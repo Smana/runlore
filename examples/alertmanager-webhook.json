@@ -1,0 +1,10 @@
+{
+  "alerts": [
+    {"status": "firing",   "labels": {"alertname": "HarborProbeFailure", "severity": "critical", "environment": "prod",    "namespace": "apps"}, "startsAt": "2026-06-20T03:14:00Z", "fingerprint": "fp1"},
+    {"status": "firing",   "labels": {"alertname": "HarborProbeFailure", "severity": "critical", "environment": "prod",    "namespace": "apps"}, "startsAt": "2026-06-20T03:14:00Z", "fingerprint": "fp1"},
+    {"status": "firing",   "labels": {"alertname": "NoisyWarn",          "severity": "warning",  "environment": "prod",    "namespace": "apps"}, "startsAt": "2026-06-20T03:14:00Z", "fingerprint": "fp2"},
+    {"status": "firing",   "labels": {"alertname": "StagingCrit",        "severity": "critical", "environment": "staging", "namespace": "apps"}, "startsAt": "2026-06-20T03:14:00Z", "fingerprint": "fp3"},
+    {"status": "firing",   "labels": {"alertname": "Watchdog",           "severity": "critical", "environment": "prod",    "namespace": "apps"}, "startsAt": "2026-06-20T03:14:00Z", "fingerprint": "fp4"},
+    {"status": "resolved", "labels": {"alertname": "HarborProbeFailure", "severity": "critical", "environment": "prod",    "namespace": "apps"}, "startsAt": "2026-06-20T03:14:00Z", "fingerprint": "fp5"}
+  ]
+}
