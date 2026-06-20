@@ -26,6 +26,11 @@ func main() {
 	mux.HandleFunc("POST /v1/chat/completions", chatCompletions)
 	mux.HandleFunc("POST /slack", logOK("SLACK"))
 	mux.HandleFunc("PUT /_matrix/client/v3/rooms/{room}/send/m.room.message/{txn}", matrixSend)
+	// Metrics (Prometheus API) + logs (VictoriaLogs LogsQL).
+	mux.HandleFunc("GET /api/v1/query", logJSON("METRICS",
+		`{"status":"success","data":{"resultType":"vector","result":[{"metric":{"__name__":"up","job":"harbor"},"value":[1700000000,"0"]}]}}`))
+	mux.HandleFunc("POST /select/logsql/query", logJSON("LOGS",
+		`{"_time":"2026-06-20T10:00:00Z","_msg":"db connection refused","kubernetes.pod_name":"harbor-db-0"}`))
 	// Minimal GitHub API (for the curator).
 	mux.HandleFunc("POST /app/installations/{id}/access_tokens", githubToken)
 	mux.HandleFunc("POST /repos/{owner}/{repo}/issues", githubIssue)
@@ -66,6 +71,10 @@ func chatCompletions(w http.ResponseWriter, r *http.Request) {
 		name, args = "what_changed", `{"namespace":"apps"}`
 	case 1:
 		name, args = "kb_search", `{"query":"harbor helmrelease upgrade"}`
+	case 2:
+		name, args = "query_metrics", `{"query":"up"}`
+	case 3:
+		name, args = "query_logs", `{"query":"error","since_minutes":30}`
 	default:
 		name, args = "submit_findings", `{"confidence":0.9,"root_causes":[{"summary":"mock: chart bump broke harbor-db","confidence":0.9,"evidence":["pg_up=0"],"suggested_action":"flux rollback hr/harbor","reversible":true}],"unresolved":["mock unresolved"]}`
 	}
