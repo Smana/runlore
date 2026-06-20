@@ -3,12 +3,14 @@ package flux
 import (
 	"context"
 	"fmt"
+	"time"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime/schema"
-	"k8s.io/apimachinery/pkg/watch"
 	"k8s.io/client-go/dynamic"
+	"k8s.io/client-go/dynamic/dynamicinformer"
+	"k8s.io/client-go/tools/cache"
 )
 
 // Flux CRD resources (v1).
@@ -71,40 +73,37 @@ func readyCondition(u *unstructured.Unstructured) (status, reason, message strin
 	return "", "", ""
 }
 
-// WatchKustomizations watches all Kustomizations and forwards each add/modify as
-// a KustomizationEvent. The channel closes when the underlying watch stops or ctx
-// is done.
+// WatchKustomizations watches all Kustomizations via a dynamic informer (list-watch
+// with reconnection + periodic resync) and forwards each add/update as a
+// KustomizationEvent. The channel closes when ctx is done.
 func (r *dynamicReader) WatchKustomizations(ctx context.Context) (<-chan KustomizationEvent, error) {
-	w, err := r.client.Resource(kustomizationGVR).Namespace(metav1.NamespaceAll).Watch(ctx, metav1.ListOptions{})
-	if err != nil {
-		return nil, fmt.Errorf("watch kustomizations: %w", err)
+	factory := dynamicinformer.NewDynamicSharedInformerFactory(r.client, 10*time.Minute)
+	informer := factory.ForResource(kustomizationGVR).Informer()
+
+	out := make(chan KustomizationEvent, 128)
+	send := func(obj any) {
+		u, ok := obj.(*unstructured.Unstructured)
+		if !ok {
+			return
+		}
+		ev := KustomizationEvent{Kustomization: kustomizationFromUnstructured(u)}
+		select {
+		case out <- ev:
+		case <-ctx.Done():
+		default: // never block the informer; drop under backpressure
+		}
 	}
-	out := make(chan KustomizationEvent)
+	if _, err := informer.AddEventHandler(cache.ResourceEventHandlerFuncs{
+		AddFunc:    func(obj any) { send(obj) },
+		UpdateFunc: func(_, obj any) { send(obj) },
+	}); err != nil {
+		return nil, fmt.Errorf("add event handler: %w", err)
+	}
+
 	go func() {
 		defer close(out)
-		defer w.Stop()
-		for {
-			select {
-			case <-ctx.Done():
-				return
-			case e, ok := <-w.ResultChan():
-				if !ok {
-					return
-				}
-				if e.Type != watch.Added && e.Type != watch.Modified {
-					continue
-				}
-				u, ok := e.Object.(*unstructured.Unstructured)
-				if !ok {
-					continue
-				}
-				select {
-				case out <- KustomizationEvent{Kustomization: kustomizationFromUnstructured(u)}:
-				case <-ctx.Done():
-					return
-				}
-			}
-		}
+		factory.Start(ctx.Done())
+		<-ctx.Done()
 	}()
 	return out, nil
 }
