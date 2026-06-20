@@ -46,6 +46,25 @@ func (failingNotifier) Deliver(context.Context, providers.Investigation) error {
 	return io.ErrUnexpectedEOF
 }
 
+func TestSlackMessageButtons(t *testing.T) {
+	// No ApprovalID → plain text, no interactive blocks.
+	m := slackMessage(providers.Investigation{Confidence: 0.5, Actions: []providers.Action{{Description: "x"}}})
+	if _, ok := m["blocks"]; ok {
+		t.Fatal("did not expect blocks without an ApprovalID")
+	}
+	// With ApprovalID → Block Kit Approve/Reject buttons carrying the id.
+	m = slackMessage(providers.Investigation{Confidence: 0.9, Actions: []providers.Action{{Description: "suspend ks/apps", ApprovalID: "a7"}}})
+	if _, ok := m["blocks"]; !ok {
+		t.Fatal("expected interactive blocks for a pending action")
+	}
+	raw, _ := json.Marshal(m)
+	for _, want := range []string{"runlore_approve", "runlore_reject", `"value":"a7"`, "Approve", "Reject"} {
+		if !contains(string(raw), want) {
+			t.Fatalf("rendered message missing %q:\n%s", want, raw)
+		}
+	}
+}
+
 func TestMultiBestEffort(t *testing.T) {
 	var delivered int
 	ok := notifierFunc(func(context.Context, providers.Investigation) error { delivered++; return nil })

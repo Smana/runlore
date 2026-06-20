@@ -2,18 +2,70 @@ package server
 
 import (
 	"context"
+	"crypto/hmac"
+	"crypto/sha256"
+	"encoding/hex"
 	"io"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
+	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/Smana/runlore/internal/action"
 	"github.com/Smana/runlore/internal/config"
 	"github.com/Smana/runlore/internal/investigate"
 	"github.com/Smana/runlore/internal/providers"
 )
+
+func slackSign(secret, ts, body string) string {
+	m := hmac.New(sha256.New, []byte(secret))
+	_, _ = m.Write([]byte("v0:" + ts + ":" + body))
+	return "v0=" + hex.EncodeToString(m.Sum(nil))
+}
+
+func TestSlackInteraction(t *testing.T) {
+	exec := &recordExec{}
+	pol := action.New(config.ActionPolicy{Mode: config.ActionApprove, Allow: config.ActionAllow{ReversibleOnly: true}})
+	ap := action.NewApprovals(exec, pol, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	id := ap.Register(providers.Action{Op: "suspend", Reversible: true, Target: providers.Workload{Kind: "Kustomization", Name: "apps", Namespace: "flux-system"}})
+
+	const secret = "shh"
+	srv := New(&config.Config{}, &spyEnqueuer{}, nil, ap, "", secret, slog.New(slog.NewTextHandler(io.Discard, nil)))
+
+	payload := `{"user":{"username":"alice"},"actions":[{"action_id":"runlore_approve","value":"` + id + `"}]}`
+	body := "payload=" + url.QueryEscape(payload)
+	ts := strconv.FormatInt(time.Now().Unix(), 10)
+
+	// Bad signature → 401, nothing executes.
+	bad := httptest.NewRequest(http.MethodPost, "/slack/interactions", strings.NewReader(body))
+	bad.Header.Set("X-Slack-Request-Timestamp", ts)
+	bad.Header.Set("X-Slack-Signature", "v0=deadbeef")
+	rr := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rr, bad)
+	if rr.Code != http.StatusUnauthorized {
+		t.Fatalf("bad signature = %d, want 401", rr.Code)
+	}
+	if len(exec.ran) != 0 {
+		t.Fatal("executed on an unverified request")
+	}
+
+	// Valid signature → 200, executes.
+	good := httptest.NewRequest(http.MethodPost, "/slack/interactions", strings.NewReader(body))
+	good.Header.Set("X-Slack-Request-Timestamp", ts)
+	good.Header.Set("X-Slack-Signature", slackSign(secret, ts, body))
+	rr = httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rr, good)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("valid interaction = %d, want 200", rr.Code)
+	}
+	if len(exec.ran) != 1 || exec.ran[0].Op != "suspend" {
+		t.Fatalf("approved action not executed: %+v", exec.ran)
+	}
+}
 
 type spyEnqueuer struct{ reqs []investigate.Request }
 
@@ -32,7 +84,7 @@ func TestActionsApprove(t *testing.T) {
 	ap := action.NewApprovals(exec, pol, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	id := ap.Register(providers.Action{Op: "suspend", Reversible: true, Target: providers.Workload{Kind: "Kustomization", Name: "apps", Namespace: "flux-system"}})
 
-	srv := New(&config.Config{}, &spyEnqueuer{}, nil, ap, "secret", slog.New(slog.NewTextHandler(io.Discard, nil)))
+	srv := New(&config.Config{}, &spyEnqueuer{}, nil, ap, "secret", "", slog.New(slog.NewTextHandler(io.Discard, nil)))
 
 	// Missing token → 403, nothing executes.
 	rr := httptest.NewRecorder()
@@ -63,7 +115,7 @@ func testServerWith(enq investigate.Enqueuer) *Server {
 		Enabled: true,
 		Match:   config.IncidentMatch{Severity: []string{"critical"}},
 	}
-	return New(cfg, enq, nil, nil, "", slog.New(slog.NewTextHandler(io.Discard, nil)))
+	return New(cfg, enq, nil, nil, "", "", slog.New(slog.NewTextHandler(io.Discard, nil)))
 }
 
 func testServer() *Server { return testServerWith(&spyEnqueuer{}) }
@@ -71,7 +123,7 @@ func testServer() *Server { return testServerWith(&spyEnqueuer{}) }
 func TestReadyz(t *testing.T) {
 	cfg := &config.Config{}
 	leader := false
-	srv := New(cfg, &spyEnqueuer{}, func() bool { return leader }, nil, "", slog.New(slog.NewTextHandler(io.Discard, nil)))
+	srv := New(cfg, &spyEnqueuer{}, func() bool { return leader }, nil, "", "", slog.New(slog.NewTextHandler(io.Discard, nil)))
 
 	rr := httptest.NewRecorder()
 	srv.Handler().ServeHTTP(rr, httptest.NewRequest(http.MethodGet, "/readyz", nil))

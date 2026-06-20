@@ -25,9 +25,10 @@ func NewSlack(webhookURL string) *Slack {
 
 var _ providers.Notifier = (*Slack)(nil)
 
-// Deliver posts the formatted investigation to the webhook.
+// Deliver posts the formatted investigation to the webhook. When an action carries
+// an ApprovalID, it renders interactive Approve/Reject buttons (Block Kit).
 func (s *Slack) Deliver(ctx context.Context, inv providers.Investigation) error {
-	body, err := json.Marshal(map[string]string{"text": Format(inv)})
+	body, err := json.Marshal(slackMessage(inv))
 	if err != nil {
 		return err
 	}
@@ -45,6 +46,39 @@ func (s *Slack) Deliver(ctx context.Context, inv providers.Investigation) error 
 		return fmt.Errorf("slack status %d", resp.StatusCode)
 	}
 	return nil
+}
+
+// Slack interaction action_ids — must match the server's /slack/interactions handler.
+const (
+	approveActionID = "runlore_approve"
+	rejectActionID  = "runlore_reject"
+)
+
+// slackMessage builds the webhook payload: always a text fallback, plus Block Kit
+// Approve/Reject buttons for any action carrying an ApprovalID (rung-2).
+func slackMessage(inv providers.Investigation) map[string]any {
+	text := Format(inv)
+	msg := map[string]any{"text": text}
+	var actionBlocks []map[string]any
+	for _, a := range inv.Actions {
+		if a.ApprovalID == "" {
+			continue
+		}
+		actionBlocks = append(actionBlocks,
+			map[string]any{"type": "section", "text": map[string]any{"type": "mrkdwn", "text": "*Proposed action:* " + a.Description}},
+			map[string]any{"type": "actions", "elements": []map[string]any{
+				{"type": "button", "style": "primary", "action_id": approveActionID, "value": a.ApprovalID,
+					"text": map[string]any{"type": "plain_text", "text": "Approve"}},
+				{"type": "button", "style": "danger", "action_id": rejectActionID, "value": a.ApprovalID,
+					"text": map[string]any{"type": "plain_text", "text": "Reject"}},
+			}},
+		)
+	}
+	if len(actionBlocks) > 0 {
+		blocks := []map[string]any{{"type": "section", "text": map[string]any{"type": "mrkdwn", "text": text}}}
+		msg["blocks"] = append(blocks, actionBlocks...)
+	}
+	return msg
 }
 
 // Multi delivers to several notifiers, best-effort: a failing notifier is logged,

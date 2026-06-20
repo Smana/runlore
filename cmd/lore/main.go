@@ -136,6 +136,7 @@ func runServe(args []string) error {
 	// cluster; "auto" is not implemented (approval is always required).
 	approvals := buildApprovals(cfg, executor, log)
 	approvalToken := os.Getenv(cfg.Actions.ApprovalTokenEnv)
+	slackSigningSecret := os.Getenv(cfg.Notify.Slack.SigningSecretEnv)
 
 	inv := buildInvestigator(ctx, cfg, gitops, approvals, log)
 	queue := investigate.NewQueue(inv, log)
@@ -159,7 +160,7 @@ func runServe(args []string) error {
 	}
 
 	// readyz reflects leadership so the Service routes webhooks only to the leader.
-	srv := server.New(cfg, queue, leader.Load, approvals, approvalToken, log)
+	srv := server.New(cfg, queue, leader.Load, approvals, approvalToken, slackSigningSecret, log)
 	httpSrv := &http.Server{Addr: *addr, Handler: srv.Handler()}
 	go func() {
 		<-ctx.Done()
@@ -466,6 +467,7 @@ func buildInvestigator(ctx context.Context, cfg *config.Config, gp providers.Git
 			if approvals != nil {
 				for i := range found.Actions {
 					id := approvals.Register(found.Actions[i])
+					found.Actions[i].ApprovalID = id // drives Slack approve/reject buttons
 					found.Actions[i].Description = fmt.Sprintf("%s — approve: POST /actions/%s/approve", found.Actions[i].Description, id)
 				}
 				if len(found.Actions) > 0 {

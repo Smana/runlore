@@ -127,8 +127,10 @@ helm upgrade --install runlore deploy/helm/runlore -n "$NS" \
   --set-string config.network.url="$HOST:9998" \
   --set-string config.actions.mode=approve \
   --set-string config.actions.approval_token_env=APPROVAL_TOKEN \
+  --set-string config.notify.slack.signing_secret_env=SLACK_SIGNING_SECRET \
   --set rbac.allowActions=true \
   --set "env[3].name=APPROVAL_TOKEN" --set-string "env[3].value=e2e-secret" \
+  --set "env[4].name=SLACK_SIGNING_SECRET" --set-string "env[4].value=e2e-slack-secret" \
   --set-string config.forge.github_api_url="http://$HOST:$MOCK_PORT" \
   --set-string config.forge.kb_repo="mock/repo" \
   --set-string config.forge.base_branch="main" \
@@ -198,15 +200,35 @@ check "gitops failure -> investigate" /tmp/runlore.log 'source=gitops-failure|Ku
 PORT=18090; free_port "$PORT"
 kubectl -n "$NS" port-forward svc/runlore "$PORT:8080" >/tmp/runlore-pf.log 2>&1 &
 PF=$!; sleep 3
+# (a) Token endpoint → execute (suspends broken-app).
 ID=$(curl -s -H "X-Approval-Token: e2e-secret" "localhost:$PORT/actions" | grep -oP '"ID":"\K[^"]+' | head -1) || true
-curl -s -o /dev/null -w "approve HTTP %{http_code}\n" -X POST -H "X-Approval-Token: e2e-secret" "localhost:$PORT/actions/$ID/approve" || true
+curl -s -o /dev/null -w "token approve HTTP %{http_code}\n" -X POST -H "X-Approval-Token: e2e-secret" "localhost:$PORT/actions/$ID/approve" || true
+# (b) Signed Slack interaction → approve another pending action (HMAC over v0:ts:body).
+ID2=$(curl -s -H "X-Approval-Token: e2e-secret" "localhost:$PORT/actions" | grep -oP '"ID":"\K[^"]+' | head -1) || true
+if [[ -n "$ID2" ]]; then
+  python3 - "$ID2" "$PORT" <<'PY'
+import sys, hmac, hashlib, time, json, urllib.parse, urllib.request
+aid, port = sys.argv[1], sys.argv[2]
+payload = json.dumps({"user": {"username": "e2e"}, "actions": [{"action_id": "runlore_approve", "value": aid}]})
+body = "payload=" + urllib.parse.quote(payload)
+ts = str(int(time.time()))
+sig = "v0=" + hmac.new(b"e2e-slack-secret", f"v0:{ts}:{body}".encode(), hashlib.sha256).hexdigest()
+req = urllib.request.Request(f"http://localhost:{port}/slack/interactions", data=body.encode(),
+    headers={"X-Slack-Request-Timestamp": ts, "X-Slack-Signature": sig, "Content-Type": "application/x-www-form-urlencoded"})
+try:
+    print("slack interaction HTTP", urllib.request.urlopen(req).status)
+except Exception as e:
+    print("slack interaction error:", e)
+PY
+fi
 kill "$PF" 2>/dev/null || true; free_port "$PORT"
 sleep 3
 kubectl -n "$NS" logs deploy/runlore > /tmp/runlore.log 2>&1
 SUSPENDED=$(kubectl get kustomization broken-app -n apps -o jsonpath='{.spec.suspend}' 2>/dev/null || true)
 if [[ "$SUSPENDED" == "true" ]]; then green "PASS: approved action executed (broken-app suspended)"; PASS=$((PASS+1))
 else red "FAIL: broken-app not suspended (spec.suspend=$SUSPENDED)"; FAIL=$((FAIL+1)); fi
-check "execution audit-logged"        /tmp/runlore.log 'action approved and executed'
+check "execution audit-logged"          /tmp/runlore.log 'action approved and executed'
+check "slack button approval executed"  /tmp/runlore.log 'slack approval executed'
 
 step "9/10 leader election + failover (scale to 2)"
 kubectl -n "$NS" scale deploy/runlore --replicas=2 >/dev/null

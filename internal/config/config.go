@@ -78,9 +78,11 @@ type Notify struct {
 	Matrix MatrixNotify `yaml:"matrix"`
 }
 
-// SlackNotify configures Slack incoming-webhook delivery.
+// SlackNotify configures Slack incoming-webhook delivery and (for rung-2 actions)
+// interactive approve/reject buttons.
 type SlackNotify struct {
-	WebhookURLEnv string `yaml:"webhook_url_env"` // env var holding the webhook URL
+	WebhookURLEnv    string `yaml:"webhook_url_env"`    // env var holding the webhook URL
+	SigningSecretEnv string `yaml:"signing_secret_env"` // env var with the Slack signing secret (verifies button clicks)
 }
 
 // MatrixNotify configures Matrix delivery.
