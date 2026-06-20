@@ -230,7 +230,43 @@ else red "FAIL: broken-app not suspended (spec.suspend=$SUSPENDED)"; FAIL=$((FAI
 check "execution audit-logged"          /tmp/runlore.log 'action approved and executed'
 check "slack button approval executed"  /tmp/runlore.log 'slack approval executed'
 
-step "9/10 leader election + failover (scale to 2)"
+step "9/11 rung-3 auto-execution + kill-switch"
+# Reconfigure to auto mode: reversible actions execute WITHOUT human approval, gated
+# by confidence + rate-limit + the kill-switch.
+helm upgrade runlore deploy/helm/runlore -n "$NS" --reuse-values \
+  --set-string config.actions.mode=auto \
+  --set-json config.actions.auto.min_confidence=0.5 \
+  --set replicaCount=1 >/dev/null
+kubectl -n "$NS" rollout status deploy/runlore --timeout=120s >/dev/null
+PORT=18091; free_port "$PORT"
+kubectl -n "$NS" port-forward svc/runlore "$PORT:8080" >/tmp/runlore-pf.log 2>&1 &
+PF=$!; sleep 3
+# (a) Auto executes: un-suspend broken-app, fire a fresh critical incident, expect auto
+# to re-suspend it with no human in the loop.
+kubectl patch kustomization broken-app -n apps --type=merge -p '{"spec":{"suspend":false}}' >/dev/null
+curl -s -o /dev/null -XPOST "localhost:$PORT/webhook/alertmanager" \
+  -d '{"alerts":[{"status":"firing","labels":{"alertname":"AutoTest1","severity":"critical","namespace":"apps"},"startsAt":"2026-06-20T03:14:00Z","fingerprint":"auto-fp-1"}]}'
+sleep 6
+kubectl -n "$NS" logs deploy/runlore > /tmp/runlore.log 2>&1
+check "rung-3 auto enabled"            /tmp/runlore.log 'AUTO execution ENABLED'
+check "auto-executed (no approval)"    /tmp/runlore.log 'auto-executed'
+SUSP=$(kubectl get kustomization broken-app -n apps -o jsonpath='{.spec.suspend}' 2>/dev/null || true)
+if [[ "$SUSP" == "true" ]]; then green "PASS: auto-execution suspended broken-app without human approval"; PASS=$((PASS+1))
+else red "FAIL: auto did not suspend broken-app (spec.suspend=$SUSP)"; FAIL=$((FAIL+1)); fi
+# (b) Kill-switch: pause, un-suspend, fire again, expect NO execution.
+curl -s -o /dev/null -XPOST -H "X-Approval-Token: e2e-secret" "localhost:$PORT/actions/pause"
+kubectl patch kustomization broken-app -n apps --type=merge -p '{"spec":{"suspend":false}}' >/dev/null
+curl -s -o /dev/null -XPOST "localhost:$PORT/webhook/alertmanager" \
+  -d '{"alerts":[{"status":"firing","labels":{"alertname":"AutoTest2","severity":"critical","namespace":"apps"},"startsAt":"2026-06-20T03:14:00Z","fingerprint":"auto-fp-2"}]}'
+sleep 6
+kubectl -n "$NS" logs deploy/runlore > /tmp/runlore.log 2>&1
+kill "$PF" 2>/dev/null || true; free_port "$PORT"
+check "kill-switch paused auto"        /tmp/runlore.log 'auto paused'
+SUSP2=$(kubectl get kustomization broken-app -n apps -o jsonpath='{.spec.suspend}' 2>/dev/null || true)
+if [[ "$SUSP2" != "true" ]]; then green "PASS: kill-switch blocked auto-execution (broken-app left un-suspended)"; PASS=$((PASS+1))
+else red "FAIL: auto executed while paused (spec.suspend=$SUSP2)"; FAIL=$((FAIL+1)); fi
+
+step "10/11 leader election + failover (scale to 2)"
 kubectl -n "$NS" scale deploy/runlore --replicas=2 >/dev/null
 TOTAL=0; READY=0
 for _ in $(seq 1 30); do
@@ -259,7 +295,7 @@ done
 if [[ -n "$NEW" && "$NEW" != "$HOLDER" ]]; then green "PASS: failover — new leader $NEW"; PASS=$((PASS+1))
 else red "FAIL: no failover (holder still '$NEW')"; FAIL=$((FAIL+1)); fi
 
-step "10/10 ArgoCD engine (reconfigure + Application Degraded)"
+step "11/11 ArgoCD engine (reconfigure + Application Degraded)"
 kubectl apply -f - <<'YAML'
 apiVersion: apiextensions.k8s.io/v1
 kind: CustomResourceDefinition

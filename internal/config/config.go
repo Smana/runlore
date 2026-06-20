@@ -242,6 +242,16 @@ type ActionPolicy struct {
 	Allow            ActionAllow `yaml:"allow"`              // envelope, enforced even in approve/auto
 	RequireApproval  bool        `yaml:"require_approval"`   // force a human click for gated actions
 	ApprovalTokenEnv string      `yaml:"approval_token_env"` // env var with a shared secret for the approval endpoints
+	Auto             AutoPolicy  `yaml:"auto"`               // rung-3 unattended-execution safety controls
+}
+
+// AutoPolicy bounds unattended execution (mode "auto"). Even within these, auto
+// only ever runs REVERSIBLE actions, and every decision is audited + delivered.
+type AutoPolicy struct {
+	DryRun        bool     `yaml:"dry_run"`        // log "would execute" without executing
+	MinConfidence float64  `yaml:"min_confidence"` // only auto-execute when the investigation is at least this confident
+	MaxPerWindow  int      `yaml:"max_per_window"` // rate limit; 0 = unlimited (not recommended)
+	Window        Duration `yaml:"window"`         // rate-limit window (default 1h)
 }
 
 // ActionAllow bounds what may be acted on, even in approve/auto modes.
