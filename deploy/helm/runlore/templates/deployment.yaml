@@ -82,6 +82,9 @@ spec:
             - name: catalog
               mountPath: {{ .Values.catalog.mountPath }}
               readOnly: true
+            {{- else if .Values.catalog.gitSync }}
+            - name: catalog
+              mountPath: {{ .Values.catalog.mountPath }}
             {{- end }}
       volumes:
         - name: config
@@ -93,6 +96,9 @@ spec:
         - name: catalog
           configMap:
             name: {{ .Values.catalog.configMap }}
+        {{- else if .Values.catalog.gitSync }}
+        - name: catalog
+          emptyDir: {}
         {{- end }}
       {{- with .Values.nodeSelector }}
       nodeSelector:

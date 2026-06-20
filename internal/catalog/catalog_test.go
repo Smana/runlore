@@ -44,3 +44,40 @@ func titles(es []Entry) []string {
 	}
 	return out
 }
+
+func TestReload(t *testing.T) {
+	dir := t.TempDir()
+	writeEntry(t, dir, "a.md", "---\ntitle: Alpha\n---\nx")
+	c, err := New(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.Len() != 1 {
+		t.Fatalf("len = %d, want 1", c.Len())
+	}
+	// A new entry appears (e.g. a merged curation PR pulled by git-sync) and we reload.
+	writeEntry(t, dir, "b.md", "---\ntitle: Beta\n---\ny")
+	if err := c.Reload(dir); err != nil {
+		t.Fatalf("Reload: %v", err)
+	}
+	if c.Len() != 2 {
+		t.Fatalf("after reload len = %d, want 2", c.Len())
+	}
+	if hits, _ := c.Search("Beta", 3); len(hits) == 0 {
+		t.Fatal("reloaded entry not searchable")
+	}
+}
+
+func TestEmptyCatalog(t *testing.T) {
+	c := NewEmpty()
+	if c.Len() != 0 {
+		t.Fatalf("empty len = %d", c.Len())
+	}
+	hits, err := c.Search("anything", 3)
+	if err != nil {
+		t.Fatalf("search empty: %v", err)
+	}
+	if len(hits) != 0 {
+		t.Fatalf("empty hits = %d", len(hits))
+	}
+}
