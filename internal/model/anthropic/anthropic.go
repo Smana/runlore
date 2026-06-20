@@ -115,7 +115,7 @@ func (c *Client) Complete(ctx context.Context, req providers.CompletionRequest) 
 	defer func() { _ = resp.Body.Close() }()
 	data, _ := io.ReadAll(resp.Body)
 	if resp.StatusCode != http.StatusOK {
-		return providers.CompletionResponse{}, fmt.Errorf("messages status %d: %s", resp.StatusCode, string(data))
+		return providers.CompletionResponse{}, fmt.Errorf("messages status %d: %s", resp.StatusCode, string(data[:min(len(data), 512)]))
 	}
 	var mr msgResponse
 	if err := json.Unmarshal(data, &mr); err != nil {

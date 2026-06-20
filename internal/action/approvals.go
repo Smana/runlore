@@ -2,6 +2,7 @@ package action
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"sync"
@@ -10,6 +11,9 @@ import (
 	"github.com/Smana/runlore/internal/audit"
 	"github.com/Smana/runlore/internal/providers"
 )
+
+// ErrNoPending is returned when an approval id is unknown, already consumed, or expired.
+var ErrNoPending = errors.New("no pending action")
 
 // Executor runs an approved action against the cluster.
 type Executor interface {
@@ -89,7 +93,7 @@ func (a *Approvals) Approve(ctx context.Context, id, actor string) (providers.Ac
 	}
 	a.mu.Unlock()
 	if !ok {
-		return providers.Action{}, fmt.Errorf("no pending action %q", id)
+		return providers.Action{}, fmt.Errorf("%w %q", ErrNoPending, id)
 	}
 	// Defense in depth: re-evaluate the server-authoritative envelope at exec time.
 	act := deriveSafety(e.action)
