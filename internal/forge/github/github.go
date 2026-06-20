@@ -29,10 +29,18 @@ type Client struct {
 	http       *http.Client
 }
 
-// New builds a client. baseBranch is the PR target (e.g. "main").
-func New(owner, repo, baseBranch string, token TokenFunc) *Client {
+// DefaultBaseURL is the public GitHub REST API. Override for GitHub Enterprise
+// Server (e.g. https://ghe.example.com/api/v3) or tests.
+const DefaultBaseURL = "https://api.github.com"
+
+// New builds a client. baseURL may be empty (defaults to DefaultBaseURL);
+// baseBranch is the PR target (e.g. "main").
+func New(baseURL, owner, repo, baseBranch string, token TokenFunc) *Client {
+	if baseURL == "" {
+		baseURL = DefaultBaseURL
+	}
 	return &Client{
-		baseURL: "https://api.github.com", owner: owner, repo: repo,
+		baseURL: strings.TrimRight(baseURL, "/"), owner: owner, repo: repo,
 		baseBranch: baseBranch, token: token, http: &http.Client{Timeout: 30 * time.Second},
 	}
 }
