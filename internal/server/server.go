@@ -6,19 +6,21 @@ import (
 	"net/http"
 
 	"github.com/Smana/runlore/internal/config"
+	"github.com/Smana/runlore/internal/investigate"
 	"github.com/Smana/runlore/internal/trigger"
 )
 
 // Server handles incoming incident webhooks and applies the trigger policy.
 type Server struct {
-	engine  *trigger.Engine
-	log     *slog.Logger
-	handler http.Handler
+	engine   *trigger.Engine
+	enqueuer investigate.Enqueuer
+	log      *slog.Logger
+	handler  http.Handler
 }
 
-// New builds a Server from config, wiring its routes once.
-func New(cfg *config.Config, log *slog.Logger) *Server {
-	s := &Server{engine: trigger.NewEngine(cfg.Triggers.Incidents), log: log}
+// New builds a Server from config and an investigation enqueuer.
+func New(cfg *config.Config, enq investigate.Enqueuer, log *slog.Logger) *Server {
+	s := &Server{engine: trigger.NewEngine(cfg.Triggers.Incidents), enqueuer: enq, log: log}
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /webhook/alertmanager", s.handleAlertmanager)
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) {
@@ -44,7 +46,9 @@ func (s *Server) handleAlertmanager(w http.ResponseWriter, r *http.Request) {
 		s.log.Info("incident",
 			"alert", inc.AlertName, "severity", inc.Severity, "namespace", inc.Namespace,
 			"investigate", d.Investigate, "reason", d.Reason)
-		// Phase 1+ (later plan): if d.Investigate, enqueue an investigation here.
+		if d.Investigate {
+			s.enqueuer.Enqueue(investigate.FromIncident(inc))
+		}
 	}
 	w.WriteHeader(http.StatusAccepted)
 }

@@ -66,7 +66,7 @@ func runServe(args []string) error {
 		return err
 	}
 	log := slog.New(slog.NewTextHandler(os.Stdout, nil))
-	srv := server.New(cfg, log)
+	srv := server.New(cfg, nil, log)
 	log.Info("runlore serving", "addr", *addr)
 	return http.ListenAndServe(*addr, srv.Handler())
 }
