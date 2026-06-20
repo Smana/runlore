@@ -62,7 +62,9 @@ knowledge base — runbooks, past incidents, platform constraints.
    re-pulls it on an interval, re-indexing automatically. When curation merges a PR into this repo, the
    new knowledge flows straight back into what the agent searches — no manual step. Configure it under
    `config.catalog.git` ([step 4](#step-4-configure-and-install)) and set `catalog.gitSync: true` (which
-   mounts a writable mirror). For a private repo, point `token_env` at a read-scoped token in the Secret.
+   mounts a writable mirror). A **private** repo authenticates with the **same curation GitHub App** by
+   default ([step 2](#step-2-github-app-for-curation-optional)) — one credential for both reads and
+   writes; set `git.token_env` only to use a different token.
 
    **Option B — ConfigMap (static).** Mount a snapshot; refresh it yourself when the repo changes:
 
@@ -186,7 +188,7 @@ config:
       url: https://github.com/your-org/runlore-kb
       branch: main
       interval: 5m
-      # token_env: KB_GIT_TOKEN              # for a private repo (key in the Secret)
+      # token_env: KB_GIT_TOKEN              # optional; private repos reuse the curation GitHub App by default
 
   # Investigate signals (optional) — enable the query_metrics / query_logs tools.
   metrics:
