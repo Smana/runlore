@@ -206,11 +206,11 @@ func (a ActionPolicy) Enabled() bool {
 	return a.Mode != "" && a.Mode != ActionOff
 }
 
-// Forge holds git-forge authentication. A GitHub App is the v1 default: one
-// fine-grained, short-lived identity used for both git access (clone/diff for the
-// what-changed spine) and forge operations (issues/PRs for the Curator).
+// Forge holds git-forge authentication and the curation target repo.
 type Forge struct {
-	GitHubApp GitHubApp `yaml:"github_app"`
+	GitHubApp  GitHubApp `yaml:"github_app"`
+	KBRepo     string    `yaml:"kb_repo"`     // "owner/name" — the catalog repo for curation
+	BaseBranch string    `yaml:"base_branch"` // PR target branch (default "main")
 }
 
 // GitHubApp holds GitHub App credentials. The private key mints 1-hour
@@ -221,4 +221,5 @@ type GitHubApp struct {
 	AppID          int64  `yaml:"app_id"`
 	InstallationID int64  `yaml:"installation_id"`
 	PrivateKeyRef  string `yaml:"private_key_ref"` // Secret name/key (e.g. via External Secrets)
+	PrivateKeyEnv  string `yaml:"private_key_env"` // v1: env var holding the PEM private key
 }
