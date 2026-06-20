@@ -117,7 +117,7 @@ func chatCompletions(w http.ResponseWriter, r *http.Request) {
 	case 4:
 		name, args = "network_drops", `{"namespace":"apps"}`
 	default:
-		name, args = "submit_findings", `{"confidence":0.9,"root_causes":[{"summary":"mock: chart bump broke harbor-db","confidence":0.9,"evidence":["pg_up=0"],"suggested_action":"flux rollback hr/harbor","reversible":true}],"unresolved":["mock unresolved"],"actions":[{"description":"flux rollback hr/harbor to 1.14.2","reversible":true,"blast_radius":1,"target":{"kind":"HelmRelease","name":"harbor","namespace":"apps"}}]}`
+		name, args = "submit_findings", `{"confidence":0.9,"root_causes":[{"summary":"mock: chart bump broke harbor-db","confidence":0.9,"evidence":["pg_up=0"],"suggested_action":"flux rollback hr/harbor","reversible":true}],"unresolved":["mock unresolved"],"actions":[{"description":"suspend the failing Kustomization to stop the reconcile loop","op":"suspend","reversible":true,"blast_radius":1,"target":{"kind":"Kustomization","name":"broken-app","namespace":"apps"}}]}`
 	}
 	log.Printf("MOCK chat/completions: toolResults=%d -> %s", toolResults, name)
 	writeJSON(w, fmt.Sprintf(

@@ -227,9 +227,10 @@ const (
 // ladder. v1 ships ActionOff; the type exists so active tools can be added later
 // behind a gate without re-architecting (see docs/design.md §9, "Act").
 type ActionPolicy struct {
-	Mode            ActionMode  `yaml:"mode"`             // off | suggest | approve | auto
-	Allow           ActionAllow `yaml:"allow"`            // envelope, enforced even in approve/auto
-	RequireApproval bool        `yaml:"require_approval"` // force a human click for gated actions
+	Mode             ActionMode  `yaml:"mode"`               // off | suggest | approve | auto
+	Allow            ActionAllow `yaml:"allow"`              // envelope, enforced even in approve/auto
+	RequireApproval  bool        `yaml:"require_approval"`   // force a human click for gated actions
+	ApprovalTokenEnv string      `yaml:"approval_token_env"` // env var with a shared secret for the approval endpoints
 }
 
 // ActionAllow bounds what may be acted on, even in approve/auto modes.

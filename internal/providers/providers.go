@@ -85,16 +85,16 @@ type FailureEvent struct {
 	When     time.Time
 }
 
-// Action describes a cluster-mutating operation a provider could expose (e.g. a
-// rollback, a reconcile, a scale). In v1 no actions are registered — RunLore is
-// read-only. The metadata exists so active tools can be added later behind
-// config.ActionPolicy (the autonomy ladder) without re-architecting.
+// Action describes a remediation the agent can propose and (at the upper autonomy
+// rungs, after approval) execute. Op names a concrete, reversible operation an
+// Executor can run; an empty Op is a suggestion only.
 type Action struct {
 	Name        string
 	Description string
+	Op          string // executable operation: suspend | resume | reconcile (empty = suggestion only)
 	Target      Workload
 	Mutating    bool // true for any cluster write
-	Reversible  bool // a rollback is reversible; a delete may not be
+	Reversible  bool // a rollback/suspend is reversible; a delete may not be
 	BlastRadius int  // number of workloads affected
 }
 

@@ -125,7 +125,10 @@ helm upgrade --install runlore deploy/helm/runlore -n "$NS" \
   --set-string config.metrics.url="http://$HOST:$MOCK_PORT" \
   --set-string config.logs.url="http://$HOST:$MOCK_PORT" \
   --set-string config.network.url="$HOST:9998" \
-  --set-string config.actions.mode=suggest \
+  --set-string config.actions.mode=approve \
+  --set-string config.actions.approval_token_env=APPROVAL_TOKEN \
+  --set rbac.allowActions=true \
+  --set "env[3].name=APPROVAL_TOKEN" --set-string "env[3].value=e2e-secret" \
   --set-string config.forge.github_api_url="http://$HOST:$MOCK_PORT" \
   --set-string config.forge.kb_repo="mock/repo" \
   --set-string config.forge.base_branch="main" \
@@ -174,8 +177,8 @@ check "curator enabled"                        /tmp/runlore.log 'curator enabled
 check "GitHub App token exchange"              /tmp/runlore-mock.log 'MOCK GH-TOKEN'
 check "curator opened a PR (confident)"        /tmp/runlore-mock.log 'MOCK GH-PR'
 check "curated ref logged"                     /tmp/runlore.log 'msg=curated'
-check "action suggestions enabled"             /tmp/runlore.log 'action suggestions enabled'
-check "suggested action surfaced (rung 1)"     /tmp/runlore.log 'suggested_actions=[1-9]'
+check "rung-2 approval-gated actions enabled"  /tmp/runlore.log 'approval-gated actions enabled'
+check "action registered for approval"         /tmp/runlore.log 'actions registered for approval'
 
 step "8/10 GitOps failure trigger (informer on a real API server)"
 kubectl create ns apps >/dev/null 2>&1 || true
@@ -190,6 +193,20 @@ kubectl patch kustomization broken-app -n apps --subresource=status --type=merge
 sleep 6
 kubectl -n "$NS" logs deploy/runlore > /tmp/runlore.log 2>&1
 check "gitops failure -> investigate" /tmp/runlore.log 'source=gitops-failure|Kustomization/broken-app'
+
+# Rung 2: approve a pending suspend action and verify it executes on the cluster.
+PORT=18090; free_port "$PORT"
+kubectl -n "$NS" port-forward svc/runlore "$PORT:8080" >/tmp/runlore-pf.log 2>&1 &
+PF=$!; sleep 3
+ID=$(curl -s -H "X-Approval-Token: e2e-secret" "localhost:$PORT/actions" | grep -oP '"ID":"\K[^"]+' | head -1) || true
+curl -s -o /dev/null -w "approve HTTP %{http_code}\n" -X POST -H "X-Approval-Token: e2e-secret" "localhost:$PORT/actions/$ID/approve" || true
+kill "$PF" 2>/dev/null || true; free_port "$PORT"
+sleep 3
+kubectl -n "$NS" logs deploy/runlore > /tmp/runlore.log 2>&1
+SUSPENDED=$(kubectl get kustomization broken-app -n apps -o jsonpath='{.spec.suspend}' 2>/dev/null || true)
+if [[ "$SUSPENDED" == "true" ]]; then green "PASS: approved action executed (broken-app suspended)"; PASS=$((PASS+1))
+else red "FAIL: broken-app not suspended (spec.suspend=$SUSPENDED)"; FAIL=$((FAIL+1)); fi
+check "execution audit-logged"        /tmp/runlore.log 'action approved and executed'
 
 step "9/10 leader election + failover (scale to 2)"
 kubectl -n "$NS" scale deploy/runlore --replicas=2 >/dev/null
