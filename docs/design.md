@@ -18,11 +18,10 @@
 
 ## 1. Why this exists
 
-On a modern GitOps platform (Kubernetes + Flux/Argo + a metrics/logs stack), a *lot* of incident
-investigation is **already solved interactively**: tools like the FluxCD `gitops-cluster-debug`
-skill + `flux-operator-mcp`, plus VictoriaMetrics/VictoriaLogs MCPs, let a human in an AI session
-trace a failing HelmRelease to its root cause today. Rebuilding that interactive experience would
-be reinvention.
+On a modern cloud-native platform (Kubernetes + a GitOps engine + a metrics/logs stack), a *lot* of
+incident investigation is **already solved interactively**: a human in an AI session, wired to the
+right MCP servers and debugging skills (a GitOps MCP, metrics/logs MCPs, and the like), can trace a
+failing rollout to its root cause today. Rebuilding that interactive experience would be reinvention.
 
 Four things are **not** solved — and they are what RunLore is:
 
@@ -90,7 +89,7 @@ tools, but never *require* them).
 ## 5. Architecture
 
 ```
- triggers:  [ VMAlert/Alertmanager webhook | GitOps failure events | timer | Slack mention | CLI ]
+ triggers:  [ incident webhook (Alertmanager/VMAlert) ── trigger policy ── | GitOps failures | timer | Slack | CLI ]
                           │
           ┌──────── RunLore agent  (Go — `lore serve` / `lore investigate`) ────────┐
           │  Investigator — ReAct loop                                               │
@@ -119,11 +118,38 @@ Components map 1:1 to `internal/` packages (§13).
 ## 6. The three pillars
 
 ### React — wake without a human
-- **Alert-triggered**: an HTTP endpoint receives VMAlert/Alertmanager webhooks → starts an investigation.
-- **GitOps-failure-triggered**: `GitOpsProvider.WatchFailures()` surfaces `Ready=False` (Flux) /
-  `Degraded`/`OutOfSync` (ArgoCD) → investigate without waiting for a metrics alert.
+
+The **primary** trigger is an **incident** (an alert from Alertmanager/VMAlert), gated by a
+configurable **trigger policy** so RunLore investigates only what matters — not every alert. Noise,
+relevance, and LLM cost are all controlled here.
+
+- **Incident-triggered** (primary): an HTTP endpoint receives Alertmanager/VMAlert webhooks; a
+  **trigger policy** decides which incidents start an investigation, by:
+  - **environment** (e.g. `prod` only — matched on alert labels / namespace conventions),
+  - **severity** (e.g. `critical` / `page` only),
+  - **namespace / team / owner**, alert-name globs, and arbitrary label matchers,
+  - **dedup / rate limits** (don't re-investigate a still-firing alert).
+- **GitOps-failure-triggered** (secondary): `GitOpsProvider.WatchFailures()` surfaces `Ready=False`
+  (Flux) / `Degraded`/`OutOfSync` (ArgoCD) → catch a bad rollout before a metrics alert fires.
 - **Proactive watch** (Phase 3): periodic scan for SLO burn-rate / drift.
 - **On-demand**: `lore investigate "<symptom>"` or a Slack mention (same engine, human-initiated).
+
+Example trigger policy (`internal/config`, `config.TriggerPolicy`):
+
+```yaml
+triggers:
+  incidents:
+    enabled: true
+    match:                              # ANDed; empty fields match anything
+      severity:    [critical]           # only paging-grade
+      environment: [prod]               # ignore staging/dev
+      namespaces:  ["apps/*", "payments"]
+      labels:      { team: platform }   # arbitrary label matchers
+    ignore:
+      alertnames:  [Watchdog, InfoInhibitor]
+    dedup: { window: 30m }              # don't re-open a still-firing alert
+  gitops_failures: { enabled: true }    # secondary trigger
+```
 
 ### Investigate — correlate, grounded on "what changed"
 1. **Instant recall**: `kb_search(symptom)` against the cached catalog. High-confidence known-pattern
@@ -226,9 +252,9 @@ as the baseline and makes failure handling a first-class primitive.
 
 - **Deterministic core is unit-tested**: the `Change` timeline + `diff_revisions` are mechanical →
   Go table tests over recorded cluster+Git fixtures. No flaky LLM scoring for the spine.
-- **Replay harness** (`lore eval`): snapshot real past incidents (VictoriaLogs/VictoriaMetrics
-  history is gold), replay them offline, score **end-state root-cause identification** via
-  LLM-as-judge. Optionally driven by `promptfoo`.
+- **Replay harness** (`lore eval`): snapshot real past incidents (your metrics/logs history),
+  replay them offline, score **end-state root-cause identification** via LLM-as-judge. Optionally
+  driven by `promptfoo`.
 - Ship the eval harness so users can **trust** the agent against *their* incidents and contributors
   can't regress it.
 
@@ -244,7 +270,7 @@ as the baseline and makes failure handling a first-class primitive.
 
 | Pillar | Phase 1 (MVP) | Phase 2 | Phase 3 | Phase 4 |
 |---|---|---|---|---|
-| **React** | Alert-triggered (VMAlert) | + GitOps-failure events, Slack mention, `lore investigate` | + proactive SLO-burn watch | — |
+| **React** | Incident-triggered (Alertmanager/VMAlert) + **trigger policy** (env/severity/namespace/label filters + dedup) | + GitOps-failure events, Slack mention, `lore investigate` | + proactive SLO-burn watch | — |
 | **Investigate** | what-changed spine + VM/VL/Hubble correlation + OKF-runbook grounding + confidence/`unresolved` | + ArgoCD + Prometheus providers proven | + cross-incident pattern recognition | — |
 | **Learn** | catalog **read** (cached index, instant recall) | catalog **write** (confidence-routed Issue/PR curation) — *loop closes* | hybrid vector retrieval, auto-curated playbooks, postmortems | — |
 | **Act** | — | — | — | gated, reversible-only remediation (eval-earned) |
