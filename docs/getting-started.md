@@ -202,6 +202,7 @@ config:
   notify:
     slack:
       webhook_url_env: SLACK_WEBHOOK_URL
+      # signing_secret_env: SLACK_SIGNING_SECRET   # enables rung-2 Approve/Reject buttons
     matrix:
       homeserver: https://matrix.org
       room_id: "!yourroom:matrix.org"
@@ -292,9 +293,10 @@ Fire a test: trigger a `critical`/`prod` alert (or `flux suspend`+break a Kustom
 - **Cluster**: **read-only by default** — it reads Flux/Argo resources, metrics (PromQL), logs (LogsQL),
   and network flows (Hubble), and never writes. RBAC is limited to watching those resources + its own
   leader-election `Lease`. With `actions.mode: approve` + `rbac.allowActions: true`, it can execute
-  *reversible* Flux ops (suspend/resume/reconcile) **only after explicit human approval**
-  (`POST /actions/<id>/approve`, token-gated) — the envelope is re-checked at execution and every action
-  is audit-logged.
+  *reversible* Flux ops (suspend/resume/reconcile) **only after explicit human approval** — either
+  `POST /actions/<id>/approve` (token-gated) or **Slack Approve/Reject buttons** (enable Slack
+  Interactivity with Request URL `…/slack/interactions` and set `slack.signing_secret_env`; clicks are
+  HMAC-verified). The envelope is re-checked at execution and every action is audit-logged.
 - **Forge**: writes issues/PRs to the one KB repo you configure, via the scoped GitHub App.
 - **Secrets**: referenced by env-var name from a `Secret` you control; nothing is inlined.
 
