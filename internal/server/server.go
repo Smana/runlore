@@ -9,6 +9,7 @@ import (
 	"crypto/subtle"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -158,7 +159,11 @@ func (s *Server) handleApprove(w http.ResponseWriter, r *http.Request) {
 	act, err := s.approvals.Approve(r.Context(), id, "approve:http")
 	if err != nil {
 		s.log.Warn("action approval failed", "id", id, "err", err)
-		http.Error(w, err.Error(), http.StatusBadRequest)
+		code := http.StatusInternalServerError
+		if errors.Is(err, action.ErrNoPending) {
+			code = http.StatusNotFound
+		}
+		http.Error(w, err.Error(), code)
 		return
 	}
 	s.log.Info("action approved and executed", "id", id, "op", act.Op)

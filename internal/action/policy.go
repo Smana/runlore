@@ -82,6 +82,9 @@ func (p *Policy) violation(a providers.Action) string {
 // namespaceViolation enforces the target-namespace allow/deny lists. A protected
 // namespace is always denied; otherwise the namespace must appear in the
 // operator's allowlist (an empty allowlist permits no executable target).
+//
+// TODO: when a second target dimension is needed (environment, labels), extract a
+// composable TargetPolicy.Evaluate(target) instead of adding inline branches here.
 func (p *Policy) namespaceViolation(ns string) string {
 	if ns == "" {
 		return "target namespace required"

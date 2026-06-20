@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/Smana/runlore/internal/providers"
+	"gopkg.in/yaml.v3"
 )
 
 // TokenFunc returns a valid installation token (minted/cached by the caller).
@@ -77,7 +78,7 @@ func (c *Client) do(ctx context.Context, method, path string, body, out any) err
 	defer func() { _ = resp.Body.Close() }()
 	data, _ := io.ReadAll(resp.Body)
 	if resp.StatusCode/100 != 2 {
-		return fmt.Errorf("github %s %s: status %d: %s", method, path, resp.StatusCode, string(data))
+		return fmt.Errorf("github %s %s: status %d: %s", method, path, resp.StatusCode, string(data[:min(len(data), 512)]))
 	}
 	if out != nil {
 		return json.Unmarshal(data, out)
@@ -153,16 +154,22 @@ func issueBody(inv providers.Investigation) string {
 	return b.String()
 }
 
+// kbFrontmatter is the YAML frontmatter of an OKF entry. Marshaled (not string-
+// formatted) so a newline-bearing title/description from LLM output can't inject
+// extra frontmatter keys.
+type kbFrontmatter struct {
+	Type        string   `yaml:"type"`
+	Title       string   `yaml:"title"`
+	Description string   `yaml:"description"`
+	Tags        []string `yaml:"tags,omitempty"`
+}
+
 // renderEntry serializes a KBEntry as OKF markdown (frontmatter + body).
 func renderEntry(e providers.KBEntry) string {
+	fm, _ := yaml.Marshal(kbFrontmatter{Type: e.Type, Title: e.Title, Description: e.Description, Tags: e.Tags})
 	var b strings.Builder
 	b.WriteString("---\n")
-	fmt.Fprintf(&b, "type: %s\n", e.Type)
-	fmt.Fprintf(&b, "title: %s\n", e.Title)
-	fmt.Fprintf(&b, "description: %s\n", e.Description)
-	if len(e.Tags) > 0 {
-		fmt.Fprintf(&b, "tags: [%s]\n", strings.Join(e.Tags, ", "))
-	}
+	b.Write(fm)
 	b.WriteString("---\n\n")
 	b.WriteString(e.Body)
 	b.WriteString("\n")

@@ -12,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/Smana/runlore/internal/httpx"
 	"github.com/Smana/runlore/internal/providers"
 )
 
@@ -105,15 +106,18 @@ func (c *Client) Complete(ctx context.Context, req providers.CompletionRequest) 
 	if err != nil {
 		return providers.CompletionResponse{}, fmt.Errorf("marshal request: %w", err)
 	}
-	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, c.baseURL+"/chat/completions", bytes.NewReader(body))
-	if err != nil {
-		return providers.CompletionResponse{}, err
+	newReq := func() (*http.Request, error) {
+		r, err := http.NewRequestWithContext(ctx, http.MethodPost, c.baseURL+"/chat/completions", bytes.NewReader(body))
+		if err != nil {
+			return nil, err
+		}
+		r.Header.Set("Content-Type", "application/json")
+		if c.apiKey != "" {
+			r.Header.Set("Authorization", "Bearer "+c.apiKey)
+		}
+		return r, nil
 	}
-	httpReq.Header.Set("Content-Type", "application/json")
-	if c.apiKey != "" {
-		httpReq.Header.Set("Authorization", "Bearer "+c.apiKey)
-	}
-	resp, err := c.http.Do(httpReq)
+	resp, err := httpx.DoWithRetry(ctx, c.http, 3, newReq)
 	if err != nil {
 		return providers.CompletionResponse{}, fmt.Errorf("chat request: %w", err)
 	}
@@ -123,7 +127,7 @@ func (c *Client) Complete(ctx context.Context, req providers.CompletionRequest) 
 		return providers.CompletionResponse{}, fmt.Errorf("read response: %w", err)
 	}
 	if resp.StatusCode != http.StatusOK {
-		return providers.CompletionResponse{}, fmt.Errorf("chat status %d: %s", resp.StatusCode, string(data))
+		return providers.CompletionResponse{}, fmt.Errorf("chat status %d: %s", resp.StatusCode, string(data[:min(len(data), 512)]))
 	}
 	var cr chatResponse
 	if err := json.Unmarshal(data, &cr); err != nil {
