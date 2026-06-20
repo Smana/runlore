@@ -88,7 +88,7 @@ a scoped GitHub App, the secrets, then `helm install`. **Hack on it** → **[CON
 # try it locally, no cluster: fire mocked Alertmanager alerts through the trigger policy
 hack/demo.sh
 
-# verify every feature end-to-end on a throwaway k3d cluster (38 checks)
+# verify every feature end-to-end on a throwaway k3d cluster
 hack/e2e-k3d.sh
 
 # run the agent against incident webhooks
@@ -101,7 +101,7 @@ lore investigate --alert HarborProbeFailure --namespace apps --config runlore.ya
 ## Status & docs
 
 - 📐 [Design](docs/design.md) · 🚀 [Getting started](docs/getting-started.md) · 🛠 [Contributing](CONTRIBUTING.md) · [Prior art](docs/prior-art.md) · [Plans](docs/plans/)
-- ✅ **End-to-end working** (verified on k3d, 38 checks):
+- ✅ **End-to-end working** (verified on k3d):
   - **React** — incident webhook (trigger policy + dedup) + GitOps failure watch (**Flux & Argo CD**)
   - **Investigate** — ReAct loop with 5 tools (`what_changed`, `kb_search`, `query_metrics`, `query_logs`, `network_drops`) + **instant recall** (skip the loop on a high-confidence catalog hit); model-agnostic (**Anthropic** or any OpenAI-compatible endpoint)
   - **Deliver** — Slack (with interactive **Approve/Reject buttons**) + Matrix

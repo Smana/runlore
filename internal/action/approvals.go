@@ -7,6 +7,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/Smana/runlore/internal/audit"
 	"github.com/Smana/runlore/internal/providers"
 )
 
@@ -27,6 +28,7 @@ type Pending struct {
 type Approvals struct {
 	exec   Executor
 	policy *Policy
+	audit  audit.Auditor
 	ttl    time.Duration
 	log    *slog.Logger
 	now    func() time.Time
@@ -41,9 +43,12 @@ type entry struct {
 	created time.Time
 }
 
-// NewApprovals builds an approval queue.
-func NewApprovals(exec Executor, policy *Policy, log *slog.Logger) *Approvals {
-	return &Approvals{exec: exec, policy: policy, ttl: 30 * time.Minute, log: log, now: time.Now, pending: map[string]entry{}}
+// NewApprovals builds an approval queue. A nil auditor falls back to a no-op.
+func NewApprovals(exec Executor, policy *Policy, aud audit.Auditor, log *slog.Logger) *Approvals {
+	if aud == nil {
+		aud = audit.Nop{}
+	}
+	return &Approvals{exec: exec, policy: policy, audit: aud, ttl: 30 * time.Minute, log: log, now: time.Now, pending: map[string]entry{}}
 }
 
 // Register queues an action for approval and returns its id.
@@ -68,34 +73,39 @@ func (a *Approvals) List() []Pending {
 	return out
 }
 
-// Approve executes the pending action after re-checking the envelope, then removes
-// it. Errors if the id is unknown/expired, the action is now out of policy, or
-// execution fails.
-func (a *Approvals) Approve(ctx context.Context, id string) (providers.Action, error) {
+// Approve executes the pending action after re-checking the envelope. The entry
+// is CLAIMED (removed) under the same lock that reads it, so two concurrent
+// approvals of the same id cannot both execute (TOCTOU double-execute). actor
+// identifies the approver for the audit trail. Errors if the id is
+// unknown/expired, the action is now out of policy, or execution fails.
+func (a *Approvals) Approve(ctx context.Context, id, actor string) (providers.Action, error) {
 	a.mu.Lock()
 	e, ok := a.pending[id]
 	if ok && a.now().Sub(e.created) > a.ttl {
-		delete(a.pending, id)
 		ok = false
+	}
+	if ok {
+		delete(a.pending, id) // claim under the lock before releasing
 	}
 	a.mu.Unlock()
 	if !ok {
 		return providers.Action{}, fmt.Errorf("no pending action %q", id)
 	}
-	// Defense in depth: re-evaluate the envelope at execution time.
-	if reason := a.policy.violation(e.action); reason != "" {
-		a.remove(id)
+	// Defense in depth: re-evaluate the server-authoritative envelope at exec time.
+	act := deriveSafety(e.action)
+	if reason := a.policy.violation(act); reason != "" {
+		recordAttempt(a.audit, actor, act, audit.DecisionDenied, reason)
 		return providers.Action{}, fmt.Errorf("action no longer within policy: %s", reason)
 	}
-	a.log.Info("executing approved action", "id", id, "op", e.action.Op,
-		"target", e.action.Target.Kind+"/"+e.action.Target.Namespace+"/"+e.action.Target.Name)
-	if err := a.exec.Execute(ctx, e.action); err != nil {
+	a.log.Info("executing approved action", "id", id, "actor", actor, "op", act.Op, "target", target(act))
+	if err := a.exec.Execute(ctx, act); err != nil {
+		recordAttempt(a.audit, actor, act, audit.DecisionFailed, err.Error())
 		a.log.Error("approved action failed", "id", id, "err", err)
 		return providers.Action{}, err
 	}
-	a.remove(id)
+	recordAttempt(a.audit, actor, act, audit.DecisionExecuted, "")
 	a.log.Info("approved action executed", "id", id)
-	return e.action, nil
+	return act, nil
 }
 
 // Reject drops a pending action.
@@ -107,12 +117,6 @@ func (a *Approvals) Reject(id string) error {
 	}
 	delete(a.pending, id)
 	return nil
-}
-
-func (a *Approvals) remove(id string) {
-	a.mu.Lock()
-	delete(a.pending, id)
-	a.mu.Unlock()
 }
 
 func (a *Approvals) gc() {

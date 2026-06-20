@@ -7,6 +7,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/Smana/runlore/internal/audit"
 	"github.com/Smana/runlore/internal/config"
 	"github.com/Smana/runlore/internal/providers"
 )
@@ -22,6 +23,7 @@ type Auto struct {
 	minConfidence float64
 	maxPerWindow  int
 	window        time.Duration
+	audit         audit.Auditor
 	log           *slog.Logger
 	now           func() time.Time
 
@@ -30,15 +32,22 @@ type Auto struct {
 	recent []time.Time // recent execution timestamps (rate limiting)
 }
 
-// NewAuto builds the auto executor from the policy (window defaults to 1h).
-func NewAuto(exec Executor, p config.AutoPolicy, log *slog.Logger) *Auto {
+// NewAuto builds the auto executor from the policy (window defaults to 1h). A nil
+// auditor falls back to a no-op. The returned Auto starts with the kill-switch
+// ENGAGED (paused) — fail closed by construction, so a process/leader restart can
+// never resume unattended execution on its own; an operator must Resume() it.
+func NewAuto(exec Executor, p config.AutoPolicy, aud audit.Auditor, log *slog.Logger) *Auto {
 	window := p.Window.Std()
 	if window <= 0 {
 		window = time.Hour
 	}
+	if aud == nil {
+		aud = audit.Nop{}
+	}
 	return &Auto{
 		exec: exec, dryRun: p.DryRun, minConfidence: p.MinConfidence,
-		maxPerWindow: p.MaxPerWindow, window: window, log: log, now: time.Now,
+		maxPerWindow: p.MaxPerWindow, window: window, audit: aud, log: log, now: time.Now,
+		paused: true,
 	}
 }
 
@@ -70,29 +79,55 @@ func (a *Auto) runOne(ctx context.Context, inv providers.Investigation, act prov
 	switch {
 	case a.Paused():
 		a.log.Warn("auto paused; action not executed (kill-switch)", "op", act.Op, "target", target(act))
+		a.record(act, audit.DecisionSkipped, "paused")
 		return annotate("[auto: skipped — paused]")
 	case inv.Confidence < a.minConfidence:
 		a.log.Info("auto skipped: confidence below threshold", "confidence", inv.Confidence, "min", a.minConfidence)
+		a.record(act, audit.DecisionSkipped, fmt.Sprintf("confidence %.2f < %.2f", inv.Confidence, a.minConfidence))
 		return annotate(fmt.Sprintf("[auto: skipped — confidence %.2f < %.2f]", inv.Confidence, a.minConfidence))
 	case !act.Reversible:
 		a.log.Warn("auto refuses irreversible action", "op", act.Op, "target", target(act))
+		a.record(act, audit.DecisionSkipped, "irreversible")
 		return annotate("[auto: skipped — irreversible]")
 	case act.Op == "":
+		a.record(act, audit.DecisionSkipped, "no executable op")
 		return annotate("[auto: skipped — no executable op]")
 	case a.dryRun:
 		a.log.Info("auto dry-run (would execute)", "op", act.Op, "target", target(act))
+		a.record(act, audit.DecisionDryRun, "")
 		return annotate("[auto: dry-run — would execute]")
 	case !a.reserve():
 		a.log.Warn("auto rate limit reached; action not executed", "max", a.maxPerWindow, "window", a.window.String())
+		a.record(act, audit.DecisionSkipped, "rate-limited")
 		return annotate("[auto: skipped — rate-limited]")
 	default:
+		// Re-check the kill-switch immediately before executing: Pause() may have
+		// landed between the switch evaluation above and here (gate TOCTOU).
+		if a.Paused() {
+			a.log.Warn("auto paused before execute (kill-switch)", "op", act.Op, "target", target(act))
+			a.record(act, audit.DecisionSkipped, "paused")
+			return annotate("[auto: skipped — paused]")
+		}
 		if err := a.exec.Execute(ctx, act); err != nil {
 			a.log.Error("auto-execute failed", "op", act.Op, "target", target(act), "err", err)
+			a.record(act, audit.DecisionFailed, err.Error())
 			return annotate("[auto: FAILED — " + err.Error() + "]")
 		}
 		a.log.Info("auto-executed", "op", act.Op, "target", target(act))
+		a.record(act, audit.DecisionExecuted, fmt.Sprintf("confidence %.2f", inv.Confidence))
 		return annotate("[auto-executed]")
 	}
+}
+
+// record appends an audit entry for an auto action attempt.
+func (a *Auto) record(act providers.Action, d audit.Decision, reason string) {
+	recordAttempt(a.audit, "auto", act, d, reason)
+}
+
+// recordAttempt writes an action-attempt audit record. Shared by both rungs
+// (auto + approvals) so the record shape stays in one place.
+func recordAttempt(aud audit.Auditor, actor string, act providers.Action, d audit.Decision, reason string) {
+	_ = aud.Log(audit.Record{Actor: actor, Op: act.Op, Target: target(act), Decision: d, Reason: reason})
 }
 
 // reserve consumes one slot from the rate-limit window if available.
