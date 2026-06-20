@@ -20,6 +20,7 @@ type Config struct {
 	Actions  ActionPolicy  `yaml:"actions"` // read-only by default; the upper rungs of the autonomy ladder
 	Forge    Forge         `yaml:"forge"`   // git-forge auth (GitHub App) for diff access + curation
 	Model    Model         `yaml:"model"`   // optional; when BaseURL is set, serve uses the LLM investigator
+	Notify   Notify        `yaml:"notify"`  // chat delivery for findings
 }
 
 // Model configures the OpenAI-compatible LLM endpoint used for investigation.
@@ -28,6 +29,24 @@ type Model struct {
 	BaseURL   string `yaml:"base_url"`    // e.g. https://vllm.svc/v1
 	Model     string `yaml:"model"`       // model name
 	APIKeyEnv string `yaml:"api_key_env"` // env var holding the API key (empty = keyless)
+}
+
+// Notify configures where investigation findings are delivered.
+type Notify struct {
+	Slack  SlackNotify  `yaml:"slack"`
+	Matrix MatrixNotify `yaml:"matrix"`
+}
+
+// SlackNotify configures Slack incoming-webhook delivery.
+type SlackNotify struct {
+	WebhookURLEnv string `yaml:"webhook_url_env"` // env var holding the webhook URL
+}
+
+// MatrixNotify configures Matrix delivery.
+type MatrixNotify struct {
+	Homeserver     string `yaml:"homeserver"`
+	RoomID         string `yaml:"room_id"`
+	AccessTokenEnv string `yaml:"access_token_env"` // env var holding the access token
 }
 
 // TriggerPolicy decides what RunLore reacts to.

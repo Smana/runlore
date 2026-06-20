@@ -24,6 +24,7 @@ import (
 	"github.com/Smana/runlore/internal/config"
 	"github.com/Smana/runlore/internal/investigate"
 	openai "github.com/Smana/runlore/internal/model/openai"
+	"github.com/Smana/runlore/internal/notify"
 	"github.com/Smana/runlore/internal/providers"
 	"github.com/Smana/runlore/internal/providers/gitops/flux"
 	"github.com/Smana/runlore/internal/server"
@@ -113,6 +114,22 @@ func runServe(args []string) error {
 	return nil
 }
 
+// buildNotifier assembles the configured chat notifiers (best-effort fan-out).
+func buildNotifier(cfg *config.Config, log *slog.Logger) *notify.Multi {
+	var ns []providers.Notifier
+	if env := cfg.Notify.Slack.WebhookURLEnv; env != "" {
+		if url := os.Getenv(env); url != "" {
+			ns = append(ns, notify.NewSlack(url))
+		}
+	}
+	if mc := cfg.Notify.Matrix; mc.Homeserver != "" && mc.RoomID != "" && mc.AccessTokenEnv != "" {
+		if tok := os.Getenv(mc.AccessTokenEnv); tok != "" {
+			ns = append(ns, notify.NewMatrix(mc.Homeserver, mc.RoomID, tok))
+		}
+	}
+	return notify.NewMulti(log, ns...)
+}
+
 // buildInvestigator returns the LLM ReAct investigator when a model is configured,
 // otherwise the read-only LogInvestigator.
 func buildInvestigator(cfg *config.Config, fp *flux.Provider, log *slog.Logger) investigate.Investigator {
@@ -130,6 +147,8 @@ func buildInvestigator(cfg *config.Config, fp *flux.Provider, log *slog.Logger) 
 		tools = append(tools, investigate.WhatChangedTool{GitOps: fp})
 	}
 	log.Info("using LLM investigator", "model", cfg.Model.Model, "tools", len(tools))
+	notifier := buildNotifier(cfg, log)
+	log.Info("delivery notifiers", "count", notifier.Len())
 	return &investigate.LoopInvestigator{
 		Model: model,
 		Tools: tools,
@@ -137,6 +156,9 @@ func buildInvestigator(cfg *config.Config, fp *flux.Provider, log *slog.Logger) 
 		OnComplete: func(found providers.Investigation) {
 			log.Info("findings",
 				"confidence", found.Confidence, "root_causes", len(found.RootCauses), "unresolved", len(found.Unresolved))
+			if err := notifier.Deliver(context.Background(), found); err != nil {
+				log.Error("deliver findings", "err", err)
+			}
 		},
 	}
 }
