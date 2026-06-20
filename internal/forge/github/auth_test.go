@@ -1,6 +1,7 @@
 package github
 
 import (
+	"context"
 	"crypto"
 	"crypto/rand"
 	"crypto/rsa"
@@ -8,10 +9,40 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
 )
+
+func TestTokenExchange(t *testing.T) {
+	key, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var gotAuth, gotPath string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotAuth, gotPath = r.Header.Get("Authorization"), r.URL.Path
+		_, _ = w.Write([]byte(`{"token":"inst-tok","expires_at":"2099-01-01T00:00:00Z"}`))
+	}))
+	defer srv.Close()
+
+	ts := NewAppTokenSource(srv.URL, 123, 42, key)
+	tok, err := ts.Token(context.Background())
+	if err != nil {
+		t.Fatalf("Token: %v", err)
+	}
+	if tok != "inst-tok" {
+		t.Fatalf("token = %q", tok)
+	}
+	if !strings.HasPrefix(gotAuth, "Bearer ") {
+		t.Fatalf("auth = %q (want a Bearer JWT)", gotAuth)
+	}
+	if gotPath != "/app/installations/42/access_tokens" {
+		t.Fatalf("path = %q", gotPath)
+	}
+}
 
 func TestMintJWT(t *testing.T) {
 	key, err := rsa.GenerateKey(rand.Reader, 2048)
