@@ -18,8 +18,9 @@ forge (issues/PRs on a repo you designate).
   reach Claude via an OpenAI-compatible gateway such as OpenRouter.) Keep it in-cluster if you don't
   want telemetry to leave your boundary.
 - `kubectl` + `helm` (v3.12+).
-- Optional: a **metrics** backend (VictoriaMetrics/Prometheus) and/or a **logs** backend
-  (VictoriaLogs) — they enable the `query_metrics` / `query_logs` investigation tools.
+- Optional: a **metrics** backend (VictoriaMetrics/Prometheus), a **logs** backend (VictoriaLogs),
+  and/or **Cilium Hubble** (Relay) — they enable the `query_metrics` / `query_logs` / `network_drops`
+  investigation tools.
 - Optional: a **Slack incoming webhook** and/or a **Matrix** account for delivery.
 - Optional: a **GitHub App** for curation (the Learn loop) — [step 2](#step-2-github-app-for-curation-optional).
 - Optional: [External Secrets Operator](https://external-secrets.io/) to sync credentials from a vault
@@ -184,6 +185,8 @@ config:
     url: http://vmsingle.observability.svc:8429       # PromQL API base (VictoriaMetrics, or Prometheus on :9090)
   logs:
     url: http://victorialogs.observability.svc:9428   # VictoriaLogs base (LogsQL)
+  network:
+    url: hubble-relay.kube-system:80                  # Cilium Hubble Relay (gRPC host:port)
 
   # Deliver: one or both.
   notify:
@@ -263,7 +266,7 @@ Fire a test: trigger a `critical`/`prod` alert (or `flux suspend`+break a Kustom
 
 ## What RunLore can and cannot do
 
-- **Cluster**: read-only. It reads Flux resources, metrics (PromQL), and logs (LogsQL), and never writes
+- **Cluster**: read-only. It reads Flux resources, metrics (PromQL), logs (LogsQL), and network flows (Hubble), and never writes
   to the cluster. RBAC is limited to watching `Kustomization`s, reading `GitRepository`s, and its own
   leader-election `Lease`.
 - **Forge**: writes issues/PRs to the one KB repo you configure, via the scoped GitHub App.

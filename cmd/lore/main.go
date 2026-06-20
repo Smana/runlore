@@ -35,6 +35,7 @@ import (
 	"github.com/Smana/runlore/internal/logs/victorialogs"
 	"github.com/Smana/runlore/internal/metrics/prometheus"
 	openai "github.com/Smana/runlore/internal/model/openai"
+	"github.com/Smana/runlore/internal/network/hubble"
 	"github.com/Smana/runlore/internal/notify"
 	"github.com/Smana/runlore/internal/providers"
 	"github.com/Smana/runlore/internal/providers/gitops/flux"
@@ -324,6 +325,9 @@ func buildInvestigator(ctx context.Context, cfg *config.Config, fp *flux.Provide
 	}
 	if cfg.Logs.URL != "" {
 		tools = append(tools, investigate.QueryLogsTool{Logs: victorialogs.New(cfg.Logs.URL)})
+	}
+	if cfg.Network.URL != "" {
+		tools = append(tools, investigate.NetworkDropsTool{Network: hubble.New(cfg.Network.URL)})
 	}
 	log.Info("using LLM investigator", "model", cfg.Model.Model, "tools", len(tools))
 	notifier := buildNotifier(cfg, log)

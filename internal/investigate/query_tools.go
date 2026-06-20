@@ -70,6 +70,59 @@ func formatMetric(m map[string]string) string {
 	return name + "{" + strings.Join(labels, ",") + "}"
 }
 
+// NetworkDropsTool lets the model list recently DROPPED network flows (Cilium
+// Hubble) — NetworkPolicy denials and connectivity failures.
+type NetworkDropsTool struct {
+	Network providers.NetworkProvider
+}
+
+// Name returns the tool name.
+func (t NetworkDropsTool) Name() string { return "network_drops" }
+
+// Description returns the tool description.
+func (t NetworkDropsTool) Description() string {
+	return "List recently DROPPED network flows (Cilium Hubble) for a namespace, optionally a pod — surfaces NetworkPolicy denials and connectivity failures."
+}
+
+// Schema returns the JSON schema for the arguments.
+func (t NetworkDropsTool) Schema() string {
+	return `{"type":"object","properties":{"namespace":{"type":"string"},"name":{"type":"string"},"since_minutes":{"type":"integer"}},"required":["namespace"]}`
+}
+
+// Call lists dropped flows over [now-since, now] and renders them.
+func (t NetworkDropsTool) Call(ctx context.Context, args string) (string, error) {
+	var in struct {
+		Namespace    string `json:"namespace"`
+		Name         string `json:"name"`
+		SinceMinutes int    `json:"since_minutes"`
+	}
+	if err := json.Unmarshal([]byte(args), &in); err != nil {
+		return "", fmt.Errorf("parse args: %w", err)
+	}
+	since := in.SinceMinutes
+	if since <= 0 {
+		since = 60
+	}
+	end := time.Now()
+	start := end.Add(-time.Duration(since) * time.Minute)
+	lines, err := t.Network.Drops(ctx, providers.Selector{Namespace: in.Namespace, Name: in.Name}, providers.TimeWindow{Start: start, End: end})
+	if err != nil {
+		return "", err
+	}
+	if len(lines) == 0 {
+		return "no dropped flows", nil
+	}
+	var b strings.Builder
+	for i, l := range lines {
+		if i >= maxToolRows {
+			fmt.Fprintf(&b, "… (%d more)\n", len(lines)-i)
+			break
+		}
+		fmt.Fprintln(&b, l.Message)
+	}
+	return b.String(), nil
+}
+
 // QueryLogsTool lets the model query logs (LogsQL) over a recent window.
 type QueryLogsTool struct {
 	Logs providers.LogsProvider
