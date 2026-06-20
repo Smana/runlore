@@ -26,6 +26,7 @@ func submitFindingsSpec() providers.ToolSpec {
 		Name:        submitFindingsName,
 		Description: "Submit the final investigation: ranked root causes with evidence, plus anything unresolved.",
 		Schema: `{"type":"object","properties":{
+"title":{"type":"string"},
 "confidence":{"type":"number"},
 "root_causes":{"type":"array","items":{"type":"object","properties":{
 "summary":{"type":"string"},"confidence":{"type":"number"},"change_ref":{"type":"string"},
@@ -37,6 +38,7 @@ func submitFindingsSpec() providers.ToolSpec {
 
 // findings is the JSON shape of submit_findings arguments.
 type findings struct {
+	Title      string  `json:"title"`
 	Confidence float64 `json:"confidence"`
 	RootCauses []struct {
 		Summary         string   `json:"summary"`
@@ -55,7 +57,7 @@ func parseFindings(args string) (providers.Investigation, error) {
 	if err := json.Unmarshal([]byte(args), &f); err != nil {
 		return providers.Investigation{}, fmt.Errorf("parse findings: %w", err)
 	}
-	inv := providers.Investigation{Confidence: f.Confidence, Unresolved: f.Unresolved}
+	inv := providers.Investigation{Title: f.Title, Confidence: f.Confidence, Unresolved: f.Unresolved}
 	for _, rc := range f.RootCauses {
 		inv.RootCauses = append(inv.RootCauses, providers.Hypothesis{
 			Summary:         rc.Summary,
