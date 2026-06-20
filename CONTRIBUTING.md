@@ -97,6 +97,21 @@ go run -tags e2e ./hack/e2e/mock :9999
 This is how features that talk to paid/external services (the LLM, GitHub) get exercised end-to-end with
 zero credentials.
 
+## Eval harness (RCA benchmark)
+
+`lore eval` replays recorded incident cases through the investigation loop and reports the
+root-cause-identification rate — use it to measure (and guard against regressions in) RCA quality as
+the loop/prompt/tools evolve. A case (`examples/eval/*.yaml`) records the evidence each tool returns and
+the keywords the findings must contain; the loop runs against the **configured model** with that
+evidence, and each case is scored pass/fail.
+
+```bash
+lore eval --config runlore.yaml --cases examples/eval
+```
+
+It needs a configured model (`config.model`). The harness logic (`internal/eval`) is unit-tested with a
+fake model, so `go test ./internal/eval/` runs without an API key.
+
 ## Quick local demo (no cluster)
 
 ```bash
