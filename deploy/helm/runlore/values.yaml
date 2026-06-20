@@ -55,7 +55,8 @@ env: []
 # Mount an OKF knowledge catalog (e.g. a ConfigMap of runbooks) so kb_search works.
 # Set config.catalog.dir to mountPath to enable it.
 catalog:
-  configMap: ""                       # ConfigMap name holding the OKF .md files
+  configMap: ""                       # ConfigMap of OKF .md files (static mode)
+  gitSync: false                      # writable mirror for config.catalog.git (closes the read/write loop)
   mountPath: /var/lib/runlore/catalog
 
 # Keeps at least one replica available during voluntary disruptions (only applied
