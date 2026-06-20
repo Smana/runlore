@@ -7,6 +7,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime/schema"
+	"k8s.io/apimachinery/pkg/watch"
 	"k8s.io/client-go/dynamic"
 )
 
@@ -70,15 +71,42 @@ func readyCondition(u *unstructured.Unstructured) (status, reason, message strin
 	return "", "", ""
 }
 
-// WatchKustomizations watches all Kustomizations across namespaces and forwards
-// each add/modify event as a KustomizationEvent. The channel closes when the
-// underlying watch stops or ctx is done.
-//
-// NOTE: full implementation is in Task 3; this stub satisfies the Reader interface.
-func (r *dynamicReader) WatchKustomizations(_ context.Context) (<-chan KustomizationEvent, error) {
-	ch := make(chan KustomizationEvent)
-	close(ch)
-	return ch, nil
+// WatchKustomizations watches all Kustomizations and forwards each add/modify as
+// a KustomizationEvent. The channel closes when the underlying watch stops or ctx
+// is done.
+func (r *dynamicReader) WatchKustomizations(ctx context.Context) (<-chan KustomizationEvent, error) {
+	w, err := r.client.Resource(kustomizationGVR).Namespace(metav1.NamespaceAll).Watch(ctx, metav1.ListOptions{})
+	if err != nil {
+		return nil, fmt.Errorf("watch kustomizations: %w", err)
+	}
+	out := make(chan KustomizationEvent)
+	go func() {
+		defer close(out)
+		defer w.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case e, ok := <-w.ResultChan():
+				if !ok {
+					return
+				}
+				if e.Type != watch.Added && e.Type != watch.Modified {
+					continue
+				}
+				u, ok := e.Object.(*unstructured.Unstructured)
+				if !ok {
+					continue
+				}
+				select {
+				case out <- KustomizationEvent{Kustomization: kustomizationFromUnstructured(u)}:
+				case <-ctx.Done():
+					return
+				}
+			}
+		}
+	}()
+	return out, nil
 }
 
 // kustomizationFromUnstructured maps an unstructured Kustomization object to the
