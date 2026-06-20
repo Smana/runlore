@@ -201,6 +201,21 @@ The catalog only grows from **genuinely novel, human-sharpened** incidents. Ever
 the **issue** (reasoning), the **causing** change, and the **fixing** change — provenance no closed
 "memory" gives you.
 
+**Two kinds of knowledge — seeded vs learned (a deliberate distinction).** "Learns your context" is
+only half emergent:
+- **Seeded** (authored / ingested, *not* conjured from RCA): your **constraints**, **architecture &
+  tooling**, and **workflows & procedures** — e.g. "never restart the payments DB in market hours,"
+  "egress is a single NAT, so DNS flakes look like app errors," "cap-touching changes escalate to
+  platform." These come from your existing runbooks, ADRs, wiki, and `AGENTS.md`, ingested as OKF
+  entries — making the agent context-aware on **day one**, not after a slow accumulation.
+- **Learned** (emergent from investigations): **incident patterns** ("this symptom → this cause →
+  this fix"), captured via the loop above.
+
+To keep the catalog an asset and not a liability (frontier RCA is <50 % accurate, §10), entries carry
+**`status` (draft/verified)**, **`confidence`**, and **`last_validated`** so wrong or stale knowledge
+is down-weighted, and stale entries decay or get re-validated. Curation (the PR/issue review) is
+**load-bearing**, not free — it is the quality gate that separates this from opaque vendor "memory."
+
 ### Act — evolve toward (gated) action *(future)*
 
 Read-only is the **starting posture, not the ceiling.** RunLore is designed to climb an **autonomy
