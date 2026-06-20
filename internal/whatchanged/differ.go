@@ -116,3 +116,13 @@ func (d *Differ) Remote(url, fromRev, toRev, scope string) (providers.Diff, erro
 	}
 	return diffRevisions(repo, fromRev, toRev, scope)
 }
+
+// ForChange resolves the diff for a detected Change, cloning its source repo and
+// scoping to the workload's path. This is the integration point a GitOpsProvider
+// uses to fill in a Change's diff.
+func (d *Differ) ForChange(c providers.Change) (providers.Diff, error) {
+	if c.FromRev == "" || c.ToRev == "" {
+		return providers.Diff{}, fmt.Errorf("change %s/%s: missing from/to revision", c.Workload.Namespace, c.Workload.Name)
+	}
+	return d.Remote(c.Source.RepoURL, c.FromRev, c.ToRev, c.Source.Path)
+}

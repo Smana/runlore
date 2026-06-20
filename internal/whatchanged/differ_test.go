@@ -10,6 +10,8 @@ import (
 	"github.com/go-git/go-git/v5"
 	"github.com/go-git/go-git/v5/plumbing"
 	"github.com/go-git/go-git/v5/plumbing/object"
+
+	"github.com/Smana/runlore/internal/providers"
 )
 
 // buildRepo creates a temp git repo with two commits and returns the repo dir
@@ -104,5 +106,24 @@ func TestRemoteFromLocalSource(t *testing.T) {
 	}
 	if len(d.Files) != 1 || d.Files[0].Path != "apps/harbor/values.yaml" {
 		t.Fatalf("unexpected remote diff: %v", paths(d.Files))
+	}
+}
+
+func TestForChange(t *testing.T) {
+	dir, v1, v2 := buildRepo(t)
+	c := providers.Change{
+		Workload: providers.Workload{Kind: "HelmRelease", Name: "harbor", Namespace: "apps"},
+		Engine:   providers.EngineFlux,
+		Type:     providers.ChangeChartBump,
+		FromRev:  v1.String(),
+		ToRev:    v2.String(),
+		Source:   providers.SourceRef{RepoURL: dir, Path: "apps/harbor"},
+	}
+	d, err := (&Differ{}).ForChange(c)
+	if err != nil {
+		t.Fatalf("ForChange: %v", err)
+	}
+	if len(d.Files) != 1 || d.Files[0].Path != "apps/harbor/values.yaml" {
+		t.Fatalf("unexpected diff: %v", paths(d.Files))
 	}
 }
