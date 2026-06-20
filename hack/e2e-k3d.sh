@@ -102,6 +102,7 @@ kubectl -n "$NS" create secret generic runlore-forge \
   --dry-run=client -o yaml | kubectl apply -f -
 helm upgrade --install runlore deploy/helm/runlore -n "$NS" \
   --set image.repository=runlore --set image.tag=e2e --set image.pullPolicy=Never \
+  --set replicaCount=1 \
   --set catalog.configMap=runlore-catalog \
   --set-string config.catalog.dir=/var/lib/runlore/catalog \
   --set-string config.model.base_url="http://$HOST:$MOCK_PORT/v1" \
@@ -154,7 +155,7 @@ check "GitHub App token exchange"              /tmp/runlore-mock.log 'MOCK GH-TO
 check "curator opened a PR (confident)"        /tmp/runlore-mock.log 'MOCK GH-PR'
 check "curated ref logged"                     /tmp/runlore.log 'msg=curated'
 
-step "8/8 GitOps failure trigger (informer on a real API server)"
+step "8/9 GitOps failure trigger (informer on a real API server)"
 kubectl create ns apps >/dev/null 2>&1 || true
 kubectl apply -f - <<'YAML'
 apiVersion: kustomize.toolkit.fluxcd.io/v1
@@ -167,6 +168,35 @@ kubectl patch kustomization broken-app -n apps --subresource=status --type=merge
 sleep 6
 kubectl -n "$NS" logs deploy/runlore > /tmp/runlore.log 2>&1
 check "gitops failure -> investigate" /tmp/runlore.log 'source=gitops-failure|Kustomization/broken-app'
+
+step "9/9 leader election + failover (scale to 2)"
+kubectl -n "$NS" scale deploy/runlore --replicas=2 >/dev/null
+TOTAL=0; READY=0
+for _ in $(seq 1 30); do
+  TOTAL=$(kubectl -n "$NS" get pods -l app.kubernetes.io/name=runlore --no-headers 2>/dev/null | wc -l | tr -d ' ')
+  READY=$(kubectl -n "$NS" get pods -l app.kubernetes.io/name=runlore \
+    -o jsonpath='{range .items[*]}{.status.conditions[?(@.type=="Ready")].status}{"\n"}{end}' 2>/dev/null | grep -c True || true)
+  [[ "$TOTAL" == "2" && "$READY" == "1" ]] && break
+  sleep 2
+done
+if [[ "$TOTAL" == "2" && "$READY" == "1" ]]; then
+  green "PASS: 2 replicas, exactly 1 Ready (leader); the other is hot standby"; PASS=$((PASS+1))
+else red "FAIL: replicas=$TOTAL ready=$READY (want 2 / 1)"; FAIL=$((FAIL+1)); fi
+
+HOLDER=$(kubectl -n "$NS" get lease runlore-leader -o jsonpath='{.spec.holderIdentity}' 2>/dev/null || true)
+if [[ -n "$HOLDER" ]]; then green "PASS: Lease held by $HOLDER"; PASS=$((PASS+1))
+else red "FAIL: no Lease holder"; FAIL=$((FAIL+1)); fi
+
+# Failover: delete the leader; a standby must acquire the Lease.
+kubectl -n "$NS" delete pod "$HOLDER" --wait=false >/dev/null 2>&1 || true
+NEW=""
+for _ in $(seq 1 30); do
+  NEW=$(kubectl -n "$NS" get lease runlore-leader -o jsonpath='{.spec.holderIdentity}' 2>/dev/null || true)
+  [[ -n "$NEW" && "$NEW" != "$HOLDER" ]] && break
+  sleep 2
+done
+if [[ -n "$NEW" && "$NEW" != "$HOLDER" ]]; then green "PASS: failover — new leader $NEW"; PASS=$((PASS+1))
+else red "FAIL: no failover (holder still '$NEW')"; FAIL=$((FAIL+1)); fi
 
 step "RESULTS"
 echo "PASS=$PASS FAIL=$FAIL"

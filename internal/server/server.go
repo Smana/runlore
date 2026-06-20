@@ -14,16 +14,27 @@ import (
 type Server struct {
 	engine   *trigger.Engine
 	enqueuer investigate.Enqueuer
+	ready    func() bool
 	log      *slog.Logger
 	handler  http.Handler
 }
 
-// New builds a Server from config and an investigation enqueuer.
-func New(cfg *config.Config, enq investigate.Enqueuer, log *slog.Logger) *Server {
-	s := &Server{engine: trigger.NewEngine(cfg.Triggers.Incidents), enqueuer: enq, log: log}
+// New builds a Server from config and an investigation enqueuer. ready reports
+// whether this replica should serve traffic (e.g. it holds leadership); when nil,
+// the replica is always ready. /healthz is liveness (always OK); /readyz is
+// readiness (gated by ready) so the Service routes webhooks only to the leader.
+func New(cfg *config.Config, enq investigate.Enqueuer, ready func() bool, log *slog.Logger) *Server {
+	s := &Server{engine: trigger.NewEngine(cfg.Triggers.Incidents), enqueuer: enq, ready: ready, log: log}
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /webhook/alertmanager", s.handleAlertmanager)
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	})
+	mux.HandleFunc("GET /readyz", func(w http.ResponseWriter, _ *http.Request) {
+		if s.ready != nil && !s.ready() {
+			http.Error(w, "not ready (standby)", http.StatusServiceUnavailable)
+			return
+		}
 		w.WriteHeader(http.StatusOK)
 	})
 	s.handler = mux

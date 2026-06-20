@@ -22,10 +22,35 @@ func testServerWith(enq investigate.Enqueuer) *Server {
 		Enabled: true,
 		Match:   config.IncidentMatch{Severity: []string{"critical"}},
 	}
-	return New(cfg, enq, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	return New(cfg, enq, nil, slog.New(slog.NewTextHandler(io.Discard, nil)))
 }
 
 func testServer() *Server { return testServerWith(&spyEnqueuer{}) }
+
+func TestReadyz(t *testing.T) {
+	cfg := &config.Config{}
+	leader := false
+	srv := New(cfg, &spyEnqueuer{}, func() bool { return leader }, slog.New(slog.NewTextHandler(io.Discard, nil)))
+
+	rr := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rr, httptest.NewRequest(http.MethodGet, "/readyz", nil))
+	if rr.Code != http.StatusServiceUnavailable {
+		t.Fatalf("standby readyz = %d, want 503", rr.Code)
+	}
+	leader = true
+	rr = httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rr, httptest.NewRequest(http.MethodGet, "/readyz", nil))
+	if rr.Code != http.StatusOK {
+		t.Fatalf("leader readyz = %d, want 200", rr.Code)
+	}
+	// liveness is always OK regardless of leadership
+	leader = false
+	rr = httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rr, httptest.NewRequest(http.MethodGet, "/healthz", nil))
+	if rr.Code != http.StatusOK {
+		t.Fatalf("healthz = %d, want 200", rr.Code)
+	}
+}
 
 func TestHandleAlertmanager(t *testing.T) {
 	body := `{"alerts":[{"status":"firing","labels":{"alertname":"A","severity":"critical","namespace":"apps"},"startsAt":"2026-06-20T03:14:00Z","fingerprint":"fp1"}]}`

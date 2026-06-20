@@ -1,4 +1,6 @@
-replicaCount: 1
+# 2+ replicas give failover: only the elected leader is Ready/active; the rest are
+# hot standby. See config.leader_election below.
+replicaCount: 2
 
 image:
   repository: ghcr.io/smana/runlore
@@ -21,6 +23,11 @@ config:
         window: 30m
     gitops_failures:
       enabled: true
+  # HA: only the elected leader runs the informer + investigation queue and reports
+  # ready (the Service then routes webhooks to the leader). Harmless with 1 replica.
+  leader_election:
+    enabled: true
+    name: runlore-leader
   # model:
   #   base_url: https://vllm.svc/v1
   #   model: <model-name>
@@ -50,6 +57,12 @@ env: []
 catalog:
   configMap: ""                       # ConfigMap name holding the OKF .md files
   mountPath: /var/lib/runlore/catalog
+
+# Keeps at least one replica available during voluntary disruptions (only applied
+# when replicaCount > 1).
+podDisruptionBudget:
+  create: true
+  minAvailable: 1
 
 service:
   type: ClusterIP
