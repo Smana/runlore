@@ -1,0 +1,118 @@
+name: Build Image
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+    paths:
+      - '**.go'
+      - 'go.mod'
+      - 'go.sum'
+      - 'Dockerfile'
+      - '.dockerignore'
+      - '.github/workflows/build-image.yml'
+  pull_request:
+    branches: [main]
+    paths:
+      - '**.go'
+      - 'go.mod'
+      - 'go.sum'
+      - 'Dockerfile'
+      - '.dockerignore'
+      - '.github/workflows/build-image.yml'
+  workflow_dispatch:
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository_owner }}/runlore
+
+jobs:
+  build-and-push:
+    name: Build and push
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+      security-events: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4
+
+      - name: Log in to Container Registry
+        if: github.event_name != 'pull_request'
+        uses: docker/login-action@v4
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract metadata
+        id: meta
+        uses: docker/metadata-action@v6
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          tags: |
+            type=ref,event=branch
+            type=ref,event=pr
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=sha,prefix={{branch}}-
+            type=raw,value=latest,enable={{is_default_branch}}
+
+      - name: Build and push
+        id: build
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          file: ./Dockerfile
+          platforms: linux/amd64,linux/arm64
+          push: ${{ github.event_name != 'pull_request' }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          build-args: |
+            VERSION=${{ steps.meta.outputs.version }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          provenance: false
+
+      - name: Run Trivy vulnerability scanner
+        uses: aquasecurity/trivy-action@v0.36.0
+        if: github.event_name != 'pull_request'
+        with:
+          image-ref: '${{ fromJSON(steps.meta.outputs.json).tags[0] }}'
+          format: 'sarif'
+          output: 'trivy-results.sarif'
+          severity: 'HIGH,CRITICAL'
+          ignore-unfixed: true
+
+      - name: Upload Trivy results to GitHub Security
+        uses: github/codeql-action/upload-sarif@v4
+        if: github.event_name != 'pull_request'
+        with:
+          sarif_file: 'trivy-results.sarif'
+          category: 'trivy-runlore'
+
+      - name: Build summary
+        if: always()
+        run: |
+          {
+            echo "## 🏗️ RunLore Image Build"
+            echo ""
+            echo "**Trigger**: ${{ github.event_name }}"
+            echo "**Commit**: \`${{ github.sha }}\`"
+            echo "**Platforms**: linux/amd64, linux/arm64"
+            echo ""
+            echo "**Tags**:"
+            echo '```'
+            echo "${{ steps.meta.outputs.tags }}"
+            echo '```'
+            if [[ "${{ github.event_name }}" != "pull_request" ]]; then
+              echo "**Pushed to**: \`${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}\`"
+              echo "**Security scan**: ✅ Trivy (HIGH, CRITICAL)"
+            else
+              echo "_PR build — image built for validation, not pushed._"
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
