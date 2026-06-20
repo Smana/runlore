@@ -59,7 +59,7 @@ const usage = `lore — the RunLore SRE agent
 Usage:
   lore investigate --alert <name> [--namespace <ns>] [--message <text>]   investigate on-demand, print findings
   lore serve [--config <path>] [--addr <addr>]        run the in-cluster agent (react to incidents)
-  lore catalog sync                                   sync + index the knowledge catalog
+  lore catalog sync [--config <path>]                 clone/pull + index the knowledge catalog
   lore eval [--config <path>] [--cases <dir>]         replay incident cases, score RCA identification
   lore version                                        print version
 `
@@ -90,8 +90,10 @@ func main() {
 			os.Exit(1)
 		}
 	case "catalog":
-		fmt.Printf("lore %s: not yet implemented (scaffold). See docs/design.md\n", os.Args[1])
-		os.Exit(1)
+		if err := runCatalog(os.Args[2:]); err != nil {
+			fmt.Fprintln(os.Stderr, "catalog:", err)
+			os.Exit(1)
+		}
 	default:
 		fmt.Fprintf(os.Stderr, "unknown command %q\n\n%s", os.Args[1], usage)
 		os.Exit(2)
@@ -418,6 +420,64 @@ func buildCurator(cfg *config.Config, token forgeToken, log *slog.Logger) *curat
 	client := github.New(cfg.Forge.GitHubAPIURL, owner, repo, base, github.TokenFunc(token))
 	log.Info("curator enabled", "repo", cfg.Forge.KBRepo)
 	return &curator.Curator{Issues: client, MinConfidencePR: 0.75, Log: log}
+}
+
+// runCatalog dispatches catalog subcommands.
+func runCatalog(args []string) error {
+	if len(args) == 0 || args[0] != "sync" {
+		return fmt.Errorf("usage: lore catalog sync [--config <path>]")
+	}
+	return runCatalogSync(args[1:])
+}
+
+// runCatalogSync clones/pulls the catalog Git repo into the mirror and reports the
+// indexed entry count — a one-shot of the background sync that serve runs.
+func runCatalogSync(args []string) error {
+	fs := flag.NewFlagSet("catalog sync", flag.ContinueOnError)
+	cfgPath := fs.String("config", "runlore.yaml", "path to config file")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	cfg, err := config.Load(*cfgPath)
+	if err != nil {
+		return err
+	}
+	log := slog.New(slog.NewTextHandler(os.Stderr, nil))
+
+	g := cfg.Catalog.Git
+	if g.URL == "" {
+		if cfg.Catalog.Dir == "" {
+			return fmt.Errorf("no catalog configured (set catalog.git.url or catalog.dir)")
+		}
+		cat, err := catalog.New(cfg.Catalog.Dir)
+		if err != nil {
+			return err
+		}
+		fmt.Printf("catalog: %d entries at %s (no git-sync configured)\n", cat.Len(), cfg.Catalog.Dir)
+		return nil
+	}
+	dir := cfg.Catalog.Dir
+	if dir == "" {
+		dir = "/var/lib/runlore/catalog"
+	}
+	var token catalog.TokenFunc
+	if env := g.TokenEnv; env != "" {
+		if t := os.Getenv(env); t != "" {
+			token = func(context.Context) (string, error) { return t, nil }
+		}
+	} else if ft := buildForgeTokenSource(cfg, log); ft != nil {
+		token = catalog.TokenFunc(ft)
+	}
+	syncer := &catalog.Syncer{URL: g.URL, Branch: g.Branch, Dir: dir, Token: token, Log: log}
+	if err := syncer.Sync(context.Background()); err != nil {
+		return fmt.Errorf("sync: %w", err)
+	}
+	cat, err := catalog.New(dir)
+	if err != nil {
+		return err
+	}
+	fmt.Printf("synced %s -> %s (%d entries)\n", g.URL, dir, cat.Len())
+	return nil
 }
 
 // buildModelAndTools assembles the model, investigation tools, and the instant-recall
