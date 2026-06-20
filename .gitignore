@@ -1,0 +1,15 @@
+# build output
+/lore
+/dist/
+*.test
+*.out
+coverage.*
+
+# local catalog cache / mirror
+/.cache/
+*.bleve/
+
+# editors / OS
+.idea/
+.vscode/
+.DS_Store
