@@ -51,7 +51,8 @@ check() { # check <desc> <logfile> <pattern>
 step "1/8 create k3d cluster"
 k3d cluster delete "$CLUSTER" >/dev/null 2>&1 || true
 k3d cluster create "$CLUSTER" --wait --timeout 120s --no-lb \
-  --k3s-arg "--disable=traefik@server:0"
+  --k3s-arg "--disable=traefik@server:0" \
+  --k3s-arg "--kubelet-arg=eviction-hard=imagefs.available<1%,nodefs.available<1%@server:0"   # tolerate a near-full dev host (absolute free space is ample)
 kubectl config use-context "k3d-$CLUSTER" >/dev/null
 
 step "2/8 install minimal Flux CRDs (Kustomization + GitRepository)"
@@ -110,6 +111,8 @@ openssl genrsa -out /tmp/runlore-app-key.pem 2048 2>/dev/null
 kubectl -n "$NS" create secret generic runlore-forge \
   --from-file=GITHUB_APP_PRIVATE_KEY=/tmp/runlore-app-key.pem \
   --dry-run=client -o yaml | kubectl apply -f -
+# apps ns must exist before install: the namespace-scoped action Role is created here.
+kubectl create namespace apps --dry-run=client -o yaml | kubectl apply -f -
 helm upgrade --install runlore deploy/helm/runlore -n "$NS" \
   --set image.repository=runlore --set image.tag=e2e --set image.pullPolicy=Never \
   --set replicaCount=1 \
@@ -129,8 +132,13 @@ helm upgrade --install runlore deploy/helm/runlore -n "$NS" \
   --set-string config.actions.approval_token_env=APPROVAL_TOKEN \
   --set-string config.notify.slack.signing_secret_env=SLACK_SIGNING_SECRET \
   --set rbac.allowActions=true \
+  --set networkPolicy.enabled=false \
+  --set "config.actions.allow.namespaces={apps}" \
+  --set "rbac.actionNamespaces={apps}" \
+  --set "config.notify.slack.approver_ids={U_E2E}" \
   --set "env[3].name=APPROVAL_TOKEN" --set-string "env[3].value=e2e-secret" \
   --set "env[4].name=SLACK_SIGNING_SECRET" --set-string "env[4].value=e2e-slack-secret" \
+  --set "env[5].name=WEBHOOK_TOKEN" --set-string "env[5].value=e2e-webhook" \
   --set-string config.forge.github_api_url="http://$HOST:$MOCK_PORT" \
   --set-string config.forge.kb_repo="mock/repo" \
   --set-string config.forge.base_branch="main" \
@@ -209,7 +217,7 @@ if [[ -n "$ID2" ]]; then
   python3 - "$ID2" "$PORT" <<'PY'
 import sys, hmac, hashlib, time, json, urllib.parse, urllib.request
 aid, port = sys.argv[1], sys.argv[2]
-payload = json.dumps({"user": {"username": "e2e"}, "actions": [{"action_id": "runlore_approve", "value": aid}]})
+payload = json.dumps({"user": {"id": "U_E2E", "username": "e2e"}, "actions": [{"action_id": "runlore_approve", "value": aid}]})
 body = "payload=" + urllib.parse.quote(payload)
 ts = str(int(time.time()))
 sig = "v0=" + hmac.new(b"e2e-slack-secret", f"v0:{ts}:{body}".encode(), hashlib.sha256).hexdigest()
@@ -236,15 +244,21 @@ step "9/11 rung-3 auto-execution + kill-switch"
 helm upgrade runlore deploy/helm/runlore -n "$NS" --reuse-values \
   --set-string config.actions.mode=auto \
   --set-json config.actions.auto.min_confidence=0.5 \
+  --set-json config.actions.auto.max_per_window=5 \
+  --set-string config.actions.audit_log_path=/tmp/runlore-audit.jsonl \
+  --set-string config.server.webhook_token_env=WEBHOOK_TOKEN \
   --set replicaCount=1 >/dev/null
 kubectl -n "$NS" rollout status deploy/runlore --timeout=120s >/dev/null
 PORT=18091; free_port "$PORT"
 kubectl -n "$NS" port-forward svc/runlore "$PORT:8080" >/tmp/runlore-pf.log 2>&1 &
 PF=$!; sleep 3
+# Auto starts paused (fail-closed cold start); resume before exercising execution.
+curl -s -o /dev/null -XPOST -H "X-Approval-Token: e2e-secret" "localhost:$PORT/actions/resume"
+sleep 1
 # (a) Auto executes: un-suspend broken-app, fire a fresh critical incident, expect auto
 # to re-suspend it with no human in the loop.
 kubectl patch kustomization broken-app -n apps --type=merge -p '{"spec":{"suspend":false}}' >/dev/null
-curl -s -o /dev/null -XPOST "localhost:$PORT/webhook/alertmanager" \
+curl -s -o /dev/null -XPOST -H "Authorization: Bearer e2e-webhook" "localhost:$PORT/webhook/alertmanager" \
   -d '{"alerts":[{"status":"firing","labels":{"alertname":"AutoTest1","severity":"critical","namespace":"apps"},"startsAt":"2026-06-20T03:14:00Z","fingerprint":"auto-fp-1"}]}'
 sleep 6
 kubectl -n "$NS" logs deploy/runlore > /tmp/runlore.log 2>&1
@@ -256,7 +270,7 @@ else red "FAIL: auto did not suspend broken-app (spec.suspend=$SUSP)"; FAIL=$((F
 # (b) Kill-switch: pause, un-suspend, fire again, expect NO execution.
 curl -s -o /dev/null -XPOST -H "X-Approval-Token: e2e-secret" "localhost:$PORT/actions/pause"
 kubectl patch kustomization broken-app -n apps --type=merge -p '{"spec":{"suspend":false}}' >/dev/null
-curl -s -o /dev/null -XPOST "localhost:$PORT/webhook/alertmanager" \
+curl -s -o /dev/null -XPOST -H "Authorization: Bearer e2e-webhook" "localhost:$PORT/webhook/alertmanager" \
   -d '{"alerts":[{"status":"firing","labels":{"alertname":"AutoTest2","severity":"critical","namespace":"apps"},"startsAt":"2026-06-20T03:14:00Z","fingerprint":"auto-fp-2"}]}'
 sleep 6
 kubectl -n "$NS" logs deploy/runlore > /tmp/runlore.log 2>&1
