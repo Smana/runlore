@@ -27,7 +27,7 @@ RunLore is exactly those gaps — and only those.
 |---|---|
 | **React** | incident/alert webhook gated by a **trigger policy** (only prod, only critical, by namespace/team/label) · GitOps failure events · proactive watch · on-demand CLI / chat |
 | **Investigate** | *what-changed* spine (revision history + Git diff) · cross-signal correlation · runbook-grounded ReAct · confidence + explicit `unresolved` |
-| **Learn** | reads a cached OKF knowledge catalog (instant recall) and writes new incidents back via reviewed PRs — knowledge is portable markdown in git, never vendor lock-in |
+| **Learn** | reads a cached [OKF](https://github.com/GoogleCloudPlatform/knowledge-catalog) knowledge catalog (instant recall) and writes new incidents back via reviewed PRs — portable markdown in git, never vendor lock-in |
 
 ## Design principles
 

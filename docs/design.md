@@ -167,7 +167,12 @@ triggers:
    it couldn't determine — designed for the ITBench <50 % reality, §10).
 
 ### Learn — compound an open catalog
-`retrieve → capture → curate → compound`, routed by confidence:
+
+RunLore's learning is modeled on the **Open Knowledge Format (OKF)** introduced by
+[GoogleCloudPlatform/knowledge-catalog](https://github.com/GoogleCloudPlatform/knowledge-catalog):
+a git tree of markdown + YAML-frontmatter entries that agents both **read and write** (its enrichment
+agent follows a *read existing → generate entries → human pushes* loop). RunLore applies that pattern
+to incidents. The loop is `retrieve → capture → curate → compound`, routed by confidence:
 
 ```
 investigation result
@@ -230,8 +235,9 @@ reference combo; Argo + Prometheus exercises the abstraction.
 
 ## 8. The knowledge catalog & its cache
 
-**Source of truth = a git repo** (OKF bundle: markdown + YAML frontmatter; `index.md` + `log.md`
-reserved; entries link to assert relationships). Reviewed, versioned, portable.
+**Source of truth = a git repo** — an
+[OKF](https://github.com/GoogleCloudPlatform/knowledge-catalog) bundle (markdown + YAML frontmatter;
+`index.md` + `log.md` reserved; entries link to assert relationships). Reviewed, versioned, portable.
 
 **The agent never queries git at investigation time.** A `Catalog` subsystem keeps it fast:
 
