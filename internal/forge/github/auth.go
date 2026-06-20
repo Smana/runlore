@@ -40,13 +40,17 @@ func NewAppTokenSource(baseURL string, appID, installID int64, key *rsa.PrivateK
 		baseURL: strings.TrimRight(baseURL, "/"), http: &http.Client{Timeout: 30 * time.Second}}
 }
 
-// Token returns a valid installation token, refreshing when near expiry.
+// Token returns a valid installation token, refreshing when near expiry. The
+// network refresh runs WITHOUT holding the lock (double-checked locking), so a
+// slow/hung GitHub round-trip can't block every other token consumer.
 func (s *AppTokenSource) Token(ctx context.Context) (string, error) {
 	s.mu.Lock()
-	defer s.mu.Unlock()
-	if s.token != "" && time.Now().Before(s.exp.Add(-1*time.Minute)) {
-		return s.token, nil
+	if tok := s.cached(); tok != "" {
+		s.mu.Unlock()
+		return tok, nil
 	}
+	s.mu.Unlock()
+
 	jwt, err := mintJWT(s.appID, s.key, time.Now())
 	if err != nil {
 		return "", err
@@ -73,8 +77,22 @@ func (s *AppTokenSource) Token(ctx context.Context) (string, error) {
 	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
 		return "", err
 	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if tok := s.cached(); tok != "" {
+		return tok, nil // a concurrent caller refreshed while we fetched
+	}
 	s.token, s.exp = out.Token, out.ExpiresAt
 	return s.token, nil
+}
+
+// cached returns the current token if still valid, else "". Caller holds s.mu.
+func (s *AppTokenSource) cached() string {
+	if s.token != "" && time.Now().Before(s.exp.Add(-1*time.Minute)) {
+		return s.token
+	}
+	return ""
 }
 
 // mintJWT builds a short-lived RS256 JWT signed with the App private key.
