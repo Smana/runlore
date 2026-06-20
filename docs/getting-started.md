@@ -11,8 +11,9 @@ forge (issues/PRs on a repo you designate).
 
 ## Prerequisites
 
-- A Kubernetes cluster running **Flux** (the what-changed spine + failure trigger read Flux
-  `Kustomization`/`GitRepository` resources; ArgoCD is on the roadmap).
+- A Kubernetes cluster running **Flux** or **Argo CD** — select with `config.gitops.engine`
+  (`flux` default, or `argocd`). The what-changed spine + failure trigger read the engine's resources
+  (Flux `Kustomization`/`GitRepository`, or Argo CD `Application`s).
 - An **OpenAI-compatible** model endpoint — in-cluster [vLLM](https://github.com/vllm-project/vllm),
   [Ollama](https://ollama.com/), OpenAI, or OpenRouter. (Native Anthropic is on the roadmap; today,
   reach Claude via an OpenAI-compatible gateway such as OpenRouter.) Keep it in-cluster if you don't
@@ -156,6 +157,9 @@ catalog:
   # configMap: runlore-catalog
 
 config:
+  # GitOps engine the what-changed spine + failure watch read.
+  gitops:
+    engine: flux          # or "argocd"
   # React: only investigate what matters (controls noise + LLM cost).
   triggers:
     incidents:
