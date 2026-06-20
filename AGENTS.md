@@ -14,6 +14,17 @@ go build ./... && go vet ./... && go test ./... && gofmt -l . && golangci-lint r
 - Linter config: [`.golangci.yml`](.golangci.yml) (golangci-lint **v2**). CI runs the same gate
   ([`.github/workflows/ci.yaml`](.github/workflows/ci.yaml)).
 
+## Try it — mock alert, end to end
+
+```bash
+hack/demo.sh
+```
+
+Builds `lore`, runs `lore serve`, and fires the mocked Alertmanager batch in
+[`examples/alertmanager-webhook.json`](examples/alertmanager-webhook.json) through the trigger
+policy — printing the investigate/skip decision per alert (covers match, dedup, severity/environment
+filters, ignore-list, and resolved-drop). That JSON shape is what Alertmanager/VMAlert POST.
+
 ## Conventions
 
 - **TDD.** Write the failing test first, then the minimal implementation. Prefer table-driven tests.
