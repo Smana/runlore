@@ -152,8 +152,13 @@ func runServe(args []string) error {
 		return aerr
 	}
 	defer auditClose()
-	approvals := buildApprovals(cfg, executor, aud, log)
-	auto := buildAuto(cfg, executor, aud, log)
+	// Audit every cluster mutation at the single Execute seam (both rungs go through it).
+	execForActions := executor
+	if executor != nil {
+		execForActions = action.NewAuditedExecutor(executor, aud)
+	}
+	approvals := buildApprovals(cfg, execForActions, aud, log)
+	auto := buildAuto(cfg, execForActions, aud, log)
 	slackSigningSecret := os.Getenv(cfg.Notify.Slack.SigningSecretEnv)
 	webhookToken := os.Getenv(cfg.Server.WebhookTokenEnv)
 
@@ -448,7 +453,7 @@ func buildAuto(cfg *config.Config, exec action.Executor, aud audit.Auditor, log 
 	a := cfg.Actions.Auto
 	log.Warn("rung-3 AUTO execution ENABLED — reversible actions execute WITHOUT human approval",
 		"dry_run", a.DryRun, "min_confidence", a.MinConfidence, "max_per_window", a.MaxPerWindow, "window", a.Window.Std().String())
-	au := action.NewAuto(exec, a, aud, log)
+	au := action.NewAuto(exec, a, action.New(cfg.Actions), aud, log)
 	// NewAuto starts paused (fail closed by construction across cold start / failover);
 	// surface that to the operator, who resumes via the authenticated /actions/resume.
 	log.Warn("rung-3 auto starts PAUSED (kill-switch engaged) — POST /actions/resume to begin auto-execution")

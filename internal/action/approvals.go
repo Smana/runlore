@@ -102,12 +102,12 @@ func (a *Approvals) Approve(ctx context.Context, id, actor string) (providers.Ac
 		return providers.Action{}, fmt.Errorf("action no longer within policy: %s", reason)
 	}
 	a.log.Info("executing approved action", "id", id, "actor", actor, "op", act.Op, "target", target(act))
-	if err := a.exec.Execute(ctx, act); err != nil {
-		recordAttempt(a.audit, actor, act, audit.DecisionFailed, err.Error())
+	// executed/failed are audited at the executor seam (NewAuditedExecutor); the
+	// actor is carried in the context so the record attributes the right approver.
+	if err := a.exec.Execute(ContextWithActor(ctx, actor), act); err != nil {
 		a.log.Error("approved action failed", "id", id, "err", err)
 		return providers.Action{}, err
 	}
-	recordAttempt(a.audit, actor, act, audit.DecisionExecuted, "")
 	a.log.Info("approved action executed", "id", id)
 	return act, nil
 }
