@@ -34,6 +34,11 @@ var gvrByKind = map[string]schema.GroupVersionResource{
 
 // Execute applies the action's reversible Flux operation to its target.
 func (e *Executor) Execute(ctx context.Context, a providers.Action) error {
+	// providers.Ops is the canonical op allowlist shared with the action gate; an op
+	// absent there is never executed (keeps the gate and the executor from drifting).
+	if _, ok := providers.Ops[a.Op]; !ok {
+		return fmt.Errorf("unsupported op %q", a.Op)
+	}
 	gvr, ok := gvrByKind[a.Target.Kind]
 	if !ok {
 		return fmt.Errorf("unsupported target kind %q (want Kustomization or HelmRelease)", a.Target.Kind)

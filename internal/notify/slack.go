@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -95,14 +96,18 @@ func NewMulti(log *slog.Logger, notifiers ...providers.Notifier) *Multi {
 
 var _ providers.Notifier = (*Multi)(nil)
 
-// Deliver fans out to every notifier; errors are logged, never returned.
+// Deliver fans out to every notifier (best-effort: one bad sink never blocks the
+// others), logs each failure, and returns the joined errors so the caller can tell
+// delivery was incomplete. Returns nil when all sinks succeed.
 func (m *Multi) Deliver(ctx context.Context, inv providers.Investigation) error {
+	var errs []error
 	for _, n := range m.notifiers {
 		if err := n.Deliver(ctx, inv); err != nil {
 			m.log.Error("delivery failed", "err", err)
+			errs = append(errs, err)
 		}
 	}
-	return nil
+	return errors.Join(errs...)
 }
 
 // Len reports how many notifiers are configured.

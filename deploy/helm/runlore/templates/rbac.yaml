@@ -17,16 +17,9 @@ rules:
   - apiGroups: ["argoproj.io"]
     resources: ["applications"]
     verbs: ["get", "list", "watch"]
-  {{- if .Values.rbac.allowActions }}
-  # Rung-2 execution (config.actions.mode: approve) — suspend/resume/reconcile Flux
-  # resources after human approval. Off by default: granting patch is a privilege.
-  - apiGroups: ["kustomize.toolkit.fluxcd.io"]
-    resources: ["kustomizations"]
-    verbs: ["patch"]
-  - apiGroups: ["helm.toolkit.fluxcd.io"]
-    resources: ["helmreleases"]
-    verbs: ["get", "patch"]
-  {{- end }}
+  # NOTE: execution rights (patch) are intentionally NOT granted cluster-wide here.
+  # They are scoped to rbac.actionNamespaces as namespaced Roles below, so a
+  # confused/compromised agent cannot mutate flux-system or another team's workloads.
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding
@@ -71,4 +64,42 @@ subjects:
   - kind: ServiceAccount
     name: {{ include "runlore.serviceAccountName" . }}
     namespace: {{ .Release.Namespace }}
+{{- if .Values.rbac.allowActions }}
+{{- range .Values.rbac.actionNamespaces }}
+---
+# Namespace-scoped execution rights (config.actions): patch Flux resources in THIS
+# namespace only — never cluster-wide — so the blast radius is bounded. The set
+# should mirror config.actions.allow.namespaces.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ include "runlore.fullname" $ }}-actions
+  namespace: {{ . }}
+  labels:
+    {{- include "runlore.labels" $ | nindent 4 }}
+rules:
+  - apiGroups: ["kustomize.toolkit.fluxcd.io"]
+    resources: ["kustomizations"]
+    verbs: ["get", "patch"]
+  - apiGroups: ["helm.toolkit.fluxcd.io"]
+    resources: ["helmreleases"]
+    verbs: ["get", "patch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ include "runlore.fullname" $ }}-actions
+  namespace: {{ . }}
+  labels:
+    {{- include "runlore.labels" $ | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: {{ include "runlore.fullname" $ }}-actions
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "runlore.serviceAccountName" $ }}
+    namespace: {{ $.Release.Namespace }}
+{{- end }}
+{{- end }}
 {{- end }}
