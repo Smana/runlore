@@ -109,7 +109,7 @@ tools, but never *require* them).
    ┌──────┬───────────┼─────────┬────────┬─────────┐  └─► GitHub (now) / GitLab (later)
    ▼      ▼           ▼         ▼        ▼         ▼
  gitops  metrics    logs     network  cloud     model
- flux|   vm|prom    vl       hubble   aws        …
+ flux|   vm|prom    vl       hubble   (P2 SDK)  …
  argocd  (PromQL)
    │
    └─ what-changed: client-go (revision history) + go-git (diff between revisions)
@@ -214,10 +214,16 @@ Interfaces live in `internal/providers/providers.go`. "For the moment" impls:
 | Metrics | `MetricsProvider` | **VictoriaMetrics**, **Prometheus** (one PromQL impl, 2 endpoints) | — |
 | Logs | `LogsProvider` | **VictoriaLogs** | Loki, … |
 | Network | `NetworkProvider` | **Hubble** | — |
-| Cloud | `CloudProvider` | **AWS** (Steampipe) | — |
+| Cloud | `CloudProvider` | — *(Phase 2)* | AWS, GCP, Azure via native SDKs; Steampipe/cloud-MCP optional |
 | Model | `ModelProvider` | **Anthropic**, **OpenAI-compatible** (vLLM/Ollama) | — |
 | Notifier | `Notifier` | **Slack**, **Matrix** | PagerDuty, incident.io |
 | Issue | `IssueProvider` | **GitHub** | GitLab |
+
+> **Cloud is Phase 2, via native SDKs.** v1 needs no cloud provider — the MVP correlates in-cluster
+> signals + what-changed. When cloud lands, `CloudProvider` uses native SDKs (`aws-sdk-go-v2`,
+> `google-cloud-go`, `azure-sdk-for-go`) with in-cluster identity (Pod/Workload Identity) — *not*
+> Steampipe and *not* shelling out to cloud CLIs (both add heavy deps and break the single-binary
+> property). Steampipe and cloud MCP servers remain available as optional MCP extensions.
 
 **Why the GitOps abstraction is real, not hand-wavy** — both engines reduce to *revision history +
 git diff*:
@@ -306,7 +312,7 @@ as the baseline and makes failure handling a first-class primitive.
 | Pillar | Phase 1 (MVP) | Phase 2 | Phase 3 | Phase 4 |
 |---|---|---|---|---|
 | **React** | Incident-triggered (Alertmanager/VMAlert) + **trigger policy** (env/severity/namespace/label filters + dedup) | + GitOps-failure events, chat mention (Slack/Matrix), `lore investigate` | + proactive SLO-burn watch | — |
-| **Investigate** | what-changed spine + VM/VL/Hubble correlation + OKF-runbook grounding + confidence/`unresolved` | + ArgoCD + Prometheus providers proven | + cross-incident pattern recognition | — |
+| **Investigate** | what-changed spine + VM/VL/Hubble correlation + OKF-runbook grounding + confidence/`unresolved` | + ArgoCD + Prometheus providers proven | + cloud context (native SDKs: AWS/GCP/Azure) + cross-incident pattern recognition | — |
 | **Learn** | catalog **read** (cached index, instant recall) | catalog **write** (confidence-routed Issue/PR curation) — *loop closes* | hybrid vector retrieval, auto-curated playbooks, postmortems | — |
 | **Act** | rung 0: read-only (no action tools) | — | — | climb the ladder: suggest → approve-to-execute → bounded reversible auto (eval-earned, policy-gated) |
 
@@ -332,7 +338,7 @@ internal/
     metrics/                   MetricsProvider (PromQL: vm | prometheus)
     logs/victorialogs/         LogsProvider
     network/hubble/            NetworkProvider
-    cloud/aws/                 CloudProvider (Steampipe)
+    cloud/{aws,gcp,azure}/     CloudProvider — native SDKs, Phase 2+ (Steampipe/MCP optional)
 deploy/helm/runlore/           in-cluster chart (Phase 2)
 examples/runbooks/             seed OKF catalog (ships as default knowledge)
 docs/                          design.md, prior-art.md
