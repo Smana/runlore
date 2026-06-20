@@ -236,18 +236,23 @@ func buildModel(cfg *config.Config, apiKey string) providers.ModelProvider {
 // configured. With a Git URL it starts a background syncer (running on every
 // replica, so a failover standby is already warm) that re-indexes after each pull;
 // otherwise it loads a static mounted directory once.
-func buildCatalog(ctx context.Context, cfg *config.Config, log *slog.Logger) catalog.Searcher {
+func buildCatalog(ctx context.Context, cfg *config.Config, forgeTok forgeToken, log *slog.Logger) catalog.Searcher {
 	if cfg.Catalog.Git.URL != "" {
 		dir := cfg.Catalog.Dir
 		if dir == "" {
 			dir = "/var/lib/runlore/catalog"
 		}
 		cat := catalog.NewEmpty()
+		// Auth precedence: explicit token_env, else the shared forge GitHub App
+		// identity (one credential for both curation writes and catalog reads).
 		var token catalog.TokenFunc
 		if env := cfg.Catalog.Git.TokenEnv; env != "" {
 			if t := os.Getenv(env); t != "" {
 				token = func(context.Context) (string, error) { return t, nil }
 			}
+		} else if forgeTok != nil {
+			token = catalog.TokenFunc(forgeTok)
+			log.Info("catalog git-sync using the forge GitHub App identity")
 		}
 		syncer := &catalog.Syncer{URL: cfg.Catalog.Git.URL, Branch: cfg.Catalog.Git.Branch, Dir: dir, Token: token, Log: log}
 		go syncer.Run(ctx, cfg.Catalog.Git.Interval.Std(), func() {
@@ -288,20 +293,34 @@ func buildNotifier(cfg *config.Config, log *slog.Logger) *notify.Multi {
 	return notify.NewMulti(log, ns...)
 }
 
-// buildCurator returns a Curator when a GitHub App + KB repo are configured, else nil.
-func buildCurator(cfg *config.Config, log *slog.Logger) *curator.Curator {
+// forgeToken mints GitHub App installation tokens.
+type forgeToken func(context.Context) (string, error)
+
+// buildForgeTokenSource builds the GitHub App installation-token source shared by
+// the curator (issues/PRs) and catalog git-sync (clone auth) — one identity for
+// both forge writes and reads. Returns nil when no App is configured.
+func buildForgeTokenSource(cfg *config.Config, log *slog.Logger) forgeToken {
 	ga := cfg.Forge.GitHubApp
-	if ga.AppID == 0 || ga.InstallationID == 0 || ga.PrivateKeyEnv == "" || cfg.Forge.KBRepo == "" {
+	if ga.AppID == 0 || ga.InstallationID == 0 || ga.PrivateKeyEnv == "" {
 		return nil
 	}
 	pemData := os.Getenv(ga.PrivateKeyEnv)
 	if pemData == "" {
-		log.Warn("curator disabled: empty private key env", "env", ga.PrivateKeyEnv)
+		log.Warn("forge auth disabled: empty private key env", "env", ga.PrivateKeyEnv)
 		return nil
 	}
 	key, err := github.ParsePrivateKey(pemData)
 	if err != nil {
-		log.Warn("curator disabled: bad private key", "err", err)
+		log.Warn("forge auth disabled: bad private key", "err", err)
+		return nil
+	}
+	return github.NewAppTokenSource(cfg.Forge.GitHubAPIURL, ga.AppID, ga.InstallationID, key).Token
+}
+
+// buildCurator returns a Curator when the GitHub App token + KB repo are
+// configured, else nil.
+func buildCurator(cfg *config.Config, token forgeToken, log *slog.Logger) *curator.Curator {
+	if token == nil || cfg.Forge.KBRepo == "" {
 		return nil
 	}
 	owner, repo, ok := strings.Cut(cfg.Forge.KBRepo, "/")
@@ -313,8 +332,7 @@ func buildCurator(cfg *config.Config, log *slog.Logger) *curator.Curator {
 	if base == "" {
 		base = "main"
 	}
-	ts := github.NewAppTokenSource(cfg.Forge.GitHubAPIURL, ga.AppID, ga.InstallationID, key)
-	client := github.New(cfg.Forge.GitHubAPIURL, owner, repo, base, ts.Token)
+	client := github.New(cfg.Forge.GitHubAPIURL, owner, repo, base, github.TokenFunc(token))
 	log.Info("curator enabled", "repo", cfg.Forge.KBRepo)
 	return &curator.Curator{Issues: client, MinConfidencePR: 0.75, Log: log}
 }
@@ -331,11 +349,12 @@ func buildInvestigator(ctx context.Context, cfg *config.Config, gp providers.Git
 		apiKey = os.Getenv(cfg.Model.APIKeyEnv)
 	}
 	model := buildModel(cfg, apiKey)
+	forgeTok := buildForgeTokenSource(cfg, log)
 	var tools []investigate.Tool
 	if gp != nil {
 		tools = append(tools, investigate.WhatChangedTool{GitOps: gp})
 	}
-	if cat := buildCatalog(ctx, cfg, log); cat != nil {
+	if cat := buildCatalog(ctx, cfg, forgeTok, log); cat != nil {
 		tools = append(tools, investigate.KBSearchTool{Catalog: cat})
 	}
 	if cfg.Metrics.URL != "" {
@@ -350,7 +369,7 @@ func buildInvestigator(ctx context.Context, cfg *config.Config, gp providers.Git
 	log.Info("using LLM investigator", "provider", modelProvider(cfg), "model", cfg.Model.Model, "tools", len(tools))
 	notifier := buildNotifier(cfg, log)
 	log.Info("delivery notifiers", "count", notifier.Len())
-	cur := buildCurator(cfg, log)
+	cur := buildCurator(cfg, forgeTok, log)
 	return &investigate.LoopInvestigator{
 		Model: model,
 		Tools: tools,
