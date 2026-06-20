@@ -217,7 +217,7 @@ Interfaces live in `internal/providers/providers.go`. "For the moment" impls:
 | Cloud | `CloudProvider` | — *(Phase 2)* | AWS, GCP, Azure via native SDKs; Steampipe/cloud-MCP optional |
 | Model | `ModelProvider` | **Anthropic**, **OpenAI-compatible** (vLLM/Ollama) | — |
 | Notifier | `Notifier` | **Slack**, **Matrix** | PagerDuty, incident.io |
-| Issue | `IssueProvider` | **GitHub** | GitLab |
+| Issue | `IssueProvider` | **GitHub** (App auth) | GitLab (access token) |
 
 > **Cloud is Phase 2, via native SDKs.** v1 needs no cloud provider — the MVP correlates in-cluster
 > signals + what-changed. When cloud lands, `CloudProvider` uses native SDKs (`aws-sdk-go-v2`,
@@ -346,9 +346,25 @@ docs/                          design.md, prior-art.md
 
 ## 14. Open questions & risks
 
-1. **Git auth for diffs** *(the main risk)* — default: **reuse the credentials the GitOps engine
-   already uses** (read the `GitRepository.spec.secretRef` / Argo repo secret). Fallback: a GitHub
-   App token. Needs care.
+1. **Git & forge auth — a GitHub App** (best practice; one fine-grained, short-lived identity for
+   both needs):
+   - `contents: read` → clone/diff the GitOps source repo(s) for the what-changed spine;
+   - `issues: write` + `pull_requests: write` + `contents: write` (KB repo) → the Curator.
+
+   The App mints **1-hour installation tokens** (no long-lived PAT; bot identity; central revoke).
+   The installation token also works as the git HTTP password (`x-access-token:<tok>@github.com/…`),
+   so the *same* App serves clone/diff and API writes. The private key lives in a k8s Secret (ideally
+   via External Secrets), referenced — never inlined:
+
+   ```yaml
+   forge:
+     github_app:
+       app_id: 123456
+       installation_id: 7891011
+       private_key_ref: runlore-github-app   # Secret name/key
+   ```
+   Non-GitHub hosts (GitLab, self-hosted) fall back to a scoped access token / deploy key — auth is
+   per-host. Local `lore investigate` can use ambient git credentials instead of the App.
 2. **Embedding source** for vector search — defer vectors to a later phase (BM25-first keeps v1
    dependency-free); when added, serve embeddings from the in-cluster vLLM.
 3. **Multi-replica index** — v1 single-replica with a local index; later, shared PVC or per-replica
