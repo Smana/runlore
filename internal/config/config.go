@@ -6,7 +6,12 @@
 // alerts — controlling noise, relevance, and LLM cost.
 package config
 
-import "time"
+import (
+	"path"
+	"time"
+
+	"gopkg.in/yaml.v3"
+)
 
 // Config is the top-level RunLore configuration (loaded from YAML).
 type Config struct {
@@ -41,7 +46,7 @@ type IncidentMatch struct {
 
 // Dedup suppresses re-investigation of a still-firing alert within Window.
 type Dedup struct {
-	Window time.Duration `yaml:"window"`
+	Window Duration `yaml:"window"`
 }
 
 // Toggle is a simple on/off switch.
@@ -59,12 +64,85 @@ type Incident struct {
 	StartsAt    time.Time
 }
 
-// Matches reports whether an incident passes this trigger policy: matched by
-// Match and not excluded by Ignore. Matcher evaluation is implemented in Phase 1.
-func (t IncidentTrigger) Matches(_ Incident) bool {
-	// TODO(phase1): evaluate Match/Ignore (severity, environment, namespace globs,
-	// alertname globs, label matchers) instead of only the enabled flag.
-	return t.Enabled
+// Matches reports whether an incident passes this trigger policy: enabled,
+// matched by Match, and not excluded by a non-empty Ignore.
+func (t IncidentTrigger) Matches(inc Incident) bool {
+	if !t.Enabled {
+		return false
+	}
+	if !t.Match.matches(inc) {
+		return false
+	}
+	if !t.Ignore.isEmpty() && t.Ignore.matches(inc) {
+		return false
+	}
+	return true
+}
+
+// matches reports whether the incident satisfies every non-empty criterion.
+func (m IncidentMatch) matches(inc Incident) bool {
+	if len(m.Severity) > 0 && !contains(m.Severity, inc.Severity) {
+		return false
+	}
+	if len(m.Environment) > 0 && !contains(m.Environment, inc.Environment) {
+		return false
+	}
+	if len(m.Namespaces) > 0 && !globAny(m.Namespaces, inc.Namespace) {
+		return false
+	}
+	if len(m.AlertNames) > 0 && !globAny(m.AlertNames, inc.AlertName) {
+		return false
+	}
+	for k, v := range m.Labels {
+		if inc.Labels[k] != v {
+			return false
+		}
+	}
+	return true
+}
+
+// isEmpty reports whether no criteria are set.
+func (m IncidentMatch) isEmpty() bool {
+	return len(m.Severity) == 0 && len(m.Environment) == 0 &&
+		len(m.Namespaces) == 0 && len(m.AlertNames) == 0 && len(m.Labels) == 0
+}
+
+func contains(xs []string, s string) bool {
+	for _, x := range xs {
+		if x == s {
+			return true
+		}
+	}
+	return false
+}
+
+func globAny(patterns []string, s string) bool {
+	for _, p := range patterns {
+		if ok, _ := path.Match(p, s); ok {
+			return true
+		}
+	}
+	return false
+}
+
+// Duration is a time.Duration that unmarshals from a Go duration string ("30m").
+type Duration time.Duration
+
+// Std returns the standard library duration.
+func (d Duration) Std() time.Duration { return time.Duration(d) }
+
+// UnmarshalYAML parses a duration string such as "30m" or "1h30m".
+func (d *Duration) UnmarshalYAML(value *yaml.Node) error {
+	var s string
+	if err := value.Decode(&s); err != nil {
+		return err
+	}
+	parsed, err := time.ParseDuration(s)
+	if err != nil {
+		return err
+	}
+	*d = Duration(parsed)
+	return nil
 }
 
 // ActionMode controls how far RunLore may go when acting on the cluster.
