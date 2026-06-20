@@ -123,7 +123,7 @@ func (c *Client) Complete(ctx context.Context, req providers.CompletionRequest) 
 		return providers.CompletionResponse{}, fmt.Errorf("read response: %w", err)
 	}
 	if resp.StatusCode != http.StatusOK {
-		return providers.CompletionResponse{}, fmt.Errorf("chat status %d: %s", resp.StatusCode, string(data))
+		return providers.CompletionResponse{}, fmt.Errorf("chat status %d: %s", resp.StatusCode, string(data[:min(len(data), 512)]))
 	}
 	var cr chatResponse
 	if err := json.Unmarshal(data, &cr); err != nil {
