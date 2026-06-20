@@ -147,7 +147,9 @@ type ModelProvider interface {
 	Complete(ctx context.Context, req CompletionRequest) (CompletionResponse, error)
 }
 
-// Notifier delivers an investigation (Slack now).
+// Notifier delivers an investigation to a destination. Pluggable: Slack and
+// Matrix first; PagerDuty and incident.io later. Several notifiers can be wired
+// at once (e.g. chat for humans + an incident platform for the on-call record).
 type Notifier interface {
 	Deliver(ctx context.Context, inv Investigation) error
 }

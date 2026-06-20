@@ -37,6 +37,7 @@ RunLore is exactly those gaps — and only those.
 - **Single static Go binary.** Runs in your terminal (`lore investigate`) or in-cluster (`lore serve`).
 - **Model-agnostic.** Claude, an in-cluster vLLM, or Ollama — your telemetry needn't leave the boundary.
 - **Built-in core providers, MCP as the extension layer** — self-contained, but composable.
+- **Pluggable notifications.** Slack + Matrix first; PagerDuty and incident.io next.
 
 ## Quickstart
 

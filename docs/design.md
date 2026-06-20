@@ -91,7 +91,7 @@ tools, but never *require* them).
 ## 5. Architecture
 
 ```
- triggers:  [ incident webhook (Alertmanager/VMAlert) ── trigger policy ── | GitOps failures | timer | Slack | CLI ]
+ triggers:  [ incident webhook (Alertmanager/VMAlert) ── trigger policy ── | GitOps failures | timer | chat | CLI ]
                           │
           ┌──────── RunLore agent  (Go — `lore serve` / `lore investigate`) ────────┐
           │  Investigator — ReAct loop                                               │
@@ -134,7 +134,7 @@ relevance, and LLM cost are all controlled here.
 - **GitOps-failure-triggered** (secondary): `GitOpsProvider.WatchFailures()` surfaces `Ready=False`
   (Flux) / `Degraded`/`OutOfSync` (ArgoCD) → catch a bad rollout before a metrics alert fires.
 - **Proactive watch** (Phase 3): periodic scan for SLO burn-rate / drift.
-- **On-demand**: `lore investigate "<symptom>"` or a Slack mention (same engine, human-initiated).
+- **On-demand**: `lore investigate "<symptom>"` or a chat mention in Slack/Matrix (same engine, human-initiated).
 
 Example trigger policy (`internal/config`, `config.TriggerPolicy`):
 
@@ -216,7 +216,7 @@ Interfaces live in `internal/providers/providers.go`. "For the moment" impls:
 | Network | `NetworkProvider` | **Hubble** | — |
 | Cloud | `CloudProvider` | **AWS** (Steampipe) | — |
 | Model | `ModelProvider` | **Anthropic**, **OpenAI-compatible** (vLLM/Ollama) | — |
-| Notifier | `Notifier` | **Slack** | — |
+| Notifier | `Notifier` | **Slack**, **Matrix** | PagerDuty, incident.io |
 | Issue | `IssueProvider` | **GitHub** | GitLab |
 
 **Why the GitOps abstraction is real, not hand-wavy** — both engines reduce to *revision history +
@@ -305,13 +305,13 @@ as the baseline and makes failure handling a first-class primitive.
 
 | Pillar | Phase 1 (MVP) | Phase 2 | Phase 3 | Phase 4 |
 |---|---|---|---|---|
-| **React** | Incident-triggered (Alertmanager/VMAlert) + **trigger policy** (env/severity/namespace/label filters + dedup) | + GitOps-failure events, Slack mention, `lore investigate` | + proactive SLO-burn watch | — |
+| **React** | Incident-triggered (Alertmanager/VMAlert) + **trigger policy** (env/severity/namespace/label filters + dedup) | + GitOps-failure events, chat mention (Slack/Matrix), `lore investigate` | + proactive SLO-burn watch | — |
 | **Investigate** | what-changed spine + VM/VL/Hubble correlation + OKF-runbook grounding + confidence/`unresolved` | + ArgoCD + Prometheus providers proven | + cross-incident pattern recognition | — |
 | **Learn** | catalog **read** (cached index, instant recall) | catalog **write** (confidence-routed Issue/PR curation) — *loop closes* | hybrid vector retrieval, auto-curated playbooks, postmortems | — |
 | **Act** | rung 0: read-only (no action tools) | — | — | climb the ladder: suggest → approve-to-execute → bounded reversible auto (eval-earned, policy-gated) |
 
 Phase 1 headline: *an alert fires → RunLore investigates by correlating what-changed with
-metrics/logs → posts a confidence-scored RCA + suggested rollback to Slack, grounded in the catalog.*
+metrics/logs → posts a confidence-scored RCA + suggested rollback to chat (Slack/Matrix), grounded in the catalog.*
 
 ## 13. Repo layout
 
@@ -325,7 +325,7 @@ internal/
   curator/                     confidence-routed Issue/PR crystallization → OKF entries
   audit/                       append-only decision/tool-call log
   model/                       ModelProvider impls (anthropic, openai-compatible)
-  notify/                      Notifier impls (slack)
+  notify/                      Notifier impls (slack, matrix; pagerduty/incident.io later)
   providers/
     providers.go               the interfaces + the Change model (the contract)
     gitops/{flux,argocd}/      GitOpsProvider impls
