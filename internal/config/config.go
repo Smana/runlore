@@ -11,6 +11,7 @@ import "time"
 // Config is the top-level RunLore configuration (loaded from YAML).
 type Config struct {
 	Triggers TriggerPolicy `yaml:"triggers"`
+	Actions  ActionPolicy  `yaml:"actions"` // read-only by default; the upper rungs of the autonomy ladder
 	// Providers, Catalog, Model, Notify, etc. are added as packages land.
 }
 
@@ -63,4 +64,38 @@ func (t IncidentTrigger) Matches(_ Incident) bool {
 	// TODO(phase1): evaluate Match/Ignore (severity, environment, namespace globs,
 	// alertname globs, label matchers) instead of only the enabled flag.
 	return t.Enabled
+}
+
+// ActionMode controls how far RunLore may go when acting on the cluster.
+// Default (zero value) is read-only.
+type ActionMode string
+
+const (
+	ActionOff     ActionMode = "off"     // read-only (default): no action tools registered
+	ActionSuggest ActionMode = "suggest" // propose a command/PR; never execute
+	ActionApprove ActionMode = "approve" // execute only after explicit human approval
+	ActionAuto    ActionMode = "auto"    // execute within the allowed envelope, no click
+)
+
+// ActionPolicy gates cluster-mutating actions — the upper rungs of the autonomy
+// ladder. v1 ships ActionOff; the type exists so active tools can be added later
+// behind a gate without re-architecting (see docs/design.md §9, "Act").
+type ActionPolicy struct {
+	Mode            ActionMode  `yaml:"mode"`             // off | suggest | approve | auto
+	Allow           ActionAllow `yaml:"allow"`            // envelope, enforced even in approve/auto
+	RequireApproval bool        `yaml:"require_approval"` // force a human click for gated actions
+}
+
+// ActionAllow bounds what may be acted on, even in approve/auto modes.
+// Irreversibility is the trip-wire for mandatory human approval.
+type ActionAllow struct {
+	ReversibleOnly bool     `yaml:"reversible_only"`  // never auto-apply irreversible actions
+	Environments   []string `yaml:"environments"`     // e.g. [staging] — never prod by default
+	MaxBlastRadius int      `yaml:"max_blast_radius"` // cap on affected workloads
+	Kinds          []string `yaml:"kinds"`            // resource kinds that may be acted on
+}
+
+// Enabled reports whether any cluster-mutating action is permitted.
+func (a ActionPolicy) Enabled() bool {
+	return a.Mode != "" && a.Mode != ActionOff
 }
