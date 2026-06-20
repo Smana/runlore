@@ -29,18 +29,38 @@ type Server struct {
 	enqueuer    investigate.Enqueuer
 	ready       func() bool
 	approvals   *action.Approvals // nil unless action mode "approve" is configured
-	token       string            // optional shared secret for the approval endpoints
+	pauser      Pauser            // nil unless action mode "auto" is configured (kill-switch)
+	token       string            // optional shared secret for the approval/control endpoints
 	slackSecret string            // Slack signing secret; verifies interactive button clicks
 	log         *slog.Logger
 	handler     http.Handler
 }
 
+// Pauser is the rung-3 auto-execution kill-switch.
+type Pauser interface {
+	Pause()
+	Resume()
+	Paused() bool
+}
+
+// Actions bundles the optional rung-2/rung-3 wiring: the approval queue, the auto
+// kill-switch, the shared control token, and the Slack signing secret.
+type Actions struct {
+	Approvals   *action.Approvals
+	Pauser      Pauser
+	Token       string
+	SlackSecret string
+}
+
 // New builds a Server. ready reports whether this replica should serve (leadership);
-// nil = always ready. approvals (optional) enables the human-approval endpoints for
-// rung-2 actions; token (optional) is required as X-Approval-Token to use them.
-// /healthz is liveness; /readyz is readiness (gated by ready, leader-only).
-func New(cfg *config.Config, enq investigate.Enqueuer, ready func() bool, approvals *action.Approvals, token, slackSecret string, log *slog.Logger) *Server {
-	s := &Server{engine: trigger.NewEngine(cfg.Triggers.Incidents), enqueuer: enq, ready: ready, approvals: approvals, token: token, slackSecret: slackSecret, log: log}
+// nil = always ready. acts (optional) enables the rung-2 approval endpoints + the
+// rung-3 kill-switch, gated by acts.Token (X-Approval-Token). /healthz is liveness;
+// /readyz is readiness (gated by ready, leader-only).
+func New(cfg *config.Config, enq investigate.Enqueuer, ready func() bool, acts Actions, log *slog.Logger) *Server {
+	s := &Server{
+		engine: trigger.NewEngine(cfg.Triggers.Incidents), enqueuer: enq, ready: ready,
+		approvals: acts.Approvals, pauser: acts.Pauser, token: acts.Token, slackSecret: acts.SlackSecret, log: log,
+	}
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /webhook/alertmanager", s.handleAlertmanager)
 	mux.HandleFunc("POST /slack/interactions", s.handleSlackInteraction)
@@ -57,8 +77,38 @@ func New(cfg *config.Config, enq investigate.Enqueuer, ready func() bool, approv
 	mux.HandleFunc("GET /actions", s.handleListActions)
 	mux.HandleFunc("POST /actions/{id}/approve", s.handleApprove)
 	mux.HandleFunc("POST /actions/{id}/reject", s.handleReject)
+	mux.HandleFunc("POST /actions/pause", s.handlePause)
+	mux.HandleFunc("POST /actions/resume", s.handleResume)
 	s.handler = mux
 	return s
+}
+
+func (s *Server) handlePause(w http.ResponseWriter, r *http.Request) {
+	if s.pauser == nil {
+		http.Error(w, "auto-execution not enabled", http.StatusNotFound)
+		return
+	}
+	if !s.authorized(r) {
+		http.Error(w, "forbidden", http.StatusForbidden)
+		return
+	}
+	s.pauser.Pause()
+	s.log.Warn("auto-execution paused via kill-switch")
+	_, _ = fmt.Fprintln(w, "auto-execution paused")
+}
+
+func (s *Server) handleResume(w http.ResponseWriter, r *http.Request) {
+	if s.pauser == nil {
+		http.Error(w, "auto-execution not enabled", http.StatusNotFound)
+		return
+	}
+	if !s.authorized(r) {
+		http.Error(w, "forbidden", http.StatusForbidden)
+		return
+	}
+	s.pauser.Resume()
+	s.log.Info("auto-execution resumed")
+	_, _ = fmt.Fprintln(w, "auto-execution resumed")
 }
 
 // authorized enforces the optional approval token (constant-time compare).
