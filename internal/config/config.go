@@ -12,6 +12,7 @@ import "time"
 type Config struct {
 	Triggers TriggerPolicy `yaml:"triggers"`
 	Actions  ActionPolicy  `yaml:"actions"` // read-only by default; the upper rungs of the autonomy ladder
+	Forge    Forge         `yaml:"forge"`   // git-forge auth (GitHub App) for diff access + curation
 	// Providers, Catalog, Model, Notify, etc. are added as packages land.
 }
 
@@ -98,4 +99,21 @@ type ActionAllow struct {
 // Enabled reports whether any cluster-mutating action is permitted.
 func (a ActionPolicy) Enabled() bool {
 	return a.Mode != "" && a.Mode != ActionOff
+}
+
+// Forge holds git-forge authentication. A GitHub App is the v1 default: one
+// fine-grained, short-lived identity used for both git access (clone/diff for the
+// what-changed spine) and forge operations (issues/PRs for the Curator).
+type Forge struct {
+	GitHubApp GitHubApp `yaml:"github_app"`
+}
+
+// GitHubApp holds GitHub App credentials. The private key mints 1-hour
+// installation tokens (no long-lived PAT); it is referenced from a Secret, never
+// inlined. Required permissions: contents:read (diff), and on the KB repo
+// issues:write + pull_requests:write + contents:write (curation).
+type GitHubApp struct {
+	AppID          int64  `yaml:"app_id"`
+	InstallationID int64  `yaml:"installation_id"`
+	PrivateKeyRef  string `yaml:"private_key_ref"` // Secret name/key (e.g. via External Secrets)
 }
