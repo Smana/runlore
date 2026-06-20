@@ -38,6 +38,7 @@ import (
 	"github.com/Smana/runlore/internal/network/hubble"
 	"github.com/Smana/runlore/internal/notify"
 	"github.com/Smana/runlore/internal/providers"
+	"github.com/Smana/runlore/internal/providers/gitops/argocd"
 	"github.com/Smana/runlore/internal/providers/gitops/flux"
 	"github.com/Smana/runlore/internal/server"
 	"github.com/Smana/runlore/internal/trigger"
@@ -101,8 +102,8 @@ func runServe(args []string) error {
 	// Build kube clients once (best-effort): the dynamic client backs the
 	// GitOps-failure watch + what-changed tool; the clientset backs leader election.
 	var (
-		fluxProvider *flux.Provider
-		clientset    *kubernetes.Clientset
+		gitops    providers.GitOpsProvider
+		clientset *kubernetes.Clientset
 	)
 	if restCfg, err := restConfig(); err != nil {
 		log.Warn("no kube client; GitOps features + leader election disabled", "err", err)
@@ -110,7 +111,7 @@ func runServe(args []string) error {
 		if dc, derr := dynamic.NewForConfig(restCfg); derr != nil {
 			log.Warn("dynamic client unavailable; GitOps features disabled", "err", derr)
 		} else {
-			fluxProvider = flux.New(flux.NewDynamicReader(dc), &whatchanged.Differ{})
+			gitops = buildGitOps(cfg, dc, log)
 		}
 		if cs, cerr := kubernetes.NewForConfig(restCfg); cerr != nil {
 			log.Warn("clientset unavailable; leader election disabled", "err", cerr)
@@ -119,15 +120,15 @@ func runServe(args []string) error {
 		}
 	}
 
-	inv := buildInvestigator(ctx, cfg, fluxProvider, log)
+	inv := buildInvestigator(ctx, cfg, gitops, log)
 	queue := investigate.NewQueue(inv, log)
 
 	// startWork runs the leader-only loops (investigation queue + failure watch),
 	// scoped to a context cancelled when leadership is lost.
 	startWork := func(workCtx context.Context) {
 		go queue.Run(workCtx)
-		if cfg.Triggers.GitOpsFailures.Enabled && fluxProvider != nil {
-			startGitOpsFailureWatch(workCtx, cfg, queue, fluxProvider, log)
+		if cfg.Triggers.GitOpsFailures.Enabled && gitops != nil {
+			startGitOpsFailureWatch(workCtx, cfg, queue, gitops, log)
 		}
 	}
 
@@ -303,7 +304,7 @@ func buildCurator(cfg *config.Config, log *slog.Logger) *curator.Curator {
 
 // buildInvestigator returns the LLM ReAct investigator when a model is configured,
 // otherwise the read-only LogInvestigator.
-func buildInvestigator(ctx context.Context, cfg *config.Config, fp *flux.Provider, log *slog.Logger) investigate.Investigator {
+func buildInvestigator(ctx context.Context, cfg *config.Config, gp providers.GitOpsProvider, log *slog.Logger) investigate.Investigator {
 	if cfg.Model.BaseURL == "" {
 		log.Info("no model configured; using log-only investigator")
 		return investigate.LogInvestigator{Log: log}
@@ -314,8 +315,8 @@ func buildInvestigator(ctx context.Context, cfg *config.Config, fp *flux.Provide
 	}
 	model := openai.New(cfg.Model.BaseURL, cfg.Model.Model, apiKey)
 	var tools []investigate.Tool
-	if fp != nil {
-		tools = append(tools, investigate.WhatChangedTool{GitOps: fp})
+	if gp != nil {
+		tools = append(tools, investigate.WhatChangedTool{GitOps: gp})
 	}
 	if cat := buildCatalog(ctx, cfg, log); cat != nil {
 		tools = append(tools, investigate.KBSearchTool{Catalog: cat})
@@ -355,14 +356,33 @@ func buildInvestigator(ctx context.Context, cfg *config.Config, fp *flux.Provide
 }
 
 // startGitOpsFailureWatch drains Flux WatchFailures into the queue.
-func startGitOpsFailureWatch(ctx context.Context, cfg *config.Config, q investigate.Enqueuer, fp *flux.Provider, log *slog.Logger) {
-	events, err := fp.WatchFailures(ctx)
+func startGitOpsFailureWatch(ctx context.Context, cfg *config.Config, q investigate.Enqueuer, gp providers.GitOpsProvider, log *slog.Logger) {
+	events, err := gp.WatchFailures(ctx)
 	if err != nil {
 		log.Warn("gitops-failure watch disabled", "err", err)
 		return
 	}
-	log.Info("watching gitops failures (Flux Kustomizations)")
+	log.Info("watching gitops failures", "engine", gitopsEngine(cfg))
 	go investigate.DrainFailures(ctx, events, q, trigger.NewDeduper(cfg.Triggers.Incidents.Dedup.Window.Std()))
+}
+
+// gitopsEngine returns the configured GitOps engine, defaulting to flux.
+func gitopsEngine(cfg *config.Config) string {
+	if cfg.GitOps.Engine == "argocd" {
+		return "argocd"
+	}
+	return "flux"
+}
+
+// buildGitOps builds the GitOps provider for the configured engine (flux default).
+func buildGitOps(cfg *config.Config, dc dynamic.Interface, log *slog.Logger) providers.GitOpsProvider {
+	differ := &whatchanged.Differ{}
+	if gitopsEngine(cfg) == "argocd" {
+		log.Info("gitops engine", "engine", "argocd")
+		return argocd.New(argocd.NewDynamicReader(dc), differ)
+	}
+	log.Info("gitops engine", "engine", "flux")
+	return flux.New(flux.NewDynamicReader(dc), differ)
 }
 
 // restConfig builds a Kubernetes REST config from in-cluster config, falling back

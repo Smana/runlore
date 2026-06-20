@@ -16,6 +16,7 @@ import (
 
 // Config is the top-level RunLore configuration (loaded from YAML).
 type Config struct {
+	GitOps   GitOps        `yaml:"gitops"` // engine selection (flux default | argocd)
 	Triggers TriggerPolicy `yaml:"triggers"`
 	Actions  ActionPolicy  `yaml:"actions"` // read-only by default; the upper rungs of the autonomy ladder
 	Forge    Forge         `yaml:"forge"`   // git-forge auth (GitHub App) for diff access + curation
@@ -84,6 +85,11 @@ type MatrixNotify struct {
 	Homeserver     string `yaml:"homeserver"`
 	RoomID         string `yaml:"room_id"`
 	AccessTokenEnv string `yaml:"access_token_env"` // env var holding the access token
+}
+
+// GitOps selects the GitOps engine RunLore reads (what-changed + failure watch).
+type GitOps struct {
+	Engine string `yaml:"engine"` // "flux" (default) | "argocd"
 }
 
 // TriggerPolicy decides what RunLore reacts to.
