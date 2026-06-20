@@ -38,8 +38,7 @@ func (d *Differ) Local(path, fromRev, toRev, scope string) (providers.Diff, erro
 	return diffRevisions(repo, fromRev, toRev, scope)
 }
 
-// diffRevisions returns the path-scoped unified diff between two revisions.
-// scope is a path prefix; "" includes every changed file.
+// diffRevisions resolves two revisions and returns their path-scoped diff.
 func diffRevisions(repo *git.Repository, fromRev, toRev, scope string) (providers.Diff, error) {
 	from, err := resolveCommit(repo, fromRev)
 	if err != nil {
@@ -49,11 +48,16 @@ func diffRevisions(repo *git.Repository, fromRev, toRev, scope string) (provider
 	if err != nil {
 		return providers.Diff{}, fmt.Errorf("resolve %q: %w", toRev, err)
 	}
+	return diffCommits(from, to, scope)
+}
+
+// diffCommits returns the path-scoped unified diff between two commits.
+// scope is a path prefix matched on segment boundaries; "" includes every file.
+func diffCommits(from, to *object.Commit, scope string) (providers.Diff, error) {
 	patch, err := from.Patch(to)
 	if err != nil {
 		return providers.Diff{}, fmt.Errorf("patch: %w", err)
 	}
-
 	var out providers.Diff
 	for _, fp := range patch.FilePatches() {
 		path := filePatchPath(fp)
@@ -128,12 +132,41 @@ func (d *Differ) Remote(url, fromRev, toRev, scope string) (providers.Diff, erro
 	return diffRevisions(repo, fromRev, toRev, scope)
 }
 
-// ForChange resolves the diff for a detected Change, cloning its source repo and
-// scoping to the workload's path. This is the integration point a GitOpsProvider
-// uses to fill in a Change's diff.
+// RemoteFromParent clones url and returns the path-scoped diff of the change
+// introduced by rev (rev against its first parent). A root commit (no parent)
+// yields an empty diff.
+//
+// NOTE (perf): like Remote, this does a full in-memory clone per call. When the
+// GitOpsProvider drives this across many changes, add a shallow fetch or a
+// per-repo clone cache here (see docs/plans review note).
+func (d *Differ) RemoteFromParent(url, rev, scope string) (providers.Diff, error) {
+	repo, err := git.Clone(memory.NewStorage(), nil, &git.CloneOptions{URL: url, Auth: d.auth()})
+	if err != nil {
+		return providers.Diff{}, fmt.Errorf("clone %s: %w", url, err)
+	}
+	to, err := resolveCommit(repo, rev)
+	if err != nil {
+		return providers.Diff{}, fmt.Errorf("resolve %q: %w", rev, err)
+	}
+	if to.NumParents() == 0 {
+		return providers.Diff{}, nil // root commit: nothing to diff against
+	}
+	from, err := to.Parent(0)
+	if err != nil {
+		return providers.Diff{}, fmt.Errorf("parent of %q: %w", rev, err)
+	}
+	return diffCommits(from, to, scope)
+}
+
+// ForChange resolves the diff for a detected Change by cloning its source repo
+// and scoping to the workload's path. With both revisions it diffs FromRev..ToRev;
+// with only ToRev it diffs the change introduced by ToRev (against its parent).
 func (d *Differ) ForChange(c providers.Change) (providers.Diff, error) {
-	if c.FromRev == "" || c.ToRev == "" {
-		return providers.Diff{}, fmt.Errorf("change %s/%s: missing from/to revision", c.Workload.Namespace, c.Workload.Name)
+	if c.ToRev == "" {
+		return providers.Diff{}, fmt.Errorf("change %s/%s: missing to revision", c.Workload.Namespace, c.Workload.Name)
+	}
+	if c.FromRev == "" {
+		return d.RemoteFromParent(c.Source.RepoURL, c.ToRev, c.Source.Path)
 	}
 	return d.Remote(c.Source.RepoURL, c.FromRev, c.ToRev, c.Source.Path)
 }
