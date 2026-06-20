@@ -6,10 +6,57 @@ import (
 	"log/slog"
 	"testing"
 
+	"strings"
+
 	"github.com/Smana/runlore/internal/action"
+	"github.com/Smana/runlore/internal/catalog"
 	"github.com/Smana/runlore/internal/config"
 	"github.com/Smana/runlore/internal/providers"
 )
+
+type fakeScored struct{ hits []catalog.ScoredEntry }
+
+func (f fakeScored) SearchScored(string, int) ([]catalog.ScoredEntry, error) { return f.hits, nil }
+
+func TestInstantRecallHit(t *testing.T) {
+	model := &scriptModel{} // no responses scripted: a call would panic, proving the loop is skipped
+	var got *providers.Investigation
+	li := &LoopInvestigator{
+		Model: model,
+		Log:   slog.New(slog.NewTextHandler(io.Discard, nil)),
+		Recall: &Recall{MinScore: 2.0, Catalog: fakeScored{hits: []catalog.ScoredEntry{
+			{Entry: catalog.Entry{Title: "Known incident", Description: "chart bump", Path: "known.md"}, Score: 5.0}}}},
+		OnComplete: func(inv providers.Investigation) { got = &inv },
+	}
+	if err := li.Investigate(context.Background(), Request{Title: "HarborProbeFailure"}); err != nil {
+		t.Fatalf("Investigate: %v", err)
+	}
+	if model.i != 0 {
+		t.Fatalf("model was called %d times; a recall hit must skip the loop", model.i)
+	}
+	if got == nil || len(got.RootCauses) != 1 || !strings.Contains(got.RootCauses[0].Summary, "Known incident") {
+		t.Fatalf("unexpected recalled investigation: %+v", got)
+	}
+}
+
+func TestInstantRecallBelowThreshold(t *testing.T) {
+	model := &scriptModel{responses: []providers.CompletionResponse{
+		{ToolCalls: []providers.ToolCall{{ID: "1", Name: submitFindingsName, Args: `{"confidence":0.5,"root_causes":[{"summary":"freshly investigated"}]}`}}},
+	}}
+	li := &LoopInvestigator{
+		Model: model,
+		Log:   slog.New(slog.NewTextHandler(io.Discard, nil)),
+		Recall: &Recall{MinScore: 2.0, Catalog: fakeScored{hits: []catalog.ScoredEntry{
+			{Entry: catalog.Entry{Title: "weak"}, Score: 0.5}}}}, // below threshold → loop runs
+		OnComplete: func(providers.Investigation) {},
+	}
+	if err := li.Investigate(context.Background(), Request{Title: "x"}); err != nil {
+		t.Fatalf("Investigate: %v", err)
+	}
+	if model.i == 0 {
+		t.Fatal("model not called; a below-threshold score must run the loop")
+	}
+}
 
 func TestLoopInvestigatorActions(t *testing.T) {
 	// submit_findings proposes a reversible and an irreversible action.
