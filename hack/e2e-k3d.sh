@@ -239,12 +239,10 @@ spec:
 YAML
 kubectl wait --for=condition=Established crd/applications.argoproj.io --timeout=30s
 # Switch the engine to argocd (reuse prior values; back to 1 replica for a quick roll).
-# Reconfigure to the argocd engine. Leader election is disabled for this step:
-# leadership-gated readiness stalls in-place rolling updates (a known HA limitation),
-# so a single non-LE pod rolls cleanly here.
+# Reconfigure to the argocd engine. The chart's Recreate strategy makes this
+# in-place update roll cleanly under leader election (old pods terminate first).
 helm upgrade runlore deploy/helm/runlore -n "$NS" --reuse-values \
-  --set replicaCount=1 --set config.leader_election.enabled=false \
-  --set-string config.gitops.engine=argocd >/dev/null
+  --set replicaCount=1 --set-string config.gitops.engine=argocd >/dev/null
 kubectl -n "$NS" rollout status deploy/runlore --timeout=120s
 sleep 3
 kubectl apply -f - <<'YAML'

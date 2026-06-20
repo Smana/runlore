@@ -2,6 +2,13 @@
 # hot standby. See config.leader_election below.
 replicaCount: 2
 
+# Recreate avoids a rolling-update deadlock under leader election: a new pod can't
+# become Ready until it leads, but the old leader holds the Lease (and maxUnavailable
+# is 0), so an in-place rolling update stalls. Recreate terminates old pods first.
+# Trade-off: ~20s downtime during the agent's own upgrade; crash-failover HA is
+# unaffected. Switch to RollingUpdate only with a leadership-independent readiness model.
+updateStrategy: Recreate
+
 image:
   repository: ghcr.io/smana/runlore
   tag: ""               # defaults to .Chart.AppVersion
