@@ -32,7 +32,11 @@ func submitFindingsSpec() providers.ToolSpec {
 "summary":{"type":"string"},"confidence":{"type":"number"},"change_ref":{"type":"string"},
 "evidence":{"type":"array","items":{"type":"string"}},"suggested_action":{"type":"string"},"reversible":{"type":"boolean"}},
 "required":["summary"]}},
-"unresolved":{"type":"array","items":{"type":"string"}}},"required":["root_causes"]}`,
+"unresolved":{"type":"array","items":{"type":"string"}},
+"actions":{"type":"array","description":"proposed remediations; prefer reversible, low-blast-radius","items":{"type":"object","properties":{
+"description":{"type":"string"},"reversible":{"type":"boolean"},"blast_radius":{"type":"integer"},
+"target":{"type":"object","properties":{"kind":{"type":"string"},"name":{"type":"string"},"namespace":{"type":"string"}}}},
+"required":["description"]}}},"required":["root_causes"]}`,
 	}
 }
 
@@ -49,6 +53,16 @@ type findings struct {
 		Reversible      bool     `json:"reversible"`
 	} `json:"root_causes"`
 	Unresolved []string `json:"unresolved"`
+	Actions    []struct {
+		Description string `json:"description"`
+		Reversible  bool   `json:"reversible"`
+		BlastRadius int    `json:"blast_radius"`
+		Target      struct {
+			Kind      string `json:"kind"`
+			Name      string `json:"name"`
+			Namespace string `json:"namespace"`
+		} `json:"target"`
+	} `json:"actions"`
 }
 
 // parseFindings turns submit_findings arguments into a providers.Investigation.
@@ -66,6 +80,16 @@ func parseFindings(args string) (providers.Investigation, error) {
 			Evidence:        rc.Evidence,
 			SuggestedAction: rc.SuggestedAction,
 			Reversible:      rc.Reversible,
+		})
+	}
+	for _, a := range f.Actions {
+		inv.Actions = append(inv.Actions, providers.Action{
+			Name:        a.Description,
+			Description: a.Description,
+			Target:      providers.Workload{Kind: a.Target.Kind, Name: a.Target.Name, Namespace: a.Target.Namespace},
+			Mutating:    true,
+			Reversible:  a.Reversible,
+			BlastRadius: a.BlastRadius,
 		})
 	}
 	return inv, nil
