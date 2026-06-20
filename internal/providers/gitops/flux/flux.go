@@ -18,6 +18,9 @@ type kustomization struct {
 	SourceName      string // spec.sourceRef.name
 	SourceNamespace string // spec.sourceRef.namespace (defaults to the Kustomization namespace)
 	Revision        string // status.lastAppliedRevision
+	ReadyStatus     string // status.conditions[type=Ready].status ("True"/"False"/"Unknown")
+	ReadyReason     string
+	ReadyMessage    string
 }
 
 // gitRepository is the minimal Flux GitRepository data the provider needs.
@@ -26,11 +29,17 @@ type gitRepository struct {
 	URL             string // spec.url
 }
 
+// KustomizationEvent is a single watch event for a Kustomization.
+type KustomizationEvent struct {
+	Kustomization kustomization
+}
+
 // Reader is the cluster-read surface the provider depends on. The dynamic
 // client-go implementation lives in dynamic.go; tests use a fake.
 type Reader interface {
 	ListKustomizations(ctx context.Context) ([]kustomization, error)
 	GetGitRepository(ctx context.Context, namespace, name string) (gitRepository, error)
+	WatchKustomizations(ctx context.Context) (<-chan KustomizationEvent, error)
 }
 
 // Provider implements providers.GitOpsProvider for Flux.
@@ -91,12 +100,44 @@ func (p *Provider) Diff(_ context.Context, c providers.Change) (providers.Diff, 
 	return p.differ.ForChange(c)
 }
 
-// WatchFailures is not implemented yet (next plan: watch Kustomization
-// Ready=False / source FetchFailed). It returns a closed channel.
-func (p *Provider) WatchFailures(context.Context) (<-chan providers.FailureEvent, error) {
-	ch := make(chan providers.FailureEvent)
-	close(ch)
-	return ch, nil
+// WatchFailures watches Flux Kustomizations and emits a FailureEvent whenever one
+// is Ready=False (a failed/blocked reconcile). The returned channel closes when
+// the watch ends or ctx is done.
+func (p *Provider) WatchFailures(ctx context.Context) (<-chan providers.FailureEvent, error) {
+	src, err := p.reader.WatchKustomizations(ctx)
+	if err != nil {
+		return nil, err
+	}
+	out := make(chan providers.FailureEvent)
+	go func() {
+		defer close(out)
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case ev, ok := <-src:
+				if !ok {
+					return
+				}
+				k := ev.Kustomization
+				if k.ReadyStatus != "False" {
+					continue
+				}
+				fe := providers.FailureEvent{
+					Workload: providers.Workload{Kind: "Kustomization", Name: k.Name, Namespace: k.Namespace},
+					Engine:   providers.EngineFlux,
+					Reason:   k.ReadyReason,
+					Message:  k.ReadyMessage,
+				}
+				select {
+				case out <- fe:
+				case <-ctx.Done():
+					return
+				}
+			}
+		}
+	}()
+	return out, nil
 }
 
 // mapKustomization builds an engine-agnostic Change from a Kustomization + its
