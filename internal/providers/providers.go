@@ -175,16 +175,42 @@ type IssueProvider interface {
 	OpenPR(ctx context.Context, entry KBEntry) (Ref, error)
 }
 
-// ---- payloads (sketched; refined as impls land) ------------------------------
+// ---- payloads ----------------------------------------------------------------
 
-// Samples is a placeholder instant-query result envelope.
-type Samples struct{ Raw []byte }
+// Sample is one instant metric value with its labels.
+type Sample struct {
+	Metric map[string]string
+	Value  float64
+	Time   time.Time
+}
 
-// Matrix is a placeholder range-query result envelope.
-type Matrix struct{ Raw []byte }
+// Point is a single (time, value) in a range series.
+type Point struct {
+	Time  time.Time
+	Value float64
+}
 
-// LogResult is a placeholder logs/network query result envelope.
-type LogResult struct{ Raw []byte }
+// Series is a labeled time series (range query).
+type Series struct {
+	Metric map[string]string
+	Points []Point
+}
+
+// LogLine is one normalized log entry (engine-agnostic).
+type LogLine struct {
+	Time    time.Time
+	Message string
+	Fields  map[string]string
+}
+
+// Samples is an instant-vector result.
+type Samples []Sample
+
+// Matrix is a range-query result.
+type Matrix []Series
+
+// LogResult is a logs/network query result.
+type LogResult []LogLine
 
 // Investigation is the structured output contract of an investigation.
 type Investigation struct {
