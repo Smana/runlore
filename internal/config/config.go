@@ -289,15 +289,16 @@ func (c *Config) Validate() error {
 	switch c.Actions.Mode {
 	case "", ActionOff, ActionSuggest:
 		return nil // read-only-ish: nothing to execute
-	case ActionApprove:
+	case ActionApprove, ActionAuto:
+		// Both executing rungs require the control/kill-switch token (fail closed).
 		if c.Actions.ApprovalTokenEnv == "" {
-			return fmt.Errorf("actions.mode=approve requires actions.approval_token_env (control endpoints fail closed without it)")
+			return fmt.Errorf("actions.mode=%s requires actions.approval_token_env (control/kill-switch endpoints fail closed without it)", c.Actions.Mode)
 		}
-		return nil
-	case ActionAuto:
-		if c.Actions.ApprovalTokenEnv == "" {
-			return fmt.Errorf("actions.mode=auto requires actions.approval_token_env (the kill-switch endpoint must be authenticated)")
+		if c.Actions.Mode == ActionApprove {
+			return nil
 		}
+		// auto-only: unattended execution additionally needs audit, an authenticated
+		// webhook, and bounded gates.
 		if c.Actions.AuditLogPath == "" {
 			return fmt.Errorf("actions.mode=auto requires actions.audit_log_path (auto-execution must be audited)")
 		}

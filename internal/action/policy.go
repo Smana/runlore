@@ -86,12 +86,7 @@ func (p *Policy) namespaceViolation(ns string) string {
 	if ns == "" {
 		return "target namespace required"
 	}
-	for _, prot := range builtinProtectedNamespaces {
-		if ns == prot {
-			return "namespace " + ns + " is protected (never an action target)"
-		}
-	}
-	if slices.Contains(p.cfg.Allow.ProtectedNamespaces, ns) {
+	if slices.Contains(builtinProtectedNamespaces, ns) || slices.Contains(p.cfg.Allow.ProtectedNamespaces, ns) {
 		return "namespace " + ns + " is protected (never an action target)"
 	}
 	if !slices.Contains(p.cfg.Allow.Namespaces, ns) {

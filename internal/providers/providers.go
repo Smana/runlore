@@ -99,6 +99,23 @@ type Action struct {
 	ApprovalID  string // runtime: set when registered for approval; drives Slack approve/reject buttons
 }
 
+// OpSafety is the server-derived safety metadata for an executable action op.
+type OpSafety struct {
+	Reversible bool
+	Blast      int
+}
+
+// Ops is the canonical registry of executable remediation operations and their
+// server-authoritative safety metadata. The action gate (internal/action) derives
+// reversibility/blast from this — never from model output — and the executor
+// (internal/executor/flux) runs only ops listed here. One entry per op is the
+// single source of truth that keeps the gate and the executor from drifting.
+var Ops = map[string]OpSafety{
+	"suspend":   {Reversible: true, Blast: 1},
+	"resume":    {Reversible: true, Blast: 1},
+	"reconcile": {Reversible: true, Blast: 1},
+}
+
 // TimeWindow is a [Start, End] interval.
 type TimeWindow struct {
 	Start time.Time

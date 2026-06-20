@@ -449,11 +449,8 @@ func buildAuto(cfg *config.Config, exec action.Executor, aud audit.Auditor, log 
 	log.Warn("rung-3 AUTO execution ENABLED — reversible actions execute WITHOUT human approval",
 		"dry_run", a.DryRun, "min_confidence", a.MinConfidence, "max_per_window", a.MaxPerWindow, "window", a.Window.Std().String())
 	au := action.NewAuto(exec, a, aud, log)
-	// Fail closed across restart/leader failover: the in-memory kill-switch starts
-	// ENGAGED on every cold start, so a previously-engaged pause can never silently
-	// evaporate into unattended execution. An operator resumes explicitly via the
-	// authenticated POST /actions/resume endpoint.
-	au.Pause()
+	// NewAuto starts paused (fail closed by construction across cold start / failover);
+	// surface that to the operator, who resumes via the authenticated /actions/resume.
 	log.Warn("rung-3 auto starts PAUSED (kill-switch engaged) — POST /actions/resume to begin auto-execution")
 	return au
 }

@@ -94,16 +94,16 @@ func (a *Approvals) Approve(ctx context.Context, id, actor string) (providers.Ac
 	// Defense in depth: re-evaluate the server-authoritative envelope at exec time.
 	act := deriveSafety(e.action)
 	if reason := a.policy.violation(act); reason != "" {
-		_ = a.audit.Log(audit.Record{Actor: actor, Op: act.Op, Target: target(act), Decision: audit.DecisionDenied, Reason: reason})
+		recordAttempt(a.audit, actor, act, audit.DecisionDenied, reason)
 		return providers.Action{}, fmt.Errorf("action no longer within policy: %s", reason)
 	}
 	a.log.Info("executing approved action", "id", id, "actor", actor, "op", act.Op, "target", target(act))
 	if err := a.exec.Execute(ctx, act); err != nil {
-		_ = a.audit.Log(audit.Record{Actor: actor, Op: act.Op, Target: target(act), Decision: audit.DecisionFailed, Reason: err.Error()})
+		recordAttempt(a.audit, actor, act, audit.DecisionFailed, err.Error())
 		a.log.Error("approved action failed", "id", id, "err", err)
 		return providers.Action{}, err
 	}
-	_ = a.audit.Log(audit.Record{Actor: actor, Op: act.Op, Target: target(act), Decision: audit.DecisionExecuted})
+	recordAttempt(a.audit, actor, act, audit.DecisionExecuted, "")
 	a.log.Info("approved action executed", "id", id)
 	return act, nil
 }
