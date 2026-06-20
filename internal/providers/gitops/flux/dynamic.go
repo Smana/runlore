@@ -49,6 +49,27 @@ func (r *dynamicReader) GetGitRepository(ctx context.Context, namespace, name st
 	return gitRepository{Name: name, Namespace: namespace, URL: url}, nil
 }
 
+// readyCondition returns the (status, reason, message) of the Ready condition.
+func readyCondition(u *unstructured.Unstructured) (status, reason, message string) {
+	conds, found, _ := unstructured.NestedSlice(u.Object, "status", "conditions")
+	if !found {
+		return "", "", ""
+	}
+	for _, c := range conds {
+		m, ok := c.(map[string]any)
+		if !ok {
+			continue
+		}
+		if t, _ := m["type"].(string); t == "Ready" {
+			status, _ = m["status"].(string)
+			reason, _ = m["reason"].(string)
+			message, _ = m["message"].(string)
+			return status, reason, message
+		}
+	}
+	return "", "", ""
+}
+
 // kustomizationFromUnstructured maps an unstructured Kustomization object to the
 // minimal kustomization type.
 func kustomizationFromUnstructured(u *unstructured.Unstructured) kustomization {
@@ -60,6 +81,7 @@ func kustomizationFromUnstructured(u *unstructured.Unstructured) kustomization {
 	if srcNamespace == "" {
 		srcNamespace = namespace // sourceRef.namespace defaults to the Kustomization namespace
 	}
+	readyStatus, readyReason, readyMessage := readyCondition(u)
 	return kustomization{
 		Name:            u.GetName(),
 		Namespace:       namespace,
@@ -67,5 +89,8 @@ func kustomizationFromUnstructured(u *unstructured.Unstructured) kustomization {
 		SourceName:      srcName,
 		SourceNamespace: srcNamespace,
 		Revision:        rev,
+		ReadyStatus:     readyStatus,
+		ReadyReason:     readyReason,
+		ReadyMessage:    readyMessage,
 	}
 }
