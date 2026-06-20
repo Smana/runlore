@@ -68,6 +68,26 @@ func TestReload(t *testing.T) {
 	}
 }
 
+func TestSearchScored(t *testing.T) {
+	dir := t.TempDir()
+	writeEntry(t, dir, "a.md", "---\ntitle: HelmRelease upgrade failure\ntags: [flux, helmrelease]\n---\nchart bump stalls the release")
+	writeEntry(t, dir, "b.md", "---\ntitle: Network policy drops\ntags: [cilium]\n---\nconnectivity timeouts")
+	c, err := New(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	hits, err := c.SearchScored("helmrelease chart upgrade", 2)
+	if err != nil {
+		t.Fatalf("SearchScored: %v", err)
+	}
+	if len(hits) == 0 || hits[0].Entry.Title != "HelmRelease upgrade failure" {
+		t.Fatalf("unexpected top hit: %+v", hits)
+	}
+	if hits[0].Score <= 0 {
+		t.Fatalf("expected a positive relevance score, got %v", hits[0].Score)
+	}
+}
+
 func TestEmptyCatalog(t *testing.T) {
 	c := NewEmpty()
 	if c.Len() != 0 {

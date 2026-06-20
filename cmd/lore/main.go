@@ -253,7 +253,7 @@ func buildModel(cfg *config.Config, apiKey string) providers.ModelProvider {
 // configured. With a Git URL it starts a background syncer (running on every
 // replica, so a failover standby is already warm) that re-indexes after each pull;
 // otherwise it loads a static mounted directory once.
-func buildCatalog(ctx context.Context, cfg *config.Config, forgeTok forgeToken, log *slog.Logger) catalog.Searcher {
+func buildCatalog(ctx context.Context, cfg *config.Config, forgeTok forgeToken, log *slog.Logger) *catalog.Catalog {
 	if cfg.Catalog.Git.URL != "" {
 		dir := cfg.Catalog.Dir
 		if dir == "" {
@@ -432,8 +432,13 @@ func buildInvestigator(ctx context.Context, cfg *config.Config, gp providers.Git
 	if gp != nil {
 		tools = append(tools, investigate.WhatChangedTool{GitOps: gp})
 	}
+	var recall *investigate.Recall
 	if cat := buildCatalog(ctx, cfg, forgeTok, log); cat != nil {
 		tools = append(tools, investigate.KBSearchTool{Catalog: cat})
+		if cfg.Catalog.InstantRecall.Enabled {
+			recall = &investigate.Recall{Catalog: cat, MinScore: cfg.Catalog.InstantRecall.MinScore}
+			log.Info("instant recall enabled", "min_score", cfg.Catalog.InstantRecall.MinScore)
+		}
 	}
 	if cfg.Metrics.URL != "" {
 		tools = append(tools, investigate.QueryMetricsTool{Metrics: prometheus.New(cfg.Metrics.URL)})
@@ -460,6 +465,7 @@ func buildInvestigator(ctx context.Context, cfg *config.Config, gp providers.Git
 		Tools:   tools,
 		Log:     log,
 		Actions: actions,
+		Recall:  recall,
 		OnComplete: func(found providers.Investigation) {
 			// Rung 2: register envelope-compliant actions for human approval and
 			// annotate each with how to approve it. (Rung 1 only suggests; rung 2 makes

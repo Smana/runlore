@@ -78,10 +78,37 @@ func (c *Catalog) Len() int {
 	return len(c.entries)
 }
 
-var _ Searcher = (*Catalog)(nil)
+// ScoredEntry is a search hit with its BM25 relevance score.
+type ScoredEntry struct {
+	Entry Entry
+	Score float64
+}
+
+// ScoredSearcher exposes relevance scores (used by instant recall).
+type ScoredSearcher interface {
+	SearchScored(query string, k int) ([]ScoredEntry, error)
+}
+
+var (
+	_ Searcher       = (*Catalog)(nil)
+	_ ScoredSearcher = (*Catalog)(nil)
+)
 
 // Search returns up to k entries best matching the query (BM25).
 func (c *Catalog) Search(query string, k int) ([]Entry, error) {
+	scored, err := c.SearchScored(query, k)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]Entry, len(scored))
+	for i, s := range scored {
+		out[i] = s.Entry
+	}
+	return out, nil
+}
+
+// SearchScored returns up to k hits with their relevance scores.
+func (c *Catalog) SearchScored(query string, k int) ([]ScoredEntry, error) {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
 	if c.index == nil {
@@ -94,13 +121,13 @@ func (c *Catalog) Search(query string, k int) ([]Entry, error) {
 	if err != nil {
 		return nil, fmt.Errorf("search: %w", err)
 	}
-	out := make([]Entry, 0, len(res.Hits))
+	out := make([]ScoredEntry, 0, len(res.Hits))
 	for _, hit := range res.Hits {
 		i, err := strconv.Atoi(hit.ID)
 		if err != nil || i < 0 || i >= len(c.entries) {
 			continue
 		}
-		out = append(out, c.entries[i])
+		out = append(out, ScoredEntry{Entry: c.entries[i], Score: hit.Score})
 	}
 	return out, nil
 }

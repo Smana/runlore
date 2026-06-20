@@ -189,6 +189,10 @@ config:
       branch: main
       interval: 5m
       # token_env: KB_GIT_TOKEN              # optional; private repos reuse the curation GitHub App by default
+    # Instant recall: skip the LLM loop when the catalog has a high-confidence match
+    # for the symptom (faster, cheaper). Off by default; tune min_score for your
+    # catalog — BM25 scores are corpus-dependent (observe the "score=" logs).
+    # instant_recall: { enabled: true, min_score: 0.3 }
 
   # Investigate signals (optional) — enable the query_metrics / query_logs tools.
   metrics:
