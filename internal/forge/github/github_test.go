@@ -25,8 +25,7 @@ func TestOpenIssue(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	c := New("o", "r", "main", staticToken("tok"))
-	c.baseURL = srv.URL
+	c := New(srv.URL, "o", "r", "main", staticToken("tok"))
 	ref, err := c.OpenIssue(context.Background(), providers.Investigation{Title: "Boom", Confidence: 0.4,
 		RootCauses: []providers.Hypothesis{{Summary: "db down"}}})
 	if err != nil {
@@ -65,8 +64,7 @@ func TestOpenPR(t *testing.T) {
 	srv := httptest.NewServer(mux)
 	defer srv.Close()
 
-	c := New("o", "r", "main", staticToken("tok"))
-	c.baseURL = srv.URL
+	c := New(srv.URL, "o", "r", "main", staticToken("tok"))
 	ref, err := c.OpenPR(context.Background(), providers.KBEntry{Type: "Incident", Title: "DB outage", Body: "## body"})
 	if err != nil {
 		t.Fatalf("OpenPR: %v", err)

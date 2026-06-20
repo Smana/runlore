@@ -95,6 +95,11 @@ kubectl create ns "$NS" >/dev/null 2>&1 || true
 kubectl -n "$NS" create configmap runlore-catalog --from-file=examples/runbooks/ \
   --dry-run=client -o yaml | kubectl apply -f -
 HOST="host.k3d.internal"
+# GitHub App key for the curator (mock GitHub API at the same host:port).
+openssl genrsa -out /tmp/runlore-app-key.pem 2048 2>/dev/null
+kubectl -n "$NS" create secret generic runlore-forge \
+  --from-file=GITHUB_APP_PRIVATE_KEY=/tmp/runlore-app-key.pem \
+  --dry-run=client -o yaml | kubectl apply -f -
 helm upgrade --install runlore deploy/helm/runlore -n "$NS" \
   --set image.repository=runlore --set image.tag=e2e --set image.pullPolicy=Never \
   --set catalog.configMap=runlore-catalog \
@@ -106,9 +111,16 @@ helm upgrade --install runlore deploy/helm/runlore -n "$NS" \
   --set-string config.notify.matrix.homeserver="http://$HOST:$MOCK_PORT" \
   --set-string config.notify.matrix.room_id='!test:mock' \
   --set-string config.notify.matrix.access_token_env=MATRIX_TOKEN \
+  --set-string config.forge.github_api_url="http://$HOST:$MOCK_PORT" \
+  --set-string config.forge.kb_repo="mock/repo" \
+  --set-string config.forge.base_branch="main" \
+  --set config.forge.github_app.app_id=123 \
+  --set config.forge.github_app.installation_id=42 \
+  --set-string config.forge.github_app.private_key_env=GITHUB_APP_PRIVATE_KEY \
   --set "env[0].name=OPENAI_API_KEY" --set-string "env[0].value=mock" \
   --set "env[1].name=SLACK_WEBHOOK_URL" --set-string "env[1].value=http://$HOST:$MOCK_PORT/slack" \
-  --set "env[2].name=MATRIX_TOKEN" --set-string "env[2].value=mocktoken"
+  --set "env[2].name=MATRIX_TOKEN" --set-string "env[2].value=mocktoken" \
+  --set "envFrom[0].secretRef.name=runlore-forge"
 kubectl -n "$NS" rollout status deploy/runlore --timeout=90s
 
 step "6/8 startup wiring (config, catalog, RBAC, watch)"
@@ -119,7 +131,7 @@ check "LLM investigator active"        /tmp/runlore.log 'using LLM investigator'
 check "watching gitops failures"       /tmp/runlore.log 'watching gitops failures'
 check "serving"                        /tmp/runlore.log 'runlore serving'
 
-step "7/8 incident webhook -> investigate -> findings -> deliver"
+step "7/8 incident webhook -> investigate -> findings -> deliver -> curate"
 # Post from inside the cluster (no host port-forward — avoids host port conflicts).
 kubectl -n "$NS" create configmap am-payload \
   --from-file=alertmanager-webhook.json=examples/alertmanager-webhook.json \
@@ -137,6 +149,10 @@ check "mock model drove kb_search"            /tmp/runlore-mock.log '> kb_search
 check "mock model drove submit_findings"      /tmp/runlore-mock.log '> submit_findings'
 check "Slack delivery"                         /tmp/runlore-mock.log 'MOCK SLACK'
 check "Matrix delivery"                        /tmp/runlore-mock.log 'MOCK MATRIX'
+check "curator enabled"                        /tmp/runlore.log 'curator enabled'
+check "GitHub App token exchange"              /tmp/runlore-mock.log 'MOCK GH-TOKEN'
+check "curator opened a PR (confident)"        /tmp/runlore-mock.log 'MOCK GH-PR'
+check "curated ref logged"                     /tmp/runlore.log 'msg=curated'
 
 step "8/8 GitOps failure trigger (informer on a real API server)"
 kubectl create ns apps >/dev/null 2>&1 || true

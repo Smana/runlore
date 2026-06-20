@@ -57,6 +57,9 @@ func (li *LoopInvestigator) Investigate(ctx context.Context, req Request) error 
 					messages = append(messages, providers.Message{Role: "tool", ToolCallID: tc.ID, Content: "error: " + perr.Error()})
 					continue
 				}
+				if inv.Title == "" {
+					inv.Title = req.Title // default to the triggering incident/failure
+				}
 				li.deliver(req, inv)
 				return nil
 			}

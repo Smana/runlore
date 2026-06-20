@@ -160,8 +160,8 @@ func buildCurator(cfg *config.Config, log *slog.Logger) *curator.Curator {
 	if base == "" {
 		base = "main"
 	}
-	ts := github.NewAppTokenSource(ga.AppID, ga.InstallationID, key)
-	client := github.New(owner, repo, base, ts.Token)
+	ts := github.NewAppTokenSource(cfg.Forge.GitHubAPIURL, ga.AppID, ga.InstallationID, key)
+	client := github.New(cfg.Forge.GitHubAPIURL, owner, repo, base, ts.Token)
 	log.Info("curator enabled", "repo", cfg.Forge.KBRepo)
 	return &curator.Curator{Issues: client, MinConfidencePR: 0.75, Log: log}
 }

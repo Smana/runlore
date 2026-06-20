@@ -49,6 +49,10 @@ func TestLoopInvestigator(t *testing.T) {
 	if got.Confidence != 0.8 || len(got.RootCauses) != 1 || got.RootCauses[0].Summary != "chart bump broke db" {
 		t.Fatalf("unexpected investigation: %+v", got)
 	}
+	// submit_findings carried no title, so it defaults to the triggering incident.
+	if got.Title != "HarborProbeFailure" {
+		t.Fatalf("title = %q, want it to default to the request title", got.Title)
+	}
 	if model.i != 2 {
 		t.Fatalf("expected exactly 2 model calls, got %d", model.i)
 	}
