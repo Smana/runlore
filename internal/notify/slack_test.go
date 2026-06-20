@@ -69,9 +69,10 @@ func TestMultiBestEffort(t *testing.T) {
 	var delivered int
 	ok := notifierFunc(func(context.Context, providers.Investigation) error { delivered++; return nil })
 	m := NewMulti(slog.New(slog.NewTextHandler(io.Discard, nil)), failingNotifier{}, ok)
-	// Must not return an error even though one notifier fails, and must still call the good one.
-	if err := m.Deliver(context.Background(), sampleInvestigation()); err != nil {
-		t.Fatalf("Multi.Deliver returned error: %v", err)
+	// Best-effort: a failing notifier must not stop the good one — but the failure IS
+	// surfaced to the caller (joined), so partial delivery is detectable.
+	if err := m.Deliver(context.Background(), sampleInvestigation()); err == nil {
+		t.Fatal("Multi.Deliver should surface the failing sink's error")
 	}
 	if delivered != 1 {
 		t.Fatalf("good notifier called %d times, want 1", delivered)

@@ -21,7 +21,7 @@ func autoInv(conf float64, acts ...providers.Action) providers.Investigation {
 
 func TestAutoExecutes(t *testing.T) {
 	exec := &fakeExec{}
-	a := NewAuto(exec, config.AutoPolicy{MinConfidence: 0.5}, discardLog())
+	a := NewAuto(exec, config.AutoPolicy{MinConfidence: 0.5}, nil, discardLog())
 	out := a.Run(context.Background(), autoInv(0.9, revAction))
 	if len(exec.ran) != 1 || exec.ran[0].Op != "suspend" {
 		t.Fatalf("expected one execution, got %+v", exec.ran)
@@ -33,7 +33,7 @@ func TestAutoExecutes(t *testing.T) {
 
 func TestAutoRefusesIrreversible(t *testing.T) {
 	exec := &fakeExec{}
-	a := NewAuto(exec, config.AutoPolicy{MinConfidence: 0.5}, discardLog())
+	a := NewAuto(exec, config.AutoPolicy{MinConfidence: 0.5}, nil, discardLog())
 	out := a.Run(context.Background(), autoInv(0.9, providers.Action{Op: "delete", Reversible: false}))
 	if len(exec.ran) != 0 {
 		t.Fatal("irreversible action must never auto-execute")
@@ -45,7 +45,7 @@ func TestAutoRefusesIrreversible(t *testing.T) {
 
 func TestAutoConfidenceGate(t *testing.T) {
 	exec := &fakeExec{}
-	a := NewAuto(exec, config.AutoPolicy{MinConfidence: 0.8}, discardLog())
+	a := NewAuto(exec, config.AutoPolicy{MinConfidence: 0.8}, nil, discardLog())
 	out := a.Run(context.Background(), autoInv(0.5, revAction))
 	if len(exec.ran) != 0 {
 		t.Fatal("must not execute below the confidence threshold")
@@ -57,7 +57,7 @@ func TestAutoConfidenceGate(t *testing.T) {
 
 func TestAutoDryRun(t *testing.T) {
 	exec := &fakeExec{}
-	a := NewAuto(exec, config.AutoPolicy{DryRun: true}, discardLog())
+	a := NewAuto(exec, config.AutoPolicy{DryRun: true}, nil, discardLog())
 	out := a.Run(context.Background(), autoInv(0.9, revAction))
 	if len(exec.ran) != 0 {
 		t.Fatal("dry-run must not execute")
@@ -69,7 +69,7 @@ func TestAutoDryRun(t *testing.T) {
 
 func TestAutoKillSwitch(t *testing.T) {
 	exec := &fakeExec{}
-	a := NewAuto(exec, config.AutoPolicy{}, discardLog())
+	a := NewAuto(exec, config.AutoPolicy{}, nil, discardLog())
 	a.Pause()
 	if !a.Paused() {
 		t.Fatal("Pause should engage the kill-switch")
@@ -93,7 +93,7 @@ func TestAutoKillSwitch(t *testing.T) {
 
 func TestAutoRateLimit(t *testing.T) {
 	exec := &fakeExec{}
-	a := NewAuto(exec, config.AutoPolicy{MaxPerWindow: 1}, discardLog())
+	a := NewAuto(exec, config.AutoPolicy{MaxPerWindow: 1}, nil, discardLog())
 	out := a.Run(context.Background(), autoInv(0.9, revAction, revAction)) // two actions, budget 1
 	if len(exec.ran) != 1 {
 		t.Fatalf("rate limit should allow exactly one, got %d", len(exec.ran))

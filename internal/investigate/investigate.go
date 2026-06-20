@@ -98,67 +98,95 @@ func keyOf(r Request) key {
 	return key{Source: r.Source, Namespace: r.Workload.Namespace, Name: r.Workload.Name, Title: r.Title}
 }
 
+// pending holds a coalesced request plus the sequence number of the latest
+// Enqueue that produced it (used for compare-and-delete after processing).
+type pending struct {
+	req Request
+	seq uint64
+}
+
 // Queue is a rate-limiting investigation queue: duplicate triggers coalesce, and
-// failed investigations are retried with exponential backoff.
+// failed investigations are retried with exponential backoff. A fresh workqueue
+// is built per Run (leadership term), so the queue recovers after a lost-then-
+// re-acquired leadership instead of staying permanently shut down.
 type Queue struct {
-	wq   workqueue.TypedRateLimitingInterface[key]
 	mu   sync.Mutex
-	reqs map[key]Request
+	wq   workqueue.TypedRateLimitingInterface[key] // current term's queue; nil between terms
+	reqs map[key]pending
+	seq  uint64
 	inv  Investigator
 	log  *slog.Logger
 }
 
-// NewQueue builds an investigation queue.
+// NewQueue builds an investigation queue. The workqueue itself is created per Run.
 func NewQueue(inv Investigator, log *slog.Logger) *Queue {
-	return &Queue{
-		wq:   workqueue.NewTypedRateLimitingQueue(workqueue.DefaultTypedControllerRateLimiter[key]()),
-		reqs: map[key]Request{},
-		inv:  inv,
-		log:  log,
-	}
+	return &Queue{reqs: map[key]pending{}, inv: inv, log: log}
 }
 
 // Enqueue submits a request. Re-enqueuing the same key before it is processed
-// coalesces (latest payload wins).
+// coalesces (latest payload wins). Requests that arrive between terms are held
+// and replayed when the next Run starts.
 func (q *Queue) Enqueue(r Request) {
 	k := keyOf(r)
 	q.mu.Lock()
-	q.reqs[k] = r
+	q.seq++
+	q.reqs[k] = pending{req: r, seq: q.seq}
+	wq := q.wq
 	q.mu.Unlock()
-	q.wq.Add(k)
+	if wq != nil {
+		wq.Add(k)
+	}
 }
 
-// Run consumes the queue until ctx is done.
+// Run builds a fresh workqueue for this leadership term, replays any pending
+// requests, and consumes until ctx is done — then shuts that queue down. Safe to
+// call again on re-acquired leadership.
 func (q *Queue) Run(ctx context.Context) {
+	wq := workqueue.NewTypedRateLimitingQueue(workqueue.DefaultTypedControllerRateLimiter[key]())
+	q.mu.Lock()
+	q.wq = wq
+	for k := range q.reqs {
+		wq.Add(k) // replay requests that arrived between terms / were mid-flight
+	}
+	q.mu.Unlock()
 	go func() {
 		<-ctx.Done()
-		q.wq.ShutDown()
+		wq.ShutDown()
 	}()
 	for {
-		k, shutdown := q.wq.Get()
+		k, shutdown := wq.Get()
 		if shutdown {
+			q.mu.Lock()
+			if q.wq == wq {
+				q.wq = nil
+			}
+			q.mu.Unlock()
 			return
 		}
-		q.process(ctx, k)
+		q.process(ctx, wq, k)
 	}
 }
 
-func (q *Queue) process(ctx context.Context, k key) {
-	defer q.wq.Done(k)
+func (q *Queue) process(ctx context.Context, wq workqueue.TypedRateLimitingInterface[key], k key) {
+	defer wq.Done(k)
 	q.mu.Lock()
-	r, ok := q.reqs[k]
+	p, ok := q.reqs[k]
 	q.mu.Unlock()
 	if !ok {
-		q.wq.Forget(k)
+		wq.Forget(k)
 		return
 	}
-	if err := q.inv.Investigate(ctx, r); err != nil {
-		q.log.Error("investigation failed; retrying", "title", r.Title, "err", err)
-		q.wq.AddRateLimited(k)
+	if err := q.inv.Investigate(ctx, p.req); err != nil {
+		q.log.Error("investigation failed; retrying", "title", p.req.Title, "err", err)
+		wq.AddRateLimited(k)
 		return
 	}
-	q.wq.Forget(k)
+	wq.Forget(k)
+	// Compare-and-delete: only drop the payload if it hasn't been superseded by a
+	// re-fired trigger while we were investigating (else the fresh trigger is lost).
 	q.mu.Lock()
-	delete(q.reqs, k)
+	if cur, ok := q.reqs[k]; ok && cur.seq == p.seq {
+		delete(q.reqs, k)
+	}
 	q.mu.Unlock()
 }

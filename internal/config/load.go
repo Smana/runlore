@@ -7,15 +7,23 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-// Load reads and parses a RunLore config file.
+// Load reads, strictly parses, and validates a RunLore config file. Unknown keys
+// are rejected (KnownFields) so a typo in a safety-critical field — e.g. an
+// autonomy gate — fails loudly instead of being silently ignored.
 func Load(path string) (*Config, error) {
-	data, err := os.ReadFile(path)
+	f, err := os.Open(path)
 	if err != nil {
-		return nil, fmt.Errorf("read config: %w", err)
+		return nil, fmt.Errorf("open config: %w", err)
 	}
+	defer func() { _ = f.Close() }()
 	var c Config
-	if err := yaml.Unmarshal(data, &c); err != nil {
+	dec := yaml.NewDecoder(f)
+	dec.KnownFields(true)
+	if err := dec.Decode(&c); err != nil {
 		return nil, fmt.Errorf("parse config: %w", err)
+	}
+	if err := c.Validate(); err != nil {
+		return nil, fmt.Errorf("invalid config: %w", err)
 	}
 	return &c, nil
 }

@@ -11,11 +11,13 @@ to exist is the combination of **GitOps-/metrics-agnostic** + **what-changed Git
 |---|---|---|---|
 | **k8sgpt** (CNCF) | Deterministic *analyzers* + optional LLM explanation; operator does continuous scan → `Result` CRD + Slack sinks. Strictly read-only. | Shallow on investigation (single-shot `analyze`, no loop, no cross-signal correlation, no Git diff). | The **analyzer-first** idea: cheap deterministic detectors before the LLM; `Result`-as-CRD; pluggable backends; anonymization. |
 | **HolmesGPT** (CNCF, Robusta) | The strongest OSS reference: a ReAct loop over 50+ **toolsets**, **runbooks**, and an **MCP client**; autonomous alert→RCA→Slack via the Robusta platform. | **Heavy** — this is the closest thing to RunLore's runtime. But it is Prom/Loki/Datadog-centric, has no Flux-revision-aware Git diffing, and relies on *your* hand-curated runbooks (it does not learn). | The **toolset abstraction**, **runbook format**, ReAct + payload discipline, read-only-by-default posture. |
-| **kagent** (CNCF, Solo.io) | In-cluster *declarative* agent framework (agents as CRDs, MCP + A2A, Google ADK engine). | The in-cluster reactive-agent runtime; generic, Prom/Grafana-centric, pre-1.0. | The declarative/GitOps-native packaging idea; could be a deployment target via A2A later. |
+| **kagent** (CNCF, Solo.io) | In-cluster *declarative* agent framework (agents as CRDs, MCP + A2A, Google ADK engine). Now ships **agent memory** (pgvector similarity recall) and HITL gated writes (`requireApproval`). | The in-cluster reactive-agent runtime; generic, Prom/Grafana-centric, pre-1.0. Its memory is **opaque, per-agent, in-DB** — the closed/unreviewable "memory" pattern, self-hosted. | The declarative/GitOps-native packaging idea; could be a deployment target via A2A later. |
 | **Aurora** | OSS AI-SRE with hybrid RAG over runbooks/postmortems. | The RAG/learning angle. | Hybrid retrieval (BM25 + vector) as table stakes for grounding. |
 
-**Takeaway:** the loop and the runtime are solved in OSS. **Nobody in OSS auto-fills a human-readable,
-git-versioned knowledge catalog from its own investigations.**
+**Takeaway:** the loop and the runtime are solved in OSS, and kagent now ships (opaque, in-DB) memory —
+so "nobody in OSS learns" is no longer the line. The precise, still-true distinction: **nobody in OSS
+auto-fills an *open, human-readable, git-versioned, PR-reviewed* knowledge catalog — with provenance —
+from its own investigations.** Reviewability and portability, not learning-vs-not, are the moat.
 
 ## Commercial
 
