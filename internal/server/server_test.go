@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/Smana/runlore/internal/action"
+	"github.com/Smana/runlore/internal/audit"
 	"github.com/Smana/runlore/internal/config"
 	"github.com/Smana/runlore/internal/investigate"
 	"github.com/Smana/runlore/internal/providers"
@@ -29,14 +30,14 @@ func slackSign(secret, ts, body string) string {
 
 func TestSlackInteraction(t *testing.T) {
 	exec := &recordExec{}
-	pol := action.New(config.ActionPolicy{Mode: config.ActionApprove, Allow: config.ActionAllow{ReversibleOnly: true}})
-	ap := action.NewApprovals(exec, pol, slog.New(slog.NewTextHandler(io.Discard, nil)))
-	id := ap.Register(providers.Action{Op: "suspend", Reversible: true, Target: providers.Workload{Kind: "Kustomization", Name: "apps", Namespace: "flux-system"}})
+	pol := action.New(config.ActionPolicy{Mode: config.ActionApprove, Allow: config.ActionAllow{ReversibleOnly: true, Namespaces: []string{"apps"}}})
+	ap := action.NewApprovals(exec, pol, audit.Nop{}, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	id := ap.Register(providers.Action{Op: "suspend", Reversible: true, Target: providers.Workload{Kind: "Kustomization", Name: "web", Namespace: "apps"}})
 
 	const secret = "shh"
-	srv := New(&config.Config{}, &spyEnqueuer{}, nil, Actions{Approvals: ap, SlackSecret: secret}, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	srv := New(&config.Config{}, &spyEnqueuer{}, nil, Actions{Approvals: ap, SlackSecret: secret, ApproverIDs: []string{"U1"}}, slog.New(slog.NewTextHandler(io.Discard, nil)))
 
-	payload := `{"user":{"username":"alice"},"actions":[{"action_id":"runlore_approve","value":"` + id + `"}]}`
+	payload := `{"user":{"id":"U1","username":"alice"},"actions":[{"action_id":"runlore_approve","value":"` + id + `"}]}`
 	body := "payload=" + url.QueryEscape(payload)
 	ts := strconv.FormatInt(time.Now().Unix(), 10)
 
@@ -80,9 +81,9 @@ func (r *recordExec) Execute(_ context.Context, a providers.Action) error {
 
 func TestActionsApprove(t *testing.T) {
 	exec := &recordExec{}
-	pol := action.New(config.ActionPolicy{Mode: config.ActionApprove, Allow: config.ActionAllow{ReversibleOnly: true}})
-	ap := action.NewApprovals(exec, pol, slog.New(slog.NewTextHandler(io.Discard, nil)))
-	id := ap.Register(providers.Action{Op: "suspend", Reversible: true, Target: providers.Workload{Kind: "Kustomization", Name: "apps", Namespace: "flux-system"}})
+	pol := action.New(config.ActionPolicy{Mode: config.ActionApprove, Allow: config.ActionAllow{ReversibleOnly: true, Namespaces: []string{"apps"}}})
+	ap := action.NewApprovals(exec, pol, audit.Nop{}, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	id := ap.Register(providers.Action{Op: "suspend", Reversible: true, Target: providers.Workload{Kind: "Kustomization", Name: "web", Namespace: "apps"}})
 
 	srv := New(&config.Config{}, &spyEnqueuer{}, nil, Actions{Approvals: ap, Token: "secret"}, slog.New(slog.NewTextHandler(io.Discard, nil)))
 

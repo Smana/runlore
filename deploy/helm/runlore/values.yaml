@@ -88,6 +88,18 @@ rbac:
   # allowActions grants patch on Flux resources for rung-2 execution
   # (config.actions.mode: approve). Off by default — read-only without it.
   allowActions: false
+  # Namespaces where the agent may patch Flux resources (suspend/resume/reconcile).
+  # Granted as namespace-scoped Roles ONLY here — never cluster-wide — so the blast
+  # radius is bounded. Mirror config.actions.allow.namespaces. Empty = no patch
+  # rights at all (actions fail closed at the RBAC layer even if mode is enabled).
+  actionNamespaces: []
+
+# Default-deny NetworkPolicy: restrict ingress to the webhook/health port and egress
+# to DNS + HTTPS + the Kubernetes API. Tighten egress to your model/git/observability
+# CIDRs in production. Disable if you manage network policy out of band.
+networkPolicy:
+  enabled: true
+  extraEgress: []   # appended verbatim, e.g. a specific model endpoint CIDR
 
 resources:
   requests:

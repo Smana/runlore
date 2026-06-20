@@ -294,13 +294,20 @@ KB git repo  ──syncer──►  local mirror  ──build──►  index:  
 
 ## 9. Safety & trust model
 
-- **Read-only-first, by construction.** v1 ships **no cluster-mutating tools**. The providers and
-  any wired MCP servers are read-only. Read-only is structural, not a prompt instruction.
-- **"Writes" mean markdown-to-git via reviewed PR** + opening issues — never touching prod. The
-  Curator is cluster-read-only.
+- **Read-only by default; execution is gated and server-authoritative.** Read-only is the default
+  posture. When the autonomy ladder is enabled (`config.actions`), the executor runs only a fixed set
+  of **reversible** Flux ops (suspend/resume/reconcile); reversibility, blast radius, and the target
+  namespace are validated **server-side** (`internal/action`) — derived from the op, never trusted
+  from model output — and an unknown op or out-of-allowlist target is refused. No cluster-mutating MCP
+  tools are wired. The alert webhook is authenticated (required under `auto`), and the kill-switch
+  **fails closed on cold start** (auto starts paused until an authenticated resume).
+- **The Curator is cluster-read-only** — its "writes" are markdown-to-git via reviewed PR + issues,
+  never the cluster. Cluster mutations come only from the gated action executor above.
 - **Scoped identity.** In-cluster, the agent runs under a least-privilege, read-mostly identity
-  (a scoped ServiceAccount; or EKS Pod Identity / Workload Identity on managed clusters).
-- **Append-only audit log** of every tool call + decision (feeds eval + trust).
+  (a scoped ServiceAccount; or EKS Pod Identity / Workload Identity on managed clusters). Execution
+  rights (`patch`) are granted as **namespace-scoped** Roles over an allowlist, never cluster-wide.
+- **Append-only, tamper-evident audit log** (`internal/audit`): every action attempt — inputs, gate
+  results, op, target, actor, outcome — is a hash-chained JSON line, so edits/deletions are detectable.
 - **Honest uncertainty.** `unresolved` is a first-class output field; the agent says what it doesn't
   know rather than hallucinating.
 **Designed to evolve — the autonomy ladder.** Read-only-first is rung 0, not the ceiling. When action

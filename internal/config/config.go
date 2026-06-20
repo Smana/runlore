@@ -7,6 +7,7 @@
 package config
 
 import (
+	"fmt"
 	"path"
 	"slices"
 	"time"
@@ -29,11 +30,21 @@ type Config struct {
 	Metrics Endpoint `yaml:"metrics"` // PromQL backend (VictoriaMetrics/Prometheus) for query_metrics
 	Logs    Endpoint `yaml:"logs"`    // LogsQL backend (VictoriaLogs) for query_logs
 	Network Endpoint `yaml:"network"` // Hubble Relay gRPC address (host:port) for network_drops
+
+	Server ServerConfig `yaml:"server"` // HTTP ingress (webhook authentication)
 }
 
 // Endpoint is a backend base URL; empty disables the corresponding tool.
 type Endpoint struct {
 	URL string `yaml:"url"`
+}
+
+// ServerConfig configures the HTTP ingress.
+type ServerConfig struct {
+	// WebhookTokenEnv names an env var holding a shared secret required on
+	// POST /webhook/alertmanager as "Authorization: Bearer <token>". Empty leaves
+	// the webhook unauthenticated (rejected by Validate when actions.mode=auto).
+	WebhookTokenEnv string `yaml:"webhook_token_env"`
 }
 
 // LeaderElection configures high availability. When enabled, replicas elect a
@@ -90,8 +101,9 @@ type Notify struct {
 // SlackNotify configures Slack incoming-webhook delivery and (for rung-2 actions)
 // interactive approve/reject buttons.
 type SlackNotify struct {
-	WebhookURLEnv    string `yaml:"webhook_url_env"`    // env var holding the webhook URL
-	SigningSecretEnv string `yaml:"signing_secret_env"` // env var with the Slack signing secret (verifies button clicks)
+	WebhookURLEnv    string   `yaml:"webhook_url_env"`    // env var holding the webhook URL
+	SigningSecretEnv string   `yaml:"signing_secret_env"` // env var with the Slack signing secret (verifies button clicks)
+	ApproverIDs      []string `yaml:"approver_ids"`       // Slack user IDs allowed to approve actions (empty = no Slack approvals)
 }
 
 // MatrixNotify configures Matrix delivery.
@@ -242,6 +254,7 @@ type ActionPolicy struct {
 	Allow            ActionAllow `yaml:"allow"`              // envelope, enforced even in approve/auto
 	RequireApproval  bool        `yaml:"require_approval"`   // force a human click for gated actions
 	ApprovalTokenEnv string      `yaml:"approval_token_env"` // env var with a shared secret for the approval endpoints
+	AuditLogPath     string      `yaml:"audit_log_path"`     // append-only, hash-chained action audit log (required for auto)
 	Auto             AutoPolicy  `yaml:"auto"`               // rung-3 unattended-execution safety controls
 }
 
@@ -257,15 +270,53 @@ type AutoPolicy struct {
 // ActionAllow bounds what may be acted on, even in approve/auto modes.
 // Irreversibility is the trip-wire for mandatory human approval.
 type ActionAllow struct {
-	ReversibleOnly bool     `yaml:"reversible_only"`  // never auto-apply irreversible actions
-	Environments   []string `yaml:"environments"`     // e.g. [staging] — never prod by default
-	MaxBlastRadius int      `yaml:"max_blast_radius"` // cap on affected workloads
-	Kinds          []string `yaml:"kinds"`            // resource kinds that may be acted on
+	ReversibleOnly      bool     `yaml:"reversible_only"`      // never auto-apply irreversible actions
+	Namespaces          []string `yaml:"namespaces"`           // allowlist of target namespaces; empty = no executable target permitted
+	ProtectedNamespaces []string `yaml:"protected_namespaces"` // never an action target (added to the built-ins flux-system, kube-system)
+	MaxBlastRadius      int      `yaml:"max_blast_radius"`     // cap on affected workloads
+	Kinds               []string `yaml:"kinds"`                // resource kinds that may be acted on
 }
 
 // Enabled reports whether any cluster-mutating action is permitted.
 func (a ActionPolicy) Enabled() bool {
 	return a.Mode != "" && a.Mode != ActionOff
+}
+
+// Validate enforces cross-field invariants after loading — fail-closed defaults
+// for the autonomy ladder: enabling execution requires the controls that bound
+// it. Returns an error that should abort startup.
+func (c *Config) Validate() error {
+	switch c.Actions.Mode {
+	case "", ActionOff, ActionSuggest:
+		return nil // read-only-ish: nothing to execute
+	case ActionApprove:
+		if c.Actions.ApprovalTokenEnv == "" {
+			return fmt.Errorf("actions.mode=approve requires actions.approval_token_env (control endpoints fail closed without it)")
+		}
+		return nil
+	case ActionAuto:
+		if c.Actions.ApprovalTokenEnv == "" {
+			return fmt.Errorf("actions.mode=auto requires actions.approval_token_env (the kill-switch endpoint must be authenticated)")
+		}
+		if c.Actions.AuditLogPath == "" {
+			return fmt.Errorf("actions.mode=auto requires actions.audit_log_path (auto-execution must be audited)")
+		}
+		if c.Server.WebhookTokenEnv == "" {
+			return fmt.Errorf("actions.mode=auto requires server.webhook_token_env (the alert webhook must be authenticated)")
+		}
+		if c.Actions.Auto.MinConfidence <= 0 {
+			return fmt.Errorf("actions.mode=auto requires actions.auto.min_confidence > 0")
+		}
+		if c.Actions.Auto.MaxPerWindow <= 0 {
+			return fmt.Errorf("actions.mode=auto requires actions.auto.max_per_window > 0 (unbounded auto-execution is unsafe)")
+		}
+		if len(c.Actions.Allow.Namespaces) == 0 {
+			return fmt.Errorf("actions.mode=auto requires actions.allow.namespaces (target-namespace allowlist)")
+		}
+		return nil
+	default:
+		return fmt.Errorf("unknown actions.mode %q (want off|suggest|approve|auto)", c.Actions.Mode)
+	}
 }
 
 // Forge holds git-forge authentication and the curation target repo.

@@ -15,6 +15,7 @@ import (
 	"net/http"
 	"net/url"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/Smana/runlore/internal/action"
@@ -25,15 +26,17 @@ import (
 
 // Server handles incoming incident webhooks and applies the trigger policy.
 type Server struct {
-	engine      *trigger.Engine
-	enqueuer    investigate.Enqueuer
-	ready       func() bool
-	approvals   *action.Approvals // nil unless action mode "approve" is configured
-	pauser      Pauser            // nil unless action mode "auto" is configured (kill-switch)
-	token       string            // optional shared secret for the approval/control endpoints
-	slackSecret string            // Slack signing secret; verifies interactive button clicks
-	log         *slog.Logger
-	handler     http.Handler
+	engine       *trigger.Engine
+	enqueuer     investigate.Enqueuer
+	ready        func() bool
+	approvals    *action.Approvals // nil unless action mode "approve" is configured
+	pauser       Pauser            // nil unless action mode "auto" is configured (kill-switch)
+	token        string            // shared secret for the approval/control endpoints (required when actions enabled)
+	slackSecret  string            // Slack signing secret; verifies interactive button clicks
+	webhookToken string            // optional bearer token required on POST /webhook/alertmanager
+	approvers    map[string]bool   // Slack user IDs permitted to approve actions (empty = none)
+	log          *slog.Logger
+	handler      http.Handler
 }
 
 // Pauser is the rung-3 auto-execution kill-switch.
@@ -46,10 +49,12 @@ type Pauser interface {
 // Actions bundles the optional rung-2/rung-3 wiring: the approval queue, the auto
 // kill-switch, the shared control token, and the Slack signing secret.
 type Actions struct {
-	Approvals   *action.Approvals
-	Pauser      Pauser
-	Token       string
-	SlackSecret string
+	Approvals    *action.Approvals
+	Pauser       Pauser
+	Token        string
+	SlackSecret  string
+	WebhookToken string   // optional bearer token required on POST /webhook/alertmanager
+	ApproverIDs  []string // Slack user IDs permitted to approve actions
 }
 
 // New builds a Server. ready reports whether this replica should serve (leadership);
@@ -57,9 +62,14 @@ type Actions struct {
 // rung-3 kill-switch, gated by acts.Token (X-Approval-Token). /healthz is liveness;
 // /readyz is readiness (gated by ready, leader-only).
 func New(cfg *config.Config, enq investigate.Enqueuer, ready func() bool, acts Actions, log *slog.Logger) *Server {
+	approvers := make(map[string]bool, len(acts.ApproverIDs))
+	for _, id := range acts.ApproverIDs {
+		approvers[id] = true
+	}
 	s := &Server{
 		engine: trigger.NewEngine(cfg.Triggers.Incidents), enqueuer: enq, ready: ready,
-		approvals: acts.Approvals, pauser: acts.Pauser, token: acts.Token, slackSecret: acts.SlackSecret, log: log,
+		approvals: acts.Approvals, pauser: acts.Pauser, token: acts.Token, slackSecret: acts.SlackSecret,
+		webhookToken: acts.WebhookToken, approvers: approvers, log: log,
 	}
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /webhook/alertmanager", s.handleAlertmanager)
@@ -111,10 +121,13 @@ func (s *Server) handleResume(w http.ResponseWriter, r *http.Request) {
 	_, _ = fmt.Fprintln(w, "auto-execution resumed")
 }
 
-// authorized enforces the optional approval token (constant-time compare).
+// authorized enforces the approval token (constant-time compare). It FAILS
+// CLOSED: with no token configured the control endpoints are denied, never open.
+// (main refuses to start with actions enabled and an empty token, so a running
+// rung-2/3 server always has one.)
 func (s *Server) authorized(r *http.Request) bool {
 	if s.token == "" {
-		return true
+		return false
 	}
 	return subtle.ConstantTimeCompare([]byte(r.Header.Get("X-Approval-Token")), []byte(s.token)) == 1
 }
@@ -142,7 +155,7 @@ func (s *Server) handleApprove(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	id := r.PathValue("id")
-	act, err := s.approvals.Approve(r.Context(), id)
+	act, err := s.approvals.Approve(r.Context(), id, "approve:http")
 	if err != nil {
 		s.log.Warn("action approval failed", "id", id, "err", err)
 		http.Error(w, err.Error(), http.StatusBadRequest)
@@ -173,6 +186,7 @@ func (s *Server) handleReject(w http.ResponseWriter, r *http.Request) {
 type slackInteraction struct {
 	ResponseURL string `json:"response_url"`
 	User        struct {
+		ID       string `json:"id"`
 		Username string `json:"username"`
 	} `json:"user"`
 	Actions []struct {
@@ -213,13 +227,20 @@ func (s *Server) handleSlackInteraction(w http.ResponseWriter, r *http.Request) 
 	var msg string
 	switch act.ActionID {
 	case "runlore_approve":
-		executed, aerr := s.approvals.Approve(r.Context(), act.Value)
+		// Authorize the *user*, not just the Slack workspace: the signature proves
+		// origin, the allowlist proves the clicker may approve cluster mutations.
+		if !s.approvers[p.User.ID] {
+			msg = "❌ not authorized to approve (user not in approver allowlist)"
+			s.log.Warn("slack approve denied: user not in allowlist", "user_id", p.User.ID, "user", p.User.Username)
+			break
+		}
+		executed, aerr := s.approvals.Approve(r.Context(), act.Value, "approve:slack:"+p.User.ID)
 		if aerr != nil {
 			msg = "❌ approval failed: " + aerr.Error()
 			s.log.Warn("slack approve failed", "id", act.Value, "user", p.User.Username, "err", aerr)
 		} else {
 			msg = fmt.Sprintf("✅ approved by @%s — executed: %s %s", p.User.Username, executed.Op, executed.Description)
-			s.log.Info("slack approval executed", "id", act.Value, "user", p.User.Username, "op", executed.Op)
+			s.log.Info("slack approval executed", "id", act.Value, "user_id", p.User.ID, "user", p.User.Username, "op", executed.Op)
 		}
 	case "runlore_reject":
 		if rerr := s.approvals.Reject(act.Value); rerr != nil {
@@ -253,8 +274,16 @@ func (s *Server) verifySlack(h http.Header, body []byte) bool {
 }
 
 // updateSlack replaces the original message via the interaction response_url.
+// The URL is attacker-influenceable (it arrives in the interaction payload), so
+// it is restricted to https *.slack.com and posted with a bounded client — no
+// SSRF to arbitrary internal services, no unbounded hang on http.DefaultClient.
 func (s *Server) updateSlack(ctx context.Context, responseURL, text string) {
 	if responseURL == "" {
+		return
+	}
+	if u, err := url.Parse(responseURL); err != nil || u.Scheme != "https" ||
+		(u.Hostname() != "slack.com" && !strings.HasSuffix(u.Hostname(), ".slack.com")) {
+		s.log.Warn("refusing slack response_url: not an https *.slack.com host", "url", responseURL)
 		return
 	}
 	body, _ := json.Marshal(map[string]any{"replace_original": true, "text": text})
@@ -263,7 +292,8 @@ func (s *Server) updateSlack(ctx context.Context, responseURL, text string) {
 		return
 	}
 	req.Header.Set("Content-Type", "application/json")
-	if resp, err := http.DefaultClient.Do(req); err == nil {
+	client := &http.Client{Timeout: 10 * time.Second}
+	if resp, err := client.Do(req); err == nil {
 		_ = resp.Body.Close()
 	}
 }
@@ -273,7 +303,29 @@ func (s *Server) Handler() http.Handler {
 	return s.handler
 }
 
+// webhookAuthorized checks the optional alert-webhook bearer token (constant-time).
+// When no token is configured the webhook is open — Validate forbids that once
+// actions.mode=auto, so an auto-executing server always authenticates it.
+func (s *Server) webhookAuthorized(r *http.Request) bool {
+	if s.webhookToken == "" {
+		return true
+	}
+	const prefix = "Bearer "
+	h := r.Header.Get("Authorization")
+	if !strings.HasPrefix(h, prefix) {
+		return false
+	}
+	return subtle.ConstantTimeCompare([]byte(strings.TrimPrefix(h, prefix)), []byte(s.webhookToken)) == 1
+}
+
 func (s *Server) handleAlertmanager(w http.ResponseWriter, r *http.Request) {
+	// Authenticate the webhook: its payload (labels, annotations) flows verbatim
+	// into the investigator's LLM prompt, so an anonymous caller must not reach it.
+	if !s.webhookAuthorized(r) {
+		s.log.Warn("rejected alert webhook: missing/invalid bearer token")
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		return
+	}
 	incidents, err := trigger.ParseAlertmanager(r.Body)
 	if err != nil {
 		http.Error(w, "bad payload", http.StatusBadRequest)

@@ -30,6 +30,7 @@ import (
 	"k8s.io/client-go/tools/leaderelection/resourcelock"
 
 	"github.com/Smana/runlore/internal/action"
+	"github.com/Smana/runlore/internal/audit"
 	"github.com/Smana/runlore/internal/catalog"
 	"github.com/Smana/runlore/internal/config"
 	"github.com/Smana/runlore/internal/curator"
@@ -141,10 +142,20 @@ func runServe(args []string) error {
 
 	// Rung-2 (approve) and rung-3 (auto) execution — mutually exclusive by mode, both
 	// requiring a reachable cluster. Token + Slack secret gate the control endpoints.
-	approvals := buildApprovals(cfg, executor, log)
-	auto := buildAuto(cfg, executor, log)
 	approvalToken := os.Getenv(cfg.Actions.ApprovalTokenEnv)
+	if cfg.Actions.Enabled() && approvalToken == "" {
+		return fmt.Errorf("actions enabled (mode=%s) but %s is empty: refusing to start with unauthenticated control endpoints (fail closed)",
+			cfg.Actions.Mode, cfg.Actions.ApprovalTokenEnv)
+	}
+	aud, auditClose, aerr := buildAuditor(cfg)
+	if aerr != nil {
+		return aerr
+	}
+	defer auditClose()
+	approvals := buildApprovals(cfg, executor, aud, log)
+	auto := buildAuto(cfg, executor, aud, log)
 	slackSigningSecret := os.Getenv(cfg.Notify.Slack.SigningSecretEnv)
+	webhookToken := os.Getenv(cfg.Server.WebhookTokenEnv)
 
 	inv := buildInvestigator(ctx, cfg, gitops, approvals, auto, log)
 	queue := investigate.NewQueue(inv, log)
@@ -168,7 +179,13 @@ func runServe(args []string) error {
 	}
 
 	// readyz reflects leadership so the Service routes webhooks only to the leader.
-	acts := server.Actions{Approvals: approvals, Token: approvalToken, SlackSecret: slackSigningSecret}
+	acts := server.Actions{
+		Approvals:    approvals,
+		Token:        approvalToken,
+		SlackSecret:  slackSigningSecret,
+		WebhookToken: webhookToken,
+		ApproverIDs:  cfg.Notify.Slack.ApproverIDs,
+	}
 	if auto != nil {
 		acts.Pauser = auto // avoid a typed-nil interface when auto is disabled
 	}
@@ -390,9 +407,22 @@ func buildForgeTokenSource(cfg *config.Config, log *slog.Logger) forgeToken {
 	return github.NewAppTokenSource(cfg.Forge.GitHubAPIURL, ga.AppID, ga.InstallationID, key).Token
 }
 
+// buildAuditor opens the append-only action audit log when configured, else a
+// no-op. Validate already requires AuditLogPath when actions.mode=auto.
+func buildAuditor(cfg *config.Config) (audit.Auditor, func(), error) {
+	if cfg.Actions.AuditLogPath == "" {
+		return audit.Nop{}, func() {}, nil
+	}
+	l, err := audit.Open(cfg.Actions.AuditLogPath)
+	if err != nil {
+		return nil, func() {}, fmt.Errorf("open audit log: %w", err)
+	}
+	return l, func() { _ = l.Close() }, nil
+}
+
 // buildApprovals enables rung-2 approval-gated execution for action mode "approve"
 // (requires a reachable cluster).
-func buildApprovals(cfg *config.Config, exec action.Executor, log *slog.Logger) *action.Approvals {
+func buildApprovals(cfg *config.Config, exec action.Executor, aud audit.Auditor, log *slog.Logger) *action.Approvals {
 	if cfg.Actions.Mode != config.ActionApprove {
 		return nil
 	}
@@ -401,13 +431,13 @@ func buildApprovals(cfg *config.Config, exec action.Executor, log *slog.Logger) 
 		return nil
 	}
 	log.Info("rung-2 approval-gated actions enabled (Flux suspend/resume/reconcile)")
-	return action.NewApprovals(exec, action.New(cfg.Actions), log)
+	return action.NewApprovals(exec, action.New(cfg.Actions), aud, log)
 }
 
 // buildAuto enables rung-3 unattended execution for action mode "auto" (requires a
 // reachable cluster). Heavily gated: reversible-only, confidence-floored, rate-
 // limited, kill-switchable, and audited. Recommend dry_run before going live.
-func buildAuto(cfg *config.Config, exec action.Executor, log *slog.Logger) *action.Auto {
+func buildAuto(cfg *config.Config, exec action.Executor, aud audit.Auditor, log *slog.Logger) *action.Auto {
 	if cfg.Actions.Mode != config.ActionAuto {
 		return nil
 	}
@@ -418,7 +448,14 @@ func buildAuto(cfg *config.Config, exec action.Executor, log *slog.Logger) *acti
 	a := cfg.Actions.Auto
 	log.Warn("rung-3 AUTO execution ENABLED — reversible actions execute WITHOUT human approval",
 		"dry_run", a.DryRun, "min_confidence", a.MinConfidence, "max_per_window", a.MaxPerWindow, "window", a.Window.Std().String())
-	return action.NewAuto(exec, a, log)
+	au := action.NewAuto(exec, a, aud, log)
+	// Fail closed across restart/leader failover: the in-memory kill-switch starts
+	// ENGAGED on every cold start, so a previously-engaged pause can never silently
+	// evaporate into unattended execution. An operator resumes explicitly via the
+	// authenticated POST /actions/resume endpoint.
+	au.Pause()
+	log.Warn("rung-3 auto starts PAUSED (kill-switch engaged) — POST /actions/resume to begin auto-execution")
+	return au
 }
 
 // buildCurator returns a Curator when the GitHub App token + KB repo are
