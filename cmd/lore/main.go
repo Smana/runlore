@@ -8,14 +8,25 @@
 package main
 
 import (
+	"context"
 	"flag"
 	"fmt"
 	"log/slog"
 	"net/http"
 	"os"
+	"os/signal"
+	"syscall"
+
+	"k8s.io/client-go/dynamic"
+	"k8s.io/client-go/rest"
+	"k8s.io/client-go/tools/clientcmd"
 
 	"github.com/Smana/runlore/internal/config"
+	"github.com/Smana/runlore/internal/investigate"
+	"github.com/Smana/runlore/internal/providers/gitops/flux"
 	"github.com/Smana/runlore/internal/server"
+	"github.com/Smana/runlore/internal/trigger"
+	"github.com/Smana/runlore/internal/whatchanged"
 )
 
 var version = "0.0.0-dev"
@@ -66,7 +77,59 @@ func runServe(args []string) error {
 		return err
 	}
 	log := slog.New(slog.NewTextHandler(os.Stdout, nil))
-	srv := server.New(cfg, log)
+
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+
+	queue := investigate.NewQueue(investigate.LogInvestigator{Log: log}, log, 64)
+	go queue.Run(ctx)
+
+	// Best-effort GitOps-failure watch: only if enabled and a cluster is reachable.
+	if cfg.Triggers.GitOpsFailures.Enabled {
+		startGitOpsFailureWatch(ctx, cfg, queue, log)
+	}
+
+	srv := server.New(cfg, queue, log)
+	httpSrv := &http.Server{Addr: *addr, Handler: srv.Handler()}
+	go func() {
+		<-ctx.Done()
+		_ = httpSrv.Shutdown(context.Background())
+	}()
 	log.Info("runlore serving", "addr", *addr)
-	return http.ListenAndServe(*addr, srv.Handler())
+	if err := httpSrv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+		return err
+	}
+	return nil
+}
+
+// startGitOpsFailureWatch builds a dynamic client and drains Flux WatchFailures
+// into the queue. Failures here are logged, not fatal — webhook-only serving
+// continues if no cluster is reachable.
+func startGitOpsFailureWatch(ctx context.Context, cfg *config.Config, q investigate.Enqueuer, log *slog.Logger) {
+	client, err := dynamicClient()
+	if err != nil {
+		log.Warn("gitops-failure watch disabled: no kube client", "err", err)
+		return
+	}
+	provider := flux.New(flux.NewDynamicReader(client), &whatchanged.Differ{})
+	events, err := provider.WatchFailures(ctx)
+	if err != nil {
+		log.Warn("gitops-failure watch disabled", "err", err)
+		return
+	}
+	log.Info("watching gitops failures (Flux Kustomizations)")
+	go investigate.DrainFailures(ctx, events, q, trigger.NewDeduper(cfg.Triggers.Incidents.Dedup.Window.Std()))
+}
+
+// dynamicClient builds a dynamic client from in-cluster config, falling back to
+// the default kubeconfig.
+func dynamicClient() (dynamic.Interface, error) {
+	restCfg, err := rest.InClusterConfig()
+	if err != nil {
+		restCfg, err = clientcmd.BuildConfigFromFlags("", clientcmd.RecommendedHomeFile)
+		if err != nil {
+			return nil, err
+		}
+	}
+	return dynamic.NewForConfig(restCfg)
 }
