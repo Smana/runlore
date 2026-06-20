@@ -34,6 +34,7 @@ import (
 	"github.com/Smana/runlore/internal/investigate"
 	"github.com/Smana/runlore/internal/logs/victorialogs"
 	"github.com/Smana/runlore/internal/metrics/prometheus"
+	anthropic "github.com/Smana/runlore/internal/model/anthropic"
 	openai "github.com/Smana/runlore/internal/model/openai"
 	"github.com/Smana/runlore/internal/network/hubble"
 	"github.com/Smana/runlore/internal/notify"
@@ -215,6 +216,22 @@ func podNamespace() string {
 	return "default"
 }
 
+// modelProvider returns the configured model provider name (default "openai").
+func modelProvider(cfg *config.Config) string {
+	if cfg.Model.Provider == "anthropic" {
+		return "anthropic"
+	}
+	return "openai"
+}
+
+// buildModel builds the ModelProvider for the configured provider.
+func buildModel(cfg *config.Config, apiKey string) providers.ModelProvider {
+	if cfg.Model.Provider == "anthropic" {
+		return anthropic.New(cfg.Model.BaseURL, cfg.Model.Model, apiKey)
+	}
+	return openai.New(cfg.Model.BaseURL, cfg.Model.Model, apiKey)
+}
+
 // buildCatalog returns the kb_search backing store, or nil when no catalog is
 // configured. With a Git URL it starts a background syncer (running on every
 // replica, so a failover standby is already warm) that re-indexes after each pull;
@@ -305,7 +322,7 @@ func buildCurator(cfg *config.Config, log *slog.Logger) *curator.Curator {
 // buildInvestigator returns the LLM ReAct investigator when a model is configured,
 // otherwise the read-only LogInvestigator.
 func buildInvestigator(ctx context.Context, cfg *config.Config, gp providers.GitOpsProvider, log *slog.Logger) investigate.Investigator {
-	if cfg.Model.BaseURL == "" {
+	if cfg.Model.BaseURL == "" && cfg.Model.Provider != "anthropic" {
 		log.Info("no model configured; using log-only investigator")
 		return investigate.LogInvestigator{Log: log}
 	}
@@ -313,7 +330,7 @@ func buildInvestigator(ctx context.Context, cfg *config.Config, gp providers.Git
 	if cfg.Model.APIKeyEnv != "" {
 		apiKey = os.Getenv(cfg.Model.APIKeyEnv)
 	}
-	model := openai.New(cfg.Model.BaseURL, cfg.Model.Model, apiKey)
+	model := buildModel(cfg, apiKey)
 	var tools []investigate.Tool
 	if gp != nil {
 		tools = append(tools, investigate.WhatChangedTool{GitOps: gp})
@@ -330,7 +347,7 @@ func buildInvestigator(ctx context.Context, cfg *config.Config, gp providers.Git
 	if cfg.Network.URL != "" {
 		tools = append(tools, investigate.NetworkDropsTool{Network: hubble.New(cfg.Network.URL)})
 	}
-	log.Info("using LLM investigator", "model", cfg.Model.Model, "tools", len(tools))
+	log.Info("using LLM investigator", "provider", modelProvider(cfg), "model", cfg.Model.Model, "tools", len(tools))
 	notifier := buildNotifier(cfg, log)
 	log.Info("delivery notifiers", "count", notifier.Len())
 	cur := buildCurator(cfg, log)

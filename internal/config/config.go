@@ -61,10 +61,13 @@ type CatalogGit struct {
 	TokenEnv string   `yaml:"token_env"` // env var with a read token (empty = anonymous/public)
 }
 
-// Model configures the OpenAI-compatible LLM endpoint used for investigation.
-// When BaseURL is empty, serve falls back to the log-only investigator.
+// Model configures the LLM used for investigation. Provider selects the wire
+// protocol: "openai" (default, OpenAI-compatible: vLLM/Ollama/OpenAI) or
+// "anthropic" (native Messages API). When unconfigured, serve uses the log-only
+// investigator.
 type Model struct {
-	BaseURL   string `yaml:"base_url"`    // e.g. https://vllm.svc/v1
+	Provider  string `yaml:"provider"`    // "openai" (default) | "anthropic"
+	BaseURL   string `yaml:"base_url"`    // OpenAI: required; Anthropic: optional (defaults to api.anthropic.com)
 	Model     string `yaml:"model"`       // model name
 	APIKeyEnv string `yaml:"api_key_env"` // env var holding the API key (empty = keyless)
 }
