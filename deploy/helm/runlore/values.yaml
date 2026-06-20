@@ -85,6 +85,9 @@ serviceAccount:
 # read GitRepositories. Cluster-scoped because the informer watches all namespaces.
 rbac:
   create: true
+  # allowActions grants patch on Flux resources for rung-2 execution
+  # (config.actions.mode: approve). Off by default — read-only without it.
+  allowActions: false
 
 resources:
   requests:
