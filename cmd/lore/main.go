@@ -32,6 +32,8 @@ import (
 	"github.com/Smana/runlore/internal/config"
 	"github.com/Smana/runlore/internal/curator"
 	"github.com/Smana/runlore/internal/investigate"
+	"github.com/Smana/runlore/internal/logs/victorialogs"
+	"github.com/Smana/runlore/internal/metrics/prometheus"
 	openai "github.com/Smana/runlore/internal/model/openai"
 	"github.com/Smana/runlore/internal/notify"
 	"github.com/Smana/runlore/internal/providers"
@@ -316,6 +318,12 @@ func buildInvestigator(ctx context.Context, cfg *config.Config, fp *flux.Provide
 	}
 	if cat := buildCatalog(ctx, cfg, log); cat != nil {
 		tools = append(tools, investigate.KBSearchTool{Catalog: cat})
+	}
+	if cfg.Metrics.URL != "" {
+		tools = append(tools, investigate.QueryMetricsTool{Metrics: prometheus.New(cfg.Metrics.URL)})
+	}
+	if cfg.Logs.URL != "" {
+		tools = append(tools, investigate.QueryLogsTool{Logs: victorialogs.New(cfg.Logs.URL)})
 	}
 	log.Info("using LLM investigator", "model", cfg.Model.Model, "tools", len(tools))
 	notifier := buildNotifier(cfg, log)
