@@ -22,6 +22,17 @@ type Config struct {
 	Model    Model         `yaml:"model"`   // optional; when BaseURL is set, serve uses the LLM investigator
 	Notify   Notify        `yaml:"notify"`  // chat delivery for findings
 	Catalog  Catalog       `yaml:"catalog"` // OKF knowledge catalog
+
+	LeaderElection LeaderElection `yaml:"leader_election"` // HA: only the leader investigates
+}
+
+// LeaderElection configures high availability. When enabled, replicas elect a
+// leader via a Lease; only the leader runs the informer watch + investigation
+// queue and reports ready (so the Service routes webhooks to it). Run >1 replica
+// for failover. Disabled by default (single-replica / local).
+type LeaderElection struct {
+	Enabled bool   `yaml:"enabled"`
+	Name    string `yaml:"name"` // Lease name (default "runlore-leader")
 }
 
 // Catalog configures the OKF knowledge catalog read by the agent.

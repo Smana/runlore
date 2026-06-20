@@ -28,4 +28,33 @@ subjects:
   - kind: ServiceAccount
     name: {{ include "runlore.serviceAccountName" . }}
     namespace: {{ .Release.Namespace }}
+---
+# Namespaced lease access for leader election (HA).
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ include "runlore.fullname" . }}-leader-election
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "runlore.labels" . | nindent 4 }}
+rules:
+  - apiGroups: ["coordination.k8s.io"]
+    resources: ["leases"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ include "runlore.fullname" . }}-leader-election
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "runlore.labels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: {{ include "runlore.fullname" . }}-leader-election
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "runlore.serviceAccountName" . }}
+    namespace: {{ .Release.Namespace }}
 {{- end }}
