@@ -62,6 +62,7 @@ type Incident struct {
 	Namespace   string
 	Labels      map[string]string
 	StartsAt    time.Time
+	Fingerprint string // stable alert identity, used for dedup
 }
 
 // Matches reports whether an incident passes this trigger policy: enabled,
