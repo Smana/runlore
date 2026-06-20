@@ -1,0 +1,21 @@
+# golangci-lint v2 config — quality gate for RunLore.
+# Run locally with: golangci-lint run ./...
+version: "2"
+
+run:
+  timeout: 5m
+
+linters:
+  default: standard # errcheck, govet, ineffassign, staticcheck, unused
+  enable:
+    - bodyclose # HTTP response bodies are closed
+    - errorlint # correct error wrapping/comparison (%w, errors.Is/As)
+    - gocritic # opinionated correctness/style checks
+    - misspell # spelling in comments/strings
+    - revive # fast, configurable golint replacement
+    - unconvert # remove redundant type conversions
+
+formatters:
+  enable:
+    - gofmt
+    - goimports
