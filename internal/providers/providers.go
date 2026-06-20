@@ -137,9 +137,17 @@ type NetworkProvider interface {
 	Drops(ctx context.Context, sel Selector, w TimeWindow) (LogResult, error)
 }
 
-// CloudProvider abstracts cloud-state queries (AWS via Steampipe now).
+// CloudProvider abstracts cloud-side context for an incident (managed-DB status,
+// instance/node health, load-balancer/target health, recent cloud events).
+//
+// Phase 2+: implemented with native cloud SDKs (aws-sdk-go-v2, google-cloud-go,
+// azure-sdk-for-go) and in-cluster identity (IRSA/Pod Identity, GKE/Azure Workload
+// Identity) — not Steampipe and not a bundled cloud CLI (both add heavy deps and
+// break the single-binary property). Steampipe / cloud MCP servers stay available
+// as optional MCP extensions. No cloud provider ships in v1.
 type CloudProvider interface {
-	Query(ctx context.Context, query string) (LogResult, error)
+	// Context returns cloud-side signals relevant to a workload/incident window.
+	Context(ctx context.Context, sel Selector, w TimeWindow) (LogResult, error)
 }
 
 // ModelProvider abstracts the LLM (Anthropic | OpenAI-compatible: vLLM/Ollama).
