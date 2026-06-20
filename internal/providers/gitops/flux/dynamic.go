@@ -70,6 +70,17 @@ func readyCondition(u *unstructured.Unstructured) (status, reason, message strin
 	return "", "", ""
 }
 
+// WatchKustomizations watches all Kustomizations across namespaces and forwards
+// each add/modify event as a KustomizationEvent. The channel closes when the
+// underlying watch stops or ctx is done.
+//
+// NOTE: full implementation is in Task 3; this stub satisfies the Reader interface.
+func (r *dynamicReader) WatchKustomizations(_ context.Context) (<-chan KustomizationEvent, error) {
+	ch := make(chan KustomizationEvent)
+	close(ch)
+	return ch, nil
+}
+
 // kustomizationFromUnstructured maps an unstructured Kustomization object to the
 // minimal kustomization type.
 func kustomizationFromUnstructured(u *unstructured.Unstructured) kustomization {
