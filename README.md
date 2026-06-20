@@ -4,8 +4,7 @@
 
 # RunLore
 
-**A self-improving SRE agent for _any_ incident.**
-Reacts to any alert, investigates the likely cause across your signals — sharpest at _what changed_, deepest on GitOps — and learns from every resolution.
+**An open-source SRE agent that investigates any incident — and learns _your_ platform as it goes.**
 
 [![CI](https://github.com/Smana/runlore/actions/workflows/ci.yaml/badge.svg)](https://github.com/Smana/runlore/actions/workflows/ci.yaml)
 [![Go Report Card](https://goreportcard.com/badge/github.com/Smana/runlore)](https://goreportcard.com/report/github.com/Smana/runlore)
@@ -17,14 +16,19 @@ Reacts to any alert, investigates the likely cause across your signals — sharp
 
 ---
 
-RunLore wakes on **any incident** — a metrics or log alert, an SLO burn, a network or infra anomaly —
-*whatever the cause*. It **investigates** by forming and testing hypotheses across your signals: the
-sharpest first question is **what changed** (deploys, config, images, infra, certs, scaling — and on a
-GitOps platform, the *exact* Git diff), alongside the causes nothing changed for — saturation, network
-drops, node health, dependency outages, load. It **delivers** a root-cause hypothesis with evidence,
-then **learns**, writing each resolved incident into an open, git-versioned knowledge base that makes
-the next investigation faster. Read-only first; a single Go binary; runs in your terminal or in your
-cluster, on your models.
+RunLore is an **on-call teammate that never sleeps**. It wakes on any incident — *whatever the cause* —
+and works it like a good SRE:
+
+- **What changed?** *(the sharpest first question)* — deploys, config, images, infra, certs, scaling;
+  on a GitOps platform, the **exact Git diff**.
+- **What's wrong?** *(when nothing changed)* — saturation, network drops, node health, dependency
+  outages, load.
+
+…then it hands you a confidence-scored root cause with evidence and **learns** — each resolved incident
+becomes a reviewed entry in an open, git-versioned knowledge base, so it gets sharper at **your**
+platform over time.
+
+**Read-only first · single Go binary · in your terminal or your cluster · on your models.**
 
 ## Why another one?
 
