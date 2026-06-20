@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log/slog"
 
+	"github.com/Smana/runlore/internal/action"
 	"github.com/Smana/runlore/internal/providers"
 )
 
@@ -12,6 +13,10 @@ const systemPrompt = `You are an SRE incident investigator. The cause is unknown
 calling the available tools to gather evidence (start with what_changed), reason about both
 change-caused and no-change causes, then call submit_findings exactly once with ranked root causes,
 evidence, and anything you could not determine. Be honest about uncertainty.`
+
+const actionsPrompt = `When you are confident in a fix, propose it in submit_findings "actions" — each
+with a description, target, blast_radius, and reversible flag. Strongly prefer REVERSIBLE, low-blast-
+radius actions (e.g. a GitOps rollback). RunLore only SUGGESTS actions to a human; it never executes them.`
 
 // LoopInvestigator is the ReAct investigation loop: it drives a ModelProvider with
 // tools, feeds tool results back, and finishes when the model calls submit_findings
@@ -22,6 +27,15 @@ type LoopInvestigator struct {
 	Log        *slog.Logger
 	MaxSteps   int
 	OnComplete func(providers.Investigation) // delivery hook (Slack/Matrix later)
+	Actions    *action.Policy                // autonomy ladder; nil/off = read-only findings only
+}
+
+// system returns the system prompt, asking for action proposals when the policy is enabled.
+func (li *LoopInvestigator) system() string {
+	if li.Actions != nil && li.Actions.Enabled() {
+		return systemPrompt + "\n\n" + actionsPrompt
+	}
+	return systemPrompt
 }
 
 // Investigate runs the loop for a request. It implements Investigator.
@@ -41,7 +55,7 @@ func (li *LoopInvestigator) Investigate(ctx context.Context, req Request) error 
 	}
 
 	for step := 0; step < maxSteps; step++ {
-		resp, err := li.Model.Complete(ctx, providers.CompletionRequest{System: systemPrompt, Messages: messages, Tools: specs})
+		resp, err := li.Model.Complete(ctx, providers.CompletionRequest{System: li.system(), Messages: messages, Tools: specs})
 		if err != nil {
 			return fmt.Errorf("model: %w", err)
 		}
@@ -60,6 +74,7 @@ func (li *LoopInvestigator) Investigate(ctx context.Context, req Request) error 
 				if inv.Title == "" {
 					inv.Title = req.Title // default to the triggering incident/failure
 				}
+				inv.Actions = li.reviewActions(inv.Actions)
 				li.deliver(req, inv)
 				return nil
 			}
@@ -82,10 +97,27 @@ func (li *LoopInvestigator) runTool(ctx context.Context, byName map[string]Tool,
 	return out
 }
 
+// reviewActions filters the model's proposed actions through the policy. Disabled
+// (or mode off) → nothing surfaced (read-only). Otherwise envelope-compliant
+// actions are kept as suggestions (never executed); the rest are logged as withheld.
+func (li *LoopInvestigator) reviewActions(proposed []providers.Action) []providers.Action {
+	if li.Actions == nil || !li.Actions.Enabled() {
+		return nil
+	}
+	kept, withheld := li.Actions.Review(proposed)
+	for _, w := range withheld {
+		li.Log.Info("action withheld (outside policy envelope)", "action", w)
+	}
+	if len(kept) > 0 {
+		li.Log.Info("suggested actions (not executed)", "mode", string(li.Actions.Mode()), "count", len(kept))
+	}
+	return kept
+}
+
 func (li *LoopInvestigator) deliver(req Request, inv providers.Investigation) {
 	li.Log.Info("investigation complete",
 		"title", req.Title, "confidence", inv.Confidence,
-		"root_causes", len(inv.RootCauses), "unresolved", len(inv.Unresolved))
+		"root_causes", len(inv.RootCauses), "unresolved", len(inv.Unresolved), "suggested_actions", len(inv.Actions))
 	if li.OnComplete != nil {
 		li.OnComplete(inv)
 	}

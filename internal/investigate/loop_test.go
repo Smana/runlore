@@ -6,8 +6,47 @@ import (
 	"log/slog"
 	"testing"
 
+	"github.com/Smana/runlore/internal/action"
+	"github.com/Smana/runlore/internal/config"
 	"github.com/Smana/runlore/internal/providers"
 )
+
+func TestLoopInvestigatorActions(t *testing.T) {
+	// submit_findings proposes a reversible and an irreversible action.
+	model := &scriptModel{responses: []providers.CompletionResponse{
+		{ToolCalls: []providers.ToolCall{{ID: "1", Name: "submit_findings", Args: `{"confidence":0.9,"root_causes":[{"summary":"x"}],"actions":[{"description":"flux rollback hr/harbor","reversible":true},{"description":"delete the pvc","reversible":false}]}`}}},
+	}}
+	var got *providers.Investigation
+	li := &LoopInvestigator{
+		Model:      model,
+		Log:        slog.New(slog.NewTextHandler(io.Discard, nil)),
+		Actions:    action.New(config.ActionPolicy{Mode: config.ActionSuggest, Allow: config.ActionAllow{ReversibleOnly: true}}),
+		OnComplete: func(inv providers.Investigation) { got = &inv },
+	}
+	if err := li.Investigate(context.Background(), Request{Title: "t"}); err != nil {
+		t.Fatalf("Investigate: %v", err)
+	}
+	// Only the reversible action is surfaced (suggest mode, reversible_only); none executed.
+	if got == nil || len(got.Actions) != 1 || got.Actions[0].Description != "flux rollback hr/harbor" {
+		t.Fatalf("expected only the reversible action surfaced, got %+v", got)
+	}
+}
+
+func TestLoopInvestigatorActionsDisabled(t *testing.T) {
+	model := &scriptModel{responses: []providers.CompletionResponse{
+		{ToolCalls: []providers.ToolCall{{ID: "1", Name: "submit_findings", Args: `{"confidence":0.9,"root_causes":[{"summary":"x"}],"actions":[{"description":"flux rollback","reversible":true}]}`}}},
+	}}
+	var got *providers.Investigation
+	li := &LoopInvestigator{ // no Actions policy => read-only, actions dropped
+		Model:      model,
+		Log:        slog.New(slog.NewTextHandler(io.Discard, nil)),
+		OnComplete: func(inv providers.Investigation) { got = &inv },
+	}
+	_ = li.Investigate(context.Background(), Request{Title: "t"})
+	if got == nil || len(got.Actions) != 0 {
+		t.Fatalf("expected no actions surfaced when policy disabled, got %+v", got)
+	}
+}
 
 // scriptModel returns a fixed sequence of responses, ignoring its input.
 type scriptModel struct {
