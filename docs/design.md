@@ -1,9 +1,9 @@
 # RunLore — Design
 
-> The self-improving, GitOps-native SRE agent. RunLore **reacts** to incidents, **investigates**
-> by correlating *what changed* across your GitOps engine and observability stack, and **learns** —
-> writing every resolved incident into an open, git-versioned knowledge catalog that makes the next
-> investigation faster.
+> A self-improving SRE agent that **reacts** to *any* incident — whatever the cause — **investigates**
+> the likely cause by forming and testing hypotheses across your signals (sharpest at *what changed*,
+> and deepest on GitOps platforms), and **learns** — writing every resolved incident into an open,
+> git-versioned knowledge catalog that makes the next investigation faster.
 
 | | |
 |---|---|
@@ -27,9 +27,12 @@ Four things are **not** solved — and they are what RunLore is:
 
 1. **Unattended operation.** Every existing piece needs a human in the loop, in a session. Nothing
    wakes at 03:00 on an alert, investigates, and hands you a root-cause hypothesis.
-2. **Cross-signal correlation anchored on "what changed."** Today the GitOps engine, metrics, logs,
-   and network are separate tools. Nobody **diffs Git between the two deployed revisions** to show
-   the *actual* manifest/values delta and ties it to the metric/log/network impact.
+2. **Cross-signal correlation across causes — with "what changed" as the sharpest lens.** Incidents
+   come from many causes: a deploy, but also a node/disk/cloud failure, a network/DNS issue,
+   saturation, a dependency outage, a cert expiry, organic load. Today the GitOps engine, metrics,
+   logs, and network are separate tools; nobody ties them into one investigation — and nobody
+   **diffs Git between the two deployed revisions** to show the *actual* delta when a change *is* the
+   cause. RunLore does both: correlates the signals, and makes "what changed" a first-class lens.
 3. **Learning.** Existing OSS agents rely on *your hand-curated* runbooks; they don't accumulate
    knowledge. Commercial tools that "learn" are all closed.
 4. **Shareability.** None of the above is an installable product a *different* team can adopt.
@@ -57,7 +60,9 @@ the reason to build it.
 - Autonomous, **read-only-first** incident investigation that a team can `helm install`.
 - **GitOps-engine-agnostic** (Flux + ArgoCD) and **metrics-backend-agnostic** (VictoriaMetrics +
   Prometheus) from day one; logs/network/cloud pluggable behind the same pattern.
-- A **"what changed" spine**: revision history + real Git diffs as the investigation anchor.
+- A **"what changed" spine** (revision history + real Git diffs) as the *sharpest* investigation
+  lens — co-equal with the no-change hypotheses (saturation, network, node health, dependency, load),
+  not the only question asked.
 - An **open OKF knowledge catalog** the agent reads (fast, cached) and writes (PR-gated) — knowledge
   is portable markdown in git, never vendor lock-in.
 - **Single static Go binary**; runs in your terminal (`lore investigate`) or in-cluster (`lore serve`).
@@ -155,15 +160,23 @@ triggers:
   gitops_failures: { enabled: true }    # secondary trigger
 ```
 
-### Investigate — correlate, grounded on "what changed"
+### Investigate — form & test hypotheses across causes
+
+The cause is unknown at wake time, so RunLore explores a **hypothesis space**, not a fixed pipeline:
+**what changed** (the sharpest first question) *and* the causes nothing changed for (saturation,
+network drops, node/disk health, dependency outages, organic load). "What changed" spans more than
+GitOps — deploys, config, images, infra/cloud, autoscaling, cert rotation, manual changes — and on a
+GitOps platform it resolves to the *exact* Git diff (the spine below).
+
 1. **Instant recall**: `kb_search(symptom)` against the cached catalog. High-confidence known-pattern
    hit → short-circuit to the known resolution (no full loop). *(HolmesGPT data: ~40 % of incidents
    self-resolve on a runbook/pattern match; tool-calls drop 16→2.)*
 2. **What changed**: build the ranked `Change` timeline around the incident window
-   (`what_changed_near`), then `diff_revisions` for the actual landed delta.
+   (`what_changed_near`), then `diff_revisions` for the actual landed delta. (GitOps changes today;
+   image/cloud/cert/scaling/manual sources are future inputs to the same timeline.)
 3. **Ground**: retrieve relevant OKF runbooks/incidents and seed the loop.
-4. **ReAct**: pull metrics (PromQL), logs, network, k8s state *just-in-time* via providers; form and
-   test hypotheses.
+4. **ReAct**: pull metrics (PromQL), logs, network, k8s/node state *just-in-time* via providers; form
+   and test hypotheses across both the change-caused and no-change branches.
 5. **Output contract** (structured): ranked root cause(s) + **confidence** + `change_ref` +
    **evidence trail** + **suggested reversible action** + explicit **`unresolved`** (honest about what
    it couldn't determine — designed for the ITBench <50 % reality, §10).
