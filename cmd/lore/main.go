@@ -11,6 +11,7 @@ import (
 	"context"
 	"flag"
 	"fmt"
+	"io"
 	"log/slog"
 	"net/http"
 	"os"
@@ -31,6 +32,7 @@ import (
 	"github.com/Smana/runlore/internal/catalog"
 	"github.com/Smana/runlore/internal/config"
 	"github.com/Smana/runlore/internal/curator"
+	"github.com/Smana/runlore/internal/eval"
 	"github.com/Smana/runlore/internal/investigate"
 	"github.com/Smana/runlore/internal/logs/victorialogs"
 	"github.com/Smana/runlore/internal/metrics/prometheus"
@@ -56,7 +58,7 @@ Usage:
   lore investigate [--alert <name>] [--since <dur>]   investigate an alert/symptom (on-demand)
   lore serve [--config <path>] [--addr <addr>]        run the in-cluster agent (react to incidents)
   lore catalog sync                                   sync + index the knowledge catalog
-  lore eval                                           replay past incidents, score root-cause identification
+  lore eval [--config <path>] [--cases <dir>]         replay incident cases, score RCA identification
   lore version                                        print version
 `
 
@@ -75,7 +77,12 @@ func main() {
 			fmt.Fprintln(os.Stderr, "serve:", err)
 			os.Exit(1)
 		}
-	case "investigate", "catalog", "eval":
+	case "eval":
+		if err := runEval(os.Args[2:]); err != nil {
+			fmt.Fprintln(os.Stderr, "eval:", err)
+			os.Exit(1)
+		}
+	case "investigate", "catalog":
 		fmt.Printf("lore %s: not yet implemented (scaffold). See docs/design.md\n", os.Args[1])
 		os.Exit(1)
 	default:
@@ -274,6 +281,50 @@ func buildCatalog(ctx context.Context, cfg *config.Config, forgeTok forgeToken, 
 		log.Info("catalog loaded", "dir", cfg.Catalog.Dir, "entries", cat.Len())
 		return cat
 	}
+	return nil
+}
+
+// runEval replays recorded incident cases through the investigation loop and
+// reports the RCA-identification rate. Requires a configured model.
+func runEval(args []string) error {
+	fs := flag.NewFlagSet("eval", flag.ContinueOnError)
+	cfgPath := fs.String("config", "runlore.yaml", "path to config file")
+	casesDir := fs.String("cases", "examples/eval", "directory of eval cases")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	cfg, err := config.Load(*cfgPath)
+	if err != nil {
+		return err
+	}
+	if cfg.Model.BaseURL == "" && cfg.Model.Provider != "anthropic" {
+		return fmt.Errorf("eval requires a configured model (set config.model)")
+	}
+	cases, err := eval.Load(*casesDir)
+	if err != nil {
+		return err
+	}
+	if len(cases) == 0 {
+		return fmt.Errorf("no eval cases found in %s", *casesDir)
+	}
+	apiKey := ""
+	if cfg.Model.APIKeyEnv != "" {
+		apiKey = os.Getenv(cfg.Model.APIKeyEnv)
+	}
+	runner := &eval.Runner{Model: buildModel(cfg, apiKey), Log: slog.New(slog.NewTextHandler(io.Discard, nil))}
+	rep := runner.Run(context.Background(), cases)
+	for _, res := range rep.Results {
+		status := "PASS"
+		if !res.Pass {
+			status = "FAIL"
+		}
+		fmt.Printf("%-4s  %-32s  confidence=%.2f", status, res.Name, res.Confidence)
+		if len(res.Missing) > 0 {
+			fmt.Printf("  missing: %s", strings.Join(res.Missing, ", "))
+		}
+		fmt.Println()
+	}
+	fmt.Printf("\nRCA identified: %d/%d (%.0f%%)\n", rep.Passed(), len(rep.Results), rep.RCARate()*100)
 	return nil
 }
 
