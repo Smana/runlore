@@ -20,6 +20,7 @@ import (
 // Engine identifies a GitOps engine.
 type Engine string
 
+// Supported GitOps engines.
 const (
 	EngineFlux   Engine = "flux"
 	EngineArgoCD Engine = "argocd"
@@ -28,6 +29,7 @@ const (
 // ChangeType classifies a detected change.
 type ChangeType string
 
+// Change types detected on the cluster.
 const (
 	ChangeSync      ChangeType = "sync"       // a reconcile/sync applied a new revision
 	ChangeChartBump ChangeType = "chart-bump" // a Helm chart version changed
@@ -175,9 +177,13 @@ type IssueProvider interface {
 
 // ---- payloads (sketched; refined as impls land) ------------------------------
 
-// Samples / Matrix / LogResult are placeholder result envelopes.
+// Samples is a placeholder instant-query result envelope.
 type Samples struct{ Raw []byte }
+
+// Matrix is a placeholder range-query result envelope.
 type Matrix struct{ Raw []byte }
+
+// LogResult is a placeholder logs/network query result envelope.
 type LogResult struct{ Raw []byte }
 
 // Investigation is the structured output contract of an investigation.
@@ -219,22 +225,26 @@ type CompletionRequest struct {
 	Tools    []ToolSpec
 }
 
+// Message is one turn in an LLM exchange.
 type Message struct {
 	Role    string
 	Content string
 }
 
+// ToolSpec describes a tool offered to the model.
 type ToolSpec struct {
 	Name        string
 	Description string
 	Schema      string // JSON Schema
 }
 
+// CompletionResponse is the model's reply (text and/or tool calls).
 type CompletionResponse struct {
 	Text      string
 	ToolCalls []ToolCall
 }
 
+// ToolCall is a model request to invoke a tool.
 type ToolCall struct {
 	Name string
 	Args string
