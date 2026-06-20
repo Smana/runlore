@@ -32,5 +32,15 @@ func Format(inv providers.Investigation) string {
 			fmt.Fprintf(&b, "   • %s\n", u)
 		}
 	}
+	if len(inv.Actions) > 0 {
+		b.WriteString("*Suggested actions* (not executed — apply manually):\n")
+		for _, a := range inv.Actions {
+			rev := ""
+			if a.Reversible {
+				rev = " (reversible)"
+			}
+			fmt.Fprintf(&b, "   • %s%s\n", a.Description, rev)
+		}
+	}
 	return b.String()
 }

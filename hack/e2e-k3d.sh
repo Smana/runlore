@@ -125,6 +125,7 @@ helm upgrade --install runlore deploy/helm/runlore -n "$NS" \
   --set-string config.metrics.url="http://$HOST:$MOCK_PORT" \
   --set-string config.logs.url="http://$HOST:$MOCK_PORT" \
   --set-string config.network.url="$HOST:9998" \
+  --set-string config.actions.mode=suggest \
   --set-string config.forge.github_api_url="http://$HOST:$MOCK_PORT" \
   --set-string config.forge.kb_repo="mock/repo" \
   --set-string config.forge.base_branch="main" \
@@ -173,6 +174,8 @@ check "curator enabled"                        /tmp/runlore.log 'curator enabled
 check "GitHub App token exchange"              /tmp/runlore-mock.log 'MOCK GH-TOKEN'
 check "curator opened a PR (confident)"        /tmp/runlore-mock.log 'MOCK GH-PR'
 check "curated ref logged"                     /tmp/runlore.log 'msg=curated'
+check "action suggestions enabled"             /tmp/runlore.log 'action suggestions enabled'
+check "suggested action surfaced (rung 1)"     /tmp/runlore.log 'suggested_actions=[1-9]'
 
 step "8/10 GitOps failure trigger (informer on a real API server)"
 kubectl create ns apps >/dev/null 2>&1 || true
@@ -236,9 +239,13 @@ spec:
 YAML
 kubectl wait --for=condition=Established crd/applications.argoproj.io --timeout=30s
 # Switch the engine to argocd (reuse prior values; back to 1 replica for a quick roll).
+# Reconfigure to the argocd engine. Leader election is disabled for this step:
+# leadership-gated readiness stalls in-place rolling updates (a known HA limitation),
+# so a single non-LE pod rolls cleanly here.
 helm upgrade runlore deploy/helm/runlore -n "$NS" --reuse-values \
-  --set replicaCount=1 --set-string config.gitops.engine=argocd >/dev/null
-kubectl -n "$NS" rollout status deploy/runlore --timeout=90s
+  --set replicaCount=1 --set config.leader_election.enabled=false \
+  --set-string config.gitops.engine=argocd >/dev/null
+kubectl -n "$NS" rollout status deploy/runlore --timeout=120s
 sleep 3
 kubectl apply -f - <<'YAML'
 apiVersion: argoproj.io/v1alpha1
