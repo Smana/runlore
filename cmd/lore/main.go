@@ -23,6 +23,8 @@ import (
 
 	"github.com/Smana/runlore/internal/config"
 	"github.com/Smana/runlore/internal/investigate"
+	openai "github.com/Smana/runlore/internal/model/openai"
+	"github.com/Smana/runlore/internal/providers"
 	"github.com/Smana/runlore/internal/providers/gitops/flux"
 	"github.com/Smana/runlore/internal/server"
 	"github.com/Smana/runlore/internal/trigger"
@@ -81,12 +83,21 @@ func runServe(args []string) error {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	queue := investigate.NewQueue(investigate.LogInvestigator{Log: log}, log)
+	// Build the (best-effort) dynamic client once: used by both the GitOps-failure
+	// watch and the what-changed tool.
+	var fluxProvider *flux.Provider
+	if client, err := dynamicClient(); err != nil {
+		log.Warn("no kube client; GitOps features disabled", "err", err)
+	} else {
+		fluxProvider = flux.New(flux.NewDynamicReader(client), &whatchanged.Differ{})
+	}
+
+	inv := buildInvestigator(cfg, fluxProvider, log)
+	queue := investigate.NewQueue(inv, log)
 	go queue.Run(ctx)
 
-	// Best-effort GitOps-failure watch: only if enabled and a cluster is reachable.
-	if cfg.Triggers.GitOpsFailures.Enabled {
-		startGitOpsFailureWatch(ctx, cfg, queue, log)
+	if cfg.Triggers.GitOpsFailures.Enabled && fluxProvider != nil {
+		startGitOpsFailureWatch(ctx, cfg, queue, fluxProvider, log)
 	}
 
 	srv := server.New(cfg, queue, log)
@@ -102,17 +113,37 @@ func runServe(args []string) error {
 	return nil
 }
 
-// startGitOpsFailureWatch builds a dynamic client and drains Flux WatchFailures
-// into the queue. Failures here are logged, not fatal — webhook-only serving
-// continues if no cluster is reachable.
-func startGitOpsFailureWatch(ctx context.Context, cfg *config.Config, q investigate.Enqueuer, log *slog.Logger) {
-	client, err := dynamicClient()
-	if err != nil {
-		log.Warn("gitops-failure watch disabled: no kube client", "err", err)
-		return
+// buildInvestigator returns the LLM ReAct investigator when a model is configured,
+// otherwise the read-only LogInvestigator.
+func buildInvestigator(cfg *config.Config, fp *flux.Provider, log *slog.Logger) investigate.Investigator {
+	if cfg.Model.BaseURL == "" {
+		log.Info("no model configured; using log-only investigator")
+		return investigate.LogInvestigator{Log: log}
 	}
-	provider := flux.New(flux.NewDynamicReader(client), &whatchanged.Differ{})
-	events, err := provider.WatchFailures(ctx)
+	apiKey := ""
+	if cfg.Model.APIKeyEnv != "" {
+		apiKey = os.Getenv(cfg.Model.APIKeyEnv)
+	}
+	model := openai.New(cfg.Model.BaseURL, cfg.Model.Model, apiKey)
+	var tools []investigate.Tool
+	if fp != nil {
+		tools = append(tools, investigate.WhatChangedTool{GitOps: fp})
+	}
+	log.Info("using LLM investigator", "model", cfg.Model.Model, "tools", len(tools))
+	return &investigate.LoopInvestigator{
+		Model: model,
+		Tools: tools,
+		Log:   log,
+		OnComplete: func(found providers.Investigation) {
+			log.Info("findings",
+				"confidence", found.Confidence, "root_causes", len(found.RootCauses), "unresolved", len(found.Unresolved))
+		},
+	}
+}
+
+// startGitOpsFailureWatch drains Flux WatchFailures into the queue.
+func startGitOpsFailureWatch(ctx context.Context, cfg *config.Config, q investigate.Enqueuer, fp *flux.Provider, log *slog.Logger) {
+	events, err := fp.WatchFailures(ctx)
 	if err != nil {
 		log.Warn("gitops-failure watch disabled", "err", err)
 		return

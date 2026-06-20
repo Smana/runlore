@@ -19,7 +19,15 @@ type Config struct {
 	Triggers TriggerPolicy `yaml:"triggers"`
 	Actions  ActionPolicy  `yaml:"actions"` // read-only by default; the upper rungs of the autonomy ladder
 	Forge    Forge         `yaml:"forge"`   // git-forge auth (GitHub App) for diff access + curation
-	// Providers, Catalog, Model, Notify, etc. are added as packages land.
+	Model    Model         `yaml:"model"`   // optional; when BaseURL is set, serve uses the LLM investigator
+}
+
+// Model configures the OpenAI-compatible LLM endpoint used for investigation.
+// When BaseURL is empty, serve falls back to the log-only investigator.
+type Model struct {
+	BaseURL   string `yaml:"base_url"`    // e.g. https://vllm.svc/v1
+	Model     string `yaml:"model"`       // model name
+	APIKeyEnv string `yaml:"api_key_env"` // env var holding the API key (empty = keyless)
 }
 
 // TriggerPolicy decides what RunLore reacts to.
