@@ -224,16 +224,28 @@ config:
 
   # Autonomy ladder. Default (omitted) = off = read-only findings only.
   #   suggest — propose envelope-filtered remediations, never executed.
-  #   approve — additionally register them for human approval; an approved action
-  #             executes a reversible Flux op (suspend/resume/reconcile). Requires
-  #             chart rbac.allowActions=true and (recommended) an approval token.
+  #   approve — register them for human approval (curl or Slack buttons); an approved
+  #             action executes a reversible Flux op (suspend/resume/reconcile).
+  #   auto    — execute eligible actions WITHOUT approval. Heavily gated (below).
+  # approve + auto require chart rbac.allowActions=true.
   # actions:
   #   mode: approve
-  #   approval_token_env: APPROVAL_TOKEN   # require X-Approval-Token on the endpoints
+  #   approval_token_env: APPROVAL_TOKEN   # gate the approval + kill-switch endpoints
   #   allow:
   #     reversible_only: true              # withhold irreversible suggestions
   #     max_blast_radius: 5
   #     kinds: [HelmRelease, Kustomization, Application]
+  #   # rung-3 unattended execution (mode: auto). Layered safety: auto ONLY ever runs
+  #   # reversible actions, and every decision is logged + delivered. Start with dry_run.
+  #   auto:
+  #     dry_run: true                      # log "would execute" without executing
+  #     min_confidence: 0.85               # only auto-execute above this confidence
+  #     max_per_window: 3                  # rate limit (anti-storm)
+  #     window: 1h
+  #   # Kill-switch (instant, no redeploy): POST /actions/pause | /actions/resume
+  #   # (X-Approval-Token). Scope which incidents auto acts on via the trigger policy.
+  #   # NOTE: floats like min_confidence must be set via a values file or
+  #   # `helm --set-json` — plain `--set x=0.85` is coerced to a string.
 
   # HA toggle (default on; harmless with 1 replica).
   leader_election:
@@ -301,6 +313,10 @@ Fire a test: trigger a `critical`/`prod` alert (or `flux suspend`+break a Kustom
   `POST /actions/<id>/approve` (token-gated) or **Slack Approve/Reject buttons** (enable Slack
   Interactivity with Request URL `…/slack/interactions` and set `slack.signing_secret_env`; clicks are
   HMAC-verified). The envelope is re-checked at execution and every action is audit-logged.
+- **Unattended (`actions.mode: auto`)**: executes eligible actions with **no human in the loop** — but only
+  *reversible* ops, only above `min_confidence`, rate-limited, and **instantly haltable** via
+  `POST /actions/pause` (`/resume`). Start with `dry_run: true`, scope which incidents it acts on via the
+  trigger policy, and watch the audit log + delivered summary. Irreversible actions are never auto-run.
 - **Forge**: writes issues/PRs to the one KB repo you configure, via the scoped GitHub App.
 - **Secrets**: referenced by env-var name from a `Secret` you control; nothing is inlined.
 
