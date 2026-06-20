@@ -35,6 +35,28 @@ func TestQueryMetricsTool(t *testing.T) {
 	}
 }
 
+type fakeNetwork struct{ lines providers.LogResult }
+
+func (f fakeNetwork) Drops(context.Context, providers.Selector, providers.TimeWindow) (providers.LogResult, error) {
+	return f.lines, nil
+}
+
+func TestNetworkDropsTool(t *testing.T) {
+	tool := NetworkDropsTool{Network: fakeNetwork{lines: providers.LogResult{
+		{Message: "apps/harbor-core-1 -> db/postgres-0 DROPPED (POLICY_DENIED)"},
+	}}}
+	if tool.Name() != "network_drops" {
+		t.Fatalf("name=%q", tool.Name())
+	}
+	out, err := tool.Call(context.Background(), `{"namespace":"apps","since_minutes":30}`)
+	if err != nil {
+		t.Fatalf("Call: %v", err)
+	}
+	if !strings.Contains(out, "POLICY_DENIED") {
+		t.Fatalf("unexpected output:\n%s", out)
+	}
+}
+
 type fakeLogs struct{ lines providers.LogResult }
 
 func (f fakeLogs) Query(context.Context, string, providers.TimeWindow) (providers.LogResult, error) {

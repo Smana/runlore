@@ -12,9 +12,16 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"net"
 	"net/http"
 	"os"
 	"strings"
+	"time"
+
+	flowpb "github.com/cilium/cilium/api/v1/flow"
+	observerpb "github.com/cilium/cilium/api/v1/observer"
+	"google.golang.org/grpc"
+	"google.golang.org/protobuf/types/known/timestamppb"
 )
 
 func main() {
@@ -42,11 +49,43 @@ func main() {
 		log.Printf("MOCK unhandled %s %s", r.Method, r.URL.Path)
 		w.WriteHeader(http.StatusNotFound)
 	})
+	go serveHubble(":9998")
 	log.Printf("MOCK backends listening on %s", addr)
 	// #nosec G114 — test double, no timeouts needed.
 	if err := http.ListenAndServe(addr, mux); err != nil {
 		log.Fatal(err)
 	}
+}
+
+// serveHubble runs a gRPC Hubble observer that streams a canned DROPPED flow.
+func serveHubble(addr string) {
+	lis, err := net.Listen("tcp", addr)
+	if err != nil {
+		log.Printf("MOCK hubble listen: %v", err)
+		return
+	}
+	srv := grpc.NewServer()
+	observerpb.RegisterObserverServer(srv, mockObserver{})
+	log.Printf("MOCK hubble (gRPC) on %s", addr)
+	if err := srv.Serve(lis); err != nil {
+		log.Printf("MOCK hubble serve: %v", err)
+	}
+}
+
+type mockObserver struct {
+	observerpb.UnimplementedObserverServer
+}
+
+func (mockObserver) GetFlows(_ *observerpb.GetFlowsRequest, stream observerpb.Observer_GetFlowsServer) error {
+	log.Printf("MOCK HUBBLE GetFlows")
+	flow := &flowpb.Flow{
+		Time:           timestamppb.New(time.Unix(1700000000, 0)),
+		Verdict:        flowpb.Verdict_DROPPED,
+		DropReasonDesc: flowpb.DropReason_POLICY_DENIED,
+		Source:         &flowpb.Endpoint{Namespace: "apps", PodName: "harbor-core-1"},
+		Destination:    &flowpb.Endpoint{Namespace: "db", PodName: "postgres-0"},
+	}
+	return stream.Send(&observerpb.GetFlowsResponse{ResponseTypes: &observerpb.GetFlowsResponse_Flow{Flow: flow}})
 }
 
 // chatCompletions scripts the ReAct loop: call what_changed, then kb_search, then
@@ -75,6 +114,8 @@ func chatCompletions(w http.ResponseWriter, r *http.Request) {
 		name, args = "query_metrics", `{"query":"up"}`
 	case 3:
 		name, args = "query_logs", `{"query":"error","since_minutes":30}`
+	case 4:
+		name, args = "network_drops", `{"namespace":"apps"}`
 	default:
 		name, args = "submit_findings", `{"confidence":0.9,"root_causes":[{"summary":"mock: chart bump broke harbor-db","confidence":0.9,"evidence":["pg_up=0"],"suggested_action":"flux rollback hr/harbor","reversible":true}],"unresolved":["mock unresolved"]}`
 	}

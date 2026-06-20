@@ -27,6 +27,7 @@ type Config struct {
 
 	Metrics Endpoint `yaml:"metrics"` // PromQL backend (VictoriaMetrics/Prometheus) for query_metrics
 	Logs    Endpoint `yaml:"logs"`    // LogsQL backend (VictoriaLogs) for query_logs
+	Network Endpoint `yaml:"network"` // Hubble Relay gRPC address (host:port) for network_drops
 }
 
 // Endpoint is a backend base URL; empty disables the corresponding tool.
