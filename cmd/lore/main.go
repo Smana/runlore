@@ -16,11 +16,17 @@ import (
 	"os"
 	"os/signal"
 	"strings"
+	"sync/atomic"
 	"syscall"
+	"time"
 
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/dynamic"
+	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/clientcmd"
+	"k8s.io/client-go/tools/leaderelection"
+	"k8s.io/client-go/tools/leaderelection/resourcelock"
 
 	"github.com/Smana/runlore/internal/catalog"
 	"github.com/Smana/runlore/internal/config"
@@ -89,34 +95,120 @@ func runServe(args []string) error {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	// Build the (best-effort) dynamic client once: used by both the GitOps-failure
-	// watch and the what-changed tool.
-	var fluxProvider *flux.Provider
-	if client, err := dynamicClient(); err != nil {
-		log.Warn("no kube client; GitOps features disabled", "err", err)
+	// Build kube clients once (best-effort): the dynamic client backs the
+	// GitOps-failure watch + what-changed tool; the clientset backs leader election.
+	var (
+		fluxProvider *flux.Provider
+		clientset    *kubernetes.Clientset
+	)
+	if restCfg, err := restConfig(); err != nil {
+		log.Warn("no kube client; GitOps features + leader election disabled", "err", err)
 	} else {
-		fluxProvider = flux.New(flux.NewDynamicReader(client), &whatchanged.Differ{})
+		if dc, derr := dynamic.NewForConfig(restCfg); derr != nil {
+			log.Warn("dynamic client unavailable; GitOps features disabled", "err", derr)
+		} else {
+			fluxProvider = flux.New(flux.NewDynamicReader(dc), &whatchanged.Differ{})
+		}
+		if cs, cerr := kubernetes.NewForConfig(restCfg); cerr != nil {
+			log.Warn("clientset unavailable; leader election disabled", "err", cerr)
+		} else {
+			clientset = cs
+		}
 	}
 
 	inv := buildInvestigator(cfg, fluxProvider, log)
 	queue := investigate.NewQueue(inv, log)
-	go queue.Run(ctx)
 
-	if cfg.Triggers.GitOpsFailures.Enabled && fluxProvider != nil {
-		startGitOpsFailureWatch(ctx, cfg, queue, fluxProvider, log)
+	// startWork runs the leader-only loops (investigation queue + failure watch),
+	// scoped to a context cancelled when leadership is lost.
+	startWork := func(workCtx context.Context) {
+		go queue.Run(workCtx)
+		if cfg.Triggers.GitOpsFailures.Enabled && fluxProvider != nil {
+			startGitOpsFailureWatch(workCtx, cfg, queue, fluxProvider, log)
+		}
 	}
 
-	srv := server.New(cfg, queue, log)
+	var leader atomic.Bool
+	useLE := cfg.LeaderElection.Enabled && clientset != nil
+	if useLE {
+		go runLeaderElection(ctx, cfg, clientset, &leader, log, startWork)
+	} else {
+		leader.Store(true) // no leader election: this replica is always active + ready
+		startWork(ctx)
+	}
+
+	// readyz reflects leadership so the Service routes webhooks only to the leader.
+	srv := server.New(cfg, queue, leader.Load, log)
 	httpSrv := &http.Server{Addr: *addr, Handler: srv.Handler()}
 	go func() {
 		<-ctx.Done()
 		_ = httpSrv.Shutdown(context.Background())
 	}()
-	log.Info("runlore serving", "addr", *addr)
+	log.Info("runlore serving", "addr", *addr, "leader_election", useLE)
 	if err := httpSrv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 		return err
 	}
 	return nil
+}
+
+// runLeaderElection blocks running Lease-based leader election; the leader runs
+// startWork and reports ready. Lost leadership cancels the work context.
+func runLeaderElection(ctx context.Context, cfg *config.Config, cs *kubernetes.Clientset, leader *atomic.Bool, log *slog.Logger, startWork func(context.Context)) {
+	name := cfg.LeaderElection.Name
+	if name == "" {
+		name = "runlore-leader"
+	}
+	id := podName()
+	lock := &resourcelock.LeaseLock{
+		LeaseMeta:  metav1.ObjectMeta{Name: name, Namespace: podNamespace()},
+		Client:     cs.CoordinationV1(),
+		LockConfig: resourcelock.ResourceLockConfig{Identity: id},
+	}
+	leaderelection.RunOrDie(ctx, leaderelection.LeaderElectionConfig{
+		Lock:            lock,
+		ReleaseOnCancel: true,
+		LeaseDuration:   15 * time.Second,
+		RenewDeadline:   10 * time.Second,
+		RetryPeriod:     2 * time.Second,
+		Callbacks: leaderelection.LeaderCallbacks{
+			OnStartedLeading: func(workCtx context.Context) {
+				log.Info("acquired leadership", "id", id)
+				leader.Store(true)
+				startWork(workCtx)
+			},
+			OnStoppedLeading: func() {
+				log.Info("lost leadership", "id", id)
+				leader.Store(false)
+			},
+			OnNewLeader: func(current string) {
+				if current != id {
+					log.Info("standby; another replica leads", "leader", current)
+				}
+			},
+		},
+	})
+}
+
+// podName returns this pod's identity for leader election.
+func podName() string {
+	if n := os.Getenv("POD_NAME"); n != "" {
+		return n
+	}
+	h, _ := os.Hostname()
+	return h
+}
+
+// podNamespace resolves the namespace from the downward API or the service-account mount.
+func podNamespace() string {
+	if ns := os.Getenv("POD_NAMESPACE"); ns != "" {
+		return ns
+	}
+	if b, err := os.ReadFile("/var/run/secrets/kubernetes.io/serviceaccount/namespace"); err == nil {
+		if ns := strings.TrimSpace(string(b)); ns != "" {
+			return ns
+		}
+	}
+	return "default"
 }
 
 // buildNotifier assembles the configured chat notifiers (best-effort fan-out).
@@ -226,15 +318,11 @@ func startGitOpsFailureWatch(ctx context.Context, cfg *config.Config, q investig
 	go investigate.DrainFailures(ctx, events, q, trigger.NewDeduper(cfg.Triggers.Incidents.Dedup.Window.Std()))
 }
 
-// dynamicClient builds a dynamic client from in-cluster config, falling back to
-// the default kubeconfig.
-func dynamicClient() (dynamic.Interface, error) {
-	restCfg, err := rest.InClusterConfig()
-	if err != nil {
-		restCfg, err = clientcmd.BuildConfigFromFlags("", clientcmd.RecommendedHomeFile)
-		if err != nil {
-			return nil, err
-		}
+// restConfig builds a Kubernetes REST config from in-cluster config, falling back
+// to the default kubeconfig.
+func restConfig() (*rest.Config, error) {
+	if cfg, err := rest.InClusterConfig(); err == nil {
+		return cfg, nil
 	}
-	return dynamic.NewForConfig(restCfg)
+	return clientcmd.BuildConfigFromFlags("", clientcmd.RecommendedHomeFile)
 }
