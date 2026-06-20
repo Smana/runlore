@@ -34,7 +34,8 @@ func submitFindingsSpec() providers.ToolSpec {
 "required":["summary"]}},
 "unresolved":{"type":"array","items":{"type":"string"}},
 "actions":{"type":"array","description":"proposed remediations; prefer reversible, low-blast-radius","items":{"type":"object","properties":{
-"description":{"type":"string"},"reversible":{"type":"boolean"},"blast_radius":{"type":"integer"},
+"description":{"type":"string"},"op":{"type":"string","enum":["suspend","resume","reconcile",""],"description":"executable op (Flux); omit for a suggestion only"},
+"reversible":{"type":"boolean"},"blast_radius":{"type":"integer"},
 "target":{"type":"object","properties":{"kind":{"type":"string"},"name":{"type":"string"},"namespace":{"type":"string"}}}},
 "required":["description"]}}},"required":["root_causes"]}`,
 	}
@@ -55,6 +56,7 @@ type findings struct {
 	Unresolved []string `json:"unresolved"`
 	Actions    []struct {
 		Description string `json:"description"`
+		Op          string `json:"op"`
 		Reversible  bool   `json:"reversible"`
 		BlastRadius int    `json:"blast_radius"`
 		Target      struct {
@@ -86,6 +88,7 @@ func parseFindings(args string) (providers.Investigation, error) {
 		inv.Actions = append(inv.Actions, providers.Action{
 			Name:        a.Description,
 			Description: a.Description,
+			Op:          a.Op,
 			Target:      providers.Workload{Kind: a.Target.Kind, Name: a.Target.Name, Namespace: a.Target.Namespace},
 			Mutating:    true,
 			Reversible:  a.Reversible,
