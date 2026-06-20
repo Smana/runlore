@@ -23,6 +23,7 @@ type Auto struct {
 	minConfidence float64
 	maxPerWindow  int
 	window        time.Duration
+	policy        *Policy
 	audit         audit.Auditor
 	log           *slog.Logger
 	now           func() time.Time
@@ -32,11 +33,12 @@ type Auto struct {
 	recent []time.Time // recent execution timestamps (rate limiting)
 }
 
-// NewAuto builds the auto executor from the policy (window defaults to 1h). A nil
+// NewAuto builds the auto executor from the policy (window defaults to 1h). policy
+// is the action envelope, re-checked at the exec boundary (defense in depth). A nil
 // auditor falls back to a no-op. The returned Auto starts with the kill-switch
 // ENGAGED (paused) — fail closed by construction, so a process/leader restart can
 // never resume unattended execution on its own; an operator must Resume() it.
-func NewAuto(exec Executor, p config.AutoPolicy, aud audit.Auditor, log *slog.Logger) *Auto {
+func NewAuto(exec Executor, p config.AutoPolicy, policy *Policy, aud audit.Auditor, log *slog.Logger) *Auto {
 	window := p.Window.Std()
 	if window <= 0 {
 		window = time.Hour
@@ -46,7 +48,7 @@ func NewAuto(exec Executor, p config.AutoPolicy, aud audit.Auditor, log *slog.Lo
 	}
 	return &Auto{
 		exec: exec, dryRun: p.DryRun, minConfidence: p.MinConfidence,
-		maxPerWindow: p.MaxPerWindow, window: window, audit: aud, log: log, now: time.Now,
+		maxPerWindow: p.MaxPerWindow, window: window, policy: policy, audit: aud, log: log, now: time.Now,
 		paused: true,
 	}
 }
@@ -108,13 +110,23 @@ func (a *Auto) runOne(ctx context.Context, inv providers.Investigation, act prov
 			a.record(act, audit.DecisionSkipped, "paused")
 			return annotate("[auto: skipped — paused]")
 		}
-		if err := a.exec.Execute(ctx, act); err != nil {
+		// Defense in depth: re-derive + re-validate the full envelope at the exec
+		// boundary (as Approvals.Approve does), so a mutated or un-Reviewed action
+		// can't reach the cluster — reversibility/blast come from the op, not the model.
+		act = deriveSafety(act)
+		if a.policy != nil {
+			if reason := a.policy.violation(act); reason != "" {
+				a.log.Warn("auto denied at exec boundary", "op", act.Op, "target", target(act), "reason", reason)
+				a.record(act, audit.DecisionDenied, reason)
+				return annotate("[auto: denied — " + reason + "]")
+			}
+		}
+		// executed/failed are audited at the executor seam (NewAuditedExecutor).
+		if err := a.exec.Execute(ContextWithActor(ctx, "auto"), act); err != nil {
 			a.log.Error("auto-execute failed", "op", act.Op, "target", target(act), "err", err)
-			a.record(act, audit.DecisionFailed, err.Error())
 			return annotate("[auto: FAILED — " + err.Error() + "]")
 		}
 		a.log.Info("auto-executed", "op", act.Op, "target", target(act))
-		a.record(act, audit.DecisionExecuted, fmt.Sprintf("confidence %.2f", inv.Confidence))
 		return annotate("[auto-executed]")
 	}
 }
