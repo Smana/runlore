@@ -34,7 +34,7 @@ func TestSlackInteraction(t *testing.T) {
 	id := ap.Register(providers.Action{Op: "suspend", Reversible: true, Target: providers.Workload{Kind: "Kustomization", Name: "apps", Namespace: "flux-system"}})
 
 	const secret = "shh"
-	srv := New(&config.Config{}, &spyEnqueuer{}, nil, ap, "", secret, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	srv := New(&config.Config{}, &spyEnqueuer{}, nil, Actions{Approvals: ap, SlackSecret: secret}, slog.New(slog.NewTextHandler(io.Discard, nil)))
 
 	payload := `{"user":{"username":"alice"},"actions":[{"action_id":"runlore_approve","value":"` + id + `"}]}`
 	body := "payload=" + url.QueryEscape(payload)
@@ -84,7 +84,7 @@ func TestActionsApprove(t *testing.T) {
 	ap := action.NewApprovals(exec, pol, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	id := ap.Register(providers.Action{Op: "suspend", Reversible: true, Target: providers.Workload{Kind: "Kustomization", Name: "apps", Namespace: "flux-system"}})
 
-	srv := New(&config.Config{}, &spyEnqueuer{}, nil, ap, "secret", "", slog.New(slog.NewTextHandler(io.Discard, nil)))
+	srv := New(&config.Config{}, &spyEnqueuer{}, nil, Actions{Approvals: ap, Token: "secret"}, slog.New(slog.NewTextHandler(io.Discard, nil)))
 
 	// Missing token → 403, nothing executes.
 	rr := httptest.NewRecorder()
@@ -109,13 +109,47 @@ func TestActionsApprove(t *testing.T) {
 	}
 }
 
+type fakePauser struct{ paused bool }
+
+func (f *fakePauser) Pause()       { f.paused = true }
+func (f *fakePauser) Resume()      { f.paused = false }
+func (f *fakePauser) Paused() bool { return f.paused }
+
+func TestKillSwitch(t *testing.T) {
+	p := &fakePauser{}
+	srv := New(&config.Config{}, &spyEnqueuer{}, nil, Actions{Pauser: p, Token: "t"}, slog.New(slog.NewTextHandler(io.Discard, nil)))
+
+	// Without the token → 403, kill-switch untouched.
+	rr := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rr, httptest.NewRequest(http.MethodPost, "/actions/pause", nil))
+	if rr.Code != http.StatusForbidden || p.paused {
+		t.Fatalf("no-token pause = %d paused=%v, want 403 + untouched", rr.Code, p.paused)
+	}
+	// With the token → paused.
+	req := httptest.NewRequest(http.MethodPost, "/actions/pause", nil)
+	req.Header.Set("X-Approval-Token", "t")
+	rr = httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rr, req)
+	if rr.Code != http.StatusOK || !p.paused {
+		t.Fatalf("pause = %d paused=%v, want 200 + paused", rr.Code, p.paused)
+	}
+	// Resume clears it.
+	req = httptest.NewRequest(http.MethodPost, "/actions/resume", nil)
+	req.Header.Set("X-Approval-Token", "t")
+	rr = httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rr, req)
+	if rr.Code != http.StatusOK || p.paused {
+		t.Fatalf("resume = %d paused=%v, want 200 + resumed", rr.Code, p.paused)
+	}
+}
+
 func testServerWith(enq investigate.Enqueuer) *Server {
 	cfg := &config.Config{}
 	cfg.Triggers.Incidents = config.IncidentTrigger{
 		Enabled: true,
 		Match:   config.IncidentMatch{Severity: []string{"critical"}},
 	}
-	return New(cfg, enq, nil, nil, "", "", slog.New(slog.NewTextHandler(io.Discard, nil)))
+	return New(cfg, enq, nil, Actions{}, slog.New(slog.NewTextHandler(io.Discard, nil)))
 }
 
 func testServer() *Server { return testServerWith(&spyEnqueuer{}) }
@@ -123,7 +157,7 @@ func testServer() *Server { return testServerWith(&spyEnqueuer{}) }
 func TestReadyz(t *testing.T) {
 	cfg := &config.Config{}
 	leader := false
-	srv := New(cfg, &spyEnqueuer{}, func() bool { return leader }, nil, "", "", slog.New(slog.NewTextHandler(io.Discard, nil)))
+	srv := New(cfg, &spyEnqueuer{}, func() bool { return leader }, Actions{}, slog.New(slog.NewTextHandler(io.Discard, nil)))
 
 	rr := httptest.NewRecorder()
 	srv.Handler().ServeHTTP(rr, httptest.NewRequest(http.MethodGet, "/readyz", nil))

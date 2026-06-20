@@ -139,13 +139,14 @@ func runServe(args []string) error {
 		}
 	}
 
-	// Rung-2: approval-gated execution. Only built for mode "approve" with a reachable
-	// cluster; "auto" is not implemented (approval is always required).
+	// Rung-2 (approve) and rung-3 (auto) execution — mutually exclusive by mode, both
+	// requiring a reachable cluster. Token + Slack secret gate the control endpoints.
 	approvals := buildApprovals(cfg, executor, log)
+	auto := buildAuto(cfg, executor, log)
 	approvalToken := os.Getenv(cfg.Actions.ApprovalTokenEnv)
 	slackSigningSecret := os.Getenv(cfg.Notify.Slack.SigningSecretEnv)
 
-	inv := buildInvestigator(ctx, cfg, gitops, approvals, log)
+	inv := buildInvestigator(ctx, cfg, gitops, approvals, auto, log)
 	queue := investigate.NewQueue(inv, log)
 
 	// startWork runs the leader-only loops (investigation queue + failure watch),
@@ -167,7 +168,11 @@ func runServe(args []string) error {
 	}
 
 	// readyz reflects leadership so the Service routes webhooks only to the leader.
-	srv := server.New(cfg, queue, leader.Load, approvals, approvalToken, slackSigningSecret, log)
+	acts := server.Actions{Approvals: approvals, Token: approvalToken, SlackSecret: slackSigningSecret}
+	if auto != nil {
+		acts.Pauser = auto // avoid a typed-nil interface when auto is disabled
+	}
+	srv := server.New(cfg, queue, leader.Load, acts, log)
 	httpSrv := &http.Server{Addr: *addr, Handler: srv.Handler()}
 	go func() {
 		<-ctx.Done()
@@ -386,12 +391,9 @@ func buildForgeTokenSource(cfg *config.Config, log *slog.Logger) forgeToken {
 }
 
 // buildApprovals enables rung-2 approval-gated execution for action mode "approve"
-// (requires a reachable cluster). "auto" is intentionally not implemented.
+// (requires a reachable cluster).
 func buildApprovals(cfg *config.Config, exec action.Executor, log *slog.Logger) *action.Approvals {
 	if cfg.Actions.Mode != config.ActionApprove {
-		if cfg.Actions.Mode == config.ActionAuto {
-			log.Warn("action mode 'auto' is not implemented; approval is always required — use 'approve'")
-		}
 		return nil
 	}
 	if exec == nil {
@@ -400,6 +402,23 @@ func buildApprovals(cfg *config.Config, exec action.Executor, log *slog.Logger) 
 	}
 	log.Info("rung-2 approval-gated actions enabled (Flux suspend/resume/reconcile)")
 	return action.NewApprovals(exec, action.New(cfg.Actions), log)
+}
+
+// buildAuto enables rung-3 unattended execution for action mode "auto" (requires a
+// reachable cluster). Heavily gated: reversible-only, confidence-floored, rate-
+// limited, kill-switchable, and audited. Recommend dry_run before going live.
+func buildAuto(cfg *config.Config, exec action.Executor, log *slog.Logger) *action.Auto {
+	if cfg.Actions.Mode != config.ActionAuto {
+		return nil
+	}
+	if exec == nil {
+		log.Warn("auto-execution disabled: no cluster executor available")
+		return nil
+	}
+	a := cfg.Actions.Auto
+	log.Warn("rung-3 AUTO execution ENABLED — reversible actions execute WITHOUT human approval",
+		"dry_run", a.DryRun, "min_confidence", a.MinConfidence, "max_per_window", a.MaxPerWindow, "window", a.Window.Std().String())
+	return action.NewAuto(exec, a, log)
 }
 
 // buildCurator returns a Curator when the GitHub App token + KB repo are
@@ -578,7 +597,7 @@ func runInvestigate(args []string) error {
 
 // buildInvestigator returns the LLM ReAct investigator when a model is configured,
 // otherwise the read-only LogInvestigator.
-func buildInvestigator(ctx context.Context, cfg *config.Config, gp providers.GitOpsProvider, approvals *action.Approvals, log *slog.Logger) investigate.Investigator {
+func buildInvestigator(ctx context.Context, cfg *config.Config, gp providers.GitOpsProvider, approvals *action.Approvals, auto *action.Auto, log *slog.Logger) investigate.Investigator {
 	if cfg.Model.BaseURL == "" && cfg.Model.Provider != "anthropic" {
 		log.Info("no model configured; using log-only investigator")
 		return investigate.LogInvestigator{Log: log}
@@ -590,10 +609,7 @@ func buildInvestigator(ctx context.Context, cfg *config.Config, gp providers.Git
 	cur := buildCurator(cfg, buildForgeTokenSource(cfg, log), log)
 	actions := action.New(cfg.Actions)
 	if actions.Enabled() {
-		log.Info("action suggestions enabled", "mode", string(actions.Mode()))
-		if m := actions.Mode(); m == config.ActionApprove || m == config.ActionAuto {
-			log.Warn("action mode not yet implemented; actions are SUGGESTED only, never executed", "mode", string(m))
-		}
+		log.Info("action policy enabled", "mode", string(actions.Mode()))
 	}
 	return &investigate.LoopInvestigator{
 		Model:   model,
@@ -602,13 +618,20 @@ func buildInvestigator(ctx context.Context, cfg *config.Config, gp providers.Git
 		Actions: actions,
 		Recall:  recall,
 		OnComplete: func(found providers.Investigation) {
-			// Rung 2: register envelope-compliant actions for human approval and
-			// annotate each with how to approve it. (Rung 1 only suggests; rung 2 makes
-			// them executable after an explicit POST /actions/<id>/approve.)
-			if approvals != nil {
+			// Post-investigation action handling, by mode. The loop has already
+			// filtered found.Actions to the envelope (rung 1). auto and approvals are
+			// mutually exclusive (one is nil unless that mode is configured).
+			switch {
+			case auto != nil:
+				// Rung 3: evaluate + execute eligible actions (reversible/confidence/
+				// rate/kill-switch gated); descriptions are annotated with the outcome.
+				found.Actions = auto.Run(ctx, found)
+			case approvals != nil:
+				// Rung 2: register envelope-compliant actions for human approval; annotate
+				// with how to approve (curl) and the ApprovalID (Slack buttons).
 				for i := range found.Actions {
 					id := approvals.Register(found.Actions[i])
-					found.Actions[i].ApprovalID = id // drives Slack approve/reject buttons
+					found.Actions[i].ApprovalID = id
 					found.Actions[i].Description = fmt.Sprintf("%s — approve: POST /actions/%s/approve", found.Actions[i].Description, id)
 				}
 				if len(found.Actions) > 0 {
