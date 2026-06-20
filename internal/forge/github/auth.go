@@ -12,6 +12,7 @@ import (
 	"encoding/pem"
 	"fmt"
 	"net/http"
+	"strings"
 	"sync"
 	"time"
 )
@@ -30,10 +31,13 @@ type AppTokenSource struct {
 }
 
 // NewAppTokenSource builds a token source from an App ID, installation ID, and
-// RSA private key.
-func NewAppTokenSource(appID, installID int64, key *rsa.PrivateKey) *AppTokenSource {
+// RSA private key. baseURL may be empty (defaults to DefaultBaseURL).
+func NewAppTokenSource(baseURL string, appID, installID int64, key *rsa.PrivateKey) *AppTokenSource {
+	if baseURL == "" {
+		baseURL = DefaultBaseURL
+	}
 	return &AppTokenSource{appID: appID, installID: installID, key: key,
-		baseURL: "https://api.github.com", http: &http.Client{Timeout: 30 * time.Second}}
+		baseURL: strings.TrimRight(baseURL, "/"), http: &http.Client{Timeout: 30 * time.Second}}
 }
 
 // Token returns a valid installation token, refreshing when near expiry.
