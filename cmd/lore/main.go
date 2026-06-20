@@ -15,6 +15,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 
 	"k8s.io/client-go/dynamic"
@@ -23,6 +24,7 @@ import (
 
 	"github.com/Smana/runlore/internal/catalog"
 	"github.com/Smana/runlore/internal/config"
+	"github.com/Smana/runlore/internal/curator"
 	"github.com/Smana/runlore/internal/investigate"
 	openai "github.com/Smana/runlore/internal/model/openai"
 	"github.com/Smana/runlore/internal/notify"
@@ -31,6 +33,8 @@ import (
 	"github.com/Smana/runlore/internal/server"
 	"github.com/Smana/runlore/internal/trigger"
 	"github.com/Smana/runlore/internal/whatchanged"
+
+	github "github.com/Smana/runlore/internal/forge/github"
 )
 
 var version = "0.0.0-dev"
@@ -131,6 +135,37 @@ func buildNotifier(cfg *config.Config, log *slog.Logger) *notify.Multi {
 	return notify.NewMulti(log, ns...)
 }
 
+// buildCurator returns a Curator when a GitHub App + KB repo are configured, else nil.
+func buildCurator(cfg *config.Config, log *slog.Logger) *curator.Curator {
+	ga := cfg.Forge.GitHubApp
+	if ga.AppID == 0 || ga.InstallationID == 0 || ga.PrivateKeyEnv == "" || cfg.Forge.KBRepo == "" {
+		return nil
+	}
+	pemData := os.Getenv(ga.PrivateKeyEnv)
+	if pemData == "" {
+		log.Warn("curator disabled: empty private key env", "env", ga.PrivateKeyEnv)
+		return nil
+	}
+	key, err := github.ParsePrivateKey(pemData)
+	if err != nil {
+		log.Warn("curator disabled: bad private key", "err", err)
+		return nil
+	}
+	owner, repo, ok := strings.Cut(cfg.Forge.KBRepo, "/")
+	if !ok {
+		log.Warn("curator disabled: kb_repo must be owner/name", "kb_repo", cfg.Forge.KBRepo)
+		return nil
+	}
+	base := cfg.Forge.BaseBranch
+	if base == "" {
+		base = "main"
+	}
+	ts := github.NewAppTokenSource(ga.AppID, ga.InstallationID, key)
+	client := github.New(owner, repo, base, ts.Token)
+	log.Info("curator enabled", "repo", cfg.Forge.KBRepo)
+	return &curator.Curator{Issues: client, MinConfidencePR: 0.75, Log: log}
+}
+
 // buildInvestigator returns the LLM ReAct investigator when a model is configured,
 // otherwise the read-only LogInvestigator.
 func buildInvestigator(cfg *config.Config, fp *flux.Provider, log *slog.Logger) investigate.Investigator {
@@ -158,6 +193,7 @@ func buildInvestigator(cfg *config.Config, fp *flux.Provider, log *slog.Logger) 
 	log.Info("using LLM investigator", "model", cfg.Model.Model, "tools", len(tools))
 	notifier := buildNotifier(cfg, log)
 	log.Info("delivery notifiers", "count", notifier.Len())
+	cur := buildCurator(cfg, log)
 	return &investigate.LoopInvestigator{
 		Model: model,
 		Tools: tools,
@@ -167,6 +203,13 @@ func buildInvestigator(cfg *config.Config, fp *flux.Provider, log *slog.Logger) 
 				"confidence", found.Confidence, "root_causes", len(found.RootCauses), "unresolved", len(found.Unresolved))
 			if err := notifier.Deliver(context.Background(), found); err != nil {
 				log.Error("deliver findings", "err", err)
+			}
+			if cur != nil {
+				if ref, err := cur.Curate(context.Background(), found); err != nil {
+					log.Error("curate findings", "err", err)
+				} else if ref.URL != "" {
+					log.Info("curated", "url", ref.URL)
+				}
 			}
 		},
 	}
