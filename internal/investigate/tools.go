@@ -18,13 +18,9 @@ type Tool interface {
 
 // submitFindingsName is the reserved tool the model calls to finish, supplying
 // the structured investigation result.
-//
-//nolint:unused // consumed by LoopInvestigator (Task 3)
 const submitFindingsName = "submit_findings"
 
 // submitFindingsSpec advertises the structured-output tool to the model.
-//
-//nolint:unused // consumed by LoopInvestigator (Task 3)
 func submitFindingsSpec() providers.ToolSpec {
 	return providers.ToolSpec{
 		Name:        submitFindingsName,
