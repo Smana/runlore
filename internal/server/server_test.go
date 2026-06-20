@@ -9,16 +9,23 @@ import (
 	"testing"
 
 	"github.com/Smana/runlore/internal/config"
+	"github.com/Smana/runlore/internal/investigate"
 )
 
-func testServer() *Server {
+type spyEnqueuer struct{ reqs []investigate.Request }
+
+func (s *spyEnqueuer) Enqueue(r investigate.Request) { s.reqs = append(s.reqs, r) }
+
+func testServerWith(enq investigate.Enqueuer) *Server {
 	cfg := &config.Config{}
 	cfg.Triggers.Incidents = config.IncidentTrigger{
 		Enabled: true,
 		Match:   config.IncidentMatch{Severity: []string{"critical"}},
 	}
-	return New(cfg, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	return New(cfg, enq, slog.New(slog.NewTextHandler(io.Discard, nil)))
 }
+
+func testServer() *Server { return testServerWith(&spyEnqueuer{}) }
 
 func TestHandleAlertmanager(t *testing.T) {
 	body := `{"alerts":[{"status":"firing","labels":{"alertname":"A","severity":"critical","namespace":"apps"},"startsAt":"2026-06-20T03:14:00Z","fingerprint":"fp1"}]}`
@@ -45,5 +52,22 @@ func TestHealthz(t *testing.T) {
 	testServer().Handler().ServeHTTP(rr, req)
 	if rr.Code != http.StatusOK {
 		t.Fatalf("want 200, got %d", rr.Code)
+	}
+}
+
+func TestHandleAlertmanagerEnqueues(t *testing.T) {
+	enq := &spyEnqueuer{}
+	body := `{"alerts":[
+	  {"status":"firing","labels":{"alertname":"A","severity":"critical","namespace":"apps"},"startsAt":"2026-06-20T03:14:00Z","fingerprint":"fp1"},
+	  {"status":"firing","labels":{"alertname":"B","severity":"warning","namespace":"apps"},"startsAt":"2026-06-20T03:14:00Z","fingerprint":"fp2"}
+	]}`
+	req := httptest.NewRequest(http.MethodPost, "/webhook/alertmanager", strings.NewReader(body))
+	rr := httptest.NewRecorder()
+	testServerWith(enq).Handler().ServeHTTP(rr, req)
+	if rr.Code != http.StatusAccepted {
+		t.Fatalf("want 202, got %d", rr.Code)
+	}
+	if len(enq.reqs) != 1 || enq.reqs[0].Title != "A" {
+		t.Fatalf("want 1 enqueued (only critical A), got %v", enq.reqs)
 	}
 }
