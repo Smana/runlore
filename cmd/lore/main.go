@@ -116,7 +116,7 @@ func runServe(args []string) error {
 		}
 	}
 
-	inv := buildInvestigator(cfg, fluxProvider, log)
+	inv := buildInvestigator(ctx, cfg, fluxProvider, log)
 	queue := investigate.NewQueue(inv, log)
 
 	// startWork runs the leader-only loops (investigation queue + failure watch),
@@ -211,6 +211,46 @@ func podNamespace() string {
 	return "default"
 }
 
+// buildCatalog returns the kb_search backing store, or nil when no catalog is
+// configured. With a Git URL it starts a background syncer (running on every
+// replica, so a failover standby is already warm) that re-indexes after each pull;
+// otherwise it loads a static mounted directory once.
+func buildCatalog(ctx context.Context, cfg *config.Config, log *slog.Logger) catalog.Searcher {
+	if cfg.Catalog.Git.URL != "" {
+		dir := cfg.Catalog.Dir
+		if dir == "" {
+			dir = "/var/lib/runlore/catalog"
+		}
+		cat := catalog.NewEmpty()
+		var token catalog.TokenFunc
+		if env := cfg.Catalog.Git.TokenEnv; env != "" {
+			if t := os.Getenv(env); t != "" {
+				token = func(context.Context) (string, error) { return t, nil }
+			}
+		}
+		syncer := &catalog.Syncer{URL: cfg.Catalog.Git.URL, Branch: cfg.Catalog.Git.Branch, Dir: dir, Token: token, Log: log}
+		go syncer.Run(ctx, cfg.Catalog.Git.Interval.Std(), func() {
+			if err := cat.Reload(dir); err != nil {
+				log.Warn("catalog reload failed", "dir", dir, "err", err)
+				return
+			}
+			log.Info("catalog synced", "url", cfg.Catalog.Git.URL, "entries", cat.Len())
+		})
+		log.Info("catalog git-sync enabled", "url", cfg.Catalog.Git.URL, "dir", dir)
+		return cat
+	}
+	if cfg.Catalog.Dir != "" {
+		cat, err := catalog.New(cfg.Catalog.Dir)
+		if err != nil {
+			log.Warn("catalog disabled", "dir", cfg.Catalog.Dir, "err", err)
+			return nil
+		}
+		log.Info("catalog loaded", "dir", cfg.Catalog.Dir, "entries", cat.Len())
+		return cat
+	}
+	return nil
+}
+
 // buildNotifier assembles the configured chat notifiers (best-effort fan-out).
 func buildNotifier(cfg *config.Config, log *slog.Logger) *notify.Multi {
 	var ns []providers.Notifier
@@ -260,7 +300,7 @@ func buildCurator(cfg *config.Config, log *slog.Logger) *curator.Curator {
 
 // buildInvestigator returns the LLM ReAct investigator when a model is configured,
 // otherwise the read-only LogInvestigator.
-func buildInvestigator(cfg *config.Config, fp *flux.Provider, log *slog.Logger) investigate.Investigator {
+func buildInvestigator(ctx context.Context, cfg *config.Config, fp *flux.Provider, log *slog.Logger) investigate.Investigator {
 	if cfg.Model.BaseURL == "" {
 		log.Info("no model configured; using log-only investigator")
 		return investigate.LogInvestigator{Log: log}
@@ -274,13 +314,8 @@ func buildInvestigator(cfg *config.Config, fp *flux.Provider, log *slog.Logger) 
 	if fp != nil {
 		tools = append(tools, investigate.WhatChangedTool{GitOps: fp})
 	}
-	if cfg.Catalog.Dir != "" {
-		if cat, err := catalog.New(cfg.Catalog.Dir); err != nil {
-			log.Warn("catalog disabled", "dir", cfg.Catalog.Dir, "err", err)
-		} else {
-			log.Info("catalog loaded", "dir", cfg.Catalog.Dir, "entries", cat.Len())
-			tools = append(tools, investigate.KBSearchTool{Catalog: cat})
-		}
+	if cat := buildCatalog(ctx, cfg, log); cat != nil {
+		tools = append(tools, investigate.KBSearchTool{Catalog: cat})
 	}
 	log.Info("using LLM investigator", "model", cfg.Model.Model, "tools", len(tools))
 	notifier := buildNotifier(cfg, log)

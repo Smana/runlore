@@ -35,9 +35,20 @@ type LeaderElection struct {
 	Name    string `yaml:"name"` // Lease name (default "runlore-leader")
 }
 
-// Catalog configures the OKF knowledge catalog read by the agent.
+// Catalog configures the OKF knowledge catalog read by the agent. Provide either
+// a mounted Dir (e.g. a ConfigMap) or a Git repo to sync (which closes the
+// read/write loop — the curator's merged PRs flow back into what the agent reads).
 type Catalog struct {
-	Dir string `yaml:"dir"` // path to the OKF bundle (a local dir / mounted mirror)
+	Dir string     `yaml:"dir"` // OKF bundle path (mounted ConfigMap, or the git-sync mirror)
+	Git CatalogGit `yaml:"git"`
+}
+
+// CatalogGit configures periodic Git sync of the catalog into Dir.
+type CatalogGit struct {
+	URL      string   `yaml:"url"`       // repo to clone/pull; empty disables git-sync
+	Branch   string   `yaml:"branch"`    // default "main"
+	Interval Duration `yaml:"interval"`  // re-sync period (default 5m)
+	TokenEnv string   `yaml:"token_env"` // env var with a read token (empty = anonymous/public)
 }
 
 // Model configures the OpenAI-compatible LLM endpoint used for investigation.
