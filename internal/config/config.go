@@ -150,6 +150,7 @@ func (d *Duration) UnmarshalYAML(value *yaml.Node) error {
 // Default (zero value) is read-only.
 type ActionMode string
 
+// Action modes, from read-only to autonomous.
 const (
 	ActionOff     ActionMode = "off"     // read-only (default): no action tools registered
 	ActionSuggest ActionMode = "suggest" // propose a command/PR; never execute
