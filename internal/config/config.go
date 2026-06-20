@@ -8,6 +8,7 @@ package config
 
 import (
 	"path"
+	"slices"
 	"time"
 
 	"gopkg.in/yaml.v3"
@@ -82,10 +83,10 @@ func (t IncidentTrigger) Matches(inc Incident) bool {
 
 // matches reports whether the incident satisfies every non-empty criterion.
 func (m IncidentMatch) matches(inc Incident) bool {
-	if len(m.Severity) > 0 && !contains(m.Severity, inc.Severity) {
+	if len(m.Severity) > 0 && !slices.Contains(m.Severity, inc.Severity) {
 		return false
 	}
-	if len(m.Environment) > 0 && !contains(m.Environment, inc.Environment) {
+	if len(m.Environment) > 0 && !slices.Contains(m.Environment, inc.Environment) {
 		return false
 	}
 	if len(m.Namespaces) > 0 && !globAny(m.Namespaces, inc.Namespace) {
@@ -106,15 +107,6 @@ func (m IncidentMatch) matches(inc Incident) bool {
 func (m IncidentMatch) isEmpty() bool {
 	return len(m.Severity) == 0 && len(m.Environment) == 0 &&
 		len(m.Namespaces) == 0 && len(m.AlertNames) == 0 && len(m.Labels) == 0
-}
-
-func contains(xs []string, s string) bool {
-	for _, x := range xs {
-		if x == s {
-			return true
-		}
-	}
-	return false
 }
 
 func globAny(patterns []string, s string) bool {

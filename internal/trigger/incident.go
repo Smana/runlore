@@ -3,6 +3,7 @@
 package trigger
 
 import (
+	"cmp"
 	"encoding/json"
 	"io"
 	"time"
@@ -39,7 +40,7 @@ func ParseAlertmanager(r io.Reader) ([]config.Incident, error) {
 		out = append(out, config.Incident{
 			AlertName:   a.Labels["alertname"],
 			Severity:    a.Labels["severity"],
-			Environment: firstNonEmpty(a.Labels["environment"], a.Labels["env"]),
+			Environment: cmp.Or(a.Labels["environment"], a.Labels["env"]),
 			Namespace:   a.Labels["namespace"],
 			Labels:      a.Labels,
 			StartsAt:    startsAt,
@@ -47,13 +48,4 @@ func ParseAlertmanager(r io.Reader) ([]config.Incident, error) {
 		})
 	}
 	return out, nil
-}
-
-func firstNonEmpty(xs ...string) string {
-	for _, x := range xs {
-		if x != "" {
-			return x
-		}
-	}
-	return ""
 }

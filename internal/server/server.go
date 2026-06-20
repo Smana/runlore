@@ -11,23 +11,26 @@ import (
 
 // Server handles incoming incident webhooks and applies the trigger policy.
 type Server struct {
-	engine *trigger.Engine
-	log    *slog.Logger
+	engine  *trigger.Engine
+	log     *slog.Logger
+	handler http.Handler
 }
 
-// New builds a Server from config.
+// New builds a Server from config, wiring its routes once.
 func New(cfg *config.Config, log *slog.Logger) *Server {
-	return &Server{engine: trigger.NewEngine(cfg.Triggers.Incidents), log: log}
-}
-
-// Handler returns the HTTP mux (Go 1.22+ method routing).
-func (s *Server) Handler() http.Handler {
+	s := &Server{engine: trigger.NewEngine(cfg.Triggers.Incidents), log: log}
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /webhook/alertmanager", s.handleAlertmanager)
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusOK)
 	})
-	return mux
+	s.handler = mux
+	return s
+}
+
+// Handler returns the HTTP handler (built once at construction; Go 1.22+ method routing).
+func (s *Server) Handler() http.Handler {
+	return s.handler
 }
 
 func (s *Server) handleAlertmanager(w http.ResponseWriter, r *http.Request) {
