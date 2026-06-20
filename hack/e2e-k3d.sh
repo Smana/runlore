@@ -112,6 +112,8 @@ helm upgrade --install runlore deploy/helm/runlore -n "$NS" \
   --set-string config.notify.matrix.homeserver="http://$HOST:$MOCK_PORT" \
   --set-string config.notify.matrix.room_id='!test:mock' \
   --set-string config.notify.matrix.access_token_env=MATRIX_TOKEN \
+  --set-string config.metrics.url="http://$HOST:$MOCK_PORT" \
+  --set-string config.logs.url="http://$HOST:$MOCK_PORT" \
   --set-string config.forge.github_api_url="http://$HOST:$MOCK_PORT" \
   --set-string config.forge.kb_repo="mock/repo" \
   --set-string config.forge.base_branch="main" \
@@ -147,6 +149,10 @@ check "investigation completed (findings)"   /tmp/runlore.log 'msg=findings'
 check "mock model received chat/completions"  /tmp/runlore-mock.log 'chat/completions'
 check "mock model drove what_changed"         /tmp/runlore-mock.log '> what_changed'
 check "mock model drove kb_search"            /tmp/runlore-mock.log '> kb_search'
+check "mock model drove query_metrics"        /tmp/runlore-mock.log '> query_metrics'
+check "mock model drove query_logs"           /tmp/runlore-mock.log '> query_logs'
+check "metrics backend queried"               /tmp/runlore-mock.log 'MOCK METRICS'
+check "logs backend queried"                  /tmp/runlore-mock.log 'MOCK LOGS'
 check "mock model drove submit_findings"      /tmp/runlore-mock.log '> submit_findings'
 check "Slack delivery"                         /tmp/runlore-mock.log 'MOCK SLACK'
 check "Matrix delivery"                        /tmp/runlore-mock.log 'MOCK MATRIX'
