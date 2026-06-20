@@ -4,12 +4,15 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
+	"sync"
 
 	"github.com/blevesearch/bleve/v2"
 )
 
-// Catalog is an in-memory BM25 index over OKF entries.
+// Catalog is an in-memory BM25 index over OKF entries. It is safe for concurrent
+// Search while a background sync calls Reload (the index is swapped atomically).
 type Catalog struct {
+	mu      sync.RWMutex
 	index   bleve.Index
 	entries []Entry
 }
@@ -21,10 +24,37 @@ type Searcher interface {
 
 // New loads the OKF bundle at dir and builds an in-memory index.
 func New(dir string) (*Catalog, error) {
-	entries, err := Load(dir)
-	if err != nil {
+	c := &Catalog{}
+	if err := c.Reload(dir); err != nil {
 		return nil, err
 	}
+	return c, nil
+}
+
+// NewEmpty returns a catalog with no entries — used before the first git sync.
+func NewEmpty() *Catalog {
+	idx, _ := bleve.NewMemOnly(bleve.NewIndexMapping())
+	return &Catalog{index: idx}
+}
+
+// Reload rebuilds the index from dir and swaps it in atomically. The new index is
+// built outside the lock so concurrent Search is only blocked for the swap.
+func (c *Catalog) Reload(dir string) error {
+	entries, err := Load(dir)
+	if err != nil {
+		return err
+	}
+	idx, err := buildIndex(entries)
+	if err != nil {
+		return err
+	}
+	c.mu.Lock()
+	c.index, c.entries = idx, entries
+	c.mu.Unlock()
+	return nil
+}
+
+func buildIndex(entries []Entry) (bleve.Index, error) {
 	idx, err := bleve.NewMemOnly(bleve.NewIndexMapping())
 	if err != nil {
 		return nil, fmt.Errorf("new index: %w", err)
@@ -38,16 +68,25 @@ func New(dir string) (*Catalog, error) {
 			return nil, fmt.Errorf("index entry %d: %w", i, err)
 		}
 	}
-	return &Catalog{index: idx, entries: entries}, nil
+	return idx, nil
 }
 
 // Len reports the number of indexed entries.
-func (c *Catalog) Len() int { return len(c.entries) }
+func (c *Catalog) Len() int {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return len(c.entries)
+}
 
 var _ Searcher = (*Catalog)(nil)
 
 // Search returns up to k entries best matching the query (BM25).
 func (c *Catalog) Search(query string, k int) ([]Entry, error) {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	if c.index == nil {
+		return nil, nil
+	}
 	q := bleve.NewMatchQuery(query)
 	q.SetField("text")
 	req := bleve.NewSearchRequestOptions(q, k, 0, false)
