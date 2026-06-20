@@ -14,10 +14,10 @@ forge (issues/PRs on a repo you designate).
 - A Kubernetes cluster running **Flux** or **Argo CD** — select with `config.gitops.engine`
   (`flux` default, or `argocd`). The what-changed spine + failure trigger read the engine's resources
   (Flux `Kustomization`/`GitRepository`, or Argo CD `Application`s).
-- An **OpenAI-compatible** model endpoint — in-cluster [vLLM](https://github.com/vllm-project/vllm),
-  [Ollama](https://ollama.com/), OpenAI, or OpenRouter. (Native Anthropic is on the roadmap; today,
-  reach Claude via an OpenAI-compatible gateway such as OpenRouter.) Keep it in-cluster if you don't
-  want telemetry to leave your boundary.
+- An **LLM** — either an **OpenAI-compatible** endpoint (in-cluster
+  [vLLM](https://github.com/vllm-project/vllm), [Ollama](https://ollama.com/), OpenAI, OpenRouter) or
+  **native Anthropic** (`model.provider: anthropic`). Keep it in-cluster if you don't want telemetry to
+  leave your boundary.
 - `kubectl` + `helm` (v3.12+).
 - Optional: a **metrics** backend (VictoriaMetrics/Prometheus), a **logs** backend (VictoriaLogs),
   and/or **Cilium Hubble** (Relay) — they enable the `query_metrics` / `query_logs` / `network_drops`
@@ -176,6 +176,10 @@ config:
     base_url: http://vllm.llm.svc:8000/v1   # any OpenAI-compatible endpoint
     model: <your-model-name>
     api_key_env: OPENAI_API_KEY             # omit/empty for keyless (in-cluster vLLM/Ollama)
+    # — or native Anthropic instead:
+    # provider: anthropic
+    # model: claude-sonnet-4-6
+    # api_key_env: ANTHROPIC_API_KEY        # base_url defaults to api.anthropic.com
   catalog:
     dir: /var/lib/runlore/catalog           # must match catalog.mountPath above
     git:                                     # omit this block if using a static ConfigMap
