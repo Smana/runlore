@@ -94,3 +94,15 @@ func paths(fs []providersFileDiff) []string {
 	}
 	return out
 }
+
+func TestRemoteFromLocalSource(t *testing.T) {
+	// Use the temp repo as the clone source (local transport, no auth/network).
+	dir, v1, v2 := buildRepo(t)
+	d, err := (&Differ{}).Remote(dir, v1.String(), v2.String(), "apps/harbor")
+	if err != nil {
+		t.Fatalf("Remote: %v", err)
+	}
+	if len(d.Files) != 1 || d.Files[0].Path != "apps/harbor/values.yaml" {
+		t.Fatalf("unexpected remote diff: %v", paths(d.Files))
+	}
+}
