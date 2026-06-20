@@ -93,6 +93,9 @@ hack/e2e-k3d.sh
 
 # run the agent against incident webhooks
 lore serve --config runlore.yaml
+
+# or investigate one incident on-demand from your terminal (prints the findings)
+lore investigate --alert HarborProbeFailure --namespace apps --config runlore.yaml
 ```
 
 ## Status & docs

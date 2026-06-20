@@ -57,7 +57,7 @@ var version = "0.0.0-dev"
 const usage = `lore — the RunLore SRE agent
 
 Usage:
-  lore investigate [--alert <name>] [--since <dur>]   investigate an alert/symptom (on-demand)
+  lore investigate --alert <name> [--namespace <ns>] [--message <text>]   investigate on-demand, print findings
   lore serve [--config <path>] [--addr <addr>]        run the in-cluster agent (react to incidents)
   lore catalog sync                                   sync + index the knowledge catalog
   lore eval [--config <path>] [--cases <dir>]         replay incident cases, score RCA identification
@@ -84,7 +84,12 @@ func main() {
 			fmt.Fprintln(os.Stderr, "eval:", err)
 			os.Exit(1)
 		}
-	case "investigate", "catalog":
+	case "investigate":
+		if err := runInvestigate(os.Args[2:]); err != nil {
+			fmt.Fprintln(os.Stderr, "investigate:", err)
+			os.Exit(1)
+		}
+	case "catalog":
 		fmt.Printf("lore %s: not yet implemented (scaffold). See docs/design.md\n", os.Args[1])
 		os.Exit(1)
 	default:
@@ -415,13 +420,9 @@ func buildCurator(cfg *config.Config, token forgeToken, log *slog.Logger) *curat
 	return &curator.Curator{Issues: client, MinConfidencePR: 0.75, Log: log}
 }
 
-// buildInvestigator returns the LLM ReAct investigator when a model is configured,
-// otherwise the read-only LogInvestigator.
-func buildInvestigator(ctx context.Context, cfg *config.Config, gp providers.GitOpsProvider, approvals *action.Approvals, log *slog.Logger) investigate.Investigator {
-	if cfg.Model.BaseURL == "" && cfg.Model.Provider != "anthropic" {
-		log.Info("no model configured; using log-only investigator")
-		return investigate.LogInvestigator{Log: log}
-	}
+// buildModelAndTools assembles the model, investigation tools, and the instant-recall
+// short-circuit from config + the GitOps provider. Shared by serve and investigate.
+func buildModelAndTools(ctx context.Context, cfg *config.Config, gp providers.GitOpsProvider, log *slog.Logger) (providers.ModelProvider, []investigate.Tool, *investigate.Recall) {
 	apiKey := ""
 	if cfg.Model.APIKeyEnv != "" {
 		apiKey = os.Getenv(cfg.Model.APIKeyEnv)
@@ -449,10 +450,84 @@ func buildInvestigator(ctx context.Context, cfg *config.Config, gp providers.Git
 	if cfg.Network.URL != "" {
 		tools = append(tools, investigate.NetworkDropsTool{Network: hubble.New(cfg.Network.URL)})
 	}
+	return model, tools, recall
+}
+
+// gitOpsFromKube builds the GitOps provider from the ambient kubeconfig (best-effort).
+func gitOpsFromKube(cfg *config.Config, log *slog.Logger) providers.GitOpsProvider {
+	restCfg, err := restConfig()
+	if err != nil {
+		log.Warn("no kube client; what-changed disabled", "err", err)
+		return nil
+	}
+	dc, err := dynamic.NewForConfig(restCfg)
+	if err != nil {
+		log.Warn("dynamic client unavailable; what-changed disabled", "err", err)
+		return nil
+	}
+	return buildGitOps(cfg, dc, log)
+}
+
+// runInvestigate runs a single on-demand investigation and prints the findings.
+func runInvestigate(args []string) error {
+	fs := flag.NewFlagSet("investigate", flag.ContinueOnError)
+	cfgPath := fs.String("config", "runlore.yaml", "path to config file")
+	alert := fs.String("alert", "", "alert/symptom name to investigate")
+	namespace := fs.String("namespace", "", "namespace of the affected workload")
+	message := fs.String("message", "", "free-text symptom description")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if *alert == "" && *message == "" {
+		return fmt.Errorf("provide --alert and/or --message")
+	}
+	cfg, err := config.Load(*cfgPath)
+	if err != nil {
+		return err
+	}
+	if cfg.Model.BaseURL == "" && cfg.Model.Provider != "anthropic" {
+		return fmt.Errorf("investigate requires a configured model (set config.model)")
+	}
+	// Progress logs go to stderr; the findings go to stdout.
+	log := slog.New(slog.NewTextHandler(os.Stderr, nil))
+	ctx := context.Background()
+
+	model, tools, recall := buildModelAndTools(ctx, cfg, gitOpsFromKube(cfg, log), log)
+	var result *providers.Investigation
+	li := &investigate.LoopInvestigator{
+		Model: model, Tools: tools, Recall: recall, Actions: action.New(cfg.Actions), Log: log,
+		OnComplete: func(inv providers.Investigation) { result = &inv },
+	}
+	title := *alert
+	if title == "" {
+		title = "on-demand investigation"
+	}
+	req := investigate.Request{
+		Source: investigate.SourceAlert, Title: title, Message: *message,
+		Workload: providers.Workload{Namespace: *namespace},
+	}
+	if err := li.Investigate(ctx, req); err != nil {
+		return err
+	}
+	if result == nil {
+		return fmt.Errorf("investigation produced no findings")
+	}
+	fmt.Println(notify.Format(*result))
+	return nil
+}
+
+// buildInvestigator returns the LLM ReAct investigator when a model is configured,
+// otherwise the read-only LogInvestigator.
+func buildInvestigator(ctx context.Context, cfg *config.Config, gp providers.GitOpsProvider, approvals *action.Approvals, log *slog.Logger) investigate.Investigator {
+	if cfg.Model.BaseURL == "" && cfg.Model.Provider != "anthropic" {
+		log.Info("no model configured; using log-only investigator")
+		return investigate.LogInvestigator{Log: log}
+	}
+	model, tools, recall := buildModelAndTools(ctx, cfg, gp, log)
 	log.Info("using LLM investigator", "provider", modelProvider(cfg), "model", cfg.Model.Model, "tools", len(tools))
 	notifier := buildNotifier(cfg, log)
 	log.Info("delivery notifiers", "count", notifier.Len())
-	cur := buildCurator(cfg, forgeTok, log)
+	cur := buildCurator(cfg, buildForgeTokenSource(cfg, log), log)
 	actions := action.New(cfg.Actions)
 	if actions.Enabled() {
 		log.Info("action suggestions enabled", "mode", string(actions.Mode()))
@@ -527,10 +602,11 @@ func buildGitOps(cfg *config.Config, dc dynamic.Interface, log *slog.Logger) pro
 }
 
 // restConfig builds a Kubernetes REST config from in-cluster config, falling back
-// to the default kubeconfig.
+// to the local kubeconfig (respecting $KUBECONFIG, then ~/.kube/config).
 func restConfig() (*rest.Config, error) {
 	if cfg, err := rest.InClusterConfig(); err == nil {
 		return cfg, nil
 	}
-	return clientcmd.BuildConfigFromFlags("", clientcmd.RecommendedHomeFile)
+	rules := clientcmd.NewDefaultClientConfigLoadingRules()
+	return clientcmd.NewNonInteractiveDeferredLoadingClientConfig(rules, &clientcmd.ConfigOverrides{}).ClientConfig()
 }
