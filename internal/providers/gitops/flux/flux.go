@@ -18,6 +18,9 @@ type kustomization struct {
 	SourceName      string // spec.sourceRef.name
 	SourceNamespace string // spec.sourceRef.namespace (defaults to the Kustomization namespace)
 	Revision        string // status.lastAppliedRevision
+	ReadyStatus     string // status.conditions[type=Ready].status ("True"/"False"/"Unknown")
+	ReadyReason     string
+	ReadyMessage    string
 }
 
 // gitRepository is the minimal Flux GitRepository data the provider needs.

@@ -56,3 +56,23 @@ func TestDynamicReader(t *testing.T) {
 		t.Fatalf("unexpected url: %q", gr.URL)
 	}
 }
+
+func TestKustomizationReadyCondition(t *testing.T) {
+	u := &unstructured.Unstructured{Object: map[string]any{
+		"apiVersion": "kustomize.toolkit.fluxcd.io/v1",
+		"kind":       "Kustomization",
+		"metadata":   map[string]any{"name": "apps", "namespace": "flux-system"},
+		"spec":       map[string]any{"path": "./apps", "sourceRef": map[string]any{"name": "flux-system"}},
+		"status": map[string]any{
+			"lastAppliedRevision": "main@sha1:abc",
+			"conditions": []any{
+				map[string]any{"type": "Healthy", "status": "True"},
+				map[string]any{"type": "Ready", "status": "False", "reason": "BuildFailed", "message": "kustomize build failed"},
+			},
+		},
+	}}
+	k := kustomizationFromUnstructured(u)
+	if k.ReadyStatus != "False" || k.ReadyReason != "BuildFailed" || k.ReadyMessage != "kustomize build failed" {
+		t.Fatalf("unexpected ready condition: %+v", k)
+	}
+}
