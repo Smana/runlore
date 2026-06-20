@@ -81,23 +81,25 @@ flowchart LR
 
 ## Quickstart
 
-> Early development — the React foundation (`lore serve`) works today; the investigation loop is landing.
+**Deploy to a cluster** → **[Getting Started](docs/getting-started.md)**: create a knowledge-base repo,
+a scoped GitHub App, the secrets, then `helm install`. **Hack on it** → **[CONTRIBUTING](CONTRIBUTING.md)**.
 
 ```bash
-go build ./...
-
-# end-to-end demo: fire mocked Alertmanager alerts through the trigger policy
+# try it locally, no cluster: fire mocked Alertmanager alerts through the trigger policy
 hack/demo.sh
 
-# run the agent: react to incident webhooks per your trigger policy
+# verify every feature end-to-end on a throwaway k3d cluster (20 checks)
+hack/e2e-k3d.sh
+
+# run the agent against incident webhooks
 lore serve --config runlore.yaml
 ```
 
 ## Status & docs
 
-- 📐 [Design](docs/design.md) · [Prior art & positioning](docs/prior-art.md) · [Plans](docs/plans/)
-- ✅ Phase 1 — React foundation (trigger policy + `lore serve`)
-- 🚧 What-changed spine (Git revision diffing) → GitOps providers (Flux/Argo) → correlation → catalog → investigation loop
+- 📐 [Design](docs/design.md) · 🚀 [Getting started](docs/getting-started.md) · 🛠 [Contributing](CONTRIBUTING.md) · [Prior art](docs/prior-art.md) · [Plans](docs/plans/)
+- ✅ **End-to-end working** (verified on k3d): **React** (incident webhook + Flux failure watch, policy-gated) → **Investigate** (ReAct loop over an OpenAI-compatible model + `what_changed` + `kb_search`) → **Deliver** (Slack/Matrix) → **Learn** (OKF catalog read + curator PRs/issues). Packaged Helm chart with **HA via leader election**.
+- 🚧 Next: more investigation tools (metrics/logs/network), catalog Git-sync, ArgoCD provider, native Anthropic.
 
 ## License
 
