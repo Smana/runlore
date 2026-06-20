@@ -81,7 +81,7 @@ func runServe(args []string) error {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	queue := investigate.NewQueue(investigate.LogInvestigator{Log: log}, log, 64)
+	queue := investigate.NewQueue(investigate.LogInvestigator{Log: log}, log)
 	go queue.Run(ctx)
 
 	// Best-effort GitOps-failure watch: only if enabled and a cluster is reachable.

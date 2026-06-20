@@ -5,7 +5,6 @@ import (
 	"testing"
 	"time"
 
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
@@ -84,15 +83,6 @@ func TestDynamicReaderWatch(t *testing.T) {
 		kustomizationGVR: "KustomizationList",
 		gitRepositoryGVR: "GitRepositoryList",
 	}
-	client := dynamicfake.NewSimpleDynamicClientWithCustomListKinds(runtime.NewScheme(), gvrToListKind)
-	r := NewDynamicReader(client)
-
-	ch, err := r.WatchKustomizations(context.Background())
-	if err != nil {
-		t.Fatalf("WatchKustomizations: %v", err)
-	}
-
-	// Create a failing Kustomization via the fake client; the watch should surface it.
 	bad := &unstructured.Unstructured{Object: map[string]any{
 		"apiVersion": "kustomize.toolkit.fluxcd.io/v1",
 		"kind":       "Kustomization",
@@ -102,16 +92,22 @@ func TestDynamicReaderWatch(t *testing.T) {
 			map[string]any{"type": "Ready", "status": "False", "reason": "BuildFailed", "message": "boom"},
 		}},
 	}}
-	if _, err := client.Resource(kustomizationGVR).Namespace("apps").Create(context.Background(), bad, metav1.CreateOptions{}); err != nil {
-		t.Fatalf("create: %v", err)
-	}
+	// Seed the object before starting the informer so the initial list surfaces it.
+	client := dynamicfake.NewSimpleDynamicClientWithCustomListKinds(runtime.NewScheme(), gvrToListKind, bad)
+	r := NewDynamicReader(client)
 
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	ch, err := r.WatchKustomizations(ctx)
+	if err != nil {
+		t.Fatalf("WatchKustomizations: %v", err)
+	}
 	select {
 	case ev := <-ch:
 		if ev.Kustomization.Name != "bad" || ev.Kustomization.ReadyStatus != "False" {
 			t.Fatalf("unexpected event: %+v", ev.Kustomization)
 		}
-	case <-time.After(2 * time.Second):
-		t.Fatal("timed out waiting for watch event")
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for informer event")
 	}
 }

@@ -7,7 +7,10 @@ package investigate
 import (
 	"context"
 	"log/slog"
+	"sync"
 	"time"
+
+	"k8s.io/client-go/util/workqueue"
 
 	"github.com/Smana/runlore/internal/config"
 	"github.com/Smana/runlore/internal/providers"
@@ -82,38 +85,80 @@ type Enqueuer interface {
 	Enqueue(r Request)
 }
 
-// Queue is a buffered, single-worker investigation queue.
+// key is the comparable workqueue item; duplicate triggers with the same key
+// coalesce. The full Request payload is held in Queue.reqs.
+type key struct {
+	Source    Source
+	Namespace string
+	Name      string
+	Title     string
+}
+
+func keyOf(r Request) key {
+	return key{Source: r.Source, Namespace: r.Workload.Namespace, Name: r.Workload.Name, Title: r.Title}
+}
+
+// Queue is a rate-limiting investigation queue: duplicate triggers coalesce, and
+// failed investigations are retried with exponential backoff.
 type Queue struct {
-	ch  chan Request
-	inv Investigator
-	log *slog.Logger
+	wq   workqueue.TypedRateLimitingInterface[key]
+	mu   sync.Mutex
+	reqs map[key]Request
+	inv  Investigator
+	log  *slog.Logger
 }
 
-// NewQueue builds a Queue with the given buffer size.
-func NewQueue(inv Investigator, log *slog.Logger, buffer int) *Queue {
-	return &Queue{ch: make(chan Request, buffer), inv: inv, log: log}
-}
-
-// Enqueue submits a request. If the buffer is full it logs and drops (backpressure)
-// rather than blocking the caller (e.g. the webhook handler).
-func (q *Queue) Enqueue(r Request) {
-	select {
-	case q.ch <- r:
-	default:
-		q.log.Warn("investigation queue full; dropping", "title", r.Title, "source", string(r.Source))
+// NewQueue builds an investigation queue.
+func NewQueue(inv Investigator, log *slog.Logger) *Queue {
+	return &Queue{
+		wq:   workqueue.NewTypedRateLimitingQueue(workqueue.DefaultTypedControllerRateLimiter[key]()),
+		reqs: map[key]Request{},
+		inv:  inv,
+		log:  log,
 	}
+}
+
+// Enqueue submits a request. Re-enqueuing the same key before it is processed
+// coalesces (latest payload wins).
+func (q *Queue) Enqueue(r Request) {
+	k := keyOf(r)
+	q.mu.Lock()
+	q.reqs[k] = r
+	q.mu.Unlock()
+	q.wq.Add(k)
 }
 
 // Run consumes the queue until ctx is done.
 func (q *Queue) Run(ctx context.Context) {
+	go func() {
+		<-ctx.Done()
+		q.wq.ShutDown()
+	}()
 	for {
-		select {
-		case <-ctx.Done():
+		k, shutdown := q.wq.Get()
+		if shutdown {
 			return
-		case r := <-q.ch:
-			if err := q.inv.Investigate(ctx, r); err != nil {
-				q.log.Error("investigation failed", "title", r.Title, "err", err)
-			}
 		}
+		q.process(ctx, k)
 	}
+}
+
+func (q *Queue) process(ctx context.Context, k key) {
+	defer q.wq.Done(k)
+	q.mu.Lock()
+	r, ok := q.reqs[k]
+	q.mu.Unlock()
+	if !ok {
+		q.wq.Forget(k)
+		return
+	}
+	if err := q.inv.Investigate(ctx, r); err != nil {
+		q.log.Error("investigation failed; retrying", "title", r.Title, "err", err)
+		q.wq.AddRateLimited(k)
+		return
+	}
+	q.wq.Forget(k)
+	q.mu.Lock()
+	delete(q.reqs, k)
+	q.mu.Unlock()
 }
