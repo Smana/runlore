@@ -1,6 +1,7 @@
 package server
 
 import (
+	"context"
 	"io"
 	"log/slog"
 	"net/http"
@@ -8,13 +9,53 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/Smana/runlore/internal/action"
 	"github.com/Smana/runlore/internal/config"
 	"github.com/Smana/runlore/internal/investigate"
+	"github.com/Smana/runlore/internal/providers"
 )
 
 type spyEnqueuer struct{ reqs []investigate.Request }
 
 func (s *spyEnqueuer) Enqueue(r investigate.Request) { s.reqs = append(s.reqs, r) }
+
+type recordExec struct{ ran []providers.Action }
+
+func (r *recordExec) Execute(_ context.Context, a providers.Action) error {
+	r.ran = append(r.ran, a)
+	return nil
+}
+
+func TestActionsApprove(t *testing.T) {
+	exec := &recordExec{}
+	pol := action.New(config.ActionPolicy{Mode: config.ActionApprove, Allow: config.ActionAllow{ReversibleOnly: true}})
+	ap := action.NewApprovals(exec, pol, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	id := ap.Register(providers.Action{Op: "suspend", Reversible: true, Target: providers.Workload{Kind: "Kustomization", Name: "apps", Namespace: "flux-system"}})
+
+	srv := New(&config.Config{}, &spyEnqueuer{}, nil, ap, "secret", slog.New(slog.NewTextHandler(io.Discard, nil)))
+
+	// Missing token → 403, nothing executes.
+	rr := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rr, httptest.NewRequest(http.MethodPost, "/actions/"+id+"/approve", nil))
+	if rr.Code != http.StatusForbidden {
+		t.Fatalf("no-token approve = %d, want 403", rr.Code)
+	}
+	if len(exec.ran) != 0 {
+		t.Fatal("executor ran without a valid token")
+	}
+
+	// With token → executes.
+	req := httptest.NewRequest(http.MethodPost, "/actions/"+id+"/approve", nil)
+	req.Header.Set("X-Approval-Token", "secret")
+	rr = httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("approve = %d, want 200", rr.Code)
+	}
+	if len(exec.ran) != 1 || exec.ran[0].Op != "suspend" {
+		t.Fatalf("executor not run as expected: %+v", exec.ran)
+	}
+}
 
 func testServerWith(enq investigate.Enqueuer) *Server {
 	cfg := &config.Config{}
@@ -22,7 +63,7 @@ func testServerWith(enq investigate.Enqueuer) *Server {
 		Enabled: true,
 		Match:   config.IncidentMatch{Severity: []string{"critical"}},
 	}
-	return New(cfg, enq, nil, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	return New(cfg, enq, nil, nil, "", slog.New(slog.NewTextHandler(io.Discard, nil)))
 }
 
 func testServer() *Server { return testServerWith(&spyEnqueuer{}) }
@@ -30,7 +71,7 @@ func testServer() *Server { return testServerWith(&spyEnqueuer{}) }
 func TestReadyz(t *testing.T) {
 	cfg := &config.Config{}
 	leader := false
-	srv := New(cfg, &spyEnqueuer{}, func() bool { return leader }, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	srv := New(cfg, &spyEnqueuer{}, func() bool { return leader }, nil, "", slog.New(slog.NewTextHandler(io.Discard, nil)))
 
 	rr := httptest.NewRecorder()
 	srv.Handler().ServeHTTP(rr, httptest.NewRequest(http.MethodGet, "/readyz", nil))

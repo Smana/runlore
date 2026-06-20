@@ -34,6 +34,7 @@ import (
 	"github.com/Smana/runlore/internal/config"
 	"github.com/Smana/runlore/internal/curator"
 	"github.com/Smana/runlore/internal/eval"
+	fluxexec "github.com/Smana/runlore/internal/executor/flux"
 	"github.com/Smana/runlore/internal/investigate"
 	"github.com/Smana/runlore/internal/logs/victorialogs"
 	"github.com/Smana/runlore/internal/metrics/prometheus"
@@ -113,6 +114,7 @@ func runServe(args []string) error {
 	var (
 		gitops    providers.GitOpsProvider
 		clientset *kubernetes.Clientset
+		executor  action.Executor // rung-2 action executor (Flux), when a cluster is reachable
 	)
 	if restCfg, err := restConfig(); err != nil {
 		log.Warn("no kube client; GitOps features + leader election disabled", "err", err)
@@ -121,6 +123,7 @@ func runServe(args []string) error {
 			log.Warn("dynamic client unavailable; GitOps features disabled", "err", derr)
 		} else {
 			gitops = buildGitOps(cfg, dc, log)
+			executor = fluxexec.New(dc)
 		}
 		if cs, cerr := kubernetes.NewForConfig(restCfg); cerr != nil {
 			log.Warn("clientset unavailable; leader election disabled", "err", cerr)
@@ -129,7 +132,12 @@ func runServe(args []string) error {
 		}
 	}
 
-	inv := buildInvestigator(ctx, cfg, gitops, log)
+	// Rung-2: approval-gated execution. Only built for mode "approve" with a reachable
+	// cluster; "auto" is not implemented (approval is always required).
+	approvals := buildApprovals(cfg, executor, log)
+	approvalToken := os.Getenv(cfg.Actions.ApprovalTokenEnv)
+
+	inv := buildInvestigator(ctx, cfg, gitops, approvals, log)
 	queue := investigate.NewQueue(inv, log)
 
 	// startWork runs the leader-only loops (investigation queue + failure watch),
@@ -151,7 +159,7 @@ func runServe(args []string) error {
 	}
 
 	// readyz reflects leadership so the Service routes webhooks only to the leader.
-	srv := server.New(cfg, queue, leader.Load, log)
+	srv := server.New(cfg, queue, leader.Load, approvals, approvalToken, log)
 	httpSrv := &http.Server{Addr: *addr, Handler: srv.Handler()}
 	go func() {
 		<-ctx.Done()
@@ -369,6 +377,23 @@ func buildForgeTokenSource(cfg *config.Config, log *slog.Logger) forgeToken {
 	return github.NewAppTokenSource(cfg.Forge.GitHubAPIURL, ga.AppID, ga.InstallationID, key).Token
 }
 
+// buildApprovals enables rung-2 approval-gated execution for action mode "approve"
+// (requires a reachable cluster). "auto" is intentionally not implemented.
+func buildApprovals(cfg *config.Config, exec action.Executor, log *slog.Logger) *action.Approvals {
+	if cfg.Actions.Mode != config.ActionApprove {
+		if cfg.Actions.Mode == config.ActionAuto {
+			log.Warn("action mode 'auto' is not implemented; approval is always required — use 'approve'")
+		}
+		return nil
+	}
+	if exec == nil {
+		log.Warn("approval-gated actions disabled: no cluster executor available")
+		return nil
+	}
+	log.Info("rung-2 approval-gated actions enabled (Flux suspend/resume/reconcile)")
+	return action.NewApprovals(exec, action.New(cfg.Actions), log)
+}
+
 // buildCurator returns a Curator when the GitHub App token + KB repo are
 // configured, else nil.
 func buildCurator(cfg *config.Config, token forgeToken, log *slog.Logger) *curator.Curator {
@@ -391,7 +416,7 @@ func buildCurator(cfg *config.Config, token forgeToken, log *slog.Logger) *curat
 
 // buildInvestigator returns the LLM ReAct investigator when a model is configured,
 // otherwise the read-only LogInvestigator.
-func buildInvestigator(ctx context.Context, cfg *config.Config, gp providers.GitOpsProvider, log *slog.Logger) investigate.Investigator {
+func buildInvestigator(ctx context.Context, cfg *config.Config, gp providers.GitOpsProvider, approvals *action.Approvals, log *slog.Logger) investigate.Investigator {
 	if cfg.Model.BaseURL == "" && cfg.Model.Provider != "anthropic" {
 		log.Info("no model configured; using log-only investigator")
 		return investigate.LogInvestigator{Log: log}
@@ -435,6 +460,18 @@ func buildInvestigator(ctx context.Context, cfg *config.Config, gp providers.Git
 		Log:     log,
 		Actions: actions,
 		OnComplete: func(found providers.Investigation) {
+			// Rung 2: register envelope-compliant actions for human approval and
+			// annotate each with how to approve it. (Rung 1 only suggests; rung 2 makes
+			// them executable after an explicit POST /actions/<id>/approve.)
+			if approvals != nil {
+				for i := range found.Actions {
+					id := approvals.Register(found.Actions[i])
+					found.Actions[i].Description = fmt.Sprintf("%s — approve: POST /actions/%s/approve", found.Actions[i].Description, id)
+				}
+				if len(found.Actions) > 0 {
+					log.Info("actions registered for approval", "count", len(found.Actions))
+				}
+			}
 			log.Info("findings",
 				"confidence", found.Confidence, "root_causes", len(found.RootCauses), "unresolved", len(found.Unresolved))
 			if err := notifier.Deliver(context.Background(), found); err != nil {
