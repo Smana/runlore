@@ -12,6 +12,9 @@ import (
 	"github.com/go-git/go-git/v5/plumbing"
 	"github.com/go-git/go-git/v5/plumbing/format/diff"
 	"github.com/go-git/go-git/v5/plumbing/object"
+	"github.com/go-git/go-git/v5/plumbing/transport"
+	"github.com/go-git/go-git/v5/plumbing/transport/http"
+	"github.com/go-git/go-git/v5/storage/memory"
 
 	"github.com/Smana/runlore/internal/providers"
 )
@@ -92,3 +95,24 @@ type singleFilePatch struct{ fp diff.FilePatch }
 
 func (p singleFilePatch) FilePatches() []diff.FilePatch { return []diff.FilePatch{p.fp} }
 func (p singleFilePatch) Message() string               { return "" }
+
+// auth builds the clone auth method from the installation token.
+func (d *Differ) auth() transport.AuthMethod {
+	if d.Token == "" {
+		return nil
+	}
+	return &http.BasicAuth{Username: "x-access-token", Password: d.Token}
+}
+
+// Remote clones url into memory (auth via the installation token when set) and
+// diffs two revisions. The source may be a remote HTTPS URL or a local path.
+func (d *Differ) Remote(url, fromRev, toRev, scope string) (providers.Diff, error) {
+	repo, err := git.Clone(memory.NewStorage(), nil, &git.CloneOptions{
+		URL:  url,
+		Auth: d.auth(),
+	})
+	if err != nil {
+		return providers.Diff{}, fmt.Errorf("clone %s: %w", url, err)
+	}
+	return diffRevisions(repo, fromRev, toRev, scope)
+}
