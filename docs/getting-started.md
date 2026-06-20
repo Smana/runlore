@@ -217,6 +217,15 @@ config:
       installation_id: 7654321               # from step 2
       private_key_env: GITHUB_APP_PRIVATE_KEY
 
+  # Autonomy ladder. Default (omitted) = off = read-only findings only. "suggest"
+  # has the agent propose remediations — never executed — filtered to the envelope.
+  # actions:
+  #   mode: suggest
+  #   allow:
+  #     reversible_only: true       # withhold irreversible suggestions
+  #     max_blast_radius: 5
+  #     kinds: [HelmRelease, Kustomization, Application]
+
   # HA toggle (default on; harmless with 1 replica).
   leader_election:
     enabled: true
