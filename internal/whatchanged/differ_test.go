@@ -49,11 +49,15 @@ func buildRepo(t *testing.T) (dir string, v1, v2 plumbing.Hash) {
 		return h
 	}
 
+	// apps/harbor-staging is a sibling of apps/harbor — it guards path-segment
+	// scoping (scope "apps/harbor" must NOT match "apps/harbor-staging").
 	write("apps/harbor/values.yaml", "version: 1.14.0\n")
+	write("apps/harbor-staging/values.yaml", "version: 1.14.0\n")
 	write("other/app.yaml", "x: 1\n")
 	v1 = commit("v1", 1000)
 
 	write("apps/harbor/values.yaml", "version: 1.15.0\ndatabase:\n  runMigrations: true\n")
+	write("apps/harbor-staging/values.yaml", "version: 1.15.0\n")
 	write("other/app.yaml", "x: 2\n")
 	v2 = commit("v2", 2000)
 	return dir, v1, v2
@@ -84,8 +88,8 @@ func TestLocalUnscoped(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Local: %v", err)
 	}
-	if len(d.Files) != 2 {
-		t.Fatalf("want 2 files unscoped, got %d (%v)", len(d.Files), paths(d.Files))
+	if len(d.Files) != 3 {
+		t.Fatalf("want 3 files unscoped, got %d (%v)", len(d.Files), paths(d.Files))
 	}
 }
 
