@@ -29,6 +29,7 @@ import (
 	"k8s.io/client-go/tools/leaderelection"
 	"k8s.io/client-go/tools/leaderelection/resourcelock"
 
+	"github.com/Smana/runlore/internal/action"
 	"github.com/Smana/runlore/internal/catalog"
 	"github.com/Smana/runlore/internal/config"
 	"github.com/Smana/runlore/internal/curator"
@@ -421,10 +422,18 @@ func buildInvestigator(ctx context.Context, cfg *config.Config, gp providers.Git
 	notifier := buildNotifier(cfg, log)
 	log.Info("delivery notifiers", "count", notifier.Len())
 	cur := buildCurator(cfg, forgeTok, log)
+	actions := action.New(cfg.Actions)
+	if actions.Enabled() {
+		log.Info("action suggestions enabled", "mode", string(actions.Mode()))
+		if m := actions.Mode(); m == config.ActionApprove || m == config.ActionAuto {
+			log.Warn("action mode not yet implemented; actions are SUGGESTED only, never executed", "mode", string(m))
+		}
+	}
 	return &investigate.LoopInvestigator{
-		Model: model,
-		Tools: tools,
-		Log:   log,
+		Model:   model,
+		Tools:   tools,
+		Log:     log,
+		Actions: actions,
 		OnComplete: func(found providers.Investigation) {
 			log.Info("findings",
 				"confidence", found.Confidence, "root_causes", len(found.RootCauses), "unresolved", len(found.Unresolved))

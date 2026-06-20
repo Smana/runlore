@@ -219,6 +219,7 @@ type Investigation struct {
 	Changes    []Change
 	Unresolved []string // honest: what the agent could not determine
 	Confidence float64
+	Actions    []Action // proposed remediations (autonomy ladder; never executed at rung "suggest")
 }
 
 // Hypothesis is one ranked root-cause candidate with its evidence.
