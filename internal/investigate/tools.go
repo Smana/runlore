@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"sort"
 
 	"github.com/Smana/runlore/internal/providers"
 )
@@ -34,11 +35,25 @@ func submitFindingsSpec() providers.ToolSpec {
 "required":["summary"]}},
 "unresolved":{"type":"array","items":{"type":"string"}},
 "actions":{"type":"array","description":"proposed remediations; prefer reversible, low-blast-radius","items":{"type":"object","properties":{
-"description":{"type":"string"},"op":{"type":"string","enum":["suspend","resume","reconcile",""],"description":"executable op (Flux); omit for a suggestion only"},
+"description":{"type":"string"},"op":{"type":"string","enum":` + opEnumJSON() + `,"description":"executable op (Flux); omit for a suggestion only"},
 "reversible":{"type":"boolean"},"blast_radius":{"type":"integer"},
 "target":{"type":"object","properties":{"kind":{"type":"string"},"name":{"type":"string"},"namespace":{"type":"string"}}}},
 "required":["description"]}}},"required":["root_causes"]}`,
 	}
+}
+
+// opEnumJSON renders the executable-op enum for the schema from the canonical
+// registry (providers.Ops, sorted) plus "" (suggestion only), so the model-facing
+// schema can't drift from what the gate and executor actually accept.
+func opEnumJSON() string {
+	ops := make([]string, 0, len(providers.Ops)+1)
+	for op := range providers.Ops {
+		ops = append(ops, op)
+	}
+	sort.Strings(ops)
+	ops = append(ops, "")
+	b, _ := json.Marshal(ops)
+	return string(b)
 }
 
 // findings is the JSON shape of submit_findings arguments.
