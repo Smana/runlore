@@ -21,6 +21,12 @@ type Config struct {
 	Forge    Forge         `yaml:"forge"`   // git-forge auth (GitHub App) for diff access + curation
 	Model    Model         `yaml:"model"`   // optional; when BaseURL is set, serve uses the LLM investigator
 	Notify   Notify        `yaml:"notify"`  // chat delivery for findings
+	Catalog  Catalog       `yaml:"catalog"` // OKF knowledge catalog
+}
+
+// Catalog configures the OKF knowledge catalog read by the agent.
+type Catalog struct {
+	Dir string `yaml:"dir"` // path to the OKF bundle (a local dir / mounted mirror)
 }
 
 // Model configures the OpenAI-compatible LLM endpoint used for investigation.

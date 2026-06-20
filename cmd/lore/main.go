@@ -21,6 +21,7 @@ import (
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/clientcmd"
 
+	"github.com/Smana/runlore/internal/catalog"
 	"github.com/Smana/runlore/internal/config"
 	"github.com/Smana/runlore/internal/investigate"
 	openai "github.com/Smana/runlore/internal/model/openai"
@@ -145,6 +146,14 @@ func buildInvestigator(cfg *config.Config, fp *flux.Provider, log *slog.Logger) 
 	var tools []investigate.Tool
 	if fp != nil {
 		tools = append(tools, investigate.WhatChangedTool{GitOps: fp})
+	}
+	if cfg.Catalog.Dir != "" {
+		if cat, err := catalog.New(cfg.Catalog.Dir); err != nil {
+			log.Warn("catalog disabled", "dir", cfg.Catalog.Dir, "err", err)
+		} else {
+			log.Info("catalog loaded", "dir", cfg.Catalog.Dir, "entries", cat.Len())
+			tools = append(tools, investigate.KBSearchTool{Catalog: cat})
+		}
 	}
 	log.Info("using LLM investigator", "model", cfg.Model.Model, "tools", len(tools))
 	notifier := buildNotifier(cfg, log)
