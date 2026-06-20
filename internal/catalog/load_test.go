@@ -43,6 +43,29 @@ Ready=False after a chart bump.
 	}
 }
 
+func TestLoadSkipsHidden(t *testing.T) {
+	dir := t.TempDir()
+	writeEntry(t, dir, "real.md", "---\ntype: Playbook\ntitle: Real\n---\nbody\n")
+	// Simulate a ConfigMap mount: a hidden ..data-style dir shadowing the entry,
+	// plus a hidden dotfile. Neither should be indexed (else entries double-count).
+	hidden := filepath.Join(dir, "..2026_06_20_data")
+	if err := os.MkdirAll(hidden, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(hidden, "real.md"), []byte("---\ntitle: Shadow\n---\nx"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	writeEntry(t, dir, ".hidden.md", "---\ntitle: Hidden\n---\nx")
+
+	entries, err := Load(dir)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if len(entries) != 1 || entries[0].Title != "Real" {
+		t.Fatalf("want exactly 1 entry 'Real', got %d: %+v", len(entries), entries)
+	}
+}
+
 func contains(s, sub string) bool {
 	for i := 0; i+len(sub) <= len(s); i++ {
 		if s[i:i+len(sub)] == sub {
