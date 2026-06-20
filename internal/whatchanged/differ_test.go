@@ -131,3 +131,37 @@ func TestForChange(t *testing.T) {
 		t.Fatalf("unexpected diff: %v", paths(d.Files))
 	}
 }
+
+func TestRemoteFromParent(t *testing.T) {
+	dir, _, v2 := buildRepo(t)
+	// v2 is the second commit; its parent is v1. Diffing the change introduced by
+	// v2, scoped to apps/harbor, must yield exactly that file's delta.
+	d, err := (&Differ{}).RemoteFromParent(dir, v2.String(), "apps/harbor")
+	if err != nil {
+		t.Fatalf("RemoteFromParent: %v", err)
+	}
+	if len(d.Files) != 1 || d.Files[0].Path != "apps/harbor/values.yaml" {
+		t.Fatalf("unexpected diff: %v", paths(d.Files))
+	}
+	if !strings.Contains(d.Files[0].Patch, "+version: 1.15.0") {
+		t.Fatalf("patch missing expected delta:\n%s", d.Files[0].Patch)
+	}
+}
+
+func TestForChangeEmptyFromRev(t *testing.T) {
+	dir, _, v2 := buildRepo(t)
+	c := providers.Change{
+		Workload: providers.Workload{Kind: "Kustomization", Name: "apps", Namespace: "flux-system"},
+		Engine:   providers.EngineFlux,
+		Type:     providers.ChangeSync,
+		ToRev:    v2.String(), // FromRev intentionally empty
+		Source:   providers.SourceRef{RepoURL: dir, Path: "apps/harbor"},
+	}
+	d, err := (&Differ{}).ForChange(c)
+	if err != nil {
+		t.Fatalf("ForChange (empty FromRev): %v", err)
+	}
+	if len(d.Files) != 1 || d.Files[0].Path != "apps/harbor/values.yaml" {
+		t.Fatalf("unexpected diff: %v", paths(d.Files))
+	}
+}
