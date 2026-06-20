@@ -57,7 +57,7 @@ func diffRevisions(repo *git.Repository, fromRev, toRev, scope string) (provider
 	var out providers.Diff
 	for _, fp := range patch.FilePatches() {
 		path := filePatchPath(fp)
-		if scope != "" && !strings.HasPrefix(path, scope) {
+		if !underScope(path, scope) {
 			continue
 		}
 		var buf bytes.Buffer
@@ -67,6 +67,17 @@ func diffRevisions(repo *git.Repository, fromRev, toRev, scope string) (provider
 		out.Files = append(out.Files, providers.FileDiff{Path: path, Patch: buf.String()})
 	}
 	return out, nil
+}
+
+// underScope reports whether path is within scope, matching on path-segment
+// boundaries so "apps/harbor" does not also match a sibling like
+// "apps/harbor-staging". Empty scope matches everything.
+func underScope(path, scope string) bool {
+	if scope == "" {
+		return true
+	}
+	scope = strings.TrimSuffix(scope, "/")
+	return path == scope || strings.HasPrefix(path, scope+"/")
 }
 
 func resolveCommit(repo *git.Repository, rev string) (*object.Commit, error) {
