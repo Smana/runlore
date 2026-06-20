@@ -24,6 +24,14 @@ type Config struct {
 	Catalog  Catalog       `yaml:"catalog"` // OKF knowledge catalog
 
 	LeaderElection LeaderElection `yaml:"leader_election"` // HA: only the leader investigates
+
+	Metrics Endpoint `yaml:"metrics"` // PromQL backend (VictoriaMetrics/Prometheus) for query_metrics
+	Logs    Endpoint `yaml:"logs"`    // LogsQL backend (VictoriaLogs) for query_logs
+}
+
+// Endpoint is a backend base URL; empty disables the corresponding tool.
+type Endpoint struct {
+	URL string `yaml:"url"`
 }
 
 // LeaderElection configures high availability. When enabled, replicas elect a
