@@ -15,6 +15,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/Smana/runlore/internal/httpx"
 	"github.com/Smana/runlore/internal/providers"
 )
 
@@ -100,15 +101,17 @@ func (c *Client) Complete(ctx context.Context, req providers.CompletionRequest) 
 	if err != nil {
 		return providers.CompletionResponse{}, fmt.Errorf("marshal request: %w", err)
 	}
-	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, c.baseURL+"/v1/messages", bytes.NewReader(body))
-	if err != nil {
-		return providers.CompletionResponse{}, err
+	newReq := func() (*http.Request, error) {
+		r, err := http.NewRequestWithContext(ctx, http.MethodPost, c.baseURL+"/v1/messages", bytes.NewReader(body))
+		if err != nil {
+			return nil, err
+		}
+		r.Header.Set("content-type", "application/json")
+		r.Header.Set("anthropic-version", apiVersion)
+		r.Header.Set("x-api-key", c.apiKey)
+		return r, nil
 	}
-	httpReq.Header.Set("content-type", "application/json")
-	httpReq.Header.Set("anthropic-version", apiVersion)
-	httpReq.Header.Set("x-api-key", c.apiKey)
-
-	resp, err := c.http.Do(httpReq)
+	resp, err := httpx.DoWithRetry(ctx, c.http, 3, newReq)
 	if err != nil {
 		return providers.CompletionResponse{}, fmt.Errorf("messages request: %w", err)
 	}
