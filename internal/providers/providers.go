@@ -93,9 +93,10 @@ type Action struct {
 	Description string
 	Op          string // executable operation: suspend | resume | reconcile (empty = suggestion only)
 	Target      Workload
-	Mutating    bool // true for any cluster write
-	Reversible  bool // a rollback/suspend is reversible; a delete may not be
-	BlastRadius int  // number of workloads affected
+	Mutating    bool   // true for any cluster write
+	Reversible  bool   // a rollback/suspend is reversible; a delete may not be
+	BlastRadius int    // number of workloads affected
+	ApprovalID  string // runtime: set when registered for approval; drives Slack approve/reject buttons
 }
 
 // TimeWindow is a [Start, End] interval.
