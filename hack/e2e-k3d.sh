@@ -174,7 +174,7 @@ check "GitHub App token exchange"              /tmp/runlore-mock.log 'MOCK GH-TO
 check "curator opened a PR (confident)"        /tmp/runlore-mock.log 'MOCK GH-PR'
 check "curated ref logged"                     /tmp/runlore.log 'msg=curated'
 
-step "8/9 GitOps failure trigger (informer on a real API server)"
+step "8/10 GitOps failure trigger (informer on a real API server)"
 kubectl create ns apps >/dev/null 2>&1 || true
 kubectl apply -f - <<'YAML'
 apiVersion: kustomize.toolkit.fluxcd.io/v1
@@ -188,7 +188,7 @@ sleep 6
 kubectl -n "$NS" logs deploy/runlore > /tmp/runlore.log 2>&1
 check "gitops failure -> investigate" /tmp/runlore.log 'source=gitops-failure|Kustomization/broken-app'
 
-step "9/9 leader election + failover (scale to 2)"
+step "9/10 leader election + failover (scale to 2)"
 kubectl -n "$NS" scale deploy/runlore --replicas=2 >/dev/null
 TOTAL=0; READY=0
 for _ in $(seq 1 30); do
@@ -216,6 +216,42 @@ for _ in $(seq 1 30); do
 done
 if [[ -n "$NEW" && "$NEW" != "$HOLDER" ]]; then green "PASS: failover — new leader $NEW"; PASS=$((PASS+1))
 else red "FAIL: no failover (holder still '$NEW')"; FAIL=$((FAIL+1)); fi
+
+step "10/10 ArgoCD engine (reconfigure + Application Degraded)"
+kubectl apply -f - <<'YAML'
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata: { name: applications.argoproj.io }
+spec:
+  group: argoproj.io
+  scope: Namespaced
+  names: { kind: Application, plural: applications, singular: application, listKind: ApplicationList }
+  versions:
+    - name: v1alpha1
+      served: true
+      storage: true
+      subresources: { status: {} }
+      schema:
+        openAPIV3Schema: { type: object, x-kubernetes-preserve-unknown-fields: true }
+YAML
+kubectl wait --for=condition=Established crd/applications.argoproj.io --timeout=30s
+# Switch the engine to argocd (reuse prior values; back to 1 replica for a quick roll).
+helm upgrade runlore deploy/helm/runlore -n "$NS" --reuse-values \
+  --set replicaCount=1 --set-string config.gitops.engine=argocd >/dev/null
+kubectl -n "$NS" rollout status deploy/runlore --timeout=90s
+sleep 3
+kubectl apply -f - <<'YAML'
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata: { name: broken-argo, namespace: apps }
+spec: { source: { repoURL: "https://github.com/org/repo", path: apps } }
+YAML
+kubectl patch application broken-argo -n apps --subresource=status --type=merge -p \
+  '{"status":{"health":{"status":"Degraded"},"sync":{"revision":"deadbeef","status":"OutOfSync"},"operationState":{"message":"image pull backoff"}}}'
+sleep 6
+kubectl -n "$NS" logs deploy/runlore > /tmp/runlore.log 2>&1
+check "argocd engine active"          /tmp/runlore.log 'engine=argocd'
+check "argocd failure -> investigate" /tmp/runlore.log 'Application/broken-argo'
 
 step "RESULTS"
 echo "PASS=$PASS FAIL=$FAIL"
