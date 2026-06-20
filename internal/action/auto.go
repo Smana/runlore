@@ -33,7 +33,9 @@ type Auto struct {
 }
 
 // NewAuto builds the auto executor from the policy (window defaults to 1h). A nil
-// auditor falls back to a no-op.
+// auditor falls back to a no-op. The returned Auto starts with the kill-switch
+// ENGAGED (paused) — fail closed by construction, so a process/leader restart can
+// never resume unattended execution on its own; an operator must Resume() it.
 func NewAuto(exec Executor, p config.AutoPolicy, aud audit.Auditor, log *slog.Logger) *Auto {
 	window := p.Window.Std()
 	if window <= 0 {
@@ -45,6 +47,7 @@ func NewAuto(exec Executor, p config.AutoPolicy, aud audit.Auditor, log *slog.Lo
 	return &Auto{
 		exec: exec, dryRun: p.DryRun, minConfidence: p.MinConfidence,
 		maxPerWindow: p.MaxPerWindow, window: window, audit: aud, log: log, now: time.Now,
+		paused: true,
 	}
 }
 
@@ -118,7 +121,13 @@ func (a *Auto) runOne(ctx context.Context, inv providers.Investigation, act prov
 
 // record appends an audit entry for an auto action attempt.
 func (a *Auto) record(act providers.Action, d audit.Decision, reason string) {
-	_ = a.audit.Log(audit.Record{Actor: "auto", Op: act.Op, Target: target(act), Decision: d, Reason: reason})
+	recordAttempt(a.audit, "auto", act, d, reason)
+}
+
+// recordAttempt writes an action-attempt audit record. Shared by both rungs
+// (auto + approvals) so the record shape stays in one place.
+func recordAttempt(aud audit.Auditor, actor string, act providers.Action, d audit.Decision, reason string) {
+	_ = aud.Log(audit.Record{Actor: actor, Op: act.Op, Target: target(act), Decision: d, Reason: reason})
 }
 
 // reserve consumes one slot from the rate-limit window if available.

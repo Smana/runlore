@@ -36,15 +36,14 @@ const (
 
 // Record is one audited action attempt. Hash and PrevHash are filled by Log.
 type Record struct {
-	Time     time.Time         `json:"time"`
-	Actor    string            `json:"actor"`            // "auto" | "approve:<user>" | "suggest"
-	Op       string            `json:"op"`               // suspend | resume | reconcile | ""
-	Target   string            `json:"target"`           // kind/namespace/name
-	Decision Decision          `json:"decision"`         // executed | dry-run | skipped | denied | failed
-	Reason   string            `json:"reason,omitempty"` // why skipped/denied/failed
-	Meta     map[string]string `json:"meta,omitempty"`   // confidence, blast, etc.
-	PrevHash string            `json:"prev_hash"`
-	Hash     string            `json:"hash"`
+	Time     time.Time `json:"time"`
+	Actor    string    `json:"actor"`            // "auto" | "approve:<user>" | "suggest"
+	Op       string    `json:"op"`               // suspend | resume | reconcile | ""
+	Target   string    `json:"target"`           // kind/namespace/name
+	Decision Decision  `json:"decision"`         // executed | dry-run | skipped | denied | failed
+	Reason   string    `json:"reason,omitempty"` // why skipped/denied/failed
+	PrevHash string    `json:"prev_hash"`
+	Hash     string    `json:"hash"`
 }
 
 // Auditor records action attempts. Implementations must be safe for concurrent use.
