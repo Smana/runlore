@@ -217,12 +217,16 @@ config:
       installation_id: 7654321               # from step 2
       private_key_env: GITHUB_APP_PRIVATE_KEY
 
-  # Autonomy ladder. Default (omitted) = off = read-only findings only. "suggest"
-  # has the agent propose remediations — never executed — filtered to the envelope.
+  # Autonomy ladder. Default (omitted) = off = read-only findings only.
+  #   suggest — propose envelope-filtered remediations, never executed.
+  #   approve — additionally register them for human approval; an approved action
+  #             executes a reversible Flux op (suspend/resume/reconcile). Requires
+  #             chart rbac.allowActions=true and (recommended) an approval token.
   # actions:
-  #   mode: suggest
+  #   mode: approve
+  #   approval_token_env: APPROVAL_TOKEN   # require X-Approval-Token on the endpoints
   #   allow:
-  #     reversible_only: true       # withhold irreversible suggestions
+  #     reversible_only: true              # withhold irreversible suggestions
   #     max_blast_radius: 5
   #     kinds: [HelmRelease, Kustomization, Application]
 
@@ -285,9 +289,12 @@ Fire a test: trigger a `critical`/`prod` alert (or `flux suspend`+break a Kustom
 
 ## What RunLore can and cannot do
 
-- **Cluster**: read-only. It reads Flux resources, metrics (PromQL), logs (LogsQL), and network flows (Hubble), and never writes
-  to the cluster. RBAC is limited to watching `Kustomization`s, reading `GitRepository`s, and its own
-  leader-election `Lease`.
+- **Cluster**: **read-only by default** — it reads Flux/Argo resources, metrics (PromQL), logs (LogsQL),
+  and network flows (Hubble), and never writes. RBAC is limited to watching those resources + its own
+  leader-election `Lease`. With `actions.mode: approve` + `rbac.allowActions: true`, it can execute
+  *reversible* Flux ops (suspend/resume/reconcile) **only after explicit human approval**
+  (`POST /actions/<id>/approve`, token-gated) — the envelope is re-checked at execution and every action
+  is audit-logged.
 - **Forge**: writes issues/PRs to the one KB repo you configure, via the scoped GitHub App.
 - **Secrets**: referenced by env-var name from a `Secret` you control; nothing is inlined.
 
