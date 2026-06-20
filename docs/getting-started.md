@@ -52,8 +52,15 @@ knowledge base — runbooks, past incidents, platform constraints.
    Filenames `index.md` and `log.md` are reserved and skipped. Seed it with whatever runbooks you
    already have — the agent gets sharper at *your* platform as the catalog grows.
 
-3. **Make it available in-cluster.** v1 mounts the catalog as a `ConfigMap` (a built-in Git-sync is on
-   the roadmap). Generate it from the repo and apply it to RunLore's namespace:
+3. **Make it available in-cluster.** Two options:
+
+   **Option A — Git-sync (recommended; closes the read/write loop).** RunLore clones the repo and
+   re-pulls it on an interval, re-indexing automatically. When curation merges a PR into this repo, the
+   new knowledge flows straight back into what the agent searches — no manual step. Configure it under
+   `config.catalog.git` ([step 4](#step-4-configure-and-install)) and set `catalog.gitSync: true` (which
+   mounts a writable mirror). For a private repo, point `token_env` at a read-scoped token in the Secret.
+
+   **Option B — ConfigMap (static).** Mount a snapshot; refresh it yourself when the repo changes:
 
    ```bash
    git clone https://github.com/your-org/runlore-kb /tmp/runlore-kb
@@ -61,9 +68,6 @@ knowledge base — runbooks, past incidents, platform constraints.
      --from-file=/tmp/runlore-kb/ \
      --dry-run=client -o yaml | kubectl apply -f -
    ```
-
-   Refresh it whenever the repo changes (CI job, or re-run the command). If you enable curation
-   ([step 2](#step-2-github-app-for-curation-optional)), RunLore opens PRs against this same repo.
 
 ---
 
@@ -141,10 +145,12 @@ envFrom:
   - secretRef:
       name: runlore-secrets
 
-# Mount the OKF catalog ConfigMap from step 1.
+# Catalog source (step 1). Option A — git-sync (recommended): a writable mirror.
 catalog:
-  configMap: runlore-catalog
+  gitSync: true
   mountPath: /var/lib/runlore/catalog
+  # Option B — static ConfigMap instead:
+  # configMap: runlore-catalog
 
 config:
   # React: only investigate what matters (controls noise + LLM cost).
@@ -165,6 +171,11 @@ config:
     api_key_env: OPENAI_API_KEY             # omit/empty for keyless (in-cluster vLLM/Ollama)
   catalog:
     dir: /var/lib/runlore/catalog           # must match catalog.mountPath above
+    git:                                     # omit this block if using a static ConfigMap
+      url: https://github.com/your-org/runlore-kb
+      branch: main
+      interval: 5m
+      # token_env: KB_GIT_TOKEN              # for a private repo (key in the Secret)
 
   # Deliver: one or both.
   notify:
