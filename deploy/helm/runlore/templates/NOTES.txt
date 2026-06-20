@@ -1,0 +1,21 @@
+RunLore is deployed as {{ include "runlore.fullname" . }} in namespace {{ .Release.Namespace }}.
+
+Webhook + health endpoint (ClusterIP):
+  http://{{ include "runlore.fullname" . }}.{{ .Release.Namespace }}.svc:{{ .Values.service.port }}
+    POST /webhook/alertmanager   — incident trigger
+    GET  /healthz                — health
+
+Point Alertmanager at the webhook:
+  receivers:
+    - name: runlore
+      webhook_configs:
+        - url: http://{{ include "runlore.fullname" . }}.{{ .Release.Namespace }}.svc:{{ .Values.service.port }}/webhook/alertmanager
+
+Quick check:
+  kubectl -n {{ .Release.Namespace }} logs deploy/{{ include "runlore.fullname" . }} -f
+
+{{- if not .Values.config.model }}
+
+NOTE: no `config.model` set — RunLore runs the read-only log-only investigator.
+Set config.model.{base_url,model,api_key_env} to enable LLM investigations.
+{{- end }}

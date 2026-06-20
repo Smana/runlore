@@ -18,10 +18,18 @@ func Load(dir string) ([]Entry, error) {
 		if err != nil {
 			return err
 		}
-		if d.IsDir() || !strings.HasSuffix(path, ".md") {
+		base := d.Name()
+		if d.IsDir() {
+			// Skip hidden dirs — notably ConfigMap mounts' ..data / ..2026_* symlink
+			// trees, which would otherwise double-index every entry.
+			if path != dir && strings.HasPrefix(base, ".") {
+				return filepath.SkipDir
+			}
 			return nil
 		}
-		base := filepath.Base(path)
+		if strings.HasPrefix(base, ".") || !strings.HasSuffix(base, ".md") {
+			return nil
+		}
 		if base == "index.md" || base == "log.md" {
 			return nil
 		}
