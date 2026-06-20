@@ -1,0 +1,135 @@
+// Package prometheus implements providers.MetricsProvider against the Prometheus
+// HTTP API — also spoken by VictoriaMetrics — for instant and range PromQL queries.
+package prometheus
+
+import (
+	"context"
+	"encoding/json"
+	"fmt"
+	"io"
+	"net/http"
+	"net/url"
+	"strconv"
+	"strings"
+	"time"
+
+	"github.com/Smana/runlore/internal/providers"
+)
+
+// Client queries a Prometheus-compatible metrics backend.
+type Client struct {
+	baseURL string
+	http    *http.Client
+}
+
+// New builds a client for a Prometheus/VictoriaMetrics base URL.
+func New(baseURL string) *Client {
+	return &Client{baseURL: strings.TrimRight(baseURL, "/"), http: &http.Client{Timeout: 30 * time.Second}}
+}
+
+var _ providers.MetricsProvider = (*Client)(nil)
+
+type apiResponse struct {
+	Status string `json:"status"`
+	Error  string `json:"error"`
+	Data   struct {
+		ResultType string            `json:"resultType"`
+		Result     []json.RawMessage `json:"result"`
+	} `json:"data"`
+}
+
+// Query runs an instant PromQL query (at = zero means "now").
+func (c *Client) Query(ctx context.Context, promql string, at time.Time) (providers.Samples, error) {
+	v := url.Values{"query": {promql}}
+	if !at.IsZero() {
+		v.Set("time", strconv.FormatInt(at.Unix(), 10))
+	}
+	resp, err := c.get(ctx, "/api/v1/query", v)
+	if err != nil {
+		return nil, err
+	}
+	out := make(providers.Samples, 0, len(resp.Data.Result))
+	for _, raw := range resp.Data.Result {
+		var item struct {
+			Metric map[string]string `json:"metric"`
+			Value  [2]any            `json:"value"`
+		}
+		if err := json.Unmarshal(raw, &item); err != nil {
+			return nil, err
+		}
+		ts, val := parsePoint(item.Value)
+		out = append(out, providers.Sample{Metric: item.Metric, Value: val, Time: ts})
+	}
+	return out, nil
+}
+
+// QueryRange runs a range PromQL query over a window.
+func (c *Client) QueryRange(ctx context.Context, promql string, w providers.TimeWindow, step time.Duration) (providers.Matrix, error) {
+	if step <= 0 {
+		step = time.Minute
+	}
+	v := url.Values{
+		"query": {promql},
+		"start": {strconv.FormatInt(w.Start.Unix(), 10)},
+		"end":   {strconv.FormatInt(w.End.Unix(), 10)},
+		"step":  {strconv.FormatInt(int64(step.Seconds()), 10)},
+	}
+	resp, err := c.get(ctx, "/api/v1/query_range", v)
+	if err != nil {
+		return nil, err
+	}
+	out := make(providers.Matrix, 0, len(resp.Data.Result))
+	for _, raw := range resp.Data.Result {
+		var item struct {
+			Metric map[string]string `json:"metric"`
+			Values [][2]any          `json:"values"`
+		}
+		if err := json.Unmarshal(raw, &item); err != nil {
+			return nil, err
+		}
+		s := providers.Series{Metric: item.Metric}
+		for _, p := range item.Values {
+			ts, val := parsePoint(p)
+			s.Points = append(s.Points, providers.Point{Time: ts, Value: val})
+		}
+		out = append(out, s)
+	}
+	return out, nil
+}
+
+func (c *Client) get(ctx context.Context, path string, v url.Values) (*apiResponse, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.baseURL+path+"?"+v.Encode(), nil)
+	if err != nil {
+		return nil, err
+	}
+	resp, err := c.http.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("metrics query: %w", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	data, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("metrics status %d: %s", resp.StatusCode, string(data))
+	}
+	var r apiResponse
+	if err := json.Unmarshal(data, &r); err != nil {
+		return nil, fmt.Errorf("parse metrics response: %w", err)
+	}
+	if r.Status != "success" {
+		return nil, fmt.Errorf("metrics error: %s", r.Error)
+	}
+	return &r, nil
+}
+
+// parsePoint parses a Prometheus [unixTime, "value"] pair.
+func parsePoint(p [2]any) (time.Time, float64) {
+	var ts time.Time
+	if f, ok := p[0].(float64); ok {
+		ts = time.Unix(int64(f), 0).UTC()
+	}
+	var val float64
+	if s, ok := p[1].(string); ok {
+		val, _ = strconv.ParseFloat(s, 64)
+	}
+	return ts, val
+}
