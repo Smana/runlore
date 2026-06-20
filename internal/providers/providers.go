@@ -227,8 +227,10 @@ type CompletionRequest struct {
 
 // Message is one turn in an LLM exchange.
 type Message struct {
-	Role    string
-	Content string
+	Role       string // system | user | assistant | tool
+	Content    string
+	ToolCalls  []ToolCall // assistant turn requesting tools
+	ToolCallID string     // tool turn: the call this answers
 }
 
 // ToolSpec describes a tool offered to the model.
@@ -246,6 +248,7 @@ type CompletionResponse struct {
 
 // ToolCall is a model request to invoke a tool.
 type ToolCall struct {
+	ID   string
 	Name string
-	Args string
+	Args string // JSON
 }
