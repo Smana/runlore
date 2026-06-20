@@ -55,7 +55,7 @@ func main() {
 }
 
 func runServe(args []string) error {
-	fs := flag.NewFlagSet("serve", flag.ExitOnError)
+	fs := flag.NewFlagSet("serve", flag.ContinueOnError)
 	cfgPath := fs.String("config", "runlore.yaml", "path to config file")
 	addr := fs.String("addr", ":8080", "listen address")
 	if err := fs.Parse(args); err != nil {

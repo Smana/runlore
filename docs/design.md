@@ -147,7 +147,7 @@ triggers:
     match:                              # ANDed; empty fields match anything
       severity:    [critical]           # only paging-grade
       environment: [prod]               # ignore staging/dev
-      namespaces:  ["apps/*", "payments"]
+      namespaces:  ["apps*", "payments"]
       labels:      { team: platform }   # arbitrary label matchers
     ignore:
       alertnames:  [Watchdog, InfoInhibitor]

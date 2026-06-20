@@ -20,13 +20,20 @@ func NewDeduper(window time.Duration) *Deduper {
 }
 
 // Seen records the key and reports whether it was already seen within the window.
+// The key must be non-empty. Expired entries are evicted on each call so the
+// map stays bounded by the dedup window.
 func (d *Deduper) Seen(key string) bool {
-	if d.window <= 0 || key == "" {
+	if d.window <= 0 {
 		return false
 	}
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	now := d.now()
+	for k, t := range d.seen {
+		if now.Sub(t) >= d.window {
+			delete(d.seen, k)
+		}
+	}
 	if last, ok := d.seen[key]; ok && now.Sub(last) < d.window {
 		return true
 	}
