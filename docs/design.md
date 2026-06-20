@@ -61,7 +61,9 @@ the reason to build it.
 - An **open OKF knowledge catalog** the agent reads (fast, cached) and writes (PR-gated) — knowledge
   is portable markdown in git, never vendor lock-in.
 - **Single static Go binary**; runs in your terminal (`lore investigate`) or in-cluster (`lore serve`).
-- Model-agnostic: Claude, your in-cluster vLLM, or Ollama (data needn't leave the boundary).
+- **Two model interfaces in v1: Anthropic and OpenAI-compatible.** The latter covers an in-cluster
+  vLLM, Ollama, OpenRouter, or any OpenAI-compatible endpoint — so data needn't leave the boundary,
+  with no LiteLLM-style multi-broker dependency.
 
 **Non-goals (for now)**
 - Autonomous **remediation** of production — *in the initial versions*. Cluster-mutating actions
@@ -215,7 +217,7 @@ Interfaces live in `internal/providers/providers.go`. "For the moment" impls:
 | Logs | `LogsProvider` | **VictoriaLogs** | Loki, … |
 | Network | `NetworkProvider` | **Hubble** | — |
 | Cloud | `CloudProvider` | — *(Phase 2)* | AWS, GCP, Azure via native SDKs; Steampipe/cloud-MCP optional |
-| Model | `ModelProvider` | **Anthropic**, **OpenAI-compatible** (vLLM/Ollama) | — |
+| Model | `ModelProvider` | **Anthropic**, **OpenAI-compatible** (in-cluster vLLM, Ollama, OpenRouter, …) | — |
 | Notifier | `Notifier` | **Slack**, **Matrix** | PagerDuty, incident.io |
 | Issue | `IssueProvider` | **GitHub** (App auth) | GitLab (access token) |
 
