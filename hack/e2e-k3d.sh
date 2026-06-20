@@ -19,14 +19,12 @@ KEEP=0
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
 MOCK_PID=""
-PF_PID=""
 
 red()   { printf '\033[31m%s\033[0m\n' "$*"; }
 green() { printf '\033[32m%s\033[0m\n' "$*"; }
 step()  { printf '\n\033[1;36m== %s ==\033[0m\n' "$*"; }
 
 cleanup() {
-  [[ -n "$PF_PID" ]] && kill "$PF_PID" 2>/dev/null || true
   [[ -n "$MOCK_PID" ]] && kill "$MOCK_PID" 2>/dev/null || true
   if [[ "$KEEP" == "0" ]]; then
     k3d cluster delete "$CLUSTER" >/dev/null 2>&1 || true
@@ -122,11 +120,14 @@ check "watching gitops failures"       /tmp/runlore.log 'watching gitops failure
 check "serving"                        /tmp/runlore.log 'runlore serving'
 
 step "7/8 incident webhook -> investigate -> findings -> deliver"
-kubectl -n "$NS" port-forward svc/runlore 18080:8080 >/tmp/runlore-pf.log 2>&1 &
-PF_PID=$!
-sleep 3
-curl -s -o /dev/null -XPOST localhost:18080/webhook/alertmanager --data @examples/alertmanager-webhook.json
-sleep 5
+# Post from inside the cluster (no host port-forward — avoids host port conflicts).
+kubectl -n "$NS" create configmap am-payload \
+  --from-file=alertmanager-webhook.json=examples/alertmanager-webhook.json \
+  --dry-run=client -o yaml | kubectl apply -f -
+kubectl -n "$NS" delete pod curl --ignore-not-found >/dev/null 2>&1 || true
+kubectl -n "$NS" run curl --image=curlimages/curl:8.11.1 --restart=Never --rm -i --quiet \
+  --overrides='{"spec":{"containers":[{"name":"curl","image":"curlimages/curl:8.11.1","command":["curl","-s","-o","/dev/null","-w","webhook HTTP %{http_code}\n","-XPOST","http://runlore.runlore.svc:8080/webhook/alertmanager","--data","@/p/alertmanager-webhook.json"],"volumeMounts":[{"name":"p","mountPath":"/p"}]}],"volumes":[{"name":"p","configMap":{"name":"am-payload"}}]}}'
+sleep 6
 kubectl -n "$NS" logs deploy/runlore > /tmp/runlore.log 2>&1
 check "incident accepted + investigate=true" /tmp/runlore.log 'msg=incident.*investigate=true'
 check "investigation completed (findings)"   /tmp/runlore.log 'msg=findings'
