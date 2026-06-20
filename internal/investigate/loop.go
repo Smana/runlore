@@ -28,6 +28,7 @@ type LoopInvestigator struct {
 	MaxSteps   int
 	OnComplete func(providers.Investigation) // delivery hook (Slack/Matrix later)
 	Actions    *action.Policy                // autonomy ladder; nil/off = read-only findings only
+	Recall     *Recall                       // optional: short-circuit on a high-confidence catalog hit
 }
 
 // system returns the system prompt, asking for action proposals when the policy is enabled.
@@ -40,6 +41,14 @@ func (li *LoopInvestigator) system() string {
 
 // Investigate runs the loop for a request. It implements Investigator.
 func (li *LoopInvestigator) Investigate(ctx context.Context, req Request) error {
+	if li.Recall != nil {
+		if entry, score := li.Recall.lookup(req); entry != nil {
+			li.Log.Info("instant recall (catalog hit; skipping the loop)",
+				"title", req.Title, "entry", entry.Path, "score", fmt.Sprintf("%.2f", score))
+			li.deliver(req, recalledInvestigation(req, *entry))
+			return nil
+		}
+	}
 	byName := map[string]Tool{}
 	specs := make([]providers.ToolSpec, 0, len(li.Tools)+1)
 	for _, t := range li.Tools {

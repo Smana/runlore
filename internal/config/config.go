@@ -49,8 +49,17 @@ type LeaderElection struct {
 // a mounted Dir (e.g. a ConfigMap) or a Git repo to sync (which closes the
 // read/write loop — the curator's merged PRs flow back into what the agent reads).
 type Catalog struct {
-	Dir string     `yaml:"dir"` // OKF bundle path (mounted ConfigMap, or the git-sync mirror)
-	Git CatalogGit `yaml:"git"`
+	Dir           string        `yaml:"dir"` // OKF bundle path (mounted ConfigMap, or the git-sync mirror)
+	Git           CatalogGit    `yaml:"git"`
+	InstantRecall InstantRecall `yaml:"instant_recall"`
+}
+
+// InstantRecall short-circuits the investigation loop when the catalog has a
+// high-confidence match for the symptom. Off by default; MinScore is the BM25
+// relevance floor (tune for your catalog).
+type InstantRecall struct {
+	Enabled  bool    `yaml:"enabled"`
+	MinScore float64 `yaml:"min_score"`
 }
 
 // CatalogGit configures periodic Git sync of the catalog into Dir.
