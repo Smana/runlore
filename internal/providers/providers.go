@@ -83,6 +83,19 @@ type FailureEvent struct {
 	When     time.Time
 }
 
+// Action describes a cluster-mutating operation a provider could expose (e.g. a
+// rollback, a reconcile, a scale). In v1 no actions are registered — RunLore is
+// read-only. The metadata exists so active tools can be added later behind
+// config.ActionPolicy (the autonomy ladder) without re-architecting.
+type Action struct {
+	Name        string
+	Description string
+	Target      Workload
+	Mutating    bool // true for any cluster write
+	Reversible  bool // a rollback is reversible; a delete may not be
+	BlastRadius int  // number of workloads affected
+}
+
 // TimeWindow is a [Start, End] interval.
 type TimeWindow struct {
 	Start time.Time

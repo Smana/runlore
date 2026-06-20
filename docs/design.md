@@ -64,8 +64,10 @@ the reason to build it.
 - Model-agnostic: Claude, your in-cluster vLLM, or Ollama (data needn't leave the boundary).
 
 **Non-goals (for now)**
-- Autonomous **remediation** of production. Writes to the *cluster* are out of scope until trust is
-  earned via eval (Phase 4); "writes" in early phases mean *markdown to git via reviewed PR*.
+- Autonomous **remediation** of production — *in the initial versions*. Cluster-mutating actions
+  are off; "writes" in early phases mean *markdown to git via reviewed PR*. This is the **first rung
+  of an autonomy ladder, not a permanent constraint**: the architecture (§9, "Act") is built so
+  *active tools* slot in later behind a policy gate, without re-architecting.
 - Being an observability platform. RunLore *reads* your metrics/logs; it doesn't store them.
 - Re-implementing interactive Flux/k8s debugging that `gitops-cluster-debug` + MCPs already do.
 - Multi-agent / A2A orchestration. A single tight investigation loop first.
@@ -179,6 +181,24 @@ The catalog only grows from **genuinely novel, human-sharpened** incidents. Ever
 the **issue** (reasoning), the **causing** change, and the **fixing** change — provenance no closed
 "memory" gives you.
 
+### Act — evolve toward (gated) action *(future)*
+
+Read-only is the **starting posture, not the ceiling.** RunLore is designed to climb an **autonomy
+ladder** as eval earns trust — without re-architecting, because an action is just *a tool with extra
+metadata behind a policy gate*:
+
+```
+read-only  →  suggest (PR/command)  →  approve-to-execute (human click)  →  bounded auto
+rung 0         rung 1                   rung 2                              (reversible + low-blast
+(v1)                                                                        + non-critical only)
+```
+
+Every action tool declares `mutating` / `reversible` / `blastRadius` / `target`; an **action policy**
+(mirroring the trigger policy) sets the **mode** (`off | suggest | approve | auto`), scoped by
+environment, reversibility, and blast radius. v1 ships `mode: off` and registers no action tools —
+adding remediation later is *enabling a gated capability + config*, not new architecture. The
+metadata already exists (`providers.Action`, `config.ActionPolicy`) so nothing has to be retrofitted.
+
 ## 7. Provider abstraction
 
 Interfaces live in `internal/providers/providers.go`. "For the moment" impls:
@@ -241,8 +261,17 @@ KB git repo  ──syncer──►  local mirror  ──build──►  index:  
 - **Append-only audit log** of every tool call + decision (feeds eval + trust).
 - **Honest uncertainty.** `unresolved` is a first-class output field; the agent says what it doesn't
   know rather than hallucinating.
-- **Gated remediation is Phase 4 only**, and even then: reversible + low-blast-radius may be
-  approval-gated auto; **irreversible is always human**.
+**Designed to evolve — the autonomy ladder.** Read-only-first is rung 0, not the ceiling. When action
+tools are introduced (Phase 4+), they are gated by an **action capability model** + **action policy**
+(`providers.Action` + `config.ActionPolicy`):
+- every action declares `mutating` / `reversible` / `blastRadius` / `target`;
+- the policy sets the **mode** (`off | suggest | approve | auto`), scoped by environment,
+  reversibility, and blast radius — **irreversibility is the trip-wire for mandatory human approval**;
+- **dry-run / preview by default**, **append-only audit**, and **rollback** for anything applied;
+- scoped agent identity (RBAC) is the hard backstop regardless of policy.
+
+These types exist from day one (carrying no enabled actions in v1) precisely so the read-only→active
+evolution needs no retrofit.
 
 ## 10. Evaluation
 
@@ -273,7 +302,7 @@ as the baseline and makes failure handling a first-class primitive.
 | **React** | Incident-triggered (Alertmanager/VMAlert) + **trigger policy** (env/severity/namespace/label filters + dedup) | + GitOps-failure events, Slack mention, `lore investigate` | + proactive SLO-burn watch | — |
 | **Investigate** | what-changed spine + VM/VL/Hubble correlation + OKF-runbook grounding + confidence/`unresolved` | + ArgoCD + Prometheus providers proven | + cross-incident pattern recognition | — |
 | **Learn** | catalog **read** (cached index, instant recall) | catalog **write** (confidence-routed Issue/PR curation) — *loop closes* | hybrid vector retrieval, auto-curated playbooks, postmortems | — |
-| **Act** | — | — | — | gated, reversible-only remediation (eval-earned) |
+| **Act** | rung 0: read-only (no action tools) | — | — | climb the ladder: suggest → approve-to-execute → bounded reversible auto (eval-earned, policy-gated) |
 
 Phase 1 headline: *an alert fires → RunLore investigates by correlating what-changed with
 metrics/logs → posts a confidence-scored RCA + suggested rollback to Slack, grounded in the catalog.*
