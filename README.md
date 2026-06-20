@@ -72,7 +72,7 @@ flowchart LR
 ## Design principles
 
 - **Cause-agnostic** — reacts to any incident and investigates any cause; "what changed" is the sharpest lens (deepest on GitOps), not the only one.
-- **Read-only first** — v1 ships no cluster-mutating tools (rung 0 of an autonomy ladder; see [`docs/design.md`](docs/design.md)).
+- **Read-only by default, full autonomy ladder when you want it** — `off` → `suggest` → `approve` (human-gated) → `auto` (unattended). Every rung above read-only is reversible-only, envelope-bounded, audited, and kill-switchable (see [`docs/design.md`](docs/design.md)).
 - **GitOps- and metrics-agnostic** — Flux + ArgoCD, VictoriaMetrics + Prometheus; logs/network pluggable.
 - **Single static Go binary** — terminal (`lore investigate`) or in-cluster (`lore serve`).
 - **Model-agnostic** — Anthropic or any OpenAI-compatible endpoint (in-cluster vLLM, Ollama…); your telemetry needn't leave the boundary.
@@ -88,7 +88,7 @@ a scoped GitHub App, the secrets, then `helm install`. **Hack on it** → **[CON
 # try it locally, no cluster: fire mocked Alertmanager alerts through the trigger policy
 hack/demo.sh
 
-# verify every feature end-to-end on a throwaway k3d cluster (20 checks)
+# verify every feature end-to-end on a throwaway k3d cluster (38 checks)
 hack/e2e-k3d.sh
 
 # run the agent against incident webhooks
@@ -101,8 +101,14 @@ lore investigate --alert HarborProbeFailure --namespace apps --config runlore.ya
 ## Status & docs
 
 - 📐 [Design](docs/design.md) · 🚀 [Getting started](docs/getting-started.md) · 🛠 [Contributing](CONTRIBUTING.md) · [Prior art](docs/prior-art.md) · [Plans](docs/plans/)
-- ✅ **End-to-end working** (verified on k3d): **React** (incident webhook + Flux failure watch, policy-gated) → **Investigate** (ReAct loop over an OpenAI-compatible model + `what_changed` + `kb_search`) → **Deliver** (Slack/Matrix) → **Learn** (OKF catalog read + curator PRs/issues). Packaged Helm chart with **HA via leader election**.
-- 🚧 Next: more investigation tools (metrics/logs/network), catalog Git-sync, ArgoCD provider, native Anthropic.
+- ✅ **End-to-end working** (verified on k3d, 38 checks):
+  - **React** — incident webhook (trigger policy + dedup) + GitOps failure watch (**Flux & Argo CD**)
+  - **Investigate** — ReAct loop with 5 tools (`what_changed`, `kb_search`, `query_metrics`, `query_logs`, `network_drops`) + **instant recall** (skip the loop on a high-confidence catalog hit); model-agnostic (**Anthropic** or any OpenAI-compatible endpoint)
+  - **Deliver** — Slack (with interactive **Approve/Reject buttons**) + Matrix
+  - **Learn** — OKF catalog (read + **git-sync**) + curator PRs/issues → knowledge compounds
+  - **Act** — full **autonomy ladder**: `off` → `suggest` → `approve` (curl or Slack buttons, token-gated) → `auto` (unattended, reversible-only, confidence-gated, rate-limited, **kill-switchable**, audited)
+  - **Run** — `lore serve` (in-cluster, **HA via leader election**) or `lore investigate` (on-demand terminal); `lore eval` RCA benchmark; `lore catalog sync`. Packaged Helm chart + CI image build.
+- 🚧 Next: more notifiers (PagerDuty, incident.io), MCP extension layer, proactive (non-incident) watch.
 
 ## License
 
