@@ -1,0 +1,8 @@
+.git
+.github
+docs
+deploy
+hack
+examples
+*.md
+**/*_test.go

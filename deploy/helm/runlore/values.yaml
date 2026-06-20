@@ -1,0 +1,90 @@
+replicaCount: 1
+
+image:
+  repository: ghcr.io/smana/runlore
+  tag: ""               # defaults to .Chart.AppVersion
+  pullPolicy: IfNotPresent
+
+imagePullSecrets: []
+nameOverride: ""
+fullnameOverride: ""
+
+# RunLore configuration — rendered verbatim into a ConfigMap and mounted at
+# /etc/runlore/runlore.yaml. See docs/design.md for the full schema.
+config:
+  triggers:
+    incidents:
+      enabled: true
+      match:
+        severity: [critical]
+      dedup:
+        window: 30m
+    gitops_failures:
+      enabled: true
+  # model:
+  #   base_url: https://vllm.svc/v1
+  #   model: <model-name>
+  #   api_key_env: OPENAI_API_KEY
+  # catalog:
+  #   dir: /var/lib/runlore/catalog
+  # notify:
+  #   slack: { webhook_url_env: SLACK_WEBHOOK_URL }
+  #   matrix: { homeserver: https://matrix.org, room_id: "!r:hs", access_token_env: MATRIX_TOKEN }
+  # forge:
+  #   kb_repo: owner/name
+  #   base_branch: main
+  #   github_app: { app_id: 0, installation_id: 0, private_key_env: GITHUB_APP_PRIVATE_KEY }
+
+# Secret-backed env vars (model API key, Slack webhook, Matrix token, GitHub key).
+# Reference an existing Secret — RunLore never inlines credentials.
+envFrom: []
+#   - secretRef:
+#       name: runlore-secrets
+env: []
+#   - name: OPENAI_API_KEY
+#     valueFrom:
+#       secretKeyRef: { name: runlore-secrets, key: openai-api-key }
+
+# Mount an OKF knowledge catalog (e.g. a ConfigMap of runbooks) so kb_search works.
+# Set config.catalog.dir to mountPath to enable it.
+catalog:
+  configMap: ""                       # ConfigMap name holding the OKF .md files
+  mountPath: /var/lib/runlore/catalog
+
+service:
+  type: ClusterIP
+  port: 8080                          # the /webhook/alertmanager + /healthz port
+
+serviceAccount:
+  create: true
+  name: ""
+  annotations: {}
+
+# ClusterRole granting the React/what-changed reads: watch Flux Kustomizations,
+# read GitRepositories. Cluster-scoped because the informer watches all namespaces.
+rbac:
+  create: true
+
+resources:
+  requests:
+    cpu: 50m
+    memory: 64Mi
+  limits:
+    cpu: "1"
+    memory: 256Mi
+
+# Restricted PSS-compliant defaults.
+podSecurityContext:
+  runAsNonRoot: true
+  seccompProfile:
+    type: RuntimeDefault
+securityContext:
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: true
+  capabilities:
+    drop: [ALL]
+
+nodeSelector: {}
+tolerations: []
+affinity: {}
+podAnnotations: {}
