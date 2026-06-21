@@ -128,27 +128,74 @@ type QueryLogsTool struct {
 	Logs providers.LogsProvider
 }
 
+// buildLogsQL composes a valid LogsQL query. With structured fields it builds the
+// canonical `{kubernetes.container_name="…",kubernetes.pod_namespace="…"} |
+// unpack_json | log.level:…` form, so valid-query generation lives in Go and can't
+// drift. A raw query is used as-is but rejected when it uses Prometheus/Loki
+// `level=` syntax (the model's recurring mistake) — the error guides a retry.
+func buildLogsQL(raw, container, namespace, level string) (string, error) {
+	if raw != "" {
+		if strings.Contains(raw, "level=") {
+			return "", fmt.Errorf("invalid LogsQL: `level=` is Prometheus/Loki syntax. Filter severity with `| unpack_json | log.level:error` (after a stream selector), or use the container/namespace/level params")
+		}
+		return raw, nil
+	}
+	var sel []string
+	if container != "" {
+		sel = append(sel, fmt.Sprintf("kubernetes.container_name=%q", container))
+	}
+	if namespace != "" {
+		sel = append(sel, fmt.Sprintf("kubernetes.pod_namespace=%q", namespace))
+	}
+	if len(sel) == 0 {
+		return "", fmt.Errorf("provide a raw `query`, or `container`/`namespace` to build one")
+	}
+	q := "{" + strings.Join(sel, ",") + "}"
+	if level != "" {
+		q += " | unpack_json | log.level:" + level
+	}
+	return q, nil
+}
+
 // Name returns the tool name.
 func (t QueryLogsTool) Name() string { return "query_logs" }
 
 // Description returns the tool description.
 func (t QueryLogsTool) Description() string {
-	return "Query logs (LogsQL) over a recent window for errors/anomalies. Optional since_minutes bounds the window (default 60)."
+	return "Query logs with LogsQL (VictoriaLogs) over a recent window. " +
+		"PREFER the structured params (container/namespace/level) and let the tool build the query. " +
+		"If you write a raw `query`: stream labels use DOT notation (kubernetes.container_name, " +
+		"kubernetes.pod_namespace), NOT underscores; to filter by severity you MUST unpack JSON first, " +
+		"e.g. `{kubernetes.container_name=\"x\"} | unpack_json | log.level:error`. " +
+		"Do NOT use `level=error` — that is Prometheus/Loki syntax and is invalid LogsQL. " +
+		"Optional since_minutes bounds the window (default 60)."
 }
 
 // Schema returns the JSON schema for the arguments.
 func (t QueryLogsTool) Schema() string {
-	return `{"type":"object","properties":{"query":{"type":"string"},"since_minutes":{"type":"integer"}},"required":["query"]}`
+	return `{"type":"object","properties":{` +
+		`"container":{"type":"string","description":"kubernetes container name to scope to"},` +
+		`"namespace":{"type":"string","description":"kubernetes namespace to scope to"},` +
+		`"level":{"type":"string","enum":["error","warn","info"],"description":"severity filter (unpacks JSON)"},` +
+		`"query":{"type":"string","description":"raw LogsQL; only if the structured fields are insufficient"},` +
+		`"since_minutes":{"type":"integer"}},"required":[]}`
 }
 
 // Call runs the logs query over [now-since, now] and renders the lines.
 func (t QueryLogsTool) Call(ctx context.Context, args string) (string, error) {
 	var in struct {
+		Container    string `json:"container"`
+		Namespace    string `json:"namespace"`
+		Level        string `json:"level"`
 		Query        string `json:"query"`
 		SinceMinutes int    `json:"since_minutes"`
 	}
 	if err := json.Unmarshal([]byte(args), &in); err != nil {
 		return "", fmt.Errorf("parse args: %w", err)
+	}
+	query, err := buildLogsQL(in.Query, in.Container, in.Namespace, in.Level)
+	if err != nil {
+		return "", err
 	}
 	since := in.SinceMinutes
 	if since <= 0 {
@@ -156,7 +203,7 @@ func (t QueryLogsTool) Call(ctx context.Context, args string) (string, error) {
 	}
 	end := time.Now()
 	start := end.Add(-time.Duration(since) * time.Minute)
-	lines, err := t.Logs.Query(ctx, in.Query, providers.TimeWindow{Start: start, End: end})
+	lines, err := t.Logs.Query(ctx, query, providers.TimeWindow{Start: start, End: end})
 	if err != nil {
 		return "", err
 	}

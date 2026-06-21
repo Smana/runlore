@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"testing"
 
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+
 	"github.com/Smana/runlore/internal/providers"
 	"github.com/Smana/runlore/internal/whatchanged"
 )
@@ -42,6 +44,12 @@ func (f fakeReader) WatchKustomizations(context.Context) (<-chan KustomizationEv
 	ch := make(chan KustomizationEvent)
 	close(ch)
 	return ch, nil
+}
+func (f fakeReader) GetResource(context.Context, string, string, string) (*unstructured.Unstructured, error) {
+	return nil, fmt.Errorf("not implemented")
+}
+func (f fakeReader) ListEvents(context.Context, string, string, string) ([]string, error) {
+	return nil, nil
 }
 
 func TestProviderChanges(t *testing.T) {

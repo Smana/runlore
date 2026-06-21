@@ -9,6 +9,8 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	dynamicfake "k8s.io/client-go/dynamic/fake"
+
+	"github.com/Smana/runlore/internal/providers"
 )
 
 func TestDynamicReader(t *testing.T) {
@@ -55,6 +57,89 @@ func TestDynamicReader(t *testing.T) {
 	}
 	if gr.URL != "https://github.com/org/repo" {
 		t.Fatalf("unexpected url: %q", gr.URL)
+	}
+}
+
+// fluxScene builds a fake cluster: a Kustomization "apps" depends on "infra";
+// "infra" sources GitRepository "infra-artifact" — which is ABSENT (the root).
+func fluxScene() *Provider {
+	apps := &unstructured.Unstructured{Object: map[string]any{
+		"apiVersion": "kustomize.toolkit.fluxcd.io/v1", "kind": "Kustomization",
+		"metadata": map[string]any{"name": "apps", "namespace": "flux-system"},
+		"spec": map[string]any{
+			"dependsOn": []any{map[string]any{"name": "infra"}},
+			"sourceRef": map[string]any{"kind": "GitRepository", "name": "flux-system"},
+		},
+		"status": map[string]any{"conditions": []any{
+			map[string]any{"type": "Ready", "status": "False", "reason": "DependencyNotReady", "message": "dependency 'flux-system/infra' is not ready"},
+		}},
+	}}
+	infra := &unstructured.Unstructured{Object: map[string]any{
+		"apiVersion": "kustomize.toolkit.fluxcd.io/v1", "kind": "Kustomization",
+		"metadata": map[string]any{"name": "infra", "namespace": "flux-system"},
+		"spec":     map[string]any{"sourceRef": map[string]any{"kind": "GitRepository", "name": "infra-artifact"}},
+		"status": map[string]any{"conditions": []any{
+			map[string]any{"type": "Ready", "status": "False", "reason": "DependencyNotReady", "message": "dependency not ready"},
+		}},
+	}}
+	gvrToListKind := map[schema.GroupVersionResource]string{
+		kustomizationGVR: "KustomizationList",
+		gitRepositoryGVR: "GitRepositoryList",
+		eventsGVR:        "EventList",
+	}
+	client := dynamicfake.NewSimpleDynamicClientWithCustomListKinds(runtime.NewScheme(), gvrToListKind, apps, infra)
+	return New(NewDynamicReader(client), nil)
+}
+
+func TestResourceStatus(t *testing.T) {
+	p := fluxScene()
+	// A present, failing Kustomization: conditions + refs are surfaced.
+	rs, err := p.ResourceStatus(context.Background(), providers.Workload{Kind: "Kustomization", Name: "apps", Namespace: "flux-system"})
+	if err != nil {
+		t.Fatalf("ResourceStatus: %v", err)
+	}
+	if rs.Ready != "False" || rs.Reason != "DependencyNotReady" {
+		t.Fatalf("unexpected status: %+v", rs)
+	}
+	if rs.Refs["dependsOn"] != "flux-system/infra" || rs.Refs["sourceRef"] != "GitRepository/flux-system/flux-system" {
+		t.Fatalf("unexpected refs: %v", rs.Refs)
+	}
+	// A missing object: NotFound (the cascade root), not an error.
+	miss, err := p.ResourceStatus(context.Background(), providers.Workload{Kind: "GitRepository", Name: "infra-artifact", Namespace: "flux-system"})
+	if err != nil {
+		t.Fatalf("ResourceStatus(missing): %v", err)
+	}
+	if !miss.NotFound {
+		t.Fatalf("expected NotFound for missing GitRepository, got %+v", miss)
+	}
+}
+
+func TestDependencyTree(t *testing.T) {
+	p := fluxScene()
+	root, err := p.DependencyTree(context.Background(), providers.Workload{Kind: "Kustomization", Name: "apps", Namespace: "flux-system"})
+	if err != nil {
+		t.Fatalf("DependencyTree: %v", err)
+	}
+	// apps → (dependsOn infra, sourceRef flux-system); infra → (sourceRef infra-artifact = NOT FOUND root)
+	var missing []string
+	var walk func(n providers.DepNode)
+	walk = func(n providers.DepNode) {
+		if n.NotFound {
+			missing = append(missing, n.Workload.Kind+"/"+n.Workload.Name)
+		}
+		for _, c := range n.Children {
+			walk(c)
+		}
+	}
+	walk(root)
+	found := false
+	for _, m := range missing {
+		if m == "GitRepository/infra-artifact" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("dependency tree did not surface the missing root GitRepository/infra-artifact; missing=%v", missing)
 	}
 }
 
