@@ -7,6 +7,8 @@ import (
 	"bufio"
 	"context"
 	"fmt"
+	"sort"
+	"time"
 
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -62,4 +64,83 @@ func (r *Reader) PodLogs(ctx context.Context, namespace, labelSelector string, s
 		_ = stream.Close()
 	}
 	return out, nil
+}
+
+var _ providers.KubeReader = (*Reader)(nil)
+
+// PodStatuses returns pod health in a namespace (optional label selector), with
+// per-container waiting/terminated reasons — surfacing pod-level failures
+// (CreateContainerConfigError, ImagePullBackOff, CrashLoopBackOff) that never
+// reach logs because the container never started. Unhealthy pods sort first.
+func (r *Reader) PodStatuses(ctx context.Context, namespace, labelSelector string) ([]providers.PodStatus, error) {
+	pods, err := r.client.CoreV1().Pods(namespace).List(ctx, metav1.ListOptions{LabelSelector: labelSelector})
+	if err != nil {
+		return nil, fmt.Errorf("list pods (%s): %w", namespace, err)
+	}
+	out := make([]providers.PodStatus, 0, len(pods.Items))
+	for i := range pods.Items {
+		out = append(out, podStatus(&pods.Items[i]))
+	}
+	sort.SliceStable(out, func(i, j int) bool { return !out[i].Healthy && out[j].Healthy })
+	return out, nil
+}
+
+func podStatus(p *corev1.Pod) providers.PodStatus {
+	ps := providers.PodStatus{Name: p.Name, Phase: string(p.Status.Phase)}
+	ready, total := 0, 0
+	collect := func(cs []corev1.ContainerStatus) {
+		for _, c := range cs {
+			total++
+			if c.Ready {
+				ready++
+			}
+			switch {
+			case c.State.Waiting != nil && c.State.Waiting.Reason != "" && c.State.Waiting.Reason != "ContainerCreating" && c.State.Waiting.Reason != "PodInitializing":
+				ps.Reasons = append(ps.Reasons, fmt.Sprintf("%s: %s: %s", c.Name, c.State.Waiting.Reason, c.State.Waiting.Message))
+			case c.State.Terminated != nil && c.State.Terminated.Reason != "" && c.State.Terminated.Reason != "Completed":
+				ps.Reasons = append(ps.Reasons, fmt.Sprintf("%s: %s (exit %d): %s", c.Name, c.State.Terminated.Reason, c.State.Terminated.ExitCode, c.State.Terminated.Message))
+			}
+		}
+	}
+	collect(p.Status.InitContainerStatuses)
+	collect(p.Status.ContainerStatuses)
+	ps.Ready = fmt.Sprintf("%d/%d", ready, total)
+	ps.Healthy = len(ps.Reasons) == 0 && (p.Status.Phase == corev1.PodRunning || p.Status.Phase == corev1.PodSucceeded) && ready == total
+	return ps
+}
+
+// Events returns recent Events in a namespace (optionally for one object,
+// optionally Warning-only), most-recent first.
+func (r *Reader) Events(ctx context.Context, namespace, objectName string, warnOnly bool) ([]providers.KubeEvent, error) {
+	opts := metav1.ListOptions{Limit: 200}
+	if objectName != "" {
+		opts.FieldSelector = "involvedObject.name=" + objectName
+	}
+	list, err := r.client.CoreV1().Events(namespace).List(ctx, opts)
+	if err != nil {
+		return nil, fmt.Errorf("list events (%s): %w", namespace, err)
+	}
+	out := make([]providers.KubeEvent, 0, len(list.Items))
+	for i := range list.Items {
+		e := &list.Items[i]
+		if warnOnly && e.Type != corev1.EventTypeWarning {
+			continue
+		}
+		out = append(out, providers.KubeEvent{
+			Type:    e.Type,
+			Reason:  e.Reason,
+			Object:  e.InvolvedObject.Kind + "/" + e.InvolvedObject.Name,
+			Message: e.Message,
+			Count:   e.Count,
+		})
+	}
+	sort.SliceStable(out, func(i, j int) bool { return eventTime(&list.Items[i]).After(eventTime(&list.Items[j])) })
+	return out, nil
+}
+
+func eventTime(e *corev1.Event) time.Time {
+	if !e.LastTimestamp.IsZero() {
+		return e.LastTimestamp.Time
+	}
+	return e.EventTime.Time
 }

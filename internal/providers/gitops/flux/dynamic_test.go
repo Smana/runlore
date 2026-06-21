@@ -91,6 +91,34 @@ func fluxScene() *Provider {
 	return New(NewDynamicReader(client), nil)
 }
 
+func TestGetResourceNamespaceFallback(t *testing.T) {
+	// The Kustomization lives in flux-system, but a caller passes the workload's
+	// namespace ("apps", from an alert). GetResource must resolve it via the
+	// flux-system / all-namespaces fallback instead of returning NotFound.
+	ksObj := &unstructured.Unstructured{Object: map[string]any{
+		"apiVersion": "kustomize.toolkit.fluxcd.io/v1",
+		"kind":       "Kustomization",
+		"metadata":   map[string]any{"name": "apps", "namespace": "flux-system"},
+		"spec":       map[string]any{"path": "./apps"},
+	}}
+	client := dynamicfake.NewSimpleDynamicClientWithCustomListKinds(runtime.NewScheme(),
+		map[schema.GroupVersionResource]string{kustomizationGVR: "KustomizationList"}, ksObj)
+	r := NewDynamicReader(client)
+
+	got, err := r.GetResource(context.Background(), "Kustomization", "apps", "apps")
+	if err != nil {
+		t.Fatalf("expected fallback resolution, got error: %v", err)
+	}
+	if got.GetNamespace() != "flux-system" || got.GetName() != "apps" {
+		t.Fatalf("expected flux-system/apps, got %s/%s", got.GetNamespace(), got.GetName())
+	}
+
+	// A genuinely absent object still returns NotFound.
+	if _, err := r.GetResource(context.Background(), "Kustomization", "apps", "does-not-exist"); err == nil {
+		t.Fatal("expected NotFound for an absent object")
+	}
+}
+
 func TestResourceStatus(t *testing.T) {
 	p := fluxScene()
 	// A present, failing Kustomization: conditions + refs are surfaced.

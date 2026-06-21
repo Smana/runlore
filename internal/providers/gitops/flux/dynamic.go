@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"time"
 
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime/schema"
@@ -12,6 +13,10 @@ import (
 	"k8s.io/client-go/dynamic/dynamicinformer"
 	"k8s.io/client-go/tools/cache"
 )
+
+// fluxSystemNamespace is where Flux objects conventionally live, regardless of the
+// namespace a workload they manage runs in.
+const fluxSystemNamespace = "flux-system"
 
 // Flux CRD resources (v1).
 var (
@@ -74,10 +79,30 @@ func (r *dynamicReader) GetResource(ctx context.Context, kind, namespace, name s
 		return nil, fmt.Errorf("unsupported kind %q", kind)
 	}
 	u, err := r.client.Resource(gvr).Namespace(namespace).Get(ctx, name, metav1.GetOptions{})
-	if err != nil {
+	if err == nil {
+		return u, nil
+	}
+	if !apierrors.IsNotFound(err) {
 		return nil, err
 	}
-	return u, nil
+	// Namespace fallback. Flux objects usually live in flux-system, not the
+	// namespace of the workload they manage — so a caller passing the workload's
+	// namespace (e.g. an alert's "apps") would otherwise get a misleading NotFound
+	// that reads as "the resource doesn't exist". Retry in flux-system, then search
+	// all namespaces by name, before trusting the NotFound.
+	if namespace != fluxSystemNamespace {
+		if u2, err2 := r.client.Resource(gvr).Namespace(fluxSystemNamespace).Get(ctx, name, metav1.GetOptions{}); err2 == nil {
+			return u2, nil
+		}
+	}
+	if list, lerr := r.client.Resource(gvr).Namespace(metav1.NamespaceAll).List(ctx, metav1.ListOptions{}); lerr == nil {
+		for i := range list.Items {
+			if list.Items[i].GetName() == name {
+				return &list.Items[i], nil
+			}
+		}
+	}
+	return nil, err // genuinely absent in every namespace: return the original NotFound
 }
 
 // ListEvents returns recent Event lines for an object, filtered client-side by the

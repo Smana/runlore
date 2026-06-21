@@ -45,7 +45,9 @@ func (t FluxStatusTool) Call(ctx context.Context, args string) (string, error) {
 	}
 	id := fmt.Sprintf("%s %s/%s", in.Kind, in.Namespace, in.Name)
 	if rs.NotFound {
-		return id + ": NOT FOUND (the object does not exist — likely the cascade root)", nil
+		return id + ": NOT FOUND — searched the given namespace, flux-system, and all namespaces by " +
+			"name; the object genuinely does not exist (likely the cascade root). If you expected it to " +
+			"exist, re-check the kind/name rather than concluding it was deleted.", nil
 	}
 	var b strings.Builder
 	fmt.Fprintf(&b, "%s  Ready=%s", id, emptyDash(rs.Ready))

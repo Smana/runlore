@@ -36,6 +36,15 @@ to find the root (a not-Ready or NOT FOUND node); and use controller_logs / quer
 relevant controller (e.g. kustomize-controller, source-controller, helm-controller) to learn WHY it
 failed. Confirm hypotheses with metrics and, where relevant, network drops.
 
+When a WORKLOAD won't run (pods not Ready, a HelmRelease install timing out), the cause is usually at
+the pod level — call pod_status on the namespace FIRST: it names container failures verbatim
+(CreateContainerConfigError → the exact missing Secret/ConfigMap key; ImagePullBackOff; CrashLoopBackOff;
+RunContainerError). Then call kube_events for causes that live only in the event stream
+(FailedScheduling "Insufficient cpu/memory", FailedMount, FailedAttachVolume, failing probes). These two
+tools see pod-level failures that logs and Flux status cannot — a container that never started has no
+logs, and "Insufficient cpu" is an Event, not a log line. Note Flux objects (Kustomization/HelmRelease)
+live in flux-system, not the workload's namespace.
+
 RIGOR — correctness over plausibility. A wrong-but-confident root cause is worse than an honest
 "unresolved":
 - Correlation is NOT causation. "The incident started after change X" does not prove X caused it.
