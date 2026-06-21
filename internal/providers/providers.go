@@ -20,10 +20,12 @@ import (
 // Engine identifies a GitOps engine.
 type Engine string
 
-// Supported GitOps engines.
+// Supported GitOps engines. EngineAWS marks a non-GitOps change from the cloud
+// control plane (CloudTrail), so cloud events join the same "what changed" model.
 const (
 	EngineFlux   Engine = "flux"
 	EngineArgoCD Engine = "argocd"
+	EngineAWS    Engine = "aws"
 )
 
 // ChangeType classifies a detected change.
@@ -35,6 +37,7 @@ const (
 	ChangeChartBump ChangeType = "chart-bump" // a Helm chart version changed
 	ChangeImageBump ChangeType = "image-bump" // a container image tag changed
 	ChangeDrift     ChangeType = "drift"      // observed state diverged from desired
+	ChangeCloudAPI  ChangeType = "cloud-api"  // a mutating cloud control-plane call (CloudTrail)
 )
 
 // Workload identifies a Kubernetes object.
@@ -197,17 +200,23 @@ type LogReader interface {
 	PodLogs(ctx context.Context, namespace, labelSelector string, sinceMinutes int) (LogResult, error)
 }
 
-// CloudProvider abstracts cloud-side context for an incident (managed-DB status,
-// instance/node health, load-balancer/target health, recent cloud events).
+// CloudProvider abstracts read-only cloud-side context for an incident. It adds
+// the AWS-layer "what changed" lens (mutating control-plane events) and cloud
+// resource health (instances/ASGs/nodegroups) that the in-cluster signals can't see.
 //
-// Phase 2+: implemented with native cloud SDKs (aws-sdk-go-v2, google-cloud-go,
-// azure-sdk-for-go) and in-cluster identity (IRSA/Pod Identity, GKE/Azure Workload
-// Identity) — not Steampipe and not a bundled cloud CLI (both add heavy deps and
-// break the single-binary property). Steampipe / cloud MCP servers stay available
-// as optional MCP extensions. No cloud provider ships in v1.
+// Implemented with native cloud SDKs (aws-sdk-go-v2) and in-cluster identity
+// (EKS Pod Identity / IRSA) — not Steampipe and not a bundled CLI (both break the
+// single-binary property). Steampipe / cloud MCP servers stay optional MCP
+// extensions. Cloud is opt-in (config.cloud.provider).
 type CloudProvider interface {
-	// Context returns cloud-side signals relevant to a workload/incident window.
-	Context(ctx context.Context, sel Selector, w TimeWindow) (LogResult, error)
+	// CloudChanges returns recent mutating cloud control-plane events (AWS:
+	// CloudTrail) in the window, normalized to the engine-agnostic Change model so
+	// they join the same "what changed" timeline as GitOps diffs.
+	CloudChanges(ctx context.Context, sel Selector, w TimeWindow) ([]Change, error)
+	// ResourceHealth returns cloud-side state/health for resources backing the
+	// selector (EC2 instance status, ASG capacity/activities, EKS nodegroup), as
+	// normalized lines for the model.
+	ResourceHealth(ctx context.Context, sel Selector, w TimeWindow) (LogResult, error)
 }
 
 // ModelProvider abstracts the LLM (Anthropic | OpenAI-compatible: vLLM/Ollama).
