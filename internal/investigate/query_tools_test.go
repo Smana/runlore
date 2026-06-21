@@ -78,3 +78,38 @@ func TestQueryLogsTool(t *testing.T) {
 		t.Fatalf("unexpected output:\n%s", out)
 	}
 }
+
+func TestBuildLogsQL(t *testing.T) {
+	cases := []struct {
+		name                             string
+		raw, container, namespace, level string
+		want                             string
+		wantErr                          bool
+	}{
+		{name: "structured with level", container: "kustomize-controller", namespace: "flux-system", level: "error",
+			want: `{kubernetes.container_name="kustomize-controller",kubernetes.pod_namespace="flux-system"} | unpack_json | log.level:error`},
+		{name: "structured container only", container: "harbor-core",
+			want: `{kubernetes.container_name="harbor-core"}`},
+		{name: "raw passthrough", raw: `{kubernetes.pod_namespace="apps"} | unpack_json | log.level:warn`,
+			want: `{kubernetes.pod_namespace="apps"} | unpack_json | log.level:warn`},
+		{name: "reject prometheus level= syntax", raw: `{job="x"} | level=error`, wantErr: true},
+		{name: "nothing provided", wantErr: true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := buildLogsQL(tc.raw, tc.container, tc.namespace, tc.level)
+			if tc.wantErr {
+				if err == nil {
+					t.Fatalf("want error, got query %q", got)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if got != tc.want {
+				t.Fatalf("buildLogsQL = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}

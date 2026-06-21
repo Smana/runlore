@@ -17,7 +17,19 @@ import (
 var (
 	kustomizationGVR = schema.GroupVersionResource{Group: "kustomize.toolkit.fluxcd.io", Version: "v1", Resource: "kustomizations"}
 	gitRepositoryGVR = schema.GroupVersionResource{Group: "source.toolkit.fluxcd.io", Version: "v1", Resource: "gitrepositories"}
+	eventsGVR        = schema.GroupVersionResource{Group: "", Version: "v1", Resource: "events"}
 )
+
+// kindToGVR maps the Flux Kinds the inspector understands to their GVR.
+var kindToGVR = map[string]schema.GroupVersionResource{
+	"Kustomization":  kustomizationGVR,
+	"GitRepository":  gitRepositoryGVR,
+	"HelmRelease":    {Group: "helm.toolkit.fluxcd.io", Version: "v2", Resource: "helmreleases"},
+	"OCIRepository":  {Group: "source.toolkit.fluxcd.io", Version: "v1", Resource: "ocirepositories"},
+	"HelmRepository": {Group: "source.toolkit.fluxcd.io", Version: "v1", Resource: "helmrepositories"},
+	"HelmChart":      {Group: "source.toolkit.fluxcd.io", Version: "v1", Resource: "helmcharts"},
+	"Bucket":         {Group: "source.toolkit.fluxcd.io", Version: "v1", Resource: "buckets"},
+}
 
 // dynamicReader reads Flux CRDs as unstructured objects via the dynamic client.
 type dynamicReader struct {
@@ -50,6 +62,49 @@ func (r *dynamicReader) GetGitRepository(ctx context.Context, namespace, name st
 	}
 	url, _, _ := unstructured.NestedString(u.Object, "spec", "url")
 	return gitRepository{Name: name, Namespace: namespace, URL: url}, nil
+}
+
+// GetResource fetches one object by kind/namespace/name. The kind must be one the
+// inspector knows (see kindToGVR). A NotFound error is returned verbatim so callers
+// can distinguish "missing" from other failures.
+func (r *dynamicReader) GetResource(ctx context.Context, kind, namespace, name string) (*unstructured.Unstructured, error) {
+	gvr, ok := kindToGVR[kind]
+	if !ok {
+		return nil, fmt.Errorf("unsupported kind %q", kind)
+	}
+	u, err := r.client.Resource(gvr).Namespace(namespace).Get(ctx, name, metav1.GetOptions{})
+	if err != nil {
+		return nil, err
+	}
+	return u, nil
+}
+
+// ListEvents returns recent Event lines for an object, filtered client-side by the
+// involved object's name (and kind, when given). Rendered as "Type Reason Message".
+func (r *dynamicReader) ListEvents(ctx context.Context, namespace, name, kind string) ([]string, error) {
+	list, err := r.client.Resource(eventsGVR).Namespace(namespace).List(ctx, metav1.ListOptions{})
+	if err != nil {
+		return nil, fmt.Errorf("list events: %w", err)
+	}
+	var out []string
+	for i := range list.Items {
+		o := list.Items[i].Object
+		ioName, _, _ := unstructured.NestedString(o, "involvedObject", "name")
+		if ioName != name {
+			continue
+		}
+		if kind != "" {
+			ioKind, _, _ := unstructured.NestedString(o, "involvedObject", "kind")
+			if ioKind != "" && ioKind != kind {
+				continue
+			}
+		}
+		typ, _, _ := unstructured.NestedString(o, "type")
+		reason, _, _ := unstructured.NestedString(o, "reason")
+		msg, _, _ := unstructured.NestedString(o, "message")
+		out = append(out, fmt.Sprintf("%s %s %s", typ, reason, msg))
+	}
+	return out, nil
 }
 
 // readyCondition returns the (status, reason, message) of the Ready condition.

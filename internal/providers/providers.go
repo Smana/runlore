@@ -141,6 +141,38 @@ type GitOpsProvider interface {
 	WatchFailures(ctx context.Context) (<-chan FailureEvent, error)
 }
 
+// ResourceStatus is a read-only snapshot of a GitOps/Kubernetes object's health,
+// used to investigate WHY a resource is failing (not just that it is).
+type ResourceStatus struct {
+	Workload Workload
+	NotFound bool              // the object does not exist (often the cascade root)
+	Ready    string            // Ready condition status: "True"/"False"/"Unknown"/""
+	Reason   string            // Ready condition reason
+	Message  string            // Ready condition message
+	Refs     map[string]string // key spec references (e.g. sourceRef, dependsOn)
+	Events   []string          // recent Event lines (type/reason/message)
+}
+
+// DepNode is a node in a GitOps dependency tree (dependsOn + sourceRef edges),
+// used to find the ROOT failing resource behind a dependency cascade.
+type DepNode struct {
+	Workload Workload
+	NotFound bool
+	Ready    string // Ready condition status
+	Reason   string
+	Children []DepNode
+}
+
+// GitOpsInspector is optional read-only deep introspection for an investigation:
+// a resource's status/refs/events and its dependency tree. Not every engine
+// implements it (Flux does); consumers type-assert for it.
+type GitOpsInspector interface {
+	// ResourceStatus returns conditions, key refs, and recent Events for one object.
+	ResourceStatus(ctx context.Context, w Workload) (ResourceStatus, error)
+	// DependencyTree walks dependsOn/sourceRef edges to surface the root failure.
+	DependencyTree(ctx context.Context, w Workload) (DepNode, error)
+}
+
 // MetricsProvider abstracts VictoriaMetrics/Prometheus (both speak PromQL).
 type MetricsProvider interface {
 	Query(ctx context.Context, promql string, at time.Time) (Samples, error)

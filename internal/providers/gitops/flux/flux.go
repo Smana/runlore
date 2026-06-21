@@ -5,7 +5,11 @@ package flux
 
 import (
 	"context"
+	"fmt"
 	"strings"
+
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 
 	"github.com/Smana/runlore/internal/providers"
 	"github.com/Smana/runlore/internal/whatchanged"
@@ -40,6 +44,10 @@ type Reader interface {
 	ListKustomizations(ctx context.Context) ([]kustomization, error)
 	GetGitRepository(ctx context.Context, namespace, name string) (gitRepository, error)
 	WatchKustomizations(ctx context.Context) (<-chan KustomizationEvent, error)
+	// GetResource fetches one object by kind/namespace/name (kinds in kindToGVR).
+	GetResource(ctx context.Context, kind, namespace, name string) (*unstructured.Unstructured, error)
+	// ListEvents returns recent Event lines for an involved object.
+	ListEvents(ctx context.Context, namespace, name, kind string) ([]string, error)
 }
 
 // Provider implements providers.GitOpsProvider for Flux.
@@ -166,5 +174,116 @@ func parseRevision(rev string) string {
 	return rev
 }
 
-// compile-time check that Provider satisfies the contract.
-var _ providers.GitOpsProvider = (*Provider)(nil)
+// ResourceStatus returns a Flux/K8s object's Ready condition, key spec refs
+// (sourceRef, dependsOn, url) and recent Events — the "why is it failing" lens.
+// A missing object is reported via NotFound (often the cascade root), not an error.
+func (p *Provider) ResourceStatus(ctx context.Context, w providers.Workload) (providers.ResourceStatus, error) {
+	rs := providers.ResourceStatus{Workload: w, Refs: map[string]string{}}
+	u, err := p.reader.GetResource(ctx, w.Kind, w.Namespace, w.Name)
+	if apierrors.IsNotFound(err) {
+		rs.NotFound = true
+		return rs, nil
+	}
+	if err != nil {
+		return rs, err
+	}
+	rs.Ready, rs.Reason, rs.Message = readyCondition(u)
+	if ref := sourceRef(u, w.Namespace); ref != "" {
+		rs.Refs["sourceRef"] = ref
+	}
+	if deps := dependsOn(u, w.Kind, w.Namespace); len(deps) > 0 {
+		names := make([]string, 0, len(deps))
+		for _, d := range deps {
+			names = append(names, d.Namespace+"/"+d.Name)
+		}
+		rs.Refs["dependsOn"] = strings.Join(names, ",")
+	}
+	if url, ok, _ := unstructured.NestedString(u.Object, "spec", "url"); ok && url != "" {
+		rs.Refs["url"] = url
+	}
+	rs.Events, _ = p.reader.ListEvents(ctx, w.Namespace, w.Name, w.Kind) // best-effort
+	return rs, nil
+}
+
+// DependencyTree walks a resource's dependsOn + sourceRef edges, returning the
+// tree with each node's Ready state so the root failure (a not-Ready or missing
+// node) is visible. Best-effort: child read errors don't abort the walk.
+func (p *Provider) DependencyTree(ctx context.Context, w providers.Workload) (providers.DepNode, error) {
+	return p.depNode(ctx, w, map[string]bool{}), nil
+}
+
+func (p *Provider) depNode(ctx context.Context, w providers.Workload, seen map[string]bool) providers.DepNode {
+	node := providers.DepNode{Workload: w}
+	key := w.Kind + "/" + w.Namespace + "/" + w.Name
+	if seen[key] {
+		return node // cycle guard
+	}
+	seen[key] = true
+	u, err := p.reader.GetResource(ctx, w.Kind, w.Namespace, w.Name)
+	if apierrors.IsNotFound(err) {
+		node.NotFound = true
+		return node
+	}
+	if err != nil {
+		return node // unknown kind / transient — leave Ready empty, keep walking siblings
+	}
+	node.Ready, node.Reason, _ = readyCondition(u)
+	for _, dep := range dependsOn(u, w.Kind, w.Namespace) {
+		node.Children = append(node.Children, p.depNode(ctx, dep, seen))
+	}
+	if sk, _, _ := unstructured.NestedString(u.Object, "spec", "sourceRef", "kind"); sk != "" {
+		sn, _, _ := unstructured.NestedString(u.Object, "spec", "sourceRef", "name")
+		sns, _, _ := unstructured.NestedString(u.Object, "spec", "sourceRef", "namespace")
+		if sns == "" {
+			sns = w.Namespace
+		}
+		node.Children = append(node.Children, p.depNode(ctx, providers.Workload{Kind: sk, Name: sn, Namespace: sns}, seen))
+	}
+	return node
+}
+
+// sourceRef renders "kind/namespace/name" of spec.sourceRef, or "".
+func sourceRef(u *unstructured.Unstructured, defaultNS string) string {
+	name, _, _ := unstructured.NestedString(u.Object, "spec", "sourceRef", "name")
+	if name == "" {
+		return ""
+	}
+	kind, _, _ := unstructured.NestedString(u.Object, "spec", "sourceRef", "kind")
+	ns, _, _ := unstructured.NestedString(u.Object, "spec", "sourceRef", "namespace")
+	if ns == "" {
+		ns = defaultNS
+	}
+	return fmt.Sprintf("%s/%s/%s", kind, ns, name)
+}
+
+// dependsOn reads spec.dependsOn (same-kind references); namespace defaults to the
+// parent's.
+func dependsOn(u *unstructured.Unstructured, parentKind, defaultNS string) []providers.Workload {
+	raw, found, _ := unstructured.NestedSlice(u.Object, "spec", "dependsOn")
+	if !found {
+		return nil
+	}
+	var out []providers.Workload
+	for _, d := range raw {
+		m, ok := d.(map[string]any)
+		if !ok {
+			continue
+		}
+		name, _ := m["name"].(string)
+		if name == "" {
+			continue
+		}
+		ns, _ := m["namespace"].(string)
+		if ns == "" {
+			ns = defaultNS
+		}
+		out = append(out, providers.Workload{Kind: parentKind, Name: name, Namespace: ns})
+	}
+	return out
+}
+
+// compile-time check that Provider satisfies the contracts.
+var (
+	_ providers.GitOpsProvider  = (*Provider)(nil)
+	_ providers.GitOpsInspector = (*Provider)(nil)
+)
