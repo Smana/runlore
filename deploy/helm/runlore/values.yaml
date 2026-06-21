@@ -100,6 +100,10 @@ rbac:
 networkPolicy:
   enabled: true
   extraEgress: []   # appended verbatim, e.g. a specific model endpoint CIDR
+  # Render a CiliumNetworkPolicy allowing egress to the EKS Pod Identity credential
+  # endpoint (host entity, 169.254.170.23:80). Required for the AWS cloud provider
+  # on Cilium clusters — a plain NetworkPolicy can't match the host-network target.
+  awsPodIdentity: false
 
 # The agent runs cluster-wide informers (Kustomizations/HelmReleases), a bleve
 # catalog index, a git-sync mirror, and multi-tool LLM investigations. A thorough

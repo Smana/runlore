@@ -33,4 +33,29 @@ spec:
     {{- with .Values.networkPolicy.extraEgress }}
     {{- toYaml . | nindent 4 }}
     {{- end }}
+{{- if .Values.networkPolicy.awsPodIdentity }}
+---
+# On Cilium clusters using EKS Pod Identity, the credential endpoint runs on the
+# node host network (link-local 169.254.170.23:80). Cilium classifies it as the
+# "host" entity, which a Kubernetes NetworkPolicy ipBlock cannot match — so the AWS
+# SDK's credential fetch is silently dropped and the cloud provider hangs. This
+# CiliumNetworkPolicy is the supported way to allow it. Enable when cloud.provider
+# is aws AND the cluster runs Cilium.
+apiVersion: cilium.io/v2
+kind: CiliumNetworkPolicy
+metadata:
+  name: {{ include "runlore.fullname" . }}-aws-pod-identity
+  labels:
+    {{- include "runlore.labels" . | nindent 4 }}
+spec:
+  endpointSelector:
+    matchLabels:
+      {{- include "runlore.selectorLabels" . | nindent 6 }}
+  egress:
+    - toEntities: [host]
+      toPorts:
+        - ports:
+            - port: "80"
+              protocol: TCP
+{{- end }}
 {{- end }}
