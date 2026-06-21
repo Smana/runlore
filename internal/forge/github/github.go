@@ -146,10 +146,15 @@ func (c *Client) OpenPR(ctx context.Context, e providers.KBEntry) (providers.Ref
 	// issues endpoint). Best-effort: a labelling failure must not lose the PR, so
 	// the error is intentionally ignored — the PR URL is already returned.
 	if out.Number != 0 {
-		_ = c.do(ctx, http.MethodPost, fmt.Sprintf("/repos/%s/%s/issues/%d/labels", c.owner, c.repo, out.Number),
-			map[string]any{"labels": lifecycleLabels}, nil)
+		_ = c.addLabels(ctx, out.Number, lifecycleLabels)
 	}
 	return providers.Ref{URL: out.HTMLURL}, nil
+}
+
+// addLabels POSTs labels onto an issue/PR (the create-PR API doesn't accept them).
+func (c *Client) addLabels(ctx context.Context, number int, labels []string) error {
+	return c.do(ctx, http.MethodPost, fmt.Sprintf("/repos/%s/%s/issues/%d/labels", c.owner, c.repo, number),
+		map[string]any{"labels": labels}, nil)
 }
 
 // ListIssuesByLabel returns open issues carrying the given label. Pull requests
@@ -196,8 +201,7 @@ func (c *Client) ReplaceLabel(ctx context.Context, number int, remove, add strin
 		_ = c.do(ctx, http.MethodDelete, fmt.Sprintf("/repos/%s/%s/issues/%d/labels/%s", c.owner, c.repo, number, url.PathEscape(remove)), nil, nil)
 	}
 	if add != "" {
-		return c.do(ctx, http.MethodPost, fmt.Sprintf("/repos/%s/%s/issues/%d/labels", c.owner, c.repo, number),
-			map[string]any{"labels": []string{add}}, nil)
+		return c.addLabels(ctx, number, []string{add})
 	}
 	return nil
 }
