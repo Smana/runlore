@@ -511,7 +511,7 @@ func buildAuto(cfg *config.Config, exec action.Executor, aud audit.Auditor, log 
 
 // buildCurator returns a Curator when the GitHub App token + KB repo are
 // configured, else nil.
-func buildCurator(cfg *config.Config, token forgeToken, log *slog.Logger) *curator.Curator {
+func buildCurator(cfg *config.Config, token forgeToken, cat *catalog.Catalog, log *slog.Logger) *curator.Curator {
 	if token == nil || cfg.Forge.KBRepo == "" {
 		return nil
 	}
@@ -524,9 +524,21 @@ func buildCurator(cfg *config.Config, token forgeToken, log *slog.Logger) *curat
 	if base == "" {
 		base = "main"
 	}
+	dup := cfg.Forge.DupScore
+	if dup == 0 {
+		dup = 5.0
+	}
+	minConf := cfg.Forge.MinConfidence
+	if minConf == 0 {
+		minConf = 0.75
+	}
 	client := github.New(cfg.Forge.GitHubAPIURL, owner, repo, base, github.TokenFunc(token))
-	log.Info("curator enabled", "repo", cfg.Forge.KBRepo)
-	return &curator.Curator{Issues: client, MinConfidencePR: 0.75, Log: log}
+	log.Info("curator enabled", "repo", cfg.Forge.KBRepo, "dup_score", dup, "min_confidence", minConf)
+	cur := &curator.Curator{Forge: client, DupScore: dup, MinConfidence: minConf, Log: log}
+	if cat != nil { // assign via concrete check to avoid a typed-nil interface
+		cur.Catalog = cat
+	}
+	return cur
 }
 
 // buildReinvestigator returns a poller that re-runs KB issues labelled
@@ -542,7 +554,7 @@ func buildReinvestigator(ctx context.Context, cfg *config.Config, gp providers.G
 		return nil
 	}
 	client := github.New(cfg.Forge.GitHubAPIURL, owner, repo, cfg.Forge.BaseBranch, github.TokenFunc(token))
-	model, tools, recall := buildModelAndTools(ctx, cfg, gp, log)
+	model, tools, recall, _ := buildModelAndTools(ctx, cfg, gp, log)
 	run := func(ctx context.Context, req investigate.Request) (providers.Investigation, error) {
 		var res providers.Investigation
 		var got bool
@@ -621,7 +633,7 @@ func runCatalogSync(args []string) error {
 
 // buildModelAndTools assembles the model, investigation tools, and the instant-recall
 // short-circuit from config + the GitOps provider. Shared by serve and investigate.
-func buildModelAndTools(ctx context.Context, cfg *config.Config, gp providers.GitOpsProvider, log *slog.Logger) (providers.ModelProvider, []investigate.Tool, *investigate.Recall) {
+func buildModelAndTools(ctx context.Context, cfg *config.Config, gp providers.GitOpsProvider, log *slog.Logger) (providers.ModelProvider, []investigate.Tool, *investigate.Recall, *catalog.Catalog) {
 	apiKey := ""
 	if cfg.Model.APIKeyEnv != "" {
 		apiKey = os.Getenv(cfg.Model.APIKeyEnv)
@@ -638,7 +650,8 @@ func buildModelAndTools(ctx context.Context, cfg *config.Config, gp providers.Gi
 		}
 	}
 	var recall *investigate.Recall
-	if cat := buildCatalog(ctx, cfg, forgeTok, log); cat != nil {
+	cat := buildCatalog(ctx, cfg, forgeTok, log)
+	if cat != nil {
 		tools = append(tools, investigate.KBSearchTool{Catalog: cat})
 		if cfg.Catalog.InstantRecall.Enabled {
 			recall = &investigate.Recall{Catalog: cat, MinScore: cfg.Catalog.InstantRecall.MinScore}
@@ -673,7 +686,7 @@ func buildModelAndTools(ctx context.Context, cfg *config.Config, gp providers.Gi
 			log.Info("cloud provider enabled", "provider", "aws", "region", cfg.Cloud.Region)
 		}
 	}
-	return model, tools, recall
+	return model, tools, recall, cat
 }
 
 // kubeClientset builds a read-only clientset for pod-log access, or nil when no
@@ -730,7 +743,7 @@ func runInvestigate(args []string) error {
 	log := slog.New(slog.NewTextHandler(os.Stderr, nil))
 	ctx := context.Background()
 
-	model, tools, recall := buildModelAndTools(ctx, cfg, gitOpsFromKube(cfg, log), log)
+	model, tools, recall, _ := buildModelAndTools(ctx, cfg, gitOpsFromKube(cfg, log), log)
 	var result *providers.Investigation
 	li := &investigate.LoopInvestigator{
 		Model: model, Tools: tools, Recall: recall, Actions: action.New(cfg.Actions), Log: log, Verify: true,
@@ -761,11 +774,11 @@ func buildInvestigator(ctx context.Context, cfg *config.Config, gp providers.Git
 		log.Info("no model configured; using log-only investigator")
 		return investigate.LogInvestigator{Log: log}
 	}
-	model, tools, recall := buildModelAndTools(ctx, cfg, gp, log)
+	model, tools, recall, cat := buildModelAndTools(ctx, cfg, gp, log)
 	log.Info("using LLM investigator", "provider", modelProvider(cfg), "model", cfg.Model.Model, "tools", len(tools))
 	notifier := buildNotifier(cfg, log)
 	log.Info("delivery notifiers", "count", notifier.Len())
-	cur := buildCurator(cfg, buildForgeTokenSource(cfg, log), log)
+	cur := buildCurator(cfg, buildForgeTokenSource(cfg, log), cat, log)
 	actions := action.New(cfg.Actions)
 	if actions.Enabled() {
 		log.Info("action policy enabled", "mode", string(actions.Mode()))

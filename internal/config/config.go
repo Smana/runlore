@@ -336,10 +336,12 @@ func (c *Config) Validate() error {
 
 // Forge holds git-forge authentication and the curation target repo.
 type Forge struct {
-	GitHubApp    GitHubApp `yaml:"github_app"`
-	KBRepo       string    `yaml:"kb_repo"`        // "owner/name" — the catalog repo for curation
-	BaseBranch   string    `yaml:"base_branch"`    // PR target branch (default "main")
-	GitHubAPIURL string    `yaml:"github_api_url"` // override for GHES/tests (default https://api.github.com)
+	GitHubApp     GitHubApp `yaml:"github_app"`
+	KBRepo        string    `yaml:"kb_repo"`        // "owner/name" — the catalog repo for curation
+	BaseBranch    string    `yaml:"base_branch"`    // PR target branch (default "main")
+	GitHubAPIURL  string    `yaml:"github_api_url"` // override for GHES/tests (default https://api.github.com)
+	DupScore      float64   `yaml:"dup_score"`      // file-time catalog BM25 dedup threshold (default 5.0)
+	MinConfidence float64   `yaml:"min_confidence"` // file-time quality gate: min overall confidence (default 0.75)
 }
 
 // GitHubApp holds GitHub App credentials. The private key mints 1-hour
