@@ -639,9 +639,15 @@ func buildModelAndTools(ctx context.Context, cfg *config.Config, gp providers.Gi
 	if cfg.Network.URL != "" {
 		tools = append(tools, investigate.NetworkDropsTool{Network: hubble.New(cfg.Network.URL)})
 	}
-	// Read-only controller-log access (Flux controllers), when a cluster is reachable.
+	// Read-only cluster access (Flux controller logs + pod status + events), when a
+	// cluster is reachable. The same reader backs all three tools.
 	if cs := kubeClientset(log); cs != nil {
-		tools = append(tools, investigate.ControllerLogsTool{Logs: cluster.New(cs)})
+		reader := cluster.New(cs)
+		tools = append(tools,
+			investigate.ControllerLogsTool{Logs: reader},
+			investigate.PodStatusTool{Kube: reader},
+			investigate.KubeEventsTool{Kube: reader},
+		)
 	}
 	// Cloud context (AWS): CloudTrail "what changed" + EC2/ASG/EKS health. Opt-in.
 	if cfg.Cloud.Provider == "aws" {
