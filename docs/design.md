@@ -171,13 +171,20 @@ GitOps platform it resolves to the *exact* Git diff (the spine below).
 1. **Instant recall**: `kb_search(symptom)` against the cached catalog. High-confidence known-pattern
    hit → short-circuit to the known resolution (no full loop). *(HolmesGPT data: ~40 % of incidents
    self-resolve on a runbook/pattern match; tool-calls drop 16→2.)*
-2. **What changed**: build the ranked `Change` timeline around the incident window
-   (`what_changed_near`), then `diff_revisions` for the actual landed delta. (GitOps changes today;
-   image/cloud/cert/scaling/manual sources are future inputs to the same timeline.)
+2. **What changed**: build the ranked `Change` timeline around the incident window — the Git diff on a
+   GitOps platform (`what_changed`, resolving GitRepository/OCIRepository/ExternalArtifact sources) **and**
+   the AWS control plane (`cloud_what_changed` = CloudTrail), unified in one `Change` model so an infra
+   change outside GitOps lands on the same timeline.
 3. **Ground**: retrieve relevant OKF runbooks/incidents and seed the loop.
-4. **ReAct**: pull metrics (PromQL), logs, network, k8s/node state *just-in-time* via providers; form
-   and test hypotheses across both the change-caused and no-change branches.
-5. **Output contract** (structured): ranked root cause(s) + **confidence** + `change_ref` +
+4. **ReAct**: pull metrics (PromQL), logs, network, Flux status/tree, controller logs, and cloud
+   resource health *just-in-time* via providers; form and test hypotheses across both the change-caused
+   and no-change branches.
+5. **Adversarial verify pass**: before delivery a *skeptic* model call re-examines each root cause and
+   **rejects correlation-only findings** (moving them to `unresolved`) and **re-calibrates confidence**.
+   It can only ever lower/withdraw a claim, never invent one — and if it rejects every root cause, the
+   proposed actions are dropped too. Recalled (catalog) findings go through it as well, since catalog
+   content is untrusted.
+6. **Output contract** (structured): ranked root cause(s) + **confidence** + `change_ref` +
    **evidence trail** + **suggested reversible action** + explicit **`unresolved`** (honest about what
    it couldn't determine — designed for the ITBench <50 % reality, §10).
 
@@ -200,6 +207,17 @@ investigation result
 The catalog only grows from **genuinely novel, human-sharpened** incidents. Every learned entry cites
 the **issue** (reasoning), the **causing** change, and the **fixing** change — provenance no closed
 "memory" gives you.
+
+**Lifecycle labels gate the catalog's quality.** Curated artifacts carry a lifecycle label —
+`triggered` (raw, just opened) → `investigating` → `solved` (root cause confirmed *and* resolution
+captured) — plus `wont-fix`. Only a **`solved` entry with a written resolution** should be merged as a
+reusable Playbook, so unverified findings can't silently become "knowledge."
+
+**Re-running on demand (`reinvestigate`).** RunLore takes no inbound GitHub webhooks, so re-triggering is
+an **outbound poll**: a human adds the `reinvestigate` label to a curated issue; the leader re-runs the
+investigation (with the prior finding as context), comments the fresh result, and advances the label to
+`investigating`. Only RunLore-originated issues (carrying the `runlore` provenance label) are eligible —
+a drive-by issue can't spend an investigation.
 
 **Two kinds of knowledge — seeded vs learned (a deliberate distinction).** "Learns your context" is
 only half emergent:
@@ -244,16 +262,22 @@ Interfaces live in `internal/providers/providers.go`. "For the moment" impls:
 | Metrics | `MetricsProvider` | **VictoriaMetrics**, **Prometheus** (one PromQL impl, 2 endpoints) | — |
 | Logs | `LogsProvider` | **VictoriaLogs** | Loki, … |
 | Network | `NetworkProvider` | **Hubble** | — |
-| Cloud | `CloudProvider` | — *(Phase 2)* | AWS, GCP, Azure via native SDKs; Steampipe/cloud-MCP optional |
+| Cloud | `CloudProvider` | **AWS** (CloudTrail what-changed + EC2/ASG/EKS health) | GCP, Azure via native SDKs; Steampipe/cloud-MCP optional |
 | Model | `ModelProvider` | **Anthropic**, **Gemini**, **OpenAI-compatible** (in-cluster vLLM, Ollama, OpenRouter, …) | — |
 | Notifier | `Notifier` | **Slack**, **Matrix** | PagerDuty, incident.io |
 | Issue | `IssueProvider` | **GitHub** (App auth) | GitLab (access token) |
 
-> **Cloud is Phase 2, via native SDKs.** v1 needs no cloud provider — the MVP correlates in-cluster
-> signals + what-changed. When cloud lands, `CloudProvider` uses native SDKs (`aws-sdk-go-v2`,
-> `google-cloud-go`, `azure-sdk-for-go`) with in-cluster identity (Pod/Workload Identity) — *not*
-> Steampipe and *not* shelling out to cloud CLIs (both add heavy deps and break the single-binary
-> property). Steampipe and cloud MCP servers remain available as optional MCP extensions.
+> **Cloud via native SDKs.** The AWS impl (`internal/providers/cloud/aws`, `aws-sdk-go-v2`) is **read-only**:
+> `CloudChanges` = CloudTrail `LookupEvents` (mutating events → the engine-agnostic `Change` model, so
+> cloud joins the same "what changed" timeline as Git diffs); `ResourceHealth` = EC2/ASG/EKS `Describe`.
+> Auth is **in-cluster identity** (EKS Pod Identity / IRSA via the default credential chain) — *not*
+> static keys, *not* Steampipe, *not* shelling out to cloud CLIs (both add heavy deps and break the
+> single-binary property). GCP/Azure follow the same shape. Steampipe and cloud MCP servers remain
+> available as optional MCP extensions.
+>
+> On Cilium clusters the Pod Identity credential endpoint is a host-network target (`169.254.170.23:80`),
+> which a Kubernetes NetworkPolicy can't match — the chart's `networkPolicy.awsPodIdentity` renders a
+> `CiliumNetworkPolicy` (`toEntities: [host]`) to allow it.
 
 **Why the GitOps abstraction is real, not hand-wavy** — both engines reduce to *revision history +
 git diff*:

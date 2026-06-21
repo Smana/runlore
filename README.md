@@ -74,6 +74,7 @@ flowchart LR
 - **Cause-agnostic** — reacts to any incident and investigates any cause; "what changed" is the sharpest lens (deepest on GitOps), not the only one.
 - **Read-only by default, full autonomy ladder when you want it** — `off` → `suggest` → `approve` (human-gated) → `auto` (unattended). Every rung above read-only is reversible-only, envelope-bounded, audited, and kill-switchable (see [`docs/design.md`](docs/design.md)).
 - **GitOps- and metrics-agnostic** — Flux + ArgoCD, VictoriaMetrics + Prometheus; logs/network pluggable.
+- **Cloud-aware (read-only)** — correlates the cloud control plane (AWS CloudTrail "what changed" + EC2/ASG/EKS health) using in-cluster identity (EKS Pod Identity / IRSA), so infra changes outside GitOps are in scope too.
 - **Single static Go binary** — terminal (`lore investigate`) or in-cluster (`lore serve`).
 - **Model-agnostic** — Anthropic, Google Gemini, or any OpenAI-compatible endpoint (in-cluster vLLM, Ollama…); your telemetry needn't leave the boundary.
 - **Built-in core providers, MCP as the extension layer** — self-contained, but composable.
@@ -101,11 +102,15 @@ lore investigate --alert HarborProbeFailure --namespace apps --config runlore.ya
 ## Status & docs
 
 - 📐 [Design](docs/design.md) · 🚀 [Getting started](docs/getting-started.md) · 🛠 [Contributing](CONTRIBUTING.md) · [Prior art](docs/prior-art.md) · [Plans](docs/plans/)
-- ✅ **End-to-end working** (verified on k3d):
+- ✅ **End-to-end working** (verified on k3d and a live EKS cluster):
   - **React** — incident webhook (trigger policy + dedup) + GitOps failure watch (**Flux & Argo CD**)
-  - **Investigate** — ReAct loop with 5 tools (`what_changed`, `kb_search`, `query_metrics`, `query_logs`, `network_drops`) + **instant recall** (skip the loop on a high-confidence catalog hit); model-agnostic (**Anthropic**, **Gemini**, or any OpenAI-compatible endpoint)
+  - **Investigate** — ReAct loop with 10 tools across every signal source + **instant recall** (skip the loop on a high-confidence catalog hit) + an **adversarial verify pass** (a skeptic model rejects correlation-only findings and re-calibrates confidence); model-agnostic (**Anthropic**, **Gemini**, or any OpenAI-compatible endpoint):
+    - *GitOps* — `what_changed` (exact Git diff; resolves `GitRepository`/`OCIRepository`/`ExternalArtifact` sources), `flux_resource_status`, `flux_tree`, `controller_logs`
+    - *Signals* — `query_metrics` (PromQL), `query_logs` (LogsQL), `network_drops` (Hubble)
+    - *Cloud (AWS)* — `cloud_what_changed` (CloudTrail), `cloud_resource_health` (EC2/ASG/EKS) via EKS Pod Identity / IRSA, **read-only**
+    - *Knowledge* — `kb_search`
   - **Deliver** — Slack (with interactive **Approve/Reject buttons**) + Matrix
-  - **Learn** — OKF catalog (read + **git-sync**) + curator PRs/issues → knowledge compounds
+  - **Learn** — OKF catalog (read + **git-sync**) + curator PRs/issues with a **lifecycle** (`triggered → investigating → solved`) → knowledge compounds; **re-run on demand** by adding the `reinvestigate` label to a curated issue
   - **Act** — full **autonomy ladder**: `off` → `suggest` → `approve` (curl or Slack buttons, token-gated) → `auto` (unattended, reversible-only, confidence-gated, rate-limited, **kill-switchable**, audited)
   - **Run** — `lore serve` (in-cluster, **HA via leader election**) or `lore investigate` (on-demand terminal); `lore eval` RCA benchmark; `lore catalog sync`. Packaged Helm chart + CI image build.
 - 🚧 Next: more notifiers (PagerDuty, incident.io), MCP extension layer, proactive (non-incident) watch.
