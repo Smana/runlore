@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"testing"
+
+	"github.com/Smana/runlore/internal/investigate"
 )
 
 // fakeTool is a minimal investigate.Tool for decorator tests.
@@ -71,5 +73,19 @@ func TestScoreCoverage(t *testing.T) {
 	miss := ScoreCoverage([]string{"gitops", "metrics"}, nil, calls)
 	if miss.Ratio != 0.5 || len(miss.Missing) != 1 || miss.Missing[0] != "metrics" {
 		t.Fatalf("want 0.5 + metrics missing, got %.2f %v", miss.Ratio, miss.Missing)
+	}
+}
+
+func TestWrapDecoratesAndRecords(t *testing.T) {
+	rec := &Recorder{}
+	wrapped := wrap([]investigate.Tool{fakeTool{name: "what_changed", out: "diff"}}, rec)
+	if len(wrapped) != 1 || wrapped[0].Name() != "what_changed" {
+		t.Fatalf("wrap did not decorate: %+v", wrapped)
+	}
+	if _, err := wrapped[0].Call(context.Background(), "{}"); err != nil {
+		t.Fatal(err)
+	}
+	if c := rec.Calls(); len(c) != 1 || c[0].Name != "what_changed" {
+		t.Fatalf("wrap's tool did not record: %+v", c)
 	}
 }
