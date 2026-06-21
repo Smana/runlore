@@ -166,13 +166,18 @@ func runServe(args []string) error {
 
 	inv := buildInvestigator(ctx, cfg, gitops, approvals, auto, log)
 	queue := investigate.NewQueue(inv, log)
+	reinv := buildReinvestigator(ctx, cfg, gitops, log)
 
-	// startWork runs the leader-only loops (investigation queue + failure watch),
-	// scoped to a context cancelled when leadership is lost.
+	// startWork runs the leader-only loops (investigation queue + failure watch +
+	// re-investigate poller), scoped to a context cancelled when leadership is lost.
 	startWork := func(workCtx context.Context) {
 		go queue.Run(workCtx)
 		if cfg.Triggers.GitOpsFailures.Enabled && gitops != nil {
 			startGitOpsFailureWatch(workCtx, cfg, queue, gitops, log)
+		}
+		if reinv != nil {
+			log.Info("re-investigate poller enabled", "label", investigate.ReinvestigateLabel)
+			go reinv.Poll(workCtx, 2*time.Minute)
 		}
 	}
 
@@ -506,6 +511,38 @@ func buildCurator(cfg *config.Config, token forgeToken, log *slog.Logger) *curat
 	client := github.New(cfg.Forge.GitHubAPIURL, owner, repo, base, github.TokenFunc(token))
 	log.Info("curator enabled", "repo", cfg.Forge.KBRepo)
 	return &curator.Curator{Issues: client, MinConfidencePR: 0.75, Log: log}
+}
+
+// buildReinvestigator returns a poller that re-runs KB issues labelled
+// "reinvestigate" and posts the fresh findings back, or nil when the forge isn't
+// configured. RunLore polls the forge (outbound) — it has no inbound webhooks.
+func buildReinvestigator(ctx context.Context, cfg *config.Config, gp providers.GitOpsProvider, log *slog.Logger) *investigate.Reinvestigator {
+	token := buildForgeTokenSource(cfg, log)
+	if token == nil || cfg.Forge.KBRepo == "" {
+		return nil
+	}
+	owner, repo, ok := strings.Cut(cfg.Forge.KBRepo, "/")
+	if !ok {
+		return nil
+	}
+	client := github.New(cfg.Forge.GitHubAPIURL, owner, repo, cfg.Forge.BaseBranch, github.TokenFunc(token))
+	model, tools, recall := buildModelAndTools(ctx, cfg, gp, log)
+	run := func(ctx context.Context, req investigate.Request) (providers.Investigation, error) {
+		var res providers.Investigation
+		var got bool
+		li := &investigate.LoopInvestigator{
+			Model: model, Tools: tools, Recall: recall, Verify: true, Log: log,
+			OnComplete: func(inv providers.Investigation) { res, got = inv, true },
+		}
+		if err := li.Investigate(ctx, req); err != nil {
+			return providers.Investigation{}, err
+		}
+		if !got {
+			return providers.Investigation{}, fmt.Errorf("re-investigation was inconclusive")
+		}
+		return res, nil
+	}
+	return &investigate.Reinvestigator{Forge: client, Run: run, Log: log}
 }
 
 // runCatalog dispatches catalog subcommands.

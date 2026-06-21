@@ -233,6 +233,27 @@ type IssueProvider interface {
 	OpenPR(ctx context.Context, entry KBEntry) (Ref, error)
 }
 
+// CuratedIssue is a minimal view of a curated KB issue, used by the re-investigate
+// loop to re-run and post results back.
+type CuratedIssue struct {
+	Number int
+	Title  string
+	Body   string
+}
+
+// ReinvestForge lists curated issues flagged for re-investigation and posts results
+// back to them. RunLore polls the forge (outbound) — it receives no inbound GitHub
+// webhooks — so a human checking the "reinvestigate" label triggers a fresh run.
+type ReinvestForge interface {
+	// ListIssuesByLabel returns open issues carrying the given label.
+	ListIssuesByLabel(ctx context.Context, label string) ([]CuratedIssue, error)
+	// Comment posts a comment on an issue.
+	Comment(ctx context.Context, number int, body string) error
+	// ReplaceLabel removes one label and adds another (lifecycle transition);
+	// either side may be empty to only add or only remove.
+	ReplaceLabel(ctx context.Context, number int, remove, add string) error
+}
+
 // ---- payloads ----------------------------------------------------------------
 
 // Sample is one instant metric value with its labels.
