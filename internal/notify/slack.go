@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/Smana/runlore/internal/providers"
@@ -109,17 +110,87 @@ const (
 	rejectActionID  = "runlore_reject"
 )
 
-// slackMessage builds the webhook payload: always a text fallback, plus Block Kit
-// Approve/Reject buttons for any action carrying an ApprovalID (rung-2).
+// slackMessage builds the Slack payload: a Block Kit layout (header, confidence
+// badge, ranked root causes with evidence, suggested next steps, open questions,
+// KB link) plus a plain-text fallback (used for notifications/accessibility and by
+// clients that don't render blocks). Actions carrying an ApprovalID also get
+// interactive Approve/Reject buttons (rung-2).
 func slackMessage(inv providers.Investigation) map[string]any {
-	text := Format(inv)
-	msg := map[string]any{"text": text}
-	var actionBlocks []map[string]any
+	return map[string]any{"text": Format(inv), "blocks": slackBlocks(inv)}
+}
+
+// slackBlocks renders the investigation as Block Kit. Designed to read top-down as
+// an on-call would triage: what happened → how sure → why → what to do → what's
+// still open.
+func slackBlocks(inv providers.Investigation) []map[string]any {
+	title := inv.Title
+	if title == "" {
+		title = "Investigation"
+	}
+	emoji, level, pct := confidenceBadge(inv)
+	blocks := []map[string]any{
+		{"type": "header", "text": map[string]any{"type": "plain_text", "text": truncate("🔍 "+title, 150), "emoji": true}},
+		{"type": "context", "elements": []map[string]any{
+			{"type": "mrkdwn", "text": fmt.Sprintf("%s *%s confidence* · %d%%  ·  🤖 RunLore SRE agent", emoji, level, pct)}}},
+	}
+
+	// Ranked root causes, each with what-changed + evidence.
+	for i, rc := range inv.RootCauses {
+		if i >= 5 {
+			break
+		}
+		var s strings.Builder
+		fmt.Fprintf(&s, "*%d. %s*  `%.0f%%`", i+1, rc.Summary, rc.Confidence*100)
+		if rc.ChangeRef != "" {
+			fmt.Fprintf(&s, "\n📦 *What changed:* `%s`", rc.ChangeRef)
+		}
+		for j, e := range rc.Evidence {
+			if j >= 4 {
+				fmt.Fprintf(&s, "\n• _…%d more_", len(rc.Evidence)-j)
+				break
+			}
+			fmt.Fprintf(&s, "\n• %s", e)
+		}
+		blocks = append(blocks, map[string]any{"type": "section", "text": map[string]any{"type": "mrkdwn", "text": truncate(s.String(), 2900)}})
+	}
+
+	// Suggested next steps — the resolution guide. Combines per-root-cause
+	// suggestions and any policy-surfaced actions, de-duplicated, reversibility flagged.
+	if steps := nextSteps(inv); len(steps) > 0 {
+		var s strings.Builder
+		s.WriteString("*🛠 Suggested next steps*  _(read-only — RunLore won't apply these)_")
+		for _, st := range steps {
+			fmt.Fprintf(&s, "\n• %s", st)
+		}
+		blocks = append(blocks,
+			map[string]any{"type": "divider"},
+			map[string]any{"type": "section", "text": map[string]any{"type": "mrkdwn", "text": truncate(s.String(), 2900)}})
+	}
+
+	if len(inv.Unresolved) > 0 {
+		var s strings.Builder
+		s.WriteString("*❓ Open questions* _(needs a human)_")
+		for i, u := range inv.Unresolved {
+			if i >= 5 {
+				fmt.Fprintf(&s, "\n• _…%d more_", len(inv.Unresolved)-i)
+				break
+			}
+			fmt.Fprintf(&s, "\n• %s", u)
+		}
+		blocks = append(blocks, map[string]any{"type": "section", "text": map[string]any{"type": "mrkdwn", "text": truncate(s.String(), 2900)}})
+	}
+
+	if inv.CuratedURL != "" {
+		blocks = append(blocks, map[string]any{"type": "context", "elements": []map[string]any{
+			{"type": "mrkdwn", "text": fmt.Sprintf("📚 Logged to the knowledge base — <%s|view entry>", inv.CuratedURL)}}})
+	}
+
+	// Interactive Approve/Reject for any action awaiting approval (rung-2).
 	for _, a := range inv.Actions {
 		if a.ApprovalID == "" {
 			continue
 		}
-		actionBlocks = append(actionBlocks,
+		blocks = append(blocks,
 			map[string]any{"type": "section", "text": map[string]any{"type": "mrkdwn", "text": "*Proposed action:* " + a.Description}},
 			map[string]any{"type": "actions", "elements": []map[string]any{
 				{"type": "button", "style": "primary", "action_id": approveActionID, "value": a.ApprovalID,
@@ -129,11 +200,63 @@ func slackMessage(inv providers.Investigation) map[string]any {
 			}},
 		)
 	}
-	if len(actionBlocks) > 0 {
-		blocks := []map[string]any{{"type": "section", "text": map[string]any{"type": "mrkdwn", "text": text}}}
-		msg["blocks"] = append(blocks, actionBlocks...)
+	return blocks
+}
+
+// confidenceBadge returns a visual confidence indicator. The headline confidence
+// is the max of the overall score and the top root cause's — models frequently
+// leave the top-level field at 0 while ranking a high-confidence root cause, and
+// showing "0%" next to an 80% root cause reads as broken.
+func confidenceBadge(inv providers.Investigation) (emoji, level string, pct int) {
+	c := inv.Confidence
+	for _, rc := range inv.RootCauses {
+		if rc.Confidence > c {
+			c = rc.Confidence
+		}
 	}
-	return msg
+	pct = int(c*100 + 0.5)
+	switch {
+	case c >= 0.7:
+		return "🟢", "High", pct
+	case c >= 0.4:
+		return "🟡", "Medium", pct
+	default:
+		return "🔴", "Low", pct
+	}
+}
+
+// nextSteps collects the actionable remediations (root-cause suggestions + policy
+// actions), de-duplicated and reversibility-flagged, preserving order.
+func nextSteps(inv providers.Investigation) []string {
+	var steps []string
+	seen := map[string]bool{}
+	add := func(desc string, reversible bool) {
+		if desc == "" || seen[desc] {
+			return
+		}
+		seen[desc] = true
+		if reversible {
+			desc += "  _(reversible)_"
+		}
+		steps = append(steps, desc)
+	}
+	for _, rc := range inv.RootCauses {
+		add(rc.SuggestedAction, rc.Reversible)
+	}
+	for _, a := range inv.Actions {
+		add(a.Description, a.Reversible)
+	}
+	return steps
+}
+
+// truncate caps a string to n runes, appending an ellipsis when cut (Slack section
+// text is limited to 3000 chars).
+func truncate(s string, n int) string {
+	r := []rune(s)
+	if len(r) <= n {
+		return s
+	}
+	return string(r[:n-1]) + "…"
 }
 
 // Multi delivers to several notifiers, best-effort: a failing notifier is logged,

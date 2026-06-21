@@ -702,15 +702,17 @@ func buildInvestigator(ctx context.Context, cfg *config.Config, gp providers.Git
 			}
 			log.Info("findings",
 				"confidence", found.Confidence, "root_causes", len(found.RootCauses), "unresolved", len(found.Unresolved))
-			if err := notifier.Deliver(context.Background(), found); err != nil {
-				log.Error("deliver findings", "err", err)
-			}
+			// Curate first so the delivered message can link to the KB issue/PR.
 			if cur != nil {
 				if ref, err := cur.Curate(context.Background(), found); err != nil {
 					log.Error("curate findings", "err", err)
 				} else if ref.URL != "" {
+					found.CuratedURL = ref.URL
 					log.Info("curated", "url", ref.URL)
 				}
+			}
+			if err := notifier.Deliver(context.Background(), found); err != nil {
+				log.Error("deliver findings", "err", err)
 			}
 		},
 	}

@@ -238,6 +238,7 @@ type Investigation struct {
 	Unresolved []string // honest: what the agent could not determine
 	Confidence float64
 	Actions    []Action // proposed remediations (autonomy ladder; never executed at rung "suggest")
+	CuratedURL string   // runtime: KB issue/PR the curator opened, linked in delivery (set after curation)
 }
 
 // Hypothesis is one ranked root-cause candidate with its evidence.
