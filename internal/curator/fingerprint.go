@@ -34,7 +34,7 @@ type Novelty struct {
 
 // IsDuplicate returns true + the matching entry when the catalog already covers
 // this finding.
-func (n Novelty) IsDuplicate(ctx context.Context, inv providers.Investigation) (bool, catalog.Entry, error) {
+func (n Novelty) IsDuplicate(ctx context.Context, inv providers.Investigation) (bool, catalog.Entry, error) { //nolint:revive // ctx kept for future remote-index symmetry
 	if n.Catalog == nil {
 		return false, catalog.Entry{}, nil
 	}
