@@ -275,6 +275,14 @@ type IssueProvider interface {
 	OpenPR(ctx context.Context, entry KBEntry) (Ref, error)
 }
 
+// CurationForge is the forge surface the curator's file-time gate needs: open a
+// drafted PR, list open KB PRs (dedup), and comment to coalesce duplicates.
+type CurationForge interface {
+	OpenPR(ctx context.Context, entry KBEntry) (Ref, error)
+	ListPRsByLabel(ctx context.Context, label string) ([]CuratedIssue, error)
+	Comment(ctx context.Context, number int, body string) error
+}
+
 // CuratedIssue is a minimal view of a curated KB issue, used by the re-investigate
 // loop to re-run and post results back.
 type CuratedIssue struct {
