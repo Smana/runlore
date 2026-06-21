@@ -25,7 +25,7 @@ type Searcher interface {
 // New loads the OKF bundle at dir and builds an in-memory index.
 func New(dir string) (*Catalog, error) {
 	c := &Catalog{}
-	if err := c.Reload(dir); err != nil {
+	if _, err := c.Reload(dir); err != nil {
 		return nil, err
 	}
 	return c, nil
@@ -38,20 +38,22 @@ func NewEmpty() *Catalog {
 }
 
 // Reload rebuilds the index from dir and swaps it in atomically. The new index is
-// built outside the lock so concurrent Search is only blocked for the swap.
-func (c *Catalog) Reload(dir string) error {
-	entries, err := Load(dir)
+// built outside the lock so concurrent Search is only blocked for the swap. It
+// returns the list of skipped (unparseable) entry paths so the caller can warn;
+// these are non-fatal — the good entries are still indexed.
+func (c *Catalog) Reload(dir string) ([]string, error) {
+	entries, skipped, err := Load(dir)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	idx, err := buildIndex(entries)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	c.mu.Lock()
 	c.index, c.entries = idx, entries
 	c.mu.Unlock()
-	return nil
+	return skipped, nil
 }
 
 func buildIndex(entries []Entry) (bleve.Index, error) {
