@@ -75,7 +75,7 @@ flowchart LR
 - **Read-only by default, full autonomy ladder when you want it** — `off` → `suggest` → `approve` (human-gated) → `auto` (unattended). Every rung above read-only is reversible-only, envelope-bounded, audited, and kill-switchable (see [`docs/design.md`](docs/design.md)).
 - **GitOps- and metrics-agnostic** — Flux + ArgoCD, VictoriaMetrics + Prometheus; logs/network pluggable.
 - **Single static Go binary** — terminal (`lore investigate`) or in-cluster (`lore serve`).
-- **Model-agnostic** — Anthropic or any OpenAI-compatible endpoint (in-cluster vLLM, Ollama…); your telemetry needn't leave the boundary.
+- **Model-agnostic** — Anthropic, Google Gemini, or any OpenAI-compatible endpoint (in-cluster vLLM, Ollama…); your telemetry needn't leave the boundary.
 - **Built-in core providers, MCP as the extension layer** — self-contained, but composable.
 - **Pluggable notifications** — Slack + Matrix first; PagerDuty and incident.io next.
 
@@ -103,7 +103,7 @@ lore investigate --alert HarborProbeFailure --namespace apps --config runlore.ya
 - 📐 [Design](docs/design.md) · 🚀 [Getting started](docs/getting-started.md) · 🛠 [Contributing](CONTRIBUTING.md) · [Prior art](docs/prior-art.md) · [Plans](docs/plans/)
 - ✅ **End-to-end working** (verified on k3d):
   - **React** — incident webhook (trigger policy + dedup) + GitOps failure watch (**Flux & Argo CD**)
-  - **Investigate** — ReAct loop with 5 tools (`what_changed`, `kb_search`, `query_metrics`, `query_logs`, `network_drops`) + **instant recall** (skip the loop on a high-confidence catalog hit); model-agnostic (**Anthropic** or any OpenAI-compatible endpoint)
+  - **Investigate** — ReAct loop with 5 tools (`what_changed`, `kb_search`, `query_metrics`, `query_logs`, `network_drops`) + **instant recall** (skip the loop on a high-confidence catalog hit); model-agnostic (**Anthropic**, **Gemini**, or any OpenAI-compatible endpoint)
   - **Deliver** — Slack (with interactive **Approve/Reject buttons**) + Matrix
   - **Learn** — OKF catalog (read + **git-sync**) + curator PRs/issues → knowledge compounds
   - **Act** — full **autonomy ladder**: `off` → `suggest` → `approve` (curl or Slack buttons, token-gated) → `auto` (unattended, reversible-only, confidence-gated, rate-limited, **kill-switchable**, audited)
