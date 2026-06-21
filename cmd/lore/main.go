@@ -665,7 +665,7 @@ func runInvestigate(args []string) error {
 	model, tools, recall := buildModelAndTools(ctx, cfg, gitOpsFromKube(cfg, log), log)
 	var result *providers.Investigation
 	li := &investigate.LoopInvestigator{
-		Model: model, Tools: tools, Recall: recall, Actions: action.New(cfg.Actions), Log: log,
+		Model: model, Tools: tools, Recall: recall, Actions: action.New(cfg.Actions), Log: log, Verify: true,
 		OnComplete: func(inv providers.Investigation) { result = &inv },
 	}
 	title := *alert
@@ -708,6 +708,7 @@ func buildInvestigator(ctx context.Context, cfg *config.Config, gp providers.Git
 		Log:     log,
 		Actions: actions,
 		Recall:  recall,
+		Verify:  true, // adversarial review of root causes before delivery/curation
 		OnComplete: func(found providers.Investigation) {
 			// Post-investigation action handling, by mode. The loop has already
 			// filtered found.Actions to the envelope (rung 1). auto and approvals are
