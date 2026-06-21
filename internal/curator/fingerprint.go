@@ -1,4 +1,3 @@
-// Package curator writes completed investigations back to the git forge.
 package curator
 
 import (

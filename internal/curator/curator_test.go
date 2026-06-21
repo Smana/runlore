@@ -2,6 +2,7 @@ package curator
 
 import (
 	"context"
+	"errors"
 	"io"
 	"log/slog"
 	"testing"
@@ -86,6 +87,20 @@ func TestCurateCatalogDuplicateDropsSilently(t *testing.T) {
 	}
 	if f.openedPR != nil || len(f.commented) != 0 || ref.URL != "" {
 		t.Fatalf("catalog duplicate must drop silently, got pr=%+v comment=%v ref=%s", f.openedPR, f.commented, ref.URL)
+	}
+}
+
+func TestCurateCatalogErrorFallsThroughToPR(t *testing.T) {
+	// A catalog search error must NOT block curation: it logs a warning and falls
+	// through (fail-open) to the open-PR dedup + quality gate. With no matching open
+	// PR and a good finding, that yields a PR.
+	f := &fakeForge{}
+	ref, err := newCurator(f, fakeScored{err: errors.New("index unavailable")}).Curate(context.Background(), goodFinding())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if f.openedPR == nil || ref.URL == "" {
+		t.Fatalf("catalog error should fall through to a PR, got %+v / %s", f.openedPR, ref.URL)
 	}
 }
 
