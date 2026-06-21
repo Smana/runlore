@@ -72,15 +72,29 @@ func (li *LoopInvestigator) Investigate(ctx context.Context, req Request) error 
 		maxSteps = 8
 	}
 
+	nudged := false
 	for step := 0; step < maxSteps; step++ {
 		resp, err := li.Model.Complete(ctx, providers.CompletionRequest{System: li.system(), Messages: messages, Tools: specs})
 		if err != nil {
 			return fmt.Errorf("model: %w", err)
 		}
+		li.Log.Debug("investigation step", "title", req.Title, "step", step, "tool_calls", len(resp.ToolCalls), "text_len", len(resp.Text))
 		if len(resp.ToolCalls) == 0 {
-			li.Log.Warn("investigation inconclusive (no submit_findings)", "title", req.Title)
-			return nil
+			// The model concluded in prose instead of calling submit_findings — a
+			// common ReAct failure (Gemini in particular emits a final text turn).
+			// Nudge it once to use the tool rather than discarding the investigation;
+			// only give up if it still won't after the nudge.
+			if nudged {
+				li.Log.Warn("investigation inconclusive (no submit_findings after nudge)", "title", req.Title)
+				return nil
+			}
+			nudged = true
+			messages = append(messages,
+				providers.Message{Role: "assistant", Content: resp.Text},
+				providers.Message{Role: "user", Content: "Record your conclusion now by calling the submit_findings tool (ranked root_causes with evidence, plus anything unresolved). Do not answer in prose."})
+			continue
 		}
+		nudged = false
 		messages = append(messages, providers.Message{Role: "assistant", Content: resp.Text, ToolCalls: resp.ToolCalls})
 		for _, tc := range resp.ToolCalls {
 			if tc.Name == submitFindingsName {
