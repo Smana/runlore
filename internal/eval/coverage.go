@@ -77,7 +77,7 @@ func (t recordingTool) Call(ctx context.Context, args string) (string, error) {
 }
 
 // wrap decorates each tool with the recorder.
-func wrap(tools []investigate.Tool, rec *Recorder) []investigate.Tool { //nolint:unused // consumed by live.go (Task 5)
+func wrap(tools []investigate.Tool, rec *Recorder) []investigate.Tool {
 	out := make([]investigate.Tool, len(tools))
 	for i, tl := range tools {
 		out[i] = recordingTool{inner: tl, rec: rec}
@@ -91,7 +91,7 @@ type Coverage struct {
 	Missing     []string // mandatory groups never touched
 	Bonus       []string // optional groups touched
 	CrossSignal bool     // >=2 distinct source groups exercised
-	ToolErrors  []string // tool names that returned an error
+	ToolErrors  []string // distinct tool names that returned an error
 	Ratio       float64  // |touched| / |expected|  (1.0 when no expected sources)
 }
 
@@ -99,9 +99,11 @@ type Coverage struct {
 // recorded calls. optional sources count as Bonus and never affect Ratio.
 func ScoreCoverage(expected, optional []string, calls []Call) Coverage {
 	seen := map[string]bool{}
+	errored := map[string]bool{}
 	var cov Coverage
 	for _, c := range calls {
-		if c.Err != "" {
+		if c.Err != "" && !errored[c.Name] {
+			errored[c.Name] = true
 			cov.ToolErrors = append(cov.ToolErrors, c.Name)
 		}
 		if grp := toolSource[c.Name]; grp != "" {
@@ -123,6 +125,7 @@ func ScoreCoverage(expected, optional []string, calls []Call) Coverage {
 	}
 	sort.Strings(cov.Touched)
 	sort.Strings(cov.Missing)
+	sort.Strings(cov.Bonus)
 	if len(expected) == 0 {
 		cov.Ratio = 1.0
 	} else {
