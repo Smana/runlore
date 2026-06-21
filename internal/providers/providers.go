@@ -20,10 +20,12 @@ import (
 // Engine identifies a GitOps engine.
 type Engine string
 
-// Supported GitOps engines.
+// Supported GitOps engines. EngineAWS marks a non-GitOps change from the cloud
+// control plane (CloudTrail), so cloud events join the same "what changed" model.
 const (
 	EngineFlux   Engine = "flux"
 	EngineArgoCD Engine = "argocd"
+	EngineAWS    Engine = "aws"
 )
 
 // ChangeType classifies a detected change.
@@ -35,6 +37,7 @@ const (
 	ChangeChartBump ChangeType = "chart-bump" // a Helm chart version changed
 	ChangeImageBump ChangeType = "image-bump" // a container image tag changed
 	ChangeDrift     ChangeType = "drift"      // observed state diverged from desired
+	ChangeCloudAPI  ChangeType = "cloud-api"  // a mutating cloud control-plane call (CloudTrail)
 )
 
 // Workload identifies a Kubernetes object.

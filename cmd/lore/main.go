@@ -45,6 +45,7 @@ import (
 	"github.com/Smana/runlore/internal/network/hubble"
 	"github.com/Smana/runlore/internal/notify"
 	"github.com/Smana/runlore/internal/providers"
+	awscloud "github.com/Smana/runlore/internal/providers/cloud/aws"
 	"github.com/Smana/runlore/internal/providers/cluster"
 	"github.com/Smana/runlore/internal/providers/gitops/argocd"
 	"github.com/Smana/runlore/internal/providers/gitops/flux"
@@ -641,6 +642,15 @@ func buildModelAndTools(ctx context.Context, cfg *config.Config, gp providers.Gi
 	// Read-only controller-log access (Flux controllers), when a cluster is reachable.
 	if cs := kubeClientset(log); cs != nil {
 		tools = append(tools, investigate.ControllerLogsTool{Logs: cluster.New(cs)})
+	}
+	// Cloud context (AWS): CloudTrail "what changed" + EC2/ASG/EKS health. Opt-in.
+	if cfg.Cloud.Provider == "aws" {
+		if cl, err := awscloud.New(ctx, cfg.Cloud.Region, cfg.Cloud.ClusterName); err != nil {
+			log.Warn("aws cloud provider unavailable; cloud tools disabled", "err", err)
+		} else {
+			tools = append(tools, investigate.CloudWhatChangedTool{Cloud: cl}, investigate.CloudResourceHealthTool{Cloud: cl})
+			log.Info("cloud provider enabled", "provider", "aws", "region", cfg.Cloud.Region)
+		}
 	}
 	return model, tools, recall
 }

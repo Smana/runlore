@@ -30,6 +30,7 @@ type Config struct {
 	Metrics Endpoint `yaml:"metrics"` // PromQL backend (VictoriaMetrics/Prometheus) for query_metrics
 	Logs    Endpoint `yaml:"logs"`    // LogsQL backend (VictoriaLogs) for query_logs
 	Network Endpoint `yaml:"network"` // Hubble Relay gRPC address (host:port) for network_drops
+	Cloud   Cloud    `yaml:"cloud"`   // cloud-side context (AWS); empty Provider disables it
 
 	Server ServerConfig `yaml:"server"` // HTTP ingress (webhook authentication)
 }
@@ -37,6 +38,15 @@ type Config struct {
 // Endpoint is a backend base URL; empty disables the corresponding tool.
 type Endpoint struct {
 	URL string `yaml:"url"`
+}
+
+// Cloud configures the cloud context provider. Auth is in-cluster identity (EKS
+// Pod Identity / IRSA) via the AWS SDK's default credential chain — no static keys.
+// Empty Provider disables the cloud tools (default — cloud is opt-in).
+type Cloud struct {
+	Provider    string `yaml:"provider"`     // "" (disabled) | "aws"
+	Region      string `yaml:"region"`       // e.g. eu-west-3 (default: AWS_REGION / IMDS)
+	ClusterName string `yaml:"cluster_name"` // EKS cluster name, scopes nodegroup/ASG queries
 }
 
 // ServerConfig configures the HTTP ingress.
