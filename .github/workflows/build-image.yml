@@ -26,6 +26,13 @@ env:
   REGISTRY: ghcr.io
   IMAGE_NAME: ${{ github.repository_owner }}/runlore
 
+# Serialize builds per ref so concurrent pushes can't race on the mutable :main
+# tag (last-to-finish wins, which silently published a stale image). PR builds are
+# superseded — cancel the in-flight one; branch/tag pushes each run to completion.
+concurrency:
+  group: build-image-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 jobs:
   build-and-push:
     name: Build and push
@@ -73,7 +80,10 @@ jobs:
         with:
           context: .
           file: ./Dockerfile
-          platforms: linux/amd64,linux/arm64
+          # amd64-only: the target clusters run amd64 nodes, and arm64 under QEMU
+          # emulation dominated build time (~10x slower Go compile). Reintroduce via
+          # a native-arm runner matrix + manifest merge if multi-arch is needed.
+          platforms: linux/amd64
           push: ${{ github.event_name != 'pull_request' }}
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
@@ -108,7 +118,7 @@ jobs:
             echo ""
             echo "**Trigger**: ${{ github.event_name }}"
             echo "**Commit**: \`${{ github.sha }}\`"
-            echo "**Platforms**: linux/amd64, linux/arm64"
+            echo "**Platforms**: linux/amd64"
             echo ""
             echo "**Tags**:"
             echo '```'

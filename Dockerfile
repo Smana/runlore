@@ -4,10 +4,16 @@
 FROM golang:1.26 AS build
 WORKDIR /src
 COPY go.mod go.sum ./
-RUN go mod download
+# Cache the module download and the compiler cache across builds (BuildKit cache
+# mounts, persisted via cache-to in CI) so an unchanged dependency set or source
+# tree doesn't recompile from scratch.
+RUN --mount=type=cache,target=/go/pkg/mod \
+    go mod download
 COPY . .
 ARG VERSION=dev
-RUN CGO_ENABLED=0 go build -trimpath \
+RUN --mount=type=cache,target=/go/pkg/mod \
+    --mount=type=cache,target=/root/.cache/go-build \
+    CGO_ENABLED=0 go build -trimpath \
       -ldflags "-s -w -X main.version=${VERSION}" \
       -o /out/lore ./cmd/lore
 
