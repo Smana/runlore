@@ -3,7 +3,9 @@
 /dist/
 *.test
 *.out
-coverage.*
+coverage.out
+coverage.html
+coverage.txt
 
 # local catalog cache / mirror
 /.cache/
