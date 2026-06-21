@@ -14,8 +14,11 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	_ "net/http/pprof" // registers /debug/pprof on DefaultServeMux (loopback-only, opt-in)
 	"os"
 	"os/signal"
+	"runtime/debug"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"syscall"
@@ -116,6 +119,18 @@ func runServe(args []string) error {
 		return err
 	}
 	log := slog.New(slog.NewTextHandler(os.Stdout, nil))
+	setMemoryLimitFromCgroup(log) // make the GC respect the container memory cap
+
+	// Opt-in pprof on loopback only (reachable via `kubectl port-forward`, never the
+	// Service) — so a memory/CPU issue can be profiled in-cluster without exposing it.
+	if os.Getenv("RUNLORE_PPROF") == "true" {
+		go func() {
+			log.Info("pprof listening", "addr", "127.0.0.1:6060")
+			if err := http.ListenAndServe("127.0.0.1:6060", nil); err != nil {
+				log.Warn("pprof server stopped", "err", err)
+			}
+		}()
+	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
@@ -839,4 +854,30 @@ func restConfig() (*rest.Config, error) {
 	}
 	rules := clientcmd.NewDefaultClientConfigLoadingRules()
 	return clientcmd.NewNonInteractiveDeferredLoadingClientConfig(rules, &clientcmd.ConfigOverrides{}).ClientConfig()
+}
+
+// setMemoryLimitFromCgroup sets GOMEMLIMIT to ~90% of the cgroup v2 memory limit
+// so the Go GC respects the container's memory cap — keeping the heap under a soft
+// ceiling and returning memory to the OS under pressure — instead of letting RSS
+// grow across investigations until the cgroup OOM-kills the process. No-op when
+// GOMEMLIMIT is set explicitly, or there is no cgroup memory limit.
+func setMemoryLimitFromCgroup(log *slog.Logger) {
+	if os.Getenv("GOMEMLIMIT") != "" {
+		return // an explicit operator override wins
+	}
+	b, err := os.ReadFile("/sys/fs/cgroup/memory.max") // cgroup v2 (EKS)
+	if err != nil {
+		return
+	}
+	s := strings.TrimSpace(string(b))
+	if s == "" || s == "max" {
+		return // unlimited
+	}
+	cgroupMax, err := strconv.ParseInt(s, 10, 64)
+	if err != nil || cgroupMax <= 0 {
+		return
+	}
+	limit := cgroupMax / 10 * 9 // 90%: leave headroom for non-heap (stacks, bleve, runtime)
+	debug.SetMemoryLimit(limit)
+	log.Info("GOMEMLIMIT set from cgroup", "cgroup_max_bytes", cgroupMax, "gomemlimit_bytes", limit)
 }

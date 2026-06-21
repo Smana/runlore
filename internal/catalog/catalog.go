@@ -51,8 +51,16 @@ func (c *Catalog) Reload(dir string) ([]string, error) {
 		return nil, err
 	}
 	c.mu.Lock()
+	old := c.index
 	c.index, c.entries = idx, entries
 	c.mu.Unlock()
+	// Release the previous index's resources. Search holds the read lock for the
+	// whole query, so by the time the swap above acquired the write lock no query
+	// is still using `old` — closing it here is safe and prevents a bleve index
+	// leaking on every git-sync reload.
+	if old != nil {
+		_ = old.Close()
+	}
 	return skipped, nil
 }
 
