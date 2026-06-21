@@ -189,6 +189,14 @@ type NetworkProvider interface {
 	Drops(ctx context.Context, sel Selector, w TimeWindow) (LogResult, error)
 }
 
+// LogReader reads recent pod logs from the cluster (read-only), backing the
+// controller_logs investigation tool. Implemented with client-go CoreV1 GetLogs.
+type LogReader interface {
+	// PodLogs returns recent log lines from pods matching labelSelector in
+	// namespace, bounded to the last sinceMinutes (0 = no lower bound).
+	PodLogs(ctx context.Context, namespace, labelSelector string, sinceMinutes int) (LogResult, error)
+}
+
 // CloudProvider abstracts cloud-side context for an incident (managed-DB status,
 // instance/node health, load-balancer/target health, recent cloud events).
 //

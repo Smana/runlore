@@ -13,6 +13,21 @@ rules:
   - apiGroups: ["source.toolkit.fluxcd.io"]
     resources: ["gitrepositories"]
     verbs: ["get", "list", "watch"]
+  # Deep read-only introspection (flux_resource_status / flux_tree): HelmReleases,
+  # the other Flux source kinds, and Events.
+  - apiGroups: ["helm.toolkit.fluxcd.io"]
+    resources: ["helmreleases"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["source.toolkit.fluxcd.io"]
+    resources: ["ocirepositories", "helmrepositories", "helmcharts", "buckets"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: [""]
+    resources: ["events"]
+    verbs: ["get", "list", "watch"]
+  # controller_logs: read Flux controller pod logs (read-only).
+  - apiGroups: [""]
+    resources: ["pods", "pods/log"]
+    verbs: ["get", "list"]
   # Argo CD engine (config.gitops.engine: argocd)
   - apiGroups: ["argoproj.io"]
     resources: ["applications"]
