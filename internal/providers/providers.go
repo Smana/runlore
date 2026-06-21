@@ -200,6 +200,39 @@ type LogReader interface {
 	PodLogs(ctx context.Context, namespace, labelSelector string, sinceMinutes int) (LogResult, error)
 }
 
+// PodStatus is a pod's high-level health: phase, ready count, and per-container
+// waiting/terminated reasons — the pod-level signals (CreateContainerConfigError,
+// ImagePullBackOff, CrashLoopBackOff, …) that never reach logs because the
+// container never started.
+type PodStatus struct {
+	Name    string
+	Phase   string
+	Ready   string   // "1/2"
+	Healthy bool     // Running/Succeeded with all containers ready and no waiting reasons
+	Reasons []string // e.g. "registry: CreateContainerConfigError: couldn't find key username in Secret …"
+}
+
+// KubeEvent is a normalized Kubernetes Event — surfaces causes that live in the
+// event stream, not logs or status (FailedScheduling, FailedMount, …).
+type KubeEvent struct {
+	Type    string // Normal | Warning
+	Reason  string
+	Object  string // Kind/Name
+	Message string
+	Count   int32
+}
+
+// KubeReader reads read-only pod status and Kubernetes Events for incident triage,
+// backing the pod_status / kube_events tools. Implemented with client-go CoreV1.
+type KubeReader interface {
+	// PodStatuses returns pod health in a namespace, optionally narrowed by a label
+	// selector (empty = all pods).
+	PodStatuses(ctx context.Context, namespace, labelSelector string) ([]PodStatus, error)
+	// Events returns recent Events in a namespace; objectName "" = all objects;
+	// warnOnly restricts to Warning events.
+	Events(ctx context.Context, namespace, objectName string, warnOnly bool) ([]KubeEvent, error)
+}
+
 // CloudProvider abstracts read-only cloud-side context for an incident. It adds
 // the AWS-layer "what changed" lens (mutating control-plane events) and cloud
 // resource health (instances/ASGs/nodegroups) that the in-cluster signals can't see.
