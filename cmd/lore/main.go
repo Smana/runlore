@@ -45,6 +45,7 @@ import (
 	"github.com/Smana/runlore/internal/network/hubble"
 	"github.com/Smana/runlore/internal/notify"
 	"github.com/Smana/runlore/internal/providers"
+	"github.com/Smana/runlore/internal/providers/cluster"
 	"github.com/Smana/runlore/internal/providers/gitops/argocd"
 	"github.com/Smana/runlore/internal/providers/gitops/flux"
 	"github.com/Smana/runlore/internal/server"
@@ -596,7 +597,26 @@ func buildModelAndTools(ctx context.Context, cfg *config.Config, gp providers.Gi
 	if cfg.Network.URL != "" {
 		tools = append(tools, investigate.NetworkDropsTool{Network: hubble.New(cfg.Network.URL)})
 	}
+	// Read-only controller-log access (Flux controllers), when a cluster is reachable.
+	if cs := kubeClientset(log); cs != nil {
+		tools = append(tools, investigate.ControllerLogsTool{Logs: cluster.New(cs)})
+	}
 	return model, tools, recall
+}
+
+// kubeClientset builds a read-only clientset for pod-log access, or nil when no
+// cluster is reachable (e.g. local runs without a kubeconfig).
+func kubeClientset(log *slog.Logger) *kubernetes.Clientset {
+	restCfg, err := restConfig()
+	if err != nil {
+		return nil
+	}
+	cs, err := kubernetes.NewForConfig(restCfg)
+	if err != nil {
+		log.Warn("clientset unavailable; controller_logs disabled", "err", err)
+		return nil
+	}
+	return cs
 }
 
 // gitOpsFromKube builds the GitOps provider from the ambient kubeconfig (best-effort).
