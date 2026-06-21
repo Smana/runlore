@@ -6,6 +6,7 @@ package whatchanged
 import (
 	"bytes"
 	"fmt"
+	"os"
 	"strings"
 
 	"github.com/go-git/go-git/v5"
@@ -14,7 +15,6 @@ import (
 	"github.com/go-git/go-git/v5/plumbing/object"
 	"github.com/go-git/go-git/v5/plumbing/transport"
 	"github.com/go-git/go-git/v5/plumbing/transport/http"
-	"github.com/go-git/go-git/v5/storage/memory"
 
 	"github.com/Smana/runlore/internal/providers"
 )
@@ -119,16 +119,33 @@ func (d *Differ) auth() transport.AuthMethod {
 	return &http.BasicAuth{Username: "x-access-token", Password: d.Token}
 }
 
-// Remote clones url into memory (auth via the installation token when set) and
-// diffs two revisions. The source may be a remote HTTPS URL or a local path.
-func (d *Differ) Remote(url, fromRev, toRev, scope string) (providers.Diff, error) {
-	repo, err := git.Clone(memory.NewStorage(), nil, &git.CloneOptions{
-		URL:  url,
-		Auth: d.auth(),
-	})
+// cloneToDisk clones url into a temporary on-disk repository and returns it with a
+// cleanup func. Cloning to disk — NOT memory.NewStorage — bounds heap to the
+// working set: an in-memory clone holds the entire object store in the heap, which
+// for a large monorepo reached ~1.3GB and OOM-killed the agent (observed via the
+// inuse_space heap profile: go-git MemoryObject.Write = 90% of heap).
+func (d *Differ) cloneToDisk(url string) (*git.Repository, func(), error) {
+	dir, err := os.MkdirTemp("", "runlore-clone-")
 	if err != nil {
-		return providers.Diff{}, fmt.Errorf("clone %s: %w", url, err)
+		return nil, func() {}, fmt.Errorf("temp dir: %w", err)
 	}
+	cleanup := func() { _ = os.RemoveAll(dir) }
+	repo, err := git.PlainClone(dir, false, &git.CloneOptions{URL: url, Auth: d.auth()})
+	if err != nil {
+		cleanup()
+		return nil, func() {}, fmt.Errorf("clone %s: %w", url, err)
+	}
+	return repo, cleanup, nil
+}
+
+// Remote clones url to disk (auth via the installation token when set) and diffs
+// two revisions. The source may be a remote HTTPS URL or a local path.
+func (d *Differ) Remote(url, fromRev, toRev, scope string) (providers.Diff, error) {
+	repo, cleanup, err := d.cloneToDisk(url)
+	if err != nil {
+		return providers.Diff{}, err
+	}
+	defer cleanup()
 	return diffRevisions(repo, fromRev, toRev, scope)
 }
 
@@ -136,14 +153,14 @@ func (d *Differ) Remote(url, fromRev, toRev, scope string) (providers.Diff, erro
 // introduced by rev (rev against its first parent). A root commit (no parent)
 // yields an empty diff.
 //
-// NOTE (perf): like Remote, this does a full in-memory clone per call. When the
-// GitOpsProvider drives this across many changes, add a shallow fetch or a
-// per-repo clone cache here (see docs/plans review note).
+// NOTE (perf): does a full (disk) clone per call. When the GitOpsProvider drives
+// this across many changes, add a per-repo clone cache here (see docs/plans note).
 func (d *Differ) RemoteFromParent(url, rev, scope string) (providers.Diff, error) {
-	repo, err := git.Clone(memory.NewStorage(), nil, &git.CloneOptions{URL: url, Auth: d.auth()})
+	repo, cleanup, err := d.cloneToDisk(url)
 	if err != nil {
-		return providers.Diff{}, fmt.Errorf("clone %s: %w", url, err)
+		return providers.Diff{}, err
 	}
+	defer cleanup()
 	to, err := resolveCommit(repo, rev)
 	if err != nil {
 		return providers.Diff{}, fmt.Errorf("resolve %q: %w", rev, err)
