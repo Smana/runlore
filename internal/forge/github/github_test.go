@@ -42,6 +42,32 @@ func TestOpenIssue(t *testing.T) {
 	}
 }
 
+func TestListPRsByLabel(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/repos/o/r/issues" || r.URL.Query().Get("labels") != "runlore" || r.URL.Query().Get("state") != "open" {
+			t.Fatalf("unexpected request: %s?%s", r.URL.Path, r.URL.RawQuery)
+		}
+		// one PR (has pull_request), one plain issue (no pull_request) → only the PR is returned
+		_, _ = w.Write([]byte(`[
+		  {"number":48,"title":"KB: HarborRegistryDown","body":"b","labels":[{"name":"runlore"},{"name":"triggered"}],"pull_request":{"url":"x"}},
+		  {"number":39,"title":"Harbor install failing","body":"b","labels":[{"name":"runlore"}]}
+		]`))
+	}))
+	defer srv.Close()
+
+	c := New(srv.URL, "o", "r", "main", staticToken("tok"))
+	prs, err := c.ListPRsByLabel(context.Background(), "runlore")
+	if err != nil {
+		t.Fatalf("ListPRsByLabel: %v", err)
+	}
+	if len(prs) != 1 || prs[0].Number != 48 || prs[0].Title != "KB: HarborRegistryDown" {
+		t.Fatalf("want only PR #48, got %+v", prs)
+	}
+	if len(prs[0].Labels) != 2 || prs[0].Labels[0] != "runlore" {
+		t.Fatalf("labels not parsed: %+v", prs[0].Labels)
+	}
+}
+
 func TestOpenPR(t *testing.T) {
 	var paths []string
 	mux := http.NewServeMux()

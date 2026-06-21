@@ -187,6 +187,39 @@ func (c *Client) ListIssuesByLabel(ctx context.Context, label string) ([]provide
 	return out, nil
 }
 
+// ListPRsByLabel returns open PRs carrying the given label. GitHub's issues
+// endpoint returns both issues and PRs; this keeps ONLY the entries that have a
+// pull_request object (the inverse of ListIssuesByLabel).
+func (c *Client) ListPRsByLabel(ctx context.Context, label string) ([]providers.CuratedIssue, error) {
+	var raw []struct {
+		Number int    `json:"number"`
+		Title  string `json:"title"`
+		Body   string `json:"body"`
+		Labels []struct {
+			Name string `json:"name"`
+		} `json:"labels"`
+		PullRequest *struct {
+			URL string `json:"url"`
+		} `json:"pull_request"`
+	}
+	path := fmt.Sprintf("/repos/%s/%s/issues?state=open&labels=%s&per_page=100", c.owner, c.repo, url.QueryEscape(label))
+	if err := c.do(ctx, http.MethodGet, path, nil, &raw); err != nil {
+		return nil, err
+	}
+	var out []providers.CuratedIssue
+	for _, it := range raw {
+		if it.PullRequest == nil {
+			continue // a plain issue, not a PR
+		}
+		labels := make([]string, 0, len(it.Labels))
+		for _, l := range it.Labels {
+			labels = append(labels, l.Name)
+		}
+		out = append(out, providers.CuratedIssue{Number: it.Number, Title: it.Title, Body: it.Body, Labels: labels})
+	}
+	return out, nil
+}
+
 // Comment posts a comment on an issue.
 func (c *Client) Comment(ctx context.Context, number int, body string) error {
 	return c.do(ctx, http.MethodPost, fmt.Sprintf("/repos/%s/%s/issues/%d/comments", c.owner, c.repo, number),
