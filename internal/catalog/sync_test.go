@@ -51,7 +51,7 @@ func TestSyncerCloneAndPull(t *testing.T) {
 	if err := s.Sync(context.Background()); err != nil {
 		t.Fatalf("clone sync: %v", err)
 	}
-	if es, _ := Load(mirror); len(es) != 1 || es[0].Title != "First" {
+	if es, _, _ := Load(mirror); len(es) != 1 || es[0].Title != "First" {
 		t.Fatalf("after clone: %v", titles(es))
 	}
 
@@ -60,7 +60,7 @@ func TestSyncerCloneAndPull(t *testing.T) {
 	if err := s.Sync(context.Background()); err != nil {
 		t.Fatalf("pull sync: %v", err)
 	}
-	if es, _ := Load(mirror); len(es) != 2 {
+	if es, _, _ := Load(mirror); len(es) != 2 {
 		t.Fatalf("after pull: %d entries, want 2", len(es))
 	}
 }

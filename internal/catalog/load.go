@@ -12,11 +12,15 @@ import (
 
 // Load walks dir and parses every concept .md file into an Entry. The reserved
 // OKF files index.md and log.md are skipped.
-func Load(dir string) ([]Entry, error) {
-	var entries []Entry
-	err := filepath.WalkDir(dir, func(path string, d fs.DirEntry, err error) error {
-		if err != nil {
-			return err
+//
+// A file that fails to parse (e.g. malformed YAML frontmatter) is skipped rather
+// than failing the whole load — its path is returned in skipped so the caller can
+// warn — so one bad entry never empties the catalog. A genuine walk/IO error is
+// still returned as the fatal error.
+func Load(dir string) (entries []Entry, skipped []string, err error) {
+	werr := filepath.WalkDir(dir, func(path string, d fs.DirEntry, werr error) error {
+		if werr != nil {
+			return werr
 		}
 		base := d.Name()
 		if d.IsDir() {
@@ -35,15 +39,16 @@ func Load(dir string) ([]Entry, error) {
 		}
 		e, perr := parseEntry(dir, path)
 		if perr != nil {
-			return fmt.Errorf("parse %s: %w", path, perr)
+			skipped = append(skipped, fmt.Sprintf("%s: %v", path, perr))
+			return nil // skip the bad entry; keep indexing the rest
 		}
 		entries = append(entries, e)
 		return nil
 	})
-	if err != nil {
-		return nil, err
+	if werr != nil {
+		return nil, nil, werr
 	}
-	return entries, nil
+	return entries, skipped, nil
 }
 
 func parseEntry(root, path string) (Entry, error) {
