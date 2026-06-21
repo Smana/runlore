@@ -44,7 +44,7 @@ type GroundTruth struct {
 func LoadScenarios(dir string) ([]Scenario, error) {
 	entries, err := os.ReadDir(dir)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("LoadScenarios %s: %w", dir, err)
 	}
 	var scns []Scenario
 	for _, e := range entries {
