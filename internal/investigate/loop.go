@@ -22,6 +22,14 @@ investigation needed" for something one of your tools could answer — call that
 an item unresolved when no available tool can determine it. A shallow finding (one tool, one guess)
 is a failure; a useful finding cites concrete evidence from several sources.
 
+Search the knowledge base EARLY with kb_search for the symptom — a matching runbook often names the
+root cause and the fix directly; use it to guide the rest of the investigation.
+
+A tool ERROR or "unavailable" backend means MISSING DATA — it is NEVER evidence of a problem. If
+network_drops errors, that does NOT mean there is a network issue; if query_logs errors, that does
+NOT mean logging is the cause. Note the missing signal as unresolved and base your conclusion on the
+tools that DID return data. Do not blame the subsystem whose tool failed.
+
 Drill from symptom to ROOT cause — don't stop at the first failing resource. When a Flux/GitOps
 resource is failing, call flux_resource_status on it; follow its sourceRef/dependsOn; use flux_tree
 to find the root (a not-Ready or NOT FOUND node); and use controller_logs / query_logs on the
@@ -90,6 +98,7 @@ func (li *LoopInvestigator) Investigate(ctx context.Context, req Request) error 
 	}
 
 	nudged := false
+	used := map[string]int{} // tool-call counts, logged so investigation breadth is observable
 	for step := 0; step < maxSteps; step++ {
 		resp, err := li.Model.Complete(ctx, providers.CompletionRequest{System: li.system(), Messages: messages, Tools: specs})
 		if err != nil {
@@ -102,7 +111,7 @@ func (li *LoopInvestigator) Investigate(ctx context.Context, req Request) error 
 			// Nudge it once to use the tool rather than discarding the investigation;
 			// only give up if it still won't after the nudge.
 			if nudged {
-				li.Log.Warn("investigation inconclusive (no submit_findings after nudge)", "title", req.Title)
+				li.Log.Warn("investigation inconclusive (no submit_findings after nudge)", "title", req.Title, "tools_used", used)
 				return nil
 			}
 			nudged = true
@@ -124,13 +133,15 @@ func (li *LoopInvestigator) Investigate(ctx context.Context, req Request) error 
 					inv.Title = req.Title // default to the triggering incident/failure
 				}
 				inv.Actions = li.reviewActions(inv.Actions)
+				li.Log.Info("investigation evidence gathered", "title", req.Title, "tools_used", used)
 				li.deliver(req, inv)
 				return nil
 			}
+			used[tc.Name]++
 			messages = append(messages, providers.Message{Role: "tool", ToolCallID: tc.ID, Content: li.runTool(ctx, byName, tc)})
 		}
 	}
-	li.Log.Warn("investigation hit max steps", "title", req.Title, "max", maxSteps)
+	li.Log.Warn("investigation hit max steps", "title", req.Title, "max", maxSteps, "tools_used", used)
 	return nil
 }
 
