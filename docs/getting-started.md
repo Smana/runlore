@@ -22,6 +22,10 @@ forge (issues/PRs on a repo you designate).
 - Optional: a **metrics** backend (VictoriaMetrics/Prometheus), a **logs** backend (VictoriaLogs),
   and/or **Cilium Hubble** (Relay) — they enable the `query_metrics` / `query_logs` / `network_drops`
   investigation tools.
+- Optional: **AWS** read-only access — enables the `cloud_what_changed` (CloudTrail) and
+  `cloud_resource_health` (EC2/ASG/EKS) tools, the cloud-control-plane "what changed" lens for infra
+  changes outside GitOps. Auth is in-cluster identity (**EKS Pod Identity** or IRSA) — no static keys.
+  See [step 4b](#step-4b-aws-cloud-provider-optional).
 - Optional: a **Slack incoming webhook** and/or a **Matrix** account for delivery.
 - Optional: a **GitHub App** for curation (the Learn loop) — [step 2](#step-2-github-app-for-curation-optional).
 - Optional: [External Secrets Operator](https://external-secrets.io/) to sync credentials from a vault
@@ -173,8 +177,9 @@ config:
     incidents:
       enabled: true
       match:
-        severity: [critical]
-        environment: [prod]
+        severity: [critical, warning]   # match against the alert's labels
+        # environment: [prod]           # only matches alerts that CARRY an `environment`
+                                        # label — omit it if yours don't, or nothing fires
       dedup: { window: 30m }
     gitops_failures:
       enabled: true            # also react to Flux Ready=False
@@ -207,6 +212,12 @@ config:
     url: http://victorialogs.observability.svc:9428   # VictoriaLogs base (LogsQL)
   network:
     url: hubble-relay.kube-system:80                  # Cilium Hubble Relay (gRPC host:port)
+  # Cloud context (AWS) — enables cloud_what_changed (CloudTrail) + cloud_resource_health
+  # (EC2/ASG/EKS). Read-only; auth is in-cluster identity (no keys). See step 4b.
+  cloud:
+    provider: aws
+    region: eu-west-3
+    cluster_name: your-cluster        # scopes EKS nodegroup / ASG queries
 
   # Deliver: one or both.
   notify:
@@ -273,6 +284,53 @@ helm install runlore deploy/helm/runlore -n runlore --create-namespace -f values
 
 ---
 
+## Step 4b — AWS cloud provider (optional)
+
+Enables the `cloud_what_changed` (CloudTrail) and `cloud_resource_health` (EC2/ASG/EKS) tools so the
+agent can see infra changes that never touched GitOps. **Read-only**, authenticated with **in-cluster
+identity** — no static AWS keys.
+
+1. **Config** — add the `config.cloud` block ([step 4](#step-4-configure-and-install)): `provider: aws`,
+   your `region`, and the EKS `cluster_name` (scopes nodegroup/ASG queries).
+
+2. **IAM (read-only)** — grant the agent's ServiceAccount a role with *only* these actions, no writes:
+
+   ```json
+   {
+     "Version": "2012-10-17",
+     "Statement": [
+       { "Effect": "Allow", "Action": ["cloudtrail:LookupEvents"], "Resource": "*" },
+       { "Effect": "Allow", "Action": [
+           "ec2:DescribeInstances", "ec2:DescribeInstanceStatus", "ec2:DescribeTags",
+           "autoscaling:DescribeAutoScalingGroups", "autoscaling:DescribeScalingActivities",
+           "eks:DescribeCluster", "eks:DescribeNodegroup", "eks:ListNodegroups"
+         ], "Resource": "*" }
+     ]
+   }
+   ```
+
+   Bind it to the `runlore` ServiceAccount via **[EKS Pod Identity](https://docs.aws.amazon.com/eks/latest/userguide/pod-identities.html)**
+   (preferred) or IRSA. The SDK's default credential chain picks it up — nothing to configure in RunLore.
+
+3. **Cilium clusters only** — the EKS Pod Identity credential endpoint runs on the node host network
+   (`169.254.170.23:80`), which Cilium classifies as the `host` entity. A plain Kubernetes NetworkPolicy
+   **cannot** match it, so the SDK's credential fetch is silently dropped and the cloud tools hang. Set
+   `networkPolicy.awsPodIdentity: true` (chart value) to render a `CiliumNetworkPolicy` that allows it:
+
+   ```yaml
+   networkPolicy:
+     enabled: true
+     awsPodIdentity: true   # CiliumNetworkPolicy: egress to host:80 for the Pod Identity endpoint
+   ```
+
+   Confirm with Hubble if calls hang: `hubble observe --pod runlore/<pod> --verdict DROPPED` showing
+   `169.254.170.23:80 (host) … DROPPED` is this exact issue.
+
+4. **Memory** — a thorough run (a "pro" model over the full step budget with the cloud tools) is the
+   memory peak; the chart default limit is `1.5Gi`. Lower it only if you use a smaller model / fewer tools.
+
+---
+
 ## Step 5 — Point Alertmanager at the webhook
 
 RunLore reacts to Alertmanager's webhook. Route the alerts you care about to its Service (the
@@ -314,10 +372,35 @@ Fire a test: trigger a `critical`/`prod` alert (or `flux suspend`+break a Kustom
 
 ---
 
+## Step 7 — The Learn loop: KB lifecycle & re-runs
+
+When curation is on, each investigation lands in your KB repo with a **lifecycle label** so you can tell
+raw findings from vetted knowledge:
+
+- **`triggered`** — RunLore just opened this issue/PR; a raw finding, not yet worked.
+- **`investigating`** — being worked (RunLore sets this when you ask it to re-run; see below).
+- **`solved`** — root cause confirmed *and the resolution captured*. **Only `solved` entries with a
+  written resolution should be merged** as a reusable Playbook — that's the quality gate that keeps the
+  catalog trustworthy.
+- **`wont-fix`** — closed without a Playbook.
+
+(High-confidence findings open as a **PR** drafting an OKF entry; lower-confidence ones open as an
+**issue** to triage.)
+
+**Re-run an investigation on demand.** RunLore takes no inbound GitHub webhooks, so it *polls*: add the
+**`reinvestigate`** label to one of its curated issues and within a couple of minutes it re-runs the
+investigation (building on the captured context), posts the fresh findings as a comment, and moves the
+label to `investigating`. Use it after more has happened, or once you've added a relevant Playbook and
+want a sharper answer. Only RunLore-originated issues (carrying the `runlore` label) are eligible.
+
+---
+
 ## What RunLore can and cannot do
 
 - **Cluster**: **read-only by default** — it reads Flux/Argo resources, metrics (PromQL), logs (LogsQL),
-  and network flows (Hubble), and never writes. RBAC is limited to watching those resources + its own
+  and network flows (Hubble), and never writes.
+- **Cloud (AWS, optional)**: **read-only** — CloudTrail `LookupEvents` + EC2/ASG/EKS `Describe`, via
+  in-cluster identity (EKS Pod Identity / IRSA). No mutating cloud calls exist in the code. RBAC is limited to watching those resources + its own
   leader-election `Lease`. With `actions.mode: approve` + `rbac.allowActions: true`, it can execute
   *reversible* Flux ops (suspend/resume/reconcile) **only after explicit human approval** — either
   `POST /actions/<id>/approve` (token-gated) or **Slack Approve/Reject buttons** (enable Slack
