@@ -101,13 +101,17 @@ networkPolicy:
   enabled: true
   extraEgress: []   # appended verbatim, e.g. a specific model endpoint CIDR
 
+# The agent runs cluster-wide informers (Kustomizations/HelmReleases), a bleve
+# catalog index, a git-sync mirror, and multi-tool LLM investigations. 256Mi
+# OOMKills under real load — these defaults give headroom; CPU stays modest
+# (mostly idle, with occasional LLM calls).
 resources:
   requests:
     cpu: 50m
-    memory: 64Mi
+    memory: 192Mi
   limits:
     cpu: "1"
-    memory: 256Mi
+    memory: 768Mi
 
 # Restricted PSS-compliant defaults.
 podSecurityContext:
