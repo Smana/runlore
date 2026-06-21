@@ -102,16 +102,17 @@ networkPolicy:
   extraEgress: []   # appended verbatim, e.g. a specific model endpoint CIDR
 
 # The agent runs cluster-wide informers (Kustomizations/HelmReleases), a bleve
-# catalog index, a git-sync mirror, and multi-tool LLM investigations. 256Mi
-# OOMKills under real load — these defaults give headroom; CPU stays modest
-# (mostly idle, with occasional LLM calls).
+# catalog index, a git-sync mirror, and multi-tool LLM investigations. A thorough
+# run (a "pro" model over up to maxSteps=20, each call re-sending the growing
+# message history plus tool outputs) is the memory peak — 768Mi OOMKilled such a
+# run, so the limit is 1.5Gi. Idle is ~15-30Mi; CPU stays modest.
 resources:
   requests:
     cpu: 50m
-    memory: 192Mi
+    memory: 256Mi
   limits:
     cpu: "1"
-    memory: 768Mi
+    memory: 1536Mi
 
 # Restricted PSS-compliant defaults.
 podSecurityContext:

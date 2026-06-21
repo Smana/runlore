@@ -50,7 +50,13 @@ func (r *Reinvestigator) pollOnce(ctx context.Context) {
 		return
 	}
 	for _, is := range issues {
-		req := Request{Source: SourceAlert, Title: is.Title, Message: "re-investigation requested via the reinvestigate label"}
+		// Only re-run RunLore-originated issues: require the "runlore" provenance
+		// label so an arbitrary (drive-by) issue carrying "reinvestigate" can't
+		// trigger an investigation. Title/body are untrusted, fed only as context.
+		if !hasLabel(is.Labels, "runlore") {
+			continue
+		}
+		req := Request{Source: SourceAlert, Title: is.Title, Reason: "re-investigation requested via the reinvestigate label", Message: is.Body}
 		inv, err := r.Run(ctx, req)
 		if err != nil {
 			r.Log.Warn("reinvestigate: run failed", "issue", is.Number, "err", err)
@@ -64,6 +70,15 @@ func (r *Reinvestigator) pollOnce(ctx context.Context) {
 		_ = r.Forge.ReplaceLabel(ctx, is.Number, ReinvestigateLabel, "investigating")
 		r.Log.Info("reinvestigated", "issue", is.Number, "confidence", inv.Confidence, "root_causes", len(inv.RootCauses))
 	}
+}
+
+func hasLabel(labels []string, want string) bool {
+	for _, l := range labels {
+		if l == want {
+			return true
+		}
+	}
+	return false
 }
 
 // reinvestComment renders the fresh findings for an issue comment.
