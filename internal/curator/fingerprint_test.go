@@ -2,6 +2,7 @@ package curator
 
 import (
 	"context"
+	"strings"
 	"testing"
 
 	"github.com/Smana/runlore/internal/catalog"
@@ -16,19 +17,23 @@ func TestFingerprintIncludesTitleRootAndWorkload(t *testing.T) {
 	}
 	fp := Fingerprint(inv)
 	for _, want := range []string{"HarborRegistryDown", "IAM AccessKeysPerUser quota", "tooling", "harbor-registry"} {
-		if !contains(fp, want) {
+		if !strings.Contains(fp, want) {
 			t.Fatalf("fingerprint %q missing %q", fp, want)
 		}
 	}
 }
 
-// fakeScored is a catalog.ScoredSearcher returning a fixed hit.
+// fakeScored is a catalog.ScoredSearcher returning a fixed hit (or an error).
 type fakeScored struct {
 	score float64
 	title string
+	err   error
 }
 
 func (f fakeScored) SearchScored(_ string, _ int) ([]catalog.ScoredEntry, error) {
+	if f.err != nil {
+		return nil, f.err
+	}
 	if f.title == "" {
 		return nil, nil
 	}
@@ -62,16 +67,4 @@ func TestNoveltyNilCatalogIsNovel(t *testing.T) {
 	if err != nil || dup {
 		t.Fatalf("nil catalog must be novel, got dup=%v err=%v", dup, err)
 	}
-}
-
-func contains(s, sub string) bool {
-	return len(sub) == 0 || (len(s) >= len(sub) && indexOf(s, sub) >= 0)
-}
-func indexOf(s, sub string) int {
-	for i := 0; i+len(sub) <= len(s); i++ {
-		if s[i:i+len(sub)] == sub {
-			return i
-		}
-	}
-	return -1
 }

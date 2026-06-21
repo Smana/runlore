@@ -53,7 +53,8 @@ func (c *Curator) Curate(ctx context.Context, inv providers.Investigation) (prov
 		return providers.Ref{}, nil
 	}
 
-	// 3. draft a merge-ready PR (labelled solved by the forge lifecycle labels)
+	// 3. draft a merge-ready PR (labels: runlore + triggered; the curate agent
+	// later advances solved/resolved/ready-to-merge — Phase 2, not here)
 	ref, err := c.Forge.OpenPR(ctx, draftKBEntry(inv))
 	if err != nil {
 		return providers.Ref{}, fmt.Errorf("open PR: %w", err)
