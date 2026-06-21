@@ -40,6 +40,7 @@ import (
 	"github.com/Smana/runlore/internal/logs/victorialogs"
 	"github.com/Smana/runlore/internal/metrics/prometheus"
 	anthropic "github.com/Smana/runlore/internal/model/anthropic"
+	gemini "github.com/Smana/runlore/internal/model/gemini"
 	openai "github.com/Smana/runlore/internal/model/openai"
 	"github.com/Smana/runlore/internal/network/hubble"
 	"github.com/Smana/runlore/internal/notify"
@@ -269,18 +270,35 @@ func podNamespace() string {
 
 // modelProvider returns the configured model provider name (default "openai").
 func modelProvider(cfg *config.Config) string {
-	if cfg.Model.Provider == "anthropic" {
-		return "anthropic"
+	switch cfg.Model.Provider {
+	case "anthropic", "gemini":
+		return cfg.Model.Provider
+	default:
+		return "openai"
 	}
-	return "openai"
+}
+
+// modelConfigured reports whether a usable model is configured: a provider with a
+// built-in default endpoint (anthropic, gemini), or any provider with a base_url.
+func modelConfigured(cfg *config.Config) bool {
+	switch cfg.Model.Provider {
+	case "anthropic", "gemini":
+		return true
+	default:
+		return cfg.Model.BaseURL != ""
+	}
 }
 
 // buildModel builds the ModelProvider for the configured provider.
 func buildModel(cfg *config.Config, apiKey string) providers.ModelProvider {
-	if cfg.Model.Provider == "anthropic" {
+	switch cfg.Model.Provider {
+	case "anthropic":
 		return anthropic.New(cfg.Model.BaseURL, cfg.Model.Model, apiKey)
+	case "gemini":
+		return gemini.New(cfg.Model.BaseURL, cfg.Model.Model, apiKey)
+	default:
+		return openai.New(cfg.Model.BaseURL, cfg.Model.Model, apiKey)
 	}
-	return openai.New(cfg.Model.BaseURL, cfg.Model.Model, apiKey)
 }
 
 // buildCatalog returns the kb_search backing store, or nil when no catalog is
@@ -341,7 +359,7 @@ func runEval(args []string) error {
 	if err != nil {
 		return err
 	}
-	if cfg.Model.BaseURL == "" && cfg.Model.Provider != "anthropic" {
+	if !modelConfigured(cfg) {
 		return fmt.Errorf("eval requires a configured model (set config.model)")
 	}
 	cases, err := eval.Load(*casesDir)
@@ -603,7 +621,7 @@ func runInvestigate(args []string) error {
 	if err != nil {
 		return err
 	}
-	if cfg.Model.BaseURL == "" && cfg.Model.Provider != "anthropic" {
+	if !modelConfigured(cfg) {
 		return fmt.Errorf("investigate requires a configured model (set config.model)")
 	}
 	// Progress logs go to stderr; the findings go to stdout.
@@ -637,7 +655,7 @@ func runInvestigate(args []string) error {
 // buildInvestigator returns the LLM ReAct investigator when a model is configured,
 // otherwise the read-only LogInvestigator.
 func buildInvestigator(ctx context.Context, cfg *config.Config, gp providers.GitOpsProvider, approvals *action.Approvals, auto *action.Auto, log *slog.Logger) investigate.Investigator {
-	if cfg.Model.BaseURL == "" && cfg.Model.Provider != "anthropic" {
+	if !modelConfigured(cfg) {
 		log.Info("no model configured; using log-only investigator")
 		return investigate.LogInvestigator{Log: log}
 	}
