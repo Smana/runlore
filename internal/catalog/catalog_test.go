@@ -57,7 +57,7 @@ func TestReload(t *testing.T) {
 	}
 	// A new entry appears (e.g. a merged curation PR pulled by git-sync) and we reload.
 	writeEntry(t, dir, "b.md", "---\ntitle: Beta\n---\ny")
-	if err := c.Reload(dir); err != nil {
+	if _, err := c.Reload(dir); err != nil {
 		t.Fatalf("Reload: %v", err)
 	}
 	if c.Len() != 2 {
