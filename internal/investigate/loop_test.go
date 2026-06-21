@@ -95,6 +95,53 @@ func TestLoopInvestigatorActionsDisabled(t *testing.T) {
 	}
 }
 
+func TestLoopNudgesOnProseTurn(t *testing.T) {
+	// Some models (Gemini in particular) answer the final turn in prose instead of
+	// calling submit_findings. The loop must nudge once and recover, not give up.
+	model := &scriptModel{responses: []providers.CompletionResponse{
+		{Text: "Based on the evidence, the chart bump broke the DB. Confidence ~0.8."}, // prose, no tool call
+		{ToolCalls: []providers.ToolCall{{ID: "1", Name: submitFindingsName, Args: `{"confidence":0.8,"root_causes":[{"summary":"chart bump broke db"}]}`}}},
+	}}
+	var got *providers.Investigation
+	li := &LoopInvestigator{
+		Model:      model,
+		Log:        slog.New(slog.NewTextHandler(io.Discard, nil)),
+		OnComplete: func(inv providers.Investigation) { got = &inv },
+	}
+	if err := li.Investigate(context.Background(), Request{Title: "x"}); err != nil {
+		t.Fatalf("Investigate: %v", err)
+	}
+	if got == nil || len(got.RootCauses) != 1 || got.RootCauses[0].Summary != "chart bump broke db" {
+		t.Fatalf("nudge did not recover findings: %+v", got)
+	}
+	if model.i != 2 {
+		t.Fatalf("expected 2 model calls (prose + nudged submit), got %d", model.i)
+	}
+}
+
+func TestLoopInconclusiveAfterNudge(t *testing.T) {
+	// If the model still won't call a tool after the nudge, give up — don't loop forever.
+	model := &scriptModel{responses: []providers.CompletionResponse{
+		{Text: "I think it's the database."},
+		{Text: "Still just the database, no tool call."},
+	}}
+	var delivered bool
+	li := &LoopInvestigator{
+		Model:      model,
+		Log:        slog.New(slog.NewTextHandler(io.Discard, nil)),
+		OnComplete: func(providers.Investigation) { delivered = true },
+	}
+	if err := li.Investigate(context.Background(), Request{Title: "x"}); err != nil {
+		t.Fatalf("Investigate: %v", err)
+	}
+	if delivered {
+		t.Fatal("expected no delivery when the model never calls submit_findings")
+	}
+	if model.i != 2 {
+		t.Fatalf("expected exactly 2 model calls (initial + one nudge), got %d", model.i)
+	}
+}
+
 // scriptModel returns a fixed sequence of responses, ignoring its input.
 type scriptModel struct {
 	responses []providers.CompletionResponse
