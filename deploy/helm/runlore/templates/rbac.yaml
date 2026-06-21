@@ -19,7 +19,7 @@ rules:
     resources: ["helmreleases"]
     verbs: ["get", "list", "watch"]
   - apiGroups: ["source.toolkit.fluxcd.io"]
-    resources: ["ocirepositories", "helmrepositories", "helmcharts", "buckets"]
+    resources: ["ocirepositories", "helmrepositories", "helmcharts", "buckets", "externalartifacts"]
     verbs: ["get", "list", "watch"]
   - apiGroups: [""]
     resources: ["events"]

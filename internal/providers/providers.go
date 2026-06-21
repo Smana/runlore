@@ -248,6 +248,7 @@ type CuratedIssue struct {
 	Number int
 	Title  string
 	Body   string
+	Labels []string
 }
 
 // ReinvestForge lists curated issues flagged for re-investigation and posts results

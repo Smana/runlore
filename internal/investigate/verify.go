@@ -123,6 +123,12 @@ func applyVerdicts(li *LoopInvestigator, req Request, inv providers.Investigatio
 		}
 	}
 	inv.Confidence = maxc
+	// If every root cause was rejected, drop the proposed actions too — a
+	// remediation motivated by a rejected hypothesis must not survive the review
+	// (the exact failure the verify pass exists to prevent).
+	if len(kept) == 0 {
+		inv.Actions = nil
+	}
 	return inv
 }
 
