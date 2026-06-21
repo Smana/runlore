@@ -12,10 +12,10 @@
 
 ## 1. Why this exists — the loop produces but never compounds
 
-Observed on the live `runlore-kb` repo (2026-06-21):
+Observed on the live `runlore-kb` repo (2026-06-21, `origin/main`):
 
-- **0 of ~12 KB PRs were ever merged** — every closed one was closed *unmerged*. The catalog's only entry is the hand-authored **seed** playbook (`helmrelease-upgrade-failure.md`); the "Incidents" section is still empty, and `log.md` has no curation entries.
-- After dozens of investigations, the catalog has grown by **zero** learned entries.
+- **~2 of ~14 KB PRs ever merged** (#38 `harbor-helmrelease-terminal-failed.md`, #48 `harborregistrydown.md`); the rest were closed *unmerged*. The catalog also holds several **hand-authored seed Playbooks** committed directly to main (not via the curator). So the curator-driven loop has contributed only ~2 learned entries despite dozens of investigations — a ~14% merge rate, the rest discarded.
+- **`log.md` is never updated on merge** — merges are manual (`gh`), which doesn't run the curator, so the change log stays empty and provenance isn't recorded.
 - **Heavy duplication**: PRs #12/#20/#22/#27/#29 are all the *same* "Kustomization DependencyNotReady / missing GitRepository" incident; issues #40/#41 both "NodeTerminatedCheckAWS"; #37/#39 both "Harbor install failing."
 - **7 issues** sit open, all `triggered`, **0 promoted, 0 resolved** — a second pile-up queue.
 
@@ -63,13 +63,23 @@ curator agent (Phase 2) detects a RECURRING unresolved pattern (N× same fingerp
 |---|---|
 | `triggered` | filed, untriaged |
 | `investigating` | being worked (reinvestigate running or human engaged) |
-| `solved` | root cause **confirmed + resolution captured** — the *only* state eligible to merge |
-| `ready-to-merge` | `solved` + passed the bar + deduped → in the decision-ready queue |
+| `solved` | root cause **confirmed + resolution captured** (proposed) — necessary but *not sufficient* to merge |
+| `resolved` | the incident actually **cleared** (alert resolved / resource healthy on re-check) — the objective merge condition |
+| `accepted` | a human **explicitly accepts** a quality-passing entry as knowledge even if not yet `resolved` (the #48 case) |
+| `ready-to-merge` | quality criteria pass + deduped + (`resolved` **or** `accepted`) → in the decision-ready queue |
 | `duplicate` / `wont-fix` / `stale` | terminal-closed |
 | `knowledge-gap` | a recurring pattern RunLore can't resolve (the only issue type) |
 
-**The merge bar** (what makes an entry mergeable — the #48 standard, explicit):
-1. `solved` — root cause confirmed, not symptom-only (`must_reach_root`);
+**The merge bar.** A PR is merged only when **(A) the merge condition** *and* **(B) all quality criteria** hold.
+
+**(A) Merge condition — resolved OR accepted** (user rule: "PRs should only be merged when the incident is resolved, or accepted"):
+- `resolved` — the incident actually **cleared**: the alert resolved or the resource is healthy on the curator's re-check. This is objective and the curator can verify it, so it is what auto-applies `ready-to-merge`.
+- `accepted` — a human **explicitly accepts** the entry as correct, valuable knowledge even though the incident isn't (yet) resolved. This is the human override for correct-but-unresolved knowledge — exactly #48, where the IAM-quota fix was deferred but the entry is right.
+
+A `solved`-but-not-`resolved` PR (root cause known, fix not yet applied/confirmed) therefore **waits** — it is not auto-queued for merge; it merges only on `resolved` or explicit `accepted`. This is what stops premature/speculative entries from compounding.
+
+**(B) Quality criteria (all required):**
+1. root cause confirmed, not symptom-only (`must_reach_root`);
 2. passed the adversarial **verify** pass (not correlation-only);
 3. cites the **causing change** and the **fixing change / resolution** (provenance);
 4. **novel** — not a duplicate of catalog or open artifacts;
@@ -106,7 +116,7 @@ A new `lore curate` mode with the **cross-incident view** the file-time gate str
 1. **Backlog dedup** — cluster existing open PRs (and legacy issues) by fingerprint; close duplicates with a reversible back-ref to the canonical one. (Immediately cleans today's mess: keep 1 "DependencyNotReady", close 4 with a pointer.)
 2. **Draft upgrade** — take promising-but-thin PRs and re-shape toward the #48 bar (re-investigate if needed, rewrite into full OKF). Sub-bar drafts that can't be lifted → close `wont-fix`.
 3. **Recurrence → knowledge-gap issues** — track unresolved findings across incidents; when a fingerprint recurs N× never-solved, open **one** `knowledge-gap` issue. This is the only path that creates issues.
-4. **Decision-ready queue** — apply `ready-to-merge` to PRs that pass the bar, deduped and ranked by value — the single surface the human approves from.
+4. **Decision-ready queue** — the curator **re-checks each quality-passing candidate's incident state** (alert resolved / resource healthy) and applies `ready-to-merge` only to `resolved` ones, deduped and ranked by value — the single surface the human approves from. Correct-but-unresolved candidates wait for explicit human `accepted` (they are surfaced separately, not auto-queued).
 5. **Lifecycle + decay** — advance labels, close stale (no progress in N days), flag aging catalog entries for re-validation / recall down-weighting (`last_validated`).
 
 **Mechanism.** A `lore curate` subcommand operating over the KB git repo + forge API + catalog index. Two run modes:
@@ -151,7 +161,8 @@ Each phase is its own implementation plan (à la the eval-harness engine/catalog
 
 ## 9. Success criteria
 
-- The catalog **grows**: learned entries get merged (from a baseline of 0), and `log.md` records them.
+- The catalog **grows**: learned entries get merged (from a ~2-entry, ~14%-merge-rate baseline) and `log.md` finally records each merge with provenance.
+- PRs merge **only when `resolved` or explicitly `accepted`** — never speculative/`solved`-only entries.
 - A human approving the queue sees **few, deduped, merge-ready** candidates, each with a decision card — no duplicate walls.
 - Duplicate findings **coalesce** instead of re-filing (the 5×"DependencyNotReady" case produces 1 artifact, not 5).
 - The **only** issues that appear are rare `knowledge-gap` issues for genuinely recurring blind spots.
