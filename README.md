@@ -61,6 +61,12 @@ flowchart LR
     K -. instant recall .-> B
 ```
 
+**…and here's what lands in chat** — a real RunLore investigation delivered to Slack: ranked root cause with confidence, the evidence trail, read-only suggested next steps, open questions for a human, and a link to the knowledge-base entry it learned.
+
+<div align="center">
+<img src="assets/slack-notification.png" alt="RunLore Slack notification — HarborRegistryDown: 95% confidence root cause (Crossplane AccessKey hit the AWS IAM AccessKeysPerUser quota → Secret missing the username key → CreateContainerConfigError), with the evidence trail, suggested next steps, and open questions" width="760" />
+</div>
+
 ## Three pillars
 
 | | |
