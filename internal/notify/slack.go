@@ -49,6 +49,60 @@ func (s *Slack) Deliver(ctx context.Context, inv providers.Investigation) error 
 	return nil
 }
 
+// SlackBot delivers via the Slack Web API (chat.postMessage) using a bot token,
+// for workspaces that provision a bot app instead of an incoming webhook. Unlike
+// a webhook, chat.postMessage targets an explicit channel and returns HTTP 200
+// with {"ok":false,"error":...} on logical failures (e.g. not_in_channel).
+type SlackBot struct {
+	token   string
+	channel string
+	baseURL string
+	http    *http.Client
+}
+
+// NewSlackBot builds a bot-token Slack notifier posting to channel (ID or name).
+func NewSlackBot(token, channel string) *SlackBot {
+	return &SlackBot{token: token, channel: channel, baseURL: "https://slack.com", http: &http.Client{Timeout: 15 * time.Second}}
+}
+
+var _ providers.Notifier = (*SlackBot)(nil)
+
+// Deliver posts the formatted investigation to the configured channel via
+// chat.postMessage, surfacing both transport and Slack API (ok:false) errors.
+func (s *SlackBot) Deliver(ctx context.Context, inv providers.Investigation) error {
+	msg := slackMessage(inv)
+	msg["channel"] = s.channel
+	body, err := json.Marshal(msg)
+	if err != nil {
+		return err
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, s.baseURL+"/api/chat.postMessage", bytes.NewReader(body))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+s.token)
+	resp, err := s.http.Do(req)
+	if err != nil {
+		return fmt.Errorf("slack post: %w", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode/100 != 2 {
+		return fmt.Errorf("slack status %d", resp.StatusCode)
+	}
+	var result struct {
+		OK    bool   `json:"ok"`
+		Error string `json:"error"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return fmt.Errorf("slack decode response: %w", err)
+	}
+	if !result.OK {
+		return fmt.Errorf("slack chat.postMessage: %s", result.Error)
+	}
+	return nil
+}
+
 // Slack interaction action_ids — must match the server's /slack/interactions handler.
 const (
 	approveActionID = "runlore_approve"

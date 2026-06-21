@@ -393,7 +393,12 @@ func runEval(args []string) error {
 // buildNotifier assembles the configured chat notifiers (best-effort fan-out).
 func buildNotifier(cfg *config.Config, log *slog.Logger) *notify.Multi {
 	var ns []providers.Notifier
-	if env := cfg.Notify.Slack.WebhookURLEnv; env != "" {
+	// Bot token (chat.postMessage) takes precedence over an incoming webhook.
+	if sl := cfg.Notify.Slack; sl.BotTokenEnv != "" && sl.Channel != "" {
+		if tok := os.Getenv(sl.BotTokenEnv); tok != "" {
+			ns = append(ns, notify.NewSlackBot(tok, sl.Channel))
+		}
+	} else if env := cfg.Notify.Slack.WebhookURLEnv; env != "" {
 		if url := os.Getenv(env); url != "" {
 			ns = append(ns, notify.NewSlack(url))
 		}

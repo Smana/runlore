@@ -29,6 +29,51 @@ func TestSlackDeliver(t *testing.T) {
 	}
 }
 
+func TestSlackBotDeliver(t *testing.T) {
+	var got map[string]any
+	var auth string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		auth = r.Header.Get("Authorization")
+		if r.URL.Path != "/api/chat.postMessage" {
+			t.Errorf("unexpected path %q", r.URL.Path)
+		}
+		_ = json.NewDecoder(r.Body).Decode(&got)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"ok":true}`))
+	}))
+	defer srv.Close()
+
+	bot := &SlackBot{token: "xoxb-test", channel: "C123", baseURL: srv.URL, http: srv.Client()}
+	if err := bot.Deliver(context.Background(), sampleInvestigation()); err != nil {
+		t.Fatalf("Deliver: %v", err)
+	}
+	if auth != "Bearer xoxb-test" {
+		t.Fatalf("auth header = %q, want Bearer xoxb-test", auth)
+	}
+	if got["channel"] != "C123" {
+		t.Fatalf("channel = %v, want C123", got["channel"])
+	}
+	if text, _ := got["text"].(string); !contains(text, "flux rollback hr/harbor") {
+		t.Fatalf("unexpected payload: %v", got)
+	}
+}
+
+func TestSlackBotAPIError(t *testing.T) {
+	// chat.postMessage returns HTTP 200 with ok:false on logical failures
+	// (e.g. not_in_channel) — Deliver must surface that as an error.
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"ok":false,"error":"not_in_channel"}`))
+	}))
+	defer srv.Close()
+
+	bot := &SlackBot{token: "xoxb-test", channel: "C123", baseURL: srv.URL, http: srv.Client()}
+	err := bot.Deliver(context.Background(), sampleInvestigation())
+	if err == nil || !contains(err.Error(), "not_in_channel") {
+		t.Fatalf("expected not_in_channel error, got %v", err)
+	}
+}
+
 func contains(s, sub string) bool { return len(s) >= len(sub) && (s == sub || indexOf(s, sub) >= 0) }
 func indexOf(s, sub string) int {
 	for i := 0; i+len(sub) <= len(s); i++ {
