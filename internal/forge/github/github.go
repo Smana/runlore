@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"strings"
 	"time"
 
@@ -46,7 +47,10 @@ func New(baseURL, owner, repo, baseBranch string, token TokenFunc) *Client {
 	}
 }
 
-var _ providers.IssueProvider = (*Client)(nil)
+var (
+	_ providers.IssueProvider = (*Client)(nil)
+	_ providers.ReinvestForge = (*Client)(nil)
+)
 
 // do performs an authenticated JSON request and decodes the response into out (if non-nil).
 func (c *Client) do(ctx context.Context, method, path string, body, out any) error {
@@ -146,6 +150,49 @@ func (c *Client) OpenPR(ctx context.Context, e providers.KBEntry) (providers.Ref
 			map[string]any{"labels": lifecycleLabels}, nil)
 	}
 	return providers.Ref{URL: out.HTMLURL}, nil
+}
+
+// ListIssuesByLabel returns open issues carrying the given label. Pull requests
+// (which the issues API also returns) are filtered out.
+func (c *Client) ListIssuesByLabel(ctx context.Context, label string) ([]providers.CuratedIssue, error) {
+	var raw []struct {
+		Number      int       `json:"number"`
+		Title       string    `json:"title"`
+		Body        string    `json:"body"`
+		PullRequest *struct{} `json:"pull_request"`
+	}
+	path := fmt.Sprintf("/repos/%s/%s/issues?state=open&labels=%s", c.owner, c.repo, url.QueryEscape(label))
+	if err := c.do(ctx, http.MethodGet, path, nil, &raw); err != nil {
+		return nil, err
+	}
+	var out []providers.CuratedIssue
+	for _, i := range raw {
+		if i.PullRequest != nil {
+			continue // skip PRs
+		}
+		out = append(out, providers.CuratedIssue{Number: i.Number, Title: i.Title, Body: i.Body})
+	}
+	return out, nil
+}
+
+// Comment posts a comment on an issue.
+func (c *Client) Comment(ctx context.Context, number int, body string) error {
+	return c.do(ctx, http.MethodPost, fmt.Sprintf("/repos/%s/%s/issues/%d/comments", c.owner, c.repo, number),
+		map[string]any{"body": body}, nil)
+}
+
+// ReplaceLabel removes one label and adds another (best-effort on the removal —
+// a 404 when the label isn't present is not fatal).
+func (c *Client) ReplaceLabel(ctx context.Context, number int, remove, add string) error {
+	if remove != "" {
+		// DELETE is best-effort: ignore "label not set" errors.
+		_ = c.do(ctx, http.MethodDelete, fmt.Sprintf("/repos/%s/%s/issues/%d/labels/%s", c.owner, c.repo, number, url.PathEscape(remove)), nil, nil)
+	}
+	if add != "" {
+		return c.do(ctx, http.MethodPost, fmt.Sprintf("/repos/%s/%s/issues/%d/labels", c.owner, c.repo, number),
+			map[string]any{"labels": []string{add}}, nil)
+	}
+	return nil
 }
 
 func issueTitle(inv providers.Investigation) string {
