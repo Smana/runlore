@@ -98,10 +98,14 @@ type Notify struct {
 	Matrix MatrixNotify `yaml:"matrix"`
 }
 
-// SlackNotify configures Slack incoming-webhook delivery and (for rung-2 actions)
-// interactive approve/reject buttons.
+// SlackNotify configures Slack delivery and (for rung-2 actions) interactive
+// approve/reject buttons. Delivery uses either an incoming webhook (WebhookURLEnv)
+// or a bot token posting to a channel via chat.postMessage (BotTokenEnv+Channel);
+// if both are set, the bot token wins.
 type SlackNotify struct {
-	WebhookURLEnv    string   `yaml:"webhook_url_env"`    // env var holding the webhook URL
+	WebhookURLEnv    string   `yaml:"webhook_url_env"`    // env var holding the incoming-webhook URL
+	BotTokenEnv      string   `yaml:"bot_token_env"`      // env var holding a bot token (xoxb-…) for chat.postMessage
+	Channel          string   `yaml:"channel"`            // channel ID or name to post to (required with bot_token_env)
 	SigningSecretEnv string   `yaml:"signing_secret_env"` // env var with the Slack signing secret (verifies button clicks)
 	ApproverIDs      []string `yaml:"approver_ids"`       // Slack user IDs allowed to approve actions (empty = no Slack approvals)
 }

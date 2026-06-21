@@ -212,6 +212,10 @@ config:
   notify:
     slack:
       webhook_url_env: SLACK_WEBHOOK_URL
+      # — or a bot token (chat.postMessage) instead of an incoming webhook; the bot
+      #   must be a member of the channel (invite it / `conversations.join`):
+      # bot_token_env: SLACK_BOT_TOKEN              # xoxb-… (takes precedence over webhook_url_env)
+      # channel: C0123456789                        # channel ID or name to post to
       # signing_secret_env: SLACK_SIGNING_SECRET   # enables rung-2 Approve/Reject buttons
     matrix:
       homeserver: https://matrix.org
