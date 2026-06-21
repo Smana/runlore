@@ -19,6 +19,7 @@ import (
 type kustomization struct {
 	Name, Namespace string
 	Path            string // spec.path
+	SourceKind      string // spec.sourceRef.kind (GitRepository | OCIRepository | Bucket | ExternalArtifact)
 	SourceName      string // spec.sourceRef.name
 	SourceNamespace string // spec.sourceRef.namespace (defaults to the Kustomization namespace)
 	Revision        string // status.lastAppliedRevision
@@ -82,29 +83,47 @@ func (p *Provider) Changes(ctx context.Context, _ providers.TimeWindow, sel prov
 		if sel.Name != "" && k.Name != sel.Name {
 			continue
 		}
-		if k.Path == "" || k.Revision == "" || k.SourceName == "" {
-			continue // not enough to locate a source diff
+		if k.Revision == "" || k.SourceName == "" {
+			continue // nothing applied yet / no source to attribute the change to
 		}
-		key := k.SourceNamespace + "/" + k.SourceName
-		url, ok := urlCache[key]
-		if !ok {
-			gr, err := p.reader.GetGitRepository(ctx, k.SourceNamespace, k.SourceName)
-			if err != nil {
-				return nil, err
+		isGit := k.SourceKind == "" || k.SourceKind == "GitRepository"
+		// Only a GitRepository source has a Git URL we can diff. Other source kinds
+		// (OCIRepository, Bucket, ExternalArtifact — e.g. ArtifactGenerator output)
+		// still produced a change worth reporting; emit it without a diffable URL
+		// rather than erroring the whole lookup (which is what made "what changed"
+		// fail on ArtifactGenerator-based GitOps).
+		url := ""
+		if isGit {
+			if k.Path == "" {
+				continue // a GitRepository change with no path can't be located for a diff
 			}
-			url = gr.URL
-			urlCache[key] = url
-		}
-		if url == "" {
-			continue
+			key := k.SourceNamespace + "/" + k.SourceName
+			cached, ok := urlCache[key]
+			if !ok {
+				gr, err := p.reader.GetGitRepository(ctx, k.SourceNamespace, k.SourceName)
+				if err != nil {
+					continue // source not resolvable (missing/transient) — skip, don't abort
+				}
+				cached = gr.URL
+				urlCache[key] = cached
+			}
+			if cached == "" {
+				continue
+			}
+			url = cached
 		}
 		changes = append(changes, mapKustomization(k, url))
 	}
 	return changes, nil
 }
 
-// Diff resolves a Change's diff via the Differ.
+// Diff resolves a Change's diff via the Differ. Changes from a non-Git source
+// (OCIRepository/Bucket/ExternalArtifact) carry no Git URL — there is no Git diff
+// to show, so return an empty diff rather than failing.
 func (p *Provider) Diff(_ context.Context, c providers.Change) (providers.Diff, error) {
+	if c.Source.RepoURL == "" {
+		return providers.Diff{}, nil
+	}
 	return p.differ.ForChange(c)
 }
 

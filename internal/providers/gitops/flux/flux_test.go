@@ -83,6 +83,36 @@ func TestProviderChanges(t *testing.T) {
 	}
 }
 
+func TestProviderChangesExternalArtifactSource(t *testing.T) {
+	// A Kustomization sourced from an ExternalArtifact (ArtifactGenerator output)
+	// must still produce a change — without erroring on a missing GitRepository,
+	// which is what broke "what changed" on ArtifactGenerator-based GitOps.
+	r := fakeReader{
+		ks: []kustomization{
+			{Name: "crossplane-configuration", Namespace: "flux-system", Path: ".",
+				SourceKind: "ExternalArtifact", SourceName: "infra-artifact", SourceNamespace: "flux-system",
+				Revision: "sha256:abc"},
+		},
+		grs: map[string]gitRepository{}, // no GitRepository exists — must NOT cause an error
+	}
+	p := New(r, &whatchanged.Differ{})
+	changes, err := p.Changes(context.Background(), providers.TimeWindow{}, providers.Selector{})
+	if err != nil {
+		t.Fatalf("Changes must not error on a non-Git source: %v", err)
+	}
+	if len(changes) != 1 || changes[0].Workload.Name != "crossplane-configuration" {
+		t.Fatalf("expected 1 change for the ExternalArtifact-sourced Kustomization, got %+v", changes)
+	}
+	if changes[0].Source.RepoURL != "" {
+		t.Fatalf("non-Git source should have no RepoURL, got %q", changes[0].Source.RepoURL)
+	}
+	// And its diff is an empty (no-op) result, not an error.
+	d, derr := p.Diff(context.Background(), changes[0])
+	if derr != nil || len(d.Files) != 0 {
+		t.Fatalf("expected empty diff for non-Git source, got files=%d err=%v", len(d.Files), derr)
+	}
+}
+
 func TestProviderChangesSelector(t *testing.T) {
 	r := fakeReader{
 		ks: []kustomization{

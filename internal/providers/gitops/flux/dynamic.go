@@ -22,13 +22,14 @@ var (
 
 // kindToGVR maps the Flux Kinds the inspector understands to their GVR.
 var kindToGVR = map[string]schema.GroupVersionResource{
-	"Kustomization":  kustomizationGVR,
-	"GitRepository":  gitRepositoryGVR,
-	"HelmRelease":    {Group: "helm.toolkit.fluxcd.io", Version: "v2", Resource: "helmreleases"},
-	"OCIRepository":  {Group: "source.toolkit.fluxcd.io", Version: "v1", Resource: "ocirepositories"},
-	"HelmRepository": {Group: "source.toolkit.fluxcd.io", Version: "v1", Resource: "helmrepositories"},
-	"HelmChart":      {Group: "source.toolkit.fluxcd.io", Version: "v1", Resource: "helmcharts"},
-	"Bucket":         {Group: "source.toolkit.fluxcd.io", Version: "v1", Resource: "buckets"},
+	"Kustomization":    kustomizationGVR,
+	"GitRepository":    gitRepositoryGVR,
+	"HelmRelease":      {Group: "helm.toolkit.fluxcd.io", Version: "v2", Resource: "helmreleases"},
+	"OCIRepository":    {Group: "source.toolkit.fluxcd.io", Version: "v1", Resource: "ocirepositories"},
+	"HelmRepository":   {Group: "source.toolkit.fluxcd.io", Version: "v1", Resource: "helmrepositories"},
+	"HelmChart":        {Group: "source.toolkit.fluxcd.io", Version: "v1", Resource: "helmcharts"},
+	"Bucket":           {Group: "source.toolkit.fluxcd.io", Version: "v1", Resource: "buckets"},
+	"ExternalArtifact": {Group: "source.toolkit.fluxcd.io", Version: "v1", Resource: "externalartifacts"},
 }
 
 // dynamicReader reads Flux CRDs as unstructured objects via the dynamic client.
@@ -167,6 +168,7 @@ func (r *dynamicReader) WatchKustomizations(ctx context.Context) (<-chan Kustomi
 // minimal kustomization type.
 func kustomizationFromUnstructured(u *unstructured.Unstructured) kustomization {
 	path, _, _ := unstructured.NestedString(u.Object, "spec", "path")
+	srcKind, _, _ := unstructured.NestedString(u.Object, "spec", "sourceRef", "kind")
 	srcName, _, _ := unstructured.NestedString(u.Object, "spec", "sourceRef", "name")
 	srcNamespace, _, _ := unstructured.NestedString(u.Object, "spec", "sourceRef", "namespace")
 	rev, _, _ := unstructured.NestedString(u.Object, "status", "lastAppliedRevision")
@@ -179,6 +181,7 @@ func kustomizationFromUnstructured(u *unstructured.Unstructured) kustomization {
 		Name:            u.GetName(),
 		Namespace:       namespace,
 		Path:            path,
+		SourceKind:      srcKind,
 		SourceName:      srcName,
 		SourceNamespace: srcNamespace,
 		Revision:        rev,
