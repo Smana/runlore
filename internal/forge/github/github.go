@@ -156,9 +156,12 @@ func (c *Client) OpenPR(ctx context.Context, e providers.KBEntry) (providers.Ref
 // (which the issues API also returns) are filtered out.
 func (c *Client) ListIssuesByLabel(ctx context.Context, label string) ([]providers.CuratedIssue, error) {
 	var raw []struct {
-		Number      int       `json:"number"`
-		Title       string    `json:"title"`
-		Body        string    `json:"body"`
+		Number int    `json:"number"`
+		Title  string `json:"title"`
+		Body   string `json:"body"`
+		Labels []struct {
+			Name string `json:"name"`
+		} `json:"labels"`
 		PullRequest *struct{} `json:"pull_request"`
 	}
 	path := fmt.Sprintf("/repos/%s/%s/issues?state=open&labels=%s", c.owner, c.repo, url.QueryEscape(label))
@@ -170,7 +173,11 @@ func (c *Client) ListIssuesByLabel(ctx context.Context, label string) ([]provide
 		if i.PullRequest != nil {
 			continue // skip PRs
 		}
-		out = append(out, providers.CuratedIssue{Number: i.Number, Title: i.Title, Body: i.Body})
+		labels := make([]string, 0, len(i.Labels))
+		for _, l := range i.Labels {
+			labels = append(labels, l.Name)
+		}
+		out = append(out, providers.CuratedIssue{Number: i.Number, Title: i.Title, Body: i.Body, Labels: labels})
 	}
 	return out, nil
 }

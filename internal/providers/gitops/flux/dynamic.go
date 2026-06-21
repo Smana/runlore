@@ -83,7 +83,13 @@ func (r *dynamicReader) GetResource(ctx context.Context, kind, namespace, name s
 // ListEvents returns recent Event lines for an object, filtered client-side by the
 // involved object's name (and kind, when given). Rendered as "Type Reason Message".
 func (r *dynamicReader) ListEvents(ctx context.Context, namespace, name, kind string) ([]string, error) {
-	list, err := r.client.Resource(eventsGVR).Namespace(namespace).List(ctx, metav1.ListOptions{})
+	// Filter server-side by the involved object and cap the result — a busy
+	// namespace can hold thousands of events.
+	opts := metav1.ListOptions{Limit: 100}
+	if name != "" {
+		opts.FieldSelector = "involvedObject.name=" + name
+	}
+	list, err := r.client.Resource(eventsGVR).Namespace(namespace).List(ctx, opts)
 	if err != nil {
 		return nil, fmt.Errorf("list events: %w", err)
 	}

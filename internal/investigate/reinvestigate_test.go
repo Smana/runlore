@@ -35,7 +35,10 @@ func (f *fakeForge) ReplaceLabel(_ context.Context, n int, remove, add string) e
 }
 
 func TestReinvestigatorPollOnce(t *testing.T) {
-	forge := &fakeForge{issues: []providers.CuratedIssue{{Number: 7, Title: "HarborInstallFailed"}}}
+	forge := &fakeForge{issues: []providers.CuratedIssue{
+		{Number: 7, Title: "HarborInstallFailed", Labels: []string{"runlore", "reinvestigate"}},
+		{Number: 8, Title: "drive-by issue", Labels: []string{"reinvestigate"}}, // no runlore label → skipped
+	}}
 	var ranTitle string
 	r := &Reinvestigator{
 		Forge: forge,
@@ -59,5 +62,9 @@ func TestReinvestigatorPollOnce(t *testing.T) {
 	}
 	if forge.relabelled[7] != [2]string{ReinvestigateLabel, "investigating"} {
 		t.Fatalf("expected label %s→investigating, got %v", ReinvestigateLabel, forge.relabelled[7])
+	}
+	// The drive-by issue (no "runlore" label) must be ignored entirely.
+	if _, ok := forge.comments[8]; ok {
+		t.Fatal("issue #8 lacks the runlore provenance label and must not be re-investigated")
 	}
 }

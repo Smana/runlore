@@ -91,7 +91,13 @@ func (li *LoopInvestigator) Investigate(ctx context.Context, req Request) error 
 		if entry, score := li.Recall.lookup(req); entry != nil {
 			li.Log.Info("instant recall (catalog hit; skipping the loop)",
 				"title", req.Title, "entry", entry.Path, "score", fmt.Sprintf("%.2f", score))
-			li.deliver(req, recalledInvestigation(req, *entry))
+			rec := recalledInvestigation(req, *entry)
+			if li.Verify {
+				// Catalog content is untrusted: verify a recalled finding too, so a
+				// crafted high-recall entry can't bypass the adversarial review.
+				rec = li.verifyFindings(ctx, req, rec)
+			}
+			li.deliver(req, rec)
 			return nil
 		}
 	}

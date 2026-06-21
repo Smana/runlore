@@ -44,13 +44,14 @@ func (c *Client) CloudChanges(ctx context.Context, sel providers.Selector, w pro
 	}
 	changes := make([]providers.Change, 0, len(out.Events))
 	for i := range out.Events {
-		if len(changes) >= c.maxEvents {
-			break
-		}
 		changes = append(changes, eventToChange(out.Events[i]))
 	}
-	// Most recent first.
+	// Sort most-recent-first BEFORE capping, so the cap keeps the newest events
+	// regardless of the API's return order.
 	sort.SliceStable(changes, func(i, j int) bool { return changes[i].When.After(changes[j].When) })
+	if len(changes) > c.maxEvents {
+		changes = changes[:c.maxEvents]
+	}
 	return changes, nil
 }
 
