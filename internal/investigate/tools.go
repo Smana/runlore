@@ -43,15 +43,16 @@ func submitFindingsSpec() providers.ToolSpec {
 }
 
 // opEnumJSON renders the executable-op enum for the schema from the canonical
-// registry (providers.Ops, sorted) plus "" (suggestion only), so the model-facing
-// schema can't drift from what the gate and executor actually accept.
+// registry (providers.Ops, sorted), so the model-facing schema can't drift from
+// what the gate and executor actually accept. A "suggestion only" action is
+// expressed by omitting op (it is not a required field) — never by an empty enum
+// value: Gemini's generateContent rejects empty enum members with HTTP 400.
 func opEnumJSON() string {
-	ops := make([]string, 0, len(providers.Ops)+1)
+	ops := make([]string, 0, len(providers.Ops))
 	for op := range providers.Ops {
 		ops = append(ops, op)
 	}
 	sort.Strings(ops)
-	ops = append(ops, "")
 	b, _ := json.Marshal(ops)
 	return string(b)
 }

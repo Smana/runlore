@@ -36,7 +36,11 @@ knowledge catalog**: a Git repo of markdown files, each with YAML frontmatter. T
 knowledge base — runbooks, past incidents, platform constraints.
 
 1. Create a new (private) Git repo, e.g. `your-org/runlore-kb`.
-2. Add entries as `<slug>.md` at the repo root:
+2. Add entries as markdown files — **one file per entry** (YAML frontmatter + a markdown body). Name
+   each file with a short, descriptive kebab-case **slug** (e.g. `helmrelease-upgrade-failure.md`); the
+   slug is just the entry's identity — not indexed, not a frontmatter field (the Curator names learned
+   entries `slugify(title).md`). Put them at the repo root or in subfolders (`playbooks/`, `incidents/`,
+   …); the whole tree is indexed recursively. Example:
 
    ```markdown
    ---
@@ -53,8 +57,10 @@ knowledge base — runbooks, past incidents, platform constraints.
    - the rendered diff between the two chart versions
    ```
 
-   Filenames `index.md` and `log.md` are reserved and skipped. Seed it with whatever runbooks you
-   already have — the agent gets sharper at *your* platform as the catalog grows.
+   `index.md` and `log.md` are reserved (a human listing + a changelog) and skipped by the indexer — as
+   are dot-files. What `kb_search` actually matches is the frontmatter `title`/`description`/`tags` plus
+   the body, **not** the filename — so write those well. Seed it with whatever runbooks you already
+   have; the agent gets sharper at *your* platform as the catalog grows.
 
 3. **Make it available in-cluster.** Two options:
 
