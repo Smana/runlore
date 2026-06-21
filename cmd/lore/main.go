@@ -726,7 +726,7 @@ func startGitOpsFailureWatch(ctx context.Context, cfg *config.Config, q investig
 		return
 	}
 	log.Info("watching gitops failures", "engine", gitopsEngine(cfg))
-	go investigate.DrainFailures(ctx, events, q, trigger.NewDeduper(cfg.Triggers.Incidents.Dedup.Window.Std()))
+	go investigate.DrainFailures(ctx, events, q, trigger.NewDeduper(cfg.Triggers.Incidents.Dedup.Window.Std()), log)
 }
 
 // gitopsEngine returns the configured GitOps engine, defaulting to flux.
