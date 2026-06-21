@@ -86,8 +86,8 @@ type CatalogGit struct {
 // "anthropic" (native Messages API). When unconfigured, serve uses the log-only
 // investigator.
 type Model struct {
-	Provider  string `yaml:"provider"`    // "openai" (default) | "anthropic"
-	BaseURL   string `yaml:"base_url"`    // OpenAI: required; Anthropic: optional (defaults to api.anthropic.com)
+	Provider  string `yaml:"provider"`    // "openai" (default) | "anthropic" | "gemini"
+	BaseURL   string `yaml:"base_url"`    // OpenAI: required; Anthropic/Gemini: optional (built-in default endpoint)
 	Model     string `yaml:"model"`       // model name
 	APIKeyEnv string `yaml:"api_key_env"` // env var holding the API key (empty = keyless)
 }
