@@ -13,6 +13,19 @@ import (
 
 const maxToolRows = 50
 
+// renderRows writes up to maxToolRows rows, calling row(i) for each kept index. If
+// n exceeds the cap it appends a truncation note "… (<remaining> <noun>)". This is
+// the shared row-capping shape used by every tool that renders a bounded list.
+func renderRows(b *strings.Builder, n int, noun string, row func(i int)) {
+	for i := 0; i < n; i++ {
+		if i >= maxToolRows {
+			fmt.Fprintf(b, "… (%d %s)\n", n-i, noun)
+			return
+		}
+		row(i)
+	}
+}
+
 // QueryMetricsTool lets the model run PromQL instant queries (saturation, error
 // rates, health) against the metrics backend.
 type QueryMetricsTool struct {
@@ -48,13 +61,9 @@ func (t QueryMetricsTool) Call(ctx context.Context, args string) (string, error)
 		return "no series matched", nil
 	}
 	var b strings.Builder
-	for i, s := range samples {
-		if i >= maxToolRows {
-			fmt.Fprintf(&b, "… (%d more series)\n", len(samples)-i)
-			break
-		}
-		fmt.Fprintf(&b, "%s = %g\n", formatMetric(s.Metric), s.Value)
-	}
+	renderRows(&b, len(samples), "more series", func(i int) {
+		fmt.Fprintf(&b, "%s = %g\n", formatMetric(samples[i].Metric), samples[i].Value)
+	})
 	return b.String(), nil
 }
 
@@ -113,13 +122,9 @@ func (t NetworkDropsTool) Call(ctx context.Context, args string) (string, error)
 		return "no dropped flows", nil
 	}
 	var b strings.Builder
-	for i, l := range lines {
-		if i >= maxToolRows {
-			fmt.Fprintf(&b, "… (%d more)\n", len(lines)-i)
-			break
-		}
-		fmt.Fprintln(&b, l.Message)
-	}
+	renderRows(&b, len(lines), "more", func(i int) {
+		fmt.Fprintln(&b, lines[i].Message)
+	})
 	return b.String(), nil
 }
 
@@ -211,12 +216,8 @@ func (t QueryLogsTool) Call(ctx context.Context, args string) (string, error) {
 		return "no log lines matched", nil
 	}
 	var b strings.Builder
-	for i, l := range lines {
-		if i >= maxToolRows {
-			fmt.Fprintf(&b, "… (%d more lines)\n", len(lines)-i)
-			break
-		}
-		fmt.Fprintf(&b, "%s %s\n", l.Time.Format(time.RFC3339), l.Message)
-	}
+	renderRows(&b, len(lines), "more lines", func(i int) {
+		fmt.Fprintf(&b, "%s %s\n", lines[i].Time.Format(time.RFC3339), lines[i].Message)
+	})
 	return b.String(), nil
 }

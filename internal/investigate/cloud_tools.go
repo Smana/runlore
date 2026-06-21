@@ -55,16 +55,13 @@ func (t CloudWhatChangedTool) Call(ctx context.Context, args string) (string, er
 		return "no mutating AWS events in the window", nil
 	}
 	var b strings.Builder
-	for i, c := range changes {
-		if i >= maxToolRows {
-			fmt.Fprintf(&b, "… (%d more)\n", len(changes)-i)
-			break
-		}
+	renderRows(&b, len(changes), "more", func(i int) {
+		c := changes[i]
 		fmt.Fprintf(&b, "%s %s %s/%s\n", c.When.Format(time.RFC3339), c.ManagedBy, c.Workload.Kind, c.Workload.Name)
 		if c.Source.Path != "" {
 			fmt.Fprintf(&b, "  %s\n", c.Source.Path)
 		}
-	}
+	})
 	return b.String(), nil
 }
 
@@ -104,12 +101,8 @@ func (t CloudResourceHealthTool) Call(ctx context.Context, args string) (string,
 		return "no AWS resource health returned", nil
 	}
 	var b strings.Builder
-	for i, l := range lines {
-		if i >= maxToolRows {
-			fmt.Fprintf(&b, "… (%d more)\n", len(lines)-i)
-			break
-		}
-		fmt.Fprintln(&b, l.Message)
-	}
+	renderRows(&b, len(lines), "more", func(i int) {
+		fmt.Fprintln(&b, lines[i].Message)
+	})
 	return b.String(), nil
 }

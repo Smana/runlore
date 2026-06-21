@@ -250,15 +250,25 @@ func (p *Provider) depNode(ctx context.Context, w providers.Workload, seen map[s
 	for _, dep := range dependsOn(u, w.Kind, w.Namespace) {
 		node.Children = append(node.Children, p.depNode(ctx, dep, seen))
 	}
-	if sk, _, _ := unstructured.NestedString(u.Object, "spec", "sourceRef", "kind"); sk != "" {
-		sn, _, _ := unstructured.NestedString(u.Object, "spec", "sourceRef", "name")
-		sns, _, _ := unstructured.NestedString(u.Object, "spec", "sourceRef", "namespace")
-		if sns == "" {
-			sns = w.Namespace
-		}
-		node.Children = append(node.Children, p.depNode(ctx, providers.Workload{Kind: sk, Name: sn, Namespace: sns}, seen))
+	if src, ok := sourceRefWorkload(u, w.Namespace); ok {
+		node.Children = append(node.Children, p.depNode(ctx, src, seen))
 	}
 	return node
+}
+
+// sourceRefWorkload reads spec.sourceRef as a Workload (namespace defaulting to the
+// parent's). ok is false when there is no sourceRef.kind to follow.
+func sourceRefWorkload(u *unstructured.Unstructured, defaultNS string) (providers.Workload, bool) {
+	kind, _, _ := unstructured.NestedString(u.Object, "spec", "sourceRef", "kind")
+	if kind == "" {
+		return providers.Workload{}, false
+	}
+	name, _, _ := unstructured.NestedString(u.Object, "spec", "sourceRef", "name")
+	ns, _, _ := unstructured.NestedString(u.Object, "spec", "sourceRef", "namespace")
+	if ns == "" {
+		ns = defaultNS
+	}
+	return providers.Workload{Kind: kind, Name: name, Namespace: ns}, true
 }
 
 // sourceRef renders "kind/namespace/name" of spec.sourceRef, or "".
