@@ -86,9 +86,14 @@ func (c *Client) do(ctx context.Context, method, path string, body, out any) err
 	return nil
 }
 
+// lifecycleLabels are the labels applied to a freshly curated artifact. "triggered"
+// is the first state of the KB lifecycle (triggered → investigating → solved); only
+// a "solved" entry with a captured resolution should be merged as a Playbook.
+var lifecycleLabels = []string{"runlore", "triggered"}
+
 // OpenIssue files an issue describing the investigation.
 func (c *Client) OpenIssue(ctx context.Context, inv providers.Investigation) (providers.Ref, error) {
-	body := map[string]any{"title": issueTitle(inv), "body": issueBody(inv), "labels": []string{"runlore"}}
+	body := map[string]any{"title": issueTitle(inv), "body": issueBody(inv), "labels": lifecycleLabels}
 	var out struct {
 		HTMLURL string `json:"html_url"`
 	}
@@ -127,10 +132,18 @@ func (c *Client) OpenPR(ctx context.Context, e providers.KBEntry) (providers.Ref
 	// 4. open the PR
 	var out struct {
 		HTMLURL string `json:"html_url"`
+		Number  int    `json:"number"`
 	}
 	if err := c.do(ctx, http.MethodPost, fmt.Sprintf("/repos/%s/%s/pulls", c.owner, c.repo),
 		map[string]any{"title": "KB: " + e.Title, "head": branch, "base": c.baseBranch, "body": "Drafted by RunLore."}, &out); err != nil {
 		return providers.Ref{}, err
+	}
+	// 5. label the PR (the create-PR API doesn't accept labels; set them via the
+	// issues endpoint). Best-effort: a labelling failure must not lose the PR, so
+	// the error is intentionally ignored — the PR URL is already returned.
+	if out.Number != 0 {
+		_ = c.do(ctx, http.MethodPost, fmt.Sprintf("/repos/%s/%s/issues/%d/labels", c.owner, c.repo, out.Number),
+			map[string]any{"labels": lifecycleLabels}, nil)
 	}
 	return providers.Ref{URL: out.HTMLURL}, nil
 }
