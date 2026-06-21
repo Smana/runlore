@@ -8,7 +8,7 @@ import (
 
 func TestLoadScenarios(t *testing.T) {
 	dir := t.TempDir()
-	yaml := `
+	content := `
 id: gitops-bad-image-tag
 category: what-changed
 description: bad image tag -> ImagePullBackOff
@@ -28,7 +28,7 @@ ground_truth:
 teardown:
   - kubectl delete -f manifests/bad-tag.yaml --ignore-not-found
 `
-	if err := os.WriteFile(filepath.Join(dir, "s1.yaml"), []byte(yaml), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(dir, "s1.yaml"), []byte(content), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(filepath.Join(dir, "notes.txt"), []byte("ignored"), 0o644); err != nil {
@@ -62,7 +62,7 @@ func TestLoadScenariosIDFallsBackToFilename(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(scns) != 1 || scns[0].ID != "harbor" {
-		t.Fatalf("want id=harbor from filename, got %+v", scns)
+	if len(scns) != 1 || scns[0].ID != "harbor" || scns[0].Trigger.Mode != "cli" {
+		t.Fatalf("want id=harbor from filename and mode=cli default, got %+v", scns)
 	}
 }
