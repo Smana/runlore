@@ -92,20 +92,48 @@ func (failingNotifier) Deliver(context.Context, providers.Investigation) error {
 }
 
 func TestSlackMessageButtons(t *testing.T) {
-	// No ApprovalID → plain text, no interactive blocks.
-	m := slackMessage(providers.Investigation{Confidence: 0.5, Actions: []providers.Action{{Description: "x"}}})
-	if _, ok := m["blocks"]; ok {
-		t.Fatal("did not expect blocks without an ApprovalID")
+	// No ApprovalID → rich blocks, but no interactive Approve/Reject elements.
+	m := slackMessage(providers.Investigation{Confidence: 0.5, RootCauses: []providers.Hypothesis{{Summary: "x"}}, Actions: []providers.Action{{Description: "x"}}})
+	raw, _ := json.Marshal(m)
+	if contains(string(raw), "runlore_approve") {
+		t.Fatalf("did not expect Approve/Reject buttons without an ApprovalID:\n%s", raw)
 	}
 	// With ApprovalID → Block Kit Approve/Reject buttons carrying the id.
 	m = slackMessage(providers.Investigation{Confidence: 0.9, Actions: []providers.Action{{Description: "suspend ks/apps", ApprovalID: "a7"}}})
 	if _, ok := m["blocks"]; !ok {
 		t.Fatal("expected interactive blocks for a pending action")
 	}
-	raw, _ := json.Marshal(m)
+	raw, _ = json.Marshal(m)
 	for _, want := range []string{"runlore_approve", "runlore_reject", `"value":"a7"`, "Approve", "Reject"} {
 		if !contains(string(raw), want) {
 			t.Fatalf("rendered message missing %q:\n%s", want, raw)
+		}
+	}
+}
+
+func TestSlackBlocksLayout(t *testing.T) {
+	inv := providers.Investigation{
+		Title:      "VictoriaTracesDown",
+		Confidence: 0, // model left top-level at 0 …
+		RootCauses: []providers.Hypothesis{{
+			Summary: "crds sync broke victoria-traces", Confidence: 0.8, // … but a root cause is 80%
+			ChangeRef: "crds@abc123", Evidence: []string{"reconcile failed", "stalled resources"},
+			SuggestedAction: "flux rollback hr/victoria-traces", Reversible: true,
+		}},
+		Unresolved: []string{"why the migration stalled"},
+		CuratedURL: "https://github.com/o/r/issues/9",
+	}
+	blocks := slackBlocks(inv)
+	if blocks[0]["type"] != "header" {
+		t.Fatalf("first block must be a header, got %v", blocks[0]["type"])
+	}
+	raw, _ := json.Marshal(blocks)
+	s := string(raw)
+	// Headline confidence falls back to the top root cause (80%, High), not the 0% top-level.
+	for _, want := range []string{"VictoriaTracesDown", "High confidence", "80%", "What changed", "crds@abc123",
+		"Suggested next steps", "flux rollback hr/victoria-traces", "(reversible)", "Open questions", "view entry"} {
+		if !contains(s, want) {
+			t.Fatalf("blocks missing %q:\n%s", want, s)
 		}
 	}
 }
