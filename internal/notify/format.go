@@ -42,5 +42,8 @@ func Format(inv providers.Investigation) string {
 			fmt.Fprintf(&b, "   • %s%s\n", a.Description, rev)
 		}
 	}
+	if inv.CuratedURL != "" {
+		fmt.Fprintf(&b, "📚 Knowledge base: %s\n", inv.CuratedURL)
+	}
 	return b.String()
 }
