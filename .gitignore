@@ -15,3 +15,6 @@ coverage.txt
 .idea/
 .vscode/
 .DS_Store
+
+# eval live-run recorded fixtures (regenerable; committed reports are the durable record)
+eval/fixtures/

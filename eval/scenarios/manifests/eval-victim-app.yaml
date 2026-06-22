@@ -1,0 +1,24 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: runlore-eval
+  labels: { runlore.io/eval: "true" }
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: eval-victim
+  namespace: runlore-eval
+  labels: { app: eval-victim, runlore.io/eval: "true" }
+spec:
+  replicas: 1
+  selector: { matchLabels: { app: eval-victim } }
+  template:
+    metadata: { labels: { app: eval-victim } }
+    spec:
+      containers:
+        - name: app
+          image: registry.k8s.io/pause:3.9 # healthy baseline; scenarios mutate this
+          resources:
+            requests: { cpu: 10m, memory: 16Mi }
+            limits: { cpu: 50m, memory: 32Mi }
