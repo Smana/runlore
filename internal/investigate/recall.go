@@ -1,11 +1,14 @@
 package investigate
 
 import (
+	"context"
 	"fmt"
+	"log/slog"
 	"strings"
 
 	"github.com/Smana/runlore/internal/catalog"
 	"github.com/Smana/runlore/internal/providers"
+	"github.com/Smana/runlore/internal/telemetry"
 )
 
 // Recall short-circuits an investigation when the knowledge catalog already has a
@@ -15,21 +18,37 @@ import (
 type Recall struct {
 	Catalog  catalog.ScoredSearcher
 	MinScore float64
+	Metrics  *telemetry.Metrics // optional; nil-safe — instruments are no-op when provider is unset
+	Log      *slog.Logger       // optional; nil-safe — log line omitted when unset
 }
 
 // lookup returns the best catalog entry for the request and its score if it meets
-// the threshold, else (nil, 0).
-func (r *Recall) lookup(req Request) (*catalog.Entry, float64) {
+// the threshold, else (nil, 0). The BM25 score is always recorded in the histogram
+// when hits exist, even when below threshold, to allow threshold tuning.
+func (r *Recall) lookup(ctx context.Context, req Request) (*catalog.Entry, float64) {
 	if r == nil || r.Catalog == nil {
 		return nil, 0
 	}
 	// Query the symptom (title + message); severity/reason is noise for matching.
 	hits, err := r.Catalog.SearchScored(strings.TrimSpace(req.Title+" "+req.Message), 1)
-	if err != nil || len(hits) == 0 || hits[0].Score < r.MinScore {
+	if err != nil || len(hits) == 0 {
+		return nil, 0
+	}
+	score := hits[0].Score
+	// Always record score at the decision point — needed to tune MinScore threshold.
+	if r.Metrics != nil {
+		r.Metrics.RecallScore.Record(ctx, score)
+	}
+	if r.Log != nil {
+		r.Log.Info("kb recall decision",
+			"alert", req.Title, "entry_id", hits[0].Entry.Path, "score", score,
+			"min_score", r.MinScore, "hit", score >= r.MinScore)
+	}
+	if score < r.MinScore {
 		return nil, 0
 	}
 	e := hits[0].Entry
-	return &e, hits[0].Score
+	return &e, score
 }
 
 // recalledInvestigation builds findings directly from a catalog entry. It is

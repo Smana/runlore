@@ -5,6 +5,9 @@ import (
 	"fmt"
 	"log/slog"
 
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/metric"
+
 	"github.com/Smana/runlore/internal/action"
 	"github.com/Smana/runlore/internal/providers"
 )
@@ -82,6 +85,10 @@ type LoopInvestigator struct {
 	Actions    *action.Policy                // autonomy ladder; nil/off = read-only findings only
 	Recall     *Recall                       // optional: short-circuit on a high-confidence catalog hit
 	Verify     bool                          // run an adversarial review of root causes before delivery
+
+	// Cost controls (Part 3 — 0 means disabled/unlimited):
+	MaxToolOutputBytes        int // truncate tool results larger than this before adding to history
+	MaxTokensPerInvestigation int // inject a budget-nudge message when the estimated token count exceeds this
 }
 
 // system returns the system prompt, asking for action proposals when the policy is enabled.
@@ -97,14 +104,27 @@ func (li *LoopInvestigator) Investigate(ctx context.Context, req Request) error 
 	// Instant recall is disabled under auto-execution: a poisoned catalog entry must
 	// not short-circuit a real investigation straight into an auto-executed action.
 	if li.Recall != nil && (li.Actions == nil || !li.Actions.IsAuto()) {
-		if entry, score := li.Recall.lookup(req); entry != nil {
+		if entry, score := li.Recall.lookup(ctx, req); entry != nil {
 			li.Log.Info("instant recall (catalog hit; skipping the loop)",
 				"title", req.Title, "entry", entry.Path, "score", fmt.Sprintf("%.2f", score))
 			rec := recalledInvestigation(req, *entry)
+			initialConfidence := rec.Confidence
 			if li.Verify {
 				// Catalog content is untrusted: verify a recalled finding too, so a
 				// crafted high-recall entry can't bypass the adversarial review.
 				rec = li.verifyFindings(ctx, req, rec)
+			}
+			// Instrument the recall result by verify outcome.
+			if m := li.Recall.Metrics; m != nil {
+				result := "verified"
+				switch {
+				case len(rec.RootCauses) == 0:
+					result = "rejected"
+				case li.Verify && rec.Confidence < initialConfidence:
+					result = "downgraded"
+				}
+				m.RecallHits.Add(ctx, 1, metric.WithAttributes(attribute.String("result", result)))
+				m.RecallTokensSaved.Add(ctx, int64(li.MaxTokensPerInvestigation))
 			}
 			li.deliver(req, rec)
 			return nil
