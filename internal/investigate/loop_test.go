@@ -9,6 +9,9 @@ import (
 	"strings"
 	"testing"
 
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/metric/noop"
+
 	"github.com/Smana/runlore/internal/action"
 	"github.com/Smana/runlore/internal/catalog"
 	"github.com/Smana/runlore/internal/config"
@@ -206,6 +209,8 @@ func (b bigTool) Call(_ context.Context, _ string) (string, error) {
 // TestLoopToolOutputTruncatedMetric verifies that oversized tool outputs are
 // truncated and that ToolOutputTruncatedBytes is incremented via OTel metrics.
 func TestLoopToolOutputTruncatedMetric(t *testing.T) {
+	t.Cleanup(func() { otel.SetMeterProvider(noop.NewMeterProvider()) })
+
 	h, shutdown, err := telemetry.Setup(context.Background())
 	if err != nil {
 		t.Fatalf("telemetry setup: %v", err)

@@ -128,7 +128,6 @@ func (li *LoopInvestigator) Investigate(ctx context.Context, req Request) error 
 				case li.Verify && rec.Confidence < initialConfidence:
 					result = "downgraded"
 				}
-				const defaultRecallTokensSavedEstimate = 50_000
 				saved := int64(li.MaxTokensPerInvestigation)
 				if saved == 0 {
 					saved = defaultRecallTokensSavedEstimate // conservative proxy when budget is unconfigured

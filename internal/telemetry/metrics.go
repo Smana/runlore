@@ -53,7 +53,7 @@ func NewMetrics() *Metrics {
 		RecallHits:               ctr("recall_hits_total", "KB instant-recall short-circuits (label: result)"),
 		RecallTokensSaved:        ctr("recall_tokens_saved_total", "estimated tokens saved by recall short-circuits"),
 		CoalesceBatchSize:        hist("coalesce_batch_size", "incidents per flushed batch"),
-		InvestigationTokens:      hist("investigation_tokens_estimated", "per-investigation token estimate"),
+		InvestigationTokens:      hist("investigation_tokens_estimated", "per-investigation token estimate (investigation loop only; excludes the adversarial verify phase)"),
 		RecallScore:              histF("recall_score", "BM25 score at the recall decision point"),
 	}
 }

@@ -16,6 +16,11 @@ func estimateTokens(system string, msgs []providers.Message) int {
 // overBudget reports whether est exceeds budget. budget <= 0 means unlimited.
 func overBudget(est, budget int) bool { return budget > 0 && est > budget }
 
+// defaultRecallTokensSavedEstimate is a conservative proxy used when
+// MaxTokensPerInvestigation is unconfigured (0): ~50k tokens ≈ a medium-depth
+// investigation (system prompt + ~20 tool turns).
+const defaultRecallTokensSavedEstimate = 50_000
+
 // budgetNudge is the single-use message injected once when the token estimate
 // exceeds MaxTokensPerInvestigation, prompting the model to wrap up now.
 const budgetNudge = "⚠️ token budget reached — call submit_findings now with your best current hypotheses and the evidence gathered so far."
