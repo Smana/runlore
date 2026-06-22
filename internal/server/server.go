@@ -20,8 +20,10 @@ import (
 	"time"
 
 	"github.com/Smana/runlore/internal/action"
+	"github.com/Smana/runlore/internal/coalesce"
 	"github.com/Smana/runlore/internal/config"
 	"github.com/Smana/runlore/internal/investigate"
+	"github.com/Smana/runlore/internal/telemetry"
 	"github.com/Smana/runlore/internal/trigger"
 )
 
@@ -36,9 +38,13 @@ type Server struct {
 	slackSecret  string            // Slack signing secret; verifies interactive button clicks
 	webhookToken string            // optional bearer token required on POST /webhook/alertmanager
 	approvers    map[string]bool   // Slack user IDs permitted to approve actions (empty = none)
-	metrics      http.Handler      // optional; GET /metrics (OTel Prometheus exposition)
-	log          *slog.Logger
-	handler      http.Handler
+
+	coalescer   *coalesce.Coalescer // optional; folds correlated alerts before enqueueing
+	otelMetrics *telemetry.Metrics  // optional; nil-safe OTel counters
+
+	metrics http.Handler // optional; GET /metrics (OTel Prometheus exposition)
+	log     *slog.Logger
+	handler http.Handler
 }
 
 // Pauser is the rung-3 auto-execution kill-switch.
@@ -97,6 +103,13 @@ func New(cfg *config.Config, enq investigate.Enqueuer, ready func() bool, acts A
 	}
 	s.handler = mux
 	return s
+}
+
+// SetCoalescer attaches a Coalescer and OTel metrics instance after construction.
+// Call before accepting requests; nil cz disables coalescing (direct enqueue).
+func (s *Server) SetCoalescer(cz *coalesce.Coalescer, m *telemetry.Metrics) {
+	s.coalescer = cz
+	s.otelMetrics = m
 }
 
 func (s *Server) handlePause(w http.ResponseWriter, r *http.Request) {
@@ -346,7 +359,15 @@ func (s *Server) handleAlertmanager(w http.ResponseWriter, r *http.Request) {
 		s.log.Info("incident",
 			"alert", inc.AlertName, "severity", inc.Severity, "namespace", inc.Namespace,
 			"investigate", d.Investigate, "reason", d.Reason)
-		if d.Investigate {
+		if !d.Investigate {
+			continue
+		}
+		if s.otelMetrics != nil {
+			s.otelMetrics.AlertsReceived.Add(r.Context(), 1)
+		}
+		if s.coalescer != nil {
+			s.coalescer.Add(inc)
+		} else {
 			s.enqueuer.Enqueue(investigate.FromIncident(inc))
 		}
 	}

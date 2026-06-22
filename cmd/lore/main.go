@@ -38,6 +38,7 @@ import (
 	"github.com/Smana/runlore/internal/action"
 	"github.com/Smana/runlore/internal/audit"
 	"github.com/Smana/runlore/internal/catalog"
+	"github.com/Smana/runlore/internal/coalesce"
 	"github.com/Smana/runlore/internal/config"
 	"github.com/Smana/runlore/internal/curate"
 	"github.com/Smana/runlore/internal/curator"
@@ -205,7 +206,6 @@ func runServe(args []string) error {
 		metricsHandler = h
 	}
 	metrics := telemetry.NewMetrics() // bound to global provider (no-op when disabled)
-	// TODO(Part 5): pass metrics to Coalescer.
 
 	inv := buildInvestigator(ctx, cfg, gitops, approvals, auto, metrics, log)
 	queue := investigate.NewQueue(inv, log)
@@ -220,6 +220,33 @@ func runServe(args []string) error {
 	// Always wire metrics into the Queue so InvestigationsStarted emits even when
 	// rate-limiting is unconfigured (max_per_window == 0).
 	queue.ConfigureRateLimit(rlStarts, cfg.Investigation.RateLimit.MaxRequeues, metrics, rlThrottled)
+
+	// Coalescer: fold correlated incidents into one investigation per group key.
+	// out is the flush sink — converts a batch into a single Request and enqueues it.
+	var cz *coalesce.Coalescer
+	if cc := cfg.Investigation.Coalesce; cc.Enabled {
+		out := func(incs []config.Incident) {
+			rep := investigate.FromIncident(incs[0])
+			if len(incs) > 1 {
+				rep.Message = coalesce.Summarize(incs)
+				metrics.AlertsCoalesced.Add(context.Background(), int64(len(incs)-1))
+			}
+			metrics.CoalesceBatchSize.Record(context.Background(), int64(len(incs)))
+			queue.Enqueue(rep)
+		}
+		cz = coalesce.New(coalesce.Config{
+			Enabled:           true,
+			Debounce:          cc.Debounce.Std(),
+			MaxWait:           cc.MaxWait.Std(),
+			MaxBatch:          cc.MaxBatch,
+			Cooldown:          cc.Cooldown.Std(),
+			CorrelationLabels: cc.CorrelationLabels,
+		}, out)
+		log.Info("investigation coalescer enabled",
+			"debounce", cc.Debounce.Std(), "max_wait", cc.MaxWait.Std(),
+			"max_batch", cc.MaxBatch, "cooldown", cc.Cooldown.Std())
+	}
+
 	reinv := buildReinvestigator(ctx, cfg, gitops, metrics, log)
 
 	// startWork runs the leader-only loops (investigation queue + failure watch +
@@ -256,6 +283,10 @@ func runServe(args []string) error {
 		acts.Pauser = auto // avoid a typed-nil interface when auto is disabled
 	}
 	srv := server.New(cfg, queue, leader.Load, acts, metricsHandler, log)
+	if cz != nil {
+		srv.SetCoalescer(cz, metrics)
+		go cz.Run(ctx, cfg.Investigation.Coalesce.Debounce.Std()/2)
+	}
 	httpSrv := &http.Server{Addr: *addr, Handler: srv.Handler()}
 	go func() {
 		<-ctx.Done()
