@@ -55,3 +55,6 @@ func (w *Window) Count() int {
 	w.slideLocked()
 	return len(w.recent)
 }
+
+// Window returns the configured sliding-window duration.
+func (w *Window) Window() time.Duration { return w.window }

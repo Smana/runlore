@@ -15,9 +15,9 @@ import (
 	"github.com/Smana/runlore/internal/telemetry"
 )
 
-// Config mirrors config.Coalesce with std durations.
+// Config mirrors config.Coalesce with std durations. The enable gate lives in
+// main.go — a constructed Coalescer is always active.
 type Config struct {
-	Enabled           bool
 	Debounce          time.Duration
 	MaxWait           time.Duration
 	MaxBatch          int
@@ -37,17 +37,16 @@ type Coalescer struct {
 	out     func([]config.Incident) // flush sink (build a Request + enqueue)
 	Metrics *telemetry.Metrics      // optional; nil-safe OTel counters
 
-	mu         sync.Mutex
-	pending    map[string]*batch
-	recent     map[string]time.Time
-	suppressed map[string]int
+	mu      sync.Mutex
+	pending map[string]*batch
+	recent  map[string]time.Time
 }
 
 // New builds a Coalescer. out is called with each flushed batch.
 func New(cfg Config, out func([]config.Incident)) *Coalescer {
 	return &Coalescer{
 		cfg: cfg, now: time.Now, out: out,
-		pending: map[string]*batch{}, recent: map[string]time.Time{}, suppressed: map[string]int{},
+		pending: map[string]*batch{}, recent: map[string]time.Time{},
 	}
 }
 
@@ -99,7 +98,6 @@ func (c *Coalescer) Add(inc config.Incident) {
 		// the rest of the storm. This is checked before the critical fast-path so a
 		// storm of critical alerts collapses to one investigation (the first) plus
 		// suppressions, rather than one investigation per alert.
-		c.suppressed[k]++
 		c.mu.Unlock()
 		if m := c.Metrics; m != nil {
 			m.AlertsSuppressed.Add(context.Background(), 1)
@@ -132,8 +130,23 @@ func (c *Coalescer) Add(inc config.Incident) {
 		}
 	}
 	c.mu.Unlock()
-	if flush != nil && c.out != nil {
-		c.out(flush)
+	if flush != nil {
+		c.emit(flush)
+	}
+}
+
+// emit records coalescing metrics for a flushed batch, then hands it to out.
+// Keeping this in the Coalescer (rather than the out closure) means the package
+// owns its full metric surface, including for tests that supply a custom out.
+func (c *Coalescer) emit(batch []config.Incident) {
+	if m := c.Metrics; m != nil {
+		if n := len(batch); n > 1 {
+			m.AlertsCoalesced.Add(context.Background(), int64(n-1))
+		}
+		m.CoalesceBatchSize.Record(context.Background(), int64(len(batch)))
+	}
+	if c.out != nil {
+		c.out(batch)
 	}
 }
 
@@ -159,9 +172,7 @@ func (c *Coalescer) sweep() {
 	}
 	c.mu.Unlock()
 	for _, f := range flushes {
-		if c.out != nil {
-			c.out(f)
-		}
+		c.emit(f)
 	}
 }
 
