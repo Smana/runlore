@@ -1,0 +1,27 @@
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: eval-bad-pvc
+  namespace: runlore-eval
+  labels: { runlore.io/eval: "true" }
+spec:
+  accessModes: [ReadWriteOnce]
+  storageClassName: this-storageclass-does-not-exist
+  resources:
+    requests: { storage: 1Gi }
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: eval-pvc-consumer
+  namespace: runlore-eval
+  labels: { app: eval-pvc-consumer, runlore.io/eval: "true" }
+spec:
+  containers:
+    - name: app
+      image: registry.k8s.io/pause:3.9
+      volumeMounts: [{ name: data, mountPath: /data }]
+      resources: { requests: { cpu: 10m, memory: 16Mi }, limits: { cpu: 50m, memory: 32Mi } }
+  volumes:
+    - name: data
+      persistentVolumeClaim: { claimName: eval-bad-pvc }
