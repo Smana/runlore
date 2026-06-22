@@ -3,6 +3,7 @@ category: storage
 description: a PVC with a non-existent StorageClass never binds; consumer Pod stays Pending (runs on k3d)
 invasive: true
 setup:
+  - kubectl create namespace runlore-eval --dry-run=client -o yaml | kubectl apply -f -
   - kubectl apply -f eval/scenarios/manifests/eval-victim-bad-pvc.yaml
   - sleep 12
 trigger:
