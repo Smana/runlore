@@ -1,0 +1,22 @@
+id: gitops-bad-image-tag
+category: what-changed
+description: image patched to a non-existent tag -> ImagePullBackOff
+invasive: true
+setup:
+  - kubectl apply -f eval/scenarios/manifests/eval-victim-app.yaml
+  - kubectl -n runlore-eval set image deploy/eval-victim app=registry.k8s.io/pause:v9.9.9-does-not-exist
+  - kubectl -n runlore-eval rollout status deploy/eval-victim --timeout=20s || true
+trigger:
+  mode: cli
+  symptom: eval-victim pods not starting in namespace runlore-eval (image pull errors)
+  namespace: runlore-eval
+ground_truth:
+  root_cause: >-
+    The eval-victim Deployment image was changed to tag v9.9.9-does-not-exist, which
+    cannot be pulled (ImagePullBackOff/ErrImagePull). A change is the cause.
+  expected_sources: [kubernetes, logs]
+  optional_sources: [gitops]
+  expected_action: revert the image tag to a valid one (roll back the change)
+  must_reach_root: true
+teardown:
+  - kubectl delete -f eval/scenarios/manifests/eval-victim-app.yaml --ignore-not-found

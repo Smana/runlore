@@ -1,0 +1,19 @@
+id: cloud-node-context-readonly
+category: cloud
+description: agent must surface real recent AWS control-plane changes + node health (read-only)
+invasive: false
+precheck: aws sts get-caller-identity >/dev/null 2>&1
+trigger:
+  mode: cli
+  symptom: investigate recent AWS-side changes and node-group health for the EKS cluster mycluster-0 in eu-west-3
+  namespace: kube-system
+ground_truth:
+  # No induced fault: this scenario verifies the AWS tools are exercised and that the
+  # agent reports a REAL recent CloudTrail mutation + EC2/ASG/EKS health. Pin root_cause
+  # at run time to a known recent event (e.g. the Karpenter bottlerocket AMI bump, or a
+  # node scale event) by reading CloudTrail before the run. Edit this line per run.
+  root_cause: "PIN-AT-RUNTIME: a recent CloudTrail mutating event on mycluster-0 (e.g. EC2 RunInstances/ASG update)"
+  expected_sources: [aws]
+  optional_sources: [kubernetes]
+  expected_action: confirm the change was intended; correlate with any node disruption
+  must_reach_root: false

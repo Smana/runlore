@@ -87,6 +87,17 @@ func (r *Reader) PodStatuses(ctx context.Context, namespace, labelSelector strin
 
 func podStatus(p *corev1.Pod) providers.PodStatus {
 	ps := providers.PodStatus{Name: p.Name, Phase: string(p.Status.Phase)}
+	// Container memory limits (from the spec) — needed to tie an OOMKill to the limit.
+	memLimit := map[string]string{}
+	addLimits := func(cs []corev1.Container) {
+		for _, c := range cs {
+			if q, ok := c.Resources.Limits[corev1.ResourceMemory]; ok {
+				memLimit[c.Name] = q.String()
+			}
+		}
+	}
+	addLimits(p.Spec.InitContainers)
+	addLimits(p.Spec.Containers)
 	ready, total := 0, 0
 	collect := func(cs []corev1.ContainerStatus) {
 		for _, c := range cs {
@@ -94,11 +105,25 @@ func podStatus(p *corev1.Pod) providers.PodStatus {
 			if c.Ready {
 				ready++
 			}
+			oom := false
 			switch {
 			case c.State.Waiting != nil && c.State.Waiting.Reason != "" && c.State.Waiting.Reason != "ContainerCreating" && c.State.Waiting.Reason != "PodInitializing":
-				ps.Reasons = append(ps.Reasons, fmt.Sprintf("%s: %s: %s", c.Name, c.State.Waiting.Reason, c.State.Waiting.Message))
+				msg := fmt.Sprintf("%s: %s: %s", c.Name, c.State.Waiting.Reason, c.State.Waiting.Message)
+				// A waiting (e.g. CrashLoopBackOff) container hides WHY it died — the
+				// reason/exit code live in the LAST termination (e.g. OOMKilled, exit 137).
+				if lt := c.LastTerminationState.Terminated; lt != nil && lt.Reason != "" {
+					msg += fmt.Sprintf(" [last termination: %s (exit %d)]", lt.Reason, lt.ExitCode)
+					oom = lt.Reason == "OOMKilled"
+				}
+				ps.Reasons = append(ps.Reasons, msg)
 			case c.State.Terminated != nil && c.State.Terminated.Reason != "" && c.State.Terminated.Reason != "Completed":
 				ps.Reasons = append(ps.Reasons, fmt.Sprintf("%s: %s (exit %d): %s", c.Name, c.State.Terminated.Reason, c.State.Terminated.ExitCode, c.State.Terminated.Message))
+				oom = c.State.Terminated.Reason == "OOMKilled"
+			}
+			if oom {
+				if lim, ok := memLimit[c.Name]; ok {
+					ps.Reasons = append(ps.Reasons, fmt.Sprintf("%s: memory limit %s (OOMKilled ⇒ limit likely too low for the workload)", c.Name, lim))
+				}
 			}
 		}
 	}

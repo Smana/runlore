@@ -1,0 +1,17 @@
+# A toFQDNs policy that OMITS the kube-dns L7 DNS rule, so Cilium proxies the DNS
+# query but never sees the resolved IPs — the toFQDNs allowlist has no IPs to match
+# and every connection is dropped (the documented Cilium DNS gotcha). DNS appears to
+# "work" while downstream traffic silently fails.
+apiVersion: cilium.io/v2
+kind: CiliumNetworkPolicy
+metadata:
+  name: eval-dns-victim-policy
+  namespace: runlore-eval
+  labels: { runlore.io/eval: "true" }
+spec:
+  endpointSelector:
+    matchLabels: { app: eval-dns-victim }
+  egress:
+    - toFQDNs:
+        - matchName: example.com # allowed destination, but with NO DNS L7 rule below
+    # intentionally NO kube-dns egress with toPorts.rules.dns -> resolution silently breaks
