@@ -14,7 +14,7 @@ import (
 // Setup installs a global OTel meter provider backed by a Prometheus exporter
 // and returns an http.Handler that serves the exposition format, plus a
 // shutdown func. Call NewMetrics AFTER Setup so instruments bind to this provider.
-func Setup(ctx context.Context) (http.Handler, func(context.Context) error, error) {
+func Setup(_ context.Context) (http.Handler, func(context.Context) error, error) {
 	reg := prometheus.NewRegistry()
 	exporter, err := otelprom.New(otelprom.WithRegisterer(reg))
 	if err != nil {

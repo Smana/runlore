@@ -10,8 +10,11 @@ func TestWindowAllowAndSlide(t *testing.T) {
 	w := New(2, time.Minute)
 	w.now = func() time.Time { return now }
 
-	if !w.Allow() || !w.Allow() {
-		t.Fatal("first two starts within budget should be allowed")
+	if !w.Allow() {
+		t.Fatal("first start within budget should be allowed")
+	}
+	if !w.Allow() {
+		t.Fatal("second start within budget should be allowed")
 	}
 	if w.Allow() {
 		t.Fatal("third start should be denied (budget 2)")

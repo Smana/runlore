@@ -7,13 +7,13 @@ import "fmt"
 // elided (0 when max <= 0 or s fits within max). max <= 0 disables truncation.
 // Note: the marker (~40 bytes) is not budget-constrained — for max < ~42 bytes
 // the head/tail are each clipped to 1 byte, which is harmless at real values.
-func truncateOutput(s string, max int) (string, int) {
-	if max <= 0 || len(s) <= max {
+func truncateOutput(s string, maxBytes int) (string, int) {
+	if maxBytes <= 0 || len(s) <= maxBytes {
 		return s, 0
 	}
 	// Reserve room for the marker; split the remaining budget head/tail.
 	const minMarker = 40
-	keep := max - minMarker
+	keep := maxBytes - minMarker
 	if keep < 2 {
 		keep = 2
 	}

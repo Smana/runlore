@@ -5,7 +5,7 @@ import (
 	"testing"
 )
 
-func TestNewMetricsNoProvider(t *testing.T) {
+func TestNewMetricsNoProvider(_ *testing.T) {
 	// With no provider configured, the global meter is a no-op; instruments must
 	// still construct and be safe to call.
 	m := NewMetrics()

@@ -17,9 +17,9 @@ type Window struct {
 	recent []time.Time
 }
 
-// New returns a Window allowing max events per window.
-func New(max int, window time.Duration) *Window {
-	return &Window{max: max, window: window, now: time.Now}
+// New returns a Window allowing maxEvents per window.
+func New(maxEvents int, window time.Duration) *Window {
+	return &Window{max: maxEvents, window: window, now: time.Now}
 }
 
 func (w *Window) slideLocked() {
