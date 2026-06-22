@@ -192,9 +192,23 @@ func runServe(args []string) error {
 	slackSigningSecret := os.Getenv(cfg.Notify.Slack.SigningSecretEnv)
 	webhookToken := os.Getenv(cfg.Server.WebhookTokenEnv)
 
-	inv := buildInvestigator(ctx, cfg, gitops, approvals, auto, log)
+	// Set up the single shared OTel metrics instance before building the investigator
+	// so recall + the investigation loop can record to it from the first request.
+	var metricsHandler http.Handler
+	if cfg.Telemetry.MetricsEnabled {
+		h, shutdown, err := telemetry.Setup(ctx)
+		if err != nil {
+			return fmt.Errorf("telemetry setup: %w", err)
+		}
+		defer func() { _ = shutdown(context.Background()) }()
+		metricsHandler = h
+	}
+	metrics := telemetry.NewMetrics() // bound to global provider (no-op when disabled)
+	// TODO(Parts 4/5): pass metrics to Queue + Coalescer.
+
+	inv := buildInvestigator(ctx, cfg, gitops, approvals, auto, metrics, log)
 	queue := investigate.NewQueue(inv, log)
-	reinv := buildReinvestigator(ctx, cfg, gitops, log)
+	reinv := buildReinvestigator(ctx, cfg, gitops, metrics, log)
 
 	// startWork runs the leader-only loops (investigation queue + failure watch +
 	// re-investigate poller), scoped to a context cancelled when leadership is lost.
@@ -229,16 +243,6 @@ func runServe(args []string) error {
 	if auto != nil {
 		acts.Pauser = auto // avoid a typed-nil interface when auto is disabled
 	}
-	var metricsHandler http.Handler
-	if cfg.Telemetry.MetricsEnabled {
-		h, shutdown, err := telemetry.Setup(ctx)
-		if err != nil {
-			return fmt.Errorf("telemetry setup: %w", err)
-		}
-		defer func() { _ = shutdown(context.Background()) }()
-		metricsHandler = h
-	}
-	_ = telemetry.NewMetrics() // no-op safe when telemetry disabled; Parts 3-5 will wire this
 	srv := server.New(cfg, queue, leader.Load, acts, metricsHandler, log)
 	httpSrv := &http.Server{Addr: *addr, Handler: srv.Handler()}
 	go func() {
@@ -712,7 +716,7 @@ func runCurate(args []string) error {
 // buildReinvestigator returns a poller that re-runs KB issues labelled
 // "reinvestigate" and posts the fresh findings back, or nil when the forge isn't
 // configured. RunLore polls the forge (outbound) — it has no inbound webhooks.
-func buildReinvestigator(ctx context.Context, cfg *config.Config, gp providers.GitOpsProvider, log *slog.Logger) *investigate.Reinvestigator {
+func buildReinvestigator(ctx context.Context, cfg *config.Config, gp providers.GitOpsProvider, metrics *telemetry.Metrics, log *slog.Logger) *investigate.Reinvestigator {
 	token := buildForgeTokenSource(cfg, log)
 	if token == nil || cfg.Forge.KBRepo == "" {
 		return nil
@@ -723,12 +727,20 @@ func buildReinvestigator(ctx context.Context, cfg *config.Config, gp providers.G
 	}
 	client := github.New(cfg.Forge.GitHubAPIURL, owner, repo, cfg.Forge.BaseBranch, github.TokenFunc(token))
 	model, tools, recall, _ := buildModelAndTools(ctx, cfg, gp, log)
+	if recall != nil {
+		recall.Metrics = metrics
+		recall.Log = log
+	}
 	run := func(ctx context.Context, req investigate.Request) (providers.Investigation, error) {
 		var res providers.Investigation
 		var got bool
 		li := &investigate.LoopInvestigator{
 			Model: model, Tools: tools, Recall: recall, Verify: true, Log: log,
-			OnComplete: func(inv providers.Investigation) { res, got = inv, true },
+			Metrics:                   metrics,
+			MaxSteps:                  cfg.Investigation.MaxSteps,
+			MaxToolOutputBytes:        cfg.Investigation.MaxToolOutputBytes,
+			MaxTokensPerInvestigation: cfg.Investigation.MaxTokensPerInvestigation,
+			OnComplete:                func(inv providers.Investigation) { res, got = inv, true },
 		}
 		if err := li.Investigate(ctx, req); err != nil {
 			return providers.Investigation{}, err
@@ -937,12 +949,16 @@ func runInvestigate(args []string) error {
 
 // buildInvestigator returns the LLM ReAct investigator when a model is configured,
 // otherwise the read-only LogInvestigator.
-func buildInvestigator(ctx context.Context, cfg *config.Config, gp providers.GitOpsProvider, approvals *action.Approvals, auto *action.Auto, log *slog.Logger) investigate.Investigator {
+func buildInvestigator(ctx context.Context, cfg *config.Config, gp providers.GitOpsProvider, approvals *action.Approvals, auto *action.Auto, metrics *telemetry.Metrics, log *slog.Logger) investigate.Investigator {
 	if !modelConfigured(cfg) {
 		log.Info("no model configured; using log-only investigator")
 		return investigate.LogInvestigator{Log: log}
 	}
 	model, tools, recall, cat := buildModelAndTools(ctx, cfg, gp, log)
+	if recall != nil {
+		recall.Metrics = metrics
+		recall.Log = log
+	}
 	log.Info("using LLM investigator", "provider", modelProvider(cfg), "model", cfg.Model.Model, "tools", len(tools))
 	notifier := buildNotifier(cfg, log)
 	log.Info("delivery notifiers", "count", notifier.Len())
@@ -952,12 +968,16 @@ func buildInvestigator(ctx context.Context, cfg *config.Config, gp providers.Git
 		log.Info("action policy enabled", "mode", string(actions.Mode()))
 	}
 	return &investigate.LoopInvestigator{
-		Model:   model,
-		Tools:   tools,
-		Log:     log,
-		Actions: actions,
-		Recall:  recall,
-		Verify:  true, // adversarial review of root causes before delivery/curation
+		Model:                     model,
+		Tools:                     tools,
+		Log:                       log,
+		Actions:                   actions,
+		Recall:                    recall,
+		Verify:                    true, // adversarial review of root causes before delivery/curation
+		Metrics:                   metrics,
+		MaxSteps:                  cfg.Investigation.MaxSteps,
+		MaxToolOutputBytes:        cfg.Investigation.MaxToolOutputBytes,
+		MaxTokensPerInvestigation: cfg.Investigation.MaxTokensPerInvestigation,
 		OnComplete: func(found providers.Investigation) {
 			// Post-investigation action handling, by mode. The loop has already
 			// filtered found.Actions to the envelope (rung 1). auto and approvals are
