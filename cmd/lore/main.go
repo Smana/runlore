@@ -56,6 +56,7 @@ import (
 	"github.com/Smana/runlore/internal/providers/cluster"
 	"github.com/Smana/runlore/internal/providers/gitops/argocd"
 	"github.com/Smana/runlore/internal/providers/gitops/flux"
+	"github.com/Smana/runlore/internal/ratelimit"
 	"github.com/Smana/runlore/internal/server"
 	"github.com/Smana/runlore/internal/telemetry"
 	"github.com/Smana/runlore/internal/trigger"
@@ -204,10 +205,21 @@ func runServe(args []string) error {
 		metricsHandler = h
 	}
 	metrics := telemetry.NewMetrics() // bound to global provider (no-op when disabled)
-	// TODO(Parts 4/5): pass metrics to Queue + Coalescer.
+	// TODO(Part 5): pass metrics to Coalescer.
 
 	inv := buildInvestigator(ctx, cfg, gitops, approvals, auto, metrics, log)
 	queue := investigate.NewQueue(inv, log)
+	if rl := cfg.Investigation.RateLimit; rl.MaxPerWindow > 0 {
+		window := rl.Window.Std()
+		queue.ConfigureRateLimit(
+			ratelimit.New(rl.MaxPerWindow, window),
+			rl.MaxRequeues,
+			metrics,
+			ratelimit.New(1, window), // once-per-window throttle guard for onThrottle
+		)
+		log.Info("investigation rate limit configured",
+			"max_per_window", rl.MaxPerWindow, "window", window, "max_requeues", rl.MaxRequeues)
+	}
 	reinv := buildReinvestigator(ctx, cfg, gitops, metrics, log)
 
 	// startWork runs the leader-only loops (investigation queue + failure watch +
