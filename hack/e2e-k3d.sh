@@ -204,8 +204,9 @@ STORM_PORT=18085; free_port "$STORM_PORT"
 kubectl -n "$NS" port-forward svc/runlore "$STORM_PORT:8080" >/tmp/runlore-storm-pf.log 2>&1 &
 STORM_PF=$!; sleep 3
 
-# 40 alerts, unique fingerprints, same groupKey → coalescer buffers all 40 and flushes
-# on MaxBatch=40, emitting alerts_coalesced_total=39 and enqueuing 1 investigation.
+# 40 critical alerts, unique fingerprints, same groupKey. The first flushes
+# immediately (critical fast-path); the other 39 fall inside the cooldown and are
+# suppressed → one investigation, not 40.
 STORM_PAYLOAD=$(python3 -c "
 import json
 alerts = [
@@ -226,24 +227,28 @@ sleep 6   # allow MaxBatch flush + investigation to start
 METRICS=$(curl -sf "http://localhost:$STORM_PORT/metrics" 2>/dev/null || true)
 kill "$STORM_PF" 2>/dev/null || true; free_port "$STORM_PORT"
 
-# Parse metric values (match on prefix to tolerate _total vs _total_total OTel suffix variants).
-COALESCED=$(echo "$METRICS" | grep '^alerts_coalesced' | grep -v '^#' | awk '{print int($NF)}' | head -1)
-COALESCED=${COALESCED:-0}
-STARTED=$(echo "$METRICS" | grep '^investigations_started' | grep -v '^#' | awk '{print int($NF)}' | head -1)
-STARTED=${STARTED:-0}
+# Parse metric values. Metrics are runlore_-prefixed by the OTel Prometheus exporter;
+# prefix-match also tolerates _total vs _total_total suffix variants. awk never fails
+# the pipeline, so a missing metric → 0 (a clean FAIL, not a set -e crash).
+metric() { echo "$METRICS" | awk -v p="^runlore_$1" '$0 ~ p {print int($NF); exit}'; }
+RECEIVED=$(metric alerts_received);       RECEIVED=${RECEIVED:-0}
+STARTED=$(metric investigations_started); STARTED=${STARTED:-0}
+SUPPRESSED=$(metric alerts_suppressed);   SUPPRESSED=${SUPPRESSED:-0}
+COALESCED=$(metric alerts_coalesced);     COALESCED=${COALESCED:-0}
+ABSORBED=$((SUPPRESSED + COALESCED))
 
-if [[ "$COALESCED" -ge 1 ]]; then
-  green "PASS: storm coalesced (alerts_coalesced_total=$COALESCED, 40 alerts → 1 flush)"
-  PASS=$((PASS+1))
-else
-  red "FAIL: coalescer did not merge alerts (alerts_coalesced_total=$COALESCED)"
-  FAIL=$((FAIL+1))
-fi
 if [[ "$STARTED" -ge 1 && "$STARTED" -le 3 ]]; then
-  green "PASS: storm bounded investigations (investigations_started_total=$STARTED, want ~1)"
+  green "PASS: storm bounded to one investigation (investigations_started_total=$STARTED, want 1-3)"
   PASS=$((PASS+1))
 else
   red "FAIL: storm investigations out of bounds (investigations_started_total=$STARTED, want 1-3)"
+  FAIL=$((FAIL+1))
+fi
+if [[ "$ABSORBED" -ge 1 ]]; then
+  green "PASS: storm absorbed ($ABSORBED of $RECEIVED — suppressed=$SUPPRESSED, coalesced=$COALESCED)"
+  PASS=$((PASS+1))
+else
+  red "FAIL: storm not absorbed (received=$RECEIVED, suppressed=$SUPPRESSED, coalesced=$COALESCED)"
   FAIL=$((FAIL+1))
 fi
 

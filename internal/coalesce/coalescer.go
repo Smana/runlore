@@ -94,8 +94,21 @@ func (c *Coalescer) Add(inc config.Incident) {
 	c.mu.Lock()
 	now := c.now()
 	switch {
+	case c.withinCooldown(k, now):
+		// An investigation for this key already fired within the cooldown — suppress
+		// the rest of the storm. This is checked before the critical fast-path so a
+		// storm of critical alerts collapses to one investigation (the first) plus
+		// suppressions, rather than one investigation per alert.
+		c.suppressed[k]++
+		c.mu.Unlock()
+		if m := c.Metrics; m != nil {
+			m.AlertsSuppressed.Add(context.Background(), 1)
+		}
+		return
 	case strings.EqualFold(inc.Severity, "critical"):
-		// Critical alerts are never throttled/suppressed — flush immediately regardless of cooldown.
+		// First critical for this key (not in cooldown): flush immediately with no
+		// debounce wait, draining any pending batch. Subsequent same-key alerts fall
+		// into the cooldown case above and are suppressed.
 		flush = []config.Incident{inc}
 		if b, ok := c.pending[k]; ok {
 			flush = make([]config.Incident, 0, len(b.incidents)+1)
@@ -104,13 +117,6 @@ func (c *Coalescer) Add(inc config.Incident) {
 			delete(c.pending, k)
 		}
 		c.recent[k] = now
-	case c.withinCooldown(k, now):
-		c.suppressed[k]++
-		c.mu.Unlock()
-		if m := c.Metrics; m != nil {
-			m.AlertsSuppressed.Add(context.Background(), 1)
-		}
-		return
 	default:
 		b := c.pending[k]
 		if b == nil {
