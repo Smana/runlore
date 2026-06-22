@@ -3,6 +3,7 @@ package config
 import (
 	"fmt"
 	"os"
+	"time"
 
 	"gopkg.in/yaml.v3"
 )
@@ -22,8 +23,37 @@ func Load(path string) (*Config, error) {
 	if err := dec.Decode(&c); err != nil {
 		return nil, fmt.Errorf("parse config: %w", err)
 	}
+	applyDefaults(&c)
 	if err := c.Validate(); err != nil {
 		return nil, fmt.Errorf("invalid config: %w", err)
 	}
 	return &c, nil
+}
+
+// applyDefaults fills in safe zero-value defaults for optional fields so that a
+// minimal config (e.g. coalesce.enabled: true with no sub-fields) is valid and
+// predictable without requiring every field to be spelled out.
+func applyDefaults(c *Config) {
+	// Coalesce defaults: when enabled without explicit tuning, choose conservative
+	// values that reduce storm noise without introducing too much investigation lag.
+	if c.Investigation.Coalesce.Enabled {
+		co := &c.Investigation.Coalesce
+		if co.Debounce == 0 {
+			co.Debounce = Duration(30 * time.Second)
+		}
+		if co.MaxWait == 0 {
+			co.MaxWait = Duration(2 * time.Minute)
+		}
+		if co.MaxBatch == 0 {
+			co.MaxBatch = 50
+		}
+		if co.Cooldown == 0 {
+			co.Cooldown = Duration(10 * time.Minute)
+		}
+	}
+	// Rate-limit window default: 1h when a per-window budget is set but no window
+	// is given (a zero window would silently allow unlimited investigations).
+	if c.Investigation.RateLimit.MaxPerWindow > 0 && c.Investigation.RateLimit.Window == 0 {
+		c.Investigation.RateLimit.Window = Duration(time.Hour)
+	}
 }

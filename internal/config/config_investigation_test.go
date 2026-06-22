@@ -8,6 +8,50 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
+func TestApplyDefaultsCoalesceEnabled(t *testing.T) {
+	// Only coalesce.enabled set — all numeric fields should get safe defaults.
+	var c Config
+	c.Investigation.Coalesce.Enabled = true
+	applyDefaults(&c)
+	co := c.Investigation.Coalesce
+	if co.Debounce.Std() != 30*time.Second {
+		t.Fatalf("default Debounce: got %v, want 30s", co.Debounce.Std())
+	}
+	if co.MaxWait.Std() != 2*time.Minute {
+		t.Fatalf("default MaxWait: got %v, want 2m", co.MaxWait.Std())
+	}
+	if co.MaxBatch != 50 {
+		t.Fatalf("default MaxBatch: got %d, want 50", co.MaxBatch)
+	}
+	if co.Cooldown.Std() != 10*time.Minute {
+		t.Fatalf("default Cooldown: got %v, want 10m", co.Cooldown.Std())
+	}
+}
+
+func TestApplyDefaultsRateLimitWindow(t *testing.T) {
+	var c Config
+	c.Investigation.RateLimit.MaxPerWindow = 10
+	applyDefaults(&c)
+	if c.Investigation.RateLimit.Window.Std() != time.Hour {
+		t.Fatalf("default Window: got %v, want 1h", c.Investigation.RateLimit.Window.Std())
+	}
+}
+
+func TestApplyDefaultsDoesNotOverride(t *testing.T) {
+	// Explicit values must not be overwritten.
+	var c Config
+	c.Investigation.Coalesce.Enabled = true
+	c.Investigation.Coalesce.Debounce = Duration(5 * time.Second)
+	c.Investigation.Coalesce.MaxBatch = 3
+	applyDefaults(&c)
+	if c.Investigation.Coalesce.Debounce.Std() != 5*time.Second {
+		t.Fatalf("explicit Debounce overwritten: got %v", c.Investigation.Coalesce.Debounce.Std())
+	}
+	if c.Investigation.Coalesce.MaxBatch != 3 {
+		t.Fatalf("explicit MaxBatch overwritten: got %d", c.Investigation.Coalesce.MaxBatch)
+	}
+}
+
 func TestInvestigationConfigParse(t *testing.T) {
 	const y = `
 investigation:

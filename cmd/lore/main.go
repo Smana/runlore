@@ -242,6 +242,7 @@ func runServe(args []string) error {
 			Cooldown:          cc.Cooldown.Std(),
 			CorrelationLabels: cc.CorrelationLabels,
 		}, out)
+		cz.Metrics = metrics
 		log.Info("investigation coalescer enabled",
 			"debounce", cc.Debounce.Std(), "max_wait", cc.MaxWait.Std(),
 			"max_batch", cc.MaxBatch, "cooldown", cc.Cooldown.Std())
