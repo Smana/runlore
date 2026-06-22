@@ -3,6 +3,7 @@ package github
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -118,5 +119,32 @@ func TestClose(t *testing.T) {
 	}
 	if gotMethod != http.MethodPatch || gotPath != "/repos/o/r/issues/42" || gotBody["state"] != "closed" {
 		t.Fatalf("unexpected: %s %s body=%v", gotMethod, gotPath, gotBody)
+	}
+}
+
+func TestListPRsByLabelPaginates(t *testing.T) {
+	// page 1 returns a full page (100) → the client must fetch page 2 for the rest.
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Query().Get("page") {
+		case "1":
+			items := make([]string, 100)
+			for i := range items {
+				items[i] = fmt.Sprintf(`{"number":%d,"title":"KB: t%d","labels":[{"name":"runlore"}],"pull_request":{}}`, i+1, i+1)
+			}
+			_, _ = w.Write([]byte("[" + strings.Join(items, ",") + "]"))
+		case "2":
+			_, _ = w.Write([]byte(`[{"number":101,"title":"KB: t101","labels":[{"name":"runlore"}],"pull_request":{}}]`))
+		default:
+			_, _ = w.Write([]byte(`[]`))
+		}
+	}))
+	defer srv.Close()
+	c := New(srv.URL, "o", "r", "main", staticToken("tok"))
+	prs, err := c.ListPRsByLabel(context.Background(), "runlore")
+	if err != nil {
+		t.Fatalf("ListPRsByLabel: %v", err)
+	}
+	if len(prs) != 101 {
+		t.Fatalf("want 101 PRs across 2 pages (no truncation at 100), got %d", len(prs))
 	}
 }

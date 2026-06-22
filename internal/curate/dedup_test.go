@@ -66,3 +66,24 @@ func TestDedupClosesDuplicatesKeepsCanonical(t *testing.T) {
 		t.Fatalf("want back-ref comments on the 2 closed dups, got %v", f.commented)
 	}
 }
+
+func TestDedupSkipsProtectedDuplicates(t *testing.T) {
+	// Three title-identical PRs; the middle one is human-`accepted`. Dedup must NOT
+	// close the protected one — it closes only the unprotected duplicate (#12),
+	// keeping the canonical (#10) and the human-touched (#11) open.
+	f := &fakeForge{prs: []providers.CuratedIssue{
+		{Number: 10, Title: "KB: Kustomization DependencyNotReady missing GitRepository"},
+		{Number: 11, Title: "KB: Kustomization DependencyNotReady missing GitRepository", Labels: []string{"runlore", "accepted"}},
+		{Number: 12, Title: "KB: Kustomization DependencyNotReady missing GitRepository"},
+	}}
+	d := Dedup{Forge: f, Log: slog.New(slog.NewTextHandler(io.Discard, nil))}
+	if err := d.Run(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if containsInt(f.closed, 11) {
+		t.Fatalf("must NOT close the protected (accepted) #11, got %v", f.closed)
+	}
+	if len(f.closed) != 1 || f.closed[0] != 12 {
+		t.Fatalf("should close only the unprotected dup #12, got %v", f.closed)
+	}
+}

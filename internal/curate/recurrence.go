@@ -38,7 +38,16 @@ func (r Recurrence) Observe(ctx context.Context, pattern string) error {
 		counts = map[string]int{}
 	}
 	counts[pattern]++
-	if counts[pattern] == thr { // exactly at threshold → open once
+	shouldOpen := counts[pattern] == thr // exactly at threshold → open once
+	// Persist the count BEFORE opening the issue. If we opened first and Save then
+	// failed, the next run would re-load the pre-increment count, re-hit the
+	// threshold, and double-open. Saving first means a later OpenIssue failure
+	// leaves the count at thr (next run increments past it → the == thr guard
+	// never re-fires).
+	if err := r.Store.Save(ctx, counts); err != nil {
+		return fmt.Errorf("save recurrence: %w", err)
+	}
+	if shouldOpen {
 		inv := providers.Investigation{
 			Title: "knowledge-gap: " + pattern,
 			RootCauses: []providers.Hypothesis{{
@@ -50,5 +59,5 @@ func (r Recurrence) Observe(ctx context.Context, pattern string) error {
 		}
 		r.Log.Info("opened knowledge-gap issue", "pattern", pattern, "count", thr)
 	}
-	return r.Store.Save(ctx, counts)
+	return nil
 }

@@ -14,8 +14,10 @@ func TestStaleClosesUnlabelledOldArtifacts(t *testing.T) {
 		{Number: 70, Title: "KB: ancient draft", Labels: []string{"runlore", "triggered"}},
 		{Number: 71, Title: "KB: queued", Labels: []string{"runlore", "ready-to-merge"}},
 		{Number: 72, Title: "KB: accepted", Labels: []string{"runlore", "accepted"}},
+		{Number: 73, Title: "KB: human-reviewed", Labels: []string{"runlore", "solved"}},
 	}}
-	// every PR is "stale" by age, but 71/72 are protected by their labels.
+	// every PR is "stale" by age, but 71/72/73 are protected by their labels (solved
+	// is human-reviewed-for-content and must not be auto-closed).
 	l := Lifecycle{Forge: f, Stale: func(int) bool { return true }, Log: slog.New(slog.NewTextHandler(io.Discard, nil))}
 	if err := l.Run(context.Background()); err != nil {
 		t.Fatal(err)
