@@ -3,12 +3,9 @@ category: saturation
 description: a memory-hog workload OOMKills under a tight limit (runs on k3d)
 invasive: true
 setup:
-  - kubectl apply -f eval/scenarios/manifests/eval-victim-app.yaml
-  - |
-    kubectl -n runlore-eval run mem-hog --image=polinux/stress --restart=Never \
-      --limits=memory=64Mi --requests=memory=64Mi -- \
-      stress --vm 1 --vm-bytes 256M --vm-hang 0 || true
-  - sleep 25 # let it OOMKill a few times
+  - kubectl create namespace runlore-eval --dry-run=client -o yaml | kubectl apply -f -
+  - kubectl apply -f eval/scenarios/manifests/eval-memhog.yaml
+  - sleep 30 # let it OOMKill a few times -> CrashLoopBackOff with OOMKilled last-termination
 trigger:
   mode: cli
   symptom: pod mem-hog repeatedly restarting (OOMKilled) in namespace runlore-eval
@@ -16,13 +13,11 @@ trigger:
 ground_truth:
   root_cause: >-
     The mem-hog pod requests 256M but is capped at a 64Mi memory limit, so the kernel
-    OOMKills it repeatedly (reason OOMKilled, exit 137). Resource saturation against the
-    limit, with no Git change involved.
+    OOMKills it repeatedly (reason OOMKilled, exit 137) and it lands in CrashLoopBackOff.
+    Resource saturation against the limit, with no Git change involved.
   expected_sources: [kubernetes]
   optional_sources: [logs]
   expected_action: raise the memory limit or reduce the workload's footprint
   must_reach_root: true
 teardown:
-  - kubectl -n runlore-eval delete pod mem-hog --ignore-not-found
-  - kubectl delete -f eval/scenarios/manifests/eval-victim-app.yaml --ignore-not-found
   - kubectl delete ns runlore-eval --ignore-not-found
