@@ -1,0 +1,17 @@
+id: vector-cilium-ip-exhaustion
+category: node
+description: victoria-logs-vector stuck ContainerCreating — Cilium IPAM IP exhaustion on the node
+invasive: false
+precheck: kubectl get pods -n observability -l app.kubernetes.io/name=vector -o jsonpath='{.items[*].status.phase}' | grep -q Pending
+trigger:
+  mode: cli
+  symptom: victoria-logs-vector pod stuck ContainerCreating in namespace observability
+  namespace: observability
+ground_truth:
+  root_cause: >-
+    Cilium IPAM has no IPs available on the node ("no IPs currently available on the
+    node"), so the vector pod sandbox cannot get an address and stays ContainerCreating.
+  expected_sources: [kubernetes]
+  optional_sources: [network]
+  expected_action: free or add node IP capacity (Cilium IPAM pool) so the pod can be scheduled
+  must_reach_root: true

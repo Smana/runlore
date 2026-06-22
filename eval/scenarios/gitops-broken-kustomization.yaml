@@ -1,0 +1,23 @@
+id: gitops-broken-kustomization
+category: what-changed
+description: a Flux Kustomization pointed at a non-existent path -> Ready=False
+invasive: true
+setup:
+  - kubectl apply -f eval/scenarios/manifests/eval-victim-bad-kustomization.yaml
+  - sleep 20 # let Flux reconcile and report Ready=False
+trigger:
+  mode: cli
+  symptom: Flux Kustomization eval-victim-broken is not ready in flux-system
+  namespace: flux-system
+ground_truth:
+  root_cause: >-
+    Kustomization/eval-victim-broken references spec.path ./this/path/does/not/exist,
+    which does not exist in the infra-artifact source, so the build fails and the
+    Kustomization is Ready=False (BuildFailed). The source ExternalArtifact itself is
+    healthy — the bad path is the root cause.
+  expected_sources: [gitops]
+  optional_sources: [kubernetes]
+  expected_action: correct spec.path (or remove the Kustomization)
+  must_reach_root: true
+teardown:
+  - kubectl delete -f eval/scenarios/manifests/eval-victim-bad-kustomization.yaml --ignore-not-found

@@ -1,0 +1,369 @@
+{
+  "at": "2026-06-22T05:02:14Z",
+  "ran": 2,
+  "passed": 1,
+  "skipped": 1,
+  "results": [
+    {
+      "Scenario": "k3d-bad-image-tag",
+      "Skipped": false,
+      "SkipReason": "",
+      "Runs": [
+        {
+          "Investigation": {
+            "Title": "k3d-bad-image-tag",
+            "RootCauses": [
+              {
+                "Summary": "One of the eval-victim pods is failing to start due to an ImagePullBackOff error. The image \"registry.k8s.io/pause:v9.9.9-does-not-exist\" cannot be found.",
+                "Confidence": 0.95,
+                "ChangeRef": "",
+                "Evidence": [
+                  "pod_status: eval-victim-756b55c647-xcqbl  Pending ready=0/1  ⚠ app: ImagePullBackOff: Back-off pulling image \"registry.k8s.io/pause:v9.9.9-does-not-exist\"",
+                  "kube_events: Warning Pod/eval-victim-756b55c647-xcqbl Failed: Failed to pull image \"registry.k8s.io/pause:v9.9.9-does-not-exist\": rpc error: code = NotFound desc = failed to pull and unpack image \"registry.k8s.io/pause:v9.9.9-does-not-exist\": failed to resolve reference \"registry.k8s.io/pause:v9.9.9-does-not-exist\": registry.k8s.io/pause:v9.9.9-does-not-exist: not found"
+                ],
+                "SuggestedAction": "Correct the image tag for the \"registry.k8s.io/pause\" image in the eval-victim pod specification to an existing version.",
+                "Reversible": false
+              }
+            ],
+            "Changes": null,
+            "Unresolved": [
+              "The specific Kustomization or HelmRelease responsible for deploying the eval-victim pod could not be identified as no Flux resources were found in the runlore-eval namespace. Therefore, the source of the incorrect image tag could not be determined."
+            ],
+            "Confidence": 0.95,
+            "Actions": null,
+            "CuratedURL": ""
+          },
+          "Coverage": {
+            "Touched": [
+              "kubernetes"
+            ],
+            "Missing": null,
+            "Bonus": null,
+            "CrossSignal": true,
+            "ToolErrors": [
+              "what_changed"
+            ],
+            "Ratio": 1
+          },
+          "Verdict": {
+            "scores": {
+              "calibration": 2,
+              "description": 3,
+              "evidence": 3,
+              "root_cause": 2,
+              "solution": 3
+            },
+            "confident_wrong": false,
+            "rationale": "The investigation correctly identified the direct cause of the pod failure: an invalid image tag ('v9.9.9-does-not-exist') leading to an ImagePullBackOff error. The evidence cited from pod status and Kubernetes events is pertinent and directly supports this conclusion. The suggested solution to correct the image tag is actionable and correct. The description is excellent, being both clear and honest about its inability to trace the source of the misconfiguration. The root cause analysis is scored as 'correct but shallow' because it identifies the incorrect configuration state but does not explicitly identify that a *change* introduced this state, which is the ultimate root cause according to the ground truth."
+          }
+        },
+        {
+          "Investigation": {
+            "Title": "k3d-bad-image-tag",
+            "RootCauses": [
+              {
+                "Summary": "An `eval-victim` pod is failing to start due to an `ImagePullBackOff` error. The pod is attempting to pull the image \"registry.k8s.io/pause:v9.9.9-does-not-exist\", which is an invalid and non-existent image tag. This directly causes the image pull failure.",
+                "Confidence": 0.9,
+                "ChangeRef": "",
+                "Evidence": [
+                  "The `pod_status` for namespace `runlore-eval` shows `eval-victim-756b55c647-xcqbl` in a `Pending` state with `ImagePullBackOff` for image \"registry.k8s.io/pause:v9.9.9-does-not-exist\"."
+                ],
+                "SuggestedAction": "Update the pod definition for `eval-victim` to use a valid and existing image tag for the `pause` image.",
+                "Reversible": false
+              }
+            ],
+            "Changes": null,
+            "Unresolved": [
+              "Could not determine if this change was introduced by a recent GitOps commit due to `what_changed` returning an error for listing kustomizations in the `runlore-eval` namespace."
+            ],
+            "Confidence": 0.9,
+            "Actions": null,
+            "CuratedURL": ""
+          },
+          "Coverage": {
+            "Touched": [
+              "kubernetes"
+            ],
+            "Missing": null,
+            "Bonus": null,
+            "CrossSignal": true,
+            "ToolErrors": [
+              "what_changed"
+            ],
+            "Ratio": 1
+          },
+          "Verdict": {
+            "scores": {
+              "calibration": 2,
+              "description": 3,
+              "evidence": 3,
+              "root_cause": 2,
+              "solution": 3
+            },
+            "confident_wrong": false,
+            "rationale": "The investigation correctly identifies the proximate cause: the pod is failing because it's trying to pull a non-existent image tag. This is more than a symptom, but falls short of the true root cause, which is that a *change* was introduced. The investigation attempted to verify this but a tool failed, so it stops at 'correct but shallow'. The evidence cited from the pod status is accurate and directly supports the diagnosis. The proposed solution to update the pod definition to a valid tag is correct and actionable. The description is excellent: it's clear, complete, and honest about its limitations in tracing the change's origin. The high confidence is appropriate given the certainty of the proximate cause."
+          }
+        },
+        {
+          "Investigation": {
+            "Title": "k3d-bad-image-tag",
+            "RootCauses": [
+              {
+                "Summary": "The eval-victim pods are failing to start due to an ImagePullBackOff error. The pod is attempting to pull an invalid image tag: \"registry.k8s.io/pause:v9.9.9-does-not-exist\". This image tag does not exist.",
+                "Confidence": 0.9,
+                "ChangeRef": "",
+                "Evidence": [
+                  "Pod eval-victim-756b55c647-xcqbl in namespace runlore-eval is in Pending state with ImagePullBackOff: Back-off pulling image \"registry.k8s.io/pause:v9.9.9-does-not-exist\"."
+                ],
+                "SuggestedAction": "Correct the image tag for the eval-victim workload to a valid and existing image.",
+                "Reversible": true
+              }
+            ],
+            "Changes": null,
+            "Unresolved": [
+              "Could not determine how the invalid image tag was introduced, as no Flux Kustomizations or HelmReleases were found in the runlore-eval namespace."
+            ],
+            "Confidence": 0.9,
+            "Actions": null,
+            "CuratedURL": ""
+          },
+          "Coverage": {
+            "Touched": [
+              "kubernetes"
+            ],
+            "Missing": null,
+            "Bonus": null,
+            "CrossSignal": true,
+            "ToolErrors": [
+              "what_changed"
+            ],
+            "Ratio": 1
+          },
+          "Verdict": {
+            "scores": {
+              "calibration": 2,
+              "description": 3,
+              "evidence": 3,
+              "root_cause": 2,
+              "solution": 3
+            },
+            "confident_wrong": false,
+            "rationale": "The investigation correctly identifies the immediate technical cause: the pods are in `ImagePullBackOff` because the deployment is configured with a non-existent image tag. The evidence cited is direct, factual, and supports this conclusion. The proposed solution is correct and actionable. The description is clear and commendable for explicitly stating what it could not determine (the origin of the change).\n\nThe root cause score is a 2 (correct but shallow) because the ground truth specifies that the *change* itself is the root cause, and the investigation explicitly states it could not determine the source of the change. Since the identified immediate cause is correct, the high confidence is warranted and this is not a case of being confident and wrong."
+          }
+        }
+      ],
+      "CoverageRatio": 1,
+      "DimMedian": {
+        "calibration": 2,
+        "description": 3,
+        "evidence": 3,
+        "root_cause": 2,
+        "solution": 3
+      },
+      "DimVariance": {
+        "calibration": 0,
+        "description": 0,
+        "evidence": 0,
+        "root_cause": 0,
+        "solution": 0
+      },
+      "ConfidentWrong": false,
+      "ToolErrors": [
+        "what_changed"
+      ],
+      "Pass": true
+    },
+    {
+      "Scenario": "k3d-oom-saturation",
+      "Skipped": false,
+      "SkipReason": "",
+      "Runs": [
+        {
+          "Investigation": {
+            "Title": "k3d-oom-saturation",
+            "RootCauses": [
+              {
+                "Summary": "The 'mem-hog' pod specified in the alert could not be found in the 'runlore-eval' namespace. No evidence of an OOMKilled pod or restarts matching the alert description was found. The 'eval-victim' pod, the only pod identified in the namespace, is running normally.",
+                "Confidence": 0.9,
+                "ChangeRef": "",
+                "Evidence": [
+                  "pod_status(namespace='runlore-eval', selector='app=mem-hog') -\u003e 'no pods in namespace \"runlore-eval\" matching app=mem-hog'",
+                  "pod_status(namespace='runlore-eval') -\u003e 'eval-victim-9ddb6b7bd-qzv2q Running ready=1/1'",
+                  "kube_events(all_types=True, namespace='runlore-eval', object='mem-hog') -\u003e 'no  events in namespace \"runlore-eval\"'",
+                  "kube_events(all_types=True, namespace='runlore-eval', object='eval-victim-9ddb6b7bd-qzv2q') -\u003e Normal events showing successful scheduling, pulling, creation and starting of container."
+                ],
+                "SuggestedAction": "",
+                "Reversible": false
+              }
+            ],
+            "Changes": null,
+            "Unresolved": [
+              "Could not determine if any changes were made to the 'runlore-eval' namespace due to an error from 'what_changed' tool: 'error: list kustomizations: the server could not find the requested resource'.",
+              "The discrepancy between the alert mentioning 'mem-hog' and the observed state of no such pod or OOMKilled events is unresolved."
+            ],
+            "Confidence": 0.9,
+            "Actions": null,
+            "CuratedURL": ""
+          },
+          "Coverage": {
+            "Touched": [
+              "kubernetes"
+            ],
+            "Missing": null,
+            "Bonus": null,
+            "CrossSignal": true,
+            "ToolErrors": [
+              "what_changed"
+            ],
+            "Ratio": 1
+          },
+          "Verdict": {
+            "scores": {
+              "calibration": 0,
+              "description": 1,
+              "evidence": 0,
+              "root_cause": 0,
+              "solution": 0
+            },
+            "confident_wrong": true,
+            "rationale": "The investigation completely failed to identify the incident. It incorrectly concluded that the 'mem-hog' pod did not exist and that there was no evidence of OOMKills, effectively denying the problem stated in the alert.\n- root_cause: 0. The investigation did not find a symptom, let alone a root cause. It reached the opposite conclusion of reality.\n- evidence: 0. The investigation used shallow queries that missed the critical evidence. A pod in a crash loop might not be visible at the exact moment of a 'get pods' command, but terminated pods and events from the ReplicaSet/Deployment would have shown the repeated OOMKills. The evidence presented (a different, healthy pod) was irrelevant and misleading.\n- solution: 0. No problem was identified, so no solution was proposed.\n- description: 1. The description clearly states the steps taken and their (null) results. However, it completely mischaracterizes the incident as a \"discrepancy\" between the alert and reality, when the reality was missed due to a flawed investigation.\n- calibration: 0. The result stated a completely wrong conclusion with very high confidence (0.90), which is a critical failure of calibration. This merits setting confident_wrong to true."
+          }
+        },
+        {
+          "Investigation": {
+            "Title": "OOMKilled restarts for 'mem-hog' pod in 'runlore-eval' namespace",
+            "RootCauses": [
+              {
+                "Summary": "The pod 'eval-victim' (identified as 'mem-hog' in the alert) is experiencing repeated Out-Of-Memory (OOMKilled) restarts, likely due to exceeding its allocated memory limits. While current tool outputs show the pod as 'Running' and 'Ready', this could be a transient state between restarts.",
+                "Confidence": 0.3,
+                "ChangeRef": "",
+                "Evidence": [
+                  "Alert message: 'pod mem-hog repeatedly restarting (OOMKilled) in namespace runlore-eval.'",
+                  "Output of `pod_status` for namespace `runlore-eval` shows `eval-victim-9ddb6b7bd-qzv2q Running ready=1/1`.",
+                  "Output of `kube_events` for namespace `runlore-eval` and object `eval-victim-9ddb6b7bd-qzv2q` (all types) did not explicitly show any OOMKilled or Warning events."
+                ],
+                "SuggestedAction": "Investigate and adjust the memory requests and limits for the 'eval-victim' pod to prevent further OOMKilled events.",
+                "Reversible": true
+              }
+            ],
+            "Changes": null,
+            "Unresolved": [
+              "The exact number and frequency of past OOMKilled events and restarts for the 'eval-victim' pod.",
+              "Whether the issue is still actively occurring at the time of investigation, as current `pod_status` indicates a running state.",
+              "The specific memory limits and requests currently configured for the 'eval-victim' pod.",
+              "Any recent changes that might have impacted the 'eval-victim' pod's memory consumption or resource limits, as `what_changed` failed to retrieve information for the `runlore-eval` namespace."
+            ],
+            "Confidence": 0.3,
+            "Actions": null,
+            "CuratedURL": ""
+          },
+          "Coverage": {
+            "Touched": [
+              "kubernetes"
+            ],
+            "Missing": null,
+            "Bonus": null,
+            "CrossSignal": true,
+            "ToolErrors": [
+              "what_changed"
+            ],
+            "Ratio": 1
+          },
+          "Verdict": {
+            "scores": {
+              "calibration": 2,
+              "description": 3,
+              "evidence": 3,
+              "root_cause": 2,
+              "solution": 3
+            },
+            "confident_wrong": false,
+            "rationale": "The investigation correctly identifies that the pod is OOMKilled due to exceeding its memory limits, which is the direct cause. However, it fails to specify the actual misconfiguration (limit of 64Mi vs. pod's actual need/request), making the root cause analysis correct but shallow (score 2/3). The evidence cited is excellent; it correctly uses the alert and pod status, and honestly reports the lack of useful output from other tools. The suggested solution to 'adjust the memory requests and limits' is perfectly aligned with the expected action. The description is clear, complete, and commendably honest about what remains unresolved. The low confidence (0.3) is well-calibrated, reflecting the lack of definitive data from the tools to confirm the hypothesis."
+          }
+        },
+        {
+          "Investigation": {
+            "Title": "k3d-oom-saturation",
+            "RootCauses": [
+              {
+                "Summary": "The 'mem-hog' pod repeatedly restarted due to Out Of Memory (OOMKilled). This indicates the pod exceeded its allocated memory resources.",
+                "Confidence": 0.9,
+                "ChangeRef": "",
+                "Evidence": [
+                  "Alert message: 'pod mem-hog repeatedly restarting (OOMKilled) in namespace runlore-eval'"
+                ],
+                "SuggestedAction": "",
+                "Reversible": false
+              }
+            ],
+            "Changes": null,
+            "Unresolved": [
+              "The current status and detailed historical events of the `mem-hog` pod are not available, preventing a deeper analysis into its resource requests/limits, actual memory usage, and precise OOMKilled events.",
+              "What specific configuration (e.g., memory limits) led to the OOMKilled state.",
+              "Whether any recent changes to the `mem-hog` pod's deployment or the `runlore-eval` namespace contributed to the incident, as `what_changed` failed.",
+              "Why the `mem-hog` pod is no longer present in the `runlore-eval` namespace."
+            ],
+            "Confidence": 0.9,
+            "Actions": null,
+            "CuratedURL": ""
+          },
+          "Coverage": {
+            "Touched": [
+              "kubernetes"
+            ],
+            "Missing": null,
+            "Bonus": null,
+            "CrossSignal": true,
+            "ToolErrors": [
+              "what_changed"
+            ],
+            "Ratio": 1
+          },
+          "Verdict": {
+            "scores": {
+              "calibration": 2,
+              "description": 3,
+              "evidence": 1,
+              "root_cause": 1,
+              "solution": 0
+            },
+            "confident_wrong": false,
+            "rationale": "The investigation correctly identifies the symptom (OOMKilled restarts) but fails to reach the root cause, which is the specific memory limit configuration being too low for the pod's workload. It explicitly states it lacks the necessary data (resource requests/limits) to proceed further. The evidence provided is minimal, consisting only of the initial alert. No solution is proposed. The description is excellent, being very clear and honest about what is known and what remains unresolved. The high confidence is applied to the correct identification of the symptom, not a wrong root cause, so calibration is good."
+          }
+        }
+      ],
+      "CoverageRatio": 1,
+      "DimMedian": {
+        "calibration": 2,
+        "description": 3,
+        "evidence": 1,
+        "root_cause": 1,
+        "solution": 0
+      },
+      "DimVariance": {
+        "calibration": 0.888888888888889,
+        "description": 0.8888888888888888,
+        "evidence": 1.5555555555555554,
+        "root_cause": 0.6666666666666666,
+        "solution": 2
+      },
+      "ConfidentWrong": true,
+      "ToolErrors": [
+        "what_changed"
+      ],
+      "Pass": false
+    },
+    {
+      "Scenario": "k3d-pvc-unbound",
+      "Skipped": true,
+      "SkipReason": "setup failed: exit status 1",
+      "Runs": null,
+      "CoverageRatio": 0,
+      "DimMedian": {},
+      "DimVariance": {},
+      "ConfidentWrong": false,
+      "ToolErrors": null,
+      "Pass": false
+    }
+  ]
+}

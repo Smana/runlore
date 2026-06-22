@@ -1,0 +1,24 @@
+id: cert-issuance-expiry
+category: cert
+description: a Certificate with a broken issuerRef never becomes Ready
+invasive: true
+setup:
+  - kubectl apply -f eval/scenarios/manifests/eval-victim-app.yaml
+  - kubectl apply -f eval/scenarios/manifests/eval-victim-bad-cert.yaml
+  - sleep 20
+trigger:
+  mode: cli
+  symptom: Certificate eval-bad-cert in namespace runlore-eval is not Ready; TLS secret missing
+  namespace: runlore-eval
+ground_truth:
+  root_cause: >-
+    Certificate eval-bad-cert references ClusterIssuer does-not-exist-issuer, which does
+    not exist, so cert-manager cannot issue the cert — it stays Ready=False and the TLS
+    secret is never created. Any workload depending on that cert would fail its TLS path.
+  expected_sources: [kubernetes]
+  optional_sources: [logs]
+  expected_action: point issuerRef at a valid (Cluster)Issuer
+  must_reach_root: true
+teardown:
+  - kubectl delete -f eval/scenarios/manifests/eval-victim-bad-cert.yaml --ignore-not-found
+  - kubectl delete -f eval/scenarios/manifests/eval-victim-app.yaml --ignore-not-found
