@@ -39,6 +39,7 @@ import (
 	"github.com/Smana/runlore/internal/audit"
 	"github.com/Smana/runlore/internal/catalog"
 	"github.com/Smana/runlore/internal/config"
+	"github.com/Smana/runlore/internal/curate"
 	"github.com/Smana/runlore/internal/curator"
 	"github.com/Smana/runlore/internal/eval"
 	fluxexec "github.com/Smana/runlore/internal/executor/flux"
@@ -72,6 +73,7 @@ Usage:
   lore catalog sync [--config <path>]                 clone/pull + index the knowledge catalog
   lore eval [--config <path>] [--cases <dir>]         replay recorded cases, score RCA identification
   lore eval --live [--scenarios <dir>] [--n 3]        live-fire on the cluster: grade coverage + RCA
+  lore curate [--config <path>]                       groom the KB backlog (dedup open PRs)
   lore version                                        print version
 `
 
@@ -103,6 +105,11 @@ func main() {
 	case "catalog":
 		if err := runCatalog(os.Args[2:]); err != nil {
 			fmt.Fprintln(os.Stderr, "catalog:", err)
+			os.Exit(1)
+		}
+	case "curate":
+		if err := runCurate(os.Args[2:]); err != nil {
+			fmt.Fprintln(os.Stderr, "curate:", err)
 			os.Exit(1)
 		}
 	default:
@@ -478,7 +485,7 @@ func runEvalLive(cfg *config.Config, scnDir, recordDir, reportDir, prevReport, s
 	}
 	log := slog.New(slog.NewTextHandler(os.Stderr, nil))
 	ctx := context.Background()
-	model, tools, _ := buildModelAndTools(ctx, cfg, gitOpsFromKube(cfg, log), log)
+	model, tools, _, _ := buildModelAndTools(ctx, cfg, gitOpsFromKube(cfg, log), log)
 	judge := eval.ModelJudge{Model: buildJudgeModel(cfg, jProvider, jBaseURL, jModel, jKeyEnv)}
 
 	runner := &eval.LiveRunner{
@@ -620,7 +627,7 @@ func buildAuto(cfg *config.Config, exec action.Executor, aud audit.Auditor, log 
 
 // buildCurator returns a Curator when the GitHub App token + KB repo are
 // configured, else nil.
-func buildCurator(cfg *config.Config, token forgeToken, log *slog.Logger) *curator.Curator {
+func buildCurator(cfg *config.Config, token forgeToken, cat *catalog.Catalog, log *slog.Logger) *curator.Curator {
 	if token == nil || cfg.Forge.KBRepo == "" {
 		return nil
 	}
@@ -633,9 +640,62 @@ func buildCurator(cfg *config.Config, token forgeToken, log *slog.Logger) *curat
 	if base == "" {
 		base = "main"
 	}
+	dup := cfg.Forge.DupScore
+	if dup == 0 {
+		dup = 5.0
+	}
+	minConf := cfg.Forge.MinConfidence
+	if minConf == 0 {
+		minConf = 0.75
+	}
 	client := github.New(cfg.Forge.GitHubAPIURL, owner, repo, base, github.TokenFunc(token))
-	log.Info("curator enabled", "repo", cfg.Forge.KBRepo)
-	return &curator.Curator{Issues: client, MinConfidencePR: 0.75, Log: log}
+	log.Info("curator enabled", "repo", cfg.Forge.KBRepo, "dup_score", dup, "min_confidence", minConf)
+	cur := &curator.Curator{Forge: client, DupScore: dup, MinConfidence: minConf, Log: log}
+	if cat != nil { // assign via concrete check to avoid a typed-nil interface
+		cur.Catalog = cat
+	}
+	return cur
+}
+
+// runCurate grooms the KB backlog (Phase-2 curation agent). v1 runs the
+// backlog-dedup pass — the highest-value, fully-wireable groom (it collapses the
+// duplicate open PRs the file-time gate couldn't see across history). The
+// resolution-gated decision-ready queue, lifecycle/decay, and recurrence→gap-issue
+// passes are implemented + tested in internal/curate but need a forge updated_at
+// field + a cluster ResolutionChecker + a recurrence store to wire — follow-up.
+func runCurate(args []string) error {
+	fs := flag.NewFlagSet("curate", flag.ContinueOnError)
+	cfgPath := fs.String("config", "runlore.yaml", "path to config file")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	cfg, err := config.Load(*cfgPath)
+	if err != nil {
+		return err
+	}
+	if cfg.Forge.KBRepo == "" {
+		return fmt.Errorf("curate requires forge.kb_repo")
+	}
+	log := slog.New(slog.NewTextHandler(os.Stderr, nil))
+	tok := buildForgeTokenSource(cfg, log)
+	if tok == nil {
+		return fmt.Errorf("curate requires a configured GitHub App (forge.github_app)")
+	}
+	owner, repo, ok := strings.Cut(cfg.Forge.KBRepo, "/")
+	if !ok {
+		return fmt.Errorf("forge.kb_repo must be owner/name")
+	}
+	base := cfg.Forge.BaseBranch
+	if base == "" {
+		base = "main"
+	}
+	forge := github.New(cfg.Forge.GitHubAPIURL, owner, repo, base, github.TokenFunc(tok))
+	agent := curate.Agent{Log: log, Passes: []curate.Pass{
+		curate.Dedup{Forge: forge, Log: log},
+	}}
+	log.Info("curate: grooming KB backlog", "repo", cfg.Forge.KBRepo)
+	agent.Run(context.Background())
+	return nil
 }
 
 // buildReinvestigator returns a poller that re-runs KB issues labelled
@@ -651,7 +711,7 @@ func buildReinvestigator(ctx context.Context, cfg *config.Config, gp providers.G
 		return nil
 	}
 	client := github.New(cfg.Forge.GitHubAPIURL, owner, repo, cfg.Forge.BaseBranch, github.TokenFunc(token))
-	model, tools, recall := buildModelAndTools(ctx, cfg, gp, log)
+	model, tools, recall, _ := buildModelAndTools(ctx, cfg, gp, log)
 	run := func(ctx context.Context, req investigate.Request) (providers.Investigation, error) {
 		var res providers.Investigation
 		var got bool
@@ -730,7 +790,7 @@ func runCatalogSync(args []string) error {
 
 // buildModelAndTools assembles the model, investigation tools, and the instant-recall
 // short-circuit from config + the GitOps provider. Shared by serve and investigate.
-func buildModelAndTools(ctx context.Context, cfg *config.Config, gp providers.GitOpsProvider, log *slog.Logger) (providers.ModelProvider, []investigate.Tool, *investigate.Recall) {
+func buildModelAndTools(ctx context.Context, cfg *config.Config, gp providers.GitOpsProvider, log *slog.Logger) (providers.ModelProvider, []investigate.Tool, *investigate.Recall, *catalog.Catalog) {
 	apiKey := ""
 	if cfg.Model.APIKeyEnv != "" {
 		apiKey = os.Getenv(cfg.Model.APIKeyEnv)
@@ -747,7 +807,8 @@ func buildModelAndTools(ctx context.Context, cfg *config.Config, gp providers.Gi
 		}
 	}
 	var recall *investigate.Recall
-	if cat := buildCatalog(ctx, cfg, forgeTok, log); cat != nil {
+	cat := buildCatalog(ctx, cfg, forgeTok, log)
+	if cat != nil {
 		tools = append(tools, investigate.KBSearchTool{Catalog: cat})
 		if cfg.Catalog.InstantRecall.Enabled {
 			recall = &investigate.Recall{Catalog: cat, MinScore: cfg.Catalog.InstantRecall.MinScore}
@@ -782,7 +843,7 @@ func buildModelAndTools(ctx context.Context, cfg *config.Config, gp providers.Gi
 			log.Info("cloud provider enabled", "provider", "aws", "region", cfg.Cloud.Region)
 		}
 	}
-	return model, tools, recall
+	return model, tools, recall, cat
 }
 
 // kubeClientset builds a read-only clientset for pod-log access, or nil when no
@@ -839,7 +900,7 @@ func runInvestigate(args []string) error {
 	log := slog.New(slog.NewTextHandler(os.Stderr, nil))
 	ctx := context.Background()
 
-	model, tools, recall := buildModelAndTools(ctx, cfg, gitOpsFromKube(cfg, log), log)
+	model, tools, recall, _ := buildModelAndTools(ctx, cfg, gitOpsFromKube(cfg, log), log)
 	var result *providers.Investigation
 	li := &investigate.LoopInvestigator{
 		Model: model, Tools: tools, Recall: recall, Actions: action.New(cfg.Actions), Log: log, Verify: true,
@@ -870,11 +931,11 @@ func buildInvestigator(ctx context.Context, cfg *config.Config, gp providers.Git
 		log.Info("no model configured; using log-only investigator")
 		return investigate.LogInvestigator{Log: log}
 	}
-	model, tools, recall := buildModelAndTools(ctx, cfg, gp, log)
+	model, tools, recall, cat := buildModelAndTools(ctx, cfg, gp, log)
 	log.Info("using LLM investigator", "provider", modelProvider(cfg), "model", cfg.Model.Model, "tools", len(tools))
 	notifier := buildNotifier(cfg, log)
 	log.Info("delivery notifiers", "count", notifier.Len())
-	cur := buildCurator(cfg, buildForgeTokenSource(cfg, log), log)
+	cur := buildCurator(cfg, buildForgeTokenSource(cfg, log), cat, log)
 	actions := action.New(cfg.Actions)
 	if actions.Enabled() {
 		log.Info("action policy enabled", "mode", string(actions.Mode()))
