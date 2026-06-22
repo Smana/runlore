@@ -105,10 +105,15 @@ func New(cfg *config.Config, enq investigate.Enqueuer, ready func() bool, acts A
 	return s
 }
 
-// SetCoalescer attaches a Coalescer and OTel metrics instance after construction.
-// Call before accepting requests; nil cz disables coalescing (direct enqueue).
-func (s *Server) SetCoalescer(cz *coalesce.Coalescer, m *telemetry.Metrics) {
+// SetCoalescer attaches a Coalescer after construction. Call before accepting
+// requests; nil cz disables coalescing (direct enqueue).
+func (s *Server) SetCoalescer(cz *coalesce.Coalescer) {
 	s.coalescer = cz
+}
+
+// SetMetrics attaches the OTel metrics instance independently of coalescing, so
+// ingress counters (alerts_received) emit even when coalescing is disabled.
+func (s *Server) SetMetrics(m *telemetry.Metrics) {
 	s.otelMetrics = m
 }
 

@@ -284,8 +284,9 @@ func runServe(args []string) error {
 		acts.Pauser = auto // avoid a typed-nil interface when auto is disabled
 	}
 	srv := server.New(cfg, queue, leader.Load, acts, metricsHandler, log)
+	srv.SetMetrics(metrics) // ingress counters emit regardless of coalescing
 	if cz != nil {
-		srv.SetCoalescer(cz, metrics)
+		srv.SetCoalescer(cz)
 		go cz.Run(ctx, cfg.Investigation.Coalesce.Debounce.Std()/2)
 	}
 	httpSrv := &http.Server{Addr: *addr, Handler: srv.Handler()}
