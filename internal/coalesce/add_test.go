@@ -52,3 +52,20 @@ func TestAddCriticalFastPath(t *testing.T) {
 		t.Fatalf("critical should flush immediately, batches=%d", len(s.batches))
 	}
 }
+
+// A storm of critical alerts for one key flushes the first immediately (no debounce
+// wait) and suppresses the rest within the cooldown — one investigation, not N.
+func TestAddCriticalStormSuppressedAfterFirst(t *testing.T) {
+	now := time.Unix(0, 0)
+	s := &sink{}
+	c := newAt(Config{Debounce: time.Hour, MaxBatch: 100, Cooldown: 10 * time.Minute}, s, &now)
+	for i := 0; i < 5; i++ {
+		c.Add(inc("X", "ns", "critical", "GK"))
+	}
+	if len(s.batches) != 1 || len(s.batches[0]) != 1 {
+		t.Fatalf("critical storm should flush once (the first), got batches=%v", s.batches)
+	}
+	if c.suppressed["GK"] != 4 {
+		t.Fatalf("expected 4 suppressed after the first flush, got %d", c.suppressed["GK"])
+	}
+}
