@@ -10,6 +10,7 @@ import (
 
 	"github.com/Smana/runlore/internal/action"
 	"github.com/Smana/runlore/internal/providers"
+	"github.com/Smana/runlore/internal/telemetry"
 )
 
 const systemPrompt = `You are an SRE incident investigator. The cause is unknown — investigate by
@@ -86,9 +87,13 @@ type LoopInvestigator struct {
 	Recall     *Recall                       // optional: short-circuit on a high-confidence catalog hit
 	Verify     bool                          // run an adversarial review of root causes before delivery
 
-	// Cost controls (Part 3 — 0 means disabled/unlimited):
+	// Cost controls (0 means disabled/unlimited):
 	MaxToolOutputBytes        int // truncate tool results larger than this before adding to history
 	MaxTokensPerInvestigation int // inject a budget-nudge message when the estimated token count exceeds this
+
+	// Observability — nil-safe; no-op when telemetry is disabled.
+	// TODO(Parts 4/5): pass the same instance to Queue + Coalescer.
+	Metrics *telemetry.Metrics
 }
 
 // system returns the system prompt, asking for action proposals when the policy is enabled.
@@ -191,7 +196,11 @@ func (li *LoopInvestigator) Investigate(ctx context.Context, req Request) error 
 				return nil
 			}
 			used[tc.Name]++
-			messages = append(messages, providers.Message{Role: "tool", ToolCallID: tc.ID, Content: li.runTool(ctx, byName, tc)})
+			out, trimmed := truncateOutput(li.runTool(ctx, byName, tc), li.MaxToolOutputBytes)
+			if trimmed > 0 && li.Metrics != nil {
+				li.Metrics.ToolOutputTruncatedBytes.Add(ctx, int64(trimmed))
+			}
+			messages = append(messages, providers.Message{Role: "tool", ToolCallID: tc.ID, Content: out})
 		}
 	}
 	li.Log.Warn("investigation hit max steps", "title", req.Title, "max", maxSteps, "tools_used", used)
