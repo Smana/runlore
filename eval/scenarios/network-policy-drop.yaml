@@ -1,0 +1,24 @@
+id: network-policy-drop
+category: network
+description: a default-deny CiliumNetworkPolicy silently drops the victim's egress
+invasive: true
+setup:
+  - kubectl apply -f eval/scenarios/manifests/eval-victim-app.yaml
+  - kubectl apply -f eval/scenarios/manifests/eval-victim-netpol-deny.yaml
+  - sleep 15
+trigger:
+  mode: cli
+  symptom: eval-victim in namespace runlore-eval cannot reach any dependency (connection timeouts)
+  namespace: runlore-eval
+ground_truth:
+  root_cause: >-
+    CiliumNetworkPolicy eval-victim-deny-egress applies an empty egress allowlist
+    (default-deny) to app=eval-victim, so all its outbound connections are dropped by
+    policy — which presents as application connection timeouts, not an app bug.
+  expected_sources: [network]
+  optional_sources: [kubernetes, logs]
+  expected_action: add an explicit egress allow rule (or remove the deny policy)
+  must_reach_root: true
+teardown:
+  - kubectl delete -f eval/scenarios/manifests/eval-victim-netpol-deny.yaml --ignore-not-found
+  - kubectl delete -f eval/scenarios/manifests/eval-victim-app.yaml --ignore-not-found
