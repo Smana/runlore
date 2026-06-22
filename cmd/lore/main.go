@@ -209,17 +209,17 @@ func runServe(args []string) error {
 
 	inv := buildInvestigator(ctx, cfg, gitops, approvals, auto, metrics, log)
 	queue := investigate.NewQueue(inv, log)
+	var rlStarts, rlThrottled *ratelimit.Window
 	if rl := cfg.Investigation.RateLimit; rl.MaxPerWindow > 0 {
-		window := rl.Window.Std()
-		queue.ConfigureRateLimit(
-			ratelimit.New(rl.MaxPerWindow, window),
-			rl.MaxRequeues,
-			metrics,
-			ratelimit.New(1, window), // once-per-window throttle guard for onThrottle
-		)
+		w := rl.Window.Std()
+		rlStarts = ratelimit.New(rl.MaxPerWindow, w)
+		rlThrottled = ratelimit.New(1, w) // once-per-window throttle-log guard
 		log.Info("investigation rate limit configured",
-			"max_per_window", rl.MaxPerWindow, "window", window, "max_requeues", rl.MaxRequeues)
+			"max_per_window", rl.MaxPerWindow, "window", w, "max_requeues", rl.MaxRequeues)
 	}
+	// Always wire metrics into the Queue so InvestigationsStarted emits even when
+	// rate-limiting is unconfigured (max_per_window == 0).
+	queue.ConfigureRateLimit(rlStarts, cfg.Investigation.RateLimit.MaxRequeues, metrics, rlThrottled)
 	reinv := buildReinvestigator(ctx, cfg, gitops, metrics, log)
 
 	// startWork runs the leader-only loops (investigation queue + failure watch +
