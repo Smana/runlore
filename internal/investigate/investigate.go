@@ -123,8 +123,7 @@ type Queue struct {
 	starts      *ratelimit.Window  // sliding-window start budget; nil = unlimited
 	maxRequeues int                // drop a key after this many backoff requeues
 	metrics     *telemetry.Metrics // nil-safe; counters for started/throttled/dropped
-	onThrottle  func()             // optional once-per-window log/notify hook; may be nil
-	throttled   *ratelimit.Window  // 1-per-window guard so onThrottle fires at most once
+	throttled   *ratelimit.Window  // 1-per-window guard: log.Warn at most once per window
 }
 
 // NewQueue builds an investigation queue. The workqueue itself is created per Run.
@@ -194,6 +193,9 @@ func (q *Queue) process(ctx context.Context, wq workqueue.TypedRateLimitingInter
 			}
 			q.log.Warn("investigation budget exhausted; dropping (Alertmanager will re-fire)", "title", p.req.Title)
 			wq.Forget(k)
+			q.mu.Lock()
+			delete(q.reqs, k)
+			q.mu.Unlock()
 			q.maybeNotifyThrottle()
 			return
 		}
@@ -222,10 +224,10 @@ func (q *Queue) process(ctx context.Context, wq workqueue.TypedRateLimitingInter
 	q.mu.Unlock()
 }
 
-// maybeNotifyThrottle fires onThrottle at most once per throttled window.
+// maybeNotifyThrottle emits a warning log at most once per throttle window.
 func (q *Queue) maybeNotifyThrottle() {
-	if q.onThrottle != nil && (q.throttled == nil || q.throttled.Allow()) {
-		q.onThrottle()
+	if q.throttled != nil && q.throttled.Allow() {
+		q.log.Warn("investigation rate limit engaged; throttling new investigations this window")
 	}
 }
 
