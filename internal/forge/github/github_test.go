@@ -102,3 +102,21 @@ func TestOpenPR(t *testing.T) {
 		t.Fatalf("expected the 4-call PR sequence, got %v", paths)
 	}
 }
+
+func TestClose(t *testing.T) {
+	var gotMethod, gotPath string
+	var gotBody map[string]any
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotMethod, gotPath = r.Method, r.URL.Path
+		_ = json.NewDecoder(r.Body).Decode(&gotBody)
+		_, _ = w.Write([]byte(`{}`))
+	}))
+	defer srv.Close()
+	c := New(srv.URL, "o", "r", "main", staticToken("tok"))
+	if err := c.Close(context.Background(), 42); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	if gotMethod != http.MethodPatch || gotPath != "/repos/o/r/issues/42" || gotBody["state"] != "closed" {
+		t.Fatalf("unexpected: %s %s body=%v", gotMethod, gotPath, gotBody)
+	}
+}
