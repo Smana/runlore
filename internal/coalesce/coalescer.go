@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/Smana/runlore/internal/config"
+	"github.com/Smana/runlore/internal/telemetry"
 )
 
 // Config mirrors config.Coalesce with std durations.
@@ -31,10 +32,10 @@ type batch struct {
 
 // Coalescer buffers correlated incidents and flushes one investigation per key.
 type Coalescer struct {
-	cfg    Config
-	now    func() time.Time
-	out    func([]config.Incident) // flush sink (build a Request + enqueue)
-	notify func(key string, n int) // optional cooldown-suppression notice; may be nil
+	cfg     Config
+	now     func() time.Time
+	out     func([]config.Incident) // flush sink (build a Request + enqueue)
+	Metrics *telemetry.Metrics      // optional; nil-safe OTel counters
 
 	mu         sync.Mutex
 	pending    map[string]*batch
@@ -94,6 +95,7 @@ func (c *Coalescer) Add(inc config.Incident) {
 	now := c.now()
 	switch {
 	case strings.EqualFold(inc.Severity, "critical"):
+		// Critical alerts are never throttled/suppressed — flush immediately regardless of cooldown.
 		flush = []config.Incident{inc}
 		if b, ok := c.pending[k]; ok {
 			flush = append(b.incidents, inc)
@@ -102,10 +104,9 @@ func (c *Coalescer) Add(inc config.Incident) {
 		c.recent[k] = now
 	case c.withinCooldown(k, now):
 		c.suppressed[k]++
-		n := c.suppressed[k]
 		c.mu.Unlock()
-		if c.notify != nil {
-			c.notify(k, n)
+		if m := c.Metrics; m != nil {
+			m.AlertsSuppressed.Add(context.Background(), 1)
 		}
 		return
 	default:
@@ -157,7 +158,11 @@ func (c *Coalescer) sweep() {
 }
 
 // Run sweeps on a ticker until ctx is cancelled. tick should be ~Debounce/2.
+// A zero or negative tick is clamped to 1s to avoid a NewTicker panic.
 func (c *Coalescer) Run(ctx context.Context, tick time.Duration) {
+	if tick <= 0 {
+		tick = time.Second
+	}
 	t := time.NewTicker(tick)
 	defer t.Stop()
 	for {
