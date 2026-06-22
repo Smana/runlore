@@ -1,0 +1,18 @@
+# A Flux Kustomization pointed at a non-existent path of a REAL, healthy
+# ExternalArtifact source (this cluster uses ArtifactGenerator → ExternalArtifact,
+# not GitRepository). The source builds fine; the path doesn't exist → Ready=False
+# (BuildFailed) — a clean "what changed / broken config" failure.
+apiVersion: kustomize.toolkit.fluxcd.io/v1
+kind: Kustomization
+metadata:
+  name: eval-victim-broken
+  namespace: flux-system
+  labels: { runlore.io/eval: "true" }
+spec:
+  interval: 1m
+  path: ./this/path/does/not/exist
+  prune: true
+  sourceRef:
+    kind: ExternalArtifact
+    name: infra-artifact
+  timeout: 30s
