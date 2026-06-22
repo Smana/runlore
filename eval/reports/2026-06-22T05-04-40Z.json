@@ -1,0 +1,182 @@
+{
+  "at": "2026-06-22T05:04:40Z",
+  "ran": 1,
+  "passed": 1,
+  "skipped": 0,
+  "results": [
+    {
+      "Scenario": "k3d-pvc-unbound",
+      "Skipped": false,
+      "SkipReason": "",
+      "Runs": [
+        {
+          "Investigation": {
+            "Title": "k3d-pvc-unbound",
+            "RootCauses": [
+              {
+                "Summary": "The pod \"eval-pvc-consumer\" is stuck in a Pending state because its associated PersistentVolumeClaim \"eval-bad-pvc\" failed to provision. The PVC failed because it references a non-existent storage class named \"this-storageclass-does-not-exist\".",
+                "Confidence": 0.9,
+                "ChangeRef": "",
+                "Evidence": [
+                  "Pod \"eval-pvc-consumer\" is Pending (from pod_status).",
+                  "PersistentVolumeClaim/eval-bad-pvc ProvisioningFailed: storageclass.storage.k8s.io \"this-storageclass-does-not-exist\" not found (from kube_events).",
+                  "Pod/eval-pvc-consumer FailedScheduling: pod has unbound immediate PersistentVolumeClaims (from kube_events)."
+                ],
+                "SuggestedAction": "Create the missing storage class \"this-storageclass-does-not-exist\" or modify the PersistentVolumeClaim \"eval-bad-pvc\" to use an existing storage class.",
+                "Reversible": false
+              }
+            ],
+            "Changes": null,
+            "Unresolved": [
+              "Could not determine if the PersistentVolumeClaim or pod are managed by Flux due to an error when calling what_changed for the namespace."
+            ],
+            "Confidence": 0.9,
+            "Actions": null,
+            "CuratedURL": ""
+          },
+          "Coverage": {
+            "Touched": [
+              "kubernetes"
+            ],
+            "Missing": null,
+            "Bonus": null,
+            "CrossSignal": true,
+            "ToolErrors": [
+              "what_changed"
+            ],
+            "Ratio": 1
+          },
+          "Verdict": {
+            "scores": {
+              "calibration": 2,
+              "description": 3,
+              "evidence": 3,
+              "root_cause": 3,
+              "solution": 3
+            },
+            "confident_wrong": false,
+            "rationale": "The investigation correctly and confidently identified the true root cause: the PVC references a non-existent StorageClass. The evidence cited from Kubernetes events is direct and conclusive. The suggested solutions are both correct and actionable, with one matching the expected action. The description is clear and complete."
+          }
+        },
+        {
+          "Investigation": {
+            "Title": "k3d-pvc-unbound",
+            "RootCauses": [
+              {
+                "Summary": "The PersistentVolumeClaim (PVC) \"eval-bad-pvc\" in namespace \"runlore-eval\" is stuck in a provisioning failed state because it references a non-existent StorageClass named \"this-storageclass-does-not-exist\". This prevents the PVC from being bound, which in turn causes the pod \"eval-pvc-consumer\" to remain in a Pending state due to unbound immediate PersistentVolumeClaims.",
+                "Confidence": 0.9,
+                "ChangeRef": "",
+                "Evidence": [
+                  "Pod \"eval-pvc-consumer\" in namespace \"runlore-eval\" is in a Pending state.",
+                  "PersistentVolumeClaim/eval-bad-pvc shows \"ProvisioningFailed: storageclass.storage.k8s.io \\\"this-storageclass-does-not-exist\\\" not found\" event.",
+                  "Pod/eval-pvc-consumer shows \"FailedScheduling: pod has unbound immediate PersistentVolumeClaims\" event."
+                ],
+                "SuggestedAction": "Modify the PersistentVolumeClaim \"eval-bad-pvc\" to reference an existing StorageClass or create the \"this-storageclass-does-not-exist\" StorageClass if it is intended to exist.",
+                "Reversible": false
+              }
+            ],
+            "Changes": null,
+            "Unresolved": [
+              "Could not determine recent GitOps changes in the 'runlore-eval' namespace due to 'error: list kustomizations: the server could not find the requested resource'."
+            ],
+            "Confidence": 0.9,
+            "Actions": null,
+            "CuratedURL": ""
+          },
+          "Coverage": {
+            "Touched": [
+              "kubernetes"
+            ],
+            "Missing": null,
+            "Bonus": null,
+            "CrossSignal": true,
+            "ToolErrors": [
+              "what_changed"
+            ],
+            "Ratio": 1
+          },
+          "Verdict": {
+            "scores": {
+              "calibration": 2,
+              "description": 3,
+              "evidence": 3,
+              "root_cause": 3,
+              "solution": 3
+            },
+            "confident_wrong": false,
+            "rationale": "The investigation correctly identifies the true root cause: the pod is pending because its PVC references a non-existent StorageClass. It provides direct, causal evidence from Kubernetes events for both the pod's state and the PVC's failure. The proposed solutions are both correct and actionable. The description is clear, complete, and honestly notes areas it could not investigate. The high confidence of 0.9 is well-calibrated given the strong evidence and correct diagnosis."
+          }
+        },
+        {
+          "Investigation": {
+            "Title": "k3d-pvc-unbound",
+            "RootCauses": [
+              {
+                "Summary": "The pod eval-pvc-consumer is stuck in Pending state because its required PersistentVolumeClaim eval-bad-pvc cannot be bound. The PVC is failing to provision due to a misconfiguration, specifically referencing a non-existent StorageClass named \"this-storageclass-does-not-exist\".",
+                "Confidence": 0.9,
+                "ChangeRef": "",
+                "Evidence": [
+                  "Pod eval-pvc-consumer is Pending (pod_status)",
+                  "KubeEvents show FailedScheduling for eval-pvc-consumer due to unbound PVCs (kube_events)",
+                  "KubeEvents show PersistentVolumeClaim/eval-bad-pvc ProvisioningFailed because \"storageclass.storage.k8s.io \\\"this-storageclass-does-exist\\\" not found\" (kube_events)"
+                ],
+                "SuggestedAction": "Identify where the PersistentVolumeClaim eval-bad-pvc is defined and correct the storageClassName to a valid, existing StorageClass or remove the storageClassName field if dynamic provisioning is not desired.",
+                "Reversible": false
+              }
+            ],
+            "Changes": null,
+            "Unresolved": [
+              "Unable to determine if a recent change introduced the invalid StorageClass due to an error listing kustomizations for the namespace."
+            ],
+            "Confidence": 0.9,
+            "Actions": null,
+            "CuratedURL": ""
+          },
+          "Coverage": {
+            "Touched": [
+              "kubernetes"
+            ],
+            "Missing": null,
+            "Bonus": null,
+            "CrossSignal": true,
+            "ToolErrors": [
+              "what_changed"
+            ],
+            "Ratio": 1
+          },
+          "Verdict": {
+            "scores": {
+              "calibration": 2,
+              "description": 3,
+              "evidence": 3,
+              "root_cause": 3,
+              "solution": 3
+            },
+            "confident_wrong": false,
+            "rationale": "The investigation correctly and confidently identified the true root cause: the PVC specified a non-existent StorageClass. The evidence provided, particularly the Kubernetes events for the PVC and Pod, was precise and directly supported this conclusion. The suggested solution to correct the `storageClassName` is accurate and actionable. The description is clear, complete, and well-structured."
+          }
+        }
+      ],
+      "CoverageRatio": 1,
+      "DimMedian": {
+        "calibration": 2,
+        "description": 3,
+        "evidence": 3,
+        "root_cause": 3,
+        "solution": 3
+      },
+      "DimVariance": {
+        "calibration": 0,
+        "description": 0,
+        "evidence": 0,
+        "root_cause": 0,
+        "solution": 0
+      },
+      "ConfidentWrong": false,
+      "ToolErrors": [
+        "what_changed"
+      ],
+      "Pass": true
+    }
+  ]
+}
