@@ -13,7 +13,8 @@ import (
 
 // amPayload is the subset of the Alertmanager webhook payload we consume.
 type amPayload struct {
-	Alerts []amAlert `json:"alerts"`
+	GroupKey string    `json:"groupKey"`
+	Alerts   []amAlert `json:"alerts"`
 }
 
 type amAlert struct {
@@ -45,6 +46,7 @@ func ParseAlertmanager(r io.Reader) ([]config.Incident, error) {
 			Labels:      a.Labels,
 			StartsAt:    startsAt,
 			Fingerprint: a.Fingerprint,
+			GroupKey:    p.GroupKey,
 		})
 	}
 	return out, nil
