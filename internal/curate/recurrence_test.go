@@ -2,6 +2,7 @@ package curate
 
 import (
 	"context"
+	"errors"
 	"io"
 	"log/slog"
 	"testing"
@@ -9,10 +10,27 @@ import (
 	"github.com/Smana/runlore/internal/providers"
 )
 
-type memStore struct{ counts map[string]int }
+type memStore struct {
+	counts  map[string]int
+	saveErr error // when set, Save fails (and does not persist) — simulates a flaky store
+}
 
-func (m *memStore) Load(context.Context) (map[string]int, error)   { return m.counts, nil }
-func (m *memStore) Save(_ context.Context, c map[string]int) error { m.counts = c; return nil }
+// Load returns a COPY (like a real forge-backed store), so an increment on the
+// loaded map does not mutate the persisted state unless Save succeeds.
+func (m *memStore) Load(context.Context) (map[string]int, error) {
+	cp := make(map[string]int, len(m.counts))
+	for k, v := range m.counts {
+		cp[k] = v
+	}
+	return cp, nil
+}
+func (m *memStore) Save(_ context.Context, c map[string]int) error {
+	if m.saveErr != nil {
+		return m.saveErr
+	}
+	m.counts = c
+	return nil
+}
 
 // gapForge records the issue titles it was asked to open.
 type gapForge struct {
@@ -37,6 +55,30 @@ func TestRecurrenceOpensGapIssueOnThreshold(t *testing.T) {
 	}
 	if store.counts["flux gitrepository not found"] != 3 {
 		t.Fatalf("count not persisted: %v", store.counts)
+	}
+}
+
+func TestRecurrenceSaveFailureDoesNotDoubleOpen(t *testing.T) {
+	// Save fails the first time. Because the count is persisted BEFORE the issue is
+	// opened, a Save failure means NO issue is opened that run (and the count isn't
+	// persisted) — so the next run retries and opens exactly once. Never twice.
+	store := &memStore{counts: map[string]int{"p": 2}, saveErr: errors.New("store unavailable")}
+	gf := &gapForge{recordingForge: &recordingForge{}}
+	r := Recurrence{Forge: gf, Store: store, Threshold: 3, Log: slog.New(slog.NewTextHandler(io.Discard, nil))}
+
+	if err := r.Observe(context.Background(), "p"); err == nil {
+		t.Fatal("want a save error on the first Observe")
+	}
+	if len(gf.openedTitles) != 0 {
+		t.Fatalf("must NOT open an issue when Save fails, got %d", len(gf.openedTitles))
+	}
+	// Retry with a working store → opens exactly once.
+	store.saveErr = nil
+	if err := r.Observe(context.Background(), "p"); err != nil {
+		t.Fatal(err)
+	}
+	if len(gf.openedTitles) != 1 {
+		t.Fatalf("want exactly 1 issue after the retry, got %d", len(gf.openedTitles))
 	}
 }
 

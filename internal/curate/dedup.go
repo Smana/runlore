@@ -37,6 +37,11 @@ func (d Dedup) Run(ctx context.Context) error {
 			if _, taken := canonicalOf[prs[j].Number]; taken {
 				continue
 			}
+			// Never auto-close a human-touched artifact (solved/ready-to-merge/
+			// accepted/investigating/knowledge-gap) as a duplicate.
+			if isProtected(prs[j].Labels) {
+				continue
+			}
 			if jaccard(titleTokens(prs[i].Title), titleTokens(prs[j].Title)) >= thr {
 				canonicalOf[prs[j].Number] = prs[i].Number
 			}

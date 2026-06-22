@@ -45,7 +45,7 @@ investigation finding
    │     → coalesce: comment "seen again @T, investigation <link>" + bump; file NOTHING new
    │
    ├─ NOVEL + confident + passes the MERGE BAR
-   │     → draft PR (OKF entry), labels: runlore, solved, ready-to-merge
+   │     → draft PR (OKF entry), labels: runlore, triggered  (curate agent later advances → solved → ready-to-merge)
    │     → YOU approve → merged (catalog grows, log.md appended)
    │     → YOU reject  → closed: wont-fix / rejected
    │
@@ -99,7 +99,7 @@ Enhance `internal/curator/curator.go` (today: `confidence ≥ 0.75 → OpenPR, e
 
 1. **Novelty / dedup check** — fingerprint the finding; query (a) bleve `kb_search` over the catalog and (b) a **new** forge "list open KB PRs" call. Above the match threshold → **coalesce** (comment + bump the canonical artifact) and stop; file nothing new.
 2. **Quality gate** — only findings meeting the **merge bar** (§3) get drafted as a PR. Everything below the bar → **chat alert only, no repo artifact**.
-3. **Merge-ready PR body** — the drafted PR leads with a **decision card**: one-line *why-keep*, confidence, root cause, causing change → fixing change, evidence trail, then the OKF entry diff. Labels `runlore, solved, ready-to-merge`.
+3. **Merge-ready PR body** — the drafted PR leads with a **decision card**: one-line *why-keep*, confidence, root cause, causing change → fixing change, evidence trail, then the OKF entry diff. File-time labels are `runlore, triggered`; the curate agent (Phase 2) advances `triggered → solved → ready-to-merge` once the merge condition (`resolved` or `accepted`, §3) holds — Phase 1 never applies `solved`/`ready-to-merge`.
 
 **What this needs (implementation surface):**
 - a `fingerprint(finding)` + novelty scorer (reuses the catalog index; adds a small threshold);
