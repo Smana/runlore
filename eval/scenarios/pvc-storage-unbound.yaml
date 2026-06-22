@@ -1,0 +1,23 @@
+id: pvc-storage-unbound
+category: storage
+description: a PVC with a non-existent StorageClass never binds; its consumer Pod stays Pending
+invasive: true
+setup:
+  - kubectl apply -f eval/scenarios/manifests/eval-victim-bad-pvc.yaml
+  - sleep 15
+trigger:
+  mode: cli
+  symptom: pod eval-pvc-consumer stuck Pending in namespace runlore-eval (volume not bound)
+  namespace: runlore-eval
+ground_truth:
+  root_cause: >-
+    PVC eval-bad-pvc requests storageClassName this-storageclass-does-not-exist, which
+    has no provisioner, so the claim never binds and the consumer Pod stays Pending
+    (FailedScheduling: pod has unbound immediate PersistentVolumeClaims).
+  expected_sources: [kubernetes]
+  optional_sources: []
+  expected_action: use a valid StorageClass (e.g. the cluster's EBS gp3 class)
+  must_reach_root: true
+teardown:
+  - kubectl delete -f eval/scenarios/manifests/eval-victim-bad-pvc.yaml --ignore-not-found
+  - kubectl get ns runlore-eval -o name >/dev/null 2>&1 && kubectl delete ns runlore-eval --ignore-not-found || true
