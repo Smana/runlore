@@ -1,0 +1,23 @@
+id: k3d-pvc-unbound
+category: storage
+description: a PVC with a non-existent StorageClass never binds; consumer Pod stays Pending (runs on k3d)
+invasive: true
+setup:
+  - kubectl apply -f eval/scenarios/manifests/eval-victim-bad-pvc.yaml
+  - sleep 12
+trigger:
+  mode: cli
+  symptom: pod eval-pvc-consumer stuck Pending in namespace runlore-eval (volume not bound)
+  namespace: runlore-eval
+ground_truth:
+  root_cause: >-
+    PVC eval-bad-pvc requests storageClassName this-storageclass-does-not-exist, which
+    has no provisioner, so the claim never binds and the consumer Pod stays Pending
+    (FailedScheduling: pod has unbound immediate PersistentVolumeClaims).
+  expected_sources: [kubernetes]
+  optional_sources: []
+  expected_action: use a valid StorageClass (on k3d, the default local-path)
+  must_reach_root: true
+teardown:
+  - kubectl delete -f eval/scenarios/manifests/eval-victim-bad-pvc.yaml --ignore-not-found
+  - kubectl delete ns runlore-eval --ignore-not-found
