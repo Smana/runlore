@@ -1,0 +1,83 @@
+{
+  "at": "2026-06-22T04:56:40Z",
+  "ran": 1,
+  "passed": 1,
+  "skipped": 0,
+  "results": [
+    {
+      "Scenario": "k3d-bad-image-tag",
+      "Skipped": false,
+      "SkipReason": "",
+      "Runs": [
+        {
+          "Investigation": {
+            "Title": "k3d-bad-image-tag",
+            "RootCauses": [
+              {
+                "Summary": "The pod 'eval-victim' is failing to start due to an 'ImagePullBackOff' error, specifically because the image 'registry.k8s.sio/pause:v9.9.9-does-not-exist' could not be found.",
+                "Confidence": 1,
+                "ChangeRef": "",
+                "Evidence": [
+                  "Pod 'eval-victim-756b55c647-74clr' is in 'Pending' state with 'ImagePullBackOff' status.",
+                  "kube_events for 'eval-victim-756b55c647-74clr' shows 'Failed to pull image' with 'registry.k8s.io/pause:v9.9.9-does-not-exist: not found' message."
+                ],
+                "SuggestedAction": "Correct the image tag for the 'eval-victim' workload to a valid and existing image.",
+                "Reversible": false
+              }
+            ],
+            "Changes": null,
+            "Unresolved": [
+              "Unable to determine if a recent GitOps change introduced the incorrect image tag due to 'error: list kustomizations: the server could not find the requested resource' when calling what_changed."
+            ],
+            "Confidence": 1,
+            "Actions": null,
+            "CuratedURL": ""
+          },
+          "Coverage": {
+            "Touched": [
+              "kubernetes"
+            ],
+            "Missing": null,
+            "Bonus": null,
+            "CrossSignal": true,
+            "ToolErrors": [
+              "what_changed"
+            ],
+            "Ratio": 1
+          },
+          "Verdict": {
+            "scores": {
+              "calibration": 2,
+              "description": 3,
+              "evidence": 3,
+              "root_cause": 2,
+              "solution": 3
+            },
+            "confident_wrong": false,
+            "rationale": "The investigation correctly identifies the immediate cause of the failure: an incorrect and non-existent image tag ('v9.9.9-does-not-exist'). The evidence cited (pod status 'ImagePullBackOff' and kube events) is direct and accurate. The suggested solution to correct the image tag is also spot on. The description is clear and honestly notes the inability to determine if a recent change was the cause due to a tool error. The root cause score is a 2 instead of a 3 because, while it correctly identifies the invalid configuration, it doesn't explicitly state that a *change* introduced this configuration, which is the ultimate root cause as per the ground truth. However, given the tool failure, this is an excellent analysis of the available data."
+          }
+        }
+      ],
+      "CoverageRatio": 1,
+      "DimMedian": {
+        "calibration": 2,
+        "description": 3,
+        "evidence": 3,
+        "root_cause": 2,
+        "solution": 3
+      },
+      "DimVariance": {
+        "calibration": 0,
+        "description": 0,
+        "evidence": 0,
+        "root_cause": 0,
+        "solution": 0
+      },
+      "ConfidentWrong": false,
+      "ToolErrors": [
+        "what_changed"
+      ],
+      "Pass": true
+    }
+  ]
+}
