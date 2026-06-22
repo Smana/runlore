@@ -1,5 +1,6 @@
-// Package github implements providers.IssueProvider over the GitHub REST API,
-// authenticated with short-lived GitHub App installation tokens.
+// Package github is RunLore's GitHub forge client (curation + re-investigation)
+// over the GitHub REST API, authenticated with short-lived GitHub App installation
+// tokens. It satisfies providers.CurationForge / providers.ReinvestForge / curate.Forge.
 package github
 
 import (
@@ -47,10 +48,7 @@ func New(baseURL, owner, repo, baseBranch string, token TokenFunc) *Client {
 	}
 }
 
-var (
-	_ providers.IssueProvider = (*Client)(nil)
-	_ providers.ReinvestForge = (*Client)(nil)
-)
+var _ providers.ReinvestForge = (*Client)(nil)
 
 // do performs an authenticated JSON request and decodes the response into out (if non-nil).
 func (c *Client) do(ctx context.Context, method, path string, body, out any) error {
@@ -139,7 +137,7 @@ func (c *Client) OpenPR(ctx context.Context, e providers.KBEntry) (providers.Ref
 		Number  int    `json:"number"`
 	}
 	if err := c.do(ctx, http.MethodPost, fmt.Sprintf("/repos/%s/%s/pulls", c.owner, c.repo),
-		map[string]any{"title": "KB: " + e.Title, "head": branch, "base": c.baseBranch, "body": "Drafted by RunLore."}, &out); err != nil {
+		map[string]any{"title": "KB: " + e.Title, "head": branch, "base": c.baseBranch, "body": prBody(e)}, &out); err != nil {
 		return providers.Ref{}, err
 	}
 	// 5. label the PR (the create-PR API doesn't accept labels; set them via the
@@ -157,32 +155,75 @@ func (c *Client) addLabels(ctx context.Context, number int, labels []string) err
 		map[string]any{"labels": labels}, nil)
 }
 
-// ListIssuesByLabel returns open issues carrying the given label. Pull requests
+// rawIssue is one entry from the issues endpoint (which returns both issues and
+// PRs — a non-nil PullRequest marks a PR).
+type rawIssue struct {
+	Number int    `json:"number"`
+	Title  string `json:"title"`
+	Body   string `json:"body"`
+	Labels []struct {
+		Name string `json:"name"`
+	} `json:"labels"`
+	PullRequest *struct{} `json:"pull_request"`
+}
+
+func (ri rawIssue) curated() providers.CuratedIssue {
+	labels := make([]string, 0, len(ri.Labels))
+	for _, l := range ri.Labels {
+		labels = append(labels, l.Name)
+	}
+	return providers.CuratedIssue{Number: ri.Number, Title: ri.Title, Body: ri.Body, Labels: labels}
+}
+
+// listIssues fetches ALL pages of open issues+PRs carrying the label. GitHub caps
+// a page at 100 and paginates the rest; without this loop the curate passes would
+// be blind to everything past the first 100 (silent truncation on a sizable KB).
+func (c *Client) listIssues(ctx context.Context, label string) ([]rawIssue, error) {
+	var all []rawIssue
+	for page := 1; ; page++ {
+		var raw []rawIssue
+		path := fmt.Sprintf("/repos/%s/%s/issues?state=open&labels=%s&per_page=100&page=%d", c.owner, c.repo, url.QueryEscape(label), page)
+		if err := c.do(ctx, http.MethodGet, path, nil, &raw); err != nil {
+			return nil, err
+		}
+		all = append(all, raw...)
+		if len(raw) < 100 { // last page (a full page is exactly 100)
+			break
+		}
+	}
+	return all, nil
+}
+
+// ListIssuesByLabel returns all open issues carrying the given label. Pull requests
 // (which the issues API also returns) are filtered out.
 func (c *Client) ListIssuesByLabel(ctx context.Context, label string) ([]providers.CuratedIssue, error) {
-	var raw []struct {
-		Number int    `json:"number"`
-		Title  string `json:"title"`
-		Body   string `json:"body"`
-		Labels []struct {
-			Name string `json:"name"`
-		} `json:"labels"`
-		PullRequest *struct{} `json:"pull_request"`
-	}
-	path := fmt.Sprintf("/repos/%s/%s/issues?state=open&labels=%s", c.owner, c.repo, url.QueryEscape(label))
-	if err := c.do(ctx, http.MethodGet, path, nil, &raw); err != nil {
+	raw, err := c.listIssues(ctx, label)
+	if err != nil {
 		return nil, err
 	}
 	var out []providers.CuratedIssue
-	for _, i := range raw {
-		if i.PullRequest != nil {
+	for _, ri := range raw {
+		if ri.PullRequest != nil {
 			continue // skip PRs
 		}
-		labels := make([]string, 0, len(i.Labels))
-		for _, l := range i.Labels {
-			labels = append(labels, l.Name)
+		out = append(out, ri.curated())
+	}
+	return out, nil
+}
+
+// ListPRsByLabel returns all open PRs carrying the given label — the inverse of
+// ListIssuesByLabel (keeps only entries with a pull_request object).
+func (c *Client) ListPRsByLabel(ctx context.Context, label string) ([]providers.CuratedIssue, error) {
+	raw, err := c.listIssues(ctx, label)
+	if err != nil {
+		return nil, err
+	}
+	var out []providers.CuratedIssue
+	for _, ri := range raw {
+		if ri.PullRequest == nil {
+			continue // a plain issue, not a PR
 		}
-		out = append(out, providers.CuratedIssue{Number: i.Number, Title: i.Title, Body: i.Body, Labels: labels})
+		out = append(out, ri.curated())
 	}
 	return out, nil
 }
@@ -204,6 +245,12 @@ func (c *Client) ReplaceLabel(ctx context.Context, number int, remove, add strin
 		return c.addLabels(ctx, number, []string{add})
 	}
 	return nil
+}
+
+// Close closes an issue or PR (they share the issues endpoint for state).
+func (c *Client) Close(ctx context.Context, number int) error {
+	return c.do(ctx, http.MethodPatch, fmt.Sprintf("/repos/%s/%s/issues/%d", c.owner, c.repo, number),
+		map[string]any{"state": "closed"}, nil)
 }
 
 func issueTitle(inv providers.Investigation) string {
@@ -236,6 +283,17 @@ type kbFrontmatter struct {
 }
 
 // renderEntry serializes a KBEntry as OKF markdown (frontmatter + body).
+// prBody is the GitHub PR description: a one-line why-keep summary so the PR list
+// view is informative. The full decision card + OKF sections live in the entry
+// file itself (visible in the PR diff).
+func prBody(e providers.KBEntry) string {
+	desc := e.Description
+	if desc == "" {
+		desc = e.Title
+	}
+	return fmt.Sprintf("Drafted by RunLore — %s\n\nReview the decision card + OKF entry in the changed file.", desc)
+}
+
 func renderEntry(e providers.KBEntry) string {
 	fm, _ := yaml.Marshal(kbFrontmatter{Type: e.Type, Title: e.Title, Description: e.Description, Tags: e.Tags})
 	var b strings.Builder

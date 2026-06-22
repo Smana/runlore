@@ -3,6 +3,7 @@ package github
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -42,6 +43,32 @@ func TestOpenIssue(t *testing.T) {
 	}
 }
 
+func TestListPRsByLabel(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/repos/o/r/issues" || r.URL.Query().Get("labels") != "runlore" || r.URL.Query().Get("state") != "open" {
+			t.Fatalf("unexpected request: %s?%s", r.URL.Path, r.URL.RawQuery)
+		}
+		// one PR (has pull_request), one plain issue (no pull_request) → only the PR is returned
+		_, _ = w.Write([]byte(`[
+		  {"number":48,"title":"KB: HarborRegistryDown","body":"b","labels":[{"name":"runlore"},{"name":"triggered"}],"pull_request":{"url":"x"}},
+		  {"number":39,"title":"Harbor install failing","body":"b","labels":[{"name":"runlore"}]}
+		]`))
+	}))
+	defer srv.Close()
+
+	c := New(srv.URL, "o", "r", "main", staticToken("tok"))
+	prs, err := c.ListPRsByLabel(context.Background(), "runlore")
+	if err != nil {
+		t.Fatalf("ListPRsByLabel: %v", err)
+	}
+	if len(prs) != 1 || prs[0].Number != 48 || prs[0].Title != "KB: HarborRegistryDown" {
+		t.Fatalf("want only PR #48, got %+v", prs)
+	}
+	if len(prs[0].Labels) != 2 || prs[0].Labels[0] != "runlore" {
+		t.Fatalf("labels not parsed: %+v", prs[0].Labels)
+	}
+}
+
 func TestOpenPR(t *testing.T) {
 	var paths []string
 	mux := http.NewServeMux()
@@ -74,5 +101,50 @@ func TestOpenPR(t *testing.T) {
 	}
 	if len(paths) != 4 || !strings.Contains(strings.Join(paths, ","), "PUT contents") {
 		t.Fatalf("expected the 4-call PR sequence, got %v", paths)
+	}
+}
+
+func TestClose(t *testing.T) {
+	var gotMethod, gotPath string
+	var gotBody map[string]any
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotMethod, gotPath = r.Method, r.URL.Path
+		_ = json.NewDecoder(r.Body).Decode(&gotBody)
+		_, _ = w.Write([]byte(`{}`))
+	}))
+	defer srv.Close()
+	c := New(srv.URL, "o", "r", "main", staticToken("tok"))
+	if err := c.Close(context.Background(), 42); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	if gotMethod != http.MethodPatch || gotPath != "/repos/o/r/issues/42" || gotBody["state"] != "closed" {
+		t.Fatalf("unexpected: %s %s body=%v", gotMethod, gotPath, gotBody)
+	}
+}
+
+func TestListPRsByLabelPaginates(t *testing.T) {
+	// page 1 returns a full page (100) → the client must fetch page 2 for the rest.
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Query().Get("page") {
+		case "1":
+			items := make([]string, 100)
+			for i := range items {
+				items[i] = fmt.Sprintf(`{"number":%d,"title":"KB: t%d","labels":[{"name":"runlore"}],"pull_request":{}}`, i+1, i+1)
+			}
+			_, _ = w.Write([]byte("[" + strings.Join(items, ",") + "]"))
+		case "2":
+			_, _ = w.Write([]byte(`[{"number":101,"title":"KB: t101","labels":[{"name":"runlore"}],"pull_request":{}}]`))
+		default:
+			_, _ = w.Write([]byte(`[]`))
+		}
+	}))
+	defer srv.Close()
+	c := New(srv.URL, "o", "r", "main", staticToken("tok"))
+	prs, err := c.ListPRsByLabel(context.Background(), "runlore")
+	if err != nil {
+		t.Fatalf("ListPRsByLabel: %v", err)
+	}
+	if len(prs) != 101 {
+		t.Fatalf("want 101 PRs across 2 pages (no truncation at 100), got %d", len(prs))
 	}
 }

@@ -264,15 +264,12 @@ type Notifier interface {
 	Deliver(ctx context.Context, inv Investigation) error
 }
 
-// IssueProvider opens/updates issues & PRs for confidence-routed curation
-// (GitHub now; GitLab later). All writes target the git forge, never the cluster.
-//
-// GitHub auth is a GitHub App (fine-grained permissions, short-lived 1h
-// installation tokens) — the same App also provides the git access used by the
-// what-changed spine. GitLab falls back to a scoped access token.
-type IssueProvider interface {
-	OpenIssue(ctx context.Context, inv Investigation) (Ref, error)
+// CurationForge is the forge surface the curator's file-time gate needs: open a
+// drafted PR, list open KB PRs (dedup), and comment to coalesce duplicates.
+type CurationForge interface {
 	OpenPR(ctx context.Context, entry KBEntry) (Ref, error)
+	ListPRsByLabel(ctx context.Context, label string) ([]CuratedIssue, error)
+	Comment(ctx context.Context, number int, body string) error
 }
 
 // CuratedIssue is a minimal view of a curated KB issue, used by the re-investigate
