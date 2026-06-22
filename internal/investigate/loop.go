@@ -128,8 +128,13 @@ func (li *LoopInvestigator) Investigate(ctx context.Context, req Request) error 
 				case li.Verify && rec.Confidence < initialConfidence:
 					result = "downgraded"
 				}
+				const defaultRecallTokensSavedEstimate = 50_000
+				saved := int64(li.MaxTokensPerInvestigation)
+				if saved == 0 {
+					saved = defaultRecallTokensSavedEstimate // conservative proxy when budget is unconfigured
+				}
 				m.RecallHits.Add(ctx, 1, metric.WithAttributes(attribute.String("result", result)))
-				m.RecallTokensSaved.Add(ctx, int64(li.MaxTokensPerInvestigation))
+				m.RecallTokensSaved.Add(ctx, saved)
 			}
 			li.deliver(req, rec)
 			return nil
@@ -152,9 +157,16 @@ func (li *LoopInvestigator) Investigate(ctx context.Context, req Request) error 
 		maxSteps = 20
 	}
 
-	nudged := false
+	nudged := false          // set when the prose-turn nudge has fired once
+	budgetNudged := false    // set when the token-budget nudge has fired once
 	used := map[string]int{} // tool-call counts, logged so investigation breadth is observable
 	for step := 0; step < maxSteps; step++ {
+		// Inject a one-time budget nudge when the estimated request size exceeds the
+		// configured ceiling, prompting the model to wrap up with current findings.
+		if !budgetNudged && overBudget(estimateTokens(li.system(), messages), li.MaxTokensPerInvestigation) {
+			messages = append(messages, providers.Message{Role: "user", Content: budgetNudge})
+			budgetNudged = true
+		}
 		resp, err := li.Model.Complete(ctx, providers.CompletionRequest{System: li.system(), Messages: messages, Tools: specs})
 		if err != nil {
 			return fmt.Errorf("model: %w", err)
@@ -188,6 +200,9 @@ func (li *LoopInvestigator) Investigate(ctx context.Context, req Request) error 
 					inv.Title = req.Title // default to the triggering incident/failure
 				}
 				li.Log.Info("investigation evidence gathered", "title", req.Title, "tools_used", used)
+				if li.Metrics != nil {
+					li.Metrics.InvestigationTokens.Record(ctx, int64(estimateTokens(li.system(), messages)))
+				}
 				if li.Verify {
 					inv = li.verifyFindings(ctx, req, inv)
 				}
