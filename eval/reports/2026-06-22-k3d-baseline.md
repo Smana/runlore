@@ -22,18 +22,23 @@ subset (`eval/scenarios-k3d/`).
 |---|---|---|---|---|---|---|---|
 | k3d-bad-image-tag | **PASS** | 100% | 2/3 | 3 | 3 | 2 | correct (ImagePullBackOff) but didn't fully nail "tag deliberately changed to a non-existent one" |
 | k3d-pvc-unbound | **PASS** | 100% | 3/3 | — | — | — | nailed the unbound-PVC / bad-StorageClass root cause cleanly |
-| k3d-oom-saturation | **FAIL** | 100% | 1/3 | 1 | 0 | 2 | **confident-wrong**, high variance (var_rc=0.67) — symptom-only, no/Wrong fix |
+| k3d-oom-saturation | **FAIL → PASS** | 100% | 1/3 → **3/3** | 1 | 0 | 2 | initially failed; **fixed** (see below), re-ran N=3 → root_cause 3/3 |
 
-**2/3 pass.** Coverage was 100% on every scenario (kubernetes touched; the deterministic track works).
+**Initial: 2/3 pass. After the OOM fix: 3/3 pass.** Coverage was 100% on every scenario (kubernetes touched; the deterministic track works).
 
 ## Top gaps (the workstream-B / RunLore-improvement input)
 
-1. **OOM-from-limit reasoning is weak and flaky.** `k3d-oom-saturation` got root_cause **1/3**,
-   solution **0**, and was **confident-wrong** on ≥1 of 3 runs (variance 0.67). RunLore+flash sees the
-   restarts but doesn't reliably tie `OOMKilled` / exit 137 to *the 64Mi limit vs the 256M workload*.
-   - Likely fixes: have `pod_status` surface container **resource limits + lastState.terminated
-     (reason=OOMKilled, exitCode=137)** explicitly so the model has the limit-vs-usage signal; and/or
-     test a stronger investigation model. This is the kind of finding the eval exists to produce.
+1. **OOM-from-limit reasoning was weak — NOW FIXED ✅.** `k3d-oom-saturation` initially got root_cause
+   **1/3**, solution 0, confident-wrong. Two root causes, both fixed:
+   - **RunLore gap:** `pod_status` only read the *current* container state. An OOM-looping pod is
+     `Waiting{CrashLoopBackOff}`; the `OOMKilled`/exit-137 signal lives in `LastTerminationState`, which
+     the tool ignored — and it never surfaced the memory limit. **Fix** (`fix(pod_status)…`): surface
+     `LastTerminationState.Terminated{reason,exitCode}` + the container memory limit, so the model can
+     tie OOM → the limit.
+   - **Scenario bug:** the setup used `kubectl run --limits` (removed from modern kubectl) → the mem-hog
+     pod was never created, so no OOM ever happened. **Fix:** induce via a manifest with
+     `resources.limits.memory`.
+   - **Re-validated:** N=3 re-run → root_cause **3/3**, PASS. The eval → fix → re-run loop closed.
 2. **`what_changed` errors on a non-Flux cluster** (flagged as a tool error on all 3 scenarios). On
    k3d there is no GitOps engine, yet `gitOpsFromKube` still builds a provider and the model calls
    `what_changed`, which errors. Harmless to coverage (kubernetes is what's graded) but noisy —
