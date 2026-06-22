@@ -239,6 +239,12 @@ func (c *Client) ReplaceLabel(ctx context.Context, number int, remove, add strin
 	return nil
 }
 
+// Close closes an issue or PR (they share the issues endpoint for state).
+func (c *Client) Close(ctx context.Context, number int) error {
+	return c.do(ctx, http.MethodPatch, fmt.Sprintf("/repos/%s/%s/issues/%d", c.owner, c.repo, number),
+		map[string]any{"state": "closed"}, nil)
+}
+
 func issueTitle(inv providers.Investigation) string {
 	if inv.Title != "" {
 		return inv.Title
