@@ -57,6 +57,7 @@ import (
 	"github.com/Smana/runlore/internal/providers/gitops/argocd"
 	"github.com/Smana/runlore/internal/providers/gitops/flux"
 	"github.com/Smana/runlore/internal/server"
+	"github.com/Smana/runlore/internal/telemetry"
 	"github.com/Smana/runlore/internal/trigger"
 	"github.com/Smana/runlore/internal/whatchanged"
 
@@ -228,7 +229,17 @@ func runServe(args []string) error {
 	if auto != nil {
 		acts.Pauser = auto // avoid a typed-nil interface when auto is disabled
 	}
-	srv := server.New(cfg, queue, leader.Load, acts, log)
+	var metricsHandler http.Handler
+	if cfg.Telemetry.MetricsEnabled {
+		h, shutdown, err := telemetry.Setup(ctx)
+		if err != nil {
+			return fmt.Errorf("telemetry setup: %w", err)
+		}
+		defer func() { _ = shutdown(context.Background()) }()
+		metricsHandler = h
+	}
+	_ = telemetry.NewMetrics() // no-op safe when telemetry disabled; Parts 3-5 will wire this
+	srv := server.New(cfg, queue, leader.Load, acts, metricsHandler, log)
 	httpSrv := &http.Server{Addr: *addr, Handler: srv.Handler()}
 	go func() {
 		<-ctx.Done()

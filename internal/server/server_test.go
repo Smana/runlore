@@ -35,7 +35,7 @@ func TestSlackInteraction(t *testing.T) {
 	id := ap.Register(providers.Action{Op: "suspend", Reversible: true, Target: providers.Workload{Kind: "Kustomization", Name: "web", Namespace: "apps"}})
 
 	const secret = "shh"
-	srv := New(&config.Config{}, &spyEnqueuer{}, nil, Actions{Approvals: ap, SlackSecret: secret, ApproverIDs: []string{"U1"}}, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	srv := New(&config.Config{}, &spyEnqueuer{}, nil, Actions{Approvals: ap, SlackSecret: secret, ApproverIDs: []string{"U1"}}, nil, slog.New(slog.NewTextHandler(io.Discard, nil)))
 
 	payload := `{"user":{"id":"U1","username":"alice"},"actions":[{"action_id":"runlore_approve","value":"` + id + `"}]}`
 	body := "payload=" + url.QueryEscape(payload)
@@ -85,7 +85,7 @@ func TestActionsApprove(t *testing.T) {
 	ap := action.NewApprovals(exec, pol, audit.Nop{}, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	id := ap.Register(providers.Action{Op: "suspend", Reversible: true, Target: providers.Workload{Kind: "Kustomization", Name: "web", Namespace: "apps"}})
 
-	srv := New(&config.Config{}, &spyEnqueuer{}, nil, Actions{Approvals: ap, Token: "secret"}, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	srv := New(&config.Config{}, &spyEnqueuer{}, nil, Actions{Approvals: ap, Token: "secret"}, nil, slog.New(slog.NewTextHandler(io.Discard, nil)))
 
 	// Missing token → 403, nothing executes.
 	rr := httptest.NewRecorder()
@@ -118,7 +118,7 @@ func (f *fakePauser) Paused() bool { return f.paused }
 
 func TestKillSwitch(t *testing.T) {
 	p := &fakePauser{}
-	srv := New(&config.Config{}, &spyEnqueuer{}, nil, Actions{Pauser: p, Token: "t"}, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	srv := New(&config.Config{}, &spyEnqueuer{}, nil, Actions{Pauser: p, Token: "t"}, nil, slog.New(slog.NewTextHandler(io.Discard, nil)))
 
 	// Without the token → 403, kill-switch untouched.
 	rr := httptest.NewRecorder()
@@ -150,7 +150,7 @@ func testServerWith(enq investigate.Enqueuer) *Server {
 		Enabled: true,
 		Match:   config.IncidentMatch{Severity: []string{"critical"}},
 	}
-	return New(cfg, enq, nil, Actions{}, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	return New(cfg, enq, nil, Actions{}, nil, slog.New(slog.NewTextHandler(io.Discard, nil)))
 }
 
 func testServer() *Server { return testServerWith(&spyEnqueuer{}) }
@@ -158,7 +158,7 @@ func testServer() *Server { return testServerWith(&spyEnqueuer{}) }
 func TestReadyz(t *testing.T) {
 	cfg := &config.Config{}
 	leader := false
-	srv := New(cfg, &spyEnqueuer{}, func() bool { return leader }, Actions{}, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	srv := New(cfg, &spyEnqueuer{}, func() bool { return leader }, Actions{}, nil, slog.New(slog.NewTextHandler(io.Discard, nil)))
 
 	rr := httptest.NewRecorder()
 	srv.Handler().ServeHTTP(rr, httptest.NewRequest(http.MethodGet, "/readyz", nil))
