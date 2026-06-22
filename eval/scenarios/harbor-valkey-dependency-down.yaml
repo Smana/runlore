@@ -1,0 +1,18 @@
+id: harbor-valkey-dependency-down
+category: dependency
+description: harbor core/jobservice/nginx CrashLoopBackOff — valkey (redis) dependency down
+invasive: false
+precheck: kubectl get pods -n tooling -l app=harbor,component=core -o jsonpath='{.items[*].status.containerStatuses[*].state.waiting.reason}' | grep -q CrashLoopBackOff
+trigger:
+  mode: cli
+  symptom: harbor core is CrashLoopBackOff in namespace tooling
+  namespace: tooling
+ground_truth:
+  root_cause: >-
+    harbor-valkey-primary:6379 connection refused (valkey is down), so harbor
+    core/jobservice/nginx crash on startup. The dependency outage, not harbor itself,
+    is the root cause.
+  expected_sources: [kubernetes, logs]
+  optional_sources: []
+  expected_action: restore the harbor-valkey-primary service (investigate why valkey is down)
+  must_reach_root: true

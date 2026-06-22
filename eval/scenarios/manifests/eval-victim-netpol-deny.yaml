@@ -1,0 +1,10 @@
+apiVersion: cilium.io/v2
+kind: CiliumNetworkPolicy
+metadata:
+  name: eval-victim-deny-egress
+  namespace: runlore-eval
+  labels: { runlore.io/eval: "true" }
+spec:
+  endpointSelector:
+    matchLabels: { app: eval-victim }
+  egress: [] # default-deny all egress for the victim

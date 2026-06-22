@@ -9,6 +9,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"flag"
 	"fmt"
 	"io"
@@ -16,7 +17,9 @@ import (
 	"net/http"
 	_ "net/http/pprof" // registers /debug/pprof on DefaultServeMux (loopback-only, opt-in)
 	"os"
+	"os/exec"
 	"os/signal"
+	"path/filepath"
 	"runtime/debug"
 	"strconv"
 	"strings"
@@ -68,7 +71,8 @@ Usage:
   lore investigate --alert <name> [--namespace <ns>] [--message <text>]   investigate on-demand, print findings
   lore serve [--config <path>] [--addr <addr>]        run the in-cluster agent (react to incidents)
   lore catalog sync [--config <path>]                 clone/pull + index the knowledge catalog
-  lore eval [--config <path>] [--cases <dir>]         replay incident cases, score RCA identification
+  lore eval [--config <path>] [--cases <dir>]         replay recorded cases, score RCA identification
+  lore eval --live [--scenarios <dir>] [--n 3]        live-fire on the cluster: grade coverage + RCA
   lore curate [--config <path>]                       groom the KB backlog (dedup open PRs)
   lore version                                        print version
 `
@@ -384,7 +388,18 @@ func buildCatalog(ctx context.Context, cfg *config.Config, forgeTok forgeToken, 
 func runEval(args []string) error {
 	fs := flag.NewFlagSet("eval", flag.ContinueOnError)
 	cfgPath := fs.String("config", "runlore.yaml", "path to config file")
-	casesDir := fs.String("cases", "examples/eval", "directory of eval cases")
+	casesDir := fs.String("cases", "examples/eval", "directory of replay cases")
+	live := fs.Bool("live", false, "live-fire mode: run scenarios against the real cluster")
+	scnDir := fs.String("scenarios", "eval/scenarios", "directory of live-fire scenarios")
+	recordDir := fs.String("record", "eval/fixtures", "where to write recorded runs (replay corpus)")
+	reportDir := fs.String("report-dir", "eval/reports", "where to write the campaign report")
+	prevReport := fs.String("baseline", "", "previous report JSON for regression diff")
+	n := fs.Int("n", 3, "runs per scenario (live mode)")
+	stamp := fs.String("stamp", "", "report timestamp (RFC3339); blank = now")
+	jProvider := fs.String("judge-provider", "", "judge model provider (default: investigation model)")
+	jBaseURL := fs.String("judge-base-url", "", "judge model base URL")
+	jModel := fs.String("judge-model", "", "judge model name")
+	jKeyEnv := fs.String("judge-api-key-env", "", "env var holding the judge API key")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -395,6 +410,11 @@ func runEval(args []string) error {
 	if !modelConfigured(cfg) {
 		return fmt.Errorf("eval requires a configured model (set config.model)")
 	}
+	if *live {
+		return runEvalLive(cfg, *scnDir, *recordDir, *reportDir, *prevReport, *stamp, *n,
+			*jProvider, *jBaseURL, *jModel, *jKeyEnv)
+	}
+	// ---- existing replay path (unchanged) ----
 	cases, err := eval.Load(*casesDir)
 	if err != nil {
 		return err
@@ -420,6 +440,95 @@ func runEval(args []string) error {
 		fmt.Println()
 	}
 	fmt.Printf("\nRCA identified: %d/%d (%.0f%%)\n", rep.Passed(), len(rep.Results), rep.RCARate()*100)
+	return nil
+}
+
+// shellStepRunner executes a scenario step as a shell command (kubectl/flux/test).
+type shellStepRunner struct{}
+
+func (shellStepRunner) Run(ctx context.Context, step string) error {
+	cmd := exec.CommandContext(ctx, "sh", "-c", step)
+	cmd.Stdout, cmd.Stderr = os.Stderr, os.Stderr // step output is progress, not findings
+	return cmd.Run()
+}
+
+// buildJudgeModel builds the (stronger) grader model from --judge-* flags, falling
+// back to the configured investigation model when unset.
+func buildJudgeModel(cfg *config.Config, provider, baseURL, model, apiKeyEnv string) providers.ModelProvider {
+	if provider == "" && model == "" {
+		apiKey := ""
+		if cfg.Model.APIKeyEnv != "" {
+			apiKey = os.Getenv(cfg.Model.APIKeyEnv)
+		}
+		return buildModel(cfg, apiKey)
+	}
+	apiKey := os.Getenv(apiKeyEnv)
+	switch provider {
+	case "anthropic":
+		return anthropic.New(baseURL, model, apiKey)
+	case "gemini":
+		return gemini.New(baseURL, model, apiKey)
+	default:
+		return openai.New(baseURL, model, apiKey)
+	}
+}
+
+// runEvalLive runs the live-fire campaign and writes a dated report.
+func runEvalLive(cfg *config.Config, scnDir, recordDir, reportDir, prevReport, stamp string, n int,
+	jProvider, jBaseURL, jModel, jKeyEnv string) error {
+	scns, err := eval.LoadScenarios(scnDir)
+	if err != nil {
+		return err
+	}
+	if len(scns) == 0 {
+		return fmt.Errorf("no scenarios found in %s", scnDir)
+	}
+	log := slog.New(slog.NewTextHandler(os.Stderr, nil))
+	ctx := context.Background()
+	model, tools, _, _ := buildModelAndTools(ctx, cfg, gitOpsFromKube(cfg, log), log)
+	judge := eval.ModelJudge{Model: buildJudgeModel(cfg, jProvider, jBaseURL, jModel, jKeyEnv)}
+
+	runner := &eval.LiveRunner{
+		Model: model, BaseTools: tools, Judge: judge, Steps: shellStepRunner{}, Log: log, N: n,
+		OnRecord: func(scn eval.Scenario, calls []eval.Call) {
+			if err := eval.WriteCase(recordDir, eval.RecordedCase(scn, calls)); err != nil {
+				log.Warn("record case failed", "id", scn.ID, "err", err)
+			}
+		},
+	}
+	var results []eval.LiveResult
+	for _, scn := range scns {
+		log.Info("running scenario", "id", scn.ID)
+		results = append(results, runner.RunScenario(ctx, scn))
+	}
+
+	if stamp == "" {
+		stamp = time.Now().UTC().Format(time.RFC3339)
+	}
+	rep := eval.NewLiveReport(stamp, results)
+	if err := os.MkdirAll(reportDir, 0o755); err != nil {
+		return err
+	}
+	base := filepath.Join(reportDir, strings.ReplaceAll(stamp, ":", "-"))
+	if err := os.WriteFile(base+".json", rep.JSON(), 0o644); err != nil {
+		return err
+	}
+	md := rep.Markdown()
+	if prevReport != "" {
+		if data, rerr := os.ReadFile(prevReport); rerr == nil {
+			var prev eval.LiveReport
+			if json.Unmarshal(data, &prev) == nil {
+				if reg := rep.RegressionsVS(prev); len(reg) > 0 {
+					md += "\n## ⚠️ Regressions vs baseline\n\n- " + strings.Join(reg, "\n- ") + "\n"
+				}
+			}
+		}
+	}
+	if err := os.WriteFile(base+".md", []byte(md), 0o644); err != nil {
+		return err
+	}
+	fmt.Print(md)
+	fmt.Printf("\nreport: %s.md / .json\n", base)
 	return nil
 }
 

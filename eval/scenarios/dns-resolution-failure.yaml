@@ -1,0 +1,29 @@
+id: dns-resolution-failure
+category: dns
+description: a toFQDNs policy missing the DNS L7 rule breaks name resolution silently
+invasive: true
+setup:
+  - kubectl apply -f eval/scenarios/manifests/eval-victim-app.yaml
+  - |
+    kubectl -n runlore-eval run eval-dns-victim --image=curlimages/curl --restart=Never \
+      --labels=app=eval-dns-victim --command -- sleep 3600 || true
+  - kubectl apply -f eval/scenarios/manifests/eval-victim-dns-broken.yaml
+  - sleep 15
+trigger:
+  mode: cli
+  symptom: pod eval-dns-victim in namespace runlore-eval fails all requests with name resolution errors
+  namespace: runlore-eval
+ground_truth:
+  root_cause: >-
+    CiliumNetworkPolicy eval-dns-victim-policy allows toFQDNs but omits the kube-dns
+    egress L7 DNS rule (toPorts.rules.dns.matchPattern "*"), so Cilium proxies the DNS
+    query but never sees the response IPs — the toFQDNs allowlist has no IPs to match and
+    every connection is dropped. DNS appears to "work" while downstream traffic fails.
+  expected_sources: [network]
+  optional_sources: [logs, kubernetes]
+  expected_action: add the kube-dns egress rule with toPorts.rules.dns matchPattern "*"
+  must_reach_root: true
+teardown:
+  - kubectl delete -f eval/scenarios/manifests/eval-victim-dns-broken.yaml --ignore-not-found
+  - kubectl -n runlore-eval delete pod eval-dns-victim --ignore-not-found
+  - kubectl delete -f eval/scenarios/manifests/eval-victim-app.yaml --ignore-not-found

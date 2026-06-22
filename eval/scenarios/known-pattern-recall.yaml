@@ -1,0 +1,21 @@
+id: known-pattern-recall
+category: instant-recall
+description: re-firing a known symptom should short-circuit via kb_search, not re-run the full loop
+invasive: false
+# Precondition: the catalog (cfg.catalog) must contain a KB entry matching this symptom
+# AND instant_recall must be enabled in config. If not, this SKIPs. Set RUNLORE_RECALL_READY
+# once the curation loop (workstream B) has merged a relevant entry and it's indexed.
+precheck: test -n "$RUNLORE_RECALL_READY"
+trigger:
+  mode: cli
+  symptom: harbor registry pod CreateContainerConfigError in namespace tooling
+  namespace: tooling
+ground_truth:
+  root_cause: >-
+    A known, catalogued pattern: harbor registry CreateContainerConfigError from the
+    Crossplane IAM access-key quota. The agent should recall the catalog entry rather
+    than re-investigate from scratch.
+  expected_sources: [kb]
+  optional_sources: [kubernetes]
+  expected_action: apply the catalogued resolution (free an IAM access key)
+  must_reach_root: true

@@ -1,0 +1,18 @@
+id: harbor-registry-iam-quota
+category: dependency
+description: harbor-registry CreateContainerConfigError — Crossplane access key Secret missing username
+invasive: false
+precheck: kubectl get pods -n tooling -l app=harbor,component=registry -o jsonpath='{.items[*].status.containerStatuses[*].state.waiting.reason}' | grep -q CreateContainerConfigError
+trigger:
+  mode: cli
+  symptom: harbor registry pod not starting in namespace tooling (CreateContainerConfigError)
+  namespace: tooling
+ground_truth:
+  root_cause: >-
+    Crossplane accesskey/xplane-harbor hit the AWS IAM AccessKeysPerUser:2 quota, so
+    Secret xplane-harbor-access-key was created without a username key, leaving the
+    registry container unable to start (CreateContainerConfigError).
+  expected_sources: [kubernetes]
+  optional_sources: [aws, gitops]
+  expected_action: delete an old IAM access key for the user so Crossplane can mint a new one
+  must_reach_root: true

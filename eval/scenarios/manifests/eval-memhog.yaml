@@ -1,0 +1,19 @@
+# A pod that requests far more memory (256M) than its limit (64Mi), so the kernel
+# OOMKills it; restartPolicy: Always makes it CrashLoopBackOff with an OOMKilled
+# LastTerminationState — the signal pod_status now surfaces. Self-contained (its own
+# namespace) so the scenario needs no other manifest.
+apiVersion: v1
+kind: Pod
+metadata:
+  name: mem-hog
+  namespace: runlore-eval
+  labels: { app: mem-hog, runlore.io/eval: "true" }
+spec:
+  restartPolicy: Always
+  containers:
+    - name: app
+      image: polinux/stress
+      args: ["stress", "--vm", "1", "--vm-bytes", "256M", "--vm-hang", "0"]
+      resources:
+        requests: { memory: 64Mi }
+        limits: { memory: 64Mi }
