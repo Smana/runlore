@@ -98,7 +98,9 @@ func (c *Coalescer) Add(inc config.Incident) {
 		// Critical alerts are never throttled/suppressed — flush immediately regardless of cooldown.
 		flush = []config.Incident{inc}
 		if b, ok := c.pending[k]; ok {
-			flush = append(b.incidents, inc)
+			flush = make([]config.Incident, 0, len(b.incidents)+1)
+			flush = append(flush, b.incidents...)
+			flush = append(flush, inc)
 			delete(c.pending, k)
 		}
 		c.recent[k] = now
