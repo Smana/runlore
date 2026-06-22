@@ -232,10 +232,13 @@ func (q *Queue) maybeNotifyThrottle() {
 }
 
 // ConfigureRateLimit installs a sliding-window start budget and wires metric
-// counters into the Queue. Call before Run; nil starts = unlimited.
-func (q *Queue) ConfigureRateLimit(starts *ratelimit.Window, maxRequeues int, m *telemetry.Metrics, throttled *ratelimit.Window) {
+// counters into the Queue. Call before Run; nil starts = unlimited. The
+// once-per-window throttle-log guard is derived from starts internally.
+func (q *Queue) ConfigureRateLimit(starts *ratelimit.Window, maxRequeues int, m *telemetry.Metrics) {
 	q.starts = starts
 	q.maxRequeues = maxRequeues
 	q.metrics = m
-	q.throttled = throttled
+	if starts != nil {
+		q.throttled = ratelimit.New(1, starts.Window())
+	}
 }

@@ -209,17 +209,16 @@ func runServe(args []string) error {
 
 	inv := buildInvestigator(ctx, cfg, gitops, approvals, auto, metrics, log)
 	queue := investigate.NewQueue(inv, log)
-	var rlStarts, rlThrottled *ratelimit.Window
+	var rlStarts *ratelimit.Window
 	if rl := cfg.Investigation.RateLimit; rl.MaxPerWindow > 0 {
 		w := rl.Window.Std()
 		rlStarts = ratelimit.New(rl.MaxPerWindow, w)
-		rlThrottled = ratelimit.New(1, w) // once-per-window throttle-log guard
 		log.Info("investigation rate limit configured",
 			"max_per_window", rl.MaxPerWindow, "window", w, "max_requeues", rl.MaxRequeues)
 	}
 	// Always wire metrics into the Queue so InvestigationsStarted emits even when
 	// rate-limiting is unconfigured (max_per_window == 0).
-	queue.ConfigureRateLimit(rlStarts, cfg.Investigation.RateLimit.MaxRequeues, metrics, rlThrottled)
+	queue.ConfigureRateLimit(rlStarts, cfg.Investigation.RateLimit.MaxRequeues, metrics)
 
 	// Coalescer: fold correlated incidents into one investigation per group key.
 	// out is the flush sink — converts a batch into a single Request and enqueues it.
@@ -229,13 +228,10 @@ func runServe(args []string) error {
 			rep := investigate.FromIncident(incs[0])
 			if len(incs) > 1 {
 				rep.Message = coalesce.Summarize(incs)
-				metrics.AlertsCoalesced.Add(context.Background(), int64(len(incs)-1))
 			}
-			metrics.CoalesceBatchSize.Record(context.Background(), int64(len(incs)))
 			queue.Enqueue(rep)
 		}
 		cz = coalesce.New(coalesce.Config{
-			Enabled:           true,
 			Debounce:          cc.Debounce.Std(),
 			MaxWait:           cc.MaxWait.Std(),
 			MaxBatch:          cc.MaxBatch,

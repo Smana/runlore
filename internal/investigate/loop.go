@@ -92,7 +92,6 @@ type LoopInvestigator struct {
 	MaxTokensPerInvestigation int // inject a budget-nudge message when the estimated token count exceeds this
 
 	// Observability — nil-safe; no-op when telemetry is disabled.
-	// TODO(Parts 4/5): pass the same instance to Queue + Coalescer.
 	Metrics *telemetry.Metrics
 }
 
@@ -159,14 +158,15 @@ func (li *LoopInvestigator) Investigate(ctx context.Context, req Request) error 
 	nudged := false          // set when the prose-turn nudge has fired once
 	budgetNudged := false    // set when the token-budget nudge has fired once
 	used := map[string]int{} // tool-call counts, logged so investigation breadth is observable
+	sys := li.system()       // constant for the investigation; build once, not per step
 	for step := 0; step < maxSteps; step++ {
 		// Inject a one-time budget nudge when the estimated request size exceeds the
 		// configured ceiling, prompting the model to wrap up with current findings.
-		if !budgetNudged && overBudget(estimateTokens(li.system(), messages), li.MaxTokensPerInvestigation) {
+		if !budgetNudged && overBudget(estimateTokens(sys, messages), li.MaxTokensPerInvestigation) {
 			messages = append(messages, providers.Message{Role: "user", Content: budgetNudge})
 			budgetNudged = true
 		}
-		resp, err := li.Model.Complete(ctx, providers.CompletionRequest{System: li.system(), Messages: messages, Tools: specs})
+		resp, err := li.Model.Complete(ctx, providers.CompletionRequest{System: sys, Messages: messages, Tools: specs})
 		if err != nil {
 			return fmt.Errorf("model: %w", err)
 		}
@@ -200,7 +200,7 @@ func (li *LoopInvestigator) Investigate(ctx context.Context, req Request) error 
 				}
 				li.Log.Info("investigation evidence gathered", "title", req.Title, "tools_used", used)
 				if li.Metrics != nil {
-					li.Metrics.InvestigationTokens.Record(ctx, int64(estimateTokens(li.system(), messages)))
+					li.Metrics.InvestigationTokens.Record(ctx, int64(estimateTokens(sys, messages)))
 				}
 				if li.Verify {
 					inv = li.verifyFindings(ctx, req, inv)

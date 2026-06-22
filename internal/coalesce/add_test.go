@@ -65,7 +65,7 @@ func TestAddCriticalStormSuppressedAfterFirst(t *testing.T) {
 	if len(s.batches) != 1 || len(s.batches[0]) != 1 {
 		t.Fatalf("critical storm should flush once (the first), got batches=%v", s.batches)
 	}
-	if c.suppressed["GK"] != 4 {
-		t.Fatalf("expected 4 suppressed after the first flush, got %d", c.suppressed["GK"])
+	if len(c.pending) != 0 {
+		t.Fatalf("storm alerts after the first should be suppressed, not buffered (pending=%d)", len(c.pending))
 	}
 }
