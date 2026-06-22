@@ -36,6 +36,7 @@ import (
 	"github.com/Smana/runlore/internal/audit"
 	"github.com/Smana/runlore/internal/catalog"
 	"github.com/Smana/runlore/internal/config"
+	"github.com/Smana/runlore/internal/curate"
 	"github.com/Smana/runlore/internal/curator"
 	"github.com/Smana/runlore/internal/eval"
 	fluxexec "github.com/Smana/runlore/internal/executor/flux"
@@ -68,6 +69,7 @@ Usage:
   lore serve [--config <path>] [--addr <addr>]        run the in-cluster agent (react to incidents)
   lore catalog sync [--config <path>]                 clone/pull + index the knowledge catalog
   lore eval [--config <path>] [--cases <dir>]         replay incident cases, score RCA identification
+  lore curate [--config <path>]                       groom the KB backlog (dedup open PRs)
   lore version                                        print version
 `
 
@@ -99,6 +101,11 @@ func main() {
 	case "catalog":
 		if err := runCatalog(os.Args[2:]); err != nil {
 			fmt.Fprintln(os.Stderr, "catalog:", err)
+			os.Exit(1)
+		}
+	case "curate":
+		if err := runCurate(os.Args[2:]); err != nil {
+			fmt.Fprintln(os.Stderr, "curate:", err)
 			os.Exit(1)
 		}
 	default:
@@ -539,6 +546,47 @@ func buildCurator(cfg *config.Config, token forgeToken, cat *catalog.Catalog, lo
 		cur.Catalog = cat
 	}
 	return cur
+}
+
+// runCurate grooms the KB backlog (Phase-2 curation agent). v1 runs the
+// backlog-dedup pass — the highest-value, fully-wireable groom (it collapses the
+// duplicate open PRs the file-time gate couldn't see across history). The
+// resolution-gated decision-ready queue, lifecycle/decay, and recurrence→gap-issue
+// passes are implemented + tested in internal/curate but need a forge updated_at
+// field + a cluster ResolutionChecker + a recurrence store to wire — follow-up.
+func runCurate(args []string) error {
+	fs := flag.NewFlagSet("curate", flag.ContinueOnError)
+	cfgPath := fs.String("config", "runlore.yaml", "path to config file")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	cfg, err := config.Load(*cfgPath)
+	if err != nil {
+		return err
+	}
+	if cfg.Forge.KBRepo == "" {
+		return fmt.Errorf("curate requires forge.kb_repo")
+	}
+	log := slog.New(slog.NewTextHandler(os.Stderr, nil))
+	tok := buildForgeTokenSource(cfg, log)
+	if tok == nil {
+		return fmt.Errorf("curate requires a configured GitHub App (forge.github_app)")
+	}
+	owner, repo, ok := strings.Cut(cfg.Forge.KBRepo, "/")
+	if !ok {
+		return fmt.Errorf("forge.kb_repo must be owner/name")
+	}
+	base := cfg.Forge.BaseBranch
+	if base == "" {
+		base = "main"
+	}
+	forge := github.New(cfg.Forge.GitHubAPIURL, owner, repo, base, github.TokenFunc(tok))
+	agent := curate.Agent{Log: log, Passes: []curate.Pass{
+		curate.Dedup{Forge: forge, Log: log},
+	}}
+	log.Info("curate: grooming KB backlog", "repo", cfg.Forge.KBRepo)
+	agent.Run(context.Background())
+	return nil
 }
 
 // buildReinvestigator returns a poller that re-runs KB issues labelled
