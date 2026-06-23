@@ -30,14 +30,15 @@ const (
 
 // Request is a normalized investigation trigger.
 type Request struct {
-	Source      Source
-	Title       string
-	Workload    providers.Workload // optional; zero for alerts without a workload
-	Reason      string
-	Message     string
-	Labels      map[string]string
-	At          time.Time
-	Fingerprint string // Alertmanager fingerprint (stable firing↔resolved); for outcome attribution
+	Source       Source
+	Title        string
+	Workload     providers.Workload // optional; zero for alerts without a workload
+	Reason       string
+	Message      string
+	Labels       map[string]string
+	At           time.Time
+	Fingerprint  string   // Alertmanager fingerprint (stable firing↔resolved); for outcome attribution
+	Fingerprints []string // coalesced batch fingerprints; one open is recorded per entry so every constituent alert's resolve matches
 }
 
 // workloadFromLabels derives the affected workload (kind, name) from Alertmanager
@@ -67,14 +68,19 @@ func workloadFromLabels(labels map[string]string) (kind, name string) {
 // FromIncident builds a Request from a matched incident alert.
 func FromIncident(inc config.Incident) Request {
 	kind, name := workloadFromLabels(inc.Labels)
+	var fps []string
+	if inc.Fingerprint != "" {
+		fps = []string{inc.Fingerprint}
+	}
 	return Request{
-		Source:      SourceAlert,
-		Title:       inc.AlertName,
-		Workload:    providers.Workload{Namespace: inc.Namespace, Kind: kind, Name: name},
-		Reason:      inc.Severity,
-		Labels:      inc.Labels,
-		At:          inc.StartsAt,
-		Fingerprint: inc.Fingerprint,
+		Source:       SourceAlert,
+		Title:        inc.AlertName,
+		Workload:     providers.Workload{Namespace: inc.Namespace, Kind: kind, Name: name},
+		Reason:       inc.Severity,
+		Labels:       inc.Labels,
+		At:           inc.StartsAt,
+		Fingerprint:  inc.Fingerprint,
+		Fingerprints: fps,
 	}
 }
 
