@@ -97,3 +97,66 @@ func TestTopHitSearchError(t *testing.T) {
 		t.Fatalf("want ok=false and a non-nil error, got ok=%v err=%v", ok, err)
 	}
 }
+
+func TestDupFingerprintStableAcrossTitlePhrasing(t *testing.T) {
+	a := providers.Investigation{
+		Title:      "Pod apps/web crash looping",
+		Resource:   providers.Workload{Namespace: "apps", Name: "web"},
+		RootCauses: []providers.Hypothesis{{Summary: "image tag rollout broke the readiness probe"}},
+	}
+	b := providers.Investigation{
+		Title:      "apps/web is down after a deploy", // different prose
+		Resource:   providers.Workload{Namespace: "apps", Name: "web"},
+		RootCauses: []providers.Hypothesis{{Summary: "the readiness probe broke when the image tag rollout happened"}},
+	}
+	fa, fb := DupFingerprint(a), DupFingerprint(b)
+	if fa == "" || fa != fb {
+		t.Fatalf("same resource+cause must hash alike across phrasing: %q vs %q", fa, fb)
+	}
+}
+
+func TestDupFingerprintDiffersByResource(t *testing.T) {
+	base := providers.Investigation{
+		Resource:   providers.Workload{Namespace: "apps", Name: "web"},
+		RootCauses: []providers.Hypothesis{{Summary: "connection pool exhausted"}},
+	}
+	other := base
+	other.Resource = providers.Workload{Namespace: "apps", Name: "worker"}
+	if DupFingerprint(base) == DupFingerprint(other) {
+		t.Fatal("different affected resource must change the fingerprint")
+	}
+}
+
+func TestDupFingerprintDiffersByCause(t *testing.T) {
+	base := providers.Investigation{
+		Resource:   providers.Workload{Namespace: "apps", Name: "web"},
+		RootCauses: []providers.Hypothesis{{Summary: "connection pool exhausted"}},
+	}
+	other := base
+	other.RootCauses = []providers.Hypothesis{{Summary: "expired TLS certificate blocked startup"}}
+	if DupFingerprint(base) == DupFingerprint(other) {
+		t.Fatal("disjoint cause token-sets must change the fingerprint")
+	}
+}
+
+func TestDupFingerprintEmptyWhenNoResourceOrCause(t *testing.T) {
+	if got := DupFingerprint(providers.Investigation{Title: "something"}); got != "" {
+		t.Fatalf("no resource and no cause must yield empty fingerprint, got %q", got)
+	}
+}
+
+// TestDupFingerprintGoldenValue pins the exact canonical fingerprint to guard
+// canonicalization stability. Markers in open PRs depend on this hash being
+// stable across the "|" separator, token order, stopword set, and hashing
+// algorithm. Any accidental change to the canonicalization must fail this test
+// rather than silently invalidating already-open PR markers.
+func TestDupFingerprintGoldenValue(t *testing.T) {
+	inv := providers.Investigation{
+		Resource:   providers.Workload{Namespace: "apps", Name: "web"},
+		RootCauses: []providers.Hypothesis{{Summary: "image tag rollout broke readiness probe"}},
+	}
+	const expected = "215ab128868422ea9e8f8cf247cbc79be9cd11aa0f2e8c634e8a997273ae2701"
+	if got := DupFingerprint(inv); got != expected {
+		t.Fatalf("golden fingerprint mismatch: expected %q, got %q", expected, got)
+	}
+}

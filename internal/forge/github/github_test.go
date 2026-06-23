@@ -148,3 +148,21 @@ func TestListPRsByLabelPaginates(t *testing.T) {
 		t.Fatalf("want 101 PRs across 2 pages (no truncation at 100), got %d", len(prs))
 	}
 }
+
+func TestRenderEntryIncludesFingerprintFrontmatter(t *testing.T) {
+	out := renderEntry(providers.KBEntry{Type: "Incident", Title: "T", Fingerprint: "deadbeef"})
+	if !strings.Contains(out, "fingerprint: deadbeef") {
+		t.Fatalf("frontmatter missing fingerprint:\n%s", out)
+	}
+	out = renderEntry(providers.KBEntry{Type: "Incident", Title: "T"})
+	if strings.Contains(out, "fingerprint:") {
+		t.Fatalf("empty fingerprint must be omitted:\n%s", out)
+	}
+}
+
+func TestPRBodyIncludesFingerprintMarker(t *testing.T) {
+	body := prBody(providers.KBEntry{Title: "T", Description: "d", Fingerprint: "deadbeef"})
+	if providers.ParseFingerprintMarker(body) != "deadbeef" {
+		t.Fatalf("PR body missing recoverable fingerprint marker:\n%s", body)
+	}
+}
