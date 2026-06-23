@@ -86,12 +86,15 @@ func TestLookupMarginClearWinner(t *testing.T) {
 }
 
 func TestLookupMarginNearTieFallsThrough(t *testing.T) {
+	// Two entries for the SAME workload with a near-tie (gap 0.5 < MarginGap 1.0) →
+	// genuinely ambiguous → falls through. (Post-structural-filter the margin compares
+	// same-workload candidates, not arbitrary lexical neighbours.)
 	r := recallWith([]catalog.ScoredEntry{
 		{Entry: catalog.Entry{Title: "OOM", Path: "a.md", Resource: "apps/web"}, Score: 6.0},
-		{Entry: catalog.Entry{Title: "BadImage", Path: "b.md"}, Score: 5.5},
+		{Entry: catalog.Entry{Title: "BadImage", Path: "b.md", Resource: "apps/web"}, Score: 5.5},
 	})
 	if e, _ := r.lookup(context.Background(), okReq()); e != nil {
-		t.Fatal("near-tie (gap 0.5 < 1.0) must fall through")
+		t.Fatal("near-tie among same-workload entries (gap 0.5 < 1.0) must fall through")
 	}
 }
 
@@ -326,6 +329,42 @@ func TestResourceAgrees(t *testing.T) {
 	}
 }
 
+func TestLookupStructuralWinnerBelowTopLexical(t *testing.T) {
+	// The two highest lexical hits are DIFFERENT workloads; the structurally-correct
+	// entry (apps/web) is only the 3rd lexical hit. Pre-filtering must surface it —
+	// the old k=2 / top-hit-only logic could not.
+	r := recallWith([]catalog.ScoredEntry{
+		{Entry: catalog.Entry{Title: "OtherA", Path: "a.md", Resource: "apps/api"}, Score: 9.0},
+		{Entry: catalog.Entry{Title: "OtherB", Path: "b.md", Resource: "apps/worker"}, Score: 8.0},
+		{Entry: catalog.Entry{Title: "Web OOM", Path: "web.md", Resource: "apps/web"}, Score: 5.0},
+	})
+	e, _ := r.lookup(context.Background(), okReq())
+	if e == nil || e.Path != "web.md" {
+		t.Fatalf("expected the structurally-correct apps/web entry (web.md) to be recalled, got %+v", e)
+	}
+}
+
+func TestLookupMarginAmongAgreeingClearWinner(t *testing.T) {
+	r := recallWith([]catalog.ScoredEntry{
+		{Entry: catalog.Entry{Title: "Web recent", Path: "web1.md", Resource: "apps/web"}, Score: 6.0},
+		{Entry: catalog.Entry{Title: "Web old", Path: "web2.md", Resource: "apps/web"}, Score: 2.0},
+	})
+	e, _ := r.lookup(context.Background(), okReq())
+	if e == nil || e.Path != "web1.md" {
+		t.Fatalf("clear same-workload winner should recall web1.md, got %+v", e)
+	}
+}
+
+func TestLookupNoAgreeingCandidateFallsThrough(t *testing.T) {
+	r := recallWith([]catalog.ScoredEntry{
+		{Entry: catalog.Entry{Title: "A", Path: "a.md", Resource: "apps/api"}, Score: 9.0},
+		{Entry: catalog.Entry{Title: "B", Path: "b.md", Resource: "other/web"}, Score: 8.0},
+	})
+	if e, _ := r.lookup(context.Background(), okReq()); e != nil {
+		t.Fatal("no structurally-agreeing candidate must fall through")
+	}
+}
+
 func TestLookupDecayRejectionMetric(t *testing.T) {
 	h, shutdown, err := telemetry.Setup(context.Background())
 	if err != nil {
@@ -345,5 +384,21 @@ func TestLookupDecayRejectionMetric(t *testing.T) {
 	h.ServeHTTP(rec, req)
 	if !strings.Contains(rec.Body.String(), `reason="low_outcome"`) {
 		t.Fatalf("expected recall_rejections_total{reason=\"low_outcome\"} in metrics:\n%s", rec.Body.String())
+	}
+}
+
+func TestLookupMarginAmongAgreeingWithDistractor(t *testing.T) {
+	// Two agreeing same-workload entries separated by a higher-scoring wrong-workload
+	// distractor. The winner must be the higher-lexical agreeing entry (web1.md @6.0),
+	// and the margin its gap to the next AGREEING entry (web2.md @2.0 → gap 4.0 >= 1.0),
+	// not the distractor (api.md). So it recalls web1.md.
+	r := recallWith([]catalog.ScoredEntry{
+		{Entry: catalog.Entry{Title: "Web hot", Path: "web1.md", Resource: "apps/web"}, Score: 6.0},
+		{Entry: catalog.Entry{Title: "API noise", Path: "api.md", Resource: "apps/api"}, Score: 5.0},
+		{Entry: catalog.Entry{Title: "Web cold", Path: "web2.md", Resource: "apps/web"}, Score: 2.0},
+	})
+	e, _ := r.lookup(context.Background(), okReq()) // okReq workload = apps/web
+	if e == nil || e.Path != "web1.md" {
+		t.Fatalf("winner must be the higher-lexical agreeing entry web1.md, got %+v", e)
 	}
 }
