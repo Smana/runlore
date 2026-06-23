@@ -1016,17 +1016,6 @@ func outcomeKind(recalled bool) string {
 	return "fresh"
 }
 
-// resourceStr renders a workload as "namespace/name" for the outcome ledger.
-func resourceStr(w providers.Workload) string {
-	if w.Namespace == "" {
-		return ""
-	}
-	if w.Name == "" {
-		return w.Namespace
-	}
-	return w.Namespace + "/" + w.Name
-}
-
 // buildInvestigator returns the LLM ReAct investigator when a model is configured,
 // otherwise the read-only LogInvestigator.
 func buildInvestigator(ctx context.Context, cfg *config.Config, gp providers.GitOpsProvider, approvals *action.Approvals, auto *action.Auto, metrics *telemetry.Metrics, ledger *outcome.Ledger, log *slog.Logger) investigate.Investigator {
@@ -1065,18 +1054,19 @@ func buildInvestigator(ctx context.Context, cfg *config.Config, gp providers.Git
 			// Skip sources without an alert fingerprint (GitOps watch, reinvestigate
 			// poller) — they could never be matched by a resolved-alert webhook.
 			if found.Fingerprint != "" {
+				kind := outcomeKind(found.Recalled)
 				if err := ledger.Open(outcome.Event{
 					Fingerprint: found.Fingerprint,
-					Kind:        outcomeKind(found.Recalled),
+					Kind:        kind,
 					Entry:       found.RecalledEntry,
 					Title:       found.Title,
-					Resource:    resourceStr(found.Resource),
+					Resource:    found.Resource.Ref(),
 					At:          time.Now(),
 				}); err != nil {
 					log.Warn("outcome ledger open failed", "fingerprint", found.Fingerprint, "err", err)
 				}
 				if metrics != nil {
-					metrics.OutcomesOpened.Add(ctx, 1, metric.WithAttributes(attribute.String("kind", outcomeKind(found.Recalled))))
+					metrics.OutcomesOpened.Add(ctx, 1, metric.WithAttributes(attribute.String("kind", kind)))
 				}
 			}
 			// Post-investigation action handling, by mode. The loop has already
