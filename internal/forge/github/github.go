@@ -281,6 +281,7 @@ type kbFrontmatter struct {
 	Description string   `yaml:"description"`
 	Resource    string   `yaml:"resource,omitempty"`
 	Tags        []string `yaml:"tags,omitempty"`
+	Fingerprint string   `yaml:"fingerprint,omitempty"`
 }
 
 // renderEntry serializes a KBEntry as OKF markdown (frontmatter + body).
@@ -292,11 +293,15 @@ func prBody(e providers.KBEntry) string {
 	if desc == "" {
 		desc = e.Title
 	}
-	return fmt.Sprintf("Drafted by RunLore — %s\n\nReview the decision card + OKF entry in the changed file.", desc)
+	body := fmt.Sprintf("Drafted by RunLore — %s\n\nReview the decision card + OKF entry in the changed file.", desc)
+	if m := providers.FingerprintMarker(e.Fingerprint); m != "" {
+		body += "\n\n" + m
+	}
+	return body
 }
 
 func renderEntry(e providers.KBEntry) string {
-	fm, _ := yaml.Marshal(kbFrontmatter{Type: e.Type, Title: e.Title, Description: e.Description, Resource: e.Resource, Tags: e.Tags})
+	fm, _ := yaml.Marshal(kbFrontmatter{Type: e.Type, Title: e.Title, Description: e.Description, Resource: e.Resource, Tags: e.Tags, Fingerprint: e.Fingerprint})
 	var b strings.Builder
 	b.WriteString("---\n")
 	b.Write(fm)

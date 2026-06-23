@@ -2,11 +2,20 @@ package curator
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"sort"
 	"strings"
+	"unicode"
 
 	"github.com/Smana/runlore/internal/catalog"
 	"github.com/Smana/runlore/internal/providers"
 )
+
+// stopWords are content-free English filler dropped so reworded causes hash alike.
+var stopWords = map[string]struct{}{
+	"the": {}, "a": {}, "an": {}, "and": {}, "or": {}, "but": {}, "in": {}, "on": {}, "at": {}, "to": {}, "for": {}, "of": {}, "by": {}, "with": {}, "is": {}, "are": {}, "was": {}, "were": {}, "be": {}, "been": {}, "being": {}, "have": {}, "has": {}, "had": {}, "do": {}, "does": {}, "did": {}, "will": {}, "would": {}, "could": {}, "should": {}, "may": {}, "might": {}, "must": {}, "can": {}, "that": {}, "which": {}, "who": {}, "when": {}, "where": {}, "why": {}, "how": {}, "as": {}, "from": {}, "up": {}, "down": {}, "out": {}, "so": {}, "if": {}, "any": {}, "all": {}, "each": {}, "every": {}, "both": {}, "few": {}, "more": {}, "most": {}, "other": {}, "same": {}, "such": {}, "no": {}, "nor": {}, "not": {}, "only": {}, "than": {}, "too": {}, "very": {}, "just": {}, "what": {}, "then": {}, "you": {}, "your": {}, "his": {}, "her": {}, "its": {}, "our": {}, "their": {}, "this": {}, "these": {}, "happened": {}, "happen": {},
+}
 
 // Fingerprint builds the dedup query string for a finding: the alert/title, the
 // top root-cause signature, and the affected workload. It is a BM25 query (fuzzy),
@@ -60,4 +69,50 @@ func (n Novelty) IsDuplicate(ctx context.Context, inv providers.Investigation) (
 		return true, top.Entry, nil
 	}
 	return false, catalog.Entry{}, nil
+}
+
+// DupFingerprint is a deterministic identity for "the same problem on the same
+// resource": the affected-resource ref plus the sorted significant-token set of the
+// top root cause, hashed. Unlike Fingerprint (a fuzzy BM25 query), it is stable
+// across the LLM's prose phrasing, so two investigations of one incident hash
+// alike. It returns "" when there is neither a resource nor a cause to key on — an
+// empty fingerprint must never match another.
+func DupFingerprint(inv providers.Investigation) string {
+	ref := strings.ToLower(inv.Resource.Ref())
+	cause := ""
+	if len(inv.RootCauses) > 0 {
+		cause = inv.RootCauses[0].Summary
+	}
+	tokens := tokenSet(cause)
+	if ref == "" && len(tokens) == 0 {
+		return ""
+	}
+	sum := sha256.Sum256([]byte(ref + "|" + strings.Join(tokens, " ")))
+	return hex.EncodeToString(sum[:])
+}
+
+// tokenSet lowercases s, splits on non-alphanumeric runes, drops generic English
+// stopwords and tokens shorter than 3 chars, dedupes, and sorts — an order-independent
+// significant-token set so reworded phrasings of one cause normalize to the same key.
+func tokenSet(s string) []string {
+	fields := strings.FieldsFunc(strings.ToLower(s), func(r rune) bool {
+		return !unicode.IsLetter(r) && !unicode.IsDigit(r)
+	})
+	seen := make(map[string]struct{}, len(fields))
+	var out []string
+	for _, f := range fields {
+		if len(f) < 3 {
+			continue
+		}
+		if _, ok := stopWords[f]; ok {
+			continue
+		}
+		if _, ok := seen[f]; ok {
+			continue
+		}
+		seen[f] = struct{}{}
+		out = append(out, f)
+	}
+	sort.Strings(out)
+	return out
 }

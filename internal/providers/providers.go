@@ -12,6 +12,7 @@ package providers
 
 import (
 	"context"
+	"strings"
 	"time"
 )
 
@@ -379,6 +380,7 @@ type KBEntry struct {
 	Resource    string
 	Tags        []string
 	Body        string // markdown
+	Fingerprint string // deterministic dedup fingerprint (see curator.DupFingerprint)
 }
 
 // Ref is a URL handle to a created issue or PR.
@@ -417,4 +419,31 @@ type ToolCall struct {
 	ID   string
 	Name string
 	Args string // JSON
+}
+
+const fingerprintMarkerPrefix = "<!-- runlore-fingerprint: "
+
+// FingerprintMarker renders a hidden PR-body marker carrying the dedup fingerprint,
+// so an open PR's fingerprint is recoverable from the PR listing without fetching
+// file contents. It returns "" for an empty fingerprint so callers may append it
+// unconditionally.
+func FingerprintMarker(fp string) string {
+	if fp == "" {
+		return ""
+	}
+	return fingerprintMarkerPrefix + fp + " -->"
+}
+
+// ParseFingerprintMarker extracts the fingerprint from a PR body, or "" if absent.
+func ParseFingerprintMarker(body string) string {
+	i := strings.Index(body, fingerprintMarkerPrefix)
+	if i < 0 {
+		return ""
+	}
+	rest := body[i+len(fingerprintMarkerPrefix):]
+	j := strings.Index(rest, " -->")
+	if j < 0 {
+		return ""
+	}
+	return strings.TrimSpace(rest[:j])
 }

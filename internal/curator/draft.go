@@ -64,6 +64,7 @@ func draftKBEntry(inv providers.Investigation) providers.KBEntry {
 		Resource:    inv.Resource.Ref(),
 		Tags:        []string{"runlore", "incident"},
 		Body:        b.String(),
+		Fingerprint: DupFingerprint(inv),
 	}
 }
 

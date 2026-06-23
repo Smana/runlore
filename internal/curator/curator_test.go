@@ -66,11 +66,18 @@ func TestCurateNovelHighQualityOpensPR(t *testing.T) {
 }
 
 func TestCurateDuplicateCoalescesNoPR(t *testing.T) {
-	// An open PR already covers this incident (matching title), and the catalog does
-	// NOT (fakeScored{} returns no hit) — so we fall through to the open-PR coalesce
-	// path, which comments on the existing PR rather than filing a new one.
-	f := &fakeForge{openPRs: []providers.CuratedIssue{{Number: 48, Title: "KB: HarborRegistryDown"}}}
-	ref, err := newCurator(f, fakeScored{}).Curate(context.Background(), goodFinding())
+	// An open PR already covers this incident (matching fingerprint marker in body),
+	// and the catalog does NOT (fakeScored{} returns no hit) — so we fall through to
+	// the open-PR coalesce path, which comments on the existing PR rather than filing
+	// a new one.
+	inv := goodFinding()
+	openPR := providers.CuratedIssue{
+		Number: 48,
+		Title:  "KB: HarborRegistryDown",
+		Body:   "Drafted by RunLore\n\n" + providers.FingerprintMarker(DupFingerprint(inv)),
+	}
+	f := &fakeForge{openPRs: []providers.CuratedIssue{openPR}}
+	ref, err := newCurator(f, fakeScored{}).Curate(context.Background(), inv)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -82,6 +89,56 @@ func TestCurateDuplicateCoalescesNoPR(t *testing.T) {
 	}
 	if ref.URL != "" {
 		t.Fatalf("duplicate ref should be empty, got %s", ref.URL)
+	}
+}
+
+func testLogger() *slog.Logger {
+	return slog.New(slog.NewTextHandler(io.Discard, nil))
+}
+
+func TestCurateDistinctTitleSameFingerprintCoalesces(t *testing.T) {
+	inv := providers.Investigation{
+		Title:      "freshly reworded title the LLM produced this time",
+		Confidence: 0.9,
+		Resource:   providers.Workload{Namespace: "apps", Name: "web"},
+		RootCauses: []providers.Hypothesis{{Summary: "image tag rollout broke readiness", Evidence: []string{"e"}}},
+	}
+	openPR := providers.CuratedIssue{
+		Number: 7,
+		Title:  "KB: a completely different earlier title",
+		Body:   "Drafted by RunLore\n\n" + providers.FingerprintMarker(DupFingerprint(inv)),
+	}
+	f := &fakeForge{openPRs: []providers.CuratedIssue{openPR}}
+	c := &Curator{Forge: f, MinConfidence: 0.5, Log: testLogger()}
+	if _, err := c.Curate(context.Background(), inv); err != nil {
+		t.Fatalf("Curate: %v", err)
+	}
+	if f.openedPR != nil {
+		t.Fatal("a same-fingerprint finding must coalesce, not open a second PR")
+	}
+	if len(f.commented) != 1 || f.commented[0] != 7 {
+		t.Fatalf("expected a coalesce comment on PR 7, got %+v", f.commented)
+	}
+}
+
+func TestCurateDifferentFingerprintOpensSecondPR(t *testing.T) {
+	inv := providers.Investigation{
+		Title:      "apps/web readiness failure",
+		Confidence: 0.9,
+		Resource:   providers.Workload{Namespace: "apps", Name: "web"},
+		RootCauses: []providers.Hypothesis{{Summary: "image tag rollout broke readiness", Evidence: []string{"e"}}},
+	}
+	openPR := providers.CuratedIssue{
+		Number: 7, Title: "KB: unrelated",
+		Body: "Drafted by RunLore\n\n" + providers.FingerprintMarker("0000ffff_a_different_hash"),
+	}
+	f := &fakeForge{openPRs: []providers.CuratedIssue{openPR}}
+	c := &Curator{Forge: f, MinConfidence: 0.5, Log: testLogger()}
+	if _, err := c.Curate(context.Background(), inv); err != nil {
+		t.Fatalf("Curate: %v", err)
+	}
+	if f.openedPR == nil {
+		t.Fatal("a different-fingerprint finding must open its own PR")
 	}
 }
 
