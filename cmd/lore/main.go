@@ -562,11 +562,11 @@ func runEvalLive(cfg *config.Config, scnDir, recordDir, reportDir, prevReport, s
 	}
 	log := slog.New(slog.NewTextHandler(os.Stderr, nil))
 	ctx := context.Background()
-	model, tools, _, _ := buildModelAndTools(ctx, cfg, gitOpsFromKube(cfg, log), log)
+	model, tools, recall, _ := buildModelAndTools(ctx, cfg, gitOpsFromKube(cfg, log), log)
 	judge := eval.ModelJudge{Model: buildJudgeModel(cfg, jProvider, jBaseURL, jModel, jKeyEnv)}
 
 	runner := &eval.LiveRunner{
-		Model: model, BaseTools: tools, Judge: judge, Steps: shellStepRunner{}, Log: log, N: n,
+		Model: model, BaseTools: tools, Judge: judge, Steps: shellStepRunner{}, Log: log, N: n, Recall: recall,
 		OnRecord: func(scn eval.Scenario, calls []eval.Call) {
 			if err := eval.WriteCase(recordDir, eval.RecordedCase(scn, calls)); err != nil {
 				log.Warn("record case failed", "id", scn.ID, "err", err)
