@@ -95,18 +95,19 @@ creds), securityContext, and the catalog/persistence volume (so the curate run r
 the same config + ledger), but runs `args: [curate, --config, /etc/runlore/runlore.yaml]`
 on `curate.cronjob.schedule` (default `"0 * * * *"` — hourly). `concurrencyPolicy:
 Forbid`, `successfulJobsHistoryLimit`/`failedJobsHistoryLimit` set, `restartPolicy:
-Never`. `values.yaml` gains:
+Never`. `values.yaml` gains a top-level deploy block:
 
 ```yaml
 curate:
   cronjob:
     enabled: false
     schedule: "0 * * * *"
-  staleAfter: ""   # e.g. "720h"; rendered into config.curate.stale_after when set
 ```
 
-(The `staleAfter` value flows into the rendered config ConfigMap; the CronJob reads
-it from the same `runlore.yaml`.)
+The staleness window is **app config**, not a deploy value: the ConfigMap renders
+`.Values.config` verbatim (`toYaml`), so it is set under `config.curate.stale_after`
+in `values.yaml` and the CronJob reads it from the same mounted `runlore.yaml`. No
+`configmap.yaml` change is needed.
 
 ## Testing
 
@@ -142,6 +143,5 @@ it from the same `runlore.yaml`.)
 - `internal/config/config.go` — `Curate.StaleAfter`.
 - `cmd/lore/main.go` — `runCurate` wires Dedup+Lifecycle; updated comment.
 - `deploy/helm/runlore/templates/cronjob.yaml` — **new**, opt-in.
-- `deploy/helm/runlore/values.yaml` — `curate.cronjob.*` + `curate.staleAfter`.
-- `deploy/helm/runlore/templates/configmap.yaml` — render `curate.stale_after` when set (if the config block is templated there).
+- `deploy/helm/runlore/values.yaml` — `curate.cronjob.*` (deploy) + `config.curate.stale_after` (app config, rendered into the ConfigMap by the existing `toYaml`).
 - corresponding `_test.go` files above.
