@@ -1062,18 +1062,22 @@ func buildInvestigator(ctx context.Context, cfg *config.Config, gp providers.Git
 			// Record the outcome "open" first: this investigation happened for an
 			// incident, with the answer we used (recall vs fresh). A matching
 			// resolved-alert webhook later stamps whether it actually resolved.
-			if err := ledger.Open(outcome.Event{
-				Fingerprint: found.Fingerprint,
-				Kind:        outcomeKind(found.Recalled),
-				Entry:       found.RecalledEntry,
-				Title:       found.Title,
-				Resource:    resourceStr(found.Resource),
-				At:          time.Now(),
-			}); err != nil {
-				log.Warn("outcome ledger open failed", "fingerprint", found.Fingerprint, "err", err)
-			}
-			if metrics != nil {
-				metrics.OutcomesOpened.Add(ctx, 1, metric.WithAttributes(attribute.String("kind", outcomeKind(found.Recalled))))
+			// Skip sources without an alert fingerprint (GitOps watch, reinvestigate
+			// poller) — they could never be matched by a resolved-alert webhook.
+			if found.Fingerprint != "" {
+				if err := ledger.Open(outcome.Event{
+					Fingerprint: found.Fingerprint,
+					Kind:        outcomeKind(found.Recalled),
+					Entry:       found.RecalledEntry,
+					Title:       found.Title,
+					Resource:    resourceStr(found.Resource),
+					At:          time.Now(),
+				}); err != nil {
+					log.Warn("outcome ledger open failed", "fingerprint", found.Fingerprint, "err", err)
+				}
+				if metrics != nil {
+					metrics.OutcomesOpened.Add(ctx, 1, metric.WithAttributes(attribute.String("kind", outcomeKind(found.Recalled))))
+				}
 			}
 			// Post-investigation action handling, by mode. The loop has already
 			// filtered found.Actions to the envelope (rung 1). auto and approvals are
