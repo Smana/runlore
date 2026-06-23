@@ -37,6 +37,17 @@ func TestApplyDefaultsRateLimitWindow(t *testing.T) {
 	}
 }
 
+func TestApplyDefaultsInstantRecall(t *testing.T) {
+	// enabled with no tuning → margin and solo gates must default to active values.
+	var c Config
+	c.Catalog.InstantRecall.Enabled = true
+	applyDefaults(&c)
+	ir := c.Catalog.InstantRecall
+	if ir.MinScore != 1.0 || ir.MarginGap != 1.0 || ir.SoloFloor != 4.0 {
+		t.Fatalf("instant-recall defaults not applied: %+v", ir)
+	}
+}
+
 func TestApplyDefaultsDoesNotOverride(t *testing.T) {
 	// Explicit values must not be overwritten.
 	var c Config
