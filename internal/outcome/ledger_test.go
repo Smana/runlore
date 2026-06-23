@@ -108,3 +108,95 @@ func TestResolveMarksEpisodeResolved(t *testing.T) {
 		t.Fatalf("a matched resolve must set Resolved=true: %+v", ep)
 	}
 }
+
+func TestEpisodesReconstructsRecurrence(t *testing.T) {
+	l, _ := New(filepath.Join(t.TempDir(), "o.jsonl"))
+	t0 := time.Unix(5000, 0)
+	for i := 0; i < 3; i++ {
+		_ = l.Open(Event{Fingerprint: "fp", Kind: "recall", Entry: "x.md", At: t0.Add(time.Duration(i) * time.Second)})
+	}
+	_, _, _ = l.Resolve("fp", t0.Add(10*time.Second))
+	eps, err := l.Episodes()
+	if err != nil {
+		t.Fatalf("Episodes: %v", err)
+	}
+	if len(eps) != 3 {
+		t.Fatalf("want 3 episodes (recurrence preserved), got %d", len(eps))
+	}
+	resolved := 0
+	for _, e := range eps {
+		if e.Resolved {
+			resolved++
+		}
+	}
+	if resolved != 1 {
+		t.Fatalf("want exactly 1 resolved episode, got %d", resolved)
+	}
+}
+
+func TestEpisodesResolvedPairingAndDuration(t *testing.T) {
+	l, _ := New(filepath.Join(t.TempDir(), "o.jsonl"))
+	t0 := time.Unix(6000, 0)
+	_ = l.Open(Event{Fingerprint: "fp", Kind: "recall", Entry: "first.md", At: t0})
+	_ = l.Open(Event{Fingerprint: "fp", Kind: "recall", Entry: "second.md", At: t0.Add(time.Second)})
+	_, _, _ = l.Resolve("fp", t0.Add(5*time.Second))
+	eps, _ := l.Episodes()
+	var second Episode
+	for _, e := range eps {
+		if e.Entry == "first.md" && e.Resolved {
+			t.Fatal("LIFO: the earlier open must remain unresolved")
+		}
+		if e.Entry == "second.md" {
+			second = e
+		}
+	}
+	if !second.Resolved || second.Duration != 4*time.Second {
+		t.Fatalf("most-recent open should resolve with 4s duration: %+v", second)
+	}
+}
+
+func TestEpisodesEmptyAndDisabled(t *testing.T) {
+	dis, _ := New("")
+	if eps, err := dis.Episodes(); err != nil || eps != nil {
+		t.Fatalf("disabled: want nil,nil; got %v,%v", eps, err)
+	}
+	empty, _ := New(filepath.Join(t.TempDir(), "o.jsonl"))
+	if eps, err := empty.Episodes(); err != nil || len(eps) != 0 {
+		t.Fatalf("empty ledger: want 0 episodes; got %v,%v", eps, err)
+	}
+}
+
+func TestEpisodesOrphanResolveSkipped(t *testing.T) {
+	l, _ := New(filepath.Join(t.TempDir(), "o.jsonl"))
+	t0 := time.Unix(9000, 0)
+	// A resolve with no prior open is dropped; a later open for the same fingerprint stays unresolved.
+	_, _, _ = l.Resolve("fp", t0)
+	_ = l.Open(Event{Fingerprint: "fp", Kind: "recall", Entry: "x.md", At: t0.Add(time.Second)})
+	eps, err := l.Episodes()
+	if err != nil {
+		t.Fatalf("Episodes: %v", err)
+	}
+	if len(eps) != 1 || eps[0].Resolved {
+		t.Fatalf("orphan resolve must be dropped and the later open left unresolved: %+v", eps)
+	}
+}
+
+func TestEpisodesTwoFingerprintsInterleaved(t *testing.T) {
+	l, _ := New(filepath.Join(t.TempDir(), "o.jsonl"))
+	t0 := time.Unix(9100, 0)
+	_ = l.Open(Event{Fingerprint: "A", Kind: "recall", Entry: "a.md", At: t0})
+	_ = l.Open(Event{Fingerprint: "B", Kind: "recall", Entry: "b.md", At: t0.Add(time.Second)})
+	_, _, _ = l.Resolve("A", t0.Add(2*time.Second))
+	eps, _ := l.Episodes()
+	if len(eps) != 2 {
+		t.Fatalf("want 2 episodes, got %d", len(eps))
+	}
+	for _, e := range eps {
+		if e.Entry == "a.md" && !e.Resolved {
+			t.Fatalf("A should be resolved: %+v", e)
+		}
+		if e.Entry == "b.md" && e.Resolved {
+			t.Fatalf("B should remain unresolved: %+v", e)
+		}
+	}
+}

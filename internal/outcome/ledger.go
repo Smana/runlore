@@ -119,6 +119,46 @@ func (l *Ledger) Open(e Event) error {
 	return nil
 }
 
+// Episodes replays the full ledger and turns every open into an Episode, pairing
+// each resolve with the most-recent (LIFO) unresolved open for the same
+// fingerprint — so recurrence is preserved (N opens + 1 resolve ⇒ N episodes, 1
+// resolved). Episodes are returned in open order; all kinds are included. A
+// disabled/empty ledger yields nil.
+func (l *Ledger) Episodes() ([]Episode, error) {
+	if !l.enabled() {
+		return nil, nil
+	}
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	events, err := l.readEvents()
+	if err != nil {
+		return nil, err
+	}
+	var out []Episode
+	pending := map[string][]int{} // fingerprint → stack of indices into out
+	for _, e := range events {
+		switch e.Event {
+		case "open":
+			out = append(out, Episode{
+				Kind: e.Kind, Entry: e.Entry, Title: e.Title, Resource: e.Resource,
+				OpenedAt: e.At,
+			})
+			pending[e.Fingerprint] = append(pending[e.Fingerprint], len(out)-1)
+		case "resolve":
+			stack := pending[e.Fingerprint]
+			if len(stack) == 0 {
+				continue // a resolve with no pending open (mirrors live ok=false)
+			}
+			i := stack[len(stack)-1]
+			pending[e.Fingerprint] = stack[:len(stack)-1]
+			out[i].ResolvedAt = e.At
+			out[i].Duration = e.At.Sub(out[i].OpenedAt)
+			out[i].Resolved = true
+		}
+	}
+	return out, nil
+}
+
 // Resolve records that an incident's alert cleared. When it matches an open
 // investigation it returns the Episode (with duration + kind) and ok=true.
 func (l *Ledger) Resolve(fp string, at time.Time) (Episode, bool, error) {
