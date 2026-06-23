@@ -35,6 +35,25 @@ config:
   leader_election:
     enabled: true
     name: runlore-leader
+  # Storm cost-control: fold correlated alerts into one investigation and cap the
+  # per-window investigation budget. Defaults (30s debounce, 2m max-wait, 50 batch,
+  # 10m cooldown, 1h window) are applied by the agent when fields are omitted.
+  investigation:
+    coalesce:
+      enabled: false
+      # debounce: 30s           # flush batch quiet for this long
+      # max_wait: 2m            # force flush even if still receiving alerts
+      # max_batch: 50           # flush when batch reaches this size
+      # cooldown: 10m           # suppress re-alerts for a group after a flush
+      # correlation_labels: []  # group by label values instead of AM groupKey
+    rate_limit:
+      max_per_window: 0        # 0 = unlimited; set e.g. 20 to cap investigations/hour
+      # window: 1h
+      # max_requeues: 3
+  # OpenTelemetry self-instrumentation (Prometheus-format /metrics endpoint).
+  # Enable when a VMServiceScrape (or ServiceMonitor) will scrape this agent.
+  telemetry:
+    metrics_enabled: false
   # model:
   #   base_url: https://vllm.svc/v1
   #   model: <model-name>
@@ -74,7 +93,7 @@ podDisruptionBudget:
 
 service:
   type: ClusterIP
-  port: 8080                          # the /webhook/alertmanager + /healthz port
+  port: 8080                          # the /webhook/alertmanager + /healthz + /metrics port
 
 serviceAccount:
   create: true
@@ -104,6 +123,14 @@ networkPolicy:
   # endpoint (host entity, 169.254.170.23:80). Required for the AWS cloud provider
   # on Cilium clusters — a plain NetworkPolicy can't match the host-network target.
   awsPodIdentity: false
+
+# VictoriaMetrics VMServiceScrape: creates a scrape target for the /metrics endpoint.
+# Requires the VictoriaMetrics Operator CRD to be installed in the cluster.
+# Enable together with config.telemetry.metrics_enabled.
+vmServiceScrape:
+  enabled: false
+  interval: 30s     # scrape interval
+  path: /metrics    # metrics endpoint path (served on service.port)
 
 # The agent runs cluster-wide informers (Kustomizations/HelmReleases), a bleve
 # catalog index, a git-sync mirror, and multi-tool LLM investigations. A thorough

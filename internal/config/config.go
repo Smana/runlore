@@ -33,6 +33,9 @@ type Config struct {
 	Cloud   Cloud    `yaml:"cloud"`   // cloud-side context (AWS); empty Provider disables it
 
 	Server ServerConfig `yaml:"server"` // HTTP ingress (webhook authentication)
+
+	Investigation Investigation `yaml:"investigation"` // coalescing + rate-limit + per-investigation token controls
+	Telemetry     Telemetry     `yaml:"telemetry"`     // OpenTelemetry metrics
 }
 
 // Endpoint is a backend base URL; empty disables the corresponding tool.
@@ -55,6 +58,38 @@ type ServerConfig struct {
 	// POST /webhook/alertmanager as "Authorization: Bearer <token>". Empty leaves
 	// the webhook unauthenticated (rejected by Validate when actions.mode=auto).
 	WebhookTokenEnv string `yaml:"webhook_token_env"`
+}
+
+// Investigation holds cost/throughput controls on the alert→investigation→LLM path.
+type Investigation struct {
+	Coalesce                  Coalesce  `yaml:"coalesce"`
+	RateLimit                 RateLimit `yaml:"rate_limit"`
+	MaxSteps                  int       `yaml:"max_steps"`                    // 0 ⇒ loop default (20)
+	MaxToolOutputBytes        int       `yaml:"max_tool_output_bytes"`        // 0 ⇒ unlimited
+	MaxTokensPerInvestigation int       `yaml:"max_tokens_per_investigation"` // 0 ⇒ unlimited
+}
+
+// Coalesce folds correlated incidents into one investigation.
+type Coalesce struct {
+	Enabled           bool     `yaml:"enabled"`
+	Debounce          Duration `yaml:"debounce"`
+	MaxWait           Duration `yaml:"max_wait"`
+	MaxBatch          int      `yaml:"max_batch"`
+	Cooldown          Duration `yaml:"cooldown"`
+	CorrelationLabels []string `yaml:"correlation_labels"` // empty ⇒ AM groupKey, else namespace+label values
+}
+
+// RateLimit caps investigation starts per sliding window.
+type RateLimit struct {
+	MaxPerWindow int      `yaml:"max_per_window"` // 0 ⇒ unlimited
+	Window       Duration `yaml:"window"`
+	MaxRequeues  int      `yaml:"max_requeues"` // drop a key after this many backoff requeues
+}
+
+// Telemetry configures OpenTelemetry metrics export.
+type Telemetry struct {
+	MetricsEnabled bool   `yaml:"metrics_enabled"` // serve OTel metrics on GET /metrics (Prometheus exposition)
+	OTLPEndpoint   string `yaml:"otlp_endpoint"`   // optional OTLP push (phase-2); empty ⇒ scrape-only
 }
 
 // LeaderElection configures high availability. When enabled, replicas elect a
@@ -174,6 +209,7 @@ type Incident struct {
 	Labels      map[string]string
 	StartsAt    time.Time
 	Fingerprint string // stable alert identity, used for dedup
+	GroupKey    string // Alertmanager group identity (shared by all alerts in one webhook POST)
 }
 
 // Matches reports whether an incident passes this trigger policy: enabled,

@@ -4,14 +4,19 @@ import (
 	"context"
 	"io"
 	"log/slog"
+	"net/http"
+	"net/http/httptest"
+	"strings"
 	"testing"
 
-	"strings"
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/metric/noop"
 
 	"github.com/Smana/runlore/internal/action"
 	"github.com/Smana/runlore/internal/catalog"
 	"github.com/Smana/runlore/internal/config"
 	"github.com/Smana/runlore/internal/providers"
+	"github.com/Smana/runlore/internal/telemetry"
 )
 
 type fakeScored struct{ hits []catalog.ScoredEntry }
@@ -188,5 +193,59 @@ func TestLoopInvestigator(t *testing.T) {
 	}
 	if model.i != 2 {
 		t.Fatalf("expected exactly 2 model calls, got %d", model.i)
+	}
+}
+
+// bigTool is a fake Tool that returns a string of length n filled with 'z'.
+type bigTool struct{ size int }
+
+func (b bigTool) Name() string        { return "big_tool" }
+func (b bigTool) Description() string { return "returns large output" }
+func (b bigTool) Schema() string      { return `{"type":"object","properties":{}}` }
+func (b bigTool) Call(_ context.Context, _ string) (string, error) {
+	return strings.Repeat("z", b.size), nil
+}
+
+// TestLoopToolOutputTruncatedMetric verifies that oversized tool outputs are
+// truncated and that ToolOutputTruncatedBytes is incremented via OTel metrics.
+func TestLoopToolOutputTruncatedMetric(t *testing.T) {
+	t.Cleanup(func() { otel.SetMeterProvider(noop.NewMeterProvider()) })
+
+	h, shutdown, err := telemetry.Setup(context.Background())
+	if err != nil {
+		t.Fatalf("telemetry setup: %v", err)
+	}
+	t.Cleanup(func() { _ = shutdown(context.Background()) })
+
+	m := telemetry.NewMetrics()
+
+	model := &scriptModel{responses: []providers.CompletionResponse{
+		// step 1: call big_tool
+		{ToolCalls: []providers.ToolCall{{ID: "1", Name: "big_tool", Args: `{}`}}},
+		// step 2: submit findings
+		{ToolCalls: []providers.ToolCall{{ID: "2", Name: submitFindingsName,
+			Args: `{"confidence":0.7,"root_causes":[{"summary":"found it"}]}`}}},
+	}}
+
+	li := &LoopInvestigator{
+		Model:              model,
+		Tools:              []Tool{bigTool{size: 2000}},
+		Log:                slog.New(slog.NewTextHandler(io.Discard, nil)),
+		MaxSteps:           5,
+		MaxToolOutputBytes: 200, // 2000-byte output must be truncated to ~200
+		Metrics:            m,
+		OnComplete:         func(providers.Investigation) {},
+	}
+	if err := li.Investigate(context.Background(), Request{Title: "big output test"}); err != nil {
+		t.Fatalf("Investigate: %v", err)
+	}
+
+	// Scrape /metrics and confirm ToolOutputTruncatedBytes appeared.
+	req := httptest.NewRequest(http.MethodGet, "/metrics", nil)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	body := rec.Body.String()
+	if !strings.Contains(body, "runlore_tool_output_truncated_bytes_total") {
+		t.Fatalf("runlore_tool_output_truncated_bytes_total not in metrics:\n%s", body)
 	}
 }

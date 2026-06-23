@@ -1,0 +1,16 @@
+{{- if .Values.vmServiceScrape.enabled }}
+apiVersion: operator.victoriametrics.com/v1beta1
+kind: VMServiceScrape
+metadata:
+  name: {{ include "runlore.fullname" . }}
+  labels:
+    {{- include "runlore.labels" . | nindent 4 }}
+spec:
+  selector:
+    matchLabels:
+      {{- include "runlore.selectorLabels" . | nindent 6 }}
+  endpoints:
+    - port: http
+      path: {{ .Values.vmServiceScrape.path | default "/metrics" }}
+      interval: {{ .Values.vmServiceScrape.interval | default "30s" }}
+{{- end }}
