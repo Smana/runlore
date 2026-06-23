@@ -277,3 +277,92 @@ func TestLoopToolOutputTruncatedMetric(t *testing.T) {
 		t.Fatalf("runlore_tool_output_truncated_bytes_total not in metrics:\n%s", body)
 	}
 }
+
+// runawayModel always returns a tool call (never submit_findings), simulating a
+// model that keeps calling tools and never winds down regardless of nudges.
+type runawayModel struct {
+	calls int
+}
+
+func (m *runawayModel) Complete(_ context.Context, _ providers.CompletionRequest) (providers.CompletionResponse, error) {
+	m.calls++
+	// Return a benign no-op tool call so the loop has something to dispatch.
+	return providers.CompletionResponse{
+		ToolCalls: []providers.ToolCall{{ID: "r", Name: "noop_tool", Args: `{}`}},
+	}, nil
+}
+
+// TestLoopHardKillOnBudgetExhaustion verifies that, after the token-budget nudge
+// has fired, the loop hard-kills on the next over-budget check and delivers an
+// unresolved result rather than running to maxSteps.
+func TestLoopHardKillOnBudgetExhaustion(t *testing.T) {
+	model := &runawayModel{}
+	var got *providers.Investigation
+	var deliveries int
+	// MaxTokensPerInvestigation = 1 forces the nudge to fire on step 0 (the real
+	// system prompt alone exceeds 1 token), making the hard-kill trigger at step 1.
+	li := &LoopInvestigator{
+		Model:                     model,
+		Log:                       slog.New(slog.NewTextHandler(io.Discard, nil)),
+		MaxSteps:                  50, // far higher than the expected kill point
+		MaxTokensPerInvestigation: 1,  // triggers immediately; proves kill happens before maxSteps
+		OnComplete: func(inv providers.Investigation) {
+			deliveries++
+			got = &inv
+		},
+	}
+	if err := li.Investigate(context.Background(), Request{Title: "runaway", Fingerprint: "fp-kill"}); err != nil {
+		t.Fatalf("Investigate: %v", err)
+	}
+	// The loop must have terminated well before maxSteps.
+	if model.calls >= 50 {
+		t.Fatalf("hard-kill did not fire: model was called %d times (= maxSteps), loop ran to the end", model.calls)
+	}
+	// OnComplete must have been called exactly once.
+	if deliveries != 1 {
+		t.Fatalf("expected exactly 1 delivery, got %d", deliveries)
+	}
+	if got == nil {
+		t.Fatal("OnComplete never called")
+	}
+	// The delivered result must carry an Unresolved entry that mentions the budget.
+	if len(got.Unresolved) == 0 {
+		t.Fatalf("expected at least one Unresolved entry on hard-kill, got none; result: %+v", got)
+	}
+	foundBudget := false
+	for _, u := range got.Unresolved {
+		if strings.Contains(u, "budget") {
+			foundBudget = true
+			break
+		}
+	}
+	if !foundBudget {
+		t.Fatalf("Unresolved entry must mention 'budget'; got: %v", got.Unresolved)
+	}
+	// Fingerprint must be propagated for outcome-ledger attribution.
+	if got.Fingerprint != "fp-kill" {
+		t.Fatalf("expected fingerprint %q, got %q", "fp-kill", got.Fingerprint)
+	}
+}
+
+// TestLoopHardKillDisabledWhenNoBudget verifies that MaxTokensPerInvestigation=0
+// (unlimited) suppresses the hard-kill entirely: a runaway model runs for the full
+// maxSteps, exactly as before this change.
+func TestLoopHardKillDisabledWhenNoBudget(t *testing.T) {
+	model := &runawayModel{}
+	li := &LoopInvestigator{
+		Model:                     model,
+		Log:                       slog.New(slog.NewTextHandler(io.Discard, nil)),
+		MaxSteps:                  5,
+		MaxTokensPerInvestigation: 0, // disabled — no hard-kill
+		OnComplete:                func(providers.Investigation) {},
+	}
+	if err := li.Investigate(context.Background(), Request{Title: "unlimited"}); err != nil {
+		t.Fatalf("Investigate: %v", err)
+	}
+	// With no budget the loop must exhaust maxSteps normally (runaway model never
+	// calls submit_findings, so the loop runs until maxSteps).
+	if model.calls != 5 {
+		t.Fatalf("expected exactly 5 model calls (= maxSteps), got %d — hard-kill must not fire when budget=0", model.calls)
+	}
+}
