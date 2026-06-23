@@ -165,6 +165,33 @@ If those don't land, RunLore is a strong 18-month product with a copyable moat t
 
 Effort: **S** ≤1 day · **M** 2–4 days · **L** ≥1 week. Impact is on the learning loop unless noted.
 
+### 9.0 Implementation status (updated 2026-06-23)
+
+**11 of 18 roadmap items merged** — Waves 0–2 are essentially complete and the eval-validity cluster is closed. Each shipped as its own brainstorm → spec → plan → subagent-implemented → reviewed PR.
+
+| # | Item | Status |
+|---|------|--------|
+| 1 | BM25 scorer | ✅ merged (PR #70) |
+| 2 | discovered-resource read+write (disambiguation) | ✅ merged (PR #73) |
+| 3 | recall retrieval — wider k + structural pre-filter | ✅ merged (PR #74) |
+| 4 | eval entity precision + over-claim penalty (Track A) | ✅ merged (PR #80) |
+| 5 | eval stats — N≥10 + k-of-n + variance gate | ✅ merged (PR #78) |
+| 6 | recall closed-loop in eval + poisoned-entry proof | ✅ merged (PR #79) |
+| 8 | outcome `Episodes()` / `OpenCounts()` read API | ✅ merged (PR #71) |
+| 9 | outcome-driven decay (the thesis) | ✅ merged (PR #72) |
+| 10 | outcome attribution — per-fingerprint open, race/TTL | ✅ merged (PR #75) |
+| 14 | durability — PVC for ledger+audit + fsync | ✅ merged (PR #77) |
+| 15 | loop cost — hard token kill | ✅ merged (PR #76) |
+| 7 | eval into CI (k-of-n + fail-on-threshold) | ⏳ **next** — deps #4, #5 now both met |
+| 11 | curation dedup fingerprint | ⏳ pending (deps #2 ✅) |
+| 12 | curation Phase-2 — `lore curate` CronJob + dormant passes | ⏳ pending (deps #8 ✅) |
+| 13 | confirmatory evidence on recall | ⏳ pending (deps #2 ✅) |
+| 16 | `Verified`/provenance in `meetsBar` | ⏳ pending |
+| 17 | reversible `rollback` op | ⏳ pending |
+| 18 | HEAD-diff sync + `readyz` gate | ⏳ pending (deps #1 ✅) |
+
+Specs/plans for each merged item live under `docs/superpowers/specs/` and `docs/superpowers/plans/` on `main`. **Recommended next: #7** — wiring the now-trustworthy eval (deterministic Track-A entity gate from #4 + k-of-n from #5) into CI so it gates merges.
+
 ### 9.1 Ranked improvements
 
 | # | Area | What | Why | Effort | Impact | Depends |
@@ -209,33 +236,35 @@ Add `func (l *Ledger) Episodes() []Episode` (replay JSONL, reconstruct open→re
 
 ```
 Wave 0 — Make measurement trustworthy (parallel, no deps)
-  ├─ Slice 1 (#1)  BM25 scorer .............. S → unblocks 3, 9, 18
-  ├─ Slice 4 (#5)  N≥10 + k-of-n + variance . S → unblocks all eval claims
-  └─ Slice 3 (#8)  Episodes() read API ...... M → unblocks 9, 10, 12
+  ├─ ✅ Slice 1 (#1)  BM25 scorer .............. S → unblocks 3, 9, 18
+  ├─ ✅ Slice 4 (#5)  N≥10 + k-of-n + variance . S → unblocks all eval claims
+  └─ ✅ Slice 3 (#8)  Episodes() read API ...... M → unblocks 9, 10, 12
 
 Wave 1 — Make recall disambiguate, then prove it
-  ├─ Slice 2 (#2)  Discovered-resource read+write . M → unblocks 3,11,13
-  ├─ #3  resource pre-filter + cause indexing ..... M [needs 1,2]
-  └─ Slice 5 (#6)  Recall into eval + poisoned case  M [needs 1,2] ← first proof the loop closes
+  ├─ ✅ Slice 2 (#2)  Discovered-resource read+write . M → unblocks 3,11,13
+  ├─ ✅ #3  resource pre-filter + cause indexing ..... M [needs 1,2]
+  └─ ✅ Slice 5 (#6)  Recall into eval + poisoned case  M [needs 1,2] ← first proof the loop closes
 
 Wave 2 — Close the outcome→recall feedback edge (make-or-break)
-  ├─ #10 coalesce/race/TTL attribution ...... M [needs 8]
-  ├─ #9  outcome-driven decay ............... L [needs 1,2,8] ← THE THESIS
-  └─ #13 confirmatory evidence on recall .... M [needs 2]
+  ├─ ✅ #10 coalesce/race/TTL attribution ...... M [needs 8]
+  ├─ ✅ #9  outcome-driven decay ............... L [needs 1,2,8] ← THE THESIS
+  └─ ⏳ #13 confirmatory evidence on recall .... M [needs 2]
 
 Wave 3 — Compound faster + harden
-  ├─ #7  eval into CI ....................... S [needs 4,5]
-  ├─ #4  entity-level precision in eval ..... M [needs 7]
-  ├─ #11 deterministic dedup fingerprint .... M [needs 2]
-  ├─ #12 curate CronJob + 3 dormant passes .. M [needs 8]
-  └─ #16 Verified/provenance in meetsBar .... M
+  ├─ ⏳ #7  eval into CI ....................... S [needs 4,5] ← NEXT (deps met)
+  ├─ ✅ #4  entity-level precision in eval ..... M (Track A; landed ahead of #7)
+  ├─ ⏳ #11 deterministic dedup fingerprint .... M [needs 2]
+  ├─ ⏳ #12 curate CronJob + 3 dormant passes .. M [needs 8]
+  └─ ⏳ #16 Verified/provenance in meetsBar .... M
 
 Wave 4 — Reliability & durability (parallel, independent)
-  ├─ #14 StatefulSet/PVC + fsync ............ M
-  ├─ #15 hard token kill + context compaction  M
-  ├─ #18 HEAD-diff sync + readyz ............ M [needs 1]
-  └─ #17 reversible rollback op (product) ... L
+  ├─ ✅ #14 StatefulSet/PVC + fsync ............ M
+  ├─ ✅ #15 hard token kill + context compaction  M
+  ├─ ⏳ #18 HEAD-diff sync + readyz ............ M [needs 1]
+  └─ ⏳ #17 reversible rollback op (product) ... L
 ```
+
+> **Status (2026-06-23):** Waves 0–2 complete bar #13; the eval-validity cluster (#4/#5/#6) is done. Remaining: #7 (next), #11, #12, #13, #16, #17, #18. See §9.0 for the per-item PR map.
 
 **Fastest credible "we learn" demo:** Wave 0 + Slice 2 + Slice 5 + #9 — a poisoned/stale entry recalls, never resolves, decays below the floor on the next occurrence, triggers a fresh re-investigation that overturns it, observable in the eval harness *and* on the entry's git frontmatter.
 
