@@ -279,6 +279,7 @@ type kbFrontmatter struct {
 	Type        string   `yaml:"type"`
 	Title       string   `yaml:"title"`
 	Description string   `yaml:"description"`
+	Resource    string   `yaml:"resource,omitempty"`
 	Tags        []string `yaml:"tags,omitempty"`
 }
 
@@ -295,7 +296,7 @@ func prBody(e providers.KBEntry) string {
 }
 
 func renderEntry(e providers.KBEntry) string {
-	fm, _ := yaml.Marshal(kbFrontmatter{Type: e.Type, Title: e.Title, Description: e.Description, Tags: e.Tags})
+	fm, _ := yaml.Marshal(kbFrontmatter{Type: e.Type, Title: e.Title, Description: e.Description, Resource: e.Resource, Tags: e.Tags})
 	var b strings.Builder
 	b.WriteString("---\n")
 	b.Write(fm)
