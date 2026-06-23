@@ -54,8 +54,9 @@ config:
   # Enable when a VMServiceScrape (or ServiceMonitor) will scrape this agent.
   telemetry:
     metrics_enabled: false
-  # Phase-2 backlog groomer (lore curate) — staleness window for automatic curation.
-  # Only used when the curate CronJob is enabled.
+  # Phase-2 backlog groomer (lore curate) — lifecycle staleness window. Applied
+  # whenever `lore curate` runs (the CronJob or a manual invocation); 0 disables the
+  # stale-PR sweep.
   curate:
     stale_after: 720h   # close unprotected KB PRs idle longer than this; 0 disables
   # model:

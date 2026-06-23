@@ -185,13 +185,22 @@ func TestCurateLowQualityDropsNoArtifact(t *testing.T) {
 func TestCurateUnverifiedDropsNoArtifact(t *testing.T) {
 	inv := goodFinding()
 	inv.Verified = false // identical to the happy-path finding, but verify did not confirm it
-	f := &fakeForge{}
+	// An open PR carrying this finding's exact fingerprint marker: an unverified
+	// finding must NOT coalesce a comment onto it — a comment is a repo artifact too.
+	f := &fakeForge{openPRs: []providers.CuratedIssue{{
+		Number: 7,
+		Title:  "KB: prior",
+		Body:   "Drafted by RunLore\n\n" + providers.FingerprintMarker(DupFingerprint(inv)),
+	}}}
 	c := &Curator{Forge: f, MinConfidence: 0.75, Log: testLogger()}
 	if _, err := c.Curate(context.Background(), inv); err != nil {
 		t.Fatalf("Curate: %v", err)
 	}
 	if f.openedPR != nil {
 		t.Fatal("an unverified finding must not draft a KB PR")
+	}
+	if len(f.commented) != 0 {
+		t.Fatalf("an unverified finding must not coalesce a comment onto an open PR, got %v", f.commented)
 	}
 }
 

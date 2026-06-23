@@ -37,7 +37,17 @@ func (c *Curator) Curate(ctx context.Context, inv providers.Investigation) (prov
 		return providers.Ref{}, nil
 	}
 
-	// 1. dedup — catalog (observe the top-hit score on every check), then open PRs
+	// 1. quality gate FIRST — a finding below the bar (e.g. unverified) produces NO
+	// repo artifact at all: not a PR, and not a coalesce comment on an existing PR.
+	// Gating before dedup keeps the open-PR coalesce path from posting an unreviewed
+	// finding onto a verified PR.
+	if !meetsBar(inv, c.MinConfidence) {
+		c.Log.Info("finding below the quality bar; chat-only, no KB artifact",
+			"confidence", inv.Confidence, "root_causes", len(inv.RootCauses))
+		return providers.Ref{}, nil
+	}
+
+	// 2. dedup — catalog (observe the top-hit score on every check), then open PRs
 	nov := Novelty{Catalog: c.Catalog, DupScore: c.DupScore}
 	if top, ok, err := nov.TopHit(ctx, inv); err != nil {
 		c.Log.Warn("dedup: catalog search failed", "err", err)
@@ -57,13 +67,6 @@ func (c *Curator) Curate(ctx context.Context, inv providers.Investigation) (prov
 			return providers.Ref{}, fmt.Errorf("coalesce comment: %w", err)
 		}
 		c.Log.Info("finding coalesced onto an open PR", "pr", n)
-		return providers.Ref{}, nil
-	}
-
-	// 2. quality gate — below the bar ⇒ no repo artifact (chat alert only)
-	if !meetsBar(inv, c.MinConfidence) {
-		c.Log.Info("finding below the quality bar; chat-only, no KB artifact",
-			"confidence", inv.Confidence, "root_causes", len(inv.RootCauses))
 		return providers.Ref{}, nil
 	}
 

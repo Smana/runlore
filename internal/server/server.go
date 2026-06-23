@@ -93,7 +93,7 @@ func New(cfg *config.Config, enq investigate.Enqueuer, ready func() bool, acts A
 	})
 	mux.HandleFunc("GET /readyz", func(w http.ResponseWriter, _ *http.Request) {
 		if s.ready != nil && !s.ready() {
-			http.Error(w, "not ready (standby)", http.StatusServiceUnavailable)
+			http.Error(w, "not ready", http.StatusServiceUnavailable)
 			return
 		}
 		w.WriteHeader(http.StatusOK)

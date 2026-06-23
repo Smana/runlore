@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -145,4 +146,37 @@ func TestSyncerCloneAndPull(t *testing.T) {
 	if es, _, _ := Load(mirror); len(es) != 2 {
 		t.Fatalf("after pull: %d entries, want 2", len(es))
 	}
+}
+
+// TestRunReloadsOnlyOnChange locks down the core of #18 Part A: Run calls onSync on
+// the first sync, then NOT again while upstream HEAD is unchanged, and again once a
+// new commit moves HEAD. The `if changed { onSync() }` gate is what prevents the
+// every-poll full index rebuild.
+func TestRunReloadsOnlyOnChange(t *testing.T) {
+	src := initBareUpstream(t)
+	dir := t.TempDir()
+	s := &Syncer{URL: src, Branch: "main", Dir: dir, Log: testLogger()}
+
+	var calls atomic.Int32
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan struct{})
+	go func() { defer close(done); s.Run(ctx, 15*time.Millisecond, func() { calls.Add(1) }) }()
+
+	// Several poll intervals with no upstream change → onSync fires exactly once
+	// (the initial sync), regardless of how many ticks elapse.
+	time.Sleep(120 * time.Millisecond)
+	if n := calls.Load(); n != 1 {
+		t.Fatalf("with no HEAD change onSync must fire exactly once, fired %d", n)
+	}
+
+	// Move HEAD: the next poll detects the change and reloads once more.
+	commitToUpstream(t, src, "new.md", "# new")
+	time.Sleep(150 * time.Millisecond)
+	if n := calls.Load(); n != 2 {
+		t.Fatalf("a new upstream commit must trigger exactly one more onSync, total %d (want 2)", n)
+	}
+
+	cancel()
+	<-done
 }
