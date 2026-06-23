@@ -122,8 +122,11 @@ func (l *Ledger) Open(e Event) error {
 // Episodes replays the full ledger and turns every open into an Episode, pairing
 // each resolve with the most-recent (LIFO) unresolved open for the same
 // fingerprint — so recurrence is preserved (N opens + 1 resolve ⇒ N episodes, 1
-// resolved). Episodes are returned in open order; all kinds are included. A
-// disabled/empty ledger yields nil.
+// resolved). Pairing is order-independent: a resolve that arrives BEFORE its open
+// (a transient incident that cleared mid-investigation, so the resolve webhook
+// landed before the open was recorded) is buffered and paired with the next open
+// for that fingerprint. Episodes are returned in open order; all kinds are
+// included. A disabled/empty ledger yields nil.
 func (l *Ledger) Episodes() ([]Episode, error) {
 	if !l.enabled() {
 		return nil, nil
@@ -135,7 +138,17 @@ func (l *Ledger) Episodes() ([]Episode, error) {
 		return nil, err
 	}
 	var out []Episode
-	pending := map[string][]int{} // fingerprint → stack of indices into out
+	pendingOpens := map[string][]int{}          // fingerprint → stack of indices into out (LIFO)
+	pendingResolves := map[string][]time.Time{} // fingerprint → buffered resolve times (resolve-before-open)
+	resolveAt := func(i int, at time.Time) {
+		out[i].ResolvedAt = at
+		d := at.Sub(out[i].OpenedAt)
+		if d < 0 {
+			d = 0 // guard: a resolve recorded before its open is not negative duration
+		}
+		out[i].Duration = d
+		out[i].Resolved = true
+	}
 	for _, e := range events {
 		switch e.Event {
 		case "open":
@@ -143,17 +156,23 @@ func (l *Ledger) Episodes() ([]Episode, error) {
 				Kind: e.Kind, Entry: e.Entry, Title: e.Title, Resource: e.Resource,
 				OpenedAt: e.At,
 			})
-			pending[e.Fingerprint] = append(pending[e.Fingerprint], len(out)-1)
+			i := len(out) - 1
+			if rs := pendingResolves[e.Fingerprint]; len(rs) > 0 {
+				resolveAt(i, rs[0]) // pair with the earliest buffered (early) resolve
+				pendingResolves[e.Fingerprint] = rs[1:]
+				continue
+			}
+			pendingOpens[e.Fingerprint] = append(pendingOpens[e.Fingerprint], i)
 		case "resolve":
-			stack := pending[e.Fingerprint]
+			stack := pendingOpens[e.Fingerprint]
 			if len(stack) == 0 {
-				continue // a resolve with no pending open (mirrors live ok=false)
+				// No pending open yet — buffer this resolve for a later open.
+				pendingResolves[e.Fingerprint] = append(pendingResolves[e.Fingerprint], e.At)
+				continue
 			}
 			i := stack[len(stack)-1]
-			pending[e.Fingerprint] = stack[:len(stack)-1]
-			out[i].ResolvedAt = e.At
-			out[i].Duration = e.At.Sub(out[i].OpenedAt)
-			out[i].Resolved = true
+			pendingOpens[e.Fingerprint] = stack[:len(stack)-1]
+			resolveAt(i, e.At)
 		}
 	}
 	return out, nil
