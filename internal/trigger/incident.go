@@ -24,9 +24,10 @@ type amAlert struct {
 	Fingerprint string            `json:"fingerprint"`
 }
 
-// ParseAlertmanager reads an Alertmanager webhook body into incidents. Only
-// firing alerts are returned. "environment" is taken from the label of the same
-// name, falling back to "env".
+// ParseAlertmanager reads an Alertmanager webhook body into incidents. Both
+// firing and resolved alerts are returned, each tagged with its Status (the
+// caller routes resolved ones to the outcome ledger). "environment" is taken
+// from the label of the same name, falling back to "env".
 func ParseAlertmanager(r io.Reader) ([]config.Incident, error) {
 	var p amPayload
 	if err := json.NewDecoder(r).Decode(&p); err != nil {
@@ -34,9 +35,6 @@ func ParseAlertmanager(r io.Reader) ([]config.Incident, error) {
 	}
 	out := make([]config.Incident, 0, len(p.Alerts))
 	for _, a := range p.Alerts {
-		if a.Status != "" && a.Status != "firing" {
-			continue
-		}
 		startsAt, _ := time.Parse(time.RFC3339, a.StartsAt)
 		out = append(out, config.Incident{
 			AlertName:   a.Labels["alertname"],
@@ -47,6 +45,7 @@ func ParseAlertmanager(r io.Reader) ([]config.Incident, error) {
 			StartsAt:    startsAt,
 			Fingerprint: a.Fingerprint,
 			GroupKey:    p.GroupKey,
+			Status:      a.Status,
 		})
 	}
 	return out, nil

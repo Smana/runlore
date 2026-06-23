@@ -23,8 +23,11 @@ import (
 	"github.com/Smana/runlore/internal/coalesce"
 	"github.com/Smana/runlore/internal/config"
 	"github.com/Smana/runlore/internal/investigate"
+	"github.com/Smana/runlore/internal/outcome"
 	"github.com/Smana/runlore/internal/telemetry"
 	"github.com/Smana/runlore/internal/trigger"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/metric"
 )
 
 // Server handles incoming incident webhooks and applies the trigger policy.
@@ -39,8 +42,9 @@ type Server struct {
 	webhookToken string            // optional bearer token required on POST /webhook/alertmanager
 	approvers    map[string]bool   // Slack user IDs permitted to approve actions (empty = none)
 
-	coalescer   *coalesce.Coalescer // optional; folds correlated alerts before enqueueing
-	otelMetrics *telemetry.Metrics  // optional; nil-safe OTel counters
+	coalescer     *coalesce.Coalescer // optional; folds correlated alerts before enqueueing
+	otelMetrics   *telemetry.Metrics  // optional; nil-safe OTel counters
+	outcomeLedger *outcome.Ledger     // optional; records investigation outcomes (resolved alerts)
 
 	metrics http.Handler // optional; GET /metrics (OTel Prometheus exposition)
 	log     *slog.Logger
@@ -115,6 +119,11 @@ func (s *Server) SetCoalescer(cz *coalesce.Coalescer) {
 // ingress counters (alerts_received) emit even when coalescing is disabled.
 func (s *Server) SetMetrics(m *telemetry.Metrics) {
 	s.otelMetrics = m
+}
+
+// SetOutcomeLedger attaches the outcome ledger; resolved alerts are recorded into it.
+func (s *Server) SetOutcomeLedger(l *outcome.Ledger) {
+	s.outcomeLedger = l
 }
 
 func (s *Server) handlePause(w http.ResponseWriter, r *http.Request) {
@@ -360,6 +369,20 @@ func (s *Server) handleAlertmanager(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	for _, inc := range incidents {
+		if inc.Status == "resolved" {
+			if s.outcomeLedger != nil {
+				if ep, ok, err := s.outcomeLedger.Resolve(inc.Fingerprint, time.Now()); err != nil {
+					s.log.Warn("outcome ledger resolve failed", "fingerprint", inc.Fingerprint, "err", err)
+				} else if ok && s.otelMetrics != nil {
+					s.otelMetrics.IncidentsResolved.Add(r.Context(), 1)
+					s.otelMetrics.IncidentResolutionSeconds.Record(r.Context(), ep.Duration.Seconds())
+					if ep.Kind == "recall" {
+						s.otelMetrics.RecallOutcome.Add(r.Context(), 1, metric.WithAttributes(attribute.String("result", "resolved")))
+					}
+				}
+			}
+			continue
+		}
 		d := s.engine.Decide(inc)
 		s.log.Info("incident",
 			"alert", inc.AlertName, "severity", inc.Severity, "namespace", inc.Namespace,
