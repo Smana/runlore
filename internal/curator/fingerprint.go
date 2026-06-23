@@ -31,18 +31,33 @@ type Novelty struct {
 	DupScore float64                // top-hit BM25 score ≥ this ⇒ duplicate
 }
 
-// IsDuplicate returns true + the matching entry when the catalog already covers
-// this finding.
-func (n Novelty) IsDuplicate(ctx context.Context, inv providers.Investigation) (bool, catalog.Entry, error) { //nolint:revive // ctx kept for future remote-index symmetry
+// TopHit returns the highest-scoring catalog entry for a finding's fingerprint.
+// ok is false when no catalog is configured or there are no hits. It surfaces the
+// score regardless of any threshold, so callers can both observe it and decide.
+func (n Novelty) TopHit(ctx context.Context, inv providers.Investigation) (catalog.ScoredEntry, bool, error) { //nolint:revive // ctx kept for future remote-index symmetry
 	if n.Catalog == nil {
-		return false, catalog.Entry{}, nil
+		return catalog.ScoredEntry{}, false, nil
 	}
 	hits, err := n.Catalog.SearchScored(Fingerprint(inv), 1)
 	if err != nil {
+		return catalog.ScoredEntry{}, false, err
+	}
+	if len(hits) == 0 {
+		return catalog.ScoredEntry{}, false, nil
+	}
+	return hits[0], true, nil
+}
+
+// IsDuplicate returns true and the matching entry when the top hit's score is
+// ≥ DupScore. Returns false (novel) when no catalog is configured, there are no
+// hits, or the top score falls below the threshold.
+func (n Novelty) IsDuplicate(ctx context.Context, inv providers.Investigation) (bool, catalog.Entry, error) {
+	top, ok, err := n.TopHit(ctx, inv)
+	if err != nil || !ok {
 		return false, catalog.Entry{}, err
 	}
-	if len(hits) > 0 && hits[0].Score >= n.DupScore {
-		return true, hits[0].Entry, nil
+	if top.Score >= n.DupScore {
+		return true, top.Entry, nil
 	}
 	return false, catalog.Entry{}, nil
 }
