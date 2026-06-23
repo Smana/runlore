@@ -240,6 +240,15 @@ func runServe(args []string) error {
 			if len(incs) > 1 {
 				rep.Message = coalesce.Summarize(incs)
 			}
+			// Record every constituent fingerprint so each alert's resolve webhook
+			// matches an open (a single incident stays one fingerprint).
+			var fps []string
+			for _, inc := range incs {
+				if inc.Fingerprint != "" {
+					fps = append(fps, inc.Fingerprint)
+				}
+			}
+			rep.Fingerprints = fps
 			queue.Enqueue(rep)
 		}
 		cz = coalesce.New(coalesce.Config{
@@ -1057,20 +1066,29 @@ func buildInvestigator(ctx context.Context, cfg *config.Config, gp providers.Git
 			// resolved-alert webhook later stamps whether it actually resolved.
 			// Skip sources without an alert fingerprint (GitOps watch, reinvestigate
 			// poller) — they could never be matched by a resolved-alert webhook.
-			if found.Fingerprint != "" {
+			fps := found.Fingerprints
+			if len(fps) == 0 && found.Fingerprint != "" {
+				fps = []string{found.Fingerprint}
+			}
+			if len(fps) > 0 {
 				kind := outcomeKind(found.Recalled)
-				if err := ledger.Open(outcome.Event{
-					Fingerprint: found.Fingerprint,
-					Kind:        kind,
-					Entry:       found.RecalledEntry,
-					Title:       found.Title,
-					Resource:    found.Resource.Ref(),
-					At:          time.Now(),
-				}); err != nil {
-					log.Warn("outcome ledger open failed", "fingerprint", found.Fingerprint, "err", err)
-				}
-				if metrics != nil {
-					metrics.OutcomesOpened.Add(ctx, 1, metric.WithAttributes(attribute.String("kind", kind)))
+				now := time.Now()
+				// One open per constituent fingerprint (coalesced batches fan out), so
+				// every alert's resolve webhook can later match this investigation.
+				for _, fp := range fps {
+					if err := ledger.Open(outcome.Event{
+						Fingerprint: fp,
+						Kind:        kind,
+						Entry:       found.RecalledEntry,
+						Title:       found.Title,
+						Resource:    found.Resource.Ref(),
+						At:          now,
+					}); err != nil {
+						log.Warn("outcome ledger open failed", "fingerprint", fp, "err", err)
+					}
+					if metrics != nil {
+						metrics.OutcomesOpened.Add(ctx, 1, metric.WithAttributes(attribute.String("kind", kind)))
+					}
 				}
 			}
 			// Post-investigation action handling, by mode. The loop has already
