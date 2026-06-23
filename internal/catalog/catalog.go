@@ -5,6 +5,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 
 	"github.com/blevesearch/bleve/v2"
 	"github.com/blevesearch/bleve/v2/mapping"
@@ -16,6 +17,7 @@ type Catalog struct {
 	mu      sync.RWMutex
 	index   bleve.Index
 	entries []Entry
+	ready   atomic.Bool // set on first successful Reload; gates readyz on catalog warmth
 }
 
 // Searcher is the read surface used by the kb_search tool.
@@ -71,6 +73,7 @@ func (c *Catalog) Reload(dir string) ([]string, error) {
 	if old != nil {
 		_ = old.Close()
 	}
+	c.ready.Store(true)
 	return skipped, nil
 }
 
@@ -96,6 +99,13 @@ func (c *Catalog) Len() int {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
 	return len(c.entries)
+}
+
+// Ready reports whether the catalog has completed at least one successful load.
+// It stays false for a git-sync catalog (NewEmpty) until the first sync indexes,
+// so readyz can keep the leader out of rotation until its KB is warm.
+func (c *Catalog) Ready() bool {
+	return c.ready.Load()
 }
 
 // ScoredEntry is a search hit with its BM25 relevance score.

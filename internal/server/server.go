@@ -69,11 +69,12 @@ type Actions struct {
 	ApproverIDs  []string // Slack user IDs permitted to approve actions
 }
 
-// New builds a Server. ready reports whether this replica should serve (leadership);
-// nil = always ready. acts (optional) enables the rung-2 approval endpoints + the
+// New builds a Server. ready reports whether this replica should serve; nil =
+// always ready. The caller composes what readiness means (e.g. leadership AND a
+// warm catalog). acts (optional) enables the rung-2 approval endpoints + the
 // rung-3 kill-switch, gated by acts.Token (X-Approval-Token). /healthz is liveness;
-// /readyz is readiness (gated by ready, leader-only). metricsHandler (optional)
-// serves OTel Prometheus metrics on GET /metrics when non-nil.
+// /readyz is readiness (gated by the caller-supplied ready func). metricsHandler
+// (optional) serves OTel Prometheus metrics on GET /metrics when non-nil.
 func New(cfg *config.Config, enq investigate.Enqueuer, ready func() bool, acts Actions, metricsHandler http.Handler, log *slog.Logger) *Server {
 	approvers := make(map[string]bool, len(acts.ApproverIDs))
 	for _, id := range acts.ApproverIDs {

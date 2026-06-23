@@ -218,7 +218,7 @@ func runServe(args []string) error {
 		log.Info("outcome ledger enabled", "path", cfg.Outcome.LedgerPath)
 	}
 
-	inv := buildInvestigator(ctx, cfg, gitops, approvals, auto, metrics, ledger, log)
+	inv, cat := buildInvestigator(ctx, cfg, gitops, approvals, auto, metrics, ledger, log)
 	queue := investigate.NewQueue(inv, log)
 	var rlStarts *ratelimit.Window
 	if rl := cfg.Investigation.RateLimit; rl.MaxPerWindow > 0 {
@@ -299,7 +299,7 @@ func runServe(args []string) error {
 	if auto != nil {
 		acts.Pauser = auto // avoid a typed-nil interface when auto is disabled
 	}
-	srv := server.New(cfg, queue, leader.Load, acts, metricsHandler, log)
+	srv := server.New(cfg, queue, readyFunc(leader.Load, cat), acts, metricsHandler, log)
 	srv.SetMetrics(metrics) // ingress counters emit regardless of coalescing
 	srv.SetOutcomeLedger(ledger)
 	if cz != nil {
@@ -904,7 +904,7 @@ func runCatalogSync(args []string) error {
 		token = catalog.TokenFunc(ft)
 	}
 	syncer := &catalog.Syncer{URL: g.URL, Branch: g.Branch, Dir: dir, Token: token, Log: log}
-	if err := syncer.Sync(context.Background()); err != nil {
+	if _, err := syncer.Sync(context.Background()); err != nil {
 		return fmt.Errorf("sync: %w", err)
 	}
 	cat, err := catalog.New(dir)
@@ -1070,12 +1070,24 @@ func outcomeKind(recalled bool) string {
 	return "fresh"
 }
 
+// readyFunc gates readiness on leadership AND a warm catalog. A nil catalog
+// (none configured) imposes no catalog gate, so readiness is pure leadership.
+func readyFunc(leader func() bool, cat *catalog.Catalog) func() bool {
+	return func() bool {
+		if cat != nil && !cat.Ready() {
+			return false
+		}
+		return leader()
+	}
+}
+
 // buildInvestigator returns the LLM ReAct investigator when a model is configured,
-// otherwise the read-only LogInvestigator.
-func buildInvestigator(ctx context.Context, cfg *config.Config, gp providers.GitOpsProvider, approvals *action.Approvals, auto *action.Auto, metrics *telemetry.Metrics, ledger *outcome.Ledger, log *slog.Logger) investigate.Investigator {
+// otherwise the read-only LogInvestigator. It also returns the catalog (nil when
+// no model is configured or no catalog is wired).
+func buildInvestigator(ctx context.Context, cfg *config.Config, gp providers.GitOpsProvider, approvals *action.Approvals, auto *action.Auto, metrics *telemetry.Metrics, ledger *outcome.Ledger, log *slog.Logger) (investigate.Investigator, *catalog.Catalog) {
 	if !modelConfigured(cfg) {
 		log.Info("no model configured; using log-only investigator")
-		return investigate.LogInvestigator{Log: log}
+		return investigate.LogInvestigator{Log: log}, nil
 	}
 	model, tools, recall, cat := buildModelAndTools(ctx, cfg, gp, log)
 	if recall != nil {
@@ -1168,7 +1180,7 @@ func buildInvestigator(ctx context.Context, cfg *config.Config, gp providers.Git
 				log.Error("deliver findings", "err", err)
 			}
 		},
-	}
+	}, cat
 }
 
 // startGitOpsFailureWatch drains Flux WatchFailures into the queue.
