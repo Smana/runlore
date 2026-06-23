@@ -366,3 +366,74 @@ func TestLoopHardKillDisabledWhenNoBudget(t *testing.T) {
 		t.Fatalf("expected exactly 5 model calls (= maxSteps), got %d — hard-kill must not fire when budget=0", model.calls)
 	}
 }
+
+func TestInstantRecallUnconfirmedLowersConfidence(t *testing.T) {
+	// A recall hit with NO confirm tools available → confidence is capped at
+	// recallUnconfirmedCap before delivery.
+	var got providers.Investigation
+	li := &LoopInvestigator{
+		Tools:      nil, // intentionally omit pod_status/kube_events so confirmRecall returns gathered=false
+		Verify:     false,
+		OnComplete: func(inv providers.Investigation) { got = inv },
+		Log:        slog.New(slog.NewTextHandler(io.Discard, nil)),
+		Recall: &Recall{MinScore: 2.0, Catalog: fakeScored{hits: []catalog.ScoredEntry{
+			{Entry: catalog.Entry{Title: "Known incident", Description: "chart bump", Path: "known.md", Resource: "apps/web"}, Score: 5.0}}}},
+	}
+	req := Request{Title: "web down", Workload: providers.Workload{Namespace: "apps", Name: "web"}}
+	if err := li.Investigate(context.Background(), req); err != nil {
+		t.Fatalf("Investigate: %v", err)
+	}
+	if got.Confidence > recallUnconfirmedCap {
+		t.Fatalf("unconfirmed recall must be capped at %.2f, got %.2f", recallUnconfirmedCap, got.Confidence)
+	}
+}
+
+// contentRejectModel is a verify-pass model that makes its verdict content-dependent:
+//   - if req.Messages[0].Content contains the sentinel "current state — pod_status"
+//     the confirmatory evidence reached verify → reject (root causes emptied → test PASSES).
+//   - if the sentinel is absent (confirmRecall wiring removed) → keep (root cause survives
+//     → len(got.RootCauses)==1 → test FAILS), proving the test discriminates.
+type contentRejectModel struct{}
+
+func (contentRejectModel) Complete(_ context.Context, req providers.CompletionRequest) (providers.CompletionResponse, error) {
+	const sentinel = "current state — pod_status"
+	verdict := "keep"
+	if len(req.Messages) > 0 && strings.Contains(req.Messages[0].Content, sentinel) {
+		verdict = "reject"
+	}
+	args := `{"verdicts":[{"index":0,"verdict":"` + verdict + `","confidence":0.1,"reason":"content-dependent verdict"}]}`
+	return providers.CompletionResponse{
+		ToolCalls: []providers.ToolCall{{ID: "1", Name: submitVerdictsName, Args: args}},
+	}, nil
+}
+
+func TestInstantRecallConfirmedEvidenceReachesVerify(t *testing.T) {
+	// A recall hit + a confirm tool whose output contradicts the entry + a verify
+	// model that rejects the (now evidence-bearing) root cause → the delivered
+	// finding is rejected (root causes emptied), proving the confirmatory evidence
+	// reached verify rather than the tautological string.
+	//
+	// The contentRejectModel makes the verdict content-dependent: it rejects only
+	// when "current state — pod_status" appears in the review content (i.e. when
+	// confirmRecall wiring is intact). Without the wiring the sentinel is absent,
+	// the model returns "keep", root causes survive, and len==0 assertion fails —
+	// proving the test genuinely discriminates.
+	var got providers.Investigation
+	ps := &fakeConfirmTool{name: "pod_status", out: "web Running ready=1/1 (healthy — contradicts the recalled crash)"}
+	li := &LoopInvestigator{
+		Tools:      []Tool{ps},
+		Verify:     true,
+		Model:      contentRejectModel{},
+		OnComplete: func(inv providers.Investigation) { got = inv },
+		Log:        slog.New(slog.NewTextHandler(io.Discard, nil)),
+		Recall: &Recall{MinScore: 2.0, Catalog: fakeScored{hits: []catalog.ScoredEntry{
+			{Entry: catalog.Entry{Title: "Known incident", Description: "crash loop", Path: "known.md", Resource: "apps/web"}, Score: 5.0}}}},
+	}
+	req := Request{Title: "web down", Workload: providers.Workload{Namespace: "apps", Name: "web"}}
+	if err := li.Investigate(context.Background(), req); err != nil {
+		t.Fatalf("Investigate: %v", err)
+	}
+	if len(got.RootCauses) != 0 {
+		t.Fatalf("verify should have rejected the recalled cause using current-state evidence, got %+v", got.RootCauses)
+	}
+}
