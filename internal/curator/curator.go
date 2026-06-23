@@ -97,15 +97,24 @@ func (c *Curator) duplicateOpenPR(ctx context.Context, inv providers.Investigati
 	return 0, false, nil
 }
 
-// meetsBar is the file-time QUALITY gate (not the merge condition): a confirmed,
-// confident root cause with cited evidence. The resolved/accepted MERGE condition
-// is enforced later by the curate agent + the human.
+// meetsBar is the file-time QUALITY gate (not the merge condition): an
+// adversarially-reviewed, confident root cause with cited evidence AND a provenance
+// anchor (a causing change or a fixing action). The resolved/accepted MERGE
+// condition is enforced later by the curate agent + the human.
 func meetsBar(inv providers.Investigation, minConf float64) bool {
+	if !inv.Verified {
+		return false // only findings that survived the adversarial review reach the shared catalog
+	}
 	if inv.Confidence < minConf || len(inv.RootCauses) == 0 {
 		return false
 	}
 	top := inv.RootCauses[0]
-	return top.Summary != "" && len(top.Evidence) > 0
+	if top.Summary == "" || len(top.Evidence) == 0 {
+		return false
+	}
+	// Provenance: actionable knowledge, not a symptom restatement — anchored to a
+	// causing change (ChangeRef) or a fixing action (SuggestedAction).
+	return top.ChangeRef != "" || top.SuggestedAction != ""
 }
 
 func coalesceComment(inv providers.Investigation) string {

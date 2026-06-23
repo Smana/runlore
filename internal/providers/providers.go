@@ -360,6 +360,7 @@ type Investigation struct {
 	Fingerprint   string   // originating alert fingerprint; for outcome-ledger attribution
 	Fingerprints  []string // coalesced batch fingerprints; one outcome open is recorded per entry
 	RecalledEntry string   // when Recalled: the catalog entry Path that was matched
+	Verified      bool     // true when the adversarial verify pass ran and a root cause survived it
 }
 
 // Hypothesis is one ranked root-cause candidate with its evidence.

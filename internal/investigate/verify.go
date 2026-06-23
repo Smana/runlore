@@ -116,6 +116,7 @@ func applyVerdicts(li *LoopInvestigator, req Request, inv providers.Investigatio
 		}
 	}
 	inv.RootCauses = kept
+	inv.Verified = len(kept) > 0
 	var maxc float64
 	for _, rc := range kept {
 		if rc.Confidence > maxc {
