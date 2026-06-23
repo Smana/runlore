@@ -46,7 +46,7 @@ func newCurator(f *fakeForge, cat catalog.ScoredSearcher) *Curator {
 
 func goodFinding() providers.Investigation {
 	return providers.Investigation{
-		Title: "HarborRegistryDown", Confidence: 0.9,
+		Title: "HarborRegistryDown", Confidence: 0.9, Verified: true,
 		RootCauses: []providers.Hypothesis{{
 			Summary: "IAM quota exceeded", Confidence: 0.9,
 			Evidence: []string{"CreateContainerConfigError"}, ChangeRef: "xplane-harbor", SuggestedAction: "delete a key",
@@ -100,8 +100,9 @@ func TestCurateDistinctTitleSameFingerprintCoalesces(t *testing.T) {
 	inv := providers.Investigation{
 		Title:      "freshly reworded title the LLM produced this time",
 		Confidence: 0.9,
+		Verified:   true,
 		Resource:   providers.Workload{Namespace: "apps", Name: "web"},
-		RootCauses: []providers.Hypothesis{{Summary: "image tag rollout broke readiness", Evidence: []string{"e"}}},
+		RootCauses: []providers.Hypothesis{{Summary: "image tag rollout broke readiness", Evidence: []string{"e"}, ChangeRef: "a-change"}},
 	}
 	openPR := providers.CuratedIssue{
 		Number: 7,
@@ -125,8 +126,9 @@ func TestCurateDifferentFingerprintOpensSecondPR(t *testing.T) {
 	inv := providers.Investigation{
 		Title:      "apps/web readiness failure",
 		Confidence: 0.9,
+		Verified:   true,
 		Resource:   providers.Workload{Namespace: "apps", Name: "web"},
-		RootCauses: []providers.Hypothesis{{Summary: "image tag rollout broke readiness", Evidence: []string{"e"}}},
+		RootCauses: []providers.Hypothesis{{Summary: "image tag rollout broke readiness", Evidence: []string{"e"}, ChangeRef: "a-change"}},
 	}
 	openPR := providers.CuratedIssue{
 		Number: 7, Title: "KB: unrelated",
@@ -177,6 +179,49 @@ func TestCurateLowQualityDropsNoArtifact(t *testing.T) {
 	}
 	if f.openedPR != nil || len(f.commented) != 0 || ref.URL != "" {
 		t.Fatalf("low-quality finding must produce no repo artifact, got pr=%+v comment=%v ref=%s", f.openedPR, f.commented, ref.URL)
+	}
+}
+
+func TestCurateUnverifiedDropsNoArtifact(t *testing.T) {
+	inv := goodFinding()
+	inv.Verified = false // identical to the happy-path finding, but verify did not confirm it
+	f := &fakeForge{}
+	c := &Curator{Forge: f, MinConfidence: 0.75, Log: testLogger()}
+	if _, err := c.Curate(context.Background(), inv); err != nil {
+		t.Fatalf("Curate: %v", err)
+	}
+	if f.openedPR != nil {
+		t.Fatal("an unverified finding must not draft a KB PR")
+	}
+}
+
+func TestCurateSymptomOnlyDropsNoArtifact(t *testing.T) {
+	inv := goodFinding()
+	inv.Verified = true
+	inv.RootCauses[0].ChangeRef = ""       // no causing-change anchor
+	inv.RootCauses[0].SuggestedAction = "" // no fixing-action anchor
+	f := &fakeForge{}
+	c := &Curator{Forge: f, MinConfidence: 0.75, Log: testLogger()}
+	if _, err := c.Curate(context.Background(), inv); err != nil {
+		t.Fatalf("Curate: %v", err)
+	}
+	if f.openedPR != nil {
+		t.Fatal("a symptom-only finding (no provenance) must not draft a KB PR")
+	}
+}
+
+func TestCurateVerifiedWithSuggestedActionOnlyOpensPR(t *testing.T) {
+	inv := goodFinding()
+	inv.Verified = true
+	inv.RootCauses[0].ChangeRef = ""               // no GitOps change...
+	inv.RootCauses[0].SuggestedAction = "scale up" // ...but a fixing action anchors it
+	f := &fakeForge{}
+	c := &Curator{Forge: f, MinConfidence: 0.75, Log: testLogger()}
+	if _, err := c.Curate(context.Background(), inv); err != nil {
+		t.Fatalf("Curate: %v", err)
+	}
+	if f.openedPR == nil {
+		t.Fatal("a verified finding with a fixing action must curate (provenance is OR)")
 	}
 }
 
