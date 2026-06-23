@@ -10,6 +10,9 @@ import (
 	"strings"
 	"testing"
 
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/metric/noop"
+
 	"github.com/Smana/runlore/internal/catalog"
 	"github.com/Smana/runlore/internal/providers"
 	"github.com/Smana/runlore/internal/telemetry"
@@ -147,6 +150,7 @@ func TestCurateRecordsDedupScore(t *testing.T) {
 		t.Fatalf("telemetry setup: %v", err)
 	}
 	defer func() { _ = shutdown(context.Background()) }()
+	t.Cleanup(func() { otel.SetMeterProvider(noop.NewMeterProvider()) })
 
 	c := newCurator(&fakeForge{}, fakeScored{score: 2.0, title: "Some entry"}) // below DupScore → records, then continues
 	c.Metrics = telemetry.NewMetrics()
