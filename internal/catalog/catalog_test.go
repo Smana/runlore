@@ -137,3 +137,31 @@ func TestEmptyCatalog(t *testing.T) {
 		t.Fatalf("empty hits = %d", len(hits))
 	}
 }
+
+func TestNewEmptyNotReady(t *testing.T) {
+	if NewEmpty().Ready() {
+		t.Fatal("a freshly-created empty catalog must not report ready before first sync")
+	}
+}
+
+func TestReloadMarksReady(t *testing.T) {
+	dir := t.TempDir() // zero entries on purpose: a synced-but-empty KB is still ready
+	c := NewEmpty()
+	if _, err := c.Reload(dir); err != nil {
+		t.Fatalf("Reload: %v", err)
+	}
+	if !c.Ready() {
+		t.Fatal("after a successful Reload the catalog must report ready (even with 0 entries)")
+	}
+}
+
+func TestStaticCatalogReadyOnLoad(t *testing.T) {
+	dir := t.TempDir()
+	c, err := New(dir)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	if !c.Ready() {
+		t.Fatal("a static-dir catalog must be ready immediately after New")
+	}
+}
