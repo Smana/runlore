@@ -21,12 +21,12 @@ type OutcomeStats interface {
 }
 
 // Recall short-circuits an investigation when the knowledge catalog already has a
-// trustworthy answer for the symptom — skipping the slow, paid ReAct loop. A recall
-// must clear three gates: a BM25 margin over the runner-up (corpus-portable, unlike
-// an absolute MinScore), structural agreement on the affected resource, and (in the
-// loop) the adversarial verify pass. Confidence is derived from those signals, never
-// asserted — BM25 scores are corpus-dependent and a stale hit must not silently
-// replace an investigation.
+// trustworthy answer for the symptom — skipping the slow, paid ReAct loop. From a
+// wider candidate set it keeps only entries whose stored resource structurally
+// agrees with the alert's workload, then requires a clear margin over the runner-up
+// among those agreeing candidates, plus (in the loop) the adversarial verify pass.
+// Confidence is derived from those signals, never asserted — scores are
+// corpus-dependent and a stale hit must not silently replace an investigation.
 type Recall struct {
 	Catalog              catalog.ScoredSearcher
 	MinScore             float64 // similarity floor for the top hit
@@ -42,6 +42,12 @@ type Recall struct {
 	Log     *slog.Logger       // optional; nil-safe — log line omitted when unset
 }
 
+// recallCandidateK is the internal lexical candidate window. Recall fetches this
+// many hits, then structurally pre-filters them, so an entry matching the alert's
+// workload is reachable even when other workloads' entries score higher on symptom
+// text alone.
+const recallCandidateK = 20
+
 // lookup returns the matched entry and a DERIVED confidence when a recall is
 // trustworthy enough to short-circuit, else (nil, 0). The BM25 score is always
 // recorded (even on rejection) so the thresholds can be tuned from live data.
@@ -50,22 +56,42 @@ func (r *Recall) lookup(ctx context.Context, req Request) (*catalog.Entry, float
 		return nil, 0
 	}
 	// Query the symptom (title + message); severity/reason is noise for matching.
-	// k=2 so the top hit can be required to be an unambiguous winner.
-	hits, err := r.Catalog.SearchScored(strings.TrimSpace(req.Title+" "+req.Message), 2)
+	hits, err := r.Catalog.SearchScored(strings.TrimSpace(req.Title+" "+req.Message), recallCandidateK)
 	if err != nil || len(hits) == 0 {
 		return nil, 0
 	}
-	score := hits[0].Score
+
+	// Structural pre-filter: keep candidates whose stored resource agrees with the
+	// alert's workload, preserving lexical order. Pre-filtering (rather than checking
+	// only the top hit) lets a structurally-correct entry win even when wrong-workload
+	// entries score higher on symptom tokens.
+	var agreeing []catalog.ScoredEntry
+	for _, h := range hits {
+		if resourceAgrees(req.Workload, h.Entry.Resource, r.RequireWorkloadMatch) != matchNone {
+			agreeing = append(agreeing, h)
+		}
+	}
+	if len(agreeing) == 0 {
+		if r.Metrics != nil {
+			r.Metrics.RecallScore.Record(ctx, hits[0].Score) // best lexical score, for miss visibility
+		}
+		r.reject(ctx, "no_resource_match")
+		return nil, 0
+	}
+
+	winner := agreeing[0]
+	score := winner.Score
 	if r.Metrics != nil {
 		r.Metrics.RecallScore.Record(ctx, score)
 	}
 
-	// Gate 1 — similarity margin. A relative margin over the runner-up is portable
-	// across corpus sizes; a lone hit needs a higher solo floor.
+	// Gate — margin among the structurally-agreeing candidates: a clear winner for
+	// this workload, not merely the top lexical hit. A lone agreeing hit must clear
+	// both the solo floor and the min score.
 	margin := score
-	confident := score >= r.SoloFloor && score >= r.MinScore // a lone hit must clear both floors
-	if len(hits) > 1 {
-		margin = score - hits[1].Score
+	confident := score >= r.SoloFloor && score >= r.MinScore
+	if len(agreeing) > 1 {
+		margin = score - agreeing[1].Score
 		confident = score >= r.MinScore && margin >= r.MarginGap
 	}
 	if !confident {
@@ -73,15 +99,8 @@ func (r *Recall) lookup(ctx context.Context, req Request) (*catalog.Entry, float
 		return nil, 0
 	}
 
-	// Gate 2 — structural agreement: the alert's workload must match the entry's
-	// stored resource. This attacks "symptoms are many-to-one with root causes".
-	e := hits[0].Entry
+	e := winner.Entry
 	strength := resourceAgrees(req.Workload, e.Resource, r.RequireWorkloadMatch)
-	if strength == matchNone {
-		r.reject(ctx, "no_resource_match")
-		return nil, 0
-	}
-
 	conf := deriveRecallConfidence(score, margin, strength)
 	// Outcome decay: bias confidence by the entry's resolution track record, and
 	// reject (re-investigate) an entry that recalls-but-never-resolves. Fail-safe —
