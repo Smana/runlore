@@ -462,7 +462,7 @@ func runEval(args []string) error {
 	recordDir := fs.String("record", "eval/fixtures", "where to write recorded runs (replay corpus)")
 	reportDir := fs.String("report-dir", "eval/reports", "where to write the campaign report")
 	prevReport := fs.String("baseline", "", "previous report JSON for regression diff")
-	n := fs.Int("n", 3, "runs per scenario (live mode)")
+	n := fs.Int("n", 10, "runs per scenario (live mode)")
 	stamp := fs.String("stamp", "", "report timestamp (RFC3339); blank = now")
 	jProvider := fs.String("judge-provider", "", "judge model provider (default: investigation model)")
 	jBaseURL := fs.String("judge-base-url", "", "judge model base URL")
@@ -573,7 +573,7 @@ func runEvalLive(cfg *config.Config, scnDir, recordDir, reportDir, prevReport, s
 	if stamp == "" {
 		stamp = time.Now().UTC().Format(time.RFC3339)
 	}
-	rep := eval.NewLiveReport(stamp, results)
+	rep := eval.NewLiveReport(stamp, n, results)
 	if err := os.MkdirAll(reportDir, 0o755); err != nil {
 		return err
 	}
