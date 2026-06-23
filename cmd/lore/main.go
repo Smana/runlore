@@ -810,13 +810,12 @@ func runCurate(args []string) error {
 		base = "main"
 	}
 	forge := github.New(cfg.Forge.GitHubAPIURL, owner, repo, base, github.TokenFunc(tok))
-	staleAfter := cfg.Curate.StaleAfter.Std()
-	if staleAfter == 0 {
-		staleAfter = 720 * time.Hour // 30 days
-	}
+	// StaleAfter is honoured as-is: 0/unset disables the lifecycle sweep (Lifecycle.Run
+	// returns early). The Helm chart ships config.curate.stale_after: 720h, so scheduled
+	// runs sweep at 30 days; a bare `lore curate` with no config does dedup only.
 	agent := curate.Agent{Log: log, Passes: []curate.Pass{
 		curate.Dedup{Forge: forge, Log: log},
-		curate.Lifecycle{Forge: forge, StaleAfter: staleAfter, Log: log},
+		curate.Lifecycle{Forge: forge, StaleAfter: cfg.Curate.StaleAfter.Std(), Log: log},
 	}}
 	log.Info("curate: grooming KB backlog", "repo", cfg.Forge.KBRepo)
 	agent.Run(context.Background())

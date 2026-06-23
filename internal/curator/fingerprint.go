@@ -84,10 +84,18 @@ func DupFingerprint(inv providers.Investigation) string {
 		cause = inv.RootCauses[0].Summary
 	}
 	tokens := tokenSet(cause)
-	if ref == "" && len(tokens) == 0 {
+	causeKey := strings.Join(tokens, " ")
+	if len(tokens) == 0 {
+		// The token-set erased the whole cause (all sub-3-char or stopword tokens,
+		// e.g. "IO GC" or "db up"). Fall back to the raw lowercased summary so two
+		// genuinely different terse/acronym causes on the same resource do not
+		// collapse to the same fingerprint and falsely coalesce.
+		causeKey = strings.ToLower(strings.TrimSpace(cause))
+	}
+	if ref == "" && causeKey == "" {
 		return ""
 	}
-	sum := sha256.Sum256([]byte(ref + "|" + strings.Join(tokens, " ")))
+	sum := sha256.Sum256([]byte(ref + "|" + causeKey))
 	return hex.EncodeToString(sum[:])
 }
 

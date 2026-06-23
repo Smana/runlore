@@ -81,3 +81,21 @@ catalog:
 		t.Fatalf("instant_recall not parsed: %+v", ir)
 	}
 }
+
+func TestCurateStaleAfterParse(t *testing.T) {
+	var c Config
+	if err := yaml.Unmarshal([]byte("curate:\n  stale_after: 720h\n"), &c); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if got := c.Curate.StaleAfter.Std(); got != 720*time.Hour {
+		t.Fatalf("curate.stale_after: want 720h, got %v", got)
+	}
+	// Absent ⇒ zero ⇒ the lifecycle sweep is disabled (runCurate honours 0).
+	var z Config
+	if err := yaml.Unmarshal([]byte("forge:\n  kb_repo: o/r\n"), &z); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if z.Curate.StaleAfter.Std() != 0 {
+		t.Fatalf("absent stale_after must be 0, got %v", z.Curate.StaleAfter.Std())
+	}
+}
