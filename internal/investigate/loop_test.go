@@ -42,6 +42,9 @@ func TestInstantRecallHit(t *testing.T) {
 	if got == nil || len(got.RootCauses) != 1 || !strings.Contains(got.RootCauses[0].Summary, "Known incident") {
 		t.Fatalf("unexpected recalled investigation: %+v", got)
 	}
+	if !got.Recalled {
+		t.Fatal("a recalled investigation must be flagged Recalled so the curator skips it")
+	}
 }
 
 func TestInstantRecallBelowThreshold(t *testing.T) {
