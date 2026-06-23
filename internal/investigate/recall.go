@@ -213,6 +213,7 @@ func recalledInvestigation(req Request, e catalog.Entry, confidence float64) pro
 		Recalled:      true,
 		RecalledEntry: e.Path,
 		Fingerprint:   req.Fingerprint,
+		Fingerprints:  req.Fingerprints,
 		Resource:      req.Workload,
 	}
 }

@@ -357,6 +357,7 @@ type Investigation struct {
 	Actions       []Action // proposed remediations (autonomy ladder; never executed at rung "suggest")
 	CuratedURL    string   // runtime: KB issue/PR the curator opened, linked in delivery (set after curation)
 	Fingerprint   string   // originating alert fingerprint; for outcome-ledger attribution
+	Fingerprints  []string // coalesced batch fingerprints; one outcome open is recorded per entry
 	RecalledEntry string   // when Recalled: the catalog entry Path that was matched
 }
 
