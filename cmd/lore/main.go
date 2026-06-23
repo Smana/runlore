@@ -471,7 +471,8 @@ func runEval(args []string) error {
 	recordDir := fs.String("record", "eval/fixtures", "where to write recorded runs (replay corpus)")
 	reportDir := fs.String("report-dir", "eval/reports", "where to write the campaign report")
 	prevReport := fs.String("baseline", "", "previous report JSON for regression diff")
-	n := fs.Int("n", 10, "runs per scenario (live mode)")
+	n := fs.Int("n", 1, "repeats per case (replay mode); >1 enables the k-of-n gate")
+	failUnder := fs.Float64("fail-under", 0, "fail (non-zero exit) when campaign pass-rate < this (0 = no gate)")
 	stamp := fs.String("stamp", "", "report timestamp (RFC3339); blank = now")
 	jProvider := fs.String("judge-provider", "", "judge model provider (default: investigation model)")
 	jBaseURL := fs.String("judge-base-url", "", "judge model base URL")
@@ -504,20 +505,44 @@ func runEval(args []string) error {
 		apiKey = os.Getenv(cfg.Model.APIKeyEnv)
 	}
 	runner := &eval.Runner{Model: buildModel(cfg, apiKey), Log: slog.New(slog.NewTextHandler(io.Discard, nil))}
-	rep := runner.Run(context.Background(), cases)
-	for _, res := range rep.Results {
-		status := "PASS"
-		if !res.Pass {
-			status = "FAIL"
+	camp := runner.RunN(context.Background(), cases, *n)
+	for _, a := range camp.Aggregates {
+		status := "MISSED"
+		if a.Reached {
+			status = "REACHED"
 		}
-		fmt.Printf("%-4s  %-32s  confidence=%.2f", status, res.Name, res.Confidence)
-		if len(res.Missing) > 0 {
-			fmt.Printf("  missing: %s", strings.Join(res.Missing, ", "))
+		flaky := ""
+		if a.Flaky {
+			flaky = " flaky"
+		}
+		fmt.Printf("%-7s  %-32s  pass-rate=%.0f%% (n=%d)%s", status, a.Name, a.PassRate*100, a.Runs, flaky)
+		if len(a.Missing) > 0 {
+			fmt.Printf("  missing: %s", strings.Join(a.Missing, ", "))
 		}
 		fmt.Println()
 	}
-	fmt.Printf("\nRCA identified: %d/%d (%.0f%%)\n", rep.Passed(), len(rep.Results), rep.RCARate()*100)
-	return nil
+	fmt.Printf("\nreached %d/%d cases (%.0f%%)", camp.ReachedCases(), len(camp.Aggregates), camp.PassRate()*100)
+	if *failUnder > 0 {
+		fmt.Printf("  threshold=%.0f%%", *failUnder*100)
+	}
+	fmt.Println()
+
+	if *reportDir != "" {
+		st := *stamp
+		if st == "" {
+			st = time.Now().UTC().Format(time.RFC3339)
+		}
+		if b, err := camp.JSON(); err == nil {
+			if mkErr := os.MkdirAll(*reportDir, 0o755); mkErr == nil {
+				path := filepath.Join(*reportDir, strings.ReplaceAll(st, ":", "-")+"-replay.json")
+				if wErr := os.WriteFile(path, b, 0o644); wErr == nil {
+					fmt.Printf("report: %s\n", path)
+				}
+			}
+		}
+	}
+
+	return eval.GateError(camp, *failUnder)
 }
 
 // shellStepRunner executes a scenario step as a shell command (kubectl/flux/test).

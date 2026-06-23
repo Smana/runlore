@@ -3,8 +3,10 @@ package eval
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"log/slog"
 	"sort"
+	"strings"
 
 	"github.com/Smana/runlore/internal/investigate"
 	"github.com/Smana/runlore/internal/providers"
@@ -185,6 +187,30 @@ func sortedSet(m map[string]struct{}) []string {
 	}
 	sort.Strings(out)
 	return out
+}
+
+// GateError returns a non-nil error when the campaign pass-rate is below failUnder
+// (which is only enforced when failUnder > 0). The message names the cases that did
+// not reach RCA and any flaky cases, so CI logs explain the failure.
+func GateError(c Campaign, failUnder float64) error {
+	if failUnder <= 0 || c.PassRate() >= failUnder {
+		return nil
+	}
+	var missed []string
+	for _, a := range c.Aggregates {
+		if !a.Reached {
+			missed = append(missed, a.Name)
+		}
+	}
+	msg := fmt.Sprintf("eval gate failed: pass-rate %.0f%% < threshold %.0f%% (reached %d/%d)",
+		c.PassRate()*100, failUnder*100, c.ReachedCases(), len(c.Aggregates))
+	if len(missed) > 0 {
+		msg += "; missed: " + strings.Join(missed, ", ")
+	}
+	if fl := c.FlakyNames(); len(fl) > 0 {
+		msg += "; flaky: " + strings.Join(fl, ", ")
+	}
+	return fmt.Errorf("%s", msg)
 }
 
 // JSON renders the campaign as an indented report for CI artifacts.

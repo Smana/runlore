@@ -277,6 +277,22 @@ func TestReplayCampaignPassRate(t *testing.T) {
 	}
 }
 
+func TestGateError(t *testing.T) {
+	miss := Case{Name: "miss", Prompt: "x", Tools: map[string]string{"what_changed": "y"},
+		Expected: Expected{MustContain: []string{"network policy"}}}
+	camp := newRateRunner(5).RunN(context.Background(), []Case{harborCase(), miss}, 5) // pass-rate 0.5
+
+	if err := GateError(camp, 0); err != nil {
+		t.Fatalf("fail-under 0 must never gate, got %v", err)
+	}
+	if err := GateError(camp, 0.4); err != nil {
+		t.Fatalf("0.5 >= 0.4 should pass, got %v", err)
+	}
+	if err := GateError(camp, 0.7); err == nil {
+		t.Fatal("0.5 < 0.7 should return a gate error")
+	}
+}
+
 func TestCampaignJSON(t *testing.T) {
 	camp := newRateRunner(5).RunN(context.Background(), []Case{harborCase()}, 2)
 	b, err := camp.JSON()
