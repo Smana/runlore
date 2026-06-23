@@ -157,3 +157,10 @@ func TestRecalledInvestigationUsesDerivedConfidence(t *testing.T) {
 		t.Fatalf("recalledInvestigation must use the derived confidence, got %+v", inv)
 	}
 }
+
+func TestRecalledInvestigationCarriesEntryPath(t *testing.T) {
+	inv := recalledInvestigation(Request{Title: "x"}, catalog.Entry{Title: "T", Path: "p.md"}, 0.7)
+	if inv.RecalledEntry != "p.md" {
+		t.Fatalf("RecalledEntry = %q, want p.md", inv.RecalledEntry)
+	}
+}

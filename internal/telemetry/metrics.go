@@ -13,19 +13,23 @@ const scope = "github.com/Smana/runlore"
 
 // Metrics is the RunLore instrument set, created once and shared.
 type Metrics struct {
-	AlertsReceived           metric.Int64Counter
-	AlertsCoalesced          metric.Int64Counter
-	AlertsSuppressed         metric.Int64Counter
-	InvestigationsStarted    metric.Int64Counter
-	InvestigationsThrottled  metric.Int64Counter
-	InvestigationsDropped    metric.Int64Counter
-	ToolOutputTruncatedBytes metric.Int64Counter
-	RecallHits               metric.Int64Counter // KB cache hits, labelled by verify result
-	RecallTokensSaved        metric.Int64Counter // estimated tokens saved by a recall short-circuit
-	RecallRejections         metric.Int64Counter // recalls rejected before short-circuit (label: reason)
-	CoalesceBatchSize        metric.Int64Histogram
-	InvestigationTokens      metric.Int64Histogram
-	RecallScore              metric.Float64Histogram // BM25 score at the recall decision (tunes min_score)
+	AlertsReceived            metric.Int64Counter
+	AlertsCoalesced           metric.Int64Counter
+	AlertsSuppressed          metric.Int64Counter
+	InvestigationsStarted     metric.Int64Counter
+	InvestigationsThrottled   metric.Int64Counter
+	InvestigationsDropped     metric.Int64Counter
+	ToolOutputTruncatedBytes  metric.Int64Counter
+	RecallHits                metric.Int64Counter // KB cache hits, labelled by verify result
+	RecallTokensSaved         metric.Int64Counter // estimated tokens saved by a recall short-circuit
+	RecallRejections          metric.Int64Counter // recalls rejected before short-circuit (label: reason)
+	CoalesceBatchSize         metric.Int64Histogram
+	InvestigationTokens       metric.Int64Histogram
+	RecallScore               metric.Float64Histogram // BM25 score at the recall decision (tunes min_score)
+	OutcomesOpened            metric.Int64Counter     // investigations recorded as open (label: kind)
+	IncidentsResolved         metric.Int64Counter     // resolve events that matched an open investigation
+	RecallOutcome             metric.Int64Counter     // resolved incidents whose open was a recall (label: result)
+	IncidentResolutionSeconds metric.Float64Histogram // open→resolve duration, seconds
 }
 
 // NewMetrics builds the instrument set from the global meter provider.
@@ -44,18 +48,22 @@ func NewMetrics() *Metrics {
 		return h
 	}
 	return &Metrics{
-		AlertsReceived:           ctr("alerts_received_total", "incidents passing Decide into the coalescer"),
-		AlertsCoalesced:          ctr("alerts_coalesced_total", "incidents folded into an existing batch"),
-		AlertsSuppressed:         ctr("alerts_suppressed_total", "incidents dropped by cooldown"),
-		InvestigationsStarted:    ctr("investigations_started_total", "investigations actually begun"),
-		InvestigationsThrottled:  ctr("investigations_throttled_total", "starts requeued by the rate limiter"),
-		InvestigationsDropped:    ctr("investigations_dropped_total", "keys dropped after max_requeues"),
-		ToolOutputTruncatedBytes: ctr("tool_output_truncated_bytes_total", "bytes elided by output truncation"),
-		RecallHits:               ctr("recall_hits_total", "KB instant-recall short-circuits (label: result)"),
-		RecallTokensSaved:        ctr("recall_tokens_saved_total", "estimated tokens saved by recall short-circuits"),
-		RecallRejections:         ctr("recall_rejections_total", "recalls rejected before short-circuit (label: reason)"),
-		CoalesceBatchSize:        hist("coalesce_batch_size", "incidents per flushed batch"),
-		InvestigationTokens:      hist("investigation_tokens_estimated", "per-investigation token estimate (investigation loop only; excludes the adversarial verify phase)"),
-		RecallScore:              histF("recall_score", "BM25 score at the recall decision point"),
+		AlertsReceived:            ctr("alerts_received_total", "incidents passing Decide into the coalescer"),
+		AlertsCoalesced:           ctr("alerts_coalesced_total", "incidents folded into an existing batch"),
+		AlertsSuppressed:          ctr("alerts_suppressed_total", "incidents dropped by cooldown"),
+		InvestigationsStarted:     ctr("investigations_started_total", "investigations actually begun"),
+		InvestigationsThrottled:   ctr("investigations_throttled_total", "starts requeued by the rate limiter"),
+		InvestigationsDropped:     ctr("investigations_dropped_total", "keys dropped after max_requeues"),
+		ToolOutputTruncatedBytes:  ctr("tool_output_truncated_bytes_total", "bytes elided by output truncation"),
+		RecallHits:                ctr("recall_hits_total", "KB instant-recall short-circuits (label: result)"),
+		RecallTokensSaved:         ctr("recall_tokens_saved_total", "estimated tokens saved by recall short-circuits"),
+		RecallRejections:          ctr("recall_rejections_total", "recalls rejected before short-circuit (label: reason)"),
+		CoalesceBatchSize:         hist("coalesce_batch_size", "incidents per flushed batch"),
+		InvestigationTokens:       hist("investigation_tokens_estimated", "per-investigation token estimate (investigation loop only; excludes the adversarial verify phase)"),
+		RecallScore:               histF("recall_score", "BM25 score at the recall decision point"),
+		OutcomesOpened:            ctr("outcomes_opened_total", "investigations recorded in the outcome ledger (label: kind)"),
+		IncidentsResolved:         ctr("incidents_resolved_total", "resolve events that matched an open investigation"),
+		RecallOutcome:             ctr("recall_outcome_total", "resolved incidents whose answer was a recall (label: result)"),
+		IncidentResolutionSeconds: histF("incident_resolution_seconds", "open→resolve duration in seconds"),
 	}
 }
