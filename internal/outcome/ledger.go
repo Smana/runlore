@@ -169,7 +169,7 @@ type Aggregate struct {
 
 // OpenCounts rolls Episodes up per catalog entry, counting recall episodes only
 // (fresh investigations carry no entry). It is the input to recall decay:
-// resolve-rate ≈ (Resolved+1)/(Recalls+2). A disabled/empty ledger yields an
+// resolve-rate ≈ (Resolved+k)/(Recalls+k). A disabled/empty ledger yields an
 // empty (non-nil) map.
 func (l *Ledger) OpenCounts() (map[string]Aggregate, error) {
 	eps, err := l.Episodes()
