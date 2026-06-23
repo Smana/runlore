@@ -30,24 +30,26 @@ const (
 
 // Request is a normalized investigation trigger.
 type Request struct {
-	Source   Source
-	Title    string
-	Workload providers.Workload // optional; zero for alerts without a workload
-	Reason   string
-	Message  string
-	Labels   map[string]string
-	At       time.Time
+	Source      Source
+	Title       string
+	Workload    providers.Workload // optional; zero for alerts without a workload
+	Reason      string
+	Message     string
+	Labels      map[string]string
+	At          time.Time
+	Fingerprint string // Alertmanager fingerprint (stable firing↔resolved); for outcome attribution
 }
 
 // FromIncident builds a Request from a matched incident alert.
 func FromIncident(inc config.Incident) Request {
 	return Request{
-		Source:   SourceAlert,
-		Title:    inc.AlertName,
-		Workload: providers.Workload{Namespace: inc.Namespace},
-		Reason:   inc.Severity,
-		Labels:   inc.Labels,
-		At:       inc.StartsAt,
+		Source:      SourceAlert,
+		Title:       inc.AlertName,
+		Workload:    providers.Workload{Namespace: inc.Namespace},
+		Reason:      inc.Severity,
+		Labels:      inc.Labels,
+		At:          inc.StartsAt,
+		Fingerprint: inc.Fingerprint,
 	}
 }
 
