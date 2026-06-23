@@ -60,9 +60,13 @@ each case runs `n` times. A new aggregate type holds, per case:
 - `PassRate float64` — fraction of the `n` repeats whose `Result.Pass` is true.
 - `Reached bool` — `PassRate >= evalMinPassRate` (k-of-n; reuse the **0.7** live
   constant). This is the per-case verdict.
-- `Flaky bool` — `variance(passIndicators) > evalMaxRootCauseVariance` (reuse the
-  live **0.5** bound over the 0/1 pass indicators). A flaky case is surfaced and
-  does **not** count as reached.
+- `Flaky bool` — runs disagree enough that the verdict is unsafe. A pass indicator
+  is binary, so its variance caps at 0.25 and the live `evalMaxRootCauseVariance`
+  (0.5) bound can never fire — replay therefore uses a **decision band**: `Flaky`
+  when `PassRate` falls in the open interval `(1-evalMinPassRate, evalMinPassRate)`
+  = (0.3, 0.7), i.e. neither reliably passing nor reliably failing. `Reached`
+  (≥0.7) already implies not-flaky; flaky only annotates the ambiguous-miss case in
+  the report.
 - `Confidence` (median over repeats), `Missing`, `OverClaimed` (union over repeats,
   for the report).
 
@@ -75,7 +79,9 @@ threshold, or when `fail-under == 0`, it returns nil.
 `evalMaxRootCauseVariance` and the helpers `variance`, `medianFloat` are currently
 unexported in `live.go`. Lift them into a new `internal/eval/stats.go` (same package,
 no API change) so replay and live share one definition. Pure move + the existing
-live tests keep passing.
+live tests keep passing. Replay reuses `evalMinPassRate` (for both the k-of-n bar
+and the flaky band) and `medianFloat`; `variance`/`evalMaxRootCauseVariance` and
+`evalRootCauseBar` remain live-only but live in the shared file.
 
 **Output.** Print a per-case line (`REACHED/MISSED  name  pass-rate=4/5
 flaky=false`) and a campaign summary (`reached N/M cases (X%)  threshold=70%`). Write
