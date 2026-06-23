@@ -198,7 +198,9 @@ func (li *LoopInvestigator) Investigate(ctx context.Context, req Request) error 
 				if inv.Title == "" {
 					inv.Title = req.Title // default to the triggering incident/failure
 				}
-				inv.Resource = req.Workload       // record the originating workload for structural recall
+				// Prefer the workload the investigation identified; fall back to the
+				// originating alert workload only when the model named none.
+				inv.Resource = preferDiscoveredResource(inv.Resource, req.Workload)
 				inv.Fingerprint = req.Fingerprint // originating alert id, for outcome-ledger attribution
 				li.Log.Info("investigation evidence gathered", "title", req.Title, "tools_used", used)
 				if li.Metrics != nil {
@@ -259,6 +261,21 @@ func (li *LoopInvestigator) deliver(req Request, inv providers.Investigation) {
 	if li.OnComplete != nil {
 		li.OnComplete(inv)
 	}
+}
+
+// preferDiscoveredResource keeps the workload the investigation identified,
+// defaulting a missing namespace to the originating alert's, and falls back to the
+// alert workload only when the model named none.
+func preferDiscoveredResource(discovered, origin providers.Workload) providers.Workload {
+	if discovered.Name != "" && discovered.Namespace == "" {
+		discovered.Namespace = origin.Namespace
+	}
+	if discovered.Ref() == "" {
+		return origin
+	}
+	// A discovered resource with a namespace but no name (Ref()=="ns") is kept as-is —
+	// the model named a namespace-scoped resource even without a specific workload.
+	return discovered
 }
 
 func seedPrompt(req Request) string {
