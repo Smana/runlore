@@ -471,7 +471,7 @@ func runEval(args []string) error {
 	recordDir := fs.String("record", "eval/fixtures", "where to write recorded runs (replay corpus)")
 	reportDir := fs.String("report-dir", "eval/reports", "where to write the campaign report")
 	prevReport := fs.String("baseline", "", "previous report JSON for regression diff")
-	n := fs.Int("n", 1, "repeats per case (replay mode); >1 enables the k-of-n gate")
+	n := fs.Int("n", 1, "runs per case: replay defaults to 1, live to 10 when unset")
 	failUnder := fs.Float64("fail-under", 0, "fail (non-zero exit) when campaign pass-rate < this (0 = no gate)")
 	stamp := fs.String("stamp", "", "report timestamp (RFC3339); blank = now")
 	jProvider := fs.String("judge-provider", "", "judge model provider (default: investigation model)")
@@ -481,6 +481,12 @@ func runEval(args []string) error {
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
+	nExplicit := false
+	fs.Visit(func(f *flag.Flag) {
+		if f.Name == "n" {
+			nExplicit = true
+		}
+	})
 	cfg, err := config.Load(*cfgPath)
 	if err != nil {
 		return err
@@ -489,6 +495,9 @@ func runEval(args []string) error {
 		return fmt.Errorf("eval requires a configured model (set config.model)")
 	}
 	if *live {
+		if !nExplicit {
+			*n = 10
+		}
 		return runEvalLive(cfg, *scnDir, *recordDir, *reportDir, *prevReport, *stamp, *n,
 			*jProvider, *jBaseURL, *jModel, *jKeyEnv)
 	}
@@ -521,9 +530,13 @@ func runEval(args []string) error {
 		}
 		fmt.Println()
 	}
-	fmt.Printf("\nreached %d/%d cases (%.0f%%)", camp.ReachedCases(), len(camp.Aggregates), camp.PassRate()*100)
-	if *failUnder > 0 {
-		fmt.Printf("  threshold=%.0f%%", *failUnder*100)
+	if len(camp.Aggregates) == 0 {
+		fmt.Print("\nno eval cases ran")
+	} else {
+		fmt.Printf("\nreached %d/%d cases (%.0f%%)", camp.ReachedCases(), len(camp.Aggregates), camp.PassRate()*100)
+		if *failUnder > 0 {
+			fmt.Printf("  threshold=%.0f%%", *failUnder*100)
+		}
 	}
 	fmt.Println()
 
@@ -532,12 +545,16 @@ func runEval(args []string) error {
 		if st == "" {
 			st = time.Now().UTC().Format(time.RFC3339)
 		}
-		if b, err := camp.JSON(); err == nil {
-			if mkErr := os.MkdirAll(*reportDir, 0o755); mkErr == nil {
-				path := filepath.Join(*reportDir, strings.ReplaceAll(st, ":", "-")+"-replay.json")
-				if wErr := os.WriteFile(path, b, 0o644); wErr == nil {
-					fmt.Printf("report: %s\n", path)
-				}
+		if b, err := camp.JSON(); err != nil {
+			fmt.Fprintf(os.Stderr, "eval: report not written: %v\n", err)
+		} else if mkErr := os.MkdirAll(*reportDir, 0o755); mkErr != nil {
+			fmt.Fprintf(os.Stderr, "eval: report not written: %v\n", mkErr)
+		} else {
+			path := filepath.Join(*reportDir, strings.ReplaceAll(st, ":", "-")+"-replay.json")
+			if wErr := os.WriteFile(path, b, 0o644); wErr != nil {
+				fmt.Fprintf(os.Stderr, "eval: report not written: %v\n", wErr)
+			} else {
+				fmt.Printf("report: %s\n", path)
 			}
 		}
 	}

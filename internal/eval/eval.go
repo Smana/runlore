@@ -3,6 +3,7 @@ package eval
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"sort"
@@ -210,7 +211,7 @@ func GateError(c Campaign, failUnder float64) error {
 	if fl := c.FlakyNames(); len(fl) > 0 {
 		msg += "; flaky: " + strings.Join(fl, ", ")
 	}
-	return fmt.Errorf("%s", msg)
+	return errors.New(msg)
 }
 
 // JSON renders the campaign as an indented report for CI artifacts.
