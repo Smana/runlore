@@ -2,10 +2,12 @@ package eval
 
 import (
 	"context"
+	"fmt"
 	"io"
 	"log/slog"
 	"testing"
 
+	"github.com/Smana/runlore/internal/catalog"
 	"github.com/Smana/runlore/internal/investigate"
 	"github.com/Smana/runlore/internal/providers"
 )
@@ -175,5 +177,70 @@ func TestAggregateConfidentWrongFails(t *testing.T) {
 	runs[0].Verdict.ConfidentWrong = true
 	if aggregated(runs).Pass {
 		t.Fatal("any confident-wrong run must fail")
+	}
+}
+
+// fakeCatalog returns a single fixed scored entry regardless of query/k — enough
+// to drive the recall gates in a unit test.
+type fakeCatalog struct {
+	entry catalog.Entry
+	score float64
+}
+
+func (f fakeCatalog) SearchScored(string, int) ([]catalog.ScoredEntry, error) {
+	return []catalog.ScoredEntry{{Entry: f.entry, Score: f.score}}, nil
+}
+
+// verifyModel answers only the adversarial verify call (submit_verdicts) with a
+// fixed verdict for root cause index 0. On the recall short-circuit path this is
+// the sole model call (the ReAct loop is skipped).
+type verifyModel struct{ verdict string }
+
+func (m verifyModel) Complete(_ context.Context, _ providers.CompletionRequest) (providers.CompletionResponse, error) {
+	return providers.CompletionResponse{ToolCalls: []providers.ToolCall{{ID: "v", Name: "submit_verdicts",
+		Args: fmt.Sprintf(`{"verdicts":[{"index":0,"verdict":%q}]}`, m.verdict)}}}, nil
+}
+
+// recallRunner builds a LiveRunner whose catalog has one entry matching the
+// recallScenario's namespace (so the structural gate agrees), with low recall
+// floors so a single strong hit short-circuits.
+func recallRunner(model providers.ModelProvider) *LiveRunner {
+	entry := catalog.Entry{Title: "HarborRegistryDown", Description: "IAM quota exceeded", Path: "harbor.md", Resource: "tooling"}
+	return &LiveRunner{
+		Model:  model,
+		Recall: &investigate.Recall{Catalog: fakeCatalog{entry: entry, score: 10}, MinScore: 1, SoloFloor: 1, MarginGap: 1},
+		Log:    slog.New(slog.NewTextHandler(io.Discard, nil)),
+	}
+}
+
+func recallScenario() Scenario {
+	return Scenario{ID: "known-pattern-recall", Trigger: Trigger{Symptom: "harbor registry down", Namespace: "tooling"}}
+}
+
+func TestRunOnceRecallShortCircuits(t *testing.T) {
+	out := recallRunner(verifyModel{verdict: "keep"}).runOnce(context.Background(), recallScenario())
+	if !out.Investigation.Recalled {
+		t.Fatal("recall should have short-circuited the loop (Investigation.Recalled=true)")
+	}
+	if len(out.Investigation.RootCauses) != 1 {
+		t.Fatalf("a kept recall should retain its single root cause, got %d", len(out.Investigation.RootCauses))
+	}
+	if len(out.Coverage.Touched) != 0 {
+		t.Fatalf("recall short-circuit must run no investigation tools, got %v", out.Coverage.Touched)
+	}
+}
+
+func TestRunOnceRecallPoisonedRejected(t *testing.T) {
+	// A poisoned entry: the verify pass rejects it → the wrong root cause is withdrawn,
+	// not short-circuited into. (Recalled stays true; the safety is an empty RootCauses.)
+	out := recallRunner(verifyModel{verdict: "reject"}).runOnce(context.Background(), recallScenario())
+	if len(out.Investigation.RootCauses) != 0 {
+		t.Fatalf("a rejected poisoned recall must withdraw its root cause, got %d", len(out.Investigation.RootCauses))
+	}
+	if !out.Investigation.Recalled {
+		t.Fatal("a rejected recall is still a recall (loop skipped): Recalled must stay true")
+	}
+	if len(out.Investigation.Unresolved) == 0 {
+		t.Fatal("a rejected recall hypothesis must be moved to Unresolved, not silently dropped")
 	}
 }
