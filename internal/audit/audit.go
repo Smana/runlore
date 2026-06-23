@@ -56,6 +56,7 @@ type Logger struct {
 	mu       sync.Mutex
 	w        io.Writer
 	closer   io.Closer
+	syncFn   func() error // fsync the backing file after each write; nil for NewWriter
 	lastHash string
 	now      func() time.Time
 }
@@ -71,7 +72,7 @@ func Open(path string) (*Logger, error) {
 	if err != nil {
 		return nil, fmt.Errorf("audit: open %s: %w", path, err)
 	}
-	return &Logger{w: f, closer: f, lastHash: last, now: time.Now}, nil
+	return &Logger{w: f, closer: f, syncFn: f.Sync, lastHash: last, now: time.Now}, nil
 }
 
 // NewWriter builds a Logger over an arbitrary writer (tests).
@@ -103,6 +104,13 @@ func (l *Logger) Log(r Record) error {
 	}
 	if _, err := l.w.Write(append(line, '\n')); err != nil {
 		return fmt.Errorf("audit: write: %w", err)
+	}
+	// fsync so the tail of the tamper-evident chain survives an unclean crash.
+	// nil for NewWriter (an arbitrary writer can't be synced).
+	if l.syncFn != nil {
+		if err := l.syncFn(); err != nil {
+			return fmt.Errorf("audit: sync: %w", err)
+		}
 	}
 	l.lastHash = r.Hash
 	return nil
