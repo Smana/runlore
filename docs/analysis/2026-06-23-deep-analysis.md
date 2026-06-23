@@ -167,7 +167,7 @@ Effort: **S** ≤1 day · **M** 2–4 days · **L** ≥1 week. Impact is on the 
 
 ### 9.0 Implementation status (updated 2026-06-23)
 
-**11 of 18 roadmap items merged** — Waves 0–2 are essentially complete and the eval-validity cluster is closed. Each shipped as its own brainstorm → spec → plan → subagent-implemented → reviewed PR.
+**17 of 18 roadmap items merged** — Waves 0–4 are complete bar the one deferred item (#17). Each shipped as its own brainstorm → spec → plan → subagent-implemented → reviewed PR. The full k3d e2e (`hack/e2e-k3d.sh`) passes end-to-end after the batch (**PASS=40 FAIL=0**); it caught + fixed a curation regression from #16's `Verified` gate (the e2e mock didn't answer the verify pass — PR #87).
 
 | # | Item | Status |
 |---|------|--------|
@@ -182,15 +182,20 @@ Effort: **S** ≤1 day · **M** 2–4 days · **L** ≥1 week. Impact is on the 
 | 10 | outcome attribution — per-fingerprint open, race/TTL | ✅ merged (PR #75) |
 | 14 | durability — PVC for ledger+audit + fsync | ✅ merged (PR #77) |
 | 15 | loop cost — hard token kill | ✅ merged (PR #76) |
-| 7 | eval into CI (k-of-n + fail-on-threshold) | ⏳ **next** — deps #4, #5 now both met |
-| 11 | curation dedup fingerprint | ⏳ pending (deps #2 ✅) |
-| 12 | curation Phase-2 — `lore curate` CronJob + dormant passes | ⏳ pending (deps #8 ✅) |
-| 13 | confirmatory evidence on recall | ⏳ pending (deps #2 ✅) |
-| 16 | `Verified`/provenance in `meetsBar` | ⏳ pending |
-| 17 | reversible `rollback` op | ⏳ pending |
-| 18 | HEAD-diff sync + `readyz` gate | ⏳ pending (deps #1 ✅) |
+| 7 | eval into CI (nightly k-of-n + fail-under) | ✅ merged (PR #81) — nightly+dispatch workflow; needs the `RUNLORE_EVAL_API_KEY` secret to run |
+| 11 | curation dedup fingerprint | ✅ merged (PR #83) |
+| 12 | curation Phase-2 — `lore curate` CronJob + dormant passes | 🟡 **partial** (PR #86) — scheduler (opt-in CronJob) + Lifecycle sweep wired; **Queue + Recurrence still deferred** (see below) |
+| 13 | confirmatory evidence on recall | ✅ merged (PR #84) |
+| 16 | `Verified`/provenance in `meetsBar` | ✅ merged (PR #85) |
+| 17 | reversible `rollback` op | ⏳ **deferred** — effort L, autonomy/remediation weight; a focused session |
+| 18 | HEAD-diff sync + `readyz` gate | ✅ merged (PR #82) |
 
-Specs/plans for each merged item live under `docs/superpowers/specs/` and `docs/superpowers/plans/` on `main`. **Recommended next: #7** — wiring the now-trustworthy eval (deterministic Track-A entity gate from #4 + k-of-n from #5) into CI so it gates merges.
+Specs/plans for each merged item live under `docs/superpowers/specs/` and `docs/superpowers/plans/` on `main`.
+
+**Remaining work:**
+- **#17 (reversible `rollback`)** — the one untouched roadmap item; deferred deliberately (it executes Flux/Argo reverts, so it warrants a dedicated, focused session rather than the autonomous batch).
+- **#12's deferred passes** — `Queue` (`ResolutionChecker`) needs a PR↔incident resolution join (the #11 dup-fingerprint ≠ the ledger's alert-fingerprint; or a cluster-state checker); `Recurrence` needs an idempotent ledger-backed driver over `Episodes()` (a watermark or gap-issue existence-check). Both stay implemented + unit-tested in `internal/curate`; `runCurate`'s comment states each blocker. Scoped this way because their correct wiring is a genuine product decision, not mechanical.
+- **Nightly eval (#7)** runs once the `RUNLORE_EVAL_API_KEY` repo secret is set (it drives a live LLM, so it can't gate fork PRs and isn't a per-PR blocker — by design).
 
 ### 9.1 Ranked improvements
 
@@ -248,23 +253,23 @@ Wave 1 — Make recall disambiguate, then prove it
 Wave 2 — Close the outcome→recall feedback edge (make-or-break)
   ├─ ✅ #10 coalesce/race/TTL attribution ...... M [needs 8]
   ├─ ✅ #9  outcome-driven decay ............... L [needs 1,2,8] ← THE THESIS
-  └─ ⏳ #13 confirmatory evidence on recall .... M [needs 2]
+  └─ ✅ #13 confirmatory evidence on recall .... M [needs 2]
 
 Wave 3 — Compound faster + harden
-  ├─ ⏳ #7  eval into CI ....................... S [needs 4,5] ← NEXT (deps met)
+  ├─ ✅ #7  eval into CI ....................... S [needs 4,5]
   ├─ ✅ #4  entity-level precision in eval ..... M (Track A; landed ahead of #7)
-  ├─ ⏳ #11 deterministic dedup fingerprint .... M [needs 2]
-  ├─ ⏳ #12 curate CronJob + 3 dormant passes .. M [needs 8]
-  └─ ⏳ #16 Verified/provenance in meetsBar .... M
+  ├─ ✅ #11 deterministic dedup fingerprint .... M [needs 2]
+  ├─ 🟡 #12 curate CronJob + lifecycle ........ M [needs 8] (Queue+Recurrence deferred)
+  └─ ✅ #16 Verified/provenance in meetsBar .... M
 
 Wave 4 — Reliability & durability (parallel, independent)
   ├─ ✅ #14 StatefulSet/PVC + fsync ............ M
   ├─ ✅ #15 hard token kill + context compaction  M
-  ├─ ⏳ #18 HEAD-diff sync + readyz ............ M [needs 1]
-  └─ ⏳ #17 reversible rollback op (product) ... L
+  ├─ ✅ #18 HEAD-diff sync + readyz ............ M [needs 1]
+  └─ ⏳ #17 reversible rollback op (product) ... L  ← only remaining item
 ```
 
-> **Status (2026-06-23):** Waves 0–2 complete bar #13; the eval-validity cluster (#4/#5/#6) is done. Remaining: #7 (next), #11, #12, #13, #16, #17, #18. See §9.0 for the per-item PR map.
+> **Status (2026-06-23, updated):** Waves 0–4 complete except **#17** (deferred) and #12's deferred Queue+Recurrence passes. The eval-validity cluster (#4/#5/#6) is done; the full k3d e2e passes (PASS=40 FAIL=0). See §9.0 for the per-item PR map and remaining-work notes.
 
 **Fastest credible "we learn" demo:** Wave 0 + Slice 2 + Slice 5 + #9 — a poisoned/stale entry recalls, never resolves, decays below the floor on the next occurrence, triggers a fresh re-investigation that overturns it, observable in the eval harness *and* on the entry's git frontmatter.
 
