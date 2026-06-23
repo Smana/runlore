@@ -32,6 +32,7 @@ type LiveRunner struct {
 	Log       *slog.Logger
 	N         int                    // runs per scenario (default 1 if 0)
 	OnRecord  func(Scenario, []Call) // optional: persist the run's calls (replay corpus)
+	Recall    *investigate.Recall    // optional; when set, runOnce takes the instant-recall short-circuit (production path). nil ⇒ no recall.
 }
 
 // RunOutcome is one of the N runs of a scenario.
@@ -100,7 +101,7 @@ func (lr *LiveRunner) runOnce(ctx context.Context, scn Scenario) RunOutcome {
 	rec := &Recorder{}
 	var inv providers.Investigation
 	li := &investigate.LoopInvestigator{
-		Model: lr.Model, Tools: wrap(lr.BaseTools, rec), Log: lr.Log, Verify: true,
+		Model: lr.Model, Tools: wrap(lr.BaseTools, rec), Log: lr.Log, Verify: true, Recall: lr.Recall,
 		OnComplete: func(got providers.Investigation) { inv = got },
 	}
 	req := investigate.Request{
