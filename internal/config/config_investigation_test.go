@@ -38,13 +38,29 @@ func TestApplyDefaultsRateLimitWindow(t *testing.T) {
 }
 
 func TestApplyDefaultsInstantRecall(t *testing.T) {
-	// enabled with no tuning → margin and solo gates must default to active values.
+	// enabled with no tuning → margin/solo gates and decay knobs default to active values.
 	var c Config
 	c.Catalog.InstantRecall.Enabled = true
 	applyDefaults(&c)
 	ir := c.Catalog.InstantRecall
 	if ir.MinScore != 1.0 || ir.MarginGap != 1.0 || ir.SoloFloor != 4.0 {
 		t.Fatalf("instant-recall defaults not applied: %+v", ir)
+	}
+	if ir.OutcomePrior != 2.0 || ir.OutcomeFloor != 0.5 {
+		t.Fatalf("recall-decay defaults not applied: %+v", ir)
+	}
+}
+
+func TestApplyDefaultsRecallDecayExplicit(t *testing.T) {
+	// Explicit decay knobs must not be overwritten.
+	var c Config
+	c.Catalog.InstantRecall.Enabled = true
+	c.Catalog.InstantRecall.OutcomePrior = 5.0
+	c.Catalog.InstantRecall.OutcomeFloor = 0.3
+	applyDefaults(&c)
+	ir := c.Catalog.InstantRecall
+	if ir.OutcomePrior != 5.0 || ir.OutcomeFloor != 0.3 {
+		t.Fatalf("explicit recall-decay values overwritten: %+v", ir)
 	}
 }
 
