@@ -14,6 +14,10 @@
 | **License** | Apache-2.0 |
 | **Language** | Go (single static binary) |
 
+> **See also:** [`learning-loop.md`](learning-loop.md) — a focused deep-dive on *how the
+> learning loop works* (retrieve → capture → curate → compound), the outcome-driven
+> decay edge, and the design rationale behind each gate, with diagrams.
+
 ---
 
 ## 1. Why this exists
