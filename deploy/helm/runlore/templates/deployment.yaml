@@ -84,7 +84,7 @@ spec:
             - name: catalog
               mountPath: {{ .Values.catalog.mountPath }}
               readOnly: true
-            {{- else if .Values.catalog.gitSync }}
+            {{- else if or .Values.catalog.gitSync .Values.persistence.enabled }}
             - name: catalog
               mountPath: {{ .Values.catalog.mountPath }}
             {{- end }}
@@ -98,9 +98,14 @@ spec:
         - name: catalog
           configMap:
             name: {{ .Values.catalog.configMap }}
-        {{- else if .Values.catalog.gitSync }}
+        {{- else if or .Values.catalog.gitSync .Values.persistence.enabled }}
         - name: catalog
+          {{- if .Values.persistence.enabled }}
+          persistentVolumeClaim:
+            claimName: {{ .Values.persistence.existingClaim | default (printf "%s-data" (include "runlore.fullname" .)) }}
+          {{- else }}
           emptyDir: {}
+          {{- end }}
         {{- end }}
       {{- with .Values.nodeSelector }}
       nodeSelector:
