@@ -10,7 +10,7 @@ import (
 // LiveReport is the serializable output of one live-fire campaign run.
 type LiveReport struct {
 	At      string       `json:"at"`
-	N       int          `json:"n"` // runs per scenario (live mode); 0 in replay mode
+	N       int          `json:"n"`   // runs per scenario (live mode); 0 in replay mode
 	Ran     int          `json:"ran"` // scenarios actually investigated (not skipped)
 	Passed  int          `json:"passed"`
 	Skipped int          `json:"skipped"`
