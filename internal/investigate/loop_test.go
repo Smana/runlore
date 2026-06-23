@@ -30,10 +30,10 @@ func TestInstantRecallHit(t *testing.T) {
 		Model: model,
 		Log:   slog.New(slog.NewTextHandler(io.Discard, nil)),
 		Recall: &Recall{MinScore: 2.0, Catalog: fakeScored{hits: []catalog.ScoredEntry{
-			{Entry: catalog.Entry{Title: "Known incident", Description: "chart bump", Path: "known.md"}, Score: 5.0}}}},
+			{Entry: catalog.Entry{Title: "Known incident", Description: "chart bump", Path: "known.md", Resource: "tooling/harbor"}, Score: 5.0}}}},
 		OnComplete: func(inv providers.Investigation) { got = &inv },
 	}
-	if err := li.Investigate(context.Background(), Request{Title: "HarborProbeFailure"}); err != nil {
+	if err := li.Investigate(context.Background(), Request{Title: "HarborProbeFailure", Workload: providers.Workload{Namespace: "tooling", Name: "harbor"}}); err != nil {
 		t.Fatalf("Investigate: %v", err)
 	}
 	if model.i != 0 {
@@ -41,6 +41,9 @@ func TestInstantRecallHit(t *testing.T) {
 	}
 	if got == nil || len(got.RootCauses) != 1 || !strings.Contains(got.RootCauses[0].Summary, "Known incident") {
 		t.Fatalf("unexpected recalled investigation: %+v", got)
+	}
+	if !got.Recalled {
+		t.Fatal("a recalled investigation must be flagged Recalled so the curator skips it")
 	}
 }
 

@@ -29,6 +29,13 @@ type Curator struct {
 // Curate applies the three-step gate. It returns the created PR ref, or an empty
 // ref when the finding was coalesced (duplicate) or dropped (below the bar).
 func (c *Curator) Curate(ctx context.Context, inv providers.Investigation) (providers.Ref, error) {
+	// A recall is a match against an existing entry — not novel; never re-curate it
+	// (chat delivery still happens upstream). Avoids drafting near-duplicate PRs.
+	if inv.Recalled {
+		c.Log.Info("skipping curation of a recalled finding (cache hit, not novel)", "title", inv.Title)
+		return providers.Ref{}, nil
+	}
+
 	// 1. dedup — catalog, then open PRs
 	if dup, hit, err := (Novelty{Catalog: c.Catalog, DupScore: c.DupScore}).IsDuplicate(ctx, inv); err != nil {
 		c.Log.Warn("dedup: catalog search failed", "err", err)
