@@ -53,3 +53,15 @@ func TestResourceStringNamespaceOnly(t *testing.T) {
 		t.Fatalf("empty workload resource = %q, want empty", got)
 	}
 }
+
+func TestDraftKBEntrySetsFingerprint(t *testing.T) {
+	inv := providers.Investigation{
+		Title:      "apps/web crash",
+		Confidence: 0.9,
+		Resource:   providers.Workload{Namespace: "apps", Name: "web"},
+		RootCauses: []providers.Hypothesis{{Summary: "image tag rollout broke readiness", Evidence: []string{"e"}}},
+	}
+	if got := draftKBEntry(inv).Fingerprint; got != DupFingerprint(inv) {
+		t.Fatalf("drafted entry fingerprint = %q, want %q", got, DupFingerprint(inv))
+	}
+}
