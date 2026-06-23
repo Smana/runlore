@@ -67,7 +67,7 @@ config:
   #     solo_floor: 4.0                # confident bar when there is only one hit
   #     require_workload_match: false  # true = exact namespace+workload; false = namespace-level agreement is enough
   # outcome:
-  #   ledger_path: /var/lib/runlore/catalog/outcomes.jsonl  # learning-loop outcome ledger; point at the writable git-sync mirror PV
+  #   ledger_path: /var/lib/runlore/catalog/outcomes.jsonl  # learning-loop outcome ledger; for durability set persistence.enabled and point this at the persistent mount (catalog.mountPath)
   # notify:
   #   slack: { webhook_url_env: SLACK_WEBHOOK_URL }
   #   matrix: { homeserver: https://matrix.org, room_id: "!r:hs", access_token_env: MATRIX_TOKEN }
@@ -92,6 +92,20 @@ catalog:
   configMap: ""                       # ConfigMap of OKF .md files (static mode)
   gitSync: false                      # writable mirror for config.catalog.git (closes the read/write loop)
   mountPath: /var/lib/runlore/catalog
+
+# Durability for the writable data path (catalog.mountPath) where the outcome
+# ledger and the hash-chained audit log live. Disabled by default: the data path
+# is an emptyDir and is DESTROYED on pod restart, upgrade, or leader failover.
+# Enable to back it with a ReadWriteMany volume (e.g. EFS/Filestore) so the
+# outcome ledger + audit log survive pod restarts AND leader failover. RWX is
+# required because the standby replica must mount the same data to take over.
+# Leave disabled (emptyDir) for non-HA / ephemeral setups.
+persistence:
+  enabled: false
+  storageClass: ""
+  accessModes: ["ReadWriteMany"]
+  size: 1Gi
+  existingClaim: ""                   # reuse a pre-provisioned PVC instead of templating one
 
 # Keeps at least one replica available during voluntary disruptions (only applied
 # when replicaCount > 1).
