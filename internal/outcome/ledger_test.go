@@ -200,3 +200,78 @@ func TestEpisodesTwoFingerprintsInterleaved(t *testing.T) {
 		}
 	}
 }
+
+func TestOpenCountsAggregatesRecallEntries(t *testing.T) {
+	l, _ := New(filepath.Join(t.TempDir(), "o.jsonl"))
+	t0 := time.Unix(7000, 0)
+	for i := 0; i < 3; i++ {
+		_ = l.Open(Event{Fingerprint: "fp", Kind: "recall", Entry: "x.md", At: t0.Add(time.Duration(i) * time.Second)})
+	}
+	resolveAt := t0.Add(10 * time.Second)
+	_, _, _ = l.Resolve("fp", resolveAt)
+	counts, err := l.OpenCounts()
+	if err != nil {
+		t.Fatalf("OpenCounts: %v", err)
+	}
+	a := counts["x.md"]
+	if a.Recalls != 3 || a.Resolved != 1 {
+		t.Fatalf("want recalls=3 resolved=1, got %+v", a)
+	}
+	if !a.LastConfirmed.Equal(resolveAt) {
+		t.Fatalf("LastConfirmed = %v, want %v", a.LastConfirmed, resolveAt)
+	}
+}
+
+func TestOpenCountsSkipsFresh(t *testing.T) {
+	l, _ := New(filepath.Join(t.TempDir(), "o.jsonl"))
+	t0 := time.Unix(8000, 0)
+	_ = l.Open(Event{Fingerprint: "f1", Kind: "fresh", At: t0}) // fresh → no entry
+	_, _, _ = l.Resolve("f1", t0.Add(time.Minute))
+	counts, _ := l.OpenCounts()
+	if len(counts) != 0 {
+		t.Fatalf("fresh opens must not appear in OpenCounts, got %+v", counts)
+	}
+}
+
+func TestOpenCountsEmptyMapWhenDisabled(t *testing.T) {
+	dis, _ := New("")
+	counts, err := dis.OpenCounts()
+	if err != nil || counts == nil || len(counts) != 0 {
+		t.Fatalf("disabled: want empty non-nil map; got %v,%v", counts, err)
+	}
+}
+
+func TestOpenCountsUnresolvedRecallCounted(t *testing.T) {
+	l, _ := New(filepath.Join(t.TempDir(), "o.jsonl"))
+	t0 := time.Unix(7100, 0)
+	_ = l.Open(Event{Fingerprint: "fp", Kind: "recall", Entry: "x.md", At: t0}) // never resolved
+	counts, err := l.OpenCounts()
+	if err != nil {
+		t.Fatalf("OpenCounts: %v", err)
+	}
+	a := counts["x.md"]
+	if a.Recalls != 1 || a.Resolved != 0 {
+		t.Fatalf("unresolved recall: want recalls=1 resolved=0, got %+v", a)
+	}
+	if !a.LastConfirmed.IsZero() {
+		t.Fatalf("unresolved recall: LastConfirmed must be zero, got %v", a.LastConfirmed)
+	}
+}
+
+func TestOpenCountsMultipleEntries(t *testing.T) {
+	l, _ := New(filepath.Join(t.TempDir(), "o.jsonl"))
+	t0 := time.Unix(7200, 0)
+	_ = l.Open(Event{Fingerprint: "A", Kind: "recall", Entry: "a.md", At: t0})
+	_ = l.Open(Event{Fingerprint: "B", Kind: "recall", Entry: "b.md", At: t0.Add(time.Second)})
+	_, _, _ = l.Resolve("A", t0.Add(2*time.Second))
+	counts, _ := l.OpenCounts()
+	if len(counts) != 2 {
+		t.Fatalf("want 2 entries, got %d: %+v", len(counts), counts)
+	}
+	if counts["a.md"].Resolved != 1 || counts["a.md"].Recalls != 1 {
+		t.Fatalf("a.md should be recalls=1 resolved=1: %+v", counts["a.md"])
+	}
+	if counts["b.md"].Recalls != 1 || counts["b.md"].Resolved != 0 {
+		t.Fatalf("b.md should be recalls=1 resolved=0: %+v", counts["b.md"])
+	}
+}
