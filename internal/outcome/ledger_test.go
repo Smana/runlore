@@ -59,3 +59,39 @@ func TestLedgerDisabledWhenPathEmpty(t *testing.T) {
 		t.Fatal("disabled ledger Resolve must be ok=false")
 	}
 }
+
+func TestReadEventsReturnsAllInOrder(t *testing.T) {
+	p := filepath.Join(t.TempDir(), "o.jsonl")
+	l, err := New(p)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	t0 := time.Unix(3000, 0)
+	_ = l.Open(Event{Fingerprint: "a", Kind: "fresh", At: t0})
+	_ = l.Open(Event{Fingerprint: "b", Kind: "recall", Entry: "x.md", At: t0.Add(time.Second)})
+	_, _, _ = l.Resolve("a", t0.Add(2*time.Second))
+	events, err := l.readEvents()
+	if err != nil {
+		t.Fatalf("readEvents: %v", err)
+	}
+	if len(events) != 3 {
+		t.Fatalf("want 3 events, got %d: %+v", len(events), events)
+	}
+	if events[0].Event != "open" || events[0].Fingerprint != "a" {
+		t.Fatalf("event[0] = %+v", events[0])
+	}
+	if events[2].Event != "resolve" || events[2].Fingerprint != "a" {
+		t.Fatalf("event[2] = %+v", events[2])
+	}
+}
+
+func TestReadEventsDisabledOrAbsent(t *testing.T) {
+	dis, _ := New("")
+	if ev, err := dis.readEvents(); err != nil || ev != nil {
+		t.Fatalf("disabled: want nil,nil; got %v,%v", ev, err)
+	}
+	absent, _ := New(filepath.Join(t.TempDir(), "missing.jsonl"))
+	if ev, err := absent.readEvents(); err != nil || ev != nil {
+		t.Fatalf("absent file: want nil,nil; got %v,%v", ev, err)
+	}
+}
