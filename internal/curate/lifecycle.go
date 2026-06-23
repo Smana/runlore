@@ -4,6 +4,7 @@ import (
 	"context"
 	"log/slog"
 	"slices"
+	"time"
 )
 
 // protectedLabels are never auto-closed (by the stale sweep OR dedup). "solved"
@@ -11,21 +12,30 @@ import (
 // for merge — auto-closing it would discard that editorial work.
 var protectedLabels = []string{"solved", "ready-to-merge", "accepted", "investigating", "knowledge-gap"}
 
-// Lifecycle closes stale, unprotected KB artifacts (no progress within the window).
+// Lifecycle closes stale, unprotected KB artifacts — those with no forge activity
+// within StaleAfter. A PR whose age is unknown (zero UpdatedAt) is never closed.
 type Lifecycle struct {
-	Forge Forge
-	Stale func(number int) bool // true ⇒ older than the staleness window (wired with real ages in the CLI)
-	Log   *slog.Logger
+	Forge      Forge
+	StaleAfter time.Duration    // 0 disables the sweep
+	Now        func() time.Time // injectable clock; nil ⇒ time.Now
+	Log        *slog.Logger
 }
 
 // Run closes stale, unprotected artifacts with a comment.
 func (l Lifecycle) Run(ctx context.Context) error {
+	if l.StaleAfter <= 0 {
+		return nil
+	}
+	now := time.Now
+	if l.Now != nil {
+		now = l.Now
+	}
 	prs, err := l.Forge.ListPRsByLabel(ctx, "runlore")
 	if err != nil {
 		return err
 	}
 	for _, pr := range prs {
-		if isProtected(pr.Labels) || !l.Stale(pr.Number) {
+		if isProtected(pr.Labels) || pr.UpdatedAt.IsZero() || now().Sub(pr.UpdatedAt) <= l.StaleAfter {
 			continue
 		}
 		// Comment first; if the back-ref comment fails, do NOT close (preserve the
