@@ -5,10 +5,14 @@ import (
 	"errors"
 	"io"
 	"log/slog"
+	"net/http"
+	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/Smana/runlore/internal/catalog"
 	"github.com/Smana/runlore/internal/providers"
+	"github.com/Smana/runlore/internal/telemetry"
 )
 
 // fakeForge records OpenPR / Comment calls and serves a fixed open-PR list.
@@ -126,5 +130,34 @@ func TestCurateSkipsRecalled(t *testing.T) {
 	}
 	if f.openedPR != nil || ref.URL != "" {
 		t.Fatalf("a recalled finding must not be curated, got pr=%+v ref=%s", f.openedPR, ref.URL)
+	}
+}
+
+func TestCurateDedupScoreNilMetricsSafe(t *testing.T) {
+	// newCurator leaves Metrics nil; recording the dedup score must not panic.
+	c := newCurator(&fakeForge{}, fakeScored{score: 2.0, title: "Some entry"})
+	if _, err := c.Curate(context.Background(), goodFinding()); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestCurateRecordsDedupScore(t *testing.T) {
+	h, shutdown, err := telemetry.Setup(context.Background())
+	if err != nil {
+		t.Fatalf("telemetry setup: %v", err)
+	}
+	defer func() { _ = shutdown(context.Background()) }()
+
+	c := newCurator(&fakeForge{}, fakeScored{score: 2.0, title: "Some entry"}) // below DupScore → records, then continues
+	c.Metrics = telemetry.NewMetrics()
+	if _, err := c.Curate(context.Background(), goodFinding()); err != nil {
+		t.Fatal(err)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/metrics", nil)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if !strings.Contains(rec.Body.String(), "runlore_curation_dedup_score") {
+		t.Fatalf("runlore_curation_dedup_score not found in metrics output:\n%s", rec.Body.String())
 	}
 }
