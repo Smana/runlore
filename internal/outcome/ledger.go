@@ -44,24 +44,11 @@ type Ledger struct {
 // no-op ledger (the feature is off).
 func New(path string) (*Ledger, error) {
 	l := &Ledger{path: path, open: map[string]Event{}}
-	if path == "" {
-		return l, nil
-	}
-	f, err := os.Open(path)
-	if errors.Is(err, fs.ErrNotExist) {
-		return l, nil
-	}
+	events, err := l.readEvents()
 	if err != nil {
 		return nil, err
 	}
-	defer func() { _ = f.Close() }()
-	sc := bufio.NewScanner(f)
-	sc.Buffer(make([]byte, 0, 64*1024), 1024*1024)
-	for sc.Scan() {
-		var e Event
-		if json.Unmarshal(sc.Bytes(), &e) != nil {
-			continue // skip a corrupt line rather than fail startup
-		}
+	for _, e := range events {
 		switch e.Event {
 		case "open":
 			l.open[e.Fingerprint] = e
@@ -69,7 +56,34 @@ func New(path string) (*Ledger, error) {
 			delete(l.open, e.Fingerprint)
 		}
 	}
-	return l, sc.Err()
+	return l, nil
+}
+
+// readEvents replays the ledger file in order, skipping corrupt lines. It returns
+// a nil slice when the ledger is disabled (path=="") or the file is absent.
+func (l *Ledger) readEvents() ([]Event, error) {
+	if l.path == "" {
+		return nil, nil
+	}
+	f, err := os.Open(l.path)
+	if errors.Is(err, fs.ErrNotExist) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = f.Close() }()
+	sc := bufio.NewScanner(f)
+	sc.Buffer(make([]byte, 0, 64*1024), 1024*1024)
+	var events []Event
+	for sc.Scan() {
+		var e Event
+		if json.Unmarshal(sc.Bytes(), &e) != nil {
+			continue // skip a corrupt line rather than fail
+		}
+		events = append(events, e)
+	}
+	return events, sc.Err()
 }
 
 func (l *Ledger) enabled() bool { return l != nil && l.path != "" }
