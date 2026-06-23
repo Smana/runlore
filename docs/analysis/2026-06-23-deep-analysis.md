@@ -13,6 +13,16 @@
 
 ## 0. TL;DR — the one-paragraph verdict
 
+> **⏱ Update (2026-06-23, post-batch).** §0–§8 below are the original analysis snapshot
+> at commit `fa37bf2`. **The make-or-break has since shipped:** the outcome-ledger read
+> API (`Episodes()`/`OpenCounts()`, PR #71), outcome-driven recall **decay** (PR #72),
+> the **BM25** scorer fix (PR #70), and the rest of Waves 0–4 are merged — **17/18
+> roadmap items done, only #17 deferred** — and the full k3d e2e passes end-to-end
+> (PASS=40 FAIL=0). So where §0 says "accumulates but does not learn", "`Episodes()`
+> does not exist", "A2 unbuilt", or "TF-IDF not BM25" — **those are now resolved.** The
+> original prose is kept verbatim as a point-in-time record; the **current** status is
+> §9.0/§9.3, and the loop is explained in [`../learning-loop.md`](../learning-loop.md).
+
 RunLore is a **genuinely above-OSS-median engine** (adversarial verify pass, honest first-class `unresolved`, derived-not-asserted recall confidence, untrusted-catalog hygiene) wrapped around a **learning claim it has not yet earned**. The loop today **accumulates but does not learn**: the measurement layer (A1 outcome ledger) is fully wired, but **nothing consumes it** — the outcome→recall feedback edge (A2) and the dormant curate passes (A3) are unbuilt, and `Episodes()` (the A1/A2 seam the spec depends on) does not exist in code. Layered on top are several **foundational defects that make every retrieval and eval claim untrustworthy until fixed** — chief among them: **the catalog silently runs legacy TF-IDF, not BM25** (every comment, metric, threshold, and the entire "corpus-portable margin" premise is tuned against a scorer the code does not run). The project is **worth building, but only as a sharply-focused, propose-and-approve play for the GitOps-native, anti-lock-in buyer — and only if the learning loop actually closes.** The differentiator was never "what changed" or "open runbooks" (both copyable in 12–18 months); it is the **outcome-validated, provenance-tracked, communal** catalog. Build *that*, or don't.
 
 ---
@@ -30,10 +40,10 @@ The **design docs are excellent** — honest about prior art (HolmesGPT, k8sgpt,
 | **Retrieve** — instant recall 3-gate + `kb_search` | ✅ wired | `recall.go`; built `main.go:889`, invoked `loop.go:110-139` |
 | **Capture (A1)** — outcome ledger open/resolve | ✅ wired | `ledger.Open` `main.go:1058`; `ledger.Resolve` `server.go:374` |
 | **Curate (file-time)** — dedup → quality gate → PR | ✅ wired | `Curator.Curate` `main.go:1096` |
-| **Curate (Phase-2)** — backlog groom | ⚠️ **only `Dedup` wired** | `runCurate` `main.go:761-763` |
-| **Curate (Phase-2)** — `Queue` / `Lifecycle` / `Recurrence` | 🟡 **DORMANT** (tested, unwired) | need `ResolutionChecker`, forge `updated_at`, `RecurrenceStore` — `main.go:728-733` admits it |
-| **Compound** — git-sync → bleve reindex | ✅ wired (slow) | `main.go:428`; compounds only as fast as humans merge PRs (~14% baseline) |
-| **A2** — outcome → recall ranking / decay | ❌ **UNBUILT** | `deriveRecallConfidence` hand-tuned, no ledger input; **`Episodes()` absent from `ledger.go`** |
+| **Curate (Phase-2)** — backlog groom | ✅ **Dedup + Lifecycle wired** (was: only Dedup) | `runCurate`; opt-in `lore curate` CronJob (PR #86) |
+| **Curate (Phase-2)** — `Queue` / `Recurrence` | 🟡 **DORMANT** (tested, unwired) | deferred by design — need a resolution join / idempotent ledger driver (`Lifecycle` now wired via `updated_at`) |
+| **Compound** — git-sync → bleve reindex | ✅ wired (HEAD-gated, was: every-poll) | re-indexes only on real HEAD change; readiness gated on catalog warmth (PR #82) |
+| **A2** — outcome → recall ranking / decay | ✅ **BUILT** (was: ❌ UNBUILT) | `Episodes()`/`OpenCounts()` (PR #71) feed `outcomeFactor` → `deriveRecallConfidence` decay (PR #72) |
 
 ---
 
