@@ -40,12 +40,37 @@ type Request struct {
 	Fingerprint string // Alertmanager fingerprint (stable firing↔resolved); for outcome attribution
 }
 
+// workloadFromLabels derives the affected workload (kind, name) from Alertmanager
+// labels, preferring a stable controller name over an ephemeral pod name.
+func workloadFromLabels(labels map[string]string) (kind, name string) {
+	for _, c := range []struct{ label, kind string }{
+		{"deployment", "Deployment"},
+		{"statefulset", "StatefulSet"},
+		{"daemonset", "DaemonSet"},
+		{"replicaset", "ReplicaSet"},
+		{"cronjob", "CronJob"},
+		{"job", "Job"},
+	} {
+		if v := labels[c.label]; v != "" {
+			return c.kind, v
+		}
+	}
+	if v := labels["workload"]; v != "" {
+		return labels["workload_type"], v // kind may be empty
+	}
+	if v := labels["pod"]; v != "" {
+		return "Pod", v
+	}
+	return "", ""
+}
+
 // FromIncident builds a Request from a matched incident alert.
 func FromIncident(inc config.Incident) Request {
+	kind, name := workloadFromLabels(inc.Labels)
 	return Request{
 		Source:      SourceAlert,
 		Title:       inc.AlertName,
-		Workload:    providers.Workload{Namespace: inc.Namespace},
+		Workload:    providers.Workload{Namespace: inc.Namespace, Kind: kind, Name: name},
 		Reason:      inc.Severity,
 		Labels:      inc.Labels,
 		At:          inc.StartsAt,
