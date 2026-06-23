@@ -9,7 +9,6 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
-	"strings"
 
 	"github.com/Smana/runlore/internal/catalog"
 	"github.com/Smana/runlore/internal/providers"
@@ -78,16 +77,20 @@ func (c *Curator) Curate(ctx context.Context, inv providers.Investigation) (prov
 	return ref, nil
 }
 
-// duplicateOpenPR reports an open KB PR whose normalized title matches this
-// finding (cheap title-slug match; deep cross-incident dedup is the curate agent).
+// duplicateOpenPR reports an open KB PR whose stored dedup fingerprint matches this
+// finding's — deterministic identity (resource + cause), not the LLM's free-text
+// title. An empty fingerprint (no resource and no cause) never matches.
 func (c *Curator) duplicateOpenPR(ctx context.Context, inv providers.Investigation) (int, bool, error) {
+	want := DupFingerprint(inv)
+	if want == "" {
+		return 0, false, nil
+	}
 	prs, err := c.Forge.ListPRsByLabel(ctx, "runlore")
 	if err != nil {
 		return 0, false, err
 	}
-	want := normTitle(inv.Title)
 	for _, pr := range prs {
-		if normTitle(strings.TrimPrefix(pr.Title, "KB: ")) == want {
+		if providers.ParseFingerprintMarker(pr.Body) == want {
 			return pr.Number, true, nil
 		}
 	}
@@ -104,8 +107,6 @@ func meetsBar(inv providers.Investigation, minConf float64) bool {
 	top := inv.RootCauses[0]
 	return top.Summary != "" && len(top.Evidence) > 0
 }
-
-func normTitle(s string) string { return strings.ToLower(strings.TrimSpace(s)) }
 
 func coalesceComment(inv providers.Investigation) string {
 	return fmt.Sprintf("RunLore saw this incident again (confidence %.0f%%). Coalesced rather than re-filed.", inv.Confidence*100)
