@@ -127,6 +127,17 @@ func TestFromIncidentCarriesFingerprint(t *testing.T) {
 	}
 }
 
+func TestFromIncidentSetsFingerprints(t *testing.T) {
+	r := FromIncident(config.Incident{AlertName: "A", Namespace: "ns", Fingerprint: "fp-9"})
+	if len(r.Fingerprints) != 1 || r.Fingerprints[0] != "fp-9" {
+		t.Fatalf("Request.Fingerprints = %v, want [fp-9]", r.Fingerprints)
+	}
+	// No fingerprint ⇒ nil (so coalescer can append non-empty ones without a "" entry).
+	if r2 := FromIncident(config.Incident{AlertName: "A", Namespace: "ns"}); r2.Fingerprints != nil {
+		t.Fatalf("Request.Fingerprints = %v, want nil when fingerprint empty", r2.Fingerprints)
+	}
+}
+
 func TestWorkloadFromLabels(t *testing.T) {
 	cases := []struct {
 		name             string

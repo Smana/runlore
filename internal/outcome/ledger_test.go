@@ -166,18 +166,45 @@ func TestEpisodesEmptyAndDisabled(t *testing.T) {
 	}
 }
 
-func TestEpisodesOrphanResolveSkipped(t *testing.T) {
+// TestEpisodesResolveBeforeOpenPairs verifies the new order-independent pairing:
+// a resolve written BEFORE its open (a transient incident that cleared
+// mid-investigation, so the resolve webhook landed before the open was recorded)
+// now PAIRS with the later open — the open becomes a resolved episode.
+func TestEpisodesResolveBeforeOpenPairs(t *testing.T) {
 	l, _ := New(filepath.Join(t.TempDir(), "o.jsonl"))
 	t0 := time.Unix(9000, 0)
-	// A resolve with no prior open is dropped; a later open for the same fingerprint stays unresolved.
 	_, _, _ = l.Resolve("fp", t0)
 	_ = l.Open(Event{Fingerprint: "fp", Kind: "recall", Entry: "x.md", At: t0.Add(time.Second)})
 	eps, err := l.Episodes()
 	if err != nil {
 		t.Fatalf("Episodes: %v", err)
 	}
-	if len(eps) != 1 || eps[0].Resolved {
-		t.Fatalf("orphan resolve must be dropped and the later open left unresolved: %+v", eps)
+	if len(eps) != 1 || !eps[0].Resolved {
+		t.Fatalf("resolve-before-open must pair: want 1 resolved episode, got %+v", eps)
+	}
+	// Resolve predates the open here, so Duration is guarded to 0 (never negative).
+	if eps[0].Duration != 0 {
+		t.Fatalf("duration must be guarded non-negative when resolve predates open: %v", eps[0].Duration)
+	}
+}
+
+// TestEpisodesCoalescedMultiFingerprintResolves checks the ledger-level shape of
+// a coalesced attribution: opening the same Title/Kind for several constituent
+// fingerprints, then a resolve for any one of them, marks that episode resolved.
+func TestEpisodesCoalescedMultiFingerprintResolves(t *testing.T) {
+	l, _ := New(filepath.Join(t.TempDir(), "o.jsonl"))
+	t0 := time.Unix(9500, 0)
+	for _, fp := range []string{"a", "b", "c"} {
+		if err := l.Open(Event{Fingerprint: fp, Kind: "recall", Entry: "x.md", Title: "BatchAlert", At: t0}); err != nil {
+			t.Fatalf("Open(%s): %v", fp, err)
+		}
+	}
+	ep, ok, err := l.Resolve("c", t0.Add(time.Minute))
+	if err != nil || !ok {
+		t.Fatalf("Resolve(c): want ok=true, got ok=%v err=%v", ok, err)
+	}
+	if !ep.Resolved || ep.Title != "BatchAlert" {
+		t.Fatalf("constituent resolve must mark its episode resolved: %+v", ep)
 	}
 }
 
