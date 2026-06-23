@@ -94,25 +94,13 @@ const (
 	matchExact
 )
 
-// canonicalResource renders a workload as "namespace/name", or just "namespace"
-// when the name is unknown (common for alert-triggered investigations).
-func canonicalResource(w providers.Workload) string {
-	if w.Namespace == "" {
-		return ""
-	}
-	if w.Name == "" {
-		return w.Namespace
-	}
-	return w.Namespace + "/" + w.Name
-}
-
 // resourceAgrees reports how strongly the alert's workload agrees with an entry's
 // stored resource. requireWorkload demands an exact namespace+name match.
 func resourceAgrees(reqW providers.Workload, entryResource string, requireWorkload bool) matchStrength {
 	if entryResource == "" || reqW.Namespace == "" {
 		return matchNone
 	}
-	if canonicalResource(reqW) == entryResource {
+	if reqW.Ref() == entryResource {
 		return matchExact
 	}
 	if requireWorkload {
