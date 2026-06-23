@@ -2,6 +2,7 @@ package investigate
 
 import (
 	"context"
+	"errors"
 	"math"
 	"net/http"
 	"net/http/httptest"
@@ -9,8 +10,11 @@ import (
 	"testing"
 
 	"github.com/Smana/runlore/internal/catalog"
+	"github.com/Smana/runlore/internal/outcome"
 	"github.com/Smana/runlore/internal/providers"
 	"github.com/Smana/runlore/internal/telemetry"
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/metric/noop"
 )
 
 // recallWith builds a Recall over fixed hits with sensible trust thresholds.
@@ -186,5 +190,108 @@ func TestOutcomeFactor(t *testing.T) {
 		if got > 1.0 {
 			t.Errorf("factor must be <= 1.0, got %v", got)
 		}
+	}
+}
+
+type fakeOutcome struct {
+	counts map[string]outcome.Aggregate
+	err    error
+}
+
+func (f fakeOutcome) OpenCounts() (map[string]outcome.Aggregate, error) { return f.counts, f.err }
+
+// soloRecall builds a Recall over a single strong hit that clears the margin +
+// solo gates for an apps/web workload, with decay configured (k=2, floor=0.5).
+func soloRecall(oc OutcomeStats) *Recall {
+	return &Recall{
+		Catalog: fakeScored{hits: []catalog.ScoredEntry{
+			{Entry: catalog.Entry{Path: "x.md", Resource: "apps/web"}, Score: 6.0},
+		}},
+		MinScore: 1.5, SoloFloor: 4.0, MarginGap: 1.0,
+		Outcome: oc, OutcomePrior: 2.0, OutcomeFloor: 0.5,
+	}
+}
+
+func TestLookupDecayHealthyEntryRecalls(t *testing.T) {
+	r := soloRecall(fakeOutcome{counts: map[string]outcome.Aggregate{"x.md": {Recalls: 5, Resolved: 5}}})
+	e, conf := r.lookup(context.Background(), okReq())
+	if e == nil {
+		t.Fatal("healthy entry (factor 1.0) should recall")
+	}
+	if conf < 0.80 {
+		t.Fatalf("healthy entry confidence should be ~undecayed, got %v", conf)
+	}
+}
+
+func TestLookupDecayStaleEntryRejected(t *testing.T) {
+	// recalls=4 resolved=0 → factor (0+2)/(4+2)=0.333 < floor 0.5 → reject, fall through.
+	r := soloRecall(fakeOutcome{counts: map[string]outcome.Aggregate{"x.md": {Recalls: 4, Resolved: 0}}})
+	if e, _ := r.lookup(context.Background(), okReq()); e != nil {
+		t.Fatal("stale never-resolving entry must be rejected (fall through to investigation)")
+	}
+}
+
+func TestLookupDecayNoHistoryRecalls(t *testing.T) {
+	r := soloRecall(fakeOutcome{counts: map[string]outcome.Aggregate{}}) // entry absent from counts
+	if e, _ := r.lookup(context.Background(), okReq()); e == nil {
+		t.Fatal("an entry with no outcome history must not be penalized")
+	}
+}
+
+func TestLookupDecayNilOutcomeRecalls(t *testing.T) {
+	r := soloRecall(nil) // no outcome stats wired
+	if e, _ := r.lookup(context.Background(), okReq()); e == nil {
+		t.Fatal("nil Outcome must behave as before (no decay)")
+	}
+}
+
+func TestLookupDecayStatsErrorRecalls(t *testing.T) {
+	r := soloRecall(fakeOutcome{err: errors.New("ledger unavailable")})
+	if e, _ := r.lookup(context.Background(), okReq()); e == nil {
+		t.Fatal("an outcome-stats error must degrade to a normal recall (skip decay)")
+	}
+}
+
+func TestLookupDecayPartialFactorReducesConfidence(t *testing.T) {
+	// recalls=3 resolved=1 → factor (1+2)/(3+2)=0.6 (> floor 0.5) → recalls, but with
+	// confidence visibly reduced from the undecayed ~0.90 (0.90*0.6 = 0.54).
+	r := soloRecall(fakeOutcome{counts: map[string]outcome.Aggregate{"x.md": {Recalls: 3, Resolved: 1}}})
+	e, conf := r.lookup(context.Background(), okReq())
+	if e == nil {
+		t.Fatal("factor 0.6 (>= floor) should still recall")
+	}
+	if conf >= 0.80 || conf <= 0.40 {
+		t.Fatalf("partial factor should visibly reduce confidence (~0.54), got %v", conf)
+	}
+}
+
+func TestLookupDecayFactorAtFloorRecalls(t *testing.T) {
+	// recalls=2 resolved=0 → factor (0+2)/(2+2)=0.5 == floor; the gate is strict (<),
+	// so it recalls (boundary case).
+	r := soloRecall(fakeOutcome{counts: map[string]outcome.Aggregate{"x.md": {Recalls: 2, Resolved: 0}}})
+	if e, _ := r.lookup(context.Background(), okReq()); e == nil {
+		t.Fatal("factor exactly at the floor must recall (gate is strict <)")
+	}
+}
+
+func TestLookupDecayRejectionMetric(t *testing.T) {
+	h, shutdown, err := telemetry.Setup(context.Background())
+	if err != nil {
+		t.Fatalf("telemetry setup: %v", err)
+	}
+	defer func() { _ = shutdown(context.Background()) }()
+	t.Cleanup(func() { otel.SetMeterProvider(noop.NewMeterProvider()) })
+
+	r := soloRecall(fakeOutcome{counts: map[string]outcome.Aggregate{"x.md": {Recalls: 4, Resolved: 0}}})
+	r.Metrics = telemetry.NewMetrics()
+	if e, _ := r.lookup(context.Background(), okReq()); e != nil {
+		t.Fatal("stale entry should be rejected")
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/metrics", nil)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if !strings.Contains(rec.Body.String(), `reason="low_outcome"`) {
+		t.Fatalf("expected recall_rejections_total{reason=\"low_outcome\"} in metrics:\n%s", rec.Body.String())
 	}
 }

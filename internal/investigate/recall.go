@@ -7,11 +7,18 @@ import (
 	"strings"
 
 	"github.com/Smana/runlore/internal/catalog"
+	"github.com/Smana/runlore/internal/outcome"
 	"github.com/Smana/runlore/internal/providers"
 	"github.com/Smana/runlore/internal/telemetry"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/metric"
 )
+
+// OutcomeStats reports per-entry recall outcomes for confidence decay.
+// *outcome.Ledger satisfies it.
+type OutcomeStats interface {
+	OpenCounts() (map[string]outcome.Aggregate, error)
+}
 
 // Recall short-circuits an investigation when the knowledge catalog already has a
 // trustworthy answer for the symptom — skipping the slow, paid ReAct loop. A recall
@@ -26,6 +33,10 @@ type Recall struct {
 	MarginGap            float64 // top hit must beat the runner-up by at least this
 	SoloFloor            float64 // confident bar when there is only one hit
 	RequireWorkloadMatch bool    // true = exact namespace+workload; false = namespace-level agreement is enough
+
+	Outcome      OutcomeStats // optional; nil ⇒ no outcome decay
+	OutcomePrior float64      // k — Beta prior strength for decay (e.g. 2.0)
+	OutcomeFloor float64      // reject the recall when the outcome factor drops below this (e.g. 0.5)
 
 	Metrics *telemetry.Metrics // optional; nil-safe — instruments are no-op when provider is unset
 	Log     *slog.Logger       // optional; nil-safe — log line omitted when unset
@@ -72,6 +83,23 @@ func (r *Recall) lookup(ctx context.Context, req Request) (*catalog.Entry, float
 	}
 
 	conf := deriveRecallConfidence(score, margin, strength)
+	// Outcome decay: bias confidence by the entry's resolution track record, and
+	// reject (re-investigate) an entry that recalls-but-never-resolves. Fail-safe —
+	// a rejected recall just falls through to a full investigation.
+	if r.Outcome != nil {
+		if counts, err := r.Outcome.OpenCounts(); err == nil {
+			if agg, ok := counts[e.Path]; ok { // only entries with recall history
+				f := outcomeFactor(agg.Recalls, agg.Resolved, r.OutcomePrior)
+				if f < r.OutcomeFloor {
+					r.reject(ctx, "low_outcome")
+					return nil, 0
+				}
+				conf = clampF(conf*f, 0, 0.90)
+			}
+		} else if r.Log != nil {
+			r.Log.Warn("recall: outcome stats unavailable; skipping decay", "err", err)
+		}
+	}
 	if r.Log != nil {
 		r.Log.Info("instant recall decision",
 			"alert", req.Title, "entry_id", e.Path, "score", score, "margin", margin, "confidence", conf)
