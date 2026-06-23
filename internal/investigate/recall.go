@@ -122,6 +122,14 @@ func clampF(v, lo, hi float64) float64 {
 	return v
 }
 
+// outcomeFactor decays a recall's confidence by its track record using an
+// optimistic Beta prior: an entry with no history (or that always resolves)
+// scores 1.0; one that recalls-but-never-resolves decays toward 0. k is the
+// prior strength. Always in (0, 1] provided resolved ≤ recalls and k > 0.
+func outcomeFactor(recalls, resolved int, k float64) float64 {
+	return (float64(resolved) + k) / (float64(recalls) + k)
+}
+
 // deriveRecallConfidence turns the match signals into an explainable confidence,
 // capped below 1.0 — a cache hit never asserts certainty. (Constants are the shape;
 // tune via recall_score / recall_rejections.)

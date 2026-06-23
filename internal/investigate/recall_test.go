@@ -2,6 +2,7 @@ package investigate
 
 import (
 	"context"
+	"math"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -162,5 +163,28 @@ func TestRecalledInvestigationCarriesEntryPath(t *testing.T) {
 	inv := recalledInvestigation(Request{Title: "x"}, catalog.Entry{Title: "T", Path: "p.md"}, 0.7)
 	if inv.RecalledEntry != "p.md" {
 		t.Fatalf("RecalledEntry = %q, want p.md", inv.RecalledEntry)
+	}
+}
+
+func TestOutcomeFactor(t *testing.T) {
+	const k = 2.0
+	cases := []struct {
+		recalls, resolved int
+		want              float64
+	}{
+		{0, 0, 1.0},  // no history → no penalty
+		{5, 5, 1.0},  // always resolves → no penalty
+		{3, 0, 0.4},  // (0+2)/(3+2)
+		{6, 0, 0.25}, // (0+2)/(6+2)
+		{3, 1, 0.6},  // (1+2)/(3+2) — partial resolve rate
+	}
+	for _, c := range cases {
+		got := outcomeFactor(c.recalls, c.resolved, k)
+		if math.Abs(got-c.want) > 1e-9 {
+			t.Errorf("outcomeFactor(%d,%d,%v) = %v, want %v", c.recalls, c.resolved, k, got, c.want)
+		}
+		if got > 1.0 {
+			t.Errorf("factor must be <= 1.0, got %v", got)
+		}
 	}
 }
