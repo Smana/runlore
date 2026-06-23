@@ -35,6 +35,9 @@ func TestVerifyRejectsCorrelationFinding(t *testing.T) {
 	if len(got.RootCauses) != 0 {
 		t.Fatalf("rejected root cause should be removed, got %+v", got.RootCauses)
 	}
+	if got.Verified {
+		t.Fatal("a finding with no surviving cause must not be marked Verified")
+	}
 	if got.Confidence != 0 {
 		t.Fatalf("overall confidence should drop to 0 with no surviving root cause, got %v", got.Confidence)
 	}
@@ -65,5 +68,8 @@ func TestVerifyDowngradesUnproven(t *testing.T) {
 	}
 	if got == nil || len(got.RootCauses) != 1 || got.RootCauses[0].Confidence != 0.4 || got.Confidence != 0.4 {
 		t.Fatalf("expected downgraded confidence 0.4, got %+v", got)
+	}
+	if !got.Verified {
+		t.Fatal("a finding with a surviving reviewed cause must be marked Verified")
 	}
 }
