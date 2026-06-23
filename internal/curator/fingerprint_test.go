@@ -97,3 +97,50 @@ func TestTopHitSearchError(t *testing.T) {
 		t.Fatalf("want ok=false and a non-nil error, got ok=%v err=%v", ok, err)
 	}
 }
+
+func TestDupFingerprintStableAcrossTitlePhrasing(t *testing.T) {
+	a := providers.Investigation{
+		Title:      "Pod apps/web crash looping",
+		Resource:   providers.Workload{Namespace: "apps", Name: "web"},
+		RootCauses: []providers.Hypothesis{{Summary: "image tag rollout broke the readiness probe"}},
+	}
+	b := providers.Investigation{
+		Title:      "apps/web is down after a deploy", // different prose
+		Resource:   providers.Workload{Namespace: "apps", Name: "web"},
+		RootCauses: []providers.Hypothesis{{Summary: "the readiness probe broke when the image tag rollout happened"}},
+	}
+	fa, fb := DupFingerprint(a), DupFingerprint(b)
+	if fa == "" || fa != fb {
+		t.Fatalf("same resource+cause must hash alike across phrasing: %q vs %q", fa, fb)
+	}
+}
+
+func TestDupFingerprintDiffersByResource(t *testing.T) {
+	base := providers.Investigation{
+		Resource:   providers.Workload{Namespace: "apps", Name: "web"},
+		RootCauses: []providers.Hypothesis{{Summary: "connection pool exhausted"}},
+	}
+	other := base
+	other.Resource = providers.Workload{Namespace: "apps", Name: "worker"}
+	if DupFingerprint(base) == DupFingerprint(other) {
+		t.Fatal("different affected resource must change the fingerprint")
+	}
+}
+
+func TestDupFingerprintDiffersByCause(t *testing.T) {
+	base := providers.Investigation{
+		Resource:   providers.Workload{Namespace: "apps", Name: "web"},
+		RootCauses: []providers.Hypothesis{{Summary: "connection pool exhausted"}},
+	}
+	other := base
+	other.RootCauses = []providers.Hypothesis{{Summary: "expired TLS certificate blocked startup"}}
+	if DupFingerprint(base) == DupFingerprint(other) {
+		t.Fatal("disjoint cause token-sets must change the fingerprint")
+	}
+}
+
+func TestDupFingerprintEmptyWhenNoResourceOrCause(t *testing.T) {
+	if got := DupFingerprint(providers.Investigation{Title: "something"}); got != "" {
+		t.Fatalf("no resource and no cause must yield empty fingerprint, got %q", got)
+	}
+}
