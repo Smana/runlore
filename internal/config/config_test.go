@@ -61,3 +61,23 @@ func TestDurationUnmarshal(t *testing.T) {
 func yamlScalar(s string) *yaml.Node {
 	return &yaml.Node{Kind: yaml.ScalarNode, Value: s}
 }
+
+func TestInstantRecallTrustConfig(t *testing.T) {
+	const y = `
+catalog:
+  instant_recall:
+    enabled: true
+    min_score: 1.5
+    margin_gap: 1.0
+    solo_floor: 4.0
+    require_workload_match: false
+`
+	var c Config
+	if err := yaml.Unmarshal([]byte(y), &c); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	ir := c.Catalog.InstantRecall
+	if !ir.Enabled || ir.MinScore != 1.5 || ir.MarginGap != 1.0 || ir.SoloFloor != 4.0 || ir.RequireWorkloadMatch {
+		t.Fatalf("instant_recall not parsed: %+v", ir)
+	}
+}

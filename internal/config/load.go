@@ -56,4 +56,19 @@ func applyDefaults(c *Config) {
 	if c.Investigation.RateLimit.MaxPerWindow > 0 && c.Investigation.RateLimit.Window == 0 {
 		c.Investigation.RateLimit.Window = Duration(time.Hour)
 	}
+	// Instant-recall trust defaults: when enabled without explicit tuning, keep the
+	// margin and solo gates active. A zero margin_gap/solo_floor would degrade recall
+	// to a bare similarity threshold — the exact brittleness this feature removes.
+	if c.Catalog.InstantRecall.Enabled {
+		ir := &c.Catalog.InstantRecall
+		if ir.MinScore == 0 {
+			ir.MinScore = 1.0
+		}
+		if ir.MarginGap == 0 {
+			ir.MarginGap = 1.0
+		}
+		if ir.SoloFloor == 0 {
+			ir.SoloFloor = 4.0
+		}
+	}
 }

@@ -61,9 +61,22 @@ func draftKBEntry(inv providers.Investigation) providers.KBEntry {
 		Type:        "Incident",
 		Title:       inv.Title,
 		Description: firstLine(inv),
+		Resource:    resourceString(inv.Resource),
 		Tags:        []string{"runlore", "incident"},
 		Body:        b.String(),
 	}
+}
+
+// resourceString renders a workload as "namespace/name" (or just "namespace" when
+// the name is unknown), matching the recall side's structural-agreement format.
+func resourceString(w providers.Workload) string {
+	if w.Namespace == "" {
+		return ""
+	}
+	if w.Name == "" {
+		return w.Namespace
+	}
+	return w.Namespace + "/" + w.Name
 }
 
 func firstLine(inv providers.Investigation) string {

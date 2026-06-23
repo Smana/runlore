@@ -33,3 +33,23 @@ func TestDraftKBEntryHasDecisionCardAndSections(t *testing.T) {
 		}
 	}
 }
+
+func TestDraftKBEntrySetsResource(t *testing.T) {
+	inv := providers.Investigation{
+		Title: "Harbor down", Confidence: 0.9,
+		Resource:   providers.Workload{Namespace: "tooling", Name: "harbor-core"},
+		RootCauses: []providers.Hypothesis{{Summary: "valkey down", Confidence: 0.9}},
+	}
+	if e := draftKBEntry(inv); e.Resource != "tooling/harbor-core" {
+		t.Fatalf("KBEntry.Resource = %q, want tooling/harbor-core", e.Resource)
+	}
+}
+
+func TestResourceStringNamespaceOnly(t *testing.T) {
+	if got := resourceString(providers.Workload{Namespace: "apps"}); got != "apps" {
+		t.Fatalf("namespace-only resource = %q, want apps", got)
+	}
+	if got := resourceString(providers.Workload{}); got != "" {
+		t.Fatalf("empty workload resource = %q, want empty", got)
+	}
+}

@@ -875,8 +875,16 @@ func buildModelAndTools(ctx context.Context, cfg *config.Config, gp providers.Gi
 	if cat != nil {
 		tools = append(tools, investigate.KBSearchTool{Catalog: cat})
 		if cfg.Catalog.InstantRecall.Enabled {
-			recall = &investigate.Recall{Catalog: cat, MinScore: cfg.Catalog.InstantRecall.MinScore}
-			log.Info("instant recall enabled", "min_score", cfg.Catalog.InstantRecall.MinScore)
+			recall = &investigate.Recall{
+				Catalog:              cat,
+				MinScore:             cfg.Catalog.InstantRecall.MinScore,
+				MarginGap:            cfg.Catalog.InstantRecall.MarginGap,
+				SoloFloor:            cfg.Catalog.InstantRecall.SoloFloor,
+				RequireWorkloadMatch: cfg.Catalog.InstantRecall.RequireWorkloadMatch,
+			}
+			log.Info("instant recall enabled",
+				"min_score", cfg.Catalog.InstantRecall.MinScore,
+				"margin_gap", cfg.Catalog.InstantRecall.MarginGap, "solo_floor", cfg.Catalog.InstantRecall.SoloFloor)
 		}
 	}
 	if cfg.Metrics.URL != "" {
