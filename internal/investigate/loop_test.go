@@ -30,10 +30,10 @@ func TestInstantRecallHit(t *testing.T) {
 		Model: model,
 		Log:   slog.New(slog.NewTextHandler(io.Discard, nil)),
 		Recall: &Recall{MinScore: 2.0, Catalog: fakeScored{hits: []catalog.ScoredEntry{
-			{Entry: catalog.Entry{Title: "Known incident", Description: "chart bump", Path: "known.md"}, Score: 5.0}}}},
+			{Entry: catalog.Entry{Title: "Known incident", Description: "chart bump", Path: "known.md", Resource: "tooling/harbor"}, Score: 5.0}}}},
 		OnComplete: func(inv providers.Investigation) { got = &inv },
 	}
-	if err := li.Investigate(context.Background(), Request{Title: "HarborProbeFailure"}); err != nil {
+	if err := li.Investigate(context.Background(), Request{Title: "HarborProbeFailure", Workload: providers.Workload{Namespace: "tooling", Name: "harbor"}}); err != nil {
 		t.Fatalf("Investigate: %v", err)
 	}
 	if model.i != 0 {
