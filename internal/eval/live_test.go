@@ -113,3 +113,67 @@ func TestRunScenarioSkipsWhenPrecheckFails(t *testing.T) {
 		t.Fatal("must not run investigations when skipped")
 	}
 }
+
+// rcRuns builds N runs with the given root_cause scores and full coverage.
+func rcRuns(scores ...int) []RunOutcome {
+	rs := make([]RunOutcome, len(scores))
+	for i, s := range scores {
+		rs[i] = RunOutcome{
+			Coverage: Coverage{Ratio: 1.0},
+			Verdict:  Verdict{Scores: map[string]int{"root_cause": s}},
+		}
+	}
+	return rs
+}
+
+func aggregated(runs []RunOutcome) LiveResult {
+	res := LiveResult{DimMedian: map[string]int{}, DimVariance: map[string]float64{}, Runs: runs}
+	(&LiveRunner{}).aggregate(&res)
+	return res
+}
+
+func TestAggregateKOfNPass(t *testing.T) {
+	res := aggregated(rcRuns(2, 2, 2, 2, 2, 2, 2, 1, 1, 1)) // 7/10 at root_cause>=2, variance ~0.21
+	if !res.Pass || res.Flaky {
+		t.Fatalf("7/10 at root_cause>=2 should pass cleanly: pass=%v flaky=%v var=%v", res.Pass, res.Flaky, res.DimVariance["root_cause"])
+	}
+}
+
+func TestAggregateKOfNFailsBelowRate(t *testing.T) {
+	res := aggregated(rcRuns(2, 2, 2, 2, 2, 2, 1, 1, 1, 1)) // 6/10
+	if res.Pass {
+		t.Fatal("6/10 at root_cause>=2 should fail the k-of-n gate")
+	}
+}
+
+func TestAggregateFlakyFails(t *testing.T) {
+	res := aggregated(rcRuns(2, 2, 2, 2, 2, 2, 2, 2, 0, 0)) // rate 0.8 but variance ~0.64
+	if !res.Flaky || res.Pass {
+		t.Fatalf("high-variance run must be flaky and not pass: flaky=%v pass=%v var=%v", res.Flaky, res.Pass, res.DimVariance["root_cause"])
+	}
+}
+
+func TestAggregateCleanPass(t *testing.T) {
+	res := aggregated(rcRuns(3, 3, 3, 3, 3, 3, 3, 3, 3, 2)) // variance ~0.09
+	if !res.Pass || res.Flaky {
+		t.Fatalf("consistent high scores should pass cleanly: pass=%v flaky=%v", res.Pass, res.Flaky)
+	}
+}
+
+func TestAggregateCoverageGate(t *testing.T) {
+	runs := rcRuns(3, 3, 3, 3, 3, 3, 3, 3, 3, 3) // rate 1.0, not flaky
+	for i := range runs {
+		runs[i].Coverage.Ratio = 0.5 // median 0.5 != 1.0
+	}
+	if aggregated(runs).Pass {
+		t.Fatal("coverage median < 1.0 must fail regardless of root_cause rate")
+	}
+}
+
+func TestAggregateConfidentWrongFails(t *testing.T) {
+	runs := rcRuns(3, 3, 3, 3, 3, 3, 3, 3, 3, 3)
+	runs[0].Verdict.ConfidentWrong = true
+	if aggregated(runs).Pass {
+		t.Fatal("any confident-wrong run must fail")
+	}
+}

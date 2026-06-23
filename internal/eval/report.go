@@ -10,6 +10,7 @@ import (
 // LiveReport is the serializable output of one live-fire campaign run.
 type LiveReport struct {
 	At      string       `json:"at"`
+	N       int          `json:"n"` // runs per scenario (live mode); 0 in replay mode
 	Ran     int          `json:"ran"` // scenarios actually investigated (not skipped)
 	Passed  int          `json:"passed"`
 	Skipped int          `json:"skipped"`
@@ -17,8 +18,8 @@ type LiveReport struct {
 }
 
 // NewLiveReport tallies results into a report.
-func NewLiveReport(at string, results []LiveResult) LiveReport {
-	rep := LiveReport{At: at, Results: results}
+func NewLiveReport(at string, n int, results []LiveResult) LiveReport {
+	rep := LiveReport{At: at, N: n, Results: results}
 	for _, r := range results {
 		if r.Skipped {
 			rep.Skipped++
@@ -45,7 +46,8 @@ var allSources = []string{"gitops", "kubernetes", "metrics", "logs", "network", 
 func (rep LiveReport) Markdown() string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "# RunLore eval report — %s\n\n", rep.At)
-	fmt.Fprintf(&b, "**Passed %d/%d** ran (%d skipped).\n\n", rep.Passed, rep.Ran, rep.Skipped)
+	fmt.Fprintf(&b, "**Passed %d/%d** ran (%d skipped) · N=%d runs/scenario, pass-rate ≥%.0f%%.\n\n",
+		rep.Passed, rep.Ran, rep.Skipped, rep.N, evalMinPassRate*100)
 
 	b.WriteString("## Scenarios\n\n")
 	b.WriteString("| scenario | result | coverage | root_cause | tool errors |\n")
@@ -58,6 +60,8 @@ func (rep LiveReport) Markdown() string {
 		status := "FAIL"
 		if r.Pass {
 			status = "PASS"
+		} else if r.Flaky {
+			status = "FLAKY"
 		}
 		te := "—"
 		if len(r.ToolErrors) > 0 {
