@@ -21,6 +21,7 @@ type Config struct {
 	Triggers TriggerPolicy `yaml:"triggers"`
 	Actions  ActionPolicy  `yaml:"actions"` // read-only by default; the upper rungs of the autonomy ladder
 	Forge    Forge         `yaml:"forge"`   // git-forge auth (GitHub App) for diff access + curation
+	Curate   Curate        `yaml:"curate"`  // Phase-2 backlog groomer settings
 	Model    Model         `yaml:"model"`   // optional; when BaseURL is set, serve uses the LLM investigator
 	Notify   Notify        `yaml:"notify"`  // chat delivery for findings
 	Catalog  Catalog       `yaml:"catalog"` // OKF knowledge catalog
@@ -380,6 +381,11 @@ func (c *Config) Validate() error {
 	default:
 		return fmt.Errorf("unknown actions.mode %q (want off|suggest|approve|auto)", c.Actions.Mode)
 	}
+}
+
+// Curate configures the Phase-2 backlog groomer (lore curate).
+type Curate struct {
+	StaleAfter Duration `yaml:"stale_after"` // close unprotected KB PRs idle longer than this; 0 disables (default 720h)
 }
 
 // Forge holds git-forge authentication and the curation target repo.

@@ -5,24 +5,49 @@ import (
 	"io"
 	"log/slog"
 	"testing"
+	"time"
 
 	"github.com/Smana/runlore/internal/providers"
 )
 
-func TestStaleClosesUnlabelledOldArtifacts(t *testing.T) {
+func lifecycleNow() time.Time { return time.Date(2026, 6, 23, 0, 0, 0, 0, time.UTC) }
+
+func TestLifecycleClosesOnlyAgedUnprotected(t *testing.T) {
+	now := lifecycleNow()
 	f := &fakeForge{prs: []providers.CuratedIssue{
-		{Number: 70, Title: "KB: ancient draft", Labels: []string{"runlore", "triggered"}},
-		{Number: 71, Title: "KB: queued", Labels: []string{"runlore", "ready-to-merge"}},
-		{Number: 72, Title: "KB: accepted", Labels: []string{"runlore", "accepted"}},
-		{Number: 73, Title: "KB: human-reviewed", Labels: []string{"runlore", "solved"}},
+		{Number: 1, Labels: []string{"runlore"}, UpdatedAt: now.Add(-40 * 24 * time.Hour)},             // aged → close
+		{Number: 2, Labels: []string{"runlore"}, UpdatedAt: now.Add(-2 * time.Hour)},                   // fresh → keep
+		{Number: 3, Labels: []string{"runlore", "accepted"}, UpdatedAt: now.Add(-40 * 24 * time.Hour)}, // aged but protected → keep
 	}}
-	// every PR is "stale" by age, but 71/72/73 are protected by their labels (solved
-	// is human-reviewed-for-content and must not be auto-closed).
-	l := Lifecycle{Forge: f, Stale: func(int) bool { return true }, Log: slog.New(slog.NewTextHandler(io.Discard, nil))}
+	l := Lifecycle{Forge: f, StaleAfter: 30 * 24 * time.Hour, Now: func() time.Time { return now }, Log: slog.New(slog.NewTextHandler(io.Discard, nil))}
 	if err := l.Run(context.Background()); err != nil {
-		t.Fatal(err)
+		t.Fatalf("Run: %v", err)
 	}
-	if len(f.closed) != 1 || f.closed[0] != 70 {
-		t.Fatalf("only the stale, unprotected #70 should close, got %v", f.closed)
+	if len(f.closed) != 1 || f.closed[0] != 1 {
+		t.Fatalf("only the aged unprotected PR #1 should close, got %v", f.closed)
+	}
+}
+
+func TestLifecycleZeroStaleAfterDisables(t *testing.T) {
+	now := lifecycleNow()
+	f := &fakeForge{prs: []providers.CuratedIssue{{Number: 1, Labels: []string{"runlore"}, UpdatedAt: now.Add(-365 * 24 * time.Hour)}}}
+	l := Lifecycle{Forge: f, StaleAfter: 0, Now: func() time.Time { return now }, Log: slog.New(slog.NewTextHandler(io.Discard, nil))}
+	if err := l.Run(context.Background()); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if len(f.closed) != 0 {
+		t.Fatalf("StaleAfter==0 must close nothing, got %v", f.closed)
+	}
+}
+
+func TestLifecycleUnknownAgeNotClosed(t *testing.T) {
+	now := lifecycleNow()
+	f := &fakeForge{prs: []providers.CuratedIssue{{Number: 1, Labels: []string{"runlore"}}}} // zero UpdatedAt
+	l := Lifecycle{Forge: f, StaleAfter: 24 * time.Hour, Now: func() time.Time { return now }, Log: slog.New(slog.NewTextHandler(io.Discard, nil))}
+	if err := l.Run(context.Background()); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if len(f.closed) != 0 {
+		t.Fatalf("a PR with unknown age must never close, got %v", f.closed)
 	}
 }
