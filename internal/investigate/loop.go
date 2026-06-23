@@ -160,11 +160,26 @@ func (li *LoopInvestigator) Investigate(ctx context.Context, req Request) error 
 	used := map[string]int{} // tool-call counts, logged so investigation breadth is observable
 	sys := li.system()       // constant for the investigation; build once, not per step
 	for step := 0; step < maxSteps; step++ {
-		// Inject a one-time budget nudge when the estimated request size exceeds the
-		// configured ceiling, prompting the model to wrap up with current findings.
-		if !budgetNudged && overBudget(estimateTokens(sys, messages), li.MaxTokensPerInvestigation) {
-			messages = append(messages, providers.Message{Role: "user", Content: budgetNudge})
-			budgetNudged = true
+		// Budget control: when the estimated request size exceeds the configured ceiling,
+		// inject a one-time nudge asking the model to wrap up. If the model did not wind
+		// down and the estimate is still over budget on the next step, hard-kill: deliver
+		// whatever findings exist rather than growing context unbounded.
+		if est := estimateTokens(sys, messages); overBudget(est, li.MaxTokensPerInvestigation) {
+			if !budgetNudged {
+				messages = append(messages, providers.Message{Role: "user", Content: budgetNudge})
+				budgetNudged = true
+			} else {
+				// Hard-kill: nudge already fired but the model is still over budget.
+				li.Log.Warn("investigation hard-stopped at token budget",
+					"title", req.Title,
+					"estimate_tokens", est,
+					"budget_tokens", li.MaxTokensPerInvestigation)
+				if li.Metrics != nil {
+					li.Metrics.InvestigationsDropped.Add(ctx, 1)
+				}
+				li.deliver(req, budgetKillResult(req))
+				return nil
+			}
 		}
 		resp, err := li.Model.Complete(ctx, providers.CompletionRequest{System: sys, Messages: messages, Tools: specs})
 		if err != nil {
