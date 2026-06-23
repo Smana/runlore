@@ -174,4 +174,3 @@ func (lr *LiveRunner) aggregate(res *LiveResult) {
 		!res.ConfidentWrong &&
 		!res.Flaky
 }
-
