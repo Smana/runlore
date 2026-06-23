@@ -26,3 +26,11 @@ func TestNewMetricsOutcomeInstruments(_ *testing.T) {
 	m.RecallOutcome.Add(ctx, 1)
 	m.IncidentResolutionSeconds.Record(ctx, 90)
 }
+
+func TestNewMetricsCurationInstruments(_ *testing.T) {
+	// With no provider configured the global meter is a no-op; the instrument must
+	// still construct and be safe to record.
+	m := NewMetrics()
+	ctx := context.Background()
+	m.CurationDedupScore.Record(ctx, 4.2)
+}

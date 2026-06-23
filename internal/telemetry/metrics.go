@@ -26,6 +26,7 @@ type Metrics struct {
 	CoalesceBatchSize         metric.Int64Histogram
 	InvestigationTokens       metric.Int64Histogram
 	RecallScore               metric.Float64Histogram // BM25 score at the recall decision (tunes min_score)
+	CurationDedupScore        metric.Float64Histogram // catalog top-hit BM25 score at the curation dedup decision
 	OutcomesOpened            metric.Int64Counter     // investigations recorded as open (label: kind)
 	IncidentsResolved         metric.Int64Counter     // resolve events that matched an open investigation
 	RecallOutcome             metric.Int64Counter     // resolved incidents whose open was a recall (label: result)
@@ -61,6 +62,7 @@ func NewMetrics() *Metrics {
 		CoalesceBatchSize:         hist("coalesce_batch_size", "incidents per flushed batch"),
 		InvestigationTokens:       hist("investigation_tokens_estimated", "per-investigation token estimate (investigation loop only; excludes the adversarial verify phase)"),
 		RecallScore:               histF("recall_score", "BM25 score at the recall decision point"),
+		CurationDedupScore:        histF("curation_dedup_score", "catalog top-hit BM25 score at the curation dedup decision"),
 		OutcomesOpened:            ctr("outcomes_opened_total", "investigations recorded in the outcome ledger (label: kind)"),
 		IncidentsResolved:         ctr("incidents_resolved_total", "resolve events that matched an open investigation"),
 		RecallOutcome:             ctr("recall_outcome_total", "resolved incidents whose answer was a recall (label: result)"),
