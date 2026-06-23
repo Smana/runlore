@@ -134,7 +134,12 @@ func resourceAgrees(reqW providers.Workload, entryResource string, requireWorklo
 	if requireWorkload {
 		return matchNone
 	}
-	if entryResource == reqW.Namespace || strings.HasPrefix(entryResource, reqW.Namespace+"/") {
+	// Namespace-level agreement only when one side is a bare namespace — never two
+	// distinct named workloads (that would defeat disambiguation).
+	if entryResource == reqW.Namespace { // entry is a bare namespace; reqW is in it
+		return matchNamespace
+	}
+	if reqW.Name == "" && strings.HasPrefix(entryResource, reqW.Namespace+"/") { // reqW is a bare namespace; entry named in it
 		return matchNamespace
 	}
 	return matchNone

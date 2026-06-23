@@ -274,6 +274,34 @@ func TestLookupDecayFactorAtFloorRecalls(t *testing.T) {
 	}
 }
 
+func TestResourceAgrees(t *testing.T) {
+	w := func(ns, name string) providers.Workload { return providers.Workload{Namespace: ns, Name: name} }
+	cases := []struct {
+		name      string
+		reqW      providers.Workload
+		entry     string
+		requireWL bool
+		want      matchStrength
+	}{
+		{"exact ns/name", w("apps", "payment-api"), "apps/payment-api", false, matchExact},
+		{"different names same ns -> none", w("apps", "payment-api"), "apps/web", false, matchNone},
+		{"named alert vs bare-ns entry -> namespace", w("apps", "payment-api"), "apps", false, matchNamespace},
+		{"bare-ns alert vs named entry -> namespace", w("apps", ""), "apps/web", false, matchNamespace},
+		{"both bare ns -> exact", w("apps", ""), "apps", false, matchExact},
+		{"different ns -> none", w("apps", "payment-api"), "other/web", false, matchNone},
+		{"empty entry -> none", w("apps", "payment-api"), "", false, matchNone},
+		{"require workload + exact -> exact", w("apps", "web"), "apps/web", true, matchExact},
+		{"require workload + ns-only -> none", w("apps", ""), "apps/web", true, matchNone},
+		{"require workload + bare-ns entry -> none", w("apps", "web"), "apps", true, matchNone},
+		{"bare-ns alert vs different-ns bare-ns entry -> none", w("apps", ""), "other", false, matchNone},
+	}
+	for _, c := range cases {
+		if got := resourceAgrees(c.reqW, c.entry, c.requireWL); got != c.want {
+			t.Errorf("%s: resourceAgrees(%+v, %q, %v) = %v, want %v", c.name, c.reqW, c.entry, c.requireWL, got, c.want)
+		}
+	}
+}
+
 func TestLookupDecayRejectionMetric(t *testing.T) {
 	h, shutdown, err := telemetry.Setup(context.Background())
 	if err != nil {
