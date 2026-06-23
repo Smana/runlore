@@ -20,7 +20,7 @@ func TestLedgerOpenResolveRoundTrip(t *testing.T) {
 	if err != nil || !ok {
 		t.Fatalf("Resolve: ok=%v err=%v", ok, err)
 	}
-	if ep.Kind != "recall" || ep.Entry != "harbor.md" || ep.Duration != 90*time.Second {
+	if ep.Kind != "recall" || ep.Entry != "harbor.md" || ep.Duration != 90*time.Second || !ep.Resolved {
 		t.Fatalf("episode: %+v", ep)
 	}
 }
@@ -93,5 +93,18 @@ func TestReadEventsDisabledOrAbsent(t *testing.T) {
 	absent, _ := New(filepath.Join(t.TempDir(), "missing.jsonl"))
 	if ev, err := absent.readEvents(); err != nil || ev != nil {
 		t.Fatalf("absent file: want nil,nil; got %v,%v", ev, err)
+	}
+}
+
+func TestResolveMarksEpisodeResolved(t *testing.T) {
+	l, _ := New(filepath.Join(t.TempDir(), "o.jsonl"))
+	t0 := time.Unix(4000, 0)
+	_ = l.Open(Event{Fingerprint: "fp", Kind: "recall", Entry: "e.md", At: t0})
+	ep, ok, err := l.Resolve("fp", t0.Add(time.Minute))
+	if err != nil || !ok {
+		t.Fatalf("Resolve: ok=%v err=%v", ok, err)
+	}
+	if !ep.Resolved {
+		t.Fatalf("a matched resolve must set Resolved=true: %+v", ep)
 	}
 }

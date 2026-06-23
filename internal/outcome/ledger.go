@@ -26,11 +26,13 @@ type Event struct {
 	At          time.Time `json:"at"`
 }
 
-// Episode is a matched open→resolve pair.
+// Episode is a matched open→resolve pair (or, from Episodes(), an unresolved open
+// when Resolved is false).
 type Episode struct {
 	Kind, Entry, Title, Resource string
 	OpenedAt, ResolvedAt         time.Time
 	Duration                     time.Duration
+	Resolved                     bool
 }
 
 // Ledger is an append-only outcome log with an in-memory open-index.
@@ -135,6 +137,6 @@ func (l *Ledger) Resolve(fp string, at time.Time) (Episode, bool, error) {
 	delete(l.open, fp)
 	return Episode{
 		Kind: o.Kind, Entry: o.Entry, Title: o.Title, Resource: o.Resource,
-		OpenedAt: o.At, ResolvedAt: at, Duration: at.Sub(o.At),
+		OpenedAt: o.At, ResolvedAt: at, Duration: at.Sub(o.At), Resolved: true,
 	}, true, nil
 }
