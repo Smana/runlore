@@ -162,5 +162,6 @@ func recalledInvestigation(req Request, e catalog.Entry, confidence float64) pro
 		Confidence: confidence,
 		RootCauses: []providers.Hypothesis{rc},
 		Unresolved: []string{"recalled from the catalog without a fresh investigation — confirm it still applies"},
+		Recalled:   true,
 	}
 }

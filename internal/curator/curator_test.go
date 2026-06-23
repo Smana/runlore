@@ -115,3 +115,16 @@ func TestCurateLowQualityDropsNoArtifact(t *testing.T) {
 		t.Fatalf("low-quality finding must produce no repo artifact, got pr=%+v comment=%v ref=%s", f.openedPR, f.commented, ref.URL)
 	}
 }
+
+func TestCurateSkipsRecalled(t *testing.T) {
+	f := &fakeForge{}
+	inv := goodFinding() // high quality: would normally open a PR
+	inv.Recalled = true  // but it's a cache hit, not novel
+	ref, err := newCurator(f, fakeScored{}).Curate(context.Background(), inv)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if f.openedPR != nil || ref.URL != "" {
+		t.Fatalf("a recalled finding must not be curated, got pr=%+v ref=%s", f.openedPR, ref.URL)
+	}
+}
