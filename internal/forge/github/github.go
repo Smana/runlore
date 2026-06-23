@@ -158,10 +158,11 @@ func (c *Client) addLabels(ctx context.Context, number int, labels []string) err
 // rawIssue is one entry from the issues endpoint (which returns both issues and
 // PRs — a non-nil PullRequest marks a PR).
 type rawIssue struct {
-	Number int    `json:"number"`
-	Title  string `json:"title"`
-	Body   string `json:"body"`
-	Labels []struct {
+	Number    int       `json:"number"`
+	Title     string    `json:"title"`
+	Body      string    `json:"body"`
+	UpdatedAt time.Time `json:"updated_at"`
+	Labels    []struct {
 		Name string `json:"name"`
 	} `json:"labels"`
 	PullRequest *struct{} `json:"pull_request"`
@@ -172,7 +173,7 @@ func (ri rawIssue) curated() providers.CuratedIssue {
 	for _, l := range ri.Labels {
 		labels = append(labels, l.Name)
 	}
-	return providers.CuratedIssue{Number: ri.Number, Title: ri.Title, Body: ri.Body, Labels: labels}
+	return providers.CuratedIssue{Number: ri.Number, Title: ri.Title, Body: ri.Body, Labels: labels, UpdatedAt: ri.UpdatedAt}
 }
 
 // listIssues fetches ALL pages of open issues+PRs carrying the label. GitHub caps

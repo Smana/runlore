@@ -776,12 +776,13 @@ func buildCurator(cfg *config.Config, token forgeToken, cat *catalog.Catalog, me
 	return cur
 }
 
-// runCurate grooms the KB backlog (Phase-2 curation agent). v1 runs the
-// backlog-dedup pass — the highest-value, fully-wireable groom (it collapses the
-// duplicate open PRs the file-time gate couldn't see across history). The
-// resolution-gated decision-ready queue, lifecycle/decay, and recurrence→gap-issue
-// passes are implemented + tested in internal/curate but need a forge updated_at
-// field + a cluster ResolutionChecker + a recurrence store to wire — follow-up.
+// runCurate grooms the KB backlog (Phase-2 curation agent). It runs the
+// backlog-dedup pass (collapses duplicate open PRs across history) and the
+// lifecycle sweep (closes stale, unprotected PRs by forge age). The
+// resolution-gated decision-ready queue and the recurrence→gap-issue pass are
+// implemented + tested in internal/curate but still need wiring: Queue needs a
+// ResolutionChecker (alert/ledger join), Recurrence needs an idempotent
+// ledger-backed driver over Episodes() — follow-up.
 func runCurate(args []string) error {
 	fs := flag.NewFlagSet("curate", flag.ContinueOnError)
 	cfgPath := fs.String("config", "runlore.yaml", "path to config file")
@@ -809,8 +810,13 @@ func runCurate(args []string) error {
 		base = "main"
 	}
 	forge := github.New(cfg.Forge.GitHubAPIURL, owner, repo, base, github.TokenFunc(tok))
+	staleAfter := cfg.Curate.StaleAfter.Std()
+	if staleAfter == 0 {
+		staleAfter = 720 * time.Hour // 30 days
+	}
 	agent := curate.Agent{Log: log, Passes: []curate.Pass{
 		curate.Dedup{Forge: forge, Log: log},
+		curate.Lifecycle{Forge: forge, StaleAfter: staleAfter, Log: log},
 	}}
 	log.Info("curate: grooming KB backlog", "repo", cfg.Forge.KBRepo)
 	agent.Run(context.Background())

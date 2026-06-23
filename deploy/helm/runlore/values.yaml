@@ -54,6 +54,10 @@ config:
   # Enable when a VMServiceScrape (or ServiceMonitor) will scrape this agent.
   telemetry:
     metrics_enabled: false
+  # Phase-2 backlog groomer (lore curate) — staleness window for automatic curation.
+  # Only used when the curate CronJob is enabled.
+  curate:
+    stale_after: 720h   # close unprotected KB PRs idle longer than this; 0 disables
   # model:
   #   base_url: https://vllm.svc/v1
   #   model: <model-name>
@@ -182,3 +186,11 @@ nodeSelector: {}
 tolerations: []
 affinity: {}
 podAnnotations: {}
+
+# Phase-2 backlog groomer (lore curate) as a scheduled Job. Opt-in: writes to the
+# KB forge (closes duplicate/stale PRs), so it stays disabled until you set the
+# GitHub App credentials and enable it.
+curate:
+  cronjob:
+    enabled: false
+    schedule: "0 * * * *"   # hourly
