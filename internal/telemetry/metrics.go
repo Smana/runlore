@@ -22,6 +22,7 @@ type Metrics struct {
 	ToolOutputTruncatedBytes metric.Int64Counter
 	RecallHits               metric.Int64Counter // KB cache hits, labelled by verify result
 	RecallTokensSaved        metric.Int64Counter // estimated tokens saved by a recall short-circuit
+	RecallRejections         metric.Int64Counter // recalls rejected before short-circuit (label: reason)
 	CoalesceBatchSize        metric.Int64Histogram
 	InvestigationTokens      metric.Int64Histogram
 	RecallScore              metric.Float64Histogram // BM25 score at the recall decision (tunes min_score)
@@ -52,6 +53,7 @@ func NewMetrics() *Metrics {
 		ToolOutputTruncatedBytes: ctr("tool_output_truncated_bytes_total", "bytes elided by output truncation"),
 		RecallHits:               ctr("recall_hits_total", "KB instant-recall short-circuits (label: result)"),
 		RecallTokensSaved:        ctr("recall_tokens_saved_total", "estimated tokens saved by recall short-circuits"),
+		RecallRejections:         ctr("recall_rejections_total", "recalls rejected before short-circuit (label: reason)"),
 		CoalesceBatchSize:        hist("coalesce_batch_size", "incidents per flushed batch"),
 		InvestigationTokens:      hist("investigation_tokens_estimated", "per-investigation token estimate (investigation loop only; excludes the adversarial verify phase)"),
 		RecallScore:              histF("recall_score", "BM25 score at the recall decision point"),
