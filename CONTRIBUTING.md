@@ -112,6 +112,23 @@ lore eval --config runlore.yaml --cases examples/eval
 It needs a configured model (`config.model`). The harness logic (`internal/eval`) is unit-tested with a
 fake model, so `go test ./internal/eval/` runs without an API key.
 
+### Nightly eval (CI)
+
+`.github/workflows/eval.yaml` runs the replay eval every night (06:00 UTC) and on
+manual dispatch. It repeats each case 5× and fails the run when the campaign
+pass-rate drops below 70% (`-n 5 -fail-under 0.7`), then uploads the JSON report as
+a build artifact.
+
+To enable it, add one repository secret — **`RUNLORE_EVAL_API_KEY`** — holding the
+API key for the provider in `eval/ci.runlore.yaml`. Without the secret the job fails
+fast (by design: a red nightly is the signal). The eval never runs on pull requests,
+so it imposes no per-PR cost and never blocks merges; the deterministic scoring logic
+is already covered by `go test ./...` on every PR.
+
+Run it locally the same way CI does:
+
+    lore eval -config eval/ci.runlore.yaml -cases examples/eval -n 5 -fail-under 0.7
+
 ## Quick local demo (no cluster)
 
 ```bash

@@ -2,6 +2,7 @@ package eval
 
 import (
 	"context"
+	"encoding/json"
 	"io"
 	"log/slog"
 	"os"
@@ -210,5 +211,123 @@ func TestRun(t *testing.T) {
 	}
 	if !rep.Results[0].Pass || rep.Results[1].Pass {
 		t.Fatalf("unexpected per-case: %+v", rep.Results)
+	}
+}
+
+// rateModel passes (names harbor-db) on its first passN Complete-pairs, then fails.
+// Each replay run makes 2 Complete calls (tool, then submit_findings).
+type rateModel struct {
+	calls, passN int
+}
+
+func (m *rateModel) Complete(_ context.Context, _ providers.CompletionRequest) (providers.CompletionResponse, error) {
+	m.calls++
+	if m.calls%2 == 1 { // first call of a run: invoke the tool
+		return providers.CompletionResponse{ToolCalls: []providers.ToolCall{
+			{ID: "1", Name: "what_changed", Args: `{}`}}}, nil
+	}
+	run := m.calls / 2 // 1-based index of the run just completing
+	summary := "chart bump broke harbor-db migrations"
+	if run > m.passN {
+		summary = "unclear, possibly a transient blip"
+	}
+	return providers.CompletionResponse{ToolCalls: []providers.ToolCall{
+		{ID: "2", Name: "submit_findings",
+			Args: `{"confidence":0.9,"root_causes":[{"summary":"` + summary + `"}]}`}}}, nil
+}
+
+func newRateRunner(passN int) *Runner {
+	return &Runner{Model: &rateModel{passN: passN}, Log: slog.New(slog.NewTextHandler(io.Discard, nil))}
+}
+
+func harborCase() Case {
+	return Case{Name: "harbor", Prompt: "probe failing", Tools: map[string]string{"what_changed": "chart 1.15"},
+		Expected: Expected{MustContain: []string{"chart", "harbor-db"}, MinConfidence: 0.5}}
+}
+
+func TestReplayKOfNRepeats(t *testing.T) {
+	// 4 of 5 pass → pass-rate 0.8 ≥ 0.7 → reached, not flaky.
+	camp := newRateRunner(4).RunN(context.Background(), []Case{harborCase()}, 5)
+	a := camp.Aggregates[0]
+	if a.Runs != 5 || a.PassRate < 0.79 || a.PassRate > 0.81 {
+		t.Fatalf("want 5 runs at 0.8, got runs=%d rate=%.2f", a.Runs, a.PassRate)
+	}
+	if !a.Reached || a.Flaky {
+		t.Fatalf("4/5 should be reached and not flaky, got %+v", a)
+	}
+
+	// 2 of 5 pass → 0.4 < 0.7 → not reached; 0.4 is in (0.3,0.7) → flaky.
+	camp = newRateRunner(2).RunN(context.Background(), []Case{harborCase()}, 5)
+	a = camp.Aggregates[0]
+	if a.Reached {
+		t.Fatalf("2/5 must not be reached, got %+v", a)
+	}
+	if !a.Flaky {
+		t.Fatalf("2/5 (rate 0.4) should be flaky, got %+v", a)
+	}
+}
+
+func TestReplayCampaignPassRate(t *testing.T) {
+	// One reachable case (5/5) and one unreachable (0/5) → campaign pass-rate 0.5.
+	cases := []Case{harborCase(), {Name: "miss", Prompt: "x", Tools: map[string]string{"what_changed": "y"},
+		Expected: Expected{MustContain: []string{"network policy"}}}}
+	camp := newRateRunner(5).RunN(context.Background(), cases, 5)
+	if camp.ReachedCases() != 1 || camp.PassRate() != 0.5 {
+		t.Fatalf("want reached=1 rate=0.5, got reached=%d rate=%.2f", camp.ReachedCases(), camp.PassRate())
+	}
+}
+
+func TestGateError(t *testing.T) {
+	miss := Case{Name: "miss", Prompt: "x", Tools: map[string]string{"what_changed": "y"},
+		Expected: Expected{MustContain: []string{"network policy"}}}
+	camp := newRateRunner(5).RunN(context.Background(), []Case{harborCase(), miss}, 5) // pass-rate 0.5
+
+	if err := GateError(camp, 0); err != nil {
+		t.Fatalf("fail-under 0 must never gate, got %v", err)
+	}
+	if err := GateError(camp, 0.4); err != nil {
+		t.Fatalf("0.5 >= 0.4 should pass, got %v", err)
+	}
+	if err := GateError(camp, 0.7); err == nil {
+		t.Fatal("0.5 < 0.7 should return a gate error")
+	}
+}
+
+func TestReplayDefaultsPreserveBehavior(t *testing.T) {
+	// n=1 (the replay default) runs each case once; GateError with the default
+	// fail-under (0) never gates, so local `lore eval` keeps exiting 0.
+	camp := newRateRunner(5).RunN(context.Background(), []Case{harborCase()}, 1)
+	if len(camp.Aggregates) != 1 || camp.Aggregates[0].Runs != 1 {
+		t.Fatalf("n=1 should run each case once, got %+v", camp.Aggregates)
+	}
+	if err := GateError(camp, 0); err != nil {
+		t.Fatalf("default fail-under (0) must never gate, got %v", err)
+	}
+}
+
+func TestCampaignJSON(t *testing.T) {
+	camp := newRateRunner(5).RunN(context.Background(), []Case{harborCase()}, 2)
+	b, err := camp.JSON()
+	if err != nil {
+		t.Fatalf("JSON: %v", err)
+	}
+	var got struct {
+		N        int     `json:"n"`
+		PassRate float64 `json:"pass_rate"`
+		Reached  int     `json:"reached"`
+		Total    int     `json:"total"`
+		Cases    []struct {
+			Name    string `json:"name"`
+			Reached bool   `json:"reached"`
+		} `json:"cases"`
+	}
+	if err := json.Unmarshal(b, &got); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if got.N != 2 || got.Total != 1 || got.Reached != 1 || got.PassRate != 1.0 {
+		t.Fatalf("unexpected report header: %+v", got)
+	}
+	if len(got.Cases) != 1 || got.Cases[0].Name != "harbor" || !got.Cases[0].Reached {
+		t.Fatalf("unexpected case rows: %+v", got.Cases)
 	}
 }
