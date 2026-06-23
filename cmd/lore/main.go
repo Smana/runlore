@@ -695,7 +695,7 @@ func buildAuto(cfg *config.Config, exec action.Executor, aud audit.Auditor, log 
 
 // buildCurator returns a Curator when the GitHub App token + KB repo are
 // configured, else nil.
-func buildCurator(cfg *config.Config, token forgeToken, cat *catalog.Catalog, log *slog.Logger) *curator.Curator {
+func buildCurator(cfg *config.Config, token forgeToken, cat *catalog.Catalog, metrics *telemetry.Metrics, log *slog.Logger) *curator.Curator {
 	if token == nil || cfg.Forge.KBRepo == "" {
 		return nil
 	}
@@ -718,7 +718,7 @@ func buildCurator(cfg *config.Config, token forgeToken, cat *catalog.Catalog, lo
 	}
 	client := github.New(cfg.Forge.GitHubAPIURL, owner, repo, base, github.TokenFunc(token))
 	log.Info("curator enabled", "repo", cfg.Forge.KBRepo, "dup_score", dup, "min_confidence", minConf)
-	cur := &curator.Curator{Forge: client, DupScore: dup, MinConfidence: minConf, Log: log}
+	cur := &curator.Curator{Forge: client, DupScore: dup, MinConfidence: minConf, Metrics: metrics, Log: log}
 	if cat != nil { // assign via concrete check to avoid a typed-nil interface
 		cur.Catalog = cat
 	}
@@ -1031,7 +1031,7 @@ func buildInvestigator(ctx context.Context, cfg *config.Config, gp providers.Git
 	log.Info("using LLM investigator", "provider", modelProvider(cfg), "model", cfg.Model.Model, "tools", len(tools))
 	notifier := buildNotifier(cfg, log)
 	log.Info("delivery notifiers", "count", notifier.Len())
-	cur := buildCurator(cfg, buildForgeTokenSource(cfg, log), cat, log)
+	cur := buildCurator(cfg, buildForgeTokenSource(cfg, log), cat, metrics, log)
 	actions := action.New(cfg.Actions)
 	if actions.Enabled() {
 		log.Info("action policy enabled", "mode", string(actions.Mode()))

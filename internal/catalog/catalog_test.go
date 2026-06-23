@@ -88,6 +88,42 @@ func TestSearchScored(t *testing.T) {
 	}
 }
 
+func TestNewIndexMappingUsesBM25(t *testing.T) {
+	// bleve defaults to legacy TF-IDF when ScoringModel is unset. Both index
+	// sites are forced through this helper, so asserting it guarantees BM25
+	// everywhere. This is the regression guard for the silent-fallback bug.
+	if got := newIndexMapping().ScoringModel; got != "bm25" {
+		t.Fatalf("ScoringModel = %q, want \"bm25\"", got)
+	}
+}
+
+func TestBuildIndexScores(t *testing.T) {
+	// Proves the BM25 mapping is accepted (NewMemOnly errors on an unsupported
+	// scoring model) and that scoring + ranking work end-to-end. We do NOT assert
+	// magnitudes — TF-IDF also length-normalizes, so magnitude-based BM25-vs-TFIDF
+	// discrimination is brittle; the helper assertion above is the reliable guard.
+	entries := []Entry{
+		{Title: "OOMKilled pod", Body: "container exceeded its memory limit"},
+		{Title: "Image pull failure", Body: "registry returned forbidden"},
+	}
+	idx, err := buildIndex(entries)
+	if err != nil {
+		t.Fatalf("buildIndex: %v", err)
+	}
+	defer func() { _ = idx.Close() }()
+	c := &Catalog{index: idx, entries: entries}
+	hits, err := c.SearchScored("memory limit", 2)
+	if err != nil {
+		t.Fatalf("search: %v", err)
+	}
+	if len(hits) == 0 || hits[0].Score <= 0 {
+		t.Fatalf("expected a positive-scored hit, got %+v", hits)
+	}
+	if hits[0].Entry.Title != "OOMKilled pod" {
+		t.Fatalf("expected the OOM entry ranked first, got %q", hits[0].Entry.Title)
+	}
+}
+
 func TestEmptyCatalog(t *testing.T) {
 	c := NewEmpty()
 	if c.Len() != 0 {

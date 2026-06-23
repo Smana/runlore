@@ -13,6 +13,7 @@ import (
 
 	"github.com/Smana/runlore/internal/catalog"
 	"github.com/Smana/runlore/internal/providers"
+	"github.com/Smana/runlore/internal/telemetry"
 )
 
 // Curator is the file-time learning gate. It dedups, quality-gates, and drafts a
@@ -21,6 +22,7 @@ import (
 type Curator struct {
 	Forge         providers.CurationForge
 	Catalog       catalog.ScoredSearcher // nil ⇒ no catalog dedup
+	Metrics       *telemetry.Metrics     // optional; nil-safe — dedup score unrecorded when unset
 	DupScore      float64                // catalog BM25 dup threshold
 	MinConfidence float64                // quality gate: minimum overall confidence
 	Log           *slog.Logger
@@ -36,12 +38,18 @@ func (c *Curator) Curate(ctx context.Context, inv providers.Investigation) (prov
 		return providers.Ref{}, nil
 	}
 
-	// 1. dedup — catalog, then open PRs
-	if dup, hit, err := (Novelty{Catalog: c.Catalog, DupScore: c.DupScore}).IsDuplicate(ctx, inv); err != nil {
+	// 1. dedup — catalog (observe the top-hit score on every check), then open PRs
+	nov := Novelty{Catalog: c.Catalog, DupScore: c.DupScore}
+	if top, ok, err := nov.TopHit(ctx, inv); err != nil {
 		c.Log.Warn("dedup: catalog search failed", "err", err)
-	} else if dup {
-		c.Log.Info("finding duplicates a catalog entry; not filing", "entry", hit.Title)
-		return providers.Ref{}, nil
+	} else if ok {
+		if c.Metrics != nil {
+			c.Metrics.CurationDedupScore.Record(ctx, top.Score)
+		}
+		if top.Score >= c.DupScore {
+			c.Log.Info("finding duplicates a catalog entry; not filing", "entry", top.Entry.Title, "score", top.Score)
+			return providers.Ref{}, nil
+		}
 	}
 	if n, ok, err := c.duplicateOpenPR(ctx, inv); err != nil {
 		c.Log.Warn("dedup: list open PRs failed", "err", err)

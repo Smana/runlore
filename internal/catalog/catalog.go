@@ -7,6 +7,7 @@ import (
 	"sync"
 
 	"github.com/blevesearch/bleve/v2"
+	"github.com/blevesearch/bleve/v2/mapping"
 )
 
 // Catalog is an in-memory BM25 index over OKF entries. It is safe for concurrent
@@ -22,6 +23,15 @@ type Searcher interface {
 	Search(query string, k int) ([]Entry, error)
 }
 
+// newIndexMapping returns the index mapping used by every catalog index. It pins
+// the scoring model to BM25 — bleve defaults to legacy TF-IDF when ScoringModel
+// is unset, whose unbounded, non-saturating scores are not corpus-portable.
+func newIndexMapping() *mapping.IndexMappingImpl {
+	im := bleve.NewIndexMapping()
+	im.ScoringModel = "bm25" // validated by bleve against SupportedScoringModels
+	return im
+}
+
 // New loads the OKF bundle at dir and builds an in-memory index.
 func New(dir string) (*Catalog, error) {
 	c := &Catalog{}
@@ -33,7 +43,7 @@ func New(dir string) (*Catalog, error) {
 
 // NewEmpty returns a catalog with no entries — used before the first git sync.
 func NewEmpty() *Catalog {
-	idx, _ := bleve.NewMemOnly(bleve.NewIndexMapping())
+	idx, _ := bleve.NewMemOnly(newIndexMapping())
 	return &Catalog{index: idx}
 }
 
@@ -65,7 +75,7 @@ func (c *Catalog) Reload(dir string) ([]string, error) {
 }
 
 func buildIndex(entries []Entry) (bleve.Index, error) {
-	idx, err := bleve.NewMemOnly(bleve.NewIndexMapping())
+	idx, err := bleve.NewMemOnly(newIndexMapping())
 	if err != nil {
 		return nil, fmt.Errorf("new index: %w", err)
 	}
