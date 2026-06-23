@@ -274,6 +274,30 @@ func TestLookupDecayFactorAtFloorRecalls(t *testing.T) {
 	}
 }
 
+func TestLookupRecallsMatchingWorkload(t *testing.T) {
+	r := recallWith([]catalog.ScoredEntry{
+		{Entry: catalog.Entry{Title: "OOM", Path: "payment.md", Resource: "apps/payment-api"}, Score: 6.0},
+		{Entry: catalog.Entry{Title: "X", Path: "b.md"}, Score: 2.0},
+	})
+	req := Request{Title: "crashloop", Workload: providers.Workload{Namespace: "apps", Name: "payment-api"}}
+	if e, _ := r.lookup(context.Background(), req); e == nil {
+		t.Fatal("an alert for payment-api should recall the payment-api entry (exact match)")
+	}
+}
+
+func TestLookupDoesNotRecallDifferentWorkloadSameNamespace(t *testing.T) {
+	// The disambiguation success metric: a payment-api alert must NOT recall a
+	// different workload's (web) entry just because they share the namespace.
+	r := recallWith([]catalog.ScoredEntry{
+		{Entry: catalog.Entry{Title: "OOM", Path: "web.md", Resource: "apps/web"}, Score: 6.0},
+		{Entry: catalog.Entry{Title: "X", Path: "b.md"}, Score: 2.0},
+	})
+	req := Request{Title: "crashloop", Workload: providers.Workload{Namespace: "apps", Name: "payment-api"}}
+	if e, _ := r.lookup(context.Background(), req); e != nil {
+		t.Fatal("a payment-api alert must not recall a different workload's entry in the same namespace")
+	}
+}
+
 func TestResourceAgrees(t *testing.T) {
 	w := func(ns, name string) providers.Workload { return providers.Workload{Namespace: ns, Name: name} }
 	cases := []struct {
