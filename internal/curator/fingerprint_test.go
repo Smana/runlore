@@ -160,3 +160,20 @@ func TestDupFingerprintGoldenValue(t *testing.T) {
 		t.Fatalf("golden fingerprint mismatch: expected %q, got %q", expected, got)
 	}
 }
+
+// TestDupFingerprintDiffersByTerseAcronymCause guards against a false-collision:
+// two different terse/acronym causes on the SAME resource whose tokens all filter
+// out (sub-3-char / stopwords) must not hash to the same fingerprint (which would
+// silently coalesce unrelated incidents). The raw-summary fallback prevents it.
+func TestDupFingerprintDiffersByTerseAcronymCause(t *testing.T) {
+	res := providers.Workload{Namespace: "apps", Name: "web"}
+	a := providers.Investigation{Resource: res, RootCauses: []providers.Hypothesis{{Summary: "IO GC"}}}
+	b := providers.Investigation{Resource: res, RootCauses: []providers.Hypothesis{{Summary: "db up"}}}
+	fa, fb := DupFingerprint(a), DupFingerprint(b)
+	if fa == "" || fb == "" {
+		t.Fatalf("a terse cause on a known resource must still produce a fingerprint: %q %q", fa, fb)
+	}
+	if fa == fb {
+		t.Fatalf("different terse causes on the same resource must not collide: both %q", fa)
+	}
+}
