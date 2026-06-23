@@ -293,6 +293,18 @@ func TestGateError(t *testing.T) {
 	}
 }
 
+func TestReplayDefaultsPreserveBehavior(t *testing.T) {
+	// n=1 (the replay default) runs each case once; GateError with the default
+	// fail-under (0) never gates, so local `lore eval` keeps exiting 0.
+	camp := newRateRunner(5).RunN(context.Background(), []Case{harborCase()}, 1)
+	if len(camp.Aggregates) != 1 || camp.Aggregates[0].Runs != 1 {
+		t.Fatalf("n=1 should run each case once, got %+v", camp.Aggregates)
+	}
+	if err := GateError(camp, 0); err != nil {
+		t.Fatalf("default fail-under (0) must never gate, got %v", err)
+	}
+}
+
 func TestCampaignJSON(t *testing.T) {
 	camp := newRateRunner(5).RunN(context.Background(), []Case{harborCase()}, 2)
 	b, err := camp.JSON()

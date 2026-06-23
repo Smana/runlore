@@ -216,6 +216,7 @@ func GateError(c Campaign, failUnder float64) error {
 
 // JSON renders the campaign as an indented report for CI artifacts.
 func (c Campaign) JSON() ([]byte, error) {
+	// row mirrors CaseAggregate's field names, types, and order so row(a) is a legal conversion — keep in sync.
 	type row struct {
 		Name        string   `json:"name"`
 		Runs        int      `json:"runs"`
