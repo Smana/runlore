@@ -46,10 +46,10 @@ func TestDraftKBEntrySetsResource(t *testing.T) {
 }
 
 func TestResourceStringNamespaceOnly(t *testing.T) {
-	if got := resourceString(providers.Workload{Namespace: "apps"}); got != "apps" {
+	if got := (providers.Workload{Namespace: "apps"}).Ref(); got != "apps" {
 		t.Fatalf("namespace-only resource = %q, want apps", got)
 	}
-	if got := resourceString(providers.Workload{}); got != "" {
+	if got := (providers.Workload{}).Ref(); got != "" {
 		t.Fatalf("empty workload resource = %q, want empty", got)
 	}
 }

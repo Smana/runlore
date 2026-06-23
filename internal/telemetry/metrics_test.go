@@ -17,3 +17,12 @@ func TestNewMetricsNoProvider(_ *testing.T) {
 	m.CoalesceBatchSize.Record(ctx, 12)
 	m.InvestigationTokens.Record(ctx, 5000)
 }
+
+func TestNewMetricsOutcomeInstruments(_ *testing.T) {
+	m := NewMetrics()
+	ctx := context.Background()
+	m.OutcomesOpened.Add(ctx, 1)
+	m.IncidentsResolved.Add(ctx, 1)
+	m.RecallOutcome.Add(ctx, 1)
+	m.IncidentResolutionSeconds.Record(ctx, 90)
+}

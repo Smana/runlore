@@ -47,6 +47,20 @@ type Workload struct {
 	Namespace string
 }
 
+// Ref renders the workload as "namespace/name", or just "namespace" when the
+// name is unknown (common for alert-triggered investigations), or "" when the
+// namespace is unknown too. It is the canonical form used for structural recall
+// matching, curated-entry resources, and outcome-ledger attribution.
+func (w Workload) Ref() string {
+	if w.Namespace == "" {
+		return ""
+	}
+	if w.Name == "" {
+		return w.Namespace
+	}
+	return w.Namespace + "/" + w.Name
+}
+
 // SourceRef points at the Git source + path backing a change.
 type SourceRef struct {
 	RepoURL string
@@ -333,15 +347,17 @@ type LogResult []LogLine
 
 // Investigation is the structured output contract of an investigation.
 type Investigation struct {
-	Title      string
-	RootCauses []Hypothesis
-	Changes    []Change
-	Unresolved []string // honest: what the agent could not determine
-	Confidence float64
-	Recalled   bool     // true when produced by instant recall (a KB cache hit); the curator skips re-curating it
-	Resource   Workload // the originating workload; stored on curated entries for structural recall matching
-	Actions    []Action // proposed remediations (autonomy ladder; never executed at rung "suggest")
-	CuratedURL string   // runtime: KB issue/PR the curator opened, linked in delivery (set after curation)
+	Title         string
+	RootCauses    []Hypothesis
+	Changes       []Change
+	Unresolved    []string // honest: what the agent could not determine
+	Confidence    float64
+	Recalled      bool     // true when produced by instant recall (a KB cache hit); the curator skips re-curating it
+	Resource      Workload // the originating workload; stored on curated entries for structural recall matching
+	Actions       []Action // proposed remediations (autonomy ladder; never executed at rung "suggest")
+	CuratedURL    string   // runtime: KB issue/PR the curator opened, linked in delivery (set after curation)
+	Fingerprint   string   // originating alert fingerprint; for outcome-ledger attribution
+	RecalledEntry string   // when Recalled: the catalog entry Path that was matched
 }
 
 // Hypothesis is one ranked root-cause candidate with its evidence.

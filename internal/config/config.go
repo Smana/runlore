@@ -24,6 +24,7 @@ type Config struct {
 	Model    Model         `yaml:"model"`   // optional; when BaseURL is set, serve uses the LLM investigator
 	Notify   Notify        `yaml:"notify"`  // chat delivery for findings
 	Catalog  Catalog       `yaml:"catalog"` // OKF knowledge catalog
+	Outcome  Outcome       `yaml:"outcome"` // learning-loop outcome ledger
 
 	LeaderElection LeaderElection `yaml:"leader_election"` // HA: only the leader investigates
 
@@ -108,6 +109,11 @@ type Catalog struct {
 	Dir           string        `yaml:"dir"` // OKF bundle path (mounted ConfigMap, or the git-sync mirror)
 	Git           CatalogGit    `yaml:"git"`
 	InstantRecall InstantRecall `yaml:"instant_recall"`
+}
+
+// Outcome configures the learning-loop outcome ledger.
+type Outcome struct {
+	LedgerPath string `yaml:"ledger_path"` // append-only JSONL path (e.g. the git-sync mirror PV); empty disables
 }
 
 // InstantRecall short-circuits the investigation loop when the catalog has a
@@ -213,6 +219,7 @@ type Incident struct {
 	StartsAt    time.Time
 	Fingerprint string // stable alert identity, used for dedup
 	GroupKey    string // Alertmanager group identity (shared by all alerts in one webhook POST)
+	Status      string // Alertmanager status: "firing" | "resolved"
 }
 
 // Matches reports whether an incident passes this trigger policy: enabled,

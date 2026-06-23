@@ -119,3 +119,10 @@ func TestFromFailureEvent(t *testing.T) {
 		t.Fatalf("unexpected request: %+v", r)
 	}
 }
+
+func TestFromIncidentCarriesFingerprint(t *testing.T) {
+	r := FromIncident(config.Incident{AlertName: "A", Namespace: "ns", Fingerprint: "fp-9"})
+	if r.Fingerprint != "fp-9" {
+		t.Fatalf("Request.Fingerprint = %q, want fp-9", r.Fingerprint)
+	}
+}

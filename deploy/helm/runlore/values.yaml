@@ -66,6 +66,8 @@ config:
   #     margin_gap: 1.0                # top hit must beat the runner-up by this (corpus-portable; not an absolute floor)
   #     solo_floor: 4.0                # confident bar when there is only one hit
   #     require_workload_match: false  # true = exact namespace+workload; false = namespace-level agreement is enough
+  # outcome:
+  #   ledger_path: /var/lib/runlore/catalog/outcomes.jsonl  # learning-loop outcome ledger; point at the writable git-sync mirror PV
   # notify:
   #   slack: { webhook_url_env: SLACK_WEBHOOK_URL }
   #   matrix: { homeserver: https://matrix.org, room_id: "!r:hs", access_token_env: MATRIX_TOKEN }
