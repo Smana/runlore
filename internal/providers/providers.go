@@ -333,15 +333,17 @@ type LogResult []LogLine
 
 // Investigation is the structured output contract of an investigation.
 type Investigation struct {
-	Title      string
-	RootCauses []Hypothesis
-	Changes    []Change
-	Unresolved []string // honest: what the agent could not determine
-	Confidence float64
-	Recalled   bool     // true when produced by instant recall (a KB cache hit); the curator skips re-curating it
-	Resource   Workload // the originating workload; stored on curated entries for structural recall matching
-	Actions    []Action // proposed remediations (autonomy ladder; never executed at rung "suggest")
-	CuratedURL string   // runtime: KB issue/PR the curator opened, linked in delivery (set after curation)
+	Title         string
+	RootCauses    []Hypothesis
+	Changes       []Change
+	Unresolved    []string // honest: what the agent could not determine
+	Confidence    float64
+	Recalled      bool     // true when produced by instant recall (a KB cache hit); the curator skips re-curating it
+	Resource      Workload // the originating workload; stored on curated entries for structural recall matching
+	Actions       []Action // proposed remediations (autonomy ladder; never executed at rung "suggest")
+	CuratedURL    string   // runtime: KB issue/PR the curator opened, linked in delivery (set after curation)
+	Fingerprint   string   // originating alert fingerprint; for outcome-ledger attribution
+	RecalledEntry string   // when Recalled: the catalog entry Path that was matched
 }
 
 // Hypothesis is one ranked root-cause candidate with its evidence.

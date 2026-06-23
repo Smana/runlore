@@ -213,6 +213,7 @@ type Incident struct {
 	StartsAt    time.Time
 	Fingerprint string // stable alert identity, used for dedup
 	GroupKey    string // Alertmanager group identity (shared by all alerts in one webhook POST)
+	Status      string // Alertmanager status: "firing" | "resolved"
 }
 
 // Matches reports whether an incident passes this trigger policy: enabled,

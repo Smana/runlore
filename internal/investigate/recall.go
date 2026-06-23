@@ -158,10 +158,11 @@ func recalledInvestigation(req Request, e catalog.Entry, confidence float64) pro
 		Evidence:   []string{fmt.Sprintf("instant recall: matched knowledge-base entry %q", e.Path)},
 	}
 	return providers.Investigation{
-		Title:      req.Title,
-		Confidence: confidence,
-		RootCauses: []providers.Hypothesis{rc},
-		Unresolved: []string{"recalled from the catalog without a fresh investigation — confirm it still applies"},
-		Recalled:   true,
+		Title:         req.Title,
+		Confidence:    confidence,
+		RootCauses:    []providers.Hypothesis{rc},
+		Unresolved:    []string{"recalled from the catalog without a fresh investigation — confirm it still applies"},
+		Recalled:      true,
+		RecalledEntry: e.Path,
 	}
 }
