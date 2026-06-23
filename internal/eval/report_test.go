@@ -18,7 +18,7 @@ func sampleResults() []LiveResult {
 }
 
 func TestReportJSONAndMarkdown(t *testing.T) {
-	rep := NewLiveReport("2026-06-21T20:00:00Z", sampleResults())
+	rep := NewLiveReport("2026-06-21T20:00:00Z", 10, sampleResults())
 
 	js := rep.JSON()
 	var back LiveReport
@@ -38,10 +38,24 @@ func TestReportJSONAndMarkdown(t *testing.T) {
 }
 
 func TestRegressionDiff(t *testing.T) {
-	prev := NewLiveReport("t0", []LiveResult{{Scenario: "a", Pass: true}, {Scenario: "b", Pass: true}})
-	curr := NewLiveReport("t1", []LiveResult{{Scenario: "a", Pass: true}, {Scenario: "b", Pass: false}})
+	prev := NewLiveReport("t0", 10, []LiveResult{{Scenario: "a", Pass: true}, {Scenario: "b", Pass: true}})
+	curr := NewLiveReport("t1", 10, []LiveResult{{Scenario: "a", Pass: true}, {Scenario: "b", Pass: false}})
 	regressed := curr.RegressionsVS(prev)
 	if len(regressed) != 1 || regressed[0] != "b" {
 		t.Fatalf("want [b] regressed, got %v", regressed)
+	}
+}
+
+func TestReportHeaderStatesN(t *testing.T) {
+	rep := NewLiveReport("t", 10, []LiveResult{{Scenario: "a", Pass: true, DimMedian: map[string]int{"root_cause": 3}}})
+	if md := rep.Markdown(); !strings.Contains(md, "N=10") {
+		t.Fatalf("header must state N:\n%s", md)
+	}
+}
+
+func TestReportFlakyStatus(t *testing.T) {
+	rep := NewLiveReport("t", 10, []LiveResult{{Scenario: "a", Pass: false, Flaky: true, DimMedian: map[string]int{"root_cause": 2}}})
+	if md := rep.Markdown(); !strings.Contains(md, "FLAKY") {
+		t.Fatalf("a flaky scenario must render FLAKY:\n%s", md)
 	}
 }
