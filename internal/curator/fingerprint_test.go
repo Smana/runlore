@@ -144,3 +144,19 @@ func TestDupFingerprintEmptyWhenNoResourceOrCause(t *testing.T) {
 		t.Fatalf("no resource and no cause must yield empty fingerprint, got %q", got)
 	}
 }
+
+// TestDupFingerprintGoldenValue pins the exact canonical fingerprint to guard
+// canonicalization stability. Markers in open PRs depend on this hash being
+// stable across the "|" separator, token order, stopword set, and hashing
+// algorithm. Any accidental change to the canonicalization must fail this test
+// rather than silently invalidating already-open PR markers.
+func TestDupFingerprintGoldenValue(t *testing.T) {
+	inv := providers.Investigation{
+		Resource:   providers.Workload{Namespace: "apps", Name: "web"},
+		RootCauses: []providers.Hypothesis{{Summary: "image tag rollout broke readiness probe"}},
+	}
+	const expected = "215ab128868422ea9e8f8cf247cbc79be9cd11aa0f2e8c634e8a997273ae2701"
+	if got := DupFingerprint(inv); got != expected {
+		t.Fatalf("golden fingerprint mismatch: expected %q, got %q", expected, got)
+	}
+}
