@@ -27,6 +27,8 @@ import (
 	"syscall"
 	"time"
 
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/metric"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/kubernetes"
@@ -52,6 +54,7 @@ import (
 	openai "github.com/Smana/runlore/internal/model/openai"
 	"github.com/Smana/runlore/internal/network/hubble"
 	"github.com/Smana/runlore/internal/notify"
+	"github.com/Smana/runlore/internal/outcome"
 	"github.com/Smana/runlore/internal/providers"
 	awscloud "github.com/Smana/runlore/internal/providers/cloud/aws"
 	"github.com/Smana/runlore/internal/providers/cluster"
@@ -207,7 +210,15 @@ func runServe(args []string) error {
 	}
 	metrics := telemetry.NewMetrics() // bound to global provider (no-op when disabled)
 
-	inv := buildInvestigator(ctx, cfg, gitops, approvals, auto, metrics, log)
+	ledger, err := outcome.New(cfg.Outcome.LedgerPath)
+	if err != nil {
+		return fmt.Errorf("outcome ledger: %w", err)
+	}
+	if cfg.Outcome.LedgerPath != "" {
+		log.Info("outcome ledger enabled", "path", cfg.Outcome.LedgerPath)
+	}
+
+	inv := buildInvestigator(ctx, cfg, gitops, approvals, auto, metrics, ledger, log)
 	queue := investigate.NewQueue(inv, log)
 	var rlStarts *ratelimit.Window
 	if rl := cfg.Investigation.RateLimit; rl.MaxPerWindow > 0 {
@@ -281,6 +292,7 @@ func runServe(args []string) error {
 	}
 	srv := server.New(cfg, queue, leader.Load, acts, metricsHandler, log)
 	srv.SetMetrics(metrics) // ingress counters emit regardless of coalescing
+	srv.SetOutcomeLedger(ledger)
 	if cz != nil {
 		srv.SetCoalescer(cz)
 		go cz.Run(ctx, cfg.Investigation.Coalesce.Debounce.Std()/2)
@@ -996,9 +1008,28 @@ func runInvestigate(args []string) error {
 	return nil
 }
 
+// outcomeKind labels an outcome-ledger open as a recall (cache hit) or a fresh finding.
+func outcomeKind(recalled bool) string {
+	if recalled {
+		return "recall"
+	}
+	return "fresh"
+}
+
+// resourceStr renders a workload as "namespace/name" for the outcome ledger.
+func resourceStr(w providers.Workload) string {
+	if w.Namespace == "" {
+		return ""
+	}
+	if w.Name == "" {
+		return w.Namespace
+	}
+	return w.Namespace + "/" + w.Name
+}
+
 // buildInvestigator returns the LLM ReAct investigator when a model is configured,
 // otherwise the read-only LogInvestigator.
-func buildInvestigator(ctx context.Context, cfg *config.Config, gp providers.GitOpsProvider, approvals *action.Approvals, auto *action.Auto, metrics *telemetry.Metrics, log *slog.Logger) investigate.Investigator {
+func buildInvestigator(ctx context.Context, cfg *config.Config, gp providers.GitOpsProvider, approvals *action.Approvals, auto *action.Auto, metrics *telemetry.Metrics, ledger *outcome.Ledger, log *slog.Logger) investigate.Investigator {
 	if !modelConfigured(cfg) {
 		log.Info("no model configured; using log-only investigator")
 		return investigate.LogInvestigator{Log: log}
@@ -1028,6 +1059,22 @@ func buildInvestigator(ctx context.Context, cfg *config.Config, gp providers.Git
 		MaxToolOutputBytes:        cfg.Investigation.MaxToolOutputBytes,
 		MaxTokensPerInvestigation: cfg.Investigation.MaxTokensPerInvestigation,
 		OnComplete: func(found providers.Investigation) {
+			// Record the outcome "open" first: this investigation happened for an
+			// incident, with the answer we used (recall vs fresh). A matching
+			// resolved-alert webhook later stamps whether it actually resolved.
+			if err := ledger.Open(outcome.Event{
+				Fingerprint: found.Fingerprint,
+				Kind:        outcomeKind(found.Recalled),
+				Entry:       found.RecalledEntry,
+				Title:       found.Title,
+				Resource:    resourceStr(found.Resource),
+				At:          time.Now(),
+			}); err != nil {
+				log.Warn("outcome ledger open failed", "fingerprint", found.Fingerprint, "err", err)
+			}
+			if metrics != nil {
+				metrics.OutcomesOpened.Add(ctx, 1, metric.WithAttributes(attribute.String("kind", outcomeKind(found.Recalled))))
+			}
 			// Post-investigation action handling, by mode. The loop has already
 			// filtered found.Actions to the envelope (rung 1). auto and approvals are
 			// mutually exclusive (one is nil unless that mode is configured).
