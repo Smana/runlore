@@ -2,6 +2,7 @@ package eval
 
 import (
 	"context"
+	"encoding/json"
 	"log/slog"
 	"sort"
 
@@ -184,4 +185,35 @@ func sortedSet(m map[string]struct{}) []string {
 	}
 	sort.Strings(out)
 	return out
+}
+
+// JSON renders the campaign as an indented report for CI artifacts.
+func (c Campaign) JSON() ([]byte, error) {
+	type row struct {
+		Name        string   `json:"name"`
+		Runs        int      `json:"runs"`
+		PassRate    float64  `json:"pass_rate"`
+		Reached     bool     `json:"reached"`
+		Flaky       bool     `json:"flaky"`
+		Confidence  float64  `json:"confidence"`
+		Missing     []string `json:"missing,omitempty"`
+		OverClaimed []string `json:"over_claimed,omitempty"`
+	}
+	rows := make([]row, len(c.Aggregates))
+	for i, a := range c.Aggregates {
+		rows[i] = row(a)
+	}
+	return json.MarshalIndent(struct {
+		N        int     `json:"n"`
+		PassRate float64 `json:"pass_rate"`
+		Reached  int     `json:"reached"`
+		Total    int     `json:"total"`
+		Cases    []row   `json:"cases"`
+	}{
+		N:        c.N,
+		PassRate: c.PassRate(),
+		Reached:  c.ReachedCases(),
+		Total:    len(c.Aggregates),
+		Cases:    rows,
+	}, "", "  ")
 }

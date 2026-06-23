@@ -2,6 +2,7 @@ package eval
 
 import (
 	"context"
+	"encoding/json"
 	"io"
 	"log/slog"
 	"os"
@@ -273,5 +274,32 @@ func TestReplayCampaignPassRate(t *testing.T) {
 	camp := newRateRunner(5).RunN(context.Background(), cases, 5)
 	if camp.ReachedCases() != 1 || camp.PassRate() != 0.5 {
 		t.Fatalf("want reached=1 rate=0.5, got reached=%d rate=%.2f", camp.ReachedCases(), camp.PassRate())
+	}
+}
+
+func TestCampaignJSON(t *testing.T) {
+	camp := newRateRunner(5).RunN(context.Background(), []Case{harborCase()}, 2)
+	b, err := camp.JSON()
+	if err != nil {
+		t.Fatalf("JSON: %v", err)
+	}
+	var got struct {
+		N        int     `json:"n"`
+		PassRate float64 `json:"pass_rate"`
+		Reached  int     `json:"reached"`
+		Total    int     `json:"total"`
+		Cases    []struct {
+			Name    string `json:"name"`
+			Reached bool   `json:"reached"`
+		} `json:"cases"`
+	}
+	if err := json.Unmarshal(b, &got); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if got.N != 2 || got.Total != 1 || got.Reached != 1 || got.PassRate != 1.0 {
+		t.Fatalf("unexpected report header: %+v", got)
+	}
+	if len(got.Cases) != 1 || got.Cases[0].Name != "harbor" || !got.Cases[0].Reached {
+		t.Fatalf("unexpected case rows: %+v", got.Cases)
 	}
 }
