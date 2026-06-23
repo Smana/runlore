@@ -90,14 +90,30 @@ func (mockObserver) GetFlows(_ *observerpb.GetFlowsRequest, stream observerpb.Ob
 
 // chatCompletions scripts the ReAct loop: call what_changed, then kb_search, then
 // submit_findings — driven by how many tool results the request already carries.
+// The adversarial verify pass is a separate, tool-result-free request that offers
+// ONLY the submit_verdicts tool; detect it by that tool and keep the cause so a
+// curatable (Verified) finding survives to the curator.
 func chatCompletions(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		Messages []struct {
 			Role string `json:"role"`
 		} `json:"messages"`
+		Tools []struct {
+			Function struct {
+				Name string `json:"name"`
+			} `json:"function"`
+		} `json:"tools"`
 	}
 	body, _ := io.ReadAll(r.Body)
 	_ = json.Unmarshal(body, &req)
+	for _, t := range req.Tools {
+		if t.Function.Name == "submit_verdicts" {
+			// Verify pass: keep the (single) root cause so the finding is Verified.
+			log.Printf("MOCK chat/completions: verify -> submit_verdicts (keep)")
+			writeJSON(w, `{"choices":[{"message":{"role":"assistant","tool_calls":[{"id":"v0","type":"function","function":{"name":"submit_verdicts","arguments":"{\"verdicts\":[{\"index\":0,\"verdict\":\"keep\",\"confidence\":0.9,\"reason\":\"mock: evidence supports the cause\"}]}"}}]}}]}`)
+			return
+		}
+	}
 	toolResults := 0
 	for _, m := range req.Messages {
 		if m.Role == "tool" {
