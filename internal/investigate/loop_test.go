@@ -205,6 +205,25 @@ func TestLoopInvestigator(t *testing.T) {
 	}
 }
 
+func TestPreferDiscoveredResource(t *testing.T) {
+	origin := providers.Workload{Namespace: "apps", Name: "web"}
+	cases := []struct {
+		name       string
+		discovered providers.Workload
+		want       providers.Workload
+	}{
+		{"discovered wins", providers.Workload{Namespace: "apps", Name: "payment-api", Kind: "Deployment"}, providers.Workload{Namespace: "apps", Name: "payment-api", Kind: "Deployment"}},
+		{"namespace defaulted from origin", providers.Workload{Name: "payment-api"}, providers.Workload{Namespace: "apps", Name: "payment-api"}},
+		{"empty falls back to origin", providers.Workload{}, origin},
+		{"namespace-only discovered kept", providers.Workload{Namespace: "ops"}, providers.Workload{Namespace: "ops"}},
+	}
+	for _, c := range cases {
+		if got := preferDiscoveredResource(c.discovered, origin); got != c.want {
+			t.Errorf("%s: got %+v, want %+v", c.name, got, c.want)
+		}
+	}
+}
+
 // bigTool is a fake Tool that returns a string of length n filled with 'z'.
 type bigTool struct{ size int }
 

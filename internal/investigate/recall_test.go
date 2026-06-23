@@ -274,6 +274,58 @@ func TestLookupDecayFactorAtFloorRecalls(t *testing.T) {
 	}
 }
 
+func TestLookupRecallsMatchingWorkload(t *testing.T) {
+	r := recallWith([]catalog.ScoredEntry{
+		{Entry: catalog.Entry{Title: "OOM", Path: "payment.md", Resource: "apps/payment-api"}, Score: 6.0},
+		{Entry: catalog.Entry{Title: "X", Path: "b.md"}, Score: 2.0},
+	})
+	req := Request{Title: "crashloop", Workload: providers.Workload{Namespace: "apps", Name: "payment-api"}}
+	if e, _ := r.lookup(context.Background(), req); e == nil {
+		t.Fatal("an alert for payment-api should recall the payment-api entry (exact match)")
+	}
+}
+
+func TestLookupDoesNotRecallDifferentWorkloadSameNamespace(t *testing.T) {
+	// The disambiguation success metric: a payment-api alert must NOT recall a
+	// different workload's (web) entry just because they share the namespace.
+	r := recallWith([]catalog.ScoredEntry{
+		{Entry: catalog.Entry{Title: "OOM", Path: "web.md", Resource: "apps/web"}, Score: 6.0},
+		{Entry: catalog.Entry{Title: "X", Path: "b.md"}, Score: 2.0},
+	})
+	req := Request{Title: "crashloop", Workload: providers.Workload{Namespace: "apps", Name: "payment-api"}}
+	if e, _ := r.lookup(context.Background(), req); e != nil {
+		t.Fatal("a payment-api alert must not recall a different workload's entry in the same namespace")
+	}
+}
+
+func TestResourceAgrees(t *testing.T) {
+	w := func(ns, name string) providers.Workload { return providers.Workload{Namespace: ns, Name: name} }
+	cases := []struct {
+		name      string
+		reqW      providers.Workload
+		entry     string
+		requireWL bool
+		want      matchStrength
+	}{
+		{"exact ns/name", w("apps", "payment-api"), "apps/payment-api", false, matchExact},
+		{"different names same ns -> none", w("apps", "payment-api"), "apps/web", false, matchNone},
+		{"named alert vs bare-ns entry -> namespace", w("apps", "payment-api"), "apps", false, matchNamespace},
+		{"bare-ns alert vs named entry -> namespace", w("apps", ""), "apps/web", false, matchNamespace},
+		{"both bare ns -> exact", w("apps", ""), "apps", false, matchExact},
+		{"different ns -> none", w("apps", "payment-api"), "other/web", false, matchNone},
+		{"empty entry -> none", w("apps", "payment-api"), "", false, matchNone},
+		{"require workload + exact -> exact", w("apps", "web"), "apps/web", true, matchExact},
+		{"require workload + ns-only -> none", w("apps", ""), "apps/web", true, matchNone},
+		{"require workload + bare-ns entry -> none", w("apps", "web"), "apps", true, matchNone},
+		{"bare-ns alert vs different-ns bare-ns entry -> none", w("apps", ""), "other", false, matchNone},
+	}
+	for _, c := range cases {
+		if got := resourceAgrees(c.reqW, c.entry, c.requireWL); got != c.want {
+			t.Errorf("%s: resourceAgrees(%+v, %q, %v) = %v, want %v", c.name, c.reqW, c.entry, c.requireWL, got, c.want)
+		}
+	}
+}
+
 func TestLookupDecayRejectionMetric(t *testing.T) {
 	h, shutdown, err := telemetry.Setup(context.Background())
 	if err != nil {

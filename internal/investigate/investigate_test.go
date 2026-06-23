@@ -126,3 +126,32 @@ func TestFromIncidentCarriesFingerprint(t *testing.T) {
 		t.Fatalf("Request.Fingerprint = %q, want fp-9", r.Fingerprint)
 	}
 }
+
+func TestWorkloadFromLabels(t *testing.T) {
+	cases := []struct {
+		name             string
+		labels           map[string]string
+		wantKind, wantNm string
+	}{
+		{"deployment", map[string]string{"deployment": "payment-api"}, "Deployment", "payment-api"},
+		{"pod only", map[string]string{"pod": "x-abc123"}, "Pod", "x-abc123"},
+		{"controller beats pod", map[string]string{"deployment": "payment-api", "pod": "payment-api-abc"}, "Deployment", "payment-api"},
+		{"workload with type", map[string]string{"workload": "w", "workload_type": "Rollout"}, "Rollout", "w"},
+		{"workload no type -> empty kind", map[string]string{"workload": "w"}, "", "w"},
+		{"none", map[string]string{"severity": "critical"}, "", ""},
+	}
+	for _, c := range cases {
+		k, n := workloadFromLabels(c.labels)
+		if k != c.wantKind || n != c.wantNm {
+			t.Errorf("%s: got (%q,%q), want (%q,%q)", c.name, k, n, c.wantKind, c.wantNm)
+		}
+	}
+}
+
+func TestFromIncidentDerivesWorkload(t *testing.T) {
+	inc := config.Incident{AlertName: "Crash", Namespace: "apps", Labels: map[string]string{"namespace": "apps", "deployment": "payment-api"}}
+	r := FromIncident(inc)
+	if r.Workload.Namespace != "apps" || r.Workload.Name != "payment-api" || r.Workload.Kind != "Deployment" {
+		t.Fatalf("FromIncident workload = %+v, want apps/payment-api Deployment", r.Workload)
+	}
+}
