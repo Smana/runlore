@@ -159,6 +159,41 @@ func (l *Ledger) Episodes() ([]Episode, error) {
 	return out, nil
 }
 
+// Aggregate is a per-entry roll-up of recall episodes: how often the entry was
+// recalled, how often the incident then resolved, and when it last resolved.
+type Aggregate struct {
+	Recalls       int
+	Resolved      int
+	LastConfirmed time.Time
+}
+
+// OpenCounts rolls Episodes up per catalog entry, counting recall episodes only
+// (fresh investigations carry no entry). It is the input to recall decay:
+// resolve-rate ≈ (Resolved+1)/(Recalls+2). A disabled/empty ledger yields an
+// empty (non-nil) map.
+func (l *Ledger) OpenCounts() (map[string]Aggregate, error) {
+	eps, err := l.Episodes()
+	if err != nil {
+		return nil, err
+	}
+	counts := map[string]Aggregate{}
+	for _, e := range eps {
+		if e.Kind != "recall" || e.Entry == "" {
+			continue
+		}
+		a := counts[e.Entry]
+		a.Recalls++
+		if e.Resolved {
+			a.Resolved++
+			if e.ResolvedAt.After(a.LastConfirmed) {
+				a.LastConfirmed = e.ResolvedAt
+			}
+		}
+		counts[e.Entry] = a
+	}
+	return counts, nil
+}
+
 // Resolve records that an incident's alert cleared. When it matches an open
 // investigation it returns the Episode (with duration + kind) and ok=true.
 func (l *Ledger) Resolve(fp string, at time.Time) (Episode, bool, error) {
