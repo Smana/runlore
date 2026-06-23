@@ -893,10 +893,13 @@ func buildModelAndTools(ctx context.Context, cfg *config.Config, gp providers.Gi
 				MarginGap:            cfg.Catalog.InstantRecall.MarginGap,
 				SoloFloor:            cfg.Catalog.InstantRecall.SoloFloor,
 				RequireWorkloadMatch: cfg.Catalog.InstantRecall.RequireWorkloadMatch,
+				OutcomePrior:         cfg.Catalog.InstantRecall.OutcomePrior,
+				OutcomeFloor:         cfg.Catalog.InstantRecall.OutcomeFloor,
 			}
 			log.Info("instant recall enabled",
 				"min_score", cfg.Catalog.InstantRecall.MinScore,
-				"margin_gap", cfg.Catalog.InstantRecall.MarginGap, "solo_floor", cfg.Catalog.InstantRecall.SoloFloor)
+				"margin_gap", cfg.Catalog.InstantRecall.MarginGap, "solo_floor", cfg.Catalog.InstantRecall.SoloFloor,
+				"outcome_prior", cfg.Catalog.InstantRecall.OutcomePrior, "outcome_floor", cfg.Catalog.InstantRecall.OutcomeFloor)
 		}
 	}
 	if cfg.Metrics.URL != "" {
@@ -1027,6 +1030,7 @@ func buildInvestigator(ctx context.Context, cfg *config.Config, gp providers.Git
 	if recall != nil {
 		recall.Metrics = metrics
 		recall.Log = log
+		recall.Outcome = ledger // outcome-driven decay (serve path); *outcome.Ledger satisfies OutcomeStats
 	}
 	log.Info("using LLM investigator", "provider", modelProvider(cfg), "model", cfg.Model.Model, "tools", len(tools))
 	notifier := buildNotifier(cfg, log)

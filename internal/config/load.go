@@ -70,5 +70,11 @@ func applyDefaults(c *Config) {
 		if ir.SoloFloor == 0 {
 			ir.SoloFloor = 4.0
 		}
+		if ir.OutcomePrior == 0 {
+			ir.OutcomePrior = 2.0
+		}
+		if ir.OutcomeFloor == 0 {
+			ir.OutcomeFloor = 0.5
+		}
 	}
 }
