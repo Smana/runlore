@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/Smana/runlore/internal/providers"
 )
@@ -66,6 +67,26 @@ func TestListPRsByLabel(t *testing.T) {
 	}
 	if len(prs[0].Labels) != 2 || prs[0].Labels[0] != "runlore" {
 		t.Fatalf("labels not parsed: %+v", prs[0].Labels)
+	}
+}
+
+func TestListPRsByLabelParsesUpdatedAt(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`[
+		  {"number":48,"title":"KB: X","body":"b","labels":[{"name":"runlore"}],"pull_request":{"url":"x"},"updated_at":"2026-06-01T12:00:00Z"}
+		]`))
+	}))
+	defer srv.Close()
+	c := New(srv.URL, "o", "r", "main", staticToken("tok"))
+	prs, err := c.ListPRsByLabel(context.Background(), "runlore")
+	if err != nil {
+		t.Fatalf("ListPRsByLabel: %v", err)
+	}
+	if len(prs) != 1 || prs[0].UpdatedAt.IsZero() {
+		t.Fatalf("updated_at not parsed: %+v", prs)
+	}
+	if got := prs[0].UpdatedAt.UTC().Format(time.RFC3339); got != "2026-06-01T12:00:00Z" {
+		t.Fatalf("unexpected updated_at: %s", got)
 	}
 }
 

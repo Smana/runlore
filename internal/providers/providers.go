@@ -290,10 +290,11 @@ type CurationForge interface {
 // CuratedIssue is a minimal view of a curated KB issue, used by the re-investigate
 // loop to re-run and post results back.
 type CuratedIssue struct {
-	Number int
-	Title  string
-	Body   string
-	Labels []string
+	Number    int
+	Title     string
+	Body      string
+	Labels    []string
+	UpdatedAt time.Time // forge last-update time; used by the curate lifecycle sweep
 }
 
 // ReinvestForge lists curated issues flagged for re-investigation and posts results
