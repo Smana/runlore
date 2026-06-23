@@ -12,6 +12,11 @@ import (
 	"github.com/Smana/runlore/internal/providers"
 )
 
+// stopWords are content-free English filler dropped so reworded causes hash alike.
+var stopWords = map[string]struct{}{
+	"the": {}, "a": {}, "an": {}, "and": {}, "or": {}, "but": {}, "in": {}, "on": {}, "at": {}, "to": {}, "for": {}, "of": {}, "by": {}, "with": {}, "is": {}, "are": {}, "was": {}, "were": {}, "be": {}, "been": {}, "being": {}, "have": {}, "has": {}, "had": {}, "do": {}, "does": {}, "did": {}, "will": {}, "would": {}, "could": {}, "should": {}, "may": {}, "might": {}, "must": {}, "can": {}, "that": {}, "which": {}, "who": {}, "when": {}, "where": {}, "why": {}, "how": {}, "as": {}, "from": {}, "up": {}, "down": {}, "out": {}, "so": {}, "if": {}, "any": {}, "all": {}, "each": {}, "every": {}, "both": {}, "few": {}, "more": {}, "most": {}, "other": {}, "same": {}, "such": {}, "no": {}, "nor": {}, "not": {}, "only": {}, "than": {}, "too": {}, "very": {}, "just": {}, "what": {}, "then": {}, "you": {}, "your": {}, "his": {}, "her": {}, "its": {}, "our": {}, "their": {}, "this": {}, "these": {}, "happened": {}, "happen": {},
+}
+
 // Fingerprint builds the dedup query string for a finding: the alert/title, the
 // top root-cause signature, and the affected workload. It is a BM25 query (fuzzy),
 // not a hash — matched against the catalog index and open-PR titles.
@@ -86,14 +91,10 @@ func DupFingerprint(inv providers.Investigation) string {
 	return hex.EncodeToString(sum[:])
 }
 
-// tokenSet lowercases s, splits on non-alphanumeric runes, drops tokens shorter
-// than 3 chars, dedupes, and sorts — an order-independent significant-token set so
-// reworded phrasings of one cause normalize to the same key.
+// tokenSet lowercases s, splits on non-alphanumeric runes, drops generic English
+// stopwords and tokens shorter than 3 chars, dedupes, and sorts — an order-independent
+// significant-token set so reworded phrasings of one cause normalize to the same key.
 func tokenSet(s string) []string {
-	// Lightweight stop words: common auxiliary/linking verbs and generic action words
-	stopWords := map[string]struct{}{
-		"the": {}, "a": {}, "an": {}, "and": {}, "or": {}, "but": {}, "in": {}, "on": {}, "at": {}, "to": {}, "for": {}, "of": {}, "by": {}, "with": {}, "is": {}, "are": {}, "was": {}, "were": {}, "be": {}, "been": {}, "being": {}, "have": {}, "has": {}, "had": {}, "do": {}, "does": {}, "did": {}, "will": {}, "would": {}, "could": {}, "should": {}, "may": {}, "might": {}, "must": {}, "can": {}, "that": {}, "which": {}, "who": {}, "when": {}, "where": {}, "why": {}, "how": {}, "as": {}, "from": {}, "up": {}, "down": {}, "out": {}, "so": {}, "if": {}, "any": {}, "all": {}, "each": {}, "every": {}, "both": {}, "few": {}, "more": {}, "most": {}, "other": {}, "same": {}, "such": {}, "no": {}, "nor": {}, "not": {}, "only": {}, "than": {}, "too": {}, "very": {}, "just": {}, "what": {}, "then": {}, "you": {}, "your": {}, "his": {}, "her": {}, "its": {}, "our": {}, "their": {}, "this": {}, "these": {}, "happened": {}, "happen": {},
-	}
 	fields := strings.FieldsFunc(strings.ToLower(s), func(r rune) bool {
 		return !unicode.IsLetter(r) && !unicode.IsDigit(r)
 	})
