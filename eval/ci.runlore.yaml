@@ -1,0 +1,7 @@
+# Minimal config for the nightly CI eval (replay mode).
+# Only the model block is needed — replay scenarios supply their own evidence.
+# Set the repo secret RUNLORE_EVAL_API_KEY to the API key for this provider.
+model:
+  provider: anthropic
+  model: claude-haiku-4-5-20251001
+  api_key_env: RUNLORE_EVAL_API_KEY
