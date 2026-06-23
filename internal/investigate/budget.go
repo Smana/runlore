@@ -2,6 +2,19 @@ package investigate
 
 import "github.com/Smana/runlore/internal/providers"
 
+// budgetKillResult synthesises an unresolved investigation for use when the
+// token-budget hard-kill fires (nudge fired, model did not submit findings in time).
+func budgetKillResult(req Request) providers.Investigation {
+	return providers.Investigation{
+		Title:       req.Title,
+		Resource:    req.Workload,
+		Fingerprint: req.Fingerprint,
+		Unresolved: []string{
+			"investigation stopped: token budget exceeded after nudge (model did not submit findings in time)",
+		},
+	}
+}
+
 // estimateTokens approximates the request size (~4 chars/token) over the system
 // prompt plus the full message history — the cost actually re-sent each step.
 // Provider-reported usage is not exposed in CompletionResponse today.

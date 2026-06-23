@@ -54,7 +54,7 @@ func NewMetrics() *Metrics {
 		AlertsSuppressed:          ctr("alerts_suppressed_total", "incidents dropped by cooldown"),
 		InvestigationsStarted:     ctr("investigations_started_total", "investigations actually begun"),
 		InvestigationsThrottled:   ctr("investigations_throttled_total", "starts requeued by the rate limiter"),
-		InvestigationsDropped:     ctr("investigations_dropped_total", "keys dropped after max_requeues"),
+		InvestigationsDropped:     ctr("investigations_dropped_total", "investigations dropped — rate-limiter max_requeues or token-budget hard-kill"),
 		ToolOutputTruncatedBytes:  ctr("tool_output_truncated_bytes_total", "bytes elided by output truncation"),
 		RecallHits:                ctr("recall_hits_total", "KB instant-recall short-circuits (label: result)"),
 		RecallTokensSaved:         ctr("recall_tokens_saved_total", "estimated tokens saved by recall short-circuits"),
