@@ -9,12 +9,6 @@ import (
 	"github.com/Smana/runlore/internal/providers"
 )
 
-const (
-	evalRootCauseBar         = 2   // a run "reaches the root cause" at score >= 2
-	evalMinPassRate          = 0.7 // fraction of runs that must reach it (e.g. at N=3 this requires all 3)
-	evalMaxRootCauseVariance = 0.5 // above this, the scenario is flaky → not a pass
-)
-
 // StepRunner executes a scenario's shell setup/teardown/precheck steps. The real
 // implementation shells out (kubectl/flux); tests use a fake.
 type StepRunner interface {
@@ -181,31 +175,3 @@ func (lr *LiveRunner) aggregate(res *LiveResult) {
 		!res.Flaky
 }
 
-func medianFloat(xs []float64) float64 {
-	if len(xs) == 0 {
-		return 0
-	}
-	cp := append([]float64(nil), xs...)
-	sort.Float64s(cp)
-	m := len(cp) / 2
-	if len(cp)%2 == 1 {
-		return cp[m]
-	}
-	return (cp[m-1] + cp[m]) / 2
-}
-
-func variance(xs []float64) float64 {
-	if len(xs) == 0 {
-		return 0
-	}
-	var sum float64
-	for _, x := range xs {
-		sum += x
-	}
-	mean := sum / float64(len(xs))
-	var v float64
-	for _, x := range xs {
-		v += (x - mean) * (x - mean)
-	}
-	return v / float64(len(xs))
-}
