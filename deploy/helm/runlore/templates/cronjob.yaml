@@ -1,0 +1,76 @@
+{{- if .Values.curate.cronjob.enabled }}
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: {{ include "runlore.fullname" . }}-curate
+  labels:
+    {{- include "runlore.labels" . | nindent 4 }}
+spec:
+  schedule: {{ .Values.curate.cronjob.schedule | quote }}
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      backoffLimit: 2
+      template:
+        metadata:
+          labels:
+            {{- include "runlore.selectorLabels" . | nindent 12 }}
+        spec:
+          restartPolicy: Never
+          serviceAccountName: {{ include "runlore.serviceAccountName" . }}
+          securityContext:
+            {{- toYaml .Values.podSecurityContext | nindent 12 }}
+          containers:
+            - name: curate
+              image: "{{ .Values.image.repository }}:{{ .Values.image.tag | default .Chart.AppVersion }}"
+              imagePullPolicy: {{ .Values.image.pullPolicy }}
+              args:
+                - curate
+                - --config
+                - /etc/runlore/runlore.yaml
+              {{- with .Values.envFrom }}
+              envFrom:
+                {{- toYaml . | nindent 16 }}
+              {{- end }}
+              {{- with .Values.env }}
+              env:
+                {{- toYaml . | nindent 16 }}
+              {{- end }}
+              securityContext:
+                {{- toYaml .Values.securityContext | nindent 16 }}
+              volumeMounts:
+                - name: config
+                  mountPath: /etc/runlore
+                  readOnly: true
+                - name: tmp
+                  mountPath: /tmp
+                {{- if .Values.catalog.configMap }}
+                - name: catalog
+                  mountPath: {{ .Values.catalog.mountPath }}
+                  readOnly: true
+                {{- else if or .Values.catalog.gitSync .Values.persistence.enabled }}
+                - name: catalog
+                  mountPath: {{ .Values.catalog.mountPath }}
+                {{- end }}
+          volumes:
+            - name: config
+              configMap:
+                name: {{ include "runlore.fullname" . }}-config
+            - name: tmp
+              emptyDir: {}
+            {{- if .Values.catalog.configMap }}
+            - name: catalog
+              configMap:
+                name: {{ .Values.catalog.configMap }}
+            {{- else if or .Values.catalog.gitSync .Values.persistence.enabled }}
+            - name: catalog
+              {{- if .Values.persistence.enabled }}
+              persistentVolumeClaim:
+                claimName: {{ .Values.persistence.existingClaim | default (printf "%s-data" (include "runlore.fullname" .)) }}
+              {{- else }}
+              emptyDir: {}
+              {{- end }}
+            {{- end }}
+{{- end }}
