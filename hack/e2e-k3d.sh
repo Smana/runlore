@@ -190,7 +190,69 @@ check "curated ref logged"                     /tmp/runlore.log 'msg=curated'
 check "rung-2 approval-gated actions enabled"  /tmp/runlore.log 'approval-gated actions enabled'
 check "action registered for approval"         /tmp/runlore.log 'actions registered for approval'
 
-step "8/10 GitOps failure trigger (informer on a real API server)"
+step "8/13 storm: 40 same-groupKey alerts coalesce into 1 investigation"
+# Enable coalescing (MaxBatch=40 flushes synchronously) + OTel metrics exposition.
+helm upgrade runlore deploy/helm/runlore -n "$NS" --reuse-values \
+  --set "config.investigation.coalesce.enabled=true" \
+  --set "config.investigation.coalesce.max_batch=40" \
+  --set "config.telemetry.metrics_enabled=true" \
+  --set replicaCount=1 >/dev/null
+kubectl -n "$NS" rollout status deploy/runlore --timeout=90s >/dev/null
+sleep 3
+
+STORM_PORT=18085; free_port "$STORM_PORT"
+kubectl -n "$NS" port-forward svc/runlore "$STORM_PORT:8080" >/tmp/runlore-storm-pf.log 2>&1 &
+STORM_PF=$!; sleep 3
+
+# 40 critical alerts, unique fingerprints, same groupKey. The first flushes
+# immediately (critical fast-path); the other 39 fall inside the cooldown and are
+# suppressed → one investigation, not 40.
+STORM_PAYLOAD=$(python3 -c "
+import json
+alerts = [
+    {'status': 'firing',
+     'labels': {'alertname': 'HighLatency', 'severity': 'critical', 'namespace': 'prod'},
+     'fingerprint': 'storm-fp-%d' % i,
+     'startsAt': '2026-01-01T00:00:00Z'}
+    for i in range(1, 41)
+]
+print(json.dumps({'groupKey': 'storm-group-key', 'alerts': alerts}))
+")
+curl -s -o /dev/null -w "storm webhook HTTP %{http_code}\n" \
+  -XPOST "http://localhost:$STORM_PORT/webhook/alertmanager" \
+  -H "Content-Type: application/json" \
+  -d "$STORM_PAYLOAD" || true
+sleep 6   # allow MaxBatch flush + investigation to start
+
+METRICS=$(curl -sf "http://localhost:$STORM_PORT/metrics" 2>/dev/null || true)
+kill "$STORM_PF" 2>/dev/null || true; free_port "$STORM_PORT"
+
+# Parse metric values. Metrics are runlore_-prefixed by the OTel Prometheus exporter;
+# prefix-match also tolerates _total vs _total_total suffix variants. awk never fails
+# the pipeline, so a missing metric → 0 (a clean FAIL, not a set -e crash).
+metric() { echo "$METRICS" | awk -v p="^runlore_$1" '$0 ~ p {print int($NF); exit}'; }
+RECEIVED=$(metric alerts_received);       RECEIVED=${RECEIVED:-0}
+STARTED=$(metric investigations_started); STARTED=${STARTED:-0}
+SUPPRESSED=$(metric alerts_suppressed);   SUPPRESSED=${SUPPRESSED:-0}
+COALESCED=$(metric alerts_coalesced);     COALESCED=${COALESCED:-0}
+ABSORBED=$((SUPPRESSED + COALESCED))
+
+if [[ "$STARTED" -ge 1 && "$STARTED" -le 3 ]]; then
+  green "PASS: storm bounded to one investigation (investigations_started_total=$STARTED, want 1-3)"
+  PASS=$((PASS+1))
+else
+  red "FAIL: storm investigations out of bounds (investigations_started_total=$STARTED, want 1-3)"
+  FAIL=$((FAIL+1))
+fi
+if [[ "$ABSORBED" -ge 1 ]]; then
+  green "PASS: storm absorbed ($ABSORBED of $RECEIVED — suppressed=$SUPPRESSED, coalesced=$COALESCED)"
+  PASS=$((PASS+1))
+else
+  red "FAIL: storm not absorbed (received=$RECEIVED, suppressed=$SUPPRESSED, coalesced=$COALESCED)"
+  FAIL=$((FAIL+1))
+fi
+
+step "9/13 GitOps failure trigger (informer on a real API server)"
 kubectl create ns apps >/dev/null 2>&1 || true
 kubectl apply -f - <<'YAML'
 apiVersion: kustomize.toolkit.fluxcd.io/v1

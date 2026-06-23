@@ -5,8 +5,12 @@ import (
 	"fmt"
 	"log/slog"
 
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/metric"
+
 	"github.com/Smana/runlore/internal/action"
 	"github.com/Smana/runlore/internal/providers"
+	"github.com/Smana/runlore/internal/telemetry"
 )
 
 const systemPrompt = `You are an SRE incident investigator. The cause is unknown — investigate by
@@ -82,6 +86,13 @@ type LoopInvestigator struct {
 	Actions    *action.Policy                // autonomy ladder; nil/off = read-only findings only
 	Recall     *Recall                       // optional: short-circuit on a high-confidence catalog hit
 	Verify     bool                          // run an adversarial review of root causes before delivery
+
+	// Cost controls (0 means disabled/unlimited):
+	MaxToolOutputBytes        int // truncate tool results larger than this before adding to history
+	MaxTokensPerInvestigation int // inject a budget-nudge message when the estimated token count exceeds this
+
+	// Observability — nil-safe; no-op when telemetry is disabled.
+	Metrics *telemetry.Metrics
 }
 
 // system returns the system prompt, asking for action proposals when the policy is enabled.
@@ -97,14 +108,31 @@ func (li *LoopInvestigator) Investigate(ctx context.Context, req Request) error 
 	// Instant recall is disabled under auto-execution: a poisoned catalog entry must
 	// not short-circuit a real investigation straight into an auto-executed action.
 	if li.Recall != nil && (li.Actions == nil || !li.Actions.IsAuto()) {
-		if entry, score := li.Recall.lookup(req); entry != nil {
+		if entry, score := li.Recall.lookup(ctx, req); entry != nil {
 			li.Log.Info("instant recall (catalog hit; skipping the loop)",
 				"title", req.Title, "entry", entry.Path, "score", fmt.Sprintf("%.2f", score))
 			rec := recalledInvestigation(req, *entry)
+			initialConfidence := rec.Confidence
 			if li.Verify {
 				// Catalog content is untrusted: verify a recalled finding too, so a
 				// crafted high-recall entry can't bypass the adversarial review.
 				rec = li.verifyFindings(ctx, req, rec)
+			}
+			// Instrument the recall result by verify outcome.
+			if m := li.Recall.Metrics; m != nil {
+				result := "verified"
+				switch {
+				case len(rec.RootCauses) == 0:
+					result = "rejected"
+				case li.Verify && rec.Confidence < initialConfidence:
+					result = "downgraded"
+				}
+				saved := int64(li.MaxTokensPerInvestigation)
+				if saved == 0 {
+					saved = defaultRecallTokensSavedEstimate // conservative proxy when budget is unconfigured
+				}
+				m.RecallHits.Add(ctx, 1, metric.WithAttributes(attribute.String("result", result)))
+				m.RecallTokensSaved.Add(ctx, saved)
 			}
 			li.deliver(req, rec)
 			return nil
@@ -127,10 +155,18 @@ func (li *LoopInvestigator) Investigate(ctx context.Context, req Request) error 
 		maxSteps = 20
 	}
 
-	nudged := false
+	nudged := false          // set when the prose-turn nudge has fired once
+	budgetNudged := false    // set when the token-budget nudge has fired once
 	used := map[string]int{} // tool-call counts, logged so investigation breadth is observable
+	sys := li.system()       // constant for the investigation; build once, not per step
 	for step := 0; step < maxSteps; step++ {
-		resp, err := li.Model.Complete(ctx, providers.CompletionRequest{System: li.system(), Messages: messages, Tools: specs})
+		// Inject a one-time budget nudge when the estimated request size exceeds the
+		// configured ceiling, prompting the model to wrap up with current findings.
+		if !budgetNudged && overBudget(estimateTokens(sys, messages), li.MaxTokensPerInvestigation) {
+			messages = append(messages, providers.Message{Role: "user", Content: budgetNudge})
+			budgetNudged = true
+		}
+		resp, err := li.Model.Complete(ctx, providers.CompletionRequest{System: sys, Messages: messages, Tools: specs})
 		if err != nil {
 			return fmt.Errorf("model: %w", err)
 		}
@@ -163,6 +199,9 @@ func (li *LoopInvestigator) Investigate(ctx context.Context, req Request) error 
 					inv.Title = req.Title // default to the triggering incident/failure
 				}
 				li.Log.Info("investigation evidence gathered", "title", req.Title, "tools_used", used)
+				if li.Metrics != nil {
+					li.Metrics.InvestigationTokens.Record(ctx, int64(estimateTokens(sys, messages)))
+				}
 				if li.Verify {
 					inv = li.verifyFindings(ctx, req, inv)
 				}
@@ -171,7 +210,11 @@ func (li *LoopInvestigator) Investigate(ctx context.Context, req Request) error 
 				return nil
 			}
 			used[tc.Name]++
-			messages = append(messages, providers.Message{Role: "tool", ToolCallID: tc.ID, Content: li.runTool(ctx, byName, tc)})
+			out, trimmed := truncateOutput(li.runTool(ctx, byName, tc), li.MaxToolOutputBytes)
+			if trimmed > 0 && li.Metrics != nil {
+				li.Metrics.ToolOutputTruncatedBytes.Add(ctx, int64(trimmed))
+			}
+			messages = append(messages, providers.Message{Role: "tool", ToolCallID: tc.ID, Content: out})
 		}
 	}
 	li.Log.Warn("investigation hit max steps", "title", req.Title, "max", maxSteps, "tools_used", used)

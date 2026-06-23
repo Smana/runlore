@@ -20,8 +20,10 @@ import (
 	"time"
 
 	"github.com/Smana/runlore/internal/action"
+	"github.com/Smana/runlore/internal/coalesce"
 	"github.com/Smana/runlore/internal/config"
 	"github.com/Smana/runlore/internal/investigate"
+	"github.com/Smana/runlore/internal/telemetry"
 	"github.com/Smana/runlore/internal/trigger"
 )
 
@@ -36,8 +38,13 @@ type Server struct {
 	slackSecret  string            // Slack signing secret; verifies interactive button clicks
 	webhookToken string            // optional bearer token required on POST /webhook/alertmanager
 	approvers    map[string]bool   // Slack user IDs permitted to approve actions (empty = none)
-	log          *slog.Logger
-	handler      http.Handler
+
+	coalescer   *coalesce.Coalescer // optional; folds correlated alerts before enqueueing
+	otelMetrics *telemetry.Metrics  // optional; nil-safe OTel counters
+
+	metrics http.Handler // optional; GET /metrics (OTel Prometheus exposition)
+	log     *slog.Logger
+	handler http.Handler
 }
 
 // Pauser is the rung-3 auto-execution kill-switch.
@@ -61,8 +68,9 @@ type Actions struct {
 // New builds a Server. ready reports whether this replica should serve (leadership);
 // nil = always ready. acts (optional) enables the rung-2 approval endpoints + the
 // rung-3 kill-switch, gated by acts.Token (X-Approval-Token). /healthz is liveness;
-// /readyz is readiness (gated by ready, leader-only).
-func New(cfg *config.Config, enq investigate.Enqueuer, ready func() bool, acts Actions, log *slog.Logger) *Server {
+// /readyz is readiness (gated by ready, leader-only). metricsHandler (optional)
+// serves OTel Prometheus metrics on GET /metrics when non-nil.
+func New(cfg *config.Config, enq investigate.Enqueuer, ready func() bool, acts Actions, metricsHandler http.Handler, log *slog.Logger) *Server {
 	approvers := make(map[string]bool, len(acts.ApproverIDs))
 	for _, id := range acts.ApproverIDs {
 		approvers[id] = true
@@ -70,7 +78,7 @@ func New(cfg *config.Config, enq investigate.Enqueuer, ready func() bool, acts A
 	s := &Server{
 		engine: trigger.NewEngine(cfg.Triggers.Incidents), enqueuer: enq, ready: ready,
 		approvals: acts.Approvals, pauser: acts.Pauser, token: acts.Token, slackSecret: acts.SlackSecret,
-		webhookToken: acts.WebhookToken, approvers: approvers, log: log,
+		webhookToken: acts.WebhookToken, approvers: approvers, metrics: metricsHandler, log: log,
 	}
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /webhook/alertmanager", s.handleAlertmanager)
@@ -90,8 +98,23 @@ func New(cfg *config.Config, enq investigate.Enqueuer, ready func() bool, acts A
 	mux.HandleFunc("POST /actions/{id}/reject", s.handleReject)
 	mux.HandleFunc("POST /actions/pause", s.handlePause)
 	mux.HandleFunc("POST /actions/resume", s.handleResume)
+	if s.metrics != nil {
+		mux.Handle("GET /metrics", s.metrics)
+	}
 	s.handler = mux
 	return s
+}
+
+// SetCoalescer attaches a Coalescer after construction. Call before accepting
+// requests; nil cz disables coalescing (direct enqueue).
+func (s *Server) SetCoalescer(cz *coalesce.Coalescer) {
+	s.coalescer = cz
+}
+
+// SetMetrics attaches the OTel metrics instance independently of coalescing, so
+// ingress counters (alerts_received) emit even when coalescing is disabled.
+func (s *Server) SetMetrics(m *telemetry.Metrics) {
+	s.otelMetrics = m
 }
 
 func (s *Server) handlePause(w http.ResponseWriter, r *http.Request) {
@@ -341,7 +364,15 @@ func (s *Server) handleAlertmanager(w http.ResponseWriter, r *http.Request) {
 		s.log.Info("incident",
 			"alert", inc.AlertName, "severity", inc.Severity, "namespace", inc.Namespace,
 			"investigate", d.Investigate, "reason", d.Reason)
-		if d.Investigate {
+		if !d.Investigate {
+			continue
+		}
+		if s.otelMetrics != nil {
+			s.otelMetrics.AlertsReceived.Add(r.Context(), 1)
+		}
+		if s.coalescer != nil {
+			s.coalescer.Add(inc)
+		} else {
 			s.enqueuer.Enqueue(investigate.FromIncident(inc))
 		}
 	}

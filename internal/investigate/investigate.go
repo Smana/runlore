@@ -14,6 +14,8 @@ import (
 
 	"github.com/Smana/runlore/internal/config"
 	"github.com/Smana/runlore/internal/providers"
+	"github.com/Smana/runlore/internal/ratelimit"
+	"github.com/Smana/runlore/internal/telemetry"
 )
 
 // Source identifies what triggered an investigation.
@@ -116,6 +118,12 @@ type Queue struct {
 	seq  uint64
 	inv  Investigator
 	log  *slog.Logger
+
+	// Rate limiting: nil starts = unlimited; 0 maxRequeues = drop immediately on throttle.
+	starts      *ratelimit.Window  // sliding-window start budget; nil = unlimited
+	maxRequeues int                // drop a key after this many backoff requeues
+	metrics     *telemetry.Metrics // nil-safe; counters for started/throttled/dropped
+	throttled   *ratelimit.Window  // 1-per-window guard: log.Warn at most once per window
 }
 
 // NewQueue builds an investigation queue. The workqueue itself is created per Run.
@@ -176,6 +184,31 @@ func (q *Queue) process(ctx context.Context, wq workqueue.TypedRateLimitingInter
 		wq.Forget(k)
 		return
 	}
+	// Rate-limit gate: if the sliding-window budget is exhausted, either back off
+	// (requeue with exponential delay) or drop after max_requeues retries.
+	if q.starts != nil && !q.starts.Allow() {
+		if wq.NumRequeues(k) >= q.maxRequeues {
+			if q.metrics != nil {
+				q.metrics.InvestigationsDropped.Add(ctx, 1)
+			}
+			q.log.Warn("investigation budget exhausted; dropping (Alertmanager will re-fire)", "title", p.req.Title)
+			wq.Forget(k)
+			q.mu.Lock()
+			delete(q.reqs, k)
+			q.mu.Unlock()
+			q.maybeNotifyThrottle()
+			return
+		}
+		if q.metrics != nil {
+			q.metrics.InvestigationsThrottled.Add(ctx, 1)
+		}
+		wq.AddRateLimited(k)
+		q.maybeNotifyThrottle()
+		return
+	}
+	if q.metrics != nil {
+		q.metrics.InvestigationsStarted.Add(ctx, 1)
+	}
 	if err := q.inv.Investigate(ctx, p.req); err != nil {
 		q.log.Error("investigation failed; retrying", "title", p.req.Title, "err", err)
 		wq.AddRateLimited(k)
@@ -189,4 +222,23 @@ func (q *Queue) process(ctx context.Context, wq workqueue.TypedRateLimitingInter
 		delete(q.reqs, k)
 	}
 	q.mu.Unlock()
+}
+
+// maybeNotifyThrottle emits a warning log at most once per throttle window.
+func (q *Queue) maybeNotifyThrottle() {
+	if q.throttled != nil && q.throttled.Allow() {
+		q.log.Warn("investigation rate limit engaged; throttling new investigations this window")
+	}
+}
+
+// ConfigureRateLimit installs a sliding-window start budget and wires metric
+// counters into the Queue. Call before Run; nil starts = unlimited. The
+// once-per-window throttle-log guard is derived from starts internally.
+func (q *Queue) ConfigureRateLimit(starts *ratelimit.Window, maxRequeues int, m *telemetry.Metrics) {
+	q.starts = starts
+	q.maxRequeues = maxRequeues
+	q.metrics = m
+	if starts != nil {
+		q.throttled = ratelimit.New(1, starts.Window())
+	}
 }
