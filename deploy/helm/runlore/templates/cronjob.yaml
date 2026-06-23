@@ -38,6 +38,8 @@ spec:
               env:
                 {{- toYaml . | nindent 16 }}
               {{- end }}
+              resources:
+                {{- toYaml .Values.resources | nindent 16 }}
               securityContext:
                 {{- toYaml .Values.securityContext | nindent 16 }}
               volumeMounts:
