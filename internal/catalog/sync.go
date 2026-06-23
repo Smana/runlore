@@ -27,6 +27,8 @@ type Syncer struct {
 	Dir    string
 	Token  TokenFunc // nil / empty => anonymous (public repo)
 	Log    *slog.Logger
+
+	lastRev plumbing.Hash // last-synced HEAD; gates re-index on real change
 }
 
 func (s *Syncer) auth(ctx context.Context) (*githttp.BasicAuth, error) {
@@ -50,40 +52,52 @@ func (s *Syncer) branch() string {
 	return s.Branch
 }
 
-// Sync clones the repo if the mirror is absent, otherwise fast-forwards it.
-func (s *Syncer) Sync(ctx context.Context) error {
+// Sync clones the repo if the mirror is absent, otherwise fast-forwards it, and
+// reports whether HEAD moved since the previous sync (true on the first sync).
+func (s *Syncer) Sync(ctx context.Context) (bool, error) {
 	auth, err := s.auth(ctx)
 	if err != nil {
-		return fmt.Errorf("auth: %w", err)
+		return false, fmt.Errorf("auth: %w", err)
 	}
 	ref := plumbing.NewBranchReferenceName(s.branch())
+	var repo *git.Repository
 	if _, statErr := os.Stat(filepath.Join(s.Dir, ".git")); statErr != nil {
-		_, cerr := git.PlainCloneContext(ctx, s.Dir, false, &git.CloneOptions{
+		repo, err = git.PlainCloneContext(ctx, s.Dir, false, &git.CloneOptions{
 			URL:           s.URL,
 			ReferenceName: ref,
 			SingleBranch:  true,
 			Auth:          auth,
 		})
-		return cerr
+		if err != nil {
+			return false, err
+		}
+	} else {
+		repo, err = git.PlainOpen(s.Dir)
+		if err != nil {
+			return false, err
+		}
+		wt, werr := repo.Worktree()
+		if werr != nil {
+			return false, werr
+		}
+		perr := wt.PullContext(ctx, &git.PullOptions{
+			ReferenceName: ref,
+			SingleBranch:  true,
+			Auth:          auth,
+			Force:         true,
+		})
+		if perr != nil && !errors.Is(perr, git.NoErrAlreadyUpToDate) {
+			return false, perr
+		}
 	}
-	repo, err := git.PlainOpen(s.Dir)
+	head, err := repo.Head()
 	if err != nil {
-		return err
+		return false, err
 	}
-	wt, err := repo.Worktree()
-	if err != nil {
-		return err
-	}
-	perr := wt.PullContext(ctx, &git.PullOptions{
-		ReferenceName: ref,
-		SingleBranch:  true,
-		Auth:          auth,
-		Force:         true,
-	})
-	if perr != nil && !errors.Is(perr, git.NoErrAlreadyUpToDate) {
-		return perr
-	}
-	return nil
+	rev := head.Hash()
+	changed := rev != s.lastRev
+	s.lastRev = rev
+	return changed, nil
 }
 
 // Run does an initial sync then re-syncs every interval, calling onSync after each
@@ -93,11 +107,14 @@ func (s *Syncer) Run(ctx context.Context, interval time.Duration, onSync func())
 		interval = 5 * time.Minute
 	}
 	do := func() {
-		if err := s.Sync(ctx); err != nil {
+		changed, err := s.Sync(ctx)
+		if err != nil {
 			s.Log.Warn("catalog git sync failed", "url", s.URL, "err", err)
 			return
 		}
-		onSync()
+		if changed {
+			onSync()
+		}
 	}
 	do()
 	ticker := time.NewTicker(interval)
