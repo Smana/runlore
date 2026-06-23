@@ -388,21 +388,42 @@ func TestInstantRecallUnconfirmedLowersConfidence(t *testing.T) {
 	}
 }
 
+// contentRejectModel is a verify-pass model that makes its verdict content-dependent:
+//   - if req.Messages[0].Content contains the sentinel "current state — pod_status"
+//     the confirmatory evidence reached verify → reject (root causes emptied → test PASSES).
+//   - if the sentinel is absent (confirmRecall wiring removed) → keep (root cause survives
+//     → len(got.RootCauses)==1 → test FAILS), proving the test discriminates.
+type contentRejectModel struct{}
+
+func (contentRejectModel) Complete(_ context.Context, req providers.CompletionRequest) (providers.CompletionResponse, error) {
+	const sentinel = "current state — pod_status"
+	verdict := "keep"
+	if len(req.Messages) > 0 && strings.Contains(req.Messages[0].Content, sentinel) {
+		verdict = "reject"
+	}
+	args := `{"verdicts":[{"index":0,"verdict":"` + verdict + `","confidence":0.1,"reason":"content-dependent verdict"}]}`
+	return providers.CompletionResponse{
+		ToolCalls: []providers.ToolCall{{ID: "1", Name: submitVerdictsName, Args: args}},
+	}, nil
+}
+
 func TestInstantRecallConfirmedEvidenceReachesVerify(t *testing.T) {
 	// A recall hit + a confirm tool whose output contradicts the entry + a verify
 	// model that rejects the (now evidence-bearing) root cause → the delivered
 	// finding is rejected (root causes emptied), proving the confirmatory evidence
 	// reached verify rather than the tautological string.
+	//
+	// The contentRejectModel makes the verdict content-dependent: it rejects only
+	// when "current state — pod_status" appears in the review content (i.e. when
+	// confirmRecall wiring is intact). Without the wiring the sentinel is absent,
+	// the model returns "keep", root causes survive, and len==0 assertion fails —
+	// proving the test genuinely discriminates.
 	var got providers.Investigation
 	ps := &fakeConfirmTool{name: "pod_status", out: "web Running ready=1/1 (healthy — contradicts the recalled crash)"}
 	li := &LoopInvestigator{
-		Tools:  []Tool{ps},
-		Verify: true,
-		// Model used only by verify here (recall short-circuits the loop): script it
-		// to submit a single "reject" verdict for index 0.
-		Model: &scriptModel{responses: []providers.CompletionResponse{
-			{ToolCalls: []providers.ToolCall{{ID: "1", Name: submitVerdictsName, Args: `{"verdicts":[{"index":0,"verdict":"reject","confidence":0.1,"reason":"current state shows healthy pod — contradicts recalled crash"}]}`}}},
-		}},
+		Tools:      []Tool{ps},
+		Verify:     true,
+		Model:      contentRejectModel{},
 		OnComplete: func(inv providers.Investigation) { got = inv },
 		Log:        slog.New(slog.NewTextHandler(io.Discard, nil)),
 		Recall: &Recall{MinScore: 2.0, Catalog: fakeScored{hits: []catalog.ScoredEntry{
