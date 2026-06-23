@@ -9,6 +9,12 @@ import (
 	"github.com/Smana/runlore/internal/providers"
 )
 
+const (
+	evalRootCauseBar         = 2   // a run "reaches the root cause" at score >= 2
+	evalMinPassRate          = 0.7 // fraction of runs that must reach it (e.g. at N=3 this requires all 3)
+	evalMaxRootCauseVariance = 0.5 // above this, the scenario is flaky → not a pass
+)
+
 // StepRunner executes a scenario's shell setup/teardown/precheck steps. The real
 // implementation shells out (kubectl/flux); tests use a fake.
 type StepRunner interface {
@@ -45,13 +51,14 @@ type LiveResult struct {
 	DimMedian      map[string]int // median per rubric dimension
 	DimVariance    map[string]float64
 	ConfidentWrong bool     // any run confident-wrong
+	Flaky          bool     // root_cause scores vary too much across runs to trust
 	ToolErrors     []string // union across runs
 	Pass           bool
 }
 
 // RunScenario runs setup (or precheck), N investigations, judging each, then
-// always tears down. Pass gate: median root_cause >= 2 AND median coverage == 1.0
-// AND no confident-wrong run.
+// always tears down. Pass gate: at least evalMinPassRate of runs reach root_cause >= evalRootCauseBar,
+// coverage median == 1.0, no confident-wrong run, and root_cause variance within evalMaxRootCauseVariance (not flaky).
 func (lr *LiveRunner) RunScenario(ctx context.Context, scn Scenario) LiveResult {
 	res := LiveResult{Scenario: scn.ID, DimMedian: map[string]int{}, DimVariance: map[string]float64{}}
 	n := lr.N
@@ -156,7 +163,21 @@ func (lr *LiveRunner) aggregate(res *LiveResult) {
 		res.DimMedian[d.Key] = int(medianFloat(vals) + 0.5)
 		res.DimVariance[d.Key] = variance(vals)
 	}
-	res.Pass = res.DimMedian["root_cause"] >= 2 && res.CoverageRatio == 1.0 && !res.ConfidentWrong
+	// k-of-n: a clear majority of runs must reach the root cause. A median over an
+	// integer 0–3 dimension is too coarse to trust at small N.
+	rootCausePasses := 0
+	for _, r := range res.Runs {
+		if r.Verdict.Scores["root_cause"] >= evalRootCauseBar {
+			rootCausePasses++
+		}
+	}
+	rootCausePassRate := float64(rootCausePasses) / float64(len(res.Runs))
+	// Flaky: runs disagree too much on root_cause to call this a reliable pass.
+	res.Flaky = res.DimVariance["root_cause"] > evalMaxRootCauseVariance
+	res.Pass = rootCausePassRate >= evalMinPassRate &&
+		res.CoverageRatio == 1.0 &&
+		!res.ConfidentWrong &&
+		!res.Flaky
 }
 
 func medianFloat(xs []float64) float64 {
