@@ -164,5 +164,7 @@ func recalledInvestigation(req Request, e catalog.Entry, confidence float64) pro
 		Unresolved:    []string{"recalled from the catalog without a fresh investigation — confirm it still applies"},
 		Recalled:      true,
 		RecalledEntry: e.Path,
+		Fingerprint:   req.Fingerprint,
+		Resource:      req.Workload,
 	}
 }

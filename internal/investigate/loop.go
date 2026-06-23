@@ -198,7 +198,8 @@ func (li *LoopInvestigator) Investigate(ctx context.Context, req Request) error 
 				if inv.Title == "" {
 					inv.Title = req.Title // default to the triggering incident/failure
 				}
-				inv.Resource = req.Workload // record the originating workload for structural recall
+				inv.Resource = req.Workload       // record the originating workload for structural recall
+				inv.Fingerprint = req.Fingerprint // originating alert id, for outcome-ledger attribution
 				li.Log.Info("investigation evidence gathered", "title", req.Title, "tools_used", used)
 				if li.Metrics != nil {
 					li.Metrics.InvestigationTokens.Record(ctx, int64(estimateTokens(sys, messages)))

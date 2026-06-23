@@ -22,7 +22,7 @@ It builds directly on slice 1: recall now records *which* entry it matched and e
 |---|---|---|
 | D1 | **First slice = outcome CAPTURE** (signal + attribution + record); feedback/decay = A2; dormant-pass wiring = A3 | The outcome loop is too big for one spec. Capture is the foundation everything else reads, and on its own it makes "did it work?" visible — killing critique #1. |
 | D2 | **Resolution signal = Alertmanager `resolved` webhook** (currently discarded) | Event-driven, low cost, and the AM `fingerprint` is **stable firing↔resolved** → clean attribution. A cluster-state `ResolutionChecker` is A3. |
-| D3 | **Persistent append-only JSONL event ledger**, keyed by AM fingerprint, at a configurable path (default the writable git-sync mirror PV) | Survives restart + leader failover; cheap per-event writes; full history. A2 reconstructs episodes; git-versioned surfacing onto entries is A2. |
+| D3 | **Persistent append-only JSONL event ledger**, keyed by AM fingerprint, at an explicit configurable path (`outcome.ledger_path`; empty disables — the default) | Survives restart + leader failover; cheap per-event writes; full history. A2 reconstructs episodes; git-versioned surfacing onto entries is A2. **Explicit opt-in** — NOT auto-derived from `catalog.dir`, which may be a read-only ConfigMap mount; operators point it at a writable path such as the git-sync mirror PV. |
 | D4 | **Attribute recalls cleanly** (`kind=recall` + entry path); **fresh investigations = `kind=fresh`, no entry link** | Recall validation is the high-value, clean case; linking a fresh finding to its eventual curated entry is murkier and belongs in A2. |
 | D5 | **Recurrence is *inferable from the ledger*** (multiple opens per fingerprint), not a separate A1 mechanism | Keep A1 to event capture; the dormant Recurrence pass / A2 interpret it. |
 
@@ -75,7 +75,9 @@ The fingerprint must reach the point where the outcome is recorded (`OnComplete`
 
 ### 3.5 Config + Helm
 
-`outcome.ledger_path` (default derived from the catalog mirror dir; empty disables). Exposed (documented) in `deploy/helm/runlore/values.yaml`.
+`outcome.ledger_path` — an **explicit** path; **empty disables** the feature (the default). Not auto-derived from `catalog.dir`, because that path may be a read-only ConfigMap mount; operators set it to a writable location (e.g. the git-sync mirror PV). Documented in `deploy/helm/runlore/values.yaml`.
+
+Note: `OnComplete` only records an `open` when the investigation carries an alert `Fingerprint` — non-alert sources (GitOps-failure watch, reinvestigate poller) are skipped, since a resolved-alert webhook could never match them.
 
 ## 4. Components / seams
 

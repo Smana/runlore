@@ -33,7 +33,7 @@ func TestInstantRecallHit(t *testing.T) {
 			{Entry: catalog.Entry{Title: "Known incident", Description: "chart bump", Path: "known.md", Resource: "tooling/harbor"}, Score: 5.0}}}},
 		OnComplete: func(inv providers.Investigation) { got = &inv },
 	}
-	if err := li.Investigate(context.Background(), Request{Title: "HarborProbeFailure", Workload: providers.Workload{Namespace: "tooling", Name: "harbor"}}); err != nil {
+	if err := li.Investigate(context.Background(), Request{Title: "HarborProbeFailure", Fingerprint: "fp-recall", Workload: providers.Workload{Namespace: "tooling", Name: "harbor"}}); err != nil {
 		t.Fatalf("Investigate: %v", err)
 	}
 	if model.i != 0 {
@@ -44,6 +44,9 @@ func TestInstantRecallHit(t *testing.T) {
 	}
 	if !got.Recalled {
 		t.Fatal("a recalled investigation must be flagged Recalled so the curator skips it")
+	}
+	if got.Fingerprint != "fp-recall" {
+		t.Fatalf("recall path must carry the alert fingerprint for outcome attribution, got %q", got.Fingerprint)
 	}
 }
 
@@ -78,12 +81,15 @@ func TestLoopInvestigatorActions(t *testing.T) {
 		Actions:    action.New(config.ActionPolicy{Mode: config.ActionSuggest, Allow: config.ActionAllow{ReversibleOnly: true}}),
 		OnComplete: func(inv providers.Investigation) { got = &inv },
 	}
-	if err := li.Investigate(context.Background(), Request{Title: "t"}); err != nil {
+	if err := li.Investigate(context.Background(), Request{Title: "t", Fingerprint: "fp-loop"}); err != nil {
 		t.Fatalf("Investigate: %v", err)
 	}
 	// Only the reversible action is surfaced (suggest mode, reversible_only); none executed.
 	if got == nil || len(got.Actions) != 1 || got.Actions[0].Description != "flux rollback hr/harbor" {
 		t.Fatalf("expected only the reversible action surfaced, got %+v", got)
+	}
+	if got.Fingerprint != "fp-loop" {
+		t.Fatalf("full-loop path must carry the alert fingerprint for outcome attribution, got %q", got.Fingerprint)
 	}
 }
 
