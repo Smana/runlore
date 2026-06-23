@@ -74,3 +74,15 @@ func TestSubmitFindingsSchemaNoEmptyEnum(t *testing.T) {
 	}
 	walk("$", schema)
 }
+
+func TestParseFindingsAffectedResource(t *testing.T) {
+	args := `{"root_causes":[{"summary":"OOM in payment-api"}],
+	  "affected_resource":{"kind":"Deployment","name":"payment-api","namespace":"apps"}}`
+	inv, err := parseFindings(args)
+	if err != nil {
+		t.Fatalf("parseFindings: %v", err)
+	}
+	if inv.Resource.Namespace != "apps" || inv.Resource.Name != "payment-api" || inv.Resource.Kind != "Deployment" {
+		t.Fatalf("affected_resource not parsed into inv.Resource: %+v", inv.Resource)
+	}
+}

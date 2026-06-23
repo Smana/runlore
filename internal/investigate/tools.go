@@ -29,6 +29,7 @@ func submitFindingsSpec() providers.ToolSpec {
 		Schema: `{"type":"object","properties":{
 "title":{"type":"string"},
 "confidence":{"type":"number"},
+"affected_resource":{"type":"object","description":"the workload your investigation identified as the failing/affected resource","properties":{"kind":{"type":"string"},"name":{"type":"string"},"namespace":{"type":"string"}}},
 "root_causes":{"type":"array","items":{"type":"object","properties":{
 "summary":{"type":"string"},"confidence":{"type":"number"},"change_ref":{"type":"string"},
 "evidence":{"type":"array","items":{"type":"string"}},"suggested_action":{"type":"string"},"reversible":{"type":"boolean"}},
@@ -59,8 +60,13 @@ func opEnumJSON() string {
 
 // findings is the JSON shape of submit_findings arguments.
 type findings struct {
-	Title      string  `json:"title"`
-	Confidence float64 `json:"confidence"`
+	Title            string  `json:"title"`
+	Confidence       float64 `json:"confidence"`
+	AffectedResource struct {
+		Kind      string `json:"kind"`
+		Name      string `json:"name"`
+		Namespace string `json:"namespace"`
+	} `json:"affected_resource"`
 	RootCauses []struct {
 		Summary         string   `json:"summary"`
 		Confidence      float64  `json:"confidence"`
@@ -110,6 +116,11 @@ func parseFindings(args string) (providers.Investigation, error) {
 			Reversible:  a.Reversible,
 			BlastRadius: a.BlastRadius,
 		})
+	}
+	inv.Resource = providers.Workload{
+		Kind:      f.AffectedResource.Kind,
+		Name:      f.AffectedResource.Name,
+		Namespace: f.AffectedResource.Namespace,
 	}
 	return inv, nil
 }
