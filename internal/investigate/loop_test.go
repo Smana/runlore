@@ -366,3 +366,53 @@ func TestLoopHardKillDisabledWhenNoBudget(t *testing.T) {
 		t.Fatalf("expected exactly 5 model calls (= maxSteps), got %d — hard-kill must not fire when budget=0", model.calls)
 	}
 }
+
+func TestInstantRecallUnconfirmedLowersConfidence(t *testing.T) {
+	// A recall hit with NO confirm tools available → confidence is capped at
+	// recallUnconfirmedCap before delivery.
+	var got providers.Investigation
+	li := &LoopInvestigator{
+		Tools:      nil, // intentionally omit pod_status/kube_events so confirmRecall returns gathered=false
+		Verify:     false,
+		OnComplete: func(inv providers.Investigation) { got = inv },
+		Log:        slog.New(slog.NewTextHandler(io.Discard, nil)),
+		Recall: &Recall{MinScore: 2.0, Catalog: fakeScored{hits: []catalog.ScoredEntry{
+			{Entry: catalog.Entry{Title: "Known incident", Description: "chart bump", Path: "known.md", Resource: "apps/web"}, Score: 5.0}}}},
+	}
+	req := Request{Title: "web down", Workload: providers.Workload{Namespace: "apps", Name: "web"}}
+	if err := li.Investigate(context.Background(), req); err != nil {
+		t.Fatalf("Investigate: %v", err)
+	}
+	if got.Confidence > recallUnconfirmedCap {
+		t.Fatalf("unconfirmed recall must be capped at %.2f, got %.2f", recallUnconfirmedCap, got.Confidence)
+	}
+}
+
+func TestInstantRecallConfirmedEvidenceReachesVerify(t *testing.T) {
+	// A recall hit + a confirm tool whose output contradicts the entry + a verify
+	// model that rejects the (now evidence-bearing) root cause → the delivered
+	// finding is rejected (root causes emptied), proving the confirmatory evidence
+	// reached verify rather than the tautological string.
+	var got providers.Investigation
+	ps := &fakeConfirmTool{name: "pod_status", out: "web Running ready=1/1 (healthy — contradicts the recalled crash)"}
+	li := &LoopInvestigator{
+		Tools:  []Tool{ps},
+		Verify: true,
+		// Model used only by verify here (recall short-circuits the loop): script it
+		// to submit a single "reject" verdict for index 0.
+		Model: &scriptModel{responses: []providers.CompletionResponse{
+			{ToolCalls: []providers.ToolCall{{ID: "1", Name: submitVerdictsName, Args: `{"verdicts":[{"index":0,"verdict":"reject","confidence":0.1,"reason":"current state shows healthy pod — contradicts recalled crash"}]}`}}},
+		}},
+		OnComplete: func(inv providers.Investigation) { got = inv },
+		Log:        slog.New(slog.NewTextHandler(io.Discard, nil)),
+		Recall: &Recall{MinScore: 2.0, Catalog: fakeScored{hits: []catalog.ScoredEntry{
+			{Entry: catalog.Entry{Title: "Known incident", Description: "crash loop", Path: "known.md", Resource: "apps/web"}, Score: 5.0}}}},
+	}
+	req := Request{Title: "web down", Workload: providers.Workload{Namespace: "apps", Name: "web"}}
+	if err := li.Investigate(context.Background(), req); err != nil {
+		t.Fatalf("Investigate: %v", err)
+	}
+	if len(got.RootCauses) != 0 {
+		t.Fatalf("verify should have rejected the recalled cause using current-state evidence, got %+v", got.RootCauses)
+	}
+}

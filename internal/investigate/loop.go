@@ -112,6 +112,12 @@ func (li *LoopInvestigator) Investigate(ctx context.Context, req Request) error 
 			li.Log.Info("instant recall (catalog hit; skipping the loop)",
 				"title", req.Title, "entry", entry.Path, "confidence", fmt.Sprintf("%.2f", conf))
 			rec := recalledInvestigation(req, *entry, conf)
+			rec, confirmed := li.confirmRecall(ctx, req, rec)
+			if !confirmed {
+				// Could not confront the entry with current state — be less assertive
+				// so an unverifiable recall does not present at full recall confidence.
+				rec = capRecallConfidence(rec, recallUnconfirmedCap)
+			}
 			initialConfidence := rec.Confidence
 			if li.Verify {
 				// Catalog content is untrusted: verify a recalled finding too, so a
