@@ -42,6 +42,7 @@ type Metrics struct {
 	ModelRequests           metric.Int64Counter     // LLM completion requests (label: provider, result)
 	ModelRequestDuration    metric.Float64Histogram // LLM completion latency, seconds (label: provider)
 	Curations               metric.Int64Counter     // curation outcomes (label: kind, result)
+	CatalogInvalidEntries   metric.Int64Counter     // structurally-invalid entries found at catalog load
 }
 
 // NewMetrics builds the instrument set from the global meter provider.
@@ -86,6 +87,7 @@ func NewMetrics() *Metrics {
 		ModelRequests:           ctr("model_requests_total", "LLM completion requests (label: provider, result)"),
 		ModelRequestDuration:    histF("model_request_duration_seconds", "LLM completion latency in seconds (label: provider)"),
 		Curations:               ctr("curations_total", "curation outcomes written to the forge (label: kind, result)"),
+		CatalogInvalidEntries:   ctr("catalog_invalid_entries_total", "structurally-invalid entries surfaced at catalog load"),
 	}
 }
 
