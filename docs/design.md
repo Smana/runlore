@@ -256,6 +256,27 @@ environment, reversibility, and blast radius. v1 ships `mode: off` and registers
 adding remediation later is *enabling a gated capability + config*, not new architecture. The
 metadata already exists (`providers.Action`, `config.ActionPolicy`) so nothing has to be retrofitted.
 
+> **Decision (2026-06-24) — no in-cluster mutating `rollback`.** A reversible "re-pin to the
+> prior revision" op was scoped and rejected. The executor today runs only namespace-scoped,
+> single-resource Flux ops (suspend/resume/reconcile). A real GitOps rollback can't fit that
+> shape cleanly:
+> - **It fights the protected-namespace model.** A Flux Kustomization has no per-resource
+>   revision pin, so re-pinning it must patch its owning **GitRepository** — which in the common
+>   monorepo layout lives in **`flux-system`**, a built-in *protected* namespace the action gate
+>   forbids as a target. The only ways past that all weaken a safety invariant.
+> - **It is anti-GitOps.** An in-cluster re-pin makes the cluster's desired state diverge from
+>   Git: Flux then reports drift, the next legitimate Git change collides with the manual pin, and
+>   the divergence must be remembered and undone.
+> - **Little is lost.** The agent already *suggests* a rollback in `suggest` mode ("roll back
+>   `apps` to `abc123`"); only the act of executing it is withheld. For a GitOps shop, "the agent
+>   advises, a human merges the revert" is the correct division of labor — and the upside is
+>   modest against the outage risk of a wrong rollback on a sub-50%-RCA baseline.
+>
+> If the loop is ever closed, the GitOps-correct form is a **Git-revert PR** (reuse the
+> curator/forge path) — in sync with Git, inherently reversible, reviewed — **not** a cluster
+> patch. Until then, remediation stays read-only / propose-and-approve, and the autonomy ladder's
+> executable vocabulary remains the three reversible Flux ops above.
+
 ## 7. Provider abstraction
 
 Interfaces live in `internal/providers/providers.go`. "For the moment" impls:
