@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"strings"
 	"testing"
 
 	"github.com/Smana/runlore/internal/catalog"
@@ -230,17 +231,49 @@ func TestRunOnceRecallShortCircuits(t *testing.T) {
 	}
 }
 
+// rejectThenInvestigateModel rejects the poisoned recalled finding on the verify
+// pass (it carries the entry's "IAM quota" text), then — once the loop falls through
+// to a real investigation — submits a fresh finding and keeps it on its own verify
+// pass. Branching on the request keeps it robust to the extra verify call.
+type rejectThenInvestigateModel struct{}
+
+func (m rejectThenInvestigateModel) Complete(_ context.Context, req providers.CompletionRequest) (providers.CompletionResponse, error) {
+	isVerify := false
+	for _, tool := range req.Tools {
+		if tool.Name == "submit_verdicts" {
+			isVerify = true
+			break
+		}
+	}
+	if isVerify {
+		verdict := "keep"
+		for _, msg := range req.Messages {
+			if strings.Contains(msg.Content, "IAM quota") { // the poisoned recalled cause
+				verdict = "reject"
+				break
+			}
+		}
+		return providers.CompletionResponse{ToolCalls: []providers.ToolCall{{ID: "v", Name: "submit_verdicts",
+			Args: fmt.Sprintf(`{"verdicts":[{"index":0,"verdict":%q}]}`, verdict)}}}, nil
+	}
+	return providers.CompletionResponse{ToolCalls: []providers.ToolCall{{ID: "f", Name: "submit_findings",
+		Args: `{"confidence":0.6,"root_causes":[{"summary":"freshly investigated cause"}]}`}}}, nil
+}
+
 func TestRunOnceRecallPoisonedRejected(t *testing.T) {
-	// A poisoned entry: the verify pass rejects it → the wrong root cause is withdrawn,
-	// not short-circuited into. (Recalled stays true; the safety is an empty RootCauses.)
-	out := recallRunner(verifyModel{verdict: "reject"}).runOnce(context.Background(), recallScenario())
-	if len(out.Investigation.RootCauses) != 0 {
-		t.Fatalf("a rejected poisoned recall must withdraw its root cause, got %d", len(out.Investigation.RootCauses))
+	// A poisoned entry: the verify pass rejects it, so RunLore must NOT short-circuit
+	// into the wrong answer — it falls through to a real investigation (the poisoned
+	// recalled cause is never delivered; a fresh finding is).
+	out := recallRunner(rejectThenInvestigateModel{}).runOnce(context.Background(), recallScenario())
+	if out.Investigation.Recalled {
+		t.Fatal("a verify-rejected recall must fall through to a real investigation, not deliver an empty recall")
 	}
-	if !out.Investigation.Recalled {
-		t.Fatal("a rejected recall is still a recall (loop skipped): Recalled must stay true")
+	if len(out.Investigation.RootCauses) != 1 || out.Investigation.RootCauses[0].Summary != "freshly investigated cause" {
+		t.Fatalf("expected the fall-through investigation's fresh finding, got %+v", out.Investigation.RootCauses)
 	}
-	if len(out.Investigation.Unresolved) == 0 {
-		t.Fatal("a rejected recall hypothesis must be moved to Unresolved, not silently dropped")
+	for _, rc := range out.Investigation.RootCauses {
+		if strings.Contains(rc.Summary, "IAM quota") {
+			t.Fatal("the poisoned recalled cause must never be delivered")
+		}
 	}
 }
