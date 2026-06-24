@@ -50,8 +50,17 @@ config:
       max_per_window: 0        # 0 = unlimited; set e.g. 20 to cap investigations/hour
       # window: 1h
       # max_requeues: 3
+  # Structured logging. In-cluster defaults to JSON so logs are ingestible by
+  # Loki / VictoriaLogs / CloudWatch; switch format to "text" for human-readable
+  # output. level: debug | info | warn | error. Both are overridable at runtime via
+  # the RUNLORE_LOG_FORMAT / RUNLORE_LOG_LEVEL env vars.
+  logging:
+    format: json
+    level: info
   # OpenTelemetry self-instrumentation (Prometheus-format /metrics endpoint).
   # Enable when a VMServiceScrape (or ServiceMonitor) will scrape this agent.
+  # A portable Grafana dashboard + PrometheusRule/VMRule alerts live under
+  # deploy/observability/ (see docs/observability.md).
   telemetry:
     metrics_enabled: false
   # Phase-2 backlog groomer (lore curate). `stale_after` drives the lifecycle sweep;

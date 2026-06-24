@@ -38,6 +38,16 @@ type Config struct {
 
 	Investigation Investigation `yaml:"investigation"` // coalescing + rate-limit + per-investigation token controls
 	Telemetry     Telemetry     `yaml:"telemetry"`     // OpenTelemetry metrics
+	Logging       Logging       `yaml:"logging"`       // structured-logging format + verbosity
+}
+
+// Logging configures the structured logger. Format selects human-readable text
+// (default, for local CLI) or JSON (for in-cluster log aggregation). Level sets
+// verbosity. Both are overridable at startup via RUNLORE_LOG_FORMAT /
+// RUNLORE_LOG_LEVEL (see internal/logging).
+type Logging struct {
+	Format string `yaml:"format"` // "text" (default) | "json"
+	Level  string `yaml:"level"`  // "debug" | "info" (default) | "warn" | "error"
 }
 
 // Endpoint is a backend base URL; empty disables the corresponding tool.
