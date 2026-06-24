@@ -257,11 +257,17 @@ keeps the backlog healthy on a schedule:
   `stale_after`), never touching human-labelled ones, and only after a back-ref
   comment. `stale_after: 0` disables the sweep.
 
-> Two further passes — **Queue** (promote a PR to *ready-to-merge* once its incident
-> has resolved) and **Recurrence** (open a *knowledge-gap* issue when a pattern recurs
-> unresolved N times) — are implemented and unit-tested but **deferred from wiring**:
-> each needs a genuine design decision (an incident↔PR resolution join; an idempotent
-> ledger-backed driver) rather than mechanical plumbing.
+Two further passes are also wired, both **ledger-backed** (they read the outcome
+ledger, so they stay source-neutral):
+
+- **Queue** — promote a human-`solved` PR to *ready-to-merge* once its incident has
+  resolved. The PR↔incident join is an exact title match (a curated PR's title is
+  `"KB: " + the incident title`, which the ledger records too), so a resolved episode
+  with that title flips the PR onto the merge-ready queue. A human still merges.
+- **Recurrence** — open one *knowledge-gap* issue when an unresolved pattern (the
+  affected resource) recurs past a threshold. Idempotent by an existing-issue check
+  (the forge's open gap issues are the "already-opened" record), so re-running never
+  double-opens — no mutable store.
 
 ---
 
@@ -380,11 +386,16 @@ eval harness and treats its outputs as the source of truth:
 
 Honesty is part of the design:
 
-- **Queue / Recurrence Phase-2 passes** are built + tested but not yet wired — they
-  need real product decisions (incident↔PR resolution join; idempotent recurrence
-  driver), not mechanical wiring.
-- **Reversible `rollback` remediation** (re-pin a Kustomization/HelmRelease to the
-  prior revision) is not yet built; `auto` today can only suspend/resume/reconcile.
+- **Reversible `rollback` remediation** was scoped and **deliberately declined**: an
+  in-cluster re-pin of a Flux Kustomization must patch a shared GitRepository in the
+  protected `flux-system` namespace and diverges the cluster from Git. Remediation
+  stays read-only / propose-and-approve; `auto` executes only suspend/resume/reconcile,
+  and the agent *suggests* (never auto-applies) a rollback. The GitOps-correct form, if
+  ever revisited, is a Git-revert PR. (See `design.md`, "Act".)
+- The **Queue/Recurrence precision tradeoff**: the resolution join is by exact title,
+  coarser than the incident fingerprint — a human-gated promotion can fire slightly
+  early on coalesced or cross-namespace incidents. The fingerprint-precise variant is
+  a possible future refinement.
 - **Nightly eval** only produces signal once a model API-key secret is configured.
 
 The loop is closed and measured; these are the next increments, sequenced so each is
