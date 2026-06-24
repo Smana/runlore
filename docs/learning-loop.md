@@ -53,9 +53,18 @@ The two things that make this *learning* rather than mere note-taking:
 
 ## 2. The loop, end to end
 
+> **The event source is pluggable.** RunLore reacts to an *incident* from whatever
+> trigger is configured — an alert webhook (Alertmanager/VMAlert today; a Datadog,
+> Sentry, PagerDuty, or other monitor tomorrow), a GitOps reconcile failure, a timer,
+> chat, or the CLI. Nothing in the learning loop is bound to a specific source: an
+> incident is normalized to a fingerprint + title + (optional) workload at the trigger
+> edge, and every stage below — recall, the outcome ledger, curation — operates on
+> that normalized shape, never on a source-specific API. Where this doc names
+> Alertmanager, read it as "the configured incident source."
+
 ```mermaid
 flowchart TD
-    A([Alert / GitOps failure webhook]) --> RT{"Instant recall?<br/>3 trust gates"}
+    A(["Incident event<br/>(alert webhook · GitOps failure · timer · chat · CLI)"]) --> RT{"Instant recall?<br/>3 trust gates"}
     RT -- "confident hit" --> CF["Confirm vs current cluster state<br/>(pod_status / kube_events)"]
     CF --> VF["Verify pass<br/>(adversarial, can only lower confidence)"]
     RT -- "no / weak hit" --> LOOP["Full ReAct investigation<br/>what-changed · metrics · logs · k8s · cloud"]
@@ -68,7 +77,7 @@ flowchart TD
     PR --> HUM["Human reviews + merges PR"]
     HUM --> SYNC["git-sync (HEAD-gated) → re-index bleve"]
     SYNC --> RT
-    RESOLVED([Resolved-alert webhook]) --> CAP2["Capture: outcome ledger<br/>record 'resolve' by fingerprint"]
+    RESOLVED(["Incident-resolved signal<br/>(from the configured source)"]) --> CAP2["Capture: outcome ledger<br/>record 'resolve' by fingerprint"]
     CAP2 --> DECAY["Decay: per-entry resolve-rate<br/>biases future recall confidence"]
     DECAY --> RT
 ```
@@ -90,7 +99,7 @@ then the answer is confirmed against live state and re-reviewed.
 ```mermaid
 flowchart TD
     Q["Query = alert title + message"] --> S["BM25 search over catalog<br/>(bleve, wider candidate set k≈15)"]
-    S --> G1{"Gate 1 — Structural<br/>does the stored resource agree<br/>with the alert's workload?"}
+    S --> G1{"Gate 1 — Structural<br/>does the stored resource agree<br/>with the incident's workload?"}
     G1 -- no --> FALL["↘ fall through to full investigation"]
     G1 -- yes --> G2{"Gate 2 — Margin<br/>does the top hit clearly beat<br/>the runner-up? (corpus-portable)"}
     G2 -- no --> FALL
@@ -109,9 +118,10 @@ Why each gate exists:
   below is meaningful as the catalog grows. (Earlier the index silently ran legacy
   TF-IDF, invalidating every threshold — fixing that was the cheapest high-leverage
   change in the codebase.)
-- **Gate 1 — structural agreement** (`resourceAgrees`). The alert names a workload
-  (namespace + name, derived from Alertmanager labels); the entry stores the resource
-  its incident affected. They must agree. This is the lever that separates "many
+- **Gate 1 — structural agreement** (`resourceAgrees`). The incident names a workload
+  (namespace + name, derived from the source's labels — e.g. Alertmanager
+  `pod`/`deployment`); the entry stores the resource its incident affected. They must
+  agree. This is the lever that separates "many
   symptoms → one cause": a `CrashLoopBackOff` in `apps/web` should not recall an OOM
   runbook for `apps/worker`. It's a **pre-filter** over a wide candidate set (≈15),
   not a check of only the top lexical hit, so the structurally-correct entry can win
@@ -159,19 +169,20 @@ record of **whether a recalled answer preceded the incident actually resolving**
 - When an investigation completes, RunLore appends an **`open`** event: the incident's
   fingerprint, whether it was answered by `recall` or a `fresh` investigation, and —
   for recalls — *which catalog entry* was used.
-- When the matching **resolved-alert webhook** arrives, RunLore appends a **`resolve`**
-  event for that fingerprint.
+- When the matching **incident-resolved signal** arrives (a resolved-alert webhook
+  today; any source's "cleared" event by design), RunLore appends a **`resolve`** event
+  for that fingerprint.
 
 ```mermaid
 sequenceDiagram
-    participant AM as Alertmanager
+    participant SRC as Incident source<br/>(Alertmanager · Datadog · Sentry · …)
     participant RL as RunLore
     participant L as Outcome ledger (JSONL)
-    AM->>RL: alert firing (fingerprint F)
+    SRC->>RL: incident fires (fingerprint F)
     RL->>RL: investigate (recall entry E, or fresh)
     RL->>L: append open{F, kind, entry:E}
-    Note over AM,RL: ...incident clears...
-    AM->>RL: alert resolved (fingerprint F)
+    Note over SRC,RL: ...incident clears...
+    SRC->>RL: incident resolved (fingerprint F)
     RL->>L: append resolve{F}
     Note over L: Episodes() pairs open→resolve (LIFO per fingerprint)<br/>OpenCounts() rolls up per entry: recalls, resolved, last_confirmed
 ```
