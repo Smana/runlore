@@ -44,6 +44,10 @@ type KustomizationEvent struct {
 type Reader interface {
 	ListKustomizations(ctx context.Context) ([]kustomization, error)
 	GetGitRepository(ctx context.Context, namespace, name string) (gitRepository, error)
+	// SourceRevision returns a source's current synced revision
+	// (status.artifact.revision) for a GitRepository/OCIRepository/Bucket/
+	// ExternalArtifact, used to find a failing Kustomization's HEAD.
+	SourceRevision(ctx context.Context, kind, namespace, name string) (string, error)
 	WatchKustomizations(ctx context.Context) (<-chan KustomizationEvent, error)
 	// GetResource fetches one object by kind/namespace/name (kinds in kindToGVR).
 	GetResource(ctx context.Context, kind, namespace, name string) (*unstructured.Unstructured, error)
@@ -112,9 +116,33 @@ func (p *Provider) Changes(ctx context.Context, _ providers.TimeWindow, sel prov
 			}
 			url = cached
 		}
-		changes = append(changes, mapKustomization(k, url))
+		fromRev, toRev := revisionRange(ctx, p.reader, k)
+		changes = append(changes, mapKustomization(k, url, fromRev, toRev))
 	}
 	return changes, nil
+}
+
+// revisionRange picks the (FromRev, ToRev) a Change should diff. For a healthy
+// Kustomization it is ("", lastApplied) — the change introduced by the applied
+// revision. For a FAILING one (Ready != True) whose source HEAD has moved past
+// lastApplied, it is (lastApplied, HEAD): Flux pins lastAppliedRevision to the last
+// HEALTHY commit on a health-check failure, so keying on it alone would diff the
+// pre-break commit and miss the breaking one. The source read is best-effort — on
+// any error (or when HEAD == lastApplied) we fall back to the single-revision range.
+func revisionRange(ctx context.Context, reader Reader, k kustomization) (fromRev, toRev string) {
+	lastApplied := parseRevision(k.Revision)
+	if k.ReadyStatus == "True" || k.ReadyStatus == "" {
+		return "", lastApplied
+	}
+	head, err := reader.SourceRevision(ctx, k.SourceKind, k.SourceNamespace, k.SourceName)
+	if err != nil {
+		return "", lastApplied // can't resolve HEAD — keep today's behavior
+	}
+	headRev := parseRevision(head)
+	if headRev == "" || headRev == lastApplied {
+		return "", lastApplied // no real gap to span
+	}
+	return lastApplied, headRev
 }
 
 // Diff resolves a Change's diff via the Differ. Changes from a non-Git source
@@ -167,16 +195,18 @@ func (p *Provider) WatchFailures(ctx context.Context) (<-chan providers.FailureE
 	return out, nil
 }
 
-// mapKustomization builds an engine-agnostic Change from a Kustomization + its
-// resolved source URL.
-func mapKustomization(k kustomization, repoURL string) providers.Change {
+// mapKustomization builds an engine-agnostic Change from a Kustomization, its
+// resolved source URL, and the (fromRev, toRev) range computed by revisionRange.
+// A healthy Kustomization carries an empty fromRev (diff the change introduced by
+// toRev); a failing one whose source HEAD moved past lastApplied spans the gap.
+func mapKustomization(k kustomization, repoURL, fromRev, toRev string) providers.Change {
 	return providers.Change{
 		Workload: providers.Workload{Kind: "Kustomization", Name: k.Name, Namespace: k.Namespace},
 		Engine:   providers.EngineFlux,
 		Type:     providers.ChangeSync,
 		Source:   providers.SourceRef{RepoURL: repoURL, Path: k.Path},
-		ToRev:    parseRevision(k.Revision),
-		// FromRev empty: diff the change introduced by ToRev.
+		FromRev:  fromRev,
+		ToRev:    toRev,
 	}
 }
 

@@ -91,6 +91,33 @@ func fluxScene() *Provider {
 	return New(NewDynamicReader(client), nil)
 }
 
+func TestSourceRevision(t *testing.T) {
+	grObj := &unstructured.Unstructured{Object: map[string]any{
+		"apiVersion": "source.toolkit.fluxcd.io/v1",
+		"kind":       "GitRepository",
+		"metadata":   map[string]any{"name": "flux-system", "namespace": "flux-system"},
+		"spec":       map[string]any{"url": "https://github.com/org/repo"},
+		"status":     map[string]any{"artifact": map[string]any{"revision": "main@sha1:bbb"}},
+	}}
+	client := dynamicfake.NewSimpleDynamicClientWithCustomListKinds(runtime.NewScheme(),
+		map[schema.GroupVersionResource]string{gitRepositoryGVR: "GitRepositoryList"}, grObj)
+	r := NewDynamicReader(client)
+
+	// An empty kind defaults to GitRepository, matching Flux's own default.
+	rev, err := r.SourceRevision(context.Background(), "", "flux-system", "flux-system")
+	if err != nil {
+		t.Fatalf("SourceRevision: %v", err)
+	}
+	if rev != "main@sha1:bbb" {
+		t.Fatalf("unexpected revision: %q", rev)
+	}
+
+	// An unknown source kind is reported, not silently swallowed.
+	if _, err := r.SourceRevision(context.Background(), "Mystery", "flux-system", "flux-system"); err == nil {
+		t.Fatal("expected an error for an unsupported source kind")
+	}
+}
+
 func TestGetResourceNamespaceFallback(t *testing.T) {
 	// The Kustomization lives in flux-system, but a caller passes the workload's
 	// namespace ("apps", from an alert). GetResource must resolve it via the
