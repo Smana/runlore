@@ -197,13 +197,13 @@ Effort: **S** ≤1 day · **M** 2–4 days · **L** ≥1 week. Impact is on the 
 | 12 | curation Phase-2 — `lore curate` CronJob + dormant passes | 🟡 **partial** (PR #86) — scheduler (opt-in CronJob) + Lifecycle sweep wired; **Queue + Recurrence still deferred** (see below) |
 | 13 | confirmatory evidence on recall | ✅ merged (PR #84) |
 | 16 | `Verified`/provenance in `meetsBar` | ✅ merged (PR #85) |
-| 17 | reversible `rollback` op | ⏳ **deferred** — effort L, autonomy/remediation weight; a focused session |
+| 17 | reversible `rollback` op | ❎ **won't build** (decided 2026-06-24) — in-cluster re-pin fights the safety model + diverges cluster↔Git; remediation stays read-only. See §9.4 |
 | 18 | HEAD-diff sync + `readyz` gate | ✅ merged (PR #82) |
 
 Specs/plans for each merged item live under `docs/superpowers/specs/` and `docs/superpowers/plans/` on `main`.
 
 **Remaining work:**
-- **#17 (reversible `rollback`)** — the one untouched roadmap item; deferred deliberately (it executes Flux/Argo reverts, so it warrants a dedicated, focused session rather than the autonomous batch).
+- **#17 (reversible `rollback`)** — **decided against** (2026-06-24). A scoped brainstorm found the in-cluster re-pin can't fit the safety model cleanly; remediation stays read-only / propose-and-approve. Full rationale in §9.4 and `docs/design.md` (the "Act" section).
 - **#12's deferred passes** — `Queue` (`ResolutionChecker`) needs a PR↔incident resolution join (the #11 dup-fingerprint ≠ the ledger's alert-fingerprint; or a cluster-state checker); `Recurrence` needs an idempotent ledger-backed driver over `Episodes()` (a watermark or gap-issue existence-check). Both stay implemented + unit-tested in `internal/curate`; `runCurate`'s comment states each blocker. Scoped this way because their correct wiring is a genuine product decision, not mechanical.
 - **Nightly eval (#7)** runs once the `RUNLORE_EVAL_API_KEY` repo secret is set (it drives a live LLM, so it can't gate fork PRs and isn't a per-PR blocker — by design).
 
@@ -276,12 +276,38 @@ Wave 4 — Reliability & durability (parallel, independent)
   ├─ ✅ #14 StatefulSet/PVC + fsync ............ M
   ├─ ✅ #15 hard token kill + context compaction  M
   ├─ ✅ #18 HEAD-diff sync + readyz ............ M [needs 1]
-  └─ ⏳ #17 reversible rollback op (product) ... L  ← only remaining item
+  └─ ❎ #17 reversible rollback op (product) ... L  ← decided against (§9.4)
 ```
 
-> **Status (2026-06-23, updated):** Waves 0–4 complete except **#17** (deferred) and #12's deferred Queue+Recurrence passes. The eval-validity cluster (#4/#5/#6) is done; the full k3d e2e passes (PASS=40 FAIL=0). See §9.0 for the per-item PR map and remaining-work notes.
+> **Status (2026-06-24, updated):** Waves 0–4 complete; **#17 decided against** (§9.4) and #12's Queue+Recurrence passes intentionally deferred. The eval-validity cluster (#4/#5/#6) is done; the full k3d e2e passes (PASS=40 FAIL=0). See §9.0 for the per-item PR map and remaining-work notes.
 
 **Fastest credible "we learn" demo:** Wave 0 + Slice 2 + Slice 5 + #9 — a poisoned/stale entry recalls, never resolves, decays below the floor on the next occurrence, triggers a fresh re-investigation that overturns it, observable in the eval harness *and* on the entry's git frontmatter.
+
+### 9.4 Decision (2026-06-24) — #17 reversible `rollback`: won't build
+
+A reversible in-cluster `rollback` op (re-pin a Flux Kustomization / ArgoCD Application to its prior
+revision) was scoped through a full brainstorm and **rejected**. The reasons, in order of weight:
+
+1. **It can't fit the safety model cleanly.** A Flux Kustomization has no per-resource revision pin,
+   so re-pinning it must patch its owning **GitRepository** — which in the common monorepo layout
+   lives in **`flux-system`**, a *built-in protected namespace* the action gate forbids as a target
+   (and the namespace-scoped action RBAC doesn't cover). Every implementation path required weakening
+   a safety invariant (a new flux-system-patching exception).
+2. **It is anti-GitOps.** An in-cluster re-pin makes the cluster's desired state diverge from Git:
+   Flux reports drift, the next legitimate Git change collides with the manual pin, and the
+   divergence must be remembered and undone.
+3. **Little is lost.** The agent already *suggests* a rollback in `suggest`/`approve` mode; only
+   executing it is withheld. For a GitOps shop, "the agent advises, a human merges the revert" is the
+   correct division of labor — and the upside is modest against the outage risk of a wrong rollback
+   on a sub-50%-RCA baseline.
+4. **The moat isn't remediation.** Per §8, the durable differentiator is the outcome-validated,
+   provenance-tracked communal catalog (now built and closing) — not mutating remediation. Read-only-
+   first is a selling point for the safety-conscious, lock-in-allergic buyer.
+
+**If revisited:** the GitOps-correct form is a **Git-revert PR** (reuse the curator/forge path) — in
+sync with Git, inherently reversible, reviewed — **not** a cluster patch. Recorded in
+`docs/design.md` ("Act" section). This supersedes §6's framing of the autonomy ladder as "functionally
+hollow without rollback": that vocabulary gap is now an intentional posture, not a defect.
 
 ---
 
