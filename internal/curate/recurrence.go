@@ -4,60 +4,85 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"strings"
 
+	"github.com/Smana/runlore/internal/outcome"
 	"github.com/Smana/runlore/internal/providers"
 )
 
-// RecurrenceStore persists per-pattern unresolved counts across curate runs.
-type RecurrenceStore interface {
-	Load(ctx context.Context) (map[string]int, error)
-	Save(ctx context.Context, counts map[string]int) error
-}
+// gapTitlePrefix titles every knowledge-gap issue; it is also the existence-check
+// key (the pass opens at most one issue per pattern).
+const gapTitlePrefix = "knowledge-gap: "
 
-// Recurrence tracks unresolved-pattern recurrence and opens ONE knowledge-gap
-// issue when a pattern crosses the threshold — the only path that creates issues.
+// Recurrence opens ONE knowledge-gap issue when an unresolved incident pattern recurs
+// at least Threshold times. It is ledger-driven and idempotent: it recomputes counts
+// from the outcome ledger every run and opens an issue only when no knowledge-gap
+// issue for that pattern already exists — so re-running never double-opens (no mutable
+// store or watermark).
 type Recurrence struct {
-	Forge     Forge
-	Store     RecurrenceStore
+	Forge  Forge
+	Ledger interface {
+		Episodes() ([]outcome.Episode, error)
+	}
 	Threshold int // default 3 when 0
 	Log       *slog.Logger
 }
 
-// Observe records one unresolved occurrence of a pattern (a Fingerprint-style key)
-// and opens a knowledge-gap issue when it first reaches the threshold.
-func (r Recurrence) Observe(ctx context.Context, pattern string) error {
+// Run opens a knowledge-gap issue for each pattern that crosses the threshold and has
+// none open yet.
+func (r Recurrence) Run(ctx context.Context) error {
 	thr := r.Threshold
 	if thr == 0 {
 		thr = 3
 	}
-	counts, err := r.Store.Load(ctx)
+	eps, err := r.Ledger.Episodes()
 	if err != nil {
-		return fmt.Errorf("load recurrence: %w", err)
+		return fmt.Errorf("recurrence: load episodes: %w", err)
 	}
-	if counts == nil {
-		counts = map[string]int{}
+	// Count UNRESOLVED occurrences per pattern (affected resource; title fallback).
+	counts := map[string]int{}
+	for _, e := range eps {
+		if e.Resolved {
+			continue
+		}
+		counts[recurrencePattern(e)]++
 	}
-	counts[pattern]++
-	shouldOpen := counts[pattern] == thr // exactly at threshold → open once
-	// Persist the count BEFORE opening the issue. If we opened first and Save then
-	// failed, the next run would re-load the pre-increment count, re-hit the
-	// threshold, and double-open. Saving first means a later OpenIssue failure
-	// leaves the count at thr (next run increments past it → the == thr guard
-	// never re-fires).
-	if err := r.Store.Save(ctx, counts); err != nil {
-		return fmt.Errorf("save recurrence: %w", err)
+	// Existing knowledge-gap issues are the idempotency guard. OpenIssue labels issues
+	// "runlore"/"triggered" and titles them gapTitlePrefix+pattern, so match by title.
+	existing, err := r.Forge.ListIssuesByLabel(ctx, "runlore")
+	if err != nil {
+		return fmt.Errorf("recurrence: list issues: %w", err)
 	}
-	if shouldOpen {
+	open := map[string]bool{}
+	for _, iss := range existing {
+		if p, ok := strings.CutPrefix(iss.Title, gapTitlePrefix); ok {
+			open[p] = true
+		}
+	}
+	for pattern, n := range counts {
+		if n < thr || open[pattern] {
+			continue
+		}
 		inv := providers.Investigation{
-			Title: "knowledge-gap: " + pattern,
+			Title: gapTitlePrefix + pattern,
 			RootCauses: []providers.Hypothesis{{
-				Summary: fmt.Sprintf("RunLore could not resolve %q across %d incidents — needs seeded knowledge or a RunLore fix.", pattern, thr),
+				Summary: fmt.Sprintf("RunLore could not resolve incidents on %q across %d occurrences — needs seeded knowledge or a RunLore fix.", pattern, n),
 			}},
 		}
 		if _, err := r.Forge.OpenIssue(ctx, inv); err != nil {
-			return fmt.Errorf("open knowledge-gap issue: %w", err)
+			r.Log.Warn("recurrence: open knowledge-gap issue failed", "pattern", pattern, "err", err)
+			continue // best-effort; other patterns still processed
 		}
-		r.Log.Info("opened knowledge-gap issue", "pattern", pattern, "count", thr)
+		r.Log.Info("opened knowledge-gap issue", "pattern", pattern, "count", n)
 	}
 	return nil
+}
+
+// recurrencePattern groups unresolved incidents by the affected resource, falling
+// back to the incident title when no resource was identified.
+func recurrencePattern(e outcome.Episode) string {
+	if e.Resource != "" {
+		return e.Resource
+	}
+	return e.Title
 }

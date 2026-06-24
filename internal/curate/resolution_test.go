@@ -14,14 +14,15 @@ import (
 // and recurrence tests.
 type recordingForge struct {
 	prs     []providers.CuratedIssue
-	relabel map[int]string // number -> added label
+	issues  []providers.CuratedIssue // returned by ListIssuesByLabel
+	relabel map[int]string           // number -> added label
 }
 
 func (f *recordingForge) ListPRsByLabel(context.Context, string) ([]providers.CuratedIssue, error) {
 	return f.prs, nil
 }
 func (f *recordingForge) ListIssuesByLabel(context.Context, string) ([]providers.CuratedIssue, error) {
-	return nil, nil
+	return f.issues, nil
 }
 func (f *recordingForge) Comment(context.Context, int, string) error { return nil }
 func (f *recordingForge) ReplaceLabel(_ context.Context, n int, _, add string) error {

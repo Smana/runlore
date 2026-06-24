@@ -2,37 +2,14 @@ package curate
 
 import (
 	"context"
-	"errors"
-	"io"
-	"log/slog"
 	"testing"
 
+	"github.com/Smana/runlore/internal/outcome"
 	"github.com/Smana/runlore/internal/providers"
 )
 
-type memStore struct {
-	counts  map[string]int
-	saveErr error // when set, Save fails (and does not persist) — simulates a flaky store
-}
-
-// Load returns a COPY (like a real forge-backed store), so an increment on the
-// loaded map does not mutate the persisted state unless Save succeeds.
-func (m *memStore) Load(context.Context) (map[string]int, error) {
-	cp := make(map[string]int, len(m.counts))
-	for k, v := range m.counts {
-		cp[k] = v
-	}
-	return cp, nil
-}
-func (m *memStore) Save(_ context.Context, c map[string]int) error {
-	if m.saveErr != nil {
-		return m.saveErr
-	}
-	m.counts = c
-	return nil
-}
-
-// gapForge records the issue titles it was asked to open.
+// gapForge records the issue titles it was asked to open. It embeds recordingForge
+// (which supplies ListIssuesByLabel from its `issues` field) and overrides OpenIssue.
 type gapForge struct {
 	*recordingForge
 	openedTitles []string
@@ -43,53 +20,75 @@ func (g *gapForge) OpenIssue(_ context.Context, inv providers.Investigation) (pr
 	return providers.Ref{URL: "https://github.com/x/y/issues/1"}, nil
 }
 
-func TestRecurrenceOpensGapIssueOnThreshold(t *testing.T) {
-	store := &memStore{counts: map[string]int{"flux gitrepository not found": 2}} // already seen twice
-	gf := &gapForge{recordingForge: &recordingForge{}}
-	r := Recurrence{Forge: gf, Store: store, Threshold: 3, Log: slog.New(slog.NewTextHandler(io.Discard, nil))}
-	if err := r.Observe(context.Background(), "flux gitrepository not found"); err != nil {
-		t.Fatal(err)
+func unresolved(pattern string, n int) []outcome.Episode {
+	eps := make([]outcome.Episode, n)
+	for i := range eps {
+		eps[i] = outcome.Episode{Resource: pattern, Resolved: false}
 	}
-	if len(gf.openedTitles) != 1 {
-		t.Fatalf("want 1 knowledge-gap issue at the threshold, got %d", len(gf.openedTitles))
-	}
-	if store.counts["flux gitrepository not found"] != 3 {
-		t.Fatalf("count not persisted: %v", store.counts)
-	}
+	return eps
 }
 
-func TestRecurrenceSaveFailureDoesNotDoubleOpen(t *testing.T) {
-	// Save fails the first time. Because the count is persisted BEFORE the issue is
-	// opened, a Save failure means NO issue is opened that run (and the count isn't
-	// persisted) — so the next run retries and opens exactly once. Never twice.
-	store := &memStore{counts: map[string]int{"p": 2}, saveErr: errors.New("store unavailable")}
+func TestRecurrenceOpensGapIssueAtThreshold(t *testing.T) {
+	eps := append(unresolved("apps/web", 3), outcome.Episode{Resource: "apps/worker", Resolved: false}) // worker: only 1
 	gf := &gapForge{recordingForge: &recordingForge{}}
-	r := Recurrence{Forge: gf, Store: store, Threshold: 3, Log: slog.New(slog.NewTextHandler(io.Discard, nil))}
-
-	if err := r.Observe(context.Background(), "p"); err == nil {
-		t.Fatal("want a save error on the first Observe")
+	r := Recurrence{Forge: gf, Ledger: fakeLedger{eps: eps}, Threshold: 3, Log: discardLog()}
+	if err := r.Run(context.Background()); err != nil {
+		t.Fatalf("Run: %v", err)
 	}
-	if len(gf.openedTitles) != 0 {
-		t.Fatalf("must NOT open an issue when Save fails, got %d", len(gf.openedTitles))
-	}
-	// Retry with a working store → opens exactly once.
-	store.saveErr = nil
-	if err := r.Observe(context.Background(), "p"); err != nil {
-		t.Fatal(err)
-	}
-	if len(gf.openedTitles) != 1 {
-		t.Fatalf("want exactly 1 issue after the retry, got %d", len(gf.openedTitles))
+	if len(gf.openedTitles) != 1 || gf.openedTitles[0] != "knowledge-gap: apps/web" {
+		t.Fatalf("want one gap issue for apps/web, got %v", gf.openedTitles)
 	}
 }
 
 func TestRecurrenceBelowThresholdNoIssue(t *testing.T) {
-	store := &memStore{counts: map[string]int{}}
 	gf := &gapForge{recordingForge: &recordingForge{}}
-	r := Recurrence{Forge: gf, Store: store, Threshold: 3, Log: slog.New(slog.NewTextHandler(io.Discard, nil))}
-	if err := r.Observe(context.Background(), "new pattern"); err != nil {
-		t.Fatal(err)
+	r := Recurrence{Forge: gf, Ledger: fakeLedger{eps: unresolved("apps/web", 2)}, Threshold: 3, Log: discardLog()}
+	if err := r.Run(context.Background()); err != nil {
+		t.Fatalf("Run: %v", err)
 	}
 	if len(gf.openedTitles) != 0 {
-		t.Fatalf("below threshold must not open an issue")
+		t.Fatalf("below threshold must open nothing, got %v", gf.openedTitles)
+	}
+}
+
+func TestRecurrenceIdempotentWhenIssueExists(t *testing.T) {
+	gf := &gapForge{recordingForge: &recordingForge{
+		issues: []providers.CuratedIssue{{Title: "knowledge-gap: apps/web"}}, // already open
+	}}
+	r := Recurrence{Forge: gf, Ledger: fakeLedger{eps: unresolved("apps/web", 5)}, Threshold: 3, Log: discardLog()}
+	if err := r.Run(context.Background()); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if len(gf.openedTitles) != 0 {
+		t.Fatalf("an existing gap issue must prevent a duplicate, got %v", gf.openedTitles)
+	}
+}
+
+func TestRecurrenceResolvedEpisodesDoNotCount(t *testing.T) {
+	eps := []outcome.Episode{
+		{Resource: "apps/web", Resolved: true}, {Resource: "apps/web", Resolved: true},
+		{Resource: "apps/web", Resolved: false}, // only 1 unresolved
+	}
+	gf := &gapForge{recordingForge: &recordingForge{}}
+	r := Recurrence{Forge: gf, Ledger: fakeLedger{eps: eps}, Threshold: 3, Log: discardLog()}
+	if err := r.Run(context.Background()); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if len(gf.openedTitles) != 0 {
+		t.Fatalf("resolved episodes must not count, got %v", gf.openedTitles)
+	}
+}
+
+func TestRecurrencePatternFallsBackToTitle(t *testing.T) {
+	eps := []outcome.Episode{
+		{Title: "DNSFailure", Resolved: false}, {Title: "DNSFailure", Resolved: false}, {Title: "DNSFailure", Resolved: false},
+	}
+	gf := &gapForge{recordingForge: &recordingForge{}}
+	r := Recurrence{Forge: gf, Ledger: fakeLedger{eps: eps}, Threshold: 3, Log: discardLog()}
+	if err := r.Run(context.Background()); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if len(gf.openedTitles) != 1 || gf.openedTitles[0] != "knowledge-gap: DNSFailure" {
+		t.Fatalf("a resource-less episode should group by title, got %v", gf.openedTitles)
 	}
 }
