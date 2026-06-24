@@ -5,7 +5,10 @@
 package telemetry
 
 import (
+	"context"
+
 	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/metric"
 )
 
@@ -31,6 +34,14 @@ type Metrics struct {
 	IncidentsResolved         metric.Int64Counter     // resolve events that matched an open investigation
 	RecallOutcome             metric.Int64Counter     // resolved incidents whose open was a recall (label: result)
 	IncidentResolutionSeconds metric.Float64Histogram // open→resolve duration, seconds
+
+	InvestigationDuration   metric.Float64Histogram // wall-clock per investigation (label: result)
+	InvestigationsCompleted metric.Int64Counter     // investigations finished (label: result)
+	ToolCalls               metric.Int64Counter     // investigation tool calls (label: tool, result)
+	ToolCallDuration        metric.Float64Histogram // tool call latency, seconds (label: tool)
+	ModelRequests           metric.Int64Counter     // LLM completion requests (label: provider, result)
+	ModelRequestDuration    metric.Float64Histogram // LLM completion latency, seconds (label: provider)
+	Curations               metric.Int64Counter     // curation outcomes (label: kind, result)
 }
 
 // NewMetrics builds the instrument set from the global meter provider.
@@ -67,5 +78,43 @@ func NewMetrics() *Metrics {
 		IncidentsResolved:         ctr("incidents_resolved_total", "resolve events that matched an open investigation"),
 		RecallOutcome:             ctr("recall_outcome_total", "resolved incidents whose answer was a recall (label: result)"),
 		IncidentResolutionSeconds: histF("incident_resolution_seconds", "open→resolve duration in seconds"),
+
+		InvestigationDuration:   histF("investigation_duration_seconds", "wall-clock duration of an investigation (label: result)"),
+		InvestigationsCompleted: ctr("investigations_completed_total", "investigations that finished (label: result)"),
+		ToolCalls:               ctr("tool_calls_total", "investigation tool calls (label: tool, result)"),
+		ToolCallDuration:        histF("tool_call_duration_seconds", "investigation tool call latency in seconds (label: tool)"),
+		ModelRequests:           ctr("model_requests_total", "LLM completion requests (label: provider, result)"),
+		ModelRequestDuration:    histF("model_request_duration_seconds", "LLM completion latency in seconds (label: provider)"),
+		Curations:               ctr("curations_total", "curation outcomes written to the forge (label: kind, result)"),
 	}
+}
+
+// RegisterRuntimeGauges registers async gauges for build info and leadership. Call
+// once after Setup (when a real provider is installed); with the no-op provider it
+// is a harmless no-op. isLeader may be nil (always reports standby). It exposes:
+//   - runlore_build_info{version} = 1  (for `absent()` liveness + version display)
+//   - runlore_leader = 1 when this replica is the elected leader, else 0
+func RegisterRuntimeGauges(version string, isLeader func() bool) error {
+	m := otel.Meter(scope)
+	if _, err := m.Int64ObservableGauge("runlore_build_info",
+		metric.WithDescription("build info; constant 1 carrying a version label"),
+		metric.WithInt64Callback(func(_ context.Context, o metric.Int64Observer) error {
+			o.Observe(1, metric.WithAttributes(attribute.String("version", version)))
+			return nil
+		}),
+	); err != nil {
+		return err
+	}
+	_, err := m.Int64ObservableGauge("runlore_leader",
+		metric.WithDescription("1 when this replica is the elected leader, else 0"),
+		metric.WithInt64Callback(func(_ context.Context, o metric.Int64Observer) error {
+			var v int64
+			if isLeader != nil && isLeader() {
+				v = 1
+			}
+			o.Observe(v)
+			return nil
+		}),
+	)
+	return err
 }

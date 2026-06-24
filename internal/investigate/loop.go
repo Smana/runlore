@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"time"
 
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/metric"
@@ -92,7 +93,8 @@ type LoopInvestigator struct {
 	MaxTokensPerInvestigation int // inject a budget-nudge message when the estimated token count exceeds this
 
 	// Observability — nil-safe; no-op when telemetry is disabled.
-	Metrics *telemetry.Metrics
+	Metrics       *telemetry.Metrics
+	ModelProvider string // label for model_requests/model_request_duration metrics (e.g. "anthropic")
 }
 
 // system returns the system prompt, asking for action proposals when the policy is enabled.
@@ -105,6 +107,16 @@ func (li *LoopInvestigator) system() string {
 
 // Investigate runs the loop for a request. It implements Investigator.
 func (li *LoopInvestigator) Investigate(ctx context.Context, req Request) error {
+	// Record wall-clock duration + a completion-result label at whichever exit we take.
+	start := time.Now()
+	result := "unresolved"
+	defer func() {
+		if li.Metrics != nil {
+			attrs := metric.WithAttributes(attribute.String("result", result))
+			li.Metrics.InvestigationDuration.Record(ctx, time.Since(start).Seconds(), attrs)
+			li.Metrics.InvestigationsCompleted.Add(ctx, 1, attrs)
+		}
+	}()
 	// Instant recall is disabled under auto-execution: a poisoned catalog entry must
 	// not short-circuit a real investigation straight into an auto-executed action.
 	if li.Recall != nil && (li.Actions == nil || !li.Actions.IsAuto()) {
@@ -126,20 +138,21 @@ func (li *LoopInvestigator) Investigate(ctx context.Context, req Request) error 
 			}
 			// Instrument the recall result by verify outcome.
 			if m := li.Recall.Metrics; m != nil {
-				result := "verified"
+				recallResult := "verified"
 				switch {
 				case len(rec.RootCauses) == 0:
-					result = "rejected"
+					recallResult = "rejected"
 				case li.Verify && rec.Confidence < initialConfidence:
-					result = "downgraded"
+					recallResult = "downgraded"
 				}
 				saved := int64(li.MaxTokensPerInvestigation)
 				if saved == 0 {
 					saved = defaultRecallTokensSavedEstimate // conservative proxy when budget is unconfigured
 				}
-				m.RecallHits.Add(ctx, 1, metric.WithAttributes(attribute.String("result", result)))
+				m.RecallHits.Add(ctx, 1, metric.WithAttributes(attribute.String("result", recallResult)))
 				m.RecallTokensSaved.Add(ctx, saved)
 			}
+			result = "recall"
 			li.deliver(req, rec)
 			return nil
 		}
@@ -183,12 +196,25 @@ func (li *LoopInvestigator) Investigate(ctx context.Context, req Request) error 
 				if li.Metrics != nil {
 					li.Metrics.InvestigationsDropped.Add(ctx, 1)
 				}
+				result = "budget_exceeded"
 				li.deliver(req, budgetKillResult(req))
 				return nil
 			}
 		}
+		mstart := time.Now()
 		resp, err := li.Model.Complete(ctx, providers.CompletionRequest{System: sys, Messages: messages, Tools: specs})
+		if li.Metrics != nil {
+			mres := "ok"
+			if err != nil {
+				mres = "error"
+			}
+			li.Metrics.ModelRequests.Add(ctx, 1, metric.WithAttributes(
+				attribute.String("provider", li.ModelProvider), attribute.String("result", mres)))
+			li.Metrics.ModelRequestDuration.Record(ctx, time.Since(mstart).Seconds(),
+				metric.WithAttributes(attribute.String("provider", li.ModelProvider)))
+		}
 		if err != nil {
+			result = "error"
 			return fmt.Errorf("model: %w", err)
 		}
 		li.Log.Debug("investigation step", "title", req.Title, "step", step, "tool_calls", len(resp.ToolCalls), "text_len", len(resp.Text))
@@ -199,6 +225,7 @@ func (li *LoopInvestigator) Investigate(ctx context.Context, req Request) error 
 			// only give up if it still won't after the nudge.
 			if nudged {
 				li.Log.Warn("investigation inconclusive (no submit_findings after nudge)", "title", req.Title, "tools_used", used)
+				result = "inconclusive"
 				return nil
 			}
 			nudged = true
@@ -232,6 +259,7 @@ func (li *LoopInvestigator) Investigate(ctx context.Context, req Request) error 
 					inv = li.verifyFindings(ctx, req, inv)
 				}
 				inv.Actions = li.reviewActions(inv.Actions)
+				result = "resolved"
 				li.deliver(req, inv)
 				return nil
 			}
@@ -244,6 +272,7 @@ func (li *LoopInvestigator) Investigate(ctx context.Context, req Request) error 
 		}
 	}
 	li.Log.Warn("investigation hit max steps", "title", req.Title, "max", maxSteps, "tools_used", used)
+	result = "max_steps"
 	return nil
 }
 
@@ -252,7 +281,18 @@ func (li *LoopInvestigator) runTool(ctx context.Context, byName map[string]Tool,
 	if !ok {
 		return "unknown tool: " + tc.Name
 	}
+	tstart := time.Now()
 	out, err := tool.Call(ctx, tc.Args)
+	if li.Metrics != nil {
+		tres := "ok"
+		if err != nil {
+			tres = "error"
+		}
+		li.Metrics.ToolCalls.Add(ctx, 1, metric.WithAttributes(
+			attribute.String("tool", tc.Name), attribute.String("result", tres)))
+		li.Metrics.ToolCallDuration.Record(ctx, time.Since(tstart).Seconds(),
+			metric.WithAttributes(attribute.String("tool", tc.Name)))
+	}
 	if err != nil {
 		return "error: " + err.Error()
 	}

@@ -47,6 +47,7 @@ import (
 	"github.com/Smana/runlore/internal/eval"
 	fluxexec "github.com/Smana/runlore/internal/executor/flux"
 	"github.com/Smana/runlore/internal/investigate"
+	"github.com/Smana/runlore/internal/logging"
 	"github.com/Smana/runlore/internal/logs/victorialogs"
 	"github.com/Smana/runlore/internal/metrics/prometheus"
 	anthropic "github.com/Smana/runlore/internal/model/anthropic"
@@ -137,7 +138,7 @@ func runServe(args []string) error {
 	if err != nil {
 		return err
 	}
-	log := slog.New(slog.NewTextHandler(os.Stdout, nil))
+	log := logging.FromConfig(os.Stdout, cfg.Logging.Format, cfg.Logging.Level)
 	setMemoryLimitFromCgroup(log) // make the GC respect the container memory cap
 
 	// Opt-in pprof on loopback only (reachable via `kubectl port-forward`, never the
@@ -288,6 +289,14 @@ func runServe(args []string) error {
 	} else {
 		leader.Store(true) // no leader election: this replica is always active + ready
 		startWork(ctx)
+	}
+
+	// Build-info + leadership gauges (runlore_build_info / runlore_leader). No-op
+	// unless telemetry installed a real provider above.
+	if cfg.Telemetry.MetricsEnabled {
+		if err := telemetry.RegisterRuntimeGauges(version, leader.Load); err != nil {
+			log.Warn("runtime gauges registration failed", "err", err)
+		}
 	}
 
 	// readyz reflects leadership so the Service routes webhooks only to the leader.
@@ -604,7 +613,7 @@ func runEvalLive(cfg *config.Config, scnDir, recordDir, reportDir, prevReport, s
 	if len(scns) == 0 {
 		return fmt.Errorf("no scenarios found in %s", scnDir)
 	}
-	log := slog.New(slog.NewTextHandler(os.Stderr, nil))
+	log := logging.FromConfig(os.Stderr, cfg.Logging.Format, cfg.Logging.Level)
 	ctx := context.Background()
 	model, tools, recall, _ := buildModelAndTools(ctx, cfg, gitOpsFromKube(cfg, log), log)
 	judge := eval.ModelJudge{Model: buildJudgeModel(cfg, jProvider, jBaseURL, jModel, jKeyEnv)}
@@ -797,7 +806,7 @@ func runCurate(args []string) error {
 	if cfg.Forge.KBRepo == "" {
 		return fmt.Errorf("curate requires forge.kb_repo")
 	}
-	log := slog.New(slog.NewTextHandler(os.Stderr, nil))
+	log := logging.FromConfig(os.Stderr, cfg.Logging.Format, cfg.Logging.Level)
 	tok := buildForgeTokenSource(cfg, log)
 	if tok == nil {
 		return fmt.Errorf("curate requires a configured GitHub App (forge.github_app)")
@@ -861,6 +870,7 @@ func buildReinvestigator(ctx context.Context, cfg *config.Config, gp providers.G
 		li := &investigate.LoopInvestigator{
 			Model: model, Tools: tools, Recall: recall, Verify: true, Log: log,
 			Metrics:                   metrics,
+			ModelProvider:             cfg.Model.Provider,
 			MaxSteps:                  cfg.Investigation.MaxSteps,
 			MaxToolOutputBytes:        cfg.Investigation.MaxToolOutputBytes,
 			MaxTokensPerInvestigation: cfg.Investigation.MaxTokensPerInvestigation,
@@ -897,7 +907,7 @@ func runCatalogSync(args []string) error {
 	if err != nil {
 		return err
 	}
-	log := slog.New(slog.NewTextHandler(os.Stderr, nil))
+	log := logging.FromConfig(os.Stderr, cfg.Logging.Format, cfg.Logging.Level)
 
 	g := cfg.Catalog.Git
 	if g.URL == "" {
@@ -1083,14 +1093,15 @@ func runInvestigate(args []string) error {
 		return fmt.Errorf("investigate requires a configured model (set config.model)")
 	}
 	// Progress logs go to stderr; the findings go to stdout.
-	log := slog.New(slog.NewTextHandler(os.Stderr, nil))
+	log := logging.FromConfig(os.Stderr, cfg.Logging.Format, cfg.Logging.Level)
 	ctx := context.Background()
 
 	model, tools, recall, _ := buildModelAndTools(ctx, cfg, gitOpsFromKube(cfg, log), log)
 	var result *providers.Investigation
 	li := &investigate.LoopInvestigator{
 		Model: model, Tools: tools, Recall: recall, Actions: action.New(cfg.Actions), Log: log, Verify: true,
-		OnComplete: func(inv providers.Investigation) { result = &inv },
+		ModelProvider: cfg.Model.Provider,
+		OnComplete:    func(inv providers.Investigation) { result = &inv },
 	}
 	title := *alert
 	if title == "" {
@@ -1159,6 +1170,7 @@ func buildInvestigator(ctx context.Context, cfg *config.Config, gp providers.Git
 		Recall:                    recall,
 		Verify:                    true, // adversarial review of root causes before delivery/curation
 		Metrics:                   metrics,
+		ModelProvider:             cfg.Model.Provider,
 		MaxSteps:                  cfg.Investigation.MaxSteps,
 		MaxToolOutputBytes:        cfg.Investigation.MaxToolOutputBytes,
 		MaxTokensPerInvestigation: cfg.Investigation.MaxTokensPerInvestigation,
