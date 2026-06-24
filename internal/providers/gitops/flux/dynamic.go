@@ -70,6 +70,27 @@ func (r *dynamicReader) GetGitRepository(ctx context.Context, namespace, name st
 	return gitRepository{Name: name, Namespace: namespace, URL: url}, nil
 }
 
+// SourceRevision returns a Flux source's current synced revision from
+// status.artifact.revision. The kind is the Kustomization's spec.sourceRef.kind
+// (GitRepository/OCIRepository/Bucket/ExternalArtifact); an empty kind defaults to
+// GitRepository, matching Flux's own default. This is the source HEAD a failing
+// Kustomization's pinned lastAppliedRevision may lag behind.
+func (r *dynamicReader) SourceRevision(ctx context.Context, kind, namespace, name string) (string, error) {
+	if kind == "" {
+		kind = "GitRepository"
+	}
+	gvr, ok := kindToGVR[kind]
+	if !ok {
+		return "", fmt.Errorf("unsupported source kind %q", kind)
+	}
+	u, err := r.client.Resource(gvr).Namespace(namespace).Get(ctx, name, metav1.GetOptions{})
+	if err != nil {
+		return "", fmt.Errorf("get %s %s/%s: %w", kind, namespace, name, err)
+	}
+	rev, _, _ := unstructured.NestedString(u.Object, "status", "artifact", "revision")
+	return rev, nil
+}
+
 // GetResource fetches one object by kind/namespace/name. The kind must be one the
 // inspector knows (see kindToGVR). A NotFound error is returned verbatim so callers
 // can distinguish "missing" from other failures.
