@@ -31,7 +31,7 @@ type Config struct {
 
 	Metrics Endpoint `yaml:"metrics"` // PromQL backend (VictoriaMetrics/Prometheus) for query_metrics
 	Logs    Endpoint `yaml:"logs"`    // LogsQL backend (VictoriaLogs) for query_logs
-	Network Endpoint `yaml:"network"` // Hubble Relay gRPC address (host:port) for network_drops
+	Network Network  `yaml:"network"` // network-flow data source (pluggable, CNI-agnostic); empty Provider disables it
 	Cloud   Cloud    `yaml:"cloud"`   // cloud-side context (AWS); empty Provider disables it
 
 	Server ServerConfig `yaml:"server"` // HTTP ingress (webhook authentication)
@@ -52,6 +52,64 @@ type Cloud struct {
 	Provider    string `yaml:"provider"`     // "" (disabled) | "aws"
 	Region      string `yaml:"region"`       // e.g. eu-west-3 (default: AWS_REGION / IMDS)
 	ClusterName string `yaml:"cluster_name"` // EKS cluster name, scopes nodegroup/ASG queries
+}
+
+// Network provider identifiers for config.network.provider. The network signal is
+// PLUGGABLE and assumes no particular CNI — pick the one matching your environment.
+const (
+	NetworkHubble          = "hubble"            // Cilium Hubble Relay (requires the Cilium CNI)
+	NetworkAWSVPCFlowLogs  = "aws-vpc-flow-logs" // AWS VPC Flow Logs via CloudWatch Logs (any AWS VPC; CNI-agnostic)
+	NetworkGCPFirewallLogs = "gcp-firewall-logs" // GCP Firewall Rules Logging via Cloud Logging (any GCP VPC; CNI-agnostic)
+)
+
+// Network configures the network-flow data source backing the network_drops tool.
+// The signal is pluggable and CNI-agnostic: RunLore does NOT assume Cilium (or any
+// particular CNI). Empty Provider disables the tool (the default — network is opt-in).
+type Network struct {
+	Provider string     `yaml:"provider"` // "" (disabled) | hubble | aws-vpc-flow-logs | gcp-firewall-logs
+	Hubble   HubbleCfg  `yaml:"hubble"`   // when provider=hubble
+	AWS      AWSFlowCfg `yaml:"aws"`      // when provider=aws-vpc-flow-logs
+	GCP      GCPFlowCfg `yaml:"gcp"`      // when provider=gcp-firewall-logs
+
+	// URL keeps the pre-pluggable `network: {url: ...}` shape working: a bare url with
+	// no provider is treated as Hubble (with a deprecation warning at wiring time).
+	URL string `yaml:"url"`
+}
+
+// HubbleCfg configures the Cilium Hubble Relay network provider.
+type HubbleCfg struct {
+	URL string `yaml:"url"` // Hubble Relay gRPC address (host:port), e.g. hubble-relay.kube-system:80
+}
+
+// AWSFlowCfg configures the AWS VPC Flow Logs network provider. Auth is in-cluster
+// identity (EKS Pod Identity / IRSA) via the AWS default credential chain.
+type AWSFlowCfg struct {
+	Region   string `yaml:"region"`    // AWS region (default: AWS_REGION / IMDS)
+	LogGroup string `yaml:"log_group"` // CloudWatch Logs group that receives the VPC Flow Logs (required)
+}
+
+// GCPFlowCfg configures the GCP Firewall Rules Logging network provider. Auth is
+// Workload Identity / Application Default Credentials.
+type GCPFlowCfg struct {
+	Project string `yaml:"project"` // GCP project ID (default: ADC / metadata server)
+}
+
+// UnmarshalYAML decodes the Network block and applies the legacy back-compat mapping:
+// a bare `network: {url: ...}` (the old Hubble-only shape) becomes provider=hubble.
+func (n *Network) UnmarshalYAML(value *yaml.Node) error {
+	type raw Network // avoid recursing into this method
+	var r raw
+	if err := value.Decode(&r); err != nil {
+		return err
+	}
+	*n = Network(r)
+	if n.Provider == "" && n.URL != "" {
+		n.Provider = NetworkHubble
+		if n.Hubble.URL == "" {
+			n.Hubble.URL = n.URL
+		}
+	}
+	return nil
 }
 
 // ServerConfig configures the HTTP ingress.
