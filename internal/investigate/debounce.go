@@ -50,7 +50,7 @@ func NewDebouncer(window time.Duration, check StillFailing, log *slog.Logger) *D
 }
 
 // WithMetrics installs the (nil-safe) metric set and returns the Debouncer for
-// chaining. A dropped transient increments InvestigationsDropped.
+// chaining. A dropped transient increments GitOpsFailuresDebounced.
 func (d *Debouncer) WithMetrics(m *telemetry.Metrics) *Debouncer {
 	d.metrics = m
 	return d
