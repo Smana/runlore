@@ -14,6 +14,8 @@ import (
 // Severity classifies an Issue. Only SeverityError fails the merge gate.
 type Severity int
 
+// Issue severities. Only SeverityError fails the merge gate; SeverityWarning is
+// advisory.
 const (
 	SeverityError Severity = iota
 	SeverityWarning
@@ -42,6 +44,30 @@ var requiredIncidentSections = []struct{ key, head string }{
 	{"symptom", "Symptom"},
 	{"cause", "Cause"},
 	{"resolution", "Resolution"},
+}
+
+// WarnInvalid runs ValidateStructural over entries and calls onInvalid(path,
+// errs) for each entry that has structural Errors. It is the load-time
+// strict-warn hook: the caller logs + increments a metric, but the entry is
+// still served (one bad entry never empties the catalog). Returns the count of
+// invalid entries. Warnings are not reported here.
+func WarnInvalid(entries []catalog.Entry, onInvalid func(path string, errs []Issue)) int {
+	n := 0
+	for _, e := range entries {
+		var errs []Issue
+		for _, i := range ValidateStructural(e) {
+			if i.Severity == SeverityError {
+				errs = append(errs, i)
+			}
+		}
+		if len(errs) > 0 {
+			n++
+			if onInvalid != nil {
+				onInvalid(e.Path, errs)
+			}
+		}
+	}
+	return n
 }
 
 // HasErrors reports whether any issue is Severity=Error — the gate signal.

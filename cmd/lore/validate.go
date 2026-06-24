@@ -75,7 +75,7 @@ func validateKB(w io.Writer, dir, format string, model providers.ModelProvider) 
 		if model != nil {
 			adv, aerr := kbvalidate.ReviewSemantic(context.Background(), e, model)
 			if aerr != nil {
-				fmt.Fprintf(w, "advisory\t%s\tsemantic review skipped: %v\n", e.Path, aerr)
+				_, _ = fmt.Fprintf(w, "advisory\t%s\tsemantic review skipped: %v\n", e.Path, aerr)
 			} else if !adv.Skipped {
 				emitAdvisory(w, e.Path, adv)
 			}
@@ -90,10 +90,10 @@ func emitIssue(w io.Writer, format, path string, iss kbvalidate.Issue) {
 		if iss.Severity == kbvalidate.SeverityError {
 			lvl = "error"
 		}
-		fmt.Fprintf(w, "::%s file=%s::%s: %s\n", lvl, path, iss.Field, iss.Message)
+		_, _ = fmt.Fprintf(w, "::%s file=%s::%s: %s\n", lvl, path, iss.Field, iss.Message)
 		return
 	}
-	fmt.Fprintf(w, "%s\t%s\t%s: %s\n", iss.Severity, path, iss.Field, iss.Message)
+	_, _ = fmt.Fprintf(w, "%s\t%s\t%s: %s\n", iss.Severity, path, iss.Field, iss.Message)
 }
 
 func emitAdvisory(w io.Writer, path string, adv kbvalidate.Advisory) {
@@ -103,7 +103,7 @@ func emitAdvisory(w io.Writer, path string, adv kbvalidate.Advisory) {
 		}
 		return "REVIEW"
 	}
-	fmt.Fprintf(w, "advisory\t%s\tcause-explains-symptom: %s (%s); durable: %s (%s)\n",
+	_, _ = fmt.Fprintf(w, "advisory\t%s\tcause-explains-symptom: %s (%s); durable: %s (%s)\n",
 		path, mark(adv.CauseExplainsSymptom), adv.CauseExplainsSymptom.Rationale,
 		mark(adv.Durable), adv.Durable.Rationale)
 }

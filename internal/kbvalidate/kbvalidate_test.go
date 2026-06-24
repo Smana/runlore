@@ -89,6 +89,28 @@ func TestValidateStructural(t *testing.T) {
 	}
 }
 
+func TestWarnInvalid(t *testing.T) {
+	good := validIncident()
+	good.Path = "good.md"
+	bad := validIncident()
+	bad.Path = "bad.md"
+	bad.Body = "## Symptom\n\nx\n" // missing ## Cause and ## Resolution
+
+	var flagged []string
+	n := WarnInvalid([]catalog.Entry{good, bad}, func(path string, errs []Issue) {
+		if len(errs) == 0 {
+			t.Fatalf("onInvalid called with no errors for %s", path)
+		}
+		flagged = append(flagged, path)
+	})
+	if n != 1 {
+		t.Fatalf("want 1 invalid entry, got %d", n)
+	}
+	if len(flagged) != 1 || flagged[0] != "bad.md" {
+		t.Fatalf("want bad.md flagged, got %v", flagged)
+	}
+}
+
 func TestHasErrors(t *testing.T) {
 	if HasErrors([]Issue{{Severity: SeverityWarning, Field: "tags"}}) {
 		t.Fatal("warnings-only must not count as errors")

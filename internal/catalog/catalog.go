@@ -101,6 +101,16 @@ func (c *Catalog) Len() int {
 	return len(c.entries)
 }
 
+// Entries returns a snapshot of the currently-indexed entries. Used by callers
+// that validate catalog content out-of-band (kbvalidate at load time).
+func (c *Catalog) Entries() []Entry {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	out := make([]Entry, len(c.entries))
+	copy(out, c.entries)
+	return out
+}
+
 // Ready reports whether the catalog has completed at least one successful load.
 // It stays false for a git-sync catalog (NewEmpty) until the first sync indexes,
 // so readyz can keep the leader out of rotation until its KB is warm.
