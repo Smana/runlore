@@ -7,7 +7,7 @@
 
 | | |
 |---|---|
-| **Status** | Draft `v0.1` (design) |
+| **Status** | `v1` — MVP + Phase-2 learning loop shipped (React + Investigate + Learn closed end-to-end; autonomy ladder off/suggest/approve shipped, `auto` gated) |
 | **Date** | 2026-06-20 |
 | **CLI** | `lore` |
 | **Module** | `github.com/Smana/runlore` *(adjustable — could move to a dedicated org)* |
@@ -75,10 +75,12 @@ the reason to build it.
   with no LiteLLM-style multi-broker dependency.
 
 **Non-goals (for now)**
-- Autonomous **remediation** of production — *in the initial versions*. Cluster-mutating actions
-  are off; "writes" in early phases mean *markdown to git via reviewed PR*. This is the **first rung
-  of an autonomy ladder, not a permanent constraint**: the architecture (§9, "Act") is built so
-  *active tools* slot in later behind a policy gate, without re-architecting.
+- **Unattended** remediation of production. The autonomy ladder's lower rungs are **shipped**
+  (`off`/`suggest`/`approve`): in `approve` the agent executes only *reversible* Flux ops
+  (suspend/resume/reconcile) **after explicit human approval**, validated server-side. The top rung
+  (`auto`, execute without approval) **exists but is gated and not recommended on real clusters**
+  (§6, §9). Default remains read-only; "writes" without an approved action mean *markdown to git via
+  reviewed PR*.
 - Being an observability platform. RunLore *reads* your metrics/logs; it doesn't store them.
 - Re-implementing interactive Flux/k8s debugging that `gitops-cluster-debug` + MCPs already do.
 - Multi-agent / A2A orchestration. A single tight investigation loop first.
@@ -238,23 +240,27 @@ To keep the catalog an asset and not a liability (frontier RCA is <50 % accurate
 is down-weighted, and stale entries decay or get re-validated. Curation (the PR/issue review) is
 **load-bearing**, not free — it is the quality gate that separates this from opaque vendor "memory."
 
-### Act — evolve toward (gated) action *(future)*
+### Act — the (gated) autonomy ladder
 
-Read-only is the **starting posture, not the ceiling.** RunLore is designed to climb an **autonomy
-ladder** as eval earns trust — without re-architecting, because an action is just *a tool with extra
-metadata behind a policy gate*:
+Read-only is the **default posture, not the ceiling.** RunLore climbs an **autonomy ladder** as eval
+earns trust — an action is just *a tool with extra metadata behind a policy gate*:
 
 ```
 read-only  →  suggest (PR/command)  →  approve-to-execute (human click)  →  bounded auto
 rung 0         rung 1                   rung 2                              (reversible + low-blast
-(v1)                                                                        + non-critical only)
+(default)      (v1, shipped)           (v1, shipped)                       + non-critical only;
+                                                                            gated, not recommended)
 ```
 
 Every action tool declares `mutating` / `reversible` / `blastRadius` / `target`; an **action policy**
 (mirroring the trigger policy) sets the **mode** (`off | suggest | approve | auto`), scoped by
-environment, reversibility, and blast radius. v1 ships `mode: off` and registers no action tools —
-adding remediation later is *enabling a gated capability + config*, not new architecture. The
-metadata already exists (`providers.Action`, `config.ActionPolicy`) so nothing has to be retrofitted.
+environment, reversibility, and blast radius. **Rungs `off`/`suggest`/`approve` are wired in v1**: in
+`approve`, an approved decision executes a **reversible** Flux op (suspend/resume/reconcile), with
+reversibility/blast-radius/target validated **server-side** (`internal/action`) — never trusted from
+model output. Rung **`auto`** (execute without approval) **exists but is gated** (reversible-only,
+confidence-thresholded, rate-limited, kill-switchable, off by default) and **is not recommended on
+real clusters**. The metadata (`providers.Action`, `config.ActionPolicy`) was in place from day one, so
+none of this was a retrofit.
 
 > **Decision (2026-06-24) — no in-cluster mutating `rollback`.** A reversible "re-pin to the
 > prior revision" op was scoped and rejected. The executor today runs only namespace-scoped,
@@ -359,17 +365,17 @@ KB git repo  ──syncer──►  local mirror  ──build──►  index:  
   results, op, target, actor, outcome — is a hash-chained JSON line, so edits/deletions are detectable.
 - **Honest uncertainty.** `unresolved` is a first-class output field; the agent says what it doesn't
   know rather than hallucinating.
-**Designed to evolve — the autonomy ladder.** Read-only-first is rung 0, not the ceiling. When action
-tools are introduced (Phase 4+), they are gated by an **action capability model** + **action policy**
-(`providers.Action` + `config.ActionPolicy`):
+**The autonomy ladder.** Read-only is the default rung, not the ceiling. Action tools are gated by an
+**action capability model** + **action policy** (`providers.Action` + `config.ActionPolicy`):
 - every action declares `mutating` / `reversible` / `blastRadius` / `target`;
 - the policy sets the **mode** (`off | suggest | approve | auto`), scoped by environment,
   reversibility, and blast radius — **irreversibility is the trip-wire for mandatory human approval**;
-- **dry-run / preview by default**, **append-only audit**, and **rollback** for anything applied;
+- **dry-run / preview by default**, **append-only audit**, and reversibility for anything applied;
 - scoped agent identity (RBAC) is the hard backstop regardless of policy.
 
-These types exist from day one (carrying no enabled actions in v1) precisely so the read-only→active
-evolution needs no retrofit.
+`off`/`suggest`/`approve` are **shipped in v1** (the executor runs only reversible Flux ops, behind
+human approval); `auto` exists but is **gated and not recommended on real clusters**. The capability
+metadata was present from day one, so reaching the higher rungs needed no retrofit.
 
 ## 10. Evaluation
 
@@ -393,14 +399,14 @@ as the baseline and makes failure handling a first-class primitive.
   `anthropic-sdk-go` + `openai-go` (models).
 - Distribution: single binary + container image + **Helm chart** (`deploy/helm/runlore`).
 
-## 12. Phased roadmap (read-only throughout P1–P3)
+## 12. Phased roadmap (read-only by default; autonomy ladder's lower rungs shipped)
 
 | Pillar | Phase 1 (MVP) | Phase 2 | Phase 3 | Phase 4 |
 |---|---|---|---|---|
 | **React** | Incident-triggered (Alertmanager/VMAlert) + **trigger policy** (env/severity/namespace/label filters + dedup) | + GitOps-failure events, chat mention (Slack/Matrix), `lore investigate` | + proactive SLO-burn watch | — |
 | **Investigate** | what-changed spine + VM/VL/Hubble correlation + OKF-runbook grounding + confidence/`unresolved` | + ArgoCD + Prometheus providers proven | + cloud context (native SDKs: AWS/GCP/Azure) + cross-incident pattern recognition | — |
 | **Learn** | catalog **read** (cached index, instant recall) | catalog **write** (confidence-routed Issue/PR curation) — *loop closes* | hybrid vector retrieval, auto-curated playbooks, postmortems | — |
-| **Act** | rung 0: read-only (no action tools) | — | — | climb the ladder: suggest → approve-to-execute → bounded reversible auto (eval-earned, policy-gated) |
+| **Act** | rung 0: read-only (default) | **shipped:** suggest + approve-to-execute (reversible Flux ops, human-approved, server-authoritative); `auto` exists but gated/not recommended | — | further rungs as eval earns trust (policy-gated) |
 
 Phase 1 headline: *an alert fires → RunLore investigates by correlating what-changed with
 metrics/logs → posts a confidence-scored RCA + suggested rollback to chat (Slack/Matrix), grounded in the catalog.*
