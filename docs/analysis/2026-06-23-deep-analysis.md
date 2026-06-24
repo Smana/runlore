@@ -41,7 +41,7 @@ The **design docs are excellent** — honest about prior art (HolmesGPT, k8sgpt,
 | **Capture (A1)** — outcome ledger open/resolve | ✅ wired | `ledger.Open` `main.go:1058`; `ledger.Resolve` `server.go:374` |
 | **Curate (file-time)** — dedup → quality gate → PR | ✅ wired | `Curator.Curate` `main.go:1096` |
 | **Curate (Phase-2)** — backlog groom | ✅ **Dedup + Lifecycle wired** (was: only Dedup) | `runCurate`; opt-in `lore curate` CronJob (PR #86) |
-| **Curate (Phase-2)** — `Queue` / `Recurrence` | 🟡 **DORMANT** (tested, unwired) | deferred by design — need a resolution join / idempotent ledger driver (`Lifecycle` now wired via `updated_at`) |
+| **Curate (Phase-2)** — `Queue` / `Recurrence` | ✅ **wired** (was: dormant) | ledger-backed via `Episodes()` — Queue: exact-title resolution join; Recurrence: idempotent existence-check (PR #92) |
 | **Compound** — git-sync → bleve reindex | ✅ wired (HEAD-gated, was: every-poll) | re-indexes only on real HEAD change; readiness gated on catalog warmth (PR #82) |
 | **A2** — outcome → recall ranking / decay | ✅ **BUILT** (was: ❌ UNBUILT) | `Episodes()`/`OpenCounts()` (PR #71) feed `outcomeFactor` → `deriveRecallConfidence` decay (PR #72) |
 
@@ -194,7 +194,7 @@ Effort: **S** ≤1 day · **M** 2–4 days · **L** ≥1 week. Impact is on the 
 | 15 | loop cost — hard token kill | ✅ merged (PR #76) |
 | 7 | eval into CI (nightly k-of-n + fail-under) | ✅ merged (PR #81) — nightly+dispatch workflow; needs the `RUNLORE_EVAL_API_KEY` secret to run |
 | 11 | curation dedup fingerprint | ✅ merged (PR #83) |
-| 12 | curation Phase-2 — `lore curate` CronJob + dormant passes | 🟡 **partial** (PR #86) — scheduler (opt-in CronJob) + Lifecycle sweep wired; **Queue + Recurrence still deferred** (see below) |
+| 12 | curation Phase-2 — `lore curate` CronJob + dormant passes | ✅ **merged** (PR #86 scheduler + Dedup/Lifecycle; PR #92 Queue + Recurrence) — all four passes wired |
 | 13 | confirmatory evidence on recall | ✅ merged (PR #84) |
 | 16 | `Verified`/provenance in `meetsBar` | ✅ merged (PR #85) |
 | 17 | reversible `rollback` op | ❎ **won't build** (decided 2026-06-24) — in-cluster re-pin fights the safety model + diverges cluster↔Git; remediation stays read-only. See §9.4 |
@@ -203,8 +203,8 @@ Effort: **S** ≤1 day · **M** 2–4 days · **L** ≥1 week. Impact is on the 
 Specs/plans for each merged item live under `docs/superpowers/specs/` and `docs/superpowers/plans/` on `main`.
 
 **Remaining work:**
-- **#17 (reversible `rollback`)** — **decided against** (2026-06-24). A scoped brainstorm found the in-cluster re-pin can't fit the safety model cleanly; remediation stays read-only / propose-and-approve. Full rationale in §9.4 and `docs/design.md` (the "Act" section).
-- **#12's deferred passes** — `Queue` (`ResolutionChecker`) needs a PR↔incident resolution join (the #11 dup-fingerprint ≠ the ledger's alert-fingerprint; or a cluster-state checker); `Recurrence` needs an idempotent ledger-backed driver over `Episodes()` (a watermark or gap-issue existence-check). Both stay implemented + unit-tested in `internal/curate`; `runCurate`'s comment states each blocker. Scoped this way because their correct wiring is a genuine product decision, not mechanical.
+- **#17 (reversible `rollback`)** — **decided against** (2026-06-24). A scoped brainstorm found the in-cluster re-pin can't fit the safety model cleanly; remediation stays read-only / propose-and-approve. Full rationale in §9.4 and `docs/design.md` (the "Act" section). *This is the only roadmap item not shipped.*
+- **#12's Queue + Recurrence** — ✅ **wired** (PR #92, 2026-06-24), ledger-backed via `Episodes()`: Queue resolves a PR's incident by exact-title match against the ledger; Recurrence opens a knowledge-gap issue idempotently via an existing-issue check. The chosen exact-title join is coarser than the incident fingerprint (a human-gated promotion can fire slightly early on coalesced/cross-namespace incidents) — a documented tradeoff; the fingerprint-precise variant remains a possible future refinement.
 - **Nightly eval (#7)** runs once the `RUNLORE_EVAL_API_KEY` repo secret is set (it drives a live LLM, so it can't gate fork PRs and isn't a per-PR blocker — by design).
 
 ### 9.1 Ranked improvements
@@ -269,7 +269,7 @@ Wave 3 — Compound faster + harden
   ├─ ✅ #7  eval into CI ....................... S [needs 4,5]
   ├─ ✅ #4  entity-level precision in eval ..... M (Track A; landed ahead of #7)
   ├─ ✅ #11 deterministic dedup fingerprint .... M [needs 2]
-  ├─ 🟡 #12 curate CronJob + lifecycle ........ M [needs 8] (Queue+Recurrence deferred)
+  ├─ ✅ #12 curate CronJob + all 4 passes ..... M [needs 8] (Queue+Recurrence wired, PR #92)
   └─ ✅ #16 Verified/provenance in meetsBar .... M
 
 Wave 4 — Reliability & durability (parallel, independent)
@@ -279,7 +279,7 @@ Wave 4 — Reliability & durability (parallel, independent)
   └─ ❎ #17 reversible rollback op (product) ... L  ← decided against (§9.4)
 ```
 
-> **Status (2026-06-24, updated):** Waves 0–4 complete; **#17 decided against** (§9.4) and #12's Queue+Recurrence passes intentionally deferred. The eval-validity cluster (#4/#5/#6) is done; the full k3d e2e passes (PASS=40 FAIL=0). See §9.0 for the per-item PR map and remaining-work notes.
+> **Status (2026-06-24, updated):** Waves 0–4 complete; **17 of 18 items shipped** — only **#17 is decided against** (§9.4). #12's Queue + Recurrence passes are now wired (PR #92), so all four Phase-2 passes are live. The eval-validity cluster (#4/#5/#6) is done; the full k3d e2e passes (PASS=40 FAIL=0). See §9.0 for the per-item PR map and remaining-work notes.
 
 **Fastest credible "we learn" demo:** Wave 0 + Slice 2 + Slice 5 + #9 — a poisoned/stale entry recalls, never resolves, decays below the floor on the next occurrence, triggers a fresh re-investigation that overturns it, observable in the eval harness *and* on the entry's git frontmatter.
 
