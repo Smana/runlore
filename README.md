@@ -57,7 +57,8 @@ Two things make this **learning**, not note-taking: **outcomes feed back** (a no
 from its real-world resolve-rate, and a note that keeps failing *decays* out of use), and **knowledge is
 yours** — portable markdown in *your* Git, PR-reviewed, provenance-tracked, never opaque vendor memory.
 
-→ Deep dive: **[How the learning loop works](docs/learning-loop.md)**.
+→ Deep dive: **[How the learning loop works](docs/learning-loop.md)**
+ · 👉 Your part: **[Reviewing & approving knowledge](docs/reviewing-knowledge.md)**.
 
 ## How it works
 
@@ -146,7 +147,7 @@ lore investigate --alert HarborProbeFailure --namespace apps --config runlore.ya
 
 ## Docs
 
-📐 [Design](docs/design.md) · 📚 [Learning loop](docs/learning-loop.md) · 🚀 [Getting started](docs/getting-started.md) ·
+📐 [Design](docs/design.md) · 📚 [Learning loop](docs/learning-loop.md) · ✅ [Reviewing knowledge](docs/reviewing-knowledge.md) · 🚀 [Getting started](docs/getting-started.md) ·
 🔌 [Data sources](docs/data-sources.md) · 📊 [Observability](docs/observability.md) ·
 🧭 [Prior art](docs/prior-art.md) · 🛠 [Contributing](CONTRIBUTING.md)
 
