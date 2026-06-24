@@ -175,7 +175,30 @@ rbac:
 # CIDRs in production. Disable if you manage network policy out of band.
 networkPolicy:
   enabled: true
-  extraEgress: []   # appended verbatim, e.g. a specific model endpoint CIDR
+  # Strict egress. false (default): the agent may egress to ANY destination on 443/6443
+  # (the Kubernetes API plus your model / git-forge / observability endpoints) — it works
+  # out of the box. true: DENY egress by default and allow ONLY the destinations declared
+  # under `egress` below — you MUST then list your model/forge/observability endpoints, or
+  # the agent cannot reach them. DNS is scoped to the cluster DNS service in BOTH modes.
+  strict: false
+  egress:
+    # DNS egress is scoped to the cluster DNS service by default — a safe, free hardening
+    # applied in both modes. If your DNS pods use different labels, override the selectors;
+    # set toClusterDNS: false to allow port 53 to any destination.
+    dns:
+      toClusterDNS: true
+      namespaceSelector:
+        matchLabels:
+          kubernetes.io/metadata.name: kube-system
+      podSelector:
+        matchLabels:
+          k8s-app: kube-dns
+    # The lists below are consulted ONLY under strict: true — declare where the agent may
+    # reach out so the empty-by-default deny still lets real traffic through.
+    allowedCIDRs: []        # off-cluster endpoints on 443 (model API, git forge, observability), e.g. ["203.0.113.10/32"]
+    namespaceSelectors: []  # in-cluster backends on 443, e.g. [{ matchLabels: { kubernetes.io/metadata.name: monitoring } }]
+    apiServerCIDRs: []      # the Kubernetes API server endpoint(s) on 6443, e.g. ["10.0.0.1/32"]
+  extraEgress: []   # appended verbatim in BOTH modes — the escape hatch for anything custom
   # Render a CiliumNetworkPolicy allowing egress to the EKS Pod Identity credential
   # endpoint (host entity, 169.254.170.23:80). Required for the AWS cloud provider
   # on Cilium clusters — a plain NetworkPolicy can't match the host-network target.
