@@ -30,6 +30,13 @@ config:
         window: 30m
     gitops_failures:
       enabled: true
+      # Debounce transient Flux failures: wait this long, then re-read the
+      # resource's Ready status and investigate only if it is STILL Ready=False.
+      # Filters reconcile-churn transients (e.g. a brief HealthCheckCanceled or an
+      # ArtifactFailed while a new artifact is mid-checkout) that clear on their own
+      # and would otherwise drive confident-but-wrong root causes. Defaults to 60s
+      # when omitted; set 0 to fire immediately on every Ready=False.
+      debounce: 60s
   # HA: only the elected leader runs the informer + investigation queue and reports
   # ready (the Service then routes webhooks to the leader). Harmless with 1 replica.
   leader_election:

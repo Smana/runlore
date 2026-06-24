@@ -27,8 +27,14 @@ func isCascadeFailure(fe providers.FailureEvent) bool {
 // DrainFailures forwards GitOps FailureEvents into the queue as investigation
 // requests. It drops dependency-cascade symptoms (so only root failures are
 // investigated) and dedups by workload (a Ready=False resource emits repeated
-// events). A nil dedup disables dedup. It returns when src closes or ctx is done.
-func DrainFailures(ctx context.Context, src <-chan providers.FailureEvent, q Enqueuer, dedup *trigger.Deduper, log *slog.Logger) {
+// events). A nil dedup disables dedup.
+//
+// When deb is non-nil with a positive window, each surviving failure is
+// debounced: the investigation is enqueued only after the failure has PERSISTED
+// (re-checked still-Ready=False after the window), filtering reconcile-churn
+// transients. A nil deb (or a zero-window one) enqueues immediately — today's
+// behavior. It returns when src closes or ctx is done.
+func DrainFailures(ctx context.Context, src <-chan providers.FailureEvent, q Enqueuer, dedup *trigger.Deduper, deb *Debouncer, log *slog.Logger) {
 	for {
 		select {
 		case <-ctx.Done():
@@ -47,7 +53,15 @@ func DrainFailures(ctx context.Context, src <-chan providers.FailureEvent, q Enq
 			if dedup != nil && dedup.Seen(fe.Workload.Namespace+"/"+fe.Workload.Name) {
 				continue
 			}
-			q.Enqueue(FromFailureEvent(fe))
+			r := FromFailureEvent(fe)
+			if deb != nil {
+				// Debounce per failing workload in its own goroutine so the drain loop
+				// keeps consuming events (and dedup keeps collapsing repeats) during the
+				// wait; Debounce no-ops the wait when the window is 0.
+				go deb.Debounce(ctx, r, q)
+				continue
+			}
+			q.Enqueue(r)
 		}
 	}
 }

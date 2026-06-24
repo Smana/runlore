@@ -249,8 +249,18 @@ type GitOps struct {
 
 // TriggerPolicy decides what RunLore reacts to.
 type TriggerPolicy struct {
-	Incidents      IncidentTrigger `yaml:"incidents"`       // primary trigger
-	GitOpsFailures Toggle          `yaml:"gitops_failures"` // secondary trigger
+	Incidents      IncidentTrigger      `yaml:"incidents"`       // primary trigger
+	GitOpsFailures GitOpsFailureTrigger `yaml:"gitops_failures"` // secondary trigger
+}
+
+// GitOpsFailureTrigger gates GitOps-failure-driven investigations. Debounce
+// delays an investigation until the failure has persisted for that window
+// (re-checked still Ready=False), filtering reconcile-churn transients that
+// would otherwise produce confident-but-wrong root causes. A zero Debounce
+// fires immediately on every Ready=False (the original behavior).
+type GitOpsFailureTrigger struct {
+	Enabled  bool     `yaml:"enabled"`
+	Debounce Duration `yaml:"debounce"` // persistence window before investigating; 0 = fire immediately
 }
 
 // IncidentTrigger gates incident/alert-driven investigations.
@@ -273,11 +283,6 @@ type IncidentMatch struct {
 // Dedup suppresses re-investigation of a still-firing alert within Window.
 type Dedup struct {
 	Window Duration `yaml:"window"`
-}
-
-// Toggle is a simple on/off switch.
-type Toggle struct {
-	Enabled bool `yaml:"enabled"`
 }
 
 // Incident is the normalized trigger input (from Alertmanager/VMAlert).
