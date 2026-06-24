@@ -6,7 +6,7 @@
 | **Date** | 2026-06-23 |
 | **Scope** | Make the catalog index actually run **BM25** (it silently runs legacy TF-IDF), prove it with a test, and add observability for the always-on curator dedup so the score floors can be re-fit from live data in a follow-up. **Re-tuning any floor is explicitly out of scope.** |
 | **Author** | Smana (brainstormed with Claude) |
-| **Related** | The deep-analysis report (`docs/analysis/2026-06-23-deep-analysis.md`) finding #1 / Slice 1 — corroborated by 3 critique lenses; `internal/catalog/catalog.go`; `internal/investigate/recall.go` (recall floors, opt-in); `internal/curator/curator.go` + `internal/curator/fingerprint.go` (`DupScore`, always-on); `internal/telemetry/metrics.go` (`recall_score` pattern this mirrors); the recall-trustworthiness spec (`2026-06-22-recall-trustworthiness-design.md`) whose "corpus-portable margin" premise depends on the scorer |
+| **Related** | The deep-analysis report (retired report) finding #1 / Slice 1 — corroborated by 3 critique lenses; `internal/catalog/catalog.go`; `internal/investigate/recall.go` (recall floors, opt-in); `internal/curator/curator.go` + `internal/curator/fingerprint.go` (`DupScore`, always-on); `internal/telemetry/metrics.go` (`recall_score` pattern this mirrors); the recall-trustworthiness spec (`2026-06-22-recall-trustworthiness-design.md`) whose "corpus-portable margin" premise depends on the scorer |
 
 ---
 

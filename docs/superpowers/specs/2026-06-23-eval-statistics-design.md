@@ -6,7 +6,7 @@
 | **Date** | 2026-06-23 |
 | **Scope** | Make a live-eval "pass" a statistically meaningful measurement: raise the default N, replace the bare-median gate with a k-of-n pass rule, fail "flaky" scenarios whose root-cause variance is high, and state N in the report. Confined to `internal/eval/live.go`, `internal/eval/report.go`, and the `-n` default in `cmd/lore/main.go`. |
 | **Author** | Smana (brainstormed with Claude) |
-| **Related** | Deep-analysis report (`docs/analysis/2026-06-23-deep-analysis.md`) roadmap #5 / "N=3 bare-median gate is statistically meaningless"; the eval harness (`internal/eval`); the separate #4 (entity-level precision / raise the per-run bar) and #7 (wire eval into CI) slices that build on this |
+| **Related** | Deep-analysis report (retired report) roadmap #5 / "N=3 bare-median gate is statistically meaningless"; the eval harness (`internal/eval`); the separate #4 (entity-level precision / raise the per-run bar) and #7 (wire eval into CI) slices that build on this |
 
 ---
 

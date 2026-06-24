@@ -6,7 +6,7 @@
 | **Date** | 2026-06-23 |
 | **Scope** | Make the live-eval harness actually exercise the instant-recall short-circuit (today it's dropped, so none of the recall work is eval-tested), and prove with unit tests that it fires AND that a poisoned catalog entry is caught by the verify pass. Confined to `internal/eval/live.go`, `cmd/lore/main.go` (`runEvalLive`), and `internal/eval/live_test.go`. |
 | **Author** | Smana (brainstormed with Claude) |
-| **Related** | Deep-analysis report (`docs/analysis/2026-06-23-deep-analysis.md`) roadmap #6 / "the recall closed-loop scenario tests a code path that is structurally bypassed in eval"; the recall slices (BM25/decay/disambiguation/retrieval); eval-statistics (#5, the gate this runs under); next: #4 entity-precision, #7 CI |
+| **Related** | Deep-analysis report (retired report) roadmap #6 / "the recall closed-loop scenario tests a code path that is structurally bypassed in eval"; the recall slices (BM25/decay/disambiguation/retrieval); eval-statistics (#5, the gate this runs under); next: #4 entity-precision, #7 CI |
 
 ---
 
