@@ -145,16 +145,26 @@ func (li *LoopInvestigator) Investigate(ctx context.Context, req Request) error 
 				case li.Verify && rec.Confidence < initialConfidence:
 					recallResult = "downgraded"
 				}
-				saved := int64(li.MaxTokensPerInvestigation)
-				if saved == 0 {
-					saved = defaultRecallTokensSavedEstimate // conservative proxy when budget is unconfigured
-				}
 				m.RecallHits.Add(ctx, 1, metric.WithAttributes(attribute.String("result", recallResult)))
-				m.RecallTokensSaved.Add(ctx, saved)
+				if len(rec.RootCauses) > 0 {
+					// Tokens are only "saved" when the recall actually short-circuits the loop.
+					saved := int64(li.MaxTokensPerInvestigation)
+					if saved == 0 {
+						saved = defaultRecallTokensSavedEstimate // conservative proxy when budget is unconfigured
+					}
+					m.RecallTokensSaved.Add(ctx, saved)
+				}
 			}
-			result = "recall"
-			li.deliver(req, rec)
-			return nil
+			if len(rec.RootCauses) > 0 {
+				result = "recall"
+				li.deliver(req, rec)
+				return nil
+			}
+			// The adversarial verify pass rejected every recalled root cause (a stale or
+			// poisoned catalog entry). Don't deliver an empty finding — fall through to a
+			// full investigation, the intended fail-safe ("verify guards recall").
+			li.Log.Info("instant recall rejected by verify; running full investigation",
+				"title", req.Title, "entry", entry.Path)
 		}
 	}
 	byName := map[string]Tool{}
