@@ -22,6 +22,7 @@ type Metrics struct {
 	InvestigationsStarted     metric.Int64Counter
 	InvestigationsThrottled   metric.Int64Counter
 	InvestigationsDropped     metric.Int64Counter
+	GitOpsFailuresDebounced   metric.Int64Counter // GitOps failures dropped as transient (cleared within the debounce window)
 	ToolOutputTruncatedBytes  metric.Int64Counter
 	RecallHits                metric.Int64Counter // KB cache hits, labelled by verify result
 	RecallTokensSaved         metric.Int64Counter // estimated tokens saved by a recall short-circuit
@@ -67,6 +68,7 @@ func NewMetrics() *Metrics {
 		InvestigationsStarted:     ctr("investigations_started_total", "investigations actually begun"),
 		InvestigationsThrottled:   ctr("investigations_throttled_total", "starts requeued by the rate limiter"),
 		InvestigationsDropped:     ctr("investigations_dropped_total", "investigations dropped — rate-limiter max_requeues or token-budget hard-kill"),
+		GitOpsFailuresDebounced:   ctr("gitops_failures_debounced_total", "GitOps failures dropped as transient: cleared within the debounce window before investigating"),
 		ToolOutputTruncatedBytes:  ctr("tool_output_truncated_bytes_total", "bytes elided by output truncation"),
 		RecallHits:                ctr("recall_hits_total", "KB instant-recall short-circuits (label: result)"),
 		RecallTokensSaved:         ctr("recall_tokens_saved_total", "estimated tokens saved by recall short-circuits"),

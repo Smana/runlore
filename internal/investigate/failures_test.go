@@ -26,7 +26,7 @@ func TestDrainFailures(t *testing.T) {
 	close(src)
 
 	enq := &collectEnqueuer{}
-	DrainFailures(context.Background(), src, enq, trigger.NewDeduper(30*time.Minute), discardLog)
+	DrainFailures(context.Background(), src, enq, trigger.NewDeduper(30*time.Minute), nil, discardLog)
 
 	if len(enq.reqs) != 2 {
 		t.Fatalf("want 2 enqueued (one deduped), got %d", len(enq.reqs))
@@ -46,7 +46,7 @@ func TestDrainFailuresSkipsCascades(t *testing.T) {
 	close(src)
 
 	enq := &collectEnqueuer{}
-	DrainFailures(context.Background(), src, enq, trigger.NewDeduper(30*time.Minute), discardLog)
+	DrainFailures(context.Background(), src, enq, trigger.NewDeduper(30*time.Minute), nil, discardLog)
 
 	if len(enq.reqs) != 1 || enq.reqs[0].Workload.Name != "crds" {
 		t.Fatalf("want only the root 'crds' failure enqueued, got %+v", enq.reqs)
