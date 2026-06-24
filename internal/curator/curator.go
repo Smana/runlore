@@ -10,6 +10,9 @@ import (
 	"fmt"
 	"log/slog"
 
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/metric"
+
 	"github.com/Smana/runlore/internal/catalog"
 	"github.com/Smana/runlore/internal/providers"
 	"github.com/Smana/runlore/internal/telemetry"
@@ -64,9 +67,11 @@ func (c *Curator) Curate(ctx context.Context, inv providers.Investigation) (prov
 		c.Log.Warn("dedup: list open PRs failed", "err", err)
 	} else if ok {
 		if err := c.Forge.Comment(ctx, n, coalesceComment(inv)); err != nil {
+			c.recordCuration(ctx, "pr", "error")
 			return providers.Ref{}, fmt.Errorf("coalesce comment: %w", err)
 		}
 		c.Log.Info("finding coalesced onto an open PR", "pr", n)
+		c.recordCuration(ctx, "pr", "coalesced")
 		return providers.Ref{}, nil
 	}
 
@@ -74,10 +79,22 @@ func (c *Curator) Curate(ctx context.Context, inv providers.Investigation) (prov
 	// later advances solved/resolved/ready-to-merge — Phase 2, not here)
 	ref, err := c.Forge.OpenPR(ctx, draftKBEntry(inv))
 	if err != nil {
+		c.recordCuration(ctx, "pr", "error")
 		return providers.Ref{}, fmt.Errorf("open PR: %w", err)
 	}
 	c.Log.Info("curated as PR", "url", ref.URL, "confidence", inv.Confidence)
+	c.recordCuration(ctx, "pr", "opened")
 	return ref, nil
+}
+
+// recordCuration increments the curations_total counter (nil-safe). kind is the
+// forge artifact (e.g. "pr"); result is opened | coalesced | error.
+func (c *Curator) recordCuration(ctx context.Context, kind, result string) {
+	if c.Metrics == nil {
+		return
+	}
+	c.Metrics.Curations.Add(ctx, 1, metric.WithAttributes(
+		attribute.String("kind", kind), attribute.String("result", result)))
 }
 
 // duplicateOpenPR reports an open KB PR whose stored dedup fingerprint matches this
