@@ -778,11 +778,10 @@ func buildCurator(cfg *config.Config, token forgeToken, cat *catalog.Catalog, me
 
 // runCurate grooms the KB backlog (Phase-2 curation agent). It runs the
 // backlog-dedup pass (collapses duplicate open PRs across history) and the
-// lifecycle sweep (closes stale, unprotected PRs by forge age). The
-// resolution-gated decision-ready queue and the recurrence→gap-issue pass are
-// implemented + tested in internal/curate but still need wiring: Queue needs a
-// ResolutionChecker (alert/ledger join), Recurrence needs an idempotent
-// ledger-backed driver over Episodes() — follow-up.
+// lifecycle sweep (closes stale, unprotected PRs by forge age). When
+// outcome.ledger_path is configured, it also runs the Queue pass (promotes
+// solved→ready-to-merge when the incident resolves) and the Recurrence pass
+// (opens a knowledge-gap issue for repeatedly-unresolved patterns).
 func runCurate(args []string) error {
 	fs := flag.NewFlagSet("curate", flag.ContinueOnError)
 	cfgPath := fs.String("config", "runlore.yaml", "path to config file")
@@ -817,6 +816,20 @@ func runCurate(args []string) error {
 		curate.Dedup{Forge: forge, Log: log},
 		curate.Lifecycle{Forge: forge, StaleAfter: cfg.Curate.StaleAfter.Std(), Log: log},
 	}}
+	// Queue + Recurrence read the outcome ledger; wire them only when it is configured.
+	if cfg.Outcome.LedgerPath != "" {
+		ledger, lerr := outcome.New(cfg.Outcome.LedgerPath)
+		if lerr != nil {
+			return fmt.Errorf("open outcome ledger %q: %w", cfg.Outcome.LedgerPath, lerr)
+		}
+		agent.Passes = append(agent.Passes,
+			curate.Queue{Forge: forge, Checker: curate.LedgerResolutionChecker{Ledger: ledger}, Log: log},
+			curate.Recurrence{Forge: forge, Ledger: ledger, Threshold: cfg.Curate.RecurrenceThreshold, Log: log},
+		)
+		log.Info("curate: Queue + Recurrence enabled", "ledger", cfg.Outcome.LedgerPath)
+	} else {
+		log.Info("curate: outcome ledger not configured; Queue + Recurrence passes skipped")
+	}
 	log.Info("curate: grooming KB backlog", "repo", cfg.Forge.KBRepo)
 	agent.Run(context.Background())
 	return nil
