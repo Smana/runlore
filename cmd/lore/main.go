@@ -1207,16 +1207,22 @@ func buildInvestigator(ctx context.Context, cfg *config.Config, gp providers.Git
 			if len(fps) > 0 {
 				kind := outcomeKind(found.Recalled)
 				now := time.Now()
+				// The deterministic dedup fingerprint (resource+cause) is the curated PR's
+				// stable resolution-join key: it is the same value draftKBEntry stamps into
+				// the PR body, so a later resolve matches the PR regardless of the LLM's
+				// re-worded title. Computed once for the whole batch.
+				dupFP := curator.DupFingerprint(found)
 				// One open per constituent fingerprint (coalesced batches fan out), so
 				// every alert's resolve webhook can later match this investigation.
 				for _, fp := range fps {
 					if err := ledger.Open(outcome.Event{
-						Fingerprint: fp,
-						Kind:        kind,
-						Entry:       found.RecalledEntry,
-						Title:       found.Title,
-						Resource:    found.Resource.Ref(),
-						At:          now,
+						Fingerprint:    fp,
+						DupFingerprint: dupFP,
+						Kind:           kind,
+						Entry:          found.RecalledEntry,
+						Title:          found.Title,
+						Resource:       found.Resource.Ref(),
+						At:             now,
 					}); err != nil {
 						log.Warn("outcome ledger open failed", "fingerprint", fp, "err", err)
 					}
