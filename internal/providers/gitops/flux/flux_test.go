@@ -31,6 +31,9 @@ func TestParseRevision(t *testing.T) {
 type fakeReader struct {
 	ks  []kustomization
 	grs map[string]gitRepository // key: namespace/name
+	// srcRevs maps "kind/namespace/name" → the source's current artifact
+	// revision (status.artifact.revision). Absent entries return an error.
+	srcRevs map[string]string
 }
 
 func (f fakeReader) ListKustomizations(context.Context) ([]kustomization, error) { return f.ks, nil }
@@ -39,6 +42,12 @@ func (f fakeReader) GetGitRepository(_ context.Context, ns, name string) (gitRep
 		return gr, nil
 	}
 	return gitRepository{}, fmt.Errorf("gitrepository %s/%s not found", ns, name)
+}
+func (f fakeReader) SourceRevision(_ context.Context, kind, ns, name string) (string, error) {
+	if rev, ok := f.srcRevs[kind+"/"+ns+"/"+name]; ok {
+		return rev, nil
+	}
+	return "", fmt.Errorf("source %s/%s/%s revision not found", kind, ns, name)
 }
 func (f fakeReader) WatchKustomizations(context.Context) (<-chan KustomizationEvent, error) {
 	ch := make(chan KustomizationEvent)
@@ -80,6 +89,76 @@ func TestProviderChanges(t *testing.T) {
 	}
 	if c.ToRev != "abc123" || c.FromRev != "" {
 		t.Fatalf("unexpected revs: from=%q to=%q", c.FromRev, c.ToRev)
+	}
+}
+
+// TestProviderChangesFailingKustomizationSpansGap covers the core bug: a failing
+// Kustomization keeps status.lastAppliedRevision pinned to the last HEALTHY commit
+// (Flux does NOT advance it on a health-check failure). Keying "what changed" on
+// lastAppliedRevision alone diffs the pre-break commit and misses the breaking one.
+// For a failing Kustomization whose source HEAD differs from lastApplied, the Change
+// must span lastApplied..HEAD; otherwise behavior is unchanged.
+func TestProviderChangesFailingKustomizationSpansGap(t *testing.T) {
+	const url = "https://github.com/org/repo"
+	cases := []struct {
+		name        string
+		readyStatus string
+		lastApplied string // status.lastAppliedRevision
+		srcHead     string // source status.artifact.revision (current synced HEAD)
+		wantFrom    string
+		wantTo      string
+	}{
+		{
+			// The bug repro: failing health check, HEAD (B) is past lastApplied (A).
+			name:        "failing with source ahead spans lastApplied..HEAD",
+			readyStatus: "False", lastApplied: "main@sha1:aaa", srcHead: "main@sha1:bbb",
+			wantFrom: "aaa", wantTo: "bbb",
+		},
+		{
+			// Healthy: keep today's behavior exactly (diff the change introduced by ToRev).
+			name:        "healthy keeps single-rev behavior",
+			readyStatus: "True", lastApplied: "main@sha1:aaa", srcHead: "main@sha1:bbb",
+			wantFrom: "", wantTo: "aaa",
+		},
+		{
+			// Failing but source HEAD == lastApplied: no real gap, no false span.
+			name:        "failing with source equal to lastApplied keeps single-rev behavior",
+			readyStatus: "False", lastApplied: "main@sha1:aaa", srcHead: "main@sha1:aaa",
+			wantFrom: "", wantTo: "aaa",
+		},
+		{
+			// Ready != True (the spec's "failing" predicate) also covers Unknown
+			// (e.g. reconciling/progressing): span the gap so an in-flight breaking
+			// commit past the last-applied one is surfaced rather than missed.
+			name:        "ready-unknown with source ahead spans lastApplied..HEAD",
+			readyStatus: "Unknown", lastApplied: "main@sha1:aaa", srcHead: "main@sha1:bbb",
+			wantFrom: "aaa", wantTo: "bbb",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			r := fakeReader{
+				ks: []kustomization{{
+					Name: "apps", Namespace: "flux-system", Path: "./apps",
+					SourceKind: "GitRepository", SourceName: "flux-system", SourceNamespace: "flux-system",
+					Revision: tc.lastApplied, ReadyStatus: tc.readyStatus,
+				}},
+				grs:     map[string]gitRepository{"flux-system/flux-system": {URL: url}},
+				srcRevs: map[string]string{"GitRepository/flux-system/flux-system": tc.srcHead},
+			}
+			p := New(r, &whatchanged.Differ{})
+			changes, err := p.Changes(context.Background(), providers.TimeWindow{}, providers.Selector{})
+			if err != nil {
+				t.Fatalf("Changes: %v", err)
+			}
+			if len(changes) != 1 {
+				t.Fatalf("want 1 change, got %d", len(changes))
+			}
+			if changes[0].FromRev != tc.wantFrom || changes[0].ToRev != tc.wantTo {
+				t.Fatalf("revs: from=%q to=%q, want from=%q to=%q",
+					changes[0].FromRev, changes[0].ToRev, tc.wantFrom, tc.wantTo)
+			}
+		})
 	}
 }
 
