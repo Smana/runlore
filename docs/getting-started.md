@@ -4,6 +4,10 @@ This guide deploys RunLore into a real cluster: it reacts to incidents, investig
 LLM (grounded in your knowledge catalog), delivers findings to chat, and — optionally — curates what
 it learns back to a Git repo as pull requests.
 
+**Running in-cluster (`lore serve`, via Helm) is the recommended way to run RunLore** — that's how it
+reacts to incidents continuously and closes the Learn loop. The CLI (`lore investigate "<symptom>"`) is
+for one-off local runs against the same engine; see [CONTRIBUTING.md](../CONTRIBUTING.md) for that.
+
 RunLore is **read-only on your cluster**: it never mutates workloads. Its only writes go to the Git
 forge (issues/PRs on a repo you designate).
 
@@ -11,35 +15,51 @@ forge (issues/PRs on a repo you designate).
 
 ## Prerequisites
 
-- A Kubernetes cluster running **Flux** or **Argo CD** — select with `config.gitops.engine`
-  (`flux` default, or `argocd`). The what-changed spine + failure trigger read the engine's resources
-  (Flux `Kustomization`/`GitRepository`, or Argo CD `Application`s).
+### Required
+
+- A **Kubernetes cluster running [Flux](https://fluxcd.io/flux/installation/) or
+  [Argo CD](https://argo-cd.readthedocs.io/en/stable/getting_started/)** — select with
+  `config.gitops.engine` (`flux` default, or `argocd`). The what-changed spine + failure trigger read
+  the engine's resources (Flux `Kustomization`/`GitRepository`, or Argo CD `Application`s). Any
+  conformant cluster works — EKS, GKE, AKS, or local [k3d](https://k3d.io/) / [kind](https://kind.sigs.k8s.io/)
+  (follow each project's install docs); RunLore only needs Flux or Argo CD running on it.
 - An **LLM** — either an **OpenAI-compatible** endpoint (in-cluster
   [vLLM](https://github.com/vllm-project/vllm), [Ollama](https://ollama.com/), OpenAI, OpenRouter) or
   **native Anthropic** (`model.provider: anthropic`). Keep it in-cluster if you don't want telemetry to
   leave your boundary.
 - `kubectl` + `helm` (v3.12+).
-- Optional: a **metrics** backend (VictoriaMetrics/Prometheus), a **logs** backend (VictoriaLogs),
+
+### Optional (but recommended)
+
+- A **GitHub App** for curation — [step 2](#step-2-github-app-for-curation-optional). **Without it the
+  Learn loop (curation) is disabled**: RunLore still reacts and investigates, but it can't write what it
+  learns back to your KB repo. Since the learning loop is RunLore's differentiator, this is **strongly
+  recommended**.
+
+### Optional
+
+- A **metrics** backend (VictoriaMetrics/Prometheus), a **logs** backend (VictoriaLogs),
   and/or a **network-flow** source — they enable the `query_metrics` / `query_logs` / `network_drops`
   investigation tools. The network signal is **pluggable and CNI-agnostic**: Cilium Hubble, **AWS VPC
   Flow Logs** (any AWS VPC, incl. EKS with the AWS VPC CNI), or **GCP Firewall Logs** (any GCP VPC,
   incl. GKE). RunLore does **not** assume Cilium.
-- Optional: **AWS** read-only access — enables the `cloud_what_changed` (CloudTrail) and
+- **AWS** read-only access — enables the `cloud_what_changed` (CloudTrail) and
   `cloud_resource_health` (EC2/ASG/EKS) tools, the cloud-control-plane "what changed" lens for infra
   changes outside GitOps. Auth is in-cluster identity (**EKS Pod Identity** or IRSA) — no static keys.
   See [step 4b](#step-4b-aws-cloud-provider-optional).
-- Optional: a **Slack incoming webhook** and/or a **Matrix** account for delivery.
-- Optional: a **GitHub App** for curation (the Learn loop) — [step 2](#step-2-github-app-for-curation-optional).
-- Optional: [External Secrets Operator](https://external-secrets.io/) to sync credentials from a vault
+- A **Slack incoming webhook** and/or a **Matrix** account for delivery.
+- [External Secrets Operator](https://external-secrets.io/) to sync credentials from a vault
   (recommended over raw `Secret`s in production).
 
 ---
 
 ## Step 1 — Create the knowledge-catalog repo
 
-RunLore reads (and, with curation, writes) an **[OKF](https://github.com/GoogleCloudPlatform/knowledge-catalog)
-knowledge catalog**: a Git repo of markdown files, each with YAML frontmatter. This is *your* portable
-knowledge base — runbooks, past incidents, platform constraints.
+**This Git repo is where RunLore commits what it learns** — every resolved incident is curated back here
+as a PR (the Learn loop), and the agent reads from it to ground future investigations. It's an
+**[OKF](https://github.com/GoogleCloudPlatform/knowledge-catalog) knowledge catalog**: a Git repo of
+markdown files, each with YAML frontmatter. This is *your* portable knowledge base — runbooks, past
+incidents, platform constraints.
 
 1. Create a new (private) Git repo, e.g. `your-org/runlore-kb`.
 2. Add entries as markdown files — **one file per entry** (YAML frontmatter + a markdown body). Name
@@ -147,6 +167,12 @@ config references each by its env-var name (`api_key_env`, `webhook_url_env`, `p
 ---
 
 ## Step 4 — Configure and install
+
+RunLore installs **in-cluster with one Helm command** (this is the recommended deployment). You give it
+a `values.yaml` and run `helm install` — jump to **[Install](#install)** below if you just want the
+command.
+
+### The configuration you'll provide
 
 Create a `values.yaml`. This is a complete production-style example — trim what you don't use:
 
@@ -287,7 +313,9 @@ config:
     enabled: true
 ```
 
-Install:
+### Install
+
+With the `values.yaml` above, deploy RunLore with a single command:
 
 ```bash
 helm install runlore deploy/helm/runlore -n runlore --create-namespace -f values.yaml
