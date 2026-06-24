@@ -63,10 +63,12 @@ func queueReason(accepted bool) string {
 }
 
 // LedgerResolutionChecker reports a curated PR's incident has resolved when the
-// outcome ledger holds a resolved episode whose title matches the PR's. A curated
-// PR's title is "KB: " + the incident title, and the ledger records each open with
-// that same incident title — so the join is an exact title match. Source-agnostic:
-// it reads the ledger's resolve events, never a trigger-specific API.
+// outcome ledger holds a matching resolved episode. The join is keyed on the
+// deterministic dedup fingerprint (resource+cause) carried in the PR body and stamped
+// on every ledger open — stable across the LLM's prose, so a reworded re-investigation
+// of one incident still resolves the matching PR. A PR filed before the fingerprint
+// was wired carries no marker; it falls back to a whitespace-normalized title join.
+// Source-agnostic: it reads the ledger's episodes, never a trigger-specific API.
 type LedgerResolutionChecker struct {
 	Ledger interface {
 		Episodes() ([]outcome.Episode, error)
@@ -75,8 +77,9 @@ type LedgerResolutionChecker struct {
 
 // IsResolved implements ResolutionChecker.
 func (c LedgerResolutionChecker) IsResolved(_ context.Context, pr providers.CuratedIssue) (bool, error) {
+	wantFP := providers.ParseFingerprintMarker(pr.Body) // "" when the PR carries no marker
 	title := strings.TrimSpace(strings.TrimPrefix(pr.Title, "KB: "))
-	if title == "" {
+	if wantFP == "" && title == "" {
 		return false, nil
 	}
 	eps, err := c.Ledger.Episodes()
@@ -84,7 +87,21 @@ func (c LedgerResolutionChecker) IsResolved(_ context.Context, pr providers.Cura
 		return false, err
 	}
 	for _, e := range eps {
-		if e.Resolved && e.Title == title {
+		if !e.Resolved {
+			continue
+		}
+		// Primary: the stable dedup-fingerprint join. An episode with an empty
+		// fingerprint never equals a non-empty wantFP, so empty never false-matches.
+		if wantFP != "" {
+			if e.DupFingerprint == wantFP {
+				return true, nil
+			}
+			// A marker is present: stay fingerprint-only. Falling through to the title
+			// here would resurrect the very free-text fragility this join removes.
+			continue
+		}
+		// Legacy fallback (no marker): whitespace-robust title equality on both sides.
+		if title != "" && strings.TrimSpace(e.Title) == title {
 			return true, nil
 		}
 	}
