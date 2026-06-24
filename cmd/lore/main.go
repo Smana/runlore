@@ -121,6 +121,11 @@ func main() {
 			fmt.Fprintln(os.Stderr, "curate:", err)
 			os.Exit(1)
 		}
+	case "validate-kb":
+		if err := runValidateKB(os.Args[2:]); err != nil {
+			fmt.Fprintln(os.Stderr, "validate-kb:", err)
+			os.Exit(1)
+		}
 	default:
 		fmt.Fprintf(os.Stderr, "unknown command %q\n\n%s", os.Args[1], usage)
 		os.Exit(2)
