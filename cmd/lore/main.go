@@ -47,6 +47,7 @@ import (
 	"github.com/Smana/runlore/internal/eval"
 	fluxexec "github.com/Smana/runlore/internal/executor/flux"
 	"github.com/Smana/runlore/internal/investigate"
+	"github.com/Smana/runlore/internal/kbvalidate"
 	"github.com/Smana/runlore/internal/logging"
 	"github.com/Smana/runlore/internal/logs/victorialogs"
 	"github.com/Smana/runlore/internal/metrics/prometheus"
@@ -119,6 +120,11 @@ func main() {
 	case "curate":
 		if err := runCurate(os.Args[2:]); err != nil {
 			fmt.Fprintln(os.Stderr, "curate:", err)
+			os.Exit(1)
+		}
+	case "validate-kb":
+		if err := runValidateKB(os.Args[2:]); err != nil {
+			fmt.Fprintln(os.Stderr, "validate-kb:", err)
 			os.Exit(1)
 		}
 	default:
@@ -426,7 +432,19 @@ func buildModel(cfg *config.Config, apiKey string) providers.ModelProvider {
 // configured. With a Git URL it starts a background syncer (running on every
 // replica, so a failover standby is already warm) that re-indexes after each pull;
 // otherwise it loads a static mounted directory once.
-func buildCatalog(ctx context.Context, cfg *config.Config, forgeTok forgeToken, log *slog.Logger) *catalog.Catalog {
+func buildCatalog(ctx context.Context, cfg *config.Config, forgeTok forgeToken, metrics *telemetry.Metrics, log *slog.Logger) *catalog.Catalog {
+	// warnInvalid surfaces structurally-invalid (but parseable) entries at load
+	// time — a backstop for the CI gate. The entry is still indexed and served
+	// (one bad entry never empties the catalog); we just log loudly + count it.
+	warnInvalid := func(cat *catalog.Catalog) {
+		kbvalidate.WarnInvalid(cat.Entries(), func(path string, errs []kbvalidate.Issue) {
+			log.Warn("invalid KB entry indexed", "path", path,
+				"issues", len(errs), "first", errs[0].Field+": "+errs[0].Message)
+			if metrics != nil {
+				metrics.CatalogInvalidEntries.Add(ctx, 1)
+			}
+		})
+	}
 	if cfg.Catalog.Git.URL != "" {
 		dir := cfg.Catalog.Dir
 		if dir == "" {
@@ -455,6 +473,7 @@ func buildCatalog(ctx context.Context, cfg *config.Config, forgeTok forgeToken, 
 				log.Warn("catalog entries skipped (unparseable)", "count", len(skipped), "files", skipped)
 			}
 			log.Info("catalog synced", "url", cfg.Catalog.Git.URL, "entries", cat.Len())
+			warnInvalid(cat)
 		})
 		log.Info("catalog git-sync enabled", "url", cfg.Catalog.Git.URL, "dir", dir)
 		return cat
@@ -466,6 +485,7 @@ func buildCatalog(ctx context.Context, cfg *config.Config, forgeTok forgeToken, 
 			return nil
 		}
 		log.Info("catalog loaded", "dir", cfg.Catalog.Dir, "entries", cat.Len())
+		warnInvalid(cat)
 		return cat
 	}
 	return nil
@@ -615,7 +635,7 @@ func runEvalLive(cfg *config.Config, scnDir, recordDir, reportDir, prevReport, s
 	}
 	log := logging.FromConfig(os.Stderr, cfg.Logging.Format, cfg.Logging.Level)
 	ctx := context.Background()
-	model, tools, recall, _ := buildModelAndTools(ctx, cfg, gitOpsFromKube(cfg, log), log)
+	model, tools, recall, _ := buildModelAndTools(ctx, cfg, gitOpsFromKube(cfg, log), nil, log)
 	judge := eval.ModelJudge{Model: buildJudgeModel(cfg, jProvider, jBaseURL, jModel, jKeyEnv)}
 
 	runner := &eval.LiveRunner{
@@ -859,7 +879,7 @@ func buildReinvestigator(ctx context.Context, cfg *config.Config, gp providers.G
 		return nil
 	}
 	client := github.New(cfg.Forge.GitHubAPIURL, owner, repo, cfg.Forge.BaseBranch, github.TokenFunc(token))
-	model, tools, recall, _ := buildModelAndTools(ctx, cfg, gp, log)
+	model, tools, recall, _ := buildModelAndTools(ctx, cfg, gp, metrics, log)
 	if recall != nil {
 		recall.Metrics = metrics
 		recall.Log = log
@@ -947,7 +967,7 @@ func runCatalogSync(args []string) error {
 
 // buildModelAndTools assembles the model, investigation tools, and the instant-recall
 // short-circuit from config + the GitOps provider. Shared by serve and investigate.
-func buildModelAndTools(ctx context.Context, cfg *config.Config, gp providers.GitOpsProvider, log *slog.Logger) (providers.ModelProvider, []investigate.Tool, *investigate.Recall, *catalog.Catalog) {
+func buildModelAndTools(ctx context.Context, cfg *config.Config, gp providers.GitOpsProvider, metrics *telemetry.Metrics, log *slog.Logger) (providers.ModelProvider, []investigate.Tool, *investigate.Recall, *catalog.Catalog) {
 	apiKey := ""
 	if cfg.Model.APIKeyEnv != "" {
 		apiKey = os.Getenv(cfg.Model.APIKeyEnv)
@@ -964,7 +984,7 @@ func buildModelAndTools(ctx context.Context, cfg *config.Config, gp providers.Gi
 		}
 	}
 	var recall *investigate.Recall
-	cat := buildCatalog(ctx, cfg, forgeTok, log)
+	cat := buildCatalog(ctx, cfg, forgeTok, metrics, log)
 	if cat != nil {
 		tools = append(tools, investigate.KBSearchTool{Catalog: cat})
 		if cfg.Catalog.InstantRecall.Enabled {
@@ -1096,7 +1116,7 @@ func runInvestigate(args []string) error {
 	log := logging.FromConfig(os.Stderr, cfg.Logging.Format, cfg.Logging.Level)
 	ctx := context.Background()
 
-	model, tools, recall, _ := buildModelAndTools(ctx, cfg, gitOpsFromKube(cfg, log), log)
+	model, tools, recall, _ := buildModelAndTools(ctx, cfg, gitOpsFromKube(cfg, log), nil, log)
 	var result *providers.Investigation
 	li := &investigate.LoopInvestigator{
 		Model: model, Tools: tools, Recall: recall, Actions: action.New(cfg.Actions), Log: log, Verify: true,
@@ -1148,7 +1168,7 @@ func buildInvestigator(ctx context.Context, cfg *config.Config, gp providers.Git
 		log.Info("no model configured; using log-only investigator")
 		return investigate.LogInvestigator{Log: log}, nil
 	}
-	model, tools, recall, cat := buildModelAndTools(ctx, cfg, gp, log)
+	model, tools, recall, cat := buildModelAndTools(ctx, cfg, gp, metrics, log)
 	if recall != nil {
 		recall.Metrics = metrics
 		recall.Log = log
