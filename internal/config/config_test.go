@@ -99,3 +99,21 @@ func TestCurateStaleAfterParse(t *testing.T) {
 		t.Fatalf("absent stale_after must be 0, got %v", z.Curate.StaleAfter.Std())
 	}
 }
+
+func TestCurateRecurrenceThresholdParse(t *testing.T) {
+	var c Config
+	if err := yaml.Unmarshal([]byte("curate:\n  recurrence_threshold: 5\n"), &c); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if c.Curate.RecurrenceThreshold != 5 {
+		t.Fatalf("recurrence_threshold: want 5, got %d", c.Curate.RecurrenceThreshold)
+	}
+	// Absent ⇒ zero ⇒ the pass applies its own default (3).
+	var z Config
+	if err := yaml.Unmarshal([]byte("curate:\n  stale_after: 240h\n"), &z); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if z.Curate.RecurrenceThreshold != 0 {
+		t.Fatalf("absent recurrence_threshold must be 0, got %d", z.Curate.RecurrenceThreshold)
+	}
+}

@@ -4,7 +4,9 @@ import (
 	"context"
 	"log/slog"
 	"slices"
+	"strings"
 
+	"github.com/Smana/runlore/internal/outcome"
 	"github.com/Smana/runlore/internal/providers"
 )
 
@@ -58,4 +60,33 @@ func queueReason(accepted bool) string {
 		return "human-accepted"
 	}
 	return "resolved"
+}
+
+// LedgerResolutionChecker reports a curated PR's incident has resolved when the
+// outcome ledger holds a resolved episode whose title matches the PR's. A curated
+// PR's title is "KB: " + the incident title, and the ledger records each open with
+// that same incident title — so the join is an exact title match. Source-agnostic:
+// it reads the ledger's resolve events, never a trigger-specific API.
+type LedgerResolutionChecker struct {
+	Ledger interface {
+		Episodes() ([]outcome.Episode, error)
+	}
+}
+
+// IsResolved implements ResolutionChecker.
+func (c LedgerResolutionChecker) IsResolved(_ context.Context, pr providers.CuratedIssue) (bool, error) {
+	title := strings.TrimSpace(strings.TrimPrefix(pr.Title, "KB: "))
+	if title == "" {
+		return false, nil
+	}
+	eps, err := c.Ledger.Episodes()
+	if err != nil {
+		return false, err
+	}
+	for _, e := range eps {
+		if e.Resolved && e.Title == title {
+			return true, nil
+		}
+	}
+	return false, nil
 }

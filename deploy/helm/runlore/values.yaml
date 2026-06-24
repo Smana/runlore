@@ -54,11 +54,13 @@ config:
   # Enable when a VMServiceScrape (or ServiceMonitor) will scrape this agent.
   telemetry:
     metrics_enabled: false
-  # Phase-2 backlog groomer (lore curate) — lifecycle staleness window. Applied
-  # whenever `lore curate` runs (the CronJob or a manual invocation); 0 disables the
-  # stale-PR sweep.
+  # Phase-2 backlog groomer (lore curate). `stale_after` drives the lifecycle sweep;
+  # the Queue (promote solved→ready-to-merge on resolution) and Recurrence
+  # (open a knowledge-gap issue for repeatedly-unresolved patterns) passes also run
+  # when config.outcome.ledger_path is set (they read the outcome ledger).
   curate:
-    stale_after: 720h   # close unprotected KB PRs idle longer than this; 0 disables
+    stale_after: 720h          # close unprotected KB PRs idle longer than this; 0 disables
+    recurrence_threshold: 3    # open a knowledge-gap issue after this many unresolved occurrences; 0 ⇒ 3
   # model:
   #   base_url: https://vllm.svc/v1
   #   model: <model-name>

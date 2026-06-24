@@ -385,7 +385,8 @@ func (c *Config) Validate() error {
 
 // Curate configures the Phase-2 backlog groomer (lore curate).
 type Curate struct {
-	StaleAfter Duration `yaml:"stale_after"` // close unprotected KB PRs idle longer than this; 0 disables (default 720h)
+	StaleAfter          Duration `yaml:"stale_after"`          // close unprotected KB PRs idle longer than this; 0 disables (default 720h)
+	RecurrenceThreshold int      `yaml:"recurrence_threshold"` // open a knowledge-gap issue after this many unresolved occurrences of a pattern; 0 ⇒ default 3
 }
 
 // Forge holds git-forge authentication and the curation target repo.
