@@ -6,7 +6,7 @@
 | **Date** | 2026-06-23 |
 | **Scope** | Make instant recall *find* the structurally-correct catalog entry instead of only checking the single top lexical hit: fetch a wider candidate set, pre-filter by structural agreement, and apply the margin gate among the structurally-agreeing candidates. Confined to `internal/investigate/recall.go`. |
 | **Author** | Smana (brainstormed with Claude) |
-| **Related** | Deep-analysis report (`docs/analysis/2026-06-23-deep-analysis.md`) roadmap #3 / "structural agreement is a post-rank filter at k=2 — the correct entry ranked #3 is never seen"; builds directly on the disambiguation slice (`2026-06-23-recall-disambiguation-design.md`, which made `resourceAgrees` discriminate) and the BM25 scorer fix (`2026-06-23-bm25-scorer-fix-design.md`) |
+| **Related** | Deep-analysis report (retired report) roadmap #3 / "structural agreement is a post-rank filter at k=2 — the correct entry ranked #3 is never seen"; builds directly on the disambiguation slice (`2026-06-23-recall-disambiguation-design.md`, which made `resourceAgrees` discriminate) and the BM25 scorer fix (`2026-06-23-bm25-scorer-fix-design.md`) |
 
 ---
 

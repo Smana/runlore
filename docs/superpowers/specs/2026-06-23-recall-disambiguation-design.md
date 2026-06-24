@@ -6,7 +6,7 @@
 | **Date** | 2026-06-23 |
 | **Scope** | Make instant-recall's structural gate (Gate 2) actually tell apart different workloads in the same namespace: derive the workload name from alert labels (read side), record the investigation's discovered failing resource (write side), and fix `resourceAgrees` so two distinct named workloads no longer match at namespace strength. Confined to `internal/investigate`. |
 | **Author** | Smana (brainstormed with Claude) |
-| **Related** | Deep-analysis report (`docs/analysis/2026-06-23-deep-analysis.md`) roadmap #2 / "Gate 2 collapses to namespace equality"; recall-trustworthiness (`2026-06-22-recall-trustworthiness-design.md`, which introduced Gate 2 / `resourceAgrees` / the `Resource` field); the recall-decay slice (`2026-06-23-recall-decay-design.md`) that sits on top of these gates |
+| **Related** | Deep-analysis report (retired report) roadmap #2 / "Gate 2 collapses to namespace equality"; recall-trustworthiness (`2026-06-22-recall-trustworthiness-design.md`, which introduced Gate 2 / `resourceAgrees` / the `Resource` field); the recall-decay slice (`2026-06-23-recall-decay-design.md`) that sits on top of these gates |
 
 ---
 

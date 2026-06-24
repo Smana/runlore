@@ -6,7 +6,7 @@
 | **Date** | 2026-06-23 |
 | **Scope** | Add a read-only API over the append-only outcome ledger that reconstructs open→resolve **episodes** (recurrence-aware) and rolls them up **per catalog entry** — the A1→A2 seam the recall-decay edge will consume. Pure addition; no behavior change to `Open`/`Resolve`. |
 | **Author** | Smana (brainstormed with Claude) |
-| **Related** | Deep-analysis report (`docs/analysis/2026-06-23-deep-analysis.md`) Slice 3 / roadmap #8; the outcome-capture spec (`2026-06-23-outcome-capture-design.md`, which named `Episodes()` at §3.1 but left it unimplemented); `internal/outcome/ledger.go`; downstream consumer #9 (bias `deriveRecallConfidence` by resolve-rate) and #10/#12 (TTL/recurrence) |
+| **Related** | Deep-analysis report (retired report) Slice 3 / roadmap #8; the outcome-capture spec (`2026-06-23-outcome-capture-design.md`, which named `Episodes()` at §3.1 but left it unimplemented); `internal/outcome/ledger.go`; downstream consumer #9 (bias `deriveRecallConfidence` by resolve-rate) and #10/#12 (TTL/recurrence) |
 
 ---
 
