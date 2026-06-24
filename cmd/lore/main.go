@@ -274,7 +274,7 @@ func runServe(args []string) error {
 	startWork := func(workCtx context.Context) {
 		go queue.Run(workCtx)
 		if cfg.Triggers.GitOpsFailures.Enabled && gitops != nil {
-			startGitOpsFailureWatch(workCtx, cfg, queue, gitops, log)
+			startGitOpsFailureWatch(workCtx, cfg, queue, gitops, metrics, log)
 		}
 		if reinv != nil {
 			log.Info("re-investigate poller enabled", "label", investigate.ReinvestigateLabel)
@@ -1243,15 +1243,45 @@ func buildInvestigator(ctx context.Context, cfg *config.Config, gp providers.Git
 	}, cat
 }
 
-// startGitOpsFailureWatch drains Flux WatchFailures into the queue.
-func startGitOpsFailureWatch(ctx context.Context, cfg *config.Config, q investigate.Enqueuer, gp providers.GitOpsProvider, log *slog.Logger) {
+// startGitOpsFailureWatch drains Flux WatchFailures into the queue. Failures are
+// debounced (when a positive window is configured): the investigation is enqueued
+// only after the failure has persisted — re-checked still Ready=False via the
+// provider's ResourceStatus — filtering reconcile-churn transients that would
+// otherwise drive confident-but-wrong root causes.
+func startGitOpsFailureWatch(ctx context.Context, cfg *config.Config, q investigate.Enqueuer, gp providers.GitOpsProvider, metrics *telemetry.Metrics, log *slog.Logger) {
 	events, err := gp.WatchFailures(ctx)
 	if err != nil {
 		log.Warn("gitops-failure watch disabled", "err", err)
 		return
 	}
-	log.Info("watching gitops failures", "engine", gitopsEngine(cfg))
-	go investigate.DrainFailures(ctx, events, q, trigger.NewDeduper(cfg.Triggers.Incidents.Dedup.Window.Std()), log)
+	deb := buildFailureDebouncer(cfg, gp, metrics, log)
+	log.Info("watching gitops failures", "engine", gitopsEngine(cfg),
+		"debounce", cfg.Triggers.GitOpsFailures.Debounce.Std())
+	go investigate.DrainFailures(ctx, events, q, trigger.NewDeduper(cfg.Triggers.Incidents.Dedup.Window.Std()), deb, log)
+}
+
+// buildFailureDebouncer wires a Debouncer whose "still failing?" re-check reads
+// the workload's CURRENT Ready condition via GitOpsInspector.ResourceStatus. When
+// the engine offers no inspector, the predicate is nil and the debouncer just
+// waits out the window before enqueuing (still filtering instantly-clearing
+// flaps). A zero window makes Debounce enqueue immediately.
+func buildFailureDebouncer(cfg *config.Config, gp providers.GitOpsProvider, metrics *telemetry.Metrics, log *slog.Logger) *investigate.Debouncer {
+	var check investigate.StillFailing
+	if insp, ok := gp.(providers.GitOpsInspector); ok {
+		check = func(ctx context.Context, w providers.Workload) (bool, error) {
+			rs, err := insp.ResourceStatus(ctx, w)
+			if err != nil {
+				return false, err
+			}
+			// A recovered (Ready=True) or vanished resource is no longer worth
+			// investigating; anything else (False/Unknown) is still failing.
+			if rs.NotFound || rs.Ready == "True" {
+				return false, nil
+			}
+			return true, nil
+		}
+	}
+	return investigate.NewDebouncer(cfg.Triggers.GitOpsFailures.Debounce.Std(), check, log).WithMetrics(metrics)
 }
 
 // gitopsEngine returns the configured GitOps engine, defaulting to flux.

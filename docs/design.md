@@ -163,7 +163,12 @@ triggers:
     ignore:
       alertnames:  [Watchdog, InfoInhibitor]
     dedup: { window: 30m }              # don't re-open a still-firing alert
-  gitops_failures: { enabled: true }    # secondary trigger
+  gitops_failures:                      # secondary trigger
+    enabled: true
+    debounce: 60s                       # require the failure to persist this long
+                                        # (re-check still Ready=False) before
+                                        # investigating — filters reconcile-churn
+                                        # transients; 0 = fire immediately
 ```
 
 ### Investigate — form & test hypotheses across causes
