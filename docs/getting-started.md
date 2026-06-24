@@ -20,8 +20,10 @@ forge (issues/PRs on a repo you designate).
   leave your boundary.
 - `kubectl` + `helm` (v3.12+).
 - Optional: a **metrics** backend (VictoriaMetrics/Prometheus), a **logs** backend (VictoriaLogs),
-  and/or **Cilium Hubble** (Relay) — they enable the `query_metrics` / `query_logs` / `network_drops`
-  investigation tools.
+  and/or a **network-flow** source — they enable the `query_metrics` / `query_logs` / `network_drops`
+  investigation tools. The network signal is **pluggable and CNI-agnostic**: Cilium Hubble, **AWS VPC
+  Flow Logs** (any AWS VPC, incl. EKS with the AWS VPC CNI), or **GCP Firewall Logs** (any GCP VPC,
+  incl. GKE). RunLore does **not** assume Cilium.
 - Optional: **AWS** read-only access — enables the `cloud_what_changed` (CloudTrail) and
   `cloud_resource_health` (EC2/ASG/EKS) tools, the cloud-control-plane "what changed" lens for infra
   changes outside GitOps. Auth is in-cluster identity (**EKS Pod Identity** or IRSA) — no static keys.
@@ -210,8 +212,20 @@ config:
     url: http://vmsingle.observability.svc:8429       # PromQL API base (VictoriaMetrics, or Prometheus on :9090)
   logs:
     url: http://victorialogs.observability.svc:9428   # VictoriaLogs base (LogsQL)
+  # Network-flow signal (optional) — the network_drops tool. PLUGGABLE and CNI-agnostic:
+  # RunLore does NOT assume Cilium. Pick the provider matching your environment; an empty/
+  # absent `network` block disables the tool. Choose ONE:
   network:
-    url: hubble-relay.kube-system:80                  # Cilium Hubble Relay (gRPC host:port)
+    provider: hubble                                  # Cilium Hubble (requires the Cilium CNI)
+    hubble:
+      url: hubble-relay.kube-system:80                # Hubble Relay gRPC host:port
+    # provider: aws-vpc-flow-logs                     # any AWS VPC (incl. EKS + AWS VPC CNI) — REJECT records
+    # aws:
+    #   region: eu-west-3
+    #   log_group: /aws/vpc/flowlogs                  # CloudWatch Logs group receiving the VPC Flow Logs
+    # provider: gcp-firewall-logs                     # any GCP VPC (incl. GKE) — DENIED firewall connections
+    # gcp:
+    #   project: my-gcp-project
   # Cloud context (AWS) — enables cloud_what_changed (CloudTrail) + cloud_resource_health
   # (EC2/ASG/EKS). Read-only; auth is in-cluster identity (no keys). See step 4b.
   cloud:

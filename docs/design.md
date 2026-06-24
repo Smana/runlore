@@ -286,7 +286,7 @@ Interfaces live in `internal/providers/providers.go`. "For the moment" impls:
 | GitOps | `GitOpsProvider` | **Flux**, **ArgoCD** | — |
 | Metrics | `MetricsProvider` | **VictoriaMetrics**, **Prometheus** (one PromQL impl, 2 endpoints) | — |
 | Logs | `LogsProvider` | **VictoriaLogs** | Loki, … |
-| Network | `NetworkProvider` | **Hubble** | — |
+| Network | `NetworkProvider` | **Cilium Hubble**, **AWS VPC Flow Logs**, **GCP Firewall Logs** (pluggable, CNI-agnostic; none default-on) | Azure NSG Flow Logs; CNI-agnostic eBPF (Retina) |
 | Cloud | `CloudProvider` | **AWS** (CloudTrail what-changed + EC2/ASG/EKS health) | GCP, Azure via native SDKs; Steampipe/cloud-MCP optional |
 | Model | `ModelProvider` | **Anthropic**, **Gemini**, **OpenAI-compatible** (in-cluster vLLM, Ollama, OpenRouter, …) | — |
 | Notifier | `Notifier` | **Slack**, **Matrix** | PagerDuty, incident.io |

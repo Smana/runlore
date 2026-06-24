@@ -79,8 +79,9 @@ func formatMetric(m map[string]string) string {
 	return name + "{" + strings.Join(labels, ",") + "}"
 }
 
-// NetworkDropsTool lets the model list recently DROPPED network flows (Cilium
-// Hubble) — NetworkPolicy denials and connectivity failures.
+// NetworkDropsTool lets the model list recently denied/dropped network flows from
+// the configured (pluggable, CNI-agnostic) network-flow source — surfacing
+// NetworkPolicy denials, firewall/security-group rejects, and connectivity failures.
 type NetworkDropsTool struct {
 	Network providers.NetworkProvider
 }
@@ -90,7 +91,7 @@ func (t NetworkDropsTool) Name() string { return "network_drops" }
 
 // Description returns the tool description.
 func (t NetworkDropsTool) Description() string {
-	return "List recently DROPPED network flows (Cilium Hubble) for a namespace, optionally a pod — surfaces NetworkPolicy denials and connectivity failures."
+	return "List recently denied/dropped network flows for a namespace (optionally a pod) — surfaces NetworkPolicy denials, firewall/security-group rejects, and connectivity failures, from the configured network-flow source. (IP-based cloud flow-log sources may return VPC-wide denials rather than pod-scoped.)"
 }
 
 // Schema returns the JSON schema for the arguments.
