@@ -82,6 +82,18 @@ config:
   #   kb_repo: owner/name
   #   base_branch: main
   #   github_app: { app_id: 0, installation_id: 0, private_key_env: GITHUB_APP_PRIVATE_KEY }
+  # Investigate signals (optional). metrics/logs enable query_metrics/query_logs.
+  # metrics: { url: http://vmsingle.observability.svc:8429 }   # PromQL (VictoriaMetrics/Prometheus)
+  # logs:    { url: http://victorialogs.observability.svc:9428 }  # LogsQL (VictoriaLogs)
+  # Network-flow signal (network_drops). PLUGGABLE + CNI-agnostic — no CNI assumed,
+  # none default-on. Choose ONE provider (see docs/data-sources.md):
+  # network:
+  #   provider: hubble                       # Cilium Hubble (requires the Cilium CNI)
+  #   hubble: { url: hubble-relay.kube-system:80 }
+  #   # provider: aws-vpc-flow-logs          # any AWS VPC (incl. EKS + AWS VPC CNI)
+  #   # aws: { region: eu-west-3, log_group: /aws/vpc/flowlogs }
+  #   # provider: gcp-firewall-logs          # any GCP VPC (incl. GKE)
+  #   # gcp: { project: my-gcp-project }
 
 # Secret-backed env vars (model API key, Slack webhook, Matrix token, GitHub key).
 # Reference an existing Secret — RunLore never inlines credentials.

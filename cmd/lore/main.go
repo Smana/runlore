@@ -52,6 +52,8 @@ import (
 	anthropic "github.com/Smana/runlore/internal/model/anthropic"
 	gemini "github.com/Smana/runlore/internal/model/gemini"
 	openai "github.com/Smana/runlore/internal/model/openai"
+	"github.com/Smana/runlore/internal/network/awsvpc"
+	"github.com/Smana/runlore/internal/network/gcpfirewall"
 	"github.com/Smana/runlore/internal/network/hubble"
 	"github.com/Smana/runlore/internal/notify"
 	"github.com/Smana/runlore/internal/outcome"
@@ -977,8 +979,36 @@ func buildModelAndTools(ctx context.Context, cfg *config.Config, gp providers.Gi
 	if cfg.Logs.URL != "" {
 		tools = append(tools, investigate.QueryLogsTool{Logs: victorialogs.New(cfg.Logs.URL)})
 	}
-	if cfg.Network.URL != "" {
-		tools = append(tools, investigate.NetworkDropsTool{Network: hubble.New(cfg.Network.URL)})
+	// Network-flow data source (the network_drops tool). Pluggable and CNI-agnostic:
+	// no provider is enabled by default. The selected provider must match the cluster's
+	// environment (Cilium Hubble, AWS VPC Flow Logs, or GCP Firewall Logs).
+	switch cfg.Network.Provider {
+	case config.NetworkHubble:
+		if cfg.Network.Hubble.URL != "" {
+			tools = append(tools, investigate.NetworkDropsTool{Network: hubble.New(cfg.Network.Hubble.URL)})
+			log.Info("network provider enabled", "provider", config.NetworkHubble, "url", cfg.Network.Hubble.URL)
+			if cfg.Network.URL != "" {
+				log.Warn("config.network.url is deprecated; set config.network.provider=hubble and config.network.hubble.url")
+			}
+		}
+	case config.NetworkAWSVPCFlowLogs:
+		if nw, err := awsvpc.New(ctx, cfg.Network.AWS.Region, cfg.Network.AWS.LogGroup); err != nil {
+			log.Warn("aws-vpc-flow-logs network provider unavailable; network_drops disabled", "err", err)
+		} else {
+			tools = append(tools, investigate.NetworkDropsTool{Network: nw})
+			log.Info("network provider enabled", "provider", config.NetworkAWSVPCFlowLogs, "log_group", cfg.Network.AWS.LogGroup)
+		}
+	case config.NetworkGCPFirewallLogs:
+		if nw, err := gcpfirewall.New(ctx, cfg.Network.GCP.Project); err != nil {
+			log.Warn("gcp-firewall-logs network provider unavailable; network_drops disabled", "err", err)
+		} else {
+			tools = append(tools, investigate.NetworkDropsTool{Network: nw})
+			log.Info("network provider enabled", "provider", config.NetworkGCPFirewallLogs, "project", cfg.Network.GCP.Project)
+		}
+	case "":
+		// network signal disabled (default)
+	default:
+		log.Warn("unknown network provider; network_drops disabled", "provider", cfg.Network.Provider)
 	}
 	// Read-only cluster access (Flux controller logs + pod status + events), when a
 	// cluster is reachable. The same reader backs all three tools.
