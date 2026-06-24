@@ -118,6 +118,8 @@ helm upgrade --install runlore deploy/helm/runlore -n "$NS" \
   --set replicaCount=1 \
   --set catalog.configMap=runlore-catalog \
   --set-string config.catalog.dir=/var/lib/runlore/catalog \
+  --set-string config.outcome.ledger_path=/tmp/outcomes.jsonl \
+  --set config.telemetry.metrics_enabled=true \
   --set-string config.model.base_url="http://$HOST:$MOCK_PORT/v1" \
   --set-string config.model.model=mock-model \
   --set-string config.model.api_key_env=OPENAI_API_KEY \
@@ -157,6 +159,7 @@ kubectl -n "$NS" logs deploy/runlore > /tmp/runlore.log 2>&1
 check "catalog loaded from ConfigMap" /tmp/runlore.log 'catalog loaded.*entries=[1-9]'
 check "LLM investigator active"        /tmp/runlore.log 'using LLM investigator'
 check "watching gitops failures"       /tmp/runlore.log 'watching gitops failures'
+check "outcome ledger enabled"         /tmp/runlore.log 'outcome ledger enabled'
 check "serving"                        /tmp/runlore.log 'runlore serving'
 
 step "7/8 incident webhook -> investigate -> findings -> deliver -> curate"
@@ -189,6 +192,35 @@ check "curator opened a PR (confident)"        /tmp/runlore-mock.log 'MOCK GH-PR
 check "curated ref logged"                     /tmp/runlore.log 'msg=curated'
 check "rung-2 approval-gated actions enabled"  /tmp/runlore.log 'approval-gated actions enabled'
 check "action registered for approval"         /tmp/runlore.log 'actions registered for approval'
+
+step "7b/13 LEARNING LOOP: outcome ledger capture (open) + resolve closes the loop"
+# Scrape the OTel /metrics exposition (image is distroless — no shell to read the
+# ledger file directly; the ledger emits counters instead).
+LLPORT=18086; free_port "$LLPORT"
+kubectl -n "$NS" port-forward svc/runlore "$LLPORT:8080" >/tmp/runlore-ll-pf.log 2>&1 &
+LLPF=$!; sleep 3
+# prefix-match tolerates the _total / _total_total suffix variants of the OTel exporter.
+llmetric() { curl -sf "http://localhost:$LLPORT/metrics" 2>/dev/null | awk -v p="^runlore_$1" '$0 ~ p {print int($NF); exit}'; }
+OPENED=$(llmetric outcomes_opened); OPENED=${OPENED:-0}
+if [[ "$OPENED" -ge 1 ]]; then green "PASS: outcome ledger recorded an investigation open (capture; opened=$OPENED)"; PASS=$((PASS+1))
+else red "FAIL: no outcome 'open' recorded (capture; opened=$OPENED)"; FAIL=$((FAIL+1)); fi
+
+# Close the loop: the resolved alert for the investigated incident (fp1). A resolve
+# that MATCHES an open increments incidents_resolved_total — proving open→resolve pairing.
+RESOLVE_JSON='{"alerts":[{"status":"resolved","labels":{"alertname":"HarborProbeFailure","severity":"critical","namespace":"apps"},"startsAt":"2026-06-20T03:14:00Z","fingerprint":"fp1"}]}'
+curl -s -o /dev/null -w "resolve webhook HTTP %{http_code}\n" -XPOST "http://localhost:$LLPORT/webhook/alertmanager" -H "Content-Type: application/json" -d "$RESOLVE_JSON" || true
+sleep 4
+RESOLVED=$(llmetric incidents_resolved); RESOLVED=${RESOLVED:-0}
+kill "$LLPF" 2>/dev/null || true; free_port "$LLPORT"
+if [[ "$RESOLVED" -ge 1 ]]; then green "PASS: open→resolve loop closed (a resolve matched an open; resolved=$RESOLVED)"; PASS=$((PASS+1))
+else red "FAIL: resolve did not match an open (resolved=$RESOLVED)"; FAIL=$((FAIL+1)); fi
+
+step "7c/13 LEARNING LOOP: lore curate wires the ledger-backed Queue + Recurrence passes"
+# Exec the binary directly (distroless has no shell). With the ledger configured,
+# runCurate enables Queue + Recurrence; the passes run against the mock forge.
+kubectl -n "$NS" exec deploy/runlore -- /usr/local/bin/lore curate --config /etc/runlore/runlore.yaml > /tmp/runlore-curate.log 2>&1 || true
+check "curate wired Queue + Recurrence (ledger-backed)" /tmp/runlore-curate.log 'Queue . Recurrence enabled'
+check "curate grooming the backlog"                     /tmp/runlore-curate.log 'grooming KB backlog'
 
 step "8/13 storm: 40 same-groupKey alerts coalesce into 1 investigation"
 # Enable coalescing (MaxBatch=40 flushes synchronously) + OTel metrics exposition.

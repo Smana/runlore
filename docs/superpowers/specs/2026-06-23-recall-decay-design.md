@@ -6,7 +6,7 @@
 | **Date** | 2026-06-23 |
 | **Scope** | Bias instant-recall confidence by each catalog entry's resolution track record, and **reject** (re-investigate) entries that recall-but-never-resolve. The make-or-break "learns, not accumulates" edge. Confined to `internal/investigate/recall.go` + serve-path wiring + config; A1 recording unchanged. |
 | **Author** | Smana (brainstormed with Claude) |
-| **Related** | Deep-analysis report (`docs/analysis/2026-06-23-deep-analysis.md`) roadmap #9 (the thesis); builds on the merged Episodes/`OpenCounts()` read API (`2026-06-23-outcome-episodes-design.md`); recall-trustworthiness (`2026-06-22-recall-trustworthiness-design.md`, the gate/`deriveRecallConfidence` this extends); outcome-capture A1 (`2026-06-23-outcome-capture-design.md`, the correlation-not-causation caveat) |
+| **Related** | Deep-analysis report (retired report) roadmap #9 (the thesis); builds on the merged Episodes/`OpenCounts()` read API (`2026-06-23-outcome-episodes-design.md`); recall-trustworthiness (`2026-06-22-recall-trustworthiness-design.md`, the gate/`deriveRecallConfidence` this extends); outcome-capture A1 (`2026-06-23-outcome-capture-design.md`, the correlation-not-causation caveat) |
 
 ---
 
