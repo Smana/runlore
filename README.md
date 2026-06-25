@@ -65,6 +65,8 @@ flowchart LR
 5. **A human reviews and merges** — after adding resolution context, the PR is merged.
    That entry is indexed: the same incident next time gets an instant answer, no re-investigation.
 
+> 📐 **Detailed architecture:** [`docs/architecture/runlore-architecture.md`](docs/architecture/runlore-architecture.md) — the full component diagram (the flow above is the summary).
+
 ## 📚 The learning loop
 
 ```mermaid
