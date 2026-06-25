@@ -1,50 +1,70 @@
 # Prior art & positioning
 
-Where RunLore sits relative to the open-source and commercial AI-SRE landscape (mid-2026). This is
-the honest version: the autonomous "alert → RCA → Slack" runtime is a **commodity**; RunLore's reason
-to exist is the combination of **GitOps-/metrics-agnostic** + **what-changed Git-diff spine** +
-**open, learning knowledge catalog**.
+Where RunLore sits in the AI-SRE landscape (mid-2026). The honest version: the autonomous
+"alert → RCA → Slack" runtime is a **commodity**, and change-diff RCA is **no longer unique**. RunLore's
+defensible reason to exist is the **combination** the open tools don't have — an **open, reviewable,
+outcome-weighted** knowledge catalog, grounded in the **exact GitOps change**, from an agent that is
+**honest about the sub-50% reality** — all self-hostable.
 
 ## Open source
 
-| Project | What it is | Overlap with RunLore | What we borrow |
+| Project | What it is | Learns? | vs RunLore |
 |---|---|---|---|
-| **k8sgpt** (CNCF) | Deterministic *analyzers* + optional LLM explanation; operator does continuous scan → `Result` CRD + Slack sinks. Strictly read-only. | Shallow on investigation (single-shot `analyze`, no loop, no cross-signal correlation, no Git diff). | The **analyzer-first** idea: cheap deterministic detectors before the LLM; `Result`-as-CRD; pluggable backends; anonymization. |
-| **HolmesGPT** (CNCF, Robusta) | The strongest OSS reference: a ReAct loop over 50+ **toolsets**, **runbooks**, and an **MCP client**; autonomous alert→RCA→Slack via the Robusta platform. | **Heavy** — this is the closest thing to RunLore's runtime. But it is Prom/Loki/Datadog-centric, has no Flux-revision-aware Git diffing, and relies on *your* hand-curated runbooks (it does not learn). | The **toolset abstraction**, **runbook format**, ReAct + payload discipline, read-only-by-default posture. |
-| **kagent** (CNCF, Solo.io) | In-cluster *declarative* agent framework (agents as CRDs, MCP + A2A, Google ADK engine). Now ships **agent memory** (pgvector similarity recall) and HITL gated writes (`requireApproval`). | The in-cluster reactive-agent runtime; generic, Prom/Grafana-centric, pre-1.0. Its memory is **opaque, per-agent, in-DB** — the closed/unreviewable "memory" pattern, self-hosted. | The declarative/GitOps-native packaging idea; could be a deployment target via A2A later. |
-| **Aurora** | OSS AI-SRE with hybrid RAG over runbooks/postmortems. | The RAG/learning angle. | Hybrid retrieval (BM25 + vector) as table stakes for grounding. |
+| [**HolmesGPT**](https://github.com/HolmesGPT/holmesgpt) (CNCF Sandbox, Robusta) | Strongest OSS ReAct agent: 60+ toolsets, runbooks, MCP client; read-only. | **No** — stateless, human-authored runbooks. | The one to beat. But Prom/Loki-centric, no Flux/Argo revision-diff, no learning. We borrow its toolset + runbook discipline. |
+| [**k8sgpt**](https://github.com/k8sgpt-ai/k8sgpt) (CNCF) | Deterministic analyzers + optional LLM-explain. | No | A *detector*, not an investigation loop. We borrow analyzer-first + `Result`-as-CRD. |
+| [**kagent**](https://github.com/kagent-dev/kagent) (CNCF Sandbox, Solo.io) | Declarative in-cluster agent framework; ships pgvector **agent memory** + `requireApproval` HITL. | Memory, but **opaque** — view-only vectors, no export/edit, per-agent. | Closest on "memory" — but closed-shape. RunLore's knowledge is open, reviewable, portable. Possible deploy target via A2A. |
+| **Aurora** (Arvo AI) | Hybrid RAG over docs; auto-generates postmortems. | Postmortems, not runbook self-update. | The RAG angle. We borrow hybrid retrieval. |
 
-**Takeaway:** the loop and the runtime are solved in OSS, and kagent now ships (opaque, in-DB) memory —
-so "nobody in OSS learns" is no longer the line. The precise, still-true distinction: **nobody in OSS
-auto-fills an *open, human-readable, git-versioned, PR-reviewed* knowledge catalog — with provenance —
-from its own investigations.** Reviewability and portability, not learning-vs-not, are the moat.
+**Takeaway:** no OSS agent auto-fills an **open, git-versioned, PR-reviewed, outcome-weighted** catalog
+from its own investigations. *Reviewability + portability* — not learning-vs-not — are the distinction.
+
+## Change-aware RCA — no longer ours alone
+
+"What changed" is the #1 RCA lever, and others now ship it:
+
+- **Komodor** — workload-scoped **manifest-diff RCA** with Argo CD/Flux integration; Gartner 2026
+  "Representative Vendor". The closest commercial analogue to our diff spine.
+- **Anyshift** (ex-driftctl) — GraphRAG RCA over a **git-versioned infrastructure graph**; owns the
+  "what changed" narrative.
+- **Datadog Change Tracking** — commit-level deploy correlation (no file-level source diff).
+
+RunLore's genuinely-owned slice is narrow: the **rendered diff between the two commits Flux/Argo
+actually reconciled**, scoped to the failing workload, as the *primary* RCA spine. It is a sharp
+feature, not a moat — treat it as **provenance for the knowledge**, not the headline.
 
 ## Commercial
 
-The market has converged on one shape — *live model of prod → agentic RCA → evidence in Slack* — and
-competes on **autonomy ceiling**, **RCA depth**, and **provable eval/trust**, not features. The
-shipped default everywhere is **read-only RCA + suggest-with-approval**; only Microsoft's Azure SRE
-Agent natively takes approved write actions at GA.
+Converged on one shape — *live model of prod → agentic RCA → evidence in Slack* — competing on the
+**autonomy ceiling**. The shipped default everywhere is read-only RCA + suggest-with-approval; only
+**Microsoft Azure SRE Agent** (GA, Mar 2026) takes approved writes natively.
 
-- **Specialized**: Cleric, Resolve.ai, Traversal, Parity, NeuBird, Causely, ewake (EU/data-residency),
-  incident.io, Flip AI — all closed.
-- **Incumbents**: Datadog (Bits AI SRE), PagerDuty (SRE Agent), Grafana (Sift/Assistant), Dynatrace
-  (Davis), New Relic, Splunk/Cisco, AWS (DevOps Agent), Google (Gemini Cloud Assist), Elastic,
-  ServiceNow.
-- **Memory / learning** is claimed by Cleric (Decision Model), Resolve (context layer), PagerDuty
-  ("context flywheel"), and Google (AI Insights) — **all closed**.
+- **Specialists:** Cleric, Resolve.ai, Traversal, Parity, NeuBird, Causely, Flip AI, ewake (EU residency).
+- **Incumbents:** Datadog, PagerDuty, Grafana, Dynatrace, New Relic, AWS, Google, ServiceNow.
+- **Memory/learning** (Cleric, Resolve, PagerDuty, Google) is **all closed**.
 
-**The reality check (ITBench, IBM/ICML 2025):** independently, frontier models identify the root
-cause **< 50 %** of the time and *fully resolve* only **~11–14 %** of real K8s incidents. Treat
-sub-50 % as the baseline; design for failure; be skeptical of vendor accuracy claims.
+> [!note] The market is frothy and under scrutiny
+> Resolve.ai raised a $1B-headline Series A (Dec 2025) on ~$4M ARR; Gartner places agentic AI at the
+> "Peak of Inflated Expectations" (>40% of agentic projects predicted cancelled by 2027) and flags
+> "agent-washing." Pressure-test every "autonomous"/"%MTTR" claim against the vendor's own docs.
+
+## The eval reality
+
+**ITBench** (IBM/ICML 2025) — frontier models identify the root cause **< 50%** of the time and fully
+resolve only **~11–14%** of real K8s incidents. Treat sub-50% as the baseline; design for failure; make
+honest uncertainty a feature, not a footnote.
 
 ## Where RunLore is different
 
-1. **GitOps-engine- and metrics-backend-agnostic** (Flux + Argo, VM + Prom) — the stack the OSS
-   incumbents treat as second-class.
-2. **A "what changed" spine** — Flux/Argo revision history + a real **Git diff between deployed
-   revisions**, scoped to the affected workload. Exists nowhere else.
-3. **An open, compounding knowledge catalog** ([OKF](https://github.com/GoogleCloudPlatform/knowledge-catalog))
-   the agent reads (cached) and writes (PR-gated). The closed tools that learn keep the knowledge;
-   RunLore's is portable markdown in *your* git, with provenance linking the issue, the causing
-   change, and the fix.
+1. **Open, reviewable, outcome-weighted knowledge** — portable markdown in *your* git, PR-reviewed,
+   provenance-tracked, with trust that decays on real-world resolve-rate. The closed tools that learn
+   keep the knowledge; the OSS agents don't learn at all.
+2. **Honest by construction** — read-only-first, `unresolved` as a first-class output, an adversarial
+   verify pass that can only *lower* confidence, and a shipped eval harness. The best-aligned response
+   to the sub-50% reality in a market full of autonomy-theatre.
+3. **GitOps-revision-exact "what changed"** — the provenance that makes the knowledge trustworthy.
+4. **Self-hostable & model-agnostic** — for lock-in-averse, sovereignty-conscious, GitOps-native teams.
+
+> **On OKF.** RunLore's catalog is [Open Knowledge Format](https://github.com/GoogleCloudPlatform/knowledge-catalog)-compatible
+> markdown. OKF is a young Google spec (v0.1 draft, mid-2026, no CNCF governance yet); we treat it as a
+> portable interop format, not a settled standard — the value is the open, reviewable, git-versioned
+> shape, which holds regardless of OKF's trajectory.

@@ -49,14 +49,17 @@ See [`prior-art.md`](prior-art.md) for the full landscape. The short version:
 
 | Capability | OSS today | Commercial today | RunLore |
 |---|---|---|---|
-| Autonomous react → investigate → report | **HolmesGPT**; k8sgpt-operator/kagent partial | the whole market's commodity | **table stakes** (we do it too) |
-| GitOps-/metrics-**agnostic** + "what-changed" Git-diff spine | nobody (all Prom/Loki/vanilla-k8s) | nobody | **differentiating wedge** |
-| Self-filling, *learning*, **open** knowledge catalog | effectively nobody | Cleric/Resolve/PagerDuty/Google — all **closed** | **the moat** |
+| Autonomous react → investigate → report | **HolmesGPT** (CNCF); k8sgpt-operator/kagent partial | the whole market's commodity | **table stakes** (we do it too) |
+| "What-changed" Git-diff RCA, GitOps-/metrics-**agnostic** | effectively nobody (OSS is Prom/Loki/vanilla-k8s) | **Komodor**, **Anyshift** do change-diff RCA | **sharp, but copyable** — *provenance* for the catalog, not the moat |
+| **Open, reviewable, outcome-weighted** knowledge catalog | nobody (HolmesGPT doesn't learn; kagent's memory is opaque) | Cleric/Resolve/PagerDuty/Google — all **closed** | **the durable wedge** |
+| Honest about the sub-50% reality (read-only-first, `unresolved`, eval-proven) | partial | mostly autonomy-theatre | **the under-sold asset** |
 
-The autonomous runtime is a commodity — if that were all RunLore is, it would be "HolmesGPT, but Go
-+ GitOps." The **open, compounding knowledge catalog** is the part that is closed-source-only
-everywhere and absent from OSS. That, plus being **GitOps-engine- and metrics-backend-agnostic**, is
-the reason to build it.
+The autonomous runtime is a commodity, and the Git diff — though sharp — is now matched by Komodor and
+Anyshift (see [`prior-art.md`](prior-art.md)). The defensible reason to build RunLore is the
+**combination the open tools don't have**: an **open, portable, PR-reviewed knowledge catalog** that
+**learns from outcomes** (HolmesGPT doesn't learn; kagent's memory is opaque), grounded in the **exact
+GitOps change**, from an agent that is **honest about what it can't determine** — all **self-hosted, on
+your models**. Target user: lock-in-averse, sovereignty-conscious, GitOps-native teams.
 
 ## 3. Goals / Non-goals
 
@@ -325,6 +328,12 @@ git diff*:
 | failure (React) | `Ready=False`, source `FetchFailed` | `health=Degraded`, `sync=OutOfSync` |
 | the diff | go-git between revisions over `spec.path` | go-git over `source.path` (Argo also has native `app diff`) |
 
+> **Engine depth is honest, not symmetric.** Flux is the reference implementation. The deep
+> introspection tools (`flux_status`, `flux_tree`) and the failure-persistence re-check use a Flux-only
+> `GitOpsInspector`; on ArgoCD they no-op — Argo gets revision history, the diff, and failure detection,
+> but not the deep tree/status lens. Likewise **action-approval (rung-2) is Slack-only** today; Matrix
+> is delivery-only. Both are honest current states, not full parity.
+
 **Auto-discovery**: detect `argoproj.io/Application` → ArgoCD; `helm.toolkit.fluxcd.io` → Flux; probe
 the metrics endpoint → VM vs Prometheus. Config overrides. Flux + VictoriaMetrics is the primary
 reference combo; Argo + Prometheus exercises the abstraction.
@@ -360,7 +369,10 @@ KB git repo  ──syncer──►  local mirror  ──build──►  index:  
   namespace are validated **server-side** (`internal/action`) — derived from the op, never trusted
   from model output — and an unknown op or out-of-allowlist target is refused. No cluster-mutating MCP
   tools are wired. The alert webhook is authenticated (required under `auto`), and the kill-switch
-  **fails closed on cold start** (auto starts paused until an authenticated resume).
+  **fails closed on cold start** (auto starts paused until an authenticated resume). *Note:* the
+  kill-switch resume and the rate-limit window are **in-memory** — a restart/failover re-pauses (safe)
+  but loses an operator's resume and resets the rate-limit counter; back them with a PVC if resume/budget
+  must survive a restart.
 - **The Curator is cluster-read-only** — its "writes" are markdown-to-git via reviewed PR + issues,
   never the cluster. Cluster mutations come only from the gated action executor above.
 - **Scoped identity.** In-cluster, the agent runs under a least-privilege, read-mostly identity
@@ -370,9 +382,15 @@ KB git repo  ──syncer──►  local mirror  ──build──►  index:  
   (which can carry secrets/PII) only from the Flux controllers, so `pods/log` is granted as a
   **namespaced** Role over `rbac.controllerLogNamespaces` (default `flux-system`) — never cluster-wide.
   Cluster-wide `pods`/`events` *get/list* (pod status + event messages, not log bodies) stays in the
-  ClusterRole because `pod_status`/`kube_events` triage arbitrary incident namespaces. Redacting
-  secrets that still surface via those status/event messages — and via the flux-system log bodies —
-  is the complementary, redaction-side mitigation (roadmap R19).
+  ClusterRole because `pod_status`/`kube_events` triage arbitrary incident namespaces.
+
+> [!warning] Known limitation — no content redaction yet (roadmap R19)
+> Tool output (logs, git diffs, status/event messages) currently reaches the **model provider**
+> verbatim, and model-quoted evidence is copied into the **KB pull-request body** and **chat** — so a
+> secret in a log line or manifest can egress to your LLM vendor and, if the KB repo is public, further.
+> Mitigated today by the RBAC scoping above and by **self-hosting the model** (in-cluster vLLM/Ollama
+> keeps data in-boundary); the planned fix is a scrub pass on tool output and on curated/notified
+> evidence. If you run untrusted-tenant namespaces or a public KB repo, treat this as a gating concern.
 - **Append-only, tamper-evident audit log** (`internal/audit`): every action attempt — inputs, gate
   results, op, target, actor, outcome — is a hash-chained JSON line, so edits/deletions are detectable.
 - **Honest uncertainty.** `unresolved` is a first-class output field; the agent says what it doesn't
