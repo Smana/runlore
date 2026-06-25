@@ -69,6 +69,46 @@ func TestInstantRecallBelowThreshold(t *testing.T) {
 	}
 }
 
+func TestRecallRejectedByVerifyFallsThrough(t *testing.T) {
+	// A recall hits a strong entry, but the adversarial verify pass rejects every
+	// root cause (a stale/poisoned catalog entry — the exact case verify exists to
+	// catch). The loop must NOT publish the now-empty recall; it must fall through
+	// to a real investigation. Regression: it previously delivered an empty "recall"
+	// result and returned.
+	model := &scriptModel{responses: []providers.CompletionResponse{
+		// 1) verify the recalled finding → reject it entirely (empties root causes).
+		{ToolCalls: []providers.ToolCall{{ID: "v1", Name: submitVerdictsName, Args: `{"verdicts":[{"index":0,"verdict":"reject","reason":"correlation only"}]}`}}},
+		// 2) the fall-through loop investigates and submits a fresh finding.
+		{ToolCalls: []providers.ToolCall{{ID: "f1", Name: submitFindingsName, Args: `{"confidence":0.8,"root_causes":[{"summary":"freshly investigated","confidence":0.8}]}`}}},
+		// 3) the loop verifies its own fresh finding → keep it.
+		{ToolCalls: []providers.ToolCall{{ID: "v2", Name: submitVerdictsName, Args: `{"verdicts":[{"index":0,"verdict":"keep","confidence":0.8}]}`}}},
+	}}
+	var got *providers.Investigation
+	li := &LoopInvestigator{
+		Model:  model,
+		Verify: true,
+		Log:    slog.New(slog.NewTextHandler(io.Discard, nil)),
+		Recall: &Recall{MinScore: 2.0, Catalog: fakeScored{hits: []catalog.ScoredEntry{
+			{Entry: catalog.Entry{Title: "Stale entry", Description: "no longer applies", Path: "stale.md", Resource: "tooling/harbor"}, Score: 5.0}}}},
+		OnComplete: func(inv providers.Investigation) { got = &inv },
+	}
+	if err := li.Investigate(context.Background(), Request{Title: "HarborProbeFailure", Fingerprint: "fp-x", Workload: providers.Workload{Namespace: "tooling", Name: "harbor"}}); err != nil {
+		t.Fatalf("Investigate: %v", err)
+	}
+	if got == nil {
+		t.Fatal("nothing delivered")
+	}
+	if got.Recalled {
+		t.Fatalf("a verify-rejected recall must fall through to a real investigation, not deliver an empty recall: %+v", got)
+	}
+	if len(got.RootCauses) != 1 || got.RootCauses[0].Summary != "freshly investigated" {
+		t.Fatalf("expected the fall-through loop's fresh finding, got %+v", got)
+	}
+	if model.i < 2 {
+		t.Fatalf("expected the loop to run after the recall was rejected (>=2 model calls), got %d", model.i)
+	}
+}
+
 func TestLoopInvestigatorActions(t *testing.T) {
 	// submit_findings proposes a reversible and an irreversible action.
 	model := &scriptModel{responses: []providers.CompletionResponse{
