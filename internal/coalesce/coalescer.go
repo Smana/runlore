@@ -56,10 +56,20 @@ func New(cfg Config, out func([]config.Incident)) *Coalescer {
 func (c *Coalescer) key(inc config.Incident) string {
 	if len(c.cfg.CorrelationLabels) > 0 {
 		parts := make([]string, 0, len(c.cfg.CorrelationLabels))
+		anyPresent := false
 		for _, l := range c.cfg.CorrelationLabels {
-			parts = append(parts, inc.Labels[l])
+			v := inc.Labels[l]
+			if v != "" {
+				anyPresent = true
+			}
+			parts = append(parts, v)
 		}
-		return inc.Namespace + "/" + strings.Join(parts, "/")
+		// Only correlate on label values when at least one is present. If every
+		// configured label is absent the key would degenerate to "ns/" and
+		// collapse unrelated incidents, so fall through to the GroupKey path.
+		if anyPresent {
+			return inc.Namespace + "/" + strings.Join(parts, "/")
+		}
 	}
 	if inc.GroupKey != "" {
 		return inc.GroupKey
