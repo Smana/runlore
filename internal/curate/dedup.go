@@ -6,6 +6,8 @@ import (
 	"log/slog"
 	"sort"
 	"strings"
+
+	"github.com/Smana/runlore/internal/providers"
 )
 
 // Dedup collapses near-identical open KB PRs: the lowest-numbered PR in a cluster
@@ -13,11 +15,12 @@ import (
 // design (high similarity threshold) — a missed merge is cheaper than a wrong close.
 type Dedup struct {
 	Forge     Forge
-	Threshold float64 // Jaccard over title token-sets; default 0.6 when 0
+	Threshold float64 // title-Jaccard fallback threshold for markerless PRs; default 0.6 when 0
 	Log       *slog.Logger
 }
 
-// Run clusters open PRs by title similarity and closes duplicates.
+// Run clusters open PRs and closes duplicates — fingerprint-first (deterministic
+// DupFingerprint marker), falling back to title-Jaccard for markerless PRs.
 func (d Dedup) Run(ctx context.Context) error {
 	thr := d.Threshold
 	if thr == 0 {
@@ -42,7 +45,7 @@ func (d Dedup) Run(ctx context.Context) error {
 			if isProtected(prs[j].Labels) {
 				continue
 			}
-			if jaccard(titleTokens(prs[i].Title), titleTokens(prs[j].Title)) >= thr {
+			if isDuplicatePair(prs[i], prs[j], thr) {
 				canonicalOf[prs[j].Number] = prs[i].Number
 			}
 		}
@@ -59,6 +62,26 @@ func (d Dedup) Run(ctx context.Context) error {
 		d.Log.Info("dedup: closed duplicate", "pr", dup, "canonical", canon)
 	}
 	return nil
+}
+
+// isDuplicatePair decides whether b duplicates the canonical a. It is
+// fingerprint-FIRST: every curator-drafted PR carries a deterministic
+// DupFingerprint persisted in its body as a marker (the same identity the
+// file-time gate's Curator.duplicateOpenPR reads back). When BOTH PRs carry a
+// parseable marker, they are duplicates iff the fingerprints are EQUAL — stable
+// across the LLM's title phrasing, which is exactly the title fragility
+// DupFingerprint was built to retire. A coincidental title match cannot collapse
+// PRs with different fingerprints, and reworded titles with one fingerprint do.
+//
+// Title-Jaccard is the FALLBACK for markerless PRs (legacy/hand-filed entries with
+// no marker) — additive, not a regression.
+func isDuplicatePair(a, b providers.CuratedIssue, thr float64) bool {
+	fa := providers.ParseFingerprintMarker(a.Body)
+	fb := providers.ParseFingerprintMarker(b.Body)
+	if fa != "" && fb != "" {
+		return fa == fb
+	}
+	return jaccard(titleTokens(a.Title), titleTokens(b.Title)) >= thr
 }
 
 var titleNoise = map[string]bool{"kb": true, "in": true, "the": true, "due": true, "to": true, "a": true, "of": true, "and": true}
