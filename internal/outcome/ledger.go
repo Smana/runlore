@@ -124,7 +124,7 @@ func (l *Ledger) Status() Status {
 }
 
 func (l *Ledger) appendLocked(e Event) error {
-	f, err := os.OpenFile(l.path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
+	f, err := os.OpenFile(l.path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o600)
 	if err != nil {
 		return err
 	}
