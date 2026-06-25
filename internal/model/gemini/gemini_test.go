@@ -11,6 +11,39 @@ import (
 	"github.com/Smana/runlore/internal/providers"
 )
 
+const maliciousBody = "\n\x1b[2Kfake=record secret=sk-LEAKED-0123456789 level=error msg=\"forged\""
+
+// TestNon2xxErrorOmitsBody asserts a non-2xx response yields an error that
+// excludes the upstream body but includes the status and request-id.
+func TestNon2xxErrorOmitsBody(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("X-Goog-Request-Id", "req-abc-123")
+		w.WriteHeader(http.StatusBadGateway)
+		_, _ = w.Write([]byte(maliciousBody))
+	}))
+	defer srv.Close()
+
+	_, err := New(srv.URL, "gemini-x", "k").Complete(context.Background(), providers.CompletionRequest{
+		Messages: []providers.Message{{Role: "user", Content: "hi"}},
+	})
+	if err == nil {
+		t.Fatal("want error for non-2xx response")
+	}
+	msg := err.Error()
+	if strings.Contains(msg, "sk-LEAKED") || strings.Contains(msg, "fake=record") {
+		t.Errorf("error leaked upstream body: %q", msg)
+	}
+	if strings.ContainsAny(msg, "\n\r") {
+		t.Errorf("error contains a raw newline (log-injection risk): %q", msg)
+	}
+	if !strings.Contains(msg, "502") {
+		t.Errorf("error should carry the status code: %q", msg)
+	}
+	if !strings.Contains(msg, "req-abc-123") {
+		t.Errorf("error should carry the request-id: %q", msg)
+	}
+}
+
 func TestComplete(t *testing.T) {
 	var gotReq genRequest
 	var gotKey, gotPath string
