@@ -364,8 +364,18 @@ func (s *Server) handleAlertmanager(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "unauthorized", http.StatusUnauthorized)
 		return
 	}
+	// Cap the body: its labels/annotations flow into the LLM prompt, so an
+	// unbounded POST must not force unbounded allocation (the Slack handler caps
+	// the same way). Past the cap, decode fails with *http.MaxBytesError → 413;
+	// other decode errors are malformed JSON → 400.
+	r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
 	incidents, err := trigger.ParseAlertmanager(r.Body)
 	if err != nil {
+		var maxErr *http.MaxBytesError
+		if errors.As(err, &maxErr) {
+			http.Error(w, "payload too large", http.StatusRequestEntityTooLarge)
+			return
+		}
 		http.Error(w, "bad payload", http.StatusBadRequest)
 		return
 	}
