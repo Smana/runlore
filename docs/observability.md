@@ -88,6 +88,11 @@ Prometheus **or** a VictoriaMetrics datasource with no edits. Import it via
 **Dashboards → Import → Upload JSON**, or provision it. See the
 [grafana README](../deploy/observability/grafana/README.md).
 
+It panels every `runlore_` series above, including the output-truncation rate
+(`tool_output_truncated_bytes_total`), the coalesced-batch-size distribution
+(`coalesce_batch_size`, heatmap), and the curation dedup-score distribution
+(`curation_dedup_score`, heatmap).
+
 ## Alerting
 
 Alert rules ship as both a Prometheus-Operator `PrometheusRule` and a
