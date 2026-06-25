@@ -24,9 +24,14 @@ rules:
   - apiGroups: [""]
     resources: ["events"]
     verbs: ["get", "list", "watch"]
-  # controller_logs: read Flux controller pod logs (read-only).
+  # pod_status / kube_events triage the INCIDENT's namespace (an arbitrary workload
+  # namespace, e.g. apps/payments), so pod STATUS reads must be cluster-wide. This grants
+  # pod metadata/status only — NOT pods/log (raw log bodies), which is scoped to a
+  # namespaced Role over rbac.controllerLogNamespaces below so secret-bearing logs are
+  # not readable cluster-wide and fed to an external LLM. (Redaction of secrets that
+  # still surface via status/event messages is a separate follow-up — roadmap R19.)
   - apiGroups: [""]
-    resources: ["pods", "pods/log"]
+    resources: ["pods"]
     verbs: ["get", "list"]
   # Argo CD engine (config.gitops.engine: argocd)
   - apiGroups: ["argoproj.io"]
@@ -79,6 +84,41 @@ subjects:
   - kind: ServiceAccount
     name: {{ include "runlore.serviceAccountName" . }}
     namespace: {{ .Release.Namespace }}
+{{- range .Values.rbac.controllerLogNamespaces }}
+---
+# controller_logs: read RAW Flux controller pod logs in THIS namespace only (default
+# flux-system) — never cluster-wide — because pod logs may carry secrets/PII and tool
+# output is sent to an external LLM. pods get/list is repeated here (in addition to the
+# cluster-wide grant) so the Role is self-contained: controller_logs lists the matching
+# controller pods before streaming pods/log.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ include "runlore.fullname" $ }}-controller-logs
+  namespace: {{ . }}
+  labels:
+    {{- include "runlore.labels" $ | nindent 4 }}
+rules:
+  - apiGroups: [""]
+    resources: ["pods", "pods/log"]
+    verbs: ["get", "list"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ include "runlore.fullname" $ }}-controller-logs
+  namespace: {{ . }}
+  labels:
+    {{- include "runlore.labels" $ | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: {{ include "runlore.fullname" $ }}-controller-logs
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "runlore.serviceAccountName" $ }}
+    namespace: {{ $.Release.Namespace }}
+{{- end }}
 {{- if .Values.rbac.allowActions }}
 {{- range .Values.rbac.actionNamespaces }}
 ---
