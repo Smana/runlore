@@ -30,6 +30,41 @@ func TestKeyCorrelationLabels(t *testing.T) {
 	}
 }
 
+// When every configured correlation label is absent from an incident, the key
+// must NOT collapse to "ns/" (which would coalesce unrelated incidents). It
+// falls back to GroupKey, else ns/alertname.
+func TestKeyAllEmptyCorrelationLabelsFallBack(t *testing.T) {
+	c := New(Config{CorrelationLabels: []string{"app", "team"}}, nil)
+	// Two unrelated incidents in the same namespace, neither carrying the
+	// correlation labels, must not share a key.
+	a := config.Incident{AlertName: "DiskFull", Namespace: "ns", GroupKey: "gk-a"}
+	b := config.Incident{AlertName: "OOMKill", Namespace: "ns", GroupKey: "gk-b"}
+	if ka, kb := c.key(a), c.key(b); ka == kb {
+		t.Fatalf("all-empty correlation labels must not collapse unrelated incidents, both = %q", ka)
+	}
+	// Falls back to GroupKey when present.
+	if got := c.key(a); got != "gk-a" {
+		t.Fatalf("all-empty labels should fall back to groupKey, got %q", got)
+	}
+	// And to ns/alertname when GroupKey is also empty.
+	noGK := config.Incident{AlertName: "DiskFull", Namespace: "ns"}
+	if got := c.key(noGK); got != "ns/DiskFull" {
+		t.Fatalf("all-empty labels + no groupKey should fall back to ns/alertname, got %q", got)
+	}
+}
+
+// Partial presence of correlation labels is a legitimate key and must still
+// correlate (not fall back).
+func TestKeyPartialCorrelationLabelsStillCorrelate(t *testing.T) {
+	c := New(Config{CorrelationLabels: []string{"app", "team"}}, nil)
+	withApp := config.Incident{AlertName: "X", Namespace: "ns", GroupKey: "gk1",
+		Labels: map[string]string{"app": "web"}}
+	// "team" is absent → partial. Key must use the labels, not fall back to GroupKey.
+	if got := c.key(withApp); got != "ns/web/" {
+		t.Fatalf("partial labels should still correlate on label values, got %q", got)
+	}
+}
+
 func TestSummarize(t *testing.T) {
 	s := Summarize([]config.Incident{
 		inc("X", "ns", "warning", "g"),

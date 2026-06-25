@@ -102,3 +102,100 @@ func TestToolResultCoalescing(t *testing.T) {
 		t.Fatalf("functionResponse.response should wrap the tool output: %s", results.Parts[0].FunctionResponse.Response)
 	}
 }
+
+// TestParallelSameFunctionCorrelatesByID verifies that two parallel calls to the
+// SAME function name correlate by id: each request functionResponse carries the
+// originating call's id (not just the shared name), so Gemini maps them correctly.
+func TestParallelSameFunctionCorrelatesByID(t *testing.T) {
+	var gotReq genRequest
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewDecoder(r.Body).Decode(&gotReq)
+		_, _ = w.Write([]byte(`{"candidates":[{"content":{"parts":[{"text":"done"}]}}]}`))
+	}))
+	defer srv.Close()
+
+	_, err := New(srv.URL, "gemini-x", "k").Complete(context.Background(), providers.CompletionRequest{
+		Messages: []providers.Message{
+			{Role: "user", Content: "investigate"},
+			{Role: "assistant", ToolCalls: []providers.ToolCall{
+				{ID: "call_1", Name: "get_status", Args: `{"ns":"a"}`},
+				{ID: "call_2", Name: "get_status", Args: `{"ns":"b"}`}, // same function, different id
+			}},
+			{Role: "tool", ToolCallID: "call_1", Content: "status: a ok"},
+			{Role: "tool", ToolCallID: "call_2", Content: "status: b failing"},
+		},
+	})
+	if err != nil {
+		t.Fatalf("Complete: %v", err)
+	}
+	// model turn: both functionCall parts carry their id.
+	model := gotReq.Contents[1]
+	if len(model.Parts) != 2 ||
+		model.Parts[0].FunctionCall == nil || model.Parts[0].FunctionCall.ID != "call_1" ||
+		model.Parts[1].FunctionCall == nil || model.Parts[1].FunctionCall.ID != "call_2" {
+		t.Fatalf("model functionCall ids wrong: %+v", model.Parts)
+	}
+	// coalesced tool results: each functionResponse carries the originating id, and
+	// the response payload matches the right call.
+	res := gotReq.Contents[2]
+	if len(res.Parts) != 2 {
+		t.Fatalf("want 2 functionResponse parts, got %d: %+v", len(res.Parts), res.Parts)
+	}
+	byID := map[string]string{}
+	for _, p := range res.Parts {
+		if p.FunctionResponse == nil {
+			t.Fatalf("nil functionResponse: %+v", p)
+		}
+		if p.FunctionResponse.Name != "get_status" {
+			t.Fatalf("functionResponse name = %q, want get_status", p.FunctionResponse.Name)
+		}
+		byID[p.FunctionResponse.ID] = string(p.FunctionResponse.Response)
+	}
+	if !strings.Contains(byID["call_1"], "a ok") {
+		t.Fatalf("call_1 response mismatched: %q", byID["call_1"])
+	}
+	if !strings.Contains(byID["call_2"], "b failing") {
+		t.Fatalf("call_2 response mismatched: %q", byID["call_2"])
+	}
+}
+
+// TestResponseFunctionCallID verifies the model's functionCall id (newer API) is
+// carried into ToolCall.ID, and that absent id falls back to the function name.
+func TestResponseFunctionCallID(t *testing.T) {
+	tests := []struct {
+		name     string
+		body     string
+		wantID   string
+		wantName string
+	}{
+		{
+			name:     "id present",
+			body:     `{"candidates":[{"content":{"parts":[{"functionCall":{"id":"call_xyz","name":"what_changed","args":{}}}]}}]}`,
+			wantID:   "call_xyz",
+			wantName: "what_changed",
+		},
+		{
+			name:     "id absent falls back to name",
+			body:     `{"candidates":[{"content":{"parts":[{"functionCall":{"name":"what_changed","args":{}}}]}}]}`,
+			wantID:   "what_changed",
+			wantName: "what_changed",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				_, _ = w.Write([]byte(tt.body))
+			}))
+			defer srv.Close()
+			resp, err := New(srv.URL, "gemini-x", "k").Complete(context.Background(), providers.CompletionRequest{
+				Messages: []providers.Message{{Role: "user", Content: "hi"}},
+			})
+			if err != nil {
+				t.Fatalf("Complete: %v", err)
+			}
+			if len(resp.ToolCalls) != 1 || resp.ToolCalls[0].ID != tt.wantID || resp.ToolCalls[0].Name != tt.wantName {
+				t.Fatalf("ToolCall = %+v, want id=%q name=%q", resp.ToolCalls, tt.wantID, tt.wantName)
+			}
+		})
+	}
+}
