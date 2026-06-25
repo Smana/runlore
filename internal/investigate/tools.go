@@ -4,10 +4,28 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"math"
 	"sort"
 
 	"github.com/Smana/runlore/internal/providers"
 )
+
+// clamp01 constrains a model-emitted confidence to [0,1]; NaN -> 0. A NaN score
+// must never pass the auto-action gate, where NaN < threshold is always false,
+// nor poison the max() that recomputes overall confidence after the verify pass.
+// +Inf/-Inf fall through the >1 / <0 arms.
+func clamp01(x float64) float64 {
+	switch {
+	case math.IsNaN(x):
+		return 0
+	case x < 0:
+		return 0
+	case x > 1:
+		return 1
+	default:
+		return x
+	}
+}
 
 // Tool is a model-callable capability used during an investigation.
 type Tool interface {
@@ -95,11 +113,11 @@ func parseFindings(args string) (providers.Investigation, error) {
 	if err := json.Unmarshal([]byte(args), &f); err != nil {
 		return providers.Investigation{}, fmt.Errorf("parse findings: %w", err)
 	}
-	inv := providers.Investigation{Title: f.Title, Confidence: f.Confidence, Unresolved: f.Unresolved}
+	inv := providers.Investigation{Title: f.Title, Confidence: clamp01(f.Confidence), Unresolved: f.Unresolved}
 	for _, rc := range f.RootCauses {
 		inv.RootCauses = append(inv.RootCauses, providers.Hypothesis{
 			Summary:         rc.Summary,
-			Confidence:      rc.Confidence,
+			Confidence:      clamp01(rc.Confidence),
 			ChangeRef:       rc.ChangeRef,
 			Evidence:        rc.Evidence,
 			SuggestedAction: rc.SuggestedAction,

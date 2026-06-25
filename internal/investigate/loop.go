@@ -207,7 +207,7 @@ func (li *LoopInvestigator) Investigate(ctx context.Context, req Request) error 
 		// inject a one-time nudge asking the model to wrap up. If the model did not wind
 		// down and the estimate is still over budget on the next step, hard-kill: deliver
 		// whatever findings exist rather than growing context unbounded.
-		if est := estimateTokens(sys, messages); overBudget(est, li.MaxTokensPerInvestigation) {
+		if est := estimateTokens(sys, messages, specs); overBudget(est, li.MaxTokensPerInvestigation) {
 			if !budgetNudged {
 				messages = append(messages, providers.Message{Role: "user", Content: budgetNudge})
 				budgetNudged = true
@@ -290,7 +290,7 @@ func (li *LoopInvestigator) Investigate(ctx context.Context, req Request) error 
 				inv.Fingerprints = req.Fingerprints // coalesced batch ids; one open per constituent alert
 				li.Log.Info("investigation evidence gathered", "title", req.Title, "tools_used", used)
 				if li.Metrics != nil {
-					li.Metrics.InvestigationTokens.Record(ctx, int64(estimateTokens(sys, messages)))
+					li.Metrics.InvestigationTokens.Record(ctx, int64(estimateTokens(sys, messages, specs)))
 				}
 				if li.Verify {
 					inv = li.verifyFindings(ctx, req, inv)

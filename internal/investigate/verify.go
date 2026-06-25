@@ -100,12 +100,12 @@ func applyVerdicts(li *LoopInvestigator, req Request, inv providers.Investigatio
 		switch {
 		case !ok || v.Verdict == "keep":
 			if ok && v.Confidence > 0 {
-				rc.Confidence = v.Confidence
+				rc.Confidence = clamp01(v.Confidence)
 			}
 			kept = append(kept, rc)
 		case v.Verdict == "downgrade":
 			if v.Confidence > 0 {
-				rc.Confidence = v.Confidence
+				rc.Confidence = clamp01(v.Confidence)
 			} else {
 				rc.Confidence /= 2
 			}

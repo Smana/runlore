@@ -2,6 +2,7 @@ package investigate
 
 import (
 	"encoding/json"
+	"math"
 	"slices"
 	"testing"
 
@@ -73,6 +74,65 @@ func TestSubmitFindingsSchemaNoEmptyEnum(t *testing.T) {
 		}
 	}
 	walk("$", schema)
+}
+
+// TestClamp01 covers the helper directly, including the NaN case JSON cannot
+// express (JSON has no NaN literal). NaN must clamp to 0 so it can never slip
+// through the auto-action gate, where NaN < x is always false.
+func TestClamp01(t *testing.T) {
+	cases := []struct {
+		name string
+		in   float64
+		want float64
+	}{
+		{"above one", 1.7, 1},
+		{"below zero", -0.2, 0},
+		{"nan", math.NaN(), 0},
+		{"pos inf", math.Inf(1), 1},
+		{"neg inf", math.Inf(-1), 0},
+		{"in range", 0.42, 0.42},
+		{"exactly one", 1, 1},
+		{"exactly zero", 0, 0},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := clamp01(tc.in); got != tc.want {
+				t.Fatalf("clamp01(%v) = %v, want %v", tc.in, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestParseFindingsClampsConfidence verifies model-emitted confidence is clamped
+// to [0,1] for both the overall and per-root-cause scores, so an out-of-range
+// value can never reach the auto-action gate or the renderers.
+func TestParseFindingsClampsConfidence(t *testing.T) {
+	cases := []struct {
+		name string
+		val  string // JSON number for confidence (both overall and per-cause)
+		want float64
+	}{
+		{"above one", "1.7", 1},
+		{"below zero", "-0.2", 0},
+		{"in range", "0.42", 0.42},
+		{"exactly one", "1", 1},
+		{"exactly zero", "0", 0},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			args := `{"confidence":` + tc.val + `,"root_causes":[{"summary":"x","confidence":` + tc.val + `}]}`
+			inv, err := parseFindings(args)
+			if err != nil {
+				t.Fatalf("parseFindings: %v", err)
+			}
+			if inv.Confidence != tc.want {
+				t.Fatalf("overall confidence = %v, want %v", inv.Confidence, tc.want)
+			}
+			if len(inv.RootCauses) != 1 || inv.RootCauses[0].Confidence != tc.want {
+				t.Fatalf("root-cause confidence = %v, want %v", inv.RootCauses[0].Confidence, tc.want)
+			}
+		})
+	}
 }
 
 func TestParseFindingsAffectedResource(t *testing.T) {
