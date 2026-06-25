@@ -98,10 +98,6 @@ func (a *Auto) runOne(ctx context.Context, inv providers.Investigation, act prov
 		a.log.Info("auto dry-run (would execute)", "op", act.Op, "target", target(act))
 		a.record(act, audit.DecisionDryRun, "")
 		return annotate("[auto: dry-run — would execute]")
-	case !a.reserve():
-		a.log.Warn("auto rate limit reached; action not executed", "max", a.maxPerWindow, "window", a.window.String())
-		a.record(act, audit.DecisionSkipped, "rate-limited")
-		return annotate("[auto: skipped — rate-limited]")
 	default:
 		// Re-check the kill-switch immediately before executing: Pause() may have
 		// landed between the switch evaluation above and here (gate TOCTOU).
@@ -120,6 +116,14 @@ func (a *Auto) runOne(ctx context.Context, inv providers.Investigation, act prov
 				a.record(act, audit.DecisionDenied, reason)
 				return annotate("[auto: denied — " + reason + "]")
 			}
+		}
+		// Reserve a rate slot LAST — only once every gate (pause re-check + envelope
+		// re-validation) has passed — so a pause or policy denial landing in the gate
+		// window can't burn a slot for an action that never executed.
+		if !a.reserve() {
+			a.log.Warn("auto rate limit reached; action not executed", "max", a.maxPerWindow, "window", a.window.String())
+			a.record(act, audit.DecisionSkipped, "rate-limited")
+			return annotate("[auto: skipped — rate-limited]")
 		}
 		// executed/failed are audited at the executor seam (NewAuditedExecutor).
 		if err := a.exec.Execute(ContextWithActor(ctx, "auto"), act); err != nil {
