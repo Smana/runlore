@@ -2,6 +2,8 @@ package action
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -38,7 +40,6 @@ type Approvals struct {
 	now    func() time.Time
 
 	mu      sync.Mutex
-	seq     int
 	pending map[string]entry
 }
 
@@ -59,10 +60,19 @@ func NewApprovals(exec Executor, policy *Policy, aud audit.Auditor, log *slog.Lo
 func (a *Approvals) Register(act providers.Action) string {
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	a.seq++
-	id := fmt.Sprintf("a%d", a.seq)
+	id := newID()
 	a.pending[id] = entry{action: act, created: a.now()}
 	return id
+}
+
+// newID returns an unguessable approval id. Ids appear in Slack button values and
+// on the HTTP approve/reject path; a sequential "a%d" id is trivially enumerable,
+// so a crypto/rand id is defense-in-depth behind the auth gates. crypto/rand.Read
+// does not return an error on supported platforms (Go 1.24+).
+func newID() string {
+	var b [12]byte
+	_, _ = rand.Read(b[:])
+	return hex.EncodeToString(b[:])
 }
 
 // List returns the non-expired pending actions.
