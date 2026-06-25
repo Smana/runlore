@@ -512,17 +512,18 @@ func buildCatalog(ctx context.Context, cfg *config.Config, forgeTok forgeToken, 
 			log.Info("catalog git-sync using the forge GitHub App identity")
 		}
 		syncer := &catalog.Syncer{URL: cfg.Catalog.Git.URL, Branch: cfg.Catalog.Git.Branch, Dir: dir, Token: token, Log: log}
-		go syncer.Run(ctx, cfg.Catalog.Git.Interval.Std(), func() {
+		go syncer.Run(ctx, cfg.Catalog.Git.Interval.Std(), func() error {
 			skipped, err := cat.Reload(dir)
 			if err != nil {
 				log.Warn("catalog reload failed", "dir", dir, "err", err)
-				return
+				return err
 			}
 			if len(skipped) > 0 {
 				log.Warn("catalog entries skipped (unparseable)", "count", len(skipped), "files", skipped)
 			}
 			log.Info("catalog synced", "url", cfg.Catalog.Git.URL, "entries", cat.Len())
 			warnInvalid(cat)
+			return nil
 		})
 		log.Info("catalog git-sync enabled", "url", cfg.Catalog.Git.URL, "dir", dir)
 		return cat
