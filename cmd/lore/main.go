@@ -281,12 +281,18 @@ func runServe(args []string) error {
 
 	reinv := buildReinvestigator(ctx, cfg, gitops, metrics, log)
 
+	// failureDedup is created ONCE (process scope), not per leadership term, so it
+	// survives leader flaps: the gitops informer's initial-LIST replay of every
+	// still-failing workload on each re-acquire is then suppressed instead of
+	// re-investigated (GO-P1A). Deduper is safe for concurrent use across terms.
+	failureDedup := trigger.NewDeduper(cfg.Triggers.Incidents.Dedup.Window.Std())
+
 	// startWork runs the leader-only loops (investigation queue + failure watch +
 	// re-investigate poller), scoped to a context cancelled when leadership is lost.
 	startWork := func(workCtx context.Context) {
 		go queue.Run(workCtx)
 		if cfg.Triggers.GitOpsFailures.Enabled && gitops != nil {
-			startGitOpsFailureWatch(workCtx, cfg, queue, gitops, metrics, log)
+			startGitOpsFailureWatch(workCtx, cfg, queue, gitops, failureDedup, metrics, log)
 		}
 		if reinv != nil {
 			log.Info("re-investigate poller enabled", "label", investigate.ReinvestigateLabel)
@@ -539,17 +545,18 @@ func buildCatalog(ctx context.Context, cfg *config.Config, forgeTok forgeToken, 
 			log.Info("catalog git-sync using the forge GitHub App identity")
 		}
 		syncer := &catalog.Syncer{URL: cfg.Catalog.Git.URL, Branch: cfg.Catalog.Git.Branch, Dir: dir, Token: token, Log: log}
-		go syncer.Run(ctx, cfg.Catalog.Git.Interval.Std(), func() {
+		go syncer.Run(ctx, cfg.Catalog.Git.Interval.Std(), func() error {
 			skipped, err := cat.Reload(dir)
 			if err != nil {
 				log.Warn("catalog reload failed", "dir", dir, "err", err)
-				return
+				return err
 			}
 			if len(skipped) > 0 {
 				log.Warn("catalog entries skipped (unparseable)", "count", len(skipped), "files", skipped)
 			}
 			log.Info("catalog synced", "url", cfg.Catalog.Git.URL, "entries", cat.Len())
 			warnInvalid(cat)
+			return nil
 		})
 		log.Info("catalog git-sync enabled", "url", cfg.Catalog.Git.URL, "dir", dir)
 		return cat
@@ -1394,7 +1401,11 @@ func buildInvestigator(ctx context.Context, cfg *config.Config, gp providers.Git
 // only after the failure has persisted — re-checked still Ready=False via the
 // provider's ResourceStatus — filtering reconcile-churn transients that would
 // otherwise drive confident-but-wrong root causes.
-func startGitOpsFailureWatch(ctx context.Context, cfg *config.Config, q investigate.Enqueuer, gp providers.GitOpsProvider, metrics *telemetry.Metrics, log *slog.Logger) {
+// dedup is process-scoped (created once in runServe) and shared across leadership
+// terms — NOT created here per call. The informer's initial LIST re-emits every
+// still-failing workload as an Add on each (re-)acquire, so a per-term deduper
+// (empty at term start) would re-investigate every broken app on every leader flap.
+func startGitOpsFailureWatch(ctx context.Context, cfg *config.Config, q investigate.Enqueuer, gp providers.GitOpsProvider, dedup *trigger.Deduper, metrics *telemetry.Metrics, log *slog.Logger) {
 	events, err := gp.WatchFailures(ctx)
 	if err != nil {
 		log.Warn("gitops-failure watch disabled", "err", err)
@@ -1403,7 +1414,7 @@ func startGitOpsFailureWatch(ctx context.Context, cfg *config.Config, q investig
 	deb := buildFailureDebouncer(cfg, gp, metrics, log)
 	log.Info("watching gitops failures", "engine", gitopsEngine(cfg),
 		"debounce", cfg.Triggers.GitOpsFailures.DebounceWindow())
-	go investigate.DrainFailures(ctx, events, q, trigger.NewDeduper(cfg.Triggers.Incidents.Dedup.Window.Std()), deb, log)
+	go investigate.DrainFailures(ctx, events, q, dedup, deb, log)
 }
 
 // buildFailureDebouncer wires a Debouncer whose "still failing?" re-check reads
