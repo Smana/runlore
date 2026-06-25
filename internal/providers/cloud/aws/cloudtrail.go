@@ -38,21 +38,54 @@ func (c *Client) CloudChanges(ctx context.Context, sel providers.Selector, w pro
 		})
 	}
 
-	out, err := c.ct.LookupEvents(ctx, in)
-	if err != nil {
-		return nil, fmt.Errorf("cloudtrail lookup: %w", err)
-	}
-	changes := make([]providers.Change, 0, len(out.Events))
-	for i := range out.Events {
-		changes = append(changes, eventToChange(out.Events[i]))
+	// Paginate via the SDK paginator (a CloudTrail page is ≤50 events); a single
+	// LookupEvents call would silently drop pages 2+ when the window has more
+	// mutating events than fit one page. Over-collect by one past the cap so we
+	// can tell the cap is *binding* (more existed) versus an exactly-full result.
+	p := cloudtrail.NewLookupEventsPaginator(c.ct, in)
+	var changes []providers.Change
+	truncated := false
+	for p.HasMorePages() {
+		out, err := p.NextPage(ctx)
+		if err != nil {
+			return nil, fmt.Errorf("cloudtrail lookup: %w", err)
+		}
+		for i := range out.Events {
+			changes = append(changes, eventToChange(out.Events[i]))
+		}
+		if len(changes) > c.maxEvents {
+			truncated = true
+			break // we already have more than the cap; further pages cannot change the kept top-N
+		}
 	}
 	// Sort most-recent-first BEFORE capping, so the cap keeps the newest events
 	// regardless of the API's return order.
 	sort.SliceStable(changes, func(i, j int) bool { return changes[i].When.After(changes[j].When) })
 	if len(changes) > c.maxEvents {
+		truncated = true
 		changes = changes[:c.maxEvents]
 	}
+	// Append the sentinel AFTER the sort+slice so it always lands last (a zero
+	// When would otherwise sort it among real events), signalling a partial view.
+	if truncated {
+		changes = append(changes, truncatedChange(c.maxEvents))
+	}
 	return changes, nil
+}
+
+// truncatedChange is the sentinel appended when CloudChanges stops at its cap
+// with more events upstream, so the model knows the timeline is partial. It is
+// not a real event: Kind "(truncated)" is the recognizable marker, and it is
+// appended last so cloud_tools renders it as a trailing note.
+func truncatedChange(limit int) providers.Change {
+	return providers.Change{
+		Engine: providers.EngineAWS,
+		Type:   providers.ChangeCloudAPI,
+		Workload: providers.Workload{
+			Kind: "(truncated)",
+			Name: fmt.Sprintf("results truncated at %d — more events matched; narrow the window or resource", limit),
+		},
+	}
 }
 
 // eventToChange maps a CloudTrail event to an engine-agnostic Change.
