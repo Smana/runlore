@@ -157,6 +157,36 @@ service:
   type: ClusterIP
   port: 8080                          # the /webhook/alertmanager + /healthz + /metrics port
 
+# Health probes. The agent has a non-trivial warm-up: the HTTP server (and so
+# /healthz) comes up within ~1s, but /readyz stays 503 until this replica wins the
+# leader Lease AND — for a git-sync catalog — the first clone+index completes (a
+# real KB repo can take many seconds). A non-leader (standby) replica is /readyz
+# 503 for its whole life by design.
+#
+# A startupProbe on /healthz owns the cold-start window: while it runs, the
+# liveness + readiness probes are suppressed, so warm-up never emits premature
+# "Unhealthy" readiness events. Once it passes once, the tight readiness probe
+# takes over (so a leader handoff shows up in the Service endpoints within a few
+# seconds) and liveness guards against a genuine process hang on its normal
+# cadence. The startupProbe targets /healthz, NOT /readyz: gating startup on
+# readiness would deadlock a standby replica (never leader ⇒ never ready ⇒
+# startupProbe never passes ⇒ kubelet kills the pod). Liveness is deliberately
+# NOT loosened — it still trips a real hang.
+probes:
+  startup:
+    enabled: true            # set false to skip the startupProbe (e.g. very fast static catalog)
+    periodSeconds: 2
+    failureThreshold: 30     # warm-up budget = periodSeconds * failureThreshold = 60s
+    timeoutSeconds: 2
+  liveness:
+    periodSeconds: 10
+    failureThreshold: 3
+    timeoutSeconds: 2
+  readiness:
+    periodSeconds: 5         # keep tight so leader handoff reflects in endpoints fast
+    failureThreshold: 3
+    timeoutSeconds: 2
+
 serviceAccount:
   create: true
   name: ""
