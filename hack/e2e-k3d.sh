@@ -206,7 +206,11 @@ LLPORT=18086; free_port "$LLPORT"
 kubectl -n "$NS" port-forward svc/runlore "$LLPORT:8080" >/tmp/runlore-ll-pf.log 2>&1 &
 LLPF=$!; sleep 3
 # prefix-match tolerates the _total / _total_total suffix variants of the OTel exporter.
-llmetric() { curl -sf "http://localhost:$LLPORT/metrics" 2>/dev/null | awk -v p="^runlore_$1" '$0 ~ p {print int($NF); exit}'; }
+# Capture to a var first (|| true), then echo|awk — a direct `curl|awk '…exit}'`
+# lets awk close the pipe early, SIGPIPE-killing curl (exit 23) which pipefail+set-e
+# turn into a spurious abort when the matched metric lands early in the output. Mirrors
+# the set-e-safe metric() helper below.
+llmetric() { local b; b=$(curl -sf "http://localhost:$LLPORT/metrics" 2>/dev/null || true); echo "$b" | awk -v p="^runlore_$1" '$0 ~ p {print int($NF); exit}'; }
 OPENED=$(llmetric outcomes_opened); OPENED=${OPENED:-0}
 if [[ "$OPENED" -ge 1 ]]; then green "PASS: outcome ledger recorded an investigation open (capture; opened=$OPENED)"; PASS=$((PASS+1))
 else red "FAIL: no outcome 'open' recorded (capture; opened=$OPENED)"; FAIL=$((FAIL+1)); fi
