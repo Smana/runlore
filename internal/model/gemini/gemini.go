@@ -137,7 +137,10 @@ func (c *Client) Complete(ctx context.Context, req providers.CompletionRequest) 
 		return providers.CompletionResponse{}, fmt.Errorf("generateContent request: %w", err)
 	}
 	defer func() { _ = resp.Body.Close() }()
-	data, _ := io.ReadAll(resp.Body)
+	data, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return providers.CompletionResponse{}, fmt.Errorf("read response: %w", err)
+	}
 	if resp.StatusCode != http.StatusOK {
 		// Don't echo the upstream body into an Error-level log (info disclosure +
 		// log injection); surface status + sanitized request-id for correlation.
