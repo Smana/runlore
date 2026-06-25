@@ -85,6 +85,61 @@ func TestComplete(t *testing.T) {
 	}
 }
 
+// TestUsageAndStopReason verifies the Anthropic usage block and stop_reason are
+// parsed onto CompletionResponse: token counts surface on Usage, and a "max_tokens"
+// stop_reason flags Truncated. A response omitting usage parses to the zero value.
+func TestUsageAndStopReason(t *testing.T) {
+	tests := []struct {
+		name          string
+		body          string
+		wantIn        int
+		wantOut       int
+		wantTruncated bool
+	}{
+		{
+			name:          "usage + end_turn (not truncated)",
+			body:          `{"stop_reason":"end_turn","usage":{"input_tokens":120,"output_tokens":45},"content":[{"type":"text","text":"done"}]}`,
+			wantIn:        120,
+			wantOut:       45,
+			wantTruncated: false,
+		},
+		{
+			name:          "max_tokens stop_reason flags truncation",
+			body:          `{"stop_reason":"max_tokens","usage":{"input_tokens":200,"output_tokens":4096},"content":[{"type":"text","text":"cut off"}]}`,
+			wantIn:        200,
+			wantOut:       4096,
+			wantTruncated: true,
+		},
+		{
+			name:          "usage omitted parses to zero value",
+			body:          `{"stop_reason":"end_turn","content":[{"type":"text","text":"done"}]}`,
+			wantIn:        0,
+			wantOut:       0,
+			wantTruncated: false,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				_, _ = w.Write([]byte(tt.body))
+			}))
+			defer srv.Close()
+			resp, err := New(srv.URL, "claude-x", "k").Complete(context.Background(), providers.CompletionRequest{
+				Messages: []providers.Message{{Role: "user", Content: "hi"}},
+			})
+			if err != nil {
+				t.Fatalf("Complete: %v", err)
+			}
+			if resp.Usage.InputTokens != tt.wantIn || resp.Usage.OutputTokens != tt.wantOut {
+				t.Fatalf("usage = %+v, want in=%d out=%d", resp.Usage, tt.wantIn, tt.wantOut)
+			}
+			if resp.Truncated != tt.wantTruncated {
+				t.Fatalf("Truncated = %v, want %v", resp.Truncated, tt.wantTruncated)
+			}
+		})
+	}
+}
+
 // TestMessageCoalescing verifies the OpenAI-shaped exchange (assistant tool_calls +
 // separate tool messages) maps to Anthropic's tool_use / coalesced tool_result form.
 func TestMessageCoalescing(t *testing.T) {
