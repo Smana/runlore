@@ -3,6 +3,7 @@ package argocd
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"time"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -15,6 +16,13 @@ import (
 
 // applicationGVR is the Argo CD Application resource.
 var applicationGVR = schema.GroupVersionResource{Group: "argoproj.io", Version: "v1alpha1", Resource: "applications"}
+
+// sendTimeout bounds how long the informer handler blocks waiting for the
+// consumer to drain a watch event before giving up. It is large enough to ride
+// out a transient consumer stall (so we don't silently drop a failure event on a
+// burst) yet finite, so a wedged consumer can never block the shared informer
+// indefinitely.
+const sendTimeout = 5 * time.Second
 
 // dynamicReader reads Argo CD Applications as unstructured objects.
 type dynamicReader struct {
@@ -53,11 +61,7 @@ func (r *dynamicReader) WatchApplications(ctx context.Context) (<-chan Applicati
 			return
 		}
 		ev := ApplicationEvent{Application: applicationFromUnstructured(u)}
-		select {
-		case out <- ev:
-		case <-ctx.Done():
-		default: // never block the informer; drop under backpressure
-		}
+		sendEvent(ctx, out, ev)
 	}
 	if _, err := informer.AddEventHandler(cache.ResourceEventHandlerFuncs{
 		AddFunc:    func(obj any) { send(obj) },
@@ -72,6 +76,25 @@ func (r *dynamicReader) WatchApplications(ctx context.Context) (<-chan Applicati
 		<-ctx.Done()
 	}()
 	return out, nil
+}
+
+// sendEvent forwards a watch event to out with a BOUNDED block. A full channel no
+// longer means an instant silent drop (the old `default:` branch): we wait up to
+// sendTimeout for the consumer to drain, so a transient burst doesn't lose a
+// failure event. If the consumer is wedged past the timeout we give up and log —
+// the shared informer must never be blocked indefinitely. ctx cancellation returns
+// immediately.
+func sendEvent(ctx context.Context, out chan<- ApplicationEvent, ev ApplicationEvent) {
+	timer := time.NewTimer(sendTimeout)
+	defer timer.Stop()
+	select {
+	case out <- ev:
+	case <-ctx.Done():
+	case <-timer.C:
+		slog.Warn("argocd: dropped watch event (consumer backpressure)",
+			"application", ev.Application.Namespace+"/"+ev.Application.Name,
+			"timeout", sendTimeout)
+	}
 }
 
 // applicationFromUnstructured maps an unstructured Application to the minimal type.

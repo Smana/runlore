@@ -65,6 +65,54 @@ func TestApplicationFromUnstructuredMultiSource(t *testing.T) {
 	}
 }
 
+// TestSendEventBoundedNoDrop proves the bounded send does not silently drop an
+// event when the channel is momentarily full: a consumer that drains slightly
+// later still receives it (the old non-blocking `default:` branch dropped it).
+func TestSendEventBoundedNoDrop(t *testing.T) {
+	out := make(chan ApplicationEvent) // unbuffered: send blocks until drained
+	ev := ApplicationEvent{Application: application{Name: "x", Namespace: "ns"}}
+
+	done := make(chan struct{})
+	go func() {
+		sendEvent(context.Background(), out, ev) // must block, not drop
+		close(done)
+	}()
+
+	// Consumer drains after a short delay; the bounded send (5s) must wait for it.
+	time.Sleep(50 * time.Millisecond)
+	select {
+	case got := <-out:
+		if got.Application.Name != "x" {
+			t.Fatalf("unexpected event: %+v", got)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("event was dropped or send did not block for the consumer")
+	}
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("sendEvent did not return after the consumer drained")
+	}
+}
+
+// TestSendEventCtxCancel proves a cancelled ctx unblocks the send promptly even
+// when no consumer ever drains (so a wedged consumer can't pin the informer).
+func TestSendEventCtxCancel(t *testing.T) {
+	out := make(chan ApplicationEvent) // no consumer
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		sendEvent(ctx, out, ApplicationEvent{})
+		close(done)
+	}()
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("sendEvent did not return on ctx cancel")
+	}
+}
+
 func TestDynamicReaderWatch(t *testing.T) {
 	gvrToListKind := map[schema.GroupVersionResource]string{applicationGVR: "ApplicationList"}
 	degraded := &unstructured.Unstructured{Object: map[string]any{
