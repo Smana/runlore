@@ -145,6 +145,8 @@ helm upgrade --install runlore deploy/helm/runlore -n "$NS" \
   --set "env[4].name=SLACK_SIGNING_SECRET" --set-string "env[4].value=e2e-slack-secret" \
   --set "env[5].name=WEBHOOK_TOKEN" --set-string "env[5].value=e2e-webhook" \
   --set-string config.server.webhook_token_env=WEBHOOK_TOKEN \
+  --set-string config.logging.format=text \
+  --set-string config.triggers.gitops_failures.debounce=1s \
   --set-string config.forge.github_api_url="http://$HOST:$MOCK_PORT" \
   --set-string config.forge.kb_repo="mock/repo" \
   --set-string config.forge.base_branch="main" \
@@ -173,7 +175,7 @@ kubectl -n "$NS" create configmap am-payload \
   --dry-run=client -o yaml | kubectl apply -f -
 kubectl -n "$NS" delete pod curl --ignore-not-found >/dev/null 2>&1 || true
 kubectl -n "$NS" run curl --image=curlimages/curl:8.11.1 --restart=Never --rm -i --quiet \
-  --overrides='{"spec":{"containers":[{"name":"curl","image":"curlimages/curl:8.11.1","command":["curl","-s","-o","/dev/null","-w","webhook HTTP %{http_code}\n","-XPOST","http://runlore.runlore.svc:8080/webhook/alertmanager","--data","@/p/alertmanager-webhook.json"],"volumeMounts":[{"name":"p","mountPath":"/p"}]}],"volumes":[{"name":"p","configMap":{"name":"am-payload"}}]}}'
+  --overrides='{"spec":{"containers":[{"name":"curl","image":"curlimages/curl:8.11.1","command":["curl","-s","-o","/dev/null","-w","webhook HTTP %{http_code}\n","-XPOST","-H","Authorization: Bearer e2e-webhook","http://runlore.runlore.svc:8080/webhook/alertmanager","--data","@/p/alertmanager-webhook.json"],"volumeMounts":[{"name":"p","mountPath":"/p"}]}],"volumes":[{"name":"p","configMap":{"name":"am-payload"}}]}}'
 sleep 6
 kubectl -n "$NS" logs deploy/runlore > /tmp/runlore.log 2>&1
 check "incident accepted + investigate=true" /tmp/runlore.log 'msg=incident.*investigate=true'
@@ -212,7 +214,7 @@ else red "FAIL: no outcome 'open' recorded (capture; opened=$OPENED)"; FAIL=$((F
 # Close the loop: the resolved alert for the investigated incident (fp1). A resolve
 # that MATCHES an open increments incidents_resolved_total — proving open→resolve pairing.
 RESOLVE_JSON='{"alerts":[{"status":"resolved","labels":{"alertname":"HarborProbeFailure","severity":"critical","namespace":"apps"},"startsAt":"2026-06-20T03:14:00Z","fingerprint":"fp1"}]}'
-curl -s -o /dev/null -w "resolve webhook HTTP %{http_code}\n" -XPOST "http://localhost:$LLPORT/webhook/alertmanager" -H "Content-Type: application/json" -d "$RESOLVE_JSON" || true
+curl -s -o /dev/null -w "resolve webhook HTTP %{http_code}\n" -XPOST "http://localhost:$LLPORT/webhook/alertmanager" -H "Authorization: Bearer e2e-webhook" -H "Content-Type: application/json" -d "$RESOLVE_JSON" || true
 sleep 4
 RESOLVED=$(llmetric incidents_resolved); RESOLVED=${RESOLVED:-0}
 kill "$LLPF" 2>/dev/null || true; free_port "$LLPORT"
@@ -256,6 +258,7 @@ print(json.dumps({'groupKey': 'storm-group-key', 'alerts': alerts}))
 ")
 curl -s -o /dev/null -w "storm webhook HTTP %{http_code}\n" \
   -XPOST "http://localhost:$STORM_PORT/webhook/alertmanager" \
+  -H "Authorization: Bearer e2e-webhook" \
   -H "Content-Type: application/json" \
   -d "$STORM_PAYLOAD" || true
 sleep 6   # allow MaxBatch flush + investigation to start
