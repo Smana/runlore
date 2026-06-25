@@ -71,16 +71,24 @@ func TestReadyFunc(t *testing.T) {
 	leaderFalse := func() bool { return false }
 
 	// No catalog configured → gate is pure leadership passthrough.
-	if !readyFunc(leaderTrue, nil)() {
-		t.Fatal("nil catalog + leader=true should be ready")
+	if !readyFunc(leaderTrue, nil, false)() {
+		t.Fatal("unconfigured + nil catalog + leader=true should be ready")
 	}
-	if readyFunc(leaderFalse, nil)() {
-		t.Fatal("nil catalog + leader=false should not be ready")
+	if readyFunc(leaderFalse, nil, false)() {
+		t.Fatal("unconfigured + nil catalog + leader=false should not be ready")
 	}
 
-	// A not-yet-warm catalog blocks readiness even when leader.
+	// A catalog was CONFIGURED but failed to load (cat == nil). Never serve incident
+	// traffic with no knowledge base: stay 503 even while leader. This is the bug —
+	// a configured-but-failed catalog used to be indistinguishable from "unconfigured"
+	// and collapsed readiness to pure leadership.
+	if readyFunc(leaderTrue, nil, true)() {
+		t.Fatal("configured + failed-to-load catalog (nil) must block readiness even when leader=true")
+	}
+
+	// A not-yet-warm configured catalog blocks readiness even when leader.
 	cold := catalog.NewEmpty()
-	if readyFunc(leaderTrue, cold)() {
+	if readyFunc(leaderTrue, cold, true)() {
 		t.Fatal("cold catalog must block readiness even when leader=true")
 	}
 
@@ -89,10 +97,10 @@ func TestReadyFunc(t *testing.T) {
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
-	if !readyFunc(leaderTrue, warm)() {
+	if !readyFunc(leaderTrue, warm, true)() {
 		t.Fatal("warm catalog + leader=true should be ready")
 	}
-	if readyFunc(leaderFalse, warm)() {
+	if readyFunc(leaderFalse, warm, true)() {
 		t.Fatal("warm catalog + leader=false should not be ready")
 	}
 }
