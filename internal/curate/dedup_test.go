@@ -67,6 +67,62 @@ func TestDedupClosesDuplicatesKeepsCanonical(t *testing.T) {
 	}
 }
 
+// TestDedupCollapsesByFingerprintAcrossRewordedTitles proves the fingerprint-first
+// path: two PRs with DELIBERATELY DISJOINT titles (Jaccard ≈ 0) but the SAME
+// persisted fingerprint marker are collapsed — the deterministic identity beats
+// the fragile title comparison that DupFingerprint was built to retire.
+func TestDedupCollapsesByFingerprintAcrossRewordedTitles(t *testing.T) {
+	const fp = "abc123fingerprint"
+	f := &fakeForge{prs: []providers.CuratedIssue{
+		{Number: 5, Title: "KB: Kustomization DependencyNotReady missing GitRepository", Body: "drafted\n\n" + providers.FingerprintMarker(fp)},
+		{Number: 9, Title: "KB: apps/web pod readiness probe failing after deploy", Body: "drafted\n\n" + providers.FingerprintMarker(fp)},
+	}}
+	d := Dedup{Forge: f, Log: slog.New(slog.NewTextHandler(io.Discard, nil))}
+	if err := d.Run(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	// Sanity: these titles would NOT collapse under title-Jaccard alone.
+	if jaccard(titleTokens(f.prs[0].Title), titleTokens(f.prs[1].Title)) >= 0.6 {
+		t.Fatal("test premise broken: titles are too similar to prove the fingerprint path")
+	}
+	if len(f.closed) != 1 || f.closed[0] != 9 {
+		t.Fatalf("matching fingerprints must collapse #9 onto canonical #5, got closed=%v", f.closed)
+	}
+}
+
+// TestDedupKeepsDistinctFingerprintsDespiteIdenticalTitles proves fingerprint
+// equality OVERRIDES a coincidental title match: two byte-identical titles whose
+// fingerprints DIFFER must stay open (title-Jaccard alone would wrongly close one).
+func TestDedupKeepsDistinctFingerprintsDespiteIdenticalTitles(t *testing.T) {
+	f := &fakeForge{prs: []providers.CuratedIssue{
+		{Number: 3, Title: "KB: Kustomization DependencyNotReady missing GitRepository", Body: "x\n\n" + providers.FingerprintMarker("fp-one")},
+		{Number: 7, Title: "KB: Kustomization DependencyNotReady missing GitRepository", Body: "x\n\n" + providers.FingerprintMarker("fp-two")},
+	}}
+	d := Dedup{Forge: f, Log: slog.New(slog.NewTextHandler(io.Discard, nil))}
+	if err := d.Run(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if len(f.closed) != 0 {
+		t.Fatalf("distinct fingerprints must NOT collapse despite identical titles, got closed=%v", f.closed)
+	}
+}
+
+// TestDedupFallsBackToTitleWhenMarkerless proves legacy/hand-filed PRs (no marker)
+// still dedup by title-Jaccard — the fingerprint path is additive, not a regression.
+func TestDedupFallsBackToTitleWhenMarkerless(t *testing.T) {
+	f := &fakeForge{prs: []providers.CuratedIssue{
+		{Number: 4, Title: "KB: Kustomization DependencyNotReady missing GitRepository"},
+		{Number: 8, Title: "KB: Kustomization DependencyNotReady due to missing GitRepository"},
+	}}
+	d := Dedup{Forge: f, Log: slog.New(slog.NewTextHandler(io.Discard, nil))}
+	if err := d.Run(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if len(f.closed) != 1 || f.closed[0] != 8 {
+		t.Fatalf("markerless near-identical titles must still collapse via Jaccard, got closed=%v", f.closed)
+	}
+}
+
 func TestDedupSkipsProtectedDuplicates(t *testing.T) {
 	// Three title-identical PRs; the middle one is human-`accepted`. Dedup must NOT
 	// close the protected one — it closes only the unprotected duplicate (#12),

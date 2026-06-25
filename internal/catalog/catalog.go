@@ -85,7 +85,10 @@ func buildIndex(entries []Entry) (bleve.Index, error) {
 	for i, e := range entries {
 		doc := map[string]any{
 			"title": e.Title,
-			"text":  strings.Join([]string{e.Title, e.Description, strings.Join(e.Tags, " "), e.Body}, " "),
+			// Resource is included so a query naming the affected object/pattern gets
+			// lexical lift (it also drives the recall structural filter — same signal,
+			// now scored). Without it a resource-only term contributes nothing to BM25.
+			"text": strings.Join([]string{e.Title, e.Description, e.Resource, strings.Join(e.Tags, " "), e.Body}, " "),
 		}
 		if err := idx.Index(strconv.Itoa(i), doc); err != nil {
 			return nil, fmt.Errorf("index entry %d: %w", i, err)
