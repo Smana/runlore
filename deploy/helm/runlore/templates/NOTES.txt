@@ -19,3 +19,13 @@ Quick check:
 NOTE: no `config.model` set — RunLore runs the read-only log-only investigator.
 Set config.model.{base_url,model,api_key_env} to enable LLM investigations.
 {{- end }}
+
+{{- if and .Values.curate.cronjob.enabled (dig "outcome" "ledger_path" "" .Values.config) (not .Values.persistence.enabled) }}
+
+WARNING: the curate CronJob is enabled with config.outcome.ledger_path set, but
+persistence.enabled is false. The Deployment and the CronJob then each get their
+OWN ephemeral catalog volume, so the CronJob's `lore curate` reads an EMPTY
+outcome ledger and the Queue + Recurrence passes silently do nothing.
+Enable persistence (a ReadWriteMany volume) and keep outcome.ledger_path under
+catalog.mountPath ({{ .Values.catalog.mountPath }}) so both pods share the ledger.
+{{- end }}

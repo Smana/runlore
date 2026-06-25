@@ -857,13 +857,43 @@ func runCurate(args []string) error {
 			curate.Queue{Forge: forge, Checker: curate.LedgerResolutionChecker{Ledger: ledger}, Log: log},
 			curate.Recurrence{Forge: forge, Ledger: ledger, Threshold: cfg.Curate.RecurrenceThreshold, Log: log},
 		)
-		log.Info("curate: Queue + Recurrence enabled", "ledger", cfg.Outcome.LedgerPath)
+		// Warn loudly when the ledger this pod sees is absent/empty: outcome.New
+		// succeeds on a missing file, so the passes would otherwise run silently
+		// against zero episodes (a misconfigured mount, not "no work").
+		logLedgerStartup(log, ledger.Status())
 	} else {
-		log.Info("curate: outcome ledger not configured; Queue + Recurrence passes skipped")
+		logLedgerStartup(log, outcome.Status{}) // disabled: a plain info, no warning
 	}
 	log.Info("curate: grooming KB backlog", "repo", cfg.Forge.KBRepo)
 	agent.Run(context.Background())
 	return nil
+}
+
+// logLedgerStartup reports, at the right level, what the outcome ledger looks
+// like to this `lore curate` process — turning the previously-silent no-op into
+// a visible warning. The Queue + Recurrence passes read the ledger, but
+// outcome.New succeeds even when the file is absent, so a misconfigured mount
+// (the ledger lives on a volume the CronJob doesn't see — e.g. persistence not
+// enabled, the path not under catalog.mountPath, or a fresh per-Job emptyDir)
+// would silently produce zero work. We still run the passes; we just make the
+// likely misconfiguration loud.
+func logLedgerStartup(log *slog.Logger, s outcome.Status) {
+	switch {
+	case !s.Configured:
+		log.Info("curate: outcome ledger not configured; Queue + Recurrence passes skipped")
+	case !s.Present:
+		log.Warn("curate: outcome ledger configured but its file is absent here — "+
+			"Queue + Recurrence will find nothing to do (check the ledger is on a volume "+
+			"this CronJob mounts: enable persistence and point outcome.ledger_path under catalog.mountPath)",
+			"ledger", s.Path)
+	case s.Events == 0:
+		log.Warn("curate: outcome ledger is present but empty — Queue + Recurrence have no episodes "+
+			"to act on (if the serve pod is recording outcomes, verify both pods share the same "+
+			"persistent volume rather than separate emptyDirs)",
+			"ledger", s.Path)
+	default:
+		log.Info("curate: Queue + Recurrence enabled", "ledger", s.Path, "events", s.Events)
+	}
 }
 
 // buildReinvestigator returns a poller that re-runs KB issues labelled
