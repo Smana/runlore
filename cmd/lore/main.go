@@ -15,7 +15,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
-	_ "net/http/pprof" // registers /debug/pprof on DefaultServeMux (loopback-only, opt-in)
+	_ "net/http/pprof" //nolint:gosec // G108: pprof is opt-in (RUNLORE_PPROF) and bound to 127.0.0.1 only, never the Service
 	"os"
 	"os/exec"
 	"os/signal"
@@ -152,7 +152,10 @@ func runServe(args []string) error {
 	if os.Getenv("RUNLORE_PPROF") == "true" {
 		go func() {
 			log.Info("pprof listening", "addr", "127.0.0.1:6060")
-			if err := http.ListenAndServe("127.0.0.1:6060", nil); err != nil {
+			// ReadHeaderTimeout guards against a slow-header (Slowloris) hold even
+			// on this loopback-only debug listener.
+			pprofSrv := &http.Server{Addr: "127.0.0.1:6060", ReadHeaderTimeout: 10 * time.Second}
+			if err := pprofSrv.ListenAndServe(); err != nil {
 				log.Warn("pprof server stopped", "err", err)
 			}
 		}()
@@ -323,7 +326,9 @@ func runServe(args []string) error {
 		srv.SetCoalescer(cz)
 		go cz.Run(ctx, cfg.Investigation.Coalesce.Debounce.Std()/2)
 	}
-	httpSrv := &http.Server{Addr: *addr, Handler: srv.Handler()}
+	// ReadHeaderTimeout bounds how long a client may take to send request headers,
+	// preventing a Slowloris-style slow-header connection from holding a goroutine.
+	httpSrv := &http.Server{Addr: *addr, Handler: srv.Handler(), ReadHeaderTimeout: 15 * time.Second}
 	go func() {
 		<-ctx.Done()
 		_ = httpSrv.Shutdown(context.Background())
@@ -578,11 +583,11 @@ func runEval(args []string) error {
 		}
 		if b, err := camp.JSON(); err != nil {
 			fmt.Fprintf(os.Stderr, "eval: report not written: %v\n", err)
-		} else if mkErr := os.MkdirAll(*reportDir, 0o755); mkErr != nil {
+		} else if mkErr := os.MkdirAll(*reportDir, 0o750); mkErr != nil {
 			fmt.Fprintf(os.Stderr, "eval: report not written: %v\n", mkErr)
 		} else {
 			path := filepath.Join(*reportDir, strings.ReplaceAll(st, ":", "-")+"-replay.json")
-			if wErr := os.WriteFile(path, b, 0o644); wErr != nil {
+			if wErr := os.WriteFile(path, b, 0o600); wErr != nil {
 				fmt.Fprintf(os.Stderr, "eval: report not written: %v\n", wErr)
 			} else {
 				fmt.Printf("report: %s\n", path)
@@ -597,7 +602,10 @@ func runEval(args []string) error {
 type shellStepRunner struct{}
 
 func (shellStepRunner) Run(ctx context.Context, step string) error {
-	cmd := exec.CommandContext(ctx, "sh", "-c", step)
+	// step is an operator-authored eval scenario command (kubectl/flux/test), not
+	// untrusted input — executing it as a shell command is the runner's purpose.
+	cmd := exec.CommandContext(ctx, "sh", "-c", step) //nolint:gosec // G204: step is operator-authored scenario YAML
+
 	cmd.Stdout, cmd.Stderr = os.Stderr, os.Stderr // step output is progress, not findings
 	return cmd.Run()
 }
@@ -656,16 +664,17 @@ func runEvalLive(cfg *config.Config, scnDir, recordDir, reportDir, prevReport, s
 		stamp = time.Now().UTC().Format(time.RFC3339)
 	}
 	rep := eval.NewLiveReport(stamp, n, results)
-	if err := os.MkdirAll(reportDir, 0o755); err != nil {
+	if err := os.MkdirAll(reportDir, 0o750); err != nil {
 		return err
 	}
 	base := filepath.Join(reportDir, strings.ReplaceAll(stamp, ":", "-"))
-	if err := os.WriteFile(base+".json", rep.JSON(), 0o644); err != nil {
+	if err := os.WriteFile(base+".json", rep.JSON(), 0o600); err != nil {
 		return err
 	}
 	md := rep.Markdown()
 	if prevReport != "" {
-		if data, rerr := os.ReadFile(prevReport); rerr == nil {
+		// prevReport is an operator-supplied --prev report path, not untrusted input.
+		if data, rerr := os.ReadFile(prevReport); rerr == nil { //nolint:gosec // G304: operator-supplied baseline report path
 			var prev eval.LiveReport
 			if json.Unmarshal(data, &prev) == nil {
 				if reg := rep.RegressionsVS(prev); len(reg) > 0 {
@@ -674,7 +683,7 @@ func runEvalLive(cfg *config.Config, scnDir, recordDir, reportDir, prevReport, s
 			}
 		}
 	}
-	if err := os.WriteFile(base+".md", []byte(md), 0o644); err != nil {
+	if err := os.WriteFile(base+".md", []byte(md), 0o600); err != nil {
 		return err
 	}
 	fmt.Print(md)

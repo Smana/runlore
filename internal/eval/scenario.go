@@ -51,7 +51,7 @@ func LoadScenarios(dir string) ([]Scenario, error) {
 		if e.IsDir() || !isYAML(e.Name()) {
 			continue
 		}
-		data, err := os.ReadFile(filepath.Join(dir, e.Name()))
+		data, err := os.ReadFile(filepath.Join(dir, e.Name())) //nolint:gosec // G304: name comes from reading the operator-supplied scenarios dir
 		if err != nil {
 			return nil, err
 		}
