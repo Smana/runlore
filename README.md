@@ -4,7 +4,7 @@
 
 # RunLore
 
-**An open-source SRE agent that investigates any incident — and learns _your_ platform as it goes.**
+**An open-source SRE agent that investigates any incident — and turns what it learns into knowledge _you_ own, review, and can take with you.**
 
 [![CI](https://github.com/Smana/runlore/actions/workflows/ci.yaml/badge.svg)](https://github.com/Smana/runlore/actions/workflows/ci.yaml)
 [![Go Report Card](https://goreportcard.com/badge/github.com/Smana/runlore)](https://goreportcard.com/report/github.com/Smana/runlore)
@@ -24,17 +24,19 @@ investigates it like a good SRE, and hands you a confidence-scored root cause wi
 - **What's wrong?** *(when nothing changed)* — saturation, network denials, node health, dependency
   outages, load.
 
-…and then it does the thing other agents don't: it **learns**. Every resolved incident becomes a
-reviewed entry in an open, git-versioned knowledge base — so RunLore gets sharper at **your** platform,
-incident after incident.
+…and then it does the thing the closed tools keep for themselves: it **learns in the open**. Every
+resolved incident becomes a **reviewed, git-versioned entry you own** — portable markdown, PR-reviewed,
+provenance-tracked, never opaque vendor memory — so RunLore gets sharper at **your** platform, incident
+after incident.
 
 **Read-only by default · single Go binary · runs in your cluster · on your models.**
 
 ## 📚 The learning loop — RunLore's reason to exist
 
-The autonomous *alert → RCA → Slack* loop is already a commodity. What isn't: an agent whose knowledge
-**compounds in a catalog you own**. A normal SRE agent answers the same incident from scratch every
-time. RunLore **remembers** — in four moves:
+The autonomous *alert → RCA → Slack* loop is already a commodity — and frontier models still get the
+root cause right less than half the time. What isn't a commodity: an agent that's **honest about that reality**
+and whose knowledge **compounds in a catalog you own** — open and reviewable, never opaque vendor memory.
+A normal SRE agent answers the same incident from scratch every time. RunLore **remembers** — in four moves:
 
 ```mermaid
 flowchart LR
@@ -94,18 +96,26 @@ link to the knowledge-base entry it learned.
 
 ## Why RunLore
 
-The bet is the two parts that aren't commodity: a **GitOps-native "what changed" spine** and an
-**open knowledge base that compounds**.
+The bet isn't the autonomous loop (a commodity) or the change diff alone (Komodor, Anyshift and others
+now diff changes too). It's the **combination the open tools don't have**: knowledge that **compounds in
+a catalog _you_ own and review**, grounded in the **exact GitOps change** that caused the incident, from
+an agent that's **honest about the sub-50% reality** — all **self-hosted, on your models**.
 
 | | What it is | What RunLore adds |
 |---|---|---|
 | [**k8sgpt**](https://github.com/k8sgpt-ai/k8sgpt) | A *detector* — analyzers + LLM explanation | An investigation loop, cross-signal correlation, real Git diffs, and learning |
-| [**HolmesGPT**](https://github.com/HolmesGPT/holmesgpt) | The strongest OSS investigation agent | Relies on *your* hand-curated runbooks (it doesn't learn); RunLore is what-changed-first and self-improving |
-| [**kagent**](https://github.com/kagent-dev/kagent) | A generic in-cluster agent *framework* | A focused, opinionated SRE agent (RunLore can run *on* kagent later) |
+| [**HolmesGPT**](https://github.com/HolmesGPT/holmesgpt) | The strongest OSS investigation agent | Relies on *your* hand-curated runbooks (it doesn't learn); RunLore is what-changed-first and **learns in the open** |
+| [**kagent**](https://github.com/kagent-dev/kagent) | A generic in-cluster agent *framework* — now with agent *memory* | A focused SRE agent whose knowledge is **open & reviewable**, not opaque per-agent vectors (RunLore can run *on* kagent later) |
 
 RunLore is **GitOps-engine-agnostic** (Flux + Argo CD), **metrics-backend-agnostic** (VictoriaMetrics +
-Prometheus), with **pluggable** logs and **CNI-agnostic network** signals — and the only one that learns
-into an **open** [OKF](https://github.com/GoogleCloudPlatform/knowledge-catalog) catalog you own.
+Prometheus), with **pluggable** logs and **CNI-agnostic network** signals — and the only one that compounds
+incidents into an **open, reviewable catalog you own**: portable markdown
+([OKF](https://github.com/GoogleCloudPlatform/knowledge-catalog)-compatible), not a proprietary store.
+
+> **Who it's for** — teams who run **GitOps** (Flux/Argo CD), want their incident knowledge **portable and
+> self-hosted** (data-residency, cost, no lock-in), and would rather an agent say *"I don't know"* than
+> guess. If that's not you, [HolmesGPT](https://github.com/HolmesGPT/holmesgpt) or a commercial SaaS may
+> fit better — and we'll say so.
 
 ## Get started
 
@@ -136,6 +146,12 @@ lore investigate --alert HarborProbeFailure --namespace apps --config runlore.ya
 - **Read-only by default, with an autonomy ladder when you want it** — `off` → `suggest` → `approve`
   (human-gated) → `auto`. Every rung above read-only is reversible-only, envelope-bounded, audited, and
   kill-switchable (see [`docs/design.md`](docs/design.md)).
+- **Honest about the sub-50% reality** — independent benchmarks ([ITBench](https://arxiv.org/abs/2502.05352))
+  show frontier models identify the root cause less than half the time (and fully resolve far fewer).
+  RunLore treats that as the baseline:
+  `unresolved` is a first-class output, an adversarial *verify* pass can only ever **lower** a finding's
+  confidence (never invent one), and every claim is measured by a **shipped eval harness** — not asserted
+  in marketing.
 - **Backend-agnostic & pluggable** — Flux + Argo CD; VictoriaMetrics + Prometheus; pluggable logs;
   **CNI-agnostic** network signals (Cilium Hubble, AWS VPC Flow Logs, or GCP Firewall Logs — see
   [data sources](docs/data-sources.md)).
