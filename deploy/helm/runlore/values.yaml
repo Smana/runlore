@@ -90,7 +90,12 @@ config:
   #     solo_floor: 4.0                # confident bar when there is only one hit
   #     require_workload_match: false  # true = exact namespace+workload; false = namespace-level agreement is enough
   # outcome:
-  #   ledger_path: /var/lib/runlore/catalog/outcomes.jsonl  # learning-loop outcome ledger; for durability set persistence.enabled and point this at the persistent mount (catalog.mountPath)
+  #   ledger_path: /var/lib/runlore/catalog/outcomes.jsonl  # learning-loop outcome ledger.
+  #     Keep it UNDER catalog.mountPath and set persistence.enabled=true: the serve
+  #     Deployment writes it and the curate CronJob reads it, so both must mount the
+  #     SAME persistent volume. With persistence disabled they get separate ephemeral
+  #     volumes and `lore curate`'s Queue + Recurrence passes read an empty ledger
+  #     (the command warns loudly at startup when the ledger it sees is absent/empty).
   # notify:
   #   slack: { webhook_url_env: SLACK_WEBHOOK_URL }
   #   matrix: { homeserver: https://matrix.org, room_id: "!r:hs", access_token_env: MATRIX_TOKEN }
