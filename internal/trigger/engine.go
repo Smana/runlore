@@ -34,5 +34,8 @@ func dedupKey(inc config.Incident) string {
 	if inc.Fingerprint != "" {
 		return inc.Fingerprint
 	}
-	return inc.AlertName + "/" + inc.Namespace
+	// Include environment: a policy admitting multiple environments can route
+	// same-name/same-namespace alerts from different environments here, and they
+	// are distinct incidents that must not collide on the fingerprint-less path.
+	return inc.AlertName + "/" + inc.Namespace + "/" + inc.Environment
 }

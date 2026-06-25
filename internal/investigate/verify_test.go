@@ -55,6 +55,37 @@ func TestVerifyRejectsCorrelationFinding(t *testing.T) {
 	}
 }
 
+// TestApplyVerdictsClampsConfidence checks that an out-of-range verdict
+// confidence from the verify pass is clamped to [0,1] before it overwrites a
+// root cause's score — on both the keep and downgrade branches — and that the
+// recomputed overall confidence (a max over survivors) is in range too. NaN is
+// not reachable here (the `v.Confidence > 0` guard skips it: NaN > 0 is false);
+// NaN clamping is covered at the model-JSON boundary in tools_test.
+func TestApplyVerdictsClampsConfidence(t *testing.T) {
+	li := &LoopInvestigator{Log: slog.New(slog.NewTextHandler(io.Discard, nil))}
+	cases := []struct {
+		name    string
+		verdict string
+		conf    float64
+		want    float64
+	}{
+		{"keep above one", "keep", 1.7, 1},
+		{"downgrade above one", "downgrade", 1.4, 1},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			inv := providers.Investigation{RootCauses: []providers.Hypothesis{{Summary: "x", Confidence: 0.5}}}
+			out := applyVerdicts(li, Request{}, inv, []verdict{{Index: 0, Verdict: tc.verdict, Confidence: tc.conf}})
+			if len(out.RootCauses) != 1 || out.RootCauses[0].Confidence != tc.want {
+				t.Fatalf("root-cause confidence = %v, want %v", out.RootCauses[0].Confidence, tc.want)
+			}
+			if out.Confidence != tc.want {
+				t.Fatalf("overall confidence = %v, want %v", out.Confidence, tc.want)
+			}
+		})
+	}
+}
+
 func TestVerifyDowngradesUnproven(t *testing.T) {
 	model := &scriptModel{responses: []providers.CompletionResponse{
 		{ToolCalls: []providers.ToolCall{{ID: "1", Name: submitFindingsName, Args: `{"confidence":0.9,"root_causes":[{"summary":"db migration stalled","confidence":0.9,"evidence":["migration lock held"]}]}`}}},

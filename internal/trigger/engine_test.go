@@ -27,3 +27,23 @@ func TestEngineDecide(t *testing.T) {
 		t.Fatal("warning should be filtered by policy")
 	}
 }
+
+// dedupKey must keep environment in its fingerprint-less fallback, so two
+// same-name/same-namespace criticals from different environments don't collide.
+func TestDedupKeyFallbackEnvironmentDistinct(t *testing.T) {
+	prod := config.Incident{AlertName: "AppDown", Namespace: "shop", Environment: "prod"}
+	stg := config.Incident{AlertName: "AppDown", Namespace: "shop", Environment: "staging"}
+	if got, other := dedupKey(prod), dedupKey(stg); got == other {
+		t.Fatalf("different environments must yield distinct dedup keys, both = %q", got)
+	}
+	// same env still collapses (real dedup of a repeat)
+	if dedupKey(prod) != dedupKey(config.Incident{AlertName: "AppDown", Namespace: "shop", Environment: "prod"}) {
+		t.Fatal("same name/namespace/env must share a dedup key")
+	}
+	// fingerprint, when present, still wins regardless of environment
+	a := config.Incident{AlertName: "X", Namespace: "n", Environment: "prod", Fingerprint: "fp"}
+	b := config.Incident{AlertName: "X", Namespace: "n", Environment: "staging", Fingerprint: "fp"}
+	if dedupKey(a) != dedupKey(b) {
+		t.Fatal("a shared fingerprint must dedup across environments")
+	}
+}

@@ -65,6 +65,27 @@ func TestProviderChanges(t *testing.T) {
 	}
 }
 
+func TestProviderChangesMultiSource(t *testing.T) {
+	// A multi-source app (its source fields populated from spec.sources[0] by the
+	// reader) must yield a Change, not be silently dropped.
+	r := fakeReader{apps: []application{
+		{Name: "multi", Namespace: "argocd", RepoURL: "https://github.com/org/manifests", Path: "apps/multi", Revision: "newsha", PrevRevision: "oldsha"},
+	}}
+	p := New(r, &whatchanged.Differ{})
+	changes, err := p.Changes(context.Background(), providers.TimeWindow{}, providers.Selector{})
+	if err != nil {
+		t.Fatalf("Changes: %v", err)
+	}
+	if len(changes) != 1 {
+		t.Fatalf("want 1 change for multi-source app, got %d", len(changes))
+	}
+	c := changes[0]
+	if c.Source != (providers.SourceRef{RepoURL: "https://github.com/org/manifests", Path: "apps/multi"}) ||
+		c.FromRev != "oldsha" || c.ToRev != "newsha" {
+		t.Fatalf("unexpected multi-source change: %+v", c)
+	}
+}
+
 func TestProviderChangesSelector(t *testing.T) {
 	r := fakeReader{apps: []application{
 		{Name: "harbor", Namespace: "argocd", RepoURL: "u", Revision: "a"},
@@ -85,22 +106,55 @@ func TestWatchFailures(t *testing.T) {
 		{Application: application{Name: "ok", Namespace: "argocd", HealthStatus: "Healthy"}},
 		{Application: application{Name: "bad", Namespace: "apps", HealthStatus: "Degraded", Message: "container crash"}},
 		{Application: application{Name: "prog", Namespace: "apps", HealthStatus: "Progressing"}},
+		// healthy app whose last sync OPERATION failed — must still trigger.
+		{Application: application{Name: "syncfail", Namespace: "apps", HealthStatus: "Healthy", OperationPhase: "Failed", Message: "bad manifest"}},
+		// OutOfSync alone is NOT a failure (auto-sync off / mid-drift steady state).
+		{Application: application{Name: "drift", Namespace: "apps", HealthStatus: "Healthy", SyncStatus: "OutOfSync"}},
 	}}
 	p := New(r, &whatchanged.Differ{})
 	ch, err := p.WatchFailures(context.Background())
 	if err != nil {
 		t.Fatalf("WatchFailures: %v", err)
 	}
-	var got []providers.FailureEvent
+	got := map[string]providers.FailureEvent{}
 	for e := range ch {
-		got = append(got, e)
+		got[e.Workload.Name] = e
 	}
-	if len(got) != 1 {
-		t.Fatalf("want 1 failure event (only Degraded), got %d", len(got))
+	if len(got) != 2 {
+		t.Fatalf("want 2 failure events (Degraded + Sync Failed), got %d: %+v", len(got), got)
 	}
-	e := got[0]
-	if e.Engine != providers.EngineArgoCD || e.Workload.Name != "bad" || e.Workload.Kind != "Application" ||
+	if e := got["bad"]; e.Engine != providers.EngineArgoCD || e.Workload.Kind != "Application" ||
 		e.Reason != "Degraded" || e.Message != "container crash" {
-		t.Fatalf("unexpected failure event: %+v", e)
+		t.Fatalf("unexpected degraded failure event: %+v", e)
+	}
+	if e := got["syncfail"]; e.Reason != "SyncFailed" || e.Message != "bad manifest" {
+		t.Fatalf("unexpected sync-failed failure event: %+v", e)
+	}
+}
+
+func TestFailureReason(t *testing.T) {
+	cases := []struct {
+		name       string
+		app        application
+		wantReason string
+		wantFailed bool
+	}{
+		{"healthy", application{HealthStatus: "Healthy"}, "", false},
+		{"progressing", application{HealthStatus: "Progressing"}, "", false},
+		{"degraded", application{HealthStatus: "Degraded"}, "Degraded", true},
+		{"sync-failed", application{HealthStatus: "Healthy", OperationPhase: "Failed"}, "SyncFailed", true},
+		{"sync-error", application{HealthStatus: "Healthy", OperationPhase: "Error"}, "SyncError", true},
+		{"sync-running", application{HealthStatus: "Healthy", OperationPhase: "Running"}, "", false},
+		{"outofsync-not-failure", application{HealthStatus: "Healthy", SyncStatus: "OutOfSync"}, "", false},
+		// health-Degraded takes precedence in the reason even if a sync also failed.
+		{"degraded-precedence", application{HealthStatus: "Degraded", OperationPhase: "Failed"}, "Degraded", true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			reason, failed := failureReason(tc.app)
+			if failed != tc.wantFailed || reason != tc.wantReason {
+				t.Errorf("failureReason(%+v) = (%q,%v), want (%q,%v)", tc.app, reason, failed, tc.wantReason, tc.wantFailed)
+			}
+		})
 	}
 }
