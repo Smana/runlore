@@ -5,6 +5,7 @@ package whatchanged
 
 import (
 	"bytes"
+	"context"
 	"fmt"
 	"os"
 	"strings"
@@ -29,17 +30,18 @@ type Differ struct {
 	Token string
 }
 
-// Local diffs two revisions in an already-cloned repository at path.
-func (d *Differ) Local(path, fromRev, toRev, scope string) (providers.Diff, error) {
+// Local diffs two revisions in an already-cloned repository at path. ctx bounds the
+// (potentially expensive) patch computation so a caller deadline is honored.
+func (d *Differ) Local(ctx context.Context, path, fromRev, toRev, scope string) (providers.Diff, error) {
 	repo, err := git.PlainOpen(path)
 	if err != nil {
 		return providers.Diff{}, fmt.Errorf("open %s: %w", path, err)
 	}
-	return diffRevisions(repo, fromRev, toRev, scope)
+	return diffRevisions(ctx, repo, fromRev, toRev, scope)
 }
 
 // diffRevisions resolves two revisions and returns their path-scoped diff.
-func diffRevisions(repo *git.Repository, fromRev, toRev, scope string) (providers.Diff, error) {
+func diffRevisions(ctx context.Context, repo *git.Repository, fromRev, toRev, scope string) (providers.Diff, error) {
 	from, err := resolveCommit(repo, fromRev)
 	if err != nil {
 		return providers.Diff{}, fmt.Errorf("resolve %q: %w", fromRev, err)
@@ -48,13 +50,14 @@ func diffRevisions(repo *git.Repository, fromRev, toRev, scope string) (provider
 	if err != nil {
 		return providers.Diff{}, fmt.Errorf("resolve %q: %w", toRev, err)
 	}
-	return diffCommits(from, to, scope)
+	return diffCommits(ctx, from, to, scope)
 }
 
 // diffCommits returns the path-scoped unified diff between two commits.
 // scope is a path prefix matched on segment boundaries; "" includes every file.
-func diffCommits(from, to *object.Commit, scope string) (providers.Diff, error) {
-	patch, err := from.Patch(to)
+// ctx cancels the diff computation (a large-tree Patch can be slow).
+func diffCommits(ctx context.Context, from, to *object.Commit, scope string) (providers.Diff, error) {
+	patch, err := from.PatchContext(ctx, to)
 	if err != nil {
 		return providers.Diff{}, fmt.Errorf("patch: %w", err)
 	}
@@ -123,14 +126,16 @@ func (d *Differ) auth() transport.AuthMethod {
 // cleanup func. Cloning to disk — NOT memory.NewStorage — bounds heap to the
 // working set: an in-memory clone holds the entire object store in the heap, which
 // for a large monorepo reached ~1.3GB and OOM-killed the agent (observed via the
-// inuse_space heap profile: go-git MemoryObject.Write = 90% of heap).
-func (d *Differ) cloneToDisk(url string) (*git.Repository, func(), error) {
+// inuse_space heap profile: go-git MemoryObject.Write = 90% of heap). ctx aborts a
+// hung remote (a stalled HTTPS clone would otherwise block the queue worker
+// indefinitely); a cancelled clone returns a context error via %w.
+func (d *Differ) cloneToDisk(ctx context.Context, url string) (*git.Repository, func(), error) {
 	dir, err := os.MkdirTemp("", "runlore-clone-")
 	if err != nil {
 		return nil, func() {}, fmt.Errorf("temp dir: %w", err)
 	}
 	cleanup := func() { _ = os.RemoveAll(dir) }
-	repo, err := git.PlainClone(dir, false, &git.CloneOptions{URL: url, Auth: d.auth()})
+	repo, err := git.PlainCloneContext(ctx, dir, false, &git.CloneOptions{URL: url, Auth: d.auth()})
 	if err != nil {
 		cleanup()
 		return nil, func() {}, fmt.Errorf("clone %s: %w", url, err)
@@ -139,24 +144,25 @@ func (d *Differ) cloneToDisk(url string) (*git.Repository, func(), error) {
 }
 
 // Remote clones url to disk (auth via the installation token when set) and diffs
-// two revisions. The source may be a remote HTTPS URL or a local path.
-func (d *Differ) Remote(url, fromRev, toRev, scope string) (providers.Diff, error) {
-	repo, cleanup, err := d.cloneToDisk(url)
+// two revisions. The source may be a remote HTTPS URL or a local path. ctx bounds
+// the clone + patch.
+func (d *Differ) Remote(ctx context.Context, url, fromRev, toRev, scope string) (providers.Diff, error) {
+	repo, cleanup, err := d.cloneToDisk(ctx, url)
 	if err != nil {
 		return providers.Diff{}, err
 	}
 	defer cleanup()
-	return diffRevisions(repo, fromRev, toRev, scope)
+	return diffRevisions(ctx, repo, fromRev, toRev, scope)
 }
 
 // RemoteFromParent clones url and returns the path-scoped diff of the change
 // introduced by rev (rev against its first parent). A root commit (no parent)
-// yields an empty diff.
+// yields an empty diff. ctx bounds the clone + patch.
 //
 // NOTE (perf): does a full (disk) clone per call. When the GitOpsProvider drives
 // this across many changes, add a per-repo clone cache here (see docs/plans note).
-func (d *Differ) RemoteFromParent(url, rev, scope string) (providers.Diff, error) {
-	repo, cleanup, err := d.cloneToDisk(url)
+func (d *Differ) RemoteFromParent(ctx context.Context, url, rev, scope string) (providers.Diff, error) {
+	repo, cleanup, err := d.cloneToDisk(ctx, url)
 	if err != nil {
 		return providers.Diff{}, err
 	}
@@ -172,18 +178,20 @@ func (d *Differ) RemoteFromParent(url, rev, scope string) (providers.Diff, error
 	if err != nil {
 		return providers.Diff{}, fmt.Errorf("parent of %q: %w", rev, err)
 	}
-	return diffCommits(from, to, scope)
+	return diffCommits(ctx, from, to, scope)
 }
 
 // ForChange resolves the diff for a detected Change by cloning its source repo
 // and scoping to the workload's path. With both revisions it diffs FromRev..ToRev;
 // with only ToRev it diffs the change introduced by ToRev (against its parent).
-func (d *Differ) ForChange(c providers.Change) (providers.Diff, error) {
+// ctx bounds the clone + patch so a caller deadline (per-investigation timeout)
+// aborts a hung remote.
+func (d *Differ) ForChange(ctx context.Context, c providers.Change) (providers.Diff, error) {
 	if c.ToRev == "" {
 		return providers.Diff{}, fmt.Errorf("change %s/%s: missing to revision", c.Workload.Namespace, c.Workload.Name)
 	}
 	if c.FromRev == "" {
-		return d.RemoteFromParent(c.Source.RepoURL, c.ToRev, c.Source.Path)
+		return d.RemoteFromParent(ctx, c.Source.RepoURL, c.ToRev, c.Source.Path)
 	}
-	return d.Remote(c.Source.RepoURL, c.FromRev, c.ToRev, c.Source.Path)
+	return d.Remote(ctx, c.Source.RepoURL, c.FromRev, c.ToRev, c.Source.Path)
 }

@@ -15,6 +15,21 @@ func budgetKillResult(req Request) providers.Investigation {
 	}
 }
 
+// timeoutResult synthesises an unresolved investigation for use when the
+// per-investigation deadline (LoopInvestigator.Timeout) fires before the loop
+// submitted findings — so a hung git clone/diff or a slow model is reported, not
+// silently retried into the same hang.
+func timeoutResult(req Request) providers.Investigation {
+	return providers.Investigation{
+		Title:       req.Title,
+		Resource:    req.Workload,
+		Fingerprint: req.Fingerprint,
+		Unresolved: []string{
+			"investigation stopped: per-investigation deadline exceeded before findings were submitted (e.g. a hung git clone/diff or a slow model)",
+		},
+	}
+}
+
 // estimateTokens approximates the request size (~4 chars/token) over the system
 // prompt plus the full message history — the cost actually re-sent each step.
 // Provider-reported usage is not exposed in CompletionResponse today.

@@ -37,6 +37,22 @@ func TestApplyDefaultsRateLimitWindow(t *testing.T) {
 	}
 }
 
+func TestApplyDefaultsInvestigationTimeout(t *testing.T) {
+	// Unset ⇒ a 10m per-investigation deadline is applied (active out of the box).
+	var c Config
+	applyDefaults(&c)
+	if c.Investigation.Timeout.Std() != 10*time.Minute {
+		t.Fatalf("default investigation Timeout: got %v, want 10m", c.Investigation.Timeout.Std())
+	}
+	// Explicit value is respected, not overwritten.
+	var c2 Config
+	c2.Investigation.Timeout = Duration(2 * time.Minute)
+	applyDefaults(&c2)
+	if c2.Investigation.Timeout.Std() != 2*time.Minute {
+		t.Fatalf("explicit Timeout overwritten: got %v, want 2m", c2.Investigation.Timeout.Std())
+	}
+}
+
 func TestApplyDefaultsInstantRecall(t *testing.T) {
 	// enabled with no tuning → margin/solo gates and decay knobs default to active values.
 	var c Config
