@@ -66,3 +66,37 @@ func TestLoadScenariosIDFallsBackToFilename(t *testing.T) {
 		t.Fatalf("want id=harbor from filename and mode=cli default, got %+v", scns)
 	}
 }
+
+// TestShippedScenariosParse loads the real eval/scenarios/ bundle so a malformed
+// scenario file is caught on every test run, and asserts the poisoned-recall
+// scenario is present, invasive, and precheck-gated (SKIPs unless seeded) so the
+// docs claim — a real poisoned-entry scenario the live eval runs — is backed.
+func TestShippedScenariosParse(t *testing.T) {
+	dir := filepath.Join("..", "..", "eval", "scenarios")
+	scns, err := LoadScenarios(dir)
+	if err != nil {
+		t.Fatalf("LoadScenarios(%s): %v", dir, err)
+	}
+	if len(scns) == 0 {
+		t.Fatalf("no scenarios loaded from %s", dir)
+	}
+	var poisoned *Scenario
+	for i := range scns {
+		if scns[i].ID == "poisoned-recall-rejected" {
+			poisoned = &scns[i]
+			break
+		}
+	}
+	if poisoned == nil {
+		t.Fatal("eval/scenarios/poisoned-recall-rejected.yaml not found — the poisoned-entry scenario the docs claim must exist")
+	}
+	if !poisoned.Invasive {
+		t.Error("poisoned scenario must be invasive (it induces a real fault distinct from the planted entry)")
+	}
+	if poisoned.Precheck == "" {
+		t.Error("poisoned scenario must be precheck-gated so it SKIPs unless the poisoned entry is seeded")
+	}
+	if poisoned.GroundTruth.RootCause == "" || !poisoned.GroundTruth.MustReachRoot {
+		t.Errorf("poisoned scenario must name the TRUE cause and require reaching root: %+v", poisoned.GroundTruth)
+	}
+}
