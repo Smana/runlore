@@ -40,7 +40,7 @@ func Load(dir string) ([]Case, error) {
 		if e.IsDir() || !isYAML(e.Name()) {
 			continue
 		}
-		data, err := os.ReadFile(filepath.Join(dir, e.Name()))
+		data, err := os.ReadFile(filepath.Join(dir, e.Name())) //nolint:gosec // G304: name comes from reading the operator-supplied cases dir
 		if err != nil {
 			return nil, err
 		}

@@ -68,7 +68,7 @@ func Open(path string) (*Logger, error) {
 	if err != nil {
 		return nil, fmt.Errorf("audit: read existing chain: %w", err)
 	}
-	f, err := os.OpenFile(path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o600)
+	f, err := os.OpenFile(path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o600) //nolint:gosec // G304: path is the operator-configured audit log
 	if err != nil {
 		return nil, fmt.Errorf("audit: open %s: %w", path, err)
 	}
@@ -128,7 +128,7 @@ func hashRecord(r Record) string {
 // lastHash returns the Hash of the last record in the file, or "" if the file is
 // absent or empty.
 func lastHash(path string) (string, error) {
-	f, err := os.Open(path)
+	f, err := os.Open(path) //nolint:gosec // G304: path is the operator-configured audit log
 	if os.IsNotExist(err) {
 		return "", nil
 	}
