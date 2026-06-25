@@ -323,7 +323,7 @@ func runServe(args []string) error {
 		srv.SetCoalescer(cz)
 		go cz.Run(ctx, cfg.Investigation.Coalesce.Debounce.Std()/2)
 	}
-	httpSrv := &http.Server{Addr: *addr, Handler: srv.Handler()}
+	httpSrv := newHTTPServer(*addr, srv.Handler())
 	go func() {
 		<-ctx.Done()
 		_ = httpSrv.Shutdown(context.Background())
@@ -333,6 +333,24 @@ func runServe(args []string) error {
 		return err
 	}
 	return nil
+}
+
+// newHTTPServer builds the serving http.Server with every inbound bound set. Go's
+// zero defaults leave each of these unlimited, exposing the long-lived server to
+// Slowloris (slow header/body), unbounded idle keep-alives, and oversized headers.
+// Payloads (Alertmanager/Slack) are small and synchronous, so 30s read/write is
+// generous while still cutting off slow attackers; the body itself is capped per
+// handler (1 MiB).
+func newHTTPServer(addr string, h http.Handler) *http.Server {
+	return &http.Server{
+		Addr:              addr,
+		Handler:           h,
+		ReadHeaderTimeout: 5 * time.Second,
+		ReadTimeout:       30 * time.Second,
+		WriteTimeout:      30 * time.Second,
+		IdleTimeout:       60 * time.Second,
+		MaxHeaderBytes:    1 << 20,
+	}
 }
 
 // runLeaderElection blocks running Lease-based leader election; the leader runs
