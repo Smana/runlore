@@ -29,6 +29,9 @@ next time gets an instant answer — no fresh investigation.
 > **Note:** RunLore is read-only by default — it never mutates your cluster. An autonomy ladder
 > (suggest → approve → auto) is on the roadmap for teams that want to go further.
 
+**Who it's for** — teams on **GitOps** (Flux/Argo CD) who want their incident knowledge **portable and
+self-hosted** (no lock-in, your models, your data), and would rather an agent say *"I don't know"* than guess.
+
 ## See it in action
 
 A real RunLore investigation delivered to Slack: confidence-scored root cause, the evidence trail,
@@ -125,9 +128,13 @@ hack/e2e-k3d.sh
 | [**kagent**](https://github.com/kagent-dev/kagent) | A generic in-cluster agent *framework* | A focused, opinionated SRE agent (RunLore can run *on* kagent later) |
 
 RunLore is **GitOps-engine-agnostic** (Flux + Argo CD), **metrics-backend-agnostic**
-(VictoriaMetrics + Prometheus), with pluggable logs and CNI-agnostic network signals — and the only
-OSS agent that learns into an **open** [OKF](https://github.com/GoogleCloudPlatform/knowledge-catalog)
-catalog you own.
+(VictoriaMetrics + Prometheus), with pluggable logs and CNI-agnostic network signals. Change-aware RCA
+isn't unique — commercial tools (Komodor, Anyshift) diff changes too ([prior art](docs/prior-art.md)) —
+so the wedge is the **combination the open tools don't have**: that signal feeding an **open, portable
+catalog you own** ([OKF](https://github.com/GoogleCloudPlatform/knowledge-catalog)-compatible markdown,
+not a proprietary store), from an agent that's **honest about the sub-50% reality** — `unresolved` is a
+first-class answer, an adversarial *verify* pass can only ever lower a finding's confidence, and every
+claim is checked by a shipped eval harness.
 
 ## Docs
 
