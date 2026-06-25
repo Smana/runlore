@@ -117,6 +117,25 @@ func commit(t *testing.T, repo *git.Repository, dir, name, content string) {
 	}
 }
 
+// TestSyncRecoversFromCorruptMirror locks down the wedge fix: a present-but-broken
+// .git (e.g. an earlier clone killed mid-write) is discarded and re-cloned, instead
+// of erroring on every future Pull forever.
+func TestSyncRecoversFromCorruptMirror(t *testing.T) {
+	src := initBareUpstream(t)
+	dir := t.TempDir()
+	// Plant a corrupt mirror: a `.git` that PlainOpen cannot read (Stat still sees it).
+	if err := os.WriteFile(filepath.Join(dir, ".git"), []byte("garbage"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	s := &Syncer{URL: src, Branch: "main", Dir: dir, Log: testLogger()}
+	if _, err := s.Sync(context.Background()); err != nil {
+		t.Fatalf("Sync should recover by re-cloning a corrupt mirror, got: %v", err)
+	}
+	if es, _, _ := Load(dir); len(es) != 1 {
+		t.Fatalf("after recovery clone: want 1 entry, got %d", len(es))
+	}
+}
+
 func TestSyncerCloneAndPull(t *testing.T) {
 	src := t.TempDir()
 	repo, err := git.PlainInitWithOptions(src, &git.PlainInitOptions{
@@ -161,7 +180,10 @@ func TestRunReloadsOnlyOnChange(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	done := make(chan struct{})
-	go func() { defer close(done); s.Run(ctx, 15*time.Millisecond, func() { calls.Add(1) }) }()
+	go func() {
+		defer close(done)
+		s.Run(ctx, 15*time.Millisecond, func() error { calls.Add(1); return nil })
+	}()
 
 	// Several poll intervals with no upstream change → onSync fires exactly once
 	// (the initial sync), regardless of how many ticks elapse.

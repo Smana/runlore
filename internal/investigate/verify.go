@@ -64,7 +64,14 @@ func (li *LoopInvestigator) verifyFindings(ctx context.Context, req Request, inv
 	if len(inv.RootCauses) == 0 {
 		return inv
 	}
-	resp, err := li.Model.Complete(ctx, providers.CompletionRequest{
+	// Route the adversarial pass to a cheaper/faster model when one is configured;
+	// otherwise reuse the main investigation model. Verify always runs (the honesty
+	// guarantee) — this only lowers its cost, it never disables it.
+	m := li.Model
+	if li.VerifyModel != nil {
+		m = li.VerifyModel
+	}
+	resp, err := m.Complete(ctx, providers.CompletionRequest{
 		System:   verifyPrompt,
 		Messages: []providers.Message{{Role: "user", Content: renderForReview(req, inv)}},
 		Tools:    []providers.ToolSpec{submitVerdictsSpec()},

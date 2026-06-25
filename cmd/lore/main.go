@@ -281,12 +281,18 @@ func runServe(args []string) error {
 
 	reinv := buildReinvestigator(ctx, cfg, gitops, metrics, log)
 
+	// failureDedup is created ONCE (process scope), not per leadership term, so it
+	// survives leader flaps: the gitops informer's initial-LIST replay of every
+	// still-failing workload on each re-acquire is then suppressed instead of
+	// re-investigated (GO-P1A). Deduper is safe for concurrent use across terms.
+	failureDedup := trigger.NewDeduper(cfg.Triggers.Incidents.Dedup.Window.Std())
+
 	// startWork runs the leader-only loops (investigation queue + failure watch +
 	// re-investigate poller), scoped to a context cancelled when leadership is lost.
 	startWork := func(workCtx context.Context) {
 		go queue.Run(workCtx)
 		if cfg.Triggers.GitOpsFailures.Enabled && gitops != nil {
-			startGitOpsFailureWatch(workCtx, cfg, queue, gitops, metrics, log)
+			startGitOpsFailureWatch(workCtx, cfg, queue, gitops, failureDedup, metrics, log)
 		}
 		if reinv != nil {
 			log.Info("re-investigate poller enabled", "label", investigate.ReinvestigateLabel)
@@ -465,16 +471,43 @@ func requireWebhookAuth(cfg *config.Config, webhookToken string) error {
 	return nil
 }
 
+// newModelClient builds a ModelProvider for a wire protocol + endpoint.
+func newModelClient(provider, baseURL, model, apiKey string) providers.ModelProvider {
+	switch provider {
+	case "anthropic":
+		return anthropic.New(baseURL, model, apiKey)
+	case "gemini":
+		return gemini.New(baseURL, model, apiKey)
+	default:
+		return openai.New(baseURL, model, apiKey)
+	}
+}
+
 // buildModel builds the ModelProvider for the configured provider.
 func buildModel(cfg *config.Config, apiKey string) providers.ModelProvider {
-	switch cfg.Model.Provider {
-	case "anthropic":
-		return anthropic.New(cfg.Model.BaseURL, cfg.Model.Model, apiKey)
-	case "gemini":
-		return gemini.New(cfg.Model.BaseURL, cfg.Model.Model, apiKey)
-	default:
-		return openai.New(cfg.Model.BaseURL, cfg.Model.Model, apiKey)
+	return newModelClient(cfg.Model.Provider, cfg.Model.BaseURL, cfg.Model.Model, apiKey)
+}
+
+// buildVerifyModel builds the optional cheaper model for the adversarial verify
+// pass, inheriting any unset field from the main model. Returns nil when no
+// model.verify override is configured (verify then runs on the main model).
+func buildVerifyModel(cfg *config.Config) providers.ModelProvider {
+	v := cfg.Model.Verify
+	if v == nil {
+		return nil
 	}
+	or := func(a, b string) string {
+		if a != "" {
+			return a
+		}
+		return b
+	}
+	apiKey := ""
+	if keyEnv := or(v.APIKeyEnv, cfg.Model.APIKeyEnv); keyEnv != "" {
+		apiKey = os.Getenv(keyEnv)
+	}
+	return newModelClient(or(v.Provider, cfg.Model.Provider),
+		or(v.BaseURL, cfg.Model.BaseURL), or(v.Model, cfg.Model.Model), apiKey)
 }
 
 // buildCatalog returns the kb_search backing store, or nil when no catalog is
@@ -512,17 +545,18 @@ func buildCatalog(ctx context.Context, cfg *config.Config, forgeTok forgeToken, 
 			log.Info("catalog git-sync using the forge GitHub App identity")
 		}
 		syncer := &catalog.Syncer{URL: cfg.Catalog.Git.URL, Branch: cfg.Catalog.Git.Branch, Dir: dir, Token: token, Log: log}
-		go syncer.Run(ctx, cfg.Catalog.Git.Interval.Std(), func() {
+		go syncer.Run(ctx, cfg.Catalog.Git.Interval.Std(), func() error {
 			skipped, err := cat.Reload(dir)
 			if err != nil {
 				log.Warn("catalog reload failed", "dir", dir, "err", err)
-				return
+				return err
 			}
 			if len(skipped) > 0 {
 				log.Warn("catalog entries skipped (unparseable)", "count", len(skipped), "files", skipped)
 			}
 			log.Info("catalog synced", "url", cfg.Catalog.Git.URL, "entries", cat.Len())
 			warnInvalid(cat)
+			return nil
 		})
 		log.Info("catalog git-sync enabled", "url", cfg.Catalog.Git.URL, "dir", dir)
 		return cat
@@ -664,15 +698,7 @@ func buildJudgeModel(cfg *config.Config, provider, baseURL, model, apiKeyEnv str
 		}
 		return buildModel(cfg, apiKey)
 	}
-	apiKey := os.Getenv(apiKeyEnv)
-	switch provider {
-	case "anthropic":
-		return anthropic.New(baseURL, model, apiKey)
-	case "gemini":
-		return gemini.New(baseURL, model, apiKey)
-	default:
-		return openai.New(baseURL, model, apiKey)
-	}
+	return newModelClient(provider, baseURL, model, os.Getenv(apiKeyEnv))
 }
 
 // runEvalLive runs the live-fire campaign and writes a dated report.
@@ -809,7 +835,11 @@ func buildApprovals(cfg *config.Config, exec action.Executor, aud audit.Auditor,
 
 // buildAuto enables rung-3 unattended execution for action mode "auto" (requires a
 // reachable cluster). Heavily gated: reversible-only, confidence-floored, rate-
-// limited, kill-switchable, and audited. Recommend dry_run before going live.
+// limited, kill-switchable, and audited. The rung is EXPERIMENTAL and FROZEN
+// (FEAT-1): unattended execution contradicts the read-only-first posture and is the
+// only path that turns a prompt-injected finding into a cluster mutation, so it gets
+// no further investment and may be removed — prefer "approve", which captures nearly
+// all the value. Recommend dry_run if you evaluate it.
 func buildAuto(cfg *config.Config, exec action.Executor, aud audit.Auditor, log *slog.Logger) *action.Auto {
 	if cfg.Actions.Mode != config.ActionAuto {
 		return nil
@@ -819,7 +849,8 @@ func buildAuto(cfg *config.Config, exec action.Executor, aud audit.Auditor, log 
 		return nil
 	}
 	a := cfg.Actions.Auto
-	log.Warn("rung-3 AUTO execution ENABLED — reversible actions execute WITHOUT human approval",
+	log.Warn("rung-3 AUTO execution ENABLED — EXPERIMENTAL and NOT recommended on real clusters; "+
+		"reversible actions execute WITHOUT human approval. Prefer mode=approve (human-click).",
 		"dry_run", a.DryRun, "min_confidence", a.MinConfidence, "max_per_window", a.MaxPerWindow, "window", a.Window.Std().String())
 	au := action.NewAuto(exec, a, action.New(cfg.Actions), aud, log)
 	// NewAuto starts paused (fail closed by construction across cold start / failover);
@@ -971,7 +1002,7 @@ func buildReinvestigator(ctx context.Context, cfg *config.Config, gp providers.G
 		var res providers.Investigation
 		var got bool
 		li := &investigate.LoopInvestigator{
-			Model: model, Tools: tools, Recall: recall, Verify: true, Log: log,
+			Model: model, VerifyModel: buildVerifyModel(cfg), Tools: tools, Recall: recall, Verify: true, Log: log,
 			Metrics:                   metrics,
 			ModelProvider:             cfg.Model.Provider,
 			MaxSteps:                  cfg.Investigation.MaxSteps,
@@ -1203,7 +1234,7 @@ func runInvestigate(args []string) error {
 	model, tools, recall, _ := buildModelAndTools(ctx, cfg, gitOpsFromKube(cfg, log), nil, log)
 	var result *providers.Investigation
 	li := &investigate.LoopInvestigator{
-		Model: model, Tools: tools, Recall: recall, Actions: action.New(cfg.Actions), Log: log, Verify: true,
+		Model: model, VerifyModel: buildVerifyModel(cfg), Tools: tools, Recall: recall, Actions: action.New(cfg.Actions), Log: log, Verify: true,
 		ModelProvider: cfg.Model.Provider,
 		Timeout:       cfg.Investigation.Timeout.Std(),
 		OnComplete:    func(inv providers.Investigation) { result = &inv },
@@ -1283,6 +1314,7 @@ func buildInvestigator(ctx context.Context, cfg *config.Config, gp providers.Git
 	}
 	return &investigate.LoopInvestigator{
 		Model:                     model,
+		VerifyModel:               buildVerifyModel(cfg),
 		Tools:                     tools,
 		Log:                       log,
 		Actions:                   actions,
@@ -1374,7 +1406,11 @@ func buildInvestigator(ctx context.Context, cfg *config.Config, gp providers.Git
 // only after the failure has persisted — re-checked still Ready=False via the
 // provider's ResourceStatus — filtering reconcile-churn transients that would
 // otherwise drive confident-but-wrong root causes.
-func startGitOpsFailureWatch(ctx context.Context, cfg *config.Config, q investigate.Enqueuer, gp providers.GitOpsProvider, metrics *telemetry.Metrics, log *slog.Logger) {
+// dedup is process-scoped (created once in runServe) and shared across leadership
+// terms — NOT created here per call. The informer's initial LIST re-emits every
+// still-failing workload as an Add on each (re-)acquire, so a per-term deduper
+// (empty at term start) would re-investigate every broken app on every leader flap.
+func startGitOpsFailureWatch(ctx context.Context, cfg *config.Config, q investigate.Enqueuer, gp providers.GitOpsProvider, dedup *trigger.Deduper, metrics *telemetry.Metrics, log *slog.Logger) {
 	events, err := gp.WatchFailures(ctx)
 	if err != nil {
 		log.Warn("gitops-failure watch disabled", "err", err)
@@ -1383,7 +1419,7 @@ func startGitOpsFailureWatch(ctx context.Context, cfg *config.Config, q investig
 	deb := buildFailureDebouncer(cfg, gp, metrics, log)
 	log.Info("watching gitops failures", "engine", gitopsEngine(cfg),
 		"debounce", cfg.Triggers.GitOpsFailures.DebounceWindow())
-	go investigate.DrainFailures(ctx, events, q, trigger.NewDeduper(cfg.Triggers.Incidents.Dedup.Window.Std()), deb, log)
+	go investigate.DrainFailures(ctx, events, q, dedup, deb, log)
 }
 
 // buildFailureDebouncer wires a Debouncer whose "still failing?" re-check reads
@@ -1419,8 +1455,12 @@ func gitopsEngine(cfg *config.Config) string {
 }
 
 // buildGitOps builds the GitOps provider for the configured engine (flux default).
+// The differ clones the GitOps source repo over HTTPS; it authenticates private
+// repos with the shared GitHub App installation token (the App needs contents:read
+// on the source repo). A nil token source (no App configured) means public/local
+// repos only.
 func buildGitOps(cfg *config.Config, dc dynamic.Interface, log *slog.Logger) providers.GitOpsProvider {
-	differ := &whatchanged.Differ{}
+	differ := &whatchanged.Differ{TokenSource: buildForgeTokenSource(cfg, log)}
 	if gitopsEngine(cfg) == "argocd" {
 		log.Info("gitops engine", "engine", "argocd")
 		return argocd.New(argocd.NewDynamicReader(dc), differ)

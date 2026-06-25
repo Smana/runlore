@@ -25,9 +25,11 @@ type providersFileDiff = providers.FileDiff
 
 // Differ computes path-scoped diffs between Git revisions.
 type Differ struct {
-	// Token is a GitHub App installation token used for HTTPS clone auth in
-	// Remote. Empty disables auth (e.g. public or local repos).
-	Token string
+	// TokenSource mints a GitHub App installation token for HTTPS clone auth in
+	// Remote/RemoteFromParent. It is called once per clone so a short-lived
+	// (~1h) installation token stays fresh across a long-running agent. nil
+	// disables auth (e.g. public or local repos).
+	TokenSource func(context.Context) (string, error)
 }
 
 // Local diffs two revisions in an already-cloned repository at path. ctx bounds the
@@ -114,12 +116,22 @@ type singleFilePatch struct{ fp diff.FilePatch }
 func (p singleFilePatch) FilePatches() []diff.FilePatch { return []diff.FilePatch{p.fp} }
 func (p singleFilePatch) Message() string               { return "" }
 
-// auth builds the clone auth method from the installation token.
-func (d *Differ) auth() transport.AuthMethod {
-	if d.Token == "" {
-		return nil
+// auth builds the clone auth method from a freshly-minted installation token.
+// Returns (nil, nil) when no token source is configured or it yields an empty
+// token (public/local repos). A token-source error is surfaced so a private
+// clone fails loudly instead of silently attempting unauthenticated access.
+func (d *Differ) auth(ctx context.Context) (transport.AuthMethod, error) {
+	if d.TokenSource == nil {
+		return nil, nil
 	}
-	return &http.BasicAuth{Username: "x-access-token", Password: d.Token}
+	tok, err := d.TokenSource(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("clone auth token: %w", err)
+	}
+	if tok == "" {
+		return nil, nil
+	}
+	return &http.BasicAuth{Username: "x-access-token", Password: tok}, nil
 }
 
 // cloneToDisk clones url into a temporary on-disk repository and returns it with a
@@ -130,12 +142,16 @@ func (d *Differ) auth() transport.AuthMethod {
 // hung remote (a stalled HTTPS clone would otherwise block the queue worker
 // indefinitely); a cancelled clone returns a context error via %w.
 func (d *Differ) cloneToDisk(ctx context.Context, url string) (*git.Repository, func(), error) {
+	auth, err := d.auth(ctx)
+	if err != nil {
+		return nil, func() {}, err
+	}
 	dir, err := os.MkdirTemp("", "runlore-clone-")
 	if err != nil {
 		return nil, func() {}, fmt.Errorf("temp dir: %w", err)
 	}
 	cleanup := func() { _ = os.RemoveAll(dir) }
-	repo, err := git.PlainCloneContext(ctx, dir, false, &git.CloneOptions{URL: url, Auth: d.auth()})
+	repo, err := git.PlainCloneContext(ctx, dir, false, &git.CloneOptions{URL: url, Auth: auth})
 	if err != nil {
 		cleanup()
 		return nil, func() {}, fmt.Errorf("clone %s: %w", url, err)

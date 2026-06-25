@@ -69,11 +69,20 @@ func TestComplete(t *testing.T) {
 	if gotVersion != apiVersion || gotKey != "k" {
 		t.Fatalf("version=%q key=%q", gotVersion, gotKey)
 	}
-	if gotReq.Model != "claude-x" || gotReq.System != "sys" || gotReq.MaxTokens == 0 {
+	if gotReq.Model != "claude-x" || gotReq.MaxTokens == 0 {
 		t.Fatalf("request: %+v", gotReq)
+	}
+	// system is sent as a content-block array carrying a prompt-cache breakpoint
+	if len(gotReq.System) != 1 || gotReq.System[0].Text != "sys" ||
+		gotReq.System[0].CacheControl == nil || gotReq.System[0].CacheControl.Type != "ephemeral" {
+		t.Fatalf("system (want one cached 'sys' block): %+v", gotReq.System)
 	}
 	if len(gotReq.Tools) != 1 || gotReq.Tools[0].Name != "what_changed" || string(gotReq.Tools[0].InputSchema) != `{"type":"object"}` {
 		t.Fatalf("tools: %+v", gotReq.Tools)
+	}
+	// the last tool is the cache breakpoint for the (static) tool schemas
+	if gotReq.Tools[0].CacheControl == nil || gotReq.Tools[0].CacheControl.Type != "ephemeral" {
+		t.Fatalf("last tool should be a cache breakpoint: %+v", gotReq.Tools[0])
 	}
 	if len(gotReq.Messages) != 1 || gotReq.Messages[0].Role != "user" || gotReq.Messages[0].Content[0].Text != "hi" {
 		t.Fatalf("messages: %+v", gotReq.Messages)
@@ -176,5 +185,36 @@ func TestMessageCoalescing(t *testing.T) {
 		results.Content[0].Type != "tool_result" || results.Content[0].ToolUseID != "a" || results.Content[0].Content != "changed: chart bump" ||
 		results.Content[1].ToolUseID != "b" {
 		t.Fatalf("coalesced tool results: %+v", results)
+	}
+}
+
+// TestPromptCacheToolsOnly verifies that with no system prompt, the tools array
+// still gets exactly one cache breakpoint — on the LAST tool, not every tool.
+func TestPromptCacheToolsOnly(t *testing.T) {
+	var gotReq msgRequest
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewDecoder(r.Body).Decode(&gotReq)
+		_, _ = w.Write([]byte(`{"content":[{"type":"text","text":"ok"}]}`))
+	}))
+	defer srv.Close()
+
+	_, err := New(srv.URL, "claude-x", "k").Complete(context.Background(), providers.CompletionRequest{
+		Messages: []providers.Message{{Role: "user", Content: "hi"}},
+		Tools: []providers.ToolSpec{
+			{Name: "a", Description: "d", Schema: `{"type":"object"}`},
+			{Name: "b", Description: "d", Schema: `{"type":"object"}`},
+		},
+	})
+	if err != nil {
+		t.Fatalf("Complete: %v", err)
+	}
+	if len(gotReq.System) != 0 {
+		t.Fatalf("want no system block, got %+v", gotReq.System)
+	}
+	if gotReq.Tools[0].CacheControl != nil {
+		t.Fatalf("only the last tool should be the breakpoint; first tool was marked: %+v", gotReq.Tools[0])
+	}
+	if gotReq.Tools[1].CacheControl == nil || gotReq.Tools[1].CacheControl.Type != "ephemeral" {
+		t.Fatalf("last tool should be the cache breakpoint: %+v", gotReq.Tools[1])
 	}
 }

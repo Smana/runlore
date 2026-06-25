@@ -12,6 +12,7 @@ import (
 
 	"github.com/Smana/runlore/internal/action"
 	"github.com/Smana/runlore/internal/providers"
+	"github.com/Smana/runlore/internal/redact"
 	"github.com/Smana/runlore/internal/telemetry"
 )
 
@@ -88,6 +89,10 @@ type LoopInvestigator struct {
 	Actions    *action.Policy                // autonomy ladder; nil/off = read-only findings only
 	Recall     *Recall                       // optional: short-circuit on a high-confidence catalog hit
 	Verify     bool                          // run an adversarial review of root causes before delivery
+
+	// VerifyModel optionally routes the adversarial verify pass to a cheaper/faster
+	// model. nil ⇒ the verify pass reuses Model. Verify itself always runs.
+	VerifyModel providers.ModelProvider
 
 	// Timeout bounds a single investigation end-to-end (recall + every model/tool
 	// call, including a hung git clone/patch). 0 disables it. On expiry the loop
@@ -189,7 +194,9 @@ func (li *LoopInvestigator) Investigate(ctx context.Context, req Request) error 
 	}
 	specs = append(specs, submitFindingsSpec())
 
-	messages := []providers.Message{{Role: "user", Content: seedPrompt(req)}}
+	// Redact secrets from the (untrusted) incident text before it enters the prompt,
+	// so a secret in an alert annotation/message never reaches the model provider.
+	messages := []providers.Message{{Role: "user", Content: redact.Secrets(seedPrompt(req))}}
 	maxSteps := li.MaxSteps
 	if maxSteps <= 0 {
 		// Enough headroom to query every signal source (gitops/cloud/logs/metrics/
@@ -325,7 +332,12 @@ func (li *LoopInvestigator) Investigate(ctx context.Context, req Request) error 
 				return nil
 			}
 			used[tc.Name]++
-			out, trimmed := truncateOutput(li.runTool(ctx, byName, tc), li.MaxToolOutputBytes)
+			// Redact secrets from tool output (pod/controller logs, git diffs, status/
+			// event messages) BEFORE it enters the prompt: this is the LLM-vendor egress
+			// boundary, and since the model only ever sees redacted text, the evidence it
+			// later quotes into the KB PR + chat is protected too. Redact before truncating
+			// so a secret near the cap is still masked.
+			out, trimmed := truncateOutput(redact.Secrets(li.runTool(ctx, byName, tc)), li.MaxToolOutputBytes)
 			if trimmed > 0 && li.Metrics != nil {
 				li.Metrics.ToolOutputTruncatedBytes.Add(ctx, int64(trimmed))
 			}

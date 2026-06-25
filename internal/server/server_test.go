@@ -68,6 +68,43 @@ func TestSlackInteraction(t *testing.T) {
 	}
 }
 
+// TestSlackRejectRequiresApprover locks down F3: a signature-valid but unlisted
+// user must not be able to cancel a pending remediation (denial-of-remediation).
+func TestSlackRejectRequiresApprover(t *testing.T) {
+	exec := &recordExec{}
+	pol := action.New(config.ActionPolicy{Mode: config.ActionApprove, Allow: config.ActionAllow{ReversibleOnly: true, Namespaces: []string{"apps"}}})
+	ap := action.NewApprovals(exec, pol, audit.Nop{}, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	id := ap.Register(providers.Action{Op: "suspend", Reversible: true, Target: providers.Workload{Kind: "Kustomization", Name: "web", Namespace: "apps"}})
+
+	const secret = "shh"
+	srv := New(&config.Config{}, &spyEnqueuer{}, nil, Actions{Approvals: ap, SlackSecret: secret, ApproverIDs: []string{"U1"}}, nil, slog.New(slog.NewTextHandler(io.Discard, nil)))
+
+	reject := func(userID string) {
+		payload := `{"user":{"id":"` + userID + `","username":"x"},"actions":[{"action_id":"runlore_reject","value":"` + id + `"}]}`
+		body := "payload=" + url.QueryEscape(payload)
+		ts := strconv.FormatInt(time.Now().Unix(), 10)
+		req := httptest.NewRequest(http.MethodPost, "/slack/interactions", strings.NewReader(body))
+		req.Header.Set("X-Slack-Request-Timestamp", ts)
+		req.Header.Set("X-Slack-Signature", slackSign(secret, ts, body))
+		rr := httptest.NewRecorder()
+		srv.Handler().ServeHTTP(rr, req)
+		if rr.Code != http.StatusOK {
+			t.Fatalf("reject by %s = %d, want 200 (click ack)", userID, rr.Code)
+		}
+	}
+
+	// Unlisted user: the click is acked (200) but the action must remain pending.
+	reject("U2")
+	if len(ap.List()) != 1 {
+		t.Fatalf("unlisted user cancelled a pending action (denial-of-remediation); pending=%d, want 1", len(ap.List()))
+	}
+	// The approver can reject — the action is dropped.
+	reject("U1")
+	if len(ap.List()) != 0 {
+		t.Fatalf("approver reject did not drop the pending action; pending=%d, want 0", len(ap.List()))
+	}
+}
+
 type spyEnqueuer struct{ reqs []investigate.Request }
 
 func (s *spyEnqueuer) Enqueue(r investigate.Request) { s.reqs = append(s.reqs, r) }
