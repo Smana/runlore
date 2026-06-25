@@ -30,6 +30,16 @@ type batch struct {
 	firstSeen, lastSeen time.Time
 }
 
+// cooldown records, per correlation key, when an investigation last fired and
+// which alertnames it has already covered. The alertname set lets a genuinely
+// new critical problem (an unseen alertname sharing the key) bypass the
+// cooldown, while same-alertname repeats — the storm noise the cooldown exists
+// to quash — stay suppressed. Evicted by sweep once aged past Cooldown.
+type cooldown struct {
+	last time.Time
+	seen map[string]struct{} // alertnames already flushed under this key
+}
+
 // Coalescer buffers correlated incidents and flushes one investigation per key.
 type Coalescer struct {
 	cfg     Config
@@ -39,14 +49,14 @@ type Coalescer struct {
 
 	mu      sync.Mutex
 	pending map[string]*batch
-	recent  map[string]time.Time
+	recent  map[string]*cooldown
 }
 
 // New builds a Coalescer. out is called with each flushed batch.
 func New(cfg Config, out func([]config.Incident)) *Coalescer {
 	return &Coalescer{
 		cfg: cfg, now: time.Now, out: out,
-		pending: map[string]*batch{}, recent: map[string]time.Time{},
+		pending: map[string]*batch{}, recent: map[string]*cooldown{},
 	}
 }
 
@@ -103,20 +113,22 @@ func (c *Coalescer) Add(inc config.Incident) {
 	c.mu.Lock()
 	now := c.now()
 	switch {
-	case c.withinCooldown(k, now):
+	case c.withinCooldown(k, now) && !c.newCriticalDuringCooldown(k, inc):
 		// An investigation for this key already fired within the cooldown — suppress
 		// the rest of the storm. This is checked before the critical fast-path so a
 		// storm of critical alerts collapses to one investigation (the first) plus
-		// suppressions, rather than one investigation per alert.
+		// suppressions, rather than one investigation per alert. The exception
+		// (newCriticalDuringCooldown) lets a critical with an alertname not yet seen
+		// for this key through, since that is a genuinely new problem, not storm noise.
 		c.mu.Unlock()
 		if m := c.Metrics; m != nil {
 			m.AlertsSuppressed.Add(context.Background(), 1)
 		}
 		return
 	case strings.EqualFold(inc.Severity, "critical"):
-		// First critical for this key (not in cooldown): flush immediately with no
-		// debounce wait, draining any pending batch. Subsequent same-key alerts fall
-		// into the cooldown case above and are suppressed.
+		// Critical (first for this key, or a new alertname during cooldown): flush
+		// immediately with no debounce wait, draining any pending batch. Same-key
+		// same-alertname criticals fall into the cooldown case above and are suppressed.
 		flush = []config.Incident{inc}
 		if b, ok := c.pending[k]; ok {
 			flush = make([]config.Incident, 0, len(b.incidents)+1)
@@ -124,7 +136,7 @@ func (c *Coalescer) Add(inc config.Incident) {
 			flush = append(flush, inc)
 			delete(c.pending, k)
 		}
-		c.recent[k] = now
+		c.markFlushed(k, now, flush)
 	default:
 		b := c.pending[k]
 		if b == nil {
@@ -136,7 +148,7 @@ func (c *Coalescer) Add(inc config.Incident) {
 		if c.cfg.MaxBatch > 0 && len(b.incidents) >= c.cfg.MaxBatch {
 			flush = b.incidents
 			delete(c.pending, k)
-			c.recent[k] = now
+			c.markFlushed(k, now, flush)
 		}
 	}
 	c.mu.Unlock()
@@ -160,9 +172,40 @@ func (c *Coalescer) emit(batch []config.Incident) {
 	}
 }
 
+// withinCooldown reports whether key k fired an investigation recently enough
+// that same-key alerts should be suppressed. Caller holds mu.
 func (c *Coalescer) withinCooldown(k string, now time.Time) bool {
-	t, ok := c.recent[k]
-	return ok && c.cfg.Cooldown > 0 && now.Sub(t) < c.cfg.Cooldown
+	cd, ok := c.recent[k]
+	return ok && c.cfg.Cooldown > 0 && now.Sub(cd.last) < c.cfg.Cooldown
+}
+
+// newCriticalDuringCooldown reports whether inc is a critical alert whose
+// alertname has not yet been covered by the current cooldown for key k — i.e. a
+// genuinely new problem that should bypass suppression. Caller holds mu.
+func (c *Coalescer) newCriticalDuringCooldown(k string, inc config.Incident) bool {
+	if !strings.EqualFold(inc.Severity, "critical") {
+		return false
+	}
+	cd, ok := c.recent[k]
+	if !ok {
+		return true
+	}
+	_, seen := cd.seen[inc.AlertName]
+	return !seen
+}
+
+// markFlushed records, for key k, that an investigation fired at now covering
+// the alertnames in the flushed batch. Caller holds mu.
+func (c *Coalescer) markFlushed(k string, now time.Time, batch []config.Incident) {
+	cd := c.recent[k]
+	if cd == nil {
+		cd = &cooldown{seen: map[string]struct{}{}}
+		c.recent[k] = cd
+	}
+	cd.last = now
+	for _, in := range batch {
+		cd.seen[in.AlertName] = struct{}{}
+	}
 }
 
 // sweep flushes every pending batch that has been quiet for >= Debounce or is
@@ -177,12 +220,25 @@ func (c *Coalescer) sweep() {
 		if debounced || maxWaited {
 			flushes = append(flushes, b.incidents)
 			delete(c.pending, k)
-			c.recent[k] = now
+			c.markFlushed(k, now, b.incidents)
 		}
 	}
+	c.evictExpiredCooldowns(now)
 	c.mu.Unlock()
 	for _, f := range flushes {
 		c.emit(f)
+	}
+}
+
+// evictExpiredCooldowns drops recent records that can no longer suppress
+// anything, keeping the map bounded over a long serve with churning keys. An
+// entry is dead once aged past Cooldown; when Cooldown <= 0, withinCooldown
+// never consults recent, so every entry is dead weight. Caller holds mu.
+func (c *Coalescer) evictExpiredCooldowns(now time.Time) {
+	for k, cd := range c.recent {
+		if c.cfg.Cooldown <= 0 || now.Sub(cd.last) >= c.cfg.Cooldown {
+			delete(c.recent, k)
+		}
 	}
 }
 
