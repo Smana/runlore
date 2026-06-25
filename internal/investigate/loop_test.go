@@ -2,6 +2,7 @@ package investigate
 
 import (
 	"context"
+	"errors"
 	"io"
 	"log/slog"
 	"net/http"
@@ -268,6 +269,81 @@ func TestInvestigateNoDeadlineWhenZero(t *testing.T) {
 	}
 	if got == nil || len(got.RootCauses) != 1 || got.RootCauses[0].Summary != "ok" {
 		t.Fatalf("Timeout==0 must not alter a normal run: %+v", got)
+	}
+}
+
+// errModel returns a plain (non-context) error on Complete — a backend rejecting
+// the request (auth, 5xx, malformed response), distinct from the deadline path.
+type errModel struct {
+	err   error
+	calls int
+}
+
+func (m *errModel) Complete(_ context.Context, _ providers.CompletionRequest) (providers.CompletionResponse, error) {
+	m.calls++
+	return providers.CompletionResponse{}, m.err
+}
+
+// TestInvestigateModelError asserts a non-deadline model error bubbles up wrapped
+// as "model: …" (so the caller/queue sees a real failure), as opposed to the
+// deadline path which delivers a synthetic timeout result and returns nil.
+func TestInvestigateModelError(t *testing.T) {
+	model := &errModel{err: errors.New("503 upstream unavailable")}
+	var delivered int
+	li := &LoopInvestigator{
+		Model:      model,
+		Log:        slog.New(slog.NewTextHandler(io.Discard, nil)),
+		MaxSteps:   5,
+		OnComplete: func(providers.Investigation) { delivered++ },
+	}
+	err := li.Investigate(context.Background(), Request{Title: "BackendDown"})
+	if err == nil {
+		t.Fatal("a non-deadline model error must be returned, not swallowed")
+	}
+	if !strings.HasPrefix(err.Error(), "model: ") {
+		t.Fatalf("error must be wrapped as model: …, got %q", err.Error())
+	}
+	if !errors.Is(err, model.err) {
+		t.Fatalf("wrapped error must preserve the cause for errors.Is, got %v", err)
+	}
+	if delivered != 0 {
+		t.Fatalf("a model error must not deliver a result, got %d deliveries", delivered)
+	}
+	if model.calls != 1 {
+		t.Fatalf("a model error must end the loop after one call, got %d", model.calls)
+	}
+}
+
+// TestLoopRecoversFromMalformedFindings asserts a submit_findings call whose args
+// are malformed JSON does not abort the investigation: the parse error is fed back
+// to the model as a tool result and the loop continues, delivering the next valid
+// submission.
+func TestLoopRecoversFromMalformedFindings(t *testing.T) {
+	model := &scriptModel{responses: []providers.CompletionResponse{
+		// turn 1: malformed submit_findings (truncated JSON)
+		{ToolCalls: []providers.ToolCall{{ID: "1", Name: submitFindingsName, Args: `{"root_causes":[{"summary":`}}},
+		// turn 2: a well-formed submission
+		{ToolCalls: []providers.ToolCall{{ID: "2", Name: submitFindingsName,
+			Args: `{"confidence":0.7,"root_causes":[{"summary":"recovered"}]}`}}},
+	}}
+	var got *providers.Investigation
+	li := &LoopInvestigator{
+		Model:      model,
+		Log:        slog.New(slog.NewTextHandler(io.Discard, nil)),
+		MaxSteps:   5,
+		OnComplete: func(inv providers.Investigation) { got = &inv },
+	}
+	if err := li.Investigate(context.Background(), Request{Title: "MalformedThenOK"}); err != nil {
+		t.Fatalf("Investigate: %v", err)
+	}
+	if got == nil {
+		t.Fatal("loop must recover from a malformed submission and deliver the next valid one")
+	}
+	if len(got.RootCauses) != 1 || got.RootCauses[0].Summary != "recovered" {
+		t.Fatalf("expected the recovered finding, got %+v", got)
+	}
+	if model.i != 2 {
+		t.Fatalf("expected exactly 2 model calls (malformed, then valid), got %d", model.i)
 	}
 }
 
