@@ -381,6 +381,63 @@ func TestLoopToolOutputTruncatedMetric(t *testing.T) {
 	}
 }
 
+// TestLoopTruncationNudgeAndMetric verifies that a truncated model response is not
+// treated as a finished step: the loop nudges the model once to continue, records the
+// truncation metric, and recovers (delivers a result) rather than accepting a half-answer.
+func TestLoopTruncationNudgeAndMetric(t *testing.T) {
+	t.Cleanup(func() { otel.SetMeterProvider(noop.NewMeterProvider()) })
+
+	h, shutdown, err := telemetry.Setup(context.Background())
+	if err != nil {
+		t.Fatalf("telemetry setup: %v", err)
+	}
+	t.Cleanup(func() { _ = shutdown(context.Background()) })
+	m := telemetry.NewMetrics()
+
+	model := &scriptModel{responses: []providers.CompletionResponse{
+		// step 1: a truncated prose turn — the loop must nudge once and continue,
+		// NOT treat this cut-off output as a finished (inconclusive) step.
+		{Text: "the root cause is probably the chart bu", Truncated: true,
+			Usage: providers.Usage{InputTokens: 500, OutputTokens: 4096}},
+		// step 2: still truncated, but now carries submit_findings. The single-use
+		// nudge has fired, so the loop falls through and processes the findings.
+		{Truncated: true, ToolCalls: []providers.ToolCall{{ID: "2", Name: submitFindingsName,
+			Args: `{"confidence":0.6,"root_causes":[{"summary":"chart bump"}]}`}}},
+	}}
+
+	var got *providers.Investigation
+	li := &LoopInvestigator{
+		Model:         model,
+		Log:           slog.New(slog.NewTextHandler(io.Discard, nil)),
+		MaxSteps:      5,
+		Metrics:       m,
+		ModelProvider: "anthropic",
+		OnComplete:    func(inv providers.Investigation) { got = &inv },
+	}
+	if err := li.Investigate(context.Background(), Request{Title: "truncation test"}); err != nil {
+		t.Fatalf("Investigate: %v", err)
+	}
+	// The loop recovered after the truncation nudge and delivered the findings.
+	if got == nil || len(got.RootCauses) != 1 || got.RootCauses[0].Summary != "chart bump" {
+		t.Fatalf("truncation must nudge-and-recover, not drop the investigation: %+v", got)
+	}
+	// Exactly two model calls: the truncated turn + the recovery turn (nudge is single-use).
+	if model.i != 2 {
+		t.Fatalf("expected 2 model calls (truncated + recovery), got %d", model.i)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/metrics", nil)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	body := rec.Body.String()
+	if !strings.Contains(body, "runlore_model_responses_truncated_total") {
+		t.Fatalf("runlore_model_responses_truncated_total not in metrics:\n%s", body)
+	}
+	if !strings.Contains(body, `provider="anthropic"`) {
+		t.Fatalf("truncation metric must carry the provider label:\n%s", body)
+	}
+}
+
 // runawayModel always returns a tool call (never submit_findings), simulating a
 // model that keeps calling tools and never winds down regardless of nudges.
 type runawayModel struct {
