@@ -100,6 +100,18 @@ func TestCurateStaleAfterParse(t *testing.T) {
 	}
 }
 
+// TestValidateModelDoesNotRequireWebhookToken guards the R9(c) scoping decision:
+// the alert-webhook auth requirement lives on the serve path, NOT in Validate.
+// Validate is shared by every subcommand, so a model-configured config with no
+// webhook token must still validate clean — otherwise `lore investigate` (which
+// requires a model and has no webhook) would break.
+func TestValidateModelDoesNotRequireWebhookToken(t *testing.T) {
+	c := &Config{Model: Model{Provider: "anthropic"}} // model set, no webhook, actions off
+	if err := c.Validate(); err != nil {
+		t.Fatalf("model-only config must validate clean (webhook auth is serve-scoped): %v", err)
+	}
+}
+
 func TestCurateRecurrenceThresholdParse(t *testing.T) {
 	var c Config
 	if err := yaml.Unmarshal([]byte("curate:\n  recurrence_threshold: 5\n"), &c); err != nil {
