@@ -22,6 +22,7 @@ import (
 	"github.com/Smana/runlore/internal/action"
 	"github.com/Smana/runlore/internal/coalesce"
 	"github.com/Smana/runlore/internal/config"
+	"github.com/Smana/runlore/internal/httpx"
 	"github.com/Smana/runlore/internal/investigate"
 	"github.com/Smana/runlore/internal/outcome"
 	"github.com/Smana/runlore/internal/telemetry"
@@ -339,7 +340,7 @@ func (s *Server) updateSlack(ctx context.Context, responseURL, text string) {
 		return
 	}
 	req.Header.Set("Content-Type", "application/json")
-	client := &http.Client{Timeout: 10 * time.Second}
+	client := httpx.SecureClient(10 * time.Second)
 	if resp, err := client.Do(req); err == nil {
 		_ = resp.Body.Close()
 	}

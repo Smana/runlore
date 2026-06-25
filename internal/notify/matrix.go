@@ -13,6 +13,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/Smana/runlore/internal/httpx"
 	"github.com/Smana/runlore/internal/providers"
 )
 
@@ -40,7 +41,7 @@ func NewMatrix(homeserver, roomID, token string) *Matrix {
 		homeserver: strings.TrimRight(homeserver, "/"),
 		roomID:     roomID,
 		token:      token,
-		http:       &http.Client{Timeout: 15 * time.Second},
+		http:       httpx.SecureClient(15 * time.Second),
 	}
 	m.txn.Store(time.Now().UnixNano())
 	return m

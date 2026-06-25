@@ -12,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/Smana/runlore/internal/httpx"
 	"github.com/Smana/runlore/internal/providers"
 )
 
@@ -23,7 +24,7 @@ type Slack struct {
 
 // NewSlack builds a Slack webhook notifier.
 func NewSlack(webhookURL string) *Slack {
-	return &Slack{webhookURL: webhookURL, http: &http.Client{Timeout: 15 * time.Second}}
+	return &Slack{webhookURL: webhookURL, http: httpx.SecureClient(15 * time.Second)}
 }
 
 var _ providers.Notifier = (*Slack)(nil)
@@ -64,7 +65,7 @@ type SlackBot struct {
 
 // NewSlackBot builds a bot-token Slack notifier posting to channel (ID or name).
 func NewSlackBot(token, channel string) *SlackBot {
-	return &SlackBot{token: token, channel: channel, baseURL: "https://slack.com", http: &http.Client{Timeout: 15 * time.Second}}
+	return &SlackBot{token: token, channel: channel, baseURL: "https://slack.com", http: httpx.SecureClient(15 * time.Second)}
 }
 
 var _ providers.Notifier = (*SlackBot)(nil)
