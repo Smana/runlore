@@ -90,6 +90,36 @@ func (l *Ledger) readEvents() ([]Event, error) {
 
 func (l *Ledger) enabled() bool { return l != nil && l.path != "" }
 
+// Status is a cheap snapshot of the ledger's on-disk reality, used to tell apart
+// "feature off" (Configured=false) from "configured but the file the curate pod
+// can see is absent/empty" (Configured=true, Present=false or Events==0) — the
+// silent-no-op the `lore curate` startup warning surfaces. It re-reads the file
+// (no cached open-index) so it reflects what a fresh process actually sees.
+type Status struct {
+	Path       string // the configured ledger path ("" when disabled)
+	Configured bool   // a non-empty ledger_path was set
+	Present    bool   // the file exists (true even when empty)
+	Events     int    // number of replayable events (0 for absent/empty)
+}
+
+// Status reports whether the ledger is configured and whether its file is
+// actually present/non-empty where this process runs. A disabled ledger
+// (path=="") reports Configured=false.
+func (l *Ledger) Status() Status {
+	s := Status{}
+	if !l.enabled() {
+		return s
+	}
+	s.Path, s.Configured = l.path, true
+	if _, err := os.Stat(l.path); err == nil {
+		s.Present = true
+	}
+	if events, err := l.readEvents(); err == nil {
+		s.Events = len(events)
+	}
+	return s
+}
+
 func (l *Ledger) appendLocked(e Event) error {
 	f, err := os.OpenFile(l.path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
 	if err != nil {
