@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"math"
 	"sort"
+	"strings"
 
 	"github.com/Smana/runlore/internal/providers"
 )
@@ -107,12 +108,57 @@ type findings struct {
 	} `json:"actions"`
 }
 
+// unwrapToolArgs makes the tool-call arguments tolerant of two malformations some
+// OpenAI-compatible backends emit instead of a bare JSON object:
+//   - a ```json … ``` code fence wrapping the object, and
+//   - a double-encoded payload (the object serialized into a JSON *string*).
+//
+// It is a best-effort normalizer applied only as a fallback after a direct parse
+// fails, so a well-formed object is never touched. A single string-unwrap level is
+// enough for the observed double-encoding; anything still invalid is returned for
+// the caller to surface as a parse error.
+func unwrapToolArgs(args string) string {
+	s := strings.TrimSpace(args)
+	// Strip a leading ```json (or ```) fence and its trailing ```.
+	if strings.HasPrefix(s, "```") {
+		s = strings.TrimPrefix(s, "```")
+		s = strings.TrimPrefix(s, "json")
+		s = strings.TrimPrefix(s, "JSON")
+		s = strings.TrimSpace(s)
+		s = strings.TrimSuffix(s, "```")
+		s = strings.TrimSpace(s)
+	}
+	// Unwrap one level of double-encoding: a JSON string whose contents are the
+	// real object (e.g. "\"{\\\"root_causes\\\":[…]}\"").
+	if strings.HasPrefix(s, `"`) {
+		var inner string
+		if err := json.Unmarshal([]byte(s), &inner); err == nil {
+			return strings.TrimSpace(inner)
+		}
+	}
+	return s
+}
+
 // parseFindings turns submit_findings arguments into a providers.Investigation.
+// It first parses the arguments verbatim; only if that fails does it retry against
+// a normalized payload (fence-stripped / one level un-double-encoded), so
+// well-formed args follow the fast path unchanged.
 func parseFindings(args string) (providers.Investigation, error) {
 	var f findings
 	if err := json.Unmarshal([]byte(args), &f); err != nil {
+		if cleaned := unwrapToolArgs(args); cleaned != args {
+			if err2 := json.Unmarshal([]byte(cleaned), &f); err2 == nil {
+				return buildInvestigation(f), nil
+			}
+		}
 		return providers.Investigation{}, fmt.Errorf("parse findings: %w", err)
 	}
+	return buildInvestigation(f), nil
+}
+
+// buildInvestigation maps the parsed findings shape onto a providers.Investigation,
+// clamping confidences. Shared by the direct and the tolerant parse paths.
+func buildInvestigation(f findings) providers.Investigation {
 	inv := providers.Investigation{Title: f.Title, Confidence: clamp01(f.Confidence), Unresolved: f.Unresolved}
 	for _, rc := range f.RootCauses {
 		inv.RootCauses = append(inv.RootCauses, providers.Hypothesis{
@@ -140,5 +186,5 @@ func parseFindings(args string) (providers.Investigation, error) {
 		Name:      f.AffectedResource.Name,
 		Namespace: f.AffectedResource.Namespace,
 	}
-	return inv, nil
+	return inv
 }
