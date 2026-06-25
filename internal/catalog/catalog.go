@@ -1,6 +1,7 @@
 package catalog
 
 import (
+	"context"
 	"fmt"
 	"strconv"
 	"strings"
@@ -17,7 +18,12 @@ type Catalog struct {
 	mu      sync.RWMutex
 	index   bleve.Index
 	entries []Entry
-	ready   atomic.Bool // set on first successful Reload; gates readyz on catalog warmth
+	// vectors holds one embedding per entry (parallel to entries), built on Reload
+	// only when an embedder is configured; nil keeps the catalog BM25-only. embedder
+	// is set once at startup (SetEmbedder) before the first Reload/Search.
+	vectors  [][]float32
+	embedder Embedder
+	ready    atomic.Bool // set on first successful Reload; gates readyz on catalog warmth
 }
 
 // Searcher is the read surface used by the kb_search tool.
@@ -54,6 +60,14 @@ func NewEmpty() *Catalog {
 // returns the list of skipped (unparseable) entry paths so the caller can warn;
 // these are non-fatal — the good entries are still indexed.
 func (c *Catalog) Reload(dir string) ([]string, error) {
+	return c.ReloadContext(context.Background(), dir)
+}
+
+// ReloadContext is Reload with a caller context bounding the (optional) embedding
+// pass. When an embedder is configured, entry vectors are rebuilt here; an embedding
+// failure is NON-fatal — vectors fall back to nil and the catalog stays BM25-only
+// (hybrid retrieval degrades gracefully rather than breaking the reload).
+func (c *Catalog) ReloadContext(ctx context.Context, dir string) ([]string, error) {
 	entries, skipped, err := Load(dir)
 	if err != nil {
 		return nil, err
@@ -62,9 +76,15 @@ func (c *Catalog) Reload(dir string) ([]string, error) {
 	if err != nil {
 		return nil, err
 	}
+	var vectors [][]float32
+	if c.embedder != nil {
+		if v, verr := embedEntries(ctx, c.embedder, entries); verr == nil {
+			vectors = v
+		}
+	}
 	c.mu.Lock()
 	old := c.index
-	c.index, c.entries = idx, entries
+	c.index, c.entries, c.vectors = idx, entries, vectors
 	c.mu.Unlock()
 	// Release the previous index's resources. Search holds the read lock for the
 	// whole query, so by the time the swap above acquired the write lock no query
@@ -85,16 +105,21 @@ func buildIndex(entries []Entry) (bleve.Index, error) {
 	for i, e := range entries {
 		doc := map[string]any{
 			"title": e.Title,
-			// Resource is included so a query naming the affected object/pattern gets
-			// lexical lift (it also drives the recall structural filter — same signal,
-			// now scored). Without it a resource-only term contributes nothing to BM25.
-			"text": strings.Join([]string{e.Title, e.Description, e.Resource, strings.Join(e.Tags, " "), e.Body}, " "),
+			"text":  entryText(e),
 		}
 		if err := idx.Index(strconv.Itoa(i), doc); err != nil {
 			return nil, fmt.Errorf("index entry %d: %w", i, err)
 		}
 	}
 	return idx, nil
+}
+
+// entryText is the single corpus text per entry — used for BOTH the BM25 doc and the
+// embedding, so the lexical and vector views index the same content. Resource is
+// included so a query naming the affected object/pattern gets lexical lift (it also
+// drives the recall structural filter — same signal, now scored).
+func entryText(e Entry) string {
+	return strings.Join([]string{e.Title, e.Description, e.Resource, strings.Join(e.Tags, " "), e.Body}, " ")
 }
 
 // Len reports the number of indexed entries.

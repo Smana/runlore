@@ -44,6 +44,7 @@ import (
 	"github.com/Smana/runlore/internal/config"
 	"github.com/Smana/runlore/internal/curate"
 	"github.com/Smana/runlore/internal/curator"
+	"github.com/Smana/runlore/internal/embed"
 	"github.com/Smana/runlore/internal/eval"
 	fluxexec "github.com/Smana/runlore/internal/executor/flux"
 	"github.com/Smana/runlore/internal/investigate"
@@ -549,12 +550,28 @@ func buildCatalog(ctx context.Context, cfg *config.Config, forgeTok forgeToken, 
 			}
 		})
 	}
+	// Hybrid recall: build the embeddings client once and attach it BEFORE any Reload
+	// so entry vectors are produced. Requires both the feature flag and a configured
+	// endpoint; otherwise the catalog stays BM25-only (and recall stays BM25).
+	var embedder catalog.Embedder
+	if cfg.Catalog.InstantRecall.Hybrid && cfg.Model.Embeddings != nil {
+		e := cfg.Model.Embeddings
+		key := ""
+		if e.APIKeyEnv != "" {
+			key = os.Getenv(e.APIKeyEnv)
+		}
+		embedder = embed.New(e.BaseURL, e.Model, key)
+		log.Info("hybrid recall: embeddings endpoint configured", "base_url", e.BaseURL, "model", e.Model)
+	}
 	if cfg.Catalog.Git.URL != "" {
 		dir := cfg.Catalog.Dir
 		if dir == "" {
 			dir = "/var/lib/runlore/catalog"
 		}
 		cat := catalog.NewEmpty()
+		if embedder != nil {
+			cat.SetEmbedder(embedder)
+		}
 		// Auth precedence: explicit token_env, else the shared forge GitHub App
 		// identity (one credential for both curation writes and catalog reads).
 		var token catalog.TokenFunc
@@ -584,10 +601,23 @@ func buildCatalog(ctx context.Context, cfg *config.Config, forgeTok forgeToken, 
 		return cat
 	}
 	if cfg.Catalog.Dir != "" {
-		cat, err := catalog.New(cfg.Catalog.Dir)
-		if err != nil {
-			log.Warn("catalog disabled", "dir", cfg.Catalog.Dir, "err", err)
-			return nil
+		var cat *catalog.Catalog
+		if embedder != nil {
+			// Embed on load: NewEmpty + SetEmbedder + ReloadContext (catalog.New can't
+			// attach an embedder before its internal Reload).
+			cat = catalog.NewEmpty()
+			cat.SetEmbedder(embedder)
+			if _, err := cat.ReloadContext(ctx, cfg.Catalog.Dir); err != nil {
+				log.Warn("catalog disabled", "dir", cfg.Catalog.Dir, "err", err)
+				return nil
+			}
+		} else {
+			c, err := catalog.New(cfg.Catalog.Dir)
+			if err != nil {
+				log.Warn("catalog disabled", "dir", cfg.Catalog.Dir, "err", err)
+				return nil
+			}
+			cat = c
 		}
 		log.Info("catalog loaded", "dir", cfg.Catalog.Dir, "entries", cat.Len())
 		warnInvalid(cat)
@@ -1138,6 +1168,22 @@ func buildModelAndTools(ctx context.Context, cfg *config.Config, gp providers.Gi
 				"min_score", cfg.Catalog.InstantRecall.MinScore,
 				"margin_gap", cfg.Catalog.InstantRecall.MarginGap, "solo_floor", cfg.Catalog.InstantRecall.SoloFloor,
 				"outcome_prior", cfg.Catalog.InstantRecall.OutcomePrior, "outcome_floor", cfg.Catalog.InstantRecall.OutcomeFloor)
+			// Hybrid (cosine-gated) recall — opt-in, and only effective once the catalog
+			// actually built vectors (an embedder was configured + embedding succeeded).
+			if cfg.Catalog.InstantRecall.Hybrid {
+				recall.Hybrid = cat
+				recall.HybridMinScore = cfg.Catalog.InstantRecall.HybridMinScore
+				recall.HybridMarginGap = cfg.Catalog.InstantRecall.HybridMarginGap
+				if recall.HybridMinScore == 0 {
+					recall.HybridMinScore = 0.80
+				}
+				if recall.HybridMarginGap == 0 {
+					recall.HybridMarginGap = 0.05
+				}
+				log.Info("hybrid recall enabled (EXPERIMENTAL — tune cosine thresholds via the instant-recall eval)",
+					"hybrid_min_score", recall.HybridMinScore, "hybrid_margin_gap", recall.HybridMarginGap,
+					"vectors_ready", cat.HasVectors())
+			}
 		}
 	}
 	if cfg.Metrics.URL != "" {
