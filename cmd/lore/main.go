@@ -1419,8 +1419,12 @@ func gitopsEngine(cfg *config.Config) string {
 }
 
 // buildGitOps builds the GitOps provider for the configured engine (flux default).
+// The differ clones the GitOps source repo over HTTPS; it authenticates private
+// repos with the shared GitHub App installation token (the App needs contents:read
+// on the source repo). A nil token source (no App configured) means public/local
+// repos only.
 func buildGitOps(cfg *config.Config, dc dynamic.Interface, log *slog.Logger) providers.GitOpsProvider {
-	differ := &whatchanged.Differ{}
+	differ := &whatchanged.Differ{TokenSource: buildForgeTokenSource(cfg, log)}
 	if gitopsEngine(cfg) == "argocd" {
 		log.Info("gitops engine", "engine", "argocd")
 		return argocd.New(argocd.NewDynamicReader(dc), differ)
