@@ -88,6 +88,38 @@ func TestSearchScored(t *testing.T) {
 	}
 }
 
+func TestSearchLiftsResourceTerm(t *testing.T) {
+	// The Resource field drives the recall structural filter; it must also feed
+	// BM25 so a query naming the resource gets lexical lift. The distinguishing
+	// term ("harbor-core") lives ONLY in Resource here — not in title/desc/tags/
+	// body — so the entry can only rank first if Resource is indexed.
+	entries := []Entry{
+		{Title: "Pod restart loop", Description: "container keeps restarting", Resource: "tooling/harbor-core", Body: "the pod will not become ready"},
+		{Title: "Network policy drops", Description: "connectivity timeouts", Resource: "apps/web", Body: "default-deny blocks traffic"},
+	}
+	idx, err := buildIndex(entries)
+	if err != nil {
+		t.Fatalf("buildIndex: %v", err)
+	}
+	defer func() { _ = idx.Close() }()
+	c := &Catalog{index: idx, entries: entries}
+	hits, err := c.SearchScored("harbor-core", 2)
+	if err != nil {
+		t.Fatalf("search: %v", err)
+	}
+	if len(hits) == 0 || hits[0].Entry.Resource != "tooling/harbor-core" {
+		t.Fatalf("a resource-term query must rank the matching-resource entry first, got %+v", titles2(hits))
+	}
+}
+
+func titles2(es []ScoredEntry) []string {
+	out := make([]string, len(es))
+	for i, e := range es {
+		out[i] = e.Entry.Title
+	}
+	return out
+}
+
 func TestNewIndexMappingUsesBM25(t *testing.T) {
 	// bleve defaults to legacy TF-IDF when ScoringModel is unset. Both index
 	// sites are forced through this helper, so asserting it guarantees BM25
