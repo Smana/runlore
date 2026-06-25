@@ -21,6 +21,10 @@ spec:
       labels:
         {{- include "runlore.selectorLabels" . | nindent 8 }}
     spec:
+      # Give the leader time to gracefully drain its in-flight investigation on
+      # SIGTERM (record the outcome + deliver) before SIGKILL — must exceed the
+      # agent's internal drain grace (25s). Raise both for longer investigations.
+      terminationGracePeriodSeconds: 40
       serviceAccountName: {{ include "runlore.serviceAccountName" . }}
       {{- with .Values.imagePullSecrets }}
       imagePullSecrets:
