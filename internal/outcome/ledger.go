@@ -17,19 +17,22 @@ import (
 
 // Event is one ledger line: an investigation opened, or an incident resolved.
 type Event struct {
-	Event       string    `json:"event"`           // "open" | "resolve"
-	Fingerprint string    `json:"fingerprint"`     // Alertmanager fingerprint (stable firing↔resolved)
-	Kind        string    `json:"kind,omitempty"`  // open: "recall" | "fresh"
-	Entry       string    `json:"entry,omitempty"` // open+recall: the recalled entry path
-	Title       string    `json:"title,omitempty"`
-	Resource    string    `json:"resource,omitempty"`
-	At          time.Time `json:"at"`
+	Event          string `json:"event"`                     // "open" | "resolve"
+	Fingerprint    string `json:"fingerprint"`               // Alertmanager fingerprint (stable firing↔resolved)
+	DupFingerprint string `json:"dup_fingerprint,omitempty"` // curator dedup fingerprint (resource+cause); the curated-PR resolution join key
+
+	Kind     string    `json:"kind,omitempty"`  // open: "recall" | "fresh"
+	Entry    string    `json:"entry,omitempty"` // open+recall: the recalled entry path
+	Title    string    `json:"title,omitempty"`
+	Resource string    `json:"resource,omitempty"`
+	At       time.Time `json:"at"`
 }
 
 // Episode is a matched open→resolve pair (or, from Episodes(), an unresolved open
 // when Resolved is false).
 type Episode struct {
 	Kind, Entry, Title, Resource string
+	DupFingerprint               string // curator dedup fingerprint; stable join key for the curated-PR resolution check
 	OpenedAt, ResolvedAt         time.Time
 	Duration                     time.Duration
 	Resolved                     bool
@@ -154,7 +157,8 @@ func (l *Ledger) Episodes() ([]Episode, error) {
 		case "open":
 			out = append(out, Episode{
 				Kind: e.Kind, Entry: e.Entry, Title: e.Title, Resource: e.Resource,
-				OpenedAt: e.At,
+				DupFingerprint: e.DupFingerprint,
+				OpenedAt:       e.At,
 			})
 			i := len(out) - 1
 			if rs := pendingResolves[e.Fingerprint]; len(rs) > 0 {
@@ -231,6 +235,7 @@ func (l *Ledger) Resolve(fp string, at time.Time) (Episode, bool, error) {
 	delete(l.open, fp)
 	return Episode{
 		Kind: o.Kind, Entry: o.Entry, Title: o.Title, Resource: o.Resource,
-		OpenedAt: o.At, ResolvedAt: at, Duration: at.Sub(o.At), Resolved: true,
+		DupFingerprint: o.DupFingerprint,
+		OpenedAt:       o.At, ResolvedAt: at, Duration: at.Sub(o.At), Resolved: true,
 	}, true, nil
 }

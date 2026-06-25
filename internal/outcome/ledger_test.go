@@ -302,3 +302,31 @@ func TestOpenCountsMultipleEntries(t *testing.T) {
 		t.Fatalf("b.md should be recalls=1 resolved=0: %+v", counts["b.md"])
 	}
 }
+
+func TestEpisodeCarriesDupFingerprint(t *testing.T) {
+	p := filepath.Join(t.TempDir(), "outcomes.jsonl")
+	l, err := New(p)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	t0 := time.Unix(2000, 0)
+	if err := l.Open(Event{Fingerprint: "fp1", DupFingerprint: "dup-abc", Title: "T", At: t0}); err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	// live Resolve carries it through
+	ep, ok, err := l.Resolve("fp1", t0.Add(time.Minute))
+	if err != nil || !ok {
+		t.Fatalf("Resolve: ok=%v err=%v", ok, err)
+	}
+	if ep.DupFingerprint != "dup-abc" {
+		t.Fatalf("Resolve episode dup = %q, want dup-abc", ep.DupFingerprint)
+	}
+	// replayed Episodes() carries it too
+	eps, err := l.Episodes()
+	if err != nil {
+		t.Fatalf("Episodes: %v", err)
+	}
+	if len(eps) != 1 || eps[0].DupFingerprint != "dup-abc" {
+		t.Fatalf("Episodes dup = %+v, want one with dup-abc", eps)
+	}
+}

@@ -115,6 +115,56 @@ func TestLedgerResolutionCheckerEmptyTitle(t *testing.T) {
 	}
 }
 
+func TestLedgerResolutionRekeyedTitleDiffers(t *testing.T) {
+	// The resolved episode shares the dedup FINGERPRINT but NOT the title — a reworded
+	// re-investigation of the same incident must still resolve the matching PR.
+	c := LedgerResolutionChecker{Ledger: fakeLedger{eps: []outcome.Episode{
+		{Title: "totally different prose this run", DupFingerprint: "dup-xyz", Resolved: true},
+	}}}
+	pr := providers.CuratedIssue{
+		Title: "KB: HarborRegistryDown",
+		Body:  "Drafted by RunLore\n\n" + providers.FingerprintMarker("dup-xyz"),
+	}
+	if got, err := c.IsResolved(context.Background(), pr); err != nil || !got {
+		t.Fatalf("a reworded re-investigation sharing the fingerprint must resolve; got %v err=%v", got, err)
+	}
+	// A PR whose fingerprint matches no resolved episode must NOT resolve.
+	other := providers.CuratedIssue{
+		Title: "KB: HarborRegistryDown",
+		Body:  "Drafted by RunLore\n\n" + providers.FingerprintMarker("dup-nomatch"),
+	}
+	if got, _ := c.IsResolved(context.Background(), other); got {
+		t.Fatal("a non-matching fingerprint must NOT resolve")
+	}
+}
+
+func TestLedgerResolutionLegacyTitleFallback(t *testing.T) {
+	// A PR with NO marker (filed before R6) still resolves via the title join — now
+	// whitespace-robust on both sides, so the raw-ledger-vs-trimmed-PR mismatch is gone.
+	c := LedgerResolutionChecker{Ledger: fakeLedger{eps: []outcome.Episode{
+		{Title: "  HarborRegistryDown  ", Resolved: true}, // raw ledger title carries stray spaces
+	}}}
+	pr := providers.CuratedIssue{Title: "KB: HarborRegistryDown"} // no body marker
+	if got, err := c.IsResolved(context.Background(), pr); err != nil || !got {
+		t.Fatalf("a markerless PR must resolve via the whitespace-robust title join; got %v err=%v", got, err)
+	}
+}
+
+func TestLedgerResolutionFingerprintMismatchNoTitleFallthrough(t *testing.T) {
+	// A PR WITH a marker that matches no episode fingerprint, but shares a title, must
+	// stay unresolved — no fall-through to the brittle title match (the R6 fragility).
+	c := LedgerResolutionChecker{Ledger: fakeLedger{eps: []outcome.Episode{
+		{Title: "HarborRegistryDown", DupFingerprint: "dup-other", Resolved: true},
+	}}}
+	pr := providers.CuratedIssue{
+		Title: "KB: HarborRegistryDown",
+		Body:  "Drafted by RunLore\n\n" + providers.FingerprintMarker("dup-want"),
+	}
+	if got, _ := c.IsResolved(context.Background(), pr); got {
+		t.Fatal("a fingerprint mismatch must not fall through to the brittle title match")
+	}
+}
+
 func TestQueuePromotesResolvedViaLedger(t *testing.T) {
 	f := &recordingForge{prs: []providers.CuratedIssue{
 		{Number: 48, Title: "KB: HarborRegistryDown", Labels: []string{"runlore", "solved"}},
