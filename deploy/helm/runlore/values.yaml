@@ -169,6 +169,18 @@ rbac:
   # radius is bounded. Mirror config.actions.allow.namespaces. Empty = no patch
   # rights at all (actions fail closed at the RBAC layer even if mode is enabled).
   actionNamespaces: []
+  # Namespaces where the agent may read RAW pod logs (pods/log) for the controller_logs
+  # tool. Granted as namespace-scoped Roles ONLY — never cluster-wide — because pod logs
+  # routinely contain secrets/tokens/PII and tool output is sent to an external LLM.
+  # The controller_logs tool only ever reads the Flux controllers (source/kustomize/
+  # helm/notification), which live in flux-system by convention, so the default is the
+  # single flux-system namespace. Override ONLY if you relocate the Flux controllers.
+  # Cluster-wide `pods` get/list (pod STATUS, not log bodies) stays in the ClusterRole
+  # because pod_status/kube_events triage arbitrary incident namespaces. Redacting
+  # secrets that still surface via status/event messages and these log bodies is a
+  # separate follow-up (see roadmap R19).
+  controllerLogNamespaces:
+    - flux-system
 
 # Default-deny NetworkPolicy: restrict ingress to the webhook/health port and egress
 # to DNS + HTTPS + the Kubernetes API. Tighten egress to your model/git/observability
