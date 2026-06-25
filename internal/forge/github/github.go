@@ -15,6 +15,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/Smana/runlore/internal/httpx"
 	"github.com/Smana/runlore/internal/providers"
 	"gopkg.in/yaml.v3"
 )
@@ -44,7 +45,7 @@ func New(baseURL, owner, repo, baseBranch string, token TokenFunc) *Client {
 	}
 	return &Client{
 		baseURL: strings.TrimRight(baseURL, "/"), owner: owner, repo: repo,
-		baseBranch: baseBranch, token: token, http: &http.Client{Timeout: 30 * time.Second},
+		baseBranch: baseBranch, token: token, http: httpx.SecureClient(30 * time.Second),
 	}
 }
 

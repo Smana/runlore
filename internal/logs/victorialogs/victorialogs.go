@@ -14,6 +14,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/Smana/runlore/internal/httpx"
 	"github.com/Smana/runlore/internal/providers"
 )
 
@@ -30,7 +31,7 @@ const defaultMaxLines = 1000
 
 // New builds a client for a VictoriaLogs base URL.
 func New(baseURL string) *Client {
-	return &Client{baseURL: strings.TrimRight(baseURL, "/"), limit: 100, maxLines: defaultMaxLines, http: &http.Client{Timeout: 30 * time.Second}}
+	return &Client{baseURL: strings.TrimRight(baseURL, "/"), limit: 100, maxLines: defaultMaxLines, http: httpx.SecureClient(30 * time.Second)}
 }
 
 var _ providers.LogsProvider = (*Client)(nil)

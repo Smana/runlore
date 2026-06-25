@@ -40,7 +40,7 @@ func New(baseURL, model, apiKey string) *Client {
 		baseURL: strings.TrimRight(baseURL, "/"),
 		model:   model,
 		apiKey:  apiKey,
-		http:    &http.Client{Timeout: 60 * time.Second},
+		http:    httpx.SecureClient(60 * time.Second),
 	}
 }
 

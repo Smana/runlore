@@ -13,6 +13,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/Smana/runlore/internal/httpx"
 	"github.com/Smana/runlore/internal/providers"
 )
 
@@ -24,7 +25,7 @@ type Client struct {
 
 // New builds a client for a Prometheus/VictoriaMetrics base URL.
 func New(baseURL string) *Client {
-	return &Client{baseURL: strings.TrimRight(baseURL, "/"), http: &http.Client{Timeout: 30 * time.Second}}
+	return &Client{baseURL: strings.TrimRight(baseURL, "/"), http: httpx.SecureClient(30 * time.Second)}
 }
 
 var _ providers.MetricsProvider = (*Client)(nil)
