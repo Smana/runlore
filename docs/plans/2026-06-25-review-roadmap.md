@@ -10,6 +10,25 @@
 >
 > **Priority key:** **P0** blocks credibility/safety · **P1** important · **P2** nice-to-have.
 
+> **Progress log — 2026-06-25 (implementation).** The review (Steps 1–5) is complete; this records
+> what has since shipped to `main`. **Merged:** M0 (AUTH-1 · C1 · C4 · C2) · M1 churn-hardening
+> (GO-P1A · GO-P2A/B/C · **GO-P1B graceful drain**) · M2 egress security (**F1** ingress **+ egress**
+> redaction · **F3** reject-gating · **CLONE-1** per-call clone cache · **P3**: crypto-rand IDs ·
+> Slack empty-2xx · anthropic/gemini ReadAll wraps · reserve-after-pause) · M3 **FEAT-1** (`auto`
+> frozen experimental) · M4
+> **part 1** (hybrid-retrieval foundation — embeddings + cosine + RRF). **Remaining:** M4 **part 2**
+> (recall integration — **eval-gated**: needs a live model+embeddings endpoint + replay-eval to tune
+> recall's gates) · **POS-4** (alignment spike — research) · **FEAT-2** (ArgoCD Inspector parity —
+> on-demand) · **PERSIST-1** (decision: doc-only). **Attempted & reverted:** **F2** action-target
+> validation — built a server-observed-resource set (alert seed + what_changed) that downgraded
+> actions on unobserved targets, but the e2e caught it downgrading a *legitimate* alert-driven
+> auto-suspend (no tool surfaced the target server-side); safe enforcement needs comprehensive
+> resource-observation capture across the gitops/cluster *status* tools (larger than scoped,
+> low-urgency while `auto` is frozen). **Deferred with reason:** dead-key removal (FEAT-3/4 — the
+> keys are reserved placeholders under a strict decoder, so removal is breaking) ·
+> `CheckRedirect`/`strict:true` (broad, low-value) · `docs/architecture/*.drawio` diagram + deep
+> README↔design↔learning-loop de-dup.
+
 ---
 
 ## Step 1 — Alternatives & positioning  ✅ **DONE**
@@ -227,7 +246,7 @@ For an HA tool, leader-flap / SIGTERM / interrupted-clone / crash are the events
 | Item | What | Size |
 |---|---|---|
 | **GO-P1A** (P1) ✅ | **Done** (`e3419c5`): deduper hoisted to process scope, survives leader flaps; cross-term test. | **M** |
-| **GO-P1B** (P1) 🔶 | **Deferred — needs focused design.** A safe graceful drain must keep the in-flight investigation's context alive past SIGTERM *and* hold the leader lease through the drain (else a draining leader split-brains with a new one in `auto` mode). Decouples work-lifetime from the SIGTERM signal + a queue drain handshake — a delicate change to the *verified-correct* HA path; own PR + churn/drain/timeout tests. | **M** |
+| **GO-P1B** (P1) ✅ | **Done** (PR #122): decoupled `workCtx` from the SIGTERM signal — on shutdown the leader drains the in-flight investigation to completion (lease held → no split-brain), then releases; lost leadership still aborts promptly. `Queue.Drain` (ShutDownWithDrain) + chart `terminationGracePeriodSeconds: 40`. Unit + e2e incl. failover. | **M** |
 | **GO-P2A** (P2) ✅ | **Done** (`99af960`): re-clone a corrupt mirror; drop a partial clone on failure. | **S** |
 | **GO-P2B** (P2) ✅ | **Done** (`99af960`): ledger fsyncs each append. | **XS** |
 | **GO-P2C** (P2) ✅ | **Done** (`99af960`): roll back `lastRev` on re-index failure → retried next tick. | **XS** |
@@ -237,7 +256,7 @@ For an HA tool, leader-flap / SIGTERM / interrupted-clone / crash are the events
 | Item | What | Size |
 |---|---|---|
 | **F1 / R19** (P1) | Content-redaction scrub: tool output → prompt, and evidence → KB PR + chat. Biggest security win; start early (long pole). | **L** |
-| **F2** (P2) | Validate action `Target.Name` against read-tool-surfaced resources (closes the injection residual). | **S–M** |
+| **F2** (P2) 🔶 | **Attempted, reverted.** Built a context-scoped observed-resource set (alert seed + server-detected what_changed workloads) that downgraded actions on unobserved targets to suggestions. The e2e caught a false positive — an alert-driven auto-suspend of the failing Kustomization was downgraded because *no tool surfaced it server-side in that investigation*. Validating against the model-supplied `inv.Resource` would be false security, so the set must be server-sourced — but a safely-enforceable set needs comprehensive resource capture across the gitops/cluster **status** tools (and a fixture that surfaces the target). Larger than scoped; low-urgency while `auto` is frozen. | **M** |
 | **F3** (P2) | Approver-gate the `runlore_reject` path. | **XS** |
 | **CLONE-1** (P2) | Shallow clone (`Depth:1`/`SingleBranch`) + per-investigation clone cache + cleanup. Also a perf/disk-DoS win. | **M** |
 | **P3 bundle** | crypto-rand approval IDs · `CheckRedirect`+`strict:true` egress · Slack empty-2xx · wrap ReadAll errors · reserve-after-pause. | **S** |
@@ -254,7 +273,7 @@ For an HA tool, leader-flap / SIGTERM / interrupted-clone / crash are the events
 ### M4 — The one real capability gain · *~M · improves the moat*
 | Item | What | Size |
 |---|---|---|
-| **Hybrid BM25 + embeddings recall** | `chromem-go` behind the `catalog.Searcher` interface; embeddings via the OpenAI-compatible endpoint. Fixes lexical brittleness — the one genuine retrieval gap — no Python, still single-binary. | **M** |
+| **Hybrid BM25 + embeddings recall** | **Part 1 done** (PR #120): in-house `internal/embed` — an OpenAI-compatible embeddings client + cosine + RRF fusion (no `chromem-go` dep, no Python, still single-binary). **Part 2 (eval-gated):** wire into the catalog index + recall, re-tuning the BM25-scaled gates for fused scores on the replay eval (needs a live model+embeddings endpoint). | **M** |
 
 ### Execution order
 **Now:** M0 (AUTH-1 → C1 → C4 → C2) + kick off **F1** (the long pole). → **Next:** M1 churn hardening. →
