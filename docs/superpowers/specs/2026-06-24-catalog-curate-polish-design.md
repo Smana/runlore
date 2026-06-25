@@ -46,14 +46,20 @@ inventing data.
 
 **Decision.** Add `entryType(inv)` deriving the type:
 - default `Incident`;
-- `Playbook` when the finding has **no concrete resource ref** but **does** carry
-  a top root cause with a suggested action (generalized, not pinned to one
-  object). `meetsBar` already guarantees a top cause + evidence + provenance, so
-  this only ever fires on quality findings.
+- `Playbook` only when the finding is **both change-agnostic and
+  resource-agnostic**: no concrete resource ref **and** no top-cause `ChangeRef`,
+  **yet** a reusable `SuggestedAction`. A specific `ChangeRef` or resource pins
+  the finding to one incident → stays `Incident`. (Refined during impl: the first
+  draft fired on resource-less-with-action alone, which mis-typed the existing
+  `HarborRegistryDown` test fixture — a specific incident carrying a `ChangeRef`
+  but no populated resource. Adding the no-`ChangeRef` clause stops the heuristic
+  over-firing on incidents that merely failed to capture a resource ref, and is
+  the more defensible signal for "generalized knowledge.")
 Fix the stale doc comment to `Incident | Playbook | Concept`. Do **not** emit
 `Postmortem` (not a valid type). Note: a Playbook drafted this way still renders
 the OKF sections; `kbvalidate` relaxes section checks for non-Incident, so this
-is strictly safe — a Playbook with extra structure validates fine.
+is strictly safe — a Playbook with extra structure validates fine. The hardcoded
+`incident` tag is also derived from the type (`runlore`, lowercased-type).
 
 ---
 

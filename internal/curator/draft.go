@@ -57,15 +57,44 @@ func draftKBEntry(inv providers.Investigation) providers.KBEntry {
 		}
 	}
 
+	typ := entryType(inv)
 	return providers.KBEntry{
-		Type:        "Incident",
+		Type:        typ,
 		Title:       inv.Title,
 		Description: firstLine(inv),
 		Resource:    inv.Resource.Ref(),
-		Tags:        []string{"runlore", "incident"},
+		Tags:        []string{"runlore", strings.ToLower(typ)}, // type-aligned tag (incident | playbook)
 		Body:        b.String(),
 		Fingerprint: DupFingerprint(inv),
 	}
+}
+
+// entryType derives the OKF type for a drafted entry. The default is Incident: a
+// point-in-time card carrying the OKF evidence sections (Symptom/Investigate/
+// Cause/Resolution) that draftKBEntry always renders and that kbvalidate requires
+// for Incident.
+//
+// A finding is a Playbook — generalized, reusable runbook knowledge — only when it
+// is BOTH change-agnostic and resource-agnostic: no concrete affected resource ref
+// AND no causing-change provenance on the top cause, yet a reusable suggested
+// action. A specific ChangeRef ("crossplane/xplane-harbor") or a concrete resource
+// pins the finding to one incident, so either keeps it an Incident — preventing
+// the heuristic from over-firing on incidents that merely failed to capture a
+// resource ref.
+//
+// We never emit Postmortem: it is not in the validator vocabulary {Incident,
+// Playbook, Concept}, so it would fail `lore validate-kb`. (The validator relaxes
+// the section requirements for Playbook, so the extra structure draftKBEntry
+// renders is harmless.)
+func entryType(inv providers.Investigation) string {
+	if len(inv.RootCauses) == 0 {
+		return "Incident"
+	}
+	top := inv.RootCauses[0]
+	if inv.Resource.Ref() == "" && top.ChangeRef == "" && top.SuggestedAction != "" {
+		return "Playbook"
+	}
+	return "Incident"
 }
 
 func firstLine(inv providers.Investigation) string {
