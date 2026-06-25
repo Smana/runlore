@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/metric/noop"
@@ -66,6 +67,46 @@ func TestInstantRecallBelowThreshold(t *testing.T) {
 	}
 	if model.i == 0 {
 		t.Fatal("model not called; a below-threshold score must run the loop")
+	}
+}
+
+func TestRecallRejectedByVerifyFallsThrough(t *testing.T) {
+	// A recall hits a strong entry, but the adversarial verify pass rejects every
+	// root cause (a stale/poisoned catalog entry — the exact case verify exists to
+	// catch). The loop must NOT publish the now-empty recall; it must fall through
+	// to a real investigation. Regression: it previously delivered an empty "recall"
+	// result and returned.
+	model := &scriptModel{responses: []providers.CompletionResponse{
+		// 1) verify the recalled finding → reject it entirely (empties root causes).
+		{ToolCalls: []providers.ToolCall{{ID: "v1", Name: submitVerdictsName, Args: `{"verdicts":[{"index":0,"verdict":"reject","reason":"correlation only"}]}`}}},
+		// 2) the fall-through loop investigates and submits a fresh finding.
+		{ToolCalls: []providers.ToolCall{{ID: "f1", Name: submitFindingsName, Args: `{"confidence":0.8,"root_causes":[{"summary":"freshly investigated","confidence":0.8}]}`}}},
+		// 3) the loop verifies its own fresh finding → keep it.
+		{ToolCalls: []providers.ToolCall{{ID: "v2", Name: submitVerdictsName, Args: `{"verdicts":[{"index":0,"verdict":"keep","confidence":0.8}]}`}}},
+	}}
+	var got *providers.Investigation
+	li := &LoopInvestigator{
+		Model:  model,
+		Verify: true,
+		Log:    slog.New(slog.NewTextHandler(io.Discard, nil)),
+		Recall: &Recall{MinScore: 2.0, Catalog: fakeScored{hits: []catalog.ScoredEntry{
+			{Entry: catalog.Entry{Title: "Stale entry", Description: "no longer applies", Path: "stale.md", Resource: "tooling/harbor"}, Score: 5.0}}}},
+		OnComplete: func(inv providers.Investigation) { got = &inv },
+	}
+	if err := li.Investigate(context.Background(), Request{Title: "HarborProbeFailure", Fingerprint: "fp-x", Workload: providers.Workload{Namespace: "tooling", Name: "harbor"}}); err != nil {
+		t.Fatalf("Investigate: %v", err)
+	}
+	if got == nil {
+		t.Fatal("nothing delivered")
+	}
+	if got.Recalled {
+		t.Fatalf("a verify-rejected recall must fall through to a real investigation, not deliver an empty recall: %+v", got)
+	}
+	if len(got.RootCauses) != 1 || got.RootCauses[0].Summary != "freshly investigated" {
+		t.Fatalf("expected the fall-through loop's fresh finding, got %+v", got)
+	}
+	if model.i < 2 {
+		t.Fatalf("expected the loop to run after the recall was rejected (>=2 model calls), got %d", model.i)
 	}
 }
 
@@ -166,6 +207,68 @@ func (m *scriptModel) Complete(context.Context, providers.CompletionRequest) (pr
 	r := m.responses[m.i]
 	m.i++
 	return r, nil
+}
+
+// blockingModel blocks every Complete on ctx, returning ctx.Err() when the
+// per-investigation deadline fires — a hung model / slow tool stand-in.
+type blockingModel struct{ calls int }
+
+func (m *blockingModel) Complete(ctx context.Context, _ providers.CompletionRequest) (providers.CompletionResponse, error) {
+	m.calls++
+	<-ctx.Done()
+	return providers.CompletionResponse{}, ctx.Err()
+}
+
+func TestInvestigateDeadline(t *testing.T) {
+	model := &blockingModel{}
+	var got *providers.Investigation
+	var delivered int
+	li := &LoopInvestigator{
+		Model:      model,
+		Log:        slog.New(slog.NewTextHandler(io.Discard, nil)),
+		MaxSteps:   20, // the deadline, not MaxSteps, must end this
+		Timeout:    20 * time.Millisecond,
+		OnComplete: func(inv providers.Investigation) { got = &inv; delivered++ },
+	}
+	done := make(chan error, 1)
+	go func() { done <- li.Investigate(context.Background(), Request{Title: "HungClone"}) }()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("a timed-out investigation must deliver a result, not return an error: %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("Investigate did not return — the per-investigation deadline is not enforced")
+	}
+	if delivered != 1 || got == nil {
+		t.Fatalf("expected exactly one timeout delivery, got %d (%+v)", delivered, got)
+	}
+	if len(got.Unresolved) == 0 || !strings.Contains(strings.ToLower(got.Unresolved[0]), "deadline") {
+		t.Fatalf("timeout result must note the deadline in Unresolved, got %+v", got.Unresolved)
+	}
+	if model.calls > 1 {
+		t.Fatalf("deadline should bound the investigation to a single blocked model call, got %d", model.calls)
+	}
+}
+
+func TestInvestigateNoDeadlineWhenZero(t *testing.T) {
+	// Timeout==0 ⇒ no WithTimeout ⇒ a normal scripted run is unaffected.
+	model := &scriptModel{responses: []providers.CompletionResponse{
+		{ToolCalls: []providers.ToolCall{{ID: "1", Name: submitFindingsName, Args: `{"confidence":0.7,"root_causes":[{"summary":"ok"}]}`}}},
+	}}
+	var got *providers.Investigation
+	li := &LoopInvestigator{
+		Model:      model,
+		Timeout:    0, // disabled
+		Log:        slog.New(slog.NewTextHandler(io.Discard, nil)),
+		OnComplete: func(inv providers.Investigation) { got = &inv },
+	}
+	if err := li.Investigate(context.Background(), Request{Title: "x"}); err != nil {
+		t.Fatalf("Investigate: %v", err)
+	}
+	if got == nil || len(got.RootCauses) != 1 || got.RootCauses[0].Summary != "ok" {
+		t.Fatalf("Timeout==0 must not alter a normal run: %+v", got)
+	}
 }
 
 func TestLoopInvestigator(t *testing.T) {

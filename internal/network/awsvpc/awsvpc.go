@@ -16,6 +16,7 @@ package awsvpc
 import (
 	"context"
 	"fmt"
+	"math"
 	"strings"
 	"time"
 
@@ -80,7 +81,12 @@ var _ providers.NetworkProvider = (*Client)(nil)
 // until maxEvents events are collected or pagination is exhausted, parsing each
 // space-delimited flow-log v2 message into a normalized LogLine.
 func (c *Client) Drops(ctx context.Context, _ providers.Selector, w providers.TimeWindow) (providers.LogResult, error) {
-	limit := int32(c.maxEvents)
+	// Clamp into int32 range before the cast so the conversion is provably safe
+	// (maxEvents is a small positive cap, but gosec G115 can't prove it).
+	limit := int32(math.MaxInt32)
+	if c.maxEvents >= 0 && c.maxEvents < math.MaxInt32 {
+		limit = int32(c.maxEvents)
+	}
 	in := &cloudwatchlogs.FilterLogEventsInput{
 		LogGroupName:  &c.logGroup,
 		FilterPattern: ptr(rejectFilterPattern),

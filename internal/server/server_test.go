@@ -199,6 +199,20 @@ func TestHandleAlertmanagerBadBody(t *testing.T) {
 	}
 }
 
+func TestHandleAlertmanagerOversizedBody(t *testing.T) {
+	// A body past the 1 MiB cap must be rejected with 413 before it is fully
+	// decoded — the alert payload flows into the LLM prompt, so an unbounded POST
+	// must not force unbounded allocation.
+	big := strings.Repeat("a", (1<<20)+1)
+	body := `{"alerts":[{"status":"firing","labels":{"alertname":"` + big + `"}}]}`
+	req := httptest.NewRequest(http.MethodPost, "/webhook/alertmanager", strings.NewReader(body))
+	rr := httptest.NewRecorder()
+	testServer().Handler().ServeHTTP(rr, req)
+	if rr.Code != http.StatusRequestEntityTooLarge {
+		t.Fatalf("oversized body = %d, want 413", rr.Code)
+	}
+}
+
 func TestHealthz(t *testing.T) {
 	req := httptest.NewRequest(http.MethodGet, "/healthz", nil)
 	rr := httptest.NewRecorder()

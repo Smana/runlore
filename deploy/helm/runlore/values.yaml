@@ -90,7 +90,12 @@ config:
   #     solo_floor: 4.0                # confident bar when there is only one hit
   #     require_workload_match: false  # true = exact namespace+workload; false = namespace-level agreement is enough
   # outcome:
-  #   ledger_path: /var/lib/runlore/catalog/outcomes.jsonl  # learning-loop outcome ledger; for durability set persistence.enabled and point this at the persistent mount (catalog.mountPath)
+  #   ledger_path: /var/lib/runlore/catalog/outcomes.jsonl  # learning-loop outcome ledger.
+  #     Keep it UNDER catalog.mountPath and set persistence.enabled=true: the serve
+  #     Deployment writes it and the curate CronJob reads it, so both must mount the
+  #     SAME persistent volume. With persistence disabled they get separate ephemeral
+  #     volumes and `lore curate`'s Queue + Recurrence passes read an empty ledger
+  #     (the command warns loudly at startup when the ledger it sees is absent/empty).
   # notify:
   #   slack: { webhook_url_env: SLACK_WEBHOOK_URL }
   #   matrix: { homeserver: https://matrix.org, room_id: "!r:hs", access_token_env: MATRIX_TOKEN }
@@ -169,13 +174,57 @@ rbac:
   # radius is bounded. Mirror config.actions.allow.namespaces. Empty = no patch
   # rights at all (actions fail closed at the RBAC layer even if mode is enabled).
   actionNamespaces: []
+  # Namespaces where the agent may read RAW pod logs (pods/log) for the controller_logs
+  # tool. Granted as namespace-scoped Roles ONLY — never cluster-wide — because pod logs
+  # routinely contain secrets/tokens/PII and tool output is sent to an external LLM.
+  # The controller_logs tool only ever reads the Flux controllers (source/kustomize/
+  # helm/notification), which live in flux-system by convention, so the default is the
+  # single flux-system namespace. Override ONLY if you relocate the Flux controllers.
+  # Cluster-wide `pods` get/list (pod STATUS, not log bodies) stays in the ClusterRole
+  # because pod_status/kube_events triage arbitrary incident namespaces. Redacting
+  # secrets that still surface via status/event messages and these log bodies is a
+  # separate follow-up (see roadmap R19).
+  controllerLogNamespaces:
+    - flux-system
 
 # Default-deny NetworkPolicy: restrict ingress to the webhook/health port and egress
 # to DNS + HTTPS + the Kubernetes API. Tighten egress to your model/git/observability
 # CIDRs in production. Disable if you manage network policy out of band.
 networkPolicy:
   enabled: true
-  extraEgress: []   # appended verbatim, e.g. a specific model endpoint CIDR
+  # Strict egress. false (default): the agent may egress to ANY destination on 443/6443
+  # (the Kubernetes API plus your model / git-forge / observability endpoints) — it works
+  # out of the box. true: DENY egress by default and allow ONLY the destinations declared
+  # under `egress` below — you MUST then list your model/forge/observability endpoints, or
+  # the agent cannot reach them. DNS is scoped to the cluster DNS service in BOTH modes.
+  strict: false
+  egress:
+    # DNS egress is scoped to the cluster DNS service by default — a safe, free hardening
+    # applied in both modes. If your DNS pods use different labels, override the selectors;
+    # set toClusterDNS: false to allow port 53 to any destination.
+    dns:
+      toClusterDNS: true
+      namespaceSelector:
+        matchLabels:
+          kubernetes.io/metadata.name: kube-system
+      podSelector:
+        matchLabels:
+          k8s-app: kube-dns
+    # The lists below are consulted ONLY under strict: true — declare where the agent may
+    # reach out so the empty-by-default deny still lets real traffic through.
+    allowedCIDRs: []        # off-cluster endpoints on 443 (model API, git forge, observability), e.g. ["203.0.113.10/32"]
+    namespaceSelectors: []  # in-cluster backends on 443, e.g. [{ matchLabels: { kubernetes.io/metadata.name: monitoring } }]
+    apiServerCIDRs: []      # the Kubernetes API server endpoint(s) on 6443, e.g. ["10.0.0.1/32"]
+  extraEgress: []   # appended verbatim in BOTH modes — the escape hatch for anything custom
+  # Scope ingress to the webhook port. Empty (default) leaves it permissive
+  # (no `from:` ⇒ all sources) so installs don't break; set it to lock the
+  # webhook down to Alertmanager. NetworkPolicyPeer list, spliced into `from:`.
+  # Example — only the monitoring namespace may POST alerts:
+  #   ingressFrom:
+  #     - namespaceSelector:
+  #         matchLabels:
+  #           kubernetes.io/metadata.name: monitoring
+  ingressFrom: []
   # Render a CiliumNetworkPolicy allowing egress to the EKS Pod Identity credential
   # endpoint (host entity, 169.254.170.23:80). Required for the AWS cloud provider
   # on Cilium clusters — a plain NetworkPolicy can't match the host-network target.

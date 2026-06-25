@@ -147,12 +147,14 @@ func revisionRange(ctx context.Context, reader Reader, k kustomization) (fromRev
 
 // Diff resolves a Change's diff via the Differ. Changes from a non-Git source
 // (OCIRepository/Bucket/ExternalArtifact) carry no Git URL — there is no Git diff
-// to show, so return an empty diff rather than failing.
-func (p *Provider) Diff(_ context.Context, c providers.Change) (providers.Diff, error) {
+// to show, so return an empty diff rather than failing. ctx is threaded into the
+// Differ so a hung clone/patch on a large monorepo is cancellable (per-investigation
+// deadline).
+func (p *Provider) Diff(ctx context.Context, c providers.Change) (providers.Diff, error) {
 	if c.Source.RepoURL == "" {
 		return providers.Diff{}, nil
 	}
-	return p.differ.ForChange(c)
+	return p.differ.ForChange(ctx, c)
 }
 
 // WatchFailures watches Flux Kustomizations and emits a FailureEvent whenever one

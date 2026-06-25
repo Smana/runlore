@@ -366,6 +366,13 @@ KB git repo  ──syncer──►  local mirror  ──build──►  index:  
 - **Scoped identity.** In-cluster, the agent runs under a least-privilege, read-mostly identity
   (a scoped ServiceAccount; or EKS Pod Identity / Workload Identity on managed clusters). Execution
   rights (`patch`) are granted as **namespace-scoped** Roles over an allowlist, never cluster-wide.
+- **Raw pod logs are namespace-scoped, not cluster-wide.** `controller_logs` reads raw pod log bodies
+  (which can carry secrets/PII) only from the Flux controllers, so `pods/log` is granted as a
+  **namespaced** Role over `rbac.controllerLogNamespaces` (default `flux-system`) — never cluster-wide.
+  Cluster-wide `pods`/`events` *get/list* (pod status + event messages, not log bodies) stays in the
+  ClusterRole because `pod_status`/`kube_events` triage arbitrary incident namespaces. Redacting
+  secrets that still surface via those status/event messages — and via the flux-system log bodies —
+  is the complementary, redaction-side mitigation (roadmap R19).
 - **Append-only, tamper-evident audit log** (`internal/audit`): every action attempt — inputs, gate
   results, op, target, actor, outcome — is a hash-chained JSON line, so edits/deletions are detectable.
 - **Honest uncertainty.** `unresolved` is a first-class output field; the agent says what it doesn't

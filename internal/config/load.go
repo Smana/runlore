@@ -12,7 +12,7 @@ import (
 // are rejected (KnownFields) so a typo in a safety-critical field — e.g. an
 // autonomy gate — fails loudly instead of being silently ignored.
 func Load(path string) (*Config, error) {
-	f, err := os.Open(path)
+	f, err := os.Open(path) //nolint:gosec // G304: path is the operator-supplied config file
 	if err != nil {
 		return nil, fmt.Errorf("open config: %w", err)
 	}
@@ -62,6 +62,12 @@ func applyDefaults(c *Config) {
 	// is given (a zero window would silently allow unlimited investigations).
 	if c.Investigation.RateLimit.MaxPerWindow > 0 && c.Investigation.RateLimit.Window == 0 {
 		c.Investigation.RateLimit.Window = Duration(time.Hour)
+	}
+	// Per-investigation deadline: bound a whole investigation (recall + every model/
+	// tool call, incl. a hung git clone) so one stuck investigation can't starve the
+	// single-worker queue. Default 10m when unset.
+	if c.Investigation.Timeout == 0 {
+		c.Investigation.Timeout = Duration(10 * time.Minute)
 	}
 	// Instant-recall trust defaults: when enabled without explicit tuning, keep the
 	// margin and solo gates active. A zero margin_gap/solo_floor would degrade recall

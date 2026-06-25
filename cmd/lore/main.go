@@ -15,7 +15,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
-	_ "net/http/pprof" // registers /debug/pprof on DefaultServeMux (loopback-only, opt-in)
+	_ "net/http/pprof" //nolint:gosec // G108: pprof is opt-in (RUNLORE_PPROF) and bound to 127.0.0.1 only, never the Service
 	"os"
 	"os/exec"
 	"os/signal"
@@ -152,7 +152,10 @@ func runServe(args []string) error {
 	if os.Getenv("RUNLORE_PPROF") == "true" {
 		go func() {
 			log.Info("pprof listening", "addr", "127.0.0.1:6060")
-			if err := http.ListenAndServe("127.0.0.1:6060", nil); err != nil {
+			// ReadHeaderTimeout guards against a slow-header (Slowloris) hold even
+			// on this loopback-only debug listener.
+			pprofSrv := &http.Server{Addr: "127.0.0.1:6060", ReadHeaderTimeout: 10 * time.Second}
+			if err := pprofSrv.ListenAndServe(); err != nil {
 				log.Warn("pprof server stopped", "err", err)
 			}
 		}()
@@ -205,6 +208,9 @@ func runServe(args []string) error {
 	auto := buildAuto(cfg, execForActions, aud, log)
 	slackSigningSecret := os.Getenv(cfg.Notify.Slack.SigningSecretEnv)
 	webhookToken := os.Getenv(cfg.Server.WebhookTokenEnv)
+	if err := requireWebhookAuth(cfg, webhookToken); err != nil {
+		return err
+	}
 
 	// Set up the single shared OTel metrics instance before building the investigator
 	// so recall + the investigation loop can record to it from the first request.
@@ -323,7 +329,7 @@ func runServe(args []string) error {
 		srv.SetCoalescer(cz)
 		go cz.Run(ctx, cfg.Investigation.Coalesce.Debounce.Std()/2)
 	}
-	httpSrv := &http.Server{Addr: *addr, Handler: srv.Handler()}
+	httpSrv := newHTTPServer(*addr, srv.Handler())
 	go func() {
 		<-ctx.Done()
 		_ = httpSrv.Shutdown(context.Background())
@@ -333,6 +339,24 @@ func runServe(args []string) error {
 		return err
 	}
 	return nil
+}
+
+// newHTTPServer builds the serving http.Server with every inbound bound set. Go's
+// zero defaults leave each of these unlimited, exposing the long-lived server to
+// Slowloris (slow header/body), unbounded idle keep-alives, and oversized headers.
+// Payloads (Alertmanager/Slack) are small and synchronous, so 30s read/write is
+// generous while still cutting off slow attackers; the body itself is capped per
+// handler (1 MiB).
+func newHTTPServer(addr string, h http.Handler) *http.Server {
+	return &http.Server{
+		Addr:              addr,
+		Handler:           h,
+		ReadHeaderTimeout: 5 * time.Second,
+		ReadTimeout:       30 * time.Second,
+		WriteTimeout:      30 * time.Second,
+		IdleTimeout:       60 * time.Second,
+		MaxHeaderBytes:    1 << 20,
+	}
 }
 
 // runLeaderElection blocks running Lease-based leader election; the leader runs
@@ -414,6 +438,22 @@ func modelConfigured(cfg *config.Config) bool {
 	default:
 		return cfg.Model.BaseURL != ""
 	}
+}
+
+// requireWebhookAuth fails closed on the serve path when the LLM investigator is
+// wired but the alert webhook is anonymous. The webhook's labels/annotations flow
+// verbatim into the LLM prompt (and bill the model), so an unauthenticated caller
+// must not reach it once a model is configured — regardless of actions.mode. This
+// lives on the serve path, NOT in config.Validate: Validate is shared by every
+// subcommand (e.g. `lore investigate` legitimately needs a model and has no
+// webhook), so the requirement is scoped to where the webhook is actually served.
+// It mirrors the approval-token fail-closed guard above.
+func requireWebhookAuth(cfg *config.Config, webhookToken string) error {
+	if modelConfigured(cfg) && webhookToken == "" {
+		return fmt.Errorf("model configured but server.webhook_token_env (%q) is empty: refusing to start with an unauthenticated alert webhook (fail closed)",
+			cfg.Server.WebhookTokenEnv)
+	}
+	return nil
 }
 
 // buildModel builds the ModelProvider for the configured provider.
@@ -578,11 +618,11 @@ func runEval(args []string) error {
 		}
 		if b, err := camp.JSON(); err != nil {
 			fmt.Fprintf(os.Stderr, "eval: report not written: %v\n", err)
-		} else if mkErr := os.MkdirAll(*reportDir, 0o755); mkErr != nil {
+		} else if mkErr := os.MkdirAll(*reportDir, 0o750); mkErr != nil {
 			fmt.Fprintf(os.Stderr, "eval: report not written: %v\n", mkErr)
 		} else {
 			path := filepath.Join(*reportDir, strings.ReplaceAll(st, ":", "-")+"-replay.json")
-			if wErr := os.WriteFile(path, b, 0o644); wErr != nil {
+			if wErr := os.WriteFile(path, b, 0o600); wErr != nil {
 				fmt.Fprintf(os.Stderr, "eval: report not written: %v\n", wErr)
 			} else {
 				fmt.Printf("report: %s\n", path)
@@ -597,7 +637,10 @@ func runEval(args []string) error {
 type shellStepRunner struct{}
 
 func (shellStepRunner) Run(ctx context.Context, step string) error {
-	cmd := exec.CommandContext(ctx, "sh", "-c", step)
+	// step is an operator-authored eval scenario command (kubectl/flux/test), not
+	// untrusted input — executing it as a shell command is the runner's purpose.
+	cmd := exec.CommandContext(ctx, "sh", "-c", step) //nolint:gosec // G204: step is operator-authored scenario YAML
+
 	cmd.Stdout, cmd.Stderr = os.Stderr, os.Stderr // step output is progress, not findings
 	return cmd.Run()
 }
@@ -656,16 +699,17 @@ func runEvalLive(cfg *config.Config, scnDir, recordDir, reportDir, prevReport, s
 		stamp = time.Now().UTC().Format(time.RFC3339)
 	}
 	rep := eval.NewLiveReport(stamp, n, results)
-	if err := os.MkdirAll(reportDir, 0o755); err != nil {
+	if err := os.MkdirAll(reportDir, 0o750); err != nil {
 		return err
 	}
 	base := filepath.Join(reportDir, strings.ReplaceAll(stamp, ":", "-"))
-	if err := os.WriteFile(base+".json", rep.JSON(), 0o644); err != nil {
+	if err := os.WriteFile(base+".json", rep.JSON(), 0o600); err != nil {
 		return err
 	}
 	md := rep.Markdown()
 	if prevReport != "" {
-		if data, rerr := os.ReadFile(prevReport); rerr == nil {
+		// prevReport is an operator-supplied --prev report path, not untrusted input.
+		if data, rerr := os.ReadFile(prevReport); rerr == nil { //nolint:gosec // G304: operator-supplied baseline report path
 			var prev eval.LiveReport
 			if json.Unmarshal(data, &prev) == nil {
 				if reg := rep.RegressionsVS(prev); len(reg) > 0 {
@@ -674,7 +718,7 @@ func runEvalLive(cfg *config.Config, scnDir, recordDir, reportDir, prevReport, s
 			}
 		}
 	}
-	if err := os.WriteFile(base+".md", []byte(md), 0o644); err != nil {
+	if err := os.WriteFile(base+".md", []byte(md), 0o600); err != nil {
 		return err
 	}
 	fmt.Print(md)
@@ -857,13 +901,43 @@ func runCurate(args []string) error {
 			curate.Queue{Forge: forge, Checker: curate.LedgerResolutionChecker{Ledger: ledger}, Log: log},
 			curate.Recurrence{Forge: forge, Ledger: ledger, Threshold: cfg.Curate.RecurrenceThreshold, Log: log},
 		)
-		log.Info("curate: Queue + Recurrence enabled", "ledger", cfg.Outcome.LedgerPath)
+		// Warn loudly when the ledger this pod sees is absent/empty: outcome.New
+		// succeeds on a missing file, so the passes would otherwise run silently
+		// against zero episodes (a misconfigured mount, not "no work").
+		logLedgerStartup(log, ledger.Status())
 	} else {
-		log.Info("curate: outcome ledger not configured; Queue + Recurrence passes skipped")
+		logLedgerStartup(log, outcome.Status{}) // disabled: a plain info, no warning
 	}
 	log.Info("curate: grooming KB backlog", "repo", cfg.Forge.KBRepo)
 	agent.Run(context.Background())
 	return nil
+}
+
+// logLedgerStartup reports, at the right level, what the outcome ledger looks
+// like to this `lore curate` process — turning the previously-silent no-op into
+// a visible warning. The Queue + Recurrence passes read the ledger, but
+// outcome.New succeeds even when the file is absent, so a misconfigured mount
+// (the ledger lives on a volume the CronJob doesn't see — e.g. persistence not
+// enabled, the path not under catalog.mountPath, or a fresh per-Job emptyDir)
+// would silently produce zero work. We still run the passes; we just make the
+// likely misconfiguration loud.
+func logLedgerStartup(log *slog.Logger, s outcome.Status) {
+	switch {
+	case !s.Configured:
+		log.Info("curate: outcome ledger not configured; Queue + Recurrence passes skipped")
+	case !s.Present:
+		log.Warn("curate: outcome ledger configured but its file is absent here — "+
+			"Queue + Recurrence will find nothing to do (check the ledger is on a volume "+
+			"this CronJob mounts: enable persistence and point outcome.ledger_path under catalog.mountPath)",
+			"ledger", s.Path)
+	case s.Events == 0:
+		log.Warn("curate: outcome ledger is present but empty — Queue + Recurrence have no episodes "+
+			"to act on (if the serve pod is recording outcomes, verify both pods share the same "+
+			"persistent volume rather than separate emptyDirs)",
+			"ledger", s.Path)
+	default:
+		log.Info("curate: Queue + Recurrence enabled", "ledger", s.Path, "events", s.Events)
+	}
 }
 
 // buildReinvestigator returns a poller that re-runs KB issues labelled
@@ -894,6 +968,7 @@ func buildReinvestigator(ctx context.Context, cfg *config.Config, gp providers.G
 			MaxSteps:                  cfg.Investigation.MaxSteps,
 			MaxToolOutputBytes:        cfg.Investigation.MaxToolOutputBytes,
 			MaxTokensPerInvestigation: cfg.Investigation.MaxTokensPerInvestigation,
+			Timeout:                   cfg.Investigation.Timeout.Std(),
 			OnComplete:                func(inv providers.Investigation) { res, got = inv, true },
 		}
 		if err := li.Investigate(ctx, req); err != nil {
@@ -1121,6 +1196,7 @@ func runInvestigate(args []string) error {
 	li := &investigate.LoopInvestigator{
 		Model: model, Tools: tools, Recall: recall, Actions: action.New(cfg.Actions), Log: log, Verify: true,
 		ModelProvider: cfg.Model.Provider,
+		Timeout:       cfg.Investigation.Timeout.Std(),
 		OnComplete:    func(inv providers.Investigation) { result = &inv },
 	}
 	title := *alert
@@ -1194,6 +1270,7 @@ func buildInvestigator(ctx context.Context, cfg *config.Config, gp providers.Git
 		MaxSteps:                  cfg.Investigation.MaxSteps,
 		MaxToolOutputBytes:        cfg.Investigation.MaxToolOutputBytes,
 		MaxTokensPerInvestigation: cfg.Investigation.MaxTokensPerInvestigation,
+		Timeout:                   cfg.Investigation.Timeout.Std(),
 		OnComplete: func(found providers.Investigation) {
 			// Record the outcome "open" first: this investigation happened for an
 			// incident, with the answer we used (recall vs fresh). A matching
@@ -1207,16 +1284,22 @@ func buildInvestigator(ctx context.Context, cfg *config.Config, gp providers.Git
 			if len(fps) > 0 {
 				kind := outcomeKind(found.Recalled)
 				now := time.Now()
+				// The deterministic dedup fingerprint (resource+cause) is the curated PR's
+				// stable resolution-join key: it is the same value draftKBEntry stamps into
+				// the PR body, so a later resolve matches the PR regardless of the LLM's
+				// re-worded title. Computed once for the whole batch.
+				dupFP := curator.DupFingerprint(found)
 				// One open per constituent fingerprint (coalesced batches fan out), so
 				// every alert's resolve webhook can later match this investigation.
 				for _, fp := range fps {
 					if err := ledger.Open(outcome.Event{
-						Fingerprint: fp,
-						Kind:        kind,
-						Entry:       found.RecalledEntry,
-						Title:       found.Title,
-						Resource:    found.Resource.Ref(),
-						At:          now,
+						Fingerprint:    fp,
+						DupFingerprint: dupFP,
+						Kind:           kind,
+						Entry:          found.RecalledEntry,
+						Title:          found.Title,
+						Resource:       found.Resource.Ref(),
+						At:             now,
 					}); err != nil {
 						log.Warn("outcome ledger open failed", "fingerprint", fp, "err", err)
 					}

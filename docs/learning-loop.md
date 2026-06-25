@@ -351,8 +351,9 @@ eval harness and treats its outputs as the source of truth:
   failure mode strong models exhibit.
 - **Statistical gating.** Reported runs use N≥10 with a **k-of-n** pass rule and a
   variance/flaky guard, so a verdict is a measurement, not a coin flip.
-- **The closed loop is exercised in eval.** A poisoned-entry scenario proves the
-  *short-circuit actually fires* and that a crafted wrong recall is caught — not just
+- **The closed loop is exercised in eval.** A poisoned-entry scenario proves a crafted
+  wrong recall is *caught* by the verify pass — the poisoned answer is withdrawn and the
+  agent **falls through to a real investigation** rather than publishing it — not just
   that the agent organically searched the KB.
 - **CI.** A nightly (+ manual) workflow runs the replay eval with a fail-under gate
   and uploads the report; it's intentionally *not* a per-PR blocker (it drives a live

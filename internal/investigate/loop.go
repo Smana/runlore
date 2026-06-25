@@ -2,6 +2,7 @@ package investigate
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"time"
@@ -88,6 +89,11 @@ type LoopInvestigator struct {
 	Recall     *Recall                       // optional: short-circuit on a high-confidence catalog hit
 	Verify     bool                          // run an adversarial review of root causes before delivery
 
+	// Timeout bounds a single investigation end-to-end (recall + every model/tool
+	// call, including a hung git clone/patch). 0 disables it. On expiry the loop
+	// delivers a synthetic timeout result rather than starving the queue worker.
+	Timeout time.Duration
+
 	// Cost controls (0 means disabled/unlimited):
 	MaxToolOutputBytes        int // truncate tool results larger than this before adding to history
 	MaxTokensPerInvestigation int // inject a budget-nudge message when the estimated token count exceeds this
@@ -107,6 +113,14 @@ func (li *LoopInvestigator) system() string {
 
 // Investigate runs the loop for a request. It implements Investigator.
 func (li *LoopInvestigator) Investigate(ctx context.Context, req Request) error {
+	// Per-investigation deadline: bound the whole body (recall + every model/tool
+	// call, incl. a hung git clone/patch) so one stuck investigation can't starve the
+	// single-worker queue. 0 ⇒ disabled (behaviour unchanged).
+	if li.Timeout > 0 {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, li.Timeout)
+		defer cancel()
+	}
 	// Record wall-clock duration + a completion-result label at whichever exit we take.
 	start := time.Now()
 	result := "unresolved"
@@ -145,16 +159,26 @@ func (li *LoopInvestigator) Investigate(ctx context.Context, req Request) error 
 				case li.Verify && rec.Confidence < initialConfidence:
 					recallResult = "downgraded"
 				}
-				saved := int64(li.MaxTokensPerInvestigation)
-				if saved == 0 {
-					saved = defaultRecallTokensSavedEstimate // conservative proxy when budget is unconfigured
-				}
 				m.RecallHits.Add(ctx, 1, metric.WithAttributes(attribute.String("result", recallResult)))
-				m.RecallTokensSaved.Add(ctx, saved)
+				if len(rec.RootCauses) > 0 {
+					// Tokens are only "saved" when the recall actually short-circuits the loop.
+					saved := int64(li.MaxTokensPerInvestigation)
+					if saved == 0 {
+						saved = defaultRecallTokensSavedEstimate // conservative proxy when budget is unconfigured
+					}
+					m.RecallTokensSaved.Add(ctx, saved)
+				}
 			}
-			result = "recall"
-			li.deliver(req, rec)
-			return nil
+			if len(rec.RootCauses) > 0 {
+				result = "recall"
+				li.deliver(req, rec)
+				return nil
+			}
+			// The adversarial verify pass rejected every recalled root cause (a stale or
+			// poisoned catalog entry). Don't deliver an empty finding — fall through to a
+			// full investigation, the intended fail-safe ("verify guards recall").
+			li.Log.Info("instant recall rejected by verify; running full investigation",
+				"title", req.Title, "entry", entry.Path)
 		}
 	}
 	byName := map[string]Tool{}
@@ -214,6 +238,19 @@ func (li *LoopInvestigator) Investigate(ctx context.Context, req Request) error 
 				metric.WithAttributes(attribute.String("provider", li.ModelProvider)))
 		}
 		if err != nil {
+			// The per-investigation deadline fired (or the parent ctx was cancelled):
+			// deliver a synthetic timeout result rather than bubbling a bare error the
+			// queue would just retry into the same hang.
+			if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+				li.Log.Warn("investigation hit per-investigation deadline",
+					"title", req.Title, "timeout", li.Timeout)
+				if li.Metrics != nil {
+					li.Metrics.InvestigationsDropped.Add(ctx, 1)
+				}
+				result = "timeout"
+				li.deliver(req, timeoutResult(req))
+				return nil
+			}
 			result = "error"
 			return fmt.Errorf("model: %w", err)
 		}
