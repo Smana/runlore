@@ -260,8 +260,22 @@ type TriggerPolicy struct {
 // would otherwise produce confident-but-wrong root causes. A zero Debounce
 // fires immediately on every Ready=False (the original behavior).
 type GitOpsFailureTrigger struct {
-	Enabled  bool     `yaml:"enabled"`
-	Debounce Duration `yaml:"debounce"` // persistence window before investigating; 0 = fire immediately
+	Enabled bool `yaml:"enabled"`
+	// Debounce is a pointer so an unset key (nil ⇒ 60s default, applied in
+	// applyDefaults) is distinguishable from an explicit `debounce: 0` (fire
+	// immediately). A plain Duration can't tell the two apart — both are the zero
+	// value — which is why `debounce: 0` used to be silently clobbered to 60s.
+	Debounce *Duration `yaml:"debounce"`
+}
+
+// DebounceWindow is the GitOps-failure debounce window. nil (unset) reads as 0
+// here, but applyDefaults fills an unset+enabled trigger with 60s; an explicit 0
+// means fire immediately on every Ready=False.
+func (g GitOpsFailureTrigger) DebounceWindow() time.Duration {
+	if g.Debounce == nil {
+		return 0
+	}
+	return g.Debounce.Std()
 }
 
 // IncidentTrigger gates incident/alert-driven investigations.
