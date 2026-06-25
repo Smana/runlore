@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"net/http"
 	"strings"
@@ -95,7 +96,14 @@ func (s *SlackBot) Deliver(ctx context.Context, inv providers.Investigation) err
 		OK    bool   `json:"ok"`
 		Error string `json:"error"`
 	}
-	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+	respBody, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return fmt.Errorf("slack read response: %w", err)
+	}
+	if len(bytes.TrimSpace(respBody)) == 0 {
+		return nil // a 2xx with an empty body is a successful post, not a failure
+	}
+	if err := json.Unmarshal(respBody, &result); err != nil {
 		return fmt.Errorf("slack decode response: %w", err)
 	}
 	if !result.OK {

@@ -390,11 +390,38 @@ func (li *LoopInvestigator) reviewActions(proposed []providers.Action) []provide
 }
 
 func (li *LoopInvestigator) deliver(req Request, inv providers.Investigation) {
+	// Egress redaction (defense in depth): scrub secrets from the finding's
+	// human-facing text before it reaches chat or a (possibly public) KB PR. Ingress
+	// redaction already covers model-authored text; this is the single egress
+	// chokepoint that also catches any NON-model text — e.g. the confirm step's
+	// appended pod-status, or the raw incident title.
+	redactInvestigation(&inv)
 	li.Log.Info("investigation complete",
 		"title", req.Title, "confidence", inv.Confidence,
 		"root_causes", len(inv.RootCauses), "unresolved", len(inv.Unresolved), "suggested_actions", len(inv.Actions))
 	if li.OnComplete != nil {
 		li.OnComplete(inv)
+	}
+}
+
+// redactInvestigation masks secret-shaped values in a finished investigation's
+// human-facing text (title; each root cause's summary, evidence, and suggested
+// action; unresolved notes; proposed-action descriptions) before it is delivered.
+func redactInvestigation(inv *providers.Investigation) {
+	inv.Title = redact.Secrets(inv.Title)
+	for i := range inv.RootCauses {
+		rc := &inv.RootCauses[i]
+		rc.Summary = redact.Secrets(rc.Summary)
+		rc.SuggestedAction = redact.Secrets(rc.SuggestedAction)
+		for j := range rc.Evidence {
+			rc.Evidence[j] = redact.Secrets(rc.Evidence[j])
+		}
+	}
+	for i := range inv.Unresolved {
+		inv.Unresolved[i] = redact.Secrets(inv.Unresolved[i])
+	}
+	for i := range inv.Actions {
+		inv.Actions[i].Description = redact.Secrets(inv.Actions[i].Description)
 	}
 }
 
