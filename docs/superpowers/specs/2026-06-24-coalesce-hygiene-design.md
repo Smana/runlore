@@ -2,7 +2,7 @@
 
 Date: 2026-06-24
 Branch: worktree-agent-a7aae1794a8d69bdf
-Status: implementing
+Status: done — all four nits implemented (nit 2 in the narrowed form), gate green incl. -race
 
 A cluster of trigger-pipeline correctness nits in `internal/coalesce` and
 `internal/trigger`. Each was challenged against the current code; the verdict
