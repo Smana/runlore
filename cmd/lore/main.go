@@ -1382,7 +1382,7 @@ func startGitOpsFailureWatch(ctx context.Context, cfg *config.Config, q investig
 	}
 	deb := buildFailureDebouncer(cfg, gp, metrics, log)
 	log.Info("watching gitops failures", "engine", gitopsEngine(cfg),
-		"debounce", cfg.Triggers.GitOpsFailures.Debounce.Std())
+		"debounce", cfg.Triggers.GitOpsFailures.DebounceWindow())
 	go investigate.DrainFailures(ctx, events, q, trigger.NewDeduper(cfg.Triggers.Incidents.Dedup.Window.Std()), deb, log)
 }
 
@@ -1407,7 +1407,7 @@ func buildFailureDebouncer(cfg *config.Config, gp providers.GitOpsProvider, metr
 			return true, nil
 		}
 	}
-	return investigate.NewDebouncer(cfg.Triggers.GitOpsFailures.Debounce.Std(), check, log).WithMetrics(metrics)
+	return investigate.NewDebouncer(cfg.Triggers.GitOpsFailures.DebounceWindow(), check, log).WithMetrics(metrics)
 }
 
 // gitopsEngine returns the configured GitOps engine, defaulting to flux.
