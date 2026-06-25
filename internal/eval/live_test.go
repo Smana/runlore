@@ -277,3 +277,52 @@ func TestRunOnceRecallPoisonedRejected(t *testing.T) {
 		}
 	}
 }
+
+// poisonedScenario is the harness-level analogue of eval/scenarios/poisoned-recall-rejected.yaml:
+// an invasive scenario (setup/teardown) whose ground-truth cause is the real fault,
+// distinct from the planted poisoned catalog entry. ExpectedSources is empty so the
+// assertions are coverage/judge-independent — this test proves the wiring carries the
+// fall-through through RunScenario (setup → N runs → aggregate → teardown), not loop.go.
+func poisonedScenario() Scenario {
+	return Scenario{
+		ID: "poisoned-recall-rejected", Invasive: true,
+		Setup: []string{"induce real fault"}, Teardown: []string{"revert fault"},
+		Trigger: Trigger{Mode: "cli", Symptom: "harbor registry down", Namespace: "tooling"},
+	}
+}
+
+func TestRunScenarioPoisonedRecallReinvestigates(t *testing.T) {
+	// The full live-harness path (RunScenario) over an invasive scenario with a poisoned
+	// recall: the verify pass rejects the planted entry, the loop falls through to a real
+	// investigation, and the poisoned cause is never delivered in ANY of the N runs.
+	steps := &recordingSteps{}
+	lr := recallRunner(rejectThenInvestigateModel{})
+	lr.Steps = steps
+	lr.N = 3
+
+	res := lr.RunScenario(context.Background(), poisonedScenario())
+
+	if res.Skipped {
+		t.Fatalf("invasive scenario must not skip: %s", res.SkipReason)
+	}
+	if len(res.Runs) != 3 {
+		t.Fatalf("want N=3 runs, got %d", len(res.Runs))
+	}
+	for i, r := range res.Runs {
+		if r.Investigation.Recalled {
+			t.Fatalf("run %d: a verify-rejected recall must fall through, not deliver a recall", i)
+		}
+		if len(r.Investigation.RootCauses) != 1 || r.Investigation.RootCauses[0].Summary != "freshly investigated cause" {
+			t.Fatalf("run %d: expected the fall-through fresh finding, got %+v", i, r.Investigation.RootCauses)
+		}
+		for _, rc := range r.Investigation.RootCauses {
+			if strings.Contains(rc.Summary, "IAM quota") {
+				t.Fatalf("run %d: the poisoned recalled cause must never be delivered", i)
+			}
+		}
+	}
+	// Setup ran first, teardown ran last (always, even on a clean run).
+	if len(steps.ran) == 0 || steps.ran[0] != "induce real fault" || steps.ran[len(steps.ran)-1] != "revert fault" {
+		t.Fatalf("setup/teardown order wrong: %v", steps.ran)
+	}
+}
