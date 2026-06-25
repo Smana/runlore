@@ -414,6 +414,21 @@ type ToolSpec struct {
 type CompletionResponse struct {
 	Text      string
 	ToolCalls []ToolCall
+	// Usage is the provider-reported token count for this completion. Zero when
+	// the provider omits it (older endpoints, or a provider that does not report
+	// it) — callers treat the zero value as "unknown", not "zero tokens".
+	Usage Usage
+	// Truncated is true when the provider stopped because it hit the output-token
+	// ceiling (Anthropic stop_reason "max_tokens", OpenAI finish_reason "length",
+	// Gemini finishReason "MAX_TOKENS"). It distinguishes a cut-off answer from a
+	// complete one, so the loop need not treat a truncated reply as final.
+	Truncated bool
+}
+
+// Usage is the provider-reported token accounting for one completion.
+type Usage struct {
+	InputTokens  int // prompt/input tokens billed for the request
+	OutputTokens int // generated/output tokens in the reply
 }
 
 // ToolCall is a model request to invoke a tool.
