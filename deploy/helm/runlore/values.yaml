@@ -42,19 +42,27 @@ config:
   leader_election:
     enabled: true
     name: runlore-leader
-  # Storm cost-control: fold correlated alerts into one investigation and cap the
-  # per-window investigation budget. Defaults (30s debounce, 2m max-wait, 50 batch,
-  # 10m cooldown, 1h window) are applied by the agent when fields are omitted.
+  # Cost controls — these ship with SAFE, BOUNDED defaults (not unlimited) so a
+  # default install can't run away in LLM spend. Tune for your environment, or set
+  # a field to 0 for unlimited (where noted). Coalesce/rate-limit sub-fields left
+  # unset default in the agent to 30s debounce, 2m max-wait, 50 batch, 10m cooldown,
+  # 1h window.
   investigation:
+    # Per-investigation context ceiling (estimated request tokens): when crossed, the
+    # agent is nudged to wrap up, then hard-stops and delivers what it has rather than
+    # growing context unbounded. 0 = unlimited.
+    max_tokens_per_investigation: 100000
+    # Cap each tool result fed back to the model (truncates large logs/diffs). 0 = unlimited.
+    max_tool_output_bytes: 32768
     coalesce:
-      enabled: false
+      enabled: true             # fold a correlated alert storm into ONE investigation
       # debounce: 30s           # flush batch quiet for this long
       # max_wait: 2m            # force flush even if still receiving alerts
       # max_batch: 50           # flush when batch reaches this size
       # cooldown: 10m           # suppress re-alerts for a group after a flush
       # correlation_labels: []  # group by label values instead of AM groupKey
     rate_limit:
-      max_per_window: 0        # 0 = unlimited; set e.g. 20 to cap investigations/hour
+      max_per_window: 20        # cap investigations per window (window defaults to 1h); 0 = unlimited
       # window: 1h
       # max_requeues: 3
   # Structured logging. In-cluster defaults to JSON so logs are ingestible by
