@@ -11,9 +11,17 @@ linters:
     - bodyclose # HTTP response bodies are closed
     - errorlint # correct error wrapping/comparison (%w, errors.Is/As)
     - gocritic # opinionated correctness/style checks
+    - gosec # security analyzer (hardcoded creds, file perms, subprocess, timeouts)
     - misspell # spelling in comments/strings
     - revive # fast, configurable golint replacement
     - unconvert # remove redundant type conversions
+  exclusions:
+    rules:
+      # gosec on test files is noise: fixtures intentionally use lax perms (0644/0755)
+      # and read temp paths. Security analysis stays on production code.
+      - path: _test\.go
+        linters:
+          - gosec
 
 formatters:
   enable:

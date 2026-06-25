@@ -1,7 +1,9 @@
 {{- if .Values.networkPolicy.enabled -}}
-# Default-deny ingress/egress for the agent: only the webhook/health port is reachable,
-# and egress is limited to DNS, HTTPS (model/git/observability) and the Kubernetes API.
-# Tighten egress to specific CIDRs via networkPolicy.extraEgress in production.
+# Network posture for the agent. Ingress: only the webhook/health port is reachable. Egress:
+# DNS is scoped to the cluster DNS service, and HTTPS + the Kubernetes API are allowed to any
+# destination by default. Set networkPolicy.strict=true to deny egress by default and allow only
+# the destinations declared in networkPolicy.egress (model/forge/observability CIDRs, in-cluster
+# namespaceSelectors, and the API server); networkPolicy.extraEgress is appended in either mode.
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
@@ -17,19 +19,66 @@ spec:
     - ports:
         - protocol: TCP
           port: {{ .Values.service.port }}
+      {{- with .Values.networkPolicy.ingressFrom }}
+      # Scope who may reach the webhook port (e.g. the Alertmanager namespace).
+      # Empty (default) ⇒ no `from:` ⇒ all sources allowed (permissive, no break).
+      from:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
   egress:
-    # DNS resolution.
+    # DNS — scoped to the cluster DNS service by default (override/disable via networkPolicy.egress.dns).
+    {{- if .Values.networkPolicy.egress.dns.toClusterDNS }}
+    - to:
+        - namespaceSelector:
+            {{- toYaml .Values.networkPolicy.egress.dns.namespaceSelector | nindent 12 }}
+          podSelector:
+            {{- toYaml .Values.networkPolicy.egress.dns.podSelector | nindent 12 }}
+      ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
+    {{- else }}
     - ports:
         - protocol: UDP
           port: 53
         - protocol: TCP
           port: 53
-    # Kubernetes API + model/git/observability over HTTPS (tighten to your CIDRs).
+    {{- end }}
+    {{- if .Values.networkPolicy.strict }}
+    # strict: deny egress by default — allow only the declared destinations.
+    {{- range .Values.networkPolicy.egress.allowedCIDRs }}
+    - to:
+        - ipBlock:
+            cidr: {{ . | quote }}
+      ports:
+        - protocol: TCP
+          port: 443
+    {{- end }}
+    {{- range .Values.networkPolicy.egress.namespaceSelectors }}
+    - to:
+        - namespaceSelector:
+            {{- toYaml . | nindent 12 }}
+      ports:
+        - protocol: TCP
+          port: 443
+    {{- end }}
+    {{- range .Values.networkPolicy.egress.apiServerCIDRs }}
+    - to:
+        - ipBlock:
+            cidr: {{ . | quote }}
+      ports:
+        - protocol: TCP
+          port: 6443
+    {{- end }}
+    {{- else }}
+    # permissive default: HTTPS (model/git/observability) + the Kubernetes API to any destination.
     - ports:
         - protocol: TCP
           port: 443
         - protocol: TCP
           port: 6443
+    {{- end }}
     {{- with .Values.networkPolicy.extraEgress }}
     {{- toYaml . | nindent 4 }}
     {{- end }}

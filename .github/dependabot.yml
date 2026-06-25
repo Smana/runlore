@@ -1,0 +1,28 @@
+# Dependabot keeps RunLore's dependencies — and the SHA-pinned GitHub Actions —
+# current. Weekly cadence, grouped minor/patch PRs to keep volume low.
+version: 2
+updates:
+  # Go module graph.
+  - package-ecosystem: gomod
+    directory: "/"
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+    groups:
+      go-minor-patch:
+        update-types:
+          - minor
+          - patch
+
+  # GitHub Actions referenced in .github/workflows/* (pinned by commit SHA).
+  # Dependabot bumps both the digest and the trailing "# vX.Y.Z" comment.
+  - package-ecosystem: github-actions
+    directory: "/"
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+    groups:
+      actions-minor-patch:
+        update-types:
+          - minor
+          - patch

@@ -17,8 +17,8 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
         with:
           go-version: "1.26"
       - run: go build -o lore ./cmd/lore
@@ -28,7 +28,7 @@ jobs:
         run: ./lore eval -config eval/ci.runlore.yaml -cases examples/eval -n 5 -fail-under 0.7 -report-dir eval/reports
       - name: upload report
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: eval-report
           path: eval/reports/

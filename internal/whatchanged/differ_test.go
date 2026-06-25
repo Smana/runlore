@@ -1,6 +1,8 @@
 package whatchanged
 
 import (
+	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -65,7 +67,7 @@ func buildRepo(t *testing.T) (dir string, v1, v2 plumbing.Hash) {
 
 func TestLocalScoped(t *testing.T) {
 	dir, v1, v2 := buildRepo(t)
-	d, err := (&Differ{}).Local(dir, v1.String(), v2.String(), "apps/harbor")
+	d, err := (&Differ{}).Local(context.Background(), dir, v1.String(), v2.String(), "apps/harbor")
 	if err != nil {
 		t.Fatalf("Local: %v", err)
 	}
@@ -84,7 +86,7 @@ func TestLocalScoped(t *testing.T) {
 
 func TestLocalUnscoped(t *testing.T) {
 	dir, v1, v2 := buildRepo(t)
-	d, err := (&Differ{}).Local(dir, v1.String(), v2.String(), "")
+	d, err := (&Differ{}).Local(context.Background(), dir, v1.String(), v2.String(), "")
 	if err != nil {
 		t.Fatalf("Local: %v", err)
 	}
@@ -104,7 +106,7 @@ func paths(fs []providersFileDiff) []string {
 func TestRemoteFromLocalSource(t *testing.T) {
 	// Use the temp repo as the clone source (local transport, no auth/network).
 	dir, v1, v2 := buildRepo(t)
-	d, err := (&Differ{}).Remote(dir, v1.String(), v2.String(), "apps/harbor")
+	d, err := (&Differ{}).Remote(context.Background(), dir, v1.String(), v2.String(), "apps/harbor")
 	if err != nil {
 		t.Fatalf("Remote: %v", err)
 	}
@@ -123,7 +125,7 @@ func TestForChange(t *testing.T) {
 		ToRev:    v2.String(),
 		Source:   providers.SourceRef{RepoURL: dir, Path: "apps/harbor"},
 	}
-	d, err := (&Differ{}).ForChange(c)
+	d, err := (&Differ{}).ForChange(context.Background(), c)
 	if err != nil {
 		t.Fatalf("ForChange: %v", err)
 	}
@@ -136,7 +138,7 @@ func TestRemoteFromParent(t *testing.T) {
 	dir, _, v2 := buildRepo(t)
 	// v2 is the second commit; its parent is v1. Diffing the change introduced by
 	// v2, scoped to apps/harbor, must yield exactly that file's delta.
-	d, err := (&Differ{}).RemoteFromParent(dir, v2.String(), "apps/harbor")
+	d, err := (&Differ{}).RemoteFromParent(context.Background(), dir, v2.String(), "apps/harbor")
 	if err != nil {
 		t.Fatalf("RemoteFromParent: %v", err)
 	}
@@ -157,11 +159,51 @@ func TestForChangeEmptyFromRev(t *testing.T) {
 		ToRev:    v2.String(), // FromRev intentionally empty
 		Source:   providers.SourceRef{RepoURL: dir, Path: "apps/harbor"},
 	}
-	d, err := (&Differ{}).ForChange(c)
+	d, err := (&Differ{}).ForChange(context.Background(), c)
 	if err != nil {
 		t.Fatalf("ForChange (empty FromRev): %v", err)
 	}
 	if len(d.Files) != 1 || d.Files[0].Path != "apps/harbor/values.yaml" {
 		t.Fatalf("unexpected diff: %v", paths(d.Files))
+	}
+}
+
+// TestRemoteCancelledCtx: a ctx cancelled before the clone must abort with a
+// wrapped context error (errors.Is) — proving the clone is cancellable.
+func TestRemoteCancelledCtx(t *testing.T) {
+	dir, v1, v2 := buildRepo(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel() // cancel before the clone even starts
+	d, err := (&Differ{}).Remote(ctx, dir, v1.String(), v2.String(), "apps/harbor")
+	if err == nil {
+		t.Fatalf("expected a cancellation error, got diff with %d files", len(d.Files))
+	}
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("error must wrap context.Canceled (errors.Is), got: %v", err)
+	}
+	if len(d.Files) != 0 {
+		t.Fatalf("cancelled clone must yield no diff, got %d files", len(d.Files))
+	}
+}
+
+// TestForChangeCancelledCtx exercises the empty-FromRev (RemoteFromParent) path
+// under a cancelled ctx.
+func TestForChangeCancelledCtx(t *testing.T) {
+	dir, _, v2 := buildRepo(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	c := providers.Change{
+		Workload: providers.Workload{Kind: "Kustomization", Name: "apps", Namespace: "flux-system"},
+		Engine:   providers.EngineFlux,
+		Type:     providers.ChangeSync,
+		ToRev:    v2.String(), // FromRev empty → RemoteFromParent
+		Source:   providers.SourceRef{RepoURL: dir, Path: "apps/harbor"},
+	}
+	_, err := (&Differ{}).ForChange(ctx, c)
+	if err == nil {
+		t.Fatal("expected a cancellation error from ForChange")
+	}
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("error must wrap context.Canceled (errors.Is), got: %v", err)
 	}
 }

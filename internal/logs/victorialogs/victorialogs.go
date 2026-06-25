@@ -19,21 +19,63 @@ import (
 
 // Client queries a VictoriaLogs backend.
 type Client struct {
-	baseURL string
-	limit   int
-	http    *http.Client
+	baseURL  string
+	limit    int // per-request page size
+	maxLines int // total cap across pages
+	http     *http.Client
 }
+
+// defaultMaxLines bounds the total number of lines Query returns across pages.
+const defaultMaxLines = 1000
 
 // New builds a client for a VictoriaLogs base URL.
 func New(baseURL string) *Client {
-	return &Client{baseURL: strings.TrimRight(baseURL, "/"), limit: 100, http: &http.Client{Timeout: 30 * time.Second}}
+	return &Client{baseURL: strings.TrimRight(baseURL, "/"), limit: 100, maxLines: defaultMaxLines, http: &http.Client{Timeout: 30 * time.Second}}
 }
 
 var _ providers.LogsProvider = (*Client)(nil)
 
 // Query runs a LogsQL query over the window and returns normalized log lines.
+//
+// It pages with limit+offset up to maxLines so a high-volume window is not
+// silently capped at a single page; when the cap binds (the page that reaches it
+// was full, implying more matched), a sentinel line signals the partial view.
+//
+// Offset pagination orders by the largest _time values; concurrent ingestion into
+// the queried range could shift the page boundary, but incidents query a settled
+// past window, so this is acceptable for v1.
 func (c *Client) Query(ctx context.Context, query string, w providers.TimeWindow) (providers.LogResult, error) {
-	form := url.Values{"query": {query}, "limit": {fmt.Sprintf("%d", c.limit)}}
+	var out providers.LogResult
+	truncated := false
+	for offset := 0; ; offset += c.limit {
+		page, err := c.queryPage(ctx, query, w, c.limit, offset)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, page...)
+		if len(out) >= c.maxLines {
+			out = out[:c.maxLines]
+			// A full last page implies more lines likely exist past the cap.
+			truncated = len(page) == c.limit
+			break
+		}
+		if len(page) < c.limit { // short page → the stream is exhausted
+			break
+		}
+	}
+	if truncated {
+		out = append(out, truncationLine(c.maxLines))
+	}
+	return out, nil
+}
+
+// queryPage runs one limit+offset page of a LogsQL query over the window.
+func (c *Client) queryPage(ctx context.Context, query string, w providers.TimeWindow, limit, offset int) (providers.LogResult, error) {
+	form := url.Values{
+		"query":  {query},
+		"limit":  {fmt.Sprintf("%d", limit)},
+		"offset": {fmt.Sprintf("%d", offset)},
+	}
 	if !w.Start.IsZero() {
 		form.Set("start", w.Start.UTC().Format(time.RFC3339))
 	}
@@ -55,6 +97,15 @@ func (c *Client) Query(ctx context.Context, query string, w providers.TimeWindow
 		return nil, fmt.Errorf("logs status %d: %s", resp.StatusCode, string(body))
 	}
 	return parseNDJSON(resp.Body)
+}
+
+// truncationLine is the sentinel appended when Query stops at its cap with more
+// lines upstream, so the model knows the view is partial. It carries no Time or
+// Fields, so it cannot be mistaken for a real log line.
+func truncationLine(limit int) providers.LogLine {
+	return providers.LogLine{
+		Message: fmt.Sprintf("… results truncated at %d (more matched — narrow the query or shorten the window)", limit),
+	}
 }
 
 // parseNDJSON turns VictoriaLogs' newline-delimited JSON into log lines. Each

@@ -1,10 +1,66 @@
 package outcome
 
 import (
+	"os"
 	"path/filepath"
 	"testing"
 	"time"
 )
+
+func TestStatusDisabled(t *testing.T) {
+	l, _ := New("")
+	s := l.Status()
+	if s.Configured {
+		t.Fatalf("empty path must be Configured=false: %+v", s)
+	}
+	if s.Present || s.Events != 0 {
+		t.Fatalf("disabled ledger: want Present=false Events=0, got %+v", s)
+	}
+}
+
+func TestStatusConfiguredButAbsent(t *testing.T) {
+	l, _ := New(filepath.Join(t.TempDir(), "missing.jsonl"))
+	s := l.Status()
+	if !s.Configured {
+		t.Fatalf("a non-empty path must be Configured=true: %+v", s)
+	}
+	if s.Present {
+		t.Fatalf("an absent file must be Present=false (this is the silent no-op the warning catches): %+v", s)
+	}
+	if s.Events != 0 {
+		t.Fatalf("absent file: want Events=0, got %d", s.Events)
+	}
+}
+
+func TestStatusPresentWithEvents(t *testing.T) {
+	p := filepath.Join(t.TempDir(), "o.jsonl")
+	l, _ := New(p)
+	t0 := time.Unix(1000, 0)
+	_ = l.Open(Event{Fingerprint: "fp", Kind: "recall", Entry: "x.md", At: t0})
+	_, _, _ = l.Resolve("fp", t0.Add(time.Minute))
+	s := l.Status()
+	if !s.Configured || !s.Present {
+		t.Fatalf("a written ledger must be Configured && Present: %+v", s)
+	}
+	if s.Events != 2 {
+		t.Fatalf("want Events=2 (1 open + 1 resolve), got %d", s.Events)
+	}
+}
+
+func TestStatusPresentButEmptyFile(t *testing.T) {
+	p := filepath.Join(t.TempDir(), "o.jsonl")
+	if err := os.WriteFile(p, nil, 0o644); err != nil {
+		t.Fatalf("seed empty file: %v", err)
+	}
+	l, _ := New(p)
+	s := l.Status()
+	if !s.Configured || !s.Present {
+		t.Fatalf("an existing (empty) file is Present: %+v", s)
+	}
+	if s.Events != 0 {
+		t.Fatalf("empty file: want Events=0, got %d", s.Events)
+	}
+}
 
 func TestLedgerOpenResolveRoundTrip(t *testing.T) {
 	p := filepath.Join(t.TempDir(), "outcomes.jsonl")
@@ -300,5 +356,33 @@ func TestOpenCountsMultipleEntries(t *testing.T) {
 	}
 	if counts["b.md"].Recalls != 1 || counts["b.md"].Resolved != 0 {
 		t.Fatalf("b.md should be recalls=1 resolved=0: %+v", counts["b.md"])
+	}
+}
+
+func TestEpisodeCarriesDupFingerprint(t *testing.T) {
+	p := filepath.Join(t.TempDir(), "outcomes.jsonl")
+	l, err := New(p)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	t0 := time.Unix(2000, 0)
+	if err := l.Open(Event{Fingerprint: "fp1", DupFingerprint: "dup-abc", Title: "T", At: t0}); err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	// live Resolve carries it through
+	ep, ok, err := l.Resolve("fp1", t0.Add(time.Minute))
+	if err != nil || !ok {
+		t.Fatalf("Resolve: ok=%v err=%v", ok, err)
+	}
+	if ep.DupFingerprint != "dup-abc" {
+		t.Fatalf("Resolve episode dup = %q, want dup-abc", ep.DupFingerprint)
+	}
+	// replayed Episodes() carries it too
+	eps, err := l.Episodes()
+	if err != nil {
+		t.Fatalf("Episodes: %v", err)
+	}
+	if len(eps) != 1 || eps[0].DupFingerprint != "dup-abc" {
+		t.Fatalf("Episodes dup = %+v, want one with dup-abc", eps)
 	}
 }

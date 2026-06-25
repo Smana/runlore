@@ -34,7 +34,7 @@ func RecordedCase(scn Scenario, calls []Call) Case {
 
 // WriteCase writes a Case as <dir>/<name>.yaml.
 func WriteCase(dir string, c Case) error {
-	if err := os.MkdirAll(dir, 0o755); err != nil {
+	if err := os.MkdirAll(dir, 0o750); err != nil {
 		return err
 	}
 	data, err := yaml.Marshal(c)
@@ -42,7 +42,7 @@ func WriteCase(dir string, c Case) error {
 		return err
 	}
 	path := filepath.Join(dir, c.Name+".yaml")
-	if err := os.WriteFile(path, data, 0o644); err != nil {
+	if err := os.WriteFile(path, data, 0o600); err != nil {
 		return fmt.Errorf("write case %s: %w", path, err)
 	}
 	return nil

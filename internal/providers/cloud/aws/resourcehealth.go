@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	"github.com/aws/aws-sdk-go-v2/service/autoscaling"
+	asgtypes "github.com/aws/aws-sdk-go-v2/service/autoscaling/types"
 	"github.com/aws/aws-sdk-go-v2/service/ec2"
 	ec2types "github.com/aws/aws-sdk-go-v2/service/ec2/types"
 	"github.com/aws/aws-sdk-go-v2/service/eks"
@@ -26,12 +27,15 @@ func (c *Client) ResourceHealth(ctx context.Context, sel providers.Selector, _ p
 		lines = append(lines, providers.LogLine{Message: fmt.Sprintf(format, a...)})
 	}
 
-	// EKS nodegroups for the cluster.
+	// EKS nodegroups for the cluster. Paginate (a ListNodegroups page is ≤100) and
+	// cap at c.maxEvents so a large cluster's later pages are not silently dropped;
+	// a binding cap surfaces a truncation line so the model knows the view is partial.
 	if c.clusterName != "" {
-		if ng, err := c.eks.ListNodegroups(ctx, &eks.ListNodegroupsInput{ClusterName: ptr(c.clusterName)}); err != nil {
+		names, more, err := c.listNodegroups(ctx)
+		if err != nil {
 			add("eks: list nodegroups failed: %v", err)
 		} else {
-			for _, name := range ng.Nodegroups {
+			for _, name := range names {
 				d, err := c.eks.DescribeNodegroup(ctx, &eks.DescribeNodegroupInput{ClusterName: ptr(c.clusterName), NodegroupName: ptr(name)})
 				if err != nil || d.Nodegroup == nil {
 					add("eks nodegroup %s: describe failed", name)
@@ -39,14 +43,22 @@ func (c *Client) ResourceHealth(ctx context.Context, sel providers.Selector, _ p
 				}
 				add("EKS nodegroup %s: status=%s%s", name, string(d.Nodegroup.Status), nodegroupHealth(d))
 			}
+			if more {
+				add("… EKS nodegroups truncated at %d (more exist)", c.maxEvents)
+			}
 		}
 	}
 
-	// ASG scaling activities (capacity/launch failures show up here).
-	if asgs, err := c.asg.DescribeAutoScalingGroups(ctx, &autoscaling.DescribeAutoScalingGroupsInput{}); err != nil {
+	// ASG scaling activities (capacity/launch failures show up here). Paginate and
+	// cap the number of ASGs *examined* at c.maxEvents; a binding cap surfaces a
+	// truncation line (the cap counts ASGs scanned, not just those matching the
+	// cluster filter — the honest statement is "stopped scanning at N").
+	asgs, more, err := c.describeASGs(ctx)
+	if err != nil {
 		add("asg: describe failed: %v", err)
 	} else {
-		for _, g := range asgs.AutoScalingGroups {
+		for i := range asgs {
+			g := asgs[i]
 			name := deref(g.AutoScalingGroupName)
 			if c.clusterName != "" && !asgInCluster(g.AutoScalingGroupName, c.clusterName) {
 				// Best-effort cluster scoping by name substring; keep it if it matches.
@@ -58,6 +70,9 @@ func (c *Client) ResourceHealth(ctx context.Context, sel providers.Selector, _ p
 					add("  activity: %s %s — %s", string(a.StatusCode), deref(a.Description), deref(a.StatusMessage))
 				}
 			}
+		}
+		if more {
+			add("… ASGs truncated at %d (more exist)", c.maxEvents)
 		}
 	}
 
@@ -73,6 +88,47 @@ func (c *Client) ResourceHealth(ctx context.Context, sel providers.Selector, _ p
 		}
 	}
 	return lines, nil
+}
+
+// listNodegroups returns up to c.maxEvents nodegroup names for the cluster,
+// paging via the SDK paginator. more is true when the cap was reached with
+// further pages still available (the truncation signal).
+func (c *Client) listNodegroups(ctx context.Context) (names []string, more bool, err error) {
+	p := eks.NewListNodegroupsPaginator(c.eks, &eks.ListNodegroupsInput{ClusterName: ptr(c.clusterName)})
+	for p.HasMorePages() {
+		out, err := p.NextPage(ctx)
+		if err != nil {
+			return nil, false, fmt.Errorf("list nodegroups: %w", err)
+		}
+		names = append(names, out.Nodegroups...)
+		if len(names) >= c.maxEvents {
+			names = names[:c.maxEvents]
+			more = p.HasMorePages()
+			break
+		}
+	}
+	return names, more, nil
+}
+
+// describeASGs returns up to c.maxEvents Auto Scaling Groups, paging via the SDK
+// paginator. more is true when the cap was reached with further pages available.
+// The cap counts ASGs examined (before the cluster filter), matching the
+// truncation line's "stopped scanning at N" meaning.
+func (c *Client) describeASGs(ctx context.Context) (groups []asgtypes.AutoScalingGroup, more bool, err error) {
+	p := autoscaling.NewDescribeAutoScalingGroupsPaginator(c.asg, &autoscaling.DescribeAutoScalingGroupsInput{})
+	for p.HasMorePages() {
+		out, err := p.NextPage(ctx)
+		if err != nil {
+			return nil, false, fmt.Errorf("describe auto scaling groups: %w", err)
+		}
+		groups = append(groups, out.AutoScalingGroups...)
+		if len(groups) >= c.maxEvents {
+			groups = groups[:c.maxEvents]
+			more = p.HasMorePages()
+			break
+		}
+	}
+	return groups, more, nil
 }
 
 func nodegroupHealth(d *eks.DescribeNodegroupOutput) string {

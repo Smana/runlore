@@ -137,6 +137,7 @@ type Investigation struct {
 	MaxSteps                  int       `yaml:"max_steps"`                    // 0 ⇒ loop default (20)
 	MaxToolOutputBytes        int       `yaml:"max_tool_output_bytes"`        // 0 ⇒ unlimited
 	MaxTokensPerInvestigation int       `yaml:"max_tokens_per_investigation"` // 0 ⇒ unlimited
+	Timeout                   Duration  `yaml:"timeout"`                      // per-investigation deadline; 0 ⇒ default (10m) via applyDefaults
 }
 
 // Coalesce folds correlated incidents into one investigation.

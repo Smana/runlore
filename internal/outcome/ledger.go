@@ -17,19 +17,22 @@ import (
 
 // Event is one ledger line: an investigation opened, or an incident resolved.
 type Event struct {
-	Event       string    `json:"event"`           // "open" | "resolve"
-	Fingerprint string    `json:"fingerprint"`     // Alertmanager fingerprint (stable firing↔resolved)
-	Kind        string    `json:"kind,omitempty"`  // open: "recall" | "fresh"
-	Entry       string    `json:"entry,omitempty"` // open+recall: the recalled entry path
-	Title       string    `json:"title,omitempty"`
-	Resource    string    `json:"resource,omitempty"`
-	At          time.Time `json:"at"`
+	Event          string `json:"event"`                     // "open" | "resolve"
+	Fingerprint    string `json:"fingerprint"`               // Alertmanager fingerprint (stable firing↔resolved)
+	DupFingerprint string `json:"dup_fingerprint,omitempty"` // curator dedup fingerprint (resource+cause); the curated-PR resolution join key
+
+	Kind     string    `json:"kind,omitempty"`  // open: "recall" | "fresh"
+	Entry    string    `json:"entry,omitempty"` // open+recall: the recalled entry path
+	Title    string    `json:"title,omitempty"`
+	Resource string    `json:"resource,omitempty"`
+	At       time.Time `json:"at"`
 }
 
 // Episode is a matched open→resolve pair (or, from Episodes(), an unresolved open
 // when Resolved is false).
 type Episode struct {
 	Kind, Entry, Title, Resource string
+	DupFingerprint               string // curator dedup fingerprint; stable join key for the curated-PR resolution check
 	OpenedAt, ResolvedAt         time.Time
 	Duration                     time.Duration
 	Resolved                     bool
@@ -90,8 +93,38 @@ func (l *Ledger) readEvents() ([]Event, error) {
 
 func (l *Ledger) enabled() bool { return l != nil && l.path != "" }
 
+// Status is a cheap snapshot of the ledger's on-disk reality, used to tell apart
+// "feature off" (Configured=false) from "configured but the file the curate pod
+// can see is absent/empty" (Configured=true, Present=false or Events==0) — the
+// silent-no-op the `lore curate` startup warning surfaces. It re-reads the file
+// (no cached open-index) so it reflects what a fresh process actually sees.
+type Status struct {
+	Path       string // the configured ledger path ("" when disabled)
+	Configured bool   // a non-empty ledger_path was set
+	Present    bool   // the file exists (true even when empty)
+	Events     int    // number of replayable events (0 for absent/empty)
+}
+
+// Status reports whether the ledger is configured and whether its file is
+// actually present/non-empty where this process runs. A disabled ledger
+// (path=="") reports Configured=false.
+func (l *Ledger) Status() Status {
+	s := Status{}
+	if !l.enabled() {
+		return s
+	}
+	s.Path, s.Configured = l.path, true
+	if _, err := os.Stat(l.path); err == nil {
+		s.Present = true
+	}
+	if events, err := l.readEvents(); err == nil {
+		s.Events = len(events)
+	}
+	return s
+}
+
 func (l *Ledger) appendLocked(e Event) error {
-	f, err := os.OpenFile(l.path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
+	f, err := os.OpenFile(l.path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o600)
 	if err != nil {
 		return err
 	}
@@ -154,7 +187,8 @@ func (l *Ledger) Episodes() ([]Episode, error) {
 		case "open":
 			out = append(out, Episode{
 				Kind: e.Kind, Entry: e.Entry, Title: e.Title, Resource: e.Resource,
-				OpenedAt: e.At,
+				DupFingerprint: e.DupFingerprint,
+				OpenedAt:       e.At,
 			})
 			i := len(out) - 1
 			if rs := pendingResolves[e.Fingerprint]; len(rs) > 0 {
@@ -231,6 +265,7 @@ func (l *Ledger) Resolve(fp string, at time.Time) (Episode, bool, error) {
 	delete(l.open, fp)
 	return Episode{
 		Kind: o.Kind, Entry: o.Entry, Title: o.Title, Resource: o.Resource,
-		OpenedAt: o.At, ResolvedAt: at, Duration: at.Sub(o.At), Resolved: true,
+		DupFingerprint: o.DupFingerprint,
+		OpenedAt:       o.At, ResolvedAt: at, Duration: at.Sub(o.At), Resolved: true,
 	}, true, nil
 }
