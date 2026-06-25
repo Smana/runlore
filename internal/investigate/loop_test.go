@@ -2,6 +2,7 @@ package investigate
 
 import (
 	"context"
+	"errors"
 	"io"
 	"log/slog"
 	"net/http"
@@ -271,6 +272,81 @@ func TestInvestigateNoDeadlineWhenZero(t *testing.T) {
 	}
 }
 
+// errModel returns a plain (non-context) error on Complete — a backend rejecting
+// the request (auth, 5xx, malformed response), distinct from the deadline path.
+type errModel struct {
+	err   error
+	calls int
+}
+
+func (m *errModel) Complete(_ context.Context, _ providers.CompletionRequest) (providers.CompletionResponse, error) {
+	m.calls++
+	return providers.CompletionResponse{}, m.err
+}
+
+// TestInvestigateModelError asserts a non-deadline model error bubbles up wrapped
+// as "model: …" (so the caller/queue sees a real failure), as opposed to the
+// deadline path which delivers a synthetic timeout result and returns nil.
+func TestInvestigateModelError(t *testing.T) {
+	model := &errModel{err: errors.New("503 upstream unavailable")}
+	var delivered int
+	li := &LoopInvestigator{
+		Model:      model,
+		Log:        slog.New(slog.NewTextHandler(io.Discard, nil)),
+		MaxSteps:   5,
+		OnComplete: func(providers.Investigation) { delivered++ },
+	}
+	err := li.Investigate(context.Background(), Request{Title: "BackendDown"})
+	if err == nil {
+		t.Fatal("a non-deadline model error must be returned, not swallowed")
+	}
+	if !strings.HasPrefix(err.Error(), "model: ") {
+		t.Fatalf("error must be wrapped as model: …, got %q", err.Error())
+	}
+	if !errors.Is(err, model.err) {
+		t.Fatalf("wrapped error must preserve the cause for errors.Is, got %v", err)
+	}
+	if delivered != 0 {
+		t.Fatalf("a model error must not deliver a result, got %d deliveries", delivered)
+	}
+	if model.calls != 1 {
+		t.Fatalf("a model error must end the loop after one call, got %d", model.calls)
+	}
+}
+
+// TestLoopRecoversFromMalformedFindings asserts a submit_findings call whose args
+// are malformed JSON does not abort the investigation: the parse error is fed back
+// to the model as a tool result and the loop continues, delivering the next valid
+// submission.
+func TestLoopRecoversFromMalformedFindings(t *testing.T) {
+	model := &scriptModel{responses: []providers.CompletionResponse{
+		// turn 1: malformed submit_findings (truncated JSON)
+		{ToolCalls: []providers.ToolCall{{ID: "1", Name: submitFindingsName, Args: `{"root_causes":[{"summary":`}}},
+		// turn 2: a well-formed submission
+		{ToolCalls: []providers.ToolCall{{ID: "2", Name: submitFindingsName,
+			Args: `{"confidence":0.7,"root_causes":[{"summary":"recovered"}]}`}}},
+	}}
+	var got *providers.Investigation
+	li := &LoopInvestigator{
+		Model:      model,
+		Log:        slog.New(slog.NewTextHandler(io.Discard, nil)),
+		MaxSteps:   5,
+		OnComplete: func(inv providers.Investigation) { got = &inv },
+	}
+	if err := li.Investigate(context.Background(), Request{Title: "MalformedThenOK"}); err != nil {
+		t.Fatalf("Investigate: %v", err)
+	}
+	if got == nil {
+		t.Fatal("loop must recover from a malformed submission and deliver the next valid one")
+	}
+	if len(got.RootCauses) != 1 || got.RootCauses[0].Summary != "recovered" {
+		t.Fatalf("expected the recovered finding, got %+v", got)
+	}
+	if model.i != 2 {
+		t.Fatalf("expected exactly 2 model calls (malformed, then valid), got %d", model.i)
+	}
+}
+
 func TestLoopInvestigator(t *testing.T) {
 	model := &scriptModel{responses: []providers.CompletionResponse{
 		// turn 1: ask what changed
@@ -378,6 +454,63 @@ func TestLoopToolOutputTruncatedMetric(t *testing.T) {
 	body := rec.Body.String()
 	if !strings.Contains(body, "runlore_tool_output_truncated_bytes_total") {
 		t.Fatalf("runlore_tool_output_truncated_bytes_total not in metrics:\n%s", body)
+	}
+}
+
+// TestLoopTruncationNudgeAndMetric verifies that a truncated model response is not
+// treated as a finished step: the loop nudges the model once to continue, records the
+// truncation metric, and recovers (delivers a result) rather than accepting a half-answer.
+func TestLoopTruncationNudgeAndMetric(t *testing.T) {
+	t.Cleanup(func() { otel.SetMeterProvider(noop.NewMeterProvider()) })
+
+	h, shutdown, err := telemetry.Setup(context.Background())
+	if err != nil {
+		t.Fatalf("telemetry setup: %v", err)
+	}
+	t.Cleanup(func() { _ = shutdown(context.Background()) })
+	m := telemetry.NewMetrics()
+
+	model := &scriptModel{responses: []providers.CompletionResponse{
+		// step 1: a truncated prose turn — the loop must nudge once and continue,
+		// NOT treat this cut-off output as a finished (inconclusive) step.
+		{Text: "the root cause is probably the chart bu", Truncated: true,
+			Usage: providers.Usage{InputTokens: 500, OutputTokens: 4096}},
+		// step 2: still truncated, but now carries submit_findings. The single-use
+		// nudge has fired, so the loop falls through and processes the findings.
+		{Truncated: true, ToolCalls: []providers.ToolCall{{ID: "2", Name: submitFindingsName,
+			Args: `{"confidence":0.6,"root_causes":[{"summary":"chart bump"}]}`}}},
+	}}
+
+	var got *providers.Investigation
+	li := &LoopInvestigator{
+		Model:         model,
+		Log:           slog.New(slog.NewTextHandler(io.Discard, nil)),
+		MaxSteps:      5,
+		Metrics:       m,
+		ModelProvider: "anthropic",
+		OnComplete:    func(inv providers.Investigation) { got = &inv },
+	}
+	if err := li.Investigate(context.Background(), Request{Title: "truncation test"}); err != nil {
+		t.Fatalf("Investigate: %v", err)
+	}
+	// The loop recovered after the truncation nudge and delivered the findings.
+	if got == nil || len(got.RootCauses) != 1 || got.RootCauses[0].Summary != "chart bump" {
+		t.Fatalf("truncation must nudge-and-recover, not drop the investigation: %+v", got)
+	}
+	// Exactly two model calls: the truncated turn + the recovery turn (nudge is single-use).
+	if model.i != 2 {
+		t.Fatalf("expected 2 model calls (truncated + recovery), got %d", model.i)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/metrics", nil)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	body := rec.Body.String()
+	if !strings.Contains(body, "runlore_model_responses_truncated_total") {
+		t.Fatalf("runlore_model_responses_truncated_total not in metrics:\n%s", body)
+	}
+	if !strings.Contains(body, `provider="anthropic"`) {
+		t.Fatalf("truncation metric must carry the provider label:\n%s", body)
 	}
 }
 

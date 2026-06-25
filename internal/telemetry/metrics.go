@@ -42,6 +42,7 @@ type Metrics struct {
 	ToolCallDuration        metric.Float64Histogram // tool call latency, seconds (label: tool)
 	ModelRequests           metric.Int64Counter     // LLM completion requests (label: provider, result)
 	ModelRequestDuration    metric.Float64Histogram // LLM completion latency, seconds (label: provider)
+	ModelResponsesTruncated metric.Int64Counter     // LLM completions cut off at the output-token ceiling (label: provider)
 	Curations               metric.Int64Counter     // curation outcomes (label: kind, result)
 	CatalogInvalidEntries   metric.Int64Counter     // structurally-invalid entries found at catalog load
 }
@@ -88,6 +89,7 @@ func NewMetrics() *Metrics {
 		ToolCallDuration:        histF("tool_call_duration_seconds", "investigation tool call latency in seconds (label: tool)"),
 		ModelRequests:           ctr("model_requests_total", "LLM completion requests (label: provider, result)"),
 		ModelRequestDuration:    histF("model_request_duration_seconds", "LLM completion latency in seconds (label: provider)"),
+		ModelResponsesTruncated: ctr("model_responses_truncated_total", "LLM completions cut off at the output-token ceiling — the provider stop/finish reason indicated truncation (label: provider)"),
 		Curations:               ctr("curations_total", "curation outcomes written to the forge (label: kind, result)"),
 		CatalogInvalidEntries:   ctr("catalog_invalid_entries_total", "structurally-invalid entries surfaced at catalog load"),
 	}

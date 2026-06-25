@@ -57,19 +57,44 @@ spec:
             {{- with .Values.env }}
             {{- toYaml . | nindent 12 }}
             {{- end }}
-          livenessProbe:
+          {{- /* nil-safe: tolerate a values override that nulls `probes` or a sub-map */}}
+          {{- $probes := .Values.probes | default dict }}
+          {{- $startup := $probes.startup | default dict }}
+          {{- $liveness := $probes.liveness | default dict }}
+          {{- $readiness := $probes.readiness | default dict }}
+          {{- if $startup.enabled }}
+          # startupProbe owns the cold-start window (catalog warm-up + leader-lease
+          # gating). It targets /healthz (process-alive), NOT /readyz: a standby
+          # replica is never the leader and so never /readyz-ready, which would
+          # deadlock a readiness-gated startupProbe. While it runs, liveness +
+          # readiness are suppressed, so warm-up emits no premature Unhealthy events.
+          startupProbe:
             httpGet:
               path: /healthz
               port: http
-            initialDelaySeconds: 3
-            periodSeconds: 10
+            periodSeconds: {{ $startup.periodSeconds | default 2 }}
+            failureThreshold: {{ $startup.failureThreshold | default 30 }}
+            timeoutSeconds: {{ $startup.timeoutSeconds | default 2 }}
+          {{- end }}
+          livenessProbe:
+            # Liveness is NOT loosened — a genuine process hang still trips it.
+            httpGet:
+              path: /healthz
+              port: http
+            periodSeconds: {{ $liveness.periodSeconds | default 10 }}
+            failureThreshold: {{ $liveness.failureThreshold | default 3 }}
+            timeoutSeconds: {{ $liveness.timeoutSeconds | default 2 }}
           readinessProbe:
-            # /readyz is gated by leadership — only the leader serves webhook traffic.
+            # /readyz is gated by leadership + catalog warmth — only the warm leader
+            # serves webhook traffic. The startupProbe covers the cold window, so no
+            # initialDelaySeconds here; the tight cadence makes leader handoff reflect
+            # in the Service endpoints within a few seconds.
             httpGet:
               path: /readyz
               port: http
-            initialDelaySeconds: 2
-            periodSeconds: 5
+            periodSeconds: {{ $readiness.periodSeconds | default 5 }}
+            failureThreshold: {{ $readiness.failureThreshold | default 3 }}
+            timeoutSeconds: {{ $readiness.timeoutSeconds | default 2 }}
           resources:
             {{- toYaml .Values.resources | nindent 12 }}
           securityContext:

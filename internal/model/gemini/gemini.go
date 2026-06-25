@@ -90,7 +90,16 @@ type functionDeclaration struct {
 type genResponse struct {
 	Candidates []struct {
 		Content content `json:"content"`
+		// FinishReason is the candidate-termination reason; "MAX_TOKENS" marks an output
+		// cut off at the token ceiling (a truncated, not complete, answer).
+		FinishReason string `json:"finishReason"`
 	} `json:"candidates"`
+	// UsageMetadata carries the per-request token counts; a pointer so an absent block
+	// parses to nil (unknown) rather than a misleading {0,0}.
+	UsageMetadata *struct {
+		PromptTokenCount     int `json:"promptTokenCount"`
+		CandidatesTokenCount int `json:"candidatesTokenCount"`
+	} `json:"usageMetadata"`
 	Error *struct {
 		Message string `json:"message"`
 	} `json:"error"`
@@ -130,7 +139,9 @@ func (c *Client) Complete(ctx context.Context, req providers.CompletionRequest) 
 	defer func() { _ = resp.Body.Close() }()
 	data, _ := io.ReadAll(resp.Body)
 	if resp.StatusCode != http.StatusOK {
-		return providers.CompletionResponse{}, fmt.Errorf("generateContent status %d: %s", resp.StatusCode, string(data[:min(len(data), 512)]))
+		// Don't echo the upstream body into an Error-level log (info disclosure +
+		// log injection); surface status + sanitized request-id for correlation.
+		return providers.CompletionResponse{}, fmt.Errorf("generateContent status %d (request-id %q)", resp.StatusCode, httpx.RequestID(resp.Header))
 	}
 	var gr genResponse
 	if err := json.Unmarshal(data, &gr); err != nil {
@@ -140,9 +151,13 @@ func (c *Client) Complete(ctx context.Context, req providers.CompletionRequest) 
 		return providers.CompletionResponse{}, fmt.Errorf("gemini error: %s", gr.Error.Message)
 	}
 	out := providers.CompletionResponse{}
+	if gr.UsageMetadata != nil {
+		out.Usage = providers.Usage{InputTokens: gr.UsageMetadata.PromptTokenCount, OutputTokens: gr.UsageMetadata.CandidatesTokenCount}
+	}
 	if len(gr.Candidates) == 0 {
 		return out, nil
 	}
+	out.Truncated = gr.Candidates[0].FinishReason == "MAX_TOKENS"
 	for _, p := range gr.Candidates[0].Content.Parts {
 		switch {
 		case p.FunctionCall != nil:
