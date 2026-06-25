@@ -376,7 +376,7 @@ type Hypothesis struct {
 
 // KBEntry is an OKF knowledge entry the curator drafts from an investigation.
 type KBEntry struct {
-	Type        string // e.g. Incident | Playbook | Postmortem
+	Type        string // OKF type, one of the validator vocabulary: Incident | Playbook | Concept
 	Title       string
 	Description string
 	Resource    string
