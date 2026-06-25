@@ -141,22 +141,40 @@ func (d *Differ) auth(ctx context.Context) (transport.AuthMethod, error) {
 // inuse_space heap profile: go-git MemoryObject.Write = 90% of heap). ctx aborts a
 // hung remote (a stalled HTTPS clone would otherwise block the queue worker
 // indefinitely); a cancelled clone returns a context error via %w.
+//
+// When ctx carries a clone cache (see WithCloneCache), a repo is cloned at most once
+// per batch: a cache hit returns the shared clone with a no-op cleanup (the cache
+// owns the temp dir and removes it on close). Without a cache, the caller owns the
+// returned cleanup, as before.
 func (d *Differ) cloneToDisk(ctx context.Context, url string) (*git.Repository, func(), error) {
+	noop := func() {}
+	cc := cacheFrom(ctx)
+	if cc != nil {
+		if repo, ok := cc.get(url); ok {
+			return repo, noop, nil // reuse — the cache owns cleanup
+		}
+	}
 	auth, err := d.auth(ctx)
 	if err != nil {
-		return nil, func() {}, err
+		return nil, noop, err
 	}
 	dir, err := os.MkdirTemp("", "runlore-clone-")
 	if err != nil {
-		return nil, func() {}, fmt.Errorf("temp dir: %w", err)
+		return nil, noop, fmt.Errorf("temp dir: %w", err)
 	}
-	cleanup := func() { _ = os.RemoveAll(dir) }
 	repo, err := git.PlainCloneContext(ctx, dir, false, &git.CloneOptions{URL: url, Auth: auth})
 	if err != nil {
-		cleanup()
-		return nil, func() {}, fmt.Errorf("clone %s: %w", url, err)
+		_ = os.RemoveAll(dir)
+		return nil, noop, fmt.Errorf("clone %s: %w", url, err)
 	}
-	return repo, cleanup, nil
+	if cc != nil {
+		winner, kept := cc.put(url, repo, dir)
+		if !kept {
+			_ = os.RemoveAll(dir) // a concurrent diff cloned the same url first
+		}
+		return winner, noop, nil // cache owns cleanup
+	}
+	return repo, func() { _ = os.RemoveAll(dir) }, nil
 }
 
 // Remote clones url to disk (auth via the installation token when set) and diffs
