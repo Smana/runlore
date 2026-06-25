@@ -208,6 +208,32 @@ func (q *Queue) Run(ctx context.Context) {
 	}
 }
 
+// Drain stops the current term's queue from starting new work and waits for an
+// in-flight investigation to finish, up to ctx's deadline. It is the graceful
+// counterpart to a workCtx cancel (which aborts immediately — used on LOST
+// leadership): on SIGTERM the leader keeps its work context alive and calls Drain so
+// the in-flight investigation can COMPLETE (record its outcome + deliver) before the
+// process exits, instead of being killed mid-flight. A no-op when not running (no
+// leadership / between terms). If the deadline fires first it returns, and the
+// caller's subsequent workCtx cancel aborts the straggler.
+func (q *Queue) Drain(ctx context.Context) {
+	q.mu.Lock()
+	wq := q.wq
+	q.mu.Unlock()
+	if wq == nil {
+		return
+	}
+	done := make(chan struct{})
+	// ShutDownWithDrain stops new Get()s but waits for the in-flight item (Get-but-
+	// not-Done) to finish — unlike ShutDown(), which drops it. The worker's per-item
+	// ctx is workCtx (still alive during the drain), so the investigation completes.
+	go func() { wq.ShutDownWithDrain(); close(done) }()
+	select {
+	case <-done:
+	case <-ctx.Done():
+	}
+}
+
 func (q *Queue) process(ctx context.Context, wq workqueue.TypedRateLimitingInterface[key], k key) {
 	defer wq.Done(k)
 	q.mu.Lock()

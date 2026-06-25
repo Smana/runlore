@@ -163,6 +163,18 @@ func runServe(args []string) error {
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
+	// drainGracePeriod bounds how long shutdown waits for the in-flight investigation
+	// to finish before forcing it. Keep it under the pod's terminationGracePeriodSeconds
+	// (the chart sets 40s) so the process exits cleanly before SIGKILL.
+	const drainGracePeriod = 25 * time.Second
+	// workCtx drives the leader-only work (leader election, the investigation queue,
+	// failure watch, coalescer) and is intentionally SEPARATE from the SIGTERM signal
+	// (ctx): on shutdown the leader keeps workCtx alive, drains the in-flight
+	// investigation to completion (lease still held, so no other replica acts), then
+	// cancels workCtx — releasing the lease. Lost leadership still cancels its own
+	// LE-derived context and aborts promptly.
+	workCtx, stopWork := context.WithCancel(context.Background())
+	defer stopWork()
 
 	// Build kube clients once (best-effort): the dynamic client backs the
 	// GitOps-failure watch + what-changed tool; the clientset backs leader election.
@@ -303,10 +315,10 @@ func runServe(args []string) error {
 	var leader atomic.Bool
 	useLE := cfg.LeaderElection.Enabled && clientset != nil
 	if useLE {
-		go runLeaderElection(ctx, cfg, clientset, &leader, log, startWork)
+		go runLeaderElection(workCtx, cfg, clientset, &leader, log, startWork)
 	} else {
 		leader.Store(true) // no leader election: this replica is always active + ready
-		startWork(ctx)
+		startWork(workCtx)
 	}
 
 	// Build-info + leadership gauges (runlore_build_info / runlore_leader). No-op
@@ -333,17 +345,27 @@ func runServe(args []string) error {
 	srv.SetOutcomeLedger(ledger)
 	if cz != nil {
 		srv.SetCoalescer(cz)
-		go cz.Run(ctx, cfg.Investigation.Coalesce.Debounce.Std()/2)
+		go cz.Run(workCtx, cfg.Investigation.Coalesce.Debounce.Std()/2)
 	}
 	httpSrv := newHTTPServer(*addr, srv.Handler())
+	// Graceful shutdown: on SIGTERM, stop accepting webhooks, let the in-flight
+	// investigation finish within a bounded grace (lease still held), then release.
+	drained := make(chan struct{})
 	go func() {
+		defer close(drained)
 		<-ctx.Done()
+		log.Info("shutdown: stopping intake; draining in-flight investigation")
 		_ = httpSrv.Shutdown(context.Background())
+		dctx, cancelDrain := context.WithTimeout(context.Background(), drainGracePeriod)
+		queue.Drain(dctx)
+		cancelDrain()
+		stopWork() // release the leader lease + stop the queue/watch/coalescer
 	}()
 	log.Info("runlore serving", "addr", *addr, "leader_election", useLE)
 	if err := httpSrv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 		return err
 	}
+	<-drained // wait for the graceful drain to finish before exiting
 	return nil
 }
 
