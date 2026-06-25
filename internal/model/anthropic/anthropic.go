@@ -52,12 +52,30 @@ func New(baseURL, model, apiKey string) *Client {
 
 var _ providers.ModelProvider = (*Client)(nil)
 
+// cacheControl marks a content block as a prompt-cache breakpoint: Anthropic
+// caches the request prefix up to and including the marked block. The default
+// 5-minute ephemeral cache is GA on anthropic-version 2023-06-01 (no beta header).
+type cacheControl struct {
+	Type string `json:"type"` // "ephemeral"
+}
+
+// ephemeral is the shared 5-minute cache marker (read-only; never mutated).
+var ephemeral = &cacheControl{Type: "ephemeral"}
+
+// systemBlock is one block of an array-form system prompt. The array form (vs a
+// bare string) is what lets the system prompt carry a cache breakpoint.
+type systemBlock struct {
+	Type         string        `json:"type"` // "text"
+	Text         string        `json:"text"`
+	CacheControl *cacheControl `json:"cache_control,omitempty"`
+}
+
 type msgRequest struct {
-	Model     string    `json:"model"`
-	MaxTokens int       `json:"max_tokens"`
-	System    string    `json:"system,omitempty"`
-	Messages  []message `json:"messages"`
-	Tools     []tool    `json:"tools,omitempty"`
+	Model     string        `json:"model"`
+	MaxTokens int           `json:"max_tokens"`
+	System    []systemBlock `json:"system,omitempty"`
+	Messages  []message     `json:"messages"`
+	Tools     []tool        `json:"tools,omitempty"`
 }
 
 type message struct {
@@ -79,9 +97,10 @@ type block struct {
 }
 
 type tool struct {
-	Name        string          `json:"name"`
-	Description string          `json:"description"`
-	InputSchema json.RawMessage `json:"input_schema"`
+	Name         string          `json:"name"`
+	Description  string          `json:"description"`
+	InputSchema  json.RawMessage `json:"input_schema"`
+	CacheControl *cacheControl   `json:"cache_control,omitempty"`
 }
 
 type msgResponse struct {
@@ -102,9 +121,22 @@ type msgResponse struct {
 
 // Complete sends a Messages request with tools and maps the result back.
 func (c *Client) Complete(ctx context.Context, req providers.CompletionRequest) (providers.CompletionResponse, error) {
-	areq := msgRequest{Model: c.model, MaxTokens: c.maxTokens, System: req.System, Messages: toMessages(req.Messages)}
+	areq := msgRequest{Model: c.model, MaxTokens: c.maxTokens, Messages: toMessages(req.Messages)}
+	if req.System != "" {
+		areq.System = []systemBlock{{Type: "text", Text: req.System, CacheControl: ephemeral}}
+	}
 	for _, t := range req.Tools {
 		areq.Tools = append(areq.Tools, tool{Name: t.Name, Description: t.Description, InputSchema: json.RawMessage(t.Schema)})
+	}
+	// Prompt caching: the system prompt + tool schemas are identical across every
+	// step of an investigation's ReAct loop (up to ~20 calls), so mark them as cache
+	// breakpoints — Anthropic re-reads that static prefix at ~0.1x input cost instead
+	// of re-billing it each step. The system block (set above) caches tools+system
+	// (cache prefix order is tools → system); marking the last tool also caches the
+	// tool array when there's no system prompt. Savings surface as a drop in
+	// usage.input_tokens (cached input moves to cache_read_input_tokens).
+	if n := len(areq.Tools); n > 0 {
+		areq.Tools[n-1].CacheControl = ephemeral
 	}
 	body, err := json.Marshal(areq)
 	if err != nil {
