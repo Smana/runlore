@@ -281,6 +281,15 @@ func (s *Server) handleSlackInteraction(w http.ResponseWriter, r *http.Request) 
 			s.log.Info("slack approval executed", "id", act.Value, "user_id", p.User.ID, "user", p.User.Username, "op", executed.Op)
 		}
 	case "runlore_reject":
+		// Gate reject on the same approver allowlist as approve: a signature-valid but
+		// unlisted user must not be able to cancel a pending remediation (denial-of-
+		// remediation). Rejecting is the safe direction, but it's still a privileged
+		// decision over a queued cluster action.
+		if !s.approvers[p.User.ID] {
+			msg = "❌ not authorized to reject (user not in approver allowlist)"
+			s.log.Warn("slack reject denied: user not in allowlist", "user_id", p.User.ID, "user", p.User.Username)
+			break
+		}
 		if rerr := s.approvals.Reject(act.Value); rerr != nil {
 			msg = "⚠️ " + rerr.Error()
 		} else {
