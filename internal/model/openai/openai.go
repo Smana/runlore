@@ -37,9 +37,9 @@ func New(baseURL, model, apiKey string) *Client {
 var _ providers.ModelProvider = (*Client)(nil)
 
 type chatRequest struct {
-	Model    string        `json:"model"`
-	Messages []chatMessage `json:"messages"`
-	Tools    []chatTool    `json:"tools,omitempty"`
+	Model    string     `json:"model"`
+	Messages []any      `json:"messages"` // chatMessage | toolMessage
+	Tools    []chatTool `json:"tools,omitempty"`
 }
 
 type chatMessage struct {
@@ -47,6 +47,16 @@ type chatMessage struct {
 	Content    string         `json:"content,omitempty"`
 	ToolCalls  []chatToolCall `json:"tool_calls,omitempty"`
 	ToolCallID string         `json:"tool_call_id,omitempty"`
+}
+
+// toolMessage is the tool-role result. Its content has no omitempty: the OpenAI
+// chat-completions schema (and strict OpenAI-compatible servers — vLLM, Ollama)
+// require a "content" field on a tool message, so an empty tool result must still
+// serialize "content":"" rather than be elided.
+type toolMessage struct {
+	Role       string `json:"role"`
+	Content    string `json:"content"`
+	ToolCallID string `json:"tool_call_id,omitempty"`
 }
 
 type chatToolCall struct {
@@ -81,11 +91,16 @@ type chatResponse struct {
 
 // Complete sends a chat completion with tools and maps the result back.
 func (c *Client) Complete(ctx context.Context, req providers.CompletionRequest) (providers.CompletionResponse, error) {
-	msgs := make([]chatMessage, 0, len(req.Messages)+1)
+	msgs := make([]any, 0, len(req.Messages)+1)
 	if req.System != "" {
 		msgs = append(msgs, chatMessage{Role: "system", Content: req.System})
 	}
 	for _, m := range req.Messages {
+		if m.Role == "tool" {
+			// Tool results use a shape that always emits "content" (see toolMessage).
+			msgs = append(msgs, toolMessage{Role: m.Role, Content: m.Content, ToolCallID: m.ToolCallID})
+			continue
+		}
 		cm := chatMessage{Role: m.Role, Content: m.Content, ToolCallID: m.ToolCallID}
 		for _, tc := range m.ToolCalls {
 			cm.ToolCalls = append(cm.ToolCalls, chatToolCall{
