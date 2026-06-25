@@ -75,28 +75,60 @@ func (r *dynamicReader) WatchApplications(ctx context.Context) (<-chan Applicati
 }
 
 // applicationFromUnstructured maps an unstructured Application to the minimal type.
+// It supports both the single-source schema (spec.source / status.sync.revision)
+// and the multi-source schema (spec.sources[] / status.sync.revisions[]); for a
+// multi-source app the FIRST source + first revision are used (the Git source that
+// backs the manifests), so the app contributes to the change spine instead of
+// being silently dropped.
 func applicationFromUnstructured(u *unstructured.Unstructured) application {
-	repoURL, _, _ := unstructured.NestedString(u.Object, "spec", "source", "repoURL")
-	path, _, _ := unstructured.NestedString(u.Object, "spec", "source", "path")
-	rev, _, _ := unstructured.NestedString(u.Object, "status", "sync", "revision")
+	repoURL, path := sourceRepoPath(u)
+	rev := syncRevision(u)
 	syncStatus, _, _ := unstructured.NestedString(u.Object, "status", "sync", "status")
 	health, _, _ := unstructured.NestedString(u.Object, "status", "health", "status")
+	phase, _, _ := unstructured.NestedString(u.Object, "status", "operationState", "phase")
 	msg, _, _ := unstructured.NestedString(u.Object, "status", "operationState", "message")
 	return application{
-		Name:         u.GetName(),
-		Namespace:    u.GetNamespace(),
-		RepoURL:      repoURL,
-		Path:         path,
-		Revision:     rev,
-		PrevRevision: prevRevision(u),
-		HealthStatus: health,
-		SyncStatus:   syncStatus,
-		Message:      msg,
+		Name:           u.GetName(),
+		Namespace:      u.GetNamespace(),
+		RepoURL:        repoURL,
+		Path:           path,
+		Revision:       rev,
+		PrevRevision:   prevRevision(u),
+		HealthStatus:   health,
+		SyncStatus:     syncStatus,
+		OperationPhase: phase,
+		Message:        msg,
 	}
 }
 
+// sourceRepoPath returns the repoURL + path of the Application's source. It reads
+// the singular spec.source first, then falls back to the FIRST entry of the
+// multi-source spec.sources[].
+func sourceRepoPath(u *unstructured.Unstructured) (repoURL, path string) {
+	repoURL, _, _ = unstructured.NestedString(u.Object, "spec", "source", "repoURL")
+	if repoURL != "" {
+		path, _, _ = unstructured.NestedString(u.Object, "spec", "source", "path")
+		return repoURL, path
+	}
+	if first, ok := firstSourceMap(u, "spec", "sources"); ok {
+		repoURL, _ = first["repoURL"].(string)
+		path, _ = first["path"].(string)
+	}
+	return repoURL, path
+}
+
+// syncRevision returns the synced revision: status.sync.revision (single-source)
+// or the first of status.sync.revisions[] (multi-source).
+func syncRevision(u *unstructured.Unstructured) string {
+	if rev, _, _ := unstructured.NestedString(u.Object, "status", "sync", "revision"); rev != "" {
+		return rev
+	}
+	return firstRevision(u, "status", "sync", "revisions")
+}
+
 // prevRevision returns the revision before the latest in status.history (the diff
-// range start), or empty if there is no prior deployment.
+// range start), or empty if there is no prior deployment. Handles both the
+// singular .revision and the multi-source plural .revisions[] (first element).
 func prevRevision(u *unstructured.Unstructured) string {
 	hist, found, _ := unstructured.NestedSlice(u.Object, "status", "history")
 	if !found || len(hist) < 2 {
@@ -106,6 +138,39 @@ func prevRevision(u *unstructured.Unstructured) string {
 	if !ok {
 		return ""
 	}
-	rev, _ := m["revision"].(string)
-	return rev
+	if rev, ok := m["revision"].(string); ok && rev != "" {
+		return rev
+	}
+	return firstString(m["revisions"])
+}
+
+// firstSourceMap returns the first element of an object-array field (e.g.
+// spec.sources) as a map, or ok=false when absent/empty.
+func firstSourceMap(u *unstructured.Unstructured, fields ...string) (map[string]any, bool) {
+	s, found, _ := unstructured.NestedSlice(u.Object, fields...)
+	if !found || len(s) == 0 {
+		return nil, false
+	}
+	m, ok := s[0].(map[string]any)
+	return m, ok
+}
+
+// firstRevision returns the first element of a string-array field (e.g.
+// status.sync.revisions), or "".
+func firstRevision(u *unstructured.Unstructured, fields ...string) string {
+	s, found, _ := unstructured.NestedSlice(u.Object, fields...)
+	if !found {
+		return ""
+	}
+	return firstString(s)
+}
+
+// firstString returns the first string element of a []any, or "".
+func firstString(v any) string {
+	s, ok := v.([]any)
+	if !ok || len(s) == 0 {
+		return ""
+	}
+	str, _ := s[0].(string)
+	return str
 }
