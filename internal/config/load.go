@@ -51,12 +51,14 @@ func applyDefaults(c *Config) {
 			co.Cooldown = Duration(10 * time.Minute)
 		}
 	}
-	// GitOps-failure debounce default: when the trigger is enabled without an
-	// explicit window, wait 60s and re-check before investigating — long enough to
-	// let reconcile-churn transients clear, short enough to catch real failures
-	// promptly. Set debounce: 0 explicitly to restore fire-on-every-failure.
-	if c.Triggers.GitOpsFailures.Enabled && c.Triggers.GitOpsFailures.Debounce == 0 {
-		c.Triggers.GitOpsFailures.Debounce = Duration(60 * time.Second)
+	// GitOps-failure debounce default: when the trigger is enabled and the window is
+	// unset (nil), wait 60s and re-check before investigating — long enough to let
+	// reconcile-churn transients clear, short enough to catch real failures promptly.
+	// An explicit `debounce: 0` (non-nil) is left untouched, so it fires on every
+	// Ready=False as documented.
+	if c.Triggers.GitOpsFailures.Enabled && c.Triggers.GitOpsFailures.Debounce == nil {
+		d := Duration(60 * time.Second)
+		c.Triggers.GitOpsFailures.Debounce = &d
 	}
 	// Rate-limit window default: 1h when a per-window budget is set but no window
 	// is given (a zero window would silently allow unlimited investigations).

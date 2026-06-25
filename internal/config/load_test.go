@@ -71,3 +71,29 @@ triggers:
 		t.Fatalf("explicit debounce: got %v, want 2m", c.Triggers.GitOpsFailures.Debounce.Std())
 	}
 }
+
+func TestLoadGitOpsFailureDebounceZeroFiresImmediately(t *testing.T) {
+	dir := t.TempDir()
+	p := filepath.Join(dir, "runlore.yaml")
+	doc := `
+triggers:
+  gitops_failures:
+    enabled: true
+    debounce: 0
+`
+	if err := os.WriteFile(p, []byte(doc), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	c, err := Load(p)
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	// An explicit `debounce: 0` must survive applyDefaults (not be clobbered to the
+	// 60s default for an unset window), so the trigger fires immediately.
+	if c.Triggers.GitOpsFailures.Debounce == nil {
+		t.Fatal("explicit debounce:0 should be non-nil (distinguishable from unset)")
+	}
+	if c.Triggers.GitOpsFailures.DebounceWindow() != 0 {
+		t.Fatalf("explicit debounce:0 should fire immediately, got %v", c.Triggers.GitOpsFailures.DebounceWindow())
+	}
+}
