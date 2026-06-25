@@ -216,6 +216,19 @@ type Model struct {
 	BaseURL   string `yaml:"base_url"`    // OpenAI: required; Anthropic/Gemini: optional (built-in default endpoint)
 	Model     string `yaml:"model"`       // model name
 	APIKeyEnv string `yaml:"api_key_env"` // env var holding the API key (empty = keyless)
+	// Verify optionally routes the adversarial verify pass to a cheaper/faster model;
+	// unset fields inherit from the parent above (so `verify: {model: <cheap>}` reuses
+	// the same provider/endpoint/key). Absent ⇒ verify runs on the main model.
+	Verify *ModelOverride `yaml:"verify"`
+}
+
+// ModelOverride is a partial Model used to route the verify pass to a cheaper model;
+// empty fields inherit from the parent Model.
+type ModelOverride struct {
+	Provider  string `yaml:"provider"`
+	BaseURL   string `yaml:"base_url"`
+	Model     string `yaml:"model"`
+	APIKeyEnv string `yaml:"api_key_env"`
 }
 
 // Notify configures where investigation findings are delivered.
@@ -394,14 +407,14 @@ const (
 	ActionOff     ActionMode = "off"     // read-only (default): no action tools registered
 	ActionSuggest ActionMode = "suggest" // propose a command/PR; never execute
 	ActionApprove ActionMode = "approve" // execute only after explicit human approval
-	ActionAuto    ActionMode = "auto"    // execute within the allowed envelope, no click
+	ActionAuto    ActionMode = "auto"    // EXPERIMENTAL/frozen (FEAT-1): execute in-envelope, no click — not for prod
 )
 
 // ActionPolicy gates cluster-mutating actions — the upper rungs of the autonomy
 // ladder. v1 ships ActionOff; the type exists so active tools can be added later
 // behind a gate without re-architecting (see docs/design.md §9, "Act").
 type ActionPolicy struct {
-	Mode             ActionMode  `yaml:"mode"`               // off | suggest | approve | auto
+	Mode             ActionMode  `yaml:"mode"`               // off | suggest | approve | auto (experimental, frozen)
 	Allow            ActionAllow `yaml:"allow"`              // envelope, enforced even in approve/auto
 	RequireApproval  bool        `yaml:"require_approval"`   // force a human click for gated actions
 	ApprovalTokenEnv string      `yaml:"approval_token_env"` // env var with a shared secret for the approval endpoints

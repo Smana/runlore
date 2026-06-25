@@ -133,8 +133,12 @@ func (l *Ledger) appendLocked(e Event) error {
 	if err != nil {
 		return err
 	}
-	_, err = f.Write(append(b, '\n'))
-	return err
+	if _, err := f.Write(append(b, '\n')); err != nil {
+		return err
+	}
+	// fsync so an unclean crash/SIGKILL can't lose the tail open/resolve event — the
+	// ledger is the durable truth for recall-decay attribution (the audit log fsyncs too).
+	return f.Sync()
 }
 
 // Open records that an investigation completed for an incident (fingerprint).

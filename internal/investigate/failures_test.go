@@ -52,3 +52,30 @@ func TestDrainFailuresSkipsCascades(t *testing.T) {
 		t.Fatalf("want only the root 'crds' failure enqueued, got %+v", enq.reqs)
 	}
 }
+
+// TestDrainFailuresDedupSurvivesAcrossRuns locks down GO-P1A: a deduper shared across
+// two DrainFailures runs (two leadership terms) suppresses the second term's
+// initial-LIST replay of a still-failing workload, instead of re-investigating it.
+// A per-term deduper would enqueue twice; the process-scoped one enqueues once.
+func TestDrainFailuresDedupSurvivesAcrossRuns(t *testing.T) {
+	wl := providers.Workload{Kind: "Kustomization", Name: "apps", Namespace: "flux-system"}
+	dedup := trigger.NewDeduper(30 * time.Minute) // process-scoped: survives both runs
+	enq := &collectEnqueuer{}
+
+	// Term 1: the failure is seen and investigated.
+	src1 := make(chan providers.FailureEvent, 1)
+	src1 <- providers.FailureEvent{Workload: wl, Reason: "BuildFailed"}
+	close(src1)
+	DrainFailures(context.Background(), src1, enq, dedup, nil, discardLog)
+
+	// Term 2 (leader re-acquired): the informer relists and re-emits the same
+	// still-failing workload — the shared deduper must suppress the replay.
+	src2 := make(chan providers.FailureEvent, 1)
+	src2 <- providers.FailureEvent{Workload: wl, Reason: "BuildFailed"}
+	close(src2)
+	DrainFailures(context.Background(), src2, enq, dedup, nil, discardLog)
+
+	if len(enq.reqs) != 1 {
+		t.Fatalf("a still-failing workload replayed on leader re-acquire must be investigated once, got %d", len(enq.reqs))
+	}
+}
