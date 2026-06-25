@@ -394,14 +394,14 @@ const (
 	ActionOff     ActionMode = "off"     // read-only (default): no action tools registered
 	ActionSuggest ActionMode = "suggest" // propose a command/PR; never execute
 	ActionApprove ActionMode = "approve" // execute only after explicit human approval
-	ActionAuto    ActionMode = "auto"    // execute within the allowed envelope, no click
+	ActionAuto    ActionMode = "auto"    // EXPERIMENTAL/frozen (FEAT-1): execute in-envelope, no click — not for prod
 )
 
 // ActionPolicy gates cluster-mutating actions — the upper rungs of the autonomy
 // ladder. v1 ships ActionOff; the type exists so active tools can be added later
 // behind a gate without re-architecting (see docs/design.md §9, "Act").
 type ActionPolicy struct {
-	Mode             ActionMode  `yaml:"mode"`               // off | suggest | approve | auto
+	Mode             ActionMode  `yaml:"mode"`               // off | suggest | approve | auto (experimental, frozen)
 	Allow            ActionAllow `yaml:"allow"`              // envelope, enforced even in approve/auto
 	RequireApproval  bool        `yaml:"require_approval"`   // force a human click for gated actions
 	ApprovalTokenEnv string      `yaml:"approval_token_env"` // env var with a shared secret for the approval endpoints
