@@ -34,6 +34,15 @@ format at `GET /metrics` on the service port. Scrape it with a `VMServiceScrape`
 
 All series are prefixed `runlore_`.
 
+The seconds-scale latency histograms (`*_duration_seconds`,
+`incident_resolution_seconds`) carry explicit **SLO-aligned bucket boundaries**
+(seconds): `0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10, 30, 60, 120, 300`. The OTel SDK
+defaults are millisecond-scale and would collapse most calls into the first bucket,
+breaking `histogram_quantile`. The boundaries are defined in
+[`internal/telemetry/setup.go`](../internal/telemetry/setup.go) via an
+explicit-bucket-histogram view. Other histograms (scores, batch size, token
+estimate) keep the SDK defaults and are read as heatmaps, not percentiles.
+
 ### Pipeline & investigations
 | Metric | Type | Labels | Meaning |
 |---|---|---|---|
