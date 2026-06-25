@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"github.com/Smana/runlore/internal/providers"
+	"github.com/Smana/runlore/internal/whatchanged"
 )
 
 // WhatChangedTool exposes the GitOps "what changed" lens to the model: the change
@@ -44,6 +45,11 @@ func (t WhatChangedTool) Call(ctx context.Context, args string) (string, error) 
 	if len(changes) == 0 {
 		return "no changes found for the given selector", nil
 	}
+	// Clone each source repo at most once for this call: several changes on one
+	// (mono)repo would otherwise each trigger a full clone. The cache owns the
+	// clones and removes them when the call returns.
+	ctx, done := whatchanged.WithCloneCache(ctx)
+	defer done()
 	var b strings.Builder
 	for _, c := range changes {
 		fmt.Fprintf(&b, "%s %s/%s (%s): %s..%s\n", c.Engine, c.Workload.Kind, c.Workload.Name, c.Type, c.FromRev, c.ToRev)
