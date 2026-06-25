@@ -16,16 +16,15 @@
 
 ---
 
-RunLore is an open-source, **read-only** SRE agent that wakes on any incident, investigates it —
-*what changed? what's wrong?* — and delivers a confidence-scored root cause to Slack. At the same
-time it opens a pull request in a Git repository you own, drafting what it found as a knowledge-base
-entry. A human reviews, adds context, and merges the PR: that entry is indexed, and the next time
-the same pattern hits, RunLore answers in seconds — no full investigation needed.
+RunLore is an open-source, **read-only** SRE agent that investigates any incident — *what changed?
+what's wrong?* — and posts a confidence-scored root cause to chat (Slack, Matrix…). It never touches
+your cluster.
 
-**RunLore never mutates your cluster.** It reads Kubernetes, metrics, logs, and network flows.
-Its only writes go to Git, via reviewed pull requests.
+What sets it apart: it learns **your** platform. Every investigation opens a PR in a Git repo you
+own; a human merges it, building a knowledge base of your incidents and context. The same pattern
+next time gets an instant answer — no fresh investigation.
 
-**Read-only by default · single Go binary · runs in your cluster · on your models.**
+**Learns your platform · single Go binary · runs in your cluster · on your models.**
 
 ## See it in action
 
@@ -82,72 +81,25 @@ incidents gains trust; knowledge that keeps failing decays.
 ## 🚀 Getting started
 
 RunLore runs in your Kubernetes cluster as a single Go binary, deployed via Helm.
-You need four things before installing:
+RunLore is a single binary deployed via Helm. Before installing, you need:
 
-| | What | Why |
-|---|---|---|
-| **Cluster + data sources** | Flux or Argo CD; optionally Prometheus/VictoriaMetrics, VictoriaLogs, Hubble | The investigation signals |
-| **LLM** | Any OpenAI-compatible endpoint, Anthropic, or Gemini — in-cluster or external | The investigation engine |
-| **Knowledge-base repo** | A private GitHub repo + a GitHub App (scoped read/write) | Where RunLore commits what it learns |
-| **Notifications** | A Slack webhook (or Matrix) | Where findings are delivered |
+- **Data sources** — a cluster running Flux or Argo CD; optionally Prometheus/VictoriaMetrics, VictoriaLogs, Hubble for richer signals
+- **An LLM** — any OpenAI-compatible endpoint, Anthropic, or Gemini (in-cluster or external)
+- **A knowledge-base repo** — a private GitHub repo + a scoped GitHub App; this is where RunLore commits what it learns
+- **A notification destination** — a Slack webhook, Matrix, or both
 
-### Step 1 — Create your KB repo
-
-Create a private GitHub repo (e.g. `your-org/runlore-kb`). Seed it with existing runbooks if you
-have them — RunLore will grow it from there. Then create a **GitHub App**, install it on that repo
-with `Contents` + `Pull requests` + `Issues` (read/write), and note the App ID, Installation ID,
-and private key.
-
-### Step 2 — Create your secrets
-
-```bash
-kubectl -n runlore create secret generic runlore-secrets \
-  --from-literal=SLACK_WEBHOOK_URL='https://hooks.slack.com/services/...' \
-  --from-literal=OPENAI_API_KEY='<your-api-key>' \
-  --from-file=GITHUB_APP_PRIVATE_KEY=/path/to/app.pem
-```
-
-### Step 3 — Configure
-
-Create a minimal `values.yaml`:
-
-```yaml
-envFrom:
-  - secretRef:
-      name: runlore-secrets
-
-catalog:
-  gitSync: true
-
-config:
-  gitops:
-    engine: flux             # or argocd
-  model:
-    base_url: http://vllm.llm.svc:8000/v1
-    model: your-model
-    api_key_env: OPENAI_API_KEY
-  notify:
-    slack:
-      webhook_url_env: SLACK_WEBHOOK_URL
-  forge:
-    kb_repo: your-org/runlore-kb
-    github_app:
-      app_id: 123456
-      installation_id: 7654321
-      private_key_env: GITHUB_APP_PRIVATE_KEY
-```
-
-### Step 4 — Install
+Wire your credentials into a Kubernetes `Secret`, point the chart at them via a `values.yaml`
+(GitOps engine, LLM endpoint, KB repo, notification), and install:
 
 ```bash
 helm install runlore deploy/helm/runlore -n runlore --create-namespace -f values.yaml
 ```
 
-Then point Alertmanager at `http://runlore.runlore.svc:8080/webhook/alertmanager` and RunLore
-starts investigating.
+Then route your Alertmanager alerts to `http://runlore.runlore.svc:8080/webhook/alertmanager` —
+RunLore starts investigating immediately.
 
-> **→ [Full getting-started guide](docs/getting-started.md)** — GitHub App setup,
-> metrics/logs/network data sources, AWS cloud context, HA, and verification steps.
+**→ [Full getting-started guide](docs/getting-started.md)** — KB repo setup, GitHub App,
+credentials, complete `values.yaml` reference, data sources, and verification steps.
 
 ---
 
