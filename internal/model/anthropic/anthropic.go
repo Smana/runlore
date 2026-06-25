@@ -86,7 +86,16 @@ type tool struct {
 
 type msgResponse struct {
 	Content []block `json:"content"`
-	Error   *struct {
+	// StopReason is the turn-termination reason; "max_tokens" marks an output cut off
+	// at the token ceiling (a truncated, not complete, answer).
+	StopReason string `json:"stop_reason"`
+	// Usage carries the per-request token counts; a pointer so an absent block parses
+	// to nil (unknown) rather than a misleading {0,0}.
+	Usage *struct {
+		InputTokens  int `json:"input_tokens"`
+		OutputTokens int `json:"output_tokens"`
+	} `json:"usage"`
+	Error *struct {
 		Message string `json:"message"`
 	} `json:"error"`
 }
@@ -127,7 +136,10 @@ func (c *Client) Complete(ctx context.Context, req providers.CompletionRequest) 
 	if mr.Error != nil {
 		return providers.CompletionResponse{}, fmt.Errorf("anthropic error: %s", mr.Error.Message)
 	}
-	out := providers.CompletionResponse{}
+	out := providers.CompletionResponse{Truncated: mr.StopReason == "max_tokens"}
+	if mr.Usage != nil {
+		out.Usage = providers.Usage{InputTokens: mr.Usage.InputTokens, OutputTokens: mr.Usage.OutputTokens}
+	}
 	for _, b := range mr.Content {
 		switch b.Type {
 		case "text":
