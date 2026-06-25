@@ -15,6 +15,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/Smana/runlore/internal/httpx"
 )
 
 // AppTokenSource mints and caches GitHub App installation tokens.
@@ -37,7 +39,7 @@ func NewAppTokenSource(baseURL string, appID, installID int64, key *rsa.PrivateK
 		baseURL = DefaultBaseURL
 	}
 	return &AppTokenSource{appID: appID, installID: installID, key: key,
-		baseURL: strings.TrimRight(baseURL, "/"), http: &http.Client{Timeout: 30 * time.Second}}
+		baseURL: strings.TrimRight(baseURL, "/"), http: httpx.SecureClient(30 * time.Second)}
 }
 
 // Token returns a valid installation token, refreshing when near expiry. The

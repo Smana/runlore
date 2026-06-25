@@ -46,7 +46,7 @@ func New(baseURL, model, apiKey string) *Client {
 		model:     model,
 		apiKey:    apiKey,
 		maxTokens: defaultMaxTokens,
-		http:      &http.Client{Timeout: 2 * time.Minute},
+		http:      httpx.SecureClient(2 * time.Minute),
 	}
 }
 
