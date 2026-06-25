@@ -69,3 +69,50 @@ func TestAddCriticalStormSuppressedAfterFirst(t *testing.T) {
 		t.Fatalf("storm alerts after the first should be suppressed, not buffered (pending=%d)", len(c.pending))
 	}
 }
+
+// During cooldown, a critical with an alertname not yet seen for the key is a
+// genuinely new problem and must flush — it must not be swallowed as storm
+// noise. Same-key correlation (CorrelationLabels) is what makes two distinct
+// alertnames share a key.
+func TestAddNewCriticalDuringCooldownFlushes(t *testing.T) {
+	now := time.Unix(0, 0)
+	s := &sink{}
+	c := newAt(Config{Debounce: time.Hour, MaxBatch: 100, Cooldown: 10 * time.Minute,
+		CorrelationLabels: []string{"app"}}, s, &now)
+	first := config.Incident{AlertName: "CrashLoop", Namespace: "ns", Severity: "critical",
+		Labels: map[string]string{"app": "web"}}
+	second := config.Incident{AlertName: "PodNotReady", Namespace: "ns", Severity: "critical",
+		Labels: map[string]string{"app": "web"}} // same key (app=web), different alertname
+
+	c.Add(first) // flush #1, seeds recent + seen{CrashLoop}
+	now = now.Add(time.Minute)
+	c.Add(second) // within cooldown but a NEW alertname → flush #2
+	if len(s.batches) != 2 {
+		t.Fatalf("a new critical alertname during cooldown must flush, batches=%d", len(s.batches))
+	}
+	// A repeat of the same alertname during cooldown is still suppressed.
+	now = now.Add(time.Minute)
+	c.Add(second) // PodNotReady again → suppressed
+	if len(s.batches) != 2 {
+		t.Fatalf("repeat critical alertname during cooldown must be suppressed, batches=%d", len(s.batches))
+	}
+}
+
+// A warning repeat during cooldown stays suppressed — only genuinely new
+// criticals get the cooldown bypass.
+func TestAddWarningDuringCooldownSuppressed(t *testing.T) {
+	now := time.Unix(0, 0)
+	s := &sink{}
+	c := newAt(Config{Debounce: time.Hour, MaxBatch: 1, Cooldown: 10 * time.Minute,
+		CorrelationLabels: []string{"app"}}, s, &now)
+	first := config.Incident{AlertName: "A", Namespace: "ns", Severity: "warning",
+		Labels: map[string]string{"app": "web"}}
+	newWarn := config.Incident{AlertName: "B", Namespace: "ns", Severity: "warning",
+		Labels: map[string]string{"app": "web"}} // same key, new alertname, but warning
+	c.Add(first) // MaxBatch=1 → flush, seeds cooldown
+	now = now.Add(time.Minute)
+	c.Add(newWarn) // new alertname but only warning → still suppressed
+	if len(s.batches) != 1 {
+		t.Fatalf("a new warning during cooldown must stay suppressed, batches=%d", len(s.batches))
+	}
+}
