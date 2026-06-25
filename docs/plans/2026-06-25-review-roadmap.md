@@ -14,11 +14,13 @@
 > what has since shipped to `main`. **Merged:** M0 (AUTH-1 · C1 · C4 · C2) · M1 churn-hardening
 > (GO-P1A · GO-P2A/B/C · **GO-P1B graceful drain**) · M2 egress security (**F1** ingress **+ egress**
 > redaction · **F3** reject-gating · **CLONE-1** per-call clone cache · **P3**: crypto-rand IDs ·
-> Slack empty-2xx · anthropic/gemini ReadAll wraps · reserve-after-pause) · M3 **FEAT-1** (`auto`
-> frozen experimental) · M4
-> **part 1** (hybrid-retrieval foundation — embeddings + cosine + RRF). **Remaining:** M4 **part 2**
-> (recall integration — **eval-gated**: needs a live model+embeddings endpoint + replay-eval to tune
-> recall's gates) · **POS-4** (alignment spike — research) · **FEAT-2** (ArgoCD Inspector parity —
+> Slack empty-2xx · anthropic/gemini ReadAll wraps · reserve-after-pause · **SSRF redirect guard**
+> across all outbound clients) · M3 **FEAT-1** (`auto` frozen experimental) · **M4 hybrid recall**
+> (part 1 embed foundation + part 2 catalog/recall integration — opt-in, BM25-default, regression-free;
+> cosine-threshold eval-tuning pending) · docs (**architecture diagram** — mermaid · prior-art ·
+> roadmap). **Remaining:** **M4 pt2 eval-tuning** (operator step — needs a live embeddings endpoint +
+> the live instant-recall eval to set the cosine gates) · **POS-4** (alignment spike — research) ·
+> **FEAT-2** (ArgoCD Inspector parity —
 > on-demand) · **PERSIST-1** (decision: doc-only). **Attempted & reverted:** **F2** action-target
 > validation — built a server-observed-resource set (alert seed + what_changed) that downgraded
 > actions on unobserved targets, but the e2e caught it downgrading a *legitimate* alert-driven
@@ -273,11 +275,11 @@ For an HA tool, leader-flap / SIGTERM / interrupted-clone / crash are the events
 ### M4 — The one real capability gain · *~M · improves the moat*
 | Item | What | Size |
 |---|---|---|
-| **Hybrid BM25 + embeddings recall** | **Part 1 done** (PR #120): in-house `internal/embed` — an OpenAI-compatible embeddings client + cosine + RRF fusion (no `chromem-go` dep, no Python, still single-binary). **Part 2 (eval-gated):** wire into the catalog index + recall, re-tuning the BM25-scaled gates for fused scores on the replay eval (needs a live model+embeddings endpoint). | **M** |
+| **Hybrid BM25 + embeddings recall** | **Implemented** (PR #120 foundation + #127 integration): in-house `internal/embed` (embeddings client + cosine + RRF — no `chromem-go`/Python, single-binary), wired into the catalog index + recall as an **opt-in, BM25-default** path gated on cosine (RRF candidate fusion → cosine confidence). **Eval-tuning pending:** the cosine thresholds (0.80 / 0.05) are conservative placeholders — set them against the live instant-recall eval (needs a real embeddings endpoint); recall records scores-on-rejection so they're measurable. | **M** |
 
 ### Execution order
 **Now:** M0 (AUTH-1 → C1 → C4 → C2) + kick off **F1** (the long pole). → **Next:** M1 churn hardening. →
 **Then:** finish M2 (F2 / F3 / CLONE-1 / P3). → **Decisions in parallel:** FEAT-1 (`auto`), POS-4, PERSIST-1. →
-**Later:** M4 hybrid recall, M3 docs polish, FEAT-2 (only on demand).
+**Later:** M4 pt2 eval-tuning (operator — needs an embeddings endpoint), M3 deep doc de-dup, FEAT-2 (only on demand).
 
 > Living doc — promote items as they land. **The review (Steps 1–5) is complete; this is the standing backlog.**
