@@ -35,10 +35,12 @@ func timeoutResult(req Request) providers.Investigation {
 // description + JSON Schema), and the message history — including the assistant
 // tool-call JSON (m.ToolCalls[].Args), which also goes over the wire. Counting
 // only m.Content systematically under-estimated a tool-heavy investigation,
-// letting the hard-kill guard fire late or never. Provider-reported usage is
-// not exposed in CompletionResponse today. Still an under-estimate of the true
-// wire size (it ignores JSON envelope/role overhead) but now the right order of
-// magnitude, which is what the hard-kill needs.
+// letting the hard-kill guard fire late or never. This estimate drives the
+// PRE-request budget guard, so it cannot use provider-reported usage (which only
+// exists post-response, on CompletionResponse.Usage); the loop records real
+// counts separately. Still an under-estimate of the true wire size (it ignores
+// JSON envelope/role overhead) but now the right order of magnitude, which is
+// what the hard-kill needs.
 func estimateTokens(system string, msgs []providers.Message, tools []providers.ToolSpec) int {
 	n := len(system)
 	for _, t := range tools {

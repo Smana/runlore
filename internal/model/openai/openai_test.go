@@ -101,6 +101,61 @@ func TestComplete(t *testing.T) {
 	}
 }
 
+// TestUsageAndFinishReason verifies the OpenAI usage block and choice finish_reason
+// are parsed onto CompletionResponse: prompt/completion tokens surface on Usage, and a
+// "length" finish_reason flags Truncated. A response omitting usage parses to the zero value.
+func TestUsageAndFinishReason(t *testing.T) {
+	tests := []struct {
+		name          string
+		body          string
+		wantIn        int
+		wantOut       int
+		wantTruncated bool
+	}{
+		{
+			name:          "usage + stop (not truncated)",
+			body:          `{"choices":[{"finish_reason":"stop","message":{"role":"assistant","content":"done"}}],"usage":{"prompt_tokens":130,"completion_tokens":42}}`,
+			wantIn:        130,
+			wantOut:       42,
+			wantTruncated: false,
+		},
+		{
+			name:          "length finish_reason flags truncation",
+			body:          `{"choices":[{"finish_reason":"length","message":{"role":"assistant","content":"cut off"}}],"usage":{"prompt_tokens":210,"completion_tokens":4096}}`,
+			wantIn:        210,
+			wantOut:       4096,
+			wantTruncated: true,
+		},
+		{
+			name:          "usage omitted parses to zero value",
+			body:          `{"choices":[{"finish_reason":"stop","message":{"role":"assistant","content":"done"}}]}`,
+			wantIn:        0,
+			wantOut:       0,
+			wantTruncated: false,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				_, _ = w.Write([]byte(tt.body))
+			}))
+			defer srv.Close()
+			resp, err := New(srv.URL, "test-model", "").Complete(context.Background(), providers.CompletionRequest{
+				Messages: []providers.Message{{Role: "user", Content: "hi"}},
+			})
+			if err != nil {
+				t.Fatalf("Complete: %v", err)
+			}
+			if resp.Usage.InputTokens != tt.wantIn || resp.Usage.OutputTokens != tt.wantOut {
+				t.Fatalf("usage = %+v, want in=%d out=%d", resp.Usage, tt.wantIn, tt.wantOut)
+			}
+			if resp.Truncated != tt.wantTruncated {
+				t.Fatalf("Truncated = %v, want %v", resp.Truncated, tt.wantTruncated)
+			}
+		})
+	}
+}
+
 // TestEmptyToolResultKeepsContent guards the OpenAI-compat requirement that a
 // tool-role message always carries a "content" field, even when the tool produced
 // no output. With json:"content,omitempty" an empty result elides the field and
