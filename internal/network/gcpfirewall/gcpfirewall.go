@@ -98,35 +98,62 @@ func (c *Client) Drops(ctx context.Context, _ providers.Selector, w providers.Ti
 		filter += fmt.Sprintf(` AND timestamp<="%s"`, w.End.Format(time.RFC3339Nano))
 	}
 
-	req := &logging.ListLogEntriesRequest{
-		ResourceNames: []string{"projects/" + c.project},
-		Filter:        filter,
-		OrderBy:       "timestamp desc",
-		PageSize:      c.maxEvents,
-	}
-
-	resp, err := c.svc.Entries.List(req).Context(ctx).Do()
-	if err != nil {
-		return nil, fmt.Errorf("list firewall log entries: %w", err)
-	}
-
-	out := make(providers.LogResult, 0, len(resp.Entries))
-	for _, e := range resp.Entries {
-		if e == nil {
-			continue
+	// Follow NextPageToken until we collect maxEvents lines or pages are exhausted.
+	// A single Entries.List().Do() returns one page (the API may return fewer than
+	// PageSize entries plus a token), so without paging a busy window is silently
+	// truncated to whatever the first page held. When the cap binds with more
+	// available, a sentinel line signals the partial view to the model.
+	out := make(providers.LogResult, 0, c.maxEvents)
+	truncated := false
+	token := ""
+	for {
+		req := &logging.ListLogEntriesRequest{
+			ResourceNames: []string{"projects/" + c.project},
+			Filter:        filter,
+			OrderBy:       "timestamp desc",
+			PageSize:      c.maxEvents,
+			PageToken:     token,
 		}
-		var p fwPayload
-		// JsonPayload is a googleapi.RawMessage ([]byte) holding the raw object.
-		if err := json.Unmarshal([]byte(e.JsonPayload), &p); err != nil {
-			// Skip entries we cannot parse rather than failing the whole query.
-			continue
+		resp, err := c.svc.Entries.List(req).Context(ctx).Do()
+		if err != nil {
+			return nil, fmt.Errorf("list firewall log entries: %w", err)
 		}
-		out = append(out, payloadToLine(p, e.Timestamp))
-		if int64(len(out)) >= c.maxEvents {
+		for _, e := range resp.Entries {
+			if e == nil {
+				continue
+			}
+			var p fwPayload
+			// JsonPayload is a googleapi.RawMessage ([]byte) holding the raw object.
+			if err := json.Unmarshal([]byte(e.JsonPayload), &p); err != nil {
+				// Skip entries we cannot parse rather than failing the whole query.
+				continue
+			}
+			out = append(out, payloadToLine(p, e.Timestamp))
+			if int64(len(out)) >= c.maxEvents {
+				// Cap reached: truncated iff there is more to fetch (more on this
+				// page is implied by another page token, or this page being full).
+				truncated = resp.NextPageToken != ""
+				break
+			}
+		}
+		if int64(len(out)) >= c.maxEvents || resp.NextPageToken == "" {
 			break
 		}
+		token = resp.NextPageToken
+	}
+	if truncated {
+		out = append(out, truncationLine(c.maxEvents))
 	}
 	return out, nil
+}
+
+// truncationLine is the sentinel appended when Drops stops at its cap with more
+// entries upstream, so the model knows the view is partial. It carries no Time or
+// Fields, so it cannot be mistaken for a real flow.
+func truncationLine(limit int64) providers.LogLine {
+	return providers.LogLine{
+		Message: fmt.Sprintf("… results truncated at %d (more matched — narrow the query or shorten the window)", limit),
+	}
 }
 
 // payloadToLine renders one DENIED firewall connection into a LogLine. ts is the
