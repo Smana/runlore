@@ -60,22 +60,37 @@ func (s *Syncer) Sync(ctx context.Context) (bool, error) {
 		return false, fmt.Errorf("auth: %w", err)
 	}
 	ref := plumbing.NewBranchReferenceName(s.branch())
-	var repo *git.Repository
-	if _, statErr := os.Stat(filepath.Join(s.Dir, ".git")); statErr != nil {
-		repo, err = git.PlainCloneContext(ctx, s.Dir, false, &git.CloneOptions{
+	clone := func() (*git.Repository, error) {
+		repo, cerr := git.PlainCloneContext(ctx, s.Dir, false, &git.CloneOptions{
 			URL:           s.URL,
 			ReferenceName: ref,
 			SingleBranch:  true,
 			Auth:          auth,
 		})
-		if err != nil {
+		if cerr != nil {
+			// Drop the partial checkout so an interrupted/failed clone can't leave a
+			// half-written .git that wedges every future Pull — the next tick re-clones.
+			_ = os.RemoveAll(s.Dir)
+			return nil, cerr
+		}
+		return repo, nil
+	}
+	var repo *git.Repository
+	if _, statErr := os.Stat(filepath.Join(s.Dir, ".git")); statErr != nil {
+		if repo, err = clone(); err != nil {
+			return false, err
+		}
+	} else if repo, err = git.PlainOpen(s.Dir); err != nil {
+		// A present-but-unreadable mirror (e.g. an earlier clone killed mid-write)
+		// would otherwise error on every Pull forever — discard it and re-clone.
+		s.Log.Warn("catalog mirror unreadable; re-cloning", "dir", s.Dir, "err", err)
+		if rmErr := os.RemoveAll(s.Dir); rmErr != nil {
+			return false, fmt.Errorf("remove corrupt mirror: %w", rmErr)
+		}
+		if repo, err = clone(); err != nil {
 			return false, err
 		}
 	} else {
-		repo, err = git.PlainOpen(s.Dir)
-		if err != nil {
-			return false, err
-		}
 		wt, werr := repo.Worktree()
 		if werr != nil {
 			return false, werr
@@ -102,18 +117,26 @@ func (s *Syncer) Sync(ctx context.Context) (bool, error) {
 
 // Run does an initial sync then re-syncs every interval, calling onSync after each
 // success. It returns when ctx is done. interval <= 0 defaults to 5m.
-func (s *Syncer) Run(ctx context.Context, interval time.Duration, onSync func()) {
+func (s *Syncer) Run(ctx context.Context, interval time.Duration, onSync func() error) {
 	if interval <= 0 {
 		interval = 5 * time.Minute
 	}
 	do := func() {
+		prev := s.lastRev
 		changed, err := s.Sync(ctx)
 		if err != nil {
 			s.Log.Warn("catalog git sync failed", "url", s.URL, "err", err)
 			return
 		}
-		if changed {
-			onSync()
+		if !changed {
+			return
+		}
+		if err := onSync(); err != nil {
+			// Re-index failed: roll back to the previous synced revision so the next
+			// tick retries it, instead of sticking the catalog on a stale/empty index
+			// until upstream HEAD next moves. (Sync already advanced lastRev.)
+			s.lastRev = prev
+			s.Log.Warn("catalog re-index failed; will retry next sync", "url", s.URL, "err", err)
 		}
 	}
 	do()
