@@ -5,7 +5,44 @@ import (
 	"testing"
 
 	"github.com/Smana/runlore/internal/catalog"
+	"github.com/Smana/runlore/internal/config"
 )
+
+// TestRequireWebhookAuth asserts the serve-path fail-closed guard: a configured
+// model with an empty webhook token must refuse to start; everything else is
+// allowed. Scoped to serve only — config.Validate stays untouched so non-serve
+// subcommands (e.g. `lore investigate`) with a model and no webhook still run.
+func TestRequireWebhookAuth(t *testing.T) {
+	// openai/vllm needs a base_url to count as configured; anthropic/gemini are
+	// configured via their built-in endpoint even with an empty base_url.
+	openaiModel := config.Model{Provider: "openai", BaseURL: "http://vllm:8000/v1"}
+	anthropicModel := config.Model{Provider: "anthropic"} // built-in endpoint
+	noModel := config.Model{}                             // unconfigured
+
+	tests := []struct {
+		name    string
+		model   config.Model
+		token   string
+		wantErr bool
+	}{
+		{"model + token → ok", openaiModel, "secret", false},
+		{"model + no token → refused", openaiModel, "", true},
+		{"anthropic built-in + no token → refused", anthropicModel, "", true},
+		{"anthropic built-in + token → ok", anthropicModel, "secret", false},
+		{"no model + no token → ok (log-only)", noModel, "", false},
+		{"no model + token → ok", noModel, "secret", false},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := &config.Config{Model: tc.model}
+			cfg.Server.WebhookTokenEnv = "RUNLORE_WEBHOOK_TOKEN"
+			err := requireWebhookAuth(cfg, tc.token)
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("requireWebhookAuth err = %v, wantErr = %v", err, tc.wantErr)
+			}
+		})
+	}
+}
 
 // TestNewHTTPServer asserts the serving http.Server is built with every inbound
 // timeout/size bound set (non-zero) — Go's defaults are zero (unlimited), the

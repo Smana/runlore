@@ -205,6 +205,9 @@ func runServe(args []string) error {
 	auto := buildAuto(cfg, execForActions, aud, log)
 	slackSigningSecret := os.Getenv(cfg.Notify.Slack.SigningSecretEnv)
 	webhookToken := os.Getenv(cfg.Server.WebhookTokenEnv)
+	if err := requireWebhookAuth(cfg, webhookToken); err != nil {
+		return err
+	}
 
 	// Set up the single shared OTel metrics instance before building the investigator
 	// so recall + the investigation loop can record to it from the first request.
@@ -432,6 +435,22 @@ func modelConfigured(cfg *config.Config) bool {
 	default:
 		return cfg.Model.BaseURL != ""
 	}
+}
+
+// requireWebhookAuth fails closed on the serve path when the LLM investigator is
+// wired but the alert webhook is anonymous. The webhook's labels/annotations flow
+// verbatim into the LLM prompt (and bill the model), so an unauthenticated caller
+// must not reach it once a model is configured — regardless of actions.mode. This
+// lives on the serve path, NOT in config.Validate: Validate is shared by every
+// subcommand (e.g. `lore investigate` legitimately needs a model and has no
+// webhook), so the requirement is scoped to where the webhook is actually served.
+// It mirrors the approval-token fail-closed guard above.
+func requireWebhookAuth(cfg *config.Config, webhookToken string) error {
+	if modelConfigured(cfg) && webhookToken == "" {
+		return fmt.Errorf("model configured but server.webhook_token_env (%q) is empty: refusing to start with an unauthenticated alert webhook (fail closed)",
+			cfg.Server.WebhookTokenEnv)
+	}
+	return nil
 }
 
 // buildModel builds the ModelProvider for the configured provider.
