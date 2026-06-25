@@ -894,6 +894,7 @@ func buildReinvestigator(ctx context.Context, cfg *config.Config, gp providers.G
 			MaxSteps:                  cfg.Investigation.MaxSteps,
 			MaxToolOutputBytes:        cfg.Investigation.MaxToolOutputBytes,
 			MaxTokensPerInvestigation: cfg.Investigation.MaxTokensPerInvestigation,
+			Timeout:                   cfg.Investigation.Timeout.Std(),
 			OnComplete:                func(inv providers.Investigation) { res, got = inv, true },
 		}
 		if err := li.Investigate(ctx, req); err != nil {
@@ -1121,6 +1122,7 @@ func runInvestigate(args []string) error {
 	li := &investigate.LoopInvestigator{
 		Model: model, Tools: tools, Recall: recall, Actions: action.New(cfg.Actions), Log: log, Verify: true,
 		ModelProvider: cfg.Model.Provider,
+		Timeout:       cfg.Investigation.Timeout.Std(),
 		OnComplete:    func(inv providers.Investigation) { result = &inv },
 	}
 	title := *alert
@@ -1194,6 +1196,7 @@ func buildInvestigator(ctx context.Context, cfg *config.Config, gp providers.Git
 		MaxSteps:                  cfg.Investigation.MaxSteps,
 		MaxToolOutputBytes:        cfg.Investigation.MaxToolOutputBytes,
 		MaxTokensPerInvestigation: cfg.Investigation.MaxTokensPerInvestigation,
+		Timeout:                   cfg.Investigation.Timeout.Std(),
 		OnComplete: func(found providers.Investigation) {
 			// Record the outcome "open" first: this investigation happened for an
 			// incident, with the answer we used (recall vs fresh). A matching
