@@ -83,10 +83,19 @@ type chatFunction struct {
 
 type chatChoice struct {
 	Message chatMessage `json:"message"`
+	// FinishReason is the choice-termination reason; "length" marks an output cut off
+	// at the token ceiling (a truncated, not complete, answer).
+	FinishReason string `json:"finish_reason"`
 }
 
 type chatResponse struct {
 	Choices []chatChoice `json:"choices"`
+	// Usage carries the per-request token counts; a pointer so an absent block parses
+	// to nil (unknown) rather than a misleading {0,0}.
+	Usage *struct {
+		PromptTokens     int `json:"prompt_tokens"`
+		CompletionTokens int `json:"completion_tokens"`
+	} `json:"usage"`
 }
 
 // Complete sends a chat completion with tools and maps the result back.
@@ -151,8 +160,12 @@ func (c *Client) Complete(ctx context.Context, req providers.CompletionRequest) 
 	if len(cr.Choices) == 0 {
 		return providers.CompletionResponse{}, fmt.Errorf("no choices in response")
 	}
-	msg := cr.Choices[0].Message
-	out := providers.CompletionResponse{Text: msg.Content}
+	choice := cr.Choices[0]
+	msg := choice.Message
+	out := providers.CompletionResponse{Text: msg.Content, Truncated: choice.FinishReason == "length"}
+	if cr.Usage != nil {
+		out.Usage = providers.Usage{InputTokens: cr.Usage.PromptTokens, OutputTokens: cr.Usage.CompletionTokens}
+	}
 	for _, tc := range msg.ToolCalls {
 		out.ToolCalls = append(out.ToolCalls, providers.ToolCall{ID: tc.ID, Name: tc.Function.Name, Args: tc.Function.Arguments})
 	}
