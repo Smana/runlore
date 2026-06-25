@@ -3,7 +3,9 @@
 // agnostic exchange (OpenAI-shaped: assistant tool_calls + separate tool messages)
 // onto Gemini's contents/parts form: assistant turns become role "model" with
 // functionCall parts, and tool results coalesce into one role "user" turn of
-// functionResponse parts (Gemini matches a response to its call by function name).
+// functionResponse parts. Each call/response carries the originating call id, so
+// parallel calls to the same function name correlate by id (Gemini's rule for
+// parallel calls); when the model returns no id, correlation falls back to name.
 package gemini
 
 import (
@@ -64,11 +66,13 @@ type part struct {
 }
 
 type functionCall struct {
+	ID   string          `json:"id,omitempty"` // call id; correlates parallel same-name calls
 	Name string          `json:"name"`
 	Args json.RawMessage `json:"args,omitempty"`
 }
 
 type functionResponse struct {
+	ID       string          `json:"id,omitempty"` // echoes the originating functionCall id
 	Name     string          `json:"name"`
 	Response json.RawMessage `json:"response"`
 }
@@ -142,8 +146,14 @@ func (c *Client) Complete(ctx context.Context, req providers.CompletionRequest) 
 	for _, p := range gr.Candidates[0].Content.Parts {
 		switch {
 		case p.FunctionCall != nil:
+			// Newer Gemini responses carry a call id that correlates parallel calls
+			// to the same function; fall back to the name when the id is absent.
+			id := p.FunctionCall.ID
+			if id == "" {
+				id = p.FunctionCall.Name
+			}
 			out.ToolCalls = append(out.ToolCalls, providers.ToolCall{
-				ID:   p.FunctionCall.Name, // Gemini matches a function response to its call by name
+				ID:   id,
 				Name: p.FunctionCall.Name,
 				Args: argString(p.FunctionCall.Args),
 			})
@@ -156,8 +166,13 @@ func (c *Client) Complete(ctx context.Context, req providers.CompletionRequest) 
 
 // toContents maps engine-agnostic messages to Gemini contents. Assistant turns
 // become role "model" (text + functionCall parts); consecutive tool results are
-// coalesced into a single role "user" turn of functionResponse parts, named by the
-// function they answer (resolved from the originating tool call's id).
+// coalesced into a single role "user" turn of functionResponse parts. Each call/
+// response carries the originating call id so parallel calls to the SAME function
+// name correlate correctly; the name resolves from the id and is kept as a label.
+//
+// A call id equal to its function name is a fallback (older Gemini API responses
+// without a real id): that id is not emitted on the wire, preserving name-only
+// behavior for single calls and matching what the model itself sent.
 func toContents(in []providers.Message) []content {
 	idToName := map[string]string{}
 	for _, m := range in {
@@ -175,17 +190,26 @@ func toContents(in []providers.Message) []content {
 				parts = append(parts, part{Text: m.Content})
 			}
 			for _, tc := range m.ToolCalls {
-				parts = append(parts, part{FunctionCall: &functionCall{Name: tc.Name, Args: rawObject(tc.Args)}})
+				parts = append(parts, part{FunctionCall: &functionCall{
+					ID:   wireID(tc.ID, tc.Name),
+					Name: tc.Name,
+					Args: rawObject(tc.Args),
+				}})
 			}
 			out = append(out, content{Role: "model", Parts: parts})
 		case "tool":
 			var parts []part
 			for i < len(in) && in[i].Role == "tool" {
-				name := idToName[in[i].ToolCallID]
+				id := in[i].ToolCallID
+				name := idToName[id]
 				if name == "" {
-					name = in[i].ToolCallID
+					name = id
 				}
-				parts = append(parts, part{FunctionResponse: &functionResponse{Name: name, Response: resultObject(in[i].Content)}})
+				parts = append(parts, part{FunctionResponse: &functionResponse{
+					ID:       wireID(id, name),
+					Name:     name,
+					Response: resultObject(in[i].Content),
+				}})
 				i++
 			}
 			i-- // outer loop will increment
@@ -195,6 +219,16 @@ func toContents(in []providers.Message) []content {
 		}
 	}
 	return out
+}
+
+// wireID returns the call id to send on the wire, or "" when the id is just the
+// function name (our fallback for older API responses with no real id) — in which
+// case Gemini correlates by name as before.
+func wireID(id, name string) string {
+	if id == name {
+		return ""
+	}
+	return id
 }
 
 // rawObject ensures functionCall args is a JSON object ("" → {}).
