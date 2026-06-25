@@ -118,7 +118,9 @@ func (c *Client) Complete(ctx context.Context, req providers.CompletionRequest) 
 	defer func() { _ = resp.Body.Close() }()
 	data, _ := io.ReadAll(resp.Body)
 	if resp.StatusCode != http.StatusOK {
-		return providers.CompletionResponse{}, fmt.Errorf("messages status %d: %s", resp.StatusCode, string(data[:min(len(data), 512)]))
+		// Don't echo the upstream body into an Error-level log (info disclosure +
+		// log injection); surface status + sanitized request-id for correlation.
+		return providers.CompletionResponse{}, fmt.Errorf("messages status %d (request-id %q)", resp.StatusCode, httpx.RequestID(resp.Header))
 	}
 	var mr msgResponse
 	if err := json.Unmarshal(data, &mr); err != nil {

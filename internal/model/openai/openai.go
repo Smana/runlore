@@ -127,7 +127,11 @@ func (c *Client) Complete(ctx context.Context, req providers.CompletionRequest) 
 		return providers.CompletionResponse{}, fmt.Errorf("read response: %w", err)
 	}
 	if resp.StatusCode != http.StatusOK {
-		return providers.CompletionResponse{}, fmt.Errorf("chat status %d: %s", resp.StatusCode, string(data[:min(len(data), 512)]))
+		// Do not echo the upstream body: base_url is operator-configurable, so a
+		// misbehaving/compromised proxy could inject arbitrary content into an
+		// Error-level log (info disclosure + log injection). Surface the status and
+		// the upstream request-id (sanitized) for correlation instead.
+		return providers.CompletionResponse{}, fmt.Errorf("chat status %d (request-id %q)", resp.StatusCode, httpx.RequestID(resp.Header))
 	}
 	var cr chatResponse
 	if err := json.Unmarshal(data, &cr); err != nil {
