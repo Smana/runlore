@@ -94,6 +94,12 @@ config:
   #   # omit to verify with the main model). Verify always runs — this only lowers cost.
   #   verify:
   #     model: <cheaper-model-name>
+  #   # Embeddings endpoint (OpenAI-compatible /embeddings) for hybrid recall — see
+  #   # catalog.instant_recall.hybrid. Unset ⇒ BM25-only recall.
+  #   embeddings:
+  #     base_url: https://vllm.svc/v1
+  #     model: <embedding-model-name>
+  #     api_key_env: OPENAI_API_KEY
   # catalog:
   #   dir: /var/lib/runlore/catalog
   #   instant_recall:
@@ -102,6 +108,12 @@ config:
   #     margin_gap: 1.0                # top hit must beat the runner-up by this (corpus-portable; not an absolute floor)
   #     solo_floor: 4.0                # confident bar when there is only one hit
   #     require_workload_match: false  # true = exact namespace+workload; false = namespace-level agreement is enough
+  #     # EXPERIMENTAL hybrid recall: fuse BM25 + embeddings, gate on cosine similarity.
+  #     # Requires model.embeddings (above). TUNE the cosine thresholds against the
+  #     # instant-recall eval before relying on it — defaults are conservative placeholders.
+  #     hybrid: false
+  #     hybrid_min_score: 0.80         # cosine floor for the top hit
+  #     hybrid_margin_gap: 0.05        # cosine margin over the runner-up
   # outcome:
   #   ledger_path: /var/lib/runlore/catalog/outcomes.jsonl  # learning-loop outcome ledger.
   #     Keep it UNDER catalog.mountPath and set persistence.enabled=true: the serve

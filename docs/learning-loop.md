@@ -96,6 +96,14 @@ The agent never blindly trusts the catalog. A recall short-circuit (answer witho
 investigating) only fires when a hit clears **three independent gates**, and even
 then the answer is confirmed against live state and re-reviewed.
 
+> **Hybrid recall (experimental, opt-in).** With `instant_recall.hybrid` set and a
+> `model.embeddings` endpoint configured, the BM25 search below is fused with
+> embedding-cosine similarity (Reciprocal Rank Fusion), and Gate 2's margin is measured
+> on **cosine** (`hybrid_min_score` / `hybrid_margin_gap`) rather than the BM25 score.
+> Default off — with no embedder the catalog stays BM25-only and recall is unchanged.
+> The cosine thresholds are conservative placeholders; tune them against the
+> instant-recall eval before relying on them.
+
 ```mermaid
 flowchart TD
     Q["Query = alert title + message"] --> S["BM25 search over catalog<br/>(bleve, wider candidate set k≈15)"]

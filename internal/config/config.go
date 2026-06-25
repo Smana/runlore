@@ -197,6 +197,15 @@ type InstantRecall struct {
 	RequireWorkloadMatch bool    `yaml:"require_workload_match"` // true = exact namespace+workload; false = namespace-level agreement is enough
 	OutcomePrior         float64 `yaml:"outcome_prior"`          // Beta prior strength for outcome decay
 	OutcomeFloor         float64 `yaml:"outcome_floor"`          // reject a recall when the outcome factor drops below this
+
+	// Hybrid switches recall to fused BM25 + embedding retrieval, gated on COSINE
+	// similarity instead of the BM25 score above. Requires model.embeddings to be
+	// configured (else recall stays BM25). EXPERIMENTAL — tune the cosine thresholds
+	// against the instant-recall eval before relying on it; the defaults are
+	// conservative placeholders, not measured values.
+	Hybrid          bool    `yaml:"hybrid"`            // enable hybrid (cosine-gated) recall
+	HybridMinScore  float64 `yaml:"hybrid_min_score"`  // cosine floor for the top hit (default 0.80)
+	HybridMarginGap float64 `yaml:"hybrid_margin_gap"` // cosine margin over the runner-up (default 0.05)
 }
 
 // CatalogGit configures periodic Git sync of the catalog into Dir.
@@ -220,6 +229,18 @@ type Model struct {
 	// unset fields inherit from the parent above (so `verify: {model: <cheap>}` reuses
 	// the same provider/endpoint/key). Absent ⇒ verify runs on the main model.
 	Verify *ModelOverride `yaml:"verify"`
+	// Embeddings optionally configures an OpenAI-compatible /embeddings endpoint used
+	// for hybrid recall (instant_recall.hybrid). Unset ⇒ BM25-only recall.
+	Embeddings *Embeddings `yaml:"embeddings"`
+}
+
+// Embeddings configures an OpenAI-compatible /embeddings endpoint (vLLM/Ollama/
+// OpenAI) for hybrid catalog recall — served by the same kind of endpoint as the
+// model; keyless when APIKeyEnv is empty.
+type Embeddings struct {
+	BaseURL   string `yaml:"base_url"`
+	Model     string `yaml:"model"`
+	APIKeyEnv string `yaml:"api_key_env"`
 }
 
 // ModelOverride is a partial Model used to route the verify pass to a cheaper model;
