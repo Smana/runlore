@@ -89,6 +89,11 @@ config:
   #   base_url: https://vllm.svc/v1
   #   model: <model-name>
   #   api_key_env: OPENAI_API_KEY
+  #   # Route the adversarial verify pass to a cheaper/faster model to cut the
+  #   # +1-call-per-investigation cost (inherits the fields above unless overridden;
+  #   # omit to verify with the main model). Verify always runs — this only lowers cost.
+  #   verify:
+  #     model: <cheaper-model-name>
   # catalog:
   #   dir: /var/lib/runlore/catalog
   #   instant_recall:
