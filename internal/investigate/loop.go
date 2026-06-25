@@ -89,6 +89,10 @@ type LoopInvestigator struct {
 	Recall     *Recall                       // optional: short-circuit on a high-confidence catalog hit
 	Verify     bool                          // run an adversarial review of root causes before delivery
 
+	// VerifyModel optionally routes the adversarial verify pass to a cheaper/faster
+	// model. nil ⇒ the verify pass reuses Model. Verify itself always runs.
+	VerifyModel providers.ModelProvider
+
 	// Timeout bounds a single investigation end-to-end (recall + every model/tool
 	// call, including a hung git clone/patch). 0 disables it. On expiry the loop
 	// delivers a synthetic timeout result rather than starving the queue worker.

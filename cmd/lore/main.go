@@ -465,16 +465,43 @@ func requireWebhookAuth(cfg *config.Config, webhookToken string) error {
 	return nil
 }
 
+// newModelClient builds a ModelProvider for a wire protocol + endpoint.
+func newModelClient(provider, baseURL, model, apiKey string) providers.ModelProvider {
+	switch provider {
+	case "anthropic":
+		return anthropic.New(baseURL, model, apiKey)
+	case "gemini":
+		return gemini.New(baseURL, model, apiKey)
+	default:
+		return openai.New(baseURL, model, apiKey)
+	}
+}
+
 // buildModel builds the ModelProvider for the configured provider.
 func buildModel(cfg *config.Config, apiKey string) providers.ModelProvider {
-	switch cfg.Model.Provider {
-	case "anthropic":
-		return anthropic.New(cfg.Model.BaseURL, cfg.Model.Model, apiKey)
-	case "gemini":
-		return gemini.New(cfg.Model.BaseURL, cfg.Model.Model, apiKey)
-	default:
-		return openai.New(cfg.Model.BaseURL, cfg.Model.Model, apiKey)
+	return newModelClient(cfg.Model.Provider, cfg.Model.BaseURL, cfg.Model.Model, apiKey)
+}
+
+// buildVerifyModel builds the optional cheaper model for the adversarial verify
+// pass, inheriting any unset field from the main model. Returns nil when no
+// model.verify override is configured (verify then runs on the main model).
+func buildVerifyModel(cfg *config.Config) providers.ModelProvider {
+	v := cfg.Model.Verify
+	if v == nil {
+		return nil
 	}
+	or := func(a, b string) string {
+		if a != "" {
+			return a
+		}
+		return b
+	}
+	apiKey := ""
+	if keyEnv := or(v.APIKeyEnv, cfg.Model.APIKeyEnv); keyEnv != "" {
+		apiKey = os.Getenv(keyEnv)
+	}
+	return newModelClient(or(v.Provider, cfg.Model.Provider),
+		or(v.BaseURL, cfg.Model.BaseURL), or(v.Model, cfg.Model.Model), apiKey)
 }
 
 // buildCatalog returns the kb_search backing store, or nil when no catalog is
@@ -664,15 +691,7 @@ func buildJudgeModel(cfg *config.Config, provider, baseURL, model, apiKeyEnv str
 		}
 		return buildModel(cfg, apiKey)
 	}
-	apiKey := os.Getenv(apiKeyEnv)
-	switch provider {
-	case "anthropic":
-		return anthropic.New(baseURL, model, apiKey)
-	case "gemini":
-		return gemini.New(baseURL, model, apiKey)
-	default:
-		return openai.New(baseURL, model, apiKey)
-	}
+	return newModelClient(provider, baseURL, model, os.Getenv(apiKeyEnv))
 }
 
 // runEvalLive runs the live-fire campaign and writes a dated report.
@@ -971,7 +990,7 @@ func buildReinvestigator(ctx context.Context, cfg *config.Config, gp providers.G
 		var res providers.Investigation
 		var got bool
 		li := &investigate.LoopInvestigator{
-			Model: model, Tools: tools, Recall: recall, Verify: true, Log: log,
+			Model: model, VerifyModel: buildVerifyModel(cfg), Tools: tools, Recall: recall, Verify: true, Log: log,
 			Metrics:                   metrics,
 			ModelProvider:             cfg.Model.Provider,
 			MaxSteps:                  cfg.Investigation.MaxSteps,
@@ -1203,7 +1222,7 @@ func runInvestigate(args []string) error {
 	model, tools, recall, _ := buildModelAndTools(ctx, cfg, gitOpsFromKube(cfg, log), nil, log)
 	var result *providers.Investigation
 	li := &investigate.LoopInvestigator{
-		Model: model, Tools: tools, Recall: recall, Actions: action.New(cfg.Actions), Log: log, Verify: true,
+		Model: model, VerifyModel: buildVerifyModel(cfg), Tools: tools, Recall: recall, Actions: action.New(cfg.Actions), Log: log, Verify: true,
 		ModelProvider: cfg.Model.Provider,
 		Timeout:       cfg.Investigation.Timeout.Std(),
 		OnComplete:    func(inv providers.Investigation) { result = &inv },
@@ -1283,6 +1302,7 @@ func buildInvestigator(ctx context.Context, cfg *config.Config, gp providers.Git
 	}
 	return &investigate.LoopInvestigator{
 		Model:                     model,
+		VerifyModel:               buildVerifyModel(cfg),
 		Tools:                     tools,
 		Log:                       log,
 		Actions:                   actions,
@@ -1419,8 +1439,12 @@ func gitopsEngine(cfg *config.Config) string {
 }
 
 // buildGitOps builds the GitOps provider for the configured engine (flux default).
+// The differ clones the GitOps source repo over HTTPS; it authenticates private
+// repos with the shared GitHub App installation token (the App needs contents:read
+// on the source repo). A nil token source (no App configured) means public/local
+// repos only.
 func buildGitOps(cfg *config.Config, dc dynamic.Interface, log *slog.Logger) providers.GitOpsProvider {
-	differ := &whatchanged.Differ{}
+	differ := &whatchanged.Differ{TokenSource: buildForgeTokenSource(cfg, log)}
 	if gitopsEngine(cfg) == "argocd" {
 		log.Info("gitops engine", "engine", "argocd")
 		return argocd.New(argocd.NewDynamicReader(dc), differ)
