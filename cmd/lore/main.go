@@ -281,12 +281,18 @@ func runServe(args []string) error {
 
 	reinv := buildReinvestigator(ctx, cfg, gitops, metrics, log)
 
+	// failureDedup is created ONCE (process scope), not per leadership term, so it
+	// survives leader flaps: the gitops informer's initial-LIST replay of every
+	// still-failing workload on each re-acquire is then suppressed instead of
+	// re-investigated (GO-P1A). Deduper is safe for concurrent use across terms.
+	failureDedup := trigger.NewDeduper(cfg.Triggers.Incidents.Dedup.Window.Std())
+
 	// startWork runs the leader-only loops (investigation queue + failure watch +
 	// re-investigate poller), scoped to a context cancelled when leadership is lost.
 	startWork := func(workCtx context.Context) {
 		go queue.Run(workCtx)
 		if cfg.Triggers.GitOpsFailures.Enabled && gitops != nil {
-			startGitOpsFailureWatch(workCtx, cfg, queue, gitops, metrics, log)
+			startGitOpsFailureWatch(workCtx, cfg, queue, gitops, failureDedup, metrics, log)
 		}
 		if reinv != nil {
 			log.Info("re-investigate poller enabled", "label", investigate.ReinvestigateLabel)
@@ -1375,7 +1381,11 @@ func buildInvestigator(ctx context.Context, cfg *config.Config, gp providers.Git
 // only after the failure has persisted — re-checked still Ready=False via the
 // provider's ResourceStatus — filtering reconcile-churn transients that would
 // otherwise drive confident-but-wrong root causes.
-func startGitOpsFailureWatch(ctx context.Context, cfg *config.Config, q investigate.Enqueuer, gp providers.GitOpsProvider, metrics *telemetry.Metrics, log *slog.Logger) {
+// dedup is process-scoped (created once in runServe) and shared across leadership
+// terms — NOT created here per call. The informer's initial LIST re-emits every
+// still-failing workload as an Add on each (re-)acquire, so a per-term deduper
+// (empty at term start) would re-investigate every broken app on every leader flap.
+func startGitOpsFailureWatch(ctx context.Context, cfg *config.Config, q investigate.Enqueuer, gp providers.GitOpsProvider, dedup *trigger.Deduper, metrics *telemetry.Metrics, log *slog.Logger) {
 	events, err := gp.WatchFailures(ctx)
 	if err != nil {
 		log.Warn("gitops-failure watch disabled", "err", err)
@@ -1384,7 +1394,7 @@ func startGitOpsFailureWatch(ctx context.Context, cfg *config.Config, q investig
 	deb := buildFailureDebouncer(cfg, gp, metrics, log)
 	log.Info("watching gitops failures", "engine", gitopsEngine(cfg),
 		"debounce", cfg.Triggers.GitOpsFailures.DebounceWindow())
-	go investigate.DrainFailures(ctx, events, q, trigger.NewDeduper(cfg.Triggers.Incidents.Dedup.Window.Std()), deb, log)
+	go investigate.DrainFailures(ctx, events, q, dedup, deb, log)
 }
 
 // buildFailureDebouncer wires a Debouncer whose "still failing?" re-check reads
