@@ -282,6 +282,7 @@ type kbFrontmatter struct {
 	Description string   `yaml:"description"`
 	Resource    string   `yaml:"resource,omitempty"`
 	Tags        []string `yaml:"tags,omitempty"`
+	Timestamp   string   `yaml:"timestamp,omitempty"` // OKF-recommended; seed entries carry it, curated ones now do too
 	Fingerprint string   `yaml:"fingerprint,omitempty"`
 }
 
@@ -302,7 +303,11 @@ func prBody(e providers.KBEntry) string {
 }
 
 func renderEntry(e providers.KBEntry) string {
-	fm, _ := yaml.Marshal(kbFrontmatter{Type: e.Type, Title: e.Title, Description: e.Description, Resource: e.Resource, Tags: e.Tags, Fingerprint: e.Fingerprint})
+	// Stamp the curated entry at render time (RFC3339 UTC, matching the seed
+	// entries and flux.Executor). Kept off KBEntry so draftKBEntry stays
+	// deterministic/time-free; this serializer is already the I/O boundary.
+	ts := time.Now().UTC().Format(time.RFC3339)
+	fm, _ := yaml.Marshal(kbFrontmatter{Type: e.Type, Title: e.Title, Description: e.Description, Resource: e.Resource, Tags: e.Tags, Timestamp: ts, Fingerprint: e.Fingerprint})
 	var b strings.Builder
 	b.WriteString("---\n")
 	b.Write(fm)
