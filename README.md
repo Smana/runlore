@@ -4,7 +4,7 @@
 
 # RunLore
 
-**A read-only SRE agent that investigates incidents — and remembers what it learns.**
+**An open-source SRE agent that investigates incidents — and remembers what it learns.**
 
 [![CI](https://github.com/Smana/runlore/actions/workflows/ci.yaml/badge.svg)](https://github.com/Smana/runlore/actions/workflows/ci.yaml)
 [![Go Report Card](https://goreportcard.com/badge/github.com/Smana/runlore)](https://goreportcard.com/report/github.com/Smana/runlore)
@@ -16,15 +16,18 @@
 
 ---
 
-RunLore is an open-source, **read-only** SRE agent that investigates any incident — *what changed?
-what's wrong?* — and posts a confidence-scored root cause to chat (Slack, Matrix…). It never touches
-your cluster.
+RunLore is an open-source SRE agent that investigates any incident — *what changed? what's wrong?*
+— and posts a confidence-scored root cause to chat (Slack, Matrix…). It is **read-only by default**:
+it reads your cluster, metrics, logs, and network flows — its only writes go to Git, via reviewed PRs.
 
 What sets it apart: it learns **your** platform. Every investigation opens a PR in a Git repo you
 own; a human merges it, building a knowledge base of your incidents and context. The same pattern
 next time gets an instant answer — no fresh investigation.
 
 **Learns your platform · single Go binary · runs in your cluster · on your models.**
+
+> **Note:** RunLore is read-only by default — it never mutates your cluster. An autonomy ladder
+> (suggest → approve → auto) is on the roadmap for teams that want to go further.
 
 ## See it in action
 
@@ -41,19 +44,19 @@ knowledge base.
 ```mermaid
 flowchart LR
     A["Incident<br/>any alert · event"] -->|"trigger policy<br/>(prod · critical · ns…)"| B
-    subgraph B["🔎 Investigate · read-only"]
+    subgraph B["🔎 Investigate"]
       direction TB
       W["what changed?<br/>deploys · infra · certs · scaling<br/>(GitOps → exact Git diff)"]
       C["what's wrong?<br/>saturation · network · nodes · deps"]
     end
     B --> R["🎯 Root cause<br/>+ confidence + evidence"]
-    R -->|"read-only"| D["💬 Slack / Matrix<br/>findings + suggested fix"]
+    R --> D["💬 Slack / Matrix<br/>findings + suggested fix"]
     R -. learn .-> K[("📚 GitHub PR<br/>draft entry in your KB")]
     K -. instant recall .-> B
 ```
 
 1. **Alert fires** — Alertmanager or a GitOps failure event triggers RunLore via webhook.
-2. **RunLore investigates** — it reads your cluster, metrics, logs, and network flows. It never writes to the cluster.
+2. **RunLore investigates** — it reads your cluster, metrics, logs, and network flows.
 3. **Findings land in Slack** — ranked root causes with confidence, the evidence trail, and suggested next steps.
 4. **A PR opens in your KB repo** — RunLore drafts what it found as a knowledge-base entry.
 5. **A human reviews and merges** — after adding resolution context, the PR is merged.
