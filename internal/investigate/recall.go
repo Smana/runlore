@@ -34,6 +34,13 @@ type Recall struct {
 	SoloFloor            float64 // confident bar when there is only one hit
 	RequireWorkloadMatch bool    // true = exact namespace+workload; false = namespace-level agreement is enough
 
+	// Hybrid, when non-nil AND it has vectors, switches recall to fused BM25+embedding
+	// retrieval gated on COSINE similarity (HybridMinScore / HybridMarginGap) instead
+	// of the BM25 thresholds above. nil (or no vectors) ⇒ BM25 recall, unchanged.
+	Hybrid          catalog.HybridSearcher
+	HybridMinScore  float64 // cosine floor for the top hit (hybrid mode)
+	HybridMarginGap float64 // cosine margin over the runner-up (hybrid mode)
+
 	Outcome      OutcomeStats // optional; nil ⇒ no outcome decay
 	OutcomePrior float64      // k — Beta prior strength for decay (e.g. 2.0)
 	OutcomeFloor float64      // reject the recall when the outcome factor drops below this (e.g. 0.5)
@@ -56,7 +63,19 @@ func (r *Recall) lookup(ctx context.Context, req Request) (*catalog.Entry, float
 		return nil, 0
 	}
 	// Query the symptom (title + message); severity/reason is noise for matching.
-	hits, err := r.Catalog.SearchScored(strings.TrimSpace(req.Title+" "+req.Message), recallCandidateK)
+	query := strings.TrimSpace(req.Title + " " + req.Message)
+	// Mode select: hybrid (BM25+embedding, cosine-gated) when an embedder-backed
+	// catalog is live, else BM25 — unchanged. The gate logic below is identical; only
+	// the candidate source and the thresholds differ.
+	minScore, marginGap, soloFloor := r.MinScore, r.MarginGap, r.SoloFloor
+	var hits []catalog.ScoredEntry
+	var err error
+	if r.Hybrid != nil && r.Hybrid.HasVectors() {
+		minScore, marginGap, soloFloor = r.HybridMinScore, r.HybridMarginGap, r.HybridMinScore
+		hits, err = r.Hybrid.SearchHybrid(ctx, query, recallCandidateK)
+	} else {
+		hits, err = r.Catalog.SearchScored(query, recallCandidateK)
+	}
 	if err != nil || len(hits) == 0 {
 		return nil, 0
 	}
@@ -89,10 +108,10 @@ func (r *Recall) lookup(ctx context.Context, req Request) (*catalog.Entry, float
 	// this workload, not merely the top lexical hit. A lone agreeing hit must clear
 	// both the solo floor and the min score.
 	margin := score
-	confident := score >= r.SoloFloor && score >= r.MinScore
+	confident := score >= soloFloor && score >= minScore
 	if len(agreeing) > 1 {
 		margin = score - agreeing[1].Score
-		confident = score >= r.MinScore && margin >= r.MarginGap
+		confident = score >= minScore && margin >= marginGap
 	}
 	if !confident {
 		r.reject(ctx, "low_margin")
