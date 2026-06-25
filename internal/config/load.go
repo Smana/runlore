@@ -63,6 +63,12 @@ func applyDefaults(c *Config) {
 	if c.Investigation.RateLimit.MaxPerWindow > 0 && c.Investigation.RateLimit.Window == 0 {
 		c.Investigation.RateLimit.Window = Duration(time.Hour)
 	}
+	// Per-investigation deadline: bound a whole investigation (recall + every model/
+	// tool call, incl. a hung git clone) so one stuck investigation can't starve the
+	// single-worker queue. Default 10m when unset.
+	if c.Investigation.Timeout == 0 {
+		c.Investigation.Timeout = Duration(10 * time.Minute)
+	}
 	// Instant-recall trust defaults: when enabled without explicit tuning, keep the
 	// margin and solo gates active. A zero margin_gap/solo_floor would degrade recall
 	// to a bare similarity threshold — the exact brittleness this feature removes.

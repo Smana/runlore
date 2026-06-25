@@ -73,9 +73,10 @@ func (p *Provider) Changes(ctx context.Context, _ providers.TimeWindow, sel prov
 	return changes, nil
 }
 
-// Diff resolves a Change's diff via the Differ.
-func (p *Provider) Diff(_ context.Context, c providers.Change) (providers.Diff, error) {
-	return p.differ.ForChange(c)
+// Diff resolves a Change's diff via the Differ. ctx is threaded into the Differ so
+// a hung clone/patch is cancellable (per-investigation deadline).
+func (p *Provider) Diff(ctx context.Context, c providers.Change) (providers.Diff, error) {
+	return p.differ.ForChange(ctx, c)
 }
 
 // WatchFailures watches Argo CD Applications and emits a FailureEvent whenever one
