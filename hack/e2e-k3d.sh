@@ -88,6 +88,9 @@ spec:
         openAPIV3Schema: { type: object, x-kubernetes-preserve-unknown-fields: true }
 YAML
 kubectl wait --for=condition=Established crd/kustomizations.kustomize.toolkit.fluxcd.io --timeout=30s
+# A real Flux install owns flux-system; the chart namespaces its controller-logs
+# Role + RoleBinding into it (rbac.controllerLogNamespaces), so it must pre-exist.
+kubectl create namespace flux-system --dry-run=client -o yaml | kubectl apply -f -
 
 step "3/8 build + import image"
 docker build -t "$IMG" --build-arg VERSION=e2e .
@@ -141,6 +144,7 @@ helm upgrade --install runlore deploy/helm/runlore -n "$NS" \
   --set "env[3].name=APPROVAL_TOKEN" --set-string "env[3].value=e2e-secret" \
   --set "env[4].name=SLACK_SIGNING_SECRET" --set-string "env[4].value=e2e-slack-secret" \
   --set "env[5].name=WEBHOOK_TOKEN" --set-string "env[5].value=e2e-webhook" \
+  --set-string config.server.webhook_token_env=WEBHOOK_TOKEN \
   --set-string config.forge.github_api_url="http://$HOST:$MOCK_PORT" \
   --set-string config.forge.kb_repo="mock/repo" \
   --set-string config.forge.base_branch="main" \
