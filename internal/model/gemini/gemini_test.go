@@ -11,6 +11,39 @@ import (
 	"github.com/Smana/runlore/internal/providers"
 )
 
+const maliciousBody = "\n\x1b[2Kfake=record secret=sk-LEAKED-0123456789 level=error msg=\"forged\""
+
+// TestNon2xxErrorOmitsBody asserts a non-2xx response yields an error that
+// excludes the upstream body but includes the status and request-id.
+func TestNon2xxErrorOmitsBody(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("X-Goog-Request-Id", "req-abc-123")
+		w.WriteHeader(http.StatusBadGateway)
+		_, _ = w.Write([]byte(maliciousBody))
+	}))
+	defer srv.Close()
+
+	_, err := New(srv.URL, "gemini-x", "k").Complete(context.Background(), providers.CompletionRequest{
+		Messages: []providers.Message{{Role: "user", Content: "hi"}},
+	})
+	if err == nil {
+		t.Fatal("want error for non-2xx response")
+	}
+	msg := err.Error()
+	if strings.Contains(msg, "sk-LEAKED") || strings.Contains(msg, "fake=record") {
+		t.Errorf("error leaked upstream body: %q", msg)
+	}
+	if strings.ContainsAny(msg, "\n\r") {
+		t.Errorf("error contains a raw newline (log-injection risk): %q", msg)
+	}
+	if !strings.Contains(msg, "502") {
+		t.Errorf("error should carry the status code: %q", msg)
+	}
+	if !strings.Contains(msg, "req-abc-123") {
+		t.Errorf("error should carry the request-id: %q", msg)
+	}
+}
+
 func TestComplete(t *testing.T) {
 	var gotReq genRequest
 	var gotKey, gotPath string
@@ -56,6 +89,61 @@ func TestComplete(t *testing.T) {
 	if resp.Text != "investigating" || len(resp.ToolCalls) != 1 ||
 		resp.ToolCalls[0].Name != "what_changed" || resp.ToolCalls[0].Args != `{"namespace":"apps"}` {
 		t.Fatalf("response: %+v", resp)
+	}
+}
+
+// TestUsageAndFinishReason verifies the Gemini usageMetadata and candidate finishReason
+// are parsed onto CompletionResponse: prompt/candidates token counts surface on Usage, and a
+// "MAX_TOKENS" finishReason flags Truncated. A response omitting usageMetadata parses to zero.
+func TestUsageAndFinishReason(t *testing.T) {
+	tests := []struct {
+		name          string
+		body          string
+		wantIn        int
+		wantOut       int
+		wantTruncated bool
+	}{
+		{
+			name:          "usageMetadata + STOP (not truncated)",
+			body:          `{"candidates":[{"finishReason":"STOP","content":{"role":"model","parts":[{"text":"done"}]}}],"usageMetadata":{"promptTokenCount":140,"candidatesTokenCount":48}}`,
+			wantIn:        140,
+			wantOut:       48,
+			wantTruncated: false,
+		},
+		{
+			name:          "MAX_TOKENS finishReason flags truncation",
+			body:          `{"candidates":[{"finishReason":"MAX_TOKENS","content":{"role":"model","parts":[{"text":"cut off"}]}}],"usageMetadata":{"promptTokenCount":220,"candidatesTokenCount":4096}}`,
+			wantIn:        220,
+			wantOut:       4096,
+			wantTruncated: true,
+		},
+		{
+			name:          "usageMetadata omitted parses to zero value",
+			body:          `{"candidates":[{"finishReason":"STOP","content":{"role":"model","parts":[{"text":"done"}]}}]}`,
+			wantIn:        0,
+			wantOut:       0,
+			wantTruncated: false,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				_, _ = w.Write([]byte(tt.body))
+			}))
+			defer srv.Close()
+			resp, err := New(srv.URL, "gemini-x", "k").Complete(context.Background(), providers.CompletionRequest{
+				Messages: []providers.Message{{Role: "user", Content: "hi"}},
+			})
+			if err != nil {
+				t.Fatalf("Complete: %v", err)
+			}
+			if resp.Usage.InputTokens != tt.wantIn || resp.Usage.OutputTokens != tt.wantOut {
+				t.Fatalf("usage = %+v, want in=%d out=%d", resp.Usage, tt.wantIn, tt.wantOut)
+			}
+			if resp.Truncated != tt.wantTruncated {
+				t.Fatalf("Truncated = %v, want %v", resp.Truncated, tt.wantTruncated)
+			}
+		})
 	}
 }
 

@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"math"
 	"slices"
+	"strings"
 	"testing"
 
 	"github.com/Smana/runlore/internal/providers"
@@ -130,6 +131,59 @@ func TestParseFindingsClampsConfidence(t *testing.T) {
 			}
 			if len(inv.RootCauses) != 1 || inv.RootCauses[0].Confidence != tc.want {
 				t.Fatalf("root-cause confidence = %v, want %v", inv.RootCauses[0].Confidence, tc.want)
+			}
+		})
+	}
+}
+
+// TestParseFindingsMalformed asserts that genuinely-unparseable args (not merely
+// fenced/double-encoded) return a parse error rather than a zero-value
+// Investigation passed off as success.
+func TestParseFindingsMalformed(t *testing.T) {
+	cases := []struct {
+		name string
+		args string
+	}{
+		{"truncated object", `{"root_causes":[{"summary":`},
+		{"not json at all", `I think the harbor chart bump broke the db.`},
+		{"empty", ``},
+		{"fenced but still broken", "```json\n{\"root_causes\":[\n```"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := parseFindings(tc.args)
+			if err == nil {
+				t.Fatalf("parseFindings(%q) = nil error, want a parse error", tc.args)
+			}
+			if !strings.HasPrefix(err.Error(), "parse findings:") {
+				t.Fatalf("error must be wrapped as parse findings: …, got %q", err.Error())
+			}
+		})
+	}
+}
+
+// TestParseFindingsTolerant covers the best-effort normalizer: a ```json fence or a
+// double-encoded payload (some OpenAI-compatible backends) still parses, while a
+// well-formed object is unaffected.
+func TestParseFindingsTolerant(t *testing.T) {
+	want := "chart bump broke db"
+	cases := []struct {
+		name string
+		args string
+	}{
+		{"plain object (fast path)", `{"root_causes":[{"summary":"chart bump broke db"}]}`},
+		{"json code fence", "```json\n{\"root_causes\":[{\"summary\":\"chart bump broke db\"}]}\n```"},
+		{"bare code fence", "```\n{\"root_causes\":[{\"summary\":\"chart bump broke db\"}]}\n```"},
+		{"double-encoded", `"{\"root_causes\":[{\"summary\":\"chart bump broke db\"}]}"`},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			inv, err := parseFindings(tc.args)
+			if err != nil {
+				t.Fatalf("parseFindings(%q): %v", tc.args, err)
+			}
+			if len(inv.RootCauses) != 1 || inv.RootCauses[0].Summary != want {
+				t.Fatalf("expected the unwrapped finding %q, got %+v", want, inv.RootCauses)
 			}
 		})
 	}

@@ -198,10 +198,11 @@ func (li *LoopInvestigator) Investigate(ctx context.Context, req Request) error 
 		maxSteps = 20
 	}
 
-	nudged := false          // set when the prose-turn nudge has fired once
-	budgetNudged := false    // set when the token-budget nudge has fired once
-	used := map[string]int{} // tool-call counts, logged so investigation breadth is observable
-	sys := li.system()       // constant for the investigation; build once, not per step
+	nudged := false           // set when the prose-turn nudge has fired once
+	budgetNudged := false     // set when the token-budget nudge has fired once
+	truncationNudged := false // set when the output-truncation nudge has fired once
+	used := map[string]int{}  // tool-call counts, logged so investigation breadth is observable
+	sys := li.system()        // constant for the investigation; build once, not per step
 	for step := 0; step < maxSteps; step++ {
 		// Budget control: when the estimated request size exceeds the configured ceiling,
 		// inject a one-time nudge asking the model to wrap up. If the model did not wind
@@ -255,6 +256,29 @@ func (li *LoopInvestigator) Investigate(ctx context.Context, req Request) error 
 			return fmt.Errorf("model: %w", err)
 		}
 		li.Log.Debug("investigation step", "title", req.Title, "step", step, "tool_calls", len(resp.ToolCalls), "text_len", len(resp.Text))
+		// Truncation: the provider stopped at its output-token ceiling, so this turn is
+		// cut off — its prose is incomplete and any tool-call JSON is likely partial, so
+		// it must not be treated as a finished step. Surface it (warn + metric) and, once,
+		// re-prompt the model to continue concisely rather than silently accepting a
+		// half-answer. Single-use, mirroring the prose-turn and budget nudges.
+		if resp.Truncated {
+			li.Log.Warn("investigation step truncated at output-token ceiling",
+				"title", req.Title, "step", step,
+				"input_tokens", resp.Usage.InputTokens, "output_tokens", resp.Usage.OutputTokens)
+			if li.Metrics != nil {
+				li.Metrics.ModelResponsesTruncated.Add(ctx, 1,
+					metric.WithAttributes(attribute.String("provider", li.ModelProvider)))
+			}
+			if !truncationNudged {
+				truncationNudged = true
+				messages = append(messages,
+					providers.Message{Role: "assistant", Content: resp.Text},
+					providers.Message{Role: "user", Content: "Your previous response was cut off at the output limit. Continue from where you stopped, but be concise: prioritise calling a tool (or submit_findings) over long prose."})
+				continue
+			}
+			// Already nudged once and still truncating: fall through and process what we
+			// got rather than looping forever on truncated turns.
+		}
 		if len(resp.ToolCalls) == 0 {
 			// The model concluded in prose instead of calling submit_findings — a
 			// common ReAct failure (Gemini in particular emits a final text turn).

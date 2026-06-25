@@ -181,6 +181,27 @@ func TestRenderEntryIncludesFingerprintFrontmatter(t *testing.T) {
 	}
 }
 
+func TestRenderEntryIncludesTimestamp(t *testing.T) {
+	// OKF recommends a timestamp; seed entries carry one. Curated entries must too,
+	// for provenance parity in the PR diff. It must be a parseable RFC3339 value.
+	out := renderEntry(providers.KBEntry{Type: "Incident", Title: "T", Body: "## body"})
+	const key = "timestamp: "
+	i := strings.Index(out, key)
+	if i < 0 {
+		t.Fatalf("frontmatter missing timestamp:\n%s", out)
+	}
+	line := out[i+len(key):]
+	if j := strings.IndexByte(line, '\n'); j >= 0 {
+		line = line[:j]
+	}
+	// yaml.v3 quotes a timestamp-shaped string to keep it a string (not a YAML
+	// timestamp); strip the quotes before parsing the value.
+	val := strings.Trim(strings.TrimSpace(line), `"`)
+	if _, err := time.Parse(time.RFC3339, val); err != nil {
+		t.Fatalf("timestamp %q is not RFC3339: %v", val, err)
+	}
+}
+
 func TestPRBodyIncludesFingerprintMarker(t *testing.T) {
 	body := prBody(providers.KBEntry{Title: "T", Description: "d", Fingerprint: "deadbeef"})
 	if providers.ParseFingerprintMarker(body) != "deadbeef" {
