@@ -322,7 +322,7 @@ func runServe(args []string) error {
 	if auto != nil {
 		acts.Pauser = auto // avoid a typed-nil interface when auto is disabled
 	}
-	srv := server.New(cfg, queue, readyFunc(leader.Load, cat), acts, metricsHandler, log)
+	srv := server.New(cfg, queue, readyFunc(leader.Load, cat, catalogConfigured(cfg)), acts, metricsHandler, log)
 	srv.SetMetrics(metrics) // ingress counters emit regardless of coalescing
 	srv.SetOutcomeLedger(ledger)
 	if cz != nil {
@@ -438,6 +438,15 @@ func modelConfigured(cfg *config.Config) bool {
 	default:
 		return cfg.Model.BaseURL != ""
 	}
+}
+
+// catalogConfigured reports whether the operator asked for a knowledge catalog
+// (a mounted dir or a git-sync repo). It is independent of whether the load
+// succeeded: readyFunc uses it to keep a configured-but-failed catalog (which
+// buildCatalog returns as nil) from collapsing readiness to pure leadership and
+// serving incident traffic with no knowledge base.
+func catalogConfigured(cfg *config.Config) bool {
+	return cfg.Catalog.Dir != "" || cfg.Catalog.Git.URL != ""
 }
 
 // requireWebhookAuth fails closed on the serve path when the LLM investigator is
@@ -1225,10 +1234,24 @@ func outcomeKind(recalled bool) string {
 	return "fresh"
 }
 
-// readyFunc gates readiness on leadership AND a warm catalog. A nil catalog
-// (none configured) imposes no catalog gate, so readiness is pure leadership.
-func readyFunc(leader func() bool, cat *catalog.Catalog) func() bool {
+// readyFunc gates readiness on leadership AND a warm catalog. When a catalog is
+// configured, the leader must NOT advertise ready until its knowledge base is
+// loaded and warm — otherwise it would serve incident traffic blind. This
+// distinguishes the two ways buildCatalog returns a nil catalog:
+//
+//   - configured but the load failed (configured=true, cat=nil): stay 503. A
+//     static catalog has no syncer to recover, so the pod stays not-ready and the
+//     misconfiguration surfaces loudly instead of silently serving with no KB.
+//   - not configured at all (configured=false, cat=nil): no catalog gate;
+//     readiness is pure leadership.
+//
+// A configured-but-not-yet-warm catalog (git-sync NewEmpty, cat!=nil &&
+// !Ready()) is also held at 503 until its first successful sync.
+func readyFunc(leader func() bool, cat *catalog.Catalog, configured bool) func() bool {
 	return func() bool {
+		if configured && (cat == nil || !cat.Ready()) {
+			return false
+		}
 		if cat != nil && !cat.Ready() {
 			return false
 		}
