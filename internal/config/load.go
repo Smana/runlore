@@ -12,7 +12,7 @@ import (
 // are rejected (KnownFields) so a typo in a safety-critical field — e.g. an
 // autonomy gate — fails loudly instead of being silently ignored.
 func Load(path string) (*Config, error) {
-	f, err := os.Open(path)
+	f, err := os.Open(path) //nolint:gosec // G304: path is the operator-supplied config file
 	if err != nil {
 		return nil, fmt.Errorf("open config: %w", err)
 	}

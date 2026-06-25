@@ -52,7 +52,7 @@ func Load(dir string) (entries []Entry, skipped []string, err error) {
 }
 
 func parseEntry(root, path string) (Entry, error) {
-	data, err := os.ReadFile(path)
+	data, err := os.ReadFile(path) //nolint:gosec // G304: path is within the operator-configured catalog directory
 	if err != nil {
 		return Entry{}, err
 	}
