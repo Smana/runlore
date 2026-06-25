@@ -176,6 +176,15 @@ rbac:
 networkPolicy:
   enabled: true
   extraEgress: []   # appended verbatim, e.g. a specific model endpoint CIDR
+  # Scope ingress to the webhook port. Empty (default) leaves it permissive
+  # (no `from:` ⇒ all sources) so installs don't break; set it to lock the
+  # webhook down to Alertmanager. NetworkPolicyPeer list, spliced into `from:`.
+  # Example — only the monitoring namespace may POST alerts:
+  #   ingressFrom:
+  #     - namespaceSelector:
+  #         matchLabels:
+  #           kubernetes.io/metadata.name: monitoring
+  ingressFrom: []
   # Render a CiliumNetworkPolicy allowing egress to the EKS Pod Identity credential
   # endpoint (host entity, 169.254.170.23:80). Required for the AWS cloud provider
   # on Cilium clusters — a plain NetworkPolicy can't match the host-network target.
