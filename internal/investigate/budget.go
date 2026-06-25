@@ -15,13 +15,25 @@ func budgetKillResult(req Request) providers.Investigation {
 	}
 }
 
-// estimateTokens approximates the request size (~4 chars/token) over the system
-// prompt plus the full message history — the cost actually re-sent each step.
-// Provider-reported usage is not exposed in CompletionResponse today.
-func estimateTokens(system string, msgs []providers.Message) int {
+// estimateTokens approximates the request size (~4 chars/token) over everything
+// re-sent each step: the system prompt, the full tool schemas (name +
+// description + JSON Schema), and the message history — including the assistant
+// tool-call JSON (m.ToolCalls[].Args), which also goes over the wire. Counting
+// only m.Content systematically under-estimated a tool-heavy investigation,
+// letting the hard-kill guard fire late or never. Provider-reported usage is
+// not exposed in CompletionResponse today. Still an under-estimate of the true
+// wire size (it ignores JSON envelope/role overhead) but now the right order of
+// magnitude, which is what the hard-kill needs.
+func estimateTokens(system string, msgs []providers.Message, tools []providers.ToolSpec) int {
 	n := len(system)
+	for _, t := range tools {
+		n += len(t.Name) + len(t.Description) + len(t.Schema)
+	}
 	for _, m := range msgs {
 		n += len(m.Content)
+		for _, tc := range m.ToolCalls {
+			n += len(tc.Args)
+		}
 	}
 	return n / 4
 }
