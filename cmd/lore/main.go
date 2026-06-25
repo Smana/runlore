@@ -205,6 +205,9 @@ func runServe(args []string) error {
 	auto := buildAuto(cfg, execForActions, aud, log)
 	slackSigningSecret := os.Getenv(cfg.Notify.Slack.SigningSecretEnv)
 	webhookToken := os.Getenv(cfg.Server.WebhookTokenEnv)
+	if err := requireWebhookAuth(cfg, webhookToken); err != nil {
+		return err
+	}
 
 	// Set up the single shared OTel metrics instance before building the investigator
 	// so recall + the investigation loop can record to it from the first request.
@@ -323,7 +326,7 @@ func runServe(args []string) error {
 		srv.SetCoalescer(cz)
 		go cz.Run(ctx, cfg.Investigation.Coalesce.Debounce.Std()/2)
 	}
-	httpSrv := &http.Server{Addr: *addr, Handler: srv.Handler()}
+	httpSrv := newHTTPServer(*addr, srv.Handler())
 	go func() {
 		<-ctx.Done()
 		_ = httpSrv.Shutdown(context.Background())
@@ -333,6 +336,24 @@ func runServe(args []string) error {
 		return err
 	}
 	return nil
+}
+
+// newHTTPServer builds the serving http.Server with every inbound bound set. Go's
+// zero defaults leave each of these unlimited, exposing the long-lived server to
+// Slowloris (slow header/body), unbounded idle keep-alives, and oversized headers.
+// Payloads (Alertmanager/Slack) are small and synchronous, so 30s read/write is
+// generous while still cutting off slow attackers; the body itself is capped per
+// handler (1 MiB).
+func newHTTPServer(addr string, h http.Handler) *http.Server {
+	return &http.Server{
+		Addr:              addr,
+		Handler:           h,
+		ReadHeaderTimeout: 5 * time.Second,
+		ReadTimeout:       30 * time.Second,
+		WriteTimeout:      30 * time.Second,
+		IdleTimeout:       60 * time.Second,
+		MaxHeaderBytes:    1 << 20,
+	}
 }
 
 // runLeaderElection blocks running Lease-based leader election; the leader runs
@@ -414,6 +435,22 @@ func modelConfigured(cfg *config.Config) bool {
 	default:
 		return cfg.Model.BaseURL != ""
 	}
+}
+
+// requireWebhookAuth fails closed on the serve path when the LLM investigator is
+// wired but the alert webhook is anonymous. The webhook's labels/annotations flow
+// verbatim into the LLM prompt (and bill the model), so an unauthenticated caller
+// must not reach it once a model is configured — regardless of actions.mode. This
+// lives on the serve path, NOT in config.Validate: Validate is shared by every
+// subcommand (e.g. `lore investigate` legitimately needs a model and has no
+// webhook), so the requirement is scoped to where the webhook is actually served.
+// It mirrors the approval-token fail-closed guard above.
+func requireWebhookAuth(cfg *config.Config, webhookToken string) error {
+	if modelConfigured(cfg) && webhookToken == "" {
+		return fmt.Errorf("model configured but server.webhook_token_env (%q) is empty: refusing to start with an unauthenticated alert webhook (fail closed)",
+			cfg.Server.WebhookTokenEnv)
+	}
+	return nil
 }
 
 // buildModel builds the ModelProvider for the configured provider.
