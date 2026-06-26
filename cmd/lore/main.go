@@ -38,6 +38,7 @@ import (
 	"k8s.io/client-go/tools/leaderelection/resourcelock"
 
 	"github.com/Smana/runlore/internal/action"
+	"github.com/Smana/runlore/internal/app"
 	"github.com/Smana/runlore/internal/audit"
 	"github.com/Smana/runlore/internal/catalog"
 	"github.com/Smana/runlore/internal/coalesce"
@@ -53,9 +54,6 @@ import (
 	"github.com/Smana/runlore/internal/logs/victorialogs"
 	"github.com/Smana/runlore/internal/mcp"
 	"github.com/Smana/runlore/internal/metrics/prometheus"
-	anthropic "github.com/Smana/runlore/internal/model/anthropic"
-	gemini "github.com/Smana/runlore/internal/model/gemini"
-	openai "github.com/Smana/runlore/internal/model/openai"
 	"github.com/Smana/runlore/internal/network/awsvpc"
 	"github.com/Smana/runlore/internal/network/gcpfirewall"
 	"github.com/Smana/runlore/internal/network/hubble"
@@ -228,7 +226,7 @@ func runServe(args []string) error {
 	auto := buildAuto(cfg, execForActions, aud, log)
 	slackSigningSecret := os.Getenv(cfg.Notify.Slack.SigningSecretEnv)
 	webhookToken := os.Getenv(cfg.Server.WebhookTokenEnv)
-	if err := requireWebhookAuth(cfg, webhookToken); err != nil {
+	if err := app.RequireWebhookAuth(cfg, webhookToken); err != nil {
 		return err
 	}
 
@@ -348,7 +346,7 @@ func runServe(args []string) error {
 	if auto != nil {
 		acts.Pauser = auto // avoid a typed-nil interface when auto is disabled
 	}
-	srv := server.New(cfg, queue, readyFunc(leader.Load, cat, catalogConfigured(cfg)), acts, metricsHandler, log)
+	srv := server.New(cfg, queue, app.ReadyFunc(leader.Load, cat, app.CatalogConfigured(cfg)), acts, metricsHandler, log)
 	srv.SetMetrics(metrics) // ingress counters emit regardless of coalescing
 	srv.SetOutcomeLedger(ledger)
 	if cz != nil {
@@ -402,9 +400,9 @@ func runLeaderElection(ctx context.Context, cfg *config.Config, cs *kubernetes.C
 	if name == "" {
 		name = "runlore-leader"
 	}
-	id := podName()
+	id := app.PodName()
 	lock := &resourcelock.LeaseLock{
-		LeaseMeta:  metav1.ObjectMeta{Name: name, Namespace: podNamespace()},
+		LeaseMeta:  metav1.ObjectMeta{Name: name, Namespace: app.PodNamespace()},
 		Client:     cs.CoordinationV1(),
 		LockConfig: resourcelock.ResourceLockConfig{Identity: id},
 	}
@@ -431,113 +429,6 @@ func runLeaderElection(ctx context.Context, cfg *config.Config, cs *kubernetes.C
 			},
 		},
 	})
-}
-
-// podName returns this pod's identity for leader election.
-func podName() string {
-	if n := os.Getenv("POD_NAME"); n != "" {
-		return n
-	}
-	h, _ := os.Hostname()
-	return h
-}
-
-// podNamespace resolves the namespace from the downward API or the service-account mount.
-func podNamespace() string {
-	if ns := os.Getenv("POD_NAMESPACE"); ns != "" {
-		return ns
-	}
-	if b, err := os.ReadFile("/var/run/secrets/kubernetes.io/serviceaccount/namespace"); err == nil {
-		if ns := strings.TrimSpace(string(b)); ns != "" {
-			return ns
-		}
-	}
-	return "default"
-}
-
-// modelProvider returns the configured model provider name (default "openai").
-func modelProvider(cfg *config.Config) string {
-	switch cfg.Model.Provider {
-	case "anthropic", "gemini":
-		return cfg.Model.Provider
-	default:
-		return "openai"
-	}
-}
-
-// modelConfigured reports whether a usable model is configured: a provider with a
-// built-in default endpoint (anthropic, gemini), or any provider with a base_url.
-func modelConfigured(cfg *config.Config) bool {
-	switch cfg.Model.Provider {
-	case "anthropic", "gemini":
-		return true
-	default:
-		return cfg.Model.BaseURL != ""
-	}
-}
-
-// catalogConfigured reports whether the operator asked for a knowledge catalog
-// (a mounted dir or a git-sync repo). It is independent of whether the load
-// succeeded: readyFunc uses it to keep a configured-but-failed catalog (which
-// buildCatalog returns as nil) from collapsing readiness to pure leadership and
-// serving incident traffic with no knowledge base.
-func catalogConfigured(cfg *config.Config) bool {
-	return cfg.Catalog.Dir != "" || cfg.Catalog.Git.URL != ""
-}
-
-// requireWebhookAuth fails closed on the serve path when the LLM investigator is
-// wired but the alert webhook is anonymous. The webhook's labels/annotations flow
-// verbatim into the LLM prompt (and bill the model), so an unauthenticated caller
-// must not reach it once a model is configured — regardless of actions.mode. This
-// lives on the serve path, NOT in config.Validate: Validate is shared by every
-// subcommand (e.g. `lore investigate` legitimately needs a model and has no
-// webhook), so the requirement is scoped to where the webhook is actually served.
-// It mirrors the approval-token fail-closed guard above.
-func requireWebhookAuth(cfg *config.Config, webhookToken string) error {
-	if modelConfigured(cfg) && webhookToken == "" {
-		return fmt.Errorf("model configured but server.webhook_token_env (%q) is empty: refusing to start with an unauthenticated alert webhook (fail closed)",
-			cfg.Server.WebhookTokenEnv)
-	}
-	return nil
-}
-
-// newModelClient builds a ModelProvider for a wire protocol + endpoint.
-func newModelClient(provider, baseURL, model, apiKey string) providers.ModelProvider {
-	switch provider {
-	case "anthropic":
-		return anthropic.New(baseURL, model, apiKey)
-	case "gemini":
-		return gemini.New(baseURL, model, apiKey)
-	default:
-		return openai.New(baseURL, model, apiKey)
-	}
-}
-
-// buildModel builds the ModelProvider for the configured provider.
-func buildModel(cfg *config.Config, apiKey string) providers.ModelProvider {
-	return newModelClient(cfg.Model.Provider, cfg.Model.BaseURL, cfg.Model.Model, apiKey)
-}
-
-// buildVerifyModel builds the optional cheaper model for the adversarial verify
-// pass, inheriting any unset field from the main model. Returns nil when no
-// model.verify override is configured (verify then runs on the main model).
-func buildVerifyModel(cfg *config.Config) providers.ModelProvider {
-	v := cfg.Model.Verify
-	if v == nil {
-		return nil
-	}
-	or := func(a, b string) string {
-		if a != "" {
-			return a
-		}
-		return b
-	}
-	apiKey := ""
-	if keyEnv := or(v.APIKeyEnv, cfg.Model.APIKeyEnv); keyEnv != "" {
-		apiKey = os.Getenv(keyEnv)
-	}
-	return newModelClient(or(v.Provider, cfg.Model.Provider),
-		or(v.BaseURL, cfg.Model.BaseURL), or(v.Model, cfg.Model.Model), apiKey)
 }
 
 // buildCatalog returns the kb_search backing store, or nil when no catalog is
@@ -664,7 +555,7 @@ func runEval(args []string) error {
 	if err != nil {
 		return err
 	}
-	if !modelConfigured(cfg) {
+	if !app.ModelConfigured(cfg) {
 		return fmt.Errorf("eval requires a configured model (set config.model)")
 	}
 	if *live {
@@ -686,7 +577,7 @@ func runEval(args []string) error {
 	if cfg.Model.APIKeyEnv != "" {
 		apiKey = os.Getenv(cfg.Model.APIKeyEnv)
 	}
-	runner := &eval.Runner{Model: buildModel(cfg, apiKey), Log: slog.New(slog.NewTextHandler(io.Discard, nil))}
+	runner := &eval.Runner{Model: app.BuildModel(cfg, apiKey), Log: slog.New(slog.NewTextHandler(io.Discard, nil))}
 	camp := runner.RunN(context.Background(), cases, *n)
 	for _, a := range camp.Aggregates {
 		status := "MISSED"
@@ -747,19 +638,6 @@ func (shellStepRunner) Run(ctx context.Context, step string) error {
 	return cmd.Run()
 }
 
-// buildJudgeModel builds the (stronger) grader model from --judge-* flags, falling
-// back to the configured investigation model when unset.
-func buildJudgeModel(cfg *config.Config, provider, baseURL, model, apiKeyEnv string) providers.ModelProvider {
-	if provider == "" && model == "" {
-		apiKey := ""
-		if cfg.Model.APIKeyEnv != "" {
-			apiKey = os.Getenv(cfg.Model.APIKeyEnv)
-		}
-		return buildModel(cfg, apiKey)
-	}
-	return newModelClient(provider, baseURL, model, os.Getenv(apiKeyEnv))
-}
-
 // runEvalLive runs the live-fire campaign and writes a dated report.
 func runEvalLive(cfg *config.Config, scnDir, recordDir, reportDir, prevReport, stamp string, n int,
 	jProvider, jBaseURL, jModel, jKeyEnv string) error {
@@ -773,7 +651,7 @@ func runEvalLive(cfg *config.Config, scnDir, recordDir, reportDir, prevReport, s
 	log := logging.FromConfig(os.Stderr, cfg.Logging.Format, cfg.Logging.Level)
 	ctx := context.Background()
 	model, tools, recall, _ := buildModelAndTools(ctx, cfg, gitOpsFromKube(cfg, log), nil, log)
-	judge := eval.ModelJudge{Model: buildJudgeModel(cfg, jProvider, jBaseURL, jModel, jKeyEnv)}
+	judge := eval.ModelJudge{Model: app.BuildJudgeModel(cfg, jProvider, jBaseURL, jModel, jKeyEnv)}
 
 	runner := &eval.LiveRunner{
 		Model: model, BaseTools: tools, Judge: judge, Steps: shellStepRunner{}, Log: log, N: n, Recall: recall,
@@ -1061,7 +939,7 @@ func buildReinvestigator(ctx context.Context, cfg *config.Config, gp providers.G
 		var res providers.Investigation
 		var got bool
 		li := &investigate.LoopInvestigator{
-			Model: model, VerifyModel: buildVerifyModel(cfg), Tools: tools, Recall: recall, Verify: true, Log: log,
+			Model: model, VerifyModel: app.BuildVerifyModel(cfg), Tools: tools, Recall: recall, Verify: true, Log: log,
 			Metrics:                   metrics,
 			ModelProvider:             cfg.Model.Provider,
 			MaxSteps:                  cfg.Investigation.MaxSteps,
@@ -1146,7 +1024,7 @@ func buildModelAndTools(ctx context.Context, cfg *config.Config, gp providers.Gi
 	if cfg.Model.APIKeyEnv != "" {
 		apiKey = os.Getenv(cfg.Model.APIKeyEnv)
 	}
-	model := buildModel(cfg, apiKey)
+	model := app.BuildModel(cfg, apiKey)
 	forgeTok := buildForgeTokenSource(cfg, log)
 	var tools []investigate.Tool
 	if gp != nil {
@@ -1333,7 +1211,7 @@ func runInvestigate(args []string) error {
 	if err != nil {
 		return err
 	}
-	if !modelConfigured(cfg) {
+	if !app.ModelConfigured(cfg) {
 		return fmt.Errorf("investigate requires a configured model (set config.model)")
 	}
 	// Progress logs go to stderr; the findings go to stdout.
@@ -1343,7 +1221,7 @@ func runInvestigate(args []string) error {
 	model, tools, recall, _ := buildModelAndTools(ctx, cfg, gitOpsFromKube(cfg, log), nil, log)
 	var result *providers.Investigation
 	li := &investigate.LoopInvestigator{
-		Model: model, VerifyModel: buildVerifyModel(cfg), Tools: tools, Recall: recall, Actions: action.New(cfg.Actions), Log: log, Verify: true,
+		Model: model, VerifyModel: app.BuildVerifyModel(cfg), Tools: tools, Recall: recall, Actions: action.New(cfg.Actions), Log: log, Verify: true,
 		ModelProvider: cfg.Model.Provider,
 		Timeout:       cfg.Investigation.Timeout.Std(),
 		OnComplete:    func(inv providers.Investigation) { result = &inv },
@@ -1366,44 +1244,11 @@ func runInvestigate(args []string) error {
 	return nil
 }
 
-// outcomeKind labels an outcome-ledger open as a recall (cache hit) or a fresh finding.
-func outcomeKind(recalled bool) string {
-	if recalled {
-		return "recall"
-	}
-	return "fresh"
-}
-
-// readyFunc gates readiness on leadership AND a warm catalog. When a catalog is
-// configured, the leader must NOT advertise ready until its knowledge base is
-// loaded and warm — otherwise it would serve incident traffic blind. This
-// distinguishes the two ways buildCatalog returns a nil catalog:
-//
-//   - configured but the load failed (configured=true, cat=nil): stay 503. A
-//     static catalog has no syncer to recover, so the pod stays not-ready and the
-//     misconfiguration surfaces loudly instead of silently serving with no KB.
-//   - not configured at all (configured=false, cat=nil): no catalog gate;
-//     readiness is pure leadership.
-//
-// A configured-but-not-yet-warm catalog (git-sync NewEmpty, cat!=nil &&
-// !Ready()) is also held at 503 until its first successful sync.
-func readyFunc(leader func() bool, cat *catalog.Catalog, configured bool) func() bool {
-	return func() bool {
-		if configured && (cat == nil || !cat.Ready()) {
-			return false
-		}
-		if cat != nil && !cat.Ready() {
-			return false
-		}
-		return leader()
-	}
-}
-
 // buildInvestigator returns the LLM ReAct investigator when a model is configured,
 // otherwise the read-only LogInvestigator. It also returns the catalog (nil when
 // no model is configured or no catalog is wired).
 func buildInvestigator(ctx context.Context, cfg *config.Config, gp providers.GitOpsProvider, approvals *action.Approvals, auto *action.Auto, metrics *telemetry.Metrics, ledger *outcome.Ledger, log *slog.Logger) (investigate.Investigator, *catalog.Catalog) {
-	if !modelConfigured(cfg) {
+	if !app.ModelConfigured(cfg) {
 		log.Info("no model configured; using log-only investigator")
 		return investigate.LogInvestigator{Log: log}, nil
 	}
@@ -1413,7 +1258,7 @@ func buildInvestigator(ctx context.Context, cfg *config.Config, gp providers.Git
 		recall.Log = log
 		recall.Outcome = ledger // outcome-driven decay (serve path); *outcome.Ledger satisfies OutcomeStats
 	}
-	log.Info("using LLM investigator", "provider", modelProvider(cfg), "model", cfg.Model.Model, "tools", len(tools))
+	log.Info("using LLM investigator", "provider", app.ModelProvider(cfg), "model", cfg.Model.Model, "tools", len(tools))
 	notifier := buildNotifier(cfg, log)
 	log.Info("delivery notifiers", "count", notifier.Len())
 	cur := buildCurator(cfg, buildForgeTokenSource(cfg, log), cat, metrics, log)
@@ -1423,7 +1268,7 @@ func buildInvestigator(ctx context.Context, cfg *config.Config, gp providers.Git
 	}
 	return &investigate.LoopInvestigator{
 		Model:                     model,
-		VerifyModel:               buildVerifyModel(cfg),
+		VerifyModel:               app.BuildVerifyModel(cfg),
 		Tools:                     tools,
 		Log:                       log,
 		Actions:                   actions,
@@ -1446,7 +1291,7 @@ func buildInvestigator(ctx context.Context, cfg *config.Config, gp providers.Git
 				fps = []string{found.Fingerprint}
 			}
 			if len(fps) > 0 {
-				kind := outcomeKind(found.Recalled)
+				kind := app.OutcomeKind(found.Recalled)
 				now := time.Now()
 				// The deterministic dedup fingerprint (resource+cause) is the curated PR's
 				// stable resolution-join key: it is the same value draftKBEntry stamps into
@@ -1526,7 +1371,7 @@ func startGitOpsFailureWatch(ctx context.Context, cfg *config.Config, q investig
 		return
 	}
 	deb := buildFailureDebouncer(cfg, gp, metrics, log)
-	log.Info("watching gitops failures", "engine", gitopsEngine(cfg),
+	log.Info("watching gitops failures", "engine", app.GitopsEngine(cfg),
 		"debounce", cfg.Triggers.GitOpsFailures.DebounceWindow())
 	go investigate.DrainFailures(ctx, events, q, dedup, deb, log)
 }
@@ -1555,14 +1400,6 @@ func buildFailureDebouncer(cfg *config.Config, gp providers.GitOpsProvider, metr
 	return investigate.NewDebouncer(cfg.Triggers.GitOpsFailures.DebounceWindow(), check, log).WithMetrics(metrics)
 }
 
-// gitopsEngine returns the configured GitOps engine, defaulting to flux.
-func gitopsEngine(cfg *config.Config) string {
-	if cfg.GitOps.Engine == "argocd" {
-		return "argocd"
-	}
-	return "flux"
-}
-
 // buildGitOps builds the GitOps provider for the configured engine (flux default).
 // The differ clones the GitOps source repo over HTTPS; it authenticates private
 // repos with the shared GitHub App installation token (the App needs contents:read
@@ -1570,7 +1407,7 @@ func gitopsEngine(cfg *config.Config) string {
 // repos only.
 func buildGitOps(cfg *config.Config, dc dynamic.Interface, log *slog.Logger) providers.GitOpsProvider {
 	differ := &whatchanged.Differ{TokenSource: buildForgeTokenSource(cfg, log)}
-	if gitopsEngine(cfg) == "argocd" {
+	if app.GitopsEngine(cfg) == "argocd" {
 		log.Info("gitops engine", "engine", "argocd")
 		return argocd.New(argocd.NewDynamicReader(dc), differ)
 	}
