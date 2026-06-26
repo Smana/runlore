@@ -62,6 +62,13 @@ adding an MCP server entry to its config; **no upstream PR is required**.
   separation (HolmesGPT reasons, RunLore serves data).
 - **Cons:** an extra process to run; not "in the box" with HolmesGPT.
 
+> **Implemented (MVP, this repo).** `lore mcp` serves `gitops_what_changed` over the
+> stdio MCP transport (minimal dependency-free JSON-RPC server in `internal/mcp`,
+> reusing the existing what-changed engine; read-only). Point any MCP client at it —
+> the stdio launch command is `lore mcp --config <path>`. Validate the handshake +
+> a `tools/call` against a live MCP client (e.g. HolmesGPT) as the next step, and
+> confirm the client's exact MCP-server config key against its docs.
+
 ### Path B — native HolmesGPT toolset (deeper; upstream once proven)
 
 Contribute a toolset to the HolmesGPT repo (under its toolsets plugin dir), wrapping a

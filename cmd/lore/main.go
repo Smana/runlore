@@ -51,6 +51,7 @@ import (
 	"github.com/Smana/runlore/internal/kbvalidate"
 	"github.com/Smana/runlore/internal/logging"
 	"github.com/Smana/runlore/internal/logs/victorialogs"
+	"github.com/Smana/runlore/internal/mcp"
 	"github.com/Smana/runlore/internal/metrics/prometheus"
 	anthropic "github.com/Smana/runlore/internal/model/anthropic"
 	gemini "github.com/Smana/runlore/internal/model/gemini"
@@ -85,6 +86,7 @@ Usage:
   lore eval [--config <path>] [--cases <dir>]         replay recorded cases, score RCA identification
   lore eval --live [--scenarios <dir>] [--n 3]        live-fire on the cluster: grade coverage + RCA
   lore curate [--config <path>]                       groom the KB backlog (dedup open PRs)
+  lore mcp [--config <path>]                          serve GitOps what-changed over MCP (stdio; for HolmesGPT et al.)
   lore version                                        print version
 `
 
@@ -121,6 +123,11 @@ func main() {
 	case "curate":
 		if err := runCurate(os.Args[2:]); err != nil {
 			fmt.Fprintln(os.Stderr, "curate:", err)
+			os.Exit(1)
+		}
+	case "mcp":
+		if err := runMCP(os.Args[2:]); err != nil {
+			fmt.Fprintln(os.Stderr, "mcp:", err)
 			os.Exit(1)
 		}
 	case "validate-kb":
@@ -1273,6 +1280,40 @@ func gitOpsFromKube(cfg *config.Config, log *slog.Logger) providers.GitOpsProvid
 		return nil
 	}
 	return buildGitOps(cfg, dc, log)
+}
+
+// runMCP serves RunLore's GitOps what-changed capability over the Model Context
+// Protocol (stdio JSON-RPC), so an MCP client (e.g. HolmesGPT) can call it as a
+// toolset. stdout is the protocol channel; logs go to stderr. Read-only.
+func runMCP(args []string) error {
+	fs := flag.NewFlagSet("mcp", flag.ContinueOnError)
+	cfgPath := fs.String("config", "runlore.yaml", "path to config file")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	cfg, err := config.Load(*cfgPath)
+	if err != nil {
+		return err
+	}
+	log := logging.FromConfig(os.Stderr, cfg.Logging.Format, cfg.Logging.Level)
+	gp := gitOpsFromKube(cfg, log)
+	if gp == nil {
+		return fmt.Errorf("what_changed needs a Kubernetes client + config.gitops")
+	}
+	tool := investigate.WhatChangedTool{GitOps: gp}
+	srv := mcp.NewServer("runlore-whatchanged", version, log)
+	srv.AddTool(mcp.Tool{
+		Name:        "gitops_what_changed",
+		Description: tool.Description(),
+		InputSchema: json.RawMessage(tool.Schema()),
+		Handler: func(ctx context.Context, args json.RawMessage) (string, error) {
+			return tool.Call(ctx, string(args))
+		},
+	})
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	log.Info("runlore mcp server ready (stdio)", "tool", "gitops_what_changed")
+	return srv.Serve(ctx, os.Stdin, os.Stdout)
 }
 
 // runInvestigate runs a single on-demand investigation and prints the findings.
