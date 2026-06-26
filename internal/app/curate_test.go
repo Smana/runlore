@@ -1,4 +1,4 @@
-package main
+package app
 
 import (
 	"bytes"
@@ -13,7 +13,7 @@ import (
 )
 
 // captureLog returns a logger writing JSON records into buf so a test can assert
-// the level/message emitted by logLedgerStartup.
+// the level/message emitted by LogLedgerStartup.
 func captureLog(buf *bytes.Buffer) *slog.Logger {
 	return slog.New(slog.NewJSONHandler(buf, &slog.HandlerOptions{Level: slog.LevelDebug}))
 }
@@ -37,7 +37,7 @@ func TestLogLedgerStartupAbsentWarns(t *testing.T) {
 	// no-op the warning must surface.
 	l, _ := outcome.New(filepath.Join(t.TempDir(), "missing.jsonl"))
 	var buf bytes.Buffer
-	logLedgerStartup(captureLog(&buf), l.Status())
+	LogLedgerStartup(captureLog(&buf), l.Status())
 	rec := lastRecord(t, &buf)
 	if rec["level"] != "WARN" {
 		t.Fatalf("absent ledger must WARN, got level=%v msg=%v", rec["level"], rec["msg"])
@@ -49,7 +49,7 @@ func TestLogLedgerStartupEmptyWarns(t *testing.T) {
 	// misconfigured mount (fresh emptyDir per Job) is not mistaken for "no work".
 	l, _ := outcome.New(filepath.Join(t.TempDir(), "o.jsonl")) // file never created
 	var buf bytes.Buffer
-	logLedgerStartup(captureLog(&buf), l.Status())
+	LogLedgerStartup(captureLog(&buf), l.Status())
 	if rec := lastRecord(t, &buf); rec["level"] != "WARN" {
 		t.Fatalf("empty ledger must WARN, got level=%v", rec["level"])
 	}
@@ -62,7 +62,7 @@ func TestLogLedgerStartupPresentInfos(t *testing.T) {
 	_ = l.Open(outcome.Event{Fingerprint: "fp", Kind: "recall", Entry: "x.md", At: t0})
 	_, _, _ = l.Resolve("fp", t0.Add(time.Minute))
 	var buf bytes.Buffer
-	logLedgerStartup(captureLog(&buf), l.Status())
+	LogLedgerStartup(captureLog(&buf), l.Status())
 	rec := lastRecord(t, &buf)
 	if rec["level"] != "INFO" {
 		t.Fatalf("a present, non-empty ledger must INFO, got level=%v", rec["level"])
@@ -73,7 +73,7 @@ func TestLogLedgerStartupDisabledInfos(t *testing.T) {
 	// Feature off (no ledger_path): a plain info that the passes are skipped, no warning.
 	l, _ := outcome.New("")
 	var buf bytes.Buffer
-	logLedgerStartup(captureLog(&buf), l.Status())
+	LogLedgerStartup(captureLog(&buf), l.Status())
 	rec := lastRecord(t, &buf)
 	if rec["level"] != "INFO" {
 		t.Fatalf("disabled ledger must INFO (not WARN), got level=%v", rec["level"])
