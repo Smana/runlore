@@ -11,18 +11,18 @@ import (
 // toolSource maps each investigation tool to its data-source group. submit_findings
 // and any unknown tool map to "" (ignored by coverage).
 var toolSource = map[string]string{
-	"what_changed":          "gitops",
-	"flux_resource_status":  "gitops",
-	"flux_tree":             "gitops",
-	"pod_status":            "kubernetes",
-	"kube_events":           "kubernetes",
-	"controller_logs":       "kubernetes",
-	"query_metrics":         "metrics",
-	"query_logs":            "logs",
-	"network_drops":         "network",
-	"cloud_what_changed":    "aws",
-	"cloud_resource_health": "aws",
-	"kb_search":             "kb",
+	"what_changed":           "gitops",
+	"gitops_resource_status": "gitops",
+	"gitops_tree":            "gitops",
+	"pod_status":             "kubernetes",
+	"kube_events":            "kubernetes",
+	"controller_logs":        "kubernetes",
+	"query_metrics":          "metrics",
+	"query_logs":             "logs",
+	"network_drops":          "network",
+	"cloud_what_changed":     "aws",
+	"cloud_resource_health":  "aws",
+	"kb_search":              "kb",
 }
 
 // Call is one recorded tool invocation during a live investigation.

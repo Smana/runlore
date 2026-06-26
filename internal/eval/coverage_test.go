@@ -52,7 +52,7 @@ func TestRecordingToolRecordsError(t *testing.T) {
 func TestScoreCoverage(t *testing.T) {
 	calls := []Call{
 		{Name: "what_changed", Output: "diff"},
-		{Name: "flux_resource_status", Output: "Ready=False"},
+		{Name: "gitops_resource_status", Output: "Ready=False"},
 		{Name: "query_logs", Output: "boom"},
 		{Name: "cloud_what_changed", Err: "timeout"},
 	}
