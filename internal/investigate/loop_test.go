@@ -35,7 +35,7 @@ func TestInstantRecallHit(t *testing.T) {
 			{Entry: catalog.Entry{Title: "Known incident", Description: "chart bump", Path: "known.md", Resource: "tooling/harbor"}, Score: 5.0}}}},
 		OnComplete: func(inv providers.Investigation) { got = &inv },
 	}
-	if err := li.Investigate(context.Background(), Request{Title: "HarborProbeFailure", Fingerprint: "fp-recall", Workload: providers.Workload{Namespace: "tooling", Name: "harbor"}}); err != nil {
+	if err := li.Investigate(context.Background(), Request{Title: "HarborProbeFailure", Fingerprint: "fp-recall", TriggerKey: "tk-recall", Workload: providers.Workload{Namespace: "tooling", Name: "harbor"}}); err != nil {
 		t.Fatalf("Investigate: %v", err)
 	}
 	if model.i != 0 {
@@ -49,6 +49,9 @@ func TestInstantRecallHit(t *testing.T) {
 	}
 	if got.Fingerprint != "fp-recall" {
 		t.Fatalf("recall path must carry the alert fingerprint for outcome attribution, got %q", got.Fingerprint)
+	}
+	if got.TriggerKey != "tk-recall" {
+		t.Fatalf("recall path must propagate the trigger key for dedup, got %q", got.TriggerKey)
 	}
 }
 
@@ -123,7 +126,7 @@ func TestLoopInvestigatorActions(t *testing.T) {
 		Actions:    action.New(config.ActionPolicy{Mode: config.ActionSuggest, Allow: config.ActionAllow{ReversibleOnly: true}}),
 		OnComplete: func(inv providers.Investigation) { got = &inv },
 	}
-	if err := li.Investigate(context.Background(), Request{Title: "t", Fingerprint: "fp-loop"}); err != nil {
+	if err := li.Investigate(context.Background(), Request{Title: "t", Fingerprint: "fp-loop", TriggerKey: "tk-loop"}); err != nil {
 		t.Fatalf("Investigate: %v", err)
 	}
 	// Only the reversible action is surfaced (suggest mode, reversible_only); none executed.
@@ -132,6 +135,9 @@ func TestLoopInvestigatorActions(t *testing.T) {
 	}
 	if got.Fingerprint != "fp-loop" {
 		t.Fatalf("full-loop path must carry the alert fingerprint for outcome attribution, got %q", got.Fingerprint)
+	}
+	if got.TriggerKey != "tk-loop" {
+		t.Fatalf("full-loop path must propagate the trigger key for dedup, got %q", got.TriggerKey)
 	}
 }
 
