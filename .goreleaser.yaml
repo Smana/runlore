@@ -51,14 +51,17 @@ signs:
   # id-token: write, so cosign gets a short-lived Fulcio cert from the OIDC token
   # and records the signature in Rekor — no long-lived keys. Verifying the
   # checksums transitively covers every archive it lists.
+  #
+  # New Sigstore bundle format: current cosign defaults to a single
+  # `${artifact}.bundle` (sig + cert) and IGNORES the legacy
+  # --output-signature/--output-certificate flags, so those are gone. Consumers
+  # verify with `cosign verify-blob --bundle checksums.txt.bundle …`.
   - cmd: cosign
-    certificate: '${artifact}.pem'
     args:
-      - sign-blob
-      - '--output-certificate=${certificate}'
-      - '--output-signature=${signature}'
-      - '${artifact}'
-      - '--yes'
+      - "sign-blob"
+      - "--bundle=${artifact}.bundle"
+      - "${artifact}"
+      - "--yes"
     artifacts: checksum
     output: true
 
