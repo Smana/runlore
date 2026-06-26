@@ -1,0 +1,114 @@
+name: Bug report
+description: Report something in RunLore that isn't working as expected
+title: "bug: <short summary>"
+labels: ["bug", "triage"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for taking the time to file a bug. Please fill in as much as you can —
+        it makes reproduction much faster.
+
+        **Security issue?** Do **not** file it here. Report vulnerabilities privately
+        via the [Security advisories page](https://github.com/Smana/runlore/security/advisories/new).
+
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened?
+      description: A clear description of the bug — what you observed.
+      placeholder: RunLore returned ... / the investigation crashed with ...
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: What did you expect to happen?
+      description: What you expected instead.
+    validations:
+      required: true
+
+  - type: input
+    id: version
+    attributes:
+      label: RunLore version or commit SHA
+      description: Output of `lore version`, the image tag, or the Git commit SHA you built from.
+      placeholder: "v0.x.y / git sha abc1234"
+    validations:
+      required: true
+
+  - type: dropdown
+    id: deployment-mode
+    attributes:
+      label: Deployment mode
+      description: How were you running RunLore when this happened?
+      options:
+        - "lore serve (in-cluster, via Helm)"
+        - "lore investigate (CLI, one-shot)"
+        - "lore eval (eval harness)"
+        - "Other / not sure"
+    validations:
+      required: true
+
+  - type: dropdown
+    id: gitops-engine
+    attributes:
+      label: GitOps engine
+      description: Which what-changed source is configured?
+      options:
+        - Flux
+        - Argo CD
+        - None
+        - Not sure
+    validations:
+      required: true
+
+  - type: input
+    id: model-provider
+    attributes:
+      label: Model provider
+      description: Anthropic, Gemini, or an OpenAI-compatible endpoint — and the model id if relevant.
+      placeholder: "Anthropic claude-... / OpenAI-compatible (vLLM, ...) / Gemini ..."
+    validations:
+      required: true
+
+  - type: input
+    id: backends
+    attributes:
+      label: Metrics / logs / network backends
+      description: e.g. VictoriaMetrics, Prometheus, VictoriaLogs, Hubble — or none.
+      placeholder: "metrics: VictoriaMetrics · logs: VictoriaLogs · network: Hubble"
+    validations:
+      required: false
+
+  - type: textarea
+    id: repro
+    attributes:
+      label: Steps to reproduce
+      description: Minimal steps to trigger the bug.
+      placeholder: |
+        1. Configure ...
+        2. Fire an alert / run `lore investigate ...`
+        3. See ...
+    validations:
+      required: true
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Relevant logs
+      description: |
+        Relevant log output, error messages, or config snippets.
+        **Redact secrets, tokens, API keys, and cluster identifiers** before pasting.
+      render: text
+    validations:
+      required: false
+
+  - type: textarea
+    id: extra
+    attributes:
+      label: Anything else?
+      description: Environment details, screenshots, or context that might help.
+    validations:
+      required: false
