@@ -1,0 +1,75 @@
+# GoReleaser builds and publishes the signed cross-platform `lore` binaries.
+# Scope: BINARIES ONLY. The container image is built and signed separately by
+# .github/workflows/build-image.yml on the same v* tag, and CHANGELOG.md is owned
+# by release-please — so docker and changelog are deliberately absent here.
+# Docs: https://goreleaser.com
+version: 2
+
+project_name: runlore
+
+builds:
+  - id: lore
+    main: ./cmd/lore
+    binary: lore
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - linux
+      - darwin
+      - windows
+    goarch:
+      - amd64
+      - arm64
+    # MUST stay in sync with the Dockerfile / build-image.yml ldflags so the binary
+    # and the image report the same version (`-X main.version`, see cmd/lore/main.go).
+    ldflags:
+      - -s -w -X main.version={{.Version}}
+
+archives:
+  - id: lore
+    ids:
+      - lore
+    name_template: >-
+      {{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}
+    formats:
+      - tar.gz
+    # Windows users typically expect a zip.
+    format_overrides:
+      - goos: windows
+        formats:
+          - zip
+
+checksum:
+  name_template: 'checksums.txt'
+
+sboms:
+  - id: archive-sbom
+    artifacts: archive
+
+signs:
+  # Keyless (Sigstore) signing of the checksums file. The job runs with
+  # id-token: write, so cosign gets a short-lived Fulcio cert from the OIDC token
+  # and records the signature in Rekor — no long-lived keys. Verifying the
+  # checksums transitively covers every archive it lists.
+  - cmd: cosign
+    certificate: '${artifact}.pem'
+    args:
+      - sign-blob
+      - '--output-certificate=${certificate}'
+      - '--output-signature=${signature}'
+      - '${artifact}'
+      - '--yes'
+    artifacts: checksum
+    output: true
+
+# release-please owns CHANGELOG.md; don't let GoReleaser generate its own.
+changelog:
+  disable: true
+
+release:
+  github:
+    owner: Smana
+    name: runlore
+  # release-please already created the GitHub release for this tag; only add the
+  # binaries/checksums/SBOMs/signatures and keep everything else it set.
+  mode: keep-existing
