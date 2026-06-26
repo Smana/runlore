@@ -112,10 +112,14 @@ jobs:
       - name: Sign image with cosign (keyless)
         if: github.event_name != 'pull_request'
         env:
-          # Sign by immutable digest, not a mutable tag, so the signature can't be
-          # repointed at a different image later.
-          IMAGE_DIGEST: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}@${{ steps.build.outputs.digest }}
-        run: cosign sign --yes "${IMAGE_DIGEST}"
+          DIGEST: ${{ steps.build.outputs.digest }}
+        # Sign by immutable digest, not a mutable tag, so the signature can't be
+        # repointed later. ghcr/OCI references must be lowercase, but
+        # github.repository_owner can contain uppercase (e.g. "Smana"), so lowercase
+        # the image name before signing.
+        run: |
+          image="${REGISTRY}/${IMAGE_NAME}"
+          cosign sign --yes "${image,,}@${DIGEST}"
 
       # PR gate: the image isn't pushed on pull_request, so scan the filesystem
       # (Go module graph + Dockerfile/config) and FAIL the job on HIGH/CRITICAL
