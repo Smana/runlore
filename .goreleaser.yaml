@@ -63,6 +63,9 @@ signs:
       - "${artifact}"
       - "--yes"
     artifacts: checksum
+    # cosign writes a single ${artifact}.bundle; tell GoReleaser to publish THAT as
+    # the signature artifact (its default is the now-nonexistent ${artifact}.sig).
+    signature: "${artifact}.bundle"
     output: true
 
 # release-please owns CHANGELOG.md; don't let GoReleaser generate its own.
