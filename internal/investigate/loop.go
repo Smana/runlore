@@ -38,7 +38,7 @@ NOT mean logging is the cause. Note the missing signal as unresolved and base yo
 tools that DID return data. Do not blame the subsystem whose tool failed.
 
 Drill from symptom to ROOT cause — don't stop at the first failing resource. When a Flux/GitOps
-resource is failing, call flux_resource_status on it; follow its sourceRef/dependsOn; use flux_tree
+resource is failing, call gitops_resource_status on it; follow its sourceRef/dependsOn; use gitops_tree
 to find the root (a not-Ready or NOT FOUND node); and use controller_logs / query_logs on the
 relevant controller (e.g. kustomize-controller, source-controller, helm-controller) to learn WHY it
 failed. Confirm hypotheses with metrics and, where relevant, network drops.
