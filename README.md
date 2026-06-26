@@ -138,6 +138,26 @@ not a proprietary store), from an agent that's **honest about the sub-50% realit
 first-class answer, an adversarial *verify* pass can only ever lower a finding's confidence, and every
 claim is checked by a shipped eval harness.
 
+## Project status & stability
+
+RunLore is **pre-1.0 and under active development** — interfaces and config may shift
+between commits. It's usable today, but "stable" means different things across the surface:
+
+- **The supported golden path is eval-tested and stable.** That's **Flux** +
+  **VictoriaMetrics / Prometheus** + an **Anthropic or OpenAI-compatible** model +
+  **Slack** + **GitHub** for the knowledge base. This is the path the [nightly eval](CONTRIBUTING.md#nightly-eval-ci)
+  and the [k3d e2e suite](CONTRIBUTING.md#end-to-end-on-k3d) exercise — run it with confidence.
+- **Functional but less exercised:** **Argo CD**, **Matrix**, **Gemini**, cloud
+  integrations, and the network (Hubble) provider. They work and are tested, but see
+  less real-world mileage — expect rougher edges and please file issues.
+- **The `auto` autonomy rung is experimental, frozen, and not recommended on real
+  clusters.** The supported posture is **read-only → suggest → approve**: RunLore reads
+  and recommends, a human reviews and merges. Hands-off `auto` remains on the roadmap,
+  off by default, and should not be pointed at production.
+
+If you stay on the golden path with a human in the approval loop, you're on the surface
+we test hardest.
+
 ## Docs
 
 📐 [Design](docs/design.md) · 📚 [Learning loop](docs/learning-loop.md) · ✅ [Reviewing knowledge](docs/reviewing-knowledge.md) · 🚀 [Getting started](docs/getting-started.md) ·
