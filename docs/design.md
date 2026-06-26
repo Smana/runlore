@@ -330,11 +330,12 @@ git diff*:
 | failure (React) | `Ready=False`, source `FetchFailed` | `health=Degraded`, `sync=OutOfSync` |
 | the diff | go-git between revisions over `spec.path` | go-git over `source.path` (Argo also has native `app diff`) |
 
-> **Engine depth is honest, not symmetric.** Flux is the reference implementation. The deep
-> introspection tools (`flux_status`, `flux_tree`) and the failure-persistence re-check use a Flux-only
-> `GitOpsInspector`; on ArgoCD they no-op — Argo gets revision history, the diff, and failure detection,
-> but not the deep tree/status lens. Likewise **action-approval (rung-2) is Slack-only** today; Matrix
-> is delivery-only. Both are honest current states, not full parity.
+> **Engine depth — deep lens now at parity.** Flux is the reference implementation, but the deep
+> introspection tools (`flux_status`, `flux_tree`) and the failure-persistence re-check run on the
+> `GitOpsInspector` interface, which **both Flux and Argo CD now implement** (FEAT-2): on Argo via
+> native `status.health`/`status.sync`, error conditions, and the `status.resources` tree (app-of-apps
+> aware). The tools keep their `flux_`-prefixed names for now — cosmetic, not functional. Remaining
+> honest asymmetry: **action-approval (rung-2) is Slack-only** today; Matrix is delivery-only.
 
 **Auto-discovery**: detect `argoproj.io/Application` → ArgoCD; `helm.toolkit.fluxcd.io` → Flux; probe
 the metrics endpoint → VM vs Prometheus. Config overrides. Flux + VictoriaMetrics is the primary

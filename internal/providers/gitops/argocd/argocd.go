@@ -8,6 +8,8 @@ import (
 	"log/slog"
 	"strings"
 
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+
 	"github.com/Smana/runlore/internal/providers"
 	"github.com/Smana/runlore/internal/whatchanged"
 )
@@ -37,6 +39,12 @@ type ApplicationEvent struct {
 type Reader interface {
 	ListApplications(ctx context.Context) ([]application, error)
 	WatchApplications(ctx context.Context) (<-chan ApplicationEvent, error)
+	// GetApplication fetches one Application as unstructured (deep inspection needs
+	// status.conditions + status.resources, which the minimal `application` omits). A
+	// NotFound error is returned verbatim so callers can distinguish "missing".
+	GetApplication(ctx context.Context, namespace, name string) (*unstructured.Unstructured, error)
+	// ListEvents returns recent Event lines for an involved object.
+	ListEvents(ctx context.Context, namespace, name, kind string) ([]string, error)
 }
 
 // Provider implements providers.GitOpsProvider for Argo CD.
@@ -174,4 +182,7 @@ func parseRevision(rev string) string {
 	return rev
 }
 
-var _ providers.GitOpsProvider = (*Provider)(nil)
+var (
+	_ providers.GitOpsProvider  = (*Provider)(nil)
+	_ providers.GitOpsInspector = (*Provider)(nil)
+)
