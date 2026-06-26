@@ -5,6 +5,3 @@ contact_links:
     about: >-
       Found a security issue? Report it privately via GitHub security advisories —
       please do NOT open a public issue for vulnerabilities.
-  - name: Questions & discussion
-    url: https://github.com/Smana/runlore/discussions
-    about: For usage questions, ideas, and general discussion (not bug reports).
