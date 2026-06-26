@@ -25,12 +25,20 @@ func (p *Provider) ResourceStatus(ctx context.Context, w providers.Workload) (pr
 		return rs, err
 	}
 	rs.Ready, rs.Reason, rs.Message = appReady(u)
-	if repo, _, _ := unstructured.NestedString(u.Object, "spec", "source", "repoURL"); repo != "" {
+	// sourceRepoPath handles both single-source (spec.source) and multi-source
+	// (spec.sources[0]) schemas, mirroring the Changes() path in dynamic.go.
+	if repo, path := sourceRepoPath(u); repo != "" {
 		rs.Refs["repoURL"] = repo
-		if path, _, _ := unstructured.NestedString(u.Object, "spec", "source", "path"); path != "" {
+		if path != "" {
 			rs.Refs["path"] = path
 		}
-		if tr, _, _ := unstructured.NestedString(u.Object, "spec", "source", "targetRevision"); tr != "" {
+		tr, _, _ := unstructured.NestedString(u.Object, "spec", "source", "targetRevision")
+		if tr == "" {
+			if first, ok := firstSourceMap(u, "spec", "sources"); ok {
+				tr, _ = first["targetRevision"].(string)
+			}
+		}
+		if tr != "" {
 			rs.Refs["targetRevision"] = tr
 		}
 	}

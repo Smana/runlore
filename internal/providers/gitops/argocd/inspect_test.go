@@ -85,6 +85,47 @@ func TestArgoResourceStatusSyncFailedForcesNotReady(t *testing.T) {
 	}
 }
 
+func TestArgoResourceStatusMultiSource(t *testing.T) {
+	// Multi-source app: spec.source is absent; spec.sources[] carries the refs.
+	// ResourceStatus must populate repoURL/path/targetRevision from sources[0],
+	// matching the behaviour of the Changes() path (sourceRepoPath in dynamic.go).
+	obj := &unstructured.Unstructured{Object: map[string]any{
+		"metadata": map[string]any{"name": "multi-src", "namespace": "argocd"},
+		"spec": map[string]any{
+			"sources": []any{
+				map[string]any{
+					"repoURL":        "https://example.com/infra",
+					"path":           "apps/payment",
+					"targetRevision": "v1.2.3",
+				},
+				map[string]any{
+					"repoURL":        "https://example.com/values",
+					"targetRevision": "HEAD",
+				},
+			},
+			"destination": map[string]any{"namespace": "payment"},
+		},
+		"status": map[string]any{
+			"health": map[string]any{"status": "Degraded"},
+			"sync":   map[string]any{"status": "OutOfSync"},
+		},
+	}}
+	p := New(fakeReader{obj: obj}, &whatchanged.Differ{})
+	rs, err := p.ResourceStatus(context.Background(), providers.Workload{Kind: "Application", Name: "multi-src", Namespace: "argocd"})
+	if err != nil {
+		t.Fatalf("ResourceStatus: %v", err)
+	}
+	if rs.Refs["repoURL"] != "https://example.com/infra" {
+		t.Fatalf("repoURL should come from sources[0], got %q", rs.Refs["repoURL"])
+	}
+	if rs.Refs["path"] != "apps/payment" {
+		t.Fatalf("path from sources[0]: got %q", rs.Refs["path"])
+	}
+	if rs.Refs["targetRevision"] != "v1.2.3" {
+		t.Fatalf("targetRevision from sources[0]: got %q", rs.Refs["targetRevision"])
+	}
+}
+
 func TestArgoResourceStatusNotFound(t *testing.T) {
 	p := New(fakeReader{notFound: true}, &whatchanged.Differ{})
 	rs, err := p.ResourceStatus(context.Background(), providers.Workload{Kind: "Application", Name: "ghost", Namespace: "argocd"})
