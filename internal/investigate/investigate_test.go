@@ -120,6 +120,30 @@ func TestFromFailureEvent(t *testing.T) {
 	}
 }
 
+func TestFromFailureEventSetsTriggerKey(t *testing.T) {
+	// The trigger key is the failing resource ref + the condition reason — both
+	// deterministic K8s fields, set before the LLM runs, so re-investigations of one
+	// persistent failure share it regardless of how the model rewords the cause (#137).
+	fe := providers.FailureEvent{
+		Workload: providers.Workload{Kind: "Application", Namespace: "argocd", Name: "airflow"},
+		Reason:   "Degraded",
+	}
+	if r := FromFailureEvent(fe); r.TriggerKey != "argocd/airflow:Degraded" {
+		t.Fatalf("Request.TriggerKey = %q, want argocd/airflow:Degraded", r.TriggerKey)
+	}
+}
+
+func TestFromIncidentSetsTriggerKey(t *testing.T) {
+	// For alerts the deterministic identity is the Alertmanager fingerprint.
+	if r := FromIncident(config.Incident{AlertName: "A", Namespace: "ns", Fingerprint: "fp-9"}); r.TriggerKey != "fp-9" {
+		t.Fatalf("Request.TriggerKey = %q, want fp-9", r.TriggerKey)
+	}
+	// No alert fingerprint ⇒ no trigger key (DupFingerprint falls back to the prose cause).
+	if r := FromIncident(config.Incident{AlertName: "A", Namespace: "ns"}); r.TriggerKey != "" {
+		t.Fatalf("Request.TriggerKey = %q, want empty when no fingerprint", r.TriggerKey)
+	}
+}
+
 func TestFromIncidentCarriesFingerprint(t *testing.T) {
 	r := FromIncident(config.Incident{AlertName: "A", Namespace: "ns", Fingerprint: "fp-9"})
 	if r.Fingerprint != "fp-9" {
