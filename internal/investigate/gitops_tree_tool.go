@@ -43,9 +43,22 @@ func (t GitOpsTreeTool) Call(ctx context.Context, args string) (string, error) {
 	if err != nil {
 		return "", err
 	}
+	// F2: every existing node in the tree is a server-confirmed resource — record them
+	// observed so an action may legitimately target the root failure or a dependency.
+	recordObservedTree(ctx, root)
 	var b strings.Builder
 	renderDepNode(&b, root, 0)
 	return b.String(), nil
+}
+
+// recordObservedTree records every existing (non-NotFound) node of a dependency tree.
+func recordObservedTree(ctx context.Context, n providers.DepNode) {
+	if !n.NotFound {
+		recordObserved(ctx, n.Workload)
+	}
+	for _, c := range n.Children {
+		recordObservedTree(ctx, c)
+	}
 }
 
 // renderDepNode renders a node and its children with indentation, flagging the

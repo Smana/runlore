@@ -52,6 +52,10 @@ func (t WhatChangedTool) Call(ctx context.Context, args string) (string, error) 
 	defer done()
 	var b strings.Builder
 	for _, c := range changes {
+		// F2: these workloads were DETECTED server-side (Flux/Argo + git) — record them
+		// as observed so an action may legitimately target them.
+		recordObserved(ctx, c.Workload)
+		recordObserved(ctx, c.BlastRadius...)
 		fmt.Fprintf(&b, "%s %s/%s (%s): %s..%s\n", c.Engine, c.Workload.Kind, c.Workload.Name, c.Type, c.FromRev, c.ToRev)
 		d, derr := t.GitOps.Diff(ctx, c)
 		if derr != nil {

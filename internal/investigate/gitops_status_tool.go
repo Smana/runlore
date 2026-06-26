@@ -50,6 +50,8 @@ func (t GitOpsStatusTool) Call(ctx context.Context, args string) (string, error)
 			"name; the object genuinely does not exist (likely the cascade root). If you expected it to " +
 			"exist, re-check the kind/name rather than concluding it was deleted.", nil
 	}
+	// F2: the inspector confirmed this resource exists server-side — record it observed.
+	recordObserved(ctx, providers.Workload{Kind: in.Kind, Name: in.Name, Namespace: in.Namespace})
 	var b strings.Builder
 	fmt.Fprintf(&b, "%s  Ready=%s", id, emptyDash(rs.Ready))
 	if rs.Reason != "" {
