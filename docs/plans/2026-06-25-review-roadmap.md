@@ -10,26 +10,25 @@
 >
 > **Priority key:** **P0** blocks credibility/safety · **P1** important · **P2** nice-to-have.
 
-> **Progress log — 2026-06-25 (implementation).** The review (Steps 1–5) is complete; this records
-> what has since shipped to `main`. **Merged:** M0 (AUTH-1 · C1 · C4 · C2) · M1 churn-hardening
-> (GO-P1A · GO-P2A/B/C · **GO-P1B graceful drain**) · M2 egress security (**F1** ingress **+ egress**
-> redaction · **F3** reject-gating · **CLONE-1** per-call clone cache · **P3**: crypto-rand IDs ·
-> Slack empty-2xx · anthropic/gemini ReadAll wraps · reserve-after-pause · **SSRF redirect guard**
-> across all outbound clients) · M3 **FEAT-1** (`auto` frozen experimental) · **M4 hybrid recall**
-> (part 1 embed foundation + part 2 catalog/recall integration — opt-in, BM25-default, regression-free;
-> cosine-threshold eval-tuning pending) · docs (**architecture diagram** — mermaid · prior-art ·
-> roadmap). **Remaining:** **M4 pt2 eval-tuning** (operator step — needs a live embeddings endpoint +
-> the live instant-recall eval to set the cosine gates) · **POS-4** (alignment spike — research) ·
-> **FEAT-2** (ArgoCD Inspector parity —
-> on-demand) · **PERSIST-1** (decision: doc-only). **Attempted & reverted:** **F2** action-target
-> validation — built a server-observed-resource set (alert seed + what_changed) that downgraded
-> actions on unobserved targets, but the e2e caught it downgrading a *legitimate* alert-driven
-> auto-suspend (no tool surfaced the target server-side); safe enforcement needs comprehensive
-> resource-observation capture across the gitops/cluster *status* tools (larger than scoped,
-> low-urgency while `auto` is frozen). **Deferred with reason:** dead-key removal (FEAT-3/4 — the
-> keys are reserved placeholders under a strict decoder, so removal is breaking) ·
-> `CheckRedirect`/`strict:true` (broad, low-value) · `docs/architecture/*.drawio` diagram + deep
-> README↔design↔learning-loop de-dup.
+> **Progress log — 2026-06-26.** The review (Steps 1–5) is complete; this records what has shipped to
+> `main`. **Merged:** M0 (AUTH-1 · C1 · C4 · C2) · M1 churn-hardening (GO-P1A · GO-P2A/B/C · **GO-P1B
+> graceful drain**) · M2 egress security (**F1** ingress **+ egress** redaction · **F3** reject-gating ·
+> **CLONE-1** per-call clone cache · **P3** nits · **SSRF redirect guard** across all outbound clients) ·
+> M3 **FEAT-1** (`auto` frozen) · **FEAT-2** (ArgoCD `GitOpsInspector` parity) + the `gitops_*` tool
+> rename · **M4 hybrid recall** (pt1 embed foundation + pt2 catalog/recall integration — opt-in,
+> BM25-default; cosine-threshold eval-tuning pending) · **POS-4** (HolmesGPT what-changed proposal +
+> `lore mcp` MVP) · docs (architecture **mermaid** diagram · prior-art · learning-loop de-dup · roadmap).
+> **Remaining:** **M4 pt2 eval-tuning** (operator — needs a live embeddings endpoint + the instant-recall
+> eval) · **POS-4 upstream** (HolmesGPT live demo / native-toolset PR — relationship) · **PERSIST-1**
+> (decision: doc-only). **Attempted twice, deferred:** **F2** action-target validation — *attempt 1
+> (narrow: alert seed + what_changed)* downgraded a legit auto-suspend → reverted; *attempt 2 (proper:
+> capture across what_changed + gitops_resource_status + gitops_tree, name-tolerant matching)* validates
+> the core (e2e `auto-executed` passes) but **regresses the rung-2 two-approve e2e** (`main` 45/45 → F2
+> 44/45 — one approvable action vs two) via an unconfirmed re-fire-action interaction; deferred
+> (low-urgency while `auto` is frozen), code parked on branch `fix/f2-action-target-validation`. Next
+> attempt: instrument the rung-2 re-fire (`--keep`) before enforcing. **Deferred with reason:** dead-key
+> removal (FEAT-3/4 — reserved keys under a strict decoder) · `CheckRedirect`/`strict:true` (broad,
+> low-value).
 
 ---
 
@@ -258,7 +257,7 @@ For an HA tool, leader-flap / SIGTERM / interrupted-clone / crash are the events
 | Item | What | Size |
 |---|---|---|
 | **F1 / R19** (P1) | Content-redaction scrub: tool output → prompt, and evidence → KB PR + chat. Biggest security win; start early (long pole). | **L** |
-| **F2** (P2) 🔶 | **Attempted, reverted.** Built a context-scoped observed-resource set (alert seed + server-detected what_changed workloads) that downgraded actions on unobserved targets to suggestions. The e2e caught a false positive — an alert-driven auto-suspend of the failing Kustomization was downgraded because *no tool surfaced it server-side in that investigation*. Validating against the model-supplied `inv.Resource` would be false security, so the set must be server-sourced — but a safely-enforceable set needs comprehensive resource capture across the gitops/cluster **status** tools (and a fixture that surfaces the target). Larger than scoped; low-urgency while `auto` is frozen. | **M** |
+| **F2** (P2) 🔶 | **Attempted twice, deferred.** *Attempt 1 (narrow — alert seed + what_changed only):* downgraded a legitimate alert-driven auto-suspend (target not surfaced server-side) → reverted. *Attempt 2 (proper):* a context-scoped observed-resource set captured across **every** server-confirming read tool (what_changed + gitops_resource_status + gitops_tree), with **name-tolerant** matching (exact ns/name → name-only fallback, since a GitOps object's namespace varies by view and the gate already gates the namespace). The core works — the e2e `auto-executed` (observed target) passes — but it **regresses the rung-2 two-approve e2e**: `main` is 45/45, the F2 branch 44/45, leaving only one approvable action where `main` reliably has two (the second comes from an informer re-fire). Mechanism **unconfirmed** — likely a false-downgrade of the re-fire investigation's action (the attempt-1 class of bug, in a new place). **Deferred** (low-urgency while `auto` is frozen); code parked on `fix/f2-action-target-validation`. Next attempt must instrument the rung-2 re-fire path (`--keep`) before enforcing. | **M** |
 | **F3** (P2) | Approver-gate the `runlore_reject` path. | **XS** |
 | **CLONE-1** (P2) | Shallow clone (`Depth:1`/`SingleBranch`) + per-investigation clone cache + cleanup. Also a perf/disk-DoS win. | **M** |
 | **P3 bundle** | crypto-rand approval IDs · `CheckRedirect`+`strict:true` egress · Slack empty-2xx · wrap ReadAll errors · reserve-after-pause. | **S** |
