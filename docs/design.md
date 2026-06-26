@@ -339,8 +339,7 @@ git diff*:
 > introspection tools (`gitops_resource_status`, `gitops_tree`) and the failure-persistence re-check run on the
 > `GitOpsInspector` interface, which **both Flux and Argo CD now implement** (FEAT-2): on Argo via
 > native `status.health`/`status.sync`, error conditions, and the `status.resources` tree (app-of-apps
-> aware). The tools keep their `flux_`-prefixed names for now — cosmetic, not functional. Remaining
-> honest asymmetry: **action-approval (rung-2) is Slack-only** today; Matrix is delivery-only.
+> aware). Remaining honest asymmetry: **action-approval (rung-2) is Slack-only** today; Matrix is delivery-only.
 
 **Auto-discovery**: detect `argoproj.io/Application` → ArgoCD; `helm.toolkit.fluxcd.io` → Flux; probe
 the metrics endpoint → VM vs Prometheus. Config overrides. Flux + VictoriaMetrics is the primary

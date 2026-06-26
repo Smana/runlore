@@ -122,7 +122,13 @@ config:
   #     volumes and `lore curate`'s Queue + Recurrence passes read an empty ledger
   #     (the command warns loudly at startup when the ledger it sees is absent/empty).
   # notify:
-  #   slack: { webhook_url_env: SLACK_WEBHOOK_URL }
+  #   slack:
+  #     # Option A — incoming webhook (simplest):
+  #     webhook_url_env: SLACK_WEBHOOK_URL
+  #     # Option B — bot token (chat.postMessage; reuse an existing Slack app, e.g. Alertmanager's):
+  #     # bot_token_env: SLACK_BOT_TOKEN
+  #     # channel: "#alerts"            # channel ID or name (required with bot_token_env)
+  #     # signing_secret_env: SLACK_SIGNING_SECRET  # only needed for rung-2 approve/reject buttons
   #   matrix: { homeserver: https://matrix.org, room_id: "!r:hs", access_token_env: MATRIX_TOKEN }
   # forge:
   #   kb_repo: owner/name
@@ -235,6 +241,7 @@ rbac:
   # The controller_logs tool only ever reads the Flux controllers (source/kustomize/
   # helm/notification), which live in flux-system by convention, so the default is the
   # single flux-system namespace. Override ONLY if you relocate the Flux controllers.
+  # For ArgoCD deployments (config.gitops.engine: argocd), override to [argocd] instead.
   # Cluster-wide `pods` get/list (pod STATUS, not log bodies) stays in the ClusterRole
   # because pod_status/kube_events triage arbitrary incident namespaces. Redacting
   # secrets that still surface via status/event messages and these log bodies is a
