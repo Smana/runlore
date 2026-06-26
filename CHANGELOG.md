@@ -8,6 +8,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 RunLore is **pre-1.0 and under active development** — there are no tagged releases
 yet, so everything currently lives under `[Unreleased]`.
 
+## [0.1.1](https://github.com/Smana/runlore/compare/v0.1.0...v0.1.1) (2026-06-26)
+
+
+### Bug Fixes
+
+* **ci:** publish cosign bundle as the signature artifact ([008f1cf](https://github.com/Smana/runlore/commit/008f1cfeaad43ebc3841f7521e3e887289bcd56d))
+* **ci:** publish cosign bundle as the signature artifact ([e8127fc](https://github.com/Smana/runlore/commit/e8127fcf43f9dca46e38048da461d6fed978c869))
+
 ## 0.1.0 (2026-06-26)
 
 
