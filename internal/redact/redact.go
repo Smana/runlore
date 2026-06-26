@@ -27,12 +27,26 @@ var rules = []rule{
 	{regexp.MustCompile(`eyJ[A-Za-z0-9_-]{8,}\.eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}`), mask},
 	// GitHub tokens (ghp_/gho_/ghu_/ghs_/ghr_).
 	{regexp.MustCompile(`gh[pousr]_[A-Za-z0-9]{20,}`), mask},
-	// OpenAI / Anthropic-style keys.
-	{regexp.MustCompile(`sk-[A-Za-z0-9_-]{16,}`), mask},
+	// GitHub fine-grained personal access token.
+	{regexp.MustCompile(`\bgithub_pat_[0-9A-Za-z_]{22,}\b`), mask},
+	// OpenAI / Anthropic-style keys (anchored so a benign "sk-" inside a word
+	// like "task-management" is not matched).
+	{regexp.MustCompile(`\bsk-[A-Za-z0-9_-]{16,}\b`), mask},
+	// Stripe live keys (secret / restricted).
+	{regexp.MustCompile(`\b(?:sk|rk)_live_[0-9A-Za-z]{16,}\b`), mask},
+	// Google OAuth access token.
+	{regexp.MustCompile(`\bya29\.[0-9A-Za-z_-]{20,}`), mask},
 	// Slack tokens.
 	{regexp.MustCompile(`xox[baprs]-[A-Za-z0-9-]{10,}`), mask},
 	// AWS access key id.
 	{regexp.MustCompile(`\b(?:AKIA|ASIA)[0-9A-Z]{16}\b`), mask},
+	// AWS secret access key, but ONLY when an AWS context cue is adjacent. The
+	// ':' / '=' separated forms (aws_secret_access_key=..., "SecretAccessKey":
+	// "...") are already covered by the generic key=value rule below; this adds
+	// the whitespace-separated case while deliberately NOT introducing a bare
+	// [A-Za-z0-9/+]{40} rule, which would false-positive on git SHAs and
+	// base64 log blobs.
+	{regexp.MustCompile(`(?i)(aws[_-]?secret[_-]?access[_-]?key\s+)[A-Za-z0-9/+]{40}\b`), `${1}[REDACTED]`},
 	// Google API key.
 	{regexp.MustCompile(`\bAIza[0-9A-Za-z_-]{35}\b`), mask},
 	// Credentials in a URL: scheme://user:PASSWORD@host → mask the password.
