@@ -206,6 +206,10 @@ GitOps platform it resolves to the *exact* Git diff (the spine below).
 
 ### Learn — compound an open catalog
 
+> The **full operational mechanics** — instant-recall trust gates, the outcome ledger, outcome-driven
+> decay, curation, and compounding — are documented once in **[learning-loop.md](learning-loop.md)**
+> (the canonical deep-dive). This section is the *architectural* view: how Learn fits the design and why.
+
 RunLore's learning is modeled on the **Open Knowledge Format (OKF)** introduced by
 [GoogleCloudPlatform/knowledge-catalog](https://github.com/GoogleCloudPlatform/knowledge-catalog):
 a git tree of markdown + YAML-frontmatter entries that agents both **read and write** (its enrichment
@@ -246,9 +250,10 @@ only half emergent:
   this fix"), captured via the loop above.
 
 To keep the catalog an asset and not a liability (frontier RCA is <50 % accurate, §10), entries carry
-**`status` (draft/verified)**, **`confidence`**, and **`last_validated`** so wrong or stale knowledge
-is down-weighted, and stale entries decay or get re-validated. Curation (the PR/issue review) is
-**load-bearing**, not free — it is the quality gate that separates this from opaque vendor "memory."
+**`status`**, **`confidence`**, and **`last_validated`**, and an outcome-driven decay down-weights
+knowledge that stops resolving incidents ([mechanics in learning-loop.md §6](learning-loop.md)).
+Curation — the PR/issue review — is the **load-bearing** quality gate that separates this from opaque
+vendor "memory."
 
 ### Act — the (gated) autonomy ladder
 
