@@ -20,55 +20,32 @@ import (
 	"os/exec"
 	"os/signal"
 	"path/filepath"
-	"runtime/debug"
-	"strconv"
 	"strings"
 	"sync/atomic"
 	"syscall"
 	"time"
 
-	"go.opentelemetry.io/otel/attribute"
-	"go.opentelemetry.io/otel/metric"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/kubernetes"
-	"k8s.io/client-go/rest"
-	"k8s.io/client-go/tools/clientcmd"
-	"k8s.io/client-go/tools/leaderelection"
-	"k8s.io/client-go/tools/leaderelection/resourcelock"
 
 	"github.com/Smana/runlore/internal/action"
 	"github.com/Smana/runlore/internal/app"
-	"github.com/Smana/runlore/internal/audit"
 	"github.com/Smana/runlore/internal/catalog"
 	"github.com/Smana/runlore/internal/coalesce"
 	"github.com/Smana/runlore/internal/config"
 	"github.com/Smana/runlore/internal/curate"
-	"github.com/Smana/runlore/internal/curator"
-	"github.com/Smana/runlore/internal/embed"
 	"github.com/Smana/runlore/internal/eval"
 	fluxexec "github.com/Smana/runlore/internal/executor/flux"
 	"github.com/Smana/runlore/internal/investigate"
-	"github.com/Smana/runlore/internal/kbvalidate"
 	"github.com/Smana/runlore/internal/logging"
-	"github.com/Smana/runlore/internal/logs/victorialogs"
 	"github.com/Smana/runlore/internal/mcp"
-	"github.com/Smana/runlore/internal/metrics/prometheus"
-	"github.com/Smana/runlore/internal/network/awsvpc"
-	"github.com/Smana/runlore/internal/network/gcpfirewall"
-	"github.com/Smana/runlore/internal/network/hubble"
 	"github.com/Smana/runlore/internal/notify"
 	"github.com/Smana/runlore/internal/outcome"
 	"github.com/Smana/runlore/internal/providers"
-	awscloud "github.com/Smana/runlore/internal/providers/cloud/aws"
-	"github.com/Smana/runlore/internal/providers/cluster"
-	"github.com/Smana/runlore/internal/providers/gitops/argocd"
-	"github.com/Smana/runlore/internal/providers/gitops/flux"
 	"github.com/Smana/runlore/internal/ratelimit"
 	"github.com/Smana/runlore/internal/server"
 	"github.com/Smana/runlore/internal/telemetry"
 	"github.com/Smana/runlore/internal/trigger"
-	"github.com/Smana/runlore/internal/whatchanged"
 
 	github "github.com/Smana/runlore/internal/forge/github"
 )
@@ -151,7 +128,7 @@ func runServe(args []string) error {
 		return err
 	}
 	log := logging.FromConfig(os.Stdout, cfg.Logging.Format, cfg.Logging.Level)
-	setMemoryLimitFromCgroup(log) // make the GC respect the container memory cap
+	app.SetMemoryLimitFromCgroup(log) // make the GC respect the container memory cap
 
 	// Opt-in pprof on loopback only (reachable via `kubectl port-forward`, never the
 	// Service) — so a memory/CPU issue can be profiled in-cluster without exposing it.
@@ -189,13 +166,13 @@ func runServe(args []string) error {
 		clientset *kubernetes.Clientset
 		executor  action.Executor // rung-2 action executor (Flux), when a cluster is reachable
 	)
-	if restCfg, err := restConfig(); err != nil {
+	if restCfg, err := app.RestConfig(); err != nil {
 		log.Warn("no kube client; GitOps features + leader election disabled", "err", err)
 	} else {
 		if dc, derr := dynamic.NewForConfig(restCfg); derr != nil {
 			log.Warn("dynamic client unavailable; GitOps features disabled", "err", derr)
 		} else {
-			gitops = buildGitOps(cfg, dc, log)
+			gitops = app.BuildGitOps(cfg, dc, log)
 			executor = fluxexec.New(dc)
 		}
 		if cs, cerr := kubernetes.NewForConfig(restCfg); cerr != nil {
@@ -212,7 +189,7 @@ func runServe(args []string) error {
 		return fmt.Errorf("actions enabled (mode=%s) but %s is empty: refusing to start with unauthenticated control endpoints (fail closed)",
 			cfg.Actions.Mode, cfg.Actions.ApprovalTokenEnv)
 	}
-	aud, auditClose, aerr := buildAuditor(cfg)
+	aud, auditClose, aerr := app.BuildAuditor(cfg)
 	if aerr != nil {
 		return aerr
 	}
@@ -222,8 +199,8 @@ func runServe(args []string) error {
 	if executor != nil {
 		execForActions = action.NewAuditedExecutor(executor, aud)
 	}
-	approvals := buildApprovals(cfg, execForActions, aud, log)
-	auto := buildAuto(cfg, execForActions, aud, log)
+	approvals := app.BuildApprovals(cfg, execForActions, aud, log)
+	auto := app.BuildAuto(cfg, execForActions, aud, log)
 	slackSigningSecret := os.Getenv(cfg.Notify.Slack.SigningSecretEnv)
 	webhookToken := os.Getenv(cfg.Server.WebhookTokenEnv)
 	if err := app.RequireWebhookAuth(cfg, webhookToken); err != nil {
@@ -251,7 +228,7 @@ func runServe(args []string) error {
 		log.Info("outcome ledger enabled", "path", cfg.Outcome.LedgerPath)
 	}
 
-	inv, cat := buildInvestigator(ctx, cfg, gitops, approvals, auto, metrics, ledger, log)
+	inv, cat := app.BuildInvestigator(ctx, cfg, gitops, approvals, auto, metrics, ledger, log)
 	queue := investigate.NewQueue(inv, log)
 	var rlStarts *ratelimit.Window
 	if rl := cfg.Investigation.RateLimit; rl.MaxPerWindow > 0 {
@@ -297,7 +274,7 @@ func runServe(args []string) error {
 			"max_batch", cc.MaxBatch, "cooldown", cc.Cooldown.Std())
 	}
 
-	reinv := buildReinvestigator(ctx, cfg, gitops, metrics, log)
+	reinv := app.BuildReinvestigator(ctx, cfg, gitops, metrics, log)
 
 	// failureDedup is created ONCE (process scope), not per leadership term, so it
 	// survives leader flaps: the gitops informer's initial-LIST replay of every
@@ -310,7 +287,7 @@ func runServe(args []string) error {
 	startWork := func(workCtx context.Context) {
 		go queue.Run(workCtx)
 		if cfg.Triggers.GitOpsFailures.Enabled && gitops != nil {
-			startGitOpsFailureWatch(workCtx, cfg, queue, gitops, failureDedup, metrics, log)
+			app.StartGitOpsFailureWatch(workCtx, cfg, queue, gitops, failureDedup, metrics, log)
 		}
 		if reinv != nil {
 			log.Info("re-investigate poller enabled", "label", investigate.ReinvestigateLabel)
@@ -321,7 +298,7 @@ func runServe(args []string) error {
 	var leader atomic.Bool
 	useLE := cfg.LeaderElection.Enabled && clientset != nil
 	if useLE {
-		go runLeaderElection(workCtx, cfg, clientset, &leader, log, startWork)
+		go app.RunLeaderElection(workCtx, cfg, clientset, &leader, log, startWork)
 	} else {
 		leader.Store(true) // no leader election: this replica is always active + ready
 		startWork(workCtx)
@@ -353,7 +330,7 @@ func runServe(args []string) error {
 		srv.SetCoalescer(cz)
 		go cz.Run(workCtx, cfg.Investigation.Coalesce.Debounce.Std()/2)
 	}
-	httpSrv := newHTTPServer(*addr, srv.Handler())
+	httpSrv := app.NewHTTPServer(*addr, srv.Handler())
 	// Graceful shutdown: on SIGTERM, stop accepting webhooks, let the in-flight
 	// investigation finish within a bounded grace (lease still held), then release.
 	drained := make(chan struct{})
@@ -372,155 +349,6 @@ func runServe(args []string) error {
 		return err
 	}
 	<-drained // wait for the graceful drain to finish before exiting
-	return nil
-}
-
-// newHTTPServer builds the serving http.Server with every inbound bound set. Go's
-// zero defaults leave each of these unlimited, exposing the long-lived server to
-// Slowloris (slow header/body), unbounded idle keep-alives, and oversized headers.
-// Payloads (Alertmanager/Slack) are small and synchronous, so 30s read/write is
-// generous while still cutting off slow attackers; the body itself is capped per
-// handler (1 MiB).
-func newHTTPServer(addr string, h http.Handler) *http.Server {
-	return &http.Server{
-		Addr:              addr,
-		Handler:           h,
-		ReadHeaderTimeout: 5 * time.Second,
-		ReadTimeout:       30 * time.Second,
-		WriteTimeout:      30 * time.Second,
-		IdleTimeout:       60 * time.Second,
-		MaxHeaderBytes:    1 << 20,
-	}
-}
-
-// runLeaderElection blocks running Lease-based leader election; the leader runs
-// startWork and reports ready. Lost leadership cancels the work context.
-func runLeaderElection(ctx context.Context, cfg *config.Config, cs *kubernetes.Clientset, leader *atomic.Bool, log *slog.Logger, startWork func(context.Context)) {
-	name := cfg.LeaderElection.Name
-	if name == "" {
-		name = "runlore-leader"
-	}
-	id := app.PodName()
-	lock := &resourcelock.LeaseLock{
-		LeaseMeta:  metav1.ObjectMeta{Name: name, Namespace: app.PodNamespace()},
-		Client:     cs.CoordinationV1(),
-		LockConfig: resourcelock.ResourceLockConfig{Identity: id},
-	}
-	leaderelection.RunOrDie(ctx, leaderelection.LeaderElectionConfig{
-		Lock:            lock,
-		ReleaseOnCancel: true,
-		LeaseDuration:   15 * time.Second,
-		RenewDeadline:   10 * time.Second,
-		RetryPeriod:     2 * time.Second,
-		Callbacks: leaderelection.LeaderCallbacks{
-			OnStartedLeading: func(workCtx context.Context) {
-				log.Info("acquired leadership", "id", id)
-				leader.Store(true)
-				startWork(workCtx)
-			},
-			OnStoppedLeading: func() {
-				log.Info("lost leadership", "id", id)
-				leader.Store(false)
-			},
-			OnNewLeader: func(current string) {
-				if current != id {
-					log.Info("standby; another replica leads", "leader", current)
-				}
-			},
-		},
-	})
-}
-
-// buildCatalog returns the kb_search backing store, or nil when no catalog is
-// configured. With a Git URL it starts a background syncer (running on every
-// replica, so a failover standby is already warm) that re-indexes after each pull;
-// otherwise it loads a static mounted directory once.
-func buildCatalog(ctx context.Context, cfg *config.Config, forgeTok forgeToken, metrics *telemetry.Metrics, log *slog.Logger) *catalog.Catalog {
-	// warnInvalid surfaces structurally-invalid (but parseable) entries at load
-	// time — a backstop for the CI gate. The entry is still indexed and served
-	// (one bad entry never empties the catalog); we just log loudly + count it.
-	warnInvalid := func(cat *catalog.Catalog) {
-		kbvalidate.WarnInvalid(cat.Entries(), func(path string, errs []kbvalidate.Issue) {
-			log.Warn("invalid KB entry indexed", "path", path,
-				"issues", len(errs), "first", errs[0].Field+": "+errs[0].Message)
-			if metrics != nil {
-				metrics.CatalogInvalidEntries.Add(ctx, 1)
-			}
-		})
-	}
-	// Hybrid recall: build the embeddings client once and attach it BEFORE any Reload
-	// so entry vectors are produced. Requires both the feature flag and a configured
-	// endpoint; otherwise the catalog stays BM25-only (and recall stays BM25).
-	var embedder catalog.Embedder
-	if cfg.Catalog.InstantRecall.Hybrid && cfg.Model.Embeddings != nil {
-		e := cfg.Model.Embeddings
-		key := ""
-		if e.APIKeyEnv != "" {
-			key = os.Getenv(e.APIKeyEnv)
-		}
-		embedder = embed.New(e.BaseURL, e.Model, key)
-		log.Info("hybrid recall: embeddings endpoint configured", "base_url", e.BaseURL, "model", e.Model)
-	}
-	if cfg.Catalog.Git.URL != "" {
-		dir := cfg.Catalog.Dir
-		if dir == "" {
-			dir = "/var/lib/runlore/catalog"
-		}
-		cat := catalog.NewEmpty()
-		if embedder != nil {
-			cat.SetEmbedder(embedder)
-		}
-		// Auth precedence: explicit token_env, else the shared forge GitHub App
-		// identity (one credential for both curation writes and catalog reads).
-		var token catalog.TokenFunc
-		if env := cfg.Catalog.Git.TokenEnv; env != "" {
-			if t := os.Getenv(env); t != "" {
-				token = func(context.Context) (string, error) { return t, nil }
-			}
-		} else if forgeTok != nil {
-			token = catalog.TokenFunc(forgeTok)
-			log.Info("catalog git-sync using the forge GitHub App identity")
-		}
-		syncer := &catalog.Syncer{URL: cfg.Catalog.Git.URL, Branch: cfg.Catalog.Git.Branch, Dir: dir, Token: token, Log: log}
-		go syncer.Run(ctx, cfg.Catalog.Git.Interval.Std(), func() error {
-			skipped, err := cat.Reload(dir)
-			if err != nil {
-				log.Warn("catalog reload failed", "dir", dir, "err", err)
-				return err
-			}
-			if len(skipped) > 0 {
-				log.Warn("catalog entries skipped (unparseable)", "count", len(skipped), "files", skipped)
-			}
-			log.Info("catalog synced", "url", cfg.Catalog.Git.URL, "entries", cat.Len())
-			warnInvalid(cat)
-			return nil
-		})
-		log.Info("catalog git-sync enabled", "url", cfg.Catalog.Git.URL, "dir", dir)
-		return cat
-	}
-	if cfg.Catalog.Dir != "" {
-		var cat *catalog.Catalog
-		if embedder != nil {
-			// Embed on load: NewEmpty + SetEmbedder + ReloadContext (catalog.New can't
-			// attach an embedder before its internal Reload).
-			cat = catalog.NewEmpty()
-			cat.SetEmbedder(embedder)
-			if _, err := cat.ReloadContext(ctx, cfg.Catalog.Dir); err != nil {
-				log.Warn("catalog disabled", "dir", cfg.Catalog.Dir, "err", err)
-				return nil
-			}
-		} else {
-			c, err := catalog.New(cfg.Catalog.Dir)
-			if err != nil {
-				log.Warn("catalog disabled", "dir", cfg.Catalog.Dir, "err", err)
-				return nil
-			}
-			cat = c
-		}
-		log.Info("catalog loaded", "dir", cfg.Catalog.Dir, "entries", cat.Len())
-		warnInvalid(cat)
-		return cat
-	}
 	return nil
 }
 
@@ -650,7 +478,7 @@ func runEvalLive(cfg *config.Config, scnDir, recordDir, reportDir, prevReport, s
 	}
 	log := logging.FromConfig(os.Stderr, cfg.Logging.Format, cfg.Logging.Level)
 	ctx := context.Background()
-	model, tools, recall, _ := buildModelAndTools(ctx, cfg, gitOpsFromKube(cfg, log), nil, log)
+	model, tools, recall, _ := app.BuildModelAndTools(ctx, cfg, app.GitOpsFromKube(cfg, log), nil, log)
 	judge := eval.ModelJudge{Model: app.BuildJudgeModel(cfg, jProvider, jBaseURL, jModel, jKeyEnv)}
 
 	runner := &eval.LiveRunner{
@@ -698,136 +526,6 @@ func runEvalLive(cfg *config.Config, scnDir, recordDir, reportDir, prevReport, s
 	return nil
 }
 
-// buildNotifier assembles the configured chat notifiers (best-effort fan-out).
-func buildNotifier(cfg *config.Config, log *slog.Logger) *notify.Multi {
-	var ns []providers.Notifier
-	// Bot token (chat.postMessage) takes precedence over an incoming webhook.
-	if sl := cfg.Notify.Slack; sl.BotTokenEnv != "" && sl.Channel != "" {
-		if tok := os.Getenv(sl.BotTokenEnv); tok != "" {
-			ns = append(ns, notify.NewSlackBot(tok, sl.Channel))
-		}
-	} else if env := cfg.Notify.Slack.WebhookURLEnv; env != "" {
-		if url := os.Getenv(env); url != "" {
-			ns = append(ns, notify.NewSlack(url))
-		}
-	}
-	if mc := cfg.Notify.Matrix; mc.Homeserver != "" && mc.RoomID != "" && mc.AccessTokenEnv != "" {
-		if tok := os.Getenv(mc.AccessTokenEnv); tok != "" {
-			ns = append(ns, notify.NewMatrix(mc.Homeserver, mc.RoomID, tok))
-		}
-	}
-	return notify.NewMulti(log, ns...)
-}
-
-// forgeToken mints GitHub App installation tokens.
-type forgeToken func(context.Context) (string, error)
-
-// buildForgeTokenSource builds the GitHub App installation-token source shared by
-// the curator (issues/PRs) and catalog git-sync (clone auth) — one identity for
-// both forge writes and reads. Returns nil when no App is configured.
-func buildForgeTokenSource(cfg *config.Config, log *slog.Logger) forgeToken {
-	ga := cfg.Forge.GitHubApp
-	if ga.AppID == 0 || ga.InstallationID == 0 || ga.PrivateKeyEnv == "" {
-		return nil
-	}
-	pemData := os.Getenv(ga.PrivateKeyEnv)
-	if pemData == "" {
-		log.Warn("forge auth disabled: empty private key env", "env", ga.PrivateKeyEnv)
-		return nil
-	}
-	key, err := github.ParsePrivateKey(pemData)
-	if err != nil {
-		log.Warn("forge auth disabled: bad private key", "err", err)
-		return nil
-	}
-	return github.NewAppTokenSource(cfg.Forge.GitHubAPIURL, ga.AppID, ga.InstallationID, key).Token
-}
-
-// buildAuditor opens the append-only action audit log when configured, else a
-// no-op. Validate already requires AuditLogPath when actions.mode=auto.
-func buildAuditor(cfg *config.Config) (audit.Auditor, func(), error) {
-	if cfg.Actions.AuditLogPath == "" {
-		return audit.Nop{}, func() {}, nil
-	}
-	l, err := audit.Open(cfg.Actions.AuditLogPath)
-	if err != nil {
-		return nil, func() {}, fmt.Errorf("open audit log: %w", err)
-	}
-	return l, func() { _ = l.Close() }, nil
-}
-
-// buildApprovals enables rung-2 approval-gated execution for action mode "approve"
-// (requires a reachable cluster).
-func buildApprovals(cfg *config.Config, exec action.Executor, aud audit.Auditor, log *slog.Logger) *action.Approvals {
-	if cfg.Actions.Mode != config.ActionApprove {
-		return nil
-	}
-	if exec == nil {
-		log.Warn("approval-gated actions disabled: no cluster executor available")
-		return nil
-	}
-	log.Info("rung-2 approval-gated actions enabled (Flux suspend/resume/reconcile)")
-	return action.NewApprovals(exec, action.New(cfg.Actions), aud, log)
-}
-
-// buildAuto enables rung-3 unattended execution for action mode "auto" (requires a
-// reachable cluster). Heavily gated: reversible-only, confidence-floored, rate-
-// limited, kill-switchable, and audited. The rung is EXPERIMENTAL and FROZEN
-// (FEAT-1): unattended execution contradicts the read-only-first posture and is the
-// only path that turns a prompt-injected finding into a cluster mutation, so it gets
-// no further investment and may be removed — prefer "approve", which captures nearly
-// all the value. Recommend dry_run if you evaluate it.
-func buildAuto(cfg *config.Config, exec action.Executor, aud audit.Auditor, log *slog.Logger) *action.Auto {
-	if cfg.Actions.Mode != config.ActionAuto {
-		return nil
-	}
-	if exec == nil {
-		log.Warn("auto-execution disabled: no cluster executor available")
-		return nil
-	}
-	a := cfg.Actions.Auto
-	log.Warn("rung-3 AUTO execution ENABLED — EXPERIMENTAL and NOT recommended on real clusters; "+
-		"reversible actions execute WITHOUT human approval. Prefer mode=approve (human-click).",
-		"dry_run", a.DryRun, "min_confidence", a.MinConfidence, "max_per_window", a.MaxPerWindow, "window", a.Window.Std().String())
-	au := action.NewAuto(exec, a, action.New(cfg.Actions), aud, log)
-	// NewAuto starts paused (fail closed by construction across cold start / failover);
-	// surface that to the operator, who resumes via the authenticated /actions/resume.
-	log.Warn("rung-3 auto starts PAUSED (kill-switch engaged) — POST /actions/resume to begin auto-execution")
-	return au
-}
-
-// buildCurator returns a Curator when the GitHub App token + KB repo are
-// configured, else nil.
-func buildCurator(cfg *config.Config, token forgeToken, cat *catalog.Catalog, metrics *telemetry.Metrics, log *slog.Logger) *curator.Curator {
-	if token == nil || cfg.Forge.KBRepo == "" {
-		return nil
-	}
-	owner, repo, ok := strings.Cut(cfg.Forge.KBRepo, "/")
-	if !ok {
-		log.Warn("curator disabled: kb_repo must be owner/name", "kb_repo", cfg.Forge.KBRepo)
-		return nil
-	}
-	base := cfg.Forge.BaseBranch
-	if base == "" {
-		base = "main"
-	}
-	dup := cfg.Forge.DupScore
-	if dup == 0 {
-		dup = 5.0
-	}
-	minConf := cfg.Forge.MinConfidence
-	if minConf == 0 {
-		minConf = 0.75
-	}
-	client := github.New(cfg.Forge.GitHubAPIURL, owner, repo, base, github.TokenFunc(token))
-	log.Info("curator enabled", "repo", cfg.Forge.KBRepo, "dup_score", dup, "min_confidence", minConf)
-	cur := &curator.Curator{Forge: client, DupScore: dup, MinConfidence: minConf, Metrics: metrics, Log: log}
-	if cat != nil { // assign via concrete check to avoid a typed-nil interface
-		cur.Catalog = cat
-	}
-	return cur
-}
-
 // runCurate grooms the KB backlog (Phase-2 curation agent). It runs the
 // backlog-dedup pass (collapses duplicate open PRs across history) and the
 // lifecycle sweep (closes stale, unprotected PRs by forge age). When
@@ -848,7 +546,7 @@ func runCurate(args []string) error {
 		return fmt.Errorf("curate requires forge.kb_repo")
 	}
 	log := logging.FromConfig(os.Stderr, cfg.Logging.Format, cfg.Logging.Level)
-	tok := buildForgeTokenSource(cfg, log)
+	tok := app.BuildForgeTokenSource(cfg, log)
 	if tok == nil {
 		return fmt.Errorf("curate requires a configured GitHub App (forge.github_app)")
 	}
@@ -917,48 +615,6 @@ func logLedgerStartup(log *slog.Logger, s outcome.Status) {
 	}
 }
 
-// buildReinvestigator returns a poller that re-runs KB issues labelled
-// "reinvestigate" and posts the fresh findings back, or nil when the forge isn't
-// configured. RunLore polls the forge (outbound) — it has no inbound webhooks.
-func buildReinvestigator(ctx context.Context, cfg *config.Config, gp providers.GitOpsProvider, metrics *telemetry.Metrics, log *slog.Logger) *investigate.Reinvestigator {
-	token := buildForgeTokenSource(cfg, log)
-	if token == nil || cfg.Forge.KBRepo == "" {
-		return nil
-	}
-	owner, repo, ok := strings.Cut(cfg.Forge.KBRepo, "/")
-	if !ok {
-		return nil
-	}
-	client := github.New(cfg.Forge.GitHubAPIURL, owner, repo, cfg.Forge.BaseBranch, github.TokenFunc(token))
-	model, tools, recall, _ := buildModelAndTools(ctx, cfg, gp, metrics, log)
-	if recall != nil {
-		recall.Metrics = metrics
-		recall.Log = log
-	}
-	run := func(ctx context.Context, req investigate.Request) (providers.Investigation, error) {
-		var res providers.Investigation
-		var got bool
-		li := &investigate.LoopInvestigator{
-			Model: model, VerifyModel: app.BuildVerifyModel(cfg), Tools: tools, Recall: recall, Verify: true, Log: log,
-			Metrics:                   metrics,
-			ModelProvider:             cfg.Model.Provider,
-			MaxSteps:                  cfg.Investigation.MaxSteps,
-			MaxToolOutputBytes:        cfg.Investigation.MaxToolOutputBytes,
-			MaxTokensPerInvestigation: cfg.Investigation.MaxTokensPerInvestigation,
-			Timeout:                   cfg.Investigation.Timeout.Std(),
-			OnComplete:                func(inv providers.Investigation) { res, got = inv, true },
-		}
-		if err := li.Investigate(ctx, req); err != nil {
-			return providers.Investigation{}, err
-		}
-		if !got {
-			return providers.Investigation{}, fmt.Errorf("re-investigation was inconclusive")
-		}
-		return res, nil
-	}
-	return &investigate.Reinvestigator{Forge: client, Run: run, Log: log}
-}
-
 // runCatalog dispatches catalog subcommands.
 func runCatalog(args []string) error {
 	if len(args) == 0 || args[0] != "sync" {
@@ -1002,7 +658,7 @@ func runCatalogSync(args []string) error {
 		if t := os.Getenv(env); t != "" {
 			token = func(context.Context) (string, error) { return t, nil }
 		}
-	} else if ft := buildForgeTokenSource(cfg, log); ft != nil {
+	} else if ft := app.BuildForgeTokenSource(cfg, log); ft != nil {
 		token = catalog.TokenFunc(ft)
 	}
 	syncer := &catalog.Syncer{URL: g.URL, Branch: g.Branch, Dir: dir, Token: token, Log: log}
@@ -1015,149 +671,6 @@ func runCatalogSync(args []string) error {
 	}
 	fmt.Printf("synced %s -> %s (%d entries)\n", g.URL, dir, cat.Len())
 	return nil
-}
-
-// buildModelAndTools assembles the model, investigation tools, and the instant-recall
-// short-circuit from config + the GitOps provider. Shared by serve and investigate.
-func buildModelAndTools(ctx context.Context, cfg *config.Config, gp providers.GitOpsProvider, metrics *telemetry.Metrics, log *slog.Logger) (providers.ModelProvider, []investigate.Tool, *investigate.Recall, *catalog.Catalog) {
-	apiKey := ""
-	if cfg.Model.APIKeyEnv != "" {
-		apiKey = os.Getenv(cfg.Model.APIKeyEnv)
-	}
-	model := app.BuildModel(cfg, apiKey)
-	forgeTok := buildForgeTokenSource(cfg, log)
-	var tools []investigate.Tool
-	if gp != nil {
-		tools = append(tools, investigate.WhatChangedTool{GitOps: gp})
-		// Deep read-only Flux introspection (status/events + dependency tree), when
-		// the GitOps provider supports it (Flux does).
-		if insp, ok := gp.(providers.GitOpsInspector); ok {
-			tools = append(tools, investigate.GitOpsStatusTool{Inspector: insp}, investigate.GitOpsTreeTool{Inspector: insp})
-		}
-	}
-	var recall *investigate.Recall
-	cat := buildCatalog(ctx, cfg, forgeTok, metrics, log)
-	if cat != nil {
-		tools = append(tools, investigate.KBSearchTool{Catalog: cat})
-		if cfg.Catalog.InstantRecall.Enabled {
-			recall = &investigate.Recall{
-				Catalog:              cat,
-				MinScore:             cfg.Catalog.InstantRecall.MinScore,
-				MarginGap:            cfg.Catalog.InstantRecall.MarginGap,
-				SoloFloor:            cfg.Catalog.InstantRecall.SoloFloor,
-				RequireWorkloadMatch: cfg.Catalog.InstantRecall.RequireWorkloadMatch,
-				OutcomePrior:         cfg.Catalog.InstantRecall.OutcomePrior,
-				OutcomeFloor:         cfg.Catalog.InstantRecall.OutcomeFloor,
-			}
-			log.Info("instant recall enabled",
-				"min_score", cfg.Catalog.InstantRecall.MinScore,
-				"margin_gap", cfg.Catalog.InstantRecall.MarginGap, "solo_floor", cfg.Catalog.InstantRecall.SoloFloor,
-				"outcome_prior", cfg.Catalog.InstantRecall.OutcomePrior, "outcome_floor", cfg.Catalog.InstantRecall.OutcomeFloor)
-			// Hybrid (cosine-gated) recall — opt-in, and only effective once the catalog
-			// actually built vectors (an embedder was configured + embedding succeeded).
-			if cfg.Catalog.InstantRecall.Hybrid {
-				recall.Hybrid = cat
-				recall.HybridMinScore = cfg.Catalog.InstantRecall.HybridMinScore
-				recall.HybridMarginGap = cfg.Catalog.InstantRecall.HybridMarginGap
-				if recall.HybridMinScore == 0 {
-					recall.HybridMinScore = 0.80
-				}
-				if recall.HybridMarginGap == 0 {
-					recall.HybridMarginGap = 0.05
-				}
-				log.Info("hybrid recall enabled (EXPERIMENTAL — tune cosine thresholds via the instant-recall eval)",
-					"hybrid_min_score", recall.HybridMinScore, "hybrid_margin_gap", recall.HybridMarginGap,
-					"vectors_ready", cat.HasVectors())
-			}
-		}
-	}
-	if cfg.Metrics.URL != "" {
-		tools = append(tools, investigate.QueryMetricsTool{Metrics: prometheus.New(cfg.Metrics.URL)})
-	}
-	if cfg.Logs.URL != "" {
-		tools = append(tools, investigate.QueryLogsTool{Logs: victorialogs.New(cfg.Logs.URL)})
-	}
-	// Network-flow data source (the network_drops tool). Pluggable and CNI-agnostic:
-	// no provider is enabled by default. The selected provider must match the cluster's
-	// environment (Cilium Hubble, AWS VPC Flow Logs, or GCP Firewall Logs).
-	switch cfg.Network.Provider {
-	case config.NetworkHubble:
-		if cfg.Network.Hubble.URL != "" {
-			tools = append(tools, investigate.NetworkDropsTool{Network: hubble.New(cfg.Network.Hubble.URL)})
-			log.Info("network provider enabled", "provider", config.NetworkHubble, "url", cfg.Network.Hubble.URL)
-			if cfg.Network.URL != "" {
-				log.Warn("config.network.url is deprecated; set config.network.provider=hubble and config.network.hubble.url")
-			}
-		}
-	case config.NetworkAWSVPCFlowLogs:
-		if nw, err := awsvpc.New(ctx, cfg.Network.AWS.Region, cfg.Network.AWS.LogGroup); err != nil {
-			log.Warn("aws-vpc-flow-logs network provider unavailable; network_drops disabled", "err", err)
-		} else {
-			tools = append(tools, investigate.NetworkDropsTool{Network: nw})
-			log.Info("network provider enabled", "provider", config.NetworkAWSVPCFlowLogs, "log_group", cfg.Network.AWS.LogGroup)
-		}
-	case config.NetworkGCPFirewallLogs:
-		if nw, err := gcpfirewall.New(ctx, cfg.Network.GCP.Project); err != nil {
-			log.Warn("gcp-firewall-logs network provider unavailable; network_drops disabled", "err", err)
-		} else {
-			tools = append(tools, investigate.NetworkDropsTool{Network: nw})
-			log.Info("network provider enabled", "provider", config.NetworkGCPFirewallLogs, "project", cfg.Network.GCP.Project)
-		}
-	case "":
-		// network signal disabled (default)
-	default:
-		log.Warn("unknown network provider; network_drops disabled", "provider", cfg.Network.Provider)
-	}
-	// Read-only cluster access (Flux controller logs + pod status + events), when a
-	// cluster is reachable. The same reader backs all three tools.
-	if cs := kubeClientset(log); cs != nil {
-		reader := cluster.New(cs)
-		tools = append(tools,
-			investigate.ControllerLogsTool{Logs: reader},
-			investigate.PodStatusTool{Kube: reader},
-			investigate.KubeEventsTool{Kube: reader},
-		)
-	}
-	// Cloud context (AWS): CloudTrail "what changed" + EC2/ASG/EKS health. Opt-in.
-	if cfg.Cloud.Provider == "aws" {
-		if cl, err := awscloud.New(ctx, cfg.Cloud.Region, cfg.Cloud.ClusterName); err != nil {
-			log.Warn("aws cloud provider unavailable; cloud tools disabled", "err", err)
-		} else {
-			tools = append(tools, investigate.CloudWhatChangedTool{Cloud: cl}, investigate.CloudResourceHealthTool{Cloud: cl})
-			log.Info("cloud provider enabled", "provider", "aws", "region", cfg.Cloud.Region)
-		}
-	}
-	return model, tools, recall, cat
-}
-
-// kubeClientset builds a read-only clientset for pod-log access, or nil when no
-// cluster is reachable (e.g. local runs without a kubeconfig).
-func kubeClientset(log *slog.Logger) *kubernetes.Clientset {
-	restCfg, err := restConfig()
-	if err != nil {
-		return nil
-	}
-	cs, err := kubernetes.NewForConfig(restCfg)
-	if err != nil {
-		log.Warn("clientset unavailable; controller_logs disabled", "err", err)
-		return nil
-	}
-	return cs
-}
-
-// gitOpsFromKube builds the GitOps provider from the ambient kubeconfig (best-effort).
-func gitOpsFromKube(cfg *config.Config, log *slog.Logger) providers.GitOpsProvider {
-	restCfg, err := restConfig()
-	if err != nil {
-		log.Warn("no kube client; what-changed disabled", "err", err)
-		return nil
-	}
-	dc, err := dynamic.NewForConfig(restCfg)
-	if err != nil {
-		log.Warn("dynamic client unavailable; what-changed disabled", "err", err)
-		return nil
-	}
-	return buildGitOps(cfg, dc, log)
 }
 
 // runMCP serves RunLore's GitOps what-changed capability over the Model Context
@@ -1174,7 +687,7 @@ func runMCP(args []string) error {
 		return err
 	}
 	log := logging.FromConfig(os.Stderr, cfg.Logging.Format, cfg.Logging.Level)
-	gp := gitOpsFromKube(cfg, log)
+	gp := app.GitOpsFromKube(cfg, log)
 	if gp == nil {
 		return fmt.Errorf("what_changed needs a Kubernetes client + config.gitops")
 	}
@@ -1218,7 +731,7 @@ func runInvestigate(args []string) error {
 	log := logging.FromConfig(os.Stderr, cfg.Logging.Format, cfg.Logging.Level)
 	ctx := context.Background()
 
-	model, tools, recall, _ := buildModelAndTools(ctx, cfg, gitOpsFromKube(cfg, log), nil, log)
+	model, tools, recall, _ := app.BuildModelAndTools(ctx, cfg, app.GitOpsFromKube(cfg, log), nil, log)
 	var result *providers.Investigation
 	li := &investigate.LoopInvestigator{
 		Model: model, VerifyModel: app.BuildVerifyModel(cfg), Tools: tools, Recall: recall, Actions: action.New(cfg.Actions), Log: log, Verify: true,
@@ -1242,211 +755,4 @@ func runInvestigate(args []string) error {
 	}
 	fmt.Println(notify.Format(*result))
 	return nil
-}
-
-// buildInvestigator returns the LLM ReAct investigator when a model is configured,
-// otherwise the read-only LogInvestigator. It also returns the catalog (nil when
-// no model is configured or no catalog is wired).
-func buildInvestigator(ctx context.Context, cfg *config.Config, gp providers.GitOpsProvider, approvals *action.Approvals, auto *action.Auto, metrics *telemetry.Metrics, ledger *outcome.Ledger, log *slog.Logger) (investigate.Investigator, *catalog.Catalog) {
-	if !app.ModelConfigured(cfg) {
-		log.Info("no model configured; using log-only investigator")
-		return investigate.LogInvestigator{Log: log}, nil
-	}
-	model, tools, recall, cat := buildModelAndTools(ctx, cfg, gp, metrics, log)
-	if recall != nil {
-		recall.Metrics = metrics
-		recall.Log = log
-		recall.Outcome = ledger // outcome-driven decay (serve path); *outcome.Ledger satisfies OutcomeStats
-	}
-	log.Info("using LLM investigator", "provider", app.ModelProvider(cfg), "model", cfg.Model.Model, "tools", len(tools))
-	notifier := buildNotifier(cfg, log)
-	log.Info("delivery notifiers", "count", notifier.Len())
-	cur := buildCurator(cfg, buildForgeTokenSource(cfg, log), cat, metrics, log)
-	actions := action.New(cfg.Actions)
-	if actions.Enabled() {
-		log.Info("action policy enabled", "mode", string(actions.Mode()))
-	}
-	return &investigate.LoopInvestigator{
-		Model:                     model,
-		VerifyModel:               app.BuildVerifyModel(cfg),
-		Tools:                     tools,
-		Log:                       log,
-		Actions:                   actions,
-		Recall:                    recall,
-		Verify:                    true, // adversarial review of root causes before delivery/curation
-		Metrics:                   metrics,
-		ModelProvider:             cfg.Model.Provider,
-		MaxSteps:                  cfg.Investigation.MaxSteps,
-		MaxToolOutputBytes:        cfg.Investigation.MaxToolOutputBytes,
-		MaxTokensPerInvestigation: cfg.Investigation.MaxTokensPerInvestigation,
-		Timeout:                   cfg.Investigation.Timeout.Std(),
-		OnComplete: func(found providers.Investigation) {
-			// Record the outcome "open" first: this investigation happened for an
-			// incident, with the answer we used (recall vs fresh). A matching
-			// resolved-alert webhook later stamps whether it actually resolved.
-			// Skip sources without an alert fingerprint (GitOps watch, reinvestigate
-			// poller) — they could never be matched by a resolved-alert webhook.
-			fps := found.Fingerprints
-			if len(fps) == 0 && found.Fingerprint != "" {
-				fps = []string{found.Fingerprint}
-			}
-			if len(fps) > 0 {
-				kind := app.OutcomeKind(found.Recalled)
-				now := time.Now()
-				// The deterministic dedup fingerprint (resource+cause) is the curated PR's
-				// stable resolution-join key: it is the same value draftKBEntry stamps into
-				// the PR body, so a later resolve matches the PR regardless of the LLM's
-				// re-worded title. Computed once for the whole batch.
-				dupFP := curator.DupFingerprint(found)
-				// One open per constituent fingerprint (coalesced batches fan out), so
-				// every alert's resolve webhook can later match this investigation.
-				for _, fp := range fps {
-					if err := ledger.Open(outcome.Event{
-						Fingerprint:    fp,
-						DupFingerprint: dupFP,
-						Kind:           kind,
-						Entry:          found.RecalledEntry,
-						Title:          found.Title,
-						Resource:       found.Resource.Ref(),
-						At:             now,
-					}); err != nil {
-						log.Warn("outcome ledger open failed", "fingerprint", fp, "err", err)
-					}
-					if metrics != nil {
-						metrics.OutcomesOpened.Add(ctx, 1, metric.WithAttributes(attribute.String("kind", kind)))
-					}
-				}
-			}
-			// Post-investigation action handling, by mode. The loop has already
-			// filtered found.Actions to the envelope (rung 1). auto and approvals are
-			// mutually exclusive (one is nil unless that mode is configured).
-			switch {
-			case auto != nil:
-				// Rung 3: evaluate + execute eligible actions (reversible/confidence/
-				// rate/kill-switch gated); descriptions are annotated with the outcome.
-				found.Actions = auto.Run(ctx, found)
-			case approvals != nil:
-				// Rung 2: register envelope-compliant actions for human approval; annotate
-				// with how to approve (curl) and the ApprovalID (Slack buttons).
-				for i := range found.Actions {
-					id := approvals.Register(found.Actions[i])
-					found.Actions[i].ApprovalID = id
-					found.Actions[i].Description = fmt.Sprintf("%s — approve: POST /actions/%s/approve", found.Actions[i].Description, id)
-				}
-				if len(found.Actions) > 0 {
-					log.Info("actions registered for approval", "count", len(found.Actions))
-				}
-			}
-			log.Info("findings",
-				"confidence", found.Confidence, "root_causes", len(found.RootCauses), "unresolved", len(found.Unresolved))
-			// Curate first so the delivered message can link to the KB issue/PR.
-			if cur != nil {
-				if ref, err := cur.Curate(context.Background(), found); err != nil {
-					log.Error("curate findings", "err", err)
-				} else if ref.URL != "" {
-					found.CuratedURL = ref.URL
-					log.Info("curated", "url", ref.URL)
-				}
-			}
-			if err := notifier.Deliver(context.Background(), found); err != nil {
-				log.Error("deliver findings", "err", err)
-			}
-		},
-	}, cat
-}
-
-// startGitOpsFailureWatch drains Flux WatchFailures into the queue. Failures are
-// debounced (when a positive window is configured): the investigation is enqueued
-// only after the failure has persisted — re-checked still Ready=False via the
-// provider's ResourceStatus — filtering reconcile-churn transients that would
-// otherwise drive confident-but-wrong root causes.
-// dedup is process-scoped (created once in runServe) and shared across leadership
-// terms — NOT created here per call. The informer's initial LIST re-emits every
-// still-failing workload as an Add on each (re-)acquire, so a per-term deduper
-// (empty at term start) would re-investigate every broken app on every leader flap.
-func startGitOpsFailureWatch(ctx context.Context, cfg *config.Config, q investigate.Enqueuer, gp providers.GitOpsProvider, dedup *trigger.Deduper, metrics *telemetry.Metrics, log *slog.Logger) {
-	events, err := gp.WatchFailures(ctx)
-	if err != nil {
-		log.Warn("gitops-failure watch disabled", "err", err)
-		return
-	}
-	deb := buildFailureDebouncer(cfg, gp, metrics, log)
-	log.Info("watching gitops failures", "engine", app.GitopsEngine(cfg),
-		"debounce", cfg.Triggers.GitOpsFailures.DebounceWindow())
-	go investigate.DrainFailures(ctx, events, q, dedup, deb, log)
-}
-
-// buildFailureDebouncer wires a Debouncer whose "still failing?" re-check reads
-// the workload's CURRENT Ready condition via GitOpsInspector.ResourceStatus. When
-// the engine offers no inspector, the predicate is nil and the debouncer just
-// waits out the window before enqueuing (still filtering instantly-clearing
-// flaps). A zero window makes Debounce enqueue immediately.
-func buildFailureDebouncer(cfg *config.Config, gp providers.GitOpsProvider, metrics *telemetry.Metrics, log *slog.Logger) *investigate.Debouncer {
-	var check investigate.StillFailing
-	if insp, ok := gp.(providers.GitOpsInspector); ok {
-		check = func(ctx context.Context, w providers.Workload) (bool, error) {
-			rs, err := insp.ResourceStatus(ctx, w)
-			if err != nil {
-				return false, err
-			}
-			// A recovered (Ready=True) or vanished resource is no longer worth
-			// investigating; anything else (False/Unknown) is still failing.
-			if rs.NotFound || rs.Ready == "True" {
-				return false, nil
-			}
-			return true, nil
-		}
-	}
-	return investigate.NewDebouncer(cfg.Triggers.GitOpsFailures.DebounceWindow(), check, log).WithMetrics(metrics)
-}
-
-// buildGitOps builds the GitOps provider for the configured engine (flux default).
-// The differ clones the GitOps source repo over HTTPS; it authenticates private
-// repos with the shared GitHub App installation token (the App needs contents:read
-// on the source repo). A nil token source (no App configured) means public/local
-// repos only.
-func buildGitOps(cfg *config.Config, dc dynamic.Interface, log *slog.Logger) providers.GitOpsProvider {
-	differ := &whatchanged.Differ{TokenSource: buildForgeTokenSource(cfg, log)}
-	if app.GitopsEngine(cfg) == "argocd" {
-		log.Info("gitops engine", "engine", "argocd")
-		return argocd.New(argocd.NewDynamicReader(dc), differ)
-	}
-	log.Info("gitops engine", "engine", "flux")
-	return flux.New(flux.NewDynamicReader(dc), differ)
-}
-
-// restConfig builds a Kubernetes REST config from in-cluster config, falling back
-// to the local kubeconfig (respecting $KUBECONFIG, then ~/.kube/config).
-func restConfig() (*rest.Config, error) {
-	if cfg, err := rest.InClusterConfig(); err == nil {
-		return cfg, nil
-	}
-	rules := clientcmd.NewDefaultClientConfigLoadingRules()
-	return clientcmd.NewNonInteractiveDeferredLoadingClientConfig(rules, &clientcmd.ConfigOverrides{}).ClientConfig()
-}
-
-// setMemoryLimitFromCgroup sets GOMEMLIMIT to ~90% of the cgroup v2 memory limit
-// so the Go GC respects the container's memory cap — keeping the heap under a soft
-// ceiling and returning memory to the OS under pressure — instead of letting RSS
-// grow across investigations until the cgroup OOM-kills the process. No-op when
-// GOMEMLIMIT is set explicitly, or there is no cgroup memory limit.
-func setMemoryLimitFromCgroup(log *slog.Logger) {
-	if os.Getenv("GOMEMLIMIT") != "" {
-		return // an explicit operator override wins
-	}
-	b, err := os.ReadFile("/sys/fs/cgroup/memory.max") // cgroup v2 (EKS)
-	if err != nil {
-		return
-	}
-	s := strings.TrimSpace(string(b))
-	if s == "" || s == "max" {
-		return // unlimited
-	}
-	cgroupMax, err := strconv.ParseInt(s, 10, 64)
-	if err != nil || cgroupMax <= 0 {
-		return
-	}
-	limit := cgroupMax / 10 * 9 // 90%: leave headroom for non-heap (stacks, bleve, runtime)
-	debug.SetMemoryLimit(limit)
-	log.Info("GOMEMLIMIT set from cgroup", "cgroup_max_bytes", cgroupMax, "gomemlimit_bytes", limit)
 }
