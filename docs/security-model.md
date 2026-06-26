@@ -35,6 +35,10 @@ registry and **discards the model's own metadata**:
   config; an empty `allow.namespaces` permits nothing.
 - The gate is re-validated at **every** execution boundary (approval handling *and* auto), so a stale
   or tampered decision can't slip through (defense in depth).
+- The target **name** is corroborated against the resources the investigation actually observed
+  server-side (the triggering workload + everything the GitOps read tools returned). An unobserved
+  target **never auto-executes** (the action is downgraded to a suggestion); under `approve` it stays
+  in the queue but carries an explicit possible-injection warning for the human approver.
 - `auto` mode starts **paused** (kill-switch engaged, fail-closed) and is gated behind
   confidence/rate/blast limits. It exists but is **not recommended on real clusters**.
 

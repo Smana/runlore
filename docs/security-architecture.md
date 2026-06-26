@@ -69,6 +69,24 @@ structural, not configuration hygiene:
     approval token, an audit-log path, an authenticated webhook, a positive confidence threshold,
     and a positive rate cap.
 
+### Unobserved action targets never auto-execute
+
+The gate validates *op*, *kind*, and *namespace* — but the target **name** is model-authored, so a
+prompt-injected finding could steer an otherwise in-envelope action onto an arbitrary named
+resource. Each investigation therefore tracks the resources it confirmed **server-side**
+(`internal/investigate/observedresources.go`): the request's own workload (the alert/failure
+subject always counts), plus everything `what_changed`, `gitops_resource_status`, and `gitops_tree`
+actually read. An executable action whose target was never observed is handled per rung
+(`guardUnobservedTargets`):
+
+- **`auto`:** the executable op is **stripped** — the proposal is still delivered, but only as a
+  suggestion. A hallucinated or injected target cannot reach an unattended cluster write.
+- **`approve`/`suggest`:** the action stays executable but its description carries an explicit
+  *"target was never observed server-side"* warning into the approval queue and chat message. The
+  human approval is the gate; the observed set is a heuristic with false negatives (a legitimate
+  target the investigation never re-read), so under a human gate its verdict is advisory — it arms
+  the approver rather than silently starving the queue.
+
 ### Recall is disabled under auto
 
 The knowledge catalog is community-shaped markdown — **untrusted input**. Under `off`/`suggest`/
