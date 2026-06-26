@@ -1,0 +1,70 @@
+name: Release Please
+
+on:
+  push:
+    branches: [main]
+
+# Top-level least privilege. release-please needs to write the release PR and the
+# release/tag; the goreleaser job widens its own permissions below.
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  release-please:
+    name: Release Please
+    runs-on: ubuntu-latest
+    outputs:
+      # Whether merging the release PR just cut a release on this push.
+      release_created: ${{ steps.release.outputs.release_created }}
+      tag_name: ${{ steps.release.outputs.tag_name }}
+    steps:
+      - name: Run release-please
+        id: release
+        uses: googleapis/release-please-action@5c625bfb5d1ff62eadeeb3772007f7f66fdcf071 # v4.4.1
+        with:
+          # Fine-grained PAT (NOT the default GITHUB_TOKEN): pushing the release PR /
+          # tag with GITHUB_TOKEN would NOT trigger downstream workflows (CI on the
+          # release PR, build-image + goreleaser on the v* tag). See CONTRIBUTING.md.
+          token: ${{ secrets.RELEASE_PLEASE_TOKEN }}
+          config-file: release-please-config.json
+          manifest-file: .release-please-manifest.json
+
+  goreleaser:
+    name: GoReleaser
+    needs: release-please
+    if: needs.release-please.outputs.release_created
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      # Keyless cosign signing of the checksums file: the OIDC token identifies this
+      # workflow to Fulcio, which issues the short-lived signing certificate.
+      id-token: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          # GoReleaser needs the full history (and tags) to build the release.
+          fetch-depth: 0
+
+      - name: Set up Go
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
+        with:
+          go-version: "1.26"
+
+      - name: Install cosign
+        uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
+
+      - name: Install syft
+        # Provides the syft binary GoReleaser shells out to for the per-archive SBOMs.
+        uses: anchore/sbom-action/download-syft@e22c389904149dbc22b58101806040fa8d37a610 # v0.24.0
+
+      - name: Run GoReleaser
+        uses: goreleaser/goreleaser-action@e435ccd777264be153ace6237001ef4d979d3a7a # v6.4.0
+        with:
+          version: '~> v2'
+          args: release --clean
+        env:
+          # Default token is enough: the release for this tag already exists (created
+          # by release-please) and GoReleaser only uploads assets to it.
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
