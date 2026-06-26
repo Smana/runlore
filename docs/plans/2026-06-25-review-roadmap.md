@@ -19,8 +19,11 @@
 > BM25-default; cosine-threshold eval-tuning pending) · **POS-4** (HolmesGPT what-changed proposal +
 > `lore mcp` MVP) · docs (architecture **mermaid** diagram · prior-art · learning-loop de-dup · roadmap).
 > **Remaining:** **M4 pt2 eval-tuning** (operator — needs a live embeddings endpoint + the instant-recall
-> eval) · **POS-4 upstream** (HolmesGPT live demo / native-toolset PR — relationship) · **PERSIST-1**
-> (decision: doc-only). **Attempted twice, deferred:** **F2** action-target validation — *attempt 1
+> eval). **Decided (2026-06-26):** **POS-4** → *hold* — `lore mcp` already hedges the threat (any MCP
+> client can consume the diff); upstream engagement (demo + native-toolset PR) deferred until there's
+> community bandwidth · **PERSIST-1** → *closed, doc-only* — auto is frozen so the kill-switch/rate-limit
+> are moot and restart re-pauses auto (fail-closed); revisit only if auto is unfrozen for production.
+> **Attempted twice, deferred:** **F2** action-target validation — *attempt 1
 > (narrow: alert seed + what_changed)* downgraded a legit auto-suspend → reverted; *attempt 2 (proper:
 > capture across what_changed + gitops_resource_status + gitops_tree, name-tolerant matching)* validates
 > the core (e2e `auto-executed` passes) but **regresses the rung-2 two-approve e2e** (`main` 45/45 → F2
@@ -251,7 +254,7 @@ For an HA tool, leader-flap / SIGTERM / interrupted-clone / crash are the events
 | **GO-P2A** (P2) ✅ | **Done** (`99af960`): re-clone a corrupt mirror; drop a partial clone on failure. | **S** |
 | **GO-P2B** (P2) ✅ | **Done** (`99af960`): ledger fsyncs each append. | **XS** |
 | **GO-P2C** (P2) ✅ | **Done** (`99af960`): roll back `lastRev` on re-index failure → retried next tick. | **XS** |
-| **PERSIST-1** 🧭 | Persist kill-switch/rate-limit to PVC **or** stay doc-only (Step 4 clarified the docs → default doc-only unless resume must survive restart). | **S / 0** |
+| **PERSIST-1** ✅ | **Decided (2026-06-26): doc-only, closed.** Auto is frozen, so the kill-switch/rate-limit (which only gate auto) are moot, and on restart auto re-starts PAUSED (fail-closed). No PVC persistence. Revisit only if auto is unfrozen for production (bundle with auto-hardening then). | **0** |
 
 ### M2 — Close the data-egress gap · *~4–6d · top security work, ICP-critical*
 | Item | What | Size |
@@ -267,7 +270,7 @@ For an HA tool, leader-flap / SIGTERM / interrupted-clone / crash are the events
 |---|---|---|
 | **FEAT-1** 🧭 | **Freeze or remove the `auto` rung.** Recommend freezing as experimental (or dropping the executable path): it contradicts the no-unattended-remediation non-goal and is the sole reason the injection→mutation surface exists; `approve` keeps ~95% of value. If removed → shed ~13 config keys + the biggest attack surface. | 🧭 / **M** |
 | **FEAT-3/4** | Remove 3 dead config keys (`ActionPolicy.RequireApproval`, `Telemetry.OTLPEndpoint`, `GitHubApp.PrivateKeyRef`); trim config if `auto` is frozen. | **S** |
-| **POS-4** 🧭 | Strategic-alignment spike: contribute a what-changed toolset to HolmesGPT / run-on-kagent (A2A) / OKF reference writer-back — turn the biggest threat into a channel. | **spike** |
+| **POS-4** ✅ | **Decided (2026-06-26): hold.** The spike shipped a HolmesGPT what-changed proposal (#129) + a `lore mcp` MVP (#130), which already hedges the threat — any MCP client can consume the diff today. Upstream engagement (live demo + native-toolset PR) and the kagent-A2A / OKF-writer-back angles are deferred until there's community bandwidth. | **done (spike)** |
 | **FEAT-2** 🧭 | ArgoCD Inspector parity — *only if* Argo demand appears; else the Step-4 honest-docs path stands. | **M / 0** |
 | Docs deferred | `docs/architecture/*.drawio` diagram; deep README↔design↔learning-loop de-dup. | **M** |
 
