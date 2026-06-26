@@ -7,6 +7,7 @@ import (
 	"io"
 	"os"
 
+	"github.com/Smana/runlore/internal/app"
 	"github.com/Smana/runlore/internal/catalog"
 	"github.com/Smana/runlore/internal/config"
 	"github.com/Smana/runlore/internal/kbvalidate"
@@ -31,8 +32,8 @@ func runValidateKB(args []string) error {
 
 	var model providers.ModelProvider
 	if *semantic {
-		if cfg, err := config.Load(*cfgPath); err == nil && modelConfigured(cfg) {
-			model = buildModel(cfg, os.Getenv(cfg.Model.APIKeyEnv))
+		if cfg, err := config.Load(*cfgPath); err == nil && app.ModelConfigured(cfg) {
+			model = app.BuildModel(cfg, os.Getenv(cfg.Model.APIKeyEnv))
 		} else {
 			fmt.Fprintln(os.Stderr, "validate-kb: --semantic set but no usable model in config; running structural only")
 		}
