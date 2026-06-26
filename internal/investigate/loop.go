@@ -319,6 +319,7 @@ func (li *LoopInvestigator) Investigate(ctx context.Context, req Request) error 
 				inv.Resource = preferDiscoveredResource(inv.Resource, req.Workload)
 				inv.Fingerprint = req.Fingerprint   // originating alert id, for outcome-ledger attribution
 				inv.Fingerprints = req.Fingerprints // coalesced batch ids; one open per constituent alert
+				inv.TriggerKey = req.TriggerKey     // deterministic dedup key stamped at trigger time (#137)
 				li.Log.Info("investigation evidence gathered", "title", req.Title, "tools_used", used)
 				if li.Metrics != nil {
 					li.Metrics.InvestigationTokens.Record(ctx, int64(estimateTokens(sys, messages, specs)))

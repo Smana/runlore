@@ -71,14 +71,24 @@ func (n Novelty) IsDuplicate(ctx context.Context, inv providers.Investigation) (
 	return false, catalog.Entry{}, nil
 }
 
-// DupFingerprint is a deterministic identity for "the same problem on the same
-// resource": the affected-resource ref plus the sorted significant-token set of the
-// top root cause, hashed. Unlike Fingerprint (a fuzzy BM25 query), it is stable
-// across the LLM's prose phrasing, so two investigations of one incident hash
-// alike. It returns "" when there is neither a resource nor a cause to key on — an
-// empty fingerprint must never match another.
+// DupFingerprint is a deterministic identity for "the same incident", used to
+// dedupe curated PRs across re-investigations. It prefers the trigger key stamped
+// at trigger time (a structured K8s signal — the alert fingerprint, or the failing
+// resource + condition reason): re-investigations of one ongoing incident reword
+// the LLM's prose cause but share the same trigger, so keying on the trigger is
+// what coalesces them to a single open PR (#137). When no trigger key is present
+// (e.g. a human `lore investigate "<symptom>"`), it falls back to the affected-
+// resource ref plus the significant-token set of the top root cause. Unlike
+// Fingerprint (a fuzzy BM25 query) it is an exact hash. It returns "" when there is
+// nothing to key on — an empty fingerprint must never match another.
 func DupFingerprint(inv providers.Investigation) string {
 	ref := strings.ToLower(inv.Resource.Ref())
+	if tk := strings.ToLower(strings.TrimSpace(inv.TriggerKey)); tk != "" {
+		// "trigger:" namespaces the key so a trigger value can never collide with a
+		// prose causeKey from the fallback path below.
+		sum := sha256.Sum256([]byte(ref + "|trigger:" + tk))
+		return hex.EncodeToString(sum[:])
+	}
 	cause := ""
 	if len(inv.RootCauses) > 0 {
 		cause = inv.RootCauses[0].Summary

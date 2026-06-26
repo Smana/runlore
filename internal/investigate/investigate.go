@@ -39,6 +39,7 @@ type Request struct {
 	At           time.Time
 	Fingerprint  string   // Alertmanager fingerprint (stable firing↔resolved); for outcome attribution
 	Fingerprints []string // coalesced batch fingerprints; one open is recorded per entry so every constituent alert's resolve matches
+	TriggerKey   string   // deterministic incident identity (alert fingerprint, or failing resource+condition) set at trigger time; threaded to Investigation.TriggerKey for stable dedup across reworded re-investigations (#137)
 }
 
 // workloadFromLabels derives the affected workload (kind, name) from Alertmanager
@@ -81,12 +82,13 @@ func FromIncident(inc config.Incident) Request {
 		At:           inc.StartsAt,
 		Fingerprint:  inc.Fingerprint,
 		Fingerprints: fps,
+		TriggerKey:   inc.Fingerprint, // Alertmanager fingerprint: stable across re-fires of one alert series (#137)
 	}
 }
 
 // FromFailureEvent builds a Request from a GitOps failure.
 func FromFailureEvent(fe providers.FailureEvent) Request {
-	return Request{
+	r := Request{
 		Source:   SourceGitOpsFailure,
 		Title:    fe.Workload.Kind + "/" + fe.Workload.Name + " " + fe.Reason,
 		Workload: fe.Workload,
@@ -94,6 +96,15 @@ func FromFailureEvent(fe providers.FailureEvent) Request {
 		Message:  fe.Message,
 		At:       fe.When,
 	}
+	// TriggerKey is the failing resource ref + its condition reason — both
+	// deterministic K8s fields, not LLM prose. A persistently-failing resource (e.g.
+	// an ArgoCD Application that retries every ~30m) re-fires with the same ref+reason,
+	// so its re-investigations dedupe to one curated PR however the model rewords the
+	// cause (#137). Guard the degenerate empty-ref case → fall back to prose dedup.
+	if ref := fe.Workload.Ref(); ref != "" {
+		r.TriggerKey = ref + ":" + fe.Reason
+	}
+	return r
 }
 
 // Investigator runs an investigation for a Request.
