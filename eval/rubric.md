@@ -7,7 +7,7 @@ Two grading tracks (see `docs/superpowers/specs/2026-06-21-runlore-eval-harness-
 From the recorded tool-call trace. `coverage = |mandatory expected_sources touched| / |expected_sources|`.
 Pass requires `coverage == 1.0`. `optional_sources` are bonus, never gating. Any errored tool is flagged.
 
-Data-source groups: `gitops` (what_changed, flux_resource_status, flux_tree), `kubernetes` (pod_status,
+Data-source groups: `gitops` (what_changed, gitops_resource_status, gitops_tree), `kubernetes` (pod_status,
 kube_events, controller_logs), `metrics` (query_metrics), `logs` (query_logs), `network` (network_drops),
 `aws` (cloud_what_changed, cloud_resource_health), `kb` (kb_search).
 

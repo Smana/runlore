@@ -331,7 +331,7 @@ git diff*:
 | the diff | go-git between revisions over `spec.path` | go-git over `source.path` (Argo also has native `app diff`) |
 
 > **Engine depth — deep lens now at parity.** Flux is the reference implementation, but the deep
-> introspection tools (`flux_status`, `flux_tree`) and the failure-persistence re-check run on the
+> introspection tools (`gitops_resource_status`, `gitops_tree`) and the failure-persistence re-check run on the
 > `GitOpsInspector` interface, which **both Flux and Argo CD now implement** (FEAT-2): on Argo via
 > native `status.health`/`status.sync`, error conditions, and the `status.resources` tree (app-of-apps
 > aware). The tools keep their `flux_`-prefixed names for now — cosmetic, not functional. Remaining

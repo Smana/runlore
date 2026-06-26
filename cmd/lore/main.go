@@ -1154,7 +1154,7 @@ func buildModelAndTools(ctx context.Context, cfg *config.Config, gp providers.Gi
 		// Deep read-only Flux introspection (status/events + dependency tree), when
 		// the GitOps provider supports it (Flux does).
 		if insp, ok := gp.(providers.GitOpsInspector); ok {
-			tools = append(tools, investigate.FluxStatusTool{Inspector: insp}, investigate.FluxTreeTool{Inspector: insp})
+			tools = append(tools, investigate.GitOpsStatusTool{Inspector: insp}, investigate.GitOpsTreeTool{Inspector: insp})
 		}
 	}
 	var recall *investigate.Recall

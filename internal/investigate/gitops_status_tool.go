@@ -10,31 +10,32 @@ import (
 	"github.com/Smana/runlore/internal/providers"
 )
 
-// FluxStatusTool exposes a Flux/Kubernetes resource's Ready condition, key spec
-// refs (sourceRef, dependsOn) and recent Events — so the model can learn WHY a
-// resource is failing, not just that it is.
-type FluxStatusTool struct {
+// GitOpsStatusTool exposes a GitOps/Kubernetes resource's status (a Flux Ready
+// condition or an Argo CD Application's health/sync), key spec refs, and recent
+// Events — so the model can learn WHY a resource is failing, not just that it is.
+type GitOpsStatusTool struct {
 	Inspector providers.GitOpsInspector
 }
 
 // Name returns the tool name.
-func (t FluxStatusTool) Name() string { return "flux_resource_status" }
+func (t GitOpsStatusTool) Name() string { return "gitops_resource_status" }
 
 // Description returns the tool description.
-func (t FluxStatusTool) Description() string {
-	return "Get a Flux/Kubernetes resource's Ready condition (status/reason/message), key spec refs " +
-		"(sourceRef, dependsOn) and recent Events. Use this to learn WHY a resource is failing — " +
-		"follow its sourceRef/dependsOn to the root. kind is one of: Kustomization, HelmRelease, " +
-		"GitRepository, OCIRepository, HelmRepository, HelmChart, Bucket."
+func (t GitOpsStatusTool) Description() string {
+	return "Get a GitOps/Kubernetes resource's status (a Flux Ready condition or an Argo CD " +
+		"Application's health/sync: status, reason, message), key spec refs, and recent Events. Use " +
+		"this to learn WHY a resource is failing — follow its refs to the root. kind is one of: " +
+		"Application (Argo CD); Kustomization, HelmRelease, GitRepository, OCIRepository, " +
+		"HelmRepository, HelmChart, Bucket (Flux)."
 }
 
 // Schema returns the JSON schema for the arguments.
-func (t FluxStatusTool) Schema() string {
+func (t GitOpsStatusTool) Schema() string {
 	return `{"type":"object","properties":{"kind":{"type":"string"},"name":{"type":"string"},"namespace":{"type":"string"}},"required":["kind","name","namespace"]}`
 }
 
 // Call fetches the resource status and renders it.
-func (t FluxStatusTool) Call(ctx context.Context, args string) (string, error) {
+func (t GitOpsStatusTool) Call(ctx context.Context, args string) (string, error) {
 	var in struct{ Kind, Name, Namespace string }
 	if err := json.Unmarshal([]byte(args), &in); err != nil {
 		return "", fmt.Errorf("parse args: %w", err)

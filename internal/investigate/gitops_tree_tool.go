@@ -9,30 +9,32 @@ import (
 	"github.com/Smana/runlore/internal/providers"
 )
 
-// FluxTreeTool walks a resource's dependsOn + sourceRef graph and renders it as a
-// tree, so the model can find the ROOT failing resource behind a dependency
-// cascade (the not-Ready or missing node), not just the downstream symptom.
-type FluxTreeTool struct {
+// GitOpsTreeTool walks a resource's dependency graph (Flux dependsOn/sourceRef, or an
+// Argo CD Application's managed-resource tree) and renders it, so the model can find
+// the ROOT failing resource behind a cascade (the not-Ready/Degraded or missing
+// node), not just the downstream symptom.
+type GitOpsTreeTool struct {
 	Inspector providers.GitOpsInspector
 }
 
 // Name returns the tool name.
-func (t FluxTreeTool) Name() string { return "flux_tree" }
+func (t GitOpsTreeTool) Name() string { return "gitops_tree" }
 
 // Description returns the tool description.
-func (t FluxTreeTool) Description() string {
-	return "Walk a Flux Kustomization/HelmRelease's dependsOn + sourceRef graph and render the tree " +
-		"with each node's Ready state. Use it on a DependencyNotReady resource to find the ROOT cause " +
-		"— the first not-Ready or NOT FOUND node — instead of the downstream symptom."
+func (t GitOpsTreeTool) Description() string {
+	return "Walk a GitOps resource's dependency graph (a Flux resource's dependsOn/sourceRef, or an " +
+		"Argo CD Application's managed-resource tree) and render it with each node's Ready/health state. " +
+		"Use it on a failing resource to find the ROOT cause — the first not-Ready/Degraded or NOT FOUND " +
+		"node — instead of the downstream symptom."
 }
 
 // Schema returns the JSON schema for the arguments.
-func (t FluxTreeTool) Schema() string {
+func (t GitOpsTreeTool) Schema() string {
 	return `{"type":"object","properties":{"kind":{"type":"string"},"name":{"type":"string"},"namespace":{"type":"string"}},"required":["kind","name","namespace"]}`
 }
 
 // Call walks the dependency tree and renders it.
-func (t FluxTreeTool) Call(ctx context.Context, args string) (string, error) {
+func (t GitOpsTreeTool) Call(ctx context.Context, args string) (string, error) {
 	var in struct{ Kind, Name, Namespace string }
 	if err := json.Unmarshal([]byte(args), &in); err != nil {
 		return "", fmt.Errorf("parse args: %w", err)
