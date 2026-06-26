@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"time"
 
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime/schema"
@@ -16,6 +17,9 @@ import (
 
 // applicationGVR is the Argo CD Application resource.
 var applicationGVR = schema.GroupVersionResource{Group: "argoproj.io", Version: "v1alpha1", Resource: "applications"}
+
+// eventsGVR is the core v1 Events resource (for ListEvents).
+var eventsGVR = schema.GroupVersionResource{Group: "", Version: "v1", Resource: "events"}
 
 // sendTimeout bounds how long the informer handler blocks waiting for the
 // consumer to drain a watch event before giving up. It is large enough to ride
@@ -43,6 +47,58 @@ func (r *dynamicReader) ListApplications(ctx context.Context) ([]application, er
 	out := make([]application, 0, len(list.Items))
 	for i := range list.Items {
 		out = append(out, applicationFromUnstructured(&list.Items[i]))
+	}
+	return out, nil
+}
+
+// GetApplication fetches one Application as unstructured. Argo Applications usually
+// live in the argocd namespace, not the workload's; if the caller passes the
+// workload's namespace and the app isn't there, fall back to a name search across all
+// namespaces before trusting the NotFound.
+func (r *dynamicReader) GetApplication(ctx context.Context, namespace, name string) (*unstructured.Unstructured, error) {
+	u, err := r.client.Resource(applicationGVR).Namespace(namespace).Get(ctx, name, metav1.GetOptions{})
+	if err == nil {
+		return u, nil
+	}
+	if !apierrors.IsNotFound(err) {
+		return nil, err
+	}
+	if list, lerr := r.client.Resource(applicationGVR).Namespace(metav1.NamespaceAll).List(ctx, metav1.ListOptions{}); lerr == nil {
+		for i := range list.Items {
+			if list.Items[i].GetName() == name {
+				return &list.Items[i], nil
+			}
+		}
+	}
+	return nil, err // genuinely absent in every namespace: return the original NotFound
+}
+
+// ListEvents returns recent Event lines for an involved object, filtered by name
+// (server-side) + kind (client-side), rendered as "Type Reason Message".
+func (r *dynamicReader) ListEvents(ctx context.Context, namespace, name, kind string) ([]string, error) {
+	opts := metav1.ListOptions{Limit: 100}
+	if name != "" {
+		opts.FieldSelector = "involvedObject.name=" + name
+	}
+	list, err := r.client.Resource(eventsGVR).Namespace(namespace).List(ctx, opts)
+	if err != nil {
+		return nil, fmt.Errorf("list events: %w", err)
+	}
+	var out []string
+	for i := range list.Items {
+		o := list.Items[i].Object
+		if n, _, _ := unstructured.NestedString(o, "involvedObject", "name"); n != name {
+			continue
+		}
+		if kind != "" {
+			if k, _, _ := unstructured.NestedString(o, "involvedObject", "kind"); k != "" && k != kind {
+				continue
+			}
+		}
+		typ, _, _ := unstructured.NestedString(o, "type")
+		reason, _, _ := unstructured.NestedString(o, "reason")
+		msg, _, _ := unstructured.NestedString(o, "message")
+		out = append(out, fmt.Sprintf("%s %s %s", typ, reason, msg))
 	}
 	return out, nil
 }

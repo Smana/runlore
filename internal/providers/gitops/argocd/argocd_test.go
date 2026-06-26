@@ -4,6 +4,10 @@ import (
 	"context"
 	"testing"
 
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/apimachinery/pkg/runtime/schema"
+
 	"github.com/Smana/runlore/internal/providers"
 	"github.com/Smana/runlore/internal/whatchanged"
 )
@@ -23,8 +27,11 @@ func TestParseRevision(t *testing.T) {
 }
 
 type fakeReader struct {
-	apps   []application
-	events []ApplicationEvent
+	apps       []application
+	events     []ApplicationEvent
+	obj        *unstructured.Unstructured // returned by GetApplication
+	notFound   bool                       // GetApplication returns a NotFound error
+	eventLines []string                   // returned by ListEvents
 }
 
 func (f fakeReader) ListApplications(context.Context) ([]application, error) { return f.apps, nil }
@@ -35,6 +42,15 @@ func (f fakeReader) WatchApplications(context.Context) (<-chan ApplicationEvent,
 	}
 	close(ch)
 	return ch, nil
+}
+func (f fakeReader) GetApplication(_ context.Context, _, name string) (*unstructured.Unstructured, error) {
+	if f.notFound {
+		return nil, apierrors.NewNotFound(schema.GroupResource{Group: "argoproj.io", Resource: "applications"}, name)
+	}
+	return f.obj, nil
+}
+func (f fakeReader) ListEvents(context.Context, string, string, string) ([]string, error) {
+	return f.eventLines, nil
 }
 
 func TestProviderChanges(t *testing.T) {
