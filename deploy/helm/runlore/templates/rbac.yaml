@@ -33,9 +33,14 @@ rules:
   - apiGroups: [""]
     resources: ["pods"]
     verbs: ["get", "list"]
-  # Argo CD engine (config.gitops.engine: argocd)
+  # Argo CD engine (config.gitops.engine: argocd).
+  # applications: reactive watch (WatchFailures) + deep inspection (ResourceStatus/DependencyTree).
+  # applicationsets: read-only during investigations — generator failures don't yet trigger
+  #   the React loop (v2 roadmap), but the inspector can surface AppSet status as context.
+  # appprojects: read-only during investigations — RBAC denials manifest as Application
+  #   conditions; the inspector can cross-reference the project definition for root-cause.
   - apiGroups: ["argoproj.io"]
-    resources: ["applications"]
+    resources: ["applications", "applicationsets", "appprojects"]
     verbs: ["get", "list", "watch"]
   # NOTE: execution rights (patch) are intentionally NOT granted cluster-wide here.
   # They are scoped to rbac.actionNamespaces as namespaced Roles below, so a
@@ -86,11 +91,12 @@ subjects:
     namespace: {{ .Release.Namespace }}
 {{- range .Values.rbac.controllerLogNamespaces }}
 ---
-# controller_logs: read RAW Flux controller pod logs in THIS namespace only (default
-# flux-system) — never cluster-wide — because pod logs may carry secrets/PII and tool
-# output is sent to an external LLM. pods get/list is repeated here (in addition to the
-# cluster-wide grant) so the Role is self-contained: controller_logs lists the matching
-# controller pods before streaming pods/log.
+# controller_logs: read RAW gitops controller pod logs in THIS namespace only
+# (flux-system for Flux, argocd for ArgoCD — set via rbac.controllerLogNamespaces) —
+# never cluster-wide — because pod logs may carry secrets/PII and tool output is sent
+# to an external LLM. pods get/list is repeated here (in addition to the cluster-wide
+# grant) so the Role is self-contained: controller_logs lists the matching controller
+# pods before streaming pods/log.
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
 metadata:
