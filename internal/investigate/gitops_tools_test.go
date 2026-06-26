@@ -21,8 +21,8 @@ func (f fakeInspector) DependencyTree(context.Context, providers.Workload) (prov
 	return f.tree, nil
 }
 
-func TestFluxStatusTool(t *testing.T) {
-	tool := FluxStatusTool{Inspector: fakeInspector{status: providers.ResourceStatus{
+func TestGitOpsStatusTool(t *testing.T) {
+	tool := GitOpsStatusTool{Inspector: fakeInspector{status: providers.ResourceStatus{
 		Workload: providers.Workload{Kind: "Kustomization", Name: "apps", Namespace: "flux-system"},
 		Ready:    "False", Reason: "DependencyNotReady", Message: "dependency not ready",
 		Refs:   map[string]string{"sourceRef": "GitRepository/flux-system/infra-artifact", "dependsOn": "flux-system/infra"},
@@ -39,8 +39,8 @@ func TestFluxStatusTool(t *testing.T) {
 	}
 }
 
-func TestFluxStatusToolNotFound(t *testing.T) {
-	tool := FluxStatusTool{Inspector: fakeInspector{status: providers.ResourceStatus{
+func TestGitOpsStatusToolNotFound(t *testing.T) {
+	tool := GitOpsStatusTool{Inspector: fakeInspector{status: providers.ResourceStatus{
 		Workload: providers.Workload{Kind: "GitRepository", Name: "infra-artifact", Namespace: "flux-system"}, NotFound: true,
 	}}}
 	out, _ := tool.Call(context.Background(), `{"kind":"GitRepository","name":"infra-artifact","namespace":"flux-system"}`)
@@ -49,8 +49,8 @@ func TestFluxStatusToolNotFound(t *testing.T) {
 	}
 }
 
-func TestFluxTreeTool(t *testing.T) {
-	tool := FluxTreeTool{Inspector: fakeInspector{tree: providers.DepNode{
+func TestGitOpsTreeTool(t *testing.T) {
+	tool := GitOpsTreeTool{Inspector: fakeInspector{tree: providers.DepNode{
 		Workload: providers.Workload{Kind: "Kustomization", Name: "apps", Namespace: "flux-system"}, Ready: "False", Reason: "DependencyNotReady",
 		Children: []providers.DepNode{{
 			Workload: providers.Workload{Kind: "Kustomization", Name: "infra", Namespace: "flux-system"}, Ready: "False", Reason: "DependencyNotReady",

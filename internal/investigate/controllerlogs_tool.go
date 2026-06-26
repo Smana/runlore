@@ -27,7 +27,7 @@ func (t ControllerLogsTool) Description() string {
 	return "Read recent logs from a Flux controller (source-controller, kustomize-controller, " +
 		"helm-controller, notification-controller), optionally filtered to a resource name, over a " +
 		"window (default 30m). Use it to learn WHY a source/object failed — e.g. a GitRepository that " +
-		"was never created, an auth or checkout error — when flux_resource_status isn't enough."
+		"was never created, an auth or checkout error — when gitops_resource_status isn't enough."
 }
 
 // Schema returns the JSON schema for the arguments.
