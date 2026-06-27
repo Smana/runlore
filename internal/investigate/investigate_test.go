@@ -166,3 +166,11 @@ func TestFromIncidentDerivesWorkload(t *testing.T) {
 		t.Fatalf("FromIncident workload = %+v, want apps/payment-api Deployment", r.Workload)
 	}
 }
+
+func TestFromIncidentCarriesSeverityAndEnvironment(t *testing.T) {
+	inc := config.Incident{AlertName: "X", Severity: "critical", Environment: "prod", Namespace: "ns"}
+	r := FromIncident(inc)
+	if r.Severity != "critical" || r.Environment != "prod" {
+		t.Fatalf("got severity=%q env=%q", r.Severity, r.Environment)
+	}
+}

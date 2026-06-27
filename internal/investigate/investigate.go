@@ -34,6 +34,8 @@ type Request struct {
 	Title        string
 	Workload     providers.Workload // optional; zero for alerts without a workload
 	Reason       string
+	Severity     string             // alert severity (alert-like sources); shapes prompt + notification
+	Environment  string             // deployment environment (prod/staging/…)
 	Message      string
 	Labels       map[string]string
 	At           time.Time
@@ -77,6 +79,8 @@ func FromIncident(inc config.Incident) Request {
 		Title:        inc.AlertName,
 		Workload:     providers.Workload{Namespace: inc.Namespace, Kind: kind, Name: name},
 		Reason:       inc.Severity,
+		Severity:     inc.Severity,
+		Environment:  inc.Environment,
 		Labels:       inc.Labels,
 		At:           inc.StartsAt,
 		Fingerprint:  inc.Fingerprint,
