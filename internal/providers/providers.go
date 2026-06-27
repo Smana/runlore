@@ -210,11 +210,19 @@ type NetworkProvider interface {
 // LogReader reads recent pod logs from the cluster (read-only), backing the
 // controller_logs investigation tool. Implemented with client-go CoreV1 GetLogs.
 type LogReader interface {
-	// PodLogs returns recent log lines from pods matching labelSelector in
-	// namespace, bounded to the last sinceMinutes (0 = no lower bound). When
-	// previous is true it reads each pod's last-terminated container (the crash
-	// output of a CrashLoopBackOff) instead of the running one.
-	PodLogs(ctx context.Context, namespace, labelSelector string, sinceMinutes int, previous bool) (LogResult, error)
+	// PodLogs returns recent log lines from the pods selected by q, each line
+	// prefixed with its pod name.
+	PodLogs(ctx context.Context, q PodLogQuery) (LogResult, error)
+}
+
+// PodLogQuery selects pods and a log window for LogReader.PodLogs. It mirrors the
+// optional-field shape of corev1.PodLogOptions so a new knob (e.g. a container
+// name) doesn't break the interface and every caller.
+type PodLogQuery struct {
+	Namespace     string // required
+	LabelSelector string // empty = all pods in the namespace
+	SinceMinutes  int    // 0 = no lower bound
+	Previous      bool   // read the last-terminated container (crash output) instead of the running one
 }
 
 // PodStatus is a pod's high-level health: phase, ready count, and per-container
