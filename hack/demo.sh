@@ -11,22 +11,10 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 ADDR=":18080"
 BIN="$(mktemp -d)/lore"
-CFG="$(mktemp)"
+CFG="$ROOT/hack/demo.config.yaml"   # committed + parse-tested (internal/config)
 LOG="$(mktemp)"
 
 go build -o "$BIN" "$ROOT/cmd/lore"
-
-cat > "$CFG" <<'EOF'
-triggers:
-  incidents:
-    enabled: true
-    match:
-      severity: [critical]
-      environment: [prod]
-    ignore:
-      alertnames: [Watchdog]
-    dedup: { window: 30m }
-EOF
 
 "$BIN" serve --config "$CFG" --addr "$ADDR" > "$LOG" 2>&1 &
 SRV=$!

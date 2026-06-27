@@ -154,12 +154,16 @@ relevance, and LLM cost are all controlled here.
 - **Proactive watch** (Phase 3): periodic scan for SLO burn-rate / drift.
 - **On-demand**: `lore investigate "<symptom>"` or a chat mention in Slack/Matrix (same engine, human-initiated).
 
-Example trigger policy (`internal/config`, `config.TriggerPolicy`):
+Example trigger policy (`internal/config`, `config.TriggerPolicy`). Source *enablement*
+lives under `sources.<name>`; the `triggers` block is purely the match/ignore/dedup
+criteria applied to admitted alerts:
 
 ```yaml
+sources:                                # enablement is per-source
+  alertmanager: {}                      # mount the incident webhook ingress
+  gitops: { enabled: true }             # watch GitOps Ready=False (secondary trigger)
 triggers:
-  incidents:
-    enabled: true
+  incidents:                            # match/ignore/dedup for admitted alerts
     match:                              # ANDed; empty fields match anything
       severity:    [critical]           # only paging-grade
       environment: [prod]               # ignore staging/dev
@@ -168,8 +172,7 @@ triggers:
     ignore:
       alertnames:  [Watchdog, InfoInhibitor]
     dedup: { window: 30m }              # don't re-open a still-firing alert
-  gitops_failures:                      # secondary trigger
-    enabled: true
+  gitops_failures:                      # secondary trigger (enabled via sources.gitops)
     debounce: 60s                       # require the failure to persist this long
                                         # (re-check still Ready=False) before
                                         # investigating — filters reconcile-churn
@@ -391,13 +394,20 @@ KB git repo  ──syncer──►  local mirror  ──build──►  index:  
   Cluster-wide `pods`/`events` *get/list* (pod status + event messages, not log bodies) stays in the
   ClusterRole because `pod_status`/`kube_events` triage arbitrary incident namespaces.
 
-> [!warning] Known limitation — no content redaction yet (roadmap R19)
-> Tool output (logs, git diffs, status/event messages) currently reaches the **model provider**
-> verbatim, and model-quoted evidence is copied into the **KB pull-request body** and **chat** — so a
-> secret in a log line or manifest can egress to your LLM vendor and, if the KB repo is public, further.
-> Mitigated today by the RBAC scoping above and by **self-hosting the model** (in-cluster vLLM/Ollama
-> keeps data in-boundary); the planned fix is a scrub pass on tool output and on curated/notified
-> evidence. If you run untrusted-tenant namespaces or a public KB repo, treat this as a gating concern.
+- **Secret redaction at the model and egress boundaries (`internal/redact`).** Secret-shaped values
+  are masked at three trust boundaries before they can leave the cluster: the **incident text**
+  entering the prompt, **every tool output** (logs, git diffs, status/event messages) before it reaches
+  the **model provider**, and the **finished investigation** (root-cause summaries, evidence, suggested
+  actions) before it is copied into the **KB pull-request body** and **chat**. The ruleset is
+  high-precision — PEM private keys, JWTs, GitHub / Slack / AWS / Google / Stripe keys,
+  `user:pass@host` URLs, `Authorization` headers, and generic `*secret*/*token*/*password*: <value>`
+  pairs — masking the *value* while keeping surrounding structure so the agent can still reason ("the
+  password field changed"). Redaction is a **mitigation, not a guarantee**: it does not yet base64-decode
+  `kind: Secret` `data:` blocks, so a Secret manifest surfaced verbatim in a git diff can still reach the
+  model unmasked (roadmap). Defense-in-depth still applies — the RBAC scoping above limits what tool
+  output can contain, and **self-hosting the model** (in-cluster vLLM/Ollama) keeps data in-boundary
+  regardless. If you run a public KB repo or untrusted-tenant namespaces, treat the base64-`Secret` gap
+  as a gating concern until the decode pass lands.
 - **Append-only, tamper-evident audit log** (`internal/audit`): every action attempt — inputs, gate
   results, op, target, actor, outcome — is a hash-chained JSON line, so edits/deletions are detectable.
 - **Honest uncertainty.** `unresolved` is a first-class output field; the agent says what it doesn't

@@ -1,0 +1,14 @@
+# Demo config for hack/demo.sh — the zero-cluster quickstart.
+#
+# Enablement of a source lives under `sources.<name>`; the trigger policy below
+# is purely the match/ignore/dedup criteria applied to admitted alerts.
+sources:
+  alertmanager: {}        # mount the /webhook/alertmanager ingress endpoint
+triggers:
+  incidents:
+    match:
+      severity: [critical]
+      environment: [prod]
+    ignore:
+      alertnames: [Watchdog]
+    dedup: { window: 30m }
