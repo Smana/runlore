@@ -52,7 +52,7 @@ func (t PodLogsTool) Call(ctx context.Context, args string) (string, error) {
 	if since <= 0 {
 		since = 30
 	}
-	lines, err := t.Logs.PodLogs(ctx, in.Namespace, in.Selector, since, in.Previous)
+	lines, err := t.Logs.PodLogs(ctx, providers.PodLogQuery{Namespace: in.Namespace, LabelSelector: in.Selector, SinceMinutes: since, Previous: in.Previous})
 	if err != nil {
 		return "", err
 	}

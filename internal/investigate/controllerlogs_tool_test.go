@@ -15,8 +15,8 @@ type fakeLogReader struct {
 	gotSince           int
 }
 
-func (f *fakeLogReader) PodLogs(_ context.Context, namespace, labelSelector string, sinceMinutes int, _ bool) (providers.LogResult, error) {
-	f.gotNS, f.gotSelector, f.gotSince = namespace, labelSelector, sinceMinutes
+func (f *fakeLogReader) PodLogs(_ context.Context, q providers.PodLogQuery) (providers.LogResult, error) {
+	f.gotNS, f.gotSelector, f.gotSince = q.Namespace, q.LabelSelector, q.SinceMinutes
 	return f.lines, nil
 }
 

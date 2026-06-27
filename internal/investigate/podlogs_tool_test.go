@@ -18,8 +18,8 @@ type fakeWorkloadLogs struct {
 	gotPrevious bool
 }
 
-func (f *fakeWorkloadLogs) PodLogs(_ context.Context, namespace, labelSelector string, sinceMinutes int, previous bool) (providers.LogResult, error) {
-	f.gotNS, f.gotSelector, f.gotSince, f.gotPrevious = namespace, labelSelector, sinceMinutes, previous
+func (f *fakeWorkloadLogs) PodLogs(_ context.Context, q providers.PodLogQuery) (providers.LogResult, error) {
+	f.gotNS, f.gotSelector, f.gotSince, f.gotPrevious = q.Namespace, q.LabelSelector, q.SinceMinutes, q.Previous
 	return f.lines, nil
 }
 
