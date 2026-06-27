@@ -399,6 +399,41 @@ route:
 
 With 2+ replicas, only the **leader** is Ready, so the Service routes webhooks to it automatically.
 
+### Harden for production
+
+By default the webhook is **unauthenticated** and the chart's NetworkPolicy ingress is permissive
+(`ingressFrom: []` ⇒ any source) — fine for a trial, but lock both down before pointing a real alert
+stream at it:
+
+1. **Require a bearer token.** Name an env var in `server.webhook_token_env` (wired from your Secret);
+   unauthenticated requests are then rejected with `401`. A token is **mandatory** when
+   `actions.mode=auto`.
+   ```yaml
+   # values.yaml
+   config:
+     server:
+       webhook_token_env: RUNLORE_WEBHOOK_TOKEN
+   ```
+   ```yaml
+   # alertmanager — send the same token as a bearer credential
+   webhook_configs:
+     - url: http://runlore.runlore.svc:8080/webhook/alertmanager
+       http_config:
+         authorization:
+           type: Bearer
+           credentials_file: /etc/alertmanager/secrets/runlore-webhook-token
+   ```
+2. **Scope ingress** to only the namespace that should reach the webhook (e.g. your monitoring stack):
+   ```yaml
+   # values.yaml — spliced into the NetworkPolicy `from:`
+   networkPolicy:
+     ingressFrom:
+       - namespaceSelector:
+           matchLabels: { kubernetes.io/metadata.name: monitoring }
+   ```
+
+See the [Security model](security-model.md) for the full posture — redaction, RBAC, the action gate.
+
 ---
 
 ## Step 6 — Verify
