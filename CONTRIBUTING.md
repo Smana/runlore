@@ -56,7 +56,7 @@ loop is written against engine-agnostic types, never against Flux/OpenAI/GitHub 
 ## How we work
 
 - **TDD.** Write the failing test first, then the implementation. Non-trivial work starts from a plan in
-  [`docs/plans/`](docs/plans) (a bite-sized, test-first task list).
+  [`dev/plans/`](dev/plans) (a bite-sized, test-first task list).
 - **Small, focused commits**, conventional-commit style (`feat(scope): …`, `fix(scope): …`,
   `test(...)`, `docs(...)`, `ci: …`). One concern per commit.
 - **Branch + PR**; keep the gate green on the branch.

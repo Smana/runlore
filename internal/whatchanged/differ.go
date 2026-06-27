@@ -194,7 +194,7 @@ func (d *Differ) Remote(ctx context.Context, url, fromRev, toRev, scope string) 
 // yields an empty diff. ctx bounds the clone + patch.
 //
 // NOTE (perf): does a full (disk) clone per call. When the GitOpsProvider drives
-// this across many changes, add a per-repo clone cache here (see docs/plans note).
+// this across many changes, add a per-repo clone cache here (see dev/plans note).
 func (d *Differ) RemoteFromParent(ctx context.Context, url, rev, scope string) (providers.Diff, error) {
 	repo, cleanup, err := d.cloneToDisk(ctx, url)
 	if err != nil {
