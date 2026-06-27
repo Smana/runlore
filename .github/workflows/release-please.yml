@@ -1,0 +1,28 @@
+name: Release Please
+
+on:
+  push:
+    branches: [main]
+
+# Top-level least privilege. release-please needs to write the release PR and the
+# release/tag. Binary artifacts are built by release-binaries.yml, which the v*
+# tag created here triggers.
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  release-please:
+    name: Release Please
+    runs-on: ubuntu-latest
+    steps:
+      - name: Run release-please
+        id: release
+        uses: googleapis/release-please-action@5c625bfb5d1ff62eadeeb3772007f7f66fdcf071 # v4.4.1
+        with:
+          # Fine-grained PAT (NOT the default GITHUB_TOKEN): pushing the release PR /
+          # tag with GITHUB_TOKEN would NOT trigger downstream workflows (CI on the
+          # release PR, build-image + release-binaries on the v* tag). See CONTRIBUTING.md.
+          token: ${{ secrets.RELEASE_PLEASE_TOKEN }}
+          config-file: release-please-config.json
+          manifest-file: .release-please-manifest.json

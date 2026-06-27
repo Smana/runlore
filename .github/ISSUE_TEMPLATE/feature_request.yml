@@ -1,0 +1,55 @@
+name: Feature request
+description: Suggest an idea or improvement for RunLore
+title: "feat: <short summary>"
+labels: ["enhancement", "triage"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for the idea! RunLore is an opinionated, **read-only-first** SRE agent
+        built around one loop: **React → Investigate → Learn**, feeding an **open,
+        portable knowledge base you own**. Proposals that sharpen that loop land best.
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem / motivation
+      description: What problem are you trying to solve? What's painful or missing today?
+      placeholder: "When investigating X, RunLore can't ... so I have to ..."
+    validations:
+      required: true
+
+  - type: textarea
+    id: solution
+    attributes:
+      label: Proposed solution
+      description: What would you like RunLore to do? Describe the behavior or capability.
+    validations:
+      required: true
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+      description: Other approaches, existing workarounds, or related tools you looked at.
+    validations:
+      required: false
+
+  - type: textarea
+    id: fit
+    attributes:
+      label: How does it fit RunLore's intent?
+      description: |
+        Help us place this. How does it serve the **React → Investigate → Learn** loop,
+        the **read-only-first** posture (writes only to Git via reviewed PRs), and the
+        **open, portable knowledge** principle (no proprietary lock-in)?
+    validations:
+      required: true
+
+  - type: textarea
+    id: extra
+    attributes:
+      label: Anything else?
+      description: Sketches, links, prior art, or example output that would help.
+    validations:
+      required: false

@@ -141,3 +141,46 @@ hack/demo.sh    # fires mocked Alertmanager alerts through the trigger policy
 2. Make the change test-first; keep the gate green (`-race` where relevant).
 3. If it touches the deployment or a feature path, run `hack/e2e-k3d.sh`.
 4. Open a PR describing **what** changed and **how it was verified** (cite the gate / e2e results).
+
+## Releasing
+
+Releases are fully automated from the [Conventional Commits](https://www.conventionalcommits.org/) you
+already write — there is nothing to tag by hand.
+
+1. **You merge `feat:` / `fix:` / etc. PRs to `main`** as usual.
+2. **[release-please](https://github.com/googleapis/release-please) opens (and keeps updating) a release
+   PR** — `.github/workflows/release-please.yml`. It computes the next [SemVer](https://semver.org/) from
+   the commit types since the last release, bumps the version, and regenerates `CHANGELOG.md`. The first
+   release PR will propose **v0.1.0** (the `feat:` history so far is a 0.x minor bump).
+3. **You merge the release PR.** That tags `vX.Y.Z` and creates the GitHub release with the changelog.
+4. **The `vX.Y.Z` tag then fans out to two builds:**
+   - `build-image.yml` builds and **cosign-signs** the container image (with SLSA provenance + SBOM
+     attestation) and pushes the `vX.Y.Z` / `{major}.{minor}` tags to `ghcr.io`.
+   - the `goreleaser` job in `release-please.yml` runs [GoReleaser](https://goreleaser.com)
+     (`.goreleaser.yaml`) and **attaches the cross-platform `lore` binaries** (linux/darwin/windows ×
+     amd64/arm64) as `tar.gz`/`zip` archives, plus `checksums.txt`, a syft **SBOM per archive**, and a
+     **keyless cosign signature** of the checksums file — to the release release-please just created.
+
+The image and the binaries share the same `-X main.version` ldflags, so `lore --version` matches the
+image tag.
+
+### One-time setup (required): the `RELEASE_PLEASE_TOKEN` PAT
+
+> **This must exist before the pipeline works.** Without it the automation silently half-runs: the
+> release PR opens but **CI never runs on it**, and merging it tags the release but **neither
+> `build-image.yml` nor the `goreleaser` binaries fire**. This is a GitHub safeguard — events created
+> using the default `GITHUB_TOKEN` do **not** trigger further workflow runs.
+
+Create a **fine-grained Personal Access Token** scoped to `Smana/runlore` with these **repository**
+permissions:
+
+| Permission     | Access       |
+| -------------- | ------------ |
+| Contents       | Read & write |
+| Pull requests  | Read & write |
+| Workflows      | Read & write |
+
+Then add it as an **Actions repository secret** named **`RELEASE_PLEASE_TOKEN`**
+(`Settings → Secrets and variables → Actions → New repository secret`). The `goreleaser` job uses the
+default `GITHUB_TOKEN` (it only uploads assets to the already-created release), so no extra secret is
+needed there.

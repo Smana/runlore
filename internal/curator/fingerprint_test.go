@@ -177,3 +177,39 @@ func TestDupFingerprintDiffersByTerseAcronymCause(t *testing.T) {
 		t.Fatalf("different terse causes on the same resource must not collide: both %q", fa)
 	}
 }
+
+// TestDupFingerprintStableAcrossProseWhenTriggerKeyPresent is the #137 regression:
+// re-investigations of one ongoing incident reword the LLM root cause, but the
+// trigger that fired them (a failing resource + condition, or an alert fingerprint)
+// is identical. Keying on that deterministic trigger makes the fingerprints match,
+// so the curator updates the one open PR instead of opening a new PR per retry.
+func TestDupFingerprintStableAcrossProseWhenTriggerKeyPresent(t *testing.T) {
+	res := providers.Workload{Kind: "Application", Namespace: "argocd", Name: "airflow"}
+	const tk = "argocd/airflow:Degraded"
+	a := providers.Investigation{
+		Resource:   res,
+		TriggerKey: tk,
+		RootCauses: []providers.Hypothesis{{Summary: "ArgoCD git repository authentication failure"}},
+	}
+	b := providers.Investigation{
+		Resource:   res,
+		TriggerKey: tk,
+		RootCauses: []providers.Hypothesis{{Summary: "Missing ExternalSecret for database credentials: Secret does not exist"}},
+	}
+	fa, fb := DupFingerprint(a), DupFingerprint(b)
+	if fa == "" || fa != fb {
+		t.Fatalf("same trigger key must hash alike across reworded causes: %q vs %q", fa, fb)
+	}
+}
+
+// TestDupFingerprintDiffersByTriggerKey guards against over-coalescing: genuinely
+// different triggers on the same resource (e.g. a Degraded vs an OutOfSync
+// condition) must not collapse into one fingerprint.
+func TestDupFingerprintDiffersByTriggerKey(t *testing.T) {
+	res := providers.Workload{Namespace: "argocd", Name: "airflow"}
+	a := providers.Investigation{Resource: res, TriggerKey: "argocd/airflow:Degraded", RootCauses: []providers.Hypothesis{{Summary: "x"}}}
+	b := providers.Investigation{Resource: res, TriggerKey: "argocd/airflow:OutOfSync", RootCauses: []providers.Hypothesis{{Summary: "x"}}}
+	if DupFingerprint(a) == DupFingerprint(b) {
+		t.Fatal("different trigger keys on the same resource must not coalesce")
+	}
+}

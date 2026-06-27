@@ -1,0 +1,7 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Report a security vulnerability
+    url: https://github.com/Smana/runlore/security/advisories/new
+    about: >-
+      Found a security issue? Report it privately via GitHub security advisories —
+      please do NOT open a public issue for vulnerabilities.
