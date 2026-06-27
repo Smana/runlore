@@ -31,9 +31,11 @@ func New(client kubernetes.Interface) *Reader { return &Reader{client: client} }
 var _ providers.LogReader = (*Reader)(nil)
 
 // PodLogs returns recent log lines from up to maxPods pods matching labelSelector
-// in namespace, bounded to the last sinceMinutes. Each line is prefixed with its
-// pod name. Best-effort: a pod whose log stream fails is skipped, not fatal.
-func (r *Reader) PodLogs(ctx context.Context, namespace, labelSelector string, sinceMinutes int) (providers.LogResult, error) {
+// in namespace, bounded to the last sinceMinutes. When previous is true it reads
+// each pod's last-terminated container (the crash output of a CrashLoopBackOff)
+// instead of the running one. Each line is prefixed with its pod name. Best-effort:
+// a pod whose log stream fails is skipped, not fatal.
+func (r *Reader) PodLogs(ctx context.Context, namespace, labelSelector string, sinceMinutes int, previous bool) (providers.LogResult, error) {
 	pods, err := r.client.CoreV1().Pods(namespace).List(ctx, metav1.ListOptions{LabelSelector: labelSelector})
 	if err != nil {
 		return nil, fmt.Errorf("list pods (%s/%s): %w", namespace, labelSelector, err)
@@ -51,7 +53,7 @@ func (r *Reader) PodLogs(ctx context.Context, namespace, labelSelector string, s
 		}
 		name := pods.Items[i].Name
 		stream, err := r.client.CoreV1().Pods(namespace).
-			GetLogs(name, &corev1.PodLogOptions{SinceSeconds: since, TailLines: &tail}).
+			GetLogs(name, &corev1.PodLogOptions{SinceSeconds: since, TailLines: &tail, Previous: previous}).
 			Stream(ctx)
 		if err != nil {
 			continue

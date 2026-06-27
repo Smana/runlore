@@ -21,7 +21,7 @@ func TestPodLogs(t *testing.T) {
 	)
 	r := New(client)
 
-	lines, err := r.PodLogs(context.Background(), "flux-system", "app=source-controller", 30)
+	lines, err := r.PodLogs(context.Background(), "flux-system", "app=source-controller", 30, false)
 	if err != nil {
 		t.Fatalf("PodLogs: %v", err)
 	}

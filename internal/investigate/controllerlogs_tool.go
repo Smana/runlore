@@ -55,7 +55,7 @@ func (t ControllerLogsTool) Call(ctx context.Context, args string) (string, erro
 	if since <= 0 {
 		since = 30
 	}
-	lines, err := t.Logs.PodLogs(ctx, fluxControllerNamespace, "app="+in.Controller, since)
+	lines, err := t.Logs.PodLogs(ctx, fluxControllerNamespace, "app="+in.Controller, since, false)
 	if err != nil {
 		return "", err
 	}
