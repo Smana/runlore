@@ -138,5 +138,17 @@ func meetsBar(inv providers.Investigation, minConf float64) bool {
 }
 
 func coalesceComment(inv providers.Investigation) string {
-	return fmt.Sprintf("RunLore saw this incident again (confidence %.0f%%). Coalesced rather than re-filed.", inv.Confidence*100)
+	cause := "(no root cause identified)"
+	if len(inv.RootCauses) > 0 && inv.RootCauses[0].Summary != "" {
+		cause = inv.RootCauses[0].Summary
+	}
+	// The open-PR dedup keys on the trigger (resource+reason / alert fingerprint),
+	// not the cause, so name the cause observed this time: if it differs from the one
+	// documented in this PR, the symptom may now have a different root cause that the
+	// trigger-keyed dedup would otherwise hide.
+	return fmt.Sprintf(
+		"RunLore saw this incident again (confidence %.0f%%). Observed root cause this time: %s\n\n"+
+			"Coalesced onto this PR rather than re-filing (on alert/GitOps incidents the dedup key is the trigger, not the cause). "+
+			"If that differs from the root cause documented above, this symptom may now have a *different* cause — worth a human check.",
+		inv.Confidence*100, cause)
 }
