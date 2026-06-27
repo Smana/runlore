@@ -145,21 +145,36 @@ func (r *Reader) Events(ctx context.Context, namespace, objectName string, warnO
 	if err != nil {
 		return nil, fmt.Errorf("list events (%s): %w", namespace, err)
 	}
-	out := make([]providers.KubeEvent, 0, len(list.Items))
+	// Carry each kept event's timestamp alongside it: warnOnly filtering makes
+	// the kept slice shorter than list.Items, so the sort must not index back
+	// into list.Items (the indices diverge and ordering would read the wrong
+	// events' timestamps).
+	type timedEvent struct {
+		ev providers.KubeEvent
+		at time.Time
+	}
+	kept := make([]timedEvent, 0, len(list.Items))
 	for i := range list.Items {
 		e := &list.Items[i]
 		if warnOnly && e.Type != corev1.EventTypeWarning {
 			continue
 		}
-		out = append(out, providers.KubeEvent{
-			Type:    e.Type,
-			Reason:  e.Reason,
-			Object:  e.InvolvedObject.Kind + "/" + e.InvolvedObject.Name,
-			Message: e.Message,
-			Count:   e.Count,
+		kept = append(kept, timedEvent{
+			ev: providers.KubeEvent{
+				Type:    e.Type,
+				Reason:  e.Reason,
+				Object:  e.InvolvedObject.Kind + "/" + e.InvolvedObject.Name,
+				Message: e.Message,
+				Count:   e.Count,
+			},
+			at: eventTime(e),
 		})
 	}
-	sort.SliceStable(out, func(i, j int) bool { return eventTime(&list.Items[i]).After(eventTime(&list.Items[j])) })
+	sort.SliceStable(kept, func(i, j int) bool { return kept[i].at.After(kept[j].at) })
+	out := make([]providers.KubeEvent, len(kept))
+	for i := range kept {
+		out[i] = kept[i].ev
+	}
 	return out, nil
 }
 
