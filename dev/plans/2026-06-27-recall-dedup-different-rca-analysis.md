@@ -180,11 +180,11 @@ Two places where the docs describe behaviour the code does **not** implement —
 
 ---
 
-## 9. Recommendations (future slices — not implemented here)
+## 9. Recommendations
 
-Ordered by leverage. Each is independently shippable in the project's slice style.
+Ordered by leverage. Each is independently shippable in the project's slice style. **Item 1 is implemented in this branch**; the rest are follow-up slices.
 
-1. **Make the coalesce comment carry the new RCA + flag divergence.** Smallest, highest-value change: when `duplicateOpenPR` coalesces, include the new finding's `RootCauses[0].Summary` in the comment and label it when the cause token-set diverges from the open PR's. Turns a silent drop into a visible "same trigger, *different* cause observed" signal a reviewer can act on. No new identity needed.
+1. ✅ **Implemented (this branch).** **The coalesce comment now carries the new RCA + a divergence hint.** When `duplicateOpenPR` coalesces, `coalesceComment` names the cause observed this time and warns that — because dedup keys on the trigger, not the cause — a differing cause warrants a human check. Turns a silent drop into a visible "same trigger, *different* cause observed" signal a reviewer can act on, with no change to the dedup identity. (Computing the *token-set* divergence against the open PR's stored cause, to auto-label only genuine divergences, is a further refinement.)
 2. **Cause-divergence gate on recall (read side).** Before short-circuiting, compare the recalled entry's stored cause/evidence against the `confirm.go` live signals; if they diverge beyond a threshold, **fall through to a full investigation** instead of adopting the prior RCA. This directly closes the first-occurrence anchoring gap rather than waiting for outcome decay.
 3. **Add an "evidence contradicts the runbook → pursue the new cause" instruction** to the `kb_search` guidance in `loop.go:66-67`, balancing the current pure-anchoring wording.
 4. **Decide the dedup contract for "same trigger, new cause" explicitly.** Either (a) blend a coarse cause signal into `DupFingerprint` even on the trigger path (so a clearly-different cause forks a new PR), or (b) keep trigger-keying but make §9.1 the safety net. Document the choice; today the open-vs-merged asymmetry is *emergent*, not designed.
