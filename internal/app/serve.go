@@ -230,7 +230,7 @@ func RunServe(version string, args []string) error {
 			}
 		}
 	}
-	built, err := source.BuildEnabled(source.Deps{Cfg: cfg, GitOps: gitops, Log: log})
+	built, err := source.BuildEnabled(source.Deps{Cfg: cfg, GitOps: gitops, Log: log, Raw: cfg.Sources})
 	if err != nil {
 		return fmt.Errorf("build sources: %w", err)
 	}
