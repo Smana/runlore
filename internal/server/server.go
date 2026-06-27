@@ -20,21 +20,13 @@ import (
 	"time"
 
 	"github.com/Smana/runlore/internal/action"
-	"github.com/Smana/runlore/internal/coalesce"
 	"github.com/Smana/runlore/internal/config"
 	"github.com/Smana/runlore/internal/httpx"
-	"github.com/Smana/runlore/internal/investigate"
-	"github.com/Smana/runlore/internal/outcome"
-	"github.com/Smana/runlore/internal/telemetry"
-	"github.com/Smana/runlore/internal/trigger"
-	"go.opentelemetry.io/otel/attribute"
-	"go.opentelemetry.io/otel/metric"
+	"github.com/Smana/runlore/internal/source"
 )
 
 // Server handles incoming incident webhooks and applies the trigger policy.
 type Server struct {
-	engine       *trigger.Engine
-	enqueuer     investigate.Enqueuer
 	ready        func() bool
 	approvals    *action.Approvals // nil unless action mode "approve" is configured
 	pauser       Pauser            // nil unless action mode "auto" is configured (kill-switch)
@@ -42,10 +34,6 @@ type Server struct {
 	slackSecret  string            // Slack signing secret; verifies interactive button clicks
 	webhookToken string            // optional bearer token required on POST /webhook/alertmanager
 	approvers    map[string]bool   // Slack user IDs permitted to approve actions (empty = none)
-
-	coalescer     *coalesce.Coalescer // optional; folds correlated alerts before enqueueing
-	otelMetrics   *telemetry.Metrics  // optional; nil-safe OTel counters
-	outcomeLedger *outcome.Ledger     // optional; records investigation outcomes (resolved alerts)
 
 	metrics http.Handler // optional; GET /metrics (OTel Prometheus exposition)
 	log     *slog.Logger
@@ -74,20 +62,21 @@ type Actions struct {
 // always ready. The caller composes what readiness means (e.g. leadership AND a
 // warm catalog). acts (optional) enables the rung-2 approval endpoints + the
 // rung-3 kill-switch, gated by acts.Token (X-Approval-Token). /healthz is liveness;
-// /readyz is readiness (gated by the caller-supplied ready func). metricsHandler
-// (optional) serves OTel Prometheus metrics on GET /metrics when non-nil.
-func New(cfg *config.Config, enq investigate.Enqueuer, ready func() bool, acts Actions, metricsHandler http.Handler, log *slog.Logger) *Server {
+// /readyz is readiness (gated by the caller-supplied ready func). built + pipe wire
+// the registered event sources: webhook sources are mounted at their paths and feed
+// the ingest pipeline. metricsHandler (optional) serves OTel Prometheus metrics on
+// GET /metrics when non-nil.
+func New(cfg *config.Config, ready func() bool, acts Actions, built []source.Built, pipe *source.Pipeline, metricsHandler http.Handler, log *slog.Logger) *Server {
 	approvers := make(map[string]bool, len(acts.ApproverIDs))
 	for _, id := range acts.ApproverIDs {
 		approvers[id] = true
 	}
 	s := &Server{
-		engine: trigger.NewEngine(cfg.Triggers.Incidents), enqueuer: enq, ready: ready,
+		ready:     ready,
 		approvals: acts.Approvals, pauser: acts.Pauser, token: acts.Token, slackSecret: acts.SlackSecret,
 		webhookToken: acts.WebhookToken, approvers: approvers, metrics: metricsHandler, log: log,
 	}
 	mux := http.NewServeMux()
-	mux.HandleFunc("POST /webhook/alertmanager", s.handleAlertmanager)
 	mux.HandleFunc("POST /slack/interactions", s.handleSlackInteraction)
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusOK)
@@ -107,25 +96,9 @@ func New(cfg *config.Config, enq investigate.Enqueuer, ready func() bool, acts A
 	if s.metrics != nil {
 		mux.Handle("GET /metrics", s.metrics)
 	}
+	source.MountWebhooks(mux, built, s.webhookAuthorized, pipe)
 	s.handler = mux
 	return s
-}
-
-// SetCoalescer attaches a Coalescer after construction. Call before accepting
-// requests; nil cz disables coalescing (direct enqueue).
-func (s *Server) SetCoalescer(cz *coalesce.Coalescer) {
-	s.coalescer = cz
-}
-
-// SetMetrics attaches the OTel metrics instance independently of coalescing, so
-// ingress counters (alerts_received) emit even when coalescing is disabled.
-func (s *Server) SetMetrics(m *telemetry.Metrics) {
-	s.otelMetrics = m
-}
-
-// SetOutcomeLedger attaches the outcome ledger; resolved alerts are recorded into it.
-func (s *Server) SetOutcomeLedger(l *outcome.Ledger) {
-	s.outcomeLedger = l
 }
 
 func (s *Server) handlePause(w http.ResponseWriter, r *http.Request) {
@@ -364,61 +337,4 @@ func (s *Server) webhookAuthorized(r *http.Request) bool {
 		return false
 	}
 	return subtle.ConstantTimeCompare([]byte(strings.TrimPrefix(h, prefix)), []byte(s.webhookToken)) == 1
-}
-
-func (s *Server) handleAlertmanager(w http.ResponseWriter, r *http.Request) {
-	// Authenticate the webhook: its payload (labels, annotations) flows verbatim
-	// into the investigator's LLM prompt, so an anonymous caller must not reach it.
-	if !s.webhookAuthorized(r) {
-		s.log.Warn("rejected alert webhook: missing/invalid bearer token")
-		http.Error(w, "unauthorized", http.StatusUnauthorized)
-		return
-	}
-	// Cap the body: its labels/annotations flow into the LLM prompt, so an
-	// unbounded POST must not force unbounded allocation (the Slack handler caps
-	// the same way). Past the cap, decode fails with *http.MaxBytesError → 413;
-	// other decode errors are malformed JSON → 400.
-	r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
-	incidents, err := trigger.ParseAlertmanager(r.Body)
-	if err != nil {
-		var maxErr *http.MaxBytesError
-		if errors.As(err, &maxErr) {
-			http.Error(w, "payload too large", http.StatusRequestEntityTooLarge)
-			return
-		}
-		http.Error(w, "bad payload", http.StatusBadRequest)
-		return
-	}
-	for _, inc := range incidents {
-		if inc.Status == "resolved" {
-			if s.outcomeLedger != nil {
-				if ep, ok, err := s.outcomeLedger.Resolve(inc.Fingerprint, time.Now()); err != nil {
-					s.log.Warn("outcome ledger resolve failed", "fingerprint", inc.Fingerprint, "err", err)
-				} else if ok && s.otelMetrics != nil {
-					s.otelMetrics.IncidentsResolved.Add(r.Context(), 1)
-					s.otelMetrics.IncidentResolutionSeconds.Record(r.Context(), ep.Duration.Seconds())
-					if ep.Kind == "recall" {
-						s.otelMetrics.RecallOutcome.Add(r.Context(), 1, metric.WithAttributes(attribute.String("result", "resolved")))
-					}
-				}
-			}
-			continue
-		}
-		d := s.engine.Decide(inc)
-		s.log.Info("incident",
-			"alert", inc.AlertName, "severity", inc.Severity, "namespace", inc.Namespace,
-			"investigate", d.Investigate, "reason", d.Reason)
-		if !d.Investigate {
-			continue
-		}
-		if s.otelMetrics != nil {
-			s.otelMetrics.AlertsReceived.Add(r.Context(), 1)
-		}
-		if s.coalescer != nil {
-			s.coalescer.Add(investigate.FromIncident(inc))
-		} else {
-			s.enqueuer.Enqueue(investigate.FromIncident(inc))
-		}
-	}
-	w.WriteHeader(http.StatusAccepted)
 }

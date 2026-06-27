@@ -7,6 +7,7 @@ import (
 
 	"github.com/Smana/runlore/internal/config"
 	"github.com/Smana/runlore/internal/investigate"
+	"github.com/Smana/runlore/internal/telemetry"
 	"github.com/Smana/runlore/internal/trigger"
 )
 
@@ -20,6 +21,7 @@ type Pipeline struct {
 	enq     investigate.Enqueuer
 	resolve ResolveFunc
 	dedup   *trigger.Deduper
+	metrics *telemetry.Metrics // optional; nil-safe ingress counters
 	log     *slog.Logger
 }
 
@@ -29,6 +31,10 @@ func NewPipeline(cfg *config.Config, enq investigate.Enqueuer, resolve ResolveFu
 		dedup: trigger.NewDeduper(cfg.Triggers.Incidents.Dedup.Window.Std()),
 	}
 }
+
+// WithMetrics attaches the OTel metrics instance so admitted alerts (MatchGated)
+// increment AlertsReceived. Chains off NewPipeline; nil m is a no-op.
+func (p *Pipeline) WithMetrics(m *telemetry.Metrics) *Pipeline { p.metrics = m; return p }
 
 // Ingest admits each Request per the admission mode and invokes resolve for each
 // Resolution. Cascade-suppression and debounce for EnableGated sources are
@@ -42,6 +48,12 @@ func (p *Pipeline) Ingest(ctx context.Context, adm Admission, res DecodeResult) 
 	for _, req := range res.Requests {
 		if !p.admit(adm, req) {
 			continue
+		}
+		// AlertsReceived counts admitted alerts only (MatchGated): it preserves the
+		// legacy server.go ingress counter, which fired after Decide passed and before
+		// coalescing. GitOps failures (EnableGated) never incremented it.
+		if adm == MatchGated && p.metrics != nil {
+			p.metrics.AlertsReceived.Add(ctx, 1)
 		}
 		p.enq.Enqueue(req)
 	}

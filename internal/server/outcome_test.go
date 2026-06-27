@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/Smana/runlore/internal/config"
 	"github.com/Smana/runlore/internal/outcome"
 )
 
@@ -20,8 +21,21 @@ func TestHandleAlertmanagerResolvedRoutesToLedger(t *testing.T) {
 		t.Fatalf("seed open: %v", err)
 	}
 	enq := &spyEnqueuer{}
-	srv := testServerWith(enq)
-	srv.SetOutcomeLedger(led)
+	cfg := &config.Config{}
+	cfg.Triggers.Incidents = config.IncidentTrigger{
+		Enabled: true,
+		Match:   config.IncidentMatch{Severity: []string{"critical"}},
+	}
+	// resolve mirrors main's pipeline resolve callback: a resolved alert folds back
+	// into the outcome ledger. We also capture the fingerprint to assert routing.
+	var resolved []string
+	resolve := func(fp string, at time.Time) {
+		resolved = append(resolved, fp)
+		if _, _, rerr := led.Resolve(fp, at); rerr != nil {
+			t.Errorf("ledger resolve: %v", rerr)
+		}
+	}
+	srv := newAlertServer(cfg, enq, resolve)
 
 	body := `{"alerts":[{"status":"resolved","labels":{"alertname":"A","severity":"critical","namespace":"apps"},"fingerprint":"fp1"}]}`
 	rr := httptest.NewRecorder()
@@ -33,8 +47,11 @@ func TestHandleAlertmanagerResolvedRoutesToLedger(t *testing.T) {
 	if len(enq.reqs) != 0 {
 		t.Fatalf("resolved alert must not enqueue an investigation, got %d", len(enq.reqs))
 	}
-	// the handler's Resolve consumed the seeded open; a second Resolve finds nothing.
+	if len(resolved) != 1 || resolved[0] != "fp1" {
+		t.Fatalf("resolved alert must route to resolve(fp1), got %+v", resolved)
+	}
+	// the pipeline's resolve consumed the seeded open; a second Resolve finds nothing.
 	if _, ok, _ := led.Resolve("fp1", time.Unix(2000, 0)); ok {
-		t.Fatal("handler should have consumed the open for fp1 (open-index empty after resolve)")
+		t.Fatal("resolve should have consumed the open for fp1 (open-index empty after resolve)")
 	}
 }

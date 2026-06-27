@@ -68,6 +68,9 @@ import (
 	"github.com/Smana/runlore/internal/providers/gitops/flux"
 	"github.com/Smana/runlore/internal/ratelimit"
 	"github.com/Smana/runlore/internal/server"
+	"github.com/Smana/runlore/internal/source"
+	_ "github.com/Smana/runlore/internal/source/alertmanager" // self-registers the alertmanager webhook source
+	_ "github.com/Smana/runlore/internal/source/gitops"       // self-registers the gitops-failure watcher source
 	"github.com/Smana/runlore/internal/telemetry"
 	"github.com/Smana/runlore/internal/trigger"
 	"github.com/Smana/runlore/internal/whatchanged"
@@ -307,12 +310,41 @@ func runServe(args []string) error {
 	// re-investigated (GO-P1A). Deduper is safe for concurrent use across terms.
 	failureDedup := trigger.NewDeduper(cfg.Triggers.Incidents.Dedup.Window.Std())
 
+	// Event sources: alerts admit into the coalescer (when enabled) else the queue;
+	// gitops failures admit directly into the queue (never coalesced). resolve folds
+	// a resolved alert back into the outcome ledger + metrics — the pipeline stays
+	// decoupled from the ledger's concrete episode type.
+	var alertEnq investigate.Enqueuer = queue
+	if cz != nil {
+		alertEnq = cz
+	}
+	resolve := func(fp string, at time.Time) {
+		if ledger == nil {
+			return
+		}
+		if ep, ok, err := ledger.Resolve(fp, at); err != nil {
+			log.Warn("outcome ledger resolve failed", "fingerprint", fp, "err", err)
+		} else if ok && metrics != nil {
+			metrics.IncidentsResolved.Add(ctx, 1)
+			metrics.IncidentResolutionSeconds.Record(ctx, ep.Duration.Seconds())
+			if ep.Kind == "recall" {
+				metrics.RecallOutcome.Add(ctx, 1, metric.WithAttributes(attribute.String("result", "resolved")))
+			}
+		}
+	}
+	built, err := source.BuildEnabled(source.Deps{Cfg: cfg, GitOps: gitops, Log: log})
+	if err != nil {
+		return fmt.Errorf("build sources: %w", err)
+	}
+	pipe := source.NewPipeline(cfg, alertEnq, resolve, log).WithMetrics(metrics)
+
 	// startWork runs the leader-only loops (investigation queue + failure watch +
 	// re-investigate poller), scoped to a context cancelled when leadership is lost.
 	startWork := func(workCtx context.Context) {
 		go queue.Run(workCtx)
 		if cfg.Triggers.GitOpsFailures.Enabled && gitops != nil {
-			startGitOpsFailureWatch(workCtx, cfg, queue, gitops, failureDedup, metrics, log)
+			deb := buildFailureDebouncer(cfg, gitops, metrics, log)
+			source.RunWatchers(workCtx, built, queue, failureDedup, deb, log)
 		}
 		if reinv != nil {
 			log.Info("re-investigate poller enabled", "label", investigate.ReinvestigateLabel)
@@ -348,11 +380,8 @@ func runServe(args []string) error {
 	if auto != nil {
 		acts.Pauser = auto // avoid a typed-nil interface when auto is disabled
 	}
-	srv := server.New(cfg, queue, readyFunc(leader.Load, cat, catalogConfigured(cfg)), acts, metricsHandler, log)
-	srv.SetMetrics(metrics) // ingress counters emit regardless of coalescing
-	srv.SetOutcomeLedger(ledger)
+	srv := server.New(cfg, readyFunc(leader.Load, cat, catalogConfigured(cfg)), acts, built, pipe, metricsHandler, log)
 	if cz != nil {
-		srv.SetCoalescer(cz)
 		go cz.Run(workCtx, cfg.Investigation.Coalesce.Debounce.Std()/2)
 	}
 	httpSrv := newHTTPServer(*addr, srv.Handler())
@@ -1508,27 +1537,6 @@ func buildInvestigator(ctx context.Context, cfg *config.Config, gp providers.Git
 			}
 		},
 	}, cat
-}
-
-// startGitOpsFailureWatch drains Flux WatchFailures into the queue. Failures are
-// debounced (when a positive window is configured): the investigation is enqueued
-// only after the failure has persisted — re-checked still Ready=False via the
-// provider's ResourceStatus — filtering reconcile-churn transients that would
-// otherwise drive confident-but-wrong root causes.
-// dedup is process-scoped (created once in runServe) and shared across leadership
-// terms — NOT created here per call. The informer's initial LIST re-emits every
-// still-failing workload as an Add on each (re-)acquire, so a per-term deduper
-// (empty at term start) would re-investigate every broken app on every leader flap.
-func startGitOpsFailureWatch(ctx context.Context, cfg *config.Config, q investigate.Enqueuer, gp providers.GitOpsProvider, dedup *trigger.Deduper, metrics *telemetry.Metrics, log *slog.Logger) {
-	events, err := gp.WatchFailures(ctx)
-	if err != nil {
-		log.Warn("gitops-failure watch disabled", "err", err)
-		return
-	}
-	deb := buildFailureDebouncer(cfg, gp, metrics, log)
-	log.Info("watching gitops failures", "engine", gitopsEngine(cfg),
-		"debounce", cfg.Triggers.GitOpsFailures.DebounceWindow())
-	go investigate.DrainFailures(ctx, events, q, dedup, deb, log)
 }
 
 // buildFailureDebouncer wires a Debouncer whose "still failing?" re-check reads
