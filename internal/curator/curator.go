@@ -148,7 +148,7 @@ func coalesceComment(inv providers.Investigation) string {
 	// trigger-keyed dedup would otherwise hide.
 	return fmt.Sprintf(
 		"RunLore saw this incident again (confidence %.0f%%). Observed root cause this time: %s\n\n"+
-			"Coalesced onto this PR rather than re-filing (the dedup key is the trigger/resource, not the cause). "+
+			"Coalesced onto this PR rather than re-filing (on alert/GitOps incidents the dedup key is the trigger, not the cause). "+
 			"If that differs from the root cause documented above, this symptom may now have a *different* cause — worth a human check.",
 		inv.Confidence*100, cause)
 }
