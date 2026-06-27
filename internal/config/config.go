@@ -19,13 +19,22 @@ import (
 type Config struct {
 	GitOps   GitOps        `yaml:"gitops"` // engine selection (flux default | argocd)
 	Triggers TriggerPolicy `yaml:"triggers"`
-	Actions  ActionPolicy  `yaml:"actions"` // read-only by default; the upper rungs of the autonomy ladder
-	Forge    Forge         `yaml:"forge"`   // git-forge auth (GitHub App) for diff access + curation
-	Curate   Curate        `yaml:"curate"`  // Phase-2 backlog groomer settings
-	Model    Model         `yaml:"model"`   // optional; when BaseURL is set, serve uses the LLM investigator
-	Notify   Notify        `yaml:"notify"`  // chat delivery for findings
-	Catalog  Catalog       `yaml:"catalog"` // OKF knowledge catalog
-	Outcome  Outcome       `yaml:"outcome"` // learning-loop outcome ledger
+
+	// Sources is the per-source enablement map: a key under `sources.<name>`
+	// enables that source adapter, and its value is the adapter's own raw config
+	// (decoded lazily by each adapter's Build). Presence is enablement — e.g.
+	// `sources.alertmanager: {}` turns on the Alertmanager webhook source. This
+	// keeps adding a source from requiring a central-struct edit. The webhook
+	// auth token stays server-level (server.webhook_token_env).
+	Sources map[string]yaml.Node `yaml:"sources"`
+
+	Actions ActionPolicy `yaml:"actions"` // read-only by default; the upper rungs of the autonomy ladder
+	Forge   Forge        `yaml:"forge"`   // git-forge auth (GitHub App) for diff access + curation
+	Curate  Curate       `yaml:"curate"`  // Phase-2 backlog groomer settings
+	Model   Model        `yaml:"model"`   // optional; when BaseURL is set, serve uses the LLM investigator
+	Notify  Notify       `yaml:"notify"`  // chat delivery for findings
+	Catalog Catalog      `yaml:"catalog"` // OKF knowledge catalog
+	Outcome Outcome      `yaml:"outcome"` // learning-loop outcome ledger
 
 	LeaderElection LeaderElection `yaml:"leader_election"` // HA: only the leader investigates
 
@@ -254,8 +263,9 @@ type ModelOverride struct {
 
 // Notify configures where investigation findings are delivered.
 type Notify struct {
-	Slack  SlackNotify  `yaml:"slack"`
-	Matrix MatrixNotify `yaml:"matrix"`
+	Slack  SlackNotify          `yaml:"slack"`
+	Matrix MatrixNotify         `yaml:"matrix"`
+	Extra  map[string]yaml.Node `yaml:",inline"` // notify.<name> blocks for registered (non-built-in) notifiers
 }
 
 // SlackNotify configures Slack delivery and (for rung-2 actions) interactive
@@ -288,13 +298,13 @@ type TriggerPolicy struct {
 	GitOpsFailures GitOpsFailureTrigger `yaml:"gitops_failures"` // secondary trigger
 }
 
-// GitOpsFailureTrigger gates GitOps-failure-driven investigations. Debounce
-// delays an investigation until the failure has persisted for that window
-// (re-checked still Ready=False), filtering reconcile-churn transients that
-// would otherwise produce confident-but-wrong root causes. A zero Debounce
-// fires immediately on every Ready=False (the original behavior).
+// GitOpsFailureTrigger holds the GitOps-failure-driven investigation POLICY.
+// Enablement now lives under `sources.gitops.enabled`; this struct keeps only the
+// debounce window. Debounce delays an investigation until the failure has persisted
+// for that window (re-checked still Ready=False), filtering reconcile-churn
+// transients that would otherwise produce confident-but-wrong root causes. A zero
+// Debounce fires immediately on every Ready=False (the original behavior).
 type GitOpsFailureTrigger struct {
-	Enabled bool `yaml:"enabled"`
 	// Debounce is a pointer so an unset key (nil ⇒ 60s default, applied in
 	// applyDefaults) is distinguishable from an explicit `debounce: 0` (fire
 	// immediately). A plain Duration can't tell the two apart — both are the zero
@@ -303,7 +313,7 @@ type GitOpsFailureTrigger struct {
 }
 
 // DebounceWindow is the GitOps-failure debounce window. nil (unset) reads as 0
-// here, but applyDefaults fills an unset+enabled trigger with 60s; an explicit 0
+// here, but applyDefaults fills an unset trigger with 60s; an explicit 0
 // means fire immediately on every Ready=False.
 func (g GitOpsFailureTrigger) DebounceWindow() time.Duration {
 	if g.Debounce == nil {
@@ -312,12 +322,13 @@ func (g GitOpsFailureTrigger) DebounceWindow() time.Duration {
 	return g.Debounce.Std()
 }
 
-// IncidentTrigger gates incident/alert-driven investigations.
+// IncidentTrigger holds the incident/alert MATCH policy. Enablement of the
+// alertmanager source now lives under `sources.alertmanager`; this struct is purely
+// the match/ignore/dedup criteria applied to admitted alerts.
 type IncidentTrigger struct {
-	Enabled bool          `yaml:"enabled"`
-	Match   IncidentMatch `yaml:"match"`  // must match to investigate
-	Ignore  IncidentMatch `yaml:"ignore"` // excludes even if Match passes
-	Dedup   Dedup         `yaml:"dedup"`
+	Match  IncidentMatch `yaml:"match"`  // must match to investigate
+	Ignore IncidentMatch `yaml:"ignore"` // excludes even if Match passes
+	Dedup  Dedup         `yaml:"dedup"`
 }
 
 // IncidentMatch is a set of matchers ANDed together; empty fields match anything.
@@ -334,50 +345,35 @@ type Dedup struct {
 	Window Duration `yaml:"window"`
 }
 
-// Incident is the normalized trigger input (from Alertmanager/VMAlert).
-type Incident struct {
-	AlertName   string
-	Severity    string
-	Environment string
-	Namespace   string
-	Labels      map[string]string
-	StartsAt    time.Time
-	Fingerprint string // stable alert identity, used for dedup
-	GroupKey    string // Alertmanager group identity (shared by all alerts in one webhook POST)
-	Status      string // Alertmanager status: "firing" | "resolved"
-}
-
-// Matches reports whether an incident passes this trigger policy: enabled,
-// matched by Match, and not excluded by a non-empty Ignore.
-func (t IncidentTrigger) Matches(inc Incident) bool {
-	if !t.Enabled {
+// MatchFields reports whether an incident passes this trigger policy: matched by
+// Match and not excluded by a non-empty Ignore. Enablement is the source's job
+// (sources.alertmanager); matching here is purely criteria. title is the alertname.
+func (t IncidentTrigger) MatchFields(title, severity, environment, namespace string, labels map[string]string) bool {
+	if !t.Match.matchFields(severity, environment, namespace, title, labels) {
 		return false
 	}
-	if !t.Match.matches(inc) {
-		return false
-	}
-	if !t.Ignore.isEmpty() && t.Ignore.matches(inc) {
+	if !t.Ignore.isEmpty() && t.Ignore.matchFields(severity, environment, namespace, title, labels) {
 		return false
 	}
 	return true
 }
 
-// matches reports whether the incident satisfies every non-empty criterion.
-func (m IncidentMatch) matches(inc Incident) bool {
-	if len(m.Severity) > 0 && !slices.Contains(m.Severity, inc.Severity) {
+// matchFields reports whether the incident satisfies every non-empty criterion.
+func (m IncidentMatch) matchFields(severity, environment, namespace, alertname string, labels map[string]string) bool {
+	if len(m.Severity) > 0 && !slices.Contains(m.Severity, severity) {
 		return false
 	}
-	if len(m.Environment) > 0 && !slices.Contains(m.Environment, inc.Environment) {
+	if len(m.Environment) > 0 && !slices.Contains(m.Environment, environment) {
 		return false
 	}
-	if len(m.Namespaces) > 0 && !globAny(m.Namespaces, inc.Namespace) {
+	if len(m.Namespaces) > 0 && !globAny(m.Namespaces, namespace) {
 		return false
 	}
-	if len(m.AlertNames) > 0 && !globAny(m.AlertNames, inc.AlertName) {
+	if len(m.AlertNames) > 0 && !globAny(m.AlertNames, alertname) {
 		return false
 	}
 	for k, v := range m.Labels {
-		if inc.Labels[k] != v {
+		if labels[k] != v {
 			return false
 		}
 	}

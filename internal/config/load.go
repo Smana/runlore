@@ -51,12 +51,13 @@ func applyDefaults(c *Config) {
 			co.Cooldown = Duration(10 * time.Minute)
 		}
 	}
-	// GitOps-failure debounce default: when the trigger is enabled and the window is
-	// unset (nil), wait 60s and re-check before investigating — long enough to let
-	// reconcile-churn transients clear, short enough to catch real failures promptly.
-	// An explicit `debounce: 0` (non-nil) is left untouched, so it fires on every
-	// Ready=False as documented.
-	if c.Triggers.GitOpsFailures.Enabled && c.Triggers.GitOpsFailures.Debounce == nil {
+	// GitOps-failure debounce default: when the window is unset (nil), wait 60s and
+	// re-check before investigating — long enough to let reconcile-churn transients
+	// clear, short enough to catch real failures promptly. An explicit `debounce: 0`
+	// (non-nil) is left untouched, so it fires on every Ready=False as documented.
+	// Applied unconditionally now that enablement lives under sources.gitops; it is
+	// harmless when the gitops source is disabled (the debouncer is never built).
+	if c.Triggers.GitOpsFailures.Debounce == nil {
 		d := Duration(60 * time.Second)
 		c.Triggers.GitOpsFailures.Debounce = &d
 	}

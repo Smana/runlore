@@ -12,7 +12,6 @@ import (
 
 	"k8s.io/client-go/util/workqueue"
 
-	"github.com/Smana/runlore/internal/config"
 	"github.com/Smana/runlore/internal/providers"
 	"github.com/Smana/runlore/internal/ratelimit"
 	"github.com/Smana/runlore/internal/telemetry"
@@ -34,56 +33,15 @@ type Request struct {
 	Title        string
 	Workload     providers.Workload // optional; zero for alerts without a workload
 	Reason       string
+	Severity     string // alert severity (alert-like sources); shapes prompt + notification
+	Environment  string // deployment environment (prod/staging/…)
 	Message      string
 	Labels       map[string]string
+	GroupKey     string // Alertmanager group identity (shared by all alerts in one webhook POST)
 	At           time.Time
 	Fingerprint  string   // Alertmanager fingerprint (stable firing↔resolved); for outcome attribution
 	Fingerprints []string // coalesced batch fingerprints; one open is recorded per entry so every constituent alert's resolve matches
 	TriggerKey   string   // deterministic incident identity (alert fingerprint, or failing resource+condition) set at trigger time; threaded to Investigation.TriggerKey for stable dedup across reworded re-investigations (#137)
-}
-
-// workloadFromLabels derives the affected workload (kind, name) from Alertmanager
-// labels, preferring a stable controller name over an ephemeral pod name.
-func workloadFromLabels(labels map[string]string) (kind, name string) {
-	for _, c := range []struct{ label, kind string }{
-		{"deployment", "Deployment"},
-		{"statefulset", "StatefulSet"},
-		{"daemonset", "DaemonSet"},
-		{"replicaset", "ReplicaSet"},
-		{"cronjob", "CronJob"},
-		{"job", "Job"},
-	} {
-		if v := labels[c.label]; v != "" {
-			return c.kind, v
-		}
-	}
-	if v := labels["workload"]; v != "" {
-		return labels["workload_type"], v // kind may be empty
-	}
-	if v := labels["pod"]; v != "" {
-		return "Pod", v
-	}
-	return "", ""
-}
-
-// FromIncident builds a Request from a matched incident alert.
-func FromIncident(inc config.Incident) Request {
-	kind, name := workloadFromLabels(inc.Labels)
-	var fps []string
-	if inc.Fingerprint != "" {
-		fps = []string{inc.Fingerprint}
-	}
-	return Request{
-		Source:       SourceAlert,
-		Title:        inc.AlertName,
-		Workload:     providers.Workload{Namespace: inc.Namespace, Kind: kind, Name: name},
-		Reason:       inc.Severity,
-		Labels:       inc.Labels,
-		At:           inc.StartsAt,
-		Fingerprint:  inc.Fingerprint,
-		Fingerprints: fps,
-		TriggerKey:   inc.Fingerprint, // Alertmanager fingerprint: stable across re-fires of one alert series (#137)
-	}
 }
 
 // FromFailureEvent builds a Request from a GitOps failure.

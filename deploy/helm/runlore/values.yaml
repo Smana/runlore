@@ -21,15 +21,22 @@ fullnameOverride: ""
 # RunLore configuration — rendered verbatim into a ConfigMap and mounted at
 # /etc/runlore/runlore.yaml. See docs/design.md for the full schema.
 config:
+  # Source enablement: a key under `sources.<name>` turns that source on; its value
+  # is the source's own config. Presence is enablement (e.g. `alertmanager: {}`).
+  # The webhook auth token stays server-level (server.webhook_token_env).
+  sources:
+    alertmanager: {}            # enable the Alertmanager/VMAlert webhook source
+    gitops:
+      enabled: true             # also react to Flux/Argo CD Ready=False
   triggers:
+    # Match POLICY for admitted alerts (enablement now lives under sources.alertmanager).
     incidents:
-      enabled: true
       match:
         severity: [critical]
       dedup:
         window: 30m
+    # Failure POLICY for the gitops source (enablement lives under sources.gitops).
     gitops_failures:
-      enabled: true
       # Debounce transient Flux failures: wait this long, then re-read the
       # resource's Ready status and investigate only if it is STILL Ready=False.
       # Filters reconcile-churn transients (e.g. a brief HealthCheckCanceled or an
@@ -130,6 +137,8 @@ config:
   #     # channel: "#alerts"            # channel ID or name (required with bot_token_env)
   #     # signing_secret_env: SLACK_SIGNING_SECRET  # only needed for rung-2 approve/reject buttons
   #   matrix: { homeserver: https://matrix.org, room_id: "!r:hs", access_token_env: MATRIX_TOKEN }
+  #   webhook:
+  #     url_env: RUNLORE_WEBHOOK_NOTIFY_URL   # POST findings JSON to this URL
   # forge:
   #   kb_repo: owner/name
   #   base_branch: main

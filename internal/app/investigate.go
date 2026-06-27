@@ -25,7 +25,6 @@ import (
 	awscloud "github.com/Smana/runlore/internal/providers/cloud/aws"
 	"github.com/Smana/runlore/internal/providers/cluster"
 	"github.com/Smana/runlore/internal/telemetry"
-	"github.com/Smana/runlore/internal/trigger"
 )
 
 // BuildModelAndTools assembles the model, investigation tools, and the instant-recall
@@ -144,10 +143,10 @@ func BuildModelAndTools(ctx context.Context, cfg *config.Config, gp providers.Gi
 // BuildInvestigator returns the LLM ReAct investigator when a model is configured,
 // otherwise the read-only LogInvestigator. It also returns the catalog (nil when
 // no model is configured or no catalog is wired).
-func BuildInvestigator(ctx context.Context, cfg *config.Config, gp providers.GitOpsProvider, approvals *action.Approvals, auto *action.Auto, metrics *telemetry.Metrics, ledger *outcome.Ledger, log *slog.Logger) (investigate.Investigator, *catalog.Catalog) {
+func BuildInvestigator(ctx context.Context, cfg *config.Config, gp providers.GitOpsProvider, approvals *action.Approvals, auto *action.Auto, metrics *telemetry.Metrics, ledger *outcome.Ledger, log *slog.Logger) (investigate.Investigator, *catalog.Catalog, error) {
 	if !ModelConfigured(cfg) {
 		log.Info("no model configured; using log-only investigator")
-		return investigate.LogInvestigator{Log: log}, nil
+		return investigate.LogInvestigator{Log: log}, nil, nil
 	}
 	model, tools, recall, cat := BuildModelAndTools(ctx, cfg, gp, metrics, log)
 	if recall != nil {
@@ -156,7 +155,10 @@ func BuildInvestigator(ctx context.Context, cfg *config.Config, gp providers.Git
 		recall.Outcome = ledger // outcome-driven decay (serve path); *outcome.Ledger satisfies OutcomeStats
 	}
 	log.Info("using LLM investigator", "provider", ModelProvider(cfg), "model", cfg.Model.Model, "tools", len(tools))
-	notifier := BuildNotifier(cfg, log)
+	notifier, err := BuildNotifier(cfg, log)
+	if err != nil {
+		return nil, nil, err
+	}
 	log.Info("delivery notifiers", "count", notifier.Len())
 	cur := BuildCurator(cfg, BuildForgeTokenSource(cfg, log), cat, metrics, log)
 	actions := action.New(cfg.Actions)
@@ -249,28 +251,7 @@ func BuildInvestigator(ctx context.Context, cfg *config.Config, gp providers.Git
 				log.Error("deliver findings", "err", err)
 			}
 		},
-	}, cat
-}
-
-// StartGitOpsFailureWatch drains Flux WatchFailures into the queue. Failures are
-// debounced (when a positive window is configured): the investigation is enqueued
-// only after the failure has persisted — re-checked still Ready=False via the
-// provider's ResourceStatus — filtering reconcile-churn transients that would
-// otherwise drive confident-but-wrong root causes.
-// dedup is process-scoped (created once in runServe) and shared across leadership
-// terms — NOT created here per call. The informer's initial LIST re-emits every
-// still-failing workload as an Add on each (re-)acquire, so a per-term deduper
-// (empty at term start) would re-investigate every broken app on every leader flap.
-func StartGitOpsFailureWatch(ctx context.Context, cfg *config.Config, q investigate.Enqueuer, gp providers.GitOpsProvider, dedup *trigger.Deduper, metrics *telemetry.Metrics, log *slog.Logger) {
-	events, err := gp.WatchFailures(ctx)
-	if err != nil {
-		log.Warn("gitops-failure watch disabled", "err", err)
-		return
-	}
-	deb := BuildFailureDebouncer(cfg, gp, metrics, log)
-	log.Info("watching gitops failures", "engine", GitopsEngine(cfg),
-		"debounce", cfg.Triggers.GitOpsFailures.DebounceWindow())
-	go investigate.DrainFailures(ctx, events, q, dedup, deb, log)
+	}, cat, nil
 }
 
 // BuildFailureDebouncer wires a Debouncer whose "still failing?" re-check reads

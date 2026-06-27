@@ -7,43 +7,44 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-func sampleIncident() Incident {
-	return Incident{
-		AlertName:   "HarborProbeFailure",
-		Severity:    "critical",
-		Environment: "prod",
-		Namespace:   "apps",
-		Labels:      map[string]string{"team": "platform", "severity": "critical"},
-	}
+// sample incident fields, mirroring a critical/prod alert in namespace apps.
+const (
+	sampleAlertName   = "HarborProbeFailure"
+	sampleSeverity    = "critical"
+	sampleEnvironment = "prod"
+	sampleNamespace   = "apps"
+)
+
+func sampleLabels() map[string]string {
+	return map[string]string{"team": "platform", "severity": "critical"}
 }
 
 func TestMatches(t *testing.T) {
 	cases := []struct {
 		name string
 		tr   IncidentTrigger
-		inc  Incident
 		want bool
 	}{
-		{"disabled never matches", IncidentTrigger{Enabled: false}, sampleIncident(), false},
-		{"empty match matches anything", IncidentTrigger{Enabled: true}, sampleIncident(), true},
-		{"severity+env match", IncidentTrigger{Enabled: true, Match: IncidentMatch{
-			Severity: []string{"critical"}, Environment: []string{"prod"}}}, sampleIncident(), true},
-		{"severity mismatch", IncidentTrigger{Enabled: true, Match: IncidentMatch{
-			Severity: []string{"warning"}}}, sampleIncident(), false},
-		{"namespace glob", IncidentTrigger{Enabled: true, Match: IncidentMatch{
-			Namespaces: []string{"app*"}}}, sampleIncident(), true},
-		{"namespace glob miss", IncidentTrigger{Enabled: true, Match: IncidentMatch{
-			Namespaces: []string{"payments"}}}, sampleIncident(), false},
-		{"label subset match", IncidentTrigger{Enabled: true, Match: IncidentMatch{
-			Labels: map[string]string{"team": "platform"}}}, sampleIncident(), true},
-		{"label mismatch", IncidentTrigger{Enabled: true, Match: IncidentMatch{
-			Labels: map[string]string{"team": "data"}}}, sampleIncident(), false},
-		{"ignore excludes", IncidentTrigger{Enabled: true, Ignore: IncidentMatch{
-			AlertNames: []string{"Watchdog", "HarborProbeFailure"}}}, sampleIncident(), false},
+		{"empty match matches anything", IncidentTrigger{}, true},
+		{"severity+env match", IncidentTrigger{Match: IncidentMatch{
+			Severity: []string{"critical"}, Environment: []string{"prod"}}}, true},
+		{"severity mismatch", IncidentTrigger{Match: IncidentMatch{
+			Severity: []string{"warning"}}}, false},
+		{"namespace glob", IncidentTrigger{Match: IncidentMatch{
+			Namespaces: []string{"app*"}}}, true},
+		{"namespace glob miss", IncidentTrigger{Match: IncidentMatch{
+			Namespaces: []string{"payments"}}}, false},
+		{"label subset match", IncidentTrigger{Match: IncidentMatch{
+			Labels: map[string]string{"team": "platform"}}}, true},
+		{"label mismatch", IncidentTrigger{Match: IncidentMatch{
+			Labels: map[string]string{"team": "data"}}}, false},
+		{"ignore excludes", IncidentTrigger{Ignore: IncidentMatch{
+			AlertNames: []string{"Watchdog", "HarborProbeFailure"}}}, false},
 	}
 	for _, c := range cases {
-		if got := c.tr.Matches(c.inc); got != c.want {
-			t.Errorf("%s: Matches=%v want %v", c.name, got, c.want)
+		got := c.tr.MatchFields(sampleAlertName, sampleSeverity, sampleEnvironment, sampleNamespace, sampleLabels())
+		if got != c.want {
+			t.Errorf("%s: MatchFields=%v want %v", c.name, got, c.want)
 		}
 	}
 }
