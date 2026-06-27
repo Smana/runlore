@@ -351,6 +351,13 @@ func runServe(args []string) error {
 		// when unused is harmless.
 		if gitops != nil {
 			deb := buildFailureDebouncer(cfg, gitops, metrics, log)
+			for _, b := range built {
+				if b.Desc.Kind == source.Watcher {
+					log.Info("watching gitops failures",
+						"engine", gitopsEngine(cfg), "debounce", cfg.Triggers.GitOpsFailures.DebounceWindow())
+					break
+				}
+			}
 			source.RunWatchers(workCtx, built, queue, failureDedup, deb, log)
 		}
 		if reinv != nil {
