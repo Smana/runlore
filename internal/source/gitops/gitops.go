@@ -49,7 +49,6 @@ func (s *Source) Watch(ctx context.Context) (<-chan investigate.Request, error) 
 func init() {
 	source.Register(source.Descriptor{
 		Name:      "gitops",
-		ConfigKey: "sources.gitops",
 		Kind:      source.Watcher,
 		Admission: source.EnableGated,
 		Build: func(d source.Deps) (any, error) {

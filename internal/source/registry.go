@@ -68,13 +68,13 @@ type Deps struct {
 	Cfg    *config.Config
 	GitOps providers.GitOpsProvider
 	Log    *slog.Logger
-	Raw    map[string]yaml.Node // per-adapter raw config, keyed by Descriptor.ConfigKey
+	Raw    map[string]yaml.Node // raw `sources:` config, keyed by the source's short name (Descriptor.Name)
 }
 
 // Descriptor is the self-registration record an adapter supplies to Register.
+// An adapter reads its own config from Deps.Raw[Name].
 type Descriptor struct {
 	Name      string
-	ConfigKey string
 	Kind      Kind
 	Admission Admission
 	Path      string // webhook only
