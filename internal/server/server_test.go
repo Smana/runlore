@@ -20,7 +20,24 @@ import (
 	"github.com/Smana/runlore/internal/config"
 	"github.com/Smana/runlore/internal/investigate"
 	"github.com/Smana/runlore/internal/providers"
+	"github.com/Smana/runlore/internal/source"
+	_ "github.com/Smana/runlore/internal/source/alertmanager" // self-registers the alertmanager webhook source
 )
+
+// discardLog is the shared no-op logger for server tests.
+var discardLog = slog.New(slog.NewTextHandler(io.Discard, nil))
+
+// newAlertServer builds a Server whose alertmanager webhook feeds a pipeline with
+// the given enqueuer + resolve callback. cfg.Triggers.Incidents must be enabled for
+// the alertmanager source to be built and mounted.
+func newAlertServer(cfg *config.Config, enq investigate.Enqueuer, resolve source.ResolveFunc) *Server {
+	built, err := source.BuildEnabled(source.Deps{Cfg: cfg})
+	if err != nil {
+		panic(err)
+	}
+	pipe := source.NewPipeline(cfg, enq, resolve, discardLog)
+	return New(cfg, nil, Actions{}, built, pipe, nil, discardLog)
+}
 
 func slackSign(secret, ts, body string) string {
 	m := hmac.New(sha256.New, []byte(secret))
@@ -35,7 +52,7 @@ func TestSlackInteraction(t *testing.T) {
 	id := ap.Register(providers.Action{Op: "suspend", Reversible: true, Target: providers.Workload{Kind: "Kustomization", Name: "web", Namespace: "apps"}})
 
 	const secret = "shh"
-	srv := New(&config.Config{}, &spyEnqueuer{}, nil, Actions{Approvals: ap, SlackSecret: secret, ApproverIDs: []string{"U1"}}, nil, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	srv := New(&config.Config{}, nil, Actions{Approvals: ap, SlackSecret: secret, ApproverIDs: []string{"U1"}}, nil, nil, nil, discardLog)
 
 	payload := `{"user":{"id":"U1","username":"alice"},"actions":[{"action_id":"runlore_approve","value":"` + id + `"}]}`
 	body := "payload=" + url.QueryEscape(payload)
@@ -77,7 +94,7 @@ func TestSlackRejectRequiresApprover(t *testing.T) {
 	id := ap.Register(providers.Action{Op: "suspend", Reversible: true, Target: providers.Workload{Kind: "Kustomization", Name: "web", Namespace: "apps"}})
 
 	const secret = "shh"
-	srv := New(&config.Config{}, &spyEnqueuer{}, nil, Actions{Approvals: ap, SlackSecret: secret, ApproverIDs: []string{"U1"}}, nil, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	srv := New(&config.Config{}, nil, Actions{Approvals: ap, SlackSecret: secret, ApproverIDs: []string{"U1"}}, nil, nil, nil, discardLog)
 
 	reject := func(userID string) {
 		payload := `{"user":{"id":"` + userID + `","username":"x"},"actions":[{"action_id":"runlore_reject","value":"` + id + `"}]}`
@@ -122,7 +139,7 @@ func TestActionsApprove(t *testing.T) {
 	ap := action.NewApprovals(exec, pol, audit.Nop{}, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	id := ap.Register(providers.Action{Op: "suspend", Reversible: true, Target: providers.Workload{Kind: "Kustomization", Name: "web", Namespace: "apps"}})
 
-	srv := New(&config.Config{}, &spyEnqueuer{}, nil, Actions{Approvals: ap, Token: "secret"}, nil, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	srv := New(&config.Config{}, nil, Actions{Approvals: ap, Token: "secret"}, nil, nil, nil, discardLog)
 
 	// Missing token → 403, nothing executes.
 	rr := httptest.NewRecorder()
@@ -155,7 +172,7 @@ func (f *fakePauser) Paused() bool { return f.paused }
 
 func TestKillSwitch(t *testing.T) {
 	p := &fakePauser{}
-	srv := New(&config.Config{}, &spyEnqueuer{}, nil, Actions{Pauser: p, Token: "t"}, nil, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	srv := New(&config.Config{}, nil, Actions{Pauser: p, Token: "t"}, nil, nil, nil, discardLog)
 
 	// Without the token → 403, kill-switch untouched.
 	rr := httptest.NewRecorder()
@@ -187,7 +204,7 @@ func testServerWith(enq investigate.Enqueuer) *Server {
 		Enabled: true,
 		Match:   config.IncidentMatch{Severity: []string{"critical"}},
 	}
-	return New(cfg, enq, nil, Actions{}, nil, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	return newAlertServer(cfg, enq, nil)
 }
 
 func testServer() *Server { return testServerWith(&spyEnqueuer{}) }
@@ -195,7 +212,7 @@ func testServer() *Server { return testServerWith(&spyEnqueuer{}) }
 func TestReadyz(t *testing.T) {
 	cfg := &config.Config{}
 	leader := false
-	srv := New(cfg, &spyEnqueuer{}, func() bool { return leader }, Actions{}, nil, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	srv := New(cfg, func() bool { return leader }, Actions{}, nil, nil, nil, discardLog)
 
 	rr := httptest.NewRecorder()
 	srv.Handler().ServeHTTP(rr, httptest.NewRequest(http.MethodGet, "/readyz", nil))
