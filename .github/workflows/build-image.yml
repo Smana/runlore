@@ -69,11 +69,12 @@ jobs:
             type=ref,event=pr
             type=semver,pattern={{version}}
             type=semver,pattern={{major}}.{{minor}}
-            # Branch-prefixed SHA tag only on branch pushes (empty on tags/PRs →
+            # Branch-prefixed SHA tag only on branch PUSHES (empty on tags/PRs →
             # invalid ":-<sha>"): the metadata action leaves {{branch}} empty there,
             # which would emit the invalid tag ":-<sha>" (a tag cannot start with
-            # "-") and fail the build.
-            type=sha,prefix={{branch}}-,enable=${{ github.ref_type == 'branch' }}
+            # "-") and fail the build. `ref_type` is 'branch' on pull_request events
+            # too, so gate on event_name=push to actually exclude PRs.
+            type=sha,prefix={{branch}}-,enable=${{ github.event_name == 'push' && github.ref_type == 'branch' }}
             # Always provide an immutable SHA tag (valid in every event context).
             type=sha,prefix=sha-
             type=raw,value=latest,enable={{is_default_branch}}
