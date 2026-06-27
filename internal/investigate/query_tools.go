@@ -79,6 +79,83 @@ func formatMetric(m map[string]string) string {
 	return name + "{" + strings.Join(labels, ",") + "}"
 }
 
+// QueryMetricsRangeTool lets the model run a PromQL RANGE query and see how a
+// metric trends over a recent window — the time dimension an instant query lacks,
+// which is what reveals when a problem started (rising / spiking / recovering).
+type QueryMetricsRangeTool struct {
+	Metrics providers.MetricsProvider
+}
+
+// Name returns the tool name.
+func (t QueryMetricsRangeTool) Name() string { return "query_metrics_range" }
+
+// Description returns the tool description.
+func (t QueryMetricsRangeTool) Description() string {
+	return "Run a PromQL RANGE query over a recent window (default 60m, 60s step) to see how a metric TRENDS — rising, spiking, or recovering around the incident — not just its value right now. Use rate()/error-rate/saturation expressions; returns per-series first→last with min/max so you can tell WHEN a problem started. since_minutes bounds the window; step_seconds the resolution."
+}
+
+// Schema returns the JSON schema for the arguments.
+func (t QueryMetricsRangeTool) Schema() string {
+	return `{"type":"object","properties":{"query":{"type":"string"},"since_minutes":{"type":"integer"},"step_seconds":{"type":"integer"}},"required":["query"]}`
+}
+
+// Call runs the range query over [now-since, now] and renders a per-series trend.
+func (t QueryMetricsRangeTool) Call(ctx context.Context, args string) (string, error) {
+	var in struct {
+		Query        string `json:"query"`
+		SinceMinutes int    `json:"since_minutes"`
+		StepSeconds  int    `json:"step_seconds"`
+	}
+	if err := json.Unmarshal([]byte(args), &in); err != nil {
+		return "", fmt.Errorf("parse args: %w", err)
+	}
+	since := in.SinceMinutes
+	if since <= 0 {
+		since = 60
+	}
+	step := time.Duration(in.StepSeconds) * time.Second
+	if step <= 0 {
+		step = time.Minute
+	}
+	end := time.Now()
+	start := end.Add(-time.Duration(since) * time.Minute)
+	series, err := t.Metrics.QueryRange(ctx, in.Query, providers.TimeWindow{Start: start, End: end}, step)
+	if err != nil {
+		return "", err
+	}
+	if len(series) == 0 {
+		return "no series matched", nil
+	}
+	var b strings.Builder
+	renderRows(&b, len(series), "more series", func(i int) {
+		s := series[i]
+		first, last, lo, hi := summarize(s.Points)
+		fmt.Fprintf(&b, "%s first=%g last=%g min=%g max=%g\n", formatMetric(s.Metric), first, last, lo, hi)
+	})
+	return b.String(), nil
+}
+
+// summarize reduces a series' points to first, last, min and max — the compact
+// trend an LLM needs to tell whether a metric climbed, spiked or recovered,
+// without shipping every sample. An empty series yields all zeros.
+func summarize(points []providers.Point) (first, last, lo, hi float64) {
+	if len(points) == 0 {
+		return 0, 0, 0, 0
+	}
+	first = points[0].Value
+	last = points[len(points)-1].Value
+	lo, hi = first, first
+	for _, p := range points {
+		if p.Value < lo {
+			lo = p.Value
+		}
+		if p.Value > hi {
+			hi = p.Value
+		}
+	}
+	return first, last, lo, hi
+}
+
 // NetworkDropsTool lets the model list recently denied/dropped network flows from
 // the configured (pluggable, CNI-agnostic) network-flow source — surfacing
 // NetworkPolicy denials, firewall/security-group rejects, and connectivity failures.
