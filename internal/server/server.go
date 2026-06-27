@@ -415,7 +415,7 @@ func (s *Server) handleAlertmanager(w http.ResponseWriter, r *http.Request) {
 			s.otelMetrics.AlertsReceived.Add(r.Context(), 1)
 		}
 		if s.coalescer != nil {
-			s.coalescer.Add(inc)
+			s.coalescer.Add(investigate.FromIncident(inc))
 		} else {
 			s.enqueuer.Enqueue(investigate.FromIncident(inc))
 		}

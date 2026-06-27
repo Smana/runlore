@@ -38,6 +38,7 @@ type Request struct {
 	Environment  string             // deployment environment (prod/staging/…)
 	Message      string
 	Labels       map[string]string
+	GroupKey     string             // Alertmanager group identity (shared by all alerts in one webhook POST)
 	At           time.Time
 	Fingerprint  string   // Alertmanager fingerprint (stable firing↔resolved); for outcome attribution
 	Fingerprints []string // coalesced batch fingerprints; one open is recorded per entry so every constituent alert's resolve matches
@@ -82,6 +83,7 @@ func FromIncident(inc config.Incident) Request {
 		Severity:     inc.Severity,
 		Environment:  inc.Environment,
 		Labels:       inc.Labels,
+		GroupKey:     inc.GroupKey,
 		At:           inc.StartsAt,
 		Fingerprint:  inc.Fingerprint,
 		Fingerprints: fps,

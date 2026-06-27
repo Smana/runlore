@@ -270,17 +270,17 @@ func runServe(args []string) error {
 	// out is the flush sink — converts a batch into a single Request and enqueues it.
 	var cz *coalesce.Coalescer
 	if cc := cfg.Investigation.Coalesce; cc.Enabled {
-		out := func(incs []config.Incident) {
-			rep := investigate.FromIncident(incs[0])
-			if len(incs) > 1 {
-				rep.Message = coalesce.Summarize(incs)
+		out := func(batch []investigate.Request) {
+			rep := batch[0]
+			if len(batch) > 1 {
+				rep.Message = coalesce.Summarize(batch)
 			}
 			// Record every constituent fingerprint so each alert's resolve webhook
 			// matches an open (a single incident stays one fingerprint).
 			var fps []string
-			for _, inc := range incs {
-				if inc.Fingerprint != "" {
-					fps = append(fps, inc.Fingerprint)
+			for _, r := range batch {
+				if r.Fingerprint != "" {
+					fps = append(fps, r.Fingerprint)
 				}
 			}
 			rep.Fingerprints = fps
