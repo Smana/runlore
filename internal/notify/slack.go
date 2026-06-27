@@ -9,12 +9,32 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"os"
 	"strings"
 	"time"
 
 	"github.com/Smana/runlore/internal/httpx"
 	"github.com/Smana/runlore/internal/providers"
 )
+
+func init() {
+	Register(Descriptor{
+		Name: "slack",
+		Build: func(d Deps) (providers.Notifier, error) {
+			// Bot token (chat.postMessage) takes precedence over an incoming webhook.
+			if sl := d.Cfg.Notify.Slack; sl.BotTokenEnv != "" && sl.Channel != "" {
+				if tok := os.Getenv(sl.BotTokenEnv); tok != "" {
+					return NewSlackBot(tok, sl.Channel), nil
+				}
+			} else if env := d.Cfg.Notify.Slack.WebhookURLEnv; env != "" {
+				if url := os.Getenv(env); url != "" {
+					return NewSlack(url), nil
+				}
+			}
+			return nil, nil
+		},
+	})
+}
 
 // Slack delivers via a Slack incoming webhook.
 type Slack struct {

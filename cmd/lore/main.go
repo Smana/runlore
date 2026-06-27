@@ -256,7 +256,10 @@ func runServe(args []string) error {
 		log.Info("outcome ledger enabled", "path", cfg.Outcome.LedgerPath)
 	}
 
-	inv, cat := buildInvestigator(ctx, cfg, gitops, approvals, auto, metrics, ledger, log)
+	inv, cat, err := buildInvestigator(ctx, cfg, gitops, approvals, auto, metrics, ledger, log)
+	if err != nil {
+		return err
+	}
 	queue := investigate.NewQueue(inv, log)
 	var rlStarts *ratelimit.Window
 	if rl := cfg.Investigation.RateLimit; rl.MaxPerWindow > 0 {
@@ -852,27 +855,6 @@ func runEvalLive(cfg *config.Config, scnDir, recordDir, reportDir, prevReport, s
 	return nil
 }
 
-// buildNotifier assembles the configured chat notifiers (best-effort fan-out).
-func buildNotifier(cfg *config.Config, log *slog.Logger) *notify.Multi {
-	var ns []providers.Notifier
-	// Bot token (chat.postMessage) takes precedence over an incoming webhook.
-	if sl := cfg.Notify.Slack; sl.BotTokenEnv != "" && sl.Channel != "" {
-		if tok := os.Getenv(sl.BotTokenEnv); tok != "" {
-			ns = append(ns, notify.NewSlackBot(tok, sl.Channel))
-		}
-	} else if env := cfg.Notify.Slack.WebhookURLEnv; env != "" {
-		if url := os.Getenv(env); url != "" {
-			ns = append(ns, notify.NewSlack(url))
-		}
-	}
-	if mc := cfg.Notify.Matrix; mc.Homeserver != "" && mc.RoomID != "" && mc.AccessTokenEnv != "" {
-		if tok := os.Getenv(mc.AccessTokenEnv); tok != "" {
-			ns = append(ns, notify.NewMatrix(mc.Homeserver, mc.RoomID, tok))
-		}
-	}
-	return notify.NewMulti(log, ns...)
-}
-
 // forgeToken mints GitHub App installation tokens.
 type forgeToken func(context.Context) (string, error)
 
@@ -1434,10 +1416,10 @@ func readyFunc(leader func() bool, cat *catalog.Catalog, configured bool) func()
 // buildInvestigator returns the LLM ReAct investigator when a model is configured,
 // otherwise the read-only LogInvestigator. It also returns the catalog (nil when
 // no model is configured or no catalog is wired).
-func buildInvestigator(ctx context.Context, cfg *config.Config, gp providers.GitOpsProvider, approvals *action.Approvals, auto *action.Auto, metrics *telemetry.Metrics, ledger *outcome.Ledger, log *slog.Logger) (investigate.Investigator, *catalog.Catalog) {
+func buildInvestigator(ctx context.Context, cfg *config.Config, gp providers.GitOpsProvider, approvals *action.Approvals, auto *action.Auto, metrics *telemetry.Metrics, ledger *outcome.Ledger, log *slog.Logger) (investigate.Investigator, *catalog.Catalog, error) {
 	if !modelConfigured(cfg) {
 		log.Info("no model configured; using log-only investigator")
-		return investigate.LogInvestigator{Log: log}, nil
+		return investigate.LogInvestigator{Log: log}, nil, nil
 	}
 	model, tools, recall, cat := buildModelAndTools(ctx, cfg, gp, metrics, log)
 	if recall != nil {
@@ -1446,7 +1428,10 @@ func buildInvestigator(ctx context.Context, cfg *config.Config, gp providers.Git
 		recall.Outcome = ledger // outcome-driven decay (serve path); *outcome.Ledger satisfies OutcomeStats
 	}
 	log.Info("using LLM investigator", "provider", modelProvider(cfg), "model", cfg.Model.Model, "tools", len(tools))
-	notifier := buildNotifier(cfg, log)
+	notifier, err := notify.BuildEnabled(notify.Deps{Cfg: cfg, Log: log})
+	if err != nil {
+		return nil, nil, fmt.Errorf("build notifiers: %w", err)
+	}
 	log.Info("delivery notifiers", "count", notifier.Len())
 	cur := buildCurator(cfg, buildForgeTokenSource(cfg, log), cat, metrics, log)
 	actions := action.New(cfg.Actions)
@@ -1539,7 +1524,7 @@ func buildInvestigator(ctx context.Context, cfg *config.Config, gp providers.Git
 				log.Error("deliver findings", "err", err)
 			}
 		},
-	}, cat
+	}, cat, nil
 }
 
 // buildFailureDebouncer wires a Debouncer whose "still failing?" re-check reads
