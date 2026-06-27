@@ -51,7 +51,15 @@ func (p *Pipeline) Ingest(ctx context.Context, adm Admission, res DecodeResult) 
 		}
 	}
 	for _, req := range res.Requests {
-		if !p.admit(adm, req) {
+		ok, reason := p.admit(adm, req)
+		// Per-incident trigger decision log (preserves the legacy handleAlertmanager
+		// "incident … investigate=…" line) — alerts only; GitOps failures bypass the pipeline.
+		if adm == MatchGated && p.log != nil {
+			p.log.Info("incident",
+				"alert", req.Title, "severity", req.Severity, "namespace", req.Workload.Namespace,
+				"investigate", ok, "reason", reason)
+		}
+		if !ok {
 			continue
 		}
 		// AlertsReceived counts admitted alerts only (MatchGated): it preserves the
@@ -64,19 +72,24 @@ func (p *Pipeline) Ingest(ctx context.Context, adm Admission, res DecodeResult) 
 	}
 }
 
-func (p *Pipeline) admit(adm Admission, r investigate.Request) bool {
+// admit reports whether the request starts an investigation, plus a short reason
+// (mirroring the legacy trigger.Engine.Decide reasons) for the per-incident log.
+func (p *Pipeline) admit(adm Admission, r investigate.Request) (bool, string) {
 	switch adm {
 	case MatchGated:
 		if !trigger.MatchRequest(p.cfg.Triggers.Incidents, r.Title, r.Severity, r.Environment, r.Workload.Namespace, r.Labels) {
-			return false
+			return false, "filtered by trigger policy"
 		}
 	case EnableGated:
 		// Enablement is gated at source build (sources.gitops.enabled); nothing to
 		// check here. Fall through to dedup.
 	default:
-		return false
+		return false, "unknown admission mode"
 	}
-	return !p.dedup.Seen(dedupKey(r))
+	if p.dedup.Seen(dedupKey(r)) {
+		return false, "deduplicated (still-firing)"
+	}
+	return true, "matched trigger policy"
 }
 
 func dedupKey(r investigate.Request) string {
