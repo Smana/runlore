@@ -263,8 +263,9 @@ type ModelOverride struct {
 
 // Notify configures where investigation findings are delivered.
 type Notify struct {
-	Slack  SlackNotify  `yaml:"slack"`
-	Matrix MatrixNotify `yaml:"matrix"`
+	Slack  SlackNotify        `yaml:"slack"`
+	Matrix MatrixNotify       `yaml:"matrix"`
+	Extra  map[string]yaml.Node `yaml:",inline"` // notify.<name> blocks for registered (non-built-in) notifiers
 }
 
 // SlackNotify configures Slack delivery and (for rung-2 actions) interactive
