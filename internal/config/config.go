@@ -28,13 +28,13 @@ type Config struct {
 	// auth token stays server-level (server.webhook_token_env).
 	Sources map[string]yaml.Node `yaml:"sources"`
 
-	Actions  ActionPolicy  `yaml:"actions"` // read-only by default; the upper rungs of the autonomy ladder
-	Forge    Forge         `yaml:"forge"`   // git-forge auth (GitHub App) for diff access + curation
-	Curate   Curate        `yaml:"curate"`  // Phase-2 backlog groomer settings
-	Model    Model         `yaml:"model"`   // optional; when BaseURL is set, serve uses the LLM investigator
-	Notify   Notify        `yaml:"notify"`  // chat delivery for findings
-	Catalog  Catalog       `yaml:"catalog"` // OKF knowledge catalog
-	Outcome  Outcome       `yaml:"outcome"` // learning-loop outcome ledger
+	Actions ActionPolicy `yaml:"actions"` // read-only by default; the upper rungs of the autonomy ladder
+	Forge   Forge        `yaml:"forge"`   // git-forge auth (GitHub App) for diff access + curation
+	Curate  Curate       `yaml:"curate"`  // Phase-2 backlog groomer settings
+	Model   Model        `yaml:"model"`   // optional; when BaseURL is set, serve uses the LLM investigator
+	Notify  Notify       `yaml:"notify"`  // chat delivery for findings
+	Catalog Catalog      `yaml:"catalog"` // OKF knowledge catalog
+	Outcome Outcome      `yaml:"outcome"` // learning-loop outcome ledger
 
 	LeaderElection LeaderElection `yaml:"leader_election"` // HA: only the leader investigates
 
@@ -263,8 +263,8 @@ type ModelOverride struct {
 
 // Notify configures where investigation findings are delivered.
 type Notify struct {
-	Slack  SlackNotify        `yaml:"slack"`
-	Matrix MatrixNotify       `yaml:"matrix"`
+	Slack  SlackNotify          `yaml:"slack"`
+	Matrix MatrixNotify         `yaml:"matrix"`
 	Extra  map[string]yaml.Node `yaml:",inline"` // notify.<name> blocks for registered (non-built-in) notifiers
 }
 

@@ -20,7 +20,6 @@ import (
 	"time"
 
 	"github.com/Smana/runlore/internal/action"
-	"github.com/Smana/runlore/internal/config"
 	"github.com/Smana/runlore/internal/httpx"
 	"github.com/Smana/runlore/internal/source"
 )
@@ -66,7 +65,7 @@ type Actions struct {
 // the registered event sources: webhook sources are mounted at their paths and feed
 // the ingest pipeline. metricsHandler (optional) serves OTel Prometheus metrics on
 // GET /metrics when non-nil.
-func New(cfg *config.Config, ready func() bool, acts Actions, built []source.Built, pipe *source.Pipeline, metricsHandler http.Handler, log *slog.Logger) *Server {
+func New(ready func() bool, acts Actions, built []source.Built, pipe *source.Pipeline, metricsHandler http.Handler, log *slog.Logger) *Server {
 	approvers := make(map[string]bool, len(acts.ApproverIDs))
 	for _, id := range acts.ApproverIDs {
 		approvers[id] = true
