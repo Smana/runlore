@@ -60,6 +60,7 @@ import (
 	"github.com/Smana/runlore/internal/network/gcpfirewall"
 	"github.com/Smana/runlore/internal/network/hubble"
 	"github.com/Smana/runlore/internal/notify"
+	_ "github.com/Smana/runlore/internal/notify/webhook" // self-registers the generic outgoing-webhook notifier
 	"github.com/Smana/runlore/internal/outcome"
 	"github.com/Smana/runlore/internal/providers"
 	awscloud "github.com/Smana/runlore/internal/providers/cloud/aws"
@@ -69,7 +70,6 @@ import (
 	"github.com/Smana/runlore/internal/ratelimit"
 	"github.com/Smana/runlore/internal/server"
 	"github.com/Smana/runlore/internal/source"
-	_ "github.com/Smana/runlore/internal/notify/webhook"       // self-registers the generic outgoing-webhook notifier
 	_ "github.com/Smana/runlore/internal/source/alertmanager" // self-registers the alertmanager webhook source
 	_ "github.com/Smana/runlore/internal/source/gitops"       // self-registers the gitops-failure watcher source
 	"github.com/Smana/runlore/internal/telemetry"
@@ -387,7 +387,7 @@ func runServe(args []string) error {
 	if auto != nil {
 		acts.Pauser = auto // avoid a typed-nil interface when auto is disabled
 	}
-	srv := server.New(cfg, readyFunc(leader.Load, cat, catalogConfigured(cfg)), acts, built, pipe, metricsHandler, log)
+	srv := server.New(readyFunc(leader.Load, cat, catalogConfigured(cfg)), acts, built, pipe, metricsHandler, log)
 	if cz != nil {
 		go cz.Run(workCtx, cfg.Investigation.Coalesce.Debounce.Std()/2)
 	}

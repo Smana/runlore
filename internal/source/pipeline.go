@@ -16,6 +16,9 @@ import (
 // concrete episode type. A nil ResolveFunc disables resolved-alert handling.
 type ResolveFunc func(fingerprint string, at time.Time)
 
+// Pipeline admits inbound events from all source adapters, applies the
+// configured gate policy (MatchGated or EnableGated), deduplicates within the
+// configured window, and forwards survivors to the investigation enqueuer.
 type Pipeline struct {
 	cfg     *config.Config
 	enq     investigate.Enqueuer
@@ -25,6 +28,8 @@ type Pipeline struct {
 	log     *slog.Logger
 }
 
+// NewPipeline creates a Pipeline. resolve may be nil to disable resolved-alert
+// handling; metrics may be attached later via WithMetrics.
 func NewPipeline(cfg *config.Config, enq investigate.Enqueuer, resolve ResolveFunc, log *slog.Logger) *Pipeline {
 	return &Pipeline{
 		cfg: cfg, enq: enq, resolve: resolve, log: log,
@@ -71,10 +76,7 @@ func (p *Pipeline) admit(adm Admission, r investigate.Request) bool {
 	default:
 		return false
 	}
-	if p.dedup.Seen(dedupKey(r)) {
-		return false
-	}
-	return true
+	return !p.dedup.Seen(dedupKey(r))
 }
 
 func dedupKey(r investigate.Request) string {

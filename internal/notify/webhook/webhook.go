@@ -16,6 +16,8 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
+	"io"
 	"net/http"
 	"os"
 	"time"
@@ -70,7 +72,7 @@ func (n *Notifier) Deliver(ctx context.Context, inv providers.Investigation) err
 	if err != nil {
 		return err
 	}
-	defer resp.Body.Close()
+	defer func() { _, _ = io.Copy(io.Discard, resp.Body); _ = resp.Body.Close() }()
 	if resp.StatusCode >= 300 {
 		return &deliverError{status: resp.StatusCode}
 	}
@@ -80,7 +82,7 @@ func (n *Notifier) Deliver(ctx context.Context, inv providers.Investigation) err
 type deliverError struct{ status int }
 
 func (e *deliverError) Error() string {
-	return "webhook notify: unexpected status " + http.StatusText(e.status)
+	return fmt.Sprintf("webhook notify: HTTP %d %s", e.status, http.StatusText(e.status))
 }
 
 // cfg is the YAML schema for the notify.webhook block.

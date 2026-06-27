@@ -37,9 +37,9 @@ func oneRequestResult() DecodeResult {
 	return DecodeResult{
 		Requests: []investigate.Request{
 			{
-				Title:     "test alert",
-				Severity:  "critical",
-				Workload:  providers.Workload{Namespace: "default", Name: "myapp"},
+				Title:       "test alert",
+				Severity:    "critical",
+				Workload:    providers.Workload{Namespace: "default", Name: "myapp"},
 				Fingerprint: "fp-webhook-1",
 			},
 		},

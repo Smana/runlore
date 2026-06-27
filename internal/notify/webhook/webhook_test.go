@@ -120,7 +120,7 @@ func TestBuildRegisteredFromExtra(t *testing.T) {
 	}
 
 	// With the env var unset — webhook Build returns nil; Multi must have length 0.
-	os.Unsetenv(envVar)
+	_ = os.Unsetenv(envVar)
 	m2, err := notify.BuildEnabled(deps)
 	if err != nil {
 		t.Fatalf("BuildEnabled (env unset): %v", err)

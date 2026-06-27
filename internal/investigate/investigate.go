@@ -33,11 +33,11 @@ type Request struct {
 	Title        string
 	Workload     providers.Workload // optional; zero for alerts without a workload
 	Reason       string
-	Severity     string             // alert severity (alert-like sources); shapes prompt + notification
-	Environment  string             // deployment environment (prod/staging/…)
+	Severity     string // alert severity (alert-like sources); shapes prompt + notification
+	Environment  string // deployment environment (prod/staging/…)
 	Message      string
 	Labels       map[string]string
-	GroupKey     string             // Alertmanager group identity (shared by all alerts in one webhook POST)
+	GroupKey     string // Alertmanager group identity (shared by all alerts in one webhook POST)
 	At           time.Time
 	Fingerprint  string   // Alertmanager fingerprint (stable firing↔resolved); for outcome attribution
 	Fingerprints []string // coalesced batch fingerprints; one open is recorded per entry so every constituent alert's resolve matches

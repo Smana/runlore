@@ -12,6 +12,9 @@ import (
 	"github.com/Smana/runlore/internal/source"
 )
 
+// Source is the Alertmanager/VMAlert webhook source adapter. It implements
+// source.WebhookSource by parsing the Alertmanager webhook payload into
+// investigation requests (firing alerts) and resolutions (resolved alerts).
 type Source struct{}
 
 // amPayload is the subset of the Alertmanager webhook payload we consume.

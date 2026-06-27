@@ -110,4 +110,3 @@ func TestFromFailureEvent(t *testing.T) {
 		t.Fatalf("unexpected request: %+v", r)
 	}
 }
-
