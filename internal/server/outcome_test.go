@@ -10,6 +10,7 @@ import (
 
 	"github.com/Smana/runlore/internal/config"
 	"github.com/Smana/runlore/internal/outcome"
+	"gopkg.in/yaml.v3"
 )
 
 func TestHandleAlertmanagerResolvedRoutesToLedger(t *testing.T) {
@@ -22,9 +23,9 @@ func TestHandleAlertmanagerResolvedRoutesToLedger(t *testing.T) {
 	}
 	enq := &spyEnqueuer{}
 	cfg := &config.Config{}
+	cfg.Sources = map[string]yaml.Node{"alertmanager": {}}
 	cfg.Triggers.Incidents = config.IncidentTrigger{
-		Enabled: true,
-		Match:   config.IncidentMatch{Severity: []string{"critical"}},
+		Match: config.IncidentMatch{Severity: []string{"critical"}},
 	}
 	// resolve mirrors main's pipeline resolve callback: a resolved alert folds back
 	// into the outcome ledger. We also capture the fingerprint to assert routing.

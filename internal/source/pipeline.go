@@ -66,9 +66,8 @@ func (p *Pipeline) admit(adm Admission, r investigate.Request) bool {
 			return false
 		}
 	case EnableGated:
-		if !p.cfg.Triggers.GitOpsFailures.Enabled {
-			return false
-		}
+		// Enablement is gated at source build (sources.gitops.enabled); nothing to
+		// check here. Fall through to dedup.
 	default:
 		return false
 	}

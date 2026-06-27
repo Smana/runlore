@@ -200,17 +200,24 @@ config:
   # GitOps engine the what-changed spine + failure watch read.
   gitops:
     engine: flux          # or "argocd"
-  # React: only investigate what matters (controls noise + LLM cost).
+  # Enable sources: a key under `sources.<name>` turns that source on. Presence is
+  # enablement; the value is the source's own config. The webhook auth token stays
+  # server-level (server.webhook_token_env).
+  sources:
+    alertmanager: {}           # enable the Alertmanager/VMAlert webhook source
+    gitops:
+      enabled: true            # also react to Flux/Argo CD Ready=False
+  # React: only investigate what matters (controls noise + LLM cost). These are the
+  # match/failure POLICIES; enablement lives under `sources` above.
   triggers:
     incidents:
-      enabled: true
       match:
         severity: [critical, warning]   # match against the alert's labels
         # environment: [prod]           # only matches alerts that CARRY an `environment`
                                         # label — omit it if yours don't, or nothing fires
       dedup: { window: 30m }
-    gitops_failures:
-      enabled: true            # also react to Flux Ready=False
+    # gitops_failures:
+    #   debounce: 60s          # re-check window before investigating a Flux failure
 
   # Investigate: the model + the catalog the loop searches.
   model:

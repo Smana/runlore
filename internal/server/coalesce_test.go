@@ -9,6 +9,7 @@ import (
 	"github.com/Smana/runlore/internal/coalesce"
 	"github.com/Smana/runlore/internal/config"
 	"github.com/Smana/runlore/internal/investigate"
+	"gopkg.in/yaml.v3"
 )
 
 // newTestServerCoalescing builds a Server whose alertmanager webhook feeds a
@@ -18,8 +19,8 @@ func newTestServerCoalescing(t *testing.T, onFlush func()) *Server {
 	t.Helper()
 	enq := &spyEnqueuer{}
 	cfg := &config.Config{}
+	cfg.Sources = map[string]yaml.Node{"alertmanager": {}}
 	cfg.Triggers.Incidents = config.IncidentTrigger{
-		Enabled: true,
 		// No severity filter — accept all so the three "warning" alerts pass admission.
 	}
 	cz := coalesce.New(coalesce.Config{MaxBatch: 3, Debounce: 0}, func(batch []investigate.Request) {

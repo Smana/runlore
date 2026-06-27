@@ -93,8 +93,9 @@ func init() {
 		Name: "alertmanager", ConfigKey: "sources.alertmanager",
 		Kind: source.Webhook, Admission: source.MatchGated, Path: "/webhook/alertmanager",
 		Build: func(d source.Deps) (any, error) {
-			// Enabled when the incident trigger is enabled (Phase 3 moves this to sources.alertmanager).
-			if !d.Cfg.Triggers.Incidents.Enabled {
+			// Presence of the sources.alertmanager key enables this source. The match
+			// policy stays at triggers.incidents; webhook auth stays server-level.
+			if _, ok := d.Raw["alertmanager"]; !ok {
 				return nil, nil
 			}
 			return Source{}, nil
