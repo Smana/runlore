@@ -69,6 +69,7 @@ import (
 	"github.com/Smana/runlore/internal/ratelimit"
 	"github.com/Smana/runlore/internal/server"
 	"github.com/Smana/runlore/internal/source"
+	_ "github.com/Smana/runlore/internal/notify/webhook"       // self-registers the generic outgoing-webhook notifier
 	_ "github.com/Smana/runlore/internal/source/alertmanager" // self-registers the alertmanager webhook source
 	_ "github.com/Smana/runlore/internal/source/gitops"       // self-registers the gitops-failure watcher source
 	"github.com/Smana/runlore/internal/telemetry"
