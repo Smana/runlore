@@ -30,17 +30,19 @@ func New(client kubernetes.Interface) *Reader { return &Reader{client: client} }
 
 var _ providers.LogReader = (*Reader)(nil)
 
-// PodLogs returns recent log lines from up to maxPods pods matching labelSelector
-// in namespace, bounded to the last sinceMinutes. Each line is prefixed with its
-// pod name. Best-effort: a pod whose log stream fails is skipped, not fatal.
-func (r *Reader) PodLogs(ctx context.Context, namespace, labelSelector string, sinceMinutes int) (providers.LogResult, error) {
-	pods, err := r.client.CoreV1().Pods(namespace).List(ctx, metav1.ListOptions{LabelSelector: labelSelector})
+// PodLogs returns recent log lines from up to maxPods pods selected by q, bounded to
+// the last q.SinceMinutes. When q.Previous is true it reads each pod's last-terminated
+// container (the crash output of a CrashLoopBackOff) instead of the running one. Each
+// line is prefixed with its pod name. Best-effort: a pod whose log stream fails is
+// skipped, not fatal.
+func (r *Reader) PodLogs(ctx context.Context, q providers.PodLogQuery) (providers.LogResult, error) {
+	pods, err := r.client.CoreV1().Pods(q.Namespace).List(ctx, metav1.ListOptions{LabelSelector: q.LabelSelector})
 	if err != nil {
-		return nil, fmt.Errorf("list pods (%s/%s): %w", namespace, labelSelector, err)
+		return nil, fmt.Errorf("list pods (%s/%s): %w", q.Namespace, q.LabelSelector, err)
 	}
 	var since *int64
-	if sinceMinutes > 0 {
-		s := int64(sinceMinutes) * 60
+	if q.SinceMinutes > 0 {
+		s := int64(q.SinceMinutes) * 60
 		since = &s
 	}
 	tail := int64(tailLines)
@@ -50,8 +52,8 @@ func (r *Reader) PodLogs(ctx context.Context, namespace, labelSelector string, s
 			break
 		}
 		name := pods.Items[i].Name
-		stream, err := r.client.CoreV1().Pods(namespace).
-			GetLogs(name, &corev1.PodLogOptions{SinceSeconds: since, TailLines: &tail}).
+		stream, err := r.client.CoreV1().Pods(q.Namespace).
+			GetLogs(name, &corev1.PodLogOptions{SinceSeconds: since, TailLines: &tail, Previous: q.Previous}).
 			Stream(ctx)
 		if err != nil {
 			continue

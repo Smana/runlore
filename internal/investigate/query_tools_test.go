@@ -113,3 +113,68 @@ func TestBuildLogsQL(t *testing.T) {
 		})
 	}
 }
+
+type fakeRangeMetrics struct {
+	matrix    providers.Matrix
+	gotQuery  string
+	gotWindow providers.TimeWindow
+	gotStep   time.Duration
+}
+
+func (f *fakeRangeMetrics) Query(context.Context, string, time.Time) (providers.Samples, error) {
+	return nil, nil
+}
+
+func (f *fakeRangeMetrics) QueryRange(_ context.Context, q string, w providers.TimeWindow, step time.Duration) (providers.Matrix, error) {
+	f.gotQuery, f.gotWindow, f.gotStep = q, w, step
+	return f.matrix, nil
+}
+
+func TestQueryMetricsRangeTool(t *testing.T) {
+	fm := &fakeRangeMetrics{matrix: providers.Matrix{{
+		Metric: map[string]string{"__name__": "http_errors", "job": "api"},
+		Points: []providers.Point{
+			{Time: time.Unix(1700000000, 0).UTC(), Value: 1},
+			{Time: time.Unix(1700000060, 0).UTC(), Value: 9},
+			{Time: time.Unix(1700000120, 0).UTC(), Value: 4},
+		},
+	}}}
+	tool := QueryMetricsRangeTool{Metrics: fm}
+	if tool.Name() != "query_metrics_range" {
+		t.Fatalf("name=%q", tool.Name())
+	}
+	out, err := tool.Call(context.Background(), `{"query":"http_errors","since_minutes":30,"step_seconds":60}`)
+	if err != nil {
+		t.Fatalf("Call: %v", err)
+	}
+	// The model must see the TREND, not a single value: first->last with min/max
+	// so a spike-then-partial-recovery (1 -> 9 -> 4) is legible.
+	if !strings.Contains(out, `http_errors{job="api"}`) {
+		t.Fatalf("missing series label:\n%s", out)
+	}
+	for _, want := range []string{"first=1", "last=4", "min=1", "max=9"} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("missing %q in:\n%s", want, out)
+		}
+	}
+	if fm.gotQuery != "http_errors" {
+		t.Fatalf("query=%q", fm.gotQuery)
+	}
+	if fm.gotStep != 60*time.Second {
+		t.Fatalf("step=%v, want 60s", fm.gotStep)
+	}
+	if d := fm.gotWindow.End.Sub(fm.gotWindow.Start); d < 29*time.Minute || d > 31*time.Minute {
+		t.Fatalf("window width=%v, want ~30m", d)
+	}
+}
+
+func TestQueryMetricsRangeToolEmpty(t *testing.T) {
+	tool := QueryMetricsRangeTool{Metrics: &fakeRangeMetrics{}}
+	out, err := tool.Call(context.Background(), `{"query":"up"}`)
+	if err != nil {
+		t.Fatalf("Call: %v", err)
+	}
+	if !strings.Contains(out, "no series matched") {
+		t.Fatalf("want no-series note, got:\n%s", out)
+	}
+}
