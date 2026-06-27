@@ -185,12 +185,12 @@ Two items previously flagged are **resolved in current `main`** and should not b
 
 ---
 
-## 8. Recommendations (future slices — not implemented here)
+## 8. Recommendations
 
-Ordered by leverage; each is independently shippable behind the existing provider interfaces.
+Ordered by leverage; each is independently shippable behind the existing provider interfaces. **Items 1–2 are implemented in this branch**; the rest are follow-up slices.
 
-1. **Wire `QueryRange` + incident-time anchoring** into a `query_metrics_range` tool (or a `since`/`at` param). Biggest single RCA-quality lever; the backend code already exists.
-2. **Add a general workload-log tool** over the K8s API (arbitrary namespace/selector) **with `Previous: true`** support for CrashLoop. Closes the largest K8s blind spot.
+1. ✅ **Implemented (this branch).** **Wire `QueryRange`** into a `query_metrics_range` tool — per-series first→last with min/max over a bounded window, so the agent sees a metric rise/spike/recover instead of a single "now" scalar. (Full incident-*timestamp* anchoring — evaluating at the alert time — remains a follow-up.)
+2. ✅ **Implemented (this branch).** **Added a general workload-log tool** (`pod_logs`) over the K8s API (namespace + optional selector) **with `previous=true`** for CrashLoop crash output. Closes the largest K8s blind spot. (Per-container targeting for multi-container pods is a follow-up.)
 3. **Bring HelmReleases into the change spine** (helm-controller `status.history` / chart-version delta) and **emit `ChangeImageBump`/`ChangeChartBump`**; surface **commit time + message** and start **using `TimeWindow`** to rank changes by proximity to the incident.
 4. **Add Hubble L7 + DNS queries** to `network_drops` (or a sibling tool), and include L4 port/protocol + policy name in the output.
 5. **Add an AWS Health/PHD probe** and surface CloudTrail `errorCode`/`errorMessage`; add an ENI/IP-exhaustion check.
