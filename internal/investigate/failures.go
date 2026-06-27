@@ -18,9 +18,9 @@ var cascadeFailureReasons = map[string]bool{
 	"DependencyNotReady": true, // Flux Kustomization/HelmRelease dependsOn cascade
 }
 
-// isCascadeFailure reports whether the event is a downstream cascade symptom
+// IsCascadeFailure reports whether the event is a downstream cascade symptom
 // rather than a root-cause failure worth investigating.
-func isCascadeFailure(fe providers.FailureEvent) bool {
+func IsCascadeFailure(fe providers.FailureEvent) bool {
 	return cascadeFailureReasons[fe.Reason]
 }
 
@@ -43,7 +43,7 @@ func DrainFailures(ctx context.Context, src <-chan providers.FailureEvent, q Enq
 			if !ok {
 				return
 			}
-			if isCascadeFailure(fe) {
+			if IsCascadeFailure(fe) {
 				if log != nil {
 					log.Debug("skipping gitops cascade failure (not a root cause)",
 						"workload", fe.Workload.Namespace+"/"+fe.Workload.Name, "reason", fe.Reason)
