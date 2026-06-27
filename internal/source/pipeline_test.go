@@ -16,6 +16,7 @@ func (c *capEnq) Enqueue(r investigate.Request) { c.reqs = append(c.reqs, r) }
 func matchAllCfg() *config.Config {
 	c := &config.Config{}
 	c.Triggers.Incidents.Enabled = true // empty Match ⇒ matches anything
+	c.Triggers.Incidents.Dedup.Window = config.Duration(30 * time.Minute)
 	return c
 }
 
