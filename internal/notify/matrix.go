@@ -8,6 +8,7 @@ import (
 	"html"
 	"net/http"
 	"net/url"
+	"os"
 	"regexp"
 	"strings"
 	"sync/atomic"
@@ -16,6 +17,20 @@ import (
 	"github.com/Smana/runlore/internal/httpx"
 	"github.com/Smana/runlore/internal/providers"
 )
+
+func init() {
+	Register(Descriptor{
+		Name: "matrix",
+		Build: func(d Deps) (providers.Notifier, error) {
+			if mc := d.Cfg.Notify.Matrix; mc.Homeserver != "" && mc.RoomID != "" && mc.AccessTokenEnv != "" {
+				if tok := os.Getenv(mc.AccessTokenEnv); tok != "" {
+					return NewMatrix(mc.Homeserver, mc.RoomID, tok), nil
+				}
+			}
+			return nil, nil
+		},
+	})
+}
 
 // Matrix delivers via the Matrix client-server send API.
 type Matrix struct {

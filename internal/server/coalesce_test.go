@@ -1,8 +1,6 @@
 package server
 
 import (
-	"io"
-	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -11,26 +9,26 @@ import (
 	"github.com/Smana/runlore/internal/coalesce"
 	"github.com/Smana/runlore/internal/config"
 	"github.com/Smana/runlore/internal/investigate"
+	"gopkg.in/yaml.v3"
 )
 
-// newTestServerCoalescing builds a Server with a Coalescer that has MaxBatch=3
-// so three same-group alerts flush synchronously (no sweeper needed).
-// The provided onFlush callback is called once per flushed batch.
+// newTestServerCoalescing builds a Server whose alertmanager webhook feeds a
+// pipeline that enqueues into a Coalescer (MaxBatch=3, so three same-group alerts
+// flush synchronously, no sweeper needed). onFlush is called once per flushed batch.
 func newTestServerCoalescing(t *testing.T, onFlush func()) *Server {
 	t.Helper()
 	enq := &spyEnqueuer{}
 	cfg := &config.Config{}
+	cfg.Sources = map[string]yaml.Node{"alertmanager": {}}
 	cfg.Triggers.Incidents = config.IncidentTrigger{
-		Enabled: true,
-		// No severity filter — accept all so the three "warning" alerts pass Decide.
+		// No severity filter — accept all so the three "warning" alerts pass admission.
 	}
-	cz := coalesce.New(coalesce.Config{MaxBatch: 3, Debounce: 0}, func(incs []config.Incident) {
-		enq.Enqueue(investigate.FromIncident(incs[0]))
+	cz := coalesce.New(coalesce.Config{MaxBatch: 3, Debounce: 0}, func(batch []investigate.Request) {
+		enq.Enqueue(batch[0])
 		onFlush()
 	})
-	srv := New(cfg, enq, nil, Actions{}, nil, slog.New(slog.NewTextHandler(io.Discard, nil)))
-	srv.coalescer = cz
-	return srv
+	// The coalescer is the pipeline's enqueuer (it implements investigate.Enqueuer).
+	return newAlertServer(cfg, cz, nil)
 }
 
 func TestWebhookCoalescesGroup(t *testing.T) {
