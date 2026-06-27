@@ -75,7 +75,10 @@ func TestBuildInvestigatorSelectsImplementation(t *testing.T) {
 
 	t.Run("no model -> LogInvestigator", func(t *testing.T) {
 		cfg := &config.Config{} // no model configured
-		inv, cat := BuildInvestigator(context.Background(), cfg, nil, nil, nil, nil, nil, log)
+		inv, cat, err := BuildInvestigator(context.Background(), cfg, nil, nil, nil, nil, nil, log)
+		if err != nil {
+			t.Fatal(err)
+		}
 		if _, ok := inv.(investigate.LogInvestigator); !ok {
 			t.Fatalf("want LogInvestigator, got %T", inv)
 		}
@@ -86,7 +89,10 @@ func TestBuildInvestigatorSelectsImplementation(t *testing.T) {
 
 	t.Run("model -> LoopInvestigator", func(t *testing.T) {
 		cfg := &config.Config{Model: config.Model{Provider: "openai", BaseURL: "http://vllm:8000/v1", Model: "test-model"}}
-		inv, _ := BuildInvestigator(context.Background(), cfg, nil, nil, nil, nil, nil, log)
+		inv, _, err := BuildInvestigator(context.Background(), cfg, nil, nil, nil, nil, nil, log)
+		if err != nil {
+			t.Fatal(err)
+		}
 		if _, ok := inv.(*investigate.LoopInvestigator); !ok {
 			t.Fatalf("want *LoopInvestigator, got %T", inv)
 		}

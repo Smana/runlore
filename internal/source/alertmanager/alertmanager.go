@@ -86,6 +86,7 @@ func (Source) Decode(body []byte, _ http.Header) (source.DecodeResult, error) {
 			Fingerprint:  a.Fingerprint,
 			Fingerprints: fps,
 			GroupKey:     p.GroupKey,
+			TriggerKey:   a.Fingerprint, // Alertmanager fingerprint: stable across re-fires of one alert series (#137)
 		})
 	}
 	return out, nil
