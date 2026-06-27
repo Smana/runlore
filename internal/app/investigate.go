@@ -128,6 +128,7 @@ func BuildModelAndTools(ctx context.Context, cfg *config.Config, gp providers.Gi
 		reader := cluster.New(cs)
 		tools = append(tools,
 			investigate.ControllerLogsTool{Logs: reader},
+			investigate.PodLogsTool{Logs: reader},
 			investigate.PodStatusTool{Kube: reader},
 			investigate.KubeEventsTool{Kube: reader},
 		)
