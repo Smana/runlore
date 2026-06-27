@@ -4,6 +4,7 @@ package alertmanager
 import (
 	"bytes"
 	"net/http"
+	"time"
 
 	"github.com/Smana/runlore/internal/investigate"
 	"github.com/Smana/runlore/internal/source"
@@ -20,7 +21,7 @@ func (Source) Decode(body []byte, _ http.Header) (source.DecodeResult, error) {
 	var out source.DecodeResult
 	for _, inc := range incidents {
 		if inc.Status == "resolved" {
-			out.Resolved = append(out.Resolved, source.Resolution{Fingerprint: inc.Fingerprint, At: inc.StartsAt})
+			out.Resolved = append(out.Resolved, source.Resolution{Fingerprint: inc.Fingerprint, At: time.Now()})
 			continue
 		}
 		out.Requests = append(out.Requests, investigate.FromIncident(inc))
