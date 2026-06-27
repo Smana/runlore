@@ -29,8 +29,10 @@ next time gets an instant answer — no fresh investigation.
 > **Note:** RunLore is read-only by default — it never mutates your cluster. An autonomy ladder
 > (suggest → approve → auto) is on the roadmap for teams that want to go further.
 
-**Who it's for** — teams on **GitOps** (Flux/Argo CD) who want their incident knowledge **portable and
-self-hosted** (no lock-in, your models, your data), and would rather an agent say *"I don't know"* than guess.
+**Who it's for** — **SRE and platform teams** who want their incident knowledge **portable and
+self-hosted** (no lock-in, your models, your data), and would rather an agent say *"I don't know"* than
+guess. It shines if you run **GitOps** (Flux/Argo CD) — RunLore turns *"what changed?"* into an exact Git
+diff — but GitOps isn't required: every data source is pluggable, and an unset one simply disables its tool.
 
 ## See it in action
 
@@ -53,14 +55,14 @@ flowchart LR
       C["what's wrong?<br/>saturation · network · nodes · deps"]
     end
     B --> R["🎯 Root cause<br/>+ confidence + evidence"]
-    R --> D["💬 Slack / Matrix<br/>findings + suggested fix"]
+    R --> D["💬 Chat<br/>(Slack · Matrix…)<br/>findings + suggested fix"]
     R -. learn .-> K[("📚 GitHub PR<br/>draft entry in your KB")]
     K -. instant recall .-> B
 ```
 
-1. **Alert fires** — Alertmanager or a GitOps failure event triggers RunLore via webhook.
+1. **An event fires** — a pluggable *source* triggers RunLore: an Alertmanager webhook, a GitOps failure event, or any adapter you register.
 2. **RunLore investigates** — it reads your cluster, metrics, logs, and network flows.
-3. **Findings land in Slack** — ranked root causes with confidence, the evidence trail, and suggested next steps.
+3. **Findings land in chat** — ranked root causes with confidence, the evidence trail, and suggested next steps, delivered through a pluggable *notifier* (Slack, Matrix, a generic webhook…).
 4. **A PR opens in your KB repo** — RunLore drafts what it found as a knowledge-base entry.
 5. **A human reviews and merges** — after adding resolution context, the PR is merged.
    That entry is indexed: the same incident next time gets an instant answer, no re-investigation.
@@ -79,7 +81,7 @@ flowchart LR
     class R,C,U,P s;
 ```
 
-The autonomous *alert → RCA → Slack* loop is a commodity. What isn't: a knowledge base that
+The autonomous *alert → RCA → chat* loop is a commodity. What isn't: a knowledge base that
 **compounds in a catalog you own**. Every merged PR becomes a searchable entry — plain markdown in a
 Git repo you control, PR-reviewed, with full provenance. Knowledge that consistently resolves
 incidents gains trust; knowledge that keeps failing decays.
@@ -91,10 +93,10 @@ incidents gains trust; knowledge that keeps failing decays.
 RunLore runs in your Kubernetes cluster as a single Go binary, deployed via Helm.
 RunLore is a single binary deployed via Helm. Before installing, you need:
 
-- **Data sources** — a cluster running Flux or Argo CD; optionally Prometheus/VictoriaMetrics, VictoriaLogs, Hubble for richer signals
+- **Data sources** — at least one wired source (each is pluggable, an unset one just disables its tool); for the *what-changed* anchor, a cluster running Flux or Argo CD, plus optionally Prometheus/VictoriaMetrics, VictoriaLogs, Hubble for richer signals
 - **An LLM** — any OpenAI-compatible endpoint, Anthropic, or Gemini (in-cluster or external)
 - **A knowledge-base repo** — a private GitHub repo + a scoped GitHub App; this is where RunLore commits what it learns
-- **A notification destination** — a Slack webhook, Matrix, or both
+- **A notification destination** — a pluggable notifier: Slack, Matrix, a generic outgoing webhook, or your own
 
 Wire your credentials into a Kubernetes `Secret`, point the chart at them via a `values.yaml`
 (GitOps engine, LLM endpoint, KB repo, notification), and install:
@@ -103,8 +105,8 @@ Wire your credentials into a Kubernetes `Secret`, point the chart at them via a 
 helm install runlore deploy/helm/runlore -n runlore --create-namespace -f values.yaml
 ```
 
-Then route your Alertmanager alerts to `http://runlore.runlore.svc:8080/webhook/alertmanager` —
-RunLore starts investigating immediately.
+Then point a source at RunLore — for example, route your Alertmanager alerts to
+`http://runlore.runlore.svc:8080/webhook/alertmanager` — and it starts investigating immediately.
 
 **→ [Full getting-started guide](docs/getting-started.md)** — KB repo setup, GitHub App,
 credentials, complete `values.yaml` reference, data sources, and verification steps.
@@ -144,12 +146,15 @@ RunLore is **pre-1.0 and under active development** — interfaces and config ma
 between commits. It's usable today, but "stable" means different things across the surface:
 
 - **The supported golden path is eval-tested and stable.** That's **Flux** +
-  **VictoriaMetrics / Prometheus** + an **Anthropic or OpenAI-compatible** model +
-  **Slack** + **GitHub** for the knowledge base. This is the path the [nightly eval](CONTRIBUTING.md#nightly-eval-ci)
-  and the [k3d e2e suite](CONTRIBUTING.md#end-to-end-on-k3d) exercise — run it with confidence.
-- **Functional but less exercised:** **Argo CD**, **Matrix**, **Gemini**, cloud
-  integrations, and the network (Hubble) provider. They work and are tested, but see
-  less real-world mileage — expect rougher edges and please file issues.
+  **VictoriaMetrics / Prometheus** + an **Anthropic or OpenAI-compatible** model + a **chat
+  notifier** (Slack in the eval) + **GitHub** for the knowledge base. This is the path the
+  [nightly eval](CONTRIBUTING.md#nightly-eval-ci) and the [k3d e2e suite](CONTRIBUTING.md#end-to-end-on-k3d)
+  exercise — run it with confidence.
+- **Argo CD is now end-to-end tested**, alongside Flux: the k3d suite reconfigures to the `argocd`
+  engine and drives an `Application Degraded` failure through a full investigation.
+- **Functional but less exercised:** **Matrix**, **Gemini**, cloud integrations, and the network
+  (Hubble) provider. They work and are tested, but see less real-world mileage — expect rougher
+  edges and please file issues.
 - **The `auto` autonomy rung is experimental, frozen, and not recommended on real
   clusters.** The supported posture is **read-only → suggest → approve**: RunLore reads
   and recommends, a human reviews and merges. Hands-off `auto` remains on the roadmap,
