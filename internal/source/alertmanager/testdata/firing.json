@@ -1,1 +1,1 @@
-{"groupKey":"g1","alerts":[{"status":"firing","labels":{"alertname":"HighMem","severity":"critical","namespace":"prod-web","deployment":"web"},"startsAt":"2026-06-27T10:00:00Z","fingerprint":"abc"}]}
+{"groupKey":"g1","alerts":[{"status":"firing","labels":{"alertname":"HighMem","severity":"critical","environment":"prod","namespace":"prod-web","deployment":"web"},"startsAt":"2026-06-27T10:00:00Z","fingerprint":"abc"}]}

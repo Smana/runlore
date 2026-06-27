@@ -334,50 +334,37 @@ type Dedup struct {
 	Window Duration `yaml:"window"`
 }
 
-// Incident is the normalized trigger input (from Alertmanager/VMAlert).
-type Incident struct {
-	AlertName   string
-	Severity    string
-	Environment string
-	Namespace   string
-	Labels      map[string]string
-	StartsAt    time.Time
-	Fingerprint string // stable alert identity, used for dedup
-	GroupKey    string // Alertmanager group identity (shared by all alerts in one webhook POST)
-	Status      string // Alertmanager status: "firing" | "resolved"
-}
-
-// Matches reports whether an incident passes this trigger policy: enabled,
-// matched by Match, and not excluded by a non-empty Ignore.
-func (t IncidentTrigger) Matches(inc Incident) bool {
+// MatchFields reports whether an incident passes this trigger policy: enabled,
+// matched by Match, and not excluded by a non-empty Ignore. title is the alertname.
+func (t IncidentTrigger) MatchFields(title, severity, environment, namespace string, labels map[string]string) bool {
 	if !t.Enabled {
 		return false
 	}
-	if !t.Match.matches(inc) {
+	if !t.Match.matchFields(severity, environment, namespace, title, labels) {
 		return false
 	}
-	if !t.Ignore.isEmpty() && t.Ignore.matches(inc) {
+	if !t.Ignore.isEmpty() && t.Ignore.matchFields(severity, environment, namespace, title, labels) {
 		return false
 	}
 	return true
 }
 
-// matches reports whether the incident satisfies every non-empty criterion.
-func (m IncidentMatch) matches(inc Incident) bool {
-	if len(m.Severity) > 0 && !slices.Contains(m.Severity, inc.Severity) {
+// matchFields reports whether the incident satisfies every non-empty criterion.
+func (m IncidentMatch) matchFields(severity, environment, namespace, alertname string, labels map[string]string) bool {
+	if len(m.Severity) > 0 && !slices.Contains(m.Severity, severity) {
 		return false
 	}
-	if len(m.Environment) > 0 && !slices.Contains(m.Environment, inc.Environment) {
+	if len(m.Environment) > 0 && !slices.Contains(m.Environment, environment) {
 		return false
 	}
-	if len(m.Namespaces) > 0 && !globAny(m.Namespaces, inc.Namespace) {
+	if len(m.Namespaces) > 0 && !globAny(m.Namespaces, namespace) {
 		return false
 	}
-	if len(m.AlertNames) > 0 && !globAny(m.AlertNames, inc.AlertName) {
+	if len(m.AlertNames) > 0 && !globAny(m.AlertNames, alertname) {
 		return false
 	}
 	for k, v := range m.Labels {
-		if inc.Labels[k] != v {
+		if labels[k] != v {
 			return false
 		}
 	}
