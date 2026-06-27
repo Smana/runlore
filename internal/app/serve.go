@@ -12,6 +12,8 @@ import (
 	"syscall"
 	"time"
 
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/metric"
 	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/kubernetes"
 
@@ -21,10 +23,14 @@ import (
 	fluxexec "github.com/Smana/runlore/internal/executor/flux"
 	"github.com/Smana/runlore/internal/investigate"
 	"github.com/Smana/runlore/internal/logging"
+	_ "github.com/Smana/runlore/internal/notify/webhook" // self-registers the generic outgoing-webhook notifier
 	"github.com/Smana/runlore/internal/outcome"
 	"github.com/Smana/runlore/internal/providers"
 	"github.com/Smana/runlore/internal/ratelimit"
 	"github.com/Smana/runlore/internal/server"
+	"github.com/Smana/runlore/internal/source"
+	_ "github.com/Smana/runlore/internal/source/alertmanager" // self-registers the alertmanager webhook source
+	_ "github.com/Smana/runlore/internal/source/gitops"       // self-registers the gitops-failure watcher source
 	"github.com/Smana/runlore/internal/telemetry"
 	"github.com/Smana/runlore/internal/trigger"
 )
@@ -146,7 +152,10 @@ func RunServe(version string, args []string) error {
 		log.Info("outcome ledger enabled", "path", cfg.Outcome.LedgerPath)
 	}
 
-	inv, cat := BuildInvestigator(ctx, cfg, gitops, approvals, auto, metrics, ledger, log)
+	inv, cat, err := BuildInvestigator(ctx, cfg, gitops, approvals, auto, metrics, ledger, log)
+	if err != nil {
+		return fmt.Errorf("build investigator: %w", err)
+	}
 	queue := investigate.NewQueue(inv, log)
 	var rlStarts *ratelimit.Window
 	if rl := cfg.Investigation.RateLimit; rl.MaxPerWindow > 0 {
@@ -163,17 +172,17 @@ func RunServe(version string, args []string) error {
 	// out is the flush sink — converts a batch into a single Request and enqueues it.
 	var cz *coalesce.Coalescer
 	if cc := cfg.Investigation.Coalesce; cc.Enabled {
-		out := func(incs []config.Incident) {
-			rep := investigate.FromIncident(incs[0])
-			if len(incs) > 1 {
-				rep.Message = coalesce.Summarize(incs)
+		out := func(batch []investigate.Request) {
+			rep := batch[0]
+			if len(batch) > 1 {
+				rep.Message = coalesce.Summarize(batch)
 			}
 			// Record every constituent fingerprint so each alert's resolve webhook
 			// matches an open (a single incident stays one fingerprint).
 			var fps []string
-			for _, inc := range incs {
-				if inc.Fingerprint != "" {
-					fps = append(fps, inc.Fingerprint)
+			for _, r := range batch {
+				if r.Fingerprint != "" {
+					fps = append(fps, r.Fingerprint)
 				}
 			}
 			rep.Fingerprints = fps
@@ -200,12 +209,49 @@ func RunServe(version string, args []string) error {
 	// re-investigated (GO-P1A). Deduper is safe for concurrent use across terms.
 	failureDedup := trigger.NewDeduper(cfg.Triggers.Incidents.Dedup.Window.Std())
 
+	// Source registry: build the enabled sources (webhook + watcher) and the shared
+	// ingest pipeline. Webhook sources are mounted by the server and ingest through
+	// the pipeline (policy → dedup → enqueue); watcher sources are run by RunWatchers.
+	// Alerts enqueue via the coalescer when enabled, else straight to the queue.
+	var alertEnq investigate.Enqueuer = queue
+	if cz != nil {
+		alertEnq = cz
+	}
+	// resolve records a resolved alert into the outcome ledger (+ metrics), mirroring
+	// the legacy server.go resolved-alert handling.
+	resolve := func(fp string, at time.Time) {
+		if ep, ok, rerr := ledger.Resolve(fp, at); rerr != nil {
+			log.Warn("outcome ledger resolve failed", "fingerprint", fp, "err", rerr)
+		} else if ok && metrics != nil {
+			metrics.IncidentsResolved.Add(ctx, 1)
+			metrics.IncidentResolutionSeconds.Record(ctx, ep.Duration.Seconds())
+			if ep.Kind == "recall" {
+				metrics.RecallOutcome.Add(ctx, 1, metric.WithAttributes(attribute.String("result", "resolved")))
+			}
+		}
+	}
+	built, err := source.BuildEnabled(source.Deps{Cfg: cfg, GitOps: gitops, Log: log})
+	if err != nil {
+		return fmt.Errorf("build sources: %w", err)
+	}
+	pipe := source.NewPipeline(cfg, alertEnq, resolve, log).WithMetrics(metrics)
+
 	// startWork runs the leader-only loops (investigation queue + failure watch +
 	// re-investigate poller), scoped to a context cancelled when leadership is lost.
 	startWork := func(workCtx context.Context) {
 		go queue.Run(workCtx)
-		if cfg.Triggers.GitOpsFailures.Enabled && gitops != nil {
-			StartGitOpsFailureWatch(workCtx, cfg, queue, gitops, failureDedup, metrics, log)
+		// The gitops watcher source is built only when sources.gitops.enabled, so
+		// RunWatchers no-ops when no watcher source is present.
+		if gitops != nil {
+			deb := BuildFailureDebouncer(cfg, gitops, metrics, log)
+			for _, b := range built {
+				if b.Desc.Kind == source.Watcher {
+					log.Info("watching gitops failures",
+						"engine", GitopsEngine(cfg), "debounce", cfg.Triggers.GitOpsFailures.DebounceWindow())
+					break
+				}
+			}
+			source.RunWatchers(workCtx, built, queue, failureDedup, deb, log)
 		}
 		if reinv != nil {
 			log.Info("re-investigate poller enabled", "label", investigate.ReinvestigateLabel)
@@ -241,11 +287,8 @@ func RunServe(version string, args []string) error {
 	if auto != nil {
 		acts.Pauser = auto // avoid a typed-nil interface when auto is disabled
 	}
-	srv := server.New(cfg, queue, ReadyFunc(leader.Load, cat, CatalogConfigured(cfg)), acts, metricsHandler, log)
-	srv.SetMetrics(metrics) // ingress counters emit regardless of coalescing
-	srv.SetOutcomeLedger(ledger)
+	srv := server.New(ReadyFunc(leader.Load, cat, CatalogConfigured(cfg)), acts, built, pipe, metricsHandler, log)
 	if cz != nil {
-		srv.SetCoalescer(cz)
 		go cz.Run(workCtx, cfg.Investigation.Coalesce.Debounce.Std()/2)
 	}
 	httpSrv := NewHTTPServer(*addr, srv.Handler())
