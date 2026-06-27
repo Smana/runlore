@@ -9,6 +9,8 @@ import (
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes/fake"
+
+	"github.com/Smana/runlore/internal/providers"
 )
 
 func TestPodLogs(t *testing.T) {
@@ -21,7 +23,7 @@ func TestPodLogs(t *testing.T) {
 	)
 	r := New(client)
 
-	lines, err := r.PodLogs(context.Background(), "flux-system", "app=source-controller", 30)
+	lines, err := r.PodLogs(context.Background(), providers.PodLogQuery{Namespace: "flux-system", LabelSelector: "app=source-controller", SinceMinutes: 30})
 	if err != nil {
 		t.Fatalf("PodLogs: %v", err)
 	}
