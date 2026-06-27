@@ -93,7 +93,7 @@ func (Source) Decode(body []byte, _ http.Header) (source.DecodeResult, error) {
 
 func init() {
 	source.Register(source.Descriptor{
-		Name: "alertmanager", ConfigKey: "sources.alertmanager",
+		Name: "alertmanager",
 		Kind: source.Webhook, Admission: source.MatchGated, Path: "/webhook/alertmanager",
 		Build: func(d source.Deps) (any, error) {
 			// Presence of the sources.alertmanager key enables this source. The match
