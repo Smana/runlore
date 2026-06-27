@@ -110,3 +110,16 @@ func TestFromFailureEvent(t *testing.T) {
 		t.Fatalf("unexpected request: %+v", r)
 	}
 }
+
+func TestFromFailureEventSetsTriggerKey(t *testing.T) {
+	// The trigger key is the failing resource ref + the condition reason — both
+	// deterministic K8s fields, set before the LLM runs, so re-investigations of one
+	// persistent failure share it regardless of how the model rewords the cause (#137).
+	fe := providers.FailureEvent{
+		Workload: providers.Workload{Kind: "Application", Namespace: "argocd", Name: "airflow"},
+		Reason:   "Degraded",
+	}
+	if r := FromFailureEvent(fe); r.TriggerKey != "argocd/airflow:Degraded" {
+		t.Fatalf("Request.TriggerKey = %q, want argocd/airflow:Degraded", r.TriggerKey)
+	}
+}
