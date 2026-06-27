@@ -88,10 +88,29 @@ incidents gains trust; knowledge that keeps failing decays.
 
 → **[How the learning loop works](docs/learning-loop.md)** · **[Reviewing & approving knowledge](docs/reviewing-knowledge.md)**
 
+## 🔌 Supported integrations
+
+Every backend is pluggable behind an interface — **wire what you run; an unset source just disables
+its tool.** GitOps (Flux / Argo CD) anchors the *what-changed* spine; everything else is optional and
+additive. Full setup detail in **[Data sources](docs/data-sources.md)**.
+
+| Category | Supported | Config |
+|---|---|---|
+| **GitOps** — *what changed* | Flux · Argo CD | `gitops.engine` |
+| **Metrics** | VictoriaMetrics · Prometheus *(PromQL)* | `metrics.url` |
+| **Logs** | VictoriaLogs *(LogsQL)* | `logs.url` |
+| **Network flows** | Cilium Hubble · AWS VPC Flow Logs · GCP Firewall Logs | `network.provider` |
+| **Cloud** | AWS — CloudTrail + EC2 / ASG / EKS | `cloud.provider` |
+| **Kubernetes** | client-go — pod status, events, controller logs | *(in-cluster)* |
+| **LLM** | Anthropic · Google Gemini · any OpenAI-compatible *(vLLM, Ollama, OpenRouter…)* | `model.provider` |
+| **Triggers** *(sources)* | Alertmanager webhook · GitOps failures | `sources.*` |
+| **Notifiers** | Slack · Matrix · generic webhook | `notify.*` |
+| **Knowledge base** *(git forge)* | GitHub *(App auth)* | `forge.*` |
+
 ## 🚀 Getting started
 
-RunLore runs in your Kubernetes cluster as a single Go binary, deployed via Helm.
-RunLore is a single binary deployed via Helm. Before installing, you need:
+RunLore runs in your Kubernetes cluster as a single Go binary, deployed via Helm. Before installing,
+you need:
 
 - **Data sources** — at least one wired source (each is pluggable, an unset one just disables its tool); for the *what-changed* anchor, a cluster running Flux or Argo CD, plus optionally Prometheus/VictoriaMetrics, VictoriaLogs, Hubble for richer signals
 - **An LLM** — any OpenAI-compatible endpoint, Anthropic, or Gemini (in-cluster or external)
