@@ -24,8 +24,8 @@ func newTestServerCoalescing(t *testing.T, onFlush func()) *Server {
 		Enabled: true,
 		// No severity filter — accept all so the three "warning" alerts pass Decide.
 	}
-	cz := coalesce.New(coalesce.Config{MaxBatch: 3, Debounce: 0}, func(incs []config.Incident) {
-		enq.Enqueue(investigate.FromIncident(incs[0]))
+	cz := coalesce.New(coalesce.Config{MaxBatch: 3, Debounce: 0}, func(batch []investigate.Request) {
+		enq.Enqueue(batch[0])
 		onFlush()
 	})
 	srv := New(cfg, enq, nil, Actions{}, nil, slog.New(slog.NewTextHandler(io.Discard, nil)))

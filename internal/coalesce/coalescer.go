@@ -11,7 +11,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/Smana/runlore/internal/config"
+	"github.com/Smana/runlore/internal/investigate"
 	"github.com/Smana/runlore/internal/telemetry"
 )
 
@@ -26,7 +26,7 @@ type Config struct {
 }
 
 type batch struct {
-	incidents           []config.Incident
+	incidents           []investigate.Request
 	firstSeen, lastSeen time.Time
 }
 
@@ -44,8 +44,8 @@ type cooldown struct {
 type Coalescer struct {
 	cfg     Config
 	now     func() time.Time
-	out     func([]config.Incident) // flush sink (build a Request + enqueue)
-	Metrics *telemetry.Metrics      // optional; nil-safe OTel counters
+	out     func([]investigate.Request) // flush sink (build a Request + enqueue)
+	Metrics *telemetry.Metrics          // optional; nil-safe OTel counters
 
 	mu      sync.Mutex
 	pending map[string]*batch
@@ -53,7 +53,7 @@ type Coalescer struct {
 }
 
 // New builds a Coalescer. out is called with each flushed batch.
-func New(cfg Config, out func([]config.Incident)) *Coalescer {
+func New(cfg Config, out func([]investigate.Request)) *Coalescer {
 	return &Coalescer{
 		cfg: cfg, now: time.Now, out: out,
 		pending: map[string]*batch{}, recent: map[string]*cooldown{},
@@ -63,12 +63,12 @@ func New(cfg Config, out func([]config.Incident)) *Coalescer {
 // key returns the correlation key for an incident. When CorrelationLabels are
 // set, the key is namespace + those label values. Otherwise it's the AM
 // groupKey, falling back to namespace/alertname.
-func (c *Coalescer) key(inc config.Incident) string {
+func (c *Coalescer) key(r investigate.Request) string {
 	if len(c.cfg.CorrelationLabels) > 0 {
 		parts := make([]string, 0, len(c.cfg.CorrelationLabels))
 		anyPresent := false
 		for _, l := range c.cfg.CorrelationLabels {
-			v := inc.Labels[l]
+			v := r.Labels[l]
 			if v != "" {
 				anyPresent = true
 			}
@@ -78,20 +78,20 @@ func (c *Coalescer) key(inc config.Incident) string {
 		// configured label is absent the key would degenerate to "ns/" and
 		// collapse unrelated incidents, so fall through to the GroupKey path.
 		if anyPresent {
-			return inc.Namespace + "/" + strings.Join(parts, "/")
+			return r.Workload.Namespace + "/" + strings.Join(parts, "/")
 		}
 	}
-	if inc.GroupKey != "" {
-		return inc.GroupKey
+	if r.GroupKey != "" {
+		return r.GroupKey
 	}
-	return inc.Namespace + "/" + inc.AlertName
+	return r.Workload.Namespace + "/" + r.Title
 }
 
 // Summarize renders a one-line digest of a coalesced batch for the seed prompt.
-func Summarize(incs []config.Incident) string {
+func Summarize(reqs []investigate.Request) string {
 	counts := map[string]int{}
-	for _, in := range incs {
-		counts[in.AlertName]++
+	for _, r := range reqs {
+		counts[r.Title]++
 	}
 	names := make([]string, 0, len(counts))
 	for n := range counts {
@@ -102,18 +102,18 @@ func Summarize(incs []config.Incident) string {
 	for _, n := range names {
 		parts = append(parts, fmt.Sprintf("%s×%d", n, counts[n]))
 	}
-	return fmt.Sprintf("%d correlated alerts: %s", len(incs), strings.Join(parts, ", "))
+	return fmt.Sprintf("%d correlated alerts: %s", len(reqs), strings.Join(parts, ", "))
 }
 
 // Add ingests one incident: critical → flush now; within cooldown → suppress;
 // else buffer (flushing when MaxBatch is reached).
-func (c *Coalescer) Add(inc config.Incident) {
-	k := c.key(inc)
-	var flush []config.Incident
+func (c *Coalescer) Add(r investigate.Request) {
+	k := c.key(r)
+	var flush []investigate.Request
 	c.mu.Lock()
 	now := c.now()
 	switch {
-	case c.withinCooldown(k, now) && !c.newCriticalDuringCooldown(k, inc):
+	case c.withinCooldown(k, now) && !c.newCriticalDuringCooldown(k, r):
 		// An investigation for this key already fired within the cooldown — suppress
 		// the rest of the storm. This is checked before the critical fast-path so a
 		// storm of critical alerts collapses to one investigation (the first) plus
@@ -125,15 +125,15 @@ func (c *Coalescer) Add(inc config.Incident) {
 			m.AlertsSuppressed.Add(context.Background(), 1)
 		}
 		return
-	case strings.EqualFold(inc.Severity, "critical"):
+	case strings.EqualFold(r.Severity, "critical"):
 		// Critical (first for this key, or a new alertname during cooldown): flush
 		// immediately with no debounce wait, draining any pending batch. Same-key
 		// same-alertname criticals fall into the cooldown case above and are suppressed.
-		flush = []config.Incident{inc}
+		flush = []investigate.Request{r}
 		if b, ok := c.pending[k]; ok {
-			flush = make([]config.Incident, 0, len(b.incidents)+1)
+			flush = make([]investigate.Request, 0, len(b.incidents)+1)
 			flush = append(flush, b.incidents...)
-			flush = append(flush, inc)
+			flush = append(flush, r)
 			delete(c.pending, k)
 		}
 		c.markFlushed(k, now, flush)
@@ -143,7 +143,7 @@ func (c *Coalescer) Add(inc config.Incident) {
 			b = &batch{firstSeen: now}
 			c.pending[k] = b
 		}
-		b.incidents = append(b.incidents, inc)
+		b.incidents = append(b.incidents, r)
 		b.lastSeen = now
 		if c.cfg.MaxBatch > 0 && len(b.incidents) >= c.cfg.MaxBatch {
 			flush = b.incidents
@@ -157,10 +157,14 @@ func (c *Coalescer) Add(inc config.Incident) {
 	}
 }
 
+// Enqueue satisfies investigate.Enqueuer by folding the request through the
+// coalescer, so a source pipeline can route admitted Requests through coalescing.
+func (c *Coalescer) Enqueue(r investigate.Request) { c.Add(r) }
+
 // emit records coalescing metrics for a flushed batch, then hands it to out.
 // Keeping this in the Coalescer (rather than the out closure) means the package
 // owns its full metric surface, including for tests that supply a custom out.
-func (c *Coalescer) emit(batch []config.Incident) {
+func (c *Coalescer) emit(batch []investigate.Request) {
 	if m := c.Metrics; m != nil {
 		if n := len(batch); n > 1 {
 			m.AlertsCoalesced.Add(context.Background(), int64(n-1))
@@ -182,36 +186,36 @@ func (c *Coalescer) withinCooldown(k string, now time.Time) bool {
 // newCriticalDuringCooldown reports whether inc is a critical alert whose
 // alertname has not yet been covered by the current cooldown for key k — i.e. a
 // genuinely new problem that should bypass suppression. Caller holds mu.
-func (c *Coalescer) newCriticalDuringCooldown(k string, inc config.Incident) bool {
-	if !strings.EqualFold(inc.Severity, "critical") {
+func (c *Coalescer) newCriticalDuringCooldown(k string, r investigate.Request) bool {
+	if !strings.EqualFold(r.Severity, "critical") {
 		return false
 	}
 	cd, ok := c.recent[k]
 	if !ok {
 		return true
 	}
-	_, seen := cd.seen[inc.AlertName]
+	_, seen := cd.seen[r.Title]
 	return !seen
 }
 
 // markFlushed records, for key k, that an investigation fired at now covering
 // the alertnames in the flushed batch. Caller holds mu.
-func (c *Coalescer) markFlushed(k string, now time.Time, batch []config.Incident) {
+func (c *Coalescer) markFlushed(k string, now time.Time, batch []investigate.Request) {
 	cd := c.recent[k]
 	if cd == nil {
 		cd = &cooldown{seen: map[string]struct{}{}}
 		c.recent[k] = cd
 	}
 	cd.last = now
-	for _, in := range batch {
-		cd.seen[in.AlertName] = struct{}{}
+	for _, r := range batch {
+		cd.seen[r.Title] = struct{}{}
 	}
 }
 
 // sweep flushes every pending batch that has been quiet for >= Debounce or is
 // older than MaxWait.
 func (c *Coalescer) sweep() {
-	var flushes [][]config.Incident
+	var flushes [][]investigate.Request
 	c.mu.Lock()
 	now := c.now()
 	for k, b := range c.pending {

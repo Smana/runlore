@@ -4,12 +4,13 @@ import (
 	"testing"
 	"time"
 
-	"github.com/Smana/runlore/internal/config"
+	"github.com/Smana/runlore/internal/investigate"
+	"github.com/Smana/runlore/internal/providers"
 )
 
-type sink struct{ batches [][]config.Incident }
+type sink struct{ batches [][]investigate.Request }
 
-func (s *sink) out(b []config.Incident) { s.batches = append(s.batches, b) }
+func (s *sink) out(b []investigate.Request) { s.batches = append(s.batches, b) }
 
 func newAt(cfg Config, s *sink, now *time.Time) *Coalescer {
 	c := New(cfg, s.out)
@@ -79,9 +80,9 @@ func TestAddNewCriticalDuringCooldownFlushes(t *testing.T) {
 	s := &sink{}
 	c := newAt(Config{Debounce: time.Hour, MaxBatch: 100, Cooldown: 10 * time.Minute,
 		CorrelationLabels: []string{"app"}}, s, &now)
-	first := config.Incident{AlertName: "CrashLoop", Namespace: "ns", Severity: "critical",
+	first := investigate.Request{Title: "CrashLoop", Workload: providers.Workload{Namespace: "ns"}, Severity: "critical",
 		Labels: map[string]string{"app": "web"}}
-	second := config.Incident{AlertName: "PodNotReady", Namespace: "ns", Severity: "critical",
+	second := investigate.Request{Title: "PodNotReady", Workload: providers.Workload{Namespace: "ns"}, Severity: "critical",
 		Labels: map[string]string{"app": "web"}} // same key (app=web), different alertname
 
 	c.Add(first) // flush #1, seeds recent + seen{CrashLoop}
@@ -105,9 +106,9 @@ func TestAddWarningDuringCooldownSuppressed(t *testing.T) {
 	s := &sink{}
 	c := newAt(Config{Debounce: time.Hour, MaxBatch: 1, Cooldown: 10 * time.Minute,
 		CorrelationLabels: []string{"app"}}, s, &now)
-	first := config.Incident{AlertName: "A", Namespace: "ns", Severity: "warning",
+	first := investigate.Request{Title: "A", Workload: providers.Workload{Namespace: "ns"}, Severity: "warning",
 		Labels: map[string]string{"app": "web"}}
-	newWarn := config.Incident{AlertName: "B", Namespace: "ns", Severity: "warning",
+	newWarn := investigate.Request{Title: "B", Workload: providers.Workload{Namespace: "ns"}, Severity: "warning",
 		Labels: map[string]string{"app": "web"}} // same key, new alertname, but warning
 	c.Add(first) // MaxBatch=1 → flush, seeds cooldown
 	now = now.Add(time.Minute)
