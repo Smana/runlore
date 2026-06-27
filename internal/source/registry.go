@@ -116,8 +116,30 @@ func Registered() []Descriptor {
 // non-nil results. A nil return from Build means the adapter is disabled (no
 // config); an error aborts startup.
 func BuildEnabled(deps Deps) ([]Built, error) {
+	descs := Registered()
+	// Reject typo'd keys under `sources:` loudly. The sources map escapes the
+	// config loader's strict (KnownFields) decode, so an unknown key here (e.g.
+	// "alertmanagr") would otherwise silently disable a source and leave the
+	// agent healthy but deaf.
+	known := make(map[string]bool, len(descs))
+	names := make([]string, 0, len(descs))
+	for _, d := range descs {
+		known[d.Name] = true
+		names = append(names, d.Name)
+	}
+	var unknown []string
+	for name := range deps.Raw {
+		if !known[name] {
+			unknown = append(unknown, name)
+		}
+	}
+	if len(unknown) > 0 {
+		sort.Strings(unknown)
+		return nil, fmt.Errorf("unknown source(s) %v under `sources:` — known sources are %v", unknown, names)
+	}
+
 	var built []Built
-	for _, d := range Registered() {
+	for _, d := range descs {
 		impl, err := d.Build(deps)
 		if err != nil {
 			return nil, fmt.Errorf("source %q: %w", d.Name, err)
