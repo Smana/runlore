@@ -82,7 +82,11 @@ func BuildModelAndTools(ctx context.Context, cfg *config.Config, gp providers.Gi
 		}
 	}
 	if cfg.Metrics.URL != "" {
-		tools = append(tools, investigate.QueryMetricsTool{Metrics: prometheus.New(cfg.Metrics.URL)})
+		m := prometheus.New(cfg.Metrics.URL)
+		tools = append(tools,
+			investigate.QueryMetricsTool{Metrics: m},
+			investigate.QueryMetricsRangeTool{Metrics: m},
+		)
 	}
 	if cfg.Logs.URL != "" {
 		tools = append(tools, investigate.QueryLogsTool{Logs: victorialogs.New(cfg.Logs.URL)})
