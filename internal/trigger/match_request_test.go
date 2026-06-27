@@ -10,7 +10,7 @@ import (
 )
 
 func TestMatchRequestSeverityAndNamespace(t *testing.T) {
-	pol := config.IncidentTrigger{Enabled: true}
+	pol := config.IncidentTrigger{}
 	pol.Match.Severity = []string{"critical"}
 	pol.Match.Namespaces = []string{"prod-*"}
 

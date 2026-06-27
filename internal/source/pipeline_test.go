@@ -15,7 +15,7 @@ func (c *capEnq) Enqueue(r investigate.Request) { c.reqs = append(c.reqs, r) }
 
 func matchAllCfg() *config.Config {
 	c := &config.Config{}
-	c.Triggers.Incidents.Enabled = true // empty Match ⇒ matches anything
+	// empty Match ⇒ matches anything; enablement is now the source's job (sources.*).
 	c.Triggers.Incidents.Dedup.Window = config.Duration(30 * time.Minute)
 	return c
 }
@@ -34,7 +34,6 @@ func TestPipelineMatchGatedAdmitsMatching(t *testing.T) {
 func TestPipelineMatchGatedDropsUnmatched(t *testing.T) {
 	enq := &capEnq{}
 	c := &config.Config{}
-	c.Triggers.Incidents.Enabled = true
 	c.Triggers.Incidents.Match.Severity = []string{"critical"}
 	p := NewPipeline(c, enq, nil, nil)
 	p.Ingest(context.Background(), MatchGated, DecodeResult{

@@ -22,16 +22,17 @@ import (
 	"github.com/Smana/runlore/internal/providers"
 	"github.com/Smana/runlore/internal/source"
 	_ "github.com/Smana/runlore/internal/source/alertmanager" // self-registers the alertmanager webhook source
+	"gopkg.in/yaml.v3"
 )
 
 // discardLog is the shared no-op logger for server tests.
 var discardLog = slog.New(slog.NewTextHandler(io.Discard, nil))
 
 // newAlertServer builds a Server whose alertmanager webhook feeds a pipeline with
-// the given enqueuer + resolve callback. cfg.Triggers.Incidents must be enabled for
-// the alertmanager source to be built and mounted.
+// the given enqueuer + resolve callback. cfg.Sources["alertmanager"] must be present
+// for the alertmanager source to be built and mounted.
 func newAlertServer(cfg *config.Config, enq investigate.Enqueuer, resolve source.ResolveFunc) *Server {
-	built, err := source.BuildEnabled(source.Deps{Cfg: cfg})
+	built, err := source.BuildEnabled(source.Deps{Cfg: cfg, Raw: cfg.Sources})
 	if err != nil {
 		panic(err)
 	}
@@ -200,9 +201,9 @@ func TestKillSwitch(t *testing.T) {
 
 func testServerWith(enq investigate.Enqueuer) *Server {
 	cfg := &config.Config{}
+	cfg.Sources = map[string]yaml.Node{"alertmanager": {}}
 	cfg.Triggers.Incidents = config.IncidentTrigger{
-		Enabled: true,
-		Match:   config.IncidentMatch{Severity: []string{"critical"}},
+		Match: config.IncidentMatch{Severity: []string{"critical"}},
 	}
 	return newAlertServer(cfg, enq, nil)
 }

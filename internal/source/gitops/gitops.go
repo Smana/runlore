@@ -53,7 +53,18 @@ func init() {
 		Kind:      source.Watcher,
 		Admission: source.EnableGated,
 		Build: func(d source.Deps) (any, error) {
-			if !d.Cfg.Triggers.GitOpsFailures.Enabled || d.GitOps == nil {
+			// Enabled via sources.gitops.enabled. A missing key ⇒ disabled.
+			node, ok := d.Raw["gitops"]
+			if !ok {
+				return nil, nil
+			}
+			var s struct {
+				Enabled bool `yaml:"enabled"`
+			}
+			if err := node.Decode(&s); err != nil {
+				return nil, err
+			}
+			if !s.Enabled || d.GitOps == nil {
 				return nil, nil
 			}
 			return &Source{gp: d.GitOps}, nil

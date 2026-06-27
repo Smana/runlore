@@ -25,21 +25,20 @@ func TestMatches(t *testing.T) {
 		tr   IncidentTrigger
 		want bool
 	}{
-		{"disabled never matches", IncidentTrigger{Enabled: false}, false},
-		{"empty match matches anything", IncidentTrigger{Enabled: true}, true},
-		{"severity+env match", IncidentTrigger{Enabled: true, Match: IncidentMatch{
+		{"empty match matches anything", IncidentTrigger{}, true},
+		{"severity+env match", IncidentTrigger{Match: IncidentMatch{
 			Severity: []string{"critical"}, Environment: []string{"prod"}}}, true},
-		{"severity mismatch", IncidentTrigger{Enabled: true, Match: IncidentMatch{
+		{"severity mismatch", IncidentTrigger{Match: IncidentMatch{
 			Severity: []string{"warning"}}}, false},
-		{"namespace glob", IncidentTrigger{Enabled: true, Match: IncidentMatch{
+		{"namespace glob", IncidentTrigger{Match: IncidentMatch{
 			Namespaces: []string{"app*"}}}, true},
-		{"namespace glob miss", IncidentTrigger{Enabled: true, Match: IncidentMatch{
+		{"namespace glob miss", IncidentTrigger{Match: IncidentMatch{
 			Namespaces: []string{"payments"}}}, false},
-		{"label subset match", IncidentTrigger{Enabled: true, Match: IncidentMatch{
+		{"label subset match", IncidentTrigger{Match: IncidentMatch{
 			Labels: map[string]string{"team": "platform"}}}, true},
-		{"label mismatch", IncidentTrigger{Enabled: true, Match: IncidentMatch{
+		{"label mismatch", IncidentTrigger{Match: IncidentMatch{
 			Labels: map[string]string{"team": "data"}}}, false},
-		{"ignore excludes", IncidentTrigger{Enabled: true, Ignore: IncidentMatch{
+		{"ignore excludes", IncidentTrigger{Ignore: IncidentMatch{
 			AlertNames: []string{"Watchdog", "HarborProbeFailure"}}}, false},
 	}
 	for _, c := range cases {

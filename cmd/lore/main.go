@@ -332,7 +332,7 @@ func runServe(args []string) error {
 			}
 		}
 	}
-	built, err := source.BuildEnabled(source.Deps{Cfg: cfg, GitOps: gitops, Log: log})
+	built, err := source.BuildEnabled(source.Deps{Cfg: cfg, GitOps: gitops, Log: log, Raw: cfg.Sources})
 	if err != nil {
 		return fmt.Errorf("build sources: %w", err)
 	}
@@ -342,7 +342,10 @@ func runServe(args []string) error {
 	// re-investigate poller), scoped to a context cancelled when leadership is lost.
 	startWork := func(workCtx context.Context) {
 		go queue.Run(workCtx)
-		if cfg.Triggers.GitOpsFailures.Enabled && gitops != nil {
+		// The gitops watcher source is built only when sources.gitops.enabled, so
+		// RunWatchers no-ops when no watcher source is present; building the debouncer
+		// when unused is harmless.
+		if gitops != nil {
 			deb := buildFailureDebouncer(cfg, gitops, metrics, log)
 			source.RunWatchers(workCtx, built, queue, failureDedup, deb, log)
 		}
