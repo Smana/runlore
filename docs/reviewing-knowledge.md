@@ -70,7 +70,7 @@ reusable knowledge for the next person (and for RunLore's instant recall).
 ## 3. Reviewing it — three checks
 
 Formatting is already enforced for you (a CI check validates the structure — see
-[KB-entry validation](superpowers/specs/2026-06-24-kb-entry-validation-design.md)).
+[KB-entry validation](../dev/superpowers/specs/2026-06-24-kb-entry-validation-design.md)).
 Your job is the **judgment** the machine can't make:
 
 1. **Is the cause real?** Does the `Investigate` evidence actually support the

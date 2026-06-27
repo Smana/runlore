@@ -1,7 +1,7 @@
 # RunLore — contributor & agent guide
 
 RunLore is a self-improving, GitOps-native SRE agent written in Go. Start with
-[`docs/design.md`](docs/design.md) for the architecture and `docs/plans/` for the implementation plans.
+[`docs/design.md`](docs/design.md) for the architecture and `dev/plans/` for the implementation plans.
 
 ## Quality gate — run before every commit
 
