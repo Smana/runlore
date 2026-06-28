@@ -8,6 +8,73 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 RunLore is **pre-1.0 and under active development** — there are no tagged releases
 yet, so everything currently lives under `[Unreleased]`.
 
+## [0.2.0](https://github.com/Smana/runlore/compare/v0.1.0...v0.2.0) (2026-06-28)
+
+
+### Features
+
+* **config:** sources.&lt;name&gt; enablement map (pragmatic break; auth stays server-level) ([06161b5](https://github.com/Smana/runlore/commit/06161b5e49e5d292b6f991b4667c359aaab00e56))
+* **curator:** surface the observed root cause in the coalesce comment ([d193989](https://github.com/Smana/runlore/commit/d1939897355288a34c3cc38c2f7e1c9e77fe5637))
+* **curator:** surface the recurring incident's root cause in the coalesce comment ([2519d2b](https://github.com/Smana/runlore/commit/2519d2b10732999d699233d69ab139f754fe761b))
+* **investigate:** add pod_logs tool with previous-container crash logs ([f768eeb](https://github.com/Smana/runlore/commit/f768eeb7658666e03d66031456ba1161240ce5ae))
+* **investigate:** add query_metrics_range tool for incident-window metric trends ([51ce3fc](https://github.com/Smana/runlore/commit/51ce3fc8a78da21f005c3fe212b58159856eee72))
+* **investigate:** incident-window metric trends + crashing-pod log reader ([09ac1fb](https://github.com/Smana/runlore/commit/09ac1fb0d1cd101afcd6a0771c0a91ab39607be7))
+* **investigate:** promote Severity/Environment onto Request ([912200b](https://github.com/Smana/runlore/commit/912200b545acdcce3d60f0218fce0cb881eec2ce))
+* **notify:** generic outgoing-webhook sink (proves drop-in extensibility) ([47f560c](https://github.com/Smana/runlore/commit/47f560cd2186fc40f0a651aa440eec87760238a4))
+* **notify:** notifier registry; retrofit slack/matrix (typed) + inline extras map ([8017ae4](https://github.com/Smana/runlore/commit/8017ae41061b0066683ad34719a43f14ce60f273))
+* **source:** adapter registry (Descriptor, Register, BuildEnabled) ([6ab9df4](https://github.com/Smana/runlore/commit/6ab9df4bebedf5d560bdc6772204144e85b8a31d))
+* **source:** alertmanager webhook adapter (golden-tested Decode) ([c10277a](https://github.com/Smana/runlore/commit/c10277a9e747153af895118b15e23be7e034d6e0))
+* **source:** gitops failure watcher adapter; export IsCascadeFailure ([5998d1f](https://github.com/Smana/runlore/commit/5998d1fd2f958a7fcb7389c8dd9525f5ace6b9aa))
+* **source:** ingest pipeline (admission, dedup, ledger routing) ([f2813ef](https://github.com/Smana/runlore/commit/f2813efe067e91a8915af5db291535a9583bbb9b))
+* **source:** webhook + watcher transports (RunWatchers preserves gitops dedup+debounce) ([a9ac8d9](https://github.com/Smana/runlore/commit/a9ac8d938491fc37adef3cf90398b4ea0d20bfd5))
+* **source:** wire sources through server+main; remove bespoke alert/gitops paths ([f64a097](https://github.com/Smana/runlore/commit/f64a097caf7e6106f43b684e198f3b48c1a7c7a5))
+* **trigger:** MatchRequest matcher over normalized Request ([7effa22](https://github.com/Smana/runlore/commit/7effa226b84d41452433b123337d02a450fcbc58))
+
+
+### Bug Fixes
+
+* **app:** pass Raw: cfg.Sources to source.BuildEnabled (port regression); test alert TriggerKey ([7973d84](https://github.com/Smana/runlore/commit/7973d844342c46c9f93ea469a1d7c8e4563e3539))
+* **ci:** publish cosign bundle as the signature artifact ([008f1cf](https://github.com/Smana/runlore/commit/008f1cfeaad43ebc3841f7521e3e887289bcd56d))
+* **ci:** publish cosign bundle as the signature artifact ([e8127fc](https://github.com/Smana/runlore/commit/e8127fcf43f9dca46e38048da461d6fed978c869))
+* **ci:** skip branch-prefixed SHA image tag on PRs (invalid :-&lt;sha&gt;) ([574cda6](https://github.com/Smana/runlore/commit/574cda6db25a79565039343549505211efd1ccf1))
+* **cluster:** order warn-only events by their own timestamp ([0dcbc56](https://github.com/Smana/runlore/commit/0dcbc56fe7b37888a42eb3aa1d18cee93058435a))
+* **curator:** scope the coalesce note's 'trigger not cause' to alert/GitOps ([1d59b55](https://github.com/Smana/runlore/commit/1d59b55fea173a26ea5d34bdd86ce337f815f1ad))
+* **demo:** repair zero-cluster quickstart broken by sources migration ([4ce6f02](https://github.com/Smana/runlore/commit/4ce6f02831c69f8b9116b7967841b856718fe7de))
+* **demo:** repair zero-cluster quickstart broken by sources.&lt;name&gt; migration ([36348ef](https://github.com/Smana/runlore/commit/36348ef6af5bec589cb4fe92dbd20fd11c4ce8e7))
+* **investigate:** pod_status falls back to namespace when a selector matches nothing ([#165](https://github.com/Smana/runlore/issues/165)) ([d9c4584](https://github.com/Smana/runlore/commit/d9c45844ce1b5e9d5373e2eaf67b754047e11325))
+* **observability:** restore per-incident decision + gitops-watch startup logs ([434c73c](https://github.com/Smana/runlore/commit/434c73c7455c9203669d5e03f75247074ad462c2))
+* **source:** alertmanager resolution uses receipt time; tighten tests ([85d580f](https://github.com/Smana/runlore/commit/85d580fccb38fb4d69c398a923381d638df17ca2))
+* **source:** preserve dedup behavior (drop floor); harden admit + dedupKey ([a65686d](https://github.com/Smana/runlore/commit/a65686d8f61e4cbe8547251b20aa2f828d9b75ec))
+* **source:** reject unknown keys under `sources:` instead of silently ignoring ([da7d040](https://github.com/Smana/runlore/commit/da7d040baba2b8570b1a12c7cdbcade1366114a4))
+* two pre-launch correctness bugs (warn-event ordering, silent source-key typo) ([5dc160d](https://github.com/Smana/runlore/commit/5dc160dc24a0e42aaf11592ff0e64123ff554882))
+
+
+### Documentation
+
+* add operability & config guides (troubleshooting, upgrade/uninstall, configuration, security model) ([2d3af2b](https://github.com/Smana/runlore/commit/2d3af2b950ed5652eca287353b0e77705cbdc613))
+* **analysis:** mark query_metrics_range and pod_logs as implemented in this branch ([4b7ae84](https://github.com/Smana/runlore/commit/4b7ae84eabb8d3fe727848546c7e809efce56902))
+* **analysis:** per-integration troubleshooting methods, signals, and gaps ([e376a50](https://github.com/Smana/runlore/commit/e376a50484e692ced34d8096e672092b2a2d8df5))
+* **analysis:** recall & dedup behaviour when a symptom recurs with a different RCA ([5556ffa](https://github.com/Smana/runlore/commit/5556ffac9af5fb1f08c398acfbcdb1d11256d61c))
+* **architecture:** document source/notifier adapter extensibility ([264bcb8](https://github.com/Smana/runlore/commit/264bcb8dd092f1d85f502daabc7974619d59d232))
+* **examples:** add worked end-to-end example (Harbor registry down) ([#166](https://github.com/Smana/runlore/issues/166)) ([8824074](https://github.com/Smana/runlore/commit/882407430afa3c0bd4837069c85222c27eea930f))
+* **getting-started:** document webhook bearer auth + ingress lockdown ([af96e6a](https://github.com/Smana/runlore/commit/af96e6a8d767325cf7c3179b66353ec998b60593))
+* operability & config guides (troubleshooting, upgrade/uninstall, configuration, security model) ([6a636ba](https://github.com/Smana/runlore/commit/6a636ba9c1abf28cd11905dd2e4ad288e4e0a14e))
+* **plan:** extensible sources & notifiers implementation plan ([c0429d6](https://github.com/Smana/runlore/commit/c0429d6671344876848388dca9e1bc83dc7186f5))
+* **readme:** add a Supported integrations matrix; dedupe install sentence ([b4bb674](https://github.com/Smana/runlore/commit/b4bb674ac1ce49d15f31565c4343597a95141733))
+* **readme:** pluggable sources/notifiers; SRE audience; Argo CD e2e-tested ([77b039d](https://github.com/Smana/runlore/commit/77b039d28b1b259c0b59bb5cfa36fb844d6c82bd))
+* **readme:** pluggable sources/notifiers; SRE audience; Argo CD e2e-tested ([5f396e6](https://github.com/Smana/runlore/commit/5f396e69a633881c72fd4d84e6f279feee78d0ae))
+* **source:** fix Deps.Raw keying comment; drop dead Descriptor.ConfigKey ([8e7c415](https://github.com/Smana/runlore/commit/8e7c4157d26fe2dfded197e3fa8f746dd163fdd3))
+* **spec:** extensible source & notifier adapter registries ([25a0220](https://github.com/Smana/runlore/commit/25a02201866640c5b258f5e926837a45f35004b2))
+
+
+### Code Refactoring
+
+* **app:** port source/notifier wiring onto internal/app; reconcile [#137](https://github.com/Smana/runlore/issues/137) TriggerKey ([0e53c3a](https://github.com/Smana/runlore/commit/0e53c3a0c665c654cba6e9d513c22fdc7bd78275))
+* **coalesce:** operate on investigate.Request (+Enqueue); keep alert path green ([f1b6276](https://github.com/Smana/runlore/commit/f1b6276983a3de00550226a3c4486d5165f90706))
+* extensible source & notifier adapters (typed registries) ([050a962](https://github.com/Smana/runlore/commit/050a962247546faf4ba8d22643269af5cde08dac))
+* **providers:** take a PodLogQuery struct, not a 5-arg bool, for PodLogs ([b347fc0](https://github.com/Smana/runlore/commit/b347fc0b4c4b7c95d78934bedbb432b4d9468581))
+* retire config.Incident + dead trigger.Engine; alertmanager adapter owns AM parsing ([ee60686](https://github.com/Smana/runlore/commit/ee60686516ffe74fa179147e241afcfcc1f27ef2))
+
 ## 0.1.0 (2026-06-26)
 
 
