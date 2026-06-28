@@ -42,10 +42,29 @@ func (t PodStatusTool) Call(ctx context.Context, args string) (string, error) {
 	if err != nil {
 		return "", err
 	}
+	// A caller-supplied selector that matches nothing is indistinguishable from a
+	// genuinely empty namespace — and that false negative has produced confident-
+	// but-wrong "workload not deployed" findings (the model tends to guess
+	// app=<name>, but workloads commonly label with app.kubernetes.io/name). Fall
+	// back to the whole namespace so a non-matching selector can't read as "no pods
+	// exist"; the model still sees the real (e.g. CrashLoopBackOff) pods.
+	var note string
+	if len(pods) == 0 && in.Selector != "" {
+		all, err := t.Kube.PodStatuses(ctx, in.Namespace, "")
+		if err != nil {
+			return "", err
+		}
+		if len(all) > 0 {
+			note = fmt.Sprintf("selector %s matched no pods; showing all %d pod(s) in namespace %q instead:\n",
+				in.Selector, len(all), in.Namespace)
+			pods = all
+		}
+	}
 	if len(pods) == 0 {
 		return fmt.Sprintf("no pods in namespace %q%s", in.Namespace, selectorSuffix(in.Selector)), nil
 	}
 	var b strings.Builder
+	b.WriteString(note)
 	for i, p := range pods {
 		if i >= maxToolRows {
 			fmt.Fprintf(&b, "… (%d more)\n", len(pods)-i)
