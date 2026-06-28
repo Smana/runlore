@@ -40,6 +40,56 @@ func TestPodStatusTool(t *testing.T) {
 	}
 }
 
+// selectorKube returns matched pods only for a specific selector, and allPods for
+// the empty (whole-namespace) selector — modelling a workload whose real labels
+// don't match a guessed `app=<name>` selector.
+type selectorKube struct {
+	matchSelector string
+	matched       []providers.PodStatus
+	allPods       []providers.PodStatus
+}
+
+func (f selectorKube) PodStatuses(_ context.Context, _ string, selector string) ([]providers.PodStatus, error) {
+	if selector == "" {
+		return f.allPods, nil
+	}
+	if selector == f.matchSelector {
+		return f.matched, nil
+	}
+	return nil, nil
+}
+func (f selectorKube) Events(context.Context, string, string, bool) ([]providers.KubeEvent, error) {
+	return nil, nil
+}
+
+// A guessed label selector that matches nothing must NOT read as an empty
+// namespace: that false negative produced confident-but-wrong "workload not
+// deployed" RCAs. pod_status falls back to the whole namespace so the real
+// (e.g. CrashLoopBackOff) pods still reach the model.
+func TestPodStatusToolSelectorFallback(t *testing.T) {
+	tool := PodStatusTool{Kube: selectorKube{
+		matchSelector: "app.kubernetes.io/name=image-gallery",
+		allPods: []providers.PodStatus{
+			{Name: "xplane-image-gallery-xwdk7", Phase: "Running", Ready: "0/1", Reasons: []string{
+				"image-gallery: CrashLoopBackOff: back-off restarting failed container",
+			}},
+		},
+	}}
+	out, err := tool.Call(context.Background(), `{"namespace":"apps","selector":"app=xplane-image-gallery"}`)
+	if err != nil {
+		t.Fatalf("Call: %v", err)
+	}
+	if strings.Contains(out, "no pods in namespace") {
+		t.Fatalf("a non-matching selector must not read as an empty namespace, got:\n%s", out)
+	}
+	if !strings.Contains(out, "xplane-image-gallery-xwdk7") || !strings.Contains(out, "CrashLoopBackOff") {
+		t.Fatalf("fallback must surface the real namespace pods, got:\n%s", out)
+	}
+	if !strings.Contains(out, "app=xplane-image-gallery") {
+		t.Fatalf("fallback should note the selector that matched nothing, got:\n%s", out)
+	}
+}
+
 func TestKubeEventsTool(t *testing.T) {
 	tool := KubeEventsTool{Kube: fakeKube{events: []providers.KubeEvent{
 		{Type: "Warning", Reason: "FailedScheduling", Object: "Pod/valkey-0", Count: 13,
