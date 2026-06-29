@@ -5,6 +5,18 @@
       "package-name": "runlore",
       "include-component-in-tag": false,
       "initial-version": "0.1.0",
+      "extra-files": [
+        {
+          "type": "yaml",
+          "path": "deploy/helm/runlore/Chart.yaml",
+          "jsonpath": "$.version"
+        },
+        {
+          "type": "yaml",
+          "path": "deploy/helm/runlore/Chart.yaml",
+          "jsonpath": "$.appVersion"
+        }
+      ],
       "changelog-sections": [
         {"type": "feat", "section": "Features"},
         {"type": "fix", "section": "Bug Fixes"},
