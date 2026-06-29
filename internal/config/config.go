@@ -235,6 +235,10 @@ type Model struct {
 	BaseURL   string `yaml:"base_url"`    // OpenAI: required; Anthropic/Gemini: optional (built-in default endpoint)
 	Model     string `yaml:"model"`       // model name
 	APIKeyEnv string `yaml:"api_key_env"` // env var holding the API key (empty = keyless)
+	// MaxTokens caps the model's output (generated) tokens per request. 0 = use the
+	// 8192 default. Streaming providers send it (Anthropic max_tokens, OpenAI
+	// max_tokens, Gemini generationConfig.maxOutputTokens); a too-low value truncates.
+	MaxTokens int `yaml:"max_tokens"`
 	// Verify optionally routes the adversarial verify pass to a cheaper/faster model;
 	// unset fields inherit from the parent above (so `verify: {model: <cheap>}` reuses
 	// the same provider/endpoint/key). Absent ⇒ verify runs on the main model.
@@ -260,6 +264,9 @@ type ModelOverride struct {
 	BaseURL   string `yaml:"base_url"`
 	Model     string `yaml:"model"`
 	APIKeyEnv string `yaml:"api_key_env"`
+	// MaxTokens overrides the parent's effective output-token cap for the verify pass;
+	// 0 inherits the parent's effective value.
+	MaxTokens int `yaml:"max_tokens"`
 }
 
 // Notify configures where investigation findings are delivered.
@@ -483,6 +490,14 @@ func (a ActionPolicy) Enabled() bool {
 // for the autonomy ladder: enabling execution requires the controls that bound
 // it. Returns an error that should abort startup.
 func (c *Config) Validate() error {
+	// Reject a nonsensical output-token cap before it reaches a provider request. 0
+	// means "use the default"; a negative value is always a misconfiguration.
+	if c.Model.MaxTokens < 0 {
+		return fmt.Errorf("model.max_tokens must be >= 0 (0 = use the default), got %d", c.Model.MaxTokens)
+	}
+	if c.Model.Verify != nil && c.Model.Verify.MaxTokens < 0 {
+		return fmt.Errorf("model.verify.max_tokens must be >= 0 (0 = inherit), got %d", c.Model.Verify.MaxTokens)
+	}
 	switch c.Actions.Mode {
 	case "", ActionOff, ActionSuggest:
 		return nil // read-only-ish: nothing to execute

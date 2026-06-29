@@ -13,21 +13,47 @@ import (
 	"github.com/Smana/runlore/internal/providers"
 )
 
-// NewModelClient builds a ModelProvider for a wire protocol + endpoint.
-func NewModelClient(provider, baseURL, model, apiKey string) providers.ModelProvider {
+// defaultMaxTokens is the output-token ceiling used when model.max_tokens is unset
+// (0). It bounds a single completion's generated tokens across every provider.
+const defaultMaxTokens = 8192
+
+// effectiveMaxTokens resolves a configured max_tokens to the value sent on the wire:
+// an unset (0) value becomes the defaultMaxTokens; an explicit value is used as-is.
+func effectiveMaxTokens(configured int) int {
+	if configured <= 0 {
+		return defaultMaxTokens
+	}
+	return configured
+}
+
+// verifyMaxTokens resolves the verify pass's effective output-token cap: its own
+// override when set (>0), otherwise the parent model's effective value (so a bare
+// `verify: {model: <cheap>}` inherits the parent's cap, defaulted or explicit).
+func verifyMaxTokens(cfg *config.Config) int {
+	parent := effectiveMaxTokens(cfg.Model.MaxTokens)
+	if v := cfg.Model.Verify; v != nil && v.MaxTokens > 0 {
+		return v.MaxTokens
+	}
+	return parent
+}
+
+// NewModelClient builds a ModelProvider for a wire protocol + endpoint. maxTokens
+// is the per-request output-token ceiling passed through to the provider.
+func NewModelClient(provider, baseURL, model, apiKey string, maxTokens int) providers.ModelProvider {
 	switch provider {
 	case "anthropic":
-		return anthropic.New(baseURL, model, apiKey)
+		return anthropic.New(baseURL, model, apiKey, maxTokens)
 	case "gemini":
-		return gemini.New(baseURL, model, apiKey)
+		return gemini.New(baseURL, model, apiKey, maxTokens)
 	default:
-		return openai.New(baseURL, model, apiKey)
+		return openai.New(baseURL, model, apiKey, maxTokens)
 	}
 }
 
-// BuildModel builds the ModelProvider for the configured provider.
+// BuildModel builds the ModelProvider for the configured provider, applying the
+// effective output-token cap (model.max_tokens, defaulted when unset).
 func BuildModel(cfg *config.Config, apiKey string) providers.ModelProvider {
-	return NewModelClient(cfg.Model.Provider, cfg.Model.BaseURL, cfg.Model.Model, apiKey)
+	return NewModelClient(cfg.Model.Provider, cfg.Model.BaseURL, cfg.Model.Model, apiKey, effectiveMaxTokens(cfg.Model.MaxTokens))
 }
 
 // BuildVerifyModel builds the optional cheaper model for the adversarial verify
@@ -49,7 +75,7 @@ func BuildVerifyModel(cfg *config.Config) providers.ModelProvider {
 		apiKey = os.Getenv(keyEnv)
 	}
 	return NewModelClient(or(v.Provider, cfg.Model.Provider),
-		or(v.BaseURL, cfg.Model.BaseURL), or(v.Model, cfg.Model.Model), apiKey)
+		or(v.BaseURL, cfg.Model.BaseURL), or(v.Model, cfg.Model.Model), apiKey, verifyMaxTokens(cfg))
 }
 
 // BuildJudgeModel builds the (stronger) grader model from --judge-* flags, falling
@@ -62,5 +88,6 @@ func BuildJudgeModel(cfg *config.Config, provider, baseURL, model, apiKeyEnv str
 		}
 		return BuildModel(cfg, apiKey)
 	}
-	return NewModelClient(provider, baseURL, model, os.Getenv(apiKeyEnv))
+	// A judge gets the same effective output cap as the main model (no separate knob).
+	return NewModelClient(provider, baseURL, model, os.Getenv(apiKeyEnv), effectiveMaxTokens(cfg.Model.MaxTokens))
 }

@@ -136,6 +136,77 @@ func TestValidateModelDoesNotRequireWebhookToken(t *testing.T) {
 	}
 }
 
+// TestModelMaxTokensParse verifies model.max_tokens parses to Model.MaxTokens, an
+// unset key reads as 0 (the "use the default" sentinel), and the verify override
+// carries its own max_tokens (0 ⇒ inherit the parent's effective value).
+func TestModelMaxTokensParse(t *testing.T) {
+	const y = `
+model:
+  provider: anthropic
+  model: claude-x
+  max_tokens: 16384
+  verify:
+    model: claude-cheap
+`
+	var c Config
+	if err := yaml.Unmarshal([]byte(y), &c); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if c.Model.MaxTokens != 16384 {
+		t.Fatalf("model.max_tokens: want 16384, got %d", c.Model.MaxTokens)
+	}
+	// A verify block with no max_tokens leaves the override at 0 (inherit the parent).
+	if c.Model.Verify == nil || c.Model.Verify.MaxTokens != 0 {
+		t.Fatalf("verify.max_tokens absent must be 0, got %+v", c.Model.Verify)
+	}
+
+	// Absent ⇒ zero ⇒ the wiring applies the 8192 default.
+	var z Config
+	if err := yaml.Unmarshal([]byte("model:\n  provider: openai\n  model: x\n"), &z); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if z.Model.MaxTokens != 0 {
+		t.Fatalf("absent max_tokens must be 0, got %d", z.Model.MaxTokens)
+	}
+
+	// An explicit verify.max_tokens overrides the parent.
+	const yv = `
+model:
+  provider: anthropic
+  model: claude-x
+  max_tokens: 16384
+  verify:
+    model: claude-cheap
+    max_tokens: 2048
+`
+	var cv Config
+	if err := yaml.Unmarshal([]byte(yv), &cv); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if cv.Model.Verify == nil || cv.Model.Verify.MaxTokens != 2048 {
+		t.Fatalf("verify.max_tokens override: want 2048, got %+v", cv.Model.Verify)
+	}
+}
+
+// TestValidateRejectsNegativeMaxTokens verifies a negative model.max_tokens (or a
+// negative verify override) is rejected by Validate — a nonsensical value that
+// would otherwise reach a provider request.
+func TestValidateRejectsNegativeMaxTokens(t *testing.T) {
+	c := &Config{Model: Model{Provider: "anthropic", MaxTokens: -1}}
+	if err := c.Validate(); err == nil {
+		t.Fatal("negative model.max_tokens must be rejected by Validate")
+	}
+	cv := &Config{Model: Model{Provider: "anthropic", Verify: &ModelOverride{MaxTokens: -5}}}
+	if err := cv.Validate(); err == nil {
+		t.Fatal("negative verify.max_tokens must be rejected by Validate")
+	}
+	// Zero and positive are fine.
+	ok := &Config{Model: Model{Provider: "anthropic", MaxTokens: 0, Verify: &ModelOverride{MaxTokens: 4096}}}
+	if err := ok.Validate(); err != nil {
+		t.Fatalf("non-negative max_tokens must validate clean: %v", err)
+	}
+}
+
 func TestCurateRecurrenceThresholdParse(t *testing.T) {
 	var c Config
 	if err := yaml.Unmarshal([]byte("curate:\n  recurrence_threshold: 5\n"), &c); err != nil {

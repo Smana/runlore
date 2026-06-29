@@ -16,21 +16,30 @@ import (
 	"github.com/Smana/runlore/internal/providers"
 )
 
+// defaultMaxTokens is the output-token ceiling used when the caller passes <= 0.
+const defaultMaxTokens = 8192
+
 // Client is an OpenAI-compatible model provider.
 type Client struct {
-	baseURL string
-	model   string
-	apiKey  string
-	http    *http.Client
+	baseURL   string
+	model     string
+	apiKey    string
+	maxTokens int
+	http      *http.Client
 }
 
-// New builds a client. apiKey may be empty (keyless vLLM/Ollama).
-func New(baseURL, model, apiKey string) *Client {
+// New builds a client. apiKey may be empty (keyless vLLM/Ollama). maxTokens caps
+// output tokens per request; <= 0 falls back to defaultMaxTokens.
+func New(baseURL, model, apiKey string, maxTokens int) *Client {
+	if maxTokens <= 0 {
+		maxTokens = defaultMaxTokens
+	}
 	return &Client{
-		baseURL: strings.TrimRight(baseURL, "/"),
-		model:   model,
-		apiKey:  apiKey,
-		http:    httpx.SecureClient(2 * time.Minute),
+		baseURL:   strings.TrimRight(baseURL, "/"),
+		model:     model,
+		apiKey:    apiKey,
+		maxTokens: maxTokens,
+		http:      httpx.SecureClient(2 * time.Minute),
 	}
 }
 

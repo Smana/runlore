@@ -37,15 +37,19 @@ type Client struct {
 }
 
 // New builds a client. baseURL may be empty (defaults to DefaultBaseURL).
-func New(baseURL, model, apiKey string) *Client {
+// maxTokens caps output tokens per request; <= 0 falls back to defaultMaxTokens.
+func New(baseURL, model, apiKey string, maxTokens int) *Client {
 	if baseURL == "" {
 		baseURL = DefaultBaseURL
+	}
+	if maxTokens <= 0 {
+		maxTokens = defaultMaxTokens
 	}
 	return &Client{
 		baseURL:   strings.TrimRight(baseURL, "/"),
 		model:     model,
 		apiKey:    apiKey,
-		maxTokens: defaultMaxTokens,
+		maxTokens: maxTokens,
 		http:      httpx.SecureClient(2 * time.Minute),
 	}
 }
