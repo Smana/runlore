@@ -434,6 +434,32 @@ type CompletionResponse struct {
 	// Gemini finishReason "MAX_TOKENS"). It distinguishes a cut-off answer from a
 	// complete one, so the loop need not treat a truncated reply as final.
 	Truncated bool
+	// StopReason is the provider's raw turn-termination reason, normalized to the
+	// provider's own vocabulary (Anthropic stop_reason, OpenAI finish_reason, Gemini
+	// finishReason). It is empty when the provider omits it. Refused() interprets it;
+	// the loop uses Refused() rather than matching strings itself.
+	StopReason string
+}
+
+// refusalStopReasons is the set of stop reasons (across providers, lower-cased) that
+// mean the model declined the request on safety/policy grounds rather than producing
+// an answer. Anthropic emits "refusal"; OpenAI "content_filter"; Gemini "SAFETY",
+// "PROHIBITED_CONTENT", "BLOCKLIST", "SPII".
+var refusalStopReasons = map[string]bool{
+	"refusal":            true,
+	"content_filter":     true,
+	"safety":             true,
+	"prohibited_content": true,
+	"blocklist":          true,
+	"spii":               true,
+}
+
+// Refused reports whether the model declined the request on safety/policy grounds
+// (a successful response with no usable answer) rather than terminating normally.
+// The comparison is case-insensitive so a provider's casing (e.g. Gemini's "SAFETY")
+// does not matter. The loop treats a refusal as a first-class unresolved outcome.
+func (r CompletionResponse) Refused() bool {
+	return refusalStopReasons[strings.ToLower(r.StopReason)]
 }
 
 // Usage is the provider-reported token accounting for one completion.
