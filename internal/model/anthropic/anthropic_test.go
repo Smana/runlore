@@ -23,7 +23,7 @@ func TestNon2xxErrorOmitsBody(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	_, err := New(srv.URL, "claude-x", "k").Complete(context.Background(), providers.CompletionRequest{
+	_, err := New(srv.URL, "claude-x", "k", 0).Complete(context.Background(), providers.CompletionRequest{
 		Messages: []providers.Message{{Role: "user", Content: "hi"}},
 	})
 	if err == nil {
@@ -56,7 +56,7 @@ func TestComplete(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	c := New(srv.URL, "claude-x", "k")
+	c := New(srv.URL, "claude-x", "k", 0)
 	resp, err := c.Complete(context.Background(), providers.CompletionRequest{
 		System:   "sys",
 		Messages: []providers.Message{{Role: "user", Content: "hi"}},
@@ -133,7 +133,7 @@ func TestUsageAndStopReason(t *testing.T) {
 				_, _ = w.Write([]byte(tt.body))
 			}))
 			defer srv.Close()
-			resp, err := New(srv.URL, "claude-x", "k").Complete(context.Background(), providers.CompletionRequest{
+			resp, err := New(srv.URL, "claude-x", "k", 0).Complete(context.Background(), providers.CompletionRequest{
 				Messages: []providers.Message{{Role: "user", Content: "hi"}},
 			})
 			if err != nil {
@@ -159,7 +159,7 @@ func TestMessageCoalescing(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	_, err := New(srv.URL, "claude-x", "k").Complete(context.Background(), providers.CompletionRequest{
+	_, err := New(srv.URL, "claude-x", "k", 0).Complete(context.Background(), providers.CompletionRequest{
 		Messages: []providers.Message{
 			{Role: "user", Content: "investigate"},
 			{Role: "assistant", ToolCalls: []providers.ToolCall{
@@ -198,7 +198,7 @@ func TestPromptCacheToolsOnly(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	_, err := New(srv.URL, "claude-x", "k").Complete(context.Background(), providers.CompletionRequest{
+	_, err := New(srv.URL, "claude-x", "k", 0).Complete(context.Background(), providers.CompletionRequest{
 		Messages: []providers.Message{{Role: "user", Content: "hi"}},
 		Tools: []providers.ToolSpec{
 			{Name: "a", Description: "d", Schema: `{"type":"object"}`},

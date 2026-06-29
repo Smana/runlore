@@ -25,24 +25,33 @@ import (
 // DefaultBaseURL is the public Gemini API.
 const DefaultBaseURL = "https://generativelanguage.googleapis.com"
 
+// defaultMaxTokens is the output-token ceiling used when the caller passes <= 0.
+const defaultMaxTokens = 8192
+
 // Client is a Gemini (generateContent) model provider.
 type Client struct {
-	baseURL string
-	model   string
-	apiKey  string
-	http    *http.Client
+	baseURL   string
+	model     string
+	apiKey    string
+	maxTokens int
+	http      *http.Client
 }
 
 // New builds a client. baseURL may be empty (defaults to DefaultBaseURL).
-func New(baseURL, model, apiKey string) *Client {
+// maxTokens caps output tokens per request; <= 0 falls back to defaultMaxTokens.
+func New(baseURL, model, apiKey string, maxTokens int) *Client {
 	if baseURL == "" {
 		baseURL = DefaultBaseURL
 	}
+	if maxTokens <= 0 {
+		maxTokens = defaultMaxTokens
+	}
 	return &Client{
-		baseURL: strings.TrimRight(baseURL, "/"),
-		model:   model,
-		apiKey:  apiKey,
-		http:    httpx.SecureClient(2 * time.Minute),
+		baseURL:   strings.TrimRight(baseURL, "/"),
+		model:     model,
+		apiKey:    apiKey,
+		maxTokens: maxTokens,
+		http:      httpx.SecureClient(2 * time.Minute),
 	}
 }
 

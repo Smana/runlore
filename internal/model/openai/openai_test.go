@@ -36,7 +36,7 @@ func TestNon2xxErrorOmitsBody(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	_, err := New(srv.URL, "test-model", "k").Complete(context.Background(), providers.CompletionRequest{
+	_, err := New(srv.URL, "test-model", "k", 0).Complete(context.Background(), providers.CompletionRequest{
 		Messages: []providers.Message{{Role: "user", Content: "hi"}},
 	})
 	if err == nil {
@@ -74,7 +74,7 @@ func TestComplete(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	c := New(srv.URL, "test-model", "k")
+	c := New(srv.URL, "test-model", "k", 0)
 	resp, err := c.Complete(context.Background(), providers.CompletionRequest{
 		System:   "sys",
 		Messages: []providers.Message{{Role: "user", Content: "hi"}},
@@ -140,7 +140,7 @@ func TestUsageAndFinishReason(t *testing.T) {
 				_, _ = w.Write([]byte(tt.body))
 			}))
 			defer srv.Close()
-			resp, err := New(srv.URL, "test-model", "").Complete(context.Background(), providers.CompletionRequest{
+			resp, err := New(srv.URL, "test-model", "", 0).Complete(context.Background(), providers.CompletionRequest{
 				Messages: []providers.Message{{Role: "user", Content: "hi"}},
 			})
 			if err != nil {
@@ -170,7 +170,7 @@ func TestEmptyToolResultKeepsContent(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	c := New(srv.URL, "test-model", "")
+	c := New(srv.URL, "test-model", "", 0)
 	_, err := c.Complete(context.Background(), providers.CompletionRequest{
 		Messages: []providers.Message{
 			{Role: "user", Content: "investigate"},
