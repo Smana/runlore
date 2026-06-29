@@ -1,3 +1,9 @@
+# Nightly replay-eval: runs the lore eval harness against example cases and
+# gates on a 70% pass-rate.
+#
+# IMPORTANT: this job requires the RUNLORE_EVAL_API_KEY repo secret (an
+# Anthropic API key). When the secret is absent the run is skipped gracefully
+# (job exits 0) so the nightly schedule does not produce spurious failures.
 name: eval
 on:
   schedule:
@@ -21,13 +27,43 @@ jobs:
       - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
         with:
           go-version: "1.26"
-      - run: go build -o lore ./cmd/lore
+
+      # Guard: check whether the API key secret is set without echoing it.
+      # We map the secret to an env var and test -n so the value is never
+      # printed. The output `has_key` drives all subsequent steps.
+      - id: guard
+        env:
+          KEY: ${{ secrets.RUNLORE_EVAL_API_KEY }}
+        run: |
+          if [ -n "$KEY" ]; then
+            echo "has_key=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "has_key=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      # Emit a clear notice and a job-summary line when the key is absent so
+      # the skip is self-documenting in the Actions UI.
+      - name: skip notice (no API key)
+        if: steps.guard.outputs.has_key != 'true'
+        run: |
+          echo "::notice::eval skipped — RUNLORE_EVAL_API_KEY secret not set"
+          echo "## eval skipped" >> "$GITHUB_STEP_SUMMARY"
+          echo "The \`RUNLORE_EVAL_API_KEY\` repo secret (Anthropic API key) is not configured. Set it to enable nightly eval runs." >> "$GITHUB_STEP_SUMMARY"
+
+      - name: build lore binary
+        if: steps.guard.outputs.has_key == 'true'
+        run: go build -o lore ./cmd/lore
+
       - name: replay eval (k-of-n + fail-under gate)
+        if: steps.guard.outputs.has_key == 'true'
         env:
           RUNLORE_EVAL_API_KEY: ${{ secrets.RUNLORE_EVAL_API_KEY }}
         run: ./lore eval -config eval/ci.runlore.yaml -cases examples/eval -n 5 -fail-under 0.7 -report-dir eval/reports
+
       - name: upload report
-        if: always()
+        # always() so a genuine eval failure (key present, score < gate) still
+        # uploads its diagnostic report; gated on has_key so a skipped run doesn't.
+        if: always() && steps.guard.outputs.has_key == 'true'
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: eval-report
