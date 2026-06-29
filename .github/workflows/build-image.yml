@@ -34,15 +34,34 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
-  build-and-push:
-    name: Build and push
-    runs-on: ubuntu-latest
+  # Per-architecture build on NATIVE hosted runners (no QEMU): ubuntu-latest builds
+  # amd64, ubuntu-24.04-arm builds arm64. arm64 hosted runners are free with
+  # unlimited minutes on public repos. Each leg compiles Go natively (CGO_ENABLED=0
+  # static binary + distroless static base, both per-arch), so no cross-compile.
+  #
+  # On push: each leg pushes the image BY DIGEST only (push-by-digest=true, no tag)
+  # with full provenance (mode=max) + SBOM attestations attached to that per-arch
+  # digest, then exports the digest as an artifact for the merge job. On PR: both
+  # arches build (to catch arm64 breakage early) but nothing is pushed.
+  build:
+    name: Build (${{ matrix.platform.arch }})
+    strategy:
+      fail-fast: false
+      matrix:
+        platform:
+          - arch: amd64
+            os: linux/amd64
+            runner: ubuntu-latest
+          - arch: arm64
+            os: linux/arm64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.platform.runner }}
     permissions:
       contents: read
       packages: write
-      security-events: write
-      # Keyless cosign signing: the OIDC token identifies this workflow to Fulcio,
-      # which issues the short-lived signing certificate. No long-lived keys.
+      # Keyless cosign signing happens in the merge job, but provenance/SBOM
+      # attestations on the per-arch digest are signed by buildx via the same OIDC
+      # token, so each build leg needs id-token: write.
       id-token: write
     steps:
       - name: Checkout
@@ -64,72 +83,92 @@ jobs:
         uses: docker/metadata-action@80c7e94dd9b9319bd5eb7a0e0fe9291e23a2a2e9 # v6.1.0
         with:
           images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          # Per-arch images are pushed by digest with NO tag, so this step exists
+          # only to derive the OCI labels and the {{version}} value (consumed as the
+          # VERSION build-arg / image label below). The authoritative tag list is
+          # computed once in the merge job and applied to the final manifest list.
+          # These tag rules just feed {{version}}: semver on tag pushes, branch/PR
+          # ref otherwise.
           tags: |
+            type=semver,pattern={{version}}
             type=ref,event=branch
             type=ref,event=pr
-            type=semver,pattern={{version}}
-            type=semver,pattern={{major}}.{{minor}}
-            # Branch-prefixed SHA tag only on branch PUSHES (empty on tags/PRs →
-            # invalid ":-<sha>"): the metadata action leaves {{branch}} empty there,
-            # which would emit the invalid tag ":-<sha>" (a tag cannot start with
-            # "-") and fail the build. `ref_type` is 'branch' on pull_request events
-            # too, so gate on event_name=push to actually exclude PRs.
-            type=sha,prefix={{branch}}-,enable=${{ github.event_name == 'push' && github.ref_type == 'branch' }}
-            # Always provide an immutable SHA tag (valid in every event context).
-            type=sha,prefix=sha-
-            type=raw,value=latest,enable={{is_default_branch}}
 
-      - name: Build and push
+      # OCI repository names must be lowercase, but github.repository_owner can
+      # contain uppercase (e.g. "Smana") — buildx rejects a mixed-case push target.
+      # Lowercase the full image ref before pushing by digest (the merge job already
+      # does this; PRs wouldn't catch it since they build type=cacheonly / no push).
+      - name: Lowercase image ref
+        id: img
+        env:
+          REF: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+        run: echo "ref=${REF,,}" >> "$GITHUB_OUTPUT"
+
+      - name: Build and push by digest
         id: build
         uses: docker/build-push-action@f9f3042f7e2789586610d6e8b85c8f03e5195baf # v7.2.0
         with:
           context: .
           file: ./Dockerfile
-          # amd64-only: the target clusters run amd64 nodes, and arm64 under QEMU
-          # emulation dominated build time (~10x slower Go compile). Reintroduce via
-          # a native-arm runner matrix + manifest merge if multi-arch is needed.
-          platforms: linux/amd64
-          push: ${{ github.event_name != 'pull_request' }}
-          tags: ${{ steps.meta.outputs.tags }}
+          platforms: ${{ matrix.platform.os }}
           labels: ${{ steps.meta.outputs.labels }}
           build-args: |
             VERSION=${{ steps.meta.outputs.version }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
-          # Buildx-native supply-chain attestations, pushed alongside the image:
+          # Per-arch GitHub Actions cache, keyed by arch so amd64 and arm64 don't
+          # clobber each other.
+          cache-from: type=gha,scope=build-${{ matrix.platform.arch }}
+          cache-to: type=gha,mode=max,scope=build-${{ matrix.platform.arch }}
+          # Buildx-native supply-chain attestations, pushed alongside each per-arch
+          # image:
           #   provenance mode=max -> full SLSA build provenance (build steps + materials)
           #   sbom: true          -> SPDX SBOM attestation generated from the build
-          # These are attached as OCI referrers to the pushed digest; cosign signs
-          # the same digest below.
+          # These are attached as OCI referrers to the per-arch digest. `imagetools
+          # create` in the merge job preserves these referrers under the final tag,
+          # and cosign signs the manifest-list digest there.
           provenance: mode=max
           sbom: true
+          # Push BY DIGEST only (no tag) on non-PR events; the merge job assembles
+          # the multi-arch manifest list and applies the tags. name-canonical keeps
+          # the fully-qualified repo name in the pushed digest reference.
+          outputs: ${{ github.event_name != 'pull_request' && format('type=image,name={0},push-by-digest=true,name-canonical=true,push=true', steps.img.outputs.ref) || 'type=cacheonly' }}
 
-      # Keyless image signing. Only runs when the image was actually pushed
-      # (digest is empty on pull_request). cosign uses the job's OIDC token to
-      # get a short-lived Fulcio cert and records the signature in Rekor.
-      - name: Install cosign
-        if: github.event_name != 'pull_request'
-        uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
-
-      - name: Sign image with cosign (keyless)
+      # Export the per-arch digest as an artifact so the merge job can assemble the
+      # manifest list. Only on push (nothing was pushed on PR). The digest is written
+      # as an empty filename under /tmp/digests so downstream globbing picks it up.
+      - name: Export digest
         if: github.event_name != 'pull_request'
         env:
           DIGEST: ${{ steps.build.outputs.digest }}
-        # Sign by immutable digest, not a mutable tag, so the signature can't be
-        # repointed later. ghcr/OCI references must be lowercase, but
-        # github.repository_owner can contain uppercase (e.g. "Smana"), so lowercase
-        # the image name before signing.
         run: |
-          image="${REGISTRY}/${IMAGE_NAME}"
-          cosign sign --yes "${image,,}@${DIGEST}"
+          mkdir -p /tmp/digests
+          # Strip the "sha256:" algorithm prefix so the value is a valid filename.
+          touch "/tmp/digests/${DIGEST#sha256:}"
 
-      # PR gate: the image isn't pushed on pull_request, so scan the filesystem
-      # (Go module graph + Dockerfile/config) and FAIL the job on HIGH/CRITICAL
-      # so a vulnerable dependency or misconfig can't merge. Post-publish runs
-      # get the image-level scan below instead.
+      - name: Upload digest
+        if: github.event_name != 'pull_request'
+        uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5.0.0
+        with:
+          name: digest-${{ matrix.platform.arch }}
+          path: /tmp/digests/*
+          if-no-files-found: error
+          retention-days: 1
+
+  # PR gate (single run, arch-independent): the image isn't pushed on pull_request,
+  # so scan the filesystem (Go module graph + Dockerfile/config) and FAIL on
+  # HIGH/CRITICAL so a vulnerable dependency or misconfig can't merge. Post-publish
+  # runs get the image-level scan in the merge job instead.
+  scan-pr:
+    name: Trivy filesystem scan (PR gate)
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+
       - name: Trivy filesystem scan (PR gate)
         uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
-        if: github.event_name == 'pull_request'
         with:
           scan-type: 'fs'
           scan-ref: '.'
@@ -138,9 +177,105 @@ jobs:
           ignore-unfixed: true
           exit-code: '1'
 
+  # Assemble the multi-arch manifest list from the per-arch digests, sign it, scan
+  # it. Only runs on push (publish), after both build legs succeed.
+  merge:
+    name: Merge, sign and scan
+    if: github.event_name != 'pull_request'
+    needs: [build]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+      security-events: write
+      # Keyless cosign signing: the OIDC token identifies this workflow to Fulcio,
+      # which issues the short-lived signing certificate. No long-lived keys.
+      id-token: write
+    steps:
+      - name: Download digests
+        uses: actions/download-artifact@018cc2cf5baa6db3ef3c5f8a56943fffe632ef53 # v6.0.0
+        with:
+          path: /tmp/digests
+          pattern: digest-*
+          merge-multiple: true
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@d7f5e7f509e45cec5c76c4d5afdd7de93d0b3df5 # v4.1.0
+
+      - name: Log in to Container Registry
+        uses: docker/login-action@650006c6eb7dba73a995cc03b0b2d7f5ca915bee # v4.2.0
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract metadata
+        id: meta
+        uses: docker/metadata-action@80c7e94dd9b9319bd5eb7a0e0fe9291e23a2a2e9 # v6.1.0
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          tags: |
+            type=ref,event=branch
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            # Branch-prefixed SHA tag only on branch PUSHES (empty on tags →
+            # invalid ":-<sha>"): the metadata action leaves {{branch}} empty there,
+            # which would emit the invalid tag ":-<sha>" (a tag cannot start with
+            # "-") and fail the build. This job only runs on push, so gate on
+            # ref_type=branch to exclude tag pushes.
+            type=sha,prefix={{branch}}-,enable=${{ github.ref_type == 'branch' }}
+            # Always provide an immutable SHA tag (valid in every push context).
+            type=sha,prefix=sha-
+            type=raw,value=latest,enable={{is_default_branch}}
+
+      # Build the manifest list from the per-arch digests and push it under every
+      # tag computed above. `imagetools create` references the source images by
+      # digest in the same repo; the per-arch provenance/SBOM referrers attached at
+      # build time remain discoverable under the resulting manifest-list digest.
+      - name: Create multi-arch manifest list
+        working-directory: /tmp/digests
+        run: |
+          tags=$(jq -cr '.tags | map("-t " + .) | join(" ")' <<< "${DOCKER_METADATA_OUTPUT_JSON}")
+          # Each downloaded artifact filename is a per-arch digest (sans algorithm
+          # prefix). Reference them as "<repo>@sha256:<digest>" sources.
+          image="${REGISTRY}/${IMAGE_NAME}"
+          sources=$(printf "${image,,}@sha256:%s " *)
+          # shellcheck disable=SC2086
+          docker buildx imagetools create ${tags} ${sources}
+
+      # Resolve the manifest-list digest under the canonical tag so we sign the
+      # multi-arch index itself (not a per-arch child). All tags point at the same
+      # index digest, so signing once by digest covers every tag.
+      - name: Inspect manifest-list digest
+        id: digest
+        run: |
+          image="${REGISTRY}/${IMAGE_NAME}"
+          image="${image,,}"
+          tag=$(jq -cr '.tags[0]' <<< "${DOCKER_METADATA_OUTPUT_JSON}")
+          digest=$(docker buildx imagetools inspect "${tag}" --format '{{ json .Manifest.Digest }}' | jq -r .)
+          echo "digest=${digest}" >> "$GITHUB_OUTPUT"
+          echo "image=${image}" >> "$GITHUB_OUTPUT"
+
+      # Keyless image signing of the multi-arch manifest list. cosign uses the job's
+      # OIDC token to get a short-lived Fulcio cert and records the signature in
+      # Rekor. Signing the index digest covers all architectures under all tags.
+      - name: Install cosign
+        uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
+
+      - name: Sign manifest list with cosign (keyless)
+        env:
+          IMAGE: ${{ steps.digest.outputs.image }}
+          DIGEST: ${{ steps.digest.outputs.digest }}
+        # Sign by immutable digest, not a mutable tag, so the signature can't be
+        # repointed later. The image reference is already lowercased above (ghcr/OCI
+        # references must be lowercase, but github.repository_owner can contain
+        # uppercase, e.g. "Smana").
+        run: cosign sign --yes "${IMAGE}@${DIGEST}"
+
+      # Post-publish image scan against the canonical multi-arch tag, uploaded as
+      # SARIF to GitHub Security.
       - name: Run Trivy vulnerability scanner
         uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
-        if: github.event_name != 'pull_request'
         with:
           image-ref: '${{ fromJSON(steps.meta.outputs.json).tags[0] }}'
           format: 'sarif'
@@ -150,7 +285,6 @@ jobs:
 
       - name: Upload Trivy results to GitHub Security
         uses: github/codeql-action/upload-sarif@8aad20d150bbac5944a9f9d289da16a4b0d87c1e # v4.36.2
-        if: github.event_name != 'pull_request'
         with:
           sarif_file: 'trivy-results.sarif'
           category: 'trivy-runlore'
@@ -163,18 +297,37 @@ jobs:
             echo ""
             echo "**Trigger**: ${{ github.event_name }}"
             echo "**Commit**: \`${{ github.sha }}\`"
-            echo "**Platforms**: linux/amd64"
+            echo "**Platforms**: linux/amd64, linux/arm64"
             echo ""
             echo "**Tags**:"
             echo '```'
             echo "${{ steps.meta.outputs.tags }}"
             echo '```'
-            if [[ "${{ github.event_name }}" != "pull_request" ]]; then
-              echo "**Pushed to**: \`${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}\`"
-              echo "**Digest**: \`${{ steps.build.outputs.digest }}\`"
-              echo "**Security scan**: ✅ Trivy (HIGH, CRITICAL)"
-              echo "**Supply chain**: ✅ cosign signature + SLSA provenance + SBOM attestation"
-            else
-              echo "_PR build — image built for validation, not pushed._"
-            fi
+            echo "**Pushed to**: \`${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}\`"
+            echo "**Manifest digest**: \`${{ steps.digest.outputs.digest }}\`"
+            echo "**Security scan**: ✅ Trivy (HIGH, CRITICAL)"
+            echo "**Supply chain**: ✅ cosign signature (manifest list) + SLSA provenance + SBOM attestation (per-arch)"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  # PR-only summary (the merge/publish summary lives in the merge job, which is
+  # skipped on PRs).
+  pr-summary:
+    name: PR build summary
+    if: github.event_name == 'pull_request'
+    needs: [build, scan-pr]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Build summary
+        if: always()
+        run: |
+          {
+            echo "## 🏗️ RunLore Image Build"
+            echo ""
+            echo "**Trigger**: ${{ github.event_name }}"
+            echo "**Commit**: \`${{ github.sha }}\`"
+            echo "**Platforms**: linux/amd64, linux/arm64"
+            echo ""
+            echo "_PR build — both arches built for validation, not pushed._"
           } >> "$GITHUB_STEP_SUMMARY"
