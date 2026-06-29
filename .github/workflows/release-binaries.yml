@@ -1,11 +1,17 @@
-name: Release Binaries
+name: Release
 
 # Triggered by the v* tag itself, not by release-please's release_created output.
-# release-please creates the v* tag via its PAT, which fires both this workflow and
-# build-image. Decoupling from release_created means re-pointing an existing tag
-# (a re-cut) rebuilds the artifacts; release-please already created the GitHub
-# release and .goreleaser.yaml uses release.mode: keep-existing, so GoReleaser only
-# uploads assets to it.
+# release-please creates the v* tag via its PAT, which fires this workflow.
+# Decoupling from release_created means re-pointing an existing tag (a re-cut)
+# rebuilds the artifacts; release-please already created the GitHub release and
+# .goreleaser.yaml uses release.mode: keep-existing, so GoReleaser only uploads
+# assets to it.
+#
+# GoReleaser produces the full release here: the signed cross-platform `lore`
+# binaries/archives/checksums AND the signed multi-arch (amd64+arm64) container
+# image — built, pushed to ghcr.io/smana/runlore, fused into a manifest, cosign
+# keyless-signed, and shipped with SLSA provenance + SBOM attestations.
+# build-image.yml now only validates PR/main builds (no release builds).
 on:
   push:
     tags: ['v*']
@@ -17,8 +23,11 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: write
-      # Keyless cosign signing of the checksums file: the OIDC token identifies this
-      # workflow to Fulcio, which issues the short-lived signing certificate.
+      # Push the container image + attestations to GHCR (GitHub Packages).
+      packages: write
+      # Keyless cosign signing of the checksums file and the image manifest: the
+      # OIDC token identifies this workflow to Fulcio, which issues the short-lived
+      # signing certificate.
       id-token: write
     steps:
       - name: Checkout
@@ -31,6 +40,18 @@ jobs:
         uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
         with:
           go-version: "1.26"
+
+      - name: Set up Docker Buildx
+        # Required for the goreleaser `dockers` entries (use: buildx) and their
+        # buildx-native --provenance / --sbom attestations.
+        uses: docker/setup-buildx-action@d7f5e7f509e45cec5c76c4d5afdd7de93d0b3df5 # v4.1.0
+
+      - name: Log in to Container Registry
+        uses: docker/login-action@650006c6eb7dba73a995cc03b0b2d7f5ca915bee # v4.2.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Install cosign
         uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
@@ -46,5 +67,6 @@ jobs:
           args: release --clean
         env:
           # Default token is enough: the release for this tag already exists (created
-          # by release-please) and GoReleaser only uploads assets to it.
+          # by release-please) and GoReleaser only uploads assets to it; packages:
+          # write above lets the same token push the image to GHCR.
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
