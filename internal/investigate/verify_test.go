@@ -56,11 +56,13 @@ func TestVerifyRejectsCorrelationFinding(t *testing.T) {
 }
 
 // TestApplyVerdictsClampsConfidence checks that an out-of-range verdict
-// confidence from the verify pass is clamped to [0,1] before it overwrites a
+// confidence from the verify pass is clamped to [0,1] before it is applied to a
 // root cause's score — on both the keep and downgrade branches — and that the
-// recomputed overall confidence (a max over survivors) is in range too. NaN is
-// not reachable here (the `v.Confidence > 0` guard skips it: NaN > 0 is false);
-// NaN clamping is covered at the model-JSON boundary in tools_test.
+// recomputed overall confidence stays in range too. The hypothesis enters at the
+// ceiling (1.0) so the never-raise floor (min with the entering score) does not
+// mask the clamp: min(1.0, clamp01(1.7)) == 1. NaN is not reachable here (the
+// `v.Confidence > 0` guard skips it: NaN > 0 is false); NaN clamping is covered
+// at the model-JSON boundary in tools_test.
 func TestApplyVerdictsClampsConfidence(t *testing.T) {
 	li := &LoopInvestigator{Log: slog.New(slog.NewTextHandler(io.Discard, nil))}
 	cases := []struct {
@@ -74,10 +76,52 @@ func TestApplyVerdictsClampsConfidence(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			inv := providers.Investigation{RootCauses: []providers.Hypothesis{{Summary: "x", Confidence: 0.5}}}
+			inv := providers.Investigation{Confidence: 1, RootCauses: []providers.Hypothesis{{Summary: "x", Confidence: 1}}}
 			out := applyVerdicts(li, Request{}, inv, []verdict{{Index: 0, Verdict: tc.verdict, Confidence: tc.conf}})
 			if len(out.RootCauses) != 1 || out.RootCauses[0].Confidence != tc.want {
 				t.Fatalf("root-cause confidence = %v, want %v", out.RootCauses[0].Confidence, tc.want)
+			}
+			if out.Confidence != tc.want {
+				t.Fatalf("overall confidence = %v, want %v", out.Confidence, tc.want)
+			}
+		})
+	}
+}
+
+// TestVerifyNeverRaisesConfidence pins the design invariant (docs/design.md:203):
+// the adversarial verify pass may only keep confidence equal or lower it, never
+// raise — both per-hypothesis and for the overall investigation confidence. A
+// `keep` verdict carrying a HIGHER confidence than the hypothesis entered with
+// must not promote it; a `keep` with a lower confidence still lowers it.
+func TestVerifyNeverRaisesConfidence(t *testing.T) {
+	li := &LoopInvestigator{Log: slog.New(slog.NewTextHandler(io.Discard, nil))}
+	cases := []struct {
+		name    string
+		enter   float64
+		verdict string
+		conf    float64
+		want    float64
+	}{
+		{"keep does not raise", 0.5, "keep", 0.9, 0.5},
+		{"keep lowers", 0.5, "keep", 0.3, 0.3},
+		{"downgrade does not raise", 0.5, "downgrade", 0.9, 0.5},
+		{"downgrade lowers", 0.5, "downgrade", 0.3, 0.3},
+		{"keep with zero conf leaves original", 0.5, "keep", 0, 0.5},
+		{"downgrade with zero conf halves", 0.5, "downgrade", 0, 0.25},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			inv := providers.Investigation{
+				Confidence: tc.enter,
+				RootCauses: []providers.Hypothesis{{Summary: "x", Confidence: tc.enter}},
+			}
+			out := applyVerdicts(li, Request{}, inv, []verdict{{Index: 0, Verdict: tc.verdict, Confidence: tc.conf}})
+			if len(out.RootCauses) != 1 || out.RootCauses[0].Confidence != tc.want {
+				t.Fatalf("root-cause confidence = %v, want %v", out.RootCauses[0].Confidence, tc.want)
+			}
+			// Overall must never exceed the pre-verify overall.
+			if out.Confidence > tc.enter {
+				t.Fatalf("overall confidence %v raised above pre-verify %v", out.Confidence, tc.enter)
 			}
 			if out.Confidence != tc.want {
 				t.Fatalf("overall confidence = %v, want %v", out.Confidence, tc.want)
