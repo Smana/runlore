@@ -94,25 +94,32 @@ func (li *LoopInvestigator) verifyFindings(ctx context.Context, req Request, inv
 }
 
 // applyVerdicts rewrites the investigation per the review: rejected root causes
-// move to Unresolved, downgraded ones get a lower confidence, and the overall
-// confidence is recomputed as the max of what survived.
+// move to Unresolved and downgraded ones get a lower confidence. The verify pass
+// is the honesty guarantee (docs/design.md:203) — it may only keep confidence
+// equal or LOWER it, never raise. So a verdict's confidence is applied as a
+// monotonic floor (min with the score the hypothesis entered with), both
+// per-hypothesis and for the recomputed overall confidence.
 func applyVerdicts(li *LoopInvestigator, req Request, inv providers.Investigation, verds []verdict) providers.Investigation {
 	byIndex := map[int]verdict{}
 	for _, v := range verds {
 		byIndex[v.Index] = v
 	}
+	// Capture the pre-verify overall so the recompute below can only lower it.
+	preVerifyOverall := inv.Confidence
 	kept := make([]providers.Hypothesis, 0, len(inv.RootCauses))
 	for i, rc := range inv.RootCauses {
 		v, ok := byIndex[i]
 		switch {
 		case !ok || v.Verdict == "keep":
+			// A keep carrying a confidence may only lower the score, never raise
+			// it; a keep with no/zero confidence leaves the original untouched.
 			if ok && v.Confidence > 0 {
-				rc.Confidence = clamp01(v.Confidence)
+				rc.Confidence = min(rc.Confidence, clamp01(v.Confidence))
 			}
 			kept = append(kept, rc)
 		case v.Verdict == "downgrade":
 			if v.Confidence > 0 {
-				rc.Confidence = clamp01(v.Confidence)
+				rc.Confidence = min(rc.Confidence, clamp01(v.Confidence))
 			} else {
 				rc.Confidence /= 2
 			}
@@ -130,7 +137,8 @@ func applyVerdicts(li *LoopInvestigator, req Request, inv providers.Investigatio
 			maxc = rc.Confidence
 		}
 	}
-	inv.Confidence = maxc
+	// Never raise the overall above what it was before the review.
+	inv.Confidence = min(preVerifyOverall, maxc)
 	// If every root cause was rejected, drop the proposed actions too — a
 	// remediation motivated by a rejected hypothesis must not survive the review
 	// (the exact failure the verify pass exists to prevent).
