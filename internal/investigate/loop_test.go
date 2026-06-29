@@ -679,3 +679,36 @@ func TestInstantRecallConfirmedEvidenceReachesVerify(t *testing.T) {
 		t.Fatalf("verify should have rejected the recalled cause using current-state evidence, got %+v", got.RootCauses)
 	}
 }
+
+// TestSeedPrompt asserts the seed prompt threads Severity and Environment into
+// the model context when set (so it can calibrate rigor for prod vs staging,
+// critical vs warning), and omits each line — no empty label — when unset.
+func TestSeedPrompt(t *testing.T) {
+	t.Run("includes severity and environment when set", func(t *testing.T) {
+		req := Request{
+			Title:       "PodCrashLooping",
+			Source:      SourceAlert,
+			Workload:    providers.Workload{Namespace: "apps", Name: "web"},
+			Reason:      "CrashLoopBackOff",
+			Severity:    "critical",
+			Environment: "prod",
+		}
+		got := seedPrompt(req)
+		if !strings.Contains(got, "Severity: critical.") {
+			t.Errorf("seed prompt missing severity, got %q", got)
+		}
+		if !strings.Contains(got, "Environment: prod.") {
+			t.Errorf("seed prompt missing environment, got %q", got)
+		}
+	})
+	t.Run("omits severity and environment when empty", func(t *testing.T) {
+		req := Request{Title: "PodCrashLooping", Source: SourceAlert}
+		got := seedPrompt(req)
+		if strings.Contains(got, "Severity:") {
+			t.Errorf("seed prompt should omit empty severity, got %q", got)
+		}
+		if strings.Contains(got, "Environment:") {
+			t.Errorf("seed prompt should omit empty environment, got %q", got)
+		}
+	})
+}
