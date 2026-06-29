@@ -49,6 +49,29 @@ func TestMatches(t *testing.T) {
 	}
 }
 
+// TestMatchSeverityCaseInsensitive guards against the "RunLore went deaf" failure:
+// Alertmanager severity labels arrive with arbitrary casing (Critical, CRITICAL),
+// so a policy configured with lowercase `critical` must still match. This also keeps
+// the trigger consistent with the coalescer, which fast-paths via EqualFold("critical").
+func TestMatchSeverityCaseInsensitive(t *testing.T) {
+	tr := IncidentTrigger{Match: IncidentMatch{Severity: []string{"critical"}}}
+	for _, alertSeverity := range []string{"critical", "Critical", "CRITICAL"} {
+		got := tr.MatchFields(sampleAlertName, alertSeverity, sampleEnvironment, sampleNamespace, sampleLabels())
+		if !got {
+			t.Errorf("severity %q: MatchFields=false, want true (case-insensitive)", alertSeverity)
+		}
+	}
+	// A genuine mismatch must still be rejected regardless of casing.
+	if tr.MatchFields(sampleAlertName, "Warning", sampleEnvironment, sampleNamespace, sampleLabels()) {
+		t.Errorf("severity %q should not match policy %q", "Warning", "critical")
+	}
+	// Casing in the policy itself must not matter either.
+	if !(IncidentTrigger{Match: IncidentMatch{Severity: []string{"CRITICAL"}}}).
+		MatchFields(sampleAlertName, "critical", sampleEnvironment, sampleNamespace, sampleLabels()) {
+		t.Errorf("policy %q should match alert severity %q", "CRITICAL", "critical")
+	}
+}
+
 func TestDurationUnmarshal(t *testing.T) {
 	var d Duration
 	if err := d.UnmarshalYAML(yamlScalar("30m")); err != nil {

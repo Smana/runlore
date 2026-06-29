@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"path"
 	"slices"
+	"strings"
 	"time"
 
 	"gopkg.in/yaml.v3"
@@ -360,7 +361,11 @@ func (t IncidentTrigger) MatchFields(title, severity, environment, namespace str
 
 // matchFields reports whether the incident satisfies every non-empty criterion.
 func (m IncidentMatch) matchFields(severity, environment, namespace, alertname string, labels map[string]string) bool {
-	if len(m.Severity) > 0 && !slices.Contains(m.Severity, severity) {
+	// Severity is matched case-insensitively: Alertmanager labels arrive with
+	// arbitrary casing (Critical, CRITICAL), and a config of `severity: [critical]`
+	// must still match — otherwise RunLore silently goes deaf. This also keeps the
+	// trigger consistent with the coalescer's EqualFold("critical") fast-path.
+	if len(m.Severity) > 0 && !containsFold(m.Severity, severity) {
 		return false
 	}
 	if len(m.Environment) > 0 && !slices.Contains(m.Environment, environment) {
@@ -384,6 +389,17 @@ func (m IncidentMatch) matchFields(severity, environment, namespace, alertname s
 func (m IncidentMatch) isEmpty() bool {
 	return len(m.Severity) == 0 && len(m.Environment) == 0 &&
 		len(m.Namespaces) == 0 && len(m.AlertNames) == 0 && len(m.Labels) == 0
+}
+
+// containsFold reports whether s equals any element of vals under Unicode case
+// folding (the case-insensitive counterpart of slices.Contains).
+func containsFold(vals []string, s string) bool {
+	for _, v := range vals {
+		if strings.EqualFold(v, s) {
+			return true
+		}
+	}
+	return false
 }
 
 func globAny(patterns []string, s string) bool {

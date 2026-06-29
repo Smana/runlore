@@ -1,6 +1,7 @@
 package server
 
 import (
+	"bytes"
 	"context"
 	"crypto/hmac"
 	"crypto/sha256"
@@ -273,6 +274,50 @@ func TestHealthz(t *testing.T) {
 	testServer().Handler().ServeHTTP(rr, req)
 	if rr.Code != http.StatusOK {
 		t.Fatalf("want 200, got %d", rr.Code)
+	}
+}
+
+// TestRecoverPanic verifies the panic-recovery middleware: a handler that panics
+// must yield a 500 (not a silently-dropped connection) and log the panic at error
+// level with the request method/path, without crashing the process.
+func TestRecoverPanic(t *testing.T) {
+	var buf bytes.Buffer
+	log := slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelError}))
+
+	var next http.Handler = http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+		panic("boom")
+	})
+	h := recoverPanic(next, log)
+
+	rr := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/webhook/alertmanager", nil)
+	req.RemoteAddr = "10.1.2.3:5555"
+
+	// Must not propagate the panic out of ServeHTTP.
+	h.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusInternalServerError {
+		t.Fatalf("panicking handler = %d, want 500", rr.Code)
+	}
+	logged := buf.String()
+	for _, want := range []string{"GET", "/webhook/alertmanager", "10.1.2.3:5555", "boom"} {
+		if !strings.Contains(logged, want) {
+			t.Errorf("recovery log missing %q; got: %s", want, logged)
+		}
+	}
+}
+
+// TestServerRecoversFromHandlerPanic verifies the middleware is wired so a panic in
+// any mounted route is recovered (here: the slack-interactions handler reached with
+// no body, which would deref a nil payload absent recovery is not guaranteed — so we
+// drive a route through the real mux and assert no panic escapes ServeHTTP).
+func TestServerRecoversFromHandlerPanic(t *testing.T) {
+	srv := New(func() bool { panic("ready panic") }, Actions{}, nil, nil, nil, discardLog)
+	rr := httptest.NewRecorder()
+	// /readyz calls ready(); the panicking ready func exercises the wired middleware.
+	srv.Handler().ServeHTTP(rr, httptest.NewRequest(http.MethodGet, "/readyz", nil))
+	if rr.Code != http.StatusInternalServerError {
+		t.Fatalf("panicking route through mux = %d, want 500", rr.Code)
 	}
 }
 

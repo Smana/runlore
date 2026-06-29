@@ -15,6 +15,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/url"
+	"runtime/debug"
 	"strconv"
 	"strings"
 	"time"
@@ -96,8 +97,34 @@ func New(ready func() bool, acts Actions, built []source.Built, pipe *source.Pip
 		mux.Handle("GET /metrics", s.metrics)
 	}
 	source.MountWebhooks(mux, built, s.webhookAuthorized, pipe)
-	s.handler = mux
+	// Wrap the whole mux so a panic in any handler (current or future) returns a
+	// structured 500 and a logged stack instead of net/http's silent connection drop.
+	s.handler = recoverPanic(mux, log)
 	return s
+}
+
+// recoverPanic wraps next so a panic in any handler is recovered: it logs the
+// panic value, request method/path/remote-addr, and a stack trace at error level,
+// then writes a 500 if nothing has been written yet. Without this, net/http's
+// per-connection recover closes the connection with no response and no log.
+func recoverPanic(next http.Handler, log *slog.Logger) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		defer func() {
+			if rec := recover(); rec != nil {
+				if log != nil {
+					log.Error("recovered from handler panic",
+						"panic", rec,
+						"method", r.Method,
+						"path", r.URL.Path,
+						"remote_addr", r.RemoteAddr,
+						"stack", string(debug.Stack()),
+					)
+				}
+				http.Error(w, "internal server error", http.StatusInternalServerError)
+			}
+		}()
+		next.ServeHTTP(w, r)
+	})
 }
 
 func (s *Server) handlePause(w http.ResponseWriter, r *http.Request) {
