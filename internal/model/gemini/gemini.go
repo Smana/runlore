@@ -1,11 +1,16 @@
 // Package gemini implements providers.ModelProvider against the Gemini API
-// (generateContent with native function calling). It maps RunLore's engine-
+// (streamGenerateContent with native function calling). It maps RunLore's engine-
 // agnostic exchange (OpenAI-shaped: assistant tool_calls + separate tool messages)
 // onto Gemini's contents/parts form: assistant turns become role "model" with
 // functionCall parts, and tool results coalesce into one role "user" turn of
 // functionResponse parts. Each call/response carries the originating call id, so
 // parallel calls to the same function name correlate by id (Gemini's rule for
 // parallel calls); when the model returns no id, correlation falls back to name.
+//
+// Streaming is internal: callers see the same one-shot Complete interface, but the
+// request uses :streamGenerateContent?alt=sse and the SSE chunks are accumulated
+// into a single CompletionResponse. Consuming the stream avoids a flat request
+// deadline truncating a long completion.
 package gemini
 
 import (
@@ -14,6 +19,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"iter"
 	"net/http"
 	"strings"
 	"time"
@@ -25,10 +31,18 @@ import (
 // DefaultBaseURL is the public Gemini API.
 const DefaultBaseURL = "https://generativelanguage.googleapis.com"
 
-// defaultMaxTokens is the output-token ceiling used when the caller passes <= 0.
-const defaultMaxTokens = 8192
+const (
+	// defaultMaxTokens is the output-token ceiling used when the caller passes <= 0.
+	defaultMaxTokens = 8192
+	// responseHeaderTimeout caps the wait for response headers (time-to-first-byte);
+	// the streamed body then has no flat deadline (a long completion is legitimate).
+	responseHeaderTimeout = 2 * time.Minute
+	// idleTimeout aborts a stream that stalls (no bytes) for this long — the streaming
+	// counterpart of an overall deadline, without killing an actively-sending stream.
+	idleTimeout = 2 * time.Minute
+)
 
-// Client is a Gemini (generateContent) model provider.
+// Client is a Gemini (streamGenerateContent) model provider.
 type Client struct {
 	baseURL   string
 	model     string
@@ -51,16 +65,24 @@ func New(baseURL, model, apiKey string, maxTokens int) *Client {
 		model:     model,
 		apiKey:    apiKey,
 		maxTokens: maxTokens,
-		http:      httpx.SecureClient(2 * time.Minute),
+		http:      httpx.SecureStreamingClient(responseHeaderTimeout),
 	}
 }
 
 var _ providers.ModelProvider = (*Client)(nil)
 
 type genRequest struct {
-	SystemInstruction *content  `json:"system_instruction,omitempty"`
-	Contents          []content `json:"contents"`
-	Tools             []tool    `json:"tools,omitempty"`
+	SystemInstruction *content          `json:"system_instruction,omitempty"`
+	Contents          []content         `json:"contents"`
+	Tools             []tool            `json:"tools,omitempty"`
+	GenerationConfig  *generationConfig `json:"generationConfig,omitempty"`
+}
+
+// generationConfig carries per-request decoding controls. MaxOutputTokens caps the
+// output tokens; without it Gemini applies the model's (often small) default and a
+// long completion is silently cut off (a MAX_TOKENS truncation).
+type generationConfig struct {
+	MaxOutputTokens int `json:"maxOutputTokens,omitempty"`
 }
 
 type content struct {
@@ -96,11 +118,16 @@ type functionDeclaration struct {
 	Parameters  json.RawMessage `json:"parameters,omitempty"`
 }
 
+// genResponse is one GenerateContentResponse — the shape of both a full response and
+// each SSE stream chunk (?alt=sse emits one per data: event). Only the fields RunLore
+// accumulates are decoded.
 type genResponse struct {
 	Candidates []struct {
 		Content content `json:"content"`
 		// FinishReason is the candidate-termination reason; "MAX_TOKENS" marks an output
-		// cut off at the token ceiling (a truncated, not complete, answer).
+		// cut off at the token ceiling (a truncated, not complete, answer). Safety stops
+		// (SAFETY, PROHIBITED_CONTENT, BLOCKLIST, SPII) surface raw via StopReason, which
+		// providers.Refused recognizes. It is empty on intermediate stream chunks.
 		FinishReason string `json:"finishReason"`
 	} `json:"candidates"`
 	// UsageMetadata carries the per-request token counts; a pointer so an absent block
@@ -114,9 +141,15 @@ type genResponse struct {
 	} `json:"error"`
 }
 
-// Complete sends a generateContent request with tools and maps the result back.
+// Complete sends a streaming streamGenerateContent request with tools and accumulates
+// the full SSE response into a single CompletionResponse. Streaming is internal —
+// callers see the same one-shot interface; consuming the stream avoids the flat
+// request deadline truncating a long completion.
 func (c *Client) Complete(ctx context.Context, req providers.CompletionRequest) (providers.CompletionResponse, error) {
-	greq := genRequest{Contents: toContents(req.Messages)}
+	greq := genRequest{
+		Contents:         toContents(req.Messages),
+		GenerationConfig: &generationConfig{MaxOutputTokens: c.maxTokens},
+	}
 	if req.System != "" {
 		greq.SystemInstruction = &content{Parts: []part{{Text: req.System}}}
 	}
@@ -131,9 +164,15 @@ func (c *Client) Complete(ctx context.Context, req providers.CompletionRequest) 
 	if err != nil {
 		return providers.CompletionResponse{}, fmt.Errorf("marshal request: %w", err)
 	}
-	url := fmt.Sprintf("%s/v1beta/models/%s:generateContent", c.baseURL, c.model)
+	// ?alt=sse switches streamGenerateContent from a JSON array to a Server-Sent
+	// Events stream: one GenerateContentResponse per data: event, ending at EOF.
+	url := fmt.Sprintf("%s/v1beta/models/%s:streamGenerateContent?alt=sse", c.baseURL, c.model)
+	// A child context lets the idle-timeout reader abort a stalled stream by cancelling
+	// the in-flight HTTP read; cancel always runs on return to release resources.
+	streamCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
 	newReq := func() (*http.Request, error) {
-		r, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
+		r, err := http.NewRequestWithContext(streamCtx, http.MethodPost, url, bytes.NewReader(body))
 		if err != nil {
 			return nil, err
 		}
@@ -141,52 +180,103 @@ func (c *Client) Complete(ctx context.Context, req providers.CompletionRequest) 
 		r.Header.Set("x-goog-api-key", c.apiKey)
 		return r, nil
 	}
-	resp, err := httpx.DoWithRetry(ctx, c.http, 3, newReq)
+	// DoWithRetry retries only connection establishment / 429 / 5xx (before the stream
+	// begins); once a 200 stream is flowing it is never retried mid-stream.
+	resp, err := httpx.DoWithRetry(streamCtx, c.http, 3, newReq)
 	if err != nil {
-		return providers.CompletionResponse{}, fmt.Errorf("generateContent request: %w", err)
+		return providers.CompletionResponse{}, fmt.Errorf("streamGenerateContent request: %w", err)
 	}
 	defer func() { _ = resp.Body.Close() }()
-	data, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return providers.CompletionResponse{}, fmt.Errorf("read response: %w", err)
-	}
 	if resp.StatusCode != http.StatusOK {
-		// Don't echo the upstream body into an Error-level log (info disclosure +
-		// log injection); surface status + sanitized request-id for correlation.
-		return providers.CompletionResponse{}, fmt.Errorf("generateContent status %d (request-id %q)", resp.StatusCode, httpx.RequestID(resp.Header))
+		// Drain a bounded prefix so the connection can be reused, but never echo the
+		// upstream body into an Error-level log (info disclosure + log injection);
+		// surface status + sanitized request-id for correlation.
+		_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 4<<10))
+		return providers.CompletionResponse{}, fmt.Errorf("streamGenerateContent status %d (request-id %q)", resp.StatusCode, httpx.RequestID(resp.Header))
 	}
-	var gr genResponse
-	if err := json.Unmarshal(data, &gr); err != nil {
-		return providers.CompletionResponse{}, fmt.Errorf("parse response: %w", err)
-	}
-	if gr.Error != nil {
-		return providers.CompletionResponse{}, fmt.Errorf("gemini error: %s", gr.Error.Message)
-	}
-	out := providers.CompletionResponse{}
-	if gr.UsageMetadata != nil {
-		out.Usage = providers.Usage{InputTokens: gr.UsageMetadata.PromptTokenCount, OutputTokens: gr.UsageMetadata.CandidatesTokenCount}
-	}
-	if len(gr.Candidates) == 0 {
-		return out, nil
-	}
-	out.Truncated = gr.Candidates[0].FinishReason == "MAX_TOKENS"
-	for _, p := range gr.Candidates[0].Content.Parts {
-		switch {
-		case p.FunctionCall != nil:
-			// Newer Gemini responses carry a call id that correlates parallel calls
-			// to the same function; fall back to the name when the id is absent.
-			id := p.FunctionCall.ID
-			if id == "" {
-				id = p.FunctionCall.Name
+	stream := httpx.NewIdleTimeoutReader(resp.Body, idleTimeout, cancel)
+	return accumulate(stream)
+}
+
+// sseEvents parses the Gemini SSE stream into decoded genResponse chunks. It wraps the
+// generic httpx.SSEData framing primitive and json-unmarshals each event's data
+// payload (one full GenerateContentResponse per event); a framing/read error or a JSON
+// decode error is surfaced via the second yield value.
+func sseEvents(r io.Reader) iter.Seq2[genResponse, error] {
+	return func(yield func(genResponse, error) bool) {
+		for payload, err := range httpx.SSEData(r) {
+			if err != nil {
+				yield(genResponse{}, err)
+				return
 			}
-			out.ToolCalls = append(out.ToolCalls, providers.ToolCall{
-				ID:   id,
-				Name: p.FunctionCall.Name,
-				Args: argString(p.FunctionCall.Args),
-			})
-		case p.Text != "":
-			out.Text += p.Text
+			var gr genResponse
+			if err := json.Unmarshal(payload, &gr); err != nil {
+				if !yield(genResponse{}, fmt.Errorf("decode sse event: %w", err)) {
+					return
+				}
+				continue
+			}
+			if !yield(gr, nil) {
+				return
+			}
 		}
+	}
+}
+
+// accumulate consumes a Gemini SSE stream and folds it into one CompletionResponse:
+// text parts concatenate into Text, functionCall parts become ToolCalls (id-correlated,
+// name fallback), usageMetadata is taken last-one-wins, and a candidate finishReason
+// maps to StopReason (and Truncated when "MAX_TOKENS"; safety reasons like "SAFETY"
+// surface raw so providers.Refused recognizes them). A read error, or a stream that
+// ends before any finishReason (a mid-stream drop), is an error.
+func accumulate(r io.Reader) (providers.CompletionResponse, error) {
+	var out providers.CompletionResponse
+	sawFinish := false
+
+	for gr, err := range sseEvents(r) {
+		if err != nil {
+			return providers.CompletionResponse{}, fmt.Errorf("read stream: %w", err)
+		}
+		if gr.Error != nil {
+			return providers.CompletionResponse{}, fmt.Errorf("gemini error: %s", gr.Error.Message)
+		}
+		// usageMetadata accumulates across chunks (last non-nil block wins; Gemini
+		// resends the running totals, so the final chunk carries the full count).
+		if gr.UsageMetadata != nil {
+			out.Usage = providers.Usage{InputTokens: gr.UsageMetadata.PromptTokenCount, OutputTokens: gr.UsageMetadata.CandidatesTokenCount}
+		}
+		if len(gr.Candidates) == 0 {
+			continue
+		}
+		cand := gr.Candidates[0]
+		if cand.FinishReason != "" {
+			sawFinish = true
+			out.StopReason = cand.FinishReason
+			out.Truncated = cand.FinishReason == "MAX_TOKENS"
+		}
+		for _, p := range cand.Content.Parts {
+			switch {
+			case p.FunctionCall != nil:
+				// Newer Gemini responses carry a call id that correlates parallel calls
+				// to the same function; fall back to the name when the id is absent.
+				id := p.FunctionCall.ID
+				if id == "" {
+					id = p.FunctionCall.Name
+				}
+				out.ToolCalls = append(out.ToolCalls, providers.ToolCall{
+					ID:   id,
+					Name: p.FunctionCall.Name,
+					Args: argString(p.FunctionCall.Args),
+				})
+			case p.Text != "":
+				out.Text += p.Text
+			}
+		}
+	}
+	// A stream that ends before any finishReason is a mid-stream drop, not a clean
+	// completion — surface it as an error rather than a silently-truncated success.
+	if !sawFinish {
+		return providers.CompletionResponse{}, fmt.Errorf("stream ended before a finishReason (truncated upstream)")
 	}
 	return out, nil
 }
