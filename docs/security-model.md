@@ -36,8 +36,9 @@ registry and **discards the model's own metadata**:
 - `auto` mode starts **paused** (kill-switch engaged, fail-closed) and is gated behind
   confidence/rate/blast limits. It exists but is **not recommended on real clusters**.
 
-The action config is **fail-closed**: `approve`/`auto` won't start without an approval token, and
-`auto` additionally requires an audit-log path, an authenticated webhook, a positive confidence
+The action config is **fail-closed**: `approve`/`auto` won't start without an approval token **and an
+audit-log path** (both modes execute cluster mutations, so both must be audited), and `auto`
+additionally requires an authenticated webhook, a positive confidence
 threshold and rate cap, and a non-empty namespace allowlist (see
 [Configuration → actions](configuration.md#actions--the-autonomy-ladder-off-by-default)).
 
@@ -102,9 +103,36 @@ The chart's RBAC is scoped tightly (`deploy/helm/runlore/templates/rbac.yaml`):
 
 Every action attempt — inputs, gate result, op, target, actor, outcome — is appended to a
 **hash-chained** JSON log (`internal/audit`): each record carries the previous record's hash, the file
-is `0600` and **fsync'd after every write**, and a `Verify` pass detects the first broken link. Edits
-or deletions are therefore detectable. Outcomes recorded: `executed` / `dry-run` / `skipped` /
-`denied` / `failed`.
+is `0600` and **fsync'd after every write**, and a `Verify` pass detects the first broken link. Outcomes
+recorded: `executed` / `dry-run` / `skipped` / `denied` / `failed`.
+
+The chain is **load-bearing**, not just an artifact tests check:
+
+- **Verified on startup, fail-closed under `approve`/`auto`.** Both executing modes are **required** to
+  set `actions.audit_log_path` (enforced by config validation), so the guarantee always has a chain to
+  verify — neither can silently downgrade to an unaudited run. When the agent opens the log it re-walks
+  the existing chain in a single read pass and reuses that same handle for appends (no verify→append
+  re-read window). If a link is broken and `actions.mode` is `approve` or `auto`, **startup fails** —
+  RunLore refuses to execute and audit cluster mutations against a history it can no longer vouch for.
+  Under `off`/`suggest` (nothing executes) it logs a loud **warning** and keeps appending, so a
+  read-only deployment isn't blocked by a damaged file. An empty or absent log is a valid (zero-record)
+  chain.
+- **Verifiable on demand.** `lore audit verify --path <audit.jsonl>` (or `--config <runlore.yaml>` to
+  read `actions.audit_log_path`) re-walks the chain out-of-band: it prints `OK: chain intact (<N>
+  records)` and exits `0`, or prints the first broken link and exits non-zero. Run it from CI, a cron, or
+  an incident review.
+
+Verification catches **insertion**, **edit** (any byte of a recorded field), and **mid-chain deletion**
+— each breaks a `prev_hash`/`hash` link.
+
+**Honest residual limit — tail-truncation.** Dropping the *most-recent* records leaves a shorter but
+internally consistent prefix, which still verifies. Chain verification alone therefore cannot detect
+that the tail was lopped off. Fully closing this needs an **external anchor** (e.g. periodically
+publishing the head hash + record count to an append-only store the writer can't rewrite), which is out
+of scope: a sidecar high-water mark doesn't help — a privileged writer that can truncate the log can
+truncate the sidecar too, and making it crash-consistent is fiddly. Until an external anchor exists,
+mitigate operationally: keep the log on **durable storage with restricted write access** (ideally a
+medium where the agent's own identity cannot rewrite history), and back it up.
 
 ## Honest limitations
 

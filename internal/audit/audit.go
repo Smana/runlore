@@ -75,6 +75,44 @@ func Open(path string) (*Logger, error) {
 	return &Logger{w: f, closer: f, syncFn: f.Sync, lastHash: last, now: time.Now}, nil
 }
 
+// OpenVerified opens the audit log like Open, but first re-walks the existing
+// chain and refuses to open a chain whose integrity is broken (insertion, edit,
+// or mid-chain deletion). An empty or absent file is a valid (zero-record) chain.
+// Callers that must fail closed against an untrustworthy chain (executing action
+// modes) should use this instead of Open; the mode-based fail/warn policy lives at
+// the call site where the config is available.
+//
+// It reads the file EXACTLY ONCE: the same scan that verifies the chain also
+// yields the trusted seed hash, and that fd is reused as the append handle (seeked
+// to end). This closes a TOCTOU window the previous implementation had — it
+// verified, closed the fd, then re-read the tail via a second os.Open to seed the
+// chaining hash, letting an attacker overwrite the tail in between so the Logger
+// chained from a tampered base. Now the seed comes from the verified bytes and the
+// handle is never reopened, so there is no verify→append gap.
+func OpenVerified(path string) (*Logger, error) {
+	f, err := os.OpenFile(path, os.O_RDWR|os.O_CREATE, 0o600) //nolint:gosec // G304: path is the operator-configured audit log
+	if err != nil {
+		return nil, fmt.Errorf("audit: open %s for verify: %w", path, err)
+	}
+	// Verify and capture the trusted last hash from the SAME read pass.
+	last, verr := verifyChain(f)
+	if verr != nil {
+		_ = f.Close()
+		return nil, fmt.Errorf("audit: existing chain failed verification: %w", verr)
+	}
+	// Reuse the verified fd as the append handle: seek past the verified tail so the
+	// next write lands at end-of-file. Seeding lastHash from the verified scan (not a
+	// second os.Open) means an append always chains from bytes we just vouched for.
+	// Safety: a one-time seek-to-end is sufficient because Logger is single-writer
+	// (mutex-guarded, single process/Logger owner); a second writer or a stray Seek
+	// on this fd would silently produce a mid-file write and corrupt the chain.
+	if _, err := f.Seek(0, io.SeekEnd); err != nil {
+		_ = f.Close()
+		return nil, fmt.Errorf("audit: seek to append: %w", err)
+	}
+	return &Logger{w: f, closer: f, syncFn: f.Sync, lastHash: last, now: time.Now}, nil
+}
+
 // NewWriter builds a Logger over an arbitrary writer (tests).
 func NewWriter(w io.Writer) *Logger {
 	return &Logger{w: w, now: time.Now}
@@ -155,6 +193,16 @@ func lastHash(path string) (string, error) {
 
 // Verify re-walks a chain and reports the first broken link, if any.
 func Verify(r io.Reader) error {
+	_, err := verifyChain(r)
+	return err
+}
+
+// verifyChain re-walks a chain in a single pass, returning the last record's hash
+// (the trusted seed for a subsequent append) alongside the first broken-link
+// error, if any. Both the public Verify and OpenVerified share it; OpenVerified
+// uses the returned hash to seed its Logger from the very bytes it just verified,
+// so the file is read exactly once and there is no verify→append re-read window.
+func verifyChain(r io.Reader) (string, error) {
 	sc := bufio.NewScanner(r)
 	sc.Buffer(make([]byte, 0, 64*1024), 1024*1024)
 	prev := ""
@@ -167,17 +215,20 @@ func Verify(r io.Reader) error {
 		n++
 		var rec Record
 		if err := json.Unmarshal([]byte(line), &rec); err != nil {
-			return fmt.Errorf("audit: record %d: %w", n, err)
+			return "", fmt.Errorf("audit: record %d: %w", n, err)
 		}
 		if rec.PrevHash != prev {
-			return fmt.Errorf("audit: record %d: prev_hash mismatch (chain broken)", n)
+			return "", fmt.Errorf("audit: record %d: prev_hash mismatch (chain broken)", n)
 		}
 		if hashRecord(rec) != rec.Hash {
-			return fmt.Errorf("audit: record %d: hash mismatch (record tampered)", n)
+			return "", fmt.Errorf("audit: record %d: hash mismatch (record tampered)", n)
 		}
 		prev = rec.Hash
 	}
-	return sc.Err()
+	if err := sc.Err(); err != nil {
+		return "", err
+	}
+	return prev, nil
 }
 
 // Nop is an Auditor that drops records (local/no-audit fallback).
