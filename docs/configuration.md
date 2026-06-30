@@ -143,6 +143,10 @@ mcp:
   aborting. Fix the server and restart to pick it up.
 - **Secrets by indirection.** `token_env` names the environment variable — never embed the token
   value directly in config. Wire it from a Kubernetes `Secret` (`env`/`envFrom`).
+- **`headers` are not secret-safe over plain HTTP.** Only `token_env` is checked at config
+  validation time; custom `headers` values are not. Do not carry secrets in `headers` when `url`
+  is plain `http://` to a public host — use `headers` for non-secret metadata only (e.g. `X-Tenant`).
+  Use `https://` whenever the server is on a public network.
 
 ### Other top-level keys
 `gitops.engine` (`flux` default · `argocd`), `cloud` (`provider: aws`, `region`, `cluster_name`),

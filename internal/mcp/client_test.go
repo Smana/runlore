@@ -132,3 +132,55 @@ func TestClientNon2xxNoBodyEcho(t *testing.T) {
 		t.Fatalf("non-2xx must error without echoing the body, got %v", err)
 	}
 }
+
+// TestCallToolNoRetryOn5xx asserts that CallTool does NOT retry on a 5xx: remote
+// tools may not be idempotent, so a transient 5xx must NOT be re-issued automatically.
+// The server counts requests; if more than one arrives the test fails.
+func TestCallToolNoRetryOn5xx(t *testing.T) {
+	var calls int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		calls++
+		w.WriteHeader(http.StatusServiceUnavailable)
+	}))
+	defer srv.Close()
+	c := NewClient("s", srv.URL, "", nil, nil)
+	_, err := c.CallTool(context.Background(), "op", nil)
+	if err == nil {
+		t.Fatal("expected error on 5xx, got nil")
+	}
+	if calls != 1 {
+		t.Fatalf("CallTool must not retry: got %d request(s), want 1", calls)
+	}
+}
+
+// TestListToolsRetriesOn5xx asserts that ListTools DOES retry on transient 5xx:
+// the server returns 503 on the first request and 200 with a valid result on the
+// second, so ListTools must succeed without the caller noticing the first failure.
+func TestListToolsRetriesOn5xx(t *testing.T) {
+	var calls int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		if calls == 1 {
+			w.WriteHeader(http.StatusServiceUnavailable)
+			return
+		}
+		var req rpcEnvelope
+		b, _ := io.ReadAll(r.Body)
+		_ = json.Unmarshal(b, &req)
+		writeResult(w, req.ID, map[string]any{"tools": []map[string]any{
+			{"name": "ping", "description": "pong"},
+		}})
+	}))
+	defer srv.Close()
+	c := NewClient("s", srv.URL, "", nil, nil)
+	tools, err := c.ListTools(context.Background())
+	if err != nil {
+		t.Fatalf("ListTools must succeed after retry, got: %v", err)
+	}
+	if len(tools) != 1 || tools[0].Name != "ping" {
+		t.Fatalf("unexpected tools: %+v", tools)
+	}
+	if calls != 2 {
+		t.Fatalf("expected 2 requests (1 failure + 1 success), got %d", calls)
+	}
+}

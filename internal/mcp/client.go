@@ -51,14 +51,14 @@ func NewClient(name, url, apiKey string, headers map[string]string, log *slog.Lo
 func (c *Client) Name() string { return c.name }
 
 // Initialize performs the MCP handshake: initialize (capturing any session id) then the
-// notifications/initialized notification.
+// notifications/initialized notification. Retries up to 3 times on transient failures.
 func (c *Client) Initialize(ctx context.Context) error {
 	params := map[string]any{
 		"protocolVersion": defaultProtocolVersion,
 		"capabilities":    map[string]any{},
 		"clientInfo":      map[string]any{"name": "runlore", "version": "dev"},
 	}
-	if _, err := c.rpc(ctx, "initialize", params); err != nil {
+	if _, err := c.rpc(ctx, "initialize", params, 3); err != nil {
 		return fmt.Errorf("mcp initialize: %w", err)
 	}
 	// Best-effort lifecycle notification (no id, no response).
@@ -68,9 +68,9 @@ func (c *Client) Initialize(ctx context.Context) error {
 	return nil
 }
 
-// ListTools returns the server's advertised tools.
+// ListTools returns the server's advertised tools. Retries up to 3 times on transient failures.
 func (c *Client) ListTools(ctx context.Context) ([]RemoteTool, error) {
-	raw, err := c.rpc(ctx, "tools/list", map[string]any{})
+	raw, err := c.rpc(ctx, "tools/list", map[string]any{}, 3)
 	if err != nil {
 		return nil, err
 	}
@@ -89,11 +89,16 @@ func (c *Client) ListTools(ctx context.Context) ([]RemoteTool, error) {
 
 // CallTool invokes a remote tool and returns its concatenated text content. An MCP
 // tool error (isError) or a JSON-RPC error becomes a Go error.
+//
+// tools/call is NOT retried (attempts=1): remote MCP tools may have side effects, and
+// retrying a side-effecting call on a transient 5xx could double-invoke it. A 5xx here
+// becomes an error that the investigation loop surfaces as a tool error; the model may
+// choose to call again explicitly.
 func (c *Client) CallTool(ctx context.Context, name string, args json.RawMessage) (string, error) {
 	if len(args) == 0 {
 		args = json.RawMessage(`{}`)
 	}
-	raw, err := c.rpc(ctx, "tools/call", map[string]any{"name": name, "arguments": args})
+	raw, err := c.rpc(ctx, "tools/call", map[string]any{"name": name, "arguments": args}, 1)
 	if err != nil {
 		return "", err
 	}
@@ -128,14 +133,17 @@ type jsonrpcMessage struct {
 
 // rpc sends a JSON-RPC request and returns the raw result. It handles a JSON response
 // and an SSE (text/event-stream) response, and captures a session id from initialize.
-func (c *Client) rpc(ctx context.Context, method string, params any) (json.RawMessage, error) {
+// attempts controls how many times the underlying HTTP call is retried on transient
+// failures (network errors, 429, 5xx): pass 3 for idempotent discovery calls
+// (Initialize, ListTools) and 1 for non-idempotent calls (CallTool).
+func (c *Client) rpc(ctx context.Context, method string, params any, attempts int) (json.RawMessage, error) {
 	c.nextID++
 	id := c.nextID
 	body, err := json.Marshal(map[string]any{"jsonrpc": "2.0", "id": id, "method": method, "params": params})
 	if err != nil {
 		return nil, err
 	}
-	resp, err := c.do(ctx, body)
+	resp, err := c.do(ctx, body, attempts)
 	if err != nil {
 		return nil, err
 	}
@@ -183,10 +191,11 @@ func (c *Client) readMessage(resp *http.Response, want int) (jsonrpcMessage, err
 	return m, nil
 }
 
-// notify sends a JSON-RPC notification (no id, no response read).
+// notify sends a JSON-RPC notification (no id, no response read). It does not retry
+// (attempts=1) since notifications are fire-and-forget lifecycle signals.
 func (c *Client) notify(ctx context.Context, method string) error {
 	body, _ := json.Marshal(map[string]any{"jsonrpc": "2.0", "method": method})
-	resp, err := c.do(ctx, body)
+	resp, err := c.do(ctx, body, 1)
 	if err != nil {
 		return err
 	}
@@ -195,8 +204,8 @@ func (c *Client) notify(ctx context.Context, method string) error {
 	return nil
 }
 
-func (c *Client) do(ctx context.Context, body []byte) (*http.Response, error) {
-	return httpx.DoWithRetry(ctx, c.http, 3, func() (*http.Request, error) {
+func (c *Client) do(ctx context.Context, body []byte, attempts int) (*http.Response, error) {
+	return httpx.DoWithRetry(ctx, c.http, attempts, func() (*http.Request, error) {
 		req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.url, bytes.NewReader(body))
 		if err != nil {
 			return nil, err

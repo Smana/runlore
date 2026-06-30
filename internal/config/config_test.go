@@ -318,6 +318,7 @@ func TestValidateMCPServers(t *testing.T) {
 		{"missing url", MCPServer{Name: "a"}},
 		{"double underscore in name", MCPServer{Name: "a__b", Endpoint: Endpoint{URL: "https://x"}}},
 		{"cleartext token on public http", MCPServer{Name: "a", Endpoint: Endpoint{URL: "http://api.public.example/x", TokenEnv: "T"}}},
+		{"non-http scheme ws", MCPServer{Name: "a", Endpoint: Endpoint{URL: "ws://x"}}},
 	} {
 		c := &Config{MCP: MCP{Servers: []MCPServer{tc.s}}}
 		if err := c.Validate(); err == nil {

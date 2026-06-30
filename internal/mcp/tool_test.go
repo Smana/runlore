@@ -1,10 +1,11 @@
 package mcp
 
 import (
-	"context"
 	"encoding/json"
 	"strings"
 	"testing"
+
+	"github.com/Smana/runlore/internal/investigate"
 )
 
 func TestToolNameNamespaced(t *testing.T) {
@@ -43,10 +44,5 @@ func TestToolSchemaEmptyDefault(t *testing.T) {
 	}
 }
 
-// Compile-only: verify Call signature matches expected contract.
-var _ = func() {
-	var c *Client
-	tl := NewTool(c, RemoteTool{})
-	var ctx context.Context
-	_, _ = tl.Call(ctx, "{}")
-}
+// Compile-time assertion: *Adapter must satisfy the investigate.Tool interface.
+var _ investigate.Tool = (*Adapter)(nil)

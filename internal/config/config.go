@@ -631,6 +631,13 @@ func (c *Config) Validate() error {
 			return fmt.Errorf("mcp.servers[%d]: duplicate server name %q", i, s.Name)
 		}
 		seenMCP[s.Name] = true
+		if u, err := url.Parse(s.URL); err != nil || (u.Scheme != "http" && u.Scheme != "https") {
+			scheme := ""
+			if err == nil {
+				scheme = u.Scheme
+			}
+			return fmt.Errorf("mcp.servers[%s].url: scheme must be http or https, got %q", s.Name, scheme)
+		}
 		if err := checkSecureKeyEndpoint("mcp.servers["+s.Name+"].url", "mcp.servers["+s.Name+"].token_env", s.URL, s.TokenEnv); err != nil {
 			return err
 		}

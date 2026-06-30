@@ -128,7 +128,7 @@ func (li *LoopInvestigator) system() string {
 	}
 	for _, t := range li.Tools {
 		if strings.Contains(t.Name(), "__") {
-			s += "\n" + mcpToolsPrompt
+			s += "\n\n" + mcpToolsPrompt
 			break
 		}
 	}
