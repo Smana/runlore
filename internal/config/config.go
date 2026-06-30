@@ -163,6 +163,7 @@ type Investigation struct {
 	MaxToolOutputBytes        int       `yaml:"max_tool_output_bytes"`        // 0 ⇒ unlimited
 	MaxTokensPerInvestigation int       `yaml:"max_tokens_per_investigation"` // 0 ⇒ unlimited
 	Timeout                   Duration  `yaml:"timeout"`                      // per-investigation deadline; 0 ⇒ default (10m) via applyDefaults
+	ToolTimeout               Duration  `yaml:"tool_timeout"`                 // per-TOOL-call timeout so one hung tool can't eat the budget; 0 ⇒ default (60s) at construction
 
 	// PodLogNamespaces lists extra namespaces (beyond the incident's own) that
 	// pod_logs may read controller/crash logs from. pod_logs streams raw pod logs
@@ -570,6 +571,12 @@ func (c *Config) Validate() error {
 	}
 	if c.Model.Verify != nil && c.Model.Verify.MaxTokens < 0 {
 		return fmt.Errorf("model.verify.max_tokens must be >= 0 (0 = inherit), got %d", c.Model.Verify.MaxTokens)
+	}
+	// Reject a negative per-tool timeout: time.ParseDuration accepts negative values
+	// which silently disable the feature (fails the > 0 guard in runTool) rather than
+	// setting the intended timeout. 0 means "use the default (60s)".
+	if c.Investigation.ToolTimeout.Std() < 0 {
+		return fmt.Errorf("investigation.tool_timeout must be >= 0 (0 = use the default 60s), got %v", c.Investigation.ToolTimeout.Std())
 	}
 	// Reject a cleartext API key over a public endpoint (the key would be sent in the
 	// clear, and is the enabler for a redirect-based key leak). Cover the main model,

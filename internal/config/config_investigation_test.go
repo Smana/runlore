@@ -53,6 +53,43 @@ func TestApplyDefaultsInvestigationTimeout(t *testing.T) {
 	}
 }
 
+func TestApplyDefaultsToolTimeout(t *testing.T) {
+	// Unset ⇒ 60s default is applied so cfg.Investigation.ToolTimeout is non-zero
+	// after Load(); BuildInvestigator's 0→60s guard then becomes a no-op safety net.
+	var c Config
+	applyDefaults(&c)
+	if c.Investigation.ToolTimeout.Std() != 60*time.Second {
+		t.Fatalf("default ToolTimeout: got %v, want 60s", c.Investigation.ToolTimeout.Std())
+	}
+	// Explicit value is respected, not overwritten.
+	var c2 Config
+	c2.Investigation.ToolTimeout = Duration(30 * time.Second)
+	applyDefaults(&c2)
+	if c2.Investigation.ToolTimeout.Std() != 30*time.Second {
+		t.Fatalf("explicit ToolTimeout overwritten: got %v, want 30s", c2.Investigation.ToolTimeout.Std())
+	}
+}
+
+func TestValidateRejectsNegativeToolTimeout(t *testing.T) {
+	// time.ParseDuration accepts negative durations; a negative tool_timeout
+	// silently disables the feature (fails the > 0 guard) instead of setting a
+	// timeout, so it must be rejected at validation time.
+	c := &Config{Investigation: Investigation{ToolTimeout: Duration(-1 * time.Second)}}
+	if err := c.Validate(); err == nil {
+		t.Fatal("negative investigation.tool_timeout must be rejected by Validate")
+	}
+	// Zero is the "use the default" sentinel and must be accepted.
+	ok := &Config{}
+	if err := ok.Validate(); err != nil {
+		t.Fatalf("zero tool_timeout (use default) must validate clean: %v", err)
+	}
+	// Positive value is fine.
+	pos := &Config{Investigation: Investigation{ToolTimeout: Duration(45 * time.Second)}}
+	if err := pos.Validate(); err != nil {
+		t.Fatalf("positive tool_timeout must validate clean: %v", err)
+	}
+}
+
 func TestApplyDefaultsInstantRecall(t *testing.T) {
 	// enabled with no tuning → margin/solo gates and decay knobs default to active values.
 	var c Config
@@ -112,6 +149,7 @@ investigation:
   max_steps: 15
   max_tool_output_bytes: 16384
   max_tokens_per_investigation: 120000
+  tool_timeout: 45s
   pod_log_namespaces: [flux-system, kube-system]
 telemetry:
   metrics_enabled: true
@@ -137,6 +175,9 @@ telemetry:
 	}
 	if c.Investigation.MaxSteps != 15 || c.Investigation.MaxToolOutputBytes != 16384 {
 		t.Fatalf("scalar fields: %+v", c.Investigation)
+	}
+	if c.Investigation.ToolTimeout.Std() != 45*time.Second {
+		t.Fatalf("tool_timeout: got %v, want 45s", c.Investigation.ToolTimeout.Std())
 	}
 	if got := strings.Join(c.Investigation.Coalesce.CorrelationLabels, ","); got != "alertname,namespace" {
 		t.Fatalf("correlation_labels: got %q", got)

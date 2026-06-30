@@ -312,6 +312,231 @@ func TestInvestigateNoDeadlineWhenZero(t *testing.T) {
 	}
 }
 
+// blockingTool's Call blocks until its context is cancelled (a stuck git clone /
+// unresponsive metrics-logs endpoint stand-in). It records how many times Call ran
+// and whether the most recent call observed its context expire.
+type blockingTool struct {
+	name      string
+	calls     int
+	ctxExpiry error
+}
+
+func (b *blockingTool) Name() string        { return b.name }
+func (b *blockingTool) Description() string { return "" }
+func (b *blockingTool) Schema() string      { return "{}" }
+func (b *blockingTool) Call(ctx context.Context, _ string) (string, error) {
+	b.calls++
+	<-ctx.Done()
+	b.ctxExpiry = ctx.Err()
+	return "", ctx.Err()
+}
+
+// TestRunToolPerToolTimeout asserts a hung tool is bounded by ToolTimeout: runTool
+// returns a clear, non-fatal "timed out" string PROMPTLY (without waiting on the
+// much larger parent deadline) so the loop records it and continues.
+func TestRunToolPerToolTimeout(t *testing.T) {
+	tool := &blockingTool{name: "stuck_tool"}
+	li := &LoopInvestigator{
+		Log:         slog.New(slog.NewTextHandler(io.Discard, nil)),
+		ToolTimeout: 20 * time.Millisecond,
+	}
+	byName := map[string]Tool{tool.Name(): tool}
+
+	type res struct {
+		out string
+		dur time.Duration
+	}
+	ch := make(chan res, 1)
+	go func() {
+		start := time.Now()
+		// Parent ctx carries a far larger deadline so the only thing that can unblock
+		// the tool promptly is the per-tool timeout, not the investigation deadline.
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		out := li.runTool(ctx, byName, providers.ToolCall{ID: "1", Name: tool.Name(), Args: "{}"})
+		ch <- res{out: out, dur: time.Since(start)}
+	}()
+
+	select {
+	case r := <-ch:
+		if r.dur > 2*time.Second {
+			t.Fatalf("runTool did not honour the per-tool timeout (took %v)", r.dur)
+		}
+		if !strings.Contains(strings.ToLower(r.out), "timed out") {
+			t.Fatalf("expected a non-fatal timeout message, got %q", r.out)
+		}
+		if !strings.Contains(r.out, tool.Name()) {
+			t.Fatalf("timeout message should name the tool, got %q", r.out)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("runTool hung past the per-tool timeout")
+	}
+	if tool.calls != 1 {
+		t.Fatalf("tool should have been called exactly once, got %d", tool.calls)
+	}
+}
+
+// TestRunToolFastUnaffected asserts a fast tool returns its normal output when a
+// per-tool timeout is configured (the timeout must not alter the happy path).
+func TestRunToolFastUnaffected(t *testing.T) {
+	tool := &fakeConfirmTool{name: "fast_tool", out: "all good"}
+	li := &LoopInvestigator{
+		Log:         slog.New(slog.NewTextHandler(io.Discard, nil)),
+		ToolTimeout: time.Second, // generous; the fast tool returns well within it
+	}
+	byName := map[string]Tool{tool.Name(): tool}
+	out := li.runTool(context.Background(), byName, providers.ToolCall{ID: "1", Name: tool.Name(), Args: `{"k":"v"}`})
+	if out != "all good" {
+		t.Fatalf("fast tool output altered by per-tool timeout: got %q", out)
+	}
+	if tool.gotArgs != `{"k":"v"}` {
+		t.Fatalf("per-tool timeout wrapping must pass args through, got %q", tool.gotArgs)
+	}
+}
+
+// TestRunToolParentDeadlineNotSwallowed asserts that when the PARENT investigation
+// deadline fires (not the per-tool one), runTool does NOT report a per-tool timeout:
+// the investigation-level deadline must surface as a normal error so the loop's own
+// deadline handling (synthetic timeout result) takes over rather than being masked
+// as a per-tool timeout-and-continue.
+func TestRunToolParentDeadlineNotSwallowed(t *testing.T) {
+	tool := &blockingTool{name: "stuck_tool"}
+	li := &LoopInvestigator{
+		Log:         slog.New(slog.NewTextHandler(io.Discard, nil)),
+		ToolTimeout: 10 * time.Second, // far larger than the parent deadline below
+	}
+	byName := map[string]Tool{tool.Name(): tool}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer cancel()
+	ch := make(chan string, 1)
+	go func() {
+		ch <- li.runTool(ctx, byName, providers.ToolCall{ID: "1", Name: tool.Name(), Args: "{}"})
+	}()
+	select {
+	case out := <-ch:
+		// The parent investigation deadline fired, NOT the per-tool timeout. It must
+		// not be reported as a per-tool "timed out" message (which the loop would treat
+		// as a recorded tool result and continue) — it must surface as a normal error.
+		if strings.Contains(strings.ToLower(out), "timed out") {
+			t.Fatalf("parent deadline was masked as a per-tool timeout: %q", out)
+		}
+		if !strings.HasPrefix(out, "error:") {
+			t.Fatalf("parent-deadline cancellation should surface as a normal error, got %q", out)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("runTool hung past the parent deadline")
+	}
+}
+
+// TestRunToolTimeoutDisabled asserts ToolTimeout==0 leaves runTool's behaviour
+// unchanged: a tool error is returned verbatim as before (no per-tool wrapping).
+func TestRunToolTimeoutDisabled(t *testing.T) {
+	tool := &fakeConfirmTool{name: "ok_tool", out: "fine"}
+	li := &LoopInvestigator{
+		Log:         slog.New(slog.NewTextHandler(io.Discard, nil)),
+		ToolTimeout: 0, // disabled
+	}
+	byName := map[string]Tool{tool.Name(): tool}
+	if out := li.runTool(context.Background(), byName, providers.ToolCall{ID: "1", Name: tool.Name(), Args: "{}"}); out != "fine" {
+		t.Fatalf("ToolTimeout==0 must not alter a normal call, got %q", out)
+	}
+}
+
+// TestRunToolTimeoutMetricLabel verifies that a per-tool timeout is recorded with
+// result="timeout" (not "error") so it is distinguishable from a real backend
+// failure in dashboards/alerts. The fix moved timeout classification BEFORE the
+// metric block so the correct label reaches the counter.
+func TestRunToolTimeoutMetricLabel(t *testing.T) {
+	t.Cleanup(func() { otel.SetMeterProvider(noop.NewMeterProvider()) })
+
+	h, shutdown, err := telemetry.Setup(context.Background())
+	if err != nil {
+		t.Fatalf("telemetry setup: %v", err)
+	}
+	t.Cleanup(func() { _ = shutdown(context.Background()) })
+	m := telemetry.NewMetrics()
+
+	tool := &blockingTool{name: "hung_tool"}
+	li := &LoopInvestigator{
+		Log:         slog.New(slog.NewTextHandler(io.Discard, nil)),
+		ToolTimeout: 20 * time.Millisecond,
+		Metrics:     m,
+	}
+	byName := map[string]Tool{tool.Name(): tool}
+
+	// Parent ctx has a far longer deadline so only the per-tool timeout fires.
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	out := li.runTool(ctx, byName, providers.ToolCall{ID: "1", Name: tool.Name(), Args: "{}"})
+	if !strings.Contains(strings.ToLower(out), "timed out") {
+		t.Fatalf("expected a timed-out message, got %q", out)
+	}
+
+	// Scrape /metrics and confirm result="timeout" appears (not result="error").
+	req := httptest.NewRequest(http.MethodGet, "/metrics", nil)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	body := rec.Body.String()
+	if !strings.Contains(body, `result="timeout"`) {
+		t.Fatalf("per-tool timeout must record result=\"timeout\", not result=\"error\":\n%s", body)
+	}
+	if strings.Contains(body, `result="error"`) {
+		t.Fatalf("per-tool timeout must NOT record result=\"error\" (it was mis-classified before the fix):\n%s", body)
+	}
+}
+
+// TestInvestigatePerToolTimeoutNonFatal is a loop-level integration test proving
+// the full path: a model requests a hung tool, the per-tool timeout fires (non-
+// fatal), the loop records the "timed out" message in history and continues to a
+// second model call, which submits findings — the investigation reaches a result
+// rather than aborting.
+func TestInvestigatePerToolTimeoutNonFatal(t *testing.T) {
+	hung := &blockingTool{name: "hung_tool"}
+
+	// The scriptModel returns two responses:
+	//   1. request the blocking tool
+	//   2. after seeing the timed-out result in history, submit findings
+	model := &scriptModel{responses: []providers.CompletionResponse{
+		{ToolCalls: []providers.ToolCall{{ID: "1", Name: hung.Name(), Args: "{}"}}},
+		{ToolCalls: []providers.ToolCall{{ID: "2", Name: submitFindingsName,
+			Args: `{"confidence":0.7,"root_causes":[{"summary":"found despite hung tool"}]}`}}},
+	}}
+
+	var got *providers.Investigation
+	li := &LoopInvestigator{
+		Model:       model,
+		Tools:       []Tool{hung},
+		Log:         slog.New(slog.NewTextHandler(io.Discard, nil)),
+		MaxSteps:    5,
+		ToolTimeout: 20 * time.Millisecond, // short so the test is fast
+		OnComplete:  func(inv providers.Investigation) { got = &inv },
+	}
+	if err := li.Investigate(context.Background(), Request{Title: "HungToolTest"}); err != nil {
+		t.Fatalf("Investigate: %v", err)
+	}
+	// The loop must have reached a result (non-fatal timeout → loop continued).
+	if got == nil {
+		t.Fatal("investigation must deliver a result when a tool times out (non-fatal)")
+	}
+	if len(got.RootCauses) != 1 || got.RootCauses[0].Summary != "found despite hung tool" {
+		t.Fatalf("unexpected finding: %+v", got)
+	}
+	// The model must have been called twice: once to get the tool call, once
+	// after the timed-out message was recorded in history.
+	if model.i != 2 {
+		t.Fatalf("expected 2 model calls (tool request + findings after timeout), got %d", model.i)
+	}
+	// The blocking tool must have been called exactly once and its context must
+	// have expired via the per-tool deadline (not the parent investigation).
+	if hung.calls != 1 {
+		t.Fatalf("hung_tool should have been called exactly once, got %d", hung.calls)
+	}
+	if !errors.Is(hung.ctxExpiry, context.DeadlineExceeded) {
+		t.Fatalf("hung_tool context should have expired via deadline, got %v", hung.ctxExpiry)
+	}
+}
+
 // errModel returns a plain (non-context) error on Complete — a backend rejecting
 // the request (auth, 5xx, malformed response), distinct from the deadline path.
 type errModel struct {

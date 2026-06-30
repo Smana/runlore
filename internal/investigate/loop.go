@@ -100,6 +100,14 @@ type LoopInvestigator struct {
 	// delivers a synthetic timeout result rather than starving the queue worker.
 	Timeout time.Duration
 
+	// ToolTimeout bounds a SINGLE tool call so one hung/slow provider (a stuck git
+	// clone, an unresponsive metrics/logs endpoint) can't consume the whole
+	// per-investigation budget. On expiry runTool returns a clear, NON-fatal "timed
+	// out" string that becomes the tool result and the loop continues. 0 disables it
+	// (tool calls then share only the per-investigation Timeout). Defaulted at
+	// construction (see internal/app/investigate.go).
+	ToolTimeout time.Duration
+
 	// Cost controls (0 means disabled/unlimited):
 	MaxToolOutputBytes        int // truncate tool results larger than this before adding to history
 	MaxTokensPerInvestigation int // inject a budget-nudge message when the estimated token count exceeds this
@@ -379,11 +387,30 @@ func (li *LoopInvestigator) runTool(ctx context.Context, byName map[string]Tool,
 	if !ok {
 		return "unknown tool: " + tc.Name
 	}
+	// Per-tool timeout: bound this single call so one hung/slow provider (a stuck git
+	// clone, an unresponsive metrics/logs endpoint) can't drain the per-investigation
+	// budget. tctx is derived from ctx, so the parent investigation deadline still
+	// fires first when it's the smaller of the two.
+	tctx := ctx
+	if li.ToolTimeout > 0 {
+		var cancel context.CancelFunc
+		tctx, cancel = context.WithTimeout(ctx, li.ToolTimeout)
+		defer cancel()
+	}
 	tstart := time.Now()
-	out, err := tool.Call(ctx, tc.Args)
+	out, err := tool.Call(tctx, tc.Args)
+	// Classify the result BEFORE recording the metric so the per-tool timeout path
+	// gets a distinct result="timeout" label rather than the generic "error". The
+	// detection condition mirrors the non-fatal return below: the per-tool deadline
+	// fired (tctx expired) but the parent investigation is NOT itself done (ctx.Err()
+	// is nil), so the loop can continue with other tools.
+	isPerToolTimeout := li.ToolTimeout > 0 && err != nil && errors.Is(tctx.Err(), context.DeadlineExceeded) && ctx.Err() == nil
 	if li.Metrics != nil {
 		tres := "ok"
-		if err != nil {
+		switch {
+		case isPerToolTimeout:
+			tres = "timeout"
+		case err != nil:
 			tres = "error"
 		}
 		li.Metrics.ToolCalls.Add(ctx, 1, metric.WithAttributes(
@@ -392,6 +419,17 @@ func (li *LoopInvestigator) runTool(ctx context.Context, byName map[string]Tool,
 			metric.WithAttributes(attribute.String("tool", tc.Name)))
 	}
 	if err != nil {
+		// The PER-TOOL deadline fired, but the parent investigation is NOT itself done:
+		// surface a clear, NON-fatal message so the loop records it as this tool's result
+		// and continues — one hung tool must not abort the whole investigation. When the
+		// parent ctx is also done (the investigation deadline, or an upstream cancel), fall
+		// through to the normal error path so the loop's deadline handling takes over —
+		// don't mask the investigation-level deadline as a per-tool timeout.
+		if isPerToolTimeout {
+			li.Log.Warn("tool call hit per-tool timeout",
+				"tool", tc.Name, "tool_timeout", li.ToolTimeout)
+			return fmt.Sprintf("tool %q timed out after %s", tc.Name, li.ToolTimeout)
+		}
 		return "error: " + err.Error()
 	}
 	return out
