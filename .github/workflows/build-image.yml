@@ -1,9 +1,16 @@
 name: Build Image
 
+# Validation-only image workflow. GoReleaser (release-binaries.yml) owns the
+# release/multi-arch image on v* tags — this workflow deliberately does NOT trigger
+# on tags, to avoid double-building the release image. Here we only:
+#   - PR  -> build the image single-arch (amd64), do NOT push, gate on a Trivy fs scan.
+#   - push to main -> build + push a rolling :main amd64 image, then Trivy image scan.
+# Single-arch amd64 is sufficient for validation: the target clusters run amd64 and
+# arm64-under-QEMU dominated CI time (~10x slower Go compile). The release image is
+# multi-arch via GoReleaser.
 on:
   push:
     branches: [main]
-    tags: ['v*']
     paths:
       - '**.go'
       - 'go.mod'
@@ -28,22 +35,21 @@ env:
 
 # Serialize builds per ref so concurrent pushes can't race on the mutable :main
 # tag (last-to-finish wins, which silently published a stale image). PR builds are
-# superseded — cancel the in-flight one; branch/tag pushes each run to completion.
+# superseded — cancel the in-flight one; the main push runs to completion.
 concurrency:
   group: build-image-${{ github.ref }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
-  build-and-push:
-    name: Build and push
+  build:
+    name: Build and validate
     runs-on: ubuntu-latest
     permissions:
       contents: read
+      # Push the rolling :main image (only used on main pushes; harmless on PRs).
       packages: write
+      # Upload the Trivy SARIF to the GitHub Security tab (main pushes only).
       security-events: write
-      # Keyless cosign signing: the OIDC token identifies this workflow to Fulcio,
-      # which issues the short-lived signing certificate. No long-lived keys.
-      id-token: write
     steps:
       - name: Checkout
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
@@ -59,77 +65,50 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Extract metadata
-        id: meta
-        uses: docker/metadata-action@80c7e94dd9b9319bd5eb7a0e0fe9291e23a2a2e9 # v6.1.0
-        with:
-          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
-          tags: |
-            type=ref,event=branch
-            type=ref,event=pr
-            type=semver,pattern={{version}}
-            type=semver,pattern={{major}}.{{minor}}
-            # Branch-prefixed SHA tag only on branch PUSHES (empty on tags/PRs →
-            # invalid ":-<sha>"): the metadata action leaves {{branch}} empty there,
-            # which would emit the invalid tag ":-<sha>" (a tag cannot start with
-            # "-") and fail the build. `ref_type` is 'branch' on pull_request events
-            # too, so gate on event_name=push to actually exclude PRs.
-            type=sha,prefix={{branch}}-,enable=${{ github.event_name == 'push' && github.ref_type == 'branch' }}
-            # Always provide an immutable SHA tag (valid in every event context).
-            type=sha,prefix=sha-
-            type=raw,value=latest,enable={{is_default_branch}}
+      # Compute the lowercase :main reference once. ghcr/OCI refs must be lowercase,
+      # but github.repository_owner can contain uppercase (e.g. "Smana").
+      - name: Compute image ref
+        id: ref
+        env:
+          IMAGE: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+        run: echo "image=${IMAGE,,}:main" >> "$GITHUB_OUTPUT"
 
-      - name: Build and push
-        id: build
+      # PR: build single-arch amd64 without pushing — keep it fast. The in-image Go
+      # compile (multi-stage Dockerfile) on amd64 is fine here; the Trivy fs scan
+      # below is the actual merge gate.
+      - name: Build (PR, no push)
+        if: github.event_name == 'pull_request'
         uses: docker/build-push-action@f9f3042f7e2789586610d6e8b85c8f03e5195baf # v7.2.0
         with:
           context: .
           file: ./Dockerfile
-          # amd64-only: the target clusters run amd64 nodes, and arm64 under QEMU
-          # emulation dominated build time (~10x slower Go compile). Reintroduce via
-          # a native-arm runner matrix + manifest merge if multi-arch is needed.
           platforms: linux/amd64
-          push: ${{ github.event_name != 'pull_request' }}
-          tags: ${{ steps.meta.outputs.tags }}
-          labels: ${{ steps.meta.outputs.labels }}
-          build-args: |
-            VERSION=${{ steps.meta.outputs.version }}
+          push: false
+          load: true
+          tags: ${{ steps.ref.outputs.image }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
-          # Buildx-native supply-chain attestations, pushed alongside the image:
-          #   provenance mode=max -> full SLSA build provenance (build steps + materials)
-          #   sbom: true          -> SPDX SBOM attestation generated from the build
-          # These are attached as OCI referrers to the pushed digest; cosign signs
-          # the same digest below.
-          provenance: mode=max
-          sbom: true
 
-      # Keyless image signing. Only runs when the image was actually pushed
-      # (digest is empty on pull_request). cosign uses the job's OIDC token to
-      # get a short-lived Fulcio cert and records the signature in Rekor.
-      - name: Install cosign
+      # main push: build + push the rolling :main amd64 image.
+      - name: Build and push (:main)
+        id: build
         if: github.event_name != 'pull_request'
-        uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
-
-      - name: Sign image with cosign (keyless)
-        if: github.event_name != 'pull_request'
-        env:
-          DIGEST: ${{ steps.build.outputs.digest }}
-        # Sign by immutable digest, not a mutable tag, so the signature can't be
-        # repointed later. ghcr/OCI references must be lowercase, but
-        # github.repository_owner can contain uppercase (e.g. "Smana"), so lowercase
-        # the image name before signing.
-        run: |
-          image="${REGISTRY}/${IMAGE_NAME}"
-          cosign sign --yes "${image,,}@${DIGEST}"
+        uses: docker/build-push-action@f9f3042f7e2789586610d6e8b85c8f03e5195baf # v7.2.0
+        with:
+          context: .
+          file: ./Dockerfile
+          platforms: linux/amd64
+          push: true
+          tags: ${{ steps.ref.outputs.image }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
 
       # PR gate: the image isn't pushed on pull_request, so scan the filesystem
-      # (Go module graph + Dockerfile/config) and FAIL the job on HIGH/CRITICAL
-      # so a vulnerable dependency or misconfig can't merge. Post-publish runs
-      # get the image-level scan below instead.
+      # (Go module graph + Dockerfile/config) and FAIL the job on HIGH/CRITICAL so a
+      # vulnerable dependency or misconfig can't merge.
       - name: Trivy filesystem scan (PR gate)
-        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         if: github.event_name == 'pull_request'
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         with:
           scan-type: 'fs'
           scan-ref: '.'
@@ -138,19 +117,20 @@ jobs:
           ignore-unfixed: true
           exit-code: '1'
 
-      - name: Run Trivy vulnerability scanner
-        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+      # main push: scan the pushed image and report findings to the Security tab.
+      - name: Trivy image scan
         if: github.event_name != 'pull_request'
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         with:
-          image-ref: '${{ fromJSON(steps.meta.outputs.json).tags[0] }}'
+          image-ref: ${{ steps.ref.outputs.image }}
           format: 'sarif'
           output: 'trivy-results.sarif'
           severity: 'HIGH,CRITICAL'
           ignore-unfixed: true
 
       - name: Upload Trivy results to GitHub Security
-        uses: github/codeql-action/upload-sarif@8aad20d150bbac5944a9f9d289da16a4b0d87c1e # v4.36.2
         if: github.event_name != 'pull_request'
+        uses: github/codeql-action/upload-sarif@8aad20d150bbac5944a9f9d289da16a4b0d87c1e # v4.36.2
         with:
           sarif_file: 'trivy-results.sarif'
           category: 'trivy-runlore'
@@ -159,22 +139,19 @@ jobs:
         if: always()
         run: |
           {
-            echo "## 🏗️ RunLore Image Build"
+            echo "## RunLore Image Build (validation)"
             echo ""
             echo "**Trigger**: ${{ github.event_name }}"
             echo "**Commit**: \`${{ github.sha }}\`"
             echo "**Platforms**: linux/amd64"
             echo ""
-            echo "**Tags**:"
-            echo '```'
-            echo "${{ steps.meta.outputs.tags }}"
-            echo '```'
             if [[ "${{ github.event_name }}" != "pull_request" ]]; then
-              echo "**Pushed to**: \`${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}\`"
+              echo "**Pushed**: \`${{ steps.ref.outputs.image }}\`"
               echo "**Digest**: \`${{ steps.build.outputs.digest }}\`"
-              echo "**Security scan**: ✅ Trivy (HIGH, CRITICAL)"
-              echo "**Supply chain**: ✅ cosign signature + SLSA provenance + SBOM attestation"
+              echo "**Security scan**: Trivy image (HIGH, CRITICAL) -> Security tab"
             else
-              echo "_PR build — image built for validation, not pushed._"
+              echo "_PR build - image built single-arch for validation, not pushed. Trivy fs scan gates the merge._"
             fi
+            echo ""
+            echo "_The release/multi-arch image is built and signed by GoReleaser on v* tags._"
           } >> "$GITHUB_STEP_SUMMARY"
