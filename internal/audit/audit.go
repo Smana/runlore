@@ -75,6 +75,29 @@ func Open(path string) (*Logger, error) {
 	return &Logger{w: f, closer: f, syncFn: f.Sync, lastHash: last, now: time.Now}, nil
 }
 
+// OpenVerified opens the audit log like Open, but first re-walks the existing
+// chain with Verify and refuses to open a chain whose integrity is broken
+// (insertion, edit, or mid-chain deletion). An empty or absent file is a valid
+// (zero-record) chain. Callers that must fail closed against an untrustworthy
+// chain (executing action modes) should use this instead of Open; the mode-based
+// fail/warn policy lives at the call site where the config is available.
+func OpenVerified(path string) (*Logger, error) {
+	f, err := os.Open(path) //nolint:gosec // G304: path is the operator-configured audit log
+	switch {
+	case os.IsNotExist(err):
+		// Absent file: nothing to verify (empty chain is valid).
+	case err != nil:
+		return nil, fmt.Errorf("audit: open %s for verify: %w", path, err)
+	default:
+		verr := Verify(f)
+		_ = f.Close()
+		if verr != nil {
+			return nil, fmt.Errorf("audit: existing chain failed verification: %w", verr)
+		}
+	}
+	return Open(path)
+}
+
 // NewWriter builds a Logger over an arbitrary writer (tests).
 func NewWriter(w io.Writer) *Logger {
 	return &Logger{w: w, now: time.Now}
