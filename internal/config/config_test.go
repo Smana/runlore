@@ -302,6 +302,35 @@ func TestCurateRecurrenceThresholdParse(t *testing.T) {
 	}
 }
 
+func TestValidateMCPServers(t *testing.T) {
+	good := &Config{MCP: MCP{Servers: []MCPServer{
+		{Name: "steampipe", Endpoint: Endpoint{URL: "https://mcp.example/x"}},
+		{Name: "k8s", Endpoint: Endpoint{URL: "http://k8s-mcp.ai.svc:8080"}},
+	}}}
+	if err := good.Validate(); err != nil {
+		t.Fatalf("valid MCP servers must pass: %v", err)
+	}
+	for _, tc := range []struct {
+		name string
+		s    MCPServer
+	}{
+		{"missing name", MCPServer{Endpoint: Endpoint{URL: "https://x"}}},
+		{"missing url", MCPServer{Name: "a"}},
+		{"double underscore in name", MCPServer{Name: "a__b", Endpoint: Endpoint{URL: "https://x"}}},
+		{"cleartext token on public http", MCPServer{Name: "a", Endpoint: Endpoint{URL: "http://api.public.example/x", TokenEnv: "T"}}},
+		{"non-http scheme ws", MCPServer{Name: "a", Endpoint: Endpoint{URL: "ws://x"}}},
+	} {
+		c := &Config{MCP: MCP{Servers: []MCPServer{tc.s}}}
+		if err := c.Validate(); err == nil {
+			t.Fatalf("%s must be rejected", tc.name)
+		}
+	}
+	dup := &Config{MCP: MCP{Servers: []MCPServer{{Name: "a", Endpoint: Endpoint{URL: "https://x"}}, {Name: "a", Endpoint: Endpoint{URL: "https://y"}}}}}
+	if err := dup.Validate(); err == nil {
+		t.Fatal("duplicate server names must be rejected")
+	}
+}
+
 // TestValidateApproveRequiresAuditLog asserts approve mode is held to the same
 // audit requirement as auto: an executing rung that mutates the cluster must have
 // an audit_log_path (so the hash chain is verified fail-closed on open). Without

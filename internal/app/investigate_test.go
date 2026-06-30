@@ -2,8 +2,11 @@ package app
 
 import (
 	"context"
+	"encoding/json"
 	"io"
 	"log/slog"
+	"net/http"
+	"net/http/httptest"
 	"path/filepath"
 	"testing"
 	"time"
@@ -182,6 +185,45 @@ func TestBuildApprovals(t *testing.T) {
 				t.Fatalf("BuildApprovals nil=%v, want nil=%v", got == nil, tc.wantNil)
 			}
 		})
+	}
+}
+
+// TestAppendMCPToolsSkipsUnreachable verifies failure-isolation: a healthy MCP server
+// contributes its namespaced tools, while a broken server (500) is skipped so the
+// investigation loop still starts with the healthy server's tools.
+func TestAppendMCPToolsSkipsUnreachable(t *testing.T) {
+	healthy := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			ID     json.RawMessage `json:"id"`
+			Method string          `json:"method"`
+		}
+		b, _ := io.ReadAll(r.Body)
+		_ = json.Unmarshal(b, &req)
+		switch req.Method {
+		case "tools/list":
+			_ = json.NewEncoder(w).Encode(map[string]any{"jsonrpc": "2.0", "id": req.ID,
+				"result": map[string]any{"tools": []map[string]any{{"name": "query", "description": "d"}}}})
+		default:
+			_ = json.NewEncoder(w).Encode(map[string]any{"jsonrpc": "2.0", "id": req.ID, "result": map[string]any{}})
+		}
+	}))
+	defer healthy.Close()
+	broken := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(500) }))
+	defer broken.Close()
+
+	cfg := &config.Config{MCP: config.MCP{Servers: []config.MCPServer{
+		{Name: "good", Endpoint: config.Endpoint{URL: healthy.URL}},
+		{Name: "bad", Endpoint: config.Endpoint{URL: broken.URL}},
+	}}}
+	var tools []investigate.Tool
+	tools = appendMCPTools(context.Background(), cfg, slog.New(slog.NewTextHandler(io.Discard, nil)), tools)
+
+	var names []string
+	for _, tl := range tools {
+		names = append(names, tl.Name())
+	}
+	if len(names) != 1 || names[0] != "good__query" {
+		t.Fatalf("want only good__query (bad server skipped), got %v", names)
 	}
 }
 
