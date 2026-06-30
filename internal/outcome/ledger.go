@@ -98,16 +98,19 @@ func New(path string) (*Ledger, error) {
 // back in. It is the single shared cache-build path called by New (single-threaded)
 // and Reload (under mu) — keeping the two in lockstep. A disabled/absent ledger leaves
 // the freshly-reset (empty) maps in place.
+//
+// The read is performed BEFORE any reset: if readEvents returns an error the prior
+// cache is left untouched — callers see a stale-but-valid cache rather than an empty one.
 func (l *Ledger) loadLocked() error {
+	events, err := l.readEvents()
+	if err != nil {
+		return err // prior cache untouched
+	}
 	l.open = map[string]Event{}
 	l.agg = map[string]Aggregate{}
 	l.pendingOpens = map[string][]pendingOpen{}
 	l.pendingResolves = map[string][]time.Time{}
 	l.droppedResolves = 0
-	events, err := l.readEvents()
-	if err != nil {
-		return err
-	}
 	for _, e := range events {
 		switch e.Event {
 		case "open":
@@ -368,7 +371,10 @@ type Aggregate struct {
 // (Resolved+k)/(Recalls+k), and runs on the recall hot path once per incident
 // lookup. It returns the cached aggregate — built once at New and maintained
 // incrementally on every Open/Resolve — so it is O(entries) and never re-reads the
-// file; the value equals a fresh full replay of the ledger for any event sequence.
+// file; the value equals a fresh full replay of the ledger for any event sequence
+// below the maxPendingResolvesPerFingerprint cap — above the cap (pathological
+// orphan-resolve load), dropped excess resolves mean the cache and an unbounded
+// Episodes() replay may diverge.
 // A disabled/empty ledger yields an empty (non-nil) map. The returned map is a
 // fresh copy the caller may freely mutate.
 //

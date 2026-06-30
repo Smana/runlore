@@ -314,6 +314,76 @@ func TestReloadResyncsExternalWrites(t *testing.T) {
 	}
 }
 
+// TestReloadErrorPreservesPriorCache is a regression test for the ordering bug where
+// loadLocked wiped the cache maps before calling readEvents: if readEvents fails the
+// cache was left empty rather than preserving the pre-Reload state. This test appends
+// a line longer than the bufio.Scanner buffer (>1 MiB) so readEvents returns
+// bufio.ErrTooLong, then asserts that Reload returns a non-nil error AND that
+// OpenCounts still equals the pre-Reload value (not empty).
+func TestReloadErrorPreservesPriorCache(t *testing.T) {
+	p := filepath.Join(t.TempDir(), "o.jsonl")
+	l, err := New(p)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	t0 := time.Unix(20000, 0)
+	// Populate the ledger so OpenCounts is non-empty.
+	_ = l.Open(Event{Fingerprint: "fp1", Kind: "recall", Entry: "a.md", At: t0})
+	_ = l.Open(Event{Fingerprint: "fp2", Kind: "recall", Entry: "b.md", At: t0.Add(time.Second)})
+	_, _, _ = l.Resolve("fp1", t0.Add(2*time.Second))
+
+	// Capture the pre-Reload cache.
+	before, err := l.OpenCounts()
+	if err != nil {
+		t.Fatalf("OpenCounts before: %v", err)
+	}
+	if len(before) == 0 {
+		t.Fatal("pre-condition: OpenCounts must be non-empty before Reload")
+	}
+
+	// Append a line >1 MiB (the Scanner max token size) to make readEvents fail with
+	// bufio.ErrTooLong. This is uid-independent (no chmod needed).
+	f, err := os.OpenFile(p, os.O_APPEND|os.O_WRONLY, 0o600)
+	if err != nil {
+		t.Fatalf("open ledger file for poisoning: %v", err)
+	}
+	// 1 MiB + 1 byte of non-JSON to exceed the scanner buffer.
+	giant := make([]byte, 1024*1024+1)
+	for i := range giant {
+		giant[i] = 'x'
+	}
+	giant[len(giant)-1] = '\n'
+	if _, err := f.Write(giant); err != nil {
+		f.Close()
+		t.Fatalf("write giant line: %v", err)
+	}
+	f.Close()
+
+	// Reload must return a non-nil error.
+	reloadErr := l.Reload()
+	if reloadErr == nil {
+		t.Fatal("Reload over a >1 MiB line must return a non-nil error")
+	}
+
+	// Cache must be unchanged — not empty.
+	after, err := l.OpenCounts()
+	if err != nil {
+		t.Fatalf("OpenCounts after failed Reload: %v", err)
+	}
+	if len(after) != len(before) {
+		t.Fatalf("failed Reload must preserve prior cache: before=%+v after=%+v", before, after)
+	}
+	for k, w := range before {
+		got, ok := after[k]
+		if !ok {
+			t.Fatalf("entry %q missing from cache after failed Reload: before=%+v after=%+v", k, before, after)
+		}
+		if got.Recalls != w.Recalls || got.Resolved != w.Resolved || !got.LastConfirmed.Equal(w.LastConfirmed) {
+			t.Fatalf("cache mismatch for %q after failed Reload: before=%+v after=%+v", k, w, got)
+		}
+	}
+}
+
 // TestReloadDisabledOrNilNoop ensures Reload is a safe no-op on a disabled (path=="")
 // or nil ledger — the leadership wiring calls it unconditionally.
 func TestReloadDisabledOrNilNoop(t *testing.T) {
