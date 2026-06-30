@@ -222,6 +222,7 @@ func (li *LoopInvestigator) Investigate(ctx context.Context, req Request) error 
 	nudged := false           // set when the prose-turn nudge has fired once
 	budgetNudged := false     // set when the token-budget nudge has fired once
 	truncationNudged := false // set when the output-truncation nudge has fired once
+	compactionLogged := false // set when the one-time compaction log has fired
 	used := map[string]int{}  // tool-call counts, logged so investigation breadth is observable
 	sys := li.system()        // constant for the investigation; build once, not per step
 	for step := 0; step < maxSteps; step++ {
@@ -229,7 +230,25 @@ func (li *LoopInvestigator) Investigate(ctx context.Context, req Request) error 
 		// inject a one-time nudge asking the model to wrap up. If the model did not wind
 		// down and the estimate is still over budget on the next step, hard-kill: deliver
 		// whatever findings exist rather than growing context unbounded.
-		if est := estimateTokens(sys, messages, specs); overBudget(est, li.MaxTokensPerInvestigation) {
+		est := estimateTokens(sys, messages, specs)
+		// Mid-loop compaction: before the budget guard, elide superseded/old tool outputs
+		// to stay under budget so a long investigation can finish instead of hard-killing.
+		if target := compactionTarget(li.MaxTokensPerInvestigation); target > 0 && est > target {
+			if compacted, elided := compactHistory(messages, sys, specs, target); elided > 0 {
+				messages = compacted
+				est = estimateTokens(sys, messages, specs)
+				if !compactionLogged {
+					li.Log.Info("compacted investigation history to bound context",
+						"title", req.Title, "elided_bytes", elided, "estimate_tokens", est)
+					compactionLogged = true
+				}
+				if li.Metrics != nil {
+					li.Metrics.HistoryCompactions.Add(ctx, 1)
+					li.Metrics.HistoryElidedBytes.Add(ctx, int64(elided))
+				}
+			}
+		}
+		if overBudget(est, li.MaxTokensPerInvestigation) {
 			if !budgetNudged {
 				messages = append(messages, providers.Message{Role: "user", Content: budgetNudge})
 				budgetNudged = true

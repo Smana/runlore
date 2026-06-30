@@ -24,6 +24,8 @@ type Metrics struct {
 	InvestigationsDropped     metric.Int64Counter
 	GitOpsFailuresDebounced   metric.Int64Counter // GitOps failures dropped as transient (cleared within the debounce window)
 	ToolOutputTruncatedBytes  metric.Int64Counter
+	HistoryCompactions        metric.Int64Counter // mid-loop history compaction events
+	HistoryElidedBytes        metric.Int64Counter // tool-output bytes elided by compaction
 	RecallHits                metric.Int64Counter // KB cache hits, labelled by verify result
 	RecallTokensSaved         metric.Int64Counter // estimated tokens saved by a recall short-circuit
 	RecallRejections          metric.Int64Counter // recalls rejected before short-circuit (label: reason)
@@ -73,6 +75,8 @@ func NewMetrics() *Metrics {
 		InvestigationsDropped:     ctr("investigations_dropped_total", "investigations dropped — rate-limiter max_requeues or token-budget hard-kill"),
 		GitOpsFailuresDebounced:   ctr("gitops_failures_debounced_total", "GitOps failures dropped as transient: cleared within the debounce window before investigating"),
 		ToolOutputTruncatedBytes:  ctr("tool_output_truncated_bytes_total", "bytes elided by output truncation"),
+		HistoryCompactions:        ctr("history_compactions_total", "mid-loop tool-output history compaction events"),
+		HistoryElidedBytes:        ctr("history_elided_bytes_total", "tool-output bytes elided by mid-loop compaction"),
 		RecallHits:                ctr("recall_hits_total", "KB instant-recall short-circuits (label: result)"),
 		RecallTokensSaved:         ctr("recall_tokens_saved_total", "estimated tokens saved by recall short-circuits"),
 		RecallRejections:          ctr("recall_rejections_total", "recalls rejected before short-circuit (label: reason)"),
