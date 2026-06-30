@@ -42,6 +42,11 @@ const (
 	idleTimeout = 2 * time.Minute
 )
 
+// Caching: RunLore relies on Gemini's automatic IMPLICIT prefix caching (enabled on
+// Gemini 2.5+). No explicit CachedContent lifecycle is used. This depends on the request
+// prefix (system_instruction + tools + earlier contents) being byte-stable and append-only
+// across the loop's steps; TestRequestPrefixStable guards that invariant.
+
 // Client is a Gemini (streamGenerateContent) model provider.
 type Client struct {
 	baseURL   string
@@ -133,8 +138,9 @@ type genResponse struct {
 	// UsageMetadata carries the per-request token counts; a pointer so an absent block
 	// parses to nil (unknown) rather than a misleading {0,0}.
 	UsageMetadata *struct {
-		PromptTokenCount     int `json:"promptTokenCount"`
-		CandidatesTokenCount int `json:"candidatesTokenCount"`
+		PromptTokenCount        int `json:"promptTokenCount"`
+		CandidatesTokenCount    int `json:"candidatesTokenCount"`
+		CachedContentTokenCount int `json:"cachedContentTokenCount"`
 	} `json:"usageMetadata"`
 	Error *struct {
 		Message string `json:"message"`
@@ -243,7 +249,11 @@ func accumulate(r io.Reader) (providers.CompletionResponse, error) {
 		// usageMetadata accumulates across chunks (last non-nil block wins; Gemini
 		// resends the running totals, so the final chunk carries the full count).
 		if gr.UsageMetadata != nil {
-			out.Usage = providers.Usage{InputTokens: gr.UsageMetadata.PromptTokenCount, OutputTokens: gr.UsageMetadata.CandidatesTokenCount}
+			out.Usage = providers.Usage{
+				InputTokens:       gr.UsageMetadata.PromptTokenCount,
+				OutputTokens:      gr.UsageMetadata.CandidatesTokenCount,
+				CachedInputTokens: gr.UsageMetadata.CachedContentTokenCount,
+			}
 		}
 		if len(gr.Candidates) == 0 {
 			continue
