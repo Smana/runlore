@@ -3,6 +3,7 @@ package anthropic
 import (
 	"context"
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -12,6 +13,29 @@ import (
 )
 
 const maliciousBody = "\n\x1b[2Kfake=record secret=sk-LEAKED-0123456789 level=error msg=\"forged\""
+
+// sseServer returns a test server that writes the given SSE event lines, flushing
+// after each so the client sees a real incremental stream.
+func sseServer(t *testing.T, capture func(*http.Request), events []string) *httptest.Server {
+	t.Helper()
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if capture != nil {
+			capture(r)
+		}
+		fl, ok := w.(http.Flusher)
+		if !ok {
+			t.Errorf("server needs http.Flusher")
+			return
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		fl.Flush()
+		for _, e := range events {
+			_, _ = io.WriteString(w, e)
+			fl.Flush()
+		}
+	}))
+}
 
 // TestNon2xxErrorOmitsBody asserts a non-2xx response yields an error that
 // excludes the upstream body but includes the status and request-id.
@@ -44,19 +68,66 @@ func TestNon2xxErrorOmitsBody(t *testing.T) {
 	}
 }
 
+// TestComplete drives a full Anthropic SSE stream — message_start (input usage),
+// a text content block, a tool_use block assembled from input_json_delta fragments,
+// content_block_stop, message_delta (stop_reason + output usage), message_stop — and
+// asserts the accumulated text, the reassembled tool call, and the request mapping
+// (stream:true + max_tokens + headers + prompt-cache breakpoints).
 func TestComplete(t *testing.T) {
 	var gotReq msgRequest
 	var gotVersion, gotKey string
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	srv := sseServer(t, func(r *http.Request) {
 		gotVersion, gotKey = r.Header.Get("anthropic-version"), r.Header.Get("x-api-key")
 		_ = json.NewDecoder(r.Body).Decode(&gotReq)
-		_, _ = w.Write([]byte(`{"content":[
-		  {"type":"text","text":"investigating"},
-		  {"type":"tool_use","id":"tu1","name":"what_changed","input":{"namespace":"apps"}}]}`))
-	}))
+	}, []string{
+		`event: message_start
+data: {"type":"message_start","message":{"usage":{"input_tokens":120,"output_tokens":1}}}
+
+`,
+		`event: content_block_start
+data: {"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}
+
+`,
+		`event: content_block_delta
+data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"investi"}}
+
+`,
+		`event: content_block_delta
+data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"gating"}}
+
+`,
+		`event: content_block_stop
+data: {"type":"content_block_stop","index":0}
+
+`,
+		`event: content_block_start
+data: {"type":"content_block_start","index":1,"content_block":{"type":"tool_use","id":"tu1","name":"what_changed","input":{}}}
+
+`,
+		`event: content_block_delta
+data: {"type":"content_block_delta","index":1,"delta":{"type":"input_json_delta","partial_json":"{\"namespace\":"}}
+
+`,
+		`event: content_block_delta
+data: {"type":"content_block_delta","index":1,"delta":{"type":"input_json_delta","partial_json":"\"apps\"}"}}
+
+`,
+		`event: content_block_stop
+data: {"type":"content_block_stop","index":1}
+
+`,
+		`event: message_delta
+data: {"type":"message_delta","delta":{"stop_reason":"tool_use"},"usage":{"output_tokens":45}}
+
+`,
+		`event: message_stop
+data: {"type":"message_stop"}
+
+`,
+	})
 	defer srv.Close()
 
-	c := New(srv.URL, "claude-x", "k", 0)
+	c := New(srv.URL, "claude-x", "k", 16384)
 	resp, err := c.Complete(context.Background(), providers.CompletionRequest{
 		System:   "sys",
 		Messages: []providers.Message{{Role: "user", Content: "hi"}},
@@ -69,8 +140,8 @@ func TestComplete(t *testing.T) {
 	if gotVersion != apiVersion || gotKey != "k" {
 		t.Fatalf("version=%q key=%q", gotVersion, gotKey)
 	}
-	if gotReq.Model != "claude-x" || gotReq.MaxTokens == 0 {
-		t.Fatalf("request: %+v", gotReq)
+	if gotReq.Model != "claude-x" || !gotReq.Stream || gotReq.MaxTokens != 16384 {
+		t.Fatalf("request (want stream:true, max_tokens:16384): %+v", gotReq)
 	}
 	// system is sent as a content-block array carrying a prompt-cache breakpoint
 	if len(gotReq.System) != 1 || gotReq.System[0].Text != "sys" ||
@@ -80,58 +151,67 @@ func TestComplete(t *testing.T) {
 	if len(gotReq.Tools) != 1 || gotReq.Tools[0].Name != "what_changed" || string(gotReq.Tools[0].InputSchema) != `{"type":"object"}` {
 		t.Fatalf("tools: %+v", gotReq.Tools)
 	}
-	// the last tool is the cache breakpoint for the (static) tool schemas
 	if gotReq.Tools[0].CacheControl == nil || gotReq.Tools[0].CacheControl.Type != "ephemeral" {
 		t.Fatalf("last tool should be a cache breakpoint: %+v", gotReq.Tools[0])
 	}
 	if len(gotReq.Messages) != 1 || gotReq.Messages[0].Role != "user" || gotReq.Messages[0].Content[0].Text != "hi" {
 		t.Fatalf("messages: %+v", gotReq.Messages)
 	}
-	// response mapping: text + tool_use
-	if resp.Text != "investigating" || len(resp.ToolCalls) != 1 ||
-		resp.ToolCalls[0].ID != "tu1" || resp.ToolCalls[0].Name != "what_changed" || resp.ToolCalls[0].Args != `{"namespace":"apps"}` {
-		t.Fatalf("response: %+v", resp)
+	// response accumulation: text + reassembled tool_use args + usage + stop reason
+	if resp.Text != "investigating" {
+		t.Fatalf("accumulated text = %q, want %q", resp.Text, "investigating")
+	}
+	if len(resp.ToolCalls) != 1 || resp.ToolCalls[0].ID != "tu1" || resp.ToolCalls[0].Name != "what_changed" ||
+		resp.ToolCalls[0].Args != `{"namespace":"apps"}` {
+		t.Fatalf("tool call: %+v", resp.ToolCalls)
+	}
+	if resp.Usage.InputTokens != 120 || resp.Usage.OutputTokens != 45 {
+		t.Fatalf("usage = %+v, want in=120 out=45", resp.Usage)
+	}
+	if resp.StopReason != "tool_use" {
+		t.Fatalf("StopReason = %q, want tool_use", resp.StopReason)
 	}
 }
 
-// TestUsageAndStopReason verifies the Anthropic usage block and stop_reason are
-// parsed onto CompletionResponse: token counts surface on Usage, and a "max_tokens"
-// stop_reason flags Truncated. A response omitting usage parses to the zero value.
+// TestUsageAndStopReason verifies usage accumulation and stop_reason mapping over a
+// minimal SSE stream: a "max_tokens" stop_reason flags Truncated; "end_turn" does not.
 func TestUsageAndStopReason(t *testing.T) {
 	tests := []struct {
 		name          string
-		body          string
-		wantIn        int
-		wantOut       int
+		stopReason    string
 		wantTruncated bool
 	}{
-		{
-			name:          "usage + end_turn (not truncated)",
-			body:          `{"stop_reason":"end_turn","usage":{"input_tokens":120,"output_tokens":45},"content":[{"type":"text","text":"done"}]}`,
-			wantIn:        120,
-			wantOut:       45,
-			wantTruncated: false,
-		},
-		{
-			name:          "max_tokens stop_reason flags truncation",
-			body:          `{"stop_reason":"max_tokens","usage":{"input_tokens":200,"output_tokens":4096},"content":[{"type":"text","text":"cut off"}]}`,
-			wantIn:        200,
-			wantOut:       4096,
-			wantTruncated: true,
-		},
-		{
-			name:          "usage omitted parses to zero value",
-			body:          `{"stop_reason":"end_turn","content":[{"type":"text","text":"done"}]}`,
-			wantIn:        0,
-			wantOut:       0,
-			wantTruncated: false,
-		},
+		{"end_turn (not truncated)", "end_turn", false},
+		{"max_tokens flags truncation", "max_tokens", true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-				_, _ = w.Write([]byte(tt.body))
-			}))
+			srv := sseServer(t, nil, []string{
+				`event: message_start
+data: {"type":"message_start","message":{"usage":{"input_tokens":200}}}
+
+`,
+				`event: content_block_start
+data: {"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}
+
+`,
+				`event: content_block_delta
+data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"done"}}
+
+`,
+				`event: content_block_stop
+data: {"type":"content_block_stop","index":0}
+
+`,
+				`event: message_delta
+data: {"type":"message_delta","delta":{"stop_reason":"` + tt.stopReason + `"},"usage":{"output_tokens":4096}}
+
+`,
+				`event: message_stop
+data: {"type":"message_stop"}
+
+`,
+			})
 			defer srv.Close()
 			resp, err := New(srv.URL, "claude-x", "k", 0).Complete(context.Background(), providers.CompletionRequest{
 				Messages: []providers.Message{{Role: "user", Content: "hi"}},
@@ -139,13 +219,84 @@ func TestUsageAndStopReason(t *testing.T) {
 			if err != nil {
 				t.Fatalf("Complete: %v", err)
 			}
-			if resp.Usage.InputTokens != tt.wantIn || resp.Usage.OutputTokens != tt.wantOut {
-				t.Fatalf("usage = %+v, want in=%d out=%d", resp.Usage, tt.wantIn, tt.wantOut)
+			if resp.Usage.InputTokens != 200 || resp.Usage.OutputTokens != 4096 {
+				t.Fatalf("usage = %+v, want in=200 out=4096", resp.Usage)
+			}
+			if resp.Text != "done" {
+				t.Fatalf("text = %q, want done", resp.Text)
 			}
 			if resp.Truncated != tt.wantTruncated {
 				t.Fatalf("Truncated = %v, want %v", resp.Truncated, tt.wantTruncated)
 			}
+			if resp.StopReason != tt.stopReason {
+				t.Fatalf("StopReason = %q, want %q", resp.StopReason, tt.stopReason)
+			}
 		})
+	}
+}
+
+// TestRefusal verifies a stop_reason of "refusal" with no content surfaces as a
+// CompletionResponse that reports Refused()==true.
+func TestRefusal(t *testing.T) {
+	srv := sseServer(t, nil, []string{
+		`event: message_start
+data: {"type":"message_start","message":{"usage":{"input_tokens":50}}}
+
+`,
+		`event: message_delta
+data: {"type":"message_delta","delta":{"stop_reason":"refusal"},"usage":{"output_tokens":0}}
+
+`,
+		`event: message_stop
+data: {"type":"message_stop"}
+
+`,
+	})
+	defer srv.Close()
+	resp, err := New(srv.URL, "claude-x", "k", 0).Complete(context.Background(), providers.CompletionRequest{
+		Messages: []providers.Message{{Role: "user", Content: "hi"}},
+	})
+	if err != nil {
+		t.Fatalf("Complete: %v", err)
+	}
+	if !resp.Refused() {
+		t.Fatalf("want Refused()==true for stop_reason refusal, got StopReason=%q", resp.StopReason)
+	}
+	if resp.Text != "" || len(resp.ToolCalls) != 0 {
+		t.Fatalf("refusal must carry no content: text=%q calls=%+v", resp.Text, resp.ToolCalls)
+	}
+}
+
+// TestMidStreamDrop verifies a connection dropped mid-stream (before message_stop)
+// surfaces as an error rather than a silently-truncated success.
+func TestMidStreamDrop(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		fl := w.(http.Flusher)
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		// Start a message but never finish it; then drop the connection.
+		_, _ = io.WriteString(w, `event: message_start
+data: {"type":"message_start","message":{"usage":{"input_tokens":10}}}
+
+event: content_block_start
+data: {"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"par`)
+		fl.Flush()
+		// Abruptly close mid-event by hijacking and closing the TCP connection.
+		if hj, ok := w.(http.Hijacker); ok {
+			conn, _, _ := hj.Hijack()
+			_ = conn.Close()
+		}
+	}))
+	defer srv.Close()
+
+	_, err := New(srv.URL, "claude-x", "k", 0).Complete(context.Background(), providers.CompletionRequest{
+		Messages: []providers.Message{{Role: "user", Content: "hi"}},
+	})
+	if err == nil {
+		t.Fatal("want an error when the stream is dropped before message_stop")
 	}
 }
 
@@ -153,10 +304,30 @@ func TestUsageAndStopReason(t *testing.T) {
 // separate tool messages) maps to Anthropic's tool_use / coalesced tool_result form.
 func TestMessageCoalescing(t *testing.T) {
 	var gotReq msgRequest
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	srv := sseServer(t, func(r *http.Request) {
 		_ = json.NewDecoder(r.Body).Decode(&gotReq)
-		_, _ = w.Write([]byte(`{"content":[{"type":"text","text":"done"}]}`))
-	}))
+	}, []string{
+		`event: message_start
+data: {"type":"message_start","message":{"usage":{"input_tokens":1}}}
+
+`,
+		`event: content_block_start
+data: {"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}
+
+`,
+		`event: content_block_delta
+data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"done"}}
+
+`,
+		`event: message_delta
+data: {"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":1}}
+
+`,
+		`event: message_stop
+data: {"type":"message_stop"}
+
+`,
+	})
 	defer srv.Close()
 
 	_, err := New(srv.URL, "claude-x", "k", 0).Complete(context.Background(), providers.CompletionRequest{
@@ -192,10 +363,30 @@ func TestMessageCoalescing(t *testing.T) {
 // still gets exactly one cache breakpoint — on the LAST tool, not every tool.
 func TestPromptCacheToolsOnly(t *testing.T) {
 	var gotReq msgRequest
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	srv := sseServer(t, func(r *http.Request) {
 		_ = json.NewDecoder(r.Body).Decode(&gotReq)
-		_, _ = w.Write([]byte(`{"content":[{"type":"text","text":"ok"}]}`))
-	}))
+	}, []string{
+		`event: message_start
+data: {"type":"message_start","message":{"usage":{"input_tokens":1}}}
+
+`,
+		`event: content_block_start
+data: {"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}
+
+`,
+		`event: content_block_delta
+data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"ok"}}
+
+`,
+		`event: message_delta
+data: {"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":1}}
+
+`,
+		`event: message_stop
+data: {"type":"message_stop"}
+
+`,
+	})
 	defer srv.Close()
 
 	_, err := New(srv.URL, "claude-x", "k", 0).Complete(context.Background(), providers.CompletionRequest{
