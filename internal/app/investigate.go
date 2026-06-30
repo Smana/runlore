@@ -16,6 +16,7 @@ import (
 	"github.com/Smana/runlore/internal/curator"
 	"github.com/Smana/runlore/internal/investigate"
 	"github.com/Smana/runlore/internal/logs/victorialogs"
+	"github.com/Smana/runlore/internal/mcp"
 	"github.com/Smana/runlore/internal/metrics/prometheus"
 	"github.com/Smana/runlore/internal/network/awsvpc"
 	"github.com/Smana/runlore/internal/network/gcpfirewall"
@@ -145,7 +146,51 @@ func BuildModelAndTools(ctx context.Context, cfg *config.Config, gp providers.Gi
 			log.Info("cloud provider enabled", "provider", "aws", "region", cfg.Cloud.Region)
 		}
 	}
+	tools = appendMCPTools(ctx, cfg, log, tools)
 	return model, tools, recall, cat
+}
+
+// appendMCPTools discovers tools from each configured MCP server and appends them
+// (namespaced, read-only) to the loop's tool set. A server that fails initialize/list is
+// logged and skipped — RunLore continues with the built-in tools. A namespaced name that
+// collides with an already-registered tool is skipped (built-ins win).
+func appendMCPTools(ctx context.Context, cfg *config.Config, log *slog.Logger, tools []investigate.Tool) []investigate.Tool {
+	if len(cfg.MCP.Servers) == 0 {
+		return tools
+	}
+	have := map[string]bool{}
+	for _, t := range tools {
+		have[t.Name()] = true
+	}
+	for _, s := range cfg.MCP.Servers {
+		apiKey := ""
+		if s.TokenEnv != "" {
+			apiKey = os.Getenv(s.TokenEnv)
+		}
+		c := mcp.NewClient(s.Name, s.URL, apiKey, s.Headers, log)
+		if err := c.Initialize(ctx); err != nil {
+			log.Warn("mcp: skipping server (initialize failed)", "server", s.Name, "err", err)
+			continue
+		}
+		remote, err := c.ListTools(ctx)
+		if err != nil {
+			log.Warn("mcp: skipping server (tools/list failed)", "server", s.Name, "err", err)
+			continue
+		}
+		added := 0
+		for _, rt := range remote {
+			tl := mcp.NewTool(c, rt)
+			if have[tl.Name()] {
+				log.Warn("mcp: skipping tool (name collision)", "server", s.Name, "tool", tl.Name())
+				continue
+			}
+			have[tl.Name()] = true
+			tools = append(tools, tl)
+			added++
+		}
+		log.Info("mcp: registered server tools", "server", s.Name, "tools", added)
+	}
+	return tools
 }
 
 // defaultToolTimeout bounds a single tool call when investigation.tool_timeout is
