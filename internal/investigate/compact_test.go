@@ -152,6 +152,23 @@ func TestCompactIdempotent(t *testing.T) {
 	_ = twice
 }
 
+func TestCompactSkipsBodiesNoLargerThanMarker(t *testing.T) {
+	tiny := "x" // far smaller than the ~49-byte marker
+	big := strings.Repeat("b", 5000)
+	// 5 tool results -> recentCut = 2; positions 0 (tiny, id1) and 1 (big, id2) are eligible.
+	msgs := buildHistory(10,
+		callAndResult("1", "pod_logs", `{"ns":"a"}`, tiny),
+		callAndResult("2", "pod_logs", `{"ns":"b"}`, big),
+		callAndResult("3", "pod_logs", `{"ns":"c"}`, big),
+		callAndResult("4", "pod_logs", `{"ns":"d"}`, big),
+		callAndResult("5", "pod_logs", `{"ns":"e"}`, big),
+	)
+	out, _ := compactHistory(msgs, "", nil, 1) // target=1 forces maximum elision
+	if toolResultByID(out, "1") != tiny {
+		t.Fatalf("a body smaller than the marker must be left untouched, got %q", toolResultByID(out, "1"))
+	}
+}
+
 func TestCompactionTarget(t *testing.T) {
 	if compactionTarget(0) != 0 || compactionTarget(-5) != 0 {
 		t.Fatal("budget<=0 disables compaction")
