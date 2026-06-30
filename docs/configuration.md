@@ -117,6 +117,37 @@ allowlist **auto-tracks this value** unless overridden, so RBAC scope and app gu
 `allowActions` (gate for the patch Role), `actionNamespaces` (the patch allowlist — **must mirror
 `config.actions.allow.namespaces`**). See [Security model](security-model.md).
 
+### `mcp` — external MCP tool servers (opt-in)
+
+RunLore can call tools advertised by external [Model Context Protocol](https://modelcontextprotocol.io)
+servers over streamable-HTTP (JSON-RPC 2.0). MCP is **opt-in** — the default empty `servers` list
+disables it entirely.
+
+```yaml
+mcp:
+  servers:
+    - name: mydb           # short identifier; namespaces all tools as mydb__<tool>
+      url: https://mcp.example.com/mcp
+      token_env: MYDB_MCP_TOKEN   # optional — env var holding a bearer token
+      headers:                    # optional extra request headers
+        X-Tenant: my-org
+```
+
+**Key behaviours:**
+
+- **Namespaced names.** Every remote tool is registered as `<server>__<tool>` (e.g. `mydb__query`),
+  so MCP tools never collide with RunLore's built-in tools. Built-in names always win on collision.
+- **Read-only.** The MCP adapter only calls `tools/call`; it never mutates RunLore state.
+- **Failure-isolated.** A server that fails the `initialize` handshake or `tools/list` is logged at
+  Warn and skipped — RunLore starts the investigation loop with the remaining tools rather than
+  aborting. Fix the server and restart to pick it up.
+- **Secrets by indirection.** `token_env` names the environment variable — never embed the token
+  value directly in config. Wire it from a Kubernetes `Secret` (`env`/`envFrom`).
+- **`headers` are not secret-safe over plain HTTP.** Only `token_env` is checked at config
+  validation time; custom `headers` values are not. Do not carry secrets in `headers` when `url`
+  is plain `http://` to a public host — use `headers` for non-secret metadata only (e.g. `X-Tenant`).
+  Use `https://` whenever the server is on a public network.
+
 ### Other top-level keys
 `gitops.engine` (`flux` default · `argocd`), `cloud` (`provider: aws`, `region`, `cluster_name`),
 `network` (pluggable: `hubble` · `aws-vpc-flow-logs` · `gcp-firewall-logs`), `metrics`/`logs`
