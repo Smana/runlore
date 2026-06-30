@@ -45,6 +45,7 @@ type Config struct {
 	Logs    Endpoint `yaml:"logs"`    // LogsQL backend (VictoriaLogs) for query_logs
 	Network Network  `yaml:"network"` // network-flow data source (pluggable, CNI-agnostic); empty Provider disables it
 	Cloud   Cloud    `yaml:"cloud"`   // cloud-side context (AWS); empty Provider disables it
+	MCP     MCP      `yaml:"mcp"`     // external MCP servers whose tools the agent may call (opt-in)
 
 	Server ServerConfig `yaml:"server"` // HTTP ingress (webhook authentication)
 
@@ -87,6 +88,20 @@ type Cloud struct {
 	Provider    string `yaml:"provider"`     // "" (disabled) | "aws"
 	Region      string `yaml:"region"`       // e.g. eu-west-3 (default: AWS_REGION / IMDS)
 	ClusterName string `yaml:"cluster_name"` // EKS cluster name, scopes nodegroup/ASG queries
+}
+
+// MCP configures outbound connections to external MCP servers whose tools the
+// investigation loop may call. Empty Servers disables it (the default — MCP is opt-in).
+type MCP struct {
+	Servers []MCPServer `yaml:"servers"`
+}
+
+// MCPServer is one external MCP server reachable over streamable-HTTP.
+type MCPServer struct {
+	Name     string            `yaml:"name"`      // identifier; namespaces its tools as name__tool
+	URL      string            `yaml:"url"`       // streamable-HTTP endpoint
+	TokenEnv string            `yaml:"token_env"` // env var holding a bearer token (optional)
+	Headers  map[string]string `yaml:"headers"`   // extra request headers (optional)
 }
 
 // Network provider identifiers for config.network.provider. The network signal is
@@ -603,6 +618,22 @@ func (c *Config) Validate() error {
 	}
 	if e := c.Model.Embeddings; e != nil {
 		if err := checkSecureKeyEndpoint("model.embeddings.base_url", "model.embeddings.api_key_env", e.BaseURL, e.APIKeyEnv); err != nil {
+			return err
+		}
+	}
+	seenMCP := map[string]bool{}
+	for i, s := range c.MCP.Servers {
+		if s.Name == "" || s.URL == "" {
+			return fmt.Errorf("mcp.servers[%d]: name and url are required", i)
+		}
+		if strings.Contains(s.Name, "__") || strings.ContainsAny(s.Name, " \t") {
+			return fmt.Errorf("mcp.servers[%d]: name %q must not contain '__' or whitespace", i, s.Name)
+		}
+		if seenMCP[s.Name] {
+			return fmt.Errorf("mcp.servers[%d]: duplicate server name %q", i, s.Name)
+		}
+		seenMCP[s.Name] = true
+		if err := checkSecureKeyEndpoint("mcp.servers["+s.Name+"].url", "mcp.servers["+s.Name+"].token_env", s.URL, s.TokenEnv); err != nil {
 			return err
 		}
 	}
