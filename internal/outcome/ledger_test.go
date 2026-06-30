@@ -1,11 +1,257 @@
 package outcome
 
 import (
+	"encoding/json"
+	"fmt"
+	"math/rand"
 	"os"
 	"path/filepath"
+	"reflect"
+	"sync"
 	"testing"
 	"time"
 )
+
+// replayOpenCounts is an independent oracle: it computes the per-entry recall
+// aggregate by replaying every event in the file from scratch, mirroring the
+// documented Episodes()→OpenCounts() semantics (LIFO pairing, order-independent
+// resolve-before-open buffering). The cached OpenCounts() must equal this for
+// any event sequence.
+func replayOpenCounts(t *testing.T, path string) map[string]Aggregate {
+	t.Helper()
+	ref, err := New(path)
+	if err != nil {
+		t.Fatalf("oracle New: %v", err)
+	}
+	eps, err := ref.Episodes() // Episodes still replays the file, so it is a fresh source of truth
+	if err != nil {
+		t.Fatalf("oracle Episodes: %v", err)
+	}
+	counts := map[string]Aggregate{}
+	for _, e := range eps {
+		if e.Kind != "recall" || e.Entry == "" {
+			continue
+		}
+		a := counts[e.Entry]
+		a.Recalls++
+		if e.Resolved {
+			a.Resolved++
+			if e.ResolvedAt.After(a.LastConfirmed) {
+				a.LastConfirmed = e.ResolvedAt
+			}
+		}
+		counts[e.Entry] = a
+	}
+	return counts
+}
+
+func assertCacheEqualsReplay(t *testing.T, l *Ledger, path string) {
+	t.Helper()
+	cached, err := l.OpenCounts()
+	if err != nil {
+		t.Fatalf("OpenCounts: %v", err)
+	}
+	want := replayOpenCounts(t, path)
+	if !reflect.DeepEqual(cached, want) {
+		t.Fatalf("cache != replay\n cached=%+v\n replay=%+v", cached, want)
+	}
+}
+
+// TestOpenCountsCacheEqualsReplaySequence drives a varied open/resolve sequence
+// (recurrence, multiple entries, resolve-before-open, fresh, interleaving) and
+// asserts the live cached OpenCounts() equals a from-scratch replay of the file.
+func TestOpenCountsCacheEqualsReplaySequence(t *testing.T) {
+	p := filepath.Join(t.TempDir(), "o.jsonl")
+	l, _ := New(p)
+	t0 := time.Unix(10000, 0)
+	at := func(d int) time.Time { return t0.Add(time.Duration(d) * time.Second) }
+
+	// recurrence on one entry: 3 opens, 1 resolve (LIFO ⇒ exactly 1 resolved)
+	_ = l.Open(Event{Fingerprint: "fp1", Kind: "recall", Entry: "x.md", At: at(0)})
+	_ = l.Open(Event{Fingerprint: "fp1", Kind: "recall", Entry: "x.md", At: at(1)})
+	_ = l.Open(Event{Fingerprint: "fp1", Kind: "recall", Entry: "x.md", At: at(2)})
+	_, _, _ = l.Resolve("fp1", at(5))
+	// a fresh open (must never appear in counts)
+	_ = l.Open(Event{Fingerprint: "fr", Kind: "fresh", At: at(6)})
+	_, _, _ = l.Resolve("fr", at(7))
+	// second entry, resolved once
+	_ = l.Open(Event{Fingerprint: "fp2", Kind: "recall", Entry: "y.md", At: at(8)})
+	_, _, _ = l.Resolve("fp2", at(9))
+	// resolve-before-open: the resolve lands first, then the open pairs with it
+	_, _, _ = l.Resolve("fp3", at(10))
+	_ = l.Open(Event{Fingerprint: "fp3", Kind: "recall", Entry: "z.md", At: at(11)})
+	// unresolved recall
+	_ = l.Open(Event{Fingerprint: "fp4", Kind: "recall", Entry: "w.md", At: at(12)})
+
+	assertCacheEqualsReplay(t, l, p)
+
+	// Spot-check the documented shape too, not only DeepEqual against the oracle.
+	counts, _ := l.OpenCounts()
+	if got := counts["x.md"]; got.Recalls != 3 || got.Resolved != 1 || !got.LastConfirmed.Equal(at(5)) {
+		t.Fatalf("x.md = %+v", got)
+	}
+	if got := counts["z.md"]; got.Recalls != 1 || got.Resolved != 1 {
+		t.Fatalf("resolve-before-open z.md = %+v", got)
+	}
+	if got := counts["w.md"]; got.Recalls != 1 || got.Resolved != 0 {
+		t.Fatalf("unresolved w.md = %+v", got)
+	}
+	if _, ok := counts["fresh"]; ok {
+		t.Fatalf("fresh must not be counted: %+v", counts)
+	}
+}
+
+// TestOpenCountsCacheReflectsAppendsAfterConstruction ensures the cache is
+// updated INCREMENTALLY on appends made after New(), not only at load.
+func TestOpenCountsCacheReflectsAppendsAfterConstruction(t *testing.T) {
+	p := filepath.Join(t.TempDir(), "o.jsonl")
+	l, _ := New(p) // constructed over an empty/absent file
+	if c, _ := l.OpenCounts(); len(c) != 0 {
+		t.Fatalf("fresh ledger must start empty, got %+v", c)
+	}
+	t0 := time.Unix(11000, 0)
+	_ = l.Open(Event{Fingerprint: "fp", Kind: "recall", Entry: "a.md", At: t0})
+	if c, _ := l.OpenCounts(); c["a.md"].Recalls != 1 || c["a.md"].Resolved != 0 {
+		t.Fatalf("after Open, want recalls=1 resolved=0, got %+v", c["a.md"])
+	}
+	_, _, _ = l.Resolve("fp", t0.Add(time.Minute))
+	if c, _ := l.OpenCounts(); c["a.md"].Resolved != 1 || !c["a.md"].LastConfirmed.Equal(t0.Add(time.Minute)) {
+		t.Fatalf("after Resolve, want resolved=1 with LastConfirmed bumped, got %+v", c["a.md"])
+	}
+	assertCacheEqualsReplay(t, l, p)
+}
+
+// TestOpenCountsCacheBuiltFromExistingFile ensures opening a ledger over a file
+// that already has events builds the cache once at construction (no append needed).
+func TestOpenCountsCacheBuiltFromExistingFile(t *testing.T) {
+	p := filepath.Join(t.TempDir(), "o.jsonl")
+	seed, _ := New(p)
+	t0 := time.Unix(12000, 0)
+	_ = seed.Open(Event{Fingerprint: "fp", Kind: "recall", Entry: "a.md", At: t0})
+	_ = seed.Open(Event{Fingerprint: "fp", Kind: "recall", Entry: "a.md", At: t0.Add(time.Second)})
+	_, _, _ = seed.Resolve("fp", t0.Add(5*time.Second))
+
+	reopened, err := New(p)
+	if err != nil {
+		t.Fatalf("reopen New: %v", err)
+	}
+	c, _ := reopened.OpenCounts()
+	if c["a.md"].Recalls != 2 || c["a.md"].Resolved != 1 || !c["a.md"].LastConfirmed.Equal(t0.Add(5*time.Second)) {
+		t.Fatalf("reopened cache from file = %+v", c["a.md"])
+	}
+	assertCacheEqualsReplay(t, reopened, p)
+}
+
+// TestOpenCountsCacheSkipsCorruptLinesOnLoad ensures the initial cache build
+// skips corrupt JSONL lines (matching readEvents' tolerance) rather than failing.
+func TestOpenCountsCacheSkipsCorruptLinesOnLoad(t *testing.T) {
+	p := filepath.Join(t.TempDir(), "o.jsonl")
+	t0 := time.Unix(13000, 0)
+	good1, _ := json.Marshal(Event{Event: "open", Fingerprint: "fp", Kind: "recall", Entry: "a.md", At: t0})
+	good2, _ := json.Marshal(Event{Event: "resolve", Fingerprint: "fp", At: t0.Add(time.Minute)})
+	content := string(good1) + "\n" + "this is not json{{{\n" + string(good2) + "\n"
+	if err := os.WriteFile(p, []byte(content), 0o600); err != nil {
+		t.Fatalf("seed file: %v", err)
+	}
+	l, err := New(p)
+	if err != nil {
+		t.Fatalf("New over file with a corrupt line must not fail: %v", err)
+	}
+	c, _ := l.OpenCounts()
+	if c["a.md"].Recalls != 1 || c["a.md"].Resolved != 1 {
+		t.Fatalf("corrupt line must be skipped, good events counted: %+v", c["a.md"])
+	}
+	assertCacheEqualsReplay(t, l, p)
+}
+
+// TestOpenCountsCacheRandomizedEqualsReplay fuzzes many random open/resolve
+// sequences (across fingerprints and entries, including resolve-before-open) and
+// asserts the cached OpenCounts() always equals a from-scratch replay.
+func TestOpenCountsCacheRandomizedEqualsReplay(t *testing.T) {
+	rng := rand.New(rand.NewSource(1))
+	fps := []string{"f0", "f1", "f2"}
+	entries := []string{"a.md", "b.md", ""} // "" ⇒ fresh-style open
+	t0 := time.Unix(14000, 0)
+	for trial := 0; trial < 40; trial++ {
+		p := filepath.Join(t.TempDir(), fmt.Sprintf("o%d.jsonl", trial))
+		l, _ := New(p)
+		n := 5 + rng.Intn(25)
+		for i := 0; i < n; i++ {
+			fp := fps[rng.Intn(len(fps))]
+			at := t0.Add(time.Duration(i) * time.Second)
+			if rng.Intn(2) == 0 {
+				entry := entries[rng.Intn(len(entries))]
+				kind := "recall"
+				if entry == "" {
+					kind = "fresh"
+				}
+				_ = l.Open(Event{Fingerprint: fp, Kind: kind, Entry: entry, At: at})
+			} else {
+				_, _, _ = l.Resolve(fp, at)
+			}
+		}
+		assertCacheEqualsReplay(t, l, p)
+	}
+}
+
+// TestOpenCountsCacheConcurrent exercises concurrent Open/Resolve and OpenCounts
+// to catch data races (run under -race). It asserts the final cached aggregate
+// equals a from-scratch replay of the file.
+func TestOpenCountsCacheConcurrent(t *testing.T) {
+	p := filepath.Join(t.TempDir(), "o.jsonl")
+	l, _ := New(p)
+	t0 := time.Unix(15000, 0)
+	const writers = 8
+	const perWriter = 50
+	var writersWG, readersWG sync.WaitGroup
+
+	// readers hammer OpenCounts concurrently with the writers, until stop is closed
+	stop := make(chan struct{})
+	for r := 0; r < 4; r++ {
+		readersWG.Add(1)
+		go func() {
+			defer readersWG.Done()
+			for {
+				select {
+				case <-stop:
+					return
+				default:
+					if _, err := l.OpenCounts(); err != nil {
+						t.Errorf("OpenCounts: %v", err)
+						return
+					}
+				}
+			}
+		}()
+	}
+
+	for w := 0; w < writers; w++ {
+		writersWG.Add(1)
+		go func(w int) {
+			defer writersWG.Done()
+			fp := fmt.Sprintf("fp%d", w)
+			entry := fmt.Sprintf("e%d.md", w)
+			for i := 0; i < perWriter; i++ {
+				at := t0.Add(time.Duration(w*perWriter+i) * time.Second)
+				_ = l.Open(Event{Fingerprint: fp, Kind: "recall", Entry: entry, At: at})
+				_, _, _ = l.Resolve(fp, at.Add(time.Millisecond))
+			}
+		}(w)
+	}
+
+	writersWG.Wait() // all appends done
+	close(stop)      // let readers exit
+	readersWG.Wait()
+
+	assertCacheEqualsReplay(t, l, p)
+	c, _ := l.OpenCounts()
+	for w := 0; w < writers; w++ {
+		entry := fmt.Sprintf("e%d.md", w)
+		if c[entry].Recalls != perWriter || c[entry].Resolved != perWriter {
+			t.Fatalf("%s: want recalls=%d resolved=%d, got %+v", entry, perWriter, perWriter, c[entry])
+		}
+	}
+}
 
 func TestStatusDisabled(t *testing.T) {
 	l, _ := New("")
