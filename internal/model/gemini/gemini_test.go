@@ -3,6 +3,7 @@ package gemini
 import (
 	"context"
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -12,6 +13,31 @@ import (
 )
 
 const maliciousBody = "\n\x1b[2Kfake=record secret=sk-LEAKED-0123456789 level=error msg=\"forged\""
+
+// sseServer returns a test server that writes the given SSE event lines, flushing
+// after each so the client sees a real incremental stream. Gemini's
+// :streamGenerateContent?alt=sse stream is one JSON GenerateContentResponse per
+// data: event, ending at EOF (no [DONE] sentinel).
+func sseServer(t *testing.T, capture func(*http.Request), events []string) *httptest.Server {
+	t.Helper()
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if capture != nil {
+			capture(r)
+		}
+		fl, ok := w.(http.Flusher)
+		if !ok {
+			t.Errorf("server needs http.Flusher")
+			return
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		fl.Flush()
+		for _, e := range events {
+			_, _ = io.WriteString(w, e)
+			fl.Flush()
+		}
+	}))
+}
 
 // TestNon2xxErrorOmitsBody asserts a non-2xx response yields an error that
 // excludes the upstream body but includes the status and request-id.
@@ -23,7 +49,7 @@ func TestNon2xxErrorOmitsBody(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	_, err := New(srv.URL, "gemini-x", "k").Complete(context.Background(), providers.CompletionRequest{
+	_, err := New(srv.URL, "gemini-x", "k", 0).Complete(context.Background(), providers.CompletionRequest{
 		Messages: []providers.Message{{Role: "user", Content: "hi"}},
 	})
 	if err == nil {
@@ -44,20 +70,28 @@ func TestNon2xxErrorOmitsBody(t *testing.T) {
 	}
 }
 
+// TestComplete drives a full Gemini SSE stream — text parts spread across chunks, a
+// functionCall part, and a final chunk carrying finishReason "STOP" + usageMetadata —
+// and asserts the accumulated text, the reassembled tool call, usage, the stop reason,
+// and the request mapping (the request hit :streamGenerateContent with
+// generationConfig.maxOutputTokens set, plus the api-key header).
 func TestComplete(t *testing.T) {
 	var gotReq genRequest
-	var gotKey, gotPath string
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	var gotKey, gotPath, gotRawQuery string
+	srv := sseServer(t, func(r *http.Request) {
 		gotKey = r.Header.Get("x-goog-api-key")
 		gotPath = r.URL.Path
+		gotRawQuery = r.URL.RawQuery
 		_ = json.NewDecoder(r.Body).Decode(&gotReq)
-		_, _ = w.Write([]byte(`{"candidates":[{"content":{"role":"model","parts":[
-		  {"text":"investigating"},
-		  {"functionCall":{"name":"what_changed","args":{"namespace":"apps"}}}]}}]}`))
-	}))
+	}, []string{
+		`data: {"candidates":[{"content":{"role":"model","parts":[{"text":"investi"}]}}]}` + "\n\n",
+		`data: {"candidates":[{"content":{"role":"model","parts":[{"text":"gating"}]}}]}` + "\n\n",
+		`data: {"candidates":[{"content":{"role":"model","parts":[{"functionCall":{"name":"what_changed","args":{"namespace":"apps"}}}]}}]}` + "\n\n",
+		`data: {"candidates":[{"finishReason":"STOP","content":{"role":"model","parts":[]}}],"usageMetadata":{"promptTokenCount":140,"candidatesTokenCount":48}}` + "\n\n",
+	})
 	defer srv.Close()
 
-	c := New(srv.URL, "gemini-x", "k")
+	c := New(srv.URL, "gemini-x", "k", 16384)
 	resp, err := c.Complete(context.Background(), providers.CompletionRequest{
 		System:   "sys",
 		Messages: []providers.Message{{Role: "user", Content: "hi"}},
@@ -66,14 +100,20 @@ func TestComplete(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Complete: %v", err)
 	}
-	// auth header + URL
+	// auth header + streaming endpoint
 	if gotKey != "k" {
 		t.Fatalf("x-goog-api-key = %q", gotKey)
 	}
-	if !strings.HasSuffix(gotPath, "/v1beta/models/gemini-x:generateContent") {
-		t.Fatalf("path = %q", gotPath)
+	if !strings.HasSuffix(gotPath, "/v1beta/models/gemini-x:streamGenerateContent") {
+		t.Fatalf("path = %q, want a :streamGenerateContent endpoint", gotPath)
 	}
-	// request mapping: system_instruction, tools (functionDeclarations), contents
+	if !strings.Contains(gotRawQuery, "alt=sse") {
+		t.Fatalf("query = %q, want alt=sse", gotRawQuery)
+	}
+	// request mapping: generationConfig.maxOutputTokens, system_instruction, tools, contents
+	if gotReq.GenerationConfig == nil || gotReq.GenerationConfig.MaxOutputTokens != 16384 {
+		t.Fatalf("generationConfig (want maxOutputTokens:16384): %+v", gotReq.GenerationConfig)
+	}
 	if gotReq.SystemInstruction == nil || gotReq.SystemInstruction.Parts[0].Text != "sys" {
 		t.Fatalf("system: %+v", gotReq.SystemInstruction)
 	}
@@ -85,65 +125,100 @@ func TestComplete(t *testing.T) {
 	if len(gotReq.Contents) != 1 || gotReq.Contents[0].Role != "user" || gotReq.Contents[0].Parts[0].Text != "hi" {
 		t.Fatalf("contents: %+v", gotReq.Contents)
 	}
-	// response mapping: text + functionCall → ToolCall (args object → string)
-	if resp.Text != "investigating" || len(resp.ToolCalls) != 1 ||
-		resp.ToolCalls[0].Name != "what_changed" || resp.ToolCalls[0].Args != `{"namespace":"apps"}` {
-		t.Fatalf("response: %+v", resp)
+	// response accumulation: text fragments concatenate, functionCall → ToolCall,
+	// usage and stop reason surface.
+	if resp.Text != "investigating" {
+		t.Fatalf("accumulated text = %q, want %q", resp.Text, "investigating")
+	}
+	if len(resp.ToolCalls) != 1 || resp.ToolCalls[0].Name != "what_changed" || resp.ToolCalls[0].Args != `{"namespace":"apps"}` {
+		t.Fatalf("tool call: %+v", resp.ToolCalls)
+	}
+	if resp.Usage.InputTokens != 140 || resp.Usage.OutputTokens != 48 {
+		t.Fatalf("usage = %+v, want in=140 out=48", resp.Usage)
+	}
+	if resp.StopReason != "STOP" {
+		t.Fatalf("StopReason = %q, want STOP", resp.StopReason)
+	}
+	if resp.Truncated {
+		t.Fatalf("STOP must not flag Truncated")
 	}
 }
 
-// TestUsageAndFinishReason verifies the Gemini usageMetadata and candidate finishReason
-// are parsed onto CompletionResponse: prompt/candidates token counts surface on Usage, and a
-// "MAX_TOKENS" finishReason flags Truncated. A response omitting usageMetadata parses to zero.
-func TestUsageAndFinishReason(t *testing.T) {
-	tests := []struct {
-		name          string
-		body          string
-		wantIn        int
-		wantOut       int
-		wantTruncated bool
-	}{
-		{
-			name:          "usageMetadata + STOP (not truncated)",
-			body:          `{"candidates":[{"finishReason":"STOP","content":{"role":"model","parts":[{"text":"done"}]}}],"usageMetadata":{"promptTokenCount":140,"candidatesTokenCount":48}}`,
-			wantIn:        140,
-			wantOut:       48,
-			wantTruncated: false,
-		},
-		{
-			name:          "MAX_TOKENS finishReason flags truncation",
-			body:          `{"candidates":[{"finishReason":"MAX_TOKENS","content":{"role":"model","parts":[{"text":"cut off"}]}}],"usageMetadata":{"promptTokenCount":220,"candidatesTokenCount":4096}}`,
-			wantIn:        220,
-			wantOut:       4096,
-			wantTruncated: true,
-		},
-		{
-			name:          "usageMetadata omitted parses to zero value",
-			body:          `{"candidates":[{"finishReason":"STOP","content":{"role":"model","parts":[{"text":"done"}]}}]}`,
-			wantIn:        0,
-			wantOut:       0,
-			wantTruncated: false,
-		},
+// TestTruncation verifies a finishReason of "MAX_TOKENS" flags Truncated and that the
+// last usageMetadata wins across chunks.
+func TestTruncation(t *testing.T) {
+	srv := sseServer(t, nil, []string{
+		`data: {"candidates":[{"content":{"role":"model","parts":[{"text":"cut "}]}}],"usageMetadata":{"promptTokenCount":220,"candidatesTokenCount":1}}` + "\n\n",
+		`data: {"candidates":[{"content":{"role":"model","parts":[{"text":"off"}]}}]}` + "\n\n",
+		`data: {"candidates":[{"finishReason":"MAX_TOKENS","content":{"role":"model","parts":[]}}],"usageMetadata":{"promptTokenCount":220,"candidatesTokenCount":4096}}` + "\n\n",
+	})
+	defer srv.Close()
+	resp, err := New(srv.URL, "gemini-x", "k", 0).Complete(context.Background(), providers.CompletionRequest{
+		Messages: []providers.Message{{Role: "user", Content: "hi"}},
+	})
+	if err != nil {
+		t.Fatalf("Complete: %v", err)
 	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-				_, _ = w.Write([]byte(tt.body))
-			}))
-			defer srv.Close()
-			resp, err := New(srv.URL, "gemini-x", "k").Complete(context.Background(), providers.CompletionRequest{
-				Messages: []providers.Message{{Role: "user", Content: "hi"}},
-			})
-			if err != nil {
-				t.Fatalf("Complete: %v", err)
-			}
-			if resp.Usage.InputTokens != tt.wantIn || resp.Usage.OutputTokens != tt.wantOut {
-				t.Fatalf("usage = %+v, want in=%d out=%d", resp.Usage, tt.wantIn, tt.wantOut)
-			}
-			if resp.Truncated != tt.wantTruncated {
-				t.Fatalf("Truncated = %v, want %v", resp.Truncated, tt.wantTruncated)
-			}
-		})
+	if resp.Text != "cut off" {
+		t.Fatalf("text = %q, want %q", resp.Text, "cut off")
+	}
+	if !resp.Truncated {
+		t.Fatalf("MAX_TOKENS must flag Truncated")
+	}
+	if resp.StopReason != "MAX_TOKENS" {
+		t.Fatalf("StopReason = %q, want MAX_TOKENS", resp.StopReason)
+	}
+	// last usageMetadata wins
+	if resp.Usage.InputTokens != 220 || resp.Usage.OutputTokens != 4096 {
+		t.Fatalf("usage = %+v, want in=220 out=4096 (last wins)", resp.Usage)
+	}
+}
+
+// TestRefusal verifies a safety finishReason ("SAFETY") with no content surfaces as a
+// CompletionResponse that reports Refused()==true (the raw reason is carried into
+// StopReason, which providers.Refused recognizes).
+func TestRefusal(t *testing.T) {
+	srv := sseServer(t, nil, []string{
+		`data: {"candidates":[{"finishReason":"SAFETY","content":{"role":"model","parts":[]}}],"usageMetadata":{"promptTokenCount":50,"candidatesTokenCount":0}}` + "\n\n",
+	})
+	defer srv.Close()
+	resp, err := New(srv.URL, "gemini-x", "k", 0).Complete(context.Background(), providers.CompletionRequest{
+		Messages: []providers.Message{{Role: "user", Content: "hi"}},
+	})
+	if err != nil {
+		t.Fatalf("Complete: %v", err)
+	}
+	if !resp.Refused() {
+		t.Fatalf("want Refused()==true for finishReason SAFETY, got StopReason=%q", resp.StopReason)
+	}
+	if resp.Text != "" || len(resp.ToolCalls) != 0 {
+		t.Fatalf("refusal must carry no content: text=%q calls=%+v", resp.Text, resp.ToolCalls)
+	}
+}
+
+// TestMidStreamDrop verifies a connection dropped mid-stream (before any finishReason
+// is seen) surfaces as an error rather than a silently-truncated success.
+func TestMidStreamDrop(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		fl := w.(http.Flusher)
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		// Start emitting content but never send a finishReason; then drop the connection.
+		_, _ = io.WriteString(w, `data: {"candidates":[{"content":{"role":"model","parts":[{"text":"par`)
+		fl.Flush()
+		// Abruptly close mid-event by hijacking and closing the TCP connection.
+		if hj, ok := w.(http.Hijacker); ok {
+			conn, _, _ := hj.Hijack()
+			_ = conn.Close()
+		}
+	}))
+	defer srv.Close()
+
+	_, err := New(srv.URL, "gemini-x", "k", 0).Complete(context.Background(), providers.CompletionRequest{
+		Messages: []providers.Message{{Role: "user", Content: "hi"}},
+	})
+	if err == nil {
+		t.Fatal("want an error when the stream is dropped before a finishReason")
 	}
 }
 
@@ -152,13 +227,14 @@ func TestUsageAndFinishReason(t *testing.T) {
 // functionResponse form, named by the originating call.
 func TestToolResultCoalescing(t *testing.T) {
 	var gotReq genRequest
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	srv := sseServer(t, func(r *http.Request) {
 		_ = json.NewDecoder(r.Body).Decode(&gotReq)
-		_, _ = w.Write([]byte(`{"candidates":[{"content":{"parts":[{"text":"done"}]}}]}`))
-	}))
+	}, []string{
+		`data: {"candidates":[{"finishReason":"STOP","content":{"parts":[{"text":"done"}]}}]}` + "\n\n",
+	})
 	defer srv.Close()
 
-	_, err := New(srv.URL, "gemini-x", "k").Complete(context.Background(), providers.CompletionRequest{
+	_, err := New(srv.URL, "gemini-x", "k", 0).Complete(context.Background(), providers.CompletionRequest{
 		Messages: []providers.Message{
 			{Role: "user", Content: "investigate"},
 			{Role: "assistant", ToolCalls: []providers.ToolCall{
@@ -196,13 +272,14 @@ func TestToolResultCoalescing(t *testing.T) {
 // originating call's id (not just the shared name), so Gemini maps them correctly.
 func TestParallelSameFunctionCorrelatesByID(t *testing.T) {
 	var gotReq genRequest
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	srv := sseServer(t, func(r *http.Request) {
 		_ = json.NewDecoder(r.Body).Decode(&gotReq)
-		_, _ = w.Write([]byte(`{"candidates":[{"content":{"parts":[{"text":"done"}]}}]}`))
-	}))
+	}, []string{
+		`data: {"candidates":[{"finishReason":"STOP","content":{"parts":[{"text":"done"}]}}]}` + "\n\n",
+	})
 	defer srv.Close()
 
-	_, err := New(srv.URL, "gemini-x", "k").Complete(context.Background(), providers.CompletionRequest{
+	_, err := New(srv.URL, "gemini-x", "k", 0).Complete(context.Background(), providers.CompletionRequest{
 		Messages: []providers.Message{
 			{Role: "user", Content: "investigate"},
 			{Role: "assistant", ToolCalls: []providers.ToolCall{
@@ -248,34 +325,39 @@ func TestParallelSameFunctionCorrelatesByID(t *testing.T) {
 }
 
 // TestResponseFunctionCallID verifies the model's functionCall id (newer API) is
-// carried into ToolCall.ID, and that absent id falls back to the function name.
+// carried into ToolCall.ID across the stream, and that an absent id falls back to the
+// function name.
 func TestResponseFunctionCallID(t *testing.T) {
 	tests := []struct {
 		name     string
-		body     string
+		events   []string
 		wantID   string
 		wantName string
 	}{
 		{
-			name:     "id present",
-			body:     `{"candidates":[{"content":{"parts":[{"functionCall":{"id":"call_xyz","name":"what_changed","args":{}}}]}}]}`,
+			name: "id present",
+			events: []string{
+				`data: {"candidates":[{"content":{"parts":[{"functionCall":{"id":"call_xyz","name":"what_changed","args":{}}}]}}]}` + "\n\n",
+				`data: {"candidates":[{"finishReason":"STOP","content":{"parts":[]}}]}` + "\n\n",
+			},
 			wantID:   "call_xyz",
 			wantName: "what_changed",
 		},
 		{
-			name:     "id absent falls back to name",
-			body:     `{"candidates":[{"content":{"parts":[{"functionCall":{"name":"what_changed","args":{}}}]}}]}`,
+			name: "id absent falls back to name",
+			events: []string{
+				`data: {"candidates":[{"content":{"parts":[{"functionCall":{"name":"what_changed","args":{}}}]}}]}` + "\n\n",
+				`data: {"candidates":[{"finishReason":"STOP","content":{"parts":[]}}]}` + "\n\n",
+			},
 			wantID:   "what_changed",
 			wantName: "what_changed",
 		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-				_, _ = w.Write([]byte(tt.body))
-			}))
+			srv := sseServer(t, nil, tt.events)
 			defer srv.Close()
-			resp, err := New(srv.URL, "gemini-x", "k").Complete(context.Background(), providers.CompletionRequest{
+			resp, err := New(srv.URL, "gemini-x", "k", 0).Complete(context.Background(), providers.CompletionRequest{
 				Messages: []providers.Message{{Role: "user", Content: "hi"}},
 			})
 			if err != nil {

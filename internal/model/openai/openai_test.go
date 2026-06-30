@@ -14,16 +14,43 @@ import (
 
 // decodedRequest mirrors chatRequest for test decoding: chatRequest.Messages is
 // []any (mixed chatMessage/toolMessage) on the wire, which round-trips through a
-// typed []chatMessage here for assertions.
+// typed []chatMessage here for assertions. The streaming knobs (stream,
+// max_tokens, stream_options) are decoded too so a test can assert the request.
 type decodedRequest struct {
-	Model    string        `json:"model"`
-	Messages []chatMessage `json:"messages"`
-	Tools    []chatTool    `json:"tools"`
+	Model         string         `json:"model"`
+	Messages      []chatMessage  `json:"messages"`
+	Tools         []chatTool     `json:"tools"`
+	MaxTokens     int            `json:"max_tokens"`
+	Stream        bool           `json:"stream"`
+	StreamOptions *streamOptions `json:"stream_options"`
 }
 
 // maliciousBody is an upstream-controlled error body carrying a secret and a
 // forged log record (newline + ANSI). A non-2xx error must not echo any of it.
 const maliciousBody = "\n\x1b[2Kfake=record secret=sk-LEAKED-0123456789 level=error msg=\"forged\""
+
+// sseServer returns a test server that writes the given SSE event lines, flushing
+// after each so the client sees a real incremental stream.
+func sseServer(t *testing.T, capture func(*http.Request), events []string) *httptest.Server {
+	t.Helper()
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if capture != nil {
+			capture(r)
+		}
+		fl, ok := w.(http.Flusher)
+		if !ok {
+			t.Errorf("server needs http.Flusher")
+			return
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		fl.Flush()
+		for _, e := range events {
+			_, _ = io.WriteString(w, e)
+			fl.Flush()
+		}
+	}))
+}
 
 // TestNon2xxErrorOmitsBody asserts a non-2xx response yields an error that
 // excludes the upstream body (no secret, no newline) but includes the status and
@@ -36,7 +63,7 @@ func TestNon2xxErrorOmitsBody(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	_, err := New(srv.URL, "test-model", "k").Complete(context.Background(), providers.CompletionRequest{
+	_, err := New(srv.URL, "test-model", "k", 0).Complete(context.Background(), providers.CompletionRequest{
 		Messages: []providers.Message{{Role: "user", Content: "hi"}},
 	})
 	if err == nil {
@@ -57,24 +84,30 @@ func TestNon2xxErrorOmitsBody(t *testing.T) {
 	}
 }
 
+// TestComplete drives a full OpenAI chat/completions SSE stream — content deltas, a
+// tool_call assembled by index (first chunk carries id+name, later chunks carry
+// arguments fragments), a finish_reason chunk, a usage-only chunk, and the [DONE]
+// terminator — and asserts the accumulated text, the reassembled tool call, usage,
+// stop reason, and the request mapping (stream:true + max_tokens + stream_options).
 func TestComplete(t *testing.T) {
 	var gotReq decodedRequest
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if got := r.Header.Get("Authorization"); got != "Bearer k" {
-			t.Errorf("auth header = %q, want Bearer k", got)
-		}
-		if err := json.NewDecoder(r.Body).Decode(&gotReq); err != nil {
-			t.Errorf("decode request: %v", err)
-		}
-		_ = json.NewEncoder(w).Encode(chatResponse{Choices: []chatChoice{{Message: chatMessage{
-			Role: "assistant",
-			ToolCalls: []chatToolCall{{ID: "tc1", Type: "function", Function: chatFunctionCall{
-				Name: "what_changed", Arguments: `{"namespace":"apps"}`}}},
-		}}}})
-	}))
+	var gotAuth string
+	srv := sseServer(t, func(r *http.Request) {
+		gotAuth = r.Header.Get("Authorization")
+		_ = json.NewDecoder(r.Body).Decode(&gotReq)
+	}, []string{
+		`data: {"choices":[{"index":0,"delta":{"role":"assistant","content":"investi"}}]}` + "\n\n",
+		`data: {"choices":[{"index":0,"delta":{"content":"gating"}}]}` + "\n\n",
+		`data: {"choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"tc1","type":"function","function":{"name":"what_changed","arguments":""}}]}}]}` + "\n\n",
+		`data: {"choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"arguments":"{\"namespace\":"}}]}}]}` + "\n\n",
+		`data: {"choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"arguments":"\"apps\"}"}}]}}]}` + "\n\n",
+		`data: {"choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}` + "\n\n",
+		`data: {"choices":[],"usage":{"prompt_tokens":120,"completion_tokens":45}}` + "\n\n",
+		"data: [DONE]\n\n",
+	})
 	defer srv.Close()
 
-	c := New(srv.URL, "test-model", "k")
+	c := New(srv.URL, "test-model", "k", 16384)
 	resp, err := c.Complete(context.Background(), providers.CompletionRequest{
 		System:   "sys",
 		Messages: []providers.Message{{Role: "user", Content: "hi"}},
@@ -85,8 +118,17 @@ func TestComplete(t *testing.T) {
 	}
 
 	// request mapping
+	if gotAuth != "Bearer k" {
+		t.Fatalf("auth header = %q, want Bearer k", gotAuth)
+	}
 	if gotReq.Model != "test-model" {
 		t.Fatalf("model = %q", gotReq.Model)
+	}
+	if !gotReq.Stream || gotReq.MaxTokens != 16384 {
+		t.Fatalf("request (want stream:true, max_tokens:16384): %+v", gotReq)
+	}
+	if gotReq.StreamOptions == nil || !gotReq.StreamOptions.IncludeUsage {
+		t.Fatalf("request must set stream_options.include_usage: %+v", gotReq.StreamOptions)
 	}
 	if len(gotReq.Messages) != 2 || gotReq.Messages[0].Role != "system" || gotReq.Messages[1].Content != "hi" {
 		t.Fatalf("messages mapped wrong: %+v", gotReq.Messages)
@@ -94,65 +136,100 @@ func TestComplete(t *testing.T) {
 	if len(gotReq.Tools) != 1 || gotReq.Tools[0].Function.Name != "what_changed" {
 		t.Fatalf("tools mapped wrong: %+v", gotReq.Tools)
 	}
-	// response mapping
+
+	// response accumulation: text + reassembled tool call args + usage + stop reason
+	if resp.Text != "investigating" {
+		t.Fatalf("accumulated text = %q, want %q", resp.Text, "investigating")
+	}
 	if len(resp.ToolCalls) != 1 || resp.ToolCalls[0].ID != "tc1" ||
 		resp.ToolCalls[0].Name != "what_changed" || resp.ToolCalls[0].Args != `{"namespace":"apps"}` {
-		t.Fatalf("response tool calls mapped wrong: %+v", resp.ToolCalls)
+		t.Fatalf("tool call: %+v", resp.ToolCalls)
+	}
+	if resp.Usage.InputTokens != 120 || resp.Usage.OutputTokens != 45 {
+		t.Fatalf("usage = %+v, want in=120 out=45", resp.Usage)
+	}
+	if resp.StopReason != "tool_calls" {
+		t.Fatalf("StopReason = %q, want tool_calls", resp.StopReason)
 	}
 }
 
-// TestUsageAndFinishReason verifies the OpenAI usage block and choice finish_reason
-// are parsed onto CompletionResponse: prompt/completion tokens surface on Usage, and a
-// "length" finish_reason flags Truncated. A response omitting usage parses to the zero value.
-func TestUsageAndFinishReason(t *testing.T) {
-	tests := []struct {
-		name          string
-		body          string
-		wantIn        int
-		wantOut       int
-		wantTruncated bool
-	}{
-		{
-			name:          "usage + stop (not truncated)",
-			body:          `{"choices":[{"finish_reason":"stop","message":{"role":"assistant","content":"done"}}],"usage":{"prompt_tokens":130,"completion_tokens":42}}`,
-			wantIn:        130,
-			wantOut:       42,
-			wantTruncated: false,
-		},
-		{
-			name:          "length finish_reason flags truncation",
-			body:          `{"choices":[{"finish_reason":"length","message":{"role":"assistant","content":"cut off"}}],"usage":{"prompt_tokens":210,"completion_tokens":4096}}`,
-			wantIn:        210,
-			wantOut:       4096,
-			wantTruncated: true,
-		},
-		{
-			name:          "usage omitted parses to zero value",
-			body:          `{"choices":[{"finish_reason":"stop","message":{"role":"assistant","content":"done"}}]}`,
-			wantIn:        0,
-			wantOut:       0,
-			wantTruncated: false,
-		},
+// TestTruncation verifies a finish_reason of "length" flags Truncated while the
+// content accumulated so far is preserved.
+func TestTruncation(t *testing.T) {
+	srv := sseServer(t, nil, []string{
+		`data: {"choices":[{"index":0,"delta":{"content":"cut off"}}]}` + "\n\n",
+		`data: {"choices":[{"index":0,"delta":{},"finish_reason":"length"}]}` + "\n\n",
+		`data: {"choices":[],"usage":{"prompt_tokens":210,"completion_tokens":4096}}` + "\n\n",
+		"data: [DONE]\n\n",
+	})
+	defer srv.Close()
+	resp, err := New(srv.URL, "test-model", "", 0).Complete(context.Background(), providers.CompletionRequest{
+		Messages: []providers.Message{{Role: "user", Content: "hi"}},
+	})
+	if err != nil {
+		t.Fatalf("Complete: %v", err)
 	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-				_, _ = w.Write([]byte(tt.body))
-			}))
-			defer srv.Close()
-			resp, err := New(srv.URL, "test-model", "").Complete(context.Background(), providers.CompletionRequest{
-				Messages: []providers.Message{{Role: "user", Content: "hi"}},
-			})
-			if err != nil {
-				t.Fatalf("Complete: %v", err)
-			}
-			if resp.Usage.InputTokens != tt.wantIn || resp.Usage.OutputTokens != tt.wantOut {
-				t.Fatalf("usage = %+v, want in=%d out=%d", resp.Usage, tt.wantIn, tt.wantOut)
-			}
-			if resp.Truncated != tt.wantTruncated {
-				t.Fatalf("Truncated = %v, want %v", resp.Truncated, tt.wantTruncated)
-			}
-		})
+	if resp.Text != "cut off" {
+		t.Fatalf("text = %q, want %q", resp.Text, "cut off")
+	}
+	if !resp.Truncated {
+		t.Fatalf("Truncated = false, want true for finish_reason length")
+	}
+	if resp.StopReason != "length" {
+		t.Fatalf("StopReason = %q, want length", resp.StopReason)
+	}
+	if resp.Usage.InputTokens != 210 || resp.Usage.OutputTokens != 4096 {
+		t.Fatalf("usage = %+v, want in=210 out=4096", resp.Usage)
+	}
+}
+
+// TestRefusal verifies a finish_reason of "content_filter" with no content surfaces
+// as a CompletionResponse that reports Refused()==true.
+func TestRefusal(t *testing.T) {
+	srv := sseServer(t, nil, []string{
+		`data: {"choices":[{"index":0,"delta":{},"finish_reason":"content_filter"}]}` + "\n\n",
+		`data: {"choices":[],"usage":{"prompt_tokens":50,"completion_tokens":0}}` + "\n\n",
+		"data: [DONE]\n\n",
+	})
+	defer srv.Close()
+	resp, err := New(srv.URL, "test-model", "", 0).Complete(context.Background(), providers.CompletionRequest{
+		Messages: []providers.Message{{Role: "user", Content: "hi"}},
+	})
+	if err != nil {
+		t.Fatalf("Complete: %v", err)
+	}
+	if !resp.Refused() {
+		t.Fatalf("want Refused()==true for finish_reason content_filter, got StopReason=%q", resp.StopReason)
+	}
+	if resp.Text != "" || len(resp.ToolCalls) != 0 {
+		t.Fatalf("refusal must carry no content: text=%q calls=%+v", resp.Text, resp.ToolCalls)
+	}
+}
+
+// TestMidStreamDrop verifies a connection dropped mid-stream (before any
+// finish_reason and before [DONE]) surfaces as an error rather than a
+// silently-truncated success.
+func TestMidStreamDrop(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		fl := w.(http.Flusher)
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		// Start emitting content but never send a finish_reason or [DONE].
+		_, _ = io.WriteString(w, `data: {"choices":[{"index":0,"delta":{"content":"par`)
+		fl.Flush()
+		// Abruptly close mid-event by hijacking and closing the TCP connection.
+		if hj, ok := w.(http.Hijacker); ok {
+			conn, _, _ := hj.Hijack()
+			_ = conn.Close()
+		}
+	}))
+	defer srv.Close()
+
+	_, err := New(srv.URL, "test-model", "", 0).Complete(context.Background(), providers.CompletionRequest{
+		Messages: []providers.Message{{Role: "user", Content: "hi"}},
+	})
+	if err == nil {
+		t.Fatal("want an error when the stream is dropped before a finish_reason / [DONE]")
 	}
 }
 
@@ -163,14 +240,17 @@ func TestUsageAndFinishReason(t *testing.T) {
 // raw request body the server receives, since the typed struct hides the omission.
 func TestEmptyToolResultKeepsContent(t *testing.T) {
 	var rawBody string
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	srv := sseServer(t, func(r *http.Request) {
 		b, _ := io.ReadAll(r.Body)
 		rawBody = string(b)
-		_ = json.NewEncoder(w).Encode(chatResponse{Choices: []chatChoice{{Message: chatMessage{Role: "assistant", Content: "ok"}}}})
-	}))
+	}, []string{
+		`data: {"choices":[{"index":0,"delta":{"content":"ok"}}]}` + "\n\n",
+		`data: {"choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}` + "\n\n",
+		"data: [DONE]\n\n",
+	})
 	defer srv.Close()
 
-	c := New(srv.URL, "test-model", "")
+	c := New(srv.URL, "test-model", "", 0)
 	_, err := c.Complete(context.Background(), providers.CompletionRequest{
 		Messages: []providers.Message{
 			{Role: "user", Content: "investigate"},
