@@ -11,6 +11,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"iter"
 	"net/http"
 	"strings"
 	"time"
@@ -25,6 +26,12 @@ const DefaultBaseURL = "https://api.anthropic.com"
 const (
 	defaultMaxTokens = 4096
 	apiVersion       = "2023-06-01"
+	// responseHeaderTimeout caps the wait for response headers (time-to-first-byte);
+	// the streamed body then has no flat deadline (a long completion is legitimate).
+	responseHeaderTimeout = 2 * time.Minute
+	// idleTimeout aborts a stream that stalls (no bytes) for this long — the streaming
+	// counterpart of an overall deadline, without killing an actively-sending stream.
+	idleTimeout = 2 * time.Minute
 )
 
 // Client is an Anthropic Messages API model provider.
@@ -50,7 +57,7 @@ func New(baseURL, model, apiKey string, maxTokens int) *Client {
 		model:     model,
 		apiKey:    apiKey,
 		maxTokens: maxTokens,
-		http:      httpx.SecureClient(2 * time.Minute),
+		http:      httpx.SecureStreamingClient(responseHeaderTimeout),
 	}
 }
 
@@ -77,6 +84,7 @@ type systemBlock struct {
 type msgRequest struct {
 	Model     string        `json:"model"`
 	MaxTokens int           `json:"max_tokens"`
+	Stream    bool          `json:"stream"`
 	System    []systemBlock `json:"system,omitempty"`
 	Messages  []message     `json:"messages"`
 	Tools     []tool        `json:"tools,omitempty"`
@@ -107,25 +115,48 @@ type tool struct {
 	CacheControl *cacheControl   `json:"cache_control,omitempty"`
 }
 
-type msgResponse struct {
-	Content []block `json:"content"`
-	// StopReason is the turn-termination reason; "max_tokens" marks an output cut off
-	// at the token ceiling (a truncated, not complete, answer).
-	StopReason string `json:"stop_reason"`
-	// Usage carries the per-request token counts; a pointer so an absent block parses
-	// to nil (unknown) rather than a misleading {0,0}.
-	Usage *struct {
-		InputTokens  int `json:"input_tokens"`
-		OutputTokens int `json:"output_tokens"`
-	} `json:"usage"`
+// streamEvent is one parsed Anthropic SSE event (the `data:` JSON payload). The
+// Messages stream interleaves: message_start (input usage) → content_block_start /
+// content_block_delta (text_delta text; input_json_delta tool args) /
+// content_block_stop, per block → message_delta (stop_reason + output usage) →
+// message_stop. Only the fields RunLore accumulates are decoded.
+type streamEvent struct {
+	Type    string `json:"type"`
+	Index   int    `json:"index"`
+	Message *struct {
+		Usage *usageDelta `json:"usage"`
+	} `json:"message"`
+	ContentBlock *struct {
+		Type string `json:"type"` // "text" | "tool_use"
+		ID   string `json:"id"`
+		Name string `json:"name"`
+	} `json:"content_block"`
+	Delta *struct {
+		Type        string `json:"type"` // "text_delta" | "input_json_delta"
+		Text        string `json:"text"`
+		PartialJSON string `json:"partial_json"`
+		StopReason  string `json:"stop_reason"`
+	} `json:"delta"`
+	Usage *usageDelta `json:"usage"`
 	Error *struct {
 		Message string `json:"message"`
 	} `json:"error"`
 }
 
-// Complete sends a Messages request with tools and maps the result back.
+// usageDelta carries token counts; input arrives on message_start, output on
+// message_delta (so the two are accumulated from different events).
+type usageDelta struct {
+	InputTokens  int `json:"input_tokens"`
+	OutputTokens int `json:"output_tokens"`
+}
+
+// Complete sends a streaming Messages request with tools and accumulates the full
+// SSE response into a single CompletionResponse. Streaming is internal — callers see
+// the same one-shot interface; consuming the stream avoids the flat request deadline
+// truncating a long completion and lets a per-block input_json_delta reassemble tool
+// arguments incrementally.
 func (c *Client) Complete(ctx context.Context, req providers.CompletionRequest) (providers.CompletionResponse, error) {
-	areq := msgRequest{Model: c.model, MaxTokens: c.maxTokens, Messages: toMessages(req.Messages)}
+	areq := msgRequest{Model: c.model, MaxTokens: c.maxTokens, Stream: true, Messages: toMessages(req.Messages)}
 	if req.System != "" {
 		areq.System = []systemBlock{{Type: "text", Text: req.System, CacheControl: ephemeral}}
 	}
@@ -146,8 +177,12 @@ func (c *Client) Complete(ctx context.Context, req providers.CompletionRequest) 
 	if err != nil {
 		return providers.CompletionResponse{}, fmt.Errorf("marshal request: %w", err)
 	}
+	// A child context lets the idle-timeout reader abort a stalled stream by cancelling
+	// the in-flight HTTP read; cancel always runs on return to release resources.
+	streamCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
 	newReq := func() (*http.Request, error) {
-		r, err := http.NewRequestWithContext(ctx, http.MethodPost, c.baseURL+"/v1/messages", bytes.NewReader(body))
+		r, err := http.NewRequestWithContext(streamCtx, http.MethodPost, c.baseURL+"/v1/messages", bytes.NewReader(body))
 		if err != nil {
 			return nil, err
 		}
@@ -156,38 +191,111 @@ func (c *Client) Complete(ctx context.Context, req providers.CompletionRequest) 
 		r.Header.Set("x-api-key", c.apiKey)
 		return r, nil
 	}
-	resp, err := httpx.DoWithRetry(ctx, c.http, 3, newReq)
+	// DoWithRetry retries only connection establishment / 429 / 5xx (before the stream
+	// begins); once a 200 stream is flowing it is never retried mid-stream.
+	resp, err := httpx.DoWithRetry(streamCtx, c.http, 3, newReq)
 	if err != nil {
 		return providers.CompletionResponse{}, fmt.Errorf("messages request: %w", err)
 	}
 	defer func() { _ = resp.Body.Close() }()
-	data, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return providers.CompletionResponse{}, fmt.Errorf("read response: %w", err)
-	}
 	if resp.StatusCode != http.StatusOK {
-		// Don't echo the upstream body into an Error-level log (info disclosure +
-		// log injection); surface status + sanitized request-id for correlation.
+		// Drain a bounded prefix so the connection can be reused, but never echo the
+		// upstream body into an Error-level log (info disclosure + log injection);
+		// surface status + sanitized request-id for correlation.
+		_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 4<<10))
 		return providers.CompletionResponse{}, fmt.Errorf("messages status %d (request-id %q)", resp.StatusCode, httpx.RequestID(resp.Header))
 	}
-	var mr msgResponse
-	if err := json.Unmarshal(data, &mr); err != nil {
-		return providers.CompletionResponse{}, fmt.Errorf("parse response: %w", err)
-	}
-	if mr.Error != nil {
-		return providers.CompletionResponse{}, fmt.Errorf("anthropic error: %s", mr.Error.Message)
-	}
-	out := providers.CompletionResponse{Truncated: mr.StopReason == "max_tokens"}
-	if mr.Usage != nil {
-		out.Usage = providers.Usage{InputTokens: mr.Usage.InputTokens, OutputTokens: mr.Usage.OutputTokens}
-	}
-	for _, b := range mr.Content {
-		switch b.Type {
-		case "text":
-			out.Text += b.Text
-		case "tool_use":
-			out.ToolCalls = append(out.ToolCalls, providers.ToolCall{ID: b.ID, Name: b.Name, Args: string(b.Input)})
+	stream := httpx.NewIdleTimeoutReader(resp.Body, idleTimeout, cancel)
+	return accumulate(stream)
+}
+
+// sseEvents parses the Anthropic Messages SSE stream into decoded streamEvents. It
+// wraps the generic httpx.SSEData framing primitive and json-unmarshals each event's
+// data payload; a framing/read error or a JSON decode error is surfaced via the
+// second yield value.
+func sseEvents(r io.Reader) iter.Seq2[streamEvent, error] {
+	return func(yield func(streamEvent, error) bool) {
+		for payload, err := range httpx.SSEData(r) {
+			if err != nil {
+				yield(streamEvent{}, err)
+				return
+			}
+			var ev streamEvent
+			if err := json.Unmarshal(payload, &ev); err != nil {
+				if !yield(streamEvent{}, fmt.Errorf("decode sse event: %w", err)) {
+					return
+				}
+				continue
+			}
+			if !yield(ev, nil) {
+				return
+			}
 		}
+	}
+}
+
+// accumulate consumes an Anthropic Messages SSE stream and folds it into one
+// CompletionResponse: text_delta fragments concatenate into Text, input_json_delta
+// fragments per content-block index reassemble each tool_use's JSON args, usage is
+// summed across message_start (input) and message_delta (output), and the
+// message_delta stop_reason maps to StopReason (and Truncated when "max_tokens").
+// A stream that ends before message_stop (a mid-stream drop) is an error.
+func accumulate(r io.Reader) (providers.CompletionResponse, error) {
+	var out providers.CompletionResponse
+	toolArgs := map[int]*strings.Builder{} // content-block index → reassembled JSON
+	toolMeta := map[int]*providers.ToolCall{}
+	var order []int // tool block indices, in first-seen order
+	sawStop := false
+
+	for ev, err := range sseEvents(r) {
+		if err != nil {
+			return providers.CompletionResponse{}, fmt.Errorf("read stream: %w", err)
+		}
+		if ev.Error != nil {
+			return providers.CompletionResponse{}, fmt.Errorf("anthropic error: %s", ev.Error.Message)
+		}
+		switch ev.Type {
+		case "message_start":
+			if ev.Message != nil && ev.Message.Usage != nil {
+				out.Usage.InputTokens = ev.Message.Usage.InputTokens
+			}
+		case "content_block_start":
+			if ev.ContentBlock != nil && ev.ContentBlock.Type == "tool_use" {
+				toolArgs[ev.Index] = &strings.Builder{}
+				toolMeta[ev.Index] = &providers.ToolCall{ID: ev.ContentBlock.ID, Name: ev.ContentBlock.Name}
+				order = append(order, ev.Index)
+			}
+		case "content_block_delta":
+			if ev.Delta == nil {
+				continue
+			}
+			switch ev.Delta.Type {
+			case "text_delta":
+				out.Text += ev.Delta.Text
+			case "input_json_delta":
+				if b := toolArgs[ev.Index]; b != nil {
+					b.WriteString(ev.Delta.PartialJSON)
+				}
+			}
+		case "message_delta":
+			if ev.Delta != nil && ev.Delta.StopReason != "" {
+				out.StopReason = ev.Delta.StopReason
+				out.Truncated = ev.Delta.StopReason == "max_tokens"
+			}
+			if ev.Usage != nil && ev.Usage.OutputTokens != 0 {
+				out.Usage.OutputTokens = ev.Usage.OutputTokens
+			}
+		case "message_stop":
+			sawStop = true
+		}
+	}
+	if !sawStop {
+		return providers.CompletionResponse{}, fmt.Errorf("stream ended before message_stop (truncated upstream)")
+	}
+	for _, idx := range order {
+		tc := *toolMeta[idx]
+		tc.Args = toolArgs[idx].String()
+		out.ToolCalls = append(out.ToolCalls, tc)
 	}
 	return out, nil
 }
