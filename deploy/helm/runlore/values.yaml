@@ -61,6 +61,16 @@ config:
     max_tokens_per_investigation: 100000
     # Cap each tool result fed back to the model (truncates large logs/diffs). 0 = unlimited.
     max_tool_output_bytes: 32768
+    # App-layer allowlist of namespaces the pod_logs / controller_logs tools may read
+    # RAW pod logs from, BEYOND the incident's own namespace (the incident namespace is
+    # always allowed at the app layer — RBAC still gates the actual read). Pod logs carry
+    # secrets/PII and are streamed to the external LLM, so the model is constrained here,
+    # not by Kubernetes RBAC alone. This MUST be a superset of where pods/log RBAC is
+    # granted (rbac.controllerLogNamespaces) or pod_logs is blocked at the app layer for
+    # those namespaces. LEAVE UNSET (commented) and the chart auto-defaults it to
+    # rbac.controllerLogNamespaces so the two stay in sync automatically — set it
+    # explicitly ONLY to widen/narrow beyond the RBAC scope.
+    # pod_log_namespaces: [flux-system]
     coalesce:
       enabled: true             # fold a correlated alert storm into ONE investigation
       # debounce: 30s           # flush batch quiet for this long
@@ -255,6 +265,12 @@ rbac:
   # because pod_status/kube_events triage arbitrary incident namespaces. Redacting
   # secrets that still surface via status/event messages and these log bodies is a
   # separate follow-up (see roadmap R19).
+  #
+  # PAIRING: this list is the RBAC scope (where pods/log is granted). The app-layer
+  # allowlist that gates which namespaces the pod_logs tool may actually read
+  # (config.investigation.pod_log_namespaces) auto-tracks this value unless overridden,
+  # so the two never drift. If you set config.investigation.pod_log_namespaces
+  # explicitly, keep it a superset of this list or pod_logs is blocked at the app layer.
   controllerLogNamespaces:
     - flux-system
 
