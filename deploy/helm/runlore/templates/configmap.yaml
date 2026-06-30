@@ -6,4 +6,18 @@ metadata:
     {{- include "runlore.labels" . | nindent 4 }}
 data:
   runlore.yaml: |
-    {{- toYaml .Values.config | nindent 4 }}
+    {{- /*
+      Render the agent config verbatim from .Values.config, but auto-default the
+      pod_logs app-layer allowlist (investigation.pod_log_namespaces) to the RBAC
+      scope (rbac.controllerLogNamespaces) when the operator has NOT set it.
+      pod_logs is constrained at the app layer to {incident namespace} ∪ this list;
+      tracking the RBAC namespaces by default keeps the two in sync (no foot-gun).
+      deepCopy so we never mutate the shared .Values tree.
+    */}}
+    {{- $config := deepCopy .Values.config }}
+    {{- $investigation := $config.investigation | default dict }}
+    {{- if not (hasKey $investigation "pod_log_namespaces") }}
+    {{-   $investigation = set $investigation "pod_log_namespaces" (.Values.rbac.controllerLogNamespaces | default list) }}
+    {{-   $config = set $config "investigation" $investigation }}
+    {{- end }}
+    {{- toYaml $config | nindent 4 }}
