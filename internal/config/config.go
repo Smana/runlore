@@ -8,6 +8,8 @@ package config
 
 import (
 	"fmt"
+	"net"
+	"net/url"
 	"path"
 	"slices"
 	"strings"
@@ -486,6 +488,56 @@ func (a ActionPolicy) Enabled() bool {
 	return a.Mode != "" && a.Mode != ActionOff
 }
 
+// isPrivateHost reports whether host is a loopback / in-cluster / private endpoint
+// where sending a key over plain http is acceptable. Pure — no DNS — so config
+// validation stays deterministic and network-free. IP literals are classified by
+// range; hostnames by well-known private forms. Anything else is treated as public.
+func isPrivateHost(host string) bool {
+	if host == "" {
+		return false
+	}
+	if ip := net.ParseIP(host); ip != nil {
+		return ip.IsLoopback() || ip.IsPrivate() || ip.IsLinkLocalUnicast() || ip.IsUnspecified()
+	}
+	h := strings.ToLower(strings.TrimSuffix(host, "."))
+	if h == "localhost" {
+		return true
+	}
+	if !strings.Contains(h, ".") {
+		return true // single-label in-cluster service name, e.g. "vllm"
+	}
+	for _, suf := range []string{".local", ".internal", ".svc", ".cluster.local"} {
+		if strings.HasSuffix(h, suf) {
+			return true
+		}
+	}
+	return false
+}
+
+// checkSecureKeyEndpoint rejects a base_url that would send an API key in cleartext.
+// A key is "present" when apiKeyEnv is non-empty; an empty base_url uses the provider's
+// built-in (https) default and is always fine. http is allowed only to a private host.
+func checkSecureKeyEndpoint(urlField, keyField, baseURL, apiKeyEnv string) error {
+	if apiKeyEnv == "" || baseURL == "" {
+		return nil
+	}
+	u, err := url.Parse(baseURL)
+	if err != nil {
+		return fmt.Errorf("%s is not a valid URL (%s is set): %w", urlField, keyField, err)
+	}
+	switch u.Scheme {
+	case "https":
+		return nil
+	case "http":
+		if isPrivateHost(u.Hostname()) {
+			return nil
+		}
+		return fmt.Errorf("%s is %q with an API key (%s set) on a public host — the key would be sent in cleartext; use https or a loopback/in-cluster endpoint", urlField, baseURL, keyField)
+	default:
+		return fmt.Errorf("%s must be an http(s) URL when %s is set, got scheme %q", urlField, keyField, u.Scheme)
+	}
+}
+
 // Validate enforces cross-field invariants after loading — fail-closed defaults
 // for the autonomy ladder: enabling execution requires the controls that bound
 // it. Returns an error that should abort startup.
@@ -497,6 +549,28 @@ func (c *Config) Validate() error {
 	}
 	if c.Model.Verify != nil && c.Model.Verify.MaxTokens < 0 {
 		return fmt.Errorf("model.verify.max_tokens must be >= 0 (0 = inherit), got %d", c.Model.Verify.MaxTokens)
+	}
+	// Reject a cleartext API key over a public endpoint (the key would be sent in the
+	// clear, and is the enabler for a redirect-based key leak). Cover the main model,
+	// a verify override that targets its own endpoint, and embeddings. Loopback /
+	// in-cluster hosts are exempt.
+	if err := checkSecureKeyEndpoint("model.base_url", "model.api_key_env", c.Model.BaseURL, c.Model.APIKeyEnv); err != nil {
+		return err
+	}
+	if v := c.Model.Verify; v != nil && v.BaseURL != "" {
+		// A verify override inherits the parent key when its own api_key_env is unset.
+		keyEnv := v.APIKeyEnv
+		if keyEnv == "" {
+			keyEnv = c.Model.APIKeyEnv
+		}
+		if err := checkSecureKeyEndpoint("model.verify.base_url", "model.verify.api_key_env (or inherited model.api_key_env)", v.BaseURL, keyEnv); err != nil {
+			return err
+		}
+	}
+	if e := c.Model.Embeddings; e != nil {
+		if err := checkSecureKeyEndpoint("model.embeddings.base_url", "model.embeddings.api_key_env", e.BaseURL, e.APIKeyEnv); err != nil {
+			return err
+		}
 	}
 	switch c.Actions.Mode {
 	case "", ActionOff, ActionSuggest:
