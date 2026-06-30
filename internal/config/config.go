@@ -60,9 +60,22 @@ type Logging struct {
 	Level  string `yaml:"level"`  // "debug" | "info" (default) | "warn" | "error"
 }
 
-// Endpoint is a backend base URL; empty disables the corresponding tool.
+// Endpoint is a backend base URL with optional auth; empty URL disables the
+// corresponding tool. Auth follows the secrets-by-indirection convention used
+// elsewhere (model.api_key_env, forge.*_env): the config stores the NAME of an
+// env var, never the secret itself, and the value is read at runtime.
 type Endpoint struct {
 	URL string `yaml:"url"`
+
+	// TokenEnv names an env var holding a bearer token for the backend. When set
+	// and the var is non-empty, requests carry "Authorization: Bearer <token>".
+	// Empty (default) ⇒ no Authorization header (unchanged, keyless behaviour).
+	TokenEnv string `yaml:"token_env"`
+
+	// Headers are static request headers added to every backend request — e.g. a
+	// tenant header for a multi-tenant VictoriaMetrics/VictoriaLogs instance
+	// ("X-Scope-OrgID: <tenant>"). Empty (default) ⇒ no extra headers.
+	Headers map[string]string `yaml:"headers"`
 }
 
 // Cloud configures the cloud context provider. Auth is in-cluster identity (EKS
