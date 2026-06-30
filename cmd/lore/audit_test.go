@@ -82,3 +82,61 @@ func TestAuditVerifyMissingPathErrors(t *testing.T) {
 		t.Fatal("an empty --path must error")
 	}
 }
+
+// writeConfig writes a minimal RunLore config that sets actions.audit_log_path to
+// logPath (mode is left unset, so config validation passes) and returns its path.
+func writeConfig(t *testing.T, dir, logPath string) string {
+	t.Helper()
+	cfgPath := filepath.Join(dir, "runlore.yaml")
+	body := "actions:\n  audit_log_path: " + logPath + "\n"
+	if err := os.WriteFile(cfgPath, []byte(body), 0o600); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+	return cfgPath
+}
+
+// TestRunAuditVerifyConfigIntactOK exercises the --config code path: the audit-log
+// path is resolved from actions.audit_log_path, and an intact chain verifies.
+func TestRunAuditVerifyConfigIntactOK(t *testing.T) {
+	dir := t.TempDir()
+	logPath := writeAuditChain(t, dir)
+	cfgPath := writeConfig(t, dir, logPath)
+
+	if err := runAuditVerify([]string{"--config", cfgPath}); err != nil {
+		t.Fatalf("intact chain via --config must verify, got: %v", err)
+	}
+}
+
+// TestRunAuditVerifyConfigTamperedFails exercises --config against a broken chain:
+// the resolved path's chain is tampered, so verification (and the command) fails.
+func TestRunAuditVerifyConfigTamperedFails(t *testing.T) {
+	dir := t.TempDir()
+	logPath := writeAuditChain(t, dir)
+	b, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lines := strings.Split(strings.TrimSpace(string(b)), "\n")
+	lines[1] = strings.Replace(lines[1], "apps", "flux-system", 1)
+	if err := os.WriteFile(logPath, []byte(strings.Join(lines, "\n")+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfgPath := writeConfig(t, dir, logPath)
+
+	if err := runAuditVerify([]string{"--config", cfgPath}); err == nil {
+		t.Fatal("tampered chain via --config must fail")
+	}
+}
+
+// TestRunAuditVerifyConfigNoAuditPathErrors checks that a --config without
+// actions.audit_log_path is a usage error (nothing to verify).
+func TestRunAuditVerifyConfigNoAuditPathErrors(t *testing.T) {
+	dir := t.TempDir()
+	cfgPath := filepath.Join(dir, "runlore.yaml")
+	if err := os.WriteFile(cfgPath, []byte("actions:\n  mode: off\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := runAuditVerify([]string{"--config", cfgPath}); err == nil {
+		t.Fatal("a --config with no actions.audit_log_path must error")
+	}
+}

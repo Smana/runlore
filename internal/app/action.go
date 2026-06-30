@@ -10,7 +10,8 @@ import (
 )
 
 // BuildAuditor opens the append-only action audit log when configured, else a
-// no-op. Validate already requires AuditLogPath when actions.mode=auto.
+// no-op. Validate already requires AuditLogPath for both executing modes
+// (approve and auto), so the Nop fallback below only ever applies to off/suggest.
 //
 // The existing hash chain is verified on open (OpenVerified). If it is broken
 // (insertion, edit, or mid-chain deletion) the response is mode-gated, because
