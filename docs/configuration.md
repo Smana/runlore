@@ -50,6 +50,10 @@ Per-source enablement map; presence enables a source. `alertmanager: {}` mounts 
   `max_requeues`.
 - `timeout` — per-investigation deadline, **default 10m** (bounds a hung tool/clone so it can't starve
   the single-worker queue).
+- `tool_timeout` — per-**tool**-call timeout, **default 60s** (0 = use the default). Bounds a single
+  hung/slow provider (a stuck git clone, an unresponsive metrics/logs endpoint) so it can't eat the
+  whole per-investigation budget; on expiry the tool result is a non-fatal "timed out" note and the
+  investigation continues.
 - `max_steps` (**default 20**), `max_tool_output_bytes` (0 = unlimited), `max_tokens_per_investigation`
   (0 = unlimited, else a hard token ceiling).
 - `pod_log_namespaces` — **app-layer allowlist** of namespaces the `pod_logs` tool
