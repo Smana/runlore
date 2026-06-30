@@ -148,6 +148,12 @@ func BuildModelAndTools(ctx context.Context, cfg *config.Config, gp providers.Gi
 	return model, tools, recall, cat
 }
 
+// defaultToolTimeout bounds a single tool call when investigation.tool_timeout is
+// unset (0). It keeps a hung/slow provider (a stuck git clone, an unresponsive
+// metrics/logs endpoint) from consuming the whole per-investigation budget while
+// still allowing legitimately slow queries (log scans, range PromQL) to finish.
+const defaultToolTimeout = 60 * time.Second
+
 // BuildInvestigator returns the LLM ReAct investigator when a model is configured,
 // otherwise the read-only LogInvestigator. It also returns the catalog (nil when
 // no model is configured or no catalog is wired).
@@ -173,6 +179,12 @@ func BuildInvestigator(ctx context.Context, cfg *config.Config, gp providers.Git
 	if actions.Enabled() {
 		log.Info("action policy enabled", "mode", string(actions.Mode()))
 	}
+	// Per-tool timeout: default to 60s when unset (0) so one hung tool can't eat the
+	// whole per-investigation budget; an explicit config value flows through as-is.
+	toolTimeout := cfg.Investigation.ToolTimeout.Std()
+	if toolTimeout == 0 {
+		toolTimeout = defaultToolTimeout
+	}
 	return &investigate.LoopInvestigator{
 		Model:                     model,
 		VerifyModel:               BuildVerifyModel(cfg),
@@ -187,6 +199,7 @@ func BuildInvestigator(ctx context.Context, cfg *config.Config, gp providers.Git
 		MaxToolOutputBytes:        cfg.Investigation.MaxToolOutputBytes,
 		MaxTokensPerInvestigation: cfg.Investigation.MaxTokensPerInvestigation,
 		Timeout:                   cfg.Investigation.Timeout.Std(),
+		ToolTimeout:               toolTimeout,
 		OnComplete: func(found providers.Investigation) {
 			// Record the outcome "open" first: this investigation happened for an
 			// incident, with the answer we used (recall vs fresh). A matching

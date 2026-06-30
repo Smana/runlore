@@ -148,6 +148,7 @@ type Investigation struct {
 	MaxToolOutputBytes        int       `yaml:"max_tool_output_bytes"`        // 0 ⇒ unlimited
 	MaxTokensPerInvestigation int       `yaml:"max_tokens_per_investigation"` // 0 ⇒ unlimited
 	Timeout                   Duration  `yaml:"timeout"`                      // per-investigation deadline; 0 ⇒ default (10m) via applyDefaults
+	ToolTimeout               Duration  `yaml:"tool_timeout"`                 // per-TOOL-call timeout so one hung tool can't eat the budget; 0 ⇒ default (60s) at construction
 
 	// PodLogNamespaces lists extra namespaces (beyond the incident's own) that
 	// pod_logs may read controller/crash logs from. pod_logs streams raw pod logs

@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/Smana/runlore/internal/action"
 	"github.com/Smana/runlore/internal/audit"
@@ -95,6 +96,34 @@ func TestBuildInvestigatorSelectsImplementation(t *testing.T) {
 		}
 		if _, ok := inv.(*investigate.LoopInvestigator); !ok {
 			t.Fatalf("want *LoopInvestigator, got %T", inv)
+		}
+	})
+
+	t.Run("per-tool timeout: default when unset, explicit respected", func(t *testing.T) {
+		// Unset tool_timeout (0) ⇒ the 60s default is applied at construction, mirroring
+		// the other investigation defaults.
+		cfg := &config.Config{Model: config.Model{Provider: "openai", BaseURL: "http://vllm:8000/v1", Model: "test-model"}}
+		inv, _, err := BuildInvestigator(context.Background(), cfg, nil, nil, nil, nil, nil, log)
+		if err != nil {
+			t.Fatal(err)
+		}
+		li, ok := inv.(*investigate.LoopInvestigator)
+		if !ok {
+			t.Fatalf("want *LoopInvestigator, got %T", inv)
+		}
+		if li.ToolTimeout != defaultToolTimeout {
+			t.Fatalf("unset tool_timeout must default to %v, got %v", defaultToolTimeout, li.ToolTimeout)
+		}
+
+		// Explicit tool_timeout flows through unchanged.
+		cfg.Investigation.ToolTimeout = config.Duration(5 * time.Second)
+		inv2, _, err := BuildInvestigator(context.Background(), cfg, nil, nil, nil, nil, nil, log)
+		if err != nil {
+			t.Fatal(err)
+		}
+		li2 := inv2.(*investigate.LoopInvestigator)
+		if li2.ToolTimeout != 5*time.Second {
+			t.Fatalf("explicit tool_timeout not wired: got %v, want 5s", li2.ToolTimeout)
 		}
 	})
 }

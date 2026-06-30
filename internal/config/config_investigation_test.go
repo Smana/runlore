@@ -112,6 +112,7 @@ investigation:
   max_steps: 15
   max_tool_output_bytes: 16384
   max_tokens_per_investigation: 120000
+  tool_timeout: 45s
   pod_log_namespaces: [flux-system, kube-system]
 telemetry:
   metrics_enabled: true
@@ -137,6 +138,9 @@ telemetry:
 	}
 	if c.Investigation.MaxSteps != 15 || c.Investigation.MaxToolOutputBytes != 16384 {
 		t.Fatalf("scalar fields: %+v", c.Investigation)
+	}
+	if c.Investigation.ToolTimeout.Std() != 45*time.Second {
+		t.Fatalf("tool_timeout: got %v, want 45s", c.Investigation.ToolTimeout.Std())
 	}
 	if got := strings.Join(c.Investigation.Coalesce.CorrelationLabels, ","); got != "alertname,namespace" {
 		t.Fatalf("correlation_labels: got %q", got)
