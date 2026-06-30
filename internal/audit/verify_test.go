@@ -94,6 +94,42 @@ func TestOpenVerifiedTampered(t *testing.T) {
 	}
 }
 
+// TestOpenVerifiedGenesisRoundTrip proves the empty→first-genesis-append path
+// produces a valid chain: open an absent file via OpenVerified, write the first
+// (genesis) record, close, re-read, and re-Verify the chain. Mirrors what
+// TestOpenVerifiedIntact does for the non-empty starting case.
+func TestOpenVerifiedGenesisRoundTrip(t *testing.T) {
+	for _, name := range []string{"absent", "empty"} {
+		t.Run(name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "audit.jsonl")
+			if name == "empty" {
+				if err := os.WriteFile(path, nil, 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+
+			l, err := OpenVerified(path)
+			if err != nil {
+				t.Fatalf("OpenVerified on %s file must succeed, got: %v", name, err)
+			}
+			if err := l.Log(Record{Actor: "auto", Op: "suspend", Target: "Kustomization/apps/web", Decision: DecisionExecuted}); err != nil {
+				t.Fatalf("genesis log: %v", err)
+			}
+			if err := l.Close(); err != nil {
+				t.Fatalf("close: %v", err)
+			}
+
+			b, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatalf("read back: %v", err)
+			}
+			if err := Verify(strings.NewReader(string(b))); err != nil {
+				t.Fatalf("genesis chain must verify cleanly: %v", err)
+			}
+		})
+	}
+}
+
 func TestOpenVerifiedMidChainDeletion(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "audit.jsonl")
 	writeChain(t, path)
