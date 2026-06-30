@@ -79,8 +79,10 @@ installed base to break.
 is `http` and the host is **not** private/loopback, return an error. Endpoints checked:
 
 - `Model` — when `Model.APIKeyEnv != ""` and `Model.BaseURL != ""`.
-- `Model.Verify` — when the override sets its own `BaseURL` *and* `APIKeyEnv` (an override that
-  inherits the parent's endpoint/key is covered by the parent check).
+- `Model.Verify` — validated against its **effective resolved** `base_url` and key (override
+  value if set, else the inherited parent value), mirroring `BuildVerifyModel`'s `or()` semantics.
+  This catches an override that supplies its own key while inheriting an insecure parent `base_url`
+  — a case the parent check misses because the parent is keyless.
 - `Model.Embeddings` — when `Embeddings.APIKeyEnv != ""` and `Embeddings.BaseURL != ""`.
 
 An empty `base_url` (Anthropic/Gemini built-in default endpoint) is always fine — the defaults
