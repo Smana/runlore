@@ -92,25 +92,26 @@ func TestCompactProtectsSeedAssistantAndKeepList(t *testing.T) {
 }
 
 func TestCompactSupersededFirst(t *testing.T) {
-	big := strings.Repeat("z", 3000)
-	small := strings.Repeat("z", 3200)
-	// id 1 (pod_logs ns=a) is superseded by id 4 (same name+args, later). id 2 is a
-	// larger, non-superseded one-off. Supersession must elide id 1 before id 2 even
-	// though id 2 is larger. Use K=3 so ids 1 and 2 are eligible (ids 3,4 are recent).
+	smallSuperseded := strings.Repeat("z", 2400) // id1: superseded, SMALLER
+	largeOneOff := strings.Repeat("z", 4000)     // id2: not superseded, LARGER
+	big := strings.Repeat("z", 2000)
+	// 5 tool results -> recentCut = 2, so positions 0 (id1) and 1 (id2) are both eligible.
+	// id1 (pod_logs ns=a) is superseded by id5 (same name+args, later). id2 is a larger
+	// one-off. Superseded-first must elide the SMALLER id1 before the LARGER id2.
 	msgs := buildHistory(10,
-		callAndResult("1", "pod_logs", `{"ns":"a"}`, big),         // superseded by id 4
-		callAndResult("2", "controller_logs", `{"c":"x"}`, small), // larger, one-off
+		callAndResult("1", "pod_logs", `{"ns":"a"}`, smallSuperseded),
+		callAndResult("2", "controller_logs", `{"c":"x"}`, largeOneOff),
 		callAndResult("3", "pod_logs", `{"ns":"b"}`, big),
-		callAndResult("4", "pod_logs", `{"ns":"a"}`, big), // re-query of id 1
+		callAndResult("4", "pod_logs", `{"ns":"d"}`, big),
+		callAndResult("5", "pod_logs", `{"ns":"a"}`, big), // re-query of id1 -> supersedes it
 	)
-	// target that allows exactly one elision to drop under it
-	target := estimateTokens("", msgs, nil) - 600
+	target := estimateTokens("", msgs, nil) - 400 // one elision (~590 tokens) drops under it
 	out, _ := compactHistory(msgs, "", nil, target)
 	if !isElidedMarker(toolResultByID(out, "1")) {
-		t.Fatal("superseded id 1 should be elided first")
+		t.Fatal("superseded id 1 should be elided first, even though it is smaller")
 	}
 	if isElidedMarker(toolResultByID(out, "2")) {
-		t.Fatal("non-superseded id 2 should NOT be elided when one elision sufficed")
+		t.Fatal("larger non-superseded id 2 must NOT be elided when one elision sufficed")
 	}
 }
 
@@ -121,7 +122,7 @@ func TestCompactNoopWhenUnderTarget(t *testing.T) {
 	if elided != 0 {
 		t.Fatalf("expected no-op, elided %d", elided)
 	}
-	if &out[0] == nil {
+	if len(out) == 0 {
 		t.Fatal("should return the history")
 	}
 }
