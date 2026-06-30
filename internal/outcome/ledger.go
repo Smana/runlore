@@ -38,30 +38,171 @@ type Episode struct {
 	Resolved                     bool
 }
 
-// Ledger is an append-only outcome log with an in-memory open-index.
+// pendingOpen is one unresolved open held in a fingerprint's LIFO pairing stack.
+// Every open (fresh or recall) joins the stack so a resolve pops the correct one;
+// counted records a recall open (Kind=="recall" && Entry!="") whose resolution
+// should credit agg[entry].
+type pendingOpen struct {
+	entry   string
+	counted bool
+}
+
+// Ledger is an append-only outcome log with an in-memory open-index and a cached
+// per-entry recall aggregate (the OpenCounts roll-up). The aggregate is built once
+// by replaying the file at New and then maintained INCREMENTALLY under mu on every
+// Open/Resolve, so OpenCounts is O(1) and never re-reads the file — it lived on the
+// recall hot path, which previously replayed the whole JSONL per incident lookup.
 type Ledger struct {
 	path string
 	mu   sync.Mutex
 	open map[string]Event // fingerprint → latest unresolved open
+
+	// agg is the cached OpenCounts result: per recall entry, its recall/resolve
+	// counts and last-confirmed time. Equal to a fresh full replay for any event
+	// sequence (the same LIFO, order-independent pairing as Episodes()).
+	agg map[string]Aggregate
+	// pendingOpens/pendingResolves carry the same pairing state Episodes() rebuilds
+	// per replay, but kept live so a resolve can find which open (and thus which
+	// entry) it credits without re-reading the file.
+	pendingOpens    map[string][]pendingOpen // fingerprint → LIFO stack of unresolved opens
+	pendingResolves map[string][]time.Time   // fingerprint → buffered early resolves (resolve-before-open), FIFO
+
+	// droppedResolves counts orphan resolves discarded by the pendingResolves bound
+	// (see maxPendingResolvesPerFingerprint) — spurious duplicate/replayed resolve
+	// webhooks. Kept so the (otherwise silent) defensive drop is observable.
+	droppedResolves int
 }
+
+// maxPendingResolvesPerFingerprint bounds the resolve-before-open buffer per
+// fingerprint. The legitimate window (a transient incident whose resolve webhook
+// lands before its open is recorded) needs only a handful of slots; anything beyond
+// this generous cap is spurious — duplicate/replayed resolve webhooks, or resolves
+// whose open was never recorded — and applyResolveLocked would otherwise buffer it
+// forever, growing pendingResolves without limit on a long-lived leader. When full we
+// drop the OLDEST entry (FIFO): a long-buffered resolve is the least likely to ever
+// pair with a real open, and dropping it leaves the brief-window pairing intact.
+const maxPendingResolvesPerFingerprint = 64
 
 // New opens (replaying) the ledger at path. An empty path returns a disabled,
 // no-op ledger (the feature is off).
 func New(path string) (*Ledger, error) {
-	l := &Ledger{path: path, open: map[string]Event{}}
-	events, err := l.readEvents()
-	if err != nil {
+	l := &Ledger{path: path}
+	if err := l.loadLocked(); err != nil {
 		return nil, err
 	}
+	return l, nil
+}
+
+// loadLocked (re)builds all in-memory state from a full replay of the file: it resets
+// the open-index, the cached aggregate, and the pairing state, then folds every event
+// back in. It is the single shared cache-build path called by New (single-threaded)
+// and Reload (under mu) — keeping the two in lockstep. A disabled/absent ledger leaves
+// the freshly-reset (empty) maps in place.
+//
+// The read is performed BEFORE any reset: if readEvents returns an error the prior
+// cache is left untouched — callers see a stale-but-valid cache rather than an empty one.
+func (l *Ledger) loadLocked() error {
+	events, err := l.readEvents()
+	if err != nil {
+		return err // prior cache untouched
+	}
+	l.open = map[string]Event{}
+	l.agg = map[string]Aggregate{}
+	l.pendingOpens = map[string][]pendingOpen{}
+	l.pendingResolves = map[string][]time.Time{}
+	l.droppedResolves = 0
 	for _, e := range events {
 		switch e.Event {
 		case "open":
 			l.open[e.Fingerprint] = e
+			l.applyOpenLocked(e)
 		case "resolve":
 			delete(l.open, e.Fingerprint)
+			l.applyResolveLocked(e.Fingerprint, e.At)
 		}
 	}
-	return l, nil
+	return nil
+}
+
+// Reload re-replays the ledger file under the write lock and rebuilds the cached
+// aggregate, open-index, and pairing state from scratch. The cache is otherwise
+// maintained incrementally and so only reflects writes made through THIS process: in a
+// multi-replica HA deployment sharing one ledger file, a replica that loses then
+// re-acquires leadership would keep serving its pre-handover cache, missing every
+// open/resolve another replica appended while it was a follower — stale aggregates and
+// thus wrong recall-decay. Call Reload when this process (re-)acquires leadership so it
+// re-syncs with those external writes. It takes the write lock (no torn read against a
+// concurrent OpenCounts). A disabled/nil ledger is a no-op.
+func (l *Ledger) Reload() error {
+	if !l.enabled() {
+		return nil
+	}
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.loadLocked()
+}
+
+// applyOpenLocked folds one open event into the cached aggregate, mirroring
+// Episodes(): a counted recall open increments Recalls; if an early resolve is
+// already buffered for this fingerprint, the open is paired immediately and also
+// counts as resolved. Must be called with mu held (or during single-threaded New).
+func (l *Ledger) applyOpenLocked(e Event) {
+	counted := e.Kind == "recall" && e.Entry != ""
+	if counted {
+		a := l.agg[e.Entry]
+		a.Recalls++
+		l.agg[e.Entry] = a
+	}
+	// Order-independent pairing: a resolve that arrived before this open is buffered;
+	// pair with the earliest such resolve (FIFO), matching Episodes().
+	if rs := l.pendingResolves[e.Fingerprint]; len(rs) > 0 {
+		at := rs[0]
+		l.pendingResolves[e.Fingerprint] = rs[1:]
+		if counted {
+			l.creditResolveLocked(e.Entry, at)
+		}
+		return
+	}
+	l.pendingOpens[e.Fingerprint] = append(l.pendingOpens[e.Fingerprint], pendingOpen{entry: e.Entry, counted: counted})
+}
+
+// applyResolveLocked folds one resolve event into the cached aggregate, mirroring
+// Episodes(): pop the most-recent unresolved open (LIFO) for the fingerprint and,
+// if it was a counted recall, credit its resolution; with no pending open, buffer
+// the resolve for a later open. Must be called with mu held (or during New).
+func (l *Ledger) applyResolveLocked(fp string, at time.Time) {
+	stack := l.pendingOpens[fp]
+	if len(stack) == 0 {
+		// No pending open yet — buffer this resolve for a later open (resolve-before-open).
+		// Defensive bound: orphan resolves that never pair (duplicate/replayed resolve
+		// webhooks, or resolves whose open was never recorded) would otherwise accumulate
+		// here forever on a long-lived leader. Cap the per-fingerprint buffer, dropping the
+		// oldest excess — these are spurious; the legitimate brief window needs only a few,
+		// so its pairing is untouched.
+		rs := l.pendingResolves[fp]
+		if len(rs) >= maxPendingResolvesPerFingerprint {
+			l.droppedResolves++
+			rs = rs[1:] // drop oldest (FIFO) to make room for the newer resolve
+		}
+		l.pendingResolves[fp] = append(rs, at)
+		return
+	}
+	top := stack[len(stack)-1]
+	l.pendingOpens[fp] = stack[:len(stack)-1]
+	if top.counted {
+		l.creditResolveLocked(top.entry, at)
+	}
+}
+
+// creditResolveLocked records a resolved recall for entry: Resolved++ and bump
+// LastConfirmed to the latest resolve time. Must be called with mu held (or New).
+func (l *Ledger) creditResolveLocked(entry string, at time.Time) {
+	a := l.agg[entry]
+	a.Resolved++
+	if at.After(a.LastConfirmed) {
+		a.LastConfirmed = at
+	}
+	l.agg[entry] = a
 }
 
 // readEvents replays the ledger file in order, skipping corrupt lines. It returns
@@ -150,9 +291,10 @@ func (l *Ledger) Open(e Event) error {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	if err := l.appendLocked(e); err != nil {
-		return err
+		return err // append failed: leave both index and cache untouched
 	}
 	l.open[e.Fingerprint] = e
+	l.applyOpenLocked(e) // keep the OpenCounts cache in lockstep with the durable write
 	return nil
 }
 
@@ -224,29 +366,31 @@ type Aggregate struct {
 	LastConfirmed time.Time
 }
 
-// OpenCounts rolls Episodes up per catalog entry, counting recall episodes only
-// (fresh investigations carry no entry). It is the input to recall decay:
-// resolve-rate ≈ (Resolved+k)/(Recalls+k). A disabled/empty ledger yields an
-// empty (non-nil) map.
+// OpenCounts rolls recall episodes up per catalog entry (fresh investigations
+// carry no entry). It is the input to recall decay: resolve-rate ≈
+// (Resolved+k)/(Recalls+k), and runs on the recall hot path once per incident
+// lookup. It returns the cached aggregate — built once at New and maintained
+// incrementally on every Open/Resolve — so it is O(entries) and never re-reads the
+// file; the value equals a fresh full replay of the ledger for any event sequence
+// below the maxPendingResolvesPerFingerprint cap — above the cap (pathological
+// orphan-resolve load), dropped excess resolves mean the cache and an unbounded
+// Episodes() replay may diverge.
+// A disabled/empty ledger yields an empty (non-nil) map. The returned map is a
+// fresh copy the caller may freely mutate.
+//
+// Behaviour note: because the read moved to New/Reload, OpenCounts no longer performs
+// file I/O and so can no longer return a read error — any error reading the ledger
+// surfaces at construction (New) or re-sync (Reload) time, not per call. The error
+// return is retained for signature stability and is always nil here.
 func (l *Ledger) OpenCounts() (map[string]Aggregate, error) {
-	eps, err := l.Episodes()
-	if err != nil {
-		return nil, err
+	if l == nil {
+		return map[string]Aggregate{}, nil
 	}
-	counts := map[string]Aggregate{}
-	for _, e := range eps {
-		if e.Kind != "recall" || e.Entry == "" {
-			continue
-		}
-		a := counts[e.Entry]
-		a.Recalls++
-		if e.Resolved {
-			a.Resolved++
-			if e.ResolvedAt.After(a.LastConfirmed) {
-				a.LastConfirmed = e.ResolvedAt
-			}
-		}
-		counts[e.Entry] = a
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	counts := make(map[string]Aggregate, len(l.agg))
+	for k, v := range l.agg {
+		counts[k] = v
 	}
 	return counts, nil
 }
@@ -260,8 +404,9 @@ func (l *Ledger) Resolve(fp string, at time.Time) (Episode, bool, error) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	if err := l.appendLocked(Event{Event: "resolve", Fingerprint: fp, At: at}); err != nil {
-		return Episode{}, false, err
+		return Episode{}, false, err // append failed: leave both index and cache untouched
 	}
+	l.applyResolveLocked(fp, at) // keep the OpenCounts cache in lockstep with the durable write
 	o, ok := l.open[fp]
 	if !ok {
 		return Episode{}, false, nil
