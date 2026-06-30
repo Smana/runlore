@@ -82,14 +82,14 @@ func BuildModelAndTools(ctx context.Context, cfg *config.Config, gp providers.Gi
 		}
 	}
 	if cfg.Metrics.URL != "" {
-		m := prometheus.New(cfg.Metrics.URL)
+		m := prometheus.NewWithAuth(cfg.Metrics.URL, cfg.Metrics.TokenEnv, cfg.Metrics.Headers)
 		tools = append(tools,
 			investigate.QueryMetricsTool{Metrics: m},
 			investigate.QueryMetricsRangeTool{Metrics: m},
 		)
 	}
 	if cfg.Logs.URL != "" {
-		tools = append(tools, investigate.QueryLogsTool{Logs: victorialogs.New(cfg.Logs.URL)})
+		tools = append(tools, investigate.QueryLogsTool{Logs: victorialogs.NewWithAuth(cfg.Logs.URL, cfg.Logs.TokenEnv, cfg.Logs.Headers)})
 	}
 	// Network-flow data source (the network_drops tool). Pluggable and CNI-agnostic:
 	// no provider is enabled by default. The selected provider must match the cluster's

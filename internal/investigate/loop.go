@@ -258,6 +258,11 @@ func (li *LoopInvestigator) Investigate(ctx context.Context, req Request) error 
 				attribute.String("provider", li.ModelProvider), attribute.String("result", mres)))
 			li.Metrics.ModelRequestDuration.Record(ctx, time.Since(mstart).Seconds(),
 				metric.WithAttributes(attribute.String("provider", li.ModelProvider)))
+			if err == nil {
+				provAttr := metric.WithAttributes(attribute.String("provider", li.ModelProvider))
+				li.Metrics.ModelInputTokens.Add(ctx, int64(resp.Usage.InputTokens), provAttr)
+				li.Metrics.ModelCachedInputTokens.Add(ctx, int64(resp.Usage.CachedInputTokens), provAttr)
+			}
 		}
 		if err != nil {
 			// The per-investigation deadline fired (or the parent ctx was cancelled):

@@ -1,0 +1,92 @@
+# End-to-end suite on a throwaway k3d cluster.
+#
+# Runs hack/e2e-k3d.sh, which stands up a real k3d (k3s) cluster, builds + imports
+# the lore image, installs minimal Flux CRDs, and asserts ~30 end-state behaviours
+# (leader-election failover, rung-3 auto-execution + kill-switch, the 40-alert storm
+# coalescing, the curator opening a PR, etc.) against mock LLM/Slack/Matrix/GitHub
+# backends — so NO API key or repo secret is required.
+#
+# The script owns the cluster lifecycle (k3d cluster create ... --disable=traefik,
+# eviction-hard tuning, --no-lb) and tears it down on exit (trap cleanup), so this
+# workflow only installs the CLIs it needs and invokes it. Exit code: 0 when all
+# checks pass, 1 when any check fails (RESULTS prints "PASS=N FAIL=M").
+#
+# Trigger: workflow_dispatch ONLY for now — a scheduled run can't be verified before
+# it first goes green, and a spurious red nightly is noise. Enable the schedule below
+# after a green manual run.
+on:
+  workflow_dispatch:
+  # Enable after a green manual run.
+  # schedule:
+  #   - cron: "0 5 * * *"   # nightly 05:00 UTC (before the 06:00 eval run)
+
+# Least privilege: the script only reads the checked-out repo and talks to a local
+# k3d cluster + host-side mock backends. It pushes nothing and needs no token.
+permissions:
+  contents: read
+
+concurrency:
+  group: e2e-k3d-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  # k3d version the suite is developed against (matches the maintainer's local CLI).
+  # The binary's SHA256 is verified against the value published in the release's
+  # checksums.txt, so the download is pinned by content, not just by URL.
+  K3D_VERSION: v5.9.0
+  K3D_SHA256: 06d8f25bc3a971c4eb29e0ff08429b180402db0f4dec838c9eac427e296800a0
+
+jobs:
+  e2e:
+    name: k3d end-to-end
+    runs-on: ubuntu-latest
+    # Cold docker build of the multi-stage Go image + several helm rollouts (90-120s
+    # waits each) + leader-election failover (up to 60s) + the storm/argocd phases.
+    # ~12-20 min in practice; 30 leaves headroom without masking a hang.
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+
+      # The mock backends (hack/e2e/mock) run on the host via `go run -tags e2e`, so
+      # the runner needs the same Go toolchain the project builds with (go.mod: 1.26).
+      - name: Set up Go
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
+        with:
+          go-version: "1.26"
+
+      - name: Set up kubectl
+        uses: azure/setup-kubectl@829323503d1be3d00ca8346e5391ca0b07a9ab0d # v5.1.0
+
+      - name: Set up Helm
+        uses: azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310 # v5.0.1
+
+      # Install only the k3d CLI (pinned binary + verified SHA256). The action
+      # AbsaOSS/k3d-action *creates* a cluster, which would collide with the
+      # script's own `k3d cluster create` (custom k3s args, --no-lb); the script
+      # owns the cluster lifecycle, so we just put the matching CLI on PATH.
+      - name: Install k3d CLI
+        run: |
+          set -euo pipefail
+          url="https://github.com/k3d-io/k3d/releases/download/${K3D_VERSION}/k3d-linux-amd64"
+          curl -fsSL -o /tmp/k3d "$url"
+          echo "${K3D_SHA256}  /tmp/k3d" | sha256sum -c -
+          sudo install -m 0755 /tmp/k3d /usr/local/bin/k3d
+          k3d version
+
+      # Docker is preinstalled on ubuntu-latest (k3d needs it); openssl, python3, ss
+      # (iproute2) and curl are too — the script uses all of them. Print versions so a
+      # future runner-image drift is visible in the log.
+      - name: Tool versions
+        run: |
+          set -euo pipefail
+          docker --version
+          kubectl version --client
+          helm version --short
+          go version
+          openssl version
+          python3 --version
+          ss -V || true
+
+      - name: Run k3d end-to-end suite
+        run: hack/e2e-k3d.sh
