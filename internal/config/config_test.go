@@ -304,8 +304,8 @@ func TestCurateRecurrenceThresholdParse(t *testing.T) {
 
 func TestValidateMCPServers(t *testing.T) {
 	good := &Config{MCP: MCP{Servers: []MCPServer{
-		{Name: "steampipe", URL: "https://mcp.example/x"},
-		{Name: "k8s", URL: "http://k8s-mcp.ai.svc:8080"},
+		{Name: "steampipe", Endpoint: Endpoint{URL: "https://mcp.example/x"}},
+		{Name: "k8s", Endpoint: Endpoint{URL: "http://k8s-mcp.ai.svc:8080"}},
 	}}}
 	if err := good.Validate(); err != nil {
 		t.Fatalf("valid MCP servers must pass: %v", err)
@@ -314,17 +314,17 @@ func TestValidateMCPServers(t *testing.T) {
 		name string
 		s    MCPServer
 	}{
-		{"missing name", MCPServer{URL: "https://x"}},
+		{"missing name", MCPServer{Endpoint: Endpoint{URL: "https://x"}}},
 		{"missing url", MCPServer{Name: "a"}},
-		{"double underscore in name", MCPServer{Name: "a__b", URL: "https://x"}},
-		{"cleartext token on public http", MCPServer{Name: "a", URL: "http://api.public.example/x", TokenEnv: "T"}},
+		{"double underscore in name", MCPServer{Name: "a__b", Endpoint: Endpoint{URL: "https://x"}}},
+		{"cleartext token on public http", MCPServer{Name: "a", Endpoint: Endpoint{URL: "http://api.public.example/x", TokenEnv: "T"}}},
 	} {
 		c := &Config{MCP: MCP{Servers: []MCPServer{tc.s}}}
 		if err := c.Validate(); err == nil {
 			t.Fatalf("%s must be rejected", tc.name)
 		}
 	}
-	dup := &Config{MCP: MCP{Servers: []MCPServer{{Name: "a", URL: "https://x"}, {Name: "a", URL: "https://y"}}}}
+	dup := &Config{MCP: MCP{Servers: []MCPServer{{Name: "a", Endpoint: Endpoint{URL: "https://x"}}, {Name: "a", Endpoint: Endpoint{URL: "https://y"}}}}}
 	if err := dup.Validate(); err == nil {
 		t.Fatal("duplicate server names must be rejected")
 	}

@@ -212,7 +212,8 @@ func TestAppendMCPToolsSkipsUnreachable(t *testing.T) {
 	defer broken.Close()
 
 	cfg := &config.Config{MCP: config.MCP{Servers: []config.MCPServer{
-		{Name: "good", URL: healthy.URL}, {Name: "bad", URL: broken.URL},
+		{Name: "good", Endpoint: config.Endpoint{URL: healthy.URL}},
+		{Name: "bad", Endpoint: config.Endpoint{URL: broken.URL}},
 	}}}
 	var tools []investigate.Tool
 	tools = appendMCPTools(context.Background(), cfg, slog.New(slog.NewTextHandler(io.Discard, nil)), tools)
