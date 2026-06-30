@@ -52,6 +52,74 @@ func TestQueryRange(t *testing.T) {
 	}
 }
 
+func TestQueryAuthHeaders(t *testing.T) {
+	t.Setenv("RUNLORE_TEST_VM_TOKEN", "s3cr3t")
+	var gotAuth, gotTenant string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotAuth = r.Header.Get("Authorization")
+		gotTenant = r.Header.Get("X-Scope-OrgID")
+		_, _ = w.Write([]byte(`{"status":"success","data":{"resultType":"vector","result":[]}}`))
+	}))
+	defer srv.Close()
+
+	c := NewWithAuth(srv.URL, "RUNLORE_TEST_VM_TOKEN", map[string]string{"X-Scope-OrgID": "tenant-a"})
+	if _, err := c.Query(context.Background(), "up", time.Time{}); err != nil {
+		t.Fatalf("Query: %v", err)
+	}
+	if gotAuth != "Bearer s3cr3t" {
+		t.Fatalf("Authorization: got %q, want %q", gotAuth, "Bearer s3cr3t")
+	}
+	if gotTenant != "tenant-a" {
+		t.Fatalf("X-Scope-OrgID: got %q, want tenant-a", gotTenant)
+	}
+
+	// The custom header must also ride QueryRange (both request builders share get()).
+	gotAuth, gotTenant = "", ""
+	if _, err := c.QueryRange(context.Background(), "rate(up[5m])",
+		providers.TimeWindow{Start: time.Unix(1700000000, 0), End: time.Unix(1700000300, 0)}, time.Minute); err != nil {
+		t.Fatalf("QueryRange: %v", err)
+	}
+	if gotAuth != "Bearer s3cr3t" || gotTenant != "tenant-a" {
+		t.Fatalf("QueryRange auth: auth=%q tenant=%q", gotAuth, gotTenant)
+	}
+}
+
+func TestQueryNoAuthByDefault(t *testing.T) {
+	var gotAuth string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotAuth = r.Header.Get("Authorization")
+		_, _ = w.Write([]byte(`{"status":"success","data":{"resultType":"vector","result":[]}}`))
+	}))
+	defer srv.Close()
+
+	if _, err := New(srv.URL).Query(context.Background(), "up", time.Time{}); err != nil {
+		t.Fatalf("Query: %v", err)
+	}
+	if gotAuth != "" {
+		t.Fatalf("unconfigured client must send no Authorization header, got %q", gotAuth)
+	}
+}
+
+func TestQueryTokenEnvUnset(t *testing.T) {
+	// TokenEnv names a var that is not set ⇒ no Authorization header (treated as
+	// keyless), mirroring the model provider's empty-key behaviour.
+	t.Setenv("RUNLORE_TEST_VM_TOKEN", "")
+	var gotAuth string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotAuth = r.Header.Get("Authorization")
+		_, _ = w.Write([]byte(`{"status":"success","data":{"resultType":"vector","result":[]}}`))
+	}))
+	defer srv.Close()
+
+	c := NewWithAuth(srv.URL, "RUNLORE_TEST_VM_TOKEN", nil)
+	if _, err := c.Query(context.Background(), "up", time.Time{}); err != nil {
+		t.Fatalf("Query: %v", err)
+	}
+	if gotAuth != "" {
+		t.Fatalf("empty token must send no Authorization header, got %q", gotAuth)
+	}
+}
+
 func TestQueryError(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		_, _ = w.Write([]byte(`{"status":"error","error":"bad query"}`))

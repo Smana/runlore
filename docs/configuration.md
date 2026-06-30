@@ -56,6 +56,15 @@ Per-source enablement map; presence enables a source. `alertmanager: {}` mounts 
   investigation continues.
 - `max_steps` (**default 20**), `max_tool_output_bytes` (0 = unlimited), `max_tokens_per_investigation`
   (0 = unlimited, else a hard token ceiling).
+- `pod_log_namespaces` — **app-layer allowlist** of namespaces the `pod_logs` tool
+  may read RAW pod logs from, *beyond* the incident's own namespace (which is always allowed; RBAC
+  still gates the actual read). Pod logs carry secrets/PII and are streamed to the external LLM, so the
+  model is constrained here — not by Kubernetes RBAC alone. **Empty ⇒ incident namespace only** (secure
+  by default). This **must be a superset of where `pods/log` RBAC is granted** (`rbac.controllerLogNamespaces`)
+  or `pod_logs` is blocked at the app layer for those namespaces. **The chart auto-defaults this to
+  `rbac.controllerLogNamespaces`** when you leave `config.investigation.pod_log_namespaces` unset, so the
+  app-layer allowlist and the RBAC scope stay in sync automatically — set it explicitly only to widen or
+  narrow beyond the RBAC scope. See [Security model → least-privilege RBAC](security-model.md).
 
 ### `catalog` — the knowledge base & instant recall
 - `dir` — local OKF bundle / git-sync mirror path; `git` — `url`, `branch` (default `main`), `interval`
@@ -103,9 +112,10 @@ config key. TLS is terminated externally (ClusterIP + NetworkPolicy).
 
 ### `rbac` — chart-only (not in the agent config)
 Set under `values.rbac.*`, not `values.config`: `controllerLogNamespaces` (default `[flux-system]` —
-where `pods/log` is granted, namespaced), `allowActions` (gate for the patch Role), `actionNamespaces`
-(the patch allowlist — **must mirror `config.actions.allow.namespaces`**). See
-[Security model](security-model.md).
+where `pods/log` is granted, namespaced; the app-layer `config.investigation.pod_log_namespaces`
+allowlist **auto-tracks this value** unless overridden, so RBAC scope and app guard never drift),
+`allowActions` (gate for the patch Role), `actionNamespaces` (the patch allowlist — **must mirror
+`config.actions.allow.namespaces`**). See [Security model](security-model.md).
 
 ### Other top-level keys
 `gitops.engine` (`flux` default · `argocd`), `cloud` (`provider: aws`, `region`, `cluster_name`),

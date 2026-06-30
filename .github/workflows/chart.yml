@@ -1,0 +1,71 @@
+name: Helm Chart
+
+# Validate the in-cluster Helm chart on every change to deploy/helm/** (or this
+# workflow). Two gates:
+#   - helm lint  -> templating sanity + values.yaml validated against the chart's
+#                   values.schema.json (Helm runs the schema automatically).
+#   - helm template | kubeconform -> render every manifest and strictly validate the
+#                   core Kubernetes kinds. Custom CRD kinds (Flux / Argo CD /
+#                   VictoriaMetrics / Cilium) have no schema in the default registry,
+#                   so -ignore-missing-schemas skips them rather than failing — only
+#                   built-in k8s objects are strictly checked.
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'deploy/helm/**'
+      - '.github/workflows/chart.yml'
+  pull_request:
+    paths:
+      - 'deploy/helm/**'
+      - '.github/workflows/chart.yml'
+  workflow_dispatch:
+
+# Least privilege: this workflow only needs to read the repo.
+permissions:
+  contents: read
+
+env:
+  CHART: deploy/helm/runlore
+  # Pinned kubeconform release. The binary is fetched from the GitHub release and
+  # verified against this SHA-256 before use (see the install step), so the download
+  # is pinned just as tightly as a commit-pinned action.
+  KUBECONFORM_VERSION: v0.8.0
+  KUBECONFORM_SHA256: 9bc2bffbf71f261128533edaf912153948b7ff238f9a531ae6d34466ec287883
+
+jobs:
+  lint:
+    name: Lint and validate
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+
+      - name: Install Helm
+        uses: azure/setup-helm@1a275c3b69536ee54be43f2070a358922e12c8d4 # v4.3.1
+
+      # helm lint also validates values.yaml against deploy/helm/runlore/values.schema.json.
+      - name: helm lint
+        run: helm lint "$CHART"
+
+      # Install the pinned kubeconform release, verifying the tarball checksum before
+      # extracting so a tampered/swapped asset can't run in CI.
+      - name: Install kubeconform
+        run: |
+          set -euo pipefail
+          url="https://github.com/yannh/kubeconform/releases/download/${KUBECONFORM_VERSION}/kubeconform-linux-amd64.tar.gz"
+          curl -fsSL "$url" -o kubeconform.tar.gz
+          echo "${KUBECONFORM_SHA256}  kubeconform.tar.gz" | sha256sum -c -
+          tar -xzf kubeconform.tar.gz kubeconform
+          install -m 0755 kubeconform /usr/local/bin/kubeconform
+          rm -f kubeconform.tar.gz kubeconform
+          kubeconform -v
+
+      # Render the chart and strictly validate the core k8s kinds. -ignore-missing-schemas
+      # skips the CRD kinds (Flux / Argo CD / VictoriaMetrics / Cilium) that have no
+      # schema in the default registry instead of failing on them.
+      - name: helm template | kubeconform
+        run: |
+          set -euo pipefail
+          helm template "$CHART" \
+            | kubeconform -strict -ignore-missing-schemas -summary

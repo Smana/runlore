@@ -9,6 +9,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"os"
 	"strconv"
 	"strings"
 	"time"
@@ -19,13 +20,29 @@ import (
 
 // Client queries a Prometheus-compatible metrics backend.
 type Client struct {
-	baseURL string
-	http    *http.Client
+	baseURL  string
+	tokenEnv string            // env var holding a bearer token; empty ⇒ no auth
+	headers  map[string]string // static extra request headers (e.g. tenant header)
+	http     *http.Client
 }
 
-// New builds a client for a Prometheus/VictoriaMetrics base URL.
+// New builds a client for a Prometheus/VictoriaMetrics base URL, unauthenticated.
 func New(baseURL string) *Client {
-	return &Client{baseURL: strings.TrimRight(baseURL, "/"), http: httpx.SecureClient(30 * time.Second)}
+	return NewWithAuth(baseURL, "", nil)
+}
+
+// NewWithAuth builds a client that adds optional auth to every request. tokenEnv
+// names an env var holding a bearer token (empty, or pointing at an unset/empty
+// var, ⇒ no Authorization header); headers are static request headers (e.g.
+// "X-Scope-OrgID" for a multi-tenant backend). The token is read from the
+// environment at request-build time and is never logged.
+func NewWithAuth(baseURL, tokenEnv string, headers map[string]string) *Client {
+	return &Client{
+		baseURL:  strings.TrimRight(baseURL, "/"),
+		tokenEnv: tokenEnv,
+		headers:  headers,
+		http:     httpx.SecureClient(30 * time.Second),
+	}
 }
 
 var _ providers.MetricsProvider = (*Client)(nil)
@@ -103,6 +120,7 @@ func (c *Client) get(ctx context.Context, path string, v url.Values) (*apiRespon
 	if err != nil {
 		return nil, err
 	}
+	c.setAuth(req)
 	resp, err := c.http.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("metrics query: %w", err)
@@ -120,6 +138,20 @@ func (c *Client) get(ctx context.Context, path string, v url.Values) (*apiRespon
 		return nil, fmt.Errorf("metrics error: %s", r.Error)
 	}
 	return &r, nil
+}
+
+// setAuth applies the optional bearer token and static headers to req. The token
+// is read from the environment here (request-build time) and never logged; an
+// unset/empty token var leaves the request unauthenticated.
+func (c *Client) setAuth(req *http.Request) {
+	if c.tokenEnv != "" {
+		if tok := os.Getenv(c.tokenEnv); tok != "" {
+			req.Header.Set("Authorization", "Bearer "+tok)
+		}
+	}
+	for k, v := range c.headers {
+		req.Header.Set(k, v)
+	}
 }
 
 // parsePoint parses a Prometheus [unixTime, "value"] pair.

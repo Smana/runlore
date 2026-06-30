@@ -106,6 +106,8 @@ type block struct {
 	// tool_result
 	ToolUseID string `json:"tool_use_id,omitempty"`
 	Content   string `json:"content,omitempty"`
+	// cache breakpoint (set on the last block of the last message — the rolling history breakpoint)
+	CacheControl *cacheControl `json:"cache_control,omitempty"`
 }
 
 type tool struct {
@@ -146,8 +148,10 @@ type streamEvent struct {
 // usageDelta carries token counts; input arrives on message_start, output on
 // message_delta (so the two are accumulated from different events).
 type usageDelta struct {
-	InputTokens  int `json:"input_tokens"`
-	OutputTokens int `json:"output_tokens"`
+	InputTokens              int `json:"input_tokens"`
+	OutputTokens             int `json:"output_tokens"`
+	CacheReadInputTokens     int `json:"cache_read_input_tokens"`
+	CacheCreationInputTokens int `json:"cache_creation_input_tokens"`
 }
 
 // Complete sends a streaming Messages request with tools and accumulates the full
@@ -156,7 +160,18 @@ type usageDelta struct {
 // truncating a long completion and lets a per-block input_json_delta reassemble tool
 // arguments incrementally.
 func (c *Client) Complete(ctx context.Context, req providers.CompletionRequest) (providers.CompletionResponse, error) {
-	areq := msgRequest{Model: c.model, MaxTokens: c.maxTokens, Stream: true, Messages: toMessages(req.Messages)}
+	msgs := toMessages(req.Messages)
+	// Rolling cache breakpoint: mark the last content block of the last message, so the
+	// growing conversation prefix is a cache READ on the next step. The loop only ever
+	// APPENDS to history, so the prefix is byte-identical step to step — a guaranteed
+	// rolling hit. Total breakpoints stay <= 4 (system + last tool + this one). Below
+	// Anthropic's minimum cacheable size the marker is ignored, so early steps are fine.
+	if n := len(msgs); n > 0 {
+		if blocks := msgs[n-1].Content; len(blocks) > 0 {
+			blocks[len(blocks)-1].CacheControl = ephemeral
+		}
+	}
+	areq := msgRequest{Model: c.model, MaxTokens: c.maxTokens, Stream: true, Messages: msgs}
 	if req.System != "" {
 		areq.System = []systemBlock{{Type: "text", Text: req.System, CacheControl: ephemeral}}
 	}
@@ -257,7 +272,12 @@ func accumulate(r io.Reader) (providers.CompletionResponse, error) {
 		switch ev.Type {
 		case "message_start":
 			if ev.Message != nil && ev.Message.Usage != nil {
-				out.Usage.InputTokens = ev.Message.Usage.InputTokens
+				u := ev.Message.Usage
+				// Anthropic reports input_tokens as the NON-cached remainder; total input is
+				// the sum of input + cache_read + cache_creation (per Anthropic docs).
+				out.Usage.InputTokens = u.InputTokens + u.CacheReadInputTokens + u.CacheCreationInputTokens
+				out.Usage.CachedInputTokens = u.CacheReadInputTokens
+				out.Usage.CacheWriteTokens = u.CacheCreationInputTokens
 			}
 		case "content_block_start":
 			if ev.ContentBlock != nil && ev.ContentBlock.Type == "tool_use" {

@@ -34,3 +34,10 @@ func TestNewMetricsCurationInstruments(_ *testing.T) {
 	ctx := context.Background()
 	m.CurationDedupScore.Record(ctx, 4.2)
 }
+
+func TestModelTokenCountersConstructed(t *testing.T) {
+	m := NewMetrics()
+	if m.ModelInputTokens == nil || m.ModelCachedInputTokens == nil {
+		t.Fatal("NewMetrics must construct ModelInputTokens and ModelCachedInputTokens")
+	}
+}

@@ -28,6 +28,7 @@ Usage:
   lore eval --live [--scenarios <dir>] [--n 3]        live-fire on the cluster: grade coverage + RCA
   lore curate [--config <path>]                       groom the KB backlog (dedup open PRs)
   lore mcp [--config <path>]                          serve GitOps what-changed over MCP (stdio; for HolmesGPT et al.)
+  lore audit verify --path <audit.jsonl>              re-walk the action audit log; report the first broken link
   lore version                                        print version
 `
 
@@ -69,6 +70,11 @@ func main() {
 	case "mcp":
 		if err := app.RunMCP(version, os.Args[2:]); err != nil {
 			fmt.Fprintln(os.Stderr, "mcp:", err)
+			os.Exit(1)
+		}
+	case "audit":
+		if err := runAudit(os.Args[2:]); err != nil {
+			fmt.Fprintln(os.Stderr, "audit:", err)
 			os.Exit(1)
 		}
 	case "validate-kb":

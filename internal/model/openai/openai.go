@@ -120,8 +120,11 @@ type chatChunk struct {
 	// Usage is the per-request token count, present only on the trailing usage chunk;
 	// a pointer so an absent block parses to nil (unknown) rather than a misleading {0,0}.
 	Usage *struct {
-		PromptTokens     int `json:"prompt_tokens"`
-		CompletionTokens int `json:"completion_tokens"`
+		PromptTokens        int `json:"prompt_tokens"`
+		CompletionTokens    int `json:"completion_tokens"`
+		PromptTokensDetails *struct {
+			CachedTokens int `json:"cached_tokens"`
+		} `json:"prompt_tokens_details"`
 	} `json:"usage"`
 }
 
@@ -259,7 +262,11 @@ func accumulate(r io.Reader) (providers.CompletionResponse, error) {
 			return providers.CompletionResponse{}, fmt.Errorf("decode sse event: %w", err)
 		}
 		if ck.Usage != nil {
-			out.Usage = providers.Usage{InputTokens: ck.Usage.PromptTokens, OutputTokens: ck.Usage.CompletionTokens}
+			u := providers.Usage{InputTokens: ck.Usage.PromptTokens, OutputTokens: ck.Usage.CompletionTokens}
+			if ck.Usage.PromptTokensDetails != nil {
+				u.CachedInputTokens = ck.Usage.PromptTokensDetails.CachedTokens
+			}
+			out.Usage = u
 		}
 		if len(ck.Choices) == 0 {
 			continue // usage-only (or empty) chunk: no delta to fold
