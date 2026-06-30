@@ -11,6 +11,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"os"
 	"strings"
 	"time"
 
@@ -21,17 +22,35 @@ import (
 // Client queries a VictoriaLogs backend.
 type Client struct {
 	baseURL  string
-	limit    int // per-request page size
-	maxLines int // total cap across pages
+	tokenEnv string            // env var holding a bearer token; empty ⇒ no auth
+	headers  map[string]string // static extra request headers (e.g. tenant header)
+	limit    int               // per-request page size
+	maxLines int               // total cap across pages
 	http     *http.Client
 }
 
 // defaultMaxLines bounds the total number of lines Query returns across pages.
 const defaultMaxLines = 1000
 
-// New builds a client for a VictoriaLogs base URL.
+// New builds a client for a VictoriaLogs base URL, unauthenticated.
 func New(baseURL string) *Client {
-	return &Client{baseURL: strings.TrimRight(baseURL, "/"), limit: 100, maxLines: defaultMaxLines, http: httpx.SecureClient(30 * time.Second)}
+	return NewWithAuth(baseURL, "", nil)
+}
+
+// NewWithAuth builds a client that adds optional auth to every request. tokenEnv
+// names an env var holding a bearer token (empty, or pointing at an unset/empty
+// var, ⇒ no Authorization header); headers are static request headers (e.g.
+// "X-Scope-OrgID" for a multi-tenant backend). The token is read from the
+// environment at request-build time and is never logged.
+func NewWithAuth(baseURL, tokenEnv string, headers map[string]string) *Client {
+	return &Client{
+		baseURL:  strings.TrimRight(baseURL, "/"),
+		tokenEnv: tokenEnv,
+		headers:  headers,
+		limit:    100,
+		maxLines: defaultMaxLines,
+		http:     httpx.SecureClient(30 * time.Second),
+	}
 }
 
 var _ providers.LogsProvider = (*Client)(nil)
@@ -88,6 +107,7 @@ func (c *Client) queryPage(ctx context.Context, query string, w providers.TimeWi
 		return nil, err
 	}
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	c.setAuth(req)
 	resp, err := c.http.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("logs query: %w", err)
@@ -98,6 +118,20 @@ func (c *Client) queryPage(ctx context.Context, query string, w providers.TimeWi
 		return nil, fmt.Errorf("logs status %d: %s", resp.StatusCode, string(body))
 	}
 	return parseNDJSON(resp.Body)
+}
+
+// setAuth applies the optional bearer token and static headers to req. The token
+// is read from the environment here (request-build time) and never logged; an
+// unset/empty token var leaves the request unauthenticated.
+func (c *Client) setAuth(req *http.Request) {
+	if c.tokenEnv != "" {
+		if tok := os.Getenv(c.tokenEnv); tok != "" {
+			req.Header.Set("Authorization", "Bearer "+tok)
+		}
+	}
+	for k, v := range c.headers {
+		req.Header.Set(k, v)
+	}
 }
 
 // truncationLine is the sentinel appended when Query stops at its cap with more

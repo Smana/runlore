@@ -74,6 +74,68 @@ triggers:
 	}
 }
 
+func TestLoadEndpointAuth(t *testing.T) {
+	dir := t.TempDir()
+	p := filepath.Join(dir, "runlore.yaml")
+	// Both backends carry optional auth: a bearer token (by env-var name) and static
+	// headers. The strict KnownFields(true) decoder must accept token_env/headers.
+	doc := `
+metrics:
+  url: https://vm.example.com
+  token_env: VM_TOKEN
+  headers:
+    X-Scope-OrgID: tenant-a
+logs:
+  url: https://vl.example.com
+  token_env: VL_TOKEN
+  headers:
+    X-Scope-OrgID: tenant-b
+    X-Extra: v
+`
+	if err := os.WriteFile(p, []byte(doc), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	c, err := Load(p)
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if c.Metrics.TokenEnv != "VM_TOKEN" {
+		t.Fatalf("metrics.token_env: got %q, want VM_TOKEN", c.Metrics.TokenEnv)
+	}
+	if c.Metrics.Headers["X-Scope-OrgID"] != "tenant-a" {
+		t.Fatalf("metrics.headers[X-Scope-OrgID]: got %q, want tenant-a", c.Metrics.Headers["X-Scope-OrgID"])
+	}
+	if c.Logs.TokenEnv != "VL_TOKEN" {
+		t.Fatalf("logs.token_env: got %q, want VL_TOKEN", c.Logs.TokenEnv)
+	}
+	if c.Logs.Headers["X-Scope-OrgID"] != "tenant-b" || c.Logs.Headers["X-Extra"] != "v" {
+		t.Fatalf("logs.headers: got %v", c.Logs.Headers)
+	}
+}
+
+func TestLoadEndpointAuthOptional(t *testing.T) {
+	dir := t.TempDir()
+	p := filepath.Join(dir, "runlore.yaml")
+	// URL-only endpoints (the pre-auth shape) must still decode, with empty auth.
+	doc := `
+metrics:
+  url: https://vm.example.com
+`
+	if err := os.WriteFile(p, []byte(doc), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	c, err := Load(p)
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if c.Metrics.URL != "https://vm.example.com" {
+		t.Fatalf("metrics.url: got %q", c.Metrics.URL)
+	}
+	if c.Metrics.TokenEnv != "" || len(c.Metrics.Headers) != 0 {
+		t.Fatalf("url-only endpoint should have empty auth, got token_env=%q headers=%v", c.Metrics.TokenEnv, c.Metrics.Headers)
+	}
+}
+
 func TestLoadGitOpsFailureDebounceZeroFiresImmediately(t *testing.T) {
 	dir := t.TempDir()
 	p := filepath.Join(dir, "runlore.yaml")
