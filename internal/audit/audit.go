@@ -103,6 +103,9 @@ func OpenVerified(path string) (*Logger, error) {
 	// Reuse the verified fd as the append handle: seek past the verified tail so the
 	// next write lands at end-of-file. Seeding lastHash from the verified scan (not a
 	// second os.Open) means an append always chains from bytes we just vouched for.
+	// Safety: a one-time seek-to-end is sufficient because Logger is single-writer
+	// (mutex-guarded, single process/Logger owner); a second writer or a stray Seek
+	// on this fd would silently produce a mid-file write and corrupt the chain.
 	if _, err := f.Seek(0, io.SeekEnd); err != nil {
 		_ = f.Close()
 		return nil, fmt.Errorf("audit: seek to append: %w", err)

@@ -184,6 +184,30 @@ func TestBuildAuditorUnreadableLogFailsClosed(t *testing.T) {
 	}
 }
 
+// TestBuildAuditorDirPathFailsClosed checks the uid-independent fail-closed
+// guarantee: pointing AuditLogPath at a directory causes os.OpenFile to return
+// EISDIR for any uid (including root), so OpenVerified fails and BuildAuditor
+// must return an error under the executing modes. This test must never be skipped.
+func TestBuildAuditorDirPathFailsClosed(t *testing.T) {
+	// A directory path causes EISDIR on OpenFile(O_RDWR|O_CREATE) for all uids.
+	dirPath := t.TempDir()
+	for _, mode := range []config.ActionMode{config.ActionApprove, config.ActionAuto} {
+		t.Run(string(mode), func(t *testing.T) {
+			cfg := &config.Config{}
+			cfg.Actions.Mode = mode
+			cfg.Actions.AuditLogPath = dirPath
+
+			_, closeFn, err := BuildAuditor(cfg, discardLog())
+			if closeFn != nil {
+				closeFn()
+			}
+			if err == nil {
+				t.Fatalf("mode=%s with a directory AuditLogPath must fail closed (error), got nil", mode)
+			}
+		})
+	}
+}
+
 func TestBuildAuditorNoPathIsNop(t *testing.T) {
 	cfg := &config.Config{}
 	cfg.Actions.Mode = config.ActionApprove
