@@ -207,6 +207,65 @@ func TestValidateRejectsNegativeMaxTokens(t *testing.T) {
 	}
 }
 
+func TestValidateRejectsCleartextKeyOnPublicHost(t *testing.T) {
+	cases := []struct {
+		name      string
+		baseURL   string
+		apiKeyEnv string
+		wantErr   bool
+	}{
+		{"http public + key", "http://api.openai.com/v1", "OPENAI_API_KEY", true},
+		{"https public + key", "https://api.openai.com/v1", "OPENAI_API_KEY", false},
+		{"http private IP + key", "http://10.0.0.5:8000/v1", "K", false},
+		{"http localhost + key", "http://localhost:8000/v1", "K", false},
+		{"http single-label + key", "http://vllm:8000/v1", "K", false},
+		{"http .svc + key", "http://vllm.ai.svc.cluster.local/v1", "K", false},
+		{"http public no key", "http://api.openai.com/v1", "", false},
+		{"empty base_url + key", "", "OPENAI_API_KEY", false},
+		{"unparseable + key", "http://%zz/v1", "K", true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			c := &Config{Model: Model{Provider: "openai", BaseURL: tc.baseURL, APIKeyEnv: tc.apiKeyEnv}}
+			err := c.Validate()
+			if tc.wantErr && err == nil {
+				t.Fatalf("base_url %q + key %q must be rejected", tc.baseURL, tc.apiKeyEnv)
+			}
+			if !tc.wantErr && err != nil {
+				t.Fatalf("base_url %q + key %q must validate clean, got %v", tc.baseURL, tc.apiKeyEnv, err)
+			}
+		})
+	}
+}
+
+func TestValidateCleartextKeyCoversVerifyAndEmbeddings(t *testing.T) {
+	// Verify override with its OWN http public base_url + own key.
+	cv := &Config{Model: Model{Provider: "anthropic",
+		Verify: &ModelOverride{BaseURL: "http://api.cheap.example/v1", APIKeyEnv: "CHEAP_KEY"}}}
+	if err := cv.Validate(); err == nil {
+		t.Fatal("verify override with http public base_url + key must be rejected")
+	}
+	// Verify override with its own http public base_url but INHERITING the parent key.
+	ci := &Config{Model: Model{Provider: "anthropic", APIKeyEnv: "PARENT_KEY",
+		Verify: &ModelOverride{BaseURL: "http://api.cheap.example/v1"}}}
+	if err := ci.Validate(); err == nil {
+		t.Fatal("verify override over http public, inheriting the parent key, must be rejected")
+	}
+	// Embeddings with http public base_url + key.
+	ce := &Config{Model: Model{Provider: "anthropic",
+		Embeddings: &Embeddings{BaseURL: "http://emb.example/v1", APIKeyEnv: "EMB_KEY"}}}
+	if err := ce.Validate(); err == nil {
+		t.Fatal("embeddings with http public base_url + key must be rejected")
+	}
+	// All-https equivalents validate clean.
+	ok := &Config{Model: Model{Provider: "anthropic", APIKeyEnv: "PARENT_KEY",
+		Verify:     &ModelOverride{BaseURL: "https://api.cheap.example/v1"},
+		Embeddings: &Embeddings{BaseURL: "https://emb.example/v1", APIKeyEnv: "EMB_KEY"}}}
+	if err := ok.Validate(); err != nil {
+		t.Fatalf("https verify+embeddings must validate clean, got %v", err)
+	}
+}
+
 func TestCurateRecurrenceThresholdParse(t *testing.T) {
 	var c Config
 	if err := yaml.Unmarshal([]byte("curate:\n  recurrence_threshold: 5\n"), &c); err != nil {
