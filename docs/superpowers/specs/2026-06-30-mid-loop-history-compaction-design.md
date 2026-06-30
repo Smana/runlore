@@ -29,7 +29,7 @@ At the top of each loop step, after computing the existing `est := estimateToken
 
 - The **seed** (first user message).
 - **All assistant turns** (reasoning + tool-call JSON) — small, and they carry the model's *interpretation* of evidence, so conclusions survive even when raw bytes don't.
-- Tool results from **keep-list tools: `what_changed` and `kb_search`** — the root-cause spine (the change timeline + the runbook hit). The keep-list is a package constant.
+- Tool results from **keep-list tools: `what_changed`, `kb_search`, `gitops_resource_status`, `gitops_tree`** — the structural root-cause skeleton: the change timeline, the runbook hit, the failing resource's status/conditions, and the dependency-cascade root. All four are engine-agnostic (the `gitops_*` pair resolve a Flux Ready condition **or** an ArgoCD sync/health status through the same `GitOpsInspector`, which both engines implement — `argocd.go:187`, `flux.go:231`), so the skeleton is protected identically under Flux and ArgoCD. They are small (conditions + a few events + a tree), so retaining several is cheap. The keep-list is a package constant. The bulky, supersedable evidence (`pod_logs`, `controller_logs`, `query_logs`, `query_metrics`, `network_drops`) stays elidible — those are the token hogs, and the model distills them into its kept reasoning + the recent-K window.
 - The **most-recent `keepRecentToolOutputs = 3`** tool results (the model's active working set).
 
 ### Elision policy (hardened: supersession-aware, bounded)
@@ -46,7 +46,7 @@ Each elided tool-result body is replaced with `[earlier <tool> output elided to 
 ```
 compactionBudgetFraction = 0.7   // fraction of MaxTokensPerInvestigation that triggers compaction
 keepRecentToolOutputs    = 3     // most-recent tool results kept verbatim
-keepListTools            = {"what_changed", "kb_search"}  // never elided
+keepListTools            = {"what_changed", "kb_search", "gitops_resource_status", "gitops_tree"}  // never elided (engine-agnostic root-cause skeleton)
 ```
 
 Easy to promote to config later; kept internal now.
@@ -61,7 +61,7 @@ Two counters in `internal/telemetry/metrics.go` (existing `ctr(...)` pattern): `
 
 ## Quality gate (the "measure" half — a documented merge criterion)
 
-Compaction's quality impact is measured with the existing live-eval harness, NOT taken on faith. **This gate runs on a real cluster with API keys + a judge model; it is a maintainer/CI step — it cannot run in the dev sandbox.** Procedure, wired into the PR's merge criteria:
+Compaction's quality impact is measured with the existing live-eval harness, NOT taken on faith. **Deferred by decision to a later live run on a real EKS cluster (maintainer-run, with API keys + a judge model); it cannot run in the dev sandbox.** The PR ships the mechanism (unit + integration tested) and this gate is run before the branch is considered quality-cleared. Procedure:
 
 1. On `main`: `lore eval --live --scenarios eval/scenarios-k3d` → baseline report (or reuse the committed `eval/reports/2026-06-22-k3d-baseline.md`).
 2. On this branch: same command → branch report.
@@ -108,4 +108,4 @@ All existing loop/telemetry tests stay green; `go build ./... && go vet && gofmt
 
 ## Open risk acknowledged
 
-If the live eval shows a regression on a scenario where a decisive early output got elided, the mitigation order is: (1) raise `keepRecentToolOutputs`, (2) extend the keep-list (e.g. add `gitops_tree`/`gitops_resource_status`), (3) lower `compactionBudgetFraction` so compaction fires less often. The gate exists precisely to surface this before merge.
+If the live eval shows a regression on a scenario where a decisive early output got elided, the mitigation order is: (1) raise `keepRecentToolOutputs`, (2) extend the keep-list (e.g. add `pod_status`/`kube_events` — small structural signals), (3) lower `compactionBudgetFraction` so compaction fires less often. The gate exists precisely to surface this before merge.
