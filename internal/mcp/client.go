@@ -14,13 +14,11 @@ import (
 	"github.com/Smana/runlore/internal/httpx"
 )
 
-const clientProtocolVersion = "2024-11-05"
-
 // RemoteTool is a tool advertised by an MCP server's tools/list.
 type RemoteTool struct {
-	Name        string
-	Description string
-	InputSchema json.RawMessage
+	Name        string          `json:"name"`
+	Description string          `json:"description"`
+	InputSchema json.RawMessage `json:"inputSchema"`
 }
 
 // Client is a minimal streamable-HTTP MCP client. It speaks JSON-RPC 2.0 over a single
@@ -35,7 +33,7 @@ type Client struct {
 	http      *http.Client
 	log       *slog.Logger
 	sessionID string
-	nextID    int
+	nextID    int // sequential only; the investigation loop calls tools sequentially (not goroutine-safe)
 }
 
 // NewClient builds an MCP client for a server. A nil logger discards logs.
@@ -56,7 +54,7 @@ func (c *Client) Name() string { return c.name }
 // notifications/initialized notification.
 func (c *Client) Initialize(ctx context.Context) error {
 	params := map[string]any{
-		"protocolVersion": clientProtocolVersion,
+		"protocolVersion": defaultProtocolVersion,
 		"capabilities":    map[string]any{},
 		"clientInfo":      map[string]any{"name": "runlore", "version": "dev"},
 	}
@@ -77,12 +75,8 @@ func (c *Client) ListTools(ctx context.Context) ([]RemoteTool, error) {
 		return nil, err
 	}
 	var res struct {
-		Tools []struct {
-			Name        string          `json:"name"`
-			Description string          `json:"description"`
-			InputSchema json.RawMessage `json:"inputSchema"`
-		} `json:"tools"`
-		NextCursor string `json:"nextCursor"`
+		Tools      []RemoteTool `json:"tools"`
+		NextCursor string       `json:"nextCursor"`
 	}
 	if err := json.Unmarshal(raw, &res); err != nil {
 		return nil, fmt.Errorf("mcp tools/list decode: %w", err)
@@ -90,11 +84,7 @@ func (c *Client) ListTools(ctx context.Context) ([]RemoteTool, error) {
 	if res.NextCursor != "" {
 		c.log.Warn("mcp: tools/list returned a nextCursor; pagination unsupported, list may be truncated", "server", c.name)
 	}
-	out := make([]RemoteTool, 0, len(res.Tools))
-	for _, t := range res.Tools {
-		out = append(out, RemoteTool{Name: t.Name, Description: t.Description, InputSchema: t.InputSchema})
-	}
-	return out, nil
+	return res.Tools, nil
 }
 
 // CallTool invokes a remote tool and returns its concatenated text content. An MCP
@@ -133,10 +123,7 @@ func (c *Client) CallTool(ctx context.Context, name string, args json.RawMessage
 type jsonrpcMessage struct {
 	ID     json.RawMessage `json:"id"`
 	Result json.RawMessage `json:"result"`
-	Error  *struct {
-		Code    int    `json:"code"`
-		Message string `json:"message"`
-	} `json:"error"`
+	Error  *rpcError       `json:"error"`
 }
 
 // rpc sends a JSON-RPC request and returns the raw result. It handles a JSON response
@@ -209,20 +196,22 @@ func (c *Client) notify(ctx context.Context, method string) error {
 }
 
 func (c *Client) do(ctx context.Context, body []byte) (*http.Response, error) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.url, bytes.NewReader(body))
-	if err != nil {
-		return nil, err
-	}
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Accept", "application/json, text/event-stream")
-	if c.apiKey != "" {
-		req.Header.Set("Authorization", "Bearer "+c.apiKey)
-	}
-	if c.sessionID != "" {
-		req.Header.Set("Mcp-Session-Id", c.sessionID)
-	}
-	for k, v := range c.headers {
-		req.Header.Set(k, v)
-	}
-	return c.http.Do(req)
+	return httpx.DoWithRetry(ctx, c.http, 3, func() (*http.Request, error) {
+		req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.url, bytes.NewReader(body))
+		if err != nil {
+			return nil, err
+		}
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("Accept", "application/json, text/event-stream")
+		if c.apiKey != "" {
+			req.Header.Set("Authorization", "Bearer "+c.apiKey)
+		}
+		if c.sessionID != "" {
+			req.Header.Set("Mcp-Session-Id", c.sessionID)
+		}
+		for k, v := range c.headers {
+			req.Header.Set(k, v)
+		}
+		return req, nil
+	})
 }

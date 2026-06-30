@@ -26,7 +26,7 @@ func TestToolDescriptionBounded(t *testing.T) {
 	if !strings.HasPrefix(d, "[external MCP: s] ") {
 		t.Fatalf("missing provenance prefix: %q", d[:30])
 	}
-	if len(d) > 2100 { // 2KiB cap + prefix
+	if len(d) > 2070 { // 2KiB body cap (pre-condition: checked before write) + 18-byte prefix + max 4-byte rune
 		t.Fatalf("description not bounded: %d bytes", len(d))
 	}
 }

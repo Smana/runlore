@@ -98,10 +98,8 @@ type MCP struct {
 
 // MCPServer is one external MCP server reachable over streamable-HTTP.
 type MCPServer struct {
-	Name     string            `yaml:"name"`      // identifier; namespaces its tools as name__tool
-	URL      string            `yaml:"url"`       // streamable-HTTP endpoint
-	TokenEnv string            `yaml:"token_env"` // env var holding a bearer token (optional)
-	Headers  map[string]string `yaml:"headers"`   // extra request headers (optional)
+	Name     string `yaml:"name"` // identifier; namespaces its tools as name__tool
+	Endpoint `yaml:",inline"`
 }
 
 // Network provider identifiers for config.network.provider. The network signal is
