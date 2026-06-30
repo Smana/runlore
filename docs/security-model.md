@@ -36,8 +36,9 @@ registry and **discards the model's own metadata**:
 - `auto` mode starts **paused** (kill-switch engaged, fail-closed) and is gated behind
   confidence/rate/blast limits. It exists but is **not recommended on real clusters**.
 
-The action config is **fail-closed**: `approve`/`auto` won't start without an approval token, and
-`auto` additionally requires an audit-log path, an authenticated webhook, a positive confidence
+The action config is **fail-closed**: `approve`/`auto` won't start without an approval token **and an
+audit-log path** (both modes execute cluster mutations, so both must be audited), and `auto`
+additionally requires an authenticated webhook, a positive confidence
 threshold and rate cap, and a non-empty namespace allowlist (see
 [Configuration → actions](configuration.md#actions--the-autonomy-ladder-off-by-default)).
 
@@ -107,8 +108,11 @@ recorded: `executed` / `dry-run` / `skipped` / `denied` / `failed`.
 
 The chain is **load-bearing**, not just an artifact tests check:
 
-- **Verified on startup, fail-closed under `approve`/`auto`.** When the agent opens the log it re-walks
-  the existing chain. If a link is broken and `actions.mode` is `approve` or `auto`, **startup fails** —
+- **Verified on startup, fail-closed under `approve`/`auto`.** Both executing modes are **required** to
+  set `actions.audit_log_path` (enforced by config validation), so the guarantee always has a chain to
+  verify — neither can silently downgrade to an unaudited run. When the agent opens the log it re-walks
+  the existing chain in a single read pass and reuses that same handle for appends (no verify→append
+  re-read window). If a link is broken and `actions.mode` is `approve` or `auto`, **startup fails** —
   RunLore refuses to execute and audit cluster mutations against a history it can no longer vouch for.
   Under `off`/`suggest` (nothing executes) it logs a loud **warning** and keeps appending, so a
   read-only deployment isn't blocked by a damaged file. An empty or absent log is a valid (zero-record)

@@ -527,14 +527,18 @@ func (c *Config) Validate() error {
 		if c.Actions.ApprovalTokenEnv == "" {
 			return fmt.Errorf("actions.mode=%s requires actions.approval_token_env (control/kill-switch endpoints fail closed without it)", c.Actions.Mode)
 		}
+		// Both executing rungs mutate the cluster, so both must be audited: the hash
+		// chain is verified fail-closed on open (see internal/app.BuildAuditor). Without
+		// an audit_log_path approve would silently fall back to a Nop auditor — no chain,
+		// no verify, no fail-closed — yet it still executes cluster mutations.
+		if c.Actions.AuditLogPath == "" {
+			return fmt.Errorf("actions.mode=%s requires actions.audit_log_path (an executing rung must be audited)", c.Actions.Mode)
+		}
 		if c.Actions.Mode == ActionApprove {
 			return nil
 		}
-		// auto-only: unattended execution additionally needs audit, an authenticated
-		// webhook, and bounded gates.
-		if c.Actions.AuditLogPath == "" {
-			return fmt.Errorf("actions.mode=auto requires actions.audit_log_path (auto-execution must be audited)")
-		}
+		// auto-only: unattended execution additionally needs an authenticated webhook
+		// and bounded gates.
 		if c.Server.WebhookTokenEnv == "" {
 			return fmt.Errorf("actions.mode=auto requires server.webhook_token_env (the alert webhook must be authenticated)")
 		}

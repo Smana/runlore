@@ -134,6 +134,56 @@ func TestBuildAuditorIntactChainUnderApprove(t *testing.T) {
 	}
 }
 
+func TestBuildAuditorIntactChainUnderAuto(t *testing.T) {
+	path := writeIntactChain(t, t.TempDir())
+	cfg := &config.Config{}
+	cfg.Actions.Mode = config.ActionAuto
+	cfg.Actions.AuditLogPath = path
+
+	aud, closeFn, err := BuildAuditor(cfg, discardLog())
+	if closeFn != nil {
+		defer closeFn()
+	}
+	if err != nil {
+		t.Fatalf("auto over an intact chain must succeed, got: %v", err)
+	}
+	if aud == nil {
+		t.Fatal("intact chain under auto must return an auditor")
+	}
+}
+
+// TestBuildAuditorUnreadableLogFailsClosed checks that an I/O error reading the
+// log (here: an existing, non-empty file the process cannot open) — a non-
+// IsNotExist error — blocks startup under the executing modes, just like a content
+// mismatch. Fail-closed must cover "can't read it", not only "read it and it's
+// tampered".
+func TestBuildAuditorUnreadableLogFailsClosed(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("chmod 000 does not deny root; skipping permission-based I/O test")
+	}
+	for _, mode := range []config.ActionMode{config.ActionApprove, config.ActionAuto} {
+		t.Run(string(mode), func(t *testing.T) {
+			path := writeIntactChain(t, t.TempDir())
+			if err := os.Chmod(path, 0o000); err != nil {
+				t.Fatalf("chmod: %v", err)
+			}
+			t.Cleanup(func() { _ = os.Chmod(path, 0o600) }) // let TempDir cleanup remove it
+
+			cfg := &config.Config{}
+			cfg.Actions.Mode = mode
+			cfg.Actions.AuditLogPath = path
+
+			_, closeFn, err := BuildAuditor(cfg, discardLog())
+			if closeFn != nil {
+				closeFn()
+			}
+			if err == nil {
+				t.Fatalf("mode=%s over an unreadable log must fail closed (error), got nil", mode)
+			}
+		})
+	}
+}
+
 func TestBuildAuditorNoPathIsNop(t *testing.T) {
 	cfg := &config.Config{}
 	cfg.Actions.Mode = config.ActionApprove
