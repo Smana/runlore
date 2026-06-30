@@ -301,3 +301,26 @@ func TestCurateRecurrenceThresholdParse(t *testing.T) {
 		t.Fatalf("absent recurrence_threshold must be 0, got %d", z.Curate.RecurrenceThreshold)
 	}
 }
+
+// TestValidateApproveRequiresAuditLog asserts approve mode is held to the same
+// audit requirement as auto: an executing rung that mutates the cluster must have
+// an audit_log_path (so the hash chain is verified fail-closed on open). Without
+// it, approve would silently fall back to a Nop auditor.
+func TestValidateApproveRequiresAuditLog(t *testing.T) {
+	// approve with the token but NO audit_log_path → rejected.
+	missing := &Config{}
+	missing.Actions.Mode = ActionApprove
+	missing.Actions.ApprovalTokenEnv = "RUNLORE_APPROVAL_TOKEN"
+	if err := missing.Validate(); err == nil {
+		t.Fatal("approve without actions.audit_log_path must be rejected")
+	}
+
+	// approve WITH both the token and an audit_log_path → validates.
+	ok := &Config{}
+	ok.Actions.Mode = ActionApprove
+	ok.Actions.ApprovalTokenEnv = "RUNLORE_APPROVAL_TOKEN"
+	ok.Actions.AuditLogPath = "/var/lib/runlore/audit.jsonl"
+	if err := ok.Validate(); err != nil {
+		t.Fatalf("approve with token + audit_log_path must validate clean, got: %v", err)
+	}
+}
