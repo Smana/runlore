@@ -338,8 +338,8 @@ func TestUsageCachedContent(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Complete: %v", err)
 	}
-	if resp.Usage.InputTokens != 220 || resp.Usage.CachedInputTokens != 180 {
-		t.Fatalf("usage = %+v, want in=220 cached=180", resp.Usage)
+	if resp.Usage.InputTokens != 220 || resp.Usage.CachedInputTokens != 180 || resp.Usage.OutputTokens != 8 {
+		t.Fatalf("usage = %+v, want in=220 cached=180 out=8", resp.Usage)
 	}
 }
 
@@ -377,6 +377,9 @@ func TestRequestPrefixStable(t *testing.T) {
 		t.Fatalf("Complete N+1: %v", err)
 	}
 
+	if len(bodies) != 2 {
+		t.Fatalf("expected 2 captured request bodies, got %d", len(bodies))
+	}
 	var r0, r1 genRequest
 	if err := json.Unmarshal(bodies[0], &r0); err != nil {
 		t.Fatalf("unmarshal r0: %v", err)

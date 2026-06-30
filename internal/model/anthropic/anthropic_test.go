@@ -403,6 +403,18 @@ func TestPromptCacheHistoryBreakpoint(t *testing.T) {
 	if gotReq.Messages[0].Content[0].CacheControl != nil {
 		t.Fatalf("earlier message blocks must not be marked: %+v", gotReq.Messages[0])
 	}
+	// exactly one message-level breakpoint (≤4 total is enforced; message portion must be 1)
+	msgBreakpoints := 0
+	for _, m := range gotReq.Messages {
+		for _, b := range m.Content {
+			if b.CacheControl != nil {
+				msgBreakpoints++
+			}
+		}
+	}
+	if msgBreakpoints != 1 {
+		t.Fatalf("exactly one message-level cache breakpoint expected, got %d", msgBreakpoints)
+	}
 }
 
 // TestUsageCacheFields asserts the Anthropic usage normalization: InputTokens is the
