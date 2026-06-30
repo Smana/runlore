@@ -6,6 +6,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -321,6 +322,82 @@ func TestParallelSameFunctionCorrelatesByID(t *testing.T) {
 	}
 	if !strings.Contains(byID["call_2"], "b failing") {
 		t.Fatalf("call_2 response mismatched: %q", byID["call_2"])
+	}
+}
+
+// TestUsageCachedContent asserts cachedContentTokenCount maps to CachedInputTokens
+// (Gemini promptTokenCount already includes the cached subset).
+func TestUsageCachedContent(t *testing.T) {
+	srv := sseServer(t, nil, []string{
+		"data: {\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"ok\"}]},\"finishReason\":\"STOP\"}],\"usageMetadata\":{\"promptTokenCount\":220,\"candidatesTokenCount\":8,\"cachedContentTokenCount\":180}}\n\n",
+	})
+	defer srv.Close()
+	resp, err := New(srv.URL, "gemini-x", "k", 0).Complete(context.Background(), providers.CompletionRequest{
+		Messages: []providers.Message{{Role: "user", Content: "hi"}},
+	})
+	if err != nil {
+		t.Fatalf("Complete: %v", err)
+	}
+	if resp.Usage.InputTokens != 220 || resp.Usage.CachedInputTokens != 180 || resp.Usage.OutputTokens != 8 {
+		t.Fatalf("usage = %+v, want in=220 cached=180 out=8", resp.Usage)
+	}
+}
+
+// TestRequestPrefixStable guards implicit caching: across two successive Complete calls
+// for an append-only conversation, the system instruction, tools, and earlier contents
+// must be byte-identical (only new turns appended), so Gemini's implicit cache hits.
+func TestRequestPrefixStable(t *testing.T) {
+	var bodies [][]byte
+	capture := func(r *http.Request) {
+		b, _ := io.ReadAll(r.Body)
+		bodies = append(bodies, b)
+	}
+	events := []string{"data: {\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"ok\"}]},\"finishReason\":\"STOP\"}],\"usageMetadata\":{\"promptTokenCount\":1,\"candidatesTokenCount\":1}}\n\n"}
+	srv := sseServer(t, capture, events)
+	defer srv.Close()
+	c := New(srv.URL, "gemini-x", "k", 0)
+	tools := []providers.ToolSpec{{Name: "a", Description: "d", Schema: `{"type":"object"}`}}
+
+	// Step N
+	if _, err := c.Complete(context.Background(), providers.CompletionRequest{
+		System: "sys", Tools: tools,
+		Messages: []providers.Message{{Role: "user", Content: "incident"}},
+	}); err != nil {
+		t.Fatalf("Complete N: %v", err)
+	}
+	// Step N+1: same prefix, one appended assistant turn + tool result
+	if _, err := c.Complete(context.Background(), providers.CompletionRequest{
+		System: "sys", Tools: tools,
+		Messages: []providers.Message{
+			{Role: "user", Content: "incident"},
+			{Role: "assistant", Content: "", ToolCalls: []providers.ToolCall{{ID: "t1", Name: "a", Args: "{}"}}},
+			{Role: "tool", ToolCallID: "t1", Content: "result"},
+		},
+	}); err != nil {
+		t.Fatalf("Complete N+1: %v", err)
+	}
+
+	if len(bodies) != 2 {
+		t.Fatalf("expected 2 captured request bodies, got %d", len(bodies))
+	}
+	var r0, r1 genRequest
+	if err := json.Unmarshal(bodies[0], &r0); err != nil {
+		t.Fatalf("unmarshal r0: %v", err)
+	}
+	if err := json.Unmarshal(bodies[1], &r1); err != nil {
+		t.Fatalf("unmarshal r1: %v", err)
+	}
+	if !reflect.DeepEqual(r0.SystemInstruction, r1.SystemInstruction) {
+		t.Fatal("system instruction must be byte-stable across steps (implicit-cache prefix)")
+	}
+	if !reflect.DeepEqual(r0.Tools, r1.Tools) {
+		t.Fatal("tools must be byte-stable across steps (implicit-cache prefix)")
+	}
+	if len(r1.Contents) <= len(r0.Contents) {
+		t.Fatalf("step N+1 must append contents: len0=%d len1=%d", len(r0.Contents), len(r1.Contents))
+	}
+	if !reflect.DeepEqual(r0.Contents, r1.Contents[:len(r0.Contents)]) {
+		t.Fatal("earlier contents must be unchanged (append-only) so the prefix stays cacheable")
 	}
 }
 

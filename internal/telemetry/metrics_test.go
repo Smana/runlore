@@ -41,3 +41,10 @@ func TestHistoryCompactionCountersConstructed(t *testing.T) {
 		t.Fatal("NewMetrics must construct HistoryCompactions and HistoryElidedBytes")
 	}
 }
+
+func TestModelTokenCountersConstructed(t *testing.T) {
+	m := NewMetrics()
+	if m.ModelInputTokens == nil || m.ModelCachedInputTokens == nil {
+		t.Fatal("NewMetrics must construct ModelInputTokens and ModelCachedInputTokens")
+	}
+}

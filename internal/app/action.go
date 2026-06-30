@@ -10,14 +10,40 @@ import (
 )
 
 // BuildAuditor opens the append-only action audit log when configured, else a
-// no-op. Validate already requires AuditLogPath when actions.mode=auto.
-func BuildAuditor(cfg *config.Config) (audit.Auditor, func(), error) {
+// no-op. Validate already requires AuditLogPath for both executing modes
+// (approve and auto), so the Nop fallback below only ever applies to off/suggest.
+//
+// The existing hash chain is verified on open (OpenVerified). If it is broken
+// (insertion, edit, or mid-chain deletion) the response is mode-gated, because
+// this is where cfg is available:
+//   - approve/auto (RunLore executes + audits actions) → return an error so
+//     startup FAILS CLOSED: it must not append to, or act against, a chain whose
+//     integrity can no longer be vouched for.
+//   - off/suggest (nothing is executed) → log a WARNING and proceed: the auditor
+//     still opens and keeps appending, so a non-executing deployment isn't blocked.
+//
+// An empty or absent chain is valid (not broken). Tail-truncation (dropping the
+// most-recent records) leaves a valid prefix and is NOT detectable here — see
+// docs/security-model.md.
+func BuildAuditor(cfg *config.Config, log *slog.Logger) (audit.Auditor, func(), error) {
 	if cfg.Actions.AuditLogPath == "" {
 		return audit.Nop{}, func() {}, nil
 	}
-	l, err := audit.Open(cfg.Actions.AuditLogPath)
+	l, err := audit.OpenVerified(cfg.Actions.AuditLogPath)
 	if err != nil {
-		return nil, func() {}, fmt.Errorf("open audit log: %w", err)
+		if cfg.Actions.Mode == config.ActionApprove || cfg.Actions.Mode == config.ActionAuto {
+			// Fail closed: an executing rung must not act against an untrustworthy chain.
+			return nil, func() {}, fmt.Errorf("audit log integrity check failed (mode=%s, fail closed): %w", cfg.Actions.Mode, err)
+		}
+		// Non-executing mode: warn and fall back to a plain append so the deployment
+		// still records, but the broken history is surfaced loudly.
+		log.Warn("audit log chain failed verification; proceeding because actions are not executed in this mode",
+			"mode", cfg.Actions.Mode, "path", cfg.Actions.AuditLogPath, "err", err)
+		plain, oerr := audit.Open(cfg.Actions.AuditLogPath)
+		if oerr != nil {
+			return nil, func() {}, fmt.Errorf("open audit log: %w", oerr)
+		}
+		return plain, func() { _ = plain.Close() }, nil
 	}
 	return l, func() { _ = l.Close() }, nil
 }

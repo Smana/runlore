@@ -359,6 +359,84 @@ data: {"type":"message_stop"}
 	}
 }
 
+// TestPromptCacheHistoryBreakpoint asserts the rolling breakpoint: the last content
+// block of the last message carries cache_control, alongside system + last tool.
+func TestPromptCacheHistoryBreakpoint(t *testing.T) {
+	var gotReq msgRequest
+	srv := sseServer(t, func(r *http.Request) {
+		_ = json.NewDecoder(r.Body).Decode(&gotReq)
+	}, []string{
+		"event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"usage\":{\"input_tokens\":1}}}\n\n",
+		"event: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{\"output_tokens\":1}}\n\n",
+		"event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n",
+	})
+	defer srv.Close()
+
+	_, err := New(srv.URL, "claude-x", "k", 0).Complete(context.Background(), providers.CompletionRequest{
+		System: "sys",
+		Messages: []providers.Message{
+			{Role: "user", Content: "incident"},
+			{Role: "assistant", Content: "thinking", ToolCalls: []providers.ToolCall{{ID: "t1", Name: "a", Args: "{}"}}},
+			{Role: "tool", ToolCallID: "t1", Content: "result"},
+		},
+		Tools: []providers.ToolSpec{{Name: "a", Description: "d", Schema: `{"type":"object"}`}},
+	})
+	if err != nil {
+		t.Fatalf("Complete: %v", err)
+	}
+	// system marked
+	if len(gotReq.System) == 0 || gotReq.System[0].CacheControl == nil {
+		t.Fatalf("system block should be a cache breakpoint: %+v", gotReq.System)
+	}
+	// last tool marked
+	lt := gotReq.Tools[len(gotReq.Tools)-1]
+	if lt.CacheControl == nil || lt.CacheControl.Type != "ephemeral" {
+		t.Fatalf("last tool should be a cache breakpoint: %+v", lt)
+	}
+	// last block of the last message marked (the rolling breakpoint)
+	last := gotReq.Messages[len(gotReq.Messages)-1]
+	lb := last.Content[len(last.Content)-1]
+	if lb.CacheControl == nil || lb.CacheControl.Type != "ephemeral" {
+		t.Fatalf("last message's last block should be the rolling cache breakpoint: %+v", last)
+	}
+	// an earlier message block must NOT be marked
+	if gotReq.Messages[0].Content[0].CacheControl != nil {
+		t.Fatalf("earlier message blocks must not be marked: %+v", gotReq.Messages[0])
+	}
+	// exactly one message-level breakpoint (≤4 total is enforced; message portion must be 1)
+	msgBreakpoints := 0
+	for _, m := range gotReq.Messages {
+		for _, b := range m.Content {
+			if b.CacheControl != nil {
+				msgBreakpoints++
+			}
+		}
+	}
+	if msgBreakpoints != 1 {
+		t.Fatalf("exactly one message-level cache breakpoint expected, got %d", msgBreakpoints)
+	}
+}
+
+// TestUsageCacheFields asserts the Anthropic usage normalization: InputTokens is the
+// sum of input + cache_read + cache_creation; the read/creation subsets are reported.
+func TestUsageCacheFields(t *testing.T) {
+	srv := sseServer(t, nil, []string{
+		"event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"usage\":{\"input_tokens\":30,\"cache_read_input_tokens\":100,\"cache_creation_input_tokens\":20}}}\n\n",
+		"event: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{\"output_tokens\":7}}\n\n",
+		"event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n",
+	})
+	defer srv.Close()
+	resp, err := New(srv.URL, "claude-x", "k", 0).Complete(context.Background(), providers.CompletionRequest{
+		Messages: []providers.Message{{Role: "user", Content: "hi"}},
+	})
+	if err != nil {
+		t.Fatalf("Complete: %v", err)
+	}
+	if resp.Usage.InputTokens != 150 || resp.Usage.CachedInputTokens != 100 || resp.Usage.CacheWriteTokens != 20 {
+		t.Fatalf("usage = %+v, want in=150 cached=100 write=20", resp.Usage)
+	}
+}
+
 // TestPromptCacheToolsOnly verifies that with no system prompt, the tools array
 // still gets exactly one cache breakpoint — on the LAST tool, not every tool.
 func TestPromptCacheToolsOnly(t *testing.T) {

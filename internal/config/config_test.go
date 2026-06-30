@@ -207,6 +207,83 @@ func TestValidateRejectsNegativeMaxTokens(t *testing.T) {
 	}
 }
 
+func TestValidateRejectsCleartextKeyOnPublicHost(t *testing.T) {
+	cases := []struct {
+		name      string
+		baseURL   string
+		apiKeyEnv string
+		wantErr   bool
+	}{
+		{"http public + key", "http://api.openai.com/v1", "OPENAI_API_KEY", true},
+		{"https public + key", "https://api.openai.com/v1", "OPENAI_API_KEY", false},
+		{"http private IP + key", "http://10.0.0.5:8000/v1", "K", false},
+		{"http localhost + key", "http://localhost:8000/v1", "K", false},
+		{"http single-label + key", "http://vllm:8000/v1", "K", false},
+		{"http .svc + key", "http://vllm.ai.svc.cluster.local/v1", "K", false},
+		{"http .svc only + key", "http://vllm.ns.svc:8000/v1", "K", false},
+		{"http public no key", "http://api.openai.com/v1", "", false},
+		{"empty base_url + key", "", "OPENAI_API_KEY", false},
+		{"unparseable + key", "http://%zz/v1", "K", true},
+		{"ftp scheme + key", "ftp://api.openai.com/v1", "K", true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			c := &Config{Model: Model{Provider: "openai", BaseURL: tc.baseURL, APIKeyEnv: tc.apiKeyEnv}}
+			err := c.Validate()
+			if tc.wantErr && err == nil {
+				t.Fatalf("base_url %q + key %q must be rejected", tc.baseURL, tc.apiKeyEnv)
+			}
+			if !tc.wantErr && err != nil {
+				t.Fatalf("base_url %q + key %q must validate clean, got %v", tc.baseURL, tc.apiKeyEnv, err)
+			}
+		})
+	}
+}
+
+func TestValidateCleartextKeyCoversVerifyAndEmbeddings(t *testing.T) {
+	// Verify override with its OWN http public base_url + own key.
+	cv := &Config{Model: Model{Provider: "anthropic",
+		Verify: &ModelOverride{BaseURL: "http://api.cheap.example/v1", APIKeyEnv: "CHEAP_KEY"}}}
+	if err := cv.Validate(); err == nil {
+		t.Fatal("verify override with http public base_url + key must be rejected")
+	}
+	// Verify override with its own http public base_url but INHERITING the parent key.
+	ci := &Config{Model: Model{Provider: "anthropic", APIKeyEnv: "PARENT_KEY",
+		Verify: &ModelOverride{BaseURL: "http://api.cheap.example/v1"}}}
+	if err := ci.Validate(); err == nil {
+		t.Fatal("verify override over http public, inheriting the parent key, must be rejected")
+	}
+	// Keyless parent with http public base_url + verify override that supplies its OWN key
+	// and inherits the parent's insecure base_url. This was the fail-open bug: the parent
+	// check passes (no key), the old verify check was gated on v.BaseURL != "" so it was
+	// also skipped. The effective resolved endpoint (http://api.public.example/v1 + VERIFY_KEY)
+	// must be caught.
+	ck := &Config{Model: Model{Provider: "openai", BaseURL: "http://api.public.example/v1",
+		Verify: &ModelOverride{APIKeyEnv: "VERIFY_KEY"}}}
+	if err := ck.Validate(); err == nil {
+		t.Fatal("keyless parent over http public + verify with own key (inheriting base_url) must be rejected")
+	}
+	// Same as above but the parent uses https — the inherited base is safe, must validate clean.
+	cks := &Config{Model: Model{Provider: "openai", BaseURL: "https://api.public.example/v1",
+		Verify: &ModelOverride{APIKeyEnv: "VERIFY_KEY"}}}
+	if err := cks.Validate(); err != nil {
+		t.Fatalf("keyless parent over https + verify with own key must validate clean, got %v", err)
+	}
+	// Embeddings with http public base_url + key.
+	ce := &Config{Model: Model{Provider: "anthropic",
+		Embeddings: &Embeddings{BaseURL: "http://emb.example/v1", APIKeyEnv: "EMB_KEY"}}}
+	if err := ce.Validate(); err == nil {
+		t.Fatal("embeddings with http public base_url + key must be rejected")
+	}
+	// All-https equivalents validate clean.
+	ok := &Config{Model: Model{Provider: "anthropic", APIKeyEnv: "PARENT_KEY",
+		Verify:     &ModelOverride{BaseURL: "https://api.cheap.example/v1"},
+		Embeddings: &Embeddings{BaseURL: "https://emb.example/v1", APIKeyEnv: "EMB_KEY"}}}
+	if err := ok.Validate(); err != nil {
+		t.Fatalf("https verify+embeddings must validate clean, got %v", err)
+	}
+}
+
 func TestCurateRecurrenceThresholdParse(t *testing.T) {
 	var c Config
 	if err := yaml.Unmarshal([]byte("curate:\n  recurrence_threshold: 5\n"), &c); err != nil {
@@ -222,5 +299,28 @@ func TestCurateRecurrenceThresholdParse(t *testing.T) {
 	}
 	if z.Curate.RecurrenceThreshold != 0 {
 		t.Fatalf("absent recurrence_threshold must be 0, got %d", z.Curate.RecurrenceThreshold)
+	}
+}
+
+// TestValidateApproveRequiresAuditLog asserts approve mode is held to the same
+// audit requirement as auto: an executing rung that mutates the cluster must have
+// an audit_log_path (so the hash chain is verified fail-closed on open). Without
+// it, approve would silently fall back to a Nop auditor.
+func TestValidateApproveRequiresAuditLog(t *testing.T) {
+	// approve with the token but NO audit_log_path → rejected.
+	missing := &Config{}
+	missing.Actions.Mode = ActionApprove
+	missing.Actions.ApprovalTokenEnv = "RUNLORE_APPROVAL_TOKEN"
+	if err := missing.Validate(); err == nil {
+		t.Fatal("approve without actions.audit_log_path must be rejected")
+	}
+
+	// approve WITH both the token and an audit_log_path → validates.
+	ok := &Config{}
+	ok.Actions.Mode = ActionApprove
+	ok.Actions.ApprovalTokenEnv = "RUNLORE_APPROVAL_TOKEN"
+	ok.Actions.AuditLogPath = "/var/lib/runlore/audit.jsonl"
+	if err := ok.Validate(); err != nil {
+		t.Fatalf("approve with token + audit_log_path must validate clean, got: %v", err)
 	}
 }
