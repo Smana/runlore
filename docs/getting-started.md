@@ -73,6 +73,7 @@ incidents, platform constraints.
    type: Playbook
    title: HelmRelease upgrade failure
    description: A Helm chart bump leaves the release Ready=False.
+   resource: helmrelease://*
    tags: [flux, helmrelease, upgrade]
    ---
    # Symptom
@@ -83,10 +84,13 @@ incidents, platform constraints.
    - the rendered diff between the two chart versions
    ```
 
-   `index.md` and `log.md` are reserved (a human listing + a changelog) and skipped by the indexer — as
-   are dot-files. What `kb_search` actually matches is the frontmatter `title`/`description`/`tags` plus
-   the body, **not** the filename — so write those well. Seed it with whatever runbooks you already
-   have; the agent gets sharper at *your* platform as the catalog grows.
+   Every entry **requires** a `resource:` frontmatter field (a `kind://name` reference, no whitespace);
+   use a `kind://*` glob for a general playbook (e.g. `helmrelease://*`, `pod://*`). Entries missing it
+   are still indexed but logged as invalid (`invalid KB entry indexed`). `index.md` and `log.md` are
+   reserved (a human listing + a changelog) and skipped by the indexer — as are dot-files. What
+   `kb_search` actually matches is the frontmatter `title`/`description`/`tags` plus the body, **not**
+   the filename — so write those well. Seed it with whatever runbooks you already have; the agent gets
+   sharper at *your* platform as the catalog grows.
 
 3. **Make it available in-cluster.** Two options:
 
@@ -156,10 +160,16 @@ Create a `Secret` with the credentials your config references by env-var name. I
 ```bash
 kubectl -n runlore create secret generic runlore-secrets \
   --from-literal=OPENAI_API_KEY='<model-api-key-or-omit-if-keyless>' \
+  --from-literal=RUNLORE_WEBHOOK_TOKEN="$(openssl rand -hex 32)" \
   --from-literal=SLACK_WEBHOOK_URL='https://hooks.slack.com/services/...' \
   --from-literal=MATRIX_TOKEN='<matrix-access-token>' \
   --from-file=GITHUB_APP_PRIVATE_KEY=/path/to/app-private-key.pem
 ```
+
+> **`RUNLORE_WEBHOOK_TOKEN` is required once a model is configured.** The `serve` path
+> **fails closed** — it refuses to start with an anonymous alert webhook when an LLM is wired (the
+> webhook's labels/annotations flow into the prompt and bill the model), so set
+> `config.server.webhook_token_env` to this key. See [Step 5](#harden-for-production).
 
 Only include the keys you use. The chart injects the whole Secret as env vars via `envFrom`, and the
 config references each by its env-var name (`api_key_env`, `webhook_url_env`, `private_key_env`, …).
@@ -401,13 +411,13 @@ With 2+ replicas, only the **leader** is Ready, so the Service routes webhooks t
 
 ### Harden for production
 
-By default the webhook is **unauthenticated** and the chart's NetworkPolicy ingress is permissive
-(`ingressFrom: []` ⇒ any source) — fine for a trial, but lock both down before pointing a real alert
-stream at it:
+Once a model is configured the webhook token is **mandatory** (the `serve` path fails closed — see
+Step 3); the chart's NetworkPolicy ingress, however, is permissive by default (`ingressFrom: []` ⇒ any
+source), so lock that down before pointing a real alert stream at it:
 
 1. **Require a bearer token.** Name an env var in `server.webhook_token_env` (wired from your Secret);
-   unauthenticated requests are then rejected with `401`. A token is **mandatory** when
-   `actions.mode=auto`.
+   unauthenticated requests are then rejected with `401`. This token is **required whenever a model is
+   configured** (and therefore also under `actions.mode=auto`) — `serve` refuses to start without it.
    ```yaml
    # values.yaml
    config:
