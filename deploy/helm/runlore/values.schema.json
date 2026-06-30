@@ -1,0 +1,204 @@
+{
+  "$schema": "https://json-schema.org/draft-07/schema#",
+  "title": "RunLore Helm chart values",
+  "description": "Permissive schema for the runlore chart. It types the well-known top-level keys to catch gross mistakes (e.g. a string where an object is expected) but deliberately keeps additionalProperties:true at the top level and inside freeform sub-objects (notably `config`, which is rendered verbatim into the app config). It is NOT a closed schema and must never reject otherwise-valid values.",
+  "type": "object",
+  "additionalProperties": true,
+  "properties": {
+    "replicaCount": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "updateStrategy": {
+      "type": "string"
+    },
+    "image": {
+      "type": "object",
+      "additionalProperties": true,
+      "properties": {
+        "repository": { "type": "string" },
+        "tag": { "type": "string" },
+        "pullPolicy": { "type": "string" }
+      }
+    },
+    "imagePullSecrets": {
+      "type": "array",
+      "items": { "type": "object" }
+    },
+    "nameOverride": { "type": "string" },
+    "fullnameOverride": { "type": "string" },
+    "config": {
+      "description": "Rendered verbatim into the ConfigMap mounted at /etc/runlore/runlore.yaml. Accepts arbitrary keys.",
+      "type": "object",
+      "additionalProperties": true
+    },
+    "envFrom": {
+      "type": "array",
+      "items": { "type": "object" }
+    },
+    "env": {
+      "type": "array",
+      "items": { "type": "object" }
+    },
+    "catalog": {
+      "type": "object",
+      "additionalProperties": true,
+      "properties": {
+        "configMap": { "type": "string" },
+        "gitSync": { "type": "boolean" },
+        "mountPath": { "type": "string" }
+      }
+    },
+    "persistence": {
+      "type": "object",
+      "additionalProperties": true,
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "storageClass": { "type": "string" },
+        "accessModes": {
+          "type": "array",
+          "items": { "type": "string" }
+        },
+        "size": { "type": ["string", "integer"] },
+        "existingClaim": { "type": "string" }
+      }
+    },
+    "podDisruptionBudget": {
+      "type": "object",
+      "additionalProperties": true,
+      "properties": {
+        "create": { "type": "boolean" },
+        "minAvailable": { "type": ["integer", "string"] }
+      }
+    },
+    "service": {
+      "type": "object",
+      "additionalProperties": true,
+      "properties": {
+        "type": { "type": "string" },
+        "port": { "type": "integer" }
+      }
+    },
+    "probes": {
+      "type": "object",
+      "additionalProperties": true,
+      "properties": {
+        "startup": { "type": "object", "additionalProperties": true },
+        "liveness": { "type": "object", "additionalProperties": true },
+        "readiness": { "type": "object", "additionalProperties": true }
+      }
+    },
+    "serviceAccount": {
+      "type": "object",
+      "additionalProperties": true,
+      "properties": {
+        "create": { "type": "boolean" },
+        "name": { "type": "string" },
+        "annotations": { "type": "object", "additionalProperties": true }
+      }
+    },
+    "rbac": {
+      "type": "object",
+      "additionalProperties": true,
+      "properties": {
+        "create": { "type": "boolean" },
+        "allowActions": { "type": "boolean" },
+        "actionNamespaces": {
+          "type": "array",
+          "items": { "type": "string" }
+        },
+        "controllerLogNamespaces": {
+          "type": "array",
+          "items": { "type": "string" }
+        }
+      }
+    },
+    "networkPolicy": {
+      "type": "object",
+      "additionalProperties": true,
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "strict": { "type": "boolean" },
+        "awsPodIdentity": { "type": "boolean" },
+        "egress": {
+          "type": "object",
+          "additionalProperties": true,
+          "properties": {
+            "dns": { "type": "object", "additionalProperties": true },
+            "allowedCIDRs": {
+              "type": "array",
+              "items": { "type": "string" }
+            },
+            "namespaceSelectors": {
+              "type": "array",
+              "items": { "type": "object" }
+            },
+            "apiServerCIDRs": {
+              "type": "array",
+              "items": { "type": "string" }
+            }
+          }
+        },
+        "extraEgress": {
+          "type": "array",
+          "items": { "type": "object" }
+        },
+        "ingressFrom": {
+          "type": "array",
+          "items": { "type": "object" }
+        }
+      }
+    },
+    "vmServiceScrape": {
+      "type": "object",
+      "additionalProperties": true,
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "interval": { "type": "string" },
+        "path": { "type": "string" }
+      }
+    },
+    "resources": {
+      "type": "object",
+      "additionalProperties": true
+    },
+    "podSecurityContext": {
+      "type": "object",
+      "additionalProperties": true
+    },
+    "securityContext": {
+      "type": "object",
+      "additionalProperties": true
+    },
+    "nodeSelector": {
+      "type": "object",
+      "additionalProperties": true
+    },
+    "tolerations": {
+      "type": "array",
+      "items": { "type": "object" }
+    },
+    "affinity": {
+      "type": "object",
+      "additionalProperties": true
+    },
+    "podAnnotations": {
+      "type": "object",
+      "additionalProperties": true
+    },
+    "curate": {
+      "type": "object",
+      "additionalProperties": true,
+      "properties": {
+        "cronjob": {
+          "type": "object",
+          "additionalProperties": true,
+          "properties": {
+            "enabled": { "type": "boolean" },
+            "schedule": { "type": "string" }
+          }
+        }
+      }
+    }
+  }
+}
