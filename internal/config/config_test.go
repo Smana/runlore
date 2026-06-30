@@ -302,6 +302,34 @@ func TestCurateRecurrenceThresholdParse(t *testing.T) {
 	}
 }
 
+func TestValidateMCPServers(t *testing.T) {
+	good := &Config{MCP: MCP{Servers: []MCPServer{
+		{Name: "steampipe", URL: "https://mcp.example/x"},
+		{Name: "k8s", URL: "http://k8s-mcp.ai.svc:8080"},
+	}}}
+	if err := good.Validate(); err != nil {
+		t.Fatalf("valid MCP servers must pass: %v", err)
+	}
+	for _, tc := range []struct {
+		name string
+		s    MCPServer
+	}{
+		{"missing name", MCPServer{URL: "https://x"}},
+		{"missing url", MCPServer{Name: "a"}},
+		{"double underscore in name", MCPServer{Name: "a__b", URL: "https://x"}},
+		{"cleartext token on public http", MCPServer{Name: "a", URL: "http://api.public.example/x", TokenEnv: "T"}},
+	} {
+		c := &Config{MCP: MCP{Servers: []MCPServer{tc.s}}}
+		if err := c.Validate(); err == nil {
+			t.Fatalf("%s must be rejected", tc.name)
+		}
+	}
+	dup := &Config{MCP: MCP{Servers: []MCPServer{{Name: "a", URL: "https://x"}, {Name: "a", URL: "https://y"}}}}
+	if err := dup.Validate(); err == nil {
+		t.Fatal("duplicate server names must be rejected")
+	}
+}
+
 // TestValidateApproveRequiresAuditLog asserts approve mode is held to the same
 // audit requirement as auto: an executing rung that mutates the cluster must have
 // an audit_log_path (so the hash chain is verified fail-closed on open). Without
