@@ -70,8 +70,16 @@ The chart's RBAC is scoped tightly (`deploy/helm/runlore/templates/rbac.yaml`):
 - **ClusterRole (read-only, cluster-wide):** `get/list/watch` on Flux/ArgoCD resources and `events`,
   `get/list` on `pods` (status only — **not** `pods/log`). No write verb. `patch` is *intentionally*
   never granted cluster-wide.
-- **Namespaced Role for controller logs:** `pods/log` (raw log bodies, which can carry secrets/PII) is
+- **Namespaced Role for pod/controller logs:** `pods/log` (raw log bodies, which can carry secrets/PII) is
   granted only over `rbac.controllerLogNamespaces` (default `flux-system`) — never cluster-wide.
+- **Defense-in-depth app-layer guard:** because pod logs are streamed to the external LLM, the `pod_logs`
+  tool is *also* constrained in the agent config to **{the incident's own namespace} ∪
+  `config.investigation.pod_log_namespaces`** — a request for any other namespace is rejected before the
+  cluster is queried, not just denied by RBAC. The chart **auto-defaults `pod_log_namespaces` to
+  `rbac.controllerLogNamespaces`**, so the app-layer allowlist tracks the RBAC scope by default (no
+  silent drift); leaving both at the defaults limits raw-log reads to the incident namespace plus
+  `flux-system`. The app guard must stay a superset of the RBAC namespaces, or `pod_logs` is blocked at
+  the app layer for namespaces RBAC would otherwise permit.
 - **Namespaced Role for actions:** only when `rbac.allowActions` is set, `get/patch` on
   `kustomizations`/`helmreleases` over `rbac.actionNamespaces` — a bounded, opt-in blast radius that
   must mirror `config.actions.allow.namespaces`.
