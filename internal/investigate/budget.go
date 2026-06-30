@@ -30,6 +30,21 @@ func timeoutResult(req Request) providers.Investigation {
 	}
 }
 
+// refusalResult synthesises an unresolved investigation for when the model declines
+// the turn — a provider safety/refusal stop reason (CompletionResponse.Refused()).
+// The incident is reported as unresolved (no guessed root cause) rather than retried
+// into the same refusal or misread as an empty prose turn.
+func refusalResult(req Request) providers.Investigation {
+	return providers.Investigation{
+		Title:       req.Title,
+		Resource:    req.Workload,
+		Fingerprint: req.Fingerprint,
+		Unresolved: []string{
+			"investigation stopped: the model declined to respond (safety-filtered or refused); no root cause was produced",
+		},
+	}
+}
+
 // estimateTokens approximates the request size (~4 chars/token) over everything
 // re-sent each step: the system prompt, the full tool schemas (name +
 // description + JSON Schema), and the message history — including the assistant

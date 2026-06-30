@@ -114,6 +114,40 @@ func TestRecallRejectedByVerifyFallsThrough(t *testing.T) {
 	}
 }
 
+func TestLoopRefusalUnresolved(t *testing.T) {
+	// The model declines the turn (a safety/refusal stop reason, empty content). The
+	// loop must deliver a first-class `unresolved` result and STOP after one call —
+	// not misread the empty response as a prose turn (which would burn a nudge) nor
+	// retry into the same refusal.
+	model := &scriptModel{responses: []providers.CompletionResponse{
+		{StopReason: "refusal"}, // no text, no tool calls
+	}}
+	var got *providers.Investigation
+	li := &LoopInvestigator{
+		Model:      model,
+		Log:        slog.New(slog.NewTextHandler(io.Discard, nil)),
+		OnComplete: func(inv providers.Investigation) { got = &inv },
+	}
+	if err := li.Investigate(context.Background(), Request{Title: "PodCrashLooping", Fingerprint: "fp-refuse"}); err != nil {
+		t.Fatalf("Investigate: %v", err)
+	}
+	if model.i != 1 {
+		t.Fatalf("model called %d times; a refusal must stop after one call (no nudge/retry)", model.i)
+	}
+	if got == nil {
+		t.Fatal("nothing delivered")
+	}
+	if len(got.RootCauses) != 0 || got.Confidence != 0 {
+		t.Fatalf("a refusal must produce no root cause: %+v", got)
+	}
+	if len(got.Unresolved) == 0 || !strings.Contains(strings.ToLower(got.Unresolved[0]), "declined") {
+		t.Fatalf("refusal must be reported as unresolved with a note, got %+v", got.Unresolved)
+	}
+	if got.Fingerprint != "fp-refuse" {
+		t.Fatalf("refusal result must carry the fingerprint for outcome attribution, got %q", got.Fingerprint)
+	}
+}
+
 func TestLoopInvestigatorActions(t *testing.T) {
 	// submit_findings proposes a reversible and an irreversible action.
 	model := &scriptModel{responses: []providers.CompletionResponse{
