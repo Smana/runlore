@@ -239,6 +239,14 @@ func RunServe(version string, args []string) error {
 	// startWork runs the leader-only loops (investigation queue + failure watch +
 	// re-investigate poller), scoped to a context cancelled when leadership is lost.
 	startWork := func(workCtx context.Context) {
+		// Re-sync the outcome ledger's cached aggregate from the shared file on every
+		// (re-)acquisition of leadership. In multi-replica HA the file may have grown
+		// while another replica led and this process was a follower; the cache is built
+		// incrementally and would otherwise be stale, corrupting recall-decay. A failed
+		// reload must NOT crash the leader — log and keep serving the prior cache.
+		if rerr := ledger.Reload(); rerr != nil {
+			log.Warn("outcome ledger reload on leadership failed; serving prior cache", "err", rerr)
+		}
 		go queue.Run(workCtx)
 		// The gitops watcher source is built only when sources.gitops.enabled, so
 		// RunWatchers no-ops when no watcher source is present.

@@ -266,6 +266,96 @@ func TestOpenCountsCacheConcurrent(t *testing.T) {
 	}
 }
 
+// TestReloadResyncsExternalWrites simulates multi-replica HA failover: a SECOND
+// Ledger pointed at the SAME file (another replica's leader) appends opens/resolves
+// while the first instance is a follower. The first instance's incrementally-built
+// cache stays stale until Reload re-replays the shared file — exactly what a
+// re-acquired leader must do so its recall-decay aggregate is not stale.
+func TestReloadResyncsExternalWrites(t *testing.T) {
+	p := filepath.Join(t.TempDir(), "o.jsonl")
+	a, err := New(p) // "pod A": builds its cache over the (empty) file
+	if err != nil {
+		t.Fatalf("New a: %v", err)
+	}
+	if c, _ := a.OpenCounts(); len(c) != 0 {
+		t.Fatalf("pod A must start empty, got %+v", c)
+	}
+
+	// "pod B": another replica writes to the shared file while A is a follower.
+	b, err := New(p)
+	if err != nil {
+		t.Fatalf("New b: %v", err)
+	}
+	t0 := time.Unix(16000, 0)
+	_ = b.Open(Event{Fingerprint: "fp", Kind: "recall", Entry: "a.md", At: t0})
+	_, _, _ = b.Resolve("fp", t0.Add(time.Minute))
+
+	// A's cache never saw B's writes, so it is stale.
+	if c, _ := a.OpenCounts(); c["a.md"].Recalls != 0 {
+		t.Fatalf("pre-Reload pod A must be stale (recalls=0), got %+v", c["a.md"])
+	}
+
+	// Re-acquiring leadership triggers Reload, re-syncing with B's external writes.
+	if err := a.Reload(); err != nil {
+		t.Fatalf("Reload: %v", err)
+	}
+	if c, _ := a.OpenCounts(); c["a.md"].Recalls != 1 || c["a.md"].Resolved != 1 || !c["a.md"].LastConfirmed.Equal(t0.Add(time.Minute)) {
+		t.Fatalf("post-Reload pod A must reflect B's writes, got %+v", c["a.md"])
+	}
+	assertCacheEqualsReplay(t, a, p)
+
+	// Reload rebuilds the open-index too, so A can resolve an open B recorded.
+	_ = b.Open(Event{Fingerprint: "fp2", Kind: "recall", Entry: "c.md", At: t0.Add(2 * time.Minute)})
+	if err := a.Reload(); err != nil {
+		t.Fatalf("Reload 2: %v", err)
+	}
+	if _, ok, _ := a.Resolve("fp2", t0.Add(3*time.Minute)); !ok {
+		t.Fatal("post-Reload pod A must see B's open in its rebuilt index")
+	}
+}
+
+// TestReloadDisabledOrNilNoop ensures Reload is a safe no-op on a disabled (path=="")
+// or nil ledger — the leadership wiring calls it unconditionally.
+func TestReloadDisabledOrNilNoop(t *testing.T) {
+	dis, _ := New("")
+	if err := dis.Reload(); err != nil {
+		t.Fatalf("disabled Reload must be a no-op: %v", err)
+	}
+	var nilLedger *Ledger
+	if err := nilLedger.Reload(); err != nil {
+		t.Fatalf("nil Reload must be a no-op: %v", err)
+	}
+}
+
+// TestPendingResolvesBounded verifies the defensive per-fingerprint cap on buffered
+// orphan resolves: far more spurious resolves than the cap stay bounded and the excess
+// is counted, while the legitimate resolve-before-open pairing still works.
+func TestPendingResolvesBounded(t *testing.T) {
+	l, _ := New(filepath.Join(t.TempDir(), "o.jsonl"))
+	t0 := time.Unix(17000, 0)
+	// Many orphan resolves for one fingerprint (e.g. duplicate/replayed resolve
+	// webhooks whose open was never recorded).
+	n := maxPendingResolvesPerFingerprint + 100
+	for i := 0; i < n; i++ {
+		_, _, _ = l.Resolve("orphan", t0.Add(time.Duration(i)*time.Second))
+	}
+	l.mu.Lock()
+	got := len(l.pendingResolves["orphan"])
+	dropped := l.droppedResolves
+	l.mu.Unlock()
+	if got > maxPendingResolvesPerFingerprint {
+		t.Fatalf("pendingResolves must be bounded at %d, got %d", maxPendingResolvesPerFingerprint, got)
+	}
+	if dropped == 0 {
+		t.Fatalf("excess orphan resolves must be counted as dropped, got 0")
+	}
+	// The brief-window case still pairs: a buffered resolve pairs with a later open.
+	_ = l.Open(Event{Fingerprint: "orphan", Kind: "recall", Entry: "z.md", At: t0.Add(time.Duration(n) * time.Second)})
+	if c, _ := l.OpenCounts(); c["z.md"].Recalls != 1 || c["z.md"].Resolved != 1 {
+		t.Fatalf("a buffered resolve must still pair with a later open: %+v", c["z.md"])
+	}
+}
+
 func TestStatusDisabled(t *testing.T) {
 	l, _ := New("")
 	s := l.Status()
