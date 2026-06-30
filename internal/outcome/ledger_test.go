@@ -354,10 +354,10 @@ func TestReloadErrorPreservesPriorCache(t *testing.T) {
 	}
 	giant[len(giant)-1] = '\n'
 	if _, err := f.Write(giant); err != nil {
-		f.Close()
+		_ = f.Close()
 		t.Fatalf("write giant line: %v", err)
 	}
-	f.Close()
+	_ = f.Close()
 
 	// Reload must return a non-nil error.
 	reloadErr := l.Reload()
