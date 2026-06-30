@@ -264,6 +264,19 @@ func (li *LoopInvestigator) Investigate(ctx context.Context, req Request) error 
 			return fmt.Errorf("model: %w", err)
 		}
 		li.Log.Debug("investigation step", "title", req.Title, "step", step, "tool_calls", len(resp.ToolCalls), "text_len", len(resp.Text))
+		// The provider declined the turn (a safety/refusal stop reason): deliver a
+		// first-class unresolved result rather than misreading the empty response as a
+		// prose turn (which would burn a nudge) or retrying into the same refusal.
+		if resp.Refused() {
+			li.Log.Warn("investigation stopped: model refused or safety-filtered the response",
+				"title", req.Title, "stop_reason", resp.StopReason)
+			if li.Metrics != nil {
+				li.Metrics.InvestigationsDropped.Add(ctx, 1)
+			}
+			result = "refused"
+			li.deliver(req, refusalResult(req))
+			return nil
+		}
 		// Truncation: the provider stopped at its output-token ceiling, so this turn is
 		// cut off — its prose is incomplete and any tool-call JSON is likely partial, so
 		// it must not be treated as a finished step. Surface it (warn + metric) and, once,
