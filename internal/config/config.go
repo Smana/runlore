@@ -557,13 +557,19 @@ func (c *Config) Validate() error {
 	if err := checkSecureKeyEndpoint("model.base_url", "model.api_key_env", c.Model.BaseURL, c.Model.APIKeyEnv); err != nil {
 		return err
 	}
-	if v := c.Model.Verify; v != nil && v.BaseURL != "" {
-		// A verify override inherits the parent key when its own api_key_env is unset.
-		keyEnv := v.APIKeyEnv
-		if keyEnv == "" {
-			keyEnv = c.Model.APIKeyEnv
+	if v := c.Model.Verify; v != nil {
+		// Resolve the effective endpoint and key mirroring BuildVerifyModel's or() semantics:
+		// use the override value if set, else fall back to the parent. This catches the case
+		// where a verify override supplies its own key but inherits an insecure parent base_url.
+		base := v.BaseURL
+		if base == "" {
+			base = c.Model.BaseURL
 		}
-		if err := checkSecureKeyEndpoint("model.verify.base_url", "model.verify.api_key_env (or inherited model.api_key_env)", v.BaseURL, keyEnv); err != nil {
+		key := v.APIKeyEnv
+		if key == "" {
+			key = c.Model.APIKeyEnv
+		}
+		if err := checkSecureKeyEndpoint("model.verify.base_url", "model.verify.api_key_env (or inherited model.api_key_env)", base, key); err != nil {
 			return err
 		}
 	}

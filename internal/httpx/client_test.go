@@ -150,7 +150,7 @@ func TestDenyInternalRedirectKeepsKeyOnSameHost(t *testing.T) {
 	if err := DenyInternalRedirect(target, []*http.Request{origin}); err != nil {
 		t.Fatalf("same-host redirect should be allowed, got %v", err)
 	}
-	if target.Header.Get("X-Api-Key") == "" || target.Header.Get("Authorization") == "" {
+	if target.Header.Get("X-Api-Key") == "" || target.Header.Get("X-Goog-Api-Key") == "" || target.Header.Get("Authorization") == "" {
 		t.Fatal("key headers must be retained on a same-host redirect")
 	}
 }
