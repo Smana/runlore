@@ -233,6 +233,27 @@ func TestMidStreamDrop(t *testing.T) {
 	}
 }
 
+// TestUsageCachedTokens asserts prompt_tokens_details.cached_tokens maps to
+// CachedInputTokens (OpenAI prompt_tokens already includes the cached subset).
+func TestUsageCachedTokens(t *testing.T) {
+	srv := sseServer(t, nil, []string{
+		"data: {\"choices\":[{\"delta\":{\"content\":\"ok\"}}]}\n\n",
+		"data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n",
+		"data: {\"choices\":[],\"usage\":{\"prompt_tokens\":200,\"completion_tokens\":9,\"prompt_tokens_details\":{\"cached_tokens\":160}}}\n\n",
+		"data: [DONE]\n\n",
+	})
+	defer srv.Close()
+	resp, err := New(srv.URL, "m", "k", 0).Complete(context.Background(), providers.CompletionRequest{
+		Messages: []providers.Message{{Role: "user", Content: "hi"}},
+	})
+	if err != nil {
+		t.Fatalf("Complete: %v", err)
+	}
+	if resp.Usage.InputTokens != 200 || resp.Usage.CachedInputTokens != 160 {
+		t.Fatalf("usage = %+v, want in=200 cached=160", resp.Usage)
+	}
+}
+
 // TestEmptyToolResultKeepsContent guards the OpenAI-compat requirement that a
 // tool-role message always carries a "content" field, even when the tool produced
 // no output. With json:"content,omitempty" an empty result elides the field and
