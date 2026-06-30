@@ -939,6 +939,39 @@ func TestInstantRecallConfirmedEvidenceReachesVerify(t *testing.T) {
 	}
 }
 
+// TestCompactionLetsInvestigationFinish drives a model that calls a big-output tool many
+// times under a low token budget; with compaction the loop reaches submit_findings
+// instead of the budget hard-kill.
+func TestCompactionLetsInvestigationFinish(t *testing.T) {
+	var resp []providers.CompletionResponse
+	for i := 1; i <= 6; i++ {
+		resp = append(resp, providers.CompletionResponse{
+			ToolCalls: []providers.ToolCall{{ID: fmtID(i), Name: "big_tool", Args: `{}`}},
+		})
+	}
+	resp = append(resp, providers.CompletionResponse{ToolCalls: []providers.ToolCall{
+		{ID: "f", Name: submitFindingsName, Args: `{"confidence":0.7,"root_causes":[{"summary":"found it"}]}`},
+	}})
+
+	var got *providers.Investigation
+	li := &LoopInvestigator{
+		Model:                     &scriptModel{responses: resp},
+		Tools:                     []Tool{bigTool{size: 4000}},
+		Log:                       slog.New(slog.NewTextHandler(io.Discard, nil)),
+		MaxSteps:                  10,
+		MaxTokensPerInvestigation: 6000, // low: without compaction, 6 x ~1000-token outputs hard-kill
+		OnComplete:                func(inv providers.Investigation) { got = &inv },
+	}
+	if err := li.Investigate(context.Background(), Request{Title: "compaction finish test"}); err != nil {
+		t.Fatalf("Investigate: %v", err)
+	}
+	if got == nil || len(got.RootCauses) == 0 {
+		t.Fatalf("expected a resolved investigation via compaction, got %+v", got)
+	}
+}
+
+func fmtID(i int) string { return string(rune('0' + i)) }
+
 // TestSeedPrompt asserts the seed prompt threads Severity and Environment into
 // the model context when set (so it can calibrate rigor for prod vs staging,
 // critical vs warning), and omits each line — no empty label — when unset.
