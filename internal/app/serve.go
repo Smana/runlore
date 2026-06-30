@@ -113,7 +113,7 @@ func RunServe(version string, args []string) error {
 		return fmt.Errorf("actions enabled (mode=%s) but %s is empty: refusing to start with unauthenticated control endpoints (fail closed)",
 			cfg.Actions.Mode, cfg.Actions.ApprovalTokenEnv)
 	}
-	aud, auditClose, aerr := BuildAuditor(cfg)
+	aud, auditClose, aerr := BuildAuditor(cfg, log)
 	if aerr != nil {
 		return aerr
 	}

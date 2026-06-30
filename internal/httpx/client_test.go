@@ -111,3 +111,46 @@ func TestDenyInternalRedirectBlocksExternalToInternal(t *testing.T) {
 		t.Fatal("a public→internal (metadata) redirect must be blocked")
 	}
 }
+
+// mkreqWithKeys builds a redirect-target request carrying the three provider key headers.
+func mkreqWithKeys(t *testing.T, rawurl string) *http.Request {
+	t.Helper()
+	r := mkreq(t, rawurl)
+	r.Header.Set("X-Api-Key", "sk-secret")
+	r.Header.Set("X-Goog-Api-Key", "goog-secret")
+	r.Header.Set("Authorization", "Bearer tok")
+	return r
+}
+
+func TestDenyInternalRedirectStripsKeyOnCrossHost(t *testing.T) {
+	orig := lookupIP
+	defer func() { lookupIP = orig }()
+	lookupIP = func(string) ([]net.IP, error) { return []net.IP{net.ParseIP("93.184.216.34")}, nil } // public
+
+	origin := mkreq(t, "https://api.anthropic.com/v1/messages")
+	target := mkreqWithKeys(t, "https://attacker.example/v1/messages")
+	if err := DenyInternalRedirect(target, []*http.Request{origin}); err != nil {
+		t.Fatalf("public cross-host redirect should be allowed (headers stripped), got %v", err)
+	}
+	for _, h := range []string{"X-Api-Key", "X-Goog-Api-Key", "Authorization"} {
+		if got := target.Header.Get(h); got != "" {
+			t.Fatalf("header %s must be stripped on cross-host redirect, got %q", h, got)
+		}
+	}
+}
+
+func TestDenyInternalRedirectKeepsKeyOnSameHost(t *testing.T) {
+	orig := lookupIP
+	defer func() { lookupIP = orig }()
+	lookupIP = func(string) ([]net.IP, error) { return []net.IP{net.ParseIP("93.184.216.34")}, nil } // public
+
+	// Same hostname, http→https upgrade (port 80→443): the key must be retained.
+	origin := mkreq(t, "http://api.anthropic.com/v1/messages")
+	target := mkreqWithKeys(t, "https://api.anthropic.com/v1/messages")
+	if err := DenyInternalRedirect(target, []*http.Request{origin}); err != nil {
+		t.Fatalf("same-host redirect should be allowed, got %v", err)
+	}
+	if target.Header.Get("X-Api-Key") == "" || target.Header.Get("X-Goog-Api-Key") == "" || target.Header.Get("Authorization") == "" {
+		t.Fatal("key headers must be retained on a same-host redirect")
+	}
+}

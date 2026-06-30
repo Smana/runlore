@@ -10,7 +10,10 @@
 // not a substitute for not logging secrets.
 package redact
 
-import "regexp"
+import (
+	"regexp"
+	"strings"
+)
 
 const mask = "[REDACTED]"
 
@@ -68,5 +71,123 @@ func Secrets(s string) string {
 	for _, r := range rules {
 		s = r.re.ReplaceAllString(s, r.repl)
 	}
-	return s
+	return k8sSecretData(s)
+}
+
+// diffPrefixRE matches an optional git-diff line marker ("+ ", "- ", or a single
+// leading space used for context lines). It is captured so the marker can be
+// preserved while the YAML body is inspected/rewritten.
+var diffPrefixRE = regexp.MustCompile(`^([+\- ]?)(.*)$`)
+
+// docMarkerRE matches a YAML document separator ("---", possibly trailing
+// content) after any diff marker has been stripped.
+var docMarkerRE = regexp.MustCompile(`^---(\s.*)?$`)
+
+// kindSecretRE matches a top-level `kind: Secret` line (with optional quoting),
+// after any diff marker has been stripped. It deliberately anchors at the start
+// of the (de-marked) line so an inner "kind:" value cannot trip it.
+var kindSecretRE = regexp.MustCompile(`^kind:\s*["']?Secret["']?\s*$`)
+
+// kindAnyRE matches any top-level `kind:` line, used to detect a switch to a
+// non-Secret document.
+var kindAnyRE = regexp.MustCompile(`^kind:\s*\S`)
+
+// dataKeyRE matches a `data:` or `stringData:` mapping key (no inline value),
+// capturing its indentation. Anchored after diff-marker stripping.
+var dataKeyRE = regexp.MustCompile(`^(\s*)(?:data|stringData):\s*$`)
+
+// dataEntryRE matches a `  key: value` mapping entry inside a data block,
+// capturing indentation, the "key:" portion, and the value. Block scalars
+// (`key: |` / `key: >`) are handled separately so their following lines are
+// masked too.
+var dataEntryRE = regexp.MustCompile(`^(\s*)([^\s:][^:]*:\s*)(\S.*)$`)
+
+// k8sSecretData performs a line-oriented pass that masks the VALUES under a
+// `data:`/`stringData:` block of a `kind: Secret` document, preserving keys and
+// all surrounding structure. Non-Secret documents (e.g. kind: ConfigMap) are
+// left untouched. It tolerates git-diff line markers ("+ ", "- ", leading
+// space) because a Secret most often surfaces inside a `what_changed` diff.
+//
+// A data block ends at: a dedent to a column <= the data key's indent, a new
+// top-level key, a `kind:` line, or a YAML document separator ("---"). The pass
+// is idempotent: once a value is the mask string it stays the mask string.
+func k8sSecretData(s string) string {
+	if !strings.Contains(s, "kind:") {
+		return s
+	}
+	// Preserve a trailing-newline / no-trailing-newline shape exactly.
+	lines := strings.Split(s, "\n")
+
+	inSecret := false    // current YAML document is a kind: Secret
+	inDataBlock := false // currently inside that Secret's data:/stringData: block
+	dataIndent := 0      // indent (in columns) of the data: key
+
+	for i, raw := range lines {
+		m := diffPrefixRE.FindStringSubmatch(raw)
+		prefix, body := m[1], m[2]
+
+		// Document boundary: a separator resets all document state.
+		if docMarkerRE.MatchString(body) {
+			inSecret, inDataBlock = false, false
+			continue
+		}
+
+		// A new document's kind: line (re)sets whether we are in a Secret.
+		if kindAnyRE.MatchString(body) {
+			inSecret = kindSecretRE.MatchString(body)
+			inDataBlock = false
+			continue
+		}
+
+		if !inSecret {
+			continue
+		}
+
+		if inDataBlock {
+			indent := leadingSpaces(body)
+			// Block ends on dedent to <= the data key indent, or a blank line
+			// that is not part of the block. Blank lines inside indented data
+			// are unusual; treat a blank line as ending the block.
+			if strings.TrimSpace(body) == "" {
+				inDataBlock = false
+				continue
+			}
+			if indent <= dataIndent {
+				inDataBlock = false
+				// fall through: this line may itself open another data block or
+				// be a sibling key — re-evaluate below.
+			} else {
+				if entry := dataEntryRE.FindStringSubmatch(body); entry != nil {
+					val := strings.TrimRight(entry[3], " ")
+					if val != mask {
+						lines[i] = prefix + entry[1] + entry[2] + mask
+					}
+				}
+				continue
+			}
+		}
+
+		// Detect the start of a data:/stringData: block within the Secret.
+		if dk := dataKeyRE.FindStringSubmatch(body); dk != nil {
+			inDataBlock = true
+			dataIndent = leadingSpaces(dk[1])
+			continue
+		}
+	}
+	return strings.Join(lines, "\n")
+}
+
+// leadingSpaces counts leading space/tab characters (column-ish indent). Tabs
+// are invalid YAML indentation, so counting them as one each is sufficient for
+// the dedent comparison.
+func leadingSpaces(s string) int {
+	n := 0
+	for _, r := range s {
+		if r == ' ' || r == '\t' {
+			n++
+			continue
+		}
+		break
+	}
+	return n
 }

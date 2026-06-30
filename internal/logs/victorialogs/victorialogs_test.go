@@ -51,6 +51,49 @@ func TestQuery(t *testing.T) {
 	}
 }
 
+func TestQueryAuthHeaders(t *testing.T) {
+	t.Setenv("RUNLORE_TEST_VL_TOKEN", "s3cr3t")
+	var gotAuth, gotTenant, gotCT string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotAuth = r.Header.Get("Authorization")
+		gotTenant = r.Header.Get("X-Scope-OrgID")
+		gotCT = r.Header.Get("Content-Type")
+		_, _ = io.WriteString(w, ``)
+	}))
+	defer srv.Close()
+
+	c := NewWithAuth(srv.URL, "RUNLORE_TEST_VL_TOKEN", map[string]string{"X-Scope-OrgID": "tenant-b"})
+	if _, err := c.Query(context.Background(), `{namespace="apps"}`, providers.TimeWindow{}); err != nil {
+		t.Fatalf("Query: %v", err)
+	}
+	if gotAuth != "Bearer s3cr3t" {
+		t.Fatalf("Authorization: got %q, want %q", gotAuth, "Bearer s3cr3t")
+	}
+	if gotTenant != "tenant-b" {
+		t.Fatalf("X-Scope-OrgID: got %q, want tenant-b", gotTenant)
+	}
+	// Auth headers must not displace the form Content-Type the query relies on.
+	if !strings.Contains(gotCT, "x-www-form-urlencoded") {
+		t.Fatalf("content-type=%q", gotCT)
+	}
+}
+
+func TestQueryNoAuthByDefault(t *testing.T) {
+	var gotAuth string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotAuth = r.Header.Get("Authorization")
+		_, _ = io.WriteString(w, ``)
+	}))
+	defer srv.Close()
+
+	if _, err := New(srv.URL).Query(context.Background(), `{namespace="apps"}`, providers.TimeWindow{}); err != nil {
+		t.Fatalf("Query: %v", err)
+	}
+	if gotAuth != "" {
+		t.Fatalf("unconfigured client must send no Authorization header, got %q", gotAuth)
+	}
+}
+
 // parseForm returns the decoded "query" value if present.
 func parseForm(body string) (string, error) {
 	for _, kv := range strings.Split(body, "&") {

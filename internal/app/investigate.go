@@ -82,14 +82,14 @@ func BuildModelAndTools(ctx context.Context, cfg *config.Config, gp providers.Gi
 		}
 	}
 	if cfg.Metrics.URL != "" {
-		m := prometheus.New(cfg.Metrics.URL)
+		m := prometheus.NewWithAuth(cfg.Metrics.URL, cfg.Metrics.TokenEnv, cfg.Metrics.Headers)
 		tools = append(tools,
 			investigate.QueryMetricsTool{Metrics: m},
 			investigate.QueryMetricsRangeTool{Metrics: m},
 		)
 	}
 	if cfg.Logs.URL != "" {
-		tools = append(tools, investigate.QueryLogsTool{Logs: victorialogs.New(cfg.Logs.URL)})
+		tools = append(tools, investigate.QueryLogsTool{Logs: victorialogs.NewWithAuth(cfg.Logs.URL, cfg.Logs.TokenEnv, cfg.Logs.Headers)})
 	}
 	// Network-flow data source (the network_drops tool). Pluggable and CNI-agnostic:
 	// no provider is enabled by default. The selected provider must match the cluster's
@@ -128,7 +128,10 @@ func BuildModelAndTools(ctx context.Context, cfg *config.Config, gp providers.Gi
 		reader := cluster.New(cs)
 		tools = append(tools,
 			investigate.ControllerLogsTool{Logs: reader},
-			investigate.PodLogsTool{Logs: reader},
+			// pod_logs streams raw pod logs (secrets/PII) to the LLM, so it is
+			// constrained at the app layer to the incident namespace plus this
+			// operator allowlist. The per-incident namespace is set by the loop.
+			investigate.PodLogsTool{Logs: reader, AllowedNamespaces: cfg.Investigation.PodLogNamespaces},
 			investigate.PodStatusTool{Kube: reader},
 			investigate.KubeEventsTool{Kube: reader},
 		)

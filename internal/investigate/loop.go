@@ -187,9 +187,14 @@ func (li *LoopInvestigator) Investigate(ctx context.Context, req Request) error 
 				"title", req.Title, "entry", entry.Path)
 		}
 	}
+	// Bind incident-scoped tools (pod_logs) to THIS investigation's namespace before
+	// use: a single LoopInvestigator serves many requests, so the namespace allowlist
+	// that includes the incident's own namespace must be set per request, not at
+	// construction. scopeTools copies into a fresh slice (li.Tools is never mutated).
+	tools := scopeTools(li.Tools, req.Workload.Namespace)
 	byName := map[string]Tool{}
-	specs := make([]providers.ToolSpec, 0, len(li.Tools)+1)
-	for _, t := range li.Tools {
+	specs := make([]providers.ToolSpec, 0, len(tools)+1)
+	for _, t := range tools {
 		byName[t.Name()] = t
 		specs = append(specs, providers.ToolSpec{Name: t.Name(), Description: t.Description(), Schema: t.Schema()})
 	}
@@ -264,6 +269,11 @@ func (li *LoopInvestigator) Investigate(ctx context.Context, req Request) error 
 				attribute.String("provider", li.ModelProvider), attribute.String("result", mres)))
 			li.Metrics.ModelRequestDuration.Record(ctx, time.Since(mstart).Seconds(),
 				metric.WithAttributes(attribute.String("provider", li.ModelProvider)))
+			if err == nil {
+				provAttr := metric.WithAttributes(attribute.String("provider", li.ModelProvider))
+				li.Metrics.ModelInputTokens.Add(ctx, int64(resp.Usage.InputTokens), provAttr)
+				li.Metrics.ModelCachedInputTokens.Add(ctx, int64(resp.Usage.CachedInputTokens), provAttr)
+			}
 		}
 		if err != nil {
 			// The per-investigation deadline fired (or the parent ctx was cancelled):

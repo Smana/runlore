@@ -8,6 +8,8 @@ package config
 
 import (
 	"fmt"
+	"net"
+	"net/url"
 	"path"
 	"slices"
 	"strings"
@@ -60,9 +62,22 @@ type Logging struct {
 	Level  string `yaml:"level"`  // "debug" | "info" (default) | "warn" | "error"
 }
 
-// Endpoint is a backend base URL; empty disables the corresponding tool.
+// Endpoint is a backend base URL with optional auth; empty URL disables the
+// corresponding tool. Auth follows the secrets-by-indirection convention used
+// elsewhere (model.api_key_env, forge.*_env): the config stores the NAME of an
+// env var, never the secret itself, and the value is read at runtime.
 type Endpoint struct {
 	URL string `yaml:"url"`
+
+	// TokenEnv names an env var holding a bearer token for the backend. When set
+	// and the var is non-empty, requests carry "Authorization: Bearer <token>".
+	// Empty (default) ⇒ no Authorization header (unchanged, keyless behaviour).
+	TokenEnv string `yaml:"token_env"`
+
+	// Headers are static request headers added to every backend request — e.g. a
+	// tenant header for a multi-tenant VictoriaMetrics/VictoriaLogs instance
+	// ("X-Scope-OrgID: <tenant>"). Empty (default) ⇒ no extra headers.
+	Headers map[string]string `yaml:"headers"`
 }
 
 // Cloud configures the cloud context provider. Auth is in-cluster identity (EKS
@@ -148,6 +163,14 @@ type Investigation struct {
 	MaxToolOutputBytes        int       `yaml:"max_tool_output_bytes"`        // 0 ⇒ unlimited
 	MaxTokensPerInvestigation int       `yaml:"max_tokens_per_investigation"` // 0 ⇒ unlimited
 	Timeout                   Duration  `yaml:"timeout"`                      // per-investigation deadline; 0 ⇒ default (10m) via applyDefaults
+
+	// PodLogNamespaces lists extra namespaces (beyond the incident's own) that
+	// pod_logs may read controller/crash logs from. pod_logs streams raw pod logs
+	// (which carry secrets/PII) to the external LLM, so the model is constrained to
+	// the incident namespace plus this allowlist at the application layer — not just
+	// by Kubernetes RBAC. Set this to match the Helm rbac.controllerLogNamespaces
+	// (e.g. [flux-system]); empty means the incident namespace only.
+	PodLogNamespaces []string `yaml:"pod_log_namespaces"`
 }
 
 // Coalesce folds correlated incidents into one investigation.
@@ -232,7 +255,7 @@ type CatalogGit struct {
 // investigator.
 type Model struct {
 	Provider  string `yaml:"provider"`    // "openai" (default) | "anthropic" | "gemini"
-	BaseURL   string `yaml:"base_url"`    // OpenAI: required; Anthropic/Gemini: optional (built-in default endpoint)
+	BaseURL   string `yaml:"base_url"`    // OpenAI: required; Anthropic/Gemini: optional (built-in default endpoint). Must be https when api_key_env is set on a public host (validated).
 	Model     string `yaml:"model"`       // model name
 	APIKeyEnv string `yaml:"api_key_env"` // env var holding the API key (empty = keyless)
 	// MaxTokens caps the model's output (generated) tokens per request. 0 = use the
@@ -486,6 +509,56 @@ func (a ActionPolicy) Enabled() bool {
 	return a.Mode != "" && a.Mode != ActionOff
 }
 
+// isPrivateHost reports whether host is a loopback / in-cluster / private endpoint
+// where sending a key over plain http is acceptable. Pure — no DNS — so config
+// validation stays deterministic and network-free. IP literals are classified by
+// range; hostnames by well-known private forms. Anything else is treated as public.
+func isPrivateHost(host string) bool {
+	if host == "" {
+		return false
+	}
+	if ip := net.ParseIP(host); ip != nil {
+		return ip.IsLoopback() || ip.IsPrivate() || ip.IsLinkLocalUnicast() || ip.IsUnspecified()
+	}
+	h := strings.ToLower(strings.TrimSuffix(host, "."))
+	if h == "localhost" {
+		return true
+	}
+	if !strings.Contains(h, ".") {
+		return true // single-label in-cluster service name, e.g. "vllm"
+	}
+	for _, suf := range []string{".local", ".internal", ".svc", ".cluster.local"} {
+		if strings.HasSuffix(h, suf) {
+			return true
+		}
+	}
+	return false
+}
+
+// checkSecureKeyEndpoint rejects a base_url that would send an API key in cleartext.
+// A key is "present" when apiKeyEnv is non-empty; an empty base_url uses the provider's
+// built-in (https) default and is always fine. http is allowed only to a private host.
+func checkSecureKeyEndpoint(urlField, keyField, baseURL, apiKeyEnv string) error {
+	if apiKeyEnv == "" || baseURL == "" {
+		return nil
+	}
+	u, err := url.Parse(baseURL)
+	if err != nil {
+		return fmt.Errorf("%s is not a valid URL (%s is set): %w", urlField, keyField, err)
+	}
+	switch u.Scheme {
+	case "https":
+		return nil
+	case "http":
+		if isPrivateHost(u.Hostname()) {
+			return nil
+		}
+		return fmt.Errorf("%s is %q with an API key (%s set) on a public host — the key would be sent in cleartext; use https or a loopback/in-cluster endpoint", urlField, baseURL, keyField)
+	default:
+		return fmt.Errorf("%s must be an http(s) URL when %s is set, got scheme %q", urlField, keyField, u.Scheme)
+	}
+}
+
 // Validate enforces cross-field invariants after loading — fail-closed defaults
 // for the autonomy ladder: enabling execution requires the controls that bound
 // it. Returns an error that should abort startup.
@@ -498,6 +571,34 @@ func (c *Config) Validate() error {
 	if c.Model.Verify != nil && c.Model.Verify.MaxTokens < 0 {
 		return fmt.Errorf("model.verify.max_tokens must be >= 0 (0 = inherit), got %d", c.Model.Verify.MaxTokens)
 	}
+	// Reject a cleartext API key over a public endpoint (the key would be sent in the
+	// clear, and is the enabler for a redirect-based key leak). Cover the main model,
+	// a verify override that targets its own endpoint, and embeddings. Loopback /
+	// in-cluster hosts are exempt.
+	if err := checkSecureKeyEndpoint("model.base_url", "model.api_key_env", c.Model.BaseURL, c.Model.APIKeyEnv); err != nil {
+		return err
+	}
+	if v := c.Model.Verify; v != nil {
+		// Resolve the effective endpoint and key mirroring BuildVerifyModel's or() semantics:
+		// use the override value if set, else fall back to the parent. This catches the case
+		// where a verify override supplies its own key but inherits an insecure parent base_url.
+		base := v.BaseURL
+		if base == "" {
+			base = c.Model.BaseURL
+		}
+		key := v.APIKeyEnv
+		if key == "" {
+			key = c.Model.APIKeyEnv
+		}
+		if err := checkSecureKeyEndpoint("model.verify.base_url", "model.verify.api_key_env (or inherited model.api_key_env)", base, key); err != nil {
+			return err
+		}
+	}
+	if e := c.Model.Embeddings; e != nil {
+		if err := checkSecureKeyEndpoint("model.embeddings.base_url", "model.embeddings.api_key_env", e.BaseURL, e.APIKeyEnv); err != nil {
+			return err
+		}
+	}
 	switch c.Actions.Mode {
 	case "", ActionOff, ActionSuggest:
 		return nil // read-only-ish: nothing to execute
@@ -506,14 +607,18 @@ func (c *Config) Validate() error {
 		if c.Actions.ApprovalTokenEnv == "" {
 			return fmt.Errorf("actions.mode=%s requires actions.approval_token_env (control/kill-switch endpoints fail closed without it)", c.Actions.Mode)
 		}
+		// Both executing rungs mutate the cluster, so both must be audited: the hash
+		// chain is verified fail-closed on open (see internal/app.BuildAuditor). Without
+		// an audit_log_path approve would silently fall back to a Nop auditor — no chain,
+		// no verify, no fail-closed — yet it still executes cluster mutations.
+		if c.Actions.AuditLogPath == "" {
+			return fmt.Errorf("actions.mode=%s requires actions.audit_log_path (an executing rung must be audited)", c.Actions.Mode)
+		}
 		if c.Actions.Mode == ActionApprove {
 			return nil
 		}
-		// auto-only: unattended execution additionally needs audit, an authenticated
-		// webhook, and bounded gates.
-		if c.Actions.AuditLogPath == "" {
-			return fmt.Errorf("actions.mode=auto requires actions.audit_log_path (auto-execution must be audited)")
-		}
+		// auto-only: unattended execution additionally needs an authenticated webhook
+		// and bounded gates.
 		if c.Server.WebhookTokenEnv == "" {
 			return fmt.Errorf("actions.mode=auto requires server.webhook_token_env (the alert webhook must be authenticated)")
 		}
