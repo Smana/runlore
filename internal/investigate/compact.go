@@ -97,6 +97,9 @@ func compactHistory(messages []providers.Message, sys string, specs []providers.
 		if keepListTools[c.name] || isElidedMarker(messages[mi].Content) {
 			continue
 		}
+		if len(messages[mi].Content) <= len(elidedMarker(c.name)) {
+			continue // body no larger than the marker — eliding wouldn't shrink it
+		}
 		cands = append(cands, cand{mi: mi, size: len(messages[mi].Content), superseded: lastPosFor[c] != pos})
 	}
 	// Superseded first, then largest-first.
