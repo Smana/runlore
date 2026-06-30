@@ -234,7 +234,7 @@ type CatalogGit struct {
 // investigator.
 type Model struct {
 	Provider  string `yaml:"provider"`    // "openai" (default) | "anthropic" | "gemini"
-	BaseURL   string `yaml:"base_url"`    // OpenAI: required; Anthropic/Gemini: optional (built-in default endpoint)
+	BaseURL   string `yaml:"base_url"`    // OpenAI: required; Anthropic/Gemini: optional (built-in default endpoint). Must be https when api_key_env is set on a public host (validated).
 	Model     string `yaml:"model"`       // model name
 	APIKeyEnv string `yaml:"api_key_env"` // env var holding the API key (empty = keyless)
 	// MaxTokens caps the model's output (generated) tokens per request. 0 = use the
