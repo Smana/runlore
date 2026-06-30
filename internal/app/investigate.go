@@ -315,6 +315,9 @@ func BuildInvestigator(ctx context.Context, cfg *config.Config, gp providers.Git
 			}
 			if err := notifier.Deliver(context.Background(), found); err != nil {
 				log.Error("deliver findings", "err", err)
+			} else {
+				log.Info("delivered findings",
+					"confidence", found.Confidence, "root_causes", len(found.RootCauses), "curated_url", found.CuratedURL)
 			}
 		},
 	}, cat, nil
