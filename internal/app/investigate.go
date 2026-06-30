@@ -128,7 +128,10 @@ func BuildModelAndTools(ctx context.Context, cfg *config.Config, gp providers.Gi
 		reader := cluster.New(cs)
 		tools = append(tools,
 			investigate.ControllerLogsTool{Logs: reader},
-			investigate.PodLogsTool{Logs: reader},
+			// pod_logs streams raw pod logs (secrets/PII) to the LLM, so it is
+			// constrained at the app layer to the incident namespace plus this
+			// operator allowlist. The per-incident namespace is set by the loop.
+			investigate.PodLogsTool{Logs: reader, AllowedNamespaces: cfg.Investigation.PodLogNamespaces},
 			investigate.PodStatusTool{Kube: reader},
 			investigate.KubeEventsTool{Kube: reader},
 		)

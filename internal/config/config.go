@@ -148,6 +148,14 @@ type Investigation struct {
 	MaxToolOutputBytes        int       `yaml:"max_tool_output_bytes"`        // 0 ⇒ unlimited
 	MaxTokensPerInvestigation int       `yaml:"max_tokens_per_investigation"` // 0 ⇒ unlimited
 	Timeout                   Duration  `yaml:"timeout"`                      // per-investigation deadline; 0 ⇒ default (10m) via applyDefaults
+
+	// PodLogNamespaces lists extra namespaces (beyond the incident's own) that
+	// pod_logs may read controller/crash logs from. pod_logs streams raw pod logs
+	// (which carry secrets/PII) to the external LLM, so the model is constrained to
+	// the incident namespace plus this allowlist at the application layer — not just
+	// by Kubernetes RBAC. Set this to match the Helm rbac.controllerLogNamespaces
+	// (e.g. [flux-system]); empty means the incident namespace only.
+	PodLogNamespaces []string `yaml:"pod_log_namespaces"`
 }
 
 // Coalesce folds correlated incidents into one investigation.
