@@ -507,6 +507,12 @@ func (c *Config) Validate() error {
 	if c.Model.Verify != nil && c.Model.Verify.MaxTokens < 0 {
 		return fmt.Errorf("model.verify.max_tokens must be >= 0 (0 = inherit), got %d", c.Model.Verify.MaxTokens)
 	}
+	// Reject a negative per-tool timeout: time.ParseDuration accepts negative values
+	// which silently disable the feature (fails the > 0 guard in runTool) rather than
+	// setting the intended timeout. 0 means "use the default (60s)".
+	if c.Investigation.ToolTimeout.Std() < 0 {
+		return fmt.Errorf("investigation.tool_timeout must be >= 0 (0 = use the default 60s), got %v", c.Investigation.ToolTimeout.Std())
+	}
 	switch c.Actions.Mode {
 	case "", ActionOff, ActionSuggest:
 		return nil // read-only-ish: nothing to execute

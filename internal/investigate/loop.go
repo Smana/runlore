@@ -394,9 +394,18 @@ func (li *LoopInvestigator) runTool(ctx context.Context, byName map[string]Tool,
 	}
 	tstart := time.Now()
 	out, err := tool.Call(tctx, tc.Args)
+	// Classify the result BEFORE recording the metric so the per-tool timeout path
+	// gets a distinct result="timeout" label rather than the generic "error". The
+	// detection condition mirrors the non-fatal return below: the per-tool deadline
+	// fired (tctx expired) but the parent investigation is NOT itself done (ctx.Err()
+	// is nil), so the loop can continue with other tools.
+	isPerToolTimeout := li.ToolTimeout > 0 && err != nil && errors.Is(tctx.Err(), context.DeadlineExceeded) && ctx.Err() == nil
 	if li.Metrics != nil {
 		tres := "ok"
-		if err != nil {
+		switch {
+		case isPerToolTimeout:
+			tres = "timeout"
+		case err != nil:
 			tres = "error"
 		}
 		li.Metrics.ToolCalls.Add(ctx, 1, metric.WithAttributes(
@@ -411,7 +420,7 @@ func (li *LoopInvestigator) runTool(ctx context.Context, byName map[string]Tool,
 		// parent ctx is also done (the investigation deadline, or an upstream cancel), fall
 		// through to the normal error path so the loop's deadline handling takes over —
 		// don't mask the investigation-level deadline as a per-tool timeout.
-		if li.ToolTimeout > 0 && errors.Is(tctx.Err(), context.DeadlineExceeded) && ctx.Err() == nil {
+		if isPerToolTimeout {
 			li.Log.Warn("tool call hit per-tool timeout",
 				"tool", tc.Name, "tool_timeout", li.ToolTimeout)
 			return fmt.Sprintf("tool %q timed out after %s", tc.Name, li.ToolTimeout)

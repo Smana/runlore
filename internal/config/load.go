@@ -72,6 +72,14 @@ func applyDefaults(c *Config) {
 	if c.Investigation.Timeout == 0 {
 		c.Investigation.Timeout = Duration(10 * time.Minute)
 	}
+	// Per-tool-call timeout: default to 60s when unset so one hung tool can't eat
+	// the whole per-investigation budget while still allowing legitimately slow queries
+	// (log scans, range PromQL) to finish. BuildInvestigator's 0→60s guard becomes a
+	// no-op when already defaulted here; it remains as a safety net for callers that
+	// bypass Load (e.g. tests that build a LoopInvestigator directly).
+	if c.Investigation.ToolTimeout == 0 {
+		c.Investigation.ToolTimeout = Duration(60 * time.Second)
+	}
 	// Instant-recall trust defaults: when enabled without explicit tuning, keep the
 	// margin and solo gates active. A zero margin_gap/solo_floor would degrade recall
 	// to a bare similarity threshold — the exact brittleness this feature removes.

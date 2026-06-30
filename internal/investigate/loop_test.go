@@ -443,6 +443,100 @@ func TestRunToolTimeoutDisabled(t *testing.T) {
 	}
 }
 
+// TestRunToolTimeoutMetricLabel verifies that a per-tool timeout is recorded with
+// result="timeout" (not "error") so it is distinguishable from a real backend
+// failure in dashboards/alerts. The fix moved timeout classification BEFORE the
+// metric block so the correct label reaches the counter.
+func TestRunToolTimeoutMetricLabel(t *testing.T) {
+	t.Cleanup(func() { otel.SetMeterProvider(noop.NewMeterProvider()) })
+
+	h, shutdown, err := telemetry.Setup(context.Background())
+	if err != nil {
+		t.Fatalf("telemetry setup: %v", err)
+	}
+	t.Cleanup(func() { _ = shutdown(context.Background()) })
+	m := telemetry.NewMetrics()
+
+	tool := &blockingTool{name: "hung_tool"}
+	li := &LoopInvestigator{
+		Log:         slog.New(slog.NewTextHandler(io.Discard, nil)),
+		ToolTimeout: 20 * time.Millisecond,
+		Metrics:     m,
+	}
+	byName := map[string]Tool{tool.Name(): tool}
+
+	// Parent ctx has a far longer deadline so only the per-tool timeout fires.
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	out := li.runTool(ctx, byName, providers.ToolCall{ID: "1", Name: tool.Name(), Args: "{}"})
+	if !strings.Contains(strings.ToLower(out), "timed out") {
+		t.Fatalf("expected a timed-out message, got %q", out)
+	}
+
+	// Scrape /metrics and confirm result="timeout" appears (not result="error").
+	req := httptest.NewRequest(http.MethodGet, "/metrics", nil)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	body := rec.Body.String()
+	if !strings.Contains(body, `result="timeout"`) {
+		t.Fatalf("per-tool timeout must record result=\"timeout\", not result=\"error\":\n%s", body)
+	}
+	if strings.Contains(body, `result="error"`) {
+		t.Fatalf("per-tool timeout must NOT record result=\"error\" (it was mis-classified before the fix):\n%s", body)
+	}
+}
+
+// TestInvestigatePerToolTimeoutNonFatal is a loop-level integration test proving
+// the full path: a model requests a hung tool, the per-tool timeout fires (non-
+// fatal), the loop records the "timed out" message in history and continues to a
+// second model call, which submits findings — the investigation reaches a result
+// rather than aborting.
+func TestInvestigatePerToolTimeoutNonFatal(t *testing.T) {
+	hung := &blockingTool{name: "hung_tool"}
+
+	// The scriptModel returns two responses:
+	//   1. request the blocking tool
+	//   2. after seeing the timed-out result in history, submit findings
+	model := &scriptModel{responses: []providers.CompletionResponse{
+		{ToolCalls: []providers.ToolCall{{ID: "1", Name: hung.Name(), Args: "{}"}}},
+		{ToolCalls: []providers.ToolCall{{ID: "2", Name: submitFindingsName,
+			Args: `{"confidence":0.7,"root_causes":[{"summary":"found despite hung tool"}]}`}}},
+	}}
+
+	var got *providers.Investigation
+	li := &LoopInvestigator{
+		Model:       model,
+		Tools:       []Tool{hung},
+		Log:         slog.New(slog.NewTextHandler(io.Discard, nil)),
+		MaxSteps:    5,
+		ToolTimeout: 20 * time.Millisecond, // short so the test is fast
+		OnComplete:  func(inv providers.Investigation) { got = &inv },
+	}
+	if err := li.Investigate(context.Background(), Request{Title: "HungToolTest"}); err != nil {
+		t.Fatalf("Investigate: %v", err)
+	}
+	// The loop must have reached a result (non-fatal timeout → loop continued).
+	if got == nil {
+		t.Fatal("investigation must deliver a result when a tool times out (non-fatal)")
+	}
+	if len(got.RootCauses) != 1 || got.RootCauses[0].Summary != "found despite hung tool" {
+		t.Fatalf("unexpected finding: %+v", got)
+	}
+	// The model must have been called twice: once to get the tool call, once
+	// after the timed-out message was recorded in history.
+	if model.i != 2 {
+		t.Fatalf("expected 2 model calls (tool request + findings after timeout), got %d", model.i)
+	}
+	// The blocking tool must have been called exactly once and its context must
+	// have expired via the per-tool deadline (not the parent investigation).
+	if hung.calls != 1 {
+		t.Fatalf("hung_tool should have been called exactly once, got %d", hung.calls)
+	}
+	if !errors.Is(hung.ctxExpiry, context.DeadlineExceeded) {
+		t.Fatalf("hung_tool context should have expired via deadline, got %v", hung.ctxExpiry)
+	}
+}
+
 // errModel returns a plain (non-context) error on Complete — a backend rejecting
 // the request (auth, 5xx, malformed response), distinct from the deadline path.
 type errModel struct {
