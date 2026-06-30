@@ -36,6 +36,30 @@ type Tool interface {
 	Call(ctx context.Context, args string) (string, error)
 }
 
+// incidentScoped is implemented by tools that must be bound to the incident's own
+// namespace before use (currently pod_logs, whose namespace allowlist includes the
+// incident namespace). The loop calls this per investigation when assembling tools,
+// since a single LoopInvestigator instance serves many requests. A tool not
+// implementing this interface is used unchanged.
+type incidentScoped interface {
+	withIncidentNamespace(ns string) Tool
+}
+
+// scopeTools binds any incident-scoped tools to this investigation's namespace,
+// returning a fresh slice so the shared li.Tools is never mutated. Non-scoped tools
+// pass through unchanged.
+func scopeTools(tools []Tool, incidentNamespace string) []Tool {
+	scoped := make([]Tool, len(tools))
+	for i, t := range tools {
+		if s, ok := t.(incidentScoped); ok {
+			scoped[i] = s.withIncidentNamespace(incidentNamespace)
+			continue
+		}
+		scoped[i] = t
+	}
+	return scoped
+}
+
 // submitFindingsName is the reserved tool the model calls to finish, supplying
 // the structured investigation result.
 const submitFindingsName = "submit_findings"

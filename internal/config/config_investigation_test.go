@@ -112,12 +112,16 @@ investigation:
   max_steps: 15
   max_tool_output_bytes: 16384
   max_tokens_per_investigation: 120000
+  pod_log_namespaces: [flux-system, kube-system]
 telemetry:
   metrics_enabled: true
 `
 	var c Config
 	if err := yaml.Unmarshal([]byte(y), &c); err != nil {
 		t.Fatalf("unmarshal: %v", err)
+	}
+	if got := strings.Join(c.Investigation.PodLogNamespaces, ","); got != "flux-system,kube-system" {
+		t.Fatalf("pod_log_namespaces: got %q", got)
 	}
 	if !c.Investigation.Coalesce.Enabled {
 		t.Fatal("coalesce.enabled should be true")
