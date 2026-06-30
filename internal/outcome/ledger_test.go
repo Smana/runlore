@@ -6,7 +6,6 @@ import (
 	"math/rand"
 	"os"
 	"path/filepath"
-	"reflect"
 	"sync"
 	"testing"
 	"time"
@@ -52,8 +51,22 @@ func assertCacheEqualsReplay(t *testing.T, l *Ledger, path string) {
 		t.Fatalf("OpenCounts: %v", err)
 	}
 	want := replayOpenCounts(t, path)
-	if !reflect.DeepEqual(cached, want) {
-		t.Fatalf("cache != replay\n cached=%+v\n replay=%+v", cached, want)
+	if len(cached) != len(want) {
+		t.Fatalf("cache != replay (entries %d vs %d)\n cached=%+v\n replay=%+v", len(cached), len(want), cached, want)
+	}
+	// Compare field-by-field. LastConfirmed is a time.Time and MUST be compared by
+	// instant (.Equal), not reflect.DeepEqual: the cache holds in-memory (time.Local)
+	// times while the replay holds JSON-parsed times, so their *Location pointers differ
+	// (e.g. time.Local vs time.UTC when the process runs in UTC, as CI does) even when
+	// the instants are identical — DeepEqual would spuriously fail.
+	for k, w := range want {
+		got, ok := cached[k]
+		if !ok {
+			t.Fatalf("cache missing entry %q\n cached=%+v\n replay=%+v", k, cached, want)
+		}
+		if got.Recalls != w.Recalls || got.Resolved != w.Resolved || !got.LastConfirmed.Equal(w.LastConfirmed) {
+			t.Fatalf("cache != replay for %q: cached=%+v replay=%+v", k, got, w)
+		}
 	}
 }
 
