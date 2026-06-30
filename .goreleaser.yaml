@@ -1,7 +1,9 @@
-# GoReleaser builds and publishes the signed cross-platform `lore` binaries.
-# Scope: BINARIES ONLY. The container image is built and signed separately by
-# .github/workflows/build-image.yml on the same v* tag, and CHANGELOG.md is owned
-# by release-please — so docker and changelog are deliberately absent here.
+# GoReleaser builds and publishes the signed cross-platform `lore` binaries AND the
+# signed multi-arch (linux/amd64 + linux/arm64) container image on each v* tag.
+# The same goreleaser-built `lore` binary ships in the archives and the image, so
+# there is no version-skew hazard between them.
+# Scope here: binaries + image. CHANGELOG.md is owned by release-please (changelog is
+# disabled below). build-image.yml only does PR/main validation, not release builds.
 # Docs: https://goreleaser.com
 version: 2
 
@@ -20,8 +22,9 @@ builds:
     goarch:
       - amd64
       - arm64
-    # MUST stay in sync with the Dockerfile / build-image.yml ldflags so the binary
-    # and the image report the same version (`-X main.version`, see cmd/lore/main.go).
+    # Stamps the version into the binary (`-X main.version`, see cmd/lore/main.go).
+    # This same binary is what the dockers step COPYs into the image, so the archive
+    # and the image always report an identical version.
     ldflags:
       - -s -w -X main.version={{.Version}}
 
@@ -66,6 +69,80 @@ signs:
     # cosign writes a single ${artifact}.bundle; tell GoReleaser to publish THAT as
     # the signature artifact (its default is the now-nonexistent ${artifact}.sig).
     signature: "${artifact}.bundle"
+    output: true
+
+# Multi-arch container image. One `dockers` entry per architecture builds a
+# single-platform image from the prebuilt `lore` binary (no in-image compile —
+# Dockerfile.goreleaser is COPY-only), tagged with an arch suffix. `docker_manifests`
+# then fuses the two into the user-facing multi-arch tags. ghcr/OCI refs MUST be
+# lowercase, so the owner is written `smana` (the GitHub repo is github.com/Smana).
+dockers:
+  - id: lore-amd64
+    use: buildx
+    goos: linux
+    goarch: amd64
+    ids:
+      - lore
+    dockerfile: Dockerfile.goreleaser
+    image_templates:
+      - "ghcr.io/smana/runlore:{{ .Version }}-amd64"
+    build_flag_templates:
+      - "--platform=linux/amd64"
+      # Buildx-native supply-chain attestations attached to the image:
+      #   provenance mode=max -> full SLSA build provenance (steps + materials)
+      #   sbom=true           -> SPDX SBOM attestation generated from the build
+      - "--provenance=mode=max"
+      - "--sbom=true"
+      - "--label=org.opencontainers.image.source=https://github.com/Smana/runlore"
+      - "--label=org.opencontainers.image.version={{ .Version }}"
+      - "--label=org.opencontainers.image.revision={{ .FullCommit }}"
+      - "--label=org.opencontainers.image.created={{ .Date }}"
+  - id: lore-arm64
+    use: buildx
+    goos: linux
+    goarch: arm64
+    ids:
+      - lore
+    dockerfile: Dockerfile.goreleaser
+    image_templates:
+      - "ghcr.io/smana/runlore:{{ .Version }}-arm64"
+    build_flag_templates:
+      - "--platform=linux/arm64"
+      - "--provenance=mode=max"
+      - "--sbom=true"
+      - "--label=org.opencontainers.image.source=https://github.com/Smana/runlore"
+      - "--label=org.opencontainers.image.version={{ .Version }}"
+      - "--label=org.opencontainers.image.revision={{ .FullCommit }}"
+      - "--label=org.opencontainers.image.created={{ .Date }}"
+
+# Fuse the two per-arch images into the final multi-arch tags. Each manifest list
+# references the arch-suffixed images built above.
+docker_manifests:
+  - name_template: "ghcr.io/smana/runlore:{{ .Version }}"
+    image_templates:
+      - "ghcr.io/smana/runlore:{{ .Version }}-amd64"
+      - "ghcr.io/smana/runlore:{{ .Version }}-arm64"
+  - name_template: "ghcr.io/smana/runlore:{{ .Major }}.{{ .Minor }}"
+    image_templates:
+      - "ghcr.io/smana/runlore:{{ .Version }}-amd64"
+      - "ghcr.io/smana/runlore:{{ .Version }}-arm64"
+  - name_template: "ghcr.io/smana/runlore:latest"
+    image_templates:
+      - "ghcr.io/smana/runlore:{{ .Version }}-amd64"
+      - "ghcr.io/smana/runlore:{{ .Version }}-arm64"
+
+# Keyless (Sigstore) cosign signing of the multi-arch manifest lists, by digest.
+# Runs under the job's id-token: write, so cosign gets a short-lived Fulcio cert
+# from the OIDC token and records the signature in Rekor — no long-lived keys.
+# `artifacts: manifests` signs the manifest list (not each per-arch image); cosign's
+# recursive verification still covers the referenced per-arch images.
+docker_signs:
+  - artifacts: manifests
+    cmd: cosign
+    args:
+      - "sign"
+      - "--yes"
+      - "${artifact}"
     output: true
 
 # release-please owns CHANGELOG.md; don't let GoReleaser generate its own.
