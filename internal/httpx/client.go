@@ -4,12 +4,19 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"strings"
 	"time"
 )
 
 // maxRedirects caps a redirect chain (Go's implicit default is also 10; we make it
 // explicit because installing a CheckRedirect replaces that default).
 const maxRedirects = 10
+
+// sensitiveAuthHeaders are request headers that carry a provider credential. Go's
+// net/http strips Authorization/Cookie itself on a host-changing redirect but NOT
+// custom headers, so DenyInternalRedirect deletes these explicitly (canonical form;
+// http.Header.Del is case-insensitive). x-api-key = Anthropic, x-goog-api-key = Gemini.
+var sensitiveAuthHeaders = []string{"X-Api-Key", "X-Goog-Api-Key", "Authorization"}
 
 // SecureClient returns an http.Client with the given timeout and the
 // DenyInternalRedirect policy. Use it for every outbound call to an operator- or
@@ -32,6 +39,17 @@ func SecureClient(timeout time.Duration) *http.Client {
 func DenyInternalRedirect(req *http.Request, via []*http.Request) error {
 	if len(via) >= maxRedirects {
 		return fmt.Errorf("stopped after %d redirects", maxRedirects)
+	}
+	// Strip provider key headers when a redirect changes host, so a credential is never
+	// replayed to a different host (a compromised/MITM upstream, or an http endpoint
+	// 3xx-ing elsewhere). Hostname-only compare (ignore port) keeps a same-host
+	// http→https upgrade authenticated. Guard the nil entries that the cap test passes.
+	if n := len(via); n > 0 && via[n-1] != nil {
+		if !strings.EqualFold(req.URL.Hostname(), via[n-1].URL.Hostname()) {
+			for _, h := range sensitiveAuthHeaders {
+				req.Header.Del(h)
+			}
+		}
 	}
 	// In-cluster-origin chains redirect among private addresses legitimately — only
 	// guard chains that began at a public endpoint.
