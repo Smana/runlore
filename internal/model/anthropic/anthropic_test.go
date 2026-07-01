@@ -93,7 +93,7 @@ func TestAnthropicErrorDetail(t *testing.T) {
 	}
 
 	// A message with control characters must be sanitized (no log injection).
-	inj := anthropicErrorDetail([]byte(`{"error":{"type":"x","message":"line1\nline2[2Kforged"}}`))
+	inj := anthropicErrorDetail([]byte(`{"error":{"type":"x","message":"line1\nline2\u001b[2Kforged"}}`))
 	if strings.ContainsAny(inj, "\n\r\x1b") {
 		t.Errorf("detail leaked control chars: %q", inj)
 	}
