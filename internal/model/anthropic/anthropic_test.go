@@ -104,6 +104,37 @@ func TestAnthropicErrorDetail(t *testing.T) {
 	}
 }
 
+// TestNon2xxPermanence asserts a 4xx other than 429 is classified permanent (so the
+// investigation workqueue drops it), while 429 and 5xx stay transient (retryable).
+func TestNon2xxPermanence(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		code int
+		want bool
+	}{
+		{"400 is permanent", http.StatusBadRequest, true},
+		{"403 is permanent", http.StatusForbidden, true},
+		{"429 is transient", http.StatusTooManyRequests, false},
+		{"502 is transient", http.StatusBadGateway, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				w.WriteHeader(tc.code)
+			}))
+			defer srv.Close()
+			_, err := New(srv.URL, "claude-x", "k", 0).Complete(context.Background(), providers.CompletionRequest{
+				Messages: []providers.Message{{Role: "user", Content: "hi"}},
+			})
+			if err == nil {
+				t.Fatal("want error for non-2xx response")
+			}
+			if got := providers.IsPermanent(err); got != tc.want {
+				t.Errorf("IsPermanent(status %d) = %v, want %v", tc.code, got, tc.want)
+			}
+		})
+	}
+}
+
 // TestComplete drives a full Anthropic SSE stream — message_start (input usage),
 // a text content block, a tool_use block assembled from input_json_delta fragments,
 // content_block_stop, message_delta (stop_reason + output usage), message_stop — and
