@@ -63,7 +63,7 @@ func TestNon2xxErrorOmitsBody(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	_, err := New(srv.URL, "test-model", "k", 0).Complete(context.Background(), providers.CompletionRequest{
+	_, err := New(srv.URL, "test-model", "k", 0, "").Complete(context.Background(), providers.CompletionRequest{
 		Messages: []providers.Message{{Role: "user", Content: "hi"}},
 	})
 	if err == nil {
@@ -139,7 +139,7 @@ func TestNon2xxPermanence(t *testing.T) {
 				w.WriteHeader(tc.code)
 			}))
 			defer srv.Close()
-			_, err := New(srv.URL, "test-model", "k", 0).Complete(context.Background(), providers.CompletionRequest{
+			_, err := New(srv.URL, "test-model", "k", 0, "").Complete(context.Background(), providers.CompletionRequest{
 				Messages: []providers.Message{{Role: "user", Content: "hi"}},
 			})
 			if err == nil {
@@ -175,7 +175,7 @@ func TestComplete(t *testing.T) {
 	})
 	defer srv.Close()
 
-	c := New(srv.URL, "test-model", "k", 16384)
+	c := New(srv.URL, "test-model", "k", 16384, "")
 	resp, err := c.Complete(context.Background(), providers.CompletionRequest{
 		System:   "sys",
 		Messages: []providers.Message{{Role: "user", Content: "hi"}},
@@ -242,7 +242,7 @@ func TestToolChoice(t *testing.T) {
 			srv := sseServer(t, func(r *http.Request) { body, _ = io.ReadAll(r.Body) }, events)
 			defer srv.Close()
 
-			_, err := New(srv.URL, "test-model", "k", 0).Complete(context.Background(), providers.CompletionRequest{
+			_, err := New(srv.URL, "test-model", "k", 0, "").Complete(context.Background(), providers.CompletionRequest{
 				Messages:   []providers.Message{{Role: "user", Content: "hi"}},
 				Tools:      []providers.ToolSpec{{Name: "submit_verdicts", Description: "d", Schema: `{"type":"object"}`}},
 				ToolChoice: tc.choice,
@@ -277,6 +277,55 @@ func TestToolChoice(t *testing.T) {
 	}
 }
 
+// TestEffort asserts a configured effort maps to the chat-completions
+// "reasoning_effort" field — and that an empty effort omits the field entirely
+// (today's requests, unchanged).
+func TestEffort(t *testing.T) {
+	events := []string{
+		`data: {"choices":[{"index":0,"delta":{"content":"ok"},"finish_reason":"stop"}]}` + "\n\n",
+		"data: [DONE]\n\n",
+	}
+	cases := []struct {
+		name   string
+		effort string
+	}{
+		{"effort set", "minimal"},
+		{"empty omits the field", ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var body []byte
+			srv := sseServer(t, func(r *http.Request) { body, _ = io.ReadAll(r.Body) }, events)
+			defer srv.Close()
+
+			_, err := New(srv.URL, "test-model", "k", 0, tc.effort).Complete(context.Background(), providers.CompletionRequest{
+				Messages: []providers.Message{{Role: "user", Content: "hi"}},
+			})
+			if err != nil {
+				t.Fatalf("Complete: %v", err)
+			}
+			var got struct {
+				ReasoningEffort *string `json:"reasoning_effort"`
+			}
+			if err := json.Unmarshal(body, &got); err != nil {
+				t.Fatalf("decode request body: %v", err)
+			}
+			if tc.effort == "" {
+				if got.ReasoningEffort != nil {
+					t.Fatalf("reasoning_effort must be omitted when unset, got %q", *got.ReasoningEffort)
+				}
+				if strings.Contains(string(body), "reasoning_effort") {
+					t.Fatalf("request body must not carry a reasoning_effort key when unset: %s", body)
+				}
+				return
+			}
+			if got.ReasoningEffort == nil || *got.ReasoningEffort != tc.effort {
+				t.Fatalf("reasoning_effort = %v, want %q", got.ReasoningEffort, tc.effort)
+			}
+		})
+	}
+}
+
 // TestTruncation verifies a finish_reason of "length" flags Truncated while the
 // content accumulated so far is preserved.
 func TestTruncation(t *testing.T) {
@@ -287,7 +336,7 @@ func TestTruncation(t *testing.T) {
 		"data: [DONE]\n\n",
 	})
 	defer srv.Close()
-	resp, err := New(srv.URL, "test-model", "", 0).Complete(context.Background(), providers.CompletionRequest{
+	resp, err := New(srv.URL, "test-model", "", 0, "").Complete(context.Background(), providers.CompletionRequest{
 		Messages: []providers.Message{{Role: "user", Content: "hi"}},
 	})
 	if err != nil {
@@ -316,7 +365,7 @@ func TestRefusal(t *testing.T) {
 		"data: [DONE]\n\n",
 	})
 	defer srv.Close()
-	resp, err := New(srv.URL, "test-model", "", 0).Complete(context.Background(), providers.CompletionRequest{
+	resp, err := New(srv.URL, "test-model", "", 0, "").Complete(context.Background(), providers.CompletionRequest{
 		Messages: []providers.Message{{Role: "user", Content: "hi"}},
 	})
 	if err != nil {
@@ -349,7 +398,7 @@ func TestMidStreamDrop(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	_, err := New(srv.URL, "test-model", "", 0).Complete(context.Background(), providers.CompletionRequest{
+	_, err := New(srv.URL, "test-model", "", 0, "").Complete(context.Background(), providers.CompletionRequest{
 		Messages: []providers.Message{{Role: "user", Content: "hi"}},
 	})
 	if err == nil {
@@ -367,7 +416,7 @@ func TestUsageCachedTokens(t *testing.T) {
 		"data: [DONE]\n\n",
 	})
 	defer srv.Close()
-	resp, err := New(srv.URL, "m", "k", 0).Complete(context.Background(), providers.CompletionRequest{
+	resp, err := New(srv.URL, "m", "k", 0, "").Complete(context.Background(), providers.CompletionRequest{
 		Messages: []providers.Message{{Role: "user", Content: "hi"}},
 	})
 	if err != nil {
@@ -395,7 +444,7 @@ func TestEmptyToolResultKeepsContent(t *testing.T) {
 	})
 	defer srv.Close()
 
-	c := New(srv.URL, "test-model", "", 0)
+	c := New(srv.URL, "test-model", "", 0, "")
 	_, err := c.Complete(context.Background(), providers.CompletionRequest{
 		Messages: []providers.Message{
 			{Role: "user", Content: "investigate"},

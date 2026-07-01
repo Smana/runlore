@@ -1,6 +1,7 @@
 package config
 
 import (
+	"strings"
 	"testing"
 	"time"
 
@@ -204,6 +205,69 @@ func TestValidateRejectsNegativeMaxTokens(t *testing.T) {
 	ok := &Config{Model: Model{Provider: "anthropic", MaxTokens: 0, Verify: &ModelOverride{MaxTokens: 4096}}}
 	if err := ok.Validate(); err != nil {
 		t.Fatalf("non-negative max_tokens must validate clean: %v", err)
+	}
+}
+
+// TestValidateEffort locks in the per-provider effort vocabulary: anthropic
+// low|medium|high|max, openai (and any OpenAI-compatible/unknown provider)
+// minimal|low|medium|high, gemini rejected outright, and empty always fine
+// (effort is opt-in — unset keeps today's requests unchanged). The verify
+// override validates against its EFFECTIVE provider and effort (inherit-when-
+// empty, mirroring BuildVerifyModel).
+func TestValidateEffort(t *testing.T) {
+	cases := []struct {
+		name    string
+		model   Model
+		wantErr string // "" = must validate clean; otherwise a substring of the error
+	}{
+		{"empty effort is fine", Model{Provider: "anthropic"}, ""},
+		{"anthropic low", Model{Provider: "anthropic", Effort: "low"}, ""},
+		{"anthropic medium", Model{Provider: "anthropic", Effort: "medium"}, ""},
+		{"anthropic high", Model{Provider: "anthropic", Effort: "high"}, ""},
+		{"anthropic max", Model{Provider: "anthropic", Effort: "max"}, ""},
+		{"anthropic rejects minimal", Model{Provider: "anthropic", Effort: "minimal"}, "model.effort"},
+		{"openai minimal", Model{Provider: "openai", Effort: "minimal"}, ""},
+		{"openai high", Model{Provider: "openai", Effort: "high"}, ""},
+		{"openai rejects max", Model{Provider: "openai", Effort: "max"}, "model.effort"},
+		{"empty provider defaults to openai vocabulary", Model{Effort: "minimal"}, ""},
+		{"unknown provider uses the openai vocabulary", Model{Provider: "vllm", Effort: "low"}, ""},
+		{"gemini rejects effort", Model{Provider: "gemini", Effort: "low"}, "not supported for provider gemini"},
+		{"gemini without effort is fine", Model{Provider: "gemini"}, ""},
+		{
+			"verify override inherits the parent effort and provider",
+			Model{Provider: "anthropic", Effort: "max", Verify: &ModelOverride{Model: "cheap"}},
+			"",
+		},
+		{
+			"verify override effort validated against its own vocabulary",
+			Model{Provider: "anthropic", Verify: &ModelOverride{Effort: "minimal"}},
+			"model.verify.effort",
+		},
+		{
+			"inherited parent effort invalid for the override provider",
+			Model{Provider: "anthropic", Effort: "max", Verify: &ModelOverride{Provider: "openai"}},
+			"model.verify.effort",
+		},
+		{
+			"verify override to gemini rejects an inherited effort",
+			Model{Provider: "anthropic", Effort: "high", Verify: &ModelOverride{Provider: "gemini"}},
+			"not supported for provider gemini",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			c := &Config{Model: tc.model}
+			err := c.Validate()
+			if tc.wantErr == "" {
+				if err != nil {
+					t.Fatalf("Validate() = %v, want nil", err)
+				}
+				return
+			}
+			if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+				t.Fatalf("Validate() = %v, want an error containing %q", err, tc.wantErr)
+			}
+		})
 	}
 }
 

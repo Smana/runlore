@@ -47,7 +47,7 @@ func TestNon2xxErrorOmitsBody(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	_, err := New(srv.URL, "claude-x", "k", 0).Complete(context.Background(), providers.CompletionRequest{
+	_, err := New(srv.URL, "claude-x", "k", 0, "").Complete(context.Background(), providers.CompletionRequest{
 		Messages: []providers.Message{{Role: "user", Content: "hi"}},
 	})
 	if err == nil {
@@ -122,7 +122,7 @@ func TestNon2xxPermanence(t *testing.T) {
 				w.WriteHeader(tc.code)
 			}))
 			defer srv.Close()
-			_, err := New(srv.URL, "claude-x", "k", 0).Complete(context.Background(), providers.CompletionRequest{
+			_, err := New(srv.URL, "claude-x", "k", 0, "").Complete(context.Background(), providers.CompletionRequest{
 				Messages: []providers.Message{{Role: "user", Content: "hi"}},
 			})
 			if err == nil {
@@ -194,7 +194,7 @@ data: {"type":"message_stop"}
 	})
 	defer srv.Close()
 
-	c := New(srv.URL, "claude-x", "k", 16384)
+	c := New(srv.URL, "claude-x", "k", 16384, "")
 	resp, err := c.Complete(context.Background(), providers.CompletionRequest{
 		System:   "sys",
 		Messages: []providers.Message{{Role: "user", Content: "hi"}},
@@ -280,7 +280,7 @@ data: {"type":"message_stop"}
 `,
 			})
 			defer srv.Close()
-			resp, err := New(srv.URL, "claude-x", "k", 0).Complete(context.Background(), providers.CompletionRequest{
+			resp, err := New(srv.URL, "claude-x", "k", 0, "").Complete(context.Background(), providers.CompletionRequest{
 				Messages: []providers.Message{{Role: "user", Content: "hi"}},
 			})
 			if err != nil {
@@ -320,7 +320,7 @@ data: {"type":"message_stop"}
 `,
 	})
 	defer srv.Close()
-	resp, err := New(srv.URL, "claude-x", "k", 0).Complete(context.Background(), providers.CompletionRequest{
+	resp, err := New(srv.URL, "claude-x", "k", 0, "").Complete(context.Background(), providers.CompletionRequest{
 		Messages: []providers.Message{{Role: "user", Content: "hi"}},
 	})
 	if err != nil {
@@ -359,7 +359,7 @@ data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text
 	}))
 	defer srv.Close()
 
-	_, err := New(srv.URL, "claude-x", "k", 0).Complete(context.Background(), providers.CompletionRequest{
+	_, err := New(srv.URL, "claude-x", "k", 0, "").Complete(context.Background(), providers.CompletionRequest{
 		Messages: []providers.Message{{Role: "user", Content: "hi"}},
 	})
 	if err == nil {
@@ -397,7 +397,7 @@ data: {"type":"message_stop"}
 	})
 	defer srv.Close()
 
-	_, err := New(srv.URL, "claude-x", "k", 0).Complete(context.Background(), providers.CompletionRequest{
+	_, err := New(srv.URL, "claude-x", "k", 0, "").Complete(context.Background(), providers.CompletionRequest{
 		Messages: []providers.Message{
 			{Role: "user", Content: "investigate"},
 			{Role: "assistant", ToolCalls: []providers.ToolCall{
@@ -439,7 +439,7 @@ func TestPromptCacheHistoryBreakpoint(t *testing.T) {
 	})
 	defer srv.Close()
 
-	_, err := New(srv.URL, "claude-x", "k", 0).Complete(context.Background(), providers.CompletionRequest{
+	_, err := New(srv.URL, "claude-x", "k", 0, "").Complete(context.Background(), providers.CompletionRequest{
 		System: "sys",
 		Messages: []providers.Message{
 			{Role: "user", Content: "incident"},
@@ -493,7 +493,7 @@ func TestUsageCacheFields(t *testing.T) {
 		"event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n",
 	})
 	defer srv.Close()
-	resp, err := New(srv.URL, "claude-x", "k", 0).Complete(context.Background(), providers.CompletionRequest{
+	resp, err := New(srv.URL, "claude-x", "k", 0, "").Complete(context.Background(), providers.CompletionRequest{
 		Messages: []providers.Message{{Role: "user", Content: "hi"}},
 	})
 	if err != nil {
@@ -526,7 +526,7 @@ func TestToolChoice(t *testing.T) {
 			srv := sseServer(t, func(r *http.Request) { body, _ = io.ReadAll(r.Body) }, events)
 			defer srv.Close()
 
-			_, err := New(srv.URL, "claude-x", "k", 0).Complete(context.Background(), providers.CompletionRequest{
+			_, err := New(srv.URL, "claude-x", "k", 0, "").Complete(context.Background(), providers.CompletionRequest{
 				Messages:   []providers.Message{{Role: "user", Content: "hi"}},
 				Tools:      []providers.ToolSpec{{Name: "submit_verdicts", Description: "d", Schema: `{"type":"object"}`}},
 				ToolChoice: tc.choice,
@@ -554,6 +554,65 @@ func TestToolChoice(t *testing.T) {
 			}
 			if got.ToolChoice == nil || got.ToolChoice.Type != "tool" || got.ToolChoice.Name != tc.choice {
 				t.Fatalf(`tool_choice = %+v, want {"type":"tool","name":%q}`, got.ToolChoice, tc.choice)
+			}
+		})
+	}
+}
+
+// TestEffort asserts a configured effort maps to Anthropic's
+// {"output_config":{"effort":"<level>"}} — and that an empty effort omits the
+// field entirely (today's requests, unchanged).
+func TestEffort(t *testing.T) {
+	events := []string{
+		"event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"usage\":{\"input_tokens\":1}}}\n\n",
+		"event: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{\"output_tokens\":1}}\n\n",
+		"event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n",
+	}
+	cases := []struct {
+		name   string
+		effort string
+	}{
+		{"effort set", "high"},
+		{"empty omits the field", ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var body []byte
+			srv := sseServer(t, func(r *http.Request) { body, _ = io.ReadAll(r.Body) }, events)
+			defer srv.Close()
+
+			_, err := New(srv.URL, "claude-x", "k", 0, tc.effort).Complete(context.Background(), providers.CompletionRequest{
+				Messages: []providers.Message{{Role: "user", Content: "hi"}},
+			})
+			if err != nil {
+				t.Fatalf("Complete: %v", err)
+			}
+			var got struct {
+				OutputConfig *struct {
+					Effort string `json:"effort"`
+				} `json:"output_config"`
+				Thinking json.RawMessage `json:"thinking"`
+			}
+			if err := json.Unmarshal(body, &got); err != nil {
+				t.Fatalf("decode request body: %v", err)
+			}
+			// effort must never drag a thinking param along: adaptive thinking in a
+			// multi-turn tool loop needs signed thinking-block replay, which the
+			// provider-agnostic history can't carry.
+			if got.Thinking != nil {
+				t.Fatalf("request must not carry a thinking param, got %s", got.Thinking)
+			}
+			if tc.effort == "" {
+				if got.OutputConfig != nil {
+					t.Fatalf("output_config must be omitted when effort is unset, got %+v", got.OutputConfig)
+				}
+				if strings.Contains(string(body), "output_config") {
+					t.Fatalf("request body must not carry an output_config key when effort is unset: %s", body)
+				}
+				return
+			}
+			if got.OutputConfig == nil || got.OutputConfig.Effort != tc.effort {
+				t.Fatalf(`output_config = %+v, want {"effort":%q}`, got.OutputConfig, tc.effort)
 			}
 		})
 	}
@@ -589,7 +648,7 @@ data: {"type":"message_stop"}
 	})
 	defer srv.Close()
 
-	_, err := New(srv.URL, "claude-x", "k", 0).Complete(context.Background(), providers.CompletionRequest{
+	_, err := New(srv.URL, "claude-x", "k", 0, "").Complete(context.Background(), providers.CompletionRequest{
 		Messages: []providers.Message{{Role: "user", Content: "hi"}},
 		Tools: []providers.ToolSpec{
 			{Name: "a", Description: "d", Schema: `{"type":"object"}`},
