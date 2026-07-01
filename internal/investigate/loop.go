@@ -498,7 +498,8 @@ func (li *LoopInvestigator) deliver(req Request, inv providers.Investigation) {
 
 // redactInvestigation masks secret-shaped values in a finished investigation's
 // human-facing text (title; each root cause's summary, evidence, and suggested
-// action; unresolved notes; proposed-action descriptions) before it is delivered.
+// action; unresolved notes; proposed-action names and descriptions) before it is
+// delivered.
 func redactInvestigation(inv *providers.Investigation) {
 	inv.Title = redact.Secrets(inv.Title)
 	for i := range inv.RootCauses {
@@ -513,6 +514,11 @@ func redactInvestigation(inv *providers.Investigation) {
 		inv.Unresolved[i] = redact.Secrets(inv.Unresolved[i])
 	}
 	for i := range inv.Actions {
+		// Name and Description both carry model-authored text (buildInvestigation
+		// copies the description into Name), and both are serialized verbatim on
+		// GET /actions — scrub both. Target is left alone: it is a Kubernetes
+		// resource identifier the executor acts on, not free text.
+		inv.Actions[i].Name = redact.Secrets(inv.Actions[i].Name)
 		inv.Actions[i].Description = redact.Secrets(inv.Actions[i].Description)
 	}
 }
