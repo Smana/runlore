@@ -1003,4 +1003,60 @@ func TestSeedPrompt(t *testing.T) {
 			t.Errorf("seed prompt should omit empty environment, got %q", got)
 		}
 	})
+	t.Run("anchors the incident start time so the model can size tool windows", func(t *testing.T) {
+		at := time.Now().Add(-42 * time.Minute)
+		got := seedPrompt(Request{Title: "PodCrashLooping", Source: SourceAlert, At: at})
+		if !strings.Contains(got, "Incident started: "+at.UTC().Format(time.RFC3339)) {
+			t.Errorf("seed prompt missing incident start time, got %q", got)
+		}
+		if !strings.Contains(got, "42m before now") {
+			t.Errorf("seed prompt missing relative age (42m), got %q", got)
+		}
+		if !strings.Contains(got, "since_minutes") {
+			t.Errorf("seed prompt should tell the model how to aim tool windows at the start time, got %q", got)
+		}
+	})
+	t.Run("omits the start line when At is zero", func(t *testing.T) {
+		got := seedPrompt(Request{Title: "X", Source: SourceAlert})
+		if strings.Contains(got, "Incident started:") {
+			t.Errorf("seed prompt should omit a zero start time, got %q", got)
+		}
+	})
+	t.Run("carries alert labels and annotations", func(t *testing.T) {
+		req := Request{
+			Title:  "KubePodCrashLooping",
+			Source: SourceAlert,
+			Labels: map[string]string{
+				"alertname": "KubePodCrashLooping",
+				"pod":       "web-abc123",
+				"container": "app",
+			},
+			Annotations: map[string]string{
+				"runbook_url": "https://runbooks.example/crashloop",
+				"description": "already surfaced as the message",
+			},
+			Message: "already surfaced as the message",
+		}
+		got := seedPrompt(req)
+		if !strings.Contains(got, `container="app"`) || !strings.Contains(got, `pod="web-abc123"`) {
+			t.Errorf("seed prompt missing alert labels, got %q", got)
+		}
+		if !strings.Contains(got, `runbook_url="https://runbooks.example/crashloop"`) {
+			t.Errorf("seed prompt missing runbook_url annotation, got %q", got)
+		}
+		// The annotation already surfaced as Message must not be duplicated.
+		if strings.Count(got, "already surfaced as the message") != 1 {
+			t.Errorf("description annotation duplicated in seed prompt, got %q", got)
+		}
+	})
+	t.Run("clips oversized label values", func(t *testing.T) {
+		long := strings.Repeat("x", 2000)
+		got := seedPrompt(Request{Title: "X", Source: SourceAlert, Labels: map[string]string{"big": long}})
+		if strings.Contains(got, long) {
+			t.Errorf("seed prompt should clip a 2000-char label value")
+		}
+		if !strings.Contains(got, "big=") {
+			t.Errorf("clipped label should still appear, got %q", got)
+		}
+	})
 }

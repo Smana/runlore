@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/Smana/runlore/internal/providers"
 	"github.com/Smana/runlore/internal/whatchanged"
@@ -52,7 +53,13 @@ func (t WhatChangedTool) Call(ctx context.Context, args string) (string, error) 
 	defer done()
 	var b strings.Builder
 	for _, c := range changes {
-		fmt.Fprintf(&b, "%s %s/%s (%s): %s..%s\n", c.Engine, c.Workload.Kind, c.Workload.Name, c.Type, c.FromRev, c.ToRev)
+		fmt.Fprintf(&b, "%s %s/%s (%s): %s..%s", c.Engine, c.Workload.Kind, c.Workload.Name, c.Type, c.FromRev, c.ToRev)
+		// When the engine knows WHEN the change landed, say so — "deploy at 14:02,
+		// first crash at 14:03" is the core change↔symptom correlation.
+		if !c.When.IsZero() {
+			fmt.Fprintf(&b, " at %s", c.When.UTC().Format(time.RFC3339))
+		}
+		b.WriteString("\n")
 		d, derr := t.GitOps.Diff(ctx, c)
 		if derr != nil {
 			fmt.Fprintf(&b, "  (diff error: %v)\n", derr)

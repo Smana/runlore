@@ -37,7 +37,7 @@ func (t QueryMetricsTool) Name() string { return "query_metrics" }
 
 // Description returns the tool description.
 func (t QueryMetricsTool) Description() string {
-	return "Run a PromQL instant query against the metrics backend (VictoriaMetrics/Prometheus) — check saturation, error rates, restarts, resource usage."
+	return "Run a PromQL instant query against the metrics backend (VictoriaMetrics/Prometheus) — check saturation, error rates, restarts, resource usage. This returns the value NOW only; to see when a metric started rising/spiking around the incident, use query_metrics_range instead."
 }
 
 // Schema returns the JSON schema for the arguments.
@@ -130,27 +130,39 @@ func (t QueryMetricsRangeTool) Call(ctx context.Context, args string) (string, e
 	renderRows(&b, len(series), "more series", func(i int) {
 		s := series[i]
 		first, last, lo, hi := summarize(s.Points)
-		fmt.Fprintf(&b, "%s first=%g last=%g min=%g max=%g\n", formatMetric(s.Metric), first, last, lo, hi)
+		fmt.Fprintf(&b, "%s first=%g last=%g min=%g%s max=%g%s\n",
+			formatMetric(s.Metric), first, last, lo.Value, atTime(lo.Time), hi.Value, atTime(hi.Time))
 	})
 	return b.String(), nil
 }
 
-// summarize reduces a series' points to first, last, min and max — the compact
-// trend an LLM needs to tell whether a metric climbed, spiked or recovered,
-// without shipping every sample. An empty series yields all zeros.
-func summarize(points []providers.Point) (first, last, lo, hi float64) {
+// atTime renders "@<RFC3339>" for a point's timestamp, or "" when the backend
+// returned no time — WHEN a metric peaked/bottomed is what lets the model
+// correlate the spike to a change/deploy timestamp.
+func atTime(t time.Time) string {
+	if t.IsZero() {
+		return ""
+	}
+	return "@" + t.UTC().Format(time.RFC3339)
+}
+
+// summarize reduces a series' points to first, last, and the min/max POINTS
+// (value + when it happened) — the compact trend an LLM needs to tell whether a
+// metric climbed, spiked or recovered, and when, without shipping every sample.
+// An empty series yields zeros.
+func summarize(points []providers.Point) (first, last float64, lo, hi providers.Point) {
 	if len(points) == 0 {
-		return 0, 0, 0, 0
+		return 0, 0, providers.Point{}, providers.Point{}
 	}
 	first = points[0].Value
 	last = points[len(points)-1].Value
-	lo, hi = first, first
+	lo, hi = points[0], points[0]
 	for _, p := range points {
-		if p.Value < lo {
-			lo = p.Value
+		if p.Value < lo.Value {
+			lo = p
 		}
-		if p.Value > hi {
-			hi = p.Value
+		if p.Value > hi.Value {
+			hi = p
 		}
 	}
 	return first, last, lo, hi
@@ -200,9 +212,7 @@ func (t NetworkDropsTool) Call(ctx context.Context, args string) (string, error)
 		return "no dropped flows", nil
 	}
 	var b strings.Builder
-	renderRows(&b, len(lines), "more", func(i int) {
-		fmt.Fprintln(&b, lines[i].Message)
-	})
+	renderLogLines(&b, lines, "more")
 	return b.String(), nil
 }
 
@@ -294,8 +304,6 @@ func (t QueryLogsTool) Call(ctx context.Context, args string) (string, error) {
 		return "no log lines matched", nil
 	}
 	var b strings.Builder
-	renderRows(&b, len(lines), "more lines", func(i int) {
-		fmt.Fprintf(&b, "%s %s\n", lines[i].Time.Format(time.RFC3339), lines[i].Message)
-	})
+	renderLogLines(&b, lines, "more lines")
 	return b.String(), nil
 }
