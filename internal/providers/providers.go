@@ -370,7 +370,7 @@ type Investigation struct {
 	CuratedURL    string   // runtime: KB issue/PR the curator opened, linked in delivery (set after curation)
 	Fingerprint   string   // originating alert fingerprint; for outcome-ledger attribution
 	Fingerprints  []string // coalesced batch fingerprints; one outcome open is recorded per entry
-	TriggerKey    string   // deterministic incident identity (alert fingerprint, or failing resource+condition) set at trigger time; curator.DupFingerprint prefers it so reworded re-investigations of one incident still dedupe (#137)
+	TriggerKey    string   // deterministic incident identity set at trigger time (alerts: host-invariant per-class key from curator.IncidentKey; GitOps: failing resource+condition). curator.DupFingerprint prefers it so reworded re-investigations (#137) AND the same alert on a different pod/node (CORE-681) still dedupe
 	RecalledEntry string   // when Recalled: the catalog entry Path that was matched
 	Verified      bool     // true when the adversarial verify pass ran and a root cause survived it
 }
