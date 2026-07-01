@@ -68,6 +68,42 @@ func TestNon2xxErrorOmitsBody(t *testing.T) {
 	}
 }
 
+// TestAnthropicErrorDetail asserts the error-body parser surfaces the structured
+// Anthropic error type/message (so 4xx causes like "prompt is too long" are
+// diagnosable) while never echoing a non-JSON body and never emitting control
+// characters (log-injection safe).
+func TestAnthropicErrorDetail(t *testing.T) {
+	cases := []struct {
+		name, body, want string
+	}{
+		{
+			name: "structured 400 is surfaced",
+			body: `{"type":"error","error":{"type":"invalid_request_error","message":"prompt is too long: 210000 tokens > 200000 maximum"}}`,
+			want: ": invalid_request_error: prompt is too long: 210000 tokens > 200000 maximum",
+		},
+		{name: "non-JSON body is omitted", body: maliciousBody, want: ""},
+		{name: "json without error fields is omitted", body: `{"foo":"bar"}`, want: ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := anthropicErrorDetail([]byte(tc.body)); got != tc.want {
+				t.Errorf("anthropicErrorDetail(%q) = %q, want %q", tc.body, got, tc.want)
+			}
+		})
+	}
+
+	// A message with control characters must be sanitized (no log injection).
+	inj := anthropicErrorDetail([]byte(`{"error":{"type":"x","message":"line1\nline2[2Kforged"}}`))
+	if strings.ContainsAny(inj, "\n\r\x1b") {
+		t.Errorf("detail leaked control chars: %q", inj)
+	}
+	// An over-long message is truncated with an ellipsis.
+	long := anthropicErrorDetail([]byte(`{"error":{"type":"t","message":"` + strings.Repeat("a", 500) + `"}}`))
+	if !strings.HasSuffix(long, "…") {
+		t.Errorf("long message should be truncated with an ellipsis: %q", long)
+	}
+}
+
 // TestComplete drives a full Anthropic SSE stream — message_start (input usage),
 // a text content block, a tool_use block assembled from input_json_delta fragments,
 // content_block_stop, message_delta (stop_reason + output usage), message_stop — and

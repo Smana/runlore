@@ -214,14 +214,51 @@ func (c *Client) Complete(ctx context.Context, req providers.CompletionRequest) 
 	}
 	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusOK {
-		// Drain a bounded prefix so the connection can be reused, but never echo the
-		// upstream body into an Error-level log (info disclosure + log injection);
-		// surface status + sanitized request-id for correlation.
-		_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 4<<10))
-		return providers.CompletionResponse{}, fmt.Errorf("messages status %d (request-id %q)", resp.StatusCode, httpx.RequestID(resp.Header))
+		// Read a bounded prefix of the error body. Anthropic returns a JSON error
+		// object; surface only its structured type/message (never the raw bytes),
+		// sanitized, so 4xx causes (e.g. 400 invalid_request_error "prompt is too
+		// long", or a bad tool_use/tool_result pairing) are diagnosable from the
+		// error alone — without info disclosure or log injection.
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 4<<10))
+		return providers.CompletionResponse{}, fmt.Errorf("messages status %d (request-id %q)%s", resp.StatusCode, httpx.RequestID(resp.Header), anthropicErrorDetail(body))
 	}
 	stream := httpx.NewIdleTimeoutReader(resp.Body, idleTimeout, cancel)
 	return accumulate(stream)
+}
+
+// anthropicErrorDetail extracts a sanitized ": type: message" suffix from an
+// Anthropic error response body, or "" if the body can't be parsed as one. Only
+// the structured error.type / error.message fields are surfaced (never the raw
+// bytes), control characters are collapsed to spaces to prevent log injection,
+// and the message is truncated — so a 4xx cause is diagnosable without echoing
+// arbitrary upstream content into an Error-level log.
+func anthropicErrorDetail(body []byte) string {
+	var e struct {
+		Error struct {
+			Type    string `json:"type"`
+			Message string `json:"message"`
+		} `json:"error"`
+	}
+	if err := json.Unmarshal(body, &e); err != nil || (e.Error.Type == "" && e.Error.Message == "") {
+		return ""
+	}
+	msg := sanitizeLine(e.Error.Message)
+	const max = 300
+	if len(msg) > max {
+		msg = msg[:max] + "…"
+	}
+	return fmt.Sprintf(": %s: %s", sanitizeLine(e.Error.Type), msg)
+}
+
+// sanitizeLine collapses control characters (including newlines) to spaces so an
+// upstream-controlled string can't inject additional log lines.
+func sanitizeLine(s string) string {
+	return strings.TrimSpace(strings.Map(func(r rune) rune {
+		if r < 0x20 || r == 0x7f {
+			return ' '
+		}
+		return r
+	}, s))
 }
 
 // sseEvents parses the Anthropic Messages SSE stream into decoded streamEvents. It
