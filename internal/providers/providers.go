@@ -240,11 +240,12 @@ type PodStatus struct {
 // KubeEvent is a normalized Kubernetes Event — surfaces causes that live in the
 // event stream, not logs or status (FailedScheduling, FailedMount, …).
 type KubeEvent struct {
-	Type    string // Normal | Warning
-	Reason  string
-	Object  string // Kind/Name
-	Message string
-	Count   int32
+	Type     string // Normal | Warning
+	Reason   string
+	Object   string // Kind/Name
+	Message  string
+	Count    int32
+	LastSeen time.Time // when the event last fired; zero when the API omitted it
 }
 
 // KubeReader reads read-only pod status and Kubernetes Events for incident triage,

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/Smana/runlore/internal/providers"
 )
@@ -92,7 +93,9 @@ func (t KubeEventsTool) Name() string { return "kube_events" }
 func (t KubeEventsTool) Description() string {
 	return "List recent Kubernetes Events in a namespace (Warning-only by default) — causes that live " +
 		"in the event stream, not logs or status: FailedScheduling (Insufficient cpu/memory), " +
-		"FailedMount, FailedAttachVolume, BackOff, Unhealthy probes. Optionally scope to one object's name."
+		"FailedMount, FailedAttachVolume, BackOff, Unhealthy probes. Events are most-recent-first " +
+		"with last-seen timestamps and repeat counts — use the times to correlate with change/deploy " +
+		"times. Optionally scope to one object's name."
 }
 
 // Schema returns the JSON schema for the arguments.
@@ -127,7 +130,13 @@ func (t KubeEventsTool) Call(ctx context.Context, args string) (string, error) {
 		if e.Count > 1 {
 			count = fmt.Sprintf(" (x%d)", e.Count)
 		}
-		fmt.Fprintf(&b, "%s %s %s%s: %s\n", e.Type, e.Object, e.Reason, count, e.Message)
+		// Lead with the last-seen time: it is what lets the model correlate an
+		// event to a change/deploy timestamp ("first BackOff at 14:03").
+		when := ""
+		if !e.LastSeen.IsZero() {
+			when = e.LastSeen.UTC().Format(time.RFC3339) + " "
+		}
+		fmt.Fprintf(&b, "%s%s %s %s%s: %s\n", when, e.Type, e.Object, e.Reason, count, e.Message)
 	}
 	return b.String(), nil
 }
