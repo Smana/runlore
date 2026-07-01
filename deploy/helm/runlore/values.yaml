@@ -106,6 +106,10 @@ config:
   #   base_url: https://vllm.svc/v1
   #   model: <model-name>
   #   api_key_env: OPENAI_API_KEY
+  #   # Opt-in reasoning depth: anthropic low|medium|high|max, openai-compatible
+  #   # minimal|low|medium|high; unsupported for gemini; empty = omitted (default).
+  #   # A model that doesn't support the knob returns a 400, classified permanent.
+  #   effort: high
   #   # Route the adversarial verify pass to a cheaper/faster model to cut the
   #   # +1-call-per-investigation cost (inherits the fields above unless overridden;
   #   # omit to verify with the main model). Verify always runs — this only lowers cost.

@@ -34,12 +34,15 @@ type Client struct {
 	model     string
 	apiKey    string
 	maxTokens int
+	effort    string
 	http      *http.Client
 }
 
 // New builds a client. apiKey may be empty (keyless vLLM/Ollama). maxTokens caps
-// output tokens per request; <= 0 falls back to defaultMaxTokens.
-func New(baseURL, model, apiKey string, maxTokens int) *Client {
+// output tokens per request; <= 0 falls back to defaultMaxTokens. effort opts into
+// deeper reasoning (reasoning_effort: minimal|low|medium|high, validated in
+// config); empty omits the field entirely.
+func New(baseURL, model, apiKey string, maxTokens int, effort string) *Client {
 	if maxTokens <= 0 {
 		maxTokens = defaultMaxTokens
 	}
@@ -48,6 +51,7 @@ func New(baseURL, model, apiKey string, maxTokens int) *Client {
 		model:     model,
 		apiKey:    apiKey,
 		maxTokens: maxTokens,
+		effort:    effort,
 		http:      httpx.SecureStreamingClient(responseHeaderTimeout),
 	}
 }
@@ -63,6 +67,10 @@ type chatRequest struct {
 	// ToolChoice forces the model to call one named function this turn
 	// ({"type":"function","function":{"name":...}}). Omitted (nil) = auto.
 	ToolChoice *toolChoice `json:"tool_choice,omitempty"`
+	// ReasoningEffort opts into deeper reasoning on models that support it
+	// (minimal|low|medium|high). Empty = omitted; a model that rejects the knob
+	// returns a 400, which Complete classifies permanent.
+	ReasoningEffort string `json:"reasoning_effort,omitempty"`
 	// StreamOptions asks the server to emit a trailing usage-only chunk on a streamed
 	// response (omitted otherwise, since a non-streaming request rejects it).
 	StreamOptions *streamOptions `json:"stream_options,omitempty"`
@@ -201,12 +209,13 @@ func (c *Client) Complete(ctx context.Context, req providers.CompletionRequest) 
 	}
 
 	creq := chatRequest{
-		Model:         c.model,
-		Messages:      msgs,
-		Tools:         tools,
-		MaxTokens:     c.maxTokens,
-		Stream:        true,
-		StreamOptions: &streamOptions{IncludeUsage: true},
+		Model:           c.model,
+		Messages:        msgs,
+		Tools:           tools,
+		MaxTokens:       c.maxTokens,
+		Stream:          true,
+		StreamOptions:   &streamOptions{IncludeUsage: true},
+		ReasoningEffort: c.effort,
 	}
 	if req.ToolChoice != "" {
 		creq.ToolChoice = &toolChoice{Type: "function", Function: toolChoiceFunction{Name: req.ToolChoice}}
