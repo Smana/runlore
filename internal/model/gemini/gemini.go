@@ -194,14 +194,58 @@ func (c *Client) Complete(ctx context.Context, req providers.CompletionRequest) 
 	}
 	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusOK {
-		// Drain a bounded prefix so the connection can be reused, but never echo the
-		// upstream body into an Error-level log (info disclosure + log injection);
-		// surface status + sanitized request-id for correlation.
-		_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 4<<10))
-		return providers.CompletionResponse{}, fmt.Errorf("streamGenerateContent status %d (request-id %q)", resp.StatusCode, httpx.RequestID(resp.Header))
+		// Read a bounded prefix of the error body. Never echo the raw bytes into an
+		// Error-level log (info disclosure + log injection); surface only the
+		// structured error status/message, sanitized, so 4xx causes (e.g. a 400
+		// INVALID_ARGUMENT or a 404 unknown model) are diagnosable from the error alone.
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 4<<10))
+		err := fmt.Errorf("streamGenerateContent status %d (request-id %q)%s", resp.StatusCode, httpx.RequestID(resp.Header), geminiErrorDetail(body))
+		// A 4xx other than 429 is permanent: the request itself is bad (e.g. 400
+		// INVALID_ARGUMENT, 401/403 auth, 404 unknown model), so retrying can't help.
+		// Mark it so the investigation workqueue drops it instead of requeuing forever.
+		// 429 and 5xx are already retried by DoWithRetry and stay transient here.
+		if resp.StatusCode >= 400 && resp.StatusCode < 500 && resp.StatusCode != http.StatusTooManyRequests {
+			return providers.CompletionResponse{}, providers.Permanent(err)
+		}
+		return providers.CompletionResponse{}, err
 	}
 	stream := httpx.NewIdleTimeoutReader(resp.Body, idleTimeout, cancel)
 	return accumulate(stream)
+}
+
+// geminiErrorDetail extracts a sanitized ": status: message" suffix from a Gemini
+// error response body ({"error":{"code","message","status"}}), or "" if the body
+// can't be parsed as one. Only the structured error.status / error.message fields
+// are surfaced (never the raw bytes), control characters are collapsed to spaces
+// to prevent log injection, and the message is truncated — so a 4xx cause is
+// diagnosable without echoing arbitrary upstream content into an Error-level log.
+func geminiErrorDetail(body []byte) string {
+	var e struct {
+		Error struct {
+			Status  string `json:"status"`
+			Message string `json:"message"`
+		} `json:"error"`
+	}
+	if err := json.Unmarshal(body, &e); err != nil || (e.Error.Status == "" && e.Error.Message == "") {
+		return ""
+	}
+	msg := sanitizeLine(e.Error.Message)
+	const maxLen = 300
+	if len(msg) > maxLen {
+		msg = msg[:maxLen] + "…"
+	}
+	return fmt.Sprintf(": %s: %s", sanitizeLine(e.Error.Status), msg)
+}
+
+// sanitizeLine collapses control characters (including newlines) to spaces so an
+// upstream-controlled string can't inject additional log lines.
+func sanitizeLine(s string) string {
+	return strings.TrimSpace(strings.Map(func(r rune) rune {
+		if r < 0x20 || r == 0x7f {
+			return ' '
+		}
+		return r
+	}, s))
 }
 
 // sseEvents parses the Gemini SSE stream into decoded genResponse chunks. It wraps the
