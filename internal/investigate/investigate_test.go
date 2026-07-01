@@ -2,6 +2,7 @@ package investigate
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -97,6 +98,51 @@ func TestQueueRetriesOnError(t *testing.T) {
 	defer inv.mu.Unlock()
 	if inv.calls < 3 {
 		t.Fatalf("want >=3 calls (2 failures + success), got %d", inv.calls)
+	}
+}
+
+// permanentFailingInvestigator always fails with a permanent error and records calls.
+type permanentFailingInvestigator struct {
+	mu     sync.Mutex
+	calls  int
+	called chan struct{}
+}
+
+func (f *permanentFailingInvestigator) Investigate(context.Context, Request) error {
+	f.mu.Lock()
+	f.calls++
+	f.mu.Unlock()
+	if f.called != nil {
+		f.called <- struct{}{}
+	}
+	return providers.Permanent(errors.New("bad request"))
+}
+
+// TestQueueDropsPermanent asserts a permanent failure is dropped, not requeued —
+// so a doomed request isn't retried forever.
+func TestQueueDropsPermanent(t *testing.T) {
+	inv := &permanentFailingInvestigator{called: make(chan struct{}, 4)}
+	q := NewQueue(inv, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go q.Run(ctx)
+
+	q.Enqueue(Request{Source: SourceAlert, Title: "doomed"})
+	select {
+	case <-inv.called:
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out: permanent request never investigated")
+	}
+	// It must NOT be requeued — no second call should arrive.
+	select {
+	case <-inv.called:
+		t.Fatal("permanent failure was retried; want dropped")
+	case <-time.After(500 * time.Millisecond):
+	}
+	inv.mu.Lock()
+	defer inv.mu.Unlock()
+	if inv.calls != 1 {
+		t.Fatalf("want exactly 1 call (dropped, not retried), got %d", inv.calls)
 	}
 }
 

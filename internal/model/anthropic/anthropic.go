@@ -220,7 +220,15 @@ func (c *Client) Complete(ctx context.Context, req providers.CompletionRequest) 
 		// long", or a bad tool_use/tool_result pairing) are diagnosable from the
 		// error alone — without info disclosure or log injection.
 		body, _ := io.ReadAll(io.LimitReader(resp.Body, 4<<10))
-		return providers.CompletionResponse{}, fmt.Errorf("messages status %d (request-id %q)%s", resp.StatusCode, httpx.RequestID(resp.Header), anthropicErrorDetail(body))
+		err := fmt.Errorf("messages status %d (request-id %q)%s", resp.StatusCode, httpx.RequestID(resp.Header), anthropicErrorDetail(body))
+		// A 4xx other than 429 is permanent: the request itself is bad (e.g. 400
+		// invalid_request_error, 401/403 auth, 404), so retrying can't help. Mark it
+		// so the investigation workqueue drops it instead of requeuing forever. 429
+		// and 5xx are already retried by DoWithRetry and stay transient here.
+		if resp.StatusCode >= 400 && resp.StatusCode < 500 && resp.StatusCode != http.StatusTooManyRequests {
+			return providers.CompletionResponse{}, providers.Permanent(err)
+		}
+		return providers.CompletionResponse{}, err
 	}
 	stream := httpx.NewIdleTimeoutReader(resp.Body, idleTimeout, cancel)
 	return accumulate(stream)
