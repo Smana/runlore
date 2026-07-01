@@ -2297,7 +2297,7 @@
   "templating": {
     "list": [
       {
-        "current": {},
+        "current": {"selected": true, "text": "default", "value": "default"},
         "hide": 0,
         "includeAll": false,
         "label": "Data source",
