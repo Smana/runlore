@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/Smana/runlore/internal/curator"
 	"github.com/Smana/runlore/internal/investigate"
 	"github.com/Smana/runlore/internal/providers"
 	"github.com/Smana/runlore/internal/source"
@@ -86,7 +87,11 @@ func (Source) Decode(body []byte, _ http.Header) (source.DecodeResult, error) {
 			Fingerprint:  a.Fingerprint,
 			Fingerprints: fps,
 			GroupKey:     p.GroupKey,
-			TriggerKey:   a.Fingerprint, // Alertmanager fingerprint: stable across re-fires of one alert series (#137)
+			// Host-invariant per-class dedup key (alertname + workload family +
+			// cluster, pod-hash suffix stripped): dedupes re-fires of one series
+			// (#137) AND the same alert on a different pod/node (CORE-681). Attribution
+			// still uses the per-series Alertmanager Fingerprint above.
+			TriggerKey: curator.IncidentKey(a.Labels["alertname"], a.Labels["namespace"], kind, name, a.Labels["cluster"]),
 		})
 	}
 	return out, nil
