@@ -213,6 +213,63 @@ func TestComplete(t *testing.T) {
 	}
 }
 
+// TestToolChoice asserts CompletionRequest.ToolChoice maps to Gemini's forced
+// function calling — toolConfig.functionCallingConfig with mode ANY and the tool
+// name in allowedFunctionNames — and that an empty ToolChoice omits toolConfig
+// entirely (provider default: AUTO).
+func TestToolChoice(t *testing.T) {
+	events := []string{
+		`data: {"candidates":[{"content":{"role":"model","parts":[{"text":"ok"}]},"finishReason":"STOP"}]}` + "\n\n",
+	}
+	cases := []struct {
+		name   string
+		choice string
+	}{
+		{"forced tool", "submit_verdicts"},
+		{"empty omits toolConfig", ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var body []byte
+			srv := sseServer(t, func(r *http.Request) { body, _ = io.ReadAll(r.Body) }, events)
+			defer srv.Close()
+
+			_, err := New(srv.URL, "gemini-x", "k", 0).Complete(context.Background(), providers.CompletionRequest{
+				Messages:   []providers.Message{{Role: "user", Content: "hi"}},
+				Tools:      []providers.ToolSpec{{Name: "submit_verdicts", Description: "d", Schema: `{"type":"object"}`}},
+				ToolChoice: tc.choice,
+			})
+			if err != nil {
+				t.Fatalf("Complete: %v", err)
+			}
+			var got struct {
+				ToolConfig *struct {
+					FunctionCallingConfig struct {
+						Mode                 string   `json:"mode"`
+						AllowedFunctionNames []string `json:"allowedFunctionNames"`
+					} `json:"functionCallingConfig"`
+				} `json:"toolConfig"`
+			}
+			if err := json.Unmarshal(body, &got); err != nil {
+				t.Fatalf("decode request body: %v", err)
+			}
+			if tc.choice == "" {
+				if got.ToolConfig != nil {
+					t.Fatalf("toolConfig must be omitted when unset, got %+v", got.ToolConfig)
+				}
+				if strings.Contains(string(body), "toolConfig") {
+					t.Fatalf("request body must not carry a toolConfig key when unset: %s", body)
+				}
+				return
+			}
+			if got.ToolConfig == nil || got.ToolConfig.FunctionCallingConfig.Mode != "ANY" ||
+				!reflect.DeepEqual(got.ToolConfig.FunctionCallingConfig.AllowedFunctionNames, []string{tc.choice}) {
+				t.Fatalf(`toolConfig = %+v, want functionCallingConfig{mode:"ANY", allowedFunctionNames:[%q]}`, got.ToolConfig, tc.choice)
+			}
+		})
+	}
+}
+
 // TestTruncation verifies a finishReason of "MAX_TOKENS" flags Truncated and that the
 // last usageMetadata wins across chunks.
 func TestTruncation(t *testing.T) {

@@ -18,6 +18,7 @@ import (
 	"github.com/Smana/runlore/internal/catalog"
 	"github.com/Smana/runlore/internal/config"
 	"github.com/Smana/runlore/internal/providers"
+	"github.com/Smana/runlore/internal/redact"
 	"github.com/Smana/runlore/internal/telemetry"
 )
 
@@ -238,13 +239,16 @@ func TestLoopInconclusiveAfterNudge(t *testing.T) {
 	}
 }
 
-// scriptModel returns a fixed sequence of responses, ignoring its input.
+// scriptModel returns a fixed sequence of responses, recording every request it
+// saw (so tests can assert what was sent, e.g. a forced ToolChoice).
 type scriptModel struct {
 	responses []providers.CompletionResponse
+	reqs      []providers.CompletionRequest
 	i         int
 }
 
-func (m *scriptModel) Complete(context.Context, providers.CompletionRequest) (providers.CompletionResponse, error) {
+func (m *scriptModel) Complete(_ context.Context, req providers.CompletionRequest) (providers.CompletionResponse, error) {
+	m.reqs = append(m.reqs, req)
 	r := m.responses[m.i]
 	m.i++
 	return r, nil
@@ -843,6 +847,53 @@ func TestLoopHardKillOnBudgetExhaustion(t *testing.T) {
 	// Fingerprint must be propagated for outcome-ledger attribution.
 	if got.Fingerprint != "fp-kill" {
 		t.Fatalf("expected fingerprint %q, got %q", "fp-kill", got.Fingerprint)
+	}
+}
+
+// TestBudgetNudgeForcesSubmitFindings verifies the budget nudge's ToolChoice
+// contract: normal loop steps send an empty ToolChoice (the model chooses freely
+// between investigation tools and prose), and once the token-budget nudge fires
+// every subsequent request forces submit_findings so the model cannot ramble
+// instead of concluding.
+func TestBudgetNudgeForcesSubmitFindings(t *testing.T) {
+	model := &scriptModel{responses: []providers.CompletionResponse{
+		// step 0 (under budget): the model keeps investigating.
+		{ToolCalls: []providers.ToolCall{{ID: "1", Name: "noop_tool", Args: `{}`}}},
+		// step 1 (over budget, nudge fired, forced): it submits findings.
+		{ToolCalls: []providers.ToolCall{{ID: "2", Name: submitFindingsName, Args: `{"confidence":0.5,"root_causes":[{"summary":"x","confidence":0.5}]}`}}},
+	}}
+	var got *providers.Investigation
+	li := &LoopInvestigator{
+		Model:      model,
+		Log:        slog.New(slog.NewTextHandler(io.Discard, nil)),
+		MaxSteps:   10,
+		OnComplete: func(inv providers.Investigation) { got = &inv },
+	}
+	// Budget = exactly the step-0 estimate (overBudget is a strict >), so step 0 is
+	// unforced and step 1 — grown by the assistant turn and the tool result — trips
+	// the nudge.
+	req := Request{Title: "budget-forcing"}
+	seed := []providers.Message{{Role: "user", Content: redact.Secrets(seedPrompt(req))}}
+	li.MaxTokensPerInvestigation = estimateTokens(li.system(), seed, []providers.ToolSpec{submitFindingsSpec()})
+	if err := li.Investigate(context.Background(), req); err != nil {
+		t.Fatalf("Investigate: %v", err)
+	}
+	if got == nil || len(got.RootCauses) != 1 {
+		t.Fatalf("expected the forced submit_findings to be delivered, got %+v", got)
+	}
+	if len(model.reqs) != 2 {
+		t.Fatalf("expected 2 model calls (normal + forced), got %d", len(model.reqs))
+	}
+	if model.reqs[0].ToolChoice != "" {
+		t.Fatalf("normal loop step must not force a tool, got ToolChoice=%q", model.reqs[0].ToolChoice)
+	}
+	if model.reqs[1].ToolChoice != submitFindingsName {
+		t.Fatalf("post-nudge step must force %q, got ToolChoice=%q", submitFindingsName, model.reqs[1].ToolChoice)
+	}
+	// The nudge message itself must also have been injected.
+	last := model.reqs[1].Messages[len(model.reqs[1].Messages)-1]
+	if !strings.Contains(last.Content, "token budget") {
+		t.Fatalf("budget nudge message missing; last message: %+v", last)
 	}
 }
 

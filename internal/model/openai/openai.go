@@ -60,9 +60,22 @@ type chatRequest struct {
 	Tools     []chatTool `json:"tools,omitempty"`
 	MaxTokens int        `json:"max_tokens,omitempty"`
 	Stream    bool       `json:"stream"`
+	// ToolChoice forces the model to call one named function this turn
+	// ({"type":"function","function":{"name":...}}). Omitted (nil) = auto.
+	ToolChoice *toolChoice `json:"tool_choice,omitempty"`
 	// StreamOptions asks the server to emit a trailing usage-only chunk on a streamed
 	// response (omitted otherwise, since a non-streaming request rejects it).
 	StreamOptions *streamOptions `json:"stream_options,omitempty"`
+}
+
+// toolChoice is the forced-function form of the chat-completions tool_choice.
+type toolChoice struct {
+	Type     string             `json:"type"` // "function"
+	Function toolChoiceFunction `json:"function"`
+}
+
+type toolChoiceFunction struct {
+	Name string `json:"name"`
 }
 
 // streamOptions toggles streaming extras; include_usage adds a final chunk whose
@@ -187,14 +200,18 @@ func (c *Client) Complete(ctx context.Context, req providers.CompletionRequest) 
 		}})
 	}
 
-	body, err := json.Marshal(chatRequest{
+	creq := chatRequest{
 		Model:         c.model,
 		Messages:      msgs,
 		Tools:         tools,
 		MaxTokens:     c.maxTokens,
 		Stream:        true,
 		StreamOptions: &streamOptions{IncludeUsage: true},
-	})
+	}
+	if req.ToolChoice != "" {
+		creq.ToolChoice = &toolChoice{Type: "function", Function: toolChoiceFunction{Name: req.ToolChoice}}
+	}
+	body, err := json.Marshal(creq)
 	if err != nil {
 		return providers.CompletionResponse{}, fmt.Errorf("marshal request: %w", err)
 	}
