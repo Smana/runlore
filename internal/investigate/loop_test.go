@@ -868,6 +868,64 @@ func TestLoopHardKillDisabledWhenNoBudget(t *testing.T) {
 	}
 }
 
+// reportingRunawayModel is a runaway model (never submits findings) whose
+// completions REPORT provider usage far above the chars/4 heuristic — the
+// real-world shape when tool schemas, JSON envelope and tokenizer density make
+// the wire size much larger than the character count suggests.
+type reportingRunawayModel struct {
+	calls       int
+	inputTokens int
+}
+
+func (m *reportingRunawayModel) Complete(context.Context, providers.CompletionRequest) (providers.CompletionResponse, error) {
+	m.calls++
+	return providers.CompletionResponse{
+		ToolCalls: []providers.ToolCall{{ID: "u", Name: "noop_tool", Args: `{}`}},
+		Usage:     providers.Usage{InputTokens: m.inputTokens, OutputTokens: 10},
+	}, nil
+}
+
+// TestLoopBudgetAnchorsToReportedUsage verifies the budget guard is grounded in
+// provider-reported usage, not just chars/4: the message history stays tiny (the
+// heuristic alone would never cross the budget, so the pure-heuristic loop runs
+// to maxSteps), but the provider reports 400k real input tokens per request — so
+// after the first completion the anchored estimate must trip the nudge, and the
+// next over-budget check must hard-kill.
+func TestLoopBudgetAnchorsToReportedUsage(t *testing.T) {
+	model := &reportingRunawayModel{inputTokens: 400_000}
+	var got *providers.Investigation
+	li := &LoopInvestigator{
+		Model:                     model,
+		Log:                       slog.New(slog.NewTextHandler(io.Discard, nil)),
+		MaxSteps:                  50,
+		MaxTokensPerInvestigation: 50_000, // far above the heuristic, far below the reported usage
+		OnComplete: func(inv providers.Investigation) {
+			got = &inv
+		},
+	}
+	if err := li.Investigate(context.Background(), Request{Title: "usage-anchored", Fingerprint: "fp-usage"}); err != nil {
+		t.Fatalf("Investigate: %v", err)
+	}
+	// Step 0: uncalibrated, heuristic under budget → model call 1 reports usage.
+	// Step 1: anchored estimate over budget → nudge → model call 2.
+	// Step 2: still over budget → hard-kill, no further model calls.
+	if model.calls != 2 {
+		t.Fatalf("expected exactly 2 model calls (nudge then hard-kill), got %d — the guard did not anchor to reported usage", model.calls)
+	}
+	if got == nil {
+		t.Fatal("OnComplete never called: hard-kill must deliver an unresolved result")
+	}
+	foundBudget := false
+	for _, u := range got.Unresolved {
+		if strings.Contains(u, "budget") {
+			foundBudget = true
+		}
+	}
+	if !foundBudget {
+		t.Fatalf("Unresolved entry must mention 'budget'; got: %v", got.Unresolved)
+	}
+}
+
 func TestInstantRecallUnconfirmedLowersConfidence(t *testing.T) {
 	// A recall hit with NO confirm tools available → confidence is capped at
 	// recallUnconfirmedCap before delivery.
