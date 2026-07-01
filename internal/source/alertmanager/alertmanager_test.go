@@ -33,8 +33,8 @@ func TestDecodeFiringProducesRequest(t *testing.T) {
 	if r.Fingerprint != "abc" || len(r.Fingerprints) != 1 || r.Fingerprints[0] != "abc" {
 		t.Fatalf("want fingerprint abc (and Fingerprints=[abc]), got %q %v", r.Fingerprint, r.Fingerprints)
 	}
-	if r.TriggerKey != "abc" { // alert identity = fingerprint (#137)
-		t.Fatalf("want TriggerKey=abc (=fingerprint), got %q", r.TriggerKey)
+	if r.TriggerKey != "highmem|prod-web|deployment|web|" { // host-invariant per-class key (CORE-681)
+		t.Fatalf("want per-class TriggerKey, got %q", r.TriggerKey)
 	}
 	if len(res.Resolved) != 0 {
 		t.Fatalf("firing must not resolve")
@@ -59,8 +59,8 @@ func TestDecodeEnvFallback(t *testing.T) {
 	if r.Fingerprints != nil {
 		t.Fatalf("want nil Fingerprints when fingerprint empty, got %v", r.Fingerprints)
 	}
-	if r.TriggerKey != "" { // no fingerprint ⇒ empty TriggerKey (DupFingerprint falls back to prose) (#137)
-		t.Fatalf("want empty TriggerKey when fingerprint empty, got %q", r.TriggerKey)
+	if r.TriggerKey != "x|ns|||" { // per-class key derives from labels, not the fingerprint (CORE-681)
+		t.Fatalf("want per-class TriggerKey x|ns|||, got %q", r.TriggerKey)
 	}
 }
 

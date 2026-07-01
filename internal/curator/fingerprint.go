@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"regexp"
 	"sort"
 	"strings"
 	"unicode"
@@ -11,6 +12,78 @@ import (
 	"github.com/Smana/runlore/internal/catalog"
 	"github.com/Smana/runlore/internal/providers"
 )
+
+// Volatile-identifier patterns. These name a specific host/pod/instance and are
+// NOT identity-defining for an incident CLASS — the same problem on a different
+// node must dedupe (CORE-681). They are masked out of fingerprints and keys.
+var (
+	reUUID       = regexp.MustCompile(`(?i)\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b`)
+	reNodeName   = regexp.MustCompile(`\bip-\d{1,3}-\d{1,3}-\d{1,3}-\d{1,3}(\.[a-z0-9.-]+)?`) // ip-10-11-19-78[.ec2.internal]
+	reIPv4       = regexp.MustCompile(`\b\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}\b`)
+	reInstanceID = regexp.MustCompile(`(?i)\b(i|vol|eni|snap|ami)-[0-9a-f]{8,}\b`) // EC2/EBS ids
+	reHexHash    = regexp.MustCompile(`(?i)\b[0-9a-f]{12,}\b`)                     // dashless uuids / sha blobs
+	reDeployPod  = regexp.MustCompile(`-[a-f0-9]{8,10}-[a-z0-9]{5}$`)              // <name>-<rs-hash>-<pod-hash>
+)
+
+// normalizeText masks volatile identifiers (IPs, node hostnames, EC2 ids, long
+// hashes/UUIDs) in free text, collapsing them to a single space, so the same
+// incident on a different host hashes and BM25-matches alike.
+func normalizeText(s string) string {
+	s = reUUID.ReplaceAllString(s, " ")
+	s = reNodeName.ReplaceAllString(s, " ")
+	s = reIPv4.ReplaceAllString(s, " ")
+	s = reInstanceID.ReplaceAllString(s, " ")
+	s = reHexHash.ReplaceAllString(s, " ")
+	return strings.Join(strings.Fields(s), " ")
+}
+
+// normalizeWorkloadName strips a trailing pod-name hash so a per-pod name reduces
+// to its controller family: a Deployment pod (<name>-<rs-hash>-<pod-hash>) and a
+// DaemonSet/StatefulSet-revision pod (<name>-<5-char hash containing a digit>)
+// both collapse to <name>. Names without such a suffix are returned unchanged, so
+// real trailing words (e.g. "redis-cache") are preserved.
+func normalizeWorkloadName(name string) string {
+	if m := reDeployPod.FindString(name); m != "" {
+		return name[:len(name)-len(m)]
+	}
+	if i := strings.LastIndexByte(name, '-'); i >= 0 {
+		suf := name[i+1:]
+		if len(suf) == 5 && strings.ContainsAny(suf, "0123456789") && isAlnum(suf) {
+			return name[:i]
+		}
+	}
+	return name
+}
+
+func isAlnum(s string) bool {
+	for _, r := range s {
+		if !unicode.IsLetter(r) && !unicode.IsDigit(r) {
+			return false
+		}
+	}
+	return true
+}
+
+// IncidentKey builds a host-invariant, per-class dedup key for an alert: the alert
+// class + affected workload family + cluster, with the volatile pod-hash suffix
+// stripped. The same alert on a different pod/node yields the same key (so it
+// dedupes to one KB entry), while a different cluster stays distinct. Returned as
+// the alert TriggerKey and folded into DupFingerprint. "" when there is no signal.
+func IncidentKey(alertname, namespace, kind, name, cluster string) string {
+	parts := []string{
+		strings.TrimSpace(alertname),
+		strings.TrimSpace(namespace),
+		strings.TrimSpace(kind),
+		normalizeWorkloadName(strings.TrimSpace(name)),
+		strings.TrimSpace(cluster),
+	}
+	for _, p := range parts {
+		if p != "" {
+			return strings.ToLower(strings.Join(parts, "|"))
+		}
+	}
+	return ""
+}
 
 // stopWords are content-free English filler dropped so reworded causes hash alike.
 var stopWords = map[string]struct{}{
@@ -22,13 +95,13 @@ var stopWords = map[string]struct{}{
 // not a hash — matched against the catalog index and open-PR titles.
 func Fingerprint(inv providers.Investigation) string {
 	var b strings.Builder
-	b.WriteString(inv.Title)
+	b.WriteString(normalizeText(inv.Title))
 	if len(inv.RootCauses) > 0 {
-		b.WriteString(" " + inv.RootCauses[0].Summary)
+		b.WriteString(" " + normalizeText(inv.RootCauses[0].Summary))
 	}
 	if len(inv.Changes) > 0 {
 		w := inv.Changes[0].Workload
-		b.WriteString(" " + w.Namespace + " " + w.Name)
+		b.WriteString(" " + w.Namespace + " " + normalizeWorkloadName(w.Name))
 	}
 	return strings.TrimSpace(b.String())
 }
@@ -82,7 +155,12 @@ func (n Novelty) IsDuplicate(ctx context.Context, inv providers.Investigation) (
 // Fingerprint (a fuzzy BM25 query) it is an exact hash. It returns "" when there is
 // nothing to key on — an empty fingerprint must never match another.
 func DupFingerprint(inv providers.Investigation) string {
-	ref := strings.ToLower(inv.Resource.Ref())
+	// Strip the volatile pod-hash suffix from the affected resource so the same
+	// incident on a different pod/node keys alike (CORE-681). The TriggerKey is
+	// already a host-invariant per-class key for alert sources (see IncidentKey).
+	res := inv.Resource
+	res.Name = normalizeWorkloadName(res.Name)
+	ref := strings.ToLower(res.Ref())
 	if tk := strings.ToLower(strings.TrimSpace(inv.TriggerKey)); tk != "" {
 		// "trigger:" namespaces the key so a trigger value can never collide with a
 		// prose causeKey from the fallback path below.
@@ -91,7 +169,7 @@ func DupFingerprint(inv providers.Investigation) string {
 	}
 	cause := ""
 	if len(inv.RootCauses) > 0 {
-		cause = inv.RootCauses[0].Summary
+		cause = normalizeText(inv.RootCauses[0].Summary)
 	}
 	tokens := tokenSet(cause)
 	causeKey := strings.Join(tokens, " ")

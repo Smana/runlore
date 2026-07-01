@@ -213,3 +213,69 @@ func TestDupFingerprintDiffersByTriggerKey(t *testing.T) {
 		t.Fatal("different trigger keys on the same resource must not coalesce")
 	}
 }
+
+func TestNormalizeWorkloadName(t *testing.T) {
+	cases := map[string]string{
+		"node-exporter-prometheus-node-exporter-km6ld": "node-exporter-prometheus-node-exporter", // DaemonSet pod hash
+		"node-exporter-prometheus-node-exporter-n5zld": "node-exporter-prometheus-node-exporter", // different pod, same family
+		"web-7d9c8b6f5-abcde":                          "web",                                    // Deployment <rs-hash>-<pod-hash>
+		"node-exporter-prometheus-node-exporter":       "node-exporter-prometheus-node-exporter", // controller name, unchanged
+		"redis-cache":                                  "redis-cache",                            // 5-char tail but no digit → kept
+		"web":                                          "web",
+		"":                                             "",
+	}
+	for in, want := range cases {
+		if got := normalizeWorkloadName(in); got != want {
+			t.Errorf("normalizeWorkloadName(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
+
+func TestNormalizeTextMasksVolatile(t *testing.T) {
+	got := normalizeText("node ip-10-11-19-78.ec2.internal at 10.11.152.77 on i-0abc123def456789 CPU saturated")
+	for _, bad := range []string{"ip-10-11-19-78", "10.11.152.77", "i-0abc123def456789"} {
+		if strings.Contains(got, bad) {
+			t.Errorf("normalizeText left volatile identifier %q in %q", bad, got)
+		}
+	}
+	for _, keep := range []string{"node", "CPU", "saturated"} {
+		if !strings.Contains(got, keep) {
+			t.Errorf("normalizeText dropped stable content %q from %q", keep, got)
+		}
+	}
+}
+
+func TestIncidentKeyPerClassKeepsCluster(t *testing.T) {
+	k1 := IncidentKey("KubePodNotReady", "observability", "Pod", "node-exporter-prometheus-node-exporter-km6ld", "shared")
+	k2 := IncidentKey("KubePodNotReady", "observability", "Pod", "node-exporter-prometheus-node-exporter-n5zld", "shared")
+	if k1 == "" || k1 != k2 {
+		t.Fatalf("same alert on different pods must share a key: %q vs %q", k1, k2)
+	}
+	if IncidentKey("KubePodNotReady", "observability", "Pod", "node-exporter-prometheus-node-exporter-km6ld", "dev-0") == k1 {
+		t.Fatal("different cluster must change the key")
+	}
+	if IncidentKey("KubeDaemonSetRolloutStuck", "observability", "Pod", "node-exporter-prometheus-node-exporter-km6ld", "shared") == k1 {
+		t.Fatal("different alertname must change the key")
+	}
+	if IncidentKey("", "", "", "", "") != "" {
+		t.Fatal("no signal must yield an empty key")
+	}
+}
+
+// TestDupFingerprintStableAcrossPodSuffix is the CORE-681 regression: the same
+// alert class on a different pod (volatile resource ref + per-class trigger key)
+// must dedupe to one KB entry.
+func TestDupFingerprintStableAcrossPodSuffix(t *testing.T) {
+	a := providers.Investigation{
+		Resource:   providers.Workload{Kind: "Pod", Namespace: "observability", Name: "node-exporter-prometheus-node-exporter-km6ld"},
+		TriggerKey: IncidentKey("KubePodNotReady", "observability", "Pod", "node-exporter-prometheus-node-exporter-km6ld", "shared"),
+	}
+	b := providers.Investigation{
+		Resource:   providers.Workload{Kind: "Pod", Namespace: "observability", Name: "node-exporter-prometheus-node-exporter-n5zld"},
+		TriggerKey: IncidentKey("KubePodNotReady", "observability", "Pod", "node-exporter-prometheus-node-exporter-n5zld", "shared"),
+	}
+	fa, fb := DupFingerprint(a), DupFingerprint(b)
+	if fa == "" || fa != fb {
+		t.Fatalf("same incident on different pods must share a DupFingerprint: %q vs %q", fa, fb)
+	}
+}
