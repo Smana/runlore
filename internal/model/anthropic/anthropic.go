@@ -243,9 +243,9 @@ func anthropicErrorDetail(body []byte) string {
 		return ""
 	}
 	msg := sanitizeLine(e.Error.Message)
-	const max = 300
-	if len(msg) > max {
-		msg = msg[:max] + "…"
+	const maxLen = 300
+	if len(msg) > maxLen {
+		msg = msg[:maxLen] + "…"
 	}
 	return fmt.Sprintf(": %s: %s", sanitizeLine(e.Error.Type), msg)
 }
