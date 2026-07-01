@@ -84,6 +84,74 @@ func TestNon2xxErrorOmitsBody(t *testing.T) {
 	}
 }
 
+// TestOpenAIErrorDetail asserts the error-body parser surfaces the structured
+// OpenAI-compatible error type/message (so 4xx causes like a bad model name are
+// diagnosable) while never echoing a non-JSON body and never emitting control
+// characters (log-injection safe).
+func TestOpenAIErrorDetail(t *testing.T) {
+	cases := []struct {
+		name, body, want string
+	}{
+		{
+			name: "structured 404 is surfaced",
+			body: `{"error":{"message":"The model 'gpt-oops' does not exist","type":"invalid_request_error","code":"model_not_found"}}`,
+			want: ": invalid_request_error: The model 'gpt-oops' does not exist",
+		},
+		{name: "non-JSON body is omitted", body: maliciousBody, want: ""},
+		{name: "json without error fields is omitted", body: `{"foo":"bar"}`, want: ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := openaiErrorDetail([]byte(tc.body)); got != tc.want {
+				t.Errorf("openaiErrorDetail(%q) = %q, want %q", tc.body, got, tc.want)
+			}
+		})
+	}
+
+	// A message with control characters must be sanitized (no log injection).
+	inj := openaiErrorDetail([]byte(`{"error":{"type":"x","message":"line1\nline2\u001b[2Kforged"}}`))
+	if strings.ContainsAny(inj, "\n\r\x1b") {
+		t.Errorf("detail leaked control chars: %q", inj)
+	}
+	// An over-long message is truncated with an ellipsis.
+	long := openaiErrorDetail([]byte(`{"error":{"type":"t","message":"` + strings.Repeat("a", 500) + `"}}`))
+	if !strings.HasSuffix(long, "…") {
+		t.Errorf("long message should be truncated with an ellipsis: %q", long)
+	}
+}
+
+// TestNon2xxPermanence asserts a 4xx other than 429 is classified permanent (so the
+// investigation workqueue drops it), while 429 and 5xx stay transient (retryable).
+func TestNon2xxPermanence(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		code int
+		want bool
+	}{
+		{"400 is permanent", http.StatusBadRequest, true},
+		{"401 is permanent", http.StatusUnauthorized, true},
+		{"404 is permanent", http.StatusNotFound, true},
+		{"429 is transient", http.StatusTooManyRequests, false},
+		{"502 is transient", http.StatusBadGateway, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				w.WriteHeader(tc.code)
+			}))
+			defer srv.Close()
+			_, err := New(srv.URL, "test-model", "k", 0).Complete(context.Background(), providers.CompletionRequest{
+				Messages: []providers.Message{{Role: "user", Content: "hi"}},
+			})
+			if err == nil {
+				t.Fatal("want error for non-2xx response")
+			}
+			if got := providers.IsPermanent(err); got != tc.want {
+				t.Errorf("IsPermanent(status %d) = %v, want %v", tc.code, got, tc.want)
+			}
+		})
+	}
+}
+
 // TestComplete drives a full OpenAI chat/completions SSE stream — content deltas, a
 // tool_call assembled by index (first chunk carries id+name, later chunks carry
 // arguments fragments), a finish_reason chunk, a usage-only chunk, and the [DONE]
