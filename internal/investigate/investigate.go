@@ -238,6 +238,21 @@ func (q *Queue) process(ctx context.Context, wq workqueue.TypedRateLimitingInter
 		q.metrics.InvestigationsStarted.Add(ctx, 1)
 	}
 	if err := q.inv.Investigate(ctx, p.req); err != nil {
+		// A permanent error (e.g. a 4xx model bad-request) won't succeed on retry, so
+		// drop it instead of requeuing with backoff — otherwise a doomed request is
+		// retried forever, burning model calls and amplifying a rate-limit storm.
+		// Alertmanager re-fires the alert if it persists, re-enqueuing a fresh attempt.
+		if providers.IsPermanent(err) {
+			if q.metrics != nil {
+				q.metrics.InvestigationsDropped.Add(ctx, 1)
+			}
+			q.log.Error("investigation failed permanently; dropping", "title", p.req.Title, "err", err)
+			wq.Forget(k)
+			q.mu.Lock()
+			delete(q.reqs, k)
+			q.mu.Unlock()
+			return
+		}
 		q.log.Error("investigation failed; retrying", "title", p.req.Title, "err", err)
 		wq.AddRateLimited(k)
 		return
