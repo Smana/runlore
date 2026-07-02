@@ -440,7 +440,11 @@ func (li *LoopInvestigator) Investigate(ctx context.Context, req Request) error 
 			continue
 		}
 		nudged = false
-		messages = append(messages, providers.Message{Role: "assistant", Content: resp.Text, ToolCalls: resp.ToolCalls})
+		// Carry resp.Opaque onto the stored assistant turn: for the Anthropic client it
+		// holds the signed adaptive-thinking blocks that must be replayed verbatim on the
+		// next request of this tool-use conversation. Empty for providers that don't use
+		// it. Compaction protects assistant turns, so this survives history compaction.
+		messages = append(messages, providers.Message{Role: "assistant", Content: resp.Text, ToolCalls: resp.ToolCalls, Opaque: resp.Opaque})
 		// Turn rule for submit_findings (unchanged from the sequential loop, locked by
 		// TestSubmitFindingsMixedTurn / TestMalformedSubmitFindingsAmongCalls): a
 		// turn's calls are honoured in their ORIGINAL order, and the FIRST

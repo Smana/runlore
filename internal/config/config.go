@@ -306,6 +306,14 @@ type Model struct {
 	// thought signatures — the provider-agnostic history can't carry). Models that
 	// don't support the knob return a 400, which is classified permanent.
 	Effort string `yaml:"effort"`
+	// Thinking opts into adaptive extended thinking, sent as thinking:{type:"adaptive"}.
+	// Only value is "adaptive"; only supported for provider anthropic (the client
+	// replays the signed thinking blocks across the tool loop). Empty = omitted from
+	// requests (today's behavior, byte-for-byte). Validated at startup; any other value
+	// or any non-anthropic provider is a clear config error. Interacts with effort:
+	// both may be set (effort is soft guidance for how much thinking Claude does).
+	// Give max_tokens headroom — thinking consumes output tokens.
+	Thinking string `yaml:"thinking"`
 	// Verify optionally routes the adversarial verify pass to a cheaper/faster model;
 	// unset fields inherit from the parent above (so `verify: {model: <cheap>}` reuses
 	// the same provider/endpoint/key). Absent ⇒ verify runs on the main model.
@@ -350,6 +358,11 @@ type ModelOverride struct {
 	// Effort overrides the parent's effort for the verify pass; empty inherits the
 	// parent's value (same vocabulary and validation as model.effort).
 	Effort string `yaml:"effort"`
+	// Thinking overrides the parent's thinking mode for the verify pass; empty inherits
+	// the parent's value (same vocabulary and validation as model.thinking). Note the
+	// verify pass always forces a tool_choice, so the Anthropic client drops thinking
+	// for that request anyway — this knob only affects any non-forced verify calls.
+	Thinking string `yaml:"thinking"`
 	// Pricing overrides the parent's token rates for the verify pass (a cheaper
 	// verify model has its own cost); nil inherits model.pricing.
 	Pricing *Pricing `yaml:"pricing"`
@@ -667,6 +680,28 @@ func validateEffort(field, provider, effort string) error {
 	return nil
 }
 
+// validateThinking checks an effective (provider, thinking) pair. Empty thinking is
+// always valid (the knob is opt-in and omitted from requests). Only "adaptive" is a
+// valid mode, and only for provider anthropic — the thinking-block replay contract
+// (signed blocks carried verbatim across the tool loop) is Anthropic-specific, so any
+// other provider is rejected with a clear error rather than silently ignored.
+func validateThinking(field, provider, thinking string) error {
+	if thinking == "" {
+		return nil
+	}
+	if provider != "anthropic" {
+		p := provider
+		if p == "" {
+			p = "openai"
+		}
+		return fmt.Errorf("%s: thinking is only supported for provider anthropic (got %q)", field, p)
+	}
+	if thinking != "adaptive" {
+		return fmt.Errorf("%s: %q is not a valid thinking mode (valid: adaptive, or empty to omit)", field, thinking)
+	}
+	return nil
+}
+
 // validatePricing rejects a negative token rate (which would produce a negative
 // cost). A nil *Pricing (unconfigured) is valid.
 func validatePricing(field string, p *Pricing) error {
@@ -700,6 +735,11 @@ func (c *Config) Validate() error {
 	if err := validateEffort("model.effort", c.Model.Provider, c.Model.Effort); err != nil {
 		return err
 	}
+	// Thinking is validated against the provider it will actually be sent to, mirroring
+	// effort (and BuildVerifyModel's or() inherit-when-empty semantics).
+	if err := validateThinking("model.thinking", c.Model.Provider, c.Model.Thinking); err != nil {
+		return err
+	}
 	if v := c.Model.Verify; v != nil {
 		prov := v.Provider
 		if prov == "" {
@@ -710,6 +750,13 @@ func (c *Config) Validate() error {
 			eff = c.Model.Effort
 		}
 		if err := validateEffort("model.verify.effort (or inherited model.effort)", prov, eff); err != nil {
+			return err
+		}
+		think := v.Thinking
+		if think == "" {
+			think = c.Model.Thinking
+		}
+		if err := validateThinking("model.verify.thinking (or inherited model.thinking)", prov, think); err != nil {
 			return err
 		}
 	}
