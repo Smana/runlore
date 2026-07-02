@@ -28,6 +28,8 @@ const (
 	SourceAlert Source = "alert"
 	// SourceGitOpsFailure means the investigation was triggered by a GitOps failure.
 	SourceGitOpsFailure Source = "gitops-failure"
+	// SourcePagerDuty means the investigation was triggered by a PagerDuty incident.
+	SourcePagerDuty Source = "pagerduty"
 )
 
 // Request is a normalized investigation trigger.
