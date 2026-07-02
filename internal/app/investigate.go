@@ -230,6 +230,23 @@ func BuildInvestigator(ctx context.Context, cfg *config.Config, gp providers.Git
 	if toolTimeout == 0 {
 		toolTimeout = defaultToolTimeout
 	}
+	// Interim progress notifications (opt-in). Wire the loop's callback to any
+	// notifier that implements the ProgressNotifier capability (Multi type-asserts
+	// per sink); delivery is best-effort — a failing ping is logged and swallowed,
+	// never failing the investigation. Left unset (nil, 0) when disabled ⇒ the loop
+	// emits nothing and makes zero extra model calls.
+	var onProgress func(providers.ProgressUpdate)
+	progressEverySteps := 0
+	if pu := cfg.Investigation.ProgressUpdates; pu.Enabled {
+		progressEverySteps = pu.EverySteps
+		onProgress = func(up providers.ProgressUpdate) {
+			// A progress ping must never fail an investigation: swallow its errors.
+			if err := notifier.DeliverProgress(context.Background(), up); err != nil {
+				log.Warn("progress notification failed", "err", err)
+			}
+		}
+		log.Info("interim progress updates enabled", "every_steps", progressEverySteps)
+	}
 	return &investigate.LoopInvestigator{
 		Model:                     model,
 		VerifyModel:               BuildVerifyModel(cfg),
@@ -243,8 +260,11 @@ func BuildInvestigator(ctx context.Context, cfg *config.Config, gp providers.Git
 		MaxSteps:                  cfg.Investigation.MaxSteps,
 		MaxToolOutputBytes:        cfg.Investigation.MaxToolOutputBytes,
 		MaxTokensPerInvestigation: cfg.Investigation.MaxTokensPerInvestigation,
+		Compaction:                cfg.Investigation.Compaction,
 		Timeout:                   cfg.Investigation.Timeout.Std(),
 		ToolTimeout:               toolTimeout,
+		OnProgress:                onProgress,
+		ProgressEverySteps:        progressEverySteps,
 		OnComplete: func(found providers.Investigation) {
 			// Record the outcome "open" first: this investigation happened for an
 			// incident, with the answer we used (recall vs fresh). A matching

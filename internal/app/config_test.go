@@ -42,6 +42,34 @@ func TestRequireWebhookAuth(t *testing.T) {
 	}
 }
 
+// TestRequirePagerDutyAuth mirrors TestRequireWebhookAuth for the PagerDuty
+// source: its X-PagerDuty-Signature verification replaces the shared bearer
+// token on /webhook/pagerduty, so once a model is configured an enabled
+// PagerDuty source must carry a signing secret.
+func TestRequirePagerDutyAuth(t *testing.T) {
+	model := config.Model{Provider: "anthropic"} // built-in endpoint counts as configured
+	tests := []struct {
+		name    string
+		model   config.Model
+		enabled bool
+		secret  string
+		wantErr bool
+	}{
+		{"enabled + model + secret → ok", model, true, "s", false},
+		{"enabled + model + no secret → refused", model, true, "", true},
+		{"enabled + no model + no secret → ok (log-only)", config.Model{}, true, "", false},
+		{"disabled + model + no secret → ok", model, false, "", false},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			err := RequirePagerDutyAuth(&config.Config{Model: tc.model}, tc.enabled, tc.secret)
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("RequirePagerDutyAuth err = %v, wantErr = %v", err, tc.wantErr)
+			}
+		})
+	}
+}
+
 // TestModelProvider locks in the provider-name normalization: anthropic/gemini
 // pass through; everything else (including "" and unknown) defaults to "openai".
 func TestModelProvider(t *testing.T) {

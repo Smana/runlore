@@ -291,6 +291,31 @@ type Notifier interface {
 	Deliver(ctx context.Context, inv Investigation) error
 }
 
+// ProgressUpdate is a lightweight interim status ping for a still-running
+// investigation. It is NOT an Investigation (there are no findings yet) — it
+// exists so a long (up to 20-step) investigation is not silent until the final
+// message. Interim is model-derived text that may quote tool output; the loop
+// redacts it (redact.Secrets) before it leaves, and notifiers must still escape
+// it as untrusted like any other model text.
+type ProgressUpdate struct {
+	Title     string         // incident title (untrusted alert text)
+	Step      int            // current step (1-based)
+	MaxSteps  int            // step ceiling
+	ToolsUsed map[string]int // investigation tool name → call count so far
+	Interim   string         // model's latest interim assistant text (already secret-redacted), if any
+}
+
+// ProgressNotifier is an OPTIONAL capability a Notifier may implement to receive
+// interim progress pings during a long investigation. It is separate from
+// Notifier so a progress ping (not an Investigation) never widens the Notifier
+// contract: the app type-asserts for it and wires progress delivery only to the
+// notifiers that support it (Slack first; Matrix/webhook may no-op for now).
+// Delivery of a progress ping is best-effort — a failure is logged and swallowed,
+// never failing the investigation.
+type ProgressNotifier interface {
+	DeliverProgress(ctx context.Context, up ProgressUpdate) error
+}
+
 // CurationForge is the forge surface the curator's file-time gate needs: open a
 // drafted PR, list open KB PRs (dedup), and comment to coalesce duplicates.
 type CurationForge interface {

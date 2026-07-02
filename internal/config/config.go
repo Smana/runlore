@@ -178,6 +178,14 @@ type Investigation struct {
 	Timeout                   Duration  `yaml:"timeout"`                      // per-investigation deadline; 0 ⇒ default (10m) via applyDefaults
 	ToolTimeout               Duration  `yaml:"tool_timeout"`                 // per-TOOL-call timeout so one hung tool can't eat the budget; 0 ⇒ default (60s) at construction
 
+	// Compaction selects how mid-loop history compaction treats the tool outputs it
+	// elides once the estimate crosses the compaction target. "" / "elide" is the
+	// default: drop their bodies for short markers (lossy). "summarize" first asks a
+	// model (the verify-tier model when configured, else the main model) for one
+	// compact factual digest of the batch and keeps that in place of the markers,
+	// falling back to plain elision on any summarizer error/refusal/truncation.
+	Compaction string `yaml:"compaction"` // "" | "elide" (default) | "summarize"
+
 	// PodLogNamespaces lists extra namespaces (beyond the incident's own) that
 	// pod_logs may read controller/crash logs from. pod_logs streams raw pod logs
 	// (which carry secrets/PII) to the external LLM, so the model is constrained to
@@ -185,6 +193,20 @@ type Investigation struct {
 	// by Kubernetes RBAC. Set this to match the Helm rbac.controllerLogNamespaces
 	// (e.g. [flux-system]); empty means the incident namespace only.
 	PodLogNamespaces []string `yaml:"pod_log_namespaces"`
+
+	// ProgressUpdates opts into interim progress notifications during a long
+	// investigation. Off by default (zero behaviour change, zero extra model calls).
+	ProgressUpdates ProgressUpdates `yaml:"progress_updates"`
+}
+
+// ProgressUpdates configures opt-in interim progress notifications: a long
+// investigation (up to 20 steps) is otherwise silent until the final message.
+// Off by default. When enabled, the loop emits one ping every EverySteps steps
+// to any notifier that supports it (Slack first); a ping is best-effort and never
+// fails the investigation.
+type ProgressUpdates struct {
+	Enabled    bool `yaml:"enabled"`
+	EverySteps int  `yaml:"every_steps"` // emit a ping every N steps; 0 ⇒ default 5 (applyDefaults). Must be > 0 when enabled.
 }
 
 // Coalesce folds correlated incidents into one investigation.
@@ -607,6 +629,14 @@ var effortLevels = map[string]map[string]bool{
 	"openai":    {"minimal": true, "low": true, "medium": true, "high": true},
 }
 
+// ValidateEffort checks an effective (provider, effort) pair against the
+// per-provider effort vocabulary, so callers that build a ModelProvider outside
+// config.Load (e.g. the eval model-comparison runner) share one source of truth.
+// field names the setting in the returned error. Empty effort is always valid.
+func ValidateEffort(field, provider, effort string) error {
+	return validateEffort(field, provider, effort)
+}
+
 // validateEffort checks an effective (provider, effort) pair against the
 // per-provider vocabulary. Empty effort is always valid (the knob is opt-in and
 // omitted from requests); an empty provider defaults to the OpenAI-compatible
@@ -701,11 +731,24 @@ func (c *Config) Validate() error {
 			return err
 		}
 	}
+	// Interim progress updates: a non-positive cadence while enabled is a
+	// misconfiguration (applyDefaults fills an unset 0 with 5, so only an explicit
+	// negative reaches here). Validate fail-loud rather than silently never pinging.
+	if c.Investigation.ProgressUpdates.Enabled && c.Investigation.ProgressUpdates.EverySteps <= 0 {
+		return fmt.Errorf("investigation.progress_updates.every_steps must be > 0 when enabled, got %d", c.Investigation.ProgressUpdates.EverySteps)
+	}
 	// Reject a negative per-tool timeout: time.ParseDuration accepts negative values
 	// which silently disable the feature (fails the > 0 guard in runTool) rather than
 	// setting the intended timeout. 0 means "use the default (60s)".
 	if c.Investigation.ToolTimeout.Std() < 0 {
 		return fmt.Errorf("investigation.tool_timeout must be >= 0 (0 = use the default 60s), got %v", c.Investigation.ToolTimeout.Std())
+	}
+	// Reject an unknown compaction mode at startup rather than silently defaulting a
+	// typo to lossy elision. Empty means the default (elide).
+	switch c.Investigation.Compaction {
+	case "", "elide", "summarize":
+	default:
+		return fmt.Errorf("investigation.compaction %q is invalid (want elide|summarize; empty = elide)", c.Investigation.Compaction)
 	}
 	// Reject a cleartext API key over a public endpoint (the key would be sent in the
 	// clear, and is the enabler for a redirect-based key leak). Cover the main model,

@@ -116,9 +116,27 @@ type LoopInvestigator struct {
 	MaxToolOutputBytes        int // truncate tool results larger than this before adding to history
 	MaxTokensPerInvestigation int // inject a budget-nudge message when the estimated token count exceeds this
 
+	// Compaction selects how mid-loop history compaction treats the tool outputs it
+	// elides: "" / "elide" (default) drops their bodies for markers; "summarize" first
+	// asks a model for one compact factual digest of the batch and keeps that in place
+	// of the markers, falling back to plain elision on any summarizer failure. When
+	// "summarize", the digest call is routed to VerifyModel if set, else Model.
+	Compaction string
+
 	// Observability — nil-safe; no-op when telemetry is disabled.
 	Metrics       *telemetry.Metrics
 	ModelProvider string // label for model_requests/model_request_duration metrics (e.g. "anthropic")
+
+	// OnProgress, when set, receives an interim progress snapshot every
+	// ProgressEverySteps steps of a long investigation. It is nil-safe and
+	// default-off (nil ⇒ never called; zero extra model calls). The callback must
+	// never fail the investigation: the app wires it to a best-effort delivery that
+	// logs and swallows its own errors. The interim text passed is already
+	// secret-redacted at this egress boundary.
+	OnProgress func(providers.ProgressUpdate)
+	// ProgressEverySteps is the cadence for OnProgress. <= 0 disables progress
+	// pings even when OnProgress is set.
+	ProgressEverySteps int
 }
 
 // system returns the system prompt, extended with action proposals when the policy is
@@ -252,12 +270,22 @@ func (li *LoopInvestigator) Investigate(ctx context.Context, req Request) error 
 		// The target is converted into raw-heuristic space (compactHistory measures with
 		// estimateTokens) so a calibrated loop compacts down to a REAL 0.7×budget.
 		if target := compactionTarget(li.MaxTokensPerInvestigation); target > 0 && est > target {
-			if compacted, elided := compactHistory(messages, sys, specs, calib.heuristicTarget(target)); elided > 0 {
+			if compacted, elided, removed := compactHistoryDetailed(messages, sys, specs, calib.heuristicTarget(target)); elided > 0 {
+				// summarize mode: replace the just-elided batch with one model-produced
+				// digest (best-effort — on any summarizer failure `compacted` already
+				// carries the plain elision markers, so this only ever adds information).
+				if li.Compaction == compactionSummarize {
+					li.summarizeElided(ctx, compacted, removed)
+				}
 				messages = compacted
 				est = calib.estimate(sys, messages, specs)
 				if !compactionLogged {
+					mode := li.Compaction
+					if mode == "" {
+						mode = compactionElide
+					}
 					li.Log.Info("compacted investigation history to bound context",
-						"title", req.Title, "elided_bytes", elided, "estimate_tokens", est)
+						"title", req.Title, "mode", mode, "elided_bytes", elided, "estimate_tokens", est)
 					compactionLogged = true
 				}
 				if li.Metrics != nil {
@@ -428,6 +456,12 @@ func (li *LoopInvestigator) Investigate(ctx context.Context, req Request) error 
 			}
 			messages = append(messages, providers.Message{Role: "tool", ToolCallID: run[i].ID, Content: tr.content})
 		}
+		// Interim progress ping (opt-in, off by default): a lightweight status update
+		// on this turn's boundary so a long investigation isn't silent until the end.
+		// Runs on the loop goroutine after dispatchTools has joined (used is stable),
+		// so it shares no mutable state with the workers. Best-effort — the callback
+		// swallows its own delivery errors and never fails the investigation.
+		li.emitProgress(req, step, maxSteps, used, resp.Text)
 		if terminal >= 0 {
 			inv := final
 			if inv.Title == "" {
@@ -587,6 +621,32 @@ func (li *LoopInvestigator) reviewActions(proposed []providers.Action) []provide
 		li.Log.Info("suggested actions (not executed)", "mode", string(li.Actions.Mode()), "count", len(kept))
 	}
 	return kept
+}
+
+// emitProgress fires the interim progress callback on a step boundary (every
+// ProgressEverySteps steps). It is a no-op when disabled (no callback, or a
+// non-positive cadence) — so the default path costs nothing. step is 0-based; the
+// update reports it 1-based. The used map is copied so the consumer can never race
+// the loop's later writes, and the model-derived interim text is secret-redacted
+// here (the LLM-egress boundary) before it leaves the loop.
+func (li *LoopInvestigator) emitProgress(req Request, step, maxSteps int, used map[string]int, interim string) {
+	if li.OnProgress == nil || li.ProgressEverySteps <= 0 {
+		return
+	}
+	if (step+1)%li.ProgressEverySteps != 0 {
+		return
+	}
+	toolsUsed := make(map[string]int, len(used))
+	for k, v := range used {
+		toolsUsed[k] = v
+	}
+	li.OnProgress(providers.ProgressUpdate{
+		Title:     req.Title,
+		Step:      step + 1,
+		MaxSteps:  maxSteps,
+		ToolsUsed: toolsUsed,
+		Interim:   redact.Secrets(interim),
+	})
 }
 
 func (li *LoopInvestigator) deliver(req Request, inv providers.Investigation) {

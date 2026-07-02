@@ -16,6 +16,12 @@ const (
 	keepRecentToolOutputs = 3
 )
 
+// Compaction modes (config investigation.compaction). Empty is treated as elide.
+const (
+	compactionElide     = "elide"     // drop elided tool-output bodies for markers (lossy; default)
+	compactionSummarize = "summarize" // replace the elided batch with one model-produced digest
+)
+
 // keepListTools are tools whose outputs are the structural root-cause skeleton and are
 // never elided: the change timeline, the runbook hit, the failing resource's status, and
 // the dependency-cascade root. The gitops_* pair are engine-agnostic (Flux + ArgoCD).
@@ -51,15 +57,38 @@ func compactionTarget(budget int) int {
 	return int(float64(budget) * compactionBudgetFraction)
 }
 
+// elidedOutput records one tool-result body that compaction removed: the tool that
+// produced it, its original (already-redacted) content, and its position in the
+// RETURNED slice — so the summarize path can batch the bodies for a digest and know
+// where to write it back.
+type elidedOutput struct {
+	tool    string
+	content string
+	mi      int
+}
+
 // compactHistory elides the bodies of eligible tool-result messages — superseded ones
 // first, then largest-first — until estimateTokens(sys, messages, specs) drops to or
 // below target, or no eligible output remains. Protected: the seed (index 0), every
 // assistant turn, keep-list tool results, and the most-recent keepRecentToolOutputs tool
 // results. Returns a new slice (the caller's messages are never mutated) and the number
 // of body bytes elided (0 when nothing was compacted). target <= 0 is a no-op.
+//
+// This is the elide-mode entry point (default): it discards the elidedOutput detail
+// that the summarize path (compactHistoryDetailed) consumes.
 func compactHistory(messages []providers.Message, sys string, specs []providers.ToolSpec, target int) ([]providers.Message, int) {
+	out, elided, _ := compactHistoryDetailed(messages, sys, specs, target)
+	return out, elided
+}
+
+// compactHistoryDetailed is compactHistory's core: identical selection and elision,
+// but it also returns, in elision order, the bodies it removed (tool name + original
+// content + their index in the returned slice). The summarize path uses those to ask
+// for one digest and write it back over the markers. Behaviour for the returned
+// (messages, elided) pair is byte-for-byte identical to plain elision.
+func compactHistoryDetailed(messages []providers.Message, sys string, specs []providers.ToolSpec, target int) ([]providers.Message, int, []elidedOutput) {
 	if target <= 0 || estimateTokens(sys, messages, specs) <= target {
-		return messages, 0
+		return messages, 0, nil
 	}
 	// Resolve each tool-call id -> (name, args) so a tool RESULT (which carries only
 	// ToolCallID) is attributable to its tool and dedupable by (name, args).
@@ -113,17 +142,19 @@ func compactHistory(messages []providers.Message, sys string, specs []providers.
 	out := make([]providers.Message, len(messages))
 	copy(out, messages)
 	elided := 0
+	var removed []elidedOutput
 	for _, cd := range cands {
 		if estimateTokens(sys, out, specs) <= target {
 			break
 		}
 		name := byID[out[cd.mi].ToolCallID].name
-		before := len(out[cd.mi].Content)
+		before := out[cd.mi].Content
 		out[cd.mi].Content = elidedMarker(name)
-		elided += before - len(out[cd.mi].Content)
+		elided += len(before) - len(out[cd.mi].Content)
+		removed = append(removed, elidedOutput{tool: name, content: before, mi: cd.mi})
 	}
 	if elided == 0 {
-		return messages, 0
+		return messages, 0, nil
 	}
-	return out, elided
+	return out, elided, removed
 }
