@@ -51,6 +51,7 @@ estimate) keep the SDK defaults and are read as heatmaps, not percentiles.
 | `runlore_alerts_received_total` | counter | — | incidents passing the trigger gate into the coalescer |
 | `runlore_alerts_coalesced_total` | counter | — | incidents folded into an existing batch |
 | `runlore_alerts_suppressed_total` | counter | — | incidents dropped by cooldown |
+| `runlore_incidents_debounced_total` | counter | — | firing alerts dropped as self-resolving (a matching `resolved` webhook arrived within `triggers.incidents.debounce`) |
 | `runlore_investigations_started_total` | counter | — | investigations actually begun |
 | `runlore_investigations_completed_total` | counter | `result` | investigations finished (`resolved`/`unresolved`/`recall`/`error`/`max_steps`/`budget_exceeded`/`inconclusive`) |
 | `runlore_investigation_duration_seconds` | histogram | `result` | wall-clock per investigation |
