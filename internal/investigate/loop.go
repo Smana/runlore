@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"go.opentelemetry.io/otel/attribute"
@@ -386,51 +387,132 @@ func (li *LoopInvestigator) Investigate(ctx context.Context, req Request) error 
 		}
 		nudged = false
 		messages = append(messages, providers.Message{Role: "assistant", Content: resp.Text, ToolCalls: resp.ToolCalls})
-		for _, tc := range resp.ToolCalls {
-			if tc.Name == submitFindingsName {
-				inv, perr := parseFindings(tc.Args)
-				if perr != nil {
-					messages = append(messages, providers.Message{Role: "tool", ToolCallID: tc.ID, Content: "error: " + perr.Error()})
-					continue
-				}
-				if inv.Title == "" {
-					inv.Title = req.Title // default to the triggering incident/failure
-				}
-				// Prefer the workload the investigation identified; fall back to the
-				// originating alert workload only when the model named none.
-				inv.Resource = preferDiscoveredResource(inv.Resource, req.Workload)
-				inv.Fingerprint = req.Fingerprint   // originating alert id, for outcome-ledger attribution
-				inv.Fingerprints = req.Fingerprints // coalesced batch ids; one open per constituent alert
-				inv.TriggerKey = req.TriggerKey     // deterministic dedup key stamped at trigger time (#137)
-				li.Log.Info("investigation evidence gathered", "title", req.Title, "tools_used", used)
-				if li.Metrics != nil {
-					// Usage-anchored when the provider reported usage; heuristic otherwise.
-					li.Metrics.InvestigationTokens.Record(ctx, int64(calib.estimate(sys, messages, specs)))
-				}
-				if li.Verify {
-					inv = li.verifyFindings(ctx, req, inv)
-				}
-				inv.Actions = li.reviewActions(inv.Actions)
-				result = "resolved"
-				li.deliver(req, inv)
-				return nil
+		// Turn rule for submit_findings (unchanged from the sequential loop, locked by
+		// TestSubmitFindingsMixedTurn / TestMalformedSubmitFindingsAmongCalls): a
+		// turn's calls are honoured in their ORIGINAL order, and the FIRST
+		// submit_findings whose args parse finalizes the investigation — calls before
+		// it run and have their results recorded; calls after it NEVER run. A
+		// submit_findings with malformed args does not end the turn: it is answered
+		// with a parse-error tool result in its slot and the rest of the turn
+		// proceeds. Parsing args is pure, so scanning for the terminal call up front
+		// (before any tool runs) is observably identical to the old in-order walk.
+		terminal := -1
+		var final providers.Investigation
+		for i, tc := range resp.ToolCalls {
+			if tc.Name != submitFindingsName {
+				continue
 			}
-			used[tc.Name]++
+			if inv, perr := parseFindings(tc.Args); perr == nil {
+				terminal, final = i, inv
+				break
+			}
+		}
+		run := resp.ToolCalls
+		if terminal >= 0 {
+			run = resp.ToolCalls[:terminal]
+		}
+		// used and the truncation metric are updated here, on the loop goroutine, so
+		// the workers share no mutable state (each writes only its own result slot).
+		for _, tc := range run {
+			if tc.Name != submitFindingsName { // malformed submit_findings runs no tool
+				used[tc.Name]++
+			}
+		}
+		for i, tr := range li.dispatchTools(ctx, byName, run) {
+			if tr.trimmed > 0 && li.Metrics != nil {
+				li.Metrics.ToolOutputTruncatedBytes.Add(ctx, int64(tr.trimmed))
+			}
+			messages = append(messages, providers.Message{Role: "tool", ToolCallID: run[i].ID, Content: tr.content})
+		}
+		if terminal >= 0 {
+			inv := final
+			if inv.Title == "" {
+				inv.Title = req.Title // default to the triggering incident/failure
+			}
+			// Prefer the workload the investigation identified; fall back to the
+			// originating alert workload only when the model named none.
+			inv.Resource = preferDiscoveredResource(inv.Resource, req.Workload)
+			inv.Fingerprint = req.Fingerprint   // originating alert id, for outcome-ledger attribution
+			inv.Fingerprints = req.Fingerprints // coalesced batch ids; one open per constituent alert
+			inv.TriggerKey = req.TriggerKey     // deterministic dedup key stamped at trigger time (#137)
+			li.Log.Info("investigation evidence gathered", "title", req.Title, "tools_used", used)
+			if li.Metrics != nil {
+				// Usage-anchored when the provider reported usage; heuristic otherwise.
+				li.Metrics.InvestigationTokens.Record(ctx, int64(calib.estimate(sys, messages, specs)))
+			}
+			if li.Verify {
+				inv = li.verifyFindings(ctx, req, inv)
+			}
+			inv.Actions = li.reviewActions(inv.Actions)
+			result = "resolved"
+			li.deliver(req, inv)
+			return nil
+		}
+	}
+	li.Log.Warn("investigation hit max steps", "title", req.Title, "max", maxSteps, "tools_used", used)
+	result = "max_steps"
+	return nil
+}
+
+// maxConcurrentToolCalls bounds how many of one assistant turn's tool calls run at
+// once. All investigation tools are read-only, so concurrency is safe; the cap is
+// about the backends, not the loop. 4 covers the fan-out a typical turn actually
+// requests (1–4 calls: status + events + logs + a diff), so common turns get full
+// parallelism, while bounding pressure on the shared, often rate-limited backends
+// the tools hit (the Kubernetes API server, the git forge, metrics/logs endpoints)
+// and the memory held by large not-yet-truncated outputs in flight.
+const maxConcurrentToolCalls = 4
+
+// toolResult is one tool call's post-processed outcome: the redacted, truncated
+// content destined for history, and the number of bytes truncation removed.
+type toolResult struct {
+	content string
+	trimmed int
+}
+
+// dispatchTools executes one assistant turn's tool calls concurrently (bounded by
+// maxConcurrentToolCalls) and returns their results indexed by the ORIGINAL call
+// order, so the caller appends tool results to history deterministically no matter
+// which call finished first. Per-call semantics are exactly the sequential loop's:
+// runTool applies the per-tool timeout to each call individually, and each output
+// is redacted then truncated (redact first, so a secret near the cap is still
+// masked) before it becomes a result. A submit_findings reaching here is
+// necessarily malformed (a parseable one ends the turn before dispatch); it runs
+// no tool and is answered with its parse error. Workers write only their own slot
+// of the results slice, and the WaitGroup provides the happens-before edge back to
+// the caller — no shared mutable state.
+func (li *LoopInvestigator) dispatchTools(ctx context.Context, byName map[string]Tool, calls []providers.ToolCall) []toolResult {
+	results := make([]toolResult, len(calls))
+	sem := make(chan struct{}, maxConcurrentToolCalls)
+	var wg sync.WaitGroup
+	for i, tc := range calls {
+		if tc.Name == submitFindingsName {
+			_, perr := parseFindings(tc.Args)
+			if perr == nil {
+				// Unreachable by construction (the loop dispatches only calls before
+				// the first parseable submit_findings); keep the answer well-formed
+				// rather than panicking if that invariant ever changes.
+				perr = errors.New("submit_findings already handled for this turn")
+			}
+			results[i] = toolResult{content: "error: " + perr.Error()}
+			continue
+		}
+		wg.Add(1)
+		go func(i int, tc providers.ToolCall) {
+			defer wg.Done()
+			sem <- struct{}{}
+			defer func() { <-sem }()
 			// Redact secrets from tool output (pod/controller logs, git diffs, status/
 			// event messages) BEFORE it enters the prompt: this is the LLM-vendor egress
 			// boundary, and since the model only ever sees redacted text, the evidence it
 			// later quotes into the KB PR + chat is protected too. Redact before truncating
 			// so a secret near the cap is still masked.
 			out, trimmed := truncateOutput(redact.Secrets(li.runTool(ctx, byName, tc)), li.MaxToolOutputBytes)
-			if trimmed > 0 && li.Metrics != nil {
-				li.Metrics.ToolOutputTruncatedBytes.Add(ctx, int64(trimmed))
-			}
-			messages = append(messages, providers.Message{Role: "tool", ToolCallID: tc.ID, Content: out})
-		}
+			results[i] = toolResult{content: out, trimmed: trimmed}
+		}(i, tc)
 	}
-	li.Log.Warn("investigation hit max steps", "title", req.Title, "max", maxSteps, "tools_used", used)
-	result = "max_steps"
-	return nil
+	wg.Wait()
+	return results
 }
 
 func (li *LoopInvestigator) runTool(ctx context.Context, byName map[string]Tool, tc providers.ToolCall) string {
