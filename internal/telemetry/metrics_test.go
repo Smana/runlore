@@ -48,3 +48,12 @@ func TestModelTokenCountersConstructed(t *testing.T) {
 		t.Fatal("NewMetrics must construct ModelInputTokens and ModelCachedInputTokens")
 	}
 }
+
+func TestNewMetricsInvestigationUsageInstruments(t *testing.T) {
+	m := NewMetrics()
+	if m.InvestigationModelCalls == nil || m.InvestigationInputTokens == nil ||
+		m.InvestigationOutputTokens == nil || m.InvestigationCachedInputTokens == nil ||
+		m.InvestigationCostUSD == nil {
+		t.Fatal("NewMetrics must construct the per-investigation usage/cost instruments")
+	}
+}
