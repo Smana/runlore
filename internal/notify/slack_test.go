@@ -3,6 +3,7 @@ package notify
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"log/slog"
 	"net/http"
@@ -265,4 +266,74 @@ type notifierFunc func(context.Context, providers.Investigation) error
 
 func (f notifierFunc) Deliver(ctx context.Context, inv providers.Investigation) error {
 	return f(ctx, inv)
+}
+
+// TestSlackProgressRenderEscapesInterim proves an interim progress ping renders
+// the untrusted model text inert: a hostile <url|text> line must not become a
+// clickable link in either the blocks or the plain-text fallback.
+func TestSlackProgressRenderEscapesInterim(t *testing.T) {
+	up := providers.ProgressUpdate{
+		Title:     "HarborDown",
+		Step:      5,
+		MaxSteps:  20,
+		ToolsUsed: map[string]int{"what_changed": 2, "kb_search": 1},
+		Interim:   "checking <https://evil.example|click here to remediate>",
+	}
+	msg := slackProgressMessage(up)
+	joined := strings.Join(mrkdwnTexts(msg["blocks"].([]map[string]any)), "\n")
+	text, _ := msg["text"].(string)
+	for _, s := range []string{joined, text} {
+		if strings.Contains(s, "<https://evil.example") {
+			t.Fatalf("hostile interim rendered as a live mrkdwn link:\n%s", s)
+		}
+		if !strings.Contains(s, "&lt;https://evil.example|click here to remediate&gt;") {
+			t.Fatalf("interim text was not escaped:\n%s", s)
+		}
+	}
+	// Status context carries the step counter and the tools-used summary.
+	if !strings.Contains(joined, "step 5/20") {
+		t.Fatalf("progress blocks missing the step counter:\n%s", joined)
+	}
+	if !strings.Contains(joined, "kb_search×1") || !strings.Contains(joined, "what_changed×2") {
+		t.Fatalf("progress blocks missing the tools-used summary:\n%s", joined)
+	}
+}
+
+// captureProgress is a fake ProgressNotifier recording every ping (and optionally
+// failing) — the test double for the capability fan-out.
+type captureProgress struct {
+	got  []providers.ProgressUpdate
+	fail bool
+}
+
+func (c *captureProgress) Deliver(context.Context, providers.Investigation) error { return nil }
+func (c *captureProgress) DeliverProgress(_ context.Context, up providers.ProgressUpdate) error {
+	c.got = append(c.got, up)
+	if c.fail {
+		return errors.New("boom")
+	}
+	return nil
+}
+
+// TestMultiDeliverProgressCapability proves Multi fans a progress ping only to
+// notifiers implementing ProgressNotifier (a plain notifier is skipped), and that
+// a failing progress sink is swallowed — a ping never fails an investigation.
+func TestMultiDeliverProgressCapability(t *testing.T) {
+	plain := notifierFunc(func(context.Context, providers.Investigation) error {
+		t.Fatal("a plain (non-progress) notifier must not receive Deliver on a progress ping")
+		return nil
+	})
+	cap1 := &captureProgress{}
+	cap2 := &captureProgress{fail: true} // failing sink: must be swallowed
+	m := NewMulti(slog.New(slog.NewTextHandler(io.Discard, nil)), plain, cap1, cap2)
+	up := providers.ProgressUpdate{Title: "x", Step: 5, MaxSteps: 20}
+	if err := m.DeliverProgress(context.Background(), up); err != nil {
+		t.Fatalf("DeliverProgress must swallow sink errors, got %v", err)
+	}
+	if len(cap1.got) != 1 || cap1.got[0].Step != 5 {
+		t.Fatalf("progress-capable notifier got %+v, want one ping at step 5", cap1.got)
+	}
+	if len(cap2.got) != 1 {
+		t.Fatalf("a failing progress sink must still be attempted, got %d", len(cap2.got))
+	}
 }

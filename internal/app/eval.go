@@ -36,6 +36,7 @@ func RunEval(args []string) error {
 	jBaseURL := fs.String("judge-base-url", "", "judge model base URL")
 	jModel := fs.String("judge-model", "", "judge model name")
 	jKeyEnv := fs.String("judge-api-key-env", "", "env var holding the judge API key")
+	compare := fs.String("compare", "", "path to a model-comparison spec (benchmark several models over the replay suite)")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -48,6 +49,16 @@ func RunEval(args []string) error {
 	cfg, err := config.Load(*cfgPath)
 	if err != nil {
 		return err
+	}
+	// The comparison spec carries its own per-entry models (and optionally its own
+	// judge), so it does NOT require a configured config.model — it only borrows the
+	// config's output-token cap and, as a fallback, the config judge.
+	if *compare != "" {
+		if !nExplicit {
+			*n = compareDefaultN
+		}
+		return RunEvalCompare(cfg, *compare, *casesDir, *reportDir, *stamp, *n,
+			*jProvider, *jBaseURL, *jModel, *jKeyEnv)
 	}
 	if !ModelConfigured(cfg) {
 		return fmt.Errorf("eval requires a configured model (set config.model)")

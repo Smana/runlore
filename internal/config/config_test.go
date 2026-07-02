@@ -208,6 +208,22 @@ func TestValidateRejectsNegativeMaxTokens(t *testing.T) {
 	}
 }
 
+// TestValidateCompactionMode locks the compaction knob: empty (default), "elide",
+// and "summarize" validate clean; anything else is rejected at startup rather than
+// silently defaulting a typo to lossy elision.
+func TestValidateCompactionMode(t *testing.T) {
+	for _, mode := range []string{"", "elide", "summarize"} {
+		c := &Config{Model: Model{Provider: "anthropic"}, Investigation: Investigation{Compaction: mode}}
+		if err := c.Validate(); err != nil {
+			t.Fatalf("compaction %q must validate clean: %v", mode, err)
+		}
+	}
+	bad := &Config{Model: Model{Provider: "anthropic"}, Investigation: Investigation{Compaction: "summarise"}}
+	if err := bad.Validate(); err == nil {
+		t.Fatal("an unknown compaction mode must be rejected by Validate")
+	}
+}
+
 // TestValidateEffort locks in the per-provider effort vocabulary: anthropic
 // low|medium|high|max, openai (and any OpenAI-compatible/unknown provider)
 // minimal|low|medium|high, gemini rejected outright, and empty always fine

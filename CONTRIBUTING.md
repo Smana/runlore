@@ -112,6 +112,15 @@ lore eval --config runlore.yaml --cases examples/eval
 It needs a configured model (`config.model`). The harness logic (`internal/eval`) is unit-tested with a
 fake model, so `go test ./internal/eval/` runs without an API key.
 
+### Comparing models (benchmark)
+
+`lore eval --compare <spec.yaml>` benchmarks **several** models against the same replay suite in one
+command and writes an aggregated report (markdown + JSON) to `eval/reports/`: per-model rubric medians,
+pass rate, coverage, confident-wrong count, total tokens, and optional estimated cost. Grading is by one
+fixed, blind judge so scores are comparable. See **[docs/benchmarking.md](docs/benchmarking.md)** for the
+spec shape, the report columns, and how to publish results honestly. The pipeline has a keyless offline
+test (`go test ./internal/app/ -run TestRunEvalCompareOffline`).
+
 ### Nightly eval (CI)
 
 `.github/workflows/eval.yaml` runs the replay eval every night (06:00 UTC) and on

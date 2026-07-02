@@ -52,6 +52,20 @@ func RequireWebhookAuth(cfg *config.Config, webhookToken string) error {
 	return nil
 }
 
+// RequirePagerDutyAuth is the PagerDuty analogue of RequireWebhookAuth. The
+// PagerDuty source authenticates /webhook/pagerduty with its own
+// X-PagerDuty-Signature verification (not the shared server.webhook_token_env
+// bearer token), so the shared guard does not cover it. When the source is
+// enabled and a model is configured, it must carry a signing secret — otherwise
+// an unauthenticated caller could drive (and bill) the model. Fail closed on the
+// serve path only, mirroring RequireWebhookAuth.
+func RequirePagerDutyAuth(cfg *config.Config, enabled bool, secret string) error {
+	if enabled && ModelConfigured(cfg) && secret == "" {
+		return fmt.Errorf("model configured and sources.pagerduty enabled but its secret_env is empty: refusing to start with an unauthenticated PagerDuty webhook (fail closed)")
+	}
+	return nil
+}
+
 // OutcomeKind labels an outcome-ledger open as a recall (cache hit) or a fresh finding.
 func OutcomeKind(recalled bool) string {
 	if recalled {
