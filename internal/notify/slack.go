@@ -47,12 +47,26 @@ func NewSlack(webhookURL string) *Slack {
 	return &Slack{webhookURL: webhookURL, http: httpx.SecureClient(15 * time.Second)}
 }
 
-var _ providers.Notifier = (*Slack)(nil)
+var (
+	_ providers.Notifier         = (*Slack)(nil)
+	_ providers.ProgressNotifier = (*Slack)(nil)
+)
 
 // Deliver posts the formatted investigation to the webhook. When an action carries
 // an ApprovalID, it renders interactive Approve/Reject buttons (Block Kit).
 func (s *Slack) Deliver(ctx context.Context, inv providers.Investigation) error {
-	body, err := json.Marshal(slackMessage(inv))
+	return s.post(ctx, slackMessage(inv))
+}
+
+// DeliverProgress posts an interim progress ping to the webhook (ProgressNotifier).
+func (s *Slack) DeliverProgress(ctx context.Context, up providers.ProgressUpdate) error {
+	return s.post(ctx, slackProgressMessage(up))
+}
+
+// post marshals a Slack payload and POSTs it to the incoming webhook, surfacing
+// transport and non-2xx errors. Shared by Deliver and DeliverProgress.
+func (s *Slack) post(ctx context.Context, msg map[string]any) error {
+	body, err := json.Marshal(msg)
 	if err != nil {
 		return err
 	}
@@ -88,12 +102,26 @@ func NewSlackBot(token, channel string) *SlackBot {
 	return &SlackBot{token: token, channel: channel, baseURL: "https://slack.com", http: httpx.SecureClient(15 * time.Second)}
 }
 
-var _ providers.Notifier = (*SlackBot)(nil)
+var (
+	_ providers.Notifier         = (*SlackBot)(nil)
+	_ providers.ProgressNotifier = (*SlackBot)(nil)
+)
 
 // Deliver posts the formatted investigation to the configured channel via
 // chat.postMessage, surfacing both transport and Slack API (ok:false) errors.
 func (s *SlackBot) Deliver(ctx context.Context, inv providers.Investigation) error {
-	msg := slackMessage(inv)
+	return s.post(ctx, slackMessage(inv))
+}
+
+// DeliverProgress posts an interim progress ping to the channel (ProgressNotifier).
+func (s *SlackBot) DeliverProgress(ctx context.Context, up providers.ProgressUpdate) error {
+	return s.post(ctx, slackProgressMessage(up))
+}
+
+// post targets the message at the configured channel and sends it via
+// chat.postMessage, surfacing transport and Slack API (ok:false) errors. Shared
+// by Deliver and DeliverProgress.
+func (s *SlackBot) post(ctx context.Context, msg map[string]any) error {
 	msg["channel"] = s.channel
 	body, err := json.Marshal(msg)
 	if err != nil {
@@ -152,6 +180,38 @@ func slackMessage(inv providers.Investigation) map[string]any {
 	// TestSlackMessageFallbackEscaped guards that invariant. Matrix and the
 	// generic webhook call Format themselves and are unaffected.
 	return map[string]any{"text": escapeMrkdwn(Format(inv)), "blocks": slackBlocks(inv)}
+}
+
+// slackProgressMessage builds the Slack payload for an interim progress ping: a
+// compact header + context line + the model's interim text. The fallback text is
+// the escaped shared FormatProgress output (parsed as mrkdwn by block-less
+// clients); the blocks escape each untrusted field the same way delivery does, so
+// a hostile interim line like <https://evil|x> renders inert, never a live link.
+func slackProgressMessage(up providers.ProgressUpdate) map[string]any {
+	return map[string]any{"text": escapeMrkdwn(FormatProgress(up)), "blocks": slackProgressBlocks(up)}
+}
+
+// slackProgressBlocks renders an interim progress update as Block Kit.
+func slackProgressBlocks(up providers.ProgressUpdate) []map[string]any {
+	title := up.Title
+	if title == "" {
+		title = "Investigation"
+	}
+	// The header is plain_text (Slack renders it literally, no mrkdwn parsing), so
+	// the untrusted title needs no escaping here.
+	status := fmt.Sprintf("⏳ *Investigating* · step %d/%d", up.Step, up.MaxSteps)
+	if s := progressToolsSummary(up.ToolsUsed); s != "" {
+		status += " · " + escapeMrkdwn(s)
+	}
+	blocks := []map[string]any{
+		{"type": "header", "text": map[string]any{"type": "plain_text", "text": truncate("🔍 "+title, 150), "emoji": true}},
+		{"type": "context", "elements": []map[string]any{{"type": "mrkdwn", "text": status}}},
+	}
+	if t := strings.TrimSpace(up.Interim); t != "" {
+		blocks = append(blocks, map[string]any{"type": "section",
+			"text": map[string]any{"type": "mrkdwn", "text": truncate(escapeMrkdwn(t), 2900)}})
+	}
+	return blocks
 }
 
 // mrkdwnEscaper implements Slack's documented mrkdwn escaping: exactly three
@@ -327,7 +387,10 @@ func NewMulti(log *slog.Logger, notifiers ...providers.Notifier) *Multi {
 	return &Multi{notifiers: notifiers, log: log}
 }
 
-var _ providers.Notifier = (*Multi)(nil)
+var (
+	_ providers.Notifier         = (*Multi)(nil)
+	_ providers.ProgressNotifier = (*Multi)(nil)
+)
 
 // Deliver fans out to every notifier (best-effort: one bad sink never blocks the
 // others), logs each failure, and returns the joined errors so the caller can tell
@@ -341,6 +404,24 @@ func (m *Multi) Deliver(ctx context.Context, inv providers.Investigation) error 
 		}
 	}
 	return errors.Join(errs...)
+}
+
+// DeliverProgress fans an interim progress ping out to every wrapped notifier
+// that implements ProgressNotifier (the type-assert capability check), skipping
+// those that don't (Matrix/webhook may no-op for now). It is best-effort by
+// contract: a failing sink is logged and swallowed, never propagated — a progress
+// ping must never fail an investigation. Returns nil always.
+func (m *Multi) DeliverProgress(ctx context.Context, up providers.ProgressUpdate) error {
+	for _, n := range m.notifiers {
+		pn, ok := n.(providers.ProgressNotifier)
+		if !ok {
+			continue
+		}
+		if err := pn.DeliverProgress(ctx, up); err != nil {
+			m.log.Error("progress delivery failed (swallowed)", "err", err)
+		}
+	}
+	return nil
 }
 
 // Len reports how many notifiers are configured.
