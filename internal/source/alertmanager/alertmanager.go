@@ -27,6 +27,7 @@ type amPayload struct {
 type amAlert struct {
 	Status      string            `json:"status"`
 	Labels      map[string]string `json:"labels"`
+	Annotations map[string]string `json:"annotations"`
 	StartsAt    string            `json:"startsAt"`
 	Fingerprint string            `json:"fingerprint"`
 }
@@ -76,13 +77,19 @@ func (Source) Decode(body []byte, _ http.Header) (source.DecodeResult, error) {
 			fps = []string{a.Fingerprint}
 		}
 		out.Requests = append(out.Requests, investigate.Request{
-			Source:       investigate.SourceAlert,
-			Title:        a.Labels["alertname"],
-			Severity:     a.Labels["severity"],
-			Environment:  cmp.Or(a.Labels["environment"], a.Labels["env"]),
-			Workload:     providers.Workload{Namespace: a.Labels["namespace"], Kind: kind, Name: name},
-			Reason:       a.Labels["severity"],
+			Source:      investigate.SourceAlert,
+			Title:       a.Labels["alertname"],
+			Severity:    a.Labels["severity"],
+			Environment: cmp.Or(a.Labels["environment"], a.Labels["env"]),
+			Workload:    providers.Workload{Namespace: a.Labels["namespace"], Kind: kind, Name: name},
+			Reason:      a.Labels["severity"],
+			// The description/summary annotation is the alert's most informative human
+			// text (the templated "what is wrong") — without it the seed prompt carried
+			// only the alertname. Remaining annotations (runbook_url, dashboards, …)
+			// travel on Annotations for the seed prompt to surface.
+			Message:      cmp.Or(a.Annotations["description"], a.Annotations["summary"], a.Annotations["message"]),
 			Labels:       a.Labels,
+			Annotations:  a.Annotations,
 			At:           startsAt,
 			Fingerprint:  a.Fingerprint,
 			Fingerprints: fps,

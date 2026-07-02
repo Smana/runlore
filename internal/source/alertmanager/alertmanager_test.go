@@ -102,6 +102,57 @@ func TestDecodeFiringResolvedSplit(t *testing.T) {
 	}
 }
 
+// TestDecodeAnnotations covers the alert annotations: the description (falling
+// back to summary, then message) becomes the request Message — the most
+// informative human text an alert carries — and the full annotation map is
+// threaded so the investigation seed can surface runbook_url etc.
+func TestDecodeAnnotations(t *testing.T) {
+	body := []byte(`{"alerts":[{"status":"firing",
+		"labels":{"alertname":"HighMem","namespace":"ns"},
+		"annotations":{"description":"container web memory at 97% of limit for 15m","runbook_url":"https://runbooks.example/highmem"}}]}`)
+	res, err := (&Source{}).Decode(body, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(res.Requests) != 1 {
+		t.Fatalf("want 1 request, got %d", len(res.Requests))
+	}
+	r := res.Requests[0]
+	if r.Message != "container web memory at 97% of limit for 15m" {
+		t.Fatalf("want Message from the description annotation, got %q", r.Message)
+	}
+	if r.Annotations["runbook_url"] != "https://runbooks.example/highmem" {
+		t.Fatalf("annotations not threaded: %v", r.Annotations)
+	}
+}
+
+// TestDecodeAnnotationsFallback covers the summary → message fallback order and
+// that a missing annotations object leaves Message empty (not a panic).
+func TestDecodeAnnotationsFallback(t *testing.T) {
+	cases := []struct {
+		name, body, want string
+	}{
+		{"summary fallback",
+			`{"alerts":[{"status":"firing","labels":{"alertname":"X","namespace":"ns"},"annotations":{"summary":"pods crash-looping"}}]}`,
+			"pods crash-looping"},
+		{"message fallback",
+			`{"alerts":[{"status":"firing","labels":{"alertname":"X","namespace":"ns"},"annotations":{"message":"probe failed"}}]}`,
+			"probe failed"},
+		{"no annotations",
+			`{"alerts":[{"status":"firing","labels":{"alertname":"X","namespace":"ns"}}]}`,
+			""},
+	}
+	for _, c := range cases {
+		res, err := (&Source{}).Decode([]byte(c.body), nil)
+		if err != nil {
+			t.Fatalf("%s: %v", c.name, err)
+		}
+		if got := res.Requests[0].Message; got != c.want {
+			t.Errorf("%s: Message = %q, want %q", c.name, got, c.want)
+		}
+	}
+}
+
 func TestWorkloadFromLabels(t *testing.T) {
 	cases := []struct {
 		name             string

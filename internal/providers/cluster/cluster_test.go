@@ -43,6 +43,35 @@ func TestPodLogs(t *testing.T) {
 	}
 }
 
+// TestSplitLogTimestamp covers parsing the RFC3339Nano prefix the kubelet adds
+// when PodLogOptions.Timestamps is set — the per-line time that lets the model
+// correlate a log line to a change/event timestamp. Lines without a parseable
+// prefix (fakes, malformed) pass through untouched with a zero time.
+func TestSplitLogTimestamp(t *testing.T) {
+	cases := []struct {
+		name, in, wantMsg string
+		wantZero          bool
+	}{
+		{"kubelet timestamped line", "2026-07-01T14:03:05.123456789Z panic: boom", "panic: boom", false},
+		{"no timestamp", "fake logs", "fake logs", true},
+		{"timestamp only", "2026-07-01T14:03:05Z", "", false},
+		{"empty", "", "", true},
+	}
+	for _, c := range cases {
+		ts, msg := splitLogTimestamp(c.in)
+		if msg != c.wantMsg {
+			t.Errorf("%s: msg = %q, want %q", c.name, msg, c.wantMsg)
+		}
+		if ts.IsZero() != c.wantZero {
+			t.Errorf("%s: ts.IsZero() = %v, want %v", c.name, ts.IsZero(), c.wantZero)
+		}
+	}
+	ts, _ := splitLogTimestamp("2026-07-01T14:03:05.123456789Z panic: boom")
+	if ts.UTC().Format("2006-01-02T15:04:05Z") != "2026-07-01T14:03:05Z" {
+		t.Errorf("parsed timestamp wrong: %v", ts)
+	}
+}
+
 func TestPodStatusSurfacesOOMAndLimit(t *testing.T) {
 	// An OOMKilled pod loops: its CURRENT state is Waiting{CrashLoopBackOff}; the
 	// OOMKilled/exit-137 signal lives in LastTerminationState. pod_status must surface
