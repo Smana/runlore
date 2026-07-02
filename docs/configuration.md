@@ -87,6 +87,12 @@ incident webhook. Known keys: `alertmanager`, `gitops`, `pagerduty`.
   adds no new egress path. Requires `max_tokens_per_investigation > 0` (compaction is off without a
   budget). Metrics: `history_summarizations_total`, `history_summarize_fallbacks_total`; the digest
   call's token usage is counted into `model_input_tokens_total`.
+- `progress_updates` — interim delivery for long investigations. **Off by default.** `enabled`; when
+  enabled the loop delivers a progress ping (incident title, step count, tools used so far, and the
+  model's latest interim text — redacted and mrkdwn-escaped like any other untrusted field) every
+  `every_steps` steps (**default 5**; must be `> 0` when enabled). Pings go only to notifiers that
+  implement the capability (Slack today); a delivery failure is logged and swallowed, never failing the
+  investigation.
 - `pod_log_namespaces` — **app-layer allowlist** of namespaces the `pod_logs` tool
   may read RAW pod logs from, *beyond* the incident's own namespace (which is always allowed; RBAC
   still gates the actual read). Pod logs carry secrets/PII and are streamed to the external LLM, so the
@@ -142,6 +148,14 @@ thinking is incompatible with a forced tool choice, so the client drops the thin
 the replayed thinking blocks for that single request (invalidating only the message-level prompt cache
 for that step). `verify.thinking` overrides the parent's value, inheriting it when empty like the other
 verify fields — though the verify pass always forces a tool choice, so thinking is dropped there anyway.
+
+Optional `pricing` turns the per-investigation token accounting into a cost estimate: `input_usd_per_mtok`,
+`output_usd_per_mtok`, `cached_input_usd_per_mtok` (USD per million tokens; all must be `>= 0`). When set,
+the delivered finding gains a footer line (`N model calls · X in / Y out tokens (Z% cached) · ~$C`) and the
+`investigation_cost_usd` metric is populated; without it, the footer omits the cost and only token counts
+show. Totals sum the investigation loop **and** the verify pass — loop tokens price at `model.pricing`,
+verify tokens at `model.verify.pricing` (inheriting `model.pricing` when empty). Cost never enters the
+curated KB entry, only the notification.
 
 ### `forge` — the Git host for curation
 `kb_repo` (`owner/name`), `base_branch` (default `main`), `github_api_url` (default
