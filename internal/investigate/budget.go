@@ -1,6 +1,10 @@
 package investigate
 
-import "github.com/Smana/runlore/internal/providers"
+import (
+	"math"
+
+	"github.com/Smana/runlore/internal/providers"
+)
 
 // budgetKillResult synthesises an unresolved investigation for use when the
 // token-budget hard-kill fires (nudge fired, model did not submit findings in time).
@@ -51,11 +55,12 @@ func refusalResult(req Request) providers.Investigation {
 // tool-call JSON (m.ToolCalls[].Args), which also goes over the wire. Counting
 // only m.Content systematically under-estimated a tool-heavy investigation,
 // letting the hard-kill guard fire late or never. This estimate drives the
-// PRE-request budget guard, so it cannot use provider-reported usage (which only
-// exists post-response, on CompletionResponse.Usage); the loop records real
-// counts separately. Still an under-estimate of the true wire size (it ignores
-// JSON envelope/role overhead) but now the right order of magnitude, which is
-// what the hard-kill needs.
+// PRE-request budget guard, so by itself it cannot use provider-reported usage
+// (which only exists post-response, on CompletionResponse.Usage) — that is
+// tokenCalibration's job: it scales this heuristic by the actual/heuristic ratio
+// observed on the previous completion. Uncalibrated, this remains an
+// under-estimate of the true wire size (it ignores JSON envelope/role overhead)
+// but the right order of magnitude, which is what the hard-kill needs.
 func estimateTokens(system string, msgs []providers.Message, tools []providers.ToolSpec) int {
 	n := len(system)
 	for _, t := range tools {
@@ -68,6 +73,60 @@ func estimateTokens(system string, msgs []providers.Message, tools []providers.T
 		}
 	}
 	return n / 4
+}
+
+// tokenCalibration anchors the chars/4 pre-request heuristic to reality: after
+// each completion whose provider reported usage, it records the ratio between the
+// actual prompt size (Usage.InputTokens, which includes cached tokens) and the
+// heuristic estimate computed for that same request, then scales subsequent
+// estimates by it. A ratio survives compaction and append-only growth alike
+// because it captures the heuristic's systematic bias (tokenizer density, JSON
+// envelope/role overhead), not an absolute context size. The zero value is
+// uncalibrated: estimates fall back to the pure heuristic, so providers that
+// never report usage behave exactly as before.
+type tokenCalibration struct {
+	// ratio is actual InputTokens ÷ heuristic estimate from the most recent
+	// completion that reported usage; 0 means uncalibrated. Floored at 1 on
+	// observe, so the anchored estimate is never below the raw heuristic and the
+	// budget guard can only fire EARLIER than uncalibrated, never later.
+	ratio float64
+}
+
+// observe records the actual/heuristic ratio for a completed request: heuristic
+// is estimateTokens computed for the request as sent, usage is the provider's
+// report for it. Zero usage (provider didn't report) or a non-positive heuristic
+// leaves the calibration unchanged.
+func (c *tokenCalibration) observe(heuristic int, usage providers.Usage) {
+	if heuristic <= 0 || usage.InputTokens <= 0 {
+		return
+	}
+	r := float64(usage.InputTokens) / float64(heuristic)
+	if r < 1 {
+		r = 1 // safety floor: never estimate below the raw heuristic
+	}
+	c.ratio = r
+}
+
+// estimate returns the usage-anchored request-size estimate: estimateTokens
+// scaled (rounded up) by the last observed actual/heuristic ratio. Uncalibrated,
+// it is exactly the raw heuristic.
+func (c *tokenCalibration) estimate(system string, msgs []providers.Message, tools []providers.ToolSpec) int {
+	est := estimateTokens(system, msgs, tools)
+	if c.ratio > 1 {
+		est = int(math.Ceil(float64(est) * c.ratio))
+	}
+	return est
+}
+
+// heuristicTarget converts a token target expressed in anchored (real) tokens
+// into the raw-heuristic space that compactHistory measures in, so a calibrated
+// loop compacts down to a real target rather than an under-counted one.
+// Uncalibrated, the target passes through unchanged.
+func (c *tokenCalibration) heuristicTarget(target int) int {
+	if c.ratio > 1 {
+		return int(float64(target) / c.ratio)
+	}
+	return target
 }
 
 // overBudget reports whether est exceeds budget. budget <= 0 means unlimited.

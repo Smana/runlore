@@ -9,15 +9,17 @@ import (
 )
 
 type fakeModel struct {
-	resp     providers.CompletionResponse
-	err      error
-	gotTools []string
+	resp          providers.CompletionResponse
+	err           error
+	gotTools      []string
+	gotToolChoice string
 }
 
 func (f *fakeModel) Complete(_ context.Context, req providers.CompletionRequest) (providers.CompletionResponse, error) {
 	for _, t := range req.Tools {
 		f.gotTools = append(f.gotTools, t.Name)
 	}
+	f.gotToolChoice = req.ToolChoice
 	return f.resp, f.err
 }
 
@@ -71,5 +73,18 @@ func TestReviewSemanticCauseMismatch(t *testing.T) {
 	}
 	if !found {
 		t.Fatalf("submit_review tool was not offered; got %v", m.gotTools)
+	}
+}
+
+// TestReviewSemanticForcesSubmitReview asserts the semantic review forces the
+// model to call submit_review (ToolChoice) — a prose reply degrades to Skipped,
+// so the tool call must be forced rather than merely suggested.
+func TestReviewSemanticForcesSubmitReview(t *testing.T) {
+	m := &fakeModel{resp: reviewCall(`{"cause_explains_symptom":{"ok":true,"rationale":"r"},"durable":{"ok":true,"rationale":"r"}}`)}
+	if _, err := ReviewSemantic(context.Background(), validIncident(), m); err != nil {
+		t.Fatalf("ReviewSemantic: %v", err)
+	}
+	if m.gotToolChoice != submitReviewName {
+		t.Fatalf("semantic review must force %q, got ToolChoice=%q", submitReviewName, m.gotToolChoice)
 	}
 }

@@ -70,6 +70,9 @@ func ReviewSemantic(ctx context.Context, e catalog.Entry, m providers.ModelProvi
 		System:   reviewSystemPrompt,
 		Messages: []providers.Message{{Role: "user", Content: renderEntry(e)}},
 		Tools:    []providers.ToolSpec{submitReviewSpec()},
+		// Force the tool: a prose reply degrades to Skipped (no advisory), so the
+		// model must record its review through submit_review, not text.
+		ToolChoice: submitReviewName,
 	})
 	if err != nil {
 		return Advisory{Skipped: true}, fmt.Errorf("semantic review: %w", err)

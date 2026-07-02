@@ -60,9 +60,22 @@ type chatRequest struct {
 	Tools     []chatTool `json:"tools,omitempty"`
 	MaxTokens int        `json:"max_tokens,omitempty"`
 	Stream    bool       `json:"stream"`
+	// ToolChoice forces the model to call one named function this turn
+	// ({"type":"function","function":{"name":...}}). Omitted (nil) = auto.
+	ToolChoice *toolChoice `json:"tool_choice,omitempty"`
 	// StreamOptions asks the server to emit a trailing usage-only chunk on a streamed
 	// response (omitted otherwise, since a non-streaming request rejects it).
 	StreamOptions *streamOptions `json:"stream_options,omitempty"`
+}
+
+// toolChoice is the forced-function form of the chat-completions tool_choice.
+type toolChoice struct {
+	Type     string             `json:"type"` // "function"
+	Function toolChoiceFunction `json:"function"`
+}
+
+type toolChoiceFunction struct {
+	Name string `json:"name"`
 }
 
 // streamOptions toggles streaming extras; include_usage adds a final chunk whose
@@ -187,14 +200,18 @@ func (c *Client) Complete(ctx context.Context, req providers.CompletionRequest) 
 		}})
 	}
 
-	body, err := json.Marshal(chatRequest{
+	creq := chatRequest{
 		Model:         c.model,
 		Messages:      msgs,
 		Tools:         tools,
 		MaxTokens:     c.maxTokens,
 		Stream:        true,
 		StreamOptions: &streamOptions{IncludeUsage: true},
-	})
+	}
+	if req.ToolChoice != "" {
+		creq.ToolChoice = &toolChoice{Type: "function", Function: toolChoiceFunction{Name: req.ToolChoice}}
+	}
+	body, err := json.Marshal(creq)
 	if err != nil {
 		return providers.CompletionResponse{}, fmt.Errorf("marshal request: %w", err)
 	}
@@ -221,15 +238,61 @@ func (c *Client) Complete(ctx context.Context, req providers.CompletionRequest) 
 	}
 	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusOK {
-		// Drain a bounded prefix so the connection can be reused, but never echo the
-		// upstream body into an Error-level log: base_url is operator-configurable, so a
-		// misbehaving/compromised proxy could inject arbitrary content (info disclosure +
-		// log injection). Surface the status and the upstream request-id (sanitized).
-		_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 4<<10))
-		return providers.CompletionResponse{}, fmt.Errorf("chat status %d (request-id %q)", resp.StatusCode, httpx.RequestID(resp.Header))
+		// Read a bounded prefix of the error body. base_url is operator-configurable, so
+		// never echo the raw bytes into an Error-level log (a misbehaving/compromised
+		// proxy could inject arbitrary content — info disclosure + log injection);
+		// surface only the structured error type/message, sanitized, so 4xx causes
+		// (e.g. an unknown model name or a rejected API key) are diagnosable from the
+		// error alone.
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 4<<10))
+		err := fmt.Errorf("chat status %d (request-id %q)%s", resp.StatusCode, httpx.RequestID(resp.Header), openaiErrorDetail(body))
+		// A 4xx other than 429 is permanent: the request itself is bad (e.g. 400
+		// invalid request, 401/403 auth, 404 unknown model), so retrying can't help.
+		// Mark it so the investigation workqueue drops it instead of requeuing forever.
+		// 429 and 5xx are already retried by DoWithRetry and stay transient here.
+		if resp.StatusCode >= 400 && resp.StatusCode < 500 && resp.StatusCode != http.StatusTooManyRequests {
+			return providers.CompletionResponse{}, providers.Permanent(err)
+		}
+		return providers.CompletionResponse{}, err
 	}
 	stream := httpx.NewIdleTimeoutReader(resp.Body, idleTimeout, cancel)
 	return accumulate(stream)
+}
+
+// openaiErrorDetail extracts a sanitized ": type: message" suffix from an
+// OpenAI-compatible error response body ({"error":{"message","type","code"}}), or
+// "" if the body can't be parsed as one. Only the structured error.type /
+// error.message fields are surfaced (never the raw bytes), control characters are
+// collapsed to spaces to prevent log injection, and the message is truncated — so
+// a 4xx cause is diagnosable without echoing arbitrary upstream content into an
+// Error-level log.
+func openaiErrorDetail(body []byte) string {
+	var e struct {
+		Error struct {
+			Type    string `json:"type"`
+			Message string `json:"message"`
+		} `json:"error"`
+	}
+	if err := json.Unmarshal(body, &e); err != nil || (e.Error.Type == "" && e.Error.Message == "") {
+		return ""
+	}
+	msg := sanitizeLine(e.Error.Message)
+	const maxLen = 300
+	if len(msg) > maxLen {
+		msg = msg[:maxLen] + "…"
+	}
+	return fmt.Sprintf(": %s: %s", sanitizeLine(e.Error.Type), msg)
+}
+
+// sanitizeLine collapses control characters (including newlines) to spaces so an
+// upstream-controlled string can't inject additional log lines.
+func sanitizeLine(s string) string {
+	return strings.TrimSpace(strings.Map(func(r rune) rune {
+		if r < 0x20 || r == 0x7f {
+			return ' '
+		}
+		return r
+	}, s))
 }
 
 // accumulate consumes an OpenAI chat/completions SSE stream and folds it into one

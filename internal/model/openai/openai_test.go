@@ -84,6 +84,74 @@ func TestNon2xxErrorOmitsBody(t *testing.T) {
 	}
 }
 
+// TestOpenAIErrorDetail asserts the error-body parser surfaces the structured
+// OpenAI-compatible error type/message (so 4xx causes like a bad model name are
+// diagnosable) while never echoing a non-JSON body and never emitting control
+// characters (log-injection safe).
+func TestOpenAIErrorDetail(t *testing.T) {
+	cases := []struct {
+		name, body, want string
+	}{
+		{
+			name: "structured 404 is surfaced",
+			body: `{"error":{"message":"The model 'gpt-oops' does not exist","type":"invalid_request_error","code":"model_not_found"}}`,
+			want: ": invalid_request_error: The model 'gpt-oops' does not exist",
+		},
+		{name: "non-JSON body is omitted", body: maliciousBody, want: ""},
+		{name: "json without error fields is omitted", body: `{"foo":"bar"}`, want: ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := openaiErrorDetail([]byte(tc.body)); got != tc.want {
+				t.Errorf("openaiErrorDetail(%q) = %q, want %q", tc.body, got, tc.want)
+			}
+		})
+	}
+
+	// A message with control characters must be sanitized (no log injection).
+	inj := openaiErrorDetail([]byte(`{"error":{"type":"x","message":"line1\nline2\u001b[2Kforged"}}`))
+	if strings.ContainsAny(inj, "\n\r\x1b") {
+		t.Errorf("detail leaked control chars: %q", inj)
+	}
+	// An over-long message is truncated with an ellipsis.
+	long := openaiErrorDetail([]byte(`{"error":{"type":"t","message":"` + strings.Repeat("a", 500) + `"}}`))
+	if !strings.HasSuffix(long, "…") {
+		t.Errorf("long message should be truncated with an ellipsis: %q", long)
+	}
+}
+
+// TestNon2xxPermanence asserts a 4xx other than 429 is classified permanent (so the
+// investigation workqueue drops it), while 429 and 5xx stay transient (retryable).
+func TestNon2xxPermanence(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		code int
+		want bool
+	}{
+		{"400 is permanent", http.StatusBadRequest, true},
+		{"401 is permanent", http.StatusUnauthorized, true},
+		{"404 is permanent", http.StatusNotFound, true},
+		{"429 is transient", http.StatusTooManyRequests, false},
+		{"502 is transient", http.StatusBadGateway, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				w.WriteHeader(tc.code)
+			}))
+			defer srv.Close()
+			_, err := New(srv.URL, "test-model", "k", 0).Complete(context.Background(), providers.CompletionRequest{
+				Messages: []providers.Message{{Role: "user", Content: "hi"}},
+			})
+			if err == nil {
+				t.Fatal("want error for non-2xx response")
+			}
+			if got := providers.IsPermanent(err); got != tc.want {
+				t.Errorf("IsPermanent(status %d) = %v, want %v", tc.code, got, tc.want)
+			}
+		})
+	}
+}
+
 // TestComplete drives a full OpenAI chat/completions SSE stream — content deltas, a
 // tool_call assembled by index (first chunk carries id+name, later chunks carry
 // arguments fragments), a finish_reason chunk, a usage-only chunk, and the [DONE]
@@ -150,6 +218,62 @@ func TestComplete(t *testing.T) {
 	}
 	if resp.StopReason != "tool_calls" {
 		t.Fatalf("StopReason = %q, want tool_calls", resp.StopReason)
+	}
+}
+
+// TestToolChoice asserts CompletionRequest.ToolChoice maps to the OpenAI forced
+// tool_choice — {"type":"function","function":{"name":"<name>"}} — and that an
+// empty ToolChoice omits the field entirely (provider default: auto).
+func TestToolChoice(t *testing.T) {
+	events := []string{
+		`data: {"choices":[{"index":0,"delta":{"content":"ok"},"finish_reason":"stop"}]}` + "\n\n",
+		"data: [DONE]\n\n",
+	}
+	cases := []struct {
+		name   string
+		choice string
+	}{
+		{"forced tool", "submit_verdicts"},
+		{"empty omits the field", ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var body []byte
+			srv := sseServer(t, func(r *http.Request) { body, _ = io.ReadAll(r.Body) }, events)
+			defer srv.Close()
+
+			_, err := New(srv.URL, "test-model", "k", 0).Complete(context.Background(), providers.CompletionRequest{
+				Messages:   []providers.Message{{Role: "user", Content: "hi"}},
+				Tools:      []providers.ToolSpec{{Name: "submit_verdicts", Description: "d", Schema: `{"type":"object"}`}},
+				ToolChoice: tc.choice,
+			})
+			if err != nil {
+				t.Fatalf("Complete: %v", err)
+			}
+			var got struct {
+				ToolChoice *struct {
+					Type     string `json:"type"`
+					Function struct {
+						Name string `json:"name"`
+					} `json:"function"`
+				} `json:"tool_choice"`
+			}
+			if err := json.Unmarshal(body, &got); err != nil {
+				t.Fatalf("decode request body: %v", err)
+			}
+			if tc.choice == "" {
+				if got.ToolChoice != nil {
+					t.Fatalf("tool_choice must be omitted when unset, got %+v", got.ToolChoice)
+				}
+				if strings.Contains(string(body), "tool_choice") {
+					t.Fatalf("request body must not carry a tool_choice key when unset: %s", body)
+				}
+				return
+			}
+			if got.ToolChoice == nil || got.ToolChoice.Type != "function" || got.ToolChoice.Function.Name != tc.choice {
+				t.Fatalf(`tool_choice = %+v, want {"type":"function","function":{"name":%q}}`, got.ToolChoice, tc.choice)
+			}
+		})
 	}
 }
 
