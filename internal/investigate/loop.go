@@ -229,25 +229,30 @@ func (li *LoopInvestigator) Investigate(ctx context.Context, req Request) error 
 		maxSteps = 20
 	}
 
-	nudged := false           // set when the prose-turn nudge has fired once
-	budgetNudged := false     // set when the token-budget nudge has fired once
-	toolChoice := ""          // forced tool for every remaining request; set (sticky) when the budget nudge fires
-	truncationNudged := false // set when the output-truncation nudge has fired once
-	compactionLogged := false // set when the one-time compaction log has fired
-	used := map[string]int{}  // tool-call counts, logged so investigation breadth is observable
-	sys := li.system()        // constant for the investigation; build once, not per step
+	nudged := false            // set when the prose-turn nudge has fired once
+	budgetNudged := false      // set when the token-budget nudge has fired once
+	toolChoice := ""           // forced tool for every remaining request; set (sticky) when the budget nudge fires
+	truncationNudged := false  // set when the output-truncation nudge has fired once
+	compactionLogged := false  // set when the one-time compaction log has fired
+	used := map[string]int{}   // tool-call counts, logged so investigation breadth is observable
+	sys := li.system()         // constant for the investigation; build once, not per step
+	var calib tokenCalibration // anchors the chars/4 heuristic to provider-reported usage
 	for step := 0; step < maxSteps; step++ {
 		// Budget control: when the estimated request size exceeds the configured ceiling,
 		// inject a one-time nudge asking the model to wrap up. If the model did not wind
 		// down and the estimate is still over budget on the next step, hard-kill: deliver
-		// whatever findings exist rather than growing context unbounded.
-		est := estimateTokens(sys, messages, specs)
+		// whatever findings exist rather than growing context unbounded. The estimate is
+		// the chars/4 heuristic anchored to the previous completion's reported usage
+		// (calib); providers that report no usage fall back to the pure heuristic.
+		est := calib.estimate(sys, messages, specs)
 		// Mid-loop compaction: before the budget guard, elide superseded/old tool outputs
 		// to stay under budget so a long investigation can finish instead of hard-killing.
+		// The target is converted into raw-heuristic space (compactHistory measures with
+		// estimateTokens) so a calibrated loop compacts down to a REAL 0.7×budget.
 		if target := compactionTarget(li.MaxTokensPerInvestigation); target > 0 && est > target {
-			if compacted, elided := compactHistory(messages, sys, specs, target); elided > 0 {
+			if compacted, elided := compactHistory(messages, sys, specs, calib.heuristicTarget(target)); elided > 0 {
 				messages = compacted
-				est = estimateTokens(sys, messages, specs)
+				est = calib.estimate(sys, messages, specs)
 				if !compactionLogged {
 					li.Log.Info("compacted investigation history to bound context",
 						"title", req.Title, "elided_bytes", elided, "estimate_tokens", est)
@@ -283,6 +288,10 @@ func (li *LoopInvestigator) Investigate(ctx context.Context, req Request) error 
 				return nil
 			}
 		}
+		// Raw heuristic for the request about to be sent (messages may have grown since
+		// est was computed — e.g. the budget nudge); paired with resp.Usage below to
+		// calibrate the next step's estimate.
+		reqHeuristic := estimateTokens(sys, messages, specs)
 		mstart := time.Now()
 		resp, err := li.Model.Complete(ctx, providers.CompletionRequest{System: sys, Messages: messages, Tools: specs, ToolChoice: toolChoice})
 		if li.Metrics != nil {
@@ -317,6 +326,10 @@ func (li *LoopInvestigator) Investigate(ctx context.Context, req Request) error 
 			result = "error"
 			return fmt.Errorf("model: %w", err)
 		}
+		// Anchor subsequent budget estimates to reality: the provider just reported the
+		// true input size for the request we estimated as reqHeuristic. Zero usage
+		// (provider didn't report) is a no-op — the pure heuristic keeps driving the guard.
+		calib.observe(reqHeuristic, resp.Usage)
 		li.Log.Debug("investigation step", "title", req.Title, "step", step, "tool_calls", len(resp.ToolCalls), "text_len", len(resp.Text))
 		// The provider declined the turn (a safety/refusal stop reason): deliver a
 		// first-class unresolved result rather than misreading the empty response as a
@@ -390,7 +403,8 @@ func (li *LoopInvestigator) Investigate(ctx context.Context, req Request) error 
 				inv.TriggerKey = req.TriggerKey     // deterministic dedup key stamped at trigger time (#137)
 				li.Log.Info("investigation evidence gathered", "title", req.Title, "tools_used", used)
 				if li.Metrics != nil {
-					li.Metrics.InvestigationTokens.Record(ctx, int64(estimateTokens(sys, messages, specs)))
+					// Usage-anchored when the provider reported usage; heuristic otherwise.
+					li.Metrics.InvestigationTokens.Record(ctx, int64(calib.estimate(sys, messages, specs)))
 				}
 				if li.Verify {
 					inv = li.verifyFindings(ctx, req, inv)
@@ -505,7 +519,8 @@ func (li *LoopInvestigator) deliver(req Request, inv providers.Investigation) {
 
 // redactInvestigation masks secret-shaped values in a finished investigation's
 // human-facing text (title; each root cause's summary, evidence, and suggested
-// action; unresolved notes; proposed-action descriptions) before it is delivered.
+// action; unresolved notes; proposed-action names and descriptions) before it is
+// delivered.
 func redactInvestigation(inv *providers.Investigation) {
 	inv.Title = redact.Secrets(inv.Title)
 	for i := range inv.RootCauses {
@@ -520,6 +535,11 @@ func redactInvestigation(inv *providers.Investigation) {
 		inv.Unresolved[i] = redact.Secrets(inv.Unresolved[i])
 	}
 	for i := range inv.Actions {
+		// Name and Description both carry model-authored text (buildInvestigation
+		// copies the description into Name), and both are serialized verbatim on
+		// GET /actions — scrub both. Target is left alone: it is a Kubernetes
+		// resource identifier the executor acts on, not free text.
+		inv.Actions[i].Name = redact.Secrets(inv.Actions[i].Name)
 		inv.Actions[i].Description = redact.Secrets(inv.Actions[i].Description)
 	}
 }
