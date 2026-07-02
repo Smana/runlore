@@ -33,7 +33,27 @@ list and comments, follow each link to `values.yaml`.
 
 ### `sources` — what wakes RunLore
 Per-source enablement map; presence enables a source. `alertmanager: {}` mounts the incident webhook;
-`gitops: { enabled: true }` watches GitOps `Ready=False`. Known keys: `alertmanager`, `gitops`.
+`gitops: { enabled: true }` watches GitOps `Ready=False`; `pagerduty: {}` mounts the PagerDuty V3
+incident webhook. Known keys: `alertmanager`, `gitops`, `pagerduty`.
+
+- **`pagerduty`** — mounts `POST /webhook/pagerduty` for [PagerDuty V3 webhook subscriptions](https://developer.pagerduty.com/docs/webhooks-overview).
+  `incident.triggered` starts an investigation; `incident.resolved` closes the outcome (like an
+  Alertmanager resolved alert); every other event type is ignored. The incident title becomes the
+  investigation title, priority (else urgency) the severity, and the service name, incident number and
+  `html_url` ride along as labels. PagerDuty carries **no Kubernetes namespace or workload**, so those
+  stay empty — recall and structural matching tolerate an empty workload.
+  - `secret_env` — names the env var holding the webhook **signing secret** (config stores the env-var
+    *name*, never the value). Each delivery is verified against its `X-PagerDuty-Signature` header
+    (`v1=`-prefixed HMAC-SHA256 of the raw body; multiple comma-separated signatures are accepted so a
+    zero-downtime secret rotation works — any match passes, constant-time). This **replaces** the shared
+    `server.webhook_token_env` bearer token for this path (PagerDuty signs, it cannot send a bearer
+    token). An **unset** secret leaves the webhook open (mirrors the optional Alertmanager token) — but
+    it **fails closed** when a model is configured or `actions.mode=auto`: RunLore refuses to start with
+    an unauthenticated PagerDuty webhook once a model is wired.
+  - PD-side setup: create a [webhook subscription](https://developer.pagerduty.com/api-reference/b3A6MjkyNDc4NA-create-a-webhook-subscription)
+    (delivery URL `https://<runlore>/webhook/pagerduty`), subscribe to the `incident.triggered` /
+    `incident.resolved` events, and put the subscription's generated secret in the env var named by
+    `secret_env`.
 
 ### `triggers` — which incidents to investigate
 - `incidents.match` / `incidents.ignore` — ANDed matchers (`severity`, `environment`, `namespaces`
@@ -56,6 +76,17 @@ Per-source enablement map; presence enables a source. `alertmanager: {}` mounts 
   investigation continues.
 - `max_steps` (**default 20**), `max_tool_output_bytes` (0 = unlimited), `max_tokens_per_investigation`
   (0 = unlimited, else a hard token ceiling).
+- `compaction` — how mid-loop history compaction treats the older tool outputs it elides once the
+  estimate crosses the compaction target (0.7× `max_tokens_per_investigation`). **`elide`** (default)
+  drops their bodies for short markers (lossy). **`summarize`** first asks a model for **one** compact
+  factual digest of the elided batch (per compaction event) — "preserve identifiers, timestamps, error
+  strings, counts; no speculation" — and keeps that, clearly labelled, in place of the markers.
+  Routed to the `model.verify` tier when configured (cheaper), else the main model. **Fail-safe:** any
+  summarizer error, refusal, or truncation falls back to plain elision — a compaction failure never
+  loses the investigation. The digest is derived only from the already-redacted tool outputs, so it
+  adds no new egress path. Requires `max_tokens_per_investigation > 0` (compaction is off without a
+  budget). Metrics: `history_summarizations_total`, `history_summarize_fallbacks_total`; the digest
+  call's token usage is counted into `model_input_tokens_total`.
 - `pod_log_namespaces` — **app-layer allowlist** of namespaces the `pod_logs` tool
   may read RAW pod logs from, *beyond* the incident's own namespace (which is always allowed; RBAC
   still gates the actual read). Pod logs carry secrets/PII and are streamed to the external LLM, so the

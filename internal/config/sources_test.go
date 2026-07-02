@@ -13,6 +13,7 @@ import (
 	// Blank-import the adapters so they self-register and their Build funcs run.
 	_ "github.com/Smana/runlore/internal/source/alertmanager"
 	_ "github.com/Smana/runlore/internal/source/gitops"
+	_ "github.com/Smana/runlore/internal/source/pagerduty"
 )
 
 // fakeGitOps is a minimal GitOpsProvider so the gitops source Build (which requires
@@ -51,6 +52,7 @@ func TestSourcesMapEnablesAdapters(t *testing.T) {
 sources:
   alertmanager: {}
   gitops: { enabled: true }
+  pagerduty: {}
 `)
 	built, err := source.BuildEnabled(source.Deps{Cfg: c, GitOps: fakeGitOps{}, Raw: c.Sources})
 	if err != nil {
@@ -60,8 +62,8 @@ sources:
 	for _, b := range built {
 		names[b.Desc.Name] = true
 	}
-	if !names["alertmanager"] || !names["gitops"] {
-		t.Fatalf("want both alertmanager+gitops built, got %v", names)
+	if !names["alertmanager"] || !names["gitops"] || !names["pagerduty"] {
+		t.Fatalf("want alertmanager+gitops+pagerduty built, got %v", names)
 	}
 }
 

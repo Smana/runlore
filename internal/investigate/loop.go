@@ -116,6 +116,13 @@ type LoopInvestigator struct {
 	MaxToolOutputBytes        int // truncate tool results larger than this before adding to history
 	MaxTokensPerInvestigation int // inject a budget-nudge message when the estimated token count exceeds this
 
+	// Compaction selects how mid-loop history compaction treats the tool outputs it
+	// elides: "" / "elide" (default) drops their bodies for markers; "summarize" first
+	// asks a model for one compact factual digest of the batch and keeps that in place
+	// of the markers, falling back to plain elision on any summarizer failure. When
+	// "summarize", the digest call is routed to VerifyModel if set, else Model.
+	Compaction string
+
 	// Observability — nil-safe; no-op when telemetry is disabled.
 	Metrics       *telemetry.Metrics
 	ModelProvider string // label for model_requests/model_request_duration metrics (e.g. "anthropic")
@@ -280,12 +287,22 @@ func (li *LoopInvestigator) Investigate(ctx context.Context, req Request) error 
 		// The target is converted into raw-heuristic space (compactHistory measures with
 		// estimateTokens) so a calibrated loop compacts down to a REAL 0.7×budget.
 		if target := compactionTarget(li.MaxTokensPerInvestigation); target > 0 && est > target {
-			if compacted, elided := compactHistory(messages, sys, specs, calib.heuristicTarget(target)); elided > 0 {
+			if compacted, elided, removed := compactHistoryDetailed(messages, sys, specs, calib.heuristicTarget(target)); elided > 0 {
+				// summarize mode: replace the just-elided batch with one model-produced
+				// digest (best-effort — on any summarizer failure `compacted` already
+				// carries the plain elision markers, so this only ever adds information).
+				if li.Compaction == compactionSummarize {
+					li.summarizeElided(ctx, compacted, removed)
+				}
 				messages = compacted
 				est = calib.estimate(sys, messages, specs)
 				if !compactionLogged {
+					mode := li.Compaction
+					if mode == "" {
+						mode = compactionElide
+					}
 					li.Log.Info("compacted investigation history to bound context",
-						"title", req.Title, "elided_bytes", elided, "estimate_tokens", est)
+						"title", req.Title, "mode", mode, "elided_bytes", elided, "estimate_tokens", est)
 					compactionLogged = true
 				}
 				if li.Metrics != nil {
