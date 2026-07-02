@@ -25,18 +25,21 @@ const apiVersion = "2023-06-01"
 // Client is an Anthropic Messages API model provider.
 type Client struct {
 	clientcore.Base
-	effort string
+	effort   string
+	thinking string
 }
 
 // New builds a client. baseURL may be empty (defaults to DefaultBaseURL).
 // maxTokens caps output tokens per request; <= 0 falls back to
 // clientcore.DefaultMaxTokens. effort opts into deeper reasoning
 // (output_config.effort: low|medium|high|max, validated in config); empty
-// omits the field entirely.
-func New(baseURL, model, apiKey string, maxTokens int, effort string) *Client {
+// omits the field entirely. thinking opts into adaptive extended thinking
+// ("adaptive", validated in config); empty keeps today's byte-for-byte behaviour.
+func New(baseURL, model, apiKey string, maxTokens int, effort, thinking string) *Client {
 	return &Client{
-		Base:   clientcore.NewBase(baseURL, DefaultBaseURL, model, apiKey, maxTokens),
-		effort: effort,
+		Base:     clientcore.NewBase(baseURL, DefaultBaseURL, model, apiKey, maxTokens),
+		effort:   effort,
+		thinking: thinking,
 	}
 }
 
@@ -61,24 +64,36 @@ type systemBlock struct {
 }
 
 type msgRequest struct {
-	Model        string        `json:"model"`
-	MaxTokens    int           `json:"max_tokens"`
-	Stream       bool          `json:"stream"`
-	System       []systemBlock `json:"system,omitempty"`
-	Messages     []message     `json:"messages"`
-	Tools        []tool        `json:"tools,omitempty"`
-	ToolChoice   *toolChoice   `json:"tool_choice,omitempty"`
-	OutputConfig *outputConfig `json:"output_config,omitempty"`
+	Model        string          `json:"model"`
+	MaxTokens    int             `json:"max_tokens"`
+	Stream       bool            `json:"stream"`
+	System       []systemBlock   `json:"system,omitempty"`
+	Messages     []message       `json:"messages"`
+	Tools        []tool          `json:"tools,omitempty"`
+	ToolChoice   *toolChoice     `json:"tool_choice,omitempty"`
+	OutputConfig *outputConfig   `json:"output_config,omitempty"`
+	Thinking     *thinkingConfig `json:"thinking,omitempty"`
 }
 
 // outputConfig carries Anthropic's output-level controls; RunLore only sets the
-// effort level. The thinking param is deliberately NOT enabled alongside it:
-// adaptive thinking in a multi-turn tool loop requires replaying signed thinking
-// blocks verbatim on every subsequent request, which the provider-agnostic message
-// history (providers.Message) cannot carry — explicitly out of scope here. effort
-// is constant per client, so the prompt-cache prefix stays stable across steps.
+// effort level. effort is constant per client, so the prompt-cache prefix stays
+// stable across steps. effort and thinking are independent controls and may be sent
+// together (effort is soft guidance for how much adaptive thinking Claude does).
 type outputConfig struct {
 	Effort string `json:"effort"`
+}
+
+// thinkingConfig opts into adaptive extended thinking ({"type":"adaptive"}). In this
+// mode Claude decides when and how much to think, and interleaved thinking is enabled
+// automatically. Adaptive thinking is signed: in a multi-turn tool-use conversation
+// the assistant turn's thinking/redacted_thinking blocks MUST be replayed verbatim
+// (with their signature) on later requests — the client carries them across the
+// provider-agnostic history via providers.Message.Opaque (see accumulate/toMessages).
+//
+// budget_tokens is deliberately never sent: it is rejected (400) on Claude 4.6+ and
+// deprecated elsewhere — adaptive is the only supported on-mode for the target models.
+type thinkingConfig struct {
+	Type string `json:"type"` // "adaptive"
 }
 
 // toolChoice forces the model to call one named tool this turn
@@ -96,6 +111,14 @@ type message struct {
 }
 
 type block struct {
+	// raw, when non-nil, is the verbatim JSON for this block and the struct fields are
+	// ignored (see MarshalJSON). Used to replay a thinking/redacted_thinking block
+	// byte-for-byte with its signature: struct-tag omitempty would drop a thinking
+	// field that is empty under display:"omitted", and the API rejects a modified
+	// block. raw is never decoded from a request — it exists only to re-emit captured
+	// thinking blocks on replay.
+	raw json.RawMessage
+
 	Type string `json:"type"`
 	// text
 	Text string `json:"text,omitempty"`
@@ -108,6 +131,17 @@ type block struct {
 	Content   string `json:"content,omitempty"`
 	// cache breakpoint (set on the last block of the last message — the rolling history breakpoint)
 	CacheControl *cacheControl `json:"cache_control,omitempty"`
+}
+
+// MarshalJSON emits the verbatim raw bytes of a replayed thinking block when set,
+// otherwise the normal struct encoding. The alias sheds block's own MarshalJSON to
+// avoid infinite recursion; the unexported raw field is skipped by encoding/json.
+func (b block) MarshalJSON() ([]byte, error) {
+	if b.raw != nil {
+		return b.raw, nil
+	}
+	type alias block
+	return json.Marshal(alias(b))
 }
 
 type tool struct {
@@ -129,15 +163,18 @@ type streamEvent struct {
 		Usage *usageDelta `json:"usage"`
 	} `json:"message"`
 	ContentBlock *struct {
-		Type string `json:"type"` // "text" | "tool_use"
+		Type string `json:"type"` // "text" | "tool_use" | "thinking" | "redacted_thinking"
 		ID   string `json:"id"`
 		Name string `json:"name"`
+		Data string `json:"data"` // redacted_thinking: the full opaque payload (no deltas follow)
 	} `json:"content_block"`
 	Delta *struct {
-		Type        string `json:"type"` // "text_delta" | "input_json_delta"
+		Type        string `json:"type"` // "text_delta" | "input_json_delta" | "thinking_delta" | "signature_delta"
 		Text        string `json:"text"`
 		PartialJSON string `json:"partial_json"`
 		StopReason  string `json:"stop_reason"`
+		Thinking    string `json:"thinking"`  // thinking_delta: reasoning text (empty under display:"omitted")
+		Signature   string `json:"signature"` // signature_delta: the block's encrypted signature
 	} `json:"delta"`
 	Usage *usageDelta `json:"usage"`
 	Error *struct {
@@ -160,7 +197,16 @@ type usageDelta struct {
 // truncating a long completion and lets a per-block input_json_delta reassemble tool
 // arguments incrementally.
 func (c *Client) Complete(ctx context.Context, req providers.CompletionRequest) (providers.CompletionResponse, error) {
-	msgs := toMessages(req.Messages)
+	// Adaptive thinking is incompatible with a forced tool_choice (tool|any): the API
+	// rejects that combination (400). The forced ToolChoice happens only on the
+	// budget-forced conclusion step (submit_findings). Deterministic rule: when both
+	// are requested, drop the thinking param for THIS request AND strip the replayed
+	// thinking blocks from history (with thinking off, the API rejects thinking blocks
+	// in the assistant turns) — see toMessages(includeThinking=false). Tradeoff:
+	// switching adaptive→off invalidates the messages prompt-cache tier for this one
+	// request (tools+system stay cached); acceptable, as it fires once, terminally.
+	thinkingOn := c.thinking != "" && req.ToolChoice == ""
+	msgs := toMessages(req.Messages, thinkingOn)
 	// Rolling cache breakpoint: mark the last content block of the last message, so the
 	// growing conversation prefix is a cache READ on the next step. The loop only ever
 	// APPENDS to history, so the prefix is byte-identical step to step — a guaranteed
@@ -177,6 +223,9 @@ func (c *Client) Complete(ctx context.Context, req providers.CompletionRequest) 
 	}
 	if c.effort != "" {
 		areq.OutputConfig = &outputConfig{Effort: c.effort}
+	}
+	if thinkingOn {
+		areq.Thinking = &thinkingConfig{Type: c.thinking}
 	}
 	if req.System != "" {
 		areq.System = []systemBlock{{Type: "text", Text: req.System, CacheControl: ephemeral}}
@@ -235,6 +284,13 @@ func accumulate(r io.Reader) (providers.CompletionResponse, error) {
 	toolArgs := map[int]*strings.Builder{} // content-block index → reassembled JSON
 	toolMeta := map[int]*providers.ToolCall{}
 	var order []int // tool block indices, in first-seen order
+	// Thinking capture (adaptive thinking): a thinking block's text arrives via
+	// thinking_delta and its signature via signature_delta, both keyed by content-block
+	// index; a redacted_thinking block carries its full payload on content_block_start.
+	// Thinking text is kept OUT of out.Text and folded into out.Opaque instead.
+	thinkText := map[int]*strings.Builder{}
+	thinkMeta := map[int]*thinkBlock{}
+	var thinkOrder []int // thinking block indices, in first-seen order
 	sawStop := false
 
 	for ev, err := range clientcore.SSEEvents[streamEvent](r) {
@@ -255,10 +311,22 @@ func accumulate(r io.Reader) (providers.CompletionResponse, error) {
 				out.Usage.CacheWriteTokens = u.CacheCreationInputTokens
 			}
 		case "content_block_start":
-			if ev.ContentBlock != nil && ev.ContentBlock.Type == "tool_use" {
+			if ev.ContentBlock == nil {
+				continue
+			}
+			switch ev.ContentBlock.Type {
+			case "tool_use":
 				toolArgs[ev.Index] = &strings.Builder{}
 				toolMeta[ev.Index] = &providers.ToolCall{ID: ev.ContentBlock.ID, Name: ev.ContentBlock.Name}
 				order = append(order, ev.Index)
+			case "thinking":
+				thinkText[ev.Index] = &strings.Builder{}
+				thinkMeta[ev.Index] = &thinkBlock{Type: "thinking"}
+				thinkOrder = append(thinkOrder, ev.Index)
+			case "redacted_thinking":
+				// No deltas follow; the opaque payload is fully present here.
+				thinkMeta[ev.Index] = &thinkBlock{Type: "redacted_thinking", Data: ev.ContentBlock.Data}
+				thinkOrder = append(thinkOrder, ev.Index)
 			}
 		case "content_block_delta":
 			if ev.Delta == nil {
@@ -270,6 +338,14 @@ func accumulate(r io.Reader) (providers.CompletionResponse, error) {
 			case "input_json_delta":
 				if b := toolArgs[ev.Index]; b != nil {
 					b.WriteString(ev.Delta.PartialJSON)
+				}
+			case "thinking_delta":
+				if b := thinkText[ev.Index]; b != nil {
+					b.WriteString(ev.Delta.Thinking)
+				}
+			case "signature_delta":
+				if m := thinkMeta[ev.Index]; m != nil {
+					m.Signature += ev.Delta.Signature
 				}
 			}
 		case "message_delta":
@@ -292,19 +368,95 @@ func accumulate(r io.Reader) (providers.CompletionResponse, error) {
 		tc.Args = toolArgs[idx].String()
 		out.ToolCalls = append(out.ToolCalls, tc)
 	}
+	// Serialize completed thinking blocks (in index order, with signatures) into
+	// Opaque so the loop can replay them verbatim on the next request. A "thinking"
+	// block is only completed once its signature has arrived (a mid-thinking truncation
+	// yields no signature); replaying an unsigned block would be rejected, so drop it.
+	// redacted_thinking blocks are always complete at content_block_start.
+	if raw := marshalThinking(thinkOrder, thinkMeta, thinkText); raw != nil {
+		out.Opaque = raw
+	}
 	return out, nil
+}
+
+// thinkBlock is accumulation state for one captured thinking block: its type, the
+// signature reassembled from signature_delta events ("thinking"), and the opaque
+// payload from content_block_start ("redacted_thinking"). The thinking text lives in
+// a separate builder (keyed by index) since it arrives via thinking_delta.
+type thinkBlock struct {
+	Type      string // "thinking" | "redacted_thinking"
+	Signature string // "thinking" only
+	Data      string // "redacted_thinking" only
+}
+
+// marshalThinking renders the captured thinking blocks as a JSON array of block
+// objects, or nil when there are none to replay. Each element is emitted with a
+// fixed field set (thinking + signature for thinking; data for redacted_thinking) so
+// the wire bytes are stable and reproducible for verbatim replay.
+func marshalThinking(order []int, meta map[int]*thinkBlock, text map[int]*strings.Builder) json.RawMessage {
+	var elems []json.RawMessage
+	for _, idx := range order {
+		b := meta[idx]
+		switch b.Type {
+		case "thinking":
+			if b.Signature == "" {
+				continue // incomplete/truncated thinking — cannot be replayed
+			}
+			raw, err := json.Marshal(struct {
+				Type      string `json:"type"`
+				Thinking  string `json:"thinking"`
+				Signature string `json:"signature"`
+			}{"thinking", text[idx].String(), b.Signature})
+			if err != nil {
+				continue
+			}
+			elems = append(elems, raw)
+		case "redacted_thinking":
+			raw, err := json.Marshal(struct {
+				Type string `json:"type"`
+				Data string `json:"data"`
+			}{"redacted_thinking", b.Data})
+			if err != nil {
+				continue
+			}
+			elems = append(elems, raw)
+		}
+	}
+	if len(elems) == 0 {
+		return nil
+	}
+	raw, err := json.Marshal(elems)
+	if err != nil {
+		return nil
+	}
+	return raw
 }
 
 // toMessages maps engine-agnostic messages to Anthropic messages. Consecutive
 // "tool" results are coalesced into a single user message (Anthropic requires all
 // tool_result blocks answering an assistant turn to share one user message).
-func toMessages(in []providers.Message) []message {
+//
+// When includeThinking is true, an assistant turn's replayable thinking blocks
+// (carried verbatim in Message.Opaque, produced by accumulate) are PREPENDED to that
+// turn's content — adaptive thinking requires the signed thinking blocks first, ahead
+// of text and tool_use, and unchanged. When false (thinking disabled for this request,
+// e.g. a forced tool_choice), the thinking blocks are stripped so the history stays
+// valid with thinking off.
+func toMessages(in []providers.Message, includeThinking bool) []message {
 	var out []message
 	for i := 0; i < len(in); i++ {
 		m := in[i]
 		switch m.Role {
 		case "assistant":
 			var blocks []block
+			if includeThinking && len(m.Opaque) > 0 {
+				var thinks []json.RawMessage
+				if err := json.Unmarshal(m.Opaque, &thinks); err == nil {
+					for _, t := range thinks {
+						blocks = append(blocks, block{raw: t})
+					}
+				}
+			}
 			if m.Content != "" {
 				blocks = append(blocks, block{Type: "text", Text: m.Content})
 			}

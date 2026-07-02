@@ -12,6 +12,7 @@ package providers
 
 import (
 	"context"
+	"encoding/json"
 	"strings"
 	"time"
 )
@@ -420,6 +421,13 @@ type Message struct {
 	Content    string
 	ToolCalls  []ToolCall // assistant turn requesting tools
 	ToolCallID string     // tool turn: the call this answers
+	// Opaque is provider-specific content the client must replay verbatim; produced
+	// and consumed only by the same provider, empty otherwise. The loop carries it
+	// from a completion's CompletionResponse.Opaque onto the assistant turn it stores
+	// in history, so the same provider can prepend it on the next request. Currently
+	// the Anthropic client uses it to replay signed adaptive-thinking blocks; other
+	// providers ignore it.
+	Opaque json.RawMessage
 }
 
 // ToolSpec describes a tool offered to the model.
@@ -447,6 +455,13 @@ type CompletionResponse struct {
 	// finishReason). It is empty when the provider omits it. Refused() interprets it;
 	// the loop uses Refused() rather than matching strings itself.
 	StopReason string
+	// Opaque is provider-specific content the client must replay verbatim; produced
+	// and consumed only by the same provider, empty otherwise. The loop copies it onto
+	// the assistant Message it appends to history so the same provider can replay it on
+	// the next request. The Anthropic client serializes completed adaptive-thinking
+	// (and redacted_thinking) blocks — in order, with their signatures — into it;
+	// OpenAI/Gemini leave it empty and ignore it.
+	Opaque json.RawMessage
 }
 
 // refusalStopReasons is the set of stop reasons (across providers, lower-cased) that

@@ -214,6 +214,52 @@ func TestValidateRejectsNegativeMaxTokens(t *testing.T) {
 // (effort is opt-in — unset keeps today's requests unchanged). The verify
 // override validates against its EFFECTIVE provider and effort (inherit-when-
 // empty, mirroring BuildVerifyModel).
+func TestValidateThinking(t *testing.T) {
+	cases := []struct {
+		name    string
+		model   Model
+		wantErr string // "" = must validate clean; otherwise a substring of the error
+	}{
+		{"empty thinking is fine", Model{Provider: "anthropic"}, ""},
+		{"anthropic adaptive", Model{Provider: "anthropic", Thinking: "adaptive"}, ""},
+		{"anthropic rejects enabled", Model{Provider: "anthropic", Thinking: "enabled"}, "not a valid thinking mode"},
+		{"anthropic rejects on", Model{Provider: "anthropic", Thinking: "on"}, "model.thinking"},
+		{"openai rejects thinking", Model{Provider: "openai", Thinking: "adaptive"}, "only supported for provider anthropic"},
+		{"empty provider rejects thinking", Model{Thinking: "adaptive"}, "only supported for provider anthropic"},
+		{"gemini rejects thinking", Model{Provider: "gemini", Thinking: "adaptive"}, "only supported for provider anthropic"},
+		{
+			"verify override inherits the parent thinking and provider",
+			Model{Provider: "anthropic", Thinking: "adaptive", Verify: &ModelOverride{Model: "cheap"}},
+			"",
+		},
+		{
+			"verify override thinking validated",
+			Model{Provider: "anthropic", Verify: &ModelOverride{Thinking: "enabled"}},
+			"model.verify.thinking",
+		},
+		{
+			"inherited parent thinking invalid for the override provider",
+			Model{Provider: "anthropic", Thinking: "adaptive", Verify: &ModelOverride{Provider: "openai"}},
+			"model.verify.thinking",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			c := &Config{Model: tc.model}
+			err := c.Validate()
+			if tc.wantErr == "" {
+				if err != nil {
+					t.Fatalf("Validate() = %v, want nil", err)
+				}
+				return
+			}
+			if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+				t.Fatalf("Validate() = %v, want an error containing %q", err, tc.wantErr)
+			}
+		})
+	}
+}
+
 func TestValidateEffort(t *testing.T) {
 	cases := []struct {
 		name    string

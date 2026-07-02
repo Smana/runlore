@@ -41,10 +41,12 @@ func verifyMaxTokens(cfg *config.Config) int {
 // is the per-request output-token ceiling passed through to the provider. effort
 // is the opt-in reasoning knob (config-validated per provider; "" = omitted);
 // gemini does not take it — config.Validate rejects effort for that provider.
-func NewModelClient(provider, baseURL, model, apiKey string, maxTokens int, effort string) providers.ModelProvider {
+// thinking is the opt-in adaptive-thinking knob (anthropic-only, config-validated;
+// "" = omitted); only the anthropic client consumes it.
+func NewModelClient(provider, baseURL, model, apiKey string, maxTokens int, effort, thinking string) providers.ModelProvider {
 	switch provider {
 	case "anthropic":
-		return anthropic.New(baseURL, model, apiKey, maxTokens, effort)
+		return anthropic.New(baseURL, model, apiKey, maxTokens, effort, thinking)
 	case "gemini":
 		return gemini.New(baseURL, model, apiKey, maxTokens)
 	default:
@@ -54,10 +56,10 @@ func NewModelClient(provider, baseURL, model, apiKey string, maxTokens int, effo
 
 // BuildModel builds the ModelProvider for the configured provider, applying the
 // effective output-token cap (model.max_tokens, defaulted when unset) and the
-// opt-in effort knob.
+// opt-in effort and thinking knobs.
 func BuildModel(cfg *config.Config, apiKey string) providers.ModelProvider {
 	return NewModelClient(cfg.Model.Provider, cfg.Model.BaseURL, cfg.Model.Model, apiKey,
-		effectiveMaxTokens(cfg.Model.MaxTokens), cfg.Model.Effort)
+		effectiveMaxTokens(cfg.Model.MaxTokens), cfg.Model.Effort, cfg.Model.Thinking)
 }
 
 // BuildVerifyModel builds the optional cheaper model for the adversarial verify
@@ -80,7 +82,7 @@ func BuildVerifyModel(cfg *config.Config) providers.ModelProvider {
 	}
 	return NewModelClient(or(v.Provider, cfg.Model.Provider),
 		or(v.BaseURL, cfg.Model.BaseURL), or(v.Model, cfg.Model.Model), apiKey,
-		verifyMaxTokens(cfg), or(v.Effort, cfg.Model.Effort))
+		verifyMaxTokens(cfg), or(v.Effort, cfg.Model.Effort), or(v.Thinking, cfg.Model.Thinking))
 }
 
 // BuildJudgeModel builds the (stronger) grader model from --judge-* flags, falling
@@ -94,7 +96,7 @@ func BuildJudgeModel(cfg *config.Config, provider, baseURL, model, apiKeyEnv str
 		return BuildModel(cfg, apiKey)
 	}
 	// A judge gets the same effective output cap as the main model (no separate
-	// knob), but NOT the configured effort: model.effort was validated against the
-	// configured provider, and a --judge-* flag set may target a different one.
-	return NewModelClient(provider, baseURL, model, os.Getenv(apiKeyEnv), effectiveMaxTokens(cfg.Model.MaxTokens), "")
+	// knob), but NOT the configured effort or thinking: those were validated against
+	// the configured provider, and a --judge-* flag set may target a different one.
+	return NewModelClient(provider, baseURL, model, os.Getenv(apiKeyEnv), effectiveMaxTokens(cfg.Model.MaxTokens), "", "")
 }
