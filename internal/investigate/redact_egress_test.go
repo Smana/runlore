@@ -20,13 +20,16 @@ func TestRedactInvestigation(t *testing.T) {
 			SuggestedAction: "rotate key AKIAIOSFODNN7EXAMPLE",
 		}},
 		Unresolved: []string{"DB_SECRET=s3cr3t-value-xyz seen in events"},
-		Actions:    []providers.Action{{Description: "suspend (OPENAI_API_KEY=sk-abcdefghijklmnopqrst)"}},
+		Actions: []providers.Action{{
+			Name:        "suspend (password=hunter2horse)", // buildInvestigation copies the description into Name
+			Description: "suspend (OPENAI_API_KEY=sk-abcdefghijklmnopqrst)",
+		}},
 	}
 	redactInvestigation(inv)
 
 	blob := strings.Join([]string{
 		inv.Title, inv.RootCauses[0].Summary, inv.RootCauses[0].Evidence[0],
-		inv.RootCauses[0].SuggestedAction, inv.Unresolved[0], inv.Actions[0].Description,
+		inv.RootCauses[0].SuggestedAction, inv.Unresolved[0], inv.Actions[0].Name, inv.Actions[0].Description,
 	}, "|")
 	for _, secret := range []string{
 		"hunter2horse", "ghp_0123456789abcdefghijABCDEFGHIJ0123", "xoxb-123456789012-abcdefuvwxyz",

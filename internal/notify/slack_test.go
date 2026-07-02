@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/Smana/runlore/internal/providers"
@@ -135,6 +136,113 @@ func TestSlackBlocksLayout(t *testing.T) {
 		if !contains(s, want) {
 			t.Fatalf("blocks missing %q:\n%s", want, s)
 		}
+	}
+}
+
+func TestEscapeMrkdwn(t *testing.T) {
+	for _, tc := range []struct {
+		name, in, want string
+	}{
+		{"plain", "no specials here", "no specials here"},
+		{"link_injection", "<https://evil.example|click here to remediate>", "&lt;https://evil.example|click here to remediate&gt;"},
+		{"amp_first", "a & b < c > d", "a &amp; b &lt; c &gt; d"},
+		{"pre_escaped_stays_literal", "&lt;", "&amp;lt;"},
+		{"empty", "", ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := escapeMrkdwn(tc.in); got != tc.want {
+				t.Errorf("escapeMrkdwn(%q) = %q, want %q", tc.in, got, tc.want)
+			}
+		})
+	}
+}
+
+// mrkdwnTexts collects every mrkdwn text the blocks would send to Slack, so
+// tests assert on what Slack will actually parse (json.Marshal would obscure
+// this by encoding < and > as </>).
+func mrkdwnTexts(blocks []map[string]any) []string {
+	var out []string
+	grab := func(v any) {
+		txt, _ := v.(map[string]any)
+		if txt["type"] == "mrkdwn" {
+			if s, _ := txt["text"].(string); s != "" {
+				out = append(out, s)
+			}
+		}
+	}
+	for _, b := range blocks {
+		grab(b["text"])
+		if els, _ := b["elements"].([]map[string]any); els != nil {
+			for _, el := range els {
+				grab(el)
+			}
+		}
+	}
+	return out
+}
+
+// TestSlackBlocksEscapeUntrustedText proves that model/tool-derived fields
+// (summaries, evidence quoting cluster logs, change refs, action descriptions,
+// unresolved items) cannot inject Slack mrkdwn — most importantly the
+// <url|text> link form, a phishing vector in incident notifications — while the
+// formatter's own markup (bold, code, the KB link it constructs) keeps working.
+func TestSlackBlocksEscapeUntrustedText(t *testing.T) {
+	inv := providers.Investigation{
+		Confidence: 0.9,
+		RootCauses: []providers.Hypothesis{{
+			Summary:         "summary with <b> tag",
+			Confidence:      0.9,
+			ChangeRef:       "chart@<v2>",
+			Evidence:        []string{"error: <https://evil.example|click here to remediate>"},
+			SuggestedAction: "restart & verify",
+			Reversible:      true,
+		}},
+		Unresolved: []string{"why <img> appears in logs"},
+		Actions:    []providers.Action{{Description: "scale down <deploy>", ApprovalID: "a1"}},
+		CuratedURL: "https://github.com/o/r/issues/9",
+	}
+	joined := strings.Join(mrkdwnTexts(slackBlocks(inv)), "\n")
+
+	// The hostile log line must render inert, never as a clickable link.
+	if strings.Contains(joined, "<https://evil.example") {
+		t.Fatalf("hostile evidence rendered as live mrkdwn link:\n%s", joined)
+	}
+	for _, want := range []string{
+		"&lt;https://evil.example|click here to remediate&gt;",
+		"summary with &lt;b&gt; tag",
+		"chart@&lt;v2&gt;",
+		"restart &amp; verify",
+		"why &lt;img&gt; appears in logs",
+		"scale down &lt;deploy&gt;",
+	} {
+		if !strings.Contains(joined, want) {
+			t.Errorf("blocks missing escaped untrusted text %q:\n%s", want, joined)
+		}
+	}
+	// Formatter-emitted markup must keep working: bold rank, code confidence,
+	// reversibility italics, and the KB link the formatter constructs itself.
+	for _, want := range []string{"*1. ", "`90%`", "_(reversible)_", "<https://github.com/o/r/issues/9|view entry>"} {
+		if !strings.Contains(joined, want) {
+			t.Errorf("blocks missing formatter-emitted markup %q:\n%s", want, joined)
+		}
+	}
+}
+
+// TestSlackMessageFallbackEscaped proves the plain-text fallback (Slack parses
+// it as mrkdwn for notifications) escapes untrusted content too, while the
+// scaffolding Format emits (bold headers) survives untouched.
+func TestSlackMessageFallbackEscaped(t *testing.T) {
+	inv := sampleInvestigation()
+	inv.RootCauses[0].Evidence = append(inv.RootCauses[0].Evidence, "<https://evil.example|click here to remediate>")
+	text, _ := slackMessage(inv)["text"].(string)
+	if strings.Contains(text, "<https://evil.example") {
+		t.Fatalf("fallback text carries live mrkdwn link:\n%s", text)
+	}
+	if !strings.Contains(text, "&lt;https://evil.example|click here to remediate&gt;") {
+		t.Fatalf("fallback text missing escaped evidence:\n%s", text)
+	}
+	if !strings.Contains(text, "*Investigation*") {
+		t.Fatalf("fallback text lost formatter scaffolding:\n%s", text)
 	}
 }
 

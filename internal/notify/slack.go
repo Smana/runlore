@@ -145,8 +145,27 @@ const (
 // clients that don't render blocks). Actions carrying an ApprovalID also get
 // interactive Approve/Reject buttons (rung-2).
 func slackMessage(inv providers.Investigation) map[string]any {
-	return map[string]any{"text": Format(inv), "blocks": slackBlocks(inv)}
+	// The fallback text is parsed as mrkdwn too (notifications, block-less
+	// clients), so untrusted content embedded in it must be escaped. Escaping the
+	// composed Format output is safe because Format's own scaffolding (bold
+	// markers, bullets) contains none of mrkdwn's three control characters —
+	// TestSlackMessageFallbackEscaped guards that invariant. Matrix and the
+	// generic webhook call Format themselves and are unaffected.
+	return map[string]any{"text": escapeMrkdwn(Format(inv)), "blocks": slackBlocks(inv)}
 }
+
+// mrkdwnEscaper implements Slack's documented mrkdwn escaping: exactly three
+// characters act as control characters and must be replaced with HTML entities
+// (& first). strings.Replacer substitutes in a single left-to-right pass, so
+// the ampersands introduced by &lt;/&gt; are never re-escaped.
+var mrkdwnEscaper = strings.NewReplacer("&", "&amp;", "<", "&lt;", ">", "&gt;")
+
+// escapeMrkdwn neutralises untrusted text (model output, evidence quoting
+// cluster logs or alert annotations) before it is interpolated into Slack
+// mrkdwn, so a hostile log line like <https://evil.example|innocent text>
+// renders as literal text instead of a clickable phishing link. Mirrors the
+// escape-first approach of the Matrix notifier's mrkdwnToHTML.
+func escapeMrkdwn(s string) string { return mrkdwnEscaper.Replace(s) }
 
 // slackBlocks renders the investigation as Block Kit. Designed to read top-down as
 // an on-call would triage: what happened → how sure → why → what to do → what's
@@ -158,6 +177,9 @@ func slackBlocks(inv providers.Investigation) []map[string]any {
 	}
 	emoji, level, pct := confidenceBadge(inv)
 	blocks := []map[string]any{
+		// The header is a plain_text object: Slack renders it literally (no mrkdwn
+		// parsing), so the untrusted title needs no escaping here — escaping would
+		// display raw &lt; entities instead.
 		{"type": "header", "text": map[string]any{"type": "plain_text", "text": truncate("🔍 "+title, 150), "emoji": true}},
 		{"type": "context", "elements": []map[string]any{
 			{"type": "mrkdwn", "text": fmt.Sprintf("%s *%s confidence* · %d%%  ·  🤖 RunLore SRE agent", emoji, level, pct)}}},
@@ -169,16 +191,16 @@ func slackBlocks(inv providers.Investigation) []map[string]any {
 			break
 		}
 		var s strings.Builder
-		fmt.Fprintf(&s, "*%d. %s*  `%.0f%%`", i+1, rc.Summary, rc.Confidence*100)
+		fmt.Fprintf(&s, "*%d. %s*  `%.0f%%`", i+1, escapeMrkdwn(rc.Summary), rc.Confidence*100)
 		if rc.ChangeRef != "" {
-			fmt.Fprintf(&s, "\n📦 *What changed:* `%s`", rc.ChangeRef)
+			fmt.Fprintf(&s, "\n📦 *What changed:* `%s`", escapeMrkdwn(rc.ChangeRef))
 		}
 		for j, e := range rc.Evidence {
 			if j >= 4 {
 				fmt.Fprintf(&s, "\n• _…%d more_", len(rc.Evidence)-j)
 				break
 			}
-			fmt.Fprintf(&s, "\n• %s", e)
+			fmt.Fprintf(&s, "\n• %s", escapeMrkdwn(e))
 		}
 		blocks = append(blocks, map[string]any{"type": "section", "text": map[string]any{"type": "mrkdwn", "text": truncate(s.String(), 2900)}})
 	}
@@ -204,14 +226,16 @@ func slackBlocks(inv providers.Investigation) []map[string]any {
 				fmt.Fprintf(&s, "\n• _…%d more_", len(inv.Unresolved)-i)
 				break
 			}
-			fmt.Fprintf(&s, "\n• %s", u)
+			fmt.Fprintf(&s, "\n• %s", escapeMrkdwn(u))
 		}
 		blocks = append(blocks, map[string]any{"type": "section", "text": map[string]any{"type": "mrkdwn", "text": truncate(s.String(), 2900)}})
 	}
 
 	if inv.CuratedURL != "" {
+		// The link itself is formatter-constructed; escaping the URL inside it is
+		// what Slack's docs prescribe (a raw & / < / > would corrupt the link).
 		blocks = append(blocks, map[string]any{"type": "context", "elements": []map[string]any{
-			{"type": "mrkdwn", "text": fmt.Sprintf("📚 Logged to the knowledge base — <%s|view entry>", inv.CuratedURL)}}})
+			{"type": "mrkdwn", "text": fmt.Sprintf("📚 Logged to the knowledge base — <%s|view entry>", escapeMrkdwn(inv.CuratedURL))}}})
 	}
 
 	// Interactive Approve/Reject for any action awaiting approval (rung-2).
@@ -220,7 +244,7 @@ func slackBlocks(inv providers.Investigation) []map[string]any {
 			continue
 		}
 		blocks = append(blocks,
-			map[string]any{"type": "section", "text": map[string]any{"type": "mrkdwn", "text": "*Proposed action:* " + a.Description}},
+			map[string]any{"type": "section", "text": map[string]any{"type": "mrkdwn", "text": "*Proposed action:* " + escapeMrkdwn(a.Description)}},
 			map[string]any{"type": "actions", "elements": []map[string]any{
 				{"type": "button", "style": "primary", "action_id": approveActionID, "value": a.ApprovalID,
 					"text": map[string]any{"type": "plain_text", "text": "Approve"}},
@@ -255,7 +279,9 @@ func confidenceBadge(inv providers.Investigation) (emoji, level string, pct int)
 }
 
 // nextSteps collects the actionable remediations (root-cause suggestions + policy
-// actions), de-duplicated and reversibility-flagged, preserving order.
+// actions), de-duplicated and reversibility-flagged, preserving order. The
+// untrusted descriptions are mrkdwn-escaped before the formatter's own italics
+// suffix is appended, so only the payload is neutralised.
 func nextSteps(inv providers.Investigation) []string {
 	var steps []string
 	seen := map[string]bool{}
@@ -264,6 +290,7 @@ func nextSteps(inv providers.Investigation) []string {
 			return
 		}
 		seen[desc] = true
+		desc = escapeMrkdwn(desc)
 		if reversible {
 			desc += "  _(reversible)_"
 		}
