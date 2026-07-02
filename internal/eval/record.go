@@ -21,6 +21,7 @@ func RecordedCase(scn Scenario, calls []Call) Case {
 		}
 		tools[c.Name] = c.Output
 	}
+	gt := scn.GroundTruth
 	return Case{
 		Name:   scn.ID,
 		Prompt: scn.Trigger.Symptom,
@@ -29,6 +30,9 @@ func RecordedCase(scn Scenario, calls []Call) Case {
 			MustContain:   nil, // authored later when promoting a fixture into the regression set
 			MinConfidence: 0,
 		},
+		// Carry the scenario's ground truth so the recorded fixture supports the
+		// model-comparison benchmark's coverage + rubric scoring without re-authoring.
+		GroundTruth: &gt,
 	}
 }
 
