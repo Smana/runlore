@@ -28,6 +28,10 @@ config:
     alertmanager: {}            # enable the Alertmanager/VMAlert webhook source
     gitops:
       enabled: true             # also react to Flux/Argo CD Ready=False
+    # pagerduty:                # enable the PagerDuty V3 incident webhook (POST /webhook/pagerduty)
+    #   secret_env: PAGERDUTY_WEBHOOK_SECRET  # env var NAME holding the subscription signing secret
+    #                                         # (verifies X-PagerDuty-Signature; required once a model
+    #                                         # is configured — fails closed otherwise)
   triggers:
     # Match POLICY for admitted alerts (enablement now lives under sources.alertmanager).
     incidents:
