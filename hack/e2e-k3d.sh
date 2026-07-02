@@ -135,6 +135,7 @@ helm upgrade --install runlore deploy/helm/runlore -n "$NS" \
   --set-string config.network.url="$HOST:9998" \
   --set-string config.actions.mode=approve \
   --set-string config.actions.approval_token_env=APPROVAL_TOKEN \
+  --set-string config.actions.audit_log_path=/tmp/runlore-audit.jsonl \
   --set-string config.notify.slack.signing_secret_env=SLACK_SIGNING_SECRET \
   --set rbac.allowActions=true \
   --set networkPolicy.enabled=false \

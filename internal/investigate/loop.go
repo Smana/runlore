@@ -137,6 +137,13 @@ type LoopInvestigator struct {
 	// ProgressEverySteps is the cadence for OnProgress. <= 0 disables progress
 	// pings even when OnProgress is set.
 	ProgressEverySteps int
+
+	// Pricing (optional) estimates a per-investigation cost from the accumulated
+	// token totals. nil ⇒ token totals are still reported but no cost is shown.
+	// VerifyPricing prices the adversarial verify pass's tokens; nil ⇒ it inherits
+	// Pricing (so a cheaper verify model is costed correctly when configured).
+	Pricing       *Pricing
+	VerifyPricing *Pricing
 }
 
 // system returns the system prompt, extended with action proposals when the policy is
@@ -168,6 +175,14 @@ func (li *LoopInvestigator) Investigate(ctx context.Context, req Request) error 
 	// Record wall-clock duration + a completion-result label at whichever exit we take.
 	start := time.Now()
 	result := "unresolved"
+	// Per-investigation token/cost accounting. loopTotals accumulates the ReAct
+	// loop's model calls; verifyTotals the adversarial verify pass's (main loop or
+	// recall). setUsage stamps the combined, priced totals onto whatever result we
+	// deliver, so cost is surfaced no matter which exit we take.
+	var loopTotals, verifyTotals providers.UsageTotals
+	setUsage := func(inv *providers.Investigation) {
+		inv.Usage = li.aggregateUsage(loopTotals, verifyTotals)
+	}
 	defer func() {
 		if li.Metrics != nil {
 			attrs := metric.WithAttributes(attribute.String("result", result))
@@ -192,7 +207,7 @@ func (li *LoopInvestigator) Investigate(ctx context.Context, req Request) error 
 			if li.Verify {
 				// Catalog content is untrusted: verify a recalled finding too, so a
 				// crafted high-recall entry can't bypass the adversarial review.
-				rec = li.verifyFindings(ctx, req, rec)
+				rec = li.verifyFindings(ctx, req, rec, &verifyTotals)
 			}
 			// Instrument the recall result by verify outcome.
 			if m := li.Recall.Metrics; m != nil {
@@ -215,6 +230,8 @@ func (li *LoopInvestigator) Investigate(ctx context.Context, req Request) error 
 			}
 			if len(rec.RootCauses) > 0 {
 				result = "recall"
+				setUsage(&rec)
+				li.recordUsageMetrics(ctx, rec.Usage)
 				li.deliver(req, rec)
 				return nil
 			}
@@ -314,7 +331,9 @@ func (li *LoopInvestigator) Investigate(ctx context.Context, req Request) error 
 					li.Metrics.InvestigationsDropped.Add(ctx, 1)
 				}
 				result = "budget_exceeded"
-				li.deliver(req, budgetKillResult(req))
+				res := budgetKillResult(req)
+				setUsage(&res)
+				li.deliver(req, res)
 				return nil
 			}
 		}
@@ -350,7 +369,9 @@ func (li *LoopInvestigator) Investigate(ctx context.Context, req Request) error 
 					li.Metrics.InvestigationsDropped.Add(ctx, 1)
 				}
 				result = "timeout"
-				li.deliver(req, timeoutResult(req))
+				res := timeoutResult(req)
+				setUsage(&res)
+				li.deliver(req, res)
 				return nil
 			}
 			result = "error"
@@ -360,6 +381,9 @@ func (li *LoopInvestigator) Investigate(ctx context.Context, req Request) error 
 		// true input size for the request we estimated as reqHeuristic. Zero usage
 		// (provider didn't report) is a no-op — the pure heuristic keeps driving the guard.
 		calib.observe(reqHeuristic, resp.Usage)
+		// Accumulate the same reported usage the calibrator just read (no double
+		// count): one model call plus its tokens toward the per-investigation total.
+		addUsage(&loopTotals, resp.Usage)
 		li.Log.Debug("investigation step", "title", req.Title, "step", step, "tool_calls", len(resp.ToolCalls), "text_len", len(resp.Text))
 		// The provider declined the turn (a safety/refusal stop reason): deliver a
 		// first-class unresolved result rather than misreading the empty response as a
@@ -371,7 +395,9 @@ func (li *LoopInvestigator) Investigate(ctx context.Context, req Request) error 
 				li.Metrics.InvestigationsDropped.Add(ctx, 1)
 			}
 			result = "refused"
-			li.deliver(req, refusalResult(req))
+			res := refusalResult(req)
+			setUsage(&res)
+			li.deliver(req, res)
 			return nil
 		}
 		// Truncation: the provider stopped at its output-token ceiling, so this turn is
@@ -479,9 +505,11 @@ func (li *LoopInvestigator) Investigate(ctx context.Context, req Request) error 
 				li.Metrics.InvestigationTokens.Record(ctx, int64(calib.estimate(sys, messages, specs)))
 			}
 			if li.Verify {
-				inv = li.verifyFindings(ctx, req, inv)
+				inv = li.verifyFindings(ctx, req, inv, &verifyTotals)
 			}
 			inv.Actions = li.reviewActions(inv.Actions)
+			setUsage(&inv)
+			li.recordUsageMetrics(ctx, inv.Usage)
 			result = "resolved"
 			li.deliver(req, inv)
 			return nil
