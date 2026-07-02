@@ -51,7 +51,7 @@ func RunEvalCompare(cfg *config.Config, comparePath, casesDir, reportDir, stamp 
 			apiKey = os.Getenv(entry.APIKeyEnv)
 		}
 		counting := &eval.CountingModel{
-			Inner: NewModelClient(entry.Provider, entry.BaseURL, entry.Model, apiKey, maxTokens, entry.Effort),
+			Inner: NewModelClient(entry.Provider, entry.BaseURL, entry.Model, apiKey, maxTokens, entry.Effort, ""),
 		}
 		runner := &eval.ComparisonRunner{Model: counting, Judge: judge, Log: log}
 		fmt.Printf("comparing %-20s (%s)\n", entry.Name, providerModel(entry.Provider, entry.Model))
@@ -98,7 +98,7 @@ func buildCompareJudge(cfg *config.Config, specJudge *eval.JudgeSpec, jProvider,
 	}
 	if specJudge != nil {
 		m := NewModelClient(specJudge.Provider, specJudge.BaseURL, specJudge.Model,
-			os.Getenv(specJudge.APIKeyEnv), effectiveMaxTokens(cfg.Model.MaxTokens), "")
+			os.Getenv(specJudge.APIKeyEnv), effectiveMaxTokens(cfg.Model.MaxTokens), "", "")
 		return eval.ModelJudge{Model: m}, providerModel(specJudge.Provider, specJudge.Model)
 	}
 	if ModelConfigured(cfg) {
