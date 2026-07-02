@@ -1,7 +1,10 @@
 // Package investigate routes triggers (incident alerts, GitOps failures) into a
-// single async investigation queue. The investigation itself is pluggable via
-// Investigator; LogInvestigator is the read-only placeholder until the ReAct loop
-// lands.
+// single async investigation queue and runs them. The investigation itself is
+// pluggable via Investigator: LoopInvestigator (loop.go) is the real
+// implementation — a ReAct loop that drives a ModelProvider with tools, feeds
+// tool results back, and delivers a providers.Investigation when the model calls
+// submit_findings — while LogInvestigator remains the read-only fallback used
+// when no model is configured.
 package investigate
 
 import (
@@ -71,8 +74,9 @@ type Investigator interface {
 	Investigate(ctx context.Context, r Request) error
 }
 
-// LogInvestigator is the read-only placeholder: it logs the request it would
-// investigate. Replaced by the ReAct loop in a later phase.
+// LogInvestigator is the read-only fallback used when no model is configured:
+// it logs the request it would investigate and does nothing else. The real
+// investigation is LoopInvestigator.
 type LogInvestigator struct {
 	Log *slog.Logger
 }

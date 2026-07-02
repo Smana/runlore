@@ -71,6 +71,74 @@ func TestNon2xxErrorOmitsBody(t *testing.T) {
 	}
 }
 
+// TestGeminiErrorDetail asserts the error-body parser surfaces the structured
+// Gemini error status/message (so 4xx causes like a bad model name or an invalid
+// argument are diagnosable) while never echoing a non-JSON body and never
+// emitting control characters (log-injection safe).
+func TestGeminiErrorDetail(t *testing.T) {
+	cases := []struct {
+		name, body, want string
+	}{
+		{
+			name: "structured 400 is surfaced",
+			body: `{"error":{"code":400,"message":"Invalid JSON payload received.","status":"INVALID_ARGUMENT"}}`,
+			want: ": INVALID_ARGUMENT: Invalid JSON payload received.",
+		},
+		{name: "non-JSON body is omitted", body: maliciousBody, want: ""},
+		{name: "json without error fields is omitted", body: `{"foo":"bar"}`, want: ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := geminiErrorDetail([]byte(tc.body)); got != tc.want {
+				t.Errorf("geminiErrorDetail(%q) = %q, want %q", tc.body, got, tc.want)
+			}
+		})
+	}
+
+	// A message with control characters must be sanitized (no log injection).
+	inj := geminiErrorDetail([]byte(`{"error":{"status":"X","message":"line1\nline2\u001b[2Kforged"}}`))
+	if strings.ContainsAny(inj, "\n\r\x1b") {
+		t.Errorf("detail leaked control chars: %q", inj)
+	}
+	// An over-long message is truncated with an ellipsis.
+	long := geminiErrorDetail([]byte(`{"error":{"status":"S","message":"` + strings.Repeat("a", 500) + `"}}`))
+	if !strings.HasSuffix(long, "…") {
+		t.Errorf("long message should be truncated with an ellipsis: %q", long)
+	}
+}
+
+// TestNon2xxPermanence asserts a 4xx other than 429 is classified permanent (so the
+// investigation workqueue drops it), while 429 and 5xx stay transient (retryable).
+func TestNon2xxPermanence(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		code int
+		want bool
+	}{
+		{"400 is permanent", http.StatusBadRequest, true},
+		{"403 is permanent", http.StatusForbidden, true},
+		{"404 is permanent", http.StatusNotFound, true},
+		{"429 is transient", http.StatusTooManyRequests, false},
+		{"502 is transient", http.StatusBadGateway, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				w.WriteHeader(tc.code)
+			}))
+			defer srv.Close()
+			_, err := New(srv.URL, "gemini-x", "k", 0).Complete(context.Background(), providers.CompletionRequest{
+				Messages: []providers.Message{{Role: "user", Content: "hi"}},
+			})
+			if err == nil {
+				t.Fatal("want error for non-2xx response")
+			}
+			if got := providers.IsPermanent(err); got != tc.want {
+				t.Errorf("IsPermanent(status %d) = %v, want %v", tc.code, got, tc.want)
+			}
+		})
+	}
+}
+
 // TestComplete drives a full Gemini SSE stream — text parts spread across chunks, a
 // functionCall part, and a final chunk carrying finishReason "STOP" + usageMetadata —
 // and asserts the accumulated text, the reassembled tool call, usage, the stop reason,
@@ -142,6 +210,63 @@ func TestComplete(t *testing.T) {
 	}
 	if resp.Truncated {
 		t.Fatalf("STOP must not flag Truncated")
+	}
+}
+
+// TestToolChoice asserts CompletionRequest.ToolChoice maps to Gemini's forced
+// function calling — toolConfig.functionCallingConfig with mode ANY and the tool
+// name in allowedFunctionNames — and that an empty ToolChoice omits toolConfig
+// entirely (provider default: AUTO).
+func TestToolChoice(t *testing.T) {
+	events := []string{
+		`data: {"candidates":[{"content":{"role":"model","parts":[{"text":"ok"}]},"finishReason":"STOP"}]}` + "\n\n",
+	}
+	cases := []struct {
+		name   string
+		choice string
+	}{
+		{"forced tool", "submit_verdicts"},
+		{"empty omits toolConfig", ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var body []byte
+			srv := sseServer(t, func(r *http.Request) { body, _ = io.ReadAll(r.Body) }, events)
+			defer srv.Close()
+
+			_, err := New(srv.URL, "gemini-x", "k", 0).Complete(context.Background(), providers.CompletionRequest{
+				Messages:   []providers.Message{{Role: "user", Content: "hi"}},
+				Tools:      []providers.ToolSpec{{Name: "submit_verdicts", Description: "d", Schema: `{"type":"object"}`}},
+				ToolChoice: tc.choice,
+			})
+			if err != nil {
+				t.Fatalf("Complete: %v", err)
+			}
+			var got struct {
+				ToolConfig *struct {
+					FunctionCallingConfig struct {
+						Mode                 string   `json:"mode"`
+						AllowedFunctionNames []string `json:"allowedFunctionNames"`
+					} `json:"functionCallingConfig"`
+				} `json:"toolConfig"`
+			}
+			if err := json.Unmarshal(body, &got); err != nil {
+				t.Fatalf("decode request body: %v", err)
+			}
+			if tc.choice == "" {
+				if got.ToolConfig != nil {
+					t.Fatalf("toolConfig must be omitted when unset, got %+v", got.ToolConfig)
+				}
+				if strings.Contains(string(body), "toolConfig") {
+					t.Fatalf("request body must not carry a toolConfig key when unset: %s", body)
+				}
+				return
+			}
+			if got.ToolConfig == nil || got.ToolConfig.FunctionCallingConfig.Mode != "ANY" ||
+				!reflect.DeepEqual(got.ToolConfig.FunctionCallingConfig.AllowedFunctionNames, []string{tc.choice}) {
+				t.Fatalf(`toolConfig = %+v, want functionCallingConfig{mode:"ANY", allowedFunctionNames:[%q]}`, got.ToolConfig, tc.choice)
+			}
+		})
 	}
 }
 

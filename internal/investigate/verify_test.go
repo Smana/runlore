@@ -55,6 +55,34 @@ func TestVerifyRejectsCorrelationFinding(t *testing.T) {
 	}
 }
 
+// TestVerifyForcesSubmitVerdicts asserts the adversarial pass forces the model to
+// call submit_verdicts (ToolChoice) — a reviewer that rambles in prose instead of
+// recording verdicts silently skips the honesty check, so prose is never allowed.
+func TestVerifyForcesSubmitVerdicts(t *testing.T) {
+	model := &scriptModel{responses: []providers.CompletionResponse{
+		{ToolCalls: []providers.ToolCall{{ID: "1", Name: submitFindingsName, Args: `{"confidence":0.8,"root_causes":[{"summary":"oom","confidence":0.8,"evidence":["OOMKilled"]}]}`}}},
+		{ToolCalls: []providers.ToolCall{{ID: "2", Name: submitVerdictsName, Args: `{"verdicts":[{"index":0,"verdict":"keep"}]}`}}},
+	}}
+	li := &LoopInvestigator{
+		Model:      model,
+		Log:        slog.New(slog.NewTextHandler(io.Discard, nil)),
+		Verify:     true,
+		OnComplete: func(providers.Investigation) {},
+	}
+	if err := li.Investigate(context.Background(), Request{Title: "x"}); err != nil {
+		t.Fatalf("Investigate: %v", err)
+	}
+	if len(model.reqs) != 2 {
+		t.Fatalf("expected 2 model calls (loop + verify), got %d", len(model.reqs))
+	}
+	if model.reqs[0].ToolChoice != "" {
+		t.Fatalf("the investigation step must not force a tool, got ToolChoice=%q", model.reqs[0].ToolChoice)
+	}
+	if model.reqs[1].ToolChoice != submitVerdictsName {
+		t.Fatalf("verify pass must force %q, got ToolChoice=%q", submitVerdictsName, model.reqs[1].ToolChoice)
+	}
+}
+
 // TestApplyVerdictsClampsConfidence checks that an out-of-range verdict
 // confidence from the verify pass is clamped to [0,1] before it is applied to a
 // root cause's score — on both the keep and downgrade branches — and that the
