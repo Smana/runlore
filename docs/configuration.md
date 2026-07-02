@@ -56,6 +56,17 @@ Per-source enablement map; presence enables a source. `alertmanager: {}` mounts 
   investigation continues.
 - `max_steps` (**default 20**), `max_tool_output_bytes` (0 = unlimited), `max_tokens_per_investigation`
   (0 = unlimited, else a hard token ceiling).
+- `compaction` — how mid-loop history compaction treats the older tool outputs it elides once the
+  estimate crosses the compaction target (0.7× `max_tokens_per_investigation`). **`elide`** (default)
+  drops their bodies for short markers (lossy). **`summarize`** first asks a model for **one** compact
+  factual digest of the elided batch (per compaction event) — "preserve identifiers, timestamps, error
+  strings, counts; no speculation" — and keeps that, clearly labelled, in place of the markers.
+  Routed to the `model.verify` tier when configured (cheaper), else the main model. **Fail-safe:** any
+  summarizer error, refusal, or truncation falls back to plain elision — a compaction failure never
+  loses the investigation. The digest is derived only from the already-redacted tool outputs, so it
+  adds no new egress path. Requires `max_tokens_per_investigation > 0` (compaction is off without a
+  budget). Metrics: `history_summarizations_total`, `history_summarize_fallbacks_total`; the digest
+  call's token usage is counted into `model_input_tokens_total`.
 - `pod_log_namespaces` — **app-layer allowlist** of namespaces the `pod_logs` tool
   may read RAW pod logs from, *beyond* the incident's own namespace (which is always allowed; RBAC
   still gates the actual read). Pod logs carry secrets/PII and are streamed to the external LLM, so the
