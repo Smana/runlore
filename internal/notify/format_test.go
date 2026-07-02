@@ -74,3 +74,35 @@ func TestFormatProgress(t *testing.T) {
 		t.Fatalf("empty tools map must omit the label:\n%s", bare)
 	}
 }
+
+// TestFormatUsageFooter covers the one-line cost footer: token summary always,
+// dollar figure only when priced, and omission when no model call was made.
+func TestFormatUsageFooter(t *testing.T) {
+	inv := sampleInvestigation()
+
+	// Priced: token line + dollar figure.
+	inv.Usage = providers.UsageTotals{ModelCalls: 4, InputTokens: 10000, OutputTokens: 500, CachedInputTokens: 2500, CostUSD: 0.14, Priced: true}
+	out := Format(inv)
+	for _, want := range []string{"4 model calls", "10000 in / 500 out tokens", "(25% cached)", "~$0.14"} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("priced footer missing %q:\n%s", want, out)
+		}
+	}
+
+	// Unpriced: token line, no dollar figure.
+	inv.Usage = providers.UsageTotals{ModelCalls: 4, InputTokens: 10000, OutputTokens: 500, CachedInputTokens: 2500}
+	out = Format(inv)
+	if !strings.Contains(out, "4 model calls") {
+		t.Fatalf("unpriced footer must still show the token summary:\n%s", out)
+	}
+	if strings.Contains(out, "$") {
+		t.Fatalf("unpriced footer must not show a dollar figure:\n%s", out)
+	}
+
+	// No model calls (pure recall): no footer at all.
+	inv.Usage = providers.UsageTotals{}
+	out = Format(inv)
+	if strings.Contains(out, "model calls") {
+		t.Fatalf("a zero-usage investigation must omit the footer:\n%s", out)
+	}
+}
