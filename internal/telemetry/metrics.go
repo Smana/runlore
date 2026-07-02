@@ -23,6 +23,7 @@ type Metrics struct {
 	InvestigationsThrottled   metric.Int64Counter
 	InvestigationsDropped     metric.Int64Counter
 	GitOpsFailuresDebounced   metric.Int64Counter // GitOps failures dropped as transient (cleared within the debounce window)
+	IncidentsDebounced        metric.Int64Counter // firing alerts dropped as self-resolving (resolved within the incident debounce window)
 	ToolOutputTruncatedBytes  metric.Int64Counter
 	HistoryCompactions        metric.Int64Counter // mid-loop history compaction events
 	HistoryElidedBytes        metric.Int64Counter // tool-output bytes elided by compaction
@@ -84,6 +85,7 @@ func NewMetrics() *Metrics {
 		InvestigationsThrottled:   ctr("investigations_throttled_total", "starts requeued by the rate limiter"),
 		InvestigationsDropped:     ctr("investigations_dropped_total", "investigations dropped — rate-limiter max_requeues or token-budget hard-kill"),
 		GitOpsFailuresDebounced:   ctr("gitops_failures_debounced_total", "GitOps failures dropped as transient: cleared within the debounce window before investigating"),
+		IncidentsDebounced:        ctr("incidents_debounced_total", "firing alerts dropped as self-resolving: a matching resolved webhook arrived within the incident debounce window before investigating"),
 		ToolOutputTruncatedBytes:  ctr("tool_output_truncated_bytes_total", "bytes elided by output truncation"),
 		HistoryCompactions:        ctr("history_compactions_total", "mid-loop tool-output history compaction events"),
 		HistoryElidedBytes:        ctr("history_elided_bytes_total", "tool-output bytes elided by mid-loop compaction"),
