@@ -243,6 +243,7 @@ func BuildInvestigator(ctx context.Context, cfg *config.Config, gp providers.Git
 		MaxSteps:                  cfg.Investigation.MaxSteps,
 		MaxToolOutputBytes:        cfg.Investigation.MaxToolOutputBytes,
 		MaxTokensPerInvestigation: cfg.Investigation.MaxTokensPerInvestigation,
+		Compaction:                cfg.Investigation.Compaction,
 		Timeout:                   cfg.Investigation.Timeout.Std(),
 		ToolTimeout:               toolTimeout,
 		OnComplete: func(found providers.Investigation) {
