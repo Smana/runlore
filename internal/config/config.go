@@ -594,6 +594,14 @@ var effortLevels = map[string]map[string]bool{
 	"openai":    {"minimal": true, "low": true, "medium": true, "high": true},
 }
 
+// ValidateEffort checks an effective (provider, effort) pair against the
+// per-provider effort vocabulary, so callers that build a ModelProvider outside
+// config.Load (e.g. the eval model-comparison runner) share one source of truth.
+// field names the setting in the returned error. Empty effort is always valid.
+func ValidateEffort(field, provider, effort string) error {
+	return validateEffort(field, provider, effort)
+}
+
 // validateEffort checks an effective (provider, effort) pair against the
 // per-provider vocabulary. Empty effort is always valid (the knob is opt-in and
 // omitted from requests); an empty provider defaults to the OpenAI-compatible

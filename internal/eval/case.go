@@ -19,6 +19,11 @@ type Case struct {
 	Prompt   string            `yaml:"prompt"` // the incident description (seeds the loop)
 	Tools    map[string]string `yaml:"tools"`  // tool name -> recorded evidence the tool returns
 	Expected Expected          `yaml:"expected"`
+	// GroundTruth is optional live-scenario ground truth carried into replay. When
+	// present it unlocks the richer scoring the model-comparison benchmark reports:
+	// data-source coverage (expected_sources) and blind LLM-judge rubric grading
+	// (root_cause / expected_action). Absent ⇒ keyword-only scoring, as before.
+	GroundTruth *GroundTruth `yaml:"ground_truth,omitempty"`
 }
 
 // Expected is the RCA scoring spec for a case.
