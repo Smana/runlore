@@ -1,0 +1,81 @@
+package curate
+
+import (
+	"context"
+	"testing"
+
+	"github.com/Smana/runlore/internal/providers"
+)
+
+// fakeClosedPRs is a fixed ClosedPRLister for suppression tests.
+type fakeClosedPRs struct{ prs []providers.CuratedIssue }
+
+func (f fakeClosedPRs) ListClosedUnmergedPRsByLabel(context.Context, string) ([]providers.CuratedIssue, error) {
+	return f.prs, nil
+}
+
+// body builds a PR body carrying the hidden fingerprint marker, matching what the
+// curator stamps at draft time (providers.FingerprintMarker).
+func body(fp string) string { return "Drafted by RunLore.\n\n" + providers.FingerprintMarker(fp) }
+
+func TestClosedPRSuppressionRecordsFingerprint(t *testing.T) {
+	s := ClosedPRSuppression{Forge: fakeClosedPRs{prs: []providers.CuratedIssue{
+		{Number: 7, Title: "KB: apps/web DNS", Body: body("fp-web"), Labels: []string{"runlore"}},
+	}}}
+	got, err := s.Suppressed(context.Background())
+	if err != nil {
+		t.Fatalf("Suppressed: %v", err)
+	}
+	se, ok := got["fp-web"]
+	if !ok {
+		t.Fatalf("fp-web not recorded, got %+v", got)
+	}
+	if se.PRNumber != 7 || se.Reason != "" {
+		t.Fatalf("entry = %+v, want PRNumber 7, empty reason", se)
+	}
+}
+
+func TestClosedPRSuppressionCapturesRejectReason(t *testing.T) {
+	s := ClosedPRSuppression{Forge: fakeClosedPRs{prs: []providers.CuratedIssue{
+		{Number: 9, Body: body("fp-x"), Labels: []string{"runlore", "not-kb-worthy"}},
+	}}}
+	got, _ := s.Suppressed(context.Background())
+	if got["fp-x"].Reason != "not-kb-worthy" {
+		t.Fatalf("reason = %q, want not-kb-worthy", got["fp-x"].Reason)
+	}
+}
+
+func TestClosedPRSuppressionExcludesNeedsWork(t *testing.T) {
+	// needs-work is "revise & resubmit", NOT a deliberate rejection: it must not be
+	// suppressed (so it is never escalated as a closed-unmerged reconsideration).
+	s := ClosedPRSuppression{Forge: fakeClosedPRs{prs: []providers.CuratedIssue{
+		{Number: 3, Body: body("fp-revise"), Labels: []string{"runlore", "needs-work"}},
+	}}}
+	got, _ := s.Suppressed(context.Background())
+	if _, ok := got["fp-revise"]; ok {
+		t.Fatalf("needs-work must not be suppressed, got %+v", got)
+	}
+}
+
+func TestClosedPRSuppressionSkipsMarkerlessPR(t *testing.T) {
+	// No fingerprint marker → nothing stable to key the suppression on; skip it.
+	s := ClosedPRSuppression{Forge: fakeClosedPRs{prs: []providers.CuratedIssue{
+		{Number: 5, Title: "KB: legacy", Body: "hand-filed, no marker", Labels: []string{"runlore"}},
+	}}}
+	got, _ := s.Suppressed(context.Background())
+	if len(got) != 0 {
+		t.Fatalf("markerless PR must be skipped, got %+v", got)
+	}
+}
+
+func TestClosedPRSuppressionKeepsMostRecentClose(t *testing.T) {
+	// Two closes for one fingerprint: the most recent (highest-numbered) wins.
+	s := ClosedPRSuppression{Forge: fakeClosedPRs{prs: []providers.CuratedIssue{
+		{Number: 4, Body: body("fp-dup"), Labels: []string{"runlore"}},
+		{Number: 11, Body: body("fp-dup"), Labels: []string{"runlore", "wontfix"}},
+	}}}
+	got, _ := s.Suppressed(context.Background())
+	if got["fp-dup"].PRNumber != 11 || got["fp-dup"].Reason != "wontfix" {
+		t.Fatalf("entry = %+v, want PR 11 wontfix", got["fp-dup"])
+	}
+}

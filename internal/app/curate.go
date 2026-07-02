@@ -64,7 +64,17 @@ func RunCurate(args []string) error {
 		}
 		agent.Passes = append(agent.Passes,
 			curate.Queue{Forge: forge, Checker: curate.LedgerResolutionChecker{Ledger: ledger}, Log: log},
-			curate.Recurrence{Forge: forge, Ledger: ledger, Threshold: cfg.Curate.RecurrenceThreshold, Log: log},
+			// Recurrence escalates recurring UNRESOLVED patterns AND recurring
+			// closed-unmerged (human-rejected) entries: the latter via a knowledge-gap
+			// issue that links the closed PR — never reopening it. The suppression set is
+			// derived from the forge's closed-unmerged KB PRs on every run (no store).
+			curate.Recurrence{
+				Forge:      forge,
+				Ledger:     ledger,
+				Threshold:  cfg.Curate.RecurrenceThreshold,
+				Suppressed: curate.ClosedPRSuppression{Forge: forge},
+				Log:        log,
+			},
 		)
 		// Warn loudly when the ledger this pod sees is absent/empty: outcome.New
 		// succeeds on a missing file, so the passes would otherwise run silently

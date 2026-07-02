@@ -166,7 +166,12 @@ type rawIssue struct {
 	Labels    []struct {
 		Name string `json:"name"`
 	} `json:"labels"`
-	PullRequest *struct{} `json:"pull_request"`
+	// PullRequest is non-nil on PRs. MergedAt is null for a closed-but-unmerged PR
+	// (a rejected KB entry) and set once it merges (an accepted one), letting the
+	// closed-unmerged listing tell a human "no" from a human "yes".
+	PullRequest *struct {
+		MergedAt *time.Time `json:"merged_at"`
+	} `json:"pull_request"`
 }
 
 func (ri rawIssue) curated() providers.CuratedIssue {
@@ -177,14 +182,15 @@ func (ri rawIssue) curated() providers.CuratedIssue {
 	return providers.CuratedIssue{Number: ri.Number, Title: ri.Title, Body: ri.Body, Labels: labels, UpdatedAt: ri.UpdatedAt}
 }
 
-// listIssues fetches ALL pages of open issues+PRs carrying the label. GitHub caps
-// a page at 100 and paginates the rest; without this loop the curate passes would
-// be blind to everything past the first 100 (silent truncation on a sizable KB).
-func (c *Client) listIssues(ctx context.Context, label string) ([]rawIssue, error) {
+// listIssues fetches ALL pages of issues+PRs carrying the label in the given state
+// ("open" or "closed"). GitHub caps a page at 100 and paginates the rest; without
+// this loop the curate passes would be blind to everything past the first 100 (silent
+// truncation on a sizable KB).
+func (c *Client) listIssues(ctx context.Context, state, label string) ([]rawIssue, error) {
 	var all []rawIssue
 	for page := 1; ; page++ {
 		var raw []rawIssue
-		path := fmt.Sprintf("/repos/%s/%s/issues?state=open&labels=%s&per_page=100&page=%d", c.owner, c.repo, url.QueryEscape(label), page)
+		path := fmt.Sprintf("/repos/%s/%s/issues?state=%s&labels=%s&per_page=100&page=%d", c.owner, c.repo, state, url.QueryEscape(label), page)
 		if err := c.do(ctx, http.MethodGet, path, nil, &raw); err != nil {
 			return nil, err
 		}
@@ -199,7 +205,7 @@ func (c *Client) listIssues(ctx context.Context, label string) ([]rawIssue, erro
 // ListIssuesByLabel returns all open issues carrying the given label. Pull requests
 // (which the issues API also returns) are filtered out.
 func (c *Client) ListIssuesByLabel(ctx context.Context, label string) ([]providers.CuratedIssue, error) {
-	raw, err := c.listIssues(ctx, label)
+	raw, err := c.listIssues(ctx, "open", label)
 	if err != nil {
 		return nil, err
 	}
@@ -216,7 +222,7 @@ func (c *Client) ListIssuesByLabel(ctx context.Context, label string) ([]provide
 // ListPRsByLabel returns all open PRs carrying the given label — the inverse of
 // ListIssuesByLabel (keeps only entries with a pull_request object).
 func (c *Client) ListPRsByLabel(ctx context.Context, label string) ([]providers.CuratedIssue, error) {
-	raw, err := c.listIssues(ctx, label)
+	raw, err := c.listIssues(ctx, "open", label)
 	if err != nil {
 		return nil, err
 	}
@@ -224,6 +230,29 @@ func (c *Client) ListPRsByLabel(ctx context.Context, label string) ([]providers.
 	for _, ri := range raw {
 		if ri.PullRequest == nil {
 			continue // a plain issue, not a PR
+		}
+		out = append(out, ri.curated())
+	}
+	return out, nil
+}
+
+// ListClosedUnmergedPRsByLabel returns closed PRs carrying the label that were NOT
+// merged — the KB entries a human deliberately rejected. Merged PRs (accepted
+// entries) and plain closed issues are filtered out. It drives the curate
+// suppression set: a rejected entry that keeps recurring is escalated via a
+// knowledge-gap issue, never reopened.
+func (c *Client) ListClosedUnmergedPRsByLabel(ctx context.Context, label string) ([]providers.CuratedIssue, error) {
+	raw, err := c.listIssues(ctx, "closed", label)
+	if err != nil {
+		return nil, err
+	}
+	var out []providers.CuratedIssue
+	for _, ri := range raw {
+		if ri.PullRequest == nil {
+			continue // a plain issue, not a PR
+		}
+		if ri.PullRequest.MergedAt != nil {
+			continue // merged: an accepted entry, not a rejection
 		}
 		out = append(out, ri.curated())
 	}

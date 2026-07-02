@@ -273,9 +273,21 @@ ledger, so they stay source-neutral):
   `"KB: " + the incident title`, which the ledger records too), so a resolved episode
   with that title flips the PR onto the merge-ready queue. A human still merges.
 - **Recurrence** — open one *knowledge-gap* issue when an unresolved pattern (the
-  affected resource) recurs past a threshold. Idempotent by an existing-issue check
-  (the forge's open gap issues are the "already-opened" record), so re-running never
-  double-opens — no mutable store.
+  affected resource) recurs past `recurrence_threshold`. Idempotent by an existing-issue
+  check (the forge's open gap issues are the "already-opened" record), so re-running
+  never double-opens — no mutable store.
+  - **Closed-unmerged escalation.** When a human closes a drafted KB PR *without
+    merging*, that is a deliberate "not KB-worthy". RunLore does **not** reopen it (a
+    reopen re-litigates a human "no" and resurrects exactly the entries humans reject).
+    Instead the entry's `DupFingerprint` is treated as **suppressed** — derived each run
+    from the forge's closed-unmerged `runlore` PRs, so there is still no mutable store —
+    and its recurrences are counted *silently* on the fingerprint. Once they cross
+    `recurrence_threshold`, Recurrence escalates via a knowledge-gap issue that **links
+    the closed PR** and cites the count ("closed unmerged but has recurred N times —
+    reconsider?"), respecting the close instead of overriding it. A close labelled
+    `needs-work` is a revise-and-resubmit (not a rejection) and is left to the generic
+    recurrence path; `wontfix` / `not-kb-worthy` are captured as the escalation's close
+    reason. A *merged* PR is an accepted entry and is never suppressed.
 
 ---
 
