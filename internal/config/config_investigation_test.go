@@ -186,3 +186,45 @@ telemetry:
 		t.Fatal("telemetry.metrics_enabled should be true")
 	}
 }
+
+func TestApplyDefaultsProgressUpdates(t *testing.T) {
+	// Enabled without an explicit cadence ⇒ default 5.
+	var c Config
+	c.Investigation.ProgressUpdates.Enabled = true
+	applyDefaults(&c)
+	if c.Investigation.ProgressUpdates.EverySteps != 5 {
+		t.Fatalf("default every_steps: got %d, want 5", c.Investigation.ProgressUpdates.EverySteps)
+	}
+	// Explicit cadence respected.
+	var c2 Config
+	c2.Investigation.ProgressUpdates.Enabled = true
+	c2.Investigation.ProgressUpdates.EverySteps = 3
+	applyDefaults(&c2)
+	if c2.Investigation.ProgressUpdates.EverySteps != 3 {
+		t.Fatalf("explicit every_steps overwritten: got %d, want 3", c2.Investigation.ProgressUpdates.EverySteps)
+	}
+	// Disabled ⇒ left at 0 (unused).
+	var c3 Config
+	applyDefaults(&c3)
+	if c3.Investigation.ProgressUpdates.EverySteps != 0 {
+		t.Fatalf("disabled every_steps must stay 0, got %d", c3.Investigation.ProgressUpdates.EverySteps)
+	}
+}
+
+func TestValidateProgressUpdatesEverySteps(t *testing.T) {
+	// Enabled with a negative cadence is rejected (applyDefaults fills unset 0 with 5,
+	// so only an explicit negative reaches Validate).
+	var c Config
+	c.Investigation.ProgressUpdates.Enabled = true
+	c.Investigation.ProgressUpdates.EverySteps = -1
+	if err := c.Validate(); err == nil || !strings.Contains(err.Error(), "every_steps") {
+		t.Fatalf("expected every_steps validation error, got %v", err)
+	}
+	// Enabled + positive cadence passes.
+	var ok Config
+	ok.Investigation.ProgressUpdates.Enabled = true
+	ok.Investigation.ProgressUpdates.EverySteps = 5
+	if err := ok.Validate(); err != nil {
+		t.Fatalf("valid progress config rejected: %v", err)
+	}
+}

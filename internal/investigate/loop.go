@@ -126,6 +126,17 @@ type LoopInvestigator struct {
 	// Observability — nil-safe; no-op when telemetry is disabled.
 	Metrics       *telemetry.Metrics
 	ModelProvider string // label for model_requests/model_request_duration metrics (e.g. "anthropic")
+
+	// OnProgress, when set, receives an interim progress snapshot every
+	// ProgressEverySteps steps of a long investigation. It is nil-safe and
+	// default-off (nil ⇒ never called; zero extra model calls). The callback must
+	// never fail the investigation: the app wires it to a best-effort delivery that
+	// logs and swallows its own errors. The interim text passed is already
+	// secret-redacted at this egress boundary.
+	OnProgress func(providers.ProgressUpdate)
+	// ProgressEverySteps is the cadence for OnProgress. <= 0 disables progress
+	// pings even when OnProgress is set.
+	ProgressEverySteps int
 }
 
 // system returns the system prompt, extended with action proposals when the policy is
@@ -441,6 +452,12 @@ func (li *LoopInvestigator) Investigate(ctx context.Context, req Request) error 
 			}
 			messages = append(messages, providers.Message{Role: "tool", ToolCallID: run[i].ID, Content: tr.content})
 		}
+		// Interim progress ping (opt-in, off by default): a lightweight status update
+		// on this turn's boundary so a long investigation isn't silent until the end.
+		// Runs on the loop goroutine after dispatchTools has joined (used is stable),
+		// so it shares no mutable state with the workers. Best-effort — the callback
+		// swallows its own delivery errors and never fails the investigation.
+		li.emitProgress(req, step, maxSteps, used, resp.Text)
 		if terminal >= 0 {
 			inv := final
 			if inv.Title == "" {
@@ -600,6 +617,32 @@ func (li *LoopInvestigator) reviewActions(proposed []providers.Action) []provide
 		li.Log.Info("suggested actions (not executed)", "mode", string(li.Actions.Mode()), "count", len(kept))
 	}
 	return kept
+}
+
+// emitProgress fires the interim progress callback on a step boundary (every
+// ProgressEverySteps steps). It is a no-op when disabled (no callback, or a
+// non-positive cadence) — so the default path costs nothing. step is 0-based; the
+// update reports it 1-based. The used map is copied so the consumer can never race
+// the loop's later writes, and the model-derived interim text is secret-redacted
+// here (the LLM-egress boundary) before it leaves the loop.
+func (li *LoopInvestigator) emitProgress(req Request, step, maxSteps int, used map[string]int, interim string) {
+	if li.OnProgress == nil || li.ProgressEverySteps <= 0 {
+		return
+	}
+	if (step+1)%li.ProgressEverySteps != 0 {
+		return
+	}
+	toolsUsed := make(map[string]int, len(used))
+	for k, v := range used {
+		toolsUsed[k] = v
+	}
+	li.OnProgress(providers.ProgressUpdate{
+		Title:     req.Title,
+		Step:      step + 1,
+		MaxSteps:  maxSteps,
+		ToolsUsed: toolsUsed,
+		Interim:   redact.Secrets(interim),
+	})
 }
 
 func (li *LoopInvestigator) deliver(req Request, inv providers.Investigation) {
