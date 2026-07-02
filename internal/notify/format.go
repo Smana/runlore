@@ -13,8 +13,18 @@ import (
 func Format(inv providers.Investigation) string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "*Investigation* — confidence %.0f%%\n", inv.Confidence*100)
+	// Name the affected resource up front: it is the first thing an on-call needs
+	// (which workload is this about?) and it isn't otherwise in the shared text.
+	if ref := inv.Resource.Ref(); ref != "" {
+		fmt.Fprintf(&b, "Resource: %s\n", strings.TrimSpace(inv.Resource.Kind+" "+ref))
+	}
 	for i, rc := range inv.RootCauses {
 		fmt.Fprintf(&b, "%d. *%s* (%.0f%%)\n", i+1, rc.Summary, rc.Confidence*100)
+		// The change the root cause pins the incident on — previously rendered only
+		// in the Slack blocks, so Matrix/webhook/CLI readers never saw it.
+		if rc.ChangeRef != "" {
+			fmt.Fprintf(&b, "   What changed: %s\n", rc.ChangeRef)
+		}
 		for _, e := range rc.Evidence {
 			fmt.Fprintf(&b, "   • %s\n", e)
 		}

@@ -4,6 +4,7 @@ import (
 	"context"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/Smana/runlore/internal/providers"
 )
@@ -91,8 +92,9 @@ func TestPodStatusToolSelectorFallback(t *testing.T) {
 }
 
 func TestKubeEventsTool(t *testing.T) {
+	lastSeen := time.Date(2026, 7, 1, 14, 3, 5, 0, time.UTC)
 	tool := KubeEventsTool{Kube: fakeKube{events: []providers.KubeEvent{
-		{Type: "Warning", Reason: "FailedScheduling", Object: "Pod/valkey-0", Count: 13,
+		{Type: "Warning", Reason: "FailedScheduling", Object: "Pod/valkey-0", Count: 13, LastSeen: lastSeen,
 			Message: "0/9 nodes are available: 4 Insufficient cpu, 2 Insufficient memory."},
 	}}}
 	out, err := tool.Call(context.Background(), `{"namespace":"apps"}`)
@@ -101,5 +103,24 @@ func TestKubeEventsTool(t *testing.T) {
 	}
 	if !strings.Contains(out, "FailedScheduling") || !strings.Contains(out, "Insufficient cpu") || !strings.Contains(out, "x13") {
 		t.Fatalf("kube_events must surface reason + message + count, got:\n%s", out)
+	}
+	// The last-seen timestamp is what lets the model correlate an event to a
+	// change/deploy time ("first BackOff at 14:03").
+	if !strings.Contains(out, "2026-07-01T14:03:05Z") {
+		t.Fatalf("kube_events must surface the event's last-seen time, got:\n%s", out)
+	}
+}
+
+// A zero LastSeen (older API objects, fakes) must not render a bogus epoch time.
+func TestKubeEventsToolZeroTimeOmitted(t *testing.T) {
+	tool := KubeEventsTool{Kube: fakeKube{events: []providers.KubeEvent{
+		{Type: "Warning", Reason: "BackOff", Object: "Pod/x", Message: "restarting"},
+	}}}
+	out, err := tool.Call(context.Background(), `{"namespace":"apps"}`)
+	if err != nil {
+		t.Fatalf("Call: %v", err)
+	}
+	if strings.Contains(out, "0001-01-01") {
+		t.Fatalf("kube_events must omit a zero timestamp, got:\n%s", out)
 	}
 }

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"sort"
 	"strings"
 	"time"
 
@@ -573,5 +574,63 @@ func seedPrompt(req Request) string {
 	if req.Environment != "" {
 		fmt.Fprintf(&b, " Environment: %s.", req.Environment)
 	}
+	// Time anchor: tool windows (since_minutes) are relative to NOW, so without the
+	// incident start time the model can only guess how far back to look — and a
+	// too-short window silently misses the onset (the highest-signal moment).
+	if !req.At.IsZero() {
+		fmt.Fprintf(&b, "\nIncident started: %s (%s before now). Tool time windows (since_minutes) are "+
+			"relative to now — size them to cover the start time.",
+			req.At.UTC().Format(time.RFC3339), fmtAge(time.Since(req.At)))
+	}
+	// Alert labels and annotations are free signal the alert already carries
+	// (container, instance, cluster; runbook_url, dashboards). The annotation
+	// already promoted to Message is skipped so it isn't duplicated. Values are
+	// clipped so one pathological label can't blow up the seed.
+	if kv := renderKV(req.Labels, ""); kv != "" {
+		fmt.Fprintf(&b, "\nAlert labels: %s", kv)
+	}
+	if kv := renderKV(req.Annotations, req.Message); kv != "" {
+		fmt.Fprintf(&b, "\nAlert annotations: %s", kv)
+	}
 	return b.String()
+}
+
+// fmtAge renders a duration as a compact human age ("42m", "3h07m"); anything
+// under a minute (including a negative age from clock skew) reads "<1m".
+func fmtAge(d time.Duration) string {
+	d = d.Round(time.Minute)
+	if d < time.Minute {
+		return "<1m"
+	}
+	if h := d / time.Hour; h > 0 {
+		return fmt.Sprintf("%dh%02dm", h, (d%time.Hour)/time.Minute)
+	}
+	return fmt.Sprintf("%dm", d/time.Minute)
+}
+
+// maxSeedValueRunes clips a single label/annotation value in the seed prompt so
+// one pathological value can't dominate the context budget.
+const maxSeedValueRunes = 300
+
+// renderKV renders a label/annotation map as sorted key="value" pairs, skipping
+// entries whose value equals skipValue (already surfaced elsewhere in the seed)
+// and clipping oversized values. Returns "" for an empty/fully-skipped map.
+func renderKV(m map[string]string, skipValue string) string {
+	keys := make([]string, 0, len(m))
+	for k, v := range m {
+		if skipValue != "" && v == skipValue {
+			continue
+		}
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	parts := make([]string, 0, len(keys))
+	for _, k := range keys {
+		v := m[k]
+		if r := []rune(v); len(r) > maxSeedValueRunes {
+			v = string(r[:maxSeedValueRunes]) + "…"
+		}
+		parts = append(parts, fmt.Sprintf("%s=%q", k, v))
+	}
+	return strings.Join(parts, " ")
 }
