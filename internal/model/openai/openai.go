@@ -10,49 +10,28 @@ import (
 	"io"
 	"net/http"
 	"strings"
-	"time"
 
 	"github.com/Smana/runlore/internal/httpx"
+	"github.com/Smana/runlore/internal/model/clientcore"
 	"github.com/Smana/runlore/internal/providers"
-)
-
-// defaultMaxTokens is the output-token ceiling used when the caller passes <= 0.
-const defaultMaxTokens = 8192
-
-const (
-	// responseHeaderTimeout caps the wait for response headers (time-to-first-byte);
-	// the streamed body then has no flat deadline (a long completion is legitimate).
-	responseHeaderTimeout = 2 * time.Minute
-	// idleTimeout aborts a stream that stalls (no bytes) for this long — the streaming
-	// counterpart of an overall deadline, without killing an actively-sending stream.
-	idleTimeout = 2 * time.Minute
 )
 
 // Client is an OpenAI-compatible model provider.
 type Client struct {
-	baseURL   string
-	model     string
-	apiKey    string
-	maxTokens int
-	effort    string
-	http      *http.Client
+	clientcore.Base
+	effort string
 }
 
 // New builds a client. apiKey may be empty (keyless vLLM/Ollama). maxTokens caps
-// output tokens per request; <= 0 falls back to defaultMaxTokens. effort opts into
-// deeper reasoning (reasoning_effort: minimal|low|medium|high, validated in
-// config); empty omits the field entirely.
+// output tokens per request; <= 0 falls back to clientcore.DefaultMaxTokens.
+// effort opts into deeper reasoning (reasoning_effort: minimal|low|medium|high,
+// validated in config); empty omits the field entirely.
 func New(baseURL, model, apiKey string, maxTokens int, effort string) *Client {
-	if maxTokens <= 0 {
-		maxTokens = defaultMaxTokens
-	}
 	return &Client{
-		baseURL:   strings.TrimRight(baseURL, "/"),
-		model:     model,
-		apiKey:    apiKey,
-		maxTokens: maxTokens,
-		effort:    effort,
-		http:      httpx.SecureStreamingClient(responseHeaderTimeout),
+		// No public default base URL: an OpenAI-compatible endpoint is always
+		// operator-configured, so an empty baseURL stays empty.
+		Base:   clientcore.NewBase(baseURL, "", model, apiKey, maxTokens),
+		effort: effort,
 	}
 }
 
@@ -209,10 +188,10 @@ func (c *Client) Complete(ctx context.Context, req providers.CompletionRequest) 
 	}
 
 	creq := chatRequest{
-		Model:           c.model,
+		Model:           c.Model,
 		Messages:        msgs,
 		Tools:           tools,
-		MaxTokens:       c.maxTokens,
+		MaxTokens:       c.MaxTokens,
 		Stream:          true,
 		StreamOptions:   &streamOptions{IncludeUsage: true},
 		ReasoningEffort: c.effort,
@@ -220,61 +199,25 @@ func (c *Client) Complete(ctx context.Context, req providers.CompletionRequest) 
 	if req.ToolChoice != "" {
 		creq.ToolChoice = &toolChoice{Type: "function", Function: toolChoiceFunction{Name: req.ToolChoice}}
 	}
-	body, err := json.Marshal(creq)
-	if err != nil {
-		return providers.CompletionResponse{}, fmt.Errorf("marshal request: %w", err)
-	}
-	// A child context lets the idle-timeout reader abort a stalled stream by cancelling
-	// the in-flight HTTP read; cancel always runs on return to release resources.
-	streamCtx, cancel := context.WithCancel(ctx)
-	defer cancel()
-	newReq := func() (*http.Request, error) {
-		r, err := http.NewRequestWithContext(streamCtx, http.MethodPost, c.baseURL+"/chat/completions", bytes.NewReader(body))
-		if err != nil {
-			return nil, err
-		}
-		r.Header.Set("Content-Type", "application/json")
-		if c.apiKey != "" {
-			r.Header.Set("Authorization", "Bearer "+c.apiKey)
-		}
-		return r, nil
-	}
-	// DoWithRetry retries only connection establishment / 429 / 5xx (before the stream
-	// begins); once a 200 stream is flowing it is never retried mid-stream.
-	resp, err := httpx.DoWithRetry(streamCtx, c.http, 3, newReq)
-	if err != nil {
-		return providers.CompletionResponse{}, fmt.Errorf("chat request: %w", err)
-	}
-	defer func() { _ = resp.Body.Close() }()
-	if resp.StatusCode != http.StatusOK {
-		// Read a bounded prefix of the error body. base_url is operator-configurable, so
-		// never echo the raw bytes into an Error-level log (a misbehaving/compromised
-		// proxy could inject arbitrary content — info disclosure + log injection);
-		// surface only the structured error type/message, sanitized, so 4xx causes
-		// (e.g. an unknown model name or a rejected API key) are diagnosable from the
-		// error alone.
-		body, _ := io.ReadAll(io.LimitReader(resp.Body, 4<<10))
-		err := fmt.Errorf("chat status %d (request-id %q)%s", resp.StatusCode, httpx.RequestID(resp.Header), openaiErrorDetail(body))
-		// A 4xx other than 429 is permanent: the request itself is bad (e.g. 400
-		// invalid request, 401/403 auth, 404 unknown model), so retrying can't help.
-		// Mark it so the investigation workqueue drops it instead of requeuing forever.
-		// 429 and 5xx are already retried by DoWithRetry and stay transient here.
-		if resp.StatusCode >= 400 && resp.StatusCode < 500 && resp.StatusCode != http.StatusTooManyRequests {
-			return providers.CompletionResponse{}, providers.Permanent(err)
-		}
-		return providers.CompletionResponse{}, err
-	}
-	stream := httpx.NewIdleTimeoutReader(resp.Body, idleTimeout, cancel)
-	return accumulate(stream)
+	return c.Stream(ctx, clientcore.Request{
+		Op:   "chat",
+		URL:  c.BaseURL + "/chat/completions",
+		Body: creq,
+		SetHeaders: func(r *http.Request) {
+			r.Header.Set("Content-Type", "application/json")
+			if c.APIKey != "" {
+				r.Header.Set("Authorization", "Bearer "+c.APIKey)
+			}
+		},
+		ErrorDetail: openaiErrorDetail,
+	}, accumulate)
 }
 
 // openaiErrorDetail extracts a sanitized ": type: message" suffix from an
 // OpenAI-compatible error response body ({"error":{"message","type","code"}}), or
 // "" if the body can't be parsed as one. Only the structured error.type /
-// error.message fields are surfaced (never the raw bytes), control characters are
-// collapsed to spaces to prevent log injection, and the message is truncated — so
-// a 4xx cause is diagnosable without echoing arbitrary upstream content into an
-// Error-level log.
+// error.message fields are surfaced (never the raw bytes); sanitization and
+// truncation live in clientcore.Detail.
 func openaiErrorDetail(body []byte) string {
 	var e struct {
 		Error struct {
@@ -285,23 +228,7 @@ func openaiErrorDetail(body []byte) string {
 	if err := json.Unmarshal(body, &e); err != nil || (e.Error.Type == "" && e.Error.Message == "") {
 		return ""
 	}
-	msg := sanitizeLine(e.Error.Message)
-	const maxLen = 300
-	if len(msg) > maxLen {
-		msg = msg[:maxLen] + "…"
-	}
-	return fmt.Sprintf(": %s: %s", sanitizeLine(e.Error.Type), msg)
-}
-
-// sanitizeLine collapses control characters (including newlines) to spaces so an
-// upstream-controlled string can't inject additional log lines.
-func sanitizeLine(s string) string {
-	return strings.TrimSpace(strings.Map(func(r rune) rune {
-		if r < 0x20 || r == 0x7f {
-			return ' '
-		}
-		return r
-	}, s))
+	return clientcore.Detail(e.Error.Type, e.Error.Message)
 }
 
 // accumulate consumes an OpenAI chat/completions SSE stream and folds it into one
