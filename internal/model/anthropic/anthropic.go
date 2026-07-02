@@ -6,62 +6,37 @@
 package anthropic
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
 	"io"
-	"iter"
 	"net/http"
 	"strings"
-	"time"
 
-	"github.com/Smana/runlore/internal/httpx"
+	"github.com/Smana/runlore/internal/model/clientcore"
 	"github.com/Smana/runlore/internal/providers"
 )
 
 // DefaultBaseURL is the public Anthropic API.
 const DefaultBaseURL = "https://api.anthropic.com"
 
-const (
-	defaultMaxTokens = 4096
-	apiVersion       = "2023-06-01"
-	// responseHeaderTimeout caps the wait for response headers (time-to-first-byte);
-	// the streamed body then has no flat deadline (a long completion is legitimate).
-	responseHeaderTimeout = 2 * time.Minute
-	// idleTimeout aborts a stream that stalls (no bytes) for this long — the streaming
-	// counterpart of an overall deadline, without killing an actively-sending stream.
-	idleTimeout = 2 * time.Minute
-)
+const apiVersion = "2023-06-01"
 
 // Client is an Anthropic Messages API model provider.
 type Client struct {
-	baseURL   string
-	model     string
-	apiKey    string
-	maxTokens int
-	effort    string
-	http      *http.Client
+	clientcore.Base
+	effort string
 }
 
 // New builds a client. baseURL may be empty (defaults to DefaultBaseURL).
-// maxTokens caps output tokens per request; <= 0 falls back to defaultMaxTokens.
-// effort opts into deeper reasoning (output_config.effort: low|medium|high|max,
-// validated in config); empty omits the field entirely.
+// maxTokens caps output tokens per request; <= 0 falls back to
+// clientcore.DefaultMaxTokens. effort opts into deeper reasoning
+// (output_config.effort: low|medium|high|max, validated in config); empty
+// omits the field entirely.
 func New(baseURL, model, apiKey string, maxTokens int, effort string) *Client {
-	if baseURL == "" {
-		baseURL = DefaultBaseURL
-	}
-	if maxTokens <= 0 {
-		maxTokens = defaultMaxTokens
-	}
 	return &Client{
-		baseURL:   strings.TrimRight(baseURL, "/"),
-		model:     model,
-		apiKey:    apiKey,
-		maxTokens: maxTokens,
-		effort:    effort,
-		http:      httpx.SecureStreamingClient(responseHeaderTimeout),
+		Base:   clientcore.NewBase(baseURL, DefaultBaseURL, model, apiKey, maxTokens),
+		effort: effort,
 	}
 }
 
@@ -196,7 +171,7 @@ func (c *Client) Complete(ctx context.Context, req providers.CompletionRequest) 
 			blocks[len(blocks)-1].CacheControl = ephemeral
 		}
 	}
-	areq := msgRequest{Model: c.model, MaxTokens: c.maxTokens, Stream: true, Messages: msgs}
+	areq := msgRequest{Model: c.Model, MaxTokens: c.MaxTokens, Stream: true, Messages: msgs}
 	if req.ToolChoice != "" {
 		areq.ToolChoice = &toolChoice{Type: "tool", Name: req.ToolChoice}
 	}
@@ -219,58 +194,23 @@ func (c *Client) Complete(ctx context.Context, req providers.CompletionRequest) 
 	if n := len(areq.Tools); n > 0 {
 		areq.Tools[n-1].CacheControl = ephemeral
 	}
-	body, err := json.Marshal(areq)
-	if err != nil {
-		return providers.CompletionResponse{}, fmt.Errorf("marshal request: %w", err)
-	}
-	// A child context lets the idle-timeout reader abort a stalled stream by cancelling
-	// the in-flight HTTP read; cancel always runs on return to release resources.
-	streamCtx, cancel := context.WithCancel(ctx)
-	defer cancel()
-	newReq := func() (*http.Request, error) {
-		r, err := http.NewRequestWithContext(streamCtx, http.MethodPost, c.baseURL+"/v1/messages", bytes.NewReader(body))
-		if err != nil {
-			return nil, err
-		}
-		r.Header.Set("content-type", "application/json")
-		r.Header.Set("anthropic-version", apiVersion)
-		r.Header.Set("x-api-key", c.apiKey)
-		return r, nil
-	}
-	// DoWithRetry retries only connection establishment / 429 / 5xx (before the stream
-	// begins); once a 200 stream is flowing it is never retried mid-stream.
-	resp, err := httpx.DoWithRetry(streamCtx, c.http, 3, newReq)
-	if err != nil {
-		return providers.CompletionResponse{}, fmt.Errorf("messages request: %w", err)
-	}
-	defer func() { _ = resp.Body.Close() }()
-	if resp.StatusCode != http.StatusOK {
-		// Read a bounded prefix of the error body. Anthropic returns a JSON error
-		// object; surface only its structured type/message (never the raw bytes),
-		// sanitized, so 4xx causes (e.g. 400 invalid_request_error "prompt is too
-		// long", or a bad tool_use/tool_result pairing) are diagnosable from the
-		// error alone — without info disclosure or log injection.
-		body, _ := io.ReadAll(io.LimitReader(resp.Body, 4<<10))
-		err := fmt.Errorf("messages status %d (request-id %q)%s", resp.StatusCode, httpx.RequestID(resp.Header), anthropicErrorDetail(body))
-		// A 4xx other than 429 is permanent: the request itself is bad (e.g. 400
-		// invalid_request_error, 401/403 auth, 404), so retrying can't help. Mark it
-		// so the investigation workqueue drops it instead of requeuing forever. 429
-		// and 5xx are already retried by DoWithRetry and stay transient here.
-		if resp.StatusCode >= 400 && resp.StatusCode < 500 && resp.StatusCode != http.StatusTooManyRequests {
-			return providers.CompletionResponse{}, providers.Permanent(err)
-		}
-		return providers.CompletionResponse{}, err
-	}
-	stream := httpx.NewIdleTimeoutReader(resp.Body, idleTimeout, cancel)
-	return accumulate(stream)
+	return c.Stream(ctx, clientcore.Request{
+		Op:   "messages",
+		URL:  c.BaseURL + "/v1/messages",
+		Body: areq,
+		SetHeaders: func(r *http.Request) {
+			r.Header.Set("content-type", "application/json")
+			r.Header.Set("anthropic-version", apiVersion)
+			r.Header.Set("x-api-key", c.APIKey)
+		},
+		ErrorDetail: anthropicErrorDetail,
+	}, accumulate)
 }
 
 // anthropicErrorDetail extracts a sanitized ": type: message" suffix from an
-// Anthropic error response body, or "" if the body can't be parsed as one. Only
-// the structured error.type / error.message fields are surfaced (never the raw
-// bytes), control characters are collapsed to spaces to prevent log injection,
-// and the message is truncated — so a 4xx cause is diagnosable without echoing
-// arbitrary upstream content into an Error-level log.
+// Anthropic error response body, or "" if the body can't be parsed as one.
+// Only the structured error.type / error.message fields are surfaced (never
+// the raw bytes); sanitization and truncation live in clientcore.Detail.
 func anthropicErrorDetail(body []byte) string {
 	var e struct {
 		Error struct {
@@ -281,48 +221,7 @@ func anthropicErrorDetail(body []byte) string {
 	if err := json.Unmarshal(body, &e); err != nil || (e.Error.Type == "" && e.Error.Message == "") {
 		return ""
 	}
-	msg := sanitizeLine(e.Error.Message)
-	const maxLen = 300
-	if len(msg) > maxLen {
-		msg = msg[:maxLen] + "…"
-	}
-	return fmt.Sprintf(": %s: %s", sanitizeLine(e.Error.Type), msg)
-}
-
-// sanitizeLine collapses control characters (including newlines) to spaces so an
-// upstream-controlled string can't inject additional log lines.
-func sanitizeLine(s string) string {
-	return strings.TrimSpace(strings.Map(func(r rune) rune {
-		if r < 0x20 || r == 0x7f {
-			return ' '
-		}
-		return r
-	}, s))
-}
-
-// sseEvents parses the Anthropic Messages SSE stream into decoded streamEvents. It
-// wraps the generic httpx.SSEData framing primitive and json-unmarshals each event's
-// data payload; a framing/read error or a JSON decode error is surfaced via the
-// second yield value.
-func sseEvents(r io.Reader) iter.Seq2[streamEvent, error] {
-	return func(yield func(streamEvent, error) bool) {
-		for payload, err := range httpx.SSEData(r) {
-			if err != nil {
-				yield(streamEvent{}, err)
-				return
-			}
-			var ev streamEvent
-			if err := json.Unmarshal(payload, &ev); err != nil {
-				if !yield(streamEvent{}, fmt.Errorf("decode sse event: %w", err)) {
-					return
-				}
-				continue
-			}
-			if !yield(ev, nil) {
-				return
-			}
-		}
-	}
+	return clientcore.Detail(e.Error.Type, e.Error.Message)
 }
 
 // accumulate consumes an Anthropic Messages SSE stream and folds it into one
@@ -338,7 +237,7 @@ func accumulate(r io.Reader) (providers.CompletionResponse, error) {
 	var order []int // tool block indices, in first-seen order
 	sawStop := false
 
-	for ev, err := range sseEvents(r) {
+	for ev, err := range clientcore.SSEEvents[streamEvent](r) {
 		if err != nil {
 			return providers.CompletionResponse{}, fmt.Errorf("read stream: %w", err)
 		}
@@ -410,7 +309,7 @@ func toMessages(in []providers.Message) []message {
 				blocks = append(blocks, block{Type: "text", Text: m.Content})
 			}
 			for _, tc := range m.ToolCalls {
-				blocks = append(blocks, block{Type: "tool_use", ID: tc.ID, Name: tc.Name, Input: rawObject(tc.Args)})
+				blocks = append(blocks, block{Type: "tool_use", ID: tc.ID, Name: tc.Name, Input: clientcore.RawObject(tc.Args)})
 			}
 			out = append(out, message{Role: "assistant", Content: blocks})
 		case "tool":
@@ -426,12 +325,4 @@ func toMessages(in []providers.Message) []message {
 		}
 	}
 	return out
-}
-
-// rawObject ensures tool_use input is a JSON object ("" → {}).
-func rawObject(args string) json.RawMessage {
-	if strings.TrimSpace(args) == "" {
-		return json.RawMessage("{}")
-	}
-	return json.RawMessage(args)
 }
