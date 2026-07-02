@@ -72,6 +72,12 @@ config:
     # set, else the main model) and keeps that in place of the markers; any summarizer
     # error/refusal/truncation falls back to plain elision. Needs a token budget above.
     # compaction: elide
+    # Interim progress delivery for long investigations (off by default). When enabled,
+    # deliver a ping (title, step count, tools used, latest interim text — redacted +
+    # escaped) every every_steps steps to notifiers that support it (Slack today).
+    # progress_updates:
+    #   enabled: true
+    #   every_steps: 5           # must be > 0 when enabled
     # App-layer allowlist of namespaces the pod_logs / controller_logs tools may read
     # RAW pod logs from, BEYOND the incident's own namespace (the incident namespace is
     # always allowed at the app layer — RBAC still gates the actual read). Pod logs carry
@@ -121,6 +127,16 @@ config:
   #   # minimal|low|medium|high; unsupported for gemini; empty = omitted (default).
   #   # A model that doesn't support the knob returns a 400, classified permanent.
   #   effort: high
+  #   # Opt into Anthropic adaptive extended thinking (anthropic-only; "adaptive" is the
+  #   # only value; rejected for other providers; empty = off). Give max_tokens headroom.
+  #   thinking: adaptive
+  #   # Per-investigation cost estimate (USD per million tokens; all >= 0). When set, the
+  #   # delivered finding gains a cost footer and the investigation_cost_usd metric is
+  #   # populated. Omit for token counts only. verify.pricing inherits these when unset.
+  #   pricing:
+  #     input_usd_per_mtok: 3.0
+  #     output_usd_per_mtok: 15.0
+  #     cached_input_usd_per_mtok: 0.3
   #   # Route the adversarial verify pass to a cheaper/faster model to cut the
   #   # +1-call-per-investigation cost (inherits the fields above unless overridden;
   #   # omit to verify with the main model). Verify always runs — this only lowers cost.
