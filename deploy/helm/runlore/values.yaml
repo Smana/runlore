@@ -118,7 +118,10 @@ config:
   # when config.outcome.ledger_path is set (they read the outcome ledger).
   curate:
     stale_after: 720h          # close unprotected KB PRs idle longer than this; 0 disables
-    recurrence_threshold: 3    # open a knowledge-gap issue after this many unresolved occurrences; 0 ⇒ 3
+    recurrence_threshold: 3    # open a knowledge-gap issue after this many unresolved occurrences; 0 ⇒ 3.
+                               # Also the trigger for escalating a closed-unmerged (human-rejected) KB
+                               # entry that keeps recurring: RunLore links the closed PR in a knowledge-gap
+                               # issue rather than reopening it.
   # model:
   #   base_url: https://vllm.svc/v1
   #   model: <model-name>
