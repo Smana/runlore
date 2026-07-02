@@ -88,11 +88,14 @@ dockers:
       - "ghcr.io/smana/runlore:{{ .Version }}-amd64"
     build_flag_templates:
       - "--platform=linux/amd64"
-      # Buildx-native supply-chain attestations attached to the image:
-      #   provenance mode=max -> full SLSA build provenance (steps + materials)
-      #   sbom=true           -> SPDX SBOM attestation generated from the build
-      - "--provenance=mode=max"
-      - "--sbom=true"
+      # NOTE: buildx --provenance / --sbom attestations are intentionally NOT set here.
+      # The classic `dockers` step loads each per-arch image into the local docker image
+      # store (the "docker" exporter), which cannot represent the OCI index that buildx
+      # emits when attestations are attached — the build fails with:
+      #   "docker exporter does not currently support exporting manifest lists".
+      # Restoring image-level SLSA provenance + SBOM needs the push-based `dockers_v2`
+      # flow (tracked as a follow-up). cosign still signs the fused manifest lists
+      # (docker_signs) and syft still generates the per-binary archive SBOMs.
       - "--label=org.opencontainers.image.source=https://github.com/Smana/runlore"
       - "--label=org.opencontainers.image.version={{ .Version }}"
       - "--label=org.opencontainers.image.revision={{ .FullCommit }}"
@@ -108,8 +111,8 @@ dockers:
       - "ghcr.io/smana/runlore:{{ .Version }}-arm64"
     build_flag_templates:
       - "--platform=linux/arm64"
-      - "--provenance=mode=max"
-      - "--sbom=true"
+      # Attestations omitted for the same reason as the amd64 entry above (classic
+      # dockers + local load cannot export an attestation manifest list).
       - "--label=org.opencontainers.image.source=https://github.com/Smana/runlore"
       - "--label=org.opencontainers.image.version={{ .Version }}"
       - "--label=org.opencontainers.image.revision={{ .FullCommit }}"
