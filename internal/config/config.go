@@ -321,6 +321,19 @@ type Model struct {
 	// Embeddings optionally configures an OpenAI-compatible /embeddings endpoint used
 	// for hybrid recall (instant_recall.hybrid). Unset ⇒ BM25-only recall.
 	Embeddings *Embeddings `yaml:"embeddings"`
+	// Pricing optionally sets token rates so RunLore can estimate and report a
+	// per-investigation cost. Unset ⇒ token totals are reported without a dollar
+	// figure. Rates are validated non-negative.
+	Pricing *Pricing `yaml:"pricing"`
+}
+
+// Pricing sets model token rates in USD per MILLION tokens, used to estimate a
+// per-investigation cost. All rates are optional and default to 0; a rate must be
+// non-negative.
+type Pricing struct {
+	InputUSDPerMTok       float64 `yaml:"input_usd_per_mtok"`
+	OutputUSDPerMTok      float64 `yaml:"output_usd_per_mtok"`
+	CachedInputUSDPerMTok float64 `yaml:"cached_input_usd_per_mtok"`
 }
 
 // Embeddings configures an OpenAI-compatible /embeddings endpoint (vLLM/Ollama/
@@ -350,6 +363,9 @@ type ModelOverride struct {
 	// verify pass always forces a tool_choice, so the Anthropic client drops thinking
 	// for that request anyway — this knob only affects any non-forced verify calls.
 	Thinking string `yaml:"thinking"`
+	// Pricing overrides the parent's token rates for the verify pass (a cheaper
+	// verify model has its own cost); nil inherits model.pricing.
+	Pricing *Pricing `yaml:"pricing"`
 }
 
 // Notify configures where investigation findings are delivered.
@@ -686,6 +702,19 @@ func validateThinking(field, provider, thinking string) error {
 	return nil
 }
 
+// validatePricing rejects a negative token rate (which would produce a negative
+// cost). A nil *Pricing (unconfigured) is valid.
+func validatePricing(field string, p *Pricing) error {
+	if p == nil {
+		return nil
+	}
+	if p.InputUSDPerMTok < 0 || p.OutputUSDPerMTok < 0 || p.CachedInputUSDPerMTok < 0 {
+		return fmt.Errorf("%s: rates must be >= 0 (input=%g output=%g cached_input=%g)",
+			field, p.InputUSDPerMTok, p.OutputUSDPerMTok, p.CachedInputUSDPerMTok)
+	}
+	return nil
+}
+
 // Validate enforces cross-field invariants after loading — fail-closed defaults
 // for the autonomy ladder: enabling execution requires the controls that bound
 // it. Returns an error that should abort startup.
@@ -736,6 +765,16 @@ func (c *Config) Validate() error {
 	// negative reaches here). Validate fail-loud rather than silently never pinging.
 	if c.Investigation.ProgressUpdates.Enabled && c.Investigation.ProgressUpdates.EverySteps <= 0 {
 		return fmt.Errorf("investigation.progress_updates.every_steps must be > 0 when enabled, got %d", c.Investigation.ProgressUpdates.EverySteps)
+	}
+	// Pricing rates must be non-negative (a negative rate would report a negative
+	// cost). Cover the main model and the verify override (which carries its own).
+	if err := validatePricing("model.pricing", c.Model.Pricing); err != nil {
+		return err
+	}
+	if v := c.Model.Verify; v != nil {
+		if err := validatePricing("model.verify.pricing", v.Pricing); err != nil {
+			return err
+		}
 	}
 	// Reject a negative per-tool timeout: time.ParseDuration accepts negative values
 	// which silently disable the feature (fails the > 0 guard in runTool) rather than

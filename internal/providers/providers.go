@@ -391,15 +391,30 @@ type Investigation struct {
 	Changes       []Change
 	Unresolved    []string // honest: what the agent could not determine
 	Confidence    float64
-	Recalled      bool     // true when produced by instant recall (a KB cache hit); the curator skips re-curating it
-	Resource      Workload // the workload the investigation identified as affected; defaults to the originating alert workload when none was named (stored on curated entries for structural recall)
-	Actions       []Action // proposed remediations (autonomy ladder; never executed at rung "suggest")
-	CuratedURL    string   // runtime: KB issue/PR the curator opened, linked in delivery (set after curation)
-	Fingerprint   string   // originating alert fingerprint; for outcome-ledger attribution
-	Fingerprints  []string // coalesced batch fingerprints; one outcome open is recorded per entry
-	TriggerKey    string   // deterministic incident identity set at trigger time (alerts: host-invariant per-class key from curator.IncidentKey; GitOps: failing resource+condition). curator.DupFingerprint prefers it so reworded re-investigations (#137) AND the same alert on a different pod/node (CORE-681) still dedupe
-	RecalledEntry string   // when Recalled: the catalog entry Path that was matched
-	Verified      bool     // true when the adversarial verify pass ran and a root cause survived it
+	Recalled      bool        // true when produced by instant recall (a KB cache hit); the curator skips re-curating it
+	Resource      Workload    // the workload the investigation identified as affected; defaults to the originating alert workload when none was named (stored on curated entries for structural recall)
+	Actions       []Action    // proposed remediations (autonomy ladder; never executed at rung "suggest")
+	CuratedURL    string      // runtime: KB issue/PR the curator opened, linked in delivery (set after curation)
+	Fingerprint   string      // originating alert fingerprint; for outcome-ledger attribution
+	Fingerprints  []string    // coalesced batch fingerprints; one outcome open is recorded per entry
+	TriggerKey    string      // deterministic incident identity set at trigger time (alerts: host-invariant per-class key from curator.IncidentKey; GitOps: failing resource+condition). curator.DupFingerprint prefers it so reworded re-investigations (#137) AND the same alert on a different pod/node (CORE-681) still dedupe
+	RecalledEntry string      // when Recalled: the catalog entry Path that was matched
+	Verified      bool        // true when the adversarial verify pass ran and a root cause survived it
+	Usage         UsageTotals // per-investigation model token/cost accounting (loop + verify); surfaced to humans + metrics, never written to the curated KB body
+}
+
+// UsageTotals aggregates model token usage over a whole investigation: every
+// model call summed — the ReAct loop, the adversarial verify pass, and any recall
+// verification. It is carried on Investigation so notifiers and metrics can
+// surface usage/cost without re-reading provider internals. Zero when no model
+// call reported usage (e.g. a pure recall short-circuit).
+type UsageTotals struct {
+	ModelCalls        int     // number of model completions made
+	InputTokens       int     // total input/prompt tokens, INCLUDING any served from cache (mirrors Usage.InputTokens)
+	OutputTokens      int     // total generated/output tokens
+	CachedInputTokens int     // subset of InputTokens that was a cache read (the saving)
+	CostUSD           float64 // estimated cost; meaningful only when Priced (model.pricing configured)
+	Priced            bool    // pricing was configured, so CostUSD is populated (may legitimately be 0)
 }
 
 // Hypothesis is one ranked root-cause candidate with its evidence.

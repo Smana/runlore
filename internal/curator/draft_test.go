@@ -110,3 +110,21 @@ func TestDraftKBEntrySetsFingerprint(t *testing.T) {
 		t.Fatalf("drafted entry fingerprint = %q, want %q", got, DupFingerprint(inv))
 	}
 }
+
+// TestDraftKBEntryExcludesCost proves the per-investigation cost/usage carrier
+// never leaks into the curated KB body — cost is a delivery-time concern for
+// humans, not durable knowledge.
+func TestDraftKBEntryExcludesCost(t *testing.T) {
+	inv := providers.Investigation{
+		Title:      "HarborRegistryDown",
+		Confidence: 0.9,
+		RootCauses: []providers.Hypothesis{{Summary: "db down", Evidence: []string{"pg_up=0"}}},
+		Usage:      providers.UsageTotals{ModelCalls: 5, InputTokens: 42000, OutputTokens: 900, CostUSD: 0.37, Priced: true},
+	}
+	body := draftKBEntry(inv).Body
+	for _, unwanted := range []string{"model calls", "$0.37", "tokens", "cached"} {
+		if strings.Contains(body, unwanted) {
+			t.Fatalf("KB body must not carry cost/usage text %q:\n%s", unwanted, body)
+		}
+	}
+}
