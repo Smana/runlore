@@ -59,21 +59,17 @@ func (t ControllerLogsTool) Call(ctx context.Context, args string) (string, erro
 	if err != nil {
 		return "", err
 	}
-	var b strings.Builder
-	n := 0
+	kept := lines[:0:0]
 	for _, l := range lines {
 		if in.Resource != "" && !strings.Contains(l.Message, in.Resource) {
 			continue
 		}
-		if n >= maxToolRows {
-			fmt.Fprintf(&b, "… (more lines truncated)\n")
-			break
-		}
-		fmt.Fprintln(&b, l.Message)
-		n++
+		kept = append(kept, l)
 	}
-	if b.Len() == 0 {
+	if len(kept) == 0 {
 		return "no matching controller log lines", nil
 	}
+	var b strings.Builder
+	renderLogLines(&b, kept, "more lines")
 	return b.String(), nil
 }

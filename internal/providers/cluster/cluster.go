@@ -8,6 +8,7 @@ import (
 	"context"
 	"fmt"
 	"sort"
+	"strings"
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
@@ -52,8 +53,11 @@ func (r *Reader) PodLogs(ctx context.Context, q providers.PodLogQuery) (provider
 			break
 		}
 		name := pods.Items[i].Name
+		// Timestamps: the kubelet prefixes each line with RFC3339Nano; we parse it
+		// into LogLine.Time so the renderer can show WHEN a line was emitted (the
+		// signal that correlates a crash to a change/event time).
 		stream, err := r.client.CoreV1().Pods(q.Namespace).
-			GetLogs(name, &corev1.PodLogOptions{SinceSeconds: since, TailLines: &tail, Previous: q.Previous}).
+			GetLogs(name, &corev1.PodLogOptions{SinceSeconds: since, TailLines: &tail, Previous: q.Previous, Timestamps: true}).
 			Stream(ctx)
 		if err != nil {
 			continue
@@ -61,11 +65,28 @@ func (r *Reader) PodLogs(ctx context.Context, q providers.PodLogQuery) (provider
 		sc := bufio.NewScanner(stream)
 		sc.Buffer(make([]byte, 0, 64*1024), 1024*1024)
 		for sc.Scan() {
-			out = append(out, providers.LogLine{Message: name + ": " + sc.Text()})
+			ts, msg := splitLogTimestamp(sc.Text())
+			out = append(out, providers.LogLine{Time: ts, Message: name + ": " + msg})
 		}
 		_ = stream.Close()
 	}
 	return out, nil
+}
+
+// splitLogTimestamp splits the RFC3339Nano prefix that PodLogOptions.Timestamps
+// adds to each line into a time plus the bare message. A line without a parseable
+// prefix (a fake client, a malformed line) is returned untouched with a zero time,
+// so callers never lose content.
+func splitLogTimestamp(line string) (time.Time, string) {
+	prefix, rest, found := strings.Cut(line, " ")
+	if !found {
+		prefix, rest = line, ""
+	}
+	ts, err := time.Parse(time.RFC3339Nano, prefix)
+	if err != nil {
+		return time.Time{}, line
+	}
+	return ts, rest
 }
 
 var _ providers.KubeReader = (*Reader)(nil)
@@ -161,15 +182,17 @@ func (r *Reader) Events(ctx context.Context, namespace, objectName string, warnO
 		if warnOnly && e.Type != corev1.EventTypeWarning {
 			continue
 		}
+		at := eventTime(e)
 		kept = append(kept, timedEvent{
 			ev: providers.KubeEvent{
-				Type:    e.Type,
-				Reason:  e.Reason,
-				Object:  e.InvolvedObject.Kind + "/" + e.InvolvedObject.Name,
-				Message: e.Message,
-				Count:   e.Count,
+				Type:     e.Type,
+				Reason:   e.Reason,
+				Object:   e.InvolvedObject.Kind + "/" + e.InvolvedObject.Name,
+				Message:  e.Message,
+				Count:    e.Count,
+				LastSeen: at,
 			},
-			at: eventTime(e),
+			at: at,
 		})
 	}
 	sort.SliceStable(kept, func(i, j int) bool { return kept[i].at.After(kept[j].at) })

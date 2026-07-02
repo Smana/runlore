@@ -148,11 +148,12 @@ func TestQueryMetricsRangeTool(t *testing.T) {
 		t.Fatalf("Call: %v", err)
 	}
 	// The model must see the TREND, not a single value: first->last with min/max
-	// so a spike-then-partial-recovery (1 -> 9 -> 4) is legible.
+	// so a spike-then-partial-recovery (1 -> 9 -> 4) is legible — and WHEN the
+	// extremes happened, so the spike can be correlated to a change/deploy time.
 	if !strings.Contains(out, `http_errors{job="api"}`) {
 		t.Fatalf("missing series label:\n%s", out)
 	}
-	for _, want := range []string{"first=1", "last=4", "min=1", "max=9"} {
+	for _, want := range []string{"first=1", "last=4", "min=1@2023-11-14T22:13:20Z", "max=9@2023-11-14T22:14:20Z"} {
 		if !strings.Contains(out, want) {
 			t.Fatalf("missing %q in:\n%s", want, out)
 		}
