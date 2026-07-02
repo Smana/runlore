@@ -14,33 +14,19 @@
 package gemini
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
 	"io"
-	"iter"
 	"net/http"
 	"strings"
-	"time"
 
-	"github.com/Smana/runlore/internal/httpx"
+	"github.com/Smana/runlore/internal/model/clientcore"
 	"github.com/Smana/runlore/internal/providers"
 )
 
 // DefaultBaseURL is the public Gemini API.
 const DefaultBaseURL = "https://generativelanguage.googleapis.com"
-
-const (
-	// defaultMaxTokens is the output-token ceiling used when the caller passes <= 0.
-	defaultMaxTokens = 8192
-	// responseHeaderTimeout caps the wait for response headers (time-to-first-byte);
-	// the streamed body then has no flat deadline (a long completion is legitimate).
-	responseHeaderTimeout = 2 * time.Minute
-	// idleTimeout aborts a stream that stalls (no bytes) for this long — the streaming
-	// counterpart of an overall deadline, without killing an actively-sending stream.
-	idleTimeout = 2 * time.Minute
-)
 
 // Caching: RunLore relies on Gemini's automatic IMPLICIT prefix caching (enabled on
 // Gemini 2.5+). No explicit CachedContent lifecycle is used. This depends on the request
@@ -49,29 +35,14 @@ const (
 
 // Client is a Gemini (streamGenerateContent) model provider.
 type Client struct {
-	baseURL   string
-	model     string
-	apiKey    string
-	maxTokens int
-	http      *http.Client
+	clientcore.Base
 }
 
 // New builds a client. baseURL may be empty (defaults to DefaultBaseURL).
-// maxTokens caps output tokens per request; <= 0 falls back to defaultMaxTokens.
+// maxTokens caps output tokens per request; <= 0 falls back to
+// clientcore.DefaultMaxTokens.
 func New(baseURL, model, apiKey string, maxTokens int) *Client {
-	if baseURL == "" {
-		baseURL = DefaultBaseURL
-	}
-	if maxTokens <= 0 {
-		maxTokens = defaultMaxTokens
-	}
-	return &Client{
-		baseURL:   strings.TrimRight(baseURL, "/"),
-		model:     model,
-		apiKey:    apiKey,
-		maxTokens: maxTokens,
-		http:      httpx.SecureStreamingClient(responseHeaderTimeout),
-	}
+	return &Client{Base: clientcore.NewBase(baseURL, DefaultBaseURL, model, apiKey, maxTokens)}
 }
 
 var _ providers.ModelProvider = (*Client)(nil)
@@ -169,7 +140,7 @@ type genResponse struct {
 func (c *Client) Complete(ctx context.Context, req providers.CompletionRequest) (providers.CompletionResponse, error) {
 	greq := genRequest{
 		Contents:         toContents(req.Messages),
-		GenerationConfig: &generationConfig{MaxOutputTokens: c.maxTokens},
+		GenerationConfig: &generationConfig{MaxOutputTokens: c.MaxTokens},
 	}
 	if req.System != "" {
 		greq.SystemInstruction = &content{Parts: []part{{Text: req.System}}}
@@ -186,59 +157,25 @@ func (c *Client) Complete(ctx context.Context, req providers.CompletionRequest) 
 			Mode: "ANY", AllowedFunctionNames: []string{req.ToolChoice},
 		}}
 	}
-	body, err := json.Marshal(greq)
-	if err != nil {
-		return providers.CompletionResponse{}, fmt.Errorf("marshal request: %w", err)
-	}
-	// ?alt=sse switches streamGenerateContent from a JSON array to a Server-Sent
-	// Events stream: one GenerateContentResponse per data: event, ending at EOF.
-	url := fmt.Sprintf("%s/v1beta/models/%s:streamGenerateContent?alt=sse", c.baseURL, c.model)
-	// A child context lets the idle-timeout reader abort a stalled stream by cancelling
-	// the in-flight HTTP read; cancel always runs on return to release resources.
-	streamCtx, cancel := context.WithCancel(ctx)
-	defer cancel()
-	newReq := func() (*http.Request, error) {
-		r, err := http.NewRequestWithContext(streamCtx, http.MethodPost, url, bytes.NewReader(body))
-		if err != nil {
-			return nil, err
-		}
-		r.Header.Set("Content-Type", "application/json")
-		r.Header.Set("x-goog-api-key", c.apiKey)
-		return r, nil
-	}
-	// DoWithRetry retries only connection establishment / 429 / 5xx (before the stream
-	// begins); once a 200 stream is flowing it is never retried mid-stream.
-	resp, err := httpx.DoWithRetry(streamCtx, c.http, 3, newReq)
-	if err != nil {
-		return providers.CompletionResponse{}, fmt.Errorf("streamGenerateContent request: %w", err)
-	}
-	defer func() { _ = resp.Body.Close() }()
-	if resp.StatusCode != http.StatusOK {
-		// Read a bounded prefix of the error body. Never echo the raw bytes into an
-		// Error-level log (info disclosure + log injection); surface only the
-		// structured error status/message, sanitized, so 4xx causes (e.g. a 400
-		// INVALID_ARGUMENT or a 404 unknown model) are diagnosable from the error alone.
-		body, _ := io.ReadAll(io.LimitReader(resp.Body, 4<<10))
-		err := fmt.Errorf("streamGenerateContent status %d (request-id %q)%s", resp.StatusCode, httpx.RequestID(resp.Header), geminiErrorDetail(body))
-		// A 4xx other than 429 is permanent: the request itself is bad (e.g. 400
-		// INVALID_ARGUMENT, 401/403 auth, 404 unknown model), so retrying can't help.
-		// Mark it so the investigation workqueue drops it instead of requeuing forever.
-		// 429 and 5xx are already retried by DoWithRetry and stay transient here.
-		if resp.StatusCode >= 400 && resp.StatusCode < 500 && resp.StatusCode != http.StatusTooManyRequests {
-			return providers.CompletionResponse{}, providers.Permanent(err)
-		}
-		return providers.CompletionResponse{}, err
-	}
-	stream := httpx.NewIdleTimeoutReader(resp.Body, idleTimeout, cancel)
-	return accumulate(stream)
+	return c.Stream(ctx, clientcore.Request{
+		Op: "streamGenerateContent",
+		// ?alt=sse switches streamGenerateContent from a JSON array to a Server-Sent
+		// Events stream: one GenerateContentResponse per data: event, ending at EOF.
+		URL:  fmt.Sprintf("%s/v1beta/models/%s:streamGenerateContent?alt=sse", c.BaseURL, c.Model),
+		Body: greq,
+		SetHeaders: func(r *http.Request) {
+			r.Header.Set("Content-Type", "application/json")
+			r.Header.Set("x-goog-api-key", c.APIKey)
+		},
+		ErrorDetail: geminiErrorDetail,
+	}, accumulate)
 }
 
 // geminiErrorDetail extracts a sanitized ": status: message" suffix from a Gemini
 // error response body ({"error":{"code","message","status"}}), or "" if the body
 // can't be parsed as one. Only the structured error.status / error.message fields
-// are surfaced (never the raw bytes), control characters are collapsed to spaces
-// to prevent log injection, and the message is truncated — so a 4xx cause is
-// diagnosable without echoing arbitrary upstream content into an Error-level log.
+// are surfaced (never the raw bytes); sanitization and truncation live in
+// clientcore.Detail.
 func geminiErrorDetail(body []byte) string {
 	var e struct {
 		Error struct {
@@ -249,48 +186,7 @@ func geminiErrorDetail(body []byte) string {
 	if err := json.Unmarshal(body, &e); err != nil || (e.Error.Status == "" && e.Error.Message == "") {
 		return ""
 	}
-	msg := sanitizeLine(e.Error.Message)
-	const maxLen = 300
-	if len(msg) > maxLen {
-		msg = msg[:maxLen] + "…"
-	}
-	return fmt.Sprintf(": %s: %s", sanitizeLine(e.Error.Status), msg)
-}
-
-// sanitizeLine collapses control characters (including newlines) to spaces so an
-// upstream-controlled string can't inject additional log lines.
-func sanitizeLine(s string) string {
-	return strings.TrimSpace(strings.Map(func(r rune) rune {
-		if r < 0x20 || r == 0x7f {
-			return ' '
-		}
-		return r
-	}, s))
-}
-
-// sseEvents parses the Gemini SSE stream into decoded genResponse chunks. It wraps the
-// generic httpx.SSEData framing primitive and json-unmarshals each event's data
-// payload (one full GenerateContentResponse per event); a framing/read error or a JSON
-// decode error is surfaced via the second yield value.
-func sseEvents(r io.Reader) iter.Seq2[genResponse, error] {
-	return func(yield func(genResponse, error) bool) {
-		for payload, err := range httpx.SSEData(r) {
-			if err != nil {
-				yield(genResponse{}, err)
-				return
-			}
-			var gr genResponse
-			if err := json.Unmarshal(payload, &gr); err != nil {
-				if !yield(genResponse{}, fmt.Errorf("decode sse event: %w", err)) {
-					return
-				}
-				continue
-			}
-			if !yield(gr, nil) {
-				return
-			}
-		}
-	}
+	return clientcore.Detail(e.Error.Status, e.Error.Message)
 }
 
 // accumulate consumes a Gemini SSE stream and folds it into one CompletionResponse:
@@ -303,7 +199,7 @@ func accumulate(r io.Reader) (providers.CompletionResponse, error) {
 	var out providers.CompletionResponse
 	sawFinish := false
 
-	for gr, err := range sseEvents(r) {
+	for gr, err := range clientcore.SSEEvents[genResponse](r) {
 		if err != nil {
 			return providers.CompletionResponse{}, fmt.Errorf("read stream: %w", err)
 		}
@@ -384,7 +280,7 @@ func toContents(in []providers.Message) []content {
 				parts = append(parts, part{FunctionCall: &functionCall{
 					ID:   wireID(tc.ID, tc.Name),
 					Name: tc.Name,
-					Args: rawObject(tc.Args),
+					Args: clientcore.RawObject(tc.Args),
 				}})
 			}
 			out = append(out, content{Role: "model", Parts: parts})
@@ -420,14 +316,6 @@ func wireID(id, name string) string {
 		return ""
 	}
 	return id
-}
-
-// rawObject ensures functionCall args is a JSON object ("" → {}).
-func rawObject(args string) json.RawMessage {
-	if strings.TrimSpace(args) == "" {
-		return json.RawMessage("{}")
-	}
-	return json.RawMessage(args)
 }
 
 // argString renders a response functionCall's args (a JSON object) as the string
