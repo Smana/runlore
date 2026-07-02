@@ -20,12 +20,20 @@ type ResolveFunc func(fingerprint string, at time.Time)
 // configured gate policy (MatchGated or EnableGated), deduplicates within the
 // configured window, and forwards survivors to the investigation enqueuer.
 type Pipeline struct {
-	cfg     *config.Config
-	enq     investigate.Enqueuer
-	resolve ResolveFunc
-	dedup   *trigger.Deduper
-	metrics *telemetry.Metrics // optional; nil-safe ingress counters
-	log     *slog.Logger
+	cfg      *config.Config
+	enq      investigate.Enqueuer
+	resolve  ResolveFunc
+	dedup    *trigger.Deduper
+	debounce *incidentDebouncer
+	metrics  *telemetry.Metrics // optional; nil-safe ingress counters
+	log      *slog.Logger
+
+	// baseCtx bounds the lifetime of background debounce holds, which outlive the
+	// per-request HTTP context that delivered the alert (a hold survives seconds to
+	// minutes; the webhook handler returns immediately). Defaults to
+	// context.Background(); serve binds it to the app/work context via WithContext
+	// so holds stop cleanly on shutdown.
+	baseCtx context.Context
 }
 
 // NewPipeline creates a Pipeline. resolve may be nil to disable resolved-alert
@@ -33,19 +41,39 @@ type Pipeline struct {
 func NewPipeline(cfg *config.Config, enq investigate.Enqueuer, resolve ResolveFunc, log *slog.Logger) *Pipeline {
 	return &Pipeline{
 		cfg: cfg, enq: enq, resolve: resolve, log: log,
-		dedup: trigger.NewDeduper(cfg.Triggers.Incidents.Dedup.Window.Std()),
+		dedup:    trigger.NewDeduper(cfg.Triggers.Incidents.Dedup.Window.Std()),
+		debounce: newIncidentDebouncer(cfg.Triggers.Incidents.Debounce.Std(), log),
+		baseCtx:  context.Background(),
 	}
 }
 
+// WithContext binds the lifetime of background debounce holds to ctx (typically
+// the app/work context) so they stop cleanly on shutdown instead of running to
+// their window end. Chains off NewPipeline; a nil ctx is ignored.
+func (p *Pipeline) WithContext(ctx context.Context) *Pipeline {
+	if ctx != nil {
+		p.baseCtx = ctx
+	}
+	return p
+}
+
 // WithMetrics attaches the OTel metrics instance so admitted alerts (MatchGated)
-// increment AlertsReceived. Chains off NewPipeline; nil m is a no-op.
-func (p *Pipeline) WithMetrics(m *telemetry.Metrics) *Pipeline { p.metrics = m; return p }
+// increment AlertsReceived and debounced self-resolving alerts increment
+// IncidentsDebounced. Chains off NewPipeline; nil m is a no-op.
+func (p *Pipeline) WithMetrics(m *telemetry.Metrics) *Pipeline {
+	p.metrics = m
+	p.debounce.withMetrics(m)
+	return p
+}
 
 // Ingest admits each Request per the admission mode and invokes resolve for each
 // Resolution. Cascade-suppression and debounce for EnableGated sources are
 // applied at the watcher edge (see Task 6) during Phase 1.
 func (p *Pipeline) Ingest(ctx context.Context, adm Admission, res DecodeResult) {
 	for _, r := range res.Resolved {
+		// Drop any firing alert still held in the debounce window: it self-resolved
+		// before its investigation began, so it never reaches the enqueuer.
+		p.debounce.Cancel(r.Fingerprint)
 		if p.resolve != nil {
 			p.resolve(r.Fingerprint, r.At)
 		}
@@ -68,7 +96,13 @@ func (p *Pipeline) Ingest(ctx context.Context, adm Admission, res DecodeResult) 
 		if adm == MatchGated && p.metrics != nil {
 			p.metrics.AlertsReceived.Add(ctx, 1)
 		}
-		p.enq.Enqueue(req)
+		// Pre-investigation debounce (opt-in; window 0 = enqueue immediately). Runs
+		// AFTER dedup (re-fires already suppressed) and BEFORE the coalescer sink
+		// (survivors are still storm-batched): the hold is released early — dropping
+		// the incident — if a matching resolved webhook arrives within the window.
+		// The hold runs on baseCtx, not the request ctx (the webhook handler returns
+		// before the window elapses).
+		p.debounce.Hold(p.baseCtx, req, p.enq)
 	}
 }
 

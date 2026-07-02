@@ -436,6 +436,17 @@ type IncidentTrigger struct {
 	Match  IncidentMatch `yaml:"match"`  // must match to investigate
 	Ignore IncidentMatch `yaml:"ignore"` // excludes even if Match passes
 	Dedup  Dedup         `yaml:"dedup"`
+	// Debounce is the pre-investigation hold for a firing alert: after admission
+	// (match + dedup) RunLore waits this long and investigates only if the alert
+	// is still active — i.e. no matching Alertmanager `resolved` webhook arrived
+	// within the window. It filters self-resolving alerts (e.g. a
+	// KubeDaemonSetRolloutStuck during a Karpenter node-churn cycle) that would
+	// otherwise burn a full investigation on noise. A zero window (the default)
+	// disables the hold and investigates immediately, preserving today's behavior;
+	// it is opt-in per deployment. It composes with `coalesce` (which batches the
+	// survivors afterwards) and `dedup` (which still suppresses re-fires before the
+	// hold begins).
+	Debounce Duration `yaml:"debounce"`
 }
 
 // IncidentMatch is a set of matchers ANDed together; empty fields match anything.

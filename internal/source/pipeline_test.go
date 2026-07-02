@@ -55,6 +55,80 @@ func TestPipelineDedupsStillFiring(t *testing.T) {
 	}
 }
 
+func debounceCfg(window time.Duration) *config.Config {
+	c := matchAllCfg()
+	c.Triggers.Incidents.Debounce = config.Duration(window)
+	return c
+}
+
+func TestPipelineDebounceHoldsThenEnqueues(t *testing.T) {
+	enq := &capEnq{}
+	clk := newFakeClock()
+	p := NewPipeline(debounceCfg(60*time.Second), enq, nil, nil)
+	p.debounce.clock = clk
+
+	p.Ingest(context.Background(), MatchGated, DecodeResult{
+		Requests: []investigate.Request{{Title: "A", Fingerprint: "f1"}},
+	})
+	// Nothing enqueued yet — the alert is held for the window.
+	if len(enq.reqs) != 0 {
+		t.Fatalf("want 0 enqueued while held, got %d", len(enq.reqs))
+	}
+	clk.release()
+	p.debounce.waitIdle()
+	if len(enq.reqs) != 1 {
+		t.Fatalf("want 1 enqueued after window (still active), got %d", len(enq.reqs))
+	}
+}
+
+func TestPipelineDebounceDropsSelfResolvingAlert(t *testing.T) {
+	enq := &capEnq{}
+	clk := newFakeClock()
+	p := NewPipeline(debounceCfg(60*time.Second), enq, nil, nil)
+	p.debounce.clock = clk
+
+	// Firing alert is held; a matching resolved webhook arrives within the window.
+	p.Ingest(context.Background(), MatchGated, DecodeResult{
+		Requests: []investigate.Request{{Title: "A", Fingerprint: "f1"}},
+	})
+	p.Ingest(context.Background(), MatchGated, DecodeResult{
+		Resolved: []Resolution{{Fingerprint: "f1", At: time.Now()}},
+	})
+	p.debounce.waitIdle()
+	if len(enq.reqs) != 0 {
+		t.Fatalf("want 0 enqueued (self-resolved within debounce window), got %d", len(enq.reqs))
+	}
+}
+
+func TestPipelineDebounceZeroWindowUnchanged(t *testing.T) {
+	enq := &capEnq{}
+	p := NewPipeline(debounceCfg(0), enq, nil, nil)
+	p.Ingest(context.Background(), MatchGated, DecodeResult{
+		Requests: []investigate.Request{{Title: "A", Fingerprint: "f1"}},
+	})
+	if len(enq.reqs) != 1 {
+		t.Fatalf("want 1 enqueued immediately with debounce=0, got %d", len(enq.reqs))
+	}
+}
+
+func TestPipelineDebounceCoexistsWithDedup(t *testing.T) {
+	enq := &capEnq{}
+	clk := newFakeClock()
+	p := NewPipeline(debounceCfg(60*time.Second), enq, nil, nil)
+	p.debounce.clock = clk
+
+	r := DecodeResult{Requests: []investigate.Request{{Title: "A", Fingerprint: "f1"}}}
+	// A re-fire of the same alert is suppressed by dedup BEFORE the hold begins,
+	// so only one hold is created.
+	p.Ingest(context.Background(), MatchGated, r)
+	p.Ingest(context.Background(), MatchGated, r)
+	clk.release()
+	p.debounce.waitIdle()
+	if len(enq.reqs) != 1 {
+		t.Fatalf("want dedup+debounce to yield 1, got %d", len(enq.reqs))
+	}
+}
+
 func TestPipelineRoutesResolvedToLedger(t *testing.T) {
 	enq := &capEnq{}
 	var resolved []string

@@ -60,6 +60,11 @@ incident webhook. Known keys: `alertmanager`, `gitops`, `pagerduty`.
   globs, `alertnames` globs, `labels`); empty fields match anything. `ignore` excludes even if `match`
   passes.
 - `incidents.dedup.window` — don't re-open a still-firing alert within this window.
+- `incidents.debounce` — hold a firing alert this long before investigating, and skip it if a matching
+  Alertmanager `resolved` webhook arrives within the window (self-resolving noise, e.g. a
+  `KubeDaemonSetRolloutStuck` during a Karpenter node-churn cycle). **Default `0`** (investigate
+  immediately — today's behavior); opt-in per deployment. Composes with `coalesce` (survivors are
+  batched afterwards) and `dedup` (re-fires are still suppressed before the hold begins).
 - `gitops_failures.debounce` — require a failure to persist this long before investigating. **Default
   60s**; explicit `0` fires immediately on every `Ready=False`.
 
