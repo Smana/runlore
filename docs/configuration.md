@@ -92,7 +92,12 @@ recall decay; **must be on the PVC** to compound (see [Upgrade & Uninstall](upgr
 ### `model` — the LLM provider
 `provider` — `openai` (default; any OpenAI-compatible endpoint incl. vLLM/Ollama/OpenRouter) ·
 `anthropic` · `gemini`. `base_url`, `model`, `api_key_env`. Optional `verify` (a separate model for the
-adversarial verify pass) and `embeddings` (for hybrid recall).
+adversarial verify pass) and `embeddings` (for hybrid recall). Optional `effort` opts into deeper
+reasoning per request — `anthropic`: `low`·`medium`·`high`·`max` (sent as `output_config.effort`);
+`openai`: `minimal`·`low`·`medium`·`high` (sent as `reasoning_effort`); not supported for `gemini`
+(rejected at startup); empty = omitted (default). Models that don't support the knob return a 400,
+which is classified permanent (dropped, not retried). `verify.effort` overrides the parent's value,
+inheriting it when empty like the other verify fields.
 
 ### `forge` — the Git host for curation
 `kb_repo` (`owner/name`), `base_branch` (default `main`), `github_api_url` (default
