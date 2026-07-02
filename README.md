@@ -103,7 +103,7 @@ additive. Full setup detail in **[Data sources](docs/data-sources.md)**.
 | **Cloud** | AWS — CloudTrail + EC2 / ASG / EKS | `cloud.provider` |
 | **Kubernetes** | client-go — pod status, events, controller logs | *(in-cluster)* |
 | **LLM** | Anthropic · Google Gemini · any OpenAI-compatible *(vLLM, Ollama, OpenRouter…)* | `model.provider` |
-| **Triggers** *(sources)* | Alertmanager webhook · GitOps failures | `sources.*` |
+| **Triggers** *(sources)* | Alertmanager webhook · GitOps failures · PagerDuty webhook *(new)* | `sources.*` |
 | **Notifiers** | Slack · Matrix · generic webhook | `notify.*` |
 | **Knowledge base** *(git forge)* | GitHub *(App auth)* | `forge.*` |
 
@@ -171,9 +171,9 @@ between commits. It's usable today, but "stable" means different things across t
   exercise — run it with confidence.
 - **Argo CD is now end-to-end tested**, alongside Flux: the k3d suite reconfigures to the `argocd`
   engine and drives an `Application Degraded` failure through a full investigation.
-- **Functional but less exercised:** **Matrix**, **Gemini**, cloud integrations, and the network
-  (Hubble) provider. They work and are tested, but see less real-world mileage — expect rougher
-  edges and please file issues.
+- **Functional but less exercised:** **Matrix**, **Gemini**, the **PagerDuty** webhook source, cloud
+  integrations, and the network (Hubble) provider. They work and are unit-tested, but see less
+  real-world mileage — expect rougher edges and please file issues.
 - **The `auto` autonomy rung is experimental, frozen, and not recommended on real
   clusters.** The supported posture is **read-only → suggest → approve**: RunLore reads
   and recommends, a human reviews and merges. Hands-off `auto` remains on the roadmap,
