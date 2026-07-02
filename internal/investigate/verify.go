@@ -59,8 +59,10 @@ func parseVerdicts(args string) ([]verdict, error) {
 // verifyFindings runs one adversarial review pass over the investigation's root
 // causes, rejecting correlation-only/unverified claims and downgrading unproven
 // ones before delivery/curation. Best-effort: on any verifier error the findings
-// pass through unchanged (verification must never lose a real finding).
-func (li *LoopInvestigator) verifyFindings(ctx context.Context, req Request, inv providers.Investigation) providers.Investigation {
+// pass through unchanged (verification must never lose a real finding). The verify
+// completion's token usage is accumulated into totals (when non-nil) so the
+// per-investigation cost includes the verify pass.
+func (li *LoopInvestigator) verifyFindings(ctx context.Context, req Request, inv providers.Investigation, totals *providers.UsageTotals) providers.Investigation {
 	if len(inv.RootCauses) == 0 {
 		return inv
 	}
@@ -82,6 +84,10 @@ func (li *LoopInvestigator) verifyFindings(ctx context.Context, req Request, inv
 	if err != nil {
 		li.Log.Warn("verify pass failed; keeping findings as-is", "title", req.Title, "err", err)
 		return inv
+	}
+	// Count the verify completion toward the per-investigation token/cost total.
+	if totals != nil {
+		addUsage(totals, resp.Usage)
 	}
 	var verds []verdict
 	for _, tc := range resp.ToolCalls {
