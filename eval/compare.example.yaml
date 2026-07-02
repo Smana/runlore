@@ -1,0 +1,40 @@
+# Model-comparison spec for `lore eval --compare eval/compare.example.yaml`.
+#
+# Benchmarks several model configurations against the SAME replay suite
+# (--cases, default examples/eval) and writes one aggregated report to
+# eval/reports/<stamp>-compare.md / .json. Every entry is graded by ONE fixed
+# judge (below), and grading is blind — the judge never sees which entry produced
+# a result — so the rubric scores are directly comparable.
+#
+# Set the api_key_env vars in your shell before running. Entries with no
+# api_key_env are keyless (a local vLLM/Ollama endpoint).
+
+# Optional. The single judge used for every entry. Omit to fall back to --judge-*
+# flags, then to config.model. A strong model is recommended (see docs/benchmarking.md).
+judge:
+  provider: anthropic
+  model: claude-opus-4-1
+  api_key_env: RUNLORE_JUDGE_API_KEY
+
+models:
+  # A frontier hosted model, with optional per-MTok USD prices → adds a cost column.
+  - name: haiku-4.5
+    provider: anthropic
+    model: claude-haiku-4-5-20251001
+    api_key_env: RUNLORE_ANTHROPIC_API_KEY
+    prices: {input_usd: 1.00, output_usd: 5.00}
+
+  # An OpenAI-compatible model with the reasoning-effort knob (openai/vLLM only).
+  - name: gpt-5-mini
+    provider: openai
+    base_url: https://api.openai.com/v1
+    model: gpt-5-mini
+    api_key_env: RUNLORE_OPENAI_API_KEY
+    effort: medium
+    prices: {input_usd: 0.25, output_usd: 2.00}
+
+  # A local, keyless model (no api_key_env, no prices → cost column left blank for it).
+  - name: local-qwen3
+    provider: openai
+    base_url: http://localhost:8000/v1
+    model: qwen3-30b

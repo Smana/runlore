@@ -178,6 +178,14 @@ type Investigation struct {
 	Timeout                   Duration  `yaml:"timeout"`                      // per-investigation deadline; 0 ⇒ default (10m) via applyDefaults
 	ToolTimeout               Duration  `yaml:"tool_timeout"`                 // per-TOOL-call timeout so one hung tool can't eat the budget; 0 ⇒ default (60s) at construction
 
+	// Compaction selects how mid-loop history compaction treats the tool outputs it
+	// elides once the estimate crosses the compaction target. "" / "elide" is the
+	// default: drop their bodies for short markers (lossy). "summarize" first asks a
+	// model (the verify-tier model when configured, else the main model) for one
+	// compact factual digest of the batch and keeps that in place of the markers,
+	// falling back to plain elision on any summarizer error/refusal/truncation.
+	Compaction string `yaml:"compaction"` // "" | "elide" (default) | "summarize"
+
 	// PodLogNamespaces lists extra namespaces (beyond the incident's own) that
 	// pod_logs may read controller/crash logs from. pod_logs streams raw pod logs
 	// (which carry secrets/PII) to the external LLM, so the model is constrained to
@@ -624,6 +632,14 @@ var effortLevels = map[string]map[string]bool{
 	"openai":    {"minimal": true, "low": true, "medium": true, "high": true},
 }
 
+// ValidateEffort checks an effective (provider, effort) pair against the
+// per-provider effort vocabulary, so callers that build a ModelProvider outside
+// config.Load (e.g. the eval model-comparison runner) share one source of truth.
+// field names the setting in the returned error. Empty effort is always valid.
+func ValidateEffort(field, provider, effort string) error {
+	return validateEffort(field, provider, effort)
+}
+
 // validateEffort checks an effective (provider, effort) pair against the
 // per-provider vocabulary. Empty effort is always valid (the knob is opt-in and
 // omitted from requests); an empty provider defaults to the OpenAI-compatible
@@ -718,6 +734,13 @@ func (c *Config) Validate() error {
 	// setting the intended timeout. 0 means "use the default (60s)".
 	if c.Investigation.ToolTimeout.Std() < 0 {
 		return fmt.Errorf("investigation.tool_timeout must be >= 0 (0 = use the default 60s), got %v", c.Investigation.ToolTimeout.Std())
+	}
+	// Reject an unknown compaction mode at startup rather than silently defaulting a
+	// typo to lossy elision. Empty means the default (elide).
+	switch c.Investigation.Compaction {
+	case "", "elide", "summarize":
+	default:
+		return fmt.Errorf("investigation.compaction %q is invalid (want elide|summarize; empty = elide)", c.Investigation.Compaction)
 	}
 	// Reject a cleartext API key over a public endpoint (the key would be sent in the
 	// clear, and is the enabler for a redirect-based key leak). Cover the main model,

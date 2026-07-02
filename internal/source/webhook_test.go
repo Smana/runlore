@@ -102,6 +102,59 @@ func TestHandlerValidRequest(t *testing.T) {
 	}
 }
 
+// fakeAuthDecoder is a WebhookSource that also self-authenticates (Authenticator),
+// like the pagerduty source's HMAC signature check.
+type fakeAuthDecoder struct {
+	fakeDecoder
+	ok bool
+}
+
+func (f fakeAuthDecoder) Authenticate(_ []byte, _ http.Header) bool { return f.ok }
+
+// TestHandlerSelfAuthRejects: a source-level Authenticate failure is a 401 and
+// nothing reaches the pipeline.
+func TestHandlerSelfAuthRejects(t *testing.T) {
+	enq := &capEnq{}
+	pipe := NewPipeline(matchAllCfg(), enq, nil, nil)
+	b := webhookBuilt(fakeDecoder{result: oneRequestResult()})
+	b.Impl = fakeAuthDecoder{fakeDecoder{result: oneRequestResult()}, false}
+
+	h := b.Handler(nil, 1<<20, pipe)
+	req := httptest.NewRequest(http.MethodPost, "/webhook/test", strings.NewReader(`{}`))
+	rec := httptest.NewRecorder()
+	h(rec, req)
+
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("want 401, got %d", rec.Code)
+	}
+	if len(enq.reqs) != 0 {
+		t.Fatalf("want 0 enqueued after failed self-auth, got %d", len(enq.reqs))
+	}
+}
+
+// TestHandlerSelfAuthReplacesSharedAuth: a source that implements Authenticator
+// owns its authentication — the shared bearer-token auth must NOT apply to it
+// (PagerDuty signs requests; it cannot send the operator's bearer token).
+func TestHandlerSelfAuthReplacesSharedAuth(t *testing.T) {
+	enq := &capEnq{}
+	pipe := NewPipeline(matchAllCfg(), enq, nil, nil)
+	b := webhookBuilt(fakeDecoder{result: oneRequestResult()})
+	b.Impl = fakeAuthDecoder{fakeDecoder{result: oneRequestResult()}, true}
+	sharedAuthRejectsAll := func(*http.Request) bool { return false }
+
+	h := b.Handler(sharedAuthRejectsAll, 1<<20, pipe)
+	req := httptest.NewRequest(http.MethodPost, "/webhook/test", strings.NewReader(`{}`))
+	rec := httptest.NewRecorder()
+	h(rec, req)
+
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("want 202 (self-auth replaces shared auth), got %d", rec.Code)
+	}
+	if len(enq.reqs) != 1 {
+		t.Fatalf("want 1 enqueued, got %d", len(enq.reqs))
+	}
+}
+
 func TestMountWebhooks(t *testing.T) {
 	enq := &capEnq{}
 	pipe := NewPipeline(matchAllCfg(), enq, nil, nil)

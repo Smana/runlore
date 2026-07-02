@@ -31,6 +31,7 @@ import (
 	"github.com/Smana/runlore/internal/source"
 	_ "github.com/Smana/runlore/internal/source/alertmanager" // self-registers the alertmanager webhook source
 	_ "github.com/Smana/runlore/internal/source/gitops"       // self-registers the gitops-failure watcher source
+	"github.com/Smana/runlore/internal/source/pagerduty"
 	"github.com/Smana/runlore/internal/telemetry"
 	"github.com/Smana/runlore/internal/trigger"
 )
@@ -128,6 +129,13 @@ func RunServe(version string, args []string) error {
 	slackSigningSecret := os.Getenv(cfg.Notify.Slack.SigningSecretEnv)
 	webhookToken := os.Getenv(cfg.Server.WebhookTokenEnv)
 	if err := RequireWebhookAuth(cfg, webhookToken); err != nil {
+		return err
+	}
+	// The PagerDuty source authenticates its own webhook via X-PagerDuty-Signature
+	// (not the shared bearer token), so guard it separately on the same fail-closed
+	// policy: an enabled source with a configured model must carry a signing secret.
+	pdSecret, pdEnabled := pagerduty.Secret(cfg.Sources)
+	if err := RequirePagerDutyAuth(cfg, pdEnabled, pdSecret); err != nil {
 		return err
 	}
 
