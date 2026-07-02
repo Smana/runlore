@@ -8,6 +8,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 RunLore is **pre-1.0 and under active development** — there are no tagged releases
 yet, so everything currently lives under `[Unreleased]`.
 
+## [0.3.1](https://github.com/Smana/runlore/compare/v0.3.0...v0.3.1) (2026-07-02)
+
+
+### Bug Fixes
+
+* **release:** drop buildx attestations that break local image export ([992e8f5](https://github.com/Smana/runlore/commit/992e8f5fb38b5e0f679320cf1f950ad43b16f26b))
+* **release:** drop buildx attestations that break local image export ([41711cc](https://github.com/Smana/runlore/commit/41711ccadf4dfc96acfb42f74f398ca8b088121f))
+
 ## [0.3.0](https://github.com/Smana/runlore/compare/v0.2.0...v0.3.0) (2026-07-02)
 
 
