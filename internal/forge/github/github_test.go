@@ -90,6 +90,34 @@ func TestListPRsByLabelParsesUpdatedAt(t *testing.T) {
 	}
 }
 
+func TestListClosedUnmergedPRsByLabel(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/repos/o/r/issues" || r.URL.Query().Get("state") != "closed" {
+			t.Fatalf("unexpected request: %s?%s", r.URL.Path, r.URL.RawQuery)
+		}
+		// a closed-unmerged PR (merged_at null), a merged PR (merged_at set → excluded),
+		// and a plain closed issue (no pull_request → excluded)
+		_, _ = w.Write([]byte(`[
+		  {"number":48,"title":"KB: A","body":"b","labels":[{"name":"runlore"},{"name":"not-kb-worthy"}],"pull_request":{"url":"x","merged_at":null}},
+		  {"number":50,"title":"KB: B","body":"b","labels":[{"name":"runlore"}],"pull_request":{"url":"y","merged_at":"2026-06-01T12:00:00Z"}},
+		  {"number":39,"title":"plain issue","body":"b","labels":[{"name":"runlore"}]}
+		]`))
+	}))
+	defer srv.Close()
+
+	c := New(srv.URL, "o", "r", "main", staticToken("tok"))
+	prs, err := c.ListClosedUnmergedPRsByLabel(context.Background(), "runlore")
+	if err != nil {
+		t.Fatalf("ListClosedUnmergedPRsByLabel: %v", err)
+	}
+	if len(prs) != 1 || prs[0].Number != 48 {
+		t.Fatalf("want only the closed-unmerged PR #48, got %+v", prs)
+	}
+	if len(prs[0].Labels) != 2 || prs[0].Labels[1] != "not-kb-worthy" {
+		t.Fatalf("labels not parsed: %+v", prs[0].Labels)
+	}
+}
+
 func TestOpenPR(t *testing.T) {
 	var paths []string
 	mux := http.NewServeMux()
