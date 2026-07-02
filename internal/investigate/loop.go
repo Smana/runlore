@@ -231,6 +231,7 @@ func (li *LoopInvestigator) Investigate(ctx context.Context, req Request) error 
 
 	nudged := false            // set when the prose-turn nudge has fired once
 	budgetNudged := false      // set when the token-budget nudge has fired once
+	toolChoice := ""           // forced tool for every remaining request; set (sticky) when the budget nudge fires
 	truncationNudged := false  // set when the output-truncation nudge has fired once
 	compactionLogged := false  // set when the one-time compaction log has fired
 	used := map[string]int{}   // tool-call counts, logged so investigation breadth is observable
@@ -267,6 +268,12 @@ func (li *LoopInvestigator) Investigate(ctx context.Context, req Request) error 
 			if !budgetNudged {
 				messages = append(messages, providers.Message{Role: "user", Content: budgetNudge})
 				budgetNudged = true
+				// From here on, force submit_findings on every remaining request: the
+				// model has been told to wrap up, so it must conclude — it may not
+				// ramble in prose or keep calling investigation tools. Normal loop
+				// steps (before the nudge) keep ToolChoice empty so the model stays
+				// free to pick tools or answer.
+				toolChoice = submitFindingsName
 			} else {
 				// Hard-kill: nudge already fired but the model is still over budget.
 				li.Log.Warn("investigation hard-stopped at token budget",
@@ -286,7 +293,7 @@ func (li *LoopInvestigator) Investigate(ctx context.Context, req Request) error 
 		// calibrate the next step's estimate.
 		reqHeuristic := estimateTokens(sys, messages, specs)
 		mstart := time.Now()
-		resp, err := li.Model.Complete(ctx, providers.CompletionRequest{System: sys, Messages: messages, Tools: specs})
+		resp, err := li.Model.Complete(ctx, providers.CompletionRequest{System: sys, Messages: messages, Tools: specs, ToolChoice: toolChoice})
 		if li.Metrics != nil {
 			mres := "ok"
 			if err != nil {

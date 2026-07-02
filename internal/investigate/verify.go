@@ -75,6 +75,9 @@ func (li *LoopInvestigator) verifyFindings(ctx context.Context, req Request, inv
 		System:   verifyPrompt,
 		Messages: []providers.Message{{Role: "user", Content: renderForReview(req, inv)}},
 		Tools:    []providers.ToolSpec{submitVerdictsSpec()},
+		// Force the tool: a reviewer that answers in prose silently skips the
+		// honesty check (no verdicts ⇒ findings pass through unreviewed).
+		ToolChoice: submitVerdictsName,
 	})
 	if err != nil {
 		li.Log.Warn("verify pass failed; keeping findings as-is", "title", req.Title, "err", err)

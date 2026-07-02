@@ -404,6 +404,13 @@ type CompletionRequest struct {
 	System   string
 	Messages []Message
 	Tools    []ToolSpec
+	// ToolChoice optionally names one tool from Tools that the model MUST call on
+	// this turn ("" = provider default: the model chooses freely between prose and
+	// any tool). Set it on structured-output turns — submit_verdicts, submit_review,
+	// submit_grade, and the post-budget-nudge submit_findings — where a prose reply
+	// is never acceptable; leave it empty on normal investigation steps so the model
+	// keeps the freedom to pick tools or answer.
+	ToolChoice string
 }
 
 // Message is one turn in an LLM exchange.
