@@ -40,12 +40,15 @@ type Client struct {
 	model     string
 	apiKey    string
 	maxTokens int
+	effort    string
 	http      *http.Client
 }
 
 // New builds a client. baseURL may be empty (defaults to DefaultBaseURL).
 // maxTokens caps output tokens per request; <= 0 falls back to defaultMaxTokens.
-func New(baseURL, model, apiKey string, maxTokens int) *Client {
+// effort opts into deeper reasoning (output_config.effort: low|medium|high|max,
+// validated in config); empty omits the field entirely.
+func New(baseURL, model, apiKey string, maxTokens int, effort string) *Client {
 	if baseURL == "" {
 		baseURL = DefaultBaseURL
 	}
@@ -57,6 +60,7 @@ func New(baseURL, model, apiKey string, maxTokens int) *Client {
 		model:     model,
 		apiKey:    apiKey,
 		maxTokens: maxTokens,
+		effort:    effort,
 		http:      httpx.SecureStreamingClient(responseHeaderTimeout),
 	}
 }
@@ -82,13 +86,24 @@ type systemBlock struct {
 }
 
 type msgRequest struct {
-	Model      string        `json:"model"`
-	MaxTokens  int           `json:"max_tokens"`
-	Stream     bool          `json:"stream"`
-	System     []systemBlock `json:"system,omitempty"`
-	Messages   []message     `json:"messages"`
-	Tools      []tool        `json:"tools,omitempty"`
-	ToolChoice *toolChoice   `json:"tool_choice,omitempty"`
+	Model        string        `json:"model"`
+	MaxTokens    int           `json:"max_tokens"`
+	Stream       bool          `json:"stream"`
+	System       []systemBlock `json:"system,omitempty"`
+	Messages     []message     `json:"messages"`
+	Tools        []tool        `json:"tools,omitempty"`
+	ToolChoice   *toolChoice   `json:"tool_choice,omitempty"`
+	OutputConfig *outputConfig `json:"output_config,omitempty"`
+}
+
+// outputConfig carries Anthropic's output-level controls; RunLore only sets the
+// effort level. The thinking param is deliberately NOT enabled alongside it:
+// adaptive thinking in a multi-turn tool loop requires replaying signed thinking
+// blocks verbatim on every subsequent request, which the provider-agnostic message
+// history (providers.Message) cannot carry — explicitly out of scope here. effort
+// is constant per client, so the prompt-cache prefix stays stable across steps.
+type outputConfig struct {
+	Effort string `json:"effort"`
 }
 
 // toolChoice forces the model to call one named tool this turn
@@ -184,6 +199,9 @@ func (c *Client) Complete(ctx context.Context, req providers.CompletionRequest) 
 	areq := msgRequest{Model: c.model, MaxTokens: c.maxTokens, Stream: true, Messages: msgs}
 	if req.ToolChoice != "" {
 		areq.ToolChoice = &toolChoice{Type: "tool", Name: req.ToolChoice}
+	}
+	if c.effort != "" {
+		areq.OutputConfig = &outputConfig{Effort: c.effort}
 	}
 	if req.System != "" {
 		areq.System = []systemBlock{{Type: "text", Text: req.System, CacheControl: ephemeral}}

@@ -276,6 +276,14 @@ type Model struct {
 	// 8192 default. Streaming providers send it (Anthropic max_tokens, OpenAI
 	// max_tokens, Gemini generationConfig.maxOutputTokens); a too-low value truncates.
 	MaxTokens int `yaml:"max_tokens"`
+	// Effort opts into deeper model reasoning per request. Provider-specific
+	// vocabulary, validated at startup: anthropic low|medium|high|max (sent as
+	// output_config.effort), openai minimal|low|medium|high (sent as
+	// reasoning_effort). Empty = omitted from requests (today's behavior). Not
+	// supported for provider gemini (its thinkingConfig has replay semantics —
+	// thought signatures — the provider-agnostic history can't carry). Models that
+	// don't support the knob return a 400, which is classified permanent.
+	Effort string `yaml:"effort"`
 	// Verify optionally routes the adversarial verify pass to a cheaper/faster model;
 	// unset fields inherit from the parent above (so `verify: {model: <cheap>}` reuses
 	// the same provider/endpoint/key). Absent ⇒ verify runs on the main model.
@@ -304,6 +312,9 @@ type ModelOverride struct {
 	// MaxTokens overrides the parent's effective output-token cap for the verify pass;
 	// 0 inherits the parent's effective value.
 	MaxTokens int `yaml:"max_tokens"`
+	// Effort overrides the parent's effort for the verify pass; empty inherits the
+	// parent's value (same vocabulary and validation as model.effort).
+	Effort string `yaml:"effort"`
 }
 
 // Notify configures where investigation findings are delivered.
@@ -573,6 +584,43 @@ func checkSecureKeyEndpoint(urlField, keyField, baseURL, apiKeyEnv string) error
 	}
 }
 
+// effortLevels is the per-provider vocabulary of the opt-in model.effort knob.
+// Unknown provider names use the "openai" set (NewModelClient routes them to the
+// OpenAI-compatible client). Gemini is deliberately absent: its thinkingConfig has
+// replay semantics (thought signatures) the provider-agnostic message history
+// can't carry, so effort is rejected there rather than half-supported.
+var effortLevels = map[string]map[string]bool{
+	"anthropic": {"low": true, "medium": true, "high": true, "max": true},
+	"openai":    {"minimal": true, "low": true, "medium": true, "high": true},
+}
+
+// validateEffort checks an effective (provider, effort) pair against the
+// per-provider vocabulary. Empty effort is always valid (the knob is opt-in and
+// omitted from requests); an empty provider defaults to the OpenAI-compatible
+// wire protocol, mirroring NewModelClient.
+func validateEffort(field, provider, effort string) error {
+	if effort == "" {
+		return nil
+	}
+	if provider == "gemini" {
+		return fmt.Errorf("%s: effort is not supported for provider gemini yet", field)
+	}
+	levels, ok := effortLevels[provider]
+	if !ok {
+		levels = effortLevels["openai"] // "", vllm, ollama, … → OpenAI-compatible client
+	}
+	if !levels[effort] {
+		valid := make([]string, 0, len(levels))
+		for l := range levels {
+			valid = append(valid, l)
+		}
+		slices.Sort(valid)
+		return fmt.Errorf("%s: %q is not a valid effort for this provider (valid: %s, or empty to omit)",
+			field, effort, strings.Join(valid, "|"))
+	}
+	return nil
+}
+
 // Validate enforces cross-field invariants after loading — fail-closed defaults
 // for the autonomy ladder: enabling execution requires the controls that bound
 // it. Returns an error that should abort startup.
@@ -584,6 +632,27 @@ func (c *Config) Validate() error {
 	}
 	if c.Model.Verify != nil && c.Model.Verify.MaxTokens < 0 {
 		return fmt.Errorf("model.verify.max_tokens must be >= 0 (0 = inherit), got %d", c.Model.Verify.MaxTokens)
+	}
+	// Effort is validated against the provider it will actually be sent to. The
+	// verify override resolves its EFFECTIVE provider and effort first (inherit-
+	// when-empty, mirroring BuildVerifyModel's or() semantics), so an inherited
+	// parent effort that is invalid for the override's provider fails at startup
+	// rather than as a per-request 400.
+	if err := validateEffort("model.effort", c.Model.Provider, c.Model.Effort); err != nil {
+		return err
+	}
+	if v := c.Model.Verify; v != nil {
+		prov := v.Provider
+		if prov == "" {
+			prov = c.Model.Provider
+		}
+		eff := v.Effort
+		if eff == "" {
+			eff = c.Model.Effort
+		}
+		if err := validateEffort("model.verify.effort (or inherited model.effort)", prov, eff); err != nil {
+			return err
+		}
 	}
 	// Reject a negative per-tool timeout: time.ParseDuration accepts negative values
 	// which silently disable the feature (fails the > 0 guard in runTool) rather than
