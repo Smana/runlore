@@ -2,6 +2,7 @@ package investigate
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"io"
 	"log/slog"
@@ -252,6 +253,52 @@ func (m *scriptModel) Complete(_ context.Context, req providers.CompletionReques
 	r := m.responses[m.i]
 	m.i++
 	return r, nil
+}
+
+// echoTool is a trivial tool that echoes a fixed reply, used to advance a multi-turn
+// loop (the first assistant turn calls it, the second concludes).
+type echoTool struct{ name string }
+
+func (e echoTool) Name() string                                 { return e.name }
+func (e echoTool) Description() string                          { return "echo fake tool" }
+func (e echoTool) Schema() string                               { return `{"type":"object"}` }
+func (e echoTool) Call(context.Context, string) (string, error) { return "ok", nil }
+
+// TestLoopCarriesOpaqueToHistory proves resp.Opaque flows response → assistant
+// history turn → the NEXT request unchanged: the first completion returns tool calls
+// plus an Opaque payload (e.g. signed thinking blocks); the loop must store it on the
+// assistant turn so the model's second request replays it verbatim.
+func TestLoopCarriesOpaqueToHistory(t *testing.T) {
+	opaque := json.RawMessage(`[{"type":"thinking","thinking":"reason","signature":"sig-1"}]`)
+	model := &scriptModel{responses: []providers.CompletionResponse{
+		// Turn 1: a normal tool call, carrying provider-opaque replay content.
+		{ToolCalls: []providers.ToolCall{{ID: "c1", Name: "what_changed", Args: "{}"}}, Opaque: opaque},
+		// Turn 2: conclude.
+		{ToolCalls: []providers.ToolCall{{ID: "c2", Name: submitFindingsName, Args: `{"confidence":0.9,"root_causes":[{"summary":"x"}]}`}}},
+	}}
+	li := &LoopInvestigator{
+		Model:      model,
+		Tools:      []Tool{echoTool{name: "what_changed"}},
+		Log:        slog.New(slog.NewTextHandler(io.Discard, nil)),
+		OnComplete: func(providers.Investigation) {},
+	}
+	if err := li.Investigate(context.Background(), Request{Title: "t"}); err != nil {
+		t.Fatalf("Investigate: %v", err)
+	}
+	if len(model.reqs) != 2 {
+		t.Fatalf("want 2 model requests, got %d", len(model.reqs))
+	}
+	// The second request's history must contain the assistant turn from turn 1 with the
+	// Opaque payload carried through unchanged.
+	var found bool
+	for _, m := range model.reqs[1].Messages {
+		if m.Role == "assistant" && string(m.Opaque) == string(opaque) {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("assistant turn in the next request must carry resp.Opaque verbatim; messages=%+v", model.reqs[1].Messages)
+	}
 }
 
 // blockingModel blocks every Complete on ctx, returning ctx.Err() when the

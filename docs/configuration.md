@@ -99,6 +99,19 @@ reasoning per request — `anthropic`: `low`·`medium`·`high`·`max` (sent as `
 which is classified permanent (dropped, not retried). `verify.effort` overrides the parent's value,
 inheriting it when empty like the other verify fields.
 
+Optional `thinking` opts into Anthropic **adaptive extended thinking** — set `thinking: adaptive` (the
+only value; sent as `thinking: {type: "adaptive"}`). **Anthropic-only**: it is rejected at startup for
+any other provider, because the client must replay the model's *signed* thinking blocks verbatim across
+the tool loop (a contract only the Anthropic client implements). Empty = omitted (default; today's
+behavior byte-for-byte). `effort` and `thinking` are independent and may both be set — `effort` is soft
+guidance for how much thinking the model does. Because thinking consumes output tokens, give `max_tokens`
+headroom when you enable it (a too-low cap truncates the answer mid-thought). Caveat: on the one
+budget-forced conclusion step (the loop forces `submit_findings` after the token-budget nudge), adaptive
+thinking is incompatible with a forced tool choice, so the client drops the thinking param **and** strips
+the replayed thinking blocks for that single request (invalidating only the message-level prompt cache
+for that step). `verify.thinking` overrides the parent's value, inheriting it when empty like the other
+verify fields — though the verify pass always forces a tool choice, so thinking is dropped there anyway.
+
 ### `forge` — the Git host for curation
 `kb_repo` (`owner/name`), `base_branch` (default `main`), `github_api_url` (default
 `https://api.github.com`), `dup_score` (default **5.0**), `min_confidence` (default **0.75**, the

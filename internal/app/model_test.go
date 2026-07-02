@@ -76,7 +76,7 @@ func TestNewModelClient(t *testing.T) {
 	}
 	for _, tc := range tests {
 		t.Run(tc.provider, func(t *testing.T) {
-			client := NewModelClient(tc.provider, "http://endpoint/v1", "test-model", "key", defaultMaxTokens, "")
+			client := NewModelClient(tc.provider, "http://endpoint/v1", "test-model", "key", defaultMaxTokens, "", "")
 			if client == nil {
 				t.Fatalf("NewModelClient(%q) returned nil", tc.provider)
 			}
