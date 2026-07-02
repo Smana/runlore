@@ -221,6 +221,62 @@ func TestComplete(t *testing.T) {
 	}
 }
 
+// TestToolChoice asserts CompletionRequest.ToolChoice maps to the OpenAI forced
+// tool_choice — {"type":"function","function":{"name":"<name>"}} — and that an
+// empty ToolChoice omits the field entirely (provider default: auto).
+func TestToolChoice(t *testing.T) {
+	events := []string{
+		`data: {"choices":[{"index":0,"delta":{"content":"ok"},"finish_reason":"stop"}]}` + "\n\n",
+		"data: [DONE]\n\n",
+	}
+	cases := []struct {
+		name   string
+		choice string
+	}{
+		{"forced tool", "submit_verdicts"},
+		{"empty omits the field", ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var body []byte
+			srv := sseServer(t, func(r *http.Request) { body, _ = io.ReadAll(r.Body) }, events)
+			defer srv.Close()
+
+			_, err := New(srv.URL, "test-model", "k", 0).Complete(context.Background(), providers.CompletionRequest{
+				Messages:   []providers.Message{{Role: "user", Content: "hi"}},
+				Tools:      []providers.ToolSpec{{Name: "submit_verdicts", Description: "d", Schema: `{"type":"object"}`}},
+				ToolChoice: tc.choice,
+			})
+			if err != nil {
+				t.Fatalf("Complete: %v", err)
+			}
+			var got struct {
+				ToolChoice *struct {
+					Type     string `json:"type"`
+					Function struct {
+						Name string `json:"name"`
+					} `json:"function"`
+				} `json:"tool_choice"`
+			}
+			if err := json.Unmarshal(body, &got); err != nil {
+				t.Fatalf("decode request body: %v", err)
+			}
+			if tc.choice == "" {
+				if got.ToolChoice != nil {
+					t.Fatalf("tool_choice must be omitted when unset, got %+v", got.ToolChoice)
+				}
+				if strings.Contains(string(body), "tool_choice") {
+					t.Fatalf("request body must not carry a tool_choice key when unset: %s", body)
+				}
+				return
+			}
+			if got.ToolChoice == nil || got.ToolChoice.Type != "function" || got.ToolChoice.Function.Name != tc.choice {
+				t.Fatalf(`tool_choice = %+v, want {"type":"function","function":{"name":%q}}`, got.ToolChoice, tc.choice)
+			}
+		})
+	}
+}
+
 // TestTruncation verifies a finish_reason of "length" flags Truncated while the
 // content accumulated so far is preserved.
 func TestTruncation(t *testing.T) {

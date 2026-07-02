@@ -80,7 +80,22 @@ type genRequest struct {
 	SystemInstruction *content          `json:"system_instruction,omitempty"`
 	Contents          []content         `json:"contents"`
 	Tools             []tool            `json:"tools,omitempty"`
+	ToolConfig        *toolConfig       `json:"toolConfig,omitempty"`
 	GenerationConfig  *generationConfig `json:"generationConfig,omitempty"`
+}
+
+// toolConfig carries Gemini's function-calling controls. RunLore only emits it to
+// FORCE a tool: mode ANY restricted to a single allowed function name. Omitted
+// (nil) = AUTO: the model chooses freely between prose and any declared function.
+// It is only ever set on single-shot structured-output requests, so the loop's
+// append-only prefix stability (implicit caching) is unaffected.
+type toolConfig struct {
+	FunctionCallingConfig functionCallingConfig `json:"functionCallingConfig"`
+}
+
+type functionCallingConfig struct {
+	Mode                 string   `json:"mode"` // "ANY" = the model MUST call a function
+	AllowedFunctionNames []string `json:"allowedFunctionNames,omitempty"`
 }
 
 // generationConfig carries per-request decoding controls. MaxOutputTokens caps the
@@ -165,6 +180,11 @@ func (c *Client) Complete(ctx context.Context, req providers.CompletionRequest) 
 			decls = append(decls, functionDeclaration{Name: t.Name, Description: t.Description, Parameters: json.RawMessage(t.Schema)})
 		}
 		greq.Tools = []tool{{FunctionDeclarations: decls}}
+	}
+	if req.ToolChoice != "" {
+		greq.ToolConfig = &toolConfig{FunctionCallingConfig: functionCallingConfig{
+			Mode: "ANY", AllowedFunctionNames: []string{req.ToolChoice},
+		}}
 	}
 	body, err := json.Marshal(greq)
 	if err != nil {

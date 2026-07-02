@@ -504,6 +504,61 @@ func TestUsageCacheFields(t *testing.T) {
 	}
 }
 
+// TestToolChoice asserts CompletionRequest.ToolChoice maps to Anthropic's forced
+// tool_choice — {"type":"tool","name":"<name>"} — and that an empty ToolChoice
+// omits the field entirely (provider default: auto).
+func TestToolChoice(t *testing.T) {
+	events := []string{
+		"event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"usage\":{\"input_tokens\":1}}}\n\n",
+		"event: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"tool_use\"},\"usage\":{\"output_tokens\":1}}\n\n",
+		"event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n",
+	}
+	cases := []struct {
+		name   string
+		choice string
+	}{
+		{"forced tool", "submit_verdicts"},
+		{"empty omits the field", ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var body []byte
+			srv := sseServer(t, func(r *http.Request) { body, _ = io.ReadAll(r.Body) }, events)
+			defer srv.Close()
+
+			_, err := New(srv.URL, "claude-x", "k", 0).Complete(context.Background(), providers.CompletionRequest{
+				Messages:   []providers.Message{{Role: "user", Content: "hi"}},
+				Tools:      []providers.ToolSpec{{Name: "submit_verdicts", Description: "d", Schema: `{"type":"object"}`}},
+				ToolChoice: tc.choice,
+			})
+			if err != nil {
+				t.Fatalf("Complete: %v", err)
+			}
+			var got struct {
+				ToolChoice *struct {
+					Type string `json:"type"`
+					Name string `json:"name"`
+				} `json:"tool_choice"`
+			}
+			if err := json.Unmarshal(body, &got); err != nil {
+				t.Fatalf("decode request body: %v", err)
+			}
+			if tc.choice == "" {
+				if got.ToolChoice != nil {
+					t.Fatalf("tool_choice must be omitted when unset, got %+v", got.ToolChoice)
+				}
+				if strings.Contains(string(body), "tool_choice") {
+					t.Fatalf("request body must not carry a tool_choice key when unset: %s", body)
+				}
+				return
+			}
+			if got.ToolChoice == nil || got.ToolChoice.Type != "tool" || got.ToolChoice.Name != tc.choice {
+				t.Fatalf(`tool_choice = %+v, want {"type":"tool","name":%q}`, got.ToolChoice, tc.choice)
+			}
+		})
+	}
+}
+
 // TestPromptCacheToolsOnly verifies that with no system prompt, the tools array
 // still gets exactly one cache breakpoint — on the LAST tool, not every tool.
 func TestPromptCacheToolsOnly(t *testing.T) {

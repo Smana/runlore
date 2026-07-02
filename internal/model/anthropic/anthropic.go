@@ -82,12 +82,22 @@ type systemBlock struct {
 }
 
 type msgRequest struct {
-	Model     string        `json:"model"`
-	MaxTokens int           `json:"max_tokens"`
-	Stream    bool          `json:"stream"`
-	System    []systemBlock `json:"system,omitempty"`
-	Messages  []message     `json:"messages"`
-	Tools     []tool        `json:"tools,omitempty"`
+	Model      string        `json:"model"`
+	MaxTokens  int           `json:"max_tokens"`
+	Stream     bool          `json:"stream"`
+	System     []systemBlock `json:"system,omitempty"`
+	Messages   []message     `json:"messages"`
+	Tools      []tool        `json:"tools,omitempty"`
+	ToolChoice *toolChoice   `json:"tool_choice,omitempty"`
+}
+
+// toolChoice forces the model to call one named tool this turn
+// ({"type":"tool","name":...}). Omitted (nil) = auto: the model chooses freely.
+// tool_choice sits below the tools/system cache tiers, so varying it per request
+// does not invalidate the tools+system prompt-cache prefix.
+type toolChoice struct {
+	Type string `json:"type"` // "tool"
+	Name string `json:"name"`
 }
 
 type message struct {
@@ -172,6 +182,9 @@ func (c *Client) Complete(ctx context.Context, req providers.CompletionRequest) 
 		}
 	}
 	areq := msgRequest{Model: c.model, MaxTokens: c.maxTokens, Stream: true, Messages: msgs}
+	if req.ToolChoice != "" {
+		areq.ToolChoice = &toolChoice{Type: "tool", Name: req.ToolChoice}
+	}
 	if req.System != "" {
 		areq.System = []systemBlock{{Type: "text", Text: req.System, CacheControl: ephemeral}}
 	}

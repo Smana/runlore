@@ -69,7 +69,39 @@ Score each rubric dimension as an integer in [0, max]:
 - description (max 3): clarity, completeness, honest about what is unresolved.
 - calibration (max 2): high confidence only when correct; penalise confident-and-wrong hardest.
 Set confident_wrong=true if the result states a wrong root cause with confidence >= 0.7.
-Reply with ONLY a JSON object: {"scores":{"root_cause":N,"evidence":N,"solution":N,"description":N,"calibration":N},"confident_wrong":bool,"rationale":"..."}.`
+Record your grade by calling the submit_grade tool exactly once. If you cannot call tools, reply with
+ONLY a JSON object: {"scores":{"root_cause":N,"evidence":N,"solution":N,"description":N,"calibration":N},"confident_wrong":bool,"rationale":"..."}.`
+
+const submitGradeName = "submit_grade"
+
+// submitGradeSpec is the structured-output tool for the judge. Its schema is
+// generated from Rubric so the rubric and the tool contract cannot drift, and it
+// mirrors the Verdict struct so the tool args unmarshal directly into a Verdict.
+func submitGradeSpec() providers.ToolSpec {
+	scoreProps := map[string]any{}
+	keys := make([]string, 0, len(Rubric))
+	for _, d := range Rubric {
+		scoreProps[d.Key] = map[string]any{"type": "integer", "minimum": 0, "maximum": d.Max}
+		keys = append(keys, d.Key)
+	}
+	schema, err := json.Marshal(map[string]any{
+		"type": "object",
+		"properties": map[string]any{
+			"scores":          map[string]any{"type": "object", "properties": scoreProps, "required": keys},
+			"confident_wrong": map[string]any{"type": "boolean"},
+			"rationale":       map[string]any{"type": "string"},
+		},
+		"required": []string{"scores", "confident_wrong", "rationale"},
+	})
+	if err != nil {
+		panic(fmt.Sprintf("marshal submit_grade schema: %v", err)) // static input; unreachable
+	}
+	return providers.ToolSpec{
+		Name:        submitGradeName,
+		Description: "Record the rubric grade for the investigation.",
+		Schema:      string(schema),
+	}
+}
 
 // Grade builds a blind grading prompt and parses the JSON verdict.
 func (j ModelJudge) Grade(ctx context.Context, scn Scenario, inv providers.Investigation) (Verdict, error) {
@@ -84,10 +116,30 @@ INVESTIGATION RESULT
 	resp, err := j.Model.Complete(ctx, providers.CompletionRequest{
 		System:   judgeSystem,
 		Messages: []providers.Message{{Role: "user", Content: user}},
+		Tools:    []providers.ToolSpec{submitGradeSpec()},
+		// Force the grade through the tool so the verdict arrives as schema-shaped
+		// args instead of free text that needs brace-slicing out of prose.
+		ToolChoice: submitGradeName,
 	})
 	if err != nil {
 		return Verdict{}, fmt.Errorf("judge model: %w", err)
 	}
+	for _, tc := range resp.ToolCalls {
+		if tc.Name != submitGradeName {
+			continue
+		}
+		var v Verdict
+		if err := json.Unmarshal([]byte(tc.Args), &v); err != nil {
+			return Verdict{}, fmt.Errorf("parse submit_grade args %q: %w", tc.Args, err)
+		}
+		if v.Scores == nil {
+			v.Scores = map[string]int{}
+		}
+		return v, nil
+	}
+	// Fallback ONLY when the response carries no submit_grade tool call: weak
+	// OpenAI-compatible judges sometimes ignore a forced tool_choice and reply in
+	// prose, so the legacy first-'{'..last-'}' text parser is kept for them.
 	v, err := parseVerdict(resp.Text)
 	if err != nil {
 		return Verdict{}, fmt.Errorf("parse verdict from %q: %w", resp.Text, err)
