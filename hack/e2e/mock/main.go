@@ -110,7 +110,8 @@ func chatCompletions(w http.ResponseWriter, r *http.Request) {
 		if t.Function.Name == "submit_verdicts" {
 			// Verify pass: keep the (single) root cause so the finding is Verified.
 			log.Printf("MOCK chat/completions: verify -> submit_verdicts (keep)")
-			writeJSON(w, `{"choices":[{"message":{"role":"assistant","tool_calls":[{"id":"v0","type":"function","function":{"name":"submit_verdicts","arguments":"{\"verdicts\":[{\"index\":0,\"verdict\":\"keep\",\"confidence\":0.9,\"reason\":\"mock: evidence supports the cause\"}]}"}}]}}]}`)
+			writeToolCallSSE(w, "v0", "submit_verdicts",
+				`{"verdicts":[{"index":0,"verdict":"keep","confidence":0.9,"reason":"mock: evidence supports the cause"}]}`)
 			return
 		}
 	}
@@ -136,9 +137,58 @@ func chatCompletions(w http.ResponseWriter, r *http.Request) {
 		name, args = "submit_findings", `{"confidence":0.9,"root_causes":[{"summary":"mock: chart bump broke harbor-db","confidence":0.9,"evidence":["pg_up=0"],"suggested_action":"flux rollback hr/harbor","reversible":true}],"unresolved":["mock unresolved"],"actions":[{"description":"suspend the failing Kustomization to stop the reconcile loop","op":"suspend","reversible":true,"blast_radius":1,"target":{"kind":"Kustomization","name":"broken-app","namespace":"apps"}}]}`
 	}
 	log.Printf("MOCK chat/completions: toolResults=%d -> %s", toolResults, name)
-	writeJSON(w, fmt.Sprintf(
-		`{"choices":[{"message":{"role":"assistant","tool_calls":[{"id":"c%d","type":"function","function":{"name":%q,"arguments":%q}}]}}]}`,
-		toolResults, name, args))
+	writeToolCallSSE(w, fmt.Sprintf("c%d", toolResults), name, args)
+}
+
+// writeToolCallSSE emits one tool call as an OpenAI chat/completions SSE stream:
+// a delta chunk carrying the whole tool_call (the client reassembles per index, so
+// sending id+name+arguments in one fragment is valid), a finish_reason chunk, a
+// trailing usage-only chunk (the client requests stream_options.include_usage), and
+// the [DONE] sentinel. The streaming client rejects a non-streamed JSON body, so the
+// mock must speak SSE to exercise the real accumulate path.
+func writeToolCallSSE(w http.ResponseWriter, id, name, args string) {
+	delta := map[string]any{"choices": []any{map[string]any{
+		"index": 0,
+		"delta": map[string]any{
+			"role": "assistant",
+			"tool_calls": []any{map[string]any{
+				"index": 0, "id": id, "type": "function",
+				"function": map[string]any{"name": name, "arguments": args},
+			}},
+		},
+	}}}
+	finish := map[string]any{"choices": []any{map[string]any{
+		"index": 0, "delta": map[string]any{}, "finish_reason": "tool_calls",
+	}}}
+	usage := map[string]any{
+		"choices": []any{},
+		"usage":   map[string]any{"prompt_tokens": 100, "completion_tokens": 20},
+	}
+	writeSSE(w, delta, finish, usage)
+}
+
+// writeSSE marshals each chunk as a `data:` SSE event, flushing per event, then
+// writes the terminal `data: [DONE]`. Content-Type marks the stream so the client's
+// SSE reader engages.
+func writeSSE(w http.ResponseWriter, chunks ...any) {
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-cache")
+	flusher, _ := w.(http.Flusher)
+	for _, c := range chunks {
+		b, err := json.Marshal(c)
+		if err != nil {
+			log.Printf("MOCK sse marshal: %v", err)
+			return
+		}
+		_, _ = fmt.Fprintf(w, "data: %s\n\n", b)
+		if flusher != nil {
+			flusher.Flush()
+		}
+	}
+	_, _ = io.WriteString(w, "data: [DONE]\n\n")
+	if flusher != nil {
+		flusher.Flush()
+	}
 }
 
 func matrixSend(w http.ResponseWriter, r *http.Request) {
