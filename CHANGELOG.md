@@ -8,6 +8,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 RunLore is **pre-1.0 and under active development** — there are no tagged releases
 yet, so everything currently lives under `[Unreleased]`.
 
+## [0.4.0](https://github.com/Smana/runlore/compare/v0.3.0...v0.4.0) (2026-07-02)
+
+
+### Features
+
+* **curate:** escalate recurring closed-unmerged KB entries via a knowledge-gap issue ([eb3c9a8](https://github.com/Smana/runlore/commit/eb3c9a8ba493c11043092a42adc3948e2118cadc))
+* **curate:** escalate recurring closed-unmerged KB entries via knowledge-gap issue ([cdf208f](https://github.com/Smana/runlore/commit/cdf208f4f06fb9a7a5ccf9e625de73bffa291ce6)), closes [#222](https://github.com/Smana/runlore/issues/222)
+* **incidents:** add pre-investigation debounce to skip self-resolving alerts ([0524b41](https://github.com/Smana/runlore/commit/0524b41f09ca7d22b61cdd48ef274a5164c0c447)), closes [#221](https://github.com/Smana/runlore/issues/221)
+* **incidents:** pre-investigation debounce to skip self-resolving alerts ([d6fdab5](https://github.com/Smana/runlore/commit/d6fdab5fcf57864347d234de30d5fcbaf77903ec))
+
 ## [0.3.0](https://github.com/Smana/runlore/compare/v0.2.0...v0.3.0) (2026-07-02)
 
 
