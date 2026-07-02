@@ -8,6 +8,140 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 RunLore is **pre-1.0 and under active development** — there are no tagged releases
 yet, so everything currently lives under `[Unreleased]`.
 
+## [0.3.0](https://github.com/Smana/runlore/compare/v0.2.0...v0.3.0) (2026-07-02)
+
+
+### Features
+
+* **anthropic:** cache conversation history + report cache tokens ([0b06168](https://github.com/Smana/runlore/commit/0b061686bd7741f868983ac4b2f60979a5115da8))
+* **anthropic:** surface sanitized error type/message on non-2xx ([8812f6c](https://github.com/Smana/runlore/commit/8812f6c6783291664b1fb9619c3b1c0ae30fe886))
+* **anthropic:** surface sanitized error type/message on non-2xx responses ([ef0ec9f](https://github.com/Smana/runlore/commit/ef0ec9fe44a0e03938d1ca08524d16d21bf0fdfc))
+* **app:** wire external MCP tools into the investigation loop ([b46da63](https://github.com/Smana/runlore/commit/b46da63d2b6d747ff59d4c153e8090a0a7893784))
+* **audit:** verify chain on open (fail-closed under approve/auto) + lore audit verify ([6fa6b8d](https://github.com/Smana/runlore/commit/6fa6b8df1de3ae9544bbbf315d4b13a9c5f7ae60))
+* **config:** add model.max_tokens (default 8192), verify inherits ([145366d](https://github.com/Smana/runlore/commit/145366dc8f6dc92a396951eb9591ed4870cab3d4))
+* **config:** mcp.servers (external MCP servers) + validation ([f11f875](https://github.com/Smana/runlore/commit/f11f8751e3c1c112f6891588ce6a5de1a86a7d49))
+* **config:** reject a cleartext API key on a public model endpoint ([244ab7d](https://github.com/Smana/runlore/commit/244ab7d447b2fca894ec86d73171a1eba2316c54))
+* cross-step prompt caching + cache-token observability ([85309ec](https://github.com/Smana/runlore/commit/85309ecf2f8d0186e47113ed7eba55934bb169be))
+* **curator:** host-invariant KB fingerprints — dedup across pods/nodes ([436b5d5](https://github.com/Smana/runlore/commit/436b5d554687129ac8f0c9f25038931d6f949ce6))
+* **curator:** host-invariant KB fingerprints (CORE-681) ([22f58e2](https://github.com/Smana/runlore/commit/22f58e21d504754baa1320cf64acdc46ee4ec16d))
+* **eval:** multi-model comparison benchmark ([1b02d8e](https://github.com/Smana/runlore/commit/1b02d8ef105822551564eccd5cfa2469f8ec1ad4))
+* **eval:** multi-model comparison benchmark ([11f5da0](https://github.com/Smana/runlore/commit/11f5da0e68d3df93679393e9a8c6655f190ea700))
+* **gemini:** report cached-content tokens + guard implicit-cache prefix ([d9914a6](https://github.com/Smana/runlore/commit/d9914a636ba1dacb7114ae5d344ead8e940c4f17))
+* **helm:** expose pod_log_namespaces (defaults to rbac.controllerLogNamespaces) ([ab31338](https://github.com/Smana/runlore/commit/ab3133892e9a0010c5fee9c54ef1feae945ac007))
+* **httpx:** add SSEData SSE-framing primitive ([c790ce3](https://github.com/Smana/runlore/commit/c790ce3e265425ea98c10a730d6f1c5f4365763b))
+* **httpx:** streaming-friendly secure client (no flat deadline, idle timeout) ([43ebe3c](https://github.com/Smana/runlore/commit/43ebe3ca3ccc979f809cf12afa6231f2a63ba342))
+* **investigate:** compactHistory — elide superseded/old tool outputs ([99b34ad](https://github.com/Smana/runlore/commit/99b34adab3fa9bf6007c59b4e62b4d672113bccd))
+* **investigate:** execute a turn's tool calls concurrently ([ab09eb0](https://github.com/Smana/runlore/commit/ab09eb0d2d8aeb5ee81f1f21d82b24459ddffb18))
+* **investigate:** execute a turn's tool calls concurrently ([b101178](https://github.com/Smana/runlore/commit/b10117881447beb57af0622f4593340f2b5761ca))
+* **investigate:** fail-fast on permanent model errors (CORE-680) ([60545f2](https://github.com/Smana/runlore/commit/60545f2b799d9ebbd9b64f38d285fc440971647d))
+* **investigate:** interim progress notifications ([af883cb](https://github.com/Smana/runlore/commit/af883cbd262a626df9618f10bc4464c5535cfb80))
+* **investigate:** interim progress notifications ([6317bac](https://github.com/Smana/runlore/commit/6317bac8e18f4a1b5ac06e2c4d16d006aeafd326))
+* **investigate:** opt-in LLM-summarization compaction ([c78499a](https://github.com/Smana/runlore/commit/c78499a6b03041e9e7d62c4caeabf949fb4604dc))
+* **investigate:** opt-in LLM-summarization compaction ([c396271](https://github.com/Smana/runlore/commit/c39627179d09e3b4000d3f7a670cbd980dfcac10))
+* **investigate:** per-investigation token/cost reporting ([19cfe07](https://github.com/Smana/runlore/commit/19cfe07793fc1ff813fa6a76764fd61426880b33))
+* **investigate:** per-investigation token/cost reporting ([5900536](https://github.com/Smana/runlore/commit/5900536c6155153a42388f92ee8b8ba0480ee3f9))
+* **investigate:** per-tool call timeout so one hung tool can't eat the budget ([33f4688](https://github.com/Smana/runlore/commit/33f46884232c7512c712dab30ec2327918e767bf))
+* **investigate:** raise investigation dataset quality (time, attribution, dedup, seed) ([eba2a27](https://github.com/Smana/runlore/commit/eba2a27e0c50db2584bb4ee26301471d65206e9d))
+* **investigate:** raise investigation dataset quality (time, attribution, dedup, seed) ([60c0fe0](https://github.com/Smana/runlore/commit/60c0fe008f905d7904669af3bae83ba184437d99))
+* **investigate:** treat model refusal as a first-class unresolved outcome ([806ec68](https://github.com/Smana/runlore/commit/806ec68247f01637ef1492b0119725856c0d8db7))
+* **investigate:** wire mid-loop compaction before the budget guard ([d85c389](https://github.com/Smana/runlore/commit/d85c3890b2c6a15b9fd56cde5078f2141a5420d3))
+* **mcp:** mcpTool adapter (namespaced, bounded description, schema passthrough) ([bd643bb](https://github.com/Smana/runlore/commit/bd643bb4310ab832b94477925454803ebebdaca3))
+* **mcp:** outbound MCP client — external MCP servers as read-only investigation tools ([e9421d1](https://github.com/Smana/runlore/commit/e9421d15e6387db12b173789d0c828e82e2237b0))
+* **mcp:** streamable-HTTP MCP client (initialize/list/call) ([812ccf5](https://github.com/Smana/runlore/commit/812ccf57b15f114c845753e70de37049af2d6504))
+* **metrics,logs:** optional bearer-token + header auth for metrics/logs endpoints ([f23bde4](https://github.com/Smana/runlore/commit/f23bde4eac08a75bbfb96833c455764fd4bdeddb))
+* mid-loop tool-output compaction (quality gate pending live-eval) ([0b59fec](https://github.com/Smana/runlore/commit/0b59fec5ddc8769d8fccb4a1d3a28707c1a28d00))
+* **model/anthropic:** stream /v1/messages and accumulate; send max_tokens ([1c65eca](https://github.com/Smana/runlore/commit/1c65ecaec71bf45f7a8dcfef4cc37ab9c904bf66))
+* **model/gemini:** stream generateContent and accumulate; send maxOutputTokens ([b32104b](https://github.com/Smana/runlore/commit/b32104b38cc8f9c9552a15190bd30377ee53a2d1))
+* **model/openai:** stream chat/completions and accumulate; send max_tokens ([2d6205e](https://github.com/Smana/runlore/commit/2d6205e901b4a94a7435c67a04569cd024f0b802))
+* **model:** configurable effort/reasoning knob (anthropic, openai) ([63ae11d](https://github.com/Smana/runlore/commit/63ae11d951b141d8472692b8695395d91f26f50a))
+* **model:** configurable effort/reasoning knob (anthropic, openai) ([76a3261](https://github.com/Smana/runlore/commit/76a32612dbfdc732e6e6eb57653f9a819f9fa074))
+* **model:** opt-in Anthropic adaptive thinking with block replay ([4f6fa59](https://github.com/Smana/runlore/commit/4f6fa593be7cb90a4ed9f19f8f82dd8538dbc9c7))
+* **model:** opt-in Anthropic adaptive thinking with block replay ([985c957](https://github.com/Smana/runlore/commit/985c9572aaeff388a0c8bda2a65ee0102397c5a5))
+* **model:** support forcing a tool via ToolChoice ([8c15ca4](https://github.com/Smana/runlore/commit/8c15ca41f410baace47d7953173711387c1dc678))
+* **model:** support forcing a tool via ToolChoice ([55718e0](https://github.com/Smana/runlore/commit/55718e0dcc489b5e119ca00ebde0bfd4378f3313))
+* **openai:** report cached prompt tokens (prompt_tokens_details.cached_tokens) ([9be9f58](https://github.com/Smana/runlore/commit/9be9f5872b4ab9ed5875639433b381c31bd7b50a))
+* **providers:** add CompletionResponse.StopReason + Refused() ([e35ee74](https://github.com/Smana/runlore/commit/e35ee74309f86145da4881e17b5f058432947eea))
+* **release:** build & sign multi-arch image via GoReleaser ([b77f2e1](https://github.com/Smana/runlore/commit/b77f2e1740c3e956ce6e77f9a6b94e57e915046c))
+* **serve:** log successful finding delivery ([2a2d0c9](https://github.com/Smana/runlore/commit/2a2d0c944a4051829cc5a2ecfd8a7157ba347973))
+* **source:** PagerDuty V3 webhook source ([5953d92](https://github.com/Smana/runlore/commit/5953d92e433400efb9fdeab03302d7663294f4e9))
+* **source:** PagerDuty V3 webhook source ([ca3f638](https://github.com/Smana/runlore/commit/ca3f638fffb33ed05cbc80b2b87281bb338e84c6))
+* **telemetry:** history compaction counters ([0a79175](https://github.com/Smana/runlore/commit/0a79175745e72f790cb7eebba28d58bcad23fd7f))
+* **telemetry:** record LLM input + cached-input tokens per provider ([ec0867a](https://github.com/Smana/runlore/commit/ec0867ae04ef858dab34587b036c85b773180611))
+
+
+### Bug Fixes
+
+* **audit:** close verify→append TOCTOU and require audit log for approve ([de39396](https://github.com/Smana/runlore/commit/de3939647f549bfe438d93364dcf74d720511d79))
+* case-insensitive severity matching and HTTP handler panic recovery ([b9e8e12](https://github.com/Smana/runlore/commit/b9e8e12d72170e22f4dd2558410679fa46f4fcbb))
+* **config:** validate the effective verify endpoint + close cleartext-key gaps ([49c019d](https://github.com/Smana/runlore/commit/49c019dea68ebafbea0b27b6115809e208a46de1))
+* **e2e:** audit_log_path for approve-mode install (unbreaks e2e rollout) ([be4d7f5](https://github.com/Smana/runlore/commit/be4d7f580b7aa9b069f7abe2297e7e47cdb4c462))
+* **e2e:** set audit_log_path for the approve-mode install ([fdfdb70](https://github.com/Smana/runlore/commit/fdfdb70a3fe0b62d48ec0b1162a22cae5cee725b))
+* **e2e:** stream chat completions from the mock (SSE) ([66170ad](https://github.com/Smana/runlore/commit/66170ad1c8594e8ad94e5c461e9b62fa742f8003))
+* **e2e:** stream chat completions from the mock (SSE) ([1b427aa](https://github.com/Smana/runlore/commit/1b427aa82aa5586b63473e7367d236660dd988ce))
+* harden model API-key egress (cross-host redirect + cleartext base_url) ([a3dfb18](https://github.com/Smana/runlore/commit/a3dfb1836400f4ec66f290bd141cd8f58a8db63c))
+* **helm:** bump chart to 0.2.0 and have release-please keep Chart.yaml in sync ([1606686](https://github.com/Smana/runlore/commit/1606686ee98956a8b9230f5f7acd4591625cdaf0))
+* **httpx:** strip provider key headers on host-changing redirect ([da2f099](https://github.com/Smana/runlore/commit/da2f09969eda7398996b71baabbaff8ae220f6f4))
+* **investigate:** anchor token budget estimate to provider-reported usage ([54e91ca](https://github.com/Smana/runlore/commit/54e91cae81967a99c4d41738493bffe9ef6823f8))
+* **investigate:** anchor token budget estimate to provider-reported usage ([2a55535](https://github.com/Smana/runlore/commit/2a5553529d15110d8dd4876c5caad94158fc1e3b))
+* **investigate:** constrain pod_logs to the incident namespace plus an allowlist ([0f5239b](https://github.com/Smana/runlore/commit/0f5239bfeb996632d3e9a91f3272e54518ec7ed8))
+* **investigate:** per-tool timeout metric, defaults, and validation ([30c7f0a](https://github.com/Smana/runlore/commit/30c7f0a696fe0a3a0932eb09e5c04fba1c7e2c9b))
+* **investigate:** redact action Name at the egress chokepoint ([1c32bc3](https://github.com/Smana/runlore/commit/1c32bc3ffda282f5b8ebceecdaf0490082c2ab6c))
+* **investigate:** redact action Name at the egress chokepoint ([dfa378e](https://github.com/Smana/runlore/commit/dfa378e64af478b45b994930a442772c82a05959))
+* **investigate:** skip compacting tool bodies no larger than the elision marker ([4c435e5](https://github.com/Smana/runlore/commit/4c435e5b88166aedc858bd7f2c3b47cf4796a58e))
+* **mcp:** scope retries to discovery + scheme validation + review nits ([6e50bbb](https://github.com/Smana/runlore/commit/6e50bbb932dd2eac750935c87f4cfe89e4b311a4))
+* **model:** classify 4xx as permanent and surface sanitized error detail (openai, gemini) ([6814467](https://github.com/Smana/runlore/commit/681446703fbccbcb1dc73c4b00cb3c8d3ab6dd87))
+* **model:** classify 4xx as permanent and surface sanitized error detail (openai, gemini) ([d9b9d53](https://github.com/Smana/runlore/commit/d9b9d53abb2f8256dc54786b095fc2852f8173b7))
+* **notify:** escape untrusted text in Slack mrkdwn output ([e376c1a](https://github.com/Smana/runlore/commit/e376c1af89bc72598dae7659a1355601f0805ede))
+* **notify:** escape untrusted text in Slack mrkdwn output ([bf207d3](https://github.com/Smana/runlore/commit/bf207d3718704d149b4968fd65bf628f3daa0fb4))
+* **observability:** bind Grafana dashboard to default datasource ([030bcb0](https://github.com/Smana/runlore/commit/030bcb0b58faee049aa24ebafce0c212fc0b3e77))
+* **observability:** bind Grafana dashboard to default datasource ([c26f7c1](https://github.com/Smana/runlore/commit/c26f7c14e37e18c65e2042bcfa1fad8003431058))
+* **outcome:** preserve prior ledger cache when a reload read fails ([8d4e31f](https://github.com/Smana/runlore/commit/8d4e31f76ab5e41673a7ccb02170ad8a3169764a))
+* **outcome:** re-sync ledger cache on leadership and bound orphan resolves ([b0c472c](https://github.com/Smana/runlore/commit/b0c472c5442b0f277f12b13a5e95097a777f8c64))
+* **redact:** mask base64 data values in kind: Secret manifests ([7c35337](https://github.com/Smana/runlore/commit/7c35337eafa1349c6d418a83ebdca8f616b35926))
+* satisfy linters — rename max const, escape ESC in test ([ad8a6dc](https://github.com/Smana/runlore/commit/ad8a6dccd2059eb8954d8796005955715350d784))
+* **server:** recover from handler panics ([502586f](https://github.com/Smana/runlore/commit/502586f89d9765a552a64a25a284d42b71e614c4))
+* **trigger:** match severity case-insensitively ([fd2cced](https://github.com/Smana/runlore/commit/fd2ccedb4777631ab1224d8adb15fc8a3d305fae))
+
+
+### Performance Improvements
+
+* **outcome:** cache ledger aggregates instead of replaying the JSONL per recall ([b1e0367](https://github.com/Smana/runlore/commit/b1e03671e8b3180b203a813946dc685f3adf6c4f))
+
+
+### Documentation
+
+* **config:** note the https requirement on model.base_url with a key ([a83db79](https://github.com/Smana/runlore/commit/a83db79c67fbc8e7c50d5814391c1def873f3641))
+* design spec for cross-step prompt caching + cache observability (T1+T2) ([1495626](https://github.com/Smana/runlore/commit/14956266fe5abe1e0a0b70c75f13f1f12e6d56a0))
+* design spec for mid-loop tool-output compaction (T3, hardened + eval-gated) ([b0a25a5](https://github.com/Smana/runlore/commit/b0a25a57bdbb3b45a1217dc76be83835a0b62bb7))
+* design spec for model API-key egress hardening (S1 redirect key-strip + S2 cleartext-key config guard) ([1c14c18](https://github.com/Smana/runlore/commit/1c14c1898bf6eb41779a6b6dbbd31e8664962696))
+* design spec for outbound MCP client (E1, HTTP transport, namespaced/defense-in-depth) ([a1a9e6e](https://github.com/Smana/runlore/commit/a1a9e6e87ea0719fbc7b7ced86491e3b8bc0563d))
+* document model.pricing and investigation.progress_updates ([7ee383b](https://github.com/Smana/runlore/commit/7ee383b89be80496b9947cbe288e342e4eddf568))
+* document model.pricing and investigation.progress_updates ([1ce457b](https://github.com/Smana/runlore/commit/1ce457b193520be2f9896798a9e04043a6363e79))
+* **getting-started:** align with fail-closed webhook auth and required resource frontmatter ([89b61de](https://github.com/Smana/runlore/commit/89b61debf8deb99228864037c75a9444b5c90512))
+* implementation plan for cross-step prompt caching + observability ([016b5e2](https://github.com/Smana/runlore/commit/016b5e223b2f97ef23315421ab03d9c0fa6746bf))
+* implementation plan for mid-loop tool-output compaction ([8bd0c2f](https://github.com/Smana/runlore/commit/8bd0c2fc7507763165e6c52e950026d16db37fc6))
+* implementation plan for model API-key egress hardening (S1+S2) ([8490154](https://github.com/Smana/runlore/commit/8490154115fc4060fca944bd395a5a9776ad9da8))
+* implementation plan for outbound MCP client (E1) ([65ec4ed](https://github.com/Smana/runlore/commit/65ec4eda930efb781d923b4dd1fdda2dd60cb30c))
+* **model:** spec + implementation plan for model-layer streaming/refusal ([e00997c](https://github.com/Smana/runlore/commit/e00997cba8821f8d805e0214c3153eed97a007bd))
+* refine T3 keep-list (add engine-agnostic gitops_resource_status/gitops_tree) + defer eval to EKS ([53a483a](https://github.com/Smana/runlore/commit/53a483a424aaea77dbb288acb471b86ffdbd6afb))
+* security architecture overview ([f1fd740](https://github.com/Smana/runlore/commit/f1fd740589f50b5edf3d7cda15b233ba04c87a20))
+* security architecture overview ([4b3bca1](https://github.com/Smana/runlore/commit/4b3bca1cca21e872ccc19ceac4a916942a1a1273))
+
+
+### Code Refactoring
+
+* **mcp:** apply /simplify cleanups (reuse, dedup, altitude) ([e175988](https://github.com/Smana/runlore/commit/e17598853d4dced6bea17d03468fad6d85b9512a))
+* **model:** extract shared client core (retry/SSE/error plumbing) ([f4f3558](https://github.com/Smana/runlore/commit/f4f3558fb7828f75e32b7b20657c12fe8f7b7663))
+* **model:** extract shared client core (retry/SSE/error plumbing) ([851e526](https://github.com/Smana/runlore/commit/851e526f2b2a582e933854c99defcfe26147ea96))
+
+
+### Continuous Integration
+
+* **build-image:** slim to PR/main validation only ([95caf1e](https://github.com/Smana/runlore/commit/95caf1e94ec61c89418c805596522ad1c6faaa7b))
+* **e2e:** run the k3d e2e suite via workflow_dispatch ([b180f4d](https://github.com/Smana/runlore/commit/b180f4d58bbb04f1f1a230dfefe16f065f337bdb))
+* **helm:** add chart lint + kubeconform + values schema ([3301f38](https://github.com/Smana/runlore/commit/3301f386d35b8ae517fc89a876079120dbf12742))
+* skip nightly eval when API key absent; add gofmt+race checks; pin govulncheck ([f0e28bf](https://github.com/Smana/runlore/commit/f0e28bf0ba05f9efe1baa7463115217bc0c04c75))
+
 ## [0.2.0](https://github.com/Smana/runlore/compare/v0.1.0...v0.2.0) (2026-06-28)
 
 
