@@ -228,3 +228,24 @@ func TestValidateProgressUpdatesEverySteps(t *testing.T) {
 		t.Fatalf("valid progress config rejected: %v", err)
 	}
 }
+
+func TestValidatePricingNonNegative(t *testing.T) {
+	// Negative rate on the main model is rejected.
+	var c Config
+	c.Model.Pricing = &Pricing{InputUSDPerMTok: -1}
+	if err := c.Validate(); err == nil || !strings.Contains(err.Error(), "model.pricing") {
+		t.Fatalf("expected model.pricing validation error, got %v", err)
+	}
+	// Negative rate on the verify override is rejected.
+	var c2 Config
+	c2.Model.Verify = &ModelOverride{Pricing: &Pricing{OutputUSDPerMTok: -5}}
+	if err := c2.Validate(); err == nil || !strings.Contains(err.Error(), "model.verify.pricing") {
+		t.Fatalf("expected model.verify.pricing validation error, got %v", err)
+	}
+	// Non-negative rates pass.
+	var ok Config
+	ok.Model.Pricing = &Pricing{InputUSDPerMTok: 3, OutputUSDPerMTok: 15, CachedInputUSDPerMTok: 0.3}
+	if err := ok.Validate(); err != nil {
+		t.Fatalf("valid pricing rejected: %v", err)
+	}
+}

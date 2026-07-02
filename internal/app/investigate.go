@@ -193,6 +193,19 @@ func appendMCPTools(ctx context.Context, cfg *config.Config, log *slog.Logger, t
 	return tools
 }
 
+// toPricing converts the optional config pricing to the loop's Pricing carrier
+// (nil ⇒ nil, i.e. unpriced — token totals are reported without a cost).
+func toPricing(p *config.Pricing) *investigate.Pricing {
+	if p == nil {
+		return nil
+	}
+	return &investigate.Pricing{
+		InputUSDPerMTok:       p.InputUSDPerMTok,
+		OutputUSDPerMTok:      p.OutputUSDPerMTok,
+		CachedInputUSDPerMTok: p.CachedInputUSDPerMTok,
+	}
+}
+
 // defaultToolTimeout bounds a single tool call when investigation.tool_timeout is
 // unset (0). It keeps a hung/slow provider (a stuck git clone, an unresponsive
 // metrics/logs endpoint) from consuming the whole per-investigation budget while
@@ -247,9 +260,19 @@ func BuildInvestigator(ctx context.Context, cfg *config.Config, gp providers.Git
 		}
 		log.Info("interim progress updates enabled", "every_steps", progressEverySteps)
 	}
+	// Per-investigation cost reporting (optional). The verify override inherits the
+	// main pricing when it sets none (whole-struct or() inherit), so a cheaper verify
+	// model is costed correctly.
+	mainPricing := toPricing(cfg.Model.Pricing)
+	verifyPricing := mainPricing
+	if v := cfg.Model.Verify; v != nil && v.Pricing != nil {
+		verifyPricing = toPricing(v.Pricing)
+	}
 	return &investigate.LoopInvestigator{
 		Model:                     model,
 		VerifyModel:               BuildVerifyModel(cfg),
+		Pricing:                   mainPricing,
+		VerifyPricing:             verifyPricing,
 		Tools:                     tools,
 		Log:                       log,
 		Actions:                   actions,

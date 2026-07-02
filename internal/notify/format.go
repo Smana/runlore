@@ -56,7 +56,36 @@ func Format(inv providers.Investigation) string {
 	if inv.CuratedURL != "" {
 		fmt.Fprintf(&b, "📚 Knowledge base: %s\n", inv.CuratedURL)
 	}
+	// Cost footer: a one-line usage summary for humans, appended ONLY to the shared
+	// delivery message — never to the curated KB body (the curator builds its own
+	// body and does not call Format), so cost never pollutes the knowledge base.
+	if foot := usageFooter(inv.Usage); foot != "" {
+		fmt.Fprintf(&b, "%s\n", foot)
+	}
 	return b.String()
+}
+
+// usageFooter renders the per-investigation model usage as one line:
+//
+//	N model calls · X in / Y out tokens (Z% cached)
+//
+// and appends " · ~$C.CC" only when pricing was configured (Usage.Priced).
+// Returns "" when no model call was made (e.g. a pure recall short-circuit), so
+// the footer is simply omitted.
+func usageFooter(u providers.UsageTotals) string {
+	if u.ModelCalls == 0 {
+		return ""
+	}
+	cachedPct := 0
+	if u.InputTokens > 0 {
+		cachedPct = int(float64(u.CachedInputTokens)/float64(u.InputTokens)*100 + 0.5)
+	}
+	s := fmt.Sprintf("%d model calls · %d in / %d out tokens (%d%% cached)",
+		u.ModelCalls, u.InputTokens, u.OutputTokens, cachedPct)
+	if u.Priced {
+		s += fmt.Sprintf(" · ~$%.2f", u.CostUSD)
+	}
+	return s
 }
 
 // FormatProgress renders an interim progress update as a concise plain-text
