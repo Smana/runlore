@@ -10,7 +10,7 @@ import (
 
 func TestRecordedCase(t *testing.T) {
 	scn := Scenario{ID: "harbor-valkey", Trigger: Trigger{Symptom: "harbor core crashlooping"},
-		GroundTruth: GroundTruth{RootCause: "valkey down"}}
+		GroundTruth: GroundTruth{RootCause: "valkey down", ExpectedSources: []string{"kubernetes"}}}
 	calls := []Call{
 		{Name: "pod_status", Output: "first"},
 		{Name: "pod_status", Output: "second"}, // last wins (v1 single-output replay limit)
@@ -26,6 +26,10 @@ func TestRecordedCase(t *testing.T) {
 	}
 	if _, ok := c.Tools["submit_findings"]; ok {
 		t.Fatal("submit_findings must be excluded")
+	}
+	if c.GroundTruth == nil || c.GroundTruth.RootCause != "valkey down" ||
+		len(c.GroundTruth.ExpectedSources) != 1 || c.GroundTruth.ExpectedSources[0] != "kubernetes" {
+		t.Fatalf("recorded case must carry the scenario ground truth: %+v", c.GroundTruth)
 	}
 }
 

@@ -26,6 +26,7 @@ Usage:
   lore catalog sync [--config <path>]                 clone/pull + index the knowledge catalog
   lore eval [--config <path>] [--cases <dir>]         replay recorded cases, score RCA identification
   lore eval --live [--scenarios <dir>] [--n 3]        live-fire on the cluster: grade coverage + RCA
+  lore eval --compare <spec.yaml> [--n 3]             benchmark several models over the replay suite
   lore curate [--config <path>]                       groom the KB backlog (dedup open PRs)
   lore mcp [--config <path>]                          serve GitOps what-changed over MCP (stdio; for HolmesGPT et al.)
   lore audit verify --path <audit.jsonl>              re-walk the action audit log; report the first broken link
