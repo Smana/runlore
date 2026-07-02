@@ -185,6 +185,20 @@ type Investigation struct {
 	// by Kubernetes RBAC. Set this to match the Helm rbac.controllerLogNamespaces
 	// (e.g. [flux-system]); empty means the incident namespace only.
 	PodLogNamespaces []string `yaml:"pod_log_namespaces"`
+
+	// ProgressUpdates opts into interim progress notifications during a long
+	// investigation. Off by default (zero behaviour change, zero extra model calls).
+	ProgressUpdates ProgressUpdates `yaml:"progress_updates"`
+}
+
+// ProgressUpdates configures opt-in interim progress notifications: a long
+// investigation (up to 20 steps) is otherwise silent until the final message.
+// Off by default. When enabled, the loop emits one ping every EverySteps steps
+// to any notifier that supports it (Slack first); a ping is best-effort and never
+// fails the investigation.
+type ProgressUpdates struct {
+	Enabled    bool `yaml:"enabled"`
+	EverySteps int  `yaml:"every_steps"` // emit a ping every N steps; 0 ⇒ default 5 (applyDefaults). Must be > 0 when enabled.
 }
 
 // Coalesce folds correlated incidents into one investigation.
@@ -653,6 +667,12 @@ func (c *Config) Validate() error {
 		if err := validateEffort("model.verify.effort (or inherited model.effort)", prov, eff); err != nil {
 			return err
 		}
+	}
+	// Interim progress updates: a non-positive cadence while enabled is a
+	// misconfiguration (applyDefaults fills an unset 0 with 5, so only an explicit
+	// negative reaches here). Validate fail-loud rather than silently never pinging.
+	if c.Investigation.ProgressUpdates.Enabled && c.Investigation.ProgressUpdates.EverySteps <= 0 {
+		return fmt.Errorf("investigation.progress_updates.every_steps must be > 0 when enabled, got %d", c.Investigation.ProgressUpdates.EverySteps)
 	}
 	// Reject a negative per-tool timeout: time.ParseDuration accepts negative values
 	// which silently disable the feature (fails the > 0 guard in runTool) rather than
