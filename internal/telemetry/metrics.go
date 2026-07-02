@@ -26,6 +26,8 @@ type Metrics struct {
 	ToolOutputTruncatedBytes  metric.Int64Counter
 	HistoryCompactions        metric.Int64Counter // mid-loop history compaction events
 	HistoryElidedBytes        metric.Int64Counter // tool-output bytes elided by compaction
+	HistorySummarizations     metric.Int64Counter // compaction events whose elided batch was replaced by a model digest
+	HistorySummarizeFallbacks metric.Int64Counter // summarize-mode compactions that fell back to plain elision (summarizer error/refusal/truncation)
 	RecallHits                metric.Int64Counter // KB cache hits, labelled by verify result
 	RecallTokensSaved         metric.Int64Counter // estimated tokens saved by a recall short-circuit
 	RecallRejections          metric.Int64Counter // recalls rejected before short-circuit (label: reason)
@@ -77,6 +79,8 @@ func NewMetrics() *Metrics {
 		ToolOutputTruncatedBytes:  ctr("tool_output_truncated_bytes_total", "bytes elided by output truncation"),
 		HistoryCompactions:        ctr("history_compactions_total", "mid-loop tool-output history compaction events"),
 		HistoryElidedBytes:        ctr("history_elided_bytes_total", "tool-output bytes elided by mid-loop compaction"),
+		HistorySummarizations:     ctr("history_summarizations_total", "compaction events whose elided batch was replaced by a model-produced digest"),
+		HistorySummarizeFallbacks: ctr("history_summarize_fallbacks_total", "summarize-mode compactions that fell back to plain elision (summarizer error/refusal/truncation)"),
 		RecallHits:                ctr("recall_hits_total", "KB instant-recall short-circuits (label: result)"),
 		RecallTokensSaved:         ctr("recall_tokens_saved_total", "estimated tokens saved by recall short-circuits"),
 		RecallRejections:          ctr("recall_rejections_total", "recalls rejected before short-circuit (label: reason)"),

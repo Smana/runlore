@@ -65,6 +65,13 @@ config:
     max_tokens_per_investigation: 100000
     # Cap each tool result fed back to the model (truncates large logs/diffs). 0 = unlimited.
     max_tool_output_bytes: 32768
+    # How mid-loop history compaction treats the older tool outputs it elides once the
+    # estimate crosses 0.7x max_tokens_per_investigation. "elide" (default) drops their
+    # bodies for short markers (lossy). "summarize" first asks a model for ONE compact
+    # factual digest of the elided batch per compaction event (routed to model.verify when
+    # set, else the main model) and keeps that in place of the markers; any summarizer
+    # error/refusal/truncation falls back to plain elision. Needs a token budget above.
+    # compaction: elide
     # App-layer allowlist of namespaces the pod_logs / controller_logs tools may read
     # RAW pod logs from, BEYOND the incident's own namespace (the incident namespace is
     # always allowed at the app layer — RBAC still gates the actual read). Pod logs carry
