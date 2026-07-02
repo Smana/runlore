@@ -101,8 +101,6 @@ func (t PodLogsTool) Call(ctx context.Context, args string) (string, error) {
 		return "no log lines matched", nil
 	}
 	var b strings.Builder
-	renderRows(&b, len(lines), "more lines", func(i int) {
-		fmt.Fprintln(&b, lines[i].Message)
-	})
+	renderLogLines(&b, lines, "more lines")
 	return b.String(), nil
 }

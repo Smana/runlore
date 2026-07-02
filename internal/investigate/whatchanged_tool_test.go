@@ -4,6 +4,7 @@ import (
 	"context"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/Smana/runlore/internal/providers"
 )
@@ -44,5 +45,32 @@ func TestWhatChangedTool(t *testing.T) {
 	}
 	if tool.Name() != "what_changed" {
 		t.Fatalf("unexpected name %q", tool.Name())
+	}
+}
+
+// TestWhatChangedToolRendersWhen asserts a change's timestamp reaches the model
+// when the engine knows it — "deploy at 14:02, first crash at 14:03" is the core
+// change↔symptom correlation — and that a zero When (Flux today) renders nothing.
+func TestWhatChangedToolRendersWhen(t *testing.T) {
+	when := time.Date(2026, 7, 1, 14, 2, 0, 0, time.UTC)
+	gp := fakeGitOps{changes: []providers.Change{
+		{
+			Workload: providers.Workload{Kind: "Application", Name: "web", Namespace: "argocd"},
+			Engine:   providers.EngineArgoCD, Type: providers.ChangeSync, ToRev: "ccc", When: when,
+		},
+		{
+			Workload: providers.Workload{Kind: "Kustomization", Name: "apps", Namespace: "flux-system"},
+			Engine:   providers.EngineFlux, Type: providers.ChangeSync, ToRev: "bbb",
+		},
+	}}
+	out, err := WhatChangedTool{GitOps: gp}.Call(context.Background(), `{"namespace":"flux-system"}`)
+	if err != nil {
+		t.Fatalf("Call: %v", err)
+	}
+	if !strings.Contains(out, "at 2026-07-01T14:02:00Z") {
+		t.Fatalf("change timestamp missing:\n%s", out)
+	}
+	if strings.Contains(out, "0001-01-01") {
+		t.Fatalf("zero When must not render:\n%s", out)
 	}
 }
