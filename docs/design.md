@@ -401,13 +401,14 @@ KB git repo  ──syncer──►  local mirror  ──build──►  index:  
   actions) before it is copied into the **KB pull-request body** and **chat**. The ruleset is
   high-precision — PEM private keys, JWTs, GitHub / Slack / AWS / Google / Stripe keys,
   `user:pass@host` URLs, `Authorization` headers, and generic `*secret*/*token*/*password*: <value>`
-  pairs — masking the *value* while keeping surrounding structure so the agent can still reason ("the
-  password field changed"). Redaction is a **mitigation, not a guarantee**: it does not yet base64-decode
-  `kind: Secret` `data:` blocks, so a Secret manifest surfaced verbatim in a git diff can still reach the
-  model unmasked (roadmap). Defense-in-depth still applies — the RBAC scoping above limits what tool
-  output can contain, and **self-hosting the model** (in-cluster vLLM/Ollama) keeps data in-boundary
-  regardless. If you run a public KB repo or untrusted-tenant namespaces, treat the base64-`Secret` gap
-  as a gating concern until the decode pass lands.
+  pairs, plus the values under a `kind: Secret` manifest's `data:`/`stringData:` block (including
+  inside a git diff) — masking the *value* while keeping surrounding structure so the agent can still
+  reason ("the password field changed"). Redaction is a **mitigation, not a guarantee**: unlabeled
+  high-entropy strings and base64 blobs outside a `Secret` manifest are not caught (see the
+  [LLM security architecture](security-architecture.md)). Defense-in-depth still applies — the RBAC
+  scoping above limits what tool output can contain, and **self-hosting the model** (in-cluster
+  vLLM/Ollama) keeps data in-boundary regardless. If you run a public KB repo or untrusted-tenant
+  namespaces, treat the residual recall gaps as a gating concern.
 - **Append-only, tamper-evident audit log** (`internal/audit`): every action attempt — inputs, gate
   results, op, target, actor, outcome — is a hash-chained JSON line, so edits/deletions are detectable.
 - **Honest uncertainty.** `unresolved` is a first-class output field; the agent says what it doesn't

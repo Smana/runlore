@@ -1,7 +1,9 @@
 # Security model
 
 What RunLore is allowed to do, how that's enforced, and the honest limitations. This is the **runtime**
-security model — how the agent behaves in your cluster. For reporting a vulnerability, see
+security model — how the agent behaves in your cluster. For the LLM-specific trust story — prompt
+injection, redaction boundaries, untrusted-output handling, network guards — see the
+[LLM security architecture](security-architecture.md). For reporting a vulnerability, see
 [`SECURITY.md`](../SECURITY.md). For the deeper design rationale, see [Design §9](design.md).
 
 The guiding principle: **safety is enforced in code, not promised in prose.** The agent's own claims
@@ -54,15 +56,18 @@ Tool output and incident text flow to a model provider and, for findings, into y
    before it's copied into the KB PR body and chat.
 
 Coverage (high-precision, masks the value while keeping structure): PEM private keys, JWTs,
-GitHub / Slack / AWS / Google / Stripe keys, `user:pass@host` URLs, `Authorization` headers, and
-generic `*(password|secret|api_key|token|…): <value>` pairs.
+GitHub / Slack / AWS / Google / Stripe keys, `user:pass@host` URLs, `Authorization` headers,
+generic `*(password|secret|api_key|token|…): <value>` pairs, and the values under a `kind: Secret`
+manifest's `data:`/`stringData:` block — including one surfaced inside a git diff.
 
-> [!warning] Residual gap — base64 Secret data
-> Redaction does **not** yet base64-decode `kind: Secret` `data:` blocks, so a Secret manifest
-> surfaced verbatim in a git diff can still reach the model unmasked (roadmap). Redaction is a
-> mitigation, not a guarantee. If you run a **public KB repo** or **untrusted-tenant namespaces**,
-> treat this as a gating concern — and prefer **self-hosting the model** (in-cluster vLLM/Ollama),
-> which keeps data in-boundary regardless.
+> [!warning] Redaction is a mitigation, not a guarantee
+> The ruleset is deliberately high-precision, and the cost of precision is recall: unlabeled
+> high-entropy strings, bare AWS secret keys with no context cue, and base64 blobs *outside* a
+> `kind: Secret` `data:` block (the redactor never decodes base64) are **not** caught — see
+> [LLM security architecture §2](security-architecture.md#2-secret-redaction-three-boundaries-one-chokepoint)
+> for the full list. If you run a **public KB repo** or **untrusted-tenant namespaces**, treat this
+> as a gating concern — and prefer **self-hosting the model** (in-cluster vLLM/Ollama), which keeps
+> data in-boundary regardless.
 
 ## Least-privilege RBAC
 
@@ -137,7 +142,7 @@ medium where the agent's own identity cannot rewrite history), and back it up.
 ## Honest limitations
 
 - **The model sees cluster data.** Even with redaction, tool output reaches your model provider. The
-  strongest mitigation is self-hosting the model in-cluster. The base64-Secret gap above is real.
+  strongest mitigation is self-hosting the model in-cluster. The redaction recall gaps above are real.
 - **RCA can be wrong.** Frontier RCA is sub-50% on real incidents; `unresolved` is a first-class
   output and an adversarial verify pass can only *lower* confidence. Treat findings as hypotheses, and
   the human PR review as the load-bearing quality gate.
