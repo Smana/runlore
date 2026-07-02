@@ -58,6 +58,7 @@ msg=incident alert=<name> severity=<sev> namespace=<ns> investigate=<bool> reaso
 | `runlore_investigations_dropped_total` rising | dropped by `rate_limit.max_requeues` or the token-budget hard-stop | see the timeout/budget section below |
 | `runlore_alerts_coalesced_total` rising | folded into an existing batch (`investigation.coalesce`) | expected noise control — one investigation covers the batch |
 | `runlore_alerts_suppressed_total` rising | dropped by the coalescer **cooldown** | expected — a recently-investigated correlation is in cooldown |
+| `runlore_incidents_debounced_total` rising | the alert self-resolved within `triggers.incidents.debounce` and was dropped before investigating; log: `msg="alert resolved within debounce window; dropping self-resolving incident"` | expected noise control — lower `incidents.debounce` if you want faster (but noisier) reactions, or set `0` to disable |
 
 ---
 

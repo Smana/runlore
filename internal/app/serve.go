@@ -242,7 +242,11 @@ func RunServe(version string, args []string) error {
 	if err != nil {
 		return fmt.Errorf("build sources: %w", err)
 	}
-	pipe := source.NewPipeline(cfg, alertEnq, resolve, log).WithMetrics(metrics)
+	pipe := source.NewPipeline(cfg, alertEnq, resolve, log).WithMetrics(metrics).WithContext(workCtx)
+	if w := cfg.Triggers.Incidents.Debounce.Std(); w > 0 {
+		log.Info("incident debounce enabled",
+			"window", w, "note", "firing alerts held; dropped if resolved within the window")
+	}
 
 	// startWork runs the leader-only loops (investigation queue + failure watch +
 	// re-investigate poller), scoped to a context cancelled when leadership is lost.

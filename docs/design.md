@@ -172,6 +172,9 @@ triggers:
     ignore:
       alertnames:  [Watchdog, InfoInhibitor]
     dedup: { window: 30m }              # don't re-open a still-firing alert
+    debounce: 5m                        # hold a firing alert, skip it if a matching
+                                        # resolved webhook lands within the window
+                                        # (default 0 = investigate immediately)
   gitops_failures:                      # secondary trigger (enabled via sources.gitops)
     debounce: 60s                       # require the failure to persist this long
                                         # (re-check still Ready=False) before

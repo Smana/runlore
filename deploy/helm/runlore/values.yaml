@@ -39,6 +39,15 @@ config:
         severity: [critical]
       dedup:
         window: 30m
+      # Pre-investigation debounce: hold a firing alert this long, then investigate
+      # only if it is STILL active — i.e. no matching Alertmanager `resolved` webhook
+      # arrived within the window. Skips self-resolving alerts (e.g. a
+      # KubeDaemonSetRolloutStuck during a Karpenter node-churn cycle) that would
+      # otherwise burn a full investigation on noise and are often already resolved by
+      # the time a finding lands. Defaults to 0 (investigate immediately, today's
+      # behavior); opt-in. Composes with coalesce (survivors are batched afterwards)
+      # and dedup (re-fires are still suppressed before the hold begins).
+      debounce: 0s
     # Failure POLICY for the gitops source (enablement lives under sources.gitops).
     gitops_failures:
       # Debounce transient Flux failures: wait this long, then re-read the

@@ -226,6 +226,8 @@ config:
         # environment: [prod]           # only matches alerts that CARRY an `environment`
                                         # label — omit it if yours don't, or nothing fires
       dedup: { window: 30m }
+      # debounce: 5m           # hold a firing alert this long, then skip it if it
+                               # self-resolved within the window (default 0 = off)
     # gitops_failures:
     #   debounce: 60s          # re-check window before investigating a Flux failure
 
