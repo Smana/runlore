@@ -80,6 +80,12 @@ func applyDefaults(c *Config) {
 	if c.Investigation.ToolTimeout == 0 {
 		c.Investigation.ToolTimeout = Duration(60 * time.Second)
 	}
+	// Interim progress-update default: when enabled without an explicit cadence,
+	// ping every 5 steps — frequent enough to reassure on a long investigation,
+	// sparse enough to avoid chat noise. Left at 0 when disabled (unused).
+	if c.Investigation.ProgressUpdates.Enabled && c.Investigation.ProgressUpdates.EverySteps == 0 {
+		c.Investigation.ProgressUpdates.EverySteps = 5
+	}
 	// Instant-recall trust defaults: when enabled without explicit tuning, keep the
 	// margin and solo gates active. A zero margin_gap/solo_floor would degrade recall
 	// to a bare similarity threshold — the exact brittleness this feature removes.
