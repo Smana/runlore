@@ -46,8 +46,6 @@ analysis lands as a threaded reply under that summary.
 <img src="assets/slack-notification.png" alt="RunLore Slack notification — verdict-first summary with confidence-scored root cause, alert metadata, recurrence, suggested next steps, ruled-out hypotheses and a link to the knowledge-base PR" width="760" />
 </div>
 
-> ℹ️ The screenshot above predates the verdict-first layout and will be regenerated.
-
 ## How it works
 
 ```mermaid
