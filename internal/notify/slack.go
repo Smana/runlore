@@ -107,58 +107,77 @@ var (
 	_ providers.ProgressNotifier = (*SlackBot)(nil)
 )
 
-// Deliver posts the formatted investigation to the configured channel via
-// chat.postMessage, surfacing both transport and Slack API (ok:false) errors.
+// Deliver posts the compact summary to the channel, then the full analysis as a
+// thread reply so the channel stays a scannable triage feed. The summary IS the
+// notification; the detail reply is secondary, so a failed thread post returns a
+// wrapped error that records the summary already landed — Multi logs it without
+// implying the alert went undelivered. Nothing is threaded when the summary post
+// yields no ts (empty-body path) or the investigation has no detail beyond it.
 func (s *SlackBot) Deliver(ctx context.Context, inv providers.Investigation) error {
-	return s.post(ctx, slackMessage(inv))
+	ts, err := s.post(ctx, map[string]any{"text": fallbackText(inv), "blocks": summaryBlocks(inv)})
+	if err != nil {
+		return err
+	}
+	detail := detailBlocks(inv)
+	if ts == "" || len(detail) == 0 {
+		return nil
+	}
+	msg := map[string]any{"text": "Full analysis: " + escapeMrkdwn(truncate(inv.Title, 120)), "blocks": detail, "thread_ts": ts}
+	if _, err := s.post(ctx, msg); err != nil {
+		return fmt.Errorf("slack detail thread (summary delivered): %w", err)
+	}
+	return nil
 }
 
 // DeliverProgress posts an interim progress ping to the channel (ProgressNotifier).
 func (s *SlackBot) DeliverProgress(ctx context.Context, up providers.ProgressUpdate) error {
-	return s.post(ctx, slackProgressMessage(up))
+	_, err := s.post(ctx, slackProgressMessage(up))
+	return err
 }
 
 // post targets the message at the configured channel and sends it via
-// chat.postMessage, surfacing transport and Slack API (ok:false) errors. Shared
-// by Deliver and DeliverProgress.
-func (s *SlackBot) post(ctx context.Context, msg map[string]any) error {
+// chat.postMessage, surfacing transport and Slack API (ok:false) errors, and
+// returns the posted message's ts — the handle a threaded reply keys on ("" on
+// the empty-body 2xx path). Shared by Deliver and DeliverProgress.
+func (s *SlackBot) post(ctx context.Context, msg map[string]any) (string, error) {
 	msg["channel"] = s.channel
 	body, err := json.Marshal(msg)
 	if err != nil {
-		return err
+		return "", err
 	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, s.baseURL+"/api/chat.postMessage", bytes.NewReader(body))
 	if err != nil {
-		return err
+		return "", err
 	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Authorization", "Bearer "+s.token)
 	resp, err := s.http.Do(req)
 	if err != nil {
-		return fmt.Errorf("slack post: %w", err)
+		return "", fmt.Errorf("slack post: %w", err)
 	}
 	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode/100 != 2 {
-		return fmt.Errorf("slack status %d", resp.StatusCode)
+		return "", fmt.Errorf("slack status %d", resp.StatusCode)
 	}
 	var result struct {
 		OK    bool   `json:"ok"`
 		Error string `json:"error"`
+		TS    string `json:"ts"`
 	}
 	respBody, err := io.ReadAll(resp.Body)
 	if err != nil {
-		return fmt.Errorf("slack read response: %w", err)
+		return "", fmt.Errorf("slack read response: %w", err)
 	}
 	if len(bytes.TrimSpace(respBody)) == 0 {
-		return nil // a 2xx with an empty body is a successful post, not a failure
+		return "", nil // a 2xx with an empty body is a successful post, not a failure
 	}
 	if err := json.Unmarshal(respBody, &result); err != nil {
-		return fmt.Errorf("slack decode response: %w", err)
+		return "", fmt.Errorf("slack decode response: %w", err)
 	}
 	if !result.OK {
-		return fmt.Errorf("slack chat.postMessage: %s", result.Error)
+		return "", fmt.Errorf("slack chat.postMessage: %s", result.Error)
 	}
-	return nil
+	return result.TS, nil
 }
 
 // Slack interaction action_ids — must match the server's /slack/interactions handler.

@@ -79,6 +79,112 @@ func TestSlackBotAPIError(t *testing.T) {
 	}
 }
 
+// TestSlackBotDeliverThreadsDetail proves the bot path posts a compact summary to
+// the channel, then the full analysis as a thread reply keyed on the summary's ts.
+func TestSlackBotDeliverThreadsDetail(t *testing.T) {
+	var posts []map[string]any
+	var raw []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		b, _ := io.ReadAll(r.Body)
+		raw = append(raw, string(b))
+		var m map[string]any
+		_ = json.Unmarshal(b, &m)
+		posts = append(posts, m)
+		w.Header().Set("Content-Type", "application/json")
+		if len(posts) == 1 {
+			_, _ = w.Write([]byte(`{"ok":true,"ts":"111.222"}`))
+		} else {
+			_, _ = w.Write([]byte(`{"ok":true}`))
+		}
+	}))
+	defer srv.Close()
+
+	bot := &SlackBot{token: "xoxb-test", channel: "C123", baseURL: srv.URL, http: srv.Client()}
+	if err := bot.Deliver(context.Background(), sampleInvestigation()); err != nil {
+		t.Fatalf("Deliver: %v", err)
+	}
+	if len(posts) != 2 {
+		t.Fatalf("got %d POSTs, want 2", len(posts))
+	}
+	// First message: the summary, posted to the channel with no thread_ts.
+	if _, ok := posts[0]["thread_ts"]; ok {
+		t.Fatalf("summary must not carry thread_ts: %v", posts[0])
+	}
+	if !contains(raw[0], "Action required") {
+		t.Fatalf("summary blocks missing verdict summary:\n%s", raw[0])
+	}
+	// Second message: the detail, threaded under the summary's ts.
+	if posts[1]["thread_ts"] != "111.222" {
+		t.Fatalf("detail thread_ts = %v, want 111.222", posts[1]["thread_ts"])
+	}
+	if !contains(raw[1], "Full analysis") {
+		t.Fatalf("detail blocks missing full analysis:\n%s", raw[1])
+	}
+	// The detail reply's fallback text is a short pointer, not the full body.
+	text, _ := posts[1]["text"].(string)
+	if !strings.HasPrefix(text, "Full analysis") {
+		t.Fatalf("detail fallback text = %q, want short 'Full analysis' pointer", text)
+	}
+	if len(text) > 200 {
+		t.Fatalf("detail fallback text too long (%d chars): %q", len(text), text)
+	}
+}
+
+// TestSlackBotDeliverNoThreadWhenNoDetail proves a minimal investigation (nothing
+// beyond the summary) posts exactly one message — no empty thread reply.
+func TestSlackBotDeliverNoThreadWhenNoDetail(t *testing.T) {
+	var posts int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		posts++
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"ok":true,"ts":"111.222"}`))
+	}))
+	defer srv.Close()
+
+	inv := providers.Investigation{
+		Title:      "brief blip",
+		Verdict:    providers.VerdictNoAction,
+		Confidence: 0.5,
+		RootCauses: []providers.Hypothesis{{Summary: "transient", Confidence: 0.5, Evidence: []string{"one"}}},
+	}
+	bot := &SlackBot{token: "xoxb-test", channel: "C123", baseURL: srv.URL, http: srv.Client()}
+	if err := bot.Deliver(context.Background(), inv); err != nil {
+		t.Fatalf("Deliver: %v", err)
+	}
+	if posts != 1 {
+		t.Fatalf("got %d POSTs, want 1 (no detail thread)", posts)
+	}
+}
+
+// TestSlackBotDeliverDetailBestEffort proves a failed detail thread reply is
+// surfaced as a wrapped error — but the wrapping records that the summary (the
+// notification) already landed, so Multi logs it without implying total failure.
+func TestSlackBotDeliverDetailBestEffort(t *testing.T) {
+	var posts int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		posts++
+		w.Header().Set("Content-Type", "application/json")
+		if posts == 1 {
+			_, _ = w.Write([]byte(`{"ok":true,"ts":"111.222"}`))
+		} else {
+			_, _ = w.Write([]byte(`{"ok":false,"error":"ratelimited"}`))
+		}
+	}))
+	defer srv.Close()
+
+	bot := &SlackBot{token: "xoxb-test", channel: "C123", baseURL: srv.URL, http: srv.Client()}
+	err := bot.Deliver(context.Background(), sampleInvestigation())
+	if err == nil {
+		t.Fatal("a failed detail thread must surface an error")
+	}
+	if !contains(err.Error(), "summary delivered") || !contains(err.Error(), "ratelimited") {
+		t.Fatalf("error should wrap the detail failure noting the summary landed, got %v", err)
+	}
+	if posts != 2 {
+		t.Fatalf("got %d POSTs, want 2", posts)
+	}
+}
+
 func contains(s, sub string) bool { return len(s) >= len(sub) && (s == sub || indexOf(s, sub) >= 0) }
 func indexOf(s, sub string) int {
 	for i := 0; i+len(sub) <= len(s); i++ {
