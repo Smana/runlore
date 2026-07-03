@@ -307,6 +307,9 @@ func RunServe(version string, args []string) error {
 	if auto != nil {
 		acts.Pauser = auto // avoid a typed-nil interface when auto is disabled
 	}
+	if ledger != nil {
+		acts.Feedback = ledger // typed-nil guard: a disabled ledger must stay a nil interface
+	}
 	srv := server.New(ReadyFunc(leader.Load, cat, CatalogConfigured(cfg)), acts, built, pipe, metricsHandler, log)
 	if cz != nil {
 		go cz.Run(workCtx, cfg.Investigation.Coalesce.Debounce.Std()/2)

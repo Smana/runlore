@@ -124,6 +124,63 @@ func TestSlackRejectRequiresApprover(t *testing.T) {
 	}
 }
 
+// recordFeedback is a spy FeedbackRecorder capturing the last recorded rating.
+type recordFeedback struct {
+	calls []struct{ key, fp, rating string }
+}
+
+func (r *recordFeedback) Feedback(triggerKey, fingerprint, rating string, _ time.Time) error {
+	r.calls = append(r.calls, struct{ key, fp, rating string }{triggerKey, fingerprint, rating})
+	return nil
+}
+
+// TestSlackFeedbackInteraction locks the 👍/👎 path: feedback is unprivileged (works
+// with approvals==nil and for a user NOT in the approver allowlist), up/down map to
+// the ledger ratings, and an approve click with approvals==nil returns a "not
+// enabled" ack rather than a 404.
+func TestSlackFeedbackInteraction(t *testing.T) {
+	const secret = "shh"
+	fb := &recordFeedback{}
+	// No approvals, an empty approver allowlist: feedback must still be recorded.
+	srv := New(nil, Actions{SlackSecret: secret, Feedback: fb}, nil, nil, nil, discardLog)
+
+	post := func(actionID, value string) *httptest.ResponseRecorder {
+		payload := `{"user":{"id":"U9","username":"bob"},"actions":[{"action_id":"` + actionID + `","value":"` + value + `"}]}`
+		body := "payload=" + url.QueryEscape(payload)
+		ts := strconv.FormatInt(time.Now().Unix(), 10)
+		req := httptest.NewRequest(http.MethodPost, "/slack/interactions", strings.NewReader(body))
+		req.Header.Set("X-Slack-Request-Timestamp", ts)
+		req.Header.Set("X-Slack-Signature", slackSign(secret, ts, body))
+		rr := httptest.NewRecorder()
+		srv.Handler().ServeHTTP(rr, req)
+		return rr
+	}
+
+	// 👍 from a non-allowlisted user, approvals disabled → 200, recorded as ("k","","up").
+	if rr := post("runlore_feedback_up", "k"); rr.Code != http.StatusOK {
+		t.Fatalf("feedback up = %d, want 200", rr.Code)
+	}
+	// 👎 → recorded as ("k2","","down").
+	if rr := post("runlore_feedback_down", "k2"); rr.Code != http.StatusOK {
+		t.Fatalf("feedback down = %d, want 200", rr.Code)
+	}
+	if len(fb.calls) != 2 {
+		t.Fatalf("expected 2 feedback calls, got %d: %+v", len(fb.calls), fb.calls)
+	}
+	if fb.calls[0] != (struct{ key, fp, rating string }{"k", "", "up"}) {
+		t.Fatalf("up call = %+v, want {k  up}", fb.calls[0])
+	}
+	if fb.calls[1] != (struct{ key, fp, rating string }{"k2", "", "down"}) {
+		t.Fatalf("down call = %+v, want {k2  down}", fb.calls[1])
+	}
+
+	// runlore_approve with approvals==nil must ack (200), not 404 — the guard now
+	// admits feedback-only servers, so approve returns a "not enabled" message.
+	if rr := post("runlore_approve", "a1"); rr.Code != http.StatusOK {
+		t.Fatalf("approve with approvals==nil = %d, want 200 (not-enabled ack)", rr.Code)
+	}
+}
+
 type spyEnqueuer struct{ reqs []investigate.Request }
 
 func (s *spyEnqueuer) Enqueue(r investigate.Request) { s.reqs = append(s.reqs, r) }
