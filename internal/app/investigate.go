@@ -21,6 +21,7 @@ import (
 	"github.com/Smana/runlore/internal/network/awsvpc"
 	"github.com/Smana/runlore/internal/network/gcpfirewall"
 	"github.com/Smana/runlore/internal/network/hubble"
+	"github.com/Smana/runlore/internal/notify"
 	"github.com/Smana/runlore/internal/outcome"
 	"github.com/Smana/runlore/internal/providers"
 	awscloud "github.com/Smana/runlore/internal/providers/cloud/aws"
@@ -233,6 +234,13 @@ func BuildInvestigator(ctx context.Context, cfg *config.Config, gp providers.Git
 	}
 	log.Info("delivery notifiers", "count", notifier.Len())
 	cur := BuildCurator(cfg, BuildForgeTokenSource(cfg, log), cat, metrics, log)
+	// Assign via a concrete-nil check so a disabled curator (BuildCurator returns a
+	// nil *curator.Curator) stays a nil interface — not a non-nil typed-nil that would
+	// pass onInvestigationComplete's `cur != nil` guard and panic on Curate.
+	var curOrNil investigationCurator
+	if cur != nil {
+		curOrNil = cur
+	}
 	actions := action.New(cfg.Actions)
 	if actions.Enabled() {
 		log.Info("action policy enabled", "mode", string(actions.Mode()))
@@ -289,81 +297,117 @@ func BuildInvestigator(ctx context.Context, cfg *config.Config, gp providers.Git
 		OnProgress:                onProgress,
 		ProgressEverySteps:        progressEverySteps,
 		OnComplete: func(found providers.Investigation) {
-			// Record the outcome "open" first: this investigation happened for an
-			// incident, with the answer we used (recall vs fresh). A matching
-			// resolved-alert webhook later stamps whether it actually resolved.
-			// Skip sources without an alert fingerprint (GitOps watch, reinvestigate
-			// poller) — they could never be matched by a resolved-alert webhook.
-			fps := found.Fingerprints
-			if len(fps) == 0 && found.Fingerprint != "" {
-				fps = []string{found.Fingerprint}
-			}
-			if len(fps) > 0 {
-				kind := OutcomeKind(found.Recalled)
-				now := time.Now()
-				// The deterministic dedup fingerprint (resource+cause) is the curated PR's
-				// stable resolution-join key: it is the same value draftKBEntry stamps into
-				// the PR body, so a later resolve matches the PR regardless of the LLM's
-				// re-worded title. Computed once for the whole batch.
-				dupFP := curator.DupFingerprint(found)
-				// One open per constituent fingerprint (coalesced batches fan out), so
-				// every alert's resolve webhook can later match this investigation.
-				for _, fp := range fps {
-					if err := ledger.Open(outcome.Event{
-						Fingerprint:    fp,
-						DupFingerprint: dupFP,
-						Kind:           kind,
-						Entry:          found.RecalledEntry,
-						Title:          found.Title,
-						Resource:       found.Resource.Ref(),
-						At:             now,
-					}); err != nil {
-						log.Warn("outcome ledger open failed", "fingerprint", fp, "err", err)
-					}
-					if metrics != nil {
-						metrics.OutcomesOpened.Add(ctx, 1, metric.WithAttributes(attribute.String("kind", kind)))
-					}
-				}
-			}
-			// Post-investigation action handling, by mode. The loop has already
-			// filtered found.Actions to the envelope (rung 1). auto and approvals are
-			// mutually exclusive (one is nil unless that mode is configured).
-			switch {
-			case auto != nil:
-				// Rung 3: evaluate + execute eligible actions (reversible/confidence/
-				// rate/kill-switch gated); descriptions are annotated with the outcome.
-				found.Actions = auto.Run(ctx, found)
-			case approvals != nil:
-				// Rung 2: register envelope-compliant actions for human approval; annotate
-				// with how to approve (curl) and the ApprovalID (Slack buttons).
-				for i := range found.Actions {
-					id := approvals.Register(found.Actions[i])
-					found.Actions[i].ApprovalID = id
-					found.Actions[i].Description = fmt.Sprintf("%s — approve: POST /actions/%s/approve", found.Actions[i].Description, id)
-				}
-				if len(found.Actions) > 0 {
-					log.Info("actions registered for approval", "count", len(found.Actions))
-				}
-			}
-			log.Info("findings",
-				"confidence", found.Confidence, "root_causes", len(found.RootCauses), "unresolved", len(found.Unresolved))
-			// Curate first so the delivered message can link to the KB issue/PR.
-			if cur != nil {
-				if ref, err := cur.Curate(context.Background(), found); err != nil {
-					log.Error("curate findings", "err", err)
-				} else if ref.URL != "" {
-					found.CuratedURL = ref.URL
-					log.Info("curated", "url", ref.URL)
-				}
-			}
-			if err := notifier.Deliver(context.Background(), found); err != nil {
-				log.Error("deliver findings", "err", err)
-			} else {
-				log.Info("delivered findings",
-					"confidence", found.Confidence, "root_causes", len(found.RootCauses), "curated_url", found.CuratedURL)
-			}
+			onInvestigationComplete(ctx, found, ledger, curOrNil, notifier, auto, approvals, metrics, log)
 		},
 	}, cat, nil
+}
+
+// investigationCurator opens a KB issue/PR for an investigation's findings.
+// Satisfied by *curator.Curator; abstracted so onInvestigationComplete's ordering
+// is unit-testable with a stub that need not talk to a forge.
+type investigationCurator interface {
+	Curate(ctx context.Context, inv providers.Investigation) (providers.Ref, error)
+}
+
+// onInvestigationComplete runs the post-investigation pipeline once the loop returns
+// findings: stamp recurrence facts, curate, record the outcome open, handle actions,
+// then deliver. Extracted from BuildInvestigator's OnComplete closure so the ordering
+// (which the outcome open and recurrence pointers depend on) is unit-testable.
+//
+// Order matters: recurrence facts are read BEFORE this run's own open is recorded,
+// and curate runs BEFORE the open so the open durably carries the KB link.
+func onInvestigationComplete(ctx context.Context, found providers.Investigation, ledger *outcome.Ledger, cur investigationCurator, notifier *notify.Multi, auto *action.Auto, approvals *action.Approvals, metrics *telemetry.Metrics, log *slog.Logger) {
+	// Recurrence facts BEFORE recording this run's own open, so the count and
+	// "previous" pointer describe prior investigations only. Occurrences returns the
+	// total opens recorded so far for this TriggerKey; this run adds one, hence n+1
+	// (and 1 the first time a key with no prior opens is seen).
+	if n, last, url := ledger.Occurrences(found.TriggerKey); n > 0 {
+		found.Occurrences = n + 1
+		found.LastOccurrence = last
+		found.PrevCuratedURL = url
+	} else if found.TriggerKey != "" {
+		found.Occurrences = 1
+	}
+	// Curate BEFORE recording the outcome open — the open event is the durable record
+	// of THIS investigation and must carry the KB link that recurrence pointers and
+	// the learning loop later read back; delivery also links to the KB issue/PR. A
+	// curate failure is non-fatal (log + continue) so opens are still recorded and the
+	// findings are still delivered.
+	if cur != nil {
+		if ref, err := cur.Curate(context.Background(), found); err != nil {
+			log.Error("curate findings", "err", err)
+		} else if ref.URL != "" {
+			found.CuratedURL = ref.URL
+			log.Info("curated", "url", ref.URL)
+		}
+	}
+	// Record the outcome "open": this investigation happened for an incident, with the
+	// answer we used (recall vs fresh) and the KB link curate just produced. A matching
+	// resolved-alert webhook later stamps whether it actually resolved. Skip sources
+	// without an alert fingerprint (GitOps watch, reinvestigate poller) — they could
+	// never be matched by a resolved-alert webhook.
+	fps := found.Fingerprints
+	if len(fps) == 0 && found.Fingerprint != "" {
+		fps = []string{found.Fingerprint}
+	}
+	if len(fps) > 0 {
+		kind := OutcomeKind(found.Recalled)
+		now := time.Now()
+		// The deterministic dedup fingerprint (resource+cause) is the curated PR's
+		// stable resolution-join key: it is the same value draftKBEntry stamps into
+		// the PR body, so a later resolve matches the PR regardless of the LLM's
+		// re-worded title. Computed once for the whole batch.
+		dupFP := curator.DupFingerprint(found)
+		// One open per constituent fingerprint (coalesced batches fan out), so
+		// every alert's resolve webhook can later match this investigation.
+		for _, fp := range fps {
+			if err := ledger.Open(outcome.Event{
+				Fingerprint:    fp,
+				DupFingerprint: dupFP,
+				Kind:           kind,
+				Entry:          found.RecalledEntry,
+				Title:          found.Title,
+				Resource:       found.Resource.Ref(),
+				TriggerKey:     found.TriggerKey,
+				CuratedURL:     found.CuratedURL,
+				Verdict:        string(found.Verdict),
+				At:             now,
+			}); err != nil {
+				log.Warn("outcome ledger open failed", "fingerprint", fp, "err", err)
+			}
+			if metrics != nil {
+				metrics.OutcomesOpened.Add(ctx, 1, metric.WithAttributes(attribute.String("kind", kind)))
+			}
+		}
+	}
+	// Post-investigation action handling, by mode. The loop has already
+	// filtered found.Actions to the envelope (rung 1). auto and approvals are
+	// mutually exclusive (one is nil unless that mode is configured).
+	switch {
+	case auto != nil:
+		// Rung 3: evaluate + execute eligible actions (reversible/confidence/
+		// rate/kill-switch gated); descriptions are annotated with the outcome.
+		found.Actions = auto.Run(ctx, found)
+	case approvals != nil:
+		// Rung 2: register envelope-compliant actions for human approval; annotate
+		// with how to approve (curl) and the ApprovalID (Slack buttons).
+		for i := range found.Actions {
+			id := approvals.Register(found.Actions[i])
+			found.Actions[i].ApprovalID = id
+			found.Actions[i].Description = fmt.Sprintf("%s — approve: POST /actions/%s/approve", found.Actions[i].Description, id)
+		}
+		if len(found.Actions) > 0 {
+			log.Info("actions registered for approval", "count", len(found.Actions))
+		}
+	}
+	log.Info("findings",
+		"confidence", found.Confidence, "root_causes", len(found.RootCauses), "unresolved", len(found.Unresolved))
+	if err := notifier.Deliver(context.Background(), found); err != nil {
+		log.Error("deliver findings", "err", err)
+	} else {
+		log.Info("delivered findings",
+			"confidence", found.Confidence, "root_causes", len(found.RootCauses), "curated_url", found.CuratedURL)
+	}
 }
 
 // BuildFailureDebouncer wires a Debouncer whose "still failing?" re-check reads

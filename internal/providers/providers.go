@@ -434,6 +434,12 @@ type Investigation struct {
 	RecalledEntry string      // when Recalled: the catalog entry Path that was matched
 	Verified      bool        // true when the adversarial verify pass ran and a root cause survived it
 	Usage         UsageTotals // per-investigation model token/cost accounting (loop + verify); surfaced to humans + metrics, never written to the curated KB body
+	// Recurrence facts stamped at completion from the outcome ledger's per-TriggerKey
+	// index (never seen by the model). They describe PRIOR investigations of the same
+	// TriggerKey; this run's own open is recorded after they are read.
+	Occurrences    int       // Nth recorded investigation of this TriggerKey (1 = first); 0 = unknown/ledger disabled
+	LastOccurrence time.Time // when the previous occurrence was investigated
+	PrevCuratedURL string    // the previous occurrence's KB link, for the "same conclusion as before" pointer
 }
 
 // UsageTotals aggregates model token usage over a whole investigation: every
