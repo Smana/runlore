@@ -49,6 +49,7 @@ func TestDeliverPOSTsJSON(t *testing.T) {
 		Verdict:        providers.VerdictActionRequired,
 		Severity:       "critical",
 		Cluster:        "eu-west-1",
+		Environment:    "prod",
 		Tenant:         "platform",
 		AlertName:      "HarborDown",
 		StartedAt:      time.Date(2026, 7, 3, 10, 0, 0, 0, time.UTC),
@@ -76,6 +77,7 @@ func TestDeliverPOSTsJSON(t *testing.T) {
 		Verdict        string   `json:"verdict"`
 		Severity       string   `json:"severity"`
 		Cluster        string   `json:"cluster"`
+		Environment    string   `json:"environment"`
 		Tenant         string   `json:"tenant"`
 		AlertName      string   `json:"alert_name"`
 		StartedAt      string   `json:"started_at"`
@@ -101,6 +103,9 @@ func TestDeliverPOSTsJSON(t *testing.T) {
 	}
 	if p.Severity != "critical" || p.Cluster != "eu-west-1" || p.Tenant != "platform" || p.AlertName != "HarborDown" {
 		t.Errorf("metadata mismatch: severity=%q cluster=%q tenant=%q alert=%q", p.Severity, p.Cluster, p.Tenant, p.AlertName)
+	}
+	if p.Environment != "prod" {
+		t.Errorf("environment = %q, want prod", p.Environment)
 	}
 	if p.StartedAt != "2026-07-03T10:00:00Z" {
 		t.Errorf("started_at = %q, want RFC3339 UTC", p.StartedAt)

@@ -51,6 +51,7 @@ type payload struct {
 	Verdict        string   `json:"verdict,omitempty"`
 	Severity       string   `json:"severity,omitempty"`
 	Cluster        string   `json:"cluster,omitempty"`
+	Environment    string   `json:"environment,omitempty"`
 	Tenant         string   `json:"tenant,omitempty"`
 	AlertName      string   `json:"alert_name,omitempty"`
 	StartedAt      string   `json:"started_at,omitempty"` // RFC3339; "" when unknown
@@ -76,6 +77,7 @@ func (n *Notifier) Deliver(ctx context.Context, inv providers.Investigation) err
 		Verdict:        string(inv.Verdict),
 		Severity:       inv.Severity,
 		Cluster:        inv.Cluster,
+		Environment:    inv.Environment,
 		Tenant:         inv.Tenant,
 		AlertName:      inv.AlertName,
 		StartedAt:      startedAt,
