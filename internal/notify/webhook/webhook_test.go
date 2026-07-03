@@ -9,6 +9,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"testing"
+	"time"
 
 	"gopkg.in/yaml.v3"
 
@@ -42,9 +43,19 @@ func TestDeliverPOSTsJSON(t *testing.T) {
 	ts, body, ct := captureServer(t, http.StatusOK)
 
 	inv := providers.Investigation{
-		Title:      "X",
-		Confidence: 0.9,
-		Resource:   providers.Workload{Namespace: "ns", Name: "web"},
+		Title:          "X",
+		Confidence:     0.9,
+		Resource:       providers.Workload{Namespace: "ns", Name: "web"},
+		Verdict:        providers.VerdictActionRequired,
+		Severity:       "critical",
+		Cluster:        "eu-west-1",
+		Tenant:         "platform",
+		AlertName:      "HarborDown",
+		StartedAt:      time.Date(2026, 7, 3, 10, 0, 0, 0, time.UTC),
+		Occurrences:    3,
+		PrevCuratedURL: "https://kb.example/entry/prev",
+		RuledOut:       []string{"network partition disproven"},
+		DataGaps:       []string{"disk metrics unavailable"},
 	}
 
 	n := New(ts.URL)
@@ -57,11 +68,21 @@ func TestDeliverPOSTsJSON(t *testing.T) {
 	}
 
 	var p struct {
-		Title      string  `json:"title"`
-		Confidence float64 `json:"confidence"`
-		Namespace  string  `json:"namespace"`
-		Resource   string  `json:"resource"`
-		Text       string  `json:"text"`
+		Title          string   `json:"title"`
+		Confidence     float64  `json:"confidence"`
+		Namespace      string   `json:"namespace"`
+		Resource       string   `json:"resource"`
+		Text           string   `json:"text"`
+		Verdict        string   `json:"verdict"`
+		Severity       string   `json:"severity"`
+		Cluster        string   `json:"cluster"`
+		Tenant         string   `json:"tenant"`
+		AlertName      string   `json:"alert_name"`
+		StartedAt      string   `json:"started_at"`
+		Occurrences    int      `json:"occurrences"`
+		PrevCuratedURL string   `json:"prev_curated_url"`
+		RuledOut       []string `json:"ruled_out"`
+		DataGaps       []string `json:"data_gaps"`
 	}
 	if err := json.Unmarshal(body(), &p); err != nil {
 		t.Fatalf("unmarshal body: %v", err)
@@ -74,6 +95,24 @@ func TestDeliverPOSTsJSON(t *testing.T) {
 	}
 	if p.Text == "" {
 		t.Error("text field must be non-empty")
+	}
+	if p.Verdict != string(providers.VerdictActionRequired) {
+		t.Errorf("verdict = %q, want %q", p.Verdict, providers.VerdictActionRequired)
+	}
+	if p.Severity != "critical" || p.Cluster != "eu-west-1" || p.Tenant != "platform" || p.AlertName != "HarborDown" {
+		t.Errorf("metadata mismatch: severity=%q cluster=%q tenant=%q alert=%q", p.Severity, p.Cluster, p.Tenant, p.AlertName)
+	}
+	if p.StartedAt != "2026-07-03T10:00:00Z" {
+		t.Errorf("started_at = %q, want RFC3339 UTC", p.StartedAt)
+	}
+	if p.Occurrences != 3 {
+		t.Errorf("occurrences = %d, want 3", p.Occurrences)
+	}
+	if p.PrevCuratedURL != "https://kb.example/entry/prev" {
+		t.Errorf("prev_curated_url = %q", p.PrevCuratedURL)
+	}
+	if len(p.RuledOut) != 1 || len(p.DataGaps) != 1 {
+		t.Errorf("ruled_out=%v data_gaps=%v, want one each", p.RuledOut, p.DataGaps)
 	}
 }
 
