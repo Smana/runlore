@@ -2,7 +2,6 @@ package notify
 
 import (
 	"bytes"
-	"cmp"
 	"context"
 	"encoding/json"
 	"errors"
@@ -183,10 +182,8 @@ func (s *SlackBot) post(ctx context.Context, msg map[string]any) (string, error)
 
 // Slack interaction action_ids — must match the server's /slack/interactions handler.
 const (
-	approveActionID      = "runlore_approve"
-	rejectActionID       = "runlore_reject"
-	feedbackUpActionID   = "runlore_feedback_up"
-	feedbackDownActionID = "runlore_feedback_down"
+	approveActionID = "runlore_approve"
+	rejectActionID  = "runlore_reject"
 )
 
 // slackMessage builds the Slack payload: a verdict-first Block Kit summary
@@ -443,19 +440,6 @@ func summaryBlocks(inv providers.Investigation) []map[string]any {
 					"text": map[string]any{"type": "plain_text", "text": "Reject"}},
 			}},
 		)
-	}
-
-	// 11. Human feedback on the verdict — ground truth for the learning loop. Keyed by
-	// TriggerKey (incident identity) so ratings survive re-worded re-investigations,
-	// falling back to the fingerprint. Unlike the approval buttons these render for
-	// every delivered investigation, independent of any pending action.
-	if key := cmp.Or(inv.TriggerKey, inv.Fingerprint); key != "" {
-		blocks = append(blocks, map[string]any{"type": "actions", "elements": []map[string]any{
-			{"type": "button", "action_id": feedbackUpActionID, "value": key,
-				"text": map[string]any{"type": "plain_text", "text": "👍 Accurate", "emoji": true}},
-			{"type": "button", "action_id": feedbackDownActionID, "value": key,
-				"text": map[string]any{"type": "plain_text", "text": "👎 Off-base", "emoji": true}},
-		}})
 	}
 	return blocks
 }

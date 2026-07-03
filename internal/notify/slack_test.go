@@ -222,32 +222,6 @@ func TestSlackMessageButtons(t *testing.T) {
 	}
 }
 
-func TestSlackFeedbackButtons(t *testing.T) {
-	// TriggerKey present → a feedback actions block with both action_ids and the key
-	// as the button value. Feedback renders even with no ApprovalID actions.
-	blocks := summaryBlocks(providers.Investigation{Confidence: 0.5, TriggerKey: "k"})
-	raw, _ := json.Marshal(blocks)
-	for _, want := range []string{"runlore_feedback_up", "runlore_feedback_down", `"value":"k"`, "Accurate", "Off-base"} {
-		if !contains(string(raw), want) {
-			t.Fatalf("feedback blocks missing %q:\n%s", want, raw)
-		}
-	}
-
-	// No TriggerKey but a Fingerprint → falls back to the fingerprint as the value.
-	blocks = summaryBlocks(providers.Investigation{Confidence: 0.5, Fingerprint: "fp1"})
-	raw, _ = json.Marshal(blocks)
-	if !contains(string(raw), `"value":"fp1"`) {
-		t.Fatalf("feedback value should fall back to Fingerprint:\n%s", raw)
-	}
-
-	// Neither TriggerKey nor Fingerprint → no feedback block at all.
-	blocks = summaryBlocks(providers.Investigation{Confidence: 0.5})
-	raw, _ = json.Marshal(blocks)
-	if contains(string(raw), "runlore_feedback") {
-		t.Fatalf("did not expect feedback buttons without a TriggerKey or Fingerprint:\n%s", raw)
-	}
-}
-
 func TestSlackBlocksLayout(t *testing.T) {
 	inv := providers.Investigation{
 		Title:      "VictoriaTracesDown",

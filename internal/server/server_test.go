@@ -20,7 +20,6 @@ import (
 	"github.com/Smana/runlore/internal/audit"
 	"github.com/Smana/runlore/internal/config"
 	"github.com/Smana/runlore/internal/investigate"
-	"github.com/Smana/runlore/internal/outcome"
 	"github.com/Smana/runlore/internal/providers"
 	"github.com/Smana/runlore/internal/source"
 	_ "github.com/Smana/runlore/internal/source/alertmanager" // self-registers the alertmanager webhook source
@@ -125,91 +124,16 @@ func TestSlackRejectRequiresApprover(t *testing.T) {
 	}
 }
 
-// recordFeedback is a spy FeedbackRecorder capturing the last recorded rating.
-type recordFeedback struct {
-	calls []struct{ key, fp, rating string }
-}
-
-func (r *recordFeedback) Feedback(triggerKey, fingerprint, rating string, _ time.Time) error {
-	r.calls = append(r.calls, struct{ key, fp, rating string }{triggerKey, fingerprint, rating})
-	return nil
-}
-
-// TestSlackFeedbackInteraction locks the 👍/👎 path: feedback is unprivileged (works
-// with approvals==nil and for a user NOT in the approver allowlist), up/down map to
-// the ledger ratings, and an approve click with approvals==nil returns a "not
-// enabled" ack rather than a 404.
-func TestSlackFeedbackInteraction(t *testing.T) {
+// TestSlackInteractionDisabledWithoutApprovals pins the contract that the
+// /slack/interactions endpoint exists ONLY to drive Approve/Reject on queued
+// actions: with no approval queue wired (a read-only deployment) it must 404 — even
+// for a signature-valid click — so a read-only RunLore exposes no interactive
+// callback at all.
+func TestSlackInteractionDisabledWithoutApprovals(t *testing.T) {
 	const secret = "shh"
-	fb := &recordFeedback{}
-	// No approvals, an empty approver allowlist: feedback must still be recorded.
-	srv := New(nil, Actions{SlackSecret: secret, Feedback: fb}, nil, nil, nil, discardLog)
+	srv := New(nil, Actions{SlackSecret: secret}, nil, nil, nil, discardLog)
 
-	post := func(actionID, value string) *httptest.ResponseRecorder {
-		payload := `{"user":{"id":"U9","username":"bob"},"actions":[{"action_id":"` + actionID + `","value":"` + value + `"}]}`
-		body := "payload=" + url.QueryEscape(payload)
-		ts := strconv.FormatInt(time.Now().Unix(), 10)
-		req := httptest.NewRequest(http.MethodPost, "/slack/interactions", strings.NewReader(body))
-		req.Header.Set("X-Slack-Request-Timestamp", ts)
-		req.Header.Set("X-Slack-Signature", slackSign(secret, ts, body))
-		rr := httptest.NewRecorder()
-		srv.Handler().ServeHTTP(rr, req)
-		return rr
-	}
-
-	// 👍 from a non-allowlisted user, approvals disabled → 200, recorded as ("k","","up").
-	if rr := post("runlore_feedback_up", "k"); rr.Code != http.StatusOK {
-		t.Fatalf("feedback up = %d, want 200", rr.Code)
-	}
-	// 👎 → recorded as ("k2","","down").
-	if rr := post("runlore_feedback_down", "k2"); rr.Code != http.StatusOK {
-		t.Fatalf("feedback down = %d, want 200", rr.Code)
-	}
-	if len(fb.calls) != 2 {
-		t.Fatalf("expected 2 feedback calls, got %d: %+v", len(fb.calls), fb.calls)
-	}
-	if fb.calls[0] != (struct{ key, fp, rating string }{"k", "", "up"}) {
-		t.Fatalf("up call = %+v, want {k  up}", fb.calls[0])
-	}
-	if fb.calls[1] != (struct{ key, fp, rating string }{"k2", "", "down"}) {
-		t.Fatalf("down call = %+v, want {k2  down}", fb.calls[1])
-	}
-
-	// runlore_approve with approvals==nil must ack (200), not 404 — the guard now
-	// admits feedback-only servers, so approve returns a "not enabled" message.
-	if rr := post("runlore_approve", "a1"); rr.Code != http.StatusOK {
-		t.Fatalf("approve with approvals==nil = %d, want 200 (not-enabled ack)", rr.Code)
-	}
-}
-
-// TestSlackFeedbackDisabledLedger pins the honest-reply wiring: a disabled outcome
-// ledger (empty path) must NOT be handed to the server as a FeedbackRecorder — its
-// Feedback() silently no-ops, so acking "recorded" would lie to the on-call. With
-// no recorder wired the handler's feedback==nil branch answers "not enabled" (and
-// never logs a recorded event), while the click is still acked with a 200.
-func TestSlackFeedbackDisabledLedger(t *testing.T) {
-	led, err := outcome.New("") // empty ledger_path → disabled
-	if err != nil {
-		t.Fatalf("outcome.New: %v", err)
-	}
-
-	// Mirror the serve.go wiring predicate: a disabled ledger stays a nil interface.
-	exec := &recordExec{}
-	pol := action.New(config.ActionPolicy{Mode: config.ActionApprove})
-	ap := action.NewApprovals(exec, pol, audit.Nop{}, discardLog)
-	const secret = "shh"
-	acts := Actions{Approvals: ap, SlackSecret: secret}
-	if led.Enabled() {
-		acts.Feedback = led
-	}
-	if acts.Feedback != nil {
-		t.Fatal("disabled ledger must not be wired as a FeedbackRecorder")
-	}
-
-	var logBuf bytes.Buffer
-	srv := New(nil, acts, nil, nil, nil, slog.New(slog.NewTextHandler(&logBuf, nil)))
-
-	payload := `{"user":{"id":"U9","username":"bob"},"actions":[{"action_id":"runlore_feedback_up","value":"k"}]}`
+	payload := `{"user":{"id":"U1","username":"alice"},"actions":[{"action_id":"runlore_approve","value":"a1"}]}`
 	body := "payload=" + url.QueryEscape(payload)
 	ts := strconv.FormatInt(time.Now().Unix(), 10)
 	req := httptest.NewRequest(http.MethodPost, "/slack/interactions", strings.NewReader(body))
@@ -218,11 +142,8 @@ func TestSlackFeedbackDisabledLedger(t *testing.T) {
 	rr := httptest.NewRecorder()
 	srv.Handler().ServeHTTP(rr, req)
 
-	if rr.Code != http.StatusOK {
-		t.Fatalf("feedback click with disabled ledger = %d, want 200 (honest not-enabled ack)", rr.Code)
-	}
-	if strings.Contains(logBuf.String(), "feedback recorded") {
-		t.Fatalf("disabled ledger must not claim feedback was recorded; log:\n%s", logBuf.String())
+	if rr.Code != http.StatusNotFound {
+		t.Fatalf("interactions with approvals==nil = %d, want 404 (endpoint disabled)", rr.Code)
 	}
 }
 

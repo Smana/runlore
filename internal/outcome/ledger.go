@@ -9,7 +9,6 @@ import (
 	"bufio"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"io/fs"
 	"os"
 	"sync"
@@ -22,13 +21,13 @@ type Event struct {
 	Fingerprint    string `json:"fingerprint"`               // Alertmanager fingerprint (stable firing↔resolved)
 	DupFingerprint string `json:"dup_fingerprint,omitempty"` // curator dedup fingerprint (resource+cause); the curated-PR resolution join key
 
-	Kind     string    `json:"kind,omitempty"`  // open: "recall" | "fresh"; feedback: "up" | "down"
+	Kind     string    `json:"kind,omitempty"`  // open: "recall" | "fresh"
 	Entry    string    `json:"entry,omitempty"` // open+recall: the recalled entry path
 	Title    string    `json:"title,omitempty"`
 	Resource string    `json:"resource,omitempty"`
 	At       time.Time `json:"at"`
 
-	// Recurrence/feedback fields (written by the delivery path). Kept omitempty so the
+	// Recurrence fields (written by the delivery path). Kept omitempty so the
 	// append-only file stays backward/forward compatible with older readers.
 	TriggerKey string `json:"trigger_key,omitempty"` // groups recurrences of the same alert; keys the byTrigger index
 	CuratedURL string `json:"curated_url,omitempty"` // KB link surfaced as "previous: <link>" on recurrence
@@ -257,9 +256,9 @@ func (l *Ledger) enabled() bool { return l != nil && l.path != "" }
 
 // Enabled reports whether the ledger will actually persist events (a non-empty
 // ledger_path was configured); nil-safe. Exported for wiring sites: a disabled
-// ledger's methods silently no-op, so handing it to a consumer that acks writes
-// (e.g. the server's FeedbackRecorder) would lie about persistence. Cheaper than
-// Status(), which re-reads the whole file.
+// ledger's methods silently no-op, so handing it to a consumer that assumes its
+// writes land would misrepresent persistence. Cheaper than Status(), which
+// re-reads the whole file.
 func (l *Ledger) Enabled() bool { return l.enabled() }
 
 // Status is a cheap snapshot of the ledger's on-disk reality, used to tell apart
@@ -353,21 +352,6 @@ func (l *Ledger) Occurrences(triggerKey string) (int, time.Time, string) {
 	defer l.mu.Unlock()
 	a := l.byTrigger[triggerKey]
 	return a.count, a.last, a.curatedURL
-}
-
-// Feedback appends a human 👍/👎 verdict on a delivered investigation. It is a
-// pure append: replay ignores unknown event kinds, so feedback never disturbs
-// open/resolve pairing or the recall aggregate.
-func (l *Ledger) Feedback(triggerKey, fingerprint, rating string, at time.Time) error {
-	if !l.enabled() {
-		return nil
-	}
-	if rating != "up" && rating != "down" {
-		return fmt.Errorf("feedback rating %q: want up or down", rating)
-	}
-	l.mu.Lock()
-	defer l.mu.Unlock()
-	return l.appendLocked(Event{Event: "feedback", TriggerKey: triggerKey, Fingerprint: fingerprint, Kind: rating, At: at})
 }
 
 // Episodes replays the full ledger and turns every open into an Episode, pairing
