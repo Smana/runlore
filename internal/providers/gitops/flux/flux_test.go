@@ -92,12 +92,14 @@ func TestProviderChanges(t *testing.T) {
 	}
 }
 
-// TestProviderChangesFailingKustomizationSpansGap covers the core bug: a failing
-// Kustomization keeps status.lastAppliedRevision pinned to the last HEALTHY commit
-// (Flux does NOT advance it on a health-check failure). Keying "what changed" on
-// lastAppliedRevision alone diffs the pre-break commit and misses the breaking one.
-// For a failing Kustomization whose source HEAD differs from lastApplied, the Change
-// must span lastApplied..HEAD; otherwise behavior is unchanged.
+// TestProviderChangesFailingKustomizationSpansGap covers the apply-failure case: when
+// Flux holds status.lastAppliedRevision at the last-good commit (it couldn't apply
+// HEAD), keying "what changed" on lastAppliedRevision alone diffs the pre-break commit
+// and misses the breaking one. For a failing Kustomization whose source HEAD differs
+// from lastApplied, the Change must span lastApplied..HEAD; otherwise behavior is
+// unchanged. (The health-failure case, where Flux DOES advance lastAppliedRevision
+// past the break so this range comes back empty, is recovered by Differ.ForChange's
+// last-path-change fallback — RunLore #239.)
 func TestProviderChangesFailingKustomizationSpansGap(t *testing.T) {
 	const url = "https://github.com/org/repo"
 	cases := []struct {

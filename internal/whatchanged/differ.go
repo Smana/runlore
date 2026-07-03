@@ -6,7 +6,9 @@ package whatchanged
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
+	"io"
 	"os"
 	"strings"
 
@@ -220,12 +222,82 @@ func (d *Differ) RemoteFromParent(ctx context.Context, url, rev, scope string) (
 // with only ToRev it diffs the change introduced by ToRev (against its parent).
 // ctx bounds the clone + patch so a caller deadline (per-investigation timeout)
 // aborts a hung remote.
+//
+// When the forward range holds no change to the resource's path it falls back to
+// the newest commit that actually touched the path. This matters on a Flux
+// health-check failure: Flux applies the manifest (advancing lastAppliedRevision to
+// the breaking commit) and only then fails the health gate, so the change is at/behind
+// the applied revision — diffing forward from it misses it entirely (RunLore #239).
 func (d *Differ) ForChange(ctx context.Context, c providers.Change) (providers.Diff, error) {
 	if c.ToRev == "" {
 		return providers.Diff{}, fmt.Errorf("change %s/%s: missing to revision", c.Workload.Namespace, c.Workload.Name)
 	}
+	var (
+		diff providers.Diff
+		err  error
+	)
 	if c.FromRev == "" {
-		return d.RemoteFromParent(ctx, c.Source.RepoURL, c.ToRev, c.Source.Path)
+		diff, err = d.RemoteFromParent(ctx, c.Source.RepoURL, c.ToRev, c.Source.Path)
+	} else {
+		diff, err = d.Remote(ctx, c.Source.RepoURL, c.FromRev, c.ToRev, c.Source.Path)
 	}
-	return d.Remote(ctx, c.Source.RepoURL, c.FromRev, c.ToRev, c.Source.Path)
+	if err != nil {
+		return diff, err
+	}
+	if len(diff.Files) == 0 && c.Source.Path != "" {
+		if fb, ferr := d.RemoteLastPathChange(ctx, c.Source.RepoURL, c.ToRev, c.Source.Path); ferr == nil && len(fb.Files) > 0 {
+			return fb, nil
+		}
+	}
+	return diff, nil
+}
+
+// RemoteLastPathChange clones url and returns the path-scoped diff of the newest
+// commit reachable from atRev that actually modified scope, against its first parent.
+// It is ForChange's fallback when the forward range holds no change to scope (see
+// RunLore #239). Returns an empty diff when scope is empty, no ancestor of atRev
+// touches scope, or the touching commit is a root commit (no parent).
+func (d *Differ) RemoteLastPathChange(ctx context.Context, url, atRev, scope string) (providers.Diff, error) {
+	if scope == "" {
+		return providers.Diff{}, nil
+	}
+	repo, cleanup, err := d.cloneToDisk(ctx, url)
+	if err != nil {
+		return providers.Diff{}, err
+	}
+	defer cleanup()
+	return lastPathChange(ctx, repo, atRev, scope)
+}
+
+// lastPathChange walks history from atRev and returns the path-scoped diff of the
+// newest commit that modified scope, against its first parent.
+func lastPathChange(ctx context.Context, repo *git.Repository, atRev, scope string) (providers.Diff, error) {
+	from, err := resolveCommit(repo, atRev)
+	if err != nil {
+		return providers.Diff{}, fmt.Errorf("resolve %q: %w", atRev, err)
+	}
+	iter, err := repo.Log(&git.LogOptions{
+		From:       from.Hash,
+		Order:      git.LogOrderCommitterTime,
+		PathFilter: func(p string) bool { return underScope(p, scope) },
+	})
+	if err != nil {
+		return providers.Diff{}, fmt.Errorf("log %s: %w", scope, err)
+	}
+	defer iter.Close()
+	to, err := iter.Next()
+	if errors.Is(err, io.EOF) {
+		return providers.Diff{}, nil // nothing in history touched scope
+	}
+	if err != nil {
+		return providers.Diff{}, fmt.Errorf("log %s: %w", scope, err)
+	}
+	if to.NumParents() == 0 {
+		return providers.Diff{}, nil // root commit: no parent to diff against
+	}
+	parent, err := to.Parent(0)
+	if err != nil {
+		return providers.Diff{}, fmt.Errorf("parent of %s: %w", to.Hash, err)
+	}
+	return diffCommits(ctx, parent, to, scope)
 }

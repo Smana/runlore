@@ -125,10 +125,17 @@ func (p *Provider) Changes(ctx context.Context, _ providers.TimeWindow, sel prov
 // revisionRange picks the (FromRev, ToRev) a Change should diff. For a healthy
 // Kustomization it is ("", lastApplied) — the change introduced by the applied
 // revision. For a FAILING one (Ready != True) whose source HEAD has moved past
-// lastApplied, it is (lastApplied, HEAD): Flux pins lastAppliedRevision to the last
-// HEALTHY commit on a health-check failure, so keying on it alone would diff the
-// pre-break commit and miss the breaking one. The source read is best-effort — on
-// any error (or when HEAD == lastApplied) we fall back to the single-revision range.
+// lastApplied, it is (lastApplied, HEAD) — a best-effort attempt to span the
+// breaking commit for the case where Flux held lastAppliedRevision at the last-good
+// revision (e.g. an apply failure).
+//
+// This is only a heuristic. On a health-check *failure* Flux applies the manifest —
+// advancing lastAppliedRevision to (or past) the breaking commit — before the health
+// gate fails, so the change is at/behind lastApplied and this forward range can miss
+// it entirely. That case is recovered downstream: Differ.ForChange falls back to the
+// newest commit that actually touched the resource's path (RunLore #239). The source
+// read is best-effort — on any error (or when HEAD == lastApplied) we fall back to
+// the single-revision range.
 func revisionRange(ctx context.Context, reader Reader, k kustomization) (fromRev, toRev string) {
 	lastApplied := parseRevision(k.Revision)
 	if k.ReadyStatus == "True" || k.ReadyStatus == "" {
