@@ -46,19 +46,29 @@ var requiredIncidentSections = []struct{ key, head string }{
 	{"resolution", "Resolution"},
 }
 
-// WarnInvalid runs ValidateStructural over entries and calls onInvalid(path,
-// errs) for each entry that has structural Errors. It is the load-time
-// strict-warn hook: the caller logs + increments a metric, but the entry is
-// still served (one bad entry never empties the catalog). Returns the count of
-// invalid entries. Warnings are not reported here.
+// WarnInvalid is the load-time strict-warn hook: it calls onInvalid(path, errs)
+// for each invalid entry; the caller logs + increments a metric, but the entry
+// is still served (one bad entry never empties the catalog). Returns the count
+// of invalid entries. Warnings are not reported here.
+//
+// It is deliberately looser than the merge gate: OKF conformance (§9) requires
+// consumers to tolerate unknown types gracefully, so an entry outside the
+// RunLore vocabulary (a foreign bundle's "Metric", "API Endpoint", …) is checked
+// only for OKF conformance — a non-empty `type`. Entries claiming a RunLore type
+// are held to the full ValidateStructural shape, since those are the ones the
+// merge gate promised were well-formed.
 func WarnInvalid(entries []catalog.Entry, onInvalid func(path string, errs []Issue)) int {
 	n := 0
 	for _, e := range entries {
 		var errs []Issue
-		for _, i := range ValidateStructural(e) {
-			if i.Severity == SeverityError {
-				errs = append(errs, i)
+		if validTypes[e.Type] {
+			for _, i := range ValidateStructural(e) {
+				if i.Severity == SeverityError {
+					errs = append(errs, i)
+				}
 			}
+		} else if strings.TrimSpace(e.Type) == "" {
+			errs = append(errs, Issue{SeverityError, "type", "frontmatter `type` is required (OKF conformance)"})
 		}
 		if len(errs) > 0 {
 			n++
@@ -107,9 +117,15 @@ func ValidateStructural(e catalog.Entry) []Issue {
 		addErr("description", "frontmatter `description` is required")
 	}
 
+	// resource is required for Incident only: an incident is anchored to a concrete
+	// affected object, while Playbook/Concept entries are abstract knowledge — OKF
+	// leaves resource "omitted for abstract concepts", and curator.entryType drafts
+	// a Playbook precisely when the finding is resource-agnostic.
 	switch {
 	case strings.TrimSpace(e.Resource) == "":
-		addErr("resource", "frontmatter `resource` is required (namespace/name)")
+		if e.Type == "Incident" {
+			addErr("resource", "frontmatter `resource` is required for Incident (namespace/name)")
+		}
 	case strings.ContainsAny(e.Resource, " \t\r\n"):
 		addErr("resource", "resource must not contain whitespace")
 	}
@@ -169,11 +185,16 @@ func sections(body string) map[string]string {
 	return out
 }
 
-// heading returns the lowercased label of a "## X" markdown heading line.
+// heading returns the lowercased label of a "# X" or "## X" markdown heading
+// line. Both levels are section headings here: OKF's conventional headings are H1
+// (the seed entries follow that style) while curator-drafted entries use H2.
 func heading(line string) (string, bool) {
 	t := strings.TrimSpace(line)
-	if strings.HasPrefix(t, "## ") {
+	switch {
+	case strings.HasPrefix(t, "## "):
 		return strings.ToLower(strings.TrimSpace(t[3:])), true
+	case strings.HasPrefix(t, "# "):
+		return strings.ToLower(strings.TrimSpace(t[2:])), true
 	}
 	return "", false
 }

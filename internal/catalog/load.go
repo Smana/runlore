@@ -63,6 +63,8 @@ func parseEntry(root, path string) (Entry, error) {
 		Description string   `yaml:"description"`
 		Resource    string   `yaml:"resource"`
 		Tags        []string `yaml:"tags"`
+		Timestamp   string   `yaml:"timestamp"`
+		Fingerprint string   `yaml:"fingerprint"`
 	}
 	if len(fm) > 0 {
 		if err := yaml.Unmarshal(fm, &meta); err != nil {
@@ -72,7 +74,9 @@ func parseEntry(root, path string) (Entry, error) {
 	rel, _ := filepath.Rel(root, path)
 	return Entry{
 		Type: meta.Type, Title: meta.Title, Description: meta.Description,
-		Resource: meta.Resource, Tags: meta.Tags, Body: string(body), Path: rel,
+		Resource: meta.Resource, Tags: meta.Tags,
+		Timestamp: meta.Timestamp, Fingerprint: meta.Fingerprint,
+		Body: string(body), Path: rel,
 	}, nil
 }
 
