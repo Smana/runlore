@@ -135,3 +135,43 @@ func TestOnCompleteStampsRecurrenceAndPersistsOpen(t *testing.T) {
 		t.Errorf("last open Verdict = %q, want %q", last.Verdict, providers.VerdictActionRequired)
 	}
 }
+
+// TestOnCompleteCountsOneOccurrencePerInvestigation pins the coalesced-batch fix: an
+// investigation carrying N constituent fingerprints records N per-fingerprint opens
+// (for resolve-webhook pairing), but must contribute exactly ONE TriggerKey
+// occurrence — not N. Otherwise a single investigation of a coalesced batch would
+// inflate Occurrences by N and the recurrence line would over-count.
+func TestOnCompleteCountsOneOccurrencePerInvestigation(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "outcomes.jsonl")
+	ledger, err := outcome.New(path)
+	if err != nil {
+		t.Fatalf("new ledger: %v", err)
+	}
+
+	cap := &captureNotifier{}
+	notifier := notify.NewMulti(discardLog(), cap)
+
+	found := providers.Investigation{
+		Title:        "coalesced batch",
+		Fingerprints: []string{"f1", "f2", "f3"},
+		TriggerKey:   "k",
+	}
+	onInvestigationComplete(context.Background(), found, ledger, nil, notifier, nil, nil, nil, discardLog())
+
+	// One investigation ⇒ exactly one TriggerKey occurrence, despite 3 opens.
+	if n, _, _ := ledger.Occurrences("k"); n != 1 {
+		t.Errorf("Occurrences(k) = %d, want 1 (one investigation, not per-fingerprint)", n)
+	}
+	if cap.got.Occurrences != 1 {
+		t.Errorf("delivered Occurrences = %d, want 1 (first occurrence)", cap.got.Occurrences)
+	}
+
+	// A second investigation of the same key bumps the count to exactly 2.
+	onInvestigationComplete(context.Background(), found, ledger, nil, notifier, nil, nil, nil, discardLog())
+	if n, _, _ := ledger.Occurrences("k"); n != 2 {
+		t.Errorf("Occurrences(k) after 2nd run = %d, want 2", n)
+	}
+	if cap.got.Occurrences != 2 {
+		t.Errorf("delivered Occurrences on 2nd run = %d, want 2", cap.got.Occurrences)
+	}
+}

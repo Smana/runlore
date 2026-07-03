@@ -156,10 +156,10 @@ func TestSlackBotDeliverNoThreadWhenNoDetail(t *testing.T) {
 	}
 }
 
-// TestSlackBotDeliverDetailBestEffort proves a failed detail thread reply is
+// TestSlackBotDeliverDetailFailureSurfaced proves a failed detail thread reply is
 // surfaced as a wrapped error — but the wrapping records that the summary (the
 // notification) already landed, so Multi logs it without implying total failure.
-func TestSlackBotDeliverDetailBestEffort(t *testing.T) {
+func TestSlackBotDeliverDetailFailureSurfaced(t *testing.T) {
 	var posts int
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		posts++

@@ -360,7 +360,19 @@ func onInvestigationComplete(ctx context.Context, found providers.Investigation,
 		dupFP := curator.DupFingerprint(found)
 		// One open per constituent fingerprint (coalesced batches fan out), so
 		// every alert's resolve webhook can later match this investigation.
-		for _, fp := range fps {
+		for i, fp := range fps {
+			// The per-fingerprint opens exist for resolve-webhook pairing, but the
+			// TriggerKey occurrence index (ledger.byTrigger) counts investigations,
+			// not constituents: applyTriggerLocked increments once per open carrying a
+			// TriggerKey, so stamping it on every open of an N-alert coalesced batch
+			// would inflate Occurrences by N. Stamp it (and, for symmetry of the
+			// byTrigger index data — its newest-open CuratedURL — the CuratedURL/Verdict,
+			// which are harmless on the later opens) on ONLY the first open, so each
+			// investigation contributes exactly one occurrence.
+			triggerKey, curatedURL, verdict := "", "", ""
+			if i == 0 {
+				triggerKey, curatedURL, verdict = found.TriggerKey, found.CuratedURL, string(found.Verdict)
+			}
 			if err := ledger.Open(outcome.Event{
 				Fingerprint:    fp,
 				DupFingerprint: dupFP,
@@ -368,9 +380,9 @@ func onInvestigationComplete(ctx context.Context, found providers.Investigation,
 				Entry:          found.RecalledEntry,
 				Title:          found.Title,
 				Resource:       found.Resource.Ref(),
-				TriggerKey:     found.TriggerKey,
-				CuratedURL:     found.CuratedURL,
-				Verdict:        string(found.Verdict),
+				TriggerKey:     triggerKey,
+				CuratedURL:     curatedURL,
+				Verdict:        verdict,
 				At:             now,
 			}); err != nil {
 				log.Warn("outcome ledger open failed", "fingerprint", fp, "err", err)
