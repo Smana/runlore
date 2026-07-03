@@ -114,6 +114,109 @@ func TestDraftKBEntrySetsFingerprint(t *testing.T) {
 	}
 }
 
+// TestDraftKBEntryTagsCarryRecallSignal: tags feed the catalog's BM25+embedding
+// corpus (catalog.entryText), so the drafted entry must tag the workload kind and
+// namespace — not just the constant [runlore, <type>] pair, which ranks nothing.
+func TestDraftKBEntryTagsCarryRecallSignal(t *testing.T) {
+	inv := providers.Investigation{
+		Title: "Harbor down", Confidence: 0.9,
+		Resource:   providers.Workload{Kind: "Deployment", Namespace: "tooling", Name: "harbor-core"},
+		RootCauses: []providers.Hypothesis{{Summary: "valkey down", Confidence: 0.9}},
+	}
+	tags := draftKBEntry(inv).Tags
+	for _, want := range []string{"runlore", "incident", "deployment", "tooling"} {
+		found := false
+		for _, tag := range tags {
+			if tag == want {
+				found = true
+			}
+		}
+		if !found {
+			t.Fatalf("tags missing %q: %v", want, tags)
+		}
+	}
+
+	// No resource → no empty/duplicate tags sneak in.
+	tags = draftKBEntry(providers.Investigation{
+		Title: "t", Confidence: 0.9,
+		RootCauses: []providers.Hypothesis{{Summary: "s", SuggestedAction: "a"}},
+	}).Tags
+	seen := map[string]bool{}
+	for _, tag := range tags {
+		if tag == "" {
+			t.Fatalf("empty tag in %v", tags)
+		}
+		if seen[tag] {
+			t.Fatalf("duplicate tag %q in %v", tag, tags)
+		}
+		seen[tag] = true
+	}
+}
+
+// TestDraftKBEntrySymptomNamesResource: the Symptom section must carry more than
+// a copy of the title — the affected workload (kind + ref) is both what a future
+// reader checks first and lexical recall signal in the indexed body.
+func TestDraftKBEntrySymptomNamesResource(t *testing.T) {
+	inv := providers.Investigation{
+		Title: "Harbor down", Confidence: 0.9,
+		Resource:   providers.Workload{Kind: "Deployment", Namespace: "tooling", Name: "harbor-core"},
+		RootCauses: []providers.Hypothesis{{Summary: "valkey down", Confidence: 0.9}},
+	}
+	body := draftKBEntry(inv).Body
+	if !strings.Contains(body, "Deployment tooling/harbor-core") {
+		t.Fatalf("Symptom must name the affected resource:\n%s", body)
+	}
+}
+
+// TestDraftKBEntryCitations: change provenance belongs in an OKF Citations
+// section at the entry bottom (SPEC §8) — numbered references, one per distinct
+// ChangeRef — not only squeezed into the decision card bullet.
+func TestDraftKBEntryCitations(t *testing.T) {
+	inv := providers.Investigation{
+		Title: "Harbor down", Confidence: 0.9, Verified: true,
+		RootCauses: []providers.Hypothesis{
+			{Summary: "quota", Evidence: []string{"e"}, ChangeRef: "crossplane/xplane-harbor"},
+			{Summary: "other", Evidence: []string{"e2"}, ChangeRef: "flux/harbor-values"},
+		},
+	}
+	body := draftKBEntry(inv).Body
+	i := strings.Index(body, "## Citations")
+	if i < 0 {
+		t.Fatalf("body missing ## Citations:\n%s", body)
+	}
+	tail := body[i:]
+	if !strings.Contains(tail, "[1] crossplane/xplane-harbor") || !strings.Contains(tail, "[2] flux/harbor-values") {
+		t.Fatalf("citations must number the distinct change refs:\n%s", tail)
+	}
+
+	// No change refs → no empty Citations section.
+	inv.RootCauses = []providers.Hypothesis{{Summary: "s", Evidence: []string{"e"}, SuggestedAction: "a"}}
+	if body := draftKBEntry(inv).Body; strings.Contains(body, "## Citations") {
+		t.Fatalf("no refs must mean no Citations section:\n%s", body)
+	}
+}
+
+// TestDraftKBEntrySetsConfidenceAndProvenance: OKF guidance is to put the fields
+// you want to query/filter on in frontmatter — confidence and change provenance
+// are exactly that, so the drafted KBEntry must carry them structurally (the
+// forge serializes them as extension frontmatter keys).
+func TestDraftKBEntrySetsConfidenceAndProvenance(t *testing.T) {
+	inv := providers.Investigation{
+		Title: "Harbor down", Confidence: 0.9, Verified: true,
+		RootCauses: []providers.Hypothesis{
+			{Summary: "quota", Evidence: []string{"e"}, ChangeRef: "crossplane/xplane-harbor"},
+			{Summary: "quota again", Evidence: []string{"e"}, ChangeRef: "crossplane/xplane-harbor"}, // dup ref collapses
+		},
+	}
+	e := draftKBEntry(inv)
+	if e.Confidence != 0.9 {
+		t.Fatalf("Confidence = %v, want 0.9", e.Confidence)
+	}
+	if len(e.Provenance) != 1 || e.Provenance[0] != "crossplane/xplane-harbor" {
+		t.Fatalf("Provenance = %v, want [crossplane/xplane-harbor]", e.Provenance)
+	}
+}
+
 // TestDraftKBEntryCapsLongTitle proves a free-form investigation title that runs
 // past kbvalidate's 120-byte single-line merge gate is capped by construction:
 // single line, ≤120 bytes, ellipsis-terminated, and structurally valid.

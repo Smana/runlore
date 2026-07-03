@@ -30,7 +30,9 @@ Two things happen when an investigation produces a confident, verified finding:
 ## 2. Anatomy of a proposed entry
 
 Every PR adds one Markdown file (an [OKF](https://github.com/GoogleCloudPlatform/knowledge-catalog)
-entry). Here is a real one RunLore opened for an OOMKilled pod:
+entry) under a type directory — `incidents/kubecontaineroomkilled-for-oom-app-pod-a3938440.md`
+(title slug + a short fingerprint, so two incidents sharing a title never collide).
+Here is a real one RunLore opened for an OOMKilled pod:
 
 ```markdown
 ---
@@ -38,8 +40,11 @@ type: Incident
 title: KubeContainerOOMKilled for oom-app pod
 description: The container 'hog' is OOMKilled because its memory limit (100Mi) is too low.
 resource: runlore-test/oom-app
-tags: [runlore, incident]
-fingerprint: a393844afec8e3d1…           # deterministic identity (resource + cause)
+tags: [runlore, incident, pod, runlore-test]  # + workload kind & namespace — recall signal
+timestamp: "2026-07-03T09:14:00Z"             # OKF-recommended last-change stamp
+fingerprint: a393844afec8e3d1…                # deterministic identity (resource + cause)
+confidence: 0.9                               # queryable extension fields (OKF: frontmatter
+provenance: [flux/oom-app-values]             #   is for what you filter/index on)
 ---
 
 ## Decision
@@ -48,6 +53,8 @@ fingerprint: a393844afec8e3d1…           # deterministic identity (resource + 
 
 ## Symptom
 KubeContainerOOMKilled for oom-app pod
+
+Affected resource: Pod runlore-test/oom-app
 
 ## Investigate                              # the evidence trail (what it observed)
 - pod_status: hog OOMKilled (exit 137); memory limit 100Mi …
@@ -60,10 +67,17 @@ KubeContainerOOMKilled for oom-app pod
 
 ## Unresolved                               # what it honestly couldn't determine
 - (none)
+
+## Citations                                # OKF §8: the causing-change provenance
+[1] flux/oom-app-values
 ```
 
 The **Decision card** makes the merge call quick; the **sections** make the entry
 reusable knowledge for the next person (and for RunLore's instant recall).
+
+The same PR also keeps the OKF bundle self-describing: the entry's link line is
+added to your `index.md` (when the bundle has one) and a `**Creation**` record is
+appended to `log.md` — all in the one diff you review.
 
 ---
 

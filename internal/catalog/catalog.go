@@ -139,6 +139,25 @@ func (c *Catalog) Entries() []Entry {
 	return out
 }
 
+// FindFingerprint returns the entry whose frontmatter fingerprint equals fp —
+// the exact-identity lookup behind the curator's deterministic catalog dedup
+// (curated entries persist their DupFingerprint; see forge renderEntry). An empty
+// fp never matches: hand-written entries carry no fingerprint, and "" means
+// "nothing to key on".
+func (c *Catalog) FindFingerprint(fp string) (Entry, bool) {
+	if fp == "" {
+		return Entry{}, false
+	}
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	for _, e := range c.entries {
+		if e.Fingerprint == fp {
+			return e, true
+		}
+	}
+	return Entry{}, false
+}
+
 // Ready reports whether the catalog has completed at least one successful load.
 // It stays false for a git-sync catalog (NewEmpty) until the first sync indexes,
 // so readyz can keep the leader out of rotation until its KB is warm.
