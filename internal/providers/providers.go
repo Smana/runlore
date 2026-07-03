@@ -474,8 +474,10 @@ type KBEntry struct {
 	Description string
 	Resource    string
 	Tags        []string
-	Body        string // markdown
-	Fingerprint string // deterministic dedup fingerprint (see curator.DupFingerprint)
+	Body        string   // markdown
+	Fingerprint string   // deterministic dedup fingerprint (see curator.DupFingerprint)
+	Confidence  float64  // overall investigation confidence; queryable extension frontmatter (0 = unset)
+	Provenance  []string // distinct causing-change refs; queryable extension frontmatter
 }
 
 // Ref is a URL handle to a created issue or PR.

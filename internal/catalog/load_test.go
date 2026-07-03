@@ -43,6 +43,58 @@ Ready=False after a chart bump.
 	}
 }
 
+// TestLoadParsesTimestampAndFingerprint: curated entries carry a timestamp
+// (OKF-recommended) and a deterministic dedup fingerprint in frontmatter — both
+// written by the forge serializer and consumed back here (recency-aware ranking,
+// exact-identity catalog dedup).
+func TestLoadParsesTimestampAndFingerprint(t *testing.T) {
+	dir := t.TempDir()
+	writeEntry(t, dir, "curated.md", `---
+type: Incident
+title: Harbor down
+description: valkey down
+resource: tooling/harbor-core
+timestamp: "2026-06-20T00:00:00Z"
+fingerprint: deadbeefcafebabe
+---
+body
+`)
+	entries, _, err := Load(dir)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if len(entries) != 1 {
+		t.Fatalf("want 1 entry, got %d", len(entries))
+	}
+	e := entries[0]
+	if e.Timestamp != "2026-06-20T00:00:00Z" {
+		t.Fatalf("Timestamp = %q, want 2026-06-20T00:00:00Z", e.Timestamp)
+	}
+	if e.Fingerprint != "deadbeefcafebabe" {
+		t.Fatalf("Fingerprint = %q, want deadbeefcafebabe", e.Fingerprint)
+	}
+
+	// Seed entries write the timestamp unquoted (a YAML !!timestamp scalar); it
+	// must still land in the string field rather than failing the parse.
+	writeEntry(t, dir, "seed.md", `---
+type: Playbook
+title: Seed
+description: seed entry
+timestamp: 2026-06-20T00:00:00Z
+---
+body
+`)
+	entries, skipped, err := Load(dir)
+	if err != nil || len(skipped) != 0 {
+		t.Fatalf("Load with unquoted timestamp: err=%v skipped=%v", err, skipped)
+	}
+	for _, e := range entries {
+		if e.Title == "Seed" && e.Timestamp != "2026-06-20T00:00:00Z" {
+			t.Fatalf("unquoted Timestamp = %q, want 2026-06-20T00:00:00Z", e.Timestamp)
+		}
+	}
+}
+
 func TestLoadSkipsMalformedEntry(t *testing.T) {
 	dir := t.TempDir()
 	writeEntry(t, dir, "good.md", "---\ntype: Playbook\ntitle: Good\ndescription: fine\n---\nbody\n")

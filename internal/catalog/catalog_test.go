@@ -197,3 +197,42 @@ func TestStaticCatalogReadyOnLoad(t *testing.T) {
 		t.Fatal("a static-dir catalog must be ready immediately after New")
 	}
 }
+
+// TestFindFingerprint: curated entries persist their DupFingerprint in
+// frontmatter; the catalog must answer exact-identity lookups on it so the
+// curator can dedup deterministically instead of relying on a BM25 threshold.
+func TestFindFingerprint(t *testing.T) {
+	dir := t.TempDir()
+	writeEntry(t, dir, "curated.md", `---
+type: Incident
+title: Harbor down
+description: valkey down
+resource: tooling/harbor-core
+fingerprint: deadbeefcafebabe
+---
+body
+`)
+	writeEntry(t, dir, "hand-written.md", `---
+type: Playbook
+title: No fingerprint here
+description: hand-authored
+---
+body
+`)
+	c, err := New(dir)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	e, ok := c.FindFingerprint("deadbeefcafebabe")
+	if !ok || e.Title != "Harbor down" {
+		t.Fatalf("want the curated entry, got ok=%v e=%+v", ok, e)
+	}
+	if _, ok := c.FindFingerprint("0000000000000000"); ok {
+		t.Fatal("unknown fingerprint must not match")
+	}
+	// An empty fingerprint must never match anything — hand-written entries have
+	// no fingerprint field, and an empty query is "nothing to key on".
+	if _, ok := c.FindFingerprint(""); ok {
+		t.Fatal("empty fingerprint must never match")
+	}
+}

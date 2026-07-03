@@ -109,8 +109,9 @@ func (c *Client) OpenIssue(ctx context.Context, inv providers.Investigation) (pr
 // OpenPR drafts the KB entry on a new branch and opens a PR.
 func (c *Client) OpenPR(ctx context.Context, e providers.KBEntry) (providers.Ref, error) {
 	slug := slugify(e.Title)
-	branch := fmt.Sprintf("runlore/kb-%s-%d", slug, time.Now().Unix())
-	path := slug + ".md"
+	now := time.Now().Unix()
+	branch := fmt.Sprintf("runlore/kb-%s-%d", slug, now)
+	path := entryPath(e, slug, now)
 
 	// 1. base ref SHA
 	var ref struct {
@@ -132,7 +133,11 @@ func (c *Client) OpenPR(ctx context.Context, e providers.KBEntry) (providers.Ref
 		map[string]any{"message": "runlore: draft KB entry " + e.Title, "content": content, "branch": branch}, nil); err != nil {
 		return providers.Ref{}, err
 	}
-	// 4. open the PR
+	// 4. keep the OKF bundle self-describing: index.md link line + log.md record
+	// on the same branch. Best-effort — a bundle-maintenance failure must not lose
+	// the entry PR (same contract as labelling below).
+	_ = c.maintainBundle(ctx, e, path, branch)
+	// 5. open the PR
 	var out struct {
 		HTMLURL string `json:"html_url"`
 		Number  int    `json:"number"`
@@ -141,7 +146,7 @@ func (c *Client) OpenPR(ctx context.Context, e providers.KBEntry) (providers.Ref
 		map[string]any{"title": "KB: " + e.Title, "head": branch, "base": c.baseBranch, "body": prBody(e)}, &out); err != nil {
 		return providers.Ref{}, err
 	}
-	// 5. label the PR (the create-PR API doesn't accept labels; set them via the
+	// 6. label the PR (the create-PR API doesn't accept labels; set them via the
 	// issues endpoint). Best-effort: a labelling failure must not lose the PR, so
 	// the error is intentionally ignored — the PR URL is already returned.
 	if out.Number != 0 {
@@ -348,6 +353,11 @@ type kbFrontmatter struct {
 	Tags        []string `yaml:"tags,omitempty"`
 	Timestamp   string   `yaml:"timestamp,omitempty"` // OKF-recommended; seed entries carry it, curated ones now do too
 	Fingerprint string   `yaml:"fingerprint,omitempty"`
+	// Confidence + Provenance are OKF extension keys: frontmatter is for the
+	// fields you query/filter/index on, and these are exactly that (per-entry
+	// confidence floors, "what change caused this" lookups).
+	Confidence float64  `yaml:"confidence,omitempty"`
+	Provenance []string `yaml:"provenance,omitempty"`
 }
 
 // renderEntry serializes a KBEntry as OKF markdown (frontmatter + body).
@@ -371,7 +381,11 @@ func renderEntry(e providers.KBEntry) string {
 	// entries and flux.Executor). Kept off KBEntry so draftKBEntry stays
 	// deterministic/time-free; this serializer is already the I/O boundary.
 	ts := time.Now().UTC().Format(time.RFC3339)
-	fm, _ := yaml.Marshal(kbFrontmatter{Type: e.Type, Title: e.Title, Description: e.Description, Resource: e.Resource, Tags: e.Tags, Timestamp: ts, Fingerprint: e.Fingerprint})
+	fm, _ := yaml.Marshal(kbFrontmatter{
+		Type: e.Type, Title: e.Title, Description: e.Description, Resource: e.Resource,
+		Tags: e.Tags, Timestamp: ts, Fingerprint: e.Fingerprint,
+		Confidence: e.Confidence, Provenance: e.Provenance,
+	})
 	var b strings.Builder
 	b.WriteString("---\n")
 	b.Write(fm)
@@ -379,6 +393,24 @@ func renderEntry(e providers.KBEntry) string {
 	b.WriteString(e.Body)
 	b.WriteString("\n")
 	return b.String()
+}
+
+// entryPath is where the drafted entry lives in the KB bundle: a type directory
+// ("incidents/", "playbooks/", …) plus the title slug suffixed with a short
+// fingerprint. The suffix keeps two different incidents that share a title from
+// colliding on one path — without it, the contents PUT 422s once a same-slug file
+// exists on the base branch (same symptom, different cause is a real case: the
+// coalesce comment calls it out). With no fingerprint, the branch timestamp
+// disambiguates instead.
+func entryPath(e providers.KBEntry, slug string, now int64) string {
+	suffix := e.Fingerprint
+	if len(suffix) > 8 {
+		suffix = suffix[:8]
+	}
+	if suffix == "" {
+		suffix = fmt.Sprintf("%d", now)
+	}
+	return fmt.Sprintf("%ss/%s-%s.md", strings.ToLower(e.Type), slug, suffix)
 }
 
 func slugify(s string) string {
