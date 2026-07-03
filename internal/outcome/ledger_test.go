@@ -815,47 +815,6 @@ func TestOccurrencesEmptyKeyAndDisabled(t *testing.T) {
 	}
 }
 
-// TestFeedbackAppendsAndIsIgnoredByReplay ensures a feedback event is a pure append:
-// it must not disturb open/resolve pairing (Episodes still pairs exactly one episode)
-// and an invalid rating is rejected.
-func TestFeedbackAppendsAndIsIgnoredByReplay(t *testing.T) {
-	p := filepath.Join(t.TempDir(), "o.jsonl")
-	l, _ := New(p)
-	t0 := time.Unix(18000, 0)
-	_ = l.Open(Event{Fingerprint: "f", TriggerKey: "k", Kind: "recall", Entry: "x.md", At: t0})
-	if err := l.Feedback("k", "f", "up", t0.Add(time.Second)); err != nil {
-		t.Fatalf("Feedback up: %v", err)
-	}
-	_, _, _ = l.Resolve("f", t0.Add(2*time.Second))
-
-	// The feedback line is ignored by replay: pairing is untouched.
-	eps, err := l.Episodes()
-	if err != nil {
-		t.Fatalf("Episodes: %v", err)
-	}
-	resolved := 0
-	for _, e := range eps {
-		if e.Resolved {
-			resolved++
-		}
-	}
-	if len(eps) != 1 || resolved != 1 {
-		t.Fatalf("feedback must not disturb pairing: want 1 episode/1 resolved, got %d/%d", len(eps), resolved)
-	}
-	// OpenCounts (cache) is likewise undisturbed and equals a from-scratch replay.
-	assertCacheEqualsReplay(t, l, p)
-
-	// An invalid rating is rejected.
-	if err := l.Feedback("k", "f", "sideways", t0.Add(3*time.Second)); err == nil {
-		t.Fatal("Feedback with an invalid rating must return an error")
-	}
-	// A disabled ledger no-ops Feedback (no error).
-	dis, _ := New("")
-	if err := dis.Feedback("k", "f", "sideways", t0); err != nil {
-		t.Fatalf("disabled Feedback must be a no-op even for a bad rating: %v", err)
-	}
-}
-
 // TestLedgerEnabled pins the exported wiring predicate: only a ledger with a
 // configured path reports Enabled, and a nil receiver is safe (mirrors enabled()).
 func TestLedgerEnabled(t *testing.T) {

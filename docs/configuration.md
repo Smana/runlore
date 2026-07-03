@@ -181,17 +181,10 @@ top-cause "why", suggested next steps, **ruled-out** hypotheses and **data gaps*
 limitations, kept distinct from human-only open questions):
 
 - **Slack, bot token (`bot_token_env`).** Posts a compact verdict-first summary to `channel`, then the
-  full analysis as a **threaded reply**. When `signing_secret_env` is set (same setup as Approve/Reject —
-  see below), the summary carries 👍/👎 feedback buttons; a click records the rating to the outcome
-  ledger.
+  full analysis as a **threaded reply**. When `signing_secret_env` is set and action mode is `approve`,
+  the summary carries Approve/Reject buttons on any suggested remediation (see below).
 - **Slack incoming webhook (`webhook_url_env`), Matrix, generic webhook.** Deliver the same content as a
   **single** message (incoming webhooks cannot thread and expose no interaction buttons).
-
-**Feedback buttons** render whenever the investigation has a trigger key or fingerprint. Clicks are
-HMAC-verified against `signing_secret_env` but **unprivileged** — unlike Approve/Reject they are not
-gated by `approver_ids`. A rating is persisted only when the outcome ledger is enabled
-(`outcome.ledger_path`); without it the click gets an honest "feedback isn't enabled" reply instead of a
-false "recorded" ack. Enabling them needs the same `/slack/interactions` Slack Request URL as approvals.
 
 **Generic webhook JSON payload** gained `verdict`, `severity`, `environment`, `cluster`, `tenant`,
 `alert_name`, `started_at` (RFC3339, empty when unknown), `occurrences`, `prev_curated_url`, `ruled_out`

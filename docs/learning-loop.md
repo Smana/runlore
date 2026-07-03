@@ -180,11 +180,6 @@ record of **whether a recalled answer preceded the incident actually resolving**
 - When the matching **incident-resolved signal** arrives (a resolved-alert webhook
   today; any source's "cleared" event by design), RunLore appends a **`resolve`** event
   for that fingerprint.
-- When a human clicks 👍/👎 on a delivered Slack summary, RunLore appends a
-  **`feedback`** event (`kind: up|down`) keyed by the incident's trigger key (falling
-  back to fingerprint). Feedback is a *pure append*: replay ignores unknown event kinds,
-  so a rating never disturbs open→resolve pairing — it's captured ground truth for future
-  learning, distinct from the mechanical resolve signal.
 
 The `open` event also now records the incident's **trigger key**, the **curated KB link**
 (so a recurrence can surface "previous: <link>"), and the curator's machine **verdict** —

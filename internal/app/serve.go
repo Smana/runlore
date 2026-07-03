@@ -307,14 +307,6 @@ func RunServe(version string, args []string) error {
 	if auto != nil {
 		acts.Pauser = auto // avoid a typed-nil interface when auto is disabled
 	}
-	// Only wire the ledger as a FeedbackRecorder when it actually persists: a
-	// disabled ledger (empty ledger_path) silently no-ops Feedback, so the server
-	// would ack "feedback recorded" while dropping it. Leaving the interface nil
-	// makes the handler answer honestly ("feedback recording not enabled"). Also
-	// covers the typed-nil trap: a nil *Ledger must never become a non-nil interface.
-	if ledger.Enabled() {
-		acts.Feedback = ledger
-	}
 	srv := server.New(ReadyFunc(leader.Load, cat, CatalogConfigured(cfg)), acts, built, pipe, metricsHandler, log)
 	if cz != nil {
 		go cz.Run(workCtx, cfg.Investigation.Coalesce.Debounce.Std()/2)
