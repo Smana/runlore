@@ -384,12 +384,37 @@ type Matrix []Series
 // LogResult is a logs/network query result.
 type LogResult []LogLine
 
+// Verdict classifies an investigation's actionability for the humans reading the
+// notification — the "do I need to do anything?" answer, separate from confidence
+// (how sure the model is) and severity (how the alert was labelled).
+type Verdict string
+
+const (
+	VerdictNoAction        Verdict = "no_action"        // benign / self-healed / synthetic; nothing to do
+	VerdictActionSuggested Verdict = "action_suggested" // a human should follow the suggested next steps
+	VerdictActionRequired  Verdict = "action_required"  // live impact; act promptly
+	VerdictInconclusive    Verdict = "inconclusive"     // could not be determined with available data
+)
+
+// ValidVerdict reports whether v is one of the model-facing enum values; the
+// parser normalizes anything else to "" so formatters can safely omit it.
+func ValidVerdict(v Verdict) bool {
+	switch v {
+	case VerdictNoAction, VerdictActionSuggested, VerdictActionRequired, VerdictInconclusive:
+		return true
+	}
+	return false
+}
+
 // Investigation is the structured output contract of an investigation.
 type Investigation struct {
 	Title         string
 	RootCauses    []Hypothesis
 	Changes       []Change
 	Unresolved    []string // honest: what the agent could not determine
+	Verdict       Verdict  // model-classified actionability; "" when the model omitted it (rendered nowhere)
+	RuledOut      []string // hypotheses considered and rejected, one line each with the disproving evidence
+	DataGaps      []string // signals that could not be obtained (tool errors, missing metrics, truncation) — a data limitation, not a question for a human
 	Confidence    float64
 	Recalled      bool        // true when produced by instant recall (a KB cache hit); the curator skips re-curating it
 	Resource      Workload    // the workload the investigation identified as affected; defaults to the originating alert workload when none was named (stored on curated entries for structural recall)

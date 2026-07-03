@@ -27,6 +27,38 @@ func TestParseFindings(t *testing.T) {
 	}
 }
 
+// TestParseFindingsVerdictRuledOutDataGaps checks the three model-contract fields
+// added for the notification overhaul map through parseFindings: a valid verdict
+// enum, and the ruled_out / data_gaps honesty channels distinct from unresolved.
+func TestParseFindingsVerdictRuledOutDataGaps(t *testing.T) {
+	args := `{"title":"t","verdict":"no_action",
+		"ruled_out":["plan deleted — plans still discovered in aws_backup_info"],
+		"data_gaps":["CloudTrail truncated at 25 rows by SSM noise"],
+		"root_causes":[{"summary":"s"}]}`
+	inv, err := parseFindings(args)
+	if err != nil {
+		t.Fatalf("parseFindings: %v", err)
+	}
+	if inv.Verdict != providers.VerdictNoAction {
+		t.Fatalf("Verdict = %q, want no_action", inv.Verdict)
+	}
+	if len(inv.RuledOut) != 1 || len(inv.DataGaps) != 1 {
+		t.Fatalf("RuledOut/DataGaps not mapped: %+v", inv)
+	}
+}
+
+// TestParseFindingsUnknownVerdictNormalized asserts a verdict outside the enum is
+// normalized to "" so formatters can safely omit it rather than render garbage.
+func TestParseFindingsUnknownVerdictNormalized(t *testing.T) {
+	inv, err := parseFindings(`{"verdict":"looks_fine","root_causes":[{"summary":"s"}]}`)
+	if err != nil {
+		t.Fatalf("parseFindings: %v", err)
+	}
+	if inv.Verdict != "" {
+		t.Fatalf("unknown verdict must map to empty, got %q", inv.Verdict)
+	}
+}
+
 // TestOpEnumNoEmptyValue guards against re-introducing an empty-string enum
 // member: Gemini's generateContent rejects empty enum values with HTTP 400
 // ("enum[n]: cannot be empty"). The op field is optional — "suggestion only" is
