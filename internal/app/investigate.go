@@ -363,15 +363,16 @@ func onInvestigationComplete(ctx context.Context, found providers.Investigation,
 		for i, fp := range fps {
 			// The per-fingerprint opens exist for resolve-webhook pairing, but the
 			// TriggerKey occurrence index (ledger.byTrigger) counts investigations,
-			// not constituents: applyTriggerLocked increments once per open carrying a
-			// TriggerKey, so stamping it on every open of an N-alert coalesced batch
-			// would inflate Occurrences by N. Stamp it (and, for symmetry of the
-			// byTrigger index data — its newest-open CuratedURL — the CuratedURL/Verdict,
-			// which are harmless on the later opens) on ONLY the first open, so each
-			// investigation contributes exactly one occurrence.
-			triggerKey, curatedURL, verdict := "", "", ""
+			// not constituents — and it is rebuilt from a raw replay of the file
+			// (loadLocked), which has no notion of batches. Stamping the TriggerKey on
+			// every open of an N-alert coalesced batch would therefore inflate
+			// Occurrences by N, both live and again on every restart; first-open-only
+			// keeps the count right by construction on both paths. CuratedURL/Verdict
+			// stay on every open (the index ignores TriggerKey-less events, and a
+			// complete per-fingerprint record keeps future readers from seeing gaps).
+			triggerKey := ""
 			if i == 0 {
-				triggerKey, curatedURL, verdict = found.TriggerKey, found.CuratedURL, string(found.Verdict)
+				triggerKey = found.TriggerKey
 			}
 			if err := ledger.Open(outcome.Event{
 				Fingerprint:    fp,
@@ -381,8 +382,8 @@ func onInvestigationComplete(ctx context.Context, found providers.Investigation,
 				Title:          found.Title,
 				Resource:       found.Resource.Ref(),
 				TriggerKey:     triggerKey,
-				CuratedURL:     curatedURL,
-				Verdict:        verdict,
+				CuratedURL:     found.CuratedURL,
+				Verdict:        string(found.Verdict),
 				At:             now,
 			}); err != nil {
 				log.Warn("outcome ledger open failed", "fingerprint", fp, "err", err)

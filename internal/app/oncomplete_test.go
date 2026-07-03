@@ -32,35 +32,27 @@ func (s stubCurator) Curate(context.Context, providers.Investigation) (providers
 	return providers.Ref{URL: s.url}, nil
 }
 
-// lastOpen scans the JSONL ledger file and returns the last "open" event, decoded
-// into the fields the recurrence pointers read back.
-func lastOpen(t *testing.T, path string) struct {
+// openLine is the subset of a ledger open event the recurrence pointers read back.
+type openLine struct {
 	Event      string `json:"event"`
 	TriggerKey string `json:"trigger_key"`
 	CuratedURL string `json:"curated_url"`
 	Verdict    string `json:"verdict"`
-} {
+}
+
+// lastOpen scans the JSONL ledger file and returns the last "open" event.
+func lastOpen(t *testing.T, path string) openLine {
 	t.Helper()
 	f, err := os.Open(path)
 	if err != nil {
 		t.Fatalf("open ledger file: %v", err)
 	}
 	defer func() { _ = f.Close() }()
-	var last struct {
-		Event      string `json:"event"`
-		TriggerKey string `json:"trigger_key"`
-		CuratedURL string `json:"curated_url"`
-		Verdict    string `json:"verdict"`
-	}
+	var last openLine
 	found := false
 	sc := bufio.NewScanner(f)
 	for sc.Scan() {
-		var e struct {
-			Event      string `json:"event"`
-			TriggerKey string `json:"trigger_key"`
-			CuratedURL string `json:"curated_url"`
-			Verdict    string `json:"verdict"`
-		}
+		var e openLine
 		if err := json.Unmarshal(sc.Bytes(), &e); err != nil {
 			t.Fatalf("decode ledger line: %v", err)
 		}

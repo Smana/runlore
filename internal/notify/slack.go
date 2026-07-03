@@ -221,16 +221,21 @@ func slackMessage(inv providers.Investigation) map[string]any {
 // is escaped; the verdict label is omitted when the model gave no verdict. It
 // never embeds a slackDate token (raw <>), so it stays a single safe line.
 func fallbackText(inv providers.Investigation) string {
-	title := inv.Title
-	if title == "" {
-		title = "Investigation"
-	}
+	title := displayTitle(inv.Title)
 	_, level, pct := confidenceBadge(inv)
 	s := "🔍 " + title
 	if _, label := verdictBadge(inv.Verdict); label != "" {
 		s += " — " + label
 	}
 	return escapeMrkdwn(fmt.Sprintf("%s (%s confidence · %d%%)", s, level, pct))
+}
+
+// displayTitle falls back to a generic label when the model/trigger gave no title.
+func displayTitle(title string) string {
+	if title == "" {
+		return "Investigation"
+	}
+	return title
 }
 
 // slackDate renders t as a Slack date token that displays in the reader's local
@@ -254,10 +259,7 @@ func slackProgressMessage(up providers.ProgressUpdate) map[string]any {
 
 // slackProgressBlocks renders an interim progress update as Block Kit.
 func slackProgressBlocks(up providers.ProgressUpdate) []map[string]any {
-	title := up.Title
-	if title == "" {
-		title = "Investigation"
-	}
+	title := displayTitle(up.Title)
 	// The header is plain_text (Slack renders it literally, no mrkdwn parsing), so
 	// the untrusted title needs no escaping here.
 	status := fmt.Sprintf("⏳ *Investigating* · step %d/%d", up.Step, up.MaxSteps)
@@ -295,10 +297,7 @@ func escapeMrkdwn(s string) string { return mrkdwnEscaper.Replace(s) }
 // data-gaps / ruled-out lists) lives in detailBlocks; slackMessage appends the
 // two for the single-message webhook path.
 func summaryBlocks(inv providers.Investigation) []map[string]any {
-	title := inv.Title
-	if title == "" {
-		title = "Investigation"
-	}
+	title := displayTitle(inv.Title)
 	emoji, level, pct := confidenceBadge(inv)
 
 	// 1. Header (plain_text — Slack renders it literally, no mrkdwn parsing, so the
@@ -311,12 +310,15 @@ func summaryBlocks(inv providers.Investigation) []map[string]any {
 		if scope == "" {
 			scope = inv.Cluster
 		}
-		ref := inv.Resource.Ref()
-		switch {
-		case scope != "" && ref != "":
-			head += " — " + scope + "/" + ref
-		case scope != "" || ref != "":
-			head += " — " + scope + ref
+		loc := make([]string, 0, 2)
+		if scope != "" {
+			loc = append(loc, scope)
+		}
+		if ref := inv.Resource.Ref(); ref != "" {
+			loc = append(loc, ref)
+		}
+		if len(loc) > 0 {
+			head += " — " + strings.Join(loc, "/")
 		}
 	} else {
 		head += title
