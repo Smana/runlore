@@ -27,8 +27,11 @@ git clone https://github.com/you/your-kb && lore mcp ./your-kb
   `k` (default 5, cap 20). Returns scored hits: `path`, `type`, `title`,
   `description`, `resource`, `tags`, `score`.
 - **`kb_get`** — one full entry (frontmatter + markdown body) by the
-  bundle-relative `path` a search hit returned. Lookups go through the in-memory
-  index, never the filesystem, so path traversal is structurally impossible.
+  bundle-relative `path` a search hit returned. Curated entries also carry their
+  `timestamp` (last-change stamp) and `fingerprint` (dedup identity) so a client
+  can judge freshness; hand-written entries omit both. Lookups go through the
+  in-memory index, never the filesystem, so path traversal is structurally
+  impossible.
 
 The catalog directory resolves from the positional argument first, then
 `catalog.dir` in the config. The catalog is indexed once at startup; re-run
