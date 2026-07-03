@@ -50,6 +50,12 @@ func TestValidateStructural(t *testing.T) {
 		{"empty description", func(e *catalog.Entry) { e.Description = "" }, "description", ""},
 		{"empty resource", func(e *catalog.Entry) { e.Resource = "" }, "resource", ""},
 		{"resource with whitespace", func(e *catalog.Entry) { e.Resource = "ns / name" }, "resource", ""},
+		// resource is required for Incident only: a Playbook/Concept is abstract,
+		// generalized knowledge — OKF says resource is "omitted for abstract concepts",
+		// and entryType only drafts a Playbook when the finding is resource-agnostic.
+		{"playbook empty resource ok", func(e *catalog.Entry) { e.Type = "Playbook"; e.Resource = "" }, "", ""},
+		{"concept empty resource ok", func(e *catalog.Entry) { e.Type = "Concept"; e.Resource = "" }, "", ""},
+		{"playbook resource with whitespace", func(e *catalog.Entry) { e.Type = "Playbook"; e.Resource = "ns / name" }, "resource", ""},
 		{"empty tags warns", func(e *catalog.Entry) { e.Tags = nil }, "", "tags"},
 		// body, type-aware
 		{"incident missing cause", func(e *catalog.Entry) {
@@ -66,6 +72,12 @@ func TestValidateStructural(t *testing.T) {
 			e.Body = "Some free-form runbook content with no required sections."
 		}, "", ""},
 		{"empty body", func(e *catalog.Entry) { e.Type = "Playbook"; e.Body = "  \n" }, "body", ""},
+		// OKF's conventional section headings are H1 ("# Citations") and the seed
+		// entries follow that style — a hand-written Incident using H1 sections must
+		// validate, not fail with "missing section".
+		{"incident with H1 sections", func(e *catalog.Entry) {
+			e.Body = "# Symptom\n\nx\n\n# Investigate\n\n- e\n\n# Cause\n\n1. y\n\n# Resolution\n\n- z\n"
+		}, "", ""},
 	}
 
 	for _, tc := range tests {
@@ -108,6 +120,36 @@ func TestWarnInvalid(t *testing.T) {
 	}
 	if len(flagged) != 1 || flagged[0] != "bad.md" {
 		t.Fatalf("want bad.md flagged, got %v", flagged)
+	}
+}
+
+// TestWarnInvalidToleratesForeignTypes: OKF conformance (§9) requires consumers
+// to tolerate unknown types gracefully. A foreign OKF bundle entry (type
+// "Metric", no resource, free-form body) is conformant knowledge — the load-time
+// hook must serve it without flagging. Only RunLore-vocabulary entries are held
+// to the structural merge-gate shape at load time, and OKF non-conformance
+// (empty type) is still flagged.
+func TestWarnInvalidToleratesForeignTypes(t *testing.T) {
+	foreign := catalog.Entry{
+		Path: "foreign.md", Type: "Metric", Title: "requests_total",
+		Body: "A counter of HTTP requests.",
+	}
+	noType := catalog.Entry{Path: "no-type.md", Title: "t", Body: "b"}
+	brokenIncident := validIncident()
+	brokenIncident.Path = "broken.md"
+	brokenIncident.Body = "## Symptom\n\nx\n" // missing Cause/Resolution
+
+	var flagged []string
+	n := WarnInvalid([]catalog.Entry{foreign, noType, brokenIncident}, func(path string, _ []Issue) {
+		flagged = append(flagged, path)
+	})
+	if n != 2 {
+		t.Fatalf("want 2 invalid (no-type + broken incident), got %d: %v", n, flagged)
+	}
+	for _, p := range flagged {
+		if p == "foreign.md" {
+			t.Fatal("a foreign-typed OKF entry must not be flagged at load time")
+		}
 	}
 }
 

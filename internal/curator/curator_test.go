@@ -156,6 +156,38 @@ func TestCurateCatalogDuplicateDropsSilently(t *testing.T) {
 	}
 }
 
+// fakeFingerprinted is a catalog fake with NO BM25 hits but an exact fingerprint
+// match — proving the deterministic dedup path is independent of the BM25
+// threshold.
+type fakeFingerprinted struct {
+	fakeScored
+	fp string
+}
+
+func (f fakeFingerprinted) FindFingerprint(fp string) (catalog.Entry, bool) {
+	if fp != "" && fp == f.fp {
+		return catalog.Entry{Title: "already merged", Fingerprint: fp}, true
+	}
+	return catalog.Entry{}, false
+}
+
+func TestCurateCatalogFingerprintMatchDropsSilently(t *testing.T) {
+	// The same incident was already merged into the catalog (its persisted
+	// fingerprint matches) even though BM25 returns nothing → drop without filing
+	// or commenting, exactly like the score-threshold duplicate path.
+	inv := goodFinding()
+	inv.Resource = providers.Workload{Namespace: "apps", Name: "web"}
+	f := &fakeForge{}
+	cat := fakeFingerprinted{fp: DupFingerprint(inv)}
+	ref, err := newCurator(f, cat).Curate(context.Background(), inv)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if f.openedPR != nil || len(f.commented) != 0 || ref.URL != "" {
+		t.Fatalf("catalog fingerprint duplicate must drop silently, got pr=%+v comment=%v ref=%s", f.openedPR, f.commented, ref.URL)
+	}
+}
+
 func TestCurateCatalogErrorFallsThroughToPR(t *testing.T) {
 	// A catalog search error must NOT block curation: it logs a warning and falls
 	// through (fail-open) to the open-PR dedup + quality gate. With no matching open

@@ -9,6 +9,8 @@ type Entry struct {
 	Description string   // frontmatter: description
 	Resource    string   // frontmatter: resource
 	Tags        []string // frontmatter: tags
+	Timestamp   string   // frontmatter: timestamp (OKF-recommended, RFC3339; "" when absent)
+	Fingerprint string   // frontmatter: fingerprint (curator.DupFingerprint identity; "" on hand-written entries)
 	Body        string   // markdown body (after frontmatter)
 	Path        string   // file path relative to the bundle root
 }
