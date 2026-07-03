@@ -27,6 +27,8 @@ type: Playbook
 title: HelmRelease upgrade failure
 description: Helm chart bump leaves the release Ready=False.
 tags: [flux, helmrelease, upgrade]
+timestamp: "2026-06-20T00:00:00Z"
+fingerprint: deadbeefcafebabe
 ---
 A chart bump that adds a DB migration can stall the release.
 `)
@@ -157,17 +159,33 @@ func TestKBGetReturnsFullEntry(t *testing.T) {
 		t.Fatalf("kb_get: %v", err)
 	}
 	var e struct {
-		Path  string   `json:"path"`
-		Type  string   `json:"type"`
-		Title string   `json:"title"`
-		Tags  []string `json:"tags"`
-		Body  string   `json:"body"`
+		Path        string   `json:"path"`
+		Type        string   `json:"type"`
+		Title       string   `json:"title"`
+		Tags        []string `json:"tags"`
+		Timestamp   string   `json:"timestamp"`
+		Fingerprint string   `json:"fingerprint"`
+		Body        string   `json:"body"`
 	}
 	if err := json.Unmarshal([]byte(out), &e); err != nil {
 		t.Fatalf("kb_get output is not JSON: %v\n%s", err, out)
 	}
 	if e.Type != "Playbook" || e.Title != "HelmRelease upgrade failure" || !strings.Contains(e.Body, "DB migration") {
 		t.Fatalf("entry incomplete: %+v", e)
+	}
+	// Curated entries carry a change stamp + dedup identity in frontmatter;
+	// kb_get must surface both so clients can judge freshness and identity.
+	if e.Timestamp != "2026-06-20T00:00:00Z" || e.Fingerprint != "deadbeefcafebabe" {
+		t.Fatalf("timestamp/fingerprint not surfaced: %+v", e)
+	}
+
+	// Hand-written entries have neither — the keys must be omitted, not "".
+	out, err = tool(t, "kb_get")(context.Background(), json.RawMessage(`{"path":"network.md"}`))
+	if err != nil {
+		t.Fatalf("kb_get network.md: %v", err)
+	}
+	if strings.Contains(out, `"timestamp"`) || strings.Contains(out, `"fingerprint"`) {
+		t.Fatalf("absent timestamp/fingerprint must be omitted:\n%s", out)
 	}
 }
 

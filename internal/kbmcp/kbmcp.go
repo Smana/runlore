@@ -35,6 +35,9 @@ type searchHit struct {
 }
 
 // fullEntry is the kb_get result shape: the whole entry, body included.
+// Timestamp and Fingerprint are the curated-entry provenance (last-change stamp,
+// dedup identity) — surfaced so clients can judge freshness and identity; both
+// are absent on hand-written entries.
 type fullEntry struct {
 	Path        string   `json:"path"`
 	Type        string   `json:"type"`
@@ -42,6 +45,8 @@ type fullEntry struct {
 	Description string   `json:"description,omitempty"`
 	Resource    string   `json:"resource,omitempty"`
 	Tags        []string `json:"tags,omitempty"`
+	Timestamp   string   `json:"timestamp,omitempty"`
+	Fingerprint string   `json:"fingerprint,omitempty"`
 	Body        string   `json:"body"`
 }
 
@@ -139,7 +144,8 @@ func get(cat *catalog.Catalog, args json.RawMessage) (string, error) {
 		}
 		out, err := json.MarshalIndent(fullEntry{
 			Path: e.Path, Type: e.Type, Title: e.Title, Description: e.Description,
-			Resource: e.Resource, Tags: e.Tags, Body: e.Body,
+			Resource: e.Resource, Tags: e.Tags,
+			Timestamp: e.Timestamp, Fingerprint: e.Fingerprint, Body: e.Body,
 		}, "", "  ")
 		if err != nil {
 			return "", fmt.Errorf("kb_get encode: %w", err)
