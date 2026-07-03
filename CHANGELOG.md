@@ -8,6 +8,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 RunLore is **pre-1.0 and under active development** — there are no tagged releases
 yet, so everything currently lives under `[Unreleased]`.
 
+## [0.6.1](https://github.com/Smana/runlore/compare/v0.6.0...v0.6.1) (2026-07-03)
+
+
+### Bug Fixes
+
+* **whatchanged:** recover the diff when Flux advanced past the break (health-check failures) ([#240](https://github.com/Smana/runlore/issues/240)) ([481f0ee](https://github.com/Smana/runlore/commit/481f0eef100433713ba208683b1ce6070914ed2f))
+
+
+### Documentation
+
+* refresh Slack notification screenshot (0.6.0) ([#241](https://github.com/Smana/runlore/issues/241)) ([ca396b6](https://github.com/Smana/runlore/commit/ca396b6238d00eb4f2496219755eee75a479ef2f))
+
 ## [0.6.0](https://github.com/Smana/runlore/compare/v0.5.0...v0.6.0) (2026-07-03)
 
 
