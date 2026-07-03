@@ -97,8 +97,8 @@ func TestOnCompleteStampsRecurrenceAndPersistsOpen(t *testing.T) {
 		t.Fatalf("seed open: %v", err)
 	}
 
-	cap := &captureNotifier{}
-	notifier := notify.NewMulti(discardLog(), cap)
+	sink := &captureNotifier{}
+	notifier := notify.NewMulti(discardLog(), sink)
 	cur := stubCurator{url: "https://kb/new"}
 
 	found := providers.Investigation{
@@ -110,17 +110,17 @@ func TestOnCompleteStampsRecurrenceAndPersistsOpen(t *testing.T) {
 	onInvestigationComplete(context.Background(), found, ledger, cur, notifier, nil, nil, nil, discardLog())
 
 	// Delivered investigation carries the recurrence facts queried BEFORE this open.
-	if cap.got.Occurrences != 2 {
-		t.Errorf("delivered Occurrences = %d, want 2", cap.got.Occurrences)
+	if sink.got.Occurrences != 2 {
+		t.Errorf("delivered Occurrences = %d, want 2", sink.got.Occurrences)
 	}
-	if cap.got.PrevCuratedURL != "https://kb/prev" {
-		t.Errorf("delivered PrevCuratedURL = %q, want %q", cap.got.PrevCuratedURL, "https://kb/prev")
+	if sink.got.PrevCuratedURL != "https://kb/prev" {
+		t.Errorf("delivered PrevCuratedURL = %q, want %q", sink.got.PrevCuratedURL, "https://kb/prev")
 	}
-	if cap.got.LastOccurrence.IsZero() {
+	if sink.got.LastOccurrence.IsZero() {
 		t.Error("delivered LastOccurrence is zero, want the prior occurrence time")
 	}
-	if cap.got.CuratedURL != "https://kb/new" {
-		t.Errorf("delivered CuratedURL = %q, want %q", cap.got.CuratedURL, "https://kb/new")
+	if sink.got.CuratedURL != "https://kb/new" {
+		t.Errorf("delivered CuratedURL = %q, want %q", sink.got.CuratedURL, "https://kb/new")
 	}
 
 	// The newly appended open durably records this run's trigger key + fresh KB link.
@@ -148,8 +148,8 @@ func TestOnCompleteCountsOneOccurrencePerInvestigation(t *testing.T) {
 		t.Fatalf("new ledger: %v", err)
 	}
 
-	cap := &captureNotifier{}
-	notifier := notify.NewMulti(discardLog(), cap)
+	sink := &captureNotifier{}
+	notifier := notify.NewMulti(discardLog(), sink)
 
 	found := providers.Investigation{
 		Title:        "coalesced batch",
@@ -162,8 +162,8 @@ func TestOnCompleteCountsOneOccurrencePerInvestigation(t *testing.T) {
 	if n, _, _ := ledger.Occurrences("k"); n != 1 {
 		t.Errorf("Occurrences(k) = %d, want 1 (one investigation, not per-fingerprint)", n)
 	}
-	if cap.got.Occurrences != 1 {
-		t.Errorf("delivered Occurrences = %d, want 1 (first occurrence)", cap.got.Occurrences)
+	if sink.got.Occurrences != 1 {
+		t.Errorf("delivered Occurrences = %d, want 1 (first occurrence)", sink.got.Occurrences)
 	}
 
 	// A second investigation of the same key bumps the count to exactly 2.
@@ -171,7 +171,7 @@ func TestOnCompleteCountsOneOccurrencePerInvestigation(t *testing.T) {
 	if n, _, _ := ledger.Occurrences("k"); n != 2 {
 		t.Errorf("Occurrences(k) after 2nd run = %d, want 2", n)
 	}
-	if cap.got.Occurrences != 2 {
-		t.Errorf("delivered Occurrences on 2nd run = %d, want 2", cap.got.Occurrences)
+	if sink.got.Occurrences != 2 {
+		t.Errorf("delivered Occurrences on 2nd run = %d, want 2", sink.got.Occurrences)
 	}
 }
