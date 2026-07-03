@@ -9,6 +9,7 @@ import (
 	"bufio"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io/fs"
 	"os"
 	"sync"
@@ -21,11 +22,17 @@ type Event struct {
 	Fingerprint    string `json:"fingerprint"`               // Alertmanager fingerprint (stable firing↔resolved)
 	DupFingerprint string `json:"dup_fingerprint,omitempty"` // curator dedup fingerprint (resource+cause); the curated-PR resolution join key
 
-	Kind     string    `json:"kind,omitempty"`  // open: "recall" | "fresh"
+	Kind     string    `json:"kind,omitempty"`  // open: "recall" | "fresh"; feedback: "up" | "down"
 	Entry    string    `json:"entry,omitempty"` // open+recall: the recalled entry path
 	Title    string    `json:"title,omitempty"`
 	Resource string    `json:"resource,omitempty"`
 	At       time.Time `json:"at"`
+
+	// Recurrence/feedback fields (written by the delivery path). Kept omitempty so the
+	// append-only file stays backward/forward compatible with older readers.
+	TriggerKey string `json:"trigger_key,omitempty"` // groups recurrences of the same alert; keys the byTrigger index
+	CuratedURL string `json:"curated_url,omitempty"` // KB link surfaced as "previous: <link>" on recurrence
+	Verdict    string `json:"verdict,omitempty"`     // curator's machine verdict on the investigation
 }
 
 // Episode is a matched open→resolve pair (or, from Episodes(), an unresolved open
@@ -67,10 +74,22 @@ type Ledger struct {
 	pendingOpens    map[string][]pendingOpen // fingerprint → LIFO stack of unresolved opens
 	pendingResolves map[string][]time.Time   // fingerprint → buffered early resolves (resolve-before-open), FIFO
 
+	// byTrigger indexes "open" events per TriggerKey so delivery can render
+	// "Nth occurrence — previous: <KB link>" without replaying the file. Maintained
+	// in lockstep with the durable write, rebuilt on load, like agg.
+	byTrigger map[string]triggerAgg
+
 	// droppedResolves counts orphan resolves discarded by the pendingResolves bound
 	// (see maxPendingResolvesPerFingerprint) — spurious duplicate/replayed resolve
 	// webhooks. Kept so the (otherwise silent) defensive drop is observable.
 	droppedResolves int
+}
+
+// triggerAgg is the per-TriggerKey occurrence roll-up backing Occurrences.
+type triggerAgg struct {
+	count      int
+	last       time.Time
+	curatedURL string // CuratedURL of the newest open
 }
 
 // maxPendingResolvesPerFingerprint bounds the resolve-before-open buffer per
@@ -110,12 +129,14 @@ func (l *Ledger) loadLocked() error {
 	l.agg = map[string]Aggregate{}
 	l.pendingOpens = map[string][]pendingOpen{}
 	l.pendingResolves = map[string][]time.Time{}
+	l.byTrigger = map[string]triggerAgg{}
 	l.droppedResolves = 0
 	for _, e := range events {
 		switch e.Event {
 		case "open":
 			l.open[e.Fingerprint] = e
 			l.applyOpenLocked(e)
+			l.applyTriggerLocked(e)
 		case "resolve":
 			delete(l.open, e.Fingerprint)
 			l.applyResolveLocked(e.Fingerprint, e.At)
@@ -294,8 +315,52 @@ func (l *Ledger) Open(e Event) error {
 		return err // append failed: leave both index and cache untouched
 	}
 	l.open[e.Fingerprint] = e
-	l.applyOpenLocked(e) // keep the OpenCounts cache in lockstep with the durable write
+	l.applyOpenLocked(e)    // keep the OpenCounts cache in lockstep with the durable write
+	l.applyTriggerLocked(e) // and the per-TriggerKey occurrence index
 	return nil
+}
+
+// applyTriggerLocked folds one open into the per-TriggerKey occurrence index.
+func (l *Ledger) applyTriggerLocked(e Event) {
+	if e.TriggerKey == "" {
+		return
+	}
+	a := l.byTrigger[e.TriggerKey]
+	a.count++
+	if !e.At.Before(a.last) {
+		a.last = e.At
+		a.curatedURL = e.CuratedURL
+	}
+	l.byTrigger[e.TriggerKey] = a
+}
+
+// Occurrences reports how many investigations have been recorded for a
+// TriggerKey, when the most recent one happened, and its KB link — the
+// recurrence facts the notifier renders. Zero values for a disabled ledger,
+// an empty key, or a never-seen key.
+func (l *Ledger) Occurrences(triggerKey string) (int, time.Time, string) {
+	if !l.enabled() || triggerKey == "" {
+		return 0, time.Time{}, ""
+	}
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	a := l.byTrigger[triggerKey]
+	return a.count, a.last, a.curatedURL
+}
+
+// Feedback appends a human 👍/👎 verdict on a delivered investigation. It is a
+// pure append: replay ignores unknown event kinds, so feedback never disturbs
+// open/resolve pairing or the recall aggregate.
+func (l *Ledger) Feedback(triggerKey, fingerprint, rating string, at time.Time) error {
+	if !l.enabled() {
+		return nil
+	}
+	if rating != "up" && rating != "down" {
+		return fmt.Errorf("feedback rating %q: want up or down", rating)
+	}
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.appendLocked(Event{Event: "feedback", TriggerKey: triggerKey, Fingerprint: fingerprint, Kind: rating, At: at})
 }
 
 // Episodes replays the full ledger and turns every open into an Episode, pairing

@@ -778,6 +778,84 @@ func TestOpenCountsMultipleEntries(t *testing.T) {
 	}
 }
 
+// TestOccurrencesByTriggerKey verifies the byTrigger index counts prior opens per
+// TriggerKey and surfaces the newest one's time + curated URL — the recurrence facts
+// the notifier renders — and that the index survives a replay (restart / failover).
+func TestOccurrencesByTriggerKey(t *testing.T) {
+	l, _ := New(filepath.Join(t.TempDir(), "ledger.jsonl"))
+	t1 := time.Date(2026, 7, 1, 10, 0, 0, 0, time.UTC)
+	t2 := t1.Add(6 * time.Hour)
+	_ = l.Open(Event{Fingerprint: "f1", TriggerKey: "k", CuratedURL: "https://kb/1", At: t1})
+	_ = l.Open(Event{Fingerprint: "f2", TriggerKey: "k", CuratedURL: "https://kb/2", At: t2})
+	_ = l.Open(Event{Fingerprint: "f3", TriggerKey: "other", At: t2})
+	n, last, url := l.Occurrences("k")
+	if n != 2 || !last.Equal(t2) || url != "https://kb/2" {
+		t.Fatalf("Occurrences = %d %v %q", n, last, url)
+	}
+	// index survives a replay (restart)
+	l2, _ := New(l.path)
+	if n, _, _ := l2.Occurrences("k"); n != 2 {
+		t.Fatalf("after replay: %d", n)
+	}
+}
+
+// TestOccurrencesEmptyKeyAndDisabled pins the zero-value cases: a disabled ledger,
+// an empty key, and a never-seen key all report (0, zero, "").
+func TestOccurrencesEmptyKeyAndDisabled(t *testing.T) {
+	dis, _ := New("")
+	if n, last, url := dis.Occurrences("k"); n != 0 || !last.IsZero() || url != "" {
+		t.Fatalf("disabled: want 0,zero,\"\"; got %d %v %q", n, last, url)
+	}
+	l, _ := New(filepath.Join(t.TempDir(), "o.jsonl"))
+	if n, last, url := l.Occurrences(""); n != 0 || !last.IsZero() || url != "" {
+		t.Fatalf("empty key: want 0,zero,\"\"; got %d %v %q", n, last, url)
+	}
+	if n, _, _ := l.Occurrences("never-seen"); n != 0 {
+		t.Fatalf("never-seen key: want 0, got %d", n)
+	}
+}
+
+// TestFeedbackAppendsAndIsIgnoredByReplay ensures a feedback event is a pure append:
+// it must not disturb open/resolve pairing (Episodes still pairs exactly one episode)
+// and an invalid rating is rejected.
+func TestFeedbackAppendsAndIsIgnoredByReplay(t *testing.T) {
+	p := filepath.Join(t.TempDir(), "o.jsonl")
+	l, _ := New(p)
+	t0 := time.Unix(18000, 0)
+	_ = l.Open(Event{Fingerprint: "f", TriggerKey: "k", Kind: "recall", Entry: "x.md", At: t0})
+	if err := l.Feedback("k", "f", "up", t0.Add(time.Second)); err != nil {
+		t.Fatalf("Feedback up: %v", err)
+	}
+	_, _, _ = l.Resolve("f", t0.Add(2*time.Second))
+
+	// The feedback line is ignored by replay: pairing is untouched.
+	eps, err := l.Episodes()
+	if err != nil {
+		t.Fatalf("Episodes: %v", err)
+	}
+	resolved := 0
+	for _, e := range eps {
+		if e.Resolved {
+			resolved++
+		}
+	}
+	if len(eps) != 1 || resolved != 1 {
+		t.Fatalf("feedback must not disturb pairing: want 1 episode/1 resolved, got %d/%d", len(eps), resolved)
+	}
+	// OpenCounts (cache) is likewise undisturbed and equals a from-scratch replay.
+	assertCacheEqualsReplay(t, l, p)
+
+	// An invalid rating is rejected.
+	if err := l.Feedback("k", "f", "sideways", t0.Add(3*time.Second)); err == nil {
+		t.Fatal("Feedback with an invalid rating must return an error")
+	}
+	// A disabled ledger no-ops Feedback (no error).
+	dis, _ := New("")
+	if err := dis.Feedback("k", "f", "sideways", t0); err != nil {
+		t.Fatalf("disabled Feedback must be a no-op even for a bad rating: %v", err)
+	}
+}
+
 func TestEpisodeCarriesDupFingerprint(t *testing.T) {
 	p := filepath.Join(t.TempDir(), "outcomes.jsonl")
 	l, err := New(p)
