@@ -191,6 +191,20 @@ func (d *Differ) Remote(ctx context.Context, url, fromRev, toRev, scope string) 
 	return diffRevisions(ctx, repo, fromRev, toRev, scope)
 }
 
+// diffAgainstFirstParent returns the path-scoped diff of the change introduced by
+// commit to (to against its first parent). A root commit (no parent) yields an
+// empty diff.
+func diffAgainstFirstParent(ctx context.Context, to *object.Commit, scope string) (providers.Diff, error) {
+	if to.NumParents() == 0 {
+		return providers.Diff{}, nil // root commit: nothing to diff against
+	}
+	from, err := to.Parent(0)
+	if err != nil {
+		return providers.Diff{}, fmt.Errorf("parent of %s: %w", to.Hash, err)
+	}
+	return diffCommits(ctx, from, to, scope)
+}
+
 // RemoteFromParent clones url and returns the path-scoped diff of the change
 // introduced by rev (rev against its first parent). A root commit (no parent)
 // yields an empty diff. ctx bounds the clone + patch.
@@ -207,14 +221,7 @@ func (d *Differ) RemoteFromParent(ctx context.Context, url, rev, scope string) (
 	if err != nil {
 		return providers.Diff{}, fmt.Errorf("resolve %q: %w", rev, err)
 	}
-	if to.NumParents() == 0 {
-		return providers.Diff{}, nil // root commit: nothing to diff against
-	}
-	from, err := to.Parent(0)
-	if err != nil {
-		return providers.Diff{}, fmt.Errorf("parent of %q: %w", rev, err)
-	}
-	return diffCommits(ctx, from, to, scope)
+	return diffAgainstFirstParent(ctx, to, scope)
 }
 
 // ForChange resolves the diff for a detected Change by cloning its source repo
@@ -244,7 +251,8 @@ func (d *Differ) ForChange(ctx context.Context, c providers.Change) (providers.D
 	if err != nil {
 		return diff, err
 	}
-	if len(diff.Files) == 0 && c.Source.Path != "" {
+	// RemoteLastPathChange is a no-op for an empty path, so no guard needed here.
+	if len(diff.Files) == 0 {
 		if fb, ferr := d.RemoteLastPathChange(ctx, c.Source.RepoURL, c.ToRev, c.Source.Path); ferr == nil && len(fb.Files) > 0 {
 			return fb, nil
 		}
@@ -292,12 +300,5 @@ func lastPathChange(ctx context.Context, repo *git.Repository, atRev, scope stri
 	if err != nil {
 		return providers.Diff{}, fmt.Errorf("log %s: %w", scope, err)
 	}
-	if to.NumParents() == 0 {
-		return providers.Diff{}, nil // root commit: no parent to diff against
-	}
-	parent, err := to.Parent(0)
-	if err != nil {
-		return providers.Diff{}, fmt.Errorf("parent of %s: %w", to.Hash, err)
-	}
-	return diffCommits(ctx, parent, to, scope)
+	return diffAgainstFirstParent(ctx, to, scope)
 }
