@@ -389,6 +389,7 @@ type LogResult []LogLine
 // (how sure the model is) and severity (how the alert was labelled).
 type Verdict string
 
+// The model-facing verdict vocabulary; submit_findings requires one of these.
 const (
 	VerdictNoAction        Verdict = "no_action"        // benign / self-healed / synthetic; nothing to do
 	VerdictActionSuggested Verdict = "action_suggested" // a human should follow the suggested next steps
