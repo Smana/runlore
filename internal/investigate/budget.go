@@ -13,6 +13,7 @@ func budgetKillResult(req Request) providers.Investigation {
 		Title:       req.Title,
 		Resource:    req.Workload,
 		Fingerprint: req.Fingerprint,
+		Verdict:     providers.VerdictInconclusive,
 		Unresolved: []string{
 			"investigation stopped: token budget exceeded after nudge (model did not submit findings in time)",
 		},
@@ -28,6 +29,7 @@ func timeoutResult(req Request) providers.Investigation {
 		Title:       req.Title,
 		Resource:    req.Workload,
 		Fingerprint: req.Fingerprint,
+		Verdict:     providers.VerdictInconclusive,
 		Unresolved: []string{
 			"investigation stopped: per-investigation deadline exceeded before findings were submitted (e.g. a hung git clone/diff or a slow model)",
 		},
@@ -43,6 +45,7 @@ func refusalResult(req Request) providers.Investigation {
 		Title:       req.Title,
 		Resource:    req.Workload,
 		Fingerprint: req.Fingerprint,
+		Verdict:     providers.VerdictInconclusive,
 		Unresolved: []string{
 			"investigation stopped: the model declined to respond (safety-filtered or refused); no root cause was produced",
 		},

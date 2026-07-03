@@ -3,7 +3,10 @@ package curator
 import (
 	"strings"
 	"testing"
+	"unicode/utf8"
 
+	"github.com/Smana/runlore/internal/catalog"
+	"github.com/Smana/runlore/internal/kbvalidate"
 	"github.com/Smana/runlore/internal/providers"
 )
 
@@ -211,6 +214,101 @@ func TestDraftKBEntrySetsConfidenceAndProvenance(t *testing.T) {
 	}
 	if len(e.Provenance) != 1 || e.Provenance[0] != "crossplane/xplane-harbor" {
 		t.Fatalf("Provenance = %v, want [crossplane/xplane-harbor]", e.Provenance)
+	}
+}
+
+// TestDraftKBEntryCapsLongTitle proves a free-form investigation title that runs
+// past kbvalidate's 120-byte single-line merge gate is capped by construction:
+// single line, ≤120 bytes, ellipsis-terminated, and structurally valid.
+func TestDraftKBEntryCapsLongTitle(t *testing.T) {
+	long := "Harbor registry is completely down across every environment because the IAM AccessKeysPerUser quota was exceeded and the credential secret could not be provisioned"
+	if len(long) <= 120 {
+		t.Fatalf("test fixture must exceed 120 bytes, got %d", len(long))
+	}
+	inv := providers.Investigation{
+		Title:      long,
+		Confidence: 0.9,
+		Resource:   providers.Workload{Namespace: "tooling", Name: "harbor-core"},
+		RootCauses: []providers.Hypothesis{{Summary: "IAM quota exceeded", Evidence: []string{"e"}, SuggestedAction: "delete an old key"}},
+	}
+	e := draftKBEntry(inv)
+	if got := len(e.Title); got > 120 {
+		t.Fatalf("title byte length = %d, want <= 120: %q", got, e.Title)
+	}
+	if strings.ContainsAny(e.Title, "\r\n") {
+		t.Fatalf("title must be a single line: %q", e.Title)
+	}
+	if !strings.HasSuffix(e.Title, "…") {
+		t.Fatalf("capped title should end with an ellipsis: %q", e.Title)
+	}
+	if !utf8.ValidString(e.Title) {
+		t.Fatalf("capped title must remain valid UTF-8: %q", e.Title)
+	}
+	// The drafted entry must clear the title field of the structural merge gate.
+	for _, iss := range kbvalidate.ValidateStructural(toCatalogEntry(e)) {
+		if iss.Field == "title" && iss.Severity == kbvalidate.SeverityError {
+			t.Fatalf("drafted title failed the merge gate: %s", iss.Message)
+		}
+	}
+}
+
+// TestDraftKBEntryCollapsesNewlinesInTitle proves an embedded newline (which the
+// validator rejects as a hard error) is collapsed to a single line.
+func TestDraftKBEntryCollapsesNewlinesInTitle(t *testing.T) {
+	inv := providers.Investigation{
+		Title:      "Harbor down\nsecond line\ttabbed",
+		RootCauses: []providers.Hypothesis{{Summary: "s"}},
+	}
+	e := draftKBEntry(inv)
+	if strings.ContainsAny(e.Title, "\r\n\t") {
+		t.Fatalf("title must be collapsed to a single line: %q", e.Title)
+	}
+	if e.Title != "Harbor down second line tabbed" {
+		t.Fatalf("title = %q, want collapsed single-space form", e.Title)
+	}
+}
+
+// TestDraftKBEntryShortTitleUnchanged proves a within-limit title is passed
+// through untouched.
+func TestDraftKBEntryShortTitleUnchanged(t *testing.T) {
+	inv := providers.Investigation{
+		Title:      "HarborRegistryDown",
+		RootCauses: []providers.Hypothesis{{Summary: "s"}},
+	}
+	if e := draftKBEntry(inv); e.Title != "HarborRegistryDown" {
+		t.Fatalf("short title = %q, want it unchanged", e.Title)
+	}
+}
+
+// TestDraftKBEntryMultibyteTitleNotCorrupted proves capping a title full of
+// multibyte runes never cuts mid-rune (the result stays valid UTF-8 and ≤120
+// bytes).
+func TestDraftKBEntryMultibyteTitleNotCorrupted(t *testing.T) {
+	// Each "é" is 2 bytes; a long run of them pushes well past 120 bytes.
+	long := strings.Repeat("café éclair ", 20)
+	inv := providers.Investigation{
+		Title:      long,
+		RootCauses: []providers.Hypothesis{{Summary: "s"}},
+	}
+	e := draftKBEntry(inv)
+	if len(e.Title) > 120 {
+		t.Fatalf("title byte length = %d, want <= 120", len(e.Title))
+	}
+	if !utf8.ValidString(e.Title) {
+		t.Fatalf("capped multibyte title must remain valid UTF-8: %q", e.Title)
+	}
+}
+
+// toCatalogEntry mirrors a drafted KBEntry into the catalog.Entry shape that
+// kbvalidate.ValidateStructural consumes, so tests can run the real merge gate.
+func toCatalogEntry(e providers.KBEntry) catalog.Entry {
+	return catalog.Entry{
+		Type:        e.Type,
+		Title:       e.Title,
+		Description: e.Description,
+		Resource:    e.Resource,
+		Tags:        e.Tags,
+		Body:        e.Body,
 	}
 }
 

@@ -92,16 +92,24 @@ func TestListPRsByLabelParsesUpdatedAt(t *testing.T) {
 
 func TestListClosedUnmergedPRsByLabel(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/repos/o/r/issues" || r.URL.Query().Get("state") != "closed" {
-			t.Fatalf("unexpected request: %s?%s", r.URL.Path, r.URL.RawQuery)
+		// Now driven by the Search API, which filters merged PRs out server-side.
+		q := r.URL.Query().Get("q")
+		if r.URL.Path != "/search/issues" {
+			t.Fatalf("unexpected path: %s", r.URL.Path)
 		}
-		// a closed-unmerged PR (merged_at null), a merged PR (merged_at set → excluded),
-		// and a plain closed issue (no pull_request → excluded)
-		_, _ = w.Write([]byte(`[
+		for _, want := range []string{"repo:o/r", "is:pr", "is:closed", "is:unmerged", "label:runlore"} {
+			if !strings.Contains(q, want) {
+				t.Fatalf("query %q missing qualifier %q", q, want)
+			}
+		}
+		// Search-API envelope. A closed-unmerged PR (merged_at null) that must be
+		// returned, a merged PR (merged_at set → excluded by the MergedAt backstop),
+		// and a plain issue (no pull_request → excluded).
+		_, _ = w.Write([]byte(`{"total_count":1,"items":[
 		  {"number":48,"title":"KB: A","body":"b","labels":[{"name":"runlore"},{"name":"not-kb-worthy"}],"pull_request":{"url":"x","merged_at":null}},
 		  {"number":50,"title":"KB: B","body":"b","labels":[{"name":"runlore"}],"pull_request":{"url":"y","merged_at":"2026-06-01T12:00:00Z"}},
 		  {"number":39,"title":"plain issue","body":"b","labels":[{"name":"runlore"}]}
-		]`))
+		]}`))
 	}))
 	defer srv.Close()
 
@@ -115,6 +123,36 @@ func TestListClosedUnmergedPRsByLabel(t *testing.T) {
 	}
 	if len(prs[0].Labels) != 2 || prs[0].Labels[1] != "not-kb-worthy" {
 		t.Fatalf("labels not parsed: %+v", prs[0].Labels)
+	}
+}
+
+func TestListClosedUnmergedPRsByLabelPaginates(t *testing.T) {
+	// page 1 returns a full page (100) → the client must fetch page 2 for the rest.
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/search/issues" {
+			t.Fatalf("unexpected path: %s", r.URL.Path)
+		}
+		switch r.URL.Query().Get("page") {
+		case "1":
+			items := make([]string, 100)
+			for i := range items {
+				items[i] = fmt.Sprintf(`{"number":%d,"title":"KB: t%d","labels":[{"name":"runlore"}],"pull_request":{"merged_at":null}}`, i+1, i+1)
+			}
+			_, _ = w.Write([]byte(`{"total_count":101,"items":[` + strings.Join(items, ",") + `]}`))
+		case "2":
+			_, _ = w.Write([]byte(`{"total_count":101,"items":[{"number":101,"title":"KB: t101","labels":[{"name":"runlore"}],"pull_request":{"merged_at":null}}]}`))
+		default:
+			_, _ = w.Write([]byte(`{"total_count":101,"items":[]}`))
+		}
+	}))
+	defer srv.Close()
+	c := New(srv.URL, "o", "r", "main", staticToken("tok"))
+	prs, err := c.ListClosedUnmergedPRsByLabel(context.Background(), "runlore")
+	if err != nil {
+		t.Fatalf("ListClosedUnmergedPRsByLabel: %v", err)
+	}
+	if len(prs) != 101 {
+		t.Fatalf("want 101 PRs across 2 pages (no truncation at 100), got %d", len(prs))
 	}
 }
 

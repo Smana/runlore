@@ -34,6 +34,7 @@ type Server struct {
 	slackSecret  string            // Slack signing secret; verifies interactive button clicks
 	webhookToken string            // optional bearer token required on POST /webhook/alertmanager
 	approvers    map[string]bool   // Slack user IDs permitted to approve actions (empty = none)
+	feedback     FeedbackRecorder  // nil unless an outcome ledger is configured; records 👍/👎 clicks
 
 	metrics http.Handler // optional; GET /metrics (OTel Prometheus exposition)
 	log     *slog.Logger
@@ -47,6 +48,12 @@ type Pauser interface {
 	Paused() bool
 }
 
+// FeedbackRecorder persists a human 👍/👎 on a delivered investigation
+// (implemented by *outcome.Ledger).
+type FeedbackRecorder interface {
+	Feedback(triggerKey, fingerprint, rating string, at time.Time) error
+}
+
 // Actions bundles the optional rung-2/rung-3 wiring: the approval queue, the auto
 // kill-switch, the shared control token, and the Slack signing secret.
 type Actions struct {
@@ -54,8 +61,9 @@ type Actions struct {
 	Pauser       Pauser
 	Token        string
 	SlackSecret  string
-	WebhookToken string   // optional bearer token required on POST /webhook/alertmanager
-	ApproverIDs  []string // Slack user IDs permitted to approve actions
+	WebhookToken string           // optional bearer token required on POST /webhook/alertmanager
+	ApproverIDs  []string         // Slack user IDs permitted to approve actions
+	Feedback     FeedbackRecorder // nil unless an outcome ledger is configured; records unprivileged 👍/👎 clicks
 }
 
 // New builds a Server. ready reports whether this replica should serve; nil =
@@ -74,7 +82,7 @@ func New(ready func() bool, acts Actions, built []source.Built, pipe *source.Pip
 	s := &Server{
 		ready:     ready,
 		approvals: acts.Approvals, pauser: acts.Pauser, token: acts.Token, slackSecret: acts.SlackSecret,
-		webhookToken: acts.WebhookToken, approvers: approvers, metrics: metricsHandler, log: log,
+		webhookToken: acts.WebhookToken, approvers: approvers, feedback: acts.Feedback, metrics: metricsHandler, log: log,
 	}
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /slack/interactions", s.handleSlackInteraction)
@@ -233,11 +241,15 @@ type slackInteraction struct {
 	} `json:"actions"`
 }
 
-// handleSlackInteraction processes Block Kit approve/reject button clicks: it
-// verifies the Slack request signature, approves (executing) or rejects the
-// referenced action, and updates the message via response_url.
+// handleSlackInteraction processes Block Kit button clicks: it verifies the Slack
+// request signature, then either approves (executing) / rejects the referenced
+// action (privileged — approver allowlist) or records an unprivileged 👍/👎 in the
+// outcome ledger, updating the message via response_url.
 func (s *Server) handleSlackInteraction(w http.ResponseWriter, r *http.Request) {
-	if s.approvals == nil || s.slackSecret == "" {
+	// Admit the request when EITHER approvals or feedback is wired — a feedback-only
+	// server (outcome ledger, no rung-2 actions) still serves 👍/👎 clicks. The
+	// signing secret stays mandatory: signature verification is never optional.
+	if (s.approvals == nil && s.feedback == nil) || s.slackSecret == "" {
 		http.Error(w, "slack interactions not enabled", http.StatusNotFound)
 		return
 	}
@@ -262,9 +274,16 @@ func (s *Server) handleSlackInteraction(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	act := p.Actions[0]
+	// Feedback acks are appended (replace_original:false) so the investigation stays
+	// on screen; approve/reject replace the message with the outcome.
+	replaceOriginal := true
 	var msg string
 	switch act.ActionID {
 	case "runlore_approve":
+		if s.approvals == nil {
+			msg = "❌ approvals not enabled"
+			break
+		}
 		// Authorize the *user*, not just the Slack workspace: the signature proves
 		// origin, the allowlist proves the clicker may approve cluster mutations.
 		if !s.approvers[p.User.ID] {
@@ -281,6 +300,10 @@ func (s *Server) handleSlackInteraction(w http.ResponseWriter, r *http.Request) 
 			s.log.Info("slack approval executed", "id", act.Value, "user_id", p.User.ID, "user", p.User.Username, "op", executed.Op)
 		}
 	case "runlore_reject":
+		if s.approvals == nil {
+			msg = "❌ approvals not enabled"
+			break
+		}
 		// Gate reject on the same approver allowlist as approve: a signature-valid but
 		// unlisted user must not be able to cancel a pending remediation (denial-of-
 		// remediation). Rejecting is the safe direction, but it's still a privileged
@@ -295,12 +318,32 @@ func (s *Server) handleSlackInteraction(w http.ResponseWriter, r *http.Request) 
 		} else {
 			msg = fmt.Sprintf("🚫 rejected by @%s", p.User.Username)
 		}
+	case "runlore_feedback_up", "runlore_feedback_down":
+		// Feedback is deliberately unprivileged: no approver-allowlist check. The
+		// signature proves the click came from the workspace; anyone on-call may rate a
+		// verdict. The ack is appended, not replaced, so the investigation stays visible.
+		replaceOriginal = false
+		if s.feedback == nil {
+			msg = "⚠️ feedback recording not enabled (no outcome ledger configured)"
+			break
+		}
+		rating := "up"
+		if act.ActionID == "runlore_feedback_down" {
+			rating = "down"
+		}
+		if ferr := s.feedback.Feedback(act.Value, "", rating, time.Now()); ferr != nil {
+			msg = "⚠️ recording feedback failed: " + ferr.Error()
+			s.log.Warn("slack feedback failed", "key", act.Value, "err", ferr)
+		} else {
+			msg = fmt.Sprintf("🙏 feedback recorded (%s) — thanks @%s", rating, p.User.Username)
+			s.log.Info("slack feedback recorded", "key", act.Value, "rating", rating, "user", p.User.Username)
+		}
 	default:
 		http.Error(w, "unknown action", http.StatusBadRequest)
 		return
 	}
 	w.WriteHeader(http.StatusOK) // ack the click; update the message best-effort
-	s.updateSlack(r.Context(), p.ResponseURL, msg)
+	s.updateSlack(r.Context(), p.ResponseURL, msg, replaceOriginal)
 }
 
 // verifySlack validates the Slack request signature (HMAC-SHA256 over
@@ -320,11 +363,13 @@ func (s *Server) verifySlack(h http.Header, body []byte) bool {
 	return hmac.Equal([]byte(expected), []byte(h.Get("X-Slack-Signature")))
 }
 
-// updateSlack replaces the original message via the interaction response_url.
+// updateSlack posts text back to the interaction response_url. When replaceOriginal
+// is true it overwrites the message (approve/reject outcomes); when false it appends
+// a new message so the investigation stays visible (feedback acks must never wipe it).
 // The URL is attacker-influenceable (it arrives in the interaction payload), so
 // it is restricted to https *.slack.com and posted with a bounded client — no
 // SSRF to arbitrary internal services, no unbounded hang on http.DefaultClient.
-func (s *Server) updateSlack(ctx context.Context, responseURL, text string) {
+func (s *Server) updateSlack(ctx context.Context, responseURL, text string, replaceOriginal bool) {
 	if responseURL == "" {
 		return
 	}
@@ -333,7 +378,7 @@ func (s *Server) updateSlack(ctx context.Context, responseURL, text string) {
 		s.log.Warn("refusing slack response_url: not an https *.slack.com host", "url", responseURL)
 		return
 	}
-	body, _ := json.Marshal(map[string]any{"replace_original": true, "text": text})
+	body, _ := json.Marshal(map[string]any{"replace_original": replaceOriginal, "text": text})
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, responseURL, bytes.NewReader(body))
 	if err != nil {
 		return
