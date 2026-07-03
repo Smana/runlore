@@ -288,6 +288,10 @@ config:
       #                                             #   posts a verdict-first summary + threaded full analysis
       # channel: C0123456789                        # channel ID or name to post to
       # signing_secret_env: SLACK_SIGNING_SECRET   # enables Approve/Reject + 👍/👎 feedback buttons
+      #   ↳ the buttons also need Interactivity turned ON in the Slack app itself:
+      #     api.slack.com/apps → your app → Interactivity & Shortcuts → toggle On,
+      #     Request URL = https://<your-runlore-host>/slack/interactions. Without this
+      #     Slack shows "The app is not configured to handle interactive responses" on click.
     matrix:
       homeserver: https://matrix.org
       room_id: "!yourroom:matrix.org"

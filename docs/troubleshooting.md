@@ -149,6 +149,37 @@ with `count=` confirms how many sinks were wired — `count=0` means none are co
 
 ---
 
+## Slack buttons (👍/👎, Approve/Reject) do nothing or error
+
+Clicking a button and getting **"The app is not configured to handle interactive responses"** (or the
+click silently doing nothing) is a **Slack app configuration** problem, not a RunLore one — Slack
+never even reaches RunLore. The buttons are delivered by RunLore, but the *round-trip* on click is
+driven by your Slack app's **Interactivity** feature, which is off by default.
+
+Fix it in the Slack app (**[api.slack.com/apps](https://api.slack.com/apps)** → your app):
+
+1. **Features → Interactivity & Shortcuts → toggle Interactivity On.**
+2. Set the **Request URL** to your RunLore server's public endpoint:
+   `https://<your-runlore-host>/slack/interactions` (the server exposes `POST /slack/interactions`).
+   Slack must be able to reach it — expose the `server` port via Ingress/LoadBalancer.
+3. **Save Changes.** No re-install of the app is needed for this toggle.
+
+Then, on the RunLore side, both button families need the **signing secret** so clicks can be
+HMAC-verified — without it the endpoint returns `404 slack interactions not enabled`:
+
+- Set `notify.slack.signing_secret_env` (the app's **Basic Information → Signing Secret**).
+- 👍/👎 **verdict feedback** additionally records only when the outcome ledger is on
+  (`outcome.ledger_path`); otherwise the click gets an honest *"feedback isn't enabled"* reply
+  instead of a false "recorded" ack.
+- **Approve/Reject** additionally require `actions.mode: approve` (or `auto`) and the clicker's Slack
+  ID in `notify.slack.approver_ids`; feedback buttons are unprivileged (anyone in the channel can rate).
+
+Once wired, a click hits `POST /slack/interactions` on the leader; a verification failure logs at that
+handler. See [Configuration → notifiers](configuration.md) and the
+[Getting started](getting-started.md) Slack setup for the full picture.
+
+---
+
 ## `/readyz` never goes green
 
 `/readyz` is gated by **leadership AND catalog warmth** (`internal/app/runtime.go`). It returns `503`
