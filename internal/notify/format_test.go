@@ -3,21 +3,34 @@ package notify
 import (
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/Smana/runlore/internal/providers"
 )
 
 func sampleInvestigation() providers.Investigation {
 	return providers.Investigation{
-		Confidence: 0.82,
-		Resource:   providers.Workload{Kind: "HelmRelease", Namespace: "tooling", Name: "harbor"},
+		Confidence:  0.82,
+		Verdict:     providers.VerdictActionRequired,
+		Resource:    providers.Workload{Kind: "HelmRelease", Namespace: "tooling", Name: "harbor"},
+		AlertName:   "HarborDown",
+		Severity:    "critical",
+		Environment: "prod",
+		Cluster:     "eu-west-1",
+		Tenant:      "platform",
+		StartedAt:   time.Date(2026, 7, 3, 10, 0, 0, 0, time.UTC),
 		RootCauses: []providers.Hypothesis{{
 			Summary:    "chart 1.15 enabled DB migrations; harbor-db CrashLoopBackOff",
 			Confidence: 0.82, Evidence: []string{"pg_up=0", "migration lock timeout"},
 			ChangeRef:       "flux-system/apps: abc123..def456",
 			SuggestedAction: "flux rollback hr/harbor", Reversible: true,
 		}},
-		Unresolved: []string{"why the migration lock never released"},
+		Unresolved:     []string{"why the migration lock never released"},
+		RuledOut:       []string{"network partition disproven by pg reachable from api pod"},
+		DataGaps:       []string{"harbor-db disk metrics unavailable (scrape target down)"},
+		Occurrences:    3,
+		LastOccurrence: time.Date(2026, 6, 1, 9, 0, 0, 0, time.UTC),
+		PrevCuratedURL: "https://kb.example/entry/prev",
 	}
 }
 
@@ -46,6 +59,109 @@ func TestFormatResourceAndChange(t *testing.T) {
 	empty := Format(providers.Investigation{RootCauses: []providers.Hypothesis{{Summary: "x"}}})
 	if strings.Contains(empty, "Resource:") || strings.Contains(empty, "What changed:") {
 		t.Fatalf("empty resource/change must not render labels:\n%s", empty)
+	}
+}
+
+// TestFormatVerdictMetadataRecurrence covers the enriched header: the model
+// verdict badge, the compact alert-metadata line, incident start time, and the
+// recurrence pointer to the previous investigation of the same incident.
+func TestFormatVerdictMetadataRecurrence(t *testing.T) {
+	out := Format(sampleInvestigation())
+	for _, want := range []string{
+		"Verdict: Action required",
+		"Alert: HarborDown",
+		"severity critical",
+		"env prod",
+		"cluster eu-west-1",
+		"tenant platform",
+		"Started: 2026-07-03T10:00:00Z",
+		"Occurrence: #3",
+		"last investigated 2026-06-01T09:00:00Z",
+		"Previous conclusion: https://kb.example/entry/prev",
+	} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("formatted message missing %q:\n%s", want, out)
+		}
+	}
+}
+
+// TestFormatRuledOutAndDataGaps asserts the two honest-limits sections render
+// their bullets, mirroring the Unresolved section's shape.
+func TestFormatRuledOutAndDataGaps(t *testing.T) {
+	out := Format(sampleInvestigation())
+	for _, want := range []string{
+		"*Ruled out:*",
+		"network partition disproven",
+		"*Data gaps:*",
+		"harbor-db disk metrics unavailable",
+	} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("formatted message missing %q:\n%s", want, out)
+		}
+	}
+}
+
+// TestFormatEnrichedOmissions proves every new element is dropped when its
+// source field is empty/zero, so the message never prints an empty label.
+func TestFormatEnrichedOmissions(t *testing.T) {
+	// A bare investigation: no verdict, no metadata, no recurrence, no sections.
+	bare := Format(providers.Investigation{RootCauses: []providers.Hypothesis{{Summary: "x"}}})
+	for _, unwanted := range []string{
+		"Verdict:", "Alert:", "severity ", "cluster ", "tenant ",
+		"Started:", "Occurrence:", "Previous conclusion:", "*Ruled out:*", "*Data gaps:*",
+	} {
+		if strings.Contains(bare, unwanted) {
+			t.Fatalf("bare investigation must not render %q:\n%s", unwanted, bare)
+		}
+	}
+
+	// Occurrences ≤ 1 is a first sighting: no recurrence line.
+	first := sampleInvestigation()
+	first.Occurrences = 1
+	if strings.Contains(Format(first), "Occurrence:") {
+		t.Fatalf("first sighting (Occurrences=1) must omit the recurrence line:\n%s", Format(first))
+	}
+}
+
+// TestFormatScaffoldingHasNoMrkdwnMeta guards the fallback-escape invariant: the
+// slack fallback is escapeMrkdwn(Format(inv)), and TestSlackMessageFallbackEscaped
+// relies on Format's own scaffolding carrying none of & < > (only user-injected
+// evidence should). With a fully-populated investigation whose user strings are
+// themselves free of those three chars, the WHOLE output must be free of them.
+func TestFormatScaffoldingHasNoMrkdwnMeta(t *testing.T) {
+	out := Format(sampleInvestigation())
+	for _, ch := range []string{"&", "<", ">"} {
+		if strings.Contains(out, ch) {
+			t.Fatalf("Format scaffolding must not contain %q (breaks fallback escaping):\n%s", ch, out)
+		}
+	}
+}
+
+// TestVerdictBadge maps every verdict enum to a badge and leaves unknown/empty
+// verdicts unrendered (empty label ⇒ Format prints no verdict line).
+func TestVerdictBadge(t *testing.T) {
+	for _, tc := range []struct {
+		v     providers.Verdict
+		label string
+	}{
+		{providers.VerdictNoAction, "No action needed"},
+		{providers.VerdictActionSuggested, "Action suggested"},
+		{providers.VerdictActionRequired, "Action required"},
+		{providers.VerdictInconclusive, "Inconclusive"},
+	} {
+		emoji, label := verdictBadge(tc.v)
+		if label != tc.label {
+			t.Errorf("verdictBadge(%q) label = %q, want %q", tc.v, label, tc.label)
+		}
+		if emoji == "" {
+			t.Errorf("verdictBadge(%q) emoji is empty", tc.v)
+		}
+	}
+	if emoji, label := verdictBadge(""); emoji != "" || label != "" {
+		t.Errorf(`verdictBadge("") = (%q,%q), want ("","")`, emoji, label)
+	}
+	if emoji, label := verdictBadge("bogus"); emoji != "" || label != "" {
+		t.Errorf(`verdictBadge("bogus") = (%q,%q), want ("","")`, emoji, label)
 	}
 }
 

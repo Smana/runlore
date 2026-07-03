@@ -180,6 +180,15 @@ record of **whether a recalled answer preceded the incident actually resolving**
 - When the matching **incident-resolved signal** arrives (a resolved-alert webhook
   today; any source's "cleared" event by design), RunLore appends a **`resolve`** event
   for that fingerprint.
+- When a human clicks 👍/👎 on a delivered Slack summary, RunLore appends a
+  **`feedback`** event (`kind: up|down`) keyed by the incident's trigger key (falling
+  back to fingerprint). Feedback is a *pure append*: replay ignores unknown event kinds,
+  so a rating never disturbs open→resolve pairing — it's captured ground truth for future
+  learning, distinct from the mechanical resolve signal.
+
+The `open` event also now records the incident's **trigger key**, the **curated KB link**
+(so a recurrence can surface "previous: <link>"), and the curator's machine **verdict** —
+curation runs *before* the ledger open so the KB URL is present on the open itself.
 
 ```mermaid
 sequenceDiagram
@@ -204,6 +213,11 @@ Two read APIs turn this raw log into a learning signal:
   is buffered and paired with the next open.
 - **`OpenCounts()`** rolls episodes up **per catalog entry**: how many times the entry
   was recalled, how many of those resolved, and when it last resolved.
+- **`Occurrences()`** rolls opens up **per trigger key** (a `byTrigger` index folded on
+  each open): how many times *this alert* has fired, when the last occurrence was, and the
+  KB link from the previous one. The delivery path reads this to stamp **recurrence facts**
+  (occurrence count + previous-KB link) onto the notification, so a repeat alert is
+  visibly flagged as recurring rather than looking brand-new.
 
 Design choices worth calling out:
 

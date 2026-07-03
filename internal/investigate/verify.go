@@ -103,7 +103,7 @@ func (li *LoopInvestigator) verifyFindings(ctx context.Context, req Request, inv
 }
 
 // applyVerdicts rewrites the investigation per the review: rejected root causes
-// move to Unresolved and downgraded ones get a lower confidence. The verify pass
+// move to RuledOut and downgraded ones get a lower confidence. The verify pass
 // is the honesty guarantee (docs/design.md:203) — it may only keep confidence
 // equal or LOWER it, never raise. So a verdict's confidence is applied as a
 // monotonic floor (min with the score the hypothesis entered with), both
@@ -134,12 +134,20 @@ func applyVerdicts(li *LoopInvestigator, req Request, inv providers.Investigatio
 			}
 			kept = append(kept, rc)
 		case v.Verdict == "reject":
-			inv.Unresolved = append(inv.Unresolved, fmt.Sprintf("Rejected hypothesis: %s — %s", rc.Summary, v.Reason))
+			// A rejected hypothesis is honesty about what was disproven, not an open
+			// question for a human — it belongs in RuledOut (with the disproving
+			// reason), not Unresolved.
+			inv.RuledOut = append(inv.RuledOut, fmt.Sprintf("%s — %s", rc.Summary, v.Reason))
 			li.Log.Info("verify: rejected root cause", "title", req.Title, "summary", rc.Summary, "reason", v.Reason)
 		}
 	}
 	inv.RootCauses = kept
 	inv.Verified = len(kept) > 0
+	if len(kept) == 0 && inv.Verdict != "" {
+		// Everything the model concluded was refuted by the adversarial pass — an
+		// actionable verdict would be a confident claim with no surviving support.
+		inv.Verdict = providers.VerdictInconclusive
+	}
 	var maxc float64
 	for _, rc := range kept {
 		if rc.Confidence > maxc {

@@ -5,19 +5,63 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/Smana/runlore/internal/providers"
 )
 
+// verdictBadge maps a model verdict to its emoji + human label. Empty/unknown
+// verdicts return ("", "") and are rendered nowhere — never invent a verdict.
+func verdictBadge(v providers.Verdict) (emoji, label string) {
+	switch v {
+	case providers.VerdictNoAction:
+		return "✅", "No action needed"
+	case providers.VerdictActionSuggested:
+		return "🛠", "Action suggested"
+	case providers.VerdictActionRequired:
+		return "🔥", "Action required"
+	case providers.VerdictInconclusive:
+		return "❓", "Inconclusive"
+	}
+	return "", ""
+}
+
 // Format renders an Investigation as a concise markdown-ish message used by all
 // notifiers.
+//
+// Invariant: every literal this function emits (labels, separators, bullets)
+// avoids the three mrkdwn-meta chars & < >. The Slack fallback is
+// escapeMrkdwn(Format(inv)) — only untrusted content (evidence, summaries) may
+// carry those chars, so escaping leaves the scaffolding intact. Use · • and
+// *bold*; TestFormatScaffoldingHasNoMrkdwnMeta guards it.
 func Format(inv providers.Investigation) string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "*Investigation* — confidence %.0f%%\n", inv.Confidence*100)
+	// The model verdict is the headline actionability call — show it right under
+	// confidence. Empty/unknown verdicts render nothing (never invent one).
+	if emoji, label := verdictBadge(inv.Verdict); label != "" {
+		fmt.Fprintf(&b, "%s Verdict: %s\n", emoji, label)
+	}
 	// Name the affected resource up front: it is the first thing an on-call needs
 	// (which workload is this about?) and it isn't otherwise in the shared text.
 	if ref := inv.Resource.Ref(); ref != "" {
 		fmt.Fprintf(&b, "Resource: %s\n", strings.TrimSpace(inv.Resource.Kind+" "+ref))
+	}
+	// Compact trigger-time metadata line, assembled from whatever the source
+	// stamped — omitted entirely for sources that carry none of it.
+	if meta := metadataLine(inv); meta != "" {
+		fmt.Fprintf(&b, "%s\n", meta)
+	}
+	if !inv.StartedAt.IsZero() {
+		fmt.Fprintf(&b, "Started: %s\n", inv.StartedAt.UTC().Format(time.RFC3339))
+	}
+	// Recurrence pointer: only when this is a repeat of a known incident. A first
+	// sighting (Occurrences ≤ 1, or 0 = ledger disabled) prints nothing.
+	if inv.Occurrences > 1 {
+		fmt.Fprintf(&b, "Occurrence: #%d — last investigated %s\n", inv.Occurrences, inv.LastOccurrence.UTC().Format(time.RFC3339))
+		if inv.PrevCuratedURL != "" {
+			fmt.Fprintf(&b, "Previous conclusion: %s\n", inv.PrevCuratedURL)
+		}
 	}
 	for i, rc := range inv.RootCauses {
 		fmt.Fprintf(&b, "%d. *%s* (%.0f%%)\n", i+1, rc.Summary, rc.Confidence*100)
@@ -43,6 +87,20 @@ func Format(inv providers.Investigation) string {
 			fmt.Fprintf(&b, "   • %s\n", u)
 		}
 	}
+	// Honest limits: hypotheses actively disproved, and signals we could not get.
+	// Both mirror the Unresolved section's shape and are omitted when empty.
+	if len(inv.RuledOut) > 0 {
+		b.WriteString("*Ruled out:*\n")
+		for _, r := range inv.RuledOut {
+			fmt.Fprintf(&b, "   • %s\n", r)
+		}
+	}
+	if len(inv.DataGaps) > 0 {
+		b.WriteString("*Data gaps:*\n")
+		for _, d := range inv.DataGaps {
+			fmt.Fprintf(&b, "   • %s\n", d)
+		}
+	}
 	if len(inv.Actions) > 0 {
 		b.WriteString("*Suggested actions* (not executed — apply manually):\n")
 		for _, a := range inv.Actions {
@@ -63,6 +121,31 @@ func Format(inv providers.Investigation) string {
 		fmt.Fprintf(&b, "%s\n", foot)
 	}
 	return b.String()
+}
+
+// metadataLine assembles the trigger-time facts stamped on the investigation
+// into one compact " · "-joined line (e.g. "Alert: HarborDown · severity
+// critical · env prod · cluster eu-west-1 · tenant platform"). Only non-empty
+// parts appear, so a source that carries none of them yields "" and the caller
+// omits the line. All separators/labels are mrkdwn-safe (no & < >).
+func metadataLine(inv providers.Investigation) string {
+	parts := make([]string, 0, 5)
+	if inv.AlertName != "" {
+		parts = append(parts, "Alert: "+inv.AlertName)
+	}
+	if inv.Severity != "" {
+		parts = append(parts, "severity "+inv.Severity)
+	}
+	if inv.Environment != "" {
+		parts = append(parts, "env "+inv.Environment)
+	}
+	if inv.Cluster != "" {
+		parts = append(parts, "cluster "+inv.Cluster)
+	}
+	if inv.Tenant != "" {
+		parts = append(parts, "tenant "+inv.Tenant)
+	}
+	return strings.Join(parts, " · ")
 }
 
 // usageFooter renders the per-investigation model usage as one line:

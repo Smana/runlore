@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/Smana/runlore/internal/catalog"
 	"github.com/Smana/runlore/internal/outcome"
@@ -170,6 +171,29 @@ func TestRecalledInvestigationCarriesEntryPath(t *testing.T) {
 	inv := recalledInvestigation(Request{Title: "x"}, catalog.Entry{Title: "T", Path: "p.md"}, 0.7)
 	if inv.RecalledEntry != "p.md" {
 		t.Fatalf("RecalledEntry = %q, want p.md", inv.RecalledEntry)
+	}
+}
+
+func TestRecalledInvestigationStampsAlertMetadata(t *testing.T) {
+	// The recall short-circuit must carry the same trigger-time facts as the full
+	// loop so a recalled delivery renders an identical notification metadata block.
+	start := time.Now().Add(-time.Minute)
+	req := Request{
+		Title:       "x",
+		Severity:    "critical",
+		Environment: "staging",
+		At:          start,
+		Labels:      map[string]string{"alertname": "HarborProbeFailure", "cluster": "c1", "tenant": "t1"},
+	}
+	inv := recalledInvestigation(req, catalog.Entry{Title: "T", Path: "p.md"}, 0.7)
+	if inv.Severity != "critical" || inv.Environment != "staging" {
+		t.Fatalf("recall path must stamp severity/environment, got %+v", inv)
+	}
+	if inv.Cluster != "c1" || inv.Tenant != "t1" || inv.AlertName != "HarborProbeFailure" {
+		t.Fatalf("recall path must stamp cluster/tenant/alertname, got %+v", inv)
+	}
+	if !inv.StartedAt.Equal(start) {
+		t.Fatalf("recall path must stamp StartedAt: got %v want %v", inv.StartedAt, start)
 	}
 }
 
