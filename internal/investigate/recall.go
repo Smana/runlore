@@ -224,16 +224,15 @@ func recalledInvestigation(req Request, e catalog.Entry, confidence float64) pro
 		Confidence: confidence,
 		Evidence:   []string{fmt.Sprintf("instant recall: matched knowledge-base entry %q", e.Path)},
 	}
-	return providers.Investigation{
+	inv := providers.Investigation{
 		Title:         req.Title,
 		Confidence:    confidence,
 		RootCauses:    []providers.Hypothesis{rc},
 		Unresolved:    []string{"recalled from the catalog without a fresh investigation — confirm it still applies"},
 		Recalled:      true,
 		RecalledEntry: e.Path,
-		Fingerprint:   req.Fingerprint,
-		Fingerprints:  req.Fingerprints,
-		TriggerKey:    req.TriggerKey,
 		Resource:      req.Workload,
 	}
+	stampRequestFacts(&inv, req) // same trigger-time facts as the full-loop site, factored to prevent drift
+	return inv
 }

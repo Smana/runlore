@@ -90,5 +90,7 @@ func investigationText(inv providers.Investigation) string {
 		b.WriteString(" " + rc.Summary + " " + rc.SuggestedAction + " " + strings.Join(rc.Evidence, " "))
 	}
 	b.WriteString(" " + strings.Join(inv.Unresolved, " "))
+	b.WriteString(" " + strings.Join(inv.RuledOut, " "))
+	b.WriteString(" " + strings.Join(inv.DataGaps, " "))
 	return b.String()
 }

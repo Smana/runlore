@@ -10,6 +10,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/Smana/runlore/internal/providers"
 )
@@ -26,7 +27,9 @@ func TestSlackDeliver(t *testing.T) {
 		t.Fatalf("Deliver: %v", err)
 	}
 	text, _ := got["text"].(string)
-	if text == "" || !contains(text, "flux rollback hr/harbor") {
+	// The fallback is now the one-line fallbackText: verdict label + confidence,
+	// not the full Format body.
+	if text == "" || !contains(text, "Action required") {
 		t.Fatalf("unexpected slack payload: %v", got)
 	}
 }
@@ -55,7 +58,7 @@ func TestSlackBotDeliver(t *testing.T) {
 	if got["channel"] != "C123" {
 		t.Fatalf("channel = %v, want C123", got["channel"])
 	}
-	if text, _ := got["text"].(string); !contains(text, "flux rollback hr/harbor") {
+	if text, _ := got["text"].(string); !contains(text, "Action required") {
 		t.Fatalf("unexpected payload: %v", got)
 	}
 }
@@ -73,6 +76,112 @@ func TestSlackBotAPIError(t *testing.T) {
 	err := bot.Deliver(context.Background(), sampleInvestigation())
 	if err == nil || !contains(err.Error(), "not_in_channel") {
 		t.Fatalf("expected not_in_channel error, got %v", err)
+	}
+}
+
+// TestSlackBotDeliverThreadsDetail proves the bot path posts a compact summary to
+// the channel, then the full analysis as a thread reply keyed on the summary's ts.
+func TestSlackBotDeliverThreadsDetail(t *testing.T) {
+	var posts []map[string]any
+	var raw []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		b, _ := io.ReadAll(r.Body)
+		raw = append(raw, string(b))
+		var m map[string]any
+		_ = json.Unmarshal(b, &m)
+		posts = append(posts, m)
+		w.Header().Set("Content-Type", "application/json")
+		if len(posts) == 1 {
+			_, _ = w.Write([]byte(`{"ok":true,"ts":"111.222"}`))
+		} else {
+			_, _ = w.Write([]byte(`{"ok":true}`))
+		}
+	}))
+	defer srv.Close()
+
+	bot := &SlackBot{token: "xoxb-test", channel: "C123", baseURL: srv.URL, http: srv.Client()}
+	if err := bot.Deliver(context.Background(), sampleInvestigation()); err != nil {
+		t.Fatalf("Deliver: %v", err)
+	}
+	if len(posts) != 2 {
+		t.Fatalf("got %d POSTs, want 2", len(posts))
+	}
+	// First message: the summary, posted to the channel with no thread_ts.
+	if _, ok := posts[0]["thread_ts"]; ok {
+		t.Fatalf("summary must not carry thread_ts: %v", posts[0])
+	}
+	if !contains(raw[0], "Action required") {
+		t.Fatalf("summary blocks missing verdict summary:\n%s", raw[0])
+	}
+	// Second message: the detail, threaded under the summary's ts.
+	if posts[1]["thread_ts"] != "111.222" {
+		t.Fatalf("detail thread_ts = %v, want 111.222", posts[1]["thread_ts"])
+	}
+	if !contains(raw[1], "Full analysis") {
+		t.Fatalf("detail blocks missing full analysis:\n%s", raw[1])
+	}
+	// The detail reply's fallback text is a short pointer, not the full body.
+	text, _ := posts[1]["text"].(string)
+	if !strings.HasPrefix(text, "Full analysis") {
+		t.Fatalf("detail fallback text = %q, want short 'Full analysis' pointer", text)
+	}
+	if len(text) > 200 {
+		t.Fatalf("detail fallback text too long (%d chars): %q", len(text), text)
+	}
+}
+
+// TestSlackBotDeliverNoThreadWhenNoDetail proves a minimal investigation (nothing
+// beyond the summary) posts exactly one message — no empty thread reply.
+func TestSlackBotDeliverNoThreadWhenNoDetail(t *testing.T) {
+	var posts int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		posts++
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"ok":true,"ts":"111.222"}`))
+	}))
+	defer srv.Close()
+
+	inv := providers.Investigation{
+		Title:      "brief blip",
+		Verdict:    providers.VerdictNoAction,
+		Confidence: 0.5,
+		RootCauses: []providers.Hypothesis{{Summary: "transient", Confidence: 0.5, Evidence: []string{"one"}}},
+	}
+	bot := &SlackBot{token: "xoxb-test", channel: "C123", baseURL: srv.URL, http: srv.Client()}
+	if err := bot.Deliver(context.Background(), inv); err != nil {
+		t.Fatalf("Deliver: %v", err)
+	}
+	if posts != 1 {
+		t.Fatalf("got %d POSTs, want 1 (no detail thread)", posts)
+	}
+}
+
+// TestSlackBotDeliverDetailFailureSurfaced proves a failed detail thread reply is
+// surfaced as a wrapped error — but the wrapping records that the summary (the
+// notification) already landed, so Multi logs it without implying total failure.
+func TestSlackBotDeliverDetailFailureSurfaced(t *testing.T) {
+	var posts int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		posts++
+		w.Header().Set("Content-Type", "application/json")
+		if posts == 1 {
+			_, _ = w.Write([]byte(`{"ok":true,"ts":"111.222"}`))
+		} else {
+			_, _ = w.Write([]byte(`{"ok":false,"error":"ratelimited"}`))
+		}
+	}))
+	defer srv.Close()
+
+	bot := &SlackBot{token: "xoxb-test", channel: "C123", baseURL: srv.URL, http: srv.Client()}
+	err := bot.Deliver(context.Background(), sampleInvestigation())
+	if err == nil {
+		t.Fatal("a failed detail thread must surface an error")
+	}
+	if !contains(err.Error(), "summary delivered") || !contains(err.Error(), "ratelimited") {
+		t.Fatalf("error should wrap the detail failure noting the summary landed, got %v", err)
+	}
+	if posts != 2 {
+		t.Fatalf("got %d POSTs, want 2", posts)
 	}
 }
 
@@ -113,6 +222,32 @@ func TestSlackMessageButtons(t *testing.T) {
 	}
 }
 
+func TestSlackFeedbackButtons(t *testing.T) {
+	// TriggerKey present → a feedback actions block with both action_ids and the key
+	// as the button value. Feedback renders even with no ApprovalID actions.
+	blocks := summaryBlocks(providers.Investigation{Confidence: 0.5, TriggerKey: "k"})
+	raw, _ := json.Marshal(blocks)
+	for _, want := range []string{"runlore_feedback_up", "runlore_feedback_down", `"value":"k"`, "Accurate", "Off-base"} {
+		if !contains(string(raw), want) {
+			t.Fatalf("feedback blocks missing %q:\n%s", want, raw)
+		}
+	}
+
+	// No TriggerKey but a Fingerprint → falls back to the fingerprint as the value.
+	blocks = summaryBlocks(providers.Investigation{Confidence: 0.5, Fingerprint: "fp1"})
+	raw, _ = json.Marshal(blocks)
+	if !contains(string(raw), `"value":"fp1"`) {
+		t.Fatalf("feedback value should fall back to Fingerprint:\n%s", raw)
+	}
+
+	// Neither TriggerKey nor Fingerprint → no feedback block at all.
+	blocks = summaryBlocks(providers.Investigation{Confidence: 0.5})
+	raw, _ = json.Marshal(blocks)
+	if contains(string(raw), "runlore_feedback") {
+		t.Fatalf("did not expect feedback buttons without a TriggerKey or Fingerprint:\n%s", raw)
+	}
+}
+
 func TestSlackBlocksLayout(t *testing.T) {
 	inv := providers.Investigation{
 		Title:      "VictoriaTracesDown",
@@ -125,7 +260,7 @@ func TestSlackBlocksLayout(t *testing.T) {
 		Unresolved: []string{"why the migration stalled"},
 		CuratedURL: "https://github.com/o/r/issues/9",
 	}
-	blocks := slackBlocks(inv)
+	blocks := append(summaryBlocks(inv), detailBlocks(inv)...)
 	if blocks[0]["type"] != "header" {
 		t.Fatalf("first block must be a header, got %v", blocks[0]["type"])
 	}
@@ -137,6 +272,112 @@ func TestSlackBlocksLayout(t *testing.T) {
 		if !contains(s, want) {
 			t.Fatalf("blocks missing %q:\n%s", want, s)
 		}
+	}
+}
+
+// TestSlackSummaryLayout proves the verdict-first summary: the header anchors on
+// the alert name, the second block is the verdict section (NOT the old top
+// confidence context line), the metadata fields carry cluster + recurrence, and
+// confidence has moved to the footer.
+func TestSlackSummaryLayout(t *testing.T) {
+	inv := providers.Investigation{
+		Title:       "harbor is degraded",
+		Verdict:     providers.VerdictNoAction,
+		Confidence:  0.8,
+		AlertName:   "HarborDown",
+		Severity:    "critical",
+		Tenant:      "platform",
+		Cluster:     "eu-west-1",
+		Resource:    providers.Workload{Kind: "HelmRelease", Namespace: "tooling", Name: "harbor"},
+		StartedAt:   time.Date(2026, 7, 3, 10, 0, 0, 0, time.UTC),
+		RootCauses:  []providers.Hypothesis{{Summary: "chart bump", Confidence: 0.8, ChangeRef: "c@1", Evidence: []string{"pg_up=0"}}},
+		Occurrences: 3,
+		Verified:    true,
+		CuratedURL:  "https://github.com/o/r/issues/9",
+	}
+	blocks := summaryBlocks(inv)
+	if blocks[0]["type"] != "header" {
+		t.Fatalf("block[0] must be a header, got %v", blocks[0]["type"])
+	}
+	// Verdict owns the second slot: a section, not the old confidence context line.
+	if blocks[1]["type"] != "section" {
+		t.Fatalf("block[1] must be the verdict section, not %v (old top confidence line must be gone)", blocks[1]["type"])
+	}
+	raw, _ := json.Marshal(blocks)
+	s := string(raw)
+	for _, want := range []string{"HarborDown", "No action needed", "*Cluster:*", "*Recurrence:*", "confidence", "view entry"} {
+		if !contains(s, want) {
+			t.Fatalf("summary blocks missing %q:\n%s", want, s)
+		}
+	}
+}
+
+// TestSlackFallbackOneLine proves the fallback is a single line carrying the
+// verdict label, with a hostile title escaped inert.
+func TestSlackFallbackOneLine(t *testing.T) {
+	inv := sampleInvestigation()
+	inv.Title = "<b>boom</b>"
+	text, _ := slackMessage(inv)["text"].(string)
+	if strings.Contains(text, "\n") {
+		t.Fatalf("fallback text must be one line, got:\n%q", text)
+	}
+	if !strings.Contains(text, "Action required") {
+		t.Fatalf("fallback text missing the verdict label:\n%s", text)
+	}
+	if !strings.Contains(text, "&lt;b&gt;boom&lt;/b&gt;") {
+		t.Fatalf("hostile title not escaped in fallback:\n%s", text)
+	}
+}
+
+// TestSlackDetailBlocksFullEvidence proves the summary caps the top root cause at
+// three evidence bullets while the detail section carries all of them.
+func TestSlackDetailBlocksFullEvidence(t *testing.T) {
+	inv := providers.Investigation{
+		Title: "t",
+		RootCauses: []providers.Hypothesis{{
+			Summary:  "x",
+			Evidence: []string{"ev-one", "ev-two", "ev-three", "ev-four", "ev-five", "ev-six"},
+		}},
+	}
+	summary := strings.Join(mrkdwnTexts(summaryBlocks(inv)), "\n")
+	if !strings.Contains(summary, "ev-three") || strings.Contains(summary, "ev-four") {
+		t.Fatalf("summary must show 3 evidence bullets, not more:\n%s", summary)
+	}
+	if !strings.Contains(summary, "…") {
+		t.Fatalf("summary must flag the elided evidence with an ellipsis:\n%s", summary)
+	}
+	detail := detailBlocks(inv)
+	if detail == nil {
+		t.Fatal("a 6-evidence root cause must emit detail blocks")
+	}
+	joined := strings.Join(mrkdwnTexts(detail), "\n")
+	for _, want := range []string{"ev-one", "ev-six"} {
+		if !strings.Contains(joined, want) {
+			t.Fatalf("detail blocks missing full evidence %q:\n%s", want, joined)
+		}
+	}
+}
+
+// TestSlackNoVerdictFallsBack proves an investigation without a verdict (old /
+// recall) renders no verdict badge but still surfaces confidence — the layout
+// stays complete.
+func TestSlackNoVerdictFallsBack(t *testing.T) {
+	inv := providers.Investigation{
+		Title:      "t",
+		Confidence: 0.8,
+		RootCauses: []providers.Hypothesis{{Summary: "x", Confidence: 0.8}},
+	}
+	blocks := append(summaryBlocks(inv), detailBlocks(inv)...)
+	joined := strings.Join(mrkdwnTexts(blocks), "\n")
+	if strings.Contains(joined, "No action needed") || strings.Contains(joined, "Action required") {
+		t.Fatalf("empty verdict must render no verdict badge:\n%s", joined)
+	}
+	if !strings.Contains(joined, "confidence") {
+		t.Fatalf("layout must still render confidence when the verdict is empty:\n%s", joined)
+	}
+	// With no verdict the second block falls back to the confidence context line.
+	if blocks[1]["type"] != "context" {
+		t.Fatalf("block[1] must fall back to the confidence context line, got %v", blocks[1]["type"])
 	}
 }
 
@@ -198,11 +439,14 @@ func TestSlackBlocksEscapeUntrustedText(t *testing.T) {
 			SuggestedAction: "restart & verify",
 			Reversible:      true,
 		}},
-		Unresolved: []string{"why <img> appears in logs"},
-		Actions:    []providers.Action{{Description: "scale down <deploy>", ApprovalID: "a1"}},
-		CuratedURL: "https://github.com/o/r/issues/9",
+		Unresolved:     []string{"why <img> appears in logs"},
+		RuledOut:       []string{"disproven by <script> in logs"},
+		DataGaps:       []string{"metrics <unavailable> for db"},
+		Actions:        []providers.Action{{Description: "scale down <deploy>", ApprovalID: "a1"}},
+		CuratedURL:     "https://github.com/o/r/issues/9",
+		PrevCuratedURL: "https://kb.example/prev?a=1&b=2",
 	}
-	joined := strings.Join(mrkdwnTexts(slackBlocks(inv)), "\n")
+	joined := strings.Join(mrkdwnTexts(append(summaryBlocks(inv), detailBlocks(inv)...)), "\n")
 
 	// The hostile log line must render inert, never as a clickable link.
 	if strings.Contains(joined, "<https://evil.example") {
@@ -211,14 +455,21 @@ func TestSlackBlocksEscapeUntrustedText(t *testing.T) {
 	for _, want := range []string{
 		"&lt;https://evil.example|click here to remediate&gt;",
 		"summary with &lt;b&gt; tag",
-		"chart@&lt;v2&gt;",
-		"restart &amp; verify",
+		"chart@&lt;v2&gt;",     // ChangeRef, surfaced in the metadata fields and the detail RC section
+		"restart &amp; verify", // SuggestedAction, surfaced in next steps
 		"why &lt;img&gt; appears in logs",
 		"scale down &lt;deploy&gt;",
+		"disproven by &lt;script&gt; in logs", // RuledOut item
+		"metrics &lt;unavailable&gt; for db",  // DataGaps item
+		"https://kb.example/prev?a=1&amp;b=2", // PrevCuratedURL, escaped inside the recurrence link
 	} {
 		if !strings.Contains(joined, want) {
 			t.Errorf("blocks missing escaped untrusted text %q:\n%s", want, joined)
 		}
+	}
+	// The recurrence URL must not survive with a raw ampersand (would split the link).
+	if strings.Contains(joined, "prev?a=1&b=2") {
+		t.Fatalf("PrevCuratedURL kept a raw & inside the link:\n%s", joined)
 	}
 	// Formatter-emitted markup must keep working: bold rank, code confidence,
 	// reversibility italics, and the KB link the formatter constructs itself.
@@ -229,21 +480,22 @@ func TestSlackBlocksEscapeUntrustedText(t *testing.T) {
 	}
 }
 
-// TestSlackMessageFallbackEscaped proves the plain-text fallback (Slack parses
-// it as mrkdwn for notifications) escapes untrusted content too, while the
-// scaffolding Format emits (bold headers) survives untouched.
+// TestSlackMessageFallbackEscaped proves the one-line fallback (Slack parses it
+// as mrkdwn for notifications) escapes its one untrusted field — the model title
+// — so a hostile title cannot inject a clickable phishing link, while the
+// verdict label and confidence scaffolding survive untouched.
 func TestSlackMessageFallbackEscaped(t *testing.T) {
 	inv := sampleInvestigation()
-	inv.RootCauses[0].Evidence = append(inv.RootCauses[0].Evidence, "<https://evil.example|click here to remediate>")
+	inv.Title = "<https://evil.example|click here to remediate>"
 	text, _ := slackMessage(inv)["text"].(string)
 	if strings.Contains(text, "<https://evil.example") {
 		t.Fatalf("fallback text carries live mrkdwn link:\n%s", text)
 	}
 	if !strings.Contains(text, "&lt;https://evil.example|click here to remediate&gt;") {
-		t.Fatalf("fallback text missing escaped evidence:\n%s", text)
+		t.Fatalf("fallback text missing escaped title:\n%s", text)
 	}
-	if !strings.Contains(text, "*Investigation*") {
-		t.Fatalf("fallback text lost formatter scaffolding:\n%s", text)
+	if !strings.Contains(text, "Action required") {
+		t.Fatalf("fallback text lost the verdict label:\n%s", text)
 	}
 }
 

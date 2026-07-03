@@ -384,15 +384,49 @@ type Matrix []Series
 // LogResult is a logs/network query result.
 type LogResult []LogLine
 
+// Verdict classifies an investigation's actionability for the humans reading the
+// notification — the "do I need to do anything?" answer, separate from confidence
+// (how sure the model is) and severity (how the alert was labelled).
+type Verdict string
+
+// The model-facing verdict vocabulary; submit_findings requires one of these.
+const (
+	VerdictNoAction        Verdict = "no_action"        // benign / self-healed / synthetic; nothing to do
+	VerdictActionSuggested Verdict = "action_suggested" // a human should follow the suggested next steps
+	VerdictActionRequired  Verdict = "action_required"  // live impact; act promptly
+	VerdictInconclusive    Verdict = "inconclusive"     // could not be determined with available data
+)
+
+// ValidVerdict reports whether v is one of the model-facing enum values; the
+// parser normalizes anything else to "" so formatters can safely omit it.
+func ValidVerdict(v Verdict) bool {
+	switch v {
+	case VerdictNoAction, VerdictActionSuggested, VerdictActionRequired, VerdictInconclusive:
+		return true
+	}
+	return false
+}
+
 // Investigation is the structured output contract of an investigation.
 type Investigation struct {
-	Title         string
-	RootCauses    []Hypothesis
-	Changes       []Change
-	Unresolved    []string // honest: what the agent could not determine
-	Confidence    float64
-	Recalled      bool        // true when produced by instant recall (a KB cache hit); the curator skips re-curating it
-	Resource      Workload    // the workload the investigation identified as affected; defaults to the originating alert workload when none was named (stored on curated entries for structural recall)
+	Title      string
+	RootCauses []Hypothesis
+	Changes    []Change
+	Unresolved []string // honest: what the agent could not determine
+	Verdict    Verdict  // model-classified actionability; "" when the model omitted it (rendered nowhere)
+	RuledOut   []string // hypotheses considered and rejected, one line each with the disproving evidence
+	DataGaps   []string // signals that could not be obtained (tool errors, missing metrics, truncation) — a data limitation, not a question for a human
+	Confidence float64
+	Recalled   bool     // true when produced by instant recall (a KB cache hit); the curator skips re-curating it
+	Resource   Workload // the workload the investigation identified as affected; defaults to the originating alert workload when none was named (stored on curated entries for structural recall)
+	// Trigger-time facts stamped verbatim from the Request for the notification's
+	// metadata block. The model never sees or sets them; empty for sources that lack them.
+	Severity      string      // alert severity label at trigger time
+	Environment   string      // deployment environment (prod/staging/…)
+	Cluster       string      // alert "cluster" label
+	Tenant        string      // alert "tenant" label
+	AlertName     string      // triggering alert name (labels["alertname"]); "" for non-alert sources
+	StartedAt     time.Time   // incident start (alert startsAt / failure time)
 	Actions       []Action    // proposed remediations (autonomy ladder; never executed at rung "suggest")
 	CuratedURL    string      // runtime: KB issue/PR the curator opened, linked in delivery (set after curation)
 	Fingerprint   string      // originating alert fingerprint; for outcome-ledger attribution
@@ -401,6 +435,12 @@ type Investigation struct {
 	RecalledEntry string      // when Recalled: the catalog entry Path that was matched
 	Verified      bool        // true when the adversarial verify pass ran and a root cause survived it
 	Usage         UsageTotals // per-investigation model token/cost accounting (loop + verify); surfaced to humans + metrics, never written to the curated KB body
+	// Recurrence facts stamped at completion from the outcome ledger's per-TriggerKey
+	// index (never seen by the model). They describe PRIOR investigations of the same
+	// TriggerKey; this run's own open is recorded after they are read.
+	Occurrences    int       // Nth recorded investigation of this TriggerKey (1 = first); 0 = unknown/ledger disabled
+	LastOccurrence time.Time // when the previous occurrence was investigated
+	PrevCuratedURL string    // the previous occurrence's KB link, for the "same conclusion as before" pointer
 }
 
 // UsageTotals aggregates model token usage over a whole investigation: every

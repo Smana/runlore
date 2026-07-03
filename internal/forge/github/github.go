@@ -207,6 +207,32 @@ func (c *Client) listIssues(ctx context.Context, state, label string) ([]rawIssu
 	return all, nil
 }
 
+// searchIssues fetches ALL pages of the GitHub Search API for the given query,
+// decoding the {total_count, items} envelope. Unlike listIssues (core REST issues
+// endpoint), the query is applied server-side, so the response is bounded by the
+// matching set rather than the whole label history. Search caps total results at
+// 1000 — fine for the curate suppression set. The Search API has a stricter rate
+// limit (30 req/min authenticated), so pagination stays tight: it stops on the
+// first non-full page (a full page is exactly 100).
+func (c *Client) searchIssues(ctx context.Context, query string) ([]rawIssue, error) {
+	var all []rawIssue
+	for page := 1; ; page++ {
+		var env struct {
+			TotalCount int        `json:"total_count"`
+			Items      []rawIssue `json:"items"`
+		}
+		path := fmt.Sprintf("/search/issues?q=%s&per_page=100&page=%d", url.QueryEscape(query), page)
+		if err := c.do(ctx, http.MethodGet, path, nil, &env); err != nil {
+			return nil, err
+		}
+		all = append(all, env.Items...)
+		if len(env.Items) < 100 || len(all) >= env.TotalCount { // last page (a full page is exactly 100)
+			break
+		}
+	}
+	return all, nil
+}
+
 // ListIssuesByLabel returns all open issues carrying the given label. Pull requests
 // (which the issues API also returns) are filtered out.
 func (c *Client) ListIssuesByLabel(ctx context.Context, label string) ([]providers.CuratedIssue, error) {
@@ -242,12 +268,20 @@ func (c *Client) ListPRsByLabel(ctx context.Context, label string) ([]providers.
 }
 
 // ListClosedUnmergedPRsByLabel returns closed PRs carrying the label that were NOT
-// merged — the KB entries a human deliberately rejected. Merged PRs (accepted
-// entries) and plain closed issues are filtered out. It drives the curate
+// merged — the KB entries a human deliberately rejected. It drives the curate
 // suppression set: a rejected entry that keeps recurring is escalated via a
 // knowledge-gap issue, never reopened.
+//
+// It queries the GitHub Search API (is:pr is:closed is:unmerged) so merged PRs are
+// filtered out server-side. The plain closed-issues endpoint returns every merged
+// AND unmerged KB PR ever, and the closed set only grows: over time the merged
+// entries (which we discard) dominate, so each curate run would download and decode
+// the entire KB PR history to keep a handful of rejections. The search keeps the
+// response bounded by the closed-unmerged set. The MergedAt filter below is retained
+// as a correctness backstop should the query ever be loosened.
 func (c *Client) ListClosedUnmergedPRsByLabel(ctx context.Context, label string) ([]providers.CuratedIssue, error) {
-	raw, err := c.listIssues(ctx, "closed", label)
+	query := fmt.Sprintf("repo:%s/%s is:pr is:closed is:unmerged label:%s", c.owner, c.repo, label)
+	raw, err := c.searchIssues(ctx, query)
 	if err != nil {
 		return nil, err
 	}

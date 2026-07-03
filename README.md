@@ -36,13 +36,18 @@ diff — but GitOps isn't required: every data source is pluggable, and an unset
 
 ## See it in action
 
-A real RunLore investigation delivered to Slack: confidence-scored root cause, the evidence trail,
-suggested next steps, open questions for a human, and a link to the pull request it opened in your
-knowledge base.
+A real RunLore investigation delivered to Slack: a verdict-first summary — the actionability call
+(no action / suggested / required / inconclusive), the confidence-scored root cause, the alert
+metadata and recurrence, top-cause "why", suggested next steps, ruled-out hypotheses and data gaps,
+and a link to the pull request it opened in your knowledge base. On a Slack **bot token** the full
+analysis lands as a threaded reply under that summary, and 👍/👎 buttons capture whether the verdict
+was accurate (feeding the learning loop).
 
 <div align="center">
-<img src="assets/slack-notification.png" alt="RunLore Slack notification — HarborRegistryDown: 95% confidence root cause (Crossplane AccessKey hit the AWS IAM AccessKeysPerUser quota → Secret missing the username key → CreateContainerConfigError), with the evidence trail, suggested next steps, and open questions" width="760" />
+<img src="assets/slack-notification.png" alt="RunLore Slack notification — verdict-first summary with confidence-scored root cause, alert metadata, recurrence, suggested next steps, ruled-out hypotheses and a link to the knowledge-base PR" width="760" />
 </div>
+
+> ℹ️ The screenshot above predates the verdict-first layout and will be regenerated.
 
 ## How it works
 
@@ -104,7 +109,7 @@ additive. Full setup detail in **[Data sources](docs/data-sources.md)**.
 | **Kubernetes** | client-go — pod status, events, controller logs | *(in-cluster)* |
 | **LLM** | Anthropic · Google Gemini · any OpenAI-compatible *(vLLM, Ollama, OpenRouter…)* | `model.provider` |
 | **Triggers** *(sources)* | Alertmanager webhook · GitOps failures · PagerDuty webhook *(new)* | `sources.*` |
-| **Notifiers** | Slack · Matrix · generic webhook | `notify.*` |
+| **Notifiers** | Slack *(bot token: threaded summary + detail, 👍/👎 feedback)* · Slack incoming webhook / Matrix / generic webhook *(single verdict-first message)* | `notify.*` |
 | **Knowledge base** *(git forge)* | GitHub *(App auth)* | `forge.*` |
 
 ## 🚀 Getting started

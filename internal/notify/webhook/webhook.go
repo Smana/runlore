@@ -42,23 +42,49 @@ var _ providers.Notifier = (*Notifier)(nil)
 
 // payload is the JSON body sent to the webhook endpoint.
 type payload struct {
-	Title      string  `json:"title"`
-	Confidence float64 `json:"confidence"`
-	Namespace  string  `json:"namespace,omitempty"`
-	Resource   string  `json:"resource,omitempty"`
-	CuratedURL string  `json:"curated_url,omitempty"`
-	Text       string  `json:"text"`
+	Title          string   `json:"title"`
+	Confidence     float64  `json:"confidence"`
+	Namespace      string   `json:"namespace,omitempty"`
+	Resource       string   `json:"resource,omitempty"`
+	CuratedURL     string   `json:"curated_url,omitempty"`
+	Text           string   `json:"text"`
+	Verdict        string   `json:"verdict,omitempty"`
+	Severity       string   `json:"severity,omitempty"`
+	Cluster        string   `json:"cluster,omitempty"`
+	Environment    string   `json:"environment,omitempty"`
+	Tenant         string   `json:"tenant,omitempty"`
+	AlertName      string   `json:"alert_name,omitempty"`
+	StartedAt      string   `json:"started_at,omitempty"` // RFC3339; "" when unknown
+	Occurrences    int      `json:"occurrences,omitempty"`
+	PrevCuratedURL string   `json:"prev_curated_url,omitempty"`
+	RuledOut       []string `json:"ruled_out,omitempty"`
+	DataGaps       []string `json:"data_gaps,omitempty"`
 }
 
 // Deliver marshals the investigation to JSON and POSTs it to the configured URL.
 func (n *Notifier) Deliver(ctx context.Context, inv providers.Investigation) error {
+	startedAt := ""
+	if !inv.StartedAt.IsZero() {
+		startedAt = inv.StartedAt.UTC().Format(time.RFC3339)
+	}
 	body, err := json.Marshal(payload{
-		Title:      inv.Title,
-		Confidence: inv.Confidence,
-		Namespace:  inv.Resource.Namespace,
-		Resource:   inv.Resource.Name,
-		CuratedURL: inv.CuratedURL,
-		Text:       notify.Format(inv),
+		Title:          inv.Title,
+		Confidence:     inv.Confidence,
+		Namespace:      inv.Resource.Namespace,
+		Resource:       inv.Resource.Name,
+		CuratedURL:     inv.CuratedURL,
+		Text:           notify.Format(inv),
+		Verdict:        string(inv.Verdict),
+		Severity:       inv.Severity,
+		Cluster:        inv.Cluster,
+		Environment:    inv.Environment,
+		Tenant:         inv.Tenant,
+		AlertName:      inv.AlertName,
+		StartedAt:      startedAt,
+		Occurrences:    inv.Occurrences,
+		PrevCuratedURL: inv.PrevCuratedURL,
+		RuledOut:       inv.RuledOut,
+		DataGaps:       inv.DataGaps,
 	})
 	if err != nil {
 		return err

@@ -78,8 +78,11 @@ func draftKBEntry(inv providers.Investigation) providers.KBEntry {
 
 	typ := entryType(inv)
 	return providers.KBEntry{
-		Type:        typ,
-		Title:       inv.Title,
+		Type: typ,
+		// Cap the free-form investigation title to kbvalidate's merge gate: a single
+		// line of ≤120 bytes. inv.Title is LLM/alert-derived and can run long or carry
+		// newlines, which would fail RunLore's own `lore validate-kb` hard checks.
+		Title:       capTitle(inv.Title),
 		Description: firstLine(inv),
 		Resource:    inv.Resource.Ref(),
 		Tags:        entryTags(inv, typ),
@@ -132,6 +135,47 @@ func entryTags(inv providers.Investigation, typ string) []string {
 		}
 	}
 	return tags
+}
+
+// titleMaxBytes is kbvalidate's hard title limit: `len(e.Title) > 120` is a merge
+// gate error, measured in BYTES (Go `len` on a string), not runes.
+const titleMaxBytes = 120
+
+// ellipsis marks a truncated title; "…" (U+2026) is 3 bytes in UTF-8.
+const ellipsis = "…"
+
+// capTitle makes an arbitrary investigation title satisfy kbvalidate's title
+// merge gate by construction: a single line of at most titleMaxBytes bytes. It
+// collapses every whitespace run (newlines/tabs included) into a single space
+// and trims, then — if the result still exceeds the byte budget — truncates on a
+// rune boundary (preferring the last word boundary) and appends an ellipsis so
+// the FINAL byte length stays ≤ titleMaxBytes. Empty/whitespace-only input yields
+// "" so we never invent a title (the validator flags the empty title separately).
+func capTitle(s string) string {
+	s = strings.Join(strings.Fields(s), " ")
+	if len(s) <= titleMaxBytes {
+		return s
+	}
+
+	// Reserve room for the ellipsis; keep the prefix ≤ budget bytes.
+	budget := titleMaxBytes - len(ellipsis)
+
+	// Truncate on a rune boundary so we never split a multibyte rune.
+	cut := 0
+	for i := range s {
+		if i > budget {
+			break
+		}
+		cut = i
+	}
+	prefix := s[:cut]
+
+	// Prefer trimming back to the last space so we don't end mid-word; fall back
+	// to the hard rune-boundary cut when there's no reasonable space.
+	if sp := strings.LastIndexByte(prefix, ' '); sp > 0 {
+		prefix = prefix[:sp]
+	}
+	return strings.TrimRight(prefix, " ") + ellipsis
 }
 
 func firstLine(inv providers.Investigation) string {
