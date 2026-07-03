@@ -856,6 +856,26 @@ func TestFeedbackAppendsAndIsIgnoredByReplay(t *testing.T) {
 	}
 }
 
+// TestLedgerEnabled pins the exported wiring predicate: only a ledger with a
+// configured path reports Enabled, and a nil receiver is safe (mirrors enabled()).
+func TestLedgerEnabled(t *testing.T) {
+	l, err := New(filepath.Join(t.TempDir(), "o.jsonl"))
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	if !l.Enabled() {
+		t.Fatal("configured ledger must report Enabled")
+	}
+	dis, _ := New("")
+	if dis.Enabled() {
+		t.Fatal("disabled ledger (empty path) must not report Enabled")
+	}
+	var nilLedger *Ledger
+	if nilLedger.Enabled() {
+		t.Fatal("nil ledger must not report Enabled")
+	}
+}
+
 func TestEpisodeCarriesDupFingerprint(t *testing.T) {
 	p := filepath.Join(t.TempDir(), "outcomes.jsonl")
 	l, err := New(p)

@@ -255,6 +255,13 @@ func (l *Ledger) readEvents() ([]Event, error) {
 
 func (l *Ledger) enabled() bool { return l != nil && l.path != "" }
 
+// Enabled reports whether the ledger will actually persist events (a non-empty
+// ledger_path was configured); nil-safe. Exported for wiring sites: a disabled
+// ledger's methods silently no-op, so handing it to a consumer that acks writes
+// (e.g. the server's FeedbackRecorder) would lie about persistence. Cheaper than
+// Status(), which re-reads the whole file.
+func (l *Ledger) Enabled() bool { return l.enabled() }
+
 // Status is a cheap snapshot of the ledger's on-disk reality, used to tell apart
 // "feature off" (Configured=false) from "configured but the file the curate pod
 // can see is absent/empty" (Configured=true, Present=false or Events==0) — the
