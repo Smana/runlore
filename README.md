@@ -40,8 +40,7 @@ A real RunLore investigation delivered to Slack: a verdict-first summary — the
 (no action / suggested / required / inconclusive), the confidence-scored root cause, the alert
 metadata and recurrence, top-cause "why", suggested next steps, ruled-out hypotheses and data gaps,
 and a link to the pull request it opened in your knowledge base. On a Slack **bot token** the full
-analysis lands as a threaded reply under that summary, and 👍/👎 buttons capture whether the verdict
-was accurate (feeding the learning loop).
+analysis lands as a threaded reply under that summary.
 
 <div align="center">
 <img src="assets/slack-notification.png" alt="RunLore Slack notification — verdict-first summary with confidence-scored root cause, alert metadata, recurrence, suggested next steps, ruled-out hypotheses and a link to the knowledge-base PR" width="760" />
@@ -109,7 +108,7 @@ additive. Full setup detail in **[Data sources](docs/data-sources.md)**.
 | **Kubernetes** | client-go — pod status, events, controller logs | *(in-cluster)* |
 | **LLM** | Anthropic · Google Gemini · any OpenAI-compatible *(vLLM, Ollama, OpenRouter…)* | `model.provider` |
 | **Triggers** *(sources)* | Alertmanager webhook · GitOps failures · PagerDuty webhook *(new)* | `sources.*` |
-| **Notifiers** | Slack *(bot token: threaded summary + detail, 👍/👎 feedback)* · Slack incoming webhook / Matrix / generic webhook *(single verdict-first message)* | `notify.*` |
+| **Notifiers** | Slack *(bot token: threaded summary + detail)* · Slack incoming webhook / Matrix / generic webhook *(single verdict-first message)* | `notify.*` |
 | **Knowledge base** *(git forge)* | GitHub *(App auth)* | `forge.*` |
 
 ## 🚀 Getting started

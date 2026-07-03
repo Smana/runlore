@@ -287,7 +287,11 @@ config:
       # bot_token_env: SLACK_BOT_TOKEN              # xoxb-… (takes precedence over webhook_url_env);
       #                                             #   posts a verdict-first summary + threaded full analysis
       # channel: C0123456789                        # channel ID or name to post to
-      # signing_secret_env: SLACK_SIGNING_SECRET   # enables Approve/Reject + 👍/👎 feedback buttons
+      # signing_secret_env: SLACK_SIGNING_SECRET   # enables Approve/Reject buttons (needs actions.mode: approve)
+      #   ↳ Approve/Reject also needs Interactivity turned ON in the Slack app:
+      #     api.slack.com/apps → your app → Interactivity & Shortcuts → toggle On,
+      #     Request URL = https://<your-runlore-host>/slack/interactions. Read-only
+      #     deployments (no actions) need none of this.
     matrix:
       homeserver: https://matrix.org
       room_id: "!yourroom:matrix.org"
@@ -503,11 +507,6 @@ want a sharper answer. Only RunLore-originated issues (carrying the `runlore` la
   `POST /actions/<id>/approve` (token-gated) or **Slack Approve/Reject buttons** (enable Slack
   Interactivity with Request URL `…/slack/interactions` and set `slack.signing_secret_env`; clicks are
   HMAC-verified). The envelope is re-checked at execution and every action is audit-logged.
-- **Verdict feedback (Slack bot token)**: delivered summaries carry 👍/👎 buttons rating whether the
-  verdict was accurate. They use the **same** Interactivity Request URL (`…/slack/interactions`) and
-  `slack.signing_secret_env` as the Approve/Reject buttons, but are **unprivileged** (no
-  `approver_ids` allowlist — anyone in the channel can rate). A rating is recorded to the outcome
-  ledger only when `outcome.ledger_path` is set; otherwise the click gets an honest "not enabled" reply.
 - **Unattended (`actions.mode: auto`)**: executes eligible actions with **no human in the loop** — but only
   *reversible* ops, only above `min_confidence`, rate-limited, and **instantly haltable** via
   `POST /actions/pause` (`/resume`). Start with `dry_run: true`, scope which incidents it acts on via the
