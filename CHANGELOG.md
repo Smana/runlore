@@ -8,6 +8,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 RunLore is **pre-1.0 and under active development** — there are no tagged releases
 yet, so everything currently lives under `[Unreleased]`.
 
+## [0.5.0](https://github.com/Smana/runlore/compare/v0.4.0...v0.5.0) (2026-07-03)
+
+
+### Features
+
+* **kb:** strict OKF entries, deterministic dedup, self-describing bundle ([0491433](https://github.com/Smana/runlore/commit/0491433647d9d9bd26d46f55ddc7da7471f12fe0))
+* **kb:** strict OKF entries, deterministic dedup, self-describing bundle ([cf75e45](https://github.com/Smana/runlore/commit/cf75e45c206817452e18e380a6c87ce1806524a2))
+* **mcp:** serve the knowledge catalog over MCP (lore mcp) ([b3176d9](https://github.com/Smana/runlore/commit/b3176d9f8ec18a7d1b34219c2734040d429d16e1))
+* **mcp:** serve the knowledge catalog over MCP (lore mcp) ([2b2535f](https://github.com/Smana/runlore/commit/2b2535f0e6720de4192250248c4c8e96deeb85b5))
+* **mcp:** surface timestamp + fingerprint in kb_get ([4734938](https://github.com/Smana/runlore/commit/47349386902cf9f72e267c2b29617562e316b9b5))
+* verdict-first notifications with threading, recurrence and feedback ([#228](https://github.com/Smana/runlore/issues/228)) ([96cec7b](https://github.com/Smana/runlore/commit/96cec7b2351d2b00602c2b63c4d60cc5412967e5))
+
+
+### Bug Fixes
+
+* **curator:** cap drafted KB entry title at ≤120 chars ([#230](https://github.com/Smana/runlore/issues/230)) ([9487a9b](https://github.com/Smana/runlore/commit/9487a9b59d6a174a5114c8e5bc7e5d66859bc4e4))
+
+
+### Performance Improvements
+
+* **curate:** fetch closed-unmerged KB PRs via GitHub Search API ([#231](https://github.com/Smana/runlore/issues/231)) ([3ca202b](https://github.com/Smana/runlore/commit/3ca202bf3b198a54854d6872e0b5f7e392d3922d))
+
 ## [0.4.0](https://github.com/Smana/runlore/compare/v0.3.0...v0.4.0) (2026-07-02)
 
 
