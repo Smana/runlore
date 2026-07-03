@@ -129,8 +129,11 @@ func TestOpenPR(t *testing.T) {
 		paths = append(paths, r.URL.Path)
 		_, _ = w.Write([]byte(`{}`))
 	})
-	mux.HandleFunc("PUT /repos/o/r/contents/", func(w http.ResponseWriter, _ *http.Request) {
-		paths = append(paths, "PUT contents")
+	mux.HandleFunc("GET /repos/o/r/contents/{path...}", func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusNotFound) // bare bundle: no index.md / log.md yet
+	})
+	mux.HandleFunc("PUT /repos/o/r/contents/{path...}", func(w http.ResponseWriter, r *http.Request) {
+		paths = append(paths, "PUT "+r.PathValue("path"))
 		_, _ = w.Write([]byte(`{}`))
 	})
 	mux.HandleFunc("POST /repos/o/r/pulls", func(w http.ResponseWriter, r *http.Request) {
@@ -148,8 +151,55 @@ func TestOpenPR(t *testing.T) {
 	if ref.URL != "https://github.com/o/r/pull/9" {
 		t.Fatalf("ref=%s", ref.URL)
 	}
-	if len(paths) != 4 || !strings.Contains(strings.Join(paths, ","), "PUT contents") {
-		t.Fatalf("expected the 4-call PR sequence, got %v", paths)
+	// base ref → branch → entry file → log.md (bundle maintenance) → PR
+	got := strings.Join(paths, ",")
+	if len(paths) != 5 || !strings.Contains(got, "PUT incidents/db-outage-") || !strings.Contains(got, "PUT log.md") {
+		t.Fatalf("expected the 5-call PR sequence ending in pulls, got %v", paths)
+	}
+	if paths[len(paths)-1] != "/repos/o/r/pulls" {
+		t.Fatalf("the PR must be opened last, got %v", paths)
+	}
+}
+
+// TestOpenPREntryPath pins the entry file path: a type directory plus a
+// fingerprint-suffixed slug, so two different incidents that share a title can't
+// collide on the same path (the contents PUT would 422 on the second PR after the
+// first merges). With no fingerprint the branch timestamp disambiguates instead.
+func TestOpenPREntryPath(t *testing.T) {
+	openPR := func(e providers.KBEntry) string {
+		t.Helper()
+		var putPath string
+		mux := http.NewServeMux()
+		mux.HandleFunc("GET /repos/o/r/git/ref/heads/main", func(w http.ResponseWriter, _ *http.Request) {
+			_, _ = w.Write([]byte(`{"object":{"sha":"basesha"}}`))
+		})
+		mux.HandleFunc("POST /repos/o/r/git/refs", func(w http.ResponseWriter, _ *http.Request) {
+			_, _ = w.Write([]byte(`{}`))
+		})
+		mux.HandleFunc("PUT /repos/o/r/contents/{path...}", func(w http.ResponseWriter, r *http.Request) {
+			putPath = r.PathValue("path")
+			_, _ = w.Write([]byte(`{}`))
+		})
+		mux.HandleFunc("POST /repos/o/r/pulls", func(w http.ResponseWriter, _ *http.Request) {
+			_, _ = w.Write([]byte(`{"html_url":"u"}`))
+		})
+		srv := httptest.NewServer(mux)
+		defer srv.Close()
+		c := New(srv.URL, "o", "r", "main", staticToken("tok"))
+		if _, err := c.OpenPR(context.Background(), e); err != nil {
+			t.Fatalf("OpenPR: %v", err)
+		}
+		return putPath
+	}
+
+	got := openPR(providers.KBEntry{Type: "Incident", Title: "DB outage", Fingerprint: "deadbeefcafebabe", Body: "## body"})
+	if got != "incidents/db-outage-deadbeef.md" {
+		t.Fatalf("fingerprinted incident path = %q, want incidents/db-outage-deadbeef.md", got)
+	}
+
+	got = openPR(providers.KBEntry{Type: "Playbook", Title: "DB outage", Body: "## body"})
+	if !strings.HasPrefix(got, "playbooks/db-outage-") || !strings.HasSuffix(got, ".md") || got == "playbooks/db-outage-.md" {
+		t.Fatalf("unfingerprinted playbook path = %q, want playbooks/db-outage-<ts>.md", got)
 	}
 }
 
@@ -227,6 +277,27 @@ func TestRenderEntryIncludesTimestamp(t *testing.T) {
 	val := strings.Trim(strings.TrimSpace(line), `"`)
 	if _, err := time.Parse(time.RFC3339, val); err != nil {
 		t.Fatalf("timestamp %q is not RFC3339: %v", val, err)
+	}
+}
+
+// TestRenderEntryIncludesConfidenceAndProvenance: confidence and change
+// provenance are queryable OKF extension frontmatter keys (frontmatter is for
+// the fields you filter/index on), omitted when unset.
+func TestRenderEntryIncludesConfidenceAndProvenance(t *testing.T) {
+	out := renderEntry(providers.KBEntry{
+		Type: "Incident", Title: "T", Confidence: 0.9,
+		Provenance: []string{"crossplane/xplane-harbor"},
+	})
+	if !strings.Contains(out, "confidence: 0.9") {
+		t.Fatalf("frontmatter missing confidence:\n%s", out)
+	}
+	if !strings.Contains(out, "provenance:") || !strings.Contains(out, "crossplane/xplane-harbor") {
+		t.Fatalf("frontmatter missing provenance:\n%s", out)
+	}
+
+	out = renderEntry(providers.KBEntry{Type: "Incident", Title: "T"})
+	if strings.Contains(out, "confidence:") || strings.Contains(out, "provenance:") {
+		t.Fatalf("unset confidence/provenance must be omitted:\n%s", out)
 	}
 }
 

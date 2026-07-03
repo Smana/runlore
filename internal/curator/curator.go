@@ -50,7 +50,15 @@ func (c *Curator) Curate(ctx context.Context, inv providers.Investigation) (prov
 		return providers.Ref{}, nil
 	}
 
-	// 2. dedup — catalog (observe the top-hit score on every check), then open PRs
+	// 2. dedup — catalog exact fingerprint first (deterministic identity, no
+	// threshold to tune), then catalog BM25 (observe the top-hit score on every
+	// check), then open PRs
+	if ff, ok := c.Catalog.(fingerprintFinder); ok {
+		if e, found := ff.FindFingerprint(DupFingerprint(inv)); found {
+			c.Log.Info("finding matches a catalog entry's fingerprint; not filing", "entry", e.Title, "path", e.Path)
+			return providers.Ref{}, nil
+		}
+	}
 	nov := Novelty{Catalog: c.Catalog, DupScore: c.DupScore}
 	if top, ok, err := nov.TopHit(ctx, inv); err != nil {
 		c.Log.Warn("dedup: catalog search failed", "err", err)
@@ -85,6 +93,14 @@ func (c *Curator) Curate(ctx context.Context, inv providers.Investigation) (prov
 	c.Log.Info("curated as PR", "url", ref.URL, "confidence", inv.Confidence)
 	c.recordCuration(ctx, "pr", "opened")
 	return ref, nil
+}
+
+// fingerprintFinder is the optional exact-identity dedup surface of the catalog
+// (implemented by *catalog.Catalog). Kept an optional type-assert — like
+// providers.GitOpsInspector — so ScoredSearcher fakes and remote indexes without
+// fingerprint support keep working unchanged.
+type fingerprintFinder interface {
+	FindFingerprint(fp string) (catalog.Entry, bool)
 }
 
 // recordCuration increments the curations_total counter (nil-safe). kind is the
