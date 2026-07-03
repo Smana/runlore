@@ -190,7 +190,7 @@ we test hardest.
 ## Docs
 
 📐 [Design](docs/design.md) · 📚 [Learning loop](docs/learning-loop.md) · ✅ [Reviewing knowledge](docs/reviewing-knowledge.md) · 🚀 [Getting started](docs/getting-started.md) · 🧪 [Worked example](docs/examples/harbor-registry-down.md) ·
-🔌 [Data sources](docs/data-sources.md) · ⚙️ [Configuration](docs/configuration.md) · 📊 [Observability](docs/observability.md) · 🩺 [Troubleshooting](docs/troubleshooting.md) ·
+🔌 [Data sources](docs/data-sources.md) · ⚙️ [Configuration](docs/configuration.md) · 🔗 [MCP server](docs/mcp.md) · 📊 [Observability](docs/observability.md) · 🩺 [Troubleshooting](docs/troubleshooting.md) ·
 🔒 [Security model](docs/security-model.md) · 🛡 [LLM security architecture](docs/security-architecture.md) · ⬆️ [Upgrade & uninstall](docs/upgrade-uninstall.md) · 🧭 [Prior art](docs/prior-art.md) · 📊 [Benchmarking models](docs/benchmarking.md) · 🛠 [Contributing](CONTRIBUTING.md)
 
 ## License
