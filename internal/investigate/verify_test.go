@@ -42,16 +42,54 @@ func TestVerifyRejectsCorrelationFinding(t *testing.T) {
 		t.Fatalf("overall confidence should drop to 0 with no surviving root cause, got %v", got.Confidence)
 	}
 	found := false
-	for _, u := range got.Unresolved {
-		if strings.Contains(u, "Rejected hypothesis") && strings.Contains(u, "crds-actions-runner-controller") {
+	for _, u := range got.RuledOut {
+		if strings.Contains(u, "crds-actions-runner-controller") {
 			found = true
 		}
 	}
 	if !found {
-		t.Fatalf("rejected hypothesis should be recorded in unresolved, got %v", got.Unresolved)
+		t.Fatalf("rejected hypothesis should be recorded in ruled_out, got %v", got.RuledOut)
+	}
+	for _, u := range got.Unresolved {
+		if strings.Contains(u, "Rejected hypothesis") {
+			t.Fatalf("rejected hypothesis must no longer land in unresolved, got %v", got.Unresolved)
+		}
 	}
 	if model.i != 2 {
 		t.Fatalf("expected 2 model calls (findings + verify), got %d", model.i)
+	}
+}
+
+// TestApplyVerdictsRejectedGoesToRuledOut pins the honesty contract: a rejected
+// hypothesis is a fact about what was disproven, not an open question for a human,
+// so it lands in RuledOut (formatted "<summary> — <reason>") rather than
+// Unresolved. And when the adversarial pass refutes every hypothesis, an
+// actionable verdict has no surviving support, so it downgrades to inconclusive.
+func TestApplyVerdictsRejectedGoesToRuledOut(t *testing.T) {
+	li := &LoopInvestigator{Log: slog.New(slog.NewTextHandler(io.Discard, nil))}
+	inv := providers.Investigation{
+		Confidence: 0.8,
+		Verdict:    providers.VerdictNoAction,
+		RootCauses: []providers.Hypothesis{{Summary: "crds-actions-runner-controller change", Confidence: 0.8}},
+	}
+	out := applyVerdicts(li, Request{}, inv, []verdict{{Index: 0, Verdict: "reject", Confidence: 0.1, Reason: "correlation only; diff never read"}})
+
+	if len(out.RuledOut) != 1 {
+		t.Fatalf("rejected hypothesis should be recorded in RuledOut, got %v", out.RuledOut)
+	}
+	if !strings.Contains(out.RuledOut[0], "crds-actions-runner-controller") {
+		t.Fatalf("RuledOut entry should name the hypothesis summary, got %q", out.RuledOut[0])
+	}
+	if !strings.Contains(out.RuledOut[0], "correlation only") {
+		t.Fatalf("RuledOut entry should carry the rejection reason, got %q", out.RuledOut[0])
+	}
+	for _, u := range out.Unresolved {
+		if strings.Contains(u, "Rejected hypothesis") {
+			t.Fatalf("rejected hypothesis must no longer land in Unresolved, got %v", out.Unresolved)
+		}
+	}
+	if out.Verdict != providers.VerdictInconclusive {
+		t.Fatalf("rejecting every hypothesis should downgrade verdict to inconclusive, got %q", out.Verdict)
 	}
 }
 

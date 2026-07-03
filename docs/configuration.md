@@ -171,7 +171,32 @@ quality bar below which a finding is chat-only). `github_app` — `app_id`, `ins
 ### `notify` — where findings go
 `slack` (`webhook_url_env` or `bot_token_env`, `channel`, `signing_secret_env`, `approver_ids`),
 `matrix` (`homeserver`, `room_id`, `access_token_env`), plus inline blocks for any registered notifier
-(e.g. `webhook` with `url_env`).
+(e.g. `webhook` with `url_env`). No new keys were added for the verdict-first layout — the changes
+below are behavioural.
+
+Every notifier now leads with the model's **verdict** (`no_action` / `action_suggested` /
+`action_required` / `inconclusive`) and carries the trigger-time alert metadata (severity, environment,
+cluster, tenant, alert name, `startsAt`), recurrence facts (occurrence count, previous KB link), the
+top-cause "why", suggested next steps, **ruled-out** hypotheses and **data gaps** (tool/data
+limitations, kept distinct from human-only open questions):
+
+- **Slack, bot token (`bot_token_env`).** Posts a compact verdict-first summary to `channel`, then the
+  full analysis as a **threaded reply**. When `signing_secret_env` is set (same setup as Approve/Reject —
+  see below), the summary carries 👍/👎 feedback buttons; a click records the rating to the outcome
+  ledger.
+- **Slack incoming webhook (`webhook_url_env`), Matrix, generic webhook.** Deliver the same content as a
+  **single** message (incoming webhooks cannot thread and expose no interaction buttons).
+
+**Feedback buttons** render whenever the investigation has a trigger key or fingerprint. Clicks are
+HMAC-verified against `signing_secret_env` but **unprivileged** — unlike Approve/Reject they are not
+gated by `approver_ids`. A rating is persisted only when the outcome ledger is enabled
+(`outcome.ledger_path`); without it the click gets an honest "feedback isn't enabled" reply instead of a
+false "recorded" ack. Enabling them needs the same `/slack/interactions` Slack Request URL as approvals.
+
+**Generic webhook JSON payload** gained `verdict`, `severity`, `environment`, `cluster`, `tenant`,
+`alert_name`, `started_at` (RFC3339, empty when unknown), `occurrences`, `prev_curated_url`, `ruled_out`
+and `data_gaps` alongside the existing `title`/`confidence`/`curated_url`/`text` fields (all
+`omitempty`).
 
 ### `server` — the HTTP listener
 Only `webhook_token_env` (the bearer token for the incident webhook; **required under

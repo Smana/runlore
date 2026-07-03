@@ -177,6 +177,43 @@ func TestLoopInvestigatorActions(t *testing.T) {
 	}
 }
 
+func TestLoopStampsAlertMetadata(t *testing.T) {
+	// The six trigger-time facts come verbatim from the Request (the model never
+	// sets them) and must ride the delivered investigation for notification rendering.
+	model := &scriptModel{responses: []providers.CompletionResponse{
+		{ToolCalls: []providers.ToolCall{{ID: "1", Name: "submit_findings", Args: `{"confidence":0.9,"root_causes":[{"summary":"x"}]}`}}},
+	}}
+	var got *providers.Investigation
+	li := &LoopInvestigator{
+		Model:      model,
+		Log:        slog.New(slog.NewTextHandler(io.Discard, nil)),
+		OnComplete: func(inv providers.Investigation) { got = &inv },
+	}
+	start := time.Now().Add(-5 * time.Minute)
+	req := Request{
+		Title:       "t",
+		Severity:    "warning",
+		Environment: "prod",
+		At:          start,
+		Labels:      map[string]string{"alertname": "BackupJobsMissing", "cluster": "sanofi-003", "tenant": "sanofi-003"},
+	}
+	if err := li.Investigate(context.Background(), req); err != nil {
+		t.Fatalf("Investigate: %v", err)
+	}
+	if got == nil {
+		t.Fatal("nothing delivered")
+	}
+	if got.Severity != "warning" || got.Environment != "prod" {
+		t.Fatalf("severity/environment not stamped: %+v", got)
+	}
+	if got.Cluster != "sanofi-003" || got.Tenant != "sanofi-003" || got.AlertName != "BackupJobsMissing" {
+		t.Fatalf("cluster/tenant/alertname not stamped: %+v", got)
+	}
+	if !got.StartedAt.Equal(start) {
+		t.Fatalf("StartedAt not stamped: got %v want %v", got.StartedAt, start)
+	}
+}
+
 func TestLoopInvestigatorActionsDisabled(t *testing.T) {
 	model := &scriptModel{responses: []providers.CompletionResponse{
 		{ToolCalls: []providers.ToolCall{{ID: "1", Name: "submit_findings", Args: `{"confidence":0.9,"root_causes":[{"summary":"x"}],"actions":[{"description":"flux rollback","reversible":true}]}`}}},

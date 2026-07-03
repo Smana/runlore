@@ -77,12 +77,15 @@ func submitFindingsSpec() providers.ToolSpec {
 "summary":{"type":"string"},"confidence":{"type":"number"},"change_ref":{"type":"string"},
 "evidence":{"type":"array","items":{"type":"string"}},"suggested_action":{"type":"string"},"reversible":{"type":"boolean"}},
 "required":["summary"]}},
-"unresolved":{"type":"array","items":{"type":"string"}},
+"unresolved":{"type":"array","items":{"type":"string"},"description":"genuine open questions only a human can answer - put tool or data limitations in data_gaps instead"},
+"verdict":{"type":"string","enum":["no_action","action_suggested","action_required","inconclusive"],"description":"actionability for the on-call: no_action (benign/self-healed/synthetic), action_suggested (a human should follow the next steps), action_required (live impact needing prompt action), inconclusive (could not determine)"},
+"ruled_out":{"type":"array","items":{"type":"string"},"description":"hypotheses you considered and REJECTED, one line each naming the disproving evidence"},
+"data_gaps":{"type":"array","items":{"type":"string"},"description":"signals you could not obtain (tool errors, missing metrics, truncated output) that limited the investigation - data limitations, NOT questions for a human"},
 "actions":{"type":"array","description":"proposed remediations; prefer reversible, low-blast-radius","items":{"type":"object","properties":{
 "description":{"type":"string"},"op":{"type":"string","enum":` + opEnumJSON() + `,"description":"executable op (Flux); omit for a suggestion only"},
 "reversible":{"type":"boolean"},"blast_radius":{"type":"integer"},
 "target":{"type":"object","properties":{"kind":{"type":"string"},"name":{"type":"string"},"namespace":{"type":"string"}}}},
-"required":["description"]}}},"required":["root_causes"]}`,
+"required":["description"]}}},"required":["root_causes","verdict"]}`,
 	}
 }
 
@@ -119,6 +122,9 @@ type findings struct {
 		Reversible      bool     `json:"reversible"`
 	} `json:"root_causes"`
 	Unresolved []string `json:"unresolved"`
+	Verdict    string   `json:"verdict"`
+	RuledOut   []string `json:"ruled_out"`
+	DataGaps   []string `json:"data_gaps"`
 	Actions    []struct {
 		Description string `json:"description"`
 		Op          string `json:"op"`
@@ -183,7 +189,11 @@ func parseFindings(args string) (providers.Investigation, error) {
 // buildInvestigation maps the parsed findings shape onto a providers.Investigation,
 // clamping confidences. Shared by the direct and the tolerant parse paths.
 func buildInvestigation(f findings) providers.Investigation {
-	inv := providers.Investigation{Title: f.Title, Confidence: clamp01(f.Confidence), Unresolved: f.Unresolved}
+	inv := providers.Investigation{Title: f.Title, Confidence: clamp01(f.Confidence),
+		Unresolved: f.Unresolved, RuledOut: f.RuledOut, DataGaps: f.DataGaps}
+	if v := providers.Verdict(f.Verdict); providers.ValidVerdict(v) {
+		inv.Verdict = v
+	}
 	for _, rc := range f.RootCauses {
 		inv.RootCauses = append(inv.RootCauses, providers.Hypothesis{
 			Summary:         rc.Summary,
