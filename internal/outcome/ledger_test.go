@@ -6,6 +6,7 @@ import (
 	"math/rand"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -507,6 +508,153 @@ func TestLegacyOpenMissingResolvableCountsAsResolvable(t *testing.T) {
 	}
 }
 
+// countLines returns the number of JSONL lines in the file, and how many are
+// checkpoint records.
+func countLines(t *testing.T, path string) (total, checkpoints int) {
+	t.Helper()
+	b, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read %s: %v", path, err)
+	}
+	for _, line := range strings.Split(strings.TrimRight(string(b), "\n"), "\n") {
+		if line == "" {
+			continue
+		}
+		total++
+		var e Event
+		if json.Unmarshal([]byte(line), &e) == nil && e.Event == "checkpoint" {
+			checkpoints++
+		}
+	}
+	return total, checkpoints
+}
+
+// TestCompactionPreservesAggregatesAndUnresolvedOpens pins Defect 3: when the file
+// exceeds max_events it is compacted on reload into a checkpoint + a recent tail, and
+// the reloaded state must be IDENTICAL — per-entry aggregates (OpenCounts), Occurrences,
+// and any still-unresolved open (which must remain resolvable). The file must actually
+// shrink and gain exactly one checkpoint record.
+func TestCompactionPreservesAggregatesAndUnresolvedOpens(t *testing.T) {
+	p := filepath.Join(t.TempDir(), "o.jsonl")
+	l, _ := NewWithMaxEvents(p, 8) // small bound to force compaction on reload
+	t0 := time.Unix(30000, 0)
+	at := func(d int) time.Time { return t0.Add(time.Duration(d) * time.Second) }
+
+	// Six resolved recall pairs (12 events) on entry x.md under trigger key "k".
+	for i := 0; i < 6; i++ {
+		fp := fmt.Sprintf("fp%d", i)
+		_ = l.Open(Event{Fingerprint: fp, Kind: "recall", Entry: "x.md", TriggerKey: "k", Resolvable: boolPtr(true), At: at(i * 2)})
+		_, _, _ = l.Resolve(fp, at(i*2+1))
+	}
+	// One still-unresolved recall open that must survive compaction.
+	_ = l.Open(Event{Fingerprint: "live", Kind: "recall", Entry: "x.md", Resolvable: boolPtr(true), At: at(100)})
+
+	before, _ := l.OpenCounts()
+	if before["x.md"].Recalls != 7 || before["x.md"].Resolved != 6 {
+		t.Fatalf("pre-condition: want recalls=7 resolved=6, got %+v", before["x.md"])
+	}
+	nOcc, lastOcc, _ := l.Occurrences("k")
+
+	// Reload from the file — this triggers compaction (13 raw events > bound 8).
+	l2, err := NewWithMaxEvents(p, 8)
+	if err != nil {
+		t.Fatalf("reload: %v", err)
+	}
+
+	// The file was compacted: fewer lines, exactly one checkpoint.
+	total, ckpts := countLines(t, p)
+	if ckpts != 1 {
+		t.Fatalf("compacted file must carry exactly one checkpoint, got %d (total lines %d)", ckpts, total)
+	}
+	if total > 8 {
+		t.Fatalf("compacted file must be bounded at max_events (8), got %d lines", total)
+	}
+
+	// Aggregates are identical across the compaction round-trip.
+	after, _ := l2.OpenCounts()
+	if after["x.md"].Recalls != before["x.md"].Recalls ||
+		after["x.md"].Resolved != before["x.md"].Resolved ||
+		!after["x.md"].LastConfirmed.Equal(before["x.md"].LastConfirmed) {
+		t.Fatalf("compaction changed aggregates: before=%+v after=%+v", before["x.md"], after["x.md"])
+	}
+	// Occurrences survive too.
+	if n, last, _ := l2.Occurrences("k"); n != nOcc || !last.Equal(lastOcc) {
+		t.Fatalf("compaction changed Occurrences: before=(%d,%v) after=(%d,%v)", nOcc, lastOcc, n, last)
+	}
+	// The still-unresolved open survives: a resolve for it still pairs.
+	if _, ok, _ := l2.Resolve("live", at(200)); !ok {
+		t.Fatal("an unresolved open must survive compaction (still resolvable after reload)")
+	}
+
+	// A SECOND reload (now over the compacted file: checkpoint + tail) is still correct —
+	// the checkpoint round-trips through another compaction cycle.
+	l3, err := NewWithMaxEvents(p, 8)
+	if err != nil {
+		t.Fatalf("second reload: %v", err)
+	}
+	if c := (mustCounts(t, l3))["x.md"]; c.Recalls != 7 {
+		t.Fatalf("after second reload, aggregates must still hold, got %+v", c)
+	}
+}
+
+func mustCounts(t *testing.T, l *Ledger) map[string]Aggregate {
+	t.Helper()
+	c, err := l.OpenCounts()
+	if err != nil {
+		t.Fatalf("OpenCounts: %v", err)
+	}
+	return c
+}
+
+// TestCompactionDisabledWhenZero ensures max_events=0 disables compaction: the file is
+// left fully intact (no checkpoint) however large it grows.
+func TestCompactionDisabledWhenZero(t *testing.T) {
+	p := filepath.Join(t.TempDir(), "o.jsonl")
+	l, _ := NewWithMaxEvents(p, 0) // disabled
+	t0 := time.Unix(31000, 0)
+	for i := 0; i < 20; i++ {
+		fp := fmt.Sprintf("fp%d", i)
+		_ = l.Open(Event{Fingerprint: fp, Kind: "recall", Entry: "x.md", Resolvable: boolPtr(true), At: t0.Add(time.Duration(i) * time.Second)})
+		_, _, _ = l.Resolve(fp, t0.Add(time.Duration(i)*time.Second+time.Millisecond))
+	}
+	if _, err := NewWithMaxEvents(p, 0); err != nil {
+		t.Fatalf("reload: %v", err)
+	}
+	total, ckpts := countLines(t, p)
+	if ckpts != 0 {
+		t.Fatalf("compaction disabled must write no checkpoint, got %d", ckpts)
+	}
+	if total != 40 {
+		t.Fatalf("compaction disabled must keep all 40 events, got %d", total)
+	}
+}
+
+// TestCorruptLineCountedNotSilent pins that a corrupt JSONL line is surfaced (counted),
+// not silently dropped — the good events still load.
+func TestCorruptLineCountedNotSilent(t *testing.T) {
+	p := filepath.Join(t.TempDir(), "o.jsonl")
+	t0 := time.Unix(32000, 0)
+	good1, _ := json.Marshal(Event{Event: "open", Fingerprint: "fp", Kind: "recall", Entry: "a.md", At: t0})
+	good2, _ := json.Marshal(Event{Event: "resolve", Fingerprint: "fp", At: t0.Add(time.Minute)})
+	content := string(good1) + "\nnot json at all{{{\n" + string(good2) + "\n"
+	if err := os.WriteFile(p, []byte(content), 0o600); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	l, err := New(p)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	l.mu.Lock()
+	corrupt := l.corruptLines
+	l.mu.Unlock()
+	if corrupt != 1 {
+		t.Fatalf("want exactly 1 corrupt line counted, got %d", corrupt)
+	}
+	if c, _ := l.OpenCounts(); c["a.md"].Recalls != 1 {
+		t.Fatalf("good events must still load around the corrupt line, got %+v", c["a.md"])
+	}
+}
+
 func TestStatusDisabled(t *testing.T) {
 	l, _ := New("")
 	s := l.Status()
@@ -626,7 +774,7 @@ func TestReadEventsReturnsAllInOrder(t *testing.T) {
 	_ = l.Open(Event{Fingerprint: "a", Kind: "fresh", At: t0})
 	_ = l.Open(Event{Fingerprint: "b", Kind: "recall", Entry: "x.md", At: t0.Add(time.Second)})
 	_, _, _ = l.Resolve("a", t0.Add(2*time.Second))
-	events, err := l.readEvents()
+	events, _, err := l.readEvents()
 	if err != nil {
 		t.Fatalf("readEvents: %v", err)
 	}
@@ -643,12 +791,12 @@ func TestReadEventsReturnsAllInOrder(t *testing.T) {
 
 func TestReadEventsDisabledOrAbsent(t *testing.T) {
 	dis, _ := New("")
-	if ev, err := dis.readEvents(); err != nil || ev != nil {
-		t.Fatalf("disabled: want nil,nil; got %v,%v", ev, err)
+	if ev, corrupt, err := dis.readEvents(); err != nil || ev != nil || corrupt != 0 {
+		t.Fatalf("disabled: want nil,0,nil; got %v,%v,%v", ev, corrupt, err)
 	}
 	absent, _ := New(filepath.Join(t.TempDir(), "missing.jsonl"))
-	if ev, err := absent.readEvents(); err != nil || ev != nil {
-		t.Fatalf("absent file: want nil,nil; got %v,%v", ev, err)
+	if ev, corrupt, err := absent.readEvents(); err != nil || ev != nil || corrupt != 0 {
+		t.Fatalf("absent file: want nil,0,nil; got %v,%v,%v", ev, corrupt, err)
 	}
 }
 
