@@ -119,6 +119,34 @@ func TestModelConfigured(t *testing.T) {
 	}
 }
 
+// TestCatalogExpected locks in the readiness-gate predicate: a catalog is only
+// expected when BOTH a catalog source and a usable model are configured. Without
+// a model, BuildInvestigator deliberately skips the catalog (log-only
+// investigator), so gating readiness on it would hold even the leader at 503
+// forever (issue #251).
+func TestCatalogExpected(t *testing.T) {
+	tests := []struct {
+		name     string
+		dir      string
+		provider string
+		want     bool
+	}{
+		{"catalog and model", "/var/lib/runlore/catalog", "anthropic", true},
+		{"catalog without model", "/var/lib/runlore/catalog", "", false},
+		{"model without catalog", "", "anthropic", false},
+		{"neither", "", "", false},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := &config.Config{Model: config.Model{Provider: tc.provider}}
+			cfg.Catalog.Dir = tc.dir
+			if got := CatalogExpected(cfg); got != tc.want {
+				t.Fatalf("CatalogExpected = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
 // TestCatalogConfigured locks in the catalog-configured predicate: a mounted dir
 // OR a git-sync URL counts as configured; neither does not.
 func TestCatalogConfigured(t *testing.T) {

@@ -29,11 +29,20 @@ func ModelConfigured(cfg *config.Config) bool {
 
 // CatalogConfigured reports whether the operator asked for a knowledge catalog
 // (a mounted dir or a git-sync repo). It is independent of whether the load
-// succeeded: ReadyFunc uses it to keep a configured-but-failed catalog (which
-// BuildCatalog returns as nil) from collapsing readiness to pure leadership and
-// serving incident traffic with no knowledge base.
+// succeeded.
 func CatalogConfigured(cfg *config.Config) bool {
 	return cfg.Catalog.Dir != "" || cfg.Catalog.Git.URL != ""
+}
+
+// CatalogExpected reports whether readiness should gate on a built catalog: a
+// catalog source AND a usable model. With a model, a configured-but-failed
+// catalog (BuildCatalog returns nil) keeps the pod at /readyz 503 instead of
+// collapsing readiness to pure leadership and serving incidents with no KB.
+// Without a model, BuildInvestigator skips the catalog entirely (log-only
+// investigator, cat=nil by design, not by failure), so gating on it would hold
+// every replica — leader included — at 503 forever.
+func CatalogExpected(cfg *config.Config) bool {
+	return CatalogConfigured(cfg) && ModelConfigured(cfg)
 }
 
 // RequireWebhookAuth fails closed on the serve path when the LLM investigator is
