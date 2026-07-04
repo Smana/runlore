@@ -313,7 +313,7 @@ func RunServe(version string, args []string) error {
 	if auto != nil {
 		acts.Pauser = auto // avoid a typed-nil interface when auto is disabled
 	}
-	srv := server.New(ReadyFunc(leader.Load, cat, CatalogConfigured(cfg)), acts, built, pipe, metricsHandler, log)
+	srv := server.New(ReadyFunc(leader.Load, cat, CatalogExpected(cfg)), acts, built, pipe, metricsHandler, log)
 	if cz != nil {
 		go cz.Run(workCtx, cfg.Investigation.Coalesce.Debounce.Std()/2)
 	}
