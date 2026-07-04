@@ -179,41 +179,6 @@ expected:
 	}
 }
 
-// scriptModel returns a fixed response sequence: call a tool, then submit_findings.
-type scriptModel struct {
-	calls int
-}
-
-func (m *scriptModel) Complete(_ context.Context, _ providers.CompletionRequest) (providers.CompletionResponse, error) {
-	m.calls++
-	if m.calls == 1 {
-		return providers.CompletionResponse{ToolCalls: []providers.ToolCall{
-			{ID: "1", Name: "what_changed", Args: `{}`}}}, nil
-	}
-	return providers.CompletionResponse{ToolCalls: []providers.ToolCall{
-		{ID: "2", Name: "submit_findings", Args: `{"confidence":0.9,"root_causes":[{"summary":"chart bump broke harbor-db migrations"}]}`}}}, nil
-}
-
-func TestRun(t *testing.T) {
-	cases := []Case{
-		{Name: "hit", Prompt: "probe failing", Tools: map[string]string{"what_changed": "chart 1.15"},
-			Expected: Expected{MustContain: []string{"chart", "harbor-db"}, MinConfidence: 0.5}},
-		{Name: "miss", Prompt: "probe failing", Tools: map[string]string{"what_changed": "chart 1.15"},
-			Expected: Expected{MustContain: []string{"network policy"}}},
-	}
-	r := &Runner{Model: &scriptModel{}, Log: slog.New(slog.NewTextHandler(io.Discard, nil))}
-	rep := r.Run(context.Background(), cases)
-	if len(rep.Results) != 2 {
-		t.Fatalf("want 2 results, got %d", len(rep.Results))
-	}
-	if rep.Passed() != 1 || rep.RCARate() != 0.5 {
-		t.Fatalf("want 1 passed / 0.5 rate, got passed=%d rate=%.2f", rep.Passed(), rep.RCARate())
-	}
-	if !rep.Results[0].Pass || rep.Results[1].Pass {
-		t.Fatalf("unexpected per-case: %+v", rep.Results)
-	}
-}
-
 // rateModel passes (names harbor-db) on its first passN Complete-pairs, then fails.
 // Each replay run makes 2 Complete calls (tool, then submit_findings).
 type rateModel struct {

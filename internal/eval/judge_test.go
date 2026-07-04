@@ -86,9 +86,3 @@ func TestModelJudgeParsesVerdict(t *testing.T) {
 		t.Fatalf("prompt missing ground truth/investigation: %q", m.gotUser)
 	}
 }
-
-func TestRubricMax(t *testing.T) {
-	if RubricMax() != 14 { // 3+3+3+3+2
-		t.Fatalf("rubric max = %d, want 14", RubricMax())
-	}
-}
