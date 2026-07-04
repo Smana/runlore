@@ -27,6 +27,51 @@ func TestParseFindings(t *testing.T) {
 	}
 }
 
+// TestParseFindingsOmittedOverallConfidenceFallsBackToRootCauses covers models
+// (observed with GLM-5.2 over the OpenAI-compatible path) that fill per-root-cause
+// confidence but omit the optional top-level field: the overall confidence must
+// fall back to the highest root-cause confidence, not default to zero — a zero
+// overall makes verify's min(overall, maxRootCause) pin the investigation to 0%.
+func TestParseFindingsOmittedOverallConfidenceFallsBackToRootCauses(t *testing.T) {
+	args := `{"root_causes":[
+	  {"summary":"low-memory OOMKill","confidence":0.88},
+	  {"summary":"secondary hypothesis","confidence":0.4}
+	],"verdict":"action_required"}`
+	inv, err := parseFindings(args)
+	if err != nil {
+		t.Fatalf("parseFindings: %v", err)
+	}
+	if inv.Confidence != 0.88 {
+		t.Fatalf("Confidence = %v, want fallback to max root-cause confidence 0.88", inv.Confidence)
+	}
+}
+
+// TestParseFindingsExplicitOverallConfidenceKept asserts the fallback does not
+// override a model that sets the top-level field, even when it is lower than the
+// per-root-cause confidences.
+func TestParseFindingsExplicitOverallConfidenceKept(t *testing.T) {
+	args := `{"confidence":0.3,"root_causes":[{"summary":"s","confidence":0.9}]}`
+	inv, err := parseFindings(args)
+	if err != nil {
+		t.Fatalf("parseFindings: %v", err)
+	}
+	if inv.Confidence != 0.3 {
+		t.Fatalf("Confidence = %v, want explicit 0.3 preserved", inv.Confidence)
+	}
+}
+
+// TestParseFindingsNoConfidenceAnywhereStaysZero asserts the fallback only fires
+// when a root cause actually carries confidence — all-omitted stays 0.
+func TestParseFindingsNoConfidenceAnywhereStaysZero(t *testing.T) {
+	inv, err := parseFindings(`{"root_causes":[{"summary":"s"}],"verdict":"inconclusive"}`)
+	if err != nil {
+		t.Fatalf("parseFindings: %v", err)
+	}
+	if inv.Confidence != 0 {
+		t.Fatalf("Confidence = %v, want 0 when no confidence supplied anywhere", inv.Confidence)
+	}
+}
+
 // TestParseFindingsVerdictRuledOutDataGaps checks the three model-contract fields
 // added for the notification overhaul map through parseFindings: a valid verdict
 // enum, and the ruled_out / data_gaps honesty channels distinct from unresolved.
