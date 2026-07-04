@@ -198,16 +198,22 @@ func TestRecalledInvestigationStampsAlertMetadata(t *testing.T) {
 }
 
 func TestOutcomeFactor(t *testing.T) {
-	const k = 2.0
+	const k = 2.0 // default prior strength; k=2 ⇒ documented Beta(1,1): (resolved+1)/(recalls+2)
 	cases := []struct {
 		recalls, resolved int
 		want              float64
 	}{
-		{0, 0, 1.0},  // no history → no penalty
-		{5, 5, 1.0},  // always resolves → no penalty
-		{3, 0, 0.4},  // (0+2)/(3+2)
-		{6, 0, 0.25}, // (0+2)/(6+2)
-		{3, 1, 0.6},  // (1+2)/(3+2) — partial resolve rate
+		// resolved=0, recalls 0..3 — a never-resolving entry decays fast.
+		{0, 0, 0.5},       // (0+1)/(0+2) — prior mean; never reaches the gate in practice
+		{1, 0, 1.0 / 3.0}, // (0+1)/(1+2) ≈ 0.333 — already below the 0.5 floor at the 1st recall
+		{2, 0, 0.25},      // (0+1)/(2+2)
+		{3, 0, 0.2},       // (0+1)/(3+2)
+		{6, 0, 0.125},     // (0+1)/(6+2)
+		// mixed resolve records.
+		{3, 1, 0.4},       // (1+1)/(3+2)
+		{3, 2, 0.6},       // (2+1)/(3+2)
+		{4, 2, 0.5},       // (2+1)/(4+2) — exactly at the floor
+		{5, 5, 6.0 / 7.0}, // (5+1)/(5+2) ≈ 0.857 — always-resolving asymptotes to 1, never exceeds it
 	}
 	for _, c := range cases {
 		got := outcomeFactor(c.recalls, c.resolved, k)
@@ -240,21 +246,24 @@ func soloRecall(oc OutcomeStats) *Recall {
 }
 
 func TestLookupDecayHealthyEntryRecalls(t *testing.T) {
+	// recalls=5 resolved=5 → factor (5+1)/(5+2)=6/7≈0.857 (a Beta posterior asymptotes
+	// to 1 with evidence but never reaches it), so confidence stays high but not maxed.
 	r := soloRecall(fakeOutcome{counts: map[string]outcome.Aggregate{"x.md": {Recalls: 5, Resolved: 5}}})
 	e, conf := r.lookup(context.Background(), okReq())
 	if e == nil {
-		t.Fatal("healthy entry (factor 1.0) should recall")
+		t.Fatal("healthy entry (factor ~0.857) should recall")
 	}
-	if conf < 0.80 {
-		t.Fatalf("healthy entry confidence should be ~undecayed, got %v", conf)
+	if conf < 0.75 {
+		t.Fatalf("consistently-resolving entry confidence should stay high, got %v", conf)
 	}
 }
 
 func TestLookupDecayStaleEntryRejected(t *testing.T) {
-	// recalls=4 resolved=0 → factor (0+2)/(4+2)=0.333 < floor 0.5 → reject, fall through.
-	r := soloRecall(fakeOutcome{counts: map[string]outcome.Aggregate{"x.md": {Recalls: 4, Resolved: 0}}})
+	// recalls=1 resolved=0 → factor (0+1)/(1+2)=0.333 < floor 0.5 → reject at the FIRST
+	// recall, fall through to a full investigation. This is the stricter Beta(1,1) gate.
+	r := soloRecall(fakeOutcome{counts: map[string]outcome.Aggregate{"x.md": {Recalls: 1, Resolved: 0}}})
 	if e, _ := r.lookup(context.Background(), okReq()); e != nil {
-		t.Fatal("stale never-resolving entry must be rejected (fall through to investigation)")
+		t.Fatal("an entry that recalls once and never resolves must be rejected (fall through to investigation)")
 	}
 }
 
@@ -280,9 +289,9 @@ func TestLookupDecayStatsErrorRecalls(t *testing.T) {
 }
 
 func TestLookupDecayPartialFactorReducesConfidence(t *testing.T) {
-	// recalls=3 resolved=1 → factor (1+2)/(3+2)=0.6 (> floor 0.5) → recalls, but with
+	// recalls=3 resolved=2 → factor (2+1)/(3+2)=0.6 (> floor 0.5) → recalls, but with
 	// confidence visibly reduced from the undecayed ~0.90 (0.90*0.6 = 0.54).
-	r := soloRecall(fakeOutcome{counts: map[string]outcome.Aggregate{"x.md": {Recalls: 3, Resolved: 1}}})
+	r := soloRecall(fakeOutcome{counts: map[string]outcome.Aggregate{"x.md": {Recalls: 3, Resolved: 2}}})
 	e, conf := r.lookup(context.Background(), okReq())
 	if e == nil {
 		t.Fatal("factor 0.6 (>= floor) should still recall")
@@ -293,9 +302,9 @@ func TestLookupDecayPartialFactorReducesConfidence(t *testing.T) {
 }
 
 func TestLookupDecayFactorAtFloorRecalls(t *testing.T) {
-	// recalls=2 resolved=0 → factor (0+2)/(2+2)=0.5 == floor; the gate is strict (<),
+	// recalls=4 resolved=2 → factor (2+1)/(4+2)=0.5 == floor; the gate is strict (<),
 	// so it recalls (boundary case).
-	r := soloRecall(fakeOutcome{counts: map[string]outcome.Aggregate{"x.md": {Recalls: 2, Resolved: 0}}})
+	r := soloRecall(fakeOutcome{counts: map[string]outcome.Aggregate{"x.md": {Recalls: 4, Resolved: 2}}})
 	if e, _ := r.lookup(context.Background(), okReq()); e == nil {
 		t.Fatal("factor exactly at the floor must recall (gate is strict <)")
 	}
