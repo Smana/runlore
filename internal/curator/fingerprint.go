@@ -130,20 +130,6 @@ func (n Novelty) TopHit(ctx context.Context, inv providers.Investigation) (catal
 	return hits[0], true, nil
 }
 
-// IsDuplicate returns true and the matching entry when the top hit's score is
-// ≥ DupScore. Returns false (novel) when no catalog is configured, there are no
-// hits, or the top score falls below the threshold.
-func (n Novelty) IsDuplicate(ctx context.Context, inv providers.Investigation) (bool, catalog.Entry, error) {
-	top, ok, err := n.TopHit(ctx, inv)
-	if err != nil || !ok {
-		return false, catalog.Entry{}, err
-	}
-	if top.Score >= n.DupScore {
-		return true, top.Entry, nil
-	}
-	return false, catalog.Entry{}, nil
-}
-
 // DupFingerprint is a deterministic identity for "the same incident", used to
 // dedupe curated PRs across re-investigations. It prefers the trigger key stamped
 // at trigger time (a structured K8s signal — the alert fingerprint, or the failing
