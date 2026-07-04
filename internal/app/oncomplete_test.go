@@ -205,3 +205,45 @@ func TestOnCompleteRecordsGitOpsIncident(t *testing.T) {
 		t.Fatalf("GitOps open must appear as one episode, got %+v", eps)
 	}
 }
+
+// TestOnCompleteGitOpsRecallNotCountedTowardDecay pins Defect 2 at the emission site:
+// a RECALL open for a GitOps incident (synthetic fingerprint, no resolve channel) is
+// marked non-resolvable, so it does NOT increment the entry's Recalls (which could
+// otherwise never be balanced by a Resolved and would decay a correct entry forever) —
+// while an equivalent Alertmanager recall (real fingerprint) does count.
+func TestOnCompleteGitOpsRecallNotCountedTowardDecay(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "outcomes.jsonl")
+	ledger, err := outcome.New(path)
+	if err != nil {
+		t.Fatalf("new ledger: %v", err)
+	}
+	notifier := notify.NewMulti(discardLog(), &captureNotifier{})
+
+	gitopsFP := outcome.DeriveFingerprint(outcome.GitOpsFingerprintPrefix, "argocd/airflow:Degraded")
+	gitops := providers.Investigation{
+		Title:         "airflow Degraded",
+		Fingerprint:   gitopsFP,
+		Fingerprints:  []string{gitopsFP},
+		TriggerKey:    "argocd/airflow:Degraded",
+		Recalled:      true,
+		RecalledEntry: "airflow.md",
+	}
+	onInvestigationComplete(context.Background(), gitops, ledger, nil, notifier, nil, nil, nil, discardLog())
+
+	if c, _ := ledger.OpenCounts(); c["airflow.md"].Recalls != 0 {
+		t.Fatalf("a non-resolvable GitOps recall must not count toward Recalls, got %+v", c["airflow.md"])
+	}
+
+	// An Alertmanager recall of a different entry (real fingerprint) DOES count.
+	alert := providers.Investigation{
+		Title:         "harbor down",
+		Fingerprint:   "a1b2c3d4",
+		Fingerprints:  []string{"a1b2c3d4"},
+		Recalled:      true,
+		RecalledEntry: "harbor.md",
+	}
+	onInvestigationComplete(context.Background(), alert, ledger, nil, notifier, nil, nil, nil, discardLog())
+	if c, _ := ledger.OpenCounts(); c["harbor.md"].Recalls != 1 {
+		t.Fatalf("a resolvable Alertmanager recall must count toward Recalls, got %+v", c["harbor.md"])
+	}
+}

@@ -68,7 +68,21 @@ type Event struct {
 	TriggerKey string `json:"trigger_key,omitempty"` // groups recurrences of the same alert; keys the byTrigger index
 	CuratedURL string `json:"curated_url,omitempty"` // KB link surfaced as "previous: <link>" on recurrence
 	Verdict    string `json:"verdict,omitempty"`     // curator's machine verdict on the investigation
+
+	// Resolvable is set on an open when we know whether a ground-truth resolve signal
+	// can ever arrive for it: true for sources with a resolve channel (Alertmanager,
+	// PagerDuty), false for sources that never emit one (GitOps, reinvestigate, or
+	// Alertmanager with send_resolved off). A pointer for a three-state distinction:
+	// nil ⇒ the field is absent, i.e. a LEGACY open written before this field existed —
+	// those came from Alertmanager/PagerDuty and are treated as resolvable. Only a
+	// non-resolvable recall open is excluded from recall decay (see applyOpenLocked).
+	Resolvable *bool `json:"resolvable,omitempty"`
 }
+
+// resolvable reports whether a ground-truth resolve signal can ever arrive for this
+// open. A legacy open (field absent ⇒ nil) came from Alertmanager/PagerDuty, which do
+// emit resolves, so it defaults to resolvable.
+func (e Event) resolvable() bool { return e.Resolvable == nil || *e.Resolvable }
 
 // Episode is a matched open→resolve pair (or, from Episodes(), an unresolved open
 // when Resolved is false).
@@ -203,7 +217,14 @@ func (l *Ledger) Reload() error {
 // already buffered for this fingerprint, the open is paired immediately and also
 // counts as resolved. Must be called with mu held (or during single-threaded New).
 func (l *Ledger) applyOpenLocked(e Event) {
-	counted := e.Kind == "recall" && e.Entry != ""
+	// A recall open counts toward decay ONLY when it is resolvable — i.e. a resolve
+	// signal for it can actually arrive. A non-resolvable recall (GitOps, reinvestigate,
+	// or Alertmanager with send_resolved off) neither builds nor erodes trust: counting
+	// it toward Recalls with no possible Resolved would decay a CORRECT entry's
+	// resolve-rate forever, on evidence the source can never provide. So decay is only
+	// learned where a ground-truth resolve signal exists. Episodes()/Occurrences() still
+	// include EVERY open regardless of resolvability, so recurrence counting is unaffected.
+	counted := e.Kind == "recall" && e.Entry != "" && e.resolvable()
 	if counted {
 		a := l.agg[e.Entry]
 		a.Recalls++
