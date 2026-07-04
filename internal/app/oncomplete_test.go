@@ -167,3 +167,41 @@ func TestOnCompleteCountsOneOccurrencePerInvestigation(t *testing.T) {
 		t.Errorf("delivered Occurrences on 2nd run = %d, want 2", sink.got.Occurrences)
 	}
 }
+
+// TestOnCompleteRecordsGitOpsIncident pins Defect 1's fix: a GitOps-failure incident
+// (no external alert fingerprint, only a derived gitops:<hash> id) must record an
+// outcome open and show up in Occurrences and Episodes — previously the open-emission
+// guard skipped it entirely, so pure-GitOps patterns were invisible to the loop.
+func TestOnCompleteRecordsGitOpsIncident(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "outcomes.jsonl")
+	ledger, err := outcome.New(path)
+	if err != nil {
+		t.Fatalf("new ledger: %v", err)
+	}
+	sink := &captureNotifier{}
+	notifier := notify.NewMulti(discardLog(), sink)
+
+	// What FromFailureEvent+the loop produce for a GitOps failure: a synthetic
+	// fingerprint and a trigger key, no Alertmanager id.
+	fp := outcome.DeriveFingerprint(outcome.GitOpsFingerprintPrefix, "argocd/airflow:Degraded")
+	found := providers.Investigation{
+		Title:        "airflow Degraded",
+		Fingerprint:  fp,
+		Fingerprints: []string{fp},
+		TriggerKey:   "argocd/airflow:Degraded",
+	}
+	onInvestigationComplete(context.Background(), found, ledger, nil, notifier, nil, nil, nil, discardLog())
+
+	// The GitOps incident is now captured: an open was recorded (Occurrences ≥ 1) ...
+	if n, _, _ := ledger.Occurrences("argocd/airflow:Degraded"); n != 1 {
+		t.Fatalf("GitOps incident must record one occurrence, got %d", n)
+	}
+	// ... and appears in Episodes (so the Phase-2 Recurrence pass can see it).
+	eps, err := ledger.Episodes()
+	if err != nil {
+		t.Fatalf("Episodes: %v", err)
+	}
+	if len(eps) != 1 || eps[0].Title != "airflow Degraded" {
+		t.Fatalf("GitOps open must appear as one episode, got %+v", eps)
+	}
+}
