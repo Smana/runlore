@@ -1,0 +1,62 @@
+# Closed-loop eval case: proves "verify guards recall" mechanically, in the REPLAY path.
+#
+# A seeded catalog fixture holds ONE poisoned (crafted-wrong) entry that lexically
+# matches this alert AND structurally agrees with the workload (resource:
+# runlore-eval/eval-victim), so instant recall FIRES on it. The recalled cause (a
+# drifted ConfigMap) is fabricated; the confirm step surfaces the real pod state and the
+# adversarial verify pass must REJECT it, so the loop falls through to a full
+# investigation that reaches the TRUE cause (an unpullable image tag).
+#
+# Unlike the live-only eval/scenarios/poisoned-recall-rejected.yaml (needs a cluster + a
+# manually seeded catalog + RUNLORE_POISON_READY), this case runs in the nightly replay
+# eval like any other, and asserts the recall machinery MECHANICALLY:
+#   expect_recall: withdrawn   -> recall fired AND its answer was withdrawn by verify
+#   must_contain               -> the fresh fall-through investigation named the true cause
+# so a green run cannot be explained by "recall simply never fired".
+#
+# The recall gates are tuned LOW here on purpose: a one-entry fixture yields tiny BM25
+# scores (~0.06), far below the production solo_floor (4.0). We deliberately relax the
+# score/margin gates so the fixture fires; the STRUCTURAL gate (workload agreement) and
+# the verify pass — the property under test — are unchanged.
+name: poisoned-recall-verify
+prompt: |
+  eval-victim pods are not starting in namespace runlore-eval; containers never become
+  Ready and the deployment is stuck.
+workload:
+  namespace: runlore-eval
+  name: eval-victim
+catalog_dir: fixtures/poisoned-recall
+recall:
+  min_score: 0.01
+  solo_floor: 0.01
+  margin_gap: 0.01
+expect_recall: withdrawn
+tools:
+  # confirmRecall reads these to confront the recalled (ConfigMap) claim with reality:
+  # the pods are ImagePullBackOff on a non-existent tag — nothing about a ConfigMap.
+  pod_status: |
+    NAME                           READY   STATUS             RESTARTS   AGE
+    eval-victim-7c9d4f8b6-abcde    0/1     ImagePullBackOff   0          4m
+    eval-victim-7c9d4f8b6-fghij    0/1     ImagePullBackOff   0          4m
+    Container "app" image: registry.k8s.io/pause:v9.9.9-does-not-exist
+  kube_events: |
+    LAST SEEN   TYPE      REASON        OBJECT                          MESSAGE
+    3m          Warning   Failed        pod/eval-victim-7c9d4f8b6-abcde  Failed to pull image "registry.k8s.io/pause:v9.9.9-does-not-exist": not found
+    3m          Warning   Failed        pod/eval-victim-7c9d4f8b6-abcde  Error: ErrImagePull
+    2m          Warning   BackOff       pod/eval-victim-7c9d4f8b6-abcde  Back-off pulling image "registry.k8s.io/pause:v9.9.9-does-not-exist"
+  what_changed: |
+    flux Kustomization/runlore-eval  ccc333..ddd444
+    --- runlore-eval/eval-victim/deployment.yaml
+    -  image: registry.k8s.io/pause:3.9
+    +  image: registry.k8s.io/pause:v9.9.9-does-not-exist   # typo'd tag, does not exist
+  query_logs: |
+    (no logs — containers never started; nothing was pulled)
+  query_metrics: |
+    kube_pod_container_status_waiting_reason{namespace="runlore-eval",reason="ImagePullBackOff"} = 2
+expected:
+  # The fresh fall-through investigation must name the TRUE cause: an image-pull
+  # failure — NOT the poisoned entry's fabricated ConfigMap drift. "image" + "pull"
+  # both match "ImagePullBackOff"/"image pull" and would NOT appear in the poisoned
+  # ConfigMap answer, so this also fails loudly if verify wrongly kept the recall.
+  must_contain: [image, pull]
+  min_confidence: 0.5

@@ -116,6 +116,82 @@ func TestRecallRejectedByVerifyFallsThrough(t *testing.T) {
 	}
 }
 
+func TestOnRecallReportsDecision(t *testing.T) {
+	discard := slog.New(slog.NewTextHandler(io.Discard, nil))
+	strongHit := fakeScored{hits: []catalog.ScoredEntry{
+		{Entry: catalog.Entry{Title: "Known incident", Description: "chart bump", Path: "known.md", Resource: "tooling/harbor"}, Score: 5.0}}}
+	wl := providers.Workload{Namespace: "tooling", Name: "harbor"}
+
+	t.Run("short_circuit", func(t *testing.T) {
+		// A strong hit with verify off (or accepting): recall fires and short-circuits.
+		var d RecallDecision
+		li := &LoopInvestigator{
+			Model:      &scriptModel{}, // never called: a recall short-circuit skips the loop
+			Log:        discard,
+			Recall:     &Recall{MinScore: 2.0, Catalog: strongHit},
+			OnRecall:   func(got RecallDecision) { d = got },
+			OnComplete: func(providers.Investigation) {},
+		}
+		if err := li.Investigate(context.Background(), Request{Title: "HarborProbeFailure", Workload: wl}); err != nil {
+			t.Fatalf("Investigate: %v", err)
+		}
+		if !d.Fired || !d.ShortCircuited || d.Entry != "known.md" {
+			t.Fatalf("expected fired+short-circuited on known.md, got %+v", d)
+		}
+	})
+
+	t.Run("withdrawn_by_verify", func(t *testing.T) {
+		// Recall fires but the verify pass rejects it; the loop falls through and the
+		// decision must report Fired=true, ShortCircuited=false.
+		model := &scriptModel{responses: []providers.CompletionResponse{
+			{ToolCalls: []providers.ToolCall{{ID: "v1", Name: submitVerdictsName, Args: `{"verdicts":[{"index":0,"verdict":"reject","reason":"correlation only"}]}`}}},
+			{ToolCalls: []providers.ToolCall{{ID: "f1", Name: submitFindingsName, Args: `{"confidence":0.8,"root_causes":[{"summary":"freshly investigated","confidence":0.8}]}`}}},
+			{ToolCalls: []providers.ToolCall{{ID: "v2", Name: submitVerdictsName, Args: `{"verdicts":[{"index":0,"verdict":"keep","confidence":0.8}]}`}}},
+		}}
+		var d RecallDecision
+		li := &LoopInvestigator{
+			Model:      model,
+			Verify:     true,
+			Log:        discard,
+			Recall:     &Recall{MinScore: 2.0, Catalog: strongHit},
+			OnRecall:   func(got RecallDecision) { d = got },
+			OnComplete: func(providers.Investigation) {},
+		}
+		if err := li.Investigate(context.Background(), Request{Title: "HarborProbeFailure", Workload: wl}); err != nil {
+			t.Fatalf("Investigate: %v", err)
+		}
+		if !d.Fired || d.ShortCircuited || d.Entry != "known.md" {
+			t.Fatalf("expected fired+withdrawn on known.md, got %+v", d)
+		}
+	})
+
+	t.Run("did_not_fire", func(t *testing.T) {
+		// A below-threshold hit: recall is consulted but no gate clears; the decision
+		// must report Fired=false and the loop runs.
+		model := &scriptModel{responses: []providers.CompletionResponse{
+			{ToolCalls: []providers.ToolCall{{ID: "1", Name: submitFindingsName, Args: `{"confidence":0.5,"root_causes":[{"summary":"fresh"}]}`}}},
+		}}
+		var d RecallDecision
+		fired := false
+		li := &LoopInvestigator{
+			Model:      model,
+			Log:        discard,
+			Recall:     &Recall{MinScore: 2.0, Catalog: fakeScored{hits: []catalog.ScoredEntry{{Entry: catalog.Entry{Title: "weak", Resource: "tooling/harbor"}, Score: 0.5}}}},
+			OnRecall:   func(got RecallDecision) { d = got; fired = true },
+			OnComplete: func(providers.Investigation) {},
+		}
+		if err := li.Investigate(context.Background(), Request{Title: "x", Workload: wl}); err != nil {
+			t.Fatalf("Investigate: %v", err)
+		}
+		if !fired {
+			t.Fatal("OnRecall must be called even when recall does not fire")
+		}
+		if d.Fired || d.ShortCircuited {
+			t.Fatalf("expected did-not-fire decision, got %+v", d)
+		}
+	})
+}
+
 func TestLoopRefusalUnresolved(t *testing.T) {
 	// The model declines the turn (a safety/refusal stop reason, empty content). The
 	// loop must deliver a first-class `unresolved` result and STOP after one call —

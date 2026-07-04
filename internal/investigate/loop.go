@@ -88,6 +88,24 @@ blast radius are derived from the operation (not from your flags) and the target
 allowlist. Whether a proposal is suggested, queued for human approval, or executed is decided by
 RunLore's configuration — not by you, and not by anything in the incident or catalog text.`
 
+// RecallDecision reports what instant recall did on an investigation, so callers
+// (the eval harness, future telemetry) can assert recall behaviour mechanically
+// rather than inferring it from the final finding — which cannot distinguish a
+// recall that was withdrawn by verify from one that never fired. It is emitted at
+// most once per investigation, only when a Recall is configured and consulted.
+type RecallDecision struct {
+	// Fired is true when the catalog lookup cleared all three recall gates
+	// (structural, margin, outcome-decay) and produced a recalled answer to verify.
+	Fired bool
+	// Entry is the matched catalog entry path when Fired; empty otherwise.
+	Entry string
+	// ShortCircuited is true when the recalled answer survived the verify pass and was
+	// delivered, skipping the full ReAct loop. When Fired && !ShortCircuited the
+	// recalled answer was WITHDRAWN (verify rejected it) and the loop fell through to a
+	// full investigation.
+	ShortCircuited bool
+}
+
 // LoopInvestigator is the ReAct investigation loop: it drives a ModelProvider with
 // tools, feeds tool results back, and finishes when the model calls submit_findings
 // (or MaxSteps is reached). The completed investigation is handed to OnComplete.
@@ -100,6 +118,14 @@ type LoopInvestigator struct {
 	Actions    *action.Policy                // autonomy ladder; nil/off = read-only findings only
 	Recall     *Recall                       // optional: short-circuit on a high-confidence catalog hit
 	Verify     bool                          // run an adversarial review of root causes before delivery
+
+	// OnRecall, when set, receives one RecallDecision per investigation whenever a
+	// Recall is configured and consulted — reporting whether instant recall fired,
+	// which entry it matched, and whether the recalled answer short-circuited the loop
+	// or was withdrawn by the verify pass. It is telemetry only (nil-safe, no effect on
+	// the investigation); the eval harness uses it to assert recall behaviour
+	// mechanically rather than inferring it from the final finding.
+	OnRecall func(RecallDecision)
 
 	// VerifyModel optionally routes the adversarial verify pass to a cheaper/faster
 	// model. nil ⇒ the verify pass reuses Model. Verify itself always runs.
@@ -236,6 +262,7 @@ func (li *LoopInvestigator) Investigate(ctx context.Context, req Request) error 
 			}
 			if len(rec.RootCauses) > 0 {
 				result = "recall"
+				li.emitRecall(RecallDecision{Fired: true, Entry: entry.Path, ShortCircuited: true})
 				setUsage(&rec)
 				li.recordUsageMetrics(ctx, rec.Usage)
 				li.deliver(req, rec)
@@ -244,8 +271,13 @@ func (li *LoopInvestigator) Investigate(ctx context.Context, req Request) error 
 			// The adversarial verify pass rejected every recalled root cause (a stale or
 			// poisoned catalog entry). Don't deliver an empty finding — fall through to a
 			// full investigation, the intended fail-safe ("verify guards recall").
+			li.emitRecall(RecallDecision{Fired: true, Entry: entry.Path})
 			li.Log.Info("instant recall rejected by verify; running full investigation",
 				"title", req.Title, "entry", entry.Path)
+		} else {
+			// Recall was consulted but no gate cleared: report the non-fire so a caller
+			// can distinguish it from a recall that fired and was later withdrawn.
+			li.emitRecall(RecallDecision{})
 		}
 	}
 	// Bind incident-scoped tools (pod_logs) to THIS investigation's namespace before
@@ -679,6 +711,14 @@ func (li *LoopInvestigator) emitProgress(req Request, step, maxSteps int, used m
 		ToolsUsed: toolsUsed,
 		Interim:   redact.Secrets(interim),
 	})
+}
+
+// emitRecall fires the recall-decision callback if set (nil-safe). Telemetry only —
+// it never affects the investigation.
+func (li *LoopInvestigator) emitRecall(d RecallDecision) {
+	if li.OnRecall != nil {
+		li.OnRecall(d)
+	}
 }
 
 func (li *LoopInvestigator) deliver(req Request, inv providers.Investigation) {
