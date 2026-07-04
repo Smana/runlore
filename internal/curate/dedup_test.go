@@ -90,20 +90,41 @@ func TestDedupCollapsesByFingerprintAcrossRewordedTitles(t *testing.T) {
 	}
 }
 
-// TestDedupKeepsDistinctFingerprintsDespiteIdenticalTitles proves fingerprint
-// equality OVERRIDES a coincidental title match: two byte-identical titles whose
-// fingerprints DIFFER must stay open (title-Jaccard alone would wrongly close one).
-func TestDedupKeepsDistinctFingerprintsDespiteIdenticalTitles(t *testing.T) {
+// TestDedupCollapsesDivergentFingerprintsWhenTitlesSimilar is the regression guard
+// for the divergent-fingerprint hole: the SAME incident investigated once via an
+// alert (trigger-key fingerprint) and once via a manual `lore investigate`
+// (cause-token fingerprint) produces two DIFFERENT markers. Different fingerprints
+// must NOT short-circuit dedup — the pass falls through to title-Jaccard, so the
+// similar-titled true duplicate is caught and collapsed onto the canonical PR.
+func TestDedupCollapsesDivergentFingerprintsWhenTitlesSimilar(t *testing.T) {
+	f := &fakeForge{prs: []providers.CuratedIssue{
+		{Number: 3, Title: "KB: Kustomization DependencyNotReady missing GitRepository", Body: "x\n\n" + providers.FingerprintMarker("fp-alert")},
+		{Number: 7, Title: "KB: Kustomization DependencyNotReady due to missing GitRepository", Body: "x\n\n" + providers.FingerprintMarker("fp-manual")},
+	}}
+	d := Dedup{Forge: f, Log: slog.New(slog.NewTextHandler(io.Discard, nil))}
+	if err := d.Run(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if len(f.closed) != 1 || f.closed[0] != 7 {
+		t.Fatalf("divergent fingerprints with similar titles must collapse #7 onto #3 via Jaccard, got closed=%v", f.closed)
+	}
+}
+
+// TestDedupKeepsDivergentFingerprintsWhenTitlesDissimilar proves the fall-through is
+// still guarded by the title check: two genuinely distinct incidents (different
+// fingerprints AND dissimilar titles) must stay open — Jaccard below threshold keeps
+// them apart, so the divergent-fingerprint fall-through introduces no false close.
+func TestDedupKeepsDivergentFingerprintsWhenTitlesDissimilar(t *testing.T) {
 	f := &fakeForge{prs: []providers.CuratedIssue{
 		{Number: 3, Title: "KB: Kustomization DependencyNotReady missing GitRepository", Body: "x\n\n" + providers.FingerprintMarker("fp-one")},
-		{Number: 7, Title: "KB: Kustomization DependencyNotReady missing GitRepository", Body: "x\n\n" + providers.FingerprintMarker("fp-two")},
+		{Number: 7, Title: "KB: apps/web pod readiness probe failing after deploy", Body: "x\n\n" + providers.FingerprintMarker("fp-two")},
 	}}
 	d := Dedup{Forge: f, Log: slog.New(slog.NewTextHandler(io.Discard, nil))}
 	if err := d.Run(context.Background()); err != nil {
 		t.Fatal(err)
 	}
 	if len(f.closed) != 0 {
-		t.Fatalf("distinct fingerprints must NOT collapse despite identical titles, got closed=%v", f.closed)
+		t.Fatalf("divergent fingerprints with dissimilar titles must NOT collapse, got closed=%v", f.closed)
 	}
 }
 
