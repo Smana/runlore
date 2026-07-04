@@ -37,9 +37,22 @@ func NewHTTPServer(addr string, h http.Handler) *http.Server {
 	}
 }
 
+// Leader-election timings. Package vars (not consts) so tests can shrink them;
+// production always runs the defaults.
+var (
+	leaseDuration = 15 * time.Second
+	renewDeadline = 10 * time.Second
+	retryPeriod   = 2 * time.Second
+)
+
 // RunLeaderElection blocks running Lease-based leader election; the leader runs
-// startWork and reports ready. Lost leadership cancels the work context.
-func RunLeaderElection(ctx context.Context, cfg *config.Config, cs *kubernetes.Clientset, leader *atomic.Bool, log *slog.Logger, startWork func(context.Context)) {
+// startWork and reports ready. Lost leadership cancels the work context and the
+// replica REJOINS the election as a standby: client-go's RunOrDie returns when
+// the lease is lost without the process dying (e.g. an API-server blip past
+// RenewDeadline), and without the re-entry loop the replica would never contend
+// again — a permanent zombie standby that /healthz keeps reporting alive,
+// silently shrinking the HA pool until no replica leads at all.
+func RunLeaderElection(ctx context.Context, cfg *config.Config, cs kubernetes.Interface, leader *atomic.Bool, log *slog.Logger, startWork func(context.Context)) {
 	name := cfg.LeaderElection.Name
 	if name == "" {
 		name = "runlore-leader"
@@ -50,29 +63,37 @@ func RunLeaderElection(ctx context.Context, cfg *config.Config, cs *kubernetes.C
 		Client:     cs.CoordinationV1(),
 		LockConfig: resourcelock.ResourceLockConfig{Identity: id},
 	}
-	leaderelection.RunOrDie(ctx, leaderelection.LeaderElectionConfig{
-		Lock:            lock,
-		ReleaseOnCancel: true,
-		LeaseDuration:   15 * time.Second,
-		RenewDeadline:   10 * time.Second,
-		RetryPeriod:     2 * time.Second,
-		Callbacks: leaderelection.LeaderCallbacks{
-			OnStartedLeading: func(workCtx context.Context) {
-				log.Info("acquired leadership", "id", id)
-				leader.Store(true)
-				startWork(workCtx)
+	for ctx.Err() == nil {
+		// RunOrDie blocks until leadership is lost or ctx is cancelled; the loop
+		// never spins hot — RunOrDie's internal acquire loop already paces every
+		// retry by RetryPeriod.
+		leaderelection.RunOrDie(ctx, leaderelection.LeaderElectionConfig{
+			Lock:            lock,
+			ReleaseOnCancel: true,
+			LeaseDuration:   leaseDuration,
+			RenewDeadline:   renewDeadline,
+			RetryPeriod:     retryPeriod,
+			Callbacks: leaderelection.LeaderCallbacks{
+				OnStartedLeading: func(workCtx context.Context) {
+					log.Info("acquired leadership", "id", id)
+					leader.Store(true)
+					startWork(workCtx)
+				},
+				OnStoppedLeading: func() {
+					log.Info("lost leadership", "id", id)
+					leader.Store(false)
+				},
+				OnNewLeader: func(current string) {
+					if current != id {
+						log.Info("standby; another replica leads", "leader", current)
+					}
+				},
 			},
-			OnStoppedLeading: func() {
-				log.Info("lost leadership", "id", id)
-				leader.Store(false)
-			},
-			OnNewLeader: func(current string) {
-				if current != id {
-					log.Info("standby; another replica leads", "leader", current)
-				}
-			},
-		},
-	})
+		})
+		if ctx.Err() == nil {
+			log.Warn("leadership lost without shutdown; rejoining election as standby", "id", id)
+		}
+	}
 }
 
 // SetMemoryLimitFromCgroup sets GOMEMLIMIT to ~90% of the cgroup v2 memory limit
