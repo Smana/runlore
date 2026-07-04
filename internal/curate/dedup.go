@@ -68,18 +68,28 @@ func (d Dedup) Run(ctx context.Context) error {
 // fingerprint-FIRST: every curator-drafted PR carries a deterministic
 // DupFingerprint persisted in its body as a marker (the same identity the
 // file-time gate's Curator.duplicateOpenPR reads back). When BOTH PRs carry a
-// parseable marker, they are duplicates iff the fingerprints are EQUAL — stable
-// across the LLM's title phrasing, which is exactly the title fragility
-// DupFingerprint was built to retire. A coincidental title match cannot collapse
-// PRs with different fingerprints, and reworded titles with one fingerprint do.
+// parseable marker and the fingerprints are EQUAL, that is the strong signal —
+// duplicates regardless of title phrasing, exactly the title fragility
+// DupFingerprint was built to retire.
 //
-// Title-Jaccard is the FALLBACK for markerless PRs (legacy/hand-filed entries with
-// no marker) — additive, not a regression.
+// EQUAL fingerprints are conclusive; DIFFERENT fingerprints are NOT. The same
+// incident yields two different fingerprints when investigated via an alert
+// (trigger-key identity) versus a manual `lore investigate` (cause-token identity),
+// so a fingerprint mismatch cannot be trusted to mean "distinct". Rather than
+// short-circuit to false — which let those cross-path duplicates escape dedup and
+// merge as permanent catalog dupes — we fall through to title-Jaccard, the same
+// check the markerless path uses. The tradeoff: two genuinely distinct incidents on
+// the same resource with similar titles can now be collapsed by Jaccard where the
+// fingerprint mismatch used to shield them; that shield was also hiding true
+// duplicates, so catching them is the intended net.
+//
+// Title-Jaccard is also the FALLBACK for markerless PRs (legacy/hand-filed entries
+// with no marker).
 func isDuplicatePair(a, b providers.CuratedIssue, thr float64) bool {
 	fa := providers.ParseFingerprintMarker(a.Body)
 	fb := providers.ParseFingerprintMarker(b.Body)
-	if fa != "" && fb != "" {
-		return fa == fb
+	if fa != "" && fb != "" && fa == fb {
+		return true
 	}
 	return jaccard(titleTokens(a.Title), titleTokens(b.Title)) >= thr
 }
