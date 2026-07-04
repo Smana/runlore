@@ -374,6 +374,12 @@ func onInvestigationComplete(ctx context.Context, found providers.Investigation,
 			if i == 0 {
 				triggerKey = found.TriggerKey
 			}
+			// Whether a resolve signal can ever arrive for this open: true for sources
+			// with a resolve channel (Alertmanager/PagerDuty — real fingerprints), false
+			// for sources that never emit one (GitOps/reinvestigate — synthetic derived
+			// fingerprints). A non-resolvable recall open is recorded for recurrence but
+			// kept out of recall decay (see outcome.applyOpenLocked).
+			resolvable := !outcome.Derived(fp)
 			if err := ledger.Open(outcome.Event{
 				Fingerprint:    fp,
 				DupFingerprint: dupFP,
@@ -384,6 +390,7 @@ func onInvestigationComplete(ctx context.Context, found providers.Investigation,
 				TriggerKey:     triggerKey,
 				CuratedURL:     found.CuratedURL,
 				Verdict:        string(found.Verdict),
+				Resolvable:     &resolvable,
 				At:             now,
 			}); err != nil {
 				log.Warn("outcome ledger open failed", "fingerprint", fp, "err", err)

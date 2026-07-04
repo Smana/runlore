@@ -453,6 +453,60 @@ func TestDeriveFingerprintStableAndPrefixed(t *testing.T) {
 	}
 }
 
+// boolPtr is a test helper for the tri-state Resolvable field.
+func boolPtr(b bool) *bool { return &b }
+
+// TestNonResolvableRecallOpenNotCountedButInEpisodes pins Defect 2: a recall open from
+// a source with NO resolve channel (Resolvable=false — GitOps / send_resolved off) must
+// NOT increment Recalls (so a correct entry's resolve-rate can't decay on evidence that
+// can never arrive), yet it MUST still appear in Episodes so recurrence counting keeps
+// working.
+func TestNonResolvableRecallOpenNotCountedButInEpisodes(t *testing.T) {
+	p := filepath.Join(t.TempDir(), "o.jsonl")
+	l, _ := New(p)
+	t0 := time.Unix(21000, 0)
+	// A resolvable recall (alert) — counts toward decay.
+	_ = l.Open(Event{Fingerprint: "amfp", Kind: "recall", Entry: "x.md", Resolvable: boolPtr(true), At: t0})
+	// A non-resolvable recall (gitops) — must NOT count toward decay.
+	_ = l.Open(Event{Fingerprint: "gitops:abc", Kind: "recall", Entry: "x.md", Resolvable: boolPtr(false), At: t0.Add(time.Second)})
+
+	c, _ := l.OpenCounts()
+	if c["x.md"].Recalls != 1 {
+		t.Fatalf("only the resolvable recall must count toward Recalls, got %+v", c["x.md"])
+	}
+
+	// Both opens must still be present as episodes (recurrence counting is unaffected).
+	eps, _ := l.Episodes()
+	if len(eps) != 2 {
+		t.Fatalf("both opens (resolvable and not) must appear in Episodes, got %d", len(eps))
+	}
+	// And the property survives a reload (the cache is rebuilt from the file).
+	l2, _ := New(p)
+	if c2, _ := l2.OpenCounts(); c2["x.md"].Recalls != 1 {
+		t.Fatalf("after reload, non-resolvable recall must still not count, got %+v", c2["x.md"])
+	}
+}
+
+// TestLegacyOpenMissingResolvableCountsAsResolvable pins backward compatibility: an
+// open written by an OLD binary has no "resolvable" field (nil on decode). It came from
+// Alertmanager/PagerDuty, which do emit resolves, so it must be treated as resolvable
+// and count toward Recalls exactly as before.
+func TestLegacyOpenMissingResolvableCountsAsResolvable(t *testing.T) {
+	p := filepath.Join(t.TempDir(), "o.jsonl")
+	// A legacy open line: no "resolvable" key at all.
+	legacy := `{"event":"open","fingerprint":"fp","kind":"recall","entry":"x.md","at":"2026-07-01T10:00:00Z"}` + "\n"
+	if err := os.WriteFile(p, []byte(legacy), 0o600); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	l, err := New(p)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	if c, _ := l.OpenCounts(); c["x.md"].Recalls != 1 {
+		t.Fatalf("a legacy open (no resolvable field) must count as resolvable, got %+v", c["x.md"])
+	}
+}
+
 func TestStatusDisabled(t *testing.T) {
 	l, _ := New("")
 	s := l.Status()
