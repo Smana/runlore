@@ -220,5 +220,14 @@ func buildInvestigation(f findings) providers.Investigation {
 		Name:      f.AffectedResource.Name,
 		Namespace: f.AffectedResource.Namespace,
 	}
+	// The top-level confidence is optional in the schema and some models (e.g.
+	// GLM over the OpenAI-compatible path) only fill the per-root-cause field.
+	// A missing overall would read as 0% and verify's min(overall, maxRootCause)
+	// would pin it there, so fall back to the strongest root cause.
+	if inv.Confidence == 0 {
+		for _, rc := range inv.RootCauses {
+			inv.Confidence = max(inv.Confidence, rc.Confidence)
+		}
+	}
 	return inv
 }
