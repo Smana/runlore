@@ -1,8 +1,20 @@
 package app
 
 import (
+	"context"
+	"errors"
+	"io"
+	"log/slog"
 	"net/http"
+	"sync/atomic"
 	"testing"
+	"time"
+
+	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/client-go/kubernetes/fake"
+	k8stesting "k8s.io/client-go/testing"
+
+	"github.com/Smana/runlore/internal/config"
 )
 
 // TestNewHTTPServer asserts the serving http.Server is built with every inbound
@@ -24,5 +36,86 @@ func TestNewHTTPServer(t *testing.T) {
 	}
 	if s.MaxHeaderBytes == 0 {
 		t.Error("MaxHeaderBytes is zero (defaults to 1MB but should be explicit)")
+	}
+}
+
+// TestRunLeaderElectionRejoinsAfterLoss captures the HA zombie-standby bug: a
+// replica that loses the lease WITHOUT dying (e.g. an API-server blip past
+// RenewDeadline, or another holder stealing the lease) must re-enter the
+// election and be able to lead again. Before the fix, RunOrDie returned after
+// the first loss and the election goroutine exited — the replica stayed a
+// permanent standby (never ready, never leading) while its kubelet probes
+// stayed green, silently shrinking the HA pool to zero over successive flaps.
+func TestRunLeaderElectionRejoinsAfterLoss(t *testing.T) {
+	// Shrink the election timings so a full lose-then-rejoin cycle fits in a test.
+	origLease, origRenew, origRetry := leaseDuration, renewDeadline, retryPeriod
+	leaseDuration, renewDeadline, retryPeriod = 400*time.Millisecond, 300*time.Millisecond, 50*time.Millisecond
+	defer func() { leaseDuration, renewDeadline, retryPeriod = origLease, origRenew, origRetry }()
+
+	t.Setenv("POD_NAME", "replica-a")
+	t.Setenv("POD_NAMESPACE", "default")
+	cs := fake.NewSimpleClientset()
+	// outage simulates an API-server blip: while set, every lease get/update
+	// fails, so the leader cannot renew within renewDeadline and drops the lease
+	// — exactly the production trigger for a leadership loss without a restart.
+	var outage atomic.Bool
+	blip := func(k8stesting.Action) (bool, runtime.Object, error) {
+		if outage.Load() {
+			return true, nil, errors.New("simulated apiserver outage")
+		}
+		return false, nil, nil
+	}
+	cs.PrependReactor("get", "leases", blip)
+	cs.PrependReactor("update", "leases", blip)
+	cfg := &config.Config{}
+	cfg.LeaderElection.Enabled = true
+	cfg.LeaderElection.Name = "test-leader"
+
+	var leader atomic.Bool
+	var terms atomic.Int32 // one startWork call per leadership term
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		RunLeaderElection(ctx, cfg, cs, &leader,
+			slog.New(slog.NewTextHandler(io.Discard, nil)),
+			func(context.Context) { terms.Add(1) })
+	}()
+
+	waitFor := func(desc string, cond func() bool) {
+		t.Helper()
+		deadline := time.Now().Add(10 * time.Second)
+		for time.Now().Before(deadline) {
+			if cond() {
+				return
+			}
+			time.Sleep(10 * time.Millisecond)
+		}
+		t.Fatalf("timed out waiting for %s", desc)
+	}
+
+	waitFor("initial leadership", leader.Load)
+
+	// Blip the API server for longer than renewDeadline: the replica must drop
+	// leadership (it cannot renew), but the process stays alive.
+	outage.Store(true)
+	waitFor("leadership loss during the apiserver blip", func() bool { return !leader.Load() })
+
+	// The blip clears. The replica must REJOIN the election and lead a second
+	// term — before the fix the election goroutine had already exited, leaving a
+	// permanent zombie standby.
+	outage.Store(false)
+	waitFor("re-acquired leadership after the blip cleared", leader.Load)
+	if got := terms.Load(); got < 2 {
+		t.Errorf("startWork ran %d time(s), want >=2 (one per leadership term)", got)
+	}
+
+	// Shutdown: cancelling the context must end the election loop.
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(10 * time.Second):
+		t.Fatal("RunLeaderElection did not return after context cancel")
 	}
 }
