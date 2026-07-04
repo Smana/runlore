@@ -193,12 +193,20 @@ func clampF(v, lo, hi float64) float64 {
 	return v
 }
 
-// outcomeFactor decays a recall's confidence by its track record using an
-// optimistic Beta prior: an entry with no history (or that always resolves)
-// scores 1.0; one that recalls-but-never-resolves decays toward 0. k is the
-// prior strength. Always in (0, 1] provided resolved ≤ recalls and k > 0.
+// outcomeFactor decays a recall's confidence by its track record as the posterior
+// mean of a symmetric Beta(k/2, k/2) prior over the resolve rate:
+//
+//	factor = (resolved + k/2) / (recalls + k)
+//
+// k is the total pseudo-observation count (the prior strength). With the default
+// k=2 this is the documented Beta(1,1) posterior (resolved+1)/(recalls+2): an entry
+// with no history sits at the prior mean 0.5, a consistently-resolving one asymptotes
+// toward 1 without ever reaching it, and one that recalls-but-never-resolves decays
+// fast (0.333 after a single unresolved recall). Always in (0, 1) for k > 0 and
+// resolved ≤ recalls. Entries with no recall history never reach this gate (they are
+// absent from OpenCounts), so a brand-new entry is not punished by the 0.5 prior mean.
 func outcomeFactor(recalls, resolved int, k float64) float64 {
-	return (float64(resolved) + k) / (float64(recalls) + k)
+	return (float64(resolved) + k/2) / (float64(recalls) + k)
 }
 
 // deriveRecallConfidence turns the match signals into an explainable confidence,
