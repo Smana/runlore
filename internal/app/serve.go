@@ -152,12 +152,18 @@ func RunServe(version string, args []string) error {
 	}
 	metrics := telemetry.NewMetrics() // bound to global provider (no-op when disabled)
 
-	ledger, err := outcome.New(cfg.Outcome.LedgerPath)
+	// max_events is a three-state knob: unset (nil) ⇒ the generous default; explicit 0 ⇒
+	// compaction disabled; N ⇒ compact when the ledger exceeds N events.
+	maxEvents := outcome.DefaultMaxEvents
+	if cfg.Outcome.MaxEvents != nil {
+		maxEvents = *cfg.Outcome.MaxEvents
+	}
+	ledger, err := outcome.NewWithMaxEvents(cfg.Outcome.LedgerPath, maxEvents)
 	if err != nil {
 		return fmt.Errorf("outcome ledger: %w", err)
 	}
 	if cfg.Outcome.LedgerPath != "" {
-		log.Info("outcome ledger enabled", "path", cfg.Outcome.LedgerPath)
+		log.Info("outcome ledger enabled", "path", cfg.Outcome.LedgerPath, "max_events", maxEvents)
 	}
 
 	inv, cat, err := BuildInvestigator(ctx, cfg, gitops, approvals, auto, metrics, ledger, log)

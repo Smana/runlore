@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/Smana/runlore/internal/outcome"
 	"github.com/Smana/runlore/internal/providers"
 )
 
@@ -58,6 +59,14 @@ func (r *Reinvestigator) pollOnce(ctx context.Context) {
 			continue
 		}
 		req := Request{Source: SourceAlert, Title: is.Title, Reason: "re-investigation requested via the reinvestigate label", Message: is.Body}
+		// Like a GitOps failure, a reinvestigate poll carries no external alert
+		// fingerprint. Derive a stable, deterministic one from the issue identity so the
+		// incident is not invisible to the outcome ledger (see outcome.DeriveFingerprint).
+		// The reinvestigate: prefix marks it as non-resolvable (no resolve webhook can
+		// match it).
+		fp := outcome.DeriveFingerprint(outcome.ReinvestigateFingerprintPrefix, fmt.Sprintf("issue-%d", is.Number))
+		req.Fingerprint = fp
+		req.Fingerprints = []string{fp}
 		inv, err := r.Run(ctx, req)
 		if err != nil {
 			r.Log.Warn("reinvestigate: run failed", "issue", is.Number, "err", err)
