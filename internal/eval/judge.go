@@ -24,15 +24,6 @@ var Rubric = []Dimension{
 	{"calibration", 2}, // high confidence only when correct
 }
 
-// RubricMax is the maximum total score across all dimensions.
-func RubricMax() int {
-	n := 0
-	for _, d := range Rubric {
-		n += d.Max
-	}
-	return n
-}
-
 // Verdict is the judge's structured grade for one investigation.
 type Verdict struct {
 	Scores         map[string]int `json:"scores"`

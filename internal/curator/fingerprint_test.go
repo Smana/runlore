@@ -41,35 +41,6 @@ func (f fakeScored) SearchScored(_ string, _ int) ([]catalog.ScoredEntry, error)
 	return []catalog.ScoredEntry{{Entry: catalog.Entry{Title: f.title}, Score: f.score}}, nil
 }
 
-func TestNoveltyDuplicateAboveThreshold(t *testing.T) {
-	inv := providers.Investigation{Title: "HarborRegistryDown"}
-	n := Novelty{Catalog: fakeScored{score: 9.0, title: "HarborRegistryDown"}, DupScore: 5.0}
-	dup, hit, err := n.IsDuplicate(context.Background(), inv)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !dup || hit.Title != "HarborRegistryDown" {
-		t.Fatalf("expected duplicate hit, got dup=%v hit=%+v", dup, hit)
-	}
-}
-
-func TestNoveltyBelowThresholdIsNovel(t *testing.T) {
-	inv := providers.Investigation{Title: "BrandNewThing"}
-	n := Novelty{Catalog: fakeScored{score: 1.0, title: "Unrelated"}, DupScore: 5.0}
-	dup, _, err := n.IsDuplicate(context.Background(), inv)
-	if err != nil || dup {
-		t.Fatalf("expected novel, got dup=%v err=%v", dup, err)
-	}
-}
-
-func TestNoveltyNilCatalogIsNovel(t *testing.T) {
-	n := Novelty{Catalog: nil, DupScore: 5.0}
-	dup, _, err := n.IsDuplicate(context.Background(), providers.Investigation{Title: "x"})
-	if err != nil || dup {
-		t.Fatalf("nil catalog must be novel, got dup=%v err=%v", dup, err)
-	}
-}
-
 func TestTopHitReturnsScore(t *testing.T) {
 	// TopHit surfaces the top hit + score regardless of the DupScore threshold,
 	// so the caller can both observe the score and apply the threshold itself.

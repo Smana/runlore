@@ -21,39 +21,6 @@ type Runner struct {
 	Log   *slog.Logger
 }
 
-// Report aggregates case results.
-type Report struct {
-	Results []Result
-}
-
-// Passed counts cases whose root cause was identified.
-func (r Report) Passed() int {
-	n := 0
-	for _, res := range r.Results {
-		if res.Pass {
-			n++
-		}
-	}
-	return n
-}
-
-// RCARate is the fraction of cases whose root cause was identified.
-func (r Report) RCARate() float64 {
-	if len(r.Results) == 0 {
-		return 0
-	}
-	return float64(r.Passed()) / float64(len(r.Results))
-}
-
-// Run replays every case and scores it.
-func (r *Runner) Run(ctx context.Context, cases []Case) Report {
-	var rep Report
-	for _, c := range cases {
-		rep.Results = append(rep.Results, r.runOne(ctx, c))
-	}
-	return rep
-}
-
 func (r *Runner) runOne(ctx context.Context, c Case) Result {
 	tools := make([]investigate.Tool, 0, len(c.Tools))
 	for name, output := range c.Tools {
