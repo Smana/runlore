@@ -13,6 +13,12 @@ type Result struct {
 	Confidence  float64
 	Missing     []string // expected keywords/entities not found (or an error note); includes "over-claimed: <e>" markers
 	OverClaimed []string // distractor entities the investigation wrongly blamed (over-claim/FP)
+
+	// Recall telemetry (populated only for cases with a catalog fixture): whether
+	// instant recall fired, and whether its answer short-circuited the loop. Surfaced
+	// so recall behaviour is asserted mechanically, not inferred from the finding.
+	RecallFired        bool
+	RecallShortCircuit bool
 }
 
 // Score reports whether the investigation identifies the expected root cause.
