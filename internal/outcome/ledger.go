@@ -7,13 +7,49 @@ package outcome
 
 import (
 	"bufio"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"io/fs"
 	"os"
+	"strings"
 	"sync"
 	"time"
 )
+
+// Fingerprint prefixes for incidents RunLore assigns a synthetic id to because the
+// triggering source carries no external alert fingerprint (an Alertmanager/PagerDuty
+// incident id). They are chosen so a derived id can never collide with a real
+// fingerprint, and they double as the "no ground-truth resolve channel" marker that
+// keeps such recall opens out of recall-decay (see Event.Resolvable / applyOpenLocked).
+const (
+	// GitOpsFingerprintPrefix marks a fingerprint derived from a GitOps failure's
+	// resource-ref + condition reason.
+	GitOpsFingerprintPrefix = "gitops:"
+	// ReinvestigateFingerprintPrefix marks a fingerprint derived for a reinvestigate poll.
+	ReinvestigateFingerprintPrefix = "reinvestigate:"
+)
+
+// DeriveFingerprint returns a stable, deterministic fingerprint for an incident that
+// carries no external alert id, formed as prefix + a short hex sha256 of key (e.g. the
+// trigger key, or resource-ref+reason). Determinism is the point: the same recurring
+// incident derives the SAME fingerprint every time, so its opens roll up into
+// Occurrences/Episodes as recurrences — while the prefix keeps it from ever colliding
+// with a real Alertmanager/PagerDuty fingerprint.
+func DeriveFingerprint(prefix, key string) string {
+	sum := sha256.Sum256([]byte(key))
+	return prefix + hex.EncodeToString(sum[:8])
+}
+
+// Derived reports whether fp was assigned by DeriveFingerprint (a synthetic id for a
+// source with no external fingerprint). Such incidents have no resolve channel — no
+// resolved-alert webhook can ever match them — so their recall opens are recorded for
+// recurrence but never counted toward recall decay (see Event.Resolvable).
+func Derived(fp string) bool {
+	return strings.HasPrefix(fp, GitOpsFingerprintPrefix) ||
+		strings.HasPrefix(fp, ReinvestigateFingerprintPrefix)
+}
 
 // Event is one ledger line: an investigation opened, or an incident resolved.
 type Event struct {

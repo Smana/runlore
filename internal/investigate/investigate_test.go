@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/Smana/runlore/internal/outcome"
 	"github.com/Smana/runlore/internal/providers"
 )
 
@@ -154,6 +155,31 @@ func TestFromFailureEvent(t *testing.T) {
 	r := FromFailureEvent(fe)
 	if r.Source != SourceGitOpsFailure || r.Workload != fe.Workload || r.Reason != "BuildFailed" || r.Message != "boom" {
 		t.Fatalf("unexpected request: %+v", r)
+	}
+}
+
+// TestFromFailureEventDerivesFingerprint pins the fix for GitOps incidents being
+// invisible to the outcome ledger: a GitOps failure now carries a stable, deterministic
+// synthetic fingerprint (gitops:<hash> of its trigger key) so the open-emission guard
+// records it, and re-firings of the same failure derive the SAME id (recurrence).
+func TestFromFailureEventDerivesFingerprint(t *testing.T) {
+	fe := providers.FailureEvent{
+		Workload: providers.Workload{Kind: "Application", Namespace: "argocd", Name: "airflow"},
+		Reason:   "Degraded",
+	}
+	r := FromFailureEvent(fe)
+	if r.Fingerprint == "" {
+		t.Fatal("GitOps failure must derive a fingerprint (else the outcome ledger skips it)")
+	}
+	if !outcome.Derived(r.Fingerprint) {
+		t.Fatalf("derived fingerprint %q must be recognised as synthetic/non-resolvable", r.Fingerprint)
+	}
+	if len(r.Fingerprints) != 1 || r.Fingerprints[0] != r.Fingerprint {
+		t.Fatalf("Fingerprints must mirror the derived id: %+v", r.Fingerprints)
+	}
+	// Deterministic: a re-firing of the same failure derives the same id (recurrence).
+	if again := FromFailureEvent(fe); again.Fingerprint != r.Fingerprint {
+		t.Fatalf("re-firing must derive the same fingerprint: %q != %q", again.Fingerprint, r.Fingerprint)
 	}
 }
 

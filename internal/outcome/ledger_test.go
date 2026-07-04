@@ -426,6 +426,33 @@ func TestPendingResolvesBounded(t *testing.T) {
 	}
 }
 
+// TestDeriveFingerprintStableAndPrefixed pins the synthetic fingerprint derivation
+// used for sources with no external alert id (GitOps failures, reinvestigate polls):
+// it is deterministic (same key ⇒ same id, so recurrences roll up), carries the given
+// prefix, distinguishes distinct keys, and is recognised by Derived().
+func TestDeriveFingerprintStableAndPrefixed(t *testing.T) {
+	a := DeriveFingerprint(GitOpsFingerprintPrefix, "argocd/airflow:Degraded")
+	b := DeriveFingerprint(GitOpsFingerprintPrefix, "argocd/airflow:Degraded")
+	if a != b {
+		t.Fatalf("derivation must be deterministic: %q != %q", a, b)
+	}
+	if len(a) <= len(GitOpsFingerprintPrefix) || a[:len(GitOpsFingerprintPrefix)] != GitOpsFingerprintPrefix {
+		t.Fatalf("derived id %q must carry the %q prefix", a, GitOpsFingerprintPrefix)
+	}
+	if c := DeriveFingerprint(GitOpsFingerprintPrefix, "other/thing:Failed"); c == a {
+		t.Fatalf("distinct keys must derive distinct fingerprints, both %q", c)
+	}
+	if !Derived(a) {
+		t.Fatalf("a gitops-derived fingerprint must be reported Derived: %q", a)
+	}
+	if !Derived(DeriveFingerprint(ReinvestigateFingerprintPrefix, "issue-7")) {
+		t.Fatal("a reinvestigate-derived fingerprint must be reported Derived")
+	}
+	if Derived("f0e1a2b3") { // a real Alertmanager fingerprint (opaque hex, no prefix)
+		t.Fatal("a real Alertmanager fingerprint must NOT be reported Derived")
+	}
+}
+
 func TestStatusDisabled(t *testing.T) {
 	l, _ := New("")
 	s := l.Status()
