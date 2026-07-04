@@ -6,9 +6,11 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"path/filepath"
 	"sort"
 	"strings"
 
+	"github.com/Smana/runlore/internal/catalog"
 	"github.com/Smana/runlore/internal/investigate"
 	"github.com/Smana/runlore/internal/providers"
 )
@@ -57,24 +59,83 @@ func (r *Runner) runOne(ctx context.Context, c Case) Result {
 	for name, output := range c.Tools {
 		tools = append(tools, staticTool{name: name, output: output})
 	}
+	// When the case ships a catalog fixture, seed instant recall + the verify pass so
+	// the replay exercises the closed recall→verify loop exactly as production does
+	// (BuildModelAndTools). Cases without a fixture replay with no recall, unchanged.
+	var recall *investigate.Recall
+	if c.CatalogDir != "" {
+		cat, err := catalog.New(filepath.Join(c.dir, c.CatalogDir))
+		if err != nil {
+			return Result{Name: c.Name, Missing: []string{"catalog fixture load error: " + err.Error()}}
+		}
+		rc := c.recallConfig()
+		recall = &investigate.Recall{
+			Catalog:              cat,
+			MinScore:             rc.MinScore,
+			MarginGap:            rc.MarginGap,
+			SoloFloor:            rc.SoloFloor,
+			RequireWorkloadMatch: rc.RequireWorkloadMatch,
+			OutcomePrior:         rc.OutcomePrior,
+			OutcomeFloor:         rc.OutcomeFloor,
+		}
+	}
 	var got providers.Investigation
+	var decision investigate.RecallDecision
 	done := false
 	li := &investigate.LoopInvestigator{
-		Model: r.Model,
-		Tools: tools,
-		Log:   r.Log,
+		Model:    r.Model,
+		Tools:    tools,
+		Log:      r.Log,
+		Recall:   recall,
+		Verify:   recall != nil, // recall is untrusted; verify guards it (the property under test)
+		OnRecall: func(d investigate.RecallDecision) { decision = d },
 		OnComplete: func(inv providers.Investigation) {
 			got, done = inv, true
 		},
 	}
-	req := investigate.Request{Source: investigate.SourceAlert, Title: c.Name, Message: c.Prompt}
+	req := investigate.Request{Source: investigate.SourceAlert, Title: c.Name, Message: c.Prompt, Workload: c.workload()}
 	if err := li.Investigate(ctx, req); err != nil {
 		return Result{Name: c.Name, Missing: []string{"investigation error: " + err.Error()}}
 	}
 	if !done {
 		return Result{Name: c.Name, Missing: []string{"no findings (loop did not submit)"}}
 	}
-	return Score(c.Name, got, c.Expected)
+	res := Score(c.Name, got, c.Expected)
+	res.RecallFired = decision.Fired
+	res.RecallShortCircuit = decision.ShortCircuited
+	if miss := checkRecall(c.ExpectRecall, decision); miss != "" {
+		res.Pass = false
+		res.Missing = append(res.Missing, miss)
+	}
+	return res
+}
+
+// checkRecall verifies the case's expect_recall assertion against the observed
+// decision. It returns "" when the expectation holds (or is unset), else a
+// human-readable mismatch string appended to Missing so the failure explains itself.
+func checkRecall(want string, d investigate.RecallDecision) string {
+	got := "rejected"
+	switch {
+	case d.Fired && d.ShortCircuited:
+		got = "short_circuit"
+	case d.Fired:
+		got = "withdrawn"
+	}
+	switch want {
+	case "":
+		return ""
+	case "short_circuit", "withdrawn", "rejected":
+		if got != want {
+			return fmt.Sprintf("expect_recall=%s but recall %s", want, got)
+		}
+	case "fired":
+		if !d.Fired {
+			return "expect_recall=fired but recall did not fire (rejected)"
+		}
+	default:
+		return fmt.Sprintf("unknown expect_recall value %q", want)
+	}
+	return ""
 }
 
 // staticTool replays a case's recorded evidence to the model, regardless of args.
