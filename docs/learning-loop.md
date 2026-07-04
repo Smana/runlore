@@ -69,11 +69,12 @@ flowchart TD
     CF --> VF["Verify pass<br/>(adversarial, can only lower confidence)"]
     RT -- "no / weak hit" --> LOOP["Full ReAct investigation<br/>what-changed · metrics · logs · k8s · cloud"]
     LOOP --> VF
-    VF --> DLV["Deliver RCA to Slack / Matrix"]
-    VF --> CAP["Capture: outcome ledger<br/>record 'open' (recall vs fresh)"]
-    DLV --> CUR{Curate?}
+    VF --> CUR{Curate?}
     CUR -- "fresh & verified & novel" --> PR["Draft KB entry → PR<br/>(deterministic dedup)"]
     CUR -- "recalled / below-bar / dup" --> SKIP["No new artifact"]
+    PR --> CAP["Capture: outcome ledger<br/>record 'open' (recall vs fresh, KB link)"]
+    SKIP --> CAP
+    CAP --> DLV["Deliver RCA to Slack / Matrix"]
     PR --> HUM["Human reviews + merges PR"]
     HUM --> SYNC["git-sync (HEAD-gated) → re-index bleve"]
     SYNC --> RT
@@ -106,7 +107,7 @@ then the answer is confirmed against live state and re-reviewed.
 
 ```mermaid
 flowchart TD
-    Q["Query = alert title + message"] --> S["BM25 search over catalog<br/>(bleve, wider candidate set k≈15)"]
+    Q["Query = alert title + message"] --> S["BM25 search over catalog<br/>(bleve, wider candidate set k=20)"]
     S --> G1{"Gate 1 — Structural<br/>does the stored resource agree<br/>with the incident's workload?"}
     G1 -- no --> FALL["↘ fall through to full investigation"]
     G1 -- yes --> G2{"Gate 2 — Margin<br/>does the top hit clearly beat<br/>the runner-up? (corpus-portable)"}
@@ -131,7 +132,7 @@ Why each gate exists:
   `pod`/`deployment`); the entry stores the resource its incident affected. They must
   agree. This is the lever that separates "many
   symptoms → one cause": a `CrashLoopBackOff` in `apps/web` should not recall an OOM
-  runbook for `apps/worker`. It's a **pre-filter** over a wide candidate set (≈15),
+  runbook for `apps/worker`. It's a **pre-filter** over a wide candidate set (k=20),
   not a check of only the top lexical hit, so the structurally-correct entry can win
   even when a wrong-workload entry scores higher on symptom words.
 - **Gate 2 — relative margin.** The top agreeing hit must beat the runner-up by a
@@ -257,19 +258,33 @@ The two load-bearing ideas:
   out. The gate runs **before** dedup, so a below-bar/unverified finding produces
   **zero** repo artifacts — not even a coalesce comment.
 - **Deterministic dedup, not prose matching.** The open-PR dedup keys on a
-  `DupFingerprint` — `sha256(resource-ref + "|" + normalized cause token-set)` —
-  stored both in the entry's YAML frontmatter and as a hidden marker in the PR body.
-  Two investigations of *one* incident produce different LLM prose but the **same**
-  fingerprint, so the second coalesces onto the first instead of opening a duplicate
-  PR. (The fingerprint falls back to the raw cause text when tokenization would
-  otherwise erase a terse/acronym cause, so two different terse causes on one resource
-  can't collide.)
+  `DupFingerprint`, stored both in the entry's YAML frontmatter and as a hidden marker
+  in the PR body. Two investigations of *one* incident produce different LLM prose but
+  the **same** fingerprint, so the second coalesces onto the first instead of opening a
+  duplicate PR. The fingerprint has two branches, deliberately anchored on the most
+  stable identity available:
+  - **Trigger-keyed (primary).** When the incident carries a `TriggerKey` — an
+    alert fingerprint, or a GitOps `resource + condition reason`, i.e. any
+    structured, source-emitted signal — the key is
+    `sha256(resource-ref + "|trigger:" + triggerKey)`. Re-investigations of one
+    ongoing incident reword the LLM's prose cause but share the same trigger, so
+    keying on the *trigger identity* (stabler than model prose) is what coalesces
+    them. The `"trigger:"` namespace ensures a trigger value can never collide with a
+    prose cause from the fallback.
+  - **Cause-keyed (fallback).** When there is no trigger key — a triggerless, manual
+    `lore investigate "<symptom>"` — it falls back to
+    `sha256(resource-ref + "|" + normalized cause token-set)`, the order-independent
+    significant-token set of the top root cause. This itself falls back to the raw
+    lowercased summary when tokenization would erase a terse/acronym cause (e.g.
+    "IO GC"), so two different terse causes on one resource can't collide.
 
 **Phase-2 grooming** (`internal/curate/`, run by the opt-in `lore curate` CronJob)
 keeps the backlog healthy on a schedule:
 
-- **Dedup** — collapse near-identical *open* PRs across history (Jaccard over titles),
-  closing the higher-numbered duplicate with a back-reference.
+- **Dedup** — collapse near-identical *open* PRs across history (fingerprint match
+  first — when both PRs carry a `DupFingerprint` marker they're duplicates iff the
+  fingerprints are equal — with Jaccard title-similarity as the fallback for
+  markerless legacy PRs), closing the higher-numbered duplicate with a back-reference.
 - **Lifecycle** — close stale, unprotected PRs (no forge activity within
   `stale_after`), never touching human-labelled ones, and only after a back-ref
   comment. `stale_after: 0` disables the sweep.
@@ -278,9 +293,12 @@ Two further passes are also wired, both **ledger-backed** (they read the outcome
 ledger, so they stay source-neutral):
 
 - **Queue** — promote a human-`solved` PR to *ready-to-merge* once its incident has
-  resolved. The PR↔incident join is an exact title match (a curated PR's title is
-  `"KB: " + the incident title`, which the ledger records too), so a resolved episode
-  with that title flips the PR onto the merge-ready queue. A human still merges.
+  resolved. The PR↔incident join is **fingerprint-first**: the PR's `DupFingerprint`
+  marker is matched against the resolved episodes' dup-fingerprints (the same value
+  the ledger stamps on each open), so a resolved episode flips the PR onto the
+  merge-ready queue regardless of the LLM's re-worded title. Exact title match
+  (`"KB: " + the incident title`) is only a legacy fallback for markerless,
+  hand-filed PRs. A human still merges.
 - **Recurrence** — open one *knowledge-gap* issue when an unresolved pattern (the
   affected resource) recurs past `recurrence_threshold`. Idempotent by an existing-issue
   check (the forge's open gap issues are the "already-opened" record), so re-running
@@ -402,7 +420,7 @@ eval harness and treats its outputs as the source of truth:
 | **Verify can only *lower* confidence** | A safety review must never manufacture confidence; worst case it's a no-op, never a promoter. |
 | **Outcome-driven decay (never pure mtime)** | Knowledge ages out because it stops working, giving a concrete mechanism to overturn a confidently-wrong belief. |
 | **Append-only JSONL ledger, replayed** | Robust, restart-safe attribution; preserves recurrence and tolerates out-of-order resolves. |
-| **Deterministic dedup fingerprint** | Prose titles vary per run; a `resource+cause` hash makes "same incident" detectable and stops duplicate-PR floods. |
+| **Deterministic dedup fingerprint** | Prose titles vary per run; a hash keyed on the incident's trigger identity (`resource+trigger`, primary) — or `resource+cause` for triggerless manual runs — makes "same incident" detectable and stops duplicate-PR floods. |
 | **`meetsBar` before dedup; Verified + provenance required** | The shared, communal catalog only accepts adversarially-reviewed, actionable knowledge — and a below-bar finding produces *zero* repo artifacts. |
 | **Provenance is OR (causing change ∨ fixing action)** | Avoids wrongly excluding non-GitOps incidents while still rejecting bare symptom restatements. |
 | **Recall disabled under `auto`** | A poisoned entry must never short-circuit into an unattended remediation. |
@@ -422,10 +440,11 @@ Honesty is part of the design:
   stays read-only / propose-and-approve; `auto` executes only suspend/resume/reconcile,
   and the agent *suggests* (never auto-applies) a rollback. The GitOps-correct form, if
   ever revisited, is a Git-revert PR. (See `design.md`, "Act".)
-- The **Queue/Recurrence precision tradeoff**: the resolution join is by exact title,
-  coarser than the incident fingerprint — a human-gated promotion can fire slightly
-  early on coalesced or cross-namespace incidents. The fingerprint-precise variant is
-  a possible future refinement.
+- The **Queue/Recurrence precision tradeoff**: the resolution join is now
+  fingerprint-first (the PR's `DupFingerprint` against resolved episodes), so the
+  coarse exact-title join — which can fire a human-gated promotion slightly early on
+  coalesced or cross-namespace incidents — only applies to legacy/hand-filed PRs that
+  carry no fingerprint marker.
 - **Nightly eval** only produces signal once a model API-key secret is configured.
 
 The loop is closed and measured; these are the next increments, sequenced so each is
