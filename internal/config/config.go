@@ -253,6 +253,11 @@ type Catalog struct {
 // Outcome configures the learning-loop outcome ledger.
 type Outcome struct {
 	LedgerPath string `yaml:"ledger_path"` // append-only JSONL path (e.g. the git-sync mirror PV); empty disables
+	// MaxEvents bounds the JSONL before it is compacted on load (startup / leadership
+	// Reload): older paired events are folded into a checkpoint record so the file stops
+	// growing forever. A pointer for a three-state knob: nil (key absent) ⇒ a generous
+	// default (outcome.DefaultMaxEvents); an explicit 0 ⇒ compaction disabled.
+	MaxEvents *int `yaml:"max_events"`
 }
 
 // InstantRecall short-circuits the investigation loop when the catalog has a

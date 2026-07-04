@@ -7,13 +7,51 @@ package outcome
 
 import (
 	"bufio"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"io/fs"
+	"log/slog"
 	"os"
+	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 )
+
+// Fingerprint prefixes for incidents RunLore assigns a synthetic id to because the
+// triggering source carries no external alert fingerprint (an Alertmanager/PagerDuty
+// incident id). They are chosen so a derived id can never collide with a real
+// fingerprint, and they double as the "no ground-truth resolve channel" marker that
+// keeps such recall opens out of recall-decay (see Event.Resolvable / applyOpenLocked).
+const (
+	// GitOpsFingerprintPrefix marks a fingerprint derived from a GitOps failure's
+	// resource-ref + condition reason.
+	GitOpsFingerprintPrefix = "gitops:"
+	// ReinvestigateFingerprintPrefix marks a fingerprint derived for a reinvestigate poll.
+	ReinvestigateFingerprintPrefix = "reinvestigate:"
+)
+
+// DeriveFingerprint returns a stable, deterministic fingerprint for an incident that
+// carries no external alert id, formed as prefix + a short hex sha256 of key (e.g. the
+// trigger key, or resource-ref+reason). Determinism is the point: the same recurring
+// incident derives the SAME fingerprint every time, so its opens roll up into
+// Occurrences/Episodes as recurrences — while the prefix keeps it from ever colliding
+// with a real Alertmanager/PagerDuty fingerprint.
+func DeriveFingerprint(prefix, key string) string {
+	sum := sha256.Sum256([]byte(key))
+	return prefix + hex.EncodeToString(sum[:8])
+}
+
+// Derived reports whether fp was assigned by DeriveFingerprint (a synthetic id for a
+// source with no external fingerprint). Such incidents have no resolve channel — no
+// resolved-alert webhook can ever match them — so their recall opens are recorded for
+// recurrence but never counted toward recall decay (see Event.Resolvable).
+func Derived(fp string) bool {
+	return strings.HasPrefix(fp, GitOpsFingerprintPrefix) ||
+		strings.HasPrefix(fp, ReinvestigateFingerprintPrefix)
+}
 
 // Event is one ledger line: an investigation opened, or an incident resolved.
 type Event struct {
@@ -32,7 +70,28 @@ type Event struct {
 	TriggerKey string `json:"trigger_key,omitempty"` // groups recurrences of the same alert; keys the byTrigger index
 	CuratedURL string `json:"curated_url,omitempty"` // KB link surfaced as "previous: <link>" on recurrence
 	Verdict    string `json:"verdict,omitempty"`     // curator's machine verdict on the investigation
+
+	// Resolvable is set on an open when we know whether a ground-truth resolve signal
+	// can ever arrive for it: true for sources with a resolve channel (Alertmanager,
+	// PagerDuty), false for sources that never emit one (GitOps, reinvestigate, or
+	// Alertmanager with send_resolved off). A pointer for a three-state distinction:
+	// nil ⇒ the field is absent, i.e. a LEGACY open written before this field existed —
+	// those came from Alertmanager/PagerDuty and are treated as resolvable. Only a
+	// non-resolvable recall open is excluded from recall decay (see applyOpenLocked).
+	Resolvable *bool `json:"resolvable,omitempty"`
+
+	// Checkpoint is set only on a compaction record (Event=="checkpoint"); nil on every
+	// open/resolve. It carries the folded aggregate state of the events a compaction
+	// dropped. Kept omitempty so normal lines are unaffected, and a distinct event kind
+	// so OLD binaries — whose switch has no "checkpoint" case — ignore it gracefully
+	// (they lose the pre-horizon aggregates, but do not choke).
+	Checkpoint *checkpointData `json:"checkpoint,omitempty"`
 }
+
+// resolvable reports whether a ground-truth resolve signal can ever arrive for this
+// open. A legacy open (field absent ⇒ nil) came from Alertmanager/PagerDuty, which do
+// emit resolves, so it defaults to resolvable.
+func (e Event) resolvable() bool { return e.Resolvable == nil || *e.Resolvable }
 
 // Episode is a matched open→resolve pair (or, from Episodes(), an unresolved open
 // when Resolved is false).
@@ -82,6 +141,46 @@ type Ledger struct {
 	// (see maxPendingResolvesPerFingerprint) — spurious duplicate/replayed resolve
 	// webhooks. Kept so the (otherwise silent) defensive drop is observable.
 	droppedResolves int
+
+	// maxEvents bounds the JSONL before loadLocked compacts it (0 disables). corruptLines
+	// records how many lines the last load could not parse (so the skip is observable, not
+	// silent). log carries a logger for those warnings; never nil after New.
+	maxEvents    int
+	corruptLines int
+	log          *slog.Logger
+}
+
+// DefaultMaxEvents is the generous default compaction bound used by New (and by the
+// serve wiring when outcome.max_events is unset). Chosen high enough that a healthy
+// ledger never compacts in normal operation; compaction is a growth backstop, not a
+// routine trim.
+const DefaultMaxEvents = 50000
+
+// checkpointData is the per-load snapshot a compaction writes so a later replay can
+// reconstruct the exact in-memory state the dropped (absorbed) events produced, without
+// re-reading them. It carries the complete mutable fold state: the per-entry aggregate,
+// the per-TriggerKey occurrence index, the open-index + pairing stacks for still-unresolved
+// opens, buffered early resolves, and the dropped-resolve counter. loadLocked seeds from
+// it, then folds the retained tail on top. Unexported index types (triggerAgg, pendingOpen)
+// have exported JSON mirrors here so they serialize.
+type checkpointData struct {
+	Agg             map[string]Aggregate         `json:"agg,omitempty"`
+	ByTrigger       map[string]triggerAggJSON    `json:"by_trigger,omitempty"`
+	OpenIndex       map[string]Event             `json:"open_index,omitempty"`
+	PendingOpens    map[string][]pendingOpenJSON `json:"pending_opens,omitempty"`
+	PendingResolves map[string][]time.Time       `json:"pending_resolves,omitempty"`
+	DroppedResolves int                          `json:"dropped_resolves,omitempty"`
+}
+
+type triggerAggJSON struct {
+	Count      int       `json:"count"`
+	Last       time.Time `json:"last"`
+	CuratedURL string    `json:"curated_url,omitempty"`
+}
+
+type pendingOpenJSON struct {
+	Entry   string `json:"entry,omitempty"`
+	Counted bool   `json:"counted,omitempty"`
 }
 
 // triggerAgg is the per-TriggerKey occurrence roll-up backing Occurrences.
@@ -101,10 +200,17 @@ type triggerAgg struct {
 // pair with a real open, and dropping it leaves the brief-window pairing intact.
 const maxPendingResolvesPerFingerprint = 64
 
-// New opens (replaying) the ledger at path. An empty path returns a disabled,
-// no-op ledger (the feature is off).
+// New opens (replaying) the ledger at path with the default compaction bound
+// (DefaultMaxEvents). An empty path returns a disabled, no-op ledger (the feature is off).
 func New(path string) (*Ledger, error) {
-	l := &Ledger{path: path}
+	return NewWithMaxEvents(path, DefaultMaxEvents)
+}
+
+// NewWithMaxEvents opens (replaying) the ledger at path, compacting the JSONL on load
+// when it exceeds maxEvents (0 disables compaction). An empty path returns a disabled,
+// no-op ledger.
+func NewWithMaxEvents(path string, maxEvents int) (*Ledger, error) {
+	l := &Ledger{path: path, maxEvents: maxEvents, log: slog.Default()}
 	if err := l.loadLocked(); err != nil {
 		return nil, err
 	}
@@ -120,26 +226,200 @@ func New(path string) (*Ledger, error) {
 // The read is performed BEFORE any reset: if readEvents returns an error the prior
 // cache is left untouched — callers see a stale-but-valid cache rather than an empty one.
 func (l *Ledger) loadLocked() error {
-	events, err := l.readEvents()
+	events, corrupt, err := l.readEvents()
 	if err != nil {
 		return err // prior cache untouched
 	}
+	l.resetStateLocked()
+	l.corruptLines = corrupt
+	if corrupt > 0 {
+		// A corrupt line is a real signal (truncated write, disk corruption, a stray
+		// edit) — surface it rather than dropping it silently.
+		l.log.Warn("outcome ledger: skipped corrupt JSONL lines", "count", corrupt, "path", l.path)
+	}
+	for _, e := range events {
+		l.foldLocked(e)
+	}
+	// Compaction backstop: an append-only ledger replayed in full on every startup /
+	// leadership Reload / curate Episodes() grows without bound. When it exceeds the
+	// configured cap, fold the oldest events into a single checkpoint record and keep a
+	// recent tail — the in-memory state above is already the full, correct state, so a
+	// failed rewrite is non-fatal (log and keep serving the uncompacted file).
+	if l.maxEvents > 0 && len(events) > l.maxEvents {
+		if cerr := l.compactLocked(events); cerr != nil {
+			l.log.Warn("outcome ledger: compaction failed; continuing with uncompacted file", "err", cerr, "path", l.path)
+		}
+	}
+	return nil
+}
+
+// resetStateLocked clears all derived in-memory state to empty (non-nil) maps.
+func (l *Ledger) resetStateLocked() {
 	l.open = map[string]Event{}
 	l.agg = map[string]Aggregate{}
 	l.pendingOpens = map[string][]pendingOpen{}
 	l.pendingResolves = map[string][]time.Time{}
 	l.byTrigger = map[string]triggerAgg{}
 	l.droppedResolves = 0
-	for _, e := range events {
-		switch e.Event {
-		case "open":
-			l.open[e.Fingerprint] = e
-			l.applyOpenLocked(e)
-			l.applyTriggerLocked(e)
-		case "resolve":
-			delete(l.open, e.Fingerprint)
-			l.applyResolveLocked(e.Fingerprint, e.At)
+}
+
+// foldLocked folds one replayed event into the derived state. Open/resolve maintain the
+// aggregate, open-index, pairing stacks, and occurrence index; a checkpoint seeds the
+// state a prior compaction folded away. Any other (unknown/future) kind is ignored — the
+// property old binaries rely on for the feedback kind, and now for "checkpoint" too.
+func (l *Ledger) foldLocked(e Event) {
+	switch e.Event {
+	case "open":
+		l.open[e.Fingerprint] = e
+		l.applyOpenLocked(e)
+		l.applyTriggerLocked(e)
+	case "resolve":
+		delete(l.open, e.Fingerprint)
+		l.applyResolveLocked(e.Fingerprint, e.At)
+	case "checkpoint":
+		l.seedCheckpointLocked(e.Checkpoint)
+	}
+}
+
+// seedCheckpointLocked restores the derived state a compaction saved. A checkpoint is
+// always the first line of a compacted file, so this seeds onto the freshly-reset (empty)
+// maps and the retained tail then folds on top. It sets state DIRECTLY (no re-crediting),
+// because the checkpoint already accounts for every event it absorbed.
+func (l *Ledger) seedCheckpointLocked(cd *checkpointData) {
+	if cd == nil {
+		return
+	}
+	// Copy every map/slice out of the decoded event: the ledger's live state must never
+	// ALIAS the event held in the replay slice, or a later fold (or the compaction scratch
+	// re-seeding from the same event) would mutate both through the shared reference.
+	for k, v := range cd.Agg {
+		l.agg[k] = v
+	}
+	for fp, ats := range cd.PendingResolves {
+		l.pendingResolves[fp] = append([]time.Time(nil), ats...)
+	}
+	for fp, ev := range cd.OpenIndex {
+		l.open[fp] = ev
+	}
+	for k, v := range cd.ByTrigger {
+		l.byTrigger[k] = triggerAgg{count: v.Count, last: v.Last, curatedURL: v.CuratedURL}
+	}
+	for fp, opens := range cd.PendingOpens {
+		stack := make([]pendingOpen, 0, len(opens))
+		for _, o := range opens {
+			stack = append(stack, pendingOpen{entry: o.Entry, counted: o.Counted})
 		}
+		l.pendingOpens[fp] = stack
+	}
+	l.droppedResolves += cd.DroppedResolves
+}
+
+// compactLocked rewrites the ledger file as [checkpoint][recent tail]: it folds the
+// oldest events (everything but the most recent maxEvents-1) into a checkpoint that
+// captures their exact aggregate contribution, and retains the tail as raw lines. The
+// caller's live state is untouched (already the full, correct state); this only shrinks
+// the file. Episodes() replay is preserved for the retained tail — episodes older than
+// this horizon are folded into the checkpoint (still counted in the aggregate) but are no
+// longer individually replayable, which the Phase-2 Queue/Recurrence passes tolerate
+// (they only need recent history).
+func (l *Ledger) compactLocked(events []Event) error {
+	keep := l.maxEvents - 1 // reserve one slot for the checkpoint line
+	if keep < 0 {
+		keep = 0
+	}
+	cut := len(events) - keep
+	if cut <= 0 {
+		return nil // nothing old enough to absorb
+	}
+	// Fold the absorbed prefix in a throwaway ledger to snapshot the state it produces,
+	// without disturbing the caller's live (full) state.
+	scratch := &Ledger{log: l.log}
+	scratch.resetStateLocked()
+	for _, e := range events[:cut] {
+		scratch.foldLocked(e)
+	}
+	return l.rewriteFileLocked(scratch.snapshotCheckpointLocked(), events[cut:])
+}
+
+// snapshotCheckpointLocked captures the receiver's derived state into a checkpointData.
+// Safe to reference the live maps directly: the receiver is a throwaway scratch ledger.
+func (l *Ledger) snapshotCheckpointLocked() *checkpointData {
+	cd := &checkpointData{
+		Agg:             l.agg,
+		OpenIndex:       l.open,
+		PendingResolves: l.pendingResolves,
+		DroppedResolves: l.droppedResolves,
+	}
+	if len(l.byTrigger) > 0 {
+		cd.ByTrigger = make(map[string]triggerAggJSON, len(l.byTrigger))
+		for k, v := range l.byTrigger {
+			cd.ByTrigger[k] = triggerAggJSON{Count: v.count, Last: v.last, CuratedURL: v.curatedURL}
+		}
+	}
+	if len(l.pendingOpens) > 0 {
+		cd.PendingOpens = make(map[string][]pendingOpenJSON, len(l.pendingOpens))
+		for fp, opens := range l.pendingOpens {
+			js := make([]pendingOpenJSON, 0, len(opens))
+			for _, o := range opens {
+				js = append(js, pendingOpenJSON{Entry: o.entry, Counted: o.counted})
+			}
+			cd.PendingOpens[fp] = js
+		}
+	}
+	return cd
+}
+
+// rewriteFileLocked atomically replaces the ledger file with the checkpoint followed by
+// the retained tail events, via a temp file + fsync + rename (so an interrupted compaction
+// can never leave a half-written ledger).
+func (l *Ledger) rewriteFileLocked(cd *checkpointData, tail []Event) error {
+	dir := filepath.Dir(l.path)
+	tmp, err := os.CreateTemp(dir, ".outcomes-*.tmp")
+	if err != nil {
+		return err
+	}
+	tmpName := tmp.Name()
+	// Best-effort cleanup if we bail before the rename succeeds.
+	defer func() { _ = os.Remove(tmpName) }()
+	w := bufio.NewWriter(tmp)
+	writeLine := func(e Event) error {
+		b, mErr := json.Marshal(e)
+		if mErr != nil {
+			return mErr
+		}
+		if _, wErr := w.Write(append(b, '\n')); wErr != nil {
+			return wErr
+		}
+		return nil
+	}
+	if err := writeLine(Event{Event: "checkpoint", At: time.Now(), Checkpoint: cd}); err != nil {
+		_ = tmp.Close()
+		return err
+	}
+	for _, e := range tail {
+		if err := writeLine(e); err != nil {
+			_ = tmp.Close()
+			return err
+		}
+	}
+	if err := w.Flush(); err != nil {
+		_ = tmp.Close()
+		return err
+	}
+	if err := tmp.Sync(); err != nil { // durability before the rename
+		_ = tmp.Close()
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+	if err := os.Rename(tmpName, l.path); err != nil {
+		return err
+	}
+	// fsync the directory so the rename itself survives a crash.
+	if d, derr := os.Open(dir); derr == nil { //nolint:gosec // G304: dir is the parent of the operator-configured ledger path
+		_ = d.Sync()
+		_ = d.Close()
 	}
 	return nil
 }
@@ -167,7 +447,14 @@ func (l *Ledger) Reload() error {
 // already buffered for this fingerprint, the open is paired immediately and also
 // counts as resolved. Must be called with mu held (or during single-threaded New).
 func (l *Ledger) applyOpenLocked(e Event) {
-	counted := e.Kind == "recall" && e.Entry != ""
+	// A recall open counts toward decay ONLY when it is resolvable — i.e. a resolve
+	// signal for it can actually arrive. A non-resolvable recall (GitOps, reinvestigate,
+	// or Alertmanager with send_resolved off) neither builds nor erodes trust: counting
+	// it toward Recalls with no possible Resolved would decay a CORRECT entry's
+	// resolve-rate forever, on evidence the source can never provide. So decay is only
+	// learned where a ground-truth resolve signal exists. Episodes()/Occurrences() still
+	// include EVERY open regardless of resolvability, so recurrence counting is unaffected.
+	counted := e.Kind == "recall" && e.Entry != "" && e.resolvable()
 	if counted {
 		a := l.agg[e.Entry]
 		a.Recalls++
@@ -225,31 +512,35 @@ func (l *Ledger) creditResolveLocked(entry string, at time.Time) {
 	l.agg[entry] = a
 }
 
-// readEvents replays the ledger file in order, skipping corrupt lines. It returns
-// a nil slice when the ledger is disabled (path=="") or the file is absent.
-func (l *Ledger) readEvents() ([]Event, error) {
+// readEvents replays the ledger file in order, skipping (and counting) corrupt lines.
+// The second return is the number of unparseable lines skipped — surfaced by the caller
+// so the skip is observable, never silent. It returns a nil slice when the ledger is
+// disabled (path=="") or the file is absent.
+func (l *Ledger) readEvents() ([]Event, int, error) {
 	if l.path == "" {
-		return nil, nil
+		return nil, 0, nil
 	}
 	f, err := os.Open(l.path)
 	if errors.Is(err, fs.ErrNotExist) {
-		return nil, nil
+		return nil, 0, nil
 	}
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 	defer func() { _ = f.Close() }()
 	sc := bufio.NewScanner(f)
 	sc.Buffer(make([]byte, 0, 64*1024), 1024*1024)
 	var events []Event
+	var corrupt int
 	for sc.Scan() {
 		var e Event
 		if json.Unmarshal(sc.Bytes(), &e) != nil {
-			continue // skip a corrupt line rather than fail
+			corrupt++ // skip a corrupt line rather than fail, but count it
+			continue
 		}
 		events = append(events, e)
 	}
-	return events, sc.Err()
+	return events, corrupt, sc.Err()
 }
 
 func (l *Ledger) enabled() bool { return l != nil && l.path != "" }
@@ -285,7 +576,7 @@ func (l *Ledger) Status() Status {
 	if _, err := os.Stat(l.path); err == nil {
 		s.Present = true
 	}
-	if events, err := l.readEvents(); err == nil {
+	if events, _, err := l.readEvents(); err == nil {
 		s.Events = len(events)
 	}
 	return s
@@ -368,7 +659,7 @@ func (l *Ledger) Episodes() ([]Episode, error) {
 	}
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	events, err := l.readEvents()
+	events, _, err := l.readEvents()
 	if err != nil {
 		return nil, err
 	}

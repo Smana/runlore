@@ -15,6 +15,7 @@ import (
 
 	"k8s.io/client-go/util/workqueue"
 
+	"github.com/Smana/runlore/internal/outcome"
 	"github.com/Smana/runlore/internal/providers"
 	"github.com/Smana/runlore/internal/ratelimit"
 	"github.com/Smana/runlore/internal/telemetry"
@@ -68,6 +69,20 @@ func FromFailureEvent(fe providers.FailureEvent) Request {
 	if ref := fe.Workload.Ref(); ref != "" {
 		r.TriggerKey = ref + ":" + fe.Reason
 	}
+	// A GitOps failure carries no external alert fingerprint. Without one the outcome
+	// ledger's open-emission guard skips it entirely — no open event, no Occurrences
+	// recurrence facts, and the Phase-2 Recurrence pass (which reads Episodes) never
+	// sees pure-GitOps patterns. Derive a stable, deterministic fingerprint from the
+	// incident identity (the trigger key, else the title) so these incidents are
+	// captured like any other; the gitops: prefix keeps it from ever colliding with an
+	// Alertmanager fingerprint (and marks the open non-resolvable — no resolve webhook
+	// can ever match it).
+	key := r.TriggerKey
+	if key == "" {
+		key = r.Title
+	}
+	r.Fingerprint = outcome.DeriveFingerprint(outcome.GitOpsFingerprintPrefix, key)
+	r.Fingerprints = []string{r.Fingerprint}
 	return r
 }
 
