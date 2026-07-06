@@ -65,6 +65,54 @@ func TestCurateNovelHighQualityOpensPR(t *testing.T) {
 	}
 }
 
+func TestCurateSkippedVerdictDraftsNothing(t *testing.T) {
+	// A no_action finding is otherwise novel + high-quality, but the operator has
+	// configured no_action to stay out of the KB review queue: no PR, no coalesce
+	// comment, no repo artifact at all.
+	inv := goodFinding()
+	inv.Verdict = providers.VerdictNoAction
+	c := newCurator(&fakeForge{}, fakeScored{})
+	c.SkipVerdicts = map[providers.Verdict]bool{providers.VerdictNoAction: true}
+	ref, err := c.Curate(context.Background(), inv)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ref.URL != "" || c.Forge.(*fakeForge).openedPR != nil {
+		t.Fatalf("a skipped verdict must draft nothing, got ref=%q pr=%+v", ref.URL, c.Forge.(*fakeForge).openedPR)
+	}
+}
+
+func TestCurateNonSkippedVerdictUnaffected(t *testing.T) {
+	// The same skip config, but an action_required finding is NOT in the skip set,
+	// so it drafts a PR as usual.
+	inv := goodFinding()
+	inv.Verdict = providers.VerdictActionRequired
+	c := newCurator(&fakeForge{}, fakeScored{})
+	c.SkipVerdicts = map[providers.Verdict]bool{providers.VerdictNoAction: true}
+	ref, err := c.Curate(context.Background(), inv)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ref.URL == "" || c.Forge.(*fakeForge).openedPR == nil {
+		t.Fatalf("a non-skipped verdict must draft a PR, got ref=%q", ref.URL)
+	}
+}
+
+func TestCurateNoSkipConfigDraftsEveryVerdict(t *testing.T) {
+	// With no SkipVerdicts configured (nil map), even a no_action verdict drafts a
+	// PR — the backward-compatible default preserves pre-gate behaviour.
+	inv := goodFinding()
+	inv.Verdict = providers.VerdictNoAction
+	c := newCurator(&fakeForge{}, fakeScored{}) // SkipVerdicts left nil
+	ref, err := c.Curate(context.Background(), inv)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ref.URL == "" || c.Forge.(*fakeForge).openedPR == nil {
+		t.Fatalf("empty skip config must draft every verdict, got ref=%q", ref.URL)
+	}
+}
+
 func TestCurateDuplicateCoalescesNoPR(t *testing.T) {
 	// An open PR already covers this incident (matching fingerprint marker in body),
 	// and the catalog does NOT (fakeScored{} returns no hit) — so we fall through to

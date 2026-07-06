@@ -479,3 +479,47 @@ func TestValidateApproveRequiresAuditLog(t *testing.T) {
 		t.Fatalf("approve with token + audit_log_path must validate clean, got: %v", err)
 	}
 }
+
+// TestForgeSkipVerdictsParse verifies forge.skip_verdicts parses into the string
+// list and that an absent key reads as nil (empty ⇒ draft every verdict, the
+// backward-compatible default).
+func TestForgeSkipVerdictsParse(t *testing.T) {
+	var c Config
+	if err := yaml.Unmarshal([]byte("forge:\n  kb_repo: o/r\n  skip_verdicts: [no_action, inconclusive]\n"), &c); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if got := c.Forge.SkipVerdicts; len(got) != 2 || got[0] != "no_action" || got[1] != "inconclusive" {
+		t.Fatalf("forge.skip_verdicts: want [no_action inconclusive], got %v", got)
+	}
+	// Absent ⇒ nil ⇒ every verdict is eligible to draft a PR (pre-gate behaviour).
+	var z Config
+	if err := yaml.Unmarshal([]byte("forge:\n  kb_repo: o/r\n"), &z); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if z.Forge.SkipVerdicts != nil {
+		t.Fatalf("absent skip_verdicts must be nil, got %v", z.Forge.SkipVerdicts)
+	}
+}
+
+// TestValidateSkipVerdicts guards the verdict gate's config surface: known verdict
+// values validate clean, an unknown value is rejected at startup (rather than
+// silently ignoring a typo that would leave benign PRs flowing), and an empty list
+// validates clean.
+func TestValidateSkipVerdicts(t *testing.T) {
+	ok := &Config{}
+	ok.Forge.SkipVerdicts = []string{"no_action", "action_suggested", "action_required", "inconclusive"}
+	if err := ok.Validate(); err != nil {
+		t.Fatalf("all known verdicts must validate clean, got: %v", err)
+	}
+
+	empty := &Config{}
+	if err := empty.Validate(); err != nil {
+		t.Fatalf("empty skip_verdicts must validate clean, got: %v", err)
+	}
+
+	bad := &Config{}
+	bad.Forge.SkipVerdicts = []string{"no_action", "definitely_not_a_verdict"}
+	if err := bad.Validate(); err == nil {
+		t.Fatal("an unknown verdict in forge.skip_verdicts must be rejected by Validate")
+	}
+}
