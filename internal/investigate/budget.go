@@ -143,3 +143,10 @@ const defaultRecallTokensSavedEstimate = 50_000
 // budgetNudge is the single-use message injected once when the token estimate
 // exceeds MaxTokensPerInvestigation, prompting the model to wrap up now.
 const budgetNudge = "⚠️ token budget reached — call submit_findings now with your best current hypotheses and the evidence gathered so far."
+
+// finalStepNudge is injected on the loop's LAST step (only one request remaining)
+// when the model has not already been forced to conclude by the token-budget path.
+// Paired with ToolChoice=submit_findings, it makes a non-converging model record a
+// degraded verdict on its final turn instead of exhausting the step budget in
+// silence (mitigates issue #234's blast radius).
+const finalStepNudge = "This is your FINAL step — you have no tool calls remaining. Record your conclusion NOW by calling submit_findings: give your best current hypothesis with an honest (low, if unverified) confidence, or explicitly mark the incident unresolved. Do not answer in prose."
