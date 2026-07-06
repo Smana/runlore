@@ -165,8 +165,16 @@ curated KB entry, only the notification.
 ### `forge` — the Git host for curation
 `kb_repo` (`owner/name`), `base_branch` (default `main`), `github_api_url` (default
 `https://api.github.com`), `dup_score` (default **5.0**), `min_confidence` (default **0.75**, the
-quality bar below which a finding is chat-only). `github_app` — `app_id`, `installation_id`, and
-`private_key_ref` **or** `private_key_env`.
+quality bar below which a finding is chat-only), `skip_verdicts` (default **empty** — draft every
+verdict). `github_app` — `app_id`, `installation_id`, and `private_key_ref` **or** `private_key_env`.
+
+`skip_verdicts` is a list of investigation verdicts that must **not** draft a KB PR — the finding
+still reaches chat, but no repo artifact is created. Values are validated at startup against the
+verdict enum (`no_action` / `action_suggested` / `action_required` / `inconclusive`); an unknown
+value fails fast. Empty (the default) preserves the original behaviour: every verdict is eligible.
+Recommended production value is `skip_verdicts: ["no_action"]`, which keeps benign / self-healed /
+synthetic findings out of the review queue while still notifying chat (see
+[reviewing-knowledge.md](reviewing-knowledge.md#expected-triage-volume)).
 
 ### `notify` — where findings go
 `slack` (`webhook_url_env` or `bot_token_env`, `channel`, `signing_secret_env`, `approver_ids`),

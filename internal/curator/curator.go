@@ -27,7 +27,11 @@ type Curator struct {
 	Metrics       *telemetry.Metrics     // optional; nil-safe — dedup score unrecorded when unset
 	DupScore      float64                // catalog BM25 dup threshold
 	MinConfidence float64                // quality gate: minimum overall confidence
-	Log           *slog.Logger
+	// SkipVerdicts holds verdicts that must NOT draft a KB PR (e.g. no_action).
+	// A nil/empty map draws no distinction — every verdict is eligible, preserving
+	// pre-gate behaviour.
+	SkipVerdicts map[providers.Verdict]bool
+	Log          *slog.Logger
 }
 
 // Curate applies the three-step gate. It returns the created PR ref, or an empty
@@ -37,6 +41,16 @@ func (c *Curator) Curate(ctx context.Context, inv providers.Investigation) (prov
 	// (chat delivery still happens upstream). Avoids drafting near-duplicate PRs.
 	if inv.Recalled {
 		c.Log.Info("skipping curation of a recalled finding (cache hit, not novel)", "title", inv.Title)
+		return providers.Ref{}, nil
+	}
+
+	// Verdict gate: an operator can configure benign verdicts (e.g. no_action) to
+	// stay out of the KB review queue — chat delivery already informed the human, so
+	// no repo artifact (PR or coalesce comment) is created. Sits alongside the quality
+	// and dedup gates; nil/empty map ⇒ every verdict is eligible (backward-compatible).
+	if c.SkipVerdicts[inv.Verdict] {
+		c.Log.Info("skipping curation: verdict configured to skip a KB PR (chat-only)",
+			"verdict", inv.Verdict, "title", inv.Title)
 		return providers.Ref{}, nil
 	}
 
