@@ -16,6 +16,8 @@ import (
 	"time"
 
 	"gopkg.in/yaml.v3"
+
+	"github.com/Smana/runlore/internal/providers"
 )
 
 // Config is the top-level RunLore configuration (loaded from YAML).
@@ -856,6 +858,14 @@ func (c *Config) Validate() error {
 			return err
 		}
 	}
+	// Curation verdict gate: reject an unknown verdict in forge.skip_verdicts at
+	// startup rather than silently ignoring a typo (which would leave benign findings
+	// drafting PRs into the review queue). Empty is valid — every verdict is eligible.
+	for i, v := range c.Forge.SkipVerdicts {
+		if !providers.ValidVerdict(providers.Verdict(v)) {
+			return fmt.Errorf("forge.skip_verdicts[%d]: unknown verdict %q (want no_action|action_suggested|action_required|inconclusive)", i, v)
+		}
+	}
 	switch c.Actions.Mode {
 	case "", ActionOff, ActionSuggest:
 		return nil // read-only-ish: nothing to execute
@@ -908,6 +918,12 @@ type Forge struct {
 	GitHubAPIURL  string    `yaml:"github_api_url"` // override for GHES/tests (default https://api.github.com)
 	DupScore      float64   `yaml:"dup_score"`      // file-time catalog BM25 dedup threshold (default 5.0)
 	MinConfidence float64   `yaml:"min_confidence"` // file-time quality gate: min overall confidence (default 0.75)
+	// SkipVerdicts lists investigation verdicts that must NOT draft a KB PR — the
+	// finding is still delivered to chat, but no repo artifact is created. Values are
+	// validated against the verdict enum (no_action|action_suggested|action_required|
+	// inconclusive). Empty (default) draws no distinction: every verdict is eligible,
+	// preserving pre-gate behaviour. Recommended production value: ["no_action"].
+	SkipVerdicts []string `yaml:"skip_verdicts"`
 }
 
 // GitHubApp holds GitHub App credentials. The private key mints 1-hour

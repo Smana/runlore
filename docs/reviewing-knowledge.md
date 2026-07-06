@@ -27,6 +27,36 @@ Two things happen when an investigation produces a confident, verified finding:
 
 ---
 
+## Expected triage volume
+
+Be honest with yourself about the queue this creates. In a 6-day pilot RunLore
+drafted **29 PRs (~3.5/day)**, and **~72% were closed without merging** — not
+because they were wrong, but because they weren't worth permanent knowledge:
+benign infrastructure churn, synthetic test canaries, and near-duplicates of
+entries the catalog already held. That's a real reviewer-fatigue risk: a queue
+that's mostly noise trains people to stop looking.
+
+Three `forge` knobs cut that volume *before* a PR is ever opened, so the queue you
+see is closer to the ~28% worth keeping:
+
+- **`skip_verdicts: ["no_action"]`** — the biggest lever. A `no_action` verdict is
+  RunLore's own "benign / self-healed / synthetic; nothing to do" classification.
+  Skipping it keeps those findings out of the review queue entirely while still
+  notifying chat, so nobody's blind to them — they just don't become PRs.
+- **`min_confidence`** (default `0.75`) — the quality bar. Findings the model
+  isn't confident about stay chat-only, never a PR.
+- **`dup_score`** (default `5.0`) — the dedup threshold. A finding that closely
+  matches an existing catalog entry is coalesced (a comment on the open PR) or
+  dropped, instead of drafting a near-duplicate.
+
+None of these fabricate or hide knowledge — every skipped finding is still
+delivered to chat. They only decide what's worth a *permanent, reviewed* entry.
+Recommended starting point for a production install: `skip_verdicts: ["no_action"]`,
+then tune `min_confidence` up if benign churn still leaks through. See
+[configuration.md](configuration.md#forge--the-git-host-for-curation).
+
+---
+
 ## 2. Anatomy of a proposed entry
 
 Every PR adds one Markdown file (an [OKF](https://github.com/GoogleCloudPlatform/knowledge-catalog)

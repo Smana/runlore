@@ -301,6 +301,7 @@ config:
   forge:
     kb_repo: your-org/runlore-kb            # the repo from step 1
     base_branch: main
+    skip_verdicts: [no_action]              # keep benign/self-healed/synthetic findings out of the PR queue (chat still notified)
     # github_api_url: https://ghe.example.com/api/v3   # only for GitHub Enterprise Server
     github_app:
       app_id: 123456                         # from step 2
