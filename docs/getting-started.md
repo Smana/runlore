@@ -13,6 +13,11 @@ forge (issues/PRs on a repo you designate).
 
 > For local development / testing on k3d, see [CONTRIBUTING.md](../CONTRIBUTING.md) instead.
 
+> **Just want a quick look first?** `hack/demo.sh` runs `lore serve` locally with a keyless config and
+> fires mocked Alertmanager alerts through the trigger policy — no cluster, no LLM, no credentials
+> (just Go + `curl`). It shows which alerts become incidents; the full investigate → chat → curate loop
+> below needs the cluster, LLM, and KB repo. See the [README quickstart](../README.md#-try-it-in-one-minute--no-cluster-no-keys).
+
 ## Prerequisites
 
 ### Required
