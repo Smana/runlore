@@ -387,7 +387,11 @@ if [[ "$SUSP2" != "true" ]]; then green "PASS: kill-switch blocked auto-executio
 else red "FAIL: auto executed while paused (spec.suspend=$SUSP2)"; FAIL=$((FAIL+1)); fi
 
 step "10/11 leader election + failover (scale to 2)"
-kubectl -n "$NS" scale deploy/runlore --replicas=2 >/dev/null
+# Scale via helm, not `kubectl scale`: Helm 4 applies server-side, and kubectl
+# scale hands .spec.replicas to the "kubectl" field manager, which makes the
+# next `helm upgrade` fail with a field-ownership conflict on that field.
+helm upgrade runlore deploy/helm/runlore -n "$NS" --reuse-values \
+  --set replicaCount=2 >/dev/null
 TOTAL=0; READY=0
 for _ in $(seq 1 30); do
   TOTAL=$(kubectl -n "$NS" get pods -l app.kubernetes.io/name=runlore --no-headers 2>/dev/null | wc -l | tr -d ' ')
