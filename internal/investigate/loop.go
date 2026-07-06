@@ -307,6 +307,7 @@ func (li *LoopInvestigator) Investigate(ctx context.Context, req Request) error 
 	nudged := false            // set when the prose-turn nudge has fired once
 	budgetNudged := false      // set when the token-budget nudge has fired once
 	toolChoice := ""           // forced tool for every remaining request; set (sticky) when the budget nudge fires
+	forcedFinal := false       // set when the final-step nudge forced submit_findings, so a delivery on that turn is labelled degraded
 	truncationNudged := false  // set when the output-truncation nudge has fired once
 	compactionLogged := false  // set when the one-time compaction log has fired
 	used := map[string]int{}   // tool-call counts, logged so investigation breadth is observable
@@ -374,6 +375,17 @@ func (li *LoopInvestigator) Investigate(ctx context.Context, req Request) error 
 				li.deliver(req, res)
 				return nil
 			}
+		}
+		// Step-budget exhaustion: on the LAST step (only this request remains), force a
+		// terminal submit_findings so a non-converging model records a degraded verdict
+		// rather than exhausting maxSteps in silence (no notification, no KB draft —
+		// issue #234's blast radius). Reuses the token-budget path's ToolChoice
+		// mechanism; skipped when the budget path already forced it (don't double-nudge).
+		// forcedFinal marks the delivery on this turn as degraded, not a genuine resolution.
+		if step == maxSteps-1 && toolChoice != submitFindingsName {
+			messages = append(messages, providers.Message{Role: "user", Content: finalStepNudge})
+			toolChoice = submitFindingsName
+			forcedFinal = true
 		}
 		// Raw heuristic for the request about to be sent (messages may have grown since
 		// est was computed — e.g. the budget nudge); paired with resp.Usage below to
@@ -546,7 +558,14 @@ func (li *LoopInvestigator) Investigate(ctx context.Context, req Request) error 
 			inv.Actions = li.reviewActions(inv.Actions)
 			setUsage(&inv)
 			li.recordUsageMetrics(ctx, inv.Usage)
+			// A submission produced only because the final-step nudge forced it is a
+			// degraded verdict, not a genuine resolution — label it distinctly (mirrors
+			// the "budget_exceeded" convention) so the completed-total metric separates
+			// forced conclusions from real ones.
 			result = "resolved"
+			if forcedFinal {
+				result = "max_steps_degraded"
+			}
 			li.deliver(req, inv)
 			return nil
 		}

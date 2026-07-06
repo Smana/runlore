@@ -957,6 +957,173 @@ func (m *runawayModel) Complete(_ context.Context, _ providers.CompletionRequest
 	}, nil
 }
 
+// forceOnlyModel returns a benign non-terminal tool call on every free turn and only
+// emits submit_findings when the request FORCES it via ToolChoice — the shape of a
+// non-converging model (issue #234's claude-sonnet-5) that records a verdict solely
+// when compelled. forcedAt records the 1-based request index at which forcing was
+// first observed (0 = never).
+type forceOnlyModel struct {
+	calls    int
+	forcedAt int
+}
+
+func (m *forceOnlyModel) Complete(_ context.Context, req providers.CompletionRequest) (providers.CompletionResponse, error) {
+	m.calls++
+	if req.ToolChoice == submitFindingsName {
+		if m.forcedAt == 0 {
+			m.forcedAt = m.calls
+		}
+		return providers.CompletionResponse{ToolCalls: []providers.ToolCall{
+			{ID: "f", Name: submitFindingsName,
+				Args: `{"confidence":0.3,"root_causes":[{"summary":"best-effort hypothesis under forced conclusion","confidence":0.3}]}`}}}, nil
+	}
+	return providers.CompletionResponse{ToolCalls: []providers.ToolCall{
+		{ID: "t", Name: "noop_tool", Args: `{}`}}}, nil
+}
+
+// scrapeMetrics renders the OTel /metrics exposition for assertions on a result label.
+func scrapeMetrics(t *testing.T, h http.Handler) string {
+	t.Helper()
+	req := httptest.NewRequest(http.MethodGet, "/metrics", nil)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	return rec.Body.String()
+}
+
+// TestLoopForcesFinalSubmitAtMaxSteps proves the step-budget forced-conclusion path:
+// a non-converging model that only submits when ToolChoice compels it is forced on
+// the loop's FINAL step, its findings are delivered through the normal path, and the
+// completion is labelled result="max_steps_degraded" (distinct from "resolved") so
+// the metric can tell a forced degraded verdict from a genuine resolution.
+func TestLoopForcesFinalSubmitAtMaxSteps(t *testing.T) {
+	t.Cleanup(func() { otel.SetMeterProvider(noop.NewMeterProvider()) })
+	h, shutdown, err := telemetry.Setup(context.Background())
+	if err != nil {
+		t.Fatalf("telemetry setup: %v", err)
+	}
+	t.Cleanup(func() { _ = shutdown(context.Background()) })
+	m := telemetry.NewMetrics()
+
+	model := &forceOnlyModel{}
+	var got *providers.Investigation
+	li := &LoopInvestigator{
+		Model:      model,
+		Log:        slog.New(slog.NewTextHandler(io.Discard, nil)),
+		MaxSteps:   4,
+		Metrics:    m,
+		OnComplete: func(inv providers.Investigation) { got = &inv },
+	}
+	if err := li.Investigate(context.Background(), Request{Title: "NonConverging", Fingerprint: "fp-degraded"}); err != nil {
+		t.Fatalf("Investigate: %v", err)
+	}
+	// Forcing must happen exactly on the final step (request index == MaxSteps): the
+	// three prior free turns were unforced, the model kept calling tools.
+	if model.forcedAt != 4 {
+		t.Fatalf("expected forcing on the final step (request 4), got forcedAt=%d (calls=%d)", model.forcedAt, model.calls)
+	}
+	// The forced submission is delivered through the normal path.
+	if got == nil || len(got.RootCauses) != 1 || got.RootCauses[0].Summary != "best-effort hypothesis under forced conclusion" {
+		t.Fatalf("forced final submit_findings not delivered: %+v", got)
+	}
+	if got.Fingerprint != "fp-degraded" {
+		t.Fatalf("forced degraded result must carry the fingerprint for attribution, got %q", got.Fingerprint)
+	}
+	// The completion counter must carry the distinct degraded label, not "resolved".
+	body := scrapeMetrics(t, h)
+	if !strings.Contains(body, `result="max_steps_degraded"`) {
+		t.Fatalf("forced final submit must record result=\"max_steps_degraded\":\n%s", body)
+	}
+	if strings.Contains(body, `result="resolved"`) {
+		t.Fatalf("a forced degraded verdict must NOT be labelled result=\"resolved\":\n%s", body)
+	}
+}
+
+// TestLoopMaxStepsFallbackWhenForceIgnored proves the fallback: a model that ignores
+// even the forced final step (never emits submit_findings) keeps the pre-existing
+// silent max_steps behaviour — nothing is delivered and the completion is labelled
+// result="max_steps".
+func TestLoopMaxStepsFallbackWhenForceIgnored(t *testing.T) {
+	t.Cleanup(func() { otel.SetMeterProvider(noop.NewMeterProvider()) })
+	h, shutdown, err := telemetry.Setup(context.Background())
+	if err != nil {
+		t.Fatalf("telemetry setup: %v", err)
+	}
+	t.Cleanup(func() { _ = shutdown(context.Background()) })
+	m := telemetry.NewMetrics()
+
+	model := &runawayModel{} // always returns noop_tool, ignoring the forced ToolChoice
+	var delivered bool
+	li := &LoopInvestigator{
+		Model:      model,
+		Log:        slog.New(slog.NewTextHandler(io.Discard, nil)),
+		MaxSteps:   3,
+		Metrics:    m,
+		OnComplete: func(providers.Investigation) { delivered = true },
+	}
+	if err := li.Investigate(context.Background(), Request{Title: "IgnoresForce"}); err != nil {
+		t.Fatalf("Investigate: %v", err)
+	}
+	if delivered {
+		t.Fatal("a model that ignores the forced final step must deliver nothing (silent max_steps fallback)")
+	}
+	// The loop ran the full step budget, including the forced final step, then fell back.
+	if model.calls != 3 {
+		t.Fatalf("expected exactly 3 model calls (= MaxSteps), got %d", model.calls)
+	}
+	body := scrapeMetrics(t, h)
+	if !strings.Contains(body, `result="max_steps"`) {
+		t.Fatalf("ignored-force exhaustion must record result=\"max_steps\":\n%s", body)
+	}
+	if strings.Contains(body, `result="max_steps_degraded"`) {
+		t.Fatalf("no degraded verdict was produced, so result=\"max_steps_degraded\" must be absent:\n%s", body)
+	}
+}
+
+// TestLoopEarlyConclusionNotForced proves the normal early-conclusion path is
+// unchanged by the final-step forcing: a model that submits on step 0 is never forced
+// (ToolChoice stays empty) and the completion keeps result="resolved".
+func TestLoopEarlyConclusionNotForced(t *testing.T) {
+	t.Cleanup(func() { otel.SetMeterProvider(noop.NewMeterProvider()) })
+	h, shutdown, err := telemetry.Setup(context.Background())
+	if err != nil {
+		t.Fatalf("telemetry setup: %v", err)
+	}
+	t.Cleanup(func() { _ = shutdown(context.Background()) })
+	m := telemetry.NewMetrics()
+
+	model := &scriptModel{responses: []providers.CompletionResponse{
+		{ToolCalls: []providers.ToolCall{{ID: "1", Name: submitFindingsName,
+			Args: `{"confidence":0.9,"root_causes":[{"summary":"chart bump broke db","confidence":0.9}]}`}}},
+	}}
+	var got *providers.Investigation
+	li := &LoopInvestigator{
+		Model:      model,
+		Log:        slog.New(slog.NewTextHandler(io.Discard, nil)),
+		MaxSteps:   5, // plenty of headroom: step 0 concludes, final-step forcing never engages
+		Metrics:    m,
+		OnComplete: func(inv providers.Investigation) { got = &inv },
+	}
+	if err := li.Investigate(context.Background(), Request{Title: "EarlyConclusion"}); err != nil {
+		t.Fatalf("Investigate: %v", err)
+	}
+	if got == nil || len(got.RootCauses) != 1 {
+		t.Fatalf("early conclusion not delivered: %+v", got)
+	}
+	if len(model.reqs) != 1 {
+		t.Fatalf("expected exactly 1 model call (early conclusion), got %d", len(model.reqs))
+	}
+	if model.reqs[0].ToolChoice != "" {
+		t.Fatalf("an early-concluding step must not be forced, got ToolChoice=%q", model.reqs[0].ToolChoice)
+	}
+	body := scrapeMetrics(t, h)
+	if !strings.Contains(body, `result="resolved"`) {
+		t.Fatalf("a genuine early conclusion must record result=\"resolved\":\n%s", body)
+	}
+	if strings.Contains(body, `result="max_steps_degraded"`) {
+		t.Fatalf("a genuine resolution must NOT be labelled degraded:\n%s", body)
+	}
+}
+
 // TestLoopHardKillOnBudgetExhaustion verifies that, after the token-budget nudge
 // has fired, the loop hard-kills on the next over-budget check and delivers an
 // unresolved result rather than running to maxSteps.
