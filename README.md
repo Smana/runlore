@@ -109,10 +109,38 @@ additive. Full setup detail in **[Data sources](docs/data-sources.md)**.
 | **Notifiers** | Slack *(bot token: threaded summary + detail)* · Slack incoming webhook / Matrix / generic webhook *(single verdict-first message)* | `notify.*` |
 | **Knowledge base** *(git forge)* | GitHub *(App auth)* | `forge.*` |
 
-## 🚀 Getting started
+## ⚡ Try it in one minute — no cluster, no keys
 
-RunLore runs in your Kubernetes cluster as a single Go binary, deployed via Helm. Before installing,
-you need:
+Before you wire up a cluster, see the front of the pipeline for yourself. This runs `lore serve`
+locally with a keyless demo config and fires a batch of mocked Alertmanager alerts at it — no
+Kubernetes, no LLM, no credentials. You only need Go and `curl`:
+
+```bash
+hack/demo.sh
+```
+
+It builds the binary, starts the server, POSTs [`examples/alertmanager-webhook.json`](examples/alertmanager-webhook.json)
+to the webhook, and prints the **trigger policy** deciding which alerts become incidents:
+
+```text
+=== trigger-policy decisions ===
+msg=incident alert=HarborProbeFailure severity=critical namespace=apps investigate=true  reason="matched trigger policy"
+msg=incident alert=HarborProbeFailure severity=critical namespace=apps investigate=false reason="deduplicated (still-firing)"
+msg=incident alert=NoisyWarn        severity=warning  namespace=apps investigate=false reason="filtered by trigger policy"
+msg=incident alert=StagingCrit      severity=critical namespace=apps investigate=false reason="filtered by trigger policy"
+msg=incident alert=Watchdog         severity=critical namespace=apps investigate=false reason="filtered by trigger policy"
+```
+
+That's one alert admitted (critical + prod), the rest correctly deduped, severity-filtered,
+environment-filtered, and ignore-listed — the exact gate that controls noise and LLM cost in
+production. The demo stops there: a full investigation (root cause → chat → PR) needs a real cluster,
+an LLM, and a knowledge base, which is the production install below. To exercise every feature
+end-to-end on a throwaway cluster, `hack/e2e-k3d.sh` spins one up with [k3d](https://k3d.io/).
+
+## 🚀 Getting started (production install)
+
+Ready to point it at real incidents? RunLore runs in your Kubernetes cluster as a single Go binary,
+deployed via Helm. Before installing, you need:
 
 - **Data sources** — at least one wired source (each is pluggable, an unset one just disables its tool); for the *what-changed* anchor, a cluster running Flux or Argo CD, plus optionally Prometheus/VictoriaMetrics, VictoriaLogs, Hubble for richer signals
 - **An LLM** — any OpenAI-compatible endpoint, Anthropic, or Gemini (in-cluster or external)
@@ -131,18 +159,6 @@ Then point a source at RunLore — for example, route your Alertmanager alerts t
 
 **→ [Full getting-started guide](docs/getting-started.md)** — KB repo setup, GitHub App,
 credentials, complete `values.yaml` reference, data sources, and verification steps.
-
----
-
-Prefer to try it without a cluster first?
-
-```bash
-# fire mocked Alertmanager alerts through the trigger policy (no cluster)
-hack/demo.sh
-
-# verify every feature end-to-end on a throwaway k3d cluster
-hack/e2e-k3d.sh
-```
 
 ## Why RunLore
 
