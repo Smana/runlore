@@ -627,3 +627,52 @@ func TestSlackSummaryBlocksRecurrenceWithoutPrior(t *testing.T) {
 		t.Errorf("Seen-before block must not render without Prior\n%s", txt)
 	}
 }
+
+// The seen-before block's sub-lines are each independently optional: a partial
+// PriorKnowledge must render only what it has — no empty labels, no dangling
+// footer separator.
+func TestSlackSummaryBlocksPriorKnowledgePartial(t *testing.T) {
+	cases := []struct {
+		label   string
+		prior   *providers.PriorKnowledge
+		prevURL string
+		want    []string
+		absent  []string
+	}{
+		{
+			label: "cause only", prior: &providers.PriorKnowledge{Cause: "c"}, prevURL: "https://kb/pr/1",
+			want:   []string{"*Prior cause:* c", "previous entry"},
+			absent: []string{"*Prior resolution:*", "resolve rate"},
+		},
+		{
+			label: "resolution only", prior: &providers.PriorKnowledge{Resolution: "r"}, prevURL: "https://kb/pr/1",
+			want:   []string{"*Prior resolution:* r", "previous entry"},
+			absent: []string{"*Prior cause:*", "resolve rate"},
+		},
+		{
+			label: "track record without link", prior: &providers.PriorKnowledge{Cause: "c", Recalls: 2, Resolved: 1},
+			want:   []string{"*Prior cause:* c", "resolve rate 1/2"},
+			absent: []string{"previous entry"},
+		},
+	}
+	for _, c := range cases {
+		inv := providers.Investigation{
+			Title: "t", Confidence: 0.8,
+			Occurrences:    2,
+			LastOccurrence: time.Date(2026, 6, 25, 10, 0, 0, 0, time.UTC),
+			PrevCuratedURL: c.prevURL,
+			Prior:          c.prior,
+		}
+		txt := blocksText(t, summaryBlocks(inv))
+		for _, w := range c.want {
+			if !strings.Contains(txt, w) {
+				t.Errorf("%s: blocks missing %q\n%s", c.label, w, txt)
+			}
+		}
+		for _, a := range c.absent {
+			if strings.Contains(txt, a) {
+				t.Errorf("%s: blocks must omit %q\n%s", c.label, a, txt)
+			}
+		}
+	}
+}

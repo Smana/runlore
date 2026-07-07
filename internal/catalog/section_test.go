@@ -72,3 +72,24 @@ func TestEntrySectionMalformed(t *testing.T) {
 		}
 	}
 }
+
+// A human-edited Resolution often carries a fenced command block whose "#"
+// comment lines would otherwise parse as headings and truncate the excerpt —
+// fences are opaque: skipped entirely, never section boundaries.
+func TestEntrySectionSkipsFencedCode(t *testing.T) {
+	body := "## Resolution\n\n```bash\n# revert the patch\nkubectl rollout undo deploy/web\n```\n\nRevert the patch and pin 5.3.2.\n\n## Next\n\nx\n"
+	if got := (Entry{Body: body}).Section("Resolution"); got != "Revert the patch and pin 5.3.2." {
+		t.Errorf("Section(Resolution) = %q, want the prose after the fence", got)
+	}
+	// A section that is ONLY a fence has nothing quotable.
+	only := "## Resolution\n\n```\nkubectl get pods\n```\n\n## Next\n\nx\n"
+	if got := (Entry{Body: only}).Section("Resolution"); got != "" {
+		t.Errorf("fence-only section = %q, want \"\"", got)
+	}
+	// A "## heading" line inside a fence in an EARLIER section must not
+	// derail which section is matched.
+	earlier := "## Cause\n\n```\n## Resolution\n```\n\ncause text\n\n## Resolution\n\nreal resolution\n"
+	if got := (Entry{Body: earlier}).Section("Resolution"); got != "real resolution" {
+		t.Errorf("Section(Resolution) with fenced fake heading = %q, want %q", got, "real resolution")
+	}
+}

@@ -20,8 +20,20 @@ func (e Entry) Section(name string) string {
 	want := strings.TrimSpace(name)
 	var para []string
 	in := false
+	inFence := false
 	for _, ln := range strings.Split(e.Body, "\n") {
 		trimmed := strings.TrimSpace(ln)
+		// Fenced code blocks are opaque: a "# comment" line inside one is code,
+		// not a section boundary, and commands aren't quotable prose — skip the
+		// whole fence (markers included) wherever it appears, so the excerpt is
+		// the section's first PROSE paragraph.
+		if strings.HasPrefix(trimmed, "```") {
+			inFence = !inFence
+			continue
+		}
+		if inFence {
+			continue
+		}
 		if h := headingText(trimmed); h != "" {
 			if in {
 				break // next section starts: the excerpt is done
@@ -57,7 +69,7 @@ func headingText(line string) string {
 	return strings.TrimSpace(line[i:])
 }
 
-// truncateRunes caps s at max runes, appending … when cut — rune-aware so a
+// truncateRunes caps s at n runes, appending … when cut — rune-aware so a
 // multibyte character is never split.
 func truncateRunes(s string, n int) string {
 	if utf8.RuneCountInString(s) <= n {
