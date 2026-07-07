@@ -42,23 +42,34 @@ var _ providers.Notifier = (*Notifier)(nil)
 
 // payload is the JSON body sent to the webhook endpoint.
 type payload struct {
-	Title          string   `json:"title"`
-	Confidence     float64  `json:"confidence"`
-	Namespace      string   `json:"namespace,omitempty"`
-	Resource       string   `json:"resource,omitempty"`
-	CuratedURL     string   `json:"curated_url,omitempty"`
-	Text           string   `json:"text"`
-	Verdict        string   `json:"verdict,omitempty"`
-	Severity       string   `json:"severity,omitempty"`
-	Cluster        string   `json:"cluster,omitempty"`
-	Environment    string   `json:"environment,omitempty"`
-	Tenant         string   `json:"tenant,omitempty"`
-	AlertName      string   `json:"alert_name,omitempty"`
-	StartedAt      string   `json:"started_at,omitempty"` // RFC3339; "" when unknown
-	Occurrences    int      `json:"occurrences,omitempty"`
-	PrevCuratedURL string   `json:"prev_curated_url,omitempty"`
-	RuledOut       []string `json:"ruled_out,omitempty"`
-	DataGaps       []string `json:"data_gaps,omitempty"`
+	Title          string        `json:"title"`
+	Confidence     float64       `json:"confidence"`
+	Namespace      string        `json:"namespace,omitempty"`
+	Resource       string        `json:"resource,omitempty"`
+	CuratedURL     string        `json:"curated_url,omitempty"`
+	Text           string        `json:"text"`
+	Verdict        string        `json:"verdict,omitempty"`
+	Severity       string        `json:"severity,omitempty"`
+	Cluster        string        `json:"cluster,omitempty"`
+	Environment    string        `json:"environment,omitempty"`
+	Tenant         string        `json:"tenant,omitempty"`
+	AlertName      string        `json:"alert_name,omitempty"`
+	StartedAt      string        `json:"started_at,omitempty"` // RFC3339; "" when unknown
+	Occurrences    int           `json:"occurrences,omitempty"`
+	PrevCuratedURL string        `json:"prev_curated_url,omitempty"`
+	RuledOut       []string      `json:"ruled_out,omitempty"`
+	DataGaps       []string      `json:"data_gaps,omitempty"`
+	Prior          *priorPayload `json:"prior,omitempty"`
+}
+
+// priorPayload mirrors providers.PriorKnowledge for webhook consumers: what the
+// merged KB entry said last time this incident fired.
+type priorPayload struct {
+	Cause      string `json:"cause,omitempty"`
+	Resolution string `json:"resolution,omitempty"`
+	EntryPath  string `json:"entry_path,omitempty"`
+	Recalls    int    `json:"recalls,omitempty"`
+	Resolved   int    `json:"resolved,omitempty"`
 }
 
 // Deliver marshals the investigation to JSON and POSTs it to the configured URL.
@@ -66,6 +77,10 @@ func (n *Notifier) Deliver(ctx context.Context, inv providers.Investigation) err
 	startedAt := ""
 	if !inv.StartedAt.IsZero() {
 		startedAt = inv.StartedAt.UTC().Format(time.RFC3339)
+	}
+	var prior *priorPayload
+	if p := inv.Prior; p != nil {
+		prior = &priorPayload{Cause: p.Cause, Resolution: p.Resolution, EntryPath: p.EntryPath, Recalls: p.Recalls, Resolved: p.Resolved}
 	}
 	body, err := json.Marshal(payload{
 		Title:          inv.Title,
@@ -85,6 +100,7 @@ func (n *Notifier) Deliver(ctx context.Context, inv providers.Investigation) err
 		PrevCuratedURL: inv.PrevCuratedURL,
 		RuledOut:       inv.RuledOut,
 		DataGaps:       inv.DataGaps,
+		Prior:          prior,
 	})
 	if err != nil {
 		return err
