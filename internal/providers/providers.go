@@ -478,6 +478,22 @@ type KBEntry struct {
 	Fingerprint string   // deterministic dedup fingerprint (see curator.DupFingerprint)
 	Confidence  float64  // overall investigation confidence; queryable extension frontmatter (0 = unset)
 	Provenance  []string // distinct causing-change refs; queryable extension frontmatter
+	// Reviewer context, rendered in the PR BODY only — never in the committed
+	// entry file (renderEntry ignores these), so the catalog and validator are
+	// untouched. Related is the draft-time BM25 neighborhood; the recurrence
+	// facts mirror Investigation.Occurrences/PrevCuratedURL.
+	Related        []RelatedEntry
+	Occurrences    int
+	PrevCuratedURL string
+}
+
+// RelatedEntry is a nearby catalog entry surfaced to the KB PR reviewer so
+// "is this a duplicate / what do we already know?" is answerable in the PR.
+type RelatedEntry struct {
+	Path     string // bundle-relative entry path (the forge renders the web link)
+	Title    string
+	Resource string  // affected resource, when the entry names one
+	Score    float64 // BM25 score at draft time (corpus-relative — a hint, not a ranking guarantee)
 }
 
 // Ref is a URL handle to a created issue or PR.

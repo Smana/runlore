@@ -90,6 +90,10 @@ func draftKBEntry(inv providers.Investigation) providers.KBEntry {
 		Fingerprint: DupFingerprint(inv),
 		Confidence:  inv.Confidence,
 		Provenance:  refs,
+		// Recurrence facts for the PR body's related-knowledge section — stamped
+		// on the Investigation BEFORE curation runs (see onInvestigationComplete).
+		Occurrences:    inv.Occurrences,
+		PrevCuratedURL: inv.PrevCuratedURL,
 	}
 }
 

@@ -143,7 +143,7 @@ func (c *Client) OpenPR(ctx context.Context, e providers.KBEntry) (providers.Ref
 		Number  int    `json:"number"`
 	}
 	if err := c.do(ctx, http.MethodPost, fmt.Sprintf("/repos/%s/%s/pulls", c.owner, c.repo),
-		map[string]any{"title": "KB: " + e.Title, "head": branch, "base": c.baseBranch, "body": prBody(e)}, &out); err != nil {
+		map[string]any{"title": "KB: " + e.Title, "head": branch, "base": c.baseBranch, "body": c.prBody(e)}, &out); err != nil {
 		return providers.Ref{}, err
 	}
 	// 6. label the PR (the create-PR API doesn't accept labels; set them via the
@@ -362,18 +362,69 @@ type kbFrontmatter struct {
 
 // renderEntry serializes a KBEntry as OKF markdown (frontmatter + body).
 // prBody is the GitHub PR description: a one-line why-keep summary so the PR list
-// view is informative. The full decision card + OKF sections live in the entry
-// file itself (visible in the PR diff).
-func prBody(e providers.KBEntry) string {
+// view is informative, plus the reviewer-context Related knowledge section. The
+// full decision card + OKF sections live in the entry file itself (visible in
+// the PR diff).
+func (c *Client) prBody(e providers.KBEntry) string {
 	desc := e.Description
 	if desc == "" {
 		desc = e.Title
 	}
 	body := fmt.Sprintf("Drafted by RunLore — %s\n\nReview the decision card + OKF entry in the changed file.", desc)
+	if s := c.relatedSection(e); s != "" {
+		body += "\n\n" + s
+	}
 	if m := providers.FingerprintMarker(e.Fingerprint); m != "" {
 		body += "\n\n" + m
 	}
 	return body
+}
+
+// relatedSection renders the reviewer context: the draft-time BM25 neighborhood
+// (linked, scored) and the trigger's recurrence line. Empty when there is
+// nothing to say — a genuinely novel first sighting gets no noise section.
+func (c *Client) relatedSection(e providers.KBEntry) string {
+	if len(e.Related) == 0 && e.Occurrences <= 1 {
+		return ""
+	}
+	var b strings.Builder
+	b.WriteString("## Related knowledge\n")
+	for _, r := range e.Related {
+		fmt.Fprintf(&b, "\n- [%s](%s) — score %.2f", r.Title, c.blobURL(r.Path), r.Score)
+		if r.Resource != "" {
+			fmt.Fprintf(&b, " · resource %s", r.Resource)
+		}
+	}
+	if e.Occurrences > 1 {
+		fmt.Fprintf(&b, "\n\nTrigger seen ×%d", e.Occurrences)
+		if e.PrevCuratedURL != "" {
+			fmt.Fprintf(&b, " · previous entry: %s", e.PrevCuratedURL)
+		}
+	}
+	return b.String()
+}
+
+// blobURL is the web URL of a catalog file on the base branch. The web host is
+// the API base with its API suffix stripped: api.github.com → github.com;
+// GHES https://ghe.example.com/api/v3 → https://ghe.example.com. Relative
+// links are NOT an option here — GitHub does not resolve them in PR bodies.
+// Deployment assumption: path is a RelatedEntry.Path, relative to the catalog
+// bundle root, and is assumed to resolve at the ROOT of the forge kb_repo on
+// the base branch — matching where entryPath/maintainBundle write entries.
+// Pointing catalog.dir at a different tree than kb_repo's root yields dead
+// (but harmless) links here.
+func (c *Client) blobURL(path string) string {
+	host := c.baseURL
+	if host == DefaultBaseURL {
+		host = "https://github.com"
+	} else {
+		host = strings.TrimSuffix(host, "/api/v3")
+	}
+	branch := c.baseBranch
+	if branch == "" {
+		branch = "main"
+	}
+	return fmt.Sprintf("%s/%s/%s/blob/%s/%s", host, c.owner, c.repo, branch, path)
 }
 
 func renderEntry(e providers.KBEntry) string {
