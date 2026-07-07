@@ -131,6 +131,28 @@ func TestDeliverErrorsOnNon2xx(t *testing.T) {
 	}
 }
 
+func TestWebhookDeliverPriorKnowledge(t *testing.T) {
+	var got payload
+	srv := httptest.NewServer(http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
+		if err := json.NewDecoder(r.Body).Decode(&got); err != nil {
+			t.Errorf("decode: %v", err)
+		}
+	}))
+	defer srv.Close()
+	n := New(srv.URL)
+	inv := providers.Investigation{
+		Title: "t", Confidence: 0.8, Occurrences: 3,
+		Prior: &providers.PriorKnowledge{Cause: "c", Resolution: "r", EntryPath: "incidents/e.md", Recalls: 3, Resolved: 2},
+	}
+	if err := n.Deliver(context.Background(), inv); err != nil {
+		t.Fatalf("deliver: %v", err)
+	}
+	if got.Prior == nil || got.Prior.Cause != "c" || got.Prior.Resolution != "r" ||
+		got.Prior.EntryPath != "incidents/e.md" || got.Prior.Recalls != 3 || got.Prior.Resolved != 2 {
+		t.Errorf("prior payload = %+v", got.Prior)
+	}
+}
+
 func TestBuildRegisteredFromExtra(t *testing.T) {
 	const envVar = "TEST_WH_URL"
 	const testURL = "http://127.0.0.1:9999/hook" // unreachable; we only test Build, not Deliver

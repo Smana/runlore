@@ -288,8 +288,9 @@ var mrkdwnEscaper = strings.NewReplacer("&", "&amp;", "<", "&lt;", ">", "&gt;")
 func escapeMrkdwn(s string) string { return mrkdwnEscaper.Replace(s) }
 
 // summaryBlocks renders the triage summary as Block Kit, top-down as an on-call
-// reads it: what/where (header) → verdict → key facts (fields) → why → what to do
-// → honest limits → recurrence → confidence footer → approval buttons. The full
+// reads it: what/where (header) → verdict → key facts (fields) → seen-before KB
+// recall (when present) → why → what to do → honest limits → recurrence →
+// confidence footer → approval buttons. The full
 // analysis (every hypothesis with all evidence, the complete open-questions /
 // data-gaps / ruled-out lists) lives in detailBlocks; slackMessage appends the
 // two for the single-message webhook path.
@@ -338,6 +339,35 @@ func summaryBlocks(inv providers.Investigation) []map[string]any {
 	// 3. Metadata fields — the trigger-time facts an on-call scans first.
 	if fields := metadataFields(inv); len(fields) > 0 {
 		blocks = append(blocks, map[string]any{"type": "section", "fields": fields})
+	}
+
+	// 3b. Prior knowledge — on a recurring incident with a merged KB entry, quote
+	// what the KB already says (cause + human-reviewed resolution + track record)
+	// before the current analysis: history frames how the on-call reads what
+	// follows, with zero clicks. The entry excerpts are untrusted (model prose,
+	// human edits) and escaped; when this block renders, the legacy Recurrence
+	// field and the previously-investigated context pointer are suppressed —
+	// count, date and link all live here.
+	if p := inv.Prior; p != nil {
+		var s strings.Builder
+		fmt.Fprintf(&s, "📚 *Seen before ×%d* — last %s", inv.Occurrences, slackDate(inv.LastOccurrence))
+		if p.Cause != "" {
+			fmt.Fprintf(&s, "\n*Prior cause:* %s", escapeMrkdwn(p.Cause))
+		}
+		if p.Resolution != "" {
+			fmt.Fprintf(&s, "\n*Prior resolution:* %s", escapeMrkdwn(p.Resolution))
+		}
+		foot := make([]string, 0, 2)
+		if inv.PrevCuratedURL != "" {
+			foot = append(foot, fmt.Sprintf("<%s|previous entry>", escapeMrkdwn(inv.PrevCuratedURL)))
+		}
+		if p.Recalls > 0 {
+			foot = append(foot, fmt.Sprintf("resolve rate %d/%d", p.Resolved, p.Recalls))
+		}
+		if len(foot) > 0 {
+			fmt.Fprintf(&s, "\n%s", strings.Join(foot, " · "))
+		}
+		blocks = append(blocks, map[string]any{"type": "section", "text": map[string]any{"type": "mrkdwn", "text": truncate(s.String(), 2900)}})
 	}
 
 	// 4. Top root cause: the single most-likely why, with up to three evidence
@@ -405,7 +435,7 @@ func summaryBlocks(inv providers.Investigation) []map[string]any {
 	// 8. Recurrence pointer to the previous investigation's conclusion. The link is
 	// formatter-constructed; escaping the URL inside it is what Slack's docs
 	// prescribe (a raw & / < / > would corrupt the link).
-	if inv.PrevCuratedURL != "" {
+	if inv.PrevCuratedURL != "" && inv.Prior == nil {
 		blocks = append(blocks, map[string]any{"type": "context", "elements": []map[string]any{
 			{"type": "mrkdwn", "text": fmt.Sprintf("🔁 Previously investigated — <%s|previous conclusion>", escapeMrkdwn(inv.PrevCuratedURL))}}})
 	}
@@ -484,7 +514,7 @@ func metadataFields(inv providers.Investigation) []map[string]any {
 			add("What changed", "none")
 		}
 	}
-	if inv.Occurrences > 1 {
+	if inv.Occurrences > 1 && inv.Prior == nil {
 		add("Recurrence", fmt.Sprintf("🔁 #%d · last %s", inv.Occurrences, slackDate(inv.LastOccurrence)))
 	}
 	return fields

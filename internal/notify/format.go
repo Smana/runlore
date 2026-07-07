@@ -55,10 +55,25 @@ func Format(inv providers.Investigation) string {
 	if !inv.StartedAt.IsZero() {
 		fmt.Fprintf(&b, "Started: %s\n", inv.StartedAt.UTC().Format(time.RFC3339))
 	}
-	// Recurrence pointer: only when this is a repeat of a known incident. A first
-	// sighting (Occurrences ≤ 1, or 0 = ledger disabled) prints nothing.
+	// Seen-before block: only when this is a repeat of a known incident (a first
+	// sighting — Occurrences ≤ 1, or 0 = ledger disabled — prints nothing). When
+	// the completion pipeline found the merged KB entry for this incident
+	// (Prior), the previous cause and human-reviewed resolution are quoted
+	// inline — the zero-click payoff of the knowledge base; otherwise the
+	// counter + link still tell the reader this is not new.
 	if inv.Occurrences > 1 {
-		fmt.Fprintf(&b, "Occurrence: #%d — last investigated %s\n", inv.Occurrences, inv.LastOccurrence.UTC().Format(time.RFC3339))
+		fmt.Fprintf(&b, "📚 Seen before: ×%d — last investigated %s\n", inv.Occurrences, inv.LastOccurrence.UTC().Format(time.RFC3339))
+		if p := inv.Prior; p != nil {
+			if p.Cause != "" {
+				fmt.Fprintf(&b, "   Prior cause: %s\n", p.Cause)
+			}
+			if p.Resolution != "" {
+				fmt.Fprintf(&b, "   Prior resolution: %s\n", p.Resolution)
+			}
+			if p.Recalls > 0 {
+				fmt.Fprintf(&b, "   Resolve rate: %d/%d recalls resolved\n", p.Resolved, p.Recalls)
+			}
+		}
 		if inv.PrevCuratedURL != "" {
 			fmt.Fprintf(&b, "Previous conclusion: %s\n", inv.PrevCuratedURL)
 		}

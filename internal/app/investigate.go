@@ -276,6 +276,14 @@ func BuildInvestigator(ctx context.Context, cfg *config.Config, gp providers.Git
 	if v := cfg.Model.Verify; v != nil && v.Pricing != nil {
 		verifyPricing = toPricing(v.Pricing)
 	}
+	// A nil *catalog.Catalog must stay a nil INTERFACE here: assigning a typed-nil
+	// *catalog.Catalog to prior would make prior != nil true (interface holds a
+	// non-nil type descriptor even with a nil pointer), and onInvestigationComplete's
+	// guard would then call FindFingerprint on a nil receiver and panic.
+	var prior priorEntryFinder
+	if cat != nil {
+		prior = cat
+	}
 	return &investigate.LoopInvestigator{
 		Model:                     model,
 		VerifyModel:               BuildVerifyModel(cfg),
@@ -297,7 +305,7 @@ func BuildInvestigator(ctx context.Context, cfg *config.Config, gp providers.Git
 		OnProgress:                onProgress,
 		ProgressEverySteps:        progressEverySteps,
 		OnComplete: func(found providers.Investigation) {
-			onInvestigationComplete(ctx, found, ledger, curOrNil, notifier, auto, approvals, metrics, log)
+			onInvestigationComplete(ctx, found, ledger, prior, curOrNil, notifier, auto, approvals, metrics, log)
 		},
 	}, cat, nil
 }
@@ -309,6 +317,13 @@ type investigationCurator interface {
 	Curate(ctx context.Context, inv providers.Investigation) (providers.Ref, error)
 }
 
+// priorEntryFinder is the catalog's exact-identity lookup used to quote the
+// merged KB entry on a recurring incident (implemented by *catalog.Catalog).
+// Narrowed to an interface so the completion pipeline is testable without an index.
+type priorEntryFinder interface {
+	FindFingerprint(fp string) (catalog.Entry, bool)
+}
+
 // onInvestigationComplete runs the post-investigation pipeline once the loop returns
 // findings: stamp recurrence facts, curate, record the outcome open, handle actions,
 // then deliver. Extracted from BuildInvestigator's OnComplete closure so the ordering
@@ -316,7 +331,7 @@ type investigationCurator interface {
 //
 // Order matters: recurrence facts are read BEFORE this run's own open is recorded,
 // and curate runs BEFORE the open so the open durably carries the KB link.
-func onInvestigationComplete(ctx context.Context, found providers.Investigation, ledger *outcome.Ledger, cur investigationCurator, notifier *notify.Multi, auto *action.Auto, approvals *action.Approvals, metrics *telemetry.Metrics, log *slog.Logger) {
+func onInvestigationComplete(ctx context.Context, found providers.Investigation, ledger *outcome.Ledger, prior priorEntryFinder, cur investigationCurator, notifier *notify.Multi, auto *action.Auto, approvals *action.Approvals, metrics *telemetry.Metrics, log *slog.Logger) {
 	// Recurrence facts BEFORE recording this run's own open, so the count and
 	// "previous" pointer describe prior investigations only. Occurrences returns the
 	// total opens recorded so far for this TriggerKey; this run adds one, hence n+1
@@ -327,6 +342,30 @@ func onInvestigationComplete(ctx context.Context, found providers.Investigation,
 		found.PrevCuratedURL = url
 	} else if found.TriggerKey != "" {
 		found.Occurrences = 1
+	}
+	// The dedup fingerprint is this incident's deterministic identity: the merged
+	// KB entry carries it in frontmatter and the ledger opens below stamp it —
+	// computed once for both uses.
+	dupFP := curator.DupFingerprint(found)
+	// Prior knowledge: on a RECURRING fresh investigation, quote what the merged
+	// KB entry already says (cause + human-reviewed resolution + recall track
+	// record) so the on-call reads the previous answer in the notification
+	// instead of clicking through to the forge. Recalls are excluded — the
+	// recalled entry IS the answer being delivered. Best-effort by construction:
+	// no merged entry, empty sections, or a ledger error leave Prior nil and the
+	// notification falls back to the counter+link it already carries.
+	if found.Occurrences > 1 && !found.Recalled && prior != nil {
+		if e, ok := prior.FindFingerprint(dupFP); ok {
+			cause, resolution := e.Section("Cause"), e.Section("Resolution")
+			if cause != "" || resolution != "" {
+				pk := &providers.PriorKnowledge{Cause: cause, Resolution: resolution, EntryPath: e.Path}
+				if counts, err := ledger.OpenCounts(); err == nil {
+					agg := counts[e.Path]
+					pk.Recalls, pk.Resolved = agg.Recalls, agg.Resolved
+				}
+				found.Prior = pk
+			}
+		}
 	}
 	// Curate BEFORE recording the outcome open — the open event is the durable record
 	// of THIS investigation and must carry the KB link that recurrence pointers and
@@ -353,11 +392,6 @@ func onInvestigationComplete(ctx context.Context, found providers.Investigation,
 	if len(fps) > 0 {
 		kind := OutcomeKind(found.Recalled)
 		now := time.Now()
-		// The deterministic dedup fingerprint (resource+cause) is the curated PR's
-		// stable resolution-join key: it is the same value draftKBEntry stamps into
-		// the PR body, so a later resolve matches the PR regardless of the LLM's
-		// re-worded title. Computed once for the whole batch.
-		dupFP := curator.DupFingerprint(found)
 		// One open per constituent fingerprint (coalesced batches fan out), so
 		// every alert's resolve webhook can later match this investigation.
 		for i, fp := range fps {
