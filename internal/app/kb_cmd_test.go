@@ -192,6 +192,30 @@ func TestKBSearchJSON(t *testing.T) {
 	}
 }
 
+// The usage strings promise query-first invocations; stdlib flag alone would
+// silently swallow trailing flags into the query.
+func TestKBSearchFlagsAfterQuery(t *testing.T) {
+	dir := writeKBFixture(t)
+	var out strings.Builder
+	if err := runKBSearch([]string{"crashloop", "web", "--dir", dir}, &out); err != nil {
+		t.Fatalf("flags after query must parse: %v", err)
+	}
+	if !strings.Contains(out.String(), "incidents/crashloop-web.md") {
+		t.Errorf("expected hit missing:\n%s", out.String())
+	}
+}
+
+func TestKBShowFlagsAfterArg(t *testing.T) {
+	dir := writeKBFixture(t)
+	var out strings.Builder
+	if err := runKBShow([]string{"crashloop-web", "--dir", dir}, &out); err != nil {
+		t.Fatalf("flags after arg must parse: %v", err)
+	}
+	if !strings.Contains(out.String(), "CrashLoop web ConfigMap truncated") {
+		t.Errorf("expected entry missing:\n%s", out.String())
+	}
+}
+
 func TestKBSearchLedgerMissingWarnsAndOmits(t *testing.T) {
 	dir := writeKBFixture(t)
 	missing := filepath.Join(t.TempDir(), "nope.jsonl")

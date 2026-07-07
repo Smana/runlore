@@ -58,6 +58,27 @@ func loadKBCatalog(cfgPath, dir string) (*catalog.Catalog, error) {
 	return cat, nil
 }
 
+// parseInterleaved parses fs against args while tolerating positionals BEFORE
+// flags — stdlib flag stops at the first non-flag token, but a human types
+// `lore kb search "crashloop web" --dir ./kb` (query first) as naturally as
+// the reverse, and the usage strings promise both. Each round parses what it
+// can, peels one positional, and re-parses the rest; returned positionals
+// preserve their order.
+func parseInterleaved(fs *flag.FlagSet, args []string) ([]string, error) {
+	var positional []string
+	for {
+		if err := fs.Parse(args); err != nil {
+			return nil, err
+		}
+		args = fs.Args()
+		if len(args) == 0 {
+			return positional, nil
+		}
+		positional = append(positional, args[0])
+		args = args[1:]
+	}
+}
+
 func runKBSearch(args []string, w io.Writer) error {
 	fs := flag.NewFlagSet("kb search", flag.ContinueOnError)
 	cfgPath := fs.String("config", "runlore.yaml", "path to config file")
@@ -65,10 +86,11 @@ func runKBSearch(args []string, w io.Writer) error {
 	k := fs.Int("k", 10, "maximum results")
 	asJSON := fs.Bool("json", false, "emit results as JSON")
 	ledgerPath := fs.String("ledger", "", "outcome ledger JSONL; adds the RESOLVE column")
-	if err := fs.Parse(args); err != nil {
+	rest, err := parseInterleaved(fs, args)
+	if err != nil {
 		return err
 	}
-	query := strings.TrimSpace(strings.Join(fs.Args(), " "))
+	query := strings.TrimSpace(strings.Join(rest, " "))
 	if query == "" {
 		return fmt.Errorf("usage: lore kb search <query> [--dir <catalog>] [-k 10] [--json] [--ledger <jsonl>]")
 	}
@@ -175,10 +197,11 @@ func runKBShow(args []string, w io.Writer) error {
 	fs := flag.NewFlagSet("kb show", flag.ContinueOnError)
 	cfgPath := fs.String("config", "runlore.yaml", "path to config file")
 	dir := fs.String("dir", "", "catalog directory (overrides config catalog.dir)")
-	if err := fs.Parse(args); err != nil {
+	rest, err := parseInterleaved(fs, args)
+	if err != nil {
 		return err
 	}
-	arg := strings.TrimSpace(strings.Join(fs.Args(), " "))
+	arg := strings.TrimSpace(strings.Join(rest, " "))
 	if arg == "" {
 		return fmt.Errorf("usage: lore kb show <entry-path | filename | query> [--dir <catalog>]")
 	}
