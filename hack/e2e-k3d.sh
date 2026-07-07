@@ -419,6 +419,93 @@ done
 if [[ -n "$NEW" && "$NEW" != "$HOLDER" ]]; then green "PASS: failover — new leader $NEW"; PASS=$((PASS+1))
 else red "FAIL: no failover (holder still '$NEW')"; FAIL=$((FAIL+1)); fi
 
+step "10b/11 StatefulSet mode: per-replica persistence + failover"
+# The Deployment path above shares ONE PVC across replicas via a hardcoded claimName
+# — harmless here (single-node k3d, no cross-node attach conflict) but unsafe on a
+# real multi-node cluster with an RWO StorageClass. Prove the StatefulSet path gives
+# each replica its OWN volume and that leader election/failover still hold.
+# accessModes=[ReadWriteOnce]: k3d's default local-path-provisioner doesn't support RWX.
+helm upgrade runlore deploy/helm/runlore -n "$NS" --reuse-values \
+  --set workloadKind=StatefulSet \
+  --set persistence.enabled=true \
+  --set persistence.accessModes='{ReadWriteOnce}' \
+  --set replicaCount=2 >/dev/null
+TOTAL=0; READY=0
+for _ in $(seq 1 30); do
+  TOTAL=$(kubectl -n "$NS" get pods -l app.kubernetes.io/name=runlore --no-headers 2>/dev/null | wc -l | tr -d ' ')
+  READY=$(kubectl -n "$NS" get pods -l app.kubernetes.io/name=runlore \
+    -o jsonpath='{range .items[*]}{.status.conditions[?(@.type=="Ready")].status}{"\n"}{end}' 2>/dev/null | grep -c True || true)
+  [[ "$TOTAL" == "2" && "$READY" == "1" ]] && break
+  sleep 2
+done
+if [[ "$TOTAL" == "2" && "$READY" == "1" ]]; then
+  green "PASS: StatefulSet — 2 replicas, exactly 1 Ready (leader)"; PASS=$((PASS+1))
+else red "FAIL: StatefulSet replicas=$TOTAL ready=$READY (want 2 / 1)"; FAIL=$((FAIL+1)); fi
+
+BOUND=$(kubectl -n "$NS" get pvc -l app.kubernetes.io/name=runlore -o jsonpath='{range .items[*]}{.status.phase}{"\n"}{end}' 2>/dev/null | grep -c Bound || true)
+PVC_COUNT=$(kubectl -n "$NS" get pvc -l app.kubernetes.io/name=runlore --no-headers 2>/dev/null | wc -l | tr -d ' ')
+if [[ "$PVC_COUNT" == "2" && "$BOUND" == "2" ]]; then
+  green "PASS: 2 independent PVCs, both Bound (one per replica)"; PASS=$((PASS+1))
+else red "FAIL: pvcs=$PVC_COUNT bound=$BOUND (want 2 / 2)"; FAIL=$((FAIL+1)); fi
+
+# StatefulSet pod identities are STABLE ordinals (runlore-0, runlore-1): unlike the
+# Deployment check above (a replacement pod always gets a fresh random suffix), a
+# pod-delete (as opposed to a real node failure) lets the deleted replica's fast
+# local restart legitimately race the standby for the freed lease and win it back
+# under the SAME identity string — confirmed live: client-go's own "successfully
+# acquired lease" log fired ~6s after deletion, for the SAME ordinal, and comparing
+# the Lease object's holderIdentity/acquireTime via kubectl proved unreliable at
+# distinguishing that from "no failover happened" (root cause not fully pinned
+# down — plausibly a race between the read and the record update — but the
+# leader's OWN log is authoritative and unambiguous, so use that instead: assert
+# exactly one Ready pod again post-delete, and that whichever pod is leading now
+# logged "acquired leadership" AFTER the deletion timestamp).
+# A Terminating-but-not-yet-exited pod can still report Ready (its drain can take
+# up to drainGracePeriod=25s if a GitOps-failure reinvestigation is in flight — the
+# still-broken "broken-app" Kustomization from step 9 above keeps re-firing), so a
+# "2 replicas / 1 ready" snapshot can be trivially true from the OLD leader's own
+# steady state before it has even started terminating. Poll for the actual proof —
+# a fresh "acquired leadership" log line after the deletion — inside the SAME loop,
+# not as a separate check after breaking out early on a superficial ready-count.
+SS_HOLDER=$(kubectl -n "$NS" get lease runlore-leader -o jsonpath='{.spec.holderIdentity}' 2>/dev/null || true)
+DELETE_AT=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+kubectl -n "$NS" delete pod "$SS_HOLDER" --wait=false >/dev/null 2>&1 || true
+TOTAL=0; READY=0; NEW_LEADER=""; REACQUIRED=0
+for _ in $(seq 1 60); do
+  TOTAL=$(kubectl -n "$NS" get pods -l app.kubernetes.io/name=runlore --no-headers 2>/dev/null | wc -l | tr -d ' ')
+  READY=$(kubectl -n "$NS" get pods -l app.kubernetes.io/name=runlore \
+    -o jsonpath='{range .items[*]}{.status.conditions[?(@.type=="Ready")].status}{"\n"}{end}' 2>/dev/null | grep -c True || true)
+  NEW_LEADER=$(kubectl -n "$NS" get lease runlore-leader -o jsonpath='{.spec.holderIdentity}' 2>/dev/null || true)
+  REACQUIRED=0
+  if [[ -n "$NEW_LEADER" ]]; then
+    REACQUIRED=$(kubectl -n "$NS" logs "$NEW_LEADER" --since-time="$DELETE_AT" 2>/dev/null | grep -c "acquired leadership" || true)
+  fi
+  [[ "$TOTAL" == "2" && "$READY" == "1" && "$REACQUIRED" -gt 0 ]] && break
+  sleep 2
+done
+if [[ "$TOTAL" == "2" && "$READY" == "1" && -n "$NEW_LEADER" && "$REACQUIRED" -gt 0 ]]; then
+  green "PASS: StatefulSet failover — $NEW_LEADER logged a fresh acquisition after deletion"; PASS=$((PASS+1))
+else
+  red "FAIL: StatefulSet failover (replicas=$TOTAL ready=$READY leader='$NEW_LEADER' fresh_acquisitions=$REACQUIRED)"
+  FAIL=$((FAIL+1))
+  echo "--- diagnostics: lease object ---"; kubectl -n "$NS" get lease runlore-leader -o yaml 2>&1
+  echo "--- diagnostics: pods ---"; kubectl -n "$NS" get pods -l app.kubernetes.io/name=runlore -o wide 2>&1
+  [[ -n "$NEW_LEADER" ]] && { echo "--- diagnostics: $NEW_LEADER logs ---"; kubectl -n "$NS" logs "$NEW_LEADER" --tail=40 2>&1; }
+fi
+
+# Revert to Deployment mode / replicaCount=1: step 11 below assumes `deploy/runlore`.
+helm upgrade runlore deploy/helm/runlore -n "$NS" --reuse-values \
+  --set workloadKind=Deployment \
+  --set persistence.enabled=false \
+  --set replicaCount=1 >/dev/null
+for _ in $(seq 1 30); do
+  kubectl -n "$NS" rollout status deployment/runlore --timeout=5s >/dev/null 2>&1 && break
+  sleep 2
+done
+if kubectl -n "$NS" get deployment/runlore >/dev/null 2>&1; then
+  green "PASS: reverted to Deployment mode cleanly"; PASS=$((PASS+1))
+else red "FAIL: Deployment did not come back after reverting workloadKind"; FAIL=$((FAIL+1)); fi
+
 step "11/11 ArgoCD engine (reconfigure + Application Degraded)"
 kubectl apply -f - <<'YAML'
 apiVersion: apiextensions.k8s.io/v1
