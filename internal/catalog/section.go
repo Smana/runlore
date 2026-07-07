@@ -59,10 +59,10 @@ func headingText(line string) string {
 
 // truncateRunes caps s at max runes, appending … when cut — rune-aware so a
 // multibyte character is never split.
-func truncateRunes(s string, max int) string {
-	if utf8.RuneCountInString(s) <= max {
+func truncateRunes(s string, n int) string {
+	if utf8.RuneCountInString(s) <= n {
 		return s
 	}
 	r := []rune(s)
-	return strings.TrimRight(string(r[:max]), " ") + "…"
+	return strings.TrimRight(string(r[:n]), " ") + "…"
 }
