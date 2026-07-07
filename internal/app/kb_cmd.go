@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 	"strings"
 	"text/tabwriter"
 	"time"
@@ -165,9 +166,85 @@ func relAge(ts string) string {
 	}
 }
 
-// runKBShow is implemented in Task 2 of the plan.
-func runKBShow(args []string, w io.Writer) error { //nolint:revive // args kept: Task 2 replaces this stub with the real signature
-	return fmt.Errorf("kb show: not implemented yet")
+// runKBShow prints one entry in full: the frontmatter card, then the body. The
+// argument is a bundle-relative path or a bare filename; when neither matches
+// exactly, a search fallback accepts a UNIQUE hit and otherwise lists the
+// candidates instead of guessing — showing the wrong runbook is worse than
+// asking the human to pick.
+func runKBShow(args []string, w io.Writer) error {
+	fs := flag.NewFlagSet("kb show", flag.ContinueOnError)
+	cfgPath := fs.String("config", "runlore.yaml", "path to config file")
+	dir := fs.String("dir", "", "catalog directory (overrides config catalog.dir)")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	arg := strings.TrimSpace(strings.Join(fs.Args(), " "))
+	if arg == "" {
+		return fmt.Errorf("usage: lore kb show <entry-path | filename | query> [--dir <catalog>]")
+	}
+	cat, err := loadKBCatalog(*cfgPath, *dir)
+	if err != nil {
+		return err
+	}
+	e, ok := findEntry(cat, arg)
+	if !ok {
+		hits, serr := cat.SearchScored(arg, 5)
+		if serr != nil {
+			return serr
+		}
+		switch len(hits) {
+		case 0:
+			return fmt.Errorf("no entry matches %q", arg)
+		case 1:
+			e = hits[0].Entry
+		default:
+			var b strings.Builder
+			for _, h := range hits {
+				_, _ = fmt.Fprintf(&b, "  %s — %s\n", h.Entry.Path, h.Entry.Title)
+			}
+			return fmt.Errorf("no exact match for %q; candidates:\n%s", arg, strings.TrimRight(b.String(), "\n"))
+		}
+	}
+	writeEntry(w, e)
+	return nil
+}
+
+// findEntry matches by exact bundle-relative path, then by bare filename (with
+// or without the .md suffix).
+func findEntry(cat *catalog.Catalog, arg string) (catalog.Entry, bool) {
+	base := strings.TrimSuffix(arg, ".md")
+	for _, e := range cat.Entries() {
+		if e.Path == arg || strings.TrimSuffix(filepath.Base(e.Path), ".md") == base {
+			return e, true
+		}
+	}
+	return catalog.Entry{}, false
+}
+
+// writeEntry prints the frontmatter card then the markdown body — the same
+// information a reviewer sees on the file, without leaving the terminal.
+func writeEntry(w io.Writer, e catalog.Entry) {
+	_, _ = fmt.Fprintf(w, "# %s\n\n", e.Title)
+	card := [][2]string{
+		{"path", e.Path}, {"type", e.Type}, {"description", e.Description},
+		{"resource", e.Resource}, {"tags", strings.Join(e.Tags, ", ")},
+		{"last seen", relAge(e.Timestamp)}, {"fingerprint", shortFP(e.Fingerprint)},
+	}
+	for _, kv := range card {
+		if kv[1] != "" {
+			_, _ = fmt.Fprintf(w, "%s: %s\n", kv[0], kv[1])
+		}
+	}
+	_, _ = fmt.Fprintf(w, "\n%s\n", strings.TrimSpace(e.Body))
+}
+
+// shortFP abbreviates the 64-hex dup fingerprint for display; identity checks
+// belong to machines, humans only need "has one / which one roughly".
+func shortFP(fp string) string {
+	if len(fp) > 12 {
+		return fp[:12] + "…"
+	}
+	return fp
 }
 
 // writeHitsJSON is implemented in Task 4 of the plan.

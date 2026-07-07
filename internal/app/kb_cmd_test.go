@@ -77,6 +77,39 @@ func TestKBSearchUsageErrors(t *testing.T) {
 	}
 }
 
+func TestKBShow(t *testing.T) {
+	dir := writeKBFixture(t)
+	cases := []struct{ label, arg string }{
+		{"exact path", "incidents/crashloop-web.md"},
+		{"filename slug", "crashloop-web"},
+		{"search fallback unique", "configmap truncated kustomize"},
+	}
+	for _, c := range cases {
+		var out strings.Builder
+		if err := runKBShow([]string{"--dir", dir, c.arg}, &out); err != nil {
+			t.Fatalf("%s: runKBShow: %v", c.label, err)
+		}
+		got := out.String()
+		for _, want := range []string{"CrashLoop web ConfigMap truncated", "type: Incident",
+			"resource: apps/web", "## Cause", "revert the patch"} {
+			if !strings.Contains(got, want) {
+				t.Errorf("%s: output missing %q:\n%s", c.label, want, got)
+			}
+		}
+	}
+}
+
+func TestKBShowNoMatchIsError(t *testing.T) {
+	dir := writeKBFixture(t)
+	var out strings.Builder
+	if err := runKBShow([]string{"--dir", dir, "zzz-nothing"}, &out); err == nil {
+		t.Fatal("want error when nothing matches")
+	}
+	if err := runKBShow([]string{"--dir", dir}, &out); err == nil {
+		t.Fatal("want usage error when the entry argument is missing")
+	}
+}
+
 func TestRelAge(t *testing.T) {
 	now := time.Now()
 	cases := []struct {
