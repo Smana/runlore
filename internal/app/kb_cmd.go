@@ -247,8 +247,33 @@ func shortFP(fp string) string {
 	return fp
 }
 
-// writeHitsJSON is implemented in Task 4 of the plan.
-func writeHitsJSON(w io.Writer, hits []catalog.ScoredEntry, counts map[string]outcome.Aggregate) error { //nolint:revive // hits/counts kept: Task 4 replaces this stub with the real signature
-	_ = json.NewEncoder(w)
-	return fmt.Errorf("kb search --json: not implemented yet")
+// kbHit is the machine-readable search result (the CLI counterpart of the
+// kb_search MCP tool's hit shape, plus the optional ledger track record).
+type kbHit struct {
+	Path        string   `json:"path"`
+	Type        string   `json:"type,omitempty"`
+	Title       string   `json:"title"`
+	Description string   `json:"description,omitempty"`
+	Resource    string   `json:"resource,omitempty"`
+	Tags        []string `json:"tags,omitempty"`
+	Score       float64  `json:"score"`
+	LastSeen    string   `json:"last_seen,omitempty"` // frontmatter timestamp, RFC3339
+	Recalls     int      `json:"recalls,omitempty"`
+	Resolved    int      `json:"resolved,omitempty"`
+}
+
+func writeHitsJSON(w io.Writer, hits []catalog.ScoredEntry, counts map[string]outcome.Aggregate) error {
+	out := make([]kbHit, 0, len(hits))
+	for _, h := range hits {
+		agg := counts[h.Entry.Path]
+		out = append(out, kbHit{
+			Path: h.Entry.Path, Type: h.Entry.Type, Title: h.Entry.Title,
+			Description: h.Entry.Description, Resource: h.Entry.Resource, Tags: h.Entry.Tags,
+			Score: h.Score, LastSeen: h.Entry.Timestamp,
+			Recalls: agg.Recalls, Resolved: agg.Resolved,
+		})
+	}
+	enc := json.NewEncoder(w)
+	enc.SetIndent("", "  ")
+	return enc.Encode(out)
 }

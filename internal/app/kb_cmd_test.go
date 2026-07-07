@@ -1,6 +1,7 @@
 package app
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
@@ -163,6 +164,31 @@ func TestKBSearchLedgerResolveColumn(t *testing.T) {
 	}
 	if !strings.Contains(got, "1/2") {
 		t.Errorf("resolve-rate 1/2 missing:\n%s", got)
+	}
+}
+
+func TestKBSearchJSON(t *testing.T) {
+	dir := writeKBFixture(t)
+	var out strings.Builder
+	if err := runKBSearch([]string{"--dir", dir, "--json", "crashloop", "web"}, &out); err != nil {
+		t.Fatalf("runKBSearch --json: %v", err)
+	}
+	var hits []struct {
+		Path     string  `json:"path"`
+		Type     string  `json:"type"`
+		Title    string  `json:"title"`
+		Resource string  `json:"resource"`
+		Score    float64 `json:"score"`
+		LastSeen string  `json:"last_seen"`
+	}
+	if err := json.Unmarshal([]byte(out.String()), &hits); err != nil {
+		t.Fatalf("output is not a JSON array: %v\n%s", err, out.String())
+	}
+	if len(hits) == 0 || hits[0].Path != "incidents/crashloop-web.md" {
+		t.Fatalf("unexpected hits: %+v", hits)
+	}
+	if hits[0].Score <= 0 || hits[0].Type != "Incident" || hits[0].Resource != "apps/web" {
+		t.Errorf("hit fields not mapped: %+v", hits[0])
 	}
 }
 
