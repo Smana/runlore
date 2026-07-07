@@ -75,12 +75,60 @@ func TestFormatVerdictMetadataRecurrence(t *testing.T) {
 		"cluster eu-west-1",
 		"tenant platform",
 		"Started: 2026-07-03T10:00:00Z",
-		"Occurrence: #3",
+		"📚 Seen before: ×3",
 		"last investigated 2026-06-01T09:00:00Z",
 		"Previous conclusion: https://kb.example/entry/prev",
 	} {
 		if !strings.Contains(out, want) {
 			t.Fatalf("formatted message missing %q:\n%s", want, out)
+		}
+	}
+}
+
+// TestFormatPriorKnowledge covers the zero-click payoff: when the completion
+// pipeline found the merged KB entry for a recurring incident (Prior), Format
+// quotes the previous cause, human-reviewed resolution, and resolve rate
+// inline alongside the seen-before counter and link.
+func TestFormatPriorKnowledge(t *testing.T) {
+	inv := providers.Investigation{
+		Title: "t", Confidence: 0.8,
+		Occurrences:    3,
+		LastOccurrence: time.Date(2026, 6, 25, 10, 0, 0, 0, time.UTC),
+		PrevCuratedURL: "https://kb/pr/12",
+		Prior: &providers.PriorKnowledge{
+			Cause: "ConfigMap truncated after kustomize bump", Resolution: "revert the patch and pin 5.3.2",
+			Recalls: 3, Resolved: 3,
+		},
+	}
+	out := Format(inv)
+	for _, want := range []string{
+		"📚 Seen before: ×3 — last investigated 2026-06-25T10:00:00Z",
+		"Prior cause: ConfigMap truncated after kustomize bump",
+		"Prior resolution: revert the patch and pin 5.3.2",
+		"Resolve rate: 3/3 recalls resolved",
+		"Previous conclusion: https://kb/pr/12",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("Format missing %q\n---\n%s", want, out)
+		}
+	}
+}
+
+// TestFormatSeenBeforeWithoutPrior asserts that without Prior the block keeps
+// today's counter+link shape (no empty labels).
+func TestFormatSeenBeforeWithoutPrior(t *testing.T) {
+	inv := providers.Investigation{
+		Title: "t", Confidence: 0.8,
+		Occurrences: 2, LastOccurrence: time.Date(2026, 6, 25, 10, 0, 0, 0, time.UTC),
+		PrevCuratedURL: "https://kb/pr/12",
+	}
+	out := Format(inv)
+	if !strings.Contains(out, "📚 Seen before: ×2") {
+		t.Errorf("missing seen-before counter:\n%s", out)
+	}
+	for _, absent := range []string{"Prior cause:", "Prior resolution:", "Resolve rate:"} {
+		if strings.Contains(out, absent) {
+			t.Errorf("Format must omit %q when Prior is nil:\n%s", absent, out)
 		}
 	}
 }
@@ -129,7 +177,12 @@ func TestFormatEnrichedOmissions(t *testing.T) {
 // evidence should). With a fully-populated investigation whose user strings are
 // themselves free of those three chars, the WHOLE output must be free of them.
 func TestFormatScaffoldingHasNoMrkdwnMeta(t *testing.T) {
-	out := Format(sampleInvestigation())
+	inv := sampleInvestigation()
+	inv.Occurrences = 2
+	inv.LastOccurrence = time.Now()
+	inv.PrevCuratedURL = "https://kb/pr/1"
+	inv.Prior = &providers.PriorKnowledge{Cause: "c", Resolution: "r", Recalls: 1, Resolved: 1}
+	out := Format(inv)
 	for _, ch := range []string{"&", "<", ">"} {
 		if strings.Contains(out, ch) {
 			t.Fatalf("Format scaffolding must not contain %q (breaks fallback escaping):\n%s", ch, out)
