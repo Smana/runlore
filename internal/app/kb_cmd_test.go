@@ -6,6 +6,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/Smana/runlore/internal/outcome"
 )
 
 // writeKBFixture materializes a small OKF catalog: two entries whose lexical
@@ -127,5 +129,56 @@ func TestRelAge(t *testing.T) {
 		if got := relAge(c.ts); got != c.want {
 			t.Errorf("relAge(%q) = %q, want %q", c.ts, got, c.want)
 		}
+	}
+}
+
+func TestKBSearchLedgerResolveColumn(t *testing.T) {
+	dir := writeKBFixture(t)
+	// Build a real ledger: the crashloop entry was recalled twice, resolved once.
+	ledgerPath := filepath.Join(t.TempDir(), "outcomes.jsonl")
+	l, err := outcome.New(ledgerPath)
+	if err != nil {
+		t.Fatalf("new ledger: %v", err)
+	}
+	rv := true
+	for _, fp := range []string{"a", "b"} {
+		if err := l.Open(outcome.Event{
+			Fingerprint: fp, Kind: "recall", Entry: "incidents/crashloop-web.md",
+			Resolvable: &rv, At: time.Now().Add(-time.Hour),
+		}); err != nil {
+			t.Fatalf("seed open: %v", err)
+		}
+	}
+	if _, _, err := l.Resolve("a", time.Now()); err != nil {
+		t.Fatalf("seed resolve: %v", err)
+	}
+
+	var out strings.Builder
+	if err := runKBSearch([]string{"--dir", dir, "--ledger", ledgerPath, "crashloop", "web"}, &out); err != nil {
+		t.Fatalf("runKBSearch: %v", err)
+	}
+	got := out.String()
+	if !strings.Contains(got, "RESOLVE") {
+		t.Errorf("RESOLVE header missing:\n%s", got)
+	}
+	if !strings.Contains(got, "1/2") {
+		t.Errorf("resolve-rate 1/2 missing:\n%s", got)
+	}
+}
+
+func TestKBSearchLedgerMissingWarnsAndOmits(t *testing.T) {
+	dir := writeKBFixture(t)
+	missing := filepath.Join(t.TempDir(), "nope.jsonl")
+	var out strings.Builder
+	if err := runKBSearch([]string{"--dir", dir, "--ledger", missing, "crashloop"}, &out); err != nil {
+		t.Fatalf("a missing ledger must not fail the search: %v", err)
+	}
+	got := out.String()
+	if !strings.Contains(got, "warning: ledger") {
+		t.Errorf("missing warning line:\n%s", got)
+	}
+	// Stat-before-open: the warning path must not have created the file.
+	if _, err := os.Stat(missing); err == nil {
+		t.Error("--ledger must never create the ledger file")
 	}
 }
