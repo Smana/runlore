@@ -381,6 +381,33 @@ func TestPRBodyRelatedKnowledge(t *testing.T) {
 	}
 }
 
+func TestPRBodyRecurrenceOnlyNoRelatedEntries(t *testing.T) {
+	c := New("", "acme", "kb", "main", nil) // public GitHub host
+	e := providers.KBEntry{
+		Title: "T", Description: "d", Fingerprint: "abc123",
+		Occurrences: 4, // recalled before, but the dedup search returned no neighbors
+	}
+	body := c.prBody(e)
+	for _, want := range []string{
+		"## Related knowledge",
+		"Trigger seen ×4",
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("prBody missing %q\n---\n%s", want, body)
+		}
+	}
+	if strings.Contains(body, "score ") || strings.Contains(body, "resource ") {
+		t.Errorf("prBody must not render list items when Related is empty:\n%s", body)
+	}
+	// The dedup marker survives, still parseable, still last.
+	if got := providers.ParseFingerprintMarker(body); got != "abc123" {
+		t.Errorf("ParseFingerprintMarker = %q, want abc123", got)
+	}
+	if !strings.HasSuffix(strings.TrimSpace(body), providers.FingerprintMarker("abc123")) {
+		t.Error("fingerprint marker must remain the last body element")
+	}
+}
+
 func TestPRBodyNoRelatedSectionWhenEmpty(t *testing.T) {
 	c := New("", "acme", "kb", "main", nil)
 	body := c.prBody(providers.KBEntry{Title: "T", Fingerprint: "abc123"})
@@ -392,6 +419,14 @@ func TestPRBodyNoRelatedSectionWhenEmpty(t *testing.T) {
 func TestBlobURLEnterpriseHost(t *testing.T) {
 	c := New("https://ghe.example.com/api/v3", "acme", "kb", "main", nil)
 	want := "https://ghe.example.com/acme/kb/blob/main/incidents/a.md"
+	if got := c.blobURL("incidents/a.md"); got != want {
+		t.Errorf("blobURL = %q, want %q", got, want)
+	}
+}
+
+func TestBlobURLEmptyBaseBranchFallsBackToMain(t *testing.T) {
+	c := New("", "acme", "kb", "", nil)
+	want := "https://github.com/acme/kb/blob/main/incidents/a.md"
 	if got := c.blobURL("incidents/a.md"); got != want {
 		t.Errorf("blobURL = %q, want %q", got, want)
 	}

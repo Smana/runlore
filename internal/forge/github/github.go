@@ -408,6 +408,11 @@ func (c *Client) relatedSection(e providers.KBEntry) string {
 // the API base with its API suffix stripped: api.github.com → github.com;
 // GHES https://ghe.example.com/api/v3 → https://ghe.example.com. Relative
 // links are NOT an option here — GitHub does not resolve them in PR bodies.
+// Deployment assumption: path is a RelatedEntry.Path, relative to the catalog
+// bundle root, and is assumed to resolve at the ROOT of the forge kb_repo on
+// the base branch — matching where entryPath/maintainBundle write entries.
+// Pointing catalog.dir at a different tree than kb_repo's root yields dead
+// (but harmless) links here.
 func (c *Client) blobURL(path string) string {
 	host := c.baseURL
 	if host == DefaultBaseURL {
