@@ -245,6 +245,8 @@ flowchart TD
     DUP -- no --> DRAFT["Draft KB entry → open PR<br/>(decision card + OKF sections + fingerprint)"]
 ```
 
+The drafted PR body also carries a *Related knowledge* section — the dedup search's k=5 neighborhood plus the trigger's recurrence line — so the human reviewing the entry sees what the catalog already holds.
+
 The two load-bearing ideas:
 
 - **Quality gate first (`meetsBar`).** A finding reaches the catalog only if it was

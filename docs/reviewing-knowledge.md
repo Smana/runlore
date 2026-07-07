@@ -111,6 +111,17 @@ appended to `log.md` — all in the one diff you review.
 
 ---
 
+### Related knowledge in the PR
+
+Each drafted PR ends with a **Related knowledge** section: the closest existing
+entries at draft time (linked, with their BM25 score and affected resource) and
+— when the trigger has fired before — a `Trigger seen ×N` line pointing at the
+previous entry. Use it to answer the two review questions cheaply: *is this a
+duplicate of something merged?* and *does this incident keep coming back?*
+Scores are corpus-relative hints, not a ranking guarantee.
+
+---
+
 ## 3. Reviewing it — three checks
 
 Formatting is already enforced for you (a CI check validates the structure — see
