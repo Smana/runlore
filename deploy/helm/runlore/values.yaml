@@ -9,6 +9,22 @@ replicaCount: 2
 # unaffected. Switch to RollingUpdate only with a leadership-independent readiness model.
 updateStrategy: Recreate
 
+# Deployment (default) shares one PVC across every replica via persistence.existingClaim
+# (or the templated `<fullname>-data` claim) — fine for replicaCount=1. On a real
+# multi-node cluster with an RWO (single-attach) StorageClass, a second replicaCount>1
+# pod scheduled on a different node cannot attach that already-attached volume and
+# hangs. Set StatefulSet to give each replica its OWN volume via volumeClaimTemplates;
+# leader election (already topology-agnostic — only the elected leader is Ready) then
+# provides real HA. Trade-off: a new leader that takes over on a DIFFERENT replica's
+# volume starts with an empty local outcome ledger (the catalog is unaffected — it
+# re-clones from git). Only affects persistence.enabled=true; ConfigMap/emptyDir
+# catalog modes are unchanged either way.
+workloadKind: Deployment  # Deployment | StatefulSet
+
+# StatefulSet-only; ignored under Deployment (which uses updateStrategy above).
+# Empty defaults to RollingUpdate in the template — StatefulSet has no "Recreate".
+statefulsetUpdateStrategy: ""  # "" (-> RollingUpdate) | RollingUpdate | OnDelete
+
 image:
   repository: ghcr.io/smana/runlore
   tag: ""               # defaults to .Chart.AppVersion
@@ -229,9 +245,14 @@ catalog:
 # Durability for the writable data path (catalog.mountPath) where the outcome
 # ledger and the hash-chained audit log live. Disabled by default: the data path
 # is an emptyDir and is DESTROYED on pod restart, upgrade, or leader failover.
-# Enable to back it with a ReadWriteMany volume (e.g. EFS/Filestore) so the
-# outcome ledger + audit log survive pod restarts AND leader failover. RWX is
-# required because the standby replica must mount the same data to take over.
+# Enable to back it with a volume so the outcome ledger + audit log survive pod
+# restarts. Two HA shapes, picked via workloadKind above:
+#   - workloadKind: Deployment (default) + accessModes: [ReadWriteMany] (e.g. EFS) —
+#     every replica shares the SAME volume, so a new leader keeps the ledger/audit
+#     log with zero data loss on failover. Requires an RWX-capable StorageClass.
+#   - workloadKind: StatefulSet + accessModes: [ReadWriteOnce] (e.g. EBS) — each
+#     replica gets its OWN volume via volumeClaimTemplates; no RWX needed, but a
+#     new leader taking over on a different replica starts with an empty ledger.
 # Leave disabled (emptyDir) for non-HA / ephemeral setups.
 persistence:
   enabled: false
