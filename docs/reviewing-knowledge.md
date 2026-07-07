@@ -129,6 +129,28 @@ Your job is the **judgment** the machine can't make:
 
 ---
 
+## Searching the KB from the CLI
+
+The same BM25 index the agent uses for recall is available to humans:
+
+    # against a local checkout of your KB repo
+    lore kb search "crashloop web configmap" --dir ./my-kb
+
+    # or via config (catalog.dir), after `lore catalog sync`
+    lore kb search "oom worker"
+
+    # one entry in full — path, filename, or a query with a unique hit
+    lore kb show crashloop-web
+
+`--json` emits the hits for scripting. `--ledger /var/lib/runlore/outcomes.jsonl`
+adds a RESOLVE column (how often each entry's recalls preceded the incident
+actually resolving) when you have a copy of the outcome ledger.
+
+This is also the 30-second evaluation path: clone any OKF knowledge repo and
+point `--dir` at it — no cluster, no model, no config.
+
+---
+
 ## 4. Add context / refine it
 
 The PR is just Markdown — **edit it like any other PR**:
