@@ -1,4 +1,5 @@
-{{- if and .Values.persistence.enabled (not .Values.persistence.existingClaim) }}
+{{- if and (ne .Values.workloadKind "StatefulSet") .Values.persistence.enabled (not .Values.persistence.existingClaim) }}
+{{- /* StatefulSet mode owns its per-replica PVCs via volumeClaimTemplates (statefulset.yaml) instead. */}}
 apiVersion: v1
 kind: PersistentVolumeClaim
 metadata:

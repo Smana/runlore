@@ -12,6 +12,16 @@
     "updateStrategy": {
       "type": "string"
     },
+    "workloadKind": {
+      "description": "Deployment (default) shares one PVC across all replicas via persistence.existingClaim — fine for replicaCount=1, but an RWO (EBS-class) volume can't attach to a standby on a different node. StatefulSet gives each replica its own volume via volumeClaimTemplates, which real multi-node HA (replicaCount>1 + persistence.enabled) requires.",
+      "type": "string",
+      "enum": ["Deployment", "StatefulSet"]
+    },
+    "statefulsetUpdateStrategy": {
+      "description": "StatefulSet-only; ignored under Deployment. Empty defaults to RollingUpdate.",
+      "type": "string",
+      "enum": ["", "RollingUpdate", "OnDelete"]
+    },
     "image": {
       "type": "object",
       "additionalProperties": true,

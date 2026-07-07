@@ -1,0 +1,44 @@
+{{- if eq .Values.workloadKind "StatefulSet" }}
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: {{ include "runlore.fullname" . }}
+  labels:
+    {{- include "runlore.labels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.replicaCount }}
+  serviceName: {{ include "runlore.fullname" . }}-headless
+  # Parallel: with per-replica volumes (no shared RWO to serialize on) and leader
+  # election deciding who's active, there's no reason to wait for ordinal N-1's
+  # rollout before starting N — that would only slow failover.
+  podManagementPolicy: Parallel
+  # StatefulSet's updateStrategy has a different type enum than Deployment's
+  # (RollingUpdate|OnDelete, no "Recreate") so .Values.updateStrategy — Deployment-
+  # shaped, defaults to "Recreate" — isn't reused here. RollingUpdate can hit the
+  # same old-leader-holds-the-Lease stall the Deployment comment warns about; if
+  # that bites, override with `--set-string statefulsetUpdateStrategy=OnDelete` for
+  # manual, explicit rollouts instead.
+  updateStrategy:
+    type: {{ .Values.statefulsetUpdateStrategy | default "RollingUpdate" }}
+  selector:
+    matchLabels:
+      {{- include "runlore.selectorLabels" . | nindent 6 }}
+  template:
+    {{- include "runlore.podTemplate" . | nindent 4 }}
+  {{- if .Values.persistence.enabled }}
+  volumeClaimTemplates:
+    - metadata:
+        name: catalog
+        labels:
+          {{- include "runlore.labels" . | nindent 10 }}
+      spec:
+        accessModes:
+          {{- toYaml .Values.persistence.accessModes | nindent 10 }}
+        resources:
+          requests:
+            storage: {{ .Values.persistence.size }}
+        {{- if .Values.persistence.storageClass }}
+        storageClassName: {{ .Values.persistence.storageClass | quote }}
+        {{- end }}
+  {{- end }}
+{{- end }}

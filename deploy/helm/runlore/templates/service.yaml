@@ -13,3 +13,26 @@ spec:
       port: {{ .Values.service.port }}
       targetPort: http
       protocol: TCP
+{{- if eq .Values.workloadKind "StatefulSet" }}
+---
+# The governing Service a StatefulSet requires for pod ordinal DNS identity
+# (<pod>.<service>.<namespace>.svc). Headless (clusterIP: None) and selects ALL
+# replicas (not just the Ready leader, unlike the Service above) — publishBotReady
+# isn't needed here since nothing routes webhook traffic through it.
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "runlore.fullname" . }}-headless
+  labels:
+    {{- include "runlore.labels" . | nindent 4 }}
+spec:
+  clusterIP: None
+  publishNotReadyAddresses: true
+  selector:
+    {{- include "runlore.selectorLabels" . | nindent 4 }}
+  ports:
+    - name: http
+      port: {{ .Values.service.port }}
+      targetPort: http
+      protocol: TCP
+{{- end }}

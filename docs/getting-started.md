@@ -197,6 +197,12 @@ image:
   tag: ""            # defaults to the chart appVersion; pin in production
 
 # HA: 2+ replicas, one active leader (the rest hot standby). See leader_election below.
+# If you also set persistence.enabled: true, pick workloadKind explicitly: the default
+# Deployment shares one PVC across every replica (fine with an RWX StorageClass like
+# EFS; an RWO one like EBS can't attach it to a standby on a different node — set
+# workloadKind: StatefulSet instead, which gives each replica its own volume via
+# volumeClaimTemplates at the cost of an empty outcome ledger for whichever replica
+# becomes leader next).
 replicaCount: 2
 
 # Inject the whole Secret as env vars (referenced by *_env config keys below).
