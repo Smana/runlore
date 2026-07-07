@@ -156,7 +156,7 @@ func TestFormatEnrichedOmissions(t *testing.T) {
 	bare := Format(providers.Investigation{RootCauses: []providers.Hypothesis{{Summary: "x"}}})
 	for _, unwanted := range []string{
 		"Verdict:", "Alert:", "severity ", "cluster ", "tenant ",
-		"Started:", "Occurrence:", "Previous conclusion:", "*Ruled out:*", "*Data gaps:*",
+		"Started:", "📚 Seen before:", "Previous conclusion:", "*Ruled out:*", "*Data gaps:*",
 	} {
 		if strings.Contains(bare, unwanted) {
 			t.Fatalf("bare investigation must not render %q:\n%s", unwanted, bare)
@@ -166,7 +166,7 @@ func TestFormatEnrichedOmissions(t *testing.T) {
 	// Occurrences ≤ 1 is a first sighting: no recurrence line.
 	first := sampleInvestigation()
 	first.Occurrences = 1
-	if strings.Contains(Format(first), "Occurrence:") {
+	if strings.Contains(Format(first), "📚 Seen before:") {
 		t.Fatalf("first sighting (Occurrences=1) must omit the recurrence line:\n%s", Format(first))
 	}
 }
