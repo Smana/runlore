@@ -213,7 +213,10 @@ Two read APIs turn this raw log into a learning signal:
   each open): how many times *this alert* has fired, when the last occurrence was, and the
   KB link from the previous one. The delivery path reads this to stamp **recurrence facts**
   (occurrence count + previous-KB link) onto the notification, so a repeat alert is
-  visibly flagged as recurring rather than looking brand-new.
+  visibly flagged as recurring rather than looking brand-new. When the recurring
+  incident's merged entry is findable by dup-fingerprint, the notification also quotes
+  the entry's **cause and human-reviewed resolution** inline (with its recall
+  resolve-rate), so the previous answer is readable without leaving chat.
 
 Design choices worth calling out:
 
