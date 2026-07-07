@@ -438,9 +438,24 @@ type Investigation struct {
 	// Recurrence facts stamped at completion from the outcome ledger's per-TriggerKey
 	// index (never seen by the model). They describe PRIOR investigations of the same
 	// TriggerKey; this run's own open is recorded after they are read.
-	Occurrences    int       // Nth recorded investigation of this TriggerKey (1 = first); 0 = unknown/ledger disabled
-	LastOccurrence time.Time // when the previous occurrence was investigated
-	PrevCuratedURL string    // the previous occurrence's KB link, for the "same conclusion as before" pointer
+	Occurrences    int             // Nth recorded investigation of this TriggerKey (1 = first); 0 = unknown/ledger disabled
+	LastOccurrence time.Time       // when the previous occurrence was investigated
+	PrevCuratedURL string          // the previous occurrence's KB link, for the "same conclusion as before" pointer
+	Prior          *PriorKnowledge // what the merged KB entry already says about this recurring incident; nil when unknown (see PriorKnowledge)
+}
+
+// PriorKnowledge is what the knowledge base already says about a recurring
+// incident: excerpts of the merged entry's Cause and (human-reviewed)
+// Resolution sections, plus the entry's recall track record from the outcome
+// ledger. Stamped at completion — never seen by the model — and only on FRESH
+// investigations of a recurring TriggerKey whose merged entry is findable by
+// dup-fingerprint; nil otherwise, so notifiers fall back to the counter+link.
+type PriorKnowledge struct {
+	Cause      string // excerpt of the merged entry's "## Cause" section
+	Resolution string // excerpt of "## Resolution" — carries the human's review edits, the payoff of curation
+	EntryPath  string // catalog path of the merged entry
+	Recalls    int    // times the entry answered an incident via instant recall
+	Resolved   int    // recalls followed by an incident-resolved signal
 }
 
 // UsageTotals aggregates model token usage over a whole investigation: every

@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/Smana/runlore/internal/catalog"
 	"github.com/Smana/runlore/internal/notify"
 	"github.com/Smana/runlore/internal/outcome"
 	"github.com/Smana/runlore/internal/providers"
@@ -99,7 +100,7 @@ func TestOnCompleteStampsRecurrenceAndPersistsOpen(t *testing.T) {
 		TriggerKey:  "k",
 		Verdict:     providers.VerdictActionRequired,
 	}
-	onInvestigationComplete(context.Background(), found, ledger, cur, notifier, nil, nil, nil, discardLog())
+	onInvestigationComplete(context.Background(), found, ledger, nil, cur, notifier, nil, nil, nil, discardLog())
 
 	// Delivered investigation carries the recurrence facts queried BEFORE this open.
 	if sink.got.Occurrences != 2 {
@@ -148,7 +149,7 @@ func TestOnCompleteCountsOneOccurrencePerInvestigation(t *testing.T) {
 		Fingerprints: []string{"f1", "f2", "f3"},
 		TriggerKey:   "k",
 	}
-	onInvestigationComplete(context.Background(), found, ledger, nil, notifier, nil, nil, nil, discardLog())
+	onInvestigationComplete(context.Background(), found, ledger, nil, nil, notifier, nil, nil, nil, discardLog())
 
 	// One investigation ⇒ exactly one TriggerKey occurrence, despite 3 opens.
 	if n, _, _ := ledger.Occurrences("k"); n != 1 {
@@ -159,7 +160,7 @@ func TestOnCompleteCountsOneOccurrencePerInvestigation(t *testing.T) {
 	}
 
 	// A second investigation of the same key bumps the count to exactly 2.
-	onInvestigationComplete(context.Background(), found, ledger, nil, notifier, nil, nil, nil, discardLog())
+	onInvestigationComplete(context.Background(), found, ledger, nil, nil, notifier, nil, nil, nil, discardLog())
 	if n, _, _ := ledger.Occurrences("k"); n != 2 {
 		t.Errorf("Occurrences(k) after 2nd run = %d, want 2", n)
 	}
@@ -190,7 +191,7 @@ func TestOnCompleteRecordsGitOpsIncident(t *testing.T) {
 		Fingerprints: []string{fp},
 		TriggerKey:   "argocd/airflow:Degraded",
 	}
-	onInvestigationComplete(context.Background(), found, ledger, nil, notifier, nil, nil, nil, discardLog())
+	onInvestigationComplete(context.Background(), found, ledger, nil, nil, notifier, nil, nil, nil, discardLog())
 
 	// The GitOps incident is now captured: an open was recorded (Occurrences ≥ 1) ...
 	if n, _, _ := ledger.Occurrences("argocd/airflow:Degraded"); n != 1 {
@@ -228,7 +229,7 @@ func TestOnCompleteGitOpsRecallNotCountedTowardDecay(t *testing.T) {
 		Recalled:      true,
 		RecalledEntry: "airflow.md",
 	}
-	onInvestigationComplete(context.Background(), gitops, ledger, nil, notifier, nil, nil, nil, discardLog())
+	onInvestigationComplete(context.Background(), gitops, ledger, nil, nil, notifier, nil, nil, nil, discardLog())
 
 	if c, _ := ledger.OpenCounts(); c["airflow.md"].Recalls != 0 {
 		t.Fatalf("a non-resolvable GitOps recall must not count toward Recalls, got %+v", c["airflow.md"])
@@ -242,8 +243,107 @@ func TestOnCompleteGitOpsRecallNotCountedTowardDecay(t *testing.T) {
 		Recalled:      true,
 		RecalledEntry: "harbor.md",
 	}
-	onInvestigationComplete(context.Background(), alert, ledger, nil, notifier, nil, nil, nil, discardLog())
+	onInvestigationComplete(context.Background(), alert, ledger, nil, nil, notifier, nil, nil, nil, discardLog())
 	if c, _ := ledger.OpenCounts(); c["harbor.md"].Recalls != 1 {
 		t.Fatalf("a resolvable Alertmanager recall must count toward Recalls, got %+v", c["harbor.md"])
+	}
+}
+
+// fakePrior stubs the catalog's exact-identity lookup so the completion
+// pipeline can be tested without building a bleve index.
+type fakePrior struct {
+	e  catalog.Entry
+	ok bool
+}
+
+func (f fakePrior) FindFingerprint(string) (catalog.Entry, bool) { return f.e, f.ok }
+
+// TestOnCompleteStampsPriorKnowledge: a recurring fresh investigation whose
+// merged KB entry is findable by dup-fingerprint must deliver Prior with the
+// entry's Cause/Resolution excerpts and its recall track record.
+func TestOnCompleteStampsPriorKnowledge(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "outcomes.jsonl")
+	ledger, err := outcome.New(path)
+	if err != nil {
+		t.Fatalf("new ledger: %v", err)
+	}
+	// Prior open for the same trigger key ⇒ this run is occurrence #2.
+	if err := ledger.Open(outcome.Event{
+		Fingerprint: "fp0", TriggerKey: "k", CuratedURL: "https://kb/prev",
+		At: time.Now().Add(-4 * time.Hour),
+	}); err != nil {
+		t.Fatalf("seed open: %v", err)
+	}
+	// Track record for the merged entry: one resolvable recall that resolved.
+	rv := true
+	if err := ledger.Open(outcome.Event{
+		Fingerprint: "fpr", Kind: "recall", Entry: "incidents/e.md",
+		Resolvable: &rv, At: time.Now().Add(-3 * time.Hour),
+	}); err != nil {
+		t.Fatalf("seed recall open: %v", err)
+	}
+	if _, _, err := ledger.Resolve("fpr", time.Now().Add(-2*time.Hour)); err != nil {
+		t.Fatalf("seed resolve: %v", err)
+	}
+
+	entry := catalog.Entry{
+		Path: "incidents/e.md",
+		Body: "## Cause\n\n1. **bad kustomize bump** (85%)\n\n## Resolution\n\n- revert and pin 5.3.2\n",
+	}
+	sink := &captureNotifier{}
+	notifier := notify.NewMulti(discardLog(), sink)
+	found := providers.Investigation{Title: "disk pressure", Fingerprint: "fp1", TriggerKey: "k"}
+	onInvestigationComplete(context.Background(), found, ledger, fakePrior{e: entry, ok: true}, nil, notifier, nil, nil, nil, discardLog())
+
+	p := sink.got.Prior
+	if p == nil {
+		t.Fatal("Prior not stamped on a recurring fresh investigation")
+	}
+	if p.Cause != "1. bad kustomize bump (85%)" {
+		t.Errorf("Prior.Cause = %q", p.Cause)
+	}
+	if p.Resolution != "- revert and pin 5.3.2" {
+		t.Errorf("Prior.Resolution = %q", p.Resolution)
+	}
+	if p.EntryPath != "incidents/e.md" {
+		t.Errorf("Prior.EntryPath = %q", p.EntryPath)
+	}
+	if p.Recalls != 1 || p.Resolved != 1 {
+		t.Errorf("Prior track record = %d/%d, want 1/1", p.Resolved, p.Recalls)
+	}
+}
+
+// Recalled investigations must NOT get Prior (the recalled entry IS the
+// delivered answer), and a first sighting or a fingerprint miss leaves it nil.
+func TestOnCompletePriorKnowledgeSkips(t *testing.T) {
+	entry := catalog.Entry{Path: "incidents/e.md", Body: "## Cause\n\nc\n\n## Resolution\n\nr\n"}
+	cases := []struct {
+		label    string
+		seed     bool // seed a prior open (⇒ Occurrences 2)
+		recalled bool
+		found    bool // FindFingerprint hit
+	}{
+		{"recall path", true, true, true},
+		{"first sighting", false, false, true},
+		{"no merged entry", true, false, false},
+	}
+	for _, c := range cases {
+		path := filepath.Join(t.TempDir(), "outcomes.jsonl")
+		ledger, err := outcome.New(path)
+		if err != nil {
+			t.Fatalf("%s: new ledger: %v", c.label, err)
+		}
+		if c.seed {
+			if err := ledger.Open(outcome.Event{Fingerprint: "fp0", TriggerKey: "k", At: time.Now().Add(-time.Hour)}); err != nil {
+				t.Fatalf("%s: seed: %v", c.label, err)
+			}
+		}
+		sink := &captureNotifier{}
+		notifier := notify.NewMulti(discardLog(), sink)
+		found := providers.Investigation{Title: "t", Fingerprint: "fp1", TriggerKey: "k", Recalled: c.recalled}
+		onInvestigationComplete(context.Background(), found, ledger, fakePrior{e: entry, ok: c.found}, nil, notifier, nil, nil, nil, discardLog())
+		if sink.got.Prior != nil {
+			t.Errorf("%s: Prior = %+v, want nil", c.label, sink.got.Prior)
+		}
 	}
 }
