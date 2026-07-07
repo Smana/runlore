@@ -64,19 +64,32 @@ func loadKBCatalog(cfgPath, dir string) (*catalog.Catalog, error) {
 // the reverse, and the usage strings promise both. Each round parses what it
 // can, peels one positional, and re-parses the rest; returned positionals
 // preserve their order.
+// A bare `--` is the flag terminator: once seen, everything after it is a
+// literal positional argument (never re-parsed as a flag), so a query like
+// `-k` can be searched for literally with `lore kb search -- -k`.
 func parseInterleaved(fs *flag.FlagSet, args []string) ([]string, error) {
+	head := args
+	var tail []string
+	for i, a := range args {
+		if a == "--" {
+			head = args[:i]
+			tail = args[i+1:]
+			break
+		}
+	}
 	var positional []string
 	for {
-		if err := fs.Parse(args); err != nil {
+		if err := fs.Parse(head); err != nil {
 			return nil, err
 		}
-		args = fs.Args()
-		if len(args) == 0 {
-			return positional, nil
+		head = fs.Args()
+		if len(head) == 0 {
+			break
 		}
-		positional = append(positional, args[0])
-		args = args[1:]
+		positional = append(positional, head[0])
+		head = head[1:]
 	}
+	return append(positional, tail...), nil
 }
 
 func runKBSearch(args []string, w io.Writer) error {
@@ -92,7 +105,7 @@ func runKBSearch(args []string, w io.Writer) error {
 	}
 	query := strings.TrimSpace(strings.Join(rest, " "))
 	if query == "" {
-		return fmt.Errorf("usage: lore kb search <query> [--dir <catalog>] [-k 10] [--json] [--ledger <jsonl>]")
+		return fmt.Errorf("usage: lore kb search <query> [--config <path>] [--dir <catalog>] [-k 10] [--json] [--ledger <jsonl>]")
 	}
 	cat, err := loadKBCatalog(*cfgPath, *dir)
 	if err != nil {
@@ -105,7 +118,7 @@ func runKBSearch(args []string, w io.Writer) error {
 	if len(hits) == 0 {
 		return fmt.Errorf("no entries match %q", query)
 	}
-	counts := ledgerCounts(*ledgerPath, w)
+	counts := ledgerCounts(*ledgerPath, os.Stderr)
 	if *asJSON {
 		return writeHitsJSON(w, hits, counts)
 	}
@@ -115,23 +128,24 @@ func runKBSearch(args []string, w io.Writer) error {
 
 // ledgerCounts loads per-entry recall/resolve aggregates from an optional
 // ledger file. The ledger lives in-cluster, so this is opt-in for humans who
-// copied it locally; a missing/unreadable file warns and omits the column —
-// never fails the search, and never CREATES the file (outcome.New would).
-func ledgerCounts(path string, w io.Writer) map[string]outcome.Aggregate {
+// copied it locally; a missing/unreadable file warns (to warn — kept off the
+// results stream so --json stays clean) and omits the column — never fails
+// the search, and never CREATES the file (outcome.New would).
+func ledgerCounts(path string, warn io.Writer) map[string]outcome.Aggregate {
 	if path == "" {
 		return nil
 	}
+	var openErr error
 	if _, err := os.Stat(path); err != nil {
-		_, _ = fmt.Fprintf(w, "warning: ledger %s unreadable (%v); RESOLVE column omitted\n", path, err)
-		return nil
+		openErr = err
+	} else if l, err := outcome.New(path); err != nil {
+		openErr = err
+	} else {
+		counts, _ := l.OpenCounts() // documented always-nil error
+		return counts
 	}
-	l, err := outcome.New(path)
-	if err != nil {
-		_, _ = fmt.Fprintf(w, "warning: ledger %s unreadable (%v); RESOLVE column omitted\n", path, err)
-		return nil
-	}
-	counts, _ := l.OpenCounts() // documented always-nil error
-	return counts
+	_, _ = fmt.Fprintf(warn, "warning: ledger %s unreadable (%v); RESOLVE column omitted\n", path, openErr)
+	return nil
 }
 
 func writeHitsTable(w io.Writer, hits []catalog.ScoredEntry, counts map[string]outcome.Aggregate, withResolve bool) {
@@ -203,14 +217,17 @@ func runKBShow(args []string, w io.Writer) error {
 	}
 	arg := strings.TrimSpace(strings.Join(rest, " "))
 	if arg == "" {
-		return fmt.Errorf("usage: lore kb show <entry-path | filename | query> [--dir <catalog>]")
+		return fmt.Errorf("usage: lore kb show <entry-path | filename | query> [--config <path>] [--dir <catalog>]")
 	}
 	cat, err := loadKBCatalog(*cfgPath, *dir)
 	if err != nil {
 		return err
 	}
-	e, ok := findEntry(cat, arg)
+	e, candidates, ok := findEntry(cat, arg)
 	if !ok {
+		if len(candidates) > 1 {
+			return fmt.Errorf("ambiguous entry %q; candidates:\n%s", arg, renderCandidates(candidates))
+		}
 		hits, serr := cat.SearchScored(arg, 5)
 		if serr != nil {
 			return serr
@@ -221,11 +238,11 @@ func runKBShow(args []string, w io.Writer) error {
 		case 1:
 			e = hits[0].Entry
 		default:
-			var b strings.Builder
-			for _, h := range hits {
-				_, _ = fmt.Fprintf(&b, "  %s — %s\n", h.Entry.Path, h.Entry.Title)
+			entries := make([]catalog.Entry, len(hits))
+			for i, h := range hits {
+				entries[i] = h.Entry
 			}
-			return fmt.Errorf("no exact match for %q; candidates:\n%s", arg, strings.TrimRight(b.String(), "\n"))
+			return fmt.Errorf("no exact match for %q; candidates:\n%s", arg, renderCandidates(entries))
 		}
 	}
 	writeEntry(w, e)
@@ -233,15 +250,35 @@ func runKBShow(args []string, w io.Writer) error {
 }
 
 // findEntry matches by exact bundle-relative path, then by bare filename (with
-// or without the .md suffix).
-func findEntry(cat *catalog.Catalog, arg string) (catalog.Entry, bool) {
+// or without the .md suffix). An exact path match wins immediately — paths are
+// unique. Basename matches are collected in full: exactly one is an
+// unambiguous hit, but two or more (e.g. incidents/foo.md and
+// runbooks/foo.md) are ambiguous — the caller renders them as candidates
+// instead of the command silently guessing the first one found.
+func findEntry(cat *catalog.Catalog, arg string) (e catalog.Entry, candidates []catalog.Entry, ok bool) {
 	base := strings.TrimSuffix(arg, ".md")
 	for _, e := range cat.Entries() {
-		if e.Path == arg || strings.TrimSuffix(filepath.Base(e.Path), ".md") == base {
-			return e, true
+		if e.Path == arg {
+			return e, nil, true
+		}
+		if strings.TrimSuffix(filepath.Base(e.Path), ".md") == base {
+			candidates = append(candidates, e)
 		}
 	}
-	return catalog.Entry{}, false
+	if len(candidates) == 1 {
+		return candidates[0], nil, true
+	}
+	return catalog.Entry{}, candidates, false
+}
+
+// renderCandidates formats a disambiguation list ("  path — title" per
+// entry), shared by the search-fallback and basename-collision pickers.
+func renderCandidates(entries []catalog.Entry) string {
+	var b strings.Builder
+	for _, e := range entries {
+		_, _ = fmt.Fprintf(&b, "  %s — %s\n", e.Path, e.Title)
+	}
+	return strings.TrimRight(b.String(), "\n")
 }
 
 // writeEntry prints the frontmatter card then the markdown body — the same

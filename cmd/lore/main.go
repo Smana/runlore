@@ -24,8 +24,8 @@ Usage:
   lore investigate --alert <name> [--namespace <ns>] [--message <text>]   investigate on-demand, print findings
   lore serve [--config <path>] [--addr <addr>]        run the in-cluster agent (react to incidents)
   lore catalog sync [--config <path>]                 clone/pull + index the knowledge catalog
-  lore kb search <query> [--dir <catalog>] [-k 10] [--json] [--ledger <jsonl>]   search the knowledge base
-  lore kb show <entry> [--dir <catalog>]              print one KB entry (frontmatter card + body)
+  lore kb search <query> [--config <path>] [--dir <catalog>] [-k 10] [--json] [--ledger <jsonl>]   search the knowledge base
+  lore kb show <entry> [--config <path>] [--dir <catalog>]   print one KB entry (frontmatter card + body)
   lore eval [--config <path>] [--cases <dir>]         replay recorded cases, score RCA identification
   lore eval --live [--scenarios <dir>] [--n 3]        live-fire on the cluster: grade coverage + RCA
   lore eval --compare <spec.yaml> [--n 3]             benchmark several models over the replay suite

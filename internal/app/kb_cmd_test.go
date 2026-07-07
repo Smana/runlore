@@ -219,16 +219,99 @@ func TestKBShowFlagsAfterArg(t *testing.T) {
 func TestKBSearchLedgerMissingWarnsAndOmits(t *testing.T) {
 	dir := writeKBFixture(t)
 	missing := filepath.Join(t.TempDir(), "nope.jsonl")
+
+	// The warning itself is exercised directly against ledgerCounts's warn
+	// writer — the seam that keeps it off stdout/the JSON stream.
+	var warn strings.Builder
+	if counts := ledgerCounts(missing, &warn); counts != nil {
+		t.Errorf("missing ledger must yield nil counts, got %+v", counts)
+	}
+	if !strings.Contains(warn.String(), "warning: ledger") {
+		t.Errorf("missing warning line:\n%s", warn.String())
+	}
+	// Stat-before-open: the warning path must not have created the file.
+	if _, err := os.Stat(missing); err == nil {
+		t.Error("--ledger must never create the ledger file")
+	}
+
+	// Through the search path, stdout (w) carries ONLY the table — no warning
+	// text mixed in; diagnostics go to stderr instead.
 	var out strings.Builder
 	if err := runKBSearch([]string{"--dir", dir, "--ledger", missing, "crashloop"}, &out); err != nil {
 		t.Fatalf("a missing ledger must not fail the search: %v", err)
 	}
 	got := out.String()
-	if !strings.Contains(got, "warning: ledger") {
-		t.Errorf("missing warning line:\n%s", got)
+	if strings.Contains(got, "warning:") {
+		t.Errorf("stdout must not contain the ledger warning:\n%s", got)
 	}
-	// Stat-before-open: the warning path must not have created the file.
-	if _, err := os.Stat(missing); err == nil {
-		t.Error("--ledger must never create the ledger file")
+	if !strings.Contains(got, "SCORE") {
+		t.Errorf("stdout must still contain the results table:\n%s", got)
+	}
+
+	// --json must be a clean stream: nothing before the opening bracket.
+	var jsonOut strings.Builder
+	if err := runKBSearch([]string{"--dir", dir, "--json", "--ledger", missing, "crashloop"}, &jsonOut); err != nil {
+		t.Fatalf("--json with a missing ledger must not fail: %v", err)
+	}
+	jsonGot := jsonOut.String()
+	if trimmed := strings.TrimLeft(jsonGot, " \t\n"); !strings.HasPrefix(trimmed, "[") {
+		t.Errorf("--json output must start with '[' (no warning text mixed in):\n%s", jsonGot)
+	}
+	var hits []map[string]any
+	if err := json.Unmarshal([]byte(jsonGot), &hits); err != nil {
+		t.Fatalf("output is not a clean JSON array: %v\n%s", err, jsonGot)
+	}
+}
+
+// The usage strings promise both orders around `--`; a literal `--` must stop
+// flag parsing for good, so a query token that looks like a flag (e.g. "-k")
+// stays a literal search term instead of colliding with -k/--json/etc.
+func TestKBSearchDashDashTerminator(t *testing.T) {
+	dir := writeKBFixture(t)
+
+	var out strings.Builder
+	if err := runKBSearch([]string{"--dir", dir, "--", "crashloop"}, &out); err != nil {
+		t.Fatalf("post-`--` query must parse: %v", err)
+	}
+	if !strings.Contains(out.String(), "incidents/crashloop-web.md") {
+		t.Errorf("expected hit missing:\n%s", out.String())
+	}
+
+	var out2 strings.Builder
+	err := runKBSearch([]string{"--dir", dir, "--", "-k"}, &out2)
+	if err == nil {
+		t.Fatal("want the no-match error for literal query \"-k\", not a flag parse")
+	}
+	if !strings.Contains(err.Error(), `no entries match "-k"`) {
+		t.Errorf("want the literal no-match error, got: %v", err)
+	}
+}
+
+// findEntry must not silently guess between two entries sharing a basename —
+// runKBShow should surface both candidates instead of picking the first one.
+func TestKBShowAmbiguousBasename(t *testing.T) {
+	dir := t.TempDir()
+	entries := map[string]string{
+		"incidents/foo.md": "---\ntype: Incident\ntitle: Foo from incidents\n---\nbody\n",
+		"runbooks/foo.md":  "---\ntype: Runbook\ntitle: Foo from runbooks\n---\nbody\n",
+	}
+	for path, content := range entries {
+		full := filepath.Join(dir, path)
+		if err := os.MkdirAll(filepath.Dir(full), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(full, []byte(content), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	var out strings.Builder
+	err := runKBShow([]string{"--dir", dir, "foo"}, &out)
+	if err == nil {
+		t.Fatal("want a disambiguation error for a duplicate basename")
+	}
+	for _, want := range []string{"incidents/foo.md", "runbooks/foo.md"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("candidates must list %q:\n%v", want, err)
+		}
 	}
 }
