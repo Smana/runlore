@@ -1,6 +1,7 @@
 package notify
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -561,5 +562,68 @@ func TestMultiDeliverProgressCapability(t *testing.T) {
 	}
 	if len(cap2.got) != 1 {
 		t.Fatalf("a failing progress sink must still be attempted, got %d", len(cap2.got))
+	}
+}
+
+// blocksText flattens summaryBlocks into one string for containment asserts.
+// It encodes with SetEscapeHTML(false): plain json.Marshal would re-escape the
+// '&'/'<'/'>' that escapeMrkdwn already turned into &amp;/&lt;/&gt; (e.g. "&lt;"
+// becomes "&lt;"), corrupting the containment checks below — the same
+// reason mrkdwnTexts exists elsewhere in this file.
+func blocksText(t *testing.T, blocks []map[string]any) string {
+	t.Helper()
+	var buf bytes.Buffer
+	enc := json.NewEncoder(&buf)
+	enc.SetEscapeHTML(false)
+	if err := enc.Encode(blocks); err != nil {
+		t.Fatalf("marshal blocks: %v", err)
+	}
+	return buf.String()
+}
+
+func TestSlackSummaryBlocksPriorKnowledge(t *testing.T) {
+	inv := providers.Investigation{
+		Title: "CrashLoopBackOff", Confidence: 0.86,
+		Occurrences:    3,
+		LastOccurrence: time.Date(2026, 6, 25, 10, 0, 0, 0, time.UTC),
+		PrevCuratedURL: "https://kb/pr/12",
+		Prior: &providers.PriorKnowledge{
+			Cause: "ConfigMap truncated <v5.4>", Resolution: "revert & pin 5.3.2",
+			Recalls: 3, Resolved: 3,
+		},
+	}
+	txt := blocksText(t, summaryBlocks(inv))
+	for _, want := range []string{
+		"📚 *Seen before ×3*",
+		"*Prior cause:* ConfigMap truncated &lt;v5.4&gt;", // untrusted entry text is escaped
+		"*Prior resolution:* revert &amp; pin 5.3.2",
+		"previous entry",   // link label
+		"resolve rate 3/3", // track record
+	} {
+		if !strings.Contains(txt, want) {
+			t.Errorf("summary blocks missing %q\n%s", want, txt)
+		}
+	}
+	// The new block replaces the old pointers: no duplicate recurrence renders.
+	for _, absent := range []string{"Previously investigated", "*Recurrence:*"} {
+		if strings.Contains(txt, absent) {
+			t.Errorf("summary blocks must not still render %q when Prior is set\n%s", absent, txt)
+		}
+	}
+}
+
+// Without Prior, the legacy counter field + context pointer stay untouched.
+func TestSlackSummaryBlocksRecurrenceWithoutPrior(t *testing.T) {
+	inv := providers.Investigation{
+		Title: "CrashLoopBackOff", Confidence: 0.86,
+		Occurrences: 2, LastOccurrence: time.Date(2026, 6, 25, 10, 0, 0, 0, time.UTC),
+		PrevCuratedURL: "https://kb/pr/12",
+	}
+	txt := blocksText(t, summaryBlocks(inv))
+	if !strings.Contains(txt, "Previously investigated") {
+		t.Errorf("legacy recurrence pointer missing without Prior\n%s", txt)
+	}
+	if strings.Contains(txt, "Seen before") {
+		t.Errorf("Seen-before block must not render without Prior\n%s", txt)
 	}
 }
