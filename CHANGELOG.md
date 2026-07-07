@@ -8,6 +8,45 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 RunLore is **pre-1.0 and under active development** — there are no tagged releases
 yet, so everything currently lives under `[Unreleased]`.
 
+## [0.7.0](https://github.com/Smana/runlore/compare/v0.6.1...v0.7.0) (2026-07-07)
+
+
+### Features
+
+* **chart:** StatefulSet mode for real multi-node HA (per-replica storage) ([#263](https://github.com/Smana/runlore/issues/263)) ([f180fd0](https://github.com/Smana/runlore/commit/f180fd06fda2e2e0a7eb556121b3b7660997a5ed))
+* **cli:** lore kb search/show — human search over the knowledge catalog ([#260](https://github.com/Smana/runlore/issues/260)) ([6ce138f](https://github.com/Smana/runlore/commit/6ce138f7e650642341257668310f94450469899c))
+* **curate:** add skip_verdicts gate so benign findings don't draft KB PRs ([#256](https://github.com/Smana/runlore/issues/256)) ([89ef79f](https://github.com/Smana/runlore/commit/89ef79ff78a9183a476956f5050b773d92ca1041))
+* **curator:** Related knowledge section in drafted KB PR bodies ([#259](https://github.com/Smana/runlore/issues/259)) ([f91ddf6](https://github.com/Smana/runlore/commit/f91ddf6d52638b325afe1a0a38aa0fc9ab8ac322))
+* **eval:** exercise recall + verify + decay in the replay eval ([11dd107](https://github.com/Smana/runlore/commit/11dd107d3799f023c602cc3eaaec0638d11e18ca))
+* **eval:** exercise recall + verify + decay in the replay eval ([efc3a11](https://github.com/Smana/runlore/commit/efc3a119423f8b211a52d4117b7ed2ef083e2246))
+* **notify:** quote the prior cause and resolution on recurring incidents ([#261](https://github.com/Smana/runlore/issues/261)) ([8da0e19](https://github.com/Smana/runlore/commit/8da0e192d383bfa2a989250f75e510732bf135f2))
+* **outcome:** compact the ledger on load and surface corrupt lines ([801647e](https://github.com/Smana/runlore/commit/801647e0994131742d74be3c4713c5f4ac17dbc9))
+
+
+### Bug Fixes
+
+* **catalog:** treat fenced code as opaque in Section excerpts ([#262](https://github.com/Smana/runlore/issues/262)) ([02be1c9](https://github.com/Smana/runlore/commit/02be1c9737e1044bdf3bec63dea2bfc18129b3ad))
+* **curate:** fall through to Jaccard on divergent open-PR fingerprints ([d106587](https://github.com/Smana/runlore/commit/d1065875ffd26725c1e6da218fd9402a47e98682))
+* **curate:** fall through to Jaccard on divergent open-PR fingerprints ([9ee4527](https://github.com/Smana/runlore/commit/9ee452719f694b1d3bf3ca79c1c0e04a40afc50c))
+* don't gate readyz on catalog when no model is configured ([#252](https://github.com/Smana/runlore/issues/252)) ([804b6d9](https://github.com/Smana/runlore/commit/804b6d9c8b21585321e6be6cd8dc1724094754d8)), closes [#251](https://github.com/Smana/runlore/issues/251)
+* **e2e:** survive Helm 4 SSA + enable the nightly k3d schedule ([#258](https://github.com/Smana/runlore/issues/258)) ([f26d252](https://github.com/Smana/runlore/commit/f26d2522237bf283d03ae5fc07b0ee94403e8c81))
+* fall back to max root-cause confidence when overall is omitted ([#253](https://github.com/Smana/runlore/issues/253)) ([d302c39](https://github.com/Smana/runlore/commit/d302c39f019518651bc6b0bf5642e41522f27d50))
+* **ha:** rejoin leader election after losing the lease without dying ([#250](https://github.com/Smana/runlore/issues/250)) ([7477e73](https://github.com/Smana/runlore/commit/7477e737154cf392e748caa2b5f7792c8db45b97))
+* **investigate:** force a final submit_findings turn at step-budget exhaustion ([#257](https://github.com/Smana/runlore/issues/257)) ([89a131e](https://github.com/Smana/runlore/commit/89a131e3ecad2be3dc58037bad4e240cddb0a4ab))
+* **outcome:** capture GitOps and reinvestigate incidents in the ledger ([8cd0a8b](https://github.com/Smana/runlore/commit/8cd0a8b07fc687fdc3070d95cacfbb86be6725c2))
+* **outcome:** harden the outcome ledger (GitOps capture, decay poisoning, unbounded growth) ([69d1891](https://github.com/Smana/runlore/commit/69d1891f3f43d2816777d861d6e05afd9f35d46f))
+* **outcome:** keep non-resolvable recalls out of decay ([562cd50](https://github.com/Smana/runlore/commit/562cd5082339f1e4fda5272bb871e4b8b7177f9a))
+* **recall:** correct outcome-decay factor to documented Beta(1,1) prior ([044bd80](https://github.com/Smana/runlore/commit/044bd803f211f9ecae1bb3fdd347a95437ac9def))
+* **recall:** correct outcome-decay factor to documented Beta(1,1) prior ([aa50440](https://github.com/Smana/runlore/commit/aa50440a264be08dd540e0281f5df8bf3ba34e2e))
+
+
+### Documentation
+
+* fix learning-loop drift against curation and recall code ([89e0cc0](https://github.com/Smana/runlore/commit/89e0cc0b58d6c809a8aefc05012bbaebe9d33574))
+* fix learning-loop drift against curation and recall code ([4d845e6](https://github.com/Smana/runlore/commit/4d845e69d4089c86be38021eb2feb58da64166ef))
+* **prior-art:** add OpenSRE comparison ([#255](https://github.com/Smana/runlore/issues/255)) ([fa98199](https://github.com/Smana/runlore/commit/fa98199cbe2d011db3fc0eb43d4a5ffe27391abc))
+* **readme:** lead with the zero-setup demo before the production install ([#254](https://github.com/Smana/runlore/issues/254)) ([296044f](https://github.com/Smana/runlore/commit/296044fd94a2260b1caf195b04405746df1d065d))
+
 ## [0.6.1](https://github.com/Smana/runlore/compare/v0.6.0...v0.6.1) (2026-07-03)
 
 
