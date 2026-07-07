@@ -299,6 +299,20 @@ func TestDraftKBEntryMultibyteTitleNotCorrupted(t *testing.T) {
 	}
 }
 
+func TestDraftKBEntryCarriesRecurrenceFacts(t *testing.T) {
+	inv := goodFinding()
+	inv.Occurrences = 2
+	inv.PrevCuratedURL = "https://kb/pr/7"
+	e := draftKBEntry(inv)
+	if e.Occurrences != 2 || e.PrevCuratedURL != "https://kb/pr/7" {
+		t.Errorf("KBEntry recurrence facts = occ %d prev %q", e.Occurrences, e.PrevCuratedURL)
+	}
+	// The committed FILE must not gain reviewer-context sections.
+	if strings.Contains(e.Body, "Related knowledge") {
+		t.Error("entry body must never contain the PR-only Related knowledge section")
+	}
+}
+
 // toCatalogEntry mirrors a drafted KBEntry into the catalog.Entry shape that
 // kbvalidate.ValidateStructural consumes, so tests can run the real merge gate.
 func toCatalogEntry(e providers.KBEntry) catalog.Entry {

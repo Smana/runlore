@@ -18,6 +18,16 @@ import (
 	"github.com/Smana/runlore/internal/telemetry"
 )
 
+// Related-knowledge bounds: how many BM25 neighbors a drafted PR shows the
+// reviewer, and the noise floor below which a "neighbor" is lexical debris.
+// The floor is deliberately low — BM25 absolute scores are corpus-dependent
+// (see the recall margin gate), so the top-k cap does the real limiting and
+// the floor only drops near-zero matches on genuinely novel incidents.
+const (
+	relatedK     = 5
+	relatedFloor = 0.2
+)
+
 // Curator is the file-time learning gate. It dedups, quality-gates, and drafts a
 // merge-ready PR for novel quality findings; everything else produces no repo
 // artifact.
@@ -74,14 +84,15 @@ func (c *Curator) Curate(ctx context.Context, inv providers.Investigation) (prov
 		}
 	}
 	nov := Novelty{Catalog: c.Catalog, DupScore: c.DupScore}
-	if top, ok, err := nov.TopHit(ctx, inv); err != nil {
-		c.Log.Warn("dedup: catalog search failed", "err", err)
-	} else if ok {
+	hits, herr := nov.Hits(ctx, inv, relatedK)
+	if herr != nil {
+		c.Log.Warn("dedup: catalog search failed", "err", herr)
+	} else if len(hits) > 0 {
 		if c.Metrics != nil {
-			c.Metrics.CurationDedupScore.Record(ctx, top.Score)
+			c.Metrics.CurationDedupScore.Record(ctx, hits[0].Score)
 		}
-		if top.Score >= c.DupScore {
-			c.Log.Info("finding duplicates a catalog entry; not filing", "entry", top.Entry.Title, "score", top.Score)
+		if hits[0].Score >= c.DupScore {
+			c.Log.Info("finding duplicates a catalog entry; not filing", "entry", hits[0].Entry.Title, "score", hits[0].Score)
 			return providers.Ref{}, nil
 		}
 	}
@@ -99,7 +110,11 @@ func (c *Curator) Curate(ctx context.Context, inv providers.Investigation) (prov
 
 	// 3. draft a merge-ready PR (labels: runlore + triggered; the curate agent
 	// later advances solved/resolved/ready-to-merge — Phase 2, not here)
-	ref, err := c.Forge.OpenPR(ctx, draftKBEntry(inv))
+	entry := draftKBEntry(inv)
+	// Reviewer context: the finding is novel, so its BM25 neighborhood is
+	// precisely what the reviewer needs to double-check that call.
+	entry.Related = relatedEntries(hits)
+	ref, err := c.Forge.OpenPR(ctx, entry)
 	if err != nil {
 		c.recordCuration(ctx, "pr", "error")
 		return providers.Ref{}, fmt.Errorf("open PR: %w", err)
@@ -165,6 +180,21 @@ func meetsBar(inv providers.Investigation, minConf float64) bool {
 	// Provenance: actionable knowledge, not a symptom restatement — anchored to a
 	// causing change (ChangeRef) or a fixing action (SuggestedAction).
 	return top.ChangeRef != "" || top.SuggestedAction != ""
+}
+
+// relatedEntries maps the draft-time search hits to the PR's reviewer-context
+// list, dropping noise-floor matches. Order (best first) is preserved.
+func relatedEntries(hits []catalog.ScoredEntry) []providers.RelatedEntry {
+	var out []providers.RelatedEntry
+	for _, h := range hits {
+		if h.Score < relatedFloor {
+			continue
+		}
+		out = append(out, providers.RelatedEntry{
+			Path: h.Entry.Path, Title: h.Entry.Title, Resource: h.Entry.Resource, Score: h.Score,
+		})
+	}
+	return out
 }
 
 func coalesceComment(inv providers.Investigation) string {

@@ -113,14 +113,21 @@ type Novelty struct {
 	DupScore float64                // top-hit BM25 score ≥ this ⇒ duplicate
 }
 
+// Hits returns up to k catalog entries scored against the finding's
+// fingerprint — hits[0] drives the duplicate decision, the full slice feeds
+// the PR's related-knowledge section (one search, two consumers).
+func (n Novelty) Hits(ctx context.Context, inv providers.Investigation, k int) ([]catalog.ScoredEntry, error) { //nolint:revive // ctx kept for future remote-index symmetry
+	if n.Catalog == nil {
+		return nil, nil
+	}
+	return n.Catalog.SearchScored(Fingerprint(inv), k)
+}
+
 // TopHit returns the highest-scoring catalog entry for a finding's fingerprint.
 // ok is false when no catalog is configured or there are no hits. It surfaces the
 // score regardless of any threshold, so callers can both observe it and decide.
-func (n Novelty) TopHit(ctx context.Context, inv providers.Investigation) (catalog.ScoredEntry, bool, error) { //nolint:revive // ctx kept for future remote-index symmetry
-	if n.Catalog == nil {
-		return catalog.ScoredEntry{}, false, nil
-	}
-	hits, err := n.Catalog.SearchScored(Fingerprint(inv), 1)
+func (n Novelty) TopHit(ctx context.Context, inv providers.Investigation) (catalog.ScoredEntry, bool, error) {
+	hits, err := n.Hits(ctx, inv, 1)
 	if err != nil {
 		return catalog.ScoredEntry{}, false, err
 	}

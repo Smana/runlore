@@ -335,6 +335,56 @@ func TestCurateDedupScoreNilMetricsSafe(t *testing.T) {
 	}
 }
 
+// multiScored returns a fixed multi-hit result for any query — the shape the
+// related-knowledge section consumes.
+type multiScored struct{ hits []catalog.ScoredEntry }
+
+func (m multiScored) SearchScored(string, int) ([]catalog.ScoredEntry, error) { return m.hits, nil }
+
+func TestCurateAttachesRelatedKnowledge(t *testing.T) {
+	f := &fakeForge{}
+	cat := multiScored{hits: []catalog.ScoredEntry{
+		{Entry: catalog.Entry{Path: "incidents/a.md", Title: "A", Resource: "apps/web"}, Score: 2.5},
+		{Entry: catalog.Entry{Path: "incidents/b.md", Title: "B"}, Score: 0.9},
+		{Entry: catalog.Entry{Path: "incidents/noise.md", Title: "noise"}, Score: 0.05}, // below the floor
+	}}
+	inv := goodFinding()
+	inv.Occurrences = 3
+	inv.PrevCuratedURL = "https://kb/pr/12"
+	if _, err := newCurator(f, cat).Curate(context.Background(), inv); err != nil {
+		t.Fatalf("curate: %v", err)
+	}
+	if f.openedPR == nil {
+		t.Fatal("no PR opened")
+	}
+	e := *f.openedPR
+	if len(e.Related) != 2 {
+		t.Fatalf("Related = %+v, want the 2 hits above the noise floor", e.Related)
+	}
+	if e.Related[0].Path != "incidents/a.md" || e.Related[0].Score != 2.5 || e.Related[0].Resource != "apps/web" {
+		t.Errorf("Related[0] = %+v", e.Related[0])
+	}
+	if e.Occurrences != 3 || e.PrevCuratedURL != "https://kb/pr/12" {
+		t.Errorf("recurrence facts not stamped: occ=%d prev=%q", e.Occurrences, e.PrevCuratedURL)
+	}
+}
+
+// The dup decision is unchanged: a top hit at/above DupScore still skips the PR
+// (no Related work happens for a duplicate).
+func TestCurateDupStillSkipsWithMultiHits(t *testing.T) {
+	f := &fakeForge{}
+	cat := multiScored{hits: []catalog.ScoredEntry{
+		{Entry: catalog.Entry{Path: "incidents/dup.md", Title: "dup"}, Score: 9.0}, // ≥ DupScore 5.0
+	}}
+	ref, err := newCurator(f, cat).Curate(context.Background(), goodFinding())
+	if err != nil {
+		t.Fatalf("curate: %v", err)
+	}
+	if ref.URL != "" || f.openedPR != nil {
+		t.Fatal("duplicate finding must not open a PR")
+	}
+}
+
 func TestCurateRecordsDedupScore(t *testing.T) {
 	h, shutdown, err := telemetry.Setup(context.Background())
 	if err != nil {

@@ -340,8 +340,94 @@ func TestRenderEntryIncludesConfidenceAndProvenance(t *testing.T) {
 }
 
 func TestPRBodyIncludesFingerprintMarker(t *testing.T) {
-	body := prBody(providers.KBEntry{Title: "T", Description: "d", Fingerprint: "deadbeef"})
+	c := New("", "acme", "kb", "main", nil)
+	body := c.prBody(providers.KBEntry{Title: "T", Description: "d", Fingerprint: "deadbeef"})
 	if providers.ParseFingerprintMarker(body) != "deadbeef" {
 		t.Fatalf("PR body missing recoverable fingerprint marker:\n%s", body)
+	}
+}
+
+func TestPRBodyRelatedKnowledge(t *testing.T) {
+	c := New("", "acme", "kb", "main", nil) // public GitHub host
+	e := providers.KBEntry{
+		Title: "T", Description: "d", Fingerprint: "abc123",
+		Related: []providers.RelatedEntry{
+			{Path: "incidents/a.md", Title: "A", Resource: "apps/web", Score: 2.5},
+			{Path: "incidents/b.md", Title: "B", Score: 0.9},
+		},
+		Occurrences:    3,
+		PrevCuratedURL: "https://kb/pr/12",
+	}
+	body := c.prBody(e)
+	for _, want := range []string{
+		"## Related knowledge",
+		"[A](https://github.com/acme/kb/blob/main/incidents/a.md)",
+		"score 2.50",
+		"resource apps/web",
+		"[B](https://github.com/acme/kb/blob/main/incidents/b.md)",
+		"Trigger seen ×3",
+		"previous entry: https://kb/pr/12",
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("prBody missing %q\n---\n%s", want, body)
+		}
+	}
+	// The dedup marker survives, still parseable, still last.
+	if got := providers.ParseFingerprintMarker(body); got != "abc123" {
+		t.Errorf("ParseFingerprintMarker = %q, want abc123", got)
+	}
+	if !strings.HasSuffix(strings.TrimSpace(body), providers.FingerprintMarker("abc123")) {
+		t.Error("fingerprint marker must remain the last body element")
+	}
+}
+
+func TestPRBodyRecurrenceOnlyNoRelatedEntries(t *testing.T) {
+	c := New("", "acme", "kb", "main", nil) // public GitHub host
+	e := providers.KBEntry{
+		Title: "T", Description: "d", Fingerprint: "abc123",
+		Occurrences: 4, // recalled before, but the dedup search returned no neighbors
+	}
+	body := c.prBody(e)
+	for _, want := range []string{
+		"## Related knowledge",
+		"Trigger seen ×4",
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("prBody missing %q\n---\n%s", want, body)
+		}
+	}
+	if strings.Contains(body, "score ") || strings.Contains(body, "resource ") {
+		t.Errorf("prBody must not render list items when Related is empty:\n%s", body)
+	}
+	// The dedup marker survives, still parseable, still last.
+	if got := providers.ParseFingerprintMarker(body); got != "abc123" {
+		t.Errorf("ParseFingerprintMarker = %q, want abc123", got)
+	}
+	if !strings.HasSuffix(strings.TrimSpace(body), providers.FingerprintMarker("abc123")) {
+		t.Error("fingerprint marker must remain the last body element")
+	}
+}
+
+func TestPRBodyNoRelatedSectionWhenEmpty(t *testing.T) {
+	c := New("", "acme", "kb", "main", nil)
+	body := c.prBody(providers.KBEntry{Title: "T", Fingerprint: "abc123"})
+	if strings.Contains(body, "Related knowledge") {
+		t.Errorf("no-hit, first-sighting PR must not carry an empty section:\n%s", body)
+	}
+}
+
+func TestBlobURLEnterpriseHost(t *testing.T) {
+	c := New("https://ghe.example.com/api/v3", "acme", "kb", "main", nil)
+	want := "https://ghe.example.com/acme/kb/blob/main/incidents/a.md"
+	if got := c.blobURL("incidents/a.md"); got != want {
+		t.Errorf("blobURL = %q, want %q", got, want)
+	}
+}
+
+func TestBlobURLEmptyBaseBranchFallsBackToMain(t *testing.T) {
+	c := New("", "acme", "kb", "", nil)
+	want := "https://github.com/acme/kb/blob/main/incidents/a.md"
+	if got := c.blobURL("incidents/a.md"); got != want {
+		t.Errorf("blobURL = %q, want %q", got, want)
 	}
 }
