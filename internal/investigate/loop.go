@@ -225,11 +225,11 @@ func (li *LoopInvestigator) Investigate(ctx context.Context, req Request) error 
 	}()
 	// Recurrence cooldown (opt-in) — checked BEFORE recall: within the cooldown even
 	// a recallable answer would only re-deliver what the channel already shows. A
-	// suppressed occurrence costs nothing and says nothing (no model call, no
-	// notification, no ledger open — see RecurrenceGate for why not recording the
-	// open is load-bearing); the next occurrence past the cooldown re-investigates
-	// in full. An inconclusive prior never suppresses, and a standing 👎 re-arms
-	// investigation immediately.
+	// suppressed occurrence makes no model call, sends no notification, records no
+	// ledger open (see RecurrenceGate for why not recording the open is load-bearing
+	// — and for the workqueue/rate-limit slot it does still spend); the next
+	// occurrence past the cooldown re-investigates in full. An inconclusive prior
+	// never suppresses, and a standing 👎 re-arms investigation immediately.
 	if prior, ok := li.Recurrence.suppress(req, time.Now()); ok {
 		result = "recurrence_suppressed"
 		li.Log.Info("recurrence cooldown: suppressing re-investigation",

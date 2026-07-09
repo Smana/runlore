@@ -686,15 +686,11 @@ func (l *Ledger) applyTriggerLocked(e Event) {
 // Occurrences reports how many investigations have been recorded for a
 // TriggerKey, when the most recent one happened, and its KB link — the
 // recurrence facts the notifier renders. Zero values for a disabled ledger,
-// an empty key, or a never-seen key.
+// an empty key, or a never-seen key. A narrowing of Recurrence for the
+// delivery path, which has no use for the verdict or the 👎-vote count.
 func (l *Ledger) Occurrences(triggerKey string) (int, time.Time, string) {
-	if !l.enabled() || triggerKey == "" {
-		return 0, time.Time{}, ""
-	}
-	l.mu.Lock()
-	defer l.mu.Unlock()
-	a := l.byTrigger[triggerKey]
-	return a.count, a.last, a.curatedURL
+	r := l.Recurrence(triggerKey)
+	return r.Count, r.Last, r.CuratedURL
 }
 
 // TriggerRecurrence is the per-TriggerKey snapshot the pre-investigation

@@ -29,12 +29,18 @@ type RecurrenceStats interface {
 //   - a standing 👎 on the trigger breaks the cooldown immediately — a human
 //     saying "that diagnosis is wrong" re-arms the very next occurrence.
 //
-// A suppressed occurrence costs nothing and says nothing: no model call, no
-// notification, no ledger open. That last part is load-bearing — recording an
-// open would slide the byTrigger newest-open timestamp and the cooldown would
-// never lapse while the incident keeps firing. Anchored on the last REAL
-// investigation, a persistent failure is re-investigated once per cooldown
-// (with its recurrence count intact) instead of once per resync.
+// A suppressed occurrence makes no model call, sends no notification, and
+// records no ledger open. (It does still consume a workqueue turn and a
+// rate-limiter slot — the gate runs below Queue.process like its sibling, the
+// recall short-circuit; the same accepted tradeoff for both.) Not recording
+// the open is load-bearing — an open would slide the byTrigger newest-open
+// timestamp and the cooldown would never lapse while the incident keeps
+// firing. Anchored on the last REAL investigation, a persistent failure is
+// re-investigated once per cooldown (with its recurrence count intact) instead
+// of once per resync. The flip side: the ledger keeps no durable record of
+// suppressed firings (only the recurrence_suppressed metric and a log line see
+// them) — a future consumer needing raw firing frequency is the moment to
+// promote suppression to a first-class event kind, not before.
 type RecurrenceGate struct {
 	Outcome  RecurrenceStats
 	Cooldown time.Duration // 0 disables the gate (default: off, opt-in)

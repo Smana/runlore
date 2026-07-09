@@ -1264,15 +1264,15 @@ func TestRecurrenceQuery(t *testing.T) {
 		t.Fatalf("Recurrence = %+v, want count=2 last=+1h verdict=action_suggested url=kb/2", r)
 	}
 	// Two users contest; one changes their mind back to 👍 — one live 👎 remains.
-	_ = l.Feedback("k", "", "down", "U1", t0.Add(2*time.Hour))
-	_ = l.Feedback("k", "", "down", "U2", t0.Add(2*time.Hour))
-	_ = l.Feedback("k", "", "up", "U2", t0.Add(3*time.Hour))
+	_ = l.Feedback("k", "down", "U1", t0.Add(2*time.Hour))
+	_ = l.Feedback("k", "down", "U2", t0.Add(2*time.Hour))
+	_ = l.Feedback("k", "up", "U2", t0.Add(3*time.Hour))
 	if r := l.Recurrence("k"); r.FeedbackDown != 1 {
 		t.Fatalf("live 👎 votes = %d, want 1 (U2 moved to up)", r.FeedbackDown)
 	}
 	// Votes on another trigger never leak into k.
 	_ = l.Open(Event{Fingerprint: "f3", Kind: "fresh", TriggerKey: "other", At: t0})
-	_ = l.Feedback("other", "", "down", "U9", t0.Add(time.Hour))
+	_ = l.Feedback("other", "down", "U9", t0.Add(time.Hour))
 	if r := l.Recurrence("k"); r.FeedbackDown != 1 {
 		t.Fatalf("cross-trigger vote leaked: %+v", r)
 	}
