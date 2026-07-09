@@ -81,7 +81,7 @@ apps/worker pods are OOMKilled shortly after a values change lowered the memory 
 
 	// Guard the sub-floor premise under both formulas, so the fixture stays valid if the
 	// parallel outcomeFactor change lands.
-	if f := outcomeFactor(4, 0, 2.0); f >= 0.5 {
-		t.Fatalf("fixture invalid: outcomeFactor(4,0,2)=%v is not below the 0.5 floor", f)
+	if f := outcomeFactor(4, 0, 0, 0, 2.0); f >= 0.5 {
+		t.Fatalf("fixture invalid: outcomeFactor(4,0,0,0,2)=%v is not below the 0.5 floor", f)
 	}
 }
