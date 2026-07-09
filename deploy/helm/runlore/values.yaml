@@ -205,6 +205,10 @@ config:
   #     # bot_token_env: SLACK_BOT_TOKEN
   #     # channel: "#alerts"            # channel ID or name (required with bot_token_env)
   #     # signing_secret_env: SLACK_SIGNING_SECRET  # only needed for rung-2 approve/reject buttons
+  #     # feedback_buttons: true        # OPT-IN 👍/👎 rating buttons feeding the learning loop.
+  #     #   Requires Slack to reach POST /slack/interactions (Interactivity Request URL through
+  #     #   your ingress — same exposure as approve/reject buttons), plus signing_secret_env
+  #     #   and outcome.ledger_path. Startup fails loud if either is missing.
   #   matrix: { homeserver: https://matrix.org, room_id: "!r:hs", access_token_env: MATRIX_TOKEN }
   #   webhook:
   #     url_env: RUNLORE_WEBHOOK_NOTIFY_URL   # POST findings JSON to this URL

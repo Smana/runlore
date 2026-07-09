@@ -106,7 +106,7 @@ additive. Full setup detail in **[Data sources](docs/data-sources.md)**.
 | **Kubernetes** | client-go — pod status, events, controller logs | *(in-cluster)* |
 | **LLM** | Anthropic · Google Gemini · any OpenAI-compatible *(vLLM, Ollama, OpenRouter…)* | `model.provider` |
 | **Triggers** *(sources)* | Alertmanager webhook · GitOps failures · PagerDuty webhook *(new)* | `sources.*` |
-| **Notifiers** | Slack *(bot token: threaded summary + detail)* · Slack incoming webhook / Matrix / generic webhook *(single verdict-first message)* | `notify.*` |
+| **Notifiers** | Slack *(bot token: threaded summary + detail; opt-in 👍/👎 feedback buttons feeding the learning loop)* · Slack incoming webhook / Matrix / generic webhook *(single verdict-first message)* | `notify.*` |
 | **Knowledge base** *(git forge)* | GitHub *(App auth)* | `forge.*` |
 
 ## ⚡ Try it in one minute — no cluster, no keys
