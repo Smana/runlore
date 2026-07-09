@@ -26,8 +26,11 @@ next time gets an instant answer — no fresh investigation.
 
 **Learns your platform · single Go binary · runs in your cluster · on your models.**
 
-> **Note:** RunLore is read-only by default — it never mutates your cluster. An autonomy ladder
-> (suggest → approve → auto) is on the roadmap for teams that want to go further.
+> **Note:** RunLore is **read-only by default** — investigations never mutate your cluster; the only
+> default write surface is Git, via reviewed PRs. Teams that want more can climb the autonomy ladder
+> (`suggest` → `approve`): even at the top supported rung RunLore only executes *reversible* GitOps
+> operations after an **explicit human approval** — a human stays in the loop at every step
+> (see [Project status](#project-status--stability)).
 
 **Who it's for** — **SRE and platform teams** who want their incident knowledge **portable and
 self-hosted** (no lock-in, your models, your data), and would rather an agent say *"I don't know"* than
@@ -154,6 +157,10 @@ Wire your credentials into a Kubernetes `Secret`, point the chart at them via a 
 helm install runlore deploy/helm/runlore -n runlore --create-namespace -f values.yaml
 ```
 
+> The chart ships **in this repo** (`git clone` first) — there is no `helm repo add` / OCI registry
+> yet. A minimal starting point for `values.yaml` is
+> [`deploy/helm/runlore/values-minimal.yaml`](deploy/helm/runlore/values-minimal.yaml).
+
 Then point a source at RunLore — for example, route your Alertmanager alerts to
 `http://runlore.runlore.svc:8080/webhook/alertmanager` — and it starts investigating immediately.
 
@@ -203,7 +210,7 @@ we test hardest.
 ## Docs
 
 📐 [Design](docs/design.md) · 📚 [Learning loop](docs/learning-loop.md) · ✅ [Reviewing knowledge](docs/reviewing-knowledge.md) · 🚀 [Getting started](docs/getting-started.md) · 🧪 [Worked example](docs/examples/harbor-registry-down.md) ·
-🔌 [Data sources](docs/data-sources.md) · ⚙️ [Configuration](docs/configuration.md) · 🔗 [MCP server](docs/mcp.md) · 📊 [Observability](docs/observability.md) · 🩺 [Troubleshooting](docs/troubleshooting.md) ·
+🔌 [Data sources](docs/data-sources.md) · ⚙️ [Configuration](docs/configuration.md) · 🔗 [MCP — server & client](docs/mcp.md) · 📊 [Observability](docs/observability.md) · 🩺 [Troubleshooting](docs/troubleshooting.md) ·
 🔒 [Security model](docs/security-model.md) · 🛡 [LLM security architecture](docs/security-architecture.md) · ⬆️ [Upgrade & uninstall](docs/upgrade-uninstall.md) · 🧭 [Prior art](docs/prior-art.md) · 📊 [Benchmarking models](docs/benchmarking.md) · 🛠 [Contributing](CONTRIBUTING.md)
 
 ## License

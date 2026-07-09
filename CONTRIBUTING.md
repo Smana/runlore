@@ -72,7 +72,7 @@ feature with no cluster.
 
 `hack/e2e-k3d.sh` is the real-cluster proof: it spins up a throwaway k3d cluster, installs minimal Flux
 CRDs, builds + imports the image, `helm install`s the chart, and verifies **each feature against a real
-API server** with mock external backends. It asserts 20 checks and tears down on exit.
+API server** with mock external backends. It asserts ~20 checks and tears down on exit.
 
 ```bash
 hack/e2e-k3d.sh           # full run, deletes the cluster afterwards
