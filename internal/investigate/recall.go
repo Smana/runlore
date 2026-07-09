@@ -126,8 +126,8 @@ func (r *Recall) lookup(ctx context.Context, req Request) (*catalog.Entry, float
 	// a rejected recall just falls through to a full investigation.
 	if r.Outcome != nil {
 		if counts, err := r.Outcome.OpenCounts(); err == nil {
-			if agg, ok := counts[e.Path]; ok { // only entries with recall history
-				f := outcomeFactor(agg.Recalls, agg.Resolved, r.OutcomePrior)
+			if agg, ok := counts[e.Path]; ok { // only entries with recall or feedback history
+				f := outcomeFactor(agg.Recalls, agg.Resolved, agg.FeedbackUp, agg.FeedbackDown, r.OutcomePrior)
 				if f < r.OutcomeFloor {
 					r.reject(ctx, "low_outcome")
 					return nil, 0
@@ -194,19 +194,26 @@ func clampF(v, lo, hi float64) float64 {
 }
 
 // outcomeFactor decays a recall's confidence by its track record as the posterior
-// mean of a symmetric Beta(k/2, k/2) prior over the resolve rate:
+// mean of a symmetric Beta(k/2, k/2) prior over the success rate:
 //
-//	factor = (resolved + k/2) / (recalls + k)
+//	factor = (resolved + up + k/2) / (recalls + up + down + k)
+//
+// Human 👍/👎 feedback (up/down) are extra Bernoulli observations in the SAME
+// posterior — a 👍 is one success, a 👎 one failure, each weighing exactly like a
+// resolved/unresolved recall. That is deliberate: feedback is the only ground
+// truth non-resolvable sources (GitOps failures) can ever accumulate, since their
+// recalls are excluded from resolve-based decay (see outcome.applyOpenLocked).
 //
 // k is the total pseudo-observation count (the prior strength). With the default
-// k=2 this is the documented Beta(1,1) posterior (resolved+1)/(recalls+2): an entry
-// with no history sits at the prior mean 0.5, a consistently-resolving one asymptotes
-// toward 1 without ever reaching it, and one that recalls-but-never-resolves decays
-// fast (0.333 after a single unresolved recall). Always in (0, 1) for k > 0 and
-// resolved ≤ recalls. Entries with no recall history never reach this gate (they are
-// absent from OpenCounts), so a brand-new entry is not punished by the 0.5 prior mean.
-func outcomeFactor(recalls, resolved int, k float64) float64 {
-	return (float64(resolved) + k/2) / (float64(recalls) + k)
+// k=2 this is the documented Beta(1,1) posterior (resolved+up+1)/(recalls+up+down+2):
+// an entry with no history sits at the prior mean 0.5, a consistently-resolving one
+// asymptotes toward 1 without ever reaching it, and one that recalls-but-never-
+// resolves decays fast (0.333 after a single unresolved recall — or a single 👎).
+// Always in (0, 1) for k > 0, resolved ≤ recalls and non-negative votes. Entries
+// with no recall or feedback history never reach this gate (they are absent from
+// OpenCounts), so a brand-new entry is not punished by the 0.5 prior mean.
+func outcomeFactor(recalls, resolved, up, down int, k float64) float64 {
+	return (float64(resolved+up) + k/2) / (float64(recalls+up+down) + k)
 }
 
 // deriveRecallConfidence turns the match signals into an explainable confidence,

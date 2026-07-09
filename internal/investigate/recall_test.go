@@ -198,27 +198,35 @@ func TestRecalledInvestigationStampsAlertMetadata(t *testing.T) {
 }
 
 func TestOutcomeFactor(t *testing.T) {
-	const k = 2.0 // default prior strength; k=2 ⇒ documented Beta(1,1): (resolved+1)/(recalls+2)
+	const k = 2.0 // default prior strength; k=2 ⇒ documented Beta(1,1): (resolved+up+1)/(recalls+up+down+2)
 	cases := []struct {
-		recalls, resolved int
-		want              float64
+		recalls, resolved, up, down int
+		want                        float64
 	}{
 		// resolved=0, recalls 0..3 — a never-resolving entry decays fast.
-		{0, 0, 0.5},       // (0+1)/(0+2) — prior mean; never reaches the gate in practice
-		{1, 0, 1.0 / 3.0}, // (0+1)/(1+2) ≈ 0.333 — already below the 0.5 floor at the 1st recall
-		{2, 0, 0.25},      // (0+1)/(2+2)
-		{3, 0, 0.2},       // (0+1)/(3+2)
-		{6, 0, 0.125},     // (0+1)/(6+2)
+		{0, 0, 0, 0, 0.5},       // (0+1)/(0+2) — prior mean; never reaches the gate in practice
+		{1, 0, 0, 0, 1.0 / 3.0}, // (0+1)/(1+2) ≈ 0.333 — already below the 0.5 floor at the 1st recall
+		{2, 0, 0, 0, 0.25},      // (0+1)/(2+2)
+		{3, 0, 0, 0, 0.2},       // (0+1)/(3+2)
+		{6, 0, 0, 0, 0.125},     // (0+1)/(6+2)
 		// mixed resolve records.
-		{3, 1, 0.4},       // (1+1)/(3+2)
-		{3, 2, 0.6},       // (2+1)/(3+2)
-		{4, 2, 0.5},       // (2+1)/(4+2) — exactly at the floor
-		{5, 5, 6.0 / 7.0}, // (5+1)/(5+2) ≈ 0.857 — always-resolving asymptotes to 1, never exceeds it
+		{3, 1, 0, 0, 0.4},       // (1+1)/(3+2)
+		{3, 2, 0, 0, 0.6},       // (2+1)/(3+2)
+		{4, 2, 0, 0, 0.5},       // (2+1)/(4+2) — exactly at the floor
+		{5, 5, 0, 0, 6.0 / 7.0}, // (5+1)/(5+2) ≈ 0.857 — always-resolving asymptotes to 1, never exceeds it
+		// human feedback — extra Bernoulli observations in the same posterior. The
+		// zero-recall rows are the non-resolvable-source case (GitOps): feedback is
+		// the ONLY evidence such entries can ever accumulate.
+		{0, 0, 2, 0, 0.75},      // (0+2+1)/(0+2+2) — two 👍, no resolves: trust builds
+		{0, 0, 0, 2, 0.25},      // (0+0+1)/(0+2+2) — two 👎: below the 0.5 floor, recall rejected
+		{0, 0, 0, 1, 1.0 / 3.0}, // one 👎 weighs exactly like one unresolved recall
+		{3, 2, 1, 1, 4.0 / 7.0}, // (2+1+1)/(3+1+1+2) — feedback blends with resolves
+		{5, 5, 0, 3, 0.6},       // (5+0+1)/(5+0+3+2) — 👎 erode even a perfect resolve record
 	}
 	for _, c := range cases {
-		got := outcomeFactor(c.recalls, c.resolved, k)
+		got := outcomeFactor(c.recalls, c.resolved, c.up, c.down, k)
 		if math.Abs(got-c.want) > 1e-9 {
-			t.Errorf("outcomeFactor(%d,%d,%v) = %v, want %v", c.recalls, c.resolved, k, got, c.want)
+			t.Errorf("outcomeFactor(%d,%d,%d,%d,%v) = %v, want %v", c.recalls, c.resolved, c.up, c.down, k, got, c.want)
 		}
 		if got > 1.0 {
 			t.Errorf("factor must be <= 1.0, got %v", got)
@@ -242,6 +250,30 @@ func soloRecall(oc OutcomeStats) *Recall {
 		}},
 		MinScore: 1.5, SoloFloor: 4.0, MarginGap: 1.0,
 		Outcome: oc, OutcomePrior: 2.0, OutcomeFloor: 0.5,
+	}
+}
+
+func TestLookupDecayFeedbackDownsReject(t *testing.T) {
+	// A non-resolvable-source entry (recalls=0, GitOps golden path) with two human
+	// 👎 and no 👍: factor = (0+0+1)/(0+0+2+2) = 0.25 < 0.5 floor → the recall is
+	// rejected and the incident falls through to a full investigation. This is the
+	// "click 👎 and the agent stops trusting this knowledge" contract.
+	r := soloRecall(fakeOutcome{counts: map[string]outcome.Aggregate{"x.md": {FeedbackDown: 2}}})
+	if e, _ := r.lookup(context.Background(), okReq()); e != nil {
+		t.Fatal("two 👎 with no successes must reject the recall")
+	}
+}
+
+func TestLookupDecayFeedbackUpsBuildTrust(t *testing.T) {
+	// Same entry with two 👍: factor = (0+2+1)/(0+2+2) = 0.75 → recalls, with
+	// confidence biased by the human track record instead of stuck at the prior.
+	r := soloRecall(fakeOutcome{counts: map[string]outcome.Aggregate{"x.md": {FeedbackUp: 2}}})
+	e, conf := r.lookup(context.Background(), okReq())
+	if e == nil {
+		t.Fatal("👍-endorsed entry must recall")
+	}
+	if conf <= 0 {
+		t.Fatalf("confidence must be positive, got %v", conf)
 	}
 }
 

@@ -30,6 +30,7 @@ type Server struct {
 	ready        func() bool
 	approvals    *action.Approvals // nil unless action mode "approve" is configured
 	pauser       Pauser            // nil unless action mode "auto" is configured (kill-switch)
+	feedback     FeedbackRecorder  // nil unless notify.slack.feedback_buttons is on (with an enabled ledger)
 	token        string            // shared secret for the approval/control endpoints (required when actions enabled)
 	slackSecret  string            // Slack signing secret; verifies interactive button clicks
 	webhookToken string            // optional bearer token required on POST /webhook/alertmanager
@@ -47,11 +48,20 @@ type Pauser interface {
 	Paused() bool
 }
 
+// FeedbackRecorder persists a human 👍/👎 rating on a delivered investigation —
+// the ground-truth signal the learning loop weighs recalled knowledge by
+// (implemented by *outcome.Ledger).
+type FeedbackRecorder interface {
+	Feedback(triggerKey, rating, user string, at time.Time) error
+}
+
 // Actions bundles the optional rung-2/rung-3 wiring: the approval queue, the auto
-// kill-switch, the shared control token, and the Slack signing secret.
+// kill-switch, the shared control token, the Slack signing secret, and the opt-in
+// feedback recorder.
 type Actions struct {
 	Approvals    *action.Approvals
 	Pauser       Pauser
+	Feedback     FeedbackRecorder // opt-in 👍/👎 recording (notify.slack.feedback_buttons)
 	Token        string
 	SlackSecret  string
 	WebhookToken string   // optional bearer token required on POST /webhook/alertmanager
@@ -73,7 +83,8 @@ func New(ready func() bool, acts Actions, built []source.Built, pipe *source.Pip
 	}
 	s := &Server{
 		ready:     ready,
-		approvals: acts.Approvals, pauser: acts.Pauser, token: acts.Token, slackSecret: acts.SlackSecret,
+		approvals: acts.Approvals, pauser: acts.Pauser, feedback: acts.Feedback,
+		token: acts.Token, slackSecret: acts.SlackSecret,
 		webhookToken: acts.WebhookToken, approvers: approvers, metrics: metricsHandler, log: log,
 	}
 	mux := http.NewServeMux()
@@ -235,12 +246,15 @@ type slackInteraction struct {
 
 // handleSlackInteraction processes Block Kit button clicks: it verifies the Slack
 // request signature, then approves (executing) / rejects the referenced action
-// (privileged — approver allowlist), updating the message via response_url.
+// (privileged — approver allowlist) or records a 👍/👎 feedback rating
+// (unprivileged — an opinion, not a cluster mutation), updating the message via
+// response_url.
 func (s *Server) handleSlackInteraction(w http.ResponseWriter, r *http.Request) {
-	// The endpoint only exists to drive Approve/Reject on queued actions, so it is
-	// disabled unless approvals are wired. The signing secret stays mandatory:
-	// signature verification is never optional.
-	if s.approvals == nil || s.slackSecret == "" {
+	// The endpoint drives Approve/Reject on queued actions and the opt-in 👍/👎
+	// feedback; it stays 404 unless at least one is wired, so a deployment that
+	// enabled neither exposes no interactive callback at all. The signing secret
+	// stays mandatory: signature verification is never optional.
+	if (s.approvals == nil && s.feedback == nil) || s.slackSecret == "" {
 		http.Error(w, "slack interactions not enabled", http.StatusNotFound)
 		return
 	}
@@ -306,12 +320,35 @@ func (s *Server) handleSlackInteraction(w http.ResponseWriter, r *http.Request) 
 		} else {
 			msg = fmt.Sprintf("🚫 rejected by @%s", p.User.Username)
 		}
+	case "runlore_feedback_up", "runlore_feedback_down":
+		// Feedback is deliberately unprivileged (no approver allowlist): the
+		// signature proves the workspace, and a rating is an opinion feeding the
+		// learning loop, not a cluster mutation. Anti-gaming lives in the ledger —
+		// one live vote per (TriggerKey, user), latest wins.
+		if s.feedback == nil {
+			msg = "⚠️ feedback recording not enabled (notify.slack.feedback_buttons is off)"
+			break
+		}
+		rating := "up"
+		if act.ActionID == "runlore_feedback_down" {
+			rating = "down"
+		}
+		if ferr := s.feedback.Feedback(act.Value, rating, p.User.ID, time.Now()); ferr != nil {
+			msg = "⚠️ recording feedback failed: " + ferr.Error()
+			s.log.Warn("slack feedback failed", "key", act.Value, "err", ferr)
+		} else {
+			msg = fmt.Sprintf("🙏 feedback recorded (%s) — thanks @%s", rating, p.User.Username)
+			s.log.Info("slack feedback recorded", "key", act.Value, "rating", rating, "user_id", p.User.ID, "user", p.User.Username)
+		}
 	default:
 		http.Error(w, "unknown action", http.StatusBadRequest)
 		return
 	}
 	w.WriteHeader(http.StatusOK) // ack the click; update the message best-effort
-	s.updateSlack(r.Context(), p.ResponseURL, msg)
+	// Approve/reject replace the interaction message with the outcome; a feedback
+	// ack must NOT — replacing would wipe the investigation the rating is about.
+	replace := act.ActionID == "runlore_approve" || act.ActionID == "runlore_reject"
+	s.updateSlack(r.Context(), p.ResponseURL, msg, replace)
 }
 
 // verifySlack validates the Slack request signature (HMAC-SHA256 over
@@ -331,12 +368,13 @@ func (s *Server) verifySlack(h http.Header, body []byte) bool {
 	return hmac.Equal([]byte(expected), []byte(h.Get("X-Slack-Signature")))
 }
 
-// updateSlack overwrites the interaction message via its response_url with the
-// approve/reject outcome. The URL is attacker-influenceable (it arrives in the
-// interaction payload), so it is restricted to https *.slack.com and posted with a
-// bounded client — no SSRF to arbitrary internal services, no unbounded hang on
-// http.DefaultClient.
-func (s *Server) updateSlack(ctx context.Context, responseURL, text string) {
+// updateSlack answers the interaction via its response_url: approve/reject
+// overwrite the interaction message with the outcome (replaceOriginal=true),
+// feedback appends an ephemeral note instead. The URL is attacker-influenceable
+// (it arrives in the interaction payload), so it is restricted to https
+// *.slack.com and posted with a bounded client — no SSRF to arbitrary internal
+// services, no unbounded hang on http.DefaultClient.
+func (s *Server) updateSlack(ctx context.Context, responseURL, text string, replaceOriginal bool) {
 	if responseURL == "" {
 		return
 	}
@@ -345,7 +383,7 @@ func (s *Server) updateSlack(ctx context.Context, responseURL, text string) {
 		s.log.Warn("refusing slack response_url: not an https *.slack.com host", "url", responseURL)
 		return
 	}
-	body, _ := json.Marshal(map[string]any{"replace_original": true, "text": text})
+	body := slackResponseBody(text, replaceOriginal)
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, responseURL, bytes.NewReader(body))
 	if err != nil {
 		return
@@ -355,6 +393,18 @@ func (s *Server) updateSlack(ctx context.Context, responseURL, text string) {
 	if resp, err := client.Do(req); err == nil {
 		_ = resp.Body.Close()
 	}
+}
+
+// slackResponseBody builds the response_url payload. A feedback ack
+// (replaceOriginal=false) is additionally marked ephemeral so the thanks note is
+// visible to the clicker only — the channel keeps the untouched investigation.
+func slackResponseBody(text string, replaceOriginal bool) []byte {
+	m := map[string]any{"replace_original": replaceOriginal, "text": text}
+	if !replaceOriginal {
+		m["response_type"] = "ephemeral"
+	}
+	b, _ := json.Marshal(m)
+	return b
 }
 
 // Handler returns the HTTP handler (built once at construction; Go 1.22+ method routing).

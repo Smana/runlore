@@ -119,6 +119,8 @@ incident webhook. Known keys: `alertmanager`, `gitops`, `pagerduty`.
 ### `outcome` — the learning ledger
 `ledger_path` — append-only JSONL of investigation outcomes (empty disables). Drives outcome-weighted
 recall decay; **must be on the PVC** to compound (see [Upgrade & Uninstall](upgrade-uninstall.md)).
+Also records the human 👍/👎 ratings when `notify.slack.feedback_buttons` is enabled (see
+[`notify`](#notify--where-findings-go) below).
 
 ### `actions` — the autonomy ladder (off by default)
 - `mode` — `off` (default) · `suggest` · `approve` · `auto` (experimental, frozen/not recommended).
@@ -177,10 +179,9 @@ synthetic findings out of the review queue while still notifying chat (see
 [reviewing-knowledge.md](reviewing-knowledge.md#expected-triage-volume)).
 
 ### `notify` — where findings go
-`slack` (`webhook_url_env` or `bot_token_env`, `channel`, `signing_secret_env`, `approver_ids`),
-`matrix` (`homeserver`, `room_id`, `access_token_env`), plus inline blocks for any registered notifier
-(e.g. `webhook` with `url_env`). No new keys were added for the verdict-first layout — the changes
-below are behavioural.
+`slack` (`webhook_url_env` or `bot_token_env`, `channel`, `signing_secret_env`, `approver_ids`,
+`feedback_buttons`), `matrix` (`homeserver`, `room_id`, `access_token_env`), plus inline blocks for any
+registered notifier (e.g. `webhook` with `url_env`).
 
 Every notifier now leads with the model's **verdict** (`no_action` / `action_suggested` /
 `action_required` / `inconclusive`) and carries the trigger-time alert metadata (severity, environment,
@@ -198,6 +199,31 @@ limitations, kept distinct from human-only open questions):
 `alert_name`, `started_at` (RFC3339, empty when unknown), `occurrences`, `prev_curated_url`, `ruled_out`
 and `data_gaps` alongside the existing `title`/`confidence`/`curated_url`/`text` fields (all
 `omitempty`).
+
+**👍/👎 feedback buttons — `feedback_buttons` (opt-in, default `false`).** When enabled, Slack
+investigation messages carry two buttons ("👍 Accurate" / "👎 Off-base") so the on-call can rate the
+diagnosis in one click. Ratings land in the **outcome ledger** and weigh the recalled entry's trust
+exactly like resolve signals do — enough 👎 and the entry falls below the recall floor and RunLore
+re-investigates instead of reusing it (see
+[learning-loop.md §6](learning-loop.md#6-the-feedback-edge--outcome-driven-decay-what-makes-it-learn)).
+This is the primary trust signal for incidents that have **no resolve channel** (GitOps failures).
+
+> [!important] Enabling this requires exposing the agent to Slack.
+> Button clicks arrive as HTTPS callbacks on **`POST /slack/interactions`**, so that endpoint must be
+> reachable **from Slack's servers** (a public Interactivity *Request URL* on your Slack app — the same
+> endpoint and the same exposure approve-mode buttons use; if you already run `actions.mode: approve`
+> with Slack buttons, nothing new is exposed). Route it through your ingress/gateway; if you use the
+> chart's `networkPolicy.ingressFrom`, allow your ingress controller, not the internet. Startup **fails
+> loud** unless both `signing_secret_env` (every click is HMAC-verified, ±5 min replay window) and
+> `outcome.ledger_path` (where ratings land) are set.
+
+Feedback is deliberately **unprivileged**: any signature-valid member of your workspace can rate — a
+rating is an opinion feeding the learning loop, not a cluster mutation (approve/reject keep their
+`approver_ids` allowlist). Anti-gaming lives in the ledger: **one live vote per (trigger key, Slack
+user)**, latest wins — duplicate clicks are idempotent and changing your mind moves the vote. The ack
+is an ephemeral "feedback recorded" note visible only to the clicker; the investigation message is
+never modified. With the option off (the default), no buttons render and the endpoint behaves exactly
+as before (404 unless approve mode wired it).
 
 ### `server` — the HTTP listener
 Only `webhook_token_env` (the bearer token for the incident webhook; **required under
