@@ -191,6 +191,10 @@ command.
 
 Create a `values.yaml`. This is a complete production-style example — trim what you don't use:
 
+> In a hurry? [`deploy/helm/runlore/values-minimal.yaml`](../deploy/helm/runlore/values-minimal.yaml)
+> is a copy-paste **investigate + notify** starting point (no KB/curation yet — CI-checked against
+> the config schema). The annotated example below is the full golden path.
+
 ```yaml
 image:
   repository: ghcr.io/smana/runlore
@@ -249,7 +253,7 @@ config:
     api_key_env: OPENAI_API_KEY             # omit/empty for keyless (in-cluster vLLM/Ollama)
     # — or native Anthropic instead:
     # provider: anthropic
-    # model: claude-sonnet-4-6
+    # model: claude-sonnet-5
     # api_key_env: ANTHROPIC_API_KEY        # base_url defaults to api.anthropic.com
   catalog:
     dir: /var/lib/runlore/catalog           # must match catalog.mountPath above
@@ -259,9 +263,10 @@ config:
       interval: 5m
       # token_env: KB_GIT_TOKEN              # optional; private repos reuse the curation GitHub App by default
     # Instant recall: skip the LLM loop when the catalog has a high-confidence match
-    # for the symptom (faster, cheaper). Off by default; tune min_score for your
-    # catalog — BM25 scores are corpus-dependent (observe the "score=" logs).
-    # instant_recall: { enabled: true, min_score: 0.3 }
+    # for the symptom (faster, cheaper). Off by default; the shipped default
+    # min_score is 1.0 — tune it for your catalog, BM25 scores are
+    # corpus-dependent (observe the "score=" logs).
+    # instant_recall: { enabled: true }
 
   # Investigate signals (optional) — enable the query_metrics / query_logs tools.
   metrics:

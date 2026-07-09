@@ -1,0 +1,59 @@
+# Minimal RunLore values — the smallest install that investigates and notifies.
+#
+# Golden path: Flux + Alertmanager + Anthropic (or any OpenAI-compatible endpoint) + Slack.
+# Read-only: no actions, no cluster writes. The LEARNING half (knowledge catalog + PR
+# curation) is deliberately left out here — add it when ready by following
+# docs/getting-started.md (steps 1-2: KB repo + GitHub App).
+#
+# Before installing, create the secret the *_env keys below reference:
+#
+#   kubectl create secret generic runlore-secrets -n runlore \
+#     --from-literal=ANTHROPIC_API_KEY=sk-ant-... \
+#     --from-literal=SLACK_WEBHOOK_URL=https://hooks.slack.com/services/...
+#
+# Then:
+#
+#   helm install runlore deploy/helm/runlore -n runlore --create-namespace -f values-minimal.yaml
+#
+# Finally, point Alertmanager at http://runlore.runlore.svc:8080/webhook/alertmanager
+# (add `bearer_token` auth + server.webhook_token_env if that URL is reachable beyond
+# your cluster — see docs/security-model.md).
+
+replicaCount: 1 # single replica to start; 2+ (leader-elected) once you trust it
+
+envFrom:
+  - secretRef:
+      name: runlore-secrets
+
+config:
+  gitops:
+    engine: flux # or "argocd"
+
+  sources:
+    alertmanager: {} # the incident webhook
+    gitops:
+      enabled: true # also react to Flux/Argo Ready=False
+
+  triggers:
+    incidents:
+      match:
+        severity: [critical, warning]
+      dedup: { window: 30m } # don't re-investigate a still-firing alert within 30m
+
+  model:
+    provider: anthropic
+    model: claude-sonnet-5
+    api_key_env: ANTHROPIC_API_KEY
+    # — or any OpenAI-compatible endpoint (vLLM, Ollama, OpenRouter…) instead:
+    # provider: openai
+    # base_url: http://vllm.llm.svc:8000/v1
+    # model: <your-model-name>
+    # api_key_env: OPENAI_API_KEY   # omit/empty for keyless in-cluster endpoints
+
+  notify:
+    slack:
+      webhook_url_env: SLACK_WEBHOOK_URL
+
+  # Optional but recommended once metrics/logs exist — richer investigations:
+  # metrics: { url: http://vmsingle.observability.svc:8429 }     # PromQL API base
+  # logs:    { url: http://victorialogs.observability.svc:9428 } # LogsQL API base
