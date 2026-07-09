@@ -1091,3 +1091,159 @@ func TestEpisodeCarriesDupFingerprint(t *testing.T) {
 		t.Fatalf("Episodes dup = %+v, want one with dup-abc", eps)
 	}
 }
+
+// TestFeedbackValidatesRatingAndDisabledNoop pins the Feedback contract edges: an
+// unknown rating is an error (never silently recorded), and a disabled ledger
+// no-ops like every other write.
+func TestFeedbackValidatesRatingAndDisabledNoop(t *testing.T) {
+	l, _ := New(filepath.Join(t.TempDir(), "o.jsonl"))
+	if err := l.Feedback("k", "", "sideways", "U1", time.Unix(30000, 0)); err == nil {
+		t.Fatal("rating 'sideways' must be rejected")
+	}
+	d, _ := New("") // disabled
+	if err := d.Feedback("k", "", "up", "U1", time.Unix(30000, 0)); err != nil {
+		t.Fatalf("disabled ledger Feedback must no-op, got %v", err)
+	}
+}
+
+// TestFeedbackCreditsRecalledEntryAndSurvivesReplay: a 👍/👎 credits the entry of
+// the newest open for the TriggerKey, and the fold is rebuilt identically from a
+// fresh replay of the file (restart / leader failover).
+func TestFeedbackCreditsRecalledEntryAndSurvivesReplay(t *testing.T) {
+	p := filepath.Join(t.TempDir(), "o.jsonl")
+	l, _ := New(p)
+	t0 := time.Unix(30000, 0)
+	if err := l.Open(Event{Fingerprint: "fp", Kind: "recall", Entry: "e.md", TriggerKey: "k", At: t0}); err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	if err := l.Feedback("k", "fp", "down", "U1", t0.Add(time.Minute)); err != nil {
+		t.Fatalf("Feedback: %v", err)
+	}
+	if err := l.Feedback("k", "fp", "up", "U2", t0.Add(2*time.Minute)); err != nil {
+		t.Fatalf("Feedback: %v", err)
+	}
+	c, _ := l.OpenCounts()
+	if a := c["e.md"]; a.FeedbackDown != 1 || a.FeedbackUp != 1 || a.Recalls != 1 {
+		t.Fatalf("live fold e.md = %+v, want up=1 down=1 recalls=1", a)
+	}
+	l2, err := New(p)
+	if err != nil {
+		t.Fatalf("replay New: %v", err)
+	}
+	c2, _ := l2.OpenCounts()
+	if a := c2["e.md"]; a.FeedbackDown != 1 || a.FeedbackUp != 1 || a.Recalls != 1 {
+		t.Fatalf("replayed fold e.md = %+v, want up=1 down=1 recalls=1", a)
+	}
+}
+
+// TestFeedbackDedupPerUserLatestWins: one live vote per (TriggerKey, user) — a
+// duplicate click is idempotent, a changed vote MOVES (the previous rating is
+// un-credited), and the invariant survives a fresh replay.
+func TestFeedbackDedupPerUserLatestWins(t *testing.T) {
+	p := filepath.Join(t.TempDir(), "o.jsonl")
+	l, _ := New(p)
+	t0 := time.Unix(31000, 0)
+	_ = l.Open(Event{Fingerprint: "fp", Kind: "recall", Entry: "e.md", TriggerKey: "k", At: t0})
+	_ = l.Feedback("k", "", "down", "U1", t0.Add(1*time.Minute))
+	_ = l.Feedback("k", "", "down", "U1", t0.Add(2*time.Minute)) // duplicate click
+	if c, _ := l.OpenCounts(); c["e.md"].FeedbackDown != 1 {
+		t.Fatalf("duplicate vote must be idempotent, got %+v", c["e.md"])
+	}
+	_ = l.Feedback("k", "", "up", "U1", t0.Add(3*time.Minute)) // changed mind
+	if c, _ := l.OpenCounts(); c["e.md"].FeedbackUp != 1 || c["e.md"].FeedbackDown != 0 {
+		t.Fatalf("changed vote must move, got %+v", c["e.md"])
+	}
+	l2, _ := New(p)
+	if c, _ := l2.OpenCounts(); c["e.md"].FeedbackUp != 1 || c["e.md"].FeedbackDown != 0 {
+		t.Fatalf("replayed dedup state = %+v, want up=1 down=0", c["e.md"])
+	}
+}
+
+// TestFeedbackAttributionFollowsNewestOpen: the vote credits the entry of the
+// NEWEST open for the TriggerKey at vote time — a fresh investigation (no entry)
+// credits nothing, and a later re-vote against a newer recall open moves the
+// credit to the new entry.
+func TestFeedbackAttributionFollowsNewestOpen(t *testing.T) {
+	l, _ := New(filepath.Join(t.TempDir(), "o.jsonl"))
+	t0 := time.Unix(32000, 0)
+	_ = l.Open(Event{Fingerprint: "fp1", Kind: "recall", Entry: "e1.md", TriggerKey: "k", At: t0})
+	_ = l.Open(Event{Fingerprint: "fp2", Kind: "fresh", TriggerKey: "k", At: t0.Add(time.Hour)})
+	_ = l.Feedback("k", "", "down", "U1", t0.Add(time.Hour+time.Minute))
+	c, _ := l.OpenCounts()
+	if a := c["e1.md"]; a.FeedbackDown != 0 {
+		t.Fatalf("vote on a fresh investigation must not credit an older entry, got %+v", a)
+	}
+	_ = l.Open(Event{Fingerprint: "fp3", Kind: "recall", Entry: "e2.md", TriggerKey: "k", At: t0.Add(2 * time.Hour)})
+	_ = l.Feedback("k", "", "down", "U1", t0.Add(2*time.Hour+time.Minute))
+	c, _ = l.OpenCounts()
+	if c["e2.md"].FeedbackDown != 1 || c["e1.md"].FeedbackDown != 0 {
+		t.Fatalf("re-vote must credit the newest open's entry only: e1=%+v e2=%+v", c["e1.md"], c["e2.md"])
+	}
+}
+
+// TestFeedbackOnNonResolvableRecallCounts pins the reason feedback exists: a
+// non-resolvable recall (GitOps — no resolve signal can ever arrive) is excluded
+// from resolve-based decay, so human feedback is its ONLY ground-truth channel
+// and must be folded regardless of resolvability.
+func TestFeedbackOnNonResolvableRecallCounts(t *testing.T) {
+	l, _ := New(filepath.Join(t.TempDir(), "o.jsonl"))
+	t0 := time.Unix(33000, 0)
+	rf := false
+	_ = l.Open(Event{Fingerprint: "gitops:abc", Kind: "recall", Entry: "e.md", TriggerKey: "k", Resolvable: &rf, At: t0})
+	_ = l.Feedback("k", "", "down", "U1", t0.Add(time.Minute))
+	c, _ := l.OpenCounts()
+	if a := c["e.md"]; a.Recalls != 0 || a.FeedbackDown != 1 {
+		t.Fatalf("non-resolvable recall: want recalls=0 (excluded) down=1 (folded), got %+v", a)
+	}
+}
+
+// TestFeedbackDoesNotDisturbEpisodesOrPairing: feedback lines are invisible to
+// open/resolve pairing — Episodes() and the resolve credit are unchanged.
+func TestFeedbackDoesNotDisturbEpisodesOrPairing(t *testing.T) {
+	l, _ := New(filepath.Join(t.TempDir(), "o.jsonl"))
+	t0 := time.Unix(34000, 0)
+	_ = l.Open(Event{Fingerprint: "fp", Kind: "recall", Entry: "e.md", TriggerKey: "k", At: t0})
+	_ = l.Feedback("k", "fp", "down", "U1", t0.Add(time.Minute))
+	if _, ok, err := l.Resolve("fp", t0.Add(2*time.Minute)); err != nil || !ok {
+		t.Fatalf("Resolve after feedback: ok=%v err=%v", ok, err)
+	}
+	eps, err := l.Episodes()
+	if err != nil || len(eps) != 1 || !eps[0].Resolved {
+		t.Fatalf("Episodes = %+v (err=%v), want exactly one resolved episode", eps, err)
+	}
+	if c, _ := l.OpenCounts(); c["e.md"].Resolved != 1 || c["e.md"].FeedbackDown != 1 {
+		t.Fatalf("aggregate = %+v, want resolved=1 down=1", c["e.md"])
+	}
+}
+
+// TestFeedbackSurvivesCompaction: votes, attribution and counters absorbed into a
+// checkpoint are reconstructed exactly — including the per-user dedup (a repeated
+// vote after compaction stays idempotent; a changed one still moves).
+func TestFeedbackSurvivesCompaction(t *testing.T) {
+	p := filepath.Join(t.TempDir(), "o.jsonl")
+	l, _ := New(p) // no compaction while writing
+	t0 := time.Unix(35000, 0)
+	_ = l.Open(Event{Fingerprint: "fp", Kind: "recall", Entry: "e.md", TriggerKey: "k", At: t0})
+	_ = l.Feedback("k", "", "down", "U1", t0.Add(time.Minute))
+	// Pad with unrelated resolved pairs so the feedback lines fall inside the
+	// absorbed prefix, not the retained tail.
+	for i := 0; i < 20; i++ {
+		fp := fmt.Sprintf("pad%d", i)
+		_ = l.Open(Event{Fingerprint: fp, Kind: "fresh", At: t0.Add(time.Duration(i+10) * time.Minute)})
+		_, _, _ = l.Resolve(fp, t0.Add(time.Duration(i+11)*time.Minute))
+	}
+	c, _ := NewWithMaxEvents(p, 5) // reload triggers compaction (42 events > 5)
+	if a, _ := c.OpenCounts(); a["e.md"].FeedbackDown != 1 {
+		t.Fatalf("post-compaction fold = %+v, want down=1", a["e.md"])
+	}
+	// The checkpointed vote still dedups…
+	_ = c.Feedback("k", "", "down", "U1", t0.Add(24*time.Hour))
+	if a, _ := c.OpenCounts(); a["e.md"].FeedbackDown != 1 {
+		t.Fatalf("checkpointed vote must stay idempotent, got %+v", a["e.md"])
+	}
+	// …and still moves on a changed rating.
+	_ = c.Feedback("k", "", "up", "U1", t0.Add(25*time.Hour))
+	if a, _ := c.OpenCounts(); a["e.md"].FeedbackUp != 1 || a["e.md"].FeedbackDown != 0 {
+		t.Fatalf("checkpointed vote must move, got %+v", a["e.md"])
+	}
+}

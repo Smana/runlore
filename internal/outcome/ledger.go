@@ -11,6 +11,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io/fs"
 	"log/slog"
 	"os"
@@ -70,6 +71,12 @@ type Event struct {
 	TriggerKey string `json:"trigger_key,omitempty"` // groups recurrences of the same alert; keys the byTrigger index
 	CuratedURL string `json:"curated_url,omitempty"` // KB link surfaced as "previous: <link>" on recurrence
 	Verdict    string `json:"verdict,omitempty"`     // curator's machine verdict on the investigation
+
+	// User identifies the human behind a feedback event (a Slack user id) — the
+	// dedup key that keeps one live vote per (TriggerKey, user), latest wins.
+	// Empty on open/resolve lines. On a feedback line Kind carries the rating
+	// ("up" | "down").
+	User string `json:"user,omitempty"`
 
 	// Resolvable is set on an open when we know whether a ground-truth resolve signal
 	// can ever arrive for it: true for sources with a resolve channel (Alertmanager,
@@ -137,6 +144,12 @@ type Ledger struct {
 	// in lockstep with the durable write, rebuilt on load, like agg.
 	byTrigger map[string]triggerAgg
 
+	// votes holds the latest human feedback per (TriggerKey \x00 user), so a
+	// duplicate click is idempotent and a changed vote MOVES instead of stacking —
+	// without it, one enthusiastic clicker could sink a healthy entry under the
+	// OutcomeFloor. Folded on replay like agg; checkpointed on compaction.
+	votes map[string]feedbackVote
+
 	// droppedResolves counts orphan resolves discarded by the pendingResolves bound
 	// (see maxPendingResolvesPerFingerprint) — spurious duplicate/replayed resolve
 	// webhooks. Kept so the (otherwise silent) defensive drop is observable.
@@ -169,6 +182,7 @@ type checkpointData struct {
 	OpenIndex       map[string]Event             `json:"open_index,omitempty"`
 	PendingOpens    map[string][]pendingOpenJSON `json:"pending_opens,omitempty"`
 	PendingResolves map[string][]time.Time       `json:"pending_resolves,omitempty"`
+	Votes           map[string]feedbackVoteJSON  `json:"votes,omitempty"`
 	DroppedResolves int                          `json:"dropped_resolves,omitempty"`
 }
 
@@ -176,6 +190,12 @@ type triggerAggJSON struct {
 	Count      int       `json:"count"`
 	Last       time.Time `json:"last"`
 	CuratedURL string    `json:"curated_url,omitempty"`
+	Entry      string    `json:"entry,omitempty"`
+}
+
+type feedbackVoteJSON struct {
+	Rating string `json:"rating"`
+	Entry  string `json:"entry,omitempty"`
 }
 
 type pendingOpenJSON struct {
@@ -188,6 +208,16 @@ type triggerAgg struct {
 	count      int
 	last       time.Time
 	curatedURL string // CuratedURL of the newest open
+	entry      string // Entry of the newest open ("" for fresh) — feedback attribution target
+}
+
+// feedbackVote is the fold state of one (TriggerKey, user) feedback: the rating
+// currently held and the entry it credited at vote time — kept so a changed vote
+// can un-credit exactly what it credited, even if attribution has since moved to
+// a newer open.
+type feedbackVote struct {
+	rating string // "up" | "down"
+	entry  string // agg key credited; "" when the newest open was fresh (nothing credited)
 }
 
 // maxPendingResolvesPerFingerprint bounds the resolve-before-open buffer per
@@ -260,13 +290,16 @@ func (l *Ledger) resetStateLocked() {
 	l.pendingOpens = map[string][]pendingOpen{}
 	l.pendingResolves = map[string][]time.Time{}
 	l.byTrigger = map[string]triggerAgg{}
+	l.votes = map[string]feedbackVote{}
 	l.droppedResolves = 0
 }
 
 // foldLocked folds one replayed event into the derived state. Open/resolve maintain the
-// aggregate, open-index, pairing stacks, and occurrence index; a checkpoint seeds the
-// state a prior compaction folded away. Any other (unknown/future) kind is ignored — the
-// property old binaries rely on for the feedback kind, and now for "checkpoint" too.
+// aggregate, open-index, pairing stacks, and occurrence index; feedback folds a human
+// vote into the aggregate; a checkpoint seeds the state a prior compaction folded away.
+// Any other (unknown/future) kind is ignored — the forward-compat property binaries
+// older than a given kind rely on (they ignored "feedback" before it was folded, and
+// "checkpoint" before compaction existed).
 func (l *Ledger) foldLocked(e Event) {
 	switch e.Event {
 	case "open":
@@ -276,6 +309,8 @@ func (l *Ledger) foldLocked(e Event) {
 	case "resolve":
 		delete(l.open, e.Fingerprint)
 		l.applyResolveLocked(e.Fingerprint, e.At)
+	case "feedback":
+		l.applyFeedbackLocked(e)
 	case "checkpoint":
 		l.seedCheckpointLocked(e.Checkpoint)
 	}
@@ -302,7 +337,10 @@ func (l *Ledger) seedCheckpointLocked(cd *checkpointData) {
 		l.open[fp] = ev
 	}
 	for k, v := range cd.ByTrigger {
-		l.byTrigger[k] = triggerAgg{count: v.Count, last: v.Last, curatedURL: v.CuratedURL}
+		l.byTrigger[k] = triggerAgg{count: v.Count, last: v.Last, curatedURL: v.CuratedURL, entry: v.Entry}
+	}
+	for k, v := range cd.Votes {
+		l.votes[k] = feedbackVote{rating: v.Rating, entry: v.Entry}
 	}
 	for fp, opens := range cd.PendingOpens {
 		stack := make([]pendingOpen, 0, len(opens))
@@ -353,7 +391,13 @@ func (l *Ledger) snapshotCheckpointLocked() *checkpointData {
 	if len(l.byTrigger) > 0 {
 		cd.ByTrigger = make(map[string]triggerAggJSON, len(l.byTrigger))
 		for k, v := range l.byTrigger {
-			cd.ByTrigger[k] = triggerAggJSON{Count: v.count, Last: v.last, CuratedURL: v.curatedURL}
+			cd.ByTrigger[k] = triggerAggJSON{Count: v.count, Last: v.last, CuratedURL: v.curatedURL, Entry: v.entry}
+		}
+	}
+	if len(l.votes) > 0 {
+		cd.Votes = make(map[string]feedbackVoteJSON, len(l.votes))
+		for k, v := range l.votes {
+			cd.Votes[k] = feedbackVoteJSON{Rating: v.rating, Entry: v.entry}
 		}
 	}
 	if len(l.pendingOpens) > 0 {
@@ -627,6 +671,10 @@ func (l *Ledger) applyTriggerLocked(e Event) {
 	if !e.At.Before(a.last) {
 		a.last = e.At
 		a.curatedURL = e.CuratedURL
+		// Feedback attribution follows the newest open: a fresh open (Entry "")
+		// deliberately CLEARS it — a vote on a fresh investigation must not credit
+		// an older recall's entry.
+		a.entry = e.Entry
 	}
 	l.byTrigger[e.TriggerKey] = a
 }
@@ -706,10 +754,14 @@ func (l *Ledger) Episodes() ([]Episode, error) {
 }
 
 // Aggregate is a per-entry roll-up of recall episodes: how often the entry was
-// recalled, how often the incident then resolved, and when it last resolved.
+// recalled, how often the incident then resolved, and when it last resolved —
+// plus the human 👍/👎 votes attributed to the entry (one live vote per
+// TriggerKey+user, latest wins; see applyFeedbackLocked).
 type Aggregate struct {
 	Recalls       int
 	Resolved      int
+	FeedbackUp    int // human "the diagnosis was right" votes — success observations for decay
+	FeedbackDown  int // human "the diagnosis was wrong" votes — failure observations for decay
 	LastConfirmed time.Time
 }
 
@@ -740,6 +792,68 @@ func (l *Ledger) OpenCounts() (map[string]Aggregate, error) {
 		counts[k] = v
 	}
 	return counts, nil
+}
+
+// Feedback appends a human 👍/👎 verdict on a delivered investigation and folds it
+// into the trust aggregate. rating is "up" or "down" (anything else is an error,
+// never silently recorded); user is the stable reviewer id (a Slack user id) the
+// per-trigger dedup keys on. It is a plain append that open/resolve pairing never
+// sees — binaries older than the fold ignored the kind entirely.
+func (l *Ledger) Feedback(triggerKey, fingerprint, rating, user string, at time.Time) error {
+	if rating != "up" && rating != "down" {
+		return fmt.Errorf("feedback rating %q: want up or down", rating)
+	}
+	if !l.enabled() {
+		return nil
+	}
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	e := Event{Event: "feedback", Fingerprint: fingerprint, TriggerKey: triggerKey, Kind: rating, User: user, At: at}
+	if err := l.appendLocked(e); err != nil {
+		return err // append failed: leave the fold untouched (durable-first, like Open/Resolve)
+	}
+	l.applyFeedbackLocked(e)
+	return nil
+}
+
+// applyFeedbackLocked folds one feedback event into the per-entry aggregate.
+// Attribution goes through the byTrigger index: the vote credits the entry of the
+// NEWEST open for its TriggerKey (a fresh investigation attributes nothing — the
+// vote is still on disk for analytics, there is just no catalog entry to weigh).
+// Dedup: one live vote per (TriggerKey, user), latest wins — a repeated identical
+// vote is idempotent, a changed one first un-credits what it previously credited.
+// Unlike resolve-based decay, feedback counts regardless of resolvability: a human
+// judgment on the diagnosis is exactly the ground truth non-resolvable sources
+// (GitOps failures, reinvestigate) can never get from a resolve signal.
+func (l *Ledger) applyFeedbackLocked(e Event) {
+	if e.TriggerKey == "" || (e.Kind != "up" && e.Kind != "down") {
+		return // unattributable, or a malformed replayed line: never folded
+	}
+	key := e.TriggerKey + "\x00" + e.User
+	entry := l.byTrigger[e.TriggerKey].entry
+	if prev, ok := l.votes[key]; ok {
+		if prev.rating == e.Kind && prev.entry == entry {
+			return // duplicate click — idempotent
+		}
+		l.creditFeedbackLocked(prev.entry, prev.rating, -1)
+	}
+	l.votes[key] = feedbackVote{rating: e.Kind, entry: entry}
+	l.creditFeedbackLocked(entry, e.Kind, +1)
+}
+
+// creditFeedbackLocked adjusts entry's feedback counter for rating by delta; a
+// no-op for the empty entry (fresh-investigation votes credit nothing).
+func (l *Ledger) creditFeedbackLocked(entry, rating string, delta int) {
+	if entry == "" {
+		return
+	}
+	a := l.agg[entry]
+	if rating == "up" {
+		a.FeedbackUp += delta
+	} else {
+		a.FeedbackDown += delta
+	}
+	l.agg[entry] = a
 }
 
 // Resolve records that an incident's alert cleared. When it matches an open
