@@ -1,6 +1,7 @@
 package app
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/Smana/runlore/internal/config"
@@ -37,6 +38,50 @@ func TestRequireWebhookAuth(t *testing.T) {
 			err := RequireWebhookAuth(cfg, tc.token)
 			if (err != nil) != tc.wantErr {
 				t.Fatalf("RequireWebhookAuth err = %v, wantErr = %v", err, tc.wantErr)
+			}
+		})
+	}
+}
+
+// TestWebhookAuthWarning covers the (source enabled × token set × actions mode)
+// matrix: a warning fires only when the alertmanager source is enabled AND the
+// token is empty, regardless of whether a model is configured (unlike
+// RequireWebhookAuth, which only fail-closes once a model is billed per request).
+// actions.mode=approve gets the stronger wording; auto is deliberately NOT covered
+// here — config.Validate already hard-fails an empty token under auto, so this
+// helper never has to warn about it.
+func TestWebhookAuthWarning(t *testing.T) {
+	tests := []struct {
+		name     string
+		enabled  bool
+		token    string
+		mode     config.ActionMode
+		wantWarn bool
+		wantLoud bool // stronger approve-mode wording
+	}{
+		{"disabled + no token + off → silent (source not reachable)", false, "", config.ActionOff, false, false},
+		{"disabled + no token + approve → silent (source not reachable)", false, "", config.ActionApprove, false, false},
+		{"enabled + token + off → silent (authenticated)", true, "secret", config.ActionOff, false, false},
+		{"enabled + token + approve → silent (authenticated)", true, "secret", config.ActionApprove, false, false},
+		{"enabled + no token + off → warns", true, "", config.ActionOff, true, false},
+		{"enabled + no token + suggest → warns", true, "", config.ActionSuggest, true, false},
+		{"enabled + no token + approve → warns louder", true, "", config.ActionApprove, true, true},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := WebhookAuthWarning(tc.enabled, tc.token, tc.mode)
+			if (got != "") != tc.wantWarn {
+				t.Fatalf("WebhookAuthWarning(%v, %q, %s) = %q, wantWarn = %v", tc.enabled, tc.token, tc.mode, got, tc.wantWarn)
+			}
+			if !tc.wantWarn {
+				return
+			}
+			isLoud := strings.Contains(got, "actions.mode=approve")
+			if isLoud != tc.wantLoud {
+				t.Fatalf("WebhookAuthWarning(%v, %q, %s) loud = %v, want %v (msg: %q)", tc.enabled, tc.token, tc.mode, isLoud, tc.wantLoud, got)
+			}
+			if !strings.Contains(got, "server.webhook_token_env") || !strings.Contains(got, "docs/security-model.md") {
+				t.Fatalf("WebhookAuthWarning message missing risk/fix pointers: %q", got)
 			}
 		})
 	}

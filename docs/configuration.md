@@ -254,7 +254,9 @@ attributes nothing). Startup fails loud unless `homeserver`/`room_id`/`access_to
 ### `server` — the HTTP listener
 Only `webhook_token_env` (the bearer token for the incident webhook; **required under
 `actions.mode=auto`**). The listen address is the `--addr` CLI flag (`:8080` in the chart), **not** a
-config key. TLS is terminated externally (ClusterIP + NetworkPolicy).
+config key. TLS is terminated externally (ClusterIP + NetworkPolicy). If `sources.alertmanager` is
+enabled and this is left unset, startup logs a warning (louder under `actions.mode=approve`) — the
+webhook stays open on purpose for cluster-internal traffic, but the risk should never be silent.
 
 ### `rbac` — chart-only (not in the agent config)
 Set under `values.rbac.*`, not `values.config`: `controllerLogNamespaces` (default `[flux-system]` —
