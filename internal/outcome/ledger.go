@@ -191,6 +191,7 @@ type triggerAggJSON struct {
 	Last       time.Time `json:"last"`
 	CuratedURL string    `json:"curated_url,omitempty"`
 	Entry      string    `json:"entry,omitempty"`
+	Verdict    string    `json:"verdict,omitempty"`
 }
 
 type feedbackVoteJSON struct {
@@ -203,12 +204,14 @@ type pendingOpenJSON struct {
 	Counted bool   `json:"counted,omitempty"`
 }
 
-// triggerAgg is the per-TriggerKey occurrence roll-up backing Occurrences.
+// triggerAgg is the per-TriggerKey occurrence roll-up backing Occurrences and
+// Recurrence.
 type triggerAgg struct {
 	count      int
 	last       time.Time
 	curatedURL string // CuratedURL of the newest open
 	entry      string // Entry of the newest open ("" for fresh) — feedback attribution target
+	verdict    string // Verdict of the newest open — the suppression gate's "conclusive?" input
 }
 
 // feedbackVote is the fold state of one (TriggerKey, user) feedback: the rating
@@ -337,7 +340,7 @@ func (l *Ledger) seedCheckpointLocked(cd *checkpointData) {
 		l.open[fp] = ev
 	}
 	for k, v := range cd.ByTrigger {
-		l.byTrigger[k] = triggerAgg{count: v.Count, last: v.Last, curatedURL: v.CuratedURL, entry: v.Entry}
+		l.byTrigger[k] = triggerAgg{count: v.Count, last: v.Last, curatedURL: v.CuratedURL, entry: v.Entry, verdict: v.Verdict}
 	}
 	for k, v := range cd.Votes {
 		l.votes[k] = feedbackVote{rating: v.Rating, entry: v.Entry}
@@ -391,7 +394,7 @@ func (l *Ledger) snapshotCheckpointLocked() *checkpointData {
 	if len(l.byTrigger) > 0 {
 		cd.ByTrigger = make(map[string]triggerAggJSON, len(l.byTrigger))
 		for k, v := range l.byTrigger {
-			cd.ByTrigger[k] = triggerAggJSON{Count: v.count, Last: v.last, CuratedURL: v.curatedURL, Entry: v.entry}
+			cd.ByTrigger[k] = triggerAggJSON{Count: v.count, Last: v.last, CuratedURL: v.curatedURL, Entry: v.entry, Verdict: v.verdict}
 		}
 	}
 	if len(l.votes) > 0 {
@@ -673,8 +676,9 @@ func (l *Ledger) applyTriggerLocked(e Event) {
 		a.curatedURL = e.CuratedURL
 		// Feedback attribution follows the newest open: a fresh open (Entry "")
 		// deliberately CLEARS it — a vote on a fresh investigation must not credit
-		// an older recall's entry.
+		// an older recall's entry. The verdict tracks the newest open the same way.
 		a.entry = e.Entry
+		a.verdict = e.Verdict
 	}
 	l.byTrigger[e.TriggerKey] = a
 }
@@ -691,6 +695,39 @@ func (l *Ledger) Occurrences(triggerKey string) (int, time.Time, string) {
 	defer l.mu.Unlock()
 	a := l.byTrigger[triggerKey]
 	return a.count, a.last, a.curatedURL
+}
+
+// TriggerRecurrence is the per-TriggerKey snapshot the pre-investigation
+// suppression gate reads: how many investigations this trigger has had, when the
+// last one was and what it concluded, its KB link, and how many humans currently
+// contest that conclusion.
+type TriggerRecurrence struct {
+	Count        int
+	Last         time.Time
+	Verdict      string // newest open's verdict ("" for pre-verdict events)
+	CuratedURL   string
+	FeedbackDown int // LIVE 👎 votes for this trigger, after per-user dedup
+}
+
+// Recurrence returns the trigger's recurrence snapshot. FeedbackDown counts the
+// votes map's current "down" entries for the key — O(live votes), which stays
+// small (one entry per trigger×user) and off the recall hot path (read once per
+// incoming investigation). Zero value for a disabled ledger or unseen key.
+func (l *Ledger) Recurrence(triggerKey string) TriggerRecurrence {
+	if !l.enabled() || triggerKey == "" {
+		return TriggerRecurrence{}
+	}
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	a := l.byTrigger[triggerKey]
+	tr := TriggerRecurrence{Count: a.count, Last: a.last, Verdict: a.verdict, CuratedURL: a.curatedURL}
+	prefix := triggerKey + "\x00"
+	for k, v := range l.votes {
+		if v.rating == "down" && strings.HasPrefix(k, prefix) {
+			tr.FeedbackDown++
+		}
+	}
+	return tr
 }
 
 // Episodes replays the full ledger and turns every open into an Episode, pairing
