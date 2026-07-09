@@ -1,4 +1,14 @@
-# Serving RunLore over MCP
+# MCP — RunLore as server and as client
+
+MCP is RunLore's extension layer, in **both directions**:
+
+- **Server** (`lore mcp`) — expose RunLore's capabilities (what-changed, KB search) as
+  tools to any MCP client.
+- **Client** (`mcp.servers` in the config) — extend the **investigating agent's own
+  toolbox** with remote MCP tools, **zero Go required** (see
+  [Extending the agent's tools](#extending-the-agents-tools-mcp-client) below).
+
+## Serving RunLore over MCP
 
 `lore mcp` is a read-only [Model Context Protocol](https://modelcontextprotocol.io)
 server on **stdio**: point any MCP client (Claude Code, HolmesGPT, kagent, an
@@ -66,3 +76,32 @@ lore mcp --config runlore.yaml
 
 A missing config file is tolerated when a catalog dir is given (KB-only mode); a
 present-but-invalid config still fails loudly.
+
+## Extending the agent's tools (MCP client)
+
+The investigation loop's built-in tools are deliberately few; the way to add more is
+**MCP, not Go**. Declare remote servers in the config and their tools join the agent's
+toolbox at startup:
+
+```yaml
+mcp:
+  servers:
+    - name: runbooks                       # tools appear as runbooks__<tool>
+      url: https://mcp.internal.example/mcp # streamable-HTTP transport
+      # token_env: RUNBOOKS_MCP_TOKEN       # optional bearer token (env-var name)
+```
+
+What to know:
+
+- **Transport:** streamable HTTP (the current MCP standard). stdio *client* transport is
+  not supported — RunLore runs in-cluster, remote servers are network services.
+- **Namespacing:** every remote tool is exposed to the model as `<server>__<tool>`, and
+  the system prompt marks them as **external, untrusted-output, read-only** tools — a
+  remote tool can inform an investigation, never perform an action (the action gate only
+  knows the built-in operations).
+- **Failure isolation:** discovery happens at startup per server; an unreachable server
+  is logged and skipped — it never blocks the agent or the other servers. Remote calls
+  are not retried (they are not assumed idempotent).
+- **Security:** the same cleartext-credential guard as the model endpoints applies — a
+  bearer token over public `http://` is rejected at startup. Tool *output* is treated as
+  untrusted data like every other tool result (redaction, no instruction-following).

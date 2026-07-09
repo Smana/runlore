@@ -185,7 +185,7 @@ config:
   #   dir: /var/lib/runlore/catalog
   #   instant_recall:
   #     enabled: true
-  #     min_score: 1.5                 # similarity floor for the top hit
+  #     min_score: 1.0                 # similarity floor for the top hit (shipped default)
   #     margin_gap: 1.0                # top hit must beat the runner-up by this (corpus-portable; not an absolute floor)
   #     solo_floor: 4.0                # confident bar when there is only one hit
   #     require_workload_match: false  # true = exact namespace+workload; false = namespace-level agreement is enough

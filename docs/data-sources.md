@@ -9,11 +9,11 @@ assumed).
 | Signal | Tool(s) | Interface | Providers (v1) | Config key |
 |---|---|---|---|---|
 | GitOps "what changed" | `what_changed`, `gitops_*` | `GitOpsProvider` | Flux, ArgoCD | `gitops.engine` |
-| Metrics | `query_metrics` | `MetricsProvider` | VictoriaMetrics, Prometheus (PromQL) | `metrics.url` |
+| Metrics | `query_metrics`, `query_metrics_range` | `MetricsProvider` | VictoriaMetrics, Prometheus (PromQL) | `metrics.url` |
 | Logs | `query_logs` | `LogsProvider` | VictoriaLogs (LogsQL) | `logs.url` |
 | **Network flows** | `network_drops` | `NetworkProvider` | **Cilium Hubble · AWS VPC Flow Logs · GCP Firewall Logs** | `network.provider` |
 | Cloud control plane | `cloud_*` | `CloudProvider` | AWS (CloudTrail + EC2/ASG/EKS) | `cloud.provider` |
-| Kubernetes | `pod_status`, `kube_events`, `controller_logs` | `KubeReader`/`LogReader` | client-go | (in-cluster) |
+| Kubernetes | `pod_status`, `kube_events`, `controller_logs`, `pod_logs` | `KubeReader`/`LogReader` | client-go | (in-cluster) |
 | Knowledge | `kb_search` | catalog index | bleve BM25 | `catalog.*` |
 
 ## Network flows are CNI-agnostic
