@@ -2,6 +2,8 @@ module github.com/Smana/runlore
 
 go 1.26.0
 
+toolchain go1.26.5
+
 require (
 	github.com/aws/aws-sdk-go-v2/config v1.32.27
 	github.com/aws/aws-sdk-go-v2/service/autoscaling v1.68.1
