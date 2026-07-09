@@ -360,3 +360,107 @@ func TestHandleAlertmanagerEnqueues(t *testing.T) {
 		t.Fatalf("want 1 enqueued (only critical A), got %v", enq.reqs)
 	}
 }
+
+type recordedFeedback struct {
+	key, fp, rating, user string
+}
+
+type recordFeedback struct{ got []recordedFeedback }
+
+func (r *recordFeedback) Feedback(triggerKey, fingerprint, rating, user string, _ time.Time) error {
+	r.got = append(r.got, recordedFeedback{key: triggerKey, fp: fingerprint, rating: rating, user: user})
+	return nil
+}
+
+// TestSlackFeedbackInteraction pins the feedback contract: with ONLY the feedback
+// recorder wired (approvals nil — a read-only deployment that opted into the
+// learning loop) the endpoint is up; a signature-valid click from ANY workspace
+// user is recorded (feedback is an opinion, not a cluster mutation — no approver
+// allowlist); and an approve click on such a server is acked with "not enabled"
+// rather than 404 or a panic.
+func TestSlackFeedbackInteraction(t *testing.T) {
+	rec := &recordFeedback{}
+	const secret = "shh"
+	srv := New(nil, Actions{Feedback: rec, SlackSecret: secret}, nil, nil, nil, discardLog)
+
+	send := func(actionID, userID string) *httptest.ResponseRecorder {
+		payload := `{"user":{"id":"` + userID + `","username":"bob"},"actions":[{"action_id":"` + actionID + `","value":"trig-1"}]}`
+		body := "payload=" + url.QueryEscape(payload)
+		ts := strconv.FormatInt(time.Now().Unix(), 10)
+		req := httptest.NewRequest(http.MethodPost, "/slack/interactions", strings.NewReader(body))
+		req.Header.Set("X-Slack-Request-Timestamp", ts)
+		req.Header.Set("X-Slack-Signature", slackSign(secret, ts, body))
+		rr := httptest.NewRecorder()
+		srv.Handler().ServeHTTP(rr, req)
+		return rr
+	}
+
+	if rr := send("runlore_feedback_up", "U9"); rr.Code != http.StatusOK {
+		t.Fatalf("feedback up = %d, want 200", rr.Code)
+	}
+	if rr := send("runlore_feedback_down", "U10"); rr.Code != http.StatusOK {
+		t.Fatalf("feedback down = %d, want 200", rr.Code)
+	}
+	want := []recordedFeedback{
+		{key: "trig-1", rating: "up", user: "U9"},
+		{key: "trig-1", rating: "down", user: "U10"},
+	}
+	if len(rec.got) != 2 || rec.got[0] != want[0] || rec.got[1] != want[1] {
+		t.Fatalf("recorded = %+v, want %+v", rec.got, want)
+	}
+
+	// Approve on a feedback-only server: endpoint is up, click is acked, nothing runs.
+	if rr := send("runlore_approve", "U9"); rr.Code != http.StatusOK {
+		t.Fatalf("approve with approvals==nil = %d, want 200 (acked with 'not enabled')", rr.Code)
+	}
+
+	// Unverified feedback never reaches the recorder.
+	bad := httptest.NewRequest(http.MethodPost, "/slack/interactions",
+		strings.NewReader("payload="+url.QueryEscape(`{"user":{"id":"U9"},"actions":[{"action_id":"runlore_feedback_up","value":"x"}]}`)))
+	bad.Header.Set("X-Slack-Request-Timestamp", strconv.FormatInt(time.Now().Unix(), 10))
+	bad.Header.Set("X-Slack-Signature", "v0=deadbeef")
+	rr := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rr, bad)
+	if rr.Code != http.StatusUnauthorized || len(rec.got) != 2 {
+		t.Fatalf("unsigned feedback: code=%d recorded=%d, want 401 and nothing recorded", rr.Code, len(rec.got))
+	}
+}
+
+// TestSlackFeedbackNotEnabled: on an approvals-only server (feedback recorder not
+// wired — the option is off), a feedback click is acked but records nothing.
+func TestSlackFeedbackNotEnabled(t *testing.T) {
+	exec := &recordExec{}
+	pol := action.New(config.ActionPolicy{Mode: config.ActionApprove, Allow: config.ActionAllow{ReversibleOnly: true, Namespaces: []string{"apps"}}})
+	ap := action.NewApprovals(exec, pol, audit.Nop{}, discardLog)
+	const secret = "shh"
+	srv := New(nil, Actions{Approvals: ap, SlackSecret: secret}, nil, nil, nil, discardLog)
+
+	payload := `{"user":{"id":"U1","username":"alice"},"actions":[{"action_id":"runlore_feedback_up","value":"trig-1"}]}`
+	body := "payload=" + url.QueryEscape(payload)
+	ts := strconv.FormatInt(time.Now().Unix(), 10)
+	req := httptest.NewRequest(http.MethodPost, "/slack/interactions", strings.NewReader(body))
+	req.Header.Set("X-Slack-Request-Timestamp", ts)
+	req.Header.Set("X-Slack-Signature", slackSign(secret, ts, body))
+	rr := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("feedback with recorder nil = %d, want 200 (acked with 'not enabled')", rr.Code)
+	}
+}
+
+// TestSlackResponseBodyReplaceFlag pins the response_url payload contract:
+// approve/reject REPLACE the interaction message with the outcome; feedback must
+// NOT (replace_original would wipe the investigation message) — it answers with
+// an ephemeral note to the clicker only.
+func TestSlackResponseBodyReplaceFlag(t *testing.T) {
+	if b := slackResponseBody("done", true); !bytes.Contains(b, []byte(`"replace_original":true`)) {
+		t.Fatalf("approve/reject body must replace_original, got %s", b)
+	}
+	fb := slackResponseBody("thanks", false)
+	if !bytes.Contains(fb, []byte(`"replace_original":false`)) {
+		t.Fatalf("feedback body must NOT replace the investigation message, got %s", fb)
+	}
+	if !bytes.Contains(fb, []byte(`"response_type":"ephemeral"`)) {
+		t.Fatalf("feedback ack must be ephemeral (clicker-only), got %s", fb)
+	}
+}

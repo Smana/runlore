@@ -313,6 +313,14 @@ func RunServe(version string, args []string) error {
 	if auto != nil {
 		acts.Pauser = auto // avoid a typed-nil interface when auto is disabled
 	}
+	// Opt-in 👍/👎 feedback: wire the recorder ONLY when the option is on AND the
+	// ledger persists (Validate already requires ledger_path + signing secret with
+	// the option, and Enabled() guards the typed-nil/disabled-ledger cases) — so
+	// with the option off the endpoint behaves exactly as before.
+	if cfg.Notify.Slack.FeedbackButtons && ledger.Enabled() {
+		acts.Feedback = ledger
+		log.Info("slack feedback buttons enabled", "endpoint", "/slack/interactions")
+	}
 	srv := server.New(ReadyFunc(leader.Load, cat, CatalogExpected(cfg)), acts, built, pipe, metricsHandler, log)
 	if cz != nil {
 		go cz.Run(workCtx, cfg.Investigation.Coalesce.Debounce.Std()/2)
