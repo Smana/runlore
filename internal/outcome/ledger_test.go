@@ -1247,3 +1247,56 @@ func TestFeedbackSurvivesCompaction(t *testing.T) {
 		t.Fatalf("checkpointed vote must move, got %+v", a["e.md"])
 	}
 }
+
+// TestRecurrenceQuery pins the per-TriggerKey snapshot the pre-investigation
+// suppression gate reads: investigation count, when the last one was, its
+// verdict + KB link, and the number of LIVE 👎 votes (after per-user dedup).
+func TestRecurrenceQuery(t *testing.T) {
+	l, _ := New(filepath.Join(t.TempDir(), "o.jsonl"))
+	t0 := time.Unix(40000, 0)
+	if r := l.Recurrence("k"); r.Count != 0 || r.FeedbackDown != 0 {
+		t.Fatalf("unseen key must be zero, got %+v", r)
+	}
+	_ = l.Open(Event{Fingerprint: "f1", Kind: "fresh", TriggerKey: "k", CuratedURL: "https://kb/1", Verdict: "no_action", At: t0})
+	_ = l.Open(Event{Fingerprint: "f2", Kind: "recall", Entry: "e.md", TriggerKey: "k", CuratedURL: "https://kb/2", Verdict: "action_suggested", At: t0.Add(time.Hour)})
+	r := l.Recurrence("k")
+	if r.Count != 2 || !r.Last.Equal(t0.Add(time.Hour)) || r.Verdict != "action_suggested" || r.CuratedURL != "https://kb/2" {
+		t.Fatalf("Recurrence = %+v, want count=2 last=+1h verdict=action_suggested url=kb/2", r)
+	}
+	// Two users contest; one changes their mind back to 👍 — one live 👎 remains.
+	_ = l.Feedback("k", "down", "U1", t0.Add(2*time.Hour))
+	_ = l.Feedback("k", "down", "U2", t0.Add(2*time.Hour))
+	_ = l.Feedback("k", "up", "U2", t0.Add(3*time.Hour))
+	if r := l.Recurrence("k"); r.FeedbackDown != 1 {
+		t.Fatalf("live 👎 votes = %d, want 1 (U2 moved to up)", r.FeedbackDown)
+	}
+	// Votes on another trigger never leak into k.
+	_ = l.Open(Event{Fingerprint: "f3", Kind: "fresh", TriggerKey: "other", At: t0})
+	_ = l.Feedback("other", "down", "U9", t0.Add(time.Hour))
+	if r := l.Recurrence("k"); r.FeedbackDown != 1 {
+		t.Fatalf("cross-trigger vote leaked: %+v", r)
+	}
+}
+
+// TestRecurrenceVerdictSurvivesReplayAndCheckpoint: the newest open's verdict —
+// what the suppression gate keys its "conclusive?" decision on — must be
+// identical after a fresh replay and after compaction absorbs the opens.
+func TestRecurrenceVerdictSurvivesReplayAndCheckpoint(t *testing.T) {
+	p := filepath.Join(t.TempDir(), "o.jsonl")
+	l, _ := New(p)
+	t0 := time.Unix(41000, 0)
+	_ = l.Open(Event{Fingerprint: "f1", Kind: "fresh", TriggerKey: "k", Verdict: "no_action", At: t0})
+	for i := 0; i < 20; i++ {
+		fp := fmt.Sprintf("pad%d", i)
+		_ = l.Open(Event{Fingerprint: fp, Kind: "fresh", At: t0.Add(time.Duration(i+1) * time.Minute)})
+		_, _, _ = l.Resolve(fp, t0.Add(time.Duration(i+2)*time.Minute))
+	}
+	l2, _ := New(p) // plain replay
+	if r := l2.Recurrence("k"); r.Verdict != "no_action" {
+		t.Fatalf("replayed verdict = %q, want no_action", r.Verdict)
+	}
+	c, _ := NewWithMaxEvents(p, 5) // compaction absorbs the opens into a checkpoint
+	if r := c.Recurrence("k"); r.Verdict != "no_action" || r.Count != 1 {
+		t.Fatalf("checkpointed recurrence = %+v, want verdict=no_action count=1", r)
+	}
+}

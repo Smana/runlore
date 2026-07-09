@@ -381,6 +381,16 @@ This is the answer to the hardest objection against KB-backed agents ("what happ
 when a confidently-worded wrong belief gets in?"): the loop has a mechanism to lose
 trust in it and overturn it.
 
+The same per-trigger index also powers the **recurrence cooldown**
+(`investigation.recurrence_cooldown`, opt-in): a trigger the agent conclusively
+answered moments ago is not re-investigated — no model call, no duplicate
+notification — until the cooldown lapses. The escape hatches are human-deferential
+by design: an `inconclusive` prior never suppresses (there is no answer worth
+repeating), and a standing 👎 on the trigger re-arms investigation immediately. So
+feedback does two jobs: it weighs *recalled knowledge* (the decay above) and it
+governs *when the agent may repeat itself* — both steered by the same one-click
+human signal.
+
 ---
 
 ## 7. Compound — merged knowledge becomes everyone's, fast
