@@ -218,7 +218,8 @@ Two read APIs turn this raw log into a learning signal:
   the entry's **cause and human-reviewed resolution** inline (with its recall
   resolve-rate), so the previous answer is readable without leaving chat.
 - **`Feedback()`** appends a human **`feedback`** event — the 👍/👎 buttons on Slack
-  investigation messages (opt-in, `notify.slack.feedback_buttons`; see
+  investigation messages (opt-in, `notify.slack.feedback_buttons`) or 👍/👎 **reactions**
+  on Matrix ones (opt-in, `notify.matrix.feedback_reactions`, zero-ingress; see
   [configuration.md](configuration.md#notify--where-findings-go)). A vote is attributed
   to the catalog entry behind the trigger key's **newest open** (via the same
   `byTrigger` index; a fresh investigation has no entry, so its votes are recorded but

@@ -589,3 +589,40 @@ func TestValidateRecurrenceCooldown(t *testing.T) {
 		t.Fatalf("cooldown with a ledger must validate clean, got: %v", err)
 	}
 }
+
+// TestValidateMatrixFeedbackReactions guards the Matrix feedback opt-in: the
+// reaction listener syncs the configured room and records into the ledger, so
+// enabling it without the notifier fields or without a ledger would silently
+// listen to nothing / record nowhere — rejected at startup instead.
+func TestValidateMatrixFeedbackReactions(t *testing.T) {
+	off := &Config{}
+	if err := off.Validate(); err != nil {
+		t.Fatalf("feedback_reactions off must validate clean, got: %v", err)
+	}
+
+	noMatrix := &Config{}
+	noMatrix.Notify.Matrix.FeedbackReactions = true
+	noMatrix.Outcome.LedgerPath = "/var/lib/runlore/outcomes.jsonl"
+	if err := noMatrix.Validate(); err == nil {
+		t.Fatal("feedback_reactions without the matrix notifier config must be rejected")
+	}
+
+	noLedger := &Config{}
+	noLedger.Notify.Matrix.FeedbackReactions = true
+	noLedger.Notify.Matrix.Homeserver = "https://matrix.example.org"
+	noLedger.Notify.Matrix.RoomID = "!r:example.org"
+	noLedger.Notify.Matrix.AccessTokenEnv = "MATRIX_TOKEN"
+	if err := noLedger.Validate(); err == nil {
+		t.Fatal("feedback_reactions without outcome.ledger_path must be rejected")
+	}
+
+	ok := &Config{}
+	ok.Notify.Matrix.FeedbackReactions = true
+	ok.Notify.Matrix.Homeserver = "https://matrix.example.org"
+	ok.Notify.Matrix.RoomID = "!r:example.org"
+	ok.Notify.Matrix.AccessTokenEnv = "MATRIX_TOKEN"
+	ok.Outcome.LedgerPath = "/var/lib/runlore/outcomes.jsonl"
+	if err := ok.Validate(); err != nil {
+		t.Fatalf("feedback_reactions fully configured must validate clean, got: %v", err)
+	}
+}

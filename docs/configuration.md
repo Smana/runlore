@@ -236,7 +236,20 @@ rating is an opinion feeding the learning loop, not a cluster mutation (approve/
 user)**, latest wins — duplicate clicks are idempotent and changing your mind moves the vote. The ack
 is an ephemeral "feedback recorded" note visible only to the clicker; the investigation message is
 never modified. With the option off (the default), no buttons render and the endpoint behaves exactly
-as before (404 unless approve mode wired it).
+as before (404 unless approve mode wired it). Exposure hardening and the vote trust model are
+detailed in [security-model.md](security-model.md#the-feedback-channels--exposure--trust-model).
+
+**Matrix 👍/👎 — `matrix.feedback_reactions` (opt-in, default `false`).** The same feedback loop over
+Matrix **reactions**: react 👍/👎 to a RunLore investigation message and the rating lands in the
+outcome ledger (same per-user dedup, same trust weighting, same recurrence-cooldown re-arm — the
+ledger mechanics are shared). **Nothing is exposed**: reactions arrive over the client-server `/sync`
+long-poll — an *outbound* HTTPS request authenticated by the notifier's access token — so this is the
+zero-ingress alternative to Slack buttons. The listener runs on the leader only, skips reactions from
+before startup, ignores every emoji except 👍/👎, and only counts votes on messages **the bot itself
+sent** (attribution is anchored on `/whoami`; a member-crafted message carrying the trigger field
+attributes nothing). Startup fails loud unless `homeserver`/`room_id`/`access_token_env` and
+`outcome.ledger_path` are set. Use an **invite-only room** — any room member can vote (see
+[security-model.md](security-model.md#the-feedback-channels--exposure--trust-model)).
 
 ### `server` — the HTTP listener
 Only `webhook_token_env` (the bearer token for the incident webhook; **required under

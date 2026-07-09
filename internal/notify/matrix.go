@@ -2,6 +2,7 @@ package notify
 
 import (
 	"bytes"
+	"cmp"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -74,12 +75,20 @@ func (m *Matrix) Deliver(ctx context.Context, inv providers.Investigation) error
 		m.homeserver, url.PathEscape(m.roomID), url.PathEscape(txn))
 
 	msg := Format(inv)
-	body, err := json.Marshal(map[string]string{
+	content := map[string]any{
 		"msgtype":        "m.notice",
 		"body":           plainFallback(msg),
 		"format":         "org.matrix.custom.html",
 		"formatted_body": mrkdwnToHTML(msg),
-	})
+	}
+	// Stamp the trigger identity into the event content (a custom field — legal in
+	// Matrix events, invisible in clients) so the opt-in reaction listener can join
+	// a 👍/👎 on this message back to the incident. Unconditional: the field is
+	// inert data; the LISTENER is the opt-in (notify.matrix.feedback_reactions).
+	if key := cmp.Or(inv.TriggerKey, inv.Fingerprint); key != "" {
+		content[triggerKeyContentField] = key
+	}
+	body, err := json.Marshal(content)
 	if err != nil {
 		return err
 	}
