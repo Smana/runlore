@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 // Package catalog loads and searches an OKF knowledge catalog (a directory of
 // markdown files with YAML frontmatter) — the read half of RunLore's Learn pillar.
 package catalog

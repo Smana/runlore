@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 // Package kbvalidate provides deterministic structural validation of OKF
 // knowledge-base entries (the merge gate) and an LLM-assisted semantic advisory.
 // The structural checks mirror what curator.draftKBEntry emits and what

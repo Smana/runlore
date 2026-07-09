@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 // Package logging builds RunLore's slog logger with a configurable output format
 // (human-readable text or structured JSON) and verbosity level. In-cluster
 // deployments choose JSON so logs are ingestible by Loki/VictoriaLogs/CloudWatch;

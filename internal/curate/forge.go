@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 // Package curate is the Phase-2 grooming agent: it dedups the KB backlog, gates
 // the decision-ready queue on incident resolution, surfaces recurring blind spots
 // as knowledge-gap issues, and drives lifecycle/decay. It writes to the forge only

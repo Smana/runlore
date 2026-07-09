@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 // Package argocd implements providers.GitOpsProvider for Argo CD: it reads Argo CD
 // Applications from the cluster and emits engine-agnostic Changes (diffable via
 // whatchanged.Differ) and failure events — the same contract as the flux package.

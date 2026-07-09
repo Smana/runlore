@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 // Package curator is the file-time learning gate: it dedups a finding against the
 // catalog and open PRs, gates on quality, and drafts a merge-ready PR for novel,
 // quality findings. Uncertain/low-quality findings produce NO repo artifact (the

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 // This file lives in the external test package so it can wire the real
 // investigate loop to the real action.Approvals queue AND the real HTTP server:
 // internal/server transitively imports internal/investigate (via internal/source),

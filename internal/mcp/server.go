@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 // Package mcp is a minimal Model Context Protocol server over the stdio transport
 // (newline-delimited JSON-RPC 2.0) — enough to expose RunLore tools to MCP clients
 // such as HolmesGPT, kagent, or Claude Desktop. It implements initialize, tools/list,

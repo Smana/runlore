@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 // Package victorialogs implements providers.LogsProvider against VictoriaLogs,
 // querying with LogsQL and normalizing the NDJSON response into log lines.
 package victorialogs

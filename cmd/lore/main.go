@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 // Command lore is the RunLore CLI and in-cluster agent entrypoint.
 //
 // RunLore is a self-improving, GitOps-native SRE agent: it reacts to incidents,

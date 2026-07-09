@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 // Package whatchanged produces the "what changed" delta between two GitOps
 // revisions: a path-scoped unified diff (the actual landed change). It is the
 // differentiating core of RunLore's investigation spine.

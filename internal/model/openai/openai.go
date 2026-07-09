@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 // Package openai implements providers.ModelProvider against an OpenAI-compatible
 // /chat/completions endpoint (OpenAI, in-cluster vLLM, Ollama, OpenRouter).
 package openai

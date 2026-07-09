@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 // Package embed provides an OpenAI-compatible embeddings client and the
 // similarity + fusion primitives for hybrid (BM25 + vector) catalog retrieval.
 //

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 // Package telemetry provides RunLore's self-instrumentation: an OpenTelemetry
 // metric set plus a Prometheus-exporter HTTP handler. Instruments are safe to
 // call even when no provider is configured (the global meter is a no-op), so

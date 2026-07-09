@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 // Package aws implements providers.CloudProvider against AWS using aws-sdk-go-v2
 // and in-cluster identity (EKS Pod Identity / IRSA, resolved by the SDK's default
 // credential chain). All calls are read-only: CloudTrail LookupEvents (the AWS

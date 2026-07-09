@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 // Package audit provides an append-only, tamper-evident record of every action
 // the agent attempts — the accountability backbone for the autonomy ladder.
 //

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 // Package pagerduty is the PagerDuty V3 webhook source adapter. It turns
 // PagerDuty incident webhooks into investigation requests (incident.triggered)
 // and resolutions (incident.resolved), and authenticates each delivery with the
