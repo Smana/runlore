@@ -215,6 +215,9 @@ config:
   #     #   your ingress — same exposure as approve/reject buttons), plus signing_secret_env
   #     #   and outcome.ledger_path. Startup fails loud if either is missing.
   #   matrix: { homeserver: https://matrix.org, room_id: "!r:hs", access_token_env: MATRIX_TOKEN }
+  #   # matrix.feedback_reactions: true  # OPT-IN 👍/👎 reactions feeding the learning loop.
+  #   #   ZERO-INGRESS (outbound /sync long-poll — nothing to expose, unlike Slack buttons).
+  #   #   Requires outcome.ledger_path; use an invite-only room (any member can vote).
   #   webhook:
   #     url_env: RUNLORE_WEBHOOK_NOTIFY_URL   # POST findings JSON to this URL
   # forge:

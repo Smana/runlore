@@ -283,6 +283,12 @@ func RunServe(version string, args []string) error {
 			log.Info("re-investigate poller enabled", "label", investigate.ReinvestigateLabel)
 			go reinv.Poll(workCtx, 2*time.Minute)
 		}
+		// Opt-in Matrix reaction listener — leader-only like the pollers above, so an
+		// HA deployment records each 👍/👎 exactly once, into the leader's ledger.
+		if mfb := BuildMatrixFeedback(cfg, ledger, log); mfb != nil {
+			log.Info("matrix feedback reactions enabled", "room", cfg.Notify.Matrix.RoomID)
+			go mfb.Run(workCtx)
+		}
 	}
 
 	var leader atomic.Bool

@@ -139,6 +139,47 @@ truncate the sidecar too, and making it crash-consistent is fiddly. Until an ext
 mitigate operationally: keep the log on **durable storage with restricted write access** (ideally a
 medium where the agent's own identity cannot rewrite history), and back it up.
 
+## The feedback channels (👍/👎) — exposure & trust model
+
+Human feedback ratings weigh recalled-knowledge trust and re-arm the recurrence cooldown, so the
+channels that carry them are part of the security surface. The two channels have opposite exposure
+profiles and one shared trust model.
+
+**Shared trust model — votes are workspace/room-scoped opinions.** Feedback is deliberately
+*unprivileged*: any authenticated member of your Slack workspace / Matrix room can rate (it is an
+opinion feeding the learning loop, not a cluster mutation — approve/reject keep their allowlist).
+The blast radius of a hostile voter is bounded by construction: **one live vote per (incident
+trigger, user), latest wins** (no stacking), a vote is one Bernoulli observation in the same Beta
+posterior as resolve signals (several independent voters are needed to move an established entry),
+recalled answers still pass the adversarial verify pass, recall confidence is hard-capped at 0.90,
+and the worst a 👎 campaign achieves is *extra fresh investigations* (cost, not wrong answers —
+decay fails toward re-investigation, never toward trusting). Every vote is an append-only ledger
+line carrying the voter's stable id, so a campaign is auditable after the fact.
+
+**Slack (`notify.slack.feedback_buttons`) — an exposed endpoint, hardened.** Clicks arrive on
+`POST /slack/interactions`, which must be reachable from Slack's servers. Every request is verified
+against the app **signing secret** (HMAC-SHA256 over the raw body, ±5-minute timestamp window
+against replay, constant-time compare) *before* any parsing-derived action; unsigned or stale
+requests are rejected and the body read is capped at 1 MiB. Replay within the window is idempotent
+by the vote dedup. The message-update callback (`response_url`) is restricted to
+`https://*.slack.com` with a bounded client (no SSRF). **Expose only the path, not the pod**: route
+*only* `/slack/interactions` through your ingress/gateway — the same listener also serves the
+alert webhook (open when `server.webhook_token_env` is unset!), `/metrics`, and the token-gated
+control endpoints, none of which belong on the internet. If any part of the server is reachable
+from outside, set `server.webhook_token_env` regardless of action mode.
+
+**Matrix (`notify.matrix.feedback_reactions`) — nothing exposed, one explicit check.** Reactions
+arrive over the client-server `/sync` **long-poll — an outbound HTTPS request** authenticated by
+the notifier's existing access token. No inbound endpoint, no signing secret, no NetworkPolicy
+change; responses are size-capped before decoding. The one attack Matrix enables that Slack cannot
+is **attribution forgery**: any room member could post their own message carrying the
+`io.runlore.trigger_key` content field and vote on it, misdirecting ratings to an arbitrary
+incident. The listener closes this by resolving its own identity (`/whoami`) at startup and
+counting a vote **only when the reacted-to event was sent by the bot itself** — and it refuses to
+listen at all until that identity is known. Operational requirement: because vote identity is room
+membership, use an **invite-only room** (and prefer disabling federation for it); in a federated
+room, remote homeservers assert their own users' identities.
+
 ## Honest limitations
 
 - **The model sees cluster data.** Even with redaction, tool output reaches your model provider. The

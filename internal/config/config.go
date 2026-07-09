@@ -414,6 +414,13 @@ type MatrixNotify struct {
 	Homeserver     string `yaml:"homeserver"`
 	RoomID         string `yaml:"room_id"`
 	AccessTokenEnv string `yaml:"access_token_env"` // env var holding the access token
+	// FeedbackReactions (opt-in, default off) records 👍/👎 reactions on RunLore's
+	// investigation messages into the outcome ledger, where they weigh recalled-
+	// entry trust exactly like Slack's feedback buttons. Unlike Slack, nothing is
+	// exposed: reactions arrive over the client-server /sync long-poll — an
+	// OUTBOUND request authenticated by the access token above. Requires the three
+	// notifier fields and outcome.ledger_path; Validate fails loud otherwise.
+	FeedbackReactions bool `yaml:"feedback_reactions"`
 }
 
 // GitOps selects the GitOps engine RunLore reads (what-changed + failure watch).
@@ -898,6 +905,18 @@ func (c *Config) Validate() error {
 		}
 		if c.Outcome.LedgerPath == "" {
 			return fmt.Errorf("notify.slack.feedback_buttons requires outcome.ledger_path: ratings are recorded in the outcome ledger")
+		}
+	}
+	// Same fail-loud contract for the Matrix reaction listener: without the
+	// notifier fields it would sync nothing, without the ledger it would record
+	// nowhere — both silent lies to whoever enabled the option.
+	if c.Notify.Matrix.FeedbackReactions {
+		m := c.Notify.Matrix
+		if m.Homeserver == "" || m.RoomID == "" || m.AccessTokenEnv == "" {
+			return fmt.Errorf("notify.matrix.feedback_reactions requires homeserver, room_id and access_token_env (the reaction listener long-polls the configured room)")
+		}
+		if c.Outcome.LedgerPath == "" {
+			return fmt.Errorf("notify.matrix.feedback_reactions requires outcome.ledger_path: ratings are recorded in the outcome ledger")
 		}
 	}
 	switch c.Actions.Mode {

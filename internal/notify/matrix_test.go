@@ -154,3 +154,44 @@ func TestMatrixTxnSurvivesRestart(t *testing.T) {
 		}
 	}
 }
+
+// TestMatrixDeliverEmbedsTriggerKey: the event content carries the trigger
+// identity (custom field, invisible in clients) so the reaction listener can
+// join a 👍/👎 back to the incident — TriggerKey first, fingerprint fallback,
+// omitted when the investigation carries neither.
+func TestMatrixDeliverEmbedsTriggerKey(t *testing.T) {
+	var gotBody map[string]any
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewDecoder(r.Body).Decode(&gotBody)
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+	m := NewMatrix(srv.URL, "!r:hs", "tok")
+
+	inv := sampleInvestigation()
+	inv.TriggerKey = "k1"
+	if err := m.Deliver(context.Background(), inv); err != nil {
+		t.Fatalf("Deliver: %v", err)
+	}
+	if got, _ := gotBody[triggerKeyContentField].(string); got != "k1" {
+		t.Fatalf("content[%s] = %v, want k1", triggerKeyContentField, gotBody[triggerKeyContentField])
+	}
+
+	inv.TriggerKey = ""
+	inv.Fingerprint = "fp9"
+	if err := m.Deliver(context.Background(), inv); err != nil {
+		t.Fatalf("Deliver: %v", err)
+	}
+	if got, _ := gotBody[triggerKeyContentField].(string); got != "fp9" {
+		t.Fatalf("fingerprint fallback = %v, want fp9", gotBody[triggerKeyContentField])
+	}
+
+	inv.Fingerprint = ""
+	gotBody = nil // json.Decode merges into an existing map; reset to observe omission
+	if err := m.Deliver(context.Background(), inv); err != nil {
+		t.Fatalf("Deliver: %v", err)
+	}
+	if _, ok := gotBody[triggerKeyContentField]; ok {
+		t.Fatalf("no trigger identity ⇒ field must be omitted, got %v", gotBody[triggerKeyContentField])
+	}
+}
