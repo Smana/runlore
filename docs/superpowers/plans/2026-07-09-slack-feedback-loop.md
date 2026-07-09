@@ -22,7 +22,7 @@ and with approvals also off the endpoint stays 404.
 
 **Architecture:** no new component, store, endpoint, dependency, or goroutine.
 
-1. **Collect** — `Ledger.Feedback(triggerKey, fingerprint, rating, user, at)` appends a
+1. **Collect** — `Ledger.Feedback(triggerKey, rating, user, at)` appends a
    `{"event":"feedback"}` line (the replay switch already ignores unknown kinds — old binaries are
    safe, see the existing comment in `foldLocked`). The server's existing HMAC-verified
    `/slack/interactions` handler gains two cases; feedback is deliberately unprivileged (any
@@ -48,8 +48,8 @@ golangci-lint run ./...` (must be 0 issues).
 
 ### Task 1: Ledger — feedback events, per-user dedup, entry attribution, checkpoint round-trip
 `internal/outcome/ledger.go` + `ledger_test.go`. Produces: `Event.User`,
-`Aggregate.FeedbackUp/FeedbackDown`, `Ledger.Feedback(triggerKey, fingerprint, rating, user string,
-at time.Time) error` (validates rating ∈ {up,down}; disabled ledger no-ops), `triggerAgg.entry`,
+`Aggregate.FeedbackUp/FeedbackDown`, `Ledger.Feedback(triggerKey, rating, user string, at time.Time)
+error` (validates rating ∈ {up,down}; disabled ledger no-ops), `triggerAgg.entry`,
 `votes map[triggerKey+"\x00"+user]feedbackVote{rating,entry}` folded on replay/live-append and
 checkpointed. Tests: credit/dedup/vote-change/fresh-open-no-attribution/newest-open-wins,
 replay equivalence, checkpoint survival, Episodes() untouched, invalid rating rejected.

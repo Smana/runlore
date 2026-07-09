@@ -52,7 +52,7 @@ type Pauser interface {
 // the ground-truth signal the learning loop weighs recalled knowledge by
 // (implemented by *outcome.Ledger).
 type FeedbackRecorder interface {
-	Feedback(triggerKey, fingerprint, rating, user string, at time.Time) error
+	Feedback(triggerKey, rating, user string, at time.Time) error
 }
 
 // Actions bundles the optional rung-2/rung-3 wiring: the approval queue, the auto
@@ -333,7 +333,7 @@ func (s *Server) handleSlackInteraction(w http.ResponseWriter, r *http.Request) 
 		if act.ActionID == "runlore_feedback_down" {
 			rating = "down"
 		}
-		if ferr := s.feedback.Feedback(act.Value, "", rating, p.User.ID, time.Now()); ferr != nil {
+		if ferr := s.feedback.Feedback(act.Value, rating, p.User.ID, time.Now()); ferr != nil {
 			msg = "⚠️ recording feedback failed: " + ferr.Error()
 			s.log.Warn("slack feedback failed", "key", act.Value, "err", ferr)
 		} else {

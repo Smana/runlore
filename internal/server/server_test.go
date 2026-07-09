@@ -362,13 +362,13 @@ func TestHandleAlertmanagerEnqueues(t *testing.T) {
 }
 
 type recordedFeedback struct {
-	key, fp, rating, user string
+	key, rating, user string
 }
 
 type recordFeedback struct{ got []recordedFeedback }
 
-func (r *recordFeedback) Feedback(triggerKey, fingerprint, rating, user string, _ time.Time) error {
-	r.got = append(r.got, recordedFeedback{key: triggerKey, fp: fingerprint, rating: rating, user: user})
+func (r *recordFeedback) Feedback(triggerKey, rating, user string, _ time.Time) error {
+	r.got = append(r.got, recordedFeedback{key: triggerKey, rating: rating, user: user})
 	return nil
 }
 

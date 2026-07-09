@@ -797,9 +797,10 @@ func (l *Ledger) OpenCounts() (map[string]Aggregate, error) {
 // Feedback appends a human 👍/👎 verdict on a delivered investigation and folds it
 // into the trust aggregate. rating is "up" or "down" (anything else is an error,
 // never silently recorded); user is the stable reviewer id (a Slack user id) the
-// per-trigger dedup keys on. It is a plain append that open/resolve pairing never
-// sees — binaries older than the fold ignored the kind entirely.
-func (l *Ledger) Feedback(triggerKey, fingerprint, rating, user string, at time.Time) error {
+// per-trigger dedup keys on. Attribution is entirely TriggerKey-based — feedback
+// lines carry no alert fingerprint and open/resolve pairing never sees them;
+// binaries older than the fold ignored the kind entirely.
+func (l *Ledger) Feedback(triggerKey, rating, user string, at time.Time) error {
 	if rating != "up" && rating != "down" {
 		return fmt.Errorf("feedback rating %q: want up or down", rating)
 	}
@@ -808,7 +809,7 @@ func (l *Ledger) Feedback(triggerKey, fingerprint, rating, user string, at time.
 	}
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	e := Event{Event: "feedback", Fingerprint: fingerprint, TriggerKey: triggerKey, Kind: rating, User: user, At: at}
+	e := Event{Event: "feedback", TriggerKey: triggerKey, Kind: rating, User: user, At: at}
 	if err := l.appendLocked(e); err != nil {
 		return err // append failed: leave the fold untouched (durable-first, like Open/Resolve)
 	}

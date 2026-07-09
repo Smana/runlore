@@ -2,6 +2,7 @@ package notify
 
 import (
 	"bytes"
+	"cmp"
 	"context"
 	"encoding/json"
 	"errors"
@@ -246,10 +247,7 @@ func slackMessageWith(inv providers.Investigation, withFeedback bool) map[string
 // attribute, so no buttons render. Labels are plain_text (never escaped); the
 // value is opaque to Slack.
 func feedbackBlocks(inv providers.Investigation) []map[string]any {
-	key := inv.TriggerKey
-	if key == "" {
-		key = inv.Fingerprint
-	}
+	key := cmp.Or(inv.TriggerKey, inv.Fingerprint)
 	if key == "" {
 		return nil
 	}
