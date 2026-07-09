@@ -676,3 +676,77 @@ func TestSlackSummaryBlocksPriorKnowledgePartial(t *testing.T) {
 		}
 	}
 }
+
+// marshalBlocks JSON-encodes a Slack payload for substring assertions on
+// structures (action_ids, button values) the mrkdwn text helpers don't reach.
+func marshalBlocks(t *testing.T, msg map[string]any) string {
+	t.Helper()
+	b, err := json.Marshal(msg)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	return string(b)
+}
+
+// TestSlackFeedbackButtonsOptIn pins the opt-in contract: no feedback block by
+// default; when enabled, both 👍/👎 buttons render (independently of any
+// ApprovalID actions) keyed by TriggerKey, falling back to the fingerprint, and
+// are omitted entirely when the investigation carries neither.
+func TestSlackFeedbackButtonsOptIn(t *testing.T) {
+	inv := providers.Investigation{Title: "t", TriggerKey: "k"}
+
+	if s := marshalBlocks(t, slackMessage(inv)); strings.Contains(s, "runlore_feedback") {
+		t.Fatal("feedback buttons must NOT render when the option is off (default)")
+	}
+
+	on := marshalBlocks(t, slackMessageWith(inv, true))
+	if !strings.Contains(on, `"action_id":"runlore_feedback_up"`) ||
+		!strings.Contains(on, `"action_id":"runlore_feedback_down"`) {
+		t.Fatalf("both feedback buttons must render when opted in, got: %s", on)
+	}
+	if !strings.Contains(on, `"value":"k"`) {
+		t.Fatalf("buttons must carry the TriggerKey as value, got: %s", on)
+	}
+
+	byFP := marshalBlocks(t, slackMessageWith(providers.Investigation{Title: "t", Fingerprint: "fp1"}, true))
+	if !strings.Contains(byFP, `"value":"fp1"`) {
+		t.Fatalf("buttons must fall back to the fingerprint, got: %s", byFP)
+	}
+
+	if s := marshalBlocks(t, slackMessageWith(providers.Investigation{Title: "t"}, true)); strings.Contains(s, "runlore_feedback") {
+		t.Fatal("no TriggerKey and no fingerprint ⇒ nothing to attribute ⇒ no buttons")
+	}
+}
+
+// TestSlackBotDeliverFeedbackButtons: with the option on, the bot path renders
+// the buttons on the channel summary message (never in the detail thread).
+func TestSlackBotDeliverFeedbackButtons(t *testing.T) {
+	var bodies []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		b, _ := io.ReadAll(r.Body)
+		bodies = append(bodies, string(b))
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"ok":true,"ts":"111.222"}`))
+	}))
+	defer srv.Close()
+
+	bot := NewSlackBot("xoxb-t", "#ops")
+	bot.baseURL = srv.URL
+	bot.FeedbackButtons = true
+	inv := sampleInvestigation()
+	inv.TriggerKey = "k"
+	if err := bot.Deliver(context.Background(), inv); err != nil {
+		t.Fatalf("Deliver: %v", err)
+	}
+	if len(bodies) == 0 {
+		t.Fatal("no message posted")
+	}
+	if !strings.Contains(bodies[0], "runlore_feedback_up") {
+		t.Fatalf("summary message must carry the feedback buttons, got: %s", bodies[0])
+	}
+	for _, b := range bodies[1:] {
+		if strings.Contains(b, "runlore_feedback") {
+			t.Fatalf("detail thread must not repeat the buttons, got: %s", b)
+		}
+	}
+}

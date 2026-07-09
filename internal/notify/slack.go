@@ -24,11 +24,15 @@ func init() {
 			// Bot token (chat.postMessage) takes precedence over an incoming webhook.
 			if sl := d.Cfg.Notify.Slack; sl.BotTokenEnv != "" && sl.Channel != "" {
 				if tok := os.Getenv(sl.BotTokenEnv); tok != "" {
-					return NewSlackBot(tok, sl.Channel), nil
+					b := NewSlackBot(tok, sl.Channel)
+					b.FeedbackButtons = sl.FeedbackButtons
+					return b, nil
 				}
-			} else if env := d.Cfg.Notify.Slack.WebhookURLEnv; env != "" {
-				if url := os.Getenv(env); url != "" {
-					return NewSlack(url), nil
+			} else if sl := d.Cfg.Notify.Slack; sl.WebhookURLEnv != "" {
+				if url := os.Getenv(sl.WebhookURLEnv); url != "" {
+					s := NewSlack(url)
+					s.FeedbackButtons = sl.FeedbackButtons
+					return s, nil
 				}
 			}
 			return nil, nil
@@ -40,6 +44,10 @@ func init() {
 type Slack struct {
 	webhookURL string
 	http       *http.Client
+	// FeedbackButtons (opt-in, notify.slack.feedback_buttons) appends 👍/👎 buttons
+	// so the on-call can rate the diagnosis; clicks land in the outcome ledger via
+	// the exposed /slack/interactions endpoint.
+	FeedbackButtons bool
 }
 
 // NewSlack builds a Slack webhook notifier.
@@ -55,7 +63,7 @@ var (
 // Deliver posts the formatted investigation to the webhook. When an action carries
 // an ApprovalID, it renders interactive Approve/Reject buttons (Block Kit).
 func (s *Slack) Deliver(ctx context.Context, inv providers.Investigation) error {
-	return s.post(ctx, slackMessage(inv))
+	return s.post(ctx, slackMessageWith(inv, s.FeedbackButtons))
 }
 
 // DeliverProgress posts an interim progress ping to the webhook (ProgressNotifier).
@@ -95,6 +103,9 @@ type SlackBot struct {
 	channel string
 	baseURL string
 	http    *http.Client
+	// FeedbackButtons — see Slack.FeedbackButtons; on the bot path the buttons sit
+	// on the channel summary message, never on the detail thread reply.
+	FeedbackButtons bool
 }
 
 // NewSlackBot builds a bot-token Slack notifier posting to channel (ID or name).
@@ -114,7 +125,11 @@ var (
 // implying the alert went undelivered. Nothing is threaded when the summary post
 // yields no ts (empty-body path) or the investigation has no detail beyond it.
 func (s *SlackBot) Deliver(ctx context.Context, inv providers.Investigation) error {
-	ts, err := s.post(ctx, map[string]any{"text": fallbackText(inv), "blocks": summaryBlocks(inv)})
+	summary := summaryBlocks(inv)
+	if s.FeedbackButtons {
+		summary = append(summary, feedbackBlocks(inv)...)
+	}
+	ts, err := s.post(ctx, map[string]any{"text": fallbackText(inv), "blocks": summary})
 	if err != nil {
 		return err
 	}
@@ -182,8 +197,10 @@ func (s *SlackBot) post(ctx context.Context, msg map[string]any) (string, error)
 
 // Slack interaction action_ids — must match the server's /slack/interactions handler.
 const (
-	approveActionID = "runlore_approve"
-	rejectActionID  = "runlore_reject"
+	approveActionID      = "runlore_approve"
+	rejectActionID       = "runlore_reject"
+	feedbackUpActionID   = "runlore_feedback_up"
+	feedbackDownActionID = "runlore_feedback_down"
 )
 
 // slackMessage builds the Slack payload: a verdict-first Block Kit summary
@@ -203,10 +220,45 @@ const (
 // slackDate emits a raw <!date^…> token that is blocks-only — it must never enter
 // the escaped fallback text.
 func slackMessage(inv providers.Investigation) map[string]any {
+	return slackMessageWith(inv, false)
+}
+
+// slackMessageWith is slackMessage plus the opt-in 👍/👎 feedback block appended
+// last (after the detail section) when withFeedback is set — the single-message
+// webhook path's equivalent of the bot path's buttons-on-summary.
+func slackMessageWith(inv providers.Investigation, withFeedback bool) map[string]any {
+	blocks := append(summaryBlocks(inv), detailBlocks(inv)...)
+	if withFeedback {
+		blocks = append(blocks, feedbackBlocks(inv)...)
+	}
 	return map[string]any{
 		"text":   fallbackText(inv),
-		"blocks": append(summaryBlocks(inv), detailBlocks(inv)...),
+		"blocks": blocks,
 	}
+}
+
+// feedbackBlocks renders the 👍/👎 actions block — the human end of the learning
+// loop: a click lands in the outcome ledger and weighs the recalled entry's trust
+// like a resolve signal does (the only ground-truth channel for sources with no
+// resolve webhook, e.g. GitOps failures). The button value is the TriggerKey
+// (incident identity — ratings survive re-worded re-investigations), falling back
+// to the alert fingerprint; with neither there is nothing for the ledger to
+// attribute, so no buttons render. Labels are plain_text (never escaped); the
+// value is opaque to Slack.
+func feedbackBlocks(inv providers.Investigation) []map[string]any {
+	key := inv.TriggerKey
+	if key == "" {
+		key = inv.Fingerprint
+	}
+	if key == "" {
+		return nil
+	}
+	return []map[string]any{{"type": "actions", "elements": []map[string]any{
+		{"type": "button", "action_id": feedbackUpActionID, "value": key,
+			"text": map[string]any{"type": "plain_text", "text": "👍 Accurate", "emoji": true}},
+		{"type": "button", "action_id": feedbackDownActionID, "value": key,
+			"text": map[string]any{"type": "plain_text", "text": "👎 Off-base", "emoji": true}},
+	}}}
 }
 
 // fallbackText renders the one-line notification/accessibility summary Slack

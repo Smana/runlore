@@ -392,6 +392,13 @@ type SlackNotify struct {
 	Channel          string   `yaml:"channel"`            // channel ID or name to post to (required with bot_token_env)
 	SigningSecretEnv string   `yaml:"signing_secret_env"` // env var with the Slack signing secret (verifies button clicks)
 	ApproverIDs      []string `yaml:"approver_ids"`       // Slack user IDs allowed to approve actions (empty = no Slack approvals)
+	// FeedbackButtons (opt-in, default off) renders 👍/👎 buttons on investigation
+	// messages; clicks are recorded in the outcome ledger and weigh the recalled
+	// entry's trust like resolve signals do. Requires exposing POST
+	// /slack/interactions to Slack (an interactivity Request URL — the same
+	// endpoint approve-mode buttons use) plus signing_secret_env and
+	// outcome.ledger_path; Validate fails loud when either is missing.
+	FeedbackButtons bool `yaml:"feedback_buttons"`
 }
 
 // MatrixNotify configures Matrix delivery.
@@ -864,6 +871,17 @@ func (c *Config) Validate() error {
 	for i, v := range c.Forge.SkipVerdicts {
 		if !providers.ValidVerdict(providers.Verdict(v)) {
 			return fmt.Errorf("forge.skip_verdicts[%d]: unknown verdict %q (want no_action|action_suggested|action_required|inconclusive)", i, v)
+		}
+	}
+	// Feedback buttons are click-driven: enabling them without the pieces a click
+	// needs would either accept unsigned requests (never) or render buttons whose
+	// clicks silently vanish (a lie to the on-call). Fail loud at startup instead.
+	if c.Notify.Slack.FeedbackButtons {
+		if c.Notify.Slack.SigningSecretEnv == "" {
+			return fmt.Errorf("notify.slack.feedback_buttons requires notify.slack.signing_secret_env: clicks arrive on the exposed POST /slack/interactions endpoint and must be signature-verified")
+		}
+		if c.Outcome.LedgerPath == "" {
+			return fmt.Errorf("notify.slack.feedback_buttons requires outcome.ledger_path: ratings are recorded in the outcome ledger")
 		}
 	}
 	switch c.Actions.Mode {
