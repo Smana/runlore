@@ -117,6 +117,7 @@ type LoopInvestigator struct {
 	OnComplete func(providers.Investigation) // delivery hook (Slack/Matrix later)
 	Actions    *action.Policy                // autonomy ladder; nil/off = read-only findings only
 	Recall     *Recall                       // optional: short-circuit on a high-confidence catalog hit
+	Recurrence *RecurrenceGate               // optional: suppress re-investigating a just-answered trigger
 	Verify     bool                          // run an adversarial review of root causes before delivery
 
 	// OnRecall, when set, receives one RecallDecision per investigation whenever a
@@ -222,6 +223,21 @@ func (li *LoopInvestigator) Investigate(ctx context.Context, req Request) error 
 			li.Metrics.InvestigationsCompleted.Add(ctx, 1, attrs)
 		}
 	}()
+	// Recurrence cooldown (opt-in) — checked BEFORE recall: within the cooldown even
+	// a recallable answer would only re-deliver what the channel already shows. A
+	// suppressed occurrence costs nothing and says nothing (no model call, no
+	// notification, no ledger open — see RecurrenceGate for why not recording the
+	// open is load-bearing); the next occurrence past the cooldown re-investigates
+	// in full. An inconclusive prior never suppresses, and a standing 👎 re-arms
+	// investigation immediately.
+	if prior, ok := li.Recurrence.suppress(req, time.Now()); ok {
+		result = "recurrence_suppressed"
+		li.Log.Info("recurrence cooldown: suppressing re-investigation",
+			"title", req.Title, "trigger_key", req.TriggerKey,
+			"occurrences", prior.Count, "last_investigated", prior.Last,
+			"verdict", prior.Verdict, "prev_url", prior.CuratedURL)
+		return nil
+	}
 	// Instant recall is disabled under auto-execution: a poisoned catalog entry must
 	// not short-circuit a real investigation straight into an auto-executed action.
 	if li.Recall != nil && (li.Actions == nil || !li.Actions.IsAuto()) {
