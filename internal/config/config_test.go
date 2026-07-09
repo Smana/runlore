@@ -523,3 +523,38 @@ func TestValidateSkipVerdicts(t *testing.T) {
 		t.Fatal("an unknown verdict in forge.skip_verdicts must be rejected by Validate")
 	}
 }
+
+// TestValidateFeedbackButtons guards the opt-in contract of the Slack feedback
+// loop: enabling notify.slack.feedback_buttons requires BOTH the signing secret
+// (clicks arrive on the exposed /slack/interactions endpoint and must be
+// signature-verified) and the outcome ledger (a rendered button whose click
+// cannot be recorded would be a lie). Off (the default) validates clean with
+// neither.
+func TestValidateFeedbackButtons(t *testing.T) {
+	off := &Config{}
+	if err := off.Validate(); err != nil {
+		t.Fatalf("feedback_buttons off must validate clean, got: %v", err)
+	}
+
+	noSecret := &Config{}
+	noSecret.Notify.Slack.FeedbackButtons = true
+	noSecret.Outcome.LedgerPath = "/var/lib/runlore/outcomes.jsonl"
+	if err := noSecret.Validate(); err == nil {
+		t.Fatal("feedback_buttons without notify.slack.signing_secret_env must be rejected")
+	}
+
+	noLedger := &Config{}
+	noLedger.Notify.Slack.FeedbackButtons = true
+	noLedger.Notify.Slack.SigningSecretEnv = "SLACK_SIGNING_SECRET"
+	if err := noLedger.Validate(); err == nil {
+		t.Fatal("feedback_buttons without outcome.ledger_path must be rejected")
+	}
+
+	ok := &Config{}
+	ok.Notify.Slack.FeedbackButtons = true
+	ok.Notify.Slack.SigningSecretEnv = "SLACK_SIGNING_SECRET"
+	ok.Outcome.LedgerPath = "/var/lib/runlore/outcomes.jsonl"
+	if err := ok.Validate(); err != nil {
+		t.Fatalf("feedback_buttons with secret + ledger must validate clean, got: %v", err)
+	}
+}

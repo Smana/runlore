@@ -217,6 +217,14 @@ Two read APIs turn this raw log into a learning signal:
   incident's merged entry is findable by dup-fingerprint, the notification also quotes
   the entry's **cause and human-reviewed resolution** inline (with its recall
   resolve-rate), so the previous answer is readable without leaving chat.
+- **`Feedback()`** appends a human **`feedback`** event — the 👍/👎 buttons on Slack
+  investigation messages (opt-in, `notify.slack.feedback_buttons`; see
+  [configuration.md](configuration.md#notify--where-findings-go)). A vote is attributed
+  to the catalog entry behind the trigger key's **newest open** (via the same
+  `byTrigger` index; a fresh investigation has no entry, so its votes are recorded but
+  weigh nothing), deduplicated to **one live vote per (trigger key, Slack user)** —
+  a duplicate click is idempotent, changing your mind *moves* the vote — and folded
+  into `OpenCounts()` as per-entry `FeedbackUp` / `FeedbackDown`.
 
 Design choices worth calling out:
 
@@ -327,17 +335,27 @@ ledger, so they stay source-neutral):
 
 This is the make-or-break: the edge from **Capture** back into **Retrieve**.
 
-`OpenCounts()` gives, per entry, `recalls` and `resolved`. RunLore turns that into a
-**Bayesian-smoothed resolve-rate** and multiplies the derived recall confidence by it
-(`outcomeFactor`, applied in `recall.go`):
+`OpenCounts()` gives, per entry, `recalls`, `resolved`, and the human feedback votes
+(`FeedbackUp` / `FeedbackDown`). RunLore turns that into a **Bayesian-smoothed success
+rate** and multiplies the derived recall confidence by it (`outcomeFactor`, applied in
+`recall.go`):
 
 ```
-            resolved + 1
-factor  =  --------------          (a Beta(1,1) prior — k≈2 — so a brand-new
-            recalls  + 2            entry isn't punished for having no history)
+            resolved + up + 1
+factor  =  -----------------------      (a Beta(1,1) prior — k≈2 — so a brand-new
+            recalls + up + down + 2      entry isn't punished for having no history)
 
 confidence  =  clamp( base_confidence × factor , 0 , 0.90 )
 ```
+
+Human 👍/👎 votes are **extra Bernoulli observations in the same posterior** — a 👍 is
+one success, a 👎 one failure, each weighing exactly like a resolved/unresolved recall.
+That matters most where the resolve signal *cannot exist*: sources with no resolve
+channel (**GitOps failures**, reinvestigate polls, Alertmanager without `send_resolved`)
+are deliberately excluded from resolve-based decay, so without feedback their entries'
+trust is frozen at the prior forever. A human clicking 👎 is the only ground truth those
+paths can ever accumulate — and it is a judgment on the *diagnosis itself*, which an
+alert merely clearing never proves.
 
 ```mermaid
 stateDiagram-v2

@@ -303,6 +303,13 @@ config:
       #     api.slack.com/apps → your app → Interactivity & Shortcuts → toggle On,
       #     Request URL = https://<your-runlore-host>/slack/interactions. Read-only
       #     deployments (no actions) need none of this.
+      # feedback_buttons: true                     # OPT-IN 👍/👎 buttons: one-click human rating of the
+      #                                            #   diagnosis, recorded in the outcome ledger and weighing
+      #                                            #   the recalled entry's trust (the learning loop's human
+      #                                            #   ground truth). Needs the SAME Interactivity Request URL
+      #                                            #   exposure as Approve/Reject above (Slack must reach
+      #                                            #   /slack/interactions) + signing_secret_env +
+      #                                            #   outcome.ledger_path — startup fails loud otherwise.
     matrix:
       homeserver: https://matrix.org
       room_id: "!yourroom:matrix.org"
