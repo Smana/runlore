@@ -558,3 +558,34 @@ func TestValidateFeedbackButtons(t *testing.T) {
 		t.Fatalf("feedback_buttons with secret + ledger must validate clean, got: %v", err)
 	}
 }
+
+// TestValidateRecurrenceCooldown: the suppression gate reads the outcome
+// ledger's trigger index, so a cooldown without a ledger would silently never
+// suppress — rejected at startup. Negative durations are misconfigurations; 0
+// (off) and a properly-backed positive value validate clean.
+func TestValidateRecurrenceCooldown(t *testing.T) {
+	off := &Config{}
+	if err := off.Validate(); err != nil {
+		t.Fatalf("cooldown off must validate clean, got: %v", err)
+	}
+
+	noLedger := &Config{}
+	noLedger.Investigation.RecurrenceCooldown = Duration(30 * time.Minute)
+	if err := noLedger.Validate(); err == nil {
+		t.Fatal("recurrence_cooldown without outcome.ledger_path must be rejected")
+	}
+
+	neg := &Config{}
+	neg.Investigation.RecurrenceCooldown = Duration(-time.Minute)
+	neg.Outcome.LedgerPath = "/var/lib/runlore/outcomes.jsonl"
+	if err := neg.Validate(); err == nil {
+		t.Fatal("a negative recurrence_cooldown must be rejected")
+	}
+
+	ok := &Config{}
+	ok.Investigation.RecurrenceCooldown = Duration(30 * time.Minute)
+	ok.Outcome.LedgerPath = "/var/lib/runlore/outcomes.jsonl"
+	if err := ok.Validate(); err != nil {
+		t.Fatalf("cooldown with a ledger must validate clean, got: %v", err)
+	}
+}

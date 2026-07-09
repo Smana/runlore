@@ -180,6 +180,14 @@ type Investigation struct {
 	Timeout                   Duration  `yaml:"timeout"`                      // per-investigation deadline; 0 ⇒ default (10m) via applyDefaults
 	ToolTimeout               Duration  `yaml:"tool_timeout"`                 // per-TOOL-call timeout so one hung tool can't eat the budget; 0 ⇒ default (60s) at construction
 
+	// RecurrenceCooldown (opt-in, 0 = off) suppresses re-investigating a trigger
+	// whose previous investigation completed less than this long ago, concluded
+	// (verdict ≠ inconclusive), and has no standing 👎 feedback. Without it a
+	// still-firing alert re-investigates on every Alertmanager repeat_interval and
+	// a persistently-failing GitOps resource on every informer resync (~10m).
+	// Requires outcome.ledger_path (the gate reads the ledger's trigger index).
+	RecurrenceCooldown Duration `yaml:"recurrence_cooldown"`
+
 	// Compaction selects how mid-loop history compaction treats the tool outputs it
 	// elides once the estimate crosses the compaction target. "" / "elide" is the
 	// default: drop their bodies for short markers (lossy). "summarize" first asks a
@@ -872,6 +880,14 @@ func (c *Config) Validate() error {
 		if !providers.ValidVerdict(providers.Verdict(v)) {
 			return fmt.Errorf("forge.skip_verdicts[%d]: unknown verdict %q (want no_action|action_suggested|action_required|inconclusive)", i, v)
 		}
+	}
+	// The recurrence cooldown reads the outcome ledger's trigger index; without a
+	// ledger it would silently never suppress — fail loud instead. A negative
+	// duration is always a misconfiguration (mirrors tool_timeout).
+	if d := c.Investigation.RecurrenceCooldown.Std(); d < 0 {
+		return fmt.Errorf("investigation.recurrence_cooldown must be >= 0 (0 = off), got %v", d)
+	} else if d > 0 && c.Outcome.LedgerPath == "" {
+		return fmt.Errorf("investigation.recurrence_cooldown requires outcome.ledger_path (the suppression gate reads the ledger's per-trigger index)")
 	}
 	// Feedback buttons are click-driven: enabling them without the pieces a click
 	// needs would either accept unsigned requests (never) or render buttons whose

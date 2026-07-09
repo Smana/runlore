@@ -124,6 +124,11 @@ config:
       max_per_window: 20        # cap investigations per window (window defaults to 1h); 0 = unlimited
       # window: 1h
       # max_requeues: 3
+    # recurrence_cooldown: 30m  # OPT-IN: skip re-investigating a trigger answered conclusively less
+    #                           #   than this long ago (a still-firing alert otherwise re-investigates
+    #                           #   every repeat_interval; a failing GitOps resource every ~10m resync).
+    #                           #   An inconclusive prior always retries; a 👎 re-arms immediately.
+    #                           #   Requires outcome.ledger_path.
   # Structured logging. In-cluster defaults to JSON so logs are ingestible by
   # Loki / VictoriaLogs / CloudWatch; switch format to "text" for human-readable
   # output. level: debug | info | warn | error. Both are overridable at runtime via
