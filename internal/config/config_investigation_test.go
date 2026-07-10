@@ -119,6 +119,107 @@ func TestApplyDefaultsRecallDecayExplicit(t *testing.T) {
 	}
 }
 
+// rerankPtr is a *bool literal helper for the three-state rerank knob.
+func rerankPtr(b bool) *bool { return &b }
+
+// TestRerankEnabledDefault pins the three-state default: instant_recall enabled
+// with rerank UNSET ⇒ the reranker is ON (the calibrated gate is what makes recall
+// fire out of the box); explicit false disables; disabled recall is always off.
+func TestRerankEnabledDefault(t *testing.T) {
+	on := InstantRecall{Enabled: true} // Rerank nil ⇒ default ON
+	if !on.RerankEnabled() {
+		t.Fatal("instant_recall enabled with unset rerank must default the reranker ON")
+	}
+	if (InstantRecall{Enabled: true, Rerank: rerankPtr(false)}).RerankEnabled() {
+		t.Fatal("explicit rerank:false must disable the reranker")
+	}
+	if !(InstantRecall{Enabled: true, Rerank: rerankPtr(true)}).RerankEnabled() {
+		t.Fatal("explicit rerank:true must enable the reranker")
+	}
+	if (InstantRecall{Enabled: false, Rerank: rerankPtr(true)}).RerankEnabled() {
+		t.Fatal("recall disabled ⇒ reranker off regardless of the rerank knob")
+	}
+}
+
+func TestApplyDefaultsRecallRerank(t *testing.T) {
+	// Enabled with no tuning → the reranker is ON by default and its knobs default to
+	// the stable, corpus-independent values (nothing to set for it to work).
+	var c Config
+	c.Catalog.InstantRecall.Enabled = true // Rerank unset ⇒ ON
+	applyDefaults(&c)
+	ir := c.Catalog.InstantRecall
+	if ir.RerankThreshold != 0.7 || ir.RerankK != 5 || ir.RerankMinScore != 0.1 {
+		t.Fatalf("rerank defaults not applied under the default-on path: %+v", ir)
+	}
+	// Explicit rerank:false (legacy BM25-magnitude gate) ⇒ knobs stay zero (unused).
+	var off Config
+	off.Catalog.InstantRecall.Enabled = true
+	off.Catalog.InstantRecall.Rerank = rerankPtr(false)
+	applyDefaults(&off)
+	if off.Catalog.InstantRecall.RerankThreshold != 0 || off.Catalog.InstantRecall.RerankK != 0 {
+		t.Fatalf("rerank knobs must stay zero when rerank is explicitly off: %+v", off.Catalog.InstantRecall)
+	}
+	// Explicit rerank knobs are respected, not overwritten.
+	var ex Config
+	ex.Catalog.InstantRecall.Enabled = true
+	ex.Catalog.InstantRecall.RerankThreshold = 0.85
+	ex.Catalog.InstantRecall.RerankK = 3
+	applyDefaults(&ex)
+	if ex.Catalog.InstantRecall.RerankThreshold != 0.85 || ex.Catalog.InstantRecall.RerankK != 3 {
+		t.Fatalf("explicit rerank values overwritten: %+v", ex.Catalog.InstantRecall)
+	}
+}
+
+func TestValidateRecallRerank(t *testing.T) {
+	base := func() Config {
+		var c Config
+		c.Catalog.InstantRecall.Enabled = true // Rerank unset ⇒ ON
+		return c
+	}
+	// Defaulted config validates.
+	ok := base()
+	applyDefaults(&ok)
+	if err := ok.Validate(); err != nil {
+		t.Fatalf("defaulted rerank config must validate, got %v", err)
+	}
+	// Threshold out of (0,1] is rejected (it is a calibrated probability).
+	for _, bad := range []float64{-0.1, 0, 1.5} {
+		c := base()
+		c.Catalog.InstantRecall.RerankThreshold = bad
+		c.Catalog.InstantRecall.RerankK = 5
+		c.Catalog.InstantRecall.RerankMinScore = 0.1
+		if err := c.Validate(); err == nil || !strings.Contains(err.Error(), "rerank_threshold") {
+			t.Fatalf("threshold %g must be rejected, got %v", bad, err)
+		}
+	}
+	// K < 1 is rejected.
+	c := base()
+	c.Catalog.InstantRecall.RerankThreshold = 0.7
+	c.Catalog.InstantRecall.RerankK = 0 // explicit-but-would-default; force via a post-default check
+	c.Catalog.InstantRecall.RerankMinScore = 0.1
+	// applyDefaults would fill K=5, so exercise Validate directly with an out-of-range K.
+	c.Catalog.InstantRecall.RerankK = -1
+	if err := c.Validate(); err == nil || !strings.Contains(err.Error(), "rerank_k") {
+		t.Fatalf("rerank_k -1 must be rejected, got %v", err)
+	}
+	// Negative min-score is rejected.
+	c2 := base()
+	c2.Catalog.InstantRecall.RerankThreshold = 0.7
+	c2.Catalog.InstantRecall.RerankK = 5
+	c2.Catalog.InstantRecall.RerankMinScore = -1
+	if err := c2.Validate(); err == nil || !strings.Contains(err.Error(), "rerank_min_score") {
+		t.Fatalf("negative rerank_min_score must be rejected, got %v", err)
+	}
+	// Explicit rerank:false ⇒ the knobs are not validated (they are unused).
+	off := Config{}
+	off.Catalog.InstantRecall.Enabled = true
+	off.Catalog.InstantRecall.Rerank = rerankPtr(false)
+	off.Catalog.InstantRecall.RerankThreshold = 99 // nonsense, but ignored while rerank is off
+	if err := off.Validate(); err != nil {
+		t.Fatalf("rerank OFF must ignore rerank knobs, got %v", err)
+	}
+}
+
 func TestApplyDefaultsDoesNotOverride(t *testing.T) {
 	// Explicit values must not be overwritten.
 	var c Config
