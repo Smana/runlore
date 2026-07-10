@@ -40,7 +40,7 @@ func (li *LoopInvestigator) confirmRecall(ctx context.Context, req Request, inv 
 		if !ok {
 			continue
 		}
-		out, err := t.Call(ctx, confirmArgs(name, req.Workload))
+		out, err := t.Call(ctx, confirmArgs(req.Workload))
 		if err != nil {
 			if li.Log != nil {
 				li.Log.Debug("recall confirm tool failed", "tool", name, "err", err)
@@ -57,13 +57,20 @@ func (li *LoopInvestigator) confirmRecall(ctx context.Context, req Request, inv 
 	return inv, gathered
 }
 
-// confirmArgs builds the JSON args scoping a confirmatory tool to the workload.
-func confirmArgs(name string, w providers.Workload) string {
-	m := map[string]string{"namespace": w.Namespace}
-	if name == "kube_events" && w.Name != "" {
-		m["object"] = w.Name
-	}
-	b, _ := json.Marshal(m)
+// confirmArgs builds the JSON args for a confirmatory tool: namespace-scoped, but
+// deliberately NOT scoped to the workload object.
+//
+// A recalled incident's ROOT CAUSE frequently lives on a SIBLING resource in the same
+// namespace — a Crossplane AccessKey, a dependency, an upstream — not on the alerting
+// pod itself. Scoping kube_events to the pod (its old behaviour) captured the SYMPTOM
+// ("pod failing, secret key missing") but HID the cause (the AccessKey's
+// "LimitExceeded: AccessKeysPerUser: 2" Warning lives on a different object). The verify
+// pass, judging the recalled cause only on the gathered evidence, then couldn't confirm
+// it end-to-end and systematically DOWNGRADED a correct recall. kube_events is
+// Warning-only + namespace-wide by default ("causes that live nearby"), which is exactly
+// the causal context verify needs to keep a right recall's confidence intact.
+func confirmArgs(w providers.Workload) string {
+	b, _ := json.Marshal(map[string]string{"namespace": w.Namespace})
 	return string(b)
 }
 
