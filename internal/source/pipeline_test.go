@@ -131,6 +131,74 @@ func TestPipelineDebounceCoexistsWithDedup(t *testing.T) {
 	}
 }
 
+// capCancel records CancelByFingerprint calls and returns a canned result.
+type capCancel struct {
+	fps []string
+	ret bool
+}
+
+func (c *capCancel) CancelByFingerprint(fp string) bool {
+	c.fps = append(c.fps, fp)
+	return c.ret
+}
+
+// TestPipelineCancelQueuedOnResolve pins the opt-in wiring: with
+// triggers.incidents.cancel_queued_on_resolve enabled, a resolved alert also
+// cancels its queued investigation — and the resolve itself still runs (the
+// outcome ledger must close regardless of cancellation).
+func TestPipelineCancelQueuedOnResolve(t *testing.T) {
+	c := matchAllCfg()
+	c.Triggers.Incidents.CancelQueuedOnResolve = true
+	can := &capCancel{ret: true}
+	var resolved []string
+	resolve := func(fp string, _ time.Time) { resolved = append(resolved, fp) }
+	p := NewPipeline(c, &capEnq{}, resolve, nil).WithCanceller(can)
+	p.Ingest(context.Background(), MatchGated, DecodeResult{
+		Resolved: []Resolution{{Fingerprint: "f9", At: time.Now()}},
+	})
+	if len(can.fps) != 1 || can.fps[0] != "f9" {
+		t.Fatalf("want queue cancel called with f9, got %+v", can.fps)
+	}
+	if len(resolved) != 1 || resolved[0] != "f9" {
+		t.Fatalf("resolve must still run after cancellation, got %+v", resolved)
+	}
+}
+
+// TestPipelineCancelQueuedDisabledByDefault pins behavior preservation: with the
+// flag off (the default) the resolved path never touches the queue, even when a
+// canceller is wired — bit-for-bit today's behavior.
+func TestPipelineCancelQueuedDisabledByDefault(t *testing.T) {
+	can := &capCancel{ret: true}
+	var resolved []string
+	resolve := func(fp string, _ time.Time) { resolved = append(resolved, fp) }
+	p := NewPipeline(matchAllCfg(), &capEnq{}, resolve, nil).WithCanceller(can)
+	p.Ingest(context.Background(), MatchGated, DecodeResult{
+		Resolved: []Resolution{{Fingerprint: "f9", At: time.Now()}},
+	})
+	if len(can.fps) != 0 {
+		t.Fatalf("opt-in off: the queue must never be touched, got %+v", can.fps)
+	}
+	if len(resolved) != 1 {
+		t.Fatalf("resolve must still run with the flag off, got %+v", resolved)
+	}
+}
+
+// TestPipelineCancelQueuedNilCancellerSafe pins nil-safety: the flag on with no
+// canceller wired must not panic, and the resolve still runs.
+func TestPipelineCancelQueuedNilCancellerSafe(t *testing.T) {
+	c := matchAllCfg()
+	c.Triggers.Incidents.CancelQueuedOnResolve = true
+	var resolved []string
+	resolve := func(fp string, _ time.Time) { resolved = append(resolved, fp) }
+	p := NewPipeline(c, &capEnq{}, resolve, nil) // no canceller
+	p.Ingest(context.Background(), MatchGated, DecodeResult{
+		Resolved: []Resolution{{Fingerprint: "f9", At: time.Now()}},
+	})
+	if len(resolved) != 1 {
+		t.Fatalf("resolve must run with no canceller wired, got %+v", resolved)
+	}
+}
+
 func TestPipelineRoutesResolvedToLedger(t *testing.T) {
 	enq := &capEnq{}
 	var resolved []string

@@ -259,10 +259,18 @@ func RunServe(version string, args []string) error {
 	if err != nil {
 		return fmt.Errorf("build sources: %w", err)
 	}
-	pipe := source.NewPipeline(cfg, alertEnq, resolve, log).WithMetrics(metrics).WithContext(workCtx)
+	// The queue (not alertEnq, which may be the coalescer) is wired as the
+	// pipeline's Canceller; the pipeline only calls it when
+	// triggers.incidents.cancel_queued_on_resolve is on.
+	pipe := source.NewPipeline(cfg, alertEnq, resolve, log).
+		WithMetrics(metrics).WithContext(workCtx).WithCanceller(queue)
 	if w := cfg.Triggers.Incidents.Debounce.Std(); w > 0 {
 		log.Info("incident debounce enabled",
 			"window", w, "note", "firing alerts held; dropped if resolved within the window")
+	}
+	if cfg.Triggers.Incidents.CancelQueuedOnResolve {
+		log.Info("cancel queued on resolve enabled",
+			"note", "queued (not yet started) investigations are dropped when the alert resolves first")
 	}
 
 	// startWork runs the leader-only loops (investigation queue + failure watch +

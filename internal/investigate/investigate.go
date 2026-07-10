@@ -141,9 +141,21 @@ type Queue struct {
 	mu   sync.Mutex
 	wq   workqueue.TypedRateLimitingInterface[key] // current term's queue; nil between terms
 	reqs map[key]pending
-	seq  uint64
-	inv  Investigator
-	log  *slog.Logger
+	// byFP indexes pending SINGLE-fingerprint requests by their sole alert
+	// fingerprint so a resolved webhook can cancel a queued investigation
+	// (CancelByFingerprint) without scanning reqs. Multi-fingerprint batches are
+	// deliberately never indexed (see cancellableFingerprint). Maintained by
+	// Enqueue and by every delete of a reqs entry — all under mu — so an index
+	// entry can never outlive its payload.
+	byFP map[string]key
+	// inflight marks keys whose Investigate is currently running, so
+	// CancelByFingerprint never cancels an IN-FLIGHT investigation: process()
+	// has already copied the payload out of reqs and the model loop is burning
+	// spend that aborting cannot recover — let it complete and deliver.
+	inflight map[key]struct{}
+	seq      uint64
+	inv      Investigator
+	log      *slog.Logger
 
 	// Rate limiting: nil starts = unlimited; 0 maxRequeues = drop immediately on throttle.
 	starts      *ratelimit.Window  // sliding-window start budget; nil = unlimited
@@ -154,7 +166,7 @@ type Queue struct {
 
 // NewQueue builds an investigation queue. The workqueue itself is created per Run.
 func NewQueue(inv Investigator, log *slog.Logger) *Queue {
-	return &Queue{reqs: map[key]pending{}, inv: inv, log: log}
+	return &Queue{reqs: map[key]pending{}, byFP: map[string]key{}, inflight: map[key]struct{}{}, inv: inv, log: log}
 }
 
 // Enqueue submits a request. Re-enqueuing the same key before it is processed
@@ -164,12 +176,97 @@ func (q *Queue) Enqueue(r Request) {
 	k := keyOf(r)
 	q.mu.Lock()
 	q.seq++
+	// Keep the cancel index pointing at the LATEST payload: drop the entry of the
+	// payload being coalesced over, then index the new one when it qualifies.
+	if prev, ok := q.reqs[k]; ok {
+		q.unindexLocked(prev.req, k)
+	}
 	q.reqs[k] = pending{req: r, seq: q.seq}
+	if fp, ok := cancellableFingerprint(r); ok {
+		q.byFP[fp] = k
+	}
 	wq := q.wq
 	q.mu.Unlock()
 	if wq != nil {
 		wq.Add(k)
 	}
+}
+
+// cancellableFingerprint returns the fingerprint under which r may be cancelled
+// on resolve, if any. Only a SINGLE-fingerprint request qualifies: a coalesced
+// multi-alert batch (len(Fingerprints) > 1) is never cancelled on one member's
+// resolve — one alert resolving says nothing about the rest of the batch, and
+// partial resolution is ambiguous — so the batch investigation always proceeds.
+func cancellableFingerprint(r Request) (string, bool) {
+	if r.Fingerprint == "" || len(r.Fingerprints) > 1 {
+		return "", false
+	}
+	return r.Fingerprint, true
+}
+
+// unindexLocked drops r's cancel-index entry if it still points at k. The value
+// check keeps a (theoretical) same-fingerprint-different-key overwrite from
+// clobbering the newer entry. Callers must hold q.mu.
+func (q *Queue) unindexLocked(r Request, k key) {
+	fp, ok := cancellableFingerprint(r)
+	if !ok {
+		return
+	}
+	if cur, ok := q.byFP[fp]; ok && cur == k {
+		delete(q.byFP, fp)
+	}
+}
+
+// removeLocked deletes k's payload and its cancel-index entry together, so the
+// index can never point at a request that no longer exists. Callers must hold q.mu.
+func (q *Queue) removeLocked(k key, r Request) {
+	q.unindexLocked(r, k)
+	delete(q.reqs, k)
+}
+
+// CancelByFingerprint drops a QUEUED — accepted but not yet started —
+// investigation whose sole alert fingerprint matches, and reports whether one was
+// cancelled. It is called from the pipeline's resolved-webhook path when
+// triggers.incidents.cancel_queued_on_resolve is enabled, extending the debounce
+// idea past the hold window: without it, a fire→resolve sequence whose firing
+// already passed into the queue still burns a full paid investigation.
+//
+// Deliberate boundaries:
+//   - Only pending SINGLE-fingerprint requests cancel (see cancellableFingerprint);
+//     a coalesced multi-alert batch survives one member's resolve.
+//   - An IN-FLIGHT investigation is never cancelled (see the inflight field): it
+//     completes and delivers as usual.
+//
+// Cancellation is just the payload delete: the already-queued workqueue item for k
+// stays queued and no-ops when it surfaces — process() reads q.reqs[k] first and
+// its `if !ok { Forget; return }` guard already tolerates a missing key.
+func (q *Queue) CancelByFingerprint(fp string) bool {
+	if fp == "" {
+		return false
+	}
+	q.mu.Lock()
+	k, ok := q.byFP[fp]
+	if !ok {
+		q.mu.Unlock()
+		return false
+	}
+	if _, busy := q.inflight[k]; busy {
+		q.mu.Unlock()
+		return false
+	}
+	p, ok := q.reqs[k]
+	if !ok {
+		// Defensive: index and payload map change under the same mutex, so a dangling
+		// entry should be impossible — drop it rather than "cancel" nothing.
+		delete(q.byFP, fp)
+		q.mu.Unlock()
+		return false
+	}
+	q.removeLocked(k, p.req)
+	q.mu.Unlock()
+	q.log.Info("incident resolved before investigation started; cancelling queued investigation",
+		"fingerprint", fp, "title", p.req.Title)
+	return true
 }
 
 // Run builds a fresh workqueue for this leadership term, replays any pending
@@ -231,11 +328,25 @@ func (q *Queue) process(ctx context.Context, wq workqueue.TypedRateLimitingInter
 	defer wq.Done(k)
 	q.mu.Lock()
 	p, ok := q.reqs[k]
+	if ok {
+		// Shield the payload from CancelByFingerprint for the whole of process():
+		// from here the copy in p is what runs, so a concurrent resolve must not
+		// delete the map entry out from under the compare-and-delete below.
+		q.inflight[k] = struct{}{}
+	}
 	q.mu.Unlock()
 	if !ok {
+		// No payload: the request was cancelled (CancelByFingerprint) or already
+		// completed. The stale workqueue item no-ops here — cancellation relies on
+		// exactly this guard.
 		wq.Forget(k)
 		return
 	}
+	defer func() {
+		q.mu.Lock()
+		delete(q.inflight, k)
+		q.mu.Unlock()
+	}()
 	// Rate-limit gate: if the sliding-window budget is exhausted, either back off
 	// (requeue with exponential delay) or drop after max_requeues retries.
 	if q.starts != nil && !q.starts.Allow() {
@@ -246,7 +357,11 @@ func (q *Queue) process(ctx context.Context, wq workqueue.TypedRateLimitingInter
 			q.log.Warn("investigation budget exhausted; dropping (Alertmanager will re-fire)", "title", p.req.Title)
 			wq.Forget(k)
 			q.mu.Lock()
-			delete(q.reqs, k)
+			// Re-read the current payload so the cancel-index entry of whatever is
+			// stored NOW (possibly a superseding re-fire) is removed with it.
+			if cur, ok := q.reqs[k]; ok {
+				q.removeLocked(k, cur.req)
+			}
 			q.mu.Unlock()
 			q.maybeNotifyThrottle()
 			return
@@ -273,7 +388,11 @@ func (q *Queue) process(ctx context.Context, wq workqueue.TypedRateLimitingInter
 			q.log.Error("investigation failed permanently; dropping", "title", p.req.Title, "err", err)
 			wq.Forget(k)
 			q.mu.Lock()
-			delete(q.reqs, k)
+			// Same index hygiene as the budget drop above: remove whatever payload is
+			// stored now together with its cancel-index entry.
+			if cur, ok := q.reqs[k]; ok {
+				q.removeLocked(k, cur.req)
+			}
 			q.mu.Unlock()
 			return
 		}
@@ -284,9 +403,11 @@ func (q *Queue) process(ctx context.Context, wq workqueue.TypedRateLimitingInter
 	wq.Forget(k)
 	// Compare-and-delete: only drop the payload if it hasn't been superseded by a
 	// re-fired trigger while we were investigating (else the fresh trigger is lost).
+	// The cancel-index entry goes with it, so a later resolve of this fingerprint
+	// cancels nothing and a later same-key alert re-enqueues cleanly.
 	q.mu.Lock()
 	if cur, ok := q.reqs[k]; ok && cur.seq == p.seq {
-		delete(q.reqs, k)
+		q.removeLocked(k, cur.req)
 	}
 	q.mu.Unlock()
 }
