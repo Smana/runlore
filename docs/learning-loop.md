@@ -307,7 +307,7 @@ keeps the backlog healthy on a schedule:
   `stale_after`), never touching human-labelled ones, and only after a back-ref
   comment. `stale_after: 0` disables the sweep.
 
-Two further passes are also wired, both **ledger-backed** (they read the outcome
+Three further passes are also wired, all **ledger-backed** (they read the outcome
 ledger, so they stay source-neutral):
 
 - **Queue** — promote a human-`solved` PR to *ready-to-merge* once its incident has
@@ -333,6 +333,11 @@ ledger, so they stay source-neutral):
     `needs-work` is a revise-and-resubmit (not a rejection) and is left to the generic
     recurrence path; `wontfix` / `not-kb-worthy` are captured as the escalation's close
     reason. A *merged* PR is an accepted entry and is never suppressed.
+- **Contested** — when humans hold standing 👎 votes on the investigation behind a
+  *pending* KB entry (a 👎 on a fresh investigation weighs nothing in recall trust —
+  there is no catalog entry yet), the pass posts one warning comment on the still-open
+  KB PR so the reviewer sees the contest before merging; idempotent via a hidden
+  per-trigger marker in the comment, no mutable store.
 
 ---
 

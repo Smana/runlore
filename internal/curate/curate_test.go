@@ -35,4 +35,5 @@ var (
 	_ Pass = Dedup{}
 	_ Pass = Queue{}
 	_ Pass = Lifecycle{}
+	_ Pass = Contested{}
 )
