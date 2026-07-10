@@ -127,9 +127,9 @@ there's nothing to show.
 
 ## 3. Reviewing it — three checks
 
-Formatting is already enforced for you (a CI check validates the structure — see
-[KB-entry validation](../dev/superpowers/specs/2026-06-24-kb-entry-validation-design.md)).
-Your job is the **judgment** the machine can't make:
+Formatting is already enforced for you — a CI check on the KB repo validates each
+entry's structure (`lore validate-kb`). Your job is the **judgment** the machine
+can't make:
 
 1. **Is the cause real?** Does the `Investigate` evidence actually support the
    `Cause`? (The evidence is quoted verbatim from live cluster/cloud/Git state.)
@@ -199,7 +199,9 @@ separate approval UI — your Git review *is* the gate.
 
 - **Instant recall.** On the next matching incident, RunLore recalls the entry
   (after confirming it against current state and re-verifying it) instead of
-  running a full investigation — saving minutes and tokens.
+  running a full investigation — saving minutes and tokens. On-call sees an explicit
+  **⚡ Instant recall** block in chat quoting this entry's cause, its human-reviewed
+  resolution, and its resolve-rate — the visible payoff of your review.
 - **Outcomes feed back.** RunLore records whether incidents that recalled this
   entry actually resolved. An entry with a poor real-world resolve-rate is
   **automatically decayed out of recall** — so bad knowledge stops being used
@@ -229,7 +231,7 @@ It only ever comments/labels/closes — it never merges. See
 
 The groomer also carries on-call feedback into your review: when responders hold
 standing 👎 votes on the investigation behind a pending entry (the 👍/👎 buttons
-on the chat notification), it posts a comment on the open PR — *"On-call
+or Matrix reactions on the chat notification), it posts a comment on the open PR — *"On-call
 feedback: N standing 👎 votes on the investigation behind this entry"* — naming
 the trigger. Treat it as a red flag on check 1/2 above: re-read the `Cause`
 against the evidence before merging. The same 👎 also re-arms re-investigation

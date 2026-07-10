@@ -2,9 +2,18 @@
 
 > Companion to [`design.md`](design.md). This document explains the **learning
 > loop** specifically: what "learning" means in RunLore, how each stage works, and
-> *why* it was built the way it was. It reflects the system after the 2026-06-23
-> roadmap batch (instant-recall trust, outcome ledger + decay, curation gates,
-> scheduled grooming, sync/readiness hardening, and the eval harness).
+> *why* it was built the way it was.
+
+> **TL;DR.** On an incident, RunLore first tries to **recall** a trustworthy past
+> answer from a git-versioned catalog — instant, no investigation; otherwise it
+> investigates. It then **captures** whether the incident actually resolved,
+> **curates** a verified, novel finding into a **human-reviewed pull request**, and
+> once a human merges it the note **compounds** (recall-able next time). What makes
+> this *learning* and not note-taking: a note's trust is **derived from its real-world
+> resolve-rate** (plus 👍/👎 votes), so a note that stops working **decays** and can be
+> overturned. And the human stays in the loop throughout — **RunLore drafts, a human
+> merges; nothing is auto-written.** (Deep dives: §3 Retrieve, §4 Capture, §6 Decay,
+> §8 Validation.)
 
 ---
 
@@ -97,6 +106,11 @@ The agent never blindly trusts the catalog. A recall short-circuit (answer witho
 investigating) only fires when a hit clears **three independent gates**, and even
 then the answer is confirmed against live state and re-reviewed.
 
+> **First read?** Skip the next two blockquotes and go straight to the **three-gate
+> diagram** below — that's the core of recall. The two boxes are opt-in *refinements*
+> to how the gate scores a candidate (hybrid embeddings, and the LLM reranker that is
+> on by default); come back to them when you want to tune it.
+
 > **Hybrid recall (experimental, opt-in).** With `instant_recall.hybrid` set and a
 > `model.embeddings` endpoint configured, the BM25 search below is fused with
 > embedding-cosine similarity (Reciprocal Rank Fusion), and Gate 2's margin is measured
@@ -188,10 +202,13 @@ Then two safety backstops before the recalled answer is delivered:
 
 - **Confirm against current state** (`internal/investigate/confirm.go`). Before
   trusting a remembered answer, RunLore makes 1–2 cheap, read-only cluster calls
-  (`pod_status`, `kube_events`) scoped to the workload and appends that *current
-  state* to the finding. This is non-LLM and fast. If it can't gather state (no
-  namespace / tools absent), the recalled confidence is capped lower (0.70) so an
-  unconfirmable memory isn't presented at full confidence.
+  (`pod_status`, `kube_events`) scoped to the workload's **namespace** — deliberately
+  namespace-wide, *not* just the alerting object — so a cause living on a
+  **neighbouring resource** (a dependency, an upstream, a Crossplane claim, not the
+  pod that alerted) is still confirmed, and appends that *current state* to the
+  finding. This is non-LLM and fast. If it can't gather state (no namespace / tools
+  absent), the recalled confidence is capped lower (0.70) so an unconfirmable memory
+  isn't presented at full confidence.
 - **Verify pass** (`internal/investigate/verify.go`). An adversarial reviewer judges
   the finding **only on the evidence given** and can *only lower* confidence. Because
   the confirm step injected real cluster state, verify can now actually catch a stale
@@ -271,7 +288,7 @@ Two read APIs turn this raw log into a learning signal:
   [configuration.md](configuration.md#notify--where-findings-go)). A vote is attributed
   to the catalog entry behind the trigger key's **newest open** (via the same
   `byTrigger` index; a fresh investigation has no entry, so its votes are recorded but
-  weigh nothing), deduplicated to **one live vote per (trigger key, Slack user)** —
+  weigh nothing), deduplicated to **one live vote per (trigger key, user)** —
   a duplicate click is idempotent, changing your mind *moves* the vote — and folded
   into `OpenCounts()` as per-entry `FeedbackUp` / `FeedbackDown`.
 
@@ -407,8 +424,9 @@ one success, a 👎 one failure, each weighing exactly like a resolved/unresolve
 That matters most where the resolve signal *cannot exist*: sources with no resolve
 channel (**GitOps failures**, reinvestigate polls, Alertmanager without `send_resolved`)
 are deliberately excluded from resolve-based decay, so without feedback their entries'
-trust is frozen at the prior forever. A human clicking 👎 is the only ground truth those
-paths can ever accumulate — and it is a judgment on the *diagnosis itself*, which an
+trust is frozen at the prior forever. A human's explicit 👎 (a Slack click or a Matrix
+reaction) is the only ground truth those paths can ever accumulate — and it is a
+judgment on the *diagnosis itself*, which an
 alert merely clearing never proves.
 
 ```mermaid
@@ -442,8 +460,8 @@ notification — until the cooldown lapses. The escape hatches are human-deferen
 by design: an `inconclusive` prior never suppresses (there is no answer worth
 repeating), and a standing 👎 on the trigger re-arms investigation immediately. So
 feedback does two jobs: it weighs *recalled knowledge* (the decay above) and it
-governs *when the agent may repeat itself* — both steered by the same one-click
-human signal.
+governs *when the agent may repeat itself* — both steered by the same single
+human 👍/👎 signal.
 
 ---
 

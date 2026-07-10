@@ -52,7 +52,7 @@ forge (issues/PRs on a repo you designate).
   `cloud_resource_health` (EC2/ASG/EKS) tools, the cloud-control-plane "what changed" lens for infra
   changes outside GitOps. Auth is in-cluster identity (**EKS Pod Identity** or IRSA) — no static keys.
   See [step 4b](#step-4b-aws-cloud-provider-optional).
-- A **Slack incoming webhook** and/or a **Matrix** account for delivery.
+- A **notifier** for delivery — a **Slack incoming webhook**, a **Matrix** account, or a generic outgoing webhook.
 - [External Secrets Operator](https://external-secrets.io/) to sync credentials from a vault
   (recommended over raw `Secret`s in production).
 
@@ -120,8 +120,9 @@ incidents, platform constraints.
 
 ## Step 2 — GitHub App for curation (optional)
 
-The **Curator** writes findings back to your KB repo: confident root causes become a **PR** drafting an
-OKF entry; less-confident ones become an **issue**. Auth is a **GitHub App** — the secure choice over a
+The **Curator** writes findings back to your KB repo: confident, *verified* root causes become a **PR**
+drafting an OKF entry; less-confident ones are delivered to chat only — **no repo artifact** (a below-bar
+guess must not enter the catalog). Auth is a **GitHub App** — the secure choice over a
 personal access token: fine-grained permissions, per-repo installation, and short-lived (1-hour)
 installation tokens minted on demand from the App's private key (no long-lived credential in the cluster).
 
@@ -135,7 +136,7 @@ installation tokens minted on demand from the App's private key (no long-lived c
    |---|---|---|
    | Contents | **Read & write** | push the drafted OKF entry to a branch on the KB repo |
    | Pull requests | **Read & write** | open the curation PR |
-   | Issues | **Read & write** | open issues for lower-confidence findings |
+   | Issues | **Read & write** | open knowledge-gap issues for recurring unresolved patterns (Phase-2 grooming) |
 
    If your Flux source repos are **private** and you want real Git diffs from them, also grant
    **Contents: Read-only** and install the App on those repos. Public source repos need nothing.
@@ -263,10 +264,10 @@ config:
       branch: main
       interval: 5m
       # token_env: KB_GIT_TOKEN              # optional; private repos reuse the curation GitHub App by default
-    # Instant recall: skip the LLM loop when the catalog has a high-confidence match
-    # for the symptom (faster, cheaper). Off by default; the shipped default
-    # min_score is 1.0 — tune it for your catalog, BM25 scores are
-    # corpus-dependent (observe the "score=" logs).
+    # Instant recall: skip the LLM loop when the catalog has a trustworthy match for
+    # the incident (faster, cheaper). Off by default. Once enabled, the fire-gate is
+    # calibrated by an LLM reranker (on by default) — no per-corpus BM25 tuning needed;
+    # min_score is only a trivial secondary cost guard. See docs/learning-loop.md (§3).
     # instant_recall: { enabled: true }
 
   # Investigate signals (optional) — enable the query_metrics / query_logs tools.
