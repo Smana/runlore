@@ -261,6 +261,75 @@ func TestClose(t *testing.T) {
 	}
 }
 
+func TestListIssueCommentBodies(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/repos/o/r/issues/42/comments" || r.Method != http.MethodGet {
+			t.Fatalf("unexpected request: %s %s", r.Method, r.URL.Path)
+		}
+		_, _ = w.Write([]byte(`[{"body":"first"},{"body":"second <!-- marker -->"}]`))
+	}))
+	defer srv.Close()
+	c := New(srv.URL, "o", "r", "main", staticToken("tok"))
+	bodies, err := c.ListIssueCommentBodies(context.Background(), 42)
+	if err != nil {
+		t.Fatalf("ListIssueCommentBodies: %v", err)
+	}
+	if len(bodies) != 2 || bodies[0] != "first" || bodies[1] != "second <!-- marker -->" {
+		t.Fatalf("bodies = %#v", bodies)
+	}
+}
+
+func TestListIssueCommentBodiesPaginates(t *testing.T) {
+	// page 1 returns a full page (100) → the client must fetch page 2 for the rest,
+	// or an idempotency marker past comment #100 would be invisible.
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Query().Get("page") {
+		case "1":
+			items := make([]string, 100)
+			for i := range items {
+				items[i] = fmt.Sprintf(`{"body":"c%d"}`, i+1)
+			}
+			_, _ = w.Write([]byte("[" + strings.Join(items, ",") + "]"))
+		case "2":
+			_, _ = w.Write([]byte(`[{"body":"c101"}]`))
+		default:
+			_, _ = w.Write([]byte(`[]`))
+		}
+	}))
+	defer srv.Close()
+	c := New(srv.URL, "o", "r", "main", staticToken("tok"))
+	bodies, err := c.ListIssueCommentBodies(context.Background(), 42)
+	if err != nil {
+		t.Fatalf("ListIssueCommentBodies: %v", err)
+	}
+	if len(bodies) != 101 || bodies[100] != "c101" {
+		t.Fatalf("want 101 bodies across 2 pages (no truncation at 100), got %d", len(bodies))
+	}
+}
+
+func TestIsPROpen(t *testing.T) {
+	state := "open"
+	var gotPath string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.Path
+		_, _ = fmt.Fprintf(w, `{"number":7,"state":%q}`, state)
+	}))
+	defer srv.Close()
+	c := New(srv.URL, "o", "r", "main", staticToken("tok"))
+	open, err := c.IsPROpen(context.Background(), 7)
+	if err != nil || !open {
+		t.Fatalf("IsPROpen(open) = %v, %v; want true, nil", open, err)
+	}
+	if gotPath != "/repos/o/r/pulls/7" {
+		t.Fatalf("path = %q, want the pulls endpoint (a non-PR number must 404, not pass)", gotPath)
+	}
+	state = "closed"
+	open, err = c.IsPROpen(context.Background(), 7)
+	if err != nil || open {
+		t.Fatalf("IsPROpen(closed) = %v, %v; want false, nil", open, err)
+	}
+}
+
 func TestListPRsByLabelPaginates(t *testing.T) {
 	// page 1 returns a full page (100) → the client must fetch page 2 for the rest.
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

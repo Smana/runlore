@@ -227,6 +227,17 @@ resolved, and opens a **`knowledge-gap`** issue when an unsolved pattern recurs.
 It only ever comments/labels/closes — it never merges. See
 [getting-started](getting-started.md#step-7--the-learn-loop-kb-lifecycle--re-runs).
 
+The groomer also carries on-call feedback into your review: when responders hold
+standing 👎 votes on the investigation behind a pending entry (the 👍/👎 buttons
+on the chat notification), it posts a comment on the open PR — *"On-call
+feedback: N standing 👎 votes on the investigation behind this entry"* — naming
+the trigger. Treat it as a red flag on check 1/2 above: re-read the `Cause`
+against the evidence before merging. The same 👎 also re-arms re-investigation
+(it bypasses the recurrence cooldown), so a fresher, possibly corrected
+conclusion may arrive while the PR is still open — worth waiting for before you
+merge a contested diagnosis. The comment appears once per contested trigger,
+even across repeated groomer runs.
+
 ---
 
 **In one sentence:** RunLore drafts; CI checks the format; **you** check that the
