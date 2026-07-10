@@ -486,6 +486,32 @@ type Investigation struct {
 	LastOccurrence time.Time       // when the previous occurrence was investigated
 	PrevCuratedURL string          // the previous occurrence's KB link, for the "same conclusion as before" pointer
 	Prior          *PriorKnowledge // what the merged KB entry already says about this recurring incident; nil when unknown (see PriorKnowledge)
+	// MatchedKnowledge is the single strongest PRE-EXISTING knowledge-base entry that
+	// this investigation's kb_search calls matched at clear-match strength — the visible
+	// proof that RunLore already had documented knowledge for the incident. It is stamped
+	// by the ReAct loop (never by the model) and is DISTINCT from Prior: Prior reports
+	// RECURRENCE ("this exact incident, investigated N times before", from the outcome
+	// ledger), whereas MatchedKnowledge reports that a FULL investigation reused a known
+	// runbook/entry even on a first sighting. nil when no kb_search hit cleared the bar.
+	// Notifiers render it only when Prior == nil (the recurrence block already covers the
+	// "seen before" case — don't double-render).
+	MatchedKnowledge *MatchedEntry
+}
+
+// MatchedEntry is the strongest pre-existing catalog entry an investigation's
+// kb_search calls matched at clear-match strength. It closes a live visibility gap:
+// when a full investigation's kb_search found a known runbook and used it, the
+// delivered notification previously gave NO sign RunLore already had knowledge for
+// the incident (the "Seen before"/Prior block only fires on a ledger recurrence, not
+// when a full loop reuses a known entry). Path + Title always populate; URL only when
+// a web link is cheaply derivable (else the notifier shows Path). Score is the BM25
+// relevance of the matching hit — recorded so the clear-match bar can be tuned from
+// live data, like the recall thresholds.
+type MatchedEntry struct {
+	Path  string  // catalog path of the matched entry (bundle-relative)
+	Title string  // entry title, for the human-facing line
+	URL   string  // web link to the entry when cheaply derivable; "" ⇒ notifier shows Path
+	Score float64 // BM25 relevance score of the matching kb_search hit
 }
 
 // PriorKnowledge is what the knowledge base already says about a recurring

@@ -80,6 +80,26 @@ func Format(inv providers.Investigation) string {
 			fmt.Fprintf(&b, "Previous conclusion: %s\n", inv.PrevCuratedURL)
 		}
 	}
+	// Existing-KB match: a full investigation whose kb_search matched a known
+	// runbook/entry at clear-match strength — visible proof RunLore already had
+	// knowledge for this incident. Suppressed when Prior (recurrence) is set: the
+	// Seen-before block above already covers it. The scaffolding here carries no
+	// mrkdwn-meta (& < >); the untrusted title/ref stay unescaped like every other
+	// field Format emits (the notifier escapes the whole output).
+	if mk := inv.MatchedKnowledge; mk != nil && inv.Prior == nil {
+		ref := mk.URL
+		if ref == "" {
+			ref = mk.Path
+		}
+		// Em-dash (not "(ref)") so a bare URL auto-links cleanly in Matrix: the
+		// mrkdwnToHTML link regex would otherwise swallow a trailing ")" into the href,
+		// which is why Format never parenthesizes URLs elsewhere either.
+		if ref != "" {
+			fmt.Fprintf(&b, "📚 Matches known runbook: %s — %s\n", mk.Title, ref)
+		} else {
+			fmt.Fprintf(&b, "📚 Matches known runbook: %s\n", mk.Title)
+		}
+	}
 	for i, rc := range inv.RootCauses {
 		fmt.Fprintf(&b, "%d. *%s* (%.0f%%)\n", i+1, rc.Summary, rc.Confidence*100)
 		// The change the root cause pins the incident on — previously rendered only

@@ -9,6 +9,8 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+
+	"github.com/Smana/runlore/internal/providers"
 )
 
 func TestMatrixDeliver(t *testing.T) {
@@ -37,6 +39,30 @@ func TestMatrixDeliver(t *testing.T) {
 	}
 	if body, _ := gotBody["body"].(string); !strings.Contains(body, "flux rollback hr/harbor") {
 		t.Fatalf("body missing content: %v", gotBody["body"])
+	}
+}
+
+// TestMatrixDeliverMatchedKnowledge confirms the existing-KB match reaches Matrix
+// (via the shared Format): the plaintext body carries the runbook line, and a
+// derived URL becomes a clickable anchor in the HTML body.
+func TestMatrixDeliverMatchedKnowledge(t *testing.T) {
+	var gotBody map[string]any
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewDecoder(r.Body).Decode(&gotBody)
+		_, _ = w.Write([]byte(`{"event_id":"$abc"}`))
+	}))
+	defer srv.Close()
+
+	inv := sampleInvestigation()
+	inv.MatchedKnowledge = &providers.MatchedEntry{Title: "Harbor probe runbook", Path: "runbooks/harbor.md", URL: "https://kb.example/runbooks/harbor.md", Score: 6}
+	if err := NewMatrix(srv.URL, "!room:hs", "tok").Deliver(context.Background(), inv); err != nil {
+		t.Fatalf("Deliver: %v", err)
+	}
+	if body, _ := gotBody["body"].(string); !strings.Contains(body, "Matches known runbook: Harbor probe runbook") {
+		t.Fatalf("plaintext body missing matched-runbook line: %v", gotBody["body"])
+	}
+	if fb, _ := gotBody["formatted_body"].(string); !strings.Contains(fb, `<a href="https://kb.example/runbooks/harbor.md">`) {
+		t.Errorf("formatted_body missing runbook link anchor: %s", fb)
 	}
 }
 
