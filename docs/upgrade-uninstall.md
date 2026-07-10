@@ -96,3 +96,25 @@ and PodDisruptionBudget. It does **not** remove three things, which you must cle
 
 The knowledge-catalog **Git repo** is yours and is untouched by any of the above — that's the point:
 your accumulated knowledge is portable and outlives the deployment.
+
+## StatefulSet upgrades from chart ≤ 0.7.0: one-time recreate
+
+Releases installed in `workloadKind: StatefulSet` mode by chart **0.7.0 or older**
+stamped the full label set (including `helm.sh/chart` and `app.kubernetes.io/version`)
+into the `volumeClaimTemplates` — an **immutable** StatefulSet field. Any upgrade that
+bumps the chart or app version therefore fails server-side apply
+(`Forbidden: updates to statefulset spec…`) and, under Flux, loops into rollback.
+
+Fixed in the chart (the templates now stamp version-less selector labels), but an
+existing StatefulSet keeps its old immutable template. **One-time migration** before
+the next upgrade — pods and PVCs are untouched (`--cascade=orphan` deletes only the
+controller object; the recreated StatefulSet adopts both):
+
+```bash
+kubectl delete statefulset <release-name> -n <namespace> --cascade=orphan
+# then let Flux reconcile (or: helm upgrade …) — the StatefulSet is recreated
+# with the stable labels and adopts the running pods + volumes.
+```
+
+Deployments are unaffected (no immutable template fields beyond the selector, which
+was always version-less).
