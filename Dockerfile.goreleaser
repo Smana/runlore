@@ -1,11 +1,13 @@
 # COPY-only image for GoReleaser. The `lore` binary is cross-compiled by the
 # `builds.id: lore` step (linux/amd64 + linux/arm64, CGO_ENABLED=0) and placed by
-# GoReleaser at the build-context root for the matching --platform, so there is no
-# build stage here — we only assemble the runtime layer. Mirrors the runtime stage
-# of ./Dockerfile (used by build-image.yml for PR/main validation).
+# GoReleaser's dockers_v2 step under `<os>/<arch>/` in the build context — one
+# multi-platform buildx build selects the right one via $TARGETPLATFORM — so there
+# is no build stage here, we only assemble the runtime layer. Mirrors the runtime
+# stage of ./Dockerfile (used by build-image.yml for PR/main validation).
 FROM gcr.io/distroless/static:nonroot
+ARG TARGETPLATFORM
 LABEL org.opencontainers.image.source="https://github.com/Smana/runlore"
-COPY lore /usr/local/bin/lore
+COPY $TARGETPLATFORM/lore /usr/local/bin/lore
 USER 65532:65532
 EXPOSE 8080
 ENTRYPOINT ["/usr/local/bin/lore"]

@@ -178,13 +178,17 @@ already write — there is nothing to tag by hand.
    the commit types since the last release, bumps the version, and regenerates `CHANGELOG.md`. The first
    release PR will propose **v0.1.0** (the `feat:` history so far is a 0.x minor bump).
 3. **You merge the release PR.** That tags `vX.Y.Z` and creates the GitHub release with the changelog.
-4. **The `vX.Y.Z` tag then fans out to two builds:**
-   - `build-image.yml` builds and **cosign-signs** the container image (with SLSA provenance + SBOM
-     attestation) and pushes the `vX.Y.Z` / `{major}.{minor}` tags to `ghcr.io`.
-   - the `goreleaser` job in `release-please.yml` runs [GoReleaser](https://goreleaser.com)
-     (`.goreleaser.yaml`) and **attaches the cross-platform `lore` binaries** (linux/darwin/windows ×
-     amd64/arm64) as `tar.gz`/`zip` archives, plus `checksums.txt`, a syft **SBOM per archive**, and a
-     **keyless cosign signature** of the checksums file — to the release release-please just created.
+4. **The `vX.Y.Z` tag then fires one release build — `release-binaries.yml` runs
+   [GoReleaser](https://goreleaser.com) (`.goreleaser.yaml`), which:**
+   - builds and pushes the **multi-arch container image** (the `vX.Y.Z` / `{major}.{minor}` / `latest`
+     tags on `ghcr.io/smana/runlore`) and **cosign keyless-signs it by digest**; buildx attaches
+     **SLSA provenance and SBOM attestations** to the pushed image index (attestations are produced
+     from the next tagged release onward).
+   - **attaches the cross-platform `lore` binaries** (linux/darwin/windows × amd64/arm64) as
+     `tar.gz`/`zip` archives, plus `checksums.txt`, a syft **SBOM per archive**, and a **keyless
+     cosign signature** of the checksums file — to the release release-please just created.
+
+   (`build-image.yml` only validates PR/main image builds; it does not run on tags.)
 
 The image and the binaries share the same `-X main.version` ldflags, so `lore --version` matches the
 image tag.
@@ -192,8 +196,8 @@ image tag.
 ### One-time setup (required): the `RELEASE_PLEASE_TOKEN` PAT
 
 > **This must exist before the pipeline works.** Without it the automation silently half-runs: the
-> release PR opens but **CI never runs on it**, and merging it tags the release but **neither
-> `build-image.yml` nor the `goreleaser` binaries fire**. This is a GitHub safeguard — events created
+> release PR opens but **CI never runs on it**, and merging it tags the release but **the GoReleaser
+> release build (`release-binaries.yml`) never fires**. This is a GitHub safeguard — events created
 > using the default `GITHUB_TOKEN` do **not** trigger further workflow runs.
 
 Create a **fine-grained Personal Access Token** scoped to `Smana/runlore` with these **repository**
