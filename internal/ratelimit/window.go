@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 // Package ratelimit provides a sliding-window start limiter — the windowed
 // timestamp pattern from internal/action/auto.go:reserve(), reusable.
 package ratelimit

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 package github
 
 // This file is OKF bundle maintenance: keep the reserved index.md / log.md files

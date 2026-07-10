@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 // Package notify delivers completed investigations to chat (Slack, Matrix).
 package notify
 

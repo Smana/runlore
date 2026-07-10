@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 // Package webhook is a generic outgoing-webhook notifier: it POSTs each
 // investigation's findings as JSON to an operator-configured URL. It exists as
 // much to prove RunLore's notifier extensibility (drop one self-registering

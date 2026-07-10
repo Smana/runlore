@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 // Package outcome records, in an append-only JSONL ledger, whether an
 // investigated incident later resolved and which answer was used for it — the
 // "did it actually work?" signal the learning loop reads. The ledger keeps an

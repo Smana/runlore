@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 // Package eval replays recorded incident cases through the investigation loop and
 // scores whether the agent identifies the root cause — a reproducible RCA benchmark
 // (cf. ITBench). A case records the evidence each tool returns, so the eval measures

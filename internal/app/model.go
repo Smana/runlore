@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 // Package app holds the dependency-injection builders and config predicates that
 // assemble the RunLore agent. They live here (instead of in cmd/lore behind
 // main()) so the wiring that decides what ships is unit-testable.

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 // Package gitops is the GitOps-failure watcher source adapter (Flux/Argo CD).
 package gitops
 

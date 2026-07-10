@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 // Package cluster reads Kubernetes pod logs for investigation (read-only) via the
 // client-go CoreV1 GetLogs API. It backs the controller_logs tool, which surfaces
 // why a Flux controller failed to reconcile a source/object.

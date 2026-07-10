@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 // Package config defines RunLore's configuration, including provider wiring and
 // the trigger policy that decides which incidents start an investigation.
 //

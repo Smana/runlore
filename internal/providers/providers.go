@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 // Package providers defines the pluggable backend contracts RunLore is built on.
 //
 // Every backend the agent touches is an interface, so the investigation loop and

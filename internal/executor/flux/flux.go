@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 // Package flux executes safe, reversible Flux operations (suspend / resume /
 // reconcile) on the cluster — the executable half of the autonomy ladder. It is
 // only ever invoked after explicit human approval (config.actions mode "approve").

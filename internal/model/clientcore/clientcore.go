@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 // Package clientcore provides the plumbing shared by the hand-rolled model
 // provider clients (anthropic, gemini, openai): common construction defaults,
 // the streaming request pipeline (retry, status classification, idle-timeout

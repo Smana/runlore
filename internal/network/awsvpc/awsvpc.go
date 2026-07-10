@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 // Package awsvpc implements providers.NetworkProvider against AWS VPC Flow Logs
 // delivered to a CloudWatch Logs group, surfacing REJECT (denied) flows for an
 // investigation. All calls are read-only (FilterLogEvents).

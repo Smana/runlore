@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 // Package anthropic implements providers.ModelProvider against the Anthropic
 // Messages API (native tool use). It maps RunLore's engine-agnostic exchange
 // (OpenAI-shaped: assistant tool_calls + separate tool messages) onto Anthropic's
