@@ -421,6 +421,17 @@ func onInvestigationComplete(ctx context.Context, found providers.Investigation,
 			}
 		}
 	}
+	// A recall already carries Prior (cause + resolution, stamped by recalledInvestigation
+	// from the matched entry); enrich it with the entry's recall track record so the
+	// "⚡ instant recall" block can show the resolve rate — the outcome-ledger signal that
+	// makes the cache hit trustworthy. Read before this run's own open is recorded, so the
+	// rate describes prior recalls only.
+	if found.Recalled && found.Prior != nil && found.RecalledEntry != "" {
+		if counts, err := ledger.OpenCounts(); err == nil {
+			agg := counts[found.RecalledEntry]
+			found.Prior.Recalls, found.Prior.Resolved = agg.Recalls, agg.Resolved
+		}
+	}
 	// Curate BEFORE recording the outcome open — the open event is the durable record
 	// of THIS investigation and must carry the KB link that recurrence pointers and
 	// the learning loop later read back; delivery also links to the KB issue/PR. A

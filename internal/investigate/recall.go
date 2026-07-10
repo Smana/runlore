@@ -410,6 +410,14 @@ func recalledInvestigation(req Request, e catalog.Entry, confidence float64) pro
 		RecalledEntry: e.Path,
 		Resource:      req.Workload,
 	}
+	// Quote the entry's human-reviewed cause + resolution so the notification makes the
+	// cache hit substantive (the "⚡ instant recall" block), not just a low-confidence
+	// finding. The recall track record (resolve rate) is filled in downstream by
+	// onInvestigationComplete, which has the outcome ledger. Best-effort: empty sections
+	// simply render nothing.
+	if cause, resolution := e.Section("Cause"), e.Section("Resolution"); cause != "" || resolution != "" {
+		inv.Prior = &providers.PriorKnowledge{Cause: cause, Resolution: resolution, EntryPath: e.Path}
+	}
 	stampRequestFacts(&inv, req) // same trigger-time facts as the full-loop site, factored to prevent drift
 	return inv
 }

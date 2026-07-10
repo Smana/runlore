@@ -63,7 +63,26 @@ func Format(inv providers.Investigation) string {
 	// (Prior), the previous cause and human-reviewed resolution are quoted
 	// inline — the zero-click payoff of the knowledge base; otherwise the
 	// counter + link still tell the reader this is not new.
-	if inv.Occurrences > 1 {
+	if inv.Recalled && inv.Prior != nil {
+		// Recall short-circuit: make the knowledge-base cache hit explicit (no fresh
+		// investigation ran) and quote the known answer + its resolve-rate track record.
+		p := inv.Prior
+		b.WriteString("⚡ Instant recall — answered from your knowledge base, no investigation was run\n")
+		if p.Cause != "" {
+			fmt.Fprintf(&b, "   Known cause: %s\n", p.Cause)
+		}
+		if p.Resolution != "" {
+			fmt.Fprintf(&b, "   Validated resolution: %s\n", p.Resolution)
+		}
+		if p.Recalls > 0 {
+			fmt.Fprintf(&b, "   Resolve rate: %d/%d recalls resolved\n", p.Resolved, p.Recalls)
+		}
+		if ref := inv.PrevCuratedURL; ref != "" {
+			fmt.Fprintf(&b, "   Knowledge-base entry: %s\n", ref)
+		} else if p.EntryPath != "" {
+			fmt.Fprintf(&b, "   Knowledge-base entry: %s\n", p.EntryPath)
+		}
+	} else if inv.Occurrences > 1 {
 		fmt.Fprintf(&b, "📚 Seen before: ×%d — last investigated %s\n", inv.Occurrences, inv.LastOccurrence.UTC().Format(time.RFC3339))
 		if p := inv.Prior; p != nil {
 			if p.Cause != "" {
