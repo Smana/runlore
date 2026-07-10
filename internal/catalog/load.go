@@ -13,7 +13,9 @@ import (
 )
 
 // Load walks dir and parses every concept .md file into an Entry. The reserved
-// OKF files index.md and log.md are skipped.
+// OKF files index.md and log.md — and a repo README.md — are skipped: they are
+// human-facing docs, not knowledge entries, so indexing them would pollute search
+// and (README, which carries no OKF frontmatter) trip the validator for no reason.
 //
 // A file that fails to parse (e.g. malformed YAML frontmatter) is skipped rather
 // than failing the whole load — its path is returned in skipped so the caller can
@@ -36,7 +38,7 @@ func Load(dir string) (entries []Entry, skipped []string, err error) {
 		if strings.HasPrefix(base, ".") || !strings.HasSuffix(base, ".md") {
 			return nil
 		}
-		if base == "index.md" || base == "log.md" {
+		if base == "index.md" || base == "log.md" || strings.EqualFold(base, "readme.md") {
 			return nil
 		}
 		e, perr := parseEntry(dir, path)
