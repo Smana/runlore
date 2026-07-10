@@ -68,16 +68,22 @@ GitHub forge) and fakes (the GitOps `Reader`, the catalog `Searcher`, a scripted
 Flux adapter is tested against a dynamic fake client. So `go test ./...` covers the logic of every
 feature with no cluster.
 
-## End-to-end on k3d
+## End-to-end on k3d (or kind)
 
-`hack/e2e-k3d.sh` is the real-cluster proof: it spins up a throwaway k3d cluster, installs minimal Flux
-CRDs, builds + imports the image, `helm install`s the chart, and verifies **each feature against a real
-API server** with mock external backends. It asserts ~20 checks and tears down on exit.
+`hack/e2e-local.sh` is the real-cluster proof: it spins up a throwaway local cluster, installs minimal
+Flux CRDs, builds + imports the image, `helm install`s the chart, and verifies **each feature against a
+real API server** with mock external backends. It asserts ~20 checks and tears down on exit.
 
 ```bash
-hack/e2e-k3d.sh           # full run, deletes the cluster afterwards
-hack/e2e-k3d.sh --keep    # leave the cluster + mock up for inspection
+hack/e2e-local.sh                     # full run on k3d (default), deletes the cluster afterwards
+hack/e2e-local.sh --keep              # leave the cluster + mock up for inspection
+E2E_PROVIDER=kind hack/e2e-local.sh   # same suite on a kind cluster instead
 ```
+
+For local runs the suite supports **k3d (default) and kind** — pick with `E2E_PROVIDER=k3d|kind`; the
+provider only changes cluster create/delete, image loading, the kubeconfig context, and how pods reach
+the host-side mocks (`host.k3d.internal` vs the kind docker network's gateway IP) — every assertion is
+identical. `hack/e2e-k3d.sh` remains as a thin k3d-pinned wrapper, and CI stays on k3d.
 
 What it covers: deployment + RBAC + config load · catalog (`kb_search`) from a mounted ConfigMap ·
 incident webhook → trigger policy · the ReAct loop (`what_changed → kb_search → submit_findings`) ·
@@ -94,7 +100,8 @@ deployment path, the chart, or a behaviour the e2e asserts.
 
 `hack/e2e/mock/main.go` (behind the `e2e` build tag, so it's excluded from normal builds) stands in for
 the OpenAI chat endpoint (it scripts the tool-call sequence), Slack, Matrix, and the GitHub API. It runs
-on the host; the in-cluster agent reaches it via `host.k3d.internal`. Build it standalone with:
+on the host; the in-cluster agent reaches it via `host.k3d.internal` (on kind: the docker network's
+gateway IP). Build it standalone with:
 
 ```bash
 go run -tags e2e ./hack/e2e/mock :9999
@@ -164,7 +171,7 @@ hack/demo.sh    # fires mocked Alertmanager alerts through the trigger policy
 
 1. Branch from `main`.
 2. Make the change test-first; keep the gate green (`-race` where relevant).
-3. If it touches the deployment or a feature path, run `hack/e2e-k3d.sh`.
+3. If it touches the deployment or a feature path, run `hack/e2e-local.sh`.
 4. Open a PR describing **what** changed and **how it was verified** (cite the gate / e2e results).
 
 ## Releasing
