@@ -176,6 +176,24 @@ func TestRecalledInvestigationCarriesEntryPath(t *testing.T) {
 	}
 }
 
+// A recall quotes the entry's Cause + Resolution into Prior so the notifier can make
+// the cache hit substantive ("⚡ instant recall") instead of a bare low-confidence
+// finding. The resolve-rate is filled in downstream (needs the ledger).
+func TestRecalledInvestigationStampsPrior(t *testing.T) {
+	e := catalog.Entry{Title: "T", Path: "p.md", Body: "## Cause\nIAM quota hit\n\n## Resolution\ndelete a key\n"}
+	inv := recalledInvestigation(Request{Title: "x"}, e, 0.7)
+	if inv.Prior == nil {
+		t.Fatal("recall must stamp Prior from the matched entry")
+	}
+	if inv.Prior.Cause != "IAM quota hit" || inv.Prior.Resolution != "delete a key" || inv.Prior.EntryPath != "p.md" {
+		t.Fatalf("Prior not stamped from entry sections: %+v", inv.Prior)
+	}
+	// An entry with no Cause/Resolution sections leaves Prior nil (nothing to quote).
+	if got := recalledInvestigation(Request{Title: "x"}, catalog.Entry{Title: "T", Path: "p.md"}, 0.7); got.Prior != nil {
+		t.Fatalf("Prior must be nil when the entry has no Cause/Resolution: %+v", got.Prior)
+	}
+}
+
 func TestRecalledInvestigationStampsAlertMetadata(t *testing.T) {
 	// The recall short-circuit must carry the same trigger-time facts as the full
 	// loop so a recalled delivery renders an identical notification metadata block.

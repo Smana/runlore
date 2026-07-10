@@ -614,6 +614,47 @@ func TestSlackSummaryBlocksPriorKnowledge(t *testing.T) {
 	}
 }
 
+// A recall short-circuit must be VISIBLE: the block leads with "⚡ Instant recall"
+// (not "Seen before"), labels the quoted sections as the KNOWN answer, links the
+// knowledge-base entry, and shows the resolve-rate track record — otherwise the
+// notification reads as a low-confidence fresh investigation.
+func TestSlackSummaryBlocksRecall(t *testing.T) {
+	inv := providers.Investigation{
+		Title: "HarborRegistryDown", Confidence: 0.6,
+		Recalled:      true,
+		RecalledEntry: "harbor-registry-down.md",
+		Occurrences:   1, // fresh trigger key — recall framing must not depend on the counter
+		Prior: &providers.PriorKnowledge{
+			Cause: "AccessKey hit IAM quota", Resolution: "delete an unused access key",
+			EntryPath: "harbor-registry-down.md", Recalls: 3, Resolved: 3,
+		},
+	}
+	txt := blocksText(t, summaryBlocks(inv))
+	for _, want := range []string{
+		"⚡ *Instant recall*",
+		"no investigation was run",
+		"*Known cause:* AccessKey hit IAM quota",
+		"*Validated resolution:* delete an unused access key",
+		"`harbor-registry-down.md`", // entry path shown inline when no curated URL
+		"resolve rate 3/3",
+	} {
+		if !strings.Contains(txt, want) {
+			t.Errorf("recall summary missing %q\n%s", want, txt)
+		}
+	}
+	for _, absent := range []string{"Seen before", "Prior cause"} {
+		if strings.Contains(txt, absent) {
+			t.Errorf("recall block must not use the fresh-recurrence framing %q\n%s", absent, txt)
+		}
+	}
+	// With a curated URL, the entry links instead of showing the bare path.
+	inv.PrevCuratedURL = "https://kb/pr/42"
+	txt = blocksText(t, summaryBlocks(inv))
+	if !strings.Contains(txt, "knowledge-base entry") {
+		t.Errorf("recall with curated URL must link the knowledge-base entry\n%s", txt)
+	}
+}
+
 // Without Prior, the legacy counter field + context pointer stay untouched.
 func TestSlackSummaryBlocksRecurrenceWithoutPrior(t *testing.T) {
 	inv := providers.Investigation{

@@ -403,16 +403,33 @@ func summaryBlocks(inv providers.Investigation) []map[string]any {
 	// count, date and link all live here.
 	if p := inv.Prior; p != nil {
 		var s strings.Builder
-		fmt.Fprintf(&s, "📚 *Seen before ×%d* — last %s", inv.Occurrences, slackDate(inv.LastOccurrence))
+		// Two shapes share this block. A RECALL short-circuited the loop: without an
+		// explicit marker the message reads as a low-confidence fresh investigation, so
+		// lead with "⚡ Instant recall" and label the quoted sections as the KNOWN answer.
+		// A recurring FRESH investigation instead leads with the "Seen before ×N" counter.
+		causeLabel, resLabel := "Prior cause", "Prior resolution"
+		if inv.Recalled {
+			s.WriteString("⚡ *Instant recall* — answered from your knowledge base, no investigation was run")
+			causeLabel, resLabel = "Known cause", "Validated resolution"
+		} else {
+			fmt.Fprintf(&s, "📚 *Seen before ×%d* — last %s", inv.Occurrences, slackDate(inv.LastOccurrence))
+		}
 		if p.Cause != "" {
-			fmt.Fprintf(&s, "\n*Prior cause:* %s", escapeMrkdwn(p.Cause))
+			fmt.Fprintf(&s, "\n*%s:* %s", causeLabel, escapeMrkdwn(p.Cause))
 		}
 		if p.Resolution != "" {
-			fmt.Fprintf(&s, "\n*Prior resolution:* %s", escapeMrkdwn(p.Resolution))
+			fmt.Fprintf(&s, "\n*%s:* %s", resLabel, escapeMrkdwn(p.Resolution))
 		}
 		foot := make([]string, 0, 2)
-		if inv.PrevCuratedURL != "" {
-			foot = append(foot, fmt.Sprintf("<%s|previous entry>", escapeMrkdwn(inv.PrevCuratedURL)))
+		switch {
+		case inv.PrevCuratedURL != "":
+			label := "previous entry"
+			if inv.Recalled {
+				label = "knowledge-base entry"
+			}
+			foot = append(foot, fmt.Sprintf("<%s|%s>", escapeMrkdwn(inv.PrevCuratedURL), label))
+		case inv.Recalled && p.EntryPath != "":
+			foot = append(foot, fmt.Sprintf("`%s`", escapeMrkdwn(p.EntryPath)))
 		}
 		if p.Recalls > 0 {
 			foot = append(foot, fmt.Sprintf("resolve rate %d/%d", p.Resolved, p.Recalls))

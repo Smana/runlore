@@ -116,6 +116,36 @@ func TestFormatPriorKnowledge(t *testing.T) {
 	}
 }
 
+// TestFormatRecall asserts a recall renders the explicit "⚡ Instant recall"
+// block (known answer + resolve rate + entry) regardless of the occurrence counter,
+// and never the "Seen before" fresh-recurrence framing.
+func TestFormatRecall(t *testing.T) {
+	inv := providers.Investigation{
+		Title: "HarborRegistryDown", Confidence: 0.6,
+		Recalled: true, RecalledEntry: "harbor-registry-down.md",
+		Occurrences: 1, // fresh trigger key
+		Prior: &providers.PriorKnowledge{
+			Cause: "AccessKey hit IAM quota", Resolution: "delete an unused access key",
+			EntryPath: "harbor-registry-down.md", Recalls: 3, Resolved: 3,
+		},
+	}
+	out := Format(inv)
+	for _, want := range []string{
+		"⚡ Instant recall — answered from your knowledge base, no investigation was run",
+		"Known cause: AccessKey hit IAM quota",
+		"Validated resolution: delete an unused access key",
+		"Resolve rate: 3/3 recalls resolved",
+		"Knowledge-base entry: harbor-registry-down.md",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("Format recall missing %q\n---\n%s", want, out)
+		}
+	}
+	if strings.Contains(out, "Seen before") {
+		t.Errorf("recall must not use the Seen-before framing\n%s", out)
+	}
+}
+
 // TestFormatSeenBeforeWithoutPrior asserts that without Prior the block keeps
 // today's counter+link shape (no empty labels).
 func TestFormatSeenBeforeWithoutPrior(t *testing.T) {
