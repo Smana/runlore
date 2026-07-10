@@ -20,6 +20,16 @@ NOTE: no `config.model` set — RunLore runs the read-only log-only investigator
 Set config.model.{base_url,model,api_key_env} to enable LLM investigations.
 {{- end }}
 
+{{- if and .Values.networkPolicy.enabled (not .Values.networkPolicy.ingressFrom) }}
+
+WARNING: networkPolicy.ingressFrom is empty — the webhook/health port
+({{ .Values.service.port }}) is reachable from ANY pod in the cluster. If the
+webhook is also unauthenticated (no config.server.webhook_token_env), any
+in-cluster workload can POST synthetic alerts and trigger paid LLM
+investigations at will. Set networkPolicy.ingressFrom to your Alertmanager
+namespace and config.server.webhook_token_env — see docs/security-model.md.
+{{- end }}
+
 {{- if and .Values.curate.cronjob.enabled (dig "outcome" "ledger_path" "" .Values.config) (not .Values.persistence.enabled) }}
 
 WARNING: the curate CronJob is enabled with config.outcome.ledger_path set, but
