@@ -144,7 +144,7 @@ then the answer is confirmed against live state and re-reviewed.
 
 ```mermaid
 flowchart TD
-    Q["Query = alert title + message"] --> S["BM25 search over catalog<br/>(bleve, wider candidate set k=20)"]
+    Q["Query = enriched<br/>(title + message + workload + alertname)"] --> S["BM25 search over catalog<br/>(bleve, wider candidate set k=20)"]
     S --> G1{"Gate 1 — Structural<br/>does the stored resource agree<br/>with the incident's workload?"}
     G1 -- no --> FALL["↘ fall through to full investigation"]
     G1 -- yes --> G2{"Gate 2 — Margin<br/>does the top hit clearly beat<br/>the runner-up? (corpus-portable)"}
@@ -202,6 +202,13 @@ Then two safety backstops before the recalled answer is delivered:
 `outcomeFactor`): it's a function of the BM25 score, the margin, the structural-match
 strength, and the Bayesian-smoothed resolve-rate — and it is **capped at 0.90**. The
 agent is structurally unable to claim certainty from memory alone.
+
+**A recall is made visible in the notification** (`internal/notify/`). A short-circuit
+would otherwise read as a low-confidence fresh investigation, so a recalled answer leads
+with an explicit **⚡ Instant recall** block: "answered from your knowledge base, no
+investigation was run", the entry's known cause + human-reviewed resolution, a link to the
+catalog entry, and its **resolve-rate track record** (the outcome-ledger signal that makes
+the cached answer trustworthy). This is the on-call-facing face of the Compound step (§7).
 
 > **Safety note:** instant recall is *disabled* under autonomy mode `auto`
 > (`loop.go`) — a poisoned catalog entry must never short-circuit straight into an
