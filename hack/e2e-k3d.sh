@@ -397,19 +397,25 @@ for _ in $(seq 1 30); do
   TOTAL=$(kubectl -n "$NS" get pods -l app.kubernetes.io/name=runlore --no-headers 2>/dev/null | wc -l | tr -d ' ')
   READY=$(kubectl -n "$NS" get pods -l app.kubernetes.io/name=runlore \
     -o jsonpath='{range .items[*]}{.status.conditions[?(@.type=="Ready")].status}{"\n"}{end}' 2>/dev/null | grep -c True || true)
-  [[ "$TOTAL" == "2" && "$READY" == "1" ]] && break
+  # Since #264 readiness is catalog warmth, not leadership: BOTH replicas must be
+  # Ready (this is what lets `helm upgrade --wait` / Flux kstatus succeed in HA).
+  [[ "$TOTAL" == "2" && "$READY" == "2" ]] && break
   sleep 2
 done
-if [[ "$TOTAL" == "2" && "$READY" == "1" ]]; then
-  green "PASS: 2 replicas, exactly 1 Ready (leader); the other is hot standby"; PASS=$((PASS+1))
-else red "FAIL: replicas=$TOTAL ready=$READY (want 2 / 1)"; FAIL=$((FAIL+1)); fi
+if [[ "$TOTAL" == "2" && "$READY" == "2" ]]; then
+  green "PASS: 2 replicas, BOTH Ready (readiness decoupled from leadership); leader is the Lease holder"; PASS=$((PASS+1))
+else red "FAIL: replicas=$TOTAL ready=$READY (want 2 / 2)"; FAIL=$((FAIL+1)); fi
 
 HOLDER=$(kubectl -n "$NS" get lease runlore-leader -o jsonpath='{.spec.holderIdentity}' 2>/dev/null || true)
-if [[ -n "$HOLDER" ]]; then green "PASS: Lease held by $HOLDER"; PASS=$((PASS+1))
-else red "FAIL: no Lease holder"; FAIL=$((FAIL+1)); fi
+# The holder identity is now ROUTABLE — <podName>_<podIP> (#264) — so a standby
+# can proxy incoming work to the leader. Pod names are DNS-1123 (no '_' allowed),
+# so stripping from the first underscore always recovers the pod name.
+HOLDER_POD=${HOLDER%%_*}
+if [[ "$HOLDER" == *_* && -n "$HOLDER_POD" ]]; then green "PASS: Lease held by $HOLDER (routable identity)"; PASS=$((PASS+1))
+else red "FAIL: Lease holder '$HOLDER' lacks the routable <pod>_<ip> identity"; FAIL=$((FAIL+1)); fi
 
 # Failover: delete the leader; a standby must acquire the Lease.
-kubectl -n "$NS" delete pod "$HOLDER" --wait=false >/dev/null 2>&1 || true
+kubectl -n "$NS" delete pod "$HOLDER_POD" --wait=false >/dev/null 2>&1 || true
 NEW=""
 for _ in $(seq 1 30); do
   NEW=$(kubectl -n "$NS" get lease runlore-leader -o jsonpath='{.spec.holderIdentity}' 2>/dev/null || true)
@@ -435,12 +441,12 @@ for _ in $(seq 1 30); do
   TOTAL=$(kubectl -n "$NS" get pods -l app.kubernetes.io/name=runlore --no-headers 2>/dev/null | wc -l | tr -d ' ')
   READY=$(kubectl -n "$NS" get pods -l app.kubernetes.io/name=runlore \
     -o jsonpath='{range .items[*]}{.status.conditions[?(@.type=="Ready")].status}{"\n"}{end}' 2>/dev/null | grep -c True || true)
-  [[ "$TOTAL" == "2" && "$READY" == "1" ]] && break
+  [[ "$TOTAL" == "2" && "$READY" == "2" ]] && break
   sleep 2
 done
-if [[ "$TOTAL" == "2" && "$READY" == "1" ]]; then
-  green "PASS: StatefulSet — 2 replicas, exactly 1 Ready (leader)"; PASS=$((PASS+1))
-else red "FAIL: StatefulSet replicas=$TOTAL ready=$READY (want 2 / 1)"; FAIL=$((FAIL+1)); fi
+if [[ "$TOTAL" == "2" && "$READY" == "2" ]]; then
+  green "PASS: StatefulSet — 2 replicas, BOTH Ready (readiness decoupled from leadership)"; PASS=$((PASS+1))
+else red "FAIL: StatefulSet replicas=$TOTAL ready=$READY (want 2 / 2)"; FAIL=$((FAIL+1)); fi
 
 BOUND=$(kubectl -n "$NS" get pvc -l app.kubernetes.io/name=runlore -o jsonpath='{range .items[*]}{.status.phase}{"\n"}{end}' 2>/dev/null | grep -c Bound || true)
 PVC_COUNT=$(kubectl -n "$NS" get pvc -l app.kubernetes.io/name=runlore --no-headers 2>/dev/null | wc -l | tr -d ' ')
@@ -468,29 +474,33 @@ else red "FAIL: pvcs=$PVC_COUNT bound=$BOUND (want 2 / 2)"; FAIL=$((FAIL+1)); fi
 # a fresh "acquired leadership" log line after the deletion — inside the SAME loop,
 # not as a separate check after breaking out early on a superficial ready-count.
 SS_HOLDER=$(kubectl -n "$NS" get lease runlore-leader -o jsonpath='{.spec.holderIdentity}' 2>/dev/null || true)
+SS_HOLDER_POD=${SS_HOLDER%%_*}   # identity is <podName>_<podIP> (#264)
 DELETE_AT=$(date -u +%Y-%m-%dT%H:%M:%SZ)
-kubectl -n "$NS" delete pod "$SS_HOLDER" --wait=false >/dev/null 2>&1 || true
+kubectl -n "$NS" delete pod "$SS_HOLDER_POD" --wait=false >/dev/null 2>&1 || true
 TOTAL=0; READY=0; NEW_LEADER=""; REACQUIRED=0
 for _ in $(seq 1 60); do
   TOTAL=$(kubectl -n "$NS" get pods -l app.kubernetes.io/name=runlore --no-headers 2>/dev/null | wc -l | tr -d ' ')
   READY=$(kubectl -n "$NS" get pods -l app.kubernetes.io/name=runlore \
     -o jsonpath='{range .items[*]}{.status.conditions[?(@.type=="Ready")].status}{"\n"}{end}' 2>/dev/null | grep -c True || true)
   NEW_LEADER=$(kubectl -n "$NS" get lease runlore-leader -o jsonpath='{.spec.holderIdentity}' 2>/dev/null || true)
+  NEW_LEADER_POD=${NEW_LEADER%%_*}   # identity is <podName>_<podIP> (#264)
   REACQUIRED=0
-  if [[ -n "$NEW_LEADER" ]]; then
-    REACQUIRED=$(kubectl -n "$NS" logs "$NEW_LEADER" --since-time="$DELETE_AT" 2>/dev/null | grep -c "acquired leadership" || true)
+  if [[ -n "$NEW_LEADER_POD" ]]; then
+    REACQUIRED=$(kubectl -n "$NS" logs "$NEW_LEADER_POD" --since-time="$DELETE_AT" 2>/dev/null | grep -c "acquired leadership" || true)
   fi
-  [[ "$TOTAL" == "2" && "$READY" == "1" && "$REACQUIRED" -gt 0 ]] && break
+  # Post-recovery steady state is BOTH pods Ready again (#264) + a fresh
+  # acquisition logged after the deletion timestamp (the authoritative proof).
+  [[ "$TOTAL" == "2" && "$READY" == "2" && "$REACQUIRED" -gt 0 ]] && break
   sleep 2
 done
-if [[ "$TOTAL" == "2" && "$READY" == "1" && -n "$NEW_LEADER" && "$REACQUIRED" -gt 0 ]]; then
+if [[ "$TOTAL" == "2" && "$READY" == "2" && -n "$NEW_LEADER" && "$REACQUIRED" -gt 0 ]]; then
   green "PASS: StatefulSet failover — $NEW_LEADER logged a fresh acquisition after deletion"; PASS=$((PASS+1))
 else
   red "FAIL: StatefulSet failover (replicas=$TOTAL ready=$READY leader='$NEW_LEADER' fresh_acquisitions=$REACQUIRED)"
   FAIL=$((FAIL+1))
   echo "--- diagnostics: lease object ---"; kubectl -n "$NS" get lease runlore-leader -o yaml 2>&1
   echo "--- diagnostics: pods ---"; kubectl -n "$NS" get pods -l app.kubernetes.io/name=runlore -o wide 2>&1
-  [[ -n "$NEW_LEADER" ]] && { echo "--- diagnostics: $NEW_LEADER logs ---"; kubectl -n "$NS" logs "$NEW_LEADER" --tail=40 2>&1; }
+  [[ -n "$NEW_LEADER_POD" ]] && { echo "--- diagnostics: $NEW_LEADER_POD logs ---"; kubectl -n "$NS" logs "$NEW_LEADER_POD" --tail=40 2>&1; }
 fi
 
 # Revert to Deployment mode / replicaCount=1: step 11 below assumes `deploy/runlore`.
