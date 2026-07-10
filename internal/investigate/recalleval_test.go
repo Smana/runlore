@@ -599,8 +599,9 @@ func logFire(t *testing.T, tag string, f fireMetrics) {
 }
 
 // Measured metrics — the honest before→after, kept in the source so a reviewer
-// sees the gap without running the suite. fix(recall) query-enrichment flips the
-// two pinned constants below and updates this table; the fire-rate row stays 0.
+// sees the gap without running the suite. buildRecallQuery now enriches with the
+// structured entity; the numbers below are the ENRICHED reality (the "raw" column
+// is the previous commit's pinned baseline, retained for the diff):
 //
 //	                        raw title+message    + structured-entity enrichment
 //	Recall@1 / @3 / @5       0.69 / 0.69 / 0.69    1.00 / 1.00 / 1.00
@@ -614,11 +615,12 @@ func logFire(t *testing.T, tag string, f fireMetrics) {
 // change; the harness now MEASURES exactly that, at real production thresholds.
 const (
 	// wantHardCaseRank is the ranking of the 4 hardLabelCases' target.
-	// BASELINE 0 (miss — the raw query is a lone alertname token); enriched → 1.
-	wantHardCaseRank = 0
+	// BASELINE 0 (miss — the raw query is a lone alertname token); ENRICHED 1 — the
+	// namespace + normalized workload name give BM25 the terms the runbook shares.
+	wantHardCaseRank = 1
 	// wantRetrievalHitsAt1 pins Recall@1's hit count over the 13 positive cases.
-	// BASELINE 9; enriched → 13.
-	wantRetrievalHitsAt1 = 9
+	// BASELINE 9; ENRICHED 13 (every positive now surfaces its target at rank #1).
+	wantRetrievalHitsAt1 = 13
 	// wantFireCount pins the production-threshold short-circuit count over the 11
 	// label positives. It stays 0 in BOTH regimes — the pinned proof that query
 	// enrichment alone never clears SoloFloor 4.0. A future reranker/threshold change
@@ -644,9 +646,9 @@ func TestRecallEvalRetrieval(t *testing.T) {
 	if m.positives != 13 {
 		t.Fatalf("expected 13 positive cases, got %d", m.positives)
 	}
-	// The identity-in-the-label cases are the crux: BASELINE they MISS entirely,
-	// which is the whole reason recall never fires. fix(recall) flips wantHardCaseRank
-	// to 1 (each recovered to rank #1).
+	// The identity-in-the-label cases are the crux: at BASELINE they MISS entirely
+	// (the whole reason recall never fires); the enrichment recovers each to rank #1
+	// (wantHardCaseRank flipped 0 → 1). This assertion is the fix's proof.
 	for _, n := range hardLabelCases {
 		if m.ranks[n] != wantHardCaseRank {
 			t.Fatalf("hard case %q: rank = %d, want %d (see before→after table)", n, m.ranks[n], wantHardCaseRank)
