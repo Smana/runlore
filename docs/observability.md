@@ -57,6 +57,7 @@ estimate) keep the SDK defaults and are read as heatmaps, not percentiles.
 | `runlore_investigation_duration_seconds` | histogram | `result` | wall-clock per investigation |
 | `runlore_investigations_throttled_total` | counter | — | starts requeued by the rate limiter |
 | `runlore_investigations_dropped_total` | counter | — | dropped (rate-limiter max-requeues or token-budget kill) |
+| `runlore_investigations_cancelled_total` | counter | — | queued (not yet started) investigations cancelled because the incident resolved first (`triggers.incidents.cancel_queued_on_resolve`) |
 
 ### Tools & model
 | Metric | Type | Labels | Meaning |

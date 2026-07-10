@@ -59,6 +59,7 @@ msg=incident alert=<name> severity=<sev> namespace=<ns> investigate=<bool> reaso
 | `runlore_alerts_coalesced_total` rising | folded into an existing batch (`investigation.coalesce`) | expected noise control — one investigation covers the batch |
 | `runlore_alerts_suppressed_total` rising | dropped by the coalescer **cooldown** | expected — a recently-investigated correlation is in cooldown |
 | `runlore_incidents_debounced_total` rising | the alert self-resolved within `triggers.incidents.debounce` and was dropped before investigating; log: `msg="alert resolved within debounce window; dropping self-resolving incident"` | expected noise control — lower `incidents.debounce` if you want faster (but noisier) reactions, or set `0` to disable |
+| `runlore_investigations_cancelled_total` rising | the alert resolved while its investigation was still queued and `triggers.incidents.cancel_queued_on_resolve` dropped it; log: `msg="incident resolved before investigation started; cancelling queued investigation"` | expected noise control — disable the flag if you want post-hoc investigations of self-resolved alerts |
 
 ---
 

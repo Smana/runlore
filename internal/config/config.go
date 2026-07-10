@@ -478,6 +478,17 @@ type IncidentTrigger struct {
 	// survivors afterwards) and `dedup` (which still suppresses re-fires before the
 	// hold begins).
 	Debounce Duration `yaml:"debounce"`
+	// CancelQueuedOnResolve drops a QUEUED — accepted but not yet started —
+	// investigation when the matching Alertmanager `resolved` webhook arrives
+	// first. It extends Debounce past the hold window: without it, a fire→resolve
+	// sequence whose firing already passed into the investigation queue still burns
+	// a full paid investigation. Opt-in (default false, preserving today's
+	// behavior) because some teams deliberately want the post-hoc answer to "why
+	// did it fire?" even after self-resolution — mirroring Debounce being opt-in.
+	// Boundaries: an IN-FLIGHT investigation is never cancelled, and a coalesced
+	// multi-alert batch is not cancelled on one member's resolve (see
+	// investigate.Queue.CancelByFingerprint).
+	CancelQueuedOnResolve bool `yaml:"cancel_queued_on_resolve"`
 }
 
 // IncidentMatch is a set of matchers ANDed together; empty fields match anything.
