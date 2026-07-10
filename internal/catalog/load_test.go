@@ -27,6 +27,7 @@ tags: [flux, helmrelease, upgrade]
 Ready=False after a chart bump.
 `)
 	writeEntry(t, dir, "index.md", "---\ntype: Index\n---\n# ignored\n") // reserved, skipped
+	writeEntry(t, dir, "README.md", "# repo docs, no frontmatter\n")     // reserved, skipped
 	writeEntry(t, dir, "notes.txt", "not markdown")                      // skipped
 
 	entries, _, err := Load(dir)
@@ -34,7 +35,7 @@ Ready=False after a chart bump.
 		t.Fatalf("Load: %v", err)
 	}
 	if len(entries) != 1 {
-		t.Fatalf("want 1 entry (index.md + .txt skipped), got %d", len(entries))
+		t.Fatalf("want 1 entry (index.md + README.md + .txt skipped), got %d", len(entries))
 	}
 	e := entries[0]
 	if e.Type != "Playbook" || e.Title != "HelmRelease upgrade failure" || len(e.Tags) != 3 {
