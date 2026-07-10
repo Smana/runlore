@@ -180,7 +180,7 @@ func TestMountWebhooks(t *testing.T) {
 	}
 
 	mux := http.NewServeMux()
-	MountWebhooks(mux, built, nil, pipe)
+	MountWebhooks(mux, built, nil, pipe, nil)
 
 	// Send a request to the registered webhook path
 	req := httptest.NewRequest(http.MethodPost, "/webhook/wh1", strings.NewReader(`{}`))

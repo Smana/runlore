@@ -1,12 +1,17 @@
-# 2+ replicas give failover: only the elected leader is Ready/active; the rest are
-# hot standby. See config.leader_election below.
+# 2+ replicas give failover: every warm replica reports Ready (so the Service may
+# round-robin webhooks across all of them), but only the elected leader runs the
+# investigation queue — a non-leader replica PROXIES incoming work to the leader
+# (single hop, learned from the Lease). `helm upgrade --wait` / Flux kstatus works
+# with any replica count. See config.leader_election below.
 replicaCount: 2
 
-# Recreate avoids a rolling-update deadlock under leader election: a new pod can't
-# become Ready until it leads, but the old leader holds the Lease (and maxUnavailable
-# is 0), so an in-place rolling update stalls. Recreate terminates old pods first.
+# Readiness no longer gates on leadership (#264), so the historical rolling-update
+# deadlock (new pod not Ready until it leads, old leader holding the Lease) is gone
+# and RollingUpdate is viable. Recreate stays the shipped default because it avoids
+# two agent VERSIONS overlapping mid-rollout (briefly co-serving webhooks/leases).
 # Trade-off: ~20s downtime during the agent's own upgrade; crash-failover HA is
-# unaffected. Switch to RollingUpdate only with a leadership-independent readiness model.
+# unaffected. Set RollingUpdate for near-zero-downtime upgrades once you've
+# validated it in your environment.
 updateStrategy: Recreate
 
 # Deployment (default) shares one PVC across every replica via persistence.existingClaim
@@ -14,7 +19,7 @@ updateStrategy: Recreate
 # multi-node cluster with an RWO (single-attach) StorageClass, a second replicaCount>1
 # pod scheduled on a different node cannot attach that already-attached volume and
 # hangs. Set StatefulSet to give each replica its OWN volume via volumeClaimTemplates;
-# leader election (already topology-agnostic — only the elected leader is Ready) then
+# leader election (topology-agnostic — only the elected leader investigates) then
 # provides real HA. Trade-off: a new leader that takes over on a DIFFERENT replica's
 # volume starts with an empty local outcome ledger (the catalog is unaffected — it
 # re-clones from git). Only affects persistence.enabled=true; ConfigMap/emptyDir
@@ -78,8 +83,9 @@ config:
       # and would otherwise drive confident-but-wrong root causes. Defaults to 60s
       # when omitted; set 0 to fire immediately on every Ready=False.
       debounce: 60s
-  # HA: only the elected leader runs the informer + investigation queue and reports
-  # ready (the Service then routes webhooks to the leader). Harmless with 1 replica.
+  # HA: only the elected leader runs the informer + investigation queue. Every warm
+  # replica reports Ready (#264); a non-leader replica that receives a webhook
+  # proxies it to the leader (looked up via the Lease). Harmless with 1 replica.
   leader_election:
     enabled: true
     name: runlore-leader
@@ -289,20 +295,20 @@ service:
   port: 8080                          # the /webhook/alertmanager + /healthz + /metrics port
 
 # Health probes. The agent has a non-trivial warm-up: the HTTP server (and so
-# /healthz) comes up within ~1s, but /readyz stays 503 until this replica wins the
-# leader Lease AND — for a git-sync catalog — the first clone+index completes (a
-# real KB repo can take many seconds). A non-leader (standby) replica is /readyz
-# 503 for its whole life by design.
+# /healthz) comes up within ~1s, but /readyz stays 503 until — for a git-sync
+# catalog — the first clone+index completes (a real KB repo can take many
+# seconds). Readiness does NOT depend on leadership (#264): every replica whose
+# catalog is warm reports Ready, leader and standby alike, so `helm upgrade
+# --wait` / Flux kstatus succeeds with replicaCount>1. A non-leader replica that
+# receives a webhook proxies it to the leader.
 #
 # A startupProbe on /healthz owns the cold-start window: while it runs, the
 # liveness + readiness probes are suppressed, so warm-up never emits premature
-# "Unhealthy" readiness events. Once it passes once, the tight readiness probe
-# takes over (so a leader handoff shows up in the Service endpoints within a few
-# seconds) and liveness guards against a genuine process hang on its normal
-# cadence. The startupProbe targets /healthz, NOT /readyz: gating startup on
-# readiness would deadlock a standby replica (never leader ⇒ never ready ⇒
-# startupProbe never passes ⇒ kubelet kills the pod). Liveness is deliberately
-# NOT loosened — it still trips a real hang.
+# "Unhealthy" readiness events. Once it passes once, the readiness probe takes
+# over and liveness guards against a genuine process hang on its normal cadence.
+# The startupProbe targets /healthz, NOT /readyz: a slow first catalog sync must
+# delay readiness, never get the pod killed. Liveness is deliberately NOT
+# loosened — it still trips a real hang.
 probes:
   startup:
     enabled: true            # set false to skip the startupProbe (e.g. very fast static catalog)
@@ -314,7 +320,7 @@ probes:
     failureThreshold: 3
     timeoutSeconds: 2
   readiness:
-    periodSeconds: 5         # keep tight so leader handoff reflects in endpoints fast
+    periodSeconds: 5         # keep tight so a cold/broken catalog surfaces in endpoints fast
     failureThreshold: 3
     timeoutSeconds: 2
 
