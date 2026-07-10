@@ -24,6 +24,7 @@ type Metrics struct {
 	InvestigationsStarted     metric.Int64Counter
 	InvestigationsThrottled   metric.Int64Counter
 	InvestigationsDropped     metric.Int64Counter
+	InvestigationsCancelled   metric.Int64Counter // queued (not yet started) investigations cancelled because the incident resolved first (cancel_queued_on_resolve)
 	GitOpsFailuresDebounced   metric.Int64Counter // GitOps failures dropped as transient (cleared within the debounce window)
 	IncidentsDebounced        metric.Int64Counter // firing alerts dropped as self-resolving (resolved within the incident debounce window)
 	ToolOutputTruncatedBytes  metric.Int64Counter
@@ -86,6 +87,7 @@ func NewMetrics() *Metrics {
 		InvestigationsStarted:     ctr("investigations_started_total", "investigations actually begun"),
 		InvestigationsThrottled:   ctr("investigations_throttled_total", "starts requeued by the rate limiter"),
 		InvestigationsDropped:     ctr("investigations_dropped_total", "investigations dropped — rate-limiter max_requeues or token-budget hard-kill"),
+		InvestigationsCancelled:   ctr("investigations_cancelled_total", "queued (not yet started) investigations cancelled: the incident resolved before its investigation began (triggers.incidents.cancel_queued_on_resolve)"),
 		GitOpsFailuresDebounced:   ctr("gitops_failures_debounced_total", "GitOps failures dropped as transient: cleared within the debounce window before investigating"),
 		IncidentsDebounced:        ctr("incidents_debounced_total", "firing alerts dropped as self-resolving: a matching resolved webhook arrived within the incident debounce window before investigating"),
 		ToolOutputTruncatedBytes:  ctr("tool_output_truncated_bytes_total", "bytes elided by output truncation"),

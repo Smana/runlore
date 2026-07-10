@@ -164,3 +164,32 @@ triggers:
 		t.Fatalf("explicit debounce:0 should fire immediately, got %v", c.Triggers.GitOpsFailures.DebounceWindow())
 	}
 }
+
+// TestLoadCancelQueuedOnResolve pins the yaml key spelling and the opt-in default:
+// unset ⇒ false (behavior preservation — some teams want the post-hoc investigation
+// of a self-resolved alert), explicit true parses.
+func TestLoadCancelQueuedOnResolve(t *testing.T) {
+	dir := t.TempDir()
+	p := filepath.Join(dir, "runlore.yaml")
+	doc := `
+sources:
+  alertmanager: {}
+triggers:
+  incidents:
+    cancel_queued_on_resolve: true
+`
+	if err := os.WriteFile(p, []byte(doc), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	c, err := Load(p)
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if !c.Triggers.Incidents.CancelQueuedOnResolve {
+		t.Fatal("explicit cancel_queued_on_resolve: true should parse")
+	}
+	// Default: off.
+	if (&Config{}).Triggers.Incidents.CancelQueuedOnResolve {
+		t.Fatal("cancel_queued_on_resolve must default to false")
+	}
+}

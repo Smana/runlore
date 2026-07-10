@@ -18,6 +18,16 @@ import (
 // concrete episode type. A nil ResolveFunc disables resolved-alert handling.
 type ResolveFunc func(fingerprint string, at time.Time)
 
+// Canceller drops a QUEUED (not yet started) investigation whose sole alert
+// fingerprint matches, reporting whether one was cancelled. *investigate.Queue
+// implements it; serve wires the queue in explicitly (WithCanceller, mirroring
+// how resolve is wired) because the pipeline's own handle on the queue is an
+// Enqueuer — often the coalescer, and deliberately too narrow to cancel through.
+// A nil Canceller disables cancellation regardless of config.
+type Canceller interface {
+	CancelByFingerprint(fingerprint string) bool
+}
+
 // Pipeline admits inbound events from all source adapters, applies the
 // configured gate policy (MatchGated or EnableGated), deduplicates within the
 // configured window, and forwards survivors to the investigation enqueuer.
@@ -25,6 +35,7 @@ type Pipeline struct {
 	cfg      *config.Config
 	enq      investigate.Enqueuer
 	resolve  ResolveFunc
+	cancel   Canceller // optional; cancels queued investigations on resolve (opt-in via config)
 	dedup    *trigger.Deduper
 	debounce *incidentDebouncer
 	metrics  *telemetry.Metrics // optional; nil-safe ingress counters
@@ -68,6 +79,14 @@ func (p *Pipeline) WithMetrics(m *telemetry.Metrics) *Pipeline {
 	return p
 }
 
+// WithCanceller wires the investigation queue's cancel hook so the resolved path
+// can drop a QUEUED investigation when triggers.incidents.cancel_queued_on_resolve
+// is enabled. Chains off NewPipeline; a nil c leaves cancellation disabled.
+func (p *Pipeline) WithCanceller(c Canceller) *Pipeline {
+	p.cancel = c
+	return p
+}
+
 // Ingest admits each Request per the admission mode and invokes resolve for each
 // Resolution. Cascade-suppression and debounce for EnableGated sources are
 // applied at the watcher edge (see Task 6) during Phase 1.
@@ -76,6 +95,17 @@ func (p *Pipeline) Ingest(ctx context.Context, adm Admission, res DecodeResult) 
 		// Drop any firing alert still held in the debounce window: it self-resolved
 		// before its investigation began, so it never reaches the enqueuer.
 		p.debounce.Cancel(r.Fingerprint)
+		// Opt-in (triggers.incidents.cancel_queued_on_resolve): also drop a QUEUED
+		// investigation that already passed admission (and any debounce hold) but has
+		// not started — otherwise a fire→resolve sequence still burns a full paid
+		// investigation. In-flight investigations and coalesced multi-alert batches
+		// are never cancelled (see investigate.Queue.CancelByFingerprint, which also
+		// logs the cancelled incident's fingerprint + title).
+		if p.cancel != nil && p.cfg.Triggers.Incidents.CancelQueuedOnResolve {
+			if p.cancel.CancelByFingerprint(r.Fingerprint) && p.metrics != nil {
+				p.metrics.InvestigationsCancelled.Add(ctx, 1)
+			}
+		}
 		if p.resolve != nil {
 			p.resolve(r.Fingerprint, r.At)
 		}

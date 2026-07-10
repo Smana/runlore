@@ -70,6 +70,14 @@ incident webhook. Known keys: `alertmanager`, `gitops`, `pagerduty`.
   `KubeDaemonSetRolloutStuck` during a Karpenter node-churn cycle). **Default `0`** (investigate
   immediately — today's behavior); opt-in per deployment. Composes with `coalesce` (survivors are
   batched afterwards) and `dedup` (re-fires are still suppressed before the hold begins).
+- `incidents.cancel_queued_on_resolve` — when the matching Alertmanager `resolved` webhook arrives
+  while the investigation is still **queued** (accepted, not yet started), drop it. Extends `debounce`
+  past the hold window: without it, a fire→resolve sequence whose firing already passed admission still
+  burns a full paid investigation. **Default `false`** (opt-in) — some teams want the post-hoc answer
+  to "why did it fire?" even after self-resolution. Boundaries: an **in-flight** investigation is never
+  cancelled (it completes and delivers), and a **coalesced multi-alert batch** is not cancelled on one
+  member's resolve (partial resolution is ambiguous — the rest may still be firing). Cancellations
+  count in `runlore_investigations_cancelled_total`.
 - `gitops_failures.debounce` — require a failure to persist this long before investigating. **Default
   60s**; explicit `0` fires immediately on every `Ready=False`.
 
