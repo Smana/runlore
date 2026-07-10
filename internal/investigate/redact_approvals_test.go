@@ -94,7 +94,7 @@ func TestApprovalQueueServesRedactedActions(t *testing.T) {
 
 	// And the HTTP surface: GET /actions serves the queue as JSON to a
 	// token-holding caller — the body must not contain the secret either.
-	srv := server.New(nil, server.Actions{Approvals: approvals, Token: "tok"}, nil, nil, nil, discard)
+	srv := server.New(nil, server.Actions{Approvals: approvals, Token: "tok"}, nil, nil, nil, nil, discard)
 	req := httptest.NewRequest(http.MethodGet, "/actions", nil)
 	req.Header.Set("X-Approval-Token", "tok")
 	rr := httptest.NewRecorder()

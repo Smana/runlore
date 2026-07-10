@@ -303,11 +303,15 @@ func RunServe(version string, args []string) error {
 	}
 
 	var leader atomic.Bool
+	// tracker learns the current lease holder from OnNewLeader; combined with the
+	// routable identity (<podName>_<podIP>, #264) it gives a follower the
+	// leader's address so incoming work can be proxied there.
+	tracker := &LeaderTracker{}
 	useLE := cfg.LeaderElection.Enabled && clientset != nil
 	if useLE {
-		go RunLeaderElection(workCtx, cfg, clientset, &leader, log, startWork)
+		go RunLeaderElection(workCtx, cfg, clientset, &leader, tracker, log, startWork)
 	} else {
-		leader.Store(true) // no leader election: this replica is always active + ready
+		leader.Store(true) // no leader election: this replica is always active
 		startWork(workCtx)
 	}
 
@@ -319,7 +323,6 @@ func RunServe(version string, args []string) error {
 		}
 	}
 
-	// readyz reflects leadership so the Service routes webhooks only to the leader.
 	acts := server.Actions{
 		Approvals:    approvals,
 		Token:        approvalToken,
@@ -338,7 +341,20 @@ func RunServe(version string, args []string) error {
 		acts.Feedback = ledger
 		log.Info("slack feedback buttons enabled", "endpoint", "/slack/interactions")
 	}
-	srv := server.New(ReadyFunc(leader.Load, cat, CatalogExpected(cfg)), acts, built, pipe, metricsHandler, log)
+	// /readyz is process + catalog health, NOT leadership (#264): every warm
+	// replica reports Ready (so `helm upgrade --wait` / Flux kstatus succeeds
+	// with replicaCount>1) and the Service may route a webhook to any of them —
+	// a follower then proxies work-bearing requests to the leader via fwd. The
+	// leader's address comes from the lease identity on this same serve port;
+	// an old-format identity (no IP, pre-#264 holder during a mixed-version
+	// rollout) yields no address and the follower sheds with 503 + Retry-After.
+	port := ServePort(*addr)
+	fwd := &server.Forward{
+		IsLeader:   leader.Load, // pinned true when leader election is disabled
+		LeaderAddr: func() string { return tracker.Addr(port) },
+		Log:        log,
+	}
+	srv := server.New(ReadyFunc(cat, CatalogExpected(cfg)), acts, built, pipe, metricsHandler, fwd, log)
 	if cz != nil {
 		go cz.Run(workCtx, cfg.Investigation.Coalesce.Debounce.Std()/2)
 	}
