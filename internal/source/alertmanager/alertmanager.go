@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 // Package alertmanager is the Alertmanager/VMAlert webhook source adapter.
 package alertmanager
 

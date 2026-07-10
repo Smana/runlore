@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 // Package kbmcp exposes the OKF knowledge catalog as MCP tools (kb_search,
 // kb_get) for the `lore mcp` stdio server — so any MCP client (Claude Code,
 // HolmesGPT, editors) can recall RunLore's learned incident knowledge without a

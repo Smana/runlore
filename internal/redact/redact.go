@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 // Package redact masks secret-shaped values in free text before it crosses a
 // trust boundary — specifically before tool output (pod/controller logs, git
 // diffs, status/event messages) is fed to the LLM provider, from where the

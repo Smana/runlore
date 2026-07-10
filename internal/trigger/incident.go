@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 // Package trigger ingests incidents (Alertmanager/VMAlert webhooks) and decides,
 // per the configured policy, which ones start an investigation.
 package trigger

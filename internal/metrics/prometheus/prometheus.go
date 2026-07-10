@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 // Package prometheus implements providers.MetricsProvider against the Prometheus
 // HTTP API — also spoken by VictoriaMetrics — for instant and range PromQL queries.
 package prometheus

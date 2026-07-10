@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 // Package source registers event-source adapters and runs their core-owned
 // transports. An adapter implements Webhook (push) or Watcher (pull) and
 // self-registers via Register in an init() func; the core owns HTTP auth,

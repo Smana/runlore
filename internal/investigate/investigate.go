@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 // Package investigate routes triggers (incident alerts, GitOps failures) into a
 // single async investigation queue and runs them. The investigation itself is
 // pluggable via Investigator: LoopInvestigator (loop.go) is the real

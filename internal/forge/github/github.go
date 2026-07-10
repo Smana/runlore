@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 // Package github is RunLore's GitHub forge client (curation + re-investigation)
 // over the GitHub REST API, authenticated with short-lived GitHub App installation
 // tokens. It satisfies providers.CurationForge / providers.ReinvestForge / curate.Forge.

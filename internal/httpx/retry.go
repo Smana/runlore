@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 // Package httpx provides small HTTP helpers shared across providers.
 package httpx
 

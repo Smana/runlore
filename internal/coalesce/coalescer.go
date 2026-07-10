@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 // Package coalesce folds correlated Alertmanager incidents into a single
 // investigation, suppressing the redundant per-alert investigations a storm
 // would otherwise spawn. In-memory, mutex-guarded, clock injected for tests.

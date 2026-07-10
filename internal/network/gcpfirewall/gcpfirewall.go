@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 // Package gcpfirewall implements providers.NetworkProvider against GCP Firewall
 // Rules Logging, surfacing DENIED connections for an investigation.
 //

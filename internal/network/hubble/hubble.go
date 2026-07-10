@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 // Package hubble implements providers.NetworkProvider against Cilium Hubble Relay
 // (the observer gRPC API), surfacing dropped flows for an investigation.
 package hubble

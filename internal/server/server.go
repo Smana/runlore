@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 // Package server exposes RunLore's HTTP endpoints (incident webhooks).
 package server
 

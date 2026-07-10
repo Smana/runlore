@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 // Package flux implements providers.GitOpsProvider for Flux: it reads Flux
 // Kustomizations and their GitRepository sources from the cluster and emits
 // engine-agnostic Changes, each diffable through whatchanged.Differ.

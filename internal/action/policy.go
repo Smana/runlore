@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 // Package action gates proposed remediations against the autonomy-ladder policy
 // (config.actions: off | suggest | approve | auto). The gate is server-authoritative:
 // reversibility and blast radius are derived from the operation (deriveSafety), not
