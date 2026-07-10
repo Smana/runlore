@@ -30,8 +30,17 @@ func (f fakeScoredCatalog) Search(_ string, _ int) ([]catalog.Entry, error) {
 
 // runKBLoop drives a two-turn investigation: turn 1 calls kb_search, turn 2 concludes
 // with submit_findings. It returns the delivered investigation so a test can assert on
-// the captured MatchedKnowledge.
+// the captured MatchedKnowledge. KBMatchScore is left 0, so the tracker falls back to
+// the 4.0 default bar — the unchanged high-bar behaviour.
 func runKBLoop(t *testing.T, cat catalog.Searcher) providers.Investigation {
+	t.Helper()
+	return runKBLoopWithMatchScore(t, cat, 0)
+}
+
+// runKBLoopWithMatchScore is runKBLoop with an explicit KBMatchScore, so a test can
+// exercise the config-tracked visibility bar: a low configured floor (the live sub-1.0
+// regime), the 4.0 default, or 0 (unconfigured ⇒ the tracker's 4.0 fallback).
+func runKBLoopWithMatchScore(t *testing.T, cat catalog.Searcher, kbMatchScore float64) providers.Investigation {
 	t.Helper()
 	model := &scriptModel{responses: []providers.CompletionResponse{
 		{ToolCalls: []providers.ToolCall{{ID: "s1", Name: "kb_search", Args: `{"query":"harbor probe"}`}}},
@@ -39,10 +48,11 @@ func runKBLoop(t *testing.T, cat catalog.Searcher) providers.Investigation {
 	}}
 	var got providers.Investigation
 	li := &LoopInvestigator{
-		Model:      model,
-		Tools:      []Tool{KBSearchTool{Catalog: cat}},
-		Log:        discardLog,
-		OnComplete: func(inv providers.Investigation) { got = inv },
+		Model:        model,
+		Tools:        []Tool{KBSearchTool{Catalog: cat}},
+		Log:          discardLog,
+		KBMatchScore: kbMatchScore,
+		OnComplete:   func(inv providers.Investigation) { got = inv },
 	}
 	if err := li.Investigate(context.Background(), Request{Title: "HarborProbeFailure"}); err != nil {
 		t.Fatalf("Investigate: %v", err)
@@ -56,7 +66,7 @@ func runKBLoop(t *testing.T, cat catalog.Searcher) providers.Investigation {
 // RunLore already had a runbook for the incident.
 func TestMatchedKnowledgeCapturedAboveBar(t *testing.T) {
 	cat := fakeScoredCatalog{hits: []catalog.ScoredEntry{
-		{Entry: catalog.Entry{Title: "Harbor probe runbook", Path: "runbooks/harbor.md"}, Score: kbClearMatchScore + 2},
+		{Entry: catalog.Entry{Title: "Harbor probe runbook", Path: "runbooks/harbor.md"}, Score: kbClearMatchScoreDefault + 2},
 		{Entry: catalog.Entry{Title: "runner-up", Path: "x.md"}, Score: 1.0},
 	}}
 	got := runKBLoop(t, cat)
@@ -67,8 +77,8 @@ func TestMatchedKnowledgeCapturedAboveBar(t *testing.T) {
 	if mk.Path != "runbooks/harbor.md" || mk.Title != "Harbor probe runbook" {
 		t.Fatalf("captured wrong entry: %+v", mk)
 	}
-	if mk.Score != kbClearMatchScore+2 {
-		t.Fatalf("Score = %v, want %v (recorded so the bar is tunable from live data)", mk.Score, kbClearMatchScore+2)
+	if mk.Score != kbClearMatchScoreDefault+2 {
+		t.Fatalf("Score = %v, want %v (recorded so the bar is tunable from live data)", mk.Score, kbClearMatchScoreDefault+2)
 	}
 	// URL is not derivable from the tool without new forge plumbing; the notifier
 	// shows Path instead.
@@ -82,11 +92,65 @@ func TestMatchedKnowledgeCapturedAboveBar(t *testing.T) {
 // tangential hit would be noise that erodes trust in the signal).
 func TestMatchedKnowledgeBelowBarNotCaptured(t *testing.T) {
 	cat := fakeScoredCatalog{hits: []catalog.ScoredEntry{
-		{Entry: catalog.Entry{Title: "weak", Path: "weak.md"}, Score: kbClearMatchScore - 0.5},
+		{Entry: catalog.Entry{Title: "weak", Path: "weak.md"}, Score: kbClearMatchScoreDefault - 0.5},
 	}}
 	got := runKBLoop(t, cat)
 	if got.MatchedKnowledge != nil {
 		t.Fatalf("below-bar hit must NOT be captured, got %+v", got.MatchedKnowledge)
+	}
+}
+
+// TestMatchedKnowledgeTracksLowConfiguredFloor is the live regression: on a real
+// Alertmanager-driven cluster whose label-derived alert queries score sub-1.0, the
+// operator tunes solo_floor DOWN (observed live: 0.2). A kb_search hit at 0.3 is a
+// genuine known-runbook match there and MUST be surfaced. With the old hardcoded 4.0 bar
+// it never could be — the visibility feature silently no-opped on exactly the clusters
+// that need it (a Harbor investigation matched its runbook yet showed no prior-knowledge
+// block). Wiring the tracker's bar to the configured 0.2 floor fixes it.
+func TestMatchedKnowledgeTracksLowConfiguredFloor(t *testing.T) {
+	cat := fakeScoredCatalog{hits: []catalog.ScoredEntry{
+		{Entry: catalog.Entry{Title: "Harbor probe runbook", Path: "runbooks/harbor.md"}, Score: 0.3},
+	}}
+	got := runKBLoopWithMatchScore(t, cat, 0.2) // configured recall SoloFloor on this cluster
+	mk := got.MatchedKnowledge
+	if mk == nil {
+		t.Fatalf("expected a sub-1.0 kb_search hit stamped under a 0.2 configured floor, got nil")
+	}
+	if mk.Path != "runbooks/harbor.md" || mk.Score != 0.3 {
+		t.Fatalf("captured wrong entry: %+v", mk)
+	}
+}
+
+// TestMatchedKnowledgeDefaultFloorRejectsSub1: with the default 4.0 bar (a cluster
+// running instant recall at its default solo_floor), a 0.3 hit is far too weak to claim
+// prior knowledge — the high-bar behaviour is unchanged. This is the guard that the fix
+// LOWERS the bar only where the operator lowered solo_floor, never globally.
+func TestMatchedKnowledgeDefaultFloorRejectsSub1(t *testing.T) {
+	cat := fakeScoredCatalog{hits: []catalog.ScoredEntry{
+		{Entry: catalog.Entry{Title: "weak", Path: "weak.md"}, Score: 0.3},
+	}}
+	got := runKBLoopWithMatchScore(t, cat, kbClearMatchScoreDefault) // default 4.0 floor
+	if got.MatchedKnowledge != nil {
+		t.Fatalf("a 0.3 hit under the 4.0 default bar must NOT be captured, got %+v", got.MatchedKnowledge)
+	}
+}
+
+// TestMatchedKnowledgeUnconfiguredFallsBackToDefault: instant recall disabled/unconfigured
+// ⇒ no SoloFloor to borrow ⇒ KBMatchScore 0 ⇒ the tracker falls back to the historical 4.0
+// bar. A 0.3 hit is not surfaced; a hit above 4.0 still is — behaviour is unchanged when
+// nothing is configured.
+func TestMatchedKnowledgeUnconfiguredFallsBackToDefault(t *testing.T) {
+	weak := fakeScoredCatalog{hits: []catalog.ScoredEntry{
+		{Entry: catalog.Entry{Title: "weak", Path: "weak.md"}, Score: 0.3},
+	}}
+	if got := runKBLoopWithMatchScore(t, weak, 0); got.MatchedKnowledge != nil {
+		t.Fatalf("unconfigured (0) must fall back to 4.0; a 0.3 hit must not be captured, got %+v", got.MatchedKnowledge)
+	}
+	strong := fakeScoredCatalog{hits: []catalog.ScoredEntry{
+		{Entry: catalog.Entry{Title: "Harbor probe runbook", Path: "runbooks/harbor.md"}, Score: kbClearMatchScoreDefault + 1},
+	}}
+	if got := runKBLoopWithMatchScore(t, strong, 0); got.MatchedKnowledge == nil {
+		t.Fatalf("unconfigured (0) fallback should still stamp an above-4.0 hit, got nil")
 	}
 }
 
@@ -101,7 +165,7 @@ func TestMatchedKnowledgeKeepsStrongestAcrossCalls(t *testing.T) {
 	// A stateful fake that scores its hit lower on the second call, so "strongest wins"
 	// is distinguishable from "most recent wins": the tracker must keep the first,
 	// higher score.
-	stateful := &decliningCatalog{scores: []float64{kbClearMatchScore + 3, kbClearMatchScore + 1}}
+	stateful := &decliningCatalog{scores: []float64{kbClearMatchScoreDefault + 3, kbClearMatchScoreDefault + 1}}
 	var got providers.Investigation
 	li := &LoopInvestigator{
 		Model:      model,
@@ -115,8 +179,8 @@ func TestMatchedKnowledgeKeepsStrongestAcrossCalls(t *testing.T) {
 	if got.MatchedKnowledge == nil {
 		t.Fatalf("expected a captured hit")
 	}
-	if got.MatchedKnowledge.Score != kbClearMatchScore+3 {
-		t.Fatalf("tracker kept Score %v, want the strongest %v", got.MatchedKnowledge.Score, kbClearMatchScore+3)
+	if got.MatchedKnowledge.Score != kbClearMatchScoreDefault+3 {
+		t.Fatalf("tracker kept Score %v, want the strongest %v", got.MatchedKnowledge.Score, kbClearMatchScoreDefault+3)
 	}
 }
 

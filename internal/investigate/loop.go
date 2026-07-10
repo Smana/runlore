@@ -179,6 +179,16 @@ type LoopInvestigator struct {
 	// Pricing (so a cheaper verify model is costed correctly when configured).
 	Pricing       *Pricing
 	VerifyPricing *Pricing
+
+	// KBMatchScore is the BM25 bar the per-investigation kb_search hit tracker uses to
+	// decide a hit is a "clear match" worth surfacing on the notification
+	// (Investigation.MatchedKnowledge). It is threaded from the operator's CONFIGURED
+	// recall SoloFloor (see BuildInvestigator) so the visibility bar tracks the same
+	// corpus/query-dependent BM25 score regime kb_search runs in: a cluster that tunes
+	// solo_floor DOWN for its sub-1.0 alert-query scores gets a correspondingly low bar
+	// instead of the feature silently no-opping. 0 (recall disabled/unconfigured) ⇒ the
+	// tracker falls back to the historical 4.0 default (kbClearMatchScoreDefault).
+	KBMatchScore float64
 }
 
 // system returns the system prompt, extended with action proposals when the policy is
@@ -313,7 +323,7 @@ func (li *LoopInvestigator) Investigate(ctx context.Context, req Request) error 
 	// the delivered finding (Investigation.MatchedKnowledge) as visible proof RunLore
 	// already had knowledge for this incident. scopeTools returned a fresh slice, so
 	// replacing an element leaves the shared li.Tools untouched.
-	kbHits := &kbHitTracker{}
+	kbHits := newKBHitTracker(li.KBMatchScore)
 	for i, t := range tools {
 		if kb, ok := t.(KBSearchTool); ok {
 			tools[i] = kb.withHitTracker(kbHits)

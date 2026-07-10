@@ -89,6 +89,7 @@ func BuildReinvestigator(ctx context.Context, cfg *config.Config, gp providers.G
 			MaxToolOutputBytes:        cfg.Investigation.MaxToolOutputBytes,
 			MaxTokensPerInvestigation: cfg.Investigation.MaxTokensPerInvestigation,
 			Timeout:                   cfg.Investigation.Timeout.Std(),
+			KBMatchScore:              kbMatchScore(recall), // visibility bar tracks the configured recall floor
 			OnComplete:                func(inv providers.Investigation) { res, got = inv, true },
 		}
 		if err := li.Investigate(ctx, req); err != nil {
