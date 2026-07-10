@@ -13,8 +13,16 @@
 #
 # Nightly + on-demand. Schedule enabled 2026-07-06 after the first green manual
 # run (28817745501).
+#
+# Also reachable from a pull request, opt-in only: apply the `run-e2e` label. The
+# workflow triggers on labeled/opened/synchronize/reopened, but the job itself is
+# gated by `if:` on that label being present — an unlabeled PR's run is skipped
+# immediately (no runner is ever provisioned), so this expensive suite never runs
+# by default on every PR.
 on:
   workflow_dispatch:
+  pull_request:
+    types: [labeled, opened, synchronize, reopened]
   schedule:
     - cron: "0 5 * * *"   # nightly 05:00 UTC (before the 06:00 eval run)
 
@@ -38,6 +46,10 @@ jobs:
   e2e:
     name: k3d end-to-end
     runs-on: ubuntu-latest
+    # Run unconditionally on schedule/workflow_dispatch; on pull_request, only when
+    # the PR carries the `run-e2e` label (checked here, not just at trigger level, so
+    # unlabeled PRs never even provision a runner for this expensive job).
+    if: github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'run-e2e')
     # Cold docker build of the multi-stage Go image + several helm rollouts (90-120s
     # waits each) + leader-election failover (up to 60s) + the storm/argocd phases.
     # ~12-20 min in practice; 30 leaves headroom without masking a hang.

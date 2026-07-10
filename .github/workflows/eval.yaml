@@ -3,7 +3,10 @@
 #
 # IMPORTANT: this job requires the RUNLORE_EVAL_API_KEY repo secret (an
 # Anthropic API key). When the secret is absent the run is skipped gracefully
-# (job exits 0) so the nightly schedule does not produce spurious failures.
+# (job exits 0) so the nightly schedule does not produce spurious failures —
+# but the skip is LOUD: a `::warning::` annotation (surfaced in the Actions
+# run summary / checks UI) plus a $GITHUB_STEP_SUMMARY line, so a run with no
+# key configured can never be mistaken for a real green eval.
 name: eval
 on:
   schedule:
@@ -41,14 +44,15 @@ jobs:
             echo "has_key=false" >> "$GITHUB_OUTPUT"
           fi
 
-      # Emit a clear notice and a job-summary line when the key is absent so
-      # the skip is self-documenting in the Actions UI.
+      # Emit a loud warning annotation AND a job-summary line when the key is
+      # absent so the skip is self-documenting in the Actions UI — a missing
+      # secret must never look like a quiet, real green run.
       - name: skip notice (no API key)
         if: steps.guard.outputs.has_key != 'true'
         run: |
-          echo "::notice::eval skipped — RUNLORE_EVAL_API_KEY secret not set"
+          echo "::warning title=Eval skipped::RUNLORE_EVAL_API_KEY is not set — the nightly eval did NOT run"
           echo "## eval skipped" >> "$GITHUB_STEP_SUMMARY"
-          echo "The \`RUNLORE_EVAL_API_KEY\` repo secret (Anthropic API key) is not configured. Set it to enable nightly eval runs." >> "$GITHUB_STEP_SUMMARY"
+          echo "The \`RUNLORE_EVAL_API_KEY\` repo secret (Anthropic API key) is not configured, so this run did **not** exercise the eval harness. Set the secret to enable nightly eval runs." >> "$GITHUB_STEP_SUMMARY"
 
       - name: build lore binary
         if: steps.guard.outputs.has_key == 'true'
