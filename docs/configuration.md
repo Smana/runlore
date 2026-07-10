@@ -143,6 +143,25 @@ incident webhook. Known keys: `alertmanager`, `gitops`, `pagerduty`.
   PagerDuty) can match only resource-less entries — the weakest tier, which always requires
   `solo_floor` + `min_score`, recalls with reduced confidence, and is disabled by
   `require_workload_match: true`.
+- `instant_recall.rerank` (**ON by default when `instant_recall` is enabled**; set `false` to fall back to the legacy gate) — replaces the corpus-dependent BM25-magnitude
+  fire gate (`solo_floor`/`margin_gap`) with an **LLM reranker** that scores the top-`rerank_k`
+  structurally-agreeing candidates in **one cheap call** and short-circuits only on the reranker's
+  **calibrated** match confidence (`rerank_threshold`, default **0.7**). *Why:* query enrichment fixed
+  retrieval *ranking* (the correct runbook ranks #1 on real BM25), but an enriched real-corpus score is
+  ~0.1–1.2 — an order of magnitude below the default `solo_floor` 4.0 — so the magnitude gate only fires
+  where the operator hand-tuned `solo_floor` down to their corpus. A calibrated 0–1 confidence is
+  **corpus-independent**, so the same default fires across clusters. Knobs (all defaulted when `rerank`
+  is on): `rerank_threshold` **0.7** (fire bar; a probability, so no per-corpus tuning), `rerank_k`
+  **5** (candidates ranked per call; bounded for cost), `rerank_min_score` **0.1** (trivial
+  retrieval-score floor below which the paid call is skipped — the cost guard). The call routes to
+  **`model.verify`** when configured (cheaper/faster), else the main model. It costs ~1–2k tokens and
+  saves the ~100k of a full investigation when it fires. False-recall guards: it only ever ranks
+  candidates that already passed the structural filter, ignores any `entry_id` it did not offer
+  (hallucination guard), and fails **safe** on a "no match", a low confidence, or a model error (fall
+  through to a full investigation). Off ⇒ the BM25-magnitude gate is unchanged. The recalled answer
+  still goes through live-state confirm + the adversarial verify pass, exactly as before — the reranker
+  is a *retrieval-time* "which candidate + confident enough to short-circuit" decision, not a second
+  verify.
 - The **"📚 Matches known runbook"** notification block (stamped when a *full* investigation's
   `kb_search` finds a pre-existing entry) uses `solo_floor` as its visibility bar, so it tracks
   the same corpus/query-dependent BM25 scale recall runs in: a cluster that tunes `solo_floor`

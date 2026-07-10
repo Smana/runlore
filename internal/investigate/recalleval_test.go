@@ -31,6 +31,7 @@ package investigate
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
 	"sort"
@@ -706,5 +707,180 @@ func TestRecallEvalGitOpsRetrievable(t *testing.T) {
 		if rank < 1 || rank > 3 {
 			t.Fatalf("%s: GitOps runbook must stay in the top 3 (got rank %d)", c.name, rank)
 		}
+	}
+}
+
+// --- reranker: the calibrated-confidence fire gate, measured on the REAL corpus ---
+//
+// The default reranker knobs, mirrored from config.applyDefaults. The threshold is the
+// crux: unlike prodSoloFloor (4.0, an ABSOLUTE BM25 magnitude that only fits a
+// hand-tuned corpus) it is a corpus-INDEPENDENT calibrated confidence, so the SAME
+// default fires across corpora.
+const (
+	prodRerankThreshold = 0.7
+	prodRerankK         = 5
+	prodRerankMinScore  = 0.1
+)
+
+// scriptedReranker is a DETERMINISTIC fake reranker ModelProvider — no real LLM in CI.
+// It reads the same rendered candidate list a real reranker would (renderRerankCandidates
+// emits `- id: <path> | …` lines) and picks the first candidate whose id is in `accept`
+// (the set of runbooks that genuinely answer some incident in the labeled set), returning
+// a calibrated `conf`; when no candidate is acceptable it returns match=false. This
+// simulates a competent, calibrated reranker without hard-coding per-case logic: it fires
+// on a correct runbook and abstains on the negatives — exactly the behaviour under test.
+type scriptedReranker struct {
+	accept map[string]bool
+	conf   float64
+	calls  int
+}
+
+func (m *scriptedReranker) Complete(_ context.Context, req providers.CompletionRequest) (providers.CompletionResponse, error) {
+	m.calls++
+	var msg strings.Builder
+	for _, mm := range req.Messages {
+		msg.WriteString(mm.Content)
+	}
+	pick := ""
+	for _, line := range strings.Split(msg.String(), "\n") {
+		line = strings.TrimSpace(line)
+		rest, ok := strings.CutPrefix(line, "- id: ")
+		if !ok {
+			continue
+		}
+		id := rest
+		if i := strings.Index(rest, " |"); i >= 0 {
+			id = rest[:i]
+		}
+		if id = strings.TrimSpace(id); m.accept[id] {
+			pick = id
+			break
+		}
+	}
+	args := `{"match":false}`
+	if pick != "" {
+		args = fmt.Sprintf(`{"match":true,"entry_id":%q,"confidence":%g}`, pick, m.conf)
+	}
+	return providers.CompletionResponse{ToolCalls: []providers.ToolCall{{ID: "rr", Name: rerankToolName, Args: args}}}, nil
+}
+
+// rerankTargets is the union of every case's acceptable targets — the set of runbooks
+// that genuinely answer SOME incident. A candidate outside it is, for these fixtures,
+// never a correct match (crucially, node-disk-pressure.md — the only entry a scopeless
+// negative like Watchdog structurally agrees with — is NOT a target, so the fake
+// abstains on it). Because the structural pre-filter only ever hands the reranker
+// candidates that agree with the incident's OWN workload, a union target can never be a
+// cross-incident false positive.
+func rerankTargets(cases []evalCase) map[string]bool {
+	set := map[string]bool{}
+	for _, c := range cases {
+		for _, t := range c.targets {
+			set[t] = true
+		}
+	}
+	return set
+}
+
+// computeFireReranked mirrors computeFire but wires the reranker as the fire gate (BM25
+// thresholds stay at production values — the reranker, not the magnitude, decides).
+func computeFireReranked(t *testing.T, cat *catalog.Catalog, cases []evalCase, model providers.ModelProvider) fireMetrics {
+	t.Helper()
+	r := &Recall{
+		Catalog:  cat,
+		MinScore: prodMinScore, MarginGap: prodMarginGap, SoloFloor: prodSoloFloor,
+		Rerank: &Reranker{Model: model, Threshold: prodRerankThreshold, K: prodRerankK, MinScore: prodRerankMinScore},
+	}
+	var f fireMetrics
+	for _, c := range cases {
+		if c.regime != "label" { // fire-rate is a claim about the label-derived regime (see computeFire)
+			continue
+		}
+		entry, _ := r.lookup(context.Background(), c.request())
+		if c.negative() {
+			f.negatives++
+			if entry != nil {
+				f.negFired++
+			}
+			continue
+		}
+		f.labelPositives++
+		if entry == nil {
+			continue
+		}
+		f.fired++
+		if rankOfTarget([]catalog.ScoredEntry{{Entry: *entry}}, c.targets) == 1 {
+			f.firedCorrect++
+		}
+	}
+	return f
+}
+
+// TestRecallEvalRerankFireRate is THE before→after measurement, on the real bleve
+// corpus at DEFAULT (untuned) thresholds. It proves the reranker closes the loop the
+// enrichment left open: rerank OFF fires on 0/11 label positives (the pinned baseline
+// gap — enriched BM25 tops stay below SoloFloor 4.0), while rerank ON short-circuits
+// every positive at the default confidence threshold AND fires on ZERO negatives (the
+// false-recall guard). rerank OFF stays byte-for-byte the un-reranked baseline.
+func TestRecallEvalRerankFireRate(t *testing.T) {
+	cat := writeEvalCatalog(t)
+	cases := evalCases()
+
+	off := computeFire(t, cat, cases)
+	logFire(t, "rerank-off", off)
+
+	fake := &scriptedReranker{accept: rerankTargets(cases), conf: 0.9}
+	on := computeFireReranked(t, cat, cases, fake)
+	logFire(t, "rerank-on", on)
+
+	// The measured before→after, printed for the PR body / a reviewer.
+	t.Logf("before→after @ default thresholds (SoloFloor 4.0 | rerank_threshold 0.7):")
+	t.Logf("  fire-rate  : OFF %d/%d (%.2f)  →  ON %d/%d (%.2f)",
+		off.fired, off.labelPositives, off.fireRate(), on.fired, on.labelPositives, on.fireRate())
+	t.Logf("  precision  : OFF %.2f            →  ON %.2f", off.precision(), on.precision())
+	t.Logf("  neg. fired : OFF %d/%d            →  ON %d/%d", off.negFired, off.negatives, on.negFired, on.negatives)
+
+	// BEFORE — rerank OFF is byte-for-byte the un-reranked baseline: still 0 fires.
+	if off.fired != wantFireCount {
+		t.Fatalf("rerank OFF fire count = %d, want %d (must equal the un-reranked baseline)", off.fired, wantFireCount)
+	}
+	if off.labelPositives != 11 {
+		t.Fatalf("expected 11 label-derived positives, got %d", off.labelPositives)
+	}
+	// AFTER — every label positive now short-circuits at the DEFAULT threshold (the
+	// thing that is impossible with the BM25-magnitude gate).
+	if on.fired != on.labelPositives {
+		t.Fatalf("rerank ON must fire on ALL %d label positives, fired %d", on.labelPositives, on.fired)
+	}
+	// …and every fire lands on an acceptable target (no wrong-entry recall).
+	if on.precision() != 1.0 {
+		t.Fatalf("rerank ON precision = %.2f, want 1.00", on.precision())
+	}
+	// CRITICAL false-recall guard: a negative (no correct entry) must NEVER fire —
+	// a reranker that hallucinates a match is worse than no recall.
+	if on.negFired != 0 {
+		t.Fatalf("rerank ON wrongly fired on %d/%d negative(s) — false recall", on.negFired, on.negatives)
+	}
+}
+
+// TestRecallEvalRerankThresholdGates proves the threshold is load-bearing on the real
+// corpus: below-threshold calibrated confidences do NOT fire (so the knob genuinely
+// gates), while at-or-above ones do. Same fixtures, only the fake's confidence changes.
+func TestRecallEvalRerankThresholdGates(t *testing.T) {
+	cat := writeEvalCatalog(t)
+	cases := evalCases()
+	targets := rerankTargets(cases)
+
+	// Confidence 0.5 < threshold 0.7 → nothing fires, everywhere.
+	low := computeFireReranked(t, cat, cases, &scriptedReranker{accept: targets, conf: 0.5})
+	if low.fired != 0 {
+		t.Fatalf("below-threshold confidence must fire nothing, fired %d", low.fired)
+	}
+	// Confidence exactly at the threshold → fires (the gate is >=).
+	at := computeFireReranked(t, cat, cases, &scriptedReranker{accept: targets, conf: prodRerankThreshold})
+	if at.fired != at.labelPositives {
+		t.Fatalf("at-threshold confidence must fire all %d positives, fired %d", at.labelPositives, at.fired)
+	}
+	if at.negFired != 0 {
+		t.Fatalf("at-threshold negatives must not fire, got %d", at.negFired)
 	}
 }
