@@ -3,6 +3,7 @@
 package app
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"io"
@@ -10,6 +11,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -245,4 +247,32 @@ func TestBuildVerifyModel(t *testing.T) {
 	if got := BuildVerifyModel(withOverride); got == nil {
 		t.Fatal("BuildVerifyModel with override = nil, want a non-nil model")
 	}
+}
+
+// A configured-but-unreachable metrics/logs backend must WARN loudly at startup
+// (the silent-half-blind failure this guards against); a reachable one — even one
+// answering 404 — must stay quiet.
+func TestWarnIfBackendUnreachable(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusNotFound) // any HTTP response ⇒ reachable
+	}))
+	defer srv.Close()
+
+	var buf bytes.Buffer
+	log := slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelWarn}))
+
+	warnIfBackendUnreachable(context.Background(), log, "metrics", srv.URL)
+	if strings.Contains(buf.String(), "UNREACHABLE") {
+		t.Fatalf("reachable backend must not warn:\n%s", buf.String())
+	}
+
+	buf.Reset()
+	warnIfBackendUnreachable(context.Background(), log, "logs", "http://127.0.0.1:1")
+	if !strings.Contains(buf.String(), "UNREACHABLE") || !strings.Contains(buf.String(), "logs") {
+		t.Fatalf("unreachable backend must warn with its kind:\n%s", buf.String())
+	}
+
+	// Empty URL and nil logger are no-ops (no panic).
+	warnIfBackendUnreachable(context.Background(), log, "metrics", "")
+	warnIfBackendUnreachable(context.Background(), nil, "metrics", "http://127.0.0.1:1")
 }

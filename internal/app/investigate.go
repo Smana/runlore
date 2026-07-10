@@ -6,6 +6,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"net/http"
 	"os"
 	"time"
 
@@ -111,6 +112,7 @@ func BuildModelAndTools(ctx context.Context, cfg *config.Config, gp providers.Gi
 		}
 	}
 	if cfg.Metrics.URL != "" {
+		warnIfBackendUnreachable(ctx, log, "metrics", cfg.Metrics.URL)
 		m := prometheus.NewWithAuth(cfg.Metrics.URL, cfg.Metrics.TokenEnv, cfg.Metrics.Headers)
 		tools = append(tools,
 			investigate.QueryMetricsTool{Metrics: m},
@@ -118,6 +120,7 @@ func BuildModelAndTools(ctx context.Context, cfg *config.Config, gp providers.Gi
 		)
 	}
 	if cfg.Logs.URL != "" {
+		warnIfBackendUnreachable(ctx, log, "logs", cfg.Logs.URL)
 		tools = append(tools, investigate.QueryLogsTool{Logs: victorialogs.NewWithAuth(cfg.Logs.URL, cfg.Logs.TokenEnv, cfg.Logs.Headers)})
 	}
 	// Network-flow data source (the network_drops tool). Pluggable and CNI-agnostic:
@@ -376,6 +379,34 @@ type investigationCurator interface {
 // Narrowed to an interface so the completion pipeline is testable without an index.
 type priorEntryFinder interface {
 	FindFingerprint(fp string) (catalog.Entry, bool)
+}
+
+// warnIfBackendUnreachable probes a configured metrics/logs backend once at startup
+// and logs a loud WARN if it can't be reached. Without this the failure is SILENT and
+// insidious: a NetworkPolicy that blocks egress (or a wrong URL) doesn't stop startup —
+// the agent runs, but every metrics/logs tool call hangs until it times out mid-
+// investigation, starving the analysis of those signals (and burning the per-
+// investigation deadline half-blind). Any HTTP response — even 401/404 — counts as
+// reachable; only a connection error or timeout is a problem. Best-effort and
+// non-fatal: the probe never blocks startup beyond its short timeout.
+func warnIfBackendUnreachable(ctx context.Context, log *slog.Logger, kind, rawURL string) {
+	if log == nil || rawURL == "" {
+		return
+	}
+	pctx, cancel := context.WithTimeout(ctx, 3*time.Second)
+	defer cancel()
+	req, err := http.NewRequestWithContext(pctx, http.MethodGet, rawURL, nil)
+	if err != nil {
+		return // a malformed URL is caught by config validation, not here
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		log.Warn("configured "+kind+" backend is UNREACHABLE — investigations will run WITHOUT it "+
+			"(check the NetworkPolicy egress to this endpoint's port, or the URL)",
+			"kind", kind, "url", rawURL, "err", err)
+		return
+	}
+	_ = resp.Body.Close()
 }
 
 // onInvestigationComplete runs the post-investigation pipeline once the loop returns
