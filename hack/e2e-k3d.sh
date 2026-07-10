@@ -48,6 +48,32 @@ check() { # check <desc> <logfile> <pattern>
   if grep -qE "$3" "$2"; then green "PASS: $1"; PASS=$((PASS+1)); else red "FAIL: $1 (pattern: $3)"; FAIL=$((FAIL+1)); fi
 }
 
+# wait_for_leader blocks until the runlore-leader Lease is held by a pod that
+# currently exists AND is Running — i.e. leadership has settled on a live pod.
+# Since #284 decoupled /readyz from leadership, `kubectl rollout status` returns
+# as soon as the new pod is Ready, which is BEFORE it wins the Lease. In that
+# takeover window a follower's leader-tracker still points at the previous
+# (now-dead) pod, so a webhook posted immediately is proxied to a stale IP and
+# shed (503 + Retry-After). Production senders (Alertmanager) retry on that 503
+# until it settles; the e2e's one-shot curl does not — so we wait here, encoding
+# the settling that sender retries buy in production. Bounded to ~60s; on
+# timeout it returns anyway (never aborts) so the following assertion fails
+# loudly with real diagnostics instead of a bare set -e crash here.
+wait_for_leader() {
+  local holder pod phase
+  for _ in $(seq 1 30); do   # 30 * 2s = 60s
+    holder=$(kubectl -n "$NS" get lease runlore-leader -o jsonpath='{.spec.holderIdentity}' 2>/dev/null || true)
+    pod=${holder%%_*}   # identity is <podName>_<podIP> (#264); pod names carry no '_'
+    if [[ -n "$pod" ]]; then
+      phase=$(kubectl -n "$NS" get pod "$pod" -o jsonpath='{.status.phase}' 2>/dev/null || true)
+      [[ "$phase" == "Running" ]] && { green "leader settled on $pod ($holder)"; return 0; }
+    fi
+    sleep 2
+  done
+  red "wait_for_leader: no live leader after 60s (holder='${holder:-}')"
+  return 0
+}
+
 step "1/8 create k3d cluster"
 k3d cluster delete "$CLUSTER" >/dev/null 2>&1 || true
 k3d cluster create "$CLUSTER" --wait --timeout 120s --no-lb \
@@ -159,6 +185,7 @@ helm upgrade --install runlore deploy/helm/runlore -n "$NS" \
   --set "env[2].name=MATRIX_TOKEN" --set-string "env[2].value=mocktoken" \
   --set "envFrom[0].secretRef.name=runlore-forge"
 kubectl -n "$NS" rollout status deploy/runlore --timeout=90s
+wait_for_leader   # gate traffic on leadership settling, not just pod-Ready (#284)
 
 step "6/8 startup wiring (config, catalog, RBAC, watch)"
 sleep 3
@@ -241,6 +268,7 @@ helm upgrade runlore deploy/helm/runlore -n "$NS" --reuse-values \
   --set "config.telemetry.metrics_enabled=true" \
   --set replicaCount=1 >/dev/null
 kubectl -n "$NS" rollout status deploy/runlore --timeout=90s >/dev/null
+wait_for_leader   # gate the storm webhook on leadership settling (#284)
 sleep 3
 
 STORM_PORT=18085; free_port "$STORM_PORT"
@@ -355,6 +383,7 @@ helm upgrade runlore deploy/helm/runlore -n "$NS" --reuse-values \
   --set-string config.server.webhook_token_env=WEBHOOK_TOKEN \
   --set replicaCount=1 >/dev/null
 kubectl -n "$NS" rollout status deploy/runlore --timeout=120s >/dev/null
+wait_for_leader   # gate the rung-3 auto webhooks on leadership settling (#284)
 PORT=18091; free_port "$PORT"
 kubectl -n "$NS" port-forward svc/runlore "$PORT:8080" >/tmp/runlore-pf.log 2>&1 &
 PF=$!; sleep 3
@@ -542,6 +571,7 @@ kubectl wait --for=condition=Established crd/applications.argoproj.io --timeout=
 helm upgrade runlore deploy/helm/runlore -n "$NS" --reuse-values \
   --set replicaCount=1 --set-string config.gitops.engine=argocd >/dev/null
 kubectl -n "$NS" rollout status deploy/runlore --timeout=120s
+wait_for_leader   # gate the argocd Application trigger on leadership settling (#284)
 sleep 3
 kubectl apply -f - <<'YAML'
 apiVersion: argoproj.io/v1alpha1
