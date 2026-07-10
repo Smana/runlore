@@ -86,7 +86,7 @@ func draftKBEntry(inv providers.Investigation) providers.KBEntry {
 		// newlines, which would fail RunLore's own `lore validate-kb` hard checks.
 		Title:       capTitle(inv.Title),
 		Description: firstLine(inv),
-		Resource:    inv.Resource.Ref(),
+		Resource:    normalizeResource(inv.Resource),
 		Tags:        entryTags(inv, typ),
 		Body:        b.String(),
 		Fingerprint: DupFingerprint(inv),
@@ -97,6 +97,30 @@ func draftKBEntry(inv providers.Investigation) providers.KBEntry {
 		Occurrences:    inv.Occurrences,
 		PrevCuratedURL: inv.PrevCuratedURL,
 	}
+}
+
+// normalizeResource renders the affected workload as its canonical namespace/name
+// ref with the volatile pod-hash suffix stripped from the NAME segment only (via
+// the curator-local normalizeWorkloadName → providers.NormalizeWorkloadName, the
+// single source of truth for CORE-681).
+//
+// WHY: a pod-scoped alert (KubePodNotReady carries only a `pod` label) resolves to
+// the FULL pod name INCLUDING the ReplicaSet/pod-hash suffix, e.g.
+// "tooling/harbor-registry-59598dbd57-ltkzw". Written verbatim to the entry's
+// resource: frontmatter that (1) pollutes the human-facing entry with a hash that
+// changes every rollout; (2) breaks recall's structural matching against future
+// occurrences (the READ side normalizes before comparing — this is the WRITE side);
+// (3) forks a second KB entry from an already-normalized one ("tooling/harbor-
+// registry"), driving duplicate entries. Normalizing here aligns the WRITTEN
+// resource with what DupFingerprint already normalizes internally, so the dedup
+// identity is unchanged — only the stored, human/recall-facing ref is corrected.
+//
+// It reuses Workload.Ref(), so the namespace is never touched and the empty /
+// bare-namespace cases pass through unchanged; w is a value copy, so mutating its
+// Name is local. Idempotent (NormalizeWorkloadName is).
+func normalizeResource(w providers.Workload) string {
+	w.Name = normalizeWorkloadName(w.Name)
+	return w.Ref()
 }
 
 // entryType derives the OKF type for a drafted entry. The default is Incident: a
