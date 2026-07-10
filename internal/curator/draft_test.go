@@ -95,6 +95,90 @@ func TestDraftKBEntrySetsResource(t *testing.T) {
 	}
 }
 
+// TestDraftKBEntryNormalizesResourceHash is the CORE-681 WRITE-side fix: a
+// pod-scoped alert (KubePodNotReady carries only a `pod` label) resolves to the
+// FULL pod name INCLUDING the volatile ReplicaSet/pod-hash suffix, e.g.
+// "tooling/harbor-registry-59598dbd57-ltkzw". Writing that verbatim to the entry's
+// resource: frontmatter (1) pollutes the human-facing entry with a hash that churns
+// every rollout, (2) breaks recall's structural matching against future occurrences
+// (the READ side normalizes before comparing), and (3) forks a second KB entry from
+// an already-normalized one. The written resource must be normalized to the
+// controller family; the namespace is never touched, and empty/bare-namespace refs
+// pass through unchanged.
+func TestDraftKBEntryNormalizesResourceHash(t *testing.T) {
+	tests := []struct {
+		name     string
+		resource providers.Workload
+		want     string
+	}{
+		{
+			name:     "pod-scoped alert: hash-carrying full pod name is stripped to the controller family",
+			resource: providers.Workload{Kind: "Pod", Namespace: "tooling", Name: "harbor-registry-59598dbd57-ltkzw"},
+			want:     "tooling/harbor-registry",
+		},
+		{
+			name:     "controller-level name already normalized is idempotent",
+			resource: providers.Workload{Kind: "Deployment", Namespace: "tooling", Name: "harbor-registry"},
+			want:     "tooling/harbor-registry",
+		},
+		{
+			name:     "bare namespace (no name) is written as-is",
+			resource: providers.Workload{Namespace: "tooling"},
+			want:     "tooling",
+		},
+		{
+			name:     "empty resource stays empty",
+			resource: providers.Workload{},
+			want:     "",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			inv := providers.Investigation{
+				Title:      "KubePodNotReady",
+				Confidence: 0.9,
+				Resource:   tt.resource,
+				RootCauses: []providers.Hypothesis{{Summary: "readiness probe failing", Evidence: []string{"e"}}},
+			}
+			if got := draftKBEntry(inv).Resource; got != tt.want {
+				t.Fatalf("KBEntry.Resource = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
+// TestDraftKBEntryResourceNormalizationLeavesDedupIdentityStable is the vigilance
+// guard for the write-side fix: normalizing the WRITTEN resource must NOT perturb
+// the dedup identity. DupFingerprint already normalizes the pod hash internally and
+// is computed independently of KBEntry.Resource, so the drafted entry's fingerprint
+// still equals DupFingerprint, and two occurrences on different pods still coalesce
+// to one KB entry (their fingerprints match).
+func TestDraftKBEntryResourceNormalizationLeavesDedupIdentityStable(t *testing.T) {
+	hashed := providers.Investigation{
+		Title:      "KubePodNotReady",
+		Confidence: 0.9,
+		Resource:   providers.Workload{Kind: "Pod", Namespace: "tooling", Name: "harbor-registry-59598dbd57-ltkzw"},
+		RootCauses: []providers.Hypothesis{{Summary: "readiness probe failing", Evidence: []string{"e"}}},
+	}
+	normalized := hashed
+	normalized.Resource = providers.Workload{Kind: "Pod", Namespace: "tooling", Name: "harbor-registry"}
+
+	// The drafted entry's fingerprint must still equal DupFingerprint (the write-side
+	// resource change did not perturb the identity field).
+	if got, want := draftKBEntry(hashed).Fingerprint, DupFingerprint(hashed); got != want {
+		t.Fatalf("drafted entry fingerprint = %q, want %q (must equal DupFingerprint)", got, want)
+	}
+	// The dedup identity is pod-hash invariant — the hash-carrying occurrence and the
+	// already-normalized one coalesce to a single KB entry.
+	if a, b := DupFingerprint(hashed), DupFingerprint(normalized); a == "" || a != b {
+		t.Fatalf("dedup identity must be pod-hash invariant: %q vs %q", a, b)
+	}
+	// ...and the written resource is normalized identically for both.
+	if a, b := draftKBEntry(hashed).Resource, draftKBEntry(normalized).Resource; a != b {
+		t.Fatalf("written resource must match across the pod-hash: %q vs %q", a, b)
+	}
+}
+
 func TestResourceStringNamespaceOnly(t *testing.T) {
 	if got := (providers.Workload{Namespace: "apps"}).Ref(); got != "apps" {
 		t.Fatalf("namespace-only resource = %q, want apps", got)
