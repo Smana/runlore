@@ -55,6 +55,10 @@ func (t WhatChangedTool) Call(ctx context.Context, args string) (string, error) 
 	defer done()
 	var b strings.Builder
 	for _, c := range changes {
+		// F2: these workloads were DETECTED server-side (Flux/Argo + git) — record them
+		// as observed so an action may legitimately target them.
+		recordObserved(ctx, c.Workload)
+		recordObserved(ctx, c.BlastRadius...)
 		fmt.Fprintf(&b, "%s %s/%s (%s): %s..%s", c.Engine, c.Workload.Kind, c.Workload.Name, c.Type, c.FromRev, c.ToRev)
 		// When the engine knows WHEN the change landed, say so — "deploy at 14:02,
 		// first crash at 14:03" is the core change↔symptom correlation.

@@ -207,6 +207,11 @@ func (li *LoopInvestigator) Investigate(ctx context.Context, req Request) error 
 		ctx, cancel = context.WithTimeout(ctx, li.Timeout)
 		defer cancel()
 	}
+	// F2: track the resources this investigation confirms SERVER-SIDE — seeded with the
+	// originating workload (the alert/failure subject is always a legitimate action
+	// target), augmented by what_changed and the gitops inspector tools. reviewActions
+	// consults the set to guard executable targets (see guardUnobservedTargets).
+	ctx = WithObservedResources(ctx, req.Workload)
 	// Record wall-clock duration + a completion-result label at whichever exit we take.
 	start := time.Now()
 	result := "unresolved"
@@ -573,7 +578,7 @@ func (li *LoopInvestigator) Investigate(ctx context.Context, req Request) error 
 			if li.Verify {
 				inv = li.verifyFindings(ctx, req, inv, &verifyTotals)
 			}
-			inv.Actions = li.reviewActions(inv.Actions)
+			inv.Actions = li.reviewActions(ctx, inv.Actions)
 			setUsage(&inv)
 			li.recordUsageMetrics(ctx, inv.Usage)
 			// A submission produced only because the final-step nudge forced it is a
@@ -710,10 +715,16 @@ func (li *LoopInvestigator) runTool(ctx context.Context, byName map[string]Tool,
 // reviewActions filters the model's proposed actions through the policy. Disabled
 // (or mode off) → nothing surfaced (read-only). Otherwise envelope-compliant
 // actions are kept as suggestions (never executed); the rest are logged as withheld.
-func (li *LoopInvestigator) reviewActions(proposed []providers.Action) []providers.Action {
+func (li *LoopInvestigator) reviewActions(ctx context.Context, proposed []providers.Action) []providers.Action {
 	if li.Actions == nil || !li.Actions.Enabled() {
 		return nil
 	}
+	// F2: a target the model named but nothing corroborated server-side may be a
+	// hallucinated or prompt-injected resource. Under auto (no human gate) such an
+	// action is downgraded to a non-executable suggestion; under approve/suggest it
+	// stays executable but carries an explicit warning for the human reviewer — see
+	// guardUnobservedTargets for why the failure mode is per-rung.
+	proposed = guardUnobservedTargets(ctx, proposed, li.Actions.IsAuto(), li.Log)
 	kept, withheld := li.Actions.Review(proposed)
 	for _, w := range withheld {
 		li.Log.Info("action withheld (outside policy envelope)", "action", w)

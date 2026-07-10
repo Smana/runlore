@@ -365,7 +365,7 @@ sleep 1
 # to re-suspend it with no human in the loop.
 kubectl patch kustomization broken-app -n apps --type=merge -p '{"spec":{"suspend":false}}' >/dev/null
 curl -s -o /dev/null -XPOST -H "Authorization: Bearer e2e-webhook" "localhost:$PORT/webhook/alertmanager" \
-  -d '{"alerts":[{"status":"firing","labels":{"alertname":"AutoTest1","severity":"critical","namespace":"apps"},"startsAt":"2026-06-20T03:14:00Z","fingerprint":"auto-fp-1"}]}'
+  -d '{"alerts":[{"status":"firing","labels":{"alertname":"AutoTest1","severity":"critical","namespace":"apps","workload":"broken-app","workload_type":"Kustomization"},"startsAt":"2026-06-20T03:14:00Z","fingerprint":"auto-fp-1"}]}'
 sleep 6
 kubectl -n "$NS" logs deploy/runlore > /tmp/runlore.log 2>&1
 check "rung-3 auto enabled"            /tmp/runlore.log 'AUTO execution ENABLED'
@@ -373,11 +373,13 @@ check "auto-executed (no approval)"    /tmp/runlore.log 'auto-executed'
 SUSP=$(kubectl get kustomization broken-app -n apps -o jsonpath='{.spec.suspend}' 2>/dev/null || true)
 if [[ "$SUSP" == "true" ]]; then green "PASS: auto-execution suspended broken-app without human approval"; PASS=$((PASS+1))
 else red "FAIL: auto did not suspend broken-app (spec.suspend=$SUSP)"; FAIL=$((FAIL+1)); fi
-# (b) Kill-switch: pause, un-suspend, fire again, expect NO execution.
+# (b) Kill-switch: pause, un-suspend, fire again, expect NO execution. The alert
+# names the workload (like AutoTest1) so the action would be fully executable —
+# proving it is the kill-switch, not the F2 target guard, that blocks it.
 curl -s -o /dev/null -XPOST -H "X-Approval-Token: e2e-secret" "localhost:$PORT/actions/pause"
 kubectl patch kustomization broken-app -n apps --type=merge -p '{"spec":{"suspend":false}}' >/dev/null
 curl -s -o /dev/null -XPOST -H "Authorization: Bearer e2e-webhook" "localhost:$PORT/webhook/alertmanager" \
-  -d '{"alerts":[{"status":"firing","labels":{"alertname":"AutoTest2","severity":"critical","namespace":"apps"},"startsAt":"2026-06-20T03:14:00Z","fingerprint":"auto-fp-2"}]}'
+  -d '{"alerts":[{"status":"firing","labels":{"alertname":"AutoTest2","severity":"critical","namespace":"apps","workload":"broken-app","workload_type":"Kustomization"},"startsAt":"2026-06-20T03:14:00Z","fingerprint":"auto-fp-2"}]}'
 sleep 6
 kubectl -n "$NS" logs deploy/runlore > /tmp/runlore.log 2>&1
 kill "$PF" 2>/dev/null || true; free_port "$PORT"
