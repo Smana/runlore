@@ -26,18 +26,30 @@ type KBSearchTool struct {
 	hits *kbHitTracker
 }
 
-// kbClearMatchScore is the BM25 bar a kb_search hit's top score must clear to count
-// as a "clear match" worth surfacing on the notification. It mirrors instant recall's
-// default SoloFloor (config load default 4.0) — the score at which recall trusts a
-// LONE BM25 hit enough to short-circuit the whole investigation. The reasoning: if a
-// hit is strong enough that recall would have delivered it as the answer on its own,
-// it is unquestionably strong enough to tell the on-call "we already have a runbook
-// for this". Surfacing (a low-stakes hint on an investigation that still ran in full)
-// is a strictly weaker claim than recall's short-circuit, so borrowing recall's most
-// conservative single-hit bar keeps this high-precision — no noise from weak,
-// tangentially-relevant hits. BM25 scores are corpus-dependent; recording Score on
-// every match lets this be tuned from live data exactly as the recall thresholds are.
-const kbClearMatchScore = 4.0
+// kbClearMatchScoreDefault is the FALLBACK BM25 bar a kb_search hit's top score must
+// clear to count as a "clear match" worth surfacing on the notification. It is used only
+// when instant recall is disabled/unconfigured, so there is no configured floor to
+// borrow; when recall IS configured the per-investigation tracker instead tracks the
+// operator's CONFIGURED SoloFloor (see newKBHitTracker + the app wiring), keeping the
+// visibility bar in the same BM25 score regime kb_search actually runs in.
+//
+// Why the SoloFloor is the right thing to track: it is the score at which recall trusts a
+// LONE BM25 hit enough to short-circuit the whole investigation. If a hit is strong
+// enough that recall would have delivered it as the answer on its own, it is
+// unquestionably strong enough to tell the on-call "we already have a runbook for this".
+// Surfacing (a low-stakes hint on an investigation that still ran in full) is a strictly
+// WEAKER claim than recall's short-circuit, so borrowing recall's most conservative
+// single-hit bar keeps this high-precision — no noise from weak, tangential hits.
+//
+// The bar MUST track config because BM25 scores are corpus/query-dependent: a real
+// Alertmanager-driven cluster whose label-derived alert queries score ~0.1–0.3 tunes
+// solo_floor DOWN (observed live: 0.2). A hardcoded 4.0 would make this visibility signal
+// a silent no-op on exactly those clusters — kb_search finds the runbook, yet the "Matches
+// known runbook" block could never show (live-found). Score is recorded on every match so
+// the bar can be tuned from live data exactly as the recall thresholds are. The default is
+// kept at 4.0 (instant recall's default SoloFloor) so behaviour is unchanged when nothing
+// is configured.
+const kbClearMatchScoreDefault = 4.0
 
 // kbHitTracker accumulates the single strongest clear-match kb_search hit across an
 // investigation's tool calls. An assistant turn's tool calls run concurrently
@@ -46,6 +58,23 @@ const kbClearMatchScore = 4.0
 type kbHitTracker struct {
 	mu   sync.Mutex
 	best *providers.MatchedEntry
+	// clearMatchScore is the BM25 bar the top hit must clear to be recorded. It is set
+	// per investigation (see newKBHitTracker) from the operator's configured recall
+	// SoloFloor, so the visibility bar auto-adapts to the cluster's BM25 scale instead of
+	// being pinned to a hardcoded 4.0. Read-only after construction, so the mutex above
+	// (which guards best) need not cover it.
+	clearMatchScore float64
+}
+
+// newKBHitTracker builds a per-investigation tracker whose clear-match bar is
+// clearMatchScore. A non-positive value — instant recall disabled/unconfigured, so there
+// is no configured SoloFloor to borrow — falls back to kbClearMatchScoreDefault, keeping
+// the historical 4.0 bar so behaviour is unchanged when nothing is configured.
+func newKBHitTracker(clearMatchScore float64) *kbHitTracker {
+	if clearMatchScore <= 0 {
+		clearMatchScore = kbClearMatchScoreDefault
+	}
+	return &kbHitTracker{clearMatchScore: clearMatchScore}
 }
 
 // observe keeps e when it out-scores the current best (or there is none yet). It
@@ -131,7 +160,7 @@ func (t KBSearchTool) observeTopHit(scored []catalog.ScoredEntry) {
 		return
 	}
 	top := scored[0]
-	if top.Score < kbClearMatchScore {
+	if top.Score < t.hits.clearMatchScore {
 		return // not confidently a known-runbook match — surfacing it would be noise
 	}
 	// Carry Path + Title (+ Score). URL is deliberately left empty: the entry's web

@@ -209,6 +209,23 @@ func toPricing(p *config.Pricing) *investigate.Pricing {
 	}
 }
 
+// kbMatchScore returns the BM25 bar the kb-match visibility signal
+// (Investigation.MatchedKnowledge — the "📚 Matches known runbook" block) uses to decide
+// a full investigation's kb_search hit is a clear known-runbook match worth surfacing.
+// kb_search runs in the SAME corpus/query-dependent BM25 score regime as instant recall,
+// so we borrow the operator's CONFIGURED recall SoloFloor (recall's most conservative
+// single-hit bar) instead of a hardcoded constant: a cluster that tunes solo_floor DOWN
+// for its sub-1.0 label-derived alert-query scores then gets a correspondingly low
+// visibility bar, rather than the signal silently never firing (live-found). A nil recall
+// (instant recall disabled) ⇒ 0, so the loop's tracker falls back to its historical 4.0
+// default (investigate.kbClearMatchScoreDefault) and behaviour is unchanged.
+func kbMatchScore(recall *investigate.Recall) float64 {
+	if recall == nil {
+		return 0
+	}
+	return recall.SoloFloor
+}
+
 // defaultToolTimeout bounds a single tool call when investigation.tool_timeout is
 // unset (0). It keeps a hung/slow provider (a stuck git clone, an unresponsive
 // metrics/logs endpoint) from consuming the whole per-investigation budget while
@@ -313,6 +330,7 @@ func BuildInvestigator(ctx context.Context, cfg *config.Config, gp providers.Git
 		Compaction:                cfg.Investigation.Compaction,
 		Timeout:                   cfg.Investigation.Timeout.Std(),
 		ToolTimeout:               toolTimeout,
+		KBMatchScore:              kbMatchScore(recall), // visibility bar tracks the configured recall floor
 		OnProgress:                onProgress,
 		ProgressEverySteps:        progressEverySteps,
 		OnComplete: func(found providers.Investigation) {
