@@ -23,8 +23,8 @@ builds:
       - amd64
       - arm64
     # Stamps the version into the binary (`-X main.version`, see cmd/lore/main.go).
-    # This same binary is what the dockers step COPYs into the image, so the archive
-    # and the image always report an identical version.
+    # This same binary is what the dockers_v2 step COPYs into the image, so the
+    # archive and the image always report an identical version.
     ldflags:
       - -s -w -X main.version={{.Version}}
 
@@ -71,81 +71,63 @@ signs:
     signature: "${artifact}.bundle"
     output: true
 
-# Multi-arch container image. One `dockers` entry per architecture builds a
-# single-platform image from the prebuilt `lore` binary (no in-image compile —
-# Dockerfile.goreleaser is COPY-only), tagged with an arch suffix. `docker_manifests`
-# then fuses the two into the user-facing multi-arch tags. ghcr/OCI refs MUST be
-# lowercase, so the owner is written `smana` (the GitHub repo is github.com/Smana).
-dockers:
-  - id: lore-amd64
-    use: buildx
-    goos: linux
-    goarch: amd64
+# Multi-arch container image (dockers_v2, needs GoReleaser >= v2.12 — the release
+# workflow installs `~> v2`, so it always has it). A single `docker buildx build
+# --push` produces the multi-platform index directly — no per-arch tags, no
+# docker_manifests fuse step — from the prebuilt `lore` binaries (no in-image
+# compile — Dockerfile.goreleaser is COPY-only; dockers_v2 lays the binaries out
+# under $TARGETPLATFORM/ in the build context). Because the release build pushes
+# instead of loading into the local docker image store, buildx can attach
+# image-level attestations (the classic `dockers` + --load flow could not:
+# "docker exporter does not currently support exporting manifest lists" — the
+# v0.1.0-era failure). ghcr/OCI refs MUST be lowercase, so the owner is written
+# `smana` (the GitHub repo is github.com/Smana).
+dockers_v2:
+  - id: lore
     ids:
       - lore
     dockerfile: Dockerfile.goreleaser
-    image_templates:
-      - "ghcr.io/smana/runlore:{{ .Version }}-amd64"
-    build_flag_templates:
-      - "--platform=linux/amd64"
-      # NOTE: buildx --provenance / --sbom attestations are intentionally NOT set here.
-      # The classic `dockers` step loads each per-arch image into the local docker image
-      # store (the "docker" exporter), which cannot represent the OCI index that buildx
-      # emits when attestations are attached — the build fails with:
-      #   "docker exporter does not currently support exporting manifest lists".
-      # Restoring image-level SLSA provenance + SBOM needs the push-based `dockers_v2`
-      # flow (tracked as a follow-up). cosign still signs the fused manifest lists
-      # (docker_signs) and syft still generates the per-binary archive SBOMs.
-      - "--label=org.opencontainers.image.source=https://github.com/Smana/runlore"
-      - "--label=org.opencontainers.image.version={{ .Version }}"
-      - "--label=org.opencontainers.image.revision={{ .FullCommit }}"
-      - "--label=org.opencontainers.image.created={{ .Date }}"
-  - id: lore-arm64
-    use: buildx
-    goos: linux
-    goarch: arm64
-    ids:
-      - lore
-    dockerfile: Dockerfile.goreleaser
-    image_templates:
-      - "ghcr.io/smana/runlore:{{ .Version }}-arm64"
-    build_flag_templates:
-      - "--platform=linux/arm64"
-      # Attestations omitted for the same reason as the amd64 entry above (classic
-      # dockers + local load cannot export an attestation manifest list).
-      - "--label=org.opencontainers.image.source=https://github.com/Smana/runlore"
-      - "--label=org.opencontainers.image.version={{ .Version }}"
-      - "--label=org.opencontainers.image.revision={{ .FullCommit }}"
-      - "--label=org.opencontainers.image.created={{ .Date }}"
+    images:
+      - "ghcr.io/smana/runlore"
+    tags:
+      - "{{ .Version }}"
+      - "{{ .Major }}.{{ .Minor }}"
+      - "latest"
+    platforms:
+      - linux/amd64
+      - linux/arm64
+    # SBOM attestation (BuildKit-generated, --attest=type=sbom) attached to the
+    # pushed index. This is dockers_v2's default; kept explicit so it can't silently
+    # regress. GoReleaser only passes it on pushed builds, never on snapshots.
+    sbom: true
+    flags:
+      # SLSA provenance attestation (mode=max records the full build parameters —
+      # safe here: the Dockerfile is COPY-only, no secrets in build args). Pushed
+      # builds only: snapshot builds --load per-platform images into the local
+      # docker image store, whose exporter cannot represent the attestation
+      # manifest list, so the template renders empty there and GoReleaser prunes
+      # empty flags.
+      - "{{ if not .IsSnapshot }}--provenance=mode=max{{ end }}"
+    labels:
+      "org.opencontainers.image.source": "https://github.com/Smana/runlore"
+      "org.opencontainers.image.version": "{{ .Version }}"
+      "org.opencontainers.image.revision": "{{ .FullCommit }}"
+      "org.opencontainers.image.created": "{{ .Date }}"
 
-# Fuse the two per-arch images into the final multi-arch tags. Each manifest list
-# references the arch-suffixed images built above.
-docker_manifests:
-  - name_template: "ghcr.io/smana/runlore:{{ .Version }}"
-    image_templates:
-      - "ghcr.io/smana/runlore:{{ .Version }}-amd64"
-      - "ghcr.io/smana/runlore:{{ .Version }}-arm64"
-  - name_template: "ghcr.io/smana/runlore:{{ .Major }}.{{ .Minor }}"
-    image_templates:
-      - "ghcr.io/smana/runlore:{{ .Version }}-amd64"
-      - "ghcr.io/smana/runlore:{{ .Version }}-arm64"
-  - name_template: "ghcr.io/smana/runlore:latest"
-    image_templates:
-      - "ghcr.io/smana/runlore:{{ .Version }}-amd64"
-      - "ghcr.io/smana/runlore:{{ .Version }}-arm64"
-
-# Keyless (Sigstore) cosign signing of the multi-arch manifest lists, by digest.
-# Runs under the job's id-token: write, so cosign gets a short-lived Fulcio cert
-# from the OIDC token and records the signature in Rekor — no long-lived keys.
-# `artifacts: manifests` signs the manifest list (not each per-arch image); cosign's
-# recursive verification still covers the referenced per-arch images.
+# Keyless (Sigstore) cosign signing of the pushed multi-arch image, pinned by digest
+# (${digest} is the index digest buildx reports; signing by digest instead of by tag
+# closes the tag-mutation race). Runs under the job's id-token: write, so cosign gets
+# a short-lived Fulcio cert from the OIDC token and records the signature in Rekor —
+# no long-lived keys. `artifacts: images` matches the dockers_v2 image refs (one per
+# tag; all three tags resolve to the same index digest); cosign's recursive
+# verification still covers the referenced per-arch images.
 docker_signs:
-  - artifacts: manifests
+  - artifacts: images
     cmd: cosign
     args:
       - "sign"
       - "--yes"
-      - "${artifact}"
+      - "${artifact}@${digest}"
     output: true
 
 # release-please owns CHANGELOG.md; don't let GoReleaser generate its own.
