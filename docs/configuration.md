@@ -143,6 +143,11 @@ incident webhook. Known keys: `alertmanager`, `gitops`, `pagerduty`.
   PagerDuty) can match only resource-less entries — the weakest tier, which always requires
   `solo_floor` + `min_score`, recalls with reduced confidence, and is disabled by
   `require_workload_match: true`.
+- The **"📚 Matches known runbook"** notification block (stamped when a *full* investigation's
+  `kb_search` finds a pre-existing entry) uses `solo_floor` as its visibility bar, so it tracks
+  the same corpus/query-dependent BM25 scale recall runs in: a cluster that tunes `solo_floor`
+  **down** for sub-1.0 alert-query scores gets a correspondingly low bar instead of the signal
+  silently never firing. When instant recall is disabled it falls back to the **4.0** default.
 - The search index is in-memory bleve (BM25), rebuilt from `dir` at startup — not persisted.
 
 ### `outcome` — the learning ledger

@@ -46,6 +46,7 @@ func RunInvestigate(args []string) error {
 		Model: model, VerifyModel: BuildVerifyModel(cfg), Tools: tools, Recall: recall, Actions: action.New(cfg.Actions), Log: log, Verify: true,
 		ModelProvider: cfg.Model.Provider,
 		Timeout:       cfg.Investigation.Timeout.Std(),
+		KBMatchScore:  kbMatchScore(recall), // visibility bar tracks the configured recall floor
 		OnComplete:    func(inv providers.Investigation) { result = &inv },
 	}
 	title := *alert
