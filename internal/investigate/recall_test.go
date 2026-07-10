@@ -388,6 +388,16 @@ func TestResourceAgrees(t *testing.T) {
 		{"require workload + ns-only -> none", w("apps", ""), "apps/web", true, matchNone},
 		{"require workload + bare-ns entry -> none", w("apps", "web"), "apps", true, matchNone},
 		{"bare-ns alert vs different-ns bare-ns entry -> none", w("apps", ""), "other", false, matchNone},
+		// Scopeless tier: a request with NO workload at all (PagerDuty incidents carry
+		// no Kubernetes namespace/name) agrees ONLY with entries that are themselves
+		// resource-less — the weakest tier, and strict mode disables it entirely.
+		{"scopeless request vs scopeless entry -> scopeless", w("", ""), "", false, matchScopeless},
+		{"scopeless request vs named entry -> none", w("", ""), "apps/web", false, matchNone},
+		{"scopeless request vs bare-ns entry -> none", w("", ""), "apps", false, matchNone},
+		{"require workload + scopeless both sides -> none (strict stays strict)", w("", ""), "", true, matchNone},
+		// A name without a namespace is partial workload info, not scopeless — the
+		// conservative reading refuses the weakest tier when ANY scope hint exists.
+		{"nameless-namespace request with name vs scopeless entry -> none", w("", "web"), "", false, matchNone},
 	}
 	for _, c := range cases {
 		if got := resourceAgrees(c.reqW, c.entry, c.requireWL); got != c.want {
@@ -451,6 +461,124 @@ func TestLookupDecayRejectionMetric(t *testing.T) {
 	h.ServeHTTP(rec, req)
 	if !strings.Contains(rec.Body.String(), `reason="low_outcome"`) {
 		t.Fatalf("expected recall_rejections_total{reason=\"low_outcome\"} in metrics:\n%s", rec.Body.String())
+	}
+}
+
+// TestScopelessNeverLoosensScopedMatching states the scopeless-tier invariant: the
+// new tier applies ONLY when BOTH sides carry no scope. A request with any workload
+// scope never matches a resource-less entry, and a scopeless request never matches
+// an entry with any stored resource — the existing Kubernetes matching semantics
+// are untouched in every direction.
+func TestScopelessNeverLoosensScopedMatching(t *testing.T) {
+	scopedReqs := []providers.Workload{
+		{Namespace: "apps", Name: "web"},
+		{Namespace: "apps"}, // namespace-only alert is still scoped
+	}
+	for _, reqW := range scopedReqs {
+		for _, strict := range []bool{false, true} {
+			if got := resourceAgrees(reqW, "", strict); got != matchNone {
+				t.Errorf("scoped request %+v vs resource-less entry (strict=%v) = %v, want matchNone", reqW, strict, got)
+			}
+		}
+	}
+	for _, entry := range []string{"apps/web", "apps", "other"} {
+		for _, strict := range []bool{false, true} {
+			if got := resourceAgrees(providers.Workload{}, entry, strict); got != matchNone {
+				t.Errorf("scopeless request vs scoped entry %q (strict=%v) = %v, want matchNone", entry, strict, got)
+			}
+		}
+	}
+}
+
+// scopelessReq is a request with no Kubernetes workload at all — the PagerDuty shape.
+func scopelessReq() Request {
+	return Request{Title: "checkout latency spike", Workload: providers.Workload{}}
+}
+
+// TestLookupScopeless drives the recall gate end-to-end for workload-less requests:
+// a scopeless request may recall ONLY resource-less entries, and — because a
+// scopeless match carries zero structural evidence — the winner must clear the solo
+// floor AND min score no matter how many candidates agree (the margin gate alone is
+// too weak). Strict mode (require_workload_match) disables the tier entirely.
+func TestLookupScopeless(t *testing.T) {
+	entry := func(path, resource string, score float64) catalog.ScoredEntry {
+		return catalog.ScoredEntry{Entry: catalog.Entry{Title: "Checkout runbook", Path: path, Resource: resource}, Score: score}
+	}
+	cases := []struct {
+		name       string
+		hits       []catalog.ScoredEntry
+		strict     bool
+		wantRecall bool
+	}{
+		{
+			// Lone resource-less entry clearing solo floor (4.0) + min score (1.5).
+			"scopeless solo hit above solo floor recalls",
+			[]catalog.ScoredEntry{entry("runbook.md", "", 6.0)},
+			false, true,
+		},
+		{
+			// Two agreeing scopeless entries with a decisive margin (4.0 >= 1.0) AND a
+			// winner above the solo floor: all gates clear.
+			"scopeless multi-candidate clearing solo floor recalls",
+			[]catalog.ScoredEntry{entry("runbook.md", "", 6.0), entry("old.md", "", 2.0)},
+			false, true,
+		},
+		{
+			// Margin alone would pass (2.5 >= 1.0, min 1.5 met) but the winner is below
+			// the solo floor (3.5 < 4.0): without structural evidence that is not enough.
+			"scopeless multi-candidate below solo floor falls through",
+			[]catalog.ScoredEntry{entry("runbook.md", "", 3.5), entry("old.md", "", 1.0)},
+			false, false,
+		},
+		{
+			// A scopeless request must never recall scoped entries, however strong.
+			"scopeless request vs scoped entries falls through",
+			[]catalog.ScoredEntry{entry("web.md", "apps/web", 9.0), entry("ns.md", "apps", 8.0)},
+			false, false,
+		},
+		{
+			// Strict mode: require_workload_match promises exact namespace+name
+			// agreement, which a scopeless pair can never provide.
+			"strict mode never recalls scopeless",
+			[]catalog.ScoredEntry{entry("runbook.md", "", 6.0)},
+			true, false,
+		},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			r := recallWith(c.hits)
+			r.RequireWorkloadMatch = c.strict
+			e, conf := r.lookup(context.Background(), scopelessReq())
+			if got := e != nil; got != c.wantRecall {
+				t.Fatalf("recall = %v (entry %+v), want %v", got, e, c.wantRecall)
+			}
+			if e != nil && conf > 0.70 {
+				t.Fatalf("scopeless recall confidence must stay low (<= 0.70), got %v", conf)
+			}
+		})
+	}
+}
+
+// TestDeriveRecallConfidenceScopelessWeakest pins the confidence ordering: at any
+// identical (score, margin), scopeless < namespace < exact — a workload-less recall
+// must never look as trustworthy as a structurally-anchored one — and the scopeless
+// ceiling stays below the namespace tier's even at a maximal margin.
+func TestDeriveRecallConfidenceScopelessWeakest(t *testing.T) {
+	points := []struct{ score, margin float64 }{
+		{8.0, 6.0}, // decisive winner
+		{6.0, 6.0}, // solo hit (margin == score)
+		{2.0, 0.4}, // marginal winner
+	}
+	for _, p := range points {
+		sl := deriveRecallConfidence(p.score, p.margin, matchScopeless)
+		ns := deriveRecallConfidence(p.score, p.margin, matchNamespace)
+		ex := deriveRecallConfidence(p.score, p.margin, matchExact)
+		if !(sl < ns && ns < ex) {
+			t.Errorf("at (%v, %v): want scopeless < namespace < exact, got %v, %v, %v", p.score, p.margin, sl, ns, ex)
+		}
+		if sl > 0.70 {
+			t.Errorf("at (%v, %v): scopeless confidence must be capped at 0.70, got %v", p.score, p.margin, sl)
+		}
 	}
 }
 

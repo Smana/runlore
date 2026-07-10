@@ -280,7 +280,7 @@ type InstantRecall struct {
 	MinScore             float64 `yaml:"min_score"`              // similarity floor for the top hit
 	MarginGap            float64 `yaml:"margin_gap"`             // top hit must beat the runner-up by at least this
 	SoloFloor            float64 `yaml:"solo_floor"`             // confident bar when there is only one hit (higher than MinScore)
-	RequireWorkloadMatch bool    `yaml:"require_workload_match"` // true = exact namespace+workload; false = namespace-level agreement is enough
+	RequireWorkloadMatch bool    `yaml:"require_workload_match"` // true = exact namespace+workload (also disables scopeless matching); false = namespace-level agreement is enough
 	OutcomePrior         float64 `yaml:"outcome_prior"`          // Beta prior strength for outcome decay
 	OutcomeFloor         float64 `yaml:"outcome_floor"`          // reject a recall when the outcome factor drops below this
 

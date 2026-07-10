@@ -41,7 +41,10 @@ incident webhook. Known keys: `alertmanager`, `gitops`, `pagerduty`.
   Alertmanager resolved alert); every other event type is ignored. The incident title becomes the
   investigation title, priority (else urgency) the severity, and the service name, incident number and
   `html_url` ride along as labels. PagerDuty carries **no Kubernetes namespace or workload**, so those
-  stay empty — recall and structural matching tolerate an empty workload.
+  stay empty — such workload-less incidents can recall **only entries that are themselves resource-less**
+  (hand-written runbooks / curated Playbooks without a `resource` frontmatter): the scopeless tier, the
+  weakest match. It must clear `solo_floor` **and** `min_score` even with multiple candidates, recalls
+  with reduced confidence, and `require_workload_match: true` disables it entirely.
   - `secret_env` — names the env var holding the webhook **signing secret** (config stores the env-var
     *name*, never the value). Each delivery is verified against its `X-PagerDuty-Signature` header
     (`v1=`-prefixed HMAC-SHA256 of the raw body; multiple comma-separated signatures are accepted so a
@@ -128,7 +131,10 @@ incident webhook. Known keys: `alertmanager`, `gitops`, `pagerduty`.
   (default 5m), `token_env`.
 - `instant_recall` — `enabled`, and when enabled the trust gates `min_score` **1.0**, `margin_gap`
   **1.0**, `solo_floor` **4.0**, `outcome_prior` **2.0**, `outcome_floor` **0.5**;
-  `require_workload_match`; experimental `hybrid*` vector knobs.
+  `require_workload_match`; experimental `hybrid*` vector knobs. A workload-less incident (e.g.
+  PagerDuty) can match only resource-less entries — the weakest tier, which always requires
+  `solo_floor` + `min_score`, recalls with reduced confidence, and is disabled by
+  `require_workload_match: true`.
 - The search index is in-memory bleve (BM25), rebuilt from `dir` at startup — not persisted.
 
 ### `outcome` — the learning ledger
