@@ -43,8 +43,9 @@ func TestDecodeTriggeredProducesRequest(t *testing.T) {
 	if r.Reason != "P1" {
 		t.Fatalf("want Reason=P1 (mirrors alertmanager Reason=severity), got %q", r.Reason)
 	}
-	// PagerDuty has no Kubernetes context: workload + environment stay empty and
-	// recall/structural matching tolerates that.
+	// PagerDuty has no Kubernetes context: workload + environment stay empty. Recall
+	// can still fire via the scopeless tier — but only against entries that are
+	// themselves resource-less (see investigate.resourceAgrees).
 	if r.Workload.Namespace != "" || r.Workload.Kind != "" || r.Workload.Name != "" {
 		t.Fatalf("want zero Workload, got %+v", r.Workload)
 	}

@@ -134,7 +134,11 @@ Why each gate exists:
   symptoms → one cause": a `CrashLoopBackOff` in `apps/web` should not recall an OOM
   runbook for `apps/worker`. It's a **pre-filter** over a wide candidate set (k=20),
   not a check of only the top lexical hit, so the structurally-correct entry can win
-  even when a wrong-workload entry scores higher on symptom words.
+  even when a wrong-workload entry scores higher on symptom words. A **workload-less**
+  incident (PagerDuty carries no Kubernetes namespace/name) agrees only with entries
+  that are themselves resource-less — the weakest ("scopeless") tier: it always
+  requires `solo_floor` + `min_score`, starts at reduced confidence, and
+  `require_workload_match: true` disables it.
 - **Gate 2 — relative margin.** The top agreeing hit must beat the runner-up by a
   configured gap (or clear a solo floor when there's only one). Because BM25 scores
   are corpus-dependent, RunLore trusts the *gap between candidates*, not an absolute
