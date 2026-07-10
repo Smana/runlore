@@ -84,6 +84,12 @@ incident webhook → trigger policy · the ReAct loop (`what_changed → kb_sear
 Slack + Matrix delivery · GitOps-failure informer on real `Kustomization` CRDs · the curator
 (GitHub App token → PR) · leader election (single active leader + failover).
 
+In CI (`.github/workflows/e2e-k3d.yml`) the suite runs nightly (05:00 UTC), on manual dispatch —
+and **on demand on a pull request**: apply the **`run-e2e`** label to the PR. Unlabeled PRs never
+start the job (it is `if:`-gated on the label, so no runner time is spent), keeping the
+~15-minute suite opt-in rather than a per-PR tax. Apply the label when a change touches the
+deployment path, the chart, or a behaviour the e2e asserts.
+
 ### The mock backends
 
 `hack/e2e/mock/main.go` (behind the `e2e` build tag, so it's excluded from normal builds) stands in for
@@ -129,14 +135,24 @@ pass-rate drops below 70% (`-n 5 -fail-under 0.7`), then uploads the JSON report
 a build artifact.
 
 To enable it, add one repository secret — **`RUNLORE_EVAL_API_KEY`** — holding the
-API key for the provider in `eval/ci.runlore.yaml`. Without the secret the job fails
-fast (by design: a red nightly is the signal). The eval never runs on pull requests,
-so it imposes no per-PR cost and never blocks merges; the deterministic scoring logic
-is already covered by `go test ./...` on every PR.
+API key for the provider in `eval/ci.runlore.yaml`. Without the secret the job is
+**skipped, not failed** — a fork or a repo without the secret configured stays
+green — but the skip is loud: a `::warning::` annotation plus a `$GITHUB_STEP_SUMMARY`
+line call it out in the Actions UI, so a run with no key never reads as a real,
+quiet pass. The eval never runs on pull requests, so it imposes no per-PR cost and
+never blocks merges; the deterministic scoring logic is already covered by
+`go test ./...` on every PR.
 
 Run it locally the same way CI does:
 
     lore eval -config eval/ci.runlore.yaml -cases examples/eval -n 5 -fail-under 0.7
+
+One of the replay cases, `examples/eval/poisoned-recall-verify.yaml`, is
+self-seeding (its own fixture catalog under `examples/eval/fixtures/poisoned-recall`)
+and needs no extra setup; its sibling **live-fire** scenario,
+`eval/scenarios/poisoned-recall-rejected.yaml` (run via `lore eval --live`, not by
+any CI workflow), instead requires a poisoned catalog entry to be manually seeded
+into a real cluster's catalog and `RUNLORE_POISON_READY` set, or it SKIPs.
 
 ## Quick local demo (no cluster)
 
