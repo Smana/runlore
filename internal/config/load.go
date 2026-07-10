@@ -108,5 +108,20 @@ func applyDefaults(c *Config) {
 		if ir.OutcomeFloor == 0 {
 			ir.OutcomeFloor = 0.5
 		}
+		// Reranker (opt-in) defaults: a STABLE, corpus-independent threshold (0.7) is the
+		// whole point — unlike solo_floor it does not need per-cluster tuning. K is bounded
+		// small (one cheap call over a few candidates); the trivial min-score floor keeps
+		// the paid call from ever running when retrieval surfaced nothing plausible.
+		if ir.Rerank {
+			if ir.RerankThreshold == 0 {
+				ir.RerankThreshold = 0.7
+			}
+			if ir.RerankK == 0 {
+				ir.RerankK = 5
+			}
+			if ir.RerankMinScore == 0 {
+				ir.RerankMinScore = 0.1
+			}
+		}
 	}
 }

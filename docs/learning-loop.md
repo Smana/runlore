@@ -105,6 +105,43 @@ then the answer is confirmed against live state and re-reviewed.
 > The cosine thresholds are conservative placeholders; tune them against the
 > instant-recall eval before relying on them.
 
+> **LLM reranker (opt-in) — the principled fire gate.** With `instant_recall.rerank`
+> set, Gate 2 (the BM25-magnitude margin) is **replaced** by a calibrated
+> match-confidence gate. Query enrichment fixed retrieval *ranking* — on the real
+> corpus the correct runbook now ranks #1 (Recall@1 = 1.00, MRR 1.00) — but the
+> short-circuit still gated on the **absolute** BM25 magnitude (`solo_floor`), and an
+> enriched real-corpus score is ~0.1–1.2, an *order of magnitude* below the default
+> `solo_floor` 4.0. So recall only fired where an operator hand-tuned `solo_floor` down
+> to their corpus's score regime — a fragile gate that does not "just work" at the
+> default across clusters. The reranker takes the top-`rerank_k` structurally-agreeing
+> candidates, asks the model in **one cheap call** ("which candidate, if any, is the
+> correct runbook for THIS incident, and how confident are you?"), and fires only when
+> the **calibrated** confidence clears `rerank_threshold` (default 0.7). Because a
+> calibrated 0–1 confidence is **corpus-independent**, the same default fires across
+> corpora — the BM25 score is demoted to retrieval-ranking-only (pick the top-K).
+>
+> Measured on the eval harness at default thresholds (`recalleval_test.go`,
+> `TestRecallEvalRerankFireRate`):
+>
+> | | fire-rate (label positives) | precision | negatives fired |
+> |---|---|---|---|
+> | rerank **off** | 0/11 (0.00) | — | 0/2 |
+> | rerank **on** | **11/11 (1.00)** | **1.00** | **0/2** |
+>
+> **Cost & false-recall discipline.** The reranker runs *before* the "free"
+> short-circuit, so it is bounded: one call, `rerank_k` candidates, and only when
+> retrieval already surfaced a plausible candidate (a trivial `rerank_min_score` cost
+> guard — no call otherwise). It routes to `model.verify` (cheaper/faster) when
+> configured, costs ~1–2k tokens, and saves the ~100k of a full investigation when it
+> fires. A reranker that hallucinates a match is worse than no recall, so it fails
+> **safe**: it only ranks candidates that already passed the structural filter, ignores
+> any `entry_id` it did not offer, and treats a "no match", a low confidence, or a
+> model error as a fall-through to a full investigation (the negative cases fire on
+> **zero** entries). Everything downstream is unchanged — the recalled answer still
+> goes through live-state **confirm** and the adversarial **verify** pass. The reranker
+> is a *retrieval-time* decision ("which candidate + confident enough to short-circuit"),
+> **not** a second verify.
+
 ```mermaid
 flowchart TD
     Q["Query = alert title + message"] --> S["BM25 search over catalog<br/>(bleve, wider candidate set k=20)"]

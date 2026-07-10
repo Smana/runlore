@@ -45,6 +45,15 @@ type Recall struct {
 	HybridMinScore  float64 // cosine floor for the top hit (hybrid mode)
 	HybridMarginGap float64 // cosine margin over the runner-up (hybrid mode)
 
+	// Rerank, when non-nil, REPLACES the BM25-magnitude fire gate (SoloFloor/MarginGap)
+	// with an LLM reranker: it ranks the top-K structurally-agreeing candidates and
+	// short-circuits only on the reranker's CALIBRATED, corpus-INDEPENDENT match
+	// confidence. nil ⇒ the BM25-magnitude gate is used, byte-for-byte unchanged. The
+	// structural pre-filter, outcome decay, confirm and verify steps are identical
+	// either way — the reranker only changes WHICH signal decides the fire. Opt-in
+	// (catalog.instant_recall.rerank). See the Reranker doc for the full rationale.
+	Rerank *Reranker
+
 	Outcome      OutcomeStats // optional; nil ⇒ no outcome decay
 	OutcomePrior float64      // k — Beta prior strength for decay (e.g. 2.0)
 	OutcomeFloor float64      // reject the recall when the outcome factor drops below this (e.g. 0.5)
@@ -108,8 +117,18 @@ func buildRecallQuery(req Request) string {
 
 // lookup returns the matched entry and a DERIVED confidence when a recall is
 // trustworthy enough to short-circuit, else (nil, 0). The BM25 score is always
-// recorded (even on rejection) so the thresholds can be tuned from live data.
+// recorded (even on rejection) so the thresholds can be tuned from live data. It is a
+// thin wrapper over lookupWithUsage with no usage sink — kept for callers (and tests)
+// that don't thread the per-investigation token total.
 func (r *Recall) lookup(ctx context.Context, req Request) (*catalog.Entry, float64) {
+	return r.lookupWithUsage(ctx, req, nil)
+}
+
+// lookupWithUsage is lookup plus an optional usage sink: when a Reranker runs, its
+// completion's token usage is accumulated into totals (nil ⇒ ignored) so the loop can
+// fold the reranker's cost into the per-investigation total. The gate logic is
+// identical to lookup — totals is a side channel, never a decision input.
+func (r *Recall) lookupWithUsage(ctx context.Context, req Request, totals *providers.UsageTotals) (*catalog.Entry, float64) {
 	if r == nil || r.Catalog == nil {
 		return nil, 0
 	}
@@ -154,29 +173,66 @@ func (r *Recall) lookup(ctx context.Context, req Request) (*catalog.Entry, float
 		r.Metrics.RecallScore.Record(ctx, score)
 	}
 
-	// Gate — margin among the structurally-agreeing candidates: a clear winner for
-	// this workload, not merely the top lexical hit. A lone agreeing hit must clear
-	// both the solo floor and the min score.
-	strength := resourceAgrees(req.Workload, winner.Entry.Resource, r.RequireWorkloadMatch)
-	margin := score
-	confident := score >= soloFloor && score >= minScore
-	if len(agreeing) > 1 {
-		margin = score - agreeing[1].Score
-		confident = score >= minScore && margin >= marginGap
+	// The fire gate produces the recalled entry `e` and its confidence `conf`. Two
+	// mutually-exclusive gates set them:
+	//   - Reranker gate (opt-in): a CALIBRATED, corpus-independent match confidence.
+	//   - BM25-magnitude gate (default): the classic margin/solo-floor logic, unchanged.
+	var e catalog.Entry
+	var conf float64
+	var margin float64 // meaningful only in the magnitude gate; 0 (and logged as such) under rerank
+	if r.Rerank != nil {
+		// Cost guard: the reranker is a paid LLM call placed in front of the "free"
+		// short-circuit, so only spend it when retrieval surfaced something plausible —
+		// the best structurally-agreeing candidate must clear a trivial retrieval-score
+		// floor. Below it, retrieval found nothing worth reranking; fall through to a full
+		// investigation WITHOUT making the call (asserted by the cost-guard test).
+		if score < r.Rerank.MinScore {
+			r.reject(ctx, "rerank_no_signal")
+			return nil, 0
+		}
+		// Rank only the top-K structurally-agreeing candidates (bounded for cost). They
+		// are already in lexical order, so agreeing[:k] is the strongest few.
+		k := r.Rerank.K
+		if k <= 0 || k > len(agreeing) {
+			k = len(agreeing)
+		}
+		matched, mconf, ok := r.Rerank.rank(ctx, req, agreeing[:k], totals)
+		// Fire ONLY on a calibrated confidence at or above the (corpus-independent)
+		// threshold. A no-match / low-confidence / hallucinated-id verdict falls through —
+		// the false-recall guard (a wrong or absent match is worse than no recall).
+		if !ok || mconf < r.Rerank.Threshold {
+			r.reject(ctx, "rerank_low_confidence")
+			return nil, 0
+		}
+		e = matched
+		// The reranker's confidence IS a calibrated match confidence — use it directly as
+		// the recall confidence, still capped below 1.0 (a cache hit never asserts
+		// certainty). Outcome decay below can only lower it further.
+		conf = clampF(mconf, 0, 0.90)
+	} else {
+		// Gate — margin among the structurally-agreeing candidates: a clear winner for
+		// this workload, not merely the top lexical hit. A lone agreeing hit must clear
+		// both the solo floor and the min score.
+		strength := resourceAgrees(req.Workload, winner.Entry.Resource, r.RequireWorkloadMatch)
+		margin = score
+		confident := score >= soloFloor && score >= minScore
+		if len(agreeing) > 1 {
+			margin = score - agreeing[1].Score
+			confident = score >= minScore && margin >= marginGap
+		}
+		// A scopeless match carries zero structural evidence, so the margin gate alone
+		// is too weak: regardless of how many candidates agree, a scopeless winner must
+		// ALSO clear the solo floor + min score, exactly like a lone hit.
+		if strength == matchScopeless {
+			confident = confident && score >= soloFloor && score >= minScore
+		}
+		if !confident {
+			r.reject(ctx, "low_margin")
+			return nil, 0
+		}
+		e = winner.Entry
+		conf = deriveRecallConfidence(score, margin, strength)
 	}
-	// A scopeless match carries zero structural evidence, so the margin gate alone
-	// is too weak: regardless of how many candidates agree, a scopeless winner must
-	// ALSO clear the solo floor + min score, exactly like a lone hit.
-	if strength == matchScopeless {
-		confident = confident && score >= soloFloor && score >= minScore
-	}
-	if !confident {
-		r.reject(ctx, "low_margin")
-		return nil, 0
-	}
-
-	e := winner.Entry
-	conf := deriveRecallConfidence(score, margin, strength)
 	// Outcome decay: bias confidence by the entry's resolution track record, and
 	// reject (re-investigate) an entry that recalls-but-never-resolves. Fail-safe —
 	// a rejected recall just falls through to a full investigation.

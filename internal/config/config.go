@@ -284,6 +284,22 @@ type InstantRecall struct {
 	OutcomePrior         float64 `yaml:"outcome_prior"`          // Beta prior strength for outcome decay
 	OutcomeFloor         float64 `yaml:"outcome_floor"`          // reject a recall when the outcome factor drops below this
 
+	// Rerank (opt-in, default false) adds an LLM reranking stage to the recall
+	// short-circuit: it ranks the top-K structurally-agreeing candidates against the
+	// incident with ONE cheap model call and gates the fire on the reranker's
+	// CALIBRATED match confidence (RerankThreshold) instead of the corpus-dependent
+	// BM25 magnitude (SoloFloor/MarginGap). This is the principled fix for the gate
+	// being fragile at the default across clusters: an enriched real-corpus BM25 score
+	// is ~0.1–1.2 (an order of magnitude below the default SoloFloor 4.0), so the
+	// magnitude gate only fires where the operator hand-tuned solo_floor to their
+	// corpus. A calibrated confidence needs no per-corpus tuning. Off ⇒ the
+	// BM25-magnitude gate above is used, byte-for-byte unchanged. Routes to model.verify
+	// (cheaper/faster) when configured, else the main model.
+	Rerank          bool    `yaml:"rerank"`           // enable the LLM reranker on the recall short-circuit
+	RerankThreshold float64 `yaml:"rerank_threshold"` // calibrated match-confidence bar to short-circuit (default 0.7; corpus-independent)
+	RerankK         int     `yaml:"rerank_k"`         // max structurally-agreeing candidates ranked in one call (default 5; bounded for cost)
+	RerankMinScore  float64 `yaml:"rerank_min_score"` // trivial retrieval-score floor below which retrieval found nothing plausible → skip the paid call (cost guard; default 0.1)
+
 	// Hybrid switches recall to fused BM25 + embedding retrieval, gated on COSINE
 	// similarity instead of the BM25 score above. Requires model.embeddings to be
 	// configured (else recall stays BM25). EXPERIMENTAL — tune the cosine thresholds
@@ -930,6 +946,23 @@ func (c *Config) Validate() error {
 		}
 		if c.Outcome.LedgerPath == "" {
 			return fmt.Errorf("notify.matrix.feedback_reactions requires outcome.ledger_path: ratings are recorded in the outcome ledger")
+		}
+	}
+	// Instant-recall reranker (opt-in): its knobs are only meaningful when enabled.
+	// applyDefaults fills unset (0) values, so only an explicitly out-of-range setting
+	// reaches here — fail loud rather than silently gating on a nonsensical threshold.
+	// A threshold in (0,1] is a calibrated PROBABILITY (the reranker returns 0.0–1.0);
+	// a value >1 or <=0 could never fire (or always fire), defeating the gate.
+	if c.Catalog.InstantRecall.Rerank {
+		ir := c.Catalog.InstantRecall
+		if ir.RerankThreshold <= 0 || ir.RerankThreshold > 1 {
+			return fmt.Errorf("catalog.instant_recall.rerank_threshold must be in (0,1] (a calibrated match confidence), got %g", ir.RerankThreshold)
+		}
+		if ir.RerankK < 1 {
+			return fmt.Errorf("catalog.instant_recall.rerank_k must be >= 1 (candidates to rank), got %d", ir.RerankK)
+		}
+		if ir.RerankMinScore < 0 {
+			return fmt.Errorf("catalog.instant_recall.rerank_min_score must be >= 0 (retrieval-score cost floor), got %g", ir.RerankMinScore)
 		}
 	}
 	switch c.Actions.Mode {

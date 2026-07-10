@@ -67,6 +67,31 @@ func BuildModelAndTools(ctx context.Context, cfg *config.Config, gp providers.Gi
 				"min_score", cfg.Catalog.InstantRecall.MinScore,
 				"margin_gap", cfg.Catalog.InstantRecall.MarginGap, "solo_floor", cfg.Catalog.InstantRecall.SoloFloor,
 				"outcome_prior", cfg.Catalog.InstantRecall.OutcomePrior, "outcome_floor", cfg.Catalog.InstantRecall.OutcomeFloor)
+			// LLM reranker (opt-in): replace the corpus-dependent BM25-magnitude fire gate
+			// with a CALIBRATED match-confidence gate. Route the one cheap call to the
+			// verify tier (cheaper/faster) when configured, else the main model — mirroring
+			// how verifyFindings picks its model. Metrics/Log are set here so the reranker
+			// is fully wired from the shared builder (serve + investigate).
+			if cfg.Catalog.InstantRecall.Rerank {
+				rerankModel := model
+				verifyTier := BuildVerifyModel(cfg)
+				if verifyTier != nil {
+					rerankModel = verifyTier
+				}
+				recall.Rerank = &investigate.Reranker{
+					Model:     rerankModel,
+					Threshold: cfg.Catalog.InstantRecall.RerankThreshold,
+					K:         cfg.Catalog.InstantRecall.RerankK,
+					MinScore:  cfg.Catalog.InstantRecall.RerankMinScore,
+					Metrics:   metrics,
+					Log:       log,
+				}
+				log.Info("instant-recall reranker enabled (calibrated-confidence gate replaces the BM25 solo_floor)",
+					"threshold", cfg.Catalog.InstantRecall.RerankThreshold,
+					"k", cfg.Catalog.InstantRecall.RerankK,
+					"min_score", cfg.Catalog.InstantRecall.RerankMinScore,
+					"verify_tier_model", verifyTier != nil)
+			}
 			// Hybrid (cosine-gated) recall — opt-in, and only effective once the catalog
 			// actually built vectors (an embedder was configured + embedding succeeded).
 			if cfg.Catalog.InstantRecall.Hybrid {

@@ -258,7 +258,9 @@ func (li *LoopInvestigator) Investigate(ctx context.Context, req Request) error 
 	// Instant recall is disabled under auto-execution: a poisoned catalog entry must
 	// not short-circuit a real investigation straight into an auto-executed action.
 	if li.Recall != nil && (li.Actions == nil || !li.Actions.IsAuto()) {
-		if entry, conf := li.Recall.lookup(ctx, req); entry != nil {
+		// Thread verifyTotals so the (opt-in) reranker's tokens fold into the
+		// per-investigation cost — it runs on the verify tier, so it prices there.
+		if entry, conf := li.Recall.lookupWithUsage(ctx, req, &verifyTotals); entry != nil {
 			li.Log.Info("instant recall (catalog hit; skipping the loop)",
 				"title", req.Title, "entry", entry.Path, "confidence", fmt.Sprintf("%.2f", conf))
 			rec := recalledInvestigation(req, *entry, conf)
