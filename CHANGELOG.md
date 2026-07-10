@@ -8,6 +8,50 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 RunLore is **pre-1.0 and under active development** — there are no tagged releases
 yet, so everything currently lives under `[Unreleased]`.
 
+## [0.8.0](https://github.com/Smana/runlore/compare/v0.7.0...v0.8.0) (2026-07-10)
+
+
+### Features
+
+* **app:** warn loudly at startup when the alert webhook is unauthenticated ([#274](https://github.com/Smana/runlore/issues/274)) ([2b44867](https://github.com/Smana/runlore/commit/2b44867bccfbe9c13657d00e03e6f7dcc00eff07))
+* **ci:** loud eval skips and label-gated e2e on PRs ([#277](https://github.com/Smana/runlore/issues/277)) ([4a53999](https://github.com/Smana/runlore/commit/4a53999fc8e065f3958fab03bfae2fcfea6ff604))
+* **curate:** surface standing 👎 votes on the open KB PR they contest ([#283](https://github.com/Smana/runlore/issues/283)) ([87d058a](https://github.com/Smana/runlore/commit/87d058ab3cedfb1b12ca789379f60dc89c44c7cf))
+* **e2e:** kind as a local e2e provider alongside k3d ([#285](https://github.com/Smana/runlore/issues/285)) ([9139d32](https://github.com/Smana/runlore/commit/9139d328809cc7280d1f022101d08801e2107b58))
+* **ha:** decouple /readyz from leadership — followers forward work to the leader ([#284](https://github.com/Smana/runlore/issues/284)) ([3eb7a51](https://github.com/Smana/runlore/commit/3eb7a5177632d96bdc59a0ceb7d712a12eea8216))
+* **investigate:** guard action targets against unobserved resources (F2) ([#281](https://github.com/Smana/runlore/issues/281)) ([03bb6e3](https://github.com/Smana/runlore/commit/03bb6e364767e674c47acd6b8ffa8831fccdfd57))
+* Matrix 👍/👎 feedback via reactions — zero-ingress ([#271](https://github.com/Smana/runlore/issues/271)) ([0d6ffc5](https://github.com/Smana/runlore/commit/0d6ffc5d7ff29ccddc61e048709b8c071d9d5040))
+* **notify:** make an instant-recall short-circuit visible in the notification ([#297](https://github.com/Smana/runlore/issues/297)) ([144ed52](https://github.com/Smana/runlore/commit/144ed524efbc137a5a9d3d87a973b4a1e03ce781))
+* **notify:** surface an existing-KB-entry match on the delivered finding ([#290](https://github.com/Smana/runlore/issues/290)) ([1bd71f4](https://github.com/Smana/runlore/commit/1bd71f40dd89bb9f4e5ddc5682410a6da1689fb5))
+* **observability:** redesign the Grafana dashboard around learning-loop SLIs ([#301](https://github.com/Smana/runlore/issues/301)) ([b42eb23](https://github.com/Smana/runlore/commit/b42eb230f0da772039b57b1ea290b128bca7b9cf))
+* opt-in Slack 👍/👎 feedback loop — human ratings weigh recall trust ([#267](https://github.com/Smana/runlore/issues/267)) ([9e51f13](https://github.com/Smana/runlore/commit/9e51f134f48061ea00438cbcb1d30b09892ca9fb))
+* **recall:** LLM reranker — calibrated-confidence fire gate replaces the corpus-dependent BM25 magnitude ([#294](https://github.com/Smana/runlore/issues/294)) ([161e68c](https://github.com/Smana/runlore/commit/161e68c5d720bc014f8cf8e29793565685796469))
+* **recall:** scopeless matching so workload-less incidents (PagerDuty) can recall ([#279](https://github.com/Smana/runlore/issues/279)) ([d52be30](https://github.com/Smana/runlore/commit/d52be30ff07e26080102d2bb435ea9ebec6cf652))
+* recurrence cooldown — stop re-investigating a just-answered trigger ([#270](https://github.com/Smana/runlore/issues/270)) ([dbe8f80](https://github.com/Smana/runlore/commit/dbe8f80f814ec9f985bd372e8fd401cbe2c0c26e))
+* **release:** image-level provenance and SBOM attestations ([#282](https://github.com/Smana/runlore/issues/282)) ([9e78614](https://github.com/Smana/runlore/commit/9e78614baa7409176d231accc573364f2e44eac4))
+* **triggers:** cancel queued investigations when the incident resolves first ([#280](https://github.com/Smana/runlore/issues/280)) ([8398d19](https://github.com/Smana/runlore/commit/8398d19b406675c80e83719905b033c8b1fd793a))
+
+
+### Bug Fixes
+
+* **catalog:** skip README.md when loading the KB (docs, not an entry) ([#296](https://github.com/Smana/runlore/issues/296)) ([43f225a](https://github.com/Smana/runlore/commit/43f225a0bdb159238668e08ce074f4d5f2aef237))
+* **chart:** version-less labels on volumeClaimTemplates (StatefulSet upgrades were bricked) ([#287](https://github.com/Smana/runlore/issues/287)) ([c4b336f](https://github.com/Smana/runlore/commit/c4b336f1756c6b228eeb596e88534d6936af4997))
+* **curator:** normalize the workload name in the written resource frontmatter ([#291](https://github.com/Smana/runlore/issues/291)) ([20b9ade](https://github.com/Smana/runlore/commit/20b9ade7e379db6e469735292984258aa7a6ea94))
+* **ha:** survive the leader-takeover window opened by [#284](https://github.com/Smana/runlore/issues/284) (retryable shed + self-race guard) ([#286](https://github.com/Smana/runlore/issues/286)) ([8842d68](https://github.com/Smana/runlore/commit/8842d688dd4b7ec6a7b24a716dd272c55ef9fe0a))
+* **observability:** warn on unreachable metrics/logs backends + stamp :main version ([#300](https://github.com/Smana/runlore/issues/300)) ([5cdb385](https://github.com/Smana/runlore/commit/5cdb385be7edff1fd12c9a1858103a06d7c4461f))
+* pin Go toolchain to 1.26.5 for the crypto/tls fix ([#268](https://github.com/Smana/runlore/issues/268)) ([f1ccb99](https://github.com/Smana/runlore/commit/f1ccb998ba4def18da7cf71d4f18ae15eb6ad3f5))
+* **recall:** confirm namespace-wide so verify can see cross-resource causes ([#299](https://github.com/Smana/runlore/issues/299)) ([efff55c](https://github.com/Smana/runlore/commit/efff55cbb28f14a85ac5f42b78a844a082356a2a))
+* **recall:** kb-match visibility threshold tracks the configured recall floor ([#292](https://github.com/Smana/runlore/issues/292)) ([b03e92e](https://github.com/Smana/runlore/commit/b03e92e683651aa691f9625d02e54a06780a511b))
+* **recall:** normalize the workload identity before structural match ([#289](https://github.com/Smana/runlore/issues/289)) ([f31c25b](https://github.com/Smana/runlore/commit/f31c25b2c36583126b161c322610c91b8bf450ec))
+* **recall:** reranker gates on topical fit + logs its decision ([#295](https://github.com/Smana/runlore/issues/295)) ([4ae9c09](https://github.com/Smana/runlore/commit/4ae9c0900160cd46ad9009b88c9a04a23d054f53))
+
+
+### Documentation
+
+* digestibility + human-in-the-loop + notifier-agnostic pass ([#302](https://github.com/Smana/runlore/issues/302)) ([08e707c](https://github.com/Smana/runlore/commit/08e707cc7db31e113ad8ba1b7b7c7783e3df0b6a))
+* launch messaging accuracy + minimal quickstart values ([#272](https://github.com/Smana/runlore/issues/272)) ([5a1e118](https://github.com/Smana/runlore/commit/5a1e118f5c49474738592286c08b970e642bc7ca))
+* make the recall payoff visible in the workflow (README + learning-loop) ([#298](https://github.com/Smana/runlore/issues/298)) ([ddf6b5c](https://github.com/Smana/runlore/commit/ddf6b5c6ae6c9ecb32aa14e8476b850e0d247b5e))
+* **prior-art:** sharpen the OpenSRE memory contrast after adversarial verification ([#276](https://github.com/Smana/runlore/issues/276)) ([572285a](https://github.com/Smana/runlore/commit/572285a01816b55f717e63fc17c2c1649d49afe1))
+
 ## [0.7.0](https://github.com/Smana/runlore/compare/v0.6.1...v0.7.0) (2026-07-07)
 
 
