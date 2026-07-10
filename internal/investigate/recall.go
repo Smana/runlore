@@ -59,6 +59,53 @@ type Recall struct {
 // text alone.
 const recallCandidateK = 20
 
+// buildRecallQuery constructs the BM25 query text for a recall lookup from a
+// Request. It is the single seam between "what the incident says" and "what the
+// lexical index is asked" — extracted so the retrieval quality can be measured
+// directly (see recalleval_test.go) rather than only observed through the gate.
+//
+// It queries the symptom (title + message) PLUS the discriminating structured
+// entity: the workload ref (namespace + normalized name) and — when it adds
+// anything — the alertname. WHY the enrichment:
+//
+// A real label-derived Kubernetes alert (KubePodNotReady, pod=harbor-registry-…)
+// carries a GENERIC alertname as its title and a terse-or-empty annotation as its
+// message; the object that actually identifies the incident (namespace/name) lives
+// only in the labels and drove nothing but the structural pre-filter. So the raw
+// title+message query is ~1–2 generic tokens against a differently-worded runbook
+// ("Harbor Registry Down due to IAM Access Key Quota Limit") — the classic
+// vocabulary-mismatch problem. Measured live it scored 0.096, far below the
+// production solo_floor (4.0), so recall never fired despite a perfect KB entry;
+// the recalleval harness reproduces this (4 identity-in-the-label cases return zero
+// BM25 hits). Folding the workload ref into the QUERY — LM/entity expansion in
+// front of BM25, the best-evidenced fix — gives the retriever the terms the runbook
+// actually shares ("tooling", "harbor-registry"), lifting those cases from zero-hit
+// to rank #1.
+//
+// Deliberate boundaries: the name is NORMALIZED (pod-hash stripped, same function
+// as the structural gate) so a per-pod alert matches the controller-family runbook;
+// the alertname is appended only when it is NOT already the title, so a label alert
+// (title == alertname) is not double-counted; and the ref is additive, so the
+// GitOps-failure source — whose title already carries "Kind/Name" — is not harmed
+// (its extra namespace token is at worst neutral). Empty parts are dropped so the
+// query never carries stray whitespace.
+func buildRecallQuery(req Request) string {
+	parts := make([]string, 0, 5)
+	add := func(s string) {
+		if s = strings.TrimSpace(s); s != "" {
+			parts = append(parts, s)
+		}
+	}
+	add(req.Title)
+	add(req.Message)
+	add(req.Workload.Namespace)
+	add(providers.NormalizeWorkloadName(req.Workload.Name))
+	if an := req.Labels["alertname"]; an != req.Title {
+		add(an)
+	}
+	return strings.Join(parts, " ")
+}
+
 // lookup returns the matched entry and a DERIVED confidence when a recall is
 // trustworthy enough to short-circuit, else (nil, 0). The BM25 score is always
 // recorded (even on rejection) so the thresholds can be tuned from live data.
@@ -66,8 +113,7 @@ func (r *Recall) lookup(ctx context.Context, req Request) (*catalog.Entry, float
 	if r == nil || r.Catalog == nil {
 		return nil, 0
 	}
-	// Query the symptom (title + message); severity/reason is noise for matching.
-	query := strings.TrimSpace(req.Title + " " + req.Message)
+	query := buildRecallQuery(req)
 	// Mode select: hybrid (BM25+embedding, cosine-gated) when an embedder-backed
 	// catalog is live, else BM25 — unchanged. The gate logic below is identical; only
 	// the candidate source and the thresholds differ.
