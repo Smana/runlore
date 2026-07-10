@@ -236,10 +236,10 @@ func renderRerankCandidates(req Request, cands []catalog.ScoredEntry) string {
 	return b.String()
 }
 
-// firstNonEmptyLines returns up to max runes of the first non-blank, non-heading
+// firstNonEmptyLines returns up to limit runes of the first non-blank, non-heading
 // content lines of a markdown body, single-spaced — a compact symptom excerpt for
 // the reranker without dragging the whole entry into the prompt.
-func firstNonEmptyLines(body string, max int) string {
+func firstNonEmptyLines(body string, limit int) string {
 	var b strings.Builder
 	for _, ln := range strings.Split(body, "\n") {
 		ln = strings.TrimSpace(ln)
@@ -250,13 +250,13 @@ func firstNonEmptyLines(body string, max int) string {
 			b.WriteByte(' ')
 		}
 		b.WriteString(ln)
-		if b.Len() >= max {
+		if b.Len() >= limit {
 			break
 		}
 	}
 	r := []rune(b.String())
-	if len(r) > max {
-		return string(r[:max]) + "…"
+	if len(r) > limit {
+		return string(r[:limit]) + "…"
 	}
 	return b.String()
 }
