@@ -90,6 +90,15 @@ spec:
           valueFrom:
             fieldRef:
               fieldPath: metadata.namespace
+        # Routable leader identity (#264): the agent encodes this IP into the
+        # leader-election Lease identity (<podName>_<podIP>) so a NON-leader
+        # replica can proxy incoming work (webhooks, Slack interactions, action
+        # control) straight to the leader. Without it the identity degrades to
+        # name-only and followers answer 503 instead of forwarding.
+        - name: POD_IP
+          valueFrom:
+            fieldRef:
+              fieldPath: status.podIP
         {{- with .Values.env }}
         {{- toYaml . | nindent 8 }}
         {{- end }}
@@ -99,11 +108,11 @@ spec:
       {{- $liveness := $probes.liveness | default dict }}
       {{- $readiness := $probes.readiness | default dict }}
       {{- if $startup.enabled }}
-      # startupProbe owns the cold-start window (catalog warm-up + leader-lease
-      # gating). It targets /healthz (process-alive), NOT /readyz: a standby
-      # replica is never the leader and so never /readyz-ready, which would
-      # deadlock a readiness-gated startupProbe. While it runs, liveness +
-      # readiness are suppressed, so warm-up emits no premature Unhealthy events.
+      # startupProbe owns the cold-start window (catalog clone + index warm-up).
+      # It targets /healthz (process-alive), NOT /readyz: a slow first catalog
+      # sync must delay readiness, never get the pod killed. While it runs,
+      # liveness + readiness are suppressed, so warm-up emits no premature
+      # Unhealthy events.
       startupProbe:
         httpGet:
           path: /healthz
@@ -121,10 +130,11 @@ spec:
         failureThreshold: {{ $liveness.failureThreshold | default 3 }}
         timeoutSeconds: {{ $liveness.timeoutSeconds | default 2 }}
       readinessProbe:
-        # /readyz is gated by leadership + catalog warmth — only the warm leader
-        # serves webhook traffic. The startupProbe covers the cold window, so no
-        # initialDelaySeconds here; the tight cadence makes leader handoff reflect
-        # in the Service endpoints within a few seconds.
+        # /readyz is gated by catalog warmth only — NOT leadership (#264), so
+        # every warm replica is Ready and `helm upgrade --wait` / Flux kstatus
+        # succeeds with replicaCount>1. A non-leader replica that receives a
+        # webhook proxies it to the leader. The startupProbe covers the cold
+        # window, so no initialDelaySeconds here.
         httpGet:
           path: /readyz
           port: http

@@ -23,9 +23,28 @@ spec:
       # Scope who may reach the webhook port (e.g. the Alertmanager namespace).
       # Empty (default) ⇒ no `from:` ⇒ all sources allowed (permissive, no break).
       from:
+        # Replica-to-replica forwarding (#264): a non-leader replica proxies
+        # work-bearing requests to the leader pod on this same port, so peer
+        # pods of this release must stay reachable however ingressFrom narrows
+        # the external sources.
+        - podSelector:
+            matchLabels:
+              {{- include "runlore.selectorLabels" $ | nindent 14 }}
         {{- toYaml . | nindent 8 }}
       {{- end }}
   egress:
+    # Replica-to-replica forwarding (#264): a non-leader replica proxies
+    # work-bearing requests to the leader pod on the serve port. Allowed in BOTH
+    # egress modes — the permissive default only opens 443/6443 and strict mode
+    # denies by default, so without this rule forwarding would be silently
+    # dropped by the CNI.
+    - to:
+        - podSelector:
+            matchLabels:
+              {{- include "runlore.selectorLabels" . | nindent 14 }}
+      ports:
+        - protocol: TCP
+          port: {{ .Values.service.port }}
     # DNS — scoped to the cluster DNS service by default (override/disable via networkPolicy.egress.dns).
     {{- if .Values.networkPolicy.egress.dns.toClusterDNS }}
     - to:
