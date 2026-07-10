@@ -59,6 +59,16 @@ type Recall struct {
 // text alone.
 const recallCandidateK = 20
 
+// buildRecallQuery constructs the BM25 query text for a recall lookup from a
+// Request. It is the single seam between "what the incident says" and "what the
+// lexical index is asked" — extracted so the retrieval quality can be measured
+// directly (see recalleval_test.go) rather than only observed through the gate.
+//
+// It queries the symptom (title + message); severity/reason is noise for matching.
+func buildRecallQuery(req Request) string {
+	return strings.TrimSpace(req.Title + " " + req.Message)
+}
+
 // lookup returns the matched entry and a DERIVED confidence when a recall is
 // trustworthy enough to short-circuit, else (nil, 0). The BM25 score is always
 // recorded (even on rejection) so the thresholds can be tuned from live data.
@@ -66,8 +76,7 @@ func (r *Recall) lookup(ctx context.Context, req Request) (*catalog.Entry, float
 	if r == nil || r.Catalog == nil {
 		return nil, 0
 	}
-	// Query the symptom (title + message); severity/reason is noise for matching.
-	query := strings.TrimSpace(req.Title + " " + req.Message)
+	query := buildRecallQuery(req)
 	// Mode select: hybrid (BM25+embedding, cosine-gated) when an embedder-backed
 	// catalog is live, else BM25 — unchanged. The gate logic below is identical; only
 	// the candidate source and the thresholds differ.
