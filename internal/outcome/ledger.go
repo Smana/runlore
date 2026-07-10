@@ -18,6 +18,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -726,6 +727,56 @@ func (l *Ledger) Recurrence(triggerKey string) TriggerRecurrence {
 		}
 	}
 	return tr
+}
+
+// ContestedTrigger is one trigger whose delivered conclusion has standing 👎
+// votes AND a KB artifact to act on — the unit of work for the curate pass that
+// warns the human reviewing the pending KB PR. Downs counts LIVE "down" votes
+// after per-user dedup (a vote later moved to 👍 no longer counts); CuratedURL
+// and Last come from the trigger's newest open, matching Recurrence.
+type ContestedTrigger struct {
+	TriggerKey string
+	CuratedURL string    // KB link of the newest open (never "")
+	Downs      int       // standing 👎 votes, per-user latest-wins
+	Last       time.Time // when the trigger's newest investigation happened
+}
+
+// ContestedTriggers returns every trigger with at least one standing 👎 vote and
+// a non-empty CuratedURL, sorted by TriggerKey so the pass output is
+// deterministic. It is the inverse view of Recurrence's per-key FeedbackDown:
+// one iteration over the live votes map — O(live votes), which stays small (one
+// entry per trigger×user) and runs on the scheduled curate cadence, not a hot
+// path — joined against byTrigger for the newest open's KB link and time. A
+// contested trigger with NO KB link is deliberately excluded: there is no PR for
+// a reviewer to be warned on (the vote itself still stands in the ledger for
+// trust decay and the recurrence cooldown). Nil for a disabled (or nil) ledger.
+func (l *Ledger) ContestedTriggers() []ContestedTrigger {
+	if !l.enabled() {
+		return nil
+	}
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	downs := map[string]int{}
+	for k, v := range l.votes {
+		if v.rating != "down" {
+			continue
+		}
+		trigger, _, ok := strings.Cut(k, "\x00")
+		if !ok {
+			continue // defensive: Feedback never writes a separator-less key
+		}
+		downs[trigger]++
+	}
+	out := make([]ContestedTrigger, 0, len(downs))
+	for trigger, n := range downs {
+		a := l.byTrigger[trigger]
+		if a.curatedURL == "" {
+			continue // no KB artifact to warn a reviewer on
+		}
+		out = append(out, ContestedTrigger{TriggerKey: trigger, CuratedURL: a.curatedURL, Downs: n, Last: a.last})
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].TriggerKey < out[j].TriggerKey })
+	return out
 }
 
 // Episodes replays the full ledger and turns every open into an Episode, pairing

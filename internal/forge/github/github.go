@@ -306,6 +306,45 @@ func (c *Client) Comment(ctx context.Context, number int, body string) error {
 		map[string]any{"body": body}, nil)
 }
 
+// ListIssueCommentBodies fetches ALL pages of an issue/PR's comment bodies (the
+// issues-comments endpoint serves both — PR discussion comments live there).
+// Callers scan the bodies for hidden idempotency markers, so pagination matters:
+// a marker past the first 100 comments would otherwise be invisible and the
+// caller would re-post forever.
+func (c *Client) ListIssueCommentBodies(ctx context.Context, number int) ([]string, error) {
+	var out []string
+	for page := 1; ; page++ {
+		var raw []struct {
+			Body string `json:"body"`
+		}
+		path := fmt.Sprintf("/repos/%s/%s/issues/%d/comments?per_page=100&page=%d", c.owner, c.repo, number, page)
+		if err := c.do(ctx, http.MethodGet, path, nil, &raw); err != nil {
+			return nil, err
+		}
+		for _, r := range raw {
+			out = append(out, r.Body)
+		}
+		if len(raw) < 100 { // last page (a full page is exactly 100)
+			break
+		}
+	}
+	return out, nil
+}
+
+// IsPROpen reports whether number is an OPEN pull request. It deliberately hits
+// the pulls endpoint (not issues): a number that is actually an issue 404s there
+// instead of passing, so a caller gating "comment on the open KB PR" can never
+// be fooled into treating an issue as a PR.
+func (c *Client) IsPROpen(ctx context.Context, number int) (bool, error) {
+	var out struct {
+		State string `json:"state"` // "open" | "closed" (merged PRs report closed)
+	}
+	if err := c.do(ctx, http.MethodGet, fmt.Sprintf("/repos/%s/%s/pulls/%d", c.owner, c.repo, number), nil, &out); err != nil {
+		return false, err
+	}
+	return out.State == "open", nil
+}
+
 // ReplaceLabel removes one label and adds another (best-effort on the removal —
 // a 404 when the label isn't present is not fatal).
 func (c *Client) ReplaceLabel(ctx context.Context, number int, remove, add string) error {

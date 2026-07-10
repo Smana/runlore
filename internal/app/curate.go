@@ -22,8 +22,10 @@ import (
 // backlog-dedup pass (collapses duplicate open PRs across history) and the
 // lifecycle sweep (closes stale, unprotected PRs by forge age). When
 // outcome.ledger_path is configured, it also runs the Queue pass (promotes
-// solved→ready-to-merge when the incident resolves) and the Recurrence pass
-// (opens a knowledge-gap issue for repeatedly-unresolved patterns).
+// solved→ready-to-merge when the incident resolves), the Recurrence pass
+// (opens a knowledge-gap issue for repeatedly-unresolved patterns), and the
+// Contested pass (warns the open KB PR when humans 👎'd the investigation
+// behind it).
 func RunCurate(args []string) error {
 	fs := flag.NewFlagSet("curate", flag.ContinueOnError)
 	cfgPath := fs.String("config", "runlore.yaml", "path to config file")
@@ -77,6 +79,12 @@ func RunCurate(args []string) error {
 				Suppressed: curate.ClosedPRSuppression{Forge: forge},
 				Log:        log,
 			},
+			// Contested surfaces standing 👎 votes on the OPEN KB PR they relate to:
+			// a 👎 on a fresh investigation weighs nothing in recall trust (no catalog
+			// entry yet), but it is exactly what the human reviewing the pending entry
+			// needs to see before merging. Idempotent via a hidden per-trigger comment
+			// marker — no store, mirroring the other passes.
+			curate.Contested{Forge: forge, Ledger: ledger, KBRepo: cfg.Forge.KBRepo, Log: log},
 		)
 		// Warn loudly when the ledger this pod sees is absent/empty: outcome.New
 		// succeeds on a missing file, so the passes would otherwise run silently

@@ -1302,3 +1302,72 @@ func TestRecurrenceVerdictSurvivesReplayAndCheckpoint(t *testing.T) {
 		t.Fatalf("checkpointed recurrence = %+v, want verdict=no_action count=1", r)
 	}
 }
+
+// TestContestedTriggersGroupsStandingDowns pins the grouping semantics: one
+// entry per trigger with at least one STANDING 👎 (per-user latest-wins, so a
+// moved vote no longer counts), joined with the trigger's newest-open KB link —
+// and a contested trigger with no KB link is excluded (there is no PR for a
+// reviewer to be warned on).
+func TestContestedTriggersGroupsStandingDowns(t *testing.T) {
+	l, _ := New(filepath.Join(t.TempDir(), "o.jsonl"))
+	t0 := time.Unix(42000, 0)
+	// k1: two standing 👎 (U1, U2); U3's 👍 must not count.
+	_ = l.Open(Event{Fingerprint: "f1", Kind: "fresh", TriggerKey: "k1", CuratedURL: "https://github.com/o/r/pull/7", At: t0})
+	_ = l.Feedback("k1", "down", "U1", t0.Add(time.Minute))
+	_ = l.Feedback("k1", "down", "U2", t0.Add(2*time.Minute))
+	_ = l.Feedback("k1", "up", "U3", t0.Add(3*time.Minute))
+	// k2: contested, then the voter moved to 👍 — no standing 👎 remains.
+	_ = l.Open(Event{Fingerprint: "f2", Kind: "fresh", TriggerKey: "k2", CuratedURL: "https://github.com/o/r/pull/8", At: t0})
+	_ = l.Feedback("k2", "down", "U1", t0.Add(time.Minute))
+	_ = l.Feedback("k2", "up", "U1", t0.Add(2*time.Minute))
+	// k3: standing 👎 but no CuratedURL — excluded.
+	_ = l.Open(Event{Fingerprint: "f3", Kind: "fresh", TriggerKey: "k3", At: t0})
+	_ = l.Feedback("k3", "down", "U1", t0.Add(time.Minute))
+	got := l.ContestedTriggers()
+	if len(got) != 1 {
+		t.Fatalf("ContestedTriggers = %+v, want exactly the k1 entry", got)
+	}
+	ct := got[0]
+	if ct.TriggerKey != "k1" || ct.Downs != 2 || ct.CuratedURL != "https://github.com/o/r/pull/7" || !ct.Last.Equal(t0) {
+		t.Fatalf("ContestedTriggers[0] = %+v, want k1 downs=2 url=…/pull/7 last=t0", ct)
+	}
+}
+
+// TestContestedTriggersFollowNewestOpenSortedAndReplayed: the joined KB link and
+// last-seen time come from the trigger's NEWEST open, the output is sorted by
+// TriggerKey (deterministic pass order), and the whole standing state is rebuilt
+// identically from a fresh replay of the file.
+func TestContestedTriggersFollowNewestOpenSortedAndReplayed(t *testing.T) {
+	p := filepath.Join(t.TempDir(), "o.jsonl")
+	l, _ := New(p)
+	t0 := time.Unix(43000, 0)
+	_ = l.Open(Event{Fingerprint: "f1", Kind: "fresh", TriggerKey: "k2", CuratedURL: "https://kb/old", At: t0})
+	_ = l.Feedback("k2", "down", "U1", t0.Add(time.Minute))
+	_ = l.Open(Event{Fingerprint: "f2", Kind: "fresh", TriggerKey: "k2", CuratedURL: "https://kb/new", At: t0.Add(time.Hour)})
+	_ = l.Open(Event{Fingerprint: "f3", Kind: "fresh", TriggerKey: "k1", CuratedURL: "https://kb/a", At: t0})
+	_ = l.Feedback("k1", "down", "U1", t0.Add(time.Minute))
+	got := l.ContestedTriggers()
+	if len(got) != 2 || got[0].TriggerKey != "k1" || got[1].TriggerKey != "k2" {
+		t.Fatalf("want [k1 k2] sorted by TriggerKey, got %+v", got)
+	}
+	if got[1].CuratedURL != "https://kb/new" || !got[1].Last.Equal(t0.Add(time.Hour)) {
+		t.Fatalf("k2 must carry the NEWEST open's URL/time, got %+v", got[1])
+	}
+	l2, _ := New(p) // restart / leader failover
+	if got2 := l2.ContestedTriggers(); len(got2) != 2 || got2[1].CuratedURL != "https://kb/new" || got2[0].Downs != 1 {
+		t.Fatalf("replayed ContestedTriggers = %+v", got2)
+	}
+}
+
+// TestContestedTriggersNilAndDisabled: the accessor is nil-safe and a disabled
+// ledger yields nil — the curate pass no-ops on both without special-casing.
+func TestContestedTriggersNilAndDisabled(t *testing.T) {
+	var nilLedger *Ledger
+	if got := nilLedger.ContestedTriggers(); got != nil {
+		t.Fatalf("nil ledger must yield nil, got %+v", got)
+	}
+	d, _ := New("")
+	if got := d.ContestedTriggers(); got != nil {
+		t.Fatalf("disabled ledger must yield nil, got %+v", got)
+	}
+}
