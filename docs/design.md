@@ -118,7 +118,7 @@ tools, but never *require* them).
           │   ├─ runbook grounding      (OKF playbooks)                              │
           │   ├─ tool orchestration     (providers, built-in + MCP)                  │
           │   └─ hypothesis ranker + explicit `unresolved`                           │
-          │  Curator — confidence-routed: known→recall · novel→PR · uncertain→Issue  │
+          │  Curator — confidence-routed: known→recall · novel→PR · uncertain→chat  │
           │  Catalog — syncer + local mirror + bleve/chromem-go index (kb_search)    │
           │  Model: Anthropic | OpenAI-compatible (in-cluster vLLM | Ollama)         │
           │  Audit log (append-only) → (P3) cross-incident memory                    │
@@ -224,15 +224,15 @@ to incidents. The loop is `retrieve → capture → curate → compound`, routed
 
 ```
 investigation result
-  ├─ KB hit (known)          → post known resolution. No issue, no PR. (instant recall)
+  ├─ KB hit (known)          → post the known resolution. No issue, no PR. (instant recall)
   ├─ novel + confident       → draft OKF entry as a PR; humans refine via review → merge → reindex
-  └─ novel + uncertain       → open a GitHub ISSUE (findings + open questions);
-                               humans answer in-thread; on resolve/`/kb` →
-                               crystallize thread → OKF PR → merge → reindex
+  └─ novel + uncertain       → chat-only: the findings + open questions are delivered to chat, but
+                               NO repo artifact is written — a below-bar guess must not enter the catalog
 ```
-The catalog only grows from **genuinely novel, human-sharpened** incidents. Every learned entry cites
-the **issue** (reasoning), the **causing** change, and the **fixing** change — provenance no closed
-"memory" gives you.
+The catalog only grows from **genuinely novel, human-sharpened** incidents. (Issues are opened *only*
+by the scheduled Phase-2 grooming, and only for a **recurring unresolved pattern** — a "knowledge gap",
+never for a one-off uncertain finding.) Every learned entry cites its **evidence trail**, the
+**causing** change, and the **fixing** change — provenance no closed "memory" gives you.
 
 **Lifecycle labels gate the catalog's quality.** Curated artifacts carry a lifecycle label —
 `triggered` (raw, just opened) → `investigating` → `solved` (root cause confirmed *and* resolution
@@ -484,7 +484,7 @@ internal/
     cloud/{aws,gcp,azure}/     CloudProvider — native SDKs, Phase 2+ (Steampipe/MCP optional)
 deploy/helm/runlore/           in-cluster chart (Phase 2)
 examples/runbooks/             seed OKF catalog (ships as default knowledge)
-docs/                          design.md, prior-art.md
+docs/                          design.md, learning-loop.md, getting-started.md, … (see the Docs index)
 ```
 
 ## 14. Open questions & risks
