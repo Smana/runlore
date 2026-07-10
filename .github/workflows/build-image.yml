@@ -71,7 +71,13 @@ jobs:
         id: ref
         env:
           IMAGE: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
-        run: echo "image=${IMAGE,,}:main" >> "$GITHUB_OUTPUT"
+        # Also stamp a meaningful version for the rolling :main image. Without a
+        # VERSION build-arg the Dockerfile defaults to "dev" (so runlore_build_info and
+        # the dashboard's version panel just read "dev"); main-<short-sha> ties a running
+        # replica back to its exact commit.
+        run: |
+          echo "image=${IMAGE,,}:main" >> "$GITHUB_OUTPUT"
+          echo "version=main-${GITHUB_SHA::7}" >> "$GITHUB_OUTPUT"
 
       # PR: build single-arch amd64 without pushing — keep it fast. The in-image Go
       # compile (multi-stage Dockerfile) on amd64 is fine here; the Trivy fs scan
@@ -82,6 +88,8 @@ jobs:
         with:
           context: .
           file: ./Dockerfile
+          build-args: |
+            VERSION=${{ steps.ref.outputs.version }}
           platforms: linux/amd64
           push: false
           load: true
@@ -97,6 +105,8 @@ jobs:
         with:
           context: .
           file: ./Dockerfile
+          build-args: |
+            VERSION=${{ steps.ref.outputs.version }}
           platforms: linux/amd64
           push: true
           tags: ${{ steps.ref.outputs.image }}
