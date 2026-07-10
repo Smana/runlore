@@ -105,7 +105,7 @@ then the answer is confirmed against live state and re-reviewed.
 > The cosine thresholds are conservative placeholders; tune them against the
 > instant-recall eval before relying on them.
 
-> **LLM reranker (opt-in) — the principled fire gate.** With `instant_recall.rerank`
+> **LLM reranker (on by default) — the principled fire gate.** With `instant_recall.rerank`
 > set, Gate 2 (the BM25-magnitude margin) is **replaced** by a calibrated
 > match-confidence gate. Query enrichment fixed retrieval *ranking* — on the real
 > corpus the correct runbook now ranks #1 (Recall@1 = 1.00, MRR 1.00) — but the

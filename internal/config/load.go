@@ -112,7 +112,7 @@ func applyDefaults(c *Config) {
 		// whole point — unlike solo_floor it does not need per-cluster tuning. K is bounded
 		// small (one cheap call over a few candidates); the trivial min-score floor keeps
 		// the paid call from ever running when retrieval surfaced nothing plausible.
-		if ir.Rerank {
+		if ir.RerankEnabled() {
 			if ir.RerankThreshold == 0 {
 				ir.RerankThreshold = 0.7
 			}

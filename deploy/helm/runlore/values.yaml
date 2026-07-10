@@ -200,12 +200,12 @@ config:
   #     margin_gap: 1.0                # top hit must beat the runner-up by this (corpus-portable; not an absolute floor)
   #     solo_floor: 4.0                # confident bar when there is only one hit
   #     require_workload_match: false  # true = exact namespace+workload; false = namespace-level agreement is enough
-  #     # OPT-IN LLM reranker: replace the corpus-dependent BM25-magnitude fire gate
+  #     # LLM reranker (ON by default when instant_recall is enabled): replaces the
   #     # (solo_floor/margin_gap) with a CALIBRATED, corpus-independent match-confidence
   #     # gate. One cheap call ranks the top-K structurally-agreeing candidates; fires only
   #     # when the reranker's 0-1 confidence clears rerank_threshold. Routes to model.verify
   #     # (cheaper/faster) when configured. Default off ⇒ the magnitude gate is unchanged.
-  #     rerank: false
+  #     # rerank: false                # DEFAULT is on; set false to fall back to the legacy BM25-magnitude gate
   #     rerank_threshold: 0.7          # calibrated match-confidence bar to short-circuit (probability; no per-corpus tuning)
   #     rerank_k: 5                    # candidates ranked in the one call (bounded for cost)
   #     rerank_min_score: 0.1          # trivial retrieval-score floor; below it the paid call is skipped (cost guard)

@@ -72,7 +72,7 @@ func BuildModelAndTools(ctx context.Context, cfg *config.Config, gp providers.Gi
 			// verify tier (cheaper/faster) when configured, else the main model — mirroring
 			// how verifyFindings picks its model. Metrics/Log are set here so the reranker
 			// is fully wired from the shared builder (serve + investigate).
-			if cfg.Catalog.InstantRecall.Rerank {
+			if cfg.Catalog.InstantRecall.RerankEnabled() {
 				rerankModel := model
 				verifyTier := BuildVerifyModel(cfg)
 				if verifyTier != nil {

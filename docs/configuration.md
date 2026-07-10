@@ -143,7 +143,7 @@ incident webhook. Known keys: `alertmanager`, `gitops`, `pagerduty`.
   PagerDuty) can match only resource-less entries — the weakest tier, which always requires
   `solo_floor` + `min_score`, recalls with reduced confidence, and is disabled by
   `require_workload_match: true`.
-- `instant_recall.rerank` (**opt-in, default `false`**) — replaces the corpus-dependent BM25-magnitude
+- `instant_recall.rerank` (**ON by default when `instant_recall` is enabled**; set `false` to fall back to the legacy gate) — replaces the corpus-dependent BM25-magnitude
   fire gate (`solo_floor`/`margin_gap`) with an **LLM reranker** that scores the top-`rerank_k`
   structurally-agreeing candidates in **one cheap call** and short-circuits only on the reranker's
   **calibrated** match confidence (`rerank_threshold`, default **0.7**). *Why:* query enrichment fixed

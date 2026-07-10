@@ -284,18 +284,22 @@ type InstantRecall struct {
 	OutcomePrior         float64 `yaml:"outcome_prior"`          // Beta prior strength for outcome decay
 	OutcomeFloor         float64 `yaml:"outcome_floor"`          // reject a recall when the outcome factor drops below this
 
-	// Rerank (opt-in, default false) adds an LLM reranking stage to the recall
-	// short-circuit: it ranks the top-K structurally-agreeing candidates against the
-	// incident with ONE cheap model call and gates the fire on the reranker's
-	// CALIBRATED match confidence (RerankThreshold) instead of the corpus-dependent
-	// BM25 magnitude (SoloFloor/MarginGap). This is the principled fix for the gate
-	// being fragile at the default across clusters: an enriched real-corpus BM25 score
-	// is ~0.1–1.2 (an order of magnitude below the default SoloFloor 4.0), so the
-	// magnitude gate only fires where the operator hand-tuned solo_floor to their
-	// corpus. A calibrated confidence needs no per-corpus tuning. Off ⇒ the
-	// BM25-magnitude gate above is used, byte-for-byte unchanged. Routes to model.verify
-	// (cheaper/faster) when configured, else the main model.
-	Rerank          bool    `yaml:"rerank"`           // enable the LLM reranker on the recall short-circuit
+	// Rerank adds an LLM reranking stage to the recall short-circuit: it ranks the
+	// top-K structurally-agreeing candidates against the incident with ONE cheap
+	// model call and gates the fire on the reranker's CALIBRATED match confidence
+	// (RerankThreshold) instead of the corpus-dependent BM25 magnitude
+	// (SoloFloor/MarginGap). This is the principled gate: an enriched real-corpus
+	// BM25 score is ~0.1–1.2 (an order of magnitude below the default SoloFloor 4.0),
+	// so the magnitude gate only fires where the operator hand-tuned solo_floor to
+	// their corpus, whereas a calibrated confidence needs no per-corpus tuning —
+	// measured 0/11 → 11/11 fire at default thresholds with perfect precision.
+	//
+	// Three-state (*bool): **nil (unset) ⇒ ON** whenever instant_recall is enabled,
+	// so it works out of the box; explicit `false` disables it (the BM25-magnitude
+	// gate is then used, byte-for-byte unchanged); explicit `true` is the same as
+	// unset. Use RerankEnabled(). Routes to model.verify (cheaper/faster) when
+	// configured, else the main model.
+	Rerank          *bool   `yaml:"rerank"`           // nil/true ⇒ reranker ON (default); false ⇒ off (legacy BM25-magnitude gate)
 	RerankThreshold float64 `yaml:"rerank_threshold"` // calibrated match-confidence bar to short-circuit (default 0.7; corpus-independent)
 	RerankK         int     `yaml:"rerank_k"`         // max structurally-agreeing candidates ranked in one call (default 5; bounded for cost)
 	RerankMinScore  float64 `yaml:"rerank_min_score"` // trivial retrieval-score floor below which retrieval found nothing plausible → skip the paid call (cost guard; default 0.1)
@@ -308,6 +312,14 @@ type InstantRecall struct {
 	Hybrid          bool    `yaml:"hybrid"`            // enable hybrid (cosine-gated) recall
 	HybridMinScore  float64 `yaml:"hybrid_min_score"`  // cosine floor for the top hit (default 0.80)
 	HybridMarginGap float64 `yaml:"hybrid_margin_gap"` // cosine margin over the runner-up (default 0.05)
+}
+
+// RerankEnabled reports whether the instant-recall LLM reranker should run. It is
+// ON by default whenever instant_recall is enabled (nil ⇒ on) — the calibrated,
+// corpus-independent gate is what makes recall fire out of the box; only an
+// explicit `rerank: false` falls back to the legacy BM25-magnitude gate.
+func (ir InstantRecall) RerankEnabled() bool {
+	return ir.Enabled && (ir.Rerank == nil || *ir.Rerank)
 }
 
 // CatalogGit configures periodic Git sync of the catalog into Dir.
@@ -953,7 +965,7 @@ func (c *Config) Validate() error {
 	// reaches here — fail loud rather than silently gating on a nonsensical threshold.
 	// A threshold in (0,1] is a calibrated PROBABILITY (the reranker returns 0.0–1.0);
 	// a value >1 or <=0 could never fire (or always fire), defeating the gate.
-	if c.Catalog.InstantRecall.Rerank {
+	if c.Catalog.InstantRecall.RerankEnabled() {
 		ir := c.Catalog.InstantRecall
 		if ir.RerankThreshold <= 0 || ir.RerankThreshold > 1 {
 			return fmt.Errorf("catalog.instant_recall.rerank_threshold must be in (0,1] (a calibrated match confidence), got %g", ir.RerankThreshold)

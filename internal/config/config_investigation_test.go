@@ -119,28 +119,49 @@ func TestApplyDefaultsRecallDecayExplicit(t *testing.T) {
 	}
 }
 
+// rerankPtr is a *bool literal helper for the three-state rerank knob.
+func rerankPtr(b bool) *bool { return &b }
+
+// TestRerankEnabledDefault pins the three-state default: instant_recall enabled
+// with rerank UNSET ⇒ the reranker is ON (the calibrated gate is what makes recall
+// fire out of the box); explicit false disables; disabled recall is always off.
+func TestRerankEnabledDefault(t *testing.T) {
+	on := InstantRecall{Enabled: true} // Rerank nil ⇒ default ON
+	if !on.RerankEnabled() {
+		t.Fatal("instant_recall enabled with unset rerank must default the reranker ON")
+	}
+	if (InstantRecall{Enabled: true, Rerank: rerankPtr(false)}).RerankEnabled() {
+		t.Fatal("explicit rerank:false must disable the reranker")
+	}
+	if !(InstantRecall{Enabled: true, Rerank: rerankPtr(true)}).RerankEnabled() {
+		t.Fatal("explicit rerank:true must enable the reranker")
+	}
+	if (InstantRecall{Enabled: false, Rerank: rerankPtr(true)}).RerankEnabled() {
+		t.Fatal("recall disabled ⇒ reranker off regardless of the rerank knob")
+	}
+}
+
 func TestApplyDefaultsRecallRerank(t *testing.T) {
-	// Enabled with no tuning → the calibrated-confidence gate's knobs default to the
-	// stable, corpus-independent values.
+	// Enabled with no tuning → the reranker is ON by default and its knobs default to
+	// the stable, corpus-independent values (nothing to set for it to work).
 	var c Config
-	c.Catalog.InstantRecall.Enabled = true
-	c.Catalog.InstantRecall.Rerank = true
+	c.Catalog.InstantRecall.Enabled = true // Rerank unset ⇒ ON
 	applyDefaults(&c)
 	ir := c.Catalog.InstantRecall
 	if ir.RerankThreshold != 0.7 || ir.RerankK != 5 || ir.RerankMinScore != 0.1 {
-		t.Fatalf("rerank defaults not applied: %+v", ir)
+		t.Fatalf("rerank defaults not applied under the default-on path: %+v", ir)
 	}
-	// Rerank OFF ⇒ knobs stay zero (unused), so nothing changes for existing deployments.
+	// Explicit rerank:false (legacy BM25-magnitude gate) ⇒ knobs stay zero (unused).
 	var off Config
 	off.Catalog.InstantRecall.Enabled = true
+	off.Catalog.InstantRecall.Rerank = rerankPtr(false)
 	applyDefaults(&off)
 	if off.Catalog.InstantRecall.RerankThreshold != 0 || off.Catalog.InstantRecall.RerankK != 0 {
-		t.Fatalf("rerank knobs must stay zero when rerank is off: %+v", off.Catalog.InstantRecall)
+		t.Fatalf("rerank knobs must stay zero when rerank is explicitly off: %+v", off.Catalog.InstantRecall)
 	}
 	// Explicit rerank knobs are respected, not overwritten.
 	var ex Config
 	ex.Catalog.InstantRecall.Enabled = true
-	ex.Catalog.InstantRecall.Rerank = true
 	ex.Catalog.InstantRecall.RerankThreshold = 0.85
 	ex.Catalog.InstantRecall.RerankK = 3
 	applyDefaults(&ex)
@@ -152,8 +173,7 @@ func TestApplyDefaultsRecallRerank(t *testing.T) {
 func TestValidateRecallRerank(t *testing.T) {
 	base := func() Config {
 		var c Config
-		c.Catalog.InstantRecall.Enabled = true
-		c.Catalog.InstantRecall.Rerank = true
+		c.Catalog.InstantRecall.Enabled = true // Rerank unset ⇒ ON
 		return c
 	}
 	// Defaulted config validates.
@@ -190,9 +210,10 @@ func TestValidateRecallRerank(t *testing.T) {
 	if err := c2.Validate(); err == nil || !strings.Contains(err.Error(), "rerank_min_score") {
 		t.Fatalf("negative rerank_min_score must be rejected, got %v", err)
 	}
-	// Rerank OFF ⇒ the knobs are not validated (they are unused).
+	// Explicit rerank:false ⇒ the knobs are not validated (they are unused).
 	off := Config{}
 	off.Catalog.InstantRecall.Enabled = true
+	off.Catalog.InstantRecall.Rerank = rerankPtr(false)
 	off.Catalog.InstantRecall.RerankThreshold = 99 // nonsense, but ignored while rerank is off
 	if err := off.Validate(); err != nil {
 		t.Fatalf("rerank OFF must ignore rerank knobs, got %v", err)
