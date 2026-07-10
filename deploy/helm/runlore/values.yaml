@@ -53,6 +53,11 @@ config:
     incidents:
       match:
         severity: [critical]
+      # Suppress re-investigation of a still-firing alert within this window. The code
+      # default is 0 (disabled) — without it, an alert that keeps firing burns a FULL
+      # paid LLM investigation on every Alertmanager repeat_interval. The chart ships
+      # 30m to bound cost/noise on a default install; set 0 to restore immediate
+      # re-investigation of every still-firing repeat.
       dedup:
         window: 30m
       # Pre-investigation debounce: hold a firing alert this long, then investigate
@@ -380,8 +385,16 @@ networkPolicy:
     apiServerCIDRs: []      # the Kubernetes API server endpoint(s) on 6443, e.g. ["10.0.0.1/32"]
   extraEgress: []   # appended verbatim in BOTH modes — the escape hatch for anything custom
   # Scope ingress to the webhook port. Empty (default) leaves it permissive
-  # (no `from:` ⇒ all sources) so installs don't break; set it to lock the
-  # webhook down to Alertmanager. NetworkPolicyPeer list, spliced into `from:`.
+  # (no `from:` ⇒ all sources allowed) so installs don't break on upgrade.
+  #
+  # RISK: with the default empty list, ANY pod in the cluster can reach the webhook
+  # port — and the webhook itself is UNAUTHENTICATED unless you also set
+  # server.webhook_token_env. Combined, that means any workload on the cluster (a
+  # compromised or merely misconfigured neighbor) can POST synthetic alerts and
+  # trigger paid LLM investigations at will, burning your model spend. Set
+  # ingressFrom to restrict callers to your Alertmanager namespace, AND set
+  # server.webhook_token_env — see docs/security-model.md.
+  #
   # Example — only the monitoring namespace may POST alerts:
   #   ingressFrom:
   #     - namespaceSelector:
