@@ -50,7 +50,11 @@ func TestConfirmRecallAppendsCurrentState(t *testing.T) {
 	}
 }
 
-func TestConfirmRecallScopesToWorkload(t *testing.T) {
+// confirmRecall gathers state namespace-wide, NOT scoped to the workload object: a
+// recalled cause often lives on a sibling resource (a Crossplane AccessKey, a
+// dependency), so an object filter would hide the cause and make verify downgrade a
+// correct recall. kube_events must therefore carry the namespace and NO `object`.
+func TestConfirmRecallIsNamespaceWideNotObjectScoped(t *testing.T) {
 	ps := &fakeConfirmTool{name: "pod_status", out: "ok"}
 	ev := &fakeConfirmTool{name: "kube_events", out: "Warning"}
 	li := &LoopInvestigator{Tools: []Tool{ps, ev}}
@@ -61,8 +65,11 @@ func TestConfirmRecallScopesToWorkload(t *testing.T) {
 	if !strings.Contains(ps.gotArgs, `"namespace":"apps"`) {
 		t.Fatalf("pod_status not scoped to namespace: %q", ps.gotArgs)
 	}
-	if !strings.Contains(ev.gotArgs, `"namespace":"apps"`) || !strings.Contains(ev.gotArgs, `"object":"web"`) {
-		t.Fatalf("kube_events not scoped to namespace+object: %q", ev.gotArgs)
+	if !strings.Contains(ev.gotArgs, `"namespace":"apps"`) {
+		t.Fatalf("kube_events not scoped to namespace: %q", ev.gotArgs)
+	}
+	if strings.Contains(ev.gotArgs, `"object"`) {
+		t.Fatalf("kube_events must NOT scope to the workload object (would hide cross-resource causes): %q", ev.gotArgs)
 	}
 }
 
