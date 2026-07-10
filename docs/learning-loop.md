@@ -411,10 +411,11 @@ local Git mirror of the catalog and re-indexes on change:
   every poll. A curator-merged PR moves HEAD → the next poll rebuilds exactly once.
   This runs on **every replica** (so a failover standby is already warm) and the
   per-poll rebuild cost is gone.
-- **Readiness reflects warmth.** A leader doesn't advertise `/readyz` healthy until
+- **Readiness reflects warmth.** A replica doesn't advertise `/readyz` healthy until
   its catalog has loaded at least once, so it isn't routed incident traffic before its
   knowledge base is warm (a ConfigMap-mounted static catalog is ready immediately; a
-  git-sync catalog becomes ready after its first index).
+  git-sync catalog becomes ready after its first index). Readiness is warmth only —
+  leadership is handled by request forwarding, not by keeping standbys NotReady.
 
 The compounding rate is ultimately bounded by **how fast humans merge PRs** — which is
 deliberate. The catalog is a reviewed commons, not an auto-writing cache; the

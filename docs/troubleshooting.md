@@ -11,8 +11,10 @@ two diagnostic channels:
 
 > [!note] Leader-only by design
 > With `leader_election.enabled` (the chart default, 2 replicas) **only the leader investigates**. A
-> standby logs `msg="standby; another replica leads"` and stays at `/readyz` 503 for its whole life —
-> that is intentional, not a fault. `runlore_leader == 1` marks the elected pod.
+> standby logs `msg="standby; another replica leads"`, reports `/readyz` 200 like the leader (readiness
+> is catalog warmth, not leadership), and **proxies** any webhook it receives to the leader — grep
+> `msg="forwarded to leader"` (debug) / `msg="leader forward failed"`. `runlore_leader == 1` marks the
+> elected pod; the Lease holder identity is `<podName>_<podIP>`.
 
 ---
 
@@ -151,16 +153,19 @@ with `count=` confirms how many sinks were wired — `count=0` means none are co
 
 ## `/readyz` never goes green
 
-`/readyz` is gated by **leadership AND catalog warmth** (`internal/app/runtime.go`). It returns `503`
-("`not ready`") until the pod both leads *and* has completed its first catalog index/sync.
+`/readyz` is gated by **catalog warmth** (`internal/app/runtime.go`) — deliberately **not** by
+leadership, so every warm replica (leader and standby alike) goes `Ready` and `helm upgrade --wait` /
+Flux kstatus succeeds with `replicaCount > 1`. It returns `503` ("`not ready`") until the pod has
+completed its first catalog index/sync.
 
-- A **standby** is `503` for its entire life — by design (probes target `/healthz`, not `/readyz`,
-  so a standby isn't killed). Only the leader should be `Ready`.
-- The **leader** stuck at `503` ⇒ the catalog never warmed: check `catalog.dir` / `catalog.git`
+- **Any pod** stuck at `503` ⇒ the catalog never warmed: check `catalog.dir` / `catalog.git`
   (clone failing? token wrong?) and the startup logs. `runlore_catalog_invalid_entries_total` rising
   ⇒ malformed OKF entries at load.
 - The `startupProbe` allows ~60s of warm-up; a slow first clone can exceed it — raise the chart's
   `startupProbe.failureThreshold` if needed.
+- Who leads is a separate question from readiness: read the Lease
+  (`kubectl get lease runlore-leader -o jsonpath='{.spec.holderIdentity}'` — `<podName>_<podIP>`)
+  or the `runlore_leader` gauge.
 
 ---
 
