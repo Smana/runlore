@@ -194,7 +194,18 @@ func resourceAgrees(reqW providers.Workload, entryResource string, requireWorklo
 	if entryResource == "" || reqW.Namespace == "" {
 		return matchNone
 	}
-	if reqW.Ref() == entryResource {
+	// Strip the volatile pod-hash suffix off the NAME segment on BOTH sides before
+	// the structural comparison. A pod-scoped alert (KubePodNotReady carries only a
+	// `pod` label — no deployment/workload label) arrives with the full pod name,
+	// e.g. tooling/harbor-registry-59598dbd57-ltkzw, while the KB entry stores the
+	// normalized controller family tooling/harbor-registry. Without normalization the
+	// two never agree → the recall is rejected (no_resource_match) and a full paid
+	// investigation runs despite a perfect KB entry (live-found). Normalizing BOTH
+	// sides also matches an entry written before the curator-side CORE-681 fix, which
+	// may itself still carry a pod hash. Only the name is normalized — never the
+	// namespace — and the normalization is the same idempotent one the dedup path
+	// uses, so two distinct workloads never collapse together.
+	if normalizeResourceRef(reqW.Ref()) == normalizeResourceRef(entryResource) {
 		return matchExact
 	}
 	if requireWorkload {
@@ -209,6 +220,20 @@ func resourceAgrees(reqW providers.Workload, entryResource string, requireWorklo
 		return matchNamespace
 	}
 	return matchNone
+}
+
+// normalizeResourceRef strips the volatile pod-hash suffix from the NAME segment of
+// a "namespace/name" resource ref, leaving a bare "namespace" (or "") untouched. It
+// splits on the first "/" only — Kubernetes namespaces and names never contain a
+// slash — so the namespace is never normalized, only the name. It delegates to the
+// shared providers.NormalizeWorkloadName so the recall gate and the curator dedup
+// path strip identically (and idempotently).
+func normalizeResourceRef(ref string) string {
+	ns, name, ok := strings.Cut(ref, "/")
+	if !ok {
+		return ref // bare namespace (or empty): no name segment to normalize
+	}
+	return ns + "/" + providers.NormalizeWorkloadName(name)
 }
 
 func clampF(v, lo, hi float64) float64 {

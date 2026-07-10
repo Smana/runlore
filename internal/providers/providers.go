@@ -15,8 +15,10 @@ package providers
 import (
 	"context"
 	"encoding/json"
+	"regexp"
 	"strings"
 	"time"
+	"unicode"
 )
 
 // ---- engine-agnostic "what changed" model ------------------------------------
@@ -63,6 +65,46 @@ func (w Workload) Ref() string {
 		return w.Namespace
 	}
 	return w.Namespace + "/" + w.Name
+}
+
+// reDeployPod matches a volatile pod-name suffix: a Deployment pod is
+// <name>-<rs-hash>-<pod-hash>, e.g. "harbor-registry-59598dbd57-ltkzw". The suffix
+// names one ephemeral pod, not the controller family it belongs to.
+var reDeployPod = regexp.MustCompile(`-[a-f0-9]{8,10}-[a-z0-9]{5}$`) // <name>-<rs-hash>-<pod-hash>
+
+// NormalizeWorkloadName strips a trailing pod-name hash so a per-pod name reduces
+// to its controller family: a Deployment pod (<name>-<rs-hash>-<pod-hash>) and a
+// DaemonSet/StatefulSet-revision pod (<name>-<5-char hash containing a digit>)
+// both collapse to <name>. Names without such a suffix are returned unchanged, so
+// real trailing words (e.g. "redis-cache") are preserved. It is idempotent.
+//
+// This is the single source of truth for pod-hash normalization. It is shared by
+// the curator dedup path (curator.DupFingerprint / IncidentKey — CORE-681, so the
+// same incident on a different pod dedupes to one KB entry) AND the instant-recall
+// structural gate (investigate.resourceAgrees), so a pod-scoped alert carrying the
+// volatile hash still matches the normalized workload stored on a KB entry. Homed
+// here — not in curator — because both packages already import providers, which
+// owns the Workload type; investigate must not import curator (no cycle).
+func NormalizeWorkloadName(name string) string {
+	if m := reDeployPod.FindString(name); m != "" {
+		return name[:len(name)-len(m)]
+	}
+	if i := strings.LastIndexByte(name, '-'); i >= 0 {
+		suf := name[i+1:]
+		if len(suf) == 5 && strings.ContainsAny(suf, "0123456789") && isAlnum(suf) {
+			return name[:i]
+		}
+	}
+	return name
+}
+
+func isAlnum(s string) bool {
+	for _, r := range s {
+		if !unicode.IsLetter(r) && !unicode.IsDigit(r) {
+			return false
+		}
+	}
+	return true
 }
 
 // SourceRef points at the Git source + path backing a change.

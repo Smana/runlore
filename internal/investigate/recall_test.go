@@ -406,6 +406,66 @@ func TestResourceAgrees(t *testing.T) {
 	}
 }
 
+// TestResourceAgreesNormalizesPodHash is the live-found recall bug: a pod-scoped
+// alert (KubePodNotReady carries only a `pod` label — no deployment/workload label)
+// yields a Workload whose Name is the FULL pod name INCLUDING the volatile
+// ReplicaSet/pod-hash suffix, e.g. tooling/harbor-registry-59598dbd57-ltkzw. The
+// structural gate must strip that suffix off the NAME segment on BOTH sides so the
+// request still agrees (matchExact) with the normalized controller family stored on
+// the KB entry (tooling/harbor-registry) — otherwise a perfect KB entry is skipped
+// and a full paid investigation runs. It must NOT loosen anything: distinct
+// workloads still disagree, strict mode is unaffected, the scopeless tier holds.
+func TestResourceAgreesNormalizesPodHash(t *testing.T) {
+	w := func(ns, name string) providers.Workload { return providers.Workload{Namespace: ns, Name: name} }
+	cases := []struct {
+		name      string
+		reqW      providers.Workload
+		entry     string
+		requireWL bool
+		want      matchStrength
+	}{
+		// (i) full pod-name request vs the normalized-workload entry → exact.
+		{"full pod name req vs normalized entry", w("tooling", "harbor-registry-59598dbd57-ltkzw"), "tooling/harbor-registry", false, matchExact},
+		// (ii) reverse — the entry itself carries a pod hash (written before the
+		// curator-side CORE-681 fix, like the live duplicate), request normalized.
+		{"normalized req vs hashed entry", w("tooling", "harbor-registry"), "tooling/harbor-registry-59598dbd57-ltkzw", false, matchExact},
+		// both sides carry a DIFFERENT hash of the same family → still exact.
+		{"both sides hashed same family", w("tooling", "harbor-registry-59598dbd57-ltkzw"), "tooling/harbor-registry-abcdef1234-qrstu", false, matchExact},
+		// (iii) two DIFFERENT workloads must still NOT match after normalization.
+		{"different workloads still none", w("tooling", "harbor-registry-59598dbd57-ltkzw"), "tooling/harbor-core", false, matchNone},
+		// (iv) strict require_workload_match: the normalized family match still exact…
+		{"strict + normalized family exact", w("tooling", "harbor-registry-59598dbd57-ltkzw"), "tooling/harbor-registry", true, matchExact},
+		// …but a genuine mismatch stays none under strict.
+		{"strict + different workload none", w("tooling", "harbor-registry-59598dbd57-ltkzw"), "tooling/harbor-core", true, matchNone},
+		// normalization must never cross a namespace boundary.
+		{"same family different namespace none", w("tooling", "harbor-registry-59598dbd57-ltkzw"), "other/harbor-registry", false, matchNone},
+		// (v) the scopeless tier is untouched by name normalization.
+		{"scopeless still scopeless", w("", ""), "", false, matchScopeless},
+	}
+	for _, c := range cases {
+		if got := resourceAgrees(c.reqW, c.entry, c.requireWL); got != c.want {
+			t.Errorf("%s: resourceAgrees(%+v, %q, %v) = %v, want %v", c.name, c.reqW, c.entry, c.requireWL, got, c.want)
+		}
+	}
+}
+
+// TestLookupRecallsPodScopedAlert is the end-to-end live-found bug: a pod-scoped
+// alert whose workload name carries the volatile pod-hash suffix must now FIRE
+// instant recall against a KB entry whose resource is the normalized controller
+// family — where before the fix it rejected with no_resource_match and ran a full
+// paid investigation.
+func TestLookupRecallsPodScopedAlert(t *testing.T) {
+	r := recallWith([]catalog.ScoredEntry{
+		{Entry: catalog.Entry{Title: "Harbor registry pod not ready", Path: "harbor.md", Resource: "tooling/harbor-registry"}, Score: 6.0},
+		{Entry: catalog.Entry{Title: "unrelated", Path: "b.md"}, Score: 2.0},
+	})
+	req := Request{Title: "KubePodNotReady", Workload: providers.Workload{Namespace: "tooling", Name: "harbor-registry-59598dbd57-ltkzw"}}
+	e, _ := r.lookup(context.Background(), req)
+	if e == nil || e.Path != "harbor.md" {
+		t.Fatalf("a pod-scoped alert must recall the normalized-workload entry harbor.md, got %+v", e)
+	}
+}
+
 func TestLookupStructuralWinnerBelowTopLexical(t *testing.T) {
 	// The two highest lexical hits are DIFFERENT workloads; the structurally-correct
 	// entry (apps/web) is only the 3rd lexical hit. Pre-filtering must surface it —

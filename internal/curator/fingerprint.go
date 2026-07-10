@@ -24,7 +24,6 @@ var (
 	reIPv4       = regexp.MustCompile(`\b\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}\b`)
 	reInstanceID = regexp.MustCompile(`(?i)\b(i|vol|eni|snap|ami)-[0-9a-f]{8,}\b`) // EC2/EBS ids
 	reHexHash    = regexp.MustCompile(`(?i)\b[0-9a-f]{12,}\b`)                     // dashless uuids / sha blobs
-	reDeployPod  = regexp.MustCompile(`-[a-f0-9]{8,10}-[a-z0-9]{5}$`)              // <name>-<rs-hash>-<pod-hash>
 )
 
 // normalizeText masks volatile identifiers (IPs, node hostnames, EC2 ids, long
@@ -39,31 +38,13 @@ func normalizeText(s string) string {
 	return strings.Join(strings.Fields(s), " ")
 }
 
-// normalizeWorkloadName strips a trailing pod-name hash so a per-pod name reduces
-// to its controller family: a Deployment pod (<name>-<rs-hash>-<pod-hash>) and a
-// DaemonSet/StatefulSet-revision pod (<name>-<5-char hash containing a digit>)
-// both collapse to <name>. Names without such a suffix are returned unchanged, so
-// real trailing words (e.g. "redis-cache") are preserved.
+// normalizeWorkloadName strips a trailing pod-name hash so a per-pod name reduces to
+// its controller family. The implementation is shared with the instant-recall
+// structural gate — it lives in providers.NormalizeWorkloadName (the single source
+// of truth, see CORE-681) so the dedup and recall paths can never drift. This thin
+// alias keeps the curator's internal call sites (and their tests) unchanged.
 func normalizeWorkloadName(name string) string {
-	if m := reDeployPod.FindString(name); m != "" {
-		return name[:len(name)-len(m)]
-	}
-	if i := strings.LastIndexByte(name, '-'); i >= 0 {
-		suf := name[i+1:]
-		if len(suf) == 5 && strings.ContainsAny(suf, "0123456789") && isAlnum(suf) {
-			return name[:i]
-		}
-	}
-	return name
-}
-
-func isAlnum(s string) bool {
-	for _, r := range s {
-		if !unicode.IsLetter(r) && !unicode.IsDigit(r) {
-			return false
-		}
-	}
-	return true
+	return providers.NormalizeWorkloadName(name)
 }
 
 // IncidentKey builds a host-invariant, per-class dedup key for an alert: the alert
