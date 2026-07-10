@@ -155,6 +155,56 @@ func TestWebhookDeliverPriorKnowledge(t *testing.T) {
 	}
 }
 
+func TestWebhookDeliverMatchedKnowledge(t *testing.T) {
+	var got payload
+	srv := httptest.NewServer(http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
+		if err := json.NewDecoder(r.Body).Decode(&got); err != nil {
+			t.Errorf("decode: %v", err)
+		}
+	}))
+	defer srv.Close()
+	n := New(srv.URL)
+	inv := providers.Investigation{
+		Title: "t", Confidence: 0.8,
+		MatchedKnowledge: &providers.MatchedEntry{Path: "runbooks/harbor.md", Title: "Harbor probe runbook", URL: "https://kb/runbooks/harbor.md", Score: 6.2},
+	}
+	if err := n.Deliver(context.Background(), inv); err != nil {
+		t.Fatalf("deliver: %v", err)
+	}
+	if got.MatchedKnowledge == nil {
+		t.Fatal("matched_knowledge payload missing")
+	}
+	if got.MatchedKnowledge.Path != "runbooks/harbor.md" || got.MatchedKnowledge.Title != "Harbor probe runbook" ||
+		got.MatchedKnowledge.URL != "https://kb/runbooks/harbor.md" || got.MatchedKnowledge.Score != 6.2 {
+		t.Errorf("matched payload = %+v", got.MatchedKnowledge)
+	}
+}
+
+// TestWebhookMatchedKnowledgeSuppressedByPrior mirrors the shared-text guard: when
+// Prior is set, matched_knowledge is omitted so the structured field never disagrees
+// with the payload's `text` (recurrence already covers the "seen before" case).
+func TestWebhookMatchedKnowledgeSuppressedByPrior(t *testing.T) {
+	var got payload
+	srv := httptest.NewServer(http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
+		if err := json.NewDecoder(r.Body).Decode(&got); err != nil {
+			t.Errorf("decode: %v", err)
+		}
+	}))
+	defer srv.Close()
+	n := New(srv.URL)
+	inv := providers.Investigation{
+		Title: "t", Confidence: 0.8, Occurrences: 2,
+		Prior:            &providers.PriorKnowledge{Cause: "c"},
+		MatchedKnowledge: &providers.MatchedEntry{Path: "p.md", Title: "R", Score: 6},
+	}
+	if err := n.Deliver(context.Background(), inv); err != nil {
+		t.Fatalf("deliver: %v", err)
+	}
+	if got.MatchedKnowledge != nil {
+		t.Errorf("matched_knowledge must be omitted when Prior is set, got %+v", got.MatchedKnowledge)
+	}
+}
+
 func TestBuildRegisteredFromExtra(t *testing.T) {
 	const envVar = "TEST_WH_URL"
 	const testURL = "http://127.0.0.1:9999/hook" // unreachable; we only test Build, not Deliver

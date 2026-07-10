@@ -679,6 +679,68 @@ func TestSlackSummaryBlocksPriorKnowledgePartial(t *testing.T) {
 	}
 }
 
+// TestSlackSummaryBlocksMatchedKnowledge covers the visibility fix: when a full
+// investigation's kb_search matched a known runbook (MatchedKnowledge set, Prior nil),
+// the summary renders a prominent "Matches known runbook" block with the escaped
+// title + path, so the on-call sees RunLore already had knowledge for the incident.
+func TestSlackSummaryBlocksMatchedKnowledge(t *testing.T) {
+	inv := providers.Investigation{
+		Title: "HarborProbeFailure", Confidence: 0.8,
+		MatchedKnowledge: &providers.MatchedEntry{
+			Title: "Harbor probe & TLS <runbook>", // untrusted entry text must be escaped
+			Path:  "runbooks/harbor.md", Score: 6.2,
+		},
+	}
+	txt := blocksText(t, summaryBlocks(inv))
+	for _, want := range []string{
+		"📚 *Matches known runbook:* Harbor probe &amp; TLS &lt;runbook&gt;",
+		"`runbooks/harbor.md`",
+		"RunLore has prior knowledge for this incident.",
+	} {
+		if !strings.Contains(txt, want) {
+			t.Errorf("summary blocks missing %q\n%s", want, txt)
+		}
+	}
+}
+
+// TestSlackSummaryBlocksMatchedKnowledgeURL: when a web URL is derivable it renders
+// as a link (label = path) instead of an inline code path.
+func TestSlackSummaryBlocksMatchedKnowledgeURL(t *testing.T) {
+	inv := providers.Investigation{
+		Title: "t", Confidence: 0.8,
+		MatchedKnowledge: &providers.MatchedEntry{Title: "Runbook", Path: "runbooks/h.md", URL: "https://kb/runbooks/h.md", Score: 5},
+	}
+	txt := blocksText(t, summaryBlocks(inv))
+	if !strings.Contains(txt, "<https://kb/runbooks/h.md|runbooks/h.md>") {
+		t.Errorf("expected a linked entry, got\n%s", txt)
+	}
+}
+
+// TestSlackSummaryBlocksMatchedKnowledgeOmitted: the block is absent when there is
+// no match, and — crucially — suppressed when Prior is set, so recurrence and
+// existing-KB never double-render.
+func TestSlackSummaryBlocksMatchedKnowledgeOmitted(t *testing.T) {
+	// No match at all.
+	bare := blocksText(t, summaryBlocks(providers.Investigation{Title: "t", Confidence: 0.8}))
+	if strings.Contains(bare, "Matches known runbook") {
+		t.Errorf("must not render the block without MatchedKnowledge\n%s", bare)
+	}
+	// Match present but Prior set → the Seen-before block covers it; suppress this one.
+	withPrior := providers.Investigation{
+		Title: "t", Confidence: 0.8, Occurrences: 3,
+		LastOccurrence:   time.Date(2026, 6, 25, 10, 0, 0, 0, time.UTC),
+		Prior:            &providers.PriorKnowledge{Cause: "c"},
+		MatchedKnowledge: &providers.MatchedEntry{Title: "Runbook", Path: "runbooks/h.md", Score: 9},
+	}
+	txt := blocksText(t, summaryBlocks(withPrior))
+	if strings.Contains(txt, "Matches known runbook") {
+		t.Errorf("must NOT render the existing-KB block when Prior is set (double-render)\n%s", txt)
+	}
+	if !strings.Contains(txt, "Seen before") {
+		t.Errorf("expected the recurrence block to render instead\n%s", txt)
+	}
+}
+
 // marshalBlocks JSON-encodes a Slack payload for substring assertions on
 // structures (action_ids, button values) the mrkdwn text helpers don't reach.
 func marshalBlocks(t *testing.T, msg map[string]any) string {
