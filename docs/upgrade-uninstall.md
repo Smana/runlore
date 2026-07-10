@@ -13,23 +13,29 @@ helm upgrade runlore deploy/helm/runlore -n runlore -f values.yaml
 Your `values.yaml` is the source of truth; the entire agent config under `values.config` is rendered
 verbatim into the ConfigMap. Re-apply the same file (with your changes) on every upgrade.
 
-> [!warning] Expect ~20s of downtime during the agent's own upgrade
-> The Deployment uses **`strategy.type: Recreate`**, not a rolling update. Old pods are terminated
-> **before** new ones start, so the agent is briefly unavailable while the new version boots and wins
-> the leader lease.
+> [!warning] Expect ~20s of downtime during the agent's own upgrade (default strategy)
+> The Deployment ships with **`strategy.type: Recreate`**: old pods are terminated **before** new
+> ones start, so the agent is briefly unavailable while the new version boots and wins the leader
+> lease. Set `updateStrategy: RollingUpdate` for near-zero-downtime upgrades (see below).
 
-### Why `Recreate` (not a rolling update)
+### `Recreate` vs `RollingUpdate`
 
-It's a deliberate interaction with leader election. Under a rolling update with `replicaCount: 2`:
+Historically `Recreate` was **forced** by a readiness deadlock: `/readyz` was gated on leadership, a
+new pod couldn't go `Ready` while the old leader held the `Lease`, and the rolling update stalled
+(it also meant standbys were never `Ready`, so `helm upgrade --wait` / Flux kstatus timed out with
+`replicaCount > 1`).
 
-1. A new pod can't become `Ready` until it becomes the **leader** (`/readyz` is gated on leadership).
-2. The old leader still holds the `Lease`, so the new pod can't lead yet.
-3. With `maxUnavailable: 0` the old pod won't terminate until the new one is `Ready` — **deadlock**.
+That deadlock is gone: readiness now reflects **catalog warmth only** — every warm replica is
+`Ready`, and a non-leader replica proxies incoming work to the leader. `RollingUpdate` therefore
+works: the new pod warms up, goes `Ready`, the old leader terminates (draining, then releasing the
+`Lease`), and a surviving pod acquires it.
 
-`Recreate` sidesteps this by terminating the old leader first, releasing the lease so the new pod can
-acquire it. The cost is a short gap **only during the upgrade itself**. Crash-failover HA is
-unaffected: if the leader dies unexpectedly, the hot standby takes over within the lease window
-(15s lease / 10s renew / 2s retry), no upgrade involved.
+`Recreate` remains the shipped default for one reason: it never lets two agent **versions** overlap
+mid-rollout (briefly co-serving webhooks and contending for the same lease across versions). The
+cost is a short gap **only during the upgrade itself** — crash-failover HA is unaffected: if the
+leader dies unexpectedly, the hot standby takes over within the lease window (15s lease / 10s renew
+/ 2s retry), no upgrade involved. Prefer zero-downtime upgrades? Set `updateStrategy: RollingUpdate`
+after validating it in your environment.
 
 `terminationGracePeriodSeconds: 40` gives the draining leader time to finish (the internal drain is
 ~25s): on shutdown it logs `msg="shutdown: stopping intake; draining in-flight investigation"`,

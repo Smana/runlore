@@ -40,7 +40,7 @@ func newAlertServer(cfg *config.Config, enq investigate.Enqueuer, resolve source
 		panic(err)
 	}
 	pipe := source.NewPipeline(cfg, enq, resolve, discardLog)
-	return New(nil, Actions{}, built, pipe, nil, discardLog)
+	return New(nil, Actions{}, built, pipe, nil, nil, discardLog)
 }
 
 func slackSign(secret, ts, body string) string {
@@ -56,7 +56,7 @@ func TestSlackInteraction(t *testing.T) {
 	id := ap.Register(providers.Action{Op: "suspend", Reversible: true, Target: providers.Workload{Kind: "Kustomization", Name: "web", Namespace: "apps"}})
 
 	const secret = "shh"
-	srv := New(nil, Actions{Approvals: ap, SlackSecret: secret, ApproverIDs: []string{"U1"}}, nil, nil, nil, discardLog)
+	srv := New(nil, Actions{Approvals: ap, SlackSecret: secret, ApproverIDs: []string{"U1"}}, nil, nil, nil, nil, discardLog)
 
 	payload := `{"user":{"id":"U1","username":"alice"},"actions":[{"action_id":"runlore_approve","value":"` + id + `"}]}`
 	body := "payload=" + url.QueryEscape(payload)
@@ -98,7 +98,7 @@ func TestSlackRejectRequiresApprover(t *testing.T) {
 	id := ap.Register(providers.Action{Op: "suspend", Reversible: true, Target: providers.Workload{Kind: "Kustomization", Name: "web", Namespace: "apps"}})
 
 	const secret = "shh"
-	srv := New(nil, Actions{Approvals: ap, SlackSecret: secret, ApproverIDs: []string{"U1"}}, nil, nil, nil, discardLog)
+	srv := New(nil, Actions{Approvals: ap, SlackSecret: secret, ApproverIDs: []string{"U1"}}, nil, nil, nil, nil, discardLog)
 
 	reject := func(userID string) {
 		payload := `{"user":{"id":"` + userID + `","username":"x"},"actions":[{"action_id":"runlore_reject","value":"` + id + `"}]}`
@@ -133,7 +133,7 @@ func TestSlackRejectRequiresApprover(t *testing.T) {
 // callback at all.
 func TestSlackInteractionDisabledWithoutApprovals(t *testing.T) {
 	const secret = "shh"
-	srv := New(nil, Actions{SlackSecret: secret}, nil, nil, nil, discardLog)
+	srv := New(nil, Actions{SlackSecret: secret}, nil, nil, nil, nil, discardLog)
 
 	payload := `{"user":{"id":"U1","username":"alice"},"actions":[{"action_id":"runlore_approve","value":"a1"}]}`
 	body := "payload=" + url.QueryEscape(payload)
@@ -166,7 +166,7 @@ func TestActionsApprove(t *testing.T) {
 	ap := action.NewApprovals(exec, pol, audit.Nop{}, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	id := ap.Register(providers.Action{Op: "suspend", Reversible: true, Target: providers.Workload{Kind: "Kustomization", Name: "web", Namespace: "apps"}})
 
-	srv := New(nil, Actions{Approvals: ap, Token: "secret"}, nil, nil, nil, discardLog)
+	srv := New(nil, Actions{Approvals: ap, Token: "secret"}, nil, nil, nil, nil, discardLog)
 
 	// Missing token → 403, nothing executes.
 	rr := httptest.NewRecorder()
@@ -199,7 +199,7 @@ func (f *fakePauser) Paused() bool { return f.paused }
 
 func TestKillSwitch(t *testing.T) {
 	p := &fakePauser{}
-	srv := New(nil, Actions{Pauser: p, Token: "t"}, nil, nil, nil, discardLog)
+	srv := New(nil, Actions{Pauser: p, Token: "t"}, nil, nil, nil, nil, discardLog)
 
 	// Without the token → 403, kill-switch untouched.
 	rr := httptest.NewRecorder()
@@ -238,7 +238,7 @@ func testServer() *Server { return testServerWith(&spyEnqueuer{}) }
 
 func TestReadyz(t *testing.T) {
 	leader := false
-	srv := New(func() bool { return leader }, Actions{}, nil, nil, nil, discardLog)
+	srv := New(func() bool { return leader }, Actions{}, nil, nil, nil, nil, discardLog)
 
 	rr := httptest.NewRecorder()
 	srv.Handler().ServeHTTP(rr, httptest.NewRequest(http.MethodGet, "/readyz", nil))
@@ -337,7 +337,7 @@ func TestRecoverPanic(t *testing.T) {
 // no body, which would deref a nil payload absent recovery is not guaranteed — so we
 // drive a route through the real mux and assert no panic escapes ServeHTTP).
 func TestServerRecoversFromHandlerPanic(t *testing.T) {
-	srv := New(func() bool { panic("ready panic") }, Actions{}, nil, nil, nil, discardLog)
+	srv := New(func() bool { panic("ready panic") }, Actions{}, nil, nil, nil, nil, discardLog)
 	rr := httptest.NewRecorder()
 	// /readyz calls ready(); the panicking ready func exercises the wired middleware.
 	srv.Handler().ServeHTTP(rr, httptest.NewRequest(http.MethodGet, "/readyz", nil))
@@ -383,7 +383,7 @@ func (r *recordFeedback) Feedback(triggerKey, rating, user string, _ time.Time) 
 func TestSlackFeedbackInteraction(t *testing.T) {
 	rec := &recordFeedback{}
 	const secret = "shh"
-	srv := New(nil, Actions{Feedback: rec, SlackSecret: secret}, nil, nil, nil, discardLog)
+	srv := New(nil, Actions{Feedback: rec, SlackSecret: secret}, nil, nil, nil, nil, discardLog)
 
 	send := func(actionID, userID string) *httptest.ResponseRecorder {
 		payload := `{"user":{"id":"` + userID + `","username":"bob"},"actions":[{"action_id":"` + actionID + `","value":"trig-1"}]}`
@@ -435,7 +435,7 @@ func TestSlackFeedbackNotEnabled(t *testing.T) {
 	pol := action.New(config.ActionPolicy{Mode: config.ActionApprove, Allow: config.ActionAllow{ReversibleOnly: true, Namespaces: []string{"apps"}}})
 	ap := action.NewApprovals(exec, pol, audit.Nop{}, discardLog)
 	const secret = "shh"
-	srv := New(nil, Actions{Approvals: ap, SlackSecret: secret}, nil, nil, nil, discardLog)
+	srv := New(nil, Actions{Approvals: ap, SlackSecret: secret}, nil, nil, nil, nil, discardLog)
 
 	payload := `{"user":{"id":"U1","username":"alice"},"actions":[{"action_id":"runlore_feedback_up","value":"trig-1"}]}`
 	body := "payload=" + url.QueryEscape(payload)

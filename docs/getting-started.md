@@ -200,7 +200,8 @@ image:
   repository: ghcr.io/smana/runlore
   tag: ""            # defaults to the chart appVersion; pin in production
 
-# HA: 2+ replicas, one active leader (the rest hot standby). See leader_election below.
+# HA: 2+ replicas, one active leader; every warm replica is Ready and a non-leader
+# proxies incoming webhooks to the leader. See leader_election below.
 # If you also set persistence.enabled: true, pick workloadKind explicitly: the default
 # Deployment shares one PVC across every replica (fine with an RWX StorageClass like
 # EFS; an RWO one like EBS can't attach it to a standby on a different node — set
@@ -438,7 +439,9 @@ route:
       continue: true        # keep your existing routing too
 ```
 
-With 2+ replicas, only the **leader** is Ready, so the Service routes webhooks to it automatically.
+With 2+ replicas, every warm replica is `Ready` — the Service may route a webhook to any of them,
+and a non-leader replica transparently proxies it to the elected **leader** (single hop, looked up
+via the leader-election `Lease`), so only the leader's queue ever investigates.
 
 ### Harden for production
 
@@ -480,7 +483,8 @@ See the [Security model](security-model.md) for the full posture — redaction, 
 ## Step 6 — Verify
 
 ```bash
-# the leader becomes Ready; standbys stay NotReady (expected)
+# every replica becomes Ready once its catalog is warm; the Lease names the leader
+# (holder identity is <podName>_<podIP> — the IP lets standbys forward work to it)
 kubectl -n runlore get pods
 kubectl -n runlore get lease runlore-leader -o jsonpath='{.spec.holderIdentity}'; echo
 

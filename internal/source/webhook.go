@@ -56,12 +56,19 @@ func (b Built) Handler(auth func(*http.Request) bool, bodyCap int64, pipe *Pipel
 	}
 }
 
-// MountWebhooks registers every Webhook-kind source at its Path on mux.
-func MountWebhooks(mux *http.ServeMux, built []Built, auth func(*http.Request) bool, pipe *Pipeline) {
+// MountWebhooks registers every Webhook-kind source at its Path on mux. wrap
+// (optional, nil = none) decorates each handler — the serve path passes the
+// leader-forwarding middleware (#264) so a non-leader replica proxies webhook
+// deliveries to the leader instead of ingesting into its own idle queue.
+func MountWebhooks(mux *http.ServeMux, built []Built, auth func(*http.Request) bool, pipe *Pipeline, wrap func(http.Handler) http.Handler) {
 	for _, b := range built {
 		if b.Desc.Kind != Webhook {
 			continue
 		}
-		mux.HandleFunc("POST "+b.Desc.Path, b.Handler(auth, 1<<20, pipe))
+		var h http.Handler = b.Handler(auth, 1<<20, pipe)
+		if wrap != nil {
+			h = wrap(h)
+		}
+		mux.Handle("POST "+b.Desc.Path, h)
 	}
 }

@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/client-go/kubernetes/fake"
 	k8stesting "k8s.io/client-go/testing"
@@ -56,6 +57,7 @@ func TestRunLeaderElectionRejoinsAfterLoss(t *testing.T) {
 
 	t.Setenv("POD_NAME", "replica-a")
 	t.Setenv("POD_NAMESPACE", "default")
+	t.Setenv("POD_IP", "10.9.8.7")
 	cs := fake.NewSimpleClientset()
 	// outage simulates an API-server blip: while set, every lease get/update
 	// fails, so the leader cannot renew within renewDeadline and drops the lease
@@ -74,13 +76,14 @@ func TestRunLeaderElectionRejoinsAfterLoss(t *testing.T) {
 	cfg.LeaderElection.Name = "test-leader"
 
 	var leader atomic.Bool
+	var tracker LeaderTracker
 	var terms atomic.Int32 // one startWork call per leadership term
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		RunLeaderElection(ctx, cfg, cs, &leader,
+		RunLeaderElection(ctx, cfg, cs, &leader, &tracker,
 			slog.New(slog.NewTextHandler(io.Discard, nil)),
 			func(context.Context) { terms.Add(1) })
 	}()
@@ -98,6 +101,20 @@ func TestRunLeaderElectionRejoinsAfterLoss(t *testing.T) {
 	}
 
 	waitFor("initial leadership", leader.Load)
+
+	// #264: the lease identity must be ROUTABLE — <podName>_<podIP> — so a
+	// follower can proxy work-bearing requests to the holder. Assert both the
+	// written Lease and the OnNewLeader-fed tracker expose it.
+	lease, err := cs.CoordinationV1().Leases("default").Get(ctx, "test-leader", metav1.GetOptions{})
+	if err != nil {
+		t.Fatalf("get lease: %v", err)
+	}
+	if got := *lease.Spec.HolderIdentity; got != "replica-a_10.9.8.7" {
+		t.Errorf("lease holder identity = %q, want replica-a_10.9.8.7", got)
+	}
+	waitFor("tracker learned the routable holder", func() bool {
+		return tracker.Addr("8080") == "10.9.8.7:8080"
+	})
 
 	// Blip the API server for longer than renewDeadline: the replica must drop
 	// leadership (it cannot renew), but the process stays alive.

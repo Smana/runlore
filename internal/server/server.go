@@ -71,14 +71,19 @@ type Actions struct {
 }
 
 // New builds a Server. ready reports whether this replica should serve; nil =
-// always ready. The caller composes what readiness means (e.g. leadership AND a
-// warm catalog). acts (optional) enables the rung-2 approval endpoints + the
-// rung-3 kill-switch, gated by acts.Token (X-Approval-Token). /healthz is liveness;
-// /readyz is readiness (gated by the caller-supplied ready func). built + pipe wire
-// the registered event sources: webhook sources are mounted at their paths and feed
-// the ingest pipeline. metricsHandler (optional) serves OTel Prometheus metrics on
-// GET /metrics when non-nil.
-func New(ready func() bool, acts Actions, built []source.Built, pipe *source.Pipeline, metricsHandler http.Handler, log *slog.Logger) *Server {
+// always ready. The caller composes what readiness means (e.g. a warm catalog —
+// since #264 deliberately NOT leadership, so every warm replica is Ready and
+// Helm --wait/kstatus succeeds with replicaCount>1). acts (optional) enables the
+// rung-2 approval endpoints + the rung-3 kill-switch, gated by acts.Token
+// (X-Approval-Token). /healthz is liveness; /readyz is readiness (gated by the
+// caller-supplied ready func). built + pipe wire the registered event sources:
+// webhook sources are mounted at their paths and feed the ingest pipeline.
+// metricsHandler (optional) serves OTel Prometheus metrics on GET /metrics when
+// non-nil. fwd (optional) is the leader-forwarding policy: every WORK-BEARING
+// route (source webhooks, slack interactions, action control) goes through it
+// so a follower proxies the request to the leader; nil serves everything
+// locally.
+func New(ready func() bool, acts Actions, built []source.Built, pipe *source.Pipeline, metricsHandler http.Handler, fwd *Forward, log *slog.Logger) *Server {
 	approvers := make(map[string]bool, len(acts.ApproverIDs))
 	for _, id := range acts.ApproverIDs {
 		approvers[id] = true
@@ -90,7 +95,14 @@ func New(ready func() bool, acts Actions, built []source.Built, pipe *source.Pip
 		webhookToken: acts.WebhookToken, approvers: approvers, metrics: metricsHandler, log: log,
 	}
 	mux := http.NewServeMux()
-	mux.HandleFunc("POST /slack/interactions", s.handleSlackInteraction)
+	// work marks a route as work-bearing: on a follower the request is proxied
+	// to the leader (single hop, see Forward). Authentication happens on the
+	// leader — headers and body are relayed byte-identical, so the bearer token
+	// and HMAC signatures verify there exactly as they would here. The
+	// local-only endpoints below (/healthz, /readyz, /metrics) are NEVER
+	// wrapped: probes and scrapes are always about THIS replica.
+	work := fwd.middleware // nil-receiver safe: identity when fwd == nil
+	mux.Handle("POST /slack/interactions", work(http.HandlerFunc(s.handleSlackInteraction)))
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusOK)
 	})
@@ -101,15 +113,19 @@ func New(ready func() bool, acts Actions, built []source.Built, pipe *source.Pip
 		}
 		w.WriteHeader(http.StatusOK)
 	})
-	mux.HandleFunc("GET /actions", s.handleListActions)
-	mux.HandleFunc("POST /actions/{id}/approve", s.handleApprove)
-	mux.HandleFunc("POST /actions/{id}/reject", s.handleReject)
-	mux.HandleFunc("POST /actions/pause", s.handlePause)
-	mux.HandleFunc("POST /actions/resume", s.handleResume)
+	// The action-control endpoints are work-bearing too: the approval queue and
+	// the auto kill-switch live in the LEADER process (registered by its
+	// investigation loop), so a follower answering locally would list an empty
+	// queue or pause a pauser nothing consults.
+	mux.Handle("GET /actions", work(http.HandlerFunc(s.handleListActions)))
+	mux.Handle("POST /actions/{id}/approve", work(http.HandlerFunc(s.handleApprove)))
+	mux.Handle("POST /actions/{id}/reject", work(http.HandlerFunc(s.handleReject)))
+	mux.Handle("POST /actions/pause", work(http.HandlerFunc(s.handlePause)))
+	mux.Handle("POST /actions/resume", work(http.HandlerFunc(s.handleResume)))
 	if s.metrics != nil {
 		mux.Handle("GET /metrics", s.metrics)
 	}
-	source.MountWebhooks(mux, built, s.webhookAuthorized, pipe)
+	source.MountWebhooks(mux, built, s.webhookAuthorized, pipe, work)
 	// Wrap the whole mux so a panic in any handler (current or future) returns a
 	// structured 500 and a logged stack instead of net/http's silent connection drop.
 	s.handler = recoverPanic(mux, log)

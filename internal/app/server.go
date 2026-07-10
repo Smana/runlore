@@ -48,18 +48,24 @@ var (
 )
 
 // RunLeaderElection blocks running Lease-based leader election; the leader runs
-// startWork and reports ready. Lost leadership cancels the work context and the
-// replica REJOINS the election as a standby: client-go's RunOrDie returns when
-// the lease is lost without the process dying (e.g. an API-server blip past
-// RenewDeadline), and without the re-entry loop the replica would never contend
-// again — a permanent zombie standby that /healthz keeps reporting alive,
-// silently shrinking the HA pool until no replica leads at all.
-func RunLeaderElection(ctx context.Context, cfg *config.Config, cs kubernetes.Interface, leader *atomic.Bool, log *slog.Logger, startWork func(context.Context)) {
+// startWork. Lost leadership cancels the work context and the replica REJOINS
+// the election as a standby: client-go's RunOrDie returns when the lease is
+// lost without the process dying (e.g. an API-server blip past RenewDeadline),
+// and without the re-entry loop the replica would never contend again — a
+// permanent zombie standby that /healthz keeps reporting alive, silently
+// shrinking the HA pool until no replica leads at all.
+//
+// The lease identity is "<podName>_<podIP>" (#264): every replica learns the
+// holder through OnNewLeader and records it in tracker, so a follower can
+// PROXY incoming work-bearing requests to the leader (server.Forward) —
+// /readyz no longer reflects leadership, so the Service routes to any warm
+// replica. tracker may be nil (no forwarding wired, e.g. tests).
+func RunLeaderElection(ctx context.Context, cfg *config.Config, cs kubernetes.Interface, leader *atomic.Bool, tracker *LeaderTracker, log *slog.Logger, startWork func(context.Context)) {
 	name := cfg.LeaderElection.Name
 	if name == "" {
 		name = "runlore-leader"
 	}
-	id := PodName()
+	id := EncodeLeaseIdentity(PodName(), PodIP())
 	lock := &resourcelock.LeaseLock{
 		LeaseMeta:  metav1.ObjectMeta{Name: name, Namespace: PodNamespace()},
 		Client:     cs.CoordinationV1(),
@@ -86,6 +92,13 @@ func RunLeaderElection(ctx context.Context, cfg *config.Config, cs kubernetes.In
 					leader.Store(false)
 				},
 				OnNewLeader: func(current string) {
+					// Record the holder FIRST so forwarding has a target as
+					// early as possible; the callback also fires on the leader
+					// itself (current == id), which is harmless — the leader
+					// serves locally and never consults the tracker.
+					if tracker != nil {
+						tracker.Set(current)
+					}
 					if current != id {
 						log.Info("standby; another replica leads", "leader", current)
 					}
