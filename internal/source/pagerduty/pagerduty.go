@@ -73,7 +73,8 @@ type pdRef struct {
 // investigation Request; incident.resolved becomes a Resolution keyed by the
 // incident id (stable across the triggered↔resolved pair); every other event
 // type is ignored. PagerDuty carries no Kubernetes namespace/workload, so those
-// fields stay empty — recall and structural matching tolerate that.
+// fields stay empty — such workload-less requests can recall only entries that
+// are themselves resource-less (the scopeless tier; see investigate.resourceAgrees).
 func (Source) Decode(body []byte, _ http.Header) (source.DecodeResult, error) {
 	var p pdPayload
 	if err := json.Unmarshal(body, &p); err != nil {

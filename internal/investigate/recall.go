@@ -23,8 +23,10 @@ type OutcomeStats interface {
 // Recall short-circuits an investigation when the knowledge catalog already has a
 // trustworthy answer for the symptom — skipping the slow, paid ReAct loop. From a
 // wider candidate set it keeps only entries whose stored resource structurally
-// agrees with the alert's workload, then requires a clear margin over the runner-up
-// among those agreeing candidates, plus (in the loop) the adversarial verify pass.
+// agrees with the alert's workload (a workload-less request agrees only with
+// resource-less entries — the scopeless tier), then requires a clear margin over
+// the runner-up among those agreeing candidates, plus (in the loop) the
+// adversarial verify pass.
 // Confidence is derived from those signals, never asserted — scores are
 // corpus-dependent and a stale hit must not silently replace an investigation.
 type Recall struct {
@@ -32,7 +34,7 @@ type Recall struct {
 	MinScore             float64 // similarity floor for the top hit
 	MarginGap            float64 // top hit must beat the runner-up by at least this
 	SoloFloor            float64 // confident bar when there is only one hit
-	RequireWorkloadMatch bool    // true = exact namespace+workload; false = namespace-level agreement is enough
+	RequireWorkloadMatch bool    // true = exact namespace+workload (also disables scopeless matching); false = namespace-level agreement is enough
 
 	// Hybrid, when non-nil AND it has vectors, switches recall to fused BM25+embedding
 	// retrieval gated on COSINE similarity (HybridMinScore / HybridMarginGap) instead
@@ -107,11 +109,18 @@ func (r *Recall) lookup(ctx context.Context, req Request) (*catalog.Entry, float
 	// Gate — margin among the structurally-agreeing candidates: a clear winner for
 	// this workload, not merely the top lexical hit. A lone agreeing hit must clear
 	// both the solo floor and the min score.
+	strength := resourceAgrees(req.Workload, winner.Entry.Resource, r.RequireWorkloadMatch)
 	margin := score
 	confident := score >= soloFloor && score >= minScore
 	if len(agreeing) > 1 {
 		margin = score - agreeing[1].Score
 		confident = score >= minScore && margin >= marginGap
+	}
+	// A scopeless match carries zero structural evidence, so the margin gate alone
+	// is too weak: regardless of how many candidates agree, a scopeless winner must
+	// ALSO clear the solo floor + min score, exactly like a lone hit.
+	if strength == matchScopeless {
+		confident = confident && score >= soloFloor && score >= minScore
 	}
 	if !confident {
 		r.reject(ctx, "low_margin")
@@ -119,7 +128,6 @@ func (r *Recall) lookup(ctx context.Context, req Request) (*catalog.Entry, float
 	}
 
 	e := winner.Entry
-	strength := resourceAgrees(req.Workload, e.Resource, r.RequireWorkloadMatch)
 	conf := deriveRecallConfidence(score, margin, strength)
 	// Outcome decay: bias confidence by the entry's resolution track record, and
 	// reject (re-investigate) an entry that recalls-but-never-resolves. Fail-safe —
@@ -156,13 +164,31 @@ type matchStrength int
 
 const (
 	matchNone matchStrength = iota
+	// matchScopeless is the weakest agreeing tier: BOTH sides carry no workload
+	// scope at all. It exists so workload-less incident sources (PagerDuty carries
+	// no Kubernetes namespace/name) can still recall hand-written runbooks and
+	// curated Playbooks that are themselves resource-less. It provides zero
+	// structural evidence, so the gate and the derived confidence treat it as
+	// strictly weaker than any scoped tier.
+	matchScopeless
 	matchNamespace
 	matchExact
 )
 
 // resourceAgrees reports how strongly the alert's workload agrees with an entry's
-// stored resource. requireWorkload demands an exact namespace+name match.
+// stored resource. requireWorkload demands an exact namespace+name match — which
+// also disables the scopeless tier (a scopeless pair can never provide one).
 func resourceAgrees(reqW providers.Workload, entryResource string, requireWorkload bool) matchStrength {
+	// Scopeless tier: a request with NO workload at all may agree ONLY with entries
+	// that are themselves resource-less. This never loosens scoped matching — a
+	// request carrying ANY scope hint (namespace, or even a bare name) falls through
+	// to the unchanged rules below, where a resource-less entry never agrees.
+	if reqW.Namespace == "" && reqW.Name == "" {
+		if entryResource == "" && !requireWorkload {
+			return matchScopeless
+		}
+		return matchNone
+	}
 	if entryResource == "" || reqW.Namespace == "" {
 		return matchNone
 	}
@@ -223,6 +249,13 @@ func deriveRecallConfidence(score, margin float64, strength matchStrength) float
 	base := 0.55
 	if score > 0 {
 		base = 0.55 + 0.30*clampF(margin/score, 0, 1) // decisive winner → up to 0.85
+	}
+	// Scopeless is the weakest tier: with zero structural evidence the confidence
+	// rides on the lexical margin alone, so it starts lower AND is capped below
+	// every scoped tier — a workload-less recall must never look as trustworthy as
+	// a namespace- or workload-anchored one.
+	if strength == matchScopeless {
+		return clampF(base-0.10, 0.45, 0.70)
 	}
 	if strength == matchExact {
 		base += 0.05
