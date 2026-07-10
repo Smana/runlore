@@ -61,6 +61,34 @@ func RequireWebhookAuth(cfg *config.Config, webhookToken string) error {
 	return nil
 }
 
+// WebhookAuthWarning decides the startup warning for an unauthenticated alert
+// webhook, returning "" when no warning is warranted. Unlike RequireWebhookAuth
+// (which only fails closed once a model is billed per request) and
+// config.Validate (which only hard-fails actions.mode=auto), an empty token is a
+// DELIBERATE fail-open default outside those cases — cluster-internal deployments
+// legitimately skip it. That default must not be silent: whenever the alertmanager
+// source is enabled with no token, anyone who can reach the Service can trigger
+// investigations (and, under an executing rung, actions a human then approves)
+// regardless of whether a model is configured yet. PagerDuty is deliberately
+// excluded — it authenticates via its own X-PagerDuty-Signature scheme (see
+// RequirePagerDutyAuth), so an empty shared token says nothing about its exposure.
+// actions.mode=approve escalates the wording (a human is now clicking "run" off of
+// webhook-supplied data) but stays a warning, not an error — auto already hard-fails
+// via config.Validate, and off/suggest carry no execution risk to call out.
+func WebhookAuthWarning(alertmanagerEnabled bool, webhookToken string, mode config.ActionMode) string {
+	if !alertmanagerEnabled || webhookToken != "" {
+		return ""
+	}
+	if mode == config.ActionApprove {
+		return "alert webhook is UNAUTHENTICATED (server.webhook_token_env unset) while actions.mode=approve: " +
+			"anyone who can reach the Service can trigger paid investigations whose actions a human then approves " +
+			"— set a token unless the endpoint is provably unreachable beyond trusted networks (docs/security-model.md)"
+	}
+	return "alert webhook is UNAUTHENTICATED (server.webhook_token_env unset): fine for cluster-internal traffic, " +
+		"but anyone who can reach the Service can trigger paid investigations — set a token if the endpoint is " +
+		"reachable beyond trusted networks (docs/security-model.md)"
+}
+
 // RequirePagerDutyAuth is the PagerDuty analogue of RequireWebhookAuth. The
 // PagerDuty source authenticates /webhook/pagerduty with its own
 // X-PagerDuty-Signature verification (not the shared server.webhook_token_env

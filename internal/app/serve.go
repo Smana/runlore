@@ -138,6 +138,15 @@ func RunServe(version string, args []string) error {
 	if err := RequirePagerDutyAuth(cfg, pdEnabled, pdSecret); err != nil {
 		return err
 	}
+	// RequireWebhookAuth above only fail-closes once a model is configured (it bills
+	// per request); an empty token otherwise is a DELIBERATE fail-open default for
+	// cluster-internal traffic, and config.Validate only hard-fails it under
+	// actions.mode=auto. That default must not be silent, so surface it loudly here —
+	// see WebhookAuthWarning for the full decision matrix.
+	_, alertmanagerEnabled := cfg.Sources["alertmanager"]
+	if msg := WebhookAuthWarning(alertmanagerEnabled, webhookToken, cfg.Actions.Mode); msg != "" {
+		log.Warn(msg)
+	}
 
 	// Set up the single shared OTel metrics instance before building the investigator
 	// so recall + the investigation loop can record to it from the first request.
