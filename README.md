@@ -26,10 +26,9 @@ next time gets an instant answer — no fresh investigation.
 
 **Learns your platform · single Go binary · runs in your cluster · on your models.**
 
-> **Note:** RunLore is **read-only by default** — investigations never mutate your cluster; the only
-> default write surface is Git, via reviewed PRs. Teams that want more can climb the autonomy ladder
-> (`suggest` → `approve`): even at the top supported rung RunLore only executes *reversible* GitOps
-> operations after an **explicit human approval** — a human stays in the loop at every step
+> **The autonomy ladder.** Teams that want more than the read-only default can climb `suggest` →
+> `approve`: even at the top supported rung RunLore only executes *reversible* GitOps operations after
+> an **explicit human approval** — a human stays in the loop at every step
 > (see [Project status](#project-status--stability)).
 
 **Who it's for** — **SRE and platform teams** who want their incident knowledge **portable and
@@ -39,12 +38,12 @@ diff — but GitOps isn't required: every data source is pluggable, and an unset
 
 ## See it in action
 
-Two sides of the same incident, delivered to Slack — the whole point of the learning loop in one place.
+Two sides of the same incident, delivered to your chat (shown here in Slack; Matrix delivers the same findings) — the whole point of the learning loop in one place.
 
 **First time — a full investigation.** A verdict-first summary: the actionability call
 (no action / suggested / required / inconclusive), the confidence-scored root cause, the alert
 metadata and recurrence, top-cause "why", suggested next steps, ruled-out hypotheses and data gaps,
-and a link to the pull request it opened in your knowledge base. On a Slack **bot token** the full
+and a link to the pull request it opened in your knowledge base. With the Slack notifier's **bot token**, the full
 analysis lands as a threaded reply under that summary. The footer shows the real cost — model calls
 and tokens.
 
@@ -121,7 +120,7 @@ additive. Full setup detail in **[Data sources](docs/data-sources.md)**.
 | **Kubernetes** | client-go — pod status, events, controller logs | *(in-cluster)* |
 | **LLM** | Anthropic · Google Gemini · any OpenAI-compatible *(vLLM, Ollama, OpenRouter…)* | `model.provider` |
 | **Triggers** *(sources)* | Alertmanager webhook · GitOps failures · PagerDuty webhook *(new)* | `sources.*` |
-| **Notifiers** | Slack *(bot token: threaded summary + detail; opt-in 👍/👎 feedback buttons feeding the learning loop)* · Slack incoming webhook / Matrix / generic webhook *(single verdict-first message)* | `notify.*` |
+| **Notifiers** | Slack *(bot token: threaded summary + detail; opt-in 👍/👎 buttons)* · Matrix *(opt-in 👍/👎 reactions)* — both feed the learning loop · Slack incoming webhook / generic webhook *(single verdict-first message)* | `notify.*` |
 | **Knowledge base** *(git forge)* | GitHub *(App auth)* | `forge.*` |
 
 ## ⚡ Try it in one minute — no cluster, no keys
@@ -189,12 +188,14 @@ credentials, complete `values.yaml` reference, data sources, and verification st
 
 RunLore is **GitOps-engine-agnostic** (Flux + Argo CD), **metrics-backend-agnostic**
 (VictoriaMetrics + Prometheus), with pluggable logs and CNI-agnostic network signals. Change-aware RCA
-isn't unique — commercial tools (Komodor, Anyshift) diff changes too ([prior art](docs/prior-art.md)) —
-so the wedge is the **combination the open tools don't have**: that signal feeding an **open, portable
+isn't unique — commercial tools (Komodor, Anyshift) diff changes too ([prior art](docs/prior-art.md)).
+The wedge is the **combination the open tools don't have**: that signal feeding an **open, portable
 catalog you own** ([OKF](https://github.com/GoogleCloudPlatform/knowledge-catalog)-compatible markdown,
-not a proprietary store), from an agent that's **honest about the sub-50% reality** — `unresolved` is a
-first-class answer, an adversarial *verify* pass can only ever lower a finding's confidence, and every
-claim is checked by a shipped eval harness.
+not a proprietary store), from an agent that's **honest about the sub-50% reality**:
+
+- `unresolved` is a first-class answer;
+- an adversarial *verify* pass can only ever *lower* a finding's confidence, never raise it;
+- every claim is checked by a shipped eval harness.
 
 ## Project status & stability
 
