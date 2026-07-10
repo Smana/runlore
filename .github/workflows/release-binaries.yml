@@ -42,8 +42,9 @@ jobs:
           go-version-file: go.mod
 
       - name: Set up Docker Buildx
-        # Required for the goreleaser `dockers` entries (use: buildx) and their
-        # buildx-native --provenance / --sbom attestations.
+        # Required for the goreleaser `dockers_v2` step: it creates a docker-container
+        # builder, which supports pushing a multi-platform index with the buildx-native
+        # --provenance / --sbom (--attest=type=sbom) attestations attached.
         uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
 
       - name: Log in to Container Registry
