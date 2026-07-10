@@ -190,24 +190,61 @@ func TestForwardUnknownLeader503(t *testing.T) {
 	}
 }
 
-// TestForwardLeaderUnreachable502: the tracker can briefly point at a dead
-// leader (mid-failover). The proxy must fail fast with 502 + Retry-After, not
-// hang or serve the work locally on a non-leader.
-func TestForwardLeaderUnreachable502(t *testing.T) {
+// TestForwardDeadLeaderUnreachable503: the tracker can briefly point at a dead
+// leader (mid-failover / takeover window) whose IP no longer answers. A dial
+// failure means we never REACHED a live leader, so it must be shed exactly like
+// "no leader known": 503 + Retry-After (which Alertmanager & co. retry on), NOT
+// a 502 (which those senders treat as the upstream's answer and do not retry).
+// It must also never serve the leader-only work locally on a non-leader.
+func TestForwardDeadLeaderUnreachable503(t *testing.T) {
 	enq := &spyEnqueuer{}
 	// 127.0.0.1:1 — reserved port, connection refused immediately.
 	srv := newForwardServer(t, follower(func() string { return "127.0.0.1:1" }), enq)
 
 	rr := httptest.NewRecorder()
 	srv.Handler().ServeHTTP(rr, httptest.NewRequest(http.MethodPost, "/webhook/alertmanager", strings.NewReader(alertBody)))
-	if rr.Code != http.StatusBadGateway {
-		t.Fatalf("unreachable leader = %d, want 502", rr.Code)
+	if rr.Code != http.StatusServiceUnavailable {
+		t.Fatalf("unreachable leader = %d, want 503 (retryable, not 502)", rr.Code)
 	}
 	if rr.Header().Get("Retry-After") == "" {
-		t.Error("502 for unreachable leader must carry Retry-After")
+		t.Error("503 for unreachable leader must carry Retry-After (senders retry)")
 	}
 	if len(enq.reqs) != 0 {
 		t.Error("follower served work locally when the leader was unreachable")
+	}
+}
+
+// TestForwardStaleSelfServesLocally: during a takeover the tracker can still
+// hold an identity whose pod-NAME is THIS pod's own — this pod just won the
+// Lease but IsLeader() hasn't flipped, or (StatefulSet) the Lease still names a
+// dead predecessor that reused our stable ordinal with a now-stale IP. The
+// follower must NOT proxy (dialing a stale IP, or looping onto its own port):
+// it serves the work locally, since by stable identity it owns it.
+func TestForwardStaleSelfServesLocally(t *testing.T) {
+	// A LIVE server at the tracked address, so a proxy WOULD succeed if wrongly
+	// attempted — the guard is proven by work landing locally, not by a dial
+	// error masking a missing guard.
+	tracked := newFakeLeader(t)
+	enq := &spyEnqueuer{}
+	fwd := &Forward{
+		IsLeader:   func() bool { return false }, // takeover window: not yet leader
+		LeaderAddr: tracked.addr,
+		LeaderName: func() string { return "runlore-0" },
+		SelfName:   "runlore-0", // tracked holder's name == our own
+		Log:        discardLog,
+	}
+	srv := newForwardServer(t, fwd, enq)
+
+	rr := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rr, httptest.NewRequest(http.MethodPost, "/webhook/alertmanager", strings.NewReader(alertBody)))
+	if rr.Code != http.StatusAccepted {
+		t.Fatalf("stale-self forward = %d, want 202 (served locally)", rr.Code)
+	}
+	if len(enq.reqs) != 1 {
+		t.Fatalf("stale-self enqueued %d locally, want 1 (own work served here)", len(enq.reqs))
+	}
+	if n := len(tracked.requests()); n != 0 {
+		t.Errorf("stale-self proxied %d request(s) to itself, want 0", n)
 	}
 }
 
