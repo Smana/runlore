@@ -59,7 +59,9 @@ incident webhook. Known keys: `alertmanager`, `gitops`, `pagerduty`.
 - `incidents.match` / `incidents.ignore` — ANDed matchers (`severity`, `environment`, `namespaces`
   globs, `alertnames` globs, `labels`); empty fields match anything. `ignore` excludes even if `match`
   passes.
-- `incidents.dedup.window` — don't re-open a still-firing alert within this window.
+- `incidents.dedup.window` — don't re-open a still-firing alert within this window. **Code default `0`**
+  (disabled — every repeat_interval re-investigates); the **chart ships `30m`** by default to bound
+  LLM spend on noisy still-firing alerts (see `deploy/helm/runlore/values.yaml`).
 - `incidents.debounce` — hold a firing alert this long before investigating, and skip it if a matching
   Alertmanager `resolved` webhook arrives within the window (self-resolving noise, e.g. a
   `KubeDaemonSetRolloutStuck` during a Karpenter node-churn cycle). **Default `0`** (investigate
