@@ -53,7 +53,7 @@ func ParseLeaseIdentity(id string) (name, ip string) {
 //
 // The view can be briefly stale (the holder just died and no successor has
 // renewed yet) — the forwarding layer treats a failed dial as "retry shortly"
-// (502 + Retry-After) rather than trusting the tracker blindly.
+// (503 + Retry-After) rather than trusting the tracker blindly.
 type LeaderTracker struct {
 	v atomic.Value // string: the raw holder identity
 }
@@ -66,6 +66,16 @@ func (t *LeaderTracker) Set(identity string) { t.v.Store(identity) }
 func (t *LeaderTracker) Identity() string {
 	s, _ := t.v.Load().(string)
 	return s
+}
+
+// Name returns the pod-name part of the current holder identity ("" before the
+// first OnNewLeader callback, or from a bare pre-#264 identity with no IP). The
+// forwarding layer compares it against this replica's own name to detect the
+// tracker pointing at itself during a takeover and serve locally rather than
+// proxy to itself (server.Forward.LeaderName).
+func (t *LeaderTracker) Name() string {
+	name, _ := ParseLeaseIdentity(t.Identity())
+	return name
 }
 
 // Addr returns "ip:port" (IPv6 bracketed) for the current holder on the given

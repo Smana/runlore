@@ -360,6 +360,13 @@ func RunServe(version string, args []string) error {
 	fwd := &server.Forward{
 		IsLeader:   leader.Load, // pinned true when leader election is disabled
 		LeaderAddr: func() string { return tracker.Addr(port) },
+		// SelfName/LeaderName close the takeover self-race: during the window
+		// after this pod wins the Lease but before IsLeader() flips — and, in a
+		// StatefulSet, while the Lease still names a dead predecessor that reused
+		// this pod's stable ordinal — the tracked holder's NAME is our own, so
+		// the follower serves locally instead of proxying to a stale IP / itself.
+		SelfName:   PodName(),
+		LeaderName: tracker.Name,
 		Log:        log,
 	}
 	srv := server.New(ReadyFunc(cat, CatalogExpected(cfg)), acts, built, pipe, metricsHandler, fwd, log)
