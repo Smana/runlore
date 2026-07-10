@@ -39,14 +39,26 @@ diff — but GitOps isn't required: every data source is pluggable, and an unset
 
 ## See it in action
 
-A real RunLore investigation delivered to Slack: a verdict-first summary — the actionability call
+Two sides of the same incident, delivered to Slack — the whole point of the learning loop in one place.
+
+**First time — a full investigation.** A verdict-first summary: the actionability call
 (no action / suggested / required / inconclusive), the confidence-scored root cause, the alert
 metadata and recurrence, top-cause "why", suggested next steps, ruled-out hypotheses and data gaps,
 and a link to the pull request it opened in your knowledge base. On a Slack **bot token** the full
-analysis lands as a threaded reply under that summary.
+analysis lands as a threaded reply under that summary. The footer shows the real cost — model calls
+and tokens.
 
 <div align="center">
 <img src="assets/slack-notification.png" alt="RunLore Slack notification — verdict-first summary with confidence-scored root cause, alert metadata, recurrence, suggested next steps, ruled-out hypotheses and a link to the knowledge-base PR" width="760" />
+</div>
+
+**Next time — an instant recall.** Once that entry is merged, the same incident — even under a
+*different, generic alert* — is answered straight from your knowledge base: **no investigation, no new
+PR**, just the known cause, the human-reviewed resolution, and the entry's resolve-rate track record.
+An order of magnitude cheaper (two model calls vs a full ReAct loop), delivered in seconds.
+
+<div align="center">
+<img src="assets/recall-notification.png" alt="RunLore Slack notification — an instant recall: an ⚡ Instant recall banner (answered from the knowledge base, no investigation run), the known cause and validated resolution, and the entry's resolve-rate track record" width="760" />
 </div>
 
 ## How it works
