@@ -341,8 +341,9 @@ func escapeMrkdwn(s string) string { return mrkdwnEscaper.Replace(s) }
 
 // summaryBlocks renders the triage summary as Block Kit, top-down as an on-call
 // reads it: what/where (header) → verdict → key facts (fields) → seen-before KB
-// recall (when present) → why → what to do → honest limits → recurrence →
-// confidence footer → approval buttons. The full
+// recall (when present) → matched-known-runbook (when a full loop reused a known
+// entry) → why → what to do → honest limits → recurrence → confidence footer →
+// approval buttons. The full
 // analysis (every hypothesis with all evidence, the complete open-questions /
 // data-gaps / ruled-out lists) lives in detailBlocks; slackMessage appends the
 // two for the single-message webhook path.
@@ -419,6 +420,26 @@ func summaryBlocks(inv providers.Investigation) []map[string]any {
 		if len(foot) > 0 {
 			fmt.Fprintf(&s, "\n%s", strings.Join(foot, " · "))
 		}
+		blocks = append(blocks, map[string]any{"type": "section", "text": map[string]any{"type": "mrkdwn", "text": truncate(s.String(), 2900)}})
+	}
+
+	// 3c. Existing-KB match — a full investigation whose kb_search matched a known
+	// runbook/entry at clear-match strength. Make it VISIBLE that RunLore already had
+	// knowledge for this incident: the live gap was a 95%-confidence kb_search hit that
+	// the on-call could not see. Suppressed when Prior is set — the recurrence block
+	// above already says "seen before" with richer context, so don't double-render.
+	// Title/path are untrusted (entry frontmatter) and escaped; a derived URL renders
+	// as a link, else the bare path shows inline as code.
+	if mk := inv.MatchedKnowledge; mk != nil && inv.Prior == nil {
+		var s strings.Builder
+		fmt.Fprintf(&s, "📚 *Matches known runbook:* %s", escapeMrkdwn(mk.Title))
+		switch {
+		case mk.URL != "":
+			fmt.Fprintf(&s, " (<%s|%s>)", escapeMrkdwn(mk.URL), escapeMrkdwn(mk.Path))
+		case mk.Path != "":
+			fmt.Fprintf(&s, " (`%s`)", escapeMrkdwn(mk.Path))
+		}
+		s.WriteString(" — RunLore has prior knowledge for this incident.")
 		blocks = append(blocks, map[string]any{"type": "section", "text": map[string]any{"type": "mrkdwn", "text": truncate(s.String(), 2900)}})
 	}
 

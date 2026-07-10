@@ -135,6 +135,43 @@ func TestFormatSeenBeforeWithoutPrior(t *testing.T) {
 	}
 }
 
+// TestFormatMatchedKnowledge covers the shared text used by Matrix + webhook: a full
+// investigation whose kb_search matched a known runbook (MatchedKnowledge set, Prior
+// nil) renders a visible "Matches known runbook" line with the path (or URL). It is
+// suppressed when Prior is set (recurrence already covers it) and absent when unset.
+func TestFormatMatchedKnowledge(t *testing.T) {
+	// Path shown when no URL is derivable.
+	out := Format(providers.Investigation{
+		Title: "t", Confidence: 0.8,
+		MatchedKnowledge: &providers.MatchedEntry{Title: "Harbor probe runbook", Path: "runbooks/harbor.md", Score: 6},
+	})
+	if !strings.Contains(out, "📚 Matches known runbook: Harbor probe runbook — runbooks/harbor.md") {
+		t.Errorf("expected matched-runbook line with path:\n%s", out)
+	}
+	// URL preferred over path when present.
+	outURL := Format(providers.Investigation{
+		Title: "t", Confidence: 0.8,
+		MatchedKnowledge: &providers.MatchedEntry{Title: "R", Path: "p.md", URL: "https://kb/p.md", Score: 6},
+	})
+	if !strings.Contains(outURL, "📚 Matches known runbook: R — https://kb/p.md") {
+		t.Errorf("expected URL preferred over path:\n%s", outURL)
+	}
+	// Suppressed when Prior is set (don't double-render with Seen-before).
+	outPrior := Format(providers.Investigation{
+		Title: "t", Confidence: 0.8, Occurrences: 2,
+		LastOccurrence:   time.Date(2026, 6, 25, 10, 0, 0, 0, time.UTC),
+		Prior:            &providers.PriorKnowledge{Cause: "c"},
+		MatchedKnowledge: &providers.MatchedEntry{Title: "R", Path: "p.md", Score: 6},
+	})
+	if strings.Contains(outPrior, "Matches known runbook") {
+		t.Errorf("must suppress the matched-runbook line when Prior is set:\n%s", outPrior)
+	}
+	// Absent when unset.
+	if strings.Contains(Format(providers.Investigation{Title: "t"}), "Matches known runbook") {
+		t.Error("matched-runbook line must be absent when MatchedKnowledge is nil")
+	}
+}
+
 // TestFormatRuledOutAndDataGaps asserts the two honest-limits sections render
 // their bullets, mirroring the Unresolved section's shape.
 func TestFormatRuledOutAndDataGaps(t *testing.T) {

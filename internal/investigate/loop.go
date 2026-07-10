@@ -308,6 +308,17 @@ func (li *LoopInvestigator) Investigate(ctx context.Context, req Request) error 
 	// that includes the incident's own namespace must be set per request, not at
 	// construction. scopeTools copies into a fresh slice (li.Tools is never mutated).
 	tools := scopeTools(li.Tools, req.Workload.Namespace)
+	// Per-investigation kb_search hit tracker: rebind each kb_search tool to a copy
+	// that records its strongest clear-match hit here, so the loop can surface it on
+	// the delivered finding (Investigation.MatchedKnowledge) as visible proof RunLore
+	// already had knowledge for this incident. scopeTools returned a fresh slice, so
+	// replacing an element leaves the shared li.Tools untouched.
+	kbHits := &kbHitTracker{}
+	for i, t := range tools {
+		if kb, ok := t.(KBSearchTool); ok {
+			tools[i] = kb.withHitTracker(kbHits)
+		}
+	}
 	byName := map[string]Tool{}
 	specs := make([]providers.ToolSpec, 0, len(tools)+1)
 	for _, t := range tools {
@@ -570,6 +581,13 @@ func (li *LoopInvestigator) Investigate(ctx context.Context, req Request) error 
 			// originating alert workload only when the model named none.
 			inv.Resource = preferDiscoveredResource(inv.Resource, req.Workload)
 			stampRequestFacts(&inv, req)
+			// Visibility: surface the strongest pre-existing KB entry this investigation's
+			// kb_search calls matched at clear-match strength. This is the full-loop path —
+			// the exact case the live gap exposed: kb_search found a known runbook and the
+			// model used it, yet the notification gave no sign of prior knowledge. The
+			// recall-short-circuit path is deliberately left alone (Prior/"Seen before"
+			// already covers a delivered recall).
+			stampMatchedKnowledge(&inv, kbHits.top())
 			li.Log.Info("investigation evidence gathered", "title", req.Title, "tools_used", used)
 			if li.Metrics != nil {
 				// Usage-anchored when the provider reported usage; heuristic otherwise.
@@ -826,6 +844,28 @@ func stampRequestFacts(inv *providers.Investigation, req Request) {
 	inv.Tenant = req.Labels["tenant"]
 	inv.AlertName = req.Labels["alertname"]
 	inv.StartedAt = req.At
+}
+
+// stampMatchedKnowledge records, on a completed full-loop investigation, the strongest
+// pre-existing KB entry its kb_search calls matched at clear-match strength (best), so
+// the delivered notification can show RunLore already had documented knowledge for the
+// incident. No-op when nothing cleared the bar.
+//
+// Self-reference guard: kb_search hits are PRE-EXISTING merged catalog entries, each
+// carrying a real Path, whereas the fresh finding being delivered here has no catalog
+// identity yet (curation runs later) — so a hit is inherently a different entry and this
+// is never a fresh finding "matching itself". The RecalledEntry check is belt-and-braces:
+// never stamp the very entry an answer was recalled from. The full-loop path never sets
+// RecalledEntry (recall short-circuits before the loop), so it is a no-op here, but it
+// keeps the "not the entry we are delivering" invariant explicit and future-proof.
+func stampMatchedKnowledge(inv *providers.Investigation, best *providers.MatchedEntry) {
+	if best == nil {
+		return
+	}
+	if best.Path != "" && best.Path == inv.RecalledEntry {
+		return
+	}
+	inv.MatchedKnowledge = best
 }
 
 // preferDiscoveredResource keeps the workload the investigation identified,
