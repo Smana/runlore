@@ -30,7 +30,15 @@ spec:
     - metadata:
         name: catalog
         labels:
-          {{- include "runlore.labels" . | nindent 10 }}
+          # selectorLabels ONLY — never the full label set. volumeClaimTemplates are
+          # immutable, and runlore.labels embeds helm.sh/chart + app.kubernetes.io/version:
+          # any chart/app version bump would change the template and make EVERY
+          # StatefulSet upgrade fail server-side apply ("Forbidden: updates to
+          # statefulset spec…"), looping Flux into rollback. Found live upgrading
+          # 0.6.1→0.7.0. Existing releases created with the old labels need a one-time
+          # `kubectl delete sts <name> --cascade=orphan` (pods/PVCs untouched) before
+          # the next upgrade — see docs/upgrade-uninstall.md.
+          {{- include "runlore.selectorLabels" . | nindent 10 }}
       spec:
         accessModes:
           {{- toYaml .Values.persistence.accessModes | nindent 10 }}
