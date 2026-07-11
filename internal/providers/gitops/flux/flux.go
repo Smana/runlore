@@ -96,21 +96,21 @@ func (p *Provider) Changes(ctx context.Context, _ providers.TimeWindow, sel prov
 	if err != nil {
 		return nil, err
 	}
-	changes := p.changesFor(ctx, ks, sel, func(k kustomization) bool {
+	changes := p.changesFor(ctx, ks, func(k kustomization) bool {
 		return matchesNamespace(k, sel.Namespace) && (sel.Name == "" || k.Name == sel.Name)
 	})
 	// B2 fallback: the namespace filter found nothing, but a named object might live
 	// in another namespace (the flux-system bootstrap layout). Retry by name across
 	// every namespace rather than returning a false-negative "no changes".
 	if len(changes) == 0 && sel.Name != "" {
-		changes = p.changesFor(ctx, ks, sel, func(k kustomization) bool { return k.Name == sel.Name })
+		changes = p.changesFor(ctx, ks, func(k kustomization) bool { return k.Name == sel.Name })
 	}
 	return changes, nil
 }
 
 // changesFor maps the Kustomizations accepted by keep into engine-agnostic Changes,
 // resolving each source URL (cached per source) and populating When.
-func (p *Provider) changesFor(ctx context.Context, ks []kustomization, sel providers.Selector, keep func(kustomization) bool) []providers.Change {
+func (p *Provider) changesFor(ctx context.Context, ks []kustomization, keep func(kustomization) bool) []providers.Change {
 	urlCache := map[string]string{}
 	var changes []providers.Change
 	for _, k := range ks {

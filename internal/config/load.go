@@ -97,14 +97,16 @@ func applyDefaults(c *Config) {
 	//   -1 in YAML → 0 in struct (unlimited, opt-in)
 	//    0 in YAML → bounded default (safe-by-default, applied here)
 	//   >0 in YAML → preserved as-is (explicit user setting)
-	if c.Investigation.MaxToolOutputBytes == -1 {
+	switch c.Investigation.MaxToolOutputBytes {
+	case -1:
 		c.Investigation.MaxToolOutputBytes = 0 // -1 is the user-visible opt-out; map to consumer sentinel
-	} else if c.Investigation.MaxToolOutputBytes == 0 {
+	case 0:
 		c.Investigation.MaxToolOutputBytes = 32768 // match the Helm chart default
 	}
-	if c.Investigation.MaxTokensPerInvestigation == -1 {
+	switch c.Investigation.MaxTokensPerInvestigation {
+	case -1:
 		c.Investigation.MaxTokensPerInvestigation = 0 // -1 is the user-visible opt-out; map to consumer sentinel
-	} else if c.Investigation.MaxTokensPerInvestigation == 0 {
+	case 0:
 		c.Investigation.MaxTokensPerInvestigation = 100000 // match the Helm chart default
 	}
 	// Interim progress-update default: when enabled without an explicit cadence,

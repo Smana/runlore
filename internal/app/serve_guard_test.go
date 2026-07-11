@@ -13,9 +13,11 @@ package app
 // run up an arbitrary bill (or poison the investigation history). The guard lives
 // on the serve path only (not in config.Validate) because `lore investigate`
 // legitimately needs a model without a webhook.
-import "testing"
+import (
+	"testing"
 
-import "github.com/Smana/runlore/internal/config"
+	"github.com/Smana/runlore/internal/config"
+)
 
 func TestServeGuardFailClosed(t *testing.T) {
 	t.Run("model configured, no webhook token → refused (fail closed)", func(t *testing.T) {
