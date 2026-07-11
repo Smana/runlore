@@ -80,14 +80,15 @@ func (t WorkloadOwnershipTool) Call(ctx context.Context, args string) (string, e
 
 	// Drift: prefer the GitOps engine's OWN verdict for the owning object (authoritative),
 	// then fall back to the last-applied-configuration signal from the walk.
-	if v := t.engineDrift(ctx, oc); v != nil {
+	switch v := t.engineDrift(ctx, oc); {
+	case v != nil:
 		fmt.Fprintf(&b, "drift: DRIFTED — signal=%s; %s\n", v.Signal, v.Detail)
-	} else if oc.Drift != nil && oc.Drift.Drifted {
+	case oc.Drift != nil && oc.Drift.Drifted:
 		fmt.Fprintf(&b, "drift: DRIFTED — signal=%s; %s\n", oc.Drift.Signal, oc.Drift.Detail)
-	} else if oc.ManagedByKind != "" {
+	case oc.ManagedByKind != "":
 		b.WriteString("drift: none detected — the owning GitOps object reports in-sync/Ready and the live " +
 			"spec matches its last-applied configuration (no out-of-band edit found).\n")
-	} else {
+	default:
 		b.WriteString("drift: not assessed — no GitOps owner was resolved from the controller's tracking " +
 			"labels, so there is no applied baseline to compare against.\n")
 	}
