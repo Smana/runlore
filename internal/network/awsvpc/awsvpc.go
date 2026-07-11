@@ -75,14 +75,40 @@ func New(ctx context.Context, region, logGroup string) (*Client, error) {
 
 var _ providers.NetworkProvider = (*Client)(nil)
 
+// scopingNote returns a synthetic LogLine that makes the IP-based, VPC-wide scope
+// of this provider explicit to the consuming model. It appears FIRST in every Drops
+// result so the model cannot attribute internet-scanner REJECT noise to the workload
+// under investigation without first correlating by IP. When sel carries a namespace
+// or name the note includes them so the model knows what it should look for.
+func scopingNote(sel providers.Selector) providers.LogLine {
+	scope := "<namespace>/<pod>"
+	switch {
+	case sel.Namespace != "" && sel.Name != "":
+		scope = sel.Namespace + "/" + sel.Name
+	case sel.Namespace != "":
+		scope = sel.Namespace + "/<pod>"
+	case sel.Name != "":
+		scope = "<namespace>/" + sel.Name
+	}
+	return providers.LogLine{
+		Message: fmt.Sprintf(
+			"NOTE: source is IP-based (VPC/subnet flow logs); results are VPC-wide and NOT scoped to %s"+
+				" — correlate by IP (see pod IPs in pod_status) before attributing.",
+			scope,
+		),
+	}
+}
+
 // Drops returns recent VPC-wide REJECT flows within the window.
 //
-// sel is IGNORED: VPC Flow Logs are IP-based and this v1 does not map the selector's
-// namespace/pod to IPs, so Drops cannot scope to a workload (see the package doc).
+// sel is not used to filter CloudWatch: VPC Flow Logs are IP-based and this v1
+// does not map the selector's namespace/pod to IPs, so Drops cannot scope to a
+// workload (see the package doc). A scoping note is always prepended as the first
+// LogLine so the model sees the IP-based, VPC-wide limitation before any results.
 // It calls FilterLogEvents with the REJECT filter pattern, following NextToken pages
 // until maxEvents events are collected or pagination is exhausted, parsing each
 // space-delimited flow-log v2 message into a normalized LogLine.
-func (c *Client) Drops(ctx context.Context, _ providers.Selector, w providers.TimeWindow) (providers.LogResult, error) {
+func (c *Client) Drops(ctx context.Context, sel providers.Selector, w providers.TimeWindow) (providers.LogResult, error) {
 	// Clamp into int32 range before the cast so the conversion is provably safe
 	// (maxEvents is a small positive cap, but gosec G115 can't prove it).
 	limit := int32(math.MaxInt32)
@@ -101,7 +127,12 @@ func (c *Client) Drops(ctx context.Context, _ providers.Selector, w providers.Ti
 		in.EndTime = ptr(w.End.UnixMilli())
 	}
 
-	var out providers.LogResult
+	// Prepend the scoping note so it is always the first entry the model sees,
+	// regardless of how many flow lines follow (or whether the window is empty).
+	// flowCount tracks only parsed flow lines so the maxEvents cap applies to
+	// real REJECT entries, not the synthetic note.
+	out := providers.LogResult{scopingNote(sel)}
+	flowCount := 0
 	for {
 		resp, err := c.cwl.FilterLogEvents(ctx, in)
 		if err != nil {
@@ -113,7 +144,8 @@ func (c *Client) Drops(ctx context.Context, _ providers.Selector, w providers.Ti
 				continue // malformed/short record
 			}
 			out = append(out, line)
-			if len(out) >= c.maxEvents {
+			flowCount++
+			if flowCount >= c.maxEvents {
 				return out, nil
 			}
 		}
