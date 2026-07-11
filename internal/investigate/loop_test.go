@@ -333,22 +333,37 @@ func TestLoopNudgesOnProseTurn(t *testing.T) {
 }
 
 func TestLoopInconclusiveAfterNudge(t *testing.T) {
-	// If the model still won't call a tool after the nudge, give up — don't loop forever.
+	// If the model still won't call a tool after the nudge, stop looping — but do NOT
+	// go silent: deliver a synthetic inconclusive result so OnComplete still fires
+	// (notification/ledger/KB draft) after the paid model calls (#234 follow-up).
 	model := &scriptModel{responses: []providers.CompletionResponse{
 		{Text: "I think it's the database."},
 		{Text: "Still just the database, no tool call."},
 	}}
-	var delivered bool
+	var got *providers.Investigation
+	var deliveries int
 	li := &LoopInvestigator{
 		Model:      model,
 		Log:        slog.New(slog.NewTextHandler(io.Discard, nil)),
-		OnComplete: func(providers.Investigation) { delivered = true },
+		OnComplete: func(inv providers.Investigation) { deliveries++; got = &inv },
 	}
-	if err := li.Investigate(context.Background(), Request{Title: "x"}); err != nil {
+	if err := li.Investigate(context.Background(), Request{Title: "x", Fingerprint: "fp-nudge"}); err != nil {
 		t.Fatalf("Investigate: %v", err)
 	}
-	if delivered {
-		t.Fatal("expected no delivery when the model never calls submit_findings")
+	if deliveries != 1 || got == nil {
+		t.Fatalf("expected exactly one inconclusive delivery, got %d (%+v)", deliveries, got)
+	}
+	if got.Verdict != providers.VerdictInconclusive {
+		t.Fatalf("non-convergence must deliver an inconclusive verdict, got %q", got.Verdict)
+	}
+	if len(got.RootCauses) != 0 {
+		t.Fatalf("a non-converged investigation must produce no root cause: %+v", got)
+	}
+	if len(got.DataGaps) == 0 || !strings.Contains(strings.ToLower(got.DataGaps[0]), "prose") {
+		t.Fatalf("prose-inconclusive result must name the reason in DataGaps, got %+v", got.DataGaps)
+	}
+	if got.Fingerprint != "fp-nudge" {
+		t.Fatalf("inconclusive result must carry the fingerprint for attribution, got %q", got.Fingerprint)
 	}
 	if model.i != 2 {
 		t.Fatalf("expected exactly 2 model calls (initial + one nudge), got %d", model.i)
@@ -815,6 +830,115 @@ func TestLoopInvestigator(t *testing.T) {
 	}
 }
 
+// TestTerminalExitsDeliverExactlyOnce is the invariant lock for #234's follow-up:
+// EVERY terminal exit that accepts an investigation must fire OnComplete exactly once
+// (no path may return nil with only a Warn after paid model calls). It drives each
+// exit condition — happy submit_findings, timeout, refusal, prose-inconclusive-after-
+// nudge, and max-steps exhaustion — through a counting OnComplete and asserts a single
+// delivery, plus that the non-converged exits carry an inconclusive verdict with a
+// populated honesty reason (DataGaps for the process-limitation exits; Unresolved for
+// timeout/refusal, which pre-date this change and use that channel).
+func TestTerminalExitsDeliverExactlyOnce(t *testing.T) {
+	discard := slog.New(slog.NewTextHandler(io.Discard, nil))
+	cases := []struct {
+		name           string
+		build          func(onComplete func(providers.Investigation)) (*LoopInvestigator, Request)
+		wantConverged  bool // true = a real finding; false = synthetic inconclusive
+		reasonContains string
+		reasonInGaps   bool // true = expect the reason in DataGaps, false = Unresolved
+	}{
+		{
+			name: "happy_submit_findings",
+			build: func(oc func(providers.Investigation)) (*LoopInvestigator, Request) {
+				m := &scriptModel{responses: []providers.CompletionResponse{
+					{ToolCalls: []providers.ToolCall{{ID: "1", Name: submitFindingsName,
+						Args: `{"confidence":0.8,"root_causes":[{"summary":"chart bump broke db","confidence":0.8}]}`}}},
+				}}
+				return &LoopInvestigator{Model: m, Log: discard, OnComplete: oc}, Request{Title: "Happy", Fingerprint: "fp-happy"}
+			},
+			wantConverged: true,
+		},
+		{
+			name: "timeout",
+			build: func(oc func(providers.Investigation)) (*LoopInvestigator, Request) {
+				return &LoopInvestigator{Model: &blockingModel{}, Log: discard, MaxSteps: 20,
+					Timeout: 20 * time.Millisecond, OnComplete: oc}, Request{Title: "HungClone", Fingerprint: "fp-timeout"}
+			},
+			reasonContains: "deadline",
+			reasonInGaps:   false,
+		},
+		{
+			name: "refusal",
+			build: func(oc func(providers.Investigation)) (*LoopInvestigator, Request) {
+				m := &scriptModel{responses: []providers.CompletionResponse{{StopReason: "refusal"}}}
+				return &LoopInvestigator{Model: m, Log: discard, OnComplete: oc}, Request{Title: "Refused", Fingerprint: "fp-refuse"}
+			},
+			reasonContains: "declined",
+			reasonInGaps:   false,
+		},
+		{
+			name: "prose_inconclusive_after_nudge",
+			build: func(oc func(providers.Investigation)) (*LoopInvestigator, Request) {
+				m := &scriptModel{responses: []providers.CompletionResponse{
+					{Text: "I think it's the database."},
+					{Text: "Still just the database, no tool call."},
+				}}
+				return &LoopInvestigator{Model: m, Log: discard, OnComplete: oc}, Request{Title: "Prose", Fingerprint: "fp-prose"}
+			},
+			reasonContains: "prose",
+			reasonInGaps:   true,
+		},
+		{
+			name: "max_steps",
+			build: func(oc func(providers.Investigation)) (*LoopInvestigator, Request) {
+				return &LoopInvestigator{Model: &runawayModel{}, Log: discard, MaxSteps: 3, OnComplete: oc},
+					Request{Title: "Runaway", Fingerprint: "fp-max"}
+			},
+			reasonContains: "budget",
+			reasonInGaps:   true,
+		},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			var got *providers.Investigation
+			var deliveries int
+			li, req := c.build(func(inv providers.Investigation) { deliveries++; got = &inv })
+			if err := li.Investigate(context.Background(), req); err != nil {
+				t.Fatalf("Investigate: %v", err)
+			}
+			if deliveries != 1 || got == nil {
+				t.Fatalf("every accepted terminal exit must fire OnComplete exactly once, got %d (%+v)", deliveries, got)
+			}
+			// Fingerprint must ride every delivery for outcome-ledger attribution.
+			if got.Fingerprint != req.Fingerprint {
+				t.Fatalf("delivery must carry the request fingerprint %q, got %q", req.Fingerprint, got.Fingerprint)
+			}
+			if c.wantConverged {
+				if len(got.RootCauses) != 1 {
+					t.Fatalf("converged exit must deliver a real finding, got %+v", got)
+				}
+				return
+			}
+			// Non-converged: inconclusive verdict, no guessed root cause, and a reason in
+			// the expected honesty channel.
+			if got.Verdict != providers.VerdictInconclusive {
+				t.Fatalf("non-converged exit must carry an inconclusive verdict, got %q", got.Verdict)
+			}
+			if len(got.RootCauses) != 0 {
+				t.Fatalf("non-converged exit must not guess a root cause, got %+v", got.RootCauses)
+			}
+			channel := got.DataGaps
+			label := "DataGaps"
+			if !c.reasonInGaps {
+				channel, label = got.Unresolved, "Unresolved"
+			}
+			if len(channel) == 0 || !strings.Contains(strings.ToLower(channel[0]), c.reasonContains) {
+				t.Fatalf("non-converged exit must name %q in %s, got %+v", c.reasonContains, label, channel)
+			}
+		})
+	}
+}
+
 func TestPreferDiscoveredResource(t *testing.T) {
 	origin := providers.Workload{Namespace: "apps", Name: "web"}
 	cases := []struct {
@@ -1041,9 +1165,11 @@ func TestLoopForcesFinalSubmitAtMaxSteps(t *testing.T) {
 }
 
 // TestLoopMaxStepsFallbackWhenForceIgnored proves the fallback: a model that ignores
-// even the forced final step (never emits submit_findings) keeps the pre-existing
-// silent max_steps behaviour — nothing is delivered and the completion is labelled
-// result="max_steps".
+// even the forced final step (never emits submit_findings) exhausts the step budget
+// and the completion is labelled result="max_steps" (distinct from the degraded label
+// a forced submission earns). Unlike before #234's follow-up, exhaustion is NO LONGER
+// silent — it delivers a synthetic inconclusive result so OnComplete still fires after
+// the paid model calls.
 func TestLoopMaxStepsFallbackWhenForceIgnored(t *testing.T) {
 	t.Cleanup(func() { otel.SetMeterProvider(noop.NewMeterProvider()) })
 	h, shutdown, err := telemetry.Setup(context.Background())
@@ -1054,19 +1180,30 @@ func TestLoopMaxStepsFallbackWhenForceIgnored(t *testing.T) {
 	m := telemetry.NewMetrics()
 
 	model := &runawayModel{} // always returns noop_tool, ignoring the forced ToolChoice
-	var delivered bool
+	var got *providers.Investigation
+	var deliveries int
 	li := &LoopInvestigator{
 		Model:      model,
 		Log:        slog.New(slog.NewTextHandler(io.Discard, nil)),
 		MaxSteps:   3,
 		Metrics:    m,
-		OnComplete: func(providers.Investigation) { delivered = true },
+		OnComplete: func(inv providers.Investigation) { deliveries++; got = &inv },
 	}
-	if err := li.Investigate(context.Background(), Request{Title: "IgnoresForce"}); err != nil {
+	if err := li.Investigate(context.Background(), Request{Title: "IgnoresForce", Fingerprint: "fp-maxsteps"}); err != nil {
 		t.Fatalf("Investigate: %v", err)
 	}
-	if delivered {
-		t.Fatal("a model that ignores the forced final step must deliver nothing (silent max_steps fallback)")
+	// Exhaustion now delivers an inconclusive result (not silence) so OnComplete fires.
+	if deliveries != 1 || got == nil {
+		t.Fatalf("max-steps exhaustion must deliver exactly one inconclusive result, got %d (%+v)", deliveries, got)
+	}
+	if got.Verdict != providers.VerdictInconclusive || len(got.RootCauses) != 0 {
+		t.Fatalf("exhaustion must deliver an inconclusive result with no root cause: %+v", got)
+	}
+	if len(got.DataGaps) == 0 || !strings.Contains(strings.ToLower(got.DataGaps[0]), "budget") {
+		t.Fatalf("max-steps result must name the step-budget exhaustion in DataGaps, got %+v", got.DataGaps)
+	}
+	if got.Fingerprint != "fp-maxsteps" {
+		t.Fatalf("max-steps result must carry the fingerprint for attribution, got %q", got.Fingerprint)
 	}
 	// The loop ran the full step budget, including the forced final step, then fell back.
 	if model.calls != 3 {
