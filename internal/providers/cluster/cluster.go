@@ -162,11 +162,12 @@ func podStatus(p *corev1.Pod) providers.PodStatus {
 	// PodIP/NodeName/HostIP are already on the object — surfacing them lets the model
 	// bridge a network_drops IP back to this pod at zero extra API cost (B8, CORE-707).
 	ps := providers.PodStatus{
-		Name:     p.Name,
-		Phase:    string(p.Status.Phase),
-		PodIP:    p.Status.PodIP,
-		NodeName: p.Spec.NodeName,
-		HostIP:   p.Status.HostIP,
+		Name:      p.Name,
+		Phase:     string(p.Status.Phase),
+		PodIP:     p.Status.PodIP,
+		NodeName:  p.Spec.NodeName,
+		HostIP:    p.Status.HostIP,
+		CreatedAt: p.CreationTimestamp.Time, // pod age anchor (K1)
 	}
 	// Container memory limits (from the spec) — needed to tie an OOMKill to the limit.
 	memLimit := map[string]string{}
@@ -185,6 +186,16 @@ func podStatus(p *corev1.Pod) providers.PodStatus {
 			total++
 			if c.Ready {
 				ready++
+			}
+			// Restarts (K1): sum RestartCount across containers — the pod-level
+			// count of how many times a container has looped. Track the most-recent
+			// last-termination window so a crash loop has a start/finish time.
+			ps.Restarts += int(c.RestartCount)
+			if lt := c.LastTerminationState.Terminated; lt != nil {
+				if lt.FinishedAt.Time.After(ps.LastTerminatedFinished) {
+					ps.LastTerminatedStarted = lt.StartedAt.Time
+					ps.LastTerminatedFinished = lt.FinishedAt.Time
+				}
 			}
 			oom := false
 			switch {
@@ -215,44 +226,86 @@ func podStatus(p *corev1.Pod) providers.PodStatus {
 	return ps
 }
 
+// eventPageLimit is the per-page fetch size; eventMaxPages bounds the total pages
+// walked when a time window is set, so a busy namespace can't unbound the fetch.
+const (
+	eventPageLimit = 200
+	eventMaxPages  = 10
+)
+
+var _ providers.EventWindower = (*Reader)(nil)
+
 // Events returns recent Events in a namespace (optionally for one object,
-// optionally Warning-only), most-recent first.
+// optionally Warning-only), most-recent first. It is EventsSince with no time
+// window — kept for the KubeReader interface and existing callers.
 func (r *Reader) Events(ctx context.Context, namespace, objectName string, warnOnly bool) ([]providers.KubeEvent, error) {
-	opts := metav1.ListOptions{Limit: 200}
-	if objectName != "" {
-		opts.FieldSelector = "involvedObject.name=" + objectName
+	return r.EventsSince(ctx, namespace, objectName, warnOnly, 0)
+}
+
+// EventsSince returns recent Events in a namespace, dropping any older than
+// sinceMinutes (0 = no lower bound), most-recent first.
+//
+// K2: the old code fetched a single Limit:200 page and only sorted newest-first
+// AFTER fetching — so in a busy namespace the newest events could sit on a page
+// never fetched. When a window is set we walk pages (bounded by eventMaxPages) and
+// keep every in-window event, so the newest in-window events are actually returned.
+func (r *Reader) EventsSince(ctx context.Context, namespace, objectName string, warnOnly bool, sinceMinutes int) ([]providers.KubeEvent, error) {
+	var cutoff time.Time
+	if sinceMinutes > 0 {
+		cutoff = time.Now().Add(-time.Duration(sinceMinutes) * time.Minute)
 	}
-	list, err := r.client.CoreV1().Events(namespace).List(ctx, opts)
-	if err != nil {
-		return nil, fmt.Errorf("list events (%s): %w", namespace, err)
-	}
-	// Carry each kept event's timestamp alongside it: warnOnly filtering makes
-	// the kept slice shorter than list.Items, so the sort must not index back
-	// into list.Items (the indices diverge and ordering would read the wrong
-	// events' timestamps).
+	// Carry each kept event's timestamp alongside it: warnOnly / window filtering
+	// makes the kept slice shorter than the fetched items, so the sort must not
+	// index back into the raw list (the indices diverge and ordering would read
+	// the wrong events' timestamps).
 	type timedEvent struct {
 		ev providers.KubeEvent
 		at time.Time
 	}
-	kept := make([]timedEvent, 0, len(list.Items))
-	for i := range list.Items {
-		e := &list.Items[i]
-		if warnOnly && e.Type != corev1.EventTypeWarning {
-			continue
-		}
-		at := eventTime(e)
-		kept = append(kept, timedEvent{
-			ev: providers.KubeEvent{
-				Type:     e.Type,
-				Reason:   e.Reason,
-				Object:   e.InvolvedObject.Kind + "/" + e.InvolvedObject.Name,
-				Message:  e.Message,
-				Count:    e.Count,
-				LastSeen: at,
-			},
-			at: at,
-		})
+	var kept []timedEvent
+
+	opts := metav1.ListOptions{Limit: eventPageLimit}
+	if objectName != "" {
+		opts.FieldSelector = "involvedObject.name=" + objectName
 	}
+	// Windowing walks pages until the window is fully covered; without a window we
+	// keep today's behavior exactly (a single Limit:200 page, no paging).
+	maxPages := 1
+	if !cutoff.IsZero() {
+		maxPages = eventMaxPages
+	}
+	for page := 0; page < maxPages; page++ {
+		list, err := r.client.CoreV1().Events(namespace).List(ctx, opts)
+		if err != nil {
+			return nil, fmt.Errorf("list events (%s): %w", namespace, err)
+		}
+		for i := range list.Items {
+			e := &list.Items[i]
+			if warnOnly && e.Type != corev1.EventTypeWarning {
+				continue
+			}
+			at := eventTime(e)
+			if !cutoff.IsZero() && at.Before(cutoff) {
+				continue // outside the window
+			}
+			kept = append(kept, timedEvent{
+				ev: providers.KubeEvent{
+					Type:     e.Type,
+					Reason:   e.Reason,
+					Object:   e.InvolvedObject.Kind + "/" + e.InvolvedObject.Name,
+					Message:  e.Message,
+					Count:    e.Count,
+					LastSeen: at,
+				},
+				at: at,
+			})
+		}
+		if list.Continue == "" {
+			break // last page
+		}
+		opts.Continue = list.Continue
+	}
+
 	sort.SliceStable(kept, func(i, j int) bool { return kept[i].at.After(kept[j].at) })
 	out := make([]providers.KubeEvent, len(kept))
 	for i := range kept {
