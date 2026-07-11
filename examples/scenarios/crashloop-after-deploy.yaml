@@ -1,0 +1,35 @@
+# A curated demo scenario for `lore demo investigate` — a crashloop-after-deploy
+# incident with a real Git-diff. It seeds FAKE providers (no cluster needed) so the
+# real investigation loop can be watched end to end. This reuses the eval Case shape,
+# so it also runs under: lore eval --cases examples/scenarios
+name: crashloop-after-deploy
+prompt: |
+  CheckoutPodCrashLoop (critical, prod, namespace shop): the checkout deployment's
+  pods are in CrashLoopBackOff right after this morning's release; the service is
+  returning 5xx.
+tools:
+  what_changed: |
+    flux Kustomization/shop  9c1f0a..7be44d
+    --- shop/checkout/deployment.yaml
+    -  - name: PAYMENTS_URL
+    -    value: "https://payments.internal:8443"
+    +  - name: PAYMENTS_URL
+    +    value: ""          # templating regression: the env override was dropped
+  pod_status: |
+    checkout-7f9c8b6d4-abcde  CrashLoopBackOff  restarts=9  lastState=Error(exit 1)
+    checkout-7f9c8b6d4-fghij  CrashLoopBackOff  restarts=9  lastState=Error(exit 1)
+  query_logs: |
+    checkout  FATAL: PAYMENTS_URL is empty; refusing to start (config validation)
+    checkout  panic: invalid payments endpoint ""
+  kube_events: |
+    Warning  BackOff  Back-off restarting failed container checkout in pod checkout-7f9c8b6d4-abcde
+  query_metrics: |
+    kube_pod_container_status_restarts_total{pod=~"checkout-.*"} = 9
+    up{job="checkout"} = 0
+workload:
+  namespace: shop
+  name: checkout
+expected:
+  # The agent should tie the crashloop to the release that blanked PAYMENTS_URL.
+  must_contain: [PAYMENTS_URL, config, checkout]
+  min_confidence: 0.5
