@@ -73,7 +73,7 @@ func (t PodStatusTool) Call(ctx context.Context, args string) (string, error) {
 			fmt.Fprintf(&b, "… (%d more)\n", len(pods)-i)
 			break
 		}
-		fmt.Fprintf(&b, "%s  %s ready=%s\n", p.Name, p.Phase, p.Ready)
+		fmt.Fprintf(&b, "%s  %s ready=%s%s\n", p.Name, p.Phase, p.Ready, podNet(p))
 		for _, r := range p.Reasons {
 			fmt.Fprintf(&b, "  ⚠ %s\n", r)
 		}
@@ -141,6 +141,26 @@ func (t KubeEventsTool) Call(ctx context.Context, args string) (string, error) {
 		fmt.Fprintf(&b, "%s%s %s %s%s: %s\n", when, e.Type, e.Object, e.Reason, count, e.Message)
 	}
 	return b.String(), nil
+}
+
+// podNet renders the pod's IP/node context compactly and only when present, so an
+// unscheduled pod (no IP yet) adds no noise. It is what lets the model bridge a
+// network_drops IP (VPC/Hubble names an IP, not a pod) back to this workload (B8).
+func podNet(p providers.PodStatus) string {
+	var parts []string
+	if p.PodIP != "" {
+		parts = append(parts, "ip="+p.PodIP)
+	}
+	if p.NodeName != "" {
+		parts = append(parts, "node="+p.NodeName)
+	}
+	if p.HostIP != "" {
+		parts = append(parts, "hostIP="+p.HostIP)
+	}
+	if len(parts) == 0 {
+		return ""
+	}
+	return " " + strings.Join(parts, " ")
 }
 
 func selectorSuffix(sel string) string {
