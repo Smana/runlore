@@ -9,6 +9,10 @@ spec:
   selector:
     matchLabels:
       {{- include "runlore.selectorLabels" . | nindent 6 }}
+      # Scope to the metrics Service only. The StatefulSet's headless governing
+      # Service carries the same selectorLabels, so without this discriminator the
+      # scrape matches both Services and every pod is scraped twice (doubled counters).
+      app.kubernetes.io/component: server
   endpoints:
     - port: http
       path: {{ .Values.vmServiceScrape.path | default "/metrics" }}
