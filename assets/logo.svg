@@ -1,0 +1,13 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 220 220" width="512" height="512">
+  <circle cx="110" cy="110" r="110" fill="#eff1f5"></circle>
+  <path d="M110,166 C88,156 60,156 40,164 L40,188 C60,180 86,180 110,190 C134,180 160,180 180,188 L180,164 C160,156 132,156 110,166 Z" fill="#3b82f6"></path>
+  <path d="M110,166 L110,190" stroke="#eff1f5" stroke-width="4" stroke-linecap="round"></path>
+  <path d="M110,52 C101,36 87,28 72,31 C51,35 43,58 46,89 C48,126 71,160 110,170 C149,160 172,126 174,89 C177,58 169,35 148,31 C133,28 119,36 110,52 Z" fill="#101f4b"></path>
+  <path d="M110,64 C104,54 92,49 81,53 C66,58 62,79 68,97 C74,114 91,124 110,130 C129,124 146,114 152,97 C158,79 154,58 139,53 C128,49 116,54 110,64 Z" fill="#eff1f5"></path>
+  <line x1="90" y1="86" x2="130" y2="86" stroke="#14c9a6" stroke-width="3"></line>
+  <circle cx="90" cy="86" r="12" fill="#101f4b"></circle>
+  <circle cx="130" cy="86" r="12" fill="#101f4b"></circle>
+  <circle cx="90" cy="86" r="5" fill="#14c9a6"></circle>
+  <circle cx="130" cy="86" r="5" fill="#14c9a6"></circle>
+  <path d="M104,100 L116,100 L110,113 Z" fill="#14c9a6"></path>
+</svg>
