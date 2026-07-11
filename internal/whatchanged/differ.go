@@ -167,7 +167,7 @@ func (d *Differ) cloneToDisk(ctx context.Context, url string) (*git.Repository, 
 	if err != nil {
 		return nil, noop, fmt.Errorf("temp dir: %w", err)
 	}
-	repo, err := git.PlainCloneContext(ctx, dir, false, &git.CloneOptions{URL: url, Auth: auth})
+	repo, err := git.PlainCloneContext(ctx, dir, false, &git.CloneOptions{URL: url, Auth: auth, NoCheckout: true})
 	if err != nil {
 		_ = os.RemoveAll(dir)
 		return nil, noop, fmt.Errorf("clone %s: %w", url, err)
