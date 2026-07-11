@@ -1339,7 +1339,7 @@ func TestBudgetNudgeForcesSubmitFindings(t *testing.T) {
 	// unforced and step 1 — grown by the assistant turn and the tool result — trips
 	// the nudge.
 	req := Request{Title: "budget-forcing"}
-	seed := []providers.Message{{Role: "user", Content: redact.Secrets(seedPrompt(req))}}
+	seed := []providers.Message{{Role: "user", Content: redact.Secrets(seedPrompt(req, nil))}}
 	li.MaxTokensPerInvestigation = estimateTokens(li.system(), seed, []providers.ToolSpec{submitFindingsSpec()})
 	if err := li.Investigate(context.Background(), req); err != nil {
 		t.Fatalf("Investigate: %v", err)
@@ -1560,7 +1560,7 @@ func TestSeedPrompt(t *testing.T) {
 			Severity:    "critical",
 			Environment: "prod",
 		}
-		got := seedPrompt(req)
+		got := seedPrompt(req, nil)
 		if !strings.Contains(got, "Severity: critical.") {
 			t.Errorf("seed prompt missing severity, got %q", got)
 		}
@@ -1570,7 +1570,7 @@ func TestSeedPrompt(t *testing.T) {
 	})
 	t.Run("omits severity and environment when empty", func(t *testing.T) {
 		req := Request{Title: "PodCrashLooping", Source: SourceAlert}
-		got := seedPrompt(req)
+		got := seedPrompt(req, nil)
 		if strings.Contains(got, "Severity:") {
 			t.Errorf("seed prompt should omit empty severity, got %q", got)
 		}
@@ -1580,7 +1580,7 @@ func TestSeedPrompt(t *testing.T) {
 	})
 	t.Run("anchors the incident start time so the model can size tool windows", func(t *testing.T) {
 		at := time.Now().Add(-42 * time.Minute)
-		got := seedPrompt(Request{Title: "PodCrashLooping", Source: SourceAlert, At: at})
+		got := seedPrompt(Request{Title: "PodCrashLooping", Source: SourceAlert, At: at}, nil)
 		if !strings.Contains(got, "Incident started: "+at.UTC().Format(time.RFC3339)) {
 			t.Errorf("seed prompt missing incident start time, got %q", got)
 		}
@@ -1592,7 +1592,7 @@ func TestSeedPrompt(t *testing.T) {
 		}
 	})
 	t.Run("omits the start line when At is zero", func(t *testing.T) {
-		got := seedPrompt(Request{Title: "X", Source: SourceAlert})
+		got := seedPrompt(Request{Title: "X", Source: SourceAlert}, nil)
 		if strings.Contains(got, "Incident started:") {
 			t.Errorf("seed prompt should omit a zero start time, got %q", got)
 		}
@@ -1612,7 +1612,7 @@ func TestSeedPrompt(t *testing.T) {
 			},
 			Message: "already surfaced as the message",
 		}
-		got := seedPrompt(req)
+		got := seedPrompt(req, nil)
 		if !strings.Contains(got, `container="app"`) || !strings.Contains(got, `pod="web-abc123"`) {
 			t.Errorf("seed prompt missing alert labels, got %q", got)
 		}
@@ -1626,7 +1626,7 @@ func TestSeedPrompt(t *testing.T) {
 	})
 	t.Run("clips oversized label values", func(t *testing.T) {
 		long := strings.Repeat("x", 2000)
-		got := seedPrompt(Request{Title: "X", Source: SourceAlert, Labels: map[string]string{"big": long}})
+		got := seedPrompt(Request{Title: "X", Source: SourceAlert, Labels: map[string]string{"big": long}}, nil)
 		if strings.Contains(got, long) {
 			t.Errorf("seed prompt should clip a 2000-char label value")
 		}

@@ -257,6 +257,43 @@ func (r *Recall) lookupWithUsage(ctx context.Context, req Request, totals *provi
 	return &e, conf
 }
 
+// nearMiss returns the top STRUCTURALLY-AGREEING candidate for a request, or nil.
+// It is consulted by the loop ONLY when the confidence gate did NOT fire: the fire
+// path discards every candidate on rejection, yet the structural pre-filter may have
+// found an entry whose stored resource agrees with the alert's workload — a
+// possibly-related past incident worth surfacing to the model as an UNVERIFIED lead
+// (see the seed prompt's near-miss block) rather than throwing away.
+//
+// It reuses the SAME candidate window + structural pre-filter as lookupWithUsage —
+// agreement is the only bar (no margin/solo-floor/outcome gate), because this is a
+// hint to shape the prompt, never an answer: the returned entry is framed as
+// untrusted and unverified, is subject to the same egress/ingress redaction as alert
+// text, and (like instant recall) is gated off under actions.mode=auto by the
+// caller. nil-safe; nil ⇒ no agreeing candidate (nothing to inject).
+func (r *Recall) nearMiss(ctx context.Context, req Request) *catalog.Entry {
+	if r == nil || r.Catalog == nil {
+		return nil
+	}
+	query := buildRecallQuery(req)
+	var hits []catalog.ScoredEntry
+	var err error
+	if r.Hybrid != nil && r.Hybrid.HasVectors() {
+		hits, err = r.Hybrid.SearchHybrid(ctx, query, recallCandidateK)
+	} else {
+		hits, err = r.Catalog.SearchScored(query, recallCandidateK)
+	}
+	if err != nil || len(hits) == 0 {
+		return nil
+	}
+	for _, h := range hits {
+		if resourceAgrees(req.Workload, h.Entry.Resource, r.RequireWorkloadMatch) != matchNone {
+			e := h.Entry
+			return &e
+		}
+	}
+	return nil
+}
+
 // reject records a rejection reason (nil-safe).
 func (r *Recall) reject(ctx context.Context, reason string) {
 	if r.Metrics != nil {
