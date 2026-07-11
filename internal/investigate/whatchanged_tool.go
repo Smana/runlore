@@ -41,6 +41,13 @@ func (t WhatChangedTool) Call(ctx context.Context, args string) (string, error) 
 	if err := json.Unmarshal([]byte(args), &in); err != nil {
 		return "", fmt.Errorf("parse args: %w", err)
 	}
+	// Clone each source repo at most once for this call: several changes on one
+	// (mono)repo would otherwise each trigger a full clone. Set up BEFORE Changes()
+	// so its enumeration clones (Differ.RevisionsInWindow/CommitTime) share the same
+	// cache as the per-change Diff() clones below. The cache owns the clones and
+	// removes them when the call returns.
+	ctx, done := whatchanged.WithCloneCache(ctx)
+	defer done()
 	changes, err := t.GitOps.Changes(ctx, providers.TimeWindow{}, providers.Selector{Namespace: in.Namespace, Name: in.Name})
 	if err != nil {
 		return "", err
@@ -48,11 +55,6 @@ func (t WhatChangedTool) Call(ctx context.Context, args string) (string, error) 
 	if len(changes) == 0 {
 		return "no changes found for the given selector", nil
 	}
-	// Clone each source repo at most once for this call: several changes on one
-	// (mono)repo would otherwise each trigger a full clone. The cache owns the
-	// clones and removes them when the call returns.
-	ctx, done := whatchanged.WithCloneCache(ctx)
-	defer done()
 	var b strings.Builder
 	// B2: the provider resolves a workload namespace to its OWNING GitOps object,
 	// which commonly lives elsewhere (Flux Kustomizations in flux-system, Argo
@@ -113,8 +115,12 @@ func renderDiff(b *strings.Builder, d providers.Diff) {
 		return
 	}
 	b.WriteString("  diffstat:\n")
-	for _, f := range d.Files {
-		add, del := countChanges(f.Patch)
+	// Split each file's patch once and reuse the lines for both the diffstat count
+	// and the capped render, so a large patch isn't strings.Split twice per file.
+	patchLines := make([][]string, len(d.Files))
+	for i, f := range d.Files {
+		patchLines[i] = strings.Split(strings.TrimRight(f.Patch, "\n"), "\n")
+		add, del := countChanges(patchLines[i])
 		fmt.Fprintf(b, "    %s (+%d/-%d)\n", f.Path, add, del)
 	}
 	for i, f := range d.Files {
@@ -123,14 +129,14 @@ func renderDiff(b *strings.Builder, d providers.Diff) {
 			break
 		}
 		fmt.Fprintf(b, "  --- %s\n", f.Path)
-		b.WriteString(capPatch(f.Patch))
+		b.WriteString(capPatch(patchLines[i]))
 	}
 }
 
 // countChanges counts added/removed lines in a unified-diff patch (lines beginning
 // with a single + or -), ignoring the ---/+++ file headers.
-func countChanges(patch string) (added, removed int) {
-	for _, ln := range strings.Split(patch, "\n") {
+func countChanges(lines []string) (added, removed int) {
+	for _, ln := range lines {
 		switch {
 		case strings.HasPrefix(ln, "+++") || strings.HasPrefix(ln, "---"):
 			continue
@@ -143,11 +149,10 @@ func countChanges(patch string) (added, removed int) {
 	return added, removed
 }
 
-// capPatch returns patch trimmed to at most maxPatchLines lines, appending an
+// capPatch returns the patch lines trimmed to at most maxPatchLines, appending an
 // explicit marker naming how many lines were dropped. The result always ends in a
 // newline.
-func capPatch(patch string) string {
-	lines := strings.Split(strings.TrimRight(patch, "\n"), "\n")
+func capPatch(lines []string) string {
 	if len(lines) <= maxPatchLines {
 		return strings.Join(lines, "\n") + "\n"
 	}
