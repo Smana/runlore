@@ -18,14 +18,17 @@ func TestApplicationFromUnstructured(t *testing.T) {
 		"apiVersion": "argoproj.io/v1alpha1",
 		"kind":       "Application",
 		"metadata":   map[string]any{"name": "harbor", "namespace": "argocd"},
-		"spec":       map[string]any{"source": map[string]any{"repoURL": "https://github.com/org/repo", "path": "apps/harbor"}},
+		"spec": map[string]any{
+			"source":      map[string]any{"repoURL": "https://github.com/org/repo", "path": "apps/harbor"},
+			"destination": map[string]any{"namespace": "harbor"},
+		},
 		"status": map[string]any{
 			"sync":           map[string]any{"revision": "newsha", "status": "Synced"},
 			"health":         map[string]any{"status": "Degraded"},
 			"operationState": map[string]any{"phase": "Succeeded", "message": "boom"},
 			"history": []any{
-				map[string]any{"revision": "oldsha"},
-				map[string]any{"revision": "newsha"},
+				map[string]any{"revision": "oldsha", "deployedAt": "2026-06-30T10:00:00Z"},
+				map[string]any{"revision": "newsha", "deployedAt": "2026-07-01T14:02:00Z"},
 			},
 		},
 	}}
@@ -34,6 +37,12 @@ func TestApplicationFromUnstructured(t *testing.T) {
 		a.PrevRevision != "oldsha" || a.HealthStatus != "Degraded" || a.SyncStatus != "Synced" || a.Message != "boom" ||
 		a.OperationPhase != "Succeeded" {
 		t.Fatalf("unexpected application: %+v", a)
+	}
+	if a.DestNamespace != "harbor" {
+		t.Fatalf("destination namespace not parsed: %q", a.DestNamespace)
+	}
+	if !a.DeployedAt.Equal(time.Date(2026, 7, 1, 14, 2, 0, 0, time.UTC)) {
+		t.Fatalf("deployedAt not parsed from latest history: %v", a.DeployedAt)
 	}
 }
 

@@ -164,6 +164,7 @@ func sendEvent(ctx context.Context, out chan<- ApplicationEvent, ev ApplicationE
 func applicationFromUnstructured(u *unstructured.Unstructured) application {
 	repoURL, path := sourceRepoPath(u)
 	rev := syncRevision(u)
+	destNS, _, _ := unstructured.NestedString(u.Object, "spec", "destination", "namespace")
 	syncStatus, _, _ := unstructured.NestedString(u.Object, "status", "sync", "status")
 	health, _, _ := unstructured.NestedString(u.Object, "status", "health", "status")
 	phase, _, _ := unstructured.NestedString(u.Object, "status", "operationState", "phase")
@@ -171,15 +172,36 @@ func applicationFromUnstructured(u *unstructured.Unstructured) application {
 	return application{
 		Name:           u.GetName(),
 		Namespace:      u.GetNamespace(),
+		DestNamespace:  destNS,
 		RepoURL:        repoURL,
 		Path:           path,
 		Revision:       rev,
 		PrevRevision:   prevRevision(u),
+		DeployedAt:     lastDeployedAt(u),
 		HealthStatus:   health,
 		SyncStatus:     syncStatus,
 		OperationPhase: phase,
 		Message:        msg,
 	}
+}
+
+// lastDeployedAt returns the deploy time of the latest status.history entry — the
+// moment Argo CD applied the current revision — parsed from RFC3339. Zero when
+// there is no history or the field is absent/unparseable (RunLore B1).
+func lastDeployedAt(u *unstructured.Unstructured) time.Time {
+	hist, found, _ := unstructured.NestedSlice(u.Object, "status", "history")
+	if !found || len(hist) == 0 {
+		return time.Time{}
+	}
+	m, ok := hist[len(hist)-1].(map[string]any)
+	if !ok {
+		return time.Time{}
+	}
+	ts, _ := m["deployedAt"].(string)
+	if t, err := time.Parse(time.RFC3339, ts); err == nil {
+		return t
+	}
+	return time.Time{}
 }
 
 // sourceRepoPath returns the repoURL + path of the Application's source. It reads

@@ -183,6 +183,30 @@ func readyCondition(u *unstructured.Unstructured) (status, reason, message strin
 	return "", "", ""
 }
 
+// readyTransitionTime returns the Ready condition's lastTransitionTime — the
+// reconcile time, used as the Change.When fallback (RunLore B1). Zero if absent
+// or unparseable.
+func readyTransitionTime(u *unstructured.Unstructured) time.Time {
+	conds, found, _ := unstructured.NestedSlice(u.Object, "status", "conditions")
+	if !found {
+		return time.Time{}
+	}
+	for _, c := range conds {
+		m, ok := c.(map[string]any)
+		if !ok {
+			continue
+		}
+		if t, _ := m["type"].(string); t == "Ready" {
+			ltt, _ := m["lastTransitionTime"].(string)
+			if ts, err := time.Parse(time.RFC3339, ltt); err == nil {
+				return ts
+			}
+			return time.Time{}
+		}
+	}
+	return time.Time{}
+}
+
 // WatchKustomizations watches all Kustomizations via a dynamic informer (list-watch
 // with reconnection + periodic resync) and forwards each add/update as a
 // KustomizationEvent. The channel closes when ctx is done.
@@ -222,6 +246,7 @@ func (r *dynamicReader) WatchKustomizations(ctx context.Context) (<-chan Kustomi
 // minimal kustomization type.
 func kustomizationFromUnstructured(u *unstructured.Unstructured) kustomization {
 	path, _, _ := unstructured.NestedString(u.Object, "spec", "path")
+	targetNS, _, _ := unstructured.NestedString(u.Object, "spec", "targetNamespace")
 	srcKind, _, _ := unstructured.NestedString(u.Object, "spec", "sourceRef", "kind")
 	srcName, _, _ := unstructured.NestedString(u.Object, "spec", "sourceRef", "name")
 	srcNamespace, _, _ := unstructured.NestedString(u.Object, "spec", "sourceRef", "namespace")
@@ -235,6 +260,7 @@ func kustomizationFromUnstructured(u *unstructured.Unstructured) kustomization {
 		Name:            u.GetName(),
 		Namespace:       namespace,
 		Path:            path,
+		TargetNamespace: targetNS,
 		SourceKind:      srcKind,
 		SourceName:      srcName,
 		SourceNamespace: srcNamespace,
@@ -242,5 +268,6 @@ func kustomizationFromUnstructured(u *unstructured.Unstructured) kustomization {
 		ReadyStatus:     readyStatus,
 		ReadyReason:     readyReason,
 		ReadyMessage:    readyMessage,
+		ReadyTime:       readyTransitionTime(u),
 	}
 }

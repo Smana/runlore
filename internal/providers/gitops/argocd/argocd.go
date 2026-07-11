@@ -9,6 +9,7 @@ import (
 	"context"
 	"log/slog"
 	"strings"
+	"time"
 
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 
@@ -21,14 +22,16 @@ import (
 // back from the singular spec.source — see applicationFromUnstructured.
 type application struct {
 	Name, Namespace string
-	RepoURL         string // spec.source.repoURL (or spec.sources[0].repoURL)
-	Path            string // spec.source.path (or spec.sources[0].path)
-	Revision        string // status.sync.revision (or status.sync.revisions[0])
-	PrevRevision    string // previous status.history revision (diff range start)
-	HealthStatus    string // status.health.status
-	SyncStatus      string // status.sync.status
-	OperationPhase  string // status.operationState.phase (Failed/Error => sync failed)
-	Message         string // status.operationState.message (failure context)
+	DestNamespace   string    // spec.destination.namespace (where the workloads land)
+	RepoURL         string    // spec.source.repoURL (or spec.sources[0].repoURL)
+	Path            string    // spec.source.path (or spec.sources[0].path)
+	Revision        string    // status.sync.revision (or status.sync.revisions[0])
+	PrevRevision    string    // previous status.history revision (diff range start)
+	DeployedAt      time.Time // status.history[last].deployedAt (the change→symptom time anchor)
+	HealthStatus    string    // status.health.status
+	SyncStatus      string    // status.sync.status
+	OperationPhase  string    // status.operationState.phase (Failed/Error => sync failed)
+	Message         string    // status.operationState.message (failure context)
 }
 
 // ApplicationEvent is a single watch event for an Application.
@@ -69,6 +72,12 @@ func New(reader Reader, differ *whatchanged.Differ) *Provider {
 // still resolves no diffable source is logged at Debug and skipped, so the blind
 // spot is observable rather than silent.
 //
+// Namespace resolution (B2): an Application lives in the argocd namespace but
+// deploys into spec.destination.namespace, so a query keyed on the workload
+// namespace must match EITHER. When the filter still yields zero and a name is
+// given, we retry name-matched across all namespaces so "no changes" is never a
+// silent false negative — mirroring the flux provider.
+//
 // NOTE (v1 scope): the window is accepted but not yet used to filter by deploy
 // time; each Change reflects the current synced revision.
 func (p *Provider) Changes(ctx context.Context, _ providers.TimeWindow, sel providers.Selector) ([]providers.Change, error) {
@@ -76,12 +85,20 @@ func (p *Provider) Changes(ctx context.Context, _ providers.TimeWindow, sel prov
 	if err != nil {
 		return nil, err
 	}
+	changes := changesFor(apps, func(a application) bool {
+		return matchesNamespace(a, sel.Namespace) && (sel.Name == "" || a.Name == sel.Name)
+	})
+	if len(changes) == 0 && sel.Name != "" {
+		changes = changesFor(apps, func(a application) bool { return a.Name == sel.Name })
+	}
+	return changes, nil
+}
+
+// changesFor maps the Applications accepted by keep into engine-agnostic Changes.
+func changesFor(apps []application, keep func(application) bool) []providers.Change {
 	var changes []providers.Change
 	for _, a := range apps {
-		if sel.Namespace != "" && a.Namespace != sel.Namespace {
-			continue
-		}
-		if sel.Name != "" && a.Name != sel.Name {
+		if !keep(a) {
 			continue
 		}
 		if a.RepoURL == "" || a.Revision == "" {
@@ -92,7 +109,13 @@ func (p *Provider) Changes(ctx context.Context, _ providers.TimeWindow, sel prov
 		}
 		changes = append(changes, mapApplication(a))
 	}
-	return changes, nil
+	return changes
+}
+
+// matchesNamespace reports whether an Application belongs to ns, accepting EITHER
+// its own metadata.namespace OR its spec.destination.namespace (B2). Empty matches all.
+func matchesNamespace(a application, ns string) bool {
+	return ns == "" || a.Namespace == ns || a.DestNamespace == ns
 }
 
 // Diff resolves a Change's diff via the Differ. ctx is threaded into the Differ so
@@ -160,12 +183,15 @@ func failureReason(a application) (reason string, failed bool) {
 	return "", false
 }
 
-// mapApplication builds an engine-agnostic Change from an Application.
+// mapApplication builds an engine-agnostic Change from an Application. When carries
+// the last deploy time (status.history[last].deployedAt) so the change can be
+// aligned against symptom timestamps (B1).
 func mapApplication(a application) providers.Change {
 	return providers.Change{
 		Workload: providers.Workload{Kind: "Application", Name: a.Name, Namespace: a.Namespace},
 		Engine:   providers.EngineArgoCD,
 		Type:     providers.ChangeSync,
+		When:     a.DeployedAt,
 		Source:   providers.SourceRef{RepoURL: a.RepoURL, Path: a.Path},
 		FromRev:  parseRevision(a.PrevRevision),
 		ToRev:    parseRevision(a.Revision),

@@ -9,6 +9,7 @@ import (
 	"context"
 	"fmt"
 	"strings"
+	"time"
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
@@ -21,6 +22,7 @@ import (
 type kustomization struct {
 	Name, Namespace string
 	Path            string // spec.path
+	TargetNamespace string // spec.targetNamespace (where the applied workloads land)
 	SourceKind      string // spec.sourceRef.kind (GitRepository | OCIRepository | Bucket | ExternalArtifact)
 	SourceName      string // spec.sourceRef.name
 	SourceNamespace string // spec.sourceRef.namespace (defaults to the Kustomization namespace)
@@ -28,6 +30,9 @@ type kustomization struct {
 	ReadyStatus     string // status.conditions[type=Ready].status ("True"/"False"/"Unknown")
 	ReadyReason     string
 	ReadyMessage    string
+	// ReadyTime is the Ready condition's lastTransitionTime — the reconcile time,
+	// used as the Change.When fallback when the commit time can't be resolved.
+	ReadyTime time.Time
 }
 
 // gitRepository is the minimal Flux GitRepository data the provider needs.
@@ -70,7 +75,18 @@ func New(reader Reader, differ *whatchanged.Differ) *Provider {
 
 // Changes lists Flux Kustomizations and emits a Change per workload: its source
 // repo + path and the currently applied revision (ToRev). FromRev is left empty,
-// meaning "the change introduced by ToRev" — resolved at diff time.
+// meaning "the change introduced by ToRev" — resolved at diff time. Each Change's
+// When is set to the commit time of ToRev (falling back to the Ready-condition
+// reconcile time) so the change can be aligned against symptom timestamps (B1).
+//
+// Namespace resolution (B2): in the default Flux bootstrap every Kustomization
+// lives in flux-system, so a caller asking for a workload's namespace (e.g.
+// "harbor") would match nothing on the Kustomization's OWN metadata.namespace.
+// matchesNamespace therefore accepts EITHER the object's namespace OR its
+// spec.targetNamespace (where the applied workloads land). When the namespace
+// filter still yields zero AND a name is given, we retry name-matched across all
+// namespaces and flag it in the result so "no changes" can never be a silent false
+// negative (mirrors GetResource's flux-system-then-all-namespaces fallback).
 //
 // NOTE (v1 scope): the window is accepted but not yet used to filter by commit
 // time; each Change reflects the current applied revision. Git-log-based
@@ -80,13 +96,25 @@ func (p *Provider) Changes(ctx context.Context, _ providers.TimeWindow, sel prov
 	if err != nil {
 		return nil, err
 	}
+	changes := p.changesFor(ctx, ks, sel, func(k kustomization) bool {
+		return matchesNamespace(k, sel.Namespace) && (sel.Name == "" || k.Name == sel.Name)
+	})
+	// B2 fallback: the namespace filter found nothing, but a named object might live
+	// in another namespace (the flux-system bootstrap layout). Retry by name across
+	// every namespace rather than returning a false-negative "no changes".
+	if len(changes) == 0 && sel.Name != "" {
+		changes = p.changesFor(ctx, ks, sel, func(k kustomization) bool { return k.Name == sel.Name })
+	}
+	return changes, nil
+}
+
+// changesFor maps the Kustomizations accepted by keep into engine-agnostic Changes,
+// resolving each source URL (cached per source) and populating When.
+func (p *Provider) changesFor(ctx context.Context, ks []kustomization, sel providers.Selector, keep func(kustomization) bool) []providers.Change {
 	urlCache := map[string]string{}
 	var changes []providers.Change
 	for _, k := range ks {
-		if sel.Namespace != "" && k.Namespace != sel.Namespace {
-			continue
-		}
-		if sel.Name != "" && k.Name != sel.Name {
+		if !keep(k) {
 			continue
 		}
 		if k.Revision == "" || k.SourceName == "" {
@@ -119,9 +147,33 @@ func (p *Provider) Changes(ctx context.Context, _ providers.TimeWindow, sel prov
 			url = cached
 		}
 		fromRev, toRev := revisionRange(ctx, p.reader, k)
-		changes = append(changes, mapKustomization(k, url, fromRev, toRev))
+		c := mapKustomization(k, url, fromRev, toRev)
+		c.When = p.changeTime(ctx, url, toRev, k.ReadyTime)
+		changes = append(changes, c)
 	}
-	return changes, nil
+	return changes
+}
+
+// matchesNamespace reports whether a Kustomization belongs to ns, accepting EITHER
+// its own metadata.namespace OR its spec.targetNamespace. An empty ns matches all.
+// This is the B2 fix: in the standard bootstrap the Kustomization lives in
+// flux-system but applies workloads into targetNamespace, so a query keyed on the
+// workload namespace must resolve to the owning object.
+func matchesNamespace(k kustomization, ns string) bool {
+	return ns == "" || k.Namespace == ns || k.TargetNamespace == ns
+}
+
+// changeTime resolves the Change.When for a Kustomization (B1): the ToRev commit's
+// committer timestamp — the moment the change landed in Git — falling back to the
+// Ready-condition reconcile time when the commit can't be resolved (no diffable
+// URL, clone failure, or unresolvable rev). Zero when neither is available.
+func (p *Provider) changeTime(ctx context.Context, url, toRev string, readyTime time.Time) time.Time {
+	if url != "" && toRev != "" && p.differ != nil {
+		if t, err := p.differ.CommitTime(ctx, url, toRev); err == nil && !t.IsZero() {
+			return t
+		}
+	}
+	return readyTime // reconcile time (or zero)
 }
 
 // revisionRange picks the (FromRev, ToRev) a Change should diff. For a healthy

@@ -13,6 +13,7 @@ import (
 	"io"
 	"os"
 	"strings"
+	"time"
 
 	"github.com/go-git/go-git/v5"
 	"github.com/go-git/go-git/v5/plumbing"
@@ -260,6 +261,27 @@ func (d *Differ) ForChange(ctx context.Context, c providers.Change) (providers.D
 		}
 	}
 	return diff, nil
+}
+
+// CommitTime clones url (via the batch clone cache when present) and returns the
+// committer timestamp of rev. This is the time the change actually landed in Git —
+// the anchor for aligning a GitOps Change against kube_events / pod-log timestamps
+// (RunLore B1: Change.When was never populated for Flux). A zero time + error is
+// returned when rev can't be resolved; callers fall back to a status timestamp.
+func (d *Differ) CommitTime(ctx context.Context, url, rev string) (time.Time, error) {
+	if rev == "" {
+		return time.Time{}, errors.New("commit time: empty revision")
+	}
+	repo, cleanup, err := d.cloneToDisk(ctx, url)
+	if err != nil {
+		return time.Time{}, err
+	}
+	defer cleanup()
+	c, err := resolveCommit(repo, rev)
+	if err != nil {
+		return time.Time{}, fmt.Errorf("resolve %q: %w", rev, err)
+	}
+	return c.Committer.When, nil
 }
 
 // RemoteLastPathChange clones url and returns the path-scoped diff of the newest

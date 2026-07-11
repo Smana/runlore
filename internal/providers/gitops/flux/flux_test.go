@@ -5,8 +5,13 @@ package flux
 import (
 	"context"
 	"fmt"
+	"os"
+	"path/filepath"
 	"testing"
+	"time"
 
+	"github.com/go-git/go-git/v5"
+	"github.com/go-git/go-git/v5/plumbing/object"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 
 	"github.com/Smana/runlore/internal/providers"
@@ -61,6 +66,116 @@ func (f fakeReader) GetResource(context.Context, string, string, string) (*unstr
 }
 func (f fakeReader) ListEvents(context.Context, string, string, string) ([]string, error) {
 	return nil, nil
+}
+
+// buildRepoWithCommit creates a temp git repo with a single commit at commitSec
+// (touching path apps/harbor) and returns the repo dir + the commit SHA. The repo
+// dir doubles as a clonable local RepoURL for the Differ.
+func buildRepoWithCommit(t *testing.T, commitSec int64) (dir, sha string) {
+	t.Helper()
+	dir = t.TempDir()
+	repo, err := git.PlainInit(dir, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wt, err := repo.Worktree()
+	if err != nil {
+		t.Fatal(err)
+	}
+	full := filepath.Join(dir, "apps/harbor/values.yaml")
+	if err := os.MkdirAll(filepath.Dir(full), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(full, []byte("version: 1.14.0\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := wt.Add("apps/harbor/values.yaml"); err != nil {
+		t.Fatal(err)
+	}
+	h, err := wt.Commit("v1", &git.CommitOptions{
+		Author: &object.Signature{Name: "t", Email: "t@x", When: time.Unix(commitSec, 0)},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return dir, h.String()
+}
+
+// TestProviderChangesTargetNamespace covers B1+B2: a Kustomization living in
+// flux-system but applying into targetNamespace "harbor" must be found when queried
+// by the target namespace, and its When must be the ToRev commit time.
+func TestProviderChangesTargetNamespace(t *testing.T) {
+	dir, sha := buildRepoWithCommit(t, 2000)
+	r := fakeReader{
+		ks: []kustomization{{
+			Name: "harbor", Namespace: "flux-system", Path: "apps/harbor",
+			TargetNamespace: "harbor",
+			SourceKind:      "GitRepository", SourceName: "flux-system", SourceNamespace: "flux-system",
+			Revision: sha, ReadyStatus: "True",
+			ReadyTime: time.Unix(9999, 0),
+		}},
+		grs: map[string]gitRepository{"flux-system/flux-system": {URL: dir}},
+	}
+	p := New(r, &whatchanged.Differ{})
+	changes, err := p.Changes(context.Background(), providers.TimeWindow{}, providers.Selector{Namespace: "harbor"})
+	if err != nil {
+		t.Fatalf("Changes: %v", err)
+	}
+	if len(changes) != 1 || changes[0].Workload.Name != "harbor" {
+		t.Fatalf("target-namespace query did not resolve the owning Kustomization: %+v", changes)
+	}
+	if changes[0].When.IsZero() {
+		t.Fatal("When must be non-zero (B1)")
+	}
+	if !changes[0].When.Equal(time.Unix(2000, 0)) {
+		t.Fatalf("When = %v, want commit time %v", changes[0].When, time.Unix(2000, 0))
+	}
+}
+
+// TestProviderChangesWhenFallsBackToReadyTime: when the commit time can't be
+// resolved (non-Git source, no URL to clone), When falls back to the Ready
+// condition's reconcile time.
+func TestProviderChangesWhenFallsBackToReadyTime(t *testing.T) {
+	readyAt := time.Unix(5000, 0)
+	r := fakeReader{
+		ks: []kustomization{{
+			Name: "crossplane", Namespace: "flux-system", Path: ".",
+			SourceKind: "ExternalArtifact", SourceName: "infra-artifact", SourceNamespace: "flux-system",
+			Revision: "sha256:abc", ReadyStatus: "True", ReadyTime: readyAt,
+		}},
+	}
+	p := New(r, &whatchanged.Differ{})
+	changes, err := p.Changes(context.Background(), providers.TimeWindow{}, providers.Selector{})
+	if err != nil {
+		t.Fatalf("Changes: %v", err)
+	}
+	if len(changes) != 1 {
+		t.Fatalf("want 1 change, got %d", len(changes))
+	}
+	if !changes[0].When.Equal(readyAt) {
+		t.Fatalf("When = %v, want ReadyTime fallback %v", changes[0].When, readyAt)
+	}
+}
+
+// TestProviderChangesNamespaceNameFallback: a query for a name in a namespace where
+// no Kustomization lives (nor targets) must still resolve the object by name across
+// namespaces (B2 cross-namespace retry) rather than returning nothing.
+func TestProviderChangesNamespaceNameFallback(t *testing.T) {
+	r := fakeReader{
+		ks: []kustomization{{
+			Name: "apps", Namespace: "flux-system", Path: "./apps",
+			SourceName: "flux-system", SourceNamespace: "flux-system", Revision: "main@sha1:abc",
+		}},
+		grs: map[string]gitRepository{"flux-system/flux-system": {URL: "https://github.com/org/repo"}},
+	}
+	p := New(r, &whatchanged.Differ{})
+	changes, err := p.Changes(context.Background(), providers.TimeWindow{}, providers.Selector{Namespace: "some-other-ns", Name: "apps"})
+	if err != nil {
+		t.Fatalf("Changes: %v", err)
+	}
+	if len(changes) != 1 || changes[0].Workload.Name != "apps" {
+		t.Fatalf("name fallback across namespaces failed: %+v", changes)
+	}
 }
 
 func TestProviderChanges(t *testing.T) {
