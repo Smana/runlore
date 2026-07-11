@@ -143,6 +143,30 @@ func TestDiscoveryToolsGatedByProvider(t *testing.T) {
 	}
 }
 
+// TestIncidentTimelineGatedByProviders asserts the P1 wiring: incident_timeline is
+// registered when at least one contributing source is wired (here the GitOps provider),
+// and absent when none are (no gitops, no cloud, and — via a nonexistent KUBECONFIG — no
+// cluster reader). It fans out to whichever sources are present, so a GitOps-only
+// deployment still gets the fused timeline.
+func TestIncidentTimelineGatedByProviders(t *testing.T) {
+	t.Setenv("KUBECONFIG", filepath.Join(t.TempDir(), "nonexistent-kubeconfig"))
+	log := discardLog()
+	base := config.Model{Provider: "openai", BaseURL: "http://vllm:8000/v1", Model: "test-model"}
+
+	// No contributing sources → absent.
+	cfg := &config.Config{Model: base}
+	_, tools, _, _ := BuildModelAndTools(context.Background(), cfg, nil, nil, log)
+	if toolNames(tools)["incident_timeline"] {
+		t.Errorf("incident_timeline must be absent with no contributing providers, got %v", toolNames(tools))
+	}
+
+	// GitOps wired → present.
+	_, tools, _, _ = BuildModelAndTools(context.Background(), cfg, fakeGitOps{}, nil, log)
+	if !toolNames(tools)["incident_timeline"] {
+		t.Errorf("incident_timeline must be present when a GitOps provider is wired, got %v", toolNames(tools))
+	}
+}
+
 // fakeClusterReader is a no-op clusterReader for the engine-gating test: it needs no
 // live cluster, only to satisfy the LogReader+KubeReader interfaces so clusterTools can
 // build the tool structs.

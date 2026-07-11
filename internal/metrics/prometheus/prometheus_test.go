@@ -254,3 +254,78 @@ func TestQueryError(t *testing.T) {
 		t.Fatal("expected error for status=error")
 	}
 }
+
+func TestDetectFlavor(t *testing.T) {
+	tests := []struct {
+		name   string
+		status int
+		body   string
+		want   Flavor
+	}{
+		{
+			name:   "victoriametrics buildinfo",
+			status: http.StatusOK,
+			body:   `{"status":"success","data":{"version":"victoria-metrics-20240101-000000-tags-v1.97.1"}}`,
+			want:   FlavorVictoriaMetrics,
+		},
+		{
+			name:   "prometheus buildinfo",
+			status: http.StatusOK,
+			body:   `{"status":"success","data":{"version":"2.50.1","revision":"abc","branch":"HEAD","goVersion":"go1.22"}}`,
+			want:   FlavorPrometheus,
+		},
+		{
+			name:   "probe fails (500) -> unknown, fail safe",
+			status: http.StatusInternalServerError,
+			body:   `oops`,
+			want:   FlavorUnknown,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			var gotPath string
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				gotPath = r.URL.Path
+				w.WriteHeader(tc.status)
+				_, _ = w.Write([]byte(tc.body))
+			}))
+			defer srv.Close()
+			c := New(srv.URL)
+			got := c.DetectFlavor(context.Background())
+			if gotPath != "/api/v1/status/buildinfo" {
+				t.Fatalf("probed path=%q, want /api/v1/status/buildinfo", gotPath)
+			}
+			if got != tc.want {
+				t.Fatalf("DetectFlavor=%q, want %q", got, tc.want)
+			}
+			if c.Flavor() != tc.want {
+				t.Fatalf("Flavor()=%q, want %q", c.Flavor(), tc.want)
+			}
+		})
+	}
+}
+
+func TestWithFlavorPinsAndShortCircuits(t *testing.T) {
+	probed := false
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		probed = true
+		_, _ = w.Write([]byte(`{"status":"success","data":{"version":"2.50.1"}}`))
+	}))
+	defer srv.Close()
+	c := New(srv.URL).WithFlavor(FlavorVictoriaMetrics)
+	if c.Flavor() != FlavorVictoriaMetrics {
+		t.Fatalf("WithFlavor did not pin: %q", c.Flavor())
+	}
+	// A pinned flavor short-circuits the probe.
+	if got := c.DetectFlavor(context.Background()); got != FlavorVictoriaMetrics {
+		t.Fatalf("DetectFlavor after pin=%q", got)
+	}
+	if probed {
+		t.Fatal("DetectFlavor probed the backend despite a pinned flavor")
+	}
+	// A stray/unknown value must not downgrade a good pin.
+	c.WithFlavor(FlavorUnknown)
+	if c.Flavor() != FlavorVictoriaMetrics {
+		t.Fatalf("stray WithFlavor downgraded flavor to %q", c.Flavor())
+	}
+}

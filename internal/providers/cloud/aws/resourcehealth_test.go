@@ -7,6 +7,7 @@ import (
 	"errors"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/aws/aws-sdk-go-v2/service/autoscaling"
 	asgtypes "github.com/aws/aws-sdk-go-v2/service/autoscaling/types"
@@ -50,10 +51,11 @@ func (f *fakeEKS) DescribeNodegroup(_ context.Context, in *eks.DescribeNodegroup
 // activities list. descErr (when set) makes the describe call fail. lastIn
 // captures the most-recent input so tests can assert request shapes.
 type fakeASG struct {
-	pages   []*autoscaling.DescribeAutoScalingGroupsOutput
-	call    int
-	descErr error
-	lastIn  *autoscaling.DescribeAutoScalingGroupsInput
+	pages      []*autoscaling.DescribeAutoScalingGroupsOutput
+	call       int
+	descErr    error
+	lastIn     *autoscaling.DescribeAutoScalingGroupsInput
+	activities []asgtypes.Activity // returned by DescribeScalingActivities for every ASG
 }
 
 func (f *fakeASG) DescribeAutoScalingGroups(_ context.Context, in *autoscaling.DescribeAutoScalingGroupsInput, _ ...func(*autoscaling.Options)) (*autoscaling.DescribeAutoScalingGroupsOutput, error) {
@@ -67,7 +69,7 @@ func (f *fakeASG) DescribeAutoScalingGroups(_ context.Context, in *autoscaling.D
 }
 
 func (f *fakeASG) DescribeScalingActivities(_ context.Context, _ *autoscaling.DescribeScalingActivitiesInput, _ ...func(*autoscaling.Options)) (*autoscaling.DescribeScalingActivitiesOutput, error) {
-	return &autoscaling.DescribeScalingActivitiesOutput{}, nil
+	return &autoscaling.DescribeScalingActivitiesOutput{Activities: f.activities}, nil
 }
 
 // fakeEC2 serves DescribeInstanceStatus and DescribeInstances.
@@ -542,4 +544,62 @@ func TestResourceHealthKarpenterCapacity(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestResourceHealthHonorsWindow asserts P3: a non-zero TimeWindow scopes the ASG
+// scaling-activity lookback — activities that ended before w.Start are filtered out,
+// while a zero window keeps today's behaviour (all activities shown).
+func TestResourceHealthHonorsWindow(t *testing.T) {
+	now := time.Now()
+	recent := now.Add(-10 * time.Minute)
+	stale := now.Add(-6 * time.Hour)
+	acts := []asgtypes.Activity{
+		{StatusCode: asgtypes.ScalingActivityStatusCodeSuccessful, Description: ptr("recent-scale-up"), StatusMessage: ptr("ok"), EndTime: &recent},
+		{StatusCode: asgtypes.ScalingActivityStatusCodeFailed, Description: ptr("stale-scale-up"), StatusMessage: ptr("old"), EndTime: &stale},
+	}
+	newClient := func() *Client {
+		return &Client{
+			eks:         &fakeEKS{listPages: []*eks.ListNodegroupsOutput{ngPage("")}},
+			asg:         &fakeASG{pages: []*autoscaling.DescribeAutoScalingGroupsOutput{asgPage("", "demo-asg-a")}, activities: acts},
+			clusterName: "demo",
+			maxEvents:   25,
+		}
+	}
+
+	t.Run("windowed -> stale activity filtered out", func(t *testing.T) {
+		w := providers.TimeWindow{Start: now.Add(-60 * time.Minute), End: now}
+		lines, err := newClient().ResourceHealth(context.Background(), providers.Selector{}, w)
+		if err != nil {
+			t.Fatalf("ResourceHealth: %v", err)
+		}
+		if !linesContain(lines, "recent-scale-up") {
+			t.Fatalf("in-window activity must be shown, got %v", lines)
+		}
+		if linesContain(lines, "stale-scale-up") {
+			t.Fatalf("stale (pre-window) activity must be filtered, got %v", lines)
+		}
+	})
+
+	t.Run("zero window -> all activities shown (backward compatible)", func(t *testing.T) {
+		lines, err := newClient().ResourceHealth(context.Background(), providers.Selector{}, providers.TimeWindow{})
+		if err != nil {
+			t.Fatalf("ResourceHealth: %v", err)
+		}
+		if !linesContain(lines, "recent-scale-up") || !linesContain(lines, "stale-scale-up") {
+			t.Fatalf("zero window must show all activities, got %v", lines)
+		}
+	})
+
+	t.Run("windowed with all stale -> no-activity note", func(t *testing.T) {
+		w := providers.TimeWindow{Start: now.Add(-30 * time.Minute), End: now}
+		onlyStale := &fakeASG{pages: []*autoscaling.DescribeAutoScalingGroupsOutput{asgPage("", "demo-asg-a")}, activities: []asgtypes.Activity{acts[1]}}
+		c := &Client{eks: &fakeEKS{listPages: []*eks.ListNodegroupsOutput{ngPage("")}}, asg: onlyStale, clusterName: "demo", maxEvents: 25}
+		lines, err := c.ResourceHealth(context.Background(), providers.Selector{}, w)
+		if err != nil {
+			t.Fatalf("ResourceHealth: %v", err)
+		}
+		if !linesContain(lines, "no scaling activity in the last") {
+			t.Fatalf("want a no-activity-in-window note, got %v", lines)
+		}
+	})
 }

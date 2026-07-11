@@ -420,3 +420,24 @@ func TestQueryMetricsRangeToolEmpty(t *testing.T) {
 		t.Fatalf("want no-series note, got:\n%s", out)
 	}
 }
+
+func TestQueryMetricsMetricsQLGuidance(t *testing.T) {
+	// VictoriaMetrics flavor → MetricsQL sentence appended.
+	vm := QueryMetricsTool{MetricsQL: true}.Description()
+	if !strings.Contains(vm, "MetricsQL") || !strings.Contains(vm, "outliersk(3,") {
+		t.Fatalf("VM description missing MetricsQL guidance:\n%s", vm)
+	}
+	// Prometheus/unknown flavor → NO MetricsQL claims.
+	prom := QueryMetricsTool{}.Description()
+	if strings.Contains(prom, "MetricsQL") {
+		t.Fatalf("Prometheus description must not mention MetricsQL:\n%s", prom)
+	}
+	// Range tool behaves identically.
+	vmr := QueryMetricsRangeTool{MetricsQL: true}.Description()
+	if !strings.Contains(vmr, "MetricsQL") {
+		t.Fatalf("VM range description missing MetricsQL guidance:\n%s", vmr)
+	}
+	if strings.Contains(QueryMetricsRangeTool{}.Description(), "MetricsQL") {
+		t.Fatalf("Prometheus range description must not mention MetricsQL")
+	}
+}

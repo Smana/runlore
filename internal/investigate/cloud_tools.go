@@ -79,23 +79,33 @@ func (t CloudResourceHealthTool) Name() string { return "cloud_resource_health" 
 func (t CloudResourceHealthTool) Description() string {
 	return "Describe AWS-side health for the cluster's nodes/capacity: EKS nodegroup status + health " +
 		"issues, ASG scaling activities (launch/capacity failures), and — when given an EC2 instance-id " +
-		"(i-…) — its instance/system status checks. Use to confirm a node/infra/capacity cause."
+		"(i-…) — its instance/system status checks. Use to confirm a node/infra/capacity cause. " +
+		"Optional since_minutes scopes the scaling-activity lookback to the incident window " +
+		"(default: recent activities)."
 }
 
 // Schema returns the JSON schema for the arguments.
 func (t CloudResourceHealthTool) Schema() string {
-	return `{"type":"object","properties":{"instance_id":{"type":"string","description":"optional EC2 instance id (i-…)"}},"required":[]}`
+	return `{"type":"object","properties":{"instance_id":{"type":"string","description":"optional EC2 instance id (i-…)"},"since_minutes":{"type":"integer","description":"scope scaling-activity lookback to the last N minutes"}},"required":[]}`
 }
 
 // Call renders cloud resource health.
 func (t CloudResourceHealthTool) Call(ctx context.Context, args string) (string, error) {
 	var in struct {
-		InstanceID string `json:"instance_id"`
+		InstanceID   string `json:"instance_id"`
+		SinceMinutes int    `json:"since_minutes"`
 	}
 	if err := json.Unmarshal([]byte(args), &in); err != nil {
 		return "", fmt.Errorf("parse args: %w", err)
 	}
-	lines, err := t.Cloud.ResourceHealth(ctx, providers.Selector{Name: in.InstanceID}, providers.TimeWindow{})
+	// A since_minutes bounds the scaling-activity lookback; unset ⇒ zero window
+	// (today's behaviour: recent activities, unscoped).
+	var window providers.TimeWindow
+	if in.SinceMinutes > 0 {
+		end := time.Now()
+		window = providers.TimeWindow{Start: end.Add(-time.Duration(in.SinceMinutes) * time.Minute), End: end}
+	}
+	lines, err := t.Cloud.ResourceHealth(ctx, providers.Selector{Name: in.InstanceID}, window)
 	if err != nil {
 		return "", err
 	}
