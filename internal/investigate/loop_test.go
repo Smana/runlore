@@ -1634,4 +1634,32 @@ func TestSeedPrompt(t *testing.T) {
 			t.Errorf("clipped label should still appear, got %q", got)
 		}
 	})
+	t.Run("surfaces coalesced constituent workloads as an untrusted blast-radius block", func(t *testing.T) {
+		// C1: a coalesced batch of 3 distinct workloads — the representative plus two
+		// constituents carried on CoalescedWorkloads — must surface all three so the
+		// model investigates the whole storm, not just the representative's workload.
+		req := Request{
+			Title:              "TargetDown",
+			Source:             SourceAlert,
+			Workload:           providers.Workload{Namespace: "apps", Name: "web"},
+			CoalescedWorkloads: []string{"apps/worker", "data/postgres"},
+		}
+		got := seedPrompt(req, nil)
+		if !strings.Contains(got, "apps/web") {
+			t.Errorf("seed must still name the representative workload, got %q", got)
+		}
+		if !strings.Contains(got, "apps/worker") || !strings.Contains(got, "data/postgres") {
+			t.Errorf("seed must surface all coalesced constituent workloads, got %q", got)
+		}
+		if !strings.Contains(got, "UNTRUSTED") {
+			t.Errorf("coalesced block must be framed as untrusted, got %q", got)
+		}
+	})
+	t.Run("omits the coalesced block for a single alert", func(t *testing.T) {
+		// A non-coalesced alert carries no CoalescedWorkloads, so no batch block appears.
+		got := seedPrompt(Request{Title: "X", Source: SourceAlert, Workload: providers.Workload{Namespace: "apps", Name: "web"}}, nil)
+		if strings.Contains(got, "coalesced batch") {
+			t.Errorf("single alert should not emit a coalesced-batch block, got %q", got)
+		}
+	})
 }
