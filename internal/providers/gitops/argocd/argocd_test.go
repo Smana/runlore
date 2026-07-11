@@ -5,6 +5,7 @@ package argocd
 import (
 	"context"
 	"testing"
+	"time"
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
@@ -101,6 +102,45 @@ func TestProviderChangesMultiSource(t *testing.T) {
 	if c.Source != (providers.SourceRef{RepoURL: "https://github.com/org/manifests", Path: "apps/multi"}) ||
 		c.FromRev != "oldsha" || c.ToRev != "newsha" {
 		t.Fatalf("unexpected multi-source change: %+v", c)
+	}
+}
+
+// TestProviderChangesDestNamespace covers B1+B2: an Application living in argocd but
+// deploying into destination namespace "harbor" must be found when queried by that
+// namespace, and When must carry the last deploy time.
+func TestProviderChangesDestNamespace(t *testing.T) {
+	deployedAt := time.Date(2026, 7, 1, 14, 2, 0, 0, time.UTC)
+	r := fakeReader{apps: []application{{
+		Name: "harbor", Namespace: "argocd", DestNamespace: "harbor",
+		RepoURL: "https://github.com/org/repo", Path: "apps/harbor",
+		Revision: "newsha", PrevRevision: "oldsha", DeployedAt: deployedAt,
+	}}}
+	p := New(r, &whatchanged.Differ{})
+	changes, err := p.Changes(context.Background(), providers.TimeWindow{}, providers.Selector{Namespace: "harbor"})
+	if err != nil {
+		t.Fatalf("Changes: %v", err)
+	}
+	if len(changes) != 1 || changes[0].Workload.Name != "harbor" {
+		t.Fatalf("destination-namespace query did not resolve the owning Application: %+v", changes)
+	}
+	if !changes[0].When.Equal(deployedAt) {
+		t.Fatalf("When = %v, want deployedAt %v", changes[0].When, deployedAt)
+	}
+}
+
+// TestProviderChangesNamespaceNameFallback: querying a name in a namespace the app
+// neither lives in nor targets still resolves it by name across namespaces (B2).
+func TestProviderChangesNamespaceNameFallback(t *testing.T) {
+	r := fakeReader{apps: []application{
+		{Name: "harbor", Namespace: "argocd", DestNamespace: "harbor", RepoURL: "u", Revision: "a"},
+	}}
+	p := New(r, &whatchanged.Differ{})
+	changes, err := p.Changes(context.Background(), providers.TimeWindow{}, providers.Selector{Namespace: "elsewhere", Name: "harbor"})
+	if err != nil {
+		t.Fatalf("Changes: %v", err)
+	}
+	if len(changes) != 1 || changes[0].Workload.Name != "harbor" {
+		t.Fatalf("name fallback across namespaces failed: %+v", changes)
 	}
 }
 

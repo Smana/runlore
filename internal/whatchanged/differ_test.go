@@ -170,6 +170,23 @@ func TestForChangeEmptyFromRev(t *testing.T) {
 	}
 }
 
+// TestCommitTime resolves a revision's committer timestamp — the anchor for the
+// change↔symptom time correlation (RunLore B1). buildRepo commits v2 at Unix 2000.
+func TestCommitTime(t *testing.T) {
+	dir, _, v2 := buildRepo(t)
+	got, err := (&Differ{}).CommitTime(context.Background(), dir, v2.String())
+	if err != nil {
+		t.Fatalf("CommitTime: %v", err)
+	}
+	if !got.Equal(time.Unix(2000, 0)) {
+		t.Fatalf("CommitTime = %v, want %v", got, time.Unix(2000, 0))
+	}
+	// An empty revision is a caller error, not a panic.
+	if _, err := (&Differ{}).CommitTime(context.Background(), dir, ""); err == nil {
+		t.Fatal("empty revision must error")
+	}
+}
+
 // TestRemoteCancelledCtx: a ctx cancelled before the clone must abort with a
 // wrapped context error (errors.Is) — proving the clone is cancellable.
 func TestRemoteCancelledCtx(t *testing.T) {

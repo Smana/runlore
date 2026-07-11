@@ -205,18 +205,24 @@ func TestKustomizationReadyCondition(t *testing.T) {
 		"apiVersion": "kustomize.toolkit.fluxcd.io/v1",
 		"kind":       "Kustomization",
 		"metadata":   map[string]any{"name": "apps", "namespace": "flux-system"},
-		"spec":       map[string]any{"path": "./apps", "sourceRef": map[string]any{"name": "flux-system"}},
+		"spec":       map[string]any{"path": "./apps", "targetNamespace": "harbor", "sourceRef": map[string]any{"name": "flux-system"}},
 		"status": map[string]any{
 			"lastAppliedRevision": "main@sha1:abc",
 			"conditions": []any{
 				map[string]any{"type": "Healthy", "status": "True"},
-				map[string]any{"type": "Ready", "status": "False", "reason": "BuildFailed", "message": "kustomize build failed"},
+				map[string]any{"type": "Ready", "status": "False", "reason": "BuildFailed", "message": "kustomize build failed", "lastTransitionTime": "2026-07-01T14:05:00Z"},
 			},
 		},
 	}}
 	k := kustomizationFromUnstructured(u)
 	if k.ReadyStatus != "False" || k.ReadyReason != "BuildFailed" || k.ReadyMessage != "kustomize build failed" {
 		t.Fatalf("unexpected ready condition: %+v", k)
+	}
+	if k.TargetNamespace != "harbor" {
+		t.Fatalf("targetNamespace not parsed: %q", k.TargetNamespace)
+	}
+	if !k.ReadyTime.Equal(time.Date(2026, 7, 1, 14, 5, 0, 0, time.UTC)) {
+		t.Fatalf("ReadyTime not parsed from lastTransitionTime: %v", k.ReadyTime)
 	}
 }
 
