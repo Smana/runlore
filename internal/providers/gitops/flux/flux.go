@@ -90,7 +90,7 @@ func New(reader Reader, differ *whatchanged.Differ) *Provider {
 //
 // TimeWindow (G3): when w is non-zero, each diffable-Git Kustomization emits a Change
 // per source revision that landed IN the window (git-log on the resolved source,
-// newest-first, capped at maxWindowRevisions), so "what changed over the last N hours"
+// newest-first, capped at whatchanged.MaxWindowRevisions), so "what changed over the last N hours"
 // surfaces the whole timeline — not just the current applied revision. A zero/unset
 // window falls back to the single-latest-revision behavior. The enumeration is bounded
 // (cap + committer-time short-circuit) so a wide window can't explode the output.
@@ -110,11 +110,6 @@ func (p *Provider) Changes(ctx context.Context, w providers.TimeWindow, sel prov
 	}
 	return changes, nil
 }
-
-// maxWindowRevisions caps how many in-window revisions a single Kustomization emits
-// (G3). It bounds the "what changed" output so a wide window on a busy monorepo can't
-// flood the model with hundreds of Changes.
-const maxWindowRevisions = 10
 
 // changesFor maps the Kustomizations accepted by keep into engine-agnostic Changes,
 // resolving each source URL (cached per source) and populating When. With a non-zero
@@ -173,7 +168,7 @@ func (p *Provider) changesFor(ctx context.Context, w providers.TimeWindow, ks []
 }
 
 // windowChanges expands a diffable-Git Kustomization into one Change per source
-// revision that landed within w (newest-first, capped by maxWindowRevisions). Each
+// revision that landed within w (newest-first, capped by whatchanged.MaxWindowRevisions). Each
 // Change diffs the revision against its parent (FromRev="") and carries the commit's
 // time as When, so the model sees the whole in-window timeline instead of only the
 // current applied revision (G3). It returns nil — so the caller keeps today's
@@ -183,7 +178,7 @@ func (p *Provider) windowChanges(ctx context.Context, w providers.TimeWindow, k 
 	if p.differ == nil || !isGit || url == "" || toRev == "" || (w.Start.IsZero() && w.End.IsZero()) {
 		return nil
 	}
-	revs, err := p.differ.RevisionsInWindow(ctx, url, toRev, k.Path, w, maxWindowRevisions)
+	revs, err := p.differ.RevisionsInWindow(ctx, url, toRev, k.Path, w, whatchanged.MaxWindowRevisions)
 	if err != nil || len(revs) == 0 {
 		return nil // clone/log failure or nothing in window — fall back to current revision
 	}

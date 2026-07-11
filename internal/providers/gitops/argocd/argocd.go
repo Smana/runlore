@@ -80,7 +80,7 @@ func New(reader Reader, differ *whatchanged.Differ) *Provider {
 //
 // TimeWindow (G3): when w is non-zero, each Application emits a Change per source
 // revision that landed IN the window (git-log on the resolved source repo,
-// newest-first, capped at maxWindowRevisions), so "what changed over the last N
+// newest-first, capped at whatchanged.MaxWindowRevisions), so "what changed over the last N
 // hours" surfaces the whole timeline — not just the current synced revision. A
 // zero/unset window falls back to the single current-revision behavior. The
 // enumeration is bounded so a wide window can't explode the output.
@@ -97,10 +97,6 @@ func (p *Provider) Changes(ctx context.Context, w providers.TimeWindow, sel prov
 	}
 	return changes, nil
 }
-
-// maxWindowRevisions caps how many in-window revisions a single Application emits
-// (G3), bounding the "what changed" output on a busy monorepo.
-const maxWindowRevisions = 10
 
 // changesFor maps the Applications accepted by keep into engine-agnostic Changes.
 // With a non-zero window it expands each app into one Change per in-window source
@@ -127,7 +123,7 @@ func (p *Provider) changesFor(ctx context.Context, w providers.TimeWindow, apps 
 }
 
 // windowChanges expands an Application into one Change per source revision that landed
-// within w (newest-first, capped by maxWindowRevisions), each diffing the revision
+// within w (newest-first, capped by whatchanged.MaxWindowRevisions), each diffing the revision
 // against its parent so the model sees the whole in-window timeline instead of only
 // the current synced revision (G3). It returns nil — so the caller keeps today's
 // single-revision behavior — when the window is zero, no Differ is wired, or the
@@ -136,7 +132,7 @@ func (p *Provider) windowChanges(ctx context.Context, w providers.TimeWindow, a 
 	if p.differ == nil || (w.Start.IsZero() && w.End.IsZero()) {
 		return nil
 	}
-	revs, err := p.differ.RevisionsInWindow(ctx, a.RepoURL, parseRevision(a.Revision), a.Path, w, maxWindowRevisions)
+	revs, err := p.differ.RevisionsInWindow(ctx, a.RepoURL, parseRevision(a.Revision), a.Path, w, whatchanged.MaxWindowRevisions)
 	if err != nil || len(revs) == 0 {
 		return nil // clone/log failure or nothing in window — fall back to current revision
 	}

@@ -309,6 +309,12 @@ type Revision struct {
 	When time.Time
 }
 
+// MaxWindowRevisions caps how many in-window revisions a single GitOps object
+// (Flux Kustomization / Argo CD Application) emits (G3). It bounds the "what changed"
+// output so a wide window on a busy monorepo can't flood the model with hundreds of
+// Changes. Shared by the flux and argocd providers, which pass it to RevisionsInWindow.
+const MaxWindowRevisions = 10
+
 // RevisionsInWindow clones url and returns the commits reachable from atRev whose
 // committer time falls within w, optionally scoped to a path, newest-first and
 // capped at max. It is what lets Changes honor a TimeWindow: instead of surfacing
