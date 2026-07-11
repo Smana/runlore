@@ -111,26 +111,27 @@ func (m *Matrix) Deliver(ctx context.Context, inv providers.Investigation) error
 	return nil
 }
 
-// boldRe / codeRe / linkRe match the small mrkdwn subset that Format emits
-// (plus inline code for robustness): *bold*, `code`, and bare http(s) URLs.
+// boldRe / codeRe match the small mrkdwn subset that Format emits (plus inline
+// code for robustness): *bold* and `code`.  URL auto-linkification has been
+// intentionally removed: the investigation body is assembled from untrusted
+// content (LLM output, alert labels, log evidence) and an attacker-influenced
+// URL rendered as a live <a href> is a phishing vector inside Matrix clients.
+// Slack takes the same stance (escapeMrkdwn neutralises < > |), so both
+// notifiers now present URLs as inert plain text.
 var (
 	boldRe = regexp.MustCompile(`\*([^*\n]+)\*`)
 	codeRe = regexp.MustCompile("`([^`\n]+)`")
-	linkRe = regexp.MustCompile(`https?://[^\s<]+`)
 )
 
 // mrkdwnToHTML converts the message's Slack-mrkdwn subset to the minimal HTML
 // Matrix accepts in formatted_body. Order matters: HTML-escape first so user
 // content (evidence strings, change refs) can never inject live markup, then
 // apply the markup transforms, which only ever emit a fixed, safe tag set.
+// URLs are left as plain (HTML-escaped) text — see the boldRe/codeRe comment.
 func mrkdwnToHTML(s string) string {
 	s = html.EscapeString(s)
 	s = boldRe.ReplaceAllString(s, "<strong>$1</strong>")
 	s = codeRe.ReplaceAllString(s, "<code>$1</code>")
-	s = linkRe.ReplaceAllStringFunc(s, func(u string) string {
-		// u is already HTML-escaped; safe to embed in both attribute and text.
-		return fmt.Sprintf(`<a href=%q>%s</a>`, u, u)
-	})
 	return strings.ReplaceAll(s, "\n", "<br/>")
 }
 
