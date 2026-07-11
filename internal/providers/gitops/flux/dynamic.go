@@ -23,6 +23,7 @@ const fluxSystemNamespace = "flux-system"
 // Flux CRD resources (v1).
 var (
 	kustomizationGVR = schema.GroupVersionResource{Group: "kustomize.toolkit.fluxcd.io", Version: "v1", Resource: "kustomizations"}
+	helmReleaseGVR   = schema.GroupVersionResource{Group: "helm.toolkit.fluxcd.io", Version: "v2", Resource: "helmreleases"}
 	gitRepositoryGVR = schema.GroupVersionResource{Group: "source.toolkit.fluxcd.io", Version: "v1", Resource: "gitrepositories"}
 	eventsGVR        = schema.GroupVersionResource{Group: "", Version: "v1", Resource: "events"}
 )
@@ -31,7 +32,7 @@ var (
 var kindToGVR = map[string]schema.GroupVersionResource{
 	"Kustomization":    kustomizationGVR,
 	"GitRepository":    gitRepositoryGVR,
-	"HelmRelease":      {Group: "helm.toolkit.fluxcd.io", Version: "v2", Resource: "helmreleases"},
+	"HelmRelease":      helmReleaseGVR,
 	"OCIRepository":    {Group: "source.toolkit.fluxcd.io", Version: "v1", Resource: "ocirepositories"},
 	"HelmRepository":   {Group: "source.toolkit.fluxcd.io", Version: "v1", Resource: "helmrepositories"},
 	"HelmChart":        {Group: "source.toolkit.fluxcd.io", Version: "v1", Resource: "helmcharts"},
@@ -254,22 +255,23 @@ func readyTransitionTime(u *unstructured.Unstructured) time.Time {
 	return time.Time{}
 }
 
-// WatchKustomizations watches all Kustomizations via a dynamic informer (list-watch
-// with reconnection + periodic resync) and forwards each add/update as a
-// KustomizationEvent. The channel closes when ctx is done.
-func (r *dynamicReader) WatchKustomizations(ctx context.Context) (<-chan KustomizationEvent, error) {
-	factory := dynamicinformer.NewDynamicSharedInformerFactory(r.client, 10*time.Minute)
-	informer := factory.ForResource(kustomizationGVR).Informer()
+// watchResource watches a Flux GVR via a dynamic informer (list-watch with
+// reconnection + periodic resync) and forwards each add/update, mapped by conv,
+// on the returned buffered channel. Sends never block the informer (dropped under
+// backpressure); the channel closes when ctx is done. Shared by the Kustomization
+// and HelmRelease failure watchers so both get identical watch semantics.
+func watchResource[T any](ctx context.Context, client dynamic.Interface, gvr schema.GroupVersionResource, conv func(*unstructured.Unstructured) T) (<-chan T, error) {
+	factory := dynamicinformer.NewDynamicSharedInformerFactory(client, 10*time.Minute)
+	informer := factory.ForResource(gvr).Informer()
 
-	out := make(chan KustomizationEvent, 128)
+	out := make(chan T, 128)
 	send := func(obj any) {
 		u, ok := obj.(*unstructured.Unstructured)
 		if !ok {
 			return
 		}
-		ev := KustomizationEvent{Kustomization: kustomizationFromUnstructured(u)}
 		select {
-		case out <- ev:
+		case out <- conv(u):
 		case <-ctx.Done():
 		default: // never block the informer; drop under backpressure
 		}
@@ -287,6 +289,25 @@ func (r *dynamicReader) WatchKustomizations(ctx context.Context) (<-chan Kustomi
 		<-ctx.Done()
 	}()
 	return out, nil
+}
+
+// WatchKustomizations watches all Kustomizations and forwards each add/update as a
+// KustomizationEvent. The channel closes when ctx is done.
+func (r *dynamicReader) WatchKustomizations(ctx context.Context) (<-chan KustomizationEvent, error) {
+	return watchResource(ctx, r.client, kustomizationGVR, func(u *unstructured.Unstructured) KustomizationEvent {
+		return KustomizationEvent{Kustomization: kustomizationFromUnstructured(u)}
+	})
+}
+
+// WatchHelmReleases watches all HelmReleases and forwards each add/update as a
+// HelmReleaseEvent. The channel closes when ctx is done. A HelmRelease that never
+// installs or upgrades (image pull failures, failed hooks, exhausted retries) goes
+// Ready=False without any Kustomization flipping, so it is invisible to the
+// Kustomization watch — this closes that gap (runlore#306).
+func (r *dynamicReader) WatchHelmReleases(ctx context.Context) (<-chan HelmReleaseEvent, error) {
+	return watchResource(ctx, r.client, helmReleaseGVR, func(u *unstructured.Unstructured) HelmReleaseEvent {
+		return HelmReleaseEvent{HelmRelease: helmReleaseFromUnstructured(u)}
+	})
 }
 
 // kustomizationFromUnstructured maps an unstructured Kustomization object to the
@@ -316,5 +337,18 @@ func kustomizationFromUnstructured(u *unstructured.Unstructured) kustomization {
 		ReadyReason:     readyReason,
 		ReadyMessage:    readyMessage,
 		ReadyTime:       readyTransitionTime(u),
+	}
+}
+
+// helmReleaseFromUnstructured maps an unstructured HelmRelease to the minimal
+// helmRelease type the failure watcher needs (identity + Ready condition).
+func helmReleaseFromUnstructured(u *unstructured.Unstructured) helmRelease {
+	status, reason, message := readyCondition(u)
+	return helmRelease{
+		Name:         u.GetName(),
+		Namespace:    u.GetNamespace(),
+		ReadyStatus:  status,
+		ReadyReason:  reason,
+		ReadyMessage: message,
 	}
 }
