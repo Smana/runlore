@@ -33,11 +33,22 @@ func New(client kubernetes.Interface) *Reader { return &Reader{client: client} }
 
 var _ providers.LogReader = (*Reader)(nil)
 
+// defaultContainerAnnotation names the pod's primary (app) container; kubectl sets
+// it so `kubectl logs` picks the app over an injected sidecar. We honor it to read
+// the app container FIRST (its logs are the ones an investigation wants).
+const defaultContainerAnnotation = "kubectl.kubernetes.io/default-container"
+
 // PodLogs returns recent log lines from up to maxPods pods selected by q, bounded to
 // the last q.SinceMinutes. When q.Previous is true it reads each pod's last-terminated
 // container (the crash output of a CrashLoopBackOff) instead of the running one. Each
-// line is prefixed with its pod name. Best-effort: a pod whose log stream fails is
-// skipped, not fatal.
+// line is prefixed with "<pod>/<container>". Best-effort: a pod whose log stream fails
+// still emits a marker line so a tool error reads as missing data, not silence.
+//
+// B6 (CORE-706): every container of a pod is read explicitly. The old code set no
+// Container in PodLogOptions, and the Kubernetes API REJECTS a log request on a pod
+// with more than one container ("a container name must be specified…"); that error
+// was swallowed, so every pod with an istio/linkerd/cloudsql sidecar silently
+// yielded nothing.
 func (r *Reader) PodLogs(ctx context.Context, q providers.PodLogQuery) (providers.LogResult, error) {
 	pods, err := r.client.CoreV1().Pods(q.Namespace).List(ctx, metav1.ListOptions{LabelSelector: q.LabelSelector})
 	if err != nil {
@@ -48,31 +59,68 @@ func (r *Reader) PodLogs(ctx context.Context, q providers.PodLogQuery) (provider
 		s := int64(q.SinceMinutes) * 60
 		since = &s
 	}
-	tail := int64(tailLines)
 	var out providers.LogResult
 	for i := range pods.Items {
 		if i >= maxPods {
 			break
 		}
-		name := pods.Items[i].Name
-		// Timestamps: the kubelet prefixes each line with RFC3339Nano; we parse it
-		// into LogLine.Time so the renderer can show WHEN a line was emitted (the
-		// signal that correlates a crash to a change/event time).
-		stream, err := r.client.CoreV1().Pods(q.Namespace).
-			GetLogs(name, &corev1.PodLogOptions{SinceSeconds: since, TailLines: &tail, Previous: q.Previous, Timestamps: true}).
-			Stream(ctx)
-		if err != nil {
-			continue
+		pod := &pods.Items[i]
+		containers := containerOrder(pod, q.Container)
+		if len(containers) == 0 {
+			continue // a pod with no containers in spec (shouldn't happen) has nothing to read
 		}
-		sc := bufio.NewScanner(stream)
-		sc.Buffer(make([]byte, 0, 64*1024), 1024*1024)
-		for sc.Scan() {
-			ts, msg := splitLogTimestamp(sc.Text())
-			out = append(out, providers.LogLine{Time: ts, Message: name + ": " + msg})
+		// Split the per-pod tail budget across the pod's containers so a multi-
+		// container pod doesn't blow the bound; at least 1 line each.
+		tail := int64(tailLines) / int64(len(containers))
+		if tail < 1 {
+			tail = 1
 		}
-		_ = stream.Close()
+		for _, c := range containers {
+			// Timestamps: the kubelet prefixes each line with RFC3339Nano; we parse it
+			// into LogLine.Time so the renderer can show WHEN a line was emitted (the
+			// signal that correlates a crash to a change/event time).
+			stream, err := r.client.CoreV1().Pods(q.Namespace).
+				GetLogs(pod.Name, &corev1.PodLogOptions{Container: c, SinceSeconds: since, TailLines: &tail, Previous: q.Previous, Timestamps: true}).
+				Stream(ctx)
+			if err != nil {
+				// A tool error is missing data, not silence: surface it as a marker
+				// line so the model knows this container's logs were unavailable.
+				out = append(out, providers.LogLine{Message: fmt.Sprintf("%s/%s: log stream failed: %v", pod.Name, c, err)})
+				continue
+			}
+			sc := bufio.NewScanner(stream)
+			sc.Buffer(make([]byte, 0, 64*1024), 1024*1024)
+			for sc.Scan() {
+				ts, msg := splitLogTimestamp(sc.Text())
+				out = append(out, providers.LogLine{Time: ts, Message: pod.Name + "/" + c + ": " + msg})
+			}
+			_ = stream.Close()
+		}
 	}
 	return out, nil
+}
+
+// containerOrder returns the container names to read for a pod. When q.Container is
+// set it scopes to that one; otherwise it returns all spec containers with the
+// default-container (the app, per the kubectl annotation) moved first so its logs
+// lead. A pod's own container ordering is otherwise preserved.
+func containerOrder(pod *corev1.Pod, only string) []string {
+	if only != "" {
+		return []string{only}
+	}
+	names := make([]string, 0, len(pod.Spec.Containers))
+	for _, c := range pod.Spec.Containers {
+		names = append(names, c.Name)
+	}
+	if def := pod.Annotations[defaultContainerAnnotation]; def != "" {
+		for i, n := range names {
+			if n == def && i > 0 {
+				names = append([]string{def}, append(names[:i:i], names[i+1:]...)...)
+				break
+			}
+		}
+	}
+	return names
 }
 
 // splitLogTimestamp splits the RFC3339Nano prefix that PodLogOptions.Timestamps
@@ -111,7 +159,15 @@ func (r *Reader) PodStatuses(ctx context.Context, namespace, labelSelector strin
 }
 
 func podStatus(p *corev1.Pod) providers.PodStatus {
-	ps := providers.PodStatus{Name: p.Name, Phase: string(p.Status.Phase)}
+	// PodIP/NodeName/HostIP are already on the object — surfacing them lets the model
+	// bridge a network_drops IP back to this pod at zero extra API cost (B8, CORE-707).
+	ps := providers.PodStatus{
+		Name:     p.Name,
+		Phase:    string(p.Status.Phase),
+		PodIP:    p.Status.PodIP,
+		NodeName: p.Spec.NodeName,
+		HostIP:   p.Status.HostIP,
+	}
 	// Container memory limits (from the spec) — needed to tie an OOMKill to the limit.
 	memLimit := map[string]string{}
 	addLimits := func(cs []corev1.Container) {
