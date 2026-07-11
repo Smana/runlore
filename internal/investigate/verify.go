@@ -9,6 +9,7 @@ import (
 	"strings"
 
 	"github.com/Smana/runlore/internal/providers"
+	"github.com/Smana/runlore/internal/redact"
 )
 
 // verifyPrompt drives an adversarial review of an investigation's root causes —
@@ -24,6 +25,12 @@ For EACH proposed root cause, judge it ONLY on the evidence given:
 - downgrade — plausible and partially evidenced, but not verified end-to-end (lower its confidence).
 - keep — backed by concrete, causal evidence (e.g. the change was read AND matches the observed
   failure, or a logged error directly explains it).
+
+Groundedness: each cited piece of evidence must trace to a tool result in the transcript excerpt
+below. If a root cause's evidence cannot be found in the transcript, treat it as unverified — reject
+or downgrade it. Absence of a tool result is not itself proof against a cause (the excerpt is
+bounded and may omit some results), so weigh it alongside the other evidence rather than rejecting
+solely on a missing line.
 
 Call submit_verdicts once: one verdict per root cause by index, with a calibrated confidence and a
 short reason.`
@@ -64,7 +71,11 @@ func parseVerdicts(args string) ([]verdict, error) {
 // pass through unchanged (verification must never lose a real finding). The verify
 // completion's token usage is accumulated into totals (when non-nil) so the
 // per-investigation cost includes the verify pass.
-func (li *LoopInvestigator) verifyFindings(ctx context.Context, req Request, inv providers.Investigation, totals *providers.UsageTotals) providers.Investigation {
+// transcript is the loop's accumulated message history (may be nil, e.g. the
+// recall short-circuit path where no loop ran). A bounded, redacted excerpt of its
+// tool results is fed to the reviewer so groundedness ("does this cause trace to a
+// tool result?") can be checked rather than merely asserted.
+func (li *LoopInvestigator) verifyFindings(ctx context.Context, req Request, inv providers.Investigation, transcript []providers.Message, totals *providers.UsageTotals) providers.Investigation {
 	if len(inv.RootCauses) == 0 {
 		return inv
 	}
@@ -77,7 +88,7 @@ func (li *LoopInvestigator) verifyFindings(ctx context.Context, req Request, inv
 	}
 	resp, err := m.Complete(ctx, providers.CompletionRequest{
 		System:   verifyPrompt,
-		Messages: []providers.Message{{Role: "user", Content: renderForReview(req, inv)}},
+		Messages: []providers.Message{{Role: "user", Content: renderForReview(req, inv, transcript)}},
 		Tools:    []providers.ToolSpec{submitVerdictsSpec()},
 		// Force the tool: a reviewer that answers in prose silently skips the
 		// honesty check (no verdicts ⇒ findings pass through unreviewed).
@@ -168,8 +179,9 @@ func applyVerdicts(li *LoopInvestigator, req Request, inv providers.Investigatio
 }
 
 // renderForReview presents the incident + ranked root causes (with their evidence)
-// for the adversarial reviewer to judge.
-func renderForReview(req Request, inv providers.Investigation) string {
+// for the adversarial reviewer to judge, followed by a bounded, redacted excerpt of
+// the tool transcript so groundedness can be verified against the actual tool output.
+func renderForReview(req Request, inv providers.Investigation, transcript []providers.Message) string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "Incident: %s. Workload: %s/%s. Reason: %s.\n\nProposed root causes to review:\n",
 		req.Title, req.Workload.Namespace, req.Workload.Name, req.Reason)
@@ -182,5 +194,68 @@ func renderForReview(req Request, inv providers.Investigation) string {
 			fmt.Fprintf(&b, "    - %s\n", e)
 		}
 	}
+	if ex := transcriptExcerpt(transcript); ex != "" {
+		fmt.Fprintf(&b, "\nTool transcript excerpt (most recent tool results, may be truncated — "+
+			"check each cited evidence against it):\n%s", ex)
+	}
 	return b.String()
+}
+
+// maxVerifyTranscriptBytes hard-caps the tool-transcript excerpt fed into the
+// verify pass (and the eval judge). Feeding transcripts grows the prompt, so the
+// budget is kept deliberately small and conservative: enough to check the handful
+// of decision-relevant tool results without materially shifting verify verdicts or
+// cost. Purely additive context — the excerpt never replaces the findings.
+const maxVerifyTranscriptBytes = 4000
+
+// transcriptExcerpt builds a bounded excerpt of the tool results in a loop's message
+// history, for grounding the verify/judge pass. Tool output is ALREADY redacted when
+// it enters history (loop.go's egress boundary); redact.Secrets is re-applied here as
+// idempotent defense in depth so a caller passing an unredacted transcript still can't
+// leak. The MOST RECENT tool results are preferred (they are the ones the model saw
+// just before concluding, so the most decision-relevant) and the excerpt is assembled
+// oldest-first up to maxVerifyTranscriptBytes. Returns "" when there are no tool
+// results (e.g. the recall short-circuit path, where no loop ran).
+func transcriptExcerpt(transcript []providers.Message) string {
+	// Collect tool-result contents with a short call-name label (from the assistant
+	// turn that requested them) so the reviewer can tell which tool produced what.
+	names := map[string]string{} // ToolCallID -> tool name
+	for _, m := range transcript {
+		for _, tc := range m.ToolCalls {
+			names[tc.ID] = tc.Name
+		}
+	}
+	type entry struct{ label, content string }
+	var entries []entry
+	for _, m := range transcript {
+		if m.Role != "tool" || strings.TrimSpace(m.Content) == "" {
+			continue
+		}
+		label := names[m.ToolCallID]
+		if label == "" {
+			label = "tool"
+		}
+		entries = append(entries, entry{label: label, content: m.Content})
+	}
+	if len(entries) == 0 {
+		return ""
+	}
+	// Walk newest→oldest, prepending each entry while it fits the byte budget, so the
+	// excerpt keeps the most decision-relevant (latest) results and stays capped.
+	var kept []string
+	total := 0
+	for i := len(entries) - 1; i >= 0; i-- {
+		block := fmt.Sprintf("[%s] %s", entries[i].label, entries[i].content)
+		if total+len(block) > maxVerifyTranscriptBytes {
+			// Include a final truncated fragment of this block so the budget is used
+			// fully and the cap is a hard ceiling (never exceeded).
+			if remaining := maxVerifyTranscriptBytes - total; remaining > 0 {
+				kept = append([]string{block[:remaining]}, kept...)
+			}
+			break
+		}
+		kept = append([]string{block}, kept...)
+		total += len(block) + 1 // +1 for the join newline
+	}
+	return redact.Secrets(strings.Join(kept, "\n"))
 }
