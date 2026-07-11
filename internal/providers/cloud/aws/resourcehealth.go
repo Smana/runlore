@@ -78,6 +78,15 @@ func (c *Client) ResourceHealth(ctx context.Context, sel providers.Selector, _ p
 		}
 	}
 
+	// Karpenter-managed EC2 capacity (instances tagged karpenter.sh/nodepool).
+	// These are standalone instances not tracked by EKS managed nodegroups or
+	// explicit ASGs, so they are invisible to the sections above. Spot signal
+	// (interruption / rebalance reason codes) is surfaced here so the model can
+	// answer "why did my Karpenter node vanish?"
+	if err := c.karpenterCapacity(ctx, add); err != nil {
+		add("karpenter: capacity query failed: %v", err)
+	}
+
 	// EC2 instance status when an instance id is selected.
 	if strings.HasPrefix(sel.Name, "i-") {
 		if s, err := c.ec2.DescribeInstanceStatus(ctx, &ec2.DescribeInstanceStatusInput{InstanceIds: []string{sel.Name}, IncludeAllInstances: ptr(true)}); err != nil {
@@ -146,6 +155,125 @@ func (c *Client) describeASGs(ctx context.Context) (groups []asgtypes.AutoScalin
 		}
 	}
 	return groups, more, nil
+}
+
+// karpenterCapacity enumerates EC2 instances tagged with karpenter.sh/nodepool
+// (the canonical Karpenter-managed instance tag). Results are grouped by nodepool
+// and rendered as compact summary lines; spot instances are flagged and, when the
+// instance has terminated, any spot-interruption StateReason code is noted so the
+// model can identify "node vanished due to spot reclaim" root causes.
+//
+// Filter used: tag-key=karpenter.sh/nodepool
+// When clusterName is set a second filter is ANDed: tag:kubernetes.io/cluster/<name>=owned
+// so multi-cluster accounts scope naturally.
+func (c *Client) karpenterCapacity(ctx context.Context, add func(string, ...any)) error {
+	if c.ec2 == nil {
+		// ec2 client not wired (unit tests that focus on nodegroup/ASG paths
+		// leave it nil); skip gracefully.
+		return nil
+	}
+	filters := []ec2types.Filter{
+		{Name: ptr("tag-key"), Values: []string{"karpenter.sh/nodepool"}},
+	}
+	if c.clusterName != "" {
+		// Karpenter tags every node it provisions with this cluster ownership tag.
+		filters = append(filters, ec2types.Filter{
+			Name:   ptr("tag:kubernetes.io/cluster/" + c.clusterName),
+			Values: []string{"owned"},
+		})
+	}
+
+	out, err := c.ec2.DescribeInstances(ctx, &ec2.DescribeInstancesInput{Filters: filters})
+	if err != nil {
+		return err
+	}
+
+	// Group by nodepool tag value. Track counts and accumulate spot/termination
+	// signal per nodepool.
+	type nodepoolStats struct {
+		total           int
+		spotCount       int
+		terminated      int
+		spotTermReasons []string
+	}
+	stats := map[string]*nodepoolStats{}
+
+	for _, r := range out.Reservations {
+		for _, inst := range r.Instances {
+			pool := tagValue(inst.Tags, "karpenter.sh/nodepool")
+			if pool == "" {
+				pool = "(unknown-nodepool)"
+			}
+			s := stats[pool]
+			if s == nil {
+				s = &nodepoolStats{}
+				stats[pool] = s
+			}
+			s.total++
+
+			if inst.InstanceLifecycle == ec2types.InstanceLifecycleTypeSpot {
+				s.spotCount++
+			}
+
+			// Terminated instances with spot interruption reason codes are the
+			// primary "why did my node vanish" signal for Karpenter spot capacity.
+			if inst.State != nil && inst.State.Name == ec2types.InstanceStateNameTerminated {
+				s.terminated++
+				if inst.StateReason != nil {
+					code := deref(inst.StateReason.Code)
+					if strings.Contains(code, "Spot") {
+						s.spotTermReasons = append(s.spotTermReasons, code)
+					}
+				}
+			}
+		}
+	}
+
+	if len(stats) == 0 {
+		// No Karpenter-managed instances found — omit the section entirely so
+		// clusters not using Karpenter don't get noise.
+		return nil
+	}
+
+	for pool, s := range stats {
+		spotNote := ""
+		if s.spotCount > 0 {
+			spotNote = fmt.Sprintf(" spot=%d", s.spotCount)
+		}
+		termNote := ""
+		if s.terminated > 0 {
+			termNote = fmt.Sprintf(" terminated=%d", s.terminated)
+		}
+		reasonNote := ""
+		if len(s.spotTermReasons) > 0 {
+			reasonNote = " spot-term-reasons=[" + strings.Join(dedupStrings(s.spotTermReasons), ", ") + "]"
+		}
+		add("Karpenter nodepool %s: instances=%d%s%s%s", pool, s.total, spotNote, termNote, reasonNote)
+	}
+	return nil
+}
+
+// tagValue returns the value of the first tag matching key, or "" if absent.
+func tagValue(tags []ec2types.Tag, key string) string {
+	for _, t := range tags {
+		if deref(t.Key) == key {
+			return deref(t.Value)
+		}
+	}
+	return ""
+}
+
+// dedupStrings returns a slice with duplicate strings removed (order preserved).
+func dedupStrings(in []string) []string {
+	seen := make(map[string]struct{}, len(in))
+	out := make([]string, 0, len(in))
+	for _, s := range in {
+		if _, ok := seen[s]; !ok {
+			seen[s] = struct{}{}
+			out = append(out, s)
+		}
+	}
+	return out
 }
 
 func nodegroupHealth(d *eks.DescribeNodegroupOutput) string {
