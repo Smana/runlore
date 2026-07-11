@@ -4,6 +4,7 @@ package awsvpc
 
 import (
 	"context"
+	"strings"
 	"testing"
 	"time"
 
@@ -57,12 +58,13 @@ func TestDrops(t *testing.T) {
 		t.Fatalf("Drops returned error: %v", err)
 	}
 
-	if len(got) != 3 {
-		t.Fatalf("got %d lines, want 3", len(got))
+	// got[0] is the scoping note; got[1..3] are the parsed flows.
+	if len(got) != 4 {
+		t.Fatalf("got %d lines, want 4 (1 note + 3 flows)", len(got))
 	}
 
-	// First parsed line.
-	first := got[0]
+	// First parsed line (index 1 — after the scoping note).
+	first := got[1]
 	wantMsg := "10.0.1.5:49152 -> 10.0.2.9:443 REJECT (proto 6)"
 	if first.Message != wantMsg {
 		t.Errorf("Message = %q, want %q", first.Message, wantMsg)
@@ -117,8 +119,9 @@ func TestDropsEmpty(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Drops returned error: %v", err)
 	}
-	if len(got) != 0 {
-		t.Fatalf("got %d lines, want 0", len(got))
+	// Even when there are no flow events the scoping note is always present.
+	if len(got) != 1 {
+		t.Fatalf("got %d lines, want 1 (scoping note only)", len(got))
 	}
 	// No window set: time bounds must be left nil.
 	if fake.captured.StartTime != nil || fake.captured.EndTime != nil {
@@ -141,8 +144,9 @@ func TestDropsSkipsMalformed(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Drops returned error: %v", err)
 	}
-	if len(got) != 1 {
-		t.Fatalf("got %d lines, want 1 (malformed skipped)", len(got))
+	// got[0] is the scoping note; got[1] is the one valid flow (malformed skipped).
+	if len(got) != 2 {
+		t.Fatalf("got %d lines, want 2 (1 note + 1 valid flow, malformed skipped)", len(got))
 	}
 }
 
@@ -165,8 +169,9 @@ func TestDropsPaginates(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Drops returned error: %v", err)
 	}
-	if len(got) != 2 {
-		t.Fatalf("got %d lines across pages, want 2", len(got))
+	// got[0] is the scoping note; got[1..2] are flows from pages 1 and 2.
+	if len(got) != 3 {
+		t.Fatalf("got %d lines across pages, want 3 (1 note + 2 flows)", len(got))
 	}
 	if pager.lastToken == nil || *pager.lastToken != "page-2" {
 		t.Errorf("second call NextToken = %v, want page-2", pager.lastToken)
@@ -185,4 +190,91 @@ func (p *pagedCWL) FilterLogEvents(_ context.Context, in *cloudwatchlogs.FilterL
 	out := p.pages[p.i]
 	p.i++
 	return out, nil
+}
+
+// TestDropsScopingNoteFirst asserts that:
+//   - The scoping note is always the first entry (index 0) in the result.
+//   - The note message contains "NOT scoped to".
+//   - When the Selector carries a namespace and/or name, they appear in the note.
+func TestDropsScopingNoteFirst(t *testing.T) {
+	singleEvent := &cloudwatchlogs.FilterLogEventsOutput{
+		Events: []cwltypes.FilteredLogEvent{
+			event("2 123456789010 eni-abc123 10.0.1.5 10.0.2.9 49152 443 6 5 300 1690000000 1690000060 REJECT OK", 1_690_000_059_000),
+		},
+	}
+
+	tests := []struct {
+		name      string
+		sel       providers.Selector
+		wantScope string // substring expected in the note message
+	}{
+		{
+			name:      "empty selector shows placeholder",
+			sel:       providers.Selector{},
+			wantScope: "<namespace>/<pod>",
+		},
+		{
+			name:      "namespace only",
+			sel:       providers.Selector{Namespace: "production"},
+			wantScope: "production/<pod>",
+		},
+		{
+			name:      "namespace and name",
+			sel:       providers.Selector{Namespace: "production", Name: "api-server"},
+			wantScope: "production/api-server",
+		},
+		{
+			name:      "name only",
+			sel:       providers.Selector{Name: "api-server"},
+			wantScope: "<namespace>/api-server",
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			fake := &fakeCWL{out: singleEvent}
+			c := &Client{cwl: fake, logGroup: "vpc-flow-logs", maxEvents: 100}
+
+			got, err := c.Drops(context.Background(), tc.sel, providers.TimeWindow{})
+			if err != nil {
+				t.Fatalf("Drops: %v", err)
+			}
+			if len(got) == 0 {
+				t.Fatal("Drops returned empty result, want at least the scoping note")
+			}
+			note := got[0]
+			if !strings.Contains(note.Message, "NOT scoped to") {
+				t.Errorf("note missing 'NOT scoped to': %q", note.Message)
+			}
+			if !strings.Contains(note.Message, tc.wantScope) {
+				t.Errorf("note does not contain selector %q: %q", tc.wantScope, note.Message)
+			}
+			// The note must carry no Time or Fields so it cannot be mistaken for a
+			// real flow record.
+			if !note.Time.IsZero() {
+				t.Errorf("note Time = %v, want zero", note.Time)
+			}
+			if len(note.Fields) != 0 {
+				t.Errorf("note Fields = %v, want empty", note.Fields)
+			}
+		})
+	}
+}
+
+// TestDropsScopingNoteEmptyResult asserts the scoping note is present even when
+// the CloudWatch query returns no events (empty window / no REJECTs).
+func TestDropsScopingNoteEmptyResult(t *testing.T) {
+	fake := &fakeCWL{out: &cloudwatchlogs.FilterLogEventsOutput{}}
+	c := &Client{cwl: fake, logGroup: "vpc-flow-logs", maxEvents: 100}
+	sel := providers.Selector{Namespace: "staging", Name: "worker"}
+
+	got, err := c.Drops(context.Background(), sel, providers.TimeWindow{})
+	if err != nil {
+		t.Fatalf("Drops: %v", err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("got %d lines, want 1 (scoping note only)", len(got))
+	}
+	if !strings.Contains(got[0].Message, "staging/worker") {
+		t.Errorf("note does not contain selector 'staging/worker': %q", got[0].Message)
+	}
 }

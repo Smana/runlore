@@ -82,13 +82,40 @@ type fwPayload struct {
 	} `json:"rule_details"`
 }
 
+// scopingNote returns a synthetic LogLine that makes the IP-based, project-wide
+// scope of this provider explicit to the consuming model. It appears FIRST in
+// every Drops result so the model cannot attribute internet-scanner DENIED noise
+// to the workload under investigation without first correlating by IP. When sel
+// carries a namespace or name the note includes them so the model knows what it
+// should look for.
+func scopingNote(sel providers.Selector) providers.LogLine {
+	scope := "<namespace>/<pod>"
+	switch {
+	case sel.Namespace != "" && sel.Name != "":
+		scope = sel.Namespace + "/" + sel.Name
+	case sel.Namespace != "":
+		scope = sel.Namespace + "/<pod>"
+	case sel.Name != "":
+		scope = "<namespace>/" + sel.Name
+	}
+	return providers.LogLine{
+		Message: fmt.Sprintf(
+			"NOTE: source is IP-based (VPC/subnet flow logs); results are VPC-wide and NOT scoped to %s"+
+				" — correlate by IP (see pod IPs in pod_status) before attributing.",
+			scope,
+		),
+	}
+}
+
 // Drops returns DENIED firewall connections within the window as normalized log
 // lines (newest first), capped at the client's max-events budget.
 //
 // NOTE: firewall logs are IP-based; v1 does not map the Selector's
-// namespace/pod/name to IPs, so the selector is ignored — all DENIED entries in
-// the window are returned. The window is applied via timestamp filters when set.
-func (c *Client) Drops(ctx context.Context, _ providers.Selector, w providers.TimeWindow) (providers.LogResult, error) {
+// namespace/pod/name to IPs, so the results are not scoped to the workload under
+// investigation. A scoping note is always prepended as the first LogLine so the
+// model sees the IP-based, project-wide limitation before any results. The window
+// is applied via timestamp filters when set.
+func (c *Client) Drops(ctx context.Context, sel providers.Selector, w providers.TimeWindow) (providers.LogResult, error) {
 	filter := fmt.Sprintf(
 		`logName="projects/%s/logs/%s" AND jsonPayload.disposition="DENIED"`,
 		c.project, firewallLogName,
@@ -100,14 +127,20 @@ func (c *Client) Drops(ctx context.Context, _ providers.Selector, w providers.Ti
 		filter += fmt.Sprintf(` AND timestamp<="%s"`, w.End.Format(time.RFC3339Nano))
 	}
 
+	// Prepend the scoping note so it is always the first entry the model sees,
+	// regardless of how many flow lines follow (or whether the window is empty).
+	// flowCount tracks only parsed DENIED entries so the maxEvents cap applies to
+	// real firewall flows, not the synthetic note.
+	out := providers.LogResult{scopingNote(sel)}
+	var flowCount int64
+	truncated := false
+	token := ""
+
 	// Follow NextPageToken until we collect maxEvents lines or pages are exhausted.
 	// A single Entries.List().Do() returns one page (the API may return fewer than
 	// PageSize entries plus a token), so without paging a busy window is silently
 	// truncated to whatever the first page held. When the cap binds with more
 	// available, a sentinel line signals the partial view to the model.
-	out := make(providers.LogResult, 0, c.maxEvents)
-	truncated := false
-	token := ""
 	for {
 		req := &logging.ListLogEntriesRequest{
 			ResourceNames: []string{"projects/" + c.project},
@@ -131,14 +164,15 @@ func (c *Client) Drops(ctx context.Context, _ providers.Selector, w providers.Ti
 				continue
 			}
 			out = append(out, payloadToLine(p, e.Timestamp))
-			if int64(len(out)) >= c.maxEvents {
+			flowCount++
+			if flowCount >= c.maxEvents {
 				// Cap reached: truncated iff there is more to fetch (more on this
 				// page is implied by another page token, or this page being full).
 				truncated = resp.NextPageToken != ""
 				break
 			}
 		}
-		if int64(len(out)) >= c.maxEvents || resp.NextPageToken == "" {
+		if flowCount >= c.maxEvents || resp.NextPageToken == "" {
 			break
 		}
 		token = resp.NextPageToken

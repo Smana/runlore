@@ -84,12 +84,13 @@ func TestDrops(t *testing.T) {
 		t.Fatalf("Drops: %v", err)
 	}
 
-	if len(got) != 2 {
-		t.Fatalf("got %d lines, want 2", len(got))
+	// got[0] is the scoping note; got[1..2] are the DENIED flows.
+	if len(got) != 3 {
+		t.Fatalf("got %d lines, want 3 (1 note + 2 flows)", len(got))
 	}
 
-	// First (newest) entry.
-	first := got[0]
+	// First (newest) DENIED entry is at index 1 (after the scoping note).
+	first := got[1]
 	wantMsg := "10.0.0.5:54321 -> 10.0.1.20:443 DENIED (network:default/firewall:deny-egress)"
 	if first.Message != wantMsg {
 		t.Errorf("first message = %q, want %q", first.Message, wantMsg)
@@ -115,8 +116,8 @@ func TestDrops(t *testing.T) {
 		t.Errorf("first time = %v, want %v", first.Time, wantTime)
 	}
 
-	// Second entry: empty rule reference renders as "?".
-	second := got[1]
+	// Second DENIED entry (index 2): empty rule reference renders as "?".
+	second := got[2]
 	wantMsg2 := "10.0.0.6:12345 -> 10.0.2.30:5432 DENIED (?)"
 	if second.Message != wantMsg2 {
 		t.Errorf("second message = %q, want %q", second.Message, wantMsg2)
@@ -132,6 +133,127 @@ func TestDrops(t *testing.T) {
 func TestNewRequiresProject(t *testing.T) {
 	if _, err := New(context.Background(), ""); err == nil {
 		t.Fatal("New with empty project: want error, got nil")
+	}
+}
+
+// TestDropsScopingNoteFirst asserts that:
+//   - The scoping note is always the first entry (index 0) in the result.
+//   - The note message contains "NOT scoped to".
+//   - When the Selector carries a namespace and/or name, they appear in the note.
+func TestDropsScopingNoteFirst(t *testing.T) {
+	// Minimal server that returns one DENIED entry for any request.
+	var p fwPayload
+	p.Disposition = "DENIED"
+	p.Connection.SrcIP = "10.0.0.1"
+	p.Connection.SrcPort = 1234
+	p.Connection.DestIP = "10.0.1.1"
+	p.Connection.DestPort = 443
+	p.Connection.Protocol = 6
+	oneEntry := logging.ListLogEntriesResponse{
+		Entries: []*logging.LogEntry{
+			{Timestamp: "2026-06-24T10:00:00Z", JsonPayload: rawPayload(t, p)},
+		},
+	}
+	body, _ := json.Marshal(oneEntry)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write(body)
+	}))
+	defer srv.Close()
+
+	tests := []struct {
+		name      string
+		sel       providers.Selector
+		wantScope string // substring expected in the note message
+	}{
+		{
+			name:      "empty selector shows placeholder",
+			sel:       providers.Selector{},
+			wantScope: "<namespace>/<pod>",
+		},
+		{
+			name:      "namespace only",
+			sel:       providers.Selector{Namespace: "production"},
+			wantScope: "production/<pod>",
+		},
+		{
+			name:      "namespace and name",
+			sel:       providers.Selector{Namespace: "production", Name: "api-server"},
+			wantScope: "production/api-server",
+		},
+		{
+			name:      "name only",
+			sel:       providers.Selector{Name: "api-server"},
+			wantScope: "<namespace>/api-server",
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := context.Background()
+			c, err := New(ctx, "my-proj",
+				option.WithHTTPClient(srv.Client()),
+				option.WithEndpoint(srv.URL),
+				option.WithoutAuthentication(),
+			)
+			if err != nil {
+				t.Fatalf("New: %v", err)
+			}
+			got, err := c.Drops(ctx, tc.sel, providers.TimeWindow{})
+			if err != nil {
+				t.Fatalf("Drops: %v", err)
+			}
+			if len(got) == 0 {
+				t.Fatal("Drops returned empty result, want at least the scoping note")
+			}
+			note := got[0]
+			if !strings.Contains(note.Message, "NOT scoped to") {
+				t.Errorf("note missing 'NOT scoped to': %q", note.Message)
+			}
+			if !strings.Contains(note.Message, tc.wantScope) {
+				t.Errorf("note does not contain selector %q: %q", tc.wantScope, note.Message)
+			}
+			// The note must carry no Time or Fields so it cannot be mistaken for a
+			// real flow record.
+			if !note.Time.IsZero() {
+				t.Errorf("note Time = %v, want zero", note.Time)
+			}
+			if len(note.Fields) != 0 {
+				t.Errorf("note Fields = %v, want empty", note.Fields)
+			}
+		})
+	}
+}
+
+// TestDropsScopingNoteEmptyResult asserts the scoping note is present even when
+// the Cloud Logging query returns no entries (empty window / no DENIEDs).
+func TestDropsScopingNoteEmptyResult(t *testing.T) {
+	emptyResp := logging.ListLogEntriesResponse{}
+	body, _ := json.Marshal(emptyResp)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write(body)
+	}))
+	defer srv.Close()
+
+	ctx := context.Background()
+	c, err := New(ctx, "my-proj",
+		option.WithHTTPClient(srv.Client()),
+		option.WithEndpoint(srv.URL),
+		option.WithoutAuthentication(),
+	)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	sel := providers.Selector{Namespace: "staging", Name: "worker"}
+	got, err := c.Drops(ctx, sel, providers.TimeWindow{})
+	if err != nil {
+		t.Fatalf("Drops: %v", err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("got %d lines, want 1 (scoping note only)", len(got))
+	}
+	if !strings.Contains(got[0].Message, "staging/worker") {
+		t.Errorf("note does not contain selector 'staging/worker': %q", got[0].Message)
 	}
 }
 
@@ -208,9 +330,12 @@ func TestDropsPagination(t *testing.T) {
 			truncated := 0
 			drops := 0
 			for _, l := range got {
-				if strings.Contains(l.Message, "results truncated at") {
+				switch {
+				case strings.Contains(l.Message, "results truncated at"):
 					truncated++
-				} else {
+				case strings.Contains(l.Message, "NOT scoped to"):
+					// scoping note — not a real flow line
+				default:
 					drops++
 				}
 			}
