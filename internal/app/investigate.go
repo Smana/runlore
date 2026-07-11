@@ -125,9 +125,26 @@ func BuildModelAndTools(ctx context.Context, cfg *config.Config, gp providers.Gi
 	}
 	if cfg.Logs.URL != "" {
 		warnIfBackendUnreachable(ctx, log, "logs", cfg.Logs.URL)
-		lg := victorialogs.NewWithAuth(cfg.Logs.URL, cfg.Logs.TokenEnv, cfg.Logs.Headers)
+		// Resolve the OPTIONAL collector field convention once; an unset config yields
+		// the shipped defaults, so this is a no-op unless logs.fields is set.
+		lf := cfg.Logs.Fields.Resolved()
+		lg := victorialogs.NewWithAuth(cfg.Logs.URL, cfg.Logs.TokenEnv, cfg.Logs.Headers).WithLevelField(lf.LevelField)
 		tools = append(tools,
-			investigate.QueryLogsTool{Logs: lg},
+			// query_logs reads the same raw pod logs pod_logs does, so it shares the
+			// pod_log_namespaces allowlist (L2 confinement) and honours the field
+			// convention (L1). The incident namespace is injected per-investigation by
+			// the loop (scopeTools), exactly like pod_logs.
+			investigate.QueryLogsTool{
+				Logs: lg,
+				Fields: investigate.LogFields{
+					ContainerField: lf.ContainerField,
+					NamespaceField: lf.NamespaceField,
+					PodField:       lf.PodField,
+					LevelField:     lf.LevelField,
+					UnpackPipe:     lf.UnpackPipe,
+				},
+				AllowedNamespaces: cfg.Investigation.PodLogNamespaces,
+			},
 			// logs_error_summary (error volume histogram + top messages) and
 			// discover_log_fields (real field names) both degrade gracefully when the
 			// backend lacks the analytics/field capability, so they are safe to always

@@ -4,6 +4,7 @@ package cluster
 
 import (
 	"context"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -11,6 +12,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/client-go/kubernetes/fake"
 
 	"github.com/Smana/runlore/internal/providers"
@@ -46,6 +48,49 @@ func TestPodLogs(t *testing.T) {
 	}
 	if strings.Contains(joined, "kustomize-controller-1/") {
 		t.Fatalf("label selector leaked another pod's logs:\n%s", joined)
+	}
+}
+
+// TestPodLogsFanoutCapSentinel covers L3: when more than maxPods match the selector,
+// the fan-out binds — and must now emit a sentinel line naming the shortfall so the
+// model narrows the selector instead of assuming full coverage. With exactly maxPods
+// or fewer, no sentinel appears.
+func TestPodLogsFanoutCapSentinel(t *testing.T) {
+	mkPod := func(name string) *corev1.Pod {
+		return &corev1.Pod{
+			ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: "apps", Labels: map[string]string{"app": "web"}},
+			Spec:       corev1.PodSpec{Containers: []corev1.Container{{Name: "web"}}},
+		}
+	}
+	// maxPods+3 matching pods ⇒ the cap binds and 3 are not shown.
+	objs := make([]runtime.Object, 0, maxPods+3)
+	for i := 0; i < maxPods+3; i++ {
+		objs = append(objs, mkPod("web-"+strconv.Itoa(i)))
+	}
+	r := New(fake.NewSimpleClientset(objs...))
+	lines, err := r.PodLogs(context.Background(), providers.PodLogQuery{Namespace: "apps", LabelSelector: "app=web", SinceMinutes: 30})
+	if err != nil {
+		t.Fatalf("PodLogs: %v", err)
+	}
+	joined := ""
+	for _, l := range lines {
+		joined += l.Message + "\n"
+	}
+	if !strings.Contains(joined, "3 more pods not shown") || !strings.Contains(joined, "narrow the selector") {
+		t.Fatalf("capped fan-out must emit a sentinel naming the shortfall, got:\n%s", joined)
+	}
+
+	// At the cap (exactly maxPods) nothing is hidden ⇒ no sentinel.
+	objs = objs[:maxPods]
+	r = New(fake.NewSimpleClientset(objs...))
+	lines, err = r.PodLogs(context.Background(), providers.PodLogQuery{Namespace: "apps", LabelSelector: "app=web", SinceMinutes: 30})
+	if err != nil {
+		t.Fatalf("PodLogs: %v", err)
+	}
+	for _, l := range lines {
+		if strings.Contains(l.Message, "more pods not shown") {
+			t.Fatalf("no sentinel expected when the cap does not bind, got: %s", l.Message)
+		}
 	}
 }
 

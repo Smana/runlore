@@ -62,6 +62,12 @@ func (r *Reader) PodLogs(ctx context.Context, q providers.PodLogQuery) (provider
 	var out providers.LogResult
 	for i := range pods.Items {
 		if i >= maxPods {
+			// The fan-out cap bound silently before: the model saw N pods' logs with no
+			// signal that more matched, so it could wrongly conclude a selector was
+			// fully covered. Emit a sentinel naming the shortfall so it narrows instead.
+			out = append(out, providers.LogLine{
+				Message: fmt.Sprintf("… %d more pods not shown (fan-out capped at %d) — narrow the selector to see the rest", len(pods.Items)-maxPods, maxPods),
+			})
 			break
 		}
 		pod := &pods.Items[i]

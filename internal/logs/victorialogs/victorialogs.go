@@ -24,16 +24,23 @@ import (
 
 // Client queries a VictoriaLogs backend.
 type Client struct {
-	baseURL  string
-	tokenEnv string            // env var holding a bearer token; empty ⇒ no auth
-	headers  map[string]string // static extra request headers (e.g. tenant header)
-	limit    int               // per-request page size
-	maxLines int               // total cap across pages
-	http     *http.Client
+	baseURL    string
+	tokenEnv   string            // env var holding a bearer token; empty ⇒ no auth
+	headers    map[string]string // static extra request headers (e.g. tenant header)
+	limit      int               // per-request page size
+	maxLines   int               // total cap across pages
+	levelField string            // hits-split severity field; "" ⇒ defaultLevelField
+	http       *http.Client
 }
 
 // defaultMaxLines bounds the total number of lines Query returns across pages.
 const defaultMaxLines = 1000
+
+// defaultLevelField is the severity field Hits splits by, matching the collector
+// convention RunLore shipped with. Overridable via WithLevelField for a collector
+// that names its severity field differently. Kept as the fallback so an unset config
+// reproduces the previous hardcoded behaviour exactly.
+const defaultLevelField = "level"
 
 // New builds a client for a VictoriaLogs base URL, unauthenticated.
 func New(baseURL string) *Client {
@@ -47,13 +54,24 @@ func New(baseURL string) *Client {
 // environment at request-build time and is never logged.
 func NewWithAuth(baseURL, tokenEnv string, headers map[string]string) *Client {
 	return &Client{
-		baseURL:  strings.TrimRight(baseURL, "/"),
-		tokenEnv: tokenEnv,
-		headers:  headers,
-		limit:    100,
-		maxLines: defaultMaxLines,
-		http:     httpx.SecureClient(30 * time.Second),
+		baseURL:    strings.TrimRight(baseURL, "/"),
+		tokenEnv:   tokenEnv,
+		headers:    headers,
+		limit:      100,
+		maxLines:   defaultMaxLines,
+		levelField: defaultLevelField,
+		http:       httpx.SecureClient(30 * time.Second),
 	}
+}
+
+// WithLevelField overrides the severity field Hits splits by (config.logs.fields).
+// An empty name is ignored so a caller passing an unset config keeps the default. It
+// returns the client to allow one-line construction: New(url).WithLevelField(f).
+func (c *Client) WithLevelField(field string) *Client {
+	if field != "" {
+		c.levelField = field
+	}
+	return c
 }
 
 var (
@@ -138,10 +156,14 @@ func (c *Client) Hits(ctx context.Context, query string, w providers.TimeWindow,
 	if step <= 0 {
 		step = time.Minute
 	}
+	levelField := c.levelField
+	if levelField == "" {
+		levelField = defaultLevelField
+	}
 	form := url.Values{
 		"query": {query},
 		"step":  {fmt.Sprintf("%ds", int(step.Seconds()))},
-		"field": {"level"}, // split by severity when the field exists; harmless otherwise
+		"field": {levelField}, // split by severity when the field exists; harmless otherwise
 	}
 	setWindow(form, w)
 	body, err := c.postForm(ctx, "/select/logsql/hits", form)
@@ -160,7 +182,7 @@ func (c *Client) Hits(ctx context.Context, query string, w providers.TimeWindow,
 	}
 	var out []providers.Bucket
 	for _, series := range resp.Hits {
-		level := series.Fields["level"]
+		level := series.Fields[levelField]
 		for i, ts := range series.Timestamps {
 			if i >= len(series.Values) {
 				break

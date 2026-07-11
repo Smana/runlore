@@ -3,7 +3,6 @@
 package investigate
 
 import (
-	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -62,24 +61,70 @@ func TestRenderLogLinesDedup(t *testing.T) {
 	t.Run("caps at maxToolRows DISTINCT messages", func(t *testing.T) {
 		var lines providers.LogResult
 		// 60 distinct messages, each repeated twice: dedup first, then cap — so the
-		// cap counts distinct messages, not raw lines.
-		for i := 0; i < 60; i++ {
-			msg := fmt.Sprintf("distinct line %02d", i)
+		// cap counts distinct messages, not raw lines. The distinguishing token is a
+		// spelled-out ordinal, NOT a bare number, so collapseNums doesn't fold these
+		// into one group (that numeric-collapse is exercised separately below).
+		names := distinctNames(60)
+		for _, name := range names {
+			msg := "distinct line " + name
 			lines = append(lines, providers.LogLine{Message: msg}, providers.LogLine{Message: msg})
 		}
 		var b strings.Builder
 		renderLogLines(&b, lines, "more lines")
 		out := b.String()
-		if !strings.Contains(out, "distinct line 49") {
+		if !strings.Contains(out, "distinct line "+names[49]) {
 			t.Fatalf("the 50th distinct message must render, got tail:\n%s", out[len(out)-200:])
 		}
-		if strings.Contains(out, "distinct line 50") {
+		if strings.Contains(out, "distinct line "+names[50]) {
 			t.Fatalf("the 51st distinct message must be capped, got:\n%s", out)
 		}
 		if !strings.Contains(out, "(10 more lines)") {
 			t.Fatalf("truncation note must count remaining DISTINCT messages, got tail:\n%s", out[len(out)-200:])
 		}
 	})
+}
+
+// distinctNames returns n distinct non-numeric tokens (aa, ab, …) so a dedup test
+// isn't affected by collapseNums (which folds bare digits). Two lowercase letters
+// give 676 combinations — ample for the row-cap test.
+func distinctNames(n int) []string {
+	out := make([]string, 0, n)
+	for i := 0; i < n; i++ {
+		out = append(out, string(rune('a'+i/26))+string(rune('a'+i%26)))
+	}
+	return out
+}
+
+// TestGroupLogLinesCollapsesNumericTokens covers L3: two lines that differ only by a
+// numeric value ("took 12ms" vs "took 907ms") are the SAME event with a volatile
+// number, so they must fold into one group — mirroring VictoriaLogs' collapse_nums —
+// with the first line's original message displayed verbatim.
+func TestGroupLogLinesCollapsesNumericTokens(t *testing.T) {
+	lines := providers.LogResult{
+		{Message: "request took 12ms"},
+		{Message: "request took 907ms"},
+		{Message: "request took 3ms"},
+	}
+	var b strings.Builder
+	renderLogLines(&b, lines, "more lines")
+	out := b.String()
+	// One group, count 3, representative line kept verbatim (the first-seen one).
+	if strings.Count(out, "request took") != 1 {
+		t.Fatalf("numeric-only variants must fold into one group, got:\n%s", out)
+	}
+	if !strings.Contains(out, "request took 12ms (x3") {
+		t.Fatalf("folded group must keep the first message verbatim and count 3, got:\n%s", out)
+	}
+	// A line differing by NON-numeric text stays a distinct group.
+	lines = providers.LogResult{
+		{Message: "user alice logged in"},
+		{Message: "user bob logged in"},
+	}
+	b.Reset()
+	renderLogLines(&b, lines, "more lines")
+	if out := b.String(); strings.Count(out, "logged in") != 2 {
+		t.Fatalf("non-numeric variants must stay distinct, got:\n%s", out)
+	}
 }
 
 // TestRenderLogLinesStreamIdentity covers B4+B5: query_logs lines carry stream

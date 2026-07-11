@@ -168,6 +168,43 @@ func TestHits(t *testing.T) {
 	}
 }
 
+// TestHitsCustomLevelField covers L1: a collector that names its severity field
+// differently (e.g. "severity") must have Hits split by that field. WithLevelField
+// retargets both the request `field=` param and the response-bucket read; the empty
+// default is asserted by TestHits.
+func TestHitsCustomLevelField(t *testing.T) {
+	var gotField []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		if vals, err := url.ParseQuery(string(body)); err == nil {
+			gotField = vals["field"]
+		}
+		_, _ = io.WriteString(w, `{"hits":[
+		  {"fields":{"severity":"error"},"timestamps":["2024-01-01T10:00:00Z"],"values":[7],"total":7}]}`)
+	}))
+	defer srv.Close()
+
+	buckets, err := New(srv.URL).WithLevelField("severity").Hits(context.Background(), `{namespace="apps"}`, providers.TimeWindow{}, 60*1e9)
+	if err != nil {
+		t.Fatalf("Hits: %v", err)
+	}
+	if len(gotField) != 1 || gotField[0] != "severity" {
+		t.Fatalf("field=%v, want [severity]", gotField)
+	}
+	if len(buckets) != 1 || buckets[0].Level != "error" || buckets[0].Count != 7 {
+		t.Fatalf("bucket must read the custom field: %+v", buckets)
+	}
+}
+
+// TestWithLevelFieldEmptyKeepsDefault: passing an empty field name is a no-op, so an
+// unset config keeps the shipped default. (The default request path is TestHits.)
+func TestWithLevelFieldEmptyKeepsDefault(t *testing.T) {
+	c := New("http://vl:9428").WithLevelField("")
+	if c.levelField != defaultLevelField {
+		t.Fatalf("empty override must keep default, got %q", c.levelField)
+	}
+}
+
 func TestTopMessages(t *testing.T) {
 	var gotQuery string
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

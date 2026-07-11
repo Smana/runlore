@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"math"
+	"slices"
 	"sort"
 	"strings"
 	"time"
@@ -346,33 +347,58 @@ func (t NetworkDropsTool) Call(ctx context.Context, args string) (string, error)
 // QueryLogsTool lets the model query logs (LogsQL) over a recent window.
 type QueryLogsTool struct {
 	Logs providers.LogsProvider
+
+	// Fields is the OPTIONAL collector field-naming convention (config.logs.fields).
+	// The zero value reproduces the shipped VictoriaLogs/vector schema exactly, so an
+	// unset config is a no-op. The app layer sets it from config.
+	Fields LogFields
+
+	// AllowedNamespaces is the operator-configured allowlist of namespaces a namespace-
+	// scoped query may target (config.investigation.pod_log_namespaces — the SAME list
+	// that guards pod_logs, because query_logs reads the same raw logs). Empty ⇒ the
+	// permissive pre-confinement behaviour (any namespace) is preserved. See
+	// namespaceAllowed. The incident namespace is always permitted.
+	AllowedNamespaces []string
+
+	// IncidentNamespace is this investigation's own namespace; always permitted. Set
+	// per-investigation by the loop (scopeTools) via withIncidentNamespace.
+	IncidentNamespace string
 }
 
-// buildLogsQL composes a valid LogsQL query. With structured fields it builds the
-// canonical `{kubernetes.container_name="…",kubernetes.pod_namespace="…"} |
-// unpack_json | log.level:…` form, so valid-query generation lives in Go and can't
-// drift. A raw query is used as-is but rejected when it uses Prometheus/Loki
-// `level=` syntax (the model's recurring mistake) — the error guides a retry.
+// buildLogsQL composes a LogsQL query with the SHIPPED default field convention. It
+// is the entry point for the tools that don't expose field config (discover_log_fields,
+// logs_error_summary); QueryLogsTool uses buildLogsQLWith to honour config.logs.fields.
 func buildLogsQL(raw, container, namespace, level string) (string, error) {
+	return buildLogsQLWith(raw, container, namespace, level, LogFields{})
+}
+
+// buildLogsQLWith composes a valid LogsQL query using the resolved field convention.
+// With structured fields it builds the canonical
+// `{<container_field>="…",<namespace_field>="…"} | <unpack_pipe> | <level_field>:…`
+// form, so valid-query generation lives in Go and can't drift. A raw query is used
+// as-is but rejected when it uses Prometheus/Loki `level=` syntax (the model's
+// recurring mistake) — the error guides a retry.
+func buildLogsQLWith(raw, container, namespace, level string, conv LogFields) (string, error) {
+	conv = conv.resolved()
 	if raw != "" {
 		if strings.Contains(raw, "level=") {
-			return "", fmt.Errorf("invalid LogsQL: `level=` is Prometheus/Loki syntax. Filter severity with `| unpack_json | log.level:error` (after a stream selector), or use the container/namespace/level params")
+			return "", fmt.Errorf("invalid LogsQL: `level=` is Prometheus/Loki syntax. Filter severity with `| %s | %s:error` (after a stream selector), or use the container/namespace/level params", conv.UnpackPipe, conv.LevelField)
 		}
 		return raw, nil
 	}
 	var sel []string
 	if container != "" {
-		sel = append(sel, fmt.Sprintf("kubernetes.container_name=%q", container))
+		sel = append(sel, fmt.Sprintf("%s=%q", conv.ContainerField, container))
 	}
 	if namespace != "" {
-		sel = append(sel, fmt.Sprintf("kubernetes.pod_namespace=%q", namespace))
+		sel = append(sel, fmt.Sprintf("%s=%q", conv.NamespaceField, namespace))
 	}
 	if len(sel) == 0 {
 		return "", fmt.Errorf("provide a raw `query`, or `container`/`namespace` to build one")
 	}
 	q := "{" + strings.Join(sel, ",") + "}"
 	if level != "" {
-		q += " | unpack_json | log.level:" + level
+		q += " | " + conv.UnpackPipe + " | " + conv.LevelField + ":" + level
 	}
 	return q, nil
 }
@@ -413,7 +439,15 @@ func (t QueryLogsTool) Call(ctx context.Context, args string) (string, error) {
 	if err := json.Unmarshal([]byte(args), &in); err != nil {
 		return "", fmt.Errorf("parse args: %w", err)
 	}
-	query, err := buildLogsQL(in.Query, in.Container, in.Namespace, in.Level)
+	// L2 confinement: query_logs reads the SAME raw pod logs (secrets/PII) pod_logs
+	// does, so a structured namespace argument is held to the same allowlist. Guard
+	// only the structured `namespace` param — a raw LogsQL query that names no
+	// namespace stays unrestricted (there is nothing to confine), preserving today's
+	// behaviour when no allowlist is configured.
+	if in.Namespace != "" && !t.namespaceAllowed(in.Namespace) {
+		return fmt.Sprintf("namespace %q is not permitted for query_logs (allowed: the incident namespace plus the configured pod_log_namespaces allowlist)", in.Namespace), nil
+	}
+	query, err := buildLogsQLWith(in.Query, in.Container, in.Namespace, in.Level, t.Fields)
 	if err != nil {
 		return "", err
 	}
@@ -431,6 +465,31 @@ func (t QueryLogsTool) Call(ctx context.Context, args string) (string, error) {
 		return noLogLinesMatched, nil
 	}
 	var b strings.Builder
-	renderLogLines(&b, lines, "more lines")
+	renderLogLinesWith(&b, lines, "more lines", t.Fields)
 	return b.String(), nil
+}
+
+// namespaceAllowed mirrors PodLogsTool.namespaceAllowed with the KEY difference that
+// query_logs stays PERMISSIVE by default: with no configured allowlist AND no bound
+// incident namespace the confinement is a no-op (the caller only invokes this for a
+// non-empty namespace argument), so a deployment that never set pod_log_namespaces
+// sees no behaviour change. Once an allowlist is set, a namespace argument must be
+// the incident namespace or in the allowlist.
+func (t QueryLogsTool) namespaceAllowed(ns string) bool {
+	// No confinement configured ⇒ preserve the pre-L2 unrestricted behaviour.
+	if len(t.AllowedNamespaces) == 0 && t.IncidentNamespace == "" {
+		return true
+	}
+	if ns == t.IncidentNamespace { // the incident's own namespace is always allowed
+		return true
+	}
+	return slices.Contains(t.AllowedNamespaces, ns)
+}
+
+// withIncidentNamespace binds a copy to this investigation's namespace, implementing
+// incidentScoped so the loop's scopeTools can confine query_logs per request exactly
+// as it does pod_logs. A value receiver keeps the shared tool untouched.
+func (t QueryLogsTool) withIncidentNamespace(ns string) Tool {
+	t.IncidentNamespace = ns
+	return t
 }
