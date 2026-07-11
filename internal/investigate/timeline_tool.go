@@ -9,6 +9,7 @@ import (
 	"sort"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/Smana/runlore/internal/providers"
 )
@@ -277,12 +278,20 @@ func shortRev(rev string) string {
 	return rev
 }
 
-// trimRow collapses whitespace and caps a row's free-text at perRowMsgCap so one
-// verbose fact can't dominate the fused view; over-length text gets an ellipsis.
+// trimRow collapses whitespace and caps a row's free-text at ~perRowMsgCap bytes so
+// one verbose fact can't dominate the fused view; over-length text gets an ellipsis.
+// The cut point is backed off to a UTF-8 rune boundary (like truncate.go) so a
+// multi-byte rune is never split into invalid UTF-8.
 func trimRow(s string) string {
 	s = strings.Join(strings.Fields(s), " ")
-	if len(s) > perRowMsgCap {
-		return s[:perRowMsgCap] + "…"
+	if len(s) <= perRowMsgCap {
+		return s
 	}
-	return s
+	// Back the cut off to the start of the rune straddling perRowMsgCap so the head
+	// stays valid UTF-8; the exact byte count may be slightly under the cap.
+	cut := perRowMsgCap
+	for cut > 0 && !utf8.RuneStart(s[cut]) {
+		cut--
+	}
+	return s[:cut] + "…"
 }

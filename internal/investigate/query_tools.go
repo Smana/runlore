@@ -17,6 +17,18 @@ import (
 
 const maxToolRows = 50
 
+// windowSince builds the [now-sinceMinutes, now] lookback window shared by the
+// tools that take a since_minutes argument, applying defMinutes when the caller
+// passed a non-positive value. It dedups the identical default-and-window boilerplate
+// those Call methods would otherwise repeat.
+func windowSince(sinceMinutes, defMinutes int) providers.TimeWindow {
+	if sinceMinutes <= 0 {
+		sinceMinutes = defMinutes
+	}
+	end := time.Now()
+	return providers.TimeWindow{Start: end.Add(-time.Duration(sinceMinutes) * time.Minute), End: end}
+}
+
 // Dead-end result strings. An empty query result is high-leverage: a bare "no
 // series matched" leaves the model to conclude the workload is healthy or to keep
 // guessing metric names. These strings instead name the next tool (discover_metrics
@@ -163,13 +175,7 @@ func (t QueryMetricsRangeTool) Call(ctx context.Context, args string) (string, e
 	if err := json.Unmarshal([]byte(args), &in); err != nil {
 		return "", fmt.Errorf("parse args: %w", err)
 	}
-	since := in.SinceMinutes
-	if since <= 0 {
-		since = 60
-	}
-	end := time.Now()
-	start := end.Add(-time.Duration(since) * time.Minute)
-	window := providers.TimeWindow{Start: start, End: end}
+	window := windowSince(in.SinceMinutes, 60)
 	step, clampNote := resolveStep(time.Duration(in.StepSeconds)*time.Second, window)
 	series, err := t.Metrics.QueryRange(ctx, in.Query, window, step)
 	if err != nil {
@@ -185,9 +191,16 @@ func (t QueryMetricsRangeTool) Call(ctx context.Context, args string) (string, e
 	renderRows(&b, len(series), "more series", func(i int) {
 		s := series[i]
 		first, last, lo, hi := summarize(s.Points)
+		// Compute the biggest adjacent jump once (delta + when) rather than traversing
+		// the points twice.
+		jumpIdx, jumpDlt := biggestJump(s.Points)
+		var jumpAt time.Time
+		if jumpIdx >= 0 {
+			jumpAt = s.Points[jumpIdx].Time
+		}
 		fmt.Fprintf(&b, "%s first=%g last=%g min=%g%s max=%g%s trend=%s biggest jump %+g%s\n",
 			formatMetric(s.Metric), first, last, lo.Value, atTime(lo.Time), hi.Value, atTime(hi.Time),
-			trend(s.Points), jumpDelta(s.Points), atTime(jumpTime(s.Points)))
+			trend(s.Points), jumpDlt, atTime(jumpAt))
 	})
 	return b.String(), nil
 }
@@ -291,24 +304,6 @@ func trend(points []providers.Point) string {
 	return strings.Join(vals, ">")
 }
 
-// jumpDelta returns the largest adjacent Δvalue (signed, by magnitude) in the
-// series — the single biggest step between consecutive points. This is what
-// pins a step-change to a moment (a deploy/config flip) versus a gradual ramp.
-func jumpDelta(points []providers.Point) float64 {
-	_, d := biggestJump(points)
-	return d
-}
-
-// jumpTime returns the timestamp of the point AFTER the largest adjacent jump —
-// the moment the metric moved — so it can be correlated to a change/deploy time.
-func jumpTime(points []providers.Point) time.Time {
-	i, _ := biggestJump(points)
-	if i < 0 {
-		return time.Time{}
-	}
-	return points[i].Time
-}
-
 // biggestJump finds the adjacent pair with the largest |Δvalue| and returns the
 // index of the later point and the signed delta. Returns (-1, 0) for <2 points.
 func biggestJump(points []providers.Point) (int, float64) {
@@ -355,13 +350,7 @@ func (t NetworkDropsTool) Call(ctx context.Context, args string) (string, error)
 	if err := json.Unmarshal([]byte(args), &in); err != nil {
 		return "", fmt.Errorf("parse args: %w", err)
 	}
-	since := in.SinceMinutes
-	if since <= 0 {
-		since = 60
-	}
-	end := time.Now()
-	start := end.Add(-time.Duration(since) * time.Minute)
-	lines, err := t.Network.Drops(ctx, providers.Selector{Namespace: in.Namespace, Name: in.Name}, providers.TimeWindow{Start: start, End: end})
+	lines, err := t.Network.Drops(ctx, providers.Selector{Namespace: in.Namespace, Name: in.Name}, windowSince(in.SinceMinutes, 60))
 	if err != nil {
 		return "", err
 	}
@@ -480,13 +469,7 @@ func (t QueryLogsTool) Call(ctx context.Context, args string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	since := in.SinceMinutes
-	if since <= 0 {
-		since = 60
-	}
-	end := time.Now()
-	start := end.Add(-time.Duration(since) * time.Minute)
-	lines, err := t.Logs.Query(ctx, query, providers.TimeWindow{Start: start, End: end})
+	lines, err := t.Logs.Query(ctx, query, windowSince(in.SinceMinutes, 60))
 	if err != nil {
 		return "", err
 	}
