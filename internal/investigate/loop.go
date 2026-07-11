@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"reflect"
 	"sort"
 	"strings"
 	"sync"
@@ -845,29 +846,102 @@ func (li *LoopInvestigator) deliver(req Request, inv providers.Investigation) {
 }
 
 // redactInvestigation masks secret-shaped values in a finished investigation's
-// human-facing text (title; each root cause's summary, evidence, and suggested
-// action; unresolved notes; proposed-action names and descriptions) before it is
-// delivered.
+// human-facing text before it is delivered.
+//
+// #197 "enumerate-the-serialized-shape": the previous implementation hand-listed
+// specific fields and the audit found it silently MISSED model-authored fields
+// (RuledOut, DataGaps, Hypothesis.ChangeRef) — every new string field on
+// Investigation reopened the gap. So instead of an include-list we reflection-walk
+// EVERY exported string reachable from the Investigation (strings inside slices,
+// maps, and nested structs) and apply redact.Secrets, subtracting a short
+// skip-list of server-derived fields that must stay verbatim (see
+// redactionSkipField). redact.Secrets is idempotent, so over-application is safe.
 func redactInvestigation(inv *providers.Investigation) {
-	inv.Title = redact.Secrets(inv.Title)
-	for i := range inv.RootCauses {
-		rc := &inv.RootCauses[i]
-		rc.Summary = redact.Secrets(rc.Summary)
-		rc.SuggestedAction = redact.Secrets(rc.SuggestedAction)
-		for j := range rc.Evidence {
-			rc.Evidence[j] = redact.Secrets(rc.Evidence[j])
+	redactStrings(reflect.ValueOf(inv).Elem())
+}
+
+// redactionSkipTypes are struct types whose string fields are server-derived
+// identifiers, never free text, and so must survive egress redaction verbatim.
+// providers.Workload (namespace/name/kind) is a Kubernetes resource identifier the
+// executor acts on — the old field-list left inv.Resource and Action.Target alone
+// for exactly this reason; skipping the type covers every Workload reachable from
+// an Investigation (Resource, Action.Target, Change.Workload, Change.BlastRadius)
+// in one rule.
+var redactionSkipTypes = map[reflect.Type]bool{
+	reflect.TypeOf(providers.Workload{}): true,
+}
+
+// redactionSkipField is the allowlist of exported STRING fields (by name) that are
+// server-derived and must NOT be scrubbed: dedup identity, curator-set links, the
+// catalog paths of matched/recalled entries, and the server-controlled action/
+// verdict vocabularies. Kept deliberately short (a skip-list, not an include-list —
+// #197): everything not named here is treated as potentially untrusted free text
+// and scrubbed. Matched by field name because these names are distinctive across
+// the Investigation's nested shape (EntryPath/CuratedURL/ApprovalID/etc.).
+var redactionSkipField = map[string]bool{
+	"Verdict":        true, // server-controlled classification enum
+	"Op":             true, // Action.Op — server-controlled executable-operation enum
+	"ApprovalID":     true, // Action.ApprovalID — server-generated approval token
+	"CuratedURL":     true, // curator-set KB link
+	"PrevCuratedURL": true, // curator-set KB link (prior occurrence)
+	"RecalledEntry":  true, // catalog path the answer was recalled from
+	"EntryPath":      true, // PriorKnowledge.EntryPath — catalog path
+	"Path":           true, // MatchedEntry.Path — catalog path
+	"URL":            true, // MatchedEntry.URL — server-derived web link
+	"Fingerprint":    true, // deterministic alert dedup id
+	"Fingerprints":   true, // coalesced batch dedup ids
+	"TriggerKey":     true, // deterministic incident-identity dedup key
+}
+
+// redactStrings recursively walks v and applies redact.Secrets to every settable
+// exported string it reaches — including strings inside slices, arrays, maps, and
+// nested structs — skipping the server-derived fields/types above. It is the
+// reflection engine behind redactInvestigation; redact.Secrets is idempotent so a
+// value reached by more than one path is safe to scrub more than once.
+func redactStrings(v reflect.Value) {
+	switch v.Kind() {
+	case reflect.String:
+		if v.CanSet() {
+			v.SetString(redact.Secrets(v.String()))
 		}
-	}
-	for i := range inv.Unresolved {
-		inv.Unresolved[i] = redact.Secrets(inv.Unresolved[i])
-	}
-	for i := range inv.Actions {
-		// Name and Description both carry model-authored text (buildInvestigation
-		// copies the description into Name), and both are serialized verbatim on
-		// GET /actions — scrub both. Target is left alone: it is a Kubernetes
-		// resource identifier the executor acts on, not free text.
-		inv.Actions[i].Name = redact.Secrets(inv.Actions[i].Name)
-		inv.Actions[i].Description = redact.Secrets(inv.Actions[i].Description)
+	case reflect.Pointer, reflect.Interface:
+		if !v.IsNil() {
+			redactStrings(v.Elem())
+		}
+	case reflect.Struct:
+		if redactionSkipTypes[v.Type()] {
+			return
+		}
+		t := v.Type()
+		for i := 0; i < v.NumField(); i++ {
+			if t.Field(i).PkgPath != "" { // unexported: not settable, skip
+				continue
+			}
+			if redactionSkipField[t.Field(i).Name] {
+				continue
+			}
+			redactStrings(v.Field(i))
+		}
+	case reflect.Slice, reflect.Array:
+		for i := 0; i < v.Len(); i++ {
+			redactStrings(v.Index(i))
+		}
+	case reflect.Map:
+		// Map values are not addressable, so scrub into a fresh value and write it
+		// back. Only string-valued maps carry text worth scrubbing today (labels/
+		// annotations live on Request, not Investigation), but this keeps the walk
+		// total so a future map field can't silently reopen the #197 gap.
+		for _, k := range v.MapKeys() {
+			mv := v.MapIndex(k)
+			if mv.Kind() == reflect.String {
+				v.SetMapIndex(k, reflect.ValueOf(redact.Secrets(mv.String())))
+				continue
+			}
+			cp := reflect.New(mv.Type()).Elem()
+			cp.Set(mv)
+			redactStrings(cp)
+			v.SetMapIndex(k, cp)
+		}
 	}
 }
 
