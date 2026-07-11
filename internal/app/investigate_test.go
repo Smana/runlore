@@ -72,6 +72,128 @@ func TestBuildModelAndToolsSmoke(t *testing.T) {
 	}
 }
 
+// toolNames collects the registered tool names into a set for membership assertions.
+func toolNames(tools []investigate.Tool) map[string]bool {
+	names := map[string]bool{}
+	for _, tl := range tools {
+		names[tl.Name()] = true
+	}
+	return names
+}
+
+// TestDiscoveryToolsGatedByProvider asserts the three new investigation tools appear
+// EXACTLY when their backing provider is configured: discover_metrics with the metrics
+// backend, and logs_error_summary + discover_log_fields with the logs backend. With
+// neither configured they must be absent; wiring only one backend must not enable the
+// other's tools. KUBECONFIG is pointed at a nonexistent file so cluster-backed tools are
+// deterministically omitted and don't perturb the assertions.
+func TestDiscoveryToolsGatedByProvider(t *testing.T) {
+	t.Setenv("KUBECONFIG", filepath.Join(t.TempDir(), "nonexistent-kubeconfig"))
+	log := discardLog()
+	base := config.Model{Provider: "openai", BaseURL: "http://vllm:8000/v1", Model: "test-model"}
+
+	tests := []struct {
+		name        string
+		metricsURL  string
+		logsURL     string
+		wantPresent []string
+		wantAbsent  []string
+	}{
+		{
+			name:       "no backends -> no discovery tools",
+			wantAbsent: []string{"discover_metrics", "logs_error_summary", "discover_log_fields"},
+		},
+		{
+			name:        "metrics only -> discover_metrics present, log tools absent",
+			metricsURL:  "http://metrics:9090",
+			wantPresent: []string{"discover_metrics", "query_metrics"},
+			wantAbsent:  []string{"logs_error_summary", "discover_log_fields"},
+		},
+		{
+			name:        "logs only -> log discovery tools present, discover_metrics absent",
+			logsURL:     "http://logs:9428",
+			wantPresent: []string{"logs_error_summary", "discover_log_fields", "query_logs"},
+			wantAbsent:  []string{"discover_metrics"},
+		},
+		{
+			name:        "both -> all discovery tools present",
+			metricsURL:  "http://metrics:9090",
+			logsURL:     "http://logs:9428",
+			wantPresent: []string{"discover_metrics", "logs_error_summary", "discover_log_fields"},
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := &config.Config{Model: base}
+			cfg.Metrics.URL = tc.metricsURL
+			cfg.Logs.URL = tc.logsURL
+			_, tools, _, _ := BuildModelAndTools(context.Background(), cfg, nil, nil, log)
+			names := toolNames(tools)
+			for _, w := range tc.wantPresent {
+				if !names[w] {
+					t.Errorf("tool %q must be present, got %v", w, names)
+				}
+			}
+			for _, w := range tc.wantAbsent {
+				if names[w] {
+					t.Errorf("tool %q must be absent, got %v", w, names)
+				}
+			}
+		})
+	}
+}
+
+// fakeClusterReader is a no-op clusterReader for the engine-gating test: it needs no
+// live cluster, only to satisfy the LogReader+KubeReader interfaces so clusterTools can
+// build the tool structs.
+type fakeClusterReader struct{}
+
+func (fakeClusterReader) PodLogs(context.Context, providers.PodLogQuery) (providers.LogResult, error) {
+	return providers.LogResult{}, nil
+}
+
+func (fakeClusterReader) PodStatuses(context.Context, string, string) ([]providers.PodStatus, error) {
+	return nil, nil
+}
+
+func (fakeClusterReader) Events(context.Context, string, string, bool) ([]providers.KubeEvent, error) {
+	return nil, nil
+}
+
+// TestClusterToolsControllerLogsGatedByEngine asserts the Task-2 wiring fix:
+// controller_logs is Flux-only (it enumerates the Flux controllers in flux-system), so
+// it must be registered ONLY when the configured GitOps engine is Flux — including the
+// empty/default engine, which resolves to flux — and absent for ArgoCD. The other
+// cluster tools (pod_logs, pod_status, kube_events) are engine-agnostic and must always
+// be present.
+func TestClusterToolsControllerLogsGatedByEngine(t *testing.T) {
+	tests := []struct {
+		name   string
+		engine string
+		want   bool
+	}{
+		{"flux -> controller_logs present", "flux", true},
+		{"default (empty) -> flux -> present", "", true},
+		{"argocd -> controller_logs absent", "argocd", false},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := &config.Config{}
+			cfg.GitOps.Engine = tc.engine
+			names := toolNames(clusterTools(fakeClusterReader{}, cfg))
+			if names["controller_logs"] != tc.want {
+				t.Errorf("controller_logs present=%v, want %v (engine=%q)", names["controller_logs"], tc.want, tc.engine)
+			}
+			// Engine-agnostic cluster tools are always registered.
+			for _, always := range []string{"pod_logs", "pod_status", "kube_events"} {
+				if !names[always] {
+					t.Errorf("engine-agnostic tool %q must always be present, got %v", always, names)
+				}
+			}
+		})
+	}
+}
+
 // TestBuildInvestigatorSelectsImplementation asserts the central wiring decision:
 // no configured model yields the read-only LogInvestigator (with a nil catalog),
 // while a configured model yields the LLM ReAct LoopInvestigator. KUBECONFIG is
