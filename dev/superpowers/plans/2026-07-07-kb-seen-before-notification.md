@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** When a known incident recurs, the notification quotes the merged KB entry's cause and human-reviewed resolution inline (plus its recall track record), so the on-call reads the previous answer with zero clicks. Spec: `docs/superpowers/specs/2026-07-07-kb-human-surfaces-design.md`, Feature 1.
+**Goal:** When a known incident recurs, the notification quotes the merged KB entry's cause and human-reviewed resolution inline (plus its recall track record), so the on-call reads the previous answer with zero clicks. Spec: `dev/superpowers/specs/2026-07-07-kb-human-surfaces-design.md`, Feature 1.
 
 **Architecture:** At completion (`onInvestigationComplete`), a recurring fresh investigation looks up the merged catalog entry by its `DupFingerprint` (already stored in entry frontmatter), extracts `## Cause` / `## Resolution` excerpts via a new `catalog.Entry.Section()`, joins the entry's recall/resolve aggregate from the outcome ledger, and stamps a new `providers.PriorKnowledge` onto the `Investigation`. `notify.Format` (Matrix/webhook/fallback) and the Slack summary blocks render it as a "📚 Seen before" block placed before the current root cause. Everything is best-effort: any miss degrades to today's counter+link.
 

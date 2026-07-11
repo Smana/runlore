@@ -17,7 +17,7 @@
 - Failure-isolated: a server that fails initialize/list is logged (Warn) and skipped; RunLore continues.
 - Use `httpx.SecureClient` for all MCP HTTP (SSRF guard + S1/S2 protections); never echo a non-2xx body (surface status + sanitized request-id via `httpx.RequestID`).
 - **Full quality gate before each commit:** `go build ./... && go test ./... && go vet ./... && gofmt -l && golangci-lint run ./...` (golangci-lint included — a hard lesson).
-- Spec: `docs/superpowers/specs/2026-06-30-outbound-mcp-client-design.md`.
+- Spec: `dev/superpowers/specs/2026-06-30-outbound-mcp-client-design.md`.
 
 ---
 

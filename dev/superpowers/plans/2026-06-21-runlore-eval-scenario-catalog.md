@@ -25,7 +25,7 @@ Create `eval/rubric.md`:
 ```markdown
 # RunLore eval rubric
 
-Two grading tracks (see docs/superpowers/specs/2026-06-21-runlore-eval-harness-design.md §5).
+Two grading tracks (see dev/superpowers/specs/2026-06-21-runlore-eval-harness-design.md §5).
 
 ## Track A — coverage (deterministic)
 From the recorded tool-call trace. `coverage = |mandatory expected_sources touched| / |expected_sources|`.

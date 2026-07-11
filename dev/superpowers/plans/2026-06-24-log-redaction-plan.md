@@ -1,6 +1,6 @@
 # R19 — implementation plan
 
-Spec: `docs/superpowers/specs/2026-06-24-log-redaction-design.md`
+Spec: `dev/superpowers/specs/2026-06-24-log-redaction-design.md`
 
 Test-first, incremental commits. Gate green before each commit:
 `go build/vet/test ./... && gofmt -l . && golangci-lint run ./...` and

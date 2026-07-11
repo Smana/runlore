@@ -1,9 +1,9 @@
 # Security Policy
 
 RunLore is an SRE agent that runs **inside your cluster** with privileged reach: it
-holds a GitHub App key, LLM provider credentials, and reads Kubernetes Secrets to
-investigate incidents. A vulnerability here can expose those credentials or the
-clusters RunLore observes — so please report it **privately**, not in a public issue.
+holds a GitHub App key and LLM provider credentials. A vulnerability here can expose
+those credentials or the clusters RunLore observes — so please report it **privately**,
+not in a public issue.
 
 For the technical architecture behind RunLore's defenses — the prompt-injection design,
 secret-redaction boundaries, and network guards — see

@@ -8,7 +8,7 @@
 
 **Tech Stack:** Go 1.26, stdlib `testing` (no testify). Tests use the existing `recallWith`/`okReq`/`fakeScored` helpers in `internal/investigate/` (`fakeScored.SearchScored` ignores `k` and returns all hits, so multi-candidate tests work directly).
 
-**Spec:** `docs/superpowers/specs/2026-06-23-recall-retrieval-design.md`
+**Spec:** `dev/superpowers/specs/2026-06-23-recall-retrieval-design.md`
 
 **Branch:** `feat/recall-retrieval` (already checked out; the spec is already committed there).
 
