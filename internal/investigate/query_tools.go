@@ -6,6 +6,8 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"math"
+	"slices"
 	"sort"
 	"strings"
 	"time"
@@ -14,6 +16,32 @@ import (
 )
 
 const maxToolRows = 50
+
+// windowSince builds the [now-sinceMinutes, now] lookback window shared by the
+// tools that take a since_minutes argument, applying defMinutes when the caller
+// passed a non-positive value. It dedups the identical default-and-window boilerplate
+// those Call methods would otherwise repeat.
+func windowSince(sinceMinutes, defMinutes int) providers.TimeWindow {
+	if sinceMinutes <= 0 {
+		sinceMinutes = defMinutes
+	}
+	end := time.Now()
+	return providers.TimeWindow{Start: end.Add(-time.Duration(sinceMinutes) * time.Minute), End: end}
+}
+
+// Dead-end result strings. An empty query result is high-leverage: a bare "no
+// series matched" leaves the model to conclude the workload is healthy or to keep
+// guessing metric names. These strings instead name the next tool (discover_metrics
+// / discover_log_fields) so the agent recovers instead of dead-ending. The
+// query_metrics* tests match on the "no series matched" prefix, so it is preserved.
+const (
+	noSeriesMatched = "no series matched — the metric name or labels may not exist; " +
+		"use discover_metrics with a namespace selector to list what this workload actually exports"
+
+	noLogLinesMatched = "no log lines matched — if logs were expected, the collector field names may differ " +
+		"from the assumed schema (try discover_log_fields to see the real fields), or narrow/loosen the query; " +
+		"consider pod_logs for a specific pod"
+)
 
 // renderRows writes up to maxToolRows rows, calling row(i) for each kept index. If
 // n exceeds the cap it appends a truncation note "… (<remaining> <noun>)". This is
@@ -28,10 +56,27 @@ func renderRows(b *strings.Builder, n int, noun string, row func(i int)) {
 	}
 }
 
+// metricsQLGuidance is the MetricsQL sentence appended to the query_metrics /
+// query_metrics_range Descriptions ONLY when the backend flavor is VictoriaMetrics.
+// MetricsQL is a PromQL superset, so these helpers would be invalid against real
+// Prometheus — hence they are advertised description-only, and only when the flavor
+// is known to be VM. No query rewriting happens; the model may use them or not.
+const metricsQLGuidance = " This backend is VictoriaMetrics, which also accepts MetricsQL (a PromQL superset): " +
+	"when many series match, `outliersk(3, <expr>)` returns only the anomalous ones; " +
+	"`<expr> default 0` fills scrape gaps so absent series read as 0 instead of vanishing; " +
+	"`rollup_rate(<metric>[5m])` and `<expr> keep_metric_names` are also available."
+
 // QueryMetricsTool lets the model run PromQL instant queries (saturation, error
 // rates, health) against the metrics backend.
 type QueryMetricsTool struct {
 	Metrics providers.MetricsProvider
+
+	// MetricsQL, when true, appends VictoriaMetrics-only MetricsQL guidance to the
+	// Description (the backend was detected/configured as VictoriaMetrics). It is
+	// description-only — no query is ever rewritten. Default false ⇒ generic
+	// Prometheus wording, so a Prometheus (or unknown) backend never sees MetricsQL
+	// claims it would reject.
+	MetricsQL bool
 }
 
 // Name returns the tool name.
@@ -39,7 +84,11 @@ func (t QueryMetricsTool) Name() string { return "query_metrics" }
 
 // Description returns the tool description.
 func (t QueryMetricsTool) Description() string {
-	return "Run a PromQL instant query against the metrics backend (VictoriaMetrics/Prometheus) — check saturation, error rates, restarts, resource usage. This returns the value NOW only; to see when a metric started rising/spiking around the incident, use query_metrics_range instead."
+	d := "Run a PromQL instant query against the metrics backend (VictoriaMetrics/Prometheus) — check saturation, error rates, restarts, resource usage. This returns the value NOW only; to see when a metric started rising/spiking around the incident, use query_metrics_range instead. Results cap at 50 series (largest |value| kept); prefer topk(10, sum by(pod)(rate(...))) over a raw selector so the cap doesn't hide the signal."
+	if t.MetricsQL {
+		d += metricsQLGuidance
+	}
+	return d
 }
 
 // Schema returns the JSON schema for the arguments.
@@ -60,8 +109,15 @@ func (t QueryMetricsTool) Call(ctx context.Context, args string) (string, error)
 		return "", err
 	}
 	if len(samples) == 0 {
-		return "no series matched", nil
+		return noSeriesMatched, nil
 	}
+	// Prometheus/VictoriaMetrics don't order an instant vector, so a first-50 cap
+	// (renderRows) would keep an arbitrary slice. Sort by |value| desc first so
+	// truncation keeps the extremes — the saturated/erroring series an operator
+	// cares about — rather than whatever the backend happened to emit first.
+	sort.SliceStable(samples, func(i, j int) bool {
+		return math.Abs(samples[i].Value) > math.Abs(samples[j].Value)
+	})
 	var b strings.Builder
 	renderRows(&b, len(samples), "more series", func(i int) {
 		fmt.Fprintf(&b, "%s = %g\n", formatMetric(samples[i].Metric), samples[i].Value)
@@ -86,6 +142,10 @@ func formatMetric(m map[string]string) string {
 // which is what reveals when a problem started (rising / spiking / recovering).
 type QueryMetricsRangeTool struct {
 	Metrics providers.MetricsProvider
+
+	// MetricsQL mirrors QueryMetricsTool.MetricsQL: description-only VictoriaMetrics
+	// guidance, appended only when the backend flavor is VictoriaMetrics.
+	MetricsQL bool
 }
 
 // Name returns the tool name.
@@ -93,7 +153,11 @@ func (t QueryMetricsRangeTool) Name() string { return "query_metrics_range" }
 
 // Description returns the tool description.
 func (t QueryMetricsRangeTool) Description() string {
-	return "Run a PromQL RANGE query over a recent window (default 60m, 60s step) to see how a metric TRENDS — rising, spiking, or recovering around the incident — not just its value right now. Use rate()/error-rate/saturation expressions; returns per-series first→last with min/max so you can tell WHEN a problem started. since_minutes bounds the window; step_seconds the resolution."
+	d := "Run a PromQL RANGE query over a recent window (default 60m, 60s step) to see how a metric TRENDS — rising, spiking, or recovering around the incident — not just its value right now. Use rate()/error-rate/saturation expressions; returns per-series first→last with min/max, a compact downsampled trend, and the biggest adjacent jump so you can tell WHEN a problem started and whether it was a step-change or a ramp. since_minutes bounds the window; step_seconds the resolution (auto-derived/coarsened if it would exceed the backend point cap). Results cap at 50 series (largest |value| kept); prefer topk(10, sum by(pod)(rate(...))) over a raw selector so the cap doesn't hide the signal."
+	if t.MetricsQL {
+		d += metricsQLGuidance
+	}
+	return d
 }
 
 // Schema returns the JSON schema for the arguments.
@@ -111,31 +175,71 @@ func (t QueryMetricsRangeTool) Call(ctx context.Context, args string) (string, e
 	if err := json.Unmarshal([]byte(args), &in); err != nil {
 		return "", fmt.Errorf("parse args: %w", err)
 	}
-	since := in.SinceMinutes
-	if since <= 0 {
-		since = 60
-	}
-	step := time.Duration(in.StepSeconds) * time.Second
-	if step <= 0 {
-		step = time.Minute
-	}
-	end := time.Now()
-	start := end.Add(-time.Duration(since) * time.Minute)
-	series, err := t.Metrics.QueryRange(ctx, in.Query, providers.TimeWindow{Start: start, End: end}, step)
+	window := windowSince(in.SinceMinutes, 60)
+	step, clampNote := resolveStep(time.Duration(in.StepSeconds)*time.Second, window)
+	series, err := t.Metrics.QueryRange(ctx, in.Query, window, step)
 	if err != nil {
 		return "", err
 	}
 	if len(series) == 0 {
-		return "no series matched", nil
+		return noSeriesMatched, nil
 	}
 	var b strings.Builder
+	if clampNote != "" {
+		b.WriteString(clampNote + "\n")
+	}
 	renderRows(&b, len(series), "more series", func(i int) {
 		s := series[i]
 		first, last, lo, hi := summarize(s.Points)
-		fmt.Fprintf(&b, "%s first=%g last=%g min=%g%s max=%g%s\n",
-			formatMetric(s.Metric), first, last, lo.Value, atTime(lo.Time), hi.Value, atTime(hi.Time))
+		// Compute the biggest adjacent jump once (delta + when) rather than traversing
+		// the points twice.
+		jumpIdx, jumpDlt := biggestJump(s.Points)
+		var jumpAt time.Time
+		if jumpIdx >= 0 {
+			jumpAt = s.Points[jumpIdx].Time
+		}
+		fmt.Fprintf(&b, "%s first=%g last=%g min=%g%s max=%g%s trend=%s biggest jump %+g%s\n",
+			formatMetric(s.Metric), first, last, lo.Value, atTime(lo.Time), hi.Value, atTime(hi.Time),
+			trend(s.Points), jumpDlt, atTime(jumpAt))
 	})
 	return b.String(), nil
+}
+
+// maxRangeToolPoints bounds the point count the range tool requests. It is well
+// below the backend's ~11k hard cap: the LLM reads a compact summary, not raw
+// points, so a finer resolution buys nothing and risks a rejected/expensive
+// query. The prometheus client keeps a separate 11k backstop for direct callers.
+const maxRangeToolPoints = 1000
+
+// resolveStep picks the range step for a window and reports whether it coarsened
+// an operator-supplied step. With no explicit step it derives one from the window
+// (window/maxRangeToolPoints, min 1s) so a wide window stays bounded silently. An
+// explicit step that would exceed the point cap is raised — and annotated, so a
+// deliberately fine step isn't silently changed under the operator.
+func resolveStep(requested time.Duration, w providers.TimeWindow) (step time.Duration, note string) {
+	span := w.End.Sub(w.Start)
+	minStep := time.Duration(0)
+	if span > 0 {
+		// round the per-point step UP to whole seconds (the backend step unit) so
+		// span/step never lands back above the cap.
+		if s := span / maxRangeToolPoints; s > time.Second {
+			minStep = (s + time.Second - 1).Truncate(time.Second)
+		} else {
+			minStep = time.Second
+		}
+	}
+	if requested <= 0 {
+		// derived default; nothing was overridden, so no annotation.
+		if minStep <= 0 {
+			return time.Minute, ""
+		}
+		return minStep, ""
+	}
+	if minStep > 0 && requested < minStep {
+		return minStep, fmt.Sprintf("note: step coarsened from %s to %s to keep the query under %d points (%s window); pass a smaller since_minutes for finer resolution",
+			requested, minStep, maxRangeToolPoints, span.Round(time.Minute))
+	}
+	return requested, ""
 }
 
 // atTime renders "@<RFC3339>" for a point's timestamp, or "" when the backend
@@ -170,6 +274,52 @@ func summarize(points []providers.Point) (first, last float64, lo, hi providers.
 	return first, last, lo, hi
 }
 
+// trendBuckets is the fixed number of downsampled points the trend string carries.
+// ~12 points is enough for an LLM to read the shape (flat / ramp / step / spike)
+// without shipping every raw sample.
+const trendBuckets = 12
+
+// trend renders a compact fixed-bucket downsample of the series as
+// "v0>v1>...>vN" (~trendBuckets points). first/last/min/max can't distinguish a
+// step-change from a ramp — both share the same endpoints and extremes — so the
+// shape between them is what the model needs. Fewer points than buckets are
+// emitted verbatim.
+func trend(points []providers.Point) string {
+	if len(points) == 0 {
+		return ""
+	}
+	n := trendBuckets
+	if len(points) < n {
+		n = len(points)
+	}
+	vals := make([]string, 0, n)
+	for i := 0; i < n; i++ {
+		// pick evenly spaced source indices so the first and last are always kept.
+		idx := 0
+		if n > 1 {
+			idx = i * (len(points) - 1) / (n - 1)
+		}
+		vals = append(vals, fmt.Sprintf("%g", points[idx].Value))
+	}
+	return strings.Join(vals, ">")
+}
+
+// biggestJump finds the adjacent pair with the largest |Δvalue| and returns the
+// index of the later point and the signed delta. Returns (-1, 0) for <2 points.
+func biggestJump(points []providers.Point) (int, float64) {
+	if len(points) < 2 {
+		return -1, 0
+	}
+	bestI, bestD := 1, points[1].Value-points[0].Value
+	for i := 2; i < len(points); i++ {
+		d := points[i].Value - points[i-1].Value
+		if math.Abs(d) > math.Abs(bestD) {
+			bestI, bestD = i, d
+		}
+	}
+	return bestI, bestD
+}
+
 // NetworkDropsTool lets the model list recently denied/dropped network flows from
 // the configured (pluggable, CNI-agnostic) network-flow source — surfacing
 // NetworkPolicy denials, firewall/security-group rejects, and connectivity failures.
@@ -200,13 +350,7 @@ func (t NetworkDropsTool) Call(ctx context.Context, args string) (string, error)
 	if err := json.Unmarshal([]byte(args), &in); err != nil {
 		return "", fmt.Errorf("parse args: %w", err)
 	}
-	since := in.SinceMinutes
-	if since <= 0 {
-		since = 60
-	}
-	end := time.Now()
-	start := end.Add(-time.Duration(since) * time.Minute)
-	lines, err := t.Network.Drops(ctx, providers.Selector{Namespace: in.Namespace, Name: in.Name}, providers.TimeWindow{Start: start, End: end})
+	lines, err := t.Network.Drops(ctx, providers.Selector{Namespace: in.Namespace, Name: in.Name}, windowSince(in.SinceMinutes, 60))
 	if err != nil {
 		return "", err
 	}
@@ -221,33 +365,58 @@ func (t NetworkDropsTool) Call(ctx context.Context, args string) (string, error)
 // QueryLogsTool lets the model query logs (LogsQL) over a recent window.
 type QueryLogsTool struct {
 	Logs providers.LogsProvider
+
+	// Fields is the OPTIONAL collector field-naming convention (config.logs.fields).
+	// The zero value reproduces the shipped VictoriaLogs/vector schema exactly, so an
+	// unset config is a no-op. The app layer sets it from config.
+	Fields LogFields
+
+	// AllowedNamespaces is the operator-configured allowlist of namespaces a namespace-
+	// scoped query may target (config.investigation.pod_log_namespaces — the SAME list
+	// that guards pod_logs, because query_logs reads the same raw logs). Empty ⇒ the
+	// permissive pre-confinement behaviour (any namespace) is preserved. See
+	// namespaceAllowed. The incident namespace is always permitted.
+	AllowedNamespaces []string
+
+	// IncidentNamespace is this investigation's own namespace; always permitted. Set
+	// per-investigation by the loop (scopeTools) via withIncidentNamespace.
+	IncidentNamespace string
 }
 
-// buildLogsQL composes a valid LogsQL query. With structured fields it builds the
-// canonical `{kubernetes.container_name="…",kubernetes.pod_namespace="…"} |
-// unpack_json | log.level:…` form, so valid-query generation lives in Go and can't
-// drift. A raw query is used as-is but rejected when it uses Prometheus/Loki
-// `level=` syntax (the model's recurring mistake) — the error guides a retry.
+// buildLogsQL composes a LogsQL query with the SHIPPED default field convention. It
+// is the entry point for the tools that don't expose field config (discover_log_fields,
+// logs_error_summary); QueryLogsTool uses buildLogsQLWith to honour config.logs.fields.
 func buildLogsQL(raw, container, namespace, level string) (string, error) {
+	return buildLogsQLWith(raw, container, namespace, level, LogFields{})
+}
+
+// buildLogsQLWith composes a valid LogsQL query using the resolved field convention.
+// With structured fields it builds the canonical
+// `{<container_field>="…",<namespace_field>="…"} | <unpack_pipe> | <level_field>:…`
+// form, so valid-query generation lives in Go and can't drift. A raw query is used
+// as-is but rejected when it uses Prometheus/Loki `level=` syntax (the model's
+// recurring mistake) — the error guides a retry.
+func buildLogsQLWith(raw, container, namespace, level string, conv LogFields) (string, error) {
+	conv = conv.resolved()
 	if raw != "" {
 		if strings.Contains(raw, "level=") {
-			return "", fmt.Errorf("invalid LogsQL: `level=` is Prometheus/Loki syntax. Filter severity with `| unpack_json | log.level:error` (after a stream selector), or use the container/namespace/level params")
+			return "", fmt.Errorf("invalid LogsQL: `level=` is Prometheus/Loki syntax. Filter severity with `| %s | %s:error` (after a stream selector), or use the container/namespace/level params", conv.UnpackPipe, conv.LevelField)
 		}
 		return raw, nil
 	}
 	var sel []string
 	if container != "" {
-		sel = append(sel, fmt.Sprintf("kubernetes.container_name=%q", container))
+		sel = append(sel, fmt.Sprintf("%s=%q", conv.ContainerField, container))
 	}
 	if namespace != "" {
-		sel = append(sel, fmt.Sprintf("kubernetes.pod_namespace=%q", namespace))
+		sel = append(sel, fmt.Sprintf("%s=%q", conv.NamespaceField, namespace))
 	}
 	if len(sel) == 0 {
 		return "", fmt.Errorf("provide a raw `query`, or `container`/`namespace` to build one")
 	}
 	q := "{" + strings.Join(sel, ",") + "}"
 	if level != "" {
-		q += " | unpack_json | log.level:" + level
+		q += " | " + conv.UnpackPipe + " | " + conv.LevelField + ":" + level
 	}
 	return q, nil
 }
@@ -288,24 +457,51 @@ func (t QueryLogsTool) Call(ctx context.Context, args string) (string, error) {
 	if err := json.Unmarshal([]byte(args), &in); err != nil {
 		return "", fmt.Errorf("parse args: %w", err)
 	}
-	query, err := buildLogsQL(in.Query, in.Container, in.Namespace, in.Level)
+	// L2 confinement: query_logs reads the SAME raw pod logs (secrets/PII) pod_logs
+	// does, so a structured namespace argument is held to the same allowlist. Guard
+	// only the structured `namespace` param — a raw LogsQL query that names no
+	// namespace stays unrestricted (there is nothing to confine), preserving today's
+	// behaviour when no allowlist is configured.
+	if in.Namespace != "" && !t.namespaceAllowed(in.Namespace) {
+		return fmt.Sprintf("namespace %q is not permitted for query_logs (allowed: the incident namespace plus the configured pod_log_namespaces allowlist)", in.Namespace), nil
+	}
+	query, err := buildLogsQLWith(in.Query, in.Container, in.Namespace, in.Level, t.Fields)
 	if err != nil {
 		return "", err
 	}
-	since := in.SinceMinutes
-	if since <= 0 {
-		since = 60
-	}
-	end := time.Now()
-	start := end.Add(-time.Duration(since) * time.Minute)
-	lines, err := t.Logs.Query(ctx, query, providers.TimeWindow{Start: start, End: end})
+	lines, err := t.Logs.Query(ctx, query, windowSince(in.SinceMinutes, 60))
 	if err != nil {
 		return "", err
 	}
 	if len(lines) == 0 {
-		return "no log lines matched", nil
+		return noLogLinesMatched, nil
 	}
 	var b strings.Builder
-	renderLogLines(&b, lines, "more lines")
+	renderLogLinesWith(&b, lines, "more lines", t.Fields)
 	return b.String(), nil
+}
+
+// namespaceAllowed mirrors PodLogsTool.namespaceAllowed with the KEY difference that
+// query_logs stays PERMISSIVE by default: with no configured allowlist AND no bound
+// incident namespace the confinement is a no-op (the caller only invokes this for a
+// non-empty namespace argument), so a deployment that never set pod_log_namespaces
+// sees no behaviour change. Once an allowlist is set, a namespace argument must be
+// the incident namespace or in the allowlist.
+func (t QueryLogsTool) namespaceAllowed(ns string) bool {
+	// No confinement configured ⇒ preserve the pre-L2 unrestricted behaviour.
+	if len(t.AllowedNamespaces) == 0 && t.IncidentNamespace == "" {
+		return true
+	}
+	if ns == t.IncidentNamespace { // the incident's own namespace is always allowed
+		return true
+	}
+	return slices.Contains(t.AllowedNamespaces, ns)
+}
+
+// withIncidentNamespace binds a copy to this investigation's namespace, implementing
+// incidentScoped so the loop's scopeTools can confine query_logs per request exactly
+// as it does pod_logs. A value receiver keeps the shared tool untouched.
+func (t QueryLogsTool) withIncidentNamespace(ns string) Tool {
+	t.IncidentNamespace = ns
+	return t
 }

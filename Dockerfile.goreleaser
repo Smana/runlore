@@ -4,7 +4,8 @@
 # multi-platform buildx build selects the right one via $TARGETPLATFORM — so there
 # is no build stage here, we only assemble the runtime layer. Mirrors the runtime
 # stage of ./Dockerfile (used by build-image.yml for PR/main validation).
-FROM gcr.io/distroless/static:nonroot
+# gcr.io/distroless/static:nonroot
+FROM gcr.io/distroless/static:nonroot@sha256:d29e660cc75a5b6b1334e03c5c81ccf9bc0884a002c6000dbf0fb96034814478
 ARG TARGETPLATFORM
 LABEL org.opencontainers.image.source="https://github.com/Smana/runlore"
 COPY $TARGETPLATFORM/lore /usr/local/bin/lore

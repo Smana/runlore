@@ -8,7 +8,7 @@
 
 **Tech Stack:** Go 1.26, stdlib `testing` (no testify). Tests follow `internal/investigate/recall_test.go` (fakes, `telemetry.Setup` + Prometheus scrape) and `internal/config/config_investigation_test.go` (`applyDefaults`).
 
-**Spec:** `docs/superpowers/specs/2026-06-23-recall-decay-design.md`
+**Spec:** `dev/superpowers/specs/2026-06-23-recall-decay-design.md`
 
 **Branch:** `feat/recall-decay` (already checked out; the spec is already committed there).
 

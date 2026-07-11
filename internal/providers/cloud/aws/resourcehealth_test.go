@@ -7,6 +7,7 @@ import (
 	"errors"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/aws/aws-sdk-go-v2/service/autoscaling"
 	asgtypes "github.com/aws/aws-sdk-go-v2/service/autoscaling/types"
@@ -47,14 +48,18 @@ func (f *fakeEKS) DescribeNodegroup(_ context.Context, in *eks.DescribeNodegroup
 }
 
 // fakeASG serves DescribeAutoScalingGroups across pages and an empty scaling
-// activities list. descErr (when set) makes the describe call fail.
+// activities list. descErr (when set) makes the describe call fail. lastIn
+// captures the most-recent input so tests can assert request shapes.
 type fakeASG struct {
-	pages   []*autoscaling.DescribeAutoScalingGroupsOutput
-	call    int
-	descErr error
+	pages      []*autoscaling.DescribeAutoScalingGroupsOutput
+	call       int
+	descErr    error
+	lastIn     *autoscaling.DescribeAutoScalingGroupsInput
+	activities []asgtypes.Activity // returned by DescribeScalingActivities for every ASG
 }
 
-func (f *fakeASG) DescribeAutoScalingGroups(_ context.Context, _ *autoscaling.DescribeAutoScalingGroupsInput, _ ...func(*autoscaling.Options)) (*autoscaling.DescribeAutoScalingGroupsOutput, error) {
+func (f *fakeASG) DescribeAutoScalingGroups(_ context.Context, in *autoscaling.DescribeAutoScalingGroupsInput, _ ...func(*autoscaling.Options)) (*autoscaling.DescribeAutoScalingGroupsOutput, error) {
+	f.lastIn = in
 	if f.descErr != nil {
 		return nil, f.descErr
 	}
@@ -64,15 +69,19 @@ func (f *fakeASG) DescribeAutoScalingGroups(_ context.Context, _ *autoscaling.De
 }
 
 func (f *fakeASG) DescribeScalingActivities(_ context.Context, _ *autoscaling.DescribeScalingActivitiesInput, _ ...func(*autoscaling.Options)) (*autoscaling.DescribeScalingActivitiesOutput, error) {
-	return &autoscaling.DescribeScalingActivitiesOutput{}, nil
+	return &autoscaling.DescribeScalingActivitiesOutput{Activities: f.activities}, nil
 }
 
-// fakeEC2 serves DescribeInstanceStatus (the only EC2 call ResourceHealth makes).
-// statusErr (when set) makes the status query fail. DescribeInstances is part of
-// the ec2API surface but unused here.
+// fakeEC2 serves DescribeInstanceStatus and DescribeInstances.
+// statusErr (when set) makes DescribeInstanceStatus fail.
+// reservations (when set) is returned by DescribeInstances; lastDescribeIn
+// captures the most-recent DescribeInstances input so tests can assert request
+// shapes (filters etc.).
 type fakeEC2 struct {
-	statuses  []ec2types.InstanceStatus
-	statusErr error
+	statuses       []ec2types.InstanceStatus
+	statusErr      error
+	reservations   []ec2types.Reservation
+	lastDescribeIn *ec2.DescribeInstancesInput
 }
 
 func (f *fakeEC2) DescribeInstanceStatus(_ context.Context, _ *ec2.DescribeInstanceStatusInput, _ ...func(*ec2.Options)) (*ec2.DescribeInstanceStatusOutput, error) {
@@ -82,8 +91,9 @@ func (f *fakeEC2) DescribeInstanceStatus(_ context.Context, _ *ec2.DescribeInsta
 	return &ec2.DescribeInstanceStatusOutput{InstanceStatuses: f.statuses}, nil
 }
 
-func (f *fakeEC2) DescribeInstances(_ context.Context, _ *ec2.DescribeInstancesInput, _ ...func(*ec2.Options)) (*ec2.DescribeInstancesOutput, error) {
-	return &ec2.DescribeInstancesOutput{}, nil
+func (f *fakeEC2) DescribeInstances(_ context.Context, in *ec2.DescribeInstancesInput, _ ...func(*ec2.Options)) (*ec2.DescribeInstancesOutput, error) {
+	f.lastDescribeIn = in
+	return &ec2.DescribeInstancesOutput{Reservations: f.reservations}, nil
 }
 
 func asgPage(token string, names ...string) *autoscaling.DescribeAutoScalingGroupsOutput {
@@ -357,4 +367,239 @@ func TestResourceHealthNodegroupHealthIssues(t *testing.T) {
 	if !linesContain(lines, "health=[AsgInstanceLaunchFailures: insufficient capacity]") {
 		t.Fatalf("want the nodegroup health issue rendered, got %v", lines)
 	}
+}
+
+// TestDescribeASGsClusterFilter asserts that describeASGs passes a server-side
+// tag filter (tag:eks:cluster-name=<cluster>) when clusterName is set, so the
+// 25-group cap counts only cluster-relevant ASGs rather than all ASGs in the
+// account. When clusterName is empty no filters are sent.
+func TestDescribeASGsClusterFilter(t *testing.T) {
+	t.Run("cluster set — filter sent", func(t *testing.T) {
+		asgF := &fakeASG{pages: []*autoscaling.DescribeAutoScalingGroupsOutput{asgPage("")}}
+		c := &Client{asg: asgF, clusterName: "prod", maxEvents: 25}
+		_, _, err := c.describeASGs(context.Background())
+		if err != nil {
+			t.Fatalf("describeASGs: %v", err)
+		}
+		if asgF.lastIn == nil {
+			t.Fatal("lastIn not captured")
+		}
+		if len(asgF.lastIn.Filters) != 1 {
+			t.Fatalf("expected 1 filter, got %d: %v", len(asgF.lastIn.Filters), asgF.lastIn.Filters)
+		}
+		f := asgF.lastIn.Filters[0]
+		if deref(f.Name) != "tag:eks:cluster-name" {
+			t.Fatalf("expected filter name tag:eks:cluster-name, got %q", deref(f.Name))
+		}
+		if len(f.Values) != 1 || f.Values[0] != "prod" {
+			t.Fatalf("expected filter value [prod], got %v", f.Values)
+		}
+	})
+
+	t.Run("no cluster — no filters sent", func(t *testing.T) {
+		asgF := &fakeASG{pages: []*autoscaling.DescribeAutoScalingGroupsOutput{asgPage("")}}
+		c := &Client{asg: asgF, clusterName: "", maxEvents: 25}
+		_, _, err := c.describeASGs(context.Background())
+		if err != nil {
+			t.Fatalf("describeASGs: %v", err)
+		}
+		if asgF.lastIn == nil {
+			t.Fatal("lastIn not captured")
+		}
+		if len(asgF.lastIn.Filters) != 0 {
+			t.Fatalf("expected no filters when clusterName is empty, got %v", asgF.lastIn.Filters)
+		}
+	})
+}
+
+// makeKarpenterInstance builds a minimal ec2types.Instance with the
+// karpenter.sh/nodepool tag set to pool, the given lifecycle and state,
+// and an optional StateReason code (for simulating spot terminations).
+func makeKarpenterInstance(id, pool string, lifecycle ec2types.InstanceLifecycleType, stateName ec2types.InstanceStateName, reasonCode string) ec2types.Instance {
+	inst := ec2types.Instance{
+		InstanceId:        ptr(id),
+		InstanceType:      ec2types.InstanceTypeM5Large,
+		InstanceLifecycle: lifecycle,
+		State:             &ec2types.InstanceState{Name: stateName},
+		Tags: []ec2types.Tag{
+			{Key: ptr("karpenter.sh/nodepool"), Value: ptr(pool)},
+		},
+	}
+	if reasonCode != "" {
+		inst.StateReason = &ec2types.StateReason{Code: ptr(reasonCode)}
+	}
+	return inst
+}
+
+// TestResourceHealthKarpenterCapacity exercises the karpenterCapacity path:
+//   - Instances tagged karpenter.sh/nodepool are enumerated and grouped by pool.
+//   - Spot instances are flagged (spot=N).
+//   - Terminated instances with spot interruption reason codes surface a
+//     spot-term-reasons=[...] annotation so the model can diagnose "node vanished".
+//   - When no Karpenter instances exist the section is silently omitted.
+//   - When clusterName is set the DescribeInstances request includes a
+//     tag:kubernetes.io/cluster/<name>=owned filter alongside the nodepool tag-key filter.
+func TestResourceHealthKarpenterCapacity(t *testing.T) {
+	tests := []struct {
+		name         string
+		reservations []ec2types.Reservation
+		clusterName  string
+		wantLines    []string
+		wantAbsent   []string
+	}{
+		{
+			name: "mixed spot + on-demand across two nodepools — grouped, spot flagged",
+			reservations: []ec2types.Reservation{
+				{Instances: []ec2types.Instance{
+					makeKarpenterInstance("i-spot1", "default", ec2types.InstanceLifecycleTypeSpot, ec2types.InstanceStateNameRunning, ""),
+					makeKarpenterInstance("i-spot2", "default", ec2types.InstanceLifecycleTypeSpot, ec2types.InstanceStateNameRunning, ""),
+					makeKarpenterInstance("i-od1", "default", ec2types.InstanceLifecycleType(""), ec2types.InstanceStateNameRunning, ""),
+				}},
+				{Instances: []ec2types.Instance{
+					makeKarpenterInstance("i-gpu1", "gpu-pool", ec2types.InstanceLifecycleTypeSpot, ec2types.InstanceStateNameRunning, ""),
+				}},
+			},
+			wantLines: []string{
+				"Karpenter nodepool default: instances=3 spot=2",
+				"Karpenter nodepool gpu-pool: instances=1 spot=1",
+			},
+		},
+		{
+			name: "terminated spot with interruption reason — spot-term-reasons surfaced",
+			reservations: []ec2types.Reservation{
+				{Instances: []ec2types.Instance{
+					makeKarpenterInstance("i-term1", "default", ec2types.InstanceLifecycleTypeSpot, ec2types.InstanceStateNameTerminated, "Server.SpotInstanceTermination"),
+					makeKarpenterInstance("i-run1", "default", ec2types.InstanceLifecycleTypeSpot, ec2types.InstanceStateNameRunning, ""),
+				}},
+			},
+			wantLines: []string{
+				"Karpenter nodepool default: instances=2 spot=2 terminated=1 spot-term-reasons=[Server.SpotInstanceTermination]",
+			},
+		},
+		{
+			name:         "no Karpenter instances — section silently omitted",
+			reservations: nil,
+			wantAbsent:   []string{"Karpenter"},
+		},
+		{
+			name:        "cluster set — DescribeInstances carries cluster ownership filter",
+			clusterName: "prod",
+			reservations: []ec2types.Reservation{
+				{Instances: []ec2types.Instance{
+					makeKarpenterInstance("i-a1", "default", ec2types.InstanceLifecycleTypeSpot, ec2types.InstanceStateNameRunning, ""),
+				}},
+			},
+			wantLines: []string{"Karpenter nodepool default: instances=1 spot=1"},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			ec2f := &fakeEC2{reservations: tc.reservations}
+			c := &Client{
+				eks:         &fakeEKS{listPages: []*eks.ListNodegroupsOutput{ngPage("")}},
+				asg:         &fakeASG{pages: []*autoscaling.DescribeAutoScalingGroupsOutput{asgPage("")}},
+				ec2:         ec2f,
+				clusterName: tc.clusterName,
+				maxEvents:   25,
+			}
+			lines, err := c.ResourceHealth(context.Background(), providers.Selector{}, providers.TimeWindow{})
+			if err != nil {
+				t.Fatalf("ResourceHealth: %v", err)
+			}
+			for _, want := range tc.wantLines {
+				if !linesContain(lines, want) {
+					t.Errorf("want line containing %q, got %v", want, lines)
+				}
+			}
+			for _, absent := range tc.wantAbsent {
+				if linesContain(lines, absent) {
+					t.Errorf("expected no line containing %q, got %v", absent, lines)
+				}
+			}
+			// When clusterName is set, assert the cluster-ownership filter was sent.
+			if tc.clusterName != "" && ec2f.lastDescribeIn != nil {
+				clusterFilterFound := false
+				expectedFilterName := "tag:kubernetes.io/cluster/" + tc.clusterName
+				for _, f := range ec2f.lastDescribeIn.Filters {
+					if deref(f.Name) == expectedFilterName {
+						clusterFilterFound = true
+						break
+					}
+				}
+				if !clusterFilterFound {
+					t.Errorf("expected DescribeInstances filter %q not found in %v", expectedFilterName, ec2f.lastDescribeIn.Filters)
+				}
+				// Also assert the nodepool tag-key filter is always present.
+				nodepoolFilterFound := false
+				for _, f := range ec2f.lastDescribeIn.Filters {
+					if deref(f.Name) == "tag-key" && len(f.Values) == 1 && f.Values[0] == "karpenter.sh/nodepool" {
+						nodepoolFilterFound = true
+						break
+					}
+				}
+				if !nodepoolFilterFound {
+					t.Errorf("expected DescribeInstances tag-key=karpenter.sh/nodepool filter not found in %v", ec2f.lastDescribeIn.Filters)
+				}
+			}
+		})
+	}
+}
+
+// TestResourceHealthHonorsWindow asserts P3: a non-zero TimeWindow scopes the ASG
+// scaling-activity lookback — activities that ended before w.Start are filtered out,
+// while a zero window keeps today's behaviour (all activities shown).
+func TestResourceHealthHonorsWindow(t *testing.T) {
+	now := time.Now()
+	recent := now.Add(-10 * time.Minute)
+	stale := now.Add(-6 * time.Hour)
+	acts := []asgtypes.Activity{
+		{StatusCode: asgtypes.ScalingActivityStatusCodeSuccessful, Description: ptr("recent-scale-up"), StatusMessage: ptr("ok"), EndTime: &recent},
+		{StatusCode: asgtypes.ScalingActivityStatusCodeFailed, Description: ptr("stale-scale-up"), StatusMessage: ptr("old"), EndTime: &stale},
+	}
+	newClient := func() *Client {
+		return &Client{
+			eks:         &fakeEKS{listPages: []*eks.ListNodegroupsOutput{ngPage("")}},
+			asg:         &fakeASG{pages: []*autoscaling.DescribeAutoScalingGroupsOutput{asgPage("", "demo-asg-a")}, activities: acts},
+			clusterName: "demo",
+			maxEvents:   25,
+		}
+	}
+
+	t.Run("windowed -> stale activity filtered out", func(t *testing.T) {
+		w := providers.TimeWindow{Start: now.Add(-60 * time.Minute), End: now}
+		lines, err := newClient().ResourceHealth(context.Background(), providers.Selector{}, w)
+		if err != nil {
+			t.Fatalf("ResourceHealth: %v", err)
+		}
+		if !linesContain(lines, "recent-scale-up") {
+			t.Fatalf("in-window activity must be shown, got %v", lines)
+		}
+		if linesContain(lines, "stale-scale-up") {
+			t.Fatalf("stale (pre-window) activity must be filtered, got %v", lines)
+		}
+	})
+
+	t.Run("zero window -> all activities shown (backward compatible)", func(t *testing.T) {
+		lines, err := newClient().ResourceHealth(context.Background(), providers.Selector{}, providers.TimeWindow{})
+		if err != nil {
+			t.Fatalf("ResourceHealth: %v", err)
+		}
+		if !linesContain(lines, "recent-scale-up") || !linesContain(lines, "stale-scale-up") {
+			t.Fatalf("zero window must show all activities, got %v", lines)
+		}
+	})
+
+	t.Run("windowed with all stale -> no-activity note", func(t *testing.T) {
+		w := providers.TimeWindow{Start: now.Add(-30 * time.Minute), End: now}
+		onlyStale := &fakeASG{pages: []*autoscaling.DescribeAutoScalingGroupsOutput{asgPage("", "demo-asg-a")}, activities: []asgtypes.Activity{acts[1]}}
+		c := &Client{eks: &fakeEKS{listPages: []*eks.ListNodegroupsOutput{ngPage("")}}, asg: onlyStale, clusterName: "demo", maxEvents: 25}
+		lines, err := c.ResourceHealth(context.Background(), providers.Selector{}, w)
+		if err != nil {
+			t.Fatalf("ResourceHealth: %v", err)
+		}
+		if !linesContain(lines, "no scaling activity in the last") {
+			t.Fatalf("want a no-activity-in-window note, got %v", lines)
+		}
+	})
 }

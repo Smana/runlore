@@ -107,6 +107,56 @@ func Summarize(reqs []investigate.Request) string {
 	return fmt.Sprintf("%d correlated alerts: %s", len(reqs), strings.Join(parts, ", "))
 }
 
+// maxConstituents bounds the distinct constituent list surfaced in the seed so a
+// pathological storm (hundreds of distinct workloads under one key) can't blow up
+// the prompt. Beyond the cap the excess is dropped — the summary count still
+// reflects the true batch size, so nothing about the storm's magnitude is hidden.
+const maxConstituents = 20
+
+// Constituents returns the DISTINCT constituent identities of a coalesced batch
+// OTHER than the representative's (batch[0]) own, for surfacing in the seed as the
+// storm's blast radius. Each entry prefers the workload ref ("ns/name" or "ns"),
+// falling back to the alert title when the alert carries no workload. Order is
+// stable (first-seen) and the list is capped at maxConstituents. Returns nil for a
+// singleton batch (nothing beyond the representative to surface).
+func Constituents(batch []investigate.Request) []string {
+	if len(batch) < 2 {
+		return nil
+	}
+	seen := map[string]struct{}{}
+	if rep := constituentID(batch[0]); rep != "" {
+		seen[rep] = struct{}{} // never echo the representative back to itself
+	}
+	out := make([]string, 0, len(batch)-1)
+	for _, r := range batch[1:] {
+		id := constituentID(r)
+		if id == "" {
+			continue
+		}
+		if _, dup := seen[id]; dup {
+			continue
+		}
+		seen[id] = struct{}{}
+		out = append(out, id)
+		if len(out) >= maxConstituents {
+			break
+		}
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
+// constituentID renders one incident's identity for the constituent list: its
+// workload ref when it names a workload, else its alert title.
+func constituentID(r investigate.Request) string {
+	if ref := r.Workload.Ref(); ref != "" {
+		return ref
+	}
+	return r.Title
+}
+
 // Add ingests one incident: critical → flush now; within cooldown → suppress;
 // else buffer (flushing when MaxBatch is reached).
 func (c *Coalescer) Add(r investigate.Request) {

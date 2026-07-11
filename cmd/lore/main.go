@@ -24,6 +24,7 @@ const usage = `lore — the RunLore SRE agent
 
 Usage:
   lore investigate --alert <name> [--namespace <ns>] [--message <text>]   investigate on-demand, print findings
+  lore demo investigate [--scenario <name>]           watch a full investigation against fake providers (no cluster; needs a model API key)
   lore serve [--config <path>] [--addr <addr>]        run the in-cluster agent (react to incidents)
   lore catalog sync [--config <path>]                 clone/pull + index the knowledge catalog
   lore kb search <query> [--config <path>] [--dir <catalog>] [-k 10] [--json] [--ledger <jsonl>]   search the knowledge base
@@ -60,6 +61,11 @@ func main() {
 	case "investigate":
 		if err := app.RunInvestigate(os.Args[2:]); err != nil {
 			fmt.Fprintln(os.Stderr, "investigate:", err)
+			os.Exit(1)
+		}
+	case "demo":
+		if err := app.RunDemo(os.Args[2:]); err != nil {
+			fmt.Fprintln(os.Stderr, "demo:", err)
 			os.Exit(1)
 		}
 	case "catalog":

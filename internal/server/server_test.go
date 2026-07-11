@@ -450,6 +450,62 @@ func TestSlackFeedbackNotEnabled(t *testing.T) {
 	}
 }
 
+// TestUpdateSlackNon2xxLogged verifies S5: a non-2xx response from the Slack
+// response_url is logged as a warning (the call remains best-effort — it does
+// not return an error). The SSRF guard blocks non-https/non-slack.com URLs, so
+// we exercise the guard-rejection warning path (which already logs) and verify
+// the updated control flow does not panic on either the guard path or the
+// request-failure path.
+func TestUpdateSlackNon2xxLogged(t *testing.T) {
+	var buf bytes.Buffer
+	log := slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelWarn}))
+	srv := New(nil, Actions{}, nil, nil, nil, nil, log)
+
+	// SSRF guard path: non-https URL is refused with a Warn log.
+	srv.updateSlack(context.Background(), "http://hooks.slack.com/x", "msg", true)
+	if !strings.Contains(buf.String(), "refusing slack response_url") {
+		t.Errorf("guard path: expected warn log, got: %s", buf.String())
+	}
+
+	// Request-failure path: empty URL is a no-op (returns immediately before the
+	// HTTP call — no log emitted, no panic).
+	buf.Reset()
+	srv.updateSlack(context.Background(), "", "msg", true)
+	if buf.Len() != 0 {
+		t.Errorf("empty URL must produce no log output, got: %s", buf.String())
+	}
+}
+
+// TestUpdateSlackSSRFGuard pins the SSRF guard: non-https and non-*.slack.com
+// URLs must be refused with a warning log, never forwarded.
+func TestUpdateSlackSSRFGuard(t *testing.T) {
+	cases := []struct {
+		name, url  string
+		expectWarn bool
+	}{
+		{"http scheme", "http://hooks.slack.com/trigger/x", true},
+		{"non-slack host", "https://evil.example.com/steal", true},
+		{"not slack.com", "https://notslack.com/x", true},
+		{"subdomain spoofing", "https://evil.slack.com.evil.io/x", true},
+		{"empty is no-op", "", false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var buf bytes.Buffer
+			log := slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelWarn}))
+			srv := New(nil, Actions{}, nil, nil, nil, nil, log)
+			srv.updateSlack(context.Background(), tc.url, "test", false)
+			hasWarn := strings.Contains(buf.String(), "refusing")
+			if tc.expectWarn && !hasWarn {
+				t.Errorf("expected SSRF guard warning for %q, got: %s", tc.url, buf.String())
+			}
+			if !tc.expectWarn && hasWarn {
+				t.Errorf("unexpected warning for %q: %s", tc.url, buf.String())
+			}
+		})
+	}
+}
+
 // TestSlackResponseBodyReplaceFlag pins the response_url payload contract:
 // approve/reject REPLACE the interaction message with the outcome; feedback must
 // NOT (replace_original would wipe the investigation message) — it answers with

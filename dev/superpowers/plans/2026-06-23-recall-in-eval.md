@@ -8,7 +8,7 @@
 
 **Tech Stack:** Go 1.26, stdlib `testing` (no testify). Reuses the eval package's fake conventions; adds a tiny `catalog.ScoredSearcher` fake + a verify-only model fake.
 
-**Spec:** `docs/superpowers/specs/2026-06-23-recall-in-eval-design.md`
+**Spec:** `dev/superpowers/specs/2026-06-23-recall-in-eval-design.md`
 
 **Branch:** `feat/recall-in-eval` (already checked out, off the #5-merged `main`; the spec is already committed there).
 

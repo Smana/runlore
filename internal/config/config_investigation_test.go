@@ -352,3 +352,51 @@ func TestValidatePricingNonNegative(t *testing.T) {
 		t.Fatalf("valid pricing rejected: %v", err)
 	}
 }
+
+// TestApplyDefaultsResourceCaps locks in the safe-by-default resource caps
+// (C3/B3-budget): a zero-value config must get the bounded Helm-chart defaults
+// (32768 bytes / 100000 tokens) so that `lore serve --config` and `lore
+// investigate` are never silently unbounded.
+func TestApplyDefaultsResourceCaps(t *testing.T) {
+	// Unset (zero) → bounded defaults are applied (match the Helm chart values.yaml).
+	var c Config
+	applyDefaults(&c)
+	if c.Investigation.MaxToolOutputBytes != 32768 {
+		t.Fatalf("default MaxToolOutputBytes: got %d, want 32768", c.Investigation.MaxToolOutputBytes)
+	}
+	if c.Investigation.MaxTokensPerInvestigation != 100000 {
+		t.Fatalf("default MaxTokensPerInvestigation: got %d, want 100000", c.Investigation.MaxTokensPerInvestigation)
+	}
+}
+
+// TestApplyDefaultsResourceCapsUnlimited confirms that -1 (the user-visible
+// opt-out) maps to 0 (the consumer's unlimited sentinel used by truncateOutput,
+// overBudget, and compactionTarget) so internal/investigate never has to know
+// about -1.
+func TestApplyDefaultsResourceCapsUnlimited(t *testing.T) {
+	var c Config
+	c.Investigation.MaxToolOutputBytes = -1
+	c.Investigation.MaxTokensPerInvestigation = -1
+	applyDefaults(&c)
+	if c.Investigation.MaxToolOutputBytes != 0 {
+		t.Fatalf("-1 MaxToolOutputBytes must map to 0 (unlimited sentinel), got %d", c.Investigation.MaxToolOutputBytes)
+	}
+	if c.Investigation.MaxTokensPerInvestigation != 0 {
+		t.Fatalf("-1 MaxTokensPerInvestigation must map to 0 (unlimited sentinel), got %d", c.Investigation.MaxTokensPerInvestigation)
+	}
+}
+
+// TestApplyDefaultsResourceCapsExplicit asserts that an explicitly-set positive
+// value is preserved and not clobbered by the defaulting logic.
+func TestApplyDefaultsResourceCapsExplicit(t *testing.T) {
+	var c Config
+	c.Investigation.MaxToolOutputBytes = 16384
+	c.Investigation.MaxTokensPerInvestigation = 50000
+	applyDefaults(&c)
+	if c.Investigation.MaxToolOutputBytes != 16384 {
+		t.Fatalf("explicit MaxToolOutputBytes overwritten: got %d, want 16384", c.Investigation.MaxToolOutputBytes)
+	}
+	if c.Investigation.MaxTokensPerInvestigation != 50000 {
+		t.Fatalf("explicit MaxTokensPerInvestigation overwritten: got %d, want 50000", c.Investigation.MaxTokensPerInvestigation)
+	}
+}

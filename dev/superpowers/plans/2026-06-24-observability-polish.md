@@ -1,6 +1,6 @@
 # Observability Polish (R20) — Implementation Plan
 
-Spec: `docs/superpowers/specs/2026-06-24-observability-polish-design.md`
+Spec: `dev/superpowers/specs/2026-06-24-observability-polish-design.md`
 
 Two independent, incrementally-committed changes. Validate after each.
 

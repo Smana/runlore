@@ -15,7 +15,7 @@
 - Security-only change: zero behaviour change for correctly-configured deployments (https endpoints, keyless in-cluster endpoints, same-host redirects).
 - Tests must be network-free: stub DNS via the existing `lookupIP` package var (httpx); use pure classification in config.
 - Hostname comparison and host classification are **hostname-only** (port ignored) and case-insensitive.
-- Spec: `docs/superpowers/specs/2026-06-30-model-apikey-egress-hardening-design.md`.
+- Spec: `dev/superpowers/specs/2026-06-30-model-apikey-egress-hardening-design.md`.
 
 ---
 

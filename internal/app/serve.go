@@ -201,6 +201,9 @@ func RunServe(version string, args []string) error {
 			rep := batch[0]
 			if len(batch) > 1 {
 				rep.Message = coalesce.Summarize(batch)
+				// Preserve the OTHER alerts' distinct workloads so the seed surfaces the
+				// storm's full blast radius; batch[0].Message/Workload alone drops them.
+				rep.CoalescedWorkloads = coalesce.Constituents(batch)
 			}
 			// Record every constituent fingerprint so each alert's resolve webhook
 			// matches an open (a single incident stays one fingerprint).

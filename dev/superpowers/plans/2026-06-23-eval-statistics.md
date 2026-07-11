@@ -8,7 +8,7 @@
 
 **Tech Stack:** Go 1.26, stdlib `testing` (no testify). `aggregate` is unit-testable directly on a `LiveResult` with synthetic `Runs`.
 
-**Spec:** `docs/superpowers/specs/2026-06-23-eval-statistics-design.md`
+**Spec:** `dev/superpowers/specs/2026-06-23-eval-statistics-design.md`
 
 **Branch:** `feat/eval-statistics` (already checked out; the spec is already committed there).
 

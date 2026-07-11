@@ -43,6 +43,26 @@ func TestPodStatusTool(t *testing.T) {
 	}
 }
 
+// B8 (CORE-707): pod_status output must carry podIP/nodeName so the model can bridge
+// a network_drops IP back to a pod. Absent IPs (unscheduled pod) add no noise.
+func TestPodStatusToolShowsIPs(t *testing.T) {
+	tool := PodStatusTool{Kube: fakeKube{pods: []providers.PodStatus{
+		{Name: "web-0", Phase: "Running", Ready: "1/1", PodIP: "10.42.3.7", NodeName: "ip-10-0-1-23", HostIP: "10.0.1.23"},
+		{Name: "pending-0", Phase: "Pending", Ready: "0/1"},
+	}}}
+	out, err := tool.Call(context.Background(), `{"namespace":"apps"}`)
+	if err != nil {
+		t.Fatalf("Call: %v", err)
+	}
+	if !strings.Contains(out, "ip=10.42.3.7") || !strings.Contains(out, "node=ip-10-0-1-23") || !strings.Contains(out, "hostIP=10.0.1.23") {
+		t.Fatalf("pod_status must surface podIP/node/hostIP for a scheduled pod, got:\n%s", out)
+	}
+	// A pod without an IP (unscheduled) must not render an empty ip=/node=.
+	if strings.Contains(out, "ip= ") || strings.Contains(out, "node= ") {
+		t.Fatalf("absent IPs must add no noise, got:\n%s", out)
+	}
+}
+
 // selectorKube returns matched pods only for a specific selector, and allPods for
 // the empty (whole-namespace) selector — modelling a workload whose real labels
 // don't match a guessed `app=<name>` selector.
@@ -110,6 +130,76 @@ func TestKubeEventsTool(t *testing.T) {
 	// change/deploy time ("first BackOff at 14:03").
 	if !strings.Contains(out, "2026-07-01T14:03:05Z") {
 		t.Fatalf("kube_events must surface the event's last-seen time, got:\n%s", out)
+	}
+}
+
+// K1 (v0.9): pod_status must render a time anchor — the restart count and the pod's
+// age — compactly (e.g. "restarts=7 age=15m"). A pod with no restarts and no
+// known age adds no noise.
+func TestPodStatusToolShowsRestartsAndAge(t *testing.T) {
+	tool := PodStatusTool{Kube: fakeKube{pods: []providers.PodStatus{
+		{Name: "mem-hog", Phase: "Running", Ready: "0/1", Restarts: 7,
+			CreatedAt: time.Now().Add(-15 * time.Minute)},
+		{Name: "fresh", Phase: "Running", Ready: "1/1"},
+	}}}
+	out, err := tool.Call(context.Background(), `{"namespace":"apps"}`)
+	if err != nil {
+		t.Fatalf("Call: %v", err)
+	}
+	if !strings.Contains(out, "restarts=7") {
+		t.Fatalf("pod_status must surface the restart count, got:\n%s", out)
+	}
+	if !strings.Contains(out, "age=") {
+		t.Fatalf("pod_status must surface the pod age as a time anchor, got:\n%s", out)
+	}
+	// A pod with zero restarts and no age must not render restarts=0 noise.
+	lines := strings.Split(out, "\n")
+	for _, l := range lines {
+		if strings.HasPrefix(l, "fresh ") && strings.Contains(l, "restarts=") {
+			t.Fatalf("a pod with no restarts must not render restarts=, got line:\n%s", l)
+		}
+	}
+}
+
+// windowKube implements the EventWindower extension so we can assert the tool
+// threads since_minutes through to it.
+type windowKube struct {
+	fakeKube
+	gotSince int
+}
+
+func (f *windowKube) EventsSince(_ context.Context, _, _ string, _ bool, sinceMinutes int) ([]providers.KubeEvent, error) {
+	f.gotSince = sinceMinutes
+	return f.events, nil
+}
+
+// K2 (v0.9): kube_events exposes a since_minutes time window and threads it to a
+// windowing reader when one is available.
+func TestKubeEventsToolPassesSinceMinutes(t *testing.T) {
+	wk := &windowKube{fakeKube: fakeKube{events: []providers.KubeEvent{
+		{Type: "Warning", Reason: "BackOff", Object: "Pod/x", Message: "restarting"},
+	}}}
+	tool := KubeEventsTool{Kube: wk}
+	if _, err := tool.Call(context.Background(), `{"namespace":"apps","since_minutes":45}`); err != nil {
+		t.Fatalf("Call: %v", err)
+	}
+	if wk.gotSince != 45 {
+		t.Fatalf("since_minutes not threaded to the windowing reader: got %d, want 45", wk.gotSince)
+	}
+}
+
+// A reader that is NOT a windower (the plain fakeKube) must still work — the tool
+// falls back to the un-windowed Events call. Guards the safe default.
+func TestKubeEventsToolNonWindowerFallback(t *testing.T) {
+	tool := KubeEventsTool{Kube: fakeKube{events: []providers.KubeEvent{
+		{Type: "Warning", Reason: "BackOff", Object: "Pod/x", Message: "restarting"},
+	}}}
+	out, err := tool.Call(context.Background(), `{"namespace":"apps","since_minutes":45}`)
+	if err != nil {
+		t.Fatalf("Call: %v", err)
+	}
+	if !strings.Contains(out, "BackOff") {
+		t.Fatalf("non-windower reader must still return events, got:\n%s", out)
 	}
 }
 

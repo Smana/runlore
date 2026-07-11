@@ -49,7 +49,7 @@ func (m *twoStepModel) Complete(_ context.Context, req providers.CompletionReque
 // fixedJudge returns the same verdict every time.
 type fixedJudge struct{ v Verdict }
 
-func (j fixedJudge) Grade(context.Context, Scenario, providers.Investigation) (Verdict, error) {
+func (j fixedJudge) Grade(context.Context, Scenario, providers.Investigation, ...string) (Verdict, error) {
 	return j.v, nil
 }
 

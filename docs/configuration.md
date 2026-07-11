@@ -182,9 +182,11 @@ Also records the human 👍/👎 ratings when `notify.slack.feedback_buttons` is
   `kinds`.
 - `require_approval` + `approval_token_env`, `audit_log_path`, and `auto.*` (`dry_run`,
   `min_confidence`, `max_per_window`, `window`).
-- **Fail-closed validation:** `approve`/`auto` require `approval_token_env`; `auto` *additionally*
-  requires `audit_log_path`, `server.webhook_token_env`, `auto.min_confidence > 0`,
-  `auto.max_per_window > 0`, and a non-empty `allow.namespaces`. See [Security model](security-model.md).
+- **Fail-closed validation:** `approve`/`auto` both require `approval_token_env` **and**
+  `audit_log_path` (both executing rungs mutate the cluster, so both must be audited — the hash chain
+  is verified fail-closed on open); `auto` *additionally* requires `server.webhook_token_env`,
+  `auto.min_confidence > 0`, `auto.max_per_window > 0`, and a non-empty `allow.namespaces`. See
+  [Security model](security-model.md).
 
 ### `model` — the LLM provider
 `provider` — `openai` (default; any OpenAI-compatible endpoint incl. vLLM/Ollama/OpenRouter) ·
@@ -292,11 +294,18 @@ attributes nothing). Startup fails loud unless `homeserver`/`room_id`/`access_to
 [security-model.md](security-model.md#the-feedback-channels--exposure--trust-model)).
 
 ### `server` — the HTTP listener
-Only `webhook_token_env` (the bearer token for the incident webhook; **required under
-`actions.mode=auto`**). The listen address is the `--addr` CLI flag (`:8080` in the chart), **not** a
-config key. TLS is terminated externally (ClusterIP + NetworkPolicy). If `sources.alertmanager` is
-enabled and this is left unset, startup logs a warning (louder under `actions.mode=approve`) — the
-webhook stays open on purpose for cluster-internal traffic, but the risk should never be silent.
+Only `webhook_token_env` (the bearer token for the incident webhook). The listen address is the
+`--addr` CLI flag (`:8080` in the chart), **not** a config key. TLS is terminated externally
+(ClusterIP + NetworkPolicy).
+
+**`webhook_token_env` is mandatory once any model is configured** — the `serve` path fails closed:
+it refuses to start with an anonymous alert webhook when an LLM is wired (the webhook's
+labels/annotations flow verbatim into the LLM prompt and bill the model), regardless of
+`actions.mode`. It is also mandatory under `actions.mode=auto` (enforced by `config.Validate`). It
+is warning-only *only* for the model-less log-only investigator (no model configured). If
+`sources.alertmanager` is enabled and this is left unset with a model configured, startup fails; if
+left unset without a model, startup logs a warning — the webhook stays open on purpose for
+cluster-internal traffic, but the risk should never be silent.
 
 ### `rbac` — chart-only (not in the agent config)
 Set under `values.rbac.*`, not `values.config`: `controllerLogNamespaces` (default `[flux-system]` —
@@ -336,8 +345,24 @@ mcp:
   is plain `http://` to a public host — use `headers` for non-secret metadata only (e.g. `X-Tenant`).
   Use `https://` whenever the server is on a public network.
 
+### `curate` — Phase-2 backlog groomer
+- `stale_after` — close unprotected KB PRs idle longer than this; **default `720h`** (30 days);
+  `0` disables stale-close.
+- `recurrence_threshold` — open a knowledge-gap issue after this many unresolved occurrences of a
+  pattern; **default `3`**. A knowledge-gap issue flags patterns RunLore keeps encountering without
+  resolving — a signal to write a runbook.
+
 ### Other top-level keys
 `gitops.engine` (`flux` default · `argocd`), `cloud` (`provider: aws`, `region`, `cluster_name`),
-`network` (pluggable: `hubble` · `aws-vpc-flow-logs` · `gcp-firewall-logs`), `metrics`/`logs`
-(`Endpoint{url}` for the PromQL/logs query tools), `telemetry` (`metrics_enabled`, `otlp_endpoint`),
+`network` (pluggable: `hubble` · `aws-vpc-flow-logs` · `gcp-firewall-logs`),
+`metrics`/`logs` — `Endpoint` for the PromQL/logs query tools: `url` (base URL), optional
+`token_env` (env var name for a bearer token — `Authorization: Bearer <token>` on every request),
+optional `headers` (static request headers, e.g. `X-Scope-OrgID: <tenant>` for multi-tenant
+backends; **not secret-safe over plain HTTP** — use `https` for public hosts),
+`telemetry` (`metrics_enabled`, `otlp_endpoint`),
 `logging` (`format: text|json`, `level`), `leader_election` (`enabled`, `name`).
+
+`model.max_tokens` — caps the model's output (generated) tokens per request; **`0` = use the 8192
+default**. Streaming providers send it (`Anthropic max_tokens`, `OpenAI max_tokens`, Gemini
+`generationConfig.maxOutputTokens`); a too-low value truncates. Give extra headroom when using
+`thinking: adaptive` — thinking blocks consume output tokens.

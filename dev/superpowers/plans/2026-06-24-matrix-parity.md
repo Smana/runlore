@@ -1,6 +1,6 @@
 # Plan — Matrix parity (HTML + txn durability), R16
 
-Spec: `docs/superpowers/specs/2026-06-24-matrix-parity-design.md`
+Spec: `dev/superpowers/specs/2026-06-24-matrix-parity-design.md`
 Branch: this worktree only (never `main`).
 
 ## Steps (test-first, commit incrementally)

@@ -8,7 +8,7 @@
 
 **Tech Stack:** Go 1.26, stdlib `testing` (no testify). Case-insensitive substring matching, same style as the existing `MustContain` scoring.
 
-**Spec:** `docs/superpowers/specs/2026-06-23-entity-precision-trackA-design.md`
+**Spec:** `dev/superpowers/specs/2026-06-23-entity-precision-trackA-design.md`
 
 **Branch:** `feat/entity-precision-trackA` (already checked out; the spec is already committed there).
 

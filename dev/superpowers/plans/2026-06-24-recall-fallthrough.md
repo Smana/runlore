@@ -10,7 +10,7 @@
 
 **Tech Stack:** Go 1.26, stdlib `testing`. Tests follow the scripted-`ModelProvider` pattern in `internal/investigate/loop_test.go` + the verify/verdict fakes in the verify tests.
 
-**Spec:** `docs/superpowers/specs/2026-06-24-recall-fallthrough-design.md`
+**Spec:** `dev/superpowers/specs/2026-06-24-recall-fallthrough-design.md`
 
 **Branch:** `fix/recall-fallthrough-on-empty`
 

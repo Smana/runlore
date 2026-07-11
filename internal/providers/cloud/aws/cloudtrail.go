@@ -4,6 +4,7 @@ package aws
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"sort"
 
@@ -21,23 +22,35 @@ import (
 // Note: CloudTrail is eventually consistent (~15 min), so a too-narrow window can
 // miss a just-made change — callers should use a generous lookback.
 func (c *Client) CloudChanges(ctx context.Context, sel providers.Selector, w providers.TimeWindow) ([]providers.Change, error) {
-	in := &cloudtrail.LookupEventsInput{
-		LookupAttributes: []cttypes.LookupAttribute{{
+	// CloudTrail LookupEvents accepts exactly ONE LookupAttribute per request.
+	// When a resource name is given, scope by ResourceName and filter read-only
+	// events client-side (the Event carries a ReadOnly field). When no resource
+	// is given, filter to mutating events server-side with a single ReadOnly=false
+	// attribute — the cheaper and more common path.
+	var resourceScoped bool
+	if sel.Name != "" {
+		resourceScoped = true
+	}
+
+	var attrs []cttypes.LookupAttribute
+	if resourceScoped {
+		attrs = []cttypes.LookupAttribute{{
+			AttributeKey:   cttypes.LookupAttributeKeyResourceName,
+			AttributeValue: ptr(sel.Name),
+		}}
+	} else {
+		attrs = []cttypes.LookupAttribute{{
 			AttributeKey:   cttypes.LookupAttributeKeyReadOnly,
 			AttributeValue: ptr("false"), // mutating events only
-		}},
+		}}
 	}
+
+	in := &cloudtrail.LookupEventsInput{LookupAttributes: attrs}
 	if !w.Start.IsZero() {
 		in.StartTime = ptr(w.Start)
 	}
 	if !w.End.IsZero() {
 		in.EndTime = ptr(w.End)
-	}
-	if sel.Name != "" {
-		in.LookupAttributes = append(in.LookupAttributes, cttypes.LookupAttribute{
-			AttributeKey:   cttypes.LookupAttributeKeyResourceName,
-			AttributeValue: ptr(sel.Name),
-		})
 	}
 
 	// Paginate via the SDK paginator (a CloudTrail page is ≤50 events); a single
@@ -53,6 +66,11 @@ func (c *Client) CloudChanges(ctx context.Context, sel providers.Selector, w pro
 			return nil, fmt.Errorf("cloudtrail lookup: %w", err)
 		}
 		for i := range out.Events {
+			// When resource-scoped the server cannot also filter by ReadOnly, so
+			// drop read-only events here. e.ReadOnly is "true"/"false" (string).
+			if resourceScoped && deref(out.Events[i].ReadOnly) == "true" {
+				continue
+			}
 			changes = append(changes, eventToChange(out.Events[i]))
 		}
 		if len(changes) > c.maxEvents {
@@ -90,6 +108,15 @@ func truncatedChange(limit int) providers.Change {
 	}
 }
 
+// ctEventJSON is the minimal shape of the raw CloudTrail JSON payload we need
+// to surface failed-call context. errorCode and errorMessage are omitted on
+// successful calls; their presence signals a failed API call (e.g.
+// InsufficientInstanceCapacity, UnauthorizedOperation).
+type ctEventJSON struct {
+	ErrorCode    string `json:"errorCode"`
+	ErrorMessage string `json:"errorMessage"`
+}
+
 // eventToChange maps a CloudTrail event to an engine-agnostic Change.
 func eventToChange(e cttypes.Event) providers.Change {
 	ch := providers.Change{
@@ -110,7 +137,19 @@ func eventToChange(e cttypes.Event) providers.Change {
 	} else {
 		ch.Workload = providers.Workload{Kind: deref(e.EventSource), Name: deref(e.EventName)}
 	}
-	// Source.Path repurposed to carry "eventName by username" — rendered by the tool.
-	ch.Source = providers.SourceRef{Path: deref(e.EventName) + " by " + deref(e.Username)}
+	// Source.Path carries "eventName by username", plus a FAILED suffix when the
+	// raw CloudTrail JSON carries an errorCode — so the model sees failed calls
+	// (InsufficientInstanceCapacity, UnauthorizedOperation, etc.) not as successes.
+	path := deref(e.EventName) + " by " + deref(e.Username)
+	if raw := deref(e.CloudTrailEvent); raw != "" {
+		var payload ctEventJSON
+		if err := json.Unmarshal([]byte(raw), &payload); err == nil && payload.ErrorCode != "" {
+			path += " — FAILED: " + payload.ErrorCode
+			if payload.ErrorMessage != "" {
+				path += " (" + payload.ErrorMessage + ")"
+			}
+		}
+	}
+	ch.Source = providers.SourceRef{Path: path}
 	return ch
 }

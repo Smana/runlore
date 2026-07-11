@@ -8,7 +8,7 @@
 
 **Tech Stack:** Go 1.26, `github.com/blevesearch/bleve/v2` (v2.6.0), OpenTelemetry metrics (`go.opentelemetry.io/otel/metric`), stdlib `testing` (no testify).
 
-**Spec:** `docs/superpowers/specs/2026-06-23-bm25-scorer-fix-design.md`
+**Spec:** `dev/superpowers/specs/2026-06-23-bm25-scorer-fix-design.md`
 
 **Branch:** `feat/bm25-scorer-fix` (already checked out; the spec is already committed there).
 

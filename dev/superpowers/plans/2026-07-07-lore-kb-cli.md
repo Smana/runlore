@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** A human search surface over the existing BM25 knowledge index: `lore kb search "<query>"` prints a readable hits table (optional resolve-rate from a ledger file, optional JSON), `lore kb show <entry>` prints one full entry. Spec: `docs/superpowers/specs/2026-07-07-kb-human-surfaces-design.md`, Feature 2.
+**Goal:** A human search surface over the existing BM25 knowledge index: `lore kb search "<query>"` prints a readable hits table (optional resolve-rate from a ledger file, optional JSON), `lore kb show <entry>` prints one full entry. Spec: `dev/superpowers/specs/2026-07-07-kb-human-surfaces-design.md`, Feature 2.
 
 **Architecture:** A new `internal/app/kb_cmd.go` hosts `RunKB` (dispatch) + `runKBSearch`/`runKBShow`, writing to an injected `io.Writer` for testability. The catalog loads like `lore mcp` does: explicit `--dir` wins, else config `catalog.dir` (the CLI never clones — it points at `lore catalog sync`). Resolve-rate is opt-in via `--ledger <jsonl>` (the ledger lives in-cluster, not on workstations) using `outcome.OpenCounts()` keyed by entry path. Output is a stdlib `text/tabwriter` table — no ANSI, no new dependencies.
 

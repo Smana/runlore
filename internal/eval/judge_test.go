@@ -88,3 +88,39 @@ func TestModelJudgeParsesVerdict(t *testing.T) {
 		t.Fatalf("prompt missing ground truth/investigation: %q", m.gotUser)
 	}
 }
+
+// TestJudgeReceivesTranscript pins C2 (eval side): a supplied tool-transcript
+// excerpt is threaded into the judge prompt (so groundedness can be graded), the
+// system prompt carries the groundedness instruction, and a secret-shaped value in
+// the transcript is redacted before it reaches the judge.
+func TestJudgeReceivesTranscript(t *testing.T) {
+	m := &jsonModel{toolArgs: `{"scores":{"root_cause":3,"evidence":3,"solution":2,"description":3,"calibration":2},"confident_wrong":false,"rationale":"grounded"}`}
+	j := ModelJudge{Model: m}
+	scn := Scenario{ID: "x", GroundTruth: GroundTruth{RootCause: "valkey down", ExpectedAction: "restart valkey"}}
+	inv := providers.Investigation{Title: "Harbor down", Confidence: 0.9,
+		RootCauses: []providers.Hypothesis{{Summary: "valkey refused", SuggestedAction: "restart valkey"}}}
+	transcript := "[pod_logs] connection refused to valkey:6379\nAWS_SECRET_ACCESS_KEY=AKIAIOSFODNN7EXAMPLEabcdef1234567890ABCD"
+	if _, err := j.Grade(context.Background(), scn, inv, transcript); err != nil {
+		t.Fatalf("Grade: %v", err)
+	}
+	if !strings.Contains(m.gotUser, "connection refused to valkey") {
+		t.Fatalf("judge prompt missing transcript excerpt, got %q", m.gotUser)
+	}
+	if strings.Contains(m.gotUser, "AKIAIOSFODNN7EXAMPLEabcdef1234567890ABCD") {
+		t.Fatalf("transcript leaked a secret into the judge prompt")
+	}
+	if !strings.Contains(strings.ToLower(m.gotSystem), "groundedness") {
+		t.Fatalf("judge system prompt missing groundedness instruction, got %q", m.gotSystem)
+	}
+}
+
+// TestJudgeBoundedTranscriptCap asserts the excerpt is hard-capped so grounding
+// context can't dominate the grading prompt or its cost.
+func TestJudgeBoundedTranscriptCap(t *testing.T) {
+	if got := len(boundedTranscript([]string{strings.Repeat("A", maxJudgeTranscriptBytes*3)})); got > maxJudgeTranscriptBytes {
+		t.Fatalf("transcript not capped: %d > budget %d", got, maxJudgeTranscriptBytes)
+	}
+	if got := boundedTranscript(nil); got != "" {
+		t.Fatalf("no transcript should yield empty, got %q", got)
+	}
+}

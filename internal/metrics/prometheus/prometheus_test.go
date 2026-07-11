@@ -6,6 +6,7 @@ import (
 	"context"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"testing"
 	"time"
 
@@ -122,6 +123,128 @@ func TestQueryTokenEnvUnset(t *testing.T) {
 	}
 }
 
+func TestLabelValues(t *testing.T) {
+	var gotPath string
+	var gotMatch []string
+	var gotStart, gotEnd string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.Path
+		gotMatch = r.URL.Query()["match[]"]
+		gotStart = r.URL.Query().Get("start")
+		gotEnd = r.URL.Query().Get("end")
+		_, _ = w.Write([]byte(`{"status":"success","data":["http_requests_total","up","process_cpu_seconds_total"]}`))
+	}))
+	defer srv.Close()
+
+	vals, err := New(srv.URL).LabelValues(context.Background(), "__name__",
+		[]string{`{namespace="apps"}`},
+		providers.TimeWindow{Start: time.Unix(1700000000, 0), End: time.Unix(1700000300, 0)})
+	if err != nil {
+		t.Fatalf("LabelValues: %v", err)
+	}
+	if gotPath != "/api/v1/label/__name__/values" {
+		t.Fatalf("path=%q", gotPath)
+	}
+	if len(gotMatch) != 1 || gotMatch[0] != `{namespace="apps"}` {
+		t.Fatalf("match[]=%v", gotMatch)
+	}
+	if gotStart != "1700000000" || gotEnd != "1700000300" {
+		t.Fatalf("start=%q end=%q", gotStart, gotEnd)
+	}
+	if len(vals) != 3 || vals[0] != "http_requests_total" || vals[2] != "process_cpu_seconds_total" {
+		t.Fatalf("unexpected values: %v", vals)
+	}
+}
+
+func TestLabelValuesEmptyMatchers(t *testing.T) {
+	// Empty/blank matchers must not emit a match[] param (whole-TSDB enumeration).
+	var gotMatch []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotMatch = r.URL.Query()["match[]"]
+		_, _ = w.Write([]byte(`{"status":"success","data":[]}`))
+	}))
+	defer srv.Close()
+
+	if _, err := New(srv.URL).LabelValues(context.Background(), "job", []string{"", ""}, providers.TimeWindow{}); err != nil {
+		t.Fatalf("LabelValues: %v", err)
+	}
+	if len(gotMatch) != 0 {
+		t.Fatalf("want no match[] params, got %v", gotMatch)
+	}
+}
+
+func TestLabelValuesError(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`{"status":"error","error":"bad matcher"}`))
+	}))
+	defer srv.Close()
+	if _, err := New(srv.URL).LabelValues(context.Background(), "__name__", nil, providers.TimeWindow{}); err == nil {
+		t.Fatal("expected error for status=error")
+	}
+}
+
+func TestQueryScalarResult(t *testing.T) {
+	// A scalar PromQL result (e.g. `scalar(...)` or `2+2`) is `[ts, "val"]` — not the
+	// vector `[{metric,value}]` shape. It must parse into a single unlabeled sample
+	// rather than surfacing a raw json.Unmarshal error to the model.
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`{"status":"success","data":{"resultType":"scalar","result":[1700000000,"42"]}}`))
+	}))
+	defer srv.Close()
+
+	s, err := New(srv.URL).Query(context.Background(), "scalar(up)", time.Time{})
+	if err != nil {
+		t.Fatalf("Query: %v", err)
+	}
+	if len(s) != 1 || s[0].Value != 42 || len(s[0].Metric) != 0 {
+		t.Fatalf("scalar must be one unlabeled sample value=42, got: %+v", s)
+	}
+}
+
+func TestQueryStringResult(t *testing.T) {
+	// A string PromQL result is also `[ts, "val"]`; parse the value string into a
+	// single unlabeled sample without erroring (value is 0 when non-numeric).
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`{"status":"success","data":{"resultType":"string","result":[1700000000,"1.5"]}}`))
+	}))
+	defer srv.Close()
+
+	s, err := New(srv.URL).Query(context.Background(), `"1.5"`, time.Time{})
+	if err != nil {
+		t.Fatalf("Query: %v", err)
+	}
+	if len(s) != 1 || s[0].Value != 1.5 {
+		t.Fatalf("string result must parse into one unlabeled sample, got: %+v", s)
+	}
+}
+
+func TestQueryRangeClampGuard(t *testing.T) {
+	// A huge window / tiny step would blow past Prometheus's ~11k-point limit; the
+	// provider raises the step so the request stays bounded even if the caller
+	// forgot to. 24h at 1s = 86400 points → must be coarsened well below the cap.
+	var gotStep string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotStep = r.URL.Query().Get("step")
+		_, _ = w.Write([]byte(`{"status":"success","data":{"resultType":"matrix","result":[]}}`))
+	}))
+	defer srv.Close()
+
+	start := time.Unix(1700000000, 0)
+	end := start.Add(24 * time.Hour)
+	if _, err := New(srv.URL).QueryRange(context.Background(), "up",
+		providers.TimeWindow{Start: start, End: end}, time.Second); err != nil {
+		t.Fatalf("QueryRange: %v", err)
+	}
+	stepSec, _ := strconv.Atoi(gotStep)
+	if stepSec <= 1 {
+		t.Fatalf("step must be raised above 1s to bound points, got %qs", gotStep)
+	}
+	points := int((24 * time.Hour).Seconds()) / stepSec
+	if points > maxRangePoints {
+		t.Fatalf("clamped request still %d points, want <= %d (step=%ss)", points, maxRangePoints, gotStep)
+	}
+}
+
 func TestQueryError(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		_, _ = w.Write([]byte(`{"status":"error","error":"bad query"}`))
@@ -129,5 +252,80 @@ func TestQueryError(t *testing.T) {
 	defer srv.Close()
 	if _, err := New(srv.URL).Query(context.Background(), "(", time.Time{}); err == nil {
 		t.Fatal("expected error for status=error")
+	}
+}
+
+func TestDetectFlavor(t *testing.T) {
+	tests := []struct {
+		name   string
+		status int
+		body   string
+		want   Flavor
+	}{
+		{
+			name:   "victoriametrics buildinfo",
+			status: http.StatusOK,
+			body:   `{"status":"success","data":{"version":"victoria-metrics-20240101-000000-tags-v1.97.1"}}`,
+			want:   FlavorVictoriaMetrics,
+		},
+		{
+			name:   "prometheus buildinfo",
+			status: http.StatusOK,
+			body:   `{"status":"success","data":{"version":"2.50.1","revision":"abc","branch":"HEAD","goVersion":"go1.22"}}`,
+			want:   FlavorPrometheus,
+		},
+		{
+			name:   "probe fails (500) -> unknown, fail safe",
+			status: http.StatusInternalServerError,
+			body:   `oops`,
+			want:   FlavorUnknown,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			var gotPath string
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				gotPath = r.URL.Path
+				w.WriteHeader(tc.status)
+				_, _ = w.Write([]byte(tc.body))
+			}))
+			defer srv.Close()
+			c := New(srv.URL)
+			got := c.DetectFlavor(context.Background())
+			if gotPath != "/api/v1/status/buildinfo" {
+				t.Fatalf("probed path=%q, want /api/v1/status/buildinfo", gotPath)
+			}
+			if got != tc.want {
+				t.Fatalf("DetectFlavor=%q, want %q", got, tc.want)
+			}
+			if c.Flavor() != tc.want {
+				t.Fatalf("Flavor()=%q, want %q", c.Flavor(), tc.want)
+			}
+		})
+	}
+}
+
+func TestWithFlavorPinsAndShortCircuits(t *testing.T) {
+	probed := false
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		probed = true
+		_, _ = w.Write([]byte(`{"status":"success","data":{"version":"2.50.1"}}`))
+	}))
+	defer srv.Close()
+	c := New(srv.URL).WithFlavor(FlavorVictoriaMetrics)
+	if c.Flavor() != FlavorVictoriaMetrics {
+		t.Fatalf("WithFlavor did not pin: %q", c.Flavor())
+	}
+	// A pinned flavor short-circuits the probe.
+	if got := c.DetectFlavor(context.Background()); got != FlavorVictoriaMetrics {
+		t.Fatalf("DetectFlavor after pin=%q", got)
+	}
+	if probed {
+		t.Fatal("DetectFlavor probed the backend despite a pinned flavor")
+	}
+	// A stray/unknown value must not downgrade a good pin.
+	c.WithFlavor(FlavorUnknown)
+	if c.Flavor() != FlavorVictoriaMetrics {
+		t.Fatalf("stray WithFlavor downgraded flavor to %q", c.Flavor())
 	}
 }

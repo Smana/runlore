@@ -1,6 +1,6 @@
 # Supply-chain hardening (R13) Implementation Plan
 
-> **For agentic workers:** spec at `docs/superpowers/specs/2026-06-24-supply-chain-hardening-design.md`.
+> **For agentic workers:** spec at `dev/superpowers/specs/2026-06-24-supply-chain-hardening-design.md`.
 > Gate green before EACH commit: `go build/vet/test ./... && gofmt -l . && golangci-lint run ./...` must stay `0 issues`. Commit each concern separately.
 
 **Goal:** Add standard supply-chain controls to CI/CD — dependency automation, SHA-pinned actions, `govulncheck`, `gosec`, and a PR-time image/fs scan — without breaking the lint gate.

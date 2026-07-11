@@ -4,6 +4,7 @@ package flux
 
 import (
 	"context"
+	"strings"
 	"testing"
 	"time"
 
@@ -91,6 +92,64 @@ func fluxScene() *Provider {
 	}
 	client := dynamicfake.NewSimpleDynamicClientWithCustomListKinds(runtime.NewScheme(), gvrToListKind, apps, infra)
 	return New(NewDynamicReader(client), nil)
+}
+
+// TestListEventsRendering proves G2: ListEvents leads each line with the event's
+// lastTimestamp (RFC3339, UTC) and appends "(xN)" when count>1 — mirroring
+// kube_events — while omitting both when the API left them unset.
+func TestListEventsRendering(t *testing.T) {
+	mkEvent := func(name string, extra map[string]any) *unstructured.Unstructured {
+		o := map[string]any{
+			"apiVersion":     "v1",
+			"kind":           "Event",
+			"metadata":       map[string]any{"name": name, "namespace": "flux-system"},
+			"involvedObject": map[string]any{"kind": "Kustomization", "name": "apps"},
+			"type":           "Warning",
+			"reason":         "ReconciliationFailed",
+			"message":        "build failed",
+		}
+		for k, v := range extra {
+			o[k] = v
+		}
+		return &unstructured.Unstructured{Object: o}
+	}
+	// Repeated event: lastTimestamp + count>1 both render.
+	repeated := mkEvent("e1", map[string]any{
+		"lastTimestamp": "2026-07-01T14:05:00Z",
+		"count":         int64(3),
+	})
+	// Sparse event: no timestamp, count=1 — both omitted, back to bare "Type Reason Message".
+	sparse := mkEvent("e2", nil)
+
+	client := dynamicfake.NewSimpleDynamicClientWithCustomListKinds(runtime.NewScheme(),
+		map[schema.GroupVersionResource]string{eventsGVR: "EventList"}, repeated, sparse)
+	r := NewDynamicReader(client)
+
+	lines, err := r.ListEvents(context.Background(), "flux-system", "apps", "Kustomization")
+	if err != nil {
+		t.Fatalf("ListEvents: %v", err)
+	}
+	if len(lines) != 2 {
+		t.Fatalf("want 2 event lines, got %d: %v", len(lines), lines)
+	}
+	var gotRepeated, gotSparse bool
+	for _, l := range lines {
+		switch {
+		case strings.Contains(l, "(x3)"):
+			gotRepeated = true
+			if want := "2026-07-01T14:05:00Z Warning ReconciliationFailed(x3) build failed"; l != want {
+				t.Fatalf("repeated event line = %q, want %q", l, want)
+			}
+		default:
+			gotSparse = true
+			if want := "Warning ReconciliationFailed build failed"; l != want {
+				t.Fatalf("sparse event line = %q, want %q", l, want)
+			}
+		}
+	}
+	if !gotRepeated || !gotSparse {
+		t.Fatalf("missing expected lines: %v", lines)
+	}
 }
 
 func TestSourceRevision(t *testing.T) {
@@ -205,18 +264,24 @@ func TestKustomizationReadyCondition(t *testing.T) {
 		"apiVersion": "kustomize.toolkit.fluxcd.io/v1",
 		"kind":       "Kustomization",
 		"metadata":   map[string]any{"name": "apps", "namespace": "flux-system"},
-		"spec":       map[string]any{"path": "./apps", "sourceRef": map[string]any{"name": "flux-system"}},
+		"spec":       map[string]any{"path": "./apps", "targetNamespace": "harbor", "sourceRef": map[string]any{"name": "flux-system"}},
 		"status": map[string]any{
 			"lastAppliedRevision": "main@sha1:abc",
 			"conditions": []any{
 				map[string]any{"type": "Healthy", "status": "True"},
-				map[string]any{"type": "Ready", "status": "False", "reason": "BuildFailed", "message": "kustomize build failed"},
+				map[string]any{"type": "Ready", "status": "False", "reason": "BuildFailed", "message": "kustomize build failed", "lastTransitionTime": "2026-07-01T14:05:00Z"},
 			},
 		},
 	}}
 	k := kustomizationFromUnstructured(u)
 	if k.ReadyStatus != "False" || k.ReadyReason != "BuildFailed" || k.ReadyMessage != "kustomize build failed" {
 		t.Fatalf("unexpected ready condition: %+v", k)
+	}
+	if k.TargetNamespace != "harbor" {
+		t.Fatalf("targetNamespace not parsed: %q", k.TargetNamespace)
+	}
+	if !k.ReadyTime.Equal(time.Date(2026, 7, 1, 14, 5, 0, 0, time.UTC)) {
+		t.Fatalf("ReadyTime not parsed from lastTransitionTime: %v", k.ReadyTime)
 	}
 }
 

@@ -45,11 +45,11 @@ type Config struct {
 
 	LeaderElection LeaderElection `yaml:"leader_election"` // HA: only the leader investigates
 
-	Metrics Endpoint `yaml:"metrics"` // PromQL backend (VictoriaMetrics/Prometheus) for query_metrics
-	Logs    Endpoint `yaml:"logs"`    // LogsQL backend (VictoriaLogs) for query_logs
-	Network Network  `yaml:"network"` // network-flow data source (pluggable, CNI-agnostic); empty Provider disables it
-	Cloud   Cloud    `yaml:"cloud"`   // cloud-side context (AWS); empty Provider disables it
-	MCP     MCP      `yaml:"mcp"`     // external MCP servers whose tools the agent may call (opt-in)
+	Metrics MetricsConfig `yaml:"metrics"` // PromQL backend (VictoriaMetrics/Prometheus) for query_metrics
+	Logs    LogsConfig    `yaml:"logs"`    // LogsQL backend (VictoriaLogs) for query_logs
+	Network Network       `yaml:"network"` // network-flow data source (pluggable, CNI-agnostic); empty Provider disables it
+	Cloud   Cloud         `yaml:"cloud"`   // cloud-side context (AWS); empty Provider disables it
+	MCP     MCP           `yaml:"mcp"`     // external MCP servers whose tools the agent may call (opt-in)
 
 	Server ServerConfig `yaml:"server"` // HTTP ingress (webhook authentication)
 
@@ -83,6 +83,101 @@ type Endpoint struct {
 	// tenant header for a multi-tenant VictoriaMetrics/VictoriaLogs instance
 	// ("X-Scope-OrgID: <tenant>"). Empty (default) ⇒ no extra headers.
 	Headers map[string]string `yaml:"headers"`
+}
+
+// Metrics backend flavors for config.metrics.flavor. The flavor unlocks
+// backend-specific query guidance (VictoriaMetrics also speaks MetricsQL, a PromQL
+// superset). Empty ⇒ auto-detect at startup (probe /api/v1/status/buildinfo),
+// failing safe to generic Prometheus behaviour when the probe can't identify the
+// backend — no MetricsQL claims are made unless the backend is known to be VM.
+const (
+	MetricsFlavorPrometheus     = "prometheus"      // generic Prometheus HTTP API only
+	MetricsFlavorVictoriaMetric = "victoriametrics" // also accepts MetricsQL (PromQL superset)
+)
+
+// MetricsConfig is the metrics backend endpoint plus an OPTIONAL flavor override.
+// The endpoint keys (url/token_env/headers) are inlined so the existing
+// `metrics: {url: …}` shape is unchanged; Flavor is a new opt-in sub-key. Empty
+// Flavor ⇒ auto-detect (see MetricsFlavor*), which fails safe to plain Prometheus.
+type MetricsConfig struct {
+	Endpoint `yaml:",inline"`
+
+	// Flavor optionally pins the backend flavor instead of auto-detecting it:
+	// "victoriametrics" enables MetricsQL query guidance; "prometheus" (or an unknown
+	// value) keeps generic behaviour. Empty ⇒ probe at startup.
+	Flavor string `yaml:"flavor"`
+}
+
+// LogsConfig is the logs backend endpoint plus the OPTIONAL collector field-naming
+// convention. The endpoint keys (url/token_env/headers) are inlined so the existing
+// `logs: {url: …}` shape is unchanged; Fields is a new opt-in sub-key that lets an
+// operator whose collector labels logs differently (e.g. Loki-style `namespace`
+// instead of `kubernetes.pod_namespace`) retarget every logs query and the renderer
+// WITHOUT a code change. Empty Fields ⇒ the shipped VictoriaLogs/vector convention.
+type LogsConfig struct {
+	Endpoint `yaml:",inline"`
+
+	Fields LogFields `yaml:"fields"`
+}
+
+// LogFields names the collector's log-schema fields. Every value defaults (via
+// Resolved) to EXACTLY the string the code hardcoded before this was configurable,
+// so an unset `logs.fields` is a no-op — the maintainer's test cluster keeps
+// working. Override only the field(s) your collector renames.
+type LogFields struct {
+	// ContainerField / NamespaceField / PodField are the STREAM label names used to
+	// build a `{k=v}` selector (query_logs) and to derive the compact pod/container
+	// identity in the renderer. Defaults: kubernetes.container_name /
+	// kubernetes.pod_namespace / kubernetes.pod_name.
+	ContainerField string `yaml:"container_field"`
+	NamespaceField string `yaml:"namespace_field"`
+	PodField       string `yaml:"pod_field"`
+
+	// LevelField is the severity field query_logs filters on (after unpack_json) and
+	// that the error-summary histogram splits by. Defaults: log.level.
+	LevelField string `yaml:"level_field"`
+
+	// UnpackPipe is the LogsQL pipe that promotes JSON body fields to top-level
+	// fields so LevelField becomes filterable. Default: unpack_json. Set to a
+	// different pipe (or leave empty to disable) if your logs are already flat.
+	UnpackPipe string `yaml:"unpack_pipe"`
+}
+
+// Default log-field convention: the VictoriaLogs + vector kubernetes-metadata
+// layout RunLore shipped with. Each Resolved default MUST equal one of these so an
+// unset config reproduces the previous hardcoded behaviour exactly.
+const (
+	defaultLogContainerField = "kubernetes.container_name"
+	defaultLogNamespaceField = "kubernetes.pod_namespace"
+	defaultLogPodField       = "kubernetes.pod_name"
+	defaultLogLevelField     = "log.level"
+	defaultLogUnpackPipe     = "unpack_json"
+)
+
+// Resolved returns the field convention with every unset value filled from the
+// shipped defaults, so callers can use the result without repeating the fallbacks.
+// UnpackPipe is deliberately allowed to be explicitly empty (already-flat logs), so
+// only an unset (zero) LogFields as a whole restores the default pipe — an operator
+// who sets any field but leaves unpack_pipe empty still gets the default pipe unless
+// they had a fully-zero struct. To keep the "any override" case simple, an empty
+// UnpackPipe here falls back to the default; disabling it is out of scope for v1.
+func (f LogFields) Resolved() LogFields {
+	if f.ContainerField == "" {
+		f.ContainerField = defaultLogContainerField
+	}
+	if f.NamespaceField == "" {
+		f.NamespaceField = defaultLogNamespaceField
+	}
+	if f.PodField == "" {
+		f.PodField = defaultLogPodField
+	}
+	if f.LevelField == "" {
+		f.LevelField = defaultLogLevelField
+	}
+	if f.UnpackPipe == "" {
+		f.UnpackPipe = defaultLogUnpackPipe
+	}
+	return f
 }
 
 // Cloud configures the cloud context provider. Auth is in-cluster identity (EKS
@@ -131,6 +226,12 @@ type Network struct {
 // HubbleCfg configures the Cilium Hubble Relay network provider.
 type HubbleCfg struct {
 	URL string `yaml:"url"` // Hubble Relay gRPC address (host:port), e.g. hubble-relay.kube-system:80
+
+	// TLS enables encrypted transport to the Hubble Relay endpoint. Default
+	// (false) keeps the existing plaintext/insecure behaviour so the maintainer's
+	// test cluster (Cilium/Hubble Relay, currently plaintext) keeps connecting
+	// without any config change.
+	TLS bool `yaml:"tls"` // false (default) = insecure/plaintext; true = TLS (credentials.NewTLS)
 }
 
 // AWSFlowCfg configures the AWS VPC Flow Logs network provider. Auth is in-cluster
@@ -138,6 +239,20 @@ type HubbleCfg struct {
 type AWSFlowCfg struct {
 	Region   string `yaml:"region"`    // AWS region (default: AWS_REGION / IMDS)
 	LogGroup string `yaml:"log_group"` // CloudWatch Logs group that receives the VPC Flow Logs (required)
+
+	// FlowFormat selects the VPC Flow Logs field layout. Default (empty / "v2")
+	// uses the standard v2 default format (14 fields). Set to "custom" and
+	// configure FlowFields when the log group was created with a custom field
+	// list; custom-format log groups silently return no results under "v2" because
+	// the positional field assumptions no longer hold.
+	FlowFormat string `yaml:"flow_format"` // "" | "v2" (default) | "custom"
+
+	// FlowFields maps flow field names to their 0-based column index in the
+	// space-delimited log record. Only consulted when FlowFormat is "custom".
+	// Required keys: srcaddr, dstaddr, srcport, dstport, protocol.
+	// Example for a custom format omitting the first two standard fields:
+	//   flow_fields: {srcaddr: 1, dstaddr: 2, srcport: 3, dstport: 4, protocol: 5}
+	FlowFields map[string]int `yaml:"flow_fields"`
 }
 
 // GCPFlowCfg configures the GCP Firewall Rules Logging network provider. Auth is
@@ -177,8 +292,8 @@ type Investigation struct {
 	Coalesce                  Coalesce  `yaml:"coalesce"`
 	RateLimit                 RateLimit `yaml:"rate_limit"`
 	MaxSteps                  int       `yaml:"max_steps"`                    // 0 ⇒ loop default (20)
-	MaxToolOutputBytes        int       `yaml:"max_tool_output_bytes"`        // 0 ⇒ unlimited
-	MaxTokensPerInvestigation int       `yaml:"max_tokens_per_investigation"` // 0 ⇒ unlimited
+	MaxToolOutputBytes        int       `yaml:"max_tool_output_bytes"`        // unset/0 ⇒ bounded default (32768); -1 ⇒ unlimited
+	MaxTokensPerInvestigation int       `yaml:"max_tokens_per_investigation"` // unset/0 ⇒ bounded default (100000); -1 ⇒ unlimited
 	Timeout                   Duration  `yaml:"timeout"`                      // per-investigation deadline; 0 ⇒ default (10m) via applyDefaults
 	ToolTimeout               Duration  `yaml:"tool_timeout"`                 // per-TOOL-call timeout so one hung tool can't eat the budget; 0 ⇒ default (60s) at construction
 

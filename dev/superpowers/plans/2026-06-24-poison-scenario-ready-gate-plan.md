@@ -1,6 +1,6 @@
 # R23 — Poisoned-entry scenario + readyz-with-no-KB — plan
 
-Spec: `docs/superpowers/specs/2026-06-24-poison-scenario-ready-gate-design.md`.
+Spec: `dev/superpowers/specs/2026-06-24-poison-scenario-ready-gate-design.md`.
 Base: worktree fast-forwarded to `main` (`d06ad6e`, includes R2).
 
 ## Commit 1 — readyz: a configured-but-failed catalog stays 503 (Part 1)

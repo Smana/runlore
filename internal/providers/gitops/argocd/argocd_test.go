@@ -4,8 +4,13 @@ package argocd
 
 import (
 	"context"
+	"os"
+	"path/filepath"
 	"testing"
+	"time"
 
+	"github.com/go-git/go-git/v5"
+	"github.com/go-git/go-git/v5/plumbing/object"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime/schema"
@@ -104,6 +109,45 @@ func TestProviderChangesMultiSource(t *testing.T) {
 	}
 }
 
+// TestProviderChangesDestNamespace covers B1+B2: an Application living in argocd but
+// deploying into destination namespace "harbor" must be found when queried by that
+// namespace, and When must carry the last deploy time.
+func TestProviderChangesDestNamespace(t *testing.T) {
+	deployedAt := time.Date(2026, 7, 1, 14, 2, 0, 0, time.UTC)
+	r := fakeReader{apps: []application{{
+		Name: "harbor", Namespace: "argocd", DestNamespace: "harbor",
+		RepoURL: "https://github.com/org/repo", Path: "apps/harbor",
+		Revision: "newsha", PrevRevision: "oldsha", DeployedAt: deployedAt,
+	}}}
+	p := New(r, &whatchanged.Differ{})
+	changes, err := p.Changes(context.Background(), providers.TimeWindow{}, providers.Selector{Namespace: "harbor"})
+	if err != nil {
+		t.Fatalf("Changes: %v", err)
+	}
+	if len(changes) != 1 || changes[0].Workload.Name != "harbor" {
+		t.Fatalf("destination-namespace query did not resolve the owning Application: %+v", changes)
+	}
+	if !changes[0].When.Equal(deployedAt) {
+		t.Fatalf("When = %v, want deployedAt %v", changes[0].When, deployedAt)
+	}
+}
+
+// TestProviderChangesNamespaceNameFallback: querying a name in a namespace the app
+// neither lives in nor targets still resolves it by name across namespaces (B2).
+func TestProviderChangesNamespaceNameFallback(t *testing.T) {
+	r := fakeReader{apps: []application{
+		{Name: "harbor", Namespace: "argocd", DestNamespace: "harbor", RepoURL: "u", Revision: "a"},
+	}}
+	p := New(r, &whatchanged.Differ{})
+	changes, err := p.Changes(context.Background(), providers.TimeWindow{}, providers.Selector{Namespace: "elsewhere", Name: "harbor"})
+	if err != nil {
+		t.Fatalf("Changes: %v", err)
+	}
+	if len(changes) != 1 || changes[0].Workload.Name != "harbor" {
+		t.Fatalf("name fallback across namespaces failed: %+v", changes)
+	}
+}
+
 func TestProviderChangesSelector(t *testing.T) {
 	r := fakeReader{apps: []application{
 		{Name: "harbor", Namespace: "argocd", RepoURL: "u", Revision: "a"},
@@ -174,5 +218,88 @@ func TestFailureReason(t *testing.T) {
 				t.Errorf("failureReason(%+v) = (%q,%v), want (%q,%v)", tc.app, reason, failed, tc.wantReason, tc.wantFailed)
 			}
 		})
+	}
+}
+
+// buildMultiCommitRepo creates a temp git repo with two commits touching apps/harbor
+// at t=1000 and t=2000, returning the repo dir and the HEAD (v2) SHA. The dir doubles
+// as a clonable local RepoURL for the Differ.
+func buildMultiCommitRepo(t *testing.T) (dir, head string) {
+	t.Helper()
+	dir = t.TempDir()
+	repo, err := git.PlainInit(dir, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wt, err := repo.Worktree()
+	if err != nil {
+		t.Fatal(err)
+	}
+	write := func(content string) {
+		full := filepath.Join(dir, "apps/harbor/values.yaml")
+		if err := os.MkdirAll(filepath.Dir(full), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(full, []byte(content), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := wt.Add("apps/harbor/values.yaml"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	commit := func(sec int64) string {
+		h, err := wt.Commit("c", &git.CommitOptions{
+			Author: &object.Signature{Name: "t", Email: "t@x", When: time.Unix(sec, 0)},
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return h.String()
+	}
+	write("version: 1.14.0\n")
+	commit(1000)
+	write("version: 1.15.0\n")
+	head = commit(2000)
+	return dir, head
+}
+
+// TestProviderChangesTimeWindow proves G3: a window spanning multiple source commits
+// yields one Change per in-window revision (newest-first), while a zero window keeps
+// the single current-revision behavior.
+func TestProviderChangesTimeWindow(t *testing.T) {
+	dir, head := buildMultiCommitRepo(t)
+	r := fakeReader{apps: []application{{
+		Name: "harbor", Namespace: "argocd", DestNamespace: "harbor",
+		RepoURL: dir, Path: "apps/harbor",
+		Revision: head, PrevRevision: "oldsha", DeployedAt: time.Unix(2000, 0),
+	}}}
+	p := New(r, &whatchanged.Differ{})
+
+	// Window spanning both commits: two Changes, newest-first.
+	w := providers.TimeWindow{Start: time.Unix(500, 0), End: time.Unix(2500, 0)}
+	changes, err := p.Changes(context.Background(), w, providers.Selector{Namespace: "harbor"})
+	if err != nil {
+		t.Fatalf("Changes (window): %v", err)
+	}
+	if len(changes) != 2 {
+		t.Fatalf("want 2 in-window changes, got %d: %+v", len(changes), changes)
+	}
+	if !changes[0].When.After(changes[1].When) {
+		t.Fatalf("changes not newest-first: %v then %v", changes[0].When, changes[1].When)
+	}
+	if changes[0].ToRev != head || changes[0].FromRev != "" {
+		t.Fatalf("newest change revs = from=%q to=%q, want from=\"\" to=HEAD", changes[0].FromRev, changes[0].ToRev)
+	}
+	if !changes[0].When.Equal(time.Unix(2000, 0)) || !changes[1].When.Equal(time.Unix(1000, 0)) {
+		t.Fatalf("unexpected When timeline: %v, %v", changes[0].When, changes[1].When)
+	}
+
+	// Zero window: single current-revision Change (today's behavior).
+	changes, err = p.Changes(context.Background(), providers.TimeWindow{}, providers.Selector{Namespace: "harbor"})
+	if err != nil {
+		t.Fatalf("Changes (zero window): %v", err)
+	}
+	if len(changes) != 1 || changes[0].ToRev != head || changes[0].FromRev != "oldsha" {
+		t.Fatalf("zero window: want 1 current-revision change, got %d: %+v", len(changes), changes)
 	}
 }

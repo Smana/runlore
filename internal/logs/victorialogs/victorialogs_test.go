@@ -124,6 +124,145 @@ func ndjson(n int) string {
 	return b.String()
 }
 
+func TestHits(t *testing.T) {
+	var gotPath, gotStep string
+	var gotField []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.Path
+		body, _ := io.ReadAll(r.Body)
+		gotStep = formValue(string(body), "step")
+		if vals, err := url.ParseQuery(string(body)); err == nil {
+			gotField = vals["field"]
+		}
+		_, _ = io.WriteString(w, `{"hits":[
+		  {"fields":{"level":"error"},"timestamps":["2024-01-01T10:00:00Z","2024-01-01T10:05:00Z"],"values":[3,412],"total":415},
+		  {"fields":{"level":"warn"},"timestamps":["2024-01-01T10:00:00Z","2024-01-01T10:05:00Z"],"values":[1,2],"total":3}]}`)
+	}))
+	defer srv.Close()
+
+	buckets, err := New(srv.URL).Hits(context.Background(), `{namespace="apps"} | error`, providers.TimeWindow{}, 5*60*1e9)
+	if err != nil {
+		t.Fatalf("Hits: %v", err)
+	}
+	if gotPath != "/select/logsql/hits" {
+		t.Fatalf("path=%q", gotPath)
+	}
+	if gotStep != "300s" {
+		t.Fatalf("step=%q, want 300s", gotStep)
+	}
+	if len(gotField) != 1 || gotField[0] != "level" {
+		t.Fatalf("field=%v, want [level]", gotField)
+	}
+	if len(buckets) != 4 {
+		t.Fatalf("want 4 buckets, got %d: %+v", len(buckets), buckets)
+	}
+	// Error series must be preserved with its level + count.
+	var sawSpike bool
+	for _, b := range buckets {
+		if b.Level == "error" && b.Count == 412 {
+			sawSpike = true
+		}
+	}
+	if !sawSpike {
+		t.Fatalf("missing error=412 bucket: %+v", buckets)
+	}
+}
+
+// TestHitsCustomLevelField covers L1: a collector that names its severity field
+// differently (e.g. "severity") must have Hits split by that field. WithLevelField
+// retargets both the request `field=` param and the response-bucket read; the empty
+// default is asserted by TestHits.
+func TestHitsCustomLevelField(t *testing.T) {
+	var gotField []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		if vals, err := url.ParseQuery(string(body)); err == nil {
+			gotField = vals["field"]
+		}
+		_, _ = io.WriteString(w, `{"hits":[
+		  {"fields":{"severity":"error"},"timestamps":["2024-01-01T10:00:00Z"],"values":[7],"total":7}]}`)
+	}))
+	defer srv.Close()
+
+	buckets, err := New(srv.URL).WithLevelField("severity").Hits(context.Background(), `{namespace="apps"}`, providers.TimeWindow{}, 60*1e9)
+	if err != nil {
+		t.Fatalf("Hits: %v", err)
+	}
+	if len(gotField) != 1 || gotField[0] != "severity" {
+		t.Fatalf("field=%v, want [severity]", gotField)
+	}
+	if len(buckets) != 1 || buckets[0].Level != "error" || buckets[0].Count != 7 {
+		t.Fatalf("bucket must read the custom field: %+v", buckets)
+	}
+}
+
+// TestWithLevelFieldEmptyKeepsDefault: passing an empty field name is a no-op, so an
+// unset config keeps the shipped default. (The default request path is TestHits.)
+func TestWithLevelFieldEmptyKeepsDefault(t *testing.T) {
+	c := New("http://vl:9428").WithLevelField("")
+	if c.levelField != defaultLevelField {
+		t.Fatalf("empty override must keep default, got %q", c.levelField)
+	}
+}
+
+func TestTopMessages(t *testing.T) {
+	var gotQuery string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/select/logsql/query" {
+			t.Errorf("path=%q", r.URL.Path)
+		}
+		body, _ := io.ReadAll(r.Body)
+		gotQuery = formValue(string(body), "query")
+		_, _ = io.WriteString(w, `{"_msg":"connection refused","rows":"388","first":"2024-01-01T10:00:00Z","last":"2024-01-01T10:05:00Z"}
+{"_msg":"timeout waiting for db","rows":"24","first":"2024-01-01T10:01:00Z","last":"2024-01-01T10:04:00Z"}
+`)
+	}))
+	defer srv.Close()
+
+	msgs, err := New(srv.URL).TopMessages(context.Background(), `{namespace="apps"} | error`, providers.TimeWindow{}, 10)
+	if err != nil {
+		t.Fatalf("TopMessages: %v", err)
+	}
+	// The stats pipe must be composed with collapse_nums + stats by (_msg) + limit.
+	for _, want := range []string{"collapse_nums", "stats by (_msg)", "count() rows", "limit 10"} {
+		if !strings.Contains(gotQuery, want) {
+			t.Fatalf("query %q missing %q", gotQuery, want)
+		}
+	}
+	if len(msgs) != 2 {
+		t.Fatalf("want 2 messages, got %d", len(msgs))
+	}
+	if msgs[0].Message != "connection refused" || msgs[0].Count != 388 {
+		t.Fatalf("unexpected first message: %+v", msgs[0])
+	}
+	if msgs[0].First.IsZero() || msgs[0].Last.IsZero() {
+		t.Fatalf("first/last not parsed: %+v", msgs[0])
+	}
+}
+
+func TestFieldNames(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/select/logsql/field_names" {
+			t.Errorf("path=%q", r.URL.Path)
+		}
+		_, _ = io.WriteString(w, `{"values":[
+		  {"value":"_msg","hits":1033},
+		  {"value":"kubernetes.container_name","hits":900}]}`)
+	}))
+	defer srv.Close()
+
+	fields, err := New(srv.URL).FieldNames(context.Background(), `{namespace="apps"}`, providers.TimeWindow{})
+	if err != nil {
+		t.Fatalf("FieldNames: %v", err)
+	}
+	if len(fields) != 2 || fields[0].Name != "_msg" || fields[0].Hits != 1033 {
+		t.Fatalf("unexpected fields: %+v", fields)
+	}
+	if fields[1].Name != "kubernetes.container_name" {
+		t.Fatalf("unexpected second field: %+v", fields[1])
+	}
+}
+
 func TestQueryPagination(t *testing.T) {
 	const pageSize = 100
 

@@ -8,7 +8,7 @@
 
 **Tech Stack:** Go, `encoding/json` + `bufio` (JSONL), OpenTelemetry metrics, plain `testing`. Module `github.com/Smana/runlore`.
 
-**Design spec:** `docs/superpowers/specs/2026-06-23-outcome-capture-design.md`
+**Design spec:** `dev/superpowers/specs/2026-06-23-outcome-capture-design.md`
 
 ## Global Constraints
 
