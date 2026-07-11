@@ -192,7 +192,7 @@ func podStatus(p *corev1.Pod) providers.PodStatus {
 			// last-termination window so a crash loop has a start/finish time.
 			ps.Restarts += int(c.RestartCount)
 			if lt := c.LastTerminationState.Terminated; lt != nil {
-				if lt.FinishedAt.Time.After(ps.LastTerminatedFinished) {
+				if lt.FinishedAt.After(ps.LastTerminatedFinished) {
 					ps.LastTerminatedStarted = lt.StartedAt.Time
 					ps.LastTerminatedFinished = lt.FinishedAt.Time
 				}
