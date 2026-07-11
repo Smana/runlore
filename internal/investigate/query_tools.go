@@ -44,10 +44,27 @@ func renderRows(b *strings.Builder, n int, noun string, row func(i int)) {
 	}
 }
 
+// metricsQLGuidance is the MetricsQL sentence appended to the query_metrics /
+// query_metrics_range Descriptions ONLY when the backend flavor is VictoriaMetrics.
+// MetricsQL is a PromQL superset, so these helpers would be invalid against real
+// Prometheus — hence they are advertised description-only, and only when the flavor
+// is known to be VM. No query rewriting happens; the model may use them or not.
+const metricsQLGuidance = " This backend is VictoriaMetrics, which also accepts MetricsQL (a PromQL superset): " +
+	"when many series match, `outliersk(3, <expr>)` returns only the anomalous ones; " +
+	"`<expr> default 0` fills scrape gaps so absent series read as 0 instead of vanishing; " +
+	"`rollup_rate(<metric>[5m])` and `<expr> keep_metric_names` are also available."
+
 // QueryMetricsTool lets the model run PromQL instant queries (saturation, error
 // rates, health) against the metrics backend.
 type QueryMetricsTool struct {
 	Metrics providers.MetricsProvider
+
+	// MetricsQL, when true, appends VictoriaMetrics-only MetricsQL guidance to the
+	// Description (the backend was detected/configured as VictoriaMetrics). It is
+	// description-only — no query is ever rewritten. Default false ⇒ generic
+	// Prometheus wording, so a Prometheus (or unknown) backend never sees MetricsQL
+	// claims it would reject.
+	MetricsQL bool
 }
 
 // Name returns the tool name.
@@ -55,7 +72,11 @@ func (t QueryMetricsTool) Name() string { return "query_metrics" }
 
 // Description returns the tool description.
 func (t QueryMetricsTool) Description() string {
-	return "Run a PromQL instant query against the metrics backend (VictoriaMetrics/Prometheus) — check saturation, error rates, restarts, resource usage. This returns the value NOW only; to see when a metric started rising/spiking around the incident, use query_metrics_range instead. Results cap at 50 series (largest |value| kept); prefer topk(10, sum by(pod)(rate(...))) over a raw selector so the cap doesn't hide the signal."
+	d := "Run a PromQL instant query against the metrics backend (VictoriaMetrics/Prometheus) — check saturation, error rates, restarts, resource usage. This returns the value NOW only; to see when a metric started rising/spiking around the incident, use query_metrics_range instead. Results cap at 50 series (largest |value| kept); prefer topk(10, sum by(pod)(rate(...))) over a raw selector so the cap doesn't hide the signal."
+	if t.MetricsQL {
+		d += metricsQLGuidance
+	}
+	return d
 }
 
 // Schema returns the JSON schema for the arguments.
@@ -109,6 +130,10 @@ func formatMetric(m map[string]string) string {
 // which is what reveals when a problem started (rising / spiking / recovering).
 type QueryMetricsRangeTool struct {
 	Metrics providers.MetricsProvider
+
+	// MetricsQL mirrors QueryMetricsTool.MetricsQL: description-only VictoriaMetrics
+	// guidance, appended only when the backend flavor is VictoriaMetrics.
+	MetricsQL bool
 }
 
 // Name returns the tool name.
@@ -116,7 +141,11 @@ func (t QueryMetricsRangeTool) Name() string { return "query_metrics_range" }
 
 // Description returns the tool description.
 func (t QueryMetricsRangeTool) Description() string {
-	return "Run a PromQL RANGE query over a recent window (default 60m, 60s step) to see how a metric TRENDS — rising, spiking, or recovering around the incident — not just its value right now. Use rate()/error-rate/saturation expressions; returns per-series first→last with min/max, a compact downsampled trend, and the biggest adjacent jump so you can tell WHEN a problem started and whether it was a step-change or a ramp. since_minutes bounds the window; step_seconds the resolution (auto-derived/coarsened if it would exceed the backend point cap). Results cap at 50 series (largest |value| kept); prefer topk(10, sum by(pod)(rate(...))) over a raw selector so the cap doesn't hide the signal."
+	d := "Run a PromQL RANGE query over a recent window (default 60m, 60s step) to see how a metric TRENDS — rising, spiking, or recovering around the incident — not just its value right now. Use rate()/error-rate/saturation expressions; returns per-series first→last with min/max, a compact downsampled trend, and the biggest adjacent jump so you can tell WHEN a problem started and whether it was a step-change or a ramp. since_minutes bounds the window; step_seconds the resolution (auto-derived/coarsened if it would exceed the backend point cap). Results cap at 50 series (largest |value| kept); prefer topk(10, sum by(pod)(rate(...))) over a raw selector so the cap doesn't hide the signal."
+	if t.MetricsQL {
+		d += metricsQLGuidance
+	}
+	return d
 }
 
 // Schema returns the JSON schema for the arguments.

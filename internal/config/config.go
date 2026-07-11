@@ -45,11 +45,11 @@ type Config struct {
 
 	LeaderElection LeaderElection `yaml:"leader_election"` // HA: only the leader investigates
 
-	Metrics Endpoint   `yaml:"metrics"` // PromQL backend (VictoriaMetrics/Prometheus) for query_metrics
-	Logs    LogsConfig `yaml:"logs"`    // LogsQL backend (VictoriaLogs) for query_logs
-	Network Network    `yaml:"network"` // network-flow data source (pluggable, CNI-agnostic); empty Provider disables it
-	Cloud   Cloud      `yaml:"cloud"`   // cloud-side context (AWS); empty Provider disables it
-	MCP     MCP        `yaml:"mcp"`     // external MCP servers whose tools the agent may call (opt-in)
+	Metrics MetricsConfig `yaml:"metrics"` // PromQL backend (VictoriaMetrics/Prometheus) for query_metrics
+	Logs    LogsConfig    `yaml:"logs"`    // LogsQL backend (VictoriaLogs) for query_logs
+	Network Network       `yaml:"network"` // network-flow data source (pluggable, CNI-agnostic); empty Provider disables it
+	Cloud   Cloud         `yaml:"cloud"`   // cloud-side context (AWS); empty Provider disables it
+	MCP     MCP           `yaml:"mcp"`     // external MCP servers whose tools the agent may call (opt-in)
 
 	Server ServerConfig `yaml:"server"` // HTTP ingress (webhook authentication)
 
@@ -83,6 +83,29 @@ type Endpoint struct {
 	// tenant header for a multi-tenant VictoriaMetrics/VictoriaLogs instance
 	// ("X-Scope-OrgID: <tenant>"). Empty (default) ⇒ no extra headers.
 	Headers map[string]string `yaml:"headers"`
+}
+
+// Metrics backend flavors for config.metrics.flavor. The flavor unlocks
+// backend-specific query guidance (VictoriaMetrics also speaks MetricsQL, a PromQL
+// superset). Empty ⇒ auto-detect at startup (probe /api/v1/status/buildinfo),
+// failing safe to generic Prometheus behaviour when the probe can't identify the
+// backend — no MetricsQL claims are made unless the backend is known to be VM.
+const (
+	MetricsFlavorPrometheus     = "prometheus"      // generic Prometheus HTTP API only
+	MetricsFlavorVictoriaMetric = "victoriametrics" // also accepts MetricsQL (PromQL superset)
+)
+
+// MetricsConfig is the metrics backend endpoint plus an OPTIONAL flavor override.
+// The endpoint keys (url/token_env/headers) are inlined so the existing
+// `metrics: {url: …}` shape is unchanged; Flavor is a new opt-in sub-key. Empty
+// Flavor ⇒ auto-detect (see MetricsFlavor*), which fails safe to plain Prometheus.
+type MetricsConfig struct {
+	Endpoint `yaml:",inline"`
+
+	// Flavor optionally pins the backend flavor instead of auto-detecting it:
+	// "victoriametrics" enables MetricsQL query guidance; "prometheus" (or an unknown
+	// value) keeps generic behaviour. Empty ⇒ probe at startup.
+	Flavor string `yaml:"flavor"`
 }
 
 // LogsConfig is the logs backend endpoint plus the OPTIONAL collector field-naming

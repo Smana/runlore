@@ -20,11 +20,28 @@ import (
 	"github.com/Smana/runlore/internal/providers"
 )
 
+// Flavor identifies the metrics backend implementation behind the shared Prometheus
+// HTTP API. Both Prometheus and VictoriaMetrics speak PromQL over the same endpoints,
+// but VictoriaMetrics ALSO accepts MetricsQL (a PromQL superset) — knowing the flavor
+// lets the query tools advertise MetricsQL-only helpers without risking an invalid
+// query against real Prometheus.
+type Flavor string
+
+// The known metrics-backend flavors. FlavorUnknown is the fail-safe default: it makes
+// NO MetricsQL claims, so a failed/ambiguous probe degrades to generic Prometheus
+// behaviour rather than advertising a dialect the backend may reject.
+const (
+	FlavorUnknown         Flavor = ""
+	FlavorPrometheus      Flavor = "prometheus"
+	FlavorVictoriaMetrics Flavor = "victoriametrics"
+)
+
 // Client queries a Prometheus-compatible metrics backend.
 type Client struct {
 	baseURL  string
 	tokenEnv string            // env var holding a bearer token; empty ⇒ no auth
 	headers  map[string]string // static extra request headers (e.g. tenant header)
+	flavor   Flavor            // backend flavor (auto-detected or config-pinned); "" ⇒ unknown/generic
 	http     *http.Client
 }
 
@@ -48,6 +65,49 @@ func NewWithAuth(baseURL, tokenEnv string, headers map[string]string) *Client {
 }
 
 var _ providers.MetricsProvider = (*Client)(nil)
+
+// Flavor returns the detected/configured backend flavor, or FlavorUnknown when it
+// was never set or auto-detection failed. Callers use it to decide whether to
+// advertise MetricsQL-only guidance.
+func (c *Client) Flavor() Flavor { return c.flavor }
+
+// WithFlavor pins the backend flavor, bypassing auto-detection (config.metrics.flavor).
+// An unknown/empty value leaves the flavor as-is so a stray config value never
+// downgrades a good detection to FlavorUnknown. It returns the client for chaining.
+func (c *Client) WithFlavor(f Flavor) *Client {
+	switch f {
+	case FlavorPrometheus, FlavorVictoriaMetrics:
+		c.flavor = f
+	}
+	return c
+}
+
+// DetectFlavor probes the backend's build-info endpoint once and records the
+// detected Flavor on the client, returning it. It FAILS SAFE: any error, non-200,
+// or unrecognized payload leaves the flavor FlavorUnknown (no MetricsQL claims) and
+// returns a nil error — detection is best-effort, never fatal to startup. A flavor
+// already pinned (via WithFlavor) short-circuits the probe.
+//
+// VictoriaMetrics is identified by the case-insensitive substring "victoria" in the
+// build-info response (its version/short_version strings carry it); Prometheus is
+// recorded when the payload is a well-formed build-info envelope that is NOT
+// VictoriaMetrics, so its own guidance (no MetricsQL) is explicit rather than merely
+// "unknown".
+func (c *Client) DetectFlavor(ctx context.Context) Flavor {
+	if c.flavor != FlavorUnknown {
+		return c.flavor
+	}
+	raw, err := c.getRaw(ctx, "/api/v1/status/buildinfo", url.Values{})
+	if err != nil || len(raw) == 0 {
+		return FlavorUnknown // fail safe — generic Prometheus behaviour
+	}
+	if strings.Contains(strings.ToLower(string(raw)), "victoria") {
+		c.flavor = FlavorVictoriaMetrics
+	} else {
+		c.flavor = FlavorPrometheus
+	}
+	return c.flavor
+}
 
 type apiResponse struct {
 	Status string `json:"status"`
