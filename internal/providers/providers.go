@@ -399,6 +399,74 @@ type EventWindower interface {
 	EventsSince(ctx context.Context, namespace, objectName string, warnOnly bool, sinceMinutes int) ([]KubeEvent, error)
 }
 
+// OwnerLink is one hop in a resource's ownerReferences chain, e.g. a Pod owned by
+// a ReplicaSet owned by a Deployment. Kind/Name/Namespace are engine-agnostic K8s
+// identifiers — no Flux/ArgoCD types leak through.
+type OwnerLink struct {
+	Kind      string
+	Name      string
+	Namespace string
+}
+
+// OwnerChain is the resolved ownerReferences walk from a starting object (a Pod)
+// up to its TOP controller, plus the GitOps object that manages that controller.
+// It answers "a pod is failing — WHICH GitOps object owns it, and did its live
+// state drift from what GitOps applied?" without the model guessing by name (G4).
+//
+// Engine-agnostic: ManagedByKind/ManagedByName name the owning Kustomization/
+// HelmRelease (Flux) or Application (ArgoCD) as plain strings; Engine records which
+// GitOps engine's tracking labels resolved it. Drift, when non-nil, is the live-vs-
+// GitOps drift verdict for the owning object (see DriftVerdict).
+type OwnerChain struct {
+	// Chain is the ownerReferences hops, start (the pod) FIRST, top controller LAST.
+	Chain []OwnerLink
+	// Top is the top controller (Deployment/StatefulSet/DaemonSet/Job); zero-valued
+	// Kind when the start object had no controller owner (a bare pod).
+	Top OwnerLink
+	// Engine is the GitOps engine whose tracking labels named the owner ("flux"/
+	// "argocd"), or "" when no tracking label was found on the top controller.
+	Engine Engine
+	// ManagedByKind/ManagedByName name the owning GitOps object (e.g. Kustomization
+	// "harbor", Application "harbor"); "" when no tracking label was found.
+	ManagedByKind      string
+	ManagedByNamespace string
+	ManagedByName      string
+	// Drift is the generic last-applied-configuration drift signal computed while
+	// walking (a manual `kubectl edit` on the top controller). nil when the signal
+	// was absent (no last-applied annotation) or the live spec matched it. The
+	// authoritative GitOps-engine verdict (Argo OutOfSync / Flux not-Ready) is layered
+	// on separately by the caller via GitOpsInspector — this is the cheap fallback.
+	Drift *DriftVerdict
+}
+
+// DriftVerdict states whether a live object drifted from what GitOps applied, and by
+// which signal. Signal is one of: "argocd-outofsync" (Argo's own OutOfSync verdict),
+// "flux-not-ready-drift" (a Flux object not-Ready with a drift/reconcile reason), or
+// "last-applied-configuration" (live spec differs from the kubectl.kubernetes.io/
+// last-applied-configuration annotation — a manual kubectl-apply edit). Detail is a
+// short human-readable summary; it never carries a full diff (out of scope).
+type DriftVerdict struct {
+	Drifted bool
+	Signal  string
+	Detail  string
+}
+
+// OwnerWalker is an OPTIONAL KubeReader extension (G4): it walks a resource's
+// ownerReferences up to its top controller and names the owning GitOps object from
+// the controller's Flux/ArgoCD tracking labels, and surfaces the generic last-applied-
+// configuration drift signal on that controller. It is SEPARATE from KubeReader (not
+// a new KubeReader method) so KubeReader's arity stays stable for existing callers
+// and fakes; the workload_ownership tool type-asserts for it exactly like
+// EventWindower/GitOpsInspector, and gracefully degrades when it is absent.
+type OwnerWalker interface {
+	// WorkloadOwnership resolves the owner chain for the pods selected by (namespace,
+	// labelSelector). It picks the first matching pod (or an explicit podName when
+	// set), walks Pod → ReplicaSet → Deployment (or StatefulSet/DaemonSet/Job), reads
+	// the top controller's tracking labels to name the owning GitOps object, and
+	// computes the last-applied-configuration drift signal on the top controller.
+	WorkloadOwnership(ctx context.Context, namespace, labelSelector, podName string) (OwnerChain, error)
+}
+
 // CloudProvider abstracts read-only cloud-side context for an incident. It adds
 // the AWS-layer "what changed" lens (mutating control-plane events) and cloud
 // resource health (instances/ASGs/nodegroups) that the in-cluster signals can't see.

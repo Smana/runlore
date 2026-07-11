@@ -230,6 +230,21 @@ func BuildModelAndTools(ctx context.Context, cfg *config.Config, gp providers.Gi
 		tools = append(tools, investigate.IncidentTimelineTool{GitOps: gp, Kube: kubeReader, Cloud: cloudProvider})
 		log.Info("incident_timeline enabled", "gitops", gp != nil, "cloud", cloudProvider != nil, "kube", kubeReader != nil)
 	}
+	// workload_ownership (G4) walks a failing pod's ownerReferences to its top
+	// controller and names the owning GitOps object from its tracking labels, then
+	// surfaces live-vs-GitOps drift (the "someone kubectl-edited it" cause what_changed
+	// can't see). It needs BOTH an OwnerWalker (the cluster reader supports it) AND a
+	// GitOpsInspector for the authoritative engine drift verdict — the inspector is
+	// optional (nil ⇒ the tool degrades to the last-applied fallback), but the walker is
+	// required, so registration is gated on the walker being present.
+	if ow, ok := kubeReader.(providers.OwnerWalker); ok {
+		var insp providers.GitOpsInspector
+		if gp != nil {
+			insp, _ = gp.(providers.GitOpsInspector)
+		}
+		tools = append(tools, investigate.WorkloadOwnershipTool{Kube: ow, Inspector: insp})
+		log.Info("workload_ownership enabled", "inspector", insp != nil)
+	}
 	tools = appendMCPTools(ctx, cfg, log, tools)
 	return model, tools, recall, cat
 }
