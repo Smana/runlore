@@ -45,11 +45,11 @@ type Config struct {
 
 	LeaderElection LeaderElection `yaml:"leader_election"` // HA: only the leader investigates
 
-	Metrics Endpoint `yaml:"metrics"` // PromQL backend (VictoriaMetrics/Prometheus) for query_metrics
-	Logs    Endpoint `yaml:"logs"`    // LogsQL backend (VictoriaLogs) for query_logs
-	Network Network  `yaml:"network"` // network-flow data source (pluggable, CNI-agnostic); empty Provider disables it
-	Cloud   Cloud    `yaml:"cloud"`   // cloud-side context (AWS); empty Provider disables it
-	MCP     MCP      `yaml:"mcp"`     // external MCP servers whose tools the agent may call (opt-in)
+	Metrics Endpoint   `yaml:"metrics"` // PromQL backend (VictoriaMetrics/Prometheus) for query_metrics
+	Logs    LogsConfig `yaml:"logs"`    // LogsQL backend (VictoriaLogs) for query_logs
+	Network Network    `yaml:"network"` // network-flow data source (pluggable, CNI-agnostic); empty Provider disables it
+	Cloud   Cloud      `yaml:"cloud"`   // cloud-side context (AWS); empty Provider disables it
+	MCP     MCP        `yaml:"mcp"`     // external MCP servers whose tools the agent may call (opt-in)
 
 	Server ServerConfig `yaml:"server"` // HTTP ingress (webhook authentication)
 
@@ -83,6 +83,78 @@ type Endpoint struct {
 	// tenant header for a multi-tenant VictoriaMetrics/VictoriaLogs instance
 	// ("X-Scope-OrgID: <tenant>"). Empty (default) ⇒ no extra headers.
 	Headers map[string]string `yaml:"headers"`
+}
+
+// LogsConfig is the logs backend endpoint plus the OPTIONAL collector field-naming
+// convention. The endpoint keys (url/token_env/headers) are inlined so the existing
+// `logs: {url: …}` shape is unchanged; Fields is a new opt-in sub-key that lets an
+// operator whose collector labels logs differently (e.g. Loki-style `namespace`
+// instead of `kubernetes.pod_namespace`) retarget every logs query and the renderer
+// WITHOUT a code change. Empty Fields ⇒ the shipped VictoriaLogs/vector convention.
+type LogsConfig struct {
+	Endpoint `yaml:",inline"`
+
+	Fields LogFields `yaml:"fields"`
+}
+
+// LogFields names the collector's log-schema fields. Every value defaults (via
+// Resolved) to EXACTLY the string the code hardcoded before this was configurable,
+// so an unset `logs.fields` is a no-op — the maintainer's test cluster keeps
+// working. Override only the field(s) your collector renames.
+type LogFields struct {
+	// ContainerField / NamespaceField / PodField are the STREAM label names used to
+	// build a `{k=v}` selector (query_logs) and to derive the compact pod/container
+	// identity in the renderer. Defaults: kubernetes.container_name /
+	// kubernetes.pod_namespace / kubernetes.pod_name.
+	ContainerField string `yaml:"container_field"`
+	NamespaceField string `yaml:"namespace_field"`
+	PodField       string `yaml:"pod_field"`
+
+	// LevelField is the severity field query_logs filters on (after unpack_json) and
+	// that the error-summary histogram splits by. Defaults: log.level.
+	LevelField string `yaml:"level_field"`
+
+	// UnpackPipe is the LogsQL pipe that promotes JSON body fields to top-level
+	// fields so LevelField becomes filterable. Default: unpack_json. Set to a
+	// different pipe (or leave empty to disable) if your logs are already flat.
+	UnpackPipe string `yaml:"unpack_pipe"`
+}
+
+// Default log-field convention: the VictoriaLogs + vector kubernetes-metadata
+// layout RunLore shipped with. Each Resolved default MUST equal one of these so an
+// unset config reproduces the previous hardcoded behaviour exactly.
+const (
+	defaultLogContainerField = "kubernetes.container_name"
+	defaultLogNamespaceField = "kubernetes.pod_namespace"
+	defaultLogPodField       = "kubernetes.pod_name"
+	defaultLogLevelField     = "log.level"
+	defaultLogUnpackPipe     = "unpack_json"
+)
+
+// Resolved returns the field convention with every unset value filled from the
+// shipped defaults, so callers can use the result without repeating the fallbacks.
+// UnpackPipe is deliberately allowed to be explicitly empty (already-flat logs), so
+// only an unset (zero) LogFields as a whole restores the default pipe — an operator
+// who sets any field but leaves unpack_pipe empty still gets the default pipe unless
+// they had a fully-zero struct. To keep the "any override" case simple, an empty
+// UnpackPipe here falls back to the default; disabling it is out of scope for v1.
+func (f LogFields) Resolved() LogFields {
+	if f.ContainerField == "" {
+		f.ContainerField = defaultLogContainerField
+	}
+	if f.NamespaceField == "" {
+		f.NamespaceField = defaultLogNamespaceField
+	}
+	if f.PodField == "" {
+		f.PodField = defaultLogPodField
+	}
+	if f.LevelField == "" {
+		f.LevelField = defaultLogLevelField
+	}
+	if f.UnpackPipe == "" {
+		f.UnpackPipe = defaultLogUnpackPipe
+	}
+	return f
 }
 
 // Cloud configures the cloud context provider. Auth is in-cluster identity (EKS

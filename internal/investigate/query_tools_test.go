@@ -149,6 +149,97 @@ func TestBuildLogsQL(t *testing.T) {
 	}
 }
 
+// TestBuildLogsQLWithCustomFields covers L1: a non-default field convention (a
+// Loki-style flat schema) must retarget the generated selector, unpack pipe, and
+// level field. The default (empty LogFields) path is covered by TestBuildLogsQL.
+func TestBuildLogsQLWithCustomFields(t *testing.T) {
+	conv := LogFields{
+		ContainerField: "container",
+		NamespaceField: "namespace",
+		LevelField:     "level",
+		UnpackPipe:     "unpack_logfmt",
+	}
+	got, err := buildLogsQLWith("", "harbor-core", "apps", "error", conv)
+	if err != nil {
+		t.Fatalf("buildLogsQLWith: %v", err)
+	}
+	want := `{container="harbor-core",namespace="apps"} | unpack_logfmt | level:error`
+	if got != want {
+		t.Fatalf("custom-field query =\n%q\nwant\n%q", got, want)
+	}
+}
+
+// TestBuildLogsQLDefaultsMatchLiterals pins the default-field generated query to the
+// EXACT string the tool produced before logs.fields existed — the L1 safety contract.
+func TestBuildLogsQLDefaultsMatchLiterals(t *testing.T) {
+	got, err := buildLogsQLWith("", "kustomize-controller", "flux-system", "error", LogFields{})
+	if err != nil {
+		t.Fatalf("buildLogsQLWith: %v", err)
+	}
+	want := `{kubernetes.container_name="kustomize-controller",kubernetes.pod_namespace="flux-system"} | unpack_json | log.level:error`
+	if got != want {
+		t.Fatalf("default query drifted from the shipped literal:\ngot  %q\nwant %q", got, want)
+	}
+}
+
+// TestQueryLogsToolNamespaceConfinement covers L2: with an allowlist configured, a
+// query naming an OUTSIDE namespace is rejected (non-fatally, so the model can
+// retry); the incident namespace and allowlisted namespaces are always permitted.
+func TestQueryLogsToolNamespaceConfinement(t *testing.T) {
+	base := QueryLogsTool{
+		Logs:              fakeLogs{lines: providers.LogResult{{Message: "ok"}}},
+		AllowedNamespaces: []string{"flux-system"},
+	}
+	// Bind the incident namespace exactly as the loop's scopeTools does.
+	tool := base.withIncidentNamespace("apps").(QueryLogsTool)
+
+	// Outside namespace: rejected, cluster not queried.
+	out, err := tool.Call(context.Background(), `{"namespace":"kube-system"}`)
+	if err != nil {
+		t.Fatalf("Call: %v", err)
+	}
+	if !strings.Contains(out, "not permitted") {
+		t.Fatalf("outside namespace must be rejected, got:\n%s", out)
+	}
+	// Incident namespace: always allowed.
+	if out, err := tool.Call(context.Background(), `{"namespace":"apps"}`); err != nil || !strings.Contains(out, "ok") {
+		t.Fatalf("incident namespace must be allowed, out=%q err=%v", out, err)
+	}
+	// Allowlisted namespace: allowed.
+	if out, err := tool.Call(context.Background(), `{"namespace":"flux-system"}`); err != nil || !strings.Contains(out, "ok") {
+		t.Fatalf("allowlisted namespace must be allowed, out=%q err=%v", out, err)
+	}
+}
+
+// TestQueryLogsToolPermissiveWithoutAllowlist covers the L2 non-breaking guarantee:
+// with NO allowlist and NO bound incident namespace, any namespace argument and any
+// raw query pass through unrestricted — today's behaviour is preserved.
+func TestQueryLogsToolPermissiveWithoutAllowlist(t *testing.T) {
+	tool := QueryLogsTool{Logs: fakeLogs{lines: providers.LogResult{{Message: "ok"}}}}
+	// A namespace argument that no allowlist covers must NOT be blocked.
+	if out, err := tool.Call(context.Background(), `{"namespace":"kube-system"}`); err != nil || !strings.Contains(out, "ok") {
+		t.Fatalf("no allowlist ⇒ any namespace allowed, out=%q err=%v", out, err)
+	}
+	// A raw query naming no namespace is untouched.
+	if out, err := tool.Call(context.Background(), `{"query":"{kubernetes.pod_namespace=\"kube-system\"}"}`); err != nil || !strings.Contains(out, "ok") {
+		t.Fatalf("raw query must pass through, out=%q err=%v", out, err)
+	}
+}
+
+// TestQueryLogsToolRawQueryUnconfined: even WITH an allowlist, a raw LogsQL query
+// that names no structured namespace argument is not blocked (there is nothing to
+// confine on — the SAFETY-MEDIUM carve-out).
+func TestQueryLogsToolRawQueryUnconfined(t *testing.T) {
+	tool := QueryLogsTool{
+		Logs:              fakeLogs{lines: providers.LogResult{{Message: "ok"}}},
+		AllowedNamespaces: []string{"flux-system"},
+		IncidentNamespace: "apps",
+	}
+	if out, err := tool.Call(context.Background(), `{"query":"error"}`); err != nil || !strings.Contains(out, "ok") {
+		t.Fatalf("raw query with no namespace arg must not be blocked, out=%q err=%v", out, err)
+	}
+}
+
 type fakeRangeMetrics struct {
 	matrix    providers.Matrix
 	gotQuery  string
