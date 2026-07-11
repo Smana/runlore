@@ -1663,3 +1663,114 @@ func TestSeedPrompt(t *testing.T) {
 		}
 	})
 }
+
+// TestTryRecallNearMissOnNonFire unit-tests the extracted tryRecall helper directly:
+// a consulted-but-non-firing recall (a below-threshold hit) must NOT deliver, must
+// report done==false, and must return the structural near-miss lead so Investigate can
+// fold it into the seed. This locks the helper's contract independently of the loop.
+func TestTryRecallNearMissOnNonFire(t *testing.T) {
+	discard := slog.New(slog.NewTextHandler(io.Discard, nil))
+	// A weak (below-threshold) hit: recall does not fire, but the same entry is a
+	// structural near-miss for this workload, so nearMiss surfaces it.
+	weak := fakeScored{hits: []catalog.ScoredEntry{
+		{Entry: catalog.Entry{Title: "Past incident", Description: "chart bump", Path: "past.md", Resource: "tooling/harbor"}, Score: 0.5}}}
+	li := &LoopInvestigator{
+		Log:    discard,
+		Recall: &Recall{MinScore: 2.0, Catalog: weak},
+	}
+	req := Request{Title: "HarborProbeFailure", Workload: providers.Workload{Namespace: "tooling", Name: "harbor"}}
+	result := "unresolved"
+	var totals providers.UsageTotals
+	delivered := 0
+	finish := func(providers.Investigation) { delivered++ }
+
+	nearMiss, done := li.tryRecall(context.Background(), req, &result, &totals, finish)
+	if done {
+		t.Fatal("a non-firing recall must report done==false so the loop runs")
+	}
+	if delivered != 0 {
+		t.Fatalf("a non-firing recall must not deliver, got %d deliveries", delivered)
+	}
+	if result != "unresolved" {
+		t.Fatalf("a non-firing recall must leave result untouched, got %q", result)
+	}
+	if nearMiss == nil || nearMiss.Path != "past.md" {
+		t.Fatalf("expected the structural near-miss lead, got %+v", nearMiss)
+	}
+}
+
+// TestTryRecallDisabledUnderAuto locks the auto-execution gate on the extracted
+// helper: with an auto policy, tryRecall must not consult the catalog at all (no
+// delivery, no near-miss, done==false) so a poisoned entry can shape neither an
+// auto-executed action nor the seed prompt.
+func TestTryRecallDisabledUnderAuto(t *testing.T) {
+	discard := slog.New(slog.NewTextHandler(io.Discard, nil))
+	strong := fakeScored{hits: []catalog.ScoredEntry{
+		{Entry: catalog.Entry{Title: "Known incident", Path: "known.md", Resource: "tooling/harbor"}, Score: 5.0}}}
+	li := &LoopInvestigator{
+		Log:     discard,
+		Recall:  &Recall{MinScore: 2.0, Catalog: strong},
+		Actions: action.New(config.ActionPolicy{Mode: config.ActionAuto}),
+	}
+	if !li.Actions.IsAuto() {
+		t.Fatalf("test setup: expected an auto policy")
+	}
+	req := Request{Title: "HarborProbeFailure", Workload: providers.Workload{Namespace: "tooling", Name: "harbor"}}
+	result := "unresolved"
+	var totals providers.UsageTotals
+	delivered := 0
+	nearMiss, done := li.tryRecall(context.Background(), req, &result, &totals, func(providers.Investigation) { delivered++ })
+	if done || delivered != 0 || nearMiss != nil {
+		t.Fatalf("instant recall must be disabled under auto: done=%v delivered=%d nearMiss=%+v", done, delivered, nearMiss)
+	}
+}
+
+// TestEnforceBudgetNudgeThenHardKill unit-tests the extracted enforceBudget helper
+// directly across its two over-budget outcomes on a fixed message set: the first call
+// (nudge not yet fired) appends the budget nudge, flips budgetNudged, sets the sticky
+// toolChoice, and reports done==false; the second (nudge already fired, still over)
+// hard-kills — delivering once, setting result, and reporting done==true.
+func TestEnforceBudgetNudgeThenHardKill(t *testing.T) {
+	discard := slog.New(slog.NewTextHandler(io.Discard, nil))
+	li := &LoopInvestigator{
+		Log:                       discard,
+		MaxTokensPerInvestigation: 1, // any real prompt exceeds this ⇒ always over budget
+	}
+	sys := li.system()
+	specs := []providers.ToolSpec{submitFindingsSpec()}
+	messages := []providers.Message{{Role: "user", Content: "seed"}}
+	var calib tokenCalibration
+	budgetNudged, compactionLogged := false, false
+	toolChoice := ""
+	result := "unresolved"
+	delivered := 0
+	finish := func(providers.Investigation) { delivered++ }
+
+	// First over-budget call: nudge fires, no delivery.
+	if done := li.enforceBudget(context.Background(), Request{Title: "x"}, sys, specs, &calib, &messages, &budgetNudged, &compactionLogged, &toolChoice, &result, finish); done {
+		t.Fatal("first over-budget call must nudge (done==false), not hard-kill")
+	}
+	if !budgetNudged {
+		t.Fatal("first over-budget call must set budgetNudged")
+	}
+	if toolChoice != submitFindingsName {
+		t.Fatalf("nudge must make toolChoice sticky-force %q, got %q", submitFindingsName, toolChoice)
+	}
+	if last := messages[len(messages)-1]; !strings.Contains(last.Content, "token budget") {
+		t.Fatalf("nudge message must be appended, got last=%+v", last)
+	}
+	if delivered != 0 {
+		t.Fatalf("the nudge step must not deliver, got %d", delivered)
+	}
+
+	// Second over-budget call: hard-kill, exactly one delivery.
+	if done := li.enforceBudget(context.Background(), Request{Title: "x", Fingerprint: "fp-kill"}, sys, specs, &calib, &messages, &budgetNudged, &compactionLogged, &toolChoice, &result, finish); !done {
+		t.Fatal("second over-budget call must hard-kill (done==true)")
+	}
+	if result != "budget_exceeded" {
+		t.Fatalf("hard-kill must set result=budget_exceeded, got %q", result)
+	}
+	if delivered != 1 {
+		t.Fatalf("hard-kill must deliver exactly once, got %d", delivered)
+	}
+}
