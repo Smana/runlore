@@ -6,6 +6,7 @@ import (
 	"context"
 	"strings"
 	"testing"
+	"time"
 
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
@@ -158,6 +159,59 @@ func TestPodStatusSurfacesOOMAndLimit(t *testing.T) {
 		if !strings.Contains(joined, want) {
 			t.Fatalf("pod_status reasons %q missing %q (the OOM-from-limit signal)", joined, want)
 		}
+	}
+}
+
+// K1 (v0.9): pod_status is the only cluster tool with no time anchor. It must carry
+// the container restart count, the pod's age (from CreationTimestamp), and the last
+// termination's started/finished times so the model can time-correlate a crash loop.
+func TestPodStatusCarriesRestartsAndTimes(t *testing.T) {
+	started := time.Date(2026, 7, 1, 14, 0, 0, 0, time.UTC)
+	finished := time.Date(2026, 7, 1, 14, 2, 30, 0, time.UTC)
+	created := time.Date(2026, 7, 1, 13, 45, 0, 0, time.UTC)
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:              "mem-hog",
+			Namespace:         "runlore-eval",
+			CreationTimestamp: metav1.NewTime(created),
+		},
+		Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "app"}}},
+		Status: corev1.PodStatus{
+			Phase: corev1.PodRunning,
+			ContainerStatuses: []corev1.ContainerStatus{{
+				Name:         "app",
+				Ready:        false,
+				RestartCount: 7,
+				State: corev1.ContainerState{Waiting: &corev1.ContainerStateWaiting{
+					Reason: "CrashLoopBackOff", Message: "back-off restarting failed container"}},
+				LastTerminationState: corev1.ContainerState{Terminated: &corev1.ContainerStateTerminated{
+					Reason:     "OOMKilled",
+					ExitCode:   137,
+					StartedAt:  metav1.NewTime(started),
+					FinishedAt: metav1.NewTime(finished),
+				}},
+			}},
+		},
+	}
+	r := New(fake.NewSimpleClientset(pod))
+	got, err := r.PodStatuses(context.Background(), "runlore-eval", "")
+	if err != nil {
+		t.Fatalf("PodStatuses: %v", err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("want 1 pod, got %d", len(got))
+	}
+	if got[0].Restarts != 7 {
+		t.Fatalf("Restarts = %d, want 7 (summed container RestartCount)", got[0].Restarts)
+	}
+	if got[0].CreatedAt.UTC() != created {
+		t.Fatalf("CreatedAt = %v, want %v (pod age anchor)", got[0].CreatedAt, created)
+	}
+	if got[0].LastTerminatedStarted.UTC() != started {
+		t.Fatalf("LastTerminatedStarted = %v, want %v", got[0].LastTerminatedStarted, started)
+	}
+	if got[0].LastTerminatedFinished.UTC() != finished {
+		t.Fatalf("LastTerminatedFinished = %v, want %v", got[0].LastTerminatedFinished, finished)
 	}
 }
 

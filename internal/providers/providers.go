@@ -354,6 +354,16 @@ type PodStatus struct {
 	PodIP    string
 	NodeName string
 	HostIP   string
+	// Time anchors (K1): pod_status was the only cluster tool with no notion of
+	// WHEN. Restarts is the summed container RestartCount (how many times the pod
+	// has looped); CreatedAt is the pod's creation time (its age); the
+	// LastTerminated* pair is the last-terminated container's start/finish, so a
+	// crash loop can be tied to a change/deploy time. All zero-valued when the
+	// signal is absent (a fresh, never-restarted pod), and rendered only then.
+	Restarts               int
+	CreatedAt              time.Time
+	LastTerminatedStarted  time.Time
+	LastTerminatedFinished time.Time
 }
 
 // KubeEvent is a normalized Kubernetes Event — surfaces causes that live in the
@@ -376,6 +386,17 @@ type KubeReader interface {
 	// Events returns recent Events in a namespace; objectName "" = all objects;
 	// warnOnly restricts to Warning events.
 	Events(ctx context.Context, namespace, objectName string, warnOnly bool) ([]KubeEvent, error)
+}
+
+// EventWindower is an optional KubeReader extension (K2): it adds a time window so
+// the newest in-window events are actually returned in a busy namespace, where a
+// single un-windowed page can miss them. It is a SEPARATE interface (not a new
+// Events parameter) to keep KubeReader.Events arity stable for existing callers and
+// fakes; kube_events type-asserts for it and falls back to Events when absent.
+type EventWindower interface {
+	// EventsSince behaves like KubeReader.Events but drops events older than
+	// sinceMinutes (0 = no lower bound, equivalent to Events).
+	EventsSince(ctx context.Context, namespace, objectName string, warnOnly bool, sinceMinutes int) ([]KubeEvent, error)
 }
 
 // CloudProvider abstracts read-only cloud-side context for an incident. It adds
