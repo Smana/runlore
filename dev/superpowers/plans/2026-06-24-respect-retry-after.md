@@ -8,7 +8,7 @@
 
 **Tech Stack:** Go stdlib only (`net/http`, `time`, `strconv`); plain `testing` (no testify); table-driven; errors wrapped with `%w`; `context.Context` first param of I/O funcs.
 
-**Design spec:** `docs/superpowers/specs/2026-06-24-respect-retry-after-design.md`
+**Design spec:** `dev/superpowers/specs/2026-06-24-respect-retry-after-design.md`
 
 **Conventions:**
 - Module path `github.com/Smana/runlore`.

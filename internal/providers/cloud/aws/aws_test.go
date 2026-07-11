@@ -130,6 +130,7 @@ func TestCloudChanges(t *testing.T) {
 			EventId: ptr("evt-1"), EventName: ptr("TerminateInstanceInAutoScalingGroup"),
 			EventSource: ptr("autoscaling.amazonaws.com"), Username: ptr("karpenter"), EventTime: ptr(t0),
 			Resources: []cttypes.Resource{{ResourceType: ptr("AWS::EC2::Instance"), ResourceName: ptr("i-0abc")}},
+			ReadOnly:  ptr("false"),
 		},
 	}}}}
 	c := &Client{ct: ct, maxEvents: 25}
@@ -154,8 +155,103 @@ func TestCloudChanges(t *testing.T) {
 	if ch.Source.Path != "TerminateInstanceInAutoScalingGroup by karpenter" {
 		t.Fatalf("unexpected rendered event: %q", ch.Source.Path)
 	}
-	// Mutating-only filter + resource scope must be passed to the API.
-	if len(ct.in.LookupAttributes) != 2 {
-		t.Fatalf("expected ReadOnly=false + ResourceName attributes, got %+v", ct.in.LookupAttributes)
+	// Resource-scoped query must send exactly ONE attribute (ResourceName), not two.
+	// The CloudTrail API rejects multi-attribute requests ("currently the list can
+	// contain only one item").
+	if len(ct.in.LookupAttributes) != 1 {
+		t.Fatalf("expected exactly 1 LookupAttribute (ResourceName), got %+v", ct.in.LookupAttributes)
+	}
+	if ct.in.LookupAttributes[0].AttributeKey != cttypes.LookupAttributeKeyResourceName {
+		t.Fatalf("expected ResourceName attribute key, got %v", ct.in.LookupAttributes[0].AttributeKey)
+	}
+}
+
+// TestCloudChangesUnscoped asserts that an unscoped query (no selector name) sends
+// a single ReadOnly=false attribute so mutating-only filtering is done server-side.
+func TestCloudChangesUnscoped(t *testing.T) {
+	t0 := time.Date(2026, 6, 21, 8, 12, 0, 0, time.UTC)
+	ct := &fakeCT{pages: []*cloudtrail.LookupEventsOutput{{Events: []cttypes.Event{
+		ctEvent("e1", "RunInstances", t0),
+	}}}}
+	c := &Client{ct: ct, maxEvents: 25}
+
+	_, err := c.CloudChanges(context.Background(), providers.Selector{}, providers.TimeWindow{})
+	if err != nil {
+		t.Fatalf("CloudChanges: %v", err)
+	}
+	// Unscoped: exactly ONE attribute, ReadOnly=false.
+	if len(ct.in.LookupAttributes) != 1 {
+		t.Fatalf("expected exactly 1 LookupAttribute (ReadOnly), got %+v", ct.in.LookupAttributes)
+	}
+	if ct.in.LookupAttributes[0].AttributeKey != cttypes.LookupAttributeKeyReadOnly {
+		t.Fatalf("expected ReadOnly attribute key, got %v", ct.in.LookupAttributes[0].AttributeKey)
+	}
+	if deref(ct.in.LookupAttributes[0].AttributeValue) != "false" {
+		t.Fatalf("expected ReadOnly=false, got %q", deref(ct.in.LookupAttributes[0].AttributeValue))
+	}
+}
+
+// TestCloudChangesResourceScopedFiltersReadOnly asserts that read-only events
+// (e.g. Describe* calls) returned by a resource-scoped CloudTrail query are
+// dropped client-side, since the API cannot filter by ReadOnly when scoped by
+// ResourceName.
+func TestCloudChangesResourceScopedFiltersReadOnly(t *testing.T) {
+	t0 := time.Date(2026, 6, 21, 8, 12, 0, 0, time.UTC)
+	ct := &fakeCT{pages: []*cloudtrail.LookupEventsOutput{{Events: []cttypes.Event{
+		{
+			EventId: ptr("w1"), EventName: ptr("RunInstances"),
+			EventSource: ptr("ec2.amazonaws.com"), Username: ptr("user"), EventTime: ptr(t0),
+			ReadOnly: ptr("false"), // mutating — must be kept
+		},
+		{
+			EventId: ptr("r1"), EventName: ptr("DescribeInstances"),
+			EventSource: ptr("ec2.amazonaws.com"), Username: ptr("user"), EventTime: ptr(t0.Add(-time.Minute)),
+			ReadOnly: ptr("true"), // read-only — must be filtered out client-side
+		},
+	}}}}
+	c := &Client{ct: ct, maxEvents: 25}
+
+	changes, err := c.CloudChanges(context.Background(), providers.Selector{Name: "i-0abc"}, providers.TimeWindow{})
+	if err != nil {
+		t.Fatalf("CloudChanges: %v", err)
+	}
+	if len(changes) != 1 {
+		t.Fatalf("want 1 change (mutating only), got %d: %v", len(changes), changes)
+	}
+	if changes[0].ToRev != "w1" {
+		t.Fatalf("expected the mutating event w1, got %q", changes[0].ToRev)
+	}
+}
+
+// TestCloudChangesErrorCode asserts that a failed CloudTrail event carrying an
+// errorCode in the raw JSON payload renders a FAILED suffix in Source.Path so the
+// model can see that the call (e.g. RunInstances → InsufficientInstanceCapacity)
+// did not succeed.
+func TestCloudChangesErrorCode(t *testing.T) {
+	t0 := time.Date(2026, 6, 21, 8, 12, 0, 0, time.UTC)
+	rawJSON := `{"errorCode":"InsufficientInstanceCapacity","errorMessage":"no capacity"}`
+	ct := &fakeCT{pages: []*cloudtrail.LookupEventsOutput{{Events: []cttypes.Event{
+		{
+			EventId: ptr("evt-fail"), EventName: ptr("RunInstances"),
+			EventSource: ptr("ec2.amazonaws.com"), Username: ptr("karpenter"), EventTime: ptr(t0),
+			ReadOnly:        ptr("false"),
+			CloudTrailEvent: ptr(rawJSON),
+		},
+	}}}}
+	c := &Client{ct: ct, maxEvents: 25}
+
+	changes, err := c.CloudChanges(context.Background(), providers.Selector{Name: "i-0abc"}, providers.TimeWindow{})
+	if err != nil {
+		t.Fatalf("CloudChanges: %v", err)
+	}
+	if len(changes) != 1 {
+		t.Fatalf("want 1 change, got %d", len(changes))
+	}
+	path := changes[0].Source.Path
+	if !strings.Contains(path, "FAILED: InsufficientInstanceCapacity") {
+		t.Fatalf("expected FAILED suffix with errorCode, got %q", path)
+	}
+	if !strings.Contains(path, "no capacity") {
+		t.Fatalf("expected errorMessage in path, got %q", path)
 	}
 }

@@ -1,0 +1,30 @@
+# A curated demo scenario for `lore demo investigate` — a chart bump that turned on
+# DB schema migrations at startup, so a dependency (harbor-db) blocks the app
+# (harbor-core). It seeds FAKE providers (no cluster needed) so the real investigation
+# loop can be watched end to end. Reuses the eval Case shape:
+#   lore demo investigate --scenario harbor-chart-bump
+name: harbor-chart-bump
+prompt: |
+  HarborProbeFailure (critical, prod, namespace apps): harbor-core readiness probes
+  are failing and the Service is returning 503s.
+tools:
+  what_changed: |
+    flux Kustomization/apps  aaa111..bbb222
+    --- apps/harbor/values.yaml
+    -  tag: 1.14.2
+    +  tag: 1.15.0          # chart 1.15 enables DB schema migrations on startup
+  query_metrics: |
+    up{job="harbor-core"} = 0
+    kube_pod_container_status_restarts_total{pod="harbor-db-0"} = 7
+  query_logs: |
+    harbor-db-0  FATAL: could not obtain migration lock; another migration is in progress
+    harbor-core  dial tcp harbor-db:5432: connect: connection refused
+  network_drops: |
+    (no dropped flows)
+workload:
+  namespace: apps
+  name: harbor-core
+expected:
+  # The agent should tie the failure to the chart bump's DB migration on harbor-db.
+  must_contain: [chart, migration, harbor-db]
+  min_confidence: 0.5

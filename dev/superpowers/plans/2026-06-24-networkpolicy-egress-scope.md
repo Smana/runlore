@@ -10,7 +10,7 @@
 
 **Tech Stack:** Helm (chart in `deploy/helm/runlore`), `helm template`/`helm lint`, `yq`/`grep` (or the `helm-unittest` plugin per D4) for render assertions; `hack/e2e-k3d.sh` for the live check.
 
-**Spec:** `docs/superpowers/specs/2026-06-24-networkpolicy-egress-scope-design.md`
+**Spec:** `dev/superpowers/specs/2026-06-24-networkpolicy-egress-scope-design.md`
 
 **Branch:** `fix/networkpolicy-egress-scope`
 

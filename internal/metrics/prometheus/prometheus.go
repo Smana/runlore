@@ -20,11 +20,28 @@ import (
 	"github.com/Smana/runlore/internal/providers"
 )
 
+// Flavor identifies the metrics backend implementation behind the shared Prometheus
+// HTTP API. Both Prometheus and VictoriaMetrics speak PromQL over the same endpoints,
+// but VictoriaMetrics ALSO accepts MetricsQL (a PromQL superset) — knowing the flavor
+// lets the query tools advertise MetricsQL-only helpers without risking an invalid
+// query against real Prometheus.
+type Flavor string
+
+// The known metrics-backend flavors. FlavorUnknown is the fail-safe default: it makes
+// NO MetricsQL claims, so a failed/ambiguous probe degrades to generic Prometheus
+// behaviour rather than advertising a dialect the backend may reject.
+const (
+	FlavorUnknown         Flavor = ""
+	FlavorPrometheus      Flavor = "prometheus"
+	FlavorVictoriaMetrics Flavor = "victoriametrics"
+)
+
 // Client queries a Prometheus-compatible metrics backend.
 type Client struct {
 	baseURL  string
 	tokenEnv string            // env var holding a bearer token; empty ⇒ no auth
 	headers  map[string]string // static extra request headers (e.g. tenant header)
+	flavor   Flavor            // backend flavor (auto-detected or config-pinned); "" ⇒ unknown/generic
 	http     *http.Client
 }
 
@@ -49,12 +66,57 @@ func NewWithAuth(baseURL, tokenEnv string, headers map[string]string) *Client {
 
 var _ providers.MetricsProvider = (*Client)(nil)
 
+// Flavor returns the detected/configured backend flavor, or FlavorUnknown when it
+// was never set or auto-detection failed. Callers use it to decide whether to
+// advertise MetricsQL-only guidance.
+func (c *Client) Flavor() Flavor { return c.flavor }
+
+// WithFlavor pins the backend flavor, bypassing auto-detection (config.metrics.flavor).
+// An unknown/empty value leaves the flavor as-is so a stray config value never
+// downgrades a good detection to FlavorUnknown. It returns the client for chaining.
+func (c *Client) WithFlavor(f Flavor) *Client {
+	switch f {
+	case FlavorPrometheus, FlavorVictoriaMetrics:
+		c.flavor = f
+	}
+	return c
+}
+
+// DetectFlavor probes the backend's build-info endpoint once and records the
+// detected Flavor on the client, returning it. It FAILS SAFE: any error, non-200,
+// or unrecognized payload leaves the flavor FlavorUnknown (no MetricsQL claims) and
+// returns a nil error — detection is best-effort, never fatal to startup. A flavor
+// already pinned (via WithFlavor) short-circuits the probe.
+//
+// VictoriaMetrics is identified by the case-insensitive substring "victoria" in the
+// build-info response (its version/short_version strings carry it); Prometheus is
+// recorded when the payload is a well-formed build-info envelope that is NOT
+// VictoriaMetrics, so its own guidance (no MetricsQL) is explicit rather than merely
+// "unknown".
+func (c *Client) DetectFlavor(ctx context.Context) Flavor {
+	if c.flavor != FlavorUnknown {
+		return c.flavor
+	}
+	raw, err := c.getRaw(ctx, "/api/v1/status/buildinfo", url.Values{})
+	if err != nil || len(raw) == 0 {
+		return FlavorUnknown // fail safe — generic Prometheus behaviour
+	}
+	if strings.Contains(strings.ToLower(string(raw)), "victoria") {
+		c.flavor = FlavorVictoriaMetrics
+	} else {
+		c.flavor = FlavorPrometheus
+	}
+	return c.flavor
+}
+
 type apiResponse struct {
 	Status string `json:"status"`
 	Error  string `json:"error"`
 	Data   struct {
-		ResultType string            `json:"resultType"`
-		Result     []json.RawMessage `json:"result"`
+		ResultType string `json:"resultType"`
+		// Result is kept raw so scalar/string ([ts,"val"]) and vector/matrix
+		// ([{...},...]) shapes can be decoded per resultType by the caller.
+		Result json.RawMessage `json:"result"`
 	} `json:"data"`
 }
 
@@ -68,8 +130,24 @@ func (c *Client) Query(ctx context.Context, promql string, at time.Time) (provid
 	if err != nil {
 		return nil, err
 	}
-	out := make(providers.Samples, 0, len(resp.Data.Result))
-	for _, raw := range resp.Data.Result {
+	// scalar/string results are a bare [ts, "val"] pair, not the vector
+	// [{metric,value}] shape. json.Unmarshal into the vector struct fails on them and
+	// used to surface a raw parse error to the model; parse them into a single
+	// unlabeled sample instead so `scalar(...)` / `count(...)`-style queries work.
+	if resp.Data.ResultType == "scalar" || resp.Data.ResultType == "string" {
+		var pair [2]any
+		if err := json.Unmarshal(resp.Data.Result, &pair); err != nil {
+			return nil, fmt.Errorf("parse %s result: %w", resp.Data.ResultType, err)
+		}
+		ts, val := parsePoint(pair)
+		return providers.Samples{{Metric: map[string]string{}, Value: val, Time: ts}}, nil
+	}
+	var results []json.RawMessage
+	if err := json.Unmarshal(resp.Data.Result, &results); err != nil {
+		return nil, fmt.Errorf("parse %s result: %w", resp.Data.ResultType, err)
+	}
+	out := make(providers.Samples, 0, len(results))
+	for _, raw := range results {
 		var item struct {
 			Metric map[string]string `json:"metric"`
 			Value  [2]any            `json:"value"`
@@ -83,10 +161,26 @@ func (c *Client) Query(ctx context.Context, promql string, at time.Time) (provid
 	return out, nil
 }
 
-// QueryRange runs a range PromQL query over a window.
+// maxRangePoints bounds the (end-start)/step point count per range request.
+// Prometheus/VictoriaMetrics reject a query_range whose resolution exceeds ~11k
+// points; this is a defensive backstop below that limit so a caller (or the
+// query_metrics_range tool) that passes an unbounded window/step still gets a
+// served, coarsened response instead of a hard backend error.
+const maxRangePoints = 11000
+
+// QueryRange runs a range PromQL query over a window. If (end-start)/step would
+// exceed maxRangePoints, the step is raised so the request stays within the
+// backend's point cap — a last-resort guard; the range tool clamps earlier and
+// annotates the coarsening for the operator.
 func (c *Client) QueryRange(ctx context.Context, promql string, w providers.TimeWindow, step time.Duration) (providers.Matrix, error) {
 	if step <= 0 {
 		step = time.Minute
+	}
+	if span := w.End.Sub(w.Start); span > 0 && step > 0 {
+		if points := int(span / step); points > maxRangePoints {
+			// round up so we land at/under the cap, never one point over.
+			step = time.Duration((span.Seconds()/float64(maxRangePoints))+1) * time.Second
+		}
 	}
 	v := url.Values{
 		"query": {promql},
@@ -98,8 +192,12 @@ func (c *Client) QueryRange(ctx context.Context, promql string, w providers.Time
 	if err != nil {
 		return nil, err
 	}
-	out := make(providers.Matrix, 0, len(resp.Data.Result))
-	for _, raw := range resp.Data.Result {
+	var results []json.RawMessage
+	if err := json.Unmarshal(resp.Data.Result, &results); err != nil {
+		return nil, fmt.Errorf("parse %s result: %w", resp.Data.ResultType, err)
+	}
+	out := make(providers.Matrix, 0, len(results))
+	for _, raw := range results {
 		var item struct {
 			Metric map[string]string `json:"metric"`
 			Values [][2]any          `json:"values"`
@@ -115,6 +213,70 @@ func (c *Client) QueryRange(ctx context.Context, promql string, w providers.Time
 		out = append(out, s)
 	}
 	return out, nil
+}
+
+// LabelValues lists the values of a label across series matching matchers, within
+// the window — the metric/label discovery path so the agent can find real names
+// instead of guessing (label "__name__" enumerates metric names). It hits
+// GET /api/v1/label/<label>/values?match[]=…&start=…&end=…, scoping by matcher +
+// window so it stays cheap on a big TSDB. Values are returned as the backend
+// orders them (Prometheus sorts; VictoriaMetrics may not) — callers that need a
+// stable order sort themselves.
+func (c *Client) LabelValues(ctx context.Context, label string, matchers []string, w providers.TimeWindow) ([]string, error) {
+	v := url.Values{}
+	for _, m := range matchers {
+		if m != "" {
+			v.Add("match[]", m)
+		}
+	}
+	if !w.Start.IsZero() {
+		v.Set("start", strconv.FormatInt(w.Start.Unix(), 10))
+	}
+	if !w.End.IsZero() {
+		v.Set("end", strconv.FormatInt(w.End.Unix(), 10))
+	}
+	// The label name is a path segment; escape it so a label like "__name__" (or an
+	// arbitrary one) can't break out of the path.
+	resp, err := c.getRaw(ctx, "/api/v1/label/"+url.PathEscape(label)+"/values", v)
+	if err != nil {
+		return nil, err
+	}
+	var out []string
+	if err := json.Unmarshal(resp, &out); err != nil {
+		return nil, fmt.Errorf("parse label values: %w", err)
+	}
+	return out, nil
+}
+
+// getRaw performs a GET and returns the raw `data` field, for endpoints whose
+// data shape differs from the query result envelope (label values is a []string).
+func (c *Client) getRaw(ctx context.Context, path string, v url.Values) (json.RawMessage, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.baseURL+path+"?"+v.Encode(), nil)
+	if err != nil {
+		return nil, err
+	}
+	c.setAuth(req)
+	resp, err := c.http.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("metrics query: %w", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	data, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("metrics status %d: %s", resp.StatusCode, string(data))
+	}
+	var r struct {
+		Status string          `json:"status"`
+		Error  string          `json:"error"`
+		Data   json.RawMessage `json:"data"`
+	}
+	if err := json.Unmarshal(data, &r); err != nil {
+		return nil, fmt.Errorf("parse metrics response: %w", err)
+	}
+	if r.Status != "success" {
+		return nil, fmt.Errorf("metrics error: %s", r.Error)
+	}
+	return r.Data, nil
 }
 
 func (c *Client) get(ctx context.Context, path string, v url.Values) (*apiResponse, error) {

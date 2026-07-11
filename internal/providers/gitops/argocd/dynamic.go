@@ -76,7 +76,10 @@ func (r *dynamicReader) GetApplication(ctx context.Context, namespace, name stri
 }
 
 // ListEvents returns recent Event lines for an involved object, filtered by name
-// (server-side) + kind (client-side), rendered as "Type Reason Message".
+// (server-side) + kind (client-side). Each line is rendered as
+// "<lastTimestamp> Type Reason(xN) Message" — mirroring the kube_events tool so a
+// GitOps event carries the same WHEN + repeat-count context (RunLore G2).
+// Timestamp/count are omitted when the API doesn't set them.
 func (r *dynamicReader) ListEvents(ctx context.Context, namespace, name, kind string) ([]string, error) {
 	opts := metav1.ListOptions{Limit: 100}
 	if name != "" {
@@ -100,9 +103,51 @@ func (r *dynamicReader) ListEvents(ctx context.Context, namespace, name, kind st
 		typ, _, _ := unstructured.NestedString(o, "type")
 		reason, _, _ := unstructured.NestedString(o, "reason")
 		msg, _, _ := unstructured.NestedString(o, "message")
-		out = append(out, fmt.Sprintf("%s %s %s", typ, reason, msg))
+		out = append(out, renderEventLine(o, typ, reason, msg))
 	}
 	return out, nil
+}
+
+// renderEventLine formats one Kubernetes Event as "<lastTimestamp> Type Reason(xN) Message",
+// mirroring the kube_events tool (G2). The leading timestamp (RFC3339, UTC) comes from
+// lastTimestamp, falling back to eventTime (the newer Events API field); it is omitted
+// when neither is set. "(xN)" is appended only when count>1.
+func renderEventLine(o map[string]any, typ, reason, msg string) string {
+	when := ""
+	if ts := eventLastTime(o); !ts.IsZero() {
+		when = ts.UTC().Format(time.RFC3339) + " "
+	}
+	count := ""
+	if c := eventCount(o); c > 1 {
+		count = fmt.Sprintf("(x%d)", c)
+	}
+	return fmt.Sprintf("%s%s %s%s %s", when, typ, reason, count, msg)
+}
+
+// eventLastTime returns an Event's most-recent occurrence time: lastTimestamp
+// (core/v1 aggregated events), falling back to eventTime (events.k8s.io/v1). Zero
+// when neither is present or parseable.
+func eventLastTime(o map[string]any) time.Time {
+	for _, field := range []string{"lastTimestamp", "eventTime"} {
+		if s, _, _ := unstructured.NestedString(o, field); s != "" {
+			if ts, err := time.Parse(time.RFC3339, s); err == nil {
+				return ts
+			}
+		}
+	}
+	return time.Time{}
+}
+
+// eventCount returns an Event's occurrence count from the "count" field (unstructured
+// decodes JSON numbers as int64 or float64). Zero when absent.
+func eventCount(o map[string]any) int64 {
+	switch c := o["count"].(type) {
+	case int64:
+		return c
+	case float64:
+		return int64(c)
+	}
+	return 0
 }
 
 // WatchApplications watches all Applications via a dynamic informer (list-watch
@@ -164,6 +209,7 @@ func sendEvent(ctx context.Context, out chan<- ApplicationEvent, ev ApplicationE
 func applicationFromUnstructured(u *unstructured.Unstructured) application {
 	repoURL, path := sourceRepoPath(u)
 	rev := syncRevision(u)
+	destNS, _, _ := unstructured.NestedString(u.Object, "spec", "destination", "namespace")
 	syncStatus, _, _ := unstructured.NestedString(u.Object, "status", "sync", "status")
 	health, _, _ := unstructured.NestedString(u.Object, "status", "health", "status")
 	phase, _, _ := unstructured.NestedString(u.Object, "status", "operationState", "phase")
@@ -171,15 +217,36 @@ func applicationFromUnstructured(u *unstructured.Unstructured) application {
 	return application{
 		Name:           u.GetName(),
 		Namespace:      u.GetNamespace(),
+		DestNamespace:  destNS,
 		RepoURL:        repoURL,
 		Path:           path,
 		Revision:       rev,
 		PrevRevision:   prevRevision(u),
+		DeployedAt:     lastDeployedAt(u),
 		HealthStatus:   health,
 		SyncStatus:     syncStatus,
 		OperationPhase: phase,
 		Message:        msg,
 	}
+}
+
+// lastDeployedAt returns the deploy time of the latest status.history entry — the
+// moment Argo CD applied the current revision — parsed from RFC3339. Zero when
+// there is no history or the field is absent/unparseable (RunLore B1).
+func lastDeployedAt(u *unstructured.Unstructured) time.Time {
+	hist, found, _ := unstructured.NestedSlice(u.Object, "status", "history")
+	if !found || len(hist) == 0 {
+		return time.Time{}
+	}
+	m, ok := hist[len(hist)-1].(map[string]any)
+	if !ok {
+		return time.Time{}
+	}
+	ts, _ := m["deployedAt"].(string)
+	if t, err := time.Parse(time.RFC3339, ts); err == nil {
+		return t
+	}
+	return time.Time{}
 }
 
 // sourceRepoPath returns the repoURL + path of the Application's source. It reads

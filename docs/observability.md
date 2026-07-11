@@ -53,7 +53,7 @@ estimate) keep the SDK defaults and are read as heatmaps, not percentiles.
 | `runlore_alerts_suppressed_total` | counter | — | incidents dropped by cooldown |
 | `runlore_incidents_debounced_total` | counter | — | firing alerts dropped as self-resolving (a matching `resolved` webhook arrived within `triggers.incidents.debounce`) |
 | `runlore_investigations_started_total` | counter | — | investigations actually begun |
-| `runlore_investigations_completed_total` | counter | `result` | investigations finished (`resolved`/`unresolved`/`recall`/`error`/`max_steps`/`budget_exceeded`/`inconclusive`/`recurrence_suppressed`) |
+| `runlore_investigations_completed_total` | counter | `result` | investigations finished (`resolved`/`unresolved`/`recall`/`timeout`/`error`/`max_steps`/`max_steps_degraded`/`budget_exceeded`/`inconclusive`/`recurrence_suppressed`) |
 | `runlore_investigation_duration_seconds` | histogram | `result` | wall-clock per investigation |
 | `runlore_investigations_throttled_total` | counter | — | starts requeued by the rate limiter |
 | `runlore_investigations_dropped_total` | counter | — | dropped (rate-limiter max-requeues or token-budget kill) |

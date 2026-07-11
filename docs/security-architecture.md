@@ -240,9 +240,10 @@ time (`internal/server/server.go`):
   compared with `subtle.ConstantTimeCompare`. The check **fails closed** — an empty configured
   token denies everything, and config validation refuses to start `approve`/`auto` without one, so
   a running executing-rung server always has a token.
-- **The alert webhook**: optional bearer token (constant-time), **mandatory under
-  `actions.mode=auto`** — an unauthenticated alert must not be able to trigger an investigation
-  that ends in an unattended cluster write.
+- **The alert webhook**: optional bearer token (constant-time), **mandatory once any model is
+  configured** (the `serve` path fails closed — an unauthenticated webhook must not reach the LLM
+  and bill the model) and enforced by `config.Validate` under `actions.mode=auto`; warning-only for
+  the model-less log-only investigator.
 - **Slack interactions**: the request signature is verified (HMAC-SHA256 over `v0:{ts}:{body}`)
   with a ±5-minute timestamp window against replay — and then the **user** is authorized
   separately: only Slack IDs in the approver allowlist may approve *or* reject (a signature-valid
@@ -258,7 +259,7 @@ audit log; see [Security model → Tamper-evident audit log](security-model.md#t
 
 | Attacker-controlled input | Reaches the model? | What stops it from doing damage |
 | --- | --- | --- |
-| **Alert text** (webhook payload) | Yes, redacted | Bearer-token webhook auth (mandatory under `auto`); ingress redaction; injected "instructions" can only shape a *proposal*, which the action gate re-derives and re-validates |
+| **Alert text** (webhook payload) | Yes, redacted | Bearer-token webhook auth (mandatory once a model is configured; also required under `actions.mode=auto`); ingress redaction; injected "instructions" can only shape a *proposal*, which the action gate re-derives and re-validates |
 | **Cluster logs / events / status** (pod logs, controller logs, kube events) | Yes, redacted | RBAC + app-layer namespace allowlist bound what's readable ([Security model → RBAC](security-model.md#least-privilege-rbac)); redact-before-truncate at the tool-output chokepoint; mrkdwn/HTML escaping keeps quoted lines inert in chat |
 | **Git diffs** (`what_changed`) | Yes, redacted | Same chokepoint; `kind: Secret` `data:`/`stringData:` values masked even inside diff markers |
 | **MCP tool output** (operator-added servers) | Yes, redacted | Same single chokepoint (no per-tool wiring to forget); no cluster-mutating MCP tools exist; MCP endpoints get the SecureClient redirect guard and the cleartext-key startup check |

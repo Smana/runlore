@@ -1,7 +1,7 @@
 # KB-Entry Validation — Implementation Plan
 
 > **For agentic workers:** execute task-by-task with TDD (test → fail → impl →
-> pass → commit). Spec: `docs/superpowers/specs/2026-06-24-kb-entry-validation-design.md`.
+> pass → commit). Spec: `dev/superpowers/specs/2026-06-24-kb-entry-validation-design.md`.
 
 **Goal:** A shared `internal/kbvalidate` package (deterministic structural gate +
 LLM semantic advisory), a `lore validate-kb` CLI, and a `catalog.Load` strict-warn,

@@ -333,22 +333,37 @@ func TestLoopNudgesOnProseTurn(t *testing.T) {
 }
 
 func TestLoopInconclusiveAfterNudge(t *testing.T) {
-	// If the model still won't call a tool after the nudge, give up — don't loop forever.
+	// If the model still won't call a tool after the nudge, stop looping — but do NOT
+	// go silent: deliver a synthetic inconclusive result so OnComplete still fires
+	// (notification/ledger/KB draft) after the paid model calls (#234 follow-up).
 	model := &scriptModel{responses: []providers.CompletionResponse{
 		{Text: "I think it's the database."},
 		{Text: "Still just the database, no tool call."},
 	}}
-	var delivered bool
+	var got *providers.Investigation
+	var deliveries int
 	li := &LoopInvestigator{
 		Model:      model,
 		Log:        slog.New(slog.NewTextHandler(io.Discard, nil)),
-		OnComplete: func(providers.Investigation) { delivered = true },
+		OnComplete: func(inv providers.Investigation) { deliveries++; got = &inv },
 	}
-	if err := li.Investigate(context.Background(), Request{Title: "x"}); err != nil {
+	if err := li.Investigate(context.Background(), Request{Title: "x", Fingerprint: "fp-nudge"}); err != nil {
 		t.Fatalf("Investigate: %v", err)
 	}
-	if delivered {
-		t.Fatal("expected no delivery when the model never calls submit_findings")
+	if deliveries != 1 || got == nil {
+		t.Fatalf("expected exactly one inconclusive delivery, got %d (%+v)", deliveries, got)
+	}
+	if got.Verdict != providers.VerdictInconclusive {
+		t.Fatalf("non-convergence must deliver an inconclusive verdict, got %q", got.Verdict)
+	}
+	if len(got.RootCauses) != 0 {
+		t.Fatalf("a non-converged investigation must produce no root cause: %+v", got)
+	}
+	if len(got.DataGaps) == 0 || !strings.Contains(strings.ToLower(got.DataGaps[0]), "prose") {
+		t.Fatalf("prose-inconclusive result must name the reason in DataGaps, got %+v", got.DataGaps)
+	}
+	if got.Fingerprint != "fp-nudge" {
+		t.Fatalf("inconclusive result must carry the fingerprint for attribution, got %q", got.Fingerprint)
 	}
 	if model.i != 2 {
 		t.Fatalf("expected exactly 2 model calls (initial + one nudge), got %d", model.i)
@@ -815,6 +830,115 @@ func TestLoopInvestigator(t *testing.T) {
 	}
 }
 
+// TestTerminalExitsDeliverExactlyOnce is the invariant lock for #234's follow-up:
+// EVERY terminal exit that accepts an investigation must fire OnComplete exactly once
+// (no path may return nil with only a Warn after paid model calls). It drives each
+// exit condition — happy submit_findings, timeout, refusal, prose-inconclusive-after-
+// nudge, and max-steps exhaustion — through a counting OnComplete and asserts a single
+// delivery, plus that the non-converged exits carry an inconclusive verdict with a
+// populated honesty reason (DataGaps for the process-limitation exits; Unresolved for
+// timeout/refusal, which pre-date this change and use that channel).
+func TestTerminalExitsDeliverExactlyOnce(t *testing.T) {
+	discard := slog.New(slog.NewTextHandler(io.Discard, nil))
+	cases := []struct {
+		name           string
+		build          func(onComplete func(providers.Investigation)) (*LoopInvestigator, Request)
+		wantConverged  bool // true = a real finding; false = synthetic inconclusive
+		reasonContains string
+		reasonInGaps   bool // true = expect the reason in DataGaps, false = Unresolved
+	}{
+		{
+			name: "happy_submit_findings",
+			build: func(oc func(providers.Investigation)) (*LoopInvestigator, Request) {
+				m := &scriptModel{responses: []providers.CompletionResponse{
+					{ToolCalls: []providers.ToolCall{{ID: "1", Name: submitFindingsName,
+						Args: `{"confidence":0.8,"root_causes":[{"summary":"chart bump broke db","confidence":0.8}]}`}}},
+				}}
+				return &LoopInvestigator{Model: m, Log: discard, OnComplete: oc}, Request{Title: "Happy", Fingerprint: "fp-happy"}
+			},
+			wantConverged: true,
+		},
+		{
+			name: "timeout",
+			build: func(oc func(providers.Investigation)) (*LoopInvestigator, Request) {
+				return &LoopInvestigator{Model: &blockingModel{}, Log: discard, MaxSteps: 20,
+					Timeout: 20 * time.Millisecond, OnComplete: oc}, Request{Title: "HungClone", Fingerprint: "fp-timeout"}
+			},
+			reasonContains: "deadline",
+			reasonInGaps:   false,
+		},
+		{
+			name: "refusal",
+			build: func(oc func(providers.Investigation)) (*LoopInvestigator, Request) {
+				m := &scriptModel{responses: []providers.CompletionResponse{{StopReason: "refusal"}}}
+				return &LoopInvestigator{Model: m, Log: discard, OnComplete: oc}, Request{Title: "Refused", Fingerprint: "fp-refuse"}
+			},
+			reasonContains: "declined",
+			reasonInGaps:   false,
+		},
+		{
+			name: "prose_inconclusive_after_nudge",
+			build: func(oc func(providers.Investigation)) (*LoopInvestigator, Request) {
+				m := &scriptModel{responses: []providers.CompletionResponse{
+					{Text: "I think it's the database."},
+					{Text: "Still just the database, no tool call."},
+				}}
+				return &LoopInvestigator{Model: m, Log: discard, OnComplete: oc}, Request{Title: "Prose", Fingerprint: "fp-prose"}
+			},
+			reasonContains: "prose",
+			reasonInGaps:   true,
+		},
+		{
+			name: "max_steps",
+			build: func(oc func(providers.Investigation)) (*LoopInvestigator, Request) {
+				return &LoopInvestigator{Model: &runawayModel{}, Log: discard, MaxSteps: 3, OnComplete: oc},
+					Request{Title: "Runaway", Fingerprint: "fp-max"}
+			},
+			reasonContains: "budget",
+			reasonInGaps:   true,
+		},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			var got *providers.Investigation
+			var deliveries int
+			li, req := c.build(func(inv providers.Investigation) { deliveries++; got = &inv })
+			if err := li.Investigate(context.Background(), req); err != nil {
+				t.Fatalf("Investigate: %v", err)
+			}
+			if deliveries != 1 || got == nil {
+				t.Fatalf("every accepted terminal exit must fire OnComplete exactly once, got %d (%+v)", deliveries, got)
+			}
+			// Fingerprint must ride every delivery for outcome-ledger attribution.
+			if got.Fingerprint != req.Fingerprint {
+				t.Fatalf("delivery must carry the request fingerprint %q, got %q", req.Fingerprint, got.Fingerprint)
+			}
+			if c.wantConverged {
+				if len(got.RootCauses) != 1 {
+					t.Fatalf("converged exit must deliver a real finding, got %+v", got)
+				}
+				return
+			}
+			// Non-converged: inconclusive verdict, no guessed root cause, and a reason in
+			// the expected honesty channel.
+			if got.Verdict != providers.VerdictInconclusive {
+				t.Fatalf("non-converged exit must carry an inconclusive verdict, got %q", got.Verdict)
+			}
+			if len(got.RootCauses) != 0 {
+				t.Fatalf("non-converged exit must not guess a root cause, got %+v", got.RootCauses)
+			}
+			channel := got.DataGaps
+			label := "DataGaps"
+			if !c.reasonInGaps {
+				channel, label = got.Unresolved, "Unresolved"
+			}
+			if len(channel) == 0 || !strings.Contains(strings.ToLower(channel[0]), c.reasonContains) {
+				t.Fatalf("non-converged exit must name %q in %s, got %+v", c.reasonContains, label, channel)
+			}
+		})
+	}
+}
+
 func TestPreferDiscoveredResource(t *testing.T) {
 	origin := providers.Workload{Namespace: "apps", Name: "web"}
 	cases := []struct {
@@ -1041,9 +1165,11 @@ func TestLoopForcesFinalSubmitAtMaxSteps(t *testing.T) {
 }
 
 // TestLoopMaxStepsFallbackWhenForceIgnored proves the fallback: a model that ignores
-// even the forced final step (never emits submit_findings) keeps the pre-existing
-// silent max_steps behaviour — nothing is delivered and the completion is labelled
-// result="max_steps".
+// even the forced final step (never emits submit_findings) exhausts the step budget
+// and the completion is labelled result="max_steps" (distinct from the degraded label
+// a forced submission earns). Unlike before #234's follow-up, exhaustion is NO LONGER
+// silent — it delivers a synthetic inconclusive result so OnComplete still fires after
+// the paid model calls.
 func TestLoopMaxStepsFallbackWhenForceIgnored(t *testing.T) {
 	t.Cleanup(func() { otel.SetMeterProvider(noop.NewMeterProvider()) })
 	h, shutdown, err := telemetry.Setup(context.Background())
@@ -1054,19 +1180,30 @@ func TestLoopMaxStepsFallbackWhenForceIgnored(t *testing.T) {
 	m := telemetry.NewMetrics()
 
 	model := &runawayModel{} // always returns noop_tool, ignoring the forced ToolChoice
-	var delivered bool
+	var got *providers.Investigation
+	var deliveries int
 	li := &LoopInvestigator{
 		Model:      model,
 		Log:        slog.New(slog.NewTextHandler(io.Discard, nil)),
 		MaxSteps:   3,
 		Metrics:    m,
-		OnComplete: func(providers.Investigation) { delivered = true },
+		OnComplete: func(inv providers.Investigation) { deliveries++; got = &inv },
 	}
-	if err := li.Investigate(context.Background(), Request{Title: "IgnoresForce"}); err != nil {
+	if err := li.Investigate(context.Background(), Request{Title: "IgnoresForce", Fingerprint: "fp-maxsteps"}); err != nil {
 		t.Fatalf("Investigate: %v", err)
 	}
-	if delivered {
-		t.Fatal("a model that ignores the forced final step must deliver nothing (silent max_steps fallback)")
+	// Exhaustion now delivers an inconclusive result (not silence) so OnComplete fires.
+	if deliveries != 1 || got == nil {
+		t.Fatalf("max-steps exhaustion must deliver exactly one inconclusive result, got %d (%+v)", deliveries, got)
+	}
+	if got.Verdict != providers.VerdictInconclusive || len(got.RootCauses) != 0 {
+		t.Fatalf("exhaustion must deliver an inconclusive result with no root cause: %+v", got)
+	}
+	if len(got.DataGaps) == 0 || !strings.Contains(strings.ToLower(got.DataGaps[0]), "budget") {
+		t.Fatalf("max-steps result must name the step-budget exhaustion in DataGaps, got %+v", got.DataGaps)
+	}
+	if got.Fingerprint != "fp-maxsteps" {
+		t.Fatalf("max-steps result must carry the fingerprint for attribution, got %q", got.Fingerprint)
 	}
 	// The loop ran the full step budget, including the forced final step, then fell back.
 	if model.calls != 3 {
@@ -1202,7 +1339,7 @@ func TestBudgetNudgeForcesSubmitFindings(t *testing.T) {
 	// unforced and step 1 — grown by the assistant turn and the tool result — trips
 	// the nudge.
 	req := Request{Title: "budget-forcing"}
-	seed := []providers.Message{{Role: "user", Content: redact.Secrets(seedPrompt(req))}}
+	seed := []providers.Message{{Role: "user", Content: redact.Secrets(seedPrompt(req, nil))}}
 	li.MaxTokensPerInvestigation = estimateTokens(li.system(), seed, []providers.ToolSpec{submitFindingsSpec()})
 	if err := li.Investigate(context.Background(), req); err != nil {
 		t.Fatalf("Investigate: %v", err)
@@ -1423,7 +1560,7 @@ func TestSeedPrompt(t *testing.T) {
 			Severity:    "critical",
 			Environment: "prod",
 		}
-		got := seedPrompt(req)
+		got := seedPrompt(req, nil)
 		if !strings.Contains(got, "Severity: critical.") {
 			t.Errorf("seed prompt missing severity, got %q", got)
 		}
@@ -1433,7 +1570,7 @@ func TestSeedPrompt(t *testing.T) {
 	})
 	t.Run("omits severity and environment when empty", func(t *testing.T) {
 		req := Request{Title: "PodCrashLooping", Source: SourceAlert}
-		got := seedPrompt(req)
+		got := seedPrompt(req, nil)
 		if strings.Contains(got, "Severity:") {
 			t.Errorf("seed prompt should omit empty severity, got %q", got)
 		}
@@ -1443,7 +1580,7 @@ func TestSeedPrompt(t *testing.T) {
 	})
 	t.Run("anchors the incident start time so the model can size tool windows", func(t *testing.T) {
 		at := time.Now().Add(-42 * time.Minute)
-		got := seedPrompt(Request{Title: "PodCrashLooping", Source: SourceAlert, At: at})
+		got := seedPrompt(Request{Title: "PodCrashLooping", Source: SourceAlert, At: at}, nil)
 		if !strings.Contains(got, "Incident started: "+at.UTC().Format(time.RFC3339)) {
 			t.Errorf("seed prompt missing incident start time, got %q", got)
 		}
@@ -1455,7 +1592,7 @@ func TestSeedPrompt(t *testing.T) {
 		}
 	})
 	t.Run("omits the start line when At is zero", func(t *testing.T) {
-		got := seedPrompt(Request{Title: "X", Source: SourceAlert})
+		got := seedPrompt(Request{Title: "X", Source: SourceAlert}, nil)
 		if strings.Contains(got, "Incident started:") {
 			t.Errorf("seed prompt should omit a zero start time, got %q", got)
 		}
@@ -1475,7 +1612,7 @@ func TestSeedPrompt(t *testing.T) {
 			},
 			Message: "already surfaced as the message",
 		}
-		got := seedPrompt(req)
+		got := seedPrompt(req, nil)
 		if !strings.Contains(got, `container="app"`) || !strings.Contains(got, `pod="web-abc123"`) {
 			t.Errorf("seed prompt missing alert labels, got %q", got)
 		}
@@ -1489,7 +1626,7 @@ func TestSeedPrompt(t *testing.T) {
 	})
 	t.Run("clips oversized label values", func(t *testing.T) {
 		long := strings.Repeat("x", 2000)
-		got := seedPrompt(Request{Title: "X", Source: SourceAlert, Labels: map[string]string{"big": long}})
+		got := seedPrompt(Request{Title: "X", Source: SourceAlert, Labels: map[string]string{"big": long}}, nil)
 		if strings.Contains(got, long) {
 			t.Errorf("seed prompt should clip a 2000-char label value")
 		}
@@ -1497,4 +1634,143 @@ func TestSeedPrompt(t *testing.T) {
 			t.Errorf("clipped label should still appear, got %q", got)
 		}
 	})
+	t.Run("surfaces coalesced constituent workloads as an untrusted blast-radius block", func(t *testing.T) {
+		// C1: a coalesced batch of 3 distinct workloads — the representative plus two
+		// constituents carried on CoalescedWorkloads — must surface all three so the
+		// model investigates the whole storm, not just the representative's workload.
+		req := Request{
+			Title:              "TargetDown",
+			Source:             SourceAlert,
+			Workload:           providers.Workload{Namespace: "apps", Name: "web"},
+			CoalescedWorkloads: []string{"apps/worker", "data/postgres"},
+		}
+		got := seedPrompt(req, nil)
+		if !strings.Contains(got, "apps/web") {
+			t.Errorf("seed must still name the representative workload, got %q", got)
+		}
+		if !strings.Contains(got, "apps/worker") || !strings.Contains(got, "data/postgres") {
+			t.Errorf("seed must surface all coalesced constituent workloads, got %q", got)
+		}
+		if !strings.Contains(got, "UNTRUSTED") {
+			t.Errorf("coalesced block must be framed as untrusted, got %q", got)
+		}
+	})
+	t.Run("omits the coalesced block for a single alert", func(t *testing.T) {
+		// A non-coalesced alert carries no CoalescedWorkloads, so no batch block appears.
+		got := seedPrompt(Request{Title: "X", Source: SourceAlert, Workload: providers.Workload{Namespace: "apps", Name: "web"}}, nil)
+		if strings.Contains(got, "coalesced batch") {
+			t.Errorf("single alert should not emit a coalesced-batch block, got %q", got)
+		}
+	})
+}
+
+// TestTryRecallNearMissOnNonFire unit-tests the extracted tryRecall helper directly:
+// a consulted-but-non-firing recall (a below-threshold hit) must NOT deliver, must
+// report done==false, and must return the structural near-miss lead so Investigate can
+// fold it into the seed. This locks the helper's contract independently of the loop.
+func TestTryRecallNearMissOnNonFire(t *testing.T) {
+	discard := slog.New(slog.NewTextHandler(io.Discard, nil))
+	// A weak (below-threshold) hit: recall does not fire, but the same entry is a
+	// structural near-miss for this workload, so nearMiss surfaces it.
+	weak := fakeScored{hits: []catalog.ScoredEntry{
+		{Entry: catalog.Entry{Title: "Past incident", Description: "chart bump", Path: "past.md", Resource: "tooling/harbor"}, Score: 0.5}}}
+	li := &LoopInvestigator{
+		Log:    discard,
+		Recall: &Recall{MinScore: 2.0, Catalog: weak},
+	}
+	req := Request{Title: "HarborProbeFailure", Workload: providers.Workload{Namespace: "tooling", Name: "harbor"}}
+	result := "unresolved"
+	var totals providers.UsageTotals
+	delivered := 0
+	finish := func(providers.Investigation) { delivered++ }
+
+	nearMiss, done := li.tryRecall(context.Background(), req, &result, &totals, finish)
+	if done {
+		t.Fatal("a non-firing recall must report done==false so the loop runs")
+	}
+	if delivered != 0 {
+		t.Fatalf("a non-firing recall must not deliver, got %d deliveries", delivered)
+	}
+	if result != "unresolved" {
+		t.Fatalf("a non-firing recall must leave result untouched, got %q", result)
+	}
+	if nearMiss == nil || nearMiss.Path != "past.md" {
+		t.Fatalf("expected the structural near-miss lead, got %+v", nearMiss)
+	}
+}
+
+// TestTryRecallDisabledUnderAuto locks the auto-execution gate on the extracted
+// helper: with an auto policy, tryRecall must not consult the catalog at all (no
+// delivery, no near-miss, done==false) so a poisoned entry can shape neither an
+// auto-executed action nor the seed prompt.
+func TestTryRecallDisabledUnderAuto(t *testing.T) {
+	discard := slog.New(slog.NewTextHandler(io.Discard, nil))
+	strong := fakeScored{hits: []catalog.ScoredEntry{
+		{Entry: catalog.Entry{Title: "Known incident", Path: "known.md", Resource: "tooling/harbor"}, Score: 5.0}}}
+	li := &LoopInvestigator{
+		Log:     discard,
+		Recall:  &Recall{MinScore: 2.0, Catalog: strong},
+		Actions: action.New(config.ActionPolicy{Mode: config.ActionAuto}),
+	}
+	if !li.Actions.IsAuto() {
+		t.Fatalf("test setup: expected an auto policy")
+	}
+	req := Request{Title: "HarborProbeFailure", Workload: providers.Workload{Namespace: "tooling", Name: "harbor"}}
+	result := "unresolved"
+	var totals providers.UsageTotals
+	delivered := 0
+	nearMiss, done := li.tryRecall(context.Background(), req, &result, &totals, func(providers.Investigation) { delivered++ })
+	if done || delivered != 0 || nearMiss != nil {
+		t.Fatalf("instant recall must be disabled under auto: done=%v delivered=%d nearMiss=%+v", done, delivered, nearMiss)
+	}
+}
+
+// TestEnforceBudgetNudgeThenHardKill unit-tests the extracted enforceBudget helper
+// directly across its two over-budget outcomes on a fixed message set: the first call
+// (nudge not yet fired) appends the budget nudge, flips budgetNudged, sets the sticky
+// toolChoice, and reports done==false; the second (nudge already fired, still over)
+// hard-kills — delivering once, setting result, and reporting done==true.
+func TestEnforceBudgetNudgeThenHardKill(t *testing.T) {
+	discard := slog.New(slog.NewTextHandler(io.Discard, nil))
+	li := &LoopInvestigator{
+		Log:                       discard,
+		MaxTokensPerInvestigation: 1, // any real prompt exceeds this ⇒ always over budget
+	}
+	sys := li.system()
+	specs := []providers.ToolSpec{submitFindingsSpec()}
+	messages := []providers.Message{{Role: "user", Content: "seed"}}
+	var calib tokenCalibration
+	budgetNudged, compactionLogged := false, false
+	toolChoice := ""
+	result := "unresolved"
+	delivered := 0
+	finish := func(providers.Investigation) { delivered++ }
+
+	// First over-budget call: nudge fires, no delivery.
+	if done := li.enforceBudget(context.Background(), Request{Title: "x"}, sys, specs, &calib, &messages, &budgetNudged, &compactionLogged, &toolChoice, &result, finish); done {
+		t.Fatal("first over-budget call must nudge (done==false), not hard-kill")
+	}
+	if !budgetNudged {
+		t.Fatal("first over-budget call must set budgetNudged")
+	}
+	if toolChoice != submitFindingsName {
+		t.Fatalf("nudge must make toolChoice sticky-force %q, got %q", submitFindingsName, toolChoice)
+	}
+	if last := messages[len(messages)-1]; !strings.Contains(last.Content, "token budget") {
+		t.Fatalf("nudge message must be appended, got last=%+v", last)
+	}
+	if delivered != 0 {
+		t.Fatalf("the nudge step must not deliver, got %d", delivered)
+	}
+
+	// Second over-budget call: hard-kill, exactly one delivery.
+	if done := li.enforceBudget(context.Background(), Request{Title: "x", Fingerprint: "fp-kill"}, sys, specs, &calib, &messages, &budgetNudged, &compactionLogged, &toolChoice, &result, finish); !done {
+		t.Fatal("second over-budget call must hard-kill (done==true)")
+	}
+	if result != "budget_exceeded" {
+		t.Fatalf("hard-kill must set result=budget_exceeded, got %q", result)
+	}
+	if delivered != 1 {
+		t.Fatalf("hard-kill must deliver exactly once, got %d", delivered)
+	}
 }

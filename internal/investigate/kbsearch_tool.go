@@ -24,6 +24,14 @@ type KBSearchTool struct {
 	// copy of the tool via withHitTracker; the shared li.Tools copy leaves it nil, so
 	// a bare KBSearchTool captures nothing.
 	hits *kbHitTracker
+
+	// enrich, when non-empty, is appended SERVER-SIDE to every model-issued query
+	// before it hits the index (see kbSearchEnrichment). It is the request's
+	// discriminating structured entity — normalized workload ref + alertname — the
+	// exact expansion buildRecallQuery folds in to fix the measured 0.096→rank-1
+	// vocabulary mismatch (recall.go). Set per investigation via withEnrichment; the
+	// shared li.Tools copy leaves it empty, so a bare tool searches raw text.
+	enrich string
 }
 
 // kbClearMatchScoreDefault is the FALLBACK BM25 bar a kb_search hit's top score must
@@ -103,12 +111,52 @@ func (t KBSearchTool) withHitTracker(tr *kbHitTracker) KBSearchTool {
 	return t
 }
 
+// withEnrichment returns a copy of the tool that appends s to every model-issued
+// query server-side. Used per investigation (see the loop's per-request rebinding)
+// so the shared li.Tools copy searches raw text; an empty s is a no-op.
+func (t KBSearchTool) withEnrichment(s string) KBSearchTool {
+	t.enrich = s
+	return t
+}
+
+// kbSearchEnrichment builds the server-side query suffix for a request's kb_search
+// calls: the discriminating structured entity — namespace, normalized workload
+// name, and alertname — the SAME expansion buildRecallQuery folds in front of BM25.
+// WHY: a label-derived alert's title/message is 1–2 generic tokens; the object that
+// identifies the incident (namespace/name) lives only in the labels, so the model's
+// symptom-text kb_search re-suffers the vocabulary mismatch recall already measured
+// and solved (0.096 BM25 vs a perfect runbook → rank #1 once the ref is folded in;
+// see buildRecallQuery). The name is normalized (pod-hash stripped) so a per-pod
+// alert reaches the controller-family runbook; empty parts are dropped so the suffix
+// never carries stray whitespace. It is ADDITIVE — appended to the model's own
+// query, never replacing it — so a query that already names the workload is at worst
+// neutral.
+func kbSearchEnrichment(req Request) string {
+	parts := make([]string, 0, 3)
+	add := func(s string) {
+		if s = strings.TrimSpace(s); s != "" {
+			parts = append(parts, s)
+		}
+	}
+	add(req.Workload.Namespace)
+	add(providers.NormalizeWorkloadName(req.Workload.Name))
+	add(req.Labels["alertname"])
+	return strings.Join(parts, " ")
+}
+
 // Name returns the tool name.
 func (t KBSearchTool) Name() string { return "kb_search" }
 
-// Description returns the tool description.
+// Description returns the tool description. When the tool is bound to a request's
+// enrichment (per investigation), the description states that the incident's
+// workload/alert context is folded into the search server-side, so the model knows
+// it need not repeat those terms and can query the SYMPTOM plainly.
 func (t KBSearchTool) Description() string {
-	return "Search the knowledge catalog (runbooks, past incidents) for entries relevant to a query."
+	base := "Search the knowledge catalog (runbooks, past incidents) for entries relevant to a query."
+	if t.enrich != "" {
+		base += " The failing workload and alert name are automatically added to your query, so search by symptom."
+	}
+	return base
 }
 
 // Schema returns the JSON schema for the arguments.
@@ -127,8 +175,19 @@ func (t KBSearchTool) Call(_ context.Context, args string) (string, error) {
 	if err := json.Unmarshal([]byte(args), &in); err != nil {
 		return "", fmt.Errorf("parse args: %w", err)
 	}
+	// Server-side enrichment: fold the request's workload ref + alertname into the
+	// model's query so kb_search inherits recall's measured 0.096→rank-1 fix. Additive
+	// (model query first, then the entity terms); a no-op when unbound (bare tool).
+	query := in.Query
+	if t.enrich != "" {
+		if q := strings.TrimSpace(query); q != "" {
+			query = q + " " + t.enrich
+		} else {
+			query = t.enrich
+		}
+	}
 	if ss, ok := t.Catalog.(catalog.ScoredSearcher); ok {
-		scored, err := ss.SearchScored(in.Query, 3)
+		scored, err := ss.SearchScored(query, 3)
 		if err != nil {
 			return "", err
 		}
@@ -142,7 +201,7 @@ func (t KBSearchTool) Call(_ context.Context, args string) (string, error) {
 		}
 		return renderHits(hits), nil
 	}
-	hits, err := t.Catalog.Search(in.Query, 3)
+	hits, err := t.Catalog.Search(query, 3)
 	if err != nil {
 		return "", err
 	}

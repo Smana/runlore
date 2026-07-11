@@ -42,9 +42,10 @@ func TestMatrixDeliver(t *testing.T) {
 	}
 }
 
-// TestMatrixDeliverMatchedKnowledge confirms the existing-KB match reaches Matrix
-// (via the shared Format): the plaintext body carries the runbook line, and a
-// derived URL becomes a clickable anchor in the HTML body.
+// TestMatrixDeliverMatchedKnowledge confirms the existing-KB match reaches
+// Matrix (via the shared Format): the plaintext body carries the runbook line,
+// and the URL is present as plain (defanged) text — NOT a live <a href> — so a
+// model-authored attacker-influenced URL cannot render as a phishing link.
 func TestMatrixDeliverMatchedKnowledge(t *testing.T) {
 	var gotBody map[string]any
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -61,8 +62,13 @@ func TestMatrixDeliverMatchedKnowledge(t *testing.T) {
 	if body, _ := gotBody["body"].(string); !strings.Contains(body, "Matches known runbook: Harbor probe runbook") {
 		t.Fatalf("plaintext body missing matched-runbook line: %v", gotBody["body"])
 	}
-	if fb, _ := gotBody["formatted_body"].(string); !strings.Contains(fb, `<a href="https://kb.example/runbooks/harbor.md">`) {
-		t.Errorf("formatted_body missing runbook link anchor: %s", fb)
+	fb, _ := gotBody["formatted_body"].(string)
+	// URL must appear as plain text (HTML-escaped), never as a live anchor.
+	if strings.Contains(fb, `<a href=`) {
+		t.Errorf("formatted_body contains live <a href> — URLs must not be auto-linkified: %s", fb)
+	}
+	if !strings.Contains(fb, "https://kb.example/runbooks/harbor.md") {
+		t.Errorf("formatted_body missing the plain-text URL: %s", fb)
 	}
 }
 
@@ -96,8 +102,13 @@ func TestMatrixDeliverHTML(t *testing.T) {
 	if !strings.Contains(fb, "<strong>") {
 		t.Errorf("formatted_body missing <strong> for bold: %s", fb)
 	}
-	if !strings.Contains(fb, `<a href="https://kb.example/entry/42">`) {
-		t.Errorf("formatted_body missing link anchor: %s", fb)
+	// URLs must NOT be auto-linkified (anti-phishing; see S1 fix). The URL must
+	// appear as plain HTML-escaped text, never as a live <a href> anchor.
+	if strings.Contains(fb, `<a href=`) {
+		t.Errorf("formatted_body contains live <a href> — URLs must not be auto-linkified: %s", fb)
+	}
+	if !strings.Contains(fb, "https://kb.example/entry/42") {
+		t.Errorf("formatted_body missing plain-text URL: %s", fb)
 	}
 	if !strings.Contains(fb, "<br/>") {
 		t.Errorf("formatted_body missing <br/> for newlines: %s", fb)
@@ -127,7 +138,8 @@ func TestMrkdwnToHTML(t *testing.T) {
 		{"plain", "hello world", "hello world"},
 		{"bold", "a *bold* b", "a <strong>bold</strong> b"},
 		{"code", "run `kubectl get` now", "run <code>kubectl get</code> now"},
-		{"link", "see https://x.io/p done", `see <a href="https://x.io/p">https://x.io/p</a> done`},
+		// URLs stay as plain HTML-escaped text — no auto-linkification (S1: anti-phishing).
+		{"link", "see https://x.io/p done", "see https://x.io/p done"},
 		{"newline", "line1\nline2", "line1<br/>line2"},
 		{"escape", "a < b & c > d", "a &lt; b &amp; c &gt; d"},
 		{"escape_in_bold", "*<b>*", "<strong>&lt;b&gt;</strong>"},
@@ -138,6 +150,25 @@ func TestMrkdwnToHTML(t *testing.T) {
 				t.Errorf("mrkdwnToHTML(%q) = %q, want %q", tc.in, got, tc.want)
 			}
 		})
+	}
+}
+
+// TestMrkdwnToHTMLNoLiveURLs is the security regression test for S1: URLs that
+// appear in untrusted fields (LLM output, evidence, alert labels) must never be
+// emitted as live <a href> anchors in the Matrix formatted_body. A live link
+// would let an attacker influence a future investigation to carry a phishing URL
+// that Matrix clients render as a clickable hyperlink.
+func TestMrkdwnToHTMLNoLiveURLs(t *testing.T) {
+	untrustedInputs := []string{
+		"https://attacker.example/phish",
+		"evidence: see http://evil.io/x?data=leak",
+		"check https://kb.internal/good AND https://bad.actor/steal",
+	}
+	for _, input := range untrustedInputs {
+		got := mrkdwnToHTML(input)
+		if strings.Contains(got, "<a href") {
+			t.Errorf("mrkdwnToHTML(%q) emitted a live anchor: %s", input, got)
+		}
 	}
 }
 

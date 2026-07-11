@@ -9,15 +9,20 @@
 #
 #   kubectl create secret generic runlore-secrets -n runlore \
 #     --from-literal=ANTHROPIC_API_KEY=sk-ant-... \
+#     --from-literal=RUNLORE_WEBHOOK_TOKEN=$(openssl rand -hex 24) \
 #     --from-literal=SLACK_WEBHOOK_URL=https://hooks.slack.com/services/...
+#
+# NOTE: RUNLORE_WEBHOOK_TOKEN is MANDATORY once a model is configured. The serve
+# path fails closed — it refuses to start with an anonymous alert webhook when an
+# LLM is wired (webhook labels/annotations flow into the prompt and bill the model).
+# See docs/security-model.md.
 #
 # Then:
 #
 #   helm install runlore deploy/helm/runlore -n runlore --create-namespace -f values-minimal.yaml
 #
 # Finally, point Alertmanager at http://runlore.runlore.svc:8080/webhook/alertmanager
-# (add `bearer_token` auth + server.webhook_token_env if that URL is reachable beyond
-# your cluster — see docs/security-model.md).
+# with `Authorization: Bearer <RUNLORE_WEBHOOK_TOKEN>` (see docs/security-model.md).
 
 replicaCount: 1 # single replica to start; 2+ (leader-elected) once you trust it
 
@@ -49,6 +54,9 @@ config:
     # base_url: http://vllm.llm.svc:8000/v1
     # model: <your-model-name>
     # api_key_env: OPENAI_API_KEY   # omit/empty for keyless in-cluster endpoints
+
+  server:
+    webhook_token_env: RUNLORE_WEBHOOK_TOKEN
 
   notify:
     slack:

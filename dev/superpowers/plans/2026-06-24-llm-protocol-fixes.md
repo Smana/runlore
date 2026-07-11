@@ -1,6 +1,6 @@
 # Plan — LLM-protocol correctness fixes (Item R15)
 
-Spec: `docs/superpowers/specs/2026-06-24-llm-protocol-fixes-design.md`
+Spec: `dev/superpowers/specs/2026-06-24-llm-protocol-fixes-design.md`
 Branch: `r15-llm-protocol-fixes`
 
 ## Steps

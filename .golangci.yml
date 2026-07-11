@@ -10,11 +10,29 @@ linters:
   enable:
     - bodyclose # HTTP response bodies are closed
     - errorlint # correct error wrapping/comparison (%w, errors.Is/As)
+    - forbidigo # forbid the un-guarded stdlib HTTP egress helpers (SSRF policy)
     - gocritic # opinionated correctness/style checks
     - gosec # security analyzer (hardcoded creds, file perms, subprocess, timeouts)
     - misspell # spelling in comments/strings
     - revive # fast, configurable golint replacement
     - unconvert # remove redundant type conversions
+  settings:
+    forbidigo:
+      # Every outbound HTTP call MUST go through the SSRF-guarded egress client
+      # (internal/httpx: redirect guard + credential stripping + bounded timeout).
+      # The bare net/http helpers use http.DefaultClient (unbounded, no redirect
+      # guard) and are forbidden outside internal/httpx.
+      forbid:
+        - pattern: '^http\.DefaultClient$'
+          msg: use httpx.SecureClient (SSRF-guarded egress client) instead of http.DefaultClient
+        - pattern: '^http\.Get$'
+          msg: use httpx.SecureClient (SSRF-guarded egress client) instead of http.Get
+        - pattern: '^http\.Post$'
+          msg: use httpx.SecureClient (SSRF-guarded egress client) instead of http.Post
+        - pattern: '^http\.Head$'
+          msg: use httpx.SecureClient (SSRF-guarded egress client) instead of http.Head
+        - pattern: '^http\.PostForm$'
+          msg: use httpx.SecureClient (SSRF-guarded egress client) instead of http.PostForm
   exclusions:
     rules:
       # gosec on test files is noise: fixtures intentionally use lax perms (0644/0755)
@@ -22,6 +40,11 @@ linters:
       - path: _test\.go
         linters:
           - gosec
+      # internal/httpx IS the egress client — it legitimately constructs http.Client
+      # and is where the guarded wrappers live, so the HTTP-helper ban does not apply.
+      - path: internal/httpx/
+        linters:
+          - forbidigo
 
 formatters:
   enable:

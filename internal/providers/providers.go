@@ -15,6 +15,7 @@ package providers
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"regexp"
 	"strings"
 	"time"
@@ -237,14 +238,80 @@ type GitOpsInspector interface {
 }
 
 // MetricsProvider abstracts VictoriaMetrics/Prometheus (both speak PromQL).
+//
+// LabelValues is metric/label discovery: it answers "what exists?" so the agent
+// never dead-ends on a guessed metric name. A query that matches nothing returns
+// an empty result with no hint of the real names a workload exports; LabelValues
+// scopes to a matcher + window so it stays cheap on a big TSDB. Metric-name
+// discovery uses the label "__name__".
 type MetricsProvider interface {
 	Query(ctx context.Context, promql string, at time.Time) (Samples, error)
 	QueryRange(ctx context.Context, promql string, w TimeWindow, step time.Duration) (Matrix, error)
+	// LabelValues lists the values a label takes across the series that match the
+	// given matchers (PromQL selectors, e.g. `{namespace="apps"}`), within the
+	// window. label "__name__" enumerates metric names. matchers may be empty
+	// (whole-TSDB), though callers should scope it so it stays cheap.
+	LabelValues(ctx context.Context, label string, matchers []string, w TimeWindow) ([]string, error)
 }
 
 // LogsProvider abstracts the logs backend (VictoriaLogs now; Loki etc. later).
 type LogsProvider interface {
 	Query(ctx context.Context, query string, w TimeWindow) (LogResult, error)
+}
+
+// Bucket is one time-bucket of a log-hits histogram: how many lines matched in
+// [Time, Time+step). Level is the per-level series label when the backend split
+// hits by severity ("" for a single, unsplit series).
+type Bucket struct {
+	Time  time.Time
+	Level string
+	Count int64
+}
+
+// MsgCount is one dominant log message and its occurrence stats over a window:
+// how many lines collapsed to it (after numeric normalization) and the first→last
+// span it covered — the "what is flooding the logs" summary.
+type MsgCount struct {
+	Message string
+	Count   int64
+	First   time.Time
+	Last    time.Time
+}
+
+// LogFields is an OPTIONAL discovery capability a LogsProvider may implement:
+// the list of field names present in the logs a query matches (with per-field hit
+// counts) — the log-side analogue of MetricsProvider.LabelValues. It answers "the
+// query returned nothing / the schema I assumed is wrong — what fields do these
+// logs ACTUALLY have?" so the agent recovers instead of dead-ending on a guessed
+// collector schema. Consumers type-assert for it; VictoriaLogs implements it via
+// /select/logsql/field_names.
+type LogFields interface {
+	// FieldNames returns the field names present in the logs matching query over
+	// the window, each with its occurrence count, most-frequent first.
+	FieldNames(ctx context.Context, query string, w TimeWindow) ([]FieldCount, error)
+}
+
+// FieldCount is one log field name and how many matching lines carried it.
+type FieldCount struct {
+	Name string
+	Hits int64
+}
+
+// LogStats is an OPTIONAL analytics capability a LogsProvider may implement:
+// error-volume-over-time (Hits) and top-messages-by-count (TopMessages). It is
+// separate from LogsProvider so the analytics surface never widens the core
+// contract — consumers type-assert for it exactly like GitOpsInspector, and a
+// backend that cannot serve analytics (or a future Loki client) simply omits it,
+// letting the tool fall back gracefully. VictoriaLogs implements it via
+// /select/logsql/hits and a `stats by (_msg)` pipe.
+type LogStats interface {
+	// Hits returns the match count per step-sized bucket over the window; the
+	// backend may split into per-level series (Bucket.Level set) or return a
+	// single unsplit series.
+	Hits(ctx context.Context, query string, w TimeWindow, step time.Duration) ([]Bucket, error)
+	// TopMessages returns up to k dominant messages (numeric tokens collapsed so
+	// near-identical lines group), each with its count and first→last span.
+	TopMessages(ctx context.Context, query string, w TimeWindow, k int) ([]MsgCount, error)
 }
 
 // NetworkProvider abstracts network observability (Hubble now).
@@ -268,6 +335,7 @@ type PodLogQuery struct {
 	LabelSelector string // empty = all pods in the namespace
 	SinceMinutes  int    // 0 = no lower bound
 	Previous      bool   // read the last-terminated container (crash output) instead of the running one
+	Container     string // empty = all of the pod's containers (the reader iterates them); set to scope to one
 }
 
 // PodStatus is a pod's high-level health: phase, ready count, and per-container
@@ -280,6 +348,23 @@ type PodStatus struct {
 	Ready   string   // "1/2"
 	Healthy bool     // Running/Succeeded with all containers ready and no waiting reasons
 	Reasons []string // e.g. "registry: CreateContainerConfigError: couldn't find key username in Secret …"
+	// PodIP/NodeName/HostIP bridge a network_drops IP back to a pod: a VPC/Hubble
+	// drop names an IP, and only pod_status can tie that IP to a workload. All three
+	// are already on the corev1.Pod object, so surfacing them costs no extra API call
+	// (B8, CORE-707). Empty when the pod hasn't been scheduled/assigned an IP yet.
+	PodIP    string
+	NodeName string
+	HostIP   string
+	// Time anchors (K1): pod_status was the only cluster tool with no notion of
+	// WHEN. Restarts is the summed container RestartCount (how many times the pod
+	// has looped); CreatedAt is the pod's creation time (its age); the
+	// LastTerminated* pair is the last-terminated container's start/finish, so a
+	// crash loop can be tied to a change/deploy time. All zero-valued when the
+	// signal is absent (a fresh, never-restarted pod), and rendered only then.
+	Restarts               int
+	CreatedAt              time.Time
+	LastTerminatedStarted  time.Time
+	LastTerminatedFinished time.Time
 }
 
 // KubeEvent is a normalized Kubernetes Event — surfaces causes that live in the
@@ -302,6 +387,85 @@ type KubeReader interface {
 	// Events returns recent Events in a namespace; objectName "" = all objects;
 	// warnOnly restricts to Warning events.
 	Events(ctx context.Context, namespace, objectName string, warnOnly bool) ([]KubeEvent, error)
+}
+
+// EventWindower is an optional KubeReader extension (K2): it adds a time window so
+// the newest in-window events are actually returned in a busy namespace, where a
+// single un-windowed page can miss them. It is a SEPARATE interface (not a new
+// Events parameter) to keep KubeReader.Events arity stable for existing callers and
+// fakes; kube_events type-asserts for it and falls back to Events when absent.
+type EventWindower interface {
+	// EventsSince behaves like KubeReader.Events but drops events older than
+	// sinceMinutes (0 = no lower bound, equivalent to Events).
+	EventsSince(ctx context.Context, namespace, objectName string, warnOnly bool, sinceMinutes int) ([]KubeEvent, error)
+}
+
+// OwnerLink is one hop in a resource's ownerReferences chain, e.g. a Pod owned by
+// a ReplicaSet owned by a Deployment. Kind/Name/Namespace are engine-agnostic K8s
+// identifiers — no Flux/ArgoCD types leak through.
+type OwnerLink struct {
+	Kind      string
+	Name      string
+	Namespace string
+}
+
+// OwnerChain is the resolved ownerReferences walk from a starting object (a Pod)
+// up to its TOP controller, plus the GitOps object that manages that controller.
+// It answers "a pod is failing — WHICH GitOps object owns it, and did its live
+// state drift from what GitOps applied?" without the model guessing by name (G4).
+//
+// Engine-agnostic: ManagedByKind/ManagedByName name the owning Kustomization/
+// HelmRelease (Flux) or Application (ArgoCD) as plain strings; Engine records which
+// GitOps engine's tracking labels resolved it. Drift, when non-nil, is the live-vs-
+// GitOps drift verdict for the owning object (see DriftVerdict).
+type OwnerChain struct {
+	// Chain is the ownerReferences hops, start (the pod) FIRST, top controller LAST.
+	Chain []OwnerLink
+	// Top is the top controller (Deployment/StatefulSet/DaemonSet/Job); zero-valued
+	// Kind when the start object had no controller owner (a bare pod).
+	Top OwnerLink
+	// Engine is the GitOps engine whose tracking labels named the owner ("flux"/
+	// "argocd"), or "" when no tracking label was found on the top controller.
+	Engine Engine
+	// ManagedByKind/ManagedByName name the owning GitOps object (e.g. Kustomization
+	// "harbor", Application "harbor"); "" when no tracking label was found.
+	ManagedByKind      string
+	ManagedByNamespace string
+	ManagedByName      string
+	// Drift is the generic last-applied-configuration drift signal computed while
+	// walking (a manual `kubectl edit` on the top controller). nil when the signal
+	// was absent (no last-applied annotation) or the live spec matched it. The
+	// authoritative GitOps-engine verdict (Argo OutOfSync / Flux not-Ready) is layered
+	// on separately by the caller via GitOpsInspector — this is the cheap fallback.
+	Drift *DriftVerdict
+}
+
+// DriftVerdict states whether a live object drifted from what GitOps applied, and by
+// which signal. Signal is one of: "argocd-outofsync" (Argo's own OutOfSync verdict),
+// "flux-not-ready-drift" (a Flux object not-Ready with a drift/reconcile reason), or
+// "last-applied-configuration" (live spec differs from the kubectl.kubernetes.io/
+// last-applied-configuration annotation — a manual kubectl-apply edit). Detail is a
+// short human-readable summary; it never carries a full diff (out of scope).
+type DriftVerdict struct {
+	Drifted bool
+	Signal  string
+	Detail  string
+}
+
+// OwnerWalker is an OPTIONAL KubeReader extension (G4): it walks a resource's
+// ownerReferences up to its top controller and names the owning GitOps object from
+// the controller's Flux/ArgoCD tracking labels, and surfaces the generic last-applied-
+// configuration drift signal on that controller. It is SEPARATE from KubeReader (not
+// a new KubeReader method) so KubeReader's arity stays stable for existing callers
+// and fakes; the workload_ownership tool type-asserts for it exactly like
+// EventWindower/GitOpsInspector, and gracefully degrades when it is absent.
+type OwnerWalker interface {
+	// WorkloadOwnership resolves the owner chain for the pods selected by (namespace,
+	// labelSelector). It picks the first matching pod (or an explicit podName when
+	// set), walks Pod → ReplicaSet → Deployment (or StatefulSet/DaemonSet/Job), reads
+	// the top controller's tracking labels to name the owning GitOps object, and
+	// computes the last-applied-configuration drift signal on the top controller.
+	WorkloadOwnership(ctx context.Context, namespace, labelSelector, podName string) (OwnerChain, error)
 }
 
 // CloudProvider abstracts read-only cloud-side context for an incident. It adds
@@ -417,6 +581,16 @@ type LogLine struct {
 	Time    time.Time
 	Message string
 	Fields  map[string]string
+}
+
+// TruncationLine is the sentinel appended when a logs/flow query stops at its cap
+// with more entries upstream, so the model knows the view is partial. It carries no
+// Time or Fields, so it cannot be mistaken for a real entry. Every capping provider
+// (Hubble/AWS VPC/GCP firewall flow sources, VictoriaLogs) emits this one line.
+func TruncationLine(limit int64) LogLine {
+	return LogLine{
+		Message: fmt.Sprintf("… results truncated at %d (more matched — narrow the query or shorten the window)", limit),
+	}
 }
 
 // Samples is an instant-vector result.

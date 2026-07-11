@@ -1,6 +1,6 @@
 # Plan — Action-Policy Namespace Gate at `Review` (R11, test-only)
 
-Spec: `docs/superpowers/specs/2026-06-24-action-policy-namespace-test-design.md`
+Spec: `dev/superpowers/specs/2026-06-24-action-policy-namespace-test-design.md`
 
 ## Steps
 

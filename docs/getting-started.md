@@ -342,6 +342,7 @@ config:
   # actions:
   #   mode: approve
   #   approval_token_env: APPROVAL_TOKEN   # gate the approval + kill-switch endpoints
+  #   audit_log_path: /var/lib/runlore/catalog/audit.jsonl   # REQUIRED for approve + auto (hash-chained audit; fails closed on open)
   #   allow:
   #     reversible_only: true              # withhold irreversible suggestions
   #     max_blast_radius: 5
@@ -361,6 +362,13 @@ config:
   # HA toggle (default on; harmless with 1 replica).
   leader_election:
     enabled: true
+
+  # Webhook token — MANDATORY once a model is configured (serve fails closed without it).
+  # The alert webhook's labels/annotations flow into the LLM prompt and bill the model,
+  # so an unauthenticated caller must not reach it. Set this to the env var you placed
+  # in the Secret (step 3 generates it: openssl rand -hex 32).
+  server:
+    webhook_token_env: RUNLORE_WEBHOOK_TOKEN
 ```
 
 ### Install

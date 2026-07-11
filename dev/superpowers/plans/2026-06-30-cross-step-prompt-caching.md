@@ -15,7 +15,7 @@
 - **Usage normalization (load-bearing, verified against provider docs):** `Usage.InputTokens` is the TOTAL input footprint INCLUDING cached tokens; `Usage.CachedInputTokens` is the cache-READ subset. Anthropic reports `input_tokens` as the *non-cached remainder*, so `InputTokens = input_tokens + cache_read_input_tokens + cache_creation_input_tokens`. OpenAI `prompt_tokens` and Gemini `promptTokenCount` already include the cached subset, so `InputTokens` = that value unchanged.
 - Cache fields default to 0 ("unknown / none") when a provider omits them — never fabricate.
 - Follow existing per-package test patterns: model packages use the `sseServer(t, capture, events)` helper and decode the captured request body into the provider's request struct; telemetry uses the `metrics_test.go` style.
-- Spec: `docs/superpowers/specs/2026-06-30-cross-step-prompt-caching-design.md`.
+- Spec: `dev/superpowers/specs/2026-06-30-cross-step-prompt-caching-design.md`.
 
 ---
 

@@ -9,6 +9,7 @@ import (
 	"strings"
 
 	"github.com/Smana/runlore/internal/providers"
+	"github.com/Smana/runlore/internal/redact"
 )
 
 // Dimension is one rubric axis and its max score.
@@ -42,9 +43,12 @@ func (v Verdict) Total() int {
 	return n
 }
 
-// Judge grades an investigation against a scenario's ground truth.
+// Judge grades an investigation against a scenario's ground truth. An optional
+// tool-transcript excerpt may be supplied so the judge can check that cited
+// evidence traces to a real tool result (groundedness) rather than grading the
+// findings text in isolation; callers with no transcript omit it.
 type Judge interface {
-	Grade(ctx context.Context, scn Scenario, inv providers.Investigation) (Verdict, error)
+	Grade(ctx context.Context, scn Scenario, inv providers.Investigation, transcript ...string) (Verdict, error)
 }
 
 // ModelJudge grades with an LLM (use a stronger model than the one under test).
@@ -61,6 +65,9 @@ Score each rubric dimension as an integer in [0, max]:
 - solution (max 3): suggested action vs expected — correct, actionable, reversibility flagged right.
 - description (max 3): clarity, completeness, honest about what is unresolved.
 - calibration (max 2): high confidence only when correct; penalise confident-and-wrong hardest.
+When a tool-transcript excerpt is provided, judge evidence groundedness against it: cited facts must
+trace to a tool result in the transcript, not be hallucinated or correlation-only. The excerpt is
+bounded and may omit some results, so a missing line is not by itself proof the evidence is false.
 Set confident_wrong=true if the result states a wrong root cause with confidence >= 0.7.
 Record your grade by calling the submit_grade tool exactly once. If you cannot call tools, reply with
 ONLY a JSON object: {"scores":{"root_cause":N,"evidence":N,"solution":N,"description":N,"calibration":N},"confident_wrong":bool,"rationale":"..."}.`
@@ -96,8 +103,15 @@ func submitGradeSpec() providers.ToolSpec {
 	}
 }
 
-// Grade builds a blind grading prompt and parses the JSON verdict.
-func (j ModelJudge) Grade(ctx context.Context, scn Scenario, inv providers.Investigation) (Verdict, error) {
+// maxJudgeTranscriptBytes hard-caps the tool-transcript excerpt appended to the
+// judge prompt, mirroring the verify pass. Kept small so grounding context never
+// dominates the grading prompt or its cost.
+const maxJudgeTranscriptBytes = 4000
+
+// Grade builds a blind grading prompt and parses the JSON verdict. An optional
+// transcript excerpt (first variadic arg) is appended, bounded, so the judge can
+// check evidence groundedness against the tool results the investigation saw.
+func (j ModelJudge) Grade(ctx context.Context, scn Scenario, inv providers.Investigation, transcript ...string) (Verdict, error) {
 	user := fmt.Sprintf(`GROUND TRUTH
 root_cause: %s
 expected_action: %s
@@ -105,6 +119,9 @@ must_reach_root: %t
 
 INVESTIGATION RESULT
 %s`, scn.GroundTruth.RootCause, scn.GroundTruth.ExpectedAction, scn.GroundTruth.MustReachRoot, investigationText(inv)+confidenceLine(inv))
+	if ex := boundedTranscript(transcript); ex != "" {
+		user += "\n\nTOOL TRANSCRIPT EXCERPT (bounded, may be truncated — check cited evidence against it)\n" + ex
+	}
 
 	resp, err := j.Model.Complete(ctx, providers.CompletionRequest{
 		System:   judgeSystem,
@@ -142,6 +159,22 @@ INVESTIGATION RESULT
 
 func confidenceLine(inv providers.Investigation) string {
 	return fmt.Sprintf(" (overall confidence %.2f)", inv.Confidence)
+}
+
+// boundedTranscript returns the first supplied transcript excerpt, redacted and
+// hard-capped to maxJudgeTranscriptBytes (keeping the tail — the most
+// decision-relevant, latest tool results). Empty when no transcript is supplied.
+// redact.Secrets is idempotent, so re-applying it over an already-redacted loop
+// transcript is safe and guarantees no secret reaches the judge.
+func boundedTranscript(transcript []string) string {
+	if len(transcript) == 0 || transcript[0] == "" {
+		return ""
+	}
+	s := redact.Secrets(transcript[0])
+	if len(s) > maxJudgeTranscriptBytes {
+		s = s[len(s)-maxJudgeTranscriptBytes:] // keep the tail (latest results)
+	}
+	return s
 }
 
 // parseVerdict extracts the first JSON object from the model text (models often

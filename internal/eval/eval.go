@@ -117,6 +117,37 @@ func (t staticTool) Description() string                          { return "Retu
 func (t staticTool) Schema() string                               { return `{"type":"object","properties":{}}` }
 func (t staticTool) Call(context.Context, string) (string, error) { return t.output, nil }
 
+// NewStaticTool exposes the replay tool (fixed recorded output regardless of args)
+// for reuse OUTSIDE the eval package — notably the `lore demo investigate` command,
+// which drives the real loop against these fakes with no cluster. Additive: it does
+// not change how runOne constructs its own staticTools.
+func NewStaticTool(name, output string) investigate.Tool {
+	return staticTool{name: name, output: output}
+}
+
+// FakeTools returns the case's recorded evidence as replay tools (one per entry in
+// c.Tools), the same fakes runOne wires into the loop. Exposed additively so the demo
+// command can build the identical zero-cluster tool set from a fixture.
+func (c Case) FakeTools() []investigate.Tool {
+	tools := make([]investigate.Tool, 0, len(c.Tools))
+	for name, output := range c.Tools {
+		tools = append(tools, staticTool{name: name, output: output})
+	}
+	return tools
+}
+
+// Symptom returns the case's incident description (the loop's seed prompt). Exposed so
+// the demo can build the investigation Request from a fixture without reaching into
+// unexported fields.
+func (c Case) Symptom() string { return c.Prompt }
+
+// DisplayName returns the case's name for demo/report labeling.
+func (c Case) DisplayName() string { return c.Name }
+
+// AffectedWorkload returns the case's affected workload (zero when unset), so the demo
+// can seed the Request.Workload exactly as runOne does.
+func (c Case) AffectedWorkload() providers.Workload { return c.workload() }
+
 // CaseAggregate is the k-of-n verdict for one case over N replay repeats.
 type CaseAggregate struct {
 	Name        string

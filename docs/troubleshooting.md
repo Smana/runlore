@@ -41,11 +41,13 @@ msg=incident alert=<name> severity=<sev> namespace=<ns> investigate=<bool> reaso
 
 - **Source not enabled.** The webhook only mounts when `sources.alertmanager: {}` is set. A typo such
   as `alertmanagr:` now **fails startup** with
-  `unknown source(s) [alertmanagr] under \`sources:\` — known sources are [alertmanager gitops]`
+  `unknown source(s) [alertmanagr] under \`sources:\` — known sources are [alertmanager gitops pagerduty]`
   (older builds silently did nothing). Check the startup logs.
-- **Webhook rejected at ingress.** If `server.webhook_token_env` is set (mandatory under
-  `actions.mode=auto`), Alertmanager must send `Authorization: Bearer <token>`. A `401` means the
-  token is missing or wrong. The request body is also capped at 1 MiB.
+- **Webhook rejected at ingress.** `server.webhook_token_env` is mandatory once any model is
+  configured (serve fails closed — an anonymous webhook must not bill the model); it is also required
+  by `config.Validate` under `actions.mode=auto`. When set, Alertmanager must send
+  `Authorization: Bearer <token>`. A `401` means the token is missing or wrong. The request body is
+  also capped at 1 MiB.
 - **Metric cross-check.** `runlore_alerts_received_total` counts alerts that passed initial decoding
   and `Decide`. Flat while alerts are firing ⇒ they're being rejected at ingress (auth/parse) or the
   source isn't mounted.
@@ -87,7 +89,8 @@ Check `runlore_investigations_completed_total{result=…}` — the `result` labe
 | `recall` | answered instantly from the catalog | `msg="instant recall (catalog hit; skipping the loop)"` | — |
 | `timeout` | hit `investigation.timeout` (default **10m**) | `msg="investigation hit per-investigation deadline"` | raise `investigation.timeout`; check for a hung tool/provider |
 | `budget_exceeded` | hit `investigation.max_tokens_per_investigation` | `msg="investigation hard-stopped at token budget"` | raise the budget, or accept the cap |
-| `max_steps` | hit `investigation.max_steps` (default **20**) | `msg="investigation hit max steps"` | raise `max_steps`, or the loop is looping — inspect tool calls |
+| `max_steps` | hit `investigation.max_steps` (default **20**) without calling `submit_findings` | `msg="investigation hit max steps"` | raise `max_steps`, or the loop is looping — inspect tool calls |
+| `max_steps_degraded` | hit `max_steps` but `submit_findings` was called mid-loop (degraded answer, not inconclusive) | `msg="investigation complete"` | the loop ran out of budget but still produced a finding — raise `max_steps` if you want a complete answer |
 | `inconclusive` | model never called `submit_findings` after a nudge | `msg="investigation inconclusive (no submit_findings after nudge)"` | often a weak/over-quantized model; try a stronger one |
 | `error` | a tool or model call failed | `msg="investigation failed; retrying"` | inspect the `err=` field |
 

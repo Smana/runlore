@@ -104,9 +104,11 @@ The chart's RBAC is scoped tightly (`deploy/helm/runlore/templates/rbac.yaml`):
   [Getting started → GitHub App](getting-started.md).
 - **Secrets by indirection.** Every credential is referenced by the *name* of an env var / Secret key,
   never inlined in config — so config can't leak a secret (see [Configuration](configuration.md)).
-- **Webhook auth.** The incident webhook accepts a bearer token (`server.webhook_token_env`); it is
-  **mandatory** under `actions.mode=auto` and recommended for any internet-adjacent ingress. Pair it
-  with a restrictive NetworkPolicy.
+- **Webhook auth.** The incident webhook accepts a bearer token (`server.webhook_token_env`). It is
+  **mandatory once any model is configured** (the `serve` path fails closed — an unauthenticated
+  webhook must not reach the LLM and bill the model) and also enforced by `config.Validate` under
+  `actions.mode=auto`. It is warning-only for the model-less log-only investigator. Pair it with a
+  restrictive NetworkPolicy.
 
 ## Tamper-evident audit log
 

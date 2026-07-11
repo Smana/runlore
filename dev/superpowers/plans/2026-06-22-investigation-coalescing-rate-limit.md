@@ -8,7 +8,7 @@
 
 **Tech Stack:** Go, `k8s.io/client-go/util/workqueue`, `gopkg.in/yaml.v3`, `go.opentelemetry.io/otel` + Prometheus exporter, plain `testing` (no testify), house style `now func() time.Time`.
 
-**Design spec:** `docs/superpowers/specs/2026-06-22-investigation-coalescing-rate-limit-design.md`
+**Design spec:** `dev/superpowers/specs/2026-06-22-investigation-coalescing-rate-limit-design.md`
 
 **Conventions:**
 - Module path `github.com/Smana/runlore`.

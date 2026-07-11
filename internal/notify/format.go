@@ -110,9 +110,8 @@ func Format(inv providers.Investigation) string {
 		if ref == "" {
 			ref = mk.Path
 		}
-		// Em-dash (not "(ref)") so a bare URL auto-links cleanly in Matrix: the
-		// mrkdwnToHTML link regex would otherwise swallow a trailing ")" into the href,
-		// which is why Format never parenthesizes URLs elsewhere either.
+		// Em-dash (not "(ref)") so a bare URL is readable without surrounding
+		// punctuation that would attach to the URL in a copy-paste.
 		if ref != "" {
 			fmt.Fprintf(&b, "📚 Matches known runbook: %s — %s\n", mk.Title, ref)
 		} else {

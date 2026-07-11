@@ -17,6 +17,7 @@ import (
 	"github.com/Smana/runlore/internal/catalog"
 	"github.com/Smana/runlore/internal/config"
 	"github.com/Smana/runlore/internal/curator"
+	"github.com/Smana/runlore/internal/httpx"
 	"github.com/Smana/runlore/internal/investigate"
 	"github.com/Smana/runlore/internal/logs/victorialogs"
 	"github.com/Smana/runlore/internal/mcp"
@@ -114,14 +115,55 @@ func BuildModelAndTools(ctx context.Context, cfg *config.Config, gp providers.Gi
 	if cfg.Metrics.URL != "" {
 		warnIfBackendUnreachable(ctx, log, "metrics", cfg.Metrics.URL)
 		m := prometheus.NewWithAuth(cfg.Metrics.URL, cfg.Metrics.TokenEnv, cfg.Metrics.Headers)
+		// Backend flavor (P4): a config override wins; otherwise probe buildinfo once at
+		// startup. VictoriaMetrics unlocks description-only MetricsQL guidance on the
+		// query tools. Detection fails safe to FlavorUnknown (generic Prometheus, no
+		// MetricsQL claims) if the probe can't identify the backend.
+		flavor := prometheus.Flavor(cfg.Metrics.Flavor)
+		if flavor != prometheus.FlavorUnknown {
+			m.WithFlavor(flavor)
+		} else {
+			flavor = m.DetectFlavor(ctx)
+		}
+		vm := flavor == prometheus.FlavorVictoriaMetrics
+		log.Info("metrics backend flavor", "flavor", string(m.Flavor()), "metricsql", vm)
 		tools = append(tools,
-			investigate.QueryMetricsTool{Metrics: m},
-			investigate.QueryMetricsRangeTool{Metrics: m},
+			investigate.QueryMetricsTool{Metrics: m, MetricsQL: vm},
+			investigate.QueryMetricsRangeTool{Metrics: m, MetricsQL: vm},
+			// discover_metrics turns a "no series matched" into a recoverable step by
+			// listing the metric names / label values that actually exist for a selector.
+			investigate.DiscoverMetricsTool{Metrics: m},
 		)
 	}
 	if cfg.Logs.URL != "" {
 		warnIfBackendUnreachable(ctx, log, "logs", cfg.Logs.URL)
-		tools = append(tools, investigate.QueryLogsTool{Logs: victorialogs.NewWithAuth(cfg.Logs.URL, cfg.Logs.TokenEnv, cfg.Logs.Headers)})
+		// Resolve the OPTIONAL collector field convention once; an unset config yields
+		// the shipped defaults, so this is a no-op unless logs.fields is set.
+		lf := cfg.Logs.Fields.Resolved()
+		lg := victorialogs.NewWithAuth(cfg.Logs.URL, cfg.Logs.TokenEnv, cfg.Logs.Headers).WithLevelField(lf.LevelField)
+		tools = append(tools,
+			// query_logs reads the same raw pod logs pod_logs does, so it shares the
+			// pod_log_namespaces allowlist (L2 confinement) and honours the field
+			// convention (L1). The incident namespace is injected per-investigation by
+			// the loop (scopeTools), exactly like pod_logs.
+			investigate.QueryLogsTool{
+				Logs: lg,
+				Fields: investigate.LogFields{
+					ContainerField: lf.ContainerField,
+					NamespaceField: lf.NamespaceField,
+					PodField:       lf.PodField,
+					LevelField:     lf.LevelField,
+					UnpackPipe:     lf.UnpackPipe,
+				},
+				AllowedNamespaces: cfg.Investigation.PodLogNamespaces,
+			},
+			// logs_error_summary (error volume histogram + top messages) and
+			// discover_log_fields (real field names) both degrade gracefully when the
+			// backend lacks the analytics/field capability, so they are safe to always
+			// register whenever a logs backend is configured.
+			investigate.LogsErrorSummaryTool{Logs: lg},
+			investigate.DiscoverLogFieldsTool{Logs: lg},
+		)
 	}
 	// Network-flow data source (the network_drops tool). Pluggable and CNI-agnostic:
 	// no provider is enabled by default. The selected provider must match the cluster's
@@ -129,18 +171,23 @@ func BuildModelAndTools(ctx context.Context, cfg *config.Config, gp providers.Gi
 	switch cfg.Network.Provider {
 	case config.NetworkHubble:
 		if cfg.Network.Hubble.URL != "" {
-			tools = append(tools, investigate.NetworkDropsTool{Network: hubble.New(cfg.Network.Hubble.URL)})
-			log.Info("network provider enabled", "provider", config.NetworkHubble, "url", cfg.Network.Hubble.URL)
+			tools = append(tools, investigate.NetworkDropsTool{Network: hubble.New(cfg.Network.Hubble.URL, cfg.Network.Hubble.TLS)})
+			log.Info("network provider enabled", "provider", config.NetworkHubble, "url", cfg.Network.Hubble.URL, "tls", cfg.Network.Hubble.TLS)
 			if cfg.Network.URL != "" {
 				log.Warn("config.network.url is deprecated; set config.network.provider=hubble and config.network.hubble.url")
 			}
 		}
 	case config.NetworkAWSVPCFlowLogs:
-		if nw, err := awsvpc.New(ctx, cfg.Network.AWS.Region, cfg.Network.AWS.LogGroup); err != nil {
+		// Resolve the optional custom field-index map: nil → v2 default layout.
+		var flowFieldIndex map[string]int
+		if cfg.Network.AWS.FlowFormat == "custom" && len(cfg.Network.AWS.FlowFields) > 0 {
+			flowFieldIndex = cfg.Network.AWS.FlowFields
+		}
+		if nw, err := awsvpc.New(ctx, cfg.Network.AWS.Region, cfg.Network.AWS.LogGroup, flowFieldIndex); err != nil {
 			log.Warn("aws-vpc-flow-logs network provider unavailable; network_drops disabled", "err", err)
 		} else {
 			tools = append(tools, investigate.NetworkDropsTool{Network: nw})
-			log.Info("network provider enabled", "provider", config.NetworkAWSVPCFlowLogs, "log_group", cfg.Network.AWS.LogGroup)
+			log.Info("network provider enabled", "provider", config.NetworkAWSVPCFlowLogs, "log_group", cfg.Network.AWS.LogGroup, "flow_format", cfg.Network.AWS.FlowFormat)
 		}
 	case config.NetworkGCPFirewallLogs:
 		if nw, err := gcpfirewall.New(ctx, cfg.Network.GCP.Project); err != nil {
@@ -155,30 +202,82 @@ func BuildModelAndTools(ctx context.Context, cfg *config.Config, gp providers.Gi
 		log.Warn("unknown network provider; network_drops disabled", "provider", cfg.Network.Provider)
 	}
 	// Read-only cluster access (Flux controller logs + pod status + events), when a
-	// cluster is reachable. The same reader backs all three tools.
+	// cluster is reachable. The same reader backs all three tools — and, when present,
+	// the fused incident_timeline below (as its KubeReader/EventWindower source).
+	var kubeReader providers.KubeReader
 	if cs := KubeClientset(log); cs != nil {
-		reader := cluster.New(cs)
-		tools = append(tools,
-			investigate.ControllerLogsTool{Logs: reader},
-			// pod_logs streams raw pod logs (secrets/PII) to the LLM, so it is
-			// constrained at the app layer to the incident namespace plus this
-			// operator allowlist. The per-incident namespace is set by the loop.
-			investigate.PodLogsTool{Logs: reader, AllowedNamespaces: cfg.Investigation.PodLogNamespaces},
-			investigate.PodStatusTool{Kube: reader},
-			investigate.KubeEventsTool{Kube: reader},
-		)
+		cr := cluster.New(cs)
+		kubeReader = cr
+		tools = append(tools, clusterTools(cr, cfg)...)
 	}
 	// Cloud context (AWS): CloudTrail "what changed" + EC2/ASG/EKS health. Opt-in.
+	var cloudProvider providers.CloudProvider
 	if cfg.Cloud.Provider == "aws" {
 		if cl, err := awscloud.New(ctx, cfg.Cloud.Region, cfg.Cloud.ClusterName); err != nil {
 			log.Warn("aws cloud provider unavailable; cloud tools disabled", "err", err)
 		} else {
+			cloudProvider = cl
 			tools = append(tools, investigate.CloudWhatChangedTool{Cloud: cl}, investigate.CloudResourceHealthTool{Cloud: cl})
 			log.Info("cloud provider enabled", "provider", "aws", "region", cfg.Cloud.Region)
 		}
 	}
+	// incident_timeline (P1) fuses the timestamped facts from the providers above into
+	// ONE chronologically-sorted view. Register it only when at least one contributing
+	// source is wired (GitOps changes, cloud control-plane changes, or kube events) —
+	// with none, the tool would have nothing to correlate. It fans out to whichever of
+	// its (optional) sources are present and skips the rest gracefully.
+	if gp != nil || cloudProvider != nil || kubeReader != nil {
+		tools = append(tools, investigate.IncidentTimelineTool{GitOps: gp, Kube: kubeReader, Cloud: cloudProvider})
+		log.Info("incident_timeline enabled", "gitops", gp != nil, "cloud", cloudProvider != nil, "kube", kubeReader != nil)
+	}
+	// workload_ownership (G4) walks a failing pod's ownerReferences to its top
+	// controller and names the owning GitOps object from its tracking labels, then
+	// surfaces live-vs-GitOps drift (the "someone kubectl-edited it" cause what_changed
+	// can't see). It needs BOTH an OwnerWalker (the cluster reader supports it) AND a
+	// GitOpsInspector for the authoritative engine drift verdict — the inspector is
+	// optional (nil ⇒ the tool degrades to the last-applied fallback), but the walker is
+	// required, so registration is gated on the walker being present.
+	if ow, ok := kubeReader.(providers.OwnerWalker); ok {
+		var insp providers.GitOpsInspector
+		if gp != nil {
+			insp, _ = gp.(providers.GitOpsInspector)
+		}
+		tools = append(tools, investigate.WorkloadOwnershipTool{Kube: ow, Inspector: insp})
+		log.Info("workload_ownership enabled", "inspector", insp != nil)
+	}
 	tools = appendMCPTools(ctx, cfg, log, tools)
 	return model, tools, recall, cat
+}
+
+// clusterReader is the read-only cluster capability backing the cluster tools: it is
+// both a LogReader (controller_logs, pod_logs) and a KubeReader (pod_status,
+// kube_events). *cluster.Reader satisfies it; narrowing to an interface lets the
+// engine-gating be unit-tested with a fake and no live cluster.
+type clusterReader interface {
+	providers.LogReader
+	providers.KubeReader
+}
+
+// clusterTools assembles the read-only cluster tools (controller_logs + pod_logs +
+// pod_status + kube_events) from a cluster reader. controller_logs enumerates the Flux
+// controllers in flux-system, so it is a dead/misleading tool on an ArgoCD deployment:
+// it is registered ONLY when the configured GitOps engine is Flux (the default). Making
+// registration a function of the known engine capability keeps the gate in one testable
+// place. See GitopsEngine.
+func clusterTools(reader clusterReader, cfg *config.Config) []investigate.Tool {
+	var tools []investigate.Tool
+	if GitopsEngine(cfg) == "flux" {
+		tools = append(tools, investigate.ControllerLogsTool{Logs: reader})
+	}
+	tools = append(tools,
+		// pod_logs streams raw pod logs (secrets/PII) to the LLM, so it is
+		// constrained at the app layer to the incident namespace plus this
+		// operator allowlist. The per-incident namespace is set by the loop.
+		investigate.PodLogsTool{Logs: reader, AllowedNamespaces: cfg.Investigation.PodLogNamespaces},
+		investigate.PodStatusTool{Kube: reader},
+		investigate.KubeEventsTool{Kube: reader},
+	)
+	return tools
 }
 
 // appendMCPTools discovers tools from each configured MCP server and appends them
@@ -399,7 +498,10 @@ func warnIfBackendUnreachable(ctx context.Context, log *slog.Logger, kind, rawUR
 	if err != nil {
 		return // a malformed URL is caught by config validation, not here
 	}
-	resp, err := http.DefaultClient.Do(req)
+	// Use the SSRF-guarded egress client (redirect guard + credential stripping) with a
+	// bounded timeout — never http.DefaultClient (unbounded, no redirect guard). The
+	// request context still carries the 3s probe deadline above.
+	resp, err := httpx.SecureClient(3 * time.Second).Do(req)
 	if err != nil {
 		log.Warn("configured "+kind+" backend is UNREACHABLE — investigations will run WITHOUT it "+
 			"(check the NetworkPolicy egress to this endpoint's port, or the URL)",

@@ -1,6 +1,6 @@
 # CronJob outcome-ledger visibility — implementation plan (item R12)
 
-> Spec: `docs/superpowers/specs/2026-06-24-cronjob-outcome-ledger-design.md`.
+> Spec: `dev/superpowers/specs/2026-06-24-cronjob-outcome-ledger-design.md`.
 > Verdict: PARTIAL — the curate CronJob already mounts `catalog` like the
 > Deployment; the real gap is that an absent/empty ledger is a **silent** no-op.
 > Fix = startup visibility (Go) + NOTES/values clarity (Helm). No new PVC mount.

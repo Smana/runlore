@@ -12,6 +12,83 @@ import (
 	"github.com/Smana/runlore/internal/providers"
 )
 
+// TestVerifyPromptCarriesToolTranscript pins C2: the adversarial pass must see a
+// bounded, redacted excerpt of the tool transcript (so it can check that each root
+// cause traces to an actual tool result) and its prompt must carry the
+// groundedness instruction. The loop drives one tool call whose output becomes the
+// transcript the verify request must include.
+func TestVerifyPromptCarriesToolTranscript(t *testing.T) {
+	model := &scriptModel{responses: []providers.CompletionResponse{
+		// step 0: call a tool, producing a tool-role message in history.
+		{ToolCalls: []providers.ToolCall{{ID: "c1", Name: "what_changed", Args: "{}"}}},
+		// step 1: submit findings.
+		{ToolCalls: []providers.ToolCall{{ID: "c2", Name: submitFindingsName, Args: `{"confidence":0.8,"root_causes":[{"summary":"oom","confidence":0.8,"evidence":["OOMKilled"]}]}`}}},
+		// verify pass: keep.
+		{ToolCalls: []providers.ToolCall{{ID: "c3", Name: submitVerdictsName, Args: `{"verdicts":[{"index":0,"verdict":"keep"}]}`}}},
+	}}
+	li := &LoopInvestigator{
+		Model:      model,
+		Tools:      []Tool{echoTool{name: "what_changed"}}, // Call returns "ok"
+		Log:        slog.New(slog.NewTextHandler(io.Discard, nil)),
+		Verify:     true,
+		OnComplete: func(providers.Investigation) {},
+	}
+	if err := li.Investigate(context.Background(), Request{Title: "x"}); err != nil {
+		t.Fatalf("Investigate: %v", err)
+	}
+	if len(model.reqs) != 3 {
+		t.Fatalf("want 3 model calls (2 loop + verify), got %d", len(model.reqs))
+	}
+	verifyUser := model.reqs[2].Messages[0].Content
+	// The tool's output ("ok") must appear in the verify prompt as a transcript excerpt.
+	if !strings.Contains(verifyUser, "ok") || !strings.Contains(strings.ToLower(verifyUser), "transcript") {
+		t.Fatalf("verify prompt missing tool-transcript excerpt, got %q", verifyUser)
+	}
+	// The groundedness instruction must be present in the system prompt.
+	if !strings.Contains(strings.ToLower(model.reqs[2].System), "trace to a tool result") {
+		t.Fatalf("verify system prompt missing groundedness instruction, got %q", model.reqs[2].System)
+	}
+}
+
+// TestTranscriptExcerptSizeCappedAndRedacted asserts the excerpt is hard-capped to
+// a byte budget (so feeding it to verify can't blow up tokens/cost) and that it is
+// redacted (defense in depth — even though loop history is already redacted).
+func TestTranscriptExcerptSizeCappedAndRedacted(t *testing.T) {
+	// A large first tool result (to force the cap) plus a small latest result that
+	// carries a secret-shaped token WITHIN budget — so redaction, not truncation, is
+	// what removes it (the newest result is always kept in full when it fits).
+	secret := "AWS_SECRET_ACCESS_KEY=AKIAIOSFODNN7EXAMPLEabcdef1234567890ABCD"
+	big := strings.Repeat("A", maxVerifyTranscriptBytes*4)
+	msgs := []providers.Message{
+		{Role: "user", Content: "seed"},
+		{Role: "assistant", ToolCalls: []providers.ToolCall{{ID: "1", Name: "kube_events", Args: "{}"}, {ID: "2", Name: "pod_logs", Args: "{}"}}},
+		{Role: "tool", ToolCallID: "1", Content: big},                         // oldest, oversized
+		{Role: "tool", ToolCallID: "2", Content: "recent log line " + secret}, // newest, small, has a secret
+	}
+	got := transcriptExcerpt(msgs)
+	if len(got) > maxVerifyTranscriptBytes {
+		t.Fatalf("excerpt not capped: %d bytes > budget %d", len(got), maxVerifyTranscriptBytes)
+	}
+	if !strings.Contains(got, "recent log line") {
+		t.Fatalf("excerpt should keep the newest (most decision-relevant) tool result, got %q", got[:min(len(got), 200)])
+	}
+	if strings.Contains(got, "AKIAIOSFODNN7EXAMPLEabcdef1234567890ABCD") {
+		t.Fatalf("excerpt leaked a secret-shaped value")
+	}
+}
+
+// TestTranscriptExcerptEmptyWhenNoTools returns empty for a transcript with no tool
+// results (e.g. the recall short-circuit path, where no loop ran).
+func TestTranscriptExcerptEmptyWhenNoTools(t *testing.T) {
+	if got := transcriptExcerpt(nil); got != "" {
+		t.Fatalf("nil transcript should yield empty excerpt, got %q", got)
+	}
+	msgs := []providers.Message{{Role: "user", Content: "seed"}, {Role: "assistant", Content: "thinking"}}
+	if got := transcriptExcerpt(msgs); got != "" {
+		t.Fatalf("transcript with no tool results should yield empty excerpt, got %q", got)
+	}
+}
+
 func TestVerifyRejectsCorrelationFinding(t *testing.T) {
 	// Mirrors the real PR #38 failure: a high-confidence root cause backed only by
 	// "started after change X" with the diff unread. The reviewer rejects it.
