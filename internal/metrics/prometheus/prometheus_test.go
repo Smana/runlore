@@ -122,6 +122,66 @@ func TestQueryTokenEnvUnset(t *testing.T) {
 	}
 }
 
+func TestLabelValues(t *testing.T) {
+	var gotPath string
+	var gotMatch []string
+	var gotStart, gotEnd string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.Path
+		gotMatch = r.URL.Query()["match[]"]
+		gotStart = r.URL.Query().Get("start")
+		gotEnd = r.URL.Query().Get("end")
+		_, _ = w.Write([]byte(`{"status":"success","data":["http_requests_total","up","process_cpu_seconds_total"]}`))
+	}))
+	defer srv.Close()
+
+	vals, err := New(srv.URL).LabelValues(context.Background(), "__name__",
+		[]string{`{namespace="apps"}`},
+		providers.TimeWindow{Start: time.Unix(1700000000, 0), End: time.Unix(1700000300, 0)})
+	if err != nil {
+		t.Fatalf("LabelValues: %v", err)
+	}
+	if gotPath != "/api/v1/label/__name__/values" {
+		t.Fatalf("path=%q", gotPath)
+	}
+	if len(gotMatch) != 1 || gotMatch[0] != `{namespace="apps"}` {
+		t.Fatalf("match[]=%v", gotMatch)
+	}
+	if gotStart != "1700000000" || gotEnd != "1700000300" {
+		t.Fatalf("start=%q end=%q", gotStart, gotEnd)
+	}
+	if len(vals) != 3 || vals[0] != "http_requests_total" || vals[2] != "process_cpu_seconds_total" {
+		t.Fatalf("unexpected values: %v", vals)
+	}
+}
+
+func TestLabelValuesEmptyMatchers(t *testing.T) {
+	// Empty/blank matchers must not emit a match[] param (whole-TSDB enumeration).
+	var gotMatch []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotMatch = r.URL.Query()["match[]"]
+		_, _ = w.Write([]byte(`{"status":"success","data":[]}`))
+	}))
+	defer srv.Close()
+
+	if _, err := New(srv.URL).LabelValues(context.Background(), "job", []string{"", ""}, providers.TimeWindow{}); err != nil {
+		t.Fatalf("LabelValues: %v", err)
+	}
+	if len(gotMatch) != 0 {
+		t.Fatalf("want no match[] params, got %v", gotMatch)
+	}
+}
+
+func TestLabelValuesError(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`{"status":"error","error":"bad matcher"}`))
+	}))
+	defer srv.Close()
+	if _, err := New(srv.URL).LabelValues(context.Background(), "__name__", nil, providers.TimeWindow{}); err == nil {
+		t.Fatal("expected error for status=error")
+	}
+}
+
 func TestQueryError(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		_, _ = w.Write([]byte(`{"status":"error","error":"bad query"}`))

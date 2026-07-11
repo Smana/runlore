@@ -19,6 +19,9 @@ func (f fakeMetrics) Query(context.Context, string, time.Time) (providers.Sample
 func (f fakeMetrics) QueryRange(context.Context, string, providers.TimeWindow, time.Duration) (providers.Matrix, error) {
 	return nil, nil
 }
+func (f fakeMetrics) LabelValues(context.Context, string, []string, providers.TimeWindow) ([]string, error) {
+	return nil, nil
+}
 
 func TestQueryMetricsTool(t *testing.T) {
 	tool := QueryMetricsTool{Metrics: fakeMetrics{samples: providers.Samples{
@@ -34,6 +37,18 @@ func TestQueryMetricsTool(t *testing.T) {
 	}
 	if !strings.Contains(out, `up{job="api"} = 0`) || !strings.Contains(out, `up{job="db"} = 1`) {
 		t.Fatalf("unexpected output:\n%s", out)
+	}
+}
+
+func TestQueryMetricsToolEmptyGuidesDiscovery(t *testing.T) {
+	// A bare "no series matched" is a dead end; the rewrite must name discover_metrics.
+	tool := QueryMetricsTool{Metrics: fakeMetrics{}}
+	out, err := tool.Call(context.Background(), `{"query":"nonexistent_metric"}`)
+	if err != nil {
+		t.Fatalf("Call: %v", err)
+	}
+	if !strings.Contains(out, "no series matched") || !strings.Contains(out, "discover_metrics") {
+		t.Fatalf("empty result must point at discover_metrics:\n%s", out)
 	}
 }
 
@@ -81,6 +96,21 @@ func TestQueryLogsTool(t *testing.T) {
 	}
 }
 
+func TestQueryLogsToolEmptyGuidesRecovery(t *testing.T) {
+	// The empty-logs path must be actionable: schema-mismatch hint + discover_log_fields.
+	tool := QueryLogsTool{Logs: fakeLogs{}}
+	out, err := tool.Call(context.Background(), `{"namespace":"apps"}`)
+	if err != nil {
+		t.Fatalf("Call: %v", err)
+	}
+	if !strings.Contains(out, "no log lines matched") || !strings.Contains(out, "discover_log_fields") {
+		t.Fatalf("empty result must guide recovery:\n%s", out)
+	}
+	if !strings.Contains(out, "pod_logs") {
+		t.Fatalf("empty result should mention pod_logs fallback:\n%s", out)
+	}
+}
+
 func TestBuildLogsQL(t *testing.T) {
 	cases := []struct {
 		name                             string
@@ -124,6 +154,10 @@ type fakeRangeMetrics struct {
 }
 
 func (f *fakeRangeMetrics) Query(context.Context, string, time.Time) (providers.Samples, error) {
+	return nil, nil
+}
+
+func (f *fakeRangeMetrics) LabelValues(context.Context, string, []string, providers.TimeWindow) ([]string, error) {
 	return nil, nil
 }
 
