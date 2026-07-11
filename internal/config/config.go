@@ -177,8 +177,8 @@ type Investigation struct {
 	Coalesce                  Coalesce  `yaml:"coalesce"`
 	RateLimit                 RateLimit `yaml:"rate_limit"`
 	MaxSteps                  int       `yaml:"max_steps"`                    // 0 ⇒ loop default (20)
-	MaxToolOutputBytes        int       `yaml:"max_tool_output_bytes"`        // 0 ⇒ unlimited
-	MaxTokensPerInvestigation int       `yaml:"max_tokens_per_investigation"` // 0 ⇒ unlimited
+	MaxToolOutputBytes        int       `yaml:"max_tool_output_bytes"`        // unset/0 ⇒ bounded default (32768); -1 ⇒ unlimited
+	MaxTokensPerInvestigation int       `yaml:"max_tokens_per_investigation"` // unset/0 ⇒ bounded default (100000); -1 ⇒ unlimited
 	Timeout                   Duration  `yaml:"timeout"`                      // per-investigation deadline; 0 ⇒ default (10m) via applyDefaults
 	ToolTimeout               Duration  `yaml:"tool_timeout"`                 // per-TOOL-call timeout so one hung tool can't eat the budget; 0 ⇒ default (60s) at construction
 
