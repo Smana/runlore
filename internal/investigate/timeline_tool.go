@@ -12,6 +12,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/Smana/runlore/internal/providers"
+	"github.com/Smana/runlore/internal/whatchanged"
 )
 
 // IncidentTimelineTool fuses timestamped facts from several datasources into ONE
@@ -109,6 +110,12 @@ func (t IncidentTimelineTool) Call(ctx context.Context, args string) (string, er
 	}
 	end := time.Now()
 	window := providers.TimeWindow{Start: end.Add(-time.Duration(since) * time.Minute), End: end}
+
+	// Share one clone across the GitOps fan-out: with a window set, Changes clones the
+	// source repo per in-window revision, and several Kustomizations/Applications often
+	// share one source — without this each would re-clone (mirrors what_changed).
+	ctx, done := whatchanged.WithCloneCache(ctx)
+	defer done()
 
 	var rows []timelineRow
 	var notes []string
