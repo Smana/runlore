@@ -178,18 +178,9 @@ func (c *Client) Drops(ctx context.Context, sel providers.Selector, w providers.
 		token = resp.NextPageToken
 	}
 	if truncated {
-		out = append(out, truncationLine(c.maxEvents))
+		out = append(out, providers.TruncationLine(c.maxEvents))
 	}
 	return out, nil
-}
-
-// truncationLine is the sentinel appended when Drops stops at its cap with more
-// entries upstream, so the model knows the view is partial. It carries no Time or
-// Fields, so it cannot be mistaken for a real flow.
-func truncationLine(limit int64) providers.LogLine {
-	return providers.LogLine{
-		Message: fmt.Sprintf("… results truncated at %d (more matched — narrow the query or shorten the window)", limit),
-	}
 }
 
 // payloadToLine renders one DENIED firewall connection into a LogLine. ts is the

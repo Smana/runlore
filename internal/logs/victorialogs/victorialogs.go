@@ -111,7 +111,7 @@ func (c *Client) Query(ctx context.Context, query string, w providers.TimeWindow
 		}
 	}
 	if truncated {
-		out = append(out, truncationLine(c.maxLines))
+		out = append(out, providers.TruncationLine(int64(c.maxLines)))
 	}
 	return out, nil
 }
@@ -299,15 +299,6 @@ func (c *Client) setAuth(req *http.Request) {
 	}
 	for k, v := range c.headers {
 		req.Header.Set(k, v)
-	}
-}
-
-// truncationLine is the sentinel appended when Query stops at its cap with more
-// lines upstream, so the model knows the view is partial. It carries no Time or
-// Fields, so it cannot be mistaken for a real log line.
-func truncationLine(limit int) providers.LogLine {
-	return providers.LogLine{
-		Message: fmt.Sprintf("… results truncated at %d (more matched — narrow the query or shorten the window)", limit),
 	}
 }
 

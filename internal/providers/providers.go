@@ -15,6 +15,7 @@ package providers
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"regexp"
 	"strings"
 	"time"
@@ -580,6 +581,16 @@ type LogLine struct {
 	Time    time.Time
 	Message string
 	Fields  map[string]string
+}
+
+// TruncationLine is the sentinel appended when a logs/flow query stops at its cap
+// with more entries upstream, so the model knows the view is partial. It carries no
+// Time or Fields, so it cannot be mistaken for a real entry. Every capping provider
+// (Hubble/AWS VPC/GCP firewall flow sources, VictoriaLogs) emits this one line.
+func TruncationLine(limit int64) LogLine {
+	return LogLine{
+		Message: fmt.Sprintf("… results truncated at %d (more matched — narrow the query or shorten the window)", limit),
+	}
 }
 
 // Samples is an instant-vector result.

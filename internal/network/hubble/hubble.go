@@ -88,22 +88,13 @@ func (c *Client) Drops(ctx context.Context, sel providers.Selector, w providers.
 			flowCount++
 			if flowCount >= maxFlows {
 				// Cap reached: append the truncation sentinel so the model knows
-				// the view is partial (mirrors gcpfirewall's truncationLine pattern).
-				out = append(out, truncationLine(maxFlows))
+				// the view is partial (mirrors the other flow sources).
+				out = append(out, providers.TruncationLine(int64(maxFlows)))
 				break
 			}
 		}
 	}
 	return out, nil
-}
-
-// truncationLine is the sentinel appended when Drops stops at its cap with more
-// entries upstream, so the model knows the view is partial. It carries no Time or
-// Fields, so it cannot be mistaken for a real flow.
-func truncationLine(limit int) providers.LogLine {
-	return providers.LogLine{
-		Message: fmt.Sprintf("… results truncated at %d (more matched — narrow the query or shorten the window)", limit),
-	}
 }
 
 // dropFilters builds the flow whitelist: always DROPPED, optionally scoped to the
