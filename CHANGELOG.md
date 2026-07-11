@@ -8,6 +8,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 RunLore is **pre-1.0 and under active development** — there are no tagged releases
 yet, so everything currently lives under `[Unreleased]`.
 
+## [0.9.0](https://github.com/Smana/runlore/compare/v0.8.0...v0.9.0) (2026-07-11)
+
+
+### Features
+
+* **gitops:** watch HelmReleases for autonomous failure detection ([#307](https://github.com/Smana/runlore/issues/307)) ([1ef455e](https://github.com/Smana/runlore/commit/1ef455e64ad5292684d59d27ba06c81b7a0e1c98))
+
+
+### Bug Fixes
+
+* **chart:** scope VMServiceScrape to the metrics Service ([#308](https://github.com/Smana/runlore/issues/308)) ([1b3e8c4](https://github.com/Smana/runlore/commit/1b3e8c42ba5d523c8ff359813b229e3b049b14b2))
+* **forge:** neutralize Markdown image beacons before GitHub renders (S2) ([00e9b37](https://github.com/Smana/runlore/commit/00e9b377a436e8ccfcd236dfadf361bf7523c300))
+* **server:** log non-2xx Slack response_url updates (S5) ([00e9b37](https://github.com/Smana/runlore/commit/00e9b377a436e8ccfcd236dfadf361bf7523c300))
+* **whatchanged:** skip worktree checkout on clone to avoid large repo OOM ([00e9b37](https://github.com/Smana/runlore/commit/00e9b377a436e8ccfcd236dfadf361bf7523c300))
+
+
+### Documentation
+
+* **assets:** refreshed brand assets (logo, favicons, wordmark) ([#303](https://github.com/Smana/runlore/issues/303)) ([140f3b3](https://github.com/Smana/runlore/commit/140f3b354c5c5dfeae7403b8b08e63de11295072))
+
+
+### Build System
+
+* pin Dockerfile base images to digest (S4) ([00e9b37](https://github.com/Smana/runlore/commit/00e9b377a436e8ccfcd236dfadf361bf7523c300))
+
 ## [0.8.0](https://github.com/Smana/runlore/compare/v0.7.0...v0.8.0) (2026-07-10)
 
 
