@@ -54,15 +54,18 @@ the pod level — call pod_status on the namespace FIRST: it names container fai
 RunContainerError). Then call kube_events for causes that live only in the event stream
 (FailedScheduling "Insufficient cpu/memory", FailedMount, FailedAttachVolume, failing probes). These two
 tools see pod-level failures that logs and Flux status cannot — a container that never started has no
-logs, and "Insufficient cpu" is an Event, not a log line. Note Flux objects (Kustomization/HelmRelease)
-live in flux-system, not the workload's namespace.
+logs, and "Insufficient cpu" is an Event, not a log line. When you inspect a GitOps object directly
+(gitops_resource_status/gitops_tree), remember the Flux Kustomization/HelmRelease usually lives in
+flux-system, not the workload's namespace; but you do NOT need to hunt for it — what_changed takes the
+FAILING WORKLOAD'S namespace and resolves the owning Kustomization/Application for you.
 
 RIGOR — correctness over plausibility. A wrong-but-confident root cause is worse than an honest
 "unresolved":
 - Correlation is NOT causation. "The incident started after change X" does not prove X caused it.
   Before naming a change as a root cause you MUST read its actual diff and confirm it plausibly
-  affects THIS failing workload (its namespace, or a resource it depends on). Scope what_changed to
-  the failing workload's namespace — do not pin the incident on an unrelated cluster-wide change.
+  affects THIS failing workload (its namespace, or a resource it depends on). Call what_changed with
+  the failing workload's namespace and let it resolve the owning GitOps object — do not query
+  flux-system directly for it, and do not pin the incident on an unrelated cluster-wide change.
 - Never propose reverting or modifying something you have not inspected. If you couldn't read a
   change's diff, you cannot claim it's the cause — say so in unresolved.
 - Calibrate confidence to the evidence: a verified causal chain (read the change, saw the matching
@@ -233,6 +236,24 @@ func (li *LoopInvestigator) Investigate(ctx context.Context, req Request) error 
 	setUsage := func(inv *providers.Investigation) {
 		inv.Usage = li.aggregateUsage(loopTotals, verifyTotals)
 	}
+	// finish is the SINGLE terminal-delivery chokepoint (#234 follow-up): every exit
+	// that accepts an investigation — the happy submit_findings turn, the recall
+	// short-circuit, AND every synthetic non-convergence result (timeout, refusal,
+	// budget hard-kill, prose-inconclusive-after-nudge, max-steps exhaustion) — routes
+	// through here so the "stamp usage → record usage metric → deliver (fires
+	// OnComplete)" tail can never silently regress: two paths used to return nil with
+	// only a Warn and no deliver(), so OnComplete never fired after paid model calls
+	// (no Slack/Matrix, no ledger open, no KB draft). Callers set `result` for the
+	// completion metric label before calling finish; ordering-sensitive steps the happy
+	// path needs (verify → reviewActions → stampMatchedKnowledge) run BEFORE finish, so
+	// this funnel does not change their behaviour. recordUsageMetrics/deliver are both
+	// nil-safe, so a caller that omitted the usage-metric record before now simply gains
+	// it — no path loses a delivery.
+	finish := func(inv providers.Investigation) {
+		setUsage(&inv)
+		li.recordUsageMetrics(ctx, inv.Usage)
+		li.deliver(req, inv)
+	}
 	defer func() {
 		if li.Metrics != nil {
 			attrs := metric.WithAttributes(attribute.String("result", result))
@@ -298,9 +319,7 @@ func (li *LoopInvestigator) Investigate(ctx context.Context, req Request) error 
 			if len(rec.RootCauses) > 0 {
 				result = "recall"
 				li.emitRecall(RecallDecision{Fired: true, Entry: entry.Path, ShortCircuited: true})
-				setUsage(&rec)
-				li.recordUsageMetrics(ctx, rec.Usage)
-				li.deliver(req, rec)
+				finish(rec)
 				return nil
 			}
 			// The adversarial verify pass rejected every recalled root cause (a stale or
@@ -416,9 +435,7 @@ func (li *LoopInvestigator) Investigate(ctx context.Context, req Request) error 
 					li.Metrics.InvestigationsDropped.Add(ctx, 1)
 				}
 				result = "budget_exceeded"
-				res := budgetKillResult(req)
-				setUsage(&res)
-				li.deliver(req, res)
+				finish(budgetKillResult(req))
 				return nil
 			}
 		}
@@ -465,9 +482,7 @@ func (li *LoopInvestigator) Investigate(ctx context.Context, req Request) error 
 					li.Metrics.InvestigationsDropped.Add(ctx, 1)
 				}
 				result = "timeout"
-				res := timeoutResult(req)
-				setUsage(&res)
-				li.deliver(req, res)
+				finish(timeoutResult(req))
 				return nil
 			}
 			result = "error"
@@ -491,9 +506,7 @@ func (li *LoopInvestigator) Investigate(ctx context.Context, req Request) error 
 				li.Metrics.InvestigationsDropped.Add(ctx, 1)
 			}
 			result = "refused"
-			res := refusalResult(req)
-			setUsage(&res)
-			li.deliver(req, res)
+			finish(refusalResult(req))
 			return nil
 		}
 		// Truncation: the provider stopped at its output-token ceiling, so this turn is
@@ -525,8 +538,19 @@ func (li *LoopInvestigator) Investigate(ctx context.Context, req Request) error 
 			// Nudge it once to use the tool rather than discarding the investigation;
 			// only give up if it still won't after the nudge.
 			if nudged {
+				// Non-convergence, not silence (#234 follow-up): the model answered in
+				// prose and, even after the single-use nudge, still would not call
+				// submit_findings — a common failure on OpenAI-compatible local servers
+				// (vLLM/Ollama) that don't reliably honour forced tool_choice. Deliver a
+				// synthetic inconclusive result so OnComplete still fires (notification,
+				// ledger open, KB draft) after the paid model calls, instead of returning
+				// nil with only a Warn. The reason is a process limitation, so it goes in
+				// data_gaps (not unresolved, which is reserved for questions a human must
+				// answer).
 				li.Log.Warn("investigation inconclusive (no submit_findings after nudge)", "title", req.Title, "tools_used", used)
 				result = "inconclusive"
+				inv := nonConvergenceResult(req, "model concluded in prose without calling submit_findings after a nudge")
+				finish(inv)
 				return nil
 			}
 			nudged = true
@@ -609,8 +633,6 @@ func (li *LoopInvestigator) Investigate(ctx context.Context, req Request) error 
 				inv = li.verifyFindings(ctx, req, inv, &verifyTotals)
 			}
 			inv.Actions = li.reviewActions(ctx, inv.Actions)
-			setUsage(&inv)
-			li.recordUsageMetrics(ctx, inv.Usage)
 			// A submission produced only because the final-step nudge forced it is a
 			// degraded verdict, not a genuine resolution — label it distinctly (mirrors
 			// the "budget_exceeded" convention) so the completed-total metric separates
@@ -619,12 +641,20 @@ func (li *LoopInvestigator) Investigate(ctx context.Context, req Request) error 
 			if forcedFinal {
 				result = "max_steps_degraded"
 			}
-			li.deliver(req, inv)
+			finish(inv)
 			return nil
 		}
 	}
+	// Step budget exhausted without a conclusion (#234 follow-up): the loop ran every
+	// step and the model never submitted findings even when the final step forced
+	// submit_findings — the shape seen on OpenAI-compatible local servers (vLLM/Ollama)
+	// that don't reliably honour forced tool_choice. Deliver a synthetic inconclusive
+	// result so OnComplete still fires (notification, ledger open, KB draft) after the
+	// paid model calls, rather than returning nil with only a Warn.
 	li.Log.Warn("investigation hit max steps", "title", req.Title, "max", maxSteps, "tools_used", used)
 	result = "max_steps"
+	inv := nonConvergenceResult(req, fmt.Sprintf("investigation exhausted its %d-step budget without concluding", maxSteps))
+	finish(inv)
 	return nil
 }
 
@@ -839,6 +869,26 @@ func redactInvestigation(inv *providers.Investigation) {
 		inv.Actions[i].Name = redact.Secrets(inv.Actions[i].Name)
 		inv.Actions[i].Description = redact.Secrets(inv.Actions[i].Description)
 	}
+}
+
+// nonConvergenceResult synthesises an inconclusive investigation for the two loop
+// exits where the model ran (burning paid calls) but never produced findings:
+// prose-inconclusive-after-nudge and max-steps exhaustion (#234 follow-up). Both are
+// process limitations, not a hung/refused provider, so reason lands in DataGaps (the
+// prompt's channel for "signals that could not be obtained" — a data limitation, not a
+// question for a human) rather than Unresolved. It mirrors budget/timeout/refusalResult
+// (Verdict=inconclusive, Title defaulted to req.Title, Resource=the alert workload) and
+// stamps the trigger-time facts so the delivered notification/ledger open carries the
+// alert's fingerprint/dedup key like every other terminal result.
+func nonConvergenceResult(req Request, reason string) providers.Investigation {
+	inv := providers.Investigation{
+		Title:    req.Title,
+		Resource: req.Workload,
+		Verdict:  providers.VerdictInconclusive,
+		DataGaps: []string{reason},
+	}
+	stampRequestFacts(&inv, req)
+	return inv
 }
 
 // stampRequestFacts copies the deterministic trigger-time facts from the Request
