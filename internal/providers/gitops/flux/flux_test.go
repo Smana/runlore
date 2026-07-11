@@ -61,6 +61,11 @@ func (f fakeReader) WatchKustomizations(context.Context) (<-chan KustomizationEv
 	close(ch)
 	return ch, nil
 }
+func (f fakeReader) WatchHelmReleases(context.Context) (<-chan HelmReleaseEvent, error) {
+	ch := make(chan HelmReleaseEvent)
+	close(ch)
+	return ch, nil
+}
 func (f fakeReader) GetResource(context.Context, string, string, string) (*unstructured.Unstructured, error) {
 	return nil, fmt.Errorf("not implemented")
 }
@@ -329,15 +334,26 @@ func TestProviderChangesSelector(t *testing.T) {
 	}
 }
 
-// streamReader is a fakeReader that also serves a fixed watch stream.
+// streamReader is a fakeReader that also serves fixed Kustomization and
+// HelmRelease watch streams.
 type streamReader struct {
 	fakeReader
-	events []KustomizationEvent
+	events   []KustomizationEvent
+	hrEvents []HelmReleaseEvent
 }
 
 func (s streamReader) WatchKustomizations(_ context.Context) (<-chan KustomizationEvent, error) {
 	ch := make(chan KustomizationEvent, len(s.events))
 	for _, e := range s.events {
+		ch <- e
+	}
+	close(ch)
+	return ch, nil
+}
+
+func (s streamReader) WatchHelmReleases(_ context.Context) (<-chan HelmReleaseEvent, error) {
+	ch := make(chan HelmReleaseEvent, len(s.hrEvents))
+	for _, e := range s.hrEvents {
 		ch <- e
 	}
 	close(ch)
@@ -366,6 +382,66 @@ func TestWatchFailures(t *testing.T) {
 	if e.Engine != providers.EngineFlux || e.Workload.Name != "bad" || e.Workload.Kind != "Kustomization" ||
 		e.Reason != "BuildFailed" || e.Message != "boom" {
 		t.Fatalf("unexpected failure event: %+v", e)
+	}
+}
+
+// TestWatchFailuresHelmReleases proves runlore#306: a HelmRelease going Ready=False
+// (with no Kustomization involved) surfaces as a FailureEvent{Kind:"HelmRelease"},
+// while True/Unknown HelmReleases are ignored.
+func TestWatchFailuresHelmReleases(t *testing.T) {
+	r := streamReader{hrEvents: []HelmReleaseEvent{
+		{HelmRelease: helmRelease{Name: "ok", Namespace: "apps", ReadyStatus: "True"}},
+		{HelmRelease: helmRelease{Name: "broken", Namespace: "tooling", ReadyStatus: "False", ReadyReason: "InstallFailed", ReadyMessage: "image pull backoff"}},
+		{HelmRelease: helmRelease{Name: "installing", Namespace: "apps", ReadyStatus: "Unknown"}},
+	}}
+	p := New(r, &whatchanged.Differ{})
+	ch, err := p.WatchFailures(context.Background())
+	if err != nil {
+		t.Fatalf("WatchFailures: %v", err)
+	}
+	var got []providers.FailureEvent
+	for e := range ch {
+		got = append(got, e)
+	}
+	if len(got) != 1 {
+		t.Fatalf("want 1 HelmRelease failure event (only Ready=False), got %d: %+v", len(got), got)
+	}
+	e := got[0]
+	if e.Engine != providers.EngineFlux || e.Workload.Kind != "HelmRelease" || e.Workload.Name != "broken" ||
+		e.Workload.Namespace != "tooling" || e.Reason != "InstallFailed" || e.Message != "image pull backoff" {
+		t.Fatalf("unexpected HelmRelease failure event: %+v", e)
+	}
+}
+
+// TestWatchFailuresMerged proves the Kustomization and HelmRelease watches are
+// merged onto one stream: a failing Kustomization and a failing HelmRelease both
+// surface, each carrying its own Kind.
+func TestWatchFailuresMerged(t *testing.T) {
+	r := streamReader{
+		events: []KustomizationEvent{
+			{Kustomization: kustomization{Name: "bad-ks", Namespace: "apps", ReadyStatus: "False", ReadyReason: "BuildFailed"}},
+		},
+		hrEvents: []HelmReleaseEvent{
+			{HelmRelease: helmRelease{Name: "bad-hr", Namespace: "tooling", ReadyStatus: "False", ReadyReason: "InstallFailed"}},
+		},
+	}
+	p := New(r, &whatchanged.Differ{})
+	ch, err := p.WatchFailures(context.Background())
+	if err != nil {
+		t.Fatalf("WatchFailures: %v", err)
+	}
+	byKind := map[string]providers.FailureEvent{}
+	for e := range ch {
+		byKind[e.Workload.Kind] = e
+	}
+	if len(byKind) != 2 {
+		t.Fatalf("want failures for both kinds, got %d: %+v", len(byKind), byKind)
+	}
+	if k := byKind["Kustomization"]; k.Workload.Name != "bad-ks" {
+		t.Fatalf("Kustomization failure: %+v", k)
+	}
+	if h := byKind["HelmRelease"]; h.Workload.Name != "bad-hr" {
+		t.Fatalf("HelmRelease failure: %+v", h)
 	}
 }
 

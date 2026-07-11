@@ -9,6 +9,7 @@ import (
 	"context"
 	"fmt"
 	"strings"
+	"sync"
 	"time"
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -46,6 +47,22 @@ type KustomizationEvent struct {
 	Kustomization kustomization
 }
 
+// helmRelease is the minimal Flux HelmRelease data the failure watcher needs: its
+// identity and Ready condition. Unlike kustomization it carries no source/path/
+// revision — a HelmRelease failure is reported for investigation, not Git-diffed
+// through the Kustomization Change path.
+type helmRelease struct {
+	Name, Namespace string
+	ReadyStatus     string // status.conditions[type=Ready].status ("True"/"False"/"Unknown")
+	ReadyReason     string
+	ReadyMessage    string
+}
+
+// HelmReleaseEvent is a single watch event for a HelmRelease.
+type HelmReleaseEvent struct {
+	HelmRelease helmRelease
+}
+
 // Reader is the cluster-read surface the provider depends on. The dynamic
 // client-go implementation lives in dynamic.go; tests use a fake.
 type Reader interface {
@@ -56,6 +73,10 @@ type Reader interface {
 	// ExternalArtifact, used to find a failing Kustomization's HEAD.
 	SourceRevision(ctx context.Context, kind, namespace, name string) (string, error)
 	WatchKustomizations(ctx context.Context) (<-chan KustomizationEvent, error)
+	// WatchHelmReleases watches all Flux HelmReleases (runlore#306): a stuck/failed
+	// HelmRelease goes Ready=False without any Kustomization flipping, so it is
+	// invisible to WatchKustomizations.
+	WatchHelmReleases(ctx context.Context) (<-chan HelmReleaseEvent, error)
 	// GetResource fetches one object by kind/namespace/name (kinds in kindToGVR).
 	GetResource(ctx context.Context, kind, namespace, name string) (*unstructured.Unstructured, error)
 	// ListEvents returns recent Event lines for an involved object.
@@ -255,22 +276,44 @@ func (p *Provider) Diff(ctx context.Context, c providers.Change) (providers.Diff
 	return p.differ.ForChange(ctx, c)
 }
 
-// WatchFailures watches Flux Kustomizations and emits a FailureEvent whenever one
-// is Ready=False (a failed/blocked reconcile). The returned channel closes when
-// the watch ends or ctx is done.
+// WatchFailures watches Flux Kustomizations AND HelmReleases and emits a
+// FailureEvent whenever one is Ready=False (a failed/blocked reconcile). Both are
+// watched because a HelmRelease can fail on its own (image pull, failed hook,
+// exhausted install retries) without any Kustomization flipping — that class of
+// failure was previously invisible to the autonomous gitops-watch (runlore#306).
+// The two streams are merged onto one channel, which closes when both watches end
+// or ctx is done.
 func (p *Provider) WatchFailures(ctx context.Context) (<-chan providers.FailureEvent, error) {
-	src, err := p.reader.WatchKustomizations(ctx)
+	ksrc, err := p.reader.WatchKustomizations(ctx)
 	if err != nil {
 		return nil, err
 	}
+	hsrc, err := p.reader.WatchHelmReleases(ctx)
+	if err != nil {
+		return nil, err
+	}
+
 	out := make(chan providers.FailureEvent)
+	// emit sends fe unless ctx is cancelled; returns false to stop the caller loop.
+	emit := func(fe providers.FailureEvent) bool {
+		select {
+		case out <- fe:
+			return true
+		case <-ctx.Done():
+			return false
+		}
+	}
+
+	var wg sync.WaitGroup
+	wg.Add(2)
+	// Kustomization failures.
 	go func() {
-		defer close(out)
+		defer wg.Done()
 		for {
 			select {
 			case <-ctx.Done():
 				return
-			case ev, ok := <-src:
+			case ev, ok := <-ksrc:
 				if !ok {
 					return
 				}
@@ -278,19 +321,46 @@ func (p *Provider) WatchFailures(ctx context.Context) (<-chan providers.FailureE
 				if k.ReadyStatus != "False" {
 					continue
 				}
-				fe := providers.FailureEvent{
+				if !emit(providers.FailureEvent{
 					Workload: providers.Workload{Kind: "Kustomization", Name: k.Name, Namespace: k.Namespace},
 					Engine:   providers.EngineFlux,
 					Reason:   k.ReadyReason,
 					Message:  k.ReadyMessage,
-				}
-				select {
-				case out <- fe:
-				case <-ctx.Done():
+				}) {
 					return
 				}
 			}
 		}
+	}()
+	// HelmRelease failures (runlore#306).
+	go func() {
+		defer wg.Done()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case ev, ok := <-hsrc:
+				if !ok {
+					return
+				}
+				h := ev.HelmRelease
+				if h.ReadyStatus != "False" {
+					continue
+				}
+				if !emit(providers.FailureEvent{
+					Workload: providers.Workload{Kind: "HelmRelease", Name: h.Name, Namespace: h.Namespace},
+					Engine:   providers.EngineFlux,
+					Reason:   h.ReadyReason,
+					Message:  h.ReadyMessage,
+				}) {
+					return
+				}
+			}
+		}
+	}()
+	go func() {
+		wg.Wait()
+		close(out)
 	}()
 	return out, nil
 }
