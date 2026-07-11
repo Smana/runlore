@@ -78,24 +78,34 @@ func New(reader Reader, differ *whatchanged.Differ) *Provider {
 // given, we retry name-matched across all namespaces so "no changes" is never a
 // silent false negative — mirroring the flux provider.
 //
-// NOTE (v1 scope): the window is accepted but not yet used to filter by deploy
-// time; each Change reflects the current synced revision.
-func (p *Provider) Changes(ctx context.Context, _ providers.TimeWindow, sel providers.Selector) ([]providers.Change, error) {
+// TimeWindow (G3): when w is non-zero, each Application emits a Change per source
+// revision that landed IN the window (git-log on the resolved source repo,
+// newest-first, capped at maxWindowRevisions), so "what changed over the last N
+// hours" surfaces the whole timeline — not just the current synced revision. A
+// zero/unset window falls back to the single current-revision behavior. The
+// enumeration is bounded so a wide window can't explode the output.
+func (p *Provider) Changes(ctx context.Context, w providers.TimeWindow, sel providers.Selector) ([]providers.Change, error) {
 	apps, err := p.reader.ListApplications(ctx)
 	if err != nil {
 		return nil, err
 	}
-	changes := changesFor(apps, func(a application) bool {
+	changes := p.changesFor(ctx, w, apps, func(a application) bool {
 		return matchesNamespace(a, sel.Namespace) && (sel.Name == "" || a.Name == sel.Name)
 	})
 	if len(changes) == 0 && sel.Name != "" {
-		changes = changesFor(apps, func(a application) bool { return a.Name == sel.Name })
+		changes = p.changesFor(ctx, w, apps, func(a application) bool { return a.Name == sel.Name })
 	}
 	return changes, nil
 }
 
+// maxWindowRevisions caps how many in-window revisions a single Application emits
+// (G3), bounding the "what changed" output on a busy monorepo.
+const maxWindowRevisions = 10
+
 // changesFor maps the Applications accepted by keep into engine-agnostic Changes.
-func changesFor(apps []application, keep func(application) bool) []providers.Change {
+// With a non-zero window it expands each app into one Change per in-window source
+// revision (G3); otherwise it emits the single current-revision Change.
+func (p *Provider) changesFor(ctx context.Context, w providers.TimeWindow, apps []application, keep func(application) bool) []providers.Change {
 	var changes []providers.Change
 	for _, a := range apps {
 		if !keep(a) {
@@ -107,9 +117,38 @@ func changesFor(apps []application, keep func(application) bool) []providers.Cha
 				"hasRepoURL", a.RepoURL != "", "hasRevision", a.Revision != "")
 			continue // not enough to locate a source diff
 		}
+		if wchanges := p.windowChanges(ctx, w, a); len(wchanges) > 0 {
+			changes = append(changes, wchanges...)
+			continue
+		}
 		changes = append(changes, mapApplication(a))
 	}
 	return changes
+}
+
+// windowChanges expands an Application into one Change per source revision that landed
+// within w (newest-first, capped by maxWindowRevisions), each diffing the revision
+// against its parent so the model sees the whole in-window timeline instead of only
+// the current synced revision (G3). It returns nil — so the caller keeps today's
+// single-revision behavior — when the window is zero, no Differ is wired, or the
+// enumeration finds/resolves nothing.
+func (p *Provider) windowChanges(ctx context.Context, w providers.TimeWindow, a application) []providers.Change {
+	if p.differ == nil || (w.Start.IsZero() && w.End.IsZero()) {
+		return nil
+	}
+	revs, err := p.differ.RevisionsInWindow(ctx, a.RepoURL, parseRevision(a.Revision), a.Path, w, maxWindowRevisions)
+	if err != nil || len(revs) == 0 {
+		return nil // clone/log failure or nothing in window — fall back to current revision
+	}
+	out := make([]providers.Change, 0, len(revs))
+	for _, r := range revs {
+		c := mapApplication(a)
+		c.FromRev = ""
+		c.ToRev = r.SHA
+		c.When = r.When
+		out = append(out, c)
+	}
+	return out
 }
 
 // matchesNamespace reports whether an Application belongs to ns, accepting EITHER

@@ -301,6 +301,76 @@ func (d *Differ) RemoteLastPathChange(ctx context.Context, url, atRev, scope str
 	return lastPathChange(ctx, repo, atRev, scope)
 }
 
+// Revision is one in-window commit on a source repo: its SHA and committer time.
+// It is the unit RevisionsInWindow returns, letting a GitOpsProvider emit one Change
+// per in-window revision instead of only the current applied/synced one (RunLore G3).
+type Revision struct {
+	SHA  string
+	When time.Time
+}
+
+// RevisionsInWindow clones url and returns the commits reachable from atRev whose
+// committer time falls within w, optionally scoped to a path, newest-first and
+// capped at max. It is what lets Changes honor a TimeWindow: instead of surfacing
+// only the current applied/synced revision, a provider can enumerate every revision
+// that landed in the window and emit a Change per one.
+//
+// Bounded on purpose (G3 is SAFETY MEDIUM — it changes what "what changed" surfaces
+// to the model): the walk stops once max revisions are collected OR once history
+// predates w.Start, so a wide window on a busy monorepo can't explode the output.
+// A zero-valued window (w.Start.IsZero() && w.End.IsZero()) returns nil so callers
+// fall back to their single-revision behavior. max<=0 also returns nil.
+func (d *Differ) RevisionsInWindow(ctx context.Context, url, atRev, scope string, w providers.TimeWindow, max int) ([]Revision, error) {
+	if max <= 0 || (w.Start.IsZero() && w.End.IsZero()) {
+		return nil, nil
+	}
+	repo, cleanup, err := d.cloneToDisk(ctx, url)
+	if err != nil {
+		return nil, err
+	}
+	defer cleanup()
+	return revisionsInWindow(repo, atRev, scope, w, max)
+}
+
+// revisionsInWindow walks history from atRev newest-first (committer-time order),
+// keeping commits within [w.Start, w.End] until max are collected or history predates
+// the window. Because the walk is committer-time ordered, once a commit is older than
+// w.Start no later one can be in-window, so the walk short-circuits — keeping it cheap.
+func revisionsInWindow(repo *git.Repository, atRev, scope string, w providers.TimeWindow, max int) ([]Revision, error) {
+	from, err := resolveCommit(repo, atRev)
+	if err != nil {
+		return nil, fmt.Errorf("resolve %q: %w", atRev, err)
+	}
+	opts := &git.LogOptions{From: from.Hash, Order: git.LogOrderCommitterTime}
+	if scope != "" {
+		opts.PathFilter = func(p string) bool { return underScope(p, scope) }
+	}
+	iter, err := repo.Log(opts)
+	if err != nil {
+		return nil, fmt.Errorf("log %s: %w", scope, err)
+	}
+	defer iter.Close()
+	var out []Revision
+	for len(out) < max {
+		c, err := iter.Next()
+		if errors.Is(err, io.EOF) {
+			break
+		}
+		if err != nil {
+			return out, fmt.Errorf("log %s: %w", scope, err)
+		}
+		t := c.Committer.When
+		if !w.Start.IsZero() && t.Before(w.Start) {
+			break // committer-time ordered: everything older is also out of window
+		}
+		if !w.End.IsZero() && t.After(w.End) {
+			continue // newer than the window (rare with clock skew) — skip, keep walking
+		}
+		out = append(out, Revision{SHA: c.Hash.String(), When: t})
+	}
+	return out, nil
+}
+
 // lastPathChange walks history from atRev and returns the path-scoped diff of the
 // newest commit that modified scope, against its first parent.
 func lastPathChange(ctx context.Context, repo *git.Repository, atRev, scope string) (providers.Diff, error) {
