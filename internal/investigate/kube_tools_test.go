@@ -43,6 +43,26 @@ func TestPodStatusTool(t *testing.T) {
 	}
 }
 
+// B8 (CORE-707): pod_status output must carry podIP/nodeName so the model can bridge
+// a network_drops IP back to a pod. Absent IPs (unscheduled pod) add no noise.
+func TestPodStatusToolShowsIPs(t *testing.T) {
+	tool := PodStatusTool{Kube: fakeKube{pods: []providers.PodStatus{
+		{Name: "web-0", Phase: "Running", Ready: "1/1", PodIP: "10.42.3.7", NodeName: "ip-10-0-1-23", HostIP: "10.0.1.23"},
+		{Name: "pending-0", Phase: "Pending", Ready: "0/1"},
+	}}}
+	out, err := tool.Call(context.Background(), `{"namespace":"apps"}`)
+	if err != nil {
+		t.Fatalf("Call: %v", err)
+	}
+	if !strings.Contains(out, "ip=10.42.3.7") || !strings.Contains(out, "node=ip-10-0-1-23") || !strings.Contains(out, "hostIP=10.0.1.23") {
+		t.Fatalf("pod_status must surface podIP/node/hostIP for a scheduled pod, got:\n%s", out)
+	}
+	// A pod without an IP (unscheduled) must not render an empty ip=/node=.
+	if strings.Contains(out, "ip= ") || strings.Contains(out, "node= ") {
+		t.Fatalf("absent IPs must add no noise, got:\n%s", out)
+	}
+}
+
 // selectorKube returns matched pods only for a specific selector, and allPods for
 // the empty (whole-namespace) selector — modelling a workload whose real labels
 // don't match a guessed `app=<name>` selector.

@@ -268,6 +268,7 @@ type PodLogQuery struct {
 	LabelSelector string // empty = all pods in the namespace
 	SinceMinutes  int    // 0 = no lower bound
 	Previous      bool   // read the last-terminated container (crash output) instead of the running one
+	Container     string // empty = all of the pod's containers (the reader iterates them); set to scope to one
 }
 
 // PodStatus is a pod's high-level health: phase, ready count, and per-container
@@ -280,6 +281,13 @@ type PodStatus struct {
 	Ready   string   // "1/2"
 	Healthy bool     // Running/Succeeded with all containers ready and no waiting reasons
 	Reasons []string // e.g. "registry: CreateContainerConfigError: couldn't find key username in Secret …"
+	// PodIP/NodeName/HostIP bridge a network_drops IP back to a pod: a VPC/Hubble
+	// drop names an IP, and only pod_status can tie that IP to a workload. All three
+	// are already on the corev1.Pod object, so surfacing them costs no extra API call
+	// (B8, CORE-707). Empty when the pod hasn't been scheduled/assigned an IP yet.
+	PodIP    string
+	NodeName string
+	HostIP   string
 }
 
 // KubeEvent is a normalized Kubernetes Event — surfaces causes that live in the
