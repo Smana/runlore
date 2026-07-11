@@ -408,8 +408,14 @@ func (s *Server) updateSlack(ctx context.Context, responseURL, text string, repl
 	}
 	req.Header.Set("Content-Type", "application/json")
 	client := httpx.SecureClient(10 * time.Second)
-	if resp, err := client.Do(req); err == nil {
-		_ = resp.Body.Close()
+	resp, err := client.Do(req)
+	if err != nil {
+		s.log.Warn("slack response_url: request failed (best-effort)", "err", err)
+		return
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode/100 != 2 {
+		s.log.Warn("slack response_url: non-2xx status (best-effort)", "status", resp.StatusCode)
 	}
 }
 
