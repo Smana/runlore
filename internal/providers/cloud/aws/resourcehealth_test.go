@@ -70,12 +70,16 @@ func (f *fakeASG) DescribeScalingActivities(_ context.Context, _ *autoscaling.De
 	return &autoscaling.DescribeScalingActivitiesOutput{}, nil
 }
 
-// fakeEC2 serves DescribeInstanceStatus (the only EC2 call ResourceHealth makes).
-// statusErr (when set) makes the status query fail. DescribeInstances is part of
-// the ec2API surface but unused here.
+// fakeEC2 serves DescribeInstanceStatus and DescribeInstances.
+// statusErr (when set) makes DescribeInstanceStatus fail.
+// reservations (when set) is returned by DescribeInstances; lastDescribeIn
+// captures the most-recent DescribeInstances input so tests can assert request
+// shapes (filters etc.).
 type fakeEC2 struct {
-	statuses  []ec2types.InstanceStatus
-	statusErr error
+	statuses       []ec2types.InstanceStatus
+	statusErr      error
+	reservations   []ec2types.Reservation
+	lastDescribeIn *ec2.DescribeInstancesInput
 }
 
 func (f *fakeEC2) DescribeInstanceStatus(_ context.Context, _ *ec2.DescribeInstanceStatusInput, _ ...func(*ec2.Options)) (*ec2.DescribeInstanceStatusOutput, error) {
@@ -85,8 +89,9 @@ func (f *fakeEC2) DescribeInstanceStatus(_ context.Context, _ *ec2.DescribeInsta
 	return &ec2.DescribeInstanceStatusOutput{InstanceStatuses: f.statuses}, nil
 }
 
-func (f *fakeEC2) DescribeInstances(_ context.Context, _ *ec2.DescribeInstancesInput, _ ...func(*ec2.Options)) (*ec2.DescribeInstancesOutput, error) {
-	return &ec2.DescribeInstancesOutput{}, nil
+func (f *fakeEC2) DescribeInstances(_ context.Context, in *ec2.DescribeInstancesInput, _ ...func(*ec2.Options)) (*ec2.DescribeInstancesOutput, error) {
+	f.lastDescribeIn = in
+	return &ec2.DescribeInstancesOutput{Reservations: f.reservations}, nil
 }
 
 func asgPage(token string, names ...string) *autoscaling.DescribeAutoScalingGroupsOutput {
@@ -403,4 +408,138 @@ func TestDescribeASGsClusterFilter(t *testing.T) {
 			t.Fatalf("expected no filters when clusterName is empty, got %v", asgF.lastIn.Filters)
 		}
 	})
+}
+
+// makeKarpenterInstance builds a minimal ec2types.Instance with the
+// karpenter.sh/nodepool tag set to pool, the given lifecycle and state,
+// and an optional StateReason code (for simulating spot terminations).
+func makeKarpenterInstance(id, pool string, lifecycle ec2types.InstanceLifecycleType, stateName ec2types.InstanceStateName, reasonCode string) ec2types.Instance {
+	inst := ec2types.Instance{
+		InstanceId:        ptr(id),
+		InstanceType:      ec2types.InstanceTypeM5Large,
+		InstanceLifecycle: lifecycle,
+		State:             &ec2types.InstanceState{Name: stateName},
+		Tags: []ec2types.Tag{
+			{Key: ptr("karpenter.sh/nodepool"), Value: ptr(pool)},
+		},
+	}
+	if reasonCode != "" {
+		inst.StateReason = &ec2types.StateReason{Code: ptr(reasonCode)}
+	}
+	return inst
+}
+
+// TestResourceHealthKarpenterCapacity exercises the karpenterCapacity path:
+//   - Instances tagged karpenter.sh/nodepool are enumerated and grouped by pool.
+//   - Spot instances are flagged (spot=N).
+//   - Terminated instances with spot interruption reason codes surface a
+//     spot-term-reasons=[...] annotation so the model can diagnose "node vanished".
+//   - When no Karpenter instances exist the section is silently omitted.
+//   - When clusterName is set the DescribeInstances request includes a
+//     tag:kubernetes.io/cluster/<name>=owned filter alongside the nodepool tag-key filter.
+func TestResourceHealthKarpenterCapacity(t *testing.T) {
+	tests := []struct {
+		name         string
+		reservations []ec2types.Reservation
+		clusterName  string
+		wantLines    []string
+		wantAbsent   []string
+	}{
+		{
+			name: "mixed spot + on-demand across two nodepools — grouped, spot flagged",
+			reservations: []ec2types.Reservation{
+				{Instances: []ec2types.Instance{
+					makeKarpenterInstance("i-spot1", "default", ec2types.InstanceLifecycleTypeSpot, ec2types.InstanceStateNameRunning, ""),
+					makeKarpenterInstance("i-spot2", "default", ec2types.InstanceLifecycleTypeSpot, ec2types.InstanceStateNameRunning, ""),
+					makeKarpenterInstance("i-od1", "default", ec2types.InstanceLifecycleType(""), ec2types.InstanceStateNameRunning, ""),
+				}},
+				{Instances: []ec2types.Instance{
+					makeKarpenterInstance("i-gpu1", "gpu-pool", ec2types.InstanceLifecycleTypeSpot, ec2types.InstanceStateNameRunning, ""),
+				}},
+			},
+			wantLines: []string{
+				"Karpenter nodepool default: instances=3 spot=2",
+				"Karpenter nodepool gpu-pool: instances=1 spot=1",
+			},
+		},
+		{
+			name: "terminated spot with interruption reason — spot-term-reasons surfaced",
+			reservations: []ec2types.Reservation{
+				{Instances: []ec2types.Instance{
+					makeKarpenterInstance("i-term1", "default", ec2types.InstanceLifecycleTypeSpot, ec2types.InstanceStateNameTerminated, "Server.SpotInstanceTermination"),
+					makeKarpenterInstance("i-run1", "default", ec2types.InstanceLifecycleTypeSpot, ec2types.InstanceStateNameRunning, ""),
+				}},
+			},
+			wantLines: []string{
+				"Karpenter nodepool default: instances=2 spot=2 terminated=1 spot-term-reasons=[Server.SpotInstanceTermination]",
+			},
+		},
+		{
+			name:         "no Karpenter instances — section silently omitted",
+			reservations: nil,
+			wantAbsent:   []string{"Karpenter"},
+		},
+		{
+			name:        "cluster set — DescribeInstances carries cluster ownership filter",
+			clusterName: "prod",
+			reservations: []ec2types.Reservation{
+				{Instances: []ec2types.Instance{
+					makeKarpenterInstance("i-a1", "default", ec2types.InstanceLifecycleTypeSpot, ec2types.InstanceStateNameRunning, ""),
+				}},
+			},
+			wantLines: []string{"Karpenter nodepool default: instances=1 spot=1"},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			ec2f := &fakeEC2{reservations: tc.reservations}
+			c := &Client{
+				eks:         &fakeEKS{listPages: []*eks.ListNodegroupsOutput{ngPage("")}},
+				asg:         &fakeASG{pages: []*autoscaling.DescribeAutoScalingGroupsOutput{asgPage("")}},
+				ec2:         ec2f,
+				clusterName: tc.clusterName,
+				maxEvents:   25,
+			}
+			lines, err := c.ResourceHealth(context.Background(), providers.Selector{}, providers.TimeWindow{})
+			if err != nil {
+				t.Fatalf("ResourceHealth: %v", err)
+			}
+			for _, want := range tc.wantLines {
+				if !linesContain(lines, want) {
+					t.Errorf("want line containing %q, got %v", want, lines)
+				}
+			}
+			for _, absent := range tc.wantAbsent {
+				if linesContain(lines, absent) {
+					t.Errorf("expected no line containing %q, got %v", absent, lines)
+				}
+			}
+			// When clusterName is set, assert the cluster-ownership filter was sent.
+			if tc.clusterName != "" && ec2f.lastDescribeIn != nil {
+				clusterFilterFound := false
+				expectedFilterName := "tag:kubernetes.io/cluster/" + tc.clusterName
+				for _, f := range ec2f.lastDescribeIn.Filters {
+					if deref(f.Name) == expectedFilterName {
+						clusterFilterFound = true
+						break
+					}
+				}
+				if !clusterFilterFound {
+					t.Errorf("expected DescribeInstances filter %q not found in %v", expectedFilterName, ec2f.lastDescribeIn.Filters)
+				}
+				// Also assert the nodepool tag-key filter is always present.
+				nodepoolFilterFound := false
+				for _, f := range ec2f.lastDescribeIn.Filters {
+					if deref(f.Name) == "tag-key" && len(f.Values) == 1 && f.Values[0] == "karpenter.sh/nodepool" {
+						nodepoolFilterFound = true
+						break
+					}
+				}
+				if !nodepoolFilterFound {
+					t.Errorf("expected DescribeInstances tag-key=karpenter.sh/nodepool filter not found in %v", ec2f.lastDescribeIn.Filters)
+				}
+			}
+		})
+	}
 }
