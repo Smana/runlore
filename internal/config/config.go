@@ -131,6 +131,12 @@ type Network struct {
 // HubbleCfg configures the Cilium Hubble Relay network provider.
 type HubbleCfg struct {
 	URL string `yaml:"url"` // Hubble Relay gRPC address (host:port), e.g. hubble-relay.kube-system:80
+
+	// TLS enables encrypted transport to the Hubble Relay endpoint. Default
+	// (false) keeps the existing plaintext/insecure behaviour so the maintainer's
+	// test cluster (Cilium/Hubble Relay, currently plaintext) keeps connecting
+	// without any config change.
+	TLS bool `yaml:"tls"` // false (default) = insecure/plaintext; true = TLS (credentials.NewTLS)
 }
 
 // AWSFlowCfg configures the AWS VPC Flow Logs network provider. Auth is in-cluster
@@ -138,6 +144,20 @@ type HubbleCfg struct {
 type AWSFlowCfg struct {
 	Region   string `yaml:"region"`    // AWS region (default: AWS_REGION / IMDS)
 	LogGroup string `yaml:"log_group"` // CloudWatch Logs group that receives the VPC Flow Logs (required)
+
+	// FlowFormat selects the VPC Flow Logs field layout. Default (empty / "v2")
+	// uses the standard v2 default format (14 fields). Set to "custom" and
+	// configure FlowFields when the log group was created with a custom field
+	// list; custom-format log groups silently return no results under "v2" because
+	// the positional field assumptions no longer hold.
+	FlowFormat string `yaml:"flow_format"` // "" | "v2" (default) | "custom"
+
+	// FlowFields maps flow field names to their 0-based column index in the
+	// space-delimited log record. Only consulted when FlowFormat is "custom".
+	// Required keys: srcaddr, dstaddr, srcport, dstport, protocol.
+	// Example for a custom format omitting the first two standard fields:
+	//   flow_fields: {srcaddr: 1, dstaddr: 2, srcport: 3, dstport: 4, protocol: 5}
+	FlowFields map[string]int `yaml:"flow_fields"`
 }
 
 // GCPFlowCfg configures the GCP Firewall Rules Logging network provider. Auth is

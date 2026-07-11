@@ -6,6 +6,7 @@ package hubble
 
 import (
 	"context"
+	"crypto/tls"
 	"errors"
 	"fmt"
 	"io"
@@ -14,6 +15,7 @@ import (
 	flowpb "github.com/cilium/cilium/api/v1/flow"
 	observerpb "github.com/cilium/cilium/api/v1/observer"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/protobuf/types/known/timestamppb"
 
@@ -24,21 +26,32 @@ const maxFlows = 100
 
 // Client queries a Hubble Relay endpoint (e.g. hubble-relay.kube-system:80).
 type Client struct {
-	addr string
-	opts []grpc.DialOption
+	addr    string
+	opts    []grpc.DialOption
+	tlsMode bool // false (default) = insecure/plaintext; true = TLS
 }
 
-// New builds a client. Extra dial options are appended (used by tests for an
-// in-memory connection); production uses insecure transport to the relay.
-func New(addr string, opts ...grpc.DialOption) *Client {
-	return &Client{addr: addr, opts: opts}
+// New builds a client. tlsEnabled selects TLS transport (credentials.NewTLS)
+// when true, or insecure/plaintext when false (the DEFAULT — keeps the
+// maintainer's test cluster connecting without any config change).
+// Extra dial options are appended and take precedence (used by tests for an
+// in-memory connection).
+func New(addr string, tlsEnabled bool, opts ...grpc.DialOption) *Client {
+	return &Client{addr: addr, tlsMode: tlsEnabled, opts: opts}
 }
 
 var _ providers.NetworkProvider = (*Client)(nil)
 
 // Drops returns DROPPED flows touching the selector within the window.
 func (c *Client) Drops(ctx context.Context, sel providers.Selector, w providers.TimeWindow) (providers.LogResult, error) {
-	dialOpts := append([]grpc.DialOption{grpc.WithTransportCredentials(insecure.NewCredentials())}, c.opts...)
+	// Select transport credentials: insecure/plaintext (the DEFAULT) or TLS.
+	var transportCreds grpc.DialOption
+	if c.tlsMode {
+		transportCreds = grpc.WithTransportCredentials(credentials.NewTLS(&tls.Config{}))
+	} else {
+		transportCreds = grpc.WithTransportCredentials(insecure.NewCredentials())
+	}
+	dialOpts := append([]grpc.DialOption{transportCreds}, c.opts...)
 	conn, err := grpc.NewClient(c.addr, dialOpts...)
 	if err != nil {
 		return nil, fmt.Errorf("dial hubble: %w", err)
@@ -61,6 +74,7 @@ func (c *Client) Drops(ctx context.Context, sel providers.Selector, w providers.
 		return nil, fmt.Errorf("get flows: %w", err)
 	}
 	var out providers.LogResult
+	flowCount := 0
 	for {
 		resp, err := stream.Recv()
 		if errors.Is(err, io.EOF) {
@@ -71,9 +85,25 @@ func (c *Client) Drops(ctx context.Context, sel providers.Selector, w providers.
 		}
 		if f := resp.GetFlow(); f != nil {
 			out = append(out, flowToLine(f))
+			flowCount++
+			if flowCount >= maxFlows {
+				// Cap reached: append the truncation sentinel so the model knows
+				// the view is partial (mirrors gcpfirewall's truncationLine pattern).
+				out = append(out, truncationLine(maxFlows))
+				break
+			}
 		}
 	}
 	return out, nil
+}
+
+// truncationLine is the sentinel appended when Drops stops at its cap with more
+// entries upstream, so the model knows the view is partial. It carries no Time or
+// Fields, so it cannot be mistaken for a real flow.
+func truncationLine(limit int) providers.LogLine {
+	return providers.LogLine{
+		Message: fmt.Sprintf("… results truncated at %d (more matched — narrow the query or shorten the window)", limit),
+	}
 }
 
 // dropFilters builds the flow whitelist: always DROPPED, optionally scoped to the
