@@ -14,6 +14,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 
@@ -55,7 +56,13 @@ func NewWithAuth(baseURL, tokenEnv string, headers map[string]string) *Client {
 	}
 }
 
-var _ providers.LogsProvider = (*Client)(nil)
+var (
+	_ providers.LogsProvider = (*Client)(nil)
+	// Optional analytics/discovery capabilities — consumers type-assert for these,
+	// so a future backend that lacks them still satisfies LogsProvider.
+	_ providers.LogStats  = (*Client)(nil)
+	_ providers.LogFields = (*Client)(nil)
+)
 
 // Query runs a LogsQL query over the window and returns normalized log lines.
 //
@@ -120,6 +127,143 @@ func (c *Client) queryPage(ctx context.Context, query string, w providers.TimeWi
 		return nil, fmt.Errorf("logs status %d: %s", resp.StatusCode, string(body))
 	}
 	return parseNDJSON(resp.Body)
+}
+
+// Hits returns the per-step match count over the window, split by log level when
+// the level field is present, via /select/logsql/hits (field=level). It powers the
+// logs_error_summary histogram ("3/5m baseline → 412/5m spike"). A step <= 0
+// defaults to one minute. Buckets carry Level="" for the unsplit series a backend
+// without a level field returns.
+func (c *Client) Hits(ctx context.Context, query string, w providers.TimeWindow, step time.Duration) ([]providers.Bucket, error) {
+	if step <= 0 {
+		step = time.Minute
+	}
+	form := url.Values{
+		"query": {query},
+		"step":  {fmt.Sprintf("%ds", int(step.Seconds()))},
+		"field": {"level"}, // split by severity when the field exists; harmless otherwise
+	}
+	setWindow(form, w)
+	body, err := c.postForm(ctx, "/select/logsql/hits", form)
+	if err != nil {
+		return nil, err
+	}
+	var resp struct {
+		Hits []struct {
+			Fields     map[string]string `json:"fields"`
+			Timestamps []string          `json:"timestamps"`
+			Values     []int64           `json:"values"`
+		} `json:"hits"`
+	}
+	if err := json.Unmarshal(body, &resp); err != nil {
+		return nil, fmt.Errorf("parse hits: %w", err)
+	}
+	var out []providers.Bucket
+	for _, series := range resp.Hits {
+		level := series.Fields["level"]
+		for i, ts := range series.Timestamps {
+			if i >= len(series.Values) {
+				break
+			}
+			t, _ := time.Parse(time.RFC3339, ts)
+			out = append(out, providers.Bucket{Time: t, Level: level, Count: series.Values[i]})
+		}
+	}
+	return out, nil
+}
+
+// TopMessages returns up to k dominant messages over the window. It runs
+// `<query> | collapse_nums | stats by (_msg) count() rows, min(_time) first,
+// max(_time) last | sort by (rows desc) | limit k` — collapse_nums normalizes
+// numeric tokens so "took 12ms" and "took 907ms" group into one message. The
+// stats pipe streams NDJSON rows through the raw query endpoint. k <= 0 defaults
+// to 10.
+func (c *Client) TopMessages(ctx context.Context, query string, w providers.TimeWindow, k int) ([]providers.MsgCount, error) {
+	if k <= 0 {
+		k = 10
+	}
+	pipe := fmt.Sprintf("%s | collapse_nums | stats by (_msg) count() rows, min(_time) first, max(_time) last | sort by (rows desc) | limit %d", query, k)
+	form := url.Values{"query": {pipe}}
+	setWindow(form, w)
+	body, err := c.postForm(ctx, "/select/logsql/query", form)
+	if err != nil {
+		return nil, err
+	}
+	rows, err := parseNDJSON(bytes.NewReader(body))
+	if err != nil {
+		return nil, err
+	}
+	out := make([]providers.MsgCount, 0, len(rows))
+	for _, r := range rows {
+		mc := providers.MsgCount{Message: r.Message}
+		if v := r.Fields["rows"]; v != "" {
+			mc.Count, _ = strconv.ParseInt(v, 10, 64)
+		}
+		mc.First, _ = time.Parse(time.RFC3339, r.Fields["first"])
+		mc.Last, _ = time.Parse(time.RFC3339, r.Fields["last"])
+		out = append(out, mc)
+	}
+	return out, nil
+}
+
+// FieldNames lists the field names present in the logs matching query over the
+// window, via /select/logsql/field_names — the log-schema discovery path so a
+// query that assumed the wrong collector field names can be corrected. Results
+// are most-frequent first, as the backend orders them.
+func (c *Client) FieldNames(ctx context.Context, query string, w providers.TimeWindow) ([]providers.FieldCount, error) {
+	form := url.Values{"query": {query}}
+	setWindow(form, w)
+	body, err := c.postForm(ctx, "/select/logsql/field_names", form)
+	if err != nil {
+		return nil, err
+	}
+	var resp struct {
+		Values []struct {
+			Value string `json:"value"`
+			Hits  int64  `json:"hits"`
+		} `json:"values"`
+	}
+	if err := json.Unmarshal(body, &resp); err != nil {
+		return nil, fmt.Errorf("parse field_names: %w", err)
+	}
+	out := make([]providers.FieldCount, 0, len(resp.Values))
+	for _, v := range resp.Values {
+		out = append(out, providers.FieldCount{Name: v.Value, Hits: v.Hits})
+	}
+	return out, nil
+}
+
+// setWindow adds the optional start/end RFC3339 bounds to a LogsQL form.
+func setWindow(form url.Values, w providers.TimeWindow) {
+	if !w.Start.IsZero() {
+		form.Set("start", w.Start.UTC().Format(time.RFC3339))
+	}
+	if !w.End.IsZero() {
+		form.Set("end", w.End.UTC().Format(time.RFC3339))
+	}
+}
+
+// postForm POSTs an x-www-form-urlencoded body to a VictoriaLogs endpoint and
+// returns the raw response body, applying auth exactly like queryPage. It is the
+// shared request path for the analytics/discovery endpoints (hits, field_names,
+// and the stats-pipe query).
+func (c *Client) postForm(ctx context.Context, path string, form url.Values) ([]byte, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.baseURL+path, strings.NewReader(form.Encode()))
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	c.setAuth(req)
+	resp, err := c.http.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("logs query: %w", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	body, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("logs status %d: %s", resp.StatusCode, string(body))
+	}
+	return body, nil
 }
 
 // setAuth applies the optional bearer token and static headers to req. The token

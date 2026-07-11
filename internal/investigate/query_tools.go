@@ -15,6 +15,20 @@ import (
 
 const maxToolRows = 50
 
+// Dead-end result strings. An empty query result is high-leverage: a bare "no
+// series matched" leaves the model to conclude the workload is healthy or to keep
+// guessing metric names. These strings instead name the next tool (discover_metrics
+// / discover_log_fields) so the agent recovers instead of dead-ending. The
+// query_metrics* tests match on the "no series matched" prefix, so it is preserved.
+const (
+	noSeriesMatched = "no series matched — the metric name or labels may not exist; " +
+		"use discover_metrics with a namespace selector to list what this workload actually exports"
+
+	noLogLinesMatched = "no log lines matched — if logs were expected, the collector field names may differ " +
+		"from the assumed schema (try discover_log_fields to see the real fields), or narrow/loosen the query; " +
+		"consider pod_logs for a specific pod"
+)
+
 // renderRows writes up to maxToolRows rows, calling row(i) for each kept index. If
 // n exceeds the cap it appends a truncation note "… (<remaining> <noun>)". This is
 // the shared row-capping shape used by every tool that renders a bounded list.
@@ -60,7 +74,7 @@ func (t QueryMetricsTool) Call(ctx context.Context, args string) (string, error)
 		return "", err
 	}
 	if len(samples) == 0 {
-		return "no series matched", nil
+		return noSeriesMatched, nil
 	}
 	var b strings.Builder
 	renderRows(&b, len(samples), "more series", func(i int) {
@@ -126,7 +140,7 @@ func (t QueryMetricsRangeTool) Call(ctx context.Context, args string) (string, e
 		return "", err
 	}
 	if len(series) == 0 {
-		return "no series matched", nil
+		return noSeriesMatched, nil
 	}
 	var b strings.Builder
 	renderRows(&b, len(series), "more series", func(i int) {
@@ -303,7 +317,7 @@ func (t QueryLogsTool) Call(ctx context.Context, args string) (string, error) {
 		return "", err
 	}
 	if len(lines) == 0 {
-		return "no log lines matched", nil
+		return noLogLinesMatched, nil
 	}
 	var b strings.Builder
 	renderLogLines(&b, lines, "more lines")

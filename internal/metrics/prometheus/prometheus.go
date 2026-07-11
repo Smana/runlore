@@ -117,6 +117,70 @@ func (c *Client) QueryRange(ctx context.Context, promql string, w providers.Time
 	return out, nil
 }
 
+// LabelValues lists the values of a label across series matching matchers, within
+// the window — the metric/label discovery path so the agent can find real names
+// instead of guessing (label "__name__" enumerates metric names). It hits
+// GET /api/v1/label/<label>/values?match[]=…&start=…&end=…, scoping by matcher +
+// window so it stays cheap on a big TSDB. Values are returned as the backend
+// orders them (Prometheus sorts; VictoriaMetrics may not) — callers that need a
+// stable order sort themselves.
+func (c *Client) LabelValues(ctx context.Context, label string, matchers []string, w providers.TimeWindow) ([]string, error) {
+	v := url.Values{}
+	for _, m := range matchers {
+		if m != "" {
+			v.Add("match[]", m)
+		}
+	}
+	if !w.Start.IsZero() {
+		v.Set("start", strconv.FormatInt(w.Start.Unix(), 10))
+	}
+	if !w.End.IsZero() {
+		v.Set("end", strconv.FormatInt(w.End.Unix(), 10))
+	}
+	// The label name is a path segment; escape it so a label like "__name__" (or an
+	// arbitrary one) can't break out of the path.
+	resp, err := c.getRaw(ctx, "/api/v1/label/"+url.PathEscape(label)+"/values", v)
+	if err != nil {
+		return nil, err
+	}
+	var out []string
+	if err := json.Unmarshal(resp, &out); err != nil {
+		return nil, fmt.Errorf("parse label values: %w", err)
+	}
+	return out, nil
+}
+
+// getRaw performs a GET and returns the raw `data` field, for endpoints whose
+// data shape differs from the query result envelope (label values is a []string).
+func (c *Client) getRaw(ctx context.Context, path string, v url.Values) (json.RawMessage, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.baseURL+path+"?"+v.Encode(), nil)
+	if err != nil {
+		return nil, err
+	}
+	c.setAuth(req)
+	resp, err := c.http.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("metrics query: %w", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	data, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("metrics status %d: %s", resp.StatusCode, string(data))
+	}
+	var r struct {
+		Status string          `json:"status"`
+		Error  string          `json:"error"`
+		Data   json.RawMessage `json:"data"`
+	}
+	if err := json.Unmarshal(data, &r); err != nil {
+		return nil, fmt.Errorf("parse metrics response: %w", err)
+	}
+	if r.Status != "success" {
+		return nil, fmt.Errorf("metrics error: %s", r.Error)
+	}
+	return r.Data, nil
+}
+
 func (c *Client) get(ctx context.Context, path string, v url.Values) (*apiResponse, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.baseURL+path+"?"+v.Encode(), nil)
 	if err != nil {

@@ -237,14 +237,80 @@ type GitOpsInspector interface {
 }
 
 // MetricsProvider abstracts VictoriaMetrics/Prometheus (both speak PromQL).
+//
+// LabelValues is metric/label discovery: it answers "what exists?" so the agent
+// never dead-ends on a guessed metric name. A query that matches nothing returns
+// an empty result with no hint of the real names a workload exports; LabelValues
+// scopes to a matcher + window so it stays cheap on a big TSDB. Metric-name
+// discovery uses the label "__name__".
 type MetricsProvider interface {
 	Query(ctx context.Context, promql string, at time.Time) (Samples, error)
 	QueryRange(ctx context.Context, promql string, w TimeWindow, step time.Duration) (Matrix, error)
+	// LabelValues lists the values a label takes across the series that match the
+	// given matchers (PromQL selectors, e.g. `{namespace="apps"}`), within the
+	// window. label "__name__" enumerates metric names. matchers may be empty
+	// (whole-TSDB), though callers should scope it so it stays cheap.
+	LabelValues(ctx context.Context, label string, matchers []string, w TimeWindow) ([]string, error)
 }
 
 // LogsProvider abstracts the logs backend (VictoriaLogs now; Loki etc. later).
 type LogsProvider interface {
 	Query(ctx context.Context, query string, w TimeWindow) (LogResult, error)
+}
+
+// Bucket is one time-bucket of a log-hits histogram: how many lines matched in
+// [Time, Time+step). Level is the per-level series label when the backend split
+// hits by severity ("" for a single, unsplit series).
+type Bucket struct {
+	Time  time.Time
+	Level string
+	Count int64
+}
+
+// MsgCount is one dominant log message and its occurrence stats over a window:
+// how many lines collapsed to it (after numeric normalization) and the first→last
+// span it covered — the "what is flooding the logs" summary.
+type MsgCount struct {
+	Message string
+	Count   int64
+	First   time.Time
+	Last    time.Time
+}
+
+// LogFields is an OPTIONAL discovery capability a LogsProvider may implement:
+// the list of field names present in the logs a query matches (with per-field hit
+// counts) — the log-side analogue of MetricsProvider.LabelValues. It answers "the
+// query returned nothing / the schema I assumed is wrong — what fields do these
+// logs ACTUALLY have?" so the agent recovers instead of dead-ending on a guessed
+// collector schema. Consumers type-assert for it; VictoriaLogs implements it via
+// /select/logsql/field_names.
+type LogFields interface {
+	// FieldNames returns the field names present in the logs matching query over
+	// the window, each with its occurrence count, most-frequent first.
+	FieldNames(ctx context.Context, query string, w TimeWindow) ([]FieldCount, error)
+}
+
+// FieldCount is one log field name and how many matching lines carried it.
+type FieldCount struct {
+	Name string
+	Hits int64
+}
+
+// LogStats is an OPTIONAL analytics capability a LogsProvider may implement:
+// error-volume-over-time (Hits) and top-messages-by-count (TopMessages). It is
+// separate from LogsProvider so the analytics surface never widens the core
+// contract — consumers type-assert for it exactly like GitOpsInspector, and a
+// backend that cannot serve analytics (or a future Loki client) simply omits it,
+// letting the tool fall back gracefully. VictoriaLogs implements it via
+// /select/logsql/hits and a `stats by (_msg)` pipe.
+type LogStats interface {
+	// Hits returns the match count per step-sized bucket over the window; the
+	// backend may split into per-level series (Bucket.Level set) or return a
+	// single unsplit series.
+	Hits(ctx context.Context, query string, w TimeWindow, step time.Duration) ([]Bucket, error)
+	// TopMessages returns up to k dominant messages (numeric tokens collapsed so
+	// near-identical lines group), each with its count and first→last span.
+	TopMessages(ctx context.Context, query string, w TimeWindow, k int) ([]MsgCount, error)
 }
 
 // NetworkProvider abstracts network observability (Hubble now).
