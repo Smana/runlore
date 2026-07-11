@@ -302,8 +302,10 @@ func (li *LoopInvestigator) Investigate(ctx context.Context, req Request) error 
 			initialConfidence := rec.Confidence
 			if li.Verify {
 				// Catalog content is untrusted: verify a recalled finding too, so a
-				// crafted high-recall entry can't bypass the adversarial review.
-				rec = li.verifyFindings(ctx, req, rec, &verifyTotals)
+				// crafted high-recall entry can't bypass the adversarial review. No loop
+				// ran on this short-circuit path, so there is no tool transcript to ground
+				// against (nil) — the recalled finding is judged on the catalog text alone.
+				rec = li.verifyFindings(ctx, req, rec, nil, &verifyTotals)
 			}
 			// Instrument the recall result by verify outcome.
 			if m := li.Recall.Metrics; m != nil {
@@ -658,7 +660,10 @@ func (li *LoopInvestigator) Investigate(ctx context.Context, req Request) error 
 				li.Metrics.InvestigationTokens.Record(ctx, int64(calib.estimate(sys, messages, specs)))
 			}
 			if li.Verify {
-				inv = li.verifyFindings(ctx, req, inv, &verifyTotals)
+				// Ground the review in the tool results the loop actually gathered: pass
+				// the accumulated history so verifyFindings can excerpt (bounded, redacted)
+				// the tool transcript and check each cited evidence traces to a tool result.
+				inv = li.verifyFindings(ctx, req, inv, messages, &verifyTotals)
 			}
 			inv.Actions = li.reviewActions(ctx, inv.Actions)
 			// A submission produced only because the final-step nudge forced it is a
@@ -1077,6 +1082,15 @@ func seedPrompt(req Request, nearMiss *catalog.Entry) string {
 	}
 	if kv := renderKV(req.Annotations, req.Message); kv != "" {
 		fmt.Fprintf(&b, "\nAlert annotations: %s", kv)
+	}
+	// Coalesced blast radius: when this incident represents a batch of correlated
+	// alerts, the representative's Workload names only one of them — surface the OTHER
+	// distinct constituent workloads so the model investigates the whole storm, not a
+	// single arbitrary member. Untrusted (alert-derived, already flowing through the
+	// seed's egress redaction) and pre-bounded at the flush site (maxConstituents).
+	if len(req.CoalescedWorkloads) > 0 {
+		fmt.Fprintf(&b, "\nOther alerts in this coalesced batch (UNTRUSTED — same storm, investigate the whole blast radius): %s",
+			strings.Join(req.CoalescedWorkloads, ", "))
 	}
 	// C2 near-miss: recall did not fire, but a past incident whose resource structurally
 	// agrees with this workload exists. Offer it as a CLEARLY-FRAMED, UNVERIFIED lead —

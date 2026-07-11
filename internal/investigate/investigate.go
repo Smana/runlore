@@ -51,6 +51,13 @@ type Request struct {
 	Fingerprint  string   // Alertmanager fingerprint (stable firing↔resolved); for outcome attribution
 	Fingerprints []string // coalesced batch fingerprints; one open is recorded per entry so every constituent alert's resolve matches
 	TriggerKey   string   // deterministic incident identity (alert fingerprint, or failing resource+condition) set at trigger time; threaded to Investigation.TriggerKey for stable dedup across reworded re-investigations (#137)
+	// CoalescedWorkloads names the DISTINCT constituent workloads of a coalesced batch
+	// OTHER than this representative's own (Alertmanager alertname / "ns/name" refs).
+	// Carried from the coalescer's flush so the seed prompt can surface the full blast
+	// radius of a storm — the representative alone loses the other alerts' workloads.
+	// Untrusted alert-derived text: flows through the seed's egress redaction. Bounded
+	// at the flush site so one pathological storm can't blow up the seed.
+	CoalescedWorkloads []string
 }
 
 // FromFailureEvent builds a Request from a GitOps failure.
