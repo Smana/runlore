@@ -16,7 +16,7 @@
 - **Elision order:** superseded first (a `(tool name, args)` re-issued by a later assistant turn), then largest-byte-first; stop once the estimate is `<= target` (= `0.7 × MaxTokensPerInvestigation`). Never elide more than necessary.
 - Compaction is disabled when `MaxTokensPerInvestigation <= 0` (no reference point). Idempotent (an elided marker is never re-selected).
 - The existing nudge → hard-kill backstop is unchanged; it runs after compaction on the recomputed estimate.
-- Spec: `docs/superpowers/specs/2026-06-30-mid-loop-history-compaction-design.md`.
+- Spec: `dev/superpowers/specs/2026-06-30-mid-loop-history-compaction-design.md`.
 
 ---
 

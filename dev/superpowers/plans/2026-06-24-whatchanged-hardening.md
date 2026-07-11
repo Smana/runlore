@@ -1,7 +1,7 @@
 # whatchanged Hardening — Implementation Plan
 
 > **For agentic workers:** execute task-by-task with TDD (test → fail → impl →
-> pass → commit). Spec: `docs/superpowers/specs/2026-06-24-whatchanged-hardening-design.md`.
+> pass → commit). Spec: `dev/superpowers/specs/2026-06-24-whatchanged-hardening-design.md`.
 
 **Goal (R5, must):** make go-git clone/patch cancellable (thread `ctx` through the
 Differ; `PlainCloneContext` + `PatchContext`) and bound every investigation with a

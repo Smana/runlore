@@ -8,7 +8,7 @@
 
 **Tech Stack:** Go 1.26, stdlib only (`bufio`/`encoding/json`/`os`/`sync`/`time`), stdlib `testing` (no testify). Tests follow `internal/outcome/ledger_test.go` (`t.TempDir()`, `time.Unix`).
 
-**Spec:** `docs/superpowers/specs/2026-06-23-outcome-episodes-design.md`
+**Spec:** `dev/superpowers/specs/2026-06-23-outcome-episodes-design.md`
 
 **Branch:** `feat/outcome-episodes` (already checked out; the spec is already committed there).
 

@@ -1,7 +1,7 @@
 # Server Hardening (R9) — Implementation Plan
 
 > **For agentic workers:** execute task-by-task with TDD (test → fail → impl →
-> pass → commit). Spec: `docs/superpowers/specs/2026-06-24-server-hardening-design.md`.
+> pass → commit). Spec: `dev/superpowers/specs/2026-06-24-server-hardening-design.md`.
 
 **Goal:** Close four bounded inbound-hardening gaps on the serve path — HTTP server
 timeouts/caps, an alert-body size cap, a serve-scoped webhook-auth requirement when
@@ -30,7 +30,7 @@ HTTP-agnostic) and map `*http.MaxBytesError` → 413; (c) a fail-closed guard in
 ---
 
 ### Task 0: Spec + plan (this file)
-**Files:** `docs/superpowers/specs/2026-06-24-server-hardening-design.md`, this plan.
+**Files:** `dev/superpowers/specs/2026-06-24-server-hardening-design.md`, this plan.
 - [x] Write spec (CHALLENGE each gap, verdict + file:line, decisions).
 - [x] Write plan. Commit `docs(server-hardening): spec + plan (R9)`.
 

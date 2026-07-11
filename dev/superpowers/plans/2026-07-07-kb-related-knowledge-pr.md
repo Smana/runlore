@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Every drafted KB PR carries a `## Related knowledge` section in its **body** (never the entry file): the nearest catalog entries with score + resource + web link, plus a trigger-recurrence line — so the reviewer can judge "duplicate? already documented?" without leaving the PR. Spec: `docs/superpowers/specs/2026-07-07-kb-human-surfaces-design.md`, Feature 3.
+**Goal:** Every drafted KB PR carries a `## Related knowledge` section in its **body** (never the entry file): the nearest catalog entries with score + resource + web link, plus a trigger-recurrence line — so the reviewer can judge "duplicate? already documented?" without leaving the PR. Spec: `dev/superpowers/specs/2026-07-07-kb-human-surfaces-design.md`, Feature 3.
 
 **Architecture:** The curator already runs a BM25 dedup search at draft time and discards the hits after the duplicate check; `Novelty` gains a `Hits(ctx, inv, k)` method so one k=5 search serves both the dup decision (top hit) and the reviewer context (all hits above a noise floor). `providers.KBEntry` gains `Related []RelatedEntry` + recurrence-fact fields (stamped by `draftKBEntry` from the Investigation — recurrence facts are read *before* curation in `onInvestigationComplete`, so they're already present). The GitHub forge's `prBody` becomes a method and renders the section with blob URLs derived from the client's API base.
 

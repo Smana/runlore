@@ -8,7 +8,7 @@
 
 **Tech Stack:** Go 1.26, `aws-sdk-go-v2` (cloudtrail/eks/autoscaling paginators), `google.golang.org/api/logging/v2`, stdlib `net/http`+`net/http/httptest`, stdlib `testing` (no testify), table-driven.
 
-**Spec:** `docs/superpowers/specs/2026-06-24-provider-pagination-design.md`
+**Spec:** `dev/superpowers/specs/2026-06-24-provider-pagination-design.md`
 
 **Branch:** `feat/provider-pagination` (checked out; spec+plan committed first).
 
@@ -40,7 +40,7 @@ go build ./... && go vet ./... && go test ./... && gofmt -l . && golangci-lint r
 
 - [ ] **Step 1: Commit** (so a session cut-off can't lose the design)
 ```bash
-git add docs/superpowers/specs/2026-06-24-provider-pagination-design.md docs/superpowers/plans/2026-06-24-provider-pagination.md
+git add dev/superpowers/specs/2026-06-24-provider-pagination-design.md dev/superpowers/plans/2026-06-24-provider-pagination.md
 git commit -m "docs(providers): pagination + truncation-signalling spec + plan"
 ```
 

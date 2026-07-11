@@ -8,7 +8,7 @@
 
 **Tech Stack:** Go 1.26, stdlib `testing` (no testify). Tests follow `internal/investigate/recall_test.go`, `investigate_test.go`, `tools_test.go`, `loop_test.go`.
 
-**Spec:** `docs/superpowers/specs/2026-06-23-recall-disambiguation-design.md`
+**Spec:** `dev/superpowers/specs/2026-06-23-recall-disambiguation-design.md`
 
 **Branch:** `feat/recall-disambiguation` (already checked out; the spec is already committed there).
 

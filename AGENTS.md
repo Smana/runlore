@@ -34,7 +34,8 @@ filters, ignore-list, and resolved-drop). That JSON shape is what Alertmanager/V
 - **Exported symbols carry doc comments** (enforced by `revive`).
 - **Small, focused files** — one clear responsibility each. Backends are pluggable interfaces in
   `internal/providers`, with concrete impls in sub-packages (`gitops/flux`, `metrics`, …).
-- **Read-only first.** No cluster-mutating code in v1 — see `docs/design.md` §9 (the autonomy ladder).
+- **Autonomy ladder.** Cluster-mutating code lives behind `actions.mode` (`approve`/`auto`) — both
+  off by default, both fail-closed (approval token + audit log required). See `docs/design.md` §9.
 - Module path `github.com/Smana/runlore`; CLI binary `lore`.
 
 ## Layout

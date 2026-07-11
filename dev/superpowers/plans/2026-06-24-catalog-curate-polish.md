@@ -1,6 +1,6 @@
 # Plan — Catalog / Curate polish (Item R22)
 
-Spec: `docs/superpowers/specs/2026-06-24-catalog-curate-polish-design.md`.
+Spec: `dev/superpowers/specs/2026-06-24-catalog-curate-polish-design.md`.
 Test-first per nit; gate green before each commit; commit incrementally.
 
 ## Commit 1 — Nit 2: index `Resource` for BM25 (smallest, isolated)

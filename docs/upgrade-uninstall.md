@@ -58,7 +58,7 @@ Three things live on that volume; point their config keys inside the mount path:
 |---|---|---|
 | **Catalog git-sync mirror** | `catalog.dir` (= the mount path) | the local clone of your KB repo, re-synced on an interval |
 | **Outcome ledger** | `outcome.ledger_path` (e.g. `/var/lib/runlore/catalog/outcomes.jsonl`) | append-only JSONL written by `serve`, **read by the curate CronJob** — both must share the volume |
-| **Audit log** | `actions.audit_log_path` | hash-chained, only required when `actions.mode=auto` |
+| **Audit log** | `actions.audit_log_path` | hash-chained, required for both `actions.mode=approve` and `actions.mode=auto` (all executing rungs must be audited) |
 
 The **bleve search index is *not* persisted** — it is built in memory (`NewMemOnly`) and rebuilt from
 the catalog mirror at startup, so a restart simply re-indexes. Instant-recall quality is unaffected by

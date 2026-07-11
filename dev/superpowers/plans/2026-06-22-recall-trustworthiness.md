@@ -8,7 +8,7 @@
 
 **Tech Stack:** Go, bleve (BM25), OpenTelemetry metrics, plain `testing`. Module `github.com/Smana/runlore`.
 
-**Design spec:** `docs/superpowers/specs/2026-06-22-recall-trustworthiness-design.md`
+**Design spec:** `dev/superpowers/specs/2026-06-22-recall-trustworthiness-design.md`
 
 **Conventions:** TDD red→green per task; before each commit `cd /home/smana/Sources/runlore && gofmt -w <files> && go vet ./... && go build ./... && golangci-lint run && <pkg tests>`. Plain `testing`/`t.Fatalf` (no testify). Conventional commits; **NO `Co-Authored-By` / attribution trailers**. Depends on PR #67's recall metrics (this branch is based on it).
 
