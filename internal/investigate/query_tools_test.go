@@ -4,12 +4,15 @@ package investigate
 
 import (
 	"context"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/Smana/runlore/internal/providers"
 )
+
+func strconvItoa(i int) string { return strconv.Itoa(i) }
 
 type fakeMetrics struct{ samples providers.Samples }
 
@@ -202,6 +205,117 @@ func TestQueryMetricsRangeTool(t *testing.T) {
 	}
 	if d := fm.gotWindow.End.Sub(fm.gotWindow.Start); d < 29*time.Minute || d > 31*time.Minute {
 		t.Fatalf("window width=%v, want ~30m", d)
+	}
+}
+
+func TestQueryMetricsRangeToolTrendAndBiggestJump(t *testing.T) {
+	// A step-change and a slow ramp can share the same first/last/min/max, so the
+	// summary must also carry (a) a compact downsampled trend and (b) the largest
+	// adjacent delta with its timestamp — that's what tells a jump from a ramp.
+	fm := &fakeRangeMetrics{matrix: providers.Matrix{{
+		Metric: map[string]string{"__name__": "latency", "pod": "api-0"},
+		Points: []providers.Point{
+			{Time: time.Unix(1700000000, 0).UTC(), Value: 1},
+			{Time: time.Unix(1700000060, 0).UTC(), Value: 1},
+			{Time: time.Unix(1700000120, 0).UTC(), Value: 4}, // +3 jump here
+			{Time: time.Unix(1700000180, 0).UTC(), Value: 4},
+		},
+	}}}
+	tool := QueryMetricsRangeTool{Metrics: fm}
+	out, err := tool.Call(context.Background(), `{"query":"latency","since_minutes":30,"step_seconds":60}`)
+	if err != nil {
+		t.Fatalf("Call: %v", err)
+	}
+	if !strings.Contains(out, "trend=") {
+		t.Fatalf("missing compact trend:\n%s", out)
+	}
+	// biggest adjacent jump is +3 at the third point's timestamp.
+	if !strings.Contains(out, "biggest jump +3") {
+		t.Fatalf("missing biggest-jump magnitude:\n%s", out)
+	}
+	if !strings.Contains(out, "@2023-11-14T22:15:20Z") {
+		t.Fatalf("biggest jump must carry its timestamp:\n%s", out)
+	}
+}
+
+func TestQueryMetricsRangeToolClampsStep(t *testing.T) {
+	// A 24h window with a 1s step is ~86400 points — far past the ~11k backend cap.
+	// The tool must raise the step to bound the point count and annotate that it
+	// coarsened, so an operator's explicit fine step isn't silently changed.
+	fm := &fakeRangeMetrics{matrix: providers.Matrix{{
+		Metric: map[string]string{"__name__": "up"},
+		Points: []providers.Point{{Time: time.Unix(1700000000, 0).UTC(), Value: 1}},
+	}}}
+	tool := QueryMetricsRangeTool{Metrics: fm}
+	out, err := tool.Call(context.Background(), `{"query":"up","since_minutes":1440,"step_seconds":1}`)
+	if err != nil {
+		t.Fatalf("Call: %v", err)
+	}
+	points := int(fm.gotWindow.End.Sub(fm.gotWindow.Start) / fm.gotStep)
+	if points > 1000 {
+		t.Fatalf("clamped step must bound points <= ~1000, got %d (step=%v)", points, fm.gotStep)
+	}
+	if fm.gotStep <= time.Second {
+		t.Fatalf("step should have been raised above 1s, got %v", fm.gotStep)
+	}
+	if !strings.Contains(out, "clamp") && !strings.Contains(out, "coarsen") {
+		t.Fatalf("clamping must be annotated in output:\n%s", out)
+	}
+}
+
+func TestQueryMetricsRangeToolDefaultStepFromWindow(t *testing.T) {
+	// With no explicit step and a wide window, a derived step keeps points bounded
+	// without any clamp annotation (nothing was overridden).
+	fm := &fakeRangeMetrics{matrix: providers.Matrix{{
+		Metric: map[string]string{"__name__": "up"},
+		Points: []providers.Point{{Time: time.Unix(1700000000, 0).UTC(), Value: 1}},
+	}}}
+	tool := QueryMetricsRangeTool{Metrics: fm}
+	out, err := tool.Call(context.Background(), `{"query":"up","since_minutes":1440}`)
+	if err != nil {
+		t.Fatalf("Call: %v", err)
+	}
+	points := int(fm.gotWindow.End.Sub(fm.gotWindow.Start) / fm.gotStep)
+	if points > 1000 {
+		t.Fatalf("derived step must bound points, got %d (step=%v)", points, fm.gotStep)
+	}
+	if strings.Contains(out, "clamp") {
+		t.Fatalf("no explicit step ⇒ no clamp annotation expected:\n%s", out)
+	}
+}
+
+func TestQueryMetricsToolTruncateKeepsExtremes(t *testing.T) {
+	// The 50-row cap keeps an arbitrary first-50 unless we sort by |value| desc; the
+	// extreme (biggest-magnitude) series is what matters, so it must survive
+	// truncation even when it arrives last.
+	samples := make(providers.Samples, 0, 60)
+	for i := 0; i < 59; i++ {
+		samples = append(samples, providers.Sample{
+			Metric: map[string]string{"__name__": "x", "i": strconvItoa(i)}, Value: 0.5,
+		})
+	}
+	// the extreme, appended last so first-50 truncation would drop it.
+	samples = append(samples, providers.Sample{
+		Metric: map[string]string{"__name__": "x", "i": "extreme"}, Value: -999,
+	})
+	tool := QueryMetricsTool{Metrics: fakeMetrics{samples: samples}}
+	out, err := tool.Call(context.Background(), `{"query":"x"}`)
+	if err != nil {
+		t.Fatalf("Call: %v", err)
+	}
+	if !strings.Contains(out, `i="extreme"`) {
+		t.Fatalf("extreme series must survive truncation:\n%s", out)
+	}
+}
+
+func TestQueryMetricsDescriptionSteersAggregation(t *testing.T) {
+	for _, d := range []string{QueryMetricsTool{}.Description(), QueryMetricsRangeTool{}.Description()} {
+		if !strings.Contains(d, "topk") {
+			t.Fatalf("description must steer toward topk aggregation:\n%s", d)
+		}
+		if !strings.Contains(d, "50") {
+			t.Fatalf("description must mention the 50-series cap:\n%s", d)
+		}
 	}
 }
 

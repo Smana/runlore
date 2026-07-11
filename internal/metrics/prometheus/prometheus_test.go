@@ -6,6 +6,7 @@ import (
 	"context"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"testing"
 	"time"
 
@@ -179,6 +180,68 @@ func TestLabelValuesError(t *testing.T) {
 	defer srv.Close()
 	if _, err := New(srv.URL).LabelValues(context.Background(), "__name__", nil, providers.TimeWindow{}); err == nil {
 		t.Fatal("expected error for status=error")
+	}
+}
+
+func TestQueryScalarResult(t *testing.T) {
+	// A scalar PromQL result (e.g. `scalar(...)` or `2+2`) is `[ts, "val"]` — not the
+	// vector `[{metric,value}]` shape. It must parse into a single unlabeled sample
+	// rather than surfacing a raw json.Unmarshal error to the model.
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`{"status":"success","data":{"resultType":"scalar","result":[1700000000,"42"]}}`))
+	}))
+	defer srv.Close()
+
+	s, err := New(srv.URL).Query(context.Background(), "scalar(up)", time.Time{})
+	if err != nil {
+		t.Fatalf("Query: %v", err)
+	}
+	if len(s) != 1 || s[0].Value != 42 || len(s[0].Metric) != 0 {
+		t.Fatalf("scalar must be one unlabeled sample value=42, got: %+v", s)
+	}
+}
+
+func TestQueryStringResult(t *testing.T) {
+	// A string PromQL result is also `[ts, "val"]`; parse the value string into a
+	// single unlabeled sample without erroring (value is 0 when non-numeric).
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`{"status":"success","data":{"resultType":"string","result":[1700000000,"1.5"]}}`))
+	}))
+	defer srv.Close()
+
+	s, err := New(srv.URL).Query(context.Background(), `"1.5"`, time.Time{})
+	if err != nil {
+		t.Fatalf("Query: %v", err)
+	}
+	if len(s) != 1 || s[0].Value != 1.5 {
+		t.Fatalf("string result must parse into one unlabeled sample, got: %+v", s)
+	}
+}
+
+func TestQueryRangeClampGuard(t *testing.T) {
+	// A huge window / tiny step would blow past Prometheus's ~11k-point limit; the
+	// provider raises the step so the request stays bounded even if the caller
+	// forgot to. 24h at 1s = 86400 points → must be coarsened well below the cap.
+	var gotStep string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotStep = r.URL.Query().Get("step")
+		_, _ = w.Write([]byte(`{"status":"success","data":{"resultType":"matrix","result":[]}}`))
+	}))
+	defer srv.Close()
+
+	start := time.Unix(1700000000, 0)
+	end := start.Add(24 * time.Hour)
+	if _, err := New(srv.URL).QueryRange(context.Background(), "up",
+		providers.TimeWindow{Start: start, End: end}, time.Second); err != nil {
+		t.Fatalf("QueryRange: %v", err)
+	}
+	stepSec, _ := strconv.Atoi(gotStep)
+	if stepSec <= 1 {
+		t.Fatalf("step must be raised above 1s to bound points, got %qs", gotStep)
+	}
+	points := int((24 * time.Hour).Seconds()) / stepSec
+	if points > maxRangePoints {
+		t.Fatalf("clamped request still %d points, want <= %d (step=%ss)", points, maxRangePoints, gotStep)
 	}
 }
 

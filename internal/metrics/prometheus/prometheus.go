@@ -53,8 +53,10 @@ type apiResponse struct {
 	Status string `json:"status"`
 	Error  string `json:"error"`
 	Data   struct {
-		ResultType string            `json:"resultType"`
-		Result     []json.RawMessage `json:"result"`
+		ResultType string `json:"resultType"`
+		// Result is kept raw so scalar/string ([ts,"val"]) and vector/matrix
+		// ([{...},...]) shapes can be decoded per resultType by the caller.
+		Result json.RawMessage `json:"result"`
 	} `json:"data"`
 }
 
@@ -68,8 +70,24 @@ func (c *Client) Query(ctx context.Context, promql string, at time.Time) (provid
 	if err != nil {
 		return nil, err
 	}
-	out := make(providers.Samples, 0, len(resp.Data.Result))
-	for _, raw := range resp.Data.Result {
+	// scalar/string results are a bare [ts, "val"] pair, not the vector
+	// [{metric,value}] shape. json.Unmarshal into the vector struct fails on them and
+	// used to surface a raw parse error to the model; parse them into a single
+	// unlabeled sample instead so `scalar(...)` / `count(...)`-style queries work.
+	if resp.Data.ResultType == "scalar" || resp.Data.ResultType == "string" {
+		var pair [2]any
+		if err := json.Unmarshal(resp.Data.Result, &pair); err != nil {
+			return nil, fmt.Errorf("parse %s result: %w", resp.Data.ResultType, err)
+		}
+		ts, val := parsePoint(pair)
+		return providers.Samples{{Metric: map[string]string{}, Value: val, Time: ts}}, nil
+	}
+	var results []json.RawMessage
+	if err := json.Unmarshal(resp.Data.Result, &results); err != nil {
+		return nil, fmt.Errorf("parse %s result: %w", resp.Data.ResultType, err)
+	}
+	out := make(providers.Samples, 0, len(results))
+	for _, raw := range results {
 		var item struct {
 			Metric map[string]string `json:"metric"`
 			Value  [2]any            `json:"value"`
@@ -83,10 +101,26 @@ func (c *Client) Query(ctx context.Context, promql string, at time.Time) (provid
 	return out, nil
 }
 
-// QueryRange runs a range PromQL query over a window.
+// maxRangePoints bounds the (end-start)/step point count per range request.
+// Prometheus/VictoriaMetrics reject a query_range whose resolution exceeds ~11k
+// points; this is a defensive backstop below that limit so a caller (or the
+// query_metrics_range tool) that passes an unbounded window/step still gets a
+// served, coarsened response instead of a hard backend error.
+const maxRangePoints = 11000
+
+// QueryRange runs a range PromQL query over a window. If (end-start)/step would
+// exceed maxRangePoints, the step is raised so the request stays within the
+// backend's point cap — a last-resort guard; the range tool clamps earlier and
+// annotates the coarsening for the operator.
 func (c *Client) QueryRange(ctx context.Context, promql string, w providers.TimeWindow, step time.Duration) (providers.Matrix, error) {
 	if step <= 0 {
 		step = time.Minute
+	}
+	if span := w.End.Sub(w.Start); span > 0 && step > 0 {
+		if points := int(span / step); points > maxRangePoints {
+			// round up so we land at/under the cap, never one point over.
+			step = time.Duration((span.Seconds()/float64(maxRangePoints))+1) * time.Second
+		}
 	}
 	v := url.Values{
 		"query": {promql},
@@ -98,8 +132,12 @@ func (c *Client) QueryRange(ctx context.Context, promql string, w providers.Time
 	if err != nil {
 		return nil, err
 	}
-	out := make(providers.Matrix, 0, len(resp.Data.Result))
-	for _, raw := range resp.Data.Result {
+	var results []json.RawMessage
+	if err := json.Unmarshal(resp.Data.Result, &results); err != nil {
+		return nil, fmt.Errorf("parse %s result: %w", resp.Data.ResultType, err)
+	}
+	out := make(providers.Matrix, 0, len(results))
+	for _, raw := range results {
 		var item struct {
 			Metric map[string]string `json:"metric"`
 			Values [][2]any          `json:"values"`

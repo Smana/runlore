@@ -6,6 +6,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"math"
 	"sort"
 	"strings"
 	"time"
@@ -53,7 +54,7 @@ func (t QueryMetricsTool) Name() string { return "query_metrics" }
 
 // Description returns the tool description.
 func (t QueryMetricsTool) Description() string {
-	return "Run a PromQL instant query against the metrics backend (VictoriaMetrics/Prometheus) — check saturation, error rates, restarts, resource usage. This returns the value NOW only; to see when a metric started rising/spiking around the incident, use query_metrics_range instead."
+	return "Run a PromQL instant query against the metrics backend (VictoriaMetrics/Prometheus) — check saturation, error rates, restarts, resource usage. This returns the value NOW only; to see when a metric started rising/spiking around the incident, use query_metrics_range instead. Results cap at 50 series (largest |value| kept); prefer topk(10, sum by(pod)(rate(...))) over a raw selector so the cap doesn't hide the signal."
 }
 
 // Schema returns the JSON schema for the arguments.
@@ -76,6 +77,13 @@ func (t QueryMetricsTool) Call(ctx context.Context, args string) (string, error)
 	if len(samples) == 0 {
 		return noSeriesMatched, nil
 	}
+	// Prometheus/VictoriaMetrics don't order an instant vector, so a first-50 cap
+	// (renderRows) would keep an arbitrary slice. Sort by |value| desc first so
+	// truncation keeps the extremes — the saturated/erroring series an operator
+	// cares about — rather than whatever the backend happened to emit first.
+	sort.SliceStable(samples, func(i, j int) bool {
+		return math.Abs(samples[i].Value) > math.Abs(samples[j].Value)
+	})
 	var b strings.Builder
 	renderRows(&b, len(samples), "more series", func(i int) {
 		fmt.Fprintf(&b, "%s = %g\n", formatMetric(samples[i].Metric), samples[i].Value)
@@ -107,7 +115,7 @@ func (t QueryMetricsRangeTool) Name() string { return "query_metrics_range" }
 
 // Description returns the tool description.
 func (t QueryMetricsRangeTool) Description() string {
-	return "Run a PromQL RANGE query over a recent window (default 60m, 60s step) to see how a metric TRENDS — rising, spiking, or recovering around the incident — not just its value right now. Use rate()/error-rate/saturation expressions; returns per-series first→last with min/max so you can tell WHEN a problem started. since_minutes bounds the window; step_seconds the resolution."
+	return "Run a PromQL RANGE query over a recent window (default 60m, 60s step) to see how a metric TRENDS — rising, spiking, or recovering around the incident — not just its value right now. Use rate()/error-rate/saturation expressions; returns per-series first→last with min/max, a compact downsampled trend, and the biggest adjacent jump so you can tell WHEN a problem started and whether it was a step-change or a ramp. since_minutes bounds the window; step_seconds the resolution (auto-derived/coarsened if it would exceed the backend point cap). Results cap at 50 series (largest |value| kept); prefer topk(10, sum by(pod)(rate(...))) over a raw selector so the cap doesn't hide the signal."
 }
 
 // Schema returns the JSON schema for the arguments.
@@ -129,13 +137,11 @@ func (t QueryMetricsRangeTool) Call(ctx context.Context, args string) (string, e
 	if since <= 0 {
 		since = 60
 	}
-	step := time.Duration(in.StepSeconds) * time.Second
-	if step <= 0 {
-		step = time.Minute
-	}
 	end := time.Now()
 	start := end.Add(-time.Duration(since) * time.Minute)
-	series, err := t.Metrics.QueryRange(ctx, in.Query, providers.TimeWindow{Start: start, End: end}, step)
+	window := providers.TimeWindow{Start: start, End: end}
+	step, clampNote := resolveStep(time.Duration(in.StepSeconds)*time.Second, window)
+	series, err := t.Metrics.QueryRange(ctx, in.Query, window, step)
 	if err != nil {
 		return "", err
 	}
@@ -143,13 +149,54 @@ func (t QueryMetricsRangeTool) Call(ctx context.Context, args string) (string, e
 		return noSeriesMatched, nil
 	}
 	var b strings.Builder
+	if clampNote != "" {
+		b.WriteString(clampNote + "\n")
+	}
 	renderRows(&b, len(series), "more series", func(i int) {
 		s := series[i]
 		first, last, lo, hi := summarize(s.Points)
-		fmt.Fprintf(&b, "%s first=%g last=%g min=%g%s max=%g%s\n",
-			formatMetric(s.Metric), first, last, lo.Value, atTime(lo.Time), hi.Value, atTime(hi.Time))
+		fmt.Fprintf(&b, "%s first=%g last=%g min=%g%s max=%g%s trend=%s biggest jump %+g%s\n",
+			formatMetric(s.Metric), first, last, lo.Value, atTime(lo.Time), hi.Value, atTime(hi.Time),
+			trend(s.Points), jumpDelta(s.Points), atTime(jumpTime(s.Points)))
 	})
 	return b.String(), nil
+}
+
+// maxRangeToolPoints bounds the point count the range tool requests. It is well
+// below the backend's ~11k hard cap: the LLM reads a compact summary, not raw
+// points, so a finer resolution buys nothing and risks a rejected/expensive
+// query. The prometheus client keeps a separate 11k backstop for direct callers.
+const maxRangeToolPoints = 1000
+
+// resolveStep picks the range step for a window and reports whether it coarsened
+// an operator-supplied step. With no explicit step it derives one from the window
+// (window/maxRangeToolPoints, min 1s) so a wide window stays bounded silently. An
+// explicit step that would exceed the point cap is raised — and annotated, so a
+// deliberately fine step isn't silently changed under the operator.
+func resolveStep(requested time.Duration, w providers.TimeWindow) (step time.Duration, note string) {
+	span := w.End.Sub(w.Start)
+	minStep := time.Duration(0)
+	if span > 0 {
+		// round the per-point step UP to whole seconds (the backend step unit) so
+		// span/step never lands back above the cap.
+		if s := span / maxRangeToolPoints; s > time.Second {
+			minStep = (s + time.Second - 1).Truncate(time.Second)
+		} else {
+			minStep = time.Second
+		}
+	}
+	if requested <= 0 {
+		// derived default; nothing was overridden, so no annotation.
+		if minStep <= 0 {
+			return time.Minute, ""
+		}
+		return minStep, ""
+	}
+	if minStep > 0 && requested < minStep {
+		return minStep, fmt.Sprintf("note: step coarsened from %s to %s to keep the query under %d points (%s window); pass a smaller since_minutes for finer resolution",
+			requested, minStep, maxRangeToolPoints, span.Round(time.Minute))
+	}
+	return requested, ""
 }
 
 // atTime renders "@<RFC3339>" for a point's timestamp, or "" when the backend
@@ -182,6 +229,70 @@ func summarize(points []providers.Point) (first, last float64, lo, hi providers.
 		}
 	}
 	return first, last, lo, hi
+}
+
+// trendBuckets is the fixed number of downsampled points the trend string carries.
+// ~12 points is enough for an LLM to read the shape (flat / ramp / step / spike)
+// without shipping every raw sample.
+const trendBuckets = 12
+
+// trend renders a compact fixed-bucket downsample of the series as
+// "v0>v1>...>vN" (~trendBuckets points). first/last/min/max can't distinguish a
+// step-change from a ramp — both share the same endpoints and extremes — so the
+// shape between them is what the model needs. Fewer points than buckets are
+// emitted verbatim.
+func trend(points []providers.Point) string {
+	if len(points) == 0 {
+		return ""
+	}
+	n := trendBuckets
+	if len(points) < n {
+		n = len(points)
+	}
+	vals := make([]string, 0, n)
+	for i := 0; i < n; i++ {
+		// pick evenly spaced source indices so the first and last are always kept.
+		idx := 0
+		if n > 1 {
+			idx = i * (len(points) - 1) / (n - 1)
+		}
+		vals = append(vals, fmt.Sprintf("%g", points[idx].Value))
+	}
+	return strings.Join(vals, ">")
+}
+
+// jumpDelta returns the largest adjacent Δvalue (signed, by magnitude) in the
+// series — the single biggest step between consecutive points. This is what
+// pins a step-change to a moment (a deploy/config flip) versus a gradual ramp.
+func jumpDelta(points []providers.Point) float64 {
+	_, d := biggestJump(points)
+	return d
+}
+
+// jumpTime returns the timestamp of the point AFTER the largest adjacent jump —
+// the moment the metric moved — so it can be correlated to a change/deploy time.
+func jumpTime(points []providers.Point) time.Time {
+	i, _ := biggestJump(points)
+	if i < 0 {
+		return time.Time{}
+	}
+	return points[i].Time
+}
+
+// biggestJump finds the adjacent pair with the largest |Δvalue| and returns the
+// index of the later point and the signed delta. Returns (-1, 0) for <2 points.
+func biggestJump(points []providers.Point) (int, float64) {
+	if len(points) < 2 {
+		return -1, 0
+	}
+	bestI, bestD := 1, points[1].Value-points[0].Value
+	for i := 2; i < len(points); i++ {
+		d := points[i].Value - points[i-1].Value
+		if math.Abs(d) > math.Abs(bestD) {
+			bestI, bestD = i, d
+		}
+	}
+	return bestI, bestD
 }
 
 // NetworkDropsTool lets the model list recently denied/dropped network flows from
