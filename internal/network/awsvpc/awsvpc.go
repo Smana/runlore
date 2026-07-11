@@ -37,6 +37,21 @@ const rejectFilterPattern = "[version, account, eni, source, destination, srcpor
 // defaultMaxEvents caps the number of REJECT events Drops returns (and paginates to).
 const defaultMaxEvents = 100
 
+// v2FieldIndex maps the named flow fields to their 0-based column positions in
+// the VPC Flow Logs v2 default format (14 fields). This is the DEFAULT layout
+// used when no custom field map is configured.
+var v2FieldIndex = map[string]int{
+	"srcaddr":  3,
+	"dstaddr":  4,
+	"srcport":  5,
+	"dstport":  6,
+	"protocol": 7,
+}
+
+// flowFieldIndex is the set of field names that must be present in a custom
+// field map for parseFlowLine to produce a complete LogLine.
+var requiredFlowFields = []string{"srcaddr", "dstaddr", "srcport", "dstport", "protocol"}
+
 // cwlAPI is the narrow CloudWatch Logs surface Drops needs, so tests can inject a
 // fake and the real *cloudwatchlogs.Client satisfies it directly.
 type cwlAPI interface {
@@ -45,16 +60,18 @@ type cwlAPI interface {
 
 // Client queries a CloudWatch Logs group that receives AWS VPC Flow Logs.
 type Client struct {
-	cwl       cwlAPI
-	logGroup  string // the CloudWatch Logs group flow logs are delivered to
-	maxEvents int    // cap on REJECT events returned
+	cwl        cwlAPI
+	logGroup   string         // the CloudWatch Logs group flow logs are delivered to
+	maxEvents  int            // cap on REJECT events returned
+	fieldIndex map[string]int // field-name → column-index for parsing; defaults to v2FieldIndex
 }
 
 // New builds a Client from the default AWS credential chain (Pod Identity / IRSA /
 // env / profile). region may be empty (resolved from the environment/IMDS).
 // logGroup is the CloudWatch Logs group VPC Flow Logs are delivered to and must be
-// non-empty.
-func New(ctx context.Context, region, logGroup string) (*Client, error) {
+// non-empty. fieldIndex is an OPTIONAL custom field-index map (use nil for the v2
+// default layout); it is only consulted when the caller passes a non-nil map.
+func New(ctx context.Context, region, logGroup string, fieldIndex map[string]int) (*Client, error) {
 	if logGroup == "" {
 		return nil, fmt.Errorf("awsvpc: logGroup must not be empty")
 	}
@@ -67,9 +84,10 @@ func New(ctx context.Context, region, logGroup string) (*Client, error) {
 		return nil, fmt.Errorf("awsvpc: load aws config: %w", err)
 	}
 	return &Client{
-		cwl:       cloudwatchlogs.NewFromConfig(cfg),
-		logGroup:  logGroup,
-		maxEvents: defaultMaxEvents,
+		cwl:        cloudwatchlogs.NewFromConfig(cfg),
+		logGroup:   logGroup,
+		maxEvents:  defaultMaxEvents,
+		fieldIndex: fieldIndex, // nil → v2 default applied in parseFlowLine
 	}, nil
 }
 
@@ -139,13 +157,18 @@ func (c *Client) Drops(ctx context.Context, sel providers.Selector, w providers.
 			return out, fmt.Errorf("awsvpc: filter log events: %w", err)
 		}
 		for i := range resp.Events {
-			line, ok := parseFlowLine(resp.Events[i])
+			line, ok := c.parseFlowLine(resp.Events[i])
 			if !ok {
 				continue // malformed/short record
 			}
 			out = append(out, line)
 			flowCount++
 			if flowCount >= c.maxEvents {
+				// Cap reached with more available: append the truncation sentinel so
+				// the model knows the view is partial (mirrors gcpfirewall's pattern).
+				if resp.NextToken != nil && *resp.NextToken != "" || i < len(resp.Events)-1 {
+					out = append(out, truncationLine(c.maxEvents))
+				}
 				return out, nil
 			}
 		}
@@ -157,24 +180,46 @@ func (c *Client) Drops(ctx context.Context, sel providers.Selector, w providers.
 	return out, nil
 }
 
-// parseFlowLine parses one VPC flow-log v2 default-format event into a LogLine.
-// The default format is space-delimited; Drops filters for action=REJECT, so a
-// well-formed record always carries that verdict. Records with fewer than 13 fields
-// are malformed and rejected (ok=false).
-func parseFlowLine(ev cwltypes.FilteredLogEvent) (providers.LogLine, bool) {
+// truncationLine is the sentinel appended when Drops stops at its cap with more
+// entries upstream, so the model knows the view is partial. It carries no Time or
+// Fields, so it cannot be mistaken for a real flow.
+func truncationLine(limit int) providers.LogLine {
+	return providers.LogLine{
+		Message: fmt.Sprintf("… results truncated at %d (more matched — narrow the query or shorten the window)", limit),
+	}
+}
+
+// parseFlowLine parses one VPC flow-log event into a LogLine using the client's
+// field-index map. When fieldIndex is nil the v2 default layout is used
+// (3=srcaddr 4=dstaddr 5=srcport 6=dstport 7=protocol). Records that are too
+// short to contain all required field indices are malformed and rejected (ok=false).
+func (c *Client) parseFlowLine(ev cwltypes.FilteredLogEvent) (providers.LogLine, bool) {
 	msg := ""
 	if ev.Message != nil {
 		msg = *ev.Message
 	}
 	f := strings.Fields(msg)
-	if len(f) < 13 {
-		return providers.LogLine{}, false
+
+	// Resolve the effective field-index map: nil means the v2 default layout.
+	idx := c.fieldIndex
+	if idx == nil {
+		idx = v2FieldIndex
 	}
-	// Field indices in the v2 default format:
-	// 3=srcaddr 4=dstaddr 5=srcport 6=dstport 7=protocol 12=action.
-	srcaddr, dstaddr := f[3], f[4]
-	srcport, dstport := f[5], f[6]
-	protocol := f[7]
+
+	// Ensure every required field index is within bounds.
+	for _, name := range requiredFlowFields {
+		col, ok := idx[name]
+		if !ok || col < 0 || col >= len(f) {
+			return providers.LogLine{}, false
+		}
+	}
+
+	srcaddr := f[idx["srcaddr"]]
+	dstaddr := f[idx["dstaddr"]]
+	srcport := f[idx["srcport"]]
+	dstport := f[idx["dstport"]]
+	protocol := f[idx["protocol"]]
+
 	line := providers.LogLine{
 		Message: fmt.Sprintf("%s:%s -> %s:%s REJECT (proto %s)", srcaddr, srcport, dstaddr, dstport, protocol),
 		Fields: map[string]string{

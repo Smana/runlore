@@ -142,18 +142,23 @@ func BuildModelAndTools(ctx context.Context, cfg *config.Config, gp providers.Gi
 	switch cfg.Network.Provider {
 	case config.NetworkHubble:
 		if cfg.Network.Hubble.URL != "" {
-			tools = append(tools, investigate.NetworkDropsTool{Network: hubble.New(cfg.Network.Hubble.URL)})
-			log.Info("network provider enabled", "provider", config.NetworkHubble, "url", cfg.Network.Hubble.URL)
+			tools = append(tools, investigate.NetworkDropsTool{Network: hubble.New(cfg.Network.Hubble.URL, cfg.Network.Hubble.TLS)})
+			log.Info("network provider enabled", "provider", config.NetworkHubble, "url", cfg.Network.Hubble.URL, "tls", cfg.Network.Hubble.TLS)
 			if cfg.Network.URL != "" {
 				log.Warn("config.network.url is deprecated; set config.network.provider=hubble and config.network.hubble.url")
 			}
 		}
 	case config.NetworkAWSVPCFlowLogs:
-		if nw, err := awsvpc.New(ctx, cfg.Network.AWS.Region, cfg.Network.AWS.LogGroup); err != nil {
+		// Resolve the optional custom field-index map: nil → v2 default layout.
+		var flowFieldIndex map[string]int
+		if cfg.Network.AWS.FlowFormat == "custom" && len(cfg.Network.AWS.FlowFields) > 0 {
+			flowFieldIndex = cfg.Network.AWS.FlowFields
+		}
+		if nw, err := awsvpc.New(ctx, cfg.Network.AWS.Region, cfg.Network.AWS.LogGroup, flowFieldIndex); err != nil {
 			log.Warn("aws-vpc-flow-logs network provider unavailable; network_drops disabled", "err", err)
 		} else {
 			tools = append(tools, investigate.NetworkDropsTool{Network: nw})
-			log.Info("network provider enabled", "provider", config.NetworkAWSVPCFlowLogs, "log_group", cfg.Network.AWS.LogGroup)
+			log.Info("network provider enabled", "provider", config.NetworkAWSVPCFlowLogs, "log_group", cfg.Network.AWS.LogGroup, "flow_format", cfg.Network.AWS.FlowFormat)
 		}
 	case config.NetworkGCPFirewallLogs:
 		if nw, err := gcpfirewall.New(ctx, cfg.Network.GCP.Project); err != nil {
