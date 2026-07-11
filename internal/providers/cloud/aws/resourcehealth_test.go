@@ -47,14 +47,17 @@ func (f *fakeEKS) DescribeNodegroup(_ context.Context, in *eks.DescribeNodegroup
 }
 
 // fakeASG serves DescribeAutoScalingGroups across pages and an empty scaling
-// activities list. descErr (when set) makes the describe call fail.
+// activities list. descErr (when set) makes the describe call fail. lastIn
+// captures the most-recent input so tests can assert request shapes.
 type fakeASG struct {
 	pages   []*autoscaling.DescribeAutoScalingGroupsOutput
 	call    int
 	descErr error
+	lastIn  *autoscaling.DescribeAutoScalingGroupsInput
 }
 
-func (f *fakeASG) DescribeAutoScalingGroups(_ context.Context, _ *autoscaling.DescribeAutoScalingGroupsInput, _ ...func(*autoscaling.Options)) (*autoscaling.DescribeAutoScalingGroupsOutput, error) {
+func (f *fakeASG) DescribeAutoScalingGroups(_ context.Context, in *autoscaling.DescribeAutoScalingGroupsInput, _ ...func(*autoscaling.Options)) (*autoscaling.DescribeAutoScalingGroupsOutput, error) {
+	f.lastIn = in
 	if f.descErr != nil {
 		return nil, f.descErr
 	}
@@ -357,4 +360,47 @@ func TestResourceHealthNodegroupHealthIssues(t *testing.T) {
 	if !linesContain(lines, "health=[AsgInstanceLaunchFailures: insufficient capacity]") {
 		t.Fatalf("want the nodegroup health issue rendered, got %v", lines)
 	}
+}
+
+// TestDescribeASGsClusterFilter asserts that describeASGs passes a server-side
+// tag filter (tag:eks:cluster-name=<cluster>) when clusterName is set, so the
+// 25-group cap counts only cluster-relevant ASGs rather than all ASGs in the
+// account. When clusterName is empty no filters are sent.
+func TestDescribeASGsClusterFilter(t *testing.T) {
+	t.Run("cluster set — filter sent", func(t *testing.T) {
+		asgF := &fakeASG{pages: []*autoscaling.DescribeAutoScalingGroupsOutput{asgPage("")}}
+		c := &Client{asg: asgF, clusterName: "prod", maxEvents: 25}
+		_, _, err := c.describeASGs(context.Background())
+		if err != nil {
+			t.Fatalf("describeASGs: %v", err)
+		}
+		if asgF.lastIn == nil {
+			t.Fatal("lastIn not captured")
+		}
+		if len(asgF.lastIn.Filters) != 1 {
+			t.Fatalf("expected 1 filter, got %d: %v", len(asgF.lastIn.Filters), asgF.lastIn.Filters)
+		}
+		f := asgF.lastIn.Filters[0]
+		if deref(f.Name) != "tag:eks:cluster-name" {
+			t.Fatalf("expected filter name tag:eks:cluster-name, got %q", deref(f.Name))
+		}
+		if len(f.Values) != 1 || f.Values[0] != "prod" {
+			t.Fatalf("expected filter value [prod], got %v", f.Values)
+		}
+	})
+
+	t.Run("no cluster — no filters sent", func(t *testing.T) {
+		asgF := &fakeASG{pages: []*autoscaling.DescribeAutoScalingGroupsOutput{asgPage("")}}
+		c := &Client{asg: asgF, clusterName: "", maxEvents: 25}
+		_, _, err := c.describeASGs(context.Background())
+		if err != nil {
+			t.Fatalf("describeASGs: %v", err)
+		}
+		if asgF.lastIn == nil {
+			t.Fatal("lastIn not captured")
+		}
+		if len(asgF.lastIn.Filters) != 0 {
+			t.Fatalf("expected no filters when clusterName is empty, got %v", asgF.lastIn.Filters)
+		}
+	})
 }
