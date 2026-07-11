@@ -278,6 +278,48 @@ func TestRemoteLastPathChange(t *testing.T) {
 	}
 }
 
+// TestNoCheckoutDiffStillResolves verifies that setting NoCheckout: true on the
+// PlainCloneContext call (G1 fix) does not break diffing. Diffing operates
+// exclusively on git commit/tree/blob objects via PatchContext — it never reads
+// the checked-out working tree — so skipping the checkout is safe and avoids
+// materialising large working trees for monorepos.
+func TestNoCheckoutDiffStillResolves(t *testing.T) {
+	src, v1, v2 := buildRepo(t)
+	dst := t.TempDir()
+
+	// Clone with NoCheckout: true — no working tree files are written.
+	cloned, err := git.PlainCloneContext(context.Background(), dst, false, &git.CloneOptions{
+		URL:        src,
+		NoCheckout: true,
+	})
+	if err != nil {
+		t.Fatalf("PlainCloneContext with NoCheckout: %v", err)
+	}
+
+	// Confirm no working-tree files exist beyond .git (the worktree is empty).
+	entries, err := os.ReadDir(dst)
+	if err != nil {
+		t.Fatalf("ReadDir: %v", err)
+	}
+	for _, e := range entries {
+		if e.Name() != ".git" {
+			t.Errorf("unexpected file in NoCheckout clone: %s", e.Name())
+		}
+	}
+
+	// Diffing via git objects must still work correctly on the bare clone.
+	d, err := diffRevisions(context.Background(), cloned, v1.String(), v2.String(), "apps/harbor")
+	if err != nil {
+		t.Fatalf("diffRevisions on NoCheckout clone: %v", err)
+	}
+	if len(d.Files) != 1 || d.Files[0].Path != "apps/harbor/values.yaml" {
+		t.Fatalf("want 1 scoped file, got %v", paths(d.Files))
+	}
+	if !strings.Contains(d.Files[0].Patch, "+version: 1.15.0") || !strings.Contains(d.Files[0].Patch, "runMigrations") {
+		t.Fatalf("patch missing expected delta:\n%s", d.Files[0].Patch)
+	}
+}
+
 // TestForChangeFallsBackToLastPathChange reproduces RunLore #239: on a health-check
 // failure Flux advances lastAppliedRevision to (or past) the breaking commit, so the
 // forward range diff for the resource's path is EMPTY. ForChange must then fall back
