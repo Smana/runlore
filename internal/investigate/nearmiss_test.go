@@ -172,7 +172,7 @@ func TestNoNearMissWhenNoStructuralAgreement(t *testing.T) {
 // request's normalized workload ref + alertname into the model's query server-side
 // (the buildRecallQuery enrichment), and that the tool Description reflects it.
 func TestKBSearchQueryEnriched(t *testing.T) {
-	cap := &capturingScored{hits: []catalog.ScoredEntry{{
+	capd := &capturingScored{hits: []catalog.ScoredEntry{{
 		Entry: catalog.Entry{Title: "runbook", Path: "r.md"}, Score: 1.0,
 	}}}
 	model := &scriptModel{responses: []providers.CompletionResponse{
@@ -184,7 +184,7 @@ func TestKBSearchQueryEnriched(t *testing.T) {
 	}}
 	li := &LoopInvestigator{
 		Model:      model,
-		Tools:      []Tool{KBSearchTool{Catalog: cap}},
+		Tools:      []Tool{KBSearchTool{Catalog: capd}},
 		Log:        slog.New(slog.NewTextHandler(io.Discard, nil)),
 		OnComplete: func(providers.Investigation) {},
 	}
@@ -194,7 +194,7 @@ func TestKBSearchQueryEnriched(t *testing.T) {
 	// The query the catalog actually saw must carry the model's symptom PLUS the
 	// server-side enrichment: namespace, NORMALIZED workload name (pod-hash stripped),
 	// and the alertname.
-	q := cap.lastQuery
+	q := capd.lastQuery
 	if !strings.Contains(q, "pods not ready") {
 		t.Fatalf("enriched query dropped the model's own text: %q", q)
 	}
@@ -208,12 +208,12 @@ func TestKBSearchQueryEnriched(t *testing.T) {
 		t.Fatalf("workload name was not normalized before enrichment: %q", q)
 	}
 	// The tool's Description, once bound, must advertise the enrichment.
-	desc := KBSearchTool{Catalog: cap}.withEnrichment(kbSearchEnrichment(nearMissReq())).Description()
+	desc := KBSearchTool{Catalog: capd}.withEnrichment(kbSearchEnrichment(nearMissReq())).Description()
 	if !strings.Contains(desc, "automatically added") {
 		t.Fatalf("bound Description does not reflect enrichment: %q", desc)
 	}
 	// An unbound tool's Description stays the plain base (no enrichment claim).
-	if strings.Contains(KBSearchTool{Catalog: cap}.Description(), "automatically added") {
+	if strings.Contains(KBSearchTool{Catalog: capd}.Description(), "automatically added") {
 		t.Fatal("unbound tool must not claim enrichment")
 	}
 }
