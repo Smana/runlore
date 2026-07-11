@@ -114,10 +114,25 @@ func (c *Client) listNodegroups(ctx context.Context) (names []string, more bool,
 
 // describeASGs returns up to c.maxEvents Auto Scaling Groups, paging via the SDK
 // paginator. more is true when the cap was reached with further pages available.
-// The cap counts ASGs examined (before the cluster filter), matching the
-// truncation line's "stopped scanning at N" meaning.
+// When clusterName is set the request carries a server-side tag filter for the
+// EKS-managed tag (eks:cluster-name=<cluster>) so the cap counts only
+// cluster-relevant groups and large shared accounts with many unrelated ASGs
+// do not exhaust the cap before cluster groups are seen. The caller still
+// applies the asgInCluster substring check as a fallback for self-managed groups
+// that carry the cluster name in their ASG name but not that tag.
 func (c *Client) describeASGs(ctx context.Context) (groups []asgtypes.AutoScalingGroup, more bool, err error) {
-	p := autoscaling.NewDescribeAutoScalingGroupsPaginator(c.asg, &autoscaling.DescribeAutoScalingGroupsInput{})
+	in := &autoscaling.DescribeAutoScalingGroupsInput{}
+	if c.clusterName != "" {
+		// "tag:<key>" filter: matches ASGs that have the tag with the given value.
+		// EKS-managed nodegroup ASGs always carry this tag; it is the canonical
+		// server-side scope. Self-managed groups lacking the tag survive via the
+		// asgInCluster substring fallback applied by the caller.
+		in.Filters = []asgtypes.Filter{{
+			Name:   ptr("tag:eks:cluster-name"),
+			Values: []string{c.clusterName},
+		}}
+	}
+	p := autoscaling.NewDescribeAutoScalingGroupsPaginator(c.asg, in)
 	for p.HasMorePages() {
 		out, err := p.NextPage(ctx)
 		if err != nil {
