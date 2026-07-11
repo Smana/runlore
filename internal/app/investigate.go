@@ -115,9 +115,21 @@ func BuildModelAndTools(ctx context.Context, cfg *config.Config, gp providers.Gi
 	if cfg.Metrics.URL != "" {
 		warnIfBackendUnreachable(ctx, log, "metrics", cfg.Metrics.URL)
 		m := prometheus.NewWithAuth(cfg.Metrics.URL, cfg.Metrics.TokenEnv, cfg.Metrics.Headers)
+		// Backend flavor (P4): a config override wins; otherwise probe buildinfo once at
+		// startup. VictoriaMetrics unlocks description-only MetricsQL guidance on the
+		// query tools. Detection fails safe to FlavorUnknown (generic Prometheus, no
+		// MetricsQL claims) if the probe can't identify the backend.
+		flavor := prometheus.Flavor(cfg.Metrics.Flavor)
+		if flavor != prometheus.FlavorUnknown {
+			m.WithFlavor(flavor)
+		} else {
+			flavor = m.DetectFlavor(ctx)
+		}
+		vm := flavor == prometheus.FlavorVictoriaMetrics
+		log.Info("metrics backend flavor", "flavor", string(m.Flavor()), "metricsql", vm)
 		tools = append(tools,
-			investigate.QueryMetricsTool{Metrics: m},
-			investigate.QueryMetricsRangeTool{Metrics: m},
+			investigate.QueryMetricsTool{Metrics: m, MetricsQL: vm},
+			investigate.QueryMetricsRangeTool{Metrics: m, MetricsQL: vm},
 			// discover_metrics turns a "no series matched" into a recoverable step by
 			// listing the metric names / label values that actually exist for a selector.
 			investigate.DiscoverMetricsTool{Metrics: m},
@@ -190,18 +202,33 @@ func BuildModelAndTools(ctx context.Context, cfg *config.Config, gp providers.Gi
 		log.Warn("unknown network provider; network_drops disabled", "provider", cfg.Network.Provider)
 	}
 	// Read-only cluster access (Flux controller logs + pod status + events), when a
-	// cluster is reachable. The same reader backs all three tools.
+	// cluster is reachable. The same reader backs all three tools — and, when present,
+	// the fused incident_timeline below (as its KubeReader/EventWindower source).
+	var kubeReader providers.KubeReader
 	if cs := KubeClientset(log); cs != nil {
-		tools = append(tools, clusterTools(cluster.New(cs), cfg)...)
+		cr := cluster.New(cs)
+		kubeReader = cr
+		tools = append(tools, clusterTools(cr, cfg)...)
 	}
 	// Cloud context (AWS): CloudTrail "what changed" + EC2/ASG/EKS health. Opt-in.
+	var cloudProvider providers.CloudProvider
 	if cfg.Cloud.Provider == "aws" {
 		if cl, err := awscloud.New(ctx, cfg.Cloud.Region, cfg.Cloud.ClusterName); err != nil {
 			log.Warn("aws cloud provider unavailable; cloud tools disabled", "err", err)
 		} else {
+			cloudProvider = cl
 			tools = append(tools, investigate.CloudWhatChangedTool{Cloud: cl}, investigate.CloudResourceHealthTool{Cloud: cl})
 			log.Info("cloud provider enabled", "provider", "aws", "region", cfg.Cloud.Region)
 		}
+	}
+	// incident_timeline (P1) fuses the timestamped facts from the providers above into
+	// ONE chronologically-sorted view. Register it only when at least one contributing
+	// source is wired (GitOps changes, cloud control-plane changes, or kube events) —
+	// with none, the tool would have nothing to correlate. It fans out to whichever of
+	// its (optional) sources are present and skips the rest gracefully.
+	if gp != nil || cloudProvider != nil || kubeReader != nil {
+		tools = append(tools, investigate.IncidentTimelineTool{GitOps: gp, Kube: kubeReader, Cloud: cloudProvider})
+		log.Info("incident_timeline enabled", "gitops", gp != nil, "cloud", cloudProvider != nil, "kube", kubeReader != nil)
 	}
 	tools = appendMCPTools(ctx, cfg, log, tools)
 	return model, tools, recall, cat
