@@ -350,3 +350,80 @@ func TestForChangeFallsBackToLastPathChange(t *testing.T) {
 		t.Fatalf("fallback diff missing the actual change:\n%s", d.Files[0].Patch)
 	}
 }
+
+// TestRevisionsInWindow proves G3's enumeration: a window spanning multiple commits
+// yields a Change-worthy revision per in-window commit, newest-first, honoring the
+// path scope, and capped.
+func TestRevisionsInWindow(t *testing.T) {
+	dir, v1, v2 := buildRepo(t) // apps/harbor touched at t=1000 (v1) and t=2000 (v2)
+	repo, err := git.PlainOpen(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// A window spanning both apps/harbor commits, scoped to apps/harbor, newest-first.
+	w := providers.TimeWindow{Start: time.Unix(500, 0), End: time.Unix(2500, 0)}
+	revs, err := revisionsInWindow(repo, v2.String(), "apps/harbor", w, 10)
+	if err != nil {
+		t.Fatalf("revisionsInWindow: %v", err)
+	}
+	if len(revs) != 2 {
+		t.Fatalf("want 2 in-window revisions, got %d: %+v", len(revs), revs)
+	}
+	if revs[0].SHA != v2.String() || revs[1].SHA != v1.String() {
+		t.Fatalf("want newest-first [v2,v1], got %s,%s", revs[0].SHA[:7], revs[1].SHA[:7])
+	}
+	if !revs[0].When.Equal(time.Unix(2000, 0)) {
+		t.Fatalf("unexpected When for newest: %v", revs[0].When)
+	}
+
+	// A narrow window catching only the newer commit.
+	narrow := providers.TimeWindow{Start: time.Unix(1500, 0), End: time.Unix(2500, 0)}
+	revs, err = revisionsInWindow(repo, v2.String(), "apps/harbor", narrow, 10)
+	if err != nil {
+		t.Fatalf("revisionsInWindow (narrow): %v", err)
+	}
+	if len(revs) != 1 || revs[0].SHA != v2.String() {
+		t.Fatalf("narrow window: want [v2], got %d: %+v", len(revs), revs)
+	}
+
+	// The cap bounds the result even when more commits are in window.
+	capped, err := revisionsInWindow(repo, v2.String(), "apps/harbor", w, 1)
+	if err != nil {
+		t.Fatalf("revisionsInWindow (capped): %v", err)
+	}
+	if len(capped) != 1 || capped[0].SHA != v2.String() {
+		t.Fatalf("cap=1: want [v2], got %d: %+v", len(capped), capped)
+	}
+}
+
+// TestRevisionsInWindowZeroWindowAndBounds proves the public RevisionsInWindow
+// returns nil (so callers keep single-revision behavior) for a zero window or a
+// non-positive cap, cloning the local repo for the non-trivial case.
+func TestRevisionsInWindowZeroWindow(t *testing.T) {
+	dir, _, v2 := buildRepo(t)
+	d := &Differ{}
+
+	// Zero-valued window: nil, no clone/log.
+	revs, err := d.RevisionsInWindow(context.Background(), dir, v2.String(), "apps/harbor", providers.TimeWindow{}, 10)
+	if err != nil || revs != nil {
+		t.Fatalf("zero window: want (nil,nil), got (%v,%v)", revs, err)
+	}
+
+	// max<=0: nil.
+	revs, err = d.RevisionsInWindow(context.Background(), dir, v2.String(), "apps/harbor",
+		providers.TimeWindow{Start: time.Unix(500, 0), End: time.Unix(2500, 0)}, 0)
+	if err != nil || revs != nil {
+		t.Fatalf("cap<=0: want (nil,nil), got (%v,%v)", revs, err)
+	}
+
+	// A real window over a local clone returns the in-window revisions.
+	revs, err = d.RevisionsInWindow(context.Background(), dir, v2.String(), "apps/harbor",
+		providers.TimeWindow{Start: time.Unix(500, 0), End: time.Unix(2500, 0)}, 10)
+	if err != nil {
+		t.Fatalf("RevisionsInWindow: %v", err)
+	}
+	if len(revs) != 2 {
+		t.Fatalf("want 2 in-window revisions via clone, got %d: %+v", len(revs), revs)
+	}
+}

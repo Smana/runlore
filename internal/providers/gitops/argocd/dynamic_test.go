@@ -4,6 +4,7 @@ package argocd
 
 import (
 	"context"
+	"strings"
 	"testing"
 	"time"
 
@@ -73,6 +74,62 @@ func TestApplicationFromUnstructuredMultiSource(t *testing.T) {
 	}
 	if a.PrevRevision != "oldsha" {
 		t.Fatalf("multi-source prev revision not mapped from history[-2].revisions[0]: %+v", a)
+	}
+}
+
+// TestListEventsRendering proves G2: ListEvents leads each line with the event's
+// lastTimestamp (RFC3339, UTC) and appends "(xN)" when count>1 — mirroring
+// kube_events — while omitting both when the API left them unset.
+func TestListEventsRendering(t *testing.T) {
+	mkEvent := func(name string, extra map[string]any) *unstructured.Unstructured {
+		o := map[string]any{
+			"apiVersion":     "v1",
+			"kind":           "Event",
+			"metadata":       map[string]any{"name": name, "namespace": "argocd"},
+			"involvedObject": map[string]any{"kind": "Application", "name": "harbor"},
+			"type":           "Warning",
+			"reason":         "SyncFailed",
+			"message":        "sync error",
+		}
+		for k, v := range extra {
+			o[k] = v
+		}
+		return &unstructured.Unstructured{Object: o}
+	}
+	repeated := mkEvent("e1", map[string]any{
+		"lastTimestamp": "2026-07-01T14:05:00Z",
+		"count":         int64(3),
+	})
+	sparse := mkEvent("e2", nil)
+
+	client := dynamicfake.NewSimpleDynamicClientWithCustomListKinds(runtime.NewScheme(),
+		map[schema.GroupVersionResource]string{eventsGVR: "EventList"}, repeated, sparse)
+	r := NewDynamicReader(client)
+
+	lines, err := r.ListEvents(context.Background(), "argocd", "harbor", "Application")
+	if err != nil {
+		t.Fatalf("ListEvents: %v", err)
+	}
+	if len(lines) != 2 {
+		t.Fatalf("want 2 event lines, got %d: %v", len(lines), lines)
+	}
+	var gotRepeated, gotSparse bool
+	for _, l := range lines {
+		switch {
+		case strings.Contains(l, "(x3)"):
+			gotRepeated = true
+			if want := "2026-07-01T14:05:00Z Warning SyncFailed(x3) sync error"; l != want {
+				t.Fatalf("repeated event line = %q, want %q", l, want)
+			}
+		default:
+			gotSparse = true
+			if want := "Warning SyncFailed sync error"; l != want {
+				t.Fatalf("sparse event line = %q, want %q", l, want)
+			}
+		}
+	}
+	if !gotRepeated || !gotSparse {
+		t.Fatalf("missing expected lines: %v", lines)
 	}
 }
 

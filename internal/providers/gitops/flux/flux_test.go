@@ -368,3 +368,90 @@ func TestWatchFailures(t *testing.T) {
 		t.Fatalf("unexpected failure event: %+v", e)
 	}
 }
+
+// buildMultiCommitRepo creates a temp git repo with two commits touching
+// apps/harbor at t=1000 and t=2000, returning the repo dir and the HEAD (v2) SHA.
+// The dir doubles as a clonable local RepoURL for the Differ.
+func buildMultiCommitRepo(t *testing.T) (dir, head string) {
+	t.Helper()
+	dir = t.TempDir()
+	repo, err := git.PlainInit(dir, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wt, err := repo.Worktree()
+	if err != nil {
+		t.Fatal(err)
+	}
+	write := func(content string) {
+		full := filepath.Join(dir, "apps/harbor/values.yaml")
+		if err := os.MkdirAll(filepath.Dir(full), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(full, []byte(content), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := wt.Add("apps/harbor/values.yaml"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	commit := func(sec int64) string {
+		h, err := wt.Commit("c", &git.CommitOptions{
+			Author: &object.Signature{Name: "t", Email: "t@x", When: time.Unix(sec, 0)},
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return h.String()
+	}
+	write("version: 1.14.0\n")
+	commit(1000)
+	write("version: 1.15.0\n")
+	head = commit(2000)
+	return dir, head
+}
+
+// TestProviderChangesTimeWindow proves G3: a window spanning multiple source commits
+// yields one Change per in-window revision (newest-first), while a zero window keeps
+// the single current-revision behavior.
+func TestProviderChangesTimeWindow(t *testing.T) {
+	dir, head := buildMultiCommitRepo(t)
+	r := fakeReader{
+		ks: []kustomization{{
+			Name: "harbor", Namespace: "flux-system", Path: "apps/harbor",
+			TargetNamespace: "harbor",
+			SourceKind:      "GitRepository", SourceName: "flux-system", SourceNamespace: "flux-system",
+			Revision: head, ReadyStatus: "True", ReadyTime: time.Unix(9999, 0),
+		}},
+		grs: map[string]gitRepository{"flux-system/flux-system": {URL: dir}},
+	}
+	p := New(r, &whatchanged.Differ{})
+
+	// Window spanning both commits: two Changes, newest-first.
+	w := providers.TimeWindow{Start: time.Unix(500, 0), End: time.Unix(2500, 0)}
+	changes, err := p.Changes(context.Background(), w, providers.Selector{Namespace: "harbor"})
+	if err != nil {
+		t.Fatalf("Changes (window): %v", err)
+	}
+	if len(changes) != 2 {
+		t.Fatalf("want 2 in-window changes, got %d: %+v", len(changes), changes)
+	}
+	if !changes[0].When.After(changes[1].When) {
+		t.Fatalf("changes not newest-first: %v then %v", changes[0].When, changes[1].When)
+	}
+	if changes[0].ToRev != head {
+		t.Fatalf("newest change ToRev = %q, want HEAD %q", changes[0].ToRev, head)
+	}
+	if !changes[0].When.Equal(time.Unix(2000, 0)) || !changes[1].When.Equal(time.Unix(1000, 0)) {
+		t.Fatalf("unexpected When timeline: %v, %v", changes[0].When, changes[1].When)
+	}
+
+	// Zero window: single current-revision Change (today's behavior).
+	changes, err = p.Changes(context.Background(), providers.TimeWindow{}, providers.Selector{Namespace: "harbor"})
+	if err != nil {
+		t.Fatalf("Changes (zero window): %v", err)
+	}
+	if len(changes) != 1 || changes[0].ToRev != head {
+		t.Fatalf("zero window: want 1 current-revision change, got %d: %+v", len(changes), changes)
+	}
+}

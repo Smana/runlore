@@ -129,7 +129,11 @@ func (r *dynamicReader) GetResource(ctx context.Context, kind, namespace, name s
 }
 
 // ListEvents returns recent Event lines for an object, filtered client-side by the
-// involved object's name (and kind, when given). Rendered as "Type Reason Message".
+// involved object's name (and kind, when given). Each line is rendered as
+// "<lastTimestamp> Type Reason(xN) Message" — mirroring the kube_events tool so a
+// GitOps event carries the same WHEN + repeat-count context (RunLore G2): the
+// timestamp lets the model correlate the event to a change/deploy time and (xN)
+// shows a flapping reconcile. Timestamp/count are omitted when the API doesn't set them.
 func (r *dynamicReader) ListEvents(ctx context.Context, namespace, name, kind string) ([]string, error) {
 	// Filter server-side by the involved object and cap the result — a busy
 	// namespace can hold thousands of events.
@@ -157,9 +161,52 @@ func (r *dynamicReader) ListEvents(ctx context.Context, namespace, name, kind st
 		typ, _, _ := unstructured.NestedString(o, "type")
 		reason, _, _ := unstructured.NestedString(o, "reason")
 		msg, _, _ := unstructured.NestedString(o, "message")
-		out = append(out, fmt.Sprintf("%s %s %s", typ, reason, msg))
+		out = append(out, renderEventLine(o, typ, reason, msg))
 	}
 	return out, nil
+}
+
+// renderEventLine formats one Kubernetes Event as "<lastTimestamp> Type Reason(xN) Message",
+// mirroring the kube_events tool (G2). The leading timestamp (RFC3339, UTC) comes from
+// lastTimestamp, falling back to eventTime (the newer Events API field); it is omitted
+// when neither is set. "(xN)" is appended only when count>1. This keeps GitOps inspector
+// events consistent with kube_events, which already leads with WHEN and shows repeat counts.
+func renderEventLine(o map[string]any, typ, reason, msg string) string {
+	when := ""
+	if ts := eventLastTime(o); !ts.IsZero() {
+		when = ts.UTC().Format(time.RFC3339) + " "
+	}
+	count := ""
+	if c := eventCount(o); c > 1 {
+		count = fmt.Sprintf("(x%d)", c)
+	}
+	return fmt.Sprintf("%s%s %s%s %s", when, typ, reason, count, msg)
+}
+
+// eventLastTime returns an Event's most-recent occurrence time: lastTimestamp
+// (core/v1 aggregated events), falling back to eventTime (events.k8s.io/v1). Zero
+// when neither is present or parseable.
+func eventLastTime(o map[string]any) time.Time {
+	for _, field := range []string{"lastTimestamp", "eventTime"} {
+		if s, _, _ := unstructured.NestedString(o, field); s != "" {
+			if ts, err := time.Parse(time.RFC3339, s); err == nil {
+				return ts
+			}
+		}
+	}
+	return time.Time{}
+}
+
+// eventCount returns an Event's occurrence count from the "count" field (unstructured
+// decodes JSON numbers as int64 or float64). Zero when absent.
+func eventCount(o map[string]any) int64 {
+	switch c := o["count"].(type) {
+	case int64:
+		return c
+	case float64:
+		return int64(c)
+	}
+	return 0
 }
 
 // readyCondition returns the (status, reason, message) of the Ready condition.

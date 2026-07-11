@@ -76,7 +76,10 @@ func (r *dynamicReader) GetApplication(ctx context.Context, namespace, name stri
 }
 
 // ListEvents returns recent Event lines for an involved object, filtered by name
-// (server-side) + kind (client-side), rendered as "Type Reason Message".
+// (server-side) + kind (client-side). Each line is rendered as
+// "<lastTimestamp> Type Reason(xN) Message" — mirroring the kube_events tool so a
+// GitOps event carries the same WHEN + repeat-count context (RunLore G2).
+// Timestamp/count are omitted when the API doesn't set them.
 func (r *dynamicReader) ListEvents(ctx context.Context, namespace, name, kind string) ([]string, error) {
 	opts := metav1.ListOptions{Limit: 100}
 	if name != "" {
@@ -100,9 +103,51 @@ func (r *dynamicReader) ListEvents(ctx context.Context, namespace, name, kind st
 		typ, _, _ := unstructured.NestedString(o, "type")
 		reason, _, _ := unstructured.NestedString(o, "reason")
 		msg, _, _ := unstructured.NestedString(o, "message")
-		out = append(out, fmt.Sprintf("%s %s %s", typ, reason, msg))
+		out = append(out, renderEventLine(o, typ, reason, msg))
 	}
 	return out, nil
+}
+
+// renderEventLine formats one Kubernetes Event as "<lastTimestamp> Type Reason(xN) Message",
+// mirroring the kube_events tool (G2). The leading timestamp (RFC3339, UTC) comes from
+// lastTimestamp, falling back to eventTime (the newer Events API field); it is omitted
+// when neither is set. "(xN)" is appended only when count>1.
+func renderEventLine(o map[string]any, typ, reason, msg string) string {
+	when := ""
+	if ts := eventLastTime(o); !ts.IsZero() {
+		when = ts.UTC().Format(time.RFC3339) + " "
+	}
+	count := ""
+	if c := eventCount(o); c > 1 {
+		count = fmt.Sprintf("(x%d)", c)
+	}
+	return fmt.Sprintf("%s%s %s%s %s", when, typ, reason, count, msg)
+}
+
+// eventLastTime returns an Event's most-recent occurrence time: lastTimestamp
+// (core/v1 aggregated events), falling back to eventTime (events.k8s.io/v1). Zero
+// when neither is present or parseable.
+func eventLastTime(o map[string]any) time.Time {
+	for _, field := range []string{"lastTimestamp", "eventTime"} {
+		if s, _, _ := unstructured.NestedString(o, field); s != "" {
+			if ts, err := time.Parse(time.RFC3339, s); err == nil {
+				return ts
+			}
+		}
+	}
+	return time.Time{}
+}
+
+// eventCount returns an Event's occurrence count from the "count" field (unstructured
+// decodes JSON numbers as int64 or float64). Zero when absent.
+func eventCount(o map[string]any) int64 {
+	switch c := o["count"].(type) {
+	case int64:
+		return c
+	case float64:
+		return int64(c)
+	}
+	return 0
 }
 
 // WatchApplications watches all Applications via a dynamic informer (list-watch

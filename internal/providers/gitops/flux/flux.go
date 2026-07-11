@@ -88,29 +88,39 @@ func New(reader Reader, differ *whatchanged.Differ) *Provider {
 // namespaces and flag it in the result so "no changes" can never be a silent false
 // negative (mirrors GetResource's flux-system-then-all-namespaces fallback).
 //
-// NOTE (v1 scope): the window is accepted but not yet used to filter by commit
-// time; each Change reflects the current applied revision. Git-log-based
-// time-windowing is a follow-up.
-func (p *Provider) Changes(ctx context.Context, _ providers.TimeWindow, sel providers.Selector) ([]providers.Change, error) {
+// TimeWindow (G3): when w is non-zero, each diffable-Git Kustomization emits a Change
+// per source revision that landed IN the window (git-log on the resolved source,
+// newest-first, capped at maxWindowRevisions), so "what changed over the last N hours"
+// surfaces the whole timeline — not just the current applied revision. A zero/unset
+// window falls back to the single-latest-revision behavior. The enumeration is bounded
+// (cap + committer-time short-circuit) so a wide window can't explode the output.
+func (p *Provider) Changes(ctx context.Context, w providers.TimeWindow, sel providers.Selector) ([]providers.Change, error) {
 	ks, err := p.reader.ListKustomizations(ctx)
 	if err != nil {
 		return nil, err
 	}
-	changes := p.changesFor(ctx, ks, func(k kustomization) bool {
+	changes := p.changesFor(ctx, w, ks, func(k kustomization) bool {
 		return matchesNamespace(k, sel.Namespace) && (sel.Name == "" || k.Name == sel.Name)
 	})
 	// B2 fallback: the namespace filter found nothing, but a named object might live
 	// in another namespace (the flux-system bootstrap layout). Retry by name across
 	// every namespace rather than returning a false-negative "no changes".
 	if len(changes) == 0 && sel.Name != "" {
-		changes = p.changesFor(ctx, ks, func(k kustomization) bool { return k.Name == sel.Name })
+		changes = p.changesFor(ctx, w, ks, func(k kustomization) bool { return k.Name == sel.Name })
 	}
 	return changes, nil
 }
 
+// maxWindowRevisions caps how many in-window revisions a single Kustomization emits
+// (G3). It bounds the "what changed" output so a wide window on a busy monorepo can't
+// flood the model with hundreds of Changes.
+const maxWindowRevisions = 10
+
 // changesFor maps the Kustomizations accepted by keep into engine-agnostic Changes,
-// resolving each source URL (cached per source) and populating When.
-func (p *Provider) changesFor(ctx context.Context, ks []kustomization, keep func(kustomization) bool) []providers.Change {
+// resolving each source URL (cached per source) and populating When. With a non-zero
+// window it expands each diffable-Git Kustomization into one Change per in-window
+// source revision (G3); otherwise it emits the single current-revision Change.
+func (p *Provider) changesFor(ctx context.Context, w providers.TimeWindow, ks []kustomization, keep func(kustomization) bool) []providers.Change {
 	urlCache := map[string]string{}
 	var changes []providers.Change
 	for _, k := range ks {
@@ -147,11 +157,43 @@ func (p *Provider) changesFor(ctx context.Context, ks []kustomization, keep func
 			url = cached
 		}
 		fromRev, toRev := revisionRange(ctx, p.reader, k)
+		// G3: with a window set and a diffable Git source, emit a Change per revision
+		// that landed in the window (newest-first, capped). Fall back to the single
+		// current-revision Change when the window is zero, the source isn't Git, or
+		// the enumeration yields nothing (clone/log failure — never abort the lookup).
+		if wchanges := p.windowChanges(ctx, w, k, url, isGit, toRev); len(wchanges) > 0 {
+			changes = append(changes, wchanges...)
+			continue
+		}
 		c := mapKustomization(k, url, fromRev, toRev)
 		c.When = p.changeTime(ctx, url, toRev, k.ReadyTime)
 		changes = append(changes, c)
 	}
 	return changes
+}
+
+// windowChanges expands a diffable-Git Kustomization into one Change per source
+// revision that landed within w (newest-first, capped by maxWindowRevisions). Each
+// Change diffs the revision against its parent (FromRev="") and carries the commit's
+// time as When, so the model sees the whole in-window timeline instead of only the
+// current applied revision (G3). It returns nil — so the caller keeps today's
+// single-revision behavior — when the window is zero, the source is not diffable Git,
+// no Differ is wired, or the enumeration finds/​resolves nothing.
+func (p *Provider) windowChanges(ctx context.Context, w providers.TimeWindow, k kustomization, url string, isGit bool, toRev string) []providers.Change {
+	if p.differ == nil || !isGit || url == "" || toRev == "" || (w.Start.IsZero() && w.End.IsZero()) {
+		return nil
+	}
+	revs, err := p.differ.RevisionsInWindow(ctx, url, toRev, k.Path, w, maxWindowRevisions)
+	if err != nil || len(revs) == 0 {
+		return nil // clone/log failure or nothing in window — fall back to current revision
+	}
+	out := make([]providers.Change, 0, len(revs))
+	for _, r := range revs {
+		c := mapKustomization(k, url, "", r.SHA)
+		c.When = r.When
+		out = append(out, c)
+	}
+	return out
 }
 
 // matchesNamespace reports whether a Kustomization belongs to ns, accepting EITHER
