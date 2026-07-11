@@ -320,8 +320,8 @@ type Revision struct {
 // predates w.Start, so a wide window on a busy monorepo can't explode the output.
 // A zero-valued window (w.Start.IsZero() && w.End.IsZero()) returns nil so callers
 // fall back to their single-revision behavior. max<=0 also returns nil.
-func (d *Differ) RevisionsInWindow(ctx context.Context, url, atRev, scope string, w providers.TimeWindow, max int) ([]Revision, error) {
-	if max <= 0 || (w.Start.IsZero() && w.End.IsZero()) {
+func (d *Differ) RevisionsInWindow(ctx context.Context, url, atRev, scope string, w providers.TimeWindow, maxRevs int) ([]Revision, error) {
+	if maxRevs <= 0 || (w.Start.IsZero() && w.End.IsZero()) {
 		return nil, nil
 	}
 	repo, cleanup, err := d.cloneToDisk(ctx, url)
@@ -329,14 +329,14 @@ func (d *Differ) RevisionsInWindow(ctx context.Context, url, atRev, scope string
 		return nil, err
 	}
 	defer cleanup()
-	return revisionsInWindow(repo, atRev, scope, w, max)
+	return revisionsInWindow(repo, atRev, scope, w, maxRevs)
 }
 
 // revisionsInWindow walks history from atRev newest-first (committer-time order),
 // keeping commits within [w.Start, w.End] until max are collected or history predates
 // the window. Because the walk is committer-time ordered, once a commit is older than
 // w.Start no later one can be in-window, so the walk short-circuits — keeping it cheap.
-func revisionsInWindow(repo *git.Repository, atRev, scope string, w providers.TimeWindow, max int) ([]Revision, error) {
+func revisionsInWindow(repo *git.Repository, atRev, scope string, w providers.TimeWindow, maxRevs int) ([]Revision, error) {
 	from, err := resolveCommit(repo, atRev)
 	if err != nil {
 		return nil, fmt.Errorf("resolve %q: %w", atRev, err)
@@ -351,7 +351,7 @@ func revisionsInWindow(repo *git.Repository, atRev, scope string, w providers.Ti
 	}
 	defer iter.Close()
 	var out []Revision
-	for len(out) < max {
+	for len(out) < maxRevs {
 		c, err := iter.Next()
 		if errors.Is(err, io.EOF) {
 			break
