@@ -65,22 +65,36 @@ incident webhook. Known keys: `alertmanager`, `gitops`, `pagerduty`.
 - `incidents.dedup.window` — don't re-open a still-firing alert within this window. **Code default `0`**
   (disabled — every repeat_interval re-investigates); the **chart ships `30m`** by default to bound
   LLM spend on noisy still-firing alerts (see `deploy/helm/runlore/values.yaml`).
-- `incidents.debounce` — hold a firing alert this long before investigating, and skip it if a matching
-  Alertmanager `resolved` webhook arrives within the window (self-resolving noise, e.g. a
-  `KubeDaemonSetRolloutStuck` during a Karpenter node-churn cycle). **Default `60s`** (same as
+- `incidents.debounce` — hold a **non-critical** firing alert this long before investigating, and skip
+  it if a matching Alertmanager `resolved` webhook arrives within the window (self-resolving noise, e.g.
+  a `KubeDaemonSetRolloutStuck` during a Karpenter node-churn cycle). **Default `60s`** (same as
   `gitops_failures.debounce`); set `0s` to investigate immediately on every fire. Beyond saving a paid
   investigation, the hold keeps a self-healed alert's `resolved` webhook **out of the outcome ledger**,
   where it would otherwise credit a recalled entry's resolve rate for a resolution the diagnosis had
   nothing to do with. Composes with `coalesce` (survivors are batched afterwards) and `dedup` (re-fires
   are still suppressed before the hold begins).
+
+  > **A `critical` alert is never held.** A debounce must never delay the first look at a page — the
+  > same invariant the coalescer enforces by flushing criticals with no batching wait. Because the
+  > chart's default `match.severity` is `[critical]`, the hold is effectively **inert on a default
+  > install**; it begins filtering once you widen `match.severity` (e.g. to include `warning`).
+  > Self-resolving *criticals* are filtered by `cancel_queued_on_resolve` instead, at zero added latency.
+
+  > **Operational caveat.** A held alert is lost if the process shuts down mid-hold: Alertmanager
+  > already received its `200`, so it will not resend until its own `repeat_interval` (often hours).
+  > The drop is logged at **WARN** (naming the alert + fingerprint) and counted in
+  > `runlore_incidents_dropped_on_shutdown_total`. The hold window can exceed the drain grace period,
+  > so draining does not rescue it — keep `debounce` short, or `0s`, if this matters more than the
+  > noise saving.
 - `incidents.cancel_queued_on_resolve` — when the matching Alertmanager `resolved` webhook arrives
-  while the investigation is still **queued** (accepted, not yet started), drop it. Extends `debounce`
-  past the hold window: without it, a fire→resolve sequence whose firing already passed admission still
-  burns a full paid investigation. **Default `false`** (opt-in) — some teams want the post-hoc answer
-  to "why did it fire?" even after self-resolution. Boundaries: an **in-flight** investigation is never
-  cancelled (it completes and delivers), and a **coalesced multi-alert batch** is not cancelled on one
-  member's resolve (partial resolution is ambiguous — the rest may still be firing). Cancellations
-  count in `runlore_investigations_cancelled_total`.
+  while the investigation is still **queued** (accepted, not yet started), drop it. **Default `true`.**
+  This — not the hold — is what filters a self-resolving **critical**, since `debounce` never holds one:
+  the investigation is dropped from the queue before it starts, so the saving costs **zero added
+  latency** (nothing is waited on; the cancel merely races an investigation that has not begun). Set
+  `false` if you want the post-hoc answer to "why did it fire?" even after self-resolution. Boundaries:
+  an **in-flight** investigation is never cancelled (it completes and delivers), and a **coalesced
+  multi-alert batch** is not cancelled on one member's resolve (partial resolution is ambiguous — the
+  rest may still be firing). Cancellations count in `runlore_investigations_cancelled_total`.
 - `gitops_failures.debounce` — require a failure to persist this long before investigating. **Default
   60s**; explicit `0` fires immediately on every `Ready=False`.
 

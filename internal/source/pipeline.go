@@ -95,13 +95,16 @@ func (p *Pipeline) Ingest(ctx context.Context, adm Admission, res DecodeResult) 
 		// Drop any firing alert still held in the debounce window: it self-resolved
 		// before its investigation began, so it never reaches the enqueuer.
 		p.debounce.Cancel(r.Fingerprint)
-		// Opt-in (triggers.incidents.cancel_queued_on_resolve): also drop a QUEUED
+		// triggers.incidents.cancel_queued_on_resolve (ON by default): also drop a QUEUED
 		// investigation that already passed admission (and any debounce hold) but has
 		// not started — otherwise a fire→resolve sequence still burns a full paid
-		// investigation. In-flight investigations and coalesced multi-alert batches
-		// are never cancelled (see investigate.Queue.CancelByFingerprint, which also
-		// logs the cancelled incident's fingerprint + title).
-		if p.cancel != nil && p.cfg.Triggers.Incidents.CancelQueuedOnResolve {
+		// investigation. This is the ONLY self-resolving filter a CRITICAL alert gets:
+		// criticals are never held by the debounce above (they must not be delayed), so
+		// they arrive here straight from admission. In-flight investigations and coalesced
+		// multi-alert batches are never cancelled (see
+		// investigate.Queue.CancelByFingerprint, which also logs the cancelled incident's
+		// fingerprint + title).
+		if p.cancel != nil && p.cfg.Triggers.Incidents.CancelQueuedOnResolveEnabled() {
 			if p.cancel.CancelByFingerprint(r.Fingerprint) && p.metrics != nil {
 				p.metrics.InvestigationsCancelled.Add(ctx, 1)
 			}
@@ -128,12 +131,13 @@ func (p *Pipeline) Ingest(ctx context.Context, adm Admission, res DecodeResult) 
 		if adm == MatchGated && p.metrics != nil {
 			p.metrics.AlertsReceived.Add(ctx, 1)
 		}
-		// Pre-investigation debounce (opt-in; window 0 = enqueue immediately). Runs
-		// AFTER dedup (re-fires already suppressed) and BEFORE the coalescer sink
-		// (survivors are still storm-batched): the hold is released early — dropping
-		// the incident — if a matching resolved webhook arrives within the window.
-		// The hold runs on baseCtx, not the request ctx (the webhook handler returns
-		// before the window elapses).
+		// Pre-investigation debounce (default 60s; an explicit window of 0 enqueues
+		// immediately, and a CRITICAL alert is never held at all — see
+		// incidentDebouncer.Hold). Runs AFTER dedup (re-fires already suppressed) and
+		// BEFORE the coalescer sink (survivors are still storm-batched): the hold is
+		// released early — dropping the incident — if a matching resolved webhook arrives
+		// within the window. The hold runs on baseCtx, not the request ctx (the webhook
+		// handler returns before the window elapses).
 		p.debounce.Hold(p.baseCtx, req, p.enq)
 	}
 }

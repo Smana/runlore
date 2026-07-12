@@ -52,6 +52,7 @@ estimate) keep the SDK defaults and are read as heatmaps, not percentiles.
 | `runlore_alerts_coalesced_total` | counter | — | incidents folded into an existing batch |
 | `runlore_alerts_suppressed_total` | counter | — | incidents dropped by cooldown |
 | `runlore_incidents_debounced_total` | counter | — | firing alerts dropped as self-resolving (a matching `resolved` webhook arrived within `triggers.incidents.debounce`) |
+| `runlore_incidents_dropped_on_shutdown_total` | counter | — | **alert LOSS** — firing alerts still held in the debounce window when the process shut down: accepted (`200` to Alertmanager) but never investigated, and not retried until Alertmanager's `repeat_interval`. Any non-zero value is worth a look; see [troubleshooting](troubleshooting.md) |
 | `runlore_investigations_started_total` | counter | — | investigations actually begun |
 | `runlore_investigations_completed_total` | counter | `result` | investigations finished (`resolved`/`unresolved`/`recall`/`timeout`/`error`/`max_steps`/`max_steps_degraded`/`budget_exceeded`/`inconclusive`/`recurrence_suppressed`) |
 | `runlore_investigation_duration_seconds` | histogram | `result` | wall-clock per investigation |

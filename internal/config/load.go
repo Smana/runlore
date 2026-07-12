@@ -73,6 +73,19 @@ func applyDefaults(c *Config) {
 		d := Duration(60 * time.Second)
 		c.Triggers.Incidents.Debounce = &d
 	}
+	// cancel_queued_on_resolve defaults ON — and it, not the hold, is what filters
+	// self-resolving noise on a default install. The debounce hold deliberately skips
+	// CRITICAL alerts (a debounce must never delay the first look at a critical page),
+	// and the shipped trigger matches `severity: [critical]` exclusively, so the hold
+	// would otherwise be dead code there. Cancelling a QUEUED-but-not-started
+	// investigation when the resolve lands gets the same saving — no paid investigation,
+	// no `resolved` webhook crediting a recalled entry's resolve rate in the outcome
+	// ledger — while adding ZERO latency to the page. An explicit `false` (non-nil) is
+	// left untouched, for teams who want the post-hoc "why did it fire?" regardless.
+	if c.Triggers.Incidents.CancelQueuedOnResolve == nil {
+		b := true
+		c.Triggers.Incidents.CancelQueuedOnResolve = &b
+	}
 	// Rate-limit window default: 1h when a per-window budget is set but no window
 	// is given (a zero window would silently allow unlimited investigations).
 	if c.Investigation.RateLimit.MaxPerWindow > 0 && c.Investigation.RateLimit.Window == 0 {
