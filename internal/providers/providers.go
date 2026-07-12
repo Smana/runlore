@@ -639,20 +639,28 @@ type Investigation struct {
 	Resource   Workload // the workload the investigation identified as affected; defaults to the originating alert workload when none was named (stored on curated entries for structural recall)
 	// Trigger-time facts stamped verbatim from the Request for the notification's
 	// metadata block. The model never sees or sets them; empty for sources that lack them.
-	Severity      string      // alert severity label at trigger time
-	Environment   string      // deployment environment (prod/staging/…)
-	Cluster       string      // alert "cluster" label
-	Tenant        string      // alert "tenant" label
-	AlertName     string      // triggering alert name (labels["alertname"]); "" for non-alert sources
-	StartedAt     time.Time   // incident start (alert startsAt / failure time)
-	Actions       []Action    // proposed remediations (autonomy ladder; never executed at rung "suggest")
-	CuratedURL    string      // runtime: KB issue/PR the curator opened, linked in delivery (set after curation)
-	Fingerprint   string      // originating alert fingerprint; for outcome-ledger attribution
-	Fingerprints  []string    // coalesced batch fingerprints; one outcome open is recorded per entry
-	TriggerKey    string      // deterministic incident identity set at trigger time (alerts: host-invariant per-class key from curator.IncidentKey; GitOps: failing resource+condition). curator.DupFingerprint prefers it so reworded re-investigations (#137) AND the same alert on a different pod/node (CORE-681) still dedupe
-	RecalledEntry string      // when Recalled: the catalog entry Path that was matched
-	Verified      bool        // true when the adversarial verify pass ran and a root cause survived it
-	Usage         UsageTotals // per-investigation model token/cost accounting (loop + verify); surfaced to humans + metrics, never written to the curated KB body
+	Severity    string    // alert severity label at trigger time
+	Environment string    // deployment environment (prod/staging/…)
+	Cluster     string    // alert "cluster" label
+	Tenant      string    // alert "tenant" label
+	AlertName   string    // triggering alert name (labels["alertname"]); "" for non-alert sources
+	StartedAt   time.Time // incident start (alert startsAt / failure time)
+	// InvestigationStartedAt is when RUNLORE began investigating — distinct from StartedAt,
+	// which is when the INCIDENT began. The two can be far apart: a request waits out
+	// debounce/coalescing, then queues behind the single sequential worker and any
+	// rate-limit backoff before the loop starts. Stamped by the loop at its delivery
+	// chokepoint (never by the model) and carried onto the outcome-ledger open, where it is
+	// the exact bound on resolve-before-open pairing (see outcome.resolvesSince) — the open
+	// itself is stamped at COMPLETION, so without this the pairing window is unknowable.
+	InvestigationStartedAt time.Time
+	Actions                []Action    // proposed remediations (autonomy ladder; never executed at rung "suggest")
+	CuratedURL             string      // runtime: KB issue/PR the curator opened, linked in delivery (set after curation)
+	Fingerprint            string      // originating alert fingerprint; for outcome-ledger attribution
+	Fingerprints           []string    // coalesced batch fingerprints; one outcome open is recorded per entry
+	TriggerKey             string      // deterministic incident identity set at trigger time (alerts: host-invariant per-class key from curator.IncidentKey; GitOps: failing resource+condition). curator.DupFingerprint prefers it so reworded re-investigations (#137) AND the same alert on a different pod/node (CORE-681) still dedupe
+	RecalledEntry          string      // when Recalled: the catalog entry Path that was matched
+	Verified               bool        // true when the adversarial verify pass ran and a root cause survived it
+	Usage                  UsageTotals // per-investigation model token/cost accounting (loop + verify); surfaced to humans + metrics, never written to the curated KB body
 	// Recurrence facts stamped at completion from the outcome ledger's per-TriggerKey
 	// index (never seen by the model). They describe PRIOR investigations of the same
 	// TriggerKey; this run's own open is recorded after they are read.
