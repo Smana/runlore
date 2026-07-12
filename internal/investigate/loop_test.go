@@ -275,6 +275,7 @@ func TestLoopStampsAlertMetadata(t *testing.T) {
 		At:          start,
 		Labels:      map[string]string{"alertname": "BackupJobsMissing", "cluster": "sanofi-003", "tenant": "sanofi-003"},
 	}
+	before := time.Now()
 	if err := li.Investigate(context.Background(), req); err != nil {
 		t.Fatalf("Investigate: %v", err)
 	}
@@ -289,6 +290,19 @@ func TestLoopStampsAlertMetadata(t *testing.T) {
 	}
 	if !got.StartedAt.Equal(start) {
 		t.Fatalf("StartedAt not stamped: got %v want %v", got.StartedAt, start)
+	}
+	// InvestigationStartedAt is a DIFFERENT clock from StartedAt: when RunLore began the
+	// run, not when the incident began. The outcome ledger's open is stamped at
+	// COMPLETION, so this is the only record of when the run started — and it is what
+	// bounds resolve-before-open pairing (outcome.resolvesSince). Left unstamped, every
+	// new open would silently fall back to the legacy age bound, so pin it here: it must
+	// fall inside the Investigate call, and must NOT be the incident's start time.
+	if got.InvestigationStartedAt.Before(before) || got.InvestigationStartedAt.After(time.Now()) {
+		t.Fatalf("InvestigationStartedAt must be stamped with the loop's start: got %v, want within [%v, now]",
+			got.InvestigationStartedAt, before)
+	}
+	if got.InvestigationStartedAt.Equal(got.StartedAt) {
+		t.Fatal("InvestigationStartedAt must be the RUN's start, not the INCIDENT's start (req.At)")
 	}
 }
 

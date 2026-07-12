@@ -37,10 +37,12 @@ func (s stubCurator) Curate(context.Context, providers.Investigation) (providers
 
 // openLine is the subset of a ledger open event the recurrence pointers read back.
 type openLine struct {
-	Event      string `json:"event"`
-	TriggerKey string `json:"trigger_key"`
-	CuratedURL string `json:"curated_url"`
-	Verdict    string `json:"verdict"`
+	Event      string    `json:"event"`
+	TriggerKey string    `json:"trigger_key"`
+	CuratedURL string    `json:"curated_url"`
+	Verdict    string    `json:"verdict"`
+	At         time.Time `json:"at"`
+	StartedAt  time.Time `json:"started_at"`
 }
 
 // lastOpen scans the JSONL ledger file and returns the last "open" event.
@@ -347,5 +349,76 @@ func TestOnCompletePriorKnowledgeSkips(t *testing.T) {
 		if sink.got.Prior != nil {
 			t.Errorf("%s: Prior = %+v, want nil", c.label, sink.got.Prior)
 		}
+	}
+}
+
+// TestOnCompleteRecordsInvestigationStartTime pins the plumbing that makes
+// resolve-before-open pairing exact, end to end.
+//
+// The ledger open is stamped at investigation COMPLETION, so it cannot by itself say
+// when the run began — yet that start time is precisely what separates a resolve that
+// landed WHILE this investigation ran (legitimate: the incident cleared mid-run, so its
+// webhook beat the open to the ledger) from one that predates it entirely (a bygone,
+// uninvestigated episode of the same fingerprint, which must never credit Resolved).
+// The gap is not small: a request waits behind debounce, coalescing, the single
+// sequential worker and rate-limit backoff before the loop even starts.
+//
+// So the completion pipeline must carry the loop's start time onto the open. This test
+// proves both that it is persisted (started_at on the JSONL line) and that it actually
+// governs the credit — the outcome ledger is what the learning loop trusts.
+func TestOnCompleteRecordsInvestigationStartTime(t *testing.T) {
+	started := time.Now().Add(-90 * time.Minute) // a long/queued investigation
+	for _, tc := range []struct {
+		label        string
+		resolvedAt   time.Time
+		wantResolved int
+	}{
+		// Cleared mid-investigation: the resolve is buffered, then pairs with this open.
+		{"resolve lands during the investigation", started.Add(time.Minute), 1},
+		// Self-resolved before the run began (e.g. while still queued): must not credit.
+		{"resolve predates the investigation", started.Add(-time.Minute), 0},
+	} {
+		t.Run(tc.label, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "outcomes.jsonl")
+			ledger, err := outcome.New(path)
+			if err != nil {
+				t.Fatalf("new ledger: %v", err)
+			}
+			notifier := notify.NewMulti(discardLog(), &captureNotifier{})
+
+			// The resolve webhook arrives before the open is recorded ⇒ buffered.
+			if _, _, err := ledger.Resolve("f1", tc.resolvedAt); err != nil {
+				t.Fatalf("Resolve: %v", err)
+			}
+			found := providers.Investigation{
+				Title:                  "recalled incident",
+				Fingerprint:            "f1",
+				Fingerprints:           []string{"f1"},
+				TriggerKey:             "k",
+				Recalled:               true,
+				RecalledEntry:          "x.md",
+				InvestigationStartedAt: started,
+			}
+			onInvestigationComplete(context.Background(), found, ledger, nil, nil, notifier, nil, nil, nil, discardLog())
+
+			// The start time must reach the durable open — without it the ledger falls back
+			// to the legacy age bound and this pairing decision silently changes.
+			line := lastOpen(t, path)
+			if !line.StartedAt.Equal(started) {
+				t.Fatalf("open must persist started_at: got %v, want %v", line.StartedAt, started)
+			}
+			if !line.At.After(line.StartedAt) {
+				t.Fatalf("open is stamped at completion, so at (%v) must follow started_at (%v)", line.At, line.StartedAt)
+			}
+
+			counts, err := ledger.OpenCounts()
+			if err != nil {
+				t.Fatalf("OpenCounts: %v", err)
+			}
+			if got := counts["x.md"]; got.Recalls != 1 || got.Resolved != tc.wantResolved {
+				t.Fatalf("want recalls=1 resolved=%d, got recalls=%d resolved=%d",
+					tc.wantResolved, got.Recalls, got.Resolved)
+			}
+		})
 	}
 }

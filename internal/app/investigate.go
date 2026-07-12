@@ -624,6 +624,11 @@ func onInvestigationComplete(ctx context.Context, found providers.Investigation,
 				Verdict:        string(found.Verdict),
 				Resolvable:     &resolvable,
 				At:             now,
+				// When the investigation BEGAN (`now` above is its COMPLETION). The gap is the
+				// enqueue→open latency — queue wait behind the single worker, rate-limit
+				// backoff, then the run — and it is the exact window in which a resolve may
+				// legitimately land before this open (see outcome.resolvesSince).
+				StartedAt: found.InvestigationStartedAt,
 			}); err != nil {
 				log.Warn("outcome ledger open failed", "fingerprint", fp, "err", err)
 			}

@@ -69,6 +69,16 @@ type Event struct {
 	Resource string    `json:"resource,omitempty"`
 	At       time.Time `json:"at"`
 
+	// StartedAt is, on an open, the wall-clock time the INVESTIGATION BEGAN — whereas At
+	// stamps its COMPLETION. The gap between the two is unbounded in practice (queue wait
+	// on the single-worker queue, rate-limit backoff, coalesce/debounce, then the run
+	// itself), which is exactly why it must be recorded rather than approximated: it is
+	// the interval during which a resolve can legitimately land BEFORE the open it belongs
+	// to, and so the exact bound on resolve-before-open pairing (see resolvesSince).
+	// Zero on a legacy open written before this field existed, and on resolve/feedback/
+	// checkpoint lines; omitempty keeps the append-only file compatible with old readers.
+	StartedAt time.Time `json:"started_at,omitempty"`
+
 	// Recurrence fields (written by the delivery path). Kept omitempty so the
 	// append-only file stays backward/forward compatible with older readers.
 	TriggerKey string `json:"trigger_key,omitempty"` // groups recurrences of the same alert; keys the byTrigger index
@@ -158,6 +168,15 @@ type Ledger struct {
 	// webhooks. Kept so the (otherwise silent) defensive drop is observable.
 	droppedResolves int
 
+	// staleResolves counts buffered resolves discarded at PAIRING time because they
+	// predate the open's investigation (see resolvesSince) — a resolve from a bygone,
+	// uninvestigated episode of the same fingerprint. A distinct signal from
+	// droppedResolves (a buffer overflow, not a pairing decision), and kept for the same
+	// reason: without it the discard is entirely silent, yet it is the one that decides
+	// whether an entry gets a resolve credit. Checkpointed like droppedResolves so
+	// compaction does not lose it.
+	staleResolves int
+
 	// maxEvents bounds the JSONL before loadLocked compacts it (0 disables). corruptLines
 	// records how many lines the last load could not parse (so the skip is observable, not
 	// silent). log carries a logger for those warnings; never nil after New.
@@ -187,6 +206,7 @@ type checkpointData struct {
 	PendingResolves map[string][]time.Time       `json:"pending_resolves,omitempty"`
 	Votes           map[string]feedbackVoteJSON  `json:"votes,omitempty"`
 	DroppedResolves int                          `json:"dropped_resolves,omitempty"`
+	StaleResolves   int                          `json:"stale_resolves,omitempty"`
 }
 
 type triggerAggJSON struct {
@@ -236,34 +256,57 @@ type feedbackVote struct {
 // pair with a real open, and dropping it leaves the brief-window pairing intact.
 const maxPendingResolvesPerFingerprint = 64
 
-// maxEarlyResolveAge bounds how far a buffered resolve may predate the open it pairs
-// with. A resolve is buffered whenever no open is pending for its fingerprint — which
-// includes resolves for alerts that were never investigated at all (suppressed by dedup
-// or by the trigger policy). Unbounded, such a resolve pairs with the NEXT open for the
-// same fingerprint and credits Resolved++ at open time, before the new incident has
-// produced anything: a flapping alert would bank a resolve credit on every suppressed
-// cycle for the next recall to cash in, inflating an entry's resolve rate on evidence
-// that has nothing to do with it. That is a manufactured post hoc, not merely an
-// unverified one.
+// legacyMaxEarlyResolveAge bounds how far a buffered resolve may predate an open that
+// carries NO StartedAt — i.e. ONLY an open written before Event.StartedAt existed, replayed
+// from a pre-upgrade ledger file. Every open written from now on carries its investigation's
+// start time, and resolvesSince gates on that exactly, so this fallback governs nothing but
+// history.
 //
-// Only a resolve that lands while the investigation is still running can legitimately
-// precede its open (the open is stamped at completion). An investigation is bounded by
-// investigation.timeout, 10m by default, so an hour is a generous six-fold margin;
-// beyond it, the resolve belongs to a bygone episode and must not pair.
-const maxEarlyResolveAge = time.Hour
+// It is deliberately generous rather than accurate, because for a legacy open the
+// information needed to be accurate was never recorded: the open is stamped at COMPLETION,
+// so the true bound is the enqueue→open latency, which the event does not carry. An hour is
+// the pragmatic compromise that still discards the pathological case this guards (a resolve
+// from a bygone episode, hours or days old, crediting the NEXT open for the fingerprint).
+const legacyMaxEarlyResolveAge = time.Hour
 
-// freshResolves drops buffered resolves too old to belong to an open stamped at openAt.
-// Returned in arrival order; reuses the backing array, so the caller must replace the
-// slice it passed in.
-func freshResolves(rs []time.Time, openAt time.Time) []time.Time {
-	cutoff := openAt.Add(-maxEarlyResolveAge)
+// resolvesSince drops the buffered resolves that CANNOT belong to open e, and reports how
+// many it dropped. Survivors are returned in arrival order; it reuses the backing array, so
+// the caller must replace the slice it passed in.
+//
+// The rule is exact, not heuristic: a resolve can only legitimately precede the open it
+// belongs to if it landed while that investigation was still RUNNING (the open is stamped
+// at completion, so a resolve arriving mid-investigation is recorded first). A resolve that
+// arrived BEFORE the investigation even began belongs to some earlier episode — the alert
+// fired, cleared, and was never investigated (suppressed by dedup or the trigger policy), or
+// self-resolved while the request sat in the queue. Pairing with such a resolve credits
+// Resolved++ at open time, before the new incident has produced anything: a flapping alert
+// would bank a resolve credit on every suppressed cycle for the next recall to cash in,
+// inflating an entry's resolve rate on evidence that has nothing to do with it — a
+// MANUFACTURED post hoc, not merely an unverified one.
+//
+// Gating on StartedAt rather than on the resolve's AGE is what makes this exact. The age of
+// a legitimate early resolve is bounded by the whole ENQUEUE→OPEN latency — debounce,
+// coalesce wait, the wait behind a single sequential worker, rate-limit backoff (a 1h window
+// by default), and only then the investigation itself — which no fixed hour-scale constant
+// can bound. An age bound therefore drops LEGITIMATE resolves off a backlogged queue and
+// permanently deflates a correct entry's resolve rate. The start time is the real boundary,
+// and the event carries it.
+func resolvesSince(rs []time.Time, e Event) (kept []time.Time, dropped int) {
+	// A legacy open (no StartedAt recorded) has no exact boundary to gate on; fall back to
+	// the age bound it was written under.
+	cutoff := e.StartedAt
+	if cutoff.IsZero() {
+		cutoff = e.At.Add(-legacyMaxEarlyResolveAge)
+	}
 	out := rs[:0]
 	for _, at := range rs {
-		if !at.Before(cutoff) {
-			out = append(out, at)
+		if at.Before(cutoff) {
+			dropped++
+			continue
 		}
+		out = append(out, at)
 	}
-	return out
+	return out, dropped
 }
 
 // New opens (replaying) the ledger at path with the default compaction bound
@@ -328,6 +371,7 @@ func (l *Ledger) resetStateLocked() {
 	l.byTrigger = map[string]triggerAgg{}
 	l.votes = map[string]feedbackVote{}
 	l.droppedResolves = 0
+	l.staleResolves = 0
 }
 
 // foldLocked folds one replayed event into the derived state. Open/resolve maintain the
@@ -386,6 +430,7 @@ func (l *Ledger) seedCheckpointLocked(cd *checkpointData) {
 		l.pendingOpens[fp] = stack
 	}
 	l.droppedResolves += cd.DroppedResolves
+	l.staleResolves += cd.StaleResolves
 }
 
 // compactLocked rewrites the ledger file as [checkpoint][recent tail]: it folds the
@@ -423,6 +468,7 @@ func (l *Ledger) snapshotCheckpointLocked() *checkpointData {
 		OpenIndex:       l.open,
 		PendingResolves: l.pendingResolves,
 		DroppedResolves: l.droppedResolves,
+		StaleResolves:   l.staleResolves,
 	}
 	if len(l.byTrigger) > 0 {
 		cd.ByTrigger = make(map[string]triggerAggJSON, len(l.byTrigger))
@@ -541,13 +587,21 @@ func (l *Ledger) applyOpenLocked(e Event) {
 		l.agg[e.Entry] = a
 	}
 	// Order-independent pairing: a resolve that arrived before this open is buffered;
-	// pair with the earliest such resolve (FIFO), matching Episodes(). Resolves too old
-	// to belong to this open are discarded first — see maxEarlyResolveAge.
+	// pair with the earliest such resolve (FIFO), matching Episodes(). Resolves that
+	// predate this open's investigation cannot belong to it and are discarded first —
+	// see resolvesSince.
 	if rs := l.pendingResolves[e.Fingerprint]; len(rs) > 0 {
-		rs = freshResolves(rs, e.At)
-		if len(rs) > 0 {
-			at := rs[0]
-			l.pendingResolves[e.Fingerprint] = rs[1:]
+		kept, stale := resolvesSince(rs, e)
+		if stale > 0 {
+			// Count + log: the discard decides whether an entry gets a resolve credit, so
+			// it must never be silent (cf. droppedResolves).
+			l.staleResolves += stale
+			l.log.Debug("outcome ledger: discarded buffered resolves predating the investigation",
+				"count", stale, "fingerprint", e.Fingerprint, "started_at", e.StartedAt, "opened_at", e.At)
+		}
+		if len(kept) > 0 {
+			at := kept[0]
+			l.pendingResolves[e.Fingerprint] = kept[1:]
 			if counted {
 				l.creditResolveLocked(e.Entry, at)
 			}
@@ -854,14 +908,16 @@ func (l *Ledger) Episodes() ([]Episode, error) {
 				OpenedAt:       e.At,
 			})
 			i := len(out) - 1
-			// Same pairing rule as applyOpenLocked, kept in lockstep: discard buffered
-			// resolves too old to belong to this open (see maxEarlyResolveAge), then pair
-			// with the earliest survivor.
+			// Same pairing rule as applyOpenLocked, kept in lockstep: discard the buffered
+			// resolves that predate this open's investigation (see resolvesSince), then pair
+			// with the earliest survivor. The drop count is deliberately ignored here — this
+			// is a read-only replay off the file, and folding it into the ledger's counter
+			// would re-count the same discards on every Episodes() call.
 			if rs := pendingResolves[e.Fingerprint]; len(rs) > 0 {
-				rs = freshResolves(rs, e.At)
-				if len(rs) > 0 {
-					resolveAt(i, rs[0]) // pair with the earliest buffered (early) resolve
-					pendingResolves[e.Fingerprint] = rs[1:]
+				kept, _ := resolvesSince(rs, e)
+				if len(kept) > 0 {
+					resolveAt(i, kept[0]) // pair with the earliest buffered (early) resolve
+					pendingResolves[e.Fingerprint] = kept[1:]
 					continue
 				}
 				delete(pendingResolves, e.Fingerprint)

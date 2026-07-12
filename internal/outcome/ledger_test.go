@@ -1385,6 +1385,10 @@ func TestContestedTriggersNilAndDisabled(t *testing.T) {
 // Only a resolve that landed while the investigation was running can legitimately
 // precede its open (see TestEpisodesResolveBeforeOpenPairs, 1s apart). Anything older
 // belongs to a bygone episode and must not pair.
+//
+// This open carries NO StartedAt, so it exercises the LEGACY path: an open written
+// before started_at existed falls back to the legacyMaxEarlyResolveAge age bound, and
+// a day-old resolve is far outside it.
 func TestStaleBufferedResolveDoesNotCreditLaterOpen(t *testing.T) {
 	l, _ := New(filepath.Join(t.TempDir(), "o.jsonl"))
 	stale := time.Unix(9000, 0)
@@ -1409,5 +1413,151 @@ func TestStaleBufferedResolveDoesNotCreditLaterOpen(t *testing.T) {
 	}
 	if len(eps) != 1 || eps[0].Resolved {
 		t.Fatalf("stale resolve must not resolve the episode on replay: got %+v", eps)
+	}
+}
+
+// assertPairing checks the cache (OpenCounts) and the replay (Episodes) agree on
+// whether the single recall open for entry was credited as resolved. The two paths
+// implement the same pairing rule and are kept in lockstep by design, so every
+// early-resolve test asserts on BOTH — a divergence is itself the bug.
+func assertPairing(t *testing.T, l *Ledger, entry string, wantResolved bool) {
+	t.Helper()
+	counts, err := l.OpenCounts()
+	if err != nil {
+		t.Fatalf("OpenCounts: %v", err)
+	}
+	want := 0
+	if wantResolved {
+		want = 1
+	}
+	if got := counts[entry]; got.Recalls != 1 || got.Resolved != want {
+		t.Fatalf("cache: want recalls=1 resolved=%d, got recalls=%d resolved=%d",
+			want, got.Recalls, got.Resolved)
+	}
+	eps, err := l.Episodes()
+	if err != nil {
+		t.Fatalf("Episodes: %v", err)
+	}
+	if len(eps) != 1 {
+		t.Fatalf("want exactly 1 episode, got %+v", eps)
+	}
+	if eps[0].Resolved != wantResolved {
+		t.Fatalf("replay disagrees with cache: episode Resolved=%v, want %v (cache said %v)",
+			eps[0].Resolved, wantResolved, wantResolved)
+	}
+}
+
+// TestResolveDuringLongInvestigationCreditsOpen is the regression test for the bound
+// that replaced a wall-clock age with the investigation's actual start time.
+//
+// The open is stamped at investigation COMPLETION, so the interval a buffered resolve
+// must survive to pair with it is the whole ENQUEUE→OPEN latency: debounce + coalesce
+// wait + QUEUE WAIT + rate-limit backoff + the investigation itself. The queue is a
+// single sequential worker and the rate-limit window defaults to 1h, so a backlogged
+// queue blows past any fixed hour-scale age bound trivially.
+//
+// Here the alert cleared 30m into an investigation that took 2h end-to-end (mostly
+// queued), so its resolve landed 90 MINUTES before the open. It is a LEGITIMATE
+// resolve for exactly this open — it arrived after the investigation started — and
+// dropping it would permanently deflate a CORRECT entry's resolve rate. An age bound
+// of 1h drops it; the StartedAt gate keeps it.
+func TestResolveDuringLongInvestigationCreditsOpen(t *testing.T) {
+	l, _ := New(filepath.Join(t.TempDir(), "o.jsonl"))
+	started := time.Unix(50000, 0)
+	resolvedAt := started.Add(30 * time.Minute) // cleared while the investigation ran
+	openAt := started.Add(2 * time.Hour)        // …which only completed 90m later
+
+	_, _, _ = l.Resolve("fp", resolvedAt) // no open pending yet ⇒ buffered
+	_ = l.Open(Event{Fingerprint: "fp", Kind: "recall", Entry: "x.md", StartedAt: started, At: openAt})
+
+	assertPairing(t, l, "x.md", true)
+}
+
+// TestResolveBeforeInvestigationStartDoesNotCredit pins the other side of the gate:
+// a resolve that arrived BEFORE the investigation began cannot belong to its open. The
+// alert self-resolved while the request was still QUEUED, so nothing this investigation
+// did caused the resolve — crediting it would manufacture a post hoc.
+//
+// Note the age bound this replaced would have PAIRED this one (the resolve is only
+// minutes old at open time), which is precisely why the age was never the right axis.
+func TestResolveBeforeInvestigationStartDoesNotCredit(t *testing.T) {
+	l, _ := New(filepath.Join(t.TempDir(), "o.jsonl"))
+	started := time.Unix(50000, 0)
+	resolvedAt := started.Add(-5 * time.Minute) // self-resolved while still queued
+	openAt := started.Add(3 * time.Minute)
+
+	_, _, _ = l.Resolve("fp", resolvedAt)
+	_ = l.Open(Event{Fingerprint: "fp", Kind: "recall", Entry: "x.md", StartedAt: started, At: openAt})
+
+	assertPairing(t, l, "x.md", false)
+}
+
+// TestEarlyResolveDropIsCounted checks the discard is OBSERVABLE, not silent: a
+// resolve dropped at pairing time is counted (staleResolves) and survives compaction
+// through the checkpoint, exactly like the pendingResolves-bound drop counter.
+func TestEarlyResolveDropIsCounted(t *testing.T) {
+	p := filepath.Join(t.TempDir(), "o.jsonl")
+	l, _ := New(p) // no compaction while writing
+	started := time.Unix(60000, 0)
+
+	// Two resolves that predate the investigation's start: both must be discarded.
+	_, _, _ = l.Resolve("fp", started.Add(-2*time.Hour))
+	_, _, _ = l.Resolve("fp", started.Add(-time.Hour))
+	_ = l.Open(Event{Fingerprint: "fp", Kind: "recall", Entry: "x.md", StartedAt: started, At: started.Add(time.Minute)})
+
+	l.mu.Lock()
+	stale, dropped := l.staleResolves, l.droppedResolves
+	l.mu.Unlock()
+	if stale != 2 {
+		t.Fatalf("discarded early resolves must be counted: staleResolves = %d, want 2", stale)
+	}
+	if dropped != 0 {
+		t.Fatalf("the pendingResolves-bound counter is a distinct signal and must not move: droppedResolves = %d, want 0", dropped)
+	}
+	assertPairing(t, l, "x.md", false)
+
+	// The counter is checkpointed like droppedResolves: pad the ledger so the events
+	// above are absorbed into a compaction checkpoint, then reload and confirm the
+	// count was not lost with them.
+	for i := 0; i < 20; i++ {
+		fp := fmt.Sprintf("pad%d", i)
+		_ = l.Open(Event{Fingerprint: fp, Kind: "fresh", At: started.Add(time.Duration(i+10) * time.Minute)})
+		_, _, _ = l.Resolve(fp, started.Add(time.Duration(i+11)*time.Minute))
+	}
+	c, err := NewWithMaxEvents(p, 5) // reload triggers compaction
+	if err != nil {
+		t.Fatalf("NewWithMaxEvents: %v", err)
+	}
+	c.mu.Lock()
+	got := c.staleResolves
+	c.mu.Unlock()
+	if got != 2 {
+		t.Fatalf("staleResolves must survive compaction: got %d, want 2", got)
+	}
+}
+
+// TestLegacyOpenWithoutStartedAtUsesAgeBound pins the backward-compatibility path.
+// A ledger written before started_at existed has opens with a ZERO StartedAt; gating
+// those on it directly would drop EVERY buffered resolve (all resolves postdate the
+// zero time... in fact none do — every real resolve is AFTER year 1, so a zero gate
+// would credit everything). Legacy opens therefore keep the old age bound: a resolve
+// inside legacyMaxEarlyResolveAge still pairs, one outside it does not.
+func TestLegacyOpenWithoutStartedAtUsesAgeBound(t *testing.T) {
+	t0 := time.Unix(70000, 0)
+	for _, tc := range []struct {
+		name         string
+		age          time.Duration // how far the resolve predates the open
+		wantResolved bool
+	}{
+		{"within the legacy bound", legacyMaxEarlyResolveAge / 2, true},
+		{"outside the legacy bound", 2 * legacyMaxEarlyResolveAge, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			l, _ := New(filepath.Join(t.TempDir(), "o.jsonl"))
+			_, _, _ = l.Resolve("fp", t0.Add(-tc.age))
+			// No StartedAt — a legacy open.
+			_ = l.Open(Event{Fingerprint: "fp", Kind: "recall", Entry: "x.md", At: t0})
+			assertPairing(t, l, "x.md", tc.wantResolved)
+		})
 	}
 }

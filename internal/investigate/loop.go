@@ -253,6 +253,15 @@ func (li *LoopInvestigator) Investigate(ctx context.Context, req Request) error 
 	// it — no path loses a delivery.
 	finish := func(inv providers.Investigation) {
 		setUsage(&inv)
+		// Stamp when THIS investigation began (the same `start` the duration metric uses —
+		// one clock read, one truth). The outcome ledger's open is stamped at COMPLETION, so
+		// the open alone cannot say how long the run took nor how long it waited in the
+		// queue; the start time is what lets the ledger tell a resolve that landed DURING
+		// this investigation (legitimate, pairs) from one that predates it (a bygone episode,
+		// must not credit). Stamped here because finish is the single terminal-delivery
+		// chokepoint — every exit (happy path, recall short-circuit, timeout, refusal, budget
+		// kill, max-steps) routes through it, so no delivered investigation can miss it.
+		inv.InvestigationStartedAt = start
 		li.recordUsageMetrics(ctx, inv.Usage)
 		li.deliver(req, inv)
 	}
