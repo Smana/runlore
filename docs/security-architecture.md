@@ -141,7 +141,9 @@ Slack / Stripe / Google / OpenAI-style / AWS key formats, `user:password@host` U
 **values under `data:`/`stringData:` of a `kind: Secret` manifest**, including one surfaced inside
 a `what_changed` git diff.
 
-> [!warning] Redaction is a mitigation, not a guarantee
+> [!WARNING]
+> **Redaction is a mitigation, not a guarantee**
+>
 > The ruleset is deliberately **high-precision**: it masks values while preserving structure (the
 > key name, the diff line) so the investigation can still reason — "the password field changed" —
 > without the secret. The cost of precision is recall. Things the regexes deliberately do **not**
@@ -223,7 +225,9 @@ attacker-influenceable. Each output surface neutralizes it for *its own* interpr
   an insecure parent `base_url`), embeddings, and every MCP server. Loopback and in-cluster hosts
   are exempt; the check is pure (no DNS) so validation stays deterministic.
 
-> [!note] Explicitly out of scope: dial-time DNS rebinding
+> [!NOTE]
+> **Explicitly out of scope: dial-time DNS rebinding**
+>
 > The redirect guard resolves the redirect target when deciding; it does not re-check at dial time,
 > and no client pins resolved IPs. Endpoints you put in the config are part of the **operator trust
 > boundary** — RunLore defends against a *legitimate* endpoint redirecting somewhere hostile, not

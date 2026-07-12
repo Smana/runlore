@@ -43,7 +43,9 @@ Converged on one shape — *live model of prod → agentic RCA → evidence in S
 - **Incumbents:** Datadog, PagerDuty, Grafana, Dynatrace, New Relic, AWS, Google, ServiceNow.
 - **Memory/learning** (Cleric, Resolve, PagerDuty, Google) is **all closed**.
 
-> [!note] The market is frothy and under scrutiny
+> [!NOTE]
+> **The market is frothy and under scrutiny**
+>
 > Resolve.ai raised a $1B-headline Series A (Dec 2025) on ~$4M ARR; Gartner places agentic AI at the
 > "Peak of Inflated Expectations" (>40% of agentic projects predicted cancelled by 2027) and flags
 > "agent-washing." Pressure-test every "autonomous"/"%MTTR" claim against the vendor's own docs.

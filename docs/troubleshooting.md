@@ -9,7 +9,9 @@ two diagnostic channels:
 - **Metrics** — `runlore_*` Prometheus series, exposed when `telemetry.metrics_enabled: true`. See
   [Observability](observability.md) for the full catalog and a Grafana dashboard.
 
-> [!note] Leader-only by design
+> [!NOTE]
+> **Leader-only by design**
+>
 > With `leader_election.enabled` (the chart default, 2 replicas) **only the leader investigates**. A
 > standby logs `msg="standby; another replica leads"`, reports `/readyz` 200 like the leader (readiness
 > is catalog warmth, not leadership), and **proxies** any webhook it receives to the leader — grep
@@ -145,7 +147,9 @@ Instant recall requires `catalog.instant_recall.enabled: true` **and** a confide
 
 ## Findings were investigated but never delivered to chat
 
-> [!warning] Delivery has no metric — logs only
+> [!WARNING]
+> **Delivery has no metric — logs only**
+>
 > There is currently **no** `runlore_*` counter for notifier delivery. A failed send logs
 > `msg="delivery failed" err=…` (the Slack/Matrix/webhook fan-out is best-effort and joins errors).
 > Successful sends are **not** logged. Grep `msg="delivery failed"` and `msg="deliver findings"`.

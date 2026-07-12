@@ -64,7 +64,9 @@ GitHub / Slack / AWS / Google / Stripe keys, `user:pass@host` URLs, `Authorizati
 generic `*(password|secret|api_key|token|…): <value>` pairs, and the values under a `kind: Secret`
 manifest's `data:`/`stringData:` block — including one surfaced inside a git diff.
 
-> [!warning] Redaction is a mitigation, not a guarantee
+> [!WARNING]
+> **Redaction is a mitigation, not a guarantee**
+>
 > The ruleset is deliberately high-precision, and the cost of precision is recall: unlabeled
 > high-entropy strings, bare AWS secret keys with no context cue, and base64 blobs *outside* a
 > `kind: Secret` `data:` block (the redactor never decodes base64) are **not** caught — see
