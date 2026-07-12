@@ -13,7 +13,9 @@ helm upgrade runlore deploy/helm/runlore -n runlore -f values.yaml
 Your `values.yaml` is the source of truth; the entire agent config under `values.config` is rendered
 verbatim into the ConfigMap. Re-apply the same file (with your changes) on every upgrade.
 
-> [!warning] Expect ~20s of downtime during the agent's own upgrade (default strategy)
+> [!WARNING]
+> **Expect ~20s of downtime during the agent's own upgrade (default strategy)**
+>
 > The Deployment ships with **`strategy.type: Recreate`**: old pods are terminated **before** new
 > ones start, so the agent is briefly unavailable while the new version boots and wins the leader
 > lease. Set `updateStrategy: RollingUpdate` for near-zero-downtime upgrades (see below).
@@ -43,7 +45,9 @@ stops accepting new work, and lets the in-flight investigation complete.
 
 ## What persists across upgrades, restarts, and failover
 
-> [!important] State is **ephemeral by default**
+> [!IMPORTANT]
+> **State is ephemeral by default**
+>
 > `persistence.enabled` defaults to **`false`**, which backs the data directory with an `emptyDir` —
 > wiped on every pod restart, upgrade, and failover. For anything you want to survive, enable the PVC.
 
@@ -64,7 +68,9 @@ The **bleve search index is *not* persisted** — it is built in memory (`NewMem
 the catalog mirror at startup, so a restart simply re-indexes. Instant-recall quality is unaffected by
 losing the index; it depends on the catalog content, which lives in your Git repo.
 
-> [!note] If you run with `persistence.enabled: false`
+> [!NOTE]
+> **If you run with `persistence.enabled: false`**
+>
 > The outcome ledger and audit log are lost on every restart, and the catalog re-clones from scratch
 > on boot. That's fine for a quick trial, but for the **learning loop** to compound (outcome-weighted
 > recall decay) the outcome ledger must persist — enable the PVC for any real deployment.

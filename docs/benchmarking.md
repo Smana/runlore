@@ -4,7 +4,9 @@ RunLore is model-agnostic: you pick the model behind the investigation loop. Thi
 page shows how to benchmark several models against RunLore's own eval harness in
 **one command** and publish an honest comparison.
 
-> [!important] Run RunLore on *your* models
+> [!IMPORTANT]
+> **Run RunLore on *your* models**
+>
 > The comparison runs the **replay** eval suite (recorded incident evidence, no
 > live cluster) so it is reproducible and cheap. It measures the model+loop's
 > reasoning over fixed evidence — not a live cluster's flakiness. See the

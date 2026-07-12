@@ -2,7 +2,9 @@
 
 A navigable map of RunLore's configuration, organized by subsystem.
 
-> [!note] `values.yaml` is the authoritative reference
+> [!NOTE]
+> **`values.yaml` is the authoritative reference**
+>
 > The single source of truth for every key is the chart's
 > [`deploy/helm/runlore/values.yaml`](../deploy/helm/runlore/values.yaml) — every key carries an
 > inline rationale comment, and the whole `config:` block is rendered **verbatim** into the agent's
@@ -280,7 +282,9 @@ re-investigates instead of reusing it (see
 [learning-loop.md §6](learning-loop.md#6-the-feedback-edge--outcome-driven-decay-what-makes-it-learn)).
 This is the primary trust signal for incidents that have **no resolve channel** (GitOps failures).
 
-> [!important] Enabling this requires exposing the agent to Slack.
+> [!IMPORTANT]
+> **Enabling this requires exposing the agent to Slack.**
+>
 > Button clicks arrive as HTTPS callbacks on **`POST /slack/interactions`**, so that endpoint must be
 > reachable **from Slack's servers** (a public Interactivity *Request URL* on your Slack app — the same
 > endpoint and the same exposure approve-mode buttons use; if you already run `actions.mode: approve`
