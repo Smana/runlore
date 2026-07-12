@@ -107,7 +107,9 @@ incidents gains trust; knowledge that keeps failing decays.
 
 → **[How the learning loop works](docs/learning-loop.md)** · **[Reviewing & approving knowledge](docs/reviewing-knowledge.md)**
 
-> [!note] What about "PR fatigue"?
+> [!NOTE]
+> **What about "PR fatigue"?**
+>
 > The question comes up fast: if a team had no time to document incidents yesterday, who reviews
 > AI-drafted PRs tomorrow? That's the bet, and it is a deliberate one — the review is what separates a
 > memory you own from a dump of LLM output.
