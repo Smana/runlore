@@ -12,6 +12,7 @@ package investigate
 import (
 	"context"
 	"log/slog"
+	"strings"
 	"sync"
 	"time"
 
@@ -34,6 +35,10 @@ const (
 	// SourcePagerDuty means the investigation was triggered by a PagerDuty incident.
 	SourcePagerDuty Source = "pagerduty"
 )
+
+// SeverityCritical is the paging-grade alert severity. It is the ONE spelling
+// behind Request.IsCritical; nothing else should compare Severity to a literal.
+const SeverityCritical = "critical"
 
 // Request is a normalized investigation trigger.
 type Request struct {
@@ -58,6 +63,26 @@ type Request struct {
 	// Untrusted alert-derived text: flows through the seed's egress redaction. Bounded
 	// at the flush site so one pathological storm can't blow up the seed.
 	CoalescedWorkloads []string
+}
+
+// IsCritical reports whether this is a paging-grade critical incident.
+//
+// It is the single predicate behind a design invariant that two independent
+// waits must agree on: **a debounce must never delay the first look at a
+// critical page** (dev/superpowers/specs/2026-06-22-investigation-coalescing-rate-limit-design.md,
+// D6). Both waits consult this one method so they cannot drift apart:
+//
+//   - coalesce.Coalescer.Add flushes a critical immediately instead of buffering
+//     it into a batch that waits out the coalesce window.
+//   - source.incidentDebouncer.Hold enqueues a critical immediately instead of
+//     holding it for triggers.incidents.debounce.
+//
+// The comparison is case-insensitive: Alertmanager labels arrive with arbitrary
+// casing (Critical, CRITICAL), matching config.IncidentMatch's severity matcher —
+// a case-sensitive check here would silently reintroduce the delay it exists to
+// prevent.
+func (r Request) IsCritical() bool {
+	return strings.EqualFold(r.Severity, SeverityCritical)
 }
 
 // FromFailureEvent builds a Request from a GitOps failure.

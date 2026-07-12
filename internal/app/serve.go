@@ -267,11 +267,13 @@ func RunServe(version string, args []string) error {
 	// triggers.incidents.cancel_queued_on_resolve is on.
 	pipe := source.NewPipeline(cfg, alertEnq, resolve, log).
 		WithMetrics(metrics).WithContext(workCtx).WithCanceller(queue)
-	if w := cfg.Triggers.Incidents.Debounce.Std(); w > 0 {
+	if w := cfg.Triggers.Incidents.DebounceWindow(); w > 0 {
 		log.Info("incident debounce enabled",
-			"window", w, "note", "firing alerts held; dropped if resolved within the window")
+			"window", w,
+			"note", "non-critical firing alerts held; dropped if resolved within the window",
+			"critical", "never held — critical alerts are investigated immediately")
 	}
-	if cfg.Triggers.Incidents.CancelQueuedOnResolve {
+	if cfg.Triggers.Incidents.CancelQueuedOnResolveEnabled() {
 		log.Info("cancel queued on resolve enabled",
 			"note", "queued (not yet started) investigations are dropped when the alert resolves first")
 	}

@@ -22,9 +22,21 @@ import (
 //
 // It is event-driven, mirroring the GitOps-failure debouncer's intent but using
 // the resolved webhook RunLore already receives as the "still active?" signal
-// (the cheapest backstop) rather than re-querying alert state. A zero window
-// disables the hold entirely: Hold enqueues immediately, preserving the original
-// investigate-on-admission behavior.
+// (the cheapest backstop) rather than re-querying alert state.
+//
+// TWO things are never held:
+//
+//   - A CRITICAL alert. "A debounce must never delay the first look at a critical
+//     page" is a design invariant (D6 in the coalescing spec), and the coalescer
+//     already honours it by flushing criticals with no batching wait. The hold
+//     would otherwise reintroduce exactly the latency the coalescer refuses to
+//     add — and on a default install it would hit EVERY investigated alert, since
+//     the shipped trigger matches `severity: [critical]` exclusively. Criticals
+//     instead get their noise/cost filtering from cancel_queued_on_resolve (on by
+//     default), which drops a self-resolving critical from the QUEUE at zero added
+//     latency. Both sides test the same predicate: investigate.Request.IsCritical.
+//   - Anything, when the window is 0. An explicit `debounce: 0s` is the full escape
+//     hatch: Hold enqueues immediately, restoring investigate-on-admission.
 //
 // In the pipeline the hold sits AFTER match+dedup (so re-fires are already
 // suppressed) and BEFORE the coalescer (so survivors are still storm-batched).
@@ -64,21 +76,26 @@ func newIncidentDebouncer(window time.Duration, log *slog.Logger) *incidentDebou
 }
 
 // withMetrics installs the (nil-safe) metric set. A dropped self-resolving alert
-// increments IncidentsDebounced.
+// increments IncidentsDebounced; a held alert lost to shutdown increments
+// IncidentsDroppedOnShutdown.
 func (d *incidentDebouncer) withMetrics(m *telemetry.Metrics) *incidentDebouncer {
 	d.metrics = m
 	return d
 }
 
-// Hold decides whether/when to enqueue r. With window 0 it enqueues immediately
-// (today's behavior). Otherwise it returns without blocking; a background goroutine
-// waits the window and enqueues only if the hold was not cancelled by a matching
-// Cancel (resolved webhook) or the context. The hold is keyed by the alert
-// Fingerprint — the only handle a resolved webhook carries; a fingerprint-less alert
-// is held uncancellably (no pending entry, no cancel channel) and simply waits the
-// window out.
+// Hold decides whether/when to enqueue r.
+//
+// It enqueues IMMEDIATELY, with no hold, when the window is 0 (the explicit escape
+// hatch) or when r is CRITICAL — a critical page must never wait on a debounce, the
+// same invariant the coalescer enforces on its batching wait (see the type comment).
+//
+// Otherwise it returns without blocking; a background goroutine waits the window and
+// enqueues only if the hold was not cancelled by a matching Cancel (resolved webhook)
+// or the context. The hold is keyed by the alert Fingerprint — the only handle a
+// resolved webhook carries; a fingerprint-less alert is held uncancellably (no pending
+// entry, no cancel channel) and simply waits the window out.
 func (d *incidentDebouncer) Hold(ctx context.Context, r investigate.Request, enq investigate.Enqueuer) {
-	if d.window <= 0 {
+	if d.window <= 0 || r.IsCritical() {
 		enq.Enqueue(r)
 		return
 	}
@@ -101,6 +118,25 @@ func (d *incidentDebouncer) wait(ctx context.Context, r investigate.Request, enq
 	select {
 	case <-ctx.Done():
 		d.unregister(fp, cancel)
+		// LOSS, not a filter — say so loudly. Alertmanager already got its 200 for this
+		// alert (Hold returns before the window elapses, so the webhook handler answered
+		// long ago), and a held incident that never reaches the queue is simply gone: no
+		// investigation, no ledger entry, and no retry until Alertmanager's own
+		// repeat_interval comes round (commonly hours). The hold window can also exceed
+		// the drain grace period, so draining cannot rescue it. A silent drop here would
+		// make a routine `helm upgrade` look like a clean restart while a page was
+		// quietly discarded — hence Warn, naming the alert.
+		if d.log != nil {
+			d.log.Warn("held incident DROPPED: shutting down before its debounce window elapsed",
+				"alert", r.Title, "fingerprint", r.Fingerprint, "severity", r.Severity, "window", d.window,
+				"impact", "the alert was accepted (200 to Alertmanager) but never investigated; it will not be retried until Alertmanager's repeat_interval re-fires it",
+				"remedy", "shorten triggers.incidents.debounce, or set it to 0s to investigate on admission")
+		}
+		if d.metrics != nil {
+			// ctx is already cancelled; WithoutCancel keeps the record from being dropped
+			// by an exporter that honours it.
+			d.metrics.IncidentsDroppedOnShutdown.Add(context.WithoutCancel(ctx), 1)
+		}
 		return
 	case <-cancel:
 		// A matching resolved webhook arrived within the window: drop the incident.
@@ -123,8 +159,11 @@ func (d *incidentDebouncer) wait(ctx context.Context, r investigate.Request, enq
 // resolved-webhook path). It is a no-op for an empty fingerprint or an unknown
 // key. Safe for concurrent use.
 func (d *incidentDebouncer) Cancel(fingerprint string) {
-	// Nothing is ever pending when debounce is off (window 0), so skip the lock on the
-	// default-configuration resolved-webhook path.
+	// Nothing is ever pending when the hold is off (explicit `debounce: 0s`), so skip
+	// the lock entirely on that path. Note this is NOT the default configuration — the
+	// default window is 60s — and a resolve for a critical also finds nothing pending
+	// (criticals are never held); those are dropped one stage later, from the queue, by
+	// cancel_queued_on_resolve.
 	if d == nil || d.window <= 0 || fingerprint == "" {
 		return
 	}

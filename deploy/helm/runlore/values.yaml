@@ -65,15 +65,34 @@ config:
       # re-investigation of every still-firing repeat.
       dedup:
         window: 30m
-      # Pre-investigation debounce: hold a firing alert this long, then investigate
-      # only if it is STILL active — i.e. no matching Alertmanager `resolved` webhook
-      # arrived within the window. Skips self-resolving alerts (e.g. a
-      # KubeDaemonSetRolloutStuck during a Karpenter node-churn cycle) that would
+      # Pre-investigation debounce: hold a NON-CRITICAL firing alert this long, then
+      # investigate only if it is STILL active — i.e. no matching Alertmanager
+      # `resolved` webhook arrived within the window. Skips self-resolving alerts (e.g.
+      # a KubeDaemonSetRolloutStuck during a Karpenter node-churn cycle) that would
       # otherwise burn a full investigation on noise and are often already resolved by
-      # the time a finding lands. Defaults to 0 (investigate immediately, today's
-      # behavior); opt-in. Composes with coalesce (survivors are batched afterwards)
-      # and dedup (re-fires are still suppressed before the hold begins).
-      debounce: 0s
+      # the time a finding lands. It also keeps such an alert's `resolved` webhook out
+      # of the outcome ledger, where it would credit a recalled entry's resolve rate
+      # for a resolution the diagnosis had nothing to do with.
+      #
+      # A `critical` alert is NEVER held — a debounce must never delay the first look at
+      # a page (the same invariant the coalescer honours by flushing criticals with no
+      # batching wait). Since the match policy above is `severity: [critical]`, this hold
+      # is effectively inert on the DEFAULT install; it starts filtering as soon as you
+      # widen `match.severity` (e.g. to include `warning`). Self-resolving CRITICALS are
+      # filtered by cancel_queued_on_resolve below instead, at zero added latency.
+      #
+      # Defaults to 60s (same as gitops_failures.debounce). Set `0s` to investigate
+      # immediately on every fire. Composes with coalesce (survivors are batched
+      # afterwards) and dedup (re-fires are still suppressed before the hold begins).
+      debounce: 60s
+      # When the Alertmanager `resolved` webhook arrives while the investigation is still
+      # QUEUED (accepted, not yet started), drop it. Defaults to true, and it is the only
+      # self-resolving filter a CRITICAL alert gets — the debounce above never holds one.
+      # It adds NO latency: nothing is waited on, the cancel simply races an investigation
+      # that has not begun. Set false to keep the post-hoc "why did it fire?" answer even
+      # after an alert self-resolves. An IN-FLIGHT investigation is never cancelled, and a
+      # coalesced multi-alert batch is not cancelled on one member's resolve.
+      cancel_queued_on_resolve: true
     # Failure POLICY for the gitops source (enablement lives under sources.gitops).
     gitops_failures:
       # Debounce transient Flux failures: wait this long, then re-read the

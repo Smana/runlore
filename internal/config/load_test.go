@@ -9,6 +9,22 @@ import (
 	"time"
 )
 
+// loadDoc writes doc to a temp runlore.yaml and Loads it — i.e. it exercises the real
+// entry point, defaults included. Tests that assert a DEFAULT must go through Load:
+// a bare &Config{} skips applyDefaults and would silently pin the zero value instead.
+func loadDoc(t *testing.T, doc string) *Config {
+	t.Helper()
+	p := filepath.Join(t.TempDir(), "runlore.yaml")
+	if err := os.WriteFile(p, []byte(doc), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	c, err := Load(p)
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	return c
+}
+
 func TestLoad(t *testing.T) {
 	dir := t.TempDir()
 	p := filepath.Join(dir, "runlore.yaml")
@@ -165,18 +181,77 @@ triggers:
 	}
 }
 
-// TestLoadCancelQueuedOnResolve pins the yaml key spelling and the opt-in default:
-// unset ⇒ false (behavior preservation — some teams want the post-hoc investigation
-// of a self-resolved alert), explicit true parses.
+// TestLoadCancelQueuedOnResolve pins the yaml key spelling and that an explicit
+// `true` parses.
 func TestLoadCancelQueuedOnResolve(t *testing.T) {
-	dir := t.TempDir()
-	p := filepath.Join(dir, "runlore.yaml")
-	doc := `
+	c := loadDoc(t, `
 sources:
   alertmanager: {}
 triggers:
   incidents:
     cancel_queued_on_resolve: true
+`)
+	if !c.Triggers.Incidents.CancelQueuedOnResolveEnabled() {
+		t.Fatal("explicit cancel_queued_on_resolve: true should parse")
+	}
+}
+
+// TestLoadCancelQueuedOnResolveDefaultsTrue pins the default flip: unset ⇒ TRUE.
+//
+// It used to default to false, on the reasoning that the debounce hold was the
+// self-resolving filter and this merely extended it. That reasoning does not survive
+// the critical carve-out: the debounce deliberately never holds a CRITICAL alert (a
+// debounce must never delay the first look at a critical page), and the shipped chart
+// trigger matches `severity: [critical]` EXCLUSIVELY — so on a default install the
+// hold filters nothing at all. Cancelling a QUEUED-but-not-yet-started investigation
+// when the resolve lands is the only filter criticals get, and it costs ZERO added
+// latency: nothing is ever waited on.
+func TestLoadCancelQueuedOnResolveDefaultsTrue(t *testing.T) {
+	c := loadDoc(t, `
+sources:
+  alertmanager: {}
+`)
+	if c.Triggers.Incidents.CancelQueuedOnResolve == nil {
+		t.Fatal("unset cancel_queued_on_resolve must be defaulted (non-nil) by applyDefaults")
+	}
+	if !c.Triggers.Incidents.CancelQueuedOnResolveEnabled() {
+		t.Fatal("cancel_queued_on_resolve must default to TRUE")
+	}
+}
+
+// TestLoadCancelQueuedOnResolveExplicitFalse keeps the escape hatch honest: a team that
+// wants the post-hoc "why did it fire?" investigation even after self-resolution must be
+// able to say so. That requires distinguishing "unset" from "explicitly false" — hence
+// the *bool, mirroring Debounce.
+func TestLoadCancelQueuedOnResolveExplicitFalse(t *testing.T) {
+	c := loadDoc(t, `
+sources:
+  alertmanager: {}
+triggers:
+  incidents:
+    cancel_queued_on_resolve: false
+`)
+	if c.Triggers.Incidents.CancelQueuedOnResolve == nil {
+		t.Fatal("explicit false should be non-nil (distinguishable from unset)")
+	}
+	if c.Triggers.Incidents.CancelQueuedOnResolveEnabled() {
+		t.Fatal("an explicit cancel_queued_on_resolve: false must be honoured, not overwritten by the true default")
+	}
+}
+
+// TestLoadIncidentDebounceDefault pins the incident debounce default. It was 0
+// (disabled) while the GitOps-failure debounce defaulted to 60s — an asymmetry with no
+// justification: both filters exist to keep a transient, self-resolving failure from
+// burning a full paid investigation. The incident side matters more, because a resolve
+// for a self-healed alert also lands in the outcome ledger and credits the recalled
+// entry's resolve rate on evidence unrelated to the diagnosis. A default install was
+// exactly that configuration.
+func TestLoadIncidentDebounceDefault(t *testing.T) {
+	dir := t.TempDir()
+	p := filepath.Join(dir, "runlore.yaml")
+	doc := `
+sources:
+  alertmanager: {}
 `
 	if err := os.WriteFile(p, []byte(doc), 0o644); err != nil {
 		t.Fatal(err)
@@ -185,11 +260,56 @@ triggers:
 	if err != nil {
 		t.Fatalf("load: %v", err)
 	}
-	if !c.Triggers.Incidents.CancelQueuedOnResolve {
-		t.Fatal("explicit cancel_queued_on_resolve: true should parse")
+	if c.Triggers.Incidents.Debounce.Std() != 60*time.Second {
+		t.Fatalf("incidents debounce default: got %v, want 60s", c.Triggers.Incidents.Debounce.Std())
 	}
-	// Default: off.
-	if (&Config{}).Triggers.Incidents.CancelQueuedOnResolve {
-		t.Fatal("cancel_queued_on_resolve must default to false")
+}
+
+// TestLoadIncidentDebounceExplicitZeroDisables keeps the escape hatch honest: a
+// deployment that wants the pre-debounce behaviour back (investigate on every fire,
+// including self-resolving ones) must be able to say so. That requires distinguishing
+// "unset" from "explicitly 0", hence the pointer — mirroring gitops_failures.debounce.
+func TestLoadIncidentDebounceExplicitZeroDisables(t *testing.T) {
+	dir := t.TempDir()
+	p := filepath.Join(dir, "runlore.yaml")
+	doc := `
+sources:
+  alertmanager: {}
+triggers:
+  incidents:
+    debounce: 0s
+`
+	if err := os.WriteFile(p, []byte(doc), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	c, err := Load(p)
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if c.Triggers.Incidents.Debounce.Std() != 0 {
+		t.Fatalf("explicit debounce 0 must disable the hold: got %v, want 0", c.Triggers.Incidents.Debounce.Std())
+	}
+}
+
+// TestLoadIncidentDebounceExplicit checks an explicit window survives defaulting.
+func TestLoadIncidentDebounceExplicit(t *testing.T) {
+	dir := t.TempDir()
+	p := filepath.Join(dir, "runlore.yaml")
+	doc := `
+sources:
+  alertmanager: {}
+triggers:
+  incidents:
+    debounce: 5m
+`
+	if err := os.WriteFile(p, []byte(doc), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	c, err := Load(p)
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if c.Triggers.Incidents.Debounce.Std() != 5*time.Minute {
+		t.Fatalf("explicit debounce: got %v, want 5m", c.Triggers.Incidents.Debounce.Std())
 	}
 }

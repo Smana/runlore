@@ -18,25 +18,26 @@ const scope = "github.com/Smana/runlore"
 
 // Metrics is the RunLore instrument set, created once and shared.
 type Metrics struct {
-	AlertsReceived            metric.Int64Counter
-	AlertsCoalesced           metric.Int64Counter
-	AlertsSuppressed          metric.Int64Counter
-	InvestigationsStarted     metric.Int64Counter
-	InvestigationsThrottled   metric.Int64Counter
-	InvestigationsDropped     metric.Int64Counter
-	InvestigationsCancelled   metric.Int64Counter // queued (not yet started) investigations cancelled because the incident resolved first (cancel_queued_on_resolve)
-	GitOpsFailuresDebounced   metric.Int64Counter // GitOps failures dropped as transient (cleared within the debounce window)
-	IncidentsDebounced        metric.Int64Counter // firing alerts dropped as self-resolving (resolved within the incident debounce window)
-	ToolOutputTruncatedBytes  metric.Int64Counter
-	HistoryCompactions        metric.Int64Counter // mid-loop history compaction events
-	HistoryElidedBytes        metric.Int64Counter // tool-output bytes elided by compaction
-	HistorySummarizations     metric.Int64Counter // compaction events whose elided batch was replaced by a model digest
-	HistorySummarizeFallbacks metric.Int64Counter // summarize-mode compactions that fell back to plain elision (summarizer error/refusal/truncation)
-	RecallHits                metric.Int64Counter // KB cache hits, labelled by verify result
-	RecallTokensSaved         metric.Int64Counter // estimated tokens saved by a recall short-circuit
-	RecallRejections          metric.Int64Counter // recalls rejected before short-circuit (label: reason)
-	CoalesceBatchSize         metric.Int64Histogram
-	InvestigationTokens       metric.Int64Histogram
+	AlertsReceived             metric.Int64Counter
+	AlertsCoalesced            metric.Int64Counter
+	AlertsSuppressed           metric.Int64Counter
+	InvestigationsStarted      metric.Int64Counter
+	InvestigationsThrottled    metric.Int64Counter
+	InvestigationsDropped      metric.Int64Counter
+	InvestigationsCancelled    metric.Int64Counter // queued (not yet started) investigations cancelled because the incident resolved first (cancel_queued_on_resolve)
+	GitOpsFailuresDebounced    metric.Int64Counter // GitOps failures dropped as transient (cleared within the debounce window)
+	IncidentsDebounced         metric.Int64Counter // firing alerts dropped as self-resolving (resolved within the incident debounce window)
+	IncidentsDroppedOnShutdown metric.Int64Counter // firing alerts LOST: still held in the debounce window when the process shut down (accepted, never investigated)
+	ToolOutputTruncatedBytes   metric.Int64Counter
+	HistoryCompactions         metric.Int64Counter // mid-loop history compaction events
+	HistoryElidedBytes         metric.Int64Counter // tool-output bytes elided by compaction
+	HistorySummarizations      metric.Int64Counter // compaction events whose elided batch was replaced by a model digest
+	HistorySummarizeFallbacks  metric.Int64Counter // summarize-mode compactions that fell back to plain elision (summarizer error/refusal/truncation)
+	RecallHits                 metric.Int64Counter // KB cache hits, labelled by verify result
+	RecallTokensSaved          metric.Int64Counter // estimated tokens saved by a recall short-circuit
+	RecallRejections           metric.Int64Counter // recalls rejected before short-circuit (label: reason)
+	CoalesceBatchSize          metric.Int64Histogram
+	InvestigationTokens        metric.Int64Histogram
 	// Per-investigation model usage totals (loop + verify), recorded once at
 	// delivery — the actual provider-reported spend, distinct from the pre-request
 	// InvestigationTokens estimate.
@@ -81,25 +82,26 @@ func NewMetrics() *Metrics {
 		return h
 	}
 	return &Metrics{
-		AlertsReceived:            ctr("alerts_received_total", "incidents passing Decide into the coalescer"),
-		AlertsCoalesced:           ctr("alerts_coalesced_total", "incidents folded into an existing batch"),
-		AlertsSuppressed:          ctr("alerts_suppressed_total", "incidents dropped by cooldown"),
-		InvestigationsStarted:     ctr("investigations_started_total", "investigations actually begun"),
-		InvestigationsThrottled:   ctr("investigations_throttled_total", "starts requeued by the rate limiter"),
-		InvestigationsDropped:     ctr("investigations_dropped_total", "investigations dropped — rate-limiter max_requeues or token-budget hard-kill"),
-		InvestigationsCancelled:   ctr("investigations_cancelled_total", "queued (not yet started) investigations cancelled: the incident resolved before its investigation began (triggers.incidents.cancel_queued_on_resolve)"),
-		GitOpsFailuresDebounced:   ctr("gitops_failures_debounced_total", "GitOps failures dropped as transient: cleared within the debounce window before investigating"),
-		IncidentsDebounced:        ctr("incidents_debounced_total", "firing alerts dropped as self-resolving: a matching resolved webhook arrived within the incident debounce window before investigating"),
-		ToolOutputTruncatedBytes:  ctr("tool_output_truncated_bytes_total", "bytes elided by output truncation"),
-		HistoryCompactions:        ctr("history_compactions_total", "mid-loop tool-output history compaction events"),
-		HistoryElidedBytes:        ctr("history_elided_bytes_total", "tool-output bytes elided by mid-loop compaction"),
-		HistorySummarizations:     ctr("history_summarizations_total", "compaction events whose elided batch was replaced by a model-produced digest"),
-		HistorySummarizeFallbacks: ctr("history_summarize_fallbacks_total", "summarize-mode compactions that fell back to plain elision (summarizer error/refusal/truncation)"),
-		RecallHits:                ctr("recall_hits_total", "KB instant-recall short-circuits (label: result)"),
-		RecallTokensSaved:         ctr("recall_tokens_saved_total", "estimated tokens saved by recall short-circuits"),
-		RecallRejections:          ctr("recall_rejections_total", "recalls rejected before short-circuit (label: reason)"),
-		CoalesceBatchSize:         hist("coalesce_batch_size", "incidents per flushed batch"),
-		InvestigationTokens:       hist("investigation_tokens_estimated", "per-investigation token estimate (investigation loop only; excludes the adversarial verify phase)"),
+		AlertsReceived:             ctr("alerts_received_total", "incidents passing Decide into the coalescer"),
+		AlertsCoalesced:            ctr("alerts_coalesced_total", "incidents folded into an existing batch"),
+		AlertsSuppressed:           ctr("alerts_suppressed_total", "incidents dropped by cooldown"),
+		InvestigationsStarted:      ctr("investigations_started_total", "investigations actually begun"),
+		InvestigationsThrottled:    ctr("investigations_throttled_total", "starts requeued by the rate limiter"),
+		InvestigationsDropped:      ctr("investigations_dropped_total", "investigations dropped — rate-limiter max_requeues or token-budget hard-kill"),
+		InvestigationsCancelled:    ctr("investigations_cancelled_total", "queued (not yet started) investigations cancelled: the incident resolved before its investigation began (triggers.incidents.cancel_queued_on_resolve)"),
+		GitOpsFailuresDebounced:    ctr("gitops_failures_debounced_total", "GitOps failures dropped as transient: cleared within the debounce window before investigating"),
+		IncidentsDebounced:         ctr("incidents_debounced_total", "firing alerts dropped as self-resolving: a matching resolved webhook arrived within the incident debounce window before investigating"),
+		IncidentsDroppedOnShutdown: ctr("incidents_dropped_on_shutdown_total", "firing alerts LOST: still held in the incident debounce window when the process shut down — accepted (200 to Alertmanager) but never investigated, and not retried until Alertmanager's repeat_interval"),
+		ToolOutputTruncatedBytes:   ctr("tool_output_truncated_bytes_total", "bytes elided by output truncation"),
+		HistoryCompactions:         ctr("history_compactions_total", "mid-loop tool-output history compaction events"),
+		HistoryElidedBytes:         ctr("history_elided_bytes_total", "tool-output bytes elided by mid-loop compaction"),
+		HistorySummarizations:      ctr("history_summarizations_total", "compaction events whose elided batch was replaced by a model-produced digest"),
+		HistorySummarizeFallbacks:  ctr("history_summarize_fallbacks_total", "summarize-mode compactions that fell back to plain elision (summarizer error/refusal/truncation)"),
+		RecallHits:                 ctr("recall_hits_total", "KB instant-recall short-circuits (label: result)"),
+		RecallTokensSaved:          ctr("recall_tokens_saved_total", "estimated tokens saved by recall short-circuits"),
+		RecallRejections:           ctr("recall_rejections_total", "recalls rejected before short-circuit (label: reason)"),
+		CoalesceBatchSize:          hist("coalesce_batch_size", "incidents per flushed batch"),
+		InvestigationTokens:        hist("investigation_tokens_estimated", "per-investigation token estimate (investigation loop only; excludes the adversarial verify phase)"),
 
 		InvestigationModelCalls:        hist("investigation_model_calls", "model completions per investigation (loop + verify)"),
 		InvestigationInputTokens:       hist("investigation_input_tokens", "provider-reported input tokens per investigation, including cached (loop + verify)"),

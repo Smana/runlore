@@ -177,10 +177,13 @@ func (c *Coalescer) Add(r investigate.Request) {
 			m.AlertsSuppressed.Add(context.Background(), 1)
 		}
 		return
-	case strings.EqualFold(r.Severity, "critical"):
+	case r.IsCritical():
 		// Critical (first for this key, or a new alertname during cooldown): flush
 		// immediately with no debounce wait, draining any pending batch. Same-key
 		// same-alertname criticals fall into the cooldown case above and are suppressed.
+		// The predicate is investigate.Request.IsCritical, shared with the incident
+		// debouncer's identical carve-out (source.incidentDebouncer.Hold) so the two
+		// waits enforce "never delay the first look at a critical page" identically.
 		flush = []investigate.Request{r}
 		if b, ok := c.pending[k]; ok {
 			flush = make([]investigate.Request, 0, len(b.incidents)+1)
@@ -239,7 +242,7 @@ func (c *Coalescer) withinCooldown(k string, now time.Time) bool {
 // alertname has not yet been covered by the current cooldown for key k — i.e. a
 // genuinely new problem that should bypass suppression. Caller holds mu.
 func (c *Coalescer) newCriticalDuringCooldown(k string, r investigate.Request) bool {
-	if !strings.EqualFold(r.Severity, "critical") {
+	if !r.IsCritical() {
 		return false
 	}
 	cd, ok := c.recent[k]

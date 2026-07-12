@@ -172,9 +172,15 @@ triggers:
     ignore:
       alertnames:  [Watchdog, InfoInhibitor]
     dedup: { window: 30m }              # don't re-open a still-firing alert
-    debounce: 5m                        # hold a firing alert, skip it if a matching
-                                        # resolved webhook lands within the window
-                                        # (default 0 = investigate immediately)
+    debounce: 60s                       # hold a NON-CRITICAL firing alert, skip it if a
+                                        # matching resolved webhook lands within the window
+                                        # (default 60s; 0s = investigate on every fire).
+                                        # A `critical` alert is NEVER held — a debounce
+                                        # must never delay the first look at a page.
+    cancel_queued_on_resolve: true      # default. Drop a QUEUED (not yet started)
+                                        # investigation when the alert resolves first —
+                                        # this, not the hold, is what filters a
+                                        # self-resolving CRITICAL, at zero added latency
   gitops_failures:                      # secondary trigger (enabled via sources.gitops)
     debounce: 60s                       # require the failure to persist this long
                                         # (re-check still Ready=False) before
