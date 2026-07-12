@@ -173,10 +173,17 @@ func TestSyncerCloneAndPull(t *testing.T) {
 // the first sync, then NOT again while upstream HEAD is unchanged, and again once a
 // new commit moves HEAD. The `if changed { onSync() }` gate is what prevents the
 // every-poll full index rebuild.
+//
+// It drives the poll ticks itself rather than sleeping. The previous version slept a
+// fixed 120ms and then asserted the initial sync had already fired — silently assuming
+// a real `git clone` completes within that window. On a loaded CI runner it does not,
+// and the test failed on changes that could not possibly affect it. Nothing here
+// depends on wall-clock time now.
 func TestRunReloadsOnlyOnChange(t *testing.T) {
 	src := initBareUpstream(t)
 	dir := t.TempDir()
-	s := &Syncer{URL: src, Branch: "main", Dir: dir, Log: testLogger()}
+	tick := make(chan time.Time) // unbuffered — see waitCycle
+	s := &Syncer{URL: src, Branch: "main", Dir: dir, Log: testLogger(), tick: tick}
 
 	var calls atomic.Int32
 	ctx, cancel := context.WithCancel(context.Background())
@@ -184,19 +191,37 @@ func TestRunReloadsOnlyOnChange(t *testing.T) {
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		s.Run(ctx, 15*time.Millisecond, func() error { calls.Add(1); return nil })
+		s.Run(ctx, time.Hour, func() error { calls.Add(1); return nil }) // interval unused: tick drives the loop
 	}()
 
-	// Several poll intervals with no upstream change → onSync fires exactly once
-	// (the initial sync), regardless of how many ticks elapse.
-	time.Sleep(120 * time.Millisecond)
-	if n := calls.Load(); n != 1 {
-		t.Fatalf("with no HEAD change onSync must fire exactly once, fired %d", n)
+	// Run only receives from the (unbuffered) tick channel between poll cycles, so a
+	// send that completes proves the PREVIOUS cycle has finished. That is the
+	// synchronisation point which replaces every sleep.
+	waitCycle := func() {
+		t.Helper()
+		select {
+		case tick <- time.Time{}:
+		case <-time.After(30 * time.Second): // a hang, not a timing assumption
+			t.Fatal("Run never came back for a tick — the poll loop is stuck")
+		}
 	}
 
-	// Move HEAD: the next poll detects the change and reloads once more.
+	// The first send is accepted only once the INITIAL sync has completed.
+	waitCycle()
+	if n := calls.Load(); n != 1 {
+		t.Fatalf("initial sync must fire onSync exactly once, fired %d", n)
+	}
+
+	// That tick ran a poll against an unchanged upstream; the next send proves it ended.
+	waitCycle()
+	if n := calls.Load(); n != 1 {
+		t.Fatalf("with no HEAD change onSync must not fire again, fired %d", n)
+	}
+
+	// Move HEAD: one poll observes it, a further send proves that poll completed.
 	commitToUpstream(t, src, "new.md", "# new")
-	time.Sleep(150 * time.Millisecond)
+	waitCycle()
+	waitCycle()
 	if n := calls.Load(); n != 2 {
 		t.Fatalf("a new upstream commit must trigger exactly one more onSync, total %d (want 2)", n)
 	}
