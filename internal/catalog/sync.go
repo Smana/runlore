@@ -31,6 +31,12 @@ type Syncer struct {
 	Log    *slog.Logger
 
 	lastRev plumbing.Hash // last-synced HEAD; gates re-index on real change
+
+	// tick, when non-nil, supplies Run's poll ticks instead of a real time.Ticker —
+	// the seam that lets a test drive the loop cycle by cycle rather than sleeping and
+	// hoping a git clone finished in time (mirrors the incidentDebouncer's clock).
+	// Always nil in production.
+	tick <-chan time.Time
 }
 
 func (s *Syncer) auth(ctx context.Context) (*githttp.BasicAuth, error) {
@@ -142,13 +148,18 @@ func (s *Syncer) Run(ctx context.Context, interval time.Duration, onSync func() 
 		}
 	}
 	do()
-	ticker := time.NewTicker(interval)
-	defer ticker.Stop()
+	// interval is ignored when tick is set (tests only); the sender paces the loop.
+	ticks := s.tick
+	if ticks == nil {
+		ticker := time.NewTicker(interval)
+		defer ticker.Stop()
+		ticks = ticker.C
+	}
 	for {
 		select {
 		case <-ctx.Done():
 			return
-		case <-ticker.C:
+		case <-ticks:
 			do()
 		}
 	}
