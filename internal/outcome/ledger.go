@@ -236,6 +236,36 @@ type feedbackVote struct {
 // pair with a real open, and dropping it leaves the brief-window pairing intact.
 const maxPendingResolvesPerFingerprint = 64
 
+// maxEarlyResolveAge bounds how far a buffered resolve may predate the open it pairs
+// with. A resolve is buffered whenever no open is pending for its fingerprint — which
+// includes resolves for alerts that were never investigated at all (suppressed by dedup
+// or by the trigger policy). Unbounded, such a resolve pairs with the NEXT open for the
+// same fingerprint and credits Resolved++ at open time, before the new incident has
+// produced anything: a flapping alert would bank a resolve credit on every suppressed
+// cycle for the next recall to cash in, inflating an entry's resolve rate on evidence
+// that has nothing to do with it. That is a manufactured post hoc, not merely an
+// unverified one.
+//
+// Only a resolve that lands while the investigation is still running can legitimately
+// precede its open (the open is stamped at completion). An investigation is bounded by
+// investigation.timeout, 10m by default, so an hour is a generous six-fold margin;
+// beyond it, the resolve belongs to a bygone episode and must not pair.
+const maxEarlyResolveAge = time.Hour
+
+// freshResolves drops buffered resolves too old to belong to an open stamped at openAt.
+// Returned in arrival order; reuses the backing array, so the caller must replace the
+// slice it passed in.
+func freshResolves(rs []time.Time, openAt time.Time) []time.Time {
+	cutoff := openAt.Add(-maxEarlyResolveAge)
+	out := rs[:0]
+	for _, at := range rs {
+		if !at.Before(cutoff) {
+			out = append(out, at)
+		}
+	}
+	return out
+}
+
 // New opens (replaying) the ledger at path with the default compaction bound
 // (DefaultMaxEvents). An empty path returns a disabled, no-op ledger (the feature is off).
 func New(path string) (*Ledger, error) {
@@ -511,14 +541,20 @@ func (l *Ledger) applyOpenLocked(e Event) {
 		l.agg[e.Entry] = a
 	}
 	// Order-independent pairing: a resolve that arrived before this open is buffered;
-	// pair with the earliest such resolve (FIFO), matching Episodes().
+	// pair with the earliest such resolve (FIFO), matching Episodes(). Resolves too old
+	// to belong to this open are discarded first — see maxEarlyResolveAge.
 	if rs := l.pendingResolves[e.Fingerprint]; len(rs) > 0 {
-		at := rs[0]
-		l.pendingResolves[e.Fingerprint] = rs[1:]
-		if counted {
-			l.creditResolveLocked(e.Entry, at)
+		rs = freshResolves(rs, e.At)
+		if len(rs) > 0 {
+			at := rs[0]
+			l.pendingResolves[e.Fingerprint] = rs[1:]
+			if counted {
+				l.creditResolveLocked(e.Entry, at)
+			}
+			return
 		}
-		return
+		// Every buffered resolve was stale: this open is genuinely unresolved so far.
+		delete(l.pendingResolves, e.Fingerprint)
 	}
 	l.pendingOpens[e.Fingerprint] = append(l.pendingOpens[e.Fingerprint], pendingOpen{entry: e.Entry, counted: counted})
 }
@@ -818,10 +854,17 @@ func (l *Ledger) Episodes() ([]Episode, error) {
 				OpenedAt:       e.At,
 			})
 			i := len(out) - 1
+			// Same pairing rule as applyOpenLocked, kept in lockstep: discard buffered
+			// resolves too old to belong to this open (see maxEarlyResolveAge), then pair
+			// with the earliest survivor.
 			if rs := pendingResolves[e.Fingerprint]; len(rs) > 0 {
-				resolveAt(i, rs[0]) // pair with the earliest buffered (early) resolve
-				pendingResolves[e.Fingerprint] = rs[1:]
-				continue
+				rs = freshResolves(rs, e.At)
+				if len(rs) > 0 {
+					resolveAt(i, rs[0]) // pair with the earliest buffered (early) resolve
+					pendingResolves[e.Fingerprint] = rs[1:]
+					continue
+				}
+				delete(pendingResolves, e.Fingerprint)
 			}
 			pendingOpens[e.Fingerprint] = append(pendingOpens[e.Fingerprint], i)
 		case "resolve":

@@ -1371,3 +1371,43 @@ func TestContestedTriggersNilAndDisabled(t *testing.T) {
 		t.Fatalf("disabled ledger must yield nil, got %+v", got)
 	}
 }
+
+// TestStaleBufferedResolveDoesNotCreditLaterOpen guards the resolve-before-open
+// buffer against a manufactured post hoc. A resolve is buffered whenever no open is
+// pending for its fingerprint — which includes resolves for alerts that were never
+// investigated at all (suppressed by dedup, or by the trigger policy). Left unbounded,
+// that stale resolve pairs with the NEXT open for the same fingerprint and credits
+// Resolved++ at open time, before the new incident has produced anything. A flapping
+// alert with a stable fingerprint would bank a resolve credit on every suppressed
+// cycle, and the next real recall would cash them in — inflating an entry's resolve
+// rate on evidence that has nothing to do with it.
+//
+// Only a resolve that landed while the investigation was running can legitimately
+// precede its open (see TestEpisodesResolveBeforeOpenPairs, 1s apart). Anything older
+// belongs to a bygone episode and must not pair.
+func TestStaleBufferedResolveDoesNotCreditLaterOpen(t *testing.T) {
+	l, _ := New(filepath.Join(t.TempDir(), "o.jsonl"))
+	stale := time.Unix(9000, 0)
+	// A resolve for an alert that was never investigated: nothing is pending, so it buffers.
+	_, _, _ = l.Resolve("fp", stale)
+	// A day later the same alert fires for real and a recall investigation opens.
+	_ = l.Open(Event{Fingerprint: "fp", Kind: "recall", Entry: "x.md", At: stale.Add(24 * time.Hour)})
+
+	counts, err := l.OpenCounts()
+	if err != nil {
+		t.Fatalf("OpenCounts: %v", err)
+	}
+	if got := counts["x.md"]; got.Recalls != 1 || got.Resolved != 0 {
+		t.Fatalf("stale resolve must not credit the open: want recalls=1 resolved=0, got recalls=%d resolved=%d",
+			got.Recalls, got.Resolved)
+	}
+
+	// The replay path must agree with the cache — the two are kept in lockstep by design.
+	eps, err := l.Episodes()
+	if err != nil {
+		t.Fatalf("Episodes: %v", err)
+	}
+	if len(eps) != 1 || eps[0].Resolved {
+		t.Fatalf("stale resolve must not resolve the episode on replay: got %+v", eps)
+	}
+}
