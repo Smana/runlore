@@ -218,7 +218,18 @@ func TestRunReloadsOnlyOnChange(t *testing.T) {
 		t.Fatalf("with no HEAD change onSync must not fire again, fired %d", n)
 	}
 
-	// Move HEAD: one poll observes it, a further send proves that poll completed.
+	// Move HEAD. BOTH sends below are load-bearing, and neither is redundant.
+	//
+	// Accepting a send starts the next poll immediately, so the poll begun by the send
+	// above is in flight RIGHT NOW and races this commit: it may fetch the new HEAD, or
+	// it may fetch just before the ref moves and see nothing. Either is fine — every
+	// error/no-change path in Sync returns before `s.lastRev = rev`, so a poll that
+	// misses the commit changes no state.
+	//
+	// The first send therefore only DRAINS that racing poll (proving it ended); it does
+	// not prove a post-commit poll ran. The second send proves the poll that started
+	// after the commit was already visible has completed. onSync fires on exactly one of
+	// the two — whichever first sees rev != lastRev — so the count is 2 either way.
 	commitToUpstream(t, src, "new.md", "# new")
 	waitCycle()
 	waitCycle()

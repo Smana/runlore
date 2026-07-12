@@ -148,6 +148,7 @@ func (s *Syncer) Run(ctx context.Context, interval time.Duration, onSync func() 
 		}
 	}
 	do()
+	// interval is ignored when tick is set (tests only); the sender paces the loop.
 	ticks := s.tick
 	if ticks == nil {
 		ticker := time.NewTicker(interval)
