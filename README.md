@@ -107,6 +107,21 @@ incidents gains trust; knowledge that keeps failing decays.
 
 → **[How the learning loop works](docs/learning-loop.md)** · **[Reviewing & approving knowledge](docs/reviewing-knowledge.md)**
 
+> [!warning] Watch out for "PR fatigue"
+> The fair objection to a human-reviewed memory: if a team had no time to document incidents
+> yesterday, it won't have the energy to review AI-drafted PRs the day after a crisis — so the PRs
+> either pile up, or get rubber-stamped, and the memory rots.
+>
+> **The volume is bounded by design.** A known incident produces **no PR at all** (it is served from
+> the catalog — recalled findings are never curated); a duplicate is dropped; an incident that already
+> has an open PR gets a **comment on it** rather than a new one. Only a **novel, verified** finding
+> above `forge.min_confidence` (0.75), carrying evidence *and* a change-ref or a suggested action,
+> ever becomes a PR.
+>
+> **Don't review those PRs by hand.** The efficient move is to keep an agent in the loop during the
+> diagnosis itself: have it cross-check RunLore's draft against what you found while resolving the
+> incident, and enrich it with your context. You keep the *decision* — not the line-by-line reading.
+
 ## 🔌 Supported integrations
 
 Every backend is pluggable behind an interface — **wire what you run; an unset source just disables
