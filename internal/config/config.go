@@ -615,12 +615,20 @@ type IncidentTrigger struct {
 	// is still active — i.e. no matching Alertmanager `resolved` webhook arrived
 	// within the window. It filters self-resolving alerts (e.g. a
 	// KubeDaemonSetRolloutStuck during a Karpenter node-churn cycle) that would
-	// otherwise burn a full investigation on noise. A zero window (the default)
-	// disables the hold and investigates immediately, preserving today's behavior;
-	// it is opt-in per deployment. It composes with `coalesce` (which batches the
-	// survivors afterwards) and `dedup` (which still suppresses re-fires before the
-	// hold begins).
-	Debounce Duration `yaml:"debounce"`
+	// otherwise burn a full investigation on noise. It composes with `coalesce`
+	// (which batches the survivors afterwards) and `dedup` (which still suppresses
+	// re-fires before the hold begins).
+	//
+	// A pointer, so an unset key (nil ⇒ 60s default, applied in applyDefaults) is
+	// distinguishable from an explicit `debounce: 0` (investigate immediately, on
+	// every fire) — mirroring gitops_failures.debounce.
+	//
+	// It defaults ON because the hold is not merely a cost saver: an alert that
+	// self-heals is still investigated without it, and its `resolved` webhook then
+	// credits the recalled entry's resolve rate in the outcome ledger — trust earned
+	// on a resolution the diagnosis had nothing to do with. Holding self-resolving
+	// alerts back keeps that evidence out of the ledger in the first place.
+	Debounce *Duration `yaml:"debounce"`
 	// CancelQueuedOnResolve drops a QUEUED — accepted but not yet started —
 	// investigation when the matching Alertmanager `resolved` webhook arrives
 	// first. It extends Debounce past the hold window: without it, a fire→resolve
@@ -632,6 +640,16 @@ type IncidentTrigger struct {
 	// multi-alert batch is not cancelled on one member's resolve (see
 	// investigate.Queue.CancelByFingerprint).
 	CancelQueuedOnResolve bool `yaml:"cancel_queued_on_resolve"`
+}
+
+// DebounceWindow is the incident debounce hold. nil (unset) reads as 0 here, but
+// applyDefaults fills an unset trigger with 60s; an explicit 0 means investigate
+// immediately on every fire.
+func (t IncidentTrigger) DebounceWindow() time.Duration {
+	if t.Debounce == nil {
+		return 0
+	}
+	return t.Debounce.Std()
 }
 
 // IncidentMatch is a set of matchers ANDed together; empty fields match anything.

@@ -193,3 +193,78 @@ triggers:
 		t.Fatal("cancel_queued_on_resolve must default to false")
 	}
 }
+
+// TestLoadIncidentDebounceDefault pins the incident debounce default. It was 0
+// (disabled) while the GitOps-failure debounce defaulted to 60s — an asymmetry with no
+// justification: both filters exist to keep a transient, self-resolving failure from
+// burning a full paid investigation. The incident side matters more, because a resolve
+// for a self-healed alert also lands in the outcome ledger and credits the recalled
+// entry's resolve rate on evidence unrelated to the diagnosis. A default install was
+// exactly that configuration.
+func TestLoadIncidentDebounceDefault(t *testing.T) {
+	dir := t.TempDir()
+	p := filepath.Join(dir, "runlore.yaml")
+	doc := `
+sources:
+  alertmanager: {}
+`
+	if err := os.WriteFile(p, []byte(doc), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	c, err := Load(p)
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if c.Triggers.Incidents.Debounce.Std() != 60*time.Second {
+		t.Fatalf("incidents debounce default: got %v, want 60s", c.Triggers.Incidents.Debounce.Std())
+	}
+}
+
+// TestLoadIncidentDebounceExplicitZeroDisables keeps the escape hatch honest: a
+// deployment that wants the pre-debounce behaviour back (investigate on every fire,
+// including self-resolving ones) must be able to say so. That requires distinguishing
+// "unset" from "explicitly 0", hence the pointer — mirroring gitops_failures.debounce.
+func TestLoadIncidentDebounceExplicitZeroDisables(t *testing.T) {
+	dir := t.TempDir()
+	p := filepath.Join(dir, "runlore.yaml")
+	doc := `
+sources:
+  alertmanager: {}
+triggers:
+  incidents:
+    debounce: 0s
+`
+	if err := os.WriteFile(p, []byte(doc), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	c, err := Load(p)
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if c.Triggers.Incidents.Debounce.Std() != 0 {
+		t.Fatalf("explicit debounce 0 must disable the hold: got %v, want 0", c.Triggers.Incidents.Debounce.Std())
+	}
+}
+
+// TestLoadIncidentDebounceExplicit checks an explicit window survives defaulting.
+func TestLoadIncidentDebounceExplicit(t *testing.T) {
+	dir := t.TempDir()
+	p := filepath.Join(dir, "runlore.yaml")
+	doc := `
+sources:
+  alertmanager: {}
+triggers:
+  incidents:
+    debounce: 5m
+`
+	if err := os.WriteFile(p, []byte(doc), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	c, err := Load(p)
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if c.Triggers.Incidents.Debounce.Std() != 5*time.Minute {
+		t.Fatalf("explicit debounce: got %v, want 5m", c.Triggers.Incidents.Debounce.Std())
+	}
+}

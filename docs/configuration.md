@@ -67,9 +67,12 @@ incident webhook. Known keys: `alertmanager`, `gitops`, `pagerduty`.
   LLM spend on noisy still-firing alerts (see `deploy/helm/runlore/values.yaml`).
 - `incidents.debounce` — hold a firing alert this long before investigating, and skip it if a matching
   Alertmanager `resolved` webhook arrives within the window (self-resolving noise, e.g. a
-  `KubeDaemonSetRolloutStuck` during a Karpenter node-churn cycle). **Default `0`** (investigate
-  immediately — today's behavior); opt-in per deployment. Composes with `coalesce` (survivors are
-  batched afterwards) and `dedup` (re-fires are still suppressed before the hold begins).
+  `KubeDaemonSetRolloutStuck` during a Karpenter node-churn cycle). **Default `60s`** (same as
+  `gitops_failures.debounce`); set `0s` to investigate immediately on every fire. Beyond saving a paid
+  investigation, the hold keeps a self-healed alert's `resolved` webhook **out of the outcome ledger**,
+  where it would otherwise credit a recalled entry's resolve rate for a resolution the diagnosis had
+  nothing to do with. Composes with `coalesce` (survivors are batched afterwards) and `dedup` (re-fires
+  are still suppressed before the hold begins).
 - `incidents.cancel_queued_on_resolve` — when the matching Alertmanager `resolved` webhook arrives
   while the investigation is still **queued** (accepted, not yet started), drop it. Extends `debounce`
   past the hold window: without it, a fire→resolve sequence whose firing already passed admission still

@@ -59,7 +59,8 @@ func TestPipelineDedupsStillFiring(t *testing.T) {
 
 func debounceCfg(window time.Duration) *config.Config {
 	c := matchAllCfg()
-	c.Triggers.Incidents.Debounce = config.Duration(window)
+	d := config.Duration(window)
+	c.Triggers.Incidents.Debounce = &d
 	return c
 }
 

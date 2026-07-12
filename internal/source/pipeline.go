@@ -55,7 +55,7 @@ func NewPipeline(cfg *config.Config, enq investigate.Enqueuer, resolve ResolveFu
 	return &Pipeline{
 		cfg: cfg, enq: enq, resolve: resolve, log: log,
 		dedup:    trigger.NewDeduper(cfg.Triggers.Incidents.Dedup.Window.Std()),
-		debounce: newIncidentDebouncer(cfg.Triggers.Incidents.Debounce.Std(), log),
+		debounce: newIncidentDebouncer(cfg.Triggers.Incidents.DebounceWindow(), log),
 		baseCtx:  context.Background(),
 	}
 }

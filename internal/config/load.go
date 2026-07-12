@@ -63,6 +63,16 @@ func applyDefaults(c *Config) {
 		d := Duration(60 * time.Second)
 		c.Triggers.GitOpsFailures.Debounce = &d
 	}
+	// Incident debounce default: same 60s hold, for the same reason — let a transient,
+	// self-resolving alert clear before burning a paid investigation on it. It also
+	// keeps that alert's `resolved` webhook out of the outcome ledger, where it would
+	// otherwise credit the recalled entry's resolve rate for a resolution the diagnosis
+	// had nothing to do with. An explicit `debounce: 0` (non-nil) is left untouched and
+	// investigates on every fire.
+	if c.Triggers.Incidents.Debounce == nil {
+		d := Duration(60 * time.Second)
+		c.Triggers.Incidents.Debounce = &d
+	}
 	// Rate-limit window default: 1h when a per-window budget is set but no window
 	// is given (a zero window would silently allow unlimited investigations).
 	if c.Investigation.RateLimit.MaxPerWindow > 0 && c.Investigation.RateLimit.Window == 0 {
