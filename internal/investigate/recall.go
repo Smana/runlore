@@ -297,12 +297,53 @@ func (r *Recall) nearMissExcluding(ctx context.Context, req Request, exclude str
 		if exclude != "" && h.Entry.Path == exclude {
 			continue
 		}
-		if resourceAgrees(req.Workload, h.Entry.Resource, r.RequireWorkloadMatch) != matchNone {
+		if nearMissAgrees(req.Workload, h.Entry.Resource, r.RequireWorkloadMatch) != matchNone {
 			e := h.Entry
 			return &e
 		}
 	}
 	return nil
+}
+
+// nearMissAgrees is the structural gate for a NEAR-MISS, and it is deliberately looser
+// than resourceAgrees.
+//
+// resourceAgrees guards INSTANT RECALL, which short-circuits the loop and presents a
+// catalog entry as the answer. Refusing two distinct named workloads there is correct
+// and must stay: auto-applying a pod's runbook to a HelmRelease alert would be wrong.
+//
+// A near-miss is not an answer. It is an UNVERIFIED lead, framed as such in the seed
+// ("verify against live state, do not assume it applies"), redacted like alert text,
+// and already disabled under actions.mode=auto. Judging it by the bar that protects an
+// auto-executed action throws away the catalog's value at exactly the moment it is
+// needed.
+//
+// The tier this adds is same-namespace/different-workload. Two named workloads in one
+// namespace are very often the SAME incident seen from different objects, one step
+// apart in the ownership chain: an alert on the HelmRelease `tooling/harbor` and a past
+// incident filed on the pod `tooling/harbor-registry` are the same failure. Under
+// resourceAgrees that pair is matchNone — so the entry is invisible to recall AND to
+// the near-miss, and a full paid investigation runs beside a catalog that holds the
+// answer. Observed live.
+//
+// requireWorkload is an explicit operator demand for exact agreement; it is honoured
+// here too, so an operator who has asked for strictness does not silently get this tier.
+func nearMissAgrees(reqW providers.Workload, entryResource string, requireWorkload bool) matchStrength {
+	if s := resourceAgrees(reqW, entryResource, requireWorkload); s != matchNone {
+		return s
+	}
+	if requireWorkload {
+		return matchNone
+	}
+	if reqW.Namespace == "" || entryResource == "" {
+		return matchNone
+	}
+	// Same namespace, different named workload — a lead, never an answer. The
+	// namespace boundary is the limit: a hint from an unrelated namespace is noise.
+	if strings.HasPrefix(entryResource, reqW.Namespace+"/") {
+		return matchNamespace
+	}
+	return matchNone
 }
 
 // reject records a rejection reason (nil-safe).
