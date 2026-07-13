@@ -87,16 +87,40 @@ func draftKBEntry(inv providers.Investigation) providers.KBEntry {
 		Title:       capTitle(inv.Title),
 		Description: firstLine(inv),
 		Resource:    normalizeResource(inv.Resource),
-		Tags:        entryTags(inv, typ),
-		Body:        b.String(),
-		Fingerprint: DupFingerprint(inv),
-		Confidence:  inv.Confidence,
-		Provenance:  refs,
+		// Only when the alert fired on a DIFFERENT resource than the one the
+		// investigation settled on. Equal values would be pure duplication; a
+		// difference is the whole point — it is the alert-side index that makes this
+		// entry reachable from the alert that produced it.
+		AlertResource: alertResourceIfDistinct(inv),
+		Tags:          entryTags(inv, typ),
+		Body:          b.String(),
+		Fingerprint:   DupFingerprint(inv),
+		Confidence:    inv.Confidence,
+		Provenance:    refs,
 		// Recurrence facts for the PR body's related-knowledge section — stamped
 		// on the Investigation BEFORE curation runs (see onInvestigationComplete).
 		Occurrences:    inv.Occurrences,
 		PrevCuratedURL: inv.PrevCuratedURL,
 	}
+}
+
+// alertResourceIfDistinct returns the normalized resource the ORIGINATING ALERT fired
+// on, or "" when it is the same as the affected resource (nothing to add) or unset.
+//
+// The investigation routinely refines the alert's workload to a deeper object:
+// preferDiscoveredResource lets a discovered resource win over the alert's. That is
+// right for the entry's human-facing "affected resource" — but recall matches an
+// INCOMING ALERT against the entry's resource, so an entry indexed only by the fault
+// locus is unreachable from the very alert that would surface it. Live: an alert on the
+// HelmRelease tooling/harbor, investigated down to the pod tooling/harbor-registry, was
+// filed under the pod — and every later firing of that same alert missed it
+// (no_resource_match) and paid for a full investigation instead.
+func alertResourceIfDistinct(inv providers.Investigation) string {
+	alert := normalizeResource(inv.AlertResource)
+	if alert == "" || alert == normalizeResource(inv.Resource) {
+		return ""
+	}
+	return alert
 }
 
 // normalizeResource renders the affected workload as its canonical namespace/name

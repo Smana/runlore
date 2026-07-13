@@ -412,13 +412,20 @@ func issueBody(inv providers.Investigation) string {
 // formatted) so a newline-bearing title/description from LLM output can't inject
 // extra frontmatter keys.
 type kbFrontmatter struct {
-	Type        string   `yaml:"type"`
-	Title       string   `yaml:"title"`
-	Description string   `yaml:"description"`
-	Resource    string   `yaml:"resource,omitempty"`
-	Tags        []string `yaml:"tags,omitempty"`
-	Timestamp   string   `yaml:"timestamp,omitempty"` // OKF-recommended; seed entries carry it, curated ones now do too
-	Fingerprint string   `yaml:"fingerprint,omitempty"`
+	Type        string `yaml:"type"`
+	Title       string `yaml:"title"`
+	Description string `yaml:"description"`
+	Resource    string `yaml:"resource,omitempty"`
+	// alert_resource: the resource the ORIGINATING ALERT fired on, written only when it
+	// differs from resource (the fault locus). Recall matches an incoming alert against
+	// the entry's resource; an entry whose fault sits deeper than its alert — an alert
+	// on the HelmRelease tooling/harbor investigated down to the pod
+	// tooling/harbor-registry — is otherwise unreachable from the very alert that
+	// would surface it.
+	AlertResource string   `yaml:"alert_resource,omitempty"`
+	Tags          []string `yaml:"tags,omitempty"`
+	Timestamp     string   `yaml:"timestamp,omitempty"` // OKF-recommended; seed entries carry it, curated ones now do too
+	Fingerprint   string   `yaml:"fingerprint,omitempty"`
 	// Confidence + Provenance are OKF extension keys: frontmatter is for the
 	// fields you query/filter/index on, and these are exactly that (per-entry
 	// confidence floors, "what change caused this" lookups).
@@ -501,7 +508,8 @@ func renderEntry(e providers.KBEntry) string {
 	ts := time.Now().UTC().Format(time.RFC3339)
 	fm, _ := yaml.Marshal(kbFrontmatter{
 		Type: e.Type, Title: e.Title, Description: e.Description, Resource: e.Resource,
-		Tags: e.Tags, Timestamp: ts, Fingerprint: e.Fingerprint,
+		AlertResource: e.AlertResource,
+		Tags:          e.Tags, Timestamp: ts, Fingerprint: e.Fingerprint,
 		Confidence: e.Confidence, Provenance: e.Provenance,
 	})
 	var b strings.Builder

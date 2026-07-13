@@ -1083,6 +1083,11 @@ func stampRequestFacts(inv *providers.Investigation, req Request) {
 	inv.Cluster = req.Labels["cluster"]
 	inv.Tenant = req.Labels["tenant"]
 	inv.AlertName = req.Labels["alertname"]
+	// The workload the ALERT fired on. Distinct from inv.Resource, which the loop
+	// overwrites with whatever deeper object the investigation discovered
+	// (preferDiscoveredResource). Recall reads by alert resource, so losing this is
+	// what makes a correctly-investigated entry unrecallable from its own alert.
+	inv.AlertResource = req.Workload
 	inv.StartedAt = req.At
 }
 
