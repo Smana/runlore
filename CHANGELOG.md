@@ -8,6 +8,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 RunLore is **pre-1.0 and under active development** — there are no tagged releases
 yet, so everything currently lives under `[Unreleased]`.
 
+## [0.9.1](https://github.com/Smana/runlore/compare/v0.9.0...v0.9.1) (2026-07-13)
+
+
+### Bug Fixes
+
+* **outcome:** bound early-resolve pairing by investigation start, not age ([#309](https://github.com/Smana/runlore/issues/309)) ([3176e5d](https://github.com/Smana/runlore/commit/3176e5da78a4dae2a917b6f667cc28cea44cc3f6))
+* **recall:** a verify-rejected recall must not suppress the near-miss lead ([#316](https://github.com/Smana/runlore/issues/316)) ([3582119](https://github.com/Smana/runlore/commit/3582119cc4985bda70a13ef2bd9561b786f643ff))
+* **recall:** index entries by the resource the ALERT fired on, not only the fault locus ([#318](https://github.com/Smana/runlore/issues/318)) ([34059e3](https://github.com/Smana/runlore/commit/34059e393d65dbb09b04a08c5fbab68eda7b0de5))
+* **recall:** the near-miss gate must be looser than the instant-recall gate ([#317](https://github.com/Smana/runlore/issues/317)) ([5712140](https://github.com/Smana/runlore/commit/5712140e3eb5122c1238f1e2d758d70c1f4f9ef4))
+* **triggers:** filter self-resolving alerts without ever delaying a critical page ([#310](https://github.com/Smana/runlore/issues/310)) ([ebecf13](https://github.com/Smana/runlore/commit/ebecf13ae81416b87324f14fb1655c52c270a7d1))
+
+
+### Documentation
+
+* fix 12 GitHub alerts that were rendering as plain blockquotes ([#314](https://github.com/Smana/runlore/issues/314)) ([4e8bb0f](https://github.com/Smana/runlore/commit/4e8bb0f627be4e751486023d6265f9f665e59f72))
+* **readme:** add a "PR fatigue" note to the learning-loop section ([#311](https://github.com/Smana/runlore/issues/311)) ([f2aba6c](https://github.com/Smana/runlore/commit/f2aba6c01b147c3a66fb721ebad55eefb497d6b9))
+
 ## [0.9.0](https://github.com/Smana/runlore/compare/v0.8.0...v0.9.0) (2026-07-11)
 
 
