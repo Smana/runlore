@@ -155,7 +155,7 @@ func (r *Recall) lookupWithUsage(ctx context.Context, req Request, totals *provi
 	// entries score higher on symptom tokens.
 	var agreeing []catalog.ScoredEntry
 	for _, h := range hits {
-		if resourceAgrees(req.Workload, h.Entry.Resource, r.RequireWorkloadMatch) != matchNone {
+		if entryAgrees(req.Workload, h.Entry, r.RequireWorkloadMatch) != matchNone {
 			agreeing = append(agreeing, h)
 		}
 	}
@@ -213,7 +213,7 @@ func (r *Recall) lookupWithUsage(ctx context.Context, req Request, totals *provi
 		// Gate — margin among the structurally-agreeing candidates: a clear winner for
 		// this workload, not merely the top lexical hit. A lone agreeing hit must clear
 		// both the solo floor and the min score.
-		strength := resourceAgrees(req.Workload, winner.Entry.Resource, r.RequireWorkloadMatch)
+		strength := entryAgrees(req.Workload, winner.Entry, r.RequireWorkloadMatch)
 		margin = score
 		confident := score >= soloFloor && score >= minScore
 		if len(agreeing) > 1 {
@@ -297,7 +297,7 @@ func (r *Recall) nearMissExcluding(ctx context.Context, req Request, exclude str
 		if exclude != "" && h.Entry.Path == exclude {
 			continue
 		}
-		if nearMissAgrees(req.Workload, h.Entry.Resource, r.RequireWorkloadMatch) != matchNone {
+		if nearMissEntryAgrees(req.Workload, h.Entry, r.RequireWorkloadMatch) != matchNone {
 			e := h.Entry
 			return &e
 		}
@@ -328,6 +328,20 @@ func (r *Recall) nearMissExcluding(ctx context.Context, req Request, exclude str
 //
 // requireWorkload is an explicit operator demand for exact agreement; it is honoured
 // here too, so an operator who has asked for strictness does not silently get this tier.
+// nearMissEntryAgrees is where the three recall fixes compose: a near-miss is judged by
+// the LOOSE gate (nearMissAgrees — it is a lead, not an answer) applied to BOTH resources
+// an entry carries (the fault locus, and the resource the originating alert fired on).
+// The stronger tier wins.
+func nearMissEntryAgrees(reqW providers.Workload, e catalog.Entry, requireWorkload bool) matchStrength {
+	best := nearMissAgrees(reqW, e.Resource, requireWorkload)
+	if e.AlertResource != "" {
+		if s := nearMissAgrees(reqW, e.AlertResource, requireWorkload); s > best {
+			best = s
+		}
+	}
+	return best
+}
+
 func nearMissAgrees(reqW providers.Workload, entryResource string, requireWorkload bool) matchStrength {
 	if s := resourceAgrees(reqW, entryResource, requireWorkload); s != matchNone {
 		return s
@@ -367,6 +381,28 @@ const (
 	matchNamespace
 	matchExact
 )
+
+// entryAgrees reports how strongly an alert's workload agrees with an ENTRY, matching
+// on EITHER resource the entry carries and keeping the stronger tier:
+//
+//   - Resource      — where the fault was FOUND (the investigation's conclusion)
+//   - AlertResource — where the ALERT that produced the entry FIRED (when different)
+//
+// Recall arrives with an alert's workload and nothing else. An entry indexed only by
+// its fault locus is therefore unreachable from the alert that would surface it, even
+// though that alert is exactly what produced it. Matching on either closes the loop
+// without weakening anything: AlertResource is an ADDITIONAL way to agree, never a
+// replacement, so hand-written entries and every entry curated before this field
+// existed (AlertResource == "") behave precisely as they did.
+func entryAgrees(reqW providers.Workload, e catalog.Entry, requireWorkload bool) matchStrength {
+	best := resourceAgrees(reqW, e.Resource, requireWorkload)
+	if e.AlertResource != "" {
+		if s := resourceAgrees(reqW, e.AlertResource, requireWorkload); s > best {
+			best = s
+		}
+	}
+	return best
+}
 
 // resourceAgrees reports how strongly the alert's workload agrees with an entry's
 // stored resource. requireWorkload demands an exact namespace+name match — which

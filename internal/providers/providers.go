@@ -637,6 +637,14 @@ type Investigation struct {
 	Confidence float64
 	Recalled   bool     // true when produced by instant recall (a KB cache hit); the curator skips re-curating it
 	Resource   Workload // the workload the investigation identified as affected; defaults to the originating alert workload when none was named (stored on curated entries for structural recall)
+	// AlertResource is the workload the ORIGINATING ALERT fired on, stamped verbatim
+	// from the Request and never touched by the model. It is NOT Resource: Resource is
+	// where the fault was FOUND, which the investigation routinely refines to a deeper
+	// object (an alert on the HelmRelease tooling/harbor resolving to the pod
+	// tooling/harbor-registry). Recall, however, matches by the resource an ALERT
+	// carries — so an entry indexed only by the fault locus is unreachable from the
+	// alert that would surface it. Persisting both is what closes that gap.
+	AlertResource Workload
 	// Trigger-time facts stamped verbatim from the Request for the notification's
 	// metadata block. The model never sees or sets them; empty for sources that lack them.
 	Severity    string    // alert severity label at trigger time
@@ -740,11 +748,15 @@ type KBEntry struct {
 	Title       string
 	Description string
 	Resource    string
-	Tags        []string
-	Body        string   // markdown
-	Fingerprint string   // deterministic dedup fingerprint (see curator.DupFingerprint)
-	Confidence  float64  // overall investigation confidence; queryable extension frontmatter (0 = unset)
-	Provenance  []string // distinct causing-change refs; queryable extension frontmatter
+	// AlertResource is the resource the originating ALERT fired on, when it differs
+	// from Resource (the fault locus). Recall matches by alert resource; without this
+	// an entry whose fault sits deeper than its alert is permanently unrecallable.
+	AlertResource string
+	Tags          []string
+	Body          string   // markdown
+	Fingerprint   string   // deterministic dedup fingerprint (see curator.DupFingerprint)
+	Confidence    float64  // overall investigation confidence; queryable extension frontmatter (0 = unset)
+	Provenance    []string // distinct causing-change refs; queryable extension frontmatter
 	// Reviewer context, rendered in the PR BODY only — never in the committed
 	// entry file (renderEntry ignores these), so the catalog and validator are
 	// untouched. Related is the draft-time BM25 neighborhood; the recurrence
