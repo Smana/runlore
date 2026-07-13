@@ -271,6 +271,14 @@ func (r *Recall) lookupWithUsage(ctx context.Context, req Request, totals *provi
 // text, and (like instant recall) is gated off under actions.mode=auto by the
 // caller. nil-safe; nil ⇒ no agreeing candidate (nothing to inject).
 func (r *Recall) nearMiss(ctx context.Context, req Request) *catalog.Entry {
+	return r.nearMissExcluding(ctx, req, "")
+}
+
+// nearMissExcluding is nearMiss with one entry skipped by path. The verify-rejection
+// path passes the entry verify has just refuted against live state: re-offering it as
+// a "possibly-related lead" would hand the model the very hypothesis that was proven
+// wrong. Every other candidate remains eligible.
+func (r *Recall) nearMissExcluding(ctx context.Context, req Request, exclude string) *catalog.Entry {
 	if r == nil || r.Catalog == nil {
 		return nil
 	}
@@ -286,6 +294,9 @@ func (r *Recall) nearMiss(ctx context.Context, req Request) *catalog.Entry {
 		return nil
 	}
 	for _, h := range hits {
+		if exclude != "" && h.Entry.Path == exclude {
+			continue
+		}
 		if resourceAgrees(req.Workload, h.Entry.Resource, r.RequireWorkloadMatch) != matchNone {
 			e := h.Entry
 			return &e
