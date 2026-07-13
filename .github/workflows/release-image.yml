@@ -1,0 +1,105 @@
+# Publish a SEMVER-TAGGED image on release.
+#
+# WHY THIS EXISTS AS A SEPARATE WORKFLOW
+# --------------------------------------
+# build-image.yml only ever pushes a rolling `:main` tag, and its trigger is
+# `push: branches: [main]` behind a path filter (**.go, go.mod, go.sum, Dockerfile,
+# ...). Two consequences, both silent:
+#
+#   * a release-please commit ("chore(main): release X.Y.Z") touches CHANGELOG and
+#     version files and NO Go code — so the path filter skips it, and the image
+#     build never runs for the very commit the release tag points at;
+#   * there is no `tags:` trigger, so pushing the git tag builds nothing either.
+#
+# Net effect: git tag vX.Y.Z exists, image vX.Y.Z does NOT. Anything pinning the
+# image by release tag gets ImagePullBackOff / NotFound. This bit a real cluster:
+# a GitOps deployment pinned ghcr.io/smana/runlore:v0.9.0 and the agent sat dead in
+# ImagePullBackOff, so no alert was ever investigated.
+#
+# Adding `tags:` to build-image.yml's existing trigger would NOT be safe: GitHub
+# applies a `paths:` filter to tag pushes too, so the release tag would keep being
+# filtered out. Hence a dedicated workflow with no path filter.
+name: Release Image
+
+on:
+  push:
+    tags:
+      - 'v*'
+  # Lets you backfill an image for a tag that predates this workflow.
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Git tag to build and publish (e.g. v0.9.0)'
+        required: true
+        type: string
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository_owner }}/runlore
+
+concurrency:
+  group: release-image-${{ github.event.inputs.tag || github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    name: Build and publish ${{ github.event.inputs.tag || github.ref_name }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: Checkout the tag
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          ref: ${{ github.event.inputs.tag || github.ref }}
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
+
+      - name: Log in to Container Registry
+        uses: docker/login-action@af1e73f918a031802d376d3c8bbc3fe56130a9b0 # v4.4.0
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # ghcr/OCI refs must be lowercase, but github.repository_owner can carry
+      # uppercase (e.g. "Smana"). Emit both the vX.Y.Z tag and :latest.
+      - name: Compute image refs
+        id: ref
+        env:
+          IMAGE: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          TAG: ${{ github.event.inputs.tag || github.ref_name }}
+        run: |
+          set -euo pipefail
+          case "$TAG" in
+            v*) ;;
+            *) echo "::error::tag '$TAG' must start with 'v'"; exit 1 ;;
+          esac
+          echo "tags=${IMAGE,,}:${TAG},${IMAGE,,}:latest" >> "$GITHUB_OUTPUT"
+          echo "version=${TAG}" >> "$GITHUB_OUTPUT"
+          echo "primary=${IMAGE,,}:${TAG}" >> "$GITHUB_OUTPUT"
+
+      - name: Build and push
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
+        with:
+          context: .
+          file: ./Dockerfile
+          # VERSION lands in runlore_build_info and the dashboard's version panel;
+          # without it the Dockerfile defaults to "dev".
+          build-args: |
+            VERSION=${{ steps.ref.outputs.version }}
+          platforms: linux/amd64
+          push: true
+          tags: ${{ steps.ref.outputs.tags }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      # Fail loudly if the tag somehow isn't pullable — the whole point of this
+      # workflow is that "the git tag exists" must imply "the image tag exists".
+      - name: Verify the published tag is pullable
+        run: |
+          set -euo pipefail
+          docker buildx imagetools inspect "${{ steps.ref.outputs.primary }}" >/dev/null
+          echo "✅ ${{ steps.ref.outputs.primary }} is published and pullable"
