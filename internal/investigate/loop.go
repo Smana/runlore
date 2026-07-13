@@ -672,7 +672,19 @@ func (li *LoopInvestigator) tryRecall(ctx context.Context, req Request, result *
 	li.emitRecall(RecallDecision{Fired: true, Entry: entry.Path})
 	li.Log.Info("instant recall rejected by verify; running full investigation",
 		"title", req.Title, "entry", entry.Path)
-	return nil, false
+	// …but fall through WITH the same C2 near-miss enrichment the non-fire path gets.
+	// Without this, a recall that FIRED and was then refuted leaves the loop with LESS
+	// context than a recall that never fired at all — the near-miss lookup lives only
+	// in the `entry == nil` branch above. That inverts the incentive: a confidently
+	// WRONG entry suppresses the lead that a merely-weak one would have surfaced, so
+	// the loop restarts from zero next to a catalog that may still hold something
+	// relevant. The refuted entry itself is excluded — verify just disproved it.
+	nearMiss = li.Recall.nearMissExcluding(ctx, req, entry.Path)
+	if nearMiss != nil {
+		li.Log.Info("recall near-miss after verify rejection: surfacing an unverified related entry in the seed",
+			"title", req.Title, "rejected", entry.Path, "entry", nearMiss.Path)
+	}
+	return nearMiss, false
 }
 
 // enforceBudget runs the per-step token-budget guard extracted from Investigate: it
