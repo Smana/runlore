@@ -467,7 +467,9 @@ The re-arm holds across the outer noise-control layers too — with one boundary
 The **coalescer's cooldown** (`investigation.coalesce.cooldown`, 10m default when
 enabled) consults the same standing-👎 signal and lets a contested trigger through
 instead of absorbing it as storm noise, so the layers cannot silently defer the
-re-arm. **Fingerprint dedup** (`triggers.incidents.dedup.window`) is the exception:
+re-arm. A contested re-fire takes the coalescer's normal batching path (flushed
+after `debounce`, not one flush per alert), so a contested *storm* still collapses
+to a single re-investigation. **Fingerprint dedup** (`triggers.incidents.dedup.window`) is the exception:
 it keys on the Alertmanager fingerprint before feedback is ever consulted, so a
 *still-firing* alert re-sent with the same fingerprint inside the dedup window is
 dropped regardless of a standing 👎. Precisely: a 👎 re-arms investigation at the

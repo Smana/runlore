@@ -155,6 +155,45 @@ check() { # check <desc> <logfile> <pattern>
   if grep -qE "$3" "$2"; then green "PASS: $1"; PASS=$((PASS+1)); else red "FAIL: $1 (pattern: $3)"; FAIL=$((FAIL+1)); fi
 }
 
+# webhook_post posts an Alertmanager payload through a port-forward and prints
+# the HTTP status, labelled so interleaved step output stays attributable.
+webhook_post() { # webhook_post <label> <port> <json-payload>
+  curl -s -o /dev/null -w "$1 webhook HTTP %{http_code}\n" \
+    -XPOST "http://localhost:$2/webhook/alertmanager" \
+    -H "Authorization: Bearer e2e-webhook" -H "Content-Type: application/json" \
+    -d "$3" || true
+}
+
+# scrape_metric prints the integer value of a runlore_-prefixed metric from the
+# OTel /metrics exposition. Capture-then-awk (never curl|awk directly): awk's
+# early exit would SIGPIPE-kill curl (exit 23), which pipefail+set-e turn into a
+# spurious abort when the matched metric lands early in the output. The prefix
+# match tolerates the _total / _total_total suffix variants of the exporter.
+scrape_metric() { # scrape_metric <port> <metric-name-without-runlore_>
+  local b; b=$(curl -sf "http://localhost:$1/metrics" 2>/dev/null || true)
+  echo "$b" | awk -v p="^runlore_$2" '$0 ~ p {print int($NF); exit}'
+}
+
+# slack_interact posts a signed Slack block-action interaction (HMAC over
+# v0:ts:body with the chart-installed e2e-slack-secret) as user U_E2E.
+slack_interact() { # slack_interact <port> <action_id> <value>
+  python3 - "$1" "$2" "$3" <<'PY'
+import sys, hmac, hashlib, time, json, urllib.parse, urllib.request
+port, action_id, value = sys.argv[1], sys.argv[2], sys.argv[3]
+payload = json.dumps({"user": {"id": "U_E2E", "username": "e2e"},
+                      "actions": [{"action_id": action_id, "value": value}]})
+body = "payload=" + urllib.parse.quote(payload)
+ts = str(int(time.time()))
+sig = "v0=" + hmac.new(b"e2e-slack-secret", f"v0:{ts}:{body}".encode(), hashlib.sha256).hexdigest()
+req = urllib.request.Request(f"http://localhost:{port}/slack/interactions", data=body.encode(),
+    headers={"X-Slack-Request-Timestamp": ts, "X-Slack-Signature": sig, "Content-Type": "application/x-www-form-urlencoded"})
+try:
+    print("slack interaction HTTP", urllib.request.urlopen(req).status)
+except Exception as e:
+    print("slack interaction error:", e)
+PY
+}
+
 step "1/8 create $PROVIDER cluster"
 provider_delete_cluster
 provider_create_cluster
@@ -312,13 +351,7 @@ step "7b/13 LEARNING LOOP: outcome ledger capture (open) + resolve closes the lo
 LLPORT=18086; free_port "$LLPORT"
 kubectl -n "$NS" port-forward svc/runlore "$LLPORT:8080" >/tmp/runlore-ll-pf.log 2>&1 &
 LLPF=$!; sleep 3
-# prefix-match tolerates the _total / _total_total suffix variants of the OTel exporter.
-# Capture to a var first (|| true), then echo|awk — a direct `curl|awk '…exit}'`
-# lets awk close the pipe early, SIGPIPE-killing curl (exit 23) which pipefail+set-e
-# turn into a spurious abort when the matched metric lands early in the output. Mirrors
-# the set-e-safe metric() helper below.
-llmetric() { local b; b=$(curl -sf "http://localhost:$LLPORT/metrics" 2>/dev/null || true); echo "$b" | awk -v p="^runlore_$1" '$0 ~ p {print int($NF); exit}'; }
-OPENED=$(llmetric outcomes_opened); OPENED=${OPENED:-0}
+OPENED=$(scrape_metric "$LLPORT" outcomes_opened); OPENED=${OPENED:-0}
 if [[ "$OPENED" -ge 1 ]]; then green "PASS: outcome ledger recorded an investigation open (capture; opened=$OPENED)"; PASS=$((PASS+1))
 else red "FAIL: no outcome 'open' recorded (capture; opened=$OPENED)"; FAIL=$((FAIL+1)); fi
 
@@ -327,7 +360,7 @@ else red "FAIL: no outcome 'open' recorded (capture; opened=$OPENED)"; FAIL=$((F
 RESOLVE_JSON='{"alerts":[{"status":"resolved","labels":{"alertname":"HarborProbeFailure","severity":"critical","namespace":"apps"},"startsAt":"2026-06-20T03:14:00Z","fingerprint":"fp1"}]}'
 curl -s -o /dev/null -w "resolve webhook HTTP %{http_code}\n" -XPOST "http://localhost:$LLPORT/webhook/alertmanager" -H "Authorization: Bearer e2e-webhook" -H "Content-Type: application/json" -d "$RESOLVE_JSON" || true
 sleep 4
-RESOLVED=$(llmetric incidents_resolved); RESOLVED=${RESOLVED:-0}
+RESOLVED=$(scrape_metric "$LLPORT" incidents_resolved); RESOLVED=${RESOLVED:-0}
 kill "$LLPF" 2>/dev/null || true; free_port "$LLPORT"
 if [[ "$RESOLVED" -ge 1 ]]; then green "PASS: open→resolve loop closed (a resolve matched an open; resolved=$RESOLVED)"; PASS=$((PASS+1))
 else red "FAIL: resolve did not match an open (resolved=$RESOLVED)"; FAIL=$((FAIL+1)); fi
@@ -341,9 +374,13 @@ check "curate grooming the backlog"                     /tmp/runlore-curate.log 
 
 step "8/13 storm: 40 same-groupKey alerts coalesce into 1 investigation"
 # Enable coalescing (MaxBatch=40 flushes synchronously) + OTel metrics exposition.
+# The short debounce and feedback_buttons serve step 8b (one rollout for both
+# steps): the storm flushes on MaxBatch, so debounce doesn't affect step 8.
 helm upgrade runlore deploy/helm/runlore -n "$NS" --reuse-values \
   --set "config.investigation.coalesce.enabled=true" \
   --set "config.investigation.coalesce.max_batch=40" \
+  --set-string "config.investigation.coalesce.debounce=5s" \
+  --set "config.notify.slack.feedback_buttons=true" \
   --set "config.telemetry.metrics_enabled=true" \
   --set replicaCount=1 >/dev/null
 kubectl -n "$NS" rollout status deploy/runlore --timeout=90s >/dev/null
@@ -368,11 +405,7 @@ alerts = [
 ]
 print(json.dumps({'groupKey': 'storm-group-key', 'alerts': alerts}))
 ")
-curl -s -o /dev/null -w "storm webhook HTTP %{http_code}\n" \
-  -XPOST "http://localhost:$STORM_PORT/webhook/alertmanager" \
-  -H "Authorization: Bearer e2e-webhook" \
-  -H "Content-Type: application/json" \
-  -d "$STORM_PAYLOAD" || true
+webhook_post storm "$STORM_PORT" "$STORM_PAYLOAD"
 sleep 6   # allow MaxBatch flush + investigation to start
 
 METRICS=$(curl -sf "http://localhost:$STORM_PORT/metrics" 2>/dev/null || true)
@@ -409,15 +442,12 @@ step "8b/13 LEARNING LOOP: standing 👎 re-arms through the coalesce cooldown (
 # re-arm silently absorbed by the coalescer's cooldown for up to 10m, with no log
 # line. Prove the fixed contract end-to-end: an uncontested re-fire inside the
 # cooldown is absorbed (and VISIBLY — an INFO line, not just a metric), a 👎
-# recorded via the signed Slack interaction endpoint re-arms the very next
-# re-fire, and the bypass itself is log-visible.
-helm upgrade runlore deploy/helm/runlore -n "$NS" --reuse-values \
-  --set config.notify.slack.feedback_buttons=true \
-  --set replicaCount=1 >/dev/null
-kubectl -n "$NS" rollout status deploy/runlore --timeout=90s >/dev/null
-wait_for_leader
-sleep 3
-
+# recorded via the signed Slack interaction endpoint re-arms the next re-fire
+# through the buffer path (contested repeats batch on the 5s debounce set at the
+# step-8 install — a contested storm still collapses to ONE re-investigation),
+# and the bypass itself is log-visible. Same pod as step 8, so every log grep is
+# scoped to this step's correlation key (rearm-gk) — the storm's own suppression
+# lines are in the same log.
 REARM_PORT=18087; free_port "$REARM_PORT"
 kubectl -n "$NS" port-forward svc/runlore "$REARM_PORT:8080" >/tmp/runlore-rearm-pf.log 2>&1 &
 REARM_PF=$!; sleep 3
@@ -425,24 +455,21 @@ REARM_PF=$!; sleep 3
 # Fresh fingerprints per fire clear the chart's 30m fingerprint dedup — this step
 # tests the COALESCER layer, whose key (same groupKey) and alertname stay constant.
 rearm_fire() { # rearm_fire <fingerprint>
-  curl -s -o /dev/null -w "rearm webhook HTTP %{http_code}\n" \
-    -XPOST "http://localhost:$REARM_PORT/webhook/alertmanager" \
-    -H "Authorization: Bearer e2e-webhook" -H "Content-Type: application/json" \
-    -d "{\"groupKey\":\"rearm-gk\",\"alerts\":[{\"status\":\"firing\",\"labels\":{\"alertname\":\"RearmTest\",\"severity\":\"critical\",\"namespace\":\"prod\"},\"startsAt\":\"2026-01-01T00:00:00Z\",\"fingerprint\":\"$1\"}]}" || true
+  webhook_post rearm "$REARM_PORT" \
+    "{\"groupKey\":\"rearm-gk\",\"alerts\":[{\"status\":\"firing\",\"labels\":{\"alertname\":\"RearmTest\",\"severity\":\"critical\",\"namespace\":\"prod\"},\"startsAt\":\"2026-01-01T00:00:00Z\",\"fingerprint\":\"$1\"}]}"
 }
-rearm_metric() { local b; b=$(curl -sf "http://localhost:$REARM_PORT/metrics" 2>/dev/null || true); echo "$b" | awk -v p="^runlore_$1" '$0 ~ p {print int($NF); exit}'; }
 
 # (1) First fire: critical fast-path flushes -> investigation arms the cooldown.
 rearm_fire rearm-fp-1
 sleep 6
-S0=$(rearm_metric investigations_started); S0=${S0:-0}
+S0=$(scrape_metric "$REARM_PORT" investigations_started); S0=${S0:-0}
 
 # (2) Uncontested re-fire inside the cooldown: absorbed, and log-visible (#288 B).
 rearm_fire rearm-fp-2
 sleep 4
 kubectl -n "$NS" logs deploy/runlore > /tmp/runlore.log 2>&1
-check "coalesce cooldown suppression is log-visible" /tmp/runlore.log 'coalesce cooldown: suppressing alert'
-S1=$(rearm_metric investigations_started); S1=${S1:-0}
+check "coalesce cooldown suppression is log-visible" /tmp/runlore.log 'coalesce cooldown: suppressing alert.*rearm-gk'
+S1=$(scrape_metric "$REARM_PORT" investigations_started); S1=${S1:-0}
 if [[ "$S1" == "$S0" && "$S0" -ge 1 ]]; then
   green "PASS: uncontested re-fire absorbed by the coalesce cooldown (started stays $S0)"; PASS=$((PASS+1))
 else red "FAIL: uncontested re-fire not absorbed (started $S0 -> $S1)"; FAIL=$((FAIL+1)); fi
@@ -450,37 +477,23 @@ else red "FAIL: uncontested re-fire not absorbed (started $S0 -> $S1)"; FAIL=$((
 # (3) Standing 👎 on the trigger: signed Slack interaction, value = the TriggerKey
 # (curator.IncidentKey(alertname, ns, kind, name, cluster), lowercased — the same
 # value the delivered message's feedback buttons carry).
-python3 - "$REARM_PORT" <<'PY'
-import sys, hmac, hashlib, time, json, urllib.parse, urllib.request
-port = sys.argv[1]
-payload = json.dumps({"user": {"id": "U_E2E", "username": "e2e"},
-                      "actions": [{"action_id": "runlore_feedback_down", "value": "rearmtest|prod|||"}]})
-body = "payload=" + urllib.parse.quote(payload)
-ts = str(int(time.time()))
-sig = "v0=" + hmac.new(b"e2e-slack-secret", f"v0:{ts}:{body}".encode(), hashlib.sha256).hexdigest()
-req = urllib.request.Request(f"http://localhost:{port}/slack/interactions", data=body.encode(),
-    headers={"X-Slack-Request-Timestamp": ts, "X-Slack-Signature": sig, "Content-Type": "application/x-www-form-urlencoded"})
-try:
-    print("slack feedback HTTP", urllib.request.urlopen(req).status)
-except Exception as e:
-    print("slack feedback error:", e)
-PY
+slack_interact "$REARM_PORT" runlore_feedback_down "rearmtest|prod|||"
 sleep 2
 kubectl -n "$NS" logs deploy/runlore > /tmp/runlore.log 2>&1
 check "👎 recorded in the outcome ledger" /tmp/runlore.log 'slack feedback recorded.*rating=down'
 
-# (4) Same re-fire again: the standing 👎 must bypass the cooldown (#288 A). Poll —
-# the single-worker queue may still be busy with investigation #1.
+# (4) Same re-fire again: the standing 👎 must bypass the cooldown (#288 A) into
+# the buffer path — flushed by the sweep after the 5s debounce, investigated
+# after that. Poll: debounce + sweep tick + a possibly busy single-worker queue.
 rearm_fire rearm-fp-3
-S2="$S1"
 for _ in $(seq 1 15); do
-  S2=$(rearm_metric investigations_started); S2=${S2:-0}
+  S2=$(scrape_metric "$REARM_PORT" investigations_started); S2=${S2:-0}
   [[ "$S2" -gt "$S1" ]] && break
   sleep 2
 done
 kubectl -n "$NS" logs deploy/runlore > /tmp/runlore.log 2>&1
 kill "$REARM_PF" 2>/dev/null || true; free_port "$REARM_PORT"
-check "👎 bypass is log-visible" /tmp/runlore.log 'standing 👎 bypasses coalesce cooldown'
+check "👎 bypass is log-visible" /tmp/runlore.log 'standing 👎 bypasses coalesce cooldown.*rearm-gk'
 if [[ "$S2" -gt "$S1" ]]; then
   green "PASS: standing 👎 re-armed through the coalesce cooldown (started $S1 -> $S2)"; PASS=$((PASS+1))
 else red "FAIL: standing 👎 did not re-arm investigation (started stuck at $S2)"; FAIL=$((FAIL+1)); fi
@@ -515,20 +528,7 @@ curl -s -o /dev/null -w "token approve HTTP %{http_code}\n" -X POST -H "X-Approv
 # (b) Signed Slack interaction → approve another pending action (HMAC over v0:ts:body).
 ID2=$(curl -s -H "X-Approval-Token: e2e-secret" "localhost:$PORT/actions" | first_action_id) || true
 if [[ -n "$ID2" ]]; then
-  python3 - "$ID2" "$PORT" <<'PY'
-import sys, hmac, hashlib, time, json, urllib.parse, urllib.request
-aid, port = sys.argv[1], sys.argv[2]
-payload = json.dumps({"user": {"id": "U_E2E", "username": "e2e"}, "actions": [{"action_id": "runlore_approve", "value": aid}]})
-body = "payload=" + urllib.parse.quote(payload)
-ts = str(int(time.time()))
-sig = "v0=" + hmac.new(b"e2e-slack-secret", f"v0:{ts}:{body}".encode(), hashlib.sha256).hexdigest()
-req = urllib.request.Request(f"http://localhost:{port}/slack/interactions", data=body.encode(),
-    headers={"X-Slack-Request-Timestamp": ts, "X-Slack-Signature": sig, "Content-Type": "application/x-www-form-urlencoded"})
-try:
-    print("slack interaction HTTP", urllib.request.urlopen(req).status)
-except Exception as e:
-    print("slack interaction error:", e)
-PY
+  slack_interact "$PORT" runlore_approve "$ID2"
 fi
 kill "$PF" 2>/dev/null || true; free_port "$PORT"
 sleep 3

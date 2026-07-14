@@ -225,13 +225,10 @@ func RunServe(version string, args []string) error {
 		}, out)
 		cz.Metrics = metrics
 		cz.Log = log
-		// A standing 👎 must bypass the coalescer's cooldown, or the recurrence
-		// gate's "👎 re-arms investigation immediately" promise is silently deferred
-		// by up to Cooldown at this outer layer (#288). Recurrence is a zero value
-		// for a disabled ledger, so the bypass is inert without outcome.ledger_path.
-		cz.Contested = func(triggerKey string) bool {
-			return ledger.Recurrence(triggerKey).FeedbackDown > 0
-		}
+		// Same ledger view as the recurrence gate, so the two layers cannot diverge
+		// on what "contested" means (#288). Recurrence is a zero value for a
+		// disabled ledger, so the bypass is inert without outcome.ledger_path.
+		cz.Outcome = ledger
 		log.Info("investigation coalescer enabled",
 			"debounce", cc.Debounce.Std(), "max_wait", cc.MaxWait.Std(),
 			"max_batch", cc.MaxBatch, "cooldown", cc.Cooldown.Std())

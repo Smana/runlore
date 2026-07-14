@@ -104,12 +104,11 @@ incident webhook. Known keys: `alertmanager`, `gitops`, `pagerduty`.
 - `coalesce` — fold an alert storm into one investigation. **Code default: disabled**; the **chart
   ships `enabled: true`** (see `deploy/helm/runlore/values.yaml`) — same chart-vs-code split as
   `incidents.dedup.window`. Defaults when enabled: `debounce` **30s**, `max_wait` **2m**, `max_batch`
-  **50**, `cooldown` **10m**; `correlation_labels` group related alerts. The `cooldown` suppresses
-  same-key re-fires after a flush, with two escape hatches: a **critical alert with an alertname not
-  yet seen** for the key flushes anyway (a new problem, not storm noise), and a **standing 👎 on the
-  trigger bypasses suppression** so the feedback re-arm (see `recurrence_cooldown` below) is never
-  silently deferred by this outer layer. Each suppression logs an INFO line
-  (`coalesce cooldown: suppressing alert`) and counts in `runlore_alerts_suppressed_total`.
+  **50**, `cooldown` **10m**; `correlation_labels` group related alerts. Two escape hatches open the
+  `cooldown`: an unseen critical alertname (a new problem — flushes immediately) and a **standing 👎
+  on the trigger** (the feedback re-arm, see [learning-loop](learning-loop.md) — batched on the
+  normal `debounce`, so a contested storm still collapses to one re-investigation). Suppressions log
+  an INFO line and count in `runlore_alerts_suppressed_total`.
 - `rate_limit` — `max_per_window` (**0 = unlimited**), `window` (default **1h** when a budget is set),
   `max_requeues`.
 - `recurrence_cooldown` — **opt-in (default 0 = off)** per-trigger suppression: skip re-investigating a
