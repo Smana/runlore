@@ -83,7 +83,9 @@ func retryDelay(attempt int, resp *http.Response) time.Duration {
 	if attempt-1 >= 63 {
 		return maxDelay
 	}
-	d := baseBackoff << uint(attempt-1)
+	// Signed shift counts are legal since Go 1.13; the guards above bound
+	// attempt-1 to [0,62], so no uint conversion (and no gosec G115) is needed.
+	d := baseBackoff << (attempt - 1)
 	if d <= 0 || d > maxDelay {
 		return maxDelay
 	}
