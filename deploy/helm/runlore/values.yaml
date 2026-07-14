@@ -148,7 +148,8 @@ config:
       # debounce: 30s           # flush batch quiet for this long
       # max_wait: 2m            # force flush even if still receiving alerts
       # max_batch: 50           # flush when batch reaches this size
-      # cooldown: 10m           # suppress re-alerts for a group after a flush
+      # cooldown: 10m           # suppress re-alerts for a group after a flush (a new critical
+      #                         #   alertname or a standing 👎 on the trigger bypasses suppression)
       # correlation_labels: []  # group by label values instead of AM groupKey
     rate_limit:
       max_per_window: 20        # cap investigations per window (window defaults to 1h); 0 = unlimited

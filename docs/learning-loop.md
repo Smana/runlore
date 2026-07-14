@@ -463,6 +463,18 @@ feedback does two jobs: it weighs *recalled knowledge* (the decay above) and it
 governs *when the agent may repeat itself* — both steered by the same single
 human 👍/👎 signal.
 
+The re-arm holds across the outer noise-control layers too — with one boundary.
+The **coalescer's cooldown** (`investigation.coalesce.cooldown`, 10m default when
+enabled) consults the same standing-👎 signal and lets a contested trigger through
+instead of absorbing it as storm noise, so the layers cannot silently defer the
+re-arm. **Fingerprint dedup** (`triggers.incidents.dedup.window`) is the exception:
+it keys on the Alertmanager fingerprint before feedback is ever consulted, so a
+*still-firing* alert re-sent with the same fingerprint inside the dedup window is
+dropped regardless of a standing 👎. Precisely: a 👎 re-arms investigation at the
+next occurrence that clears fingerprint dedup — a re-fire with a fresh fingerprint
+(changed label set) immediately, a same-fingerprint repeat once the dedup window
+(code default **0** = off; chart ships **30m**) has lapsed.
+
 ---
 
 ## 7. Compound — merged knowledge becomes everyone's, fast
