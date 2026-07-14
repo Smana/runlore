@@ -4,6 +4,7 @@ package hubble
 
 import (
 	"context"
+	"crypto/tls"
 	"net"
 	"strings"
 	"testing"
@@ -199,4 +200,12 @@ func TestDropsTLSSelected(t *testing.T) {
 		t.Fatalf("TLS-mode Drops (with insecure override): %v", err)
 	}
 	_ = res // result is empty (no flows registered); we only care about no panic/error
+}
+
+// The TLS client config must pin a modern floor: the zero-value tls.Config
+// accepts TLS 1.0/1.1, which no Hubble relay needs and gosec (G402) rejects.
+func TestTLSConfigMinVersion(t *testing.T) {
+	if got := tlsConfig().MinVersion; got < tls.VersionTLS12 {
+		t.Fatalf("tlsConfig MinVersion = %#x, want >= TLS 1.2 (%#x)", got, tls.VersionTLS12)
+	}
 }

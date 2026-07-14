@@ -42,12 +42,16 @@ func New(addr string, tlsEnabled bool, opts ...grpc.DialOption) *Client {
 
 var _ providers.NetworkProvider = (*Client)(nil)
 
+// tlsConfig is the client TLS configuration for Hubble Relay dials. MinVersion
+// is pinned to TLS 1.2 — the zero-value tls.Config would accept TLS 1.0/1.1.
+func tlsConfig() *tls.Config { return &tls.Config{MinVersion: tls.VersionTLS12} }
+
 // Drops returns DROPPED flows touching the selector within the window.
 func (c *Client) Drops(ctx context.Context, sel providers.Selector, w providers.TimeWindow) (providers.LogResult, error) {
 	// Select transport credentials: insecure/plaintext (the DEFAULT) or TLS.
 	var transportCreds grpc.DialOption
 	if c.tlsMode {
-		transportCreds = grpc.WithTransportCredentials(credentials.NewTLS(&tls.Config{}))
+		transportCreds = grpc.WithTransportCredentials(credentials.NewTLS(tlsConfig()))
 	} else {
 		transportCreds = grpc.WithTransportCredentials(insecure.NewCredentials())
 	}
