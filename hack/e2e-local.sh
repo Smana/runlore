@@ -403,6 +403,88 @@ else
   FAIL=$((FAIL+1))
 fi
 
+step "8b/13 LEARNING LOOP: standing 👎 re-arms through the coalesce cooldown (#288)"
+# The suppression layers stack dedup -> coalescer -> recurrence gate, and only the
+# innermost consults the ledger; #288 saw a standing 👎's documented immediate
+# re-arm silently absorbed by the coalescer's cooldown for up to 10m, with no log
+# line. Prove the fixed contract end-to-end: an uncontested re-fire inside the
+# cooldown is absorbed (and VISIBLY — an INFO line, not just a metric), a 👎
+# recorded via the signed Slack interaction endpoint re-arms the very next
+# re-fire, and the bypass itself is log-visible.
+helm upgrade runlore deploy/helm/runlore -n "$NS" --reuse-values \
+  --set config.notify.slack.feedback_buttons=true \
+  --set replicaCount=1 >/dev/null
+kubectl -n "$NS" rollout status deploy/runlore --timeout=90s >/dev/null
+wait_for_leader
+sleep 3
+
+REARM_PORT=18087; free_port "$REARM_PORT"
+kubectl -n "$NS" port-forward svc/runlore "$REARM_PORT:8080" >/tmp/runlore-rearm-pf.log 2>&1 &
+REARM_PF=$!; sleep 3
+
+# Fresh fingerprints per fire clear the chart's 30m fingerprint dedup — this step
+# tests the COALESCER layer, whose key (same groupKey) and alertname stay constant.
+rearm_fire() { # rearm_fire <fingerprint>
+  curl -s -o /dev/null -w "rearm webhook HTTP %{http_code}\n" \
+    -XPOST "http://localhost:$REARM_PORT/webhook/alertmanager" \
+    -H "Authorization: Bearer e2e-webhook" -H "Content-Type: application/json" \
+    -d "{\"groupKey\":\"rearm-gk\",\"alerts\":[{\"status\":\"firing\",\"labels\":{\"alertname\":\"RearmTest\",\"severity\":\"critical\",\"namespace\":\"prod\"},\"startsAt\":\"2026-01-01T00:00:00Z\",\"fingerprint\":\"$1\"}]}" || true
+}
+rearm_metric() { local b; b=$(curl -sf "http://localhost:$REARM_PORT/metrics" 2>/dev/null || true); echo "$b" | awk -v p="^runlore_$1" '$0 ~ p {print int($NF); exit}'; }
+
+# (1) First fire: critical fast-path flushes -> investigation arms the cooldown.
+rearm_fire rearm-fp-1
+sleep 6
+S0=$(rearm_metric investigations_started); S0=${S0:-0}
+
+# (2) Uncontested re-fire inside the cooldown: absorbed, and log-visible (#288 B).
+rearm_fire rearm-fp-2
+sleep 4
+kubectl -n "$NS" logs deploy/runlore > /tmp/runlore.log 2>&1
+check "coalesce cooldown suppression is log-visible" /tmp/runlore.log 'coalesce cooldown: suppressing alert'
+S1=$(rearm_metric investigations_started); S1=${S1:-0}
+if [[ "$S1" == "$S0" && "$S0" -ge 1 ]]; then
+  green "PASS: uncontested re-fire absorbed by the coalesce cooldown (started stays $S0)"; PASS=$((PASS+1))
+else red "FAIL: uncontested re-fire not absorbed (started $S0 -> $S1)"; FAIL=$((FAIL+1)); fi
+
+# (3) Standing 👎 on the trigger: signed Slack interaction, value = the TriggerKey
+# (curator.IncidentKey(alertname, ns, kind, name, cluster), lowercased — the same
+# value the delivered message's feedback buttons carry).
+python3 - "$REARM_PORT" <<'PY'
+import sys, hmac, hashlib, time, json, urllib.parse, urllib.request
+port = sys.argv[1]
+payload = json.dumps({"user": {"id": "U_E2E", "username": "e2e"},
+                      "actions": [{"action_id": "runlore_feedback_down", "value": "rearmtest|prod|||"}]})
+body = "payload=" + urllib.parse.quote(payload)
+ts = str(int(time.time()))
+sig = "v0=" + hmac.new(b"e2e-slack-secret", f"v0:{ts}:{body}".encode(), hashlib.sha256).hexdigest()
+req = urllib.request.Request(f"http://localhost:{port}/slack/interactions", data=body.encode(),
+    headers={"X-Slack-Request-Timestamp": ts, "X-Slack-Signature": sig, "Content-Type": "application/x-www-form-urlencoded"})
+try:
+    print("slack feedback HTTP", urllib.request.urlopen(req).status)
+except Exception as e:
+    print("slack feedback error:", e)
+PY
+sleep 2
+kubectl -n "$NS" logs deploy/runlore > /tmp/runlore.log 2>&1
+check "👎 recorded in the outcome ledger" /tmp/runlore.log 'slack feedback recorded.*rating=down'
+
+# (4) Same re-fire again: the standing 👎 must bypass the cooldown (#288 A). Poll —
+# the single-worker queue may still be busy with investigation #1.
+rearm_fire rearm-fp-3
+S2="$S1"
+for _ in $(seq 1 15); do
+  S2=$(rearm_metric investigations_started); S2=${S2:-0}
+  [[ "$S2" -gt "$S1" ]] && break
+  sleep 2
+done
+kubectl -n "$NS" logs deploy/runlore > /tmp/runlore.log 2>&1
+kill "$REARM_PF" 2>/dev/null || true; free_port "$REARM_PORT"
+check "👎 bypass is log-visible" /tmp/runlore.log 'standing 👎 bypasses coalesce cooldown'
+if [[ "$S2" -gt "$S1" ]]; then
+  green "PASS: standing 👎 re-armed through the coalesce cooldown (started $S1 -> $S2)"; PASS=$((PASS+1))
+else red "FAIL: standing 👎 did not re-arm investigation (started stuck at $S2)"; FAIL=$((FAIL+1)); fi
+
 step "9/13 GitOps failure trigger (informer on a real API server)"
 kubectl create ns apps >/dev/null 2>&1 || true
 kubectl apply -f - <<'YAML'
@@ -421,11 +503,17 @@ check "gitops failure -> investigate" /tmp/runlore.log 'source=gitops-failure|Ku
 PORT=18090; free_port "$PORT"
 kubectl -n "$NS" port-forward svc/runlore "$PORT:8080" >/tmp/runlore-pf.log 2>&1 &
 PF=$!; sleep 3
+# first_action_id extracts the first pending action ID from the /actions JSON.
+# python3 (already a script dependency), not `grep -oP` — BSD grep on macOS has
+# no -P, which silently yielded an empty ID and failed the approval assertions.
+first_action_id() {
+  python3 -c 'import sys, re; m = re.search(r"\"ID\":\"([^\"]+)\"", sys.stdin.read()); print(m.group(1) if m else "")'
+}
 # (a) Token endpoint → execute (suspends broken-app).
-ID=$(curl -s -H "X-Approval-Token: e2e-secret" "localhost:$PORT/actions" | grep -oP '"ID":"\K[^"]+' | head -1) || true
+ID=$(curl -s -H "X-Approval-Token: e2e-secret" "localhost:$PORT/actions" | first_action_id) || true
 curl -s -o /dev/null -w "token approve HTTP %{http_code}\n" -X POST -H "X-Approval-Token: e2e-secret" "localhost:$PORT/actions/$ID/approve" || true
 # (b) Signed Slack interaction → approve another pending action (HMAC over v0:ts:body).
-ID2=$(curl -s -H "X-Approval-Token: e2e-secret" "localhost:$PORT/actions" | grep -oP '"ID":"\K[^"]+' | head -1) || true
+ID2=$(curl -s -H "X-Approval-Token: e2e-secret" "localhost:$PORT/actions" | first_action_id) || true
 if [[ -n "$ID2" ]]; then
   python3 - "$ID2" "$PORT" <<'PY'
 import sys, hmac, hashlib, time, json, urllib.parse, urllib.request
