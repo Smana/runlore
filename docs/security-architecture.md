@@ -154,9 +154,10 @@ a `what_changed` git diff.
 >   and base64 log blob;
 > - **unlabeled high-entropy strings** — a password sitting in free prose with no recognizable
 >   prefix and no key label;
-> - **base64 blobs outside a `kind: Secret` `data:` block** — the redactor masks Secret-manifest
->   values wholesale but never *decodes* base64 to inspect contents, so a secret copied base64-encoded
->   into a log line or ConfigMap is not detected;
+> - **base64 blobs whose `kind: Secret` manifest is not in the same payload** — when the manifest
+>   IS present, its `data:` values are decoded and both the blob and the plaintext are scrubbed
+>   payload-wide; without it there is no ground truth, and a lone blob is indistinguishable from a
+>   git SHA or a benign base64 log blob, so it is not decoded speculatively;
 > - secrets under a key name outside the sensitive-keyword vocabulary.
 >
 > If you run a public KB repo or untrusted-tenant namespaces, the strongest mitigation is
