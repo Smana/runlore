@@ -798,6 +798,13 @@ type TriggerRecurrence struct {
 	FeedbackDown int // LIVE 👎 votes for this trigger, after per-user dedup
 }
 
+// Contested reports whether the trigger carries standing 👎 feedback — the ONE
+// definition of "a human contests this diagnosis" shared by every suppression
+// layer that must yield to it (the recurrence gate and the coalescer's cooldown,
+// #288). Layers consulting different notions of contested-ness is exactly the
+// divergence that issue was about; add nuance here, not at the call sites.
+func (r TriggerRecurrence) Contested() bool { return r.FeedbackDown > 0 }
+
 // Recurrence returns the trigger's recurrence snapshot. FeedbackDown counts the
 // votes map's current "down" entries for the key — O(live votes), which stays
 // small (one entry per trigger×user) and off the recall hot path (read once per

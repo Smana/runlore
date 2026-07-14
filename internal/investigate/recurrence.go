@@ -3,7 +3,6 @@
 package investigate
 
 import (
-	"log/slog"
 	"time"
 
 	"github.com/Smana/runlore/internal/outcome"
@@ -46,7 +45,6 @@ type RecurrenceStats interface {
 type RecurrenceGate struct {
 	Outcome  RecurrenceStats
 	Cooldown time.Duration // 0 disables the gate (default: off, opt-in)
-	Log      *slog.Logger  // optional; nil-safe
 }
 
 // suppress reports whether req should be suppressed, returning the prior
@@ -66,7 +64,7 @@ func (g *RecurrenceGate) suppress(req Request, now time.Time) (outcome.TriggerRe
 	default:
 		return r, false // inconclusive or pre-verdict: retry, we owe a real answer
 	}
-	if r.FeedbackDown > 0 {
+	if r.Contested() {
 		return r, false // a human contested the diagnosis: cooldown broken
 	}
 	return r, true

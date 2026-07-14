@@ -224,6 +224,11 @@ func RunServe(version string, args []string) error {
 			CorrelationLabels: cc.CorrelationLabels,
 		}, out)
 		cz.Metrics = metrics
+		cz.Log = log
+		// Same ledger view as the recurrence gate, so the two layers cannot diverge
+		// on what "contested" means (#288). Recurrence is a zero value for a
+		// disabled ledger, so the bypass is inert without outcome.ledger_path.
+		cz.Outcome = ledger
 		log.Info("investigation coalescer enabled",
 			"debounce", cc.Debounce.Std(), "max_wait", cc.MaxWait.Std(),
 			"max_batch", cc.MaxBatch, "cooldown", cc.Cooldown.Std())

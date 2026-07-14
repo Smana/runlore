@@ -8,6 +8,7 @@ package coalesce
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"sort"
 	"strings"
 	"sync"
@@ -48,6 +49,15 @@ type Coalescer struct {
 	now     func() time.Time
 	out     func([]investigate.Request) // flush sink (build a Request + enqueue)
 	Metrics *telemetry.Metrics          // optional; nil-safe OTel counters
+	Log     *slog.Logger                // optional; nil-safe
+
+	// Outcome is the same per-TriggerKey ledger view the recurrence gate reads
+	// (*outcome.Ledger satisfies it). A contested trigger (standing 👎) bypasses
+	// the cooldown suppression into the buffer path: the recurrence gate re-arms
+	// on that signal, and this outer layer must not silently defer the re-arm for
+	// up to Cooldown (#288). Consulted only when suppression would otherwise
+	// happen, so the ledger stays off the common path. Optional; nil = no bypass.
+	Outcome investigate.RecurrenceStats
 
 	mu      sync.Mutex
 	pending map[string]*batch
@@ -164,26 +174,36 @@ func (c *Coalescer) Add(r investigate.Request) {
 	var flush []investigate.Request
 	c.mu.Lock()
 	now := c.now()
+	// An investigation for this key already fired within the cooldown — suppress
+	// the rest of the storm. This is checked before the critical fast-path so a
+	// storm of critical alerts collapses to one investigation (the first) plus
+	// suppressions, rather than one investigation per alert. Two escape hatches:
+	// a critical with an alertname not yet seen for this key (a genuinely new
+	// problem, not storm noise), and a contested trigger (see Outcome).
+	suppress := c.withinCooldown(k, now) && !c.newCriticalDuringCooldown(k, r)
+	bypass := suppress && c.contested(r)
 	switch {
-	case c.withinCooldown(k, now) && !c.newCriticalDuringCooldown(k, r):
-		// An investigation for this key already fired within the cooldown — suppress
-		// the rest of the storm. This is checked before the critical fast-path so a
-		// storm of critical alerts collapses to one investigation (the first) plus
-		// suppressions, rather than one investigation per alert. The exception
-		// (newCriticalDuringCooldown) lets a critical with an alertname not yet seen
-		// for this key through, since that is a genuinely new problem, not storm noise.
+	case suppress && !bypass:
 		c.mu.Unlock()
+		if l := c.Log; l != nil {
+			l.Info("coalesce cooldown: suppressing alert",
+				"key", k, "title", r.Title, "trigger_key", r.TriggerKey, "cooldown", c.cfg.Cooldown)
+		}
 		if m := c.Metrics; m != nil {
 			m.AlertsSuppressed.Add(context.Background(), 1)
 		}
 		return
-	case r.IsCritical():
+	case r.IsCritical() && !bypass:
 		// Critical (first for this key, or a new alertname during cooldown): flush
 		// immediately with no debounce wait, draining any pending batch. Same-key
 		// same-alertname criticals fall into the cooldown case above and are suppressed.
 		// The predicate is investigate.Request.IsCritical, shared with the incident
 		// debouncer's identical carve-out (source.incidentDebouncer.Hold) so the two
 		// waits enforce "never delay the first look at a critical page" identically.
+		// A BYPASSED critical takes the buffer path below instead: the no-delay
+		// invariant is about the FIRST look, and a contested repeat is by definition
+		// not that — flushing per alert would fan a contested storm out to one
+		// investigation per alert, defeating the collapse this package exists for.
 		flush = []investigate.Request{r}
 		if b, ok := c.pending[k]; ok {
 			flush = make([]investigate.Request, 0, len(b.incidents)+1)
@@ -207,6 +227,12 @@ func (c *Coalescer) Add(r investigate.Request) {
 		}
 	}
 	c.mu.Unlock()
+	if bypass {
+		if l := c.Log; l != nil {
+			l.Info("standing 👎 bypasses coalesce cooldown",
+				"key", k, "title", r.Title, "trigger_key", r.TriggerKey)
+		}
+	}
 	if flush != nil {
 		c.emit(flush)
 	}
@@ -236,6 +262,14 @@ func (c *Coalescer) emit(batch []investigate.Request) {
 func (c *Coalescer) withinCooldown(k string, now time.Time) bool {
 	cd, ok := c.recent[k]
 	return ok && c.cfg.Cooldown > 0 && now.Sub(cd.last) < c.cfg.Cooldown
+}
+
+// contested reports whether r's trigger carries standing 👎 feedback — the
+// cooldown's second escape hatch, symmetric with newCriticalDuringCooldown.
+// The ledger lookup happens under mu (it has its own lock, no call cycles back
+// here) but only on the would-suppress path, never on the common path.
+func (c *Coalescer) contested(r investigate.Request) bool {
+	return c.Outcome != nil && r.TriggerKey != "" && c.Outcome.Recurrence(r.TriggerKey).Contested()
 }
 
 // newCriticalDuringCooldown reports whether inc is a critical alert whose

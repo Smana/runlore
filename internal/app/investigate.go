@@ -396,7 +396,7 @@ func BuildInvestigator(ctx context.Context, cfg *config.Config, gp providers.Git
 	// non-zero cooldown; Enabled() guards the disabled-ledger edge regardless.
 	var recurrence *investigate.RecurrenceGate
 	if d := cfg.Investigation.RecurrenceCooldown.Std(); d > 0 && ledger.Enabled() {
-		recurrence = &investigate.RecurrenceGate{Outcome: ledger, Cooldown: d, Log: log}
+		recurrence = &investigate.RecurrenceGate{Outcome: ledger, Cooldown: d}
 		log.Info("recurrence cooldown enabled", "cooldown", d)
 	}
 	// Per-tool timeout: default to 60s when unset (0) so one hung tool can't eat the
