@@ -8,6 +8,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 RunLore is **pre-1.0 and under active development** — there are no tagged releases
 yet, so everything currently lives under `[Unreleased]`.
 
+## [0.9.2](https://github.com/Smana/runlore/compare/v0.9.1...v0.9.2) (2026-07-14)
+
+
+### Bug Fixes
+
+* **coalesce:** a standing 👎 bypasses the cooldown, and suppression is logged ([#320](https://github.com/Smana/runlore/issues/320)) ([430d607](https://github.com/Smana/runlore/commit/430d607b48fd8403249b5f36a03dce97873acaf5))
+* **redact:** decode Secret data values and scrub them payload-wide (REDACT-B64) ([#322](https://github.com/Smana/runlore/issues/322)) ([d139a76](https://github.com/Smana/runlore/commit/d139a76260aa91b991ddc71f16ffa35d12f4a7bd))
+
 ## [0.9.1](https://github.com/Smana/runlore/compare/v0.9.0...v0.9.1) (2026-07-13)
 
 
