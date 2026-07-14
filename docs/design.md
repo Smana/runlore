@@ -411,9 +411,10 @@ KB git repo  ──syncer──►  local mirror  ──build──►  index:  
   high-precision — PEM private keys, JWTs, GitHub / Slack / AWS / Google / Stripe keys,
   `user:pass@host` URLs, `Authorization` headers, and generic `*secret*/*token*/*password*: <value>`
   pairs, plus the values under a `kind: Secret` manifest's `data:`/`stringData:` block (including
-  inside a git diff) — masking the *value* while keeping surrounding structure so the agent can still
+  inside a git diff; the values are also base64-decoded and scrubbed from the whole payload) —
+  masking the *value* while keeping surrounding structure so the agent can still
   reason ("the password field changed"). Redaction is a **mitigation, not a guarantee**: unlabeled
-  high-entropy strings and base64 blobs outside a `Secret` manifest are not caught (see the
+  high-entropy strings and base64 blobs with no `Secret` manifest in the payload are not caught (see the
   [LLM security architecture](security-architecture.md)). Defense-in-depth still applies — the RBAC
   scoping above limits what tool output can contain, and **self-hosting the model** (in-cluster
   vLLM/Ollama) keeps data in-boundary regardless. If you run a public KB repo or untrusted-tenant

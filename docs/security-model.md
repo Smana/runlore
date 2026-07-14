@@ -62,14 +62,18 @@ Tool output and incident text flow to a model provider and, for findings, into y
 Coverage (high-precision, masks the value while keeping structure): PEM private keys, JWTs,
 GitHub / Slack / AWS / Google / Stripe keys, `user:pass@host` URLs, `Authorization` headers,
 generic `*(password|secret|api_key|token|…): <value>` pairs, and the values under a `kind: Secret`
-manifest's `data:`/`stringData:` block — including one surfaced inside a git diff.
+manifest's `data:`/`stringData:` block — including one surfaced inside a git diff. A masked
+Secret value is also **learned**: its base64 blob is decoded and both forms are scrubbed from the
+**whole payload**, so the same secret quoted decoded in a log line or encoded in an event does not
+outlive the manifest that names it.
 
 > [!WARNING]
 > **Redaction is a mitigation, not a guarantee**
 >
 > The ruleset is deliberately high-precision, and the cost of precision is recall: unlabeled
-> high-entropy strings, bare AWS secret keys with no context cue, and base64 blobs *outside* a
-> `kind: Secret` `data:` block (the redactor never decodes base64) are **not** caught — see
+> high-entropy strings, bare AWS secret keys with no context cue, and base64 blobs whose `kind:
+> Secret` manifest is **not in the same payload** (decoding happens only with the manifest as
+> ground truth — a lone blob is indistinguishable from a SHA or log blob) are **not** caught — see
 > [LLM security architecture §2](security-architecture.md#2-secret-redaction-three-boundaries-one-chokepoint)
 > for the full list. If you run a **public KB repo** or **untrusted-tenant namespaces**, treat this
 > as a gating concern — and prefer **self-hosting the model** (in-cluster vLLM/Ollama), which keeps

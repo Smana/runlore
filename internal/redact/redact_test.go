@@ -3,6 +3,7 @@
 package redact
 
 import (
+	"encoding/base64"
 	"strings"
 	"testing"
 )
@@ -51,6 +52,64 @@ func TestSecretsMasks(t *testing.T) {
 				t.Fatalf("not idempotent: %q -> %q", out, again)
 			}
 		})
+	}
+}
+
+// A Secret's data: values are KNOWN secrets — masking them in the block is not
+// enough (REDACT-B64): the same material elsewhere in the payload, decoded in a
+// log line or base64-encoded in an event, must be scrubbed too. This is the
+// tractable half of the disclosed "never decodes base64" gap: with the manifest
+// in the payload, we have ground truth and can scrub with full precision.
+func TestSecretsKnownSecretScrubbedPayloadWide(t *testing.T) {
+	plain := "hunter2-stallion"
+	blob := base64.StdEncoding.EncodeToString([]byte(plain))
+	in := "kind: Secret\nmetadata:\n  name: db\ndata:\n  pw: " + blob + "\n  quoted: \"" + blob + "\"\n---\n" +
+		"log line: login failed for " + plain + " on db-0\n" +
+		"event: mounted value " + blob + " into pod\n"
+	out := Secrets(in)
+	if strings.Contains(out, plain) {
+		t.Fatalf("decoded data: value survived elsewhere in the payload:\n%s", out)
+	}
+	if strings.Contains(out, blob) {
+		t.Fatalf("base64 data: value survived elsewhere in the payload:\n%s", out)
+	}
+	for _, keep := range []string{"login failed for", "on db-0", "mounted value", "into pod"} {
+		if !strings.Contains(out, keep) {
+			t.Fatalf("structure %q should survive, got:\n%s", keep, out)
+		}
+	}
+	if again := Secrets(out); again != out {
+		t.Fatalf("not idempotent:\n%s\n->\n%s", out, again)
+	}
+}
+
+// stringData: values are plaintext secrets by position — the same payload-wide
+// scrub applies without a decode step.
+func TestSecretsStringDataValueScrubbedPayloadWide(t *testing.T) {
+	plain := "plaintext-cred-77"
+	in := "kind: Secret\nstringData:\n  cred: " + plain + "\n---\nmsg says " + plain + " was used\n"
+	out := Secrets(in)
+	if strings.Contains(out, plain) {
+		t.Fatalf("stringData value survived elsewhere in the payload:\n%s", out)
+	}
+	if !strings.Contains(out, "msg says") || !strings.Contains(out, "was used") {
+		t.Fatalf("structure should survive, got:\n%s", out)
+	}
+}
+
+// Precision guard: a decoded value shorter than the learning floor ("prod",
+// "true") is NOT scrubbed payload-wide — masking every occurrence of a short
+// common word would blind the model to benign evidence. The block value itself
+// is still masked.
+func TestSecretsShortDecodedValueNotScrubbedGlobally(t *testing.T) {
+	blob := base64.StdEncoding.EncodeToString([]byte("prod")) // cHJvZA==
+	in := "kind: Secret\ndata:\n  env: " + blob + "\n---\nnamespace prod is healthy\n"
+	out := Secrets(in)
+	if !strings.Contains(out, "env: [REDACTED]") {
+		t.Fatalf("block value must still be masked, got:\n%s", out)
+	}
+	if !strings.Contains(out, "namespace prod is healthy") {
+		t.Fatalf("short decoded value must not be scrubbed globally, got:\n%s", out)
 	}
 }
 

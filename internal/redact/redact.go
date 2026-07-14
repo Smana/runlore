@@ -13,7 +13,9 @@
 package redact
 
 import (
+	"encoding/base64"
 	"regexp"
+	"sort"
 	"strings"
 )
 
@@ -73,7 +75,8 @@ func Secrets(s string) string {
 	for _, r := range rules {
 		s = r.re.ReplaceAllString(s, r.repl)
 	}
-	return k8sSecretData(s)
+	s, learned := k8sSecretData(s)
+	return scrubLearned(s, learned)
 }
 
 // diffPrefixRE matches an optional git-diff line marker ("+ ", "- ", or a single
@@ -95,8 +98,10 @@ var kindSecretRE = regexp.MustCompile(`^kind:\s*["']?Secret["']?\s*$`)
 var kindAnyRE = regexp.MustCompile(`^kind:\s*\S`)
 
 // dataKeyRE matches a `data:` or `stringData:` mapping key (no inline value),
-// capturing its indentation. Anchored after diff-marker stripping.
-var dataKeyRE = regexp.MustCompile(`^(\s*)(?:data|stringData):\s*$`)
+// capturing its indentation and which of the two it is (data: values are
+// base64, stringData: values are plaintext). Anchored after diff-marker
+// stripping.
+var dataKeyRE = regexp.MustCompile(`^(\s*)(data|stringData):\s*$`)
 
 // dataEntryRE matches a `  key: value` mapping entry inside a data block,
 // capturing indentation, the "key:" portion, and the value. Block scalars
@@ -110,12 +115,17 @@ var dataEntryRE = regexp.MustCompile(`^(\s*)([^\s:][^:]*:\s*)(\S.*)$`)
 // left untouched. It tolerates git-diff line markers ("+ ", "- ", leading
 // space) because a Secret most often surfaces inside a `what_changed` diff.
 //
+// Every masked value is also LEARNED (second return): the raw token and, for a
+// base64 `data:` value, its decoded plaintext. The caller scrubs those literals
+// from the whole payload — the same secret quoted decoded in a log line or
+// encoded in an event must not outlive the manifest that names it.
+//
 // A data block ends at: a dedent to a column <= the data key's indent, a new
 // top-level key, a `kind:` line, or a YAML document separator ("---"). The pass
 // is idempotent: once a value is the mask string it stays the mask string.
-func k8sSecretData(s string) string {
+func k8sSecretData(s string) (string, []string) {
 	if !strings.Contains(s, "kind:") {
-		return s
+		return s, nil
 	}
 	// Preserve a trailing-newline / no-trailing-newline shape exactly.
 	lines := strings.Split(s, "\n")
@@ -123,6 +133,8 @@ func k8sSecretData(s string) string {
 	inSecret := false    // current YAML document is a kind: Secret
 	inDataBlock := false // currently inside that Secret's data:/stringData: block
 	dataIndent := 0      // indent (in columns) of the data: key
+	stringData := false  // the current block is stringData: (plaintext values)
+	var learned []string // secret literals to scrub payload-wide
 
 	for i, raw := range lines {
 		m := diffPrefixRE.FindStringSubmatch(raw)
@@ -162,6 +174,7 @@ func k8sSecretData(s string) string {
 				if entry := dataEntryRE.FindStringSubmatch(body); entry != nil {
 					val := strings.TrimRight(entry[3], " ")
 					if val != mask {
+						learned = append(learned, learnSecretValues(val, stringData)...)
 						lines[i] = prefix + entry[1] + entry[2] + mask
 					}
 				}
@@ -173,10 +186,60 @@ func k8sSecretData(s string) string {
 		if dk := dataKeyRE.FindStringSubmatch(body); dk != nil {
 			inDataBlock = true
 			dataIndent = leadingSpaces(dk[1])
+			stringData = dk[2] == "stringData"
 			continue
 		}
 	}
-	return strings.Join(lines, "\n")
+	return strings.Join(lines, "\n"), learned
+}
+
+// minLearnedSecretLen is the floor for payload-wide scrubbing of a learned
+// secret literal. Below it, the risk flips: masking every occurrence of a short
+// common value ("prod", "true") would blind the model to benign evidence, while
+// real secrets this short are rare. The block value itself is masked regardless.
+const minLearnedSecretLen = 6
+
+// learnSecretValues extracts the literals to scrub payload-wide from one
+// data-block value: the raw token (surrounding quotes stripped) and, for a
+// base64 `data:` value, its decoded plaintext. stringData values are plaintext
+// by definition — no decode step.
+func learnSecretValues(val string, stringData bool) []string {
+	tok := strings.Trim(val, `"'`)
+	if !stringData {
+		// data: values are single base64 tokens; drop anything after whitespace
+		// (a trailing YAML comment) so the decode sees only the blob.
+		if f := strings.Fields(tok); len(f) > 0 {
+			tok = strings.Trim(f[0], `"'`)
+		}
+	}
+	var out []string
+	if len(tok) >= minLearnedSecretLen && tok != mask {
+		out = append(out, tok)
+	}
+	if !stringData {
+		dec, err := base64.StdEncoding.DecodeString(tok)
+		if err != nil {
+			dec, err = base64.RawStdEncoding.DecodeString(tok)
+		}
+		if err == nil && len(dec) >= minLearnedSecretLen {
+			out = append(out, string(dec))
+		}
+	}
+	return out
+}
+
+// scrubLearned masks every occurrence of the learned secret literals in s.
+// Longest first, so a literal containing another is masked whole rather than
+// left as a recognizable fragment around an inner mask.
+func scrubLearned(s string, learned []string) string {
+	if len(learned) == 0 {
+		return s
+	}
+	sort.Slice(learned, func(i, j int) bool { return len(learned[i]) > len(learned[j]) })
+	for _, lit := range learned {
+		s = strings.ReplaceAll(s, lit, mask)
+	}
+	return s
 }
 
 // leadingSpaces counts leading space/tab characters (column-ish indent). Tabs
