@@ -2,8 +2,8 @@ apiVersion: v2
 name: runlore
 description: RunLore — the self-improving, GitOps-native SRE agent (in-cluster agent).
 type: application
-version: 0.9.1
-appVersion: 0.9.1
+version: 0.9.2
+appVersion: 0.9.2
 home: https://github.com/Smana/runlore
 sources:
   - https://github.com/Smana/runlore
