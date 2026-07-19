@@ -32,7 +32,8 @@ func TestApplyDefaultsCoalesceEnabled(t *testing.T) {
 
 func TestApplyDefaultsRateLimitWindow(t *testing.T) {
 	var c Config
-	c.Investigation.RateLimit.MaxPerWindow = 10
+	n := 10
+	c.Investigation.RateLimit.MaxPerWindow = &n
 	applyDefaults(&c)
 	if c.Investigation.RateLimit.Window.Std() != time.Hour {
 		t.Fatalf("default Window: got %v, want 1h", c.Investigation.RateLimit.Window.Std())
@@ -270,8 +271,8 @@ telemetry:
 	if c.Investigation.Coalesce.Debounce.Std() != 30*time.Second {
 		t.Fatalf("debounce: got %v", c.Investigation.Coalesce.Debounce.Std())
 	}
-	if c.Investigation.RateLimit.MaxPerWindow != 20 {
-		t.Fatalf("max_per_window: got %d", c.Investigation.RateLimit.MaxPerWindow)
+	if c.Investigation.RateLimit.MaxPerWindow == nil || *c.Investigation.RateLimit.MaxPerWindow != 20 {
+		t.Fatalf("max_per_window: got %v", c.Investigation.RateLimit.MaxPerWindow)
 	}
 	if c.Investigation.RateLimit.MaxRequeues != 10 {
 		t.Fatalf("max_requeues: got %d", c.Investigation.RateLimit.MaxRequeues)

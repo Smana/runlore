@@ -115,6 +115,12 @@ The chart's RBAC is scoped tightly (`deploy/helm/runlore/templates/rbac.yaml`):
   webhook must not reach the LLM and bill the model) and also enforced by `config.Validate` under
   `actions.mode=auto`. It is warning-only for the model-less log-only investigator. Pair it with a
   restrictive NetworkPolicy.
+- **Failed-auth backoff.** Failed authentications on the control endpoints and the alert webhook are
+  rate-limited per remote host: after 10 consecutive failures the host is blocked for 1s, doubling up
+  to a 60s cap, and the block is checked before the token compare. A correct token always clears the
+  counter. Behind a shared NAT this can delay a legitimate caller for at most one block window during
+  a live attack. Tokens should be ≥128-bit random values (e.g. `openssl rand -hex 16`); the backoff
+  is a brake on weak tokens, not a substitute for a strong one.
 
 ## Tamper-evident audit log
 

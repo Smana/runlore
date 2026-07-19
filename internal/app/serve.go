@@ -183,11 +183,11 @@ func RunServe(version string, args []string) error {
 	}
 	queue := investigate.NewQueue(inv, log)
 	var rlStarts *ratelimit.Window
-	if rl := cfg.Investigation.RateLimit; rl.MaxPerWindow > 0 {
+	if rl := cfg.Investigation.RateLimit; rl.MaxPerWindow != nil && *rl.MaxPerWindow > 0 {
 		w := rl.Window.Std()
-		rlStarts = ratelimit.New(rl.MaxPerWindow, w)
+		rlStarts = ratelimit.New(*rl.MaxPerWindow, w)
 		log.Info("investigation rate limit configured",
-			"max_per_window", rl.MaxPerWindow, "window", w, "max_requeues", rl.MaxRequeues)
+			"max_per_window", *rl.MaxPerWindow, "window", w, "max_requeues", rl.MaxRequeues)
 	}
 	// Always wire metrics into the Queue so InvestigationsStarted emits even when
 	// rate-limiting is unconfigured (max_per_window == 0).

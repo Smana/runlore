@@ -18,6 +18,15 @@ type Authenticator interface {
 	Authenticate(body []byte, h http.Header) bool
 }
 
+// MaxRequestsPerPayload bounds how many investigation requests one webhook
+// delivery may enqueue (cost-DoS guard): the 1MiB body cap still admits ~1k
+// alerts, and distinct alertnames bypass dedup — each would bill a model
+// investigation. Resolutions are EXEMPT (cheap, and dropping one would corrupt
+// outcome tracking). Truncation over rejection: Alertmanager re-delivers on
+// repeat_interval, so a truncated legitimate batch self-heals; a 4xx loses all
+// of it. Not configurable until someone needs it (YAGNI).
+const MaxRequestsPerPayload = 100
+
 // Handler builds the HTTP handler for a webhook source: shared auth, body cap,
 // decode, and ingest. auth (may be nil) authenticates the request via the shared
 // bearer token; a source implementing Authenticator authenticates itself from the
@@ -50,6 +59,13 @@ func (b Built) Handler(auth func(*http.Request) bool, bodyCap int64, pipe *Pipel
 		if derr != nil {
 			http.Error(w, "bad payload", http.StatusBadRequest)
 			return
+		}
+		if len(res.Requests) > MaxRequestsPerPayload {
+			if pipe.log != nil {
+				pipe.log.Warn("webhook payload cap engaged; truncating requests",
+					"source", b.Desc.Name, "decoded", len(res.Requests), "cap", MaxRequestsPerPayload)
+			}
+			res.Requests = res.Requests[:MaxRequestsPerPayload]
 		}
 		pipe.Ingest(r.Context(), b.Desc.Admission, res)
 		w.WriteHeader(http.StatusAccepted)

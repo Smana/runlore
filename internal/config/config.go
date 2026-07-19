@@ -348,7 +348,11 @@ type Coalesce struct {
 
 // RateLimit caps investigation starts per sliding window.
 type RateLimit struct {
-	MaxPerWindow int      `yaml:"max_per_window"` // 0 ⇒ unlimited
+	// MaxPerWindow caps investigation STARTS per Window. nil (unset) defaults to
+	// 30 (see applyDefaults) — a cost-DoS guard, since per-incident spend is
+	// bounded but the count of incidents was not. An EXPLICIT 0 preserves the
+	// pre-default unlimited behavior for configs that opted into it.
+	MaxPerWindow *int     `yaml:"max_per_window"`
 	Window       Duration `yaml:"window"`
 	MaxRequeues  int      `yaml:"max_requeues"` // drop a key after this many backoff requeues
 }
@@ -1011,6 +1015,12 @@ func (c *Config) Validate() error {
 		if err := validatePricing("model.verify.pricing", v.Pricing); err != nil {
 			return err
 		}
+	}
+	// Reject a negative rate-limit budget: applyDefaults fills an unset nil with 30,
+	// so only an explicit negative reaches here — fail loud rather than silently
+	// treating it as unlimited.
+	if mpw := c.Investigation.RateLimit.MaxPerWindow; mpw != nil && *mpw < 0 {
+		return fmt.Errorf("investigation.rate_limit.max_per_window must be >= 0 (0 = unlimited), got %d", *mpw)
 	}
 	// Reject a negative per-tool timeout: time.ParseDuration accepts negative values
 	// which silently disable the feature (fails the > 0 guard in runTool) rather than

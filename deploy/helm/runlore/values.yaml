@@ -152,7 +152,8 @@ config:
       #                         #   alertname or a standing 👎 on the trigger bypasses suppression)
       # correlation_labels: []  # group by label values instead of AM groupKey
     rate_limit:
-      max_per_window: 20        # cap investigations per window (window defaults to 1h); 0 = unlimited
+      max_per_window: 20        # cap investigations per window (window defaults to 1h);
+                                #   explicit 0 = unlimited; UNSET now defaults to 30
       # window: 1h
       # max_requeues: 3
     # recurrence_cooldown: 30m  # OPT-IN: skip re-investigating a trigger answered conclusively less
