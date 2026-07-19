@@ -112,6 +112,43 @@ func TestMirrorAcquireBadURL(t *testing.T) {
 	}
 }
 
+// TestMirrorEviction: with max=2, acquiring a 3rd distinct repo evicts the
+// oldest-mtime mirror; the two newest survive.
+func TestMirrorEviction(t *testing.T) {
+	srcA, _, _ := buildRepo(t)
+	srcB, _, _ := buildRepo(t)
+	srcC, _, _ := buildRepo(t)
+	mc, err := NewMirrorCache(t.TempDir(), 2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, src := range []string{srcA, srcB} {
+		_, release, err := mc.Acquire(context.Background(), src, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		release()
+	}
+	// Age A so it is the eviction victim regardless of clone timing.
+	old := time.Now().Add(-time.Hour)
+	if err := os.Chtimes(filepath.Join(mc.dir, mirrorKey(srcA)), old, old); err != nil {
+		t.Fatal(err)
+	}
+	_, release, err := mc.Acquire(context.Background(), srcC, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	release()
+	if _, err := os.Stat(filepath.Join(mc.dir, mirrorKey(srcA))); !os.IsNotExist(err) {
+		t.Fatal("oldest mirror (A) should have been evicted")
+	}
+	for _, src := range []string{srcB, srcC} {
+		if _, err := os.Stat(filepath.Join(mc.dir, mirrorKey(src))); err != nil {
+			t.Fatalf("mirror for %s should survive: %v", src, err)
+		}
+	}
+}
+
 // addCommit writes one file into the fixture repo at dir and commits it with a
 // fixed timestamp, returning the new commit hash.
 func addCommit(t testing.TB, dir, rel, content, msg string, sec int64) plumbing.Hash {

@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"sync"
 
 	git "github.com/go-git/go-git/v5"
@@ -105,5 +106,47 @@ func mirrorKey(url string) string {
 	return hex.EncodeToString(h[:8])
 }
 
-// evictLocked makes room for one more mirror; implemented in the eviction task.
-func (m *MirrorCache) evictLocked(_ string) {}
+// evictLocked deletes oldest-mtime mirrors until fewer than max remain,
+// making room for the mirror about to be cloned at keep. A dir whose entry
+// read/write lock is currently held (an in-flight Acquire) is skipped —
+// never delete a mirror out from under a reader. Touches disk state only;
+// best-effort by design (an undeletable dir is skipped, not fatal).
+func (m *MirrorCache) evictLocked(keep string) {
+	entries, err := os.ReadDir(m.dir)
+	if err != nil || len(entries) < m.max {
+		return
+	}
+	type victim struct {
+		path string
+		mod  int64
+	}
+	var victims []victim
+	m.mu.Lock()
+	locked := map[string]bool{}
+	for _, e := range m.entries {
+		if e.path == keep {
+			continue
+		}
+		if e.lock.TryLock() {
+			e.lock.Unlock()
+		} else {
+			locked[e.path] = true
+		}
+	}
+	m.mu.Unlock()
+	for _, de := range entries {
+		p := filepath.Join(m.dir, de.Name())
+		if p == keep || locked[p] {
+			continue
+		}
+		info, err := de.Info()
+		if err != nil {
+			continue
+		}
+		victims = append(victims, victim{path: p, mod: info.ModTime().UnixNano()})
+	}
+	sort.Slice(victims, func(i, j int) bool { return victims[i].mod < victims[j].mod })
+	for i := 0; len(victims)-i > m.max-1 && i < len(victims); i++ {
+		_ = os.RemoveAll(victims[i].path)
+	}
+}
