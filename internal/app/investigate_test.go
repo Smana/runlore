@@ -377,6 +377,44 @@ func TestAppendMCPToolsSkipsUnreachable(t *testing.T) {
 	}
 }
 
+// TestAppendMCPToolsAllowlist: with a tools allowlist, only listed remote tools
+// are registered; unlisted advertised tools never become investigate.Tools.
+func TestAppendMCPToolsAllowlist(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			ID     json.RawMessage `json:"id"`
+			Method string          `json:"method"`
+		}
+		b, _ := io.ReadAll(r.Body)
+		_ = json.Unmarshal(b, &req)
+		switch req.Method {
+		case "tools/list":
+			_ = json.NewEncoder(w).Encode(map[string]any{"jsonrpc": "2.0", "id": req.ID,
+				"result": map[string]any{"tools": []map[string]any{
+					{"name": "query", "description": "d"},
+					{"name": "delete_everything", "description": "d"},
+				}}})
+		default:
+			_ = json.NewEncoder(w).Encode(map[string]any{"jsonrpc": "2.0", "id": req.ID, "result": map[string]any{}})
+		}
+	}))
+	defer srv.Close()
+
+	cfg := &config.Config{MCP: config.MCP{Servers: []config.MCPServer{
+		{Name: "kb", Endpoint: config.Endpoint{URL: srv.URL}, Tools: []string{"query", "not_advertised"}},
+	}}}
+	var tools []investigate.Tool
+	tools = appendMCPTools(context.Background(), cfg, slog.New(slog.NewTextHandler(io.Discard, nil)), tools)
+
+	var names []string
+	for _, tl := range tools {
+		names = append(names, tl.Name())
+	}
+	if len(names) != 1 || names[0] != "kb__query" {
+		t.Fatalf("want only kb__query (delete_everything filtered), got %v", names)
+	}
+}
+
 // TestBuildVerifyModel asserts the verify-model override wiring: nil when no
 // model.verify is configured (verify then runs on the main model), non-nil when an
 // override is present.

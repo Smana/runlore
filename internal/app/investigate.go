@@ -307,8 +307,19 @@ func appendMCPTools(ctx context.Context, cfg *config.Config, log *slog.Logger, t
 			log.Warn("mcp: skipping server (tools/list failed)", "server", s.Name, "err", err)
 			continue
 		}
+		allowed := map[string]bool{}
+		for _, tn := range s.Tools {
+			allowed[tn] = true
+		}
+		advertised := map[string]bool{}
+		var skipped []string
 		added := 0
 		for _, rt := range remote {
+			advertised[rt.Name] = true
+			if len(allowed) > 0 && !allowed[rt.Name] {
+				skipped = append(skipped, rt.Name)
+				continue
+			}
 			tl := mcp.NewTool(c, rt)
 			if have[tl.Name()] {
 				log.Warn("mcp: skipping tool (name collision)", "server", s.Name, "tool", tl.Name())
@@ -317,6 +328,14 @@ func appendMCPTools(ctx context.Context, cfg *config.Config, log *slog.Logger, t
 			have[tl.Name()] = true
 			tools = append(tools, tl)
 			added++
+		}
+		if len(skipped) > 0 {
+			log.Info("mcp: tools excluded by allowlist", "server", s.Name, "skipped", skipped)
+		}
+		for tn := range allowed {
+			if !advertised[tn] {
+				log.Warn("mcp: allowlisted tool not advertised by server (typo?)", "server", s.Name, "tool", tn)
+			}
 		}
 		log.Info("mcp: registered server tools", "server", s.Name, "tools", added)
 	}
