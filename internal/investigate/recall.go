@@ -600,7 +600,7 @@ func (r *Recall) outcomeGate(counts map[string]outcome.Aggregate, path string) (
 // with no recall or feedback history never reach this gate (they are absent from
 // OpenCounts), so a brand-new entry is not punished by the 0.5 prior mean.
 func outcomeFactor(recalls, resolved, up, down int, k float64) float64 {
-	return (float64(resolved+up) + k/2) / (float64(recalls+up+down) + k)
+	return outcome.Aggregate{Recalls: recalls, Resolved: resolved, FeedbackUp: up, FeedbackDown: down}.Factor(k)
 }
 
 // deriveRecallConfidence turns the match signals into an explainable confidence,
