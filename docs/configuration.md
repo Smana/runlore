@@ -378,6 +378,19 @@ mcp:
 - `recurrence_threshold` — open a knowledge-gap issue after this many unresolved occurrences of a
   pattern; **default `3`**. A knowledge-gap issue flags patterns RunLore keeps encountering without
   resolving — a signal to write a runbook.
+- `retirement` — the **opt-in** KB retirement pass: opens a human-reviewed *retire* PR that stamps
+  `status: retired` into a **merged** entry whose outcome track record has sustainably decayed. It
+  never merges or deletes (a human is the gate; the entry stays in git history), is idempotent, and
+  respects a human veto — a retire PR closed without merging is never re-proposed. Keys:
+  - `enabled` — **default `false`**. When off, the pass is not wired at all (default behavior
+    unchanged); the other defaults are only applied once enabled.
+  - `min_observations` — the sustained-decay bar: total observations (recalls + 👍 + 👎) an entry
+    must have before retirement is even considered, so a single bad recall can't retire it;
+    **default `3`**, must be `>= 1`.
+  - `floor` — retire when the entry's outcome factor drops below this; **default `0.5`**, must be in
+    `(0,1]`. Mirrors recall's `catalog.instant_recall.outcome_floor` so the two gates agree.
+  - `prior` — Beta prior strength `k` for the decay formula; **default `2.0`**. Mirrors recall's
+    `catalog.instant_recall.outcome_prior` — keep them equal unless deliberately tuning the gates apart.
 
 ### Other top-level keys
 `gitops.engine` (`flux` default · `argocd`), `cloud` (`provider: aws`, `region`, `cluster_name`),

@@ -181,4 +181,20 @@ func applyDefaults(c *Config) {
 			}
 		}
 	}
+	// Retirement pass defaults (opt-in): only fill the tuning knobs once the pass is
+	// enabled, so a disabled block stays at its zero value and never wires the pass
+	// in. Prior/Floor mirror the recall gate's outcome_prior/outcome_floor defaults
+	// (2.0 / 0.5) so recall's fire gate and retirement agree on decay by default.
+	if c.Curate.Retirement.Enabled {
+		r := &c.Curate.Retirement
+		if r.MinObservations == 0 {
+			r.MinObservations = 3
+		}
+		if r.Floor == 0 {
+			r.Floor = 0.5
+		}
+		if r.Prior == 0 {
+			r.Prior = 2.0
+		}
+	}
 }

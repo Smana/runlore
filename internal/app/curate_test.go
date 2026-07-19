@@ -11,7 +11,17 @@ import (
 	"testing"
 	"time"
 
+	"github.com/Smana/runlore/internal/curate"
+	github "github.com/Smana/runlore/internal/forge/github"
 	"github.com/Smana/runlore/internal/outcome"
+)
+
+// The retirement pass is wired in RunCurate with *github.Client as its forge and
+// *outcome.Ledger as its stats source; pin both seams at compile time so a drift in
+// either interface fails here rather than in the wiring block.
+var (
+	_ curate.RetireForge = (*github.Client)(nil)
+	_ curate.RetireStats = (*outcome.Ledger)(nil)
 )
 
 // captureLog returns a logger writing JSON records into buf so a test can assert
