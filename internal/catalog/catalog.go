@@ -5,6 +5,7 @@ package catalog
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"strconv"
 	"strings"
 	"sync"
@@ -26,6 +27,15 @@ type Catalog struct {
 	vectors  [][]float32
 	embedder Embedder
 	ready    atomic.Bool // set on first successful Reload; gates readyz on catalog warmth
+	// vecCache maps sha256(entryText) → embedding, carried ACROSS reloads so a KB
+	// sync only embeds entries whose text actually changed (RunLore merges its own
+	// PRs — without this, every merge re-embeds the whole corpus). Rebuilt from the
+	// current corpus on each successful embed pass so deleted entries are evicted.
+	// Guarded by mu.
+	vecCache map[string][]float32
+	// Log, when set (wiring time, before the first Reload), surfaces non-fatal
+	// reload degradations — an embed failure that leaves hybrid BM25-only. Nil-safe.
+	Log *slog.Logger
 }
 
 // Searcher is the read surface used by the kb_search tool.
@@ -78,15 +88,13 @@ func (c *Catalog) ReloadContext(ctx context.Context, dir string) ([]string, erro
 	if err != nil {
 		return nil, err
 	}
-	var vectors [][]float32
-	if c.embedder != nil {
-		if v, verr := embedEntries(ctx, c.embedder, entries); verr == nil {
-			vectors = v
-		}
-	}
+	vectors, cache := c.embedWithCache(ctx, entries)
 	c.mu.Lock()
 	old := c.index
 	c.index, c.entries, c.vectors = idx, entries, vectors
+	if cache != nil {
+		c.vecCache = cache
+	}
 	c.mu.Unlock()
 	// Release the previous index's resources. Search holds the read lock for the
 	// whole query, so by the time the swap above acquired the write lock no query

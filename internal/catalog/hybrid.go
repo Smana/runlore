@@ -4,6 +4,8 @@ package catalog
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"sort"
 	"strconv"
@@ -41,15 +43,55 @@ func (c *Catalog) HasVectors() bool {
 	return len(c.vectors) > 0 && len(c.vectors) == len(c.entries)
 }
 
-func embedEntries(ctx context.Context, e Embedder, entries []Entry) ([][]float32, error) {
-	if len(entries) == 0 {
+// embedWithCache returns one vector per entry plus the refreshed cache, reusing
+// cached vectors for unchanged texts and embedding only the missing subset (the
+// client already chunks oversized batches). The hybrid invariant is
+// ALL-OR-NOTHING — on any embed failure it returns (nil, previous cache):
+// vectors drop for this reload (HasVectors goes false, recall degrades to BM25 —
+// never a partial vector set that would silently exclude new entries from the
+// cosine ranking), while the surviving cache makes the next attempt embed only
+// what is still missing. nil embedder or empty corpus → (nil, nil).
+func (c *Catalog) embedWithCache(ctx context.Context, entries []Entry) ([][]float32, map[string][]float32) {
+	if c.embedder == nil || len(entries) == 0 {
 		return nil, nil
 	}
-	texts := make([]string, len(entries))
-	for i, en := range entries {
-		texts[i] = entryText(en)
+	c.mu.RLock()
+	prev := c.vecCache
+	c.mu.RUnlock()
+
+	keys := make([]string, len(entries))
+	vectors := make([][]float32, len(entries))
+	var missTexts []string
+	var missIdx []int
+	for i, e := range entries {
+		text := entryText(e)
+		sum := sha256.Sum256([]byte(text))
+		keys[i] = hex.EncodeToString(sum[:])
+		if v, ok := prev[keys[i]]; ok {
+			vectors[i] = v
+			continue
+		}
+		missTexts = append(missTexts, text)
+		missIdx = append(missIdx, i)
 	}
-	return e.Embed(ctx, texts)
+	if len(missTexts) > 0 {
+		vecs, err := c.embedder.Embed(ctx, missTexts)
+		if err != nil {
+			if c.Log != nil {
+				c.Log.Warn("catalog embed failed; hybrid recall degrades to BM25-only until the next successful sync",
+					"missing", len(missTexts), "entries", len(entries), "err", err)
+			}
+			return nil, prev
+		}
+		for j, v := range vecs {
+			vectors[missIdx[j]] = v
+		}
+	}
+	cache := make(map[string][]float32, len(entries))
+	for i, k := range keys {
+		cache[k] = vectors[i]
+	}
+	return vectors, cache
 }
 
 // SearchHybrid combines lexical and semantic retrieval for instant recall. It pools
