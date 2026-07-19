@@ -21,6 +21,13 @@ import (
 // repos only.
 func BuildGitOps(cfg *config.Config, dc dynamic.Interface, log *slog.Logger) providers.GitOpsProvider {
 	differ := &whatchanged.Differ{TokenSource: BuildForgeTokenSource(cfg, log)}
+	if cfg.GitOps.Mirror.IsEnabled() {
+		if mc, err := whatchanged.NewMirrorCache(cfg.GitOps.Mirror.Dir, cfg.GitOps.Mirror.Max); err != nil {
+			log.Warn("gitops: mirror cache unavailable; falling back to clone-per-call", "err", err)
+		} else {
+			differ.Mirrors = mc
+		}
+	}
 	if GitopsEngine(cfg) == "argocd" {
 		log.Info("gitops engine", "engine", "argocd")
 		return argocd.New(argocd.NewDynamicReader(dc), differ)

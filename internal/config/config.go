@@ -574,8 +574,21 @@ type MatrixNotify struct {
 
 // GitOps selects the GitOps engine RunLore reads (what-changed + failure watch).
 type GitOps struct {
-	Engine string `yaml:"engine"` // "flux" (default) | "argocd"
+	Engine string       `yaml:"engine"` // "flux" (default) | "argocd"
+	Mirror GitOpsMirror `yaml:"mirror"` // persistent clone mirror for what_changed
 }
+
+// GitOpsMirror configures the persistent per-repo bare mirror backing
+// what_changed clones. Enabled by default (nil/true): a mirror only ever
+// falls back to the previous clone-per-call behavior on error.
+type GitOpsMirror struct {
+	Enabled *bool  `yaml:"enabled"` // nil/true ⇒ on; false ⇒ clone per call (legacy)
+	Dir     string `yaml:"dir"`     // mirror root; "" ⇒ <tmp>/runlore-mirrors (ephemeral; point at a PV to persist across restarts)
+	Max     int    `yaml:"max"`     // max mirrors kept (LRU by mtime); 0 ⇒ 10
+}
+
+// IsEnabled reports whether the mirror cache is on (nil ⇒ default on).
+func (m GitOpsMirror) IsEnabled() bool { return m.Enabled == nil || *m.Enabled }
 
 // TriggerPolicy decides what RunLore reacts to.
 type TriggerPolicy struct {
@@ -1005,6 +1018,11 @@ func (c *Config) Validate() error {
 	// negative reaches here). Validate fail-loud rather than silently never pinging.
 	if c.Investigation.ProgressUpdates.Enabled && c.Investigation.ProgressUpdates.EverySteps <= 0 {
 		return fmt.Errorf("investigation.progress_updates.every_steps must be > 0 when enabled, got %d", c.Investigation.ProgressUpdates.EverySteps)
+	}
+	// gitops.mirror.max caps the persistent what_changed mirror count; 0 means the
+	// applyDefaults value (10). A negative cap is always a misconfiguration.
+	if c.GitOps.Mirror.Max < 0 {
+		return fmt.Errorf("gitops.mirror.max must be >= 0 (0 = use the default 10), got %d", c.GitOps.Mirror.Max)
 	}
 	// Pricing rates must be non-negative (a negative rate would report a negative
 	// cost). Cover the main model and the verify override (which carries its own).
