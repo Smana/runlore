@@ -86,6 +86,21 @@ func RunCurate(args []string) error {
 			// marker — no store, mirroring the other passes.
 			curate.Contested{Forge: forge, Ledger: ledger, KBRepo: cfg.Forge.KBRepo, Log: log},
 		)
+		// Retirement (opt-in) closes the garbage-collection half of the loop: it opens a
+		// human-reviewed "retire" PR for a MERGED entry whose outcome factor stayed below
+		// the trust floor across a sustained run of observations. It never merges and never
+		// deletes — a human is the load-bearing gate; the PR only stamps `status: retired`.
+		// Idempotent and human-veto-aware via a hidden per-entry PR-body marker (no store).
+		if cfg.Curate.Retirement.Enabled {
+			agent.Passes = append(agent.Passes, curate.Retirement{
+				Forge:           forge,
+				Stats:           ledger,
+				MinObservations: cfg.Curate.Retirement.MinObservations,
+				Floor:           cfg.Curate.Retirement.Floor,
+				Prior:           cfg.Curate.Retirement.Prior,
+				Log:             log,
+			})
+		}
 		// Warn loudly when the ledger this pod sees is absent/empty: outcome.New
 		// succeeds on a missing file, so the passes would otherwise run silently
 		// against zero episodes (a misconfigured mount, not "no work").

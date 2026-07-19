@@ -400,6 +400,31 @@ ledger, so they stay source-neutral):
   KB PR so the reviewer sees the contest before merging; idempotent via a hidden
   per-trigger marker in the comment, no mutable store.
 
+Finally, an **opt-in** pass closes the *garbage-collection* half of the loop — the
+mirror image of curation, where decay existed but had no consequence beyond recall
+rejection:
+
+- **Retirement** (`curate.retirement.enabled`, default **off**) — opens a
+  human-reviewed *retire* PR for a **merged** catalog entry whose outcome factor stayed
+  below the trust floor across a **sustained** run of observations
+  (`min_observations`, default 3 — so a single bad recall, factor 0.33, can never retire
+  an entry). It uses the **same decay formula and floor as recall's Gate 3**
+  (`outcome.Aggregate.Factor`, the one definition both gates share), so the entry
+  proposed for retirement is exactly the one recall already rejects — every recurrence
+  was already paying a full investigation. The PR stamps `status: retired` into the
+  entry's YAML frontmatter (a surgical one-line edit that preserves the human's
+  formatting) and a human merges: retirement **never** merges or deletes, so a retired
+  entry stays in git history — it just stops being recallable. Idempotent and
+  **human-veto-aware** via a hidden per-entry marker in the PR body: an open retire PR
+  is never re-proposed, and a retire PR a human **closed without merging** is a
+  deliberate "keep it" that is never re-nagged (the same closed-unmerged-is-a-no
+  philosophy as the recurrence escalation above). Per-item error isolation: one flaky
+  entry never starves the rest of a run.
+  - **Seam (in progress).** This pass *writes* the `status: retired` frontmatter; the
+    catalog loader honoring it — so a retired entry actually stops being recalled — ships
+    as a separate change. Until then a merged retirement PR is inert but correct (the
+    entry is marked, the git history records the decision), with no dependency either way.
+
 ---
 
 ## 6. The feedback edge — outcome-driven decay (what makes it *learn*)

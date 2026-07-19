@@ -1185,6 +1185,21 @@ func (c *Config) Validate() error {
 			return fmt.Errorf("catalog.instant_recall.rerank_min_score must be >= 0 (retrieval-score cost floor), got %g", ir.RerankMinScore)
 		}
 	}
+	// Retirement pass (opt-in): its knobs are only meaningful when enabled, and a
+	// disabled block is never validated. applyDefaults fills unset (0) values while
+	// enabled, so only an explicitly out-of-range setting reaches here. Floor is a
+	// calibrated posterior-mean success rate: it MUST match recall's outcome_floor
+	// range (0,1] — a floor >1 would retire everything, <=0 nothing. min_observations
+	// is the sustained-decay bar and must be >= 1 (a single bad recall must never retire).
+	if c.Curate.Retirement.Enabled {
+		r := c.Curate.Retirement
+		if r.Floor <= 0 || r.Floor > 1 {
+			return fmt.Errorf("curate.retirement.floor must be in (0,1] (a calibrated outcome factor, matching recall's outcome_floor), got %g", r.Floor)
+		}
+		if r.MinObservations < 1 {
+			return fmt.Errorf("curate.retirement.min_observations must be >= 1 (the sustained-decay bar), got %d", r.MinObservations)
+		}
+	}
 	switch c.Actions.Mode {
 	case "", ActionOff, ActionSuggest:
 		return nil // read-only-ish: nothing to execute
@@ -1227,6 +1242,21 @@ func (c *Config) Validate() error {
 type Curate struct {
 	StaleAfter          Duration `yaml:"stale_after"`          // close unprotected KB PRs idle longer than this; 0 disables (default 720h)
 	RecurrenceThreshold int      `yaml:"recurrence_threshold"` // open a knowledge-gap issue after this many unresolved occurrences of a pattern; 0 ⇒ default 3
+	// Retirement opens a human-reviewed "retire" PR for a merged catalog entry whose
+	// outcome factor stayed below Floor across at least MinObservations observations.
+	// Opt-in: the pass writes to the forge on a schedule, and retirement is a
+	// judgment call an operator must consciously enable. Prior/Floor default to the
+	// recall gate's outcome_prior/outcome_floor defaults (2.0 / 0.5) so the two
+	// gates agree unless deliberately tuned apart.
+	Retirement Retirement `yaml:"retirement"`
+}
+
+// Retirement configures the curate retirement pass (opt-in KB garbage collection).
+type Retirement struct {
+	Enabled         bool    `yaml:"enabled"`
+	MinObservations int     `yaml:"min_observations"` // sustained-decay bar (default 3)
+	Floor           float64 `yaml:"floor"`            // retire below this factor (default 0.5)
+	Prior           float64 `yaml:"prior"`            // Beta prior strength k (default 2.0)
 }
 
 // Forge holds git-forge authentication and the curation target repo.

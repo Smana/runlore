@@ -957,6 +957,19 @@ type Aggregate struct {
 	LastConfirmed time.Time
 }
 
+// Factor is the entry's outcome-decay factor: the posterior mean of a symmetric
+// Beta(k/2, k/2) prior over the success rate, folding resolves and human votes
+// into one trust signal:
+//
+//	factor = (Resolved + FeedbackUp + k/2) / (Recalls + FeedbackUp + FeedbackDown + k)
+//
+// It is THE single definition of decay — recall's fire gate and the curate
+// retirement pass both consume it, so they can never drift apart. See
+// investigate's gate docs for the full statistical rationale.
+func (a Aggregate) Factor(k float64) float64 {
+	return (float64(a.Resolved+a.FeedbackUp) + k/2) / (float64(a.Recalls+a.FeedbackUp+a.FeedbackDown) + k)
+}
+
 // OpenCounts rolls recall episodes up per catalog entry (fresh investigations
 // carry no entry). It is the input to recall decay: resolve-rate ≈
 // (Resolved+k)/(Recalls+k), and runs on the recall hot path once per incident
