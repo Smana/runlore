@@ -20,7 +20,7 @@ import (
 
 // buildRepo creates a temp git repo with two commits and returns the repo dir
 // and the two commit hashes. v1 adds two files; v2 changes both.
-func buildRepo(t *testing.T) (dir string, v1, v2 plumbing.Hash) {
+func buildRepo(t testing.TB) (dir string, v1, v2 plumbing.Hash) {
 	t.Helper()
 	dir = t.TempDir()
 	repo, err := git.PlainInit(dir, false)
