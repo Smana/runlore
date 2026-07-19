@@ -5,6 +5,7 @@ package config
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -311,5 +312,76 @@ triggers:
 	}
 	if c.Triggers.Incidents.Debounce.Std() != 5*time.Minute {
 		t.Fatalf("explicit debounce: got %v, want 5m", c.Triggers.Incidents.Debounce.Std())
+	}
+}
+
+// TestRateLimitDefaultsOn pins the cost-DoS default: an UNSET
+// investigation.rate_limit.max_per_window defaults to 30 per 1h window. An
+// unbounded default let any token-holding caller (or a misfiring Alertmanager)
+// run up the model bill — per-incident cost was capped, count was not.
+func TestRateLimitDefaultsOn(t *testing.T) {
+	c := loadDoc(t, `
+sources:
+  alertmanager: {}
+`)
+	if c.Investigation.RateLimit.MaxPerWindow == nil {
+		t.Fatal("unset max_per_window must be defaulted (non-nil) by applyDefaults")
+	}
+	if got := *c.Investigation.RateLimit.MaxPerWindow; got != 30 {
+		t.Fatalf("unset max_per_window must default to 30, got %d", got)
+	}
+	if c.Investigation.RateLimit.Window != Duration(time.Hour) {
+		t.Fatalf("defaulted budget must also default window to 1h, got %v", c.Investigation.RateLimit.Window)
+	}
+}
+
+// TestRateLimitExplicitZeroStaysUnlimited pins backward compatibility: a deployed
+// `max_per_window: 0` keeps its documented unlimited meaning after the default flip.
+func TestRateLimitExplicitZeroStaysUnlimited(t *testing.T) {
+	c := loadDoc(t, `
+sources:
+  alertmanager: {}
+investigation:
+  rate_limit:
+    max_per_window: 0
+`)
+	if c.Investigation.RateLimit.MaxPerWindow == nil {
+		t.Fatal("explicit 0 should be non-nil (distinguishable from unset)")
+	}
+	if got := *c.Investigation.RateLimit.MaxPerWindow; got != 0 {
+		t.Fatalf("explicit max_per_window: 0 must stay 0 (unlimited), got %d", got)
+	}
+}
+
+// TestRateLimitExplicitValueKept pins that an operator's value survives defaulting.
+func TestRateLimitExplicitValueKept(t *testing.T) {
+	c := loadDoc(t, `
+sources:
+  alertmanager: {}
+investigation:
+  rate_limit:
+    max_per_window: 7
+`)
+	if got := *c.Investigation.RateLimit.MaxPerWindow; got != 7 {
+		t.Fatalf("explicit max_per_window: 7 must be kept, got %d", got)
+	}
+}
+
+// TestRateLimitNegativeRejected pins fail-loud validation: a negative budget is a
+// misconfiguration, not a request for unlimited.
+func TestRateLimitNegativeRejected(t *testing.T) {
+	p := filepath.Join(t.TempDir(), "runlore.yaml")
+	doc := `
+sources:
+  alertmanager: {}
+investigation:
+  rate_limit:
+    max_per_window: -1
+`
+	if err := os.WriteFile(p, []byte(doc), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Load(p); err == nil || !strings.Contains(err.Error(), "max_per_window") {
+		t.Fatalf("negative max_per_window must fail Load, got err=%v", err)
 	}
 }

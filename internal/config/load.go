@@ -86,9 +86,16 @@ func applyDefaults(c *Config) {
 		b := true
 		c.Triggers.Incidents.CancelQueuedOnResolve = &b
 	}
-	// Rate-limit window default: 1h when a per-window budget is set but no window
-	// is given (a zero window would silently allow unlimited investigations).
-	if c.Investigation.RateLimit.MaxPerWindow > 0 && c.Investigation.RateLimit.Window == 0 {
+	// Investigation rate limit: UNSET defaults to 30/h (cost-DoS guard — the count
+	// of investigations was unbounded out of the box; the Helm chart already ships
+	// an explicit 20). An explicit 0 keeps the documented unlimited meaning.
+	if c.Investigation.RateLimit.MaxPerWindow == nil {
+		n := 30
+		c.Investigation.RateLimit.MaxPerWindow = &n
+	}
+	// Rate-limit window default: 1h when a per-window budget is in effect but no
+	// window is given (a zero window would silently allow unlimited investigations).
+	if *c.Investigation.RateLimit.MaxPerWindow > 0 && c.Investigation.RateLimit.Window == 0 {
 		c.Investigation.RateLimit.Window = Duration(time.Hour)
 	}
 	// Per-investigation deadline: bound a whole investigation (recall + every model/

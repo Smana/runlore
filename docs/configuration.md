@@ -109,7 +109,7 @@ incident webhook. Known keys: `alertmanager`, `gitops`, `pagerduty`.
   on the trigger** (the feedback re-arm, see [learning-loop](learning-loop.md) — batched on the
   normal `debounce`, so a contested storm still collapses to one re-investigation). Suppressions log
   an INFO line and count in `runlore_alerts_suppressed_total`.
-- `rate_limit` — `max_per_window` (**0 = unlimited**), `window` (default **1h** when a budget is set),
+- `rate_limit` — `max_per_window` (**default 30**; an explicit **0 = unlimited**), `window` (default **1h**),
   `max_requeues`.
 - `recurrence_cooldown` — **opt-in (default 0 = off)** per-trigger suppression: skip re-investigating a
   trigger whose previous investigation completed less than this long ago, **concluded** (verdict ≠
