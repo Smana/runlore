@@ -37,6 +37,7 @@ type Server struct {
 	slackSecret  string            // Slack signing secret; verifies interactive button clicks
 	webhookToken string            // optional bearer token required on POST /webhook/alertmanager
 	approvers    map[string]bool   // Slack user IDs permitted to approve actions (empty = none)
+	guard        *authGuard        // failed-auth backoff for the shared-token endpoints
 
 	metrics http.Handler // optional; GET /metrics (OTel Prometheus exposition)
 	log     *slog.Logger
@@ -93,6 +94,7 @@ func New(ready func() bool, acts Actions, built []source.Built, pipe *source.Pip
 		approvals: acts.Approvals, pauser: acts.Pauser, feedback: acts.Feedback,
 		token: acts.Token, slackSecret: acts.SlackSecret,
 		webhookToken: acts.WebhookToken, approvers: approvers, metrics: metricsHandler, log: log,
+		guard: newAuthGuard(),
 	}
 	mux := http.NewServeMux()
 	// work marks a route as work-bearing: on a follower the request is proxied
@@ -187,12 +189,23 @@ func (s *Server) handleResume(w http.ResponseWriter, r *http.Request) {
 // authorized enforces the approval token (constant-time compare). It FAILS
 // CLOSED: with no token configured the control endpoints are denied, never open.
 // (main refuses to start with actions enabled and an empty token, so a running
-// rung-2/3 server always has one.)
+// rung-2/3 server always has one.) Repeated failures from one host arm an
+// exponential backoff (see authGuard) — checked BEFORE the compare.
 func (s *Server) authorized(r *http.Request) bool {
+	host := remoteHost(r.RemoteAddr)
+	if s.guard.blocked(host) {
+		s.log.Warn("auth backoff engaged; rejecting without compare", "host", host)
+		return false
+	}
 	if s.token == "" {
 		return false
 	}
-	return subtle.ConstantTimeCompare([]byte(r.Header.Get("X-Approval-Token")), []byte(s.token)) == 1
+	if subtle.ConstantTimeCompare([]byte(r.Header.Get("X-Approval-Token")), []byte(s.token)) == 1 {
+		s.guard.success(host)
+		return true
+	}
+	s.guard.fail(host)
+	return false
 }
 
 func (s *Server) handleListActions(w http.ResponseWriter, r *http.Request) {
@@ -438,15 +451,25 @@ func (s *Server) Handler() http.Handler {
 
 // webhookAuthorized checks the optional alert-webhook bearer token (constant-time).
 // When no token is configured the webhook is open — Validate forbids that once
-// actions.mode=auto, so an auto-executing server always authenticates it.
+// actions.mode=auto, so an auto-executing server always authenticates it. With a
+// token configured, repeated failures from one host arm the same backoff as the
+// control endpoints.
 func (s *Server) webhookAuthorized(r *http.Request) bool {
 	if s.webhookToken == "" {
 		return true
 	}
-	const prefix = "Bearer "
-	h := r.Header.Get("Authorization")
-	if !strings.HasPrefix(h, prefix) {
+	host := remoteHost(r.RemoteAddr)
+	if s.guard.blocked(host) {
+		s.log.Warn("webhook auth backoff engaged; rejecting without compare", "host", host)
 		return false
 	}
-	return subtle.ConstantTimeCompare([]byte(strings.TrimPrefix(h, prefix)), []byte(s.webhookToken)) == 1
+	const prefix = "Bearer "
+	h := r.Header.Get("Authorization")
+	if strings.HasPrefix(h, prefix) &&
+		subtle.ConstantTimeCompare([]byte(strings.TrimPrefix(h, prefix)), []byte(s.webhookToken)) == 1 {
+		s.guard.success(host)
+		return true
+	}
+	s.guard.fail(host)
+	return false
 }
