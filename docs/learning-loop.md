@@ -449,6 +449,14 @@ at Gate 3, triggers a fresh investigation, and can be **overturned** by a correc
 entry. Decay is **outcome/contradiction-driven, never pure mtime** — knowledge ages
 out because it stops working, not merely because it's old.
 
+A `low_outcome` rejection does not abandon recall outright: the gate walks a small,
+bounded set of further structurally-agreeing candidates (the runner-up fallback) —
+each held to the conservative solo bar (or, with the reranker, chosen by one final
+re-rank call over the remaining candidates) and to the same outcome gate. Only when
+every candidate is decayed does recall fall through to a full investigation, and the
+rejected entries are also excluded from the near-miss lead, so a decayed entry can
+neither answer nor steer the fresh investigation that replaces it.
+
 This is the answer to the hardest objection against KB-backed agents ("what happens
 when a confidently-worded wrong belief gets in?"): the loop has a mechanism to lose
 trust in it and overturn it.

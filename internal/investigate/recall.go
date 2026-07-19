@@ -6,6 +6,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"slices"
 	"strings"
 
 	"github.com/Smana/runlore/internal/catalog"
@@ -68,6 +69,12 @@ type Recall struct {
 // text alone.
 const recallCandidateK = 20
 
+// maxOutcomeFallback bounds how many ADDITIONAL structurally-agreeing candidates
+// the outcome-decay gate may consider after rejecting the winner (magnitude mode).
+// Small and fixed: each fallback candidate is held to the conservative solo bar,
+// so depth buys little beyond the first couple of runners-up.
+const maxOutcomeFallback = 2
+
 // buildRecallQuery constructs the BM25 query text for a recall lookup from a
 // Request. It is the single seam between "what the incident says" and "what the
 // lexical index is asked" — extracted so the retrieval quality can be measured
@@ -121,16 +128,19 @@ func buildRecallQuery(req Request) string {
 // thin wrapper over lookupWithUsage with no usage sink — kept for callers (and tests)
 // that don't thread the per-investigation token total.
 func (r *Recall) lookup(ctx context.Context, req Request) (*catalog.Entry, float64) {
-	return r.lookupWithUsage(ctx, req, nil)
+	e, conf, _ := r.lookupWithUsage(ctx, req, nil)
+	return e, conf
 }
 
 // lookupWithUsage is lookup plus an optional usage sink: when a Reranker runs, its
 // completion's token usage is accumulated into totals (nil ⇒ ignored) so the loop can
 // fold the reranker's cost into the per-investigation total. The gate logic is
-// identical to lookup — totals is a side channel, never a decision input.
-func (r *Recall) lookupWithUsage(ctx context.Context, req Request, totals *providers.UsageTotals) (*catalog.Entry, float64) {
+// identical to lookup — totals is a side channel, never a decision input. The third
+// return lists the entry paths the outcome gate (Gate 3) rejected this lookup (nil
+// when none) so the caller's near-miss lead can exclude them.
+func (r *Recall) lookupWithUsage(ctx context.Context, req Request, totals *providers.UsageTotals) (*catalog.Entry, float64, []string) {
 	if r == nil || r.Catalog == nil {
-		return nil, 0
+		return nil, 0, nil
 	}
 	query := buildRecallQuery(req)
 	// Mode select: hybrid (BM25+embedding, cosine-gated) when an embedder-backed
@@ -146,7 +156,7 @@ func (r *Recall) lookupWithUsage(ctx context.Context, req Request, totals *provi
 		hits, err = r.Catalog.SearchScored(query, recallCandidateK)
 	}
 	if err != nil || len(hits) == 0 {
-		return nil, 0
+		return nil, 0, nil
 	}
 
 	// Structural pre-filter: keep candidates whose stored resource agrees with the
@@ -164,7 +174,7 @@ func (r *Recall) lookupWithUsage(ctx context.Context, req Request, totals *provi
 			r.Metrics.RecallScore.Record(ctx, hits[0].Score) // best lexical score, for miss visibility
 		}
 		r.reject(ctx, "no_resource_match")
-		return nil, 0
+		return nil, 0, nil
 	}
 
 	winner := agreeing[0]
@@ -188,7 +198,7 @@ func (r *Recall) lookupWithUsage(ctx context.Context, req Request, totals *provi
 		// investigation WITHOUT making the call (asserted by the cost-guard test).
 		if score < r.Rerank.MinScore {
 			r.reject(ctx, "rerank_no_signal")
-			return nil, 0
+			return nil, 0, nil
 		}
 		// Rank only the top-K structurally-agreeing candidates (bounded for cost). They
 		// are already in lexical order, so agreeing[:k] is the strongest few.
@@ -202,7 +212,7 @@ func (r *Recall) lookupWithUsage(ctx context.Context, req Request, totals *provi
 		// the false-recall guard (a wrong or absent match is worse than no recall).
 		if !ok || mconf < r.Rerank.Threshold {
 			r.reject(ctx, "rerank_low_confidence")
-			return nil, 0
+			return nil, 0, nil
 		}
 		e = matched
 		// The reranker's confidence IS a calibrated match confidence — use it directly as
@@ -228,33 +238,107 @@ func (r *Recall) lookupWithUsage(ctx context.Context, req Request, totals *provi
 		}
 		if !confident {
 			r.reject(ctx, "low_margin")
-			return nil, 0
+			return nil, 0, nil
 		}
 		e = winner.Entry
 		conf = deriveRecallConfidence(score, margin, strength)
 	}
-	// Outcome decay: bias confidence by the entry's resolution track record, and
-	// reject (re-investigate) an entry that recalls-but-never-resolves. Fail-safe —
-	// a rejected recall just falls through to a full investigation.
+	// Outcome decay (Gate 3), with a bounded runner-up fallback: a decayed winner
+	// must not disable instant recall while a healthy corrected entry sits right
+	// behind it. The winner is gated exactly as before; on a low_outcome rejection
+	// the fallback (outcomeFallback) considers a few further candidates under the
+	// SAME gate. The third return lists every outcome-rejected path so the caller's
+	// near-miss lead can exclude them — an entry the gate just rejected must not
+	// resurface as a "possibly-related lead".
 	if r.Outcome != nil {
-		if counts, err := r.Outcome.OpenCounts(); err == nil {
-			if agg, ok := counts[e.Path]; ok { // only entries with recall or feedback history
-				f := outcomeFactor(agg.Recalls, agg.Resolved, agg.FeedbackUp, agg.FeedbackDown, r.OutcomePrior)
-				if f < r.OutcomeFloor {
-					r.reject(ctx, "low_outcome")
-					return nil, 0
-				}
-				conf = clampF(conf*f, 0, 0.90)
+		counts, cerr := r.Outcome.OpenCounts()
+		if cerr != nil {
+			if r.Log != nil {
+				r.Log.Warn("recall: outcome stats unavailable; skipping decay", "err", cerr)
 			}
-		} else if r.Log != nil {
-			r.Log.Warn("recall: outcome stats unavailable; skipping decay", "err", err)
+		} else {
+			f, ok := r.outcomeGate(counts, e.Path)
+			if !ok {
+				r.reject(ctx, "low_outcome")
+				return r.outcomeFallback(ctx, req, agreeing, counts, minScore, soloFloor, totals, []string{e.Path})
+			}
+			conf = clampF(conf*f, 0, 0.90)
 		}
 	}
 	if r.Log != nil {
 		r.Log.Info("instant recall decision",
 			"alert", req.Title, "entry_id", e.Path, "score", score, "margin", margin, "confidence", conf)
 	}
-	return &e, conf
+	return &e, conf, nil
+}
+
+// outcomeFallback runs after the fire-gate winner was rejected by outcome decay
+// (Gate 3). It considers a BOUNDED number of further structurally-agreeing
+// candidates, each subject to the same outcome gate, and returns the first healthy
+// one — or (nil, 0, rejected) so the caller falls through to a full investigation
+// with the rejected paths reported. Magnitude mode holds every fallback candidate
+// to the CONSERVATIVE solo bar (soloFloor AND minScore): the margin-over-runner-up
+// argument justified only the original winner, so a skipped-winner candidate gets
+// the same bar as a lone hit. Candidates arrive in lexical order, so the first one
+// below the bar ends the walk.
+func (r *Recall) outcomeFallback(ctx context.Context, req Request, agreeing []catalog.ScoredEntry, counts map[string]outcome.Aggregate, minScore, soloFloor float64, totals *providers.UsageTotals, rejected []string) (*catalog.Entry, float64, []string) {
+	if r.Rerank != nil {
+		// The rank verdict names ONE candidate, so a fallback needs a second — and
+		// FINAL — rank call over the remaining candidates. Bounded by construction:
+		// low_outcome rejections are rare and each call is ~1-2k tokens on the
+		// verify tier. The same cost guard as the first call applies.
+		remaining := make([]catalog.ScoredEntry, 0, len(agreeing))
+		for _, cand := range agreeing {
+			if !slices.Contains(rejected, cand.Entry.Path) {
+				remaining = append(remaining, cand)
+			}
+		}
+		if len(remaining) == 0 || remaining[0].Score < r.Rerank.MinScore {
+			return nil, 0, rejected
+		}
+		k := r.Rerank.K
+		if k <= 0 || k > len(remaining) {
+			k = len(remaining)
+		}
+		matched, mconf, ok := r.Rerank.rank(ctx, req, remaining[:k], totals)
+		if !ok || mconf < r.Rerank.Threshold {
+			r.reject(ctx, "rerank_low_confidence")
+			return nil, 0, rejected
+		}
+		f, ok := r.outcomeGate(counts, matched.Path)
+		if !ok {
+			r.reject(ctx, "low_outcome")
+			return nil, 0, append(rejected, matched.Path)
+		}
+		conf := clampF(clampF(mconf, 0, 0.90)*f, 0, 0.90)
+		if r.Log != nil {
+			r.Log.Info("instant recall runner-up fired after outcome rejection (re-rank)",
+				"alert", req.Title, "entry_id", matched.Path, "rejected", rejected, "confidence", conf)
+		}
+		return &matched, conf, rejected
+	}
+	limit := min(len(agreeing), 1+maxOutcomeFallback)
+	for _, cand := range agreeing[1:limit] {
+		if cand.Score < soloFloor || cand.Score < minScore {
+			break // lexical order: nothing further clears the conservative bar
+		}
+		f, ok := r.outcomeGate(counts, cand.Entry.Path)
+		if !ok {
+			r.reject(ctx, "low_outcome")
+			rejected = append(rejected, cand.Entry.Path)
+			continue
+		}
+		strength := entryAgrees(req.Workload, cand.Entry, r.RequireWorkloadMatch)
+		// margin 0: a fallback candidate gets no decisive-winner bonus.
+		conf := clampF(deriveRecallConfidence(cand.Score, 0, strength)*f, 0, 0.90)
+		if r.Log != nil {
+			r.Log.Info("instant recall runner-up fired after outcome rejection",
+				"alert", req.Title, "entry_id", cand.Entry.Path, "rejected", rejected, "confidence", conf)
+		}
+		e := cand.Entry
+		return &e, conf, rejected
+	}
+	return nil, 0, rejected
 }
 
 // nearMiss returns the top STRUCTURALLY-AGREEING candidate for a request, or nil.
@@ -271,14 +355,16 @@ func (r *Recall) lookupWithUsage(ctx context.Context, req Request, totals *provi
 // text, and (like instant recall) is gated off under actions.mode=auto by the
 // caller. nil-safe; nil ⇒ no agreeing candidate (nothing to inject).
 func (r *Recall) nearMiss(ctx context.Context, req Request) *catalog.Entry {
-	return r.nearMissExcluding(ctx, req, "")
+	return r.nearMissExcluding(ctx, req)
 }
 
-// nearMissExcluding is nearMiss with one entry skipped by path. The verify-rejection
-// path passes the entry verify has just refuted against live state: re-offering it as
-// a "possibly-related lead" would hand the model the very hypothesis that was proven
-// wrong. Every other candidate remains eligible.
-func (r *Recall) nearMissExcluding(ctx context.Context, req Request, exclude string) *catalog.Entry {
+// nearMissExcluding is nearMiss with entries skipped by path. The verify-rejection
+// path passes the entry verify has just refuted against live state — re-offering it
+// as a "possibly-related lead" would hand the model the very hypothesis that was
+// proven wrong — AND every path the outcome-decay gate (Gate 3) rejected this lookup:
+// a decayed entry must not resurface as a lead either. Every other candidate remains
+// eligible.
+func (r *Recall) nearMissExcluding(ctx context.Context, req Request, exclude ...string) *catalog.Entry {
 	if r == nil || r.Catalog == nil {
 		return nil
 	}
@@ -293,8 +379,14 @@ func (r *Recall) nearMissExcluding(ctx context.Context, req Request, exclude str
 	if err != nil || len(hits) == 0 {
 		return nil
 	}
+	skip := make(map[string]bool, len(exclude))
+	for _, p := range exclude {
+		if p != "" {
+			skip[p] = true
+		}
+	}
 	for _, h := range hits {
-		if exclude != "" && h.Entry.Path == exclude {
+		if skip[h.Entry.Path] {
 			continue
 		}
 		if nearMissEntryAgrees(req.Workload, h.Entry, r.RequireWorkloadMatch) != matchNone {
@@ -471,6 +563,21 @@ func clampF(v, lo, hi float64) float64 {
 		return hi
 	}
 	return v
+}
+
+// outcomeGate applies outcome decay (Gate 3) to ONE candidate entry, given the
+// OpenCounts snapshot the caller fetched once per lookup. It returns the decay
+// factor to multiply into the recall confidence, and ok=false when the entry's
+// track record falls below OutcomeFloor (the caller must not fire this entry).
+// Fail-safe: an entry with no recall/feedback history returns (1, true) —
+// absence of evidence never blocks a recall.
+func (r *Recall) outcomeGate(counts map[string]outcome.Aggregate, path string) (float64, bool) {
+	agg, ok := counts[path]
+	if !ok {
+		return 1, true
+	}
+	f := outcomeFactor(agg.Recalls, agg.Resolved, agg.FeedbackUp, agg.FeedbackDown, r.OutcomePrior)
+	return f, f >= r.OutcomeFloor
 }
 
 // outcomeFactor decays a recall's confidence by its track record as the posterior
