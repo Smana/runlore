@@ -64,6 +64,7 @@ type Metrics struct {
 	ModelCachedInputTokens  metric.Int64Counter     // input tokens served from cache (label: provider)
 	Curations               metric.Int64Counter     // curation outcomes (label: kind, result)
 	CatalogInvalidEntries   metric.Int64Counter     // structurally-invalid entries found at catalog load
+	CatalogEmbedDegraded    metric.Int64Counter     // catalog reloads that left hybrid recall without vectors (embed failure — recall silently BM25-only until it clears)
 }
 
 // NewMetrics builds the instrument set from the global meter provider.
@@ -126,6 +127,7 @@ func NewMetrics() *Metrics {
 		ModelCachedInputTokens:  ctr("model_cached_input_tokens_total", "LLM input tokens served from cache (label: provider)"),
 		Curations:               ctr("curations_total", "curation outcomes written to the forge (label: kind, result)"),
 		CatalogInvalidEntries:   ctr("catalog_invalid_entries_total", "structurally-invalid entries surfaced at catalog load"),
+		CatalogEmbedDegraded:    ctr("catalog_embed_degraded_total", "catalog reloads that left hybrid recall without vectors (embed failure)"),
 	}
 }
 

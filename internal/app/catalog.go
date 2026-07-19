@@ -50,6 +50,7 @@ func BuildCatalog(ctx context.Context, cfg *config.Config, forgeTok ForgeToken, 
 			dir = "/var/lib/runlore/catalog"
 		}
 		cat := catalog.NewEmpty()
+		cat.Log = log
 		if embedder != nil {
 			cat.SetEmbedder(embedder)
 		}
@@ -75,6 +76,11 @@ func BuildCatalog(ctx context.Context, cfg *config.Config, forgeTok ForgeToken, 
 				log.Warn("catalog entries skipped (unparseable)", "count", len(skipped), "files", skipped)
 			}
 			log.Info("catalog synced", "url", cfg.Catalog.Git.URL, "entries", cat.Len())
+			if embedder != nil && !cat.HasVectors() {
+				if metrics != nil {
+					metrics.CatalogEmbedDegraded.Add(ctx, 1)
+				}
+			}
 			warnInvalid(cat)
 			return nil
 		})
@@ -87,10 +93,16 @@ func BuildCatalog(ctx context.Context, cfg *config.Config, forgeTok ForgeToken, 
 			// Embed on load: NewEmpty + SetEmbedder + ReloadContext (catalog.New can't
 			// attach an embedder before its internal Reload).
 			cat = catalog.NewEmpty()
+			cat.Log = log
 			cat.SetEmbedder(embedder)
 			if _, err := cat.ReloadContext(ctx, cfg.Catalog.Dir); err != nil {
 				log.Warn("catalog disabled", "dir", cfg.Catalog.Dir, "err", err)
 				return nil
+			}
+			if embedder != nil && !cat.HasVectors() {
+				if metrics != nil {
+					metrics.CatalogEmbedDegraded.Add(ctx, 1)
+				}
 			}
 		} else {
 			c, err := catalog.New(cfg.Catalog.Dir)
