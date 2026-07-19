@@ -67,6 +67,58 @@ func buildRepo(t *testing.T) (dir string, v1, v2 plumbing.Hash) {
 	return dir, v1, v2
 }
 
+// TestRemoteWithMirrorHistoryWalks: with Mirrors set, Remote,
+// RemoteLastPathChange and RevisionsInWindow all work off the bare mirror —
+// full history is preserved (the reason a shallow clone was rejected).
+func TestRemoteWithMirrorHistoryWalks(t *testing.T) {
+	src, v1, v2 := buildRepo(t)
+	mc, err := NewMirrorCache(t.TempDir(), 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	d := &Differ{Mirrors: mc}
+	diff, err := d.Remote(context.Background(), src, v1.String(), v2.String(), "apps/harbor")
+	if err != nil {
+		t.Fatalf("Remote via mirror: %v", err)
+	}
+	if len(diff.Files) != 1 || diff.Files[0].Path != "apps/harbor/values.yaml" {
+		t.Fatalf("unexpected diff via mirror: %v", paths(diff.Files))
+	}
+	fb, err := d.RemoteLastPathChange(context.Background(), src, v2.String(), "apps/harbor")
+	if err != nil || len(fb.Files) == 0 {
+		t.Fatalf("lastPathChange via mirror: files=%d err=%v", len(fb.Files), err)
+	}
+	revs, err := d.RevisionsInWindow(context.Background(), src, v2.String(), "",
+		providers.TimeWindow{Start: time.Unix(0, 0), End: time.Unix(3000, 0)}, 10)
+	if err != nil || len(revs) != 2 {
+		t.Fatalf("revisionsInWindow via mirror: revs=%d err=%v", len(revs), err)
+	}
+	// The mirror, not a temp clone, must have been used: exactly one mirror dir.
+	entries, _ := os.ReadDir(mc.dir)
+	if len(entries) != 1 {
+		t.Fatalf("want 1 mirror dir, got %d", len(entries))
+	}
+}
+
+// TestMirrorFallbackToClone: a broken mirror cache (unwritable dir) must not
+// break Remote — it silently falls back to clone-per-call.
+func TestMirrorFallbackToClone(t *testing.T) {
+	src, v1, v2 := buildRepo(t)
+	roDir := filepath.Join(t.TempDir(), "ro")
+	if err := os.MkdirAll(roDir, 0o500); err != nil {
+		t.Fatal(err)
+	}
+	mc := &MirrorCache{dir: roDir, max: 10, entries: map[string]*mirrorEntry{}}
+	d := &Differ{Mirrors: mc}
+	diff, err := d.Remote(context.Background(), src, v1.String(), v2.String(), "apps/harbor")
+	if err != nil {
+		t.Fatalf("Remote should fall back to clone-per-call: %v", err)
+	}
+	if len(diff.Files) != 1 {
+		t.Fatalf("fallback diff wrong: %v", paths(diff.Files))
+	}
+}
+
 func TestLocalScoped(t *testing.T) {
 	dir, v1, v2 := buildRepo(t)
 	d, err := (&Differ{}).Local(context.Background(), dir, v1.String(), v2.String(), "apps/harbor")

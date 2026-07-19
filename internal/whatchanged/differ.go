@@ -35,6 +35,10 @@ type Differ struct {
 	// (~1h) installation token stays fresh across a long-running agent. nil
 	// disables auth (e.g. public or local repos).
 	TokenSource func(context.Context) (string, error)
+	// Mirrors, when set, backs clones with a persistent per-repo bare mirror
+	// (incremental fetch, shared across investigations). nil ⇒ full clone per
+	// call, exactly as before. Mirror errors fall back to clone-per-call.
+	Mirrors *MirrorCache
 }
 
 // Local diffs two revisions in an already-cloned repository at path. ctx bounds the
@@ -163,6 +167,19 @@ func (d *Differ) cloneToDisk(ctx context.Context, url string) (*git.Repository, 
 	if err != nil {
 		return nil, noop, err
 	}
+	if d.Mirrors != nil {
+		if repo, release, merr := d.Mirrors.Acquire(ctx, url, auth); merr == nil {
+			if cc != nil {
+				winner, kept := cc.putShared(url, repo, release)
+				if !kept {
+					release() // another goroutine won the race; drop our lock
+				}
+				return winner, noop, nil
+			}
+			return repo, release, nil
+		}
+		// fall through: a broken mirror must never break what_changed
+	}
 	dir, err := os.MkdirTemp("", "runlore-clone-")
 	if err != nil {
 		return nil, noop, fmt.Errorf("temp dir: %w", err)
@@ -211,9 +228,6 @@ func diffAgainstFirstParent(ctx context.Context, to *object.Commit, scope string
 // RemoteFromParent clones url and returns the path-scoped diff of the change
 // introduced by rev (rev against its first parent). A root commit (no parent)
 // yields an empty diff. ctx bounds the clone + patch.
-//
-// NOTE (perf): does a full (disk) clone per call. When the GitOpsProvider drives
-// this across many changes, add a per-repo clone cache here (see dev/plans note).
 func (d *Differ) RemoteFromParent(ctx context.Context, url, rev, scope string) (providers.Diff, error) {
 	repo, cleanup, err := d.cloneToDisk(ctx, url)
 	if err != nil {
