@@ -459,6 +459,50 @@ func TestValidateMCPServers(t *testing.T) {
 	}
 }
 
+func TestValidateMCPToolAllowlist(t *testing.T) {
+	base := func() *Config {
+		c := &Config{}
+		c.MCP.Servers = []MCPServer{{Name: "kb", Endpoint: Endpoint{URL: "https://mcp.example/mcp"}}}
+		return c
+	}
+	t.Run("empty tool name rejected", func(t *testing.T) {
+		c := base()
+		c.MCP.Servers[0].Tools = []string{""}
+		if err := c.Validate(); err == nil || !strings.Contains(err.Error(), "mcp.servers[kb].tools") {
+			t.Fatalf("want tools validation error, got %v", err)
+		}
+	})
+	t.Run("whitespace tool name rejected", func(t *testing.T) {
+		c := base()
+		c.MCP.Servers[0].Tools = []string{"a b"}
+		if err := c.Validate(); err == nil {
+			t.Fatal("want error for whitespace tool name")
+		}
+	})
+	t.Run("duplicate tool name rejected", func(t *testing.T) {
+		c := base()
+		c.MCP.Servers[0].Tools = []string{"query", "query"}
+		if err := c.Validate(); err == nil || !strings.Contains(err.Error(), "duplicate") {
+			t.Fatalf("want duplicate error, got %v", err)
+		}
+	})
+	t.Run("require_allowlist without tools fails closed", func(t *testing.T) {
+		c := base()
+		c.MCP.RequireAllowlist = true
+		if err := c.Validate(); err == nil || !strings.Contains(err.Error(), "require_allowlist") {
+			t.Fatalf("want require_allowlist error, got %v", err)
+		}
+	})
+	t.Run("require_allowlist with tools passes", func(t *testing.T) {
+		c := base()
+		c.MCP.RequireAllowlist = true
+		c.MCP.Servers[0].Tools = []string{"query"}
+		if err := c.Validate(); err != nil {
+			t.Fatalf("valid allowlisted config rejected: %v", err)
+		}
+	})
+}
+
 // TestValidateApproveRequiresAuditLog asserts approve mode is held to the same
 // audit requirement as auto: an executing rung that mutates the cluster must have
 // an audit_log_path (so the hash chain is verified fail-closed on open). Without
