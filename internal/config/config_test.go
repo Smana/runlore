@@ -672,3 +672,23 @@ func TestValidateMatrixFeedbackReactions(t *testing.T) {
 		t.Fatalf("feedback_reactions fully configured must validate clean, got: %v", err)
 	}
 }
+
+// TestGitOpsMirrorConfig covers the gitops.mirror block: zero-value defaults to
+// enabled (the Rerank *bool idiom), an explicit false disables, and a negative
+// max is rejected by Validate.
+func TestGitOpsMirrorConfig(t *testing.T) {
+	var m GitOpsMirror
+	if !m.IsEnabled() {
+		t.Fatal("zero-value mirror config must default to enabled")
+	}
+	off := false
+	m.Enabled = &off
+	if m.IsEnabled() {
+		t.Fatal("enabled:false must disable")
+	}
+	c := &Config{Model: Model{Provider: "anthropic"}} // minimal valid config
+	c.GitOps.Mirror.Max = -1
+	if err := c.Validate(); err == nil {
+		t.Fatal("negative gitops.mirror.max must fail validation")
+	}
+}

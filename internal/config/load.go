@@ -63,6 +63,12 @@ func applyDefaults(c *Config) {
 		d := Duration(60 * time.Second)
 		c.Triggers.GitOpsFailures.Debounce = &d
 	}
+	// Persistent what_changed mirror cap: an unset (0) max keeps at most 10 bare
+	// mirrors on disk, evicting oldest-mtime first. NewMirrorCache applies the same
+	// default, but filling it here keeps the effective config observable.
+	if c.GitOps.Mirror.Max == 0 {
+		c.GitOps.Mirror.Max = 10
+	}
 	// Incident debounce default: same 60s hold, for the same reason — let a transient,
 	// self-resolving alert clear before burning a paid investigation on it. It also
 	// keeps that alert's `resolved` webhook out of the outcome ledger, where it would

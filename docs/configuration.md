@@ -379,6 +379,19 @@ mcp:
   pattern; **default `3`**. A knowledge-gap issue flags patterns RunLore keeps encountering without
   resolving — a signal to write a runbook.
 
+### `gitops.mirror` — persistent what_changed clone mirror
+`what_changed` diffs a GitOps source repo between two revisions. By default it now keeps a
+persistent **bare mirror** per repo and fetches incrementally, instead of a full clone on every
+call — repeated investigations on the same (mono)repo reuse one on-disk mirror. Full history is
+preserved (the history walks behind the `#239` fallback and time-window enumeration keep working).
+- `enabled` — **default `true`**. Set `false` to restore the legacy clone-per-call behavior
+  (the escape hatch). A mirror error at runtime already falls back to clone-per-call on its own, so
+  `what_changed` never gets *worse* because a mirror misbehaved.
+- `dir` — mirror root. **Default `<tmpdir>/runlore-mirrors`** (ephemeral: wiped on pod restart).
+  Point it at a **PersistentVolume** to keep mirrors warm across restarts.
+- `max` — maximum mirrors kept on disk; **default `10`**. When exceeded, the oldest-mtime mirror is
+  evicted. Must be `>= 0` (`0` = use the default).
+
 ### Other top-level keys
 `gitops.engine` (`flux` default · `argocd`), `cloud` (`provider: aws`, `region`, `cluster_name`),
 `network` (pluggable: `hubble` · `aws-vpc-flow-logs` · `gcp-firewall-logs`),

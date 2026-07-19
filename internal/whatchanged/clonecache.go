@@ -15,9 +15,10 @@ import (
 // it, each source repo is cloned at most once per call. It is request-scoped via the
 // context and OWNS the clones' lifetime — close() removes every temp dir it made.
 type cloneCache struct {
-	mu     sync.Mutex
-	clones map[string]*git.Repository // url -> reusable clone
-	dirs   []string                   // temp dirs to remove on close
+	mu      sync.Mutex
+	clones  map[string]*git.Repository // url -> reusable clone
+	dirs    []string                   // temp dirs to remove on close
+	closers []func()                   // release funcs for shared (mirror-backed) entries
 }
 
 type cloneCacheKey struct{}
@@ -57,11 +58,29 @@ func (c *cloneCache) put(url string, repo *git.Repository, dir string) (winner *
 	return repo, true
 }
 
+// putShared stores a repo the cache does NOT own on disk (a mirror-backed
+// clone); close calls release instead of removing anything. Same race
+// contract as put: if another entry won, kept=false and the caller must
+// release its own handle.
+func (c *cloneCache) putShared(url string, repo *git.Repository, release func()) (*git.Repository, bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if existing, ok := c.clones[url]; ok {
+		return existing, false
+	}
+	c.clones[url] = repo
+	c.closers = append(c.closers, release)
+	return repo, true
+}
+
 func (c *cloneCache) close() {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	for _, f := range c.closers {
+		f()
+	}
 	for _, d := range c.dirs {
 		_ = os.RemoveAll(d)
 	}
-	c.clones, c.dirs = nil, nil
+	c.clones, c.dirs, c.closers = nil, nil, nil
 }

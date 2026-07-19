@@ -6,6 +6,8 @@ import (
 	"context"
 	"testing"
 
+	git "github.com/go-git/go-git/v5"
+
 	"github.com/Smana/runlore/internal/providers"
 )
 
@@ -51,5 +53,23 @@ func TestNoCacheStillWorks(t *testing.T) {
 	})
 	if err != nil || len(dff.Files) == 0 {
 		t.Fatalf("uncached ForChange should still diff: %d files err=%v", len(dff.Files), err)
+	}
+}
+
+// TestPutSharedReleasesOnClose: a shared entry's release func runs on close,
+// and close removes no dir for it.
+func TestPutSharedReleasesOnClose(t *testing.T) {
+	ctx, done := WithCloneCache(context.Background())
+	cc := cacheFrom(ctx)
+	released := false
+	if _, kept := cc.putShared("u", &git.Repository{}, func() { released = true }); !kept {
+		t.Fatal("first putShared must keep")
+	}
+	if _, ok := cc.get("u"); !ok {
+		t.Fatal("shared entry must be gettable")
+	}
+	done()
+	if !released {
+		t.Fatal("release must run on close")
 	}
 }
