@@ -605,7 +605,7 @@ func (li *LoopInvestigator) tryRecall(ctx context.Context, req Request, result *
 	}
 	// Thread verifyTotals so the (opt-in) reranker's tokens fold into the
 	// per-investigation cost — it runs on the verify tier, so it prices there.
-	entry, conf := li.Recall.lookupWithUsage(ctx, req, verifyTotals)
+	entry, conf, _ := li.Recall.lookupWithUsage(ctx, req, verifyTotals)
 	if entry == nil {
 		// Recall was consulted but no gate cleared: report the non-fire so a caller
 		// can distinguish it from a recall that fired and was later withdrawn.
