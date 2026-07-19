@@ -6,6 +6,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"slices"
 	"strings"
 
 	"github.com/Smana/runlore/internal/catalog"
@@ -280,11 +281,41 @@ func (r *Recall) lookupWithUsage(ctx context.Context, req Request, totals *provi
 // argument justified only the original winner, so a skipped-winner candidate gets
 // the same bar as a lone hit. Candidates arrive in lexical order, so the first one
 // below the bar ends the walk.
-func (r *Recall) outcomeFallback(ctx context.Context, req Request, agreeing []catalog.ScoredEntry, counts map[string]outcome.Aggregate, minScore, soloFloor float64, _ *providers.UsageTotals, rejected []string) (*catalog.Entry, float64, []string) {
+func (r *Recall) outcomeFallback(ctx context.Context, req Request, agreeing []catalog.ScoredEntry, counts map[string]outcome.Aggregate, minScore, soloFloor float64, totals *providers.UsageTotals, rejected []string) (*catalog.Entry, float64, []string) {
 	if r.Rerank != nil {
-		// Task 3 (reranker fallback) replaces this: without it, reranker mode keeps
-		// today's behavior — rejection falls through with no fallback.
-		return nil, 0, rejected
+		// The rank verdict names ONE candidate, so a fallback needs a second — and
+		// FINAL — rank call over the remaining candidates. Bounded by construction:
+		// low_outcome rejections are rare and each call is ~1-2k tokens on the
+		// verify tier. The same cost guard as the first call applies.
+		remaining := make([]catalog.ScoredEntry, 0, len(agreeing))
+		for _, cand := range agreeing {
+			if !slices.Contains(rejected, cand.Entry.Path) {
+				remaining = append(remaining, cand)
+			}
+		}
+		if len(remaining) == 0 || remaining[0].Score < r.Rerank.MinScore {
+			return nil, 0, rejected
+		}
+		k := r.Rerank.K
+		if k <= 0 || k > len(remaining) {
+			k = len(remaining)
+		}
+		matched, mconf, ok := r.Rerank.rank(ctx, req, remaining[:k], totals)
+		if !ok || mconf < r.Rerank.Threshold {
+			r.reject(ctx, "rerank_low_confidence")
+			return nil, 0, rejected
+		}
+		f, ok := r.outcomeGate(counts, matched.Path)
+		if !ok {
+			r.reject(ctx, "low_outcome")
+			return nil, 0, append(rejected, matched.Path)
+		}
+		conf := clampF(clampF(mconf, 0, 0.90)*f, 0, 0.90)
+		if r.Log != nil {
+			r.Log.Info("instant recall runner-up fired after outcome rejection (re-rank)",
+				"alert", req.Title, "entry_id", matched.Path, "rejected", rejected, "confidence", conf)
+		}
+		return &matched, conf, rejected
 	}
 	limit := min(len(agreeing), 1+maxOutcomeFallback)
 	for _, cand := range agreeing[1:limit] {

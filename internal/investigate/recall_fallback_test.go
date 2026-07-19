@@ -134,6 +134,79 @@ func TestAllCandidatesDecayedReturnsAllRejected(t *testing.T) {
 	}
 }
 
+// scriptedRerankModel returns each queued rerank_match verdict in order and
+// counts calls — the fallback contract is "at most ONE extra rank call".
+type scriptedRerankModel struct {
+	calls    int
+	verdicts []string // raw rerank_match JSON args, consumed in order
+}
+
+func (m *scriptedRerankModel) Complete(_ context.Context, _ providers.CompletionRequest) (providers.CompletionResponse, error) {
+	i := m.calls
+	m.calls++
+	if i >= len(m.verdicts) {
+		return providers.CompletionResponse{}, nil // no tool call ⇒ no match
+	}
+	return providers.CompletionResponse{ToolCalls: []providers.ToolCall{{Name: rerankToolName, Args: m.verdicts[i]}}}, nil
+}
+
+func TestRerankFallbackReranksOnceWithoutRejected(t *testing.T) {
+	cat, stalePath, fixedPath := twoEntryCatalog(t)
+	model := &scriptedRerankModel{verdicts: []string{
+		`{"match":true,"entry_id":"` + stalePath + `","confidence":0.9}`,
+		`{"match":true,"entry_id":"` + fixedPath + `","confidence":0.85}`,
+	}}
+	r := &Recall{
+		Catalog: cat,
+		Rerank:  &Reranker{Model: model, Threshold: 0.7, K: 5, MinScore: 0.001},
+		Outcome: fakeOutcome{counts: map[string]outcome.Aggregate{
+			stalePath: {Recalls: 4, Resolved: 0},
+			fixedPath: {Recalls: 3, Resolved: 3},
+		}},
+		OutcomePrior: 2.0, OutcomeFloor: 0.5,
+	}
+	e, conf, rejected := r.lookupWithUsage(context.Background(), fallbackReq(), nil)
+	if e == nil || e.Path != fixedPath {
+		t.Fatalf("re-rank fallback must fire the healthy candidate %q, got %+v (rejected=%v)", fixedPath, e, rejected)
+	}
+	if model.calls != 2 {
+		t.Fatalf("exactly one extra rank call allowed, model saw %d calls", model.calls)
+	}
+	if conf <= 0 || conf > 0.90 {
+		t.Fatalf("confidence %v out of (0, 0.90]", conf)
+	}
+	if len(rejected) != 1 || rejected[0] != stalePath {
+		t.Fatalf("rejected = %v, want [%q]", rejected, stalePath)
+	}
+}
+
+func TestRerankFallbackStopsAfterSecondRejection(t *testing.T) {
+	cat, stalePath, fixedPath := twoEntryCatalog(t)
+	model := &scriptedRerankModel{verdicts: []string{
+		`{"match":true,"entry_id":"` + stalePath + `","confidence":0.9}`,
+		`{"match":true,"entry_id":"` + fixedPath + `","confidence":0.85}`,
+	}}
+	r := &Recall{
+		Catalog: cat,
+		Rerank:  &Reranker{Model: model, Threshold: 0.7, K: 5, MinScore: 0.001},
+		Outcome: fakeOutcome{counts: map[string]outcome.Aggregate{
+			stalePath: {Recalls: 4, Resolved: 0},
+			fixedPath: {Recalls: 4, Resolved: 0}, // second match also decayed
+		}},
+		OutcomePrior: 2.0, OutcomeFloor: 0.5,
+	}
+	e, _, rejected := r.lookupWithUsage(context.Background(), fallbackReq(), nil)
+	if e != nil {
+		t.Fatalf("second outcome rejection must end the fallback (no third call), got %q", e.Path)
+	}
+	if model.calls != 2 {
+		t.Fatalf("bounded at 2 rank calls total, model saw %d", model.calls)
+	}
+	if len(rejected) != 2 {
+		t.Fatalf("both rejected paths must be reported, got %v", rejected)
+	}
+}
+
 // twoScores returns the BM25 scores of the two seeded entries for the fixture
 // query, so thresholds can be pinned between them without hardcoding corpus-
 // dependent magnitudes.
