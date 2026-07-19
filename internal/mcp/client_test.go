@@ -186,3 +186,68 @@ func TestListToolsRetriesOn5xx(t *testing.T) {
 		t.Fatalf("expected 2 requests (1 failure + 1 success), got %d", calls)
 	}
 }
+
+// TestListToolsPagination: two pages joined via nextCursor; the second request
+// must echo the cursor back in params.
+func TestListToolsPagination(t *testing.T) {
+	var gotCursors []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			ID     json.RawMessage `json:"id"`
+			Method string          `json:"method"`
+			Params struct {
+				Cursor string `json:"cursor"`
+			} `json:"params"`
+		}
+		b, _ := io.ReadAll(r.Body)
+		_ = json.Unmarshal(b, &req)
+		if req.Method != "tools/list" {
+			_ = json.NewEncoder(w).Encode(map[string]any{"jsonrpc": "2.0", "id": req.ID, "result": map[string]any{}})
+			return
+		}
+		gotCursors = append(gotCursors, req.Params.Cursor)
+		if req.Params.Cursor == "" {
+			_ = json.NewEncoder(w).Encode(map[string]any{"jsonrpc": "2.0", "id": req.ID,
+				"result": map[string]any{"tools": []map[string]any{{"name": "a"}}, "nextCursor": "p2"}})
+			return
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{"jsonrpc": "2.0", "id": req.ID,
+			"result": map[string]any{"tools": []map[string]any{{"name": "b"}}}})
+	}))
+	defer srv.Close()
+	c := NewClient("s", srv.URL, "", nil, nil)
+	tools, err := c.ListTools(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(tools) != 2 || tools[0].Name != "a" || tools[1].Name != "b" {
+		t.Fatalf("want [a b], got %+v", tools)
+	}
+	if len(gotCursors) != 2 || gotCursors[1] != "p2" {
+		t.Fatalf("cursor not echoed: %v", gotCursors)
+	}
+}
+
+// TestListToolsPageCap: a server that never stops paginating is cut off at the
+// page cap and still returns what was collected.
+func TestListToolsPageCap(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			ID     json.RawMessage `json:"id"`
+			Method string          `json:"method"`
+		}
+		b, _ := io.ReadAll(r.Body)
+		_ = json.Unmarshal(b, &req)
+		_ = json.NewEncoder(w).Encode(map[string]any{"jsonrpc": "2.0", "id": req.ID,
+			"result": map[string]any{"tools": []map[string]any{{"name": "x"}}, "nextCursor": "again"}})
+	}))
+	defer srv.Close()
+	c := NewClient("s", srv.URL, "", nil, nil)
+	tools, err := c.ListTools(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(tools) != maxToolListPages {
+		t.Fatalf("want %d tools (one per capped page), got %d", maxToolListPages, len(tools))
+	}
+}
