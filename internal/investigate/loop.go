@@ -605,7 +605,7 @@ func (li *LoopInvestigator) tryRecall(ctx context.Context, req Request, result *
 	}
 	// Thread verifyTotals so the (opt-in) reranker's tokens fold into the
 	// per-investigation cost — it runs on the verify tier, so it prices there.
-	entry, conf, _ := li.Recall.lookupWithUsage(ctx, req, verifyTotals)
+	entry, conf, outcomeRejected := li.Recall.lookupWithUsage(ctx, req, verifyTotals)
 	if entry == nil {
 		// Recall was consulted but no gate cleared: report the non-fire so a caller
 		// can distinguish it from a recall that fired and was later withdrawn.
@@ -616,8 +616,10 @@ func (li *LoopInvestigator) tryRecall(ctx context.Context, req Request, result *
 		// UNVERIFIED lead in the seed (below) instead of throwing away the exact
 		// vocabulary-match recall's enrichment found. Untrusted like alert text (same
 		// egress/ingress redaction) and, being inside this !IsAuto() block, disabled
-		// under auto exactly like instant recall.
-		nearMiss = li.Recall.nearMiss(ctx, req)
+		// under auto exactly like instant recall. Every path the outcome gate just
+		// rejected is excluded — a decayed entry must not resurface as a
+		// "possibly-related lead".
+		nearMiss = li.Recall.nearMissExcluding(ctx, req, outcomeRejected...)
 		if nearMiss != nil {
 			li.Log.Info("recall near-miss: surfacing an unverified related entry in the seed",
 				"title", req.Title, "entry", nearMiss.Path)
@@ -679,7 +681,7 @@ func (li *LoopInvestigator) tryRecall(ctx context.Context, req Request, result *
 	// WRONG entry suppresses the lead that a merely-weak one would have surfaced, so
 	// the loop restarts from zero next to a catalog that may still hold something
 	// relevant. The refuted entry itself is excluded — verify just disproved it.
-	nearMiss = li.Recall.nearMissExcluding(ctx, req, entry.Path)
+	nearMiss = li.Recall.nearMissExcluding(ctx, req, append(outcomeRejected, entry.Path)...)
 	if nearMiss != nil {
 		li.Log.Info("recall near-miss after verify rejection: surfacing an unverified related entry in the seed",
 			"title", req.Title, "rejected", entry.Path, "entry", nearMiss.Path)

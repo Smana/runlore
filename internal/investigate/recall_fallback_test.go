@@ -207,6 +207,24 @@ func TestRerankFallbackStopsAfterSecondRejection(t *testing.T) {
 	}
 }
 
+func TestNearMissExcludesOutcomeRejectedPaths(t *testing.T) {
+	cat, stalePath, fixedPath := twoEntryCatalog(t)
+	r := &Recall{Catalog: cat, MinScore: 0.001, SoloFloor: 0.001, MarginGap: 0.001}
+
+	// Excluding the top candidate surfaces the next agreeing one…
+	if nm := r.nearMissExcluding(context.Background(), fallbackReq(), stalePath); nm == nil || nm.Path != fixedPath {
+		t.Fatalf("near-miss with winner excluded = %+v, want %q", nm, fixedPath)
+	}
+	// …and excluding both surfaces nothing.
+	if nm := r.nearMissExcluding(context.Background(), fallbackReq(), stalePath, fixedPath); nm != nil {
+		t.Fatalf("near-miss with all candidates excluded must be nil, got %q", nm.Path)
+	}
+	// Zero exclusions (the nearMiss() path) still returns the top candidate.
+	if nm := r.nearMissExcluding(context.Background(), fallbackReq()); nm == nil {
+		t.Fatal("near-miss with no exclusions must return the top agreeing candidate")
+	}
+}
+
 // twoScores returns the BM25 scores of the two seeded entries for the fixture
 // query, so thresholds can be pinned between them without hardcoding corpus-
 // dependent magnitudes.

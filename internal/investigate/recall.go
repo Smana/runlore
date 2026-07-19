@@ -355,14 +355,16 @@ func (r *Recall) outcomeFallback(ctx context.Context, req Request, agreeing []ca
 // text, and (like instant recall) is gated off under actions.mode=auto by the
 // caller. nil-safe; nil ⇒ no agreeing candidate (nothing to inject).
 func (r *Recall) nearMiss(ctx context.Context, req Request) *catalog.Entry {
-	return r.nearMissExcluding(ctx, req, "")
+	return r.nearMissExcluding(ctx, req)
 }
 
-// nearMissExcluding is nearMiss with one entry skipped by path. The verify-rejection
-// path passes the entry verify has just refuted against live state: re-offering it as
-// a "possibly-related lead" would hand the model the very hypothesis that was proven
-// wrong. Every other candidate remains eligible.
-func (r *Recall) nearMissExcluding(ctx context.Context, req Request, exclude string) *catalog.Entry {
+// nearMissExcluding is nearMiss with entries skipped by path. The verify-rejection
+// path passes the entry verify has just refuted against live state — re-offering it
+// as a "possibly-related lead" would hand the model the very hypothesis that was
+// proven wrong — AND every path the outcome-decay gate (Gate 3) rejected this lookup:
+// a decayed entry must not resurface as a lead either. Every other candidate remains
+// eligible.
+func (r *Recall) nearMissExcluding(ctx context.Context, req Request, exclude ...string) *catalog.Entry {
 	if r == nil || r.Catalog == nil {
 		return nil
 	}
@@ -377,8 +379,14 @@ func (r *Recall) nearMissExcluding(ctx context.Context, req Request, exclude str
 	if err != nil || len(hits) == 0 {
 		return nil
 	}
+	skip := make(map[string]bool, len(exclude))
+	for _, p := range exclude {
+		if p != "" {
+			skip[p] = true
+		}
+	}
 	for _, h := range hits {
-		if exclude != "" && h.Entry.Path == exclude {
+		if skip[h.Entry.Path] {
 			continue
 		}
 		if nearMissEntryAgrees(req.Workload, h.Entry, r.RequireWorkloadMatch) != matchNone {
