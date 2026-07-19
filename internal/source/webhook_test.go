@@ -3,6 +3,7 @@
 package source
 
 import (
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -223,4 +224,36 @@ func TestHandlerAdmissionIntegration(t *testing.T) {
 		t.Fatalf("want 1 enqueued, got %d", len(enq.reqs))
 	}
 	_ = time.Now() // keep import used
+}
+
+// TestHandlerPayloadRequestCap pins the per-delivery cost guard: one webhook
+// payload can enqueue at most MaxRequestsPerPayload investigation requests. The
+// 1MiB body cap alone still admits ~1k alerts; distinct alertnames each bill an
+// investigation, so the count must be bounded at the door. Truncation (not 4xx)
+// is deliberate: Alertmanager re-delivers on repeat_interval, so a legitimate
+// mega-batch self-heals, while a rejected delivery would lose ALL its alerts.
+func TestHandlerPayloadRequestCap(t *testing.T) {
+	enq := &capEnq{}
+	pipe := NewPipeline(matchAllCfg(), enq, nil, nil)
+	var res DecodeResult
+	for i := 0; i < MaxRequestsPerPayload+50; i++ {
+		res.Requests = append(res.Requests, investigate.Request{
+			Title:       fmt.Sprintf("storm-%d", i),
+			Severity:    "critical",
+			Workload:    providers.Workload{Namespace: "default", Name: fmt.Sprintf("app-%d", i)},
+			Fingerprint: fmt.Sprintf("fp-%d", i),
+		})
+	}
+	b := webhookBuilt(fakeDecoder{result: res})
+	h := b.Handler(nil, 1<<20, pipe)
+	req := httptest.NewRequest(http.MethodPost, "/webhook/test", strings.NewReader(`{}`))
+	rec := httptest.NewRecorder()
+	h(rec, req)
+
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("want 202 (truncate, not reject), got %d", rec.Code)
+	}
+	if len(enq.reqs) != MaxRequestsPerPayload {
+		t.Fatalf("want %d enqueued (cap), got %d", MaxRequestsPerPayload, len(enq.reqs))
+	}
 }
