@@ -238,14 +238,12 @@ func (r *Recall) lookupWithUsage(ctx context.Context, req Request, totals *provi
 	// a rejected recall just falls through to a full investigation.
 	if r.Outcome != nil {
 		if counts, err := r.Outcome.OpenCounts(); err == nil {
-			if agg, ok := counts[e.Path]; ok { // only entries with recall or feedback history
-				f := outcomeFactor(agg.Recalls, agg.Resolved, agg.FeedbackUp, agg.FeedbackDown, r.OutcomePrior)
-				if f < r.OutcomeFloor {
-					r.reject(ctx, "low_outcome")
-					return nil, 0
-				}
-				conf = clampF(conf*f, 0, 0.90)
+			f, ok := r.outcomeGate(counts, e.Path)
+			if !ok {
+				r.reject(ctx, "low_outcome")
+				return nil, 0
 			}
+			conf = clampF(conf*f, 0, 0.90)
 		} else if r.Log != nil {
 			r.Log.Warn("recall: outcome stats unavailable; skipping decay", "err", err)
 		}
@@ -471,6 +469,21 @@ func clampF(v, lo, hi float64) float64 {
 		return hi
 	}
 	return v
+}
+
+// outcomeGate applies outcome decay (Gate 3) to ONE candidate entry, given the
+// OpenCounts snapshot the caller fetched once per lookup. It returns the decay
+// factor to multiply into the recall confidence, and ok=false when the entry's
+// track record falls below OutcomeFloor (the caller must not fire this entry).
+// Fail-safe: an entry with no recall/feedback history returns (1, true) —
+// absence of evidence never blocks a recall.
+func (r *Recall) outcomeGate(counts map[string]outcome.Aggregate, path string) (float64, bool) {
+	agg, ok := counts[path]
+	if !ok {
+		return 1, true
+	}
+	f := outcomeFactor(agg.Recalls, agg.Resolved, agg.FeedbackUp, agg.FeedbackDown, r.OutcomePrior)
+	return f, f >= r.OutcomeFloor
 }
 
 // outcomeFactor decays a recall's confidence by its track record as the posterior
