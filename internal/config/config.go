@@ -193,12 +193,24 @@ type Cloud struct {
 // investigation loop may call. Empty Servers disables it (the default — MCP is opt-in).
 type MCP struct {
 	Servers []MCPServer `yaml:"servers"`
+
+	// RequireAllowlist refuses startup unless EVERY server declares a tools
+	// allowlist — deny-by-default for operators who treat remote MCP servers
+	// as untrusted. Default false: a listed server exposes all its tools,
+	// matching pre-allowlist behavior.
+	RequireAllowlist bool `yaml:"require_allowlist"`
 }
 
 // MCPServer is one external MCP server reachable over streamable-HTTP.
 type MCPServer struct {
 	Name     string `yaml:"name"` // identifier; namespaces its tools as name__tool
 	Endpoint `yaml:",inline"`
+
+	// Tools is an exact-name allowlist of remote tools to expose to the model
+	// (pre-namespacing names, as advertised by tools/list). Empty ⇒ every
+	// advertised tool (unless mcp.require_allowlist). Enforced at discovery:
+	// a tool outside the list is never registered, so it cannot be called.
+	Tools []string `yaml:"tools"`
 }
 
 // Network provider identifiers for config.network.provider. The network signal is
@@ -1084,6 +1096,19 @@ func (c *Config) Validate() error {
 		}
 		if err := checkSecureKeyEndpoint("mcp.servers["+s.Name+"].url", "mcp.servers["+s.Name+"].token_env", s.URL, s.TokenEnv); err != nil {
 			return err
+		}
+		seenTool := map[string]bool{}
+		for j, tn := range s.Tools {
+			if tn == "" || strings.ContainsAny(tn, " \t") {
+				return fmt.Errorf("mcp.servers[%s].tools[%d]: tool name must be non-empty without whitespace", s.Name, j)
+			}
+			if seenTool[tn] {
+				return fmt.Errorf("mcp.servers[%s].tools: duplicate tool name %q", s.Name, tn)
+			}
+			seenTool[tn] = true
+		}
+		if c.MCP.RequireAllowlist && len(s.Tools) == 0 {
+			return fmt.Errorf("mcp.require_allowlist: server %q declares no tools allowlist (add mcp.servers[%s].tools or disable require_allowlist)", s.Name, s.Name)
 		}
 	}
 	// Curation verdict gate: reject an unknown verdict in forge.skip_verdicts at

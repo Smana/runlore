@@ -70,23 +70,37 @@ func (c *Client) Initialize(ctx context.Context) error {
 	return nil
 }
 
-// ListTools returns the server's advertised tools. Retries up to 3 times on transient failures.
+// maxToolListPages bounds tools/list cursor-following so a misbehaving server
+// can't spin discovery forever. 16 pages of any sane page size covers real
+// servers by orders of magnitude.
+const maxToolListPages = 16
+
+// ListTools returns the server's advertised tools, following nextCursor
+// pagination (bounded) so callers — including allowlist enforcement — see the
+// COMPLETE list. Each page retries up to 3 times on transient failures.
 func (c *Client) ListTools(ctx context.Context) ([]RemoteTool, error) {
-	raw, err := c.rpc(ctx, "tools/list", map[string]any{}, 3)
-	if err != nil {
-		return nil, err
+	var all []RemoteTool
+	params := map[string]any{}
+	for page := 0; page < maxToolListPages; page++ {
+		raw, err := c.rpc(ctx, "tools/list", params, 3)
+		if err != nil {
+			return nil, err
+		}
+		var res struct {
+			Tools      []RemoteTool `json:"tools"`
+			NextCursor string       `json:"nextCursor"`
+		}
+		if err := json.Unmarshal(raw, &res); err != nil {
+			return nil, fmt.Errorf("mcp tools/list decode: %w", err)
+		}
+		all = append(all, res.Tools...)
+		if res.NextCursor == "" {
+			return all, nil
+		}
+		params = map[string]any{"cursor": res.NextCursor}
 	}
-	var res struct {
-		Tools      []RemoteTool `json:"tools"`
-		NextCursor string       `json:"nextCursor"`
-	}
-	if err := json.Unmarshal(raw, &res); err != nil {
-		return nil, fmt.Errorf("mcp tools/list decode: %w", err)
-	}
-	if res.NextCursor != "" {
-		c.log.Warn("mcp: tools/list returned a nextCursor; pagination unsupported, list may be truncated", "server", c.name)
-	}
-	return res.Tools, nil
+	c.log.Warn("mcp: tools/list exceeded the page cap; list may be truncated", "server", c.name, "pages", maxToolListPages)
+	return all, nil
 }
 
 // CallTool invokes a remote tool and returns its concatenated text content. An MCP

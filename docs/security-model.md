@@ -48,6 +48,16 @@ additionally requires an authenticated webhook, a positive confidence
 threshold and rate cap, and a non-empty namespace allowlist (see
 [Configuration → actions](configuration.md#actions--the-autonomy-ladder-off-by-default)).
 
+## External MCP tools
+
+Remote MCP tools run outside RunLore's action gate: the gate stops RunLore from *executing* cluster
+operations, but a remote tool that mutates state server-side would do so the moment it is called.
+Treat every configured MCP server as part of your TCB. Two controls bound this: per-server
+`mcp.servers[].tools` allowlists (a tool not listed is never registered, so the model can never call
+it), and `mcp.require_allowlist: true` to refuse startup unless every server is allowlisted. Tool
+*output* remains untrusted data (redaction + no-instruction-following), and per-server discovery
+failures are isolated.
+
 ## Secret redaction at the LLM and egress boundaries
 
 Tool output and incident text flow to a model provider and, for findings, into your KB PR and chat.
