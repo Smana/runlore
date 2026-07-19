@@ -58,11 +58,33 @@ type embedResponse struct {
 	} `json:"data"`
 }
 
+// maxEmbedBatch bounds the inputs per /embeddings request. Providers cap the
+// batch (OpenAI ~2048; many vLLM/Ollama deployments far less), and one oversized
+// request would fail the WHOLE corpus embed — chunking keeps a growing KB
+// embeddable and each request well under every common cap.
+const maxEmbedBatch = 256
+
 // Embed returns one vector per input text, in input order. Empty input → nil.
+// Large inputs are transparently split into maxEmbedBatch-sized requests; any
+// failing chunk fails the whole call (callers rely on all-or-nothing).
 func (c *Client) Embed(ctx context.Context, texts []string) ([][]float32, error) {
 	if len(texts) == 0 {
 		return nil, nil
 	}
+	out := make([][]float32, 0, len(texts))
+	for start := 0; start < len(texts); start += maxEmbedBatch {
+		end := min(start+maxEmbedBatch, len(texts))
+		vecs, err := c.embedBatch(ctx, texts[start:end])
+		if err != nil {
+			return nil, fmt.Errorf("inputs %d-%d: %w", start, end-1, err)
+		}
+		out = append(out, vecs...)
+	}
+	return out, nil
+}
+
+// embedBatch performs one bounded /embeddings request (the pre-chunking Embed body).
+func (c *Client) embedBatch(ctx context.Context, texts []string) ([][]float32, error) {
 	body, err := json.Marshal(embedRequest{Model: c.model, Input: texts})
 	if err != nil {
 		return nil, fmt.Errorf("marshal request: %w", err)

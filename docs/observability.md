@@ -82,6 +82,7 @@ estimate) keep the SDK defaults and are read as heatmaps, not percentiles.
 | `runlore_incident_resolution_seconds` | histogram | — | open→resolve duration |
 | `runlore_curations_total` | counter | `kind`, `result` | curation outcomes (`opened`/`coalesced`/`error`) |
 | `runlore_curation_dedup_score` | histogram | — | catalog top-hit BM25 score at the dedup decision |
+| `runlore_catalog_embed_degraded_total` | counter | — | catalog reloads that left hybrid recall without vectors (embed failure — recall degrades to BM25-only until the next successful sync) |
 
 ## Grafana dashboard
 

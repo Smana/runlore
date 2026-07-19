@@ -3,8 +3,13 @@
 package catalog
 
 import (
+	"bytes"
 	"context"
+	"errors"
 	"fmt"
+	"log/slog"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -80,6 +85,142 @@ func TestSearchHybridFallsBackWithoutEmbedder(t *testing.T) {
 	}
 	if len(hits) == 0 || !strings.Contains(hits[0].Entry.Title, "Network") {
 		t.Fatalf("BM25 fallback should surface the Network entry, got %+v", hits)
+	}
+}
+
+// countingEmbedder records every Embed call so tests can assert exactly which
+// texts were sent (the cache's whole point: unchanged entries are never re-sent).
+type countingEmbedder struct {
+	calls [][]string
+	fail  bool
+}
+
+func (f *countingEmbedder) Embed(_ context.Context, texts []string) ([][]float32, error) {
+	f.calls = append(f.calls, append([]string(nil), texts...))
+	if f.fail {
+		return nil, errors.New("embed boom")
+	}
+	out := make([][]float32, len(texts))
+	for i := range texts {
+		out[i] = []float32{float32(len(texts[i])), 1}
+	}
+	return out, nil
+}
+
+func writeHybridEntry(t *testing.T, dir, name, title, body string) {
+	t.Helper()
+	md := "---\ntype: Incident\ntitle: " + title + "\ndescription: d\nresource: ns/app\n---\n\n" + body + "\n"
+	if err := os.WriteFile(filepath.Join(dir, name), []byte(md), 0o600); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// TestReloadEmbedsOnlyChangedEntries: reload #1 embeds the full corpus; editing
+// ONE entry and reloading embeds exactly that one; an unchanged reload embeds
+// nothing. Deleted entries are evicted from the cache.
+func TestReloadEmbedsOnlyChangedEntries(t *testing.T) {
+	dir := t.TempDir()
+	writeHybridEntry(t, dir, "a.md", "Alpha incident", "alpha body")
+	writeHybridEntry(t, dir, "b.md", "Beta incident", "beta body")
+
+	emb := &countingEmbedder{}
+	c := NewEmpty()
+	c.SetEmbedder(emb)
+
+	if _, err := c.ReloadContext(context.Background(), dir); err != nil {
+		t.Fatal(err)
+	}
+	if len(emb.calls) != 1 || len(emb.calls[0]) != 2 {
+		t.Fatalf("first reload: calls=%v, want one call with 2 texts", emb.calls)
+	}
+	if !c.HasVectors() {
+		t.Fatal("first reload: HasVectors=false, want true")
+	}
+
+	// Edit ONE entry → only its text is re-embedded.
+	writeHybridEntry(t, dir, "b.md", "Beta incident", "beta body EDITED")
+	if _, err := c.ReloadContext(context.Background(), dir); err != nil {
+		t.Fatal(err)
+	}
+	if len(emb.calls) != 2 || len(emb.calls[1]) != 1 {
+		t.Fatalf("edited reload: calls=%v, want second call with exactly 1 text", emb.calls)
+	}
+	if !strings.Contains(emb.calls[1][0], "EDITED") {
+		t.Fatalf("edited reload embedded the wrong text: %q", emb.calls[1][0])
+	}
+	if !c.HasVectors() {
+		t.Fatal("edited reload: HasVectors=false, want true")
+	}
+
+	// Unchanged reload → zero embed traffic.
+	if _, err := c.ReloadContext(context.Background(), dir); err != nil {
+		t.Fatal(err)
+	}
+	if len(emb.calls) != 2 {
+		t.Fatalf("unchanged reload: calls=%d, want 2 (no new embed call)", len(emb.calls))
+	}
+
+	// Delete an entry → cache must not pin it forever: re-adding it later re-embeds.
+	if err := os.Remove(filepath.Join(dir, "a.md")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := c.ReloadContext(context.Background(), dir); err != nil {
+		t.Fatal(err)
+	}
+	writeHybridEntry(t, dir, "a.md", "Alpha incident", "alpha body")
+	if _, err := c.ReloadContext(context.Background(), dir); err != nil {
+		t.Fatal(err)
+	}
+	last := emb.calls[len(emb.calls)-1]
+	if len(last) != 1 || !strings.Contains(last[0], "alpha") {
+		t.Fatalf("re-added entry not re-embedded after eviction: %v", emb.calls)
+	}
+}
+
+// TestReloadEmbedFailureKeepsCacheAndWarns pins the failure contract: a failed
+// embed drops vectors (all-or-nothing → BM25-only), logs a WARN, KEEPS the cache
+// from prior successful reloads, and the retry embeds only the missing subset.
+func TestReloadEmbedFailureKeepsCacheAndWarns(t *testing.T) {
+	dir := t.TempDir()
+	writeHybridEntry(t, dir, "a.md", "Alpha incident", "alpha body")
+
+	emb := &countingEmbedder{}
+	var logBuf bytes.Buffer
+	c := NewEmpty()
+	c.SetEmbedder(emb)
+	c.Log = slog.New(slog.NewTextHandler(&logBuf, nil))
+
+	if _, err := c.ReloadContext(context.Background(), dir); err != nil {
+		t.Fatal(err)
+	}
+	if !c.HasVectors() {
+		t.Fatal("setup: HasVectors=false after successful reload")
+	}
+
+	// Add a new entry, then fail its embed.
+	writeHybridEntry(t, dir, "b.md", "Beta incident", "beta body")
+	emb.fail = true
+	if _, err := c.ReloadContext(context.Background(), dir); err != nil {
+		t.Fatalf("reload must stay non-fatal on embed failure: %v", err)
+	}
+	if c.HasVectors() {
+		t.Fatal("failed embed: HasVectors=true, want false (all-or-nothing)")
+	}
+	if !strings.Contains(logBuf.String(), "hybrid recall degrades to BM25-only") {
+		t.Fatalf("no WARN logged on embed failure; log=%q", logBuf.String())
+	}
+
+	// Retry succeeds and embeds ONLY the new entry — the cache survived the failure.
+	emb.fail = false
+	if _, err := c.ReloadContext(context.Background(), dir); err != nil {
+		t.Fatal(err)
+	}
+	last := emb.calls[len(emb.calls)-1]
+	if len(last) != 1 || !strings.Contains(last[0], "beta") {
+		t.Fatalf("retry after failure re-embedded %d texts (%v), want only the missing 'beta' entry", len(last), last)
+	}
+	if !c.HasVectors() {
+		t.Fatal("retry: HasVectors=false, want true")
 	}
 }
 
