@@ -8,7 +8,11 @@ import (
 	"math"
 	"net/http"
 	"net/http/httptest"
+	"slices"
+	"strconv"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 )
 
@@ -71,6 +75,103 @@ func TestEmbedNon2xxOmitsBody(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "502") || !strings.Contains(err.Error(), "req-9") {
 		t.Fatalf("error should carry status + request-id: %v", err)
+	}
+}
+
+// TestEmbedChunksLargeBatches proves Embed splits oversized input into bounded
+// per-request batches while preserving input order across chunk boundaries.
+func TestEmbedChunksLargeBatches(t *testing.T) {
+	const n = 600 // 256 + 256 + 88
+	var mu sync.Mutex
+	var batchSizes []int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			Input []string `json:"input"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			t.Errorf("decode: %v", err)
+		}
+		mu.Lock()
+		batchSizes = append(batchSizes, len(req.Input))
+		mu.Unlock()
+		// Echo each input's numeric suffix back as its vector so the test can
+		// verify global ordering end-to-end ("t42" → [42]).
+		type datum struct {
+			Index     int       `json:"index"`
+			Embedding []float32 `json:"embedding"`
+		}
+		out := struct {
+			Data []datum `json:"data"`
+		}{}
+		for i, s := range req.Input {
+			v, err := strconv.Atoi(strings.TrimPrefix(s, "t"))
+			if err != nil {
+				t.Errorf("unexpected input %q", s)
+			}
+			out.Data = append(out.Data, datum{Index: i, Embedding: []float32{float32(v)}})
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(out)
+	}))
+	defer srv.Close()
+
+	texts := make([]string, n)
+	for i := range texts {
+		texts[i] = "t" + strconv.Itoa(i)
+	}
+	c := New(srv.URL, "test-model", "")
+	got, err := c.Embed(context.Background(), texts)
+	if err != nil {
+		t.Fatalf("Embed: %v", err)
+	}
+	if len(got) != n {
+		t.Fatalf("got %d vectors, want %d", len(got), n)
+	}
+	for i, v := range got {
+		if len(v) != 1 || v[0] != float32(i) {
+			t.Fatalf("vector %d = %v, want [%d] (order broken across chunks)", i, v, i)
+		}
+	}
+	wantSizes := []int{256, 256, 88}
+	if !slices.Equal(batchSizes, wantSizes) {
+		t.Fatalf("batch sizes = %v, want %v", batchSizes, wantSizes)
+	}
+}
+
+// TestEmbedChunkFailurePropagates proves a failure in a later chunk fails the
+// whole call (no partial result).
+func TestEmbedChunkFailurePropagates(t *testing.T) {
+	var calls atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if calls.Add(1) > 1 { // first chunk OK, second chunk 500s
+			http.Error(w, "boom", http.StatusInternalServerError)
+			return
+		}
+		var req struct {
+			Input []string `json:"input"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&req)
+		type datum struct {
+			Index     int       `json:"index"`
+			Embedding []float32 `json:"embedding"`
+		}
+		out := struct {
+			Data []datum `json:"data"`
+		}{}
+		for i := range req.Input {
+			out.Data = append(out.Data, datum{Index: i, Embedding: []float32{1}})
+		}
+		_ = json.NewEncoder(w).Encode(out)
+	}))
+	defer srv.Close()
+
+	texts := make([]string, 300) // 2 chunks
+	for i := range texts {
+		texts[i] = "x"
+	}
+	c := New(srv.URL, "test-model", "")
+	if _, err := c.Embed(context.Background(), texts); err == nil {
+		t.Fatal("want error when a chunk fails, got nil")
 	}
 }
 
