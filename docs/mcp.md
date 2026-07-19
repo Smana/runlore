@@ -85,10 +85,12 @@ toolbox at startup:
 
 ```yaml
 mcp:
+  # require_allowlist: true                # fail closed: every server MUST list tools
   servers:
     - name: runbooks                       # tools appear as runbooks__<tool>
       url: https://mcp.internal.example/mcp # streamable-HTTP transport
       # token_env: RUNBOOKS_MCP_TOKEN       # optional bearer token (env-var name)
+      # tools: [search, get]                # exact-name allowlist; omit ⇒ all tools
 ```
 
 What to know:
@@ -98,7 +100,14 @@ What to know:
 - **Namespacing:** every remote tool is exposed to the model as `<server>__<tool>`, and
   the system prompt marks them as **external, untrusted-output, read-only** tools — a
   remote tool can inform an investigation, never perform an action (the action gate only
-  knows the built-in operations).
+  knows the built-in operations). Note the gate constrains RunLore's *own* write path — a
+  remote tool with server-side side effects is only prevented from being *called* by the
+  allowlist below.
+- **Allowlist:** `tools:` is an exact-name allowlist enforced at discovery — an un-listed
+  tool is never registered, so the model cannot call it. `mcp.require_allowlist: true`
+  refuses startup unless every server declares one (deny-by-default). Discovery follows
+  `tools/list` pagination (bounded at 16 pages), so the allowlist is applied to the
+  server's complete tool list.
 - **Failure isolation:** discovery happens at startup per server; an unreachable server
   is logged and skipped — it never blocks the agent or the other servers. Remote calls
   are not retried (they are not assumed idempotent).
