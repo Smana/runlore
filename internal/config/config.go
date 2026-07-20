@@ -415,6 +415,11 @@ type InstantRecall struct {
 	OutcomePrior         float64 `yaml:"outcome_prior"`          // Beta prior strength for outcome decay
 	OutcomeFloor         float64 `yaml:"outcome_floor"`          // reject a recall when the outcome factor drops below this
 
+	// StaleAfter down-weights a recall whose last_validated/timestamp is older than
+	// this; 0 disables. One 0.75 confidence step, never a rejection — confirm/verify
+	// stay the hard gates. An unset horizon plus dateless entries = today's behavior.
+	StaleAfter Duration `yaml:"stale_after"`
+
 	// Rerank adds an LLM reranking stage to the recall short-circuit: it ranks the
 	// top-K structurally-agreeing candidates against the incident with ONE cheap
 	// model call and gates the fire on the reranker's CALIBRATED match confidence
