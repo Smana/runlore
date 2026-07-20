@@ -8,6 +8,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 RunLore is **pre-1.0 and under active development** — there are no tagged releases
 yet, so everything currently lives under `[Unreleased]`.
 
+## [0.10.0](https://github.com/Smana/runlore/compare/v0.9.2...v0.10.0) (2026-07-20)
+
+
+### Features
+
+* **catalog:** content-hash embedding cache, chunked batches, loud degradation ([#328](https://github.com/Smana/runlore/issues/328)) ([db28d7b](https://github.com/Smana/runlore/commit/db28d7b81f525c899334cf2fbc6e745b006a937b))
+* **catalog:** parse OKF status/last_validated; recall honors retirement and age ([#336](https://github.com/Smana/runlore/issues/336)) ([0ce151c](https://github.com/Smana/runlore/commit/0ce151c2617efb11b76bc5ced96b4b9d84ce26bc))
+* **catalog:** persisted vector cache and incremental index updates ([#341](https://github.com/Smana/runlore/issues/341)) ([da100b7](https://github.com/Smana/runlore/commit/da100b7caa7e5f397b3023700c983e8c52824e52))
+* **curate:** retirement pass for decayed merged KB entries ([#333](https://github.com/Smana/runlore/issues/333)) ([0045916](https://github.com/Smana/runlore/commit/0045916e4f4e00c298db164a6bd475de0d07f306))
+* **eval:** hybrid recall exercised by real gates with measured thresholds ([#334](https://github.com/Smana/runlore/issues/334)) ([90f0e3c](https://github.com/Smana/runlore/commit/90f0e3cadd0ff4e88b31dfc11b0f67e18943e047))
+* **mcp:** per-server remote-tool allowlist and paginated discovery ([#331](https://github.com/Smana/runlore/issues/331)) ([fcb9d58](https://github.com/Smana/runlore/commit/fcb9d58c5c03832d5b1f20bae505ebcb938a4bf0))
+* **notify:** config-only templated notifier ([#340](https://github.com/Smana/runlore/issues/340)) ([d604adf](https://github.com/Smana/runlore/commit/d604adfb84d6fcd6675256a87bef91fb0632f19c))
+* **outcome:** confirming re-investigations recover a downvoted entry ([#335](https://github.com/Smana/runlore/issues/335)) ([cb3afc1](https://github.com/Smana/runlore/commit/cb3afc1f0dc8ac9037f7d11659d686d9ebeef043))
+* **recall:** runner-up fallback past a low_outcome winner ([#329](https://github.com/Smana/runlore/issues/329)) ([db28446](https://github.com/Smana/runlore/commit/db284468a1d609a6dc94abc538640b25f42957b8))
+* **server:** investigation rate-limit default, payload cap, and auth backoff ([#330](https://github.com/Smana/runlore/issues/330)) ([66c54e2](https://github.com/Smana/runlore/commit/66c54e28c6d4eb862a77f45143e6f90c090970cf))
+* **source:** config-only templated webhook source ([#339](https://github.com/Smana/runlore/issues/339)) ([57fbf71](https://github.com/Smana/runlore/commit/57fbf71720c140fdd33128642ebf8fc5f7c6a7e1))
+* **whatchanged:** persistent per-repo git mirror with incremental fetch ([#332](https://github.com/Smana/runlore/issues/332)) ([8bdd02f](https://github.com/Smana/runlore/commit/8bdd02f7337f2c1a8a14f47183fa451a47a1b5db))
+
+
+### Bug Fixes
+
+* **e2e:** feed awk via herestring — early exit SIGPIPE-killed the metric pipeline ([#342](https://github.com/Smana/runlore/issues/342)) ([eb05727](https://github.com/Smana/runlore/commit/eb05727d61546d23e3dc2b8764f9633b06d4d269))
+
+
+### Documentation
+
+* **dev:** 2026-07-19 project audit, improvement roadmap, and implementation plans ([#326](https://github.com/Smana/runlore/issues/326)) ([c9646bd](https://github.com/Smana/runlore/commit/c9646bda59dd96a717350a46080d45136730117b))
+* **dev:** Later-wave plans, federation design, and roadmap status update ([#337](https://github.com/Smana/runlore/issues/337)) ([74feb33](https://github.com/Smana/runlore/commit/74feb33d408c3dd2451384b71494b2c0058bba67))
+
 ## [0.9.2](https://github.com/Smana/runlore/compare/v0.9.1...v0.9.2) (2026-07-14)
 
 
