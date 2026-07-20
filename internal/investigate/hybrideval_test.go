@@ -20,10 +20,12 @@ import (
 	"math"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"testing"
 
 	"github.com/Smana/runlore/internal/catalog"
+	"github.com/Smana/runlore/internal/embed"
 )
 
 // bowEmbedder is a deterministic bag-of-words embedder: each lowercase token is
@@ -284,5 +286,84 @@ func TestHybridRecallEvalProductionFireRate(t *testing.T) {
 	}
 	if f.negFired != wantHybridNegFired {
 		t.Fatalf("NEGATIVE case fired under hybrid gates (%d) — false recall, the one unacceptable outcome", f.negFired)
+	}
+}
+
+// --- LIVE measurement regime: the numbers the cosine defaults must be derived from ---
+
+// TestHybridRecallEvalLive is the MEASUREMENT run: the same fixtures, a real
+// /embeddings endpoint. It prints, per positive case, the target's cosine + rank +
+// top-vs-runner-up margin, and per negative case the top cosine; then the two numbers
+// the defaults are derived from:
+//
+//	floor candidate  = min(positive top-cosine)   — fire everything real
+//	ceiling guard    = max(negative top-cosine)   — never fire a negative
+//
+// hybrid_min_score must sit between them with headroom; hybrid_margin_gap comes from
+// the printed margin distribution. This is the ONLY regime where the thresholds are
+// semantically meaningful — CI runs the deterministic bag-of-words regime instead, so
+// these numbers are NEVER pinned into CI. Run:
+//
+//	RUNLORE_EVAL_EMBED_BASE_URL=http://localhost:11434/v1 \
+//	RUNLORE_EVAL_EMBED_MODEL=nomic-embed-text \
+//	go test ./internal/investigate/ -run TestHybridRecallEvalLive -v
+func TestHybridRecallEvalLive(t *testing.T) {
+	base := os.Getenv("RUNLORE_EVAL_EMBED_BASE_URL")
+	if base == "" {
+		t.Skipf("SKIPPED (loud): live hybrid eval needs RUNLORE_EVAL_EMBED_BASE_URL (+RUNLORE_EVAL_EMBED_MODEL, optional RUNLORE_EVAL_EMBED_API_KEY). CI runs the deterministic bag-of-words regime; THIS run is what makes the thresholds 'measured'.")
+	}
+	model := os.Getenv("RUNLORE_EVAL_EMBED_MODEL")
+	if model == "" {
+		t.Fatal("RUNLORE_EVAL_EMBED_MODEL is required with RUNLORE_EVAL_EMBED_BASE_URL")
+	}
+	dir := t.TempDir()
+	for name, md := range evalCatalogEntries {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte(md), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	cat := catalog.NewEmpty()
+	cat.SetEmbedder(embed.New(base, model, os.Getenv("RUNLORE_EVAL_EMBED_API_KEY")))
+	if _, err := cat.ReloadContext(context.Background(), dir); err != nil {
+		t.Fatal(err)
+	}
+	if !cat.HasVectors() {
+		t.Fatal("live embedder produced no vectors (endpoint down? see the catalog WARN)")
+	}
+
+	var posTop, negTop, margins []float64
+	for _, c := range evalCases() {
+		q := buildRecallQuery(c.request())
+		hits, err := cat.SearchHybrid(context.Background(), q, recallCandidateK)
+		if err != nil || len(hits) == 0 {
+			t.Logf("case %-28s: NO HITS (err=%v)", c.name, err)
+			continue
+		}
+		margin := hits[0].Score
+		if len(hits) > 1 {
+			margin = hits[0].Score - hits[1].Score
+		}
+		if c.negative() {
+			negTop = append(negTop, hits[0].Score)
+			t.Logf("case %-28s: NEGATIVE top=%.3f", c.name, hits[0].Score)
+			continue
+		}
+		rank := rankOfTarget(hits, c.targets)
+		posTop = append(posTop, hits[0].Score)
+		margins = append(margins, margin)
+		t.Logf("case %-28s: rank=%d top=%.3f margin=%.3f", c.name, rank, hits[0].Score, margin)
+	}
+	sort.Float64s(posTop)
+	sort.Float64s(negTop)
+	sort.Float64s(margins)
+	if len(posTop) == 0 || len(negTop) == 0 {
+		t.Fatal("distribution incomplete — cannot derive thresholds")
+	}
+	t.Logf("DERIVE: min positive top=%.3f | max negative top=%.3f | median margin=%.3f | model=%s",
+		posTop[0], negTop[len(negTop)-1], margins[len(margins)/2], model)
+	t.Logf("RECOMMEND: hybrid_min_score between %.3f and %.3f (with headroom); hybrid_margin_gap ≤ %.3f",
+		negTop[len(negTop)-1], posTop[0], margins[len(margins)/2])
+	if posTop[0] <= negTop[len(negTop)-1] {
+		t.Log("WARNING: distributions OVERLAP — no cosine floor separates positives from negatives for this model; hybrid_min_score alone cannot gate safely (graduation criterion 3 fails)")
 	}
 }
