@@ -126,3 +126,20 @@ grading → aggregation → report writing with no API key and no network. Run i
 ```bash
 go test ./internal/app/ -run TestRunEvalCompareOffline
 ```
+
+## Go micro-benchmarks (hot paths)
+
+Hermetic `testing.B` benchmarks guard the hot paths the 2026-07-19 audit named:
+no network, deterministic fixtures, safe to run anywhere. They are deliberately
+NOT part of the CI gate (numbers on shared runners are noise); run them locally
+when touching these packages and compare against your own baseline:
+
+    go test ./internal/whatchanged/ -bench BenchmarkRemote -benchtime 5x -run '^$'
+    go test ./internal/catalog/     -bench Benchmark       -benchtime 5x -run '^$'
+    go test ./internal/outcome/     -bench BenchmarkLedger -benchtime 5x -run '^$'
+    go test ./internal/trigger/ ./internal/coalesce/ -bench . -benchtime 5x -run '^$'
+
+What each guards: clone-vs-mirror (`whatchanged`), BM25 rebuild and cold-vs-warm
+embed cache + BM25/hybrid query cost (`catalog`), cold-start replay, one
+compaction cycle, and the O(1) OpenCounts read (`outcome`), and per-alert
+admission under storm (`trigger`, `coalesce`).
