@@ -981,17 +981,31 @@ type Aggregate struct {
 	Confirms int
 }
 
+// confirmWeight is how much of one human observation a machine confirmation is
+// worth in the Beta posterior. Half: a fresh investigation re-deriving the same
+// conclusion is real evidence, but a human 👎 must outrank any SINGLE machine
+// confirmation — with k=2 and floor 0.5, one 👎 needs TWO confirmations to recover.
+const confirmWeight = 0.5
+
 // Factor is the entry's outcome-decay factor: the posterior mean of a symmetric
-// Beta(k/2, k/2) prior over the success rate, folding resolves and human votes
-// into one trust signal:
+// Beta(k/2, k/2) prior over the success rate, folding resolves, human votes, and
+// machine confirmations into one trust signal:
 //
-//	factor = (Resolved + FeedbackUp + k/2) / (Recalls + FeedbackUp + FeedbackDown + k)
+//	factor = (Resolved + FeedbackUp + confirmWeight·Confirms + k/2) /
+//	         (Recalls + FeedbackUp + FeedbackDown + confirmWeight·Confirms + k)
+//
+// Confirms are recovery evidence at HALF the weight of a human observation
+// (confirmWeight): a fresh re-investigation independently reaching an entry's
+// conclusion counts as a partial success, but a human 👎 still outranks any single
+// confirmation — one 👎 needs two confirmations to climb back to the floor.
 //
 // It is THE single definition of decay — recall's fire gate and the curate
-// retirement pass both consume it, so they can never drift apart. See
+// retirement pass both consume it, so they can never drift apart (a
+// confirm-recovered entry therefore also exits retirement candidacy). See
 // investigate's gate docs for the full statistical rationale.
 func (a Aggregate) Factor(k float64) float64 {
-	return (float64(a.Resolved+a.FeedbackUp) + k/2) / (float64(a.Recalls+a.FeedbackUp+a.FeedbackDown) + k)
+	c := confirmWeight * float64(a.Confirms)
+	return (float64(a.Resolved+a.FeedbackUp) + c + k/2) / (float64(a.Recalls+a.FeedbackUp+a.FeedbackDown) + c + k)
 }
 
 // OpenCounts rolls recall episodes up per catalog entry (fresh investigations

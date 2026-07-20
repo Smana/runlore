@@ -576,20 +576,29 @@ func (r *Recall) outcomeGate(counts map[string]outcome.Aggregate, path string) (
 	if !ok {
 		return 1, true
 	}
-	f := outcomeFactor(agg.Recalls, agg.Resolved, agg.FeedbackUp, agg.FeedbackDown, r.OutcomePrior)
+	f := outcomeFactor(agg.Recalls, agg.Resolved, agg.FeedbackUp, agg.FeedbackDown, agg.Confirms, r.OutcomePrior)
 	return f, f >= r.OutcomeFloor
 }
 
 // outcomeFactor decays a recall's confidence by its track record as the posterior
 // mean of a symmetric Beta(k/2, k/2) prior over the success rate:
 //
-//	factor = (resolved + up + k/2) / (recalls + up + down + k)
+//	factor = (resolved + up + confirmWeight·confirms + k/2) /
+//	         (recalls + up + down + confirmWeight·confirms + k)
 //
 // Human 👍/👎 feedback (up/down) are extra Bernoulli observations in the SAME
 // posterior — a 👍 is one success, a 👎 one failure, each weighing exactly like a
 // resolved/unresolved recall. That is deliberate: feedback is the only ground
 // truth non-resolvable sources (GitOps failures) can ever accumulate, since their
 // recalls are excluded from resolve-based decay (see outcome.applyOpenLocked).
+//
+// confirms are machine confirmations — fresh investigations that independently
+// re-derived a contested entry's conclusion — folded in as recovery evidence at
+// HALF a human observation (confirmWeight): a standing 👎 forces re-investigation,
+// and two such confirmations bring a single-👎 entry back to the floor, so a human
+// still outranks any single machine confirmation. The single definition of the
+// formula lives on outcome.Aggregate.Factor; this thin delegate keeps the recall
+// gate and the curate retirement pass reading the same decay.
 //
 // k is the total pseudo-observation count (the prior strength). With the default
 // k=2 this is the documented Beta(1,1) posterior (resolved+up+1)/(recalls+up+down+2):
@@ -599,8 +608,8 @@ func (r *Recall) outcomeGate(counts map[string]outcome.Aggregate, path string) (
 // Always in (0, 1) for k > 0, resolved ≤ recalls and non-negative votes. Entries
 // with no recall or feedback history never reach this gate (they are absent from
 // OpenCounts), so a brand-new entry is not punished by the 0.5 prior mean.
-func outcomeFactor(recalls, resolved, up, down int, k float64) float64 {
-	return outcome.Aggregate{Recalls: recalls, Resolved: resolved, FeedbackUp: up, FeedbackDown: down}.Factor(k)
+func outcomeFactor(recalls, resolved, up, down, confirms int, k float64) float64 {
+	return outcome.Aggregate{Recalls: recalls, Resolved: resolved, FeedbackUp: up, FeedbackDown: down, Confirms: confirms}.Factor(k)
 }
 
 // deriveRecallConfidence turns the match signals into an explainable confidence,
