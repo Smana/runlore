@@ -187,6 +187,27 @@ incident webhook. Known keys: `alertmanager`, `gitops`, `pagerduty`.
   still goes through live-state confirm + the adversarial verify pass, exactly as before — the reranker
   is a *retrieval-time* "which candidate + confident enough to short-circuit" decision, not a second
   verify.
+- `instant_recall.hybrid` (**EXPERIMENTAL**, off by default; needs `model.embeddings`) — switches recall
+  to fused **BM25 + embedding** retrieval, gated on **cosine** similarity (`hybrid_min_score` default
+  **0.80**, `hybrid_margin_gap` default **0.05**) instead of the BM25 magnitude. *Provenance:* the hybrid
+  eval (`internal/investigate/hybrideval_test.go`) drives the whole path end-to-end with a
+  **deterministic bag-of-words embedder** — the CI regime measures the *machinery and the gate
+  philosophy*, not semantic quality: `SearchHybrid` + the cosine gates run, hybrid Recall@1 is **8/13**
+  (`TestHybridRecallEvalRetrieval`), and at the shipped gates the fire-rate is **0/11** with **0** of 2
+  negatives firing (`TestHybridRecallEvalProductionFireRate`) — the false-recall guard holds. The numeric
+  cosine defaults are **conservative and not yet live-measured**: a real embedding model's cosine scale
+  is model-specific, so it must be measured with the env-gated `TestHybridRecallEvalLive` (which prints
+  the per-case cosine distribution and a `hybrid_min_score`/`hybrid_margin_gap` recommendation) before
+  the thresholds are trusted.
+- **Graduating hybrid out of `EXPERIMENTAL`** requires all of:
+  1. Live-measured thresholds (`TestHybridRecallEvalLive`) for at least one recommended embedding model,
+     recorded here with model + date.
+  2. Hybrid Recall@1 ≥ the BM25 baseline on the same fixture set (`TestHybridRecallEvalRetrieval` vs
+     `TestRecallEvalRetrieval` — today 8/13 hybrid vs 13/13 BM25 under the crude CI embedder; a real
+     model is expected to close this, which is exactly what the live run must confirm).
+  3. Zero negative-case fires at the shipped default gates, **live** regime included.
+  4. The embedding vector cache (content-hash, chunked batches) merged so reload cost no longer scales
+     with corpus size — **done** (N2, PR #328).
 - The **"📚 Matches known runbook"** notification block (stamped when a *full* investigation's
   `kb_search` finds a pre-existing entry) uses `solo_floor` as its visibility bar, so it tracks
   the same corpus/query-dependent BM25 scale recall runs in: a cluster that tunes `solo_floor`
