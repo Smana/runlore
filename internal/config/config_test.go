@@ -109,6 +109,24 @@ catalog:
 	}
 }
 
+func TestInstantRecallStaleAfterParse(t *testing.T) {
+	var c Config
+	if err := yaml.Unmarshal([]byte("catalog:\n  instant_recall:\n    enabled: true\n    stale_after: 720h\n"), &c); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if got := c.Catalog.InstantRecall.StaleAfter.Std(); got != 720*time.Hour {
+		t.Fatalf("instant_recall.stale_after: want 720h, got %v", got)
+	}
+	// Absent ⇒ zero ⇒ age down-weighting disabled (recall honours 0 as off).
+	var z Config
+	if err := yaml.Unmarshal([]byte("catalog:\n  instant_recall:\n    enabled: true\n"), &z); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if z.Catalog.InstantRecall.StaleAfter.Std() != 0 {
+		t.Fatalf("absent instant_recall.stale_after must be 0, got %v", z.Catalog.InstantRecall.StaleAfter.Std())
+	}
+}
+
 func TestCurateStaleAfterParse(t *testing.T) {
 	var c Config
 	if err := yaml.Unmarshal([]byte("curate:\n  stale_after: 720h\n"), &c); err != nil {

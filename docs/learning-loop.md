@@ -420,10 +420,12 @@ rejection:
   deliberate "keep it" that is never re-nagged (the same closed-unmerged-is-a-no
   philosophy as the recurrence escalation above). Per-item error isolation: one flaky
   entry never starves the rest of a run.
-  - **Seam (in progress).** This pass *writes* the `status: retired` frontmatter; the
-    catalog loader honoring it — so a retired entry actually stops being recalled — ships
-    as a separate change. Until then a merged retirement PR is inert but correct (the
-    entry is marked, the git history records the decision), with no dependency either way.
+  - **Seam (now live).** Recall honours the `status: retired` frontmatter this pass
+    writes: a retired (or `draft`) entry is filtered at recall's structural pre-filter,
+    so it never fires and is never offered as a near-miss lead — while `kb_search`/`kb_get`
+    keep surfacing it (status-visible) for KB archaeology. A merged retirement PR is
+    therefore effective end-to-end. Fail-safe: an absent or unknown status is treated as
+    active (OKF §9 tolerance), so pre-retirement catalogs behave exactly as before.
 
 ---
 
@@ -473,6 +475,25 @@ poisoned** note that recalls-but-never-resolves decays below the floor, gets rej
 at Gate 3, triggers a fresh investigation, and can be **overturned** by a corrected
 entry. Decay is **outcome/contradiction-driven, never pure mtime** — knowledge ages
 out because it stops working, not merely because it's old.
+
+**Two orthogonal freshness signals sit alongside this outcome decay**, both applied at
+recall's structural pre-filter and both fail-safe (absent frontmatter reproduces the
+pre-field behaviour byte-for-byte):
+
+- **Status** — a `retired` or `draft` entry is dropped *before* the gate: it never
+  fires and is never offered as a near-miss lead, which is what makes the retirement
+  pass (§5) effective end-to-end. Any absent or unknown status is treated as active
+  (OKF §9 tolerance). The entry stays indexed, so `kb_search`/`kb_get` still surface it
+  — status-visible — for KB archaeology; recall is where the firing ban lives.
+- **Age** (`catalog.instant_recall.stale_after`, opt-in; `0` disables) — an entry whose
+  `last_validated` (else `timestamp`) predates the horizon has its delivered confidence
+  taken **one** multiplicative step down (0.75). This is deliberately *not* a rejection
+  and *not* a curve zoo: **age never rejects on its own** — the **confirm** step (Gate 1)
+  and the adversarial **verify** pass remain the hard gates against a genuinely drifted
+  answer, and the outcome floor (Gate 3) keeps priority (track record beats calendar).
+  Staleness only stops a five-year-old runbook looking as confident as yesterday's. A
+  dateless or unparseable-date entry is exempt. `last_validated` is stamped at entry
+  creation (= `timestamp`) and is the seam a future confirmation flow refreshes.
 
 A `low_outcome` rejection does not abandon recall outright: the gate walks a small,
 bounded set of further structurally-agreeing candidates (the runner-up fallback) —

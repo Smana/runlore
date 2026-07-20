@@ -98,6 +98,33 @@ body
 	}
 }
 
+// TestLoadParsesStatusAndLastValidated: the lifecycle fields (status, last_validated)
+// are parsed into the Entry and an unknown frontmatter key (okf_version) never errors —
+// yaml.Unmarshal without KnownFields ignores it, pinned here so it stays true.
+func TestLoadParsesStatusAndLastValidated(t *testing.T) {
+	dir := t.TempDir()
+	entry := `---
+type: Incident
+title: retired one
+status: retired
+last_validated: 2026-01-10
+okf_version: "0.1"
+---
+Body.
+`
+	if err := os.WriteFile(filepath.Join(dir, "a.md"), []byte(entry), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	entries, skipped, err := Load(dir)
+	if err != nil || len(skipped) != 0 || len(entries) != 1 {
+		t.Fatalf("entries=%d skipped=%v err=%v", len(entries), skipped, err)
+	}
+	e := entries[0]
+	if e.Status != "retired" || e.LastValidated != "2026-01-10" {
+		t.Errorf("Status=%q LastValidated=%q, want retired / 2026-01-10", e.Status, e.LastValidated)
+	}
+}
+
 func TestLoadSkipsMalformedEntry(t *testing.T) {
 	dir := t.TempDir()
 	writeEntry(t, dir, "good.md", "---\ntype: Playbook\ntitle: Good\ndescription: fine\n---\nbody\n")
@@ -136,6 +163,26 @@ func TestLoadSkipsHidden(t *testing.T) {
 	}
 	if len(entries) != 1 || entries[0].Title != "Real" {
 		t.Fatalf("want exactly 1 entry 'Real', got %d: %+v", len(entries), entries)
+	}
+}
+
+// TestParseEntryDate pins the one date grammar shared by kbvalidate and recall:
+// RFC3339 and bare date parse; empty and garbage report ok=false (distinct from a
+// zero-but-valid time).
+func TestParseEntryDate(t *testing.T) {
+	tests := []struct {
+		in   string
+		want bool
+	}{
+		{"2026-01-10T00:00:00Z", true},
+		{"2026-01-10", true},
+		{"", false},
+		{"not-a-date", false},
+	}
+	for _, tc := range tests {
+		if _, ok := ParseEntryDate(tc.in); ok != tc.want {
+			t.Errorf("ParseEntryDate(%q) ok=%v, want %v", tc.in, ok, tc.want)
+		}
 	}
 }
 

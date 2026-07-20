@@ -35,13 +35,18 @@ git clone https://github.com/you/your-kb && lore mcp ./your-kb
 
 - **`kb_search`** — BM25 search over the catalog. Args: `query` (required),
   `k` (default 5, cap 20). Returns scored hits: `path`, `type`, `title`,
-  `description`, `resource`, `tags`, `score`.
+  `description`, `resource`, `tags`, `score`, plus `status` and `last_validated`
+  when the entry carries them (omitted otherwise).
 - **`kb_get`** — one full entry (frontmatter + markdown body) by the
   bundle-relative `path` a search hit returned. Curated entries also carry their
   `timestamp` (last-change stamp) and `fingerprint` (dedup identity) so a client
-  can judge freshness; hand-written entries omit both. Lookups go through the
-  in-memory index, never the filesystem, so path traversal is structurally
-  impossible.
+  can judge freshness; hand-written entries omit both. The lifecycle fields
+  `status` (`retired`/`draft`/…) and `last_validated` are surfaced too when
+  present. **Retired entries stay searchable and fetchable by design** — a KB
+  consumer sees the lifecycle state and judges for itself; the "never fires" ban
+  lives in RunLore's own recall path, not in these read-only tools. Lookups go
+  through the in-memory index, never the filesystem, so path traversal is
+  structurally impossible.
 
 The catalog directory resolves from the positional argument first, then
 `catalog.dir` in the config. The catalog is indexed once at startup; re-run

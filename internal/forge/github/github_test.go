@@ -389,6 +389,32 @@ func TestRenderEntryIncludesTimestamp(t *testing.T) {
 	}
 }
 
+// TestRenderEntryStampsLastValidated: last_validated is stamped at entry creation
+// (= the timestamp), so recall's stale_after down-weighting has a freshness date to
+// read and a never-revalidated entry ages visibly. It must be a parseable RFC3339
+// value equal to the timestamp.
+func TestRenderEntryStampsLastValidated(t *testing.T) {
+	out := renderEntry(providers.KBEntry{Type: "Incident", Title: "T", Body: "## body"})
+	extract := func(key string) string {
+		i := strings.Index(out, key)
+		if i < 0 {
+			t.Fatalf("frontmatter missing %q:\n%s", key, out)
+		}
+		line := out[i+len(key):]
+		if j := strings.IndexByte(line, '\n'); j >= 0 {
+			line = line[:j]
+		}
+		return strings.Trim(strings.TrimSpace(line), `"`)
+	}
+	lv := extract("last_validated: ")
+	if _, err := time.Parse(time.RFC3339, lv); err != nil {
+		t.Fatalf("last_validated %q is not RFC3339: %v", lv, err)
+	}
+	if ts := extract("timestamp: "); lv != ts {
+		t.Fatalf("last_validated %q must equal timestamp %q at creation", lv, ts)
+	}
+}
+
 // TestRenderEntryIncludesConfidenceAndProvenance: confidence and change
 // provenance are queryable OKF extension frontmatter keys (frontmatter is for
 // the fields you filter/index on), omitted when unset.

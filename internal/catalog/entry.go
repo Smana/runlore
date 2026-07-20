@@ -4,6 +4,25 @@
 // markdown files with YAML frontmatter) — the read half of RunLore's Learn pillar.
 package catalog
 
+import "time"
+
+// ParseEntryDate parses an OKF entry date: RFC3339 or bare date (2006-01-02).
+// Empty input returns the zero time and ok=false, distinct from malformed. It is
+// the single date grammar shared by kbvalidate (advisory warnings) and recall
+// (age down-weighting), so both accept exactly the same values.
+func ParseEntryDate(s string) (time.Time, bool) {
+	if s == "" {
+		return time.Time{}, false
+	}
+	if t, err := time.Parse(time.RFC3339, s); err == nil {
+		return t, true
+	}
+	if t, err := time.Parse("2006-01-02", s); err == nil {
+		return t, true
+	}
+	return time.Time{}, false
+}
+
 // Entry is one OKF knowledge entry.
 type Entry struct {
 	Type        string // frontmatter: type (Playbook, Incident, …)
@@ -18,6 +37,15 @@ type Entry struct {
 	Tags          []string // frontmatter: tags
 	Timestamp     string   // frontmatter: timestamp (OKF-recommended, RFC3339; "" when absent)
 	Fingerprint   string   // frontmatter: fingerprint (curator.DupFingerprint identity; "" on hand-written entries)
-	Body          string   // markdown body (after frontmatter)
-	Path          string   // file path relative to the bundle root
+	// Status is frontmatter: status — the entry's lifecycle state ("", "active",
+	// "retired", "draft", or any foreign value). Recall treats anything other than
+	// retired/draft as active (OKF §9: consumers tolerate unknown vocabulary), so
+	// absent-or-unknown behaves exactly as before the field existed.
+	Status string
+	// LastValidated is frontmatter: last_validated — when a human last confirmed the
+	// entry still works (date or RFC3339; "" when absent). Kept as the raw string,
+	// like Timestamp: the loader stays tolerant, consumers parse.
+	LastValidated string
+	Body          string // markdown body (after frontmatter)
+	Path          string // file path relative to the bundle root
 }

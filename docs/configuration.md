@@ -168,6 +168,12 @@ incident webhook. Known keys: `alertmanager`, `gitops`, `pagerduty`.
   PagerDuty) can match only resource-less entries — the weakest tier, which always requires
   `solo_floor` + `min_score`, recalls with reduced confidence, and is disabled by
   `require_workload_match: true`.
+- `instant_recall.stale_after` — **opt-in** age down-weighting (a Go duration, e.g. `720h`; **`0`/unset
+  disables**, the default). A recalled entry whose `last_validated` (else `timestamp`) is older than
+  this has its delivered confidence taken **one** step down (×0.75). It **never rejects** — `confirm`
+  and `verify` remain the hard gates and the outcome floor keeps priority — it only stops an unvalidated,
+  years-old runbook looking as confident as a fresh one. A dateless or unparseable-date entry is exempt
+  (fail-safe). Retired/`draft` entries are filtered out of recall entirely (independent of this knob).
 - `instant_recall.rerank` (**ON by default when `instant_recall` is enabled**; set `false` to fall back to the legacy gate) — replaces the corpus-dependent BM25-magnitude
   fire gate (`solo_floor`/`margin_gap`) with an **LLM reranker** that scores the top-`rerank_k`
   structurally-agreeing candidates in **one cheap call** and short-circuits only on the reranker's

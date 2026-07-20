@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"slices"
 	"strings"
+	"time"
 
 	"github.com/Smana/runlore/internal/catalog"
 	"github.com/Smana/runlore/internal/outcome"
@@ -59,6 +60,14 @@ type Recall struct {
 	OutcomePrior float64      // k — Beta prior strength for decay (e.g. 2.0)
 	OutcomeFloor float64      // reject the recall when the outcome factor drops below this (e.g. 0.5)
 
+	// StaleAfter down-weights (never rejects) a recall whose freshness date
+	// (last_validated, else timestamp) is older than this horizon. 0 ⇒ disabled, so
+	// a catalog with no dates and an unset horizon behaves byte-for-byte as before.
+	StaleAfter time.Duration
+	// Now is an injectable clock for the age gate (the Lifecycle.Now pattern); nil ⇒
+	// time.Now. Tests set a fixed clock; production leaves it nil.
+	Now func() time.Time
+
 	Metrics *telemetry.Metrics // optional; nil-safe — instruments are no-op when provider is unset
 	Log     *slog.Logger       // optional; nil-safe — log line omitted when unset
 }
@@ -74,6 +83,12 @@ const recallCandidateK = 20
 // Small and fixed: each fallback candidate is held to the conservative solo bar,
 // so depth buys little beyond the first couple of runners-up.
 const maxOutcomeFallback = 2
+
+// staleFactor is the single multiplicative step applied to a recalled entry's
+// confidence when it is older than Recall.StaleAfter. One step-down, no curve zoo:
+// staleness only lowers delivered confidence, it never rejects (confirm/verify stay
+// the hard gates).
+const staleFactor = 0.75
 
 // buildRecallQuery constructs the BM25 query text for a recall lookup from a
 // Request. It is the single seam between "what the incident says" and "what the
@@ -162,9 +177,15 @@ func (r *Recall) lookupWithUsage(ctx context.Context, req Request, totals *provi
 	// Structural pre-filter: keep candidates whose stored resource agrees with the
 	// alert's workload, preserving lexical order. Pre-filtering (rather than checking
 	// only the top hit) lets a structurally-correct entry win even when wrong-workload
-	// entries score higher on symptom tokens.
+	// entries score higher on symptom tokens. Inactive entries (retired/draft) are
+	// dropped here — filtering once at the single candidate source means the winner
+	// AND every outcomeFallback runner-up (which walk this same slice) are guaranteed
+	// active, so a retired entry can never fire on any path.
 	var agreeing []catalog.ScoredEntry
 	for _, h := range hits {
+		if !entryActive(h.Entry) {
+			continue
+		}
 		if entryAgrees(req.Workload, h.Entry, r.RequireWorkloadMatch) != matchNone {
 			agreeing = append(agreeing, h)
 		}
@@ -263,6 +284,29 @@ func (r *Recall) lookupWithUsage(ctx context.Context, req Request, totals *provi
 				return r.outcomeFallback(ctx, req, agreeing, counts, minScore, soloFloor, totals, []string{e.Path})
 			}
 			conf = clampF(conf*f, 0, 0.90)
+		}
+	}
+	// Age down-weight: an entry no human has validated within StaleAfter carries its
+	// years visibly. One multiplicative step — never a rejection: confirm and verify
+	// remain the hard gates against a genuinely drifted answer, this only stops a
+	// five-year-old runbook looking as confident as yesterday's. Freshness is
+	// last_validated, else timestamp; a dateless or unparseable entry is exempt
+	// (fail-safe: absent fields = pre-staleness behavior). It follows outcome decay so
+	// the track-record floor rejection keeps priority (track record beats calendar).
+	if r.StaleAfter > 0 {
+		now := time.Now
+		if r.Now != nil {
+			now = r.Now
+		}
+		fresh := e.LastValidated
+		if fresh == "" {
+			fresh = e.Timestamp
+		}
+		if t, ok := catalog.ParseEntryDate(fresh); ok && now().Sub(t) > r.StaleAfter {
+			conf = clampF(conf*staleFactor, 0, 0.90)
+			if r.Log != nil {
+				r.Log.Info("recall: stale entry down-weighted", "entry_id", e.Path, "validated", fresh, "stale_after", r.StaleAfter)
+			}
 		}
 	}
 	if r.Log != nil {
@@ -389,12 +433,25 @@ func (r *Recall) nearMissExcluding(ctx context.Context, req Request, exclude ...
 		if skip[h.Entry.Path] {
 			continue
 		}
+		// A retired/draft entry is not a lead: an entry retired for being wrong must
+		// not be re-injected as a "possibly-related" hint any more than it may fire.
+		if !entryActive(h.Entry) {
+			continue
+		}
 		if nearMissEntryAgrees(req.Workload, h.Entry, r.RequireWorkloadMatch) != matchNone {
 			e := h.Entry
 			return &e
 		}
 	}
 	return nil
+}
+
+// entryActive reports whether an entry may participate in recall. Only the two
+// known inactive states are excluded — an absent or foreign status stays active
+// (OKF §9 tolerance), so pre-status catalogs behave byte-for-byte as before.
+func entryActive(e catalog.Entry) bool {
+	s := strings.TrimSpace(strings.ToLower(e.Status))
+	return s != "retired" && s != "draft"
 }
 
 // nearMissAgrees is the structural gate for a NEAR-MISS, and it is deliberately looser

@@ -203,3 +203,75 @@ func TestKBGetRejectsBadPaths(t *testing.T) {
 		}
 	}
 }
+
+// TestKBSurfacesStatus: retired/draft entries stay searchable and fetchable BY
+// DESIGN — MCP consumers doing KB archaeology see the lifecycle state and judge for
+// themselves; recall is where the firing ban lives. status/last_validated are
+// surfaced when present, omitted (not "") when absent.
+func TestKBSurfacesStatus(t *testing.T) {
+	dir := t.TempDir()
+	writeEntry(t, dir, "retired.md", `---
+type: Incident
+title: retired harbor incident
+description: superseded runbook
+resource: tooling/harbor
+status: retired
+last_validated: 2026-01-10
+---
+Old body.
+`)
+	writeEntry(t, dir, "active.md", `---
+type: Playbook
+title: active playbook current guidance
+description: current guidance
+---
+Body.
+`)
+	c, err := catalog.New(dir)
+	if err != nil {
+		t.Fatalf("catalog.New: %v", err)
+	}
+	handler := func(name string) func(context.Context, json.RawMessage) (string, error) {
+		for _, tl := range Tools(c) {
+			if tl.Name == name {
+				return tl.Handler
+			}
+		}
+		t.Fatalf("tool %q not registered", name)
+		return nil
+	}
+
+	// kb_search surfaces the retired status (retired knowledge stays findable).
+	out, err := handler("kb_search")(context.Background(), json.RawMessage(`{"query":"retired harbor incident"}`))
+	if err != nil {
+		t.Fatalf("kb_search: %v", err)
+	}
+	if !strings.Contains(out, `"status": "retired"`) {
+		t.Fatalf("kb_search must surface the retired status:\n%s", out)
+	}
+
+	// kb_get surfaces status + last_validated.
+	out, err = handler("kb_get")(context.Background(), json.RawMessage(`{"path":"retired.md"}`))
+	if err != nil {
+		t.Fatalf("kb_get: %v", err)
+	}
+	var e struct {
+		Status        string `json:"status"`
+		LastValidated string `json:"last_validated"`
+	}
+	if err := json.Unmarshal([]byte(out), &e); err != nil {
+		t.Fatalf("kb_get output is not JSON: %v\n%s", err, out)
+	}
+	if e.Status != "retired" || e.LastValidated != "2026-01-10" {
+		t.Fatalf("status/last_validated not surfaced: %+v", e)
+	}
+
+	// An entry without the fields omits the keys entirely (not "").
+	out, err = handler("kb_get")(context.Background(), json.RawMessage(`{"path":"active.md"}`))
+	if err != nil {
+		t.Fatalf("kb_get active.md: %v", err)
+	}
+	if strings.Contains(out, `"status"`) || strings.Contains(out, `"last_validated"`) {
+		t.Fatalf("absent status/last_validated must be omitted:\n%s", out)
+	}
+}

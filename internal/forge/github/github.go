@@ -425,7 +425,11 @@ type kbFrontmatter struct {
 	AlertResource string   `yaml:"alert_resource,omitempty"`
 	Tags          []string `yaml:"tags,omitempty"`
 	Timestamp     string   `yaml:"timestamp,omitempty"` // OKF-recommended; seed entries carry it, curated ones now do too
-	Fingerprint   string   `yaml:"fingerprint,omitempty"`
+	// last_validated: stamped at entry creation (= timestamp); refreshed by humans
+	// or by future confirmation flows (see the downvote-recovery plan). Recall's
+	// stale_after down-weighting reads it — a never-revalidated entry ages visibly.
+	LastValidated string `yaml:"last_validated,omitempty"`
+	Fingerprint   string `yaml:"fingerprint,omitempty"`
 	// Confidence + Provenance are OKF extension keys: frontmatter is for the
 	// fields you query/filter/index on, and these are exactly that (per-entry
 	// confidence floors, "what change caused this" lookups).
@@ -509,7 +513,7 @@ func renderEntry(e providers.KBEntry) string {
 	fm, _ := yaml.Marshal(kbFrontmatter{
 		Type: e.Type, Title: e.Title, Description: e.Description, Resource: e.Resource,
 		AlertResource: e.AlertResource,
-		Tags:          e.Tags, Timestamp: ts, Fingerprint: e.Fingerprint,
+		Tags:          e.Tags, Timestamp: ts, LastValidated: ts, Fingerprint: e.Fingerprint,
 		Confidence: e.Confidence, Provenance: e.Provenance,
 	})
 	var b strings.Builder

@@ -33,7 +33,12 @@ type searchHit struct {
 	Description string   `json:"description,omitempty"`
 	Resource    string   `json:"resource,omitempty"`
 	Tags        []string `json:"tags,omitempty"`
-	Score       float64  `json:"score"`
+	// Status is the entry's lifecycle state (retired/draft/… ; omitted when active/
+	// absent). Retired entries stay searchable BY DESIGN — the consumer sees the
+	// state and judges; recall is where the firing ban lives, not here.
+	Status        string  `json:"status,omitempty"`
+	LastValidated string  `json:"last_validated,omitempty"`
+	Score         float64 `json:"score"`
 }
 
 // fullEntry is the kb_get result shape: the whole entry, body included.
@@ -41,15 +46,17 @@ type searchHit struct {
 // dedup identity) — surfaced so clients can judge freshness and identity; both
 // are absent on hand-written entries.
 type fullEntry struct {
-	Path        string   `json:"path"`
-	Type        string   `json:"type"`
-	Title       string   `json:"title"`
-	Description string   `json:"description,omitempty"`
-	Resource    string   `json:"resource,omitempty"`
-	Tags        []string `json:"tags,omitempty"`
-	Timestamp   string   `json:"timestamp,omitempty"`
-	Fingerprint string   `json:"fingerprint,omitempty"`
-	Body        string   `json:"body"`
+	Path          string   `json:"path"`
+	Type          string   `json:"type"`
+	Title         string   `json:"title"`
+	Description   string   `json:"description,omitempty"`
+	Resource      string   `json:"resource,omitempty"`
+	Tags          []string `json:"tags,omitempty"`
+	Timestamp     string   `json:"timestamp,omitempty"`
+	Fingerprint   string   `json:"fingerprint,omitempty"`
+	Status        string   `json:"status,omitempty"`
+	LastValidated string   `json:"last_validated,omitempty"`
+	Body          string   `json:"body"`
 }
 
 // Tools returns the KB tool set backed by cat, ready for mcp.Server.AddTool.
@@ -117,7 +124,9 @@ func search(cat *catalog.Catalog, args json.RawMessage) (string, error) {
 		hits = append(hits, searchHit{
 			Path: s.Entry.Path, Type: s.Entry.Type, Title: s.Entry.Title,
 			Description: s.Entry.Description, Resource: s.Entry.Resource,
-			Tags: s.Entry.Tags, Score: s.Score,
+			Tags:   s.Entry.Tags,
+			Status: s.Entry.Status, LastValidated: s.Entry.LastValidated,
+			Score: s.Score,
 		})
 	}
 	out, err := json.MarshalIndent(hits, "", "  ")
@@ -147,7 +156,8 @@ func get(cat *catalog.Catalog, args json.RawMessage) (string, error) {
 		out, err := json.MarshalIndent(fullEntry{
 			Path: e.Path, Type: e.Type, Title: e.Title, Description: e.Description,
 			Resource: e.Resource, Tags: e.Tags,
-			Timestamp: e.Timestamp, Fingerprint: e.Fingerprint, Body: e.Body,
+			Timestamp: e.Timestamp, Fingerprint: e.Fingerprint,
+			Status: e.Status, LastValidated: e.LastValidated, Body: e.Body,
 		}, "", "  ")
 		if err != nil {
 			return "", fmt.Errorf("kb_get encode: %w", err)
