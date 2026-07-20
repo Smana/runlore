@@ -162,9 +162,15 @@ func (r *Recall) lookupWithUsage(ctx context.Context, req Request, totals *provi
 	// Structural pre-filter: keep candidates whose stored resource agrees with the
 	// alert's workload, preserving lexical order. Pre-filtering (rather than checking
 	// only the top hit) lets a structurally-correct entry win even when wrong-workload
-	// entries score higher on symptom tokens.
+	// entries score higher on symptom tokens. Inactive entries (retired/draft) are
+	// dropped here — filtering once at the single candidate source means the winner
+	// AND every outcomeFallback runner-up (which walk this same slice) are guaranteed
+	// active, so a retired entry can never fire on any path.
 	var agreeing []catalog.ScoredEntry
 	for _, h := range hits {
+		if !entryActive(h.Entry) {
+			continue
+		}
 		if entryAgrees(req.Workload, h.Entry, r.RequireWorkloadMatch) != matchNone {
 			agreeing = append(agreeing, h)
 		}
@@ -389,12 +395,25 @@ func (r *Recall) nearMissExcluding(ctx context.Context, req Request, exclude ...
 		if skip[h.Entry.Path] {
 			continue
 		}
+		// A retired/draft entry is not a lead: an entry retired for being wrong must
+		// not be re-injected as a "possibly-related" hint any more than it may fire.
+		if !entryActive(h.Entry) {
+			continue
+		}
 		if nearMissEntryAgrees(req.Workload, h.Entry, r.RequireWorkloadMatch) != matchNone {
 			e := h.Entry
 			return &e
 		}
 	}
 	return nil
+}
+
+// entryActive reports whether an entry may participate in recall. Only the two
+// known inactive states are excluded — an absent or foreign status stays active
+// (OKF §9 tolerance), so pre-status catalogs behave byte-for-byte as before.
+func entryActive(e catalog.Entry) bool {
+	s := strings.TrimSpace(strings.ToLower(e.Status))
+	return s != "retired" && s != "draft"
 }
 
 // nearMissAgrees is the structural gate for a NEAR-MISS, and it is deliberately looser
