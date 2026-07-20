@@ -390,6 +390,18 @@ rbac:
   # explicitly, keep it a superset of this list or pod_logs is blocked at the app layer.
   controllerLogNamespaces:
     - flux-system
+  # skipMissingControllerLogNamespaces: skip the per-namespace controller_logs
+  # Role/RoleBinding for any controllerLogNamespaces entry that does not exist at
+  # install time, instead of failing the whole release with `namespaces "<ns>" not
+  # found`. Default true so a bare `helm install` — or one that runs before Flux/
+  # Argo CD is installed — succeeds; the RBAC is created the moment the namespace
+  # (and thus the GitOps controllers whose logs it grants) exists, via `helm upgrade`.
+  # Relies on Helm's `lookup`, which has cluster access during a real install/upgrade
+  # (including Flux's helm-controller) but NOT during client-side rendering
+  # (`helm template`, Argo CD's diff) — there every namespace reads as missing and the
+  # Role is skipped. If you render client-side (e.g. deploy via Argo CD) and guarantee
+  # the namespace exists, set this false to keep the RBAC deterministic.
+  skipMissingControllerLogNamespaces: true
 
 # Default-deny NetworkPolicy: restrict ingress to the webhook/health port and egress
 # to DNS + HTTPS + the Kubernetes API. Tighten egress to your model/git/observability
