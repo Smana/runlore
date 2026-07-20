@@ -28,19 +28,20 @@ index with the KB, cap the bill — before widening integrations.
 | N8 | **Hybrid recall eval**: extend the retrieval eval to real embedding-backed hybrid, measure the cosine thresholds (currently self-described "placeholders"), and graduate hybrid from EXPERIMENTAL — or document why not | The eval already honestly shows BM25-only fires 0/11 and the reranker is load-bearing; hybrid is the designated successor and is currently unmeasured. Depends on N2 | `2026-07-19-hybrid-recall-eval.md` |
 | N9 | **MCP remote-tool allowlist**: opt-in per-server `tools:` allowlist (+ deny-by-default option), making "read-only extension layer" enforceable rather than prompt-promised | Security-conscious operators can safely connect third-party MCP servers — unlocks the extension story credibly | `2026-07-19-mcp-tool-allowlist.md` |
 
-## Later — strategic, when adoption pulls (roadmap only, no plans yet)
+> **STATUS 2026-07-20:** Now + Next SHIPPED — N1-N3 as PRs #328-#330, N4/N7/N9 as
+> #331-#333, N5/N6/N8 as #334-#336 (integrated main green after each wave). Hybrid
+> recall stays EXPERIMENTAL pending a live-endpoint measurement run (criteria in
+> `docs/configuration.md`). The Later horizon now has plans/specs (below).
 
-- **Config-only sources & notifiers** — the biggest adoption limiter (every new alert
-  source or channel needs Go). The registries exist; a generic *templated* webhook
-  source + notifier covers most vendors cheaply before per-vendor work. Unify
-  Slack/Matrix into the notify registry while there (two mechanisms for one concept
-  today). Builds on `2026-06-27-extensible-sources-notifiers-design.md`.
-- **Multi-KB federation** (org + team + vendor bundles with precedence) — wait for
-  multi-team pull.
-- **Persisted vectors / ANN / incremental indexing** — only when real KBs pass ~1-2k
-  entries; N2 buys the headroom first.
-- **A handful of `testing.B` benchmarks** on the paths above (embed reload, recall
-  query, ledger replay, clone/fetch) so the perf work has regression guardrails.
+## Later — strategic (plans/specs written 2026-07-20)
+
+| # | Item | Doc |
+|---|---|---|
+| L1 | Config-only **templated webhook source** (Grafana/Datadog/... without Go) | `plans/2026-07-20-templated-webhook-source.md` |
+| L2 | **Templated notifier** (Teams/Discord/... via Go templates). *Erratum:* the audit's "unify Slack/Matrix into the registry" was stale — construction is already registry-based; the typed-config vs `Extra`-map split is deliberate. The plan pins unified behavior with tests instead of migrating | `plans/2026-07-20-templated-notifier-registry.md` |
+| L3 | **Multi-KB federation** — DESIGN ONLY: merged index + per-source weights, `<source>/<path>` ledger identity, single writable KB; has open maintainer questions and a "when NOT to build" gate | `specs/2026-07-20-multi-kb-federation-design.md` |
+| L4 | **Persisted vector cache + incremental bleve indexing** (path-keyed doc IDs, SyncDelta, gob cache with model/dim invalidation); ANN stays a non-goal until ~1-2k entries | `plans/2026-07-20-persisted-vectors-incremental-index.md` |
+| L5 | **Hot-path benchmarks** (catalog reload cold/warm, recall query, ledger replay/compaction, ingest storm) — hermetic, not in the PR gate | `plans/2026-07-20-hotpath-benchmarks.md` |
 
 ## Deliberately not on the roadmap
 
