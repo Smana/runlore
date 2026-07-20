@@ -2,7 +2,48 @@
 
 package catalog
 
-import "testing"
+import (
+	"os"
+	"path/filepath"
+	"testing"
+)
+
+func TestSearchResolvesPathKeyedDocs(t *testing.T) {
+	dir := t.TempDir()
+	for name, title := range map[string]string{
+		"a.md": "cilium agent crashloop",
+		"b.md": "postgres disk pressure",
+	} {
+		entry := "---\ntype: Incident\ntitle: " + title + "\n---\nBody.\n"
+		if err := os.WriteFile(filepath.Join(dir, name), []byte(entry), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	c, err := New(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	hits, err := c.SearchScored("cilium crashloop", 5)
+	if err != nil || len(hits) == 0 {
+		t.Fatalf("hits=%v err=%v", hits, err)
+	}
+	if hits[0].Entry.Path != "a.md" {
+		t.Errorf("top hit path = %q, want a.md", hits[0].Entry.Path)
+	}
+	// The doc ID space is now paths: deleting by path must remove the doc.
+	c.mu.Lock()
+	err = c.index.Delete("a.md")
+	c.mu.Unlock()
+	if err != nil {
+		t.Fatalf("delete by path: %v", err)
+	}
+	hits, _ = c.SearchScored("cilium crashloop", 5)
+	for _, h := range hits {
+		if h.Entry.Path == "a.md" {
+			t.Error("deleted doc still returned")
+		}
+	}
+}
 
 func TestCatalogSearch(t *testing.T) {
 	dir := t.TempDir()
@@ -96,15 +137,15 @@ func TestSearchLiftsResourceTerm(t *testing.T) {
 	// term ("harbor-core") lives ONLY in Resource here — not in title/desc/tags/
 	// body — so the entry can only rank first if Resource is indexed.
 	entries := []Entry{
-		{Title: "Pod restart loop", Description: "container keeps restarting", Resource: "tooling/harbor-core", Body: "the pod will not become ready"},
-		{Title: "Network policy drops", Description: "connectivity timeouts", Resource: "apps/web", Body: "default-deny blocks traffic"},
+		{Path: "a.md", Title: "Pod restart loop", Description: "container keeps restarting", Resource: "tooling/harbor-core", Body: "the pod will not become ready"},
+		{Path: "b.md", Title: "Network policy drops", Description: "connectivity timeouts", Resource: "apps/web", Body: "default-deny blocks traffic"},
 	}
 	idx, err := buildIndex(entries)
 	if err != nil {
 		t.Fatalf("buildIndex: %v", err)
 	}
 	defer func() { _ = idx.Close() }()
-	c := &Catalog{index: idx, entries: entries}
+	c := &Catalog{index: idx, entries: entries, pathIdx: pathIndex(entries)}
 	hits, err := c.SearchScored("harbor-core", 2)
 	if err != nil {
 		t.Fatalf("search: %v", err)
@@ -137,15 +178,15 @@ func TestBuildIndexScores(t *testing.T) {
 	// magnitudes — TF-IDF also length-normalizes, so magnitude-based BM25-vs-TFIDF
 	// discrimination is brittle; the helper assertion above is the reliable guard.
 	entries := []Entry{
-		{Title: "OOMKilled pod", Body: "container exceeded its memory limit"},
-		{Title: "Image pull failure", Body: "registry returned forbidden"},
+		{Path: "a.md", Title: "OOMKilled pod", Body: "container exceeded its memory limit"},
+		{Path: "b.md", Title: "Image pull failure", Body: "registry returned forbidden"},
 	}
 	idx, err := buildIndex(entries)
 	if err != nil {
 		t.Fatalf("buildIndex: %v", err)
 	}
 	defer func() { _ = idx.Close() }()
-	c := &Catalog{index: idx, entries: entries}
+	c := &Catalog{index: idx, entries: entries, pathIdx: pathIndex(entries)}
 	hits, err := c.SearchScored("memory limit", 2)
 	if err != nil {
 		t.Fatalf("search: %v", err)

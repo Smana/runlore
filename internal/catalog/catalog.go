@@ -6,7 +6,6 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
-	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -33,9 +32,24 @@ type Catalog struct {
 	// current corpus on each successful embed pass so deleted entries are evicted.
 	// Guarded by mu.
 	vecCache map[string][]float32
+	// pathIdx maps Entry.Path → position in entries; maintained in lockstep with
+	// entries under mu. It exists because bleve docs are keyed by Path (stable
+	// across reloads — the prerequisite for incremental Index/Delete), so search
+	// hits resolve IDs through it instead of parsing positions.
+	pathIdx map[string]int
 	// Log, when set (wiring time, before the first Reload), surfaces non-fatal
 	// reload degradations — an embed failure that leaves hybrid BM25-only. Nil-safe.
 	Log *slog.Logger
+}
+
+// pathIndex maps each entry's Path to its slice position — the resolution table
+// for path-keyed bleve doc IDs. Built alongside every entries swap.
+func pathIndex(entries []Entry) map[string]int {
+	m := make(map[string]int, len(entries))
+	for i, e := range entries {
+		m[e.Path] = i
+	}
+	return m
 }
 
 // Searcher is the read surface used by the kb_search tool.
@@ -64,7 +78,7 @@ func New(dir string) (*Catalog, error) {
 // NewEmpty returns a catalog with no entries — used before the first git sync.
 func NewEmpty() *Catalog {
 	idx, _ := bleve.NewMemOnly(newIndexMapping())
-	return &Catalog{index: idx}
+	return &Catalog{index: idx, pathIdx: map[string]int{}}
 }
 
 // Reload rebuilds the index from dir and swaps it in atomically. The new index is
@@ -91,7 +105,7 @@ func (c *Catalog) ReloadContext(ctx context.Context, dir string) ([]string, erro
 	vectors, cache := c.embedWithCache(ctx, entries)
 	c.mu.Lock()
 	old := c.index
-	c.index, c.entries, c.vectors = idx, entries, vectors
+	c.index, c.entries, c.vectors, c.pathIdx = idx, entries, vectors, pathIndex(entries)
 	if cache != nil {
 		c.vecCache = cache
 	}
@@ -112,13 +126,13 @@ func buildIndex(entries []Entry) (bleve.Index, error) {
 	if err != nil {
 		return nil, fmt.Errorf("new index: %w", err)
 	}
-	for i, e := range entries {
+	for _, e := range entries {
 		doc := map[string]any{
 			"title": e.Title,
 			"text":  entryText(e),
 		}
-		if err := idx.Index(strconv.Itoa(i), doc); err != nil {
-			return nil, fmt.Errorf("index entry %d: %w", i, err)
+		if err := idx.Index(e.Path, doc); err != nil {
+			return nil, fmt.Errorf("index entry %s: %w", e.Path, err)
 		}
 	}
 	return idx, nil
@@ -220,8 +234,8 @@ func (c *Catalog) SearchScored(query string, k int) ([]ScoredEntry, error) {
 	}
 	out := make([]ScoredEntry, 0, len(res.Hits))
 	for _, hit := range res.Hits {
-		i, err := strconv.Atoi(hit.ID)
-		if err != nil || i < 0 || i >= len(c.entries) {
+		i, ok := c.pathIdx[hit.ID]
+		if !ok {
 			continue
 		}
 		out = append(out, ScoredEntry{Entry: c.entries[i], Score: hit.Score})
