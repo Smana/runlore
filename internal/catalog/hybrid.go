@@ -8,7 +8,6 @@ import (
 	"encoding/hex"
 	"fmt"
 	"sort"
-	"strconv"
 
 	"github.com/blevesearch/bleve/v2"
 
@@ -135,15 +134,15 @@ func (c *Catalog) SearchHybrid(ctx context.Context, query string, k int) ([]Scor
 	sort.SliceStable(ranked, func(a, b int) bool { return cos[ranked[a]] > cos[ranked[b]] })
 	cosIDs := make([]string, len(ranked))
 	for i, idx := range ranked {
-		cosIDs[i] = strconv.Itoa(idx)
+		cosIDs[i] = c.entries[idx].Path
 	}
 	// Fuse the two rankings to select the candidate pool, then order that pool by
 	// cosine (the gate score).
 	pool := embed.FuseRRF(0, bm25IDs, cosIDs)
 	out := make([]ScoredEntry, 0, len(pool))
 	for _, f := range pool {
-		i, cerr := strconv.Atoi(f.ID)
-		if cerr != nil || i < 0 || i >= len(c.entries) {
+		i, ok := c.pathIdx[f.ID]
+		if !ok {
 			continue
 		}
 		out = append(out, ScoredEntry{Entry: c.entries[i], Score: cos[i]})

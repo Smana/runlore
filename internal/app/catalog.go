@@ -6,6 +6,7 @@ import (
 	"context"
 	"log/slog"
 	"os"
+	"path/filepath"
 
 	"github.com/Smana/runlore/internal/catalog"
 	"github.com/Smana/runlore/internal/config"
@@ -44,6 +45,19 @@ func BuildCatalog(ctx context.Context, cfg *config.Config, forgeTok ForgeToken, 
 		embedder = embed.New(e.BaseURL, e.Model, key)
 		log.Info("hybrid recall: embeddings endpoint configured", "base_url", e.BaseURL, "model", e.Model)
 	}
+	// armVecCache persists the embedding cache across restarts (default on with
+	// hybrid). Only called where embedder != nil, so cfg.Model.Embeddings is set.
+	armVecCache := func(cat *catalog.Catalog) {
+		vc := cfg.Catalog.InstantRecall.VectorCache
+		if !vc.IsEnabled() {
+			return
+		}
+		vdir := vc.Dir
+		if vdir == "" {
+			vdir = filepath.Join(os.TempDir(), "runlore-veccache")
+		}
+		cat.EnableVectorCache(filepath.Join(vdir, "vectors.gob"), cfg.Model.Embeddings.Model)
+	}
 	if cfg.Catalog.Git.URL != "" {
 		dir := cfg.Catalog.Dir
 		if dir == "" {
@@ -53,6 +67,7 @@ func BuildCatalog(ctx context.Context, cfg *config.Config, forgeTok ForgeToken, 
 		cat.Log = log
 		if embedder != nil {
 			cat.SetEmbedder(embedder)
+			armVecCache(cat)
 		}
 		// Auth precedence: explicit token_env, else the shared forge GitHub App
 		// identity (one credential for both curation writes and catalog reads).
@@ -66,8 +81,8 @@ func BuildCatalog(ctx context.Context, cfg *config.Config, forgeTok ForgeToken, 
 			log.Info("catalog git-sync using the forge GitHub App identity")
 		}
 		syncer := &catalog.Syncer{URL: cfg.Catalog.Git.URL, Branch: cfg.Catalog.Git.Branch, Dir: dir, Token: token, Log: log}
-		go syncer.Run(ctx, cfg.Catalog.Git.Interval.Std(), func() error {
-			skipped, err := cat.Reload(dir)
+		go syncer.Run(ctx, cfg.Catalog.Git.Interval.Std(), func(delta *catalog.SyncDelta) error {
+			skipped, err := cat.ReloadDelta(ctx, dir, delta)
 			if err != nil {
 				log.Warn("catalog reload failed", "dir", dir, "err", err)
 				return err
@@ -95,6 +110,7 @@ func BuildCatalog(ctx context.Context, cfg *config.Config, forgeTok ForgeToken, 
 			cat = catalog.NewEmpty()
 			cat.Log = log
 			cat.SetEmbedder(embedder)
+			armVecCache(cat)
 			if _, err := cat.ReloadContext(ctx, cfg.Catalog.Dir); err != nil {
 				log.Warn("catalog disabled", "dir", cfg.Catalog.Dir, "err", err)
 				return nil

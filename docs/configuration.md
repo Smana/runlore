@@ -214,6 +214,15 @@ incident webhook. Known keys: `alertmanager`, `gitops`, `pagerduty`.
   3. Zero negative-case fires at the shipped default gates, **live** regime included.
   4. The embedding vector cache (content-hash, chunked batches) merged so reload cost no longer scales
      with corpus size — **done** (N2, PR #328).
+- `instant_recall.vector_cache` — **on by default** (only effective with `hybrid` + `model.embeddings`).
+  Persists the hybrid embedding cache to disk so a **restart or HA failover re-embeds nothing** (the
+  in-memory content-hash cache already spares unchanged entries within a process lifetime; this carries
+  it across process lifetimes). `enabled` (**`true`**; set `false` to keep the cache in-memory only) and
+  `dir` (cache directory, default `<tmp>/runlore-veccache` — **ephemeral**; point it at a PersistentVolume
+  to keep it across pod restarts, the same pattern as `gitops.mirror.dir`). Fail-safe by contract: every
+  failure mode — missing, corrupt, or written by a **different embedding model/dimension** — is a WARN +
+  cold re-embed, never an error, so a stale cache can never serve wrong vectors. Cache files are
+  **pod-local** (each replica maintains its own).
 - The **"📚 Matches known runbook"** notification block (stamped when a *full* investigation's
   `kb_search` finds a pre-existing entry) uses `solo_floor` as its visibility bar, so it tracks
   the same corpus/query-dependent BM25 scale recall runs in: a cluster that tunes `solo_floor`

@@ -6,7 +6,6 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
-	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -33,9 +32,55 @@ type Catalog struct {
 	// current corpus on each successful embed pass so deleted entries are evicted.
 	// Guarded by mu.
 	vecCache map[string][]float32
+	// vecCachePath/vecCacheModel arm disk persistence of vecCache (EnableVectorCache).
+	// Empty path ⇒ in-memory only. Set once at wiring time, before the first Reload.
+	vecCachePath  string
+	vecCacheModel string
+	// pathIdx maps Entry.Path → position in entries; maintained in lockstep with
+	// entries under mu. It exists because bleve docs are keyed by Path (stable
+	// across reloads — the prerequisite for incremental Index/Delete), so search
+	// hits resolve IDs through it instead of parsing positions.
+	pathIdx map[string]int
 	// Log, when set (wiring time, before the first Reload), surfaces non-fatal
 	// reload degradations — an embed failure that leaves hybrid BM25-only. Nil-safe.
 	Log *slog.Logger
+}
+
+// pathIndex maps each entry's Path to its slice position — the resolution table
+// for path-keyed bleve doc IDs. Built alongside every entries swap.
+func pathIndex(entries []Entry) map[string]int {
+	m := make(map[string]int, len(entries))
+	for i, e := range entries {
+		m[e.Path] = i
+	}
+	return m
+}
+
+// EnableVectorCache persists the embedding cache at path, keyed to the given
+// embedding-model identifier: the file is loaded now (before the first reload —
+// a warm cache means a restart embeds nothing) and rewritten after each
+// successful embed pass. Any load problem is a cold start, never an error.
+func (c *Catalog) EnableVectorCache(path, model string) {
+	c.vecCachePath, c.vecCacheModel = path, model
+	if warm := loadVecCache(path, model, c.Log); warm != nil {
+		c.mu.Lock()
+		c.vecCache = warm
+		c.mu.Unlock()
+		if c.Log != nil {
+			c.Log.Info("vector cache loaded from disk", "path", path, "vectors", len(warm))
+		}
+	}
+}
+
+// persistVecCache is the post-reload save hook: only a successful, complete
+// embed pass (vectors non-nil ⇒ all-or-nothing invariant held) writes the file.
+func (c *Catalog) persistVecCache(vectors [][]float32, cache map[string][]float32) {
+	if c.vecCachePath == "" || vectors == nil || cache == nil {
+		return
+	}
+	if err := saveVecCache(c.vecCachePath, c.vecCacheModel, cache); err != nil && c.Log != nil {
+		c.Log.Warn("vector cache save failed; next restart re-embeds", "path", c.vecCachePath, "err", err)
+	}
 }
 
 // Searcher is the read surface used by the kb_search tool.
@@ -64,7 +109,7 @@ func New(dir string) (*Catalog, error) {
 // NewEmpty returns a catalog with no entries — used before the first git sync.
 func NewEmpty() *Catalog {
 	idx, _ := bleve.NewMemOnly(newIndexMapping())
-	return &Catalog{index: idx}
+	return &Catalog{index: idx, pathIdx: map[string]int{}}
 }
 
 // Reload rebuilds the index from dir and swaps it in atomically. The new index is
@@ -91,7 +136,7 @@ func (c *Catalog) ReloadContext(ctx context.Context, dir string) ([]string, erro
 	vectors, cache := c.embedWithCache(ctx, entries)
 	c.mu.Lock()
 	old := c.index
-	c.index, c.entries, c.vectors = idx, entries, vectors
+	c.index, c.entries, c.vectors, c.pathIdx = idx, entries, vectors, pathIndex(entries)
 	if cache != nil {
 		c.vecCache = cache
 	}
@@ -103,7 +148,71 @@ func (c *Catalog) ReloadContext(ctx context.Context, dir string) ([]string, erro
 	if old != nil {
 		_ = old.Close()
 	}
+	c.persistVecCache(vectors, cache)
 	c.ready.Store(true)
+	return skipped, nil
+}
+
+// ReloadDelta refreshes the catalog for a known set of changed/removed paths,
+// mutating the live index (bleve is safe for concurrent search+index) instead
+// of rebuilding it. Entries, vectors, and the embed cache still refresh from a
+// full Load walk — files are cheap; only the bleve analysis pass is not — so
+// slice/vector/pathIdx consistency is trivially preserved. Falls back to a
+// full ReloadContext when the delta is nil (unknown), the catalog is cold, or
+// ANY index mutation fails: an incremental error must never leave a wrong
+// index behind.
+func (c *Catalog) ReloadDelta(ctx context.Context, dir string, delta *SyncDelta) ([]string, error) {
+	if delta == nil || !c.ready.Load() {
+		return c.ReloadContext(ctx, dir)
+	}
+	entries, skipped, err := Load(dir)
+	if err != nil {
+		return nil, err
+	}
+	vectors, cache := c.embedWithCache(ctx, entries)
+	loaded := pathIndex(entries)
+
+	// Mutate the live index outside c.mu: concurrent searches resolve hits via
+	// pathIdx, so a just-indexed unknown path is skipped and a just-deleted one
+	// simply stops matching — momentary staleness, never a wrong entry.
+	c.mu.RLock()
+	idx := c.index
+	c.mu.RUnlock()
+	incremental := func() error {
+		for _, p := range delta.Removed {
+			if err := idx.Delete(p); err != nil {
+				return fmt.Errorf("delete %s: %w", p, err)
+			}
+		}
+		for _, p := range delta.Changed {
+			i, ok := loaded[p]
+			if !ok {
+				// Changed upstream but skipped by Load (now unparseable, or a
+				// reserved/non-.md name): drop any stale doc.
+				if err := idx.Delete(p); err != nil {
+					return fmt.Errorf("delete stale %s: %w", p, err)
+				}
+				continue
+			}
+			if err := idx.Index(p, docFor(entries[i])); err != nil {
+				return fmt.Errorf("index %s: %w", p, err)
+			}
+		}
+		return nil
+	}
+	if err := incremental(); err != nil {
+		if c.Log != nil {
+			c.Log.Warn("catalog incremental re-index failed; rebuilding fully", "err", err)
+		}
+		return c.ReloadContext(ctx, dir)
+	}
+	c.mu.Lock()
+	c.entries, c.vectors, c.pathIdx = entries, vectors, loaded
+	if cache != nil {
+		c.vecCache = cache
+	}
+	c.mu.Unlock()
+	c.persistVecCache(vectors, cache)
 	return skipped, nil
 }
 
@@ -112,16 +221,22 @@ func buildIndex(entries []Entry) (bleve.Index, error) {
 	if err != nil {
 		return nil, fmt.Errorf("new index: %w", err)
 	}
-	for i, e := range entries {
-		doc := map[string]any{
-			"title": e.Title,
-			"text":  entryText(e),
-		}
-		if err := idx.Index(strconv.Itoa(i), doc); err != nil {
-			return nil, fmt.Errorf("index entry %d: %w", i, err)
+	for _, e := range entries {
+		if err := idx.Index(e.Path, docFor(e)); err != nil {
+			return nil, fmt.Errorf("index entry %s: %w", e.Path, err)
 		}
 	}
 	return idx, nil
+}
+
+// docFor is the single bleve document shape per entry — shared by the full
+// buildIndex pass and the incremental ReloadDelta re-index so both views index
+// identical content.
+func docFor(e Entry) map[string]any {
+	return map[string]any{
+		"title": e.Title,
+		"text":  entryText(e),
+	}
 }
 
 // entryText is the single corpus text per entry — used for BOTH the BM25 doc and the
@@ -220,8 +335,8 @@ func (c *Catalog) SearchScored(query string, k int) ([]ScoredEntry, error) {
 	}
 	out := make([]ScoredEntry, 0, len(res.Hits))
 	for _, hit := range res.Hits {
-		i, err := strconv.Atoi(hit.ID)
-		if err != nil || i < 0 || i >= len(c.entries) {
+		i, ok := c.pathIdx[hit.ID]
+		if !ok {
 			continue
 		}
 		out = append(out, ScoredEntry{Entry: c.entries[i], Score: hit.Score})
