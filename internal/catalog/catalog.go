@@ -121,21 +121,89 @@ func (c *Catalog) ReloadContext(ctx context.Context, dir string) ([]string, erro
 	return skipped, nil
 }
 
+// ReloadDelta refreshes the catalog for a known set of changed/removed paths,
+// mutating the live index (bleve is safe for concurrent search+index) instead
+// of rebuilding it. Entries, vectors, and the embed cache still refresh from a
+// full Load walk — files are cheap; only the bleve analysis pass is not — so
+// slice/vector/pathIdx consistency is trivially preserved. Falls back to a
+// full ReloadContext when the delta is nil (unknown), the catalog is cold, or
+// ANY index mutation fails: an incremental error must never leave a wrong
+// index behind.
+func (c *Catalog) ReloadDelta(ctx context.Context, dir string, delta *SyncDelta) ([]string, error) {
+	if delta == nil || !c.ready.Load() {
+		return c.ReloadContext(ctx, dir)
+	}
+	entries, skipped, err := Load(dir)
+	if err != nil {
+		return nil, err
+	}
+	vectors, cache := c.embedWithCache(ctx, entries)
+	loaded := pathIndex(entries)
+
+	// Mutate the live index outside c.mu: concurrent searches resolve hits via
+	// pathIdx, so a just-indexed unknown path is skipped and a just-deleted one
+	// simply stops matching — momentary staleness, never a wrong entry.
+	c.mu.RLock()
+	idx := c.index
+	c.mu.RUnlock()
+	incremental := func() error {
+		for _, p := range delta.Removed {
+			if err := idx.Delete(p); err != nil {
+				return fmt.Errorf("delete %s: %w", p, err)
+			}
+		}
+		for _, p := range delta.Changed {
+			i, ok := loaded[p]
+			if !ok {
+				// Changed upstream but skipped by Load (now unparseable, or a
+				// reserved/non-.md name): drop any stale doc.
+				if err := idx.Delete(p); err != nil {
+					return fmt.Errorf("delete stale %s: %w", p, err)
+				}
+				continue
+			}
+			if err := idx.Index(p, docFor(entries[i])); err != nil {
+				return fmt.Errorf("index %s: %w", p, err)
+			}
+		}
+		return nil
+	}
+	if err := incremental(); err != nil {
+		if c.Log != nil {
+			c.Log.Warn("catalog incremental re-index failed; rebuilding fully", "err", err)
+		}
+		return c.ReloadContext(ctx, dir)
+	}
+	c.mu.Lock()
+	c.entries, c.vectors, c.pathIdx = entries, vectors, loaded
+	if cache != nil {
+		c.vecCache = cache
+	}
+	c.mu.Unlock()
+	return skipped, nil
+}
+
 func buildIndex(entries []Entry) (bleve.Index, error) {
 	idx, err := bleve.NewMemOnly(newIndexMapping())
 	if err != nil {
 		return nil, fmt.Errorf("new index: %w", err)
 	}
 	for _, e := range entries {
-		doc := map[string]any{
-			"title": e.Title,
-			"text":  entryText(e),
-		}
-		if err := idx.Index(e.Path, doc); err != nil {
+		if err := idx.Index(e.Path, docFor(e)); err != nil {
 			return nil, fmt.Errorf("index entry %s: %w", e.Path, err)
 		}
 	}
 	return idx, nil
+}
+
+// docFor is the single bleve document shape per entry — shared by the full
+// buildIndex pass and the incremental ReloadDelta re-index so both views index
+// identical content.
+func docFor(e Entry) map[string]any {
+	return map[string]any{
+		"title": e.Title,
+		"text":  entryText(e),
+	}
 }
 
 // entryText is the single corpus text per entry — used for BOTH the BM25 doc and the
