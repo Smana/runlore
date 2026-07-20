@@ -257,3 +257,48 @@ func TestHandlerPayloadRequestCap(t *testing.T) {
 		t.Fatalf("want %d enqueued (cap), got %d", MaxRequestsPerPayload, len(enq.reqs))
 	}
 }
+
+// headerCapture records the header Decode saw.
+type headerCapture struct {
+	got    http.Header
+	result DecodeResult
+}
+
+func (h *headerCapture) Decode(_ []byte, hdr http.Header) (DecodeResult, error) {
+	h.got = hdr.Clone()
+	return h.result, nil
+}
+
+func TestHandlerStampsInstanceHeader(t *testing.T) {
+	hc := &headerCapture{result: oneRequestResult()}
+	b := Built{Desc: Descriptor{Name: "custom", Kind: Webhook, Path: "/webhook/custom/{instance}"}, Impl: hc}
+	pipe := NewPipeline(matchAllCfg(), &capEnq{}, nil, nil)
+
+	mux := http.NewServeMux()
+	MountWebhooks(mux, []Built{b}, nil, pipe, nil)
+	// A forged client value must be OVERWRITTEN by the path value.
+	req := httptest.NewRequest(http.MethodPost, "/webhook/custom/grafana", strings.NewReader(`{}`))
+	req.Header.Set(InstanceHeader, "forged")
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+	if got := hc.got.Get(InstanceHeader); got != "grafana" {
+		t.Fatalf("InstanceHeader = %q, want %q", got, "grafana")
+	}
+}
+
+func TestHandlerScrubsInstanceHeaderOnPlainRoutes(t *testing.T) {
+	hc := &headerCapture{result: oneRequestResult()}
+	b := webhookBuilt(fakeDecoder{result: oneRequestResult()})
+	b.Impl = hc
+	pipe := NewPipeline(matchAllCfg(), &capEnq{}, nil, nil)
+
+	mux := http.NewServeMux()
+	MountWebhooks(mux, []Built{b}, nil, pipe, nil)
+	req := httptest.NewRequest(http.MethodPost, "/webhook/test", strings.NewReader(`{}`))
+	req.Header.Set(InstanceHeader, "forged")
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+	if got := hc.got.Get(InstanceHeader); got != "" {
+		t.Fatalf("InstanceHeader = %q, want scrubbed", got)
+	}
+}

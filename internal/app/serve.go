@@ -32,6 +32,7 @@ import (
 	"github.com/Smana/runlore/internal/server"
 	"github.com/Smana/runlore/internal/source"
 	_ "github.com/Smana/runlore/internal/source/alertmanager" // self-registers the alertmanager webhook source
+	_ "github.com/Smana/runlore/internal/source/custom"       // self-registers the config-mapped generic webhook source
 	_ "github.com/Smana/runlore/internal/source/gitops"       // self-registers the gitops-failure watcher source
 	"github.com/Smana/runlore/internal/source/pagerduty"
 	"github.com/Smana/runlore/internal/telemetry"

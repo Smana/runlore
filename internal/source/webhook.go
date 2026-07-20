@@ -18,6 +18,11 @@ type Authenticator interface {
 	Authenticate(body []byte, h http.Header) bool
 }
 
+// InstanceHeader carries the {instance} path wildcard to Decode/Authenticate,
+// whose signatures only see (body, header). The core owns it: any client-sent
+// value is deleted before the path value is stamped, so adapters may trust it.
+const InstanceHeader = "X-Runlore-Instance"
+
 // MaxRequestsPerPayload bounds how many investigation requests one webhook
 // delivery may enqueue (cost-DoS guard): the 1MiB body cap still admits ~1k
 // alerts, and distinct alertnames bypass dedup — each would bill a model
@@ -36,6 +41,12 @@ func (b Built) Handler(auth func(*http.Request) bool, bodyCap int64, pipe *Pipel
 	wh := b.Impl.(WebhookSource)
 	selfAuth, selfAuths := b.Impl.(Authenticator)
 	return func(w http.ResponseWriter, r *http.Request) {
+		// Anti-spoofing: the instance header is core-owned. Delete any client
+		// value, then stamp the route wildcard (empty for non-wildcard routes).
+		r.Header.Del(InstanceHeader)
+		if v := r.PathValue("instance"); v != "" {
+			r.Header.Set(InstanceHeader, v)
+		}
 		if !selfAuths && auth != nil && !auth(r) {
 			http.Error(w, "unauthorized", http.StatusUnauthorized)
 			return
