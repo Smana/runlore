@@ -142,3 +142,32 @@ func BenchmarkReloadEmbedWarmCache(b *testing.B) {
 		}
 	}
 }
+
+// benchQuery mimics an enriched recall query (symptom + namespace + workload +
+// alertname vocabulary) against the fixture corpus.
+const benchQuery = "svc-42 rollout failure probe timeout ns-2 deployment"
+
+// BenchmarkSearchScored guards the BM25 recall lookup — the per-incident hot
+// path when hybrid is off.
+func BenchmarkSearchScored(b *testing.B) {
+	c := warmCatalog(b, writeBenchCorpus(b, benchCorpusSize), false)
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		if _, err := c.SearchScored(benchQuery, 20); err != nil {
+			b.Fatal(err)
+		}
+	}
+}
+
+// BenchmarkSearchHybrid guards the hybrid recall lookup: query embed + BM25 +
+// the brute-force cosine scan over the whole corpus (audit perf finding #3 —
+// this is the O(n) path that caps KB size until an ANN lands).
+func BenchmarkSearchHybrid(b *testing.B) {
+	c := warmCatalog(b, writeBenchCorpus(b, benchCorpusSize), true)
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		if _, err := c.SearchHybrid(context.Background(), benchQuery, 20); err != nil {
+			b.Fatal(err)
+		}
+	}
+}
