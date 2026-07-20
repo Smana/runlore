@@ -11,6 +11,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"time"
 
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/metric"
@@ -19,6 +20,15 @@ import (
 	"github.com/Smana/runlore/internal/providers"
 	"github.com/Smana/runlore/internal/telemetry"
 )
+
+// ConfirmationSink records that a FRESH investigation independently reached an
+// existing catalog entry's conclusion (identical DupFingerprint) — the recovery
+// evidence that lets a contested entry's outcome factor climb back (see
+// outcome.Ledger.Confirm, which satisfies this). Optional and nil-safe, like
+// Metrics: a curator without a ledger simply keeps today's behavior.
+type ConfirmationSink interface {
+	Confirm(entry, triggerKey, dupFP string, at time.Time) error
+}
 
 // Related-knowledge bounds: how many BM25 neighbors a drafted PR shows the
 // reviewer, and the noise floor below which a "neighbor" is lexical debris.
@@ -42,8 +52,9 @@ type Curator struct {
 	// SkipVerdicts holds verdicts that must NOT draft a KB PR (e.g. no_action).
 	// A nil/empty map draws no distinction — every verdict is eligible, preserving
 	// pre-gate behaviour.
-	SkipVerdicts map[providers.Verdict]bool
-	Log          *slog.Logger
+	SkipVerdicts  map[providers.Verdict]bool
+	Confirmations ConfirmationSink // optional; nil-safe — dedup matches are recovery evidence
+	Log           *slog.Logger
 }
 
 // Curate applies the three-step gate. It returns the created PR ref, or an empty
@@ -80,8 +91,18 @@ func (c *Curator) Curate(ctx context.Context, inv providers.Investigation) (prov
 	// threshold to tune), then catalog BM25 (observe the top-hit score on every
 	// check), then open PRs
 	if ff, ok := c.Catalog.(fingerprintFinder); ok {
-		if e, found := ff.FindFingerprint(DupFingerprint(inv)); found {
+		fp := DupFingerprint(inv)
+		if e, found := ff.FindFingerprint(fp); found {
 			c.Log.Info("finding matches a catalog entry's fingerprint; not filing", "entry", e.Title, "path", e.Path)
+			// Recovery evidence: a fresh investigation independently re-derived this
+			// entry's conclusion — exactly what a standing 👎 forces. Recalls never
+			// reach here (Curate returns on inv.Recalled above). Best-effort: a sink
+			// error is logged, never blocks the (artifact-free) dedup outcome.
+			if c.Confirmations != nil {
+				if err := c.Confirmations.Confirm(e.Path, inv.TriggerKey, fp, time.Now()); err != nil {
+					c.Log.Warn("confirmation record failed", "entry", e.Path, "err", err)
+				}
+			}
 			return providers.Ref{}, nil
 		}
 	}
