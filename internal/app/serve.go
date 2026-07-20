@@ -25,7 +25,8 @@ import (
 	fluxexec "github.com/Smana/runlore/internal/executor/flux"
 	"github.com/Smana/runlore/internal/investigate"
 	"github.com/Smana/runlore/internal/logging"
-	_ "github.com/Smana/runlore/internal/notify/webhook" // self-registers the generic outgoing-webhook notifier
+	_ "github.com/Smana/runlore/internal/notify/templated" // self-registers the templated notifier
+	_ "github.com/Smana/runlore/internal/notify/webhook"   // self-registers the generic outgoing-webhook notifier
 	"github.com/Smana/runlore/internal/outcome"
 	"github.com/Smana/runlore/internal/providers"
 	"github.com/Smana/runlore/internal/ratelimit"
