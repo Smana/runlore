@@ -710,3 +710,15 @@ func TestGitOpsMirrorConfig(t *testing.T) {
 		t.Fatal("negative gitops.mirror.max must fail validation")
 	}
 }
+
+func TestVectorCacheConfigDefaults(t *testing.T) {
+	var vc VectorCache
+	if !vc.IsEnabled() {
+		t.Error("zero-value vector_cache must be enabled (persistence only ever helps)")
+	}
+	off := false
+	vc = VectorCache{Enabled: &off}
+	if vc.IsEnabled() {
+		t.Error("explicit enabled:false must disable")
+	}
+}

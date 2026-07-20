@@ -453,6 +453,13 @@ type InstantRecall struct {
 	Hybrid          bool    `yaml:"hybrid"`            // enable hybrid (cosine-gated) recall
 	HybridMinScore  float64 `yaml:"hybrid_min_score"`  // cosine floor for the top hit (default 0.80)
 	HybridMarginGap float64 `yaml:"hybrid_margin_gap"` // cosine margin over the runner-up (default 0.05)
+
+	// VectorCache persists hybrid recall's per-entry embedding cache to disk so
+	// a restart or HA failover re-embeds nothing (the in-memory cache already
+	// spares unchanged entries WITHIN a process lifetime). Only meaningful when
+	// hybrid is on. Default on: persistence only ever helps, and every failure
+	// mode (corrupt/stale/missing file) degrades to a cold re-embed.
+	VectorCache VectorCache `yaml:"vector_cache"`
 }
 
 // RerankEnabled reports whether the instant-recall LLM reranker should run. It is
@@ -611,6 +618,16 @@ type GitOpsMirror struct {
 
 // IsEnabled reports whether the mirror cache is on (nil ⇒ default on).
 func (m GitOpsMirror) IsEnabled() bool { return m.Enabled == nil || *m.Enabled }
+
+// VectorCache configures on-disk persistence of the hybrid-recall embedding
+// cache. Enabled by default (nil/true).
+type VectorCache struct {
+	Enabled *bool  `yaml:"enabled"`
+	Dir     string `yaml:"dir"` // cache dir; "" ⇒ <tmp>/runlore-veccache (ephemeral; point at a PV to persist across restarts)
+}
+
+// IsEnabled reports whether cache persistence is on (nil ⇒ default on).
+func (v VectorCache) IsEnabled() bool { return v.Enabled == nil || *v.Enabled }
 
 // TriggerPolicy decides what RunLore reacts to.
 type TriggerPolicy struct {
