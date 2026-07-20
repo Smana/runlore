@@ -90,6 +90,7 @@ subjects:
     name: {{ include "runlore.serviceAccountName" . }}
     namespace: {{ .Release.Namespace }}
 {{- range .Values.rbac.controllerLogNamespaces }}
+{{- if or (not $.Values.rbac.skipMissingControllerLogNamespaces) (lookup "v1" "Namespace" "" .) }}
 ---
 # controller_logs: read RAW gitops controller pod logs in THIS namespace only
 # (flux-system for Flux, argocd for ArgoCD — set via rbac.controllerLogNamespaces) —
@@ -124,6 +125,7 @@ subjects:
   - kind: ServiceAccount
     name: {{ include "runlore.serviceAccountName" $ }}
     namespace: {{ $.Release.Namespace }}
+{{- end }}
 {{- end }}
 {{- if .Values.rbac.allowActions }}
 {{- range .Values.rbac.actionNamespaces }}
