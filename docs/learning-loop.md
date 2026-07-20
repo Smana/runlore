@@ -496,6 +496,18 @@ feedback does two jobs: it weighs *recalled knowledge* (the decay above) and it
 governs *when the agent may repeat itself* — both steered by the same single
 human 👍/👎 signal.
 
+**👎 recovery.** A standing 👎 forces re-investigation — and when that fresh
+investigation independently reaches the same conclusion (identical dedup
+fingerprint), the curator records a *confirmation* in the outcome ledger instead of
+silently deduping it away. Confirmations are recovery evidence at **half** the
+weight of a human observation: one 👎 needs two independent confirmations before
+the entry's outcome factor climbs back to the floor and recall fires again (a
+recall costs two model calls instead of a full investigation — this is what ends
+the re-investigation loop). The human override itself is untouched: the recurrence
+cooldown stays broken while the 👎 stands, and only the voter changing their vote
+clears it. The open KB PR's contested warning shows the confirmation count so the
+reviewer sees both signals.
+
 The re-arm holds across the outer noise-control layers too — with one boundary.
 The **coalescer's cooldown** (`investigation.coalesce.cooldown`, 10m default when
 enabled) consults the same standing-👎 signal and lets a contested trigger through

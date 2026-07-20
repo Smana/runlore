@@ -404,6 +404,10 @@ func BuildInvestigator(ctx context.Context, cfg *config.Config, gp providers.Git
 	// pass onInvestigationComplete's `cur != nil` guard and panic on Curate.
 	var curOrNil investigationCurator
 	if cur != nil {
+		// Fingerprint-dedup matches become recovery evidence for contested entries
+		// (👎 recovery, N5). A disabled ledger (no outcome.ledger_path) no-ops inside
+		// Confirm, so this wiring is unconditional.
+		cur.Confirmations = ledger
 		curOrNil = cur
 	}
 	actions := action.New(cfg.Actions)
