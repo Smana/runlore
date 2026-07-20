@@ -166,6 +166,26 @@ func TestLoadSkipsHidden(t *testing.T) {
 	}
 }
 
+// TestParseEntryDate pins the one date grammar shared by kbvalidate and recall:
+// RFC3339 and bare date parse; empty and garbage report ok=false (distinct from a
+// zero-but-valid time).
+func TestParseEntryDate(t *testing.T) {
+	tests := []struct {
+		in   string
+		want bool
+	}{
+		{"2026-01-10T00:00:00Z", true},
+		{"2026-01-10", true},
+		{"", false},
+		{"not-a-date", false},
+	}
+	for _, tc := range tests {
+		if _, ok := ParseEntryDate(tc.in); ok != tc.want {
+			t.Errorf("ParseEntryDate(%q) ok=%v, want %v", tc.in, ok, tc.want)
+		}
+	}
+}
+
 func contains(s, sub string) bool {
 	for i := 0; i+len(sub) <= len(s); i++ {
 		if s[i:i+len(sub)] == sub {

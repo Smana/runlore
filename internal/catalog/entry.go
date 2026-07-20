@@ -4,6 +4,25 @@
 // markdown files with YAML frontmatter) — the read half of RunLore's Learn pillar.
 package catalog
 
+import "time"
+
+// ParseEntryDate parses an OKF entry date: RFC3339 or bare date (2006-01-02).
+// Empty input returns the zero time and ok=false, distinct from malformed. It is
+// the single date grammar shared by kbvalidate (advisory warnings) and recall
+// (age down-weighting), so both accept exactly the same values.
+func ParseEntryDate(s string) (time.Time, bool) {
+	if s == "" {
+		return time.Time{}, false
+	}
+	if t, err := time.Parse(time.RFC3339, s); err == nil {
+		return t, true
+	}
+	if t, err := time.Parse("2006-01-02", s); err == nil {
+		return t, true
+	}
+	return time.Time{}, false
+}
+
 // Entry is one OKF knowledge entry.
 type Entry struct {
 	Type        string // frontmatter: type (Playbook, Incident, …)

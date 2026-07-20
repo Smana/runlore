@@ -8,6 +8,7 @@
 package kbvalidate
 
 import (
+	"fmt"
 	"strings"
 
 	"github.com/Smana/runlore/internal/catalog"
@@ -134,6 +135,23 @@ func ValidateStructural(e catalog.Entry) []Issue {
 
 	if len(e.Tags) == 0 {
 		addWarn("tags", "frontmatter `tags` is empty")
+	}
+
+	// Lifecycle fields are ADVISORY: an odd status or an unparseable date is a
+	// warning, never an error — one strange entry must never fail the merge gate,
+	// and recall's fail-safe already treats an unknown status as active and an
+	// unparseable date as no-age-penalty.
+	if s := strings.TrimSpace(e.Status); s != "" {
+		switch s {
+		case "active", "retired", "draft":
+		default:
+			addWarn("status", fmt.Sprintf("unknown status %q (known: active, retired, draft); treated as active", s))
+		}
+	}
+	if e.LastValidated != "" {
+		if _, ok := catalog.ParseEntryDate(e.LastValidated); !ok {
+			addWarn("last_validated", fmt.Sprintf("unparseable date %q (want RFC3339 or 2006-01-02); age down-weighting will ignore it", e.LastValidated))
+		}
 	}
 
 	if strings.TrimSpace(e.Body) == "" {

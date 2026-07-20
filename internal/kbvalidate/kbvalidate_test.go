@@ -155,6 +155,51 @@ func TestWarnInvalidToleratesForeignTypes(t *testing.T) {
 	}
 }
 
+// TestValidateStatusAndLastValidated: the lifecycle fields are ADVISORY at the
+// merge gate — an odd status or an unparseable date is a warning, never an error
+// (one strange entry never fails the gate). Valid vocabulary and dates warn about
+// nothing.
+func TestValidateStatusAndLastValidated(t *testing.T) {
+	// (a) unknown status → warning on `status`, and HasErrors stays false.
+	e := validIncident()
+	e.Status = "bogus"
+	issues := ValidateStructural(e)
+	if HasErrors(issues) {
+		t.Fatalf("unknown status must not be an error: %+v", issues)
+	}
+	if !has(issues, SeverityWarning, "status") {
+		t.Fatalf("expected a warning on status, got %+v", issues)
+	}
+
+	// (b) unparseable last_validated → warning on `last_validated`, never an error.
+	e = validIncident()
+	e.LastValidated = "not-a-date"
+	issues = ValidateStructural(e)
+	if HasErrors(issues) {
+		t.Fatalf("bad last_validated must not be an error: %+v", issues)
+	}
+	if !has(issues, SeverityWarning, "last_validated") {
+		t.Fatalf("expected a warning on last_validated, got %+v", issues)
+	}
+
+	// (c) known statuses (incl. empty) + a valid date → no lifecycle warning at all.
+	for _, s := range []string{"", "active", "retired", "draft"} {
+		e = validIncident()
+		e.Status = s
+		e.LastValidated = "2026-01-10"
+		issues = ValidateStructural(e)
+		if has(issues, SeverityWarning, "status") || has(issues, SeverityWarning, "last_validated") {
+			t.Fatalf("status=%q with a valid date must not warn: %+v", s, issues)
+		}
+	}
+	// An RFC3339 last_validated is equally valid.
+	e = validIncident()
+	e.LastValidated = "2026-01-10T09:30:00Z"
+	if has(ValidateStructural(e), SeverityWarning, "last_validated") {
+		t.Fatal("RFC3339 last_validated must not warn")
+	}
+}
+
 func TestHasErrors(t *testing.T) {
 	if HasErrors([]Issue{{Severity: SeverityWarning, Field: "tags"}}) {
 		t.Fatal("warnings-only must not count as errors")
