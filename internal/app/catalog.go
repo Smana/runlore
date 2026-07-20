@@ -66,7 +66,7 @@ func BuildCatalog(ctx context.Context, cfg *config.Config, forgeTok ForgeToken, 
 			log.Info("catalog git-sync using the forge GitHub App identity")
 		}
 		syncer := &catalog.Syncer{URL: cfg.Catalog.Git.URL, Branch: cfg.Catalog.Git.Branch, Dir: dir, Token: token, Log: log}
-		go syncer.Run(ctx, cfg.Catalog.Git.Interval.Std(), func() error {
+		go syncer.Run(ctx, cfg.Catalog.Git.Interval.Std(), func(_ *catalog.SyncDelta) error {
 			skipped, err := cat.Reload(dir)
 			if err != nil {
 				log.Warn("catalog reload failed", "dir", dir, "err", err)

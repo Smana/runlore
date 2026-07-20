@@ -60,7 +60,7 @@ func RunCatalogSync(args []string) error {
 		token = catalog.TokenFunc(ft)
 	}
 	syncer := &catalog.Syncer{URL: g.URL, Branch: g.Branch, Dir: dir, Token: token, Log: log}
-	if _, err := syncer.Sync(context.Background()); err != nil {
+	if _, _, err := syncer.Sync(context.Background()); err != nil {
 		return fmt.Errorf("sync: %w", err)
 	}
 	cat, err := catalog.New(dir)

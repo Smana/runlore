@@ -8,6 +8,8 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"slices"
+	"sort"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -16,6 +18,43 @@ import (
 	"github.com/go-git/go-git/v5/plumbing"
 	"github.com/go-git/go-git/v5/plumbing/object"
 )
+
+func TestSyncReportsDelta(t *testing.T) {
+	src := initBareUpstream(t)
+	commitToUpstream(t, src, "a.md", "alpha v1")
+	commitToUpstream(t, src, "b.md", "beta v1")
+	s := &Syncer{URL: src, Dir: t.TempDir(), Log: testLogger()}
+
+	// First sync: change reported, delta unknown (nil) — full reload territory.
+	changed, delta, err := s.Sync(context.Background())
+	if err != nil || !changed {
+		t.Fatalf("first sync: changed=%v err=%v", changed, err)
+	}
+	if delta != nil {
+		t.Fatalf("first sync delta = %+v, want nil (unknown)", delta)
+	}
+
+	// Modify one file, add one: delta lists exactly those, nothing removed.
+	commitToUpstream(t, src, "a.md", "alpha v2")
+	commitToUpstream(t, src, "c.md", "gamma v1")
+	changed, delta, err = s.Sync(context.Background())
+	if err != nil || !changed || delta == nil {
+		t.Fatalf("second sync: changed=%v delta=%v err=%v", changed, delta, err)
+	}
+	sort.Strings(delta.Changed)
+	if want := []string{"a.md", "c.md"}; !slices.Equal(delta.Changed, want) {
+		t.Errorf("Changed = %v, want %v", delta.Changed, want)
+	}
+	if len(delta.Removed) != 0 {
+		t.Errorf("Removed = %v, want empty", delta.Removed)
+	}
+
+	// No upstream movement: no change, no delta.
+	changed, delta, err = s.Sync(context.Background())
+	if err != nil || changed || delta != nil {
+		t.Errorf("idle sync: changed=%v delta=%v err=%v", changed, delta, err)
+	}
+}
 
 // initBareUpstream creates a local (non-bare) git repo with one initial commit
 // and returns its path. The Syncer can clone from it via a local file path.
@@ -57,7 +96,7 @@ func TestSyncReportsChangeOnClone(t *testing.T) {
 	src := initBareUpstream(t)
 	dir := t.TempDir()
 	s := &Syncer{URL: src, Branch: "main", Dir: dir, Log: testLogger()}
-	changed, err := s.Sync(context.Background())
+	changed, _, err := s.Sync(context.Background())
 	if err != nil {
 		t.Fatalf("Sync: %v", err)
 	}
@@ -70,10 +109,10 @@ func TestSyncNoChangeOnRepeatedPull(t *testing.T) {
 	src := initBareUpstream(t)
 	dir := t.TempDir()
 	s := &Syncer{URL: src, Branch: "main", Dir: dir, Log: testLogger()}
-	if _, err := s.Sync(context.Background()); err != nil {
+	if _, _, err := s.Sync(context.Background()); err != nil {
 		t.Fatalf("first Sync: %v", err)
 	}
-	changed, err := s.Sync(context.Background())
+	changed, _, err := s.Sync(context.Background())
 	if err != nil {
 		t.Fatalf("second Sync: %v", err)
 	}
@@ -86,11 +125,11 @@ func TestSyncReportsChangeAfterNewCommit(t *testing.T) {
 	src := initBareUpstream(t)
 	dir := t.TempDir()
 	s := &Syncer{URL: src, Branch: "main", Dir: dir, Log: testLogger()}
-	if _, err := s.Sync(context.Background()); err != nil {
+	if _, _, err := s.Sync(context.Background()); err != nil {
 		t.Fatalf("first Sync: %v", err)
 	}
 	commitToUpstream(t, src, "runbooks/new.md", "# new")
-	changed, err := s.Sync(context.Background())
+	changed, _, err := s.Sync(context.Background())
 	if err != nil {
 		t.Fatalf("third Sync: %v", err)
 	}
@@ -130,7 +169,7 @@ func TestSyncRecoversFromCorruptMirror(t *testing.T) {
 		t.Fatal(err)
 	}
 	s := &Syncer{URL: src, Branch: "main", Dir: dir, Log: testLogger()}
-	if _, err := s.Sync(context.Background()); err != nil {
+	if _, _, err := s.Sync(context.Background()); err != nil {
 		t.Fatalf("Sync should recover by re-cloning a corrupt mirror, got: %v", err)
 	}
 	if es, _, _ := Load(dir); len(es) != 1 {
@@ -152,7 +191,7 @@ func TestSyncerCloneAndPull(t *testing.T) {
 	s := &Syncer{URL: src, Branch: "main", Dir: mirror, Log: slog.New(slog.NewTextHandler(io.Discard, nil))}
 
 	// First Sync clones.
-	if _, err := s.Sync(context.Background()); err != nil {
+	if _, _, err := s.Sync(context.Background()); err != nil {
 		t.Fatalf("clone sync: %v", err)
 	}
 	if es, _, _ := Load(mirror); len(es) != 1 || es[0].Title != "First" {
@@ -161,7 +200,7 @@ func TestSyncerCloneAndPull(t *testing.T) {
 
 	// A new commit (e.g. a merged curation PR) appears upstream; Sync fast-forwards.
 	commit(t, repo, src, "second.md", "---\ntitle: Second\n---\ny")
-	if _, err := s.Sync(context.Background()); err != nil {
+	if _, _, err := s.Sync(context.Background()); err != nil {
 		t.Fatalf("pull sync: %v", err)
 	}
 	if es, _, _ := Load(mirror); len(es) != 2 {
@@ -191,7 +230,7 @@ func TestRunReloadsOnlyOnChange(t *testing.T) {
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		s.Run(ctx, time.Hour, func() error { calls.Add(1); return nil }) // interval unused: tick drives the loop
+		s.Run(ctx, time.Hour, func(*SyncDelta) error { calls.Add(1); return nil }) // interval unused: tick drives the loop
 	}()
 
 	// Run only receives from the (unbuffered) tick channel between poll cycles, so a
