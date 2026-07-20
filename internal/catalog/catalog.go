@@ -32,6 +32,10 @@ type Catalog struct {
 	// current corpus on each successful embed pass so deleted entries are evicted.
 	// Guarded by mu.
 	vecCache map[string][]float32
+	// vecCachePath/vecCacheModel arm disk persistence of vecCache (EnableVectorCache).
+	// Empty path ⇒ in-memory only. Set once at wiring time, before the first Reload.
+	vecCachePath  string
+	vecCacheModel string
 	// pathIdx maps Entry.Path → position in entries; maintained in lockstep with
 	// entries under mu. It exists because bleve docs are keyed by Path (stable
 	// across reloads — the prerequisite for incremental Index/Delete), so search
@@ -50,6 +54,33 @@ func pathIndex(entries []Entry) map[string]int {
 		m[e.Path] = i
 	}
 	return m
+}
+
+// EnableVectorCache persists the embedding cache at path, keyed to the given
+// embedding-model identifier: the file is loaded now (before the first reload —
+// a warm cache means a restart embeds nothing) and rewritten after each
+// successful embed pass. Any load problem is a cold start, never an error.
+func (c *Catalog) EnableVectorCache(path, model string) {
+	c.vecCachePath, c.vecCacheModel = path, model
+	if warm := loadVecCache(path, model, c.Log); warm != nil {
+		c.mu.Lock()
+		c.vecCache = warm
+		c.mu.Unlock()
+		if c.Log != nil {
+			c.Log.Info("vector cache loaded from disk", "path", path, "vectors", len(warm))
+		}
+	}
+}
+
+// persistVecCache is the post-reload save hook: only a successful, complete
+// embed pass (vectors non-nil ⇒ all-or-nothing invariant held) writes the file.
+func (c *Catalog) persistVecCache(vectors [][]float32, cache map[string][]float32) {
+	if c.vecCachePath == "" || vectors == nil || cache == nil {
+		return
+	}
+	if err := saveVecCache(c.vecCachePath, c.vecCacheModel, cache); err != nil && c.Log != nil {
+		c.Log.Warn("vector cache save failed; next restart re-embeds", "path", c.vecCachePath, "err", err)
+	}
 }
 
 // Searcher is the read surface used by the kb_search tool.
@@ -117,6 +148,7 @@ func (c *Catalog) ReloadContext(ctx context.Context, dir string) ([]string, erro
 	if old != nil {
 		_ = old.Close()
 	}
+	c.persistVecCache(vectors, cache)
 	c.ready.Store(true)
 	return skipped, nil
 }
@@ -180,6 +212,7 @@ func (c *Catalog) ReloadDelta(ctx context.Context, dir string, delta *SyncDelta)
 		c.vecCache = cache
 	}
 	c.mu.Unlock()
+	c.persistVecCache(vectors, cache)
 	return skipped, nil
 }
 
