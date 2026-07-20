@@ -437,9 +437,14 @@ type InstantRecall struct {
 
 	// Hybrid switches recall to fused BM25 + embedding retrieval, gated on COSINE
 	// similarity instead of the BM25 score above. Requires model.embeddings to be
-	// configured (else recall stays BM25). EXPERIMENTAL — tune the cosine thresholds
-	// against the instant-recall eval before relying on it; the defaults are
-	// conservative placeholders, not measured values.
+	// configured (else recall stays BM25). EXPERIMENTAL — the cosine gate is exercised
+	// end-to-end by the hybrid recall eval (internal/investigate/hybrideval_test.go:
+	// SearchHybrid + these gates run and NO negative false-fires), but the NUMERIC
+	// defaults below are conservative and NOT yet live-measured: a real embedding
+	// model's cosine scale is model-specific and must be measured with
+	// TestHybridRecallEvalLive, then the thresholds re-derived per model, before
+	// graduating out of EXPERIMENTAL. See the graduation criteria in
+	// docs/configuration.md and dev/superpowers/plans/2026-07-19-hybrid-recall-eval.md.
 	Hybrid          bool    `yaml:"hybrid"`            // enable hybrid (cosine-gated) recall
 	HybridMinScore  float64 `yaml:"hybrid_min_score"`  // cosine floor for the top hit (default 0.80)
 	HybridMarginGap float64 `yaml:"hybrid_margin_gap"` // cosine margin over the runner-up (default 0.05)
