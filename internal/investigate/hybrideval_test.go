@@ -191,3 +191,98 @@ func TestHybridRecallEvalRetrieval(t *testing.T) {
 		t.Fatalf("hybrid Recall@1 hits = %d, want pinned %d (fusion changed — re-measure and re-pin deliberately)", m.h1, wantHybridRetrievalHitsAt1)
 	}
 }
+
+// --- CI hybrid fire-rate at the PRODUCTION cosine gates (never tuned down) ---
+
+// Production hybrid gates — mirror the app/investigate.go defaults verbatim. The
+// harness gates EXACTLY as production does: no test loosens a gate to force a fire.
+const (
+	prodHybridMinScore  = 0.80
+	prodHybridMarginGap = 0.05
+)
+
+// computeFireHybrid mirrors computeFire (recalleval_test.go) but wires the hybrid
+// searcher + cosine gates, exactly as BuildInvestigator wires production
+// (Hybrid=catalog, HybridMinScore/HybridMarginGap). The BM25 gates are kept set to
+// their production values too, so the test proves the MODE switch — not the harness —
+// selects the cosine gates (recall.lookupWithUsage swaps them when Hybrid.HasVectors).
+// The label-only regime filter and the fire/precision bookkeeping are copied from
+// computeFire; only the three hybrid fields are added.
+func computeFireHybrid(t *testing.T, cat *catalog.Catalog, cases []evalCase) fireMetrics {
+	t.Helper()
+	r := &Recall{
+		Catalog:         cat,
+		Hybrid:          cat,
+		HybridMinScore:  prodHybridMinScore,
+		HybridMarginGap: prodHybridMarginGap,
+		MinScore:        prodMinScore,
+		MarginGap:       prodMarginGap,
+		SoloFloor:       prodSoloFloor,
+	}
+	var f fireMetrics
+	for _, c := range cases {
+		// Fire-rate is a claim about the LABEL-DERIVED regime (mirrors computeFire):
+		// GitOps entries carry glob resources that never clear the structural gate, so
+		// they are excluded from the fire denominator.
+		if c.regime != "label" {
+			continue
+		}
+		entry, _ := r.lookup(context.Background(), c.request())
+		if c.negative() {
+			f.negatives++
+			if entry != nil {
+				f.negFired++
+			}
+			continue
+		}
+		f.labelPositives++
+		if entry == nil {
+			continue
+		}
+		f.fired++
+		if rankOfTarget([]catalog.ScoredEntry{{Entry: *entry}}, c.targets) == 1 {
+			f.firedCorrect++
+		}
+	}
+	return f
+}
+
+// PINNED AFTER FIRST HONEST RUN (Task 2 discipline).
+//
+// Measured (bag-of-words CI regime, 11 label positives, prod gates cosine≥0.80,
+// margin≥0.05):
+//
+//	[hybrid/bow@prod-gates] production-threshold fire: fired=0/11 (rate=0.00) precision=0.00 | negatives fired=0/2
+//
+// fired=0 is the HONEST result and mirrors the BM25 harness's 0/11: a short
+// label-derived query vs a long runbook cannot reach an 0.80 cosine under a crude
+// bag-of-words embedder — the deterministic regime proves the machinery runs and the
+// gate holds, it does NOT manufacture a fire. Whether a real semantic embedder clears
+// 0.80 is measured live (TestHybridRecallEvalLive); this number moves only if the
+// fusion or the fixtures change, and is re-pinned deliberately when it does.
+const (
+	wantHybridFireCount = 0 // measured 0/11 — no bag-of-words cosine reaches the 0.80 prod floor
+	wantHybridNegFired  = 0 // negatives must NEVER fire — a requirement, not a measurement
+)
+
+// TestHybridRecallEvalProductionFireRate is the pinned fire-rate regression at the
+// PRODUCTION cosine gates. Like the BM25 harness it never tunes a gate down: the
+// deterministic regime measures that SearchHybrid + the cosine gate run end-to-end
+// and that NO negative false-fires — the one unacceptable outcome.
+func TestHybridRecallEvalProductionFireRate(t *testing.T) {
+	cat := writeHybridEvalCatalog(t)
+	f := computeFireHybrid(t, cat, evalCases())
+	logFire(t, "hybrid/bow@prod-gates", f)
+	if wantHybridFireCount < 0 {
+		t.Fatal("pin wantHybridFireCount from the -v output above before committing")
+	}
+	if f.labelPositives != 11 {
+		t.Fatalf("expected 11 label-derived positives, got %d", f.labelPositives)
+	}
+	if f.fired != wantHybridFireCount {
+		t.Fatalf("hybrid fire count = %d, want pinned %d", f.fired, wantHybridFireCount)
+	}
+	if f.negFired != wantHybridNegFired {
+		t.Fatalf("NEGATIVE case fired under hybrid gates (%d) — false recall, the one unacceptable outcome", f.negFired)
+	}
+}
