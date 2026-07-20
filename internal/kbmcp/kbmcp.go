@@ -46,11 +46,11 @@ type searchHit struct {
 // dedup identity) — surfaced so clients can judge freshness and identity; both
 // are absent on hand-written entries.
 type fullEntry struct {
-	Path        string   `json:"path"`
-	Type        string   `json:"type"`
-	Title       string   `json:"title"`
-	Description string   `json:"description,omitempty"`
-	Resource    string   `json:"resource,omitempty"`
+	Path          string   `json:"path"`
+	Type          string   `json:"type"`
+	Title         string   `json:"title"`
+	Description   string   `json:"description,omitempty"`
+	Resource      string   `json:"resource,omitempty"`
 	Tags          []string `json:"tags,omitempty"`
 	Timestamp     string   `json:"timestamp,omitempty"`
 	Fingerprint   string   `json:"fingerprint,omitempty"`

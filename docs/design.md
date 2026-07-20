@@ -261,9 +261,16 @@ only half emergent:
 - **Learned** (emergent from investigations): **incident patterns** ("this symptom → this cause →
   this fix"), captured via the loop above.
 
-To keep the catalog an asset and not a liability (frontier RCA is <50 % accurate, §10), entries carry
-**`status`**, **`confidence`**, and **`last_validated`**, and an outcome-driven decay down-weights
-knowledge that stops resolving incidents ([mechanics in learning-loop.md §6](learning-loop.md)).
+To keep the catalog an asset and not a liability (frontier RCA is <50 % accurate, §10), every entry
+carries lifecycle frontmatter that recall now **honours**: **`status`** — a `retired`/`draft` entry is
+indexed but never fires or leads (the seam the retirement pass writes to, learning-loop.md §5) — and
+**`last_validated`** — recall down-weights an entry no human has confirmed within a configurable
+horizon (`catalog.instant_recall.stale_after`; one confidence step, never a rejection). Both are
+fail-safe: an absent or unknown value reproduces the pre-field behaviour exactly. A third key,
+**`confidence`**, is *written* by the curator but deliberately **not read back** — recall derives trust
+from the live outcome track record (resolve rate + 👍/👎), and a static authored confidence would fight
+that dynamic signal. On top of these, an outcome-driven decay down-weights knowledge that stops
+resolving incidents ([mechanics in learning-loop.md §6](learning-loop.md)).
 Curation — the PR/issue review — is the **load-bearing** quality gate that separates this from opaque
 vendor "memory."
 
