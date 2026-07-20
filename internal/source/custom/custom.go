@@ -6,8 +6,10 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"os"
 	"time"
 
+	"github.com/Smana/runlore/internal/config"
 	"github.com/Smana/runlore/internal/curator"
 	"github.com/Smana/runlore/internal/investigate"
 	"github.com/Smana/runlore/internal/providers"
@@ -19,7 +21,12 @@ import (
 // mapping applies to a delivery (see source.Built.Handler).
 type Source struct {
 	instances map[string]*instance
+	shared    string // shared server.webhook_token_env value, resolved at Build
 }
+
+// osGetenv is a package-level indirection for os.Getenv (PagerDuty precedent;
+// tests set real env vars via t.Setenv).
+var osGetenv = os.Getenv
 
 // Decode maps one delivery through the instance's field paths. A single
 // non-conforming event is skipped (fail-safe: one junk element must not void a
@@ -117,4 +124,39 @@ func (s *Source) Decode(body []byte, h http.Header) (source.DecodeResult, error)
 		})
 	}
 	return out, nil
+}
+
+func init() {
+	source.Register(source.Descriptor{
+		Name: "custom",
+		Kind: source.Webhook, Admission: source.MatchGated, Path: "/webhook/custom/{instance}",
+		Build: func(d source.Deps) (any, error) {
+			node, ok := d.Raw["custom"]
+			if !ok {
+				return nil, nil // disabled: no sources.custom key
+			}
+			insts, err := parseConfig(node)
+			if err != nil {
+				return nil, err
+			}
+			shared := ""
+			if d.Cfg != nil && d.Cfg.Server.WebhookTokenEnv != "" {
+				shared = osGetenv(d.Cfg.Server.WebhookTokenEnv)
+			}
+			for name, inst := range insts {
+				if inst.tokenEnv != "" {
+					inst.token = osGetenv(inst.tokenEnv)
+					if inst.token == "" {
+						return nil, fmt.Errorf("sources.custom.instances.%s: token_env %q is empty", name, inst.tokenEnv)
+					}
+				}
+				// Fail closed under mode=auto: an unattended executor must not
+				// accept unauthenticated vendor webhooks (PagerDuty precedent).
+				if d.Cfg != nil && d.Cfg.Actions.Mode == config.ActionAuto && inst.token == "" && shared == "" {
+					return nil, fmt.Errorf("actions.mode=auto requires a token for sources.custom.instances.%s (token_env or server.webhook_token_env)", name)
+				}
+			}
+			return &Source{instances: insts, shared: shared}, nil
+		},
+	})
 }
