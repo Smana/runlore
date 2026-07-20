@@ -34,6 +34,9 @@ const (
 	SourceGitOpsFailure Source = "gitops-failure"
 	// SourcePagerDuty means the investigation was triggered by a PagerDuty incident.
 	SourcePagerDuty Source = "pagerduty"
+	// SourceCustom means the investigation was triggered by a generic
+	// (config-mapped) vendor webhook — sources.custom.
+	SourceCustom Source = "custom"
 )
 
 // SeverityCritical is the paging-grade alert severity. It is the ONE spelling
