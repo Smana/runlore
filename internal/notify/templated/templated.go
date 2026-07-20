@@ -9,9 +9,12 @@
 package templated
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"os"
 	"text/template"
@@ -23,6 +26,11 @@ import (
 	"github.com/Smana/runlore/internal/notify"
 	"github.com/Smana/runlore/internal/providers"
 )
+
+// maxBody caps a rendered template. Oversize is an error, not a truncation —
+// a truncated JSON/XML body is garbage to the receiver; failing loudly beats
+// posting it.
+const maxBody = 256 << 10
 
 var funcs = template.FuncMap{
 	// toJSON is the escaping-correct way to splice a value into a JSON body.
@@ -57,11 +65,45 @@ type Notifier struct {
 
 var _ providers.Notifier = (*Notifier)(nil)
 
-// Deliver is filled in by the delivery step (render, cap, POST). It is declared
-// here so *Notifier satisfies providers.Notifier and the notifier can
-// self-register at parse time.
-func (n *Notifier) Deliver(context.Context, providers.Investigation) error {
-	return fmt.Errorf("templated: delivery not implemented")
+// Deliver renders and POSTs every enabled instance; a failing instance is
+// reported but never blocks its siblings (errors are joined, mirroring
+// notify.Multi one level down).
+func (n *Notifier) Deliver(ctx context.Context, inv providers.Investigation) error {
+	p := notify.NewPayload(inv)
+	var errs []error
+	for _, in := range n.instances {
+		if err := n.deliverOne(ctx, in, p); err != nil {
+			errs = append(errs, fmt.Errorf("templated %q: %w", in.name, err))
+		}
+	}
+	return errors.Join(errs...)
+}
+
+func (n *Notifier) deliverOne(ctx context.Context, in instance, p notify.Payload) error {
+	var buf bytes.Buffer
+	if err := in.tmpl.Execute(&buf, p); err != nil {
+		return fmt.Errorf("execute template: %w", err)
+	}
+	if buf.Len() > maxBody {
+		return fmt.Errorf("rendered body %d bytes exceeds cap %d", buf.Len(), maxBody)
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, in.url, &buf)
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Content-Type", in.contentType)
+	if in.token != "" {
+		req.Header.Set("Authorization", "Bearer "+in.token)
+	}
+	resp, err := n.client.Do(req)
+	if err != nil {
+		return err
+	}
+	defer func() { _, _ = io.Copy(io.Discard, resp.Body); _ = resp.Body.Close() }()
+	if resp.StatusCode >= 300 {
+		return fmt.Errorf("HTTP %d %s", resp.StatusCode, http.StatusText(resp.StatusCode))
+	}
+	return nil
 }
 
 // build decodes and validates the notify.templated block. Schema/template
