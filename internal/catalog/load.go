@@ -70,6 +70,8 @@ func parseEntry(root, path string) (Entry, error) {
 		Tags          []string `yaml:"tags"`
 		Timestamp     string   `yaml:"timestamp"`
 		Fingerprint   string   `yaml:"fingerprint"`
+		Status        string   `yaml:"status"`
+		LastValidated string   `yaml:"last_validated"`
 	}
 	if len(fm) > 0 {
 		if err := yaml.Unmarshal(fm, &meta); err != nil {
@@ -82,6 +84,7 @@ func parseEntry(root, path string) (Entry, error) {
 		AlertResource: meta.AlertResource,
 		Resource:      meta.Resource, Tags: meta.Tags,
 		Timestamp: meta.Timestamp, Fingerprint: meta.Fingerprint,
+		Status: meta.Status, LastValidated: meta.LastValidated,
 		Body: string(body), Path: rel,
 	}, nil
 }
