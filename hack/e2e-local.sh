@@ -171,7 +171,8 @@ webhook_post() { # webhook_post <label> <port> <json-payload>
 # match tolerates the _total / _total_total suffix variants of the exporter.
 scrape_metric() { # scrape_metric <port> <metric-name-without-runlore_>
   local b; b=$(curl -sf "http://localhost:$1/metrics" 2>/dev/null || true)
-  echo "$b" | awk -v p="^runlore_$2" '$0 ~ p {print int($NF); exit}'
+  # Herestring for the same reason as metric(): early-exit awk + pipe = SIGPIPE.
+  awk -v p="^runlore_$2" '$0 ~ p {print int($NF); exit}' <<<"$b"
 }
 
 # slack_interact posts a signed Slack block-action interaction (HMAC over
@@ -414,7 +415,11 @@ kill "$STORM_PF" 2>/dev/null || true; free_port "$STORM_PORT"
 # Parse metric values. Metrics are runlore_-prefixed by the OTel Prometheus exporter;
 # prefix-match also tolerates _total vs _total_total suffix variants. awk never fails
 # the pipeline, so a missing metric → 0 (a clean FAIL, not a set -e crash).
-metric() { echo "$METRICS" | awk -v p="^runlore_$1" '$0 ~ p {print int($NF); exit}'; }
+# Herestring, NOT `echo | awk`: awk's early exit SIGPIPE-kills the echo whenever
+# the exposition outgrows the pipe buffer (which Linux shrinks to 4KiB under
+# pipe-user-pages pressure), and pipefail+set-e turn that 141 into a silent
+# abort. A herestring feeds awk without a pipe, so early exit is always safe.
+metric() { awk -v p="^runlore_$1" '$0 ~ p {print int($NF); exit}' <<<"$METRICS"; }
 RECEIVED=$(metric alerts_received);       RECEIVED=${RECEIVED:-0}
 STARTED=$(metric investigations_started); STARTED=${STARTED:-0}
 SUPPRESSED=$(metric alerts_suppressed);   SUPPRESSED=${SUPPRESSED:-0}
