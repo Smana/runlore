@@ -11,6 +11,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/metric/noop"
@@ -208,15 +209,17 @@ func TestCurateCatalogDuplicateDropsSilently(t *testing.T) {
 
 // fakeFingerprinted is a catalog fake with NO BM25 hits but an exact fingerprint
 // match — proving the deterministic dedup path is independent of the BM25
-// threshold.
+// threshold. path is the matched entry's catalog Path (the confirmation-record
+// attribution target); "" for callers that only assert the drop.
 type fakeFingerprinted struct {
 	fakeScored
-	fp string
+	fp   string
+	path string
 }
 
 func (f fakeFingerprinted) FindFingerprint(fp string) (catalog.Entry, bool) {
 	if fp != "" && fp == f.fp {
-		return catalog.Entry{Title: "already merged", Fingerprint: fp}, true
+		return catalog.Entry{Title: "already merged", Path: f.path, Fingerprint: fp}, true
 	}
 	return catalog.Entry{}, false
 }
@@ -384,6 +387,70 @@ func TestCurateDupStillSkipsWithMultiHits(t *testing.T) {
 	}
 	if ref.URL != "" || f.openedPR != nil {
 		t.Fatal("duplicate finding must not open a PR")
+	}
+}
+
+// recordingSink is a ConfirmationSink that records each Confirm call verbatim.
+type recordingSink struct{ calls []string }
+
+func (s *recordingSink) Confirm(entry, triggerKey, dupFP string, _ time.Time) error {
+	s.calls = append(s.calls, entry+"|"+triggerKey+"|"+dupFP)
+	return nil
+}
+
+// fingerprintMatchingInvestigation is a novel, high-quality finding whose
+// DupFingerprint the dedup curator's fake catalog matches, so Curate reaches the
+// fingerprint-dedup branch (past the recall + quality gates).
+func fingerprintMatchingInvestigation() providers.Investigation {
+	inv := goodFinding()
+	inv.Resource = providers.Workload{Namespace: "apps", Name: "web"}
+	inv.TriggerKey = "trig-1"
+	return inv
+}
+
+// newFingerprintDedupCurator builds a curator whose fake catalog returns a
+// fingerprint match (Path "kb/e.md") for fingerprintMatchingInvestigation — the
+// arrangement the confirmation tests share.
+func newFingerprintDedupCurator(t *testing.T) *Curator {
+	t.Helper()
+	cat := fakeFingerprinted{fp: DupFingerprint(fingerprintMatchingInvestigation()), path: "kb/e.md"}
+	return newCurator(&fakeForge{}, cat)
+}
+
+func TestFingerprintDedupRecordsConfirmation(t *testing.T) {
+	sink := &recordingSink{}
+	c := newFingerprintDedupCurator(t)
+	c.Confirmations = sink
+	inv := fingerprintMatchingInvestigation()
+
+	ref, err := c.Curate(context.Background(), inv)
+	if err != nil || ref.URL != "" {
+		t.Fatalf("dedup branch must still file nothing: ref=%v err=%v", ref, err)
+	}
+	if len(sink.calls) != 1 {
+		t.Fatalf("exactly one confirmation must be recorded, got %v", sink.calls)
+	}
+}
+
+func TestRecalledFindingNeverConfirms(t *testing.T) {
+	sink := &recordingSink{}
+	c := newFingerprintDedupCurator(t)
+	c.Confirmations = sink
+	inv := fingerprintMatchingInvestigation()
+	inv.Recalled = true // Curate early-returns before the dedup branch
+
+	if _, err := c.Curate(context.Background(), inv); err != nil {
+		t.Fatal(err)
+	}
+	if len(sink.calls) != 0 {
+		t.Fatalf("a recall must NEVER record recovery evidence, got %v", sink.calls)
+	}
+}
+
+func TestNilSinkIsSafe(t *testing.T) {
+	c := newFingerprintDedupCurator(t) // Confirmations left nil
+	if _, err := c.Curate(context.Background(), fingerprintMatchingInvestigation()); err != nil {
+		t.Fatalf("nil sink must be a no-op, got %v", err)
 	}
 }
 

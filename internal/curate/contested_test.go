@@ -85,6 +85,19 @@ func TestContestedCommentsOnOpenKBPR(t *testing.T) {
 	}
 }
 
+func TestContestedCommentRendersConfirmations(t *testing.T) {
+	ct := outcome.ContestedTrigger{TriggerKey: "trig-1", CuratedURL: "https://github.com/o/r/pull/7", Downs: 1, Confirms: 2}
+	body := contestedComment(ct, contestedMarker(ct.TriggerKey))
+	if !strings.Contains(body, "2 fresh re-investigations independently reached this same conclusion") {
+		t.Fatalf("comment must surface the confirmation count, got:\n%s", body)
+	}
+	// Zero confirmations: the line is absent (no noise on the common case).
+	ct.Confirms = 0
+	if body := contestedComment(ct, contestedMarker(ct.TriggerKey)); strings.Contains(body, "independently reached") {
+		t.Fatalf("no-confirmation comment must not mention confirmations, got:\n%s", body)
+	}
+}
+
 // TestContestedIdempotentWhenMarkerPresent: an existing comment carrying this
 // trigger's marker means the warning was already surfaced — never re-post, even
 // though the votes still stand on every later run.

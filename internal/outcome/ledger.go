@@ -59,7 +59,7 @@ func Derived(fp string) bool {
 
 // Event is one ledger line: an investigation opened, or an incident resolved.
 type Event struct {
-	Event          string `json:"event"`                     // "open" | "resolve"
+	Event          string `json:"event"`                     // "open" | "resolve" | "feedback" | "checkpoint" | "confirm"
 	Fingerprint    string `json:"fingerprint"`               // Alertmanager fingerprint (stable firing↔resolved)
 	DupFingerprint string `json:"dup_fingerprint,omitempty"` // curator dedup fingerprint (resource+cause); the curated-PR resolution join key
 
@@ -163,6 +163,11 @@ type Ledger struct {
 	// OutcomeFloor. Folded on replay like agg; checkpointed on compaction.
 	votes map[string]feedbackVote
 
+	// triggerConfirms counts confirmations per TriggerKey — the ContestedTriggers
+	// join that lets the curate Contested pass tell a reviewer "N re-investigations
+	// reached this same conclusion". Rebuilt on load, checkpointed on compaction.
+	triggerConfirms map[string]int
+
 	// droppedResolves counts orphan resolves discarded by the pendingResolves bound
 	// (see maxPendingResolvesPerFingerprint) — spurious duplicate/replayed resolve
 	// webhooks. Kept so the (otherwise silent) defensive drop is observable.
@@ -205,6 +210,7 @@ type checkpointData struct {
 	PendingOpens    map[string][]pendingOpenJSON `json:"pending_opens,omitempty"`
 	PendingResolves map[string][]time.Time       `json:"pending_resolves,omitempty"`
 	Votes           map[string]feedbackVoteJSON  `json:"votes,omitempty"`
+	TriggerConfirms map[string]int               `json:"trigger_confirms,omitempty"`
 	DroppedResolves int                          `json:"dropped_resolves,omitempty"`
 	StaleResolves   int                          `json:"stale_resolves,omitempty"`
 }
@@ -370,6 +376,7 @@ func (l *Ledger) resetStateLocked() {
 	l.pendingResolves = map[string][]time.Time{}
 	l.byTrigger = map[string]triggerAgg{}
 	l.votes = map[string]feedbackVote{}
+	l.triggerConfirms = map[string]int{}
 	l.droppedResolves = 0
 	l.staleResolves = 0
 }
@@ -391,6 +398,8 @@ func (l *Ledger) foldLocked(e Event) {
 		l.applyResolveLocked(e.Fingerprint, e.At)
 	case "feedback":
 		l.applyFeedbackLocked(e)
+	case "confirm":
+		l.applyConfirmLocked(e)
 	case "checkpoint":
 		l.seedCheckpointLocked(e.Checkpoint)
 	}
@@ -421,6 +430,9 @@ func (l *Ledger) seedCheckpointLocked(cd *checkpointData) {
 	}
 	for k, v := range cd.Votes {
 		l.votes[k] = feedbackVote{rating: v.Rating, entry: v.Entry}
+	}
+	for k, v := range cd.TriggerConfirms {
+		l.triggerConfirms[k] = v
 	}
 	for fp, opens := range cd.PendingOpens {
 		stack := make([]pendingOpen, 0, len(opens))
@@ -480,6 +492,12 @@ func (l *Ledger) snapshotCheckpointLocked() *checkpointData {
 		cd.Votes = make(map[string]feedbackVoteJSON, len(l.votes))
 		for k, v := range l.votes {
 			cd.Votes[k] = feedbackVoteJSON{Rating: v.rating, Entry: v.entry}
+		}
+	}
+	if len(l.triggerConfirms) > 0 {
+		cd.TriggerConfirms = make(map[string]int, len(l.triggerConfirms))
+		for k, v := range l.triggerConfirms {
+			cd.TriggerConfirms[k] = v
 		}
 	}
 	if len(l.pendingOpens) > 0 {
@@ -836,6 +854,7 @@ type ContestedTrigger struct {
 	CuratedURL string    // KB link of the newest open (never "")
 	Downs      int       // standing 👎 votes, per-user latest-wins
 	Last       time.Time // when the trigger's newest investigation happened
+	Confirms   int       // machine confirmations recorded for this trigger since (recovery evidence)
 }
 
 // ContestedTriggers returns every trigger with at least one standing 👎 vote and
@@ -870,7 +889,7 @@ func (l *Ledger) ContestedTriggers() []ContestedTrigger {
 		if a.curatedURL == "" {
 			continue // no KB artifact to warn a reviewer on
 		}
-		out = append(out, ContestedTrigger{TriggerKey: trigger, CuratedURL: a.curatedURL, Downs: n, Last: a.last})
+		out = append(out, ContestedTrigger{TriggerKey: trigger, CuratedURL: a.curatedURL, Downs: n, Last: a.last, Confirms: l.triggerConfirms[trigger]})
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].TriggerKey < out[j].TriggerKey })
 	return out
@@ -955,19 +974,38 @@ type Aggregate struct {
 	FeedbackUp    int // human "the diagnosis was right" votes — success observations for decay
 	FeedbackDown  int // human "the diagnosis was wrong" votes — failure observations for decay
 	LastConfirmed time.Time
+	// Confirms counts machine confirmations: fresh investigations that independently
+	// reached this entry's conclusion (same DupFingerprint) — the recovery evidence a
+	// standing 👎 forces into existence. Weighted at half a human observation in
+	// Factor (confirmWeight); see Ledger.Confirm.
+	Confirms int
 }
 
+// confirmWeight is how much of one human observation a machine confirmation is
+// worth in the Beta posterior. Half: a fresh investigation re-deriving the same
+// conclusion is real evidence, but a human 👎 must outrank any SINGLE machine
+// confirmation — with k=2 and floor 0.5, one 👎 needs TWO confirmations to recover.
+const confirmWeight = 0.5
+
 // Factor is the entry's outcome-decay factor: the posterior mean of a symmetric
-// Beta(k/2, k/2) prior over the success rate, folding resolves and human votes
-// into one trust signal:
+// Beta(k/2, k/2) prior over the success rate, folding resolves, human votes, and
+// machine confirmations into one trust signal:
 //
-//	factor = (Resolved + FeedbackUp + k/2) / (Recalls + FeedbackUp + FeedbackDown + k)
+//	factor = (Resolved + FeedbackUp + confirmWeight·Confirms + k/2) /
+//	         (Recalls + FeedbackUp + FeedbackDown + confirmWeight·Confirms + k)
+//
+// Confirms are recovery evidence at HALF the weight of a human observation
+// (confirmWeight): a fresh re-investigation independently reaching an entry's
+// conclusion counts as a partial success, but a human 👎 still outranks any single
+// confirmation — one 👎 needs two confirmations to climb back to the floor.
 //
 // It is THE single definition of decay — recall's fire gate and the curate
-// retirement pass both consume it, so they can never drift apart. See
+// retirement pass both consume it, so they can never drift apart (a
+// confirm-recovered entry therefore also exits retirement candidacy). See
 // investigate's gate docs for the full statistical rationale.
 func (a Aggregate) Factor(k float64) float64 {
-	return (float64(a.Resolved+a.FeedbackUp) + k/2) / (float64(a.Recalls+a.FeedbackUp+a.FeedbackDown) + k)
+	c := confirmWeight * float64(a.Confirms)
+	return (float64(a.Resolved+a.FeedbackUp) + c + k/2) / (float64(a.Recalls+a.FeedbackUp+a.FeedbackDown) + c + k)
 }
 
 // OpenCounts rolls recall episodes up per catalog entry (fresh investigations
@@ -1045,6 +1083,46 @@ func (l *Ledger) applyFeedbackLocked(e Event) {
 	}
 	l.votes[key] = feedbackVote{rating: e.Kind, entry: entry}
 	l.creditFeedbackLocked(entry, e.Kind, +1)
+}
+
+// Confirm appends a machine confirmation: a FRESH investigation independently
+// reached the same deterministic identity (DupFingerprint) as an existing catalog
+// entry — exactly the re-derivation a standing 👎 forces. It is folded as recovery
+// evidence into the entry's aggregate (at confirmWeight, see Aggregate.Factor) and
+// into the per-trigger confirmation count the Contested curate pass surfaces.
+// entry must be non-empty (an unattributable confirm is a caller bug); triggerKey
+// may be empty (human `lore investigate` has none — entry credit still applies).
+// Recalls must never reach this: only the curator's fingerprint-dedup branch calls
+// it, and Curate returns before that branch for recalled findings.
+func (l *Ledger) Confirm(entry, triggerKey, dupFP string, at time.Time) error {
+	if entry == "" {
+		return fmt.Errorf("confirm: empty entry path")
+	}
+	if !l.enabled() {
+		return nil
+	}
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	e := Event{Event: "confirm", Entry: entry, TriggerKey: triggerKey, DupFingerprint: dupFP, At: at}
+	if err := l.appendLocked(e); err != nil {
+		return err // durable-first: leave the fold untouched, like Open/Feedback
+	}
+	l.applyConfirmLocked(e)
+	return nil
+}
+
+// applyConfirmLocked folds one confirm event into the per-entry aggregate and the
+// per-trigger index. Must be called with mu held (or during single-threaded load).
+func (l *Ledger) applyConfirmLocked(e Event) {
+	if e.Entry == "" {
+		return // malformed replayed line: never folded
+	}
+	a := l.agg[e.Entry]
+	a.Confirms++
+	l.agg[e.Entry] = a
+	if e.TriggerKey != "" {
+		l.triggerConfirms[e.TriggerKey]++
+	}
 }
 
 // creditFeedbackLocked adjusts entry's feedback counter for rating by delta; a

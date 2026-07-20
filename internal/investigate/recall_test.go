@@ -220,37 +220,51 @@ func TestRecalledInvestigationStampsAlertMetadata(t *testing.T) {
 func TestOutcomeFactor(t *testing.T) {
 	const k = 2.0 // default prior strength; k=2 ⇒ documented Beta(1,1): (resolved+up+1)/(recalls+up+down+2)
 	cases := []struct {
-		recalls, resolved, up, down int
-		want                        float64
+		recalls, resolved, up, down, confirms int
+		want                                  float64
 	}{
 		// resolved=0, recalls 0..3 — a never-resolving entry decays fast.
-		{0, 0, 0, 0, 0.5},       // (0+1)/(0+2) — prior mean; never reaches the gate in practice
-		{1, 0, 0, 0, 1.0 / 3.0}, // (0+1)/(1+2) ≈ 0.333 — already below the 0.5 floor at the 1st recall
-		{2, 0, 0, 0, 0.25},      // (0+1)/(2+2)
-		{3, 0, 0, 0, 0.2},       // (0+1)/(3+2)
-		{6, 0, 0, 0, 0.125},     // (0+1)/(6+2)
+		{0, 0, 0, 0, 0, 0.5},       // (0+1)/(0+2) — prior mean; never reaches the gate in practice
+		{1, 0, 0, 0, 0, 1.0 / 3.0}, // (0+1)/(1+2) ≈ 0.333 — already below the 0.5 floor at the 1st recall
+		{2, 0, 0, 0, 0, 0.25},      // (0+1)/(2+2)
+		{3, 0, 0, 0, 0, 0.2},       // (0+1)/(3+2)
+		{6, 0, 0, 0, 0, 0.125},     // (0+1)/(6+2)
 		// mixed resolve records.
-		{3, 1, 0, 0, 0.4},       // (1+1)/(3+2)
-		{3, 2, 0, 0, 0.6},       // (2+1)/(3+2)
-		{4, 2, 0, 0, 0.5},       // (2+1)/(4+2) — exactly at the floor
-		{5, 5, 0, 0, 6.0 / 7.0}, // (5+1)/(5+2) ≈ 0.857 — always-resolving asymptotes to 1, never exceeds it
+		{3, 1, 0, 0, 0, 0.4},       // (1+1)/(3+2)
+		{3, 2, 0, 0, 0, 0.6},       // (2+1)/(3+2)
+		{4, 2, 0, 0, 0, 0.5},       // (2+1)/(4+2) — exactly at the floor
+		{5, 5, 0, 0, 0, 6.0 / 7.0}, // (5+1)/(5+2) ≈ 0.857 — always-resolving asymptotes to 1, never exceeds it
 		// human feedback — extra Bernoulli observations in the same posterior. The
 		// zero-recall rows are the non-resolvable-source case (GitOps): feedback is
 		// the ONLY evidence such entries can ever accumulate.
-		{0, 0, 2, 0, 0.75},      // (0+2+1)/(0+2+2) — two 👍, no resolves: trust builds
-		{0, 0, 0, 2, 0.25},      // (0+0+1)/(0+2+2) — two 👎: below the 0.5 floor, recall rejected
-		{0, 0, 0, 1, 1.0 / 3.0}, // one 👎 weighs exactly like one unresolved recall
-		{3, 2, 1, 1, 4.0 / 7.0}, // (2+1+1)/(3+1+1+2) — feedback blends with resolves
-		{5, 5, 0, 3, 0.6},       // (5+0+1)/(5+0+3+2) — 👎 erode even a perfect resolve record
+		{0, 0, 2, 0, 0, 0.75},      // (0+2+1)/(0+2+2) — two 👍, no resolves: trust builds
+		{0, 0, 0, 2, 0, 0.25},      // (0+0+1)/(0+2+2) — two 👎: below the 0.5 floor, recall rejected
+		{0, 0, 0, 1, 0, 1.0 / 3.0}, // one 👎 weighs exactly like one unresolved recall
+		{3, 2, 1, 1, 0, 4.0 / 7.0}, // (2+1+1)/(3+1+1+2) — feedback blends with resolves
+		{5, 5, 0, 3, 0, 0.6},       // (5+0+1)/(5+0+3+2) — 👎 erode even a perfect resolve record
+		// Recovery contract (k=2, floor 0.5 in prod): a machine confirmation is half a
+		// Bernoulli success (confirmWeight 0.5) in the same posterior.
+		{0, 0, 0, 1, 0, 1.0 / 3.0}, // one 👎 alone: rejected
+		{0, 0, 0, 1, 1, 1.5 / 3.5}, // one confirm: STILL rejected (human wins)
+		{0, 0, 0, 1, 2, 2.0 / 4.0}, // two confirms: exactly at the floor → recovered
+		{0, 0, 0, 0, 2, 2.0 / 3.0}, // confirms alone build trust gently
 	}
 	for _, c := range cases {
-		got := outcomeFactor(c.recalls, c.resolved, c.up, c.down, k)
+		got := outcomeFactor(c.recalls, c.resolved, c.up, c.down, c.confirms, k)
 		if math.Abs(got-c.want) > 1e-9 {
-			t.Errorf("outcomeFactor(%d,%d,%d,%d,%v) = %v, want %v", c.recalls, c.resolved, c.up, c.down, k, got, c.want)
+			t.Errorf("outcomeFactor(%d,%d,%d,%d,%d,%v) = %v, want %v", c.recalls, c.resolved, c.up, c.down, c.confirms, k, got, c.want)
 		}
 		if got > 1.0 {
 			t.Errorf("factor must be <= 1.0, got %v", got)
 		}
+	}
+	// The recovery threshold is exactly the floor: rejection is strictly f < floor,
+	// so factor == 0.5 passes. One 👎 + two confirms is the minimum recovery.
+	if f := outcomeFactor(0, 0, 0, 1, 2, 2.0); f < 0.5 {
+		t.Fatalf("one down + two confirms = %v, must reach the 0.5 floor", f)
+	}
+	if f := outcomeFactor(0, 0, 0, 1, 1, 2.0); f >= 0.5 {
+		t.Fatalf("one down + ONE confirm = %v, must stay below the floor (human outranks one machine confirm)", f)
 	}
 }
 

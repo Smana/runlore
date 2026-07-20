@@ -83,7 +83,49 @@ apps/worker pods are OOMKilled shortly after a values change lowered the memory 
 
 	// Guard the sub-floor premise under both formulas, so the fixture stays valid if the
 	// parallel outcomeFactor change lands.
-	if f := outcomeFactor(4, 0, 0, 0, 2.0); f >= 0.5 {
-		t.Fatalf("fixture invalid: outcomeFactor(4,0,0,0,2)=%v is not below the 0.5 floor", f)
+	if f := outcomeFactor(4, 0, 0, 0, 0, 2.0); f >= 0.5 {
+		t.Fatalf("fixture invalid: outcomeFactor(4,0,0,0,0,2)=%v is not below the 0.5 floor", f)
+	}
+}
+
+// TestRecallRecoversAfterConfirmations pins the 👎 recovery contract end to end
+// over the real Recall gate: one standing 👎 rejects the recall; one machine
+// confirmation still rejects (human outranks a single confirm); the second
+// confirmation recovers it.
+func TestRecallRecoversAfterConfirmations(t *testing.T) {
+	dir := t.TempDir()
+	entry := `---
+type: Incident
+title: worker OOMKilled after memory limit drop
+description: apps/worker pods OOMKilled; raise the container memory limit
+resource: apps/worker
+---
+
+# Symptom
+apps/worker pods are OOMKilled shortly after a values change lowered the memory limit.
+`
+	if err := os.WriteFile(filepath.Join(dir, "worker-oom.md"), []byte(entry), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cat, err := catalog.New(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := cat.Entries()[0].Path
+	req := Request{Title: "WorkerOOM", Message: "apps/worker pods OOMKilled after memory limit drop",
+		Workload: providers.Workload{Namespace: "apps", Name: "worker"}}
+	newRecall := func(agg outcome.Aggregate) *Recall {
+		return &Recall{Catalog: cat, MinScore: 0.001, SoloFloor: 0.001, MarginGap: 0.001,
+			Outcome:      fakeOutcome{counts: map[string]outcome.Aggregate{path: agg}},
+			OutcomePrior: 2.0, OutcomeFloor: 0.5}
+	}
+	if e, _ := newRecall(outcome.Aggregate{FeedbackDown: 1}).lookup(context.Background(), req); e != nil {
+		t.Fatal("one standing 👎 must reject the recall")
+	}
+	if e, _ := newRecall(outcome.Aggregate{FeedbackDown: 1, Confirms: 1}).lookup(context.Background(), req); e != nil {
+		t.Fatal("one machine confirmation must NOT overcome a human 👎")
+	}
+	if e, _ := newRecall(outcome.Aggregate{FeedbackDown: 1, Confirms: 2}).lookup(context.Background(), req); e == nil {
+		t.Fatal("two confirmations must recover the recall (factor back at the floor)")
 	}
 }

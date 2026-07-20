@@ -116,6 +116,10 @@ func contestedComment(ct outcome.ContestedTrigger, marker string) string {
 		ct.Downs, pluralVote(ct.Downs), ct.TriggerKey)
 	b.WriteString("Responders contested the delivered diagnosis. Please review the Cause against the evidence before merging — merging makes it permanent, recallable knowledge.\n\n")
 	b.WriteString("Note: a standing 👎 also re-arms re-investigation (the recurrence cooldown no longer suppresses this trigger), so a fresher conclusion may follow on the next occurrence.\n\n")
+	if ct.Confirms > 0 {
+		fmt.Fprintf(&b, "Since the contest, %d fresh re-investigation%s independently reached this same conclusion (recorded as recovery evidence in the outcome ledger).\n\n",
+			ct.Confirms, pluralS(ct.Confirms))
+	}
 	b.WriteString(marker)
 	return b.String()
 }
@@ -125,6 +129,13 @@ func pluralVote(n int) string {
 		return "vote"
 	}
 	return "votes"
+}
+
+func pluralS(n int) string {
+	if n == 1 {
+		return ""
+	}
+	return "s"
 }
 
 // contestedMarker is the hidden idempotency marker embedded in the posted
