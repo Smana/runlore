@@ -79,10 +79,14 @@ Target for a first sitting: 5–15 entries the SRE confirms are true.
 
 1. Scan entries for: `status: draft` leftovers, missing/empty `tags`, and
    `last_validated` (or `timestamp`) older than the deployment's
-   `catalog.instant_recall.stale_after` (ask the user what it is set to).
+   `catalog.instant_recall.stale_after`. Read that value from the deployment's
+   `runlore.yaml` if it is at hand; otherwise ask. Unset means no staleness
+   down-weighting is configured — ask the SRE what counts as old for their
+   platform rather than inventing a cutoff.
 2. For each stale entry ask: still true? → bump `last_validated` to today.
-   No longer applies? → set `status: retired` (retire, never delete — recall
-   excludes it, git history keeps it).
+   No longer applies? → set `status: retired` (retire, never delete — a
+   retired entry can no longer fire recall, but stays searchable and in git
+   history; see okf-format.md).
 3. Fix weak frontmatter while you're there (tags, scoped titles) — but never
    change the meaning of an entry without the SRE confirming.
 4. Deliver via the git flow, one PR for the whole pass.
@@ -106,6 +110,11 @@ Target for a first sitting: 5–15 entries the SRE confirms are true.
   tell the user — never push, never substitute another remote. Remote
   present but it does not match `<kb-remote>`: same stop — commit the local
   branch, tell the user, never push, never substitute another remote.
+- Validate before committing: if the `lore` binary is on PATH, run `lore
+  validate-kb <kb-repo>` — it is the same structural gate the PR must pass, so
+  it outranks your own review. Fix what it reports on the entries you wrote;
+  report (don't silently fix) failures in entries you didn't touch. No binary:
+  self-check against the checklist's gate block.
 - Fetch and branch from `<kb-repo>`'s default branch — it may currently sit on
   an unrelated feature branch left over from other work. Branch
   `kb-steward/<short-slug>`; stage only the entry paths you wrote (`git add

@@ -1,7 +1,7 @@
 {
   "name": "kb-steward",
   "displayName": "RunLore KB Steward",
-  "version": "0.1.0",
+  "version": "0.10.0",
   "description": "Interviews SREs and turns platform knowledge into recall-grade OKF entries for a RunLore knowledge catalog",
   "author": { "name": "Smaine Kahlouch" },
   "homepage": "https://github.com/Smana/runlore/blob/main/docs/kb-steward.md",

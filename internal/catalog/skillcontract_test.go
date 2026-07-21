@@ -128,6 +128,71 @@ func TestPluginManifestsValid(t *testing.T) {
 	}
 }
 
+// TestPluginVersionTracksRelease pins the plugin manifest's version to the
+// repo's released version. The two are kept in sync by release-please, which
+// rewrites plugin.json through the extra-files entry asserted below; without
+// that wiring the manifest silently freezes at its initial version while the
+// project releases on, which is exactly how it read before this test existed.
+func TestPluginVersionTracksRelease(t *testing.T) {
+	var manifest map[string]string
+	raw, err := os.ReadFile(filepath.Join(repoRoot, ".release-please-manifest.json"))
+	if err != nil {
+		t.Fatalf("read .release-please-manifest.json: %v", err)
+	}
+	if err := json.Unmarshal(raw, &manifest); err != nil {
+		t.Fatalf("release-please manifest is not valid JSON: %v", err)
+	}
+	want := manifest["."]
+	if want == "" {
+		t.Fatal(`release-please manifest has no version for the "." package`)
+	}
+
+	var plugin struct {
+		Version string `json:"version"`
+	}
+	raw, err = os.ReadFile(filepath.Join(pluginRoot, ".claude-plugin/plugin.json"))
+	if err != nil {
+		t.Fatalf("read plugin.json: %v", err)
+	}
+	if err := json.Unmarshal(raw, &plugin); err != nil {
+		t.Fatalf("plugin.json is not valid JSON: %v", err)
+	}
+	if plugin.Version != want {
+		t.Errorf("plugin.json version = %q, want %q (the released version); "+
+			"release-please should be bumping it via extra-files", plugin.Version, want)
+	}
+
+	// The equality above only keeps holding while release-please is told to
+	// rewrite the file, so pin that wiring too.
+	var cfg struct {
+		Packages map[string]struct {
+			ExtraFiles []struct {
+				Type     string `json:"type"`
+				Path     string `json:"path"`
+				JSONPath string `json:"jsonpath"`
+			} `json:"extra-files"`
+		} `json:"packages"`
+	}
+	raw, err = os.ReadFile(filepath.Join(repoRoot, "release-please-config.json"))
+	if err != nil {
+		t.Fatalf("read release-please-config.json: %v", err)
+	}
+	if err := json.Unmarshal(raw, &cfg); err != nil {
+		t.Fatalf("release-please-config.json is not valid JSON: %v", err)
+	}
+	const pluginManifest = "plugins/kb-steward/.claude-plugin/plugin.json"
+	found := false
+	for _, ef := range cfg.Packages["."].ExtraFiles {
+		if ef.Path == pluginManifest && ef.Type == "json" && ef.JSONPath == "$.version" {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("release-please-config.json has no {type: json, path: %s, jsonpath: $.version} "+
+			"extra-files entry — the plugin version would freeze at its current value", pluginManifest)
+	}
+}
+
 // TestSkillContentIsHarnessNeutral keeps the skill body portable: the plugin
 // manifests and SKILL.md's frontmatter are Claude Code packaging, but the
 // instructions themselves must run under any agent that can read markdown
@@ -153,11 +218,70 @@ func TestSkillContentIsHarnessNeutral(t *testing.T) {
 		if err != nil {
 			t.Fatalf("read %s: %v", f, err)
 		}
-		body := strings.ToLower(stripFrontmatter(string(raw))) // frontmatter is packaging metadata
+		body := stripFrontmatter(string(raw)) // frontmatter is packaging metadata
 		for _, word := range banned {
-			if strings.Contains(body, strings.ToLower(word)) {
+			if bannedTermRE(word).MatchString(body) {
 				t.Errorf("%s: harness-specific term %q in skill body — the portable core must not name a specific agent or its tools", f, word)
 			}
+		}
+	}
+}
+
+// bannedTermRE builds the case-insensitive matcher for one banned term.
+//
+// It anchors on a word boundary at the START of the term, because plain
+// substring matching over-matches: "hooks" is a substring of "webhooks", and an
+// SRE-facing skill has every reason to mention an Alertmanager webhook. Terms
+// opening with punctuation ("/plugin") get no leading boundary — \b there would
+// require a word character before the slash, so the term would stop matching at
+// the start of a line.
+//
+// At the END it allows an optional plural "s" before the boundary, so tightening
+// the front does not quietly stop catching "subagents" or "Task tools" the way a
+// bare \b would.
+func bannedTermRE(term string) *regexp.Regexp {
+	pat := regexp.QuoteMeta(term)
+	if isWordByte(term[0]) {
+		pat = `\b` + pat
+	}
+	if isWordByte(term[len(term)-1]) {
+		pat += `s?\b`
+	}
+	return regexp.MustCompile(`(?i)` + pat)
+}
+
+// isWordByte reports whether b is what RE2's \b treats as a word character.
+// All banned terms are ASCII, so a byte test is exact here.
+func isWordByte(b byte) bool {
+	return b == '_' ||
+		(b >= 'a' && b <= 'z') || (b >= 'A' && b <= 'Z') || (b >= '0' && b <= '9')
+}
+
+// TestBannedTermREBoundaries is a mutation test for the guard above: it pins
+// both directions of the boundary behaviour, so neither a regression to plain
+// substring matching (which fails "webhooks") nor an over-strict anchor (which
+// would silently stop catching "/plugin") can land unnoticed.
+func TestBannedTermREBoundaries(t *testing.T) {
+	cases := []struct {
+		term, text string
+		want       bool
+	}{
+		{"hooks", "configure hooks for this", true},
+		{"hooks", "the Alertmanager webhooks route to Slack", false},
+		{"hooks", "webhooks", false},
+		{"Claude", "ask Claude to do it", true},
+		{"Claude", "CLAUDE.md at the repo root", true}, // case-insensitive
+		{"Claude", "clauded", false},
+		{"/plugin", "/plugin install kb-steward", true}, // no leading \b needed
+		{"/plugin", "run /plugin now", true},
+		{"Task tool", "use the Task tool here", true},
+		{"Task tool", "the Task tools listed", true}, // plural still caught
+		{"subagent", "subagents are dispatched", true},
+		{"subagent", "a subagent runs it", true},
+	}
+	for _, c := range cases {
+		if got := bannedTermRE(c.term).MatchString(c.text); got != c.want {
+			t.Errorf("bannedTermRE(%q).MatchString(%q) = %v, want %v", c.term, c.text, got, c.want)
 		}
 	}
 }

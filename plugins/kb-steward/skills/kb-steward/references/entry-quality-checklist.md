@@ -8,6 +8,26 @@ Field-by-field contract (source of truth for what each field means and
 requires): `references/okf-format.md`. The gate items below restate only
 what's worth a quick self-review pass.
 
+## Run the real validator when you can
+
+RunLore ships the merge gate as a command. If the `lore` binary is on PATH,
+run it after writing entries and before committing — it is the same
+structural check that gates the PR, so its verdict beats any self-review:
+
+```
+lore validate-kb <catalog-dir>
+```
+
+It walks the whole catalog and exits non-zero when any structural error is
+found. Two things to expect: it validates *every* entry, so pre-existing
+failures in entries you didn't touch may surface — report those, don't
+silently fix them; and `--semantic` (an LLM advisory) needs a configured
+model, so plain `validate-kb` is what you want.
+
+No binary available? Then the gate block below is the fallback — check it by
+hand. Expect that often: the skill runs wherever the SRE is, which is not
+necessarily next to a RunLore install.
+
 ## Gate (must pass — RunLore validates these on merge)
 
 - [ ] `type` is `Incident`, `Playbook`, or `Concept`

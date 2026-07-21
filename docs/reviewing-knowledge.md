@@ -113,6 +113,12 @@ The same PR also keeps the OKF bundle self-describing: the entry's link line is
 added to your `index.md` (when the bundle has one) and a `**Creation**` record is
 appended to `log.md` — all in the one diff you review.
 
+> **Writing entries by hand?** The field-by-field contract — which frontmatter
+> keys the loader parses, which the merge gate requires, and what each one does
+> for recall — is documented in
+> [`okf-format.md`](../plugins/kb-steward/skills/kb-steward/references/okf-format.md),
+> shipped as part of the [kb-steward skill](kb-steward.md) but useful on its own.
+
 ---
 
 ### Related knowledge in the PR
