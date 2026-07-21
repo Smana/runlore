@@ -120,7 +120,7 @@ func ValidateStructural(e catalog.Entry) []Issue {
 	case strings.ContainsAny(e.Title, "\r\n"):
 		addErr("title", "title must be a single line")
 	case len(e.Title) > maxTitleLen:
-		addErr("title", fmt.Sprintf("title must be at most %d characters", maxTitleLen))
+		addErr("title", fmt.Sprintf("title must be at most %d bytes", maxTitleLen))
 	}
 
 	if strings.TrimSpace(e.Description) == "" {
