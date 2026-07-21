@@ -103,12 +103,18 @@ Target for a first sitting: 5–15 entries the SRE confirms are true.
 
 ## Flow 4 — Maintenance
 
-1. Scan entries for: `status: draft` leftovers, missing/empty `tags`, and
-   `last_validated` (or `timestamp`) older than the deployment's
-   `catalog.instant_recall.stale_after`. Read that value from the deployment's
-   `runlore.yaml` if it is at hand; otherwise ask. Unset means no staleness
-   down-weighting is configured — ask the SRE what counts as old for their
-   platform rather than inventing a cutoff.
+1. Scan entries for: `status: draft` leftovers, missing/empty `tags` (they
+   come in both inline `[a, b]` and block-list YAML forms — scan for both),
+   `resource` values not shaped `namespace/name` (recall matches resources by
+   exact string, and a non-empty resource also disables the scopeless tier —
+   so a malformed or wildcard resource silently makes the entry unrecallable,
+   worse than none; fixing one changes recall semantics, so confirm with the
+   SRE first), and `last_validated` (or `timestamp`) older than the
+   deployment's `catalog.instant_recall.stale_after`. Read that value from
+   the deployment's `runlore.yaml` if it is at hand; otherwise ask. Unset
+   means no staleness down-weighting is configured — ask the SRE what counts
+   as old for their platform rather than inventing a cutoff, and suggest
+   recording the chosen value in the deployment config as a follow-up.
 2. For each stale entry ask: still true? → bump `last_validated` to today.
    No longer applies? → set `status: retired` (retire, never delete — git
    history keeps it, and it can no longer fire recall). Note that retiring is
