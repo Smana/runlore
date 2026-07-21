@@ -15,7 +15,8 @@ what's worth a quick self-review pass.
 - [ ] `description` present
 - [ ] `resource` present for Incident (`namespace/name`)
 - [ ] if `resource` is set at all (any type), it has no whitespace
-- [ ] body non-empty; Incident body has `## Symptom`, `## Cause`, `## Resolution`
+- [ ] body non-empty; Incident body has `## Symptom`, `## Cause`, `## Resolution`,
+      each with actual content — present but empty also fails the gate
 
 ## Recall strength (the actual point)
 

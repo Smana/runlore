@@ -2,7 +2,8 @@
 
 > RunLore investigates and proposes knowledge automatically. **kb-steward** is
 > the human half: a [Claude Code](https://code.claude.com/docs) skill that
-> interviews you and turns what you know into recall-grade OKF entries.
+> interviews you and turns what you know into recall-grade
+> [OKF](https://github.com/GoogleCloudPlatform/knowledge-catalog) entries.
 
 Diagnosis stays RunLore's job — the skill only captures and curates knowledge.
 
@@ -51,15 +52,17 @@ model, or config — see [MCP](mcp.md). This skill is the writing half.
 
 | You say | It does |
 |---|---|
-| "Seed my RunLore knowledge base" | Structured interview about your platform (clusters, GitOps, alerting, conventions, tribal knowledge) → small scoped Concept/Playbook entries, plus an `AGENTS.md` platform profile so it never re-asks |
+| "Seed my RunLore knowledge base" | Structured interview about your platform (clusters, GitOps, alerting, conventions, tribal knowledge) → small scoped Concept/Playbook entries (Incident too, for past outages worth remembering), plus an `AGENTS.md` platform profile so it never re-asks |
 | "Write up the incident we just resolved" | RCA interview with pushback (symptom vs cause, five whys) → one gate-passing Incident entry — updating a near-duplicate instead when one exists |
 | "Review RunLore's KB PRs" | Quality + duplicate check per PR, merge/refine/close recommendation — and points at `forge.skip_verdicts` & friends when the queue is systematically noisy |
 | "Clean up the catalog" | Finds stale or weak entries, proposes revalidation or `status: retired` |
 
 ## Ground rules the skill enforces on itself
 
-- **PR by default, never merges** — nothing enters the KB without a human
-  merge, the same gate RunLore's own findings go through.
+- **PR by default, never merges unless explicitly told to** — nothing enters
+  the KB without a human merge, the same gate RunLore's own findings go
+  through. A solo maintainer can ask for a direct commit or merge, and the
+  skill complies and says so.
 - **No fabrication** — unknowns are recorded as unknowns.
 - **Secret scan** before any draft is written (SREs paste logs; logs leak).
 

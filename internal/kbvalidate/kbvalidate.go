@@ -41,6 +41,12 @@ type Issue struct {
 
 var validTypes = map[string]bool{"Incident": true, "Playbook": true, "Concept": true}
 
+// maxTitleLen is the gate's maximum title length (chars). A package const —
+// rather than a bare 120 restated in both the check and its error message —
+// so checklist_test.go can pin references/entry-quality-checklist.md's
+// restated "120" to this single source of truth.
+const maxTitleLen = 120
+
 // requiredIncidentSections are the OKF body sections an Incident must carry
 // (present and non-empty); curator.draftKBEntry always renders them.
 var requiredIncidentSections = []struct{ key, head string }{
@@ -112,8 +118,8 @@ func ValidateStructural(e catalog.Entry) []Issue {
 		addErr("title", "frontmatter `title` is required")
 	case strings.ContainsAny(e.Title, "\r\n"):
 		addErr("title", "title must be a single line")
-	case len(e.Title) > 120:
-		addErr("title", "title must be at most 120 characters")
+	case len(e.Title) > maxTitleLen:
+		addErr("title", fmt.Sprintf("title must be at most %d characters", maxTitleLen))
 	}
 
 	if strings.TrimSpace(e.Description) == "" {

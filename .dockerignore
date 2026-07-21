@@ -4,5 +4,6 @@ docs
 deploy
 hack
 examples
+plugins
 *.md
 **/*_test.go
