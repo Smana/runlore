@@ -124,6 +124,48 @@ func TestPluginManifestsValid(t *testing.T) {
 	}
 }
 
+// TestSkillContentIsHarnessNeutral keeps the skill body portable: the plugin
+// manifests and SKILL.md's frontmatter are Claude Code packaging, but the
+// instructions themselves must run under any agent that can read markdown
+// (see docs/kb-steward.md, "Using it with another agent").
+func TestSkillContentIsHarnessNeutral(t *testing.T) {
+	// Vocabulary that would tie the instructions to one harness.
+	banned := []string{
+		"Claude", "claude", "/plugin", "slash command",
+		"TodoWrite", "Task tool", "subagent", "Cursor", "Copilot", "Codex",
+	}
+	files := []string{
+		"skills/kb-steward/SKILL.md",
+		"skills/kb-steward/references/okf-format.md",
+		"skills/kb-steward/references/entry-quality-checklist.md",
+		"skills/kb-steward/references/interview-guides.md",
+	}
+	for _, f := range files {
+		raw, err := os.ReadFile(filepath.Join(pluginRoot, f))
+		if err != nil {
+			t.Fatalf("read %s: %v", f, err)
+		}
+		body := stripFrontmatter(string(raw)) // frontmatter is packaging metadata
+		for _, word := range banned {
+			if strings.Contains(body, word) {
+				t.Errorf("%s: harness-specific term %q in skill body — the portable core must not name a specific agent or its tools", f, word)
+			}
+		}
+	}
+}
+
+// stripFrontmatter drops a leading YAML frontmatter block, which is harness
+// packaging metadata rather than instruction content.
+func stripFrontmatter(s string) string {
+	if !strings.HasPrefix(s, "---\n") {
+		return s
+	}
+	if end := strings.Index(s[4:], "\n---"); end >= 0 {
+		return s[4+end:]
+	}
+	return s
+}
+
 func snakeCase(s string) string {
 	var b strings.Builder
 	for i, r := range s {

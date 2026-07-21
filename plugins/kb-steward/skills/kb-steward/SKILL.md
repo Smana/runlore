@@ -89,9 +89,16 @@ Target for a first sitting: 5–15 entries the SRE confirms are true.
 
 ## Git flow (all writes)
 
-- Branch `kb-steward/<short-slug>`; commit; open a PR with `gh pr create`.
-  PR body: what was captured or changed and why, with the entry list. No AI
-  attribution.
+- Run every git command against the KB repo explicitly (`git -C <kb-repo>`,
+  `gh --repo <kb-remote>`) — never rely on the shell's current directory,
+  which may be a different repository.
+- Before any push or PR, confirm the KB repo actually has a remote and that
+  it is the catalog you were pointed at (`git -C <kb-repo> remote -v`). If it
+  has none, stop after committing the local branch and tell the user — never
+  push, and never substitute another remote.
+- Branch `kb-steward/<short-slug>`; commit; push the branch; then open a PR
+  with `gh pr create`. PR body: what was captured or changed and why, with
+  the entry list. No AI attribution.
 - **Never merge and never push to the default branch.** Nothing enters the KB
   without a human merge — the same rule RunLore itself follows. A solo
   maintainer may explicitly ask for a direct commit; comply and say so.

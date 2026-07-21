@@ -16,6 +16,37 @@ Diagnosis stays RunLore's job — the skill only captures and curates knowledge.
 Update later with `/plugin update kb-steward`. No binary, no server change —
 the plugin is served from this repo.
 
+## Using it with another agent
+
+The plugin above is packaging, not a dependency. The skill is plain markdown
+with no harness-specific instruction in it — a Go test
+(`TestSkillContentIsHarnessNeutral`) fails the build if that ever stops being
+true — so any coding agent that reads files can run it:
+
+1. Copy `plugins/kb-steward/skills/kb-steward/` (SKILL.md plus `references/`)
+   into your KB repo, e.g. as `.kb-steward/`:
+
+   ```bash
+   git clone --depth 1 https://github.com/Smana/runlore /tmp/runlore
+   cp -r /tmp/runlore/plugins/kb-steward/skills/kb-steward .kb-steward
+   ```
+
+2. Point your agent at it — either directly ("follow `.kb-steward/SKILL.md`")
+   or, better, from your KB's `AGENTS.md`, which most agents read
+   automatically:
+
+   ```markdown
+   ## Knowledge-base conventions
+   When adding or curating entries in this repo, follow `.kb-steward/SKILL.md`.
+   ```
+
+SKILL.md's YAML frontmatter is metadata for Claude Code's skill loader; other
+agents ignore it harmlessly. Nothing else in the file assumes a runtime.
+
+Reading the catalog is already agent-agnostic by a different route: `lore mcp
+<kb-dir>` serves `kb_search` and `kb_get` to any MCP client, with no cluster,
+model, or config — see [MCP](mcp.md). This skill is the writing half.
+
 ## What it does
 
 | You say | It does |
