@@ -64,19 +64,38 @@ Target for a first sitting: 5–15 entries the SRE confirms are true.
 
 ## Flow 3 — PR triage
 
-1. List open KB PRs: `gh --repo <kb-remote> pr list --label runlore`. Two
+1. List open KB PRs with their CI status in one call: `gh --repo <kb-remote>
+   pr list --label runlore --json number,title,statusCheckRollup`. Two
    things that label won't tell you: **retirement PRs carry it too** — they
    only flip an existing entry's frontmatter to `status: retired`, so judge
    those on "is this entry really obsolete?", not against the entry checklist;
    and labelling is best-effort in RunLore, so a KB PR can exist unlabelled.
    If the count looks low, list without the label filter too.
-2. Per new-entry PR: run the proposed entry through the checklist; scan the
-   catalog for near-duplicates; then recommend one of merge / refine (offer the
-   concrete frontmatter or body fix) / close (say why: duplicate, benign churn,
-   not knowledge).
-3. You recommend — the human merges. Never merge or close yourself unless
+2. **Read CI before reading diffs.** Where the KB repo wires `lore
+   validate-kb` in CI, a failing check in the rollup is a gate violation
+   found for free — cite it instead of re-deriving it by hand.
+3. **Cluster the queue before judging single PRs.** RunLore files the same
+   fault repeatedly — under different alert names, on sibling pods, or hours
+   apart — so group the open PRs by underlying fault (same resource family +
+   same cause). Per group: pick the best-evidenced entry as the keeper, fold
+   the siblings' extra recall signal (other alert names, other affected
+   workloads) into the keeper as a refine suggestion, and recommend closing
+   the rest. A fault the catalog already documents needs no keeper at all —
+   recommend closing the whole group and updating/revalidating the existing
+   entry instead.
+4. Per keeper (and per singleton PR): run the proposed entry through the
+   checklist — see its *Triaging agent-drafted entries* section for what does
+   and doesn't apply to RunLore drafts; then recommend one of merge / refine
+   (offer the concrete frontmatter or body fix) / close (say why: duplicate,
+   benign churn, not knowledge).
+5. You recommend — the human merges. Never merge or close yourself unless
    explicitly told to.
-4. If most of the queue is noise, say so and point at the config levers:
+6. **Warn about merge order.** Every RunLore PR appends to the same lines of
+   `log.md` (and `index.md` when the catalog has one), so merging one open KB
+   PR invalidates the rest. Recommend closing the closables first, then
+   merging keepers one at a time, rebasing (or dropping the index/log hunks)
+   between each.
+7. If most of the queue is noise, say so and point at the config levers:
    `forge.skip_verdicts: ["no_action"]`, `forge.min_confidence`,
    `forge.dup_score` (see RunLore's docs/reviewing-knowledge.md).
 

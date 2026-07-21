@@ -62,6 +62,34 @@ necessarily next to a RunLore install.
       adding a twin
 - [ ] scopeless (no `resource`) only for genuinely platform-wide knowledge
 
+## Triaging agent-drafted entries (PR triage)
+
+The two blocks above are written for authoring. When reviewing a RunLore-drafted
+PR, the allowances and generator artifacts below apply.
+
+Allowances — expected on RunLore drafts, not refine-blockers:
+
+- `last_validated` absent: RunLore drafts don't set it — the human merge is
+  the validation. Suggest adding it only when the PR needs refining anyway.
+- `fingerprint` (parsed — RunLore's dedup identity; see okf-format.md),
+  `confidence` / `provenance` (unparsed extension fields): all expected on
+  drafts — leave them alone.
+- The near-duplicate check is already satisfied by the triage flow's
+  group-level dedupe — don't re-search the catalog per keeper.
+
+Generator artifacts — include fixes for these in any refine recommendation:
+
+- Title ending in `…` (the generator caps titles at the 120-byte gate).
+  Rewrite to a scoped title that fits without the ellipsis.
+- The description pasted verbatim into `## Decision` and `## Cause`. The
+  repetition adds no recall signal (recall indexes one corpus per entry —
+  okf-format.md); trim the body copies to what each section uniquely says.
+- Required sections present but empty (a gate item above) — `## Resolution`
+  especially, when the investigation ended with no action taken; this is a
+  RunLore draft-side defect worth fixing upstream. A keeper needs real
+  content, usually recoverable from the entry's own `## Unresolved` notes or
+  the alert's runbook.
+
 ## Secret scan (always, before writing the file)
 
 You are the only scanner in this path — RunLore redacts what *it* collects
