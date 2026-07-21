@@ -9,6 +9,10 @@ RunLore never writes to the catalog directly — it only opens PRs. Nothing ente
 your knowledge base until **a human merges it**. That's the whole point: the
 knowledge is yours, reviewed, and in your Git.
 
+> **Guided workflow:** the [kb-steward Claude Code skill](kb-steward.md) walks
+> you through PR triage, post-incident capture, and seeding the KB with your
+> platform's context — interview-style, PR-gated like everything else.
+
 ---
 
 ## 1. What you see when RunLore finds something
