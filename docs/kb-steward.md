@@ -57,6 +57,53 @@ model, or config — see [MCP](mcp.md). This skill is the writing half.
 | "Review RunLore's KB PRs" | Quality + duplicate check per PR, merge/refine/close recommendation — and points at `forge.skip_verdicts` & friends when the queue is systematically noisy |
 | "Clean up the catalog" | Finds stale or weak entries, proposes revalidation or `status: retired` |
 
+## Example session
+
+What the post-incident flow looks like in practice:
+
+> **You:** Write up the incident we just resolved
+>
+> **Steward:** First — is it fully resolved? If it's still live, diagnosis is
+> RunLore's job; I only capture what's settled.
+>
+> **You:** Resolved an hour ago.
+>
+> **Steward:** What fired, exactly — alert name and affected workload?
+>
+> **You:** `KubeContainerOOMKilled`, pod `oom-app` in `shop-prod`.
+>
+> **Steward:** You said the memory limit was the cause. Is that the cause, or
+> the first symptom you noticed — if you only raised the limit, would it
+> recur?
+>
+> **You:** The v2 image bump grew the working set to ~180Mi and the 100Mi
+> limit was never adjusted. Raised it to 256Mi in the HelmRelease values;
+> restarts stopped.
+>
+> **Steward:** Searched the catalog for `shop-prod/oom-app` and OOMKilled —
+> no existing entry. Drafting one Incident entry.
+
+The draft runs through the entry-quality checklist, a secret scan, and `lore
+validate-kb`, then lands on a branch (`kb-steward/oom-app-memory-limit`) as a
+gate-passing entry:
+
+```markdown
+---
+type: Incident
+title: KubeContainerOOMKilled for oom-app
+description: Container 'hog' is OOMKilled because its memory limit (100Mi) is below actual usage.
+resource: shop-prod/oom-app
+tags: [deployment, shop-prod, oomkilled, memory]
+…
+```
+
+(the full entry is the example in the skill's `references/okf-format.md`)
+
+The skill opens a PR against your KB repo; you merge. Next time that alert
+fires, RunLore's instant recall serves the entry. Seed, PR-triage, and
+maintenance sessions follow the same shape: interview or scan →
+checklist-validated drafts → a PR you merge.
+
 ## Ground rules the skill enforces on itself
 
 - **PR by default, never merges unless explicitly told to** — nothing enters
