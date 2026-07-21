@@ -18,7 +18,7 @@ ignored — OKF consumers must accept unknown keys):
 | Field | Required | Why it matters |
 |---|---|---|
 | `type` | yes (gate) | `Incident`, `Playbook`, or `Concept` (capitalized). Decides the write directory and body requirements. |
-| `title` | yes (gate) | Single line, ≤120 chars. Indexed as its own search field — make it the scoped symptom ("KubeContainerOOMKilled for oom-app"), never a vague theme ("OOM issues"). |
+| `title` | yes (gate) | Single line, ≤120 chars. Not indexed as its own search field — its text is the first element of the single corpus (title + description + resource + tags + body) that backs both BM25 and the embedding, so it carries full recall weight but no separate field or boost. Make it the scoped symptom ("KubeContainerOOMKilled for oom-app"), never a vague theme ("OOM issues"). |
 | `description` | yes (gate) | One or two sentences carrying the words an alert or a query would contain — prime recall signal. |
 | `resource` | Incident: yes (gate) | `namespace/name` of the affected workload, no whitespace. Drives recall's structural workload filter. Omit only deliberately, for platform-wide knowledge (the "scopeless" tier). |
 | `alert_resource` | no | Set when the alert fired on a different resource than the fault (symptom pod vs faulty config). An additional way for recall to match, never a replacement. |
