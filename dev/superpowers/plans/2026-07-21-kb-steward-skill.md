@@ -152,7 +152,7 @@ ignored — OKF consumers must accept unknown keys):
 | `timestamp` | no | RFC3339 or `YYYY-MM-DD`. Fallback freshness date when `last_validated` is absent. |
 | `fingerprint` | no | Opaque dedup identity on agent-drafted entries. Omit on hand-written entries. |
 | `status` | no | `active` (or absent) / `retired` / `draft`. `retired` and `draft` are excluded from recall; anything else counts as active. Retire — don't delete — entries that no longer apply. |
-| `last_validated` | no | Date a human last confirmed the entry works. Older than the deployment's `recall.stale_after` ⇒ confidence down-weighted (×0.75), never rejected. Set it to today whenever you author or revalidate. |
+| `last_validated` | no | Date a human last confirmed the entry works. Older than the deployment's `catalog.instant_recall.stale_after` ⇒ confidence down-weighted (×0.75), never rejected. Set it to today whenever you author or revalidate. |
 
 Agent-drafted entries may also carry extension fields such as `confidence` or
 `provenance`. They are legal OKF (unknown keys are ignored) but the loader
@@ -507,7 +507,7 @@ Target for a first sitting: 5–15 entries the SRE confirms are true.
 
 1. Scan entries for: `status: draft` leftovers, missing/empty `tags`, and
    `last_validated` (or `timestamp`) older than the deployment's
-   `recall.stale_after` (ask the user what it is set to).
+   `catalog.instant_recall.stale_after` (ask the user what it is set to).
 2. For each stale entry ask: still true? → bump `last_validated` to today.
    No longer applies? → set `status: retired` (retire, never delete — recall
    excludes it, git history keeps it).
