@@ -91,7 +91,10 @@ Allowances — expected on RunLore drafts, not refine-blockers:
 Generator artifacts — include fixes for these in any refine recommendation:
 
 - Title ending in `…` (the generator caps titles at the 120-byte gate).
-  Rewrite to a scoped title that fits without the ellipsis.
+  Rewrite to a scoped title that fits without the ellipsis — and single-quote
+  the YAML value when the new title contains `: ` (an unquoted colon+space
+  breaks frontmatter parsing, which fails the whole entry, not just the
+  title).
 - The description pasted verbatim into `## Decision` and `## Cause`. The
   repetition adds no recall signal (recall indexes one corpus per entry —
   okf-format.md); trim the body copies to what each section uniquely says.
