@@ -17,12 +17,17 @@ what's worth a quick self-review pass.
 
 ## Run the real validator when you can
 
-If the `lore` binary is on PATH, run it after writing entries and before
-committing — it is the same structural check the gate block below restates, so
-its verdict beats any self-review:
+**Match the version CI runs, not whatever is at hand.** The KB repo's CI
+workflow pins the validator (look for `go install …/cmd/lore@vX.Y.Z` under
+`.github/workflows/`); a PATH binary or a source build of a different version
+can green-light entries the pinned gate rejects, or fail entries the gate
+accepts — validation rules have changed across releases (e.g. `resource` was
+required on every type before it became Incident-only). Install exactly that
+version:
 
 ```
-lore validate-kb <catalog-dir>
+GOBIN=/tmp go install github.com/Smana/runlore/cmd/lore@<pinned-version>
+/tmp/lore validate-kb <catalog-dir>
 ```
 
 It walks the whole catalog and exits non-zero when any structural error is
@@ -31,12 +36,14 @@ failures in entries you didn't touch may surface — report those, don't
 silently fix them; and `--semantic` (an LLM advisory) needs a configured
 model, so plain `validate-kb` is what you want.
 
-Not on PATH, but the RunLore source repo is at hand? Build it — a real verdict
-still beats the hand-check: `go build -o /tmp/lore ./cmd/lore` from the repo
-root, then run `/tmp/lore validate-kb`.
+If the pinned version rejects an entry that current OKF semantics accept, the
+pin is stale — propose a pin-bump PR on the KB repo rather than contorting
+the entry to satisfy outdated rules.
 
-No binary and no source? Then the gate block below is the fallback — check it
-by hand. Expect that often: the skill runs wherever the SRE is, which is not
+No CI pin? Use a `lore` on PATH, or build from the RunLore source repo if it
+is at hand (`go build -o /tmp/lore ./cmd/lore` from the repo root). No binary
+and no source? Then the gate block below is the fallback — check it by hand.
+Expect that often: the skill runs wherever the SRE is, which is not
 necessarily next to a RunLore install.
 
 ## Gate (what `lore validate-kb` rejects)
