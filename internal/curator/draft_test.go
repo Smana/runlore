@@ -399,6 +399,30 @@ func TestDraftKBEntryCarriesRecurrenceFacts(t *testing.T) {
 	}
 }
 
+// TestDraftKBEntryNoSuggestedActionPassesResolutionGate proves a draft survives
+// RunLore's own merge gate when the investigation ends with nothing to do (a
+// no-action / organic-growth verdict): kbvalidate rejects an Incident whose
+// `## Resolution` section is present but empty, so the draft must carry honest
+// resolution content instead of a bare header.
+func TestDraftKBEntryNoSuggestedActionPassesResolutionGate(t *testing.T) {
+	inv := providers.Investigation{
+		Title:      "VMSingle memory at 82% of limit",
+		Confidence: 0.8,
+		RootCauses: []providers.Hypothesis{{
+			Summary:    "organic active-series growth from pod churn",
+			Evidence:   []string{"tsid cache 24.5M -> 29.7M over 4h"},
+			Confidence: 0.8,
+			// No SuggestedAction: the investigation found nothing to act on.
+		}},
+	}
+	e := draftKBEntry(inv)
+	for _, iss := range kbvalidate.ValidateStructural(toCatalogEntry(e)) {
+		if iss.Field == "resolution" && iss.Severity == kbvalidate.SeverityError {
+			t.Fatalf("drafted entry fails its own merge gate (%s):\n%s", iss.Message, e.Body)
+		}
+	}
+}
+
 // toCatalogEntry mirrors a drafted KBEntry into the catalog.Entry shape that
 // kbvalidate.ValidateStructural consumes, so tests can run the real merge gate.
 func toCatalogEntry(e providers.KBEntry) catalog.Entry {
