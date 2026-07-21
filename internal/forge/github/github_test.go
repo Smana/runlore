@@ -389,29 +389,26 @@ func TestRenderEntryIncludesTimestamp(t *testing.T) {
 	}
 }
 
-// TestRenderEntryStampsLastValidated: last_validated is stamped at entry creation
-// (= the timestamp), so recall's stale_after down-weighting has a freshness date to
-// read and a never-revalidated entry ages visibly. It must be a parseable RFC3339
-// value equal to the timestamp.
-func TestRenderEntryStampsLastValidated(t *testing.T) {
+// TestRenderEntryOmitsLastValidated: last_validated means "a human confirmed this
+// works" (okf-format.md), and a draft has not been confirmed by anyone — the human
+// merge is the validation. The forge must leave it unset; recall's stale_after
+// down-weighting falls back to timestamp, so a never-revalidated entry still ages
+// from creation exactly as before.
+func TestRenderEntryOmitsLastValidated(t *testing.T) {
 	out := renderEntry(providers.KBEntry{Type: "Incident", Title: "T", Body: "## body"})
-	extract := func(key string) string {
-		i := strings.Index(out, key)
-		if i < 0 {
-			t.Fatalf("frontmatter missing %q:\n%s", key, out)
-		}
-		line := out[i+len(key):]
-		if j := strings.IndexByte(line, '\n'); j >= 0 {
-			line = line[:j]
-		}
-		return strings.Trim(strings.TrimSpace(line), `"`)
+	if strings.Contains(out, "last_validated:") {
+		t.Fatalf("draft frontmatter must not claim human validation:\n%s", out)
 	}
-	lv := extract("last_validated: ")
-	if _, err := time.Parse(time.RFC3339, lv); err != nil {
-		t.Fatalf("last_validated %q is not RFC3339: %v", lv, err)
+	i := strings.Index(out, "timestamp: ")
+	if i < 0 {
+		t.Fatalf("frontmatter missing timestamp:\n%s", out)
 	}
-	if ts := extract("timestamp: "); lv != ts {
-		t.Fatalf("last_validated %q must equal timestamp %q at creation", lv, ts)
+	ts := out[i+len("timestamp: "):]
+	if j := strings.IndexByte(ts, '\n'); j >= 0 {
+		ts = ts[:j]
+	}
+	if _, err := time.Parse(time.RFC3339, strings.Trim(strings.TrimSpace(ts), `"`)); err != nil {
+		t.Fatalf("timestamp %q is not RFC3339: %v", ts, err)
 	}
 }
 
