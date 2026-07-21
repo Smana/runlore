@@ -65,12 +65,13 @@ Target for a first sitting: 5–15 entries the SRE confirms are true.
 ## Flow 3 — PR triage
 
 1. List open KB PRs with their CI status in one call: `gh --repo <kb-remote>
-   pr list --label runlore --json number,title,statusCheckRollup`. Two
-   things that label won't tell you: **retirement PRs carry it too** — they
-   only flip an existing entry's frontmatter to `status: retired`, so judge
-   those on "is this entry really obsolete?", not against the entry checklist;
-   and labelling is best-effort in RunLore, so a KB PR can exist unlabelled.
-   If the count looks low, list without the label filter too.
+   pr list --label runlore --json number,title,labels,statusCheckRollup`. Two
+   things to read off the result: **retirement PRs are the ones also labelled
+   `runlore-retire`** — they only flip an existing entry's frontmatter to
+   `status: retired`, so judge those on "is this entry really obsolete?", not
+   against the entry checklist; and labelling is best-effort in RunLore, so a
+   KB PR can exist unlabelled. If the count looks low, list without the label
+   filter too.
 2. **Read CI before reading diffs.** Where the KB repo wires `lore
    validate-kb` in CI, a failing check in the rollup is a gate violation
    found for free — cite it instead of re-deriving it by hand.
@@ -92,11 +93,11 @@ Target for a first sitting: 5–15 entries the SRE confirms are true.
    benign churn, not knowledge).
 5. You recommend — the human merges. Never merge or close yourself unless
    explicitly told to.
-6. **Warn about merge order.** Every RunLore PR appends to the same lines of
-   `log.md` (and `index.md` when the catalog has one), so merging one open KB
-   PR invalidates the rest. Recommend closing the closables first, then
-   merging keepers one at a time, rebasing (or dropping the index/log hunks)
-   between each.
+6. **Warn about merge order.** Every RunLore entry PR appends to the same
+   lines of `log.md` (and `index.md` when the catalog has one), so merging one
+   invalidates the rest. Recommend closing the closables first, then merging
+   keepers one at a time, rebasing (or dropping the index/log hunks) between
+   each. Retirement PRs touch only their entry file — they merge in any order.
 7. If most of the queue is noise, say so and point at the config levers:
    `forge.skip_verdicts: ["no_action"]`, `forge.min_confidence`,
    `forge.dup_score` (see RunLore's docs/reviewing-knowledge.md).
@@ -106,9 +107,10 @@ Target for a first sitting: 5–15 entries the SRE confirms are true.
 1. Scan entries for: `status: draft` leftovers, missing/empty `tags` (they
    come in both inline `[a, b]` and block-list YAML forms — scan for both),
    `resource` values not shaped `namespace/name` (recall matches resources by
-   exact string, and a non-empty resource also disables the scopeless tier —
-   so a malformed or wildcard resource silently makes the entry unrecallable,
-   worse than none; fixing one changes recall semantics, so confirm with the
+   string equality — it forgives only pod-template-hash suffixes — and a
+   non-empty resource also disables the scopeless tier — so a malformed or
+   wildcard resource silently makes the entry unrecallable, worse than none;
+   fixing one changes recall semantics, so confirm with the
    SRE first), and `last_validated` (or `timestamp`) older than the
    deployment's `catalog.instant_recall.stale_after`. Read that value from
    the deployment's `runlore.yaml` if it is at hand; otherwise ask. Unset
@@ -159,11 +161,14 @@ after.**
    push and never substitute another remote. If the catalog was auto-detected
    (Setup step 1) rather than named by the user, there is no `<kb-remote>` to
    compare against — confirm it with them before the first push.
-5. **Push the branch, then open the PR:** `gh pr create --title <title> --body
-   <body> --base <default-branch>`. Pass all three explicitly — without them
-   `gh pr create` falls back to an interactive prompt, which blocks, and fails
-   outright when there is no terminal. Body: what was captured or changed and
-   why, with the entry list. No AI attribution.
+5. **Push the branch, then open the PR:** `gh pr create --head
+   kb-steward/<short-slug> --title <title> --body <body> --base
+   <default-branch>`. Pass all four explicitly — without title/body/base the
+   command falls back to an interactive prompt, which blocks, and fails
+   outright when there is no terminal; without `--head` it assumes the current
+   branch of the shell's working directory, which this flow never relies on.
+   Body: what was captured or changed and why, with the entry list. No AI
+   attribution.
 6. **Never merge, and never push to the default branch.** Nothing enters the KB
    without a human merge — the same rule RunLore itself follows. A solo
    maintainer may explicitly ask for a direct commit; comply and say so.
