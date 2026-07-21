@@ -103,6 +103,27 @@ func TestValidateStructural(t *testing.T) {
 	}
 }
 
+// TestTitleLimitErrorMentionsBytes pins the unit in the error message to the
+// unit the check measures. The limit is enforced with len() — bytes — and the
+// skill docs tell authors "bytes, not characters"; for the title below (61
+// characters, 122 bytes) a message counting "characters" would be a lie.
+func TestTitleLimitErrorMentionsBytes(t *testing.T) {
+	e := validIncident()
+	e.Title = strings.Repeat("é", 61)
+	var msg string
+	for _, i := range ValidateStructural(e) {
+		if i.Severity == SeverityError && i.Field == "title" {
+			msg = i.Message
+		}
+	}
+	if msg == "" {
+		t.Fatal("no title error for a 122-byte title")
+	}
+	if !strings.Contains(msg, "bytes") || strings.Contains(msg, "characters") {
+		t.Errorf("title-limit error %q must state the measured unit (bytes), not characters", msg)
+	}
+}
+
 func TestWarnInvalid(t *testing.T) {
 	good := validIncident()
 	good.Path = "good.md"
