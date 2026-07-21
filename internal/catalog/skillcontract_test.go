@@ -129,10 +129,14 @@ func TestPluginManifestsValid(t *testing.T) {
 // instructions themselves must run under any agent that can read markdown
 // (see docs/kb-steward.md, "Using it with another agent").
 func TestSkillContentIsHarnessNeutral(t *testing.T) {
-	// Vocabulary that would tie the instructions to one harness.
+	// Vocabulary that would tie the instructions to one harness. Matching is
+	// case-insensitive (below) so casing variants like "CLAUDE.md" don't slip
+	// through; terms are listed here in the casing that should appear in any
+	// failure message.
 	banned := []string{
-		"Claude", "claude", "/plugin", "slash command",
+		"Claude", "/plugin", "slash command",
 		"TodoWrite", "Task tool", "subagent", "Cursor", "Copilot", "Codex",
+		"Bash tool", "Read tool", "Edit tool", "AskUserQuestion", "hooks",
 	}
 	files := []string{
 		"skills/kb-steward/SKILL.md",
@@ -145,9 +149,9 @@ func TestSkillContentIsHarnessNeutral(t *testing.T) {
 		if err != nil {
 			t.Fatalf("read %s: %v", f, err)
 		}
-		body := stripFrontmatter(string(raw)) // frontmatter is packaging metadata
+		body := strings.ToLower(stripFrontmatter(string(raw))) // frontmatter is packaging metadata
 		for _, word := range banned {
-			if strings.Contains(body, word) {
+			if strings.Contains(body, strings.ToLower(word)) {
 				t.Errorf("%s: harness-specific term %q in skill body — the portable core must not name a specific agent or its tools", f, word)
 			}
 		}

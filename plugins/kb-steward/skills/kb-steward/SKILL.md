@@ -89,13 +89,18 @@ Target for a first sitting: 5–15 entries the SRE confirms are true.
 
 ## Git flow (all writes)
 
-- Run every git command against the KB repo explicitly (`git -C <kb-repo>`,
+- `<kb-repo>` is the local catalog path from Setup. `<kb-remote>` is the KB
+  repo the user pointed you at — the deployment's `forge.kb_repo` — confirmed
+  against `git -C <kb-repo> remote -v`, never a guess or a different repo. Run
+  every git command against `<kb-repo>` explicitly (`git -C <kb-repo>`,
   `gh --repo <kb-remote>`) — never rely on the shell's current directory,
-  which may be a different repository.
-- Before any push or PR, confirm the KB repo actually has a remote and that
-  it is the catalog you were pointed at (`git -C <kb-repo> remote -v`). If it
-  has none, stop after committing the local branch and tell the user — never
-  push, and never substitute another remote.
+  which may be a different repository. `gh` has no `-C` flag; `--repo` (or
+  `GH_REPO`) is what fixes its target regardless of the working directory.
+- Before any push or PR, check `git -C <kb-repo> remote -v` against
+  `<kb-remote>`. No remote: stop after committing the local branch and tell
+  the user — never push, never substitute another remote. Remote present but
+  it does not match `<kb-remote>`: same stop — commit the local branch, tell
+  the user, never push, never substitute another remote.
 - Branch `kb-steward/<short-slug>`; commit; push the branch; then open a PR
   with `gh pr create`. PR body: what was captured or changed and why, with
   the entry list. No AI attribution.
