@@ -58,9 +58,22 @@ func draftKBEntry(inv providers.Investigation) providers.KBEntry {
 
 	// --- Resolution (suggested, reversible-first) ---
 	b.WriteString("\n## Resolution\n\n")
+	actions := 0
 	for _, rc := range inv.RootCauses {
 		if rc.SuggestedAction != "" {
 			fmt.Fprintf(&b, "- %s (reversible=%t)\n", rc.SuggestedAction, rc.Reversible)
+			actions++
+		}
+	}
+	if actions == 0 {
+		// A no-action verdict leaves every SuggestedAction empty, but kbvalidate
+		// rejects an Incident whose `## Resolution` section is present and empty —
+		// the draft would fail RunLore's own merge gate. Say the honest thing
+		// (OKF: an explicit unknown beats a fabricated action) instead.
+		if len(inv.Unresolved) > 0 {
+			b.WriteString("- No action suggested by the investigation — see `## Unresolved`.\n")
+		} else {
+			b.WriteString("- No action suggested by the investigation.\n")
 		}
 	}
 	if len(inv.Unresolved) > 0 {
