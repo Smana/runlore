@@ -38,11 +38,12 @@ does not parse them — never rely on them for recall.
   `concepts/` (a write-side convention matching RunLore's own PRs — the
   loader itself reads every directory).
 - Filename: `<kebab-title-slug>-<short-suffix>.md`. RunLore uses the first 8
-  fingerprint chars as suffix; for hand-written entries any short stable
-  suffix works (e.g. the date `20260721`). The suffix keeps two entries
-  sharing a title from colliding.
-- Reserved names the loader SKIPS: `index.md`, `log.md`, any `readme.md`,
-  dotfiles, and hidden directories. Never put knowledge in those files.
+  fingerprint chars as suffix (a timestamp when a draft has no fingerprint);
+  for hand-written entries any short stable suffix works (e.g. the date
+  `20260721`). The suffix keeps two entries sharing a title from colliding.
+- Reserved names the loader SKIPS: `index.md`, `log.md` (exact, lowercase),
+  `readme.md` in any letter case, dotfiles, and hidden directories. Never put
+  knowledge in those files.
 
 ## Body requirements (merge gate)
 

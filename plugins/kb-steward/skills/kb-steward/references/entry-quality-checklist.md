@@ -18,15 +18,15 @@ what's worth a quick self-review pass.
 ## Run the real validator when you can
 
 **Match the version CI runs, not whatever is at hand.** The KB repo's CI
-workflow pins the validator (look for `go install …/cmd/lore@vX.Y.Z` under
-`.github/workflows/`); a PATH binary or a source build of a different version
-can green-light entries the pinned gate rejects, or fail entries the gate
-accepts — validation rules have changed across releases (e.g. `resource` was
-required on every type before it became Incident-only). Install exactly that
-version:
+workflow pins the validator (look for `go install …/cmd/lore@<ref>` under
+`.github/workflows/` — the pin may be a version tag or a bare commit SHA); a
+PATH binary or a source build of a different version can green-light entries
+the pinned gate rejects, or fail entries the gate accepts — validation rules
+have changed across releases (e.g. `resource` was required on every type
+before it became Incident-only). Install exactly that ref:
 
 ```
-GOBIN=/tmp go install github.com/Smana/runlore/cmd/lore@<pinned-version>
+GOBIN=/tmp go install github.com/Smana/runlore/cmd/lore@<pinned-ref>
 /tmp/lore validate-kb <catalog-dir>
 ```
 
@@ -80,8 +80,10 @@ PR, the allowances and generator artifacts below apply.
 
 Allowances — expected on RunLore drafts, not refine-blockers:
 
-- `last_validated` absent: RunLore drafts don't set it — the human merge is
-  the validation. Suggest adding it only when the PR needs refining anyway.
+- `last_validated` stamped at draft time: RunLore sets it equal to `timestamp`
+  when it renders the entry, so on a draft it marks creation, not a human
+  validation — the human merge is that. Don't flag it; when refining a keeper
+  anyway, bump it to the review date.
 - `fingerprint` (parsed — RunLore's dedup identity; see okf-format.md),
   `confidence` / `provenance` (unparsed extension fields): all expected on
   drafts — leave them alone.
@@ -122,8 +124,11 @@ interview. Search the draft for and redact:
 - credentials embedded in URLs (`scheme://user:PASSWORD@host`)
 - kubeconfig blobs and base64 strings longer than ~40 chars of unclear origin
 
-(This mirrors the shapes RunLore's own redaction handles — `internal/redact`
-in the RunLore repo is the fuller list if you need to check one.)
+(This list overlaps RunLore's own redaction — `internal/redact` in the RunLore
+repo — but neither contains the other: this one adds shapes typical of human
+pastes (kubeconfigs, service-account JSON, `glpat-…`, long base64) that redact
+deliberately skips, while redact also covers machine-collected shapes, like
+`kind: Secret` data blocks, that don't turn up in interviews.)
 
 Replace with `<redacted>`. If a secret already reached git or chat via the
 user's paste, tell them so they can rotate it.
