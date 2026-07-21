@@ -10,19 +10,23 @@ import (
 	"regexp"
 	"strings"
 	"testing"
-	"unicode"
 )
 
 // The kb-steward Claude Code plugin is served from this repo (see
 // docs/kb-steward.md). These tests keep the skill's documented OKF contract
 // and the plugin manifests from drifting as the loader evolves.
 
-const pluginRoot = "../../plugins/kb-steward"
+const repoRoot = "../.."
+const pluginRoot = repoRoot + "/plugins/kb-steward"
 
 var parsedFieldsRE = regexp.MustCompile("`([a-z_]+)`")
 
 // TestOKFFormatDocMatchesLoader pins the skill's documented frontmatter field
-// list to what the loader actually parses (the frontmatter fields of Entry).
+// list to what the loader actually parses. It reflects over entryMeta's yaml
+// tags (load.go) — the struct parseEntry unmarshals into — rather than
+// Entry's Go field names, because Entry is a derived in-memory shape: renaming
+// a yaml tag on entryMeta without touching Entry would leave a name-based
+// check on Entry green while the loader's real contract drifted from the doc.
 func TestOKFFormatDocMatchesLoader(t *testing.T) {
 	raw, err := os.ReadFile(filepath.Join(pluginRoot, "skills/kb-steward/references/okf-format.md"))
 	if err != nil {
@@ -40,13 +44,13 @@ func TestOKFFormatDocMatchesLoader(t *testing.T) {
 	}
 
 	parsed := map[string]bool{}
-	et := reflect.TypeOf(Entry{})
-	for i := 0; i < et.NumField(); i++ {
-		name := et.Field(i).Name
-		if name == "Body" || name == "Path" { // not frontmatter
+	mt := reflect.TypeOf(entryMeta{})
+	for i := 0; i < mt.NumField(); i++ {
+		tag := mt.Field(i).Tag.Get("yaml")
+		if tag == "" || tag == "-" {
 			continue
 		}
-		parsed[snakeCase(name)] = true
+		parsed[tag] = true
 	}
 
 	for f := range parsed {
@@ -75,7 +79,7 @@ func TestPluginManifestsValid(t *testing.T) {
 			Description string `json:"description"`
 		} `json:"plugins"`
 	}
-	raw, err := os.ReadFile("../../.claude-plugin/marketplace.json")
+	raw, err := os.ReadFile(filepath.Join(repoRoot, ".claude-plugin/marketplace.json"))
 	if err != nil {
 		t.Fatalf("read marketplace.json: %v", err)
 	}
@@ -168,18 +172,4 @@ func stripFrontmatter(s string) string {
 		return s[4+end:]
 	}
 	return s
-}
-
-func snakeCase(s string) string {
-	var b strings.Builder
-	for i, r := range s {
-		if unicode.IsUpper(r) {
-			if i > 0 {
-				b.WriteByte('_')
-			}
-			r = unicode.ToLower(r)
-		}
-		b.WriteRune(r)
-	}
-	return b.String()
 }
