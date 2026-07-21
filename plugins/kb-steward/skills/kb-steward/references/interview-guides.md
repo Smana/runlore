@@ -5,6 +5,9 @@ multiple-choice when the options are enumerable; open-ended otherwise.
 Every answer is a candidate entry — keep a running list and confirm the
 batch with the SRE before drafting.
 
+Field-by-field OKF contract (what each frontmatter field requires): see
+`references/okf-format.md`.
+
 ## Seed interview (flow 1)
 
 ### 1. Platform inventory
@@ -45,7 +48,11 @@ batch with the SRE before drafting.
 
 Write or refresh it after the interview. Give it OKF frontmatter so RunLore
 can recall it as a scopeless Concept, and future kb-steward sessions can
-skip answered questions:
+skip answered questions. (This lives at the KB root, not under
+`incidents/`/`playbooks/`/`concepts/` — a deliberate exception to that write
+convention, since it's the platform profile, read by both humans and future
+skill sessions. The loader indexes it like any other entry regardless,
+since `AGENTS.md` isn't in its skip list.)
 
 ```markdown
 ---
@@ -80,7 +87,11 @@ Confirm first: **is the incident resolved?** If it's live, stop — capture
 happens after resolution; diagnosis is RunLore's (or the human's) job.
 
 1. **Trigger** — what fired or how was it noticed? Exact alert name / error
-   string (these words become the description).
+   string (these words become the description). Affected workload as
+   `namespace/name` (→ `resource`; required for Incident). If the alert
+   fired on a different resource than the fault (symptom pod vs faulty
+   config), the alert's resource goes in `alert_resource` instead, and
+   `resource` stays the actually-faulty workload.
 2. **Impact & timeline** — start, detection, mitigation, resolution times;
    blast radius.
 3. **What changed** — deploys, config, infra around onset? Git SHAs or

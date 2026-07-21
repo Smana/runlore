@@ -4,16 +4,23 @@ Run every draft through this list before writing it to the repo. The first
 block mirrors RunLore's merge gate (failures block the PR); the second is
 what separates a recall-able entry from noise.
 
+Field-by-field contract (source of truth for what each field means and
+requires): `references/okf-format.md`. The gate items below restate only
+what's worth a quick self-review pass.
+
 ## Gate (must pass — RunLore validates these on merge)
 
 - [ ] `type` is `Incident`, `Playbook`, or `Concept`
-- [ ] `title` is a single line, ≤120 chars, scoped to one symptom/procedure
+- [ ] `title` is a single line, ≤120 chars
 - [ ] `description` present
-- [ ] `resource` present for Incident (`namespace/name`, no whitespace)
+- [ ] `resource` present for Incident (`namespace/name`)
+- [ ] if `resource` is set at all (any type), it has no whitespace
 - [ ] body non-empty; Incident body has `## Symptom`, `## Cause`, `## Resolution`
 
 ## Recall strength (the actual point)
 
+- [ ] title scoped to one symptom/procedure, not a vague theme (editorial —
+      not gate-enforced, but the gate only checks length, not content)
 - [ ] description contains the words an alert or on-call query would use
       (alert name, error string, resource kind)
 - [ ] tags non-empty: workload kind + namespace + platform vocabulary
