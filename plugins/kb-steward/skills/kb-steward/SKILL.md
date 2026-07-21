@@ -82,7 +82,9 @@ Target for a first sitting: 5–15 entries the SRE confirms are true.
    workloads) into the keeper as a refine suggestion, and recommend closing
    the rest. A fault the catalog already documents needs no keeper at all —
    recommend closing the whole group and updating/revalidating the existing
-   entry instead.
+   entry instead. That update is itself steward work: deliver it via the git
+   flow, and name the superseded RunLore PRs in the PR body so the human can
+   close them once it merges.
 4. Per keeper (and per singleton PR): run the proposed entry through the
    checklist — see its *Triaging agent-drafted entries* section for what does
    and doesn't apply to RunLore drafts; then recommend one of merge / refine
@@ -137,7 +139,10 @@ after.**
    branch. If the tree is already dirty, stop and tell the user.
 2. **Write the entries, then validate** — see the checklist's *Run the real
    validator* section. Fix what it reports on the files you wrote; report,
-   don't silently fix, failures in entries you didn't touch.
+   don't silently fix, failures in entries you didn't touch. Edit an existing
+   entry's frontmatter surgically (string replacement) — round-tripping the
+   YAML through a formatter (`yq -i` re-indents RunLore's 4-space lists to 2)
+   churns lines you didn't touch and makes the PR harder to review.
 3. **Stage only the paths you wrote** (`git add <path>` per file) — never `git
    add -A` or `git add .`, which sweeps the user's unrelated dirty work into
    the KB PR. Then commit.
