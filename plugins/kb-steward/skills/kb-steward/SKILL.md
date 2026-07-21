@@ -96,14 +96,26 @@ Target for a first sitting: 5–15 entries the SRE confirms are true.
   `gh --repo <kb-remote>`) — never rely on the shell's current directory,
   which may be a different repository. `gh` has no `-C` flag; `--repo` (or
   `GH_REPO`) is what fixes its target regardless of the working directory.
+- If the catalog was auto-detected (Setup step 1) rather than named by the
+  user, there is no `<kb-remote>` to confirm it against — confirm the remote
+  with the user before the first push.
 - Before any push or PR, check `git -C <kb-repo> remote -v` against
-  `<kb-remote>`. No remote: stop after committing the local branch and tell
-  the user — never push, never substitute another remote. Remote present but
-  it does not match `<kb-remote>`: same stop — commit the local branch, tell
-  the user, never push, never substitute another remote.
-- Branch `kb-steward/<short-slug>`; commit; push the branch; then open a PR
-  with `gh pr create`. PR body: what was captured or changed and why, with
-  the entry list. No AI attribution.
+  `<kb-remote>`, normalized: `forge.kb_repo` is `owner/name`; a remote URL is
+  not — strip the scheme/host and a trailing `.git` down to `owner/name`
+  before comparing. No remote: stop after committing the local branch and
+  tell the user — never push, never substitute another remote. Remote
+  present but it does not match `<kb-remote>`: same stop — commit the local
+  branch, tell the user, never push, never substitute another remote.
+- Fetch and branch from `<kb-repo>`'s default branch — it may currently sit on
+  an unrelated feature branch left over from other work. Branch
+  `kb-steward/<short-slug>`; stage only the entry paths you wrote (`git add
+  <path>` per file) — never `git add -A` or `git add .`, which would sweep the
+  user's unrelated dirty work into the KB PR; commit; push the branch; then
+  open a PR with `gh pr create --title <title> --body <body> --base
+  <default-branch>`. Always pass `--title`, `--body`, and an explicit
+  `--base`: without them `gh pr create` opens an interactive editor and
+  hangs. PR body: what was captured or changed and why, with the entry list.
+  No AI attribution.
 - **Never merge and never push to the default branch.** Nothing enters the KB
   without a human merge — the same rule RunLore itself follows. A solo
   maintainer may explicitly ask for a direct commit; comply and say so.
