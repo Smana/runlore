@@ -69,17 +69,18 @@ incidents, platform constraints.
 1. Create a new (private) Git repo, e.g. `your-org/runlore-kb`.
 2. Add entries as markdown files — **one file per entry** (YAML frontmatter + a markdown body). Name
    each file with a short, descriptive kebab-case **slug** (e.g. `helmrelease-upgrade-failure.md`); the
-   slug is just the entry's identity — not indexed, not a frontmatter field (the Curator names learned
-   entries `slugify(title).md`). Put them at the repo root or in subfolders (`playbooks/`, `incidents/`,
-   …); the whole tree is indexed recursively. Example:
+   slug is just the entry's identity — not indexed, not a frontmatter field (RunLore names the entries
+   it drafts `<title-slug>-<8 fingerprint chars>.md`, so two entries sharing a title can't collide).
+   Put them at the repo root or in subfolders (`playbooks/`, `incidents/`, …); the whole tree is
+   indexed recursively. Example:
 
    ```markdown
    ---
    type: Playbook
-   title: HelmRelease upgrade failure
+   title: HelmRelease upgrade failure for shop-api
    description: A Helm chart bump leaves the release Ready=False.
-   resource: helmrelease://*
-   tags: [flux, helmrelease, upgrade]
+   resource: shop-prod/shop-api
+   tags: [flux, helmrelease, upgrade, shop-prod]
    ---
    # Symptom
    Ready=False after a chart bump; often a DB migration that didn't complete.
@@ -89,13 +90,19 @@ incidents, platform constraints.
    - the rendered diff between the two chart versions
    ```
 
-   Every entry **requires** a `resource:` frontmatter field (a `kind://name` reference, no whitespace);
-   use a `kind://*` glob for a general playbook (e.g. `helmrelease://*`, `pod://*`). Entries missing it
-   are still indexed but logged as invalid (`invalid KB entry indexed`). `index.md` and `log.md` are
-   reserved (a human listing + a changelog) and skipped by the indexer — as are dot-files. What
-   `kb_search` actually matches is the frontmatter `title`/`description`/`tags` plus the body, **not**
-   the filename — so write those well. Seed it with whatever runbooks you already have; the agent gets
-   sharper at *your* platform as the catalog grows.
+   `resource` is the affected workload as `namespace/name`, with no whitespace — it's what recall's
+   structural filter matches on, so a scoped entry beats a general one. It is **required for
+   `Incident`** entries and optional elsewhere, but an entry with no `resource` can only be recalled by
+   an incident that itself carries no workload, so leave it out only for genuinely platform-wide notes.
+   `index.md`, `log.md` and any `readme.md` are reserved (a human listing + a changelog) and skipped by
+   the indexer — as are dot-files and hidden directories. What search actually matches is one combined
+   corpus per entry — `title` + `description` + `resource` + `tags` + body, **not** the filename — so
+   write those well. Seed it with whatever runbooks you already have; the agent gets sharper at *your*
+   platform as the catalog grows.
+
+   > Writing entries by hand? The full field-by-field contract lives in
+   > [`okf-format.md`](../plugins/kb-steward/skills/kb-steward/references/okf-format.md), and
+   > `lore validate-kb <catalog-dir>` checks a catalog against it.
 
 3. **Make it available in-cluster.** Two options:
 

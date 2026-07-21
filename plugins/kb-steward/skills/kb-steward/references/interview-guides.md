@@ -46,13 +46,20 @@ Field-by-field OKF contract (what each frontmatter field requires): see
 
 ### Platform profile (AGENTS.md at the KB root)
 
-Write or refresh it after the interview. Give it OKF frontmatter so RunLore
-can recall it as a scopeless Concept, and future kb-steward sessions can
-skip answered questions. (This lives at the KB root, not under
-`incidents/`/`playbooks/`/`concepts/` — a deliberate exception to that write
-convention, since it's the platform profile, read by both humans and future
-skill sessions. The loader indexes it like any other entry regardless,
-since `AGENTS.md` isn't in its skip list.)
+Write or refresh it after the interview, with OKF frontmatter so the loader
+indexes it like any other entry (`AGENTS.md` isn't in the skip list) and
+future kb-steward sessions can skip answered questions.
+
+Set expectations honestly about *recall*: with no `resource`, this entry is
+scopeless, and scopeless entries only match incidents that carry no workload
+at all — any alert with a namespace will never recall it. Its real audience is
+humans and the agents reading the repo, plus `kb_search` during an
+investigation. That is a reason to keep it, not a reason to fake a `resource`:
+the durable, recallable knowledge belongs in the small scoped entries.
+
+(It lives at the KB root, not under `incidents/`/`playbooks/`/`concepts/` — a
+deliberate exception to that write convention, since it's the platform
+profile.)
 
 ```markdown
 ---

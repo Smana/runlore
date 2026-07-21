@@ -56,11 +56,9 @@ func Load(dir string) (entries []Entry, skipped []string, err error) {
 }
 
 // entryMeta is the exact set of frontmatter keys the loader parses, keyed by
-// their real yaml tags. It is a named (not anonymous) type specifically so
-// TestOKFFormatDocMatchesLoader (skillcontract_test.go) can reflect over ITS
-// yaml tags to pin okf-format.md's documented field list to what parseEntry
-// actually reads — renaming a tag here, not just on Entry, is what the drift
-// guard must catch.
+// their real yaml tags. Named rather than anonymous so TestOKFFormatDocMatchesLoader
+// can reflect over its tags — see that test for why they, not Entry's Go field
+// names, are the contract worth pinning.
 type entryMeta struct {
 	Type          string   `yaml:"type"`
 	Title         string   `yaml:"title"`

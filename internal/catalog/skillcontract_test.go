@@ -4,6 +4,7 @@ package catalog
 
 import (
 	"encoding/json"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -12,23 +13,70 @@ import (
 	"testing"
 )
 
-// The kb-steward Claude Code plugin is served from this repo (see
-// docs/kb-steward.md). These tests keep the skill's documented OKF contract
-// and the plugin manifests from drifting as the loader evolves.
+// The kb-steward plugin is served from this repo (see docs/kb-steward.md).
+// These tests keep the skill's documented OKF contract and the plugin manifests
+// from drifting as the loader evolves.
 
 const repoRoot = "../.."
 const pluginRoot = repoRoot + "/plugins/kb-steward"
+const skillRoot = pluginRoot + "/skills/kb-steward"
 
-var parsedFieldsRE = regexp.MustCompile("`([a-z_]+)`")
+// Field names in the parsed-fields block. The class admits digits and uppercase
+// so a future yaml tag like `sha256` fails the comparison below rather than
+// being silently skipped by the scanner.
+var parsedFieldsRE = regexp.MustCompile("`([a-zA-Z0-9_]+)`")
+
+// skillMarkdown lists every markdown file shipped in the skill, discovered by
+// walking rather than hardcoded: a hardcoded list silently under-covers the
+// moment someone adds a reference file, which is exactly when the neutrality
+// scan below matters most.
+func skillMarkdown(t *testing.T) []string {
+	t.Helper()
+	var out []string
+	err := filepath.WalkDir(skillRoot, func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if !d.IsDir() && strings.HasSuffix(d.Name(), ".md") {
+			out = append(out, path)
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("walk %s: %v", skillRoot, err)
+	}
+	if len(out) == 0 {
+		t.Fatalf("no markdown found under %s — the skill is the thing under test", skillRoot)
+	}
+	return out
+}
+
+// readJSON reads and unmarshals a repo-relative JSON file into T.
+func readJSON[T any](t *testing.T, rel string) T {
+	t.Helper()
+	raw, err := os.ReadFile(filepath.Join(repoRoot, rel))
+	if err != nil {
+		t.Fatalf("read %s: %v", rel, err)
+	}
+	var v T
+	if err := json.Unmarshal(raw, &v); err != nil {
+		t.Fatalf("%s is not valid JSON: %v", rel, err)
+	}
+	return v
+}
 
 // TestOKFFormatDocMatchesLoader pins the skill's documented frontmatter field
 // list to what the loader actually parses. It reflects over entryMeta's yaml
-// tags (load.go) — the struct parseEntry unmarshals into — rather than
-// Entry's Go field names, because Entry is a derived in-memory shape: renaming
-// a yaml tag on entryMeta without touching Entry would leave a name-based
-// check on Entry green while the loader's real contract drifted from the doc.
+// tags (load.go) — the struct parseEntry unmarshals into — rather than Entry's
+// Go field names, because Entry is a derived in-memory shape: renaming a yaml
+// tag on entryMeta without touching Entry would leave a name-based check on
+// Entry green while the loader's real contract drifted from the doc.
+//
+// It checks the per-field table as well as the marker block. The doc states the
+// field list twice, so pinning only the block would let the table — the part a
+// reader actually consults — keep describing a field the loader dropped.
 func TestOKFFormatDocMatchesLoader(t *testing.T) {
-	raw, err := os.ReadFile(filepath.Join(pluginRoot, "skills/kb-steward/references/okf-format.md"))
+	raw, err := os.ReadFile(filepath.Join(skillRoot, "references/okf-format.md"))
 	if err != nil {
 		t.Fatalf("read okf-format.md: %v", err)
 	}
@@ -55,7 +103,10 @@ func TestOKFFormatDocMatchesLoader(t *testing.T) {
 
 	for f := range parsed {
 		if !documented[f] {
-			t.Errorf("loader parses frontmatter field %q but okf-format.md does not document it", f)
+			t.Errorf("loader parses frontmatter field %q but okf-format.md's parsed-fields block does not list it", f)
+		}
+		if !strings.Contains(doc, "| `"+f+"` |") {
+			t.Errorf("loader parses frontmatter field %q but okf-format.md's field table has no row for it", f)
 		}
 	}
 	for f := range documented {
@@ -66,9 +117,9 @@ func TestOKFFormatDocMatchesLoader(t *testing.T) {
 }
 
 // TestPluginManifestsValid keeps the marketplace/plugin manifests installable:
-// docs tell users to run `/plugin install kb-steward@runlore`.
+// docs tell users to type `kb-steward@runlore`.
 func TestPluginManifestsValid(t *testing.T) {
-	var marketplace struct {
+	marketplace := readJSON[struct {
 		Name  string `json:"name"`
 		Owner struct {
 			Name string `json:"name"`
@@ -78,14 +129,8 @@ func TestPluginManifestsValid(t *testing.T) {
 			Source      string `json:"source"`
 			Description string `json:"description"`
 		} `json:"plugins"`
-	}
-	raw, err := os.ReadFile(filepath.Join(repoRoot, ".claude-plugin/marketplace.json"))
-	if err != nil {
-		t.Fatalf("read marketplace.json: %v", err)
-	}
-	if err := json.Unmarshal(raw, &marketplace); err != nil {
-		t.Fatalf("marketplace.json is not valid JSON: %v", err)
-	}
+	}](t, ".claude-plugin/marketplace.json")
+
 	if marketplace.Name != "runlore" {
 		t.Errorf("marketplace name = %q, want %q", marketplace.Name, "runlore")
 	}
@@ -99,31 +144,25 @@ func TestPluginManifestsValid(t *testing.T) {
 		t.Errorf("plugin source = %q, want %q", got, want)
 	}
 	if marketplace.Plugins[0].Description == "" {
-		t.Error("plugin description must be set (shown in /plugin listings)")
+		t.Error("plugin description must be set (shown in plugin listings)")
 	}
 
-	var plugin struct {
+	plugin := readJSON[struct {
 		Name string `json:"name"`
-	}
-	raw, err = os.ReadFile(filepath.Join(pluginRoot, ".claude-plugin/plugin.json"))
-	if err != nil {
-		t.Fatalf("read plugin.json: %v", err)
-	}
-	if err := json.Unmarshal(raw, &plugin); err != nil {
-		t.Fatalf("plugin.json is not valid JSON: %v", err)
-	}
+	}](t, "plugins/kb-steward/.claude-plugin/plugin.json")
 	if plugin.Name != "kb-steward" {
 		t.Errorf("plugin name = %q, want kb-steward", plugin.Name)
 	}
 
+	// SKILL.md is the entrypoint; the references are what it loads.
 	for _, p := range []string{
-		"skills/kb-steward/SKILL.md",
-		"skills/kb-steward/references/okf-format.md",
-		"skills/kb-steward/references/entry-quality-checklist.md",
-		"skills/kb-steward/references/interview-guides.md",
+		"SKILL.md",
+		"references/okf-format.md",
+		"references/entry-quality-checklist.md",
+		"references/interview-guides.md",
 	} {
-		if _, err := os.Stat(filepath.Join(pluginRoot, p)); err != nil {
-			t.Errorf("plugin file missing: %s: %v", p, err)
+		if _, err := os.Stat(filepath.Join(skillRoot, p)); err != nil {
+			t.Errorf("skill file missing: %s: %v", p, err)
 		}
 	}
 }
@@ -134,29 +173,15 @@ func TestPluginManifestsValid(t *testing.T) {
 // that wiring the manifest silently freezes at its initial version while the
 // project releases on, which is exactly how it read before this test existed.
 func TestPluginVersionTracksRelease(t *testing.T) {
-	var manifest map[string]string
-	raw, err := os.ReadFile(filepath.Join(repoRoot, ".release-please-manifest.json"))
-	if err != nil {
-		t.Fatalf("read .release-please-manifest.json: %v", err)
-	}
-	if err := json.Unmarshal(raw, &manifest); err != nil {
-		t.Fatalf("release-please manifest is not valid JSON: %v", err)
-	}
+	manifest := readJSON[map[string]string](t, ".release-please-manifest.json")
 	want := manifest["."]
 	if want == "" {
 		t.Fatal(`release-please manifest has no version for the "." package`)
 	}
 
-	var plugin struct {
+	plugin := readJSON[struct {
 		Version string `json:"version"`
-	}
-	raw, err = os.ReadFile(filepath.Join(pluginRoot, ".claude-plugin/plugin.json"))
-	if err != nil {
-		t.Fatalf("read plugin.json: %v", err)
-	}
-	if err := json.Unmarshal(raw, &plugin); err != nil {
-		t.Fatalf("plugin.json is not valid JSON: %v", err)
-	}
+	}](t, "plugins/kb-steward/.claude-plugin/plugin.json")
 	if plugin.Version != want {
 		t.Errorf("plugin.json version = %q, want %q (the released version); "+
 			"release-please should be bumping it via extra-files", plugin.Version, want)
@@ -164,7 +189,7 @@ func TestPluginVersionTracksRelease(t *testing.T) {
 
 	// The equality above only keeps holding while release-please is told to
 	// rewrite the file, so pin that wiring too.
-	var cfg struct {
+	cfg := readJSON[struct {
 		Packages map[string]struct {
 			ExtraFiles []struct {
 				Type     string `json:"type"`
@@ -172,56 +197,62 @@ func TestPluginVersionTracksRelease(t *testing.T) {
 				JSONPath string `json:"jsonpath"`
 			} `json:"extra-files"`
 		} `json:"packages"`
-	}
-	raw, err = os.ReadFile(filepath.Join(repoRoot, "release-please-config.json"))
-	if err != nil {
-		t.Fatalf("read release-please-config.json: %v", err)
-	}
-	if err := json.Unmarshal(raw, &cfg); err != nil {
-		t.Fatalf("release-please-config.json is not valid JSON: %v", err)
-	}
+	}](t, "release-please-config.json")
+
 	const pluginManifest = "plugins/kb-steward/.claude-plugin/plugin.json"
-	found := false
+	found := 0
 	for _, ef := range cfg.Packages["."].ExtraFiles {
-		if ef.Path == pluginManifest && ef.Type == "json" && ef.JSONPath == "$.version" {
-			found = true
+		if ef.Path == pluginManifest {
+			if ef.Type != "json" || ef.JSONPath != "$.version" {
+				t.Errorf("extra-files entry for %s has type=%q jsonpath=%q, want json / $.version",
+					pluginManifest, ef.Type, ef.JSONPath)
+			}
+			found++
 		}
 	}
-	if !found {
-		t.Errorf("release-please-config.json has no {type: json, path: %s, jsonpath: $.version} "+
-			"extra-files entry — the plugin version would freeze at its current value", pluginManifest)
+	if found != 1 {
+		t.Errorf("release-please-config.json has %d extra-files entries for %s, want exactly 1 — "+
+			"none means the plugin version freezes; duplicates mean conflicting rewrites", found, pluginManifest)
 	}
 }
 
+// bannedVocabulary is harness-coupled wording that must not appear in the
+// portable skill. Terms are matched leniently (see bannedTermRE), so list the
+// stem: "subagent" also catches "subagents".
+//
+// Deliberately NOT listed, because they are ordinary vocabulary an SRE-facing
+// skill has every reason to use — banning them would fail the build on correct
+// prose, which is worse than missing a term:
+//
+//	"hook"   — lifecycle hooks, PreStop hooks, Flux post-build hooks, git hooks.
+//	           The harness-specific sense is "<harness> hooks", already caught
+//	           by the harness name itself.
+//	"cursor" — a pagination or database cursor.
+var bannedVocabulary = []string{
+	"Claude", "/plugin", "slash command",
+	"TodoWrite", "Task tool", "subagent", "Copilot", "Codex",
+	"Bash tool", "Read tool", "Edit tool", "AskUserQuestion",
+}
+
 // TestSkillContentIsHarnessNeutral keeps the skill body portable: the plugin
-// manifests and SKILL.md's frontmatter are Claude Code packaging, but the
-// instructions themselves must run under any agent that can read markdown
-// (see docs/kb-steward.md, "Using it with another agent").
+// manifests and SKILL.md's frontmatter are packaging, but the instructions
+// themselves must run under any agent that can read markdown (see
+// docs/kb-steward.md, "Using it with another agent").
 func TestSkillContentIsHarnessNeutral(t *testing.T) {
-	// Vocabulary that would tie the instructions to one harness. Matching is
-	// case-insensitive (below) so casing variants like "CLAUDE.md" don't slip
-	// through; terms are listed here in the casing that should appear in any
-	// failure message.
-	banned := []string{
-		"Claude", "/plugin", "slash command",
-		"TodoWrite", "Task tool", "subagent", "Cursor", "Copilot", "Codex",
-		"Bash tool", "Read tool", "Edit tool", "AskUserQuestion", "hooks",
+	res := make([]*regexp.Regexp, len(bannedVocabulary))
+	for i, term := range bannedVocabulary {
+		res[i] = bannedTermRE(term)
 	}
-	files := []string{
-		"skills/kb-steward/SKILL.md",
-		"skills/kb-steward/references/okf-format.md",
-		"skills/kb-steward/references/entry-quality-checklist.md",
-		"skills/kb-steward/references/interview-guides.md",
-	}
-	for _, f := range files {
-		raw, err := os.ReadFile(filepath.Join(pluginRoot, f))
+	for _, path := range skillMarkdown(t) {
+		raw, err := os.ReadFile(path) //nolint:gosec // G304: path comes from walking the in-repo skill dir
 		if err != nil {
-			t.Fatalf("read %s: %v", f, err)
+			t.Fatalf("read %s: %v", path, err)
 		}
-		body := stripFrontmatter(string(raw)) // frontmatter is packaging metadata
-		for _, word := range banned {
-			if bannedTermRE(word).MatchString(body) {
-				t.Errorf("%s: harness-specific term %q in skill body — the portable core must not name a specific agent or its tools", f, word)
+		_, body := splitFrontmatter(raw) // frontmatter is packaging metadata
+		for i, term := range bannedVocabulary {
+			if res[i].Match(body) {
+				t.Errorf("%s: harness-specific term %q in skill body — the portable core must not name a specific agent or its tools",
+					filepath.Base(path), term)
 			}
 		}
 	}
@@ -229,71 +260,59 @@ func TestSkillContentIsHarnessNeutral(t *testing.T) {
 
 // bannedTermRE builds the case-insensitive matcher for one banned term.
 //
-// It anchors on a word boundary at the START of the term, because plain
-// substring matching over-matches: "hooks" is a substring of "webhooks", and an
-// SRE-facing skill has every reason to mention an Alertmanager webhook. Terms
-// opening with punctuation ("/plugin") get no leading boundary — \b there would
-// require a word character before the slash, so the term would stop matching at
-// the start of a line.
+// It anchors the START on a non-word character (or start-of-text) rather than
+// using \b, so terms opening with punctuation ("/plugin") still anchor. That
+// front anchor is what keeps "hook" from firing on "webhook" — a word an
+// SRE-facing skill has every reason to use.
 //
-// At the END it allows an optional plural "s" before the boundary, so tightening
-// the front does not quietly stop catching "subagents" or "Task tools" the way a
-// bare \b would.
+// There is deliberately NO end anchor: harness vocabulary shows up glued to
+// other word characters ("CLAUDE_CODE", "ClaudeCode", "subagents"), and a
+// trailing \b would miss every one of those.
+//
+// Whitespace inside a term matches any run of non-word characters, because the
+// skill files are hard-wrapped: "Task tool" has to match across a line break
+// and around markdown punctuation ("`Task` tool") too.
 func bannedTermRE(term string) *regexp.Regexp {
-	pat := regexp.QuoteMeta(term)
-	if isWordByte(term[0]) {
-		pat = `\b` + pat
+	parts := strings.Fields(term)
+	for i, p := range parts {
+		parts[i] = regexp.QuoteMeta(p)
 	}
-	if isWordByte(term[len(term)-1]) {
-		pat += `s?\b`
-	}
-	return regexp.MustCompile(`(?i)` + pat)
+	return regexp.MustCompile(`(?i)(^|\W)` + strings.Join(parts, `[\W_]+`))
 }
 
-// isWordByte reports whether b is what RE2's \b treats as a word character.
-// All banned terms are ASCII, so a byte test is exact here.
-func isWordByte(b byte) bool {
-	return b == '_' ||
-		(b >= 'a' && b <= 'z') || (b >= 'A' && b <= 'Z') || (b >= '0' && b <= '9')
-}
-
-// TestBannedTermREBoundaries is a mutation test for the guard above: it pins
-// both directions of the boundary behaviour, so neither a regression to plain
-// substring matching (which fails "webhooks") nor an over-strict anchor (which
-// would silently stop catching "/plugin") can land unnoticed.
+// TestBannedTermREBoundaries is a mutation test for the matcher above. It pins
+// both directions: the substring false positives the front anchor exists to
+// prevent, and the realistic evasions a trailing \b would let through.
+//
+// The "hook"/"webhook" pair tests the matcher, not the list — "hook" is
+// deliberately absent from bannedVocabulary (see there). It stays here because
+// it is the clearest case of the property the front anchor provides.
 func TestBannedTermREBoundaries(t *testing.T) {
 	cases := []struct {
-		term, text string
-		want       bool
+		name, term, text string
+		want             bool
 	}{
-		{"hooks", "configure hooks for this", true},
-		{"hooks", "the Alertmanager webhooks route to Slack", false},
-		{"hooks", "webhooks", false},
-		{"Claude", "ask Claude to do it", true},
-		{"Claude", "CLAUDE.md at the repo root", true}, // case-insensitive
-		{"Claude", "clauded", false},
-		{"/plugin", "/plugin install kb-steward", true}, // no leading \b needed
-		{"/plugin", "run /plugin now", true},
-		{"Task tool", "use the Task tool here", true},
-		{"Task tool", "the Task tools listed", true}, // plural still caught
-		{"subagent", "subagents are dispatched", true},
-		{"subagent", "a subagent runs it", true},
+		{"plain match", "hook", "configure hooks for this", true},
+		{"singular too", "hook", "register a hook here", true},
+		{"webhook is not a hook", "hook", "Alertmanager webhooks route to Slack", false},
+		{"webhook singular", "hook", "the webhook fires", false},
+		{"case-insensitive", "Claude", "CLAUDE.md at the repo root", true},
+		{"underscore join", "Claude", "CLAUDE_CODE_SETTINGS", true},
+		{"camel join", "Claude", "ClaudeCode is the harness", true},
+		{"punctuation-leading term", "/plugin", "/plugin install kb-steward", true},
+		{"punctuation-leading mid-line", "/plugin", "run /plugin now", true},
+		{"multiword", "Task tool", "use the Task tool here", true},
+		{"multiword across a line wrap", "Task tool", "use the Task\ntool to fan out", true},
+		{"multiword around markdown", "Task tool", "use the `Task` tool", true},
+		{"multiword hyphenated", "slash command", "a slash-command named /kb", true},
+		{"plural", "subagent", "subagents are dispatched", true},
+		{"unrelated prose stays clean", "Claude", "the cloud provider region", false},
 	}
 	for _, c := range cases {
-		if got := bannedTermRE(c.term).MatchString(c.text); got != c.want {
-			t.Errorf("bannedTermRE(%q).MatchString(%q) = %v, want %v", c.term, c.text, got, c.want)
-		}
+		t.Run(c.name, func(t *testing.T) {
+			if got := bannedTermRE(c.term).MatchString(c.text); got != c.want {
+				t.Errorf("bannedTermRE(%q).MatchString(%q) = %v, want %v", c.term, c.text, got, c.want)
+			}
+		})
 	}
-}
-
-// stripFrontmatter drops a leading YAML frontmatter block, which is harness
-// packaging metadata rather than instruction content.
-func stripFrontmatter(s string) string {
-	if !strings.HasPrefix(s, "---\n") {
-		return s
-	}
-	if end := strings.Index(s[4:], "\n---"); end >= 0 {
-		return s[4+end:]
-	}
-	return s
 }
