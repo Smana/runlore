@@ -103,11 +103,45 @@ fields), propose retirement or revalidation, tag hygiene.
 names listed in `okf-format.md` match what the catalog loader parses, so the
 skill cannot silently rot when the loader evolves.
 
+## Portability — agent-agnostic by content, Claude-packaged by default
+
+The Claude Code plugin is a *distribution* choice, not a design constraint.
+The skill body and its three references are plain markdown containing no
+harness-specific instruction — no tool names, no slash commands, no
+assumptions about the runtime. The only Claude-specific pieces are the two
+`.claude-plugin/*.json` manifests and SKILL.md's YAML frontmatter, which
+other harnesses ignore as unknown metadata.
+
+So portability is a matter of stating and defending what is already true,
+rather than restructuring:
+
+- **Documented non-Claude paths** in `docs/kb-steward.md`: vendor the
+  `skills/kb-steward/` directory into the KB repo and point the agent at
+  `SKILL.md`, or reference it from the KB's `AGENTS.md` (the cross-agent
+  convention this skill already reads and writes).
+- **A neutrality guard** — a Go test fails if harness-coupled vocabulary
+  appears in the skill body or references, so the portable core cannot rot
+  into a Claude-only artifact through ordinary edits.
+
+Rejected: moving the core to a neutral top-level directory (Claude Code
+requires skill files inside the plugin directory, so it buys a cosmetic
+signal at the cost of duplication or symlinks) and exposing the flows as MCP
+prompts (real protocol-level agnosticism, but Go work for a primitive whose
+client support is far patchier than tools).
+
+Cross-agent KB *reading* is already solved and unaffected: `lore mcp` serves
+`kb_search`/`kb_get` to any MCP client. This skill is the *writing* half.
+
 ## Guardrails
 
 - **PR by default, never merge.** Drafted entries go on a branch + PR —
   "nothing enters the KB without a human merge" holds for human-driven flows
   too. Solo maintainers can explicitly ask for direct commit.
+- **Push only to the KB repo.** Every git command names the KB repo
+  explicitly and the remote is confirmed to be the catalog before any push
+  or PR. A cold-run agent tried `gh pr create` from a checkout with no
+  remote; it failed safely, but an ambiguous working directory must never be
+  able to aim a KB entry at an unrelated repository.
 - **No fabrication.** Interview answers are the only source of facts; unknowns
   are recorded as unknowns. Same principle as the agent's no-PR-when-
   inconclusive rule.
@@ -122,9 +156,12 @@ skill cannot silently rot when the loader evolves.
   Ref platform, produce real entries, verify RunLore's recall surfaces them
   (an entry that never recalls is a failed entry).
 - **Skill verification** per superpowers:writing-skills — a cold subagent runs
-  each flow; outputs must pass entry-quality-checklist.md.
+  each flow; outputs must pass entry-quality-checklist.md. (Done for the
+  post-incident flow: a fresh agent produced a gate-passing Incident entry on
+  a `kb-steward/*` branch and recorded two unknowns as unknowns rather than
+  inventing them.)
 - **CI:** the drift-guard Go test; JSON validation of the marketplace/plugin
-  manifests.
+  manifests; the portability neutrality guard.
 
 **v1 acceptance:** a fresh user installs in two commands, seeds ≥5
 recall-firing entries in one sitting, and captures one post-incident entry
@@ -135,5 +172,7 @@ that passes the loader.
 - Live incident diagnosis from the terminal (RunLore's job; revisit only if
   real demand appears).
 - Deepening the triage/maintenance flows beyond checklists (wait for use).
+- Per-harness packaging beyond documentation (no Cursor/Codex/Gemini plugin
+  manifests) and MCP prompts — see Portability for why both were rejected.
 - Any `lore` CLI involvement in skill install (`go:embed` ruled out — most
   Claude Code users won't have the binary locally).

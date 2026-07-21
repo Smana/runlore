@@ -829,6 +829,154 @@ git add -A plugins/ && git commit -m "fix(skill): tighten kb-steward flow after 
 
 ---
 
+### Task 7: Portable core — neutrality guard, non-Claude install paths, git-flow hardening
+
+Added after Tasks 1-6, from two findings: the maintainer asked that the skill
+not be Claude-only, and the Task 6 cold run exposed an ambiguous git flow.
+
+**Files:**
+- Modify: `plugins/kb-steward/skills/kb-steward/SKILL.md` (Git flow section)
+- Modify: `docs/kb-steward.md` (add "Using it with another agent" section)
+- Modify: `internal/catalog/skillcontract_test.go` (append the neutrality test)
+
+**Interfaces:**
+- Consumes: `pluginRoot` const from Task 1.
+- Produces: `TestSkillContentIsHarnessNeutral` — a guard later edits must satisfy.
+
+- [ ] **Step 1: Write the failing neutrality test**
+
+Append to `internal/catalog/skillcontract_test.go`:
+
+```go
+// TestSkillContentIsHarnessNeutral keeps the skill body portable: the plugin
+// manifests and SKILL.md's frontmatter are Claude Code packaging, but the
+// instructions themselves must run under any agent that can read markdown
+// (see docs/kb-steward.md, "Using it with another agent").
+func TestSkillContentIsHarnessNeutral(t *testing.T) {
+	// Vocabulary that would tie the instructions to one harness.
+	banned := []string{
+		"Claude", "claude", "/plugin", "slash command",
+		"TodoWrite", "Task tool", "subagent", "Cursor", "Copilot", "Codex",
+	}
+	files := []string{
+		"skills/kb-steward/SKILL.md",
+		"skills/kb-steward/references/okf-format.md",
+		"skills/kb-steward/references/entry-quality-checklist.md",
+		"skills/kb-steward/references/interview-guides.md",
+	}
+	for _, f := range files {
+		raw, err := os.ReadFile(filepath.Join(pluginRoot, f))
+		if err != nil {
+			t.Fatalf("read %s: %v", f, err)
+		}
+		body := stripFrontmatter(string(raw)) // frontmatter is packaging metadata
+		for _, word := range banned {
+			if strings.Contains(body, word) {
+				t.Errorf("%s: harness-specific term %q in skill body — the portable core must not name a specific agent or its tools", f, word)
+			}
+		}
+	}
+}
+
+// stripFrontmatter drops a leading YAML frontmatter block, which is harness
+// packaging metadata rather than instruction content.
+func stripFrontmatter(s string) string {
+	if !strings.HasPrefix(s, "---\n") {
+		return s
+	}
+	if end := strings.Index(s[4:], "\n---"); end >= 0 {
+		return s[4+end:]
+	}
+	return s
+}
+```
+
+Add `"strings"` to the import block if not already present.
+
+- [ ] **Step 2: Run the test**
+
+Run: `go test ./internal/catalog/ -run TestSkillContentIsHarnessNeutral -v`
+Expected: PASS immediately — the content is already neutral (verified by grep
+before this task was written). This test is a regression guard, not a driver.
+If it FAILS, the failure names the offending file and term: remove the term
+from the skill body (never weaken the banned list to make it pass).
+
+- [ ] **Step 3: Harden the git flow in SKILL.md**
+
+In SKILL.md's "Git flow (all writes)" section, replace the first bullet:
+
+```markdown
+- Branch `kb-steward/<short-slug>`; commit; open a PR with `gh pr create`.
+  PR body: what was captured or changed and why, with the entry list. No AI
+  attribution.
+```
+
+with:
+
+```markdown
+- Run every git command against the KB repo explicitly (`git -C <kb-repo>`,
+  `gh --repo <kb-remote>`) — never rely on the shell's current directory,
+  which may be a different repository.
+- Before any push or PR, confirm the KB repo actually has a remote and that
+  it is the catalog you were pointed at (`git -C <kb-repo> remote -v`). If it
+  has none, stop after committing the local branch and tell the user — never
+  push, and never substitute another remote.
+- Branch `kb-steward/<short-slug>`; commit; push the branch; then open a PR
+  with `gh pr create`. PR body: what was captured or changed and why, with
+  the entry list. No AI attribution.
+```
+
+- [ ] **Step 4: Add the non-Claude install section to `docs/kb-steward.md`**
+
+Insert after the "## Install" section, before "## What it does":
+
+````markdown
+## Using it with another agent
+
+The plugin above is packaging, not a dependency. The skill is plain markdown
+with no harness-specific instruction in it — a Go test
+(`TestSkillContentIsHarnessNeutral`) fails the build if that ever stops being
+true — so any coding agent that reads files can run it:
+
+1. Copy `plugins/kb-steward/skills/kb-steward/` (SKILL.md plus `references/`)
+   into your KB repo, e.g. as `.kb-steward/`:
+
+   ```bash
+   git clone --depth 1 https://github.com/Smana/runlore /tmp/runlore
+   cp -r /tmp/runlore/plugins/kb-steward/skills/kb-steward .kb-steward
+   ```
+
+2. Point your agent at it — either directly ("follow `.kb-steward/SKILL.md`")
+   or, better, from your KB's `AGENTS.md`, which most agents read
+   automatically:
+
+   ```markdown
+   ## Knowledge-base conventions
+   When adding or curating entries in this repo, follow `.kb-steward/SKILL.md`.
+   ```
+
+SKILL.md's YAML frontmatter is metadata for Claude Code's skill loader; other
+agents ignore it harmlessly. Nothing else in the file assumes a runtime.
+
+Reading the catalog is already agent-agnostic by a different route: `lore mcp
+<kb-dir>` serves `kb_search` and `kb_get` to any MCP client, with no cluster,
+model, or config — see [MCP](mcp.md). This skill is the writing half.
+````
+
+- [ ] **Step 5: Run the full quality gate**
+
+Run: `go build ./... && go vet ./... && go test ./... && gofmt -l . && golangci-lint run ./...`
+Expected: all pass, no gofmt output, `0 issues`.
+
+- [ ] **Step 6: Commit**
+
+```bash
+git add internal/catalog/skillcontract_test.go plugins/kb-steward/skills/kb-steward/SKILL.md docs/kb-steward.md
+git commit -m "feat(skill): guard harness neutrality, document non-Claude use, harden git flow"
+```
+
+---
+
 ## Execution notes
 
 - Branch: `feat/kb-steward-skill` from `docs/kb-steward-skill-design`; one PR
