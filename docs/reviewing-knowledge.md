@@ -9,6 +9,10 @@ RunLore never writes to the catalog directly — it only opens PRs. Nothing ente
 your knowledge base until **a human merges it**. That's the whole point: the
 knowledge is yours, reviewed, and in your Git.
 
+> **Guided workflow:** the [kb-steward Claude Code skill](kb-steward.md) walks
+> you through PR triage, post-incident capture, and seeding the KB with your
+> platform's context — interview-style, PR-gated like everything else.
+
 ---
 
 ## 1. What you see when RunLore finds something
@@ -108,6 +112,12 @@ reusable knowledge for the next person (and for RunLore's instant recall).
 The same PR also keeps the OKF bundle self-describing: the entry's link line is
 added to your `index.md` (when the bundle has one) and a `**Creation**` record is
 appended to `log.md` — all in the one diff you review.
+
+> **Writing entries by hand?** The field-by-field contract — which frontmatter
+> keys the loader parses, which the merge gate requires, and what each one does
+> for recall — is documented in
+> [`okf-format.md`](../plugins/kb-steward/skills/kb-steward/references/okf-format.md),
+> shipped as part of the [kb-steward skill](kb-steward.md) but useful on its own.
 
 ---
 

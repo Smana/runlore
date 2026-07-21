@@ -123,6 +123,17 @@ incidents gains trust; knowledge that keeps failing decays.
 > **And nothing says you review by hand.** Keep an agent in the loop during the diagnosis itself: have
 > it cross-check RunLore's draft against what you found while resolving the incident, and enrich it
 > with your context. You keep the *decision* — not the line-by-line reading.
+>
+> **Optionally, put an agent on the queue.** The [kb-steward skill](docs/kb-steward.md) triages open KB
+> PRs from your terminal — quality and duplicate check per PR, a merge / refine / close call with the
+> concrete fix, and a pointer at the volume levers (`forge.skip_verdicts`, `min_confidence`,
+> `dup_score`) when the queue is systematically noisy. It
+> recommends; you merge. Install is two commands, no binary:
+>
+> ```
+> /plugin marketplace add Smana/runlore
+> /plugin install kb-steward@runlore
+> ```
 
 ## 🔌 Supported integrations
 
@@ -242,7 +253,7 @@ we test hardest.
 
 ## Docs
 
-📐 [Design](docs/design.md) · 📚 [Learning loop](docs/learning-loop.md) · ✅ [Reviewing knowledge](docs/reviewing-knowledge.md) · 🚀 [Getting started](docs/getting-started.md) · 🧪 [Worked example](docs/examples/harbor-registry-down.md) ·
+📐 [Design](docs/design.md) · 📚 [Learning loop](docs/learning-loop.md) · ✅ [Reviewing knowledge](docs/reviewing-knowledge.md) · 🧑‍🔧 [KB steward skill](docs/kb-steward.md) · 🚀 [Getting started](docs/getting-started.md) · 🧪 [Worked example](docs/examples/harbor-registry-down.md) ·
 🔌 [Data sources](docs/data-sources.md) · ⚙️ [Configuration](docs/configuration.md) · 🔗 [MCP — server & client](docs/mcp.md) · 📊 [Observability](docs/observability.md) · 🩺 [Troubleshooting](docs/troubleshooting.md) ·
 🔒 [Security model](docs/security-model.md) · 🛡 [LLM security architecture](docs/security-architecture.md) · ⬆️ [Upgrade & uninstall](docs/upgrade-uninstall.md) · 🧭 [Prior art](docs/prior-art.md) · 📊 [Benchmarking models](docs/benchmarking.md) · 🛠 [Contributing](CONTRIBUTING.md)
 

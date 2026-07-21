@@ -55,24 +55,30 @@ func Load(dir string) (entries []Entry, skipped []string, err error) {
 	return entries, skipped, nil
 }
 
+// entryMeta is the exact set of frontmatter keys the loader parses, keyed by
+// their real yaml tags. Named rather than anonymous so TestOKFFormatDocMatchesLoader
+// can reflect over its tags — see that test for why they, not Entry's Go field
+// names, are the contract worth pinning.
+type entryMeta struct {
+	Type          string   `yaml:"type"`
+	Title         string   `yaml:"title"`
+	Description   string   `yaml:"description"`
+	Resource      string   `yaml:"resource"`
+	AlertResource string   `yaml:"alert_resource"`
+	Tags          []string `yaml:"tags"`
+	Timestamp     string   `yaml:"timestamp"`
+	Fingerprint   string   `yaml:"fingerprint"`
+	Status        string   `yaml:"status"`
+	LastValidated string   `yaml:"last_validated"`
+}
+
 func parseEntry(root, path string) (Entry, error) {
 	data, err := os.ReadFile(path) //nolint:gosec // G304: path is within the operator-configured catalog directory
 	if err != nil {
 		return Entry{}, err
 	}
 	fm, body := splitFrontmatter(data)
-	var meta struct {
-		Type          string   `yaml:"type"`
-		Title         string   `yaml:"title"`
-		Description   string   `yaml:"description"`
-		Resource      string   `yaml:"resource"`
-		AlertResource string   `yaml:"alert_resource"`
-		Tags          []string `yaml:"tags"`
-		Timestamp     string   `yaml:"timestamp"`
-		Fingerprint   string   `yaml:"fingerprint"`
-		Status        string   `yaml:"status"`
-		LastValidated string   `yaml:"last_validated"`
-	}
+	var meta entryMeta
 	if len(fm) > 0 {
 		if err := yaml.Unmarshal(fm, &meta); err != nil {
 			return Entry{}, err
