@@ -1,0 +1,12 @@
+{
+  "name": "runlore",
+  "owner": { "name": "Smaine Kahlouch" },
+  "description": "Claude Code plugins shipped with RunLore",
+  "plugins": [
+    {
+      "name": "kb-steward",
+      "source": "./plugins/kb-steward",
+      "description": "Interview-driven stewardship of a RunLore OKF knowledge catalog: seeding, post-incident capture, PR triage, maintenance"
+    }
+  ]
+}

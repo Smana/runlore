@@ -3,6 +3,7 @@
 package catalog
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -56,6 +57,69 @@ func TestOKFFormatDocMatchesLoader(t *testing.T) {
 	for f := range documented {
 		if !parsed[f] {
 			t.Errorf("okf-format.md documents field %q but the loader does not parse it", f)
+		}
+	}
+}
+
+// TestPluginManifestsValid keeps the marketplace/plugin manifests installable:
+// docs tell users to run `/plugin install kb-steward@runlore`.
+func TestPluginManifestsValid(t *testing.T) {
+	var marketplace struct {
+		Name  string `json:"name"`
+		Owner struct {
+			Name string `json:"name"`
+		} `json:"owner"`
+		Plugins []struct {
+			Name        string `json:"name"`
+			Source      string `json:"source"`
+			Description string `json:"description"`
+		} `json:"plugins"`
+	}
+	raw, err := os.ReadFile("../../.claude-plugin/marketplace.json")
+	if err != nil {
+		t.Fatalf("read marketplace.json: %v", err)
+	}
+	if err := json.Unmarshal(raw, &marketplace); err != nil {
+		t.Fatalf("marketplace.json is not valid JSON: %v", err)
+	}
+	if marketplace.Name != "runlore" {
+		t.Errorf("marketplace name = %q, want %q", marketplace.Name, "runlore")
+	}
+	if marketplace.Owner.Name == "" {
+		t.Error("marketplace owner.name must be set")
+	}
+	if len(marketplace.Plugins) != 1 || marketplace.Plugins[0].Name != "kb-steward" {
+		t.Fatalf("plugins = %+v, want exactly one entry named kb-steward", marketplace.Plugins)
+	}
+	if got, want := marketplace.Plugins[0].Source, "./plugins/kb-steward"; got != want {
+		t.Errorf("plugin source = %q, want %q", got, want)
+	}
+	if marketplace.Plugins[0].Description == "" {
+		t.Error("plugin description must be set (shown in /plugin listings)")
+	}
+
+	var plugin struct {
+		Name string `json:"name"`
+	}
+	raw, err = os.ReadFile(filepath.Join(pluginRoot, ".claude-plugin/plugin.json"))
+	if err != nil {
+		t.Fatalf("read plugin.json: %v", err)
+	}
+	if err := json.Unmarshal(raw, &plugin); err != nil {
+		t.Fatalf("plugin.json is not valid JSON: %v", err)
+	}
+	if plugin.Name != "kb-steward" {
+		t.Errorf("plugin name = %q, want kb-steward", plugin.Name)
+	}
+
+	for _, p := range []string{
+		"skills/kb-steward/SKILL.md",
+		"skills/kb-steward/references/okf-format.md",
+		"skills/kb-steward/references/entry-quality-checklist.md",
+		"skills/kb-steward/references/interview-guides.md",
+	} {
+		if _, err := os.Stat(filepath.Join(pluginRoot, p)); err != nil {
+			t.Errorf("plugin file missing: %s: %v", p, err)
 		}
 	}
 }
