@@ -80,10 +80,11 @@ PR, the allowances and generator artifacts below apply.
 
 Allowances — expected on RunLore drafts, not refine-blockers:
 
-- `last_validated` stamped at draft time: RunLore sets it equal to `timestamp`
-  when it renders the entry, so on a draft it marks creation, not a human
-  validation — the human merge is that. Don't flag it; when refining a keeper
-  anyway, bump it to the review date.
+- `last_validated` absent: RunLore drafts leave it unset — the field claims
+  human confirmation, and the human merge is the first validation. Don't flag
+  it; when refining a keeper anyway, set it to the review date. (Drafts from
+  builds that predate this rule carry it equal to `timestamp` — creation, not
+  validation; read it accordingly.)
 - `fingerprint` (parsed — RunLore's dedup identity; see okf-format.md),
   `confidence` / `provenance` (unparsed extension fields): all expected on
   drafts — leave them alone.

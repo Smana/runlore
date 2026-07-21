@@ -425,9 +425,10 @@ type kbFrontmatter struct {
 	AlertResource string   `yaml:"alert_resource,omitempty"`
 	Tags          []string `yaml:"tags,omitempty"`
 	Timestamp     string   `yaml:"timestamp,omitempty"` // OKF-recommended; seed entries carry it, curated ones now do too
-	// last_validated: stamped at entry creation (= timestamp); refreshed by humans
-	// or by future confirmation flows (see the downvote-recovery plan). Recall's
-	// stale_after down-weighting reads it — a never-revalidated entry ages visibly.
+	// last_validated: the date a human last confirmed the entry works. Never set
+	// on drafts — the human merge is the first validation, and humans (or future
+	// confirmation flows) stamp it from there. Recall's stale_after down-weighting
+	// falls back to timestamp, so an unvalidated entry still ages from creation.
 	LastValidated string `yaml:"last_validated,omitempty"`
 	Fingerprint   string `yaml:"fingerprint,omitempty"`
 	// Confidence + Provenance are OKF extension keys: frontmatter is for the
@@ -506,14 +507,15 @@ func (c *Client) blobURL(path string) string {
 }
 
 func renderEntry(e providers.KBEntry) string {
-	// Stamp the curated entry at render time (RFC3339 UTC, matching the seed
-	// entries and flux.Executor). Kept off KBEntry so draftKBEntry stays
+	// Stamp the curated entry's timestamp at render time (RFC3339 UTC, matching
+	// the seed entries and flux.Executor). Kept off KBEntry so draftKBEntry stays
 	// deterministic/time-free; this serializer is already the I/O boundary.
+	// last_validated stays unset: that field claims human confirmation.
 	ts := time.Now().UTC().Format(time.RFC3339)
 	fm, _ := yaml.Marshal(kbFrontmatter{
 		Type: e.Type, Title: e.Title, Description: e.Description, Resource: e.Resource,
 		AlertResource: e.AlertResource,
-		Tags:          e.Tags, Timestamp: ts, LastValidated: ts, Fingerprint: e.Fingerprint,
+		Tags:          e.Tags, Timestamp: ts, Fingerprint: e.Fingerprint,
 		Confidence: e.Confidence, Provenance: e.Provenance,
 	})
 	var b strings.Builder
