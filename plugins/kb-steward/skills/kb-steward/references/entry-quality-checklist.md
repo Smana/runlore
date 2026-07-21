@@ -31,8 +31,12 @@ failures in entries you didn't touch may surface — report those, don't
 silently fix them; and `--semantic` (an LLM advisory) needs a configured
 model, so plain `validate-kb` is what you want.
 
-No binary available? Then the gate block below is the fallback — check it by
-hand. Expect that often: the skill runs wherever the SRE is, which is not
+Not on PATH, but the RunLore source repo is at hand? Build it — a real verdict
+still beats the hand-check: `go build -o /tmp/lore ./cmd/lore` from the repo
+root, then run `/tmp/lore validate-kb`.
+
+No binary and no source? Then the gate block below is the fallback — check it
+by hand. Expect that often: the skill runs wherever the SRE is, which is not
 necessarily next to a RunLore install.
 
 ## Gate (what `lore validate-kb` rejects)
@@ -85,10 +89,10 @@ Generator artifacts — include fixes for these in any refine recommendation:
   repetition adds no recall signal (recall indexes one corpus per entry —
   okf-format.md); trim the body copies to what each section uniquely says.
 - Required sections present but empty (a gate item above) — `## Resolution`
-  especially, when the investigation ended with no action taken; this is a
-  RunLore draft-side defect worth fixing upstream. A keeper needs real
-  content, usually recoverable from the entry's own `## Unresolved` notes or
-  the alert's runbook.
+  especially, on drafts from RunLore builds older than the no-action fix
+  (Smana/runlore#350; fixed drafts emit an explicit "No action suggested"
+  line instead). A keeper needs real content, usually recoverable from the
+  entry's own `## Unresolved` notes or the alert's runbook.
 
 ## Secret scan (always, before writing the file)
 
