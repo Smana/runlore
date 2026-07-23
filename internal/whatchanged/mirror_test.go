@@ -149,6 +149,66 @@ func TestMirrorEviction(t *testing.T) {
 	}
 }
 
+// TestMirrorEvictionSparesNonMirrorDirs: eviction must not touch directories
+// that were not created by MirrorCache itself (e.g. the "source" subdir used by
+// the source_diff cache, or stray files on an operator PV). With max=1 and two
+// distinct repos acquired sequentially, the foreign "source" subdir must survive.
+func TestMirrorEvictionSparesNonMirrorDirs(t *testing.T) {
+	srcA, _, _ := buildRepo(t)
+	srcB, _, _ := buildRepo(t)
+	mc, err := NewMirrorCache(t.TempDir(), 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Seed the cache with A.
+	_, release, err := mc.Acquire(context.Background(), srcA, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	release()
+
+	// Plant a foreign "source" subdir (the source_diff mirror cache location)
+	// and a stray file — neither is a mirror key.
+	foreignDir := filepath.Join(mc.dir, "source")
+	if err := os.MkdirAll(foreignDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	markerFile := filepath.Join(foreignDir, "marker.txt")
+	if err := os.WriteFile(markerFile, []byte("keep me"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	strayFile := filepath.Join(mc.dir, "stray.txt")
+	if err := os.WriteFile(strayFile, []byte("also keep"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Age A so it is the eviction victim.
+	old := time.Now().Add(-time.Hour)
+	if err := os.Chtimes(filepath.Join(mc.dir, mirrorKey(srcA)), old, old); err != nil {
+		t.Fatal(err)
+	}
+
+	// Acquiring B forces eviction of A (max=1, so we need to free a slot).
+	_, release2, err := mc.Acquire(context.Background(), srcB, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	release2()
+
+	// A should be gone.
+	if _, err := os.Stat(filepath.Join(mc.dir, mirrorKey(srcA))); !os.IsNotExist(err) {
+		t.Fatal("oldest mirror (A) should have been evicted")
+	}
+
+	// Foreign dirs and stray files must survive eviction.
+	if _, err := os.Stat(markerFile); err != nil {
+		t.Fatalf("foreign source/marker.txt was deleted by eviction: %v", err)
+	}
+	if _, err := os.Stat(strayFile); err != nil {
+		t.Fatalf("stray file was deleted by eviction: %v", err)
+	}
+}
+
 // addCommit writes one file into the fixture repo at dir and commits it with a
 // fixed timestamp, returning the new commit hash.
 func addCommit(t testing.TB, dir, rel, content, msg string, sec int64) plumbing.Hash {
