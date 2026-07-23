@@ -184,6 +184,15 @@ config:
                                # Also the trigger for escalating a closed-unmerged (human-rejected) KB
                                # entry that keeps recurring: RunLore links the closed PR in a knowledge-gap
                                # issue rather than reopening it.
+    # In-server scheduled sweeps (leader-only): the serve pod runs the grooming
+    # passes on a timer whenever the KB forge (forge.kb_repo + forge.github_app) is
+    # configured — no CronJob or shared ledger volume needed, and the ledger-backed
+    # passes read the pod's LIVE outcome ledger. Default mode is DRY-RUN: every
+    # candidate action is logged (and recorded in the actions.audit_log_path hash
+    # chain when set) but nothing is written to the forge until you set mode: apply.
+    sweeps:
+      mode: dry-run   # dry-run (default) | apply | "off" (quote off — YAML)
+      interval: 6h    # first sweep runs one full interval after startup; min 10m
   # model:
   #   base_url: https://vllm.svc/v1
   #   model: <model-name>
@@ -491,9 +500,11 @@ tolerations: []
 affinity: {}
 podAnnotations: {}
 
-# Phase-2 backlog groomer (lore curate) as a scheduled Job. Opt-in: writes to the
-# KB forge (closes duplicate/stale PRs), so it stays disabled until you set the
-# GitHub App credentials and enable it.
+# Phase-2 backlog groomer (lore curate) as a scheduled Job — the OUT-OF-SERVER
+# alternative to config.curate.sweeps (which the serve pod runs itself, leader-only,
+# dry-run by default). Prefer the in-server sweeps: the CronJob needs the outcome
+# ledger on a shared volume to run its ledger-backed passes. Both paths are
+# idempotent, so enabling both is safe, just redundant.
 curate:
   cronjob:
     enabled: false
