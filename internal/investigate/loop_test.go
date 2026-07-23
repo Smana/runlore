@@ -1788,3 +1788,14 @@ func TestEnforceBudgetNudgeThenHardKill(t *testing.T) {
 		t.Fatalf("hard-kill must deliver exactly once, got %d", delivered)
 	}
 }
+
+func TestSystemPromptMentionsSourceDiffOnlyWhenPresent(t *testing.T) {
+	with := &LoopInvestigator{Tools: []Tool{echoTool{name: "source_diff"}}}
+	if !strings.Contains(with.system(), "source_diff") {
+		t.Fatal("system prompt must nudge source_diff when the tool is registered")
+	}
+	without := &LoopInvestigator{Tools: []Tool{echoTool{name: "what_changed"}}}
+	if strings.Contains(without.system(), "source_diff") {
+		t.Fatal("system prompt must not mention source_diff when the tool is absent")
+	}
+}
