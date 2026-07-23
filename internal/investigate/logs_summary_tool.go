@@ -42,7 +42,8 @@ func (t LogsErrorSummaryTool) Description() string {
 		"'3/5m baseline → 412/5m SPIKE at 10:02') and the DOMINANT error messages with counts and first→last span, " +
 		"instead of a raw line dump. It answers 'is this spiking, and what is flooding the logs?' in one call; drill " +
 		"into query_logs only AFTER this to read specific lines. PREFER the structured params (container/namespace/level) " +
-		"and let the tool build the query; level defaults to error. since_minutes bounds the window (default 60)."
+		"and let the tool build the query (a raw `query` override, if used, is " + t.Fields.queryLang() + "); " +
+		"level defaults to error. since_minutes bounds the window (default 60)."
 }
 
 // Schema returns the JSON schema for the arguments.

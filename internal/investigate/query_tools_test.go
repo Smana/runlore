@@ -464,6 +464,14 @@ func TestBuildLogQL(t *testing.T) {
 			want: `{namespace="apps"} |= "refused"`},
 		{name: "raw LogsQL-ism rejected", raw: `{namespace="apps"} | unpack_json | log.level:error`, conv: logql,
 			wantErr: "LogsQL"},
+		{name: "raw LogsQL _msg: filter rejected", raw: `{namespace="apps"} | _msg:error`, conv: logql,
+			wantErr: "LogsQL"},
+		// A valid LogQL query whose label value / line filter merely CONTAINS the
+		// substring "_msg" must NOT be misrejected (the guard anchors on "_msg:").
+		{name: "raw with _msg in label value passes", raw: `{container="auth_msg_worker"}`, conv: logql,
+			want: `{container="auth_msg_worker"}`},
+		{name: "raw with _msg in line filter passes", raw: `{namespace="apps"} |= "consume_msg failed"`, conv: logql,
+			want: `{namespace="apps"} |= "consume_msg failed"`},
 		{name: "raw without selector rejected", raw: `error`, conv: logql,
 			wantErr: "stream selector"},
 		{name: "nothing given", conv: logql, wantErr: "provide a raw"},
@@ -501,12 +509,22 @@ func TestLogToolDescriptionsDialect(t *testing.T) {
 	if !strings.Contains(QueryLogsTool{}.Description(), "LogsQL (VictoriaLogs)") {
 		t.Fatalf("default description must stay LogsQL")
 	}
+	// The Loki description must interpolate the CONFIGURED field names (not hardcoded
+	// detected_level/namespace), so a field override reaches the model verbatim.
+	custom := QueryLogsTool{Fields: LogFields{Dialect: DialectLogQL, LevelField: "lvl", NamespaceField: "ns"}}
+	if !strings.Contains(custom.Description(), `lvl="error"`) || !strings.Contains(custom.Description(), `ns="apps"`) {
+		t.Fatalf("Loki description must interpolate configured field names: %s", custom.Description())
+	}
+	// Every log tool's DESCRIPTION and SCHEMA must name LogQL — never LogsQL — on Loki.
 	for _, tool := range []interface {
 		Description() string
 		Schema() string
 	}{LogsErrorSummaryTool{Fields: logql}, DiscoverLogFieldsTool{Fields: logql}} {
 		if strings.Contains(tool.Schema(), "LogsQL") {
 			t.Fatalf("loki-dialect schema must not mention LogsQL: %s", tool.Schema())
+		}
+		if strings.Contains(tool.Description(), "LogsQL") {
+			t.Fatalf("loki-dialect description must not mention LogsQL: %s", tool.Description())
 		}
 	}
 }

@@ -109,8 +109,9 @@ func (t DiscoverLogFieldsTool) Name() string { return "discover_log_fields" }
 func (t DiscoverLogFieldsTool) Description() string {
 	return "List the log FIELD NAMES that actually exist for a selector — use when query_logs returns 'no log lines " +
 		"matched' or you're unsure of the collector's schema (e.g. is it kubernetes.container_name or container?). " +
-		"Give a namespace/container (or a raw LogsQL query) and it returns the real field names with hit counts, so you " +
-		"can fix the query instead of guessing. since_minutes bounds the window (default 60)."
+		"Give a namespace/container (or a raw " + t.Fields.queryLang() + " query) and it returns the real field names " +
+		"(with hit counts where the backend reports them), so you can fix the query instead of guessing. " +
+		"since_minutes bounds the window (default 60)."
 }
 
 // Schema returns the JSON schema for the arguments.

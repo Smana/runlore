@@ -85,12 +85,41 @@ func (f LogFields) resolved() LogFields {
 	return f
 }
 
-// queryLang names the dialect for tool descriptions/schemas.
+// queryLang names the dialect (bare) for tool schemas ("raw LogQL"/"raw LogsQL").
 func (f LogFields) queryLang() string {
 	if f.Dialect == DialectLogQL {
 		return "LogQL"
 	}
 	return "LogsQL"
+}
+
+// dialectLabel names the dialect with its backend for tool descriptions — the
+// description-side counterpart of queryLang(), so both forms derive the dialect
+// from one place and no tool description can name the wrong one.
+func (f LogFields) dialectLabel() string {
+	if f.Dialect == DialectLogQL {
+		return "LogQL (Grafana Loki)"
+	}
+	return "LogsQL (VictoriaLogs)"
+}
+
+// rawQueryGuidance is the dialect- and field-aware instruction for a raw `query`
+// override, interpolated with the RESOLVED field names so an operator's
+// config.logs.fields overrides reach the model verbatim (rather than a hardcoded
+// `detected_level`/`namespace` a custom collector may not have). Shared by the
+// log tools' descriptions so the guidance and the query builder can't drift.
+func (f LogFields) rawQueryGuidance() string {
+	c := f.resolved()
+	if f.Dialect == DialectLogQL {
+		return fmt.Sprintf("If you write a raw `query`: it MUST start with a stream selector using Loki stream labels, "+
+			"e.g. `{%s=\"apps\", %s=\"x\"}`; filter severity with `| %s=\"error\"` (no parser needed) or parse first with `| json` / `| logfmt`. "+
+			"Do NOT use VictoriaLogs LogsQL syntax (unpack_json, _msg, field:value filters).",
+			c.NamespaceField, c.ContainerField, c.LevelField)
+	}
+	return fmt.Sprintf("If you write a raw `query`: stream labels use DOT notation (%s, %s), NOT underscores; "+
+		"to filter by severity you MUST unpack JSON first, e.g. `{%s=\"x\"} | %s | %s:error`. "+
+		"Do NOT use `level=error` — that is Prometheus/Loki syntax and is invalid LogsQL.",
+		c.ContainerField, c.NamespaceField, c.ContainerField, c.UnpackPipe, c.LevelField)
 }
 
 // logGroup is one distinct log message with its repeat count, the span over which
