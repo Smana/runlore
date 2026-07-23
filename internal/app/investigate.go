@@ -19,6 +19,8 @@ import (
 	"github.com/Smana/runlore/internal/curator"
 	"github.com/Smana/runlore/internal/httpx"
 	"github.com/Smana/runlore/internal/investigate"
+	"github.com/Smana/runlore/internal/logs"
+	"github.com/Smana/runlore/internal/logs/loki"
 	"github.com/Smana/runlore/internal/logs/victorialogs"
 	"github.com/Smana/runlore/internal/mcp"
 	"github.com/Smana/runlore/internal/metrics/prometheus"
@@ -139,32 +141,51 @@ func BuildModelAndTools(ctx context.Context, cfg *config.Config, gp providers.Gi
 	}
 	if cfg.Logs.URL != "" {
 		warnIfBackendUnreachable(ctx, log, "logs", cfg.Logs.URL)
-		// Resolve the OPTIONAL collector field convention once; an unset config yields
-		// the shipped defaults, so this is a no-op unless logs.fields is set.
-		lf := cfg.Logs.Fields.Resolved()
-		lg := victorialogs.NewWithAuth(cfg.Logs.URL, cfg.Logs.TokenEnv, cfg.Logs.Headers).WithLevelField(lf.LevelField)
+		// Backend provider (M1): a config pin wins; otherwise probe once at startup,
+		// mirroring the metrics flavor detection above. Detection fails safe to
+		// VictoriaLogs — the provider RunLore shipped with — so an existing deployment
+		// (or an unreachable backend at startup) sees no behaviour change.
+		provider := cfg.Logs.Provider
+		if provider == "" {
+			provider = logs.Detect(ctx, cfg.Logs.URL, cfg.Logs.TokenEnv, cfg.Logs.Headers)
+		}
+		// Resolve the OPTIONAL collector field convention once, per provider; an unset
+		// config yields the provider's shipped defaults, so this is a no-op unless
+		// logs.fields is set.
+		lf := cfg.Logs.Fields.ResolvedFor(provider)
+		var lg providers.LogsProvider
+		dialect := investigate.DialectLogsQL
+		switch provider {
+		case config.LogsProviderLoki:
+			lg = loki.NewWithAuth(cfg.Logs.URL, cfg.Logs.TokenEnv, cfg.Logs.Headers).WithLevelField(lf.LevelField)
+			dialect = investigate.DialectLogQL
+		default: // victorialogs — the shipped default
+			lg = victorialogs.NewWithAuth(cfg.Logs.URL, cfg.Logs.TokenEnv, cfg.Logs.Headers).WithLevelField(lf.LevelField)
+		}
+		log.Info("logs backend provider", "provider", provider, "pinned", cfg.Logs.Provider != "")
+		flds := investigate.LogFields{
+			ContainerField: lf.ContainerField,
+			NamespaceField: lf.NamespaceField,
+			PodField:       lf.PodField,
+			LevelField:     lf.LevelField,
+			UnpackPipe:     lf.UnpackPipe,
+			Dialect:        dialect,
+		}
 		tools = append(tools,
 			// query_logs reads the same raw pod logs pod_logs does, so it shares the
 			// pod_log_namespaces allowlist (L2 confinement) and honours the field
 			// convention (L1). The incident namespace is injected per-investigation by
 			// the loop (scopeTools), exactly like pod_logs.
 			investigate.QueryLogsTool{
-				Logs: lg,
-				Fields: investigate.LogFields{
-					ContainerField: lf.ContainerField,
-					NamespaceField: lf.NamespaceField,
-					PodField:       lf.PodField,
-					LevelField:     lf.LevelField,
-					UnpackPipe:     lf.UnpackPipe,
-				},
+				Logs:              lg,
+				Fields:            flds,
 				AllowedNamespaces: cfg.Investigation.PodLogNamespaces,
 			},
-			// logs_error_summary (error volume histogram + top messages) and
-			// discover_log_fields (real field names) both degrade gracefully when the
-			// backend lacks the analytics/field capability, so they are safe to always
-			// register whenever a logs backend is configured.
-			investigate.LogsErrorSummaryTool{Logs: lg},
-			investigate.DiscoverLogFieldsTool{Logs: lg},
+			// logs_error_summary and discover_log_fields degrade gracefully when the
+			// backend lacks the analytics/field capability (both VictoriaLogs and Loki
+			// implement them), so they are safe to always register.
+			investigate.LogsErrorSummaryTool{Logs: lg, Fields: flds},
+			investigate.DiscoverLogFieldsTool{Logs: lg, Fields: flds},
 		)
 	}
 	// Network-flow data source (the network_drops tool). Pluggable and CNI-agnostic:

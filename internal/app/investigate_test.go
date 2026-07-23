@@ -460,3 +460,55 @@ func TestWarnIfBackendUnreachable(t *testing.T) {
 	warnIfBackendUnreachable(context.Background(), log, "metrics", "")
 	warnIfBackendUnreachable(context.Background(), nil, "metrics", "http://127.0.0.1:1")
 }
+
+// TestLogsBackendSelection: logs.provider pins the backend; empty auto-detects
+// (Loki answers /loki/api/v1/status/buildinfo, VictoriaLogs 404s), failing safe
+// to victorialogs. The observable contract is the dialect carried on the
+// registered query_logs tool — LogQL means the Loki client + LogQL guidance.
+func TestLogsBackendSelection(t *testing.T) {
+	t.Setenv("KUBECONFIG", filepath.Join(t.TempDir(), "nonexistent-kubeconfig"))
+	log := discardLog()
+	base := config.Model{Provider: "openai", BaseURL: "http://vllm:8000/v1", Model: "test-model"}
+
+	lokiSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/loki/api/v1/status/buildinfo" {
+			_, _ = io.WriteString(w, `{"version":"3.1.0"}`)
+			return
+		}
+		http.NotFound(w, r)
+	}))
+	defer lokiSrv.Close()
+	vlSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.NotFound(w, r)
+	}))
+	defer vlSrv.Close()
+
+	tests := []struct {
+		name, url, pin, wantDialect string
+	}{
+		{"auto-detect loki", lokiSrv.URL, "", investigate.DialectLogQL},
+		{"auto-detect fail-safe victorialogs", vlSrv.URL, "", investigate.DialectLogsQL},
+		{"pinned loki skips probe", vlSrv.URL, "loki", investigate.DialectLogQL},
+		{"pinned victorialogs skips probe", lokiSrv.URL, "victorialogs", investigate.DialectLogsQL},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := &config.Config{Model: base}
+			cfg.Logs.URL = tc.url
+			cfg.Logs.Provider = tc.pin
+			_, tools, _, _ := BuildModelAndTools(context.Background(), cfg, nil, nil, log)
+			found := false
+			for _, tool := range tools {
+				if qt, ok := tool.(investigate.QueryLogsTool); ok {
+					found = true
+					if qt.Fields.Dialect != tc.wantDialect {
+						t.Fatalf("dialect = %q, want %q", qt.Fields.Dialect, tc.wantDialect)
+					}
+				}
+			}
+			if !found {
+				t.Fatalf("query_logs not registered")
+			}
+		})
+	}
+}
