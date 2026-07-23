@@ -119,3 +119,50 @@ func TestSuspendAlreadyPausedPreservesSavedPolicy(t *testing.T) {
 		t.Fatalf("double-suspend clobbered the saved policy: %q", v)
 	}
 }
+
+func TestResumeRestoresSavedPolicyAndClearsAnnotation(t *testing.T) {
+	c := newClient(app(nil, map[string]any{PausedPolicyAnnotation: `{"prune":true,"selfHeal":true}`}))
+	if err := New(c).Execute(context.Background(), action("resume")); err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	u := get(t, c)
+	automated, found, _ := unstructured.NestedMap(u.Object, "spec", "syncPolicy", "automated")
+	if !found {
+		t.Fatal("spec.syncPolicy.automated not restored")
+	}
+	if automated["prune"] != true || automated["selfHeal"] != true {
+		t.Fatalf("restored policy = %v, want prune+selfHeal true", automated)
+	}
+	if _, ok := u.GetAnnotations()[PausedPolicyAnnotation]; ok {
+		t.Fatal("saved-policy annotation not removed after resume")
+	}
+}
+
+func TestResumeRestoresEmptyAutomatedObject(t *testing.T) {
+	// automated: {} is valid Argo config (auto-sync with default flags) and must
+	// round-trip distinctly from "no automated at all".
+	c := newClient(app(nil, map[string]any{PausedPolicyAnnotation: `{}`}))
+	if err := New(c).Execute(context.Background(), action("resume")); err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	if _, found, _ := unstructured.NestedMap(get(t, c).Object, "spec", "syncPolicy", "automated"); !found {
+		t.Fatal("empty automated object not restored")
+	}
+}
+
+func TestResumeWithoutPriorPauseIsNoop(t *testing.T) {
+	c := newClient(app(nil, nil)) // RunLore never paused this app
+	if err := New(c).Execute(context.Background(), action("resume")); err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	if _, found, _ := unstructured.NestedMap(get(t, c).Object, "spec", "syncPolicy", "automated"); found {
+		t.Fatal("resume invented an auto-sync policy on an app RunLore never paused")
+	}
+}
+
+func TestResumeCorruptSavedPolicyErrors(t *testing.T) {
+	c := newClient(app(nil, map[string]any{PausedPolicyAnnotation: `not-json`}))
+	if err := New(c).Execute(context.Background(), action("resume")); err == nil {
+		t.Fatal("expected error for unreadable saved policy (must not guess a policy)")
+	}
+}

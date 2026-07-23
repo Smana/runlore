@@ -104,9 +104,32 @@ func (e *Executor) pauseAutoSync(ctx context.Context, a providers.Action) error 
 	})
 }
 
-// resumeAutoSync is implemented in Task 4; stub it so the package compiles.
+// resumeAutoSync restores spec.syncPolicy.automated from PausedPolicyAnnotation
+// and removes the annotation in the same patch. An app with no saved policy is
+// a no-op: RunLore never paused it, and inventing an auto-sync policy an
+// operator never configured would be a mutation outside the op's contract. A
+// saved policy that no longer parses is an ERROR, not a guess.
 func (e *Executor) resumeAutoSync(ctx context.Context, a providers.Action) error {
-	return fmt.Errorf("not implemented")
+	u, err := e.get(ctx, a)
+	if err != nil {
+		return err
+	}
+	saved, ok := u.GetAnnotations()[PausedPolicyAnnotation]
+	if !ok {
+		return nil // never paused by RunLore: nothing to restore
+	}
+	var automated map[string]any
+	if err := json.Unmarshal([]byte(saved), &automated); err != nil {
+		return fmt.Errorf("argocd resume %s/%s: saved sync policy unreadable: %w",
+			a.Target.Namespace, a.Target.Name, err)
+	}
+	if automated == nil {
+		automated = map[string]any{} // JSON "null" round-trips to the empty automated object
+	}
+	return e.patch(ctx, a, map[string]any{
+		"metadata": map[string]any{"annotations": map[string]any{PausedPolicyAnnotation: nil}},
+		"spec":     map[string]any{"syncPolicy": map[string]any{"automated": automated}},
+	})
 }
 
 // get fetches the target Application (needed by pause/resume to read the
