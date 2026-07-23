@@ -8,6 +8,9 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/Smana/runlore/internal/catalog"
+	"github.com/Smana/runlore/internal/kbvalidate"
 )
 
 func writeFile(t *testing.T, dir, name, content string) {
@@ -74,5 +77,58 @@ func TestKBImportSkipsReservedAndInvalid(t *testing.T) {
 	}
 	if strings.Contains(out, "README.md") {
 		t.Fatalf("reserved files must be silently ignored:\n%s", out)
+	}
+}
+
+func TestKBImportEndToEnd(t *testing.T) {
+	kb := t.TempDir()
+	var buf bytes.Buffer
+	if err := runKBImport([]string{"testdata/kbimport", "--into", kb}, &buf); err != nil {
+		t.Fatal(err)
+	}
+
+	// The bare runbook became a Playbook; the postmortem an Incident.
+	playbook, err := os.ReadFile(filepath.Join(kb, "playbooks", "redis-failover.md"))
+	if err != nil {
+		t.Fatalf("playbook not written: %v", err)
+	}
+	for _, want := range []string{"type: Playbook", "title: Redis failover", "- redisdown", "## Steps"} {
+		if !strings.Contains(string(playbook), want) {
+			t.Errorf("playbook missing %q:\n%s", want, playbook)
+		}
+	}
+	incident, err := os.ReadFile(filepath.Join(kb, "incidents", "payments-api-outage.md"))
+	if err != nil {
+		t.Fatalf("incident not written: %v", err)
+	}
+	for _, want := range []string{"type: Incident", "resource: payments/api", "2024-03-14", "- payments", "## Cause"} {
+		if !strings.Contains(string(incident), want) {
+			t.Errorf("incident missing %q:\n%s", want, incident)
+		}
+	}
+
+	// The near-duplicate title was skipped, the README ignored.
+	if !strings.Contains(buf.String(), "duplicate of") && !strings.Contains(buf.String(), "collides") {
+		t.Fatalf("legacy redis copy must be skipped as a duplicate:\n%s", buf.String())
+	}
+
+	// Round-trip guarantee: everything written loads back and passes the gate.
+	entries, skipped, err := catalog.Load(kb)
+	if err != nil || len(skipped) > 0 {
+		t.Fatalf("written entries must parse: err=%v skipped=%v", err, skipped)
+	}
+	if n := kbvalidate.WarnInvalid(entries, func(p string, errs []kbvalidate.Issue) {
+		t.Errorf("invalid written entry %s: %v", p, errs)
+	}); n != 0 {
+		t.Fatalf("%d written entries fail the merge gate", n)
+	}
+
+	// Idempotence: a second run imports nothing.
+	var buf2 bytes.Buffer
+	if err := runKBImport([]string{"testdata/kbimport", "--into", kb}, &buf2); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(buf2.String(), "imported 0") {
+		t.Fatalf("re-run must be a no-op:\n%s", buf2.String())
 	}
 }

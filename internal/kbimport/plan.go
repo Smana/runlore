@@ -24,16 +24,19 @@ type Action struct {
 const dupThreshold = 0.6
 
 // Plan dedups inferred results against the existing catalog and against each
-// other, preserving input order. It only decides — the caller reports/writes.
-// Skip reasons are checked in order: retired-at-source, destination already an
-// existing entry, fuzzy title duplicate, then batch path collision.
+// other, preserving input order (first occurrence wins). It only decides — the
+// caller reports/writes. Skip reasons are checked in order: retired-at-source,
+// destination already an existing entry, fuzzy title duplicate of an existing
+// entry, batch path collision, then fuzzy title duplicate of an entry already
+// accepted earlier in this same batch.
 func Plan(results []Result, existing []catalog.Entry) []Action {
 	existingPaths := map[string]bool{}
 	for _, e := range existing {
 		existingPaths[e.Path] = true
 	}
-	batchPaths := map[string]string{} // dest path -> the batch source that first claimed it
-	out := make([]Action, 0, len(results))
+	batchPaths := map[string]string{}      // dest path -> the batch source that first claimed it
+	var accepted []catalog.Entry           // entries accepted so far this batch, for intra-batch title dedup
+	out := make([]Action, 0, len(results)) //nolint:prealloc // appended conditionally below
 	for _, r := range results {
 		a := Action{Result: r}
 		switch {
@@ -46,8 +49,11 @@ func Plan(results []Result, existing []catalog.Entry) []Action {
 				a.Skip, a.Reason = true, "duplicate of "+dup
 			} else if occ, taken := batchPaths[r.DestPath]; taken {
 				a.Skip, a.Reason = true, fmt.Sprintf("destination %s collides with %s in this batch", r.DestPath, occ)
+			} else if dup, ok := duplicateOf(r.Entry.Title, accepted); ok {
+				a.Skip, a.Reason = true, fmt.Sprintf("duplicate of %s (imported earlier in this batch)", dup)
 			} else {
 				batchPaths[r.DestPath] = r.Source
+				accepted = append(accepted, catalog.Entry{Title: r.Entry.Title, Path: r.DestPath})
 			}
 		}
 		out = append(out, a)

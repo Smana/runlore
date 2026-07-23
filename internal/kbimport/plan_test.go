@@ -55,3 +55,20 @@ func TestPlanDedup(t *testing.T) {
 		}
 	}
 }
+
+func TestPlanIntraBatchTitleDedup(t *testing.T) {
+	// Two batch entries with fuzzy-duplicate titles but DIFFERENT dest paths
+	// (so path collision can't catch them) against an empty catalog: the second
+	// is skipped as a duplicate of the first accepted this batch.
+	in := []Result{
+		res("Redis failover", "playbooks/redis-failover.md", "a.md"),
+		res("Redis failover runbook", "playbooks/redis-failover-runbook.md", "b.md"),
+	}
+	got := Plan(in, nil)
+	if got[0].Skip {
+		t.Fatalf("first occurrence must be imported: %+v", got[0])
+	}
+	if !got[1].Skip || !strings.Contains(got[1].Reason, "imported earlier in this batch") {
+		t.Fatalf("second must be skipped as intra-batch duplicate, got skip=%v reason=%q", got[1].Skip, got[1].Reason)
+	}
+}
