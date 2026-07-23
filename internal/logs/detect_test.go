@@ -35,7 +35,7 @@ func TestDetect(t *testing.T) {
 		t.Fatalf("404 must fail safe to victorialogs, got %q", got)
 	}
 
-	htmlSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	htmlSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		_, _ = io.WriteString(w, `<html>welcome</html>`) // 200 but not buildinfo
 	}))
 	defer htmlSrv.Close()

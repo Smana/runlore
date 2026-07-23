@@ -92,7 +92,7 @@ func TestQueryAuthHeaders(t *testing.T) {
 // limit=maxLines once and appends the shared TruncationLine sentinel when the
 // server returned exactly the limit (more likely matched upstream).
 func TestQueryTruncation(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		_, _ = io.WriteString(w, `{"status":"success","data":{"resultType":"streams","result":[
 		  {"stream":{"namespace":"apps"},"values":[
 		    ["1750413602000000000","a"],["1750413601000000000","b"],["1750413600000000000","c"]]}]}}`)
@@ -120,7 +120,7 @@ func TestQueryErrorPaths(t *testing.T) {
 		t.Fatalf("backend down must error")
 	}
 
-	bad := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	bad := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		http.Error(w, "too many outstanding requests", http.StatusTooManyRequests)
 	}))
 	defer bad.Close()
@@ -129,7 +129,7 @@ func TestQueryErrorPaths(t *testing.T) {
 		t.Fatalf("non-200 must error with the status, got %v", err)
 	}
 
-	malformed := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	malformed := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		_, _ = io.WriteString(w, `{"status":"success","data":{"resultType":"streams","result":`)
 	}))
 	defer malformed.Close()
@@ -137,7 +137,7 @@ func TestQueryErrorPaths(t *testing.T) {
 		t.Fatalf("malformed body must error")
 	}
 
-	empty := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	empty := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		_, _ = io.WriteString(w, `{"status":"success","data":{"resultType":"streams","result":[]}}`)
 	}))
 	defer empty.Close()
@@ -193,7 +193,7 @@ func TestHits(t *testing.T) {
 }
 
 func TestTopMessages(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		_, _ = io.WriteString(w, `{"status":"success","data":{"resultType":"streams","result":[
 		  {"stream":{"namespace":"apps"},"values":[
 		    ["1750413603000000000","connection refused to 10.0.0.7"],
@@ -222,7 +222,7 @@ func TestTopMessages(t *testing.T) {
 }
 
 func TestHitsErrorPath(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		http.Error(w, "parse error: unexpected token", http.StatusBadRequest)
 	}))
 	defer srv.Close()
