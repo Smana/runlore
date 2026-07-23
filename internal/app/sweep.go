@@ -4,14 +4,11 @@ package app
 
 import (
 	"log/slog"
-	"strings"
 
 	"github.com/Smana/runlore/internal/audit"
 	"github.com/Smana/runlore/internal/config"
 	"github.com/Smana/runlore/internal/curate"
 	"github.com/Smana/runlore/internal/outcome"
-
-	github "github.com/Smana/runlore/internal/forge/github"
 )
 
 // BuildSweeper assembles the in-server grooming sweeper, or nil when sweeps are
@@ -26,17 +23,11 @@ func BuildSweeper(cfg *config.Config, ledger *outcome.Ledger, aud audit.Auditor,
 	if tok == nil || cfg.Forge.KBRepo == "" {
 		return nil // no forge, nothing to groom — sweeps are strictly additive
 	}
-	owner, repo, ok := strings.Cut(cfg.Forge.KBRepo, "/")
-	if !ok {
-		log.Warn("curate sweeps disabled: forge.kb_repo must be owner/name", "kb_repo", cfg.Forge.KBRepo)
+	guarded, err := buildGuardedForge(cfg, tok, cfg.Curate.Sweeps.DryRun(), aud, log)
+	if err != nil {
+		log.Warn("curate sweeps disabled", "err", err)
 		return nil
 	}
-	base := cfg.Forge.BaseBranch
-	if base == "" {
-		base = "main"
-	}
-	client := github.New(cfg.Forge.GitHubAPIURL, owner, repo, base, github.TokenFunc(tok))
-	guarded := curate.Guard{Inner: client, DryRun: cfg.Curate.Sweeps.DryRun(), Audit: aud, Log: log}
 	// The LIVE serve ledger: the ledger-backed passes see the same episodes the
 	// investigation loop records — no shared-volume mount to misconfigure (the
 	// CronJob's classic footgun; see LogLedgerStartup in curate.go).

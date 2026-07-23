@@ -13,13 +13,15 @@ import (
 )
 
 // GuardedForge is the union of every read and write the grooming passes perform —
-// the surface Guard wraps. *github.Client satisfies it (pinned in internal/app).
+// the surface Guard wraps. Composed from the pass role interfaces so it stays in
+// sync with them by construction (RetireForge adds ListClosedUnmergedPRsByLabel +
+// OpenRetirePR; ContestedForge adds ListIssueCommentBodies + IsPROpen; overlapping
+// methods across the embedded sets are legal since Go 1.14). *github.Client
+// satisfies it (pinned in internal/app).
 type GuardedForge interface {
 	Forge
-	ListClosedUnmergedPRsByLabel(ctx context.Context, label string) ([]providers.CuratedIssue, error)
-	ListIssueCommentBodies(ctx context.Context, number int) ([]string, error)
-	IsPROpen(ctx context.Context, number int) (bool, error)
-	OpenRetirePR(ctx context.Context, entryPath, body string) (providers.Ref, error)
+	RetireForge
+	ContestedForge
 }
 
 // Guard is the sweep-safety seam around the forge: reads pass through untouched;

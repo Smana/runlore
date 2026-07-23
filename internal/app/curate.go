@@ -10,6 +10,7 @@ import (
 	"os"
 	"strings"
 
+	"github.com/Smana/runlore/internal/audit"
 	"github.com/Smana/runlore/internal/config"
 	"github.com/Smana/runlore/internal/curate"
 	"github.com/Smana/runlore/internal/logging"
@@ -45,15 +46,6 @@ func RunCurate(args []string) error {
 	if tok == nil {
 		return fmt.Errorf("curate requires a configured GitHub App (forge.github_app)")
 	}
-	owner, repo, ok := strings.Cut(cfg.Forge.KBRepo, "/")
-	if !ok {
-		return fmt.Errorf("forge.kb_repo must be owner/name")
-	}
-	base := cfg.Forge.BaseBranch
-	if base == "" {
-		base = "main"
-	}
-	forge := github.New(cfg.Forge.GitHubAPIURL, owner, repo, base, github.TokenFunc(tok))
 	// Same audit chain as the action executors (actions.audit_log_path); Nop when
 	// unconfigured. Every forge write (or dry-run skip) below lands in it.
 	aud, auditClose, aerr := BuildAuditor(cfg, log)
@@ -61,7 +53,10 @@ func RunCurate(args []string) error {
 		return aerr
 	}
 	defer auditClose()
-	guarded := curate.Guard{Inner: forge, DryRun: *dry, Audit: aud, Log: log}
+	guarded, gerr := buildGuardedForge(cfg, tok, *dry, aud, log)
+	if gerr != nil {
+		return gerr
+	}
 
 	// Open the outcome ledger when configured; the ledger-backed passes are wired
 	// only when it exists. outcome.New succeeds on a missing file, so LogLedgerStartup
@@ -81,6 +76,24 @@ func RunCurate(args []string) error {
 	log.Info("curate: grooming KB backlog", "repo", cfg.Forge.KBRepo, "dry_run", *dry)
 	BuildCurateAgent(cfg, guarded, ledger, log).Run(context.Background())
 	return nil
+}
+
+// buildGuardedForge constructs the KB forge client and wraps it in the dry-run +
+// audit Guard, in one place so the one-shot `lore curate` CLI and the in-server
+// sweeper groom against an identically-built forge (the drift BuildCurateAgent
+// exists to prevent, one layer up). The differing error posture stays at the
+// call sites: RunCurate returns the error, BuildSweeper warns and disables.
+func buildGuardedForge(cfg *config.Config, tok ForgeToken, dryRun bool, aud audit.Auditor, log *slog.Logger) (curate.GuardedForge, error) {
+	owner, repo, ok := strings.Cut(cfg.Forge.KBRepo, "/")
+	if !ok {
+		return nil, fmt.Errorf("forge.kb_repo must be owner/name, got %q", cfg.Forge.KBRepo)
+	}
+	base := cfg.Forge.BaseBranch
+	if base == "" {
+		base = "main"
+	}
+	client := github.New(cfg.Forge.GitHubAPIURL, owner, repo, base, github.TokenFunc(tok))
+	return curate.Guard{Inner: client, DryRun: dryRun, Audit: aud, Log: log}, nil
 }
 
 // BuildCurateAgent assembles the grooming passes over a (typically Guard-wrapped)
