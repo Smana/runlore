@@ -35,6 +35,7 @@ type sourceDiffFile struct {
 // global backstop.
 const (
 	sourceDiffMaxCommits   = 50
+	sourceDiffMaxDiffstat  = 200      // diffstat lines before the tail is folded into "and N more"
 	sourceDiffSummaryBytes = 8 << 10  // hunks budget in a summary response
 	sourceDiffZoomBytes    = 16 << 10 // hunks budget in a paths-zoom response
 )
@@ -121,20 +122,57 @@ func renderSourceChanges(sc whatchanged.SourceChanges, zoom []string) string {
 		add, del := countChanges(strings.Split(f.Patch, "\n"))
 		files = append(files, sourceDiffFile{f.Path, f.Patch, add, del, generatedPath(f.Path)})
 	}
-	b.WriteString("files:\n")
-	for _, f := range files {
-		note := ""
-		if f.generated {
-			note = "  (generated — hunks skipped; zoom with paths to read)"
-		}
-		fmt.Fprintf(&b, "  %s +%d -%d%s\n", f.path, f.add, f.del, note)
-	}
+	renderDiffstat(&b, files)
 	if len(zoom) > 0 {
 		renderZoom(&b, files, zoom)
 		return b.String()
 	}
 	renderSummaryHunks(&b, files)
 	return b.String()
+}
+
+// renderDiffstat writes the per-file change summary, largest churn first, capped
+// at sourceDiffMaxDiffstat lines. The diffstat is the ONE output section that
+// otherwise scales with repo size (commits are capped, hunks byte-budgeted), so
+// a monorepo release of thousands of files would blow the token budget and get
+// blind-truncated by the loop's global backstop — taking the zoom index with it.
+// The tail is folded into one "and N more files" line with aggregate churn, and
+// every file stays reachable via paths zoom. Generated/vendored files carry a
+// terse [gen] marker explained once by a legend rather than a full note per line.
+func renderDiffstat(b *strings.Builder, files []sourceDiffFile) {
+	sort.Slice(files, func(i, j int) bool {
+		return files[i].add+files[i].del > files[j].add+files[j].del
+	})
+	hasGenerated := false
+	for _, f := range files {
+		if f.generated {
+			hasGenerated = true
+			break
+		}
+	}
+	b.WriteString("files (largest first):\n")
+	if hasGenerated {
+		b.WriteString("  ([gen] = generated/vendored — hunks omitted from the summary; read via paths)\n")
+	}
+	shown := files
+	if len(shown) > sourceDiffMaxDiffstat {
+		shown = shown[:sourceDiffMaxDiffstat]
+	}
+	for _, f := range shown {
+		marker := ""
+		if f.generated {
+			marker = " [gen]"
+		}
+		fmt.Fprintf(b, "  %s +%d -%d%s\n", f.path, f.add, f.del, marker)
+	}
+	if rest := files[len(shown):]; len(rest) > 0 {
+		var add, del int
+		for _, f := range rest {
+			add += f.add
+			del += f.del
+		}
+		fmt.Fprintf(b, "  … and %d more files (+%d -%d total) — zoom with paths to read any\n", len(rest), add, del)
+	}
 }
 
 // renderZoom emits full hunks for the requested paths (generated or not — an

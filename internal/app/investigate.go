@@ -7,8 +7,10 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"go.opentelemetry.io/otel/attribute"
@@ -304,7 +306,14 @@ func appendSourceDiffTool(cfg *config.Config, tools []investigate.Tool, log *slo
 		log.Warn("source_repos: invalid allowlist; source_diff disabled", "err", err)
 		return tools
 	}
-	sd := &whatchanged.Differ{TokenSource: BuildForgeTokenSource(cfg, log)}
+	// Confine the GitHub App token to the forge's own host: source_diff clone
+	// URLs are model-chosen across the whole allowlist, so without this a
+	// github.com token would be transmitted to any other allowlisted host (e.g.
+	// a gitlab.com repo). Off-host repos clone anonymously.
+	sd := &whatchanged.Differ{
+		TokenSource: BuildForgeTokenSource(cfg, log),
+		TokenHost:   githubGitHost(cfg.Forge.GitHubAPIURL),
+	}
 	if cfg.GitOps.Mirror.IsEnabled() {
 		base := cfg.GitOps.Mirror.Dir
 		if base == "" {
@@ -316,8 +325,26 @@ func appendSourceDiffTool(cfg *config.Config, tools []investigate.Tool, log *slo
 			sd.Mirrors = mc
 		}
 	}
-	log.Info("source_diff enabled", "allow", cfg.SourceRepos.Allow)
+	log.Info("source_diff enabled", "allow", cfg.SourceRepos.Allow, "token_host", sd.TokenHost)
 	return append(tools, investigate.SourceDiffTool{Source: sd, Allow: allow})
+}
+
+// githubGitHost derives the git host the GitHub App token is valid for from the
+// configured GitHub API URL. Default/empty ⇒ github.com. A GitHub Enterprise
+// API URL (https://ghe.example.com/api/v3) shares its host with the git remote,
+// so the host is returned as-is; the public api.github.com maps to github.com.
+func githubGitHost(apiURL string) string {
+	if apiURL == "" {
+		return "github.com"
+	}
+	u, err := url.Parse(apiURL)
+	if err != nil || u.Hostname() == "" {
+		return "github.com"
+	}
+	if h := strings.ToLower(u.Hostname()); h != "api.github.com" {
+		return h
+	}
+	return "github.com"
 }
 
 // appendMCPTools discovers tools from each configured MCP server and appends them

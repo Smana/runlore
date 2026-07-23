@@ -26,3 +26,18 @@ func TestAppendSourceDiffTool(t *testing.T) {
 		}
 	})
 }
+
+func TestGithubGitHost(t *testing.T) {
+	for _, tc := range []struct{ in, want string }{
+		{"", "github.com"},
+		{"https://api.github.com", "github.com"},
+		{"https://api.github.com/", "github.com"},
+		{"https://ghe.example.com/api/v3", "ghe.example.com"},
+		{"https://GHE.Example.COM/api/v3", "ghe.example.com"},
+		{"not a url", "github.com"},
+	} {
+		if got := githubGitHost(tc.in); got != tc.want {
+			t.Fatalf("githubGitHost(%q) = %q, want %q", tc.in, got, tc.want)
+		}
+	}
+}

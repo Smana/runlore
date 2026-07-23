@@ -54,6 +54,17 @@ func TestMatch(t *testing.T) {
 		{"scheme to other host", "https://evil.com/github.com/acme/x", "", false},
 		{"userinfo with path prefix", "evil.com/acme@github.com/acme/checkout", "", false},
 		{"double at", "git@x@github.com/acme/checkout", "", false},
+		// percent-encoded traversal: a git server may decode %2f/%2e back into
+		// path separators AFTER the match, escaping the allowed org — reject it here.
+		{"percent-encoded traversal", "github.com/acme/x%2f%2e%2e%2f%2e%2e%2fevil/secret", "", false},
+		{"percent-encoded slash", "github.com/acme/x%2fy", "", false},
+		{"bare percent", "github.com/acme/x%20y", "", false},
+		{"query string", "github.com/acme/x?ref=evil", "", false},
+		{"fragment", "github.com/acme/x#evil", "", false},
+		{"embedded newline", "github.com/acme/x\ny", "", false},
+		{"embedded null", "github.com/acme/x\x00y", "", false},
+		{"port", "github.com:443/acme/checkout", "", false},
+		{"unicode homoglyph host", "gіthub.com/acme/checkout", "", false}, // Cyrillic 'і'
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			url, ok := a.Match(tc.in)

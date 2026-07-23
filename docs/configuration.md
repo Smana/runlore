@@ -496,8 +496,13 @@ source_repos:
   (`*` never crosses `/`). Matching is enforced server-side **before any network call** —
   the model can only make RunLore clone repos you listed, whatever it writes.
 - **Auth:** private **GitHub** repos reuse the forge GitHub App installation token (install
-  the App on those repos with `contents: read`). Public repos need nothing. Private
-  non-GitHub hosts are not supported yet.
+  the App on those repos with `contents: read`). The token is confined to the forge's own
+  host — a repo on any other host (e.g. a `gitlab.com/...` entry) is cloned **anonymously**,
+  so the GitHub token is never transmitted off-host; public repos need nothing and private
+  non-GitHub hosts are not supported yet. Because the model chooses which allowlisted repo to
+  diff, keep the allowlist **and** the App's installation scope no broader than the source you
+  intend RunLore to read — a wide `github.com/org/*` glob plus an org-wide install lets the
+  agent diff any repo in that org.
 - **Repo selection is done by the model.** For Terraform/module bumps the repo URL is in
   the GitOps diff, so it is exact; for images it name-matches against your allowlist (a
   wrong guess fails at ref resolution — the tag won't exist — and the error lists nearby

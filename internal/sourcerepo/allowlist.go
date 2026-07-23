@@ -115,10 +115,34 @@ func normalize(raw string) (string, error) {
 		return "", fmt.Errorf("repo %q contains '..'", raw)
 	case strings.Contains(s, "@"):
 		return "", fmt.Errorf("repo %q contains userinfo", raw)
-	case strings.ContainsAny(s, " \t"):
-		return "", fmt.Errorf("repo %q contains whitespace", raw)
+	}
+	// Strict character allowlist on the normalized host/org/repo. This is the
+	// teeth of the boundary: a bare `..` check is not enough because a git
+	// server may percent-decode `%2e%2e%2f` back into traversal AFTER the match,
+	// escaping the allowed org. Rejecting anything outside [A-Za-z0-9._/-] kills
+	// percent-encoding, control chars, query/fragment, ports (':'), and
+	// whitespace in one gate — none of which appears in a real host/org/repo.
+	if bad := firstDisallowedRepoChar(s); bad != -1 {
+		return "", fmt.Errorf("repo %q contains a disallowed character %q (allowed: letters, digits, . _ - /)", raw, s[bad])
 	}
 	return lowerHost(s), nil
+}
+
+// firstDisallowedRepoChar returns the byte index of the first character not
+// allowed in a normalized host/org/repo, or -1 if all are allowed. ASCII-only
+// by construction — a multi-byte rune's lead byte is >0x7f and is rejected,
+// which also blocks homoglyph hosts.
+func firstDisallowedRepoChar(s string) int {
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		switch {
+		case c >= 'a' && c <= 'z', c >= 'A' && c <= 'Z', c >= '0' && c <= '9':
+		case c == '.' || c == '_' || c == '-' || c == '/':
+		default:
+			return i
+		}
+	}
+	return -1
 }
 
 // lowerHost lowercases the first path segment (the host — DNS names are

@@ -11,6 +11,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net/url"
 	"os"
 	"strings"
 	"time"
@@ -35,6 +36,15 @@ type Differ struct {
 	// (~1h) installation token stays fresh across a long-running agent. nil
 	// disables auth (e.g. public or local repos).
 	TokenSource func(context.Context) (string, error)
+	// TokenHost, when non-empty, confines the TokenSource credential to clones of
+	// that exact host — the GitHub App installation token is only valid for (and
+	// must only be sent to) the GitHub instance the App is installed on. A clone
+	// of any other host proceeds unauthenticated so a github.com token can never
+	// leak to, say, gitlab.com. Empty (the default, used by what_changed on the
+	// operator's own single-host GitOps repo) attaches the token to every clone,
+	// preserving the original behavior. source_diff sets this because its clone
+	// URLs are model-chosen across the whole allowlist.
+	TokenHost string
 	// Mirrors, when set, backs clones with a persistent per-repo bare mirror
 	// (incremental fetch, shared across investigations). nil ⇒ full clone per
 	// call, exactly as before. Mirror errors fall back to clone-per-call.
@@ -125,13 +135,19 @@ type singleFilePatch struct{ fp diff.FilePatch }
 func (p singleFilePatch) FilePatches() []diff.FilePatch { return []diff.FilePatch{p.fp} }
 func (p singleFilePatch) Message() string               { return "" }
 
-// auth builds the clone auth method from a freshly-minted installation token.
-// Returns (nil, nil) when no token source is configured or it yields an empty
-// token (public/local repos). A token-source error is surfaced so a private
-// clone fails loudly instead of silently attempting unauthenticated access.
-func (d *Differ) auth(ctx context.Context) (transport.AuthMethod, error) {
+// auth builds the clone auth method for cloneURL from a freshly-minted
+// installation token. Returns (nil, nil) when no token source is configured, it
+// yields an empty token (public/local repos), or TokenHost is set and cloneURL's
+// host does not match it — in which case the clone proceeds unauthenticated so
+// the GitHub App token is never transmitted to a foreign host. A token-source
+// error is surfaced so a private same-host clone fails loudly instead of
+// silently attempting unauthenticated access.
+func (d *Differ) auth(ctx context.Context, cloneURL string) (transport.AuthMethod, error) {
 	if d.TokenSource == nil {
 		return nil, nil
+	}
+	if d.TokenHost != "" && hostOf(cloneURL) != d.TokenHost {
+		return nil, nil // token is scoped to TokenHost; do not leak it elsewhere
 	}
 	tok, err := d.TokenSource(ctx)
 	if err != nil {
@@ -163,7 +179,7 @@ func (d *Differ) cloneToDisk(ctx context.Context, url string) (*git.Repository, 
 			return repo, noop, nil // reuse — the cache owns cleanup
 		}
 	}
-	auth, err := d.auth(ctx)
+	auth, err := d.auth(ctx, url)
 	if err != nil {
 		return nil, noop, err
 	}
@@ -197,6 +213,18 @@ func (d *Differ) cloneToDisk(ctx context.Context, url string) (*git.Repository, 
 		return winner, noop, nil // cache owns cleanup
 	}
 	return repo, func() { _ = os.RemoveAll(dir) }, nil
+}
+
+// hostOf returns the lowercased host of an https/http/ssh clone URL, or "" for
+// a local path or an unparseable/hostless URL. Used by auth to confine a
+// host-scoped token; a "" host never equals a non-empty TokenHost, so a local
+// clone is always treated as off-host (correct — local repos need no token).
+func hostOf(cloneURL string) string {
+	u, err := url.Parse(cloneURL)
+	if err != nil {
+		return ""
+	}
+	return strings.ToLower(u.Hostname())
 }
 
 // Remote clones url to disk (auth via the installation token when set) and diffs

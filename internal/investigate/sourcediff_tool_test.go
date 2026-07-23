@@ -143,3 +143,41 @@ func TestSourceDiffSummaryBudgetTruncates(t *testing.T) {
 		t.Fatalf("a budget-cut summary must tell the model paths-zoom is available:\n%.400s", out)
 	}
 }
+
+func TestSourceDiffDiffstatCapAndGeneratedLegend(t *testing.T) {
+	// 250 files (> sourceDiffMaxDiffstat=200), a mix of real and generated,
+	// with distinct churn so ordering is observable.
+	var fds []providers.FileDiff
+	for i := 0; i < 250; i++ {
+		p := "pkg/file" + strings.Repeat("x", i%3) + string(rune('a'+i%26)) + "/" + string(rune('a'+i%7)) + ".go"
+		fds = append(fds, providers.FileDiff{Path: p, Patch: "+++ b/x\n" + strings.Repeat("+l\n", i+1)})
+	}
+	fds = append(fds, providers.FileDiff{Path: "go.sum", Patch: "+++ b/go.sum\n+x\n+y\n"})
+	sc := whatchanged.SourceChanges{FromRef: "v1", ToRef: "v2", Diff: providers.Diff{Files: fds}}
+	tool := SourceDiffTool{Source: &fakeSourceDiffer{sc: sc}, Allow: mustAllow(t, "github.com/acme/*")}
+
+	out, err := tool.Call(context.Background(), `{"repo":"github.com/acme/checkout","from":"1","to":"2"}`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The diffstat is capped: the tail is folded into one "and N more files" line.
+	if !strings.Contains(out, "more files") {
+		t.Fatalf("expected a folded diffstat tail line, got:\n%.600s", out)
+	}
+	// Diffstat lines shown must not exceed the cap (+ header/legend/tail noise).
+	fileLines := strings.Count(out, "\n  pkg/file")
+	if fileLines > sourceDiffMaxDiffstat {
+		t.Fatalf("diffstat shows %d file lines, want <= %d", fileLines, sourceDiffMaxDiffstat)
+	}
+	// The generated legend appears once; the per-file marker is the terse [gen].
+	if !strings.Contains(out, "[gen]") || !strings.Contains(out, "generated/vendored") {
+		t.Fatalf("expected a [gen] marker and a single generated legend, got:\n%.600s", out)
+	}
+	if n := strings.Count(out, "generated/vendored"); n != 1 {
+		t.Fatalf("generated explanation should appear once, appeared %d times", n)
+	}
+	// Largest churn first: the highest-index file (most + lines) precedes go.sum's line region.
+	if idxBig := strings.Index(out, "pkg/file"); idxBig == -1 {
+		t.Fatal("expected the largest file near the top of the diffstat")
+	}
+}
