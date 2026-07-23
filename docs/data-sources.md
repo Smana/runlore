@@ -15,6 +15,7 @@ assumed).
 | Cloud control plane | `cloud_*` | `CloudProvider` | AWS (CloudTrail + EC2/ASG/EKS) | `cloud.provider` |
 | Kubernetes | `pod_status`, `kube_events`, `controller_logs`, `pod_logs` | `KubeReader`/`LogReader` | client-go | (in-cluster) |
 | Knowledge | `kb_search` | catalog index | bleve BM25 | `catalog.*` |
+| Source repos | `source_diff` | built-in (go-git) | any git host over HTTPS (GitHub App auth) | `source_repos.allow` |
 
 ## Network flows are CNI-agnostic
 
