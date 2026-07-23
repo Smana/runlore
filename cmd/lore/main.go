@@ -32,7 +32,7 @@ Usage:
   lore eval [--config <path>] [--cases <dir>]         replay recorded cases, score RCA identification
   lore eval --live [--scenarios <dir>] [--n 3]        live-fire on the cluster: grade coverage + RCA
   lore eval --compare <spec.yaml> [--n 3]             benchmark several models over the replay suite
-  lore curate [--config <path>]                       groom the KB backlog (dedup open PRs)
+  lore curate [--config <path>] [--dry-run]           groom the KB backlog (dedup/stale/suppress…)
   lore mcp [--config <path>] [<catalog-dir>]          serve what-changed + KB search over MCP (stdio; Claude Code, HolmesGPT, …)
   lore audit verify --path <audit.jsonl>              re-walk the action audit log; report the first broken link
   lore version                                        print version

@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/Smana/runlore/internal/config"
 	"github.com/Smana/runlore/internal/curate"
 	github "github.com/Smana/runlore/internal/forge/github"
 	"github.com/Smana/runlore/internal/outcome"
@@ -90,5 +91,28 @@ func TestLogLedgerStartupDisabledInfos(t *testing.T) {
 	rec := lastRecord(t, &buf)
 	if rec["level"] != "INFO" {
 		t.Fatalf("disabled ledger must INFO (not WARN), got level=%v", rec["level"])
+	}
+}
+
+func TestBuildCurateAgentPassComposition(t *testing.T) {
+	// Constructing a github.Client performs no I/O, so it is a safe stand-in.
+	forge := github.New("https://forge.invalid", "o", "r", "main", nil)
+
+	// No ledger: forge-only passes (Suppress, Dedup, Lifecycle).
+	agent := BuildCurateAgent(&config.Config{}, forge, nil, discardLog())
+	if len(agent.Passes) != 3 {
+		t.Fatalf("no-ledger agent: want 3 passes, got %d", len(agent.Passes))
+	}
+
+	// Ledger + retirement enabled: all seven.
+	cfg := &config.Config{}
+	cfg.Curate.Retirement = config.Retirement{Enabled: true, MinObservations: 3, Floor: 0.5, Prior: 2.0}
+	ledger, err := outcome.New(filepath.Join(t.TempDir(), "ledger.jsonl"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	agent = BuildCurateAgent(cfg, forge, ledger, discardLog())
+	if len(agent.Passes) != 7 {
+		t.Fatalf("full agent: want 7 passes (suppress dedup lifecycle queue recurrence contested retirement), got %d", len(agent.Passes))
 	}
 }
