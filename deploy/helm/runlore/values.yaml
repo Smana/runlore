@@ -363,10 +363,12 @@ serviceAccount:
 # read GitRepositories. Cluster-scoped because the informer watches all namespaces.
 rbac:
   create: true
-  # allowActions grants patch on Flux resources for rung-2 execution
+  # allowActions grants patch on GitOps resources (Flux Kustomizations/HelmReleases,
+  # Argo CD Applications) for rung-2 execution
   # (config.actions.mode: approve). Off by default — read-only without it.
   allowActions: false
-  # Namespaces where the agent may patch Flux resources (suspend/resume/reconcile).
+  # Namespaces where the agent may patch GitOps resources (suspend/resume/reconcile;
+  # for Argo CD this is where your Application objects live, e.g. argocd).
   # Granted as namespace-scoped Roles ONLY here — never cluster-wide — so the blast
   # radius is bounded. Mirror config.actions.allow.namespaces. Empty = no patch
   # rights at all (actions fail closed at the RBAC layer even if mode is enabled).
