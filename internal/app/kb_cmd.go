@@ -22,7 +22,7 @@ import (
 // sync` remains the machine/ops write surface; `lore kb` is how a person asks
 // "what do we already know about this?" without an MCP client or a cluster.
 func RunKB(args []string) error {
-	const usage = "usage: lore kb search <query> [flags] | lore kb show <entry> [flags]"
+	const usage = "usage: lore kb search <query> [flags] | lore kb show <entry> [flags] | lore kb import <src-dir> [flags]"
 	if len(args) == 0 {
 		return fmt.Errorf("%s", usage)
 	}
@@ -31,6 +31,8 @@ func RunKB(args []string) error {
 		return runKBSearch(args[1:], os.Stdout)
 	case "show":
 		return runKBShow(args[1:], os.Stdout)
+	case "import":
+		return runKBImport(args[1:], os.Stdout)
 	}
 	return fmt.Errorf("unknown kb subcommand %q\n%s", args[0], usage)
 }

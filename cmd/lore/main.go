@@ -29,6 +29,7 @@ Usage:
   lore catalog sync [--config <path>]                 clone/pull + index the knowledge catalog
   lore kb search <query> [--config <path>] [--dir <catalog>] [-k 10] [--json] [--ledger <jsonl>]   search the knowledge base
   lore kb show <entry> [--config <path>] [--dir <catalog>]   print one KB entry (frontmatter card + body)
+  lore kb import <src-dir> [--into <kb-dir>] [--dry-run] [--model]   convert existing runbooks/postmortems into OKF entries (cold-start seeding)
   lore eval [--config <path>] [--cases <dir>]         replay recorded cases, score RCA identification
   lore eval --live [--scenarios <dir>] [--n 3]        live-fire on the cluster: grade coverage + RCA
   lore eval --compare <spec.yaml> [--n 3]             benchmark several models over the replay suite
