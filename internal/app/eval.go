@@ -35,6 +35,9 @@ func evalCostUSD(cfg *config.Config, u providers.Usage) *float64 {
 // RunEval replays recorded incident cases through the investigation loop and
 // reports the RCA-identification rate. Requires a configured model.
 func RunEval(args []string) error {
+	if len(args) > 0 && args[0] == "scorecard" {
+		return RunEvalScorecard(args[1:])
+	}
 	fs := flag.NewFlagSet("eval", flag.ContinueOnError)
 	cfgPath := fs.String("config", "runlore.yaml", "path to config file")
 	casesDir := fs.String("cases", "examples/eval", "directory of replay cases")
