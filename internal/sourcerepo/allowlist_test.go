@@ -8,7 +8,10 @@ import (
 )
 
 func TestNewRejectsBadPatterns(t *testing.T) {
-	for _, tc := range []struct{ name string; patterns []string }{
+	for _, tc := range []struct {
+		name     string
+		patterns []string
+	}{
 		{"empty list", nil},
 		{"empty pattern", []string{""}},
 		{"whitespace only", []string{"   "}},
