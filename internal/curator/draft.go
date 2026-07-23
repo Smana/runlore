@@ -97,7 +97,7 @@ func draftKBEntry(inv providers.Investigation) providers.KBEntry {
 		// Cap the free-form investigation title to kbvalidate's merge gate: a single
 		// line of ≤120 bytes. inv.Title is LLM/alert-derived and can run long or carry
 		// newlines, which would fail RunLore's own `lore validate-kb` hard checks.
-		Title:       capTitle(inv.Title),
+		Title:       CapTitle(inv.Title),
 		Description: firstLine(inv),
 		Resource:    normalizeResource(inv.Resource),
 		// Only when the alert fired on a DIFFERENT resource than the one the
@@ -211,14 +211,14 @@ const titleMaxBytes = 120
 // ellipsis marks a truncated title; "…" (U+2026) is 3 bytes in UTF-8.
 const ellipsis = "…"
 
-// capTitle makes an arbitrary investigation title satisfy kbvalidate's title
+// CapTitle makes an arbitrary investigation title satisfy kbvalidate's title
 // merge gate by construction: a single line of at most titleMaxBytes bytes. It
 // collapses every whitespace run (newlines/tabs included) into a single space
 // and trims, then — if the result still exceeds the byte budget — truncates on a
 // rune boundary (preferring the last word boundary) and appends an ellipsis so
 // the FINAL byte length stays ≤ titleMaxBytes. Empty/whitespace-only input yields
 // "" so we never invent a title (the validator flags the empty title separately).
-func capTitle(s string) string {
+func CapTitle(s string) string {
 	s = strings.Join(strings.Fields(s), " ")
 	if len(s) <= titleMaxBytes {
 		return s

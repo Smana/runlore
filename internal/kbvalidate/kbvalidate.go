@@ -169,7 +169,7 @@ func ValidateStructural(e catalog.Entry) []Issue {
 	// Incident bodies must carry the OKF evidence sections; Playbook/Concept are
 	// intentionally relaxed in v1 (free-form runbooks/concepts).
 	if e.Type == "Incident" {
-		secs := sections(e.Body)
+		secs := Sections(e.Body)
 		for _, s := range requiredIncidentSections {
 			content, ok := secs[s.key]
 			switch {
@@ -187,8 +187,10 @@ func ValidateStructural(e catalog.Entry) []Issue {
 	return out
 }
 
-// sections maps each "## Heading" (lowercased) to its trimmed content.
-func sections(body string) map[string]string {
+// Sections maps each "## Heading" (lowercased) to its trimmed content. Exported
+// so `lore kb import` can infer Incident-vs-Playbook from a source document's
+// OKF sections using the same heading parser the validator gates on.
+func Sections(body string) map[string]string {
 	out := map[string]string{}
 	cur := ""
 	var buf []string

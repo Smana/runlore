@@ -77,7 +77,7 @@ func parseEntry(root, path string) (Entry, error) {
 	if err != nil {
 		return Entry{}, err
 	}
-	fm, body := splitFrontmatter(data)
+	fm, body := SplitFrontmatter(data)
 	var meta entryMeta
 	if len(fm) > 0 {
 		if err := yaml.Unmarshal(fm, &meta); err != nil {
@@ -95,8 +95,10 @@ func parseEntry(root, path string) (Entry, error) {
 	}, nil
 }
 
-// splitFrontmatter separates a leading "---\n...\n---\n" YAML block from the body.
-func splitFrontmatter(data []byte) (frontmatter, body []byte) {
+// SplitFrontmatter separates a leading "---\n...\n---\n" YAML block from the body.
+// Exported because `lore kb import` reuses the exact same split when normalizing
+// source runbooks, so import and load agree on where frontmatter ends.
+func SplitFrontmatter(data []byte) (frontmatter, body []byte) {
 	s := string(data)
 	if !strings.HasPrefix(s, "---") {
 		return nil, data
