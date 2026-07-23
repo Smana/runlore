@@ -507,6 +507,10 @@ source_repos:
   Generated/vendored files (lockfiles, `vendor/`…) are listed in the diffstat but their
   hunks are skipped unless zoomed. Mirrors reuse the `gitops.mirror` settings (a `source/`
   subdir of the same root).
+- **First-call clone latency:** the very first `source_diff` call on a large repo performs
+  a full clone that must complete within `investigation.tool_timeout` (default 60 s) — raise
+  it if large-repo clones exceed that budget. Subsequent calls reuse the warm mirror and
+  only fetch new refs.
 
 ### Other top-level keys
 `gitops.engine` (`flux` default · `argocd`), `cloud` (`provider: aws`, `region`, `cluster_name`),

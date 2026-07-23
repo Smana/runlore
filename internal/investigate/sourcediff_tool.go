@@ -139,19 +139,29 @@ func renderSourceChanges(sc whatchanged.SourceChanges, zoom []string) string {
 
 // renderZoom emits full hunks for the requested paths (generated or not — an
 // explicit ask overrides the noise filter), noting any path not in this diff.
+// When the 16 KiB budget is exhausted before a later requested path, those paths
+// are counted and an omission notice is appended — consistent with renderSummaryHunks.
 func renderZoom(b *strings.Builder, files []sourceDiffFile, zoom []string) {
 	want := make(map[string]bool, len(zoom))
 	for _, p := range zoom {
 		want[p] = true
 	}
 	budget := sourceDiffZoomBytes
+	omitted := 0
 	b.WriteString("hunks (zoom):\n")
 	for _, f := range files {
 		if !want[f.path] {
 			continue
 		}
 		delete(want, f.path)
+		if budget <= 0 {
+			omitted++
+			continue
+		}
 		budget -= writeHunk(b, f.path, f.patch, budget)
+	}
+	if omitted > 0 {
+		fmt.Fprintf(b, "[%d more requested files' hunks omitted — zoom fewer paths at once]\n", omitted)
 	}
 	for p := range want {
 		fmt.Fprintf(b, "  %s: not in this diff (check the file list above)\n", p)

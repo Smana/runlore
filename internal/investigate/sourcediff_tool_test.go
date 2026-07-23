@@ -98,6 +98,36 @@ func TestSourceDiffZoom(t *testing.T) {
 	}
 }
 
+func TestSourceDiffZoomBudgetOmitsLaterPaths(t *testing.T) {
+	// Build two files whose patches each exceed the 16 KiB zoom budget on their own.
+	bigPatch := "+++ b/file.go\n" + strings.Repeat("+padding line of reasonable length here\n", 500)
+	sc := whatchanged.SourceChanges{
+		FromRef: "v1.0.0", ToRef: "v1.0.1",
+		Commits: []whatchanged.SourceCommit{
+			{SHA: "aaaaaaaabbbbbbbbccccccccdddddddd00000000", Subject: "big change", When: time.Unix(1, 0)},
+		},
+		Diff: providers.Diff{Files: []providers.FileDiff{
+			{Path: "alpha/big.go", Patch: bigPatch},
+			{Path: "beta/big.go", Patch: bigPatch},
+		}},
+	}
+	f := &fakeSourceDiffer{sc: sc}
+	tool := SourceDiffTool{Source: f, Allow: mustAllow(t, "github.com/acme/*")}
+	out, err := tool.Call(context.Background(),
+		`{"repo":"github.com/acme/checkout","from":"v1.0.0","to":"v1.0.1","paths":["alpha/big.go","beta/big.go"]}`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The first file's hunks must be present.
+	if !strings.Contains(out, "alpha/big.go") {
+		t.Fatalf("first zoomed file missing from output:\n%.400s", out)
+	}
+	// The output must tell the caller that some requested paths were omitted.
+	if !strings.Contains(out, "omitted") {
+		t.Fatalf("zoom budget exhausted but no omission notice:\n%.400s", out)
+	}
+}
+
 func TestSourceDiffSummaryBudgetTruncates(t *testing.T) {
 	sc := fixtureChanges()
 	sc.Diff.Files = append(sc.Diff.Files, providers.FileDiff{

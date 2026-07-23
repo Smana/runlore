@@ -152,9 +152,11 @@ source_repos:
 the App on those repos with `contents: read`. Public repos need nothing. Private non-GitHub
 hosts are not supported yet.
 
-RunLore performs **read-only bare clones** — no working-tree checkout, no writes to the
-source repo. Mirrors reuse the `gitops.mirror` directory (a `source/` subdir of the same
-root), so warm mirrors cost nothing after the first clone.
+RunLore performs **read-only clones with no working-tree checkout** — bare mirrors when the
+mirror cache is enabled (the default), or a no-checkout clone per call when the cache is
+disabled. Either way, no writes are made to the source repo. Mirrors reuse the
+`gitops.mirror` directory (a `source/` subdir of the same root), so warm mirrors cost
+nothing after the first clone.
 
 Allowlist matching is enforced **server-side before any network call**: the model can only
 make RunLore clone repos you explicitly listed. A wrong repo guess fails at ref resolution
