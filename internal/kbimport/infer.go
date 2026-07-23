@@ -91,9 +91,13 @@ func Infer(data []byte, source string) Result {
 			r.Warnings = append(r.Warnings, fmt.Sprintf("unparseable date %q dropped (want RFC3339 or 2006-01-02)", ts))
 		}
 	}
-	r.DestPath = fmt.Sprintf("%ss/%s.md", strings.ToLower(typ), okf.Slugify(title))
+	r.DestPath = fmt.Sprintf("%ss/%s.md", strings.ToLower(typ), slugOf(title))
 	return r
 }
+
+// slugOf is the single dest-path slug rule (Infer and Enrich share it) so the
+// two DestPath computations can't drift.
+func slugOf(title string) string { return okf.Slugify(title) }
 
 // inferType: a valid declared type wins; else Incident iff the body already
 // carries the gate's required sections (kbvalidate.requiredIncidentSections)
