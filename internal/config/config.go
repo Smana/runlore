@@ -1279,6 +1279,17 @@ func (c *Config) Validate() error {
 			return fmt.Errorf("curate.retirement.min_observations must be >= 1 (the sustained-decay bar), got %d", r.MinObservations)
 		}
 	}
+	// In-server sweeps: an unknown mode must fail loud (a typo like "apply" silently
+	// falling back to dry-run would mean the operator believes grooming is live when
+	// it is not), and a sub-10m interval would hammer the forge listing endpoints.
+	switch c.Curate.Sweeps.Mode {
+	case "", SweepOff, SweepDryRun, SweepApply:
+	default:
+		return fmt.Errorf("unknown curate.sweeps.mode %q (want off|dry-run|apply; empty = dry-run)", c.Curate.Sweeps.Mode)
+	}
+	if iv := c.Curate.Sweeps.Interval.Std(); iv != 0 && iv < 10*time.Minute {
+		return fmt.Errorf("curate.sweeps.interval must be >= 10m (forge-listing rate protection), got %v", iv)
+	}
 	// logs.provider is a small enum; reject typos at startup rather than silently
 	// falling back to the wrong client against a live backend.
 	switch c.Logs.Provider {
@@ -1336,6 +1347,11 @@ type Curate struct {
 	// recall gate's outcome_prior/outcome_floor defaults (2.0 / 0.5) so the two
 	// gates agree unless deliberately tuned apart.
 	Retirement Retirement `yaml:"retirement"`
+	// Sweeps configures the in-server scheduled grooming loop (leader-only, run by
+	// the serve pod). Default mode is dry-run: candidates are logged and audited but
+	// no forge write happens until the operator sets mode: apply. mode: off disables
+	// the loop entirely (the opt-in CronJob remains the out-of-server alternative).
+	Sweeps Sweeps `yaml:"sweeps"`
 }
 
 // Retirement configures the curate retirement pass (opt-in KB garbage collection).
@@ -1345,6 +1361,26 @@ type Retirement struct {
 	Floor           float64 `yaml:"floor"`            // retire below this factor (default 0.5)
 	Prior           float64 `yaml:"prior"`            // Beta prior strength k (default 2.0)
 }
+
+// Sweep modes: dry-run observes (log + audit, zero forge writes), apply acts,
+// off disables the in-server loop. Empty means dry-run — safe by default.
+const (
+	SweepOff    = "off"
+	SweepDryRun = "dry-run"
+	SweepApply  = "apply"
+)
+
+// Sweeps configures the in-server scheduled grooming sweeps.
+type Sweeps struct {
+	Mode     string   `yaml:"mode"`     // "" ⇒ dry-run | "apply" | "off"
+	Interval Duration `yaml:"interval"` // default 6h; the first sweep waits one full interval
+}
+
+// Enabled reports whether the in-server sweep loop should run at all.
+func (s Sweeps) Enabled() bool { return s.Mode != SweepOff }
+
+// DryRun reports whether sweeps must not write to the forge (the default posture).
+func (s Sweeps) DryRun() bool { return s.Mode == "" || s.Mode == SweepDryRun }
 
 // Forge holds git-forge authentication and the curation target repo.
 type Forge struct {

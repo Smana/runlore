@@ -232,11 +232,19 @@ separate approval UI — your Git review *is* the gate.
 
 ## 8. Optional: the backlog groomer
 
-`lore curate` (run as a scheduled Job) keeps the PR backlog tidy without you:
-it **dedups** near-identical PRs, **closes stale** unreviewed ones after a
-configurable age, **promotes** `solved`→`ready-to-merge` when the incident
-resolved, and opens a **`knowledge-gap`** issue when an unsolved pattern recurs.
-It only ever comments/labels/closes — it never merges. See
+The backlog groomer keeps the PR queue tidy without you: it **suppresses** re-drafts of
+entries you already rejected, **dedups** near-identical PRs, **closes stale** unreviewed
+ones after a configurable age, **promotes** `solved`→`ready-to-merge` when the incident
+resolved, and opens a **`knowledge-gap`** issue when an unsolved pattern recurs. It only
+ever comments/labels/closes — it never merges.
+
+It runs automatically inside the serve pod (leader-only, every 6 h by default) — **in
+dry-run first**: check the logs for `curate dry-run: skipped forge write` lines (and the
+audit log for `"actor":"curate"` records) to see what it *would* do, then set
+`curate.sweeps.mode: apply` to let it act, or `mode: "off"` to silence it. Every
+automated action, applied or skipped, lands in the same tamper-evident audit chain as
+cluster actions when `actions.audit_log_path` is set. A `lore curate` CronJob remains
+available for out-of-server runs. See
 [getting-started](getting-started.md#step-7--the-learn-loop-kb-lifecycle--re-runs).
 
 The groomer also carries on-call feedback into your review: when responders hold

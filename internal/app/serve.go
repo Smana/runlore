@@ -319,6 +319,19 @@ func RunServe(version string, args []string) error {
 			log.Info("matrix feedback reactions enabled", "room", cfg.Notify.Matrix.RoomID)
 			go mfb.Run(workCtx)
 		}
+		// In-server grooming sweeps (leader-only, like the pollers above, so one
+		// replica grooms): the same passes as `lore curate`, on a timer, over the
+		// live ledger. Cancelled with workCtx on leadership loss.
+		if sw := BuildSweeper(cfg, ledger, aud, log); sw != nil {
+			mode := config.SweepApply
+			if cfg.Curate.Sweeps.DryRun() {
+				mode = config.SweepDryRun
+				log.Info("curate sweeps in dry-run: candidates are logged (and audited when actions.audit_log_path is set) " +
+					"but nothing is written to the forge — set curate.sweeps.mode: apply to act, mode: off to silence")
+			}
+			log.Info("curate sweeps enabled", "mode", mode, "interval", cfg.Curate.Sweeps.Interval.Std())
+			go sw.Run(workCtx)
+		}
 	}
 
 	var leader atomic.Bool

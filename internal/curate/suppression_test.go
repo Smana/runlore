@@ -81,3 +81,60 @@ func TestClosedPRSuppressionKeepsMostRecentClose(t *testing.T) {
 		t.Fatalf("entry = %+v, want PR 11 wontfix", got["fp-dup"])
 	}
 }
+
+func TestSuppressClosesRedraftOfRejectedEntry(t *testing.T) {
+	// A human closed PR #7 (fp-web) without merging; the incident recurred and the
+	// curator re-drafted it as PR #12. The sweep must comment-then-close #12.
+	f := &fakeForge{prs: []providers.CuratedIssue{
+		{Number: 12, Title: "KB: apps/web DNS", Body: body("fp-web"), Labels: []string{"runlore"}},
+		{Number: 13, Title: "KB: unrelated", Body: body("fp-other"), Labels: []string{"runlore"}},
+	}}
+	src := ClosedPRSuppression{Forge: fakeClosedPRs{prs: []providers.CuratedIssue{
+		{Number: 7, Body: body("fp-web"), Labels: []string{"runlore", "wontfix"}},
+	}}}
+	s := Suppress{Forge: f, Source: src, Log: discardLog()}
+	if err := s.Run(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if len(f.closed) != 1 || f.closed[0] != 12 {
+		t.Fatalf("want close [12] only, got %v", f.closed)
+	}
+	if len(f.commented) != 1 || f.commented[0] != 12 {
+		t.Fatalf("want a back-ref comment on 12 before closing, got %v", f.commented)
+	}
+}
+
+func TestSuppressNeverTouchesProtectedOrMarkerless(t *testing.T) {
+	f := &fakeForge{prs: []providers.CuratedIssue{
+		{Number: 20, Body: body("fp-web"), Labels: []string{"runlore", "investigating"}}, // human-touched
+		{Number: 21, Body: "no marker here", Labels: []string{"runlore"}},                // legacy/hand-filed
+	}}
+	src := ClosedPRSuppression{Forge: fakeClosedPRs{prs: []providers.CuratedIssue{
+		{Number: 7, Body: body("fp-web"), Labels: []string{"runlore"}},
+	}}}
+	s := Suppress{Forge: f, Source: src, Log: discardLog()}
+	if err := s.Run(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if len(f.closed) != 0 || len(f.commented) != 0 {
+		t.Fatalf("protected/markerless PRs must be untouched: closed=%v commented=%v", f.closed, f.commented)
+	}
+}
+
+func TestSuppressRespectsNeedsWorkAsRevise(t *testing.T) {
+	// needs-work is accept-with-changes (suppression.go suppressReviseLabels): a
+	// re-draft after such a close is the RESUBMIT — it must stay open.
+	f := &fakeForge{prs: []providers.CuratedIssue{
+		{Number: 30, Body: body("fp-y"), Labels: []string{"runlore"}},
+	}}
+	src := ClosedPRSuppression{Forge: fakeClosedPRs{prs: []providers.CuratedIssue{
+		{Number: 8, Body: body("fp-y"), Labels: []string{"runlore", "needs-work"}},
+	}}}
+	s := Suppress{Forge: f, Source: src, Log: discardLog()}
+	if err := s.Run(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if len(f.closed) != 0 {
+		t.Fatalf("a needs-work resubmit must not be suppressed, got closed=%v", f.closed)
+	}
+}
