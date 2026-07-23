@@ -106,6 +106,14 @@ The autonomous *alert → RCA → chat* loop is a commodity. What isn't: a knowl
 Git repo you control, PR-reviewed, with full provenance. Knowledge that consistently resolves
 incidents gains trust; knowledge that keeps failing decays.
 
+An instant recall is never a blind cache hit — three gates stand in front of it: the entry must
+**structurally match** the incident (same workload/resource, retrieval score above a floor), it must
+**win by a clear margin** over the runner-up entry (ambiguous matches fall through to a full
+investigation), and its confidence is **weighted by its real-world track record** — an entry that
+keeps resolving incidents gains trust, one that keeps failing decays toward re-investigation.
+Even then, the recalled finding goes through the same adversarial verify pass as a fresh one; the
+shipped eval suite includes a poisoned-entry scenario proving a bad entry is rejected at recall time.
+
 → **[How the learning loop works](docs/learning-loop.md)** · **[Reviewing & approving knowledge](docs/reviewing-knowledge.md)**
 
 > [!NOTE]
@@ -154,6 +162,7 @@ additive. Full setup detail in **[Data sources](docs/data-sources.md)**.
 | **Triggers** *(sources)* | Alertmanager webhook · GitOps failures · PagerDuty webhook *(new)* | `sources.*` |
 | **Notifiers** | Slack *(bot token: threaded summary + detail; opt-in 👍/👎 buttons)* · Matrix *(opt-in 👍/👎 reactions)* — both feed the learning loop · Slack incoming webhook / generic webhook *(single verdict-first message)* | `notify.*` |
 | **Knowledge base** *(git forge)* | GitHub *(App auth)* | `forge.*` |
+| **MCP** | Server — query your KB from Claude Code / any MCP client · Client — wire external MCP tool servers into investigations (allowlist-gated) | `mcp.*` |
 
 ## ⚡ Try it in one minute — no cluster, no keys
 
