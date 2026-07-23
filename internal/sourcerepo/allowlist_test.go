@@ -86,3 +86,19 @@ func TestPatterns(t *testing.T) {
 		t.Fatalf("Patterns() = %q", got)
 	}
 }
+
+// Patterns() must return a copy: a caller mutating the slice must never be
+// able to widen the live allowlist.
+func TestPatternsMutationIsolated(t *testing.T) {
+	a, err := New([]string{"github.com/acme/x"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	a.Patterns()[0] = "github.com/evil/x"
+	if got := a.Patterns()[0]; got != "github.com/acme/x" {
+		t.Fatalf("mutation leaked into the allowlist: %q", got)
+	}
+	if _, ok := a.Match("github.com/evil/x"); ok {
+		t.Fatal("mutated pattern changed Match behavior")
+	}
+}

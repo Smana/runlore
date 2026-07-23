@@ -23,7 +23,8 @@ type Allowlist struct {
 
 // New validates and compiles allow patterns. Rejected at load time (config
 // validation calls this): an empty list, an empty pattern, a scheme, "..",
-// whitespace, or a glob path.Match itself rejects.
+// whitespace, or a glob path.Match itself rejects. Patterns are stored with
+// the host segment lowercased (DNS names are case-insensitive).
 func New(patterns []string) (*Allowlist, error) {
 	if len(patterns) == 0 {
 		return nil, fmt.Errorf("empty allowlist")
@@ -111,7 +112,9 @@ func normalize(raw string) (string, error) {
 			}
 		}
 	}
-	s = strings.TrimSuffix(strings.TrimSuffix(s, "/"), ".git")
+	s = strings.TrimSuffix(s, "/")
+	s = strings.TrimSuffix(s, ".git")
+	s = strings.TrimSuffix(s, "/") // "x/.git" leaves a slash after the .git strip
 	switch {
 	case s == "":
 		return "", fmt.Errorf("empty repo")
