@@ -398,6 +398,9 @@ func buildLogsQL(raw, container, namespace, level string) (string, error) {
 // recurring mistake) — the error guides a retry.
 func buildLogsQLWith(raw, container, namespace, level string, conv LogFields) (string, error) {
 	conv = conv.resolved()
+	if conv.Dialect == DialectLogQL {
+		return buildLogQL(raw, container, namespace, level, conv)
+	}
 	if raw != "" {
 		if strings.Contains(raw, "level=") {
 			return "", fmt.Errorf("invalid LogsQL: `level=` is Prometheus/Loki syntax. Filter severity with `| %s | %s:error` (after a stream selector), or use the container/namespace/level params", conv.UnpackPipe, conv.LevelField)
@@ -421,11 +424,57 @@ func buildLogsQLWith(raw, container, namespace, level string, conv LogFields) (s
 	return q, nil
 }
 
+// buildLogQL composes a valid LogQL (Grafana Loki) query from the resolved
+// field convention: `{container="…",namespace="…"}` plus an optional parser
+// pipe and a `| <level_field>="…"` label filter — detected_level needs no
+// parser on Loki 3.x, so the default pipe is empty. A raw query passes through
+// but must start with a stream selector, and LogsQL-isms (unpack_json, _msg —
+// the model's likely carry-over mistakes) are rejected with a correcting error,
+// mirroring the LogsQL branch's `level=` guard in spirit.
+func buildLogQL(raw, container, namespace, level string, conv LogFields) (string, error) {
+	if raw != "" {
+		if strings.Contains(raw, "unpack_json") || strings.Contains(raw, "_msg") {
+			return "", fmt.Errorf("invalid LogQL: unpack_json/_msg are VictoriaLogs LogsQL syntax. Parse with `| json` or `| logfmt` and filter severity with `| %s=\"error\"`, or use the container/namespace/level params", conv.LevelField)
+		}
+		if !strings.HasPrefix(strings.TrimSpace(raw), "{") {
+			return "", fmt.Errorf("invalid LogQL: a query starts with a stream selector, e.g. `{%s=\"apps\"}`", conv.NamespaceField)
+		}
+		return raw, nil
+	}
+	var sel []string
+	if container != "" {
+		sel = append(sel, fmt.Sprintf("%s=%q", conv.ContainerField, container))
+	}
+	if namespace != "" {
+		sel = append(sel, fmt.Sprintf("%s=%q", conv.NamespaceField, namespace))
+	}
+	if len(sel) == 0 {
+		return "", fmt.Errorf("provide a raw `query`, or `container`/`namespace` to build one")
+	}
+	q := "{" + strings.Join(sel, ",") + "}"
+	if level != "" {
+		if conv.UnpackPipe != "" {
+			q += " | " + conv.UnpackPipe
+		}
+		q += fmt.Sprintf(" | %s=%q", conv.LevelField, level)
+	}
+	return q, nil
+}
+
 // Name returns the tool name.
 func (t QueryLogsTool) Name() string { return "query_logs" }
 
 // Description returns the tool description.
 func (t QueryLogsTool) Description() string {
+	if t.Fields.Dialect == DialectLogQL {
+		return "Query logs with LogQL (Grafana Loki) over a recent window. " +
+			"PREFER the structured params (container/namespace/level) and let the tool build the query. " +
+			"If you write a raw `query`: it MUST start with a stream selector using Loki stream labels, " +
+			"e.g. `{namespace=\"apps\", container=\"x\"}`; filter severity with `| detected_level=\"error\"` " +
+			"(no parser needed) or parse first with `| json` / `| logfmt`. " +
+			"Do NOT use VictoriaLogs LogsQL syntax (unpack_json, _msg, field:value filters). " +
+			"Optional since_minutes bounds the window (default 60)."
+	}
 	return "Query logs with LogsQL (VictoriaLogs) over a recent window. " +
 		"PREFER the structured params (container/namespace/level) and let the tool build the query. " +
 		"If you write a raw `query`: stream labels use DOT notation (kubernetes.container_name, " +
@@ -441,7 +490,7 @@ func (t QueryLogsTool) Schema() string {
 		`"container":{"type":"string","description":"kubernetes container name to scope to"},` +
 		`"namespace":{"type":"string","description":"kubernetes namespace to scope to"},` +
 		`"level":{"type":"string","enum":["error","warn","info"],"description":"severity filter (unpacks JSON)"},` +
-		`"query":{"type":"string","description":"raw LogsQL; only if the structured fields are insufficient"},` +
+		`"query":{"type":"string","description":"raw ` + t.Fields.queryLang() + `; only if the structured fields are insufficient"},` +
 		`"since_minutes":{"type":"integer"}},"required":[]}`
 }
 

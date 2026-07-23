@@ -27,6 +27,10 @@ import (
 // registered in internal/app/investigate.go (alongside query_logs).
 type LogsErrorSummaryTool struct {
 	Logs providers.LogsProvider
+
+	// Fields is the OPTIONAL field convention + dialect (config.logs.*); the zero
+	// value keeps the shipped VictoriaLogs behaviour. The app layer sets it.
+	Fields LogFields
 }
 
 // Name returns the tool name.
@@ -47,7 +51,7 @@ func (t LogsErrorSummaryTool) Schema() string {
 		`"container":{"type":"string","description":"kubernetes container name to scope to"},` +
 		`"namespace":{"type":"string","description":"kubernetes namespace to scope to"},` +
 		`"level":{"type":"string","enum":["error","warn","info"],"description":"severity filter (default error)"},` +
-		`"query":{"type":"string","description":"raw LogsQL; only if the structured fields are insufficient"},` +
+		`"query":{"type":"string","description":"raw ` + t.Fields.queryLang() + `; only if the structured fields are insufficient"},` +
 		`"since_minutes":{"type":"integer"}},"required":[]}`
 }
 
@@ -69,7 +73,7 @@ func (t LogsErrorSummaryTool) Call(ctx context.Context, args string) (string, er
 	if in.Query == "" && level == "" {
 		level = "error"
 	}
-	query, err := buildLogsQL(in.Query, in.Container, in.Namespace, level)
+	query, err := buildLogsQLWith(in.Query, in.Container, in.Namespace, level, t.Fields)
 	if err != nil {
 		return "", err
 	}

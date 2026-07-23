@@ -441,3 +441,72 @@ func TestQueryMetricsMetricsQLGuidance(t *testing.T) {
 		t.Fatalf("Prometheus range description must not mention MetricsQL")
 	}
 }
+
+// TestBuildLogQL: with Dialect=logql the same structured params compile to
+// valid LogQL, raw queries must start with a stream selector, and LogsQL-isms
+// are rejected with a correcting error so the model retries in-dialect.
+func TestBuildLogQL(t *testing.T) {
+	logql := LogFields{Dialect: DialectLogQL}
+	tests := []struct {
+		name, raw, container, namespace, level string
+		conv                                   LogFields
+		want                                   string
+		wantErr                                string
+	}{
+		{name: "structured selector + level", container: "harbor-core", namespace: "apps", level: "error", conv: logql,
+			want: `{container="harbor-core",namespace="apps"} | detected_level="error"`},
+		{name: "namespace only, no level", namespace: "apps", conv: logql,
+			want: `{namespace="apps"}`},
+		{name: "custom fields add parser pipe", container: "core", level: "error",
+			conv: LogFields{Dialect: DialectLogQL, LevelField: "level", UnpackPipe: "logfmt"},
+			want: `{container="core"} | logfmt | level="error"`},
+		{name: "raw passthrough", raw: `{namespace="apps"} |= "refused"`, conv: logql,
+			want: `{namespace="apps"} |= "refused"`},
+		{name: "raw LogsQL-ism rejected", raw: `{namespace="apps"} | unpack_json | log.level:error`, conv: logql,
+			wantErr: "LogsQL"},
+		{name: "raw without selector rejected", raw: `error`, conv: logql,
+			wantErr: "stream selector"},
+		{name: "nothing given", conv: logql, wantErr: "provide a raw"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := buildLogsQLWith(tc.raw, tc.container, tc.namespace, tc.level, tc.conv)
+			if tc.wantErr != "" {
+				if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+					t.Fatalf("err = %v, want containing %q", err, tc.wantErr)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("buildLogsQLWith: %v", err)
+			}
+			if got != tc.want {
+				t.Fatalf("got %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+// TestLogToolDescriptionsDialect: on a Loki deployment the model must be told
+// LogQL — never LogsQL — in every tool description and schema, and vice versa.
+func TestLogToolDescriptionsDialect(t *testing.T) {
+	logql := LogFields{Dialect: DialectLogQL}
+	q := QueryLogsTool{Fields: logql}
+	if !strings.Contains(q.Description(), "LogQL (Grafana Loki)") || strings.Contains(q.Description(), "invalid LogsQL") {
+		t.Fatalf("LogQL description wrong: %s", q.Description())
+	}
+	if !strings.Contains(q.Schema(), "raw LogQL") {
+		t.Fatalf("LogQL schema wrong: %s", q.Schema())
+	}
+	if !strings.Contains(QueryLogsTool{}.Description(), "LogsQL (VictoriaLogs)") {
+		t.Fatalf("default description must stay LogsQL")
+	}
+	for _, tool := range []interface {
+		Description() string
+		Schema() string
+	}{LogsErrorSummaryTool{Fields: logql}, DiscoverLogFieldsTool{Fields: logql}} {
+		if strings.Contains(tool.Schema(), "LogsQL") {
+			t.Fatalf("loki-dialect schema must not mention LogsQL: %s", tool.Schema())
+		}
+	}
+}

@@ -22,7 +22,16 @@ type LogFields struct {
 	PodField       string // stream label for the pod name; "" ⇒ default
 	LevelField     string // severity field (after the unpack pipe); "" ⇒ default
 	UnpackPipe     string // LogsQL pipe promoting JSON body to fields; "" ⇒ default
+	Dialect        string // query dialect; "" ⇒ LogsQL (see Dialect*)
 }
+
+// Dialect values for LogFields.Dialect — which query language the configured
+// logs backend speaks. The zero value is LogsQL so every existing caller and
+// fake is untouched; the app layer sets DialectLogQL when the backend is Loki.
+const (
+	DialectLogsQL = ""      // VictoriaLogs LogsQL (shipped default)
+	DialectLogQL  = "logql" // Grafana Loki LogQL
+)
 
 // Shipped log-field defaults. These MUST stay byte-identical to the strings the code
 // hardcoded before logs.fields was configurable — they are the fallback that keeps
@@ -39,6 +48,25 @@ const (
 // result directly. An empty UnpackPipe restores the default pipe (disabling it is
 // out of scope for v1).
 func (f LogFields) resolved() LogFields {
+	if f.Dialect == DialectLogQL {
+		// Loki convention: promtail/alloy stream labels + Loki 3.x detected_level
+		// (structured metadata — no parser pipe by default). Mirrors
+		// config.LogFields.ResolvedFor (internal/config/config.go), which is the
+		// normal fill path; this is the in-package fallback for zero-field callers.
+		if f.ContainerField == "" {
+			f.ContainerField = "container"
+		}
+		if f.NamespaceField == "" {
+			f.NamespaceField = "namespace"
+		}
+		if f.PodField == "" {
+			f.PodField = "pod"
+		}
+		if f.LevelField == "" {
+			f.LevelField = "detected_level"
+		}
+		return f
+	}
 	if f.ContainerField == "" {
 		f.ContainerField = defaultContainerField
 	}
@@ -55,6 +83,14 @@ func (f LogFields) resolved() LogFields {
 		f.UnpackPipe = defaultUnpackPipe
 	}
 	return f
+}
+
+// queryLang names the dialect for tool descriptions/schemas.
+func (f LogFields) queryLang() string {
+	if f.Dialect == DialectLogQL {
+		return "LogQL"
+	}
+	return "LogsQL"
 }
 
 // logGroup is one distinct log message with its repeat count, the span over which
