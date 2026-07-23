@@ -56,6 +56,21 @@ var requiredIncidentSections = []struct{ key, head string }{
 	{"resolution", "Resolution"},
 }
 
+// HasIncidentSections reports whether body carries every required Incident
+// evidence section (Symptom/Cause/Resolution), each present and non-empty — the
+// same rule ValidateStructural enforces for Incidents. Exposed so `lore kb
+// import` classifies a document as an Incident by the exact gate it must pass,
+// rather than restating the section set.
+func HasIncidentSections(body string) bool {
+	secs := Sections(body)
+	for _, s := range requiredIncidentSections {
+		if secs[s.key] == "" {
+			return false
+		}
+	}
+	return true
+}
+
 // WarnInvalid is the load-time strict-warn hook: it calls onInvalid(path, errs)
 // for each invalid entry; the caller logs + increments a metric, but the entry
 // is still served (one bad entry never empties the catalog). Returns the count

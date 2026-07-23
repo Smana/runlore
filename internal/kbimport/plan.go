@@ -34,9 +34,10 @@ func Plan(results []Result, existing []catalog.Entry) []Action {
 	for _, e := range existing {
 		existingPaths[e.Path] = true
 	}
-	batchPaths := map[string]string{}      // dest path -> the batch source that first claimed it
-	var accepted []catalog.Entry           // entries accepted so far this batch, for intra-batch title dedup
-	out := make([]Action, 0, len(results)) //nolint:prealloc // appended conditionally below
+	existingNorm := normEntries(existing) // normalize existing titles ONCE, not per result
+	batchPaths := map[string]string{}     // dest path -> the batch source that first claimed it
+	var accepted []normEntry              // entries accepted so far this batch, for intra-batch title dedup
+	out := make([]Action, 0, len(results))
 	for _, r := range results {
 		a := Action{Result: r}
 		switch {
@@ -45,7 +46,7 @@ func Plan(results []Result, existing []catalog.Entry) []Action {
 		case existingPaths[r.DestPath]:
 			a.Skip, a.Reason = true, fmt.Sprintf("destination exists: %s", r.DestPath)
 		default:
-			if dup, ok := duplicateOf(r.Entry.Title, existing); ok {
+			if dup, ok := duplicateOf(r.Entry.Title, existingNorm); ok {
 				a.Skip, a.Reason = true, "duplicate of "+dup
 			} else if occ, taken := batchPaths[r.DestPath]; taken {
 				a.Skip, a.Reason = true, fmt.Sprintf("destination %s collides with %s in this batch", r.DestPath, occ)
@@ -53,7 +54,7 @@ func Plan(results []Result, existing []catalog.Entry) []Action {
 				a.Skip, a.Reason = true, fmt.Sprintf("duplicate of %s (imported earlier in this batch)", dup)
 			} else {
 				batchPaths[r.DestPath] = r.Source
-				accepted = append(accepted, catalog.Entry{Title: r.Entry.Title, Path: r.DestPath})
+				accepted = append(accepted, normEntry{title: r.Entry.Title, norm: normTitle(r.Entry.Title), path: r.DestPath})
 			}
 		}
 		out = append(out, a)
@@ -61,16 +62,34 @@ func Plan(results []Result, existing []catalog.Entry) []Action {
 	return out
 }
 
-// duplicateOf finds an existing entry whose title matches: exact after
-// whitespace/case normalization, or fuzzy at curate's own Jaccard threshold.
-func duplicateOf(title string, existing []catalog.Entry) (string, bool) {
-	norm := strings.ToLower(strings.Join(strings.Fields(title), " "))
-	for _, e := range existing {
-		if strings.ToLower(strings.Join(strings.Fields(e.Title), " ")) == norm {
-			return e.Path, true
+// normEntry is a catalog entry with its title pre-normalized for exact-match
+// dedup, so Plan normalizes each title once instead of once per compared result.
+type normEntry struct {
+	title string // original, for the fuzzy TitleJaccard comparison
+	norm  string // lowercased, whitespace-collapsed, for exact match
+	path  string
+}
+
+func normTitle(s string) string { return strings.ToLower(strings.Join(strings.Fields(s), " ")) }
+
+func normEntries(es []catalog.Entry) []normEntry {
+	out := make([]normEntry, len(es))
+	for i, e := range es {
+		out[i] = normEntry{title: e.Title, norm: normTitle(e.Title), path: e.Path}
+	}
+	return out
+}
+
+// duplicateOf finds an entry whose title matches: exact after whitespace/case
+// normalization, or fuzzy at curate's own Jaccard threshold.
+func duplicateOf(title string, entries []normEntry) (string, bool) {
+	norm := normTitle(title)
+	for _, e := range entries {
+		if e.norm == norm {
+			return e.path, true
 		}
-		if curate.TitleJaccard(title, e.Title) >= dupThreshold {
-			return e.Path, true
+		if curate.TitleJaccard(title, e.title) >= dupThreshold {
+			return e.path, true
 		}
 	}
 	return "", false

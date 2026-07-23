@@ -86,15 +86,15 @@ func apply(r Result, title, description string, tags []string, typ string) Resul
 	if d := strings.TrimSpace(description); d != "" {
 		r.Entry.Description = capRunes(strings.Join(strings.Fields(d), " "), descriptionMaxRunes)
 	}
-	if validTypes[strings.TrimSpace(typ)] {
+	if t := strings.TrimSpace(typ); validTypes[t] {
 		// An Incident still needs a resource; without one, keep the inferred type.
-		if strings.TrimSpace(typ) != "Incident" || r.Entry.Resource != "" {
-			r.Entry.Type = strings.TrimSpace(typ)
+		if t != "Incident" || r.Entry.Resource != "" {
+			r.Entry.Type = t
 		}
 	}
 	if len(tags) > 0 {
-		r.Entry.Tags = inferTags(tags, "", r.Entry.Type) // rebuild: constant pair + model tags, deduped/capped
+		r.Entry.Tags = inferTags(tags, nil, r.Entry.Type) // rebuild: constant pair + model tags, deduped/capped
 	}
-	r.DestPath = fmt.Sprintf("%ss/%s.md", strings.ToLower(r.Entry.Type), slugOf(r.Entry.Title))
+	r.DestPath = destPath(r.Entry.Type, r.Entry.Title)
 	return r
 }

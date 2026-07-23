@@ -44,6 +44,9 @@ type sourceMeta struct {
 	Date          string   `yaml:"date"` // common in postmortems; folded into timestamp
 	Status        string   `yaml:"status"`
 	LastValidated string   `yaml:"last_validated"`
+	// Extra collects any frontmatter key not matched above (yaml.v3 inline), so
+	// the "keys not carried over" warning comes from the SAME parse, not a second one.
+	Extra map[string]any `yaml:",inline"`
 }
 
 var validTypes = map[string]bool{"Incident": true, "Playbook": true, "Concept": true}
@@ -61,13 +64,14 @@ func Infer(data []byte, source string) Result {
 	if len(fm) > 0 {
 		if err := yaml.Unmarshal(fm, &meta); err != nil {
 			r.Warnings = append(r.Warnings, fmt.Sprintf("unparseable frontmatter ignored: %v", err))
-		} else if extra := unknownKeys(fm); len(extra) > 0 {
+		} else if extra := unknownKeys(meta.Extra); len(extra) > 0 {
 			r.Warnings = append(r.Warnings, "frontmatter keys not carried over: "+strings.Join(extra, ", "))
 		}
 	}
 	b := string(body)
+	lines := strings.Split(b, "\n") // split once; the line-scanning helpers share it
 
-	title := inferTitle(meta.Title, b, source)
+	title := inferTitle(meta.Title, lines, source)
 	resource := strings.TrimSpace(meta.Resource)
 	if strings.ContainsAny(resource, " \t\r\n") {
 		r.Warnings = append(r.Warnings, fmt.Sprintf("resource %q dropped: must be whitespace-free (namespace/name)", resource))
@@ -78,9 +82,9 @@ func Infer(data []byte, source string) Result {
 	r.Entry = providers.KBEntry{
 		Type:        typ,
 		Title:       title,
-		Description: inferDescription(meta.Description, b, title),
+		Description: inferDescription(meta.Description, lines, title),
 		Resource:    resource,
-		Tags:        inferTags(meta.Tags, b, typ),
+		Tags:        inferTags(meta.Tags, lines, typ),
 		Body:        b,
 	}
 	r.Meta = okf.Meta{Status: meta.Status, LastValidated: meta.LastValidated}
@@ -91,38 +95,41 @@ func Infer(data []byte, source string) Result {
 			r.Warnings = append(r.Warnings, fmt.Sprintf("unparseable date %q dropped (want RFC3339 or 2006-01-02)", ts))
 		}
 	}
-	r.DestPath = fmt.Sprintf("%ss/%s.md", strings.ToLower(typ), slugOf(title))
+	r.DestPath = destPath(typ, title)
 	return r
 }
 
-// slugOf is the single dest-path slug rule (Infer and Enrich share it) so the
-// two DestPath computations can't drift.
-func slugOf(title string) string { return okf.Slugify(title) }
+// destPath is the single dest-path rule (Infer and Enrich share it) so the whole
+// "<type>s/<slug>.md" layout — not just the slug — can't drift between the two.
+func destPath(typ, title string) string {
+	return fmt.Sprintf("%ss/%s.md", strings.ToLower(typ), okf.Slugify(title))
+}
 
 // inferType: a valid declared type wins; else Incident iff the body already
-// carries the gate's required sections (kbvalidate.requiredIncidentSections)
-// AND a resource (Incident requires one); else Playbook — the relaxed,
-// free-form-runbook type.
+// carries the gate's required sections AND a resource (Incident requires one);
+// else Playbook — the relaxed, free-form-runbook type.
 func inferType(declared, body, resource string) string {
 	if validTypes[strings.TrimSpace(declared)] {
 		return strings.TrimSpace(declared)
 	}
-	secs := kbvalidate.Sections(body)
-	if resource != "" && secs["symptom"] != "" && secs["cause"] != "" && secs["resolution"] != "" {
+	if resource != "" && kbvalidate.HasIncidentSections(body) {
 		return "Incident"
 	}
 	return "Playbook"
 }
 
+// headingPrefixes are the markdown heading markers inferTitle promotes to a title.
+var headingPrefixes = []string{"# ", "## "}
+
 // inferTitle: frontmatter title → first #/## heading → humanized filename
 // stem. Always capped to the merge gate's single-line 120-byte budget.
-func inferTitle(declared, body, source string) string {
+func inferTitle(declared string, lines []string, source string) string {
 	if t := curator.CapTitle(declared); t != "" {
 		return t
 	}
-	for _, line := range strings.Split(body, "\n") {
+	for _, line := range lines {
 		t := strings.TrimSpace(line)
-		for _, p := range []string{"# ", "## "} {
+		for _, p := range headingPrefixes {
 			if strings.HasPrefix(t, p) {
 				if h := curator.CapTitle(strings.TrimPrefix(t, p)); h != "" {
 					return h
@@ -141,12 +148,12 @@ const descriptionMaxRunes = 240
 // inferDescription: frontmatter description → first prose line of the body
 // (headings, code fences, and blank lines skipped; list/quote markers
 // stripped) → the title, so the gate's non-empty requirement always holds.
-func inferDescription(declared, body, title string) string {
+func inferDescription(declared string, lines []string, title string) string {
 	if d := strings.TrimSpace(declared); d != "" {
 		return capRunes(strings.Join(strings.Fields(d), " "), descriptionMaxRunes)
 	}
 	inFence := false
-	for _, line := range strings.Split(body, "\n") {
+	for _, line := range lines {
 		t := strings.TrimSpace(line)
 		if strings.HasPrefix(t, "```") {
 			inFence = !inFence
@@ -178,7 +185,7 @@ var alertNameRe = regexp.MustCompile(`\b[A-Z][a-z0-9]+(?:[A-Z]+[a-z0-9]*)+\b`)
 // inferTags mirrors curator.entryTags' shape (constant pair first, derived
 // signal after, deduped, lowercased): imported + type, then the source's own
 // tags, then detected alert-name patterns.
-func inferTags(declared []string, body, typ string) []string {
+func inferTags(declared []string, lines []string, typ string) []string {
 	tags := []string{"imported", strings.ToLower(typ)}
 	seen := map[string]bool{tags[0]: true, tags[1]: true}
 	add := func(t string) {
@@ -191,7 +198,7 @@ func inferTags(declared []string, body, typ string) []string {
 	for _, t := range declared {
 		add(t)
 	}
-	for _, line := range strings.Split(body, "\n") {
+	for _, line := range lines {
 		t := strings.TrimSpace(line)
 		if !strings.HasPrefix(t, "#") && !strings.Contains(strings.ToLower(t), "alert") {
 			continue
@@ -203,22 +210,13 @@ func inferTags(declared []string, body, typ string) []string {
 	return tags
 }
 
-// unknownKeys lists top-level frontmatter keys Infer does not carry over,
-// so the import report tells the user what was left behind.
-func unknownKeys(fm []byte) []string {
-	known := map[string]bool{
-		"type": true, "title": true, "description": true, "resource": true,
-		"tags": true, "timestamp": true, "date": true, "status": true, "last_validated": true,
-	}
-	var raw map[string]any
-	if yaml.Unmarshal(fm, &raw) != nil {
-		return nil
-	}
-	var out []string
-	for k := range raw {
-		if !known[k] {
-			out = append(out, k)
-		}
+// unknownKeys lists (sorted) the frontmatter keys Infer did not carry over —
+// the yaml.v3 inline catch-all (sourceMeta.Extra) already holds exactly those,
+// so the import report tells the user what was left behind without a re-parse.
+func unknownKeys(extra map[string]any) []string {
+	out := make([]string, 0, len(extra))
+	for k := range extra {
+		out = append(out, k)
 	}
 	sort.Strings(out)
 	return out

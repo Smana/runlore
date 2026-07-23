@@ -42,26 +42,37 @@ func runKBImport(args []string, w io.Writer) error {
 	}
 	src := rest[0]
 
+	// Config is needed to resolve a default destination (catalog.dir) and/or the
+	// model; load it once when either path needs it, then reuse the parse below.
+	var cfg *config.Config
+	var cfgErr error
+	if *into == "" || *useModel {
+		cfg, cfgErr = config.Load(*cfgPath)
+	}
+
 	dest := *into
 	if dest == "" {
-		cfg, cerr := config.Load(*cfgPath)
-		if cerr != nil {
-			return fmt.Errorf("load config: %w (or pass --into <kb-dir>)", cerr)
+		if cfgErr != nil {
+			return fmt.Errorf("load config: %w (or pass --into <kb-dir>)", cfgErr)
 		}
 		dest = cfg.Catalog.Dir
 		if dest == "" {
 			return fmt.Errorf("no destination (set catalog.dir or pass --into <kb-dir>)")
 		}
 	}
-	if st, serr := os.Stat(dest); serr != nil || !st.IsDir() {
-		return fmt.Errorf("KB dir %s is not a directory (clone your KB repo checkout first): %v", dest, serr)
+	st, serr := os.Stat(dest)
+	if serr != nil {
+		return fmt.Errorf("KB dir %s: %w (clone your KB repo checkout first)", dest, serr)
+	}
+	if !st.IsDir() {
+		return fmt.Errorf("KB dir %s is not a directory (clone your KB repo checkout first)", dest)
 	}
 
 	// Optional model — same opt-in shape as `lore validate-kb --semantic`:
 	// no usable model config degrades to deterministic-only with a warning.
 	var model providers.ModelProvider
 	if *useModel {
-		if cfg, cerr := config.Load(*cfgPath); cerr == nil && ModelConfigured(cfg) {
+		if cfgErr == nil && ModelConfigured(cfg) {
 			model = BuildModel(cfg, os.Getenv(cfg.Model.APIKeyEnv))
 		} else {
 			fmt.Fprintln(os.Stderr, "kb import: --model set but no usable model in config; running deterministic only")
@@ -109,38 +120,40 @@ func runKBImport(args []string, w io.Writer) error {
 		if actions[i].Skip {
 			continue
 		}
-		issues := kbvalidate.ValidateStructural(toCatalogEntry(actions[i].Result))
-		for _, iss := range issues {
-			if iss.Severity == kbvalidate.SeverityWarning {
+		var firstErr *kbvalidate.Issue
+		for _, iss := range kbvalidate.ValidateStructural(toCatalogEntry(actions[i].Result)) {
+			switch {
+			case iss.Severity == kbvalidate.SeverityWarning:
 				actions[i].Warnings = append(actions[i].Warnings, fmt.Sprintf("%s: %s", iss.Field, iss.Message))
+			case iss.Severity == kbvalidate.SeverityError && firstErr == nil:
+				firstErr = &iss
 			}
 		}
-		if kbvalidate.HasErrors(issues) {
-			first := firstError(issues)
+		if firstErr != nil {
 			actions[i].Skip = true
-			actions[i].Reason = fmt.Sprintf("fails validation: %s: %s", first.Field, first.Message)
+			actions[i].Reason = fmt.Sprintf("fails validation: %s: %s", firstErr.Field, firstErr.Message)
 		}
 	}
 
 	imported, skipped := 0, 0
 	tw := tabwriter.NewWriter(w, 2, 4, 2, ' ', 0)
-	fmt.Fprintln(tw, "ACTION\tSOURCE\tDEST\tTYPE\tTITLE / REASON")
+	_, _ = fmt.Fprintln(tw, "ACTION\tSOURCE\tDEST\tTYPE\tTITLE / REASON")
 	for _, a := range actions {
 		for _, warn := range a.Warnings {
 			fmt.Fprintf(os.Stderr, "warning: %s: %s\n", a.Source, warn)
 		}
 		if a.Skip {
 			skipped++
-			fmt.Fprintf(tw, "skip\t%s\t-\t-\t%s\n", a.Source, a.Reason)
+			_, _ = fmt.Fprintf(tw, "skip\t%s\t-\t-\t%s\n", a.Source, a.Reason)
 			continue
 		}
 		imported++
-		fmt.Fprintf(tw, "import\t%s\t%s\t%s\t%s\n", a.Source, a.DestPath, a.Entry.Type, truncateCell(a.Entry.Title, 60))
+		_, _ = fmt.Fprintf(tw, "import\t%s\t%s\t%s\t%s\n", a.Source, a.DestPath, a.Entry.Type, truncateCell(a.Entry.Title, 60))
 		if *dryRun {
 			continue
 		}
 		out := filepath.Join(dest, filepath.FromSlash(a.DestPath))
-		if merr := os.MkdirAll(filepath.Dir(out), 0o755); merr != nil {
+		if merr := os.MkdirAll(filepath.Dir(out), 0o750); merr != nil {
 			return merr
 		}
 		if werr := os.WriteFile(out, []byte(okf.Render(a.Entry, a.Meta)), 0o644); werr != nil { //nolint:gosec // G306: catalog files are world-readable docs
@@ -149,10 +162,10 @@ func runKBImport(args []string, w io.Writer) error {
 	}
 	_ = tw.Flush()
 	if *dryRun {
-		fmt.Fprintf(w, "\ndry-run: would import %d, skip %d (of %d sources); nothing written\n", imported, skipped, len(actions))
+		_, _ = fmt.Fprintf(w, "\ndry-run: would import %d, skip %d (of %d sources); nothing written\n", imported, skipped, len(actions))
 		return nil
 	}
-	fmt.Fprintf(w, "\nimported %d, skipped %d (of %d sources) into %s — review the diff, then commit and push\n",
+	_, _ = fmt.Fprintf(w, "\nimported %d, skipped %d (of %d sources) into %s — review the diff, then commit and push\n",
 		imported, skipped, len(actions), dest)
 	return nil
 }
@@ -173,10 +186,7 @@ func collectSources(src string) ([]string, error) {
 			}
 			return nil
 		}
-		if strings.HasPrefix(base, ".") || !strings.HasSuffix(base, ".md") {
-			return nil
-		}
-		if base == "index.md" || base == "log.md" || strings.EqualFold(base, "readme.md") {
+		if !catalog.IsEntryFile(base) {
 			return nil
 		}
 		out = append(out, path)
@@ -195,13 +205,4 @@ func toCatalogEntry(r kbimport.Result) catalog.Entry {
 		Timestamp: r.Meta.Timestamp, Status: r.Meta.Status, LastValidated: r.Meta.LastValidated,
 		Path: r.DestPath,
 	}
-}
-
-func firstError(issues []kbvalidate.Issue) kbvalidate.Issue {
-	for _, iss := range issues {
-		if iss.Severity == kbvalidate.SeverityError {
-			return iss
-		}
-	}
-	return kbvalidate.Issue{Field: "unknown", Message: "validation error"}
 }
