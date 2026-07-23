@@ -423,14 +423,24 @@ config:
 
 ### Install
 
-With the `values.yaml` above, deploy RunLore with a single command:
+With the `values.yaml` above, deploy RunLore with a single command — the chart is an OCI artifact
+on GHCR, published on every release:
 
 ```bash
-helm install runlore deploy/helm/runlore -n runlore --create-namespace -f values.yaml
+helm install runlore oci://ghcr.io/smana/charts/runlore -n runlore --create-namespace -f values.yaml
 ```
 
-> The chart needs the `deploy/helm/runlore` directory from this repo. A packaged chart repo is on the
-> roadmap; for now, `git clone` and install from the path (or `helm package` it yourself).
+> Pin a version with `--version X.Y.Z` (the chart version tracks the RunLore release).
+> **Dev alternative** — working from a clone of this repo, install from the chart path instead:
+> `helm install runlore deploy/helm/runlore -n runlore --create-namespace -f values.yaml`.
+
+Every published chart is **cosign keyless-signed**. To verify before installing (optional):
+
+```bash
+cosign verify ghcr.io/smana/charts/runlore:<version> \
+  --certificate-identity-regexp 'https://github.com/Smana/runlore/\.github/workflows/release-chart\.yml@.*' \
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com
+```
 
 ---
 

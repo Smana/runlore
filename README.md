@@ -206,12 +206,15 @@ Wire your credentials into a Kubernetes `Secret`, point the chart at them via a 
 (GitOps engine, LLM endpoint, KB repo, notification), and install:
 
 ```bash
-helm install runlore deploy/helm/runlore -n runlore --create-namespace -f values.yaml
+helm install runlore oci://ghcr.io/smana/charts/runlore -n runlore --create-namespace -f values.yaml
 ```
 
-> The chart ships **in this repo** (`git clone` first) — there is no `helm repo add` / OCI registry
-> yet. A minimal starting point for `values.yaml` is
+> The chart is an **OCI artifact on GHCR** — no `git clone`, no `helm repo add`. It is published and
+> cosign-signed on every release; pin a version with `--version X.Y.Z`. A minimal starting point for
+> `values.yaml` is
 > [`deploy/helm/runlore/values-minimal.yaml`](deploy/helm/runlore/values-minimal.yaml).
+> Working from a clone (dev alternative):
+> `helm install runlore deploy/helm/runlore -n runlore --create-namespace -f values.yaml`.
 
 Then point a source at RunLore — for example, route your Alertmanager alerts to
 `http://runlore.runlore.svc:8080/webhook/alertmanager` — and it starts investigating immediately.
