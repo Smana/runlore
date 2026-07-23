@@ -20,6 +20,7 @@ import (
 	"gopkg.in/yaml.v3"
 
 	"github.com/Smana/runlore/internal/providers"
+	"github.com/Smana/runlore/internal/sourcerepo"
 )
 
 // Config is the top-level RunLore configuration (loaded from YAML).
@@ -50,6 +51,7 @@ type Config struct {
 	Network Network       `yaml:"network"` // network-flow data source (pluggable, CNI-agnostic); empty Provider disables it
 	Cloud   Cloud         `yaml:"cloud"`   // cloud-side context (AWS); empty Provider disables it
 	MCP     MCP           `yaml:"mcp"`     // external MCP servers whose tools the agent may call (opt-in)
+	SourceRepos SourceRepos `yaml:"source_repos"` // source_diff repo allowlist; empty (default) disables the tool
 
 	Server ServerConfig `yaml:"server"` // HTTP ingress (webhook authentication)
 
@@ -211,6 +213,18 @@ type MCPServer struct {
 	// advertised tool (unless mcp.require_allowlist). Enforced at discovery:
 	// a tool outside the list is never registered, so it cannot be called.
 	Tools []string `yaml:"tools"`
+}
+
+// SourceRepos gates the source_diff investigation tool: an allowlist of
+// application/module source repos the loop may clone and diff when a change
+// names a version bump (image tag, module ref). Empty (the default) ⇒ the
+// tool is not registered — no new required config. Patterns are
+// host/org/repo with per-segment globs ("github.com/acme/*"); matching is the
+// server-side security boundary (see internal/sourcerepo). Private GitHub
+// repos authenticate with the forge GitHub App installation token
+// (contents:read); private non-GitHub hosts are not supported yet.
+type SourceRepos struct {
+	Allow []string `yaml:"allow"`
 }
 
 // Network provider identifiers for config.network.provider. The network signal is
@@ -1062,6 +1076,13 @@ func (c *Config) Validate() error {
 	// applyDefaults value (10). A negative cap is always a misconfiguration.
 	if c.GitOps.Mirror.Max < 0 {
 		return fmt.Errorf("gitops.mirror.max must be >= 0 (0 = use the default 10), got %d", c.GitOps.Mirror.Max)
+	}
+	// source_repos.allow is compiled at startup; a bad pattern must fail config
+	// load, not silently disable the tool at wiring time.
+	if len(c.SourceRepos.Allow) > 0 {
+		if _, err := sourcerepo.New(c.SourceRepos.Allow); err != nil {
+			return fmt.Errorf("source_repos.allow: %w", err)
+		}
 	}
 	// Pricing rates must be non-negative (a negative rate would report a negative
 	// cost). Cover the main model and the verify override (which carries its own).
