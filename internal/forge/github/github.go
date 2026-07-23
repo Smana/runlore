@@ -19,8 +19,8 @@ import (
 	"time"
 
 	"github.com/Smana/runlore/internal/httpx"
+	"github.com/Smana/runlore/internal/okf"
 	"github.com/Smana/runlore/internal/providers"
-	"gopkg.in/yaml.v3"
 )
 
 // TokenFunc returns a valid installation token (minted/cached by the caller).
@@ -408,37 +408,6 @@ func issueBody(inv providers.Investigation) string {
 	return neutralizeImages(b.String())
 }
 
-// kbFrontmatter is the YAML frontmatter of an OKF entry. Marshaled (not string-
-// formatted) so a newline-bearing title/description from LLM output can't inject
-// extra frontmatter keys.
-type kbFrontmatter struct {
-	Type        string `yaml:"type"`
-	Title       string `yaml:"title"`
-	Description string `yaml:"description"`
-	Resource    string `yaml:"resource,omitempty"`
-	// alert_resource: the resource the ORIGINATING ALERT fired on, written only when it
-	// differs from resource (the fault locus). Recall matches an incoming alert against
-	// the entry's resource; an entry whose fault sits deeper than its alert — an alert
-	// on the HelmRelease tooling/harbor investigated down to the pod
-	// tooling/harbor-registry — is otherwise unreachable from the very alert that
-	// would surface it.
-	AlertResource string   `yaml:"alert_resource,omitempty"`
-	Tags          []string `yaml:"tags,omitempty"`
-	Timestamp     string   `yaml:"timestamp,omitempty"` // OKF-recommended; seed entries carry it, curated ones now do too
-	// last_validated: the date a human last confirmed the entry works. Never set
-	// on drafts — the human merge is the first validation, and humans (or future
-	// confirmation flows) stamp it from there. Recall's stale_after down-weighting
-	// falls back to timestamp, so an unvalidated entry still ages from creation.
-	LastValidated string `yaml:"last_validated,omitempty"`
-	Fingerprint   string `yaml:"fingerprint,omitempty"`
-	// Confidence + Provenance are OKF extension keys: frontmatter is for the
-	// fields you query/filter/index on, and these are exactly that (per-entry
-	// confidence floors, "what change caused this" lookups).
-	Confidence float64  `yaml:"confidence,omitempty"`
-	Provenance []string `yaml:"provenance,omitempty"`
-}
-
-// renderEntry serializes a KBEntry as OKF markdown (frontmatter + body).
 // prBody is the GitHub PR description: a one-line why-keep summary so the PR list
 // view is informative, plus the reviewer-context Related knowledge section. The
 // full decision card + OKF sections live in the entry file itself (visible in
@@ -506,28 +475,14 @@ func (c *Client) blobURL(path string) string {
 	return fmt.Sprintf("%s/%s/%s/blob/%s/%s", host, c.owner, c.repo, branch, path)
 }
 
+// renderEntry serializes a KBEntry as OKF markdown (frontmatter + body).
+// The timestamp is stamped at render time (RFC3339 UTC, matching the seed
+// entries); last_validated stays unset — that field claims human confirmation.
+// The body is neutralized here (LLM/alert-authored, GitHub auto-renders it);
+// okf.Render itself writes bodies verbatim.
 func renderEntry(e providers.KBEntry) string {
-	// Stamp the curated entry's timestamp at render time (RFC3339 UTC, matching
-	// the seed entries and flux.Executor). Kept off KBEntry so draftKBEntry stays
-	// deterministic/time-free; this serializer is already the I/O boundary.
-	// last_validated stays unset: that field claims human confirmation.
-	ts := time.Now().UTC().Format(time.RFC3339)
-	fm, _ := yaml.Marshal(kbFrontmatter{
-		Type: e.Type, Title: e.Title, Description: e.Description, Resource: e.Resource,
-		AlertResource: e.AlertResource,
-		Tags:          e.Tags, Timestamp: ts, Fingerprint: e.Fingerprint,
-		Confidence: e.Confidence, Provenance: e.Provenance,
-	})
-	var b strings.Builder
-	b.WriteString("---\n")
-	b.Write(fm)
-	b.WriteString("---\n\n")
-	// Neutralize image markdown in the untrusted body (LLM/alert-authored) before
-	// the entry file is written to GitHub: GitHub renders the file on merge and
-	// auto-fetches any ![](url), which would leak KB-file URLs to an attacker.
-	b.WriteString(neutralizeImages(e.Body))
-	b.WriteString("\n")
-	return b.String()
+	e.Body = neutralizeImages(e.Body)
+	return okf.Render(e, okf.Meta{Timestamp: time.Now().UTC().Format(time.RFC3339)})
 }
 
 // entryPath is where the drafted entry lives in the KB bundle: a type directory
@@ -548,21 +503,4 @@ func entryPath(e providers.KBEntry, slug string, now int64) string {
 	return fmt.Sprintf("%ss/%s-%s.md", strings.ToLower(e.Type), slug, suffix)
 }
 
-func slugify(s string) string {
-	s = strings.ToLower(s)
-	var b strings.Builder
-	prevDash := false
-	for _, r := range s {
-		switch {
-		case r >= 'a' && r <= 'z', r >= '0' && r <= '9':
-			b.WriteRune(r)
-			prevDash = false
-		default:
-			if !prevDash {
-				b.WriteByte('-')
-				prevDash = true
-			}
-		}
-	}
-	return strings.Trim(b.String(), "-")
-}
+func slugify(s string) string { return okf.Slugify(s) }

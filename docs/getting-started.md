@@ -125,6 +125,44 @@ incidents, platform constraints.
 
 ---
 
+## Step 1b — Seed the catalog from your existing runbooks (optional)
+
+You don't have to start empty. If your team already keeps markdown runbooks or
+postmortems anywhere, import them and get recall value on day one:
+
+```bash
+# preview what would be written — nothing is touched
+lore kb import ./our-runbooks --into ./kb --dry-run
+
+# convert + validate + dedup, then write into your local KB checkout
+lore kb import ./our-runbooks --into ./kb
+cd kb && git add . && git commit -m "seed catalog from existing runbooks" && git push
+```
+
+What `import` does, deterministically (no model, no config needed beyond the
+directory paths):
+
+- **Adds/normalizes OKF frontmatter** — title from the existing frontmatter or
+  the first heading (filename as last resort), description from the first
+  paragraph, tags from the document's own tags **plus detected alert names**
+  (`KubePodCrashLooping`-style tokens in headings and alert-mentioning lines —
+  exactly the recall signal that lets a future alert find the runbook).
+- **Classifies** — a document that already carries `Symptom`/`Cause`/`Resolution`
+  sections *and* names a `resource` becomes an `Incident`; everything else is a
+  `Playbook` (free-form runbooks validate relaxed, same as hand-written entries).
+- **Validates** every entry with the same merge gate as `lore validate-kb` —
+  nothing is written that the gate would later reject.
+- **Dedups** against what the catalog already holds (exact and fuzzy title, same
+  rule the curator uses for duplicate PRs) and skips it with a printed reason.
+
+Nothing is committed for you: you review the diff and push, the same
+human-in-the-loop bar as every RunLore KB PR. With `--model`, the LLM already
+configured in your `runlore.yaml` refines titles/descriptions/tags (purely
+optional — a model failure falls back to the deterministic result). Re-running
+the same import is a no-op.
+
+---
+
 ## Step 2 — GitHub App for curation (optional)
 
 The **Curator** writes findings back to your KB repo: confident, *verified* root causes become a **PR**

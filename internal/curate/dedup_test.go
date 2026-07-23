@@ -166,3 +166,12 @@ func TestDedupSkipsProtectedDuplicates(t *testing.T) {
 		t.Fatalf("should close only the unprotected dup #12, got %v", f.closed)
 	}
 }
+
+func TestTitleJaccardExported(t *testing.T) {
+	if s := TitleJaccard("redis failover runbook", "redis failover runbook"); s != 1 {
+		t.Fatalf("identical titles must score 1, got %v", s)
+	}
+	if s := TitleJaccard("redis failover", "postgres vacuum tuning"); s >= 0.6 {
+		t.Fatalf("unrelated titles must stay under threshold, got %v", s)
+	}
+}

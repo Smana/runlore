@@ -453,3 +453,13 @@ func TestDraftKBEntryExcludesCost(t *testing.T) {
 		}
 	}
 }
+
+func TestCapTitleExported(t *testing.T) {
+	if got := CapTitle("a\nb\tc"); got != "a b c" {
+		t.Fatalf("whitespace collapse: got %q", got)
+	}
+	long := strings.Repeat("word ", 40)
+	if capped := CapTitle(long); len(capped) > 120 {
+		t.Fatalf("must cap at 120 bytes, got %d", len(capped))
+	}
+}

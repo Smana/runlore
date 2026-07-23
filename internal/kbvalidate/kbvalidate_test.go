@@ -229,3 +229,10 @@ func TestHasErrors(t *testing.T) {
 		t.Fatal("an error must be reported")
 	}
 }
+
+func TestSectionsExported(t *testing.T) {
+	secs := Sections("## Symptom\n\nx\n\n## Cause\n\ny\n")
+	if secs["symptom"] != "x" || secs["cause"] != "y" {
+		t.Fatalf("got %#v", secs)
+	}
+}

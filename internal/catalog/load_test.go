@@ -194,3 +194,14 @@ func contains(s, sub string) bool {
 	}
 	return false
 }
+
+func TestSplitFrontmatterExported(t *testing.T) {
+	fm, body := SplitFrontmatter([]byte("---\ntitle: t\n---\nbody\n"))
+	if string(fm) != "title: t" || string(body) != "body\n" {
+		t.Fatalf("got fm=%q body=%q", fm, body)
+	}
+	fm, body = SplitFrontmatter([]byte("no frontmatter"))
+	if fm != nil || string(body) != "no frontmatter" {
+		t.Fatalf("frontmatterless input must pass through, got fm=%q body=%q", fm, body)
+	}
+}

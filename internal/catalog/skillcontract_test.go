@@ -248,7 +248,7 @@ func TestSkillContentIsHarnessNeutral(t *testing.T) {
 		if err != nil {
 			t.Fatalf("read %s: %v", path, err)
 		}
-		_, body := splitFrontmatter(raw) // frontmatter is packaging metadata
+		_, body := SplitFrontmatter(raw) // frontmatter is packaging metadata
 		for i, term := range bannedVocabulary {
 			if res[i].Match(body) {
 				t.Errorf("%s: harness-specific term %q in skill body — the portable core must not name a specific agent or its tools",
