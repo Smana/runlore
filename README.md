@@ -238,8 +238,11 @@ between commits. It's usable today, but "stable" means different things across t
   notifier** (Slack in the eval) + **GitHub** for the knowledge base. This is the path the
   [nightly eval](CONTRIBUTING.md#nightly-eval-ci) and the [k3d e2e suite](CONTRIBUTING.md#end-to-end-on-k3d)
   exercise — run it with confidence.
-- **Argo CD is now end-to-end tested**, alongside Flux: the k3d suite reconfigures to the `argocd`
-  engine and drives an `Application Degraded` failure through a full investigation.
+- **Argo CD is now end-to-end tested**, alongside Flux — including the **`approve` rung**: the k3d
+  suite reconfigures to the `argocd` engine, drives an `Application Degraded` failure through a full
+  investigation, then human-approves a **pause-auto-sync** action that executes reversibly (the prior
+  `syncPolicy.automated` is preserved for resume). Both engines share the same reversible-only,
+  allowlisted action envelope.
 - **Functional but less exercised:** **Matrix**, **Gemini**, the **PagerDuty** webhook source, cloud
   integrations, and the network (Hubble) provider. They work and are unit-tested, but see less
   real-world mileage — expect rougher edges and please file issues.

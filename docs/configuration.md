@@ -241,6 +241,22 @@ Also records the human 👍/👎 ratings when `notify.slack.feedback_buttons` is
 - `allow` — the envelope: `reversible_only`, `namespaces` (allowlist — **empty permits nothing**),
   `protected_namespaces` (added to built-in `flux-system`/`kube-system` denies), `max_blast_radius`,
   `kinds`.
+- **Per-engine op semantics** — the executable ops (`suspend` / `resume` / `reconcile`) are
+  engine-neutral names; the executor for the configured `gitops.engine` translates them:
+
+  | op | Flux (`Kustomization` / `HelmRelease`) | Argo CD (`Application`) |
+  |---|---|---|
+  | `suspend` | sets `spec.suspend: true` | removes `spec.syncPolicy.automated` (pauses auto-sync); the prior value is preserved in the `runlore.io/paused-sync-automated` annotation |
+  | `resume` | sets `spec.suspend: false` | restores `spec.syncPolicy.automated` from that annotation (no-op if RunLore didn't pause it) |
+  | `reconcile` | `reconcile.fluxcd.io/requestedAt` annotation | `argocd.argoproj.io/refresh: normal` annotation |
+
+  All three are reversible with blast radius 1 in the server-authoritative op registry, so the same
+  policy envelope gates both engines identically. **Argo CD notes:** `Application` objects usually
+  live in the `argocd` namespace — add it (or your apps-in-any-namespace app namespaces) to
+  `actions.allow.namespaces` **and** the chart's `rbac.actionNamespaces`. If you set `allow.kinds`,
+  include `Application`. `argocd` is deliberately **not** a built-in protected namespace (unlike
+  `flux-system`): it is where the reversible pause lever lives; the empty-by-default namespace
+  allowlist is what bounds it.
 - `require_approval` + `approval_token_env`, `audit_log_path`, and `auto.*` (`dry_run`,
   `min_confidence`, `max_per_window`, `window`).
 - **Fail-closed validation:** `approve`/`auto` both require `approval_token_env` **and**
