@@ -516,6 +516,14 @@ source_repos:
   a full clone that must complete within `investigation.tool_timeout` (default 60 s) — raise
   it if large-repo clones exceed that budget. Subsequent calls reuse the warm mirror and
   only fetch new refs.
+- **Bounded blast radius:** one investigation may clone at most 10 distinct repos, and a
+  single diff is capped in memory (files past a large bound are counted but omitted, with a
+  note telling the model to narrow the version range) — so a very large diff or a wandering
+  loop can't exhaust the agent.
+- **Local-path patterns are for dev/test only.** A pattern beginning with `/` (e.g.
+  `/tmp/fixtures/*`) matches a local filesystem path and makes RunLore diff a local git
+  repo. This exists for local development and the test suite; **do not** use local-path
+  patterns in a deployed cluster — list only remote `host/org/repo` patterns there.
 
 ### Other top-level keys
 `gitops.engine` (`flux` default · `argocd`), `cloud` (`provider: aws`, `region`, `cluster_name`),

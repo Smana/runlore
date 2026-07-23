@@ -3,6 +3,7 @@
 package whatchanged
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -13,6 +14,7 @@ import (
 
 	"github.com/go-git/go-git/v5"
 	"github.com/go-git/go-git/v5/plumbing"
+	"github.com/go-git/go-git/v5/plumbing/format/diff"
 	"github.com/go-git/go-git/v5/plumbing/object"
 
 	"github.com/Smana/runlore/internal/providers"
@@ -28,17 +30,31 @@ type SourceCommit struct {
 
 // SourceChanges is the source_diff payload: the ref spellings that actually
 // resolved (after the v-prefix fallback), the commits reachable from ToRef
-// down to FromRef (newest-first, capped), and the full unscoped diff between
-// the two refs.
+// down to FromRef (newest-first, capped), and the (bounded) unscoped diff
+// between the two refs.
 type SourceChanges struct {
 	FromRef, ToRef string
 	Commits        []SourceCommit
 	CommitsCapped  bool // the walk hit maxCommits before reaching FromRef
 	Diff           providers.Diff
+	FilesOmitted   int // files dropped because the diff hit the file/byte cap (0 = whole diff materialized)
 }
 
 // nearTagLimit caps how many candidate tags a RefNotFoundError lists.
 const nearTagLimit = 8
+
+const (
+	// sourceMaxDiffFiles / sourceMaxDiffBytes bound what Source materializes into
+	// memory. Unlike what_changed (which scopes the diff to a workload path),
+	// source_diff diffs the WHOLE repo, so a large monorepo release could render
+	// hundreds of MB of unified-diff strings and OOM the agent (the failure mode
+	// differ.go's clone-to-disk note records). These caps hold retention to a few
+	// MB regardless of repo size; the render layer trims further. Files past the
+	// cap are counted into FilesOmitted and their patches dropped — realistic
+	// releases (well under 2000 changed files) never trip this.
+	sourceMaxDiffFiles = 2000
+	sourceMaxDiffBytes = 8 << 20
+)
 
 // RefNotFoundError reports an unresolvable ref plus nearby tag names so the
 // model can self-correct (asked for "1.2.3", the repo tags "v1.2.3" — or the
@@ -77,10 +93,41 @@ func (d *Differ) Source(ctx context.Context, url, fromRef, toRef string, maxComm
 	if out.Commits, out.CommitsCapped, err = commitRange(repo, to, from.Hash, maxCommits); err != nil {
 		return SourceChanges{}, err
 	}
-	if out.Diff, err = diffCommits(ctx, from, to, ""); err != nil {
+	if out.Diff, out.FilesOmitted, err = cappedDiff(ctx, from, to); err != nil {
 		return SourceChanges{}, err
 	}
 	return out, nil
+}
+
+// cappedDiff computes the whole-repo unified diff between two commits, bounded
+// by sourceMaxDiffFiles and sourceMaxDiffBytes so a pathological monorepo diff
+// can't exhaust memory. Files rendered before a cap trips carry full patches;
+// the rest are counted and returned as omitted (their patches dropped). It
+// mirrors diffCommits' per-file encoding but adds the caps — kept separate so
+// what_changed's path-scoped diffs stay uncapped.
+func cappedDiff(ctx context.Context, from, to *object.Commit) (providers.Diff, int, error) {
+	patch, err := from.PatchContext(ctx, to)
+	if err != nil {
+		return providers.Diff{}, 0, fmt.Errorf("patch: %w", err)
+	}
+	var (
+		out     providers.Diff
+		total   int
+		omitted int
+	)
+	for _, fp := range patch.FilePatches() {
+		if len(out.Files) >= sourceMaxDiffFiles || total >= sourceMaxDiffBytes {
+			omitted++
+			continue
+		}
+		var buf bytes.Buffer
+		if err := diff.NewUnifiedEncoder(&buf, diff.DefaultContextLines).Encode(singleFilePatch{fp}); err != nil {
+			return providers.Diff{}, 0, fmt.Errorf("encode %s: %w", filePatchPath(fp), err)
+		}
+		out.Files = append(out.Files, providers.FileDiff{Path: filePatchPath(fp), Patch: buf.String()})
+		total += buf.Len()
+	}
+	return out, omitted, nil
 }
 
 // resolveWithVFallback resolves ref, then "v"+ref (the image-tag/git-tag

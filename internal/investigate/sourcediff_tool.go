@@ -40,6 +40,12 @@ const (
 	sourceDiffZoomBytes    = 16 << 10 // hunks budget in a paths-zoom response
 )
 
+// sourceDiffMaxDistinctRepos bounds how many DISTINCT repos one investigation
+// may clone through source_diff. It caps a prompt-injected loop from walking the
+// whole allowlist (each distinct URL is a full-history mirror clone), and matches
+// the mirror cache's default capacity so a single investigation can't thrash it.
+const sourceDiffMaxDistinctRepos = 10
+
 // SourceDiffTool diffs an application/module source repo between two versions
 // the model found in evidence (an image-tag or module-ref bump), closing the
 // gap between "the image bumped v1.2.2→v1.2.3" and the commit that explains
@@ -52,6 +58,21 @@ const (
 type SourceDiffTool struct {
 	Source sourceDiffer
 	Allow  *sourcerepo.Allowlist
+	// cloned tracks the distinct clone URLs used this investigation, to enforce
+	// sourceDiffMaxDistinctRepos. It is populated per-investigation by
+	// withIncidentNamespace (via the loop's scopeTools); the shared registered
+	// instance has nil cloned ⇒ unbounded, but it is never called directly.
+	cloned map[string]bool
+}
+
+// withIncidentNamespace gives each investigation a fresh SourceDiffTool with its
+// own distinct-clone budget. source_diff does not use the incident namespace,
+// but implementing incidentScoped is how a tool gets per-investigation state:
+// scopeTools calls this once per run, so the returned copy's cloned set counts
+// only this investigation's clones.
+func (t SourceDiffTool) withIncidentNamespace(string) Tool {
+	t.cloned = make(map[string]bool)
+	return t
 }
 
 // Name returns the tool name.
@@ -63,7 +84,19 @@ func (t SourceDiffTool) Description() string {
 		"image or module version bump (e.g. v1.2.2→v1.2.3) to read the actual code change behind it: commit " +
 		"subjects, a per-file diffstat, and the largest hunks. Call again with paths=[…] to read specific " +
 		"files' full hunks. Pick repo from the allowed list, matching the image/module name: " +
-		strings.Join(t.Allow.Patterns(), ", ")
+		describePatterns(t.Allow.Patterns())
+}
+
+// describePatterns renders the allowlist for the tool description, capping the
+// list so a large allowlist can't bloat the per-step standing prompt cost. The
+// full set is always named in the mismatch error (paid only on a miss).
+func describePatterns(patterns []string) string {
+	const max = 8
+	if len(patterns) <= max {
+		return strings.Join(patterns, ", ")
+	}
+	return strings.Join(patterns[:max], ", ") +
+		fmt.Sprintf(", … and %d more (a mismatch error lists all)", len(patterns)-max)
 }
 
 // Schema returns the JSON schema for the arguments.
@@ -95,6 +128,17 @@ func (t SourceDiffTool) Call(ctx context.Context, args string) (string, error) {
 		return "", fmt.Errorf("repo %q is not in the source_repos allowlist; allowed: %s",
 			in.Repo, strings.Join(t.Allow.Patterns(), ", "))
 	}
+	// Distinct-clone budget (per investigation). Re-diffing an already-cloned repo
+	// is free; a NEW repo beyond the budget is refused so the loop can't walk the
+	// whole allowlist. nil cloned (shared instance, never called directly) ⇒ off.
+	if t.cloned != nil && !t.cloned[cloneURL] {
+		if len(t.cloned) >= sourceDiffMaxDistinctRepos {
+			return "", fmt.Errorf("source_diff clone budget reached (%d distinct repos this investigation); "+
+				"re-diffing an already-fetched repo is fine, but no new repos — you have likely gathered enough source context",
+				sourceDiffMaxDistinctRepos)
+		}
+		t.cloned[cloneURL] = true
+	}
 	sc, err := t.Source.Source(ctx, cloneURL, in.From, in.To, sourceDiffMaxCommits)
 	if err != nil {
 		return "", err
@@ -115,6 +159,9 @@ func renderSourceChanges(sc whatchanged.SourceChanges, zoom []string) string {
 	b.WriteString("\ncommits (newest first):\n")
 	for _, c := range sc.Commits {
 		fmt.Fprintf(&b, "  %.7s %s %s\n", c.SHA, c.When.UTC().Format("2006-01-02"), c.Subject)
+	}
+	if sc.FilesOmitted > 0 {
+		fmt.Fprintf(&b, "note: diff too large — %d files omitted entirely; narrow the from..to range for full coverage\n", sc.FilesOmitted)
 	}
 	files := make([]sourceDiffFile, 0, len(sc.Diff.Files))
 	for _, f := range sc.Diff.Files {

@@ -181,3 +181,60 @@ func TestSourceDiffDiffstatCapAndGeneratedLegend(t *testing.T) {
 		t.Fatal("expected the largest file near the top of the diffstat")
 	}
 }
+
+func TestSourceDiffCloneBudget(t *testing.T) {
+	patterns := []string{"github.com/acme/*"}
+	// The per-investigation instance (with a fresh budget) comes from withIncidentNamespace.
+	scoped := SourceDiffTool{Source: &fakeSourceDiffer{sc: fixtureChanges()}, Allow: mustAllow(t, patterns...)}.
+		withIncidentNamespace("")
+	call := func(repo string) error {
+		_, err := scoped.Call(context.Background(),
+			`{"repo":"`+repo+`","from":"1","to":"2"}`)
+		return err
+	}
+	// 10 distinct repos are allowed.
+	for i := 0; i < sourceDiffMaxDistinctRepos; i++ {
+		if err := call("github.com/acme/svc" + string(rune('a'+i))); err != nil {
+			t.Fatalf("distinct repo %d should be allowed: %v", i, err)
+		}
+	}
+	// The 11th distinct repo is refused.
+	if err := call("github.com/acme/one-too-many"); err == nil || !strings.Contains(err.Error(), "clone budget") {
+		t.Fatalf("want clone-budget rejection, got %v", err)
+	}
+	// Re-diffing an already-cloned repo stays free even past the budget.
+	if err := call("github.com/acme/svca"); err != nil {
+		t.Fatalf("re-diffing an already-fetched repo must not count against the budget: %v", err)
+	}
+}
+
+func TestDescribePatternsCaps(t *testing.T) {
+	small := []string{"github.com/acme/*", "gitlab.com/acme/x"}
+	if got := describePatterns(small); got != "github.com/acme/*, gitlab.com/acme/x" {
+		t.Fatalf("small list should be verbatim, got %q", got)
+	}
+	var many []string
+	for i := 0; i < 20; i++ {
+		many = append(many, "github.com/acme/r"+string(rune('a'+i)))
+	}
+	got := describePatterns(many)
+	if strings.Count(got, ",")+1 > 9 { // 8 patterns + the "… and N more" tail
+		t.Fatalf("description pattern list not capped: %q", got)
+	}
+	if !strings.Contains(got, "12 more") {
+		t.Fatalf("want an overflow summary naming the remainder, got %q", got)
+	}
+}
+
+func TestSourceDiffFilesOmittedNote(t *testing.T) {
+	sc := fixtureChanges()
+	sc.FilesOmitted = 4200
+	tool := SourceDiffTool{Source: &fakeSourceDiffer{sc: sc}, Allow: mustAllow(t, "github.com/acme/*")}
+	out, err := tool.Call(context.Background(), `{"repo":"github.com/acme/checkout","from":"1","to":"2"}`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out, "4200 files omitted") || !strings.Contains(out, "narrow the from..to range") {
+		t.Fatalf("expected a truncation note surfacing FilesOmitted, got:\n%.400s", out)
+	}
+}
