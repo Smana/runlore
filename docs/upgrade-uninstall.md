@@ -4,10 +4,11 @@ How to upgrade RunLore in place, what survives a restart, and how to remove it c
 
 ## Upgrading
 
-RunLore is a Helm release — upgrade like any other chart:
+RunLore is a Helm release — upgrade like any other chart (the chart is an OCI artifact on GHCR;
+from a clone of this repo, use the `deploy/helm/runlore` path instead):
 
 ```bash
-helm upgrade runlore deploy/helm/runlore -n runlore -f values.yaml
+helm upgrade runlore oci://ghcr.io/smana/charts/runlore -n runlore -f values.yaml
 ```
 
 Your `values.yaml` is the source of truth; the entire agent config under `values.config` is rendered
