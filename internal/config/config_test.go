@@ -722,3 +722,23 @@ func TestVectorCacheConfigDefaults(t *testing.T) {
 		t.Error("explicit enabled:false must disable")
 	}
 }
+
+// TestLogsProviderValidate: logs.provider is an enum — "" (auto-detect),
+// "victorialogs", "loki". Anything else must abort startup loudly (the Load
+// philosophy: a typo'd key never fails silently), because a silent fallback to
+// victorialogs against a Loki endpoint would break every logs tool at runtime.
+func TestLogsProviderValidate(t *testing.T) {
+	for _, ok := range []string{"", "victorialogs", "loki"} {
+		c := &Config{}
+		c.Logs.Provider = ok
+		if err := c.Validate(); err != nil {
+			t.Fatalf("provider %q must validate, got %v", ok, err)
+		}
+	}
+	c := &Config{}
+	c.Logs.Provider = "grafana"
+	err := c.Validate()
+	if err == nil || !strings.Contains(err.Error(), "logs.provider") {
+		t.Fatalf("unknown provider must fail with a logs.provider error, got %v", err)
+	}
+}
