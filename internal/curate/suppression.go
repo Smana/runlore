@@ -5,6 +5,7 @@ package curate
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"slices"
 
 	"github.com/Smana/runlore/internal/providers"
@@ -104,4 +105,68 @@ func firstLabelIn(labels, set []string) (string, bool) {
 		}
 	}
 	return "", false
+}
+
+// Suppress closes open KB PRs that RE-DRAFT an entry a human already rejected
+// (closed without merging). The file-time drafter's dedup checks only OPEN PRs and
+// MERGED entries, so a recurring permanently-benign incident re-opens a fresh PR on
+// every recurrence — the core of PR fatigue. Suppress honors the human "no": it
+// closes the re-draft with a back-reference to the original close and its reason,
+// and leaves the "reconsider" path to Recurrence's threshold escalation (which
+// links, never reopens). Protected (human-touched) PRs are never closed, and the
+// comment-first / don't-close-on-comment-failure ordering mirrors Lifecycle.
+type Suppress struct {
+	Forge  Forge
+	Source SuppressionSource
+	Log    *slog.Logger
+}
+
+// Run closes every unprotected open KB PR whose DupFingerprint a human previously
+// rejected. Per-item forge failures are logged and skipped.
+func (s Suppress) Run(ctx context.Context) error {
+	prs, err := s.Forge.ListPRsByLabel(ctx, "runlore")
+	if err != nil {
+		return fmt.Errorf("suppress: list open KB PRs: %w", err)
+	}
+	// Fetch the (forge round-trip) suppression set lazily — only once an open,
+	// unprotected, markered PR could match it. Mirrors Recurrence's lazy fetch.
+	var suppressed map[string]SuppressedEntry
+	for _, pr := range prs {
+		fp := providers.ParseFingerprintMarker(pr.Body)
+		if fp == "" || isProtected(pr.Labels) {
+			continue
+		}
+		if suppressed == nil {
+			if suppressed, err = s.Source.Suppressed(ctx); err != nil {
+				return fmt.Errorf("suppress: load suppression set: %w", err)
+			}
+		}
+		se, ok := suppressed[fp]
+		if !ok {
+			continue
+		}
+		if err := s.Forge.Comment(ctx, pr.Number, suppressComment(se)); err != nil {
+			s.Log.Warn("suppress: comment failed; not closing", "pr", pr.Number, "err", err)
+			continue
+		}
+		if err := s.Forge.Close(ctx, pr.Number); err != nil {
+			s.Log.Warn("suppress: close failed", "pr", pr.Number, "err", err)
+			continue
+		}
+		s.Log.Info("suppress: closed re-draft of a human-rejected entry",
+			"pr", pr.Number, "prior_close", se.PRNumber, "reason", se.Reason)
+	}
+	return nil
+}
+
+// suppressComment explains the close and points at both the human decision and the
+// reconsider path (Recurrence escalates past the threshold — never a reopen).
+func suppressComment(se SuppressedEntry) string {
+	reason := ""
+	if se.Reason != "" {
+		reason = fmt.Sprintf(" (%s)", se.Reason)
+	}
+	return fmt.Sprintf("Closed by RunLore curate: a human already rejected this entry in #%d%s. "+
+		"If the incident keeps recurring, RunLore escalates via a knowledge-gap issue that links #%d — it never re-files PRs.",
+		se.PRNumber, reason, se.PRNumber)
 }
