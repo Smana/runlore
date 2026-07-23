@@ -84,7 +84,7 @@ func submitFindingsSpec() providers.ToolSpec {
 "ruled_out":{"type":"array","items":{"type":"string"},"description":"hypotheses you considered and REJECTED, one line each naming the disproving evidence"},
 "data_gaps":{"type":"array","items":{"type":"string"},"description":"signals you could not obtain (tool errors, missing metrics, truncated output) that limited the investigation - data limitations, NOT questions for a human"},
 "actions":{"type":"array","description":"proposed remediations; prefer reversible, low-blast-radius","items":{"type":"object","properties":{
-"description":{"type":"string"},"op":{"type":"string","enum":` + opEnumJSON() + `,"description":"executable op (Flux); omit for a suggestion only"},
+"description":{"type":"string"},"op":{"type":"string","enum":` + opEnumJSON() + `,"description":"executable GitOps op (Flux or Argo CD); omit for a suggestion only"},
 "reversible":{"type":"boolean"},"blast_radius":{"type":"integer"},
 "target":{"type":"object","properties":{"kind":{"type":"string"},"name":{"type":"string"},"namespace":{"type":"string"}}}},
 "required":["description"]}}},"required":["root_causes","verdict"]}`,

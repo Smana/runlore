@@ -60,7 +60,7 @@ func BuildApprovals(cfg *config.Config, exec action.Executor, aud audit.Auditor,
 		log.Warn("approval-gated actions disabled: no cluster executor available")
 		return nil
 	}
-	log.Info("rung-2 approval-gated actions enabled (Flux suspend/resume/reconcile)")
+	log.Info("rung-2 approval-gated actions enabled (GitOps suspend/resume/reconcile)")
 	return action.NewApprovals(exec, action.New(cfg.Actions), aud, log)
 }
 
