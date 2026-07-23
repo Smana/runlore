@@ -46,12 +46,12 @@ type Config struct {
 
 	LeaderElection LeaderElection `yaml:"leader_election"` // HA: only the leader investigates
 
-	Metrics MetricsConfig `yaml:"metrics"` // PromQL backend (VictoriaMetrics/Prometheus) for query_metrics
-	Logs    LogsConfig    `yaml:"logs"`    // LogsQL backend (VictoriaLogs) for query_logs
-	Network Network       `yaml:"network"` // network-flow data source (pluggable, CNI-agnostic); empty Provider disables it
-	Cloud   Cloud         `yaml:"cloud"`   // cloud-side context (AWS); empty Provider disables it
-	MCP     MCP           `yaml:"mcp"`     // external MCP servers whose tools the agent may call (opt-in)
-	SourceRepos SourceRepos `yaml:"source_repos"` // source_diff repo allowlist; empty (default) disables the tool
+	Metrics     MetricsConfig `yaml:"metrics"`      // PromQL backend (VictoriaMetrics/Prometheus) for query_metrics
+	Logs        LogsConfig    `yaml:"logs"`         // LogsQL backend (VictoriaLogs) for query_logs
+	Network     Network       `yaml:"network"`      // network-flow data source (pluggable, CNI-agnostic); empty Provider disables it
+	Cloud       Cloud         `yaml:"cloud"`        // cloud-side context (AWS); empty Provider disables it
+	MCP         MCP           `yaml:"mcp"`          // external MCP servers whose tools the agent may call (opt-in)
+	SourceRepos SourceRepos   `yaml:"source_repos"` // source_diff repo allowlist; empty (default) disables the tool
 
 	Server ServerConfig `yaml:"server"` // HTTP ingress (webhook authentication)
 
