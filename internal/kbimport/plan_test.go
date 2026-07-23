@@ -26,8 +26,8 @@ func TestPlanDedup(t *testing.T) {
 	retired := res("Old thing", "playbooks/old-thing.md", "old.md")
 	retired.Meta = okf.Meta{Status: "retired"}
 	in := []Result{
-		res("Postgres vacuum tuning", "playbooks/postgres-vacuum-tuning.md", "a.md"), // novel → import
-		res("Anything", "playbooks/redis-failover.md", "b.md"),                        // path taken → skip
+		res("Postgres vacuum tuning", "playbooks/postgres-vacuum-tuning.md", "a.md"),                   // novel → import
+		res("Anything", "playbooks/redis-failover.md", "b.md"),                                         // path taken → skip
 		res("Payments API outage — March 2024", "playbooks/payments-api-outage-march-2024.md", "c.md"), // fuzzy title dup → skip
 		retired, // retired at source → skip
 		res("Postgres vacuum tuning", "playbooks/postgres-vacuum-tuning.md", "e.md"), // batch collision → skip
