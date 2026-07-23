@@ -33,45 +33,54 @@ type Guard struct {
 	Log    *slog.Logger
 }
 
-// Reads: pass-through (a dry-run sweep must still SEE the queue to report on it).
+// Reads pass through untouched — a dry-run sweep must still SEE the queue to report on it.
 
+// ListPRsByLabel passes through to the wrapped forge.
 func (g Guard) ListPRsByLabel(ctx context.Context, label string) ([]providers.CuratedIssue, error) {
 	return g.Inner.ListPRsByLabel(ctx, label)
 }
 
+// ListIssuesByLabel passes through to the wrapped forge.
 func (g Guard) ListIssuesByLabel(ctx context.Context, label string) ([]providers.CuratedIssue, error) {
 	return g.Inner.ListIssuesByLabel(ctx, label)
 }
 
+// ListClosedUnmergedPRsByLabel passes through to the wrapped forge.
 func (g Guard) ListClosedUnmergedPRsByLabel(ctx context.Context, label string) ([]providers.CuratedIssue, error) {
 	return g.Inner.ListClosedUnmergedPRsByLabel(ctx, label)
 }
 
+// ListIssueCommentBodies passes through to the wrapped forge.
 func (g Guard) ListIssueCommentBodies(ctx context.Context, number int) ([]string, error) {
 	return g.Inner.ListIssueCommentBodies(ctx, number)
 }
 
+// IsPROpen passes through to the wrapped forge.
 func (g Guard) IsPROpen(ctx context.Context, number int) (bool, error) {
 	return g.Inner.IsPROpen(ctx, number)
 }
 
-// Writes: audited, dry-run-able.
+// Writes are audited and dry-run-able through the single write() choke point below.
 
+// Comment posts a PR comment (audited; skipped in dry-run).
 func (g Guard) Comment(ctx context.Context, number int, body string) error {
 	return g.write("kb.comment", fmt.Sprintf("pr/%d", number), firstLine(body),
 		func() error { return g.Inner.Comment(ctx, number, body) })
 }
 
+// ReplaceLabel swaps a label on a PR (audited; skipped in dry-run).
 func (g Guard) ReplaceLabel(ctx context.Context, number int, remove, add string) error {
 	return g.write("kb.relabel", fmt.Sprintf("pr/%d", number), fmt.Sprintf("%s -> %s", remove, add),
 		func() error { return g.Inner.ReplaceLabel(ctx, number, remove, add) })
 }
 
+// Close closes a PR (audited; skipped in dry-run).
 func (g Guard) Close(ctx context.Context, number int) error {
 	return g.write("kb.close", fmt.Sprintf("pr/%d", number), "",
 		func() error { return g.Inner.Close(ctx, number) })
 }
 
+// OpenIssue opens a knowledge-gap issue (audited; skipped in dry-run).
 func (g Guard) OpenIssue(ctx context.Context, inv providers.Investigation) (providers.Ref, error) {
 	var ref providers.Ref
 	err := g.write("kb.open-issue", firstLine(inv.Title), "", func() error {
@@ -82,6 +91,7 @@ func (g Guard) OpenIssue(ctx context.Context, inv providers.Investigation) (prov
 	return ref, err
 }
 
+// OpenRetirePR opens a retire PR for a decayed entry (audited; skipped in dry-run).
 func (g Guard) OpenRetirePR(ctx context.Context, entryPath, body string) (providers.Ref, error) {
 	var ref providers.Ref
 	err := g.write("kb.retire-pr", entryPath, "", func() error {
@@ -126,9 +136,9 @@ func firstLine(s string) string {
 	if i := strings.IndexByte(s, '\n'); i >= 0 {
 		s = s[:i]
 	}
-	const max = 120
-	if len(s) > max {
-		s = s[:max]
+	const maxLen = 120
+	if len(s) > maxLen {
+		s = s[:maxLen]
 	}
 	return s
 }
