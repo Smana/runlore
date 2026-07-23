@@ -165,3 +165,22 @@ func TestDiscoverLogFieldsToolNoCapability(t *testing.T) {
 		t.Fatalf("want graceful note, got:\n%s", out)
 	}
 }
+
+// TestDiscoverLogFieldsOmitsZeroCounts: Loki stream labels carry Hits=0 (no
+// per-label hit count exists); the render must omit the count rather than
+// print a misleading "(×0)".
+func TestDiscoverLogFieldsOmitsZeroCounts(t *testing.T) {
+	tool := DiscoverLogFieldsTool{Logs: &fakeLogFields{fields: []providers.FieldCount{
+		{Name: "namespace"}, {Name: "level", Hits: 4},
+	}}}
+	out, err := tool.Call(context.Background(), `{"namespace":"apps"}`)
+	if err != nil {
+		t.Fatalf("Call: %v", err)
+	}
+	if strings.Contains(out, "(×0)") {
+		t.Fatalf("zero hits must render without a count:\n%s", out)
+	}
+	if !strings.Contains(out, "level (×4)") {
+		t.Fatalf("non-zero hits must keep the count:\n%s", out)
+	}
+}

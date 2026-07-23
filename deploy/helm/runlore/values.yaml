@@ -267,7 +267,11 @@ config:
   #   github_app: { app_id: 0, installation_id: 0, private_key_env: GITHUB_APP_PRIVATE_KEY }
   # Investigate signals (optional). metrics/logs enable query_metrics/query_logs.
   # metrics: { url: http://vmsingle.observability.svc:8429 }   # PromQL (VictoriaMetrics/Prometheus)
-  # logs:    { url: http://victorialogs.observability.svc:9428 }  # LogsQL (VictoriaLogs)
+  # Logs backend (query_logs / logs_error_summary / discover_log_fields). The provider is
+  # auto-detected (Loki answers /loki/api/v1/status/buildinfo; anything else = VictoriaLogs);
+  # pin it with `provider:` if the backend is unreachable at chart-install time.
+  # logs:    { url: http://victorialogs.observability.svc:9428 }                # VictoriaLogs (LogsQL)
+  # logs:    { url: http://loki-gateway.observability.svc:80, provider: loki }  # Grafana Loki (LogQL)
   # Network-flow signal (network_drops). PLUGGABLE + CNI-agnostic — no CNI assumed,
   # none default-on. Choose ONE provider (see docs/data-sources.md):
   # network:
