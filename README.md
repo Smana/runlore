@@ -221,8 +221,9 @@ RunLore is **GitOps-engine-agnostic** (Flux + Argo CD), **metrics-backend-agnost
 (VictoriaMetrics + Prometheus), with pluggable logs and CNI-agnostic network signals. Change-aware RCA
 isn't unique — commercial tools (Komodor, Anyshift) diff changes too ([prior art](docs/prior-art.md)).
 The wedge is the **combination the open tools don't have**: that signal feeding an **open, portable
-catalog you own** ([OKF](https://github.com/GoogleCloudPlatform/knowledge-catalog)-compatible markdown,
-not a proprietary store), from an agent that's **honest about the sub-50% reality**:
+catalog you own** — [OKF](https://github.com/GoogleCloudPlatform/knowledge-catalog)-compatible
+markdown, not a proprietary store; as far as we know RunLore is the **first agent that *produces*
+OKF entries from its own investigations** — from an agent that's **honest about the sub-50% reality**:
 
 - `unresolved` is a first-class answer;
 - an adversarial *verify* pass can only ever *lower* a finding's confidence, never raise it;
