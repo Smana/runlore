@@ -149,9 +149,11 @@ func nearbyTags(repo *git.Repository, ref string) []string {
 	sort.Strings(all)
 	needle := strings.ToLower(strings.TrimPrefix(ref, "v"))
 	var near []string
-	for _, tag := range all {
-		if needle != "" && strings.Contains(strings.ToLower(tag), needle) {
-			near = append(near, tag)
+	if needle != "" {
+		for _, tag := range all {
+			if strings.Contains(strings.ToLower(tag), needle) {
+				near = append(near, tag)
+			}
 		}
 	}
 	if len(near) == 0 {

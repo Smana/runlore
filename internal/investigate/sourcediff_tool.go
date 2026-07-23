@@ -9,7 +9,6 @@ import (
 	"path"
 	"sort"
 	"strings"
-	"unicode/utf8"
 
 	"github.com/Smana/runlore/internal/sourcerepo"
 	"github.com/Smana/runlore/internal/whatchanged"
@@ -118,7 +117,8 @@ func renderSourceChanges(sc whatchanged.SourceChanges, zoom []string) string {
 	}
 	files := make([]sourceDiffFile, 0, len(sc.Diff.Files))
 	for _, f := range sc.Diff.Files {
-		add, del := patchCounts(f.Patch)
+		// countChanges (whatchanged_tool.go) is the package's one diffstat counter.
+		add, del := countChanges(strings.Split(f.Patch, "\n"))
 		files = append(files, sourceDiffFile{f.Path, f.Patch, add, del, generatedPath(f.Path)})
 	}
 	b.WriteString("files:\n")
@@ -204,42 +204,12 @@ func writeHunk(b *strings.Builder, filePath, patch string, budget int) int {
 	before := b.Len()
 	fmt.Fprintf(b, "--- %s\n", filePath)
 	if len(patch) > budget {
-		b.WriteString(runeSafeCut(patch, budget))
+		b.WriteString(patch[:runeAlignedCut(patch, budget)])
 		b.WriteString("\n[truncated — use paths to zoom]\n")
 	} else {
 		b.WriteString(patch)
 	}
 	return b.Len() - before
-}
-
-// runeSafeCut returns the longest prefix of s that is at most maxBytes bytes
-// and ends on a valid UTF-8 rune boundary (backing off continuation bytes so
-// a multi-byte rune is never split). It follows the same idiom used by
-// trimRow in timeline_tool.go and truncateOutput in truncate.go.
-func runeSafeCut(s string, maxBytes int) string {
-	if len(s) <= maxBytes {
-		return s
-	}
-	cut := maxBytes
-	for cut > 0 && !utf8.RuneStart(s[cut]) {
-		cut--
-	}
-	return s[:cut]
-}
-
-// patchCounts counts added/removed lines in a unified patch (excluding the
-// +++/--- headers) — a cheap diffstat without another go-git pass.
-func patchCounts(patch string) (add, del int) {
-	for _, line := range strings.Split(patch, "\n") {
-		switch {
-		case strings.HasPrefix(line, "+++"), strings.HasPrefix(line, "---"):
-		case strings.HasPrefix(line, "+"):
-			add++
-		case strings.HasPrefix(line, "-"):
-			del++
-		}
-	}
-	return add, del
 }
 
 // generatedPath reports whether a file is generated/vendored content whose
@@ -255,10 +225,7 @@ func generatedPath(p string) bool {
 	if strings.HasSuffix(base, ".pb.go") || strings.HasSuffix(base, ".min.js") || strings.HasSuffix(base, ".min.css") {
 		return true
 	}
-	for _, seg := range strings.Split(path.Dir(p), "/") {
-		if seg == "vendor" || seg == "node_modules" || seg == "dist" {
-			return true
-		}
-	}
-	return false
+	// Segment-bounded contains: "/vendor/" can't match "adventurous".
+	dir := "/" + path.Dir(p) + "/"
+	return strings.Contains(dir, "/vendor/") || strings.Contains(dir, "/node_modules/") || strings.Contains(dir, "/dist/")
 }

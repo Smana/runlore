@@ -97,20 +97,13 @@ func normalize(raw string) (string, error) {
 	// Only strip a leading userinfo when the part before '@' is a bare username
 	// (no '/', ':', or further '@'). Any other '@'-containing input is left as-is
 	// and rejected by the strings.Contains(s, "@") guard below.
-	if at := strings.Index(s, "@"); at >= 0 && !strings.HasPrefix(s, "/") {
-		userinfo := s[:at]
-		if !strings.ContainsAny(userinfo, "/:@") {
-			host := s[at+1:]
-			if idx := strings.IndexAny(host, ":/"); idx >= 0 {
-				if host[idx] == ':' {
-					s = strings.Replace(host, ":", "/", 1)
-				} else {
-					s = host
-				}
-			} else {
-				s = host
-			}
+	if at := strings.Index(s, "@"); at >= 0 && !strings.HasPrefix(s, "/") && !strings.ContainsAny(s[:at], "/:@") {
+		host := s[at+1:]
+		// scp-style only when the ':' precedes any '/': git@host:org/x → host/org/x.
+		if c := strings.IndexByte(host, ':'); c >= 0 && !strings.Contains(host[:c], "/") {
+			host = host[:c] + "/" + host[c+1:]
 		}
+		s = host
 	}
 	s = strings.TrimSuffix(s, "/")
 	s = strings.TrimSuffix(s, ".git")
