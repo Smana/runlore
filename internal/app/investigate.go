@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"net/http"
 	"os"
+	"path/filepath"
 	"time"
 
 	"go.opentelemetry.io/otel/attribute"
@@ -30,7 +31,9 @@ import (
 	"github.com/Smana/runlore/internal/providers"
 	awscloud "github.com/Smana/runlore/internal/providers/cloud/aws"
 	"github.com/Smana/runlore/internal/providers/cluster"
+	"github.com/Smana/runlore/internal/sourcerepo"
 	"github.com/Smana/runlore/internal/telemetry"
+	"github.com/Smana/runlore/internal/whatchanged"
 )
 
 // BuildModelAndTools assembles the model, investigation tools, and the instant-recall
@@ -223,6 +226,9 @@ func BuildModelAndTools(ctx context.Context, cfg *config.Config, gp providers.Gi
 			log.Info("cloud provider enabled", "provider", "aws", "region", cfg.Cloud.Region)
 		}
 	}
+	// source_diff (source-repo whitelist): read the code change behind an image
+	// or module version bump. Registered only when the operator listed repos.
+	tools = appendSourceDiffTool(cfg, tools, log)
 	// incident_timeline (P1) fuses the timestamped facts from the providers above into
 	// ONE chronologically-sorted view. Register it only when at least one contributing
 	// source is wired (GitOps changes, cloud control-plane changes, or kube events) —
@@ -280,6 +286,38 @@ func clusterTools(reader clusterReader, cfg *config.Config) []investigate.Tool {
 		investigate.KubeEventsTool{Kube: reader},
 	)
 	return tools
+}
+
+// appendSourceDiffTool registers source_diff when the operator listed
+// source_repos.allow patterns. The allowlist is the security boundary (the
+// model can only reach listed repos); auth reuses the forge GitHub App token
+// exactly like what_changed; mirrors live under a "source" subdir of the
+// gitops mirror root so source-repo and GitOps mirrors never contend.
+func appendSourceDiffTool(cfg *config.Config, tools []investigate.Tool, log *slog.Logger) []investigate.Tool {
+	if len(cfg.SourceRepos.Allow) == 0 {
+		return tools
+	}
+	allow, err := sourcerepo.New(cfg.SourceRepos.Allow)
+	if err != nil {
+		// Config.Validate() already rejects bad patterns at load; this guard
+		// only protects callers that skipped validation. Loud, not fatal.
+		log.Warn("source_repos: invalid allowlist; source_diff disabled", "err", err)
+		return tools
+	}
+	sd := &whatchanged.Differ{TokenSource: BuildForgeTokenSource(cfg, log)}
+	if cfg.GitOps.Mirror.IsEnabled() {
+		base := cfg.GitOps.Mirror.Dir
+		if base == "" {
+			base = filepath.Join(os.TempDir(), "runlore-mirrors")
+		}
+		if mc, merr := whatchanged.NewMirrorCache(filepath.Join(base, "source"), cfg.GitOps.Mirror.Max); merr != nil {
+			log.Warn("source_repos: mirror cache unavailable; falling back to clone-per-call", "err", merr)
+		} else {
+			sd.Mirrors = mc
+		}
+	}
+	log.Info("source_diff enabled", "allow", cfg.SourceRepos.Allow)
+	return append(tools, investigate.SourceDiffTool{Source: sd, Allow: allow})
 }
 
 // appendMCPTools discovers tools from each configured MCP server and appends them
