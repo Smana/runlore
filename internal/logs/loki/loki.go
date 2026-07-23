@@ -94,6 +94,24 @@ type streamResult struct {
 	Values [][2]string       `json:"values"`
 }
 
+// queryRange performs a /loki/api/v1/query_range request and returns the
+// status-checked envelope; callers unmarshal resp.Data.Result into their own
+// shape (streams for Query, matrix for Hits).
+func (c *Client) queryRange(ctx context.Context, v url.Values) (queryResponse, error) {
+	body, err := c.get(ctx, "/loki/api/v1/query_range", v)
+	if err != nil {
+		return queryResponse{}, err
+	}
+	var resp queryResponse
+	if err := json.Unmarshal(body, &resp); err != nil {
+		return queryResponse{}, fmt.Errorf("parse loki response: %w", err)
+	}
+	if resp.Status != "success" {
+		return queryResponse{}, fmt.Errorf("loki error: status %q", resp.Status)
+	}
+	return resp, nil
+}
+
 // Query runs a LogQL query over the window and returns normalized log lines,
 // newest first (matching the VictoriaLogs provider's ordering). It sends one
 // request with limit=maxLines and direction=backward; when the server returns
@@ -106,16 +124,9 @@ func (c *Client) Query(ctx context.Context, query string, w providers.TimeWindow
 		"direction": {"backward"},
 	}
 	setWindow(v, w)
-	body, err := c.get(ctx, "/loki/api/v1/query_range", v)
+	resp, err := c.queryRange(ctx, v)
 	if err != nil {
 		return nil, err
-	}
-	var resp queryResponse
-	if err := json.Unmarshal(body, &resp); err != nil {
-		return nil, fmt.Errorf("parse loki response: %w", err)
-	}
-	if resp.Status != "success" {
-		return nil, fmt.Errorf("loki error: status %q", resp.Status)
 	}
 	if resp.Data.ResultType != "streams" {
 		return nil, fmt.Errorf("unexpected loki resultType %q (Query expects a log selector, not a metric query)", resp.Data.ResultType)
@@ -127,12 +138,12 @@ func (c *Client) Query(ctx context.Context, query string, w providers.TimeWindow
 	var out providers.LogResult
 	for _, s := range streams {
 		for _, e := range s.Values {
-			ll := providers.LogLine{Message: e[1], Fields: make(map[string]string, len(s.Stream))}
+			// All lines in one stream share the same label set; alias it rather than
+			// copying per line (up to maxLines allocations avoided). Fields is
+			// read-only downstream (renderer's streamIdentity / conv.PodField lookup).
+			ll := providers.LogLine{Message: e[1], Fields: s.Stream}
 			if ns, err := strconv.ParseInt(e[0], 10, 64); err == nil {
 				ll.Time = time.Unix(0, ns).UTC()
-			}
-			for k, val := range s.Stream {
-				ll.Fields[k] = val
 			}
 			out = append(out, ll)
 		}
@@ -213,16 +224,9 @@ func (c *Client) Hits(ctx context.Context, query string, w providers.TimeWindow,
 	metricQ := fmt.Sprintf("sum by (%s) (count_over_time(%s [%s]))", c.levelField, query, stepStr)
 	v := url.Values{"query": {metricQ}, "step": {stepStr}}
 	setWindow(v, w)
-	body, err := c.get(ctx, "/loki/api/v1/query_range", v)
+	resp, err := c.queryRange(ctx, v)
 	if err != nil {
 		return nil, err
-	}
-	var resp queryResponse
-	if err := json.Unmarshal(body, &resp); err != nil {
-		return nil, fmt.Errorf("parse loki response: %w", err)
-	}
-	if resp.Status != "success" {
-		return nil, fmt.Errorf("loki error: status %q", resp.Status)
 	}
 	var series []matrixSeries
 	if err := json.Unmarshal(resp.Data.Result, &series); err != nil {

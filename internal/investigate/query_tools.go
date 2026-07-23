@@ -407,6 +407,20 @@ func buildLogsQLWith(raw, container, namespace, level string, conv LogFields) (s
 		}
 		return raw, nil
 	}
+	q, err := streamSelector(container, namespace, conv)
+	if err != nil {
+		return "", err
+	}
+	if level != "" {
+		q += " | " + conv.UnpackPipe + " | " + conv.LevelField + ":" + level
+	}
+	return q, nil
+}
+
+// streamSelector assembles the `{container="…",namespace="…"}` stream selector
+// shared by both dialect builders (LogsQL and LogQL use the identical label=value
+// form), or an error when neither field is given.
+func streamSelector(container, namespace string, conv LogFields) (string, error) {
 	var sel []string
 	if container != "" {
 		sel = append(sel, fmt.Sprintf("%s=%q", conv.ContainerField, container))
@@ -417,11 +431,7 @@ func buildLogsQLWith(raw, container, namespace, level string, conv LogFields) (s
 	if len(sel) == 0 {
 		return "", fmt.Errorf("provide a raw `query`, or `container`/`namespace` to build one")
 	}
-	q := "{" + strings.Join(sel, ",") + "}"
-	if level != "" {
-		q += " | " + conv.UnpackPipe + " | " + conv.LevelField + ":" + level
-	}
-	return q, nil
+	return "{" + strings.Join(sel, ",") + "}", nil
 }
 
 // buildLogQL composes a valid LogQL (Grafana Loki) query from the resolved
@@ -441,17 +451,10 @@ func buildLogQL(raw, container, namespace, level string, conv LogFields) (string
 		}
 		return raw, nil
 	}
-	var sel []string
-	if container != "" {
-		sel = append(sel, fmt.Sprintf("%s=%q", conv.ContainerField, container))
+	q, err := streamSelector(container, namespace, conv)
+	if err != nil {
+		return "", err
 	}
-	if namespace != "" {
-		sel = append(sel, fmt.Sprintf("%s=%q", conv.NamespaceField, namespace))
-	}
-	if len(sel) == 0 {
-		return "", fmt.Errorf("provide a raw `query`, or `container`/`namespace` to build one")
-	}
-	q := "{" + strings.Join(sel, ",") + "}"
 	if level != "" {
 		if conv.UnpackPipe != "" {
 			q += " | " + conv.UnpackPipe
