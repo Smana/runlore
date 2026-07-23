@@ -4,7 +4,6 @@ package eval
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -158,6 +157,14 @@ type CaseAggregate struct {
 	Confidence  float64  // median confidence over repeats
 	Missing     []string // union of missing keywords/entities across repeats
 	OverClaimed []string // union of over-claimed distractors across repeats
+
+	// Recall telemetry aggregated over the repeats (cases with a catalog fixture only):
+	// HasRecall marks the case as recall-exercising, ExpectRecall echoes its assertion,
+	// and the counters say in how many of the N repeats recall fired / short-circuited.
+	HasRecall          bool
+	ExpectRecall       string
+	RecallFired        int
+	RecallShortCircuit int
 }
 
 // Campaign is the aggregate of a multi-repeat replay run.
@@ -209,16 +216,31 @@ func (r *Runner) RunN(ctx context.Context, cases []Case, n int) Campaign {
 }
 
 func (r *Runner) aggregateCase(ctx context.Context, c Case, n int) CaseAggregate {
-	confs := make([]float64, n)
+	results := make([]Result, 0, n)
+	for i := 0; i < n; i++ {
+		results = append(results, r.runOne(ctx, c))
+	}
+	return aggregateResults(c, results)
+}
+
+// aggregateResults folds the repeats of one case into its k-of-n aggregate. Pure —
+// separated from the runner so the fold (including recall counting) is unit-testable.
+func aggregateResults(c Case, results []Result) CaseAggregate {
+	confs := make([]float64, 0, len(results))
 	missSet := map[string]struct{}{}
 	ocSet := map[string]struct{}{}
-	passes := 0
-	for i := 0; i < n; i++ {
-		res := r.runOne(ctx, c)
+	passes, fired, shortCircuits := 0, 0, 0
+	for _, res := range results {
 		if res.Pass {
 			passes++
 		}
-		confs[i] = res.Confidence
+		if res.RecallFired {
+			fired++
+		}
+		if res.RecallShortCircuit {
+			shortCircuits++
+		}
+		confs = append(confs, res.Confidence)
 		for _, m := range res.Missing {
 			missSet[m] = struct{}{}
 		}
@@ -226,16 +248,20 @@ func (r *Runner) aggregateCase(ctx context.Context, c Case, n int) CaseAggregate
 			ocSet[o] = struct{}{}
 		}
 	}
-	rate := float64(passes) / float64(n)
+	rate := float64(passes) / float64(len(results))
 	return CaseAggregate{
-		Name:        c.Name,
-		Runs:        n,
-		PassRate:    rate,
-		Reached:     rate >= evalMinPassRate,
-		Flaky:       rate > 1-evalMinPassRate && rate < evalMinPassRate,
-		Confidence:  medianFloat(confs),
-		Missing:     sortedSet(missSet),
-		OverClaimed: sortedSet(ocSet),
+		Name:               c.Name,
+		Runs:               len(results),
+		PassRate:           rate,
+		Reached:            rate >= evalMinPassRate,
+		Flaky:              rate > 1-evalMinPassRate && rate < evalMinPassRate,
+		Confidence:         medianFloat(confs),
+		Missing:            sortedSet(missSet),
+		OverClaimed:        sortedSet(ocSet),
+		HasRecall:          c.CatalogDir != "",
+		ExpectRecall:       c.ExpectRecall,
+		RecallFired:        fired,
+		RecallShortCircuit: shortCircuits,
 	}
 }
 
@@ -275,34 +301,9 @@ func GateError(c Campaign, failUnder float64) error {
 	return errors.New(msg)
 }
 
-// JSON renders the campaign as an indented report for CI artifacts.
+// JSON renders the campaign as an indented report without provenance. Kept for
+// callers that have no model/usage context; the nightly eval uses
+// Campaign.Report(...).JSON() so the published report carries provenance.
 func (c Campaign) JSON() ([]byte, error) {
-	// row mirrors CaseAggregate's field names, types, and order so row(a) is a legal conversion — keep in sync.
-	type row struct {
-		Name        string   `json:"name"`
-		Runs        int      `json:"runs"`
-		PassRate    float64  `json:"pass_rate"`
-		Reached     bool     `json:"reached"`
-		Flaky       bool     `json:"flaky"`
-		Confidence  float64  `json:"confidence"`
-		Missing     []string `json:"missing,omitempty"`
-		OverClaimed []string `json:"over_claimed,omitempty"`
-	}
-	rows := make([]row, len(c.Aggregates))
-	for i, a := range c.Aggregates {
-		rows[i] = row(a)
-	}
-	return json.MarshalIndent(struct {
-		N        int     `json:"n"`
-		PassRate float64 `json:"pass_rate"`
-		Reached  int     `json:"reached"`
-		Total    int     `json:"total"`
-		Cases    []row   `json:"cases"`
-	}{
-		N:        c.N,
-		PassRate: c.PassRate(),
-		Reached:  c.ReachedCases(),
-		Total:    len(c.Aggregates),
-		Cases:    rows,
-	}, "", "  ")
+	return c.Report("", "", providers.Usage{}, nil).JSON()
 }

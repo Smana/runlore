@@ -141,6 +141,20 @@ manual dispatch. It repeats each case 5× and fails the run when the campaign
 pass-rate drops below 70% (`-n 5 -fail-under 0.7`), then uploads the JSON report as
 a build artifact.
 
+The run then **publishes a public scorecard** to the
+[`eval-scorecard`](https://github.com/Smana/runlore/tree/eval-scorecard) branch:
+`scorecard.md` (per-scenario pass/fail, recall outcomes, confidence calibration,
+model, date, estimated cost), `badge.json` (the README's shields.io endpoint
+badge), and `history.jsonl` (one line per run, capped at a year). Publishing is
+deliberately unconditional on the gate: a night below 70% is published exactly
+like a green one. Render the same artifacts locally from any report:
+
+    lore eval scorecard -report eval/reports/<stamp>-replay.json -dir /tmp/scorecard
+
+The per-run cost figure comes from the optional `pricing:` rates in
+`eval/ci.runlore.yaml`; token totals are always reported, the dollar estimate
+only when rates are set.
+
 To enable it, add one repository secret — **`RUNLORE_EVAL_API_KEY`** — holding the
 API key for the provider in `eval/ci.runlore.yaml`. Without the secret the job is
 **skipped, not failed** — a fork or a repo without the secret configured stays

@@ -10,6 +10,7 @@
 **An open-source SRE agent that investigates incidents — and remembers what it learns.**
 
 [![CI](https://github.com/Smana/runlore/actions/workflows/ci.yaml/badge.svg)](https://github.com/Smana/runlore/actions/workflows/ci.yaml)
+[![Nightly eval](https://img.shields.io/endpoint?url=https%3A%2F%2Fraw.githubusercontent.com%2FSmana%2Frunlore%2Feval-scorecard%2Fbadge.json)](https://github.com/Smana/runlore/blob/eval-scorecard/scorecard.md)
 [![Go Report Card](https://goreportcard.com/badge/github.com/Smana/runlore)](https://goreportcard.com/report/github.com/Smana/runlore)
 [![Go Version](https://img.shields.io/github/go-mod/go-version/Smana/runlore)](go.mod)
 [![License: Apache 2.0](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](LICENSE)
@@ -226,7 +227,8 @@ not a proprietary store), from an agent that's **honest about the sub-50% realit
 
 - `unresolved` is a first-class answer;
 - an adversarial *verify* pass can only ever *lower* a finding's confidence, never raise it;
-- every claim is checked by a shipped eval harness.
+- every claim is checked by a shipped eval harness, and the nightly results are
+  [published — pass, fail, model, and cost included](https://github.com/Smana/runlore/blob/eval-scorecard/scorecard.md).
 
 ## Project status & stability
 
@@ -255,7 +257,7 @@ we test hardest.
 
 📐 [Design](docs/design.md) · 📚 [Learning loop](docs/learning-loop.md) · ✅ [Reviewing knowledge](docs/reviewing-knowledge.md) · 🧑‍🔧 [KB steward skill](docs/kb-steward.md) · 🚀 [Getting started](docs/getting-started.md) · 🧪 [Worked example](docs/examples/harbor-registry-down.md) ·
 🔌 [Data sources](docs/data-sources.md) · ⚙️ [Configuration](docs/configuration.md) · 🔗 [MCP — server & client](docs/mcp.md) · 📊 [Observability](docs/observability.md) · 🩺 [Troubleshooting](docs/troubleshooting.md) ·
-🔒 [Security model](docs/security-model.md) · 🛡 [LLM security architecture](docs/security-architecture.md) · ⬆️ [Upgrade & uninstall](docs/upgrade-uninstall.md) · 🧭 [Prior art](docs/prior-art.md) · 📊 [Benchmarking models](docs/benchmarking.md) · 🛠 [Contributing](CONTRIBUTING.md)
+🔒 [Security model](docs/security-model.md) · 🛡 [LLM security architecture](docs/security-architecture.md) · ⬆️ [Upgrade & uninstall](docs/upgrade-uninstall.md) · 🧭 [Prior art](docs/prior-art.md) · 📊 [Benchmarking models](docs/benchmarking.md) · 🧮 [Nightly eval scorecard](https://github.com/Smana/runlore/blob/eval-scorecard/scorecard.md) · 🛠 [Contributing](CONTRIBUTING.md)
 
 ## License
 

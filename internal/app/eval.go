@@ -18,11 +18,26 @@ import (
 	"github.com/Smana/runlore/internal/config"
 	"github.com/Smana/runlore/internal/eval"
 	"github.com/Smana/runlore/internal/logging"
+	"github.com/Smana/runlore/internal/providers"
 )
+
+// evalCostUSD estimates the campaign cost from the optional config pricing; nil
+// when unpriced so the report omits cost_usd instead of claiming $0.00.
+func evalCostUSD(cfg *config.Config, u providers.Usage) *float64 {
+	p := cfg.Model.Pricing
+	if p == nil {
+		return nil
+	}
+	c := eval.EstimateCostUSD(u, p.InputUSDPerMTok, p.CachedInputUSDPerMTok, p.OutputUSDPerMTok)
+	return &c
+}
 
 // RunEval replays recorded incident cases through the investigation loop and
 // reports the RCA-identification rate. Requires a configured model.
 func RunEval(args []string) error {
+	if len(args) > 0 && args[0] == "scorecard" {
+		return RunEvalScorecard(args[1:])
+	}
 	fs := flag.NewFlagSet("eval", flag.ContinueOnError)
 	cfgPath := fs.String("config", "runlore.yaml", "path to config file")
 	casesDir := fs.String("cases", "examples/eval", "directory of replay cases")
@@ -84,7 +99,8 @@ func RunEval(args []string) error {
 	if cfg.Model.APIKeyEnv != "" {
 		apiKey = os.Getenv(cfg.Model.APIKeyEnv)
 	}
-	runner := &eval.Runner{Model: BuildModel(cfg, apiKey), Log: slog.New(slog.NewTextHandler(io.Discard, nil))}
+	counting := &eval.CountingModel{Inner: BuildModel(cfg, apiKey)}
+	runner := &eval.Runner{Model: counting, Log: slog.New(slog.NewTextHandler(io.Discard, nil))}
 	camp := runner.RunN(context.Background(), cases, *n)
 	for _, a := range camp.Aggregates {
 		status := "MISSED"
@@ -116,7 +132,9 @@ func RunEval(args []string) error {
 		if st == "" {
 			st = time.Now().UTC().Format(time.RFC3339)
 		}
-		if b, err := camp.JSON(); err != nil {
+		usage := counting.Total()
+		rep := camp.Report(st, cfg.Model.Provider+"/"+cfg.Model.Model, usage, evalCostUSD(cfg, usage))
+		if b, err := rep.JSON(); err != nil {
 			fmt.Fprintf(os.Stderr, "eval: report not written: %v\n", err)
 		} else if mkErr := os.MkdirAll(*reportDir, 0o750); mkErr != nil {
 			fmt.Fprintf(os.Stderr, "eval: report not written: %v\n", mkErr)
