@@ -462,6 +462,18 @@ mcp:
     `(0,1]`. Mirrors recall's `catalog.instant_recall.outcome_floor` so the two gates agree.
   - `prior` — Beta prior strength `k` for the decay formula; **default `2.0`**. Mirrors recall's
     `catalog.instant_recall.outcome_prior` — keep them equal unless deliberately tuning the gates apart.
+- `sweeps` — the **in-server** scheduled grooming loop (leader-only; the serve pod runs the same
+  passes as `lore curate` on a timer, over its live outcome ledger). Strictly additive: it only
+  starts when the KB forge (`forge.kb_repo` + `forge.github_app`) is configured. Keys:
+  - `mode` — `dry-run` (**default**, also when empty): log + audit every candidate action, write
+    nothing to the forge; `apply`: act; `off` (quote it in YAML): disable the loop. Unknown values
+    fail validation — a typo must not silently demote grooming to dry-run.
+  - `interval` — sweep cadence; **default `6h`**, must be `>= 10m`. The first sweep runs one full
+    interval after startup (leadership flaps never trigger immediate re-sweeps).
+
+  Every write (or dry-run skip) is appended to the `actions.audit_log_path` hash chain as
+  `actor: curate` with `op` `kb.close` / `kb.comment` / `kb.relabel` / `kb.open-issue` /
+  `kb.retire-pr` and decision `executed` / `dry-run` / `failed`.
 
 ### `gitops.mirror` — persistent what_changed clone mirror
 `what_changed` diffs a GitOps source repo between two revisions. By default it now keeps a

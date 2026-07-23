@@ -357,8 +357,12 @@ The two load-bearing ideas:
     lowercased summary when tokenization would erase a terse/acronym cause (e.g.
     "IO GC"), so two different terse causes on one resource can't collide.
 
-**Phase-2 grooming** (`internal/curate/`, run by the opt-in `lore curate` CronJob)
-keeps the backlog healthy on a schedule:
+**Phase-2 grooming** (`internal/curate/`) keeps the backlog healthy on a schedule. It
+runs **inside the serve pod** (leader-only, every `curate.sweeps.interval`, default 6 h)
+whenever the KB forge is configured — **in dry-run by default**: candidates are logged and
+recorded in the action audit chain (`actions.audit_log_path`), and nothing touches the
+forge until you set `curate.sweeps.mode: apply`. The opt-in `lore curate` CronJob remains
+the out-of-server alternative (same passes, shared wiring — `--dry-run` there too).
 
 - **Dedup** — collapse near-identical *open* PRs across history (fingerprint match
   first — when both PRs carry a `DupFingerprint` marker they're duplicates iff the
@@ -367,6 +371,13 @@ keeps the backlog healthy on a schedule:
 - **Lifecycle** — close stale, unprotected PRs (no forge activity within
   `stale_after`), never touching human-labelled ones, and only after a back-ref
   comment. `stale_after: 0` disables the sweep.
+- **Suppress** — close a PR that *re-drafts* an entry a human already rejected (closed
+  without merging). The drafter's dedup only checks open PRs and merged entries, so a
+  recurring permanently-benign incident would re-open a fresh PR forever. The close
+  carries a back-reference to the original human decision (and its `wontfix` /
+  `not-kb-worthy` label when present); a `needs-work` close is a revise-and-resubmit and
+  is never suppressed. Reconsideration stays with Recurrence's knowledge-gap escalation —
+  suppression never argues with a human, it just stops re-asking.
 
 Three further passes are also wired, all **ledger-backed** (they read the outcome
 ledger, so they stay source-neutral):
