@@ -93,16 +93,22 @@ func normalize(raw string) (string, error) {
 	// Handle both ssh-style formats:
 	// - scp-style: git@github.com:acme/x → github.com/acme/x
 	// - ssh URL: git@github.com/acme/x → github.com/acme/x
+	// Only strip a leading userinfo when the part before '@' is a bare username
+	// (no '/', ':', or further '@'). Any other '@'-containing input is left as-is
+	// and rejected by the strings.Contains(s, "@") guard below.
 	if at := strings.Index(s, "@"); at >= 0 && !strings.HasPrefix(s, "/") {
-		host := s[at+1:]
-		if idx := strings.IndexAny(host, ":/"); idx >= 0 {
-			if host[idx] == ':' {
-				s = strings.Replace(host, ":", "/", 1)
+		userinfo := s[:at]
+		if !strings.ContainsAny(userinfo, "/:@") {
+			host := s[at+1:]
+			if idx := strings.IndexAny(host, ":/"); idx >= 0 {
+				if host[idx] == ':' {
+					s = strings.Replace(host, ":", "/", 1)
+				} else {
+					s = host
+				}
 			} else {
 				s = host
 			}
-		} else {
-			s = host
 		}
 	}
 	s = strings.TrimSuffix(strings.TrimSuffix(s, "/"), ".git")

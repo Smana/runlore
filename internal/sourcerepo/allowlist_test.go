@@ -49,6 +49,8 @@ func TestMatch(t *testing.T) {
 		{"whitespace", "github.com/acme/x y", "", false},
 		{"empty", "", "", false},
 		{"scheme to other host", "https://evil.com/github.com/acme/x", "", false},
+		{"userinfo with path prefix", "evil.com/acme@github.com/acme/checkout", "", false},
+		{"double at", "git@x@github.com/acme/checkout", "", false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			url, ok := a.Match(tc.in)
