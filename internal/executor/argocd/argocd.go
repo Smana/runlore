@@ -79,11 +79,32 @@ func (e *Executor) Execute(ctx context.Context, a providers.Action) error {
 	}
 }
 
-// pauseAutoSync and resumeAutoSync are implemented in Tasks 3-4; stub them for
-// this task so the package compiles:
+// pauseAutoSync removes spec.syncPolicy.automated (Argo CD's "stop deploying
+// this" lever — the analogue of Flux spec.suspend), saving the prior automated
+// object into PausedPolicyAnnotation in the SAME patch so resume can restore it
+// exactly. An app with no automated policy (manual sync, or already paused) is
+// a no-op — idempotent like re-suspending in Flux, and it never clobbers a
+// previously saved policy.
 func (e *Executor) pauseAutoSync(ctx context.Context, a providers.Action) error {
-	return fmt.Errorf("not implemented")
+	u, err := e.get(ctx, a)
+	if err != nil {
+		return err
+	}
+	automated, found, _ := unstructured.NestedMap(u.Object, "spec", "syncPolicy", "automated")
+	if !found {
+		return nil // manual-sync or already paused: nothing to pause
+	}
+	saved, err := json.Marshal(automated)
+	if err != nil {
+		return fmt.Errorf("marshal prior sync policy: %w", err)
+	}
+	return e.patch(ctx, a, map[string]any{
+		"metadata": map[string]any{"annotations": map[string]any{PausedPolicyAnnotation: string(saved)}},
+		"spec":     map[string]any{"syncPolicy": map[string]any{"automated": nil}}, // merge-patch null deletes the key
+	})
 }
+
+// resumeAutoSync is implemented in Task 4; stub it so the package compiles.
 func (e *Executor) resumeAutoSync(ctx context.Context, a providers.Action) error {
 	return fmt.Errorf("not implemented")
 }

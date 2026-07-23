@@ -83,3 +83,39 @@ func TestUnsupported(t *testing.T) {
 		t.Fatal("expected error for missing namespace")
 	}
 }
+
+func TestSuspendPausesAutoSyncAndStoresPriorPolicy(t *testing.T) {
+	c := newClient(app(map[string]any{"prune": true, "selfHeal": true}, nil))
+	if err := New(c).Execute(context.Background(), action("suspend")); err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	u := get(t, c)
+	if _, found, _ := unstructured.NestedMap(u.Object, "spec", "syncPolicy", "automated"); found {
+		t.Fatal("spec.syncPolicy.automated still present; auto-sync not paused")
+	}
+	// json.Marshal orders map keys alphabetically, so this is deterministic.
+	if v := u.GetAnnotations()[PausedPolicyAnnotation]; v != `{"prune":true,"selfHeal":true}` {
+		t.Fatalf("saved policy annotation = %q, want the prior automated object", v)
+	}
+}
+
+func TestSuspendManualSyncAppIsNoop(t *testing.T) {
+	c := newClient(app(nil, nil)) // no syncPolicy at all: manual sync
+	if err := New(c).Execute(context.Background(), action("suspend")); err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	if v, ok := get(t, c).GetAnnotations()[PausedPolicyAnnotation]; ok {
+		t.Fatalf("no-op suspend must not invent a saved policy (got %q)", v)
+	}
+}
+
+func TestSuspendAlreadyPausedPreservesSavedPolicy(t *testing.T) {
+	// Paused earlier: automated absent, annotation holds the real prior policy.
+	c := newClient(app(nil, map[string]any{PausedPolicyAnnotation: `{"prune":true}`}))
+	if err := New(c).Execute(context.Background(), action("suspend")); err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	if v := get(t, c).GetAnnotations()[PausedPolicyAnnotation]; v != `{"prune":true}` {
+		t.Fatalf("double-suspend clobbered the saved policy: %q", v)
+	}
+}
