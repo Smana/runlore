@@ -9,6 +9,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/Smana/runlore/internal/providers"
 )
@@ -143,5 +144,90 @@ func TestQueryErrorPaths(t *testing.T) {
 	res, err := New(empty.URL).Query(context.Background(), `{a="b"}`, providers.TimeWindow{})
 	if err != nil || len(res) != 0 {
 		t.Fatalf("empty result must be (nil, nil), got %v / %v", res, err)
+	}
+}
+
+func TestHits(t *testing.T) {
+	var gotQuery, gotStep string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotQuery = r.URL.Query().Get("query")
+		gotStep = r.URL.Query().Get("step")
+		_, _ = io.WriteString(w, `{
+		  "status": "success",
+		  "data": {
+		    "resultType": "matrix",
+		    "result": [
+		      {"metric": {"detected_level": "error"}, "values": [[1704103200, "3"], [1704103500, "412"]]},
+		      {"metric": {"detected_level": "warn"},  "values": [[1704103200, "1"]]}
+		    ]
+		  }
+		}`)
+	}))
+	defer srv.Close()
+
+	buckets, err := New(srv.URL).Hits(context.Background(), `{namespace="apps"} | detected_level="error"`,
+		providers.TimeWindow{}, 5*time.Minute)
+	if err != nil {
+		t.Fatalf("Hits: %v", err)
+	}
+	// The log query must be wrapped in the LogQL metric form, split by the level label.
+	want := `sum by (detected_level) (count_over_time({namespace="apps"} | detected_level="error" [300s]))`
+	if gotQuery != want {
+		t.Fatalf("metric query = %q, want %q", gotQuery, want)
+	}
+	if gotStep != "300s" {
+		t.Fatalf("step=%q, want 300s", gotStep)
+	}
+	if len(buckets) != 3 {
+		t.Fatalf("want 3 buckets, got %d: %+v", len(buckets), buckets)
+	}
+	var sawSpike bool
+	for _, b := range buckets {
+		if b.Level == "error" && b.Count == 412 && !b.Time.IsZero() {
+			sawSpike = true
+		}
+	}
+	if !sawSpike {
+		t.Fatalf("missing error=412 bucket: %+v", buckets)
+	}
+}
+
+func TestTopMessages(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.WriteString(w, `{"status":"success","data":{"resultType":"streams","result":[
+		  {"stream":{"namespace":"apps"},"values":[
+		    ["1750413603000000000","connection refused to 10.0.0.7"],
+		    ["1750413602000000000","connection refused to 10.0.0.9"],
+		    ["1750413601000000000","connection refused to 10.0.0.9"],
+		    ["1750413600000000000","timeout waiting for db"]]}]}}`)
+	}))
+	defer srv.Close()
+
+	msgs, err := New(srv.URL).TopMessages(context.Background(), `{namespace="apps"}`, providers.TimeWindow{}, 10)
+	if err != nil {
+		t.Fatalf("TopMessages: %v", err)
+	}
+	if len(msgs) != 2 {
+		t.Fatalf("want 2 grouped messages, got %d: %+v", len(msgs), msgs)
+	}
+	if msgs[0].Count != 3 || !strings.Contains(msgs[0].Message, "connection refused") {
+		t.Fatalf("dominant message wrong: %+v", msgs[0])
+	}
+	if !msgs[0].First.Before(msgs[0].Last) {
+		t.Fatalf("first→last span not tracked: %+v", msgs[0])
+	}
+	if msgs[1].Message != "timeout waiting for db" || msgs[1].Count != 1 {
+		t.Fatalf("second message wrong: %+v", msgs[1])
+	}
+}
+
+func TestHitsErrorPath(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "parse error: unexpected token", http.StatusBadRequest)
+	}))
+	defer srv.Close()
+	if _, err := New(srv.URL).Hits(context.Background(), `{a="b"}`, providers.TimeWindow{}, time.Minute); err == nil ||
+		!strings.Contains(err.Error(), "400") {
+		t.Fatalf("bad request must error with status, got %v", err)
 	}
 }

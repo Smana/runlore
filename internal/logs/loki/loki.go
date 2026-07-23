@@ -14,6 +14,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -72,7 +73,10 @@ func (c *Client) WithLevelField(field string) *Client {
 	return c
 }
 
-var _ providers.LogsProvider = (*Client)(nil)
+var (
+	_ providers.LogsProvider = (*Client)(nil)
+	_ providers.LogStats     = (*Client)(nil)
+)
 
 // queryResponse is Loki's standard success envelope for /loki/api/v1/query_range.
 type queryResponse struct {
@@ -186,3 +190,130 @@ func (c *Client) setAuth(req *http.Request) {
 		req.Header.Set(k, v)
 	}
 }
+
+// matrixSeries is one series of a Loki metric-query (matrix) result.
+type matrixSeries struct {
+	Metric map[string]string `json:"metric"`
+	Values [][2]any          `json:"values"` // [unix seconds (float64), "count" (string)]
+}
+
+// Hits returns the per-step match count over the window, split by severity, by
+// wrapping the log query in the LogQL metric form
+// `sum by (<level>) (count_over_time(<q> [<step>]))` — the Loki analogue of
+// VictoriaLogs' /select/logsql/hits, powering the logs_error_summary histogram.
+// The level label defaults to detected_level (Loki 3.x structured metadata);
+// series without the label fold into one Level=="" bucket series, which the
+// renderer already handles. A step <= 0 defaults to one minute.
+func (c *Client) Hits(ctx context.Context, query string, w providers.TimeWindow, step time.Duration) ([]providers.Bucket, error) {
+	if step <= 0 {
+		step = time.Minute
+	}
+	stepStr := fmt.Sprintf("%ds", int(step.Seconds()))
+	metricQ := fmt.Sprintf("sum by (%s) (count_over_time(%s [%s]))", c.levelField, query, stepStr)
+	v := url.Values{"query": {metricQ}, "step": {stepStr}}
+	setWindow(v, w)
+	body, err := c.get(ctx, "/loki/api/v1/query_range", v)
+	if err != nil {
+		return nil, err
+	}
+	var resp queryResponse
+	if err := json.Unmarshal(body, &resp); err != nil {
+		return nil, fmt.Errorf("parse loki response: %w", err)
+	}
+	if resp.Status != "success" {
+		return nil, fmt.Errorf("loki error: status %q", resp.Status)
+	}
+	var series []matrixSeries
+	if err := json.Unmarshal(resp.Data.Result, &series); err != nil {
+		return nil, fmt.Errorf("parse loki matrix: %w", err)
+	}
+	var out []providers.Bucket
+	for _, s := range series {
+		level := s.Metric[c.levelField]
+		for _, p := range s.Values {
+			ts, n := parsePoint(p)
+			out = append(out, providers.Bucket{Time: ts, Level: level, Count: n})
+		}
+	}
+	return out, nil
+}
+
+// parsePoint parses a Loki/Prometheus [unixSeconds, "value"] matrix point
+// (same wire shape as internal/metrics/prometheus/prometheus.go parsePoint,
+// narrowed to the int64 count Hits needs).
+func parsePoint(p [2]any) (time.Time, int64) {
+	var ts time.Time
+	if f, ok := p[0].(float64); ok {
+		ts = time.Unix(int64(f), 0).UTC()
+	}
+	var n int64
+	if s, ok := p[1].(string); ok {
+		if f, err := strconv.ParseFloat(s, 64); err == nil {
+			n = int64(f)
+		}
+	}
+	return ts, n
+}
+
+// TopMessages returns up to k dominant messages over the window. LogQL cannot
+// group by message content (no `stats by (_msg)` equivalent; the /patterns
+// endpoint is experimental and needs the pattern ingester), so this aggregates
+// CLIENT-SIDE over the capped Query sample: numeric tokens collapse so
+// near-identical lines group (mirroring collapse_nums), counts/first/last are
+// per-sample (up to maxLines newest lines), which is enough to NAME what floods
+// the logs — the only question logs_error_summary asks of it. k <= 0 defaults
+// to 10.
+func (c *Client) TopMessages(ctx context.Context, query string, w providers.TimeWindow, k int) ([]providers.MsgCount, error) {
+	if k <= 0 {
+		k = 10
+	}
+	lines, err := c.Query(ctx, query, w)
+	if err != nil {
+		return nil, err
+	}
+	type agg struct {
+		msg         string
+		count       int64
+		first, last time.Time
+	}
+	byKey := map[string]int{}
+	var groups []agg
+	for _, l := range lines {
+		if l.Time.IsZero() && len(l.Fields) == 0 {
+			continue // the truncation sentinel is not a log message
+		}
+		key := collapseNums(l.Message)
+		i, ok := byKey[key]
+		if !ok {
+			byKey[key] = len(groups)
+			groups = append(groups, agg{msg: l.Message, count: 1, first: l.Time, last: l.Time})
+			continue
+		}
+		g := &groups[i]
+		g.count++
+		if !l.Time.IsZero() && (g.first.IsZero() || l.Time.Before(g.first)) {
+			g.first = l.Time
+		}
+		if !l.Time.IsZero() && l.Time.After(g.last) {
+			g.last = l.Time
+		}
+	}
+	sort.SliceStable(groups, func(i, j int) bool { return groups[i].count > groups[j].count })
+	if len(groups) > k {
+		groups = groups[:k]
+	}
+	out := make([]providers.MsgCount, 0, len(groups))
+	for _, g := range groups {
+		out = append(out, providers.MsgCount{Message: g.msg, Count: g.count, First: g.first, Last: g.last})
+	}
+	return out, nil
+}
+
+// reNumToken / collapseNums mirror internal/investigate/renderlog.go (and
+// VictoriaLogs' collapse_nums pipe): free-standing digit runs collapse to "0" so
+// lines differing only by a numeric value share one grouping key. Duplicated
+// here (3 lines) rather than exported from investigate, which must not become a
+// dependency of a backend client.
+var reNumToken = regexp.MustCompile(`\d+`)
+
+func collapseNums(msg string) string { return reNumToken.ReplaceAllString(msg, "0") }
