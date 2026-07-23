@@ -231,3 +231,73 @@ func TestHitsErrorPath(t *testing.T) {
 		t.Fatalf("bad request must error with status, got %v", err)
 	}
 }
+
+// TestFieldNames: discovery merges STREAM labels (/loki/api/v1/labels — the
+// selector building blocks the model needs first) with detected body fields
+// (/loki/api/v1/detected_fields, Loki 3.x). Hits carries the detected field's
+// value CARDINALITY (Loki reports no per-field hit count); stream labels carry 0
+// and the discover tool renders the number only when > 0.
+func TestFieldNames(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/loki/api/v1/labels":
+			if q := r.URL.Query().Get("query"); q != `{namespace="apps"}` {
+				t.Errorf("labels query=%q", q)
+			}
+			_, _ = io.WriteString(w, `{"status":"success","data":["namespace","pod","container"]}`)
+		case "/loki/api/v1/detected_fields":
+			_, _ = io.WriteString(w, `{"fields":[
+			  {"label":"level","type":"string","cardinality":4,"parsers":["logfmt"]},
+			  {"label":"duration","type":"duration","cardinality":99,"parsers":["logfmt"]}]}`)
+		default:
+			t.Errorf("unexpected path %q", r.URL.Path)
+		}
+	}))
+	defer srv.Close()
+
+	fields, err := New(srv.URL).FieldNames(context.Background(), `{namespace="apps"}`, providers.TimeWindow{})
+	if err != nil {
+		t.Fatalf("FieldNames: %v", err)
+	}
+	if len(fields) != 5 {
+		t.Fatalf("want 3 labels + 2 detected fields, got %d: %+v", len(fields), fields)
+	}
+	if fields[0].Name != "namespace" || fields[0].Hits != 0 {
+		t.Fatalf("stream labels must come first with Hits=0: %+v", fields[0])
+	}
+	if fields[3].Name != "level" || fields[3].Hits != 4 {
+		t.Fatalf("detected field must carry cardinality as Hits: %+v", fields[3])
+	}
+}
+
+// TestFieldNamesOldLoki: a Loki without detected_fields (pre-3.0 returns 404)
+// still answers discovery with the stream labels alone — degrade, don't fail.
+func TestFieldNamesOldLoki(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/loki/api/v1/labels" {
+			_, _ = io.WriteString(w, `{"status":"success","data":["namespace","pod"]}`)
+			return
+		}
+		http.NotFound(w, r)
+	}))
+	defer srv.Close()
+
+	fields, err := New(srv.URL).FieldNames(context.Background(), `{namespace="apps"}`, providers.TimeWindow{})
+	if err != nil {
+		t.Fatalf("FieldNames must degrade to labels-only, got %v", err)
+	}
+	if len(fields) != 2 || fields[0].Name != "namespace" {
+		t.Fatalf("labels-only result wrong: %+v", fields)
+	}
+}
+
+// TestFieldNamesBothDown: when neither endpoint answers, the error must surface.
+func TestFieldNamesBothDown(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.NotFound(w, r)
+	}))
+	defer srv.Close()
+	if _, err := New(srv.URL).FieldNames(context.Background(), `{a="b"}`, providers.TimeWindow{}); err == nil {
+		t.Fatalf("both endpoints failing must error")
+	}
+}

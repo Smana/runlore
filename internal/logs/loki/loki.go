@@ -76,6 +76,7 @@ func (c *Client) WithLevelField(field string) *Client {
 var (
 	_ providers.LogsProvider = (*Client)(nil)
 	_ providers.LogStats     = (*Client)(nil)
+	_ providers.LogFields    = (*Client)(nil)
 )
 
 // queryResponse is Loki's standard success envelope for /loki/api/v1/query_range.
@@ -317,3 +318,54 @@ func (c *Client) TopMessages(ctx context.Context, query string, w providers.Time
 var reNumToken = regexp.MustCompile(`\d+`)
 
 func collapseNums(msg string) string { return reNumToken.ReplaceAllString(msg, "0") }
+
+// FieldNames lists the field names present in the logs matching query over the
+// window — the log-schema discovery path (providers.LogFields). Loki splits the
+// answer across two endpoints, so both are merged: STREAM labels from
+// /loki/api/v1/labels (query-scoped; these are what a selector is built from,
+// so they come first, Hits=0 — Loki reports no per-label hit count) and parsed
+// body fields from /loki/api/v1/detected_fields (Loki 3.x; Hits carries the
+// reported value cardinality). A missing detected_fields endpoint (older Loki)
+// degrades to labels-only; only both failing is an error.
+func (c *Client) FieldNames(ctx context.Context, query string, w providers.TimeWindow) ([]providers.FieldCount, error) {
+	var out []providers.FieldCount
+
+	lv := url.Values{"query": {query}}
+	setWindow(lv, w)
+	labelsBody, labelsErr := c.get(ctx, "/loki/api/v1/labels", lv)
+	if labelsErr == nil {
+		var resp struct {
+			Status string   `json:"status"`
+			Data   []string `json:"data"`
+		}
+		if err := json.Unmarshal(labelsBody, &resp); err != nil {
+			return nil, fmt.Errorf("parse loki labels: %w", err)
+		}
+		for _, name := range resp.Data {
+			out = append(out, providers.FieldCount{Name: name})
+		}
+	}
+
+	dv := url.Values{"query": {query}}
+	setWindow(dv, w)
+	dfBody, dfErr := c.get(ctx, "/loki/api/v1/detected_fields", dv)
+	if dfErr != nil {
+		if labelsErr == nil {
+			return out, nil // older Loki: stream labels alone still answer discovery
+		}
+		return nil, dfErr
+	}
+	var resp struct {
+		Fields []struct {
+			Label       string `json:"label"`
+			Cardinality int64  `json:"cardinality"`
+		} `json:"fields"`
+	}
+	if err := json.Unmarshal(dfBody, &resp); err != nil {
+		return nil, fmt.Errorf("parse loki detected_fields: %w", err)
+	}
+	for _, f := range resp.Fields {
+		out = append(out, providers.FieldCount{Name: f.Label, Hits: f.Cardinality})
+	}
+	return out, nil
+}
