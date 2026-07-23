@@ -95,6 +95,18 @@ const (
 	MetricsFlavorVictoriaMetric = "victoriametrics" // also accepts MetricsQL (PromQL superset)
 )
 
+// Logs backend providers for config.logs.provider. Unlike the metrics backends
+// (which share the Prometheus HTTP API and differ only in dialect), VictoriaLogs
+// and Loki have entirely different query APIs, so this selects the CLIENT, not a
+// flavor of one. Empty ⇒ auto-detect at startup (Loki answers
+// /loki/api/v1/status/buildinfo; VictoriaLogs does not), failing safe to
+// victorialogs — the provider RunLore shipped with — so an unreachable backend
+// at startup reproduces today's behaviour exactly.
+const (
+	LogsProviderVictoriaLogs = "victorialogs" // LogsQL over /select/logsql/* (shipped default)
+	LogsProviderLoki         = "loki"         // LogQL over /loki/api/v1/*
+)
+
 // MetricsConfig is the metrics backend endpoint plus an OPTIONAL flavor override.
 // The endpoint keys (url/token_env/headers) are inlined so the existing
 // `metrics: {url: …}` shape is unchanged; Flavor is a new opt-in sub-key. Empty
@@ -116,6 +128,11 @@ type MetricsConfig struct {
 // WITHOUT a code change. Empty Fields ⇒ the shipped VictoriaLogs/vector convention.
 type LogsConfig struct {
 	Endpoint `yaml:",inline"`
+
+	// Provider optionally pins the logs backend implementation instead of
+	// auto-detecting it: "loki" or "victorialogs" (see LogsProvider*). Empty ⇒
+	// probe once at startup, failing safe to victorialogs.
+	Provider string `yaml:"provider"`
 
 	Fields LogFields `yaml:"fields"`
 }
@@ -177,6 +194,41 @@ func (f LogFields) Resolved() LogFields {
 	if f.UnpackPipe == "" {
 		f.UnpackPipe = defaultLogUnpackPipe
 	}
+	return f
+}
+
+// Default log-field convention for Loki: the promtail/Grafana-Alloy stream-label
+// layout plus Loki 3.x's auto-detected severity (detected_level is structured
+// metadata, filterable WITHOUT a parser stage — hence no default unpack pipe).
+// An operator on Loki 2.x (no detected_level) overrides logs.fields, e.g.
+// {level_field: level, unpack_pipe: logfmt}.
+const (
+	defaultLokiContainerField = "container"
+	defaultLokiNamespaceField = "namespace"
+	defaultLokiPodField       = "pod"
+	defaultLokiLevelField     = "detected_level"
+)
+
+// ResolvedFor resolves the field convention for a specific logs provider:
+// Loki gets Loki-appropriate defaults; anything else (victorialogs, "") keeps
+// Resolved()'s shipped VictoriaLogs behaviour. Explicitly-set fields always win.
+func (f LogFields) ResolvedFor(provider string) LogFields {
+	if provider != LogsProviderLoki {
+		return f.Resolved()
+	}
+	if f.ContainerField == "" {
+		f.ContainerField = defaultLokiContainerField
+	}
+	if f.NamespaceField == "" {
+		f.NamespaceField = defaultLokiNamespaceField
+	}
+	if f.PodField == "" {
+		f.PodField = defaultLokiPodField
+	}
+	if f.LevelField == "" {
+		f.LevelField = defaultLokiLevelField
+	}
+	// UnpackPipe stays as-set (empty = no parser stage): detected_level needs none.
 	return f
 }
 
@@ -1237,6 +1289,14 @@ func (c *Config) Validate() error {
 	}
 	if iv := c.Curate.Sweeps.Interval.Std(); iv != 0 && iv < 10*time.Minute {
 		return fmt.Errorf("curate.sweeps.interval must be >= 10m (forge-listing rate protection), got %v", iv)
+	}
+	// logs.provider is a small enum; reject typos at startup rather than silently
+	// falling back to the wrong client against a live backend.
+	switch c.Logs.Provider {
+	case "", LogsProviderVictoriaLogs, LogsProviderLoki:
+	default:
+		return fmt.Errorf("logs.provider must be %q, %q, or empty (auto-detect); got %q",
+			LogsProviderVictoriaLogs, LogsProviderLoki, c.Logs.Provider)
 	}
 	switch c.Actions.Mode {
 	case "", ActionOff, ActionSuggest:

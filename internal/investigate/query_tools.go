@@ -398,12 +398,29 @@ func buildLogsQL(raw, container, namespace, level string) (string, error) {
 // recurring mistake) — the error guides a retry.
 func buildLogsQLWith(raw, container, namespace, level string, conv LogFields) (string, error) {
 	conv = conv.resolved()
+	if conv.Dialect == DialectLogQL {
+		return buildLogQL(raw, container, namespace, level, conv)
+	}
 	if raw != "" {
 		if strings.Contains(raw, "level=") {
 			return "", fmt.Errorf("invalid LogsQL: `level=` is Prometheus/Loki syntax. Filter severity with `| %s | %s:error` (after a stream selector), or use the container/namespace/level params", conv.UnpackPipe, conv.LevelField)
 		}
 		return raw, nil
 	}
+	q, err := streamSelector(container, namespace, conv)
+	if err != nil {
+		return "", err
+	}
+	if level != "" {
+		q += " | " + conv.UnpackPipe + " | " + conv.LevelField + ":" + level
+	}
+	return q, nil
+}
+
+// streamSelector assembles the `{container="…",namespace="…"}` stream selector
+// shared by both dialect builders (LogsQL and LogQL use the identical label=value
+// form), or an error when neither field is given.
+func streamSelector(container, namespace string, conv LogFields) (string, error) {
 	var sel []string
 	if container != "" {
 		sel = append(sel, fmt.Sprintf("%s=%q", conv.ContainerField, container))
@@ -414,9 +431,38 @@ func buildLogsQLWith(raw, container, namespace, level string, conv LogFields) (s
 	if len(sel) == 0 {
 		return "", fmt.Errorf("provide a raw `query`, or `container`/`namespace` to build one")
 	}
-	q := "{" + strings.Join(sel, ",") + "}"
+	return "{" + strings.Join(sel, ",") + "}", nil
+}
+
+// buildLogQL composes a valid LogQL (Grafana Loki) query from the resolved
+// field convention: `{container="…",namespace="…"}` plus an optional parser
+// pipe and a `| <level_field>="…"` label filter — detected_level needs no
+// parser on Loki 3.x, so the default pipe is empty. A raw query passes through
+// but must start with a stream selector, and LogsQL-isms (unpack_json, _msg —
+// the model's likely carry-over mistakes) are rejected with a correcting error,
+// mirroring the LogsQL branch's `level=` guard in spirit.
+func buildLogQL(raw, container, namespace, level string, conv LogFields) (string, error) {
+	if raw != "" {
+		// Guard against carried-over VictoriaLogs syntax. `_msg:` (its message-field
+		// filter) is matched WITH the colon so a Loki label value or |= search string
+		// that merely contains "_msg" (e.g. auth_msg_worker) is not misrejected.
+		if strings.Contains(raw, "unpack_json") || strings.Contains(raw, "_msg:") {
+			return "", fmt.Errorf("invalid LogQL: unpack_json / _msg: are VictoriaLogs LogsQL syntax. Parse with `| json` or `| logfmt` and filter severity with `| %s=\"error\"`, or use the container/namespace/level params", conv.LevelField)
+		}
+		if !strings.HasPrefix(strings.TrimSpace(raw), "{") {
+			return "", fmt.Errorf("invalid LogQL: a query starts with a stream selector, e.g. `{%s=\"apps\"}`", conv.NamespaceField)
+		}
+		return raw, nil
+	}
+	q, err := streamSelector(container, namespace, conv)
+	if err != nil {
+		return "", err
+	}
 	if level != "" {
-		q += " | " + conv.UnpackPipe + " | " + conv.LevelField + ":" + level
+		if conv.UnpackPipe != "" {
+			q += " | " + conv.UnpackPipe
+		}
+		q += fmt.Sprintf(" | %s=%q", conv.LevelField, level)
 	}
 	return q, nil
 }
@@ -426,12 +472,9 @@ func (t QueryLogsTool) Name() string { return "query_logs" }
 
 // Description returns the tool description.
 func (t QueryLogsTool) Description() string {
-	return "Query logs with LogsQL (VictoriaLogs) over a recent window. " +
+	return "Query logs with " + t.Fields.dialectLabel() + " over a recent window. " +
 		"PREFER the structured params (container/namespace/level) and let the tool build the query. " +
-		"If you write a raw `query`: stream labels use DOT notation (kubernetes.container_name, " +
-		"kubernetes.pod_namespace), NOT underscores; to filter by severity you MUST unpack JSON first, " +
-		"e.g. `{kubernetes.container_name=\"x\"} | unpack_json | log.level:error`. " +
-		"Do NOT use `level=error` — that is Prometheus/Loki syntax and is invalid LogsQL. " +
+		t.Fields.rawQueryGuidance() + " " +
 		"Optional since_minutes bounds the window (default 60)."
 }
 
@@ -440,8 +483,8 @@ func (t QueryLogsTool) Schema() string {
 	return `{"type":"object","properties":{` +
 		`"container":{"type":"string","description":"kubernetes container name to scope to"},` +
 		`"namespace":{"type":"string","description":"kubernetes namespace to scope to"},` +
-		`"level":{"type":"string","enum":["error","warn","info"],"description":"severity filter (unpacks JSON)"},` +
-		`"query":{"type":"string","description":"raw LogsQL; only if the structured fields are insufficient"},` +
+		`"level":{"type":"string","enum":["error","warn","info"],"description":"severity filter (tool builds the dialect-correct filter)"},` +
+		`"query":{"type":"string","description":"raw ` + t.Fields.queryLang() + `; only if the structured fields are insufficient"},` +
 		`"since_minutes":{"type":"integer"}},"required":[]}`
 }
 

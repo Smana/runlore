@@ -136,7 +136,15 @@ func chatCompletions(w http.ResponseWriter, r *http.Request) {
 	case 4:
 		name, args = "network_drops", `{"namespace":"apps"}`
 	default:
-		name, args = "submit_findings", `{"confidence":0.9,"root_causes":[{"summary":"mock: chart bump broke harbor-db","confidence":0.9,"evidence":["pg_up=0"],"suggested_action":"flux rollback hr/harbor","reversible":true}],"unresolved":["mock unresolved"],"actions":[{"description":"suspend the failing Kustomization to stop the reconcile loop","op":"suspend","reversible":true,"blast_radius":1,"target":{"kind":"Kustomization","name":"broken-app","namespace":"apps"}}]}`
+		// The action targets whichever GitOps object triggered THIS incident: the
+		// argocd e2e phase names Application/broken-argo in the incident text, the
+		// flux phases name broken-app. Sniffing the request body keeps the mock
+		// stateless across both engine phases.
+		actionJSON := `{"description":"suspend the failing Kustomization to stop the reconcile loop","op":"suspend","reversible":true,"blast_radius":1,"target":{"kind":"Kustomization","name":"broken-app","namespace":"apps"}}`
+		if strings.Contains(string(body), "broken-argo") {
+			actionJSON = `{"description":"pause auto-sync on the degraded Application to stop the flapping rollout","op":"suspend","reversible":true,"blast_radius":1,"target":{"kind":"Application","name":"broken-argo","namespace":"apps"}}`
+		}
+		name, args = "submit_findings", `{"confidence":0.9,"root_causes":[{"summary":"mock: chart bump broke harbor-db","confidence":0.9,"evidence":["pg_up=0"],"suggested_action":"flux rollback hr/harbor","reversible":true}],"unresolved":["mock unresolved"],"actions":[`+actionJSON+`]}`
 	}
 	log.Printf("MOCK chat/completions: toolResults=%d -> %s", toolResults, name)
 	writeToolCallSSE(w, fmt.Sprintf("c%d", toolResults), name, args)

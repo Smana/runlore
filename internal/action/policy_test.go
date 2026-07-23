@@ -164,3 +164,30 @@ func TestReviewExecutableNeedsTargetKind(t *testing.T) {
 		t.Fatalf("withheld = %v, want the kind reason", withheld)
 	}
 }
+
+// TestReviewArgoApplicationParity locks in M3's central invariant: an
+// Application-targeted registry op passes the SAME server-authoritative
+// envelope as a Flux target — reversibility/blast derived from providers.Ops
+// (never the model's fields), no default kind restriction, namespace
+// allowlisted — with NO engine- or kind-specific branches in the gate.
+func TestReviewArgoApplicationParity(t *testing.T) {
+	p := New(config.ActionPolicy{Mode: config.ActionApprove, Allow: config.ActionAllow{
+		ReversibleOnly: true,
+		Namespaces:     []string{"argocd"},
+	}})
+	acts := []providers.Action{{
+		Name:        "pause-auto-sync",
+		Op:          "suspend",
+		Reversible:  false, // model-supplied lie — must be discarded
+		BlastRadius: 99,    // model-supplied lie — must be discarded
+		Target:      providers.Workload{Kind: "Application", Name: "web", Namespace: "argocd"},
+	}}
+	kept, withheld := p.Review(acts)
+	if len(withheld) != 0 || len(kept) != 1 {
+		t.Fatalf("kept=%d withheld=%v; want the Application action kept", len(kept), withheld)
+	}
+	if !kept[0].Reversible || kept[0].BlastRadius != 1 {
+		t.Fatalf("derived (reversible=%v, blast=%d); want (true, 1) from providers.Ops",
+			kept[0].Reversible, kept[0].BlastRadius)
+	}
+}

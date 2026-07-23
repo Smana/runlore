@@ -35,10 +35,7 @@ func Load(dir string) (entries []Entry, skipped []string, err error) {
 			}
 			return nil
 		}
-		if strings.HasPrefix(base, ".") || !strings.HasSuffix(base, ".md") {
-			return nil
-		}
-		if base == "index.md" || base == "log.md" || strings.EqualFold(base, "readme.md") {
+		if !IsEntryFile(base) {
 			return nil
 		}
 		e, perr := parseEntry(dir, path)
@@ -53,6 +50,17 @@ func Load(dir string) (entries []Entry, skipped []string, err error) {
 		return nil, nil, werr
 	}
 	return entries, skipped, nil
+}
+
+// IsEntryFile reports whether a base filename is an OKF catalog entry file: a
+// non-hidden .md that is not one of the reserved bundle files (index.md /
+// log.md / README.md). Load and `lore kb import` share it so "what counts as an
+// entry" is defined once and their notions can't drift.
+func IsEntryFile(base string) bool {
+	if strings.HasPrefix(base, ".") || !strings.HasSuffix(base, ".md") {
+		return false
+	}
+	return base != "index.md" && base != "log.md" && !strings.EqualFold(base, "readme.md")
 }
 
 // entryMeta is the exact set of frontmatter keys the loader parses, keyed by
@@ -77,7 +85,7 @@ func parseEntry(root, path string) (Entry, error) {
 	if err != nil {
 		return Entry{}, err
 	}
-	fm, body := splitFrontmatter(data)
+	fm, body := SplitFrontmatter(data)
 	var meta entryMeta
 	if len(fm) > 0 {
 		if err := yaml.Unmarshal(fm, &meta); err != nil {
@@ -95,8 +103,10 @@ func parseEntry(root, path string) (Entry, error) {
 	}, nil
 }
 
-// splitFrontmatter separates a leading "---\n...\n---\n" YAML block from the body.
-func splitFrontmatter(data []byte) (frontmatter, body []byte) {
+// SplitFrontmatter separates a leading "---\n...\n---\n" YAML block from the body.
+// Exported because `lore kb import` reuses the exact same split when normalizing
+// source runbooks, so import and load agree on where frontmatter ends.
+func SplitFrontmatter(data []byte) (frontmatter, body []byte) {
 	s := string(data)
 	if !strings.HasPrefix(s, "---") {
 		return nil, data

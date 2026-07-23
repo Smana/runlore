@@ -13,7 +13,9 @@ on:
     - cron: "0 6 * * *"        # nightly 06:00 UTC
   workflow_dispatch: {}         # manual run from the Actions tab
 
-# Least privilege: only needs to read the repo.
+# Least privilege: the workflow only reads the repo; the replay-eval job elevates
+# to contents:write solely to push the public scorecard to the eval-scorecard
+# branch (never to main).
 permissions:
   contents: read
 
@@ -25,6 +27,8 @@ jobs:
   replay-eval:
     runs-on: ubuntu-latest
     timeout-minutes: 20
+    permissions:
+      contents: write   # push the scorecard to the eval-scorecard branch only
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
@@ -73,3 +77,31 @@ jobs:
           name: eval-report
           path: eval/reports/
           if-no-files-found: warn
+
+      - name: publish scorecard (eval-scorecard branch)
+        # always(): a gate failure (score < 70%) must publish exactly like a pass —
+        # the scorecard's value is honesty. Guarded to main so a workflow_dispatch
+        # from a feature branch can't overwrite the published numbers, and to
+        # has_key so a skipped run publishes nothing.
+        if: always() && steps.guard.outputs.has_key == 'true' && github.ref == 'refs/heads/main'
+        run: |
+          set -euo pipefail
+          REPORT=$(ls -t eval/reports/*-replay.json 2>/dev/null | head -1 || true)
+          if [ -z "$REPORT" ]; then
+            echo "::warning title=Scorecard skipped::no replay report found (eval crashed before writing one)"
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          OUT="$RUNNER_TEMP/scorecard-branch"
+          if git fetch origin eval-scorecard; then
+            git worktree add -B eval-scorecard "$OUT" origin/eval-scorecard
+          else
+            git worktree add --detach "$OUT"
+            git -C "$OUT" checkout --orphan eval-scorecard
+            git -C "$OUT" rm -rf --quiet . || true
+          fi
+          ./lore eval scorecard -report "$REPORT" -dir "$OUT"
+          git -C "$OUT" add -A
+          git -C "$OUT" commit -m "chore(eval): nightly scorecard $(date -u +%Y-%m-%d)" || { echo "no changes to publish"; exit 0; }
+          git -C "$OUT" push origin eval-scorecard

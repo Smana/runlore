@@ -58,3 +58,23 @@ fields:
 		t.Fatalf("fields.namespace_field not parsed: %+v", lc.Fields)
 	}
 }
+
+// TestLogFieldsResolvedForLoki: ResolvedFor(loki) fills the promtail/alloy
+// stream-label convention and Loki 3.x's parser-less detected_level severity,
+// and deliberately leaves UnpackPipe empty (no parser stage needed). Any
+// explicitly-set field wins. ResolvedFor(victorialogs) must equal Resolved().
+func TestLogFieldsResolvedForLoki(t *testing.T) {
+	got := LogFields{}.ResolvedFor(LogsProviderLoki)
+	want := LogFields{ContainerField: "container", NamespaceField: "namespace",
+		PodField: "pod", LevelField: "detected_level", UnpackPipe: ""}
+	if got != want {
+		t.Fatalf("loki defaults = %+v, want %+v", got, want)
+	}
+	over := LogFields{LevelField: "level", UnpackPipe: "logfmt"}.ResolvedFor(LogsProviderLoki)
+	if over.LevelField != "level" || over.UnpackPipe != "logfmt" || over.PodField != "pod" {
+		t.Fatalf("overrides must win, defaults fill the rest: %+v", over)
+	}
+	if (LogFields{}.ResolvedFor(LogsProviderVictoriaLogs)) != (LogFields{}.Resolved()) {
+		t.Fatalf("victorialogs resolution must be unchanged")
+	}
+}

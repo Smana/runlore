@@ -171,9 +171,13 @@ type OpSafety struct {
 
 // Ops is the canonical registry of executable remediation operations and their
 // server-authoritative safety metadata. The action gate (internal/action) derives
-// reversibility/blast from this — never from model output — and the executor
-// (internal/executor/flux) runs only ops listed here. One entry per op is the
-// single source of truth that keeps the gate and the executor from drifting.
+// reversibility/blast from this — never from model output — and the per-engine
+// executors (internal/executor/flux, internal/executor/argocd) run only ops
+// listed here. Op names are engine-neutral; the executor for the configured
+// gitops.engine translates them (Flux: spec.suspend / requestedAt annotation;
+// Argo CD: pause/restore spec.syncPolicy.automated / refresh annotation). One
+// entry per op is the single source of truth that keeps the gate and the
+// executors from drifting.
 var Ops = map[string]OpSafety{
 	"suspend":   {Reversible: true, Blast: 1},
 	"resume":    {Reversible: true, Blast: 1},

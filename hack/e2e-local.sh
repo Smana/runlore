@@ -742,7 +742,8 @@ kubectl wait --for=condition=Established crd/applications.argoproj.io --timeout=
 # Reconfigure to the argocd engine. The chart's Recreate strategy makes this
 # in-place update roll cleanly under leader election (old pods terminate first).
 helm upgrade runlore deploy/helm/runlore -n "$NS" --reuse-values \
-  --set replicaCount=1 --set-string config.gitops.engine=argocd >/dev/null
+  --set replicaCount=1 --set-string config.gitops.engine=argocd \
+  --set-string config.actions.mode=approve >/dev/null
 kubectl -n "$NS" rollout status deploy/runlore --timeout=120s
 wait_for_leader   # gate the argocd Application trigger on leadership settling (#284)
 sleep 3
@@ -750,7 +751,9 @@ kubectl apply -f - <<'YAML'
 apiVersion: argoproj.io/v1alpha1
 kind: Application
 metadata: { name: broken-argo, namespace: apps }
-spec: { source: { repoURL: "https://github.com/org/repo", path: apps } }
+spec:
+  source: { repoURL: "https://github.com/org/repo", path: apps }
+  syncPolicy: { automated: { prune: true, selfHeal: true } }
 YAML
 kubectl patch application broken-argo -n apps --subresource=status --type=merge -p \
   '{"status":{"health":{"status":"Degraded"},"sync":{"revision":"deadbeef","status":"OutOfSync"},"operationState":{"message":"image pull backoff"}}}'
@@ -758,6 +761,29 @@ sleep 6
 kubectl -n "$NS" logs deploy/runlore > /tmp/runlore.log 2>&1
 check "argocd engine active"          /tmp/runlore.log 'engine=argocd'
 check "argocd failure -> investigate" /tmp/runlore.log 'Application/broken-argo'
+
+# Rung 2 parity (M3): the mock proposed pausing auto-sync on the Application;
+# approve it via the token endpoint and verify the executor (a) removed
+# spec.syncPolicy.automated and (b) preserved the prior policy in the
+# runlore.io/paused-sync-automated annotation — the reversibility contract.
+check "argocd action queued for approval" /tmp/runlore.log 'actions registered for approval'
+APORT=18092; free_port "$APORT"
+kubectl -n "$NS" port-forward svc/runlore "$APORT:8080" >/tmp/runlore-argo-pf.log 2>&1 &
+APF=$!; sleep 3
+AID=$(curl -s -H "X-Approval-Token: e2e-secret" "localhost:$APORT/actions" | first_action_id) || true
+curl -s -o /dev/null -w "argo approve HTTP %{http_code}\n" -X POST \
+  -H "X-Approval-Token: e2e-secret" "localhost:$APORT/actions/$AID/approve" || true
+kill "$APF" 2>/dev/null || true; free_port "$APORT"
+sleep 3
+AUTOMATED=$(kubectl get application broken-argo -n apps -o jsonpath='{.spec.syncPolicy.automated}' 2>/dev/null || true)
+SAVED=$(kubectl get application broken-argo -n apps -o jsonpath='{.metadata.annotations.runlore\.io/paused-sync-automated}' 2>/dev/null || true)
+if [[ -z "$AUTOMATED" && "$SAVED" == *'"prune":true'* ]]; then
+  green "PASS: approved argocd action paused auto-sync and preserved the prior policy ($SAVED)"; PASS=$((PASS+1))
+else
+  red "FAIL: argocd pause (automated='$AUTOMATED' saved='$SAVED'; want automated removed + policy saved)"; FAIL=$((FAIL+1))
+fi
+kubectl -n "$NS" logs deploy/runlore > /tmp/runlore.log 2>&1
+check "argocd execution audit-logged" /tmp/runlore.log 'action approved and executed'
 
 step "RESULTS"
 echo "PASS=$PASS FAIL=$FAIL"
