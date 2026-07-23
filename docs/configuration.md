@@ -476,6 +476,38 @@ preserved (the history walks behind the `#239` fallback and time-window enumerat
 - `max` — maximum mirrors kept on disk; **default `10`**. When exceeded, the oldest-mtime mirror is
   evicted. Must be `>= 0` (`0` = use the default).
 
+### `source_repos` — source-repo allowlist for `source_diff`
+
+`what_changed` stops at the manifest layer ("image `v1.2.2 → v1.2.3`"). Listing source repos
+here gives the agent a `source_diff` tool that reads the actual change behind such a bump:
+commit subjects, a per-file diffstat, and the largest hunks between the two versions —
+turning "the deploy correlates with the alert" into "commit `a1b2c3` raised the DB pool
+size, which matches the connection exhaustion". **Unset (default) ⇒ the tool is not
+registered.**
+
+```yaml
+source_repos:
+  allow:
+    - github.com/acme/*              # every repo directly under the org
+    - gitlab.com/acme/infra-modules  # or exact host/org/repo
+```
+
+- `allow` — patterns the model may diff, `host/org/repo`-shaped with per-segment globs
+  (`*` never crosses `/`). Matching is enforced server-side **before any network call** —
+  the model can only make RunLore clone repos you listed, whatever it writes.
+- **Auth:** private **GitHub** repos reuse the forge GitHub App installation token (install
+  the App on those repos with `contents: read`). Public repos need nothing. Private
+  non-GitHub hosts are not supported yet.
+- **Repo selection is done by the model.** For Terraform/module bumps the repo URL is in
+  the GitOps diff, so it is exact; for images it name-matches against your allowlist (a
+  wrong guess fails at ref resolution — the tag won't exist — and the error lists nearby
+  tags).
+- **Token cost is bounded in code:** the default response is commit subjects + diffstat +
+  the biggest hunks (~8 KiB); the model zooms into specific files with `paths` (~16 KiB).
+  Generated/vendored files (lockfiles, `vendor/`…) are listed in the diffstat but their
+  hunks are skipped unless zoomed. Mirrors reuse the `gitops.mirror` settings (a `source/`
+  subdir of the same root).
+
 ### Other top-level keys
 `gitops.engine` (`flux` default · `argocd`), `cloud` (`provider: aws`, `region`, `cluster_name`),
 `network` (pluggable: `hubble` · `aws-vpc-flow-logs` · `gcp-firewall-logs`),

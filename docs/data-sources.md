@@ -133,3 +133,31 @@ sources:
 
 Requests without a Kubernetes workload recall only resource-less entries (the
 scopeless tier) — same as PagerDuty.
+
+## Source repos
+
+`what_changed` surfaces manifest-layer changes ("image `v1.2.2 → v1.2.3`"). Registering
+source repos deepens that to the actual code behind such a bump — commit subjects, a
+per-file diffstat, and the largest changed hunks — turning a correlation into a cause.
+This powers the `source_diff` tool; **unset (default) ⇒ the tool is not registered**.
+
+```yaml
+source_repos:
+  allow:
+    - github.com/acme/*              # every repo directly under the org
+    - gitlab.com/acme/infra-modules  # or exact host/org/repo
+```
+
+**Auth:** private **GitHub** repos reuse the forge GitHub App installation token — install
+the App on those repos with `contents: read`. Public repos need nothing. Private non-GitHub
+hosts are not supported yet.
+
+RunLore performs **read-only bare clones** — no working-tree checkout, no writes to the
+source repo. Mirrors reuse the `gitops.mirror` directory (a `source/` subdir of the same
+root), so warm mirrors cost nothing after the first clone.
+
+Allowlist matching is enforced **server-side before any network call**: the model can only
+make RunLore clone repos you explicitly listed. A wrong repo guess fails at ref resolution
+(the tag won't exist) and the error response lists nearby tags so the model can self-correct.
+
+Full key reference and token-cost details: [configuration.md → `source_repos`](configuration.md#source_repos--source-repo-allowlist-for-source_diff).
