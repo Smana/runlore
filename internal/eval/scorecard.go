@@ -4,6 +4,7 @@
 // artifacts published on the eval-scorecard branch — a browsable scorecard.md, a
 // shields.io endpoint badge.json, and an append-only history.jsonl. Pure functions
 // over bytes so the whole pipeline is testable without CI.
+
 package eval
 
 import (
