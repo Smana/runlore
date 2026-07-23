@@ -10,7 +10,7 @@ assumed).
 |---|---|---|---|---|
 | GitOps "what changed" | `what_changed`, `gitops_*` | `GitOpsProvider` | Flux, ArgoCD | `gitops.engine` |
 | Metrics | `query_metrics`, `query_metrics_range` | `MetricsProvider` | VictoriaMetrics, Prometheus (PromQL) | `metrics.url` |
-| Logs | `query_logs` | `LogsProvider` | VictoriaLogs (LogsQL) | `logs.url` |
+| Logs | `query_logs`, `logs_error_summary`, `discover_log_fields` | `LogsProvider` | VictoriaLogs (LogsQL) · **Grafana Loki (LogQL)** | `logs.url` (+ optional `logs.provider`) |
 | **Network flows** | `network_drops` | `NetworkProvider` | **Cilium Hubble · AWS VPC Flow Logs · GCP Firewall Logs** | `network.provider` |
 | Cloud control plane | `cloud_*` | `CloudProvider` | AWS (CloudTrail + EC2/ASG/EKS) | `cloud.provider` |
 | Kubernetes | `pod_status`, `kube_events`, `controller_logs`, `pod_logs` | `KubeReader`/`LogReader` | client-go | (in-cluster) |
@@ -64,6 +64,51 @@ CNI-agnostic eBPF (Microsoft **Retina** exposes a Hubble-compatible flow API, so
 
 > Compatibility: the legacy `network: { url: ... }` shape (Hubble-only) is still accepted and
 > mapped to `provider: hubble` with a deprecation warning. Prefer the explicit `provider` form.
+
+## Logs backends
+
+The logs signal is pluggable behind `LogsProvider`: **VictoriaLogs** (LogsQL) and **Grafana
+Loki** (LogQL). All three log tools — `query_logs`, `logs_error_summary`,
+`discover_log_fields` — work on both; the model is told the right query language automatically.
+
+The provider is **auto-detected** at startup (Loki answers `/loki/api/v1/status/buildinfo`;
+VictoriaLogs does not) and **fails safe to VictoriaLogs**, so existing configs are untouched.
+Pin it with `provider:` when the backend is unreachable at startup or sits behind a proxy that
+confuses the probe.
+
+### `victorialogs` — VictoriaLogs (default)
+```yaml
+logs:
+  url: http://victorialogs.observability.svc:9428
+```
+
+### `loki` — Grafana Loki
+```yaml
+logs:
+  url: http://loki-gateway.observability.svc:80
+  provider: loki          # optional — auto-detected when omitted
+  # token_env: LOKI_TOKEN                 # bearer token, by env-var indirection
+  # headers: { X-Scope-OrgID: my-tenant } # multi-tenant Loki
+```
+
+Field-convention defaults differ per provider; override any of them via `logs.fields`:
+
+| `logs.fields` key | VictoriaLogs default | Loki default |
+|---|---|---|
+| `container_field` | `kubernetes.container_name` | `container` |
+| `namespace_field` | `kubernetes.pod_namespace` | `namespace` |
+| `pod_field` | `kubernetes.pod_name` | `pod` |
+| `level_field` | `log.level` | `detected_level` |
+| `unpack_pipe` | `unpack_json` | *(none — `detected_level` is structured metadata)* |
+
+> Loki parity notes: `logs_error_summary`'s histogram uses a LogQL metric query
+> (`sum by (detected_level) (count_over_time(…))`); its *top messages* are aggregated
+> client-side over the (capped, newest-first) query sample, so counts are per-sample rather
+> than corpus-wide. `discover_log_fields` merges stream labels (`/loki/api/v1/labels`) with
+> detected body fields (`/loki/api/v1/detected_fields`, Loki ≥ 3.0; older Loki degrades to
+> labels only). On Loki 2.x there is no `detected_level` — set
+> `logs: { fields: { level_field: level, unpack_pipe: logfmt } }` (or `json`) to match your
+> collector.
 
 ## Custom webhooks — any vendor, no code
 
