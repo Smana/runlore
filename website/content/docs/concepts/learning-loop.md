@@ -3,7 +3,7 @@ title: Learning Loop
 weight: 30
 ---
 
-> Companion to [`design.md`](design.md). This document explains the **learning
+> Companion to [`design.md`]({{< relref "design.md" >}}). This document explains the **learning
 > loop** specifically: what "learning" means in RunLore, how each stage works, and
 > *why* it was built the way it was.
 
@@ -288,7 +288,7 @@ Two read APIs turn this raw log into a learning signal:
 - **`Feedback()`** appends a human **`feedback`** event — the 👍/👎 buttons on Slack
   investigation messages (opt-in, `notify.slack.feedback_buttons`) or 👍/👎 **reactions**
   on Matrix ones (opt-in, `notify.matrix.feedback_reactions`, zero-ingress; see
-  [configuration.md](configuration.md#notify--where-findings-go)). A vote is attributed
+  [configuration.md]({{< relref "/docs/configuration/configuration.md#notify--where-findings-go" >}})). A vote is attributed
   to the catalog entry behind the trigger key's **newest open** (via the same
   `byTrigger` index; a fresh investigation has no entry, so its votes are recorded but
   weigh nothing), deduplicated to **one live vote per (trigger key, user)** —

@@ -548,7 +548,7 @@ source), so lock that down before pointing a real alert stream at it:
            matchLabels: { kubernetes.io/metadata.name: monitoring }
    ```
 
-See the [Security model](security-model.md) for the full posture — redaction, RBAC, the action gate.
+See the [Security model]({{< relref "security-model.md" >}}) for the full posture — redaction, RBAC, the action gate.
 
 ---
 
@@ -616,9 +616,9 @@ want a sharper answer. Only RunLore-originated issues (carrying the `runlore` la
 
 ## Next
 
-- [Configuration](configuration.md) — every config key, organized by subsystem.
-- [Troubleshooting](troubleshooting.md) — why an investigation didn't start, timed out, or didn't file a PR.
-- [Security model](security-model.md) — read-only posture, redaction, RBAC, the action gate.
-- [Upgrade & uninstall](upgrade-uninstall.md) — `helm upgrade`/`uninstall`, what persists, and cleanup.
-- [Design](design.md) — architecture and the autonomy ladder.
+- [Configuration]({{< relref "/docs/configuration/configuration.md" >}}) — every config key, organized by subsystem.
+- [Troubleshooting]({{< relref "troubleshooting.md" >}}) — why an investigation didn't start, timed out, or didn't file a PR.
+- [Security model]({{< relref "security-model.md" >}}) — read-only posture, redaction, RBAC, the action gate.
+- [Upgrade & uninstall]({{< relref "upgrade-uninstall.md" >}}) — `helm upgrade`/`uninstall`, what persists, and cleanup.
+- [Design]({{< relref "design.md" >}}) — architecture and the autonomy ladder.
 - [CONTRIBUTING.md](../CONTRIBUTING.md) — run the full feature suite locally on k3d.

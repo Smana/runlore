@@ -10,7 +10,7 @@ two diagnostic channels:
   (or `text`) and `logging.level: debug` for the most detail. Each section below quotes the exact
   `msg=` value to grep for.
 - **Metrics** — `runlore_*` Prometheus series, exposed when `telemetry.metrics_enabled: true`. See
-  [Observability](observability.md) for the full catalog and a Grafana dashboard.
+  [Observability]({{< relref "observability.md" >}}) for the full catalog and a Grafana dashboard.
 
 > [!NOTE]
 > **Leader-only by design**
@@ -183,7 +183,7 @@ completed its first catalog index/sync.
 
 ## Quick reference — metric → meaning
 
-The most useful series for triage (full list in [Observability](observability.md)):
+The most useful series for triage (full list in [Observability]({{< relref "observability.md" >}})):
 
 | metric | use it to see… |
 |---|---|

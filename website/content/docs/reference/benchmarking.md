@@ -114,7 +114,7 @@ comparison, disclose:
    (`lore eval --live`) is the harder, cluster-bound test. Label replay results as
    replay.
 4. **ITBench context.** Independent work (ITBench, IBM/ICML 2025, see
-   [`docs/prior-art.md`](prior-art.md)) found frontier models identify the root
+   [`docs/prior-art.md`]({{< relref "prior-art.md" >}})) found frontier models identify the root
    cause **< 50%** of the time and fully resolve only ~11–14% of real K8s
    incidents. Treat sub-50% as the baseline; a high replay pass-rate is a ceiling,
    not a field number. Design for failure and make honest uncertainty a feature.

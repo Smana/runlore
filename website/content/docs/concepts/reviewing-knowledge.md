@@ -12,7 +12,7 @@ RunLore never writes to the catalog directly — it only opens PRs. Nothing ente
 your knowledge base until **a human merges it**. That's the whole point: the
 knowledge is yours, reviewed, and in your Git.
 
-> **Guided workflow:** the [kb-steward Claude Code skill](kb-steward.md) walks
+> **Guided workflow:** the [kb-steward Claude Code skill]({{< relref "kb-steward.md" >}}) walks
 > you through PR triage, post-incident capture, and seeding the KB with your
 > platform's context — interview-style, PR-gated like everything else.
 
@@ -60,7 +60,7 @@ None of these fabricate or hide knowledge — every skipped finding is still
 delivered to chat. They only decide what's worth a *permanent, reviewed* entry.
 Recommended starting point for a production install: `skip_verdicts: ["no_action"]`,
 then tune `min_confidence` up if benign churn still leaks through. See
-[configuration.md](configuration.md#forge--the-git-host-for-curation).
+[configuration.md]({{< relref "/docs/configuration/configuration.md#forge--the-git-host-for-curation" >}}).
 
 ---
 
@@ -120,7 +120,7 @@ appended to `log.md` — all in the one diff you review.
 > keys the loader parses, which the merge gate requires, and what each one does
 > for recall — is documented in
 > [`okf-format.md`](../plugins/kb-steward/skills/kb-steward/references/okf-format.md),
-> shipped as part of the [kb-steward skill](kb-steward.md) but useful on its own.
+> shipped as part of the [kb-steward skill]({{< relref "kb-steward.md" >}}) but useful on its own.
 
 ---
 
@@ -218,7 +218,7 @@ separate approval UI — your Git review *is* the gate.
 - **Outcomes feed back.** RunLore records whether incidents that recalled this
   entry actually resolved. An entry with a poor real-world resolve-rate is
   **automatically decayed out of recall** — so bad knowledge stops being used
-  without anyone policing it. (See [the learning loop](learning-loop.md).)
+  without anyone policing it. (See [the learning loop]({{< relref "learning-loop.md" >}}).)
 
 ---
 
@@ -248,7 +248,7 @@ audit log for `"actor":"curate"` records) to see what it *would* do, then set
 automated action, applied or skipped, lands in the same tamper-evident audit chain as
 cluster actions when `actions.audit_log_path` is set. A `lore curate` CronJob remains
 available for out-of-server runs. See
-[getting-started](getting-started.md#step-7--the-learn-loop-kb-lifecycle--re-runs).
+[getting-started]({{< relref "getting-started.md#step-7--the-learn-loop-kb-lifecycle--re-runs" >}}).
 
 The groomer also carries on-call feedback into your review: when responders hold
 standing 👎 votes on the investigation behind a pending entry (the 👍/👎 buttons

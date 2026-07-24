@@ -17,7 +17,7 @@ weight: 10
 | **License** | Apache-2.0 |
 | **Language** | Go (single static binary) |
 
-> **See also:** [`learning-loop.md`](learning-loop.md) — a focused deep-dive on *how the
+> **See also:** [`learning-loop.md`]({{< relref "learning-loop.md" >}}) — a focused deep-dive on *how the
 > learning loop works* (retrieve → capture → curate → compound), the outcome-driven
 > decay edge, and the design rationale behind each gate, with diagrams.
 
@@ -48,7 +48,7 @@ RunLore fills exactly these gaps, and only these.
 
 ## 2. Positioning (honest prior art)
 
-See [`prior-art.md`](prior-art.md) for the full landscape. The short version:
+See [`prior-art.md`]({{< relref "prior-art.md" >}}) for the full landscape. The short version:
 
 | Capability | OSS today | Commercial today | RunLore |
 |---|---|---|---|
@@ -58,7 +58,7 @@ See [`prior-art.md`](prior-art.md) for the full landscape. The short version:
 | Honest about the sub-50% reality (read-only-first, `unresolved`, eval-proven) | partial | mostly autonomy-theatre | **the under-sold asset** |
 
 The autonomous runtime is a commodity, and the Git diff — though sharp — is now matched by Komodor and
-Anyshift (see [`prior-art.md`](prior-art.md)). The defensible reason to build RunLore is the
+Anyshift (see [`prior-art.md`]({{< relref "prior-art.md" >}})). The defensible reason to build RunLore is the
 **combination the open tools don't have**: an **open, portable, PR-reviewed knowledge catalog** that
 **learns from outcomes** (HolmesGPT doesn't learn; kagent's memory is opaque), grounded in the **exact
 GitOps change**, from an agent that is **honest about what it can't determine** — all **self-hosted, on
@@ -222,7 +222,7 @@ GitOps platform it resolves to the *exact* Git diff (the spine below).
 ### Learn — compound an open catalog
 
 > The **full operational mechanics** — instant-recall trust gates, the outcome ledger, outcome-driven
-> decay, curation, and compounding — are documented once in **[learning-loop.md](learning-loop.md)**
+> decay, curation, and compounding — are documented once in **[learning-loop.md]({{< relref "learning-loop.md" >}})**
 > (the canonical deep-dive). This section is the *architectural* view: how Learn fits the design and why.
 
 RunLore's learning is modeled on the **Open Knowledge Format (OKF)** introduced by
@@ -273,7 +273,7 @@ fail-safe: an absent or unknown value reproduces the pre-field behaviour exactly
 **`confidence`**, is *written* by the curator but deliberately **not read back** — recall derives trust
 from the live outcome track record (resolve rate + 👍/👎), and a static authored confidence would fight
 that dynamic signal. On top of these, an outcome-driven decay down-weights knowledge that stops
-resolving incidents ([mechanics in learning-loop.md §6](learning-loop.md)).
+resolving incidents ([mechanics in learning-loop.md §6]({{< relref "learning-loop.md" >}})).
 Curation — the PR/issue review — is the **load-bearing** quality gate that separates this from opaque
 vendor "memory."
 
@@ -425,7 +425,7 @@ KB git repo  ──syncer──►  local mirror  ──build──►  index:  
   masking the *value* while keeping surrounding structure so the agent can still
   reason ("the password field changed"). Redaction is a **mitigation, not a guarantee**: unlabeled
   high-entropy strings and base64 blobs with no `Secret` manifest in the payload are not caught (see the
-  [LLM security architecture](security-architecture.md)). Defense-in-depth still applies — the RBAC
+  [LLM security architecture]({{< relref "security-architecture.md" >}})). Defense-in-depth still applies — the RBAC
   scoping above limits what tool output can contain, and **self-hosting the model** (in-cluster
   vLLM/Ollama) keeps data in-boundary regardless. If you run a public KB repo or untrusted-tenant
   namespaces, treat the residual recall gaps as a gating concern.

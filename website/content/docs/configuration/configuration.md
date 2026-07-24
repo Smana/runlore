@@ -109,7 +109,7 @@ incident webhook. Known keys: `alertmanager`, `gitops`, `pagerduty`.
   `incidents.dedup.window`. Defaults when enabled: `debounce` **30s**, `max_wait` **2m**, `max_batch`
   **50**, `cooldown` **10m**; `correlation_labels` group related alerts. Two escape hatches open the
   `cooldown`: an unseen critical alertname (a new problem — flushes immediately) and a **standing 👎
-  on the trigger** (the feedback re-arm, see [learning-loop](learning-loop.md) — batched on the
+  on the trigger** (the feedback re-arm, see [learning-loop]({{< relref "learning-loop.md" >}}) — batched on the
   normal `debounce`, so a contested storm still collapses to one re-investigation). Suppressions log
   an INFO line and count in `runlore_alerts_suppressed_total`.
 - `rate_limit` — `max_per_window` (**default 30**; an explicit **0 = unlimited**), `window` (default **1h**),
@@ -160,7 +160,7 @@ incident webhook. Known keys: `alertmanager`, `gitops`, `pagerduty`.
   or `pod_logs` is blocked at the app layer for those namespaces. **The chart auto-defaults this to
   `rbac.controllerLogNamespaces`** when you leave `config.investigation.pod_log_namespaces` unset, so the
   app-layer allowlist and the RBAC scope stay in sync automatically — set it explicitly only to widen or
-  narrow beyond the RBAC scope. See [Security model → least-privilege RBAC](security-model.md).
+  narrow beyond the RBAC scope. See [Security model → least-privilege RBAC]({{< relref "security-model.md" >}}).
 
 ### `catalog` — the knowledge base & instant recall
 - `dir` — local OKF bundle / git-sync mirror path; `git` — `url`, `branch` (default `main`), `interval`
@@ -235,7 +235,7 @@ incident webhook. Known keys: `alertmanager`, `gitops`, `pagerduty`.
 
 ### `outcome` — the learning ledger
 `ledger_path` — append-only JSONL of investigation outcomes (empty disables). Drives outcome-weighted
-recall decay; **must be on the PVC** to compound (see [Upgrade & Uninstall](upgrade-uninstall.md)).
+recall decay; **must be on the PVC** to compound (see [Upgrade & Uninstall]({{< relref "upgrade-uninstall.md" >}})).
 Also records the human 👍/👎 ratings when `notify.slack.feedback_buttons` is enabled (see
 [`notify`](#notify--where-findings-go) below).
 
@@ -266,7 +266,7 @@ Also records the human 👍/👎 ratings when `notify.slack.feedback_buttons` is
   `audit_log_path` (both executing rungs mutate the cluster, so both must be audited — the hash chain
   is verified fail-closed on open); `auto` *additionally* requires `server.webhook_token_env`,
   `auto.min_confidence > 0`, `auto.max_per_window > 0`, and a non-empty `allow.namespaces`. See
-  [Security model](security-model.md).
+  [Security model]({{< relref "security-model.md" >}}).
 
 ### `model` — the LLM provider
 `provider` — `openai` (default; any OpenAI-compatible endpoint incl. vLLM/Ollama/OpenRouter) ·
@@ -311,7 +311,7 @@ verdict enum (`no_action` / `action_suggested` / `action_required` / `inconclusi
 value fails fast. Empty (the default) preserves the original behaviour: every verdict is eligible.
 Recommended production value is `skip_verdicts: ["no_action"]`, which keeps benign / self-healed /
 synthetic findings out of the review queue while still notifying chat (see
-[reviewing-knowledge.md](reviewing-knowledge.md#expected-triage-volume)).
+[reviewing-knowledge.md]({{< relref "reviewing-knowledge.md#expected-triage-volume" >}})).
 
 ### `notify` — where findings go
 `slack` (`webhook_url_env` or `bot_token_env`, `channel`, `signing_secret_env`, `approver_ids`,
@@ -340,7 +340,7 @@ investigation messages carry two buttons ("👍 Accurate" / "👎 Off-base") so 
 diagnosis in one click. Ratings land in the **outcome ledger** and weigh the recalled entry's trust
 exactly like resolve signals do — enough 👎 and the entry falls below the recall floor and RunLore
 re-investigates instead of reusing it (see
-[learning-loop.md §6](learning-loop.md#6-the-feedback-edge--outcome-driven-decay-what-makes-it-learn)).
+[learning-loop.md §6]({{< relref "learning-loop.md#6-the-feedback-edge--outcome-driven-decay-what-makes-it-learn" >}})).
 This is the primary trust signal for incidents that have **no resolve channel** (GitOps failures).
 
 > [!IMPORTANT]
@@ -361,7 +361,7 @@ user)**, latest wins — duplicate clicks are idempotent and changing your mind 
 is an ephemeral "feedback recorded" note visible only to the clicker; the investigation message is
 never modified. With the option off (the default), no buttons render and the endpoint behaves exactly
 as before (404 unless approve mode wired it). Exposure hardening and the vote trust model are
-detailed in [security-model.md](security-model.md#the-feedback-channels--exposure--trust-model).
+detailed in [security-model.md]({{< relref "security-model.md#the-feedback-channels--exposure--trust-model" >}}).
 
 **Matrix 👍/👎 — `matrix.feedback_reactions` (opt-in, default `false`).** The same feedback loop over
 Matrix **reactions**: react 👍/👎 to a RunLore investigation message and the rating lands in the
@@ -373,7 +373,7 @@ before startup, ignores every emoji except 👍/👎, and only counts votes on m
 sent** (attribution is anchored on `/whoami`; a member-crafted message carrying the trigger field
 attributes nothing). Startup fails loud unless `homeserver`/`room_id`/`access_token_env` and
 `outcome.ledger_path` are set. Use an **invite-only room** — any room member can vote (see
-[security-model.md](security-model.md#the-feedback-channels--exposure--trust-model)).
+[security-model.md]({{< relref "security-model.md#the-feedback-channels--exposure--trust-model" >}})).
 
 ### Generic templated notifier (`notify.templated`)
 
@@ -429,7 +429,7 @@ Set under `values.rbac.*`, not `values.config`: `controllerLogNamespaces` (defau
 where `pods/log` is granted, namespaced; the app-layer `config.investigation.pod_log_namespaces`
 allowlist **auto-tracks this value** unless overridden, so RBAC scope and app guard never drift),
 `allowActions` (gate for the patch Role), `actionNamespaces` (the patch allowlist — **must mirror
-`config.actions.allow.namespaces`**). See [Security model](security-model.md).
+`config.actions.allow.namespaces`**). See [Security model]({{< relref "security-model.md" >}}).
 
 ### `mcp` — external MCP tool servers (opt-in)
 

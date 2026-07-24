@@ -6,8 +6,8 @@ weight: 10
 What RunLore is allowed to do, how that's enforced, and the honest limitations. This is the **runtime**
 security model — how the agent behaves in your cluster. For the LLM-specific trust story — prompt
 injection, redaction boundaries, untrusted-output handling, network guards — see the
-[LLM security architecture](security-architecture.md). For reporting a vulnerability, see
-[`SECURITY.md`](../SECURITY.md). For the deeper design rationale, see [Design §9](design.md).
+[LLM security architecture]({{< relref "security-architecture.md" >}}). For reporting a vulnerability, see
+[`SECURITY.md`](../SECURITY.md). For the deeper design rationale, see [Design §9]({{< relref "design.md" >}}).
 
 The guiding principle: **safety is enforced in code, not promised in prose.** The agent's own claims
 (and the LLM's output) are never trusted for an authorization decision.
@@ -49,7 +49,7 @@ The action config is **fail-closed**: `approve`/`auto` won't start without an ap
 audit-log path** (both modes execute cluster mutations, so both must be audited), and `auto`
 additionally requires an authenticated webhook, a positive confidence
 threshold and rate cap, and a non-empty namespace allowlist (see
-[Configuration → actions](configuration.md#actions--the-autonomy-ladder-off-by-default)).
+[Configuration → actions]({{< relref "/docs/configuration/configuration.md#actions--the-autonomy-ladder-off-by-default" >}})).
 
 ## External MCP tools
 
@@ -87,7 +87,7 @@ outlive the manifest that names it.
 > high-entropy strings, bare AWS secret keys with no context cue, and base64 blobs whose `kind:
 > Secret` manifest is **not in the same payload** (decoding happens only with the manifest as
 > ground truth — a lone blob is indistinguishable from a SHA or log blob) are **not** caught — see
-> [LLM security architecture §2](security-architecture.md#2-secret-redaction-three-boundaries-one-chokepoint)
+> [LLM security architecture §2]({{< relref "security-architecture.md#2-secret-redaction-three-boundaries-one-chokepoint" >}})
 > for the full list. If you run a **public KB repo** or **untrusted-tenant namespaces**, treat this
 > as a gating concern — and prefer **self-hosting the model** (in-cluster vLLM/Ollama), which keeps
 > data in-boundary regardless.
@@ -120,9 +120,9 @@ The chart's RBAC is scoped tightly (`deploy/helm/runlore/templates/rbac.yaml`):
   personal access token; revocation is central (uninstall the App).
 - **Scope the App to the KB repo** (Contents/PRs/Issues read-write), plus optional read-only on your
   GitOps source repos for the what-changed diff. Disable the App's webhook. See
-  [Getting started → GitHub App](getting-started.md).
+  [Getting started → GitHub App]({{< relref "getting-started.md" >}}).
 - **Secrets by indirection.** Every credential is referenced by the *name* of an env var / Secret key,
-  never inlined in config — so config can't leak a secret (see [Configuration](configuration.md)).
+  never inlined in config — so config can't leak a secret (see [Configuration]({{< relref "/docs/configuration/configuration.md" >}})).
 - **Webhook auth.** The incident webhook accepts a bearer token (`server.webhook_token_env`). It is
   **mandatory once any model is configured** (the `serve` path fails closed — an unauthenticated
   webhook must not reach the LLM and bill the model) and also enforced by `config.Validate` under

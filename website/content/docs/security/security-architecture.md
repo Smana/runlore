@@ -9,8 +9,8 @@ the upper autonomy rungs) a cluster executor. That is the textbook prompt-inject
 in that text can *tell the model what to do*, and no model reliably refuses.
 
 This page explains how RunLore is built so that a successful injection **degrades an answer, not a
-cluster**. It is the companion to the [Security model](security-model.md) (permissions, RBAC, audit)
-and [Design §9](design.md#9-safety--trust-model) (rationale): this page is the LLM-specific trust
+cluster**. It is the companion to the [Security model]({{< relref "security-model.md" >}}) (permissions, RBAC, audit)
+and [Design §9]({{< relref "design.md#9-safety--trust-model" >}}) (rationale): this page is the LLM-specific trust
 story, sourced from the code paths it cites.
 
 The design stance, in one line: **the model is an untrusted text generator inside a trusted Go
@@ -259,7 +259,7 @@ time (`internal/server/server.go`):
   one. Approval ids are `crypto/rand` (unguessable), as defense-in-depth behind the auth gates.
 
 Every action attempt — approved, auto, denied, dry-run — lands in the hash-chained, fail-closed
-audit log; see [Security model → Tamper-evident audit log](security-model.md#tamper-evident-audit-log).
+audit log; see [Security model → Tamper-evident audit log]({{< relref "security-model.md#tamper-evident-audit-log" >}}).
 
 ---
 
@@ -268,7 +268,7 @@ audit log; see [Security model → Tamper-evident audit log](security-model.md#t
 | Attacker-controlled input | Reaches the model? | What stops it from doing damage |
 | --- | --- | --- |
 | **Alert text** (webhook payload) | Yes, redacted | Bearer-token webhook auth (mandatory once a model is configured; also required under `actions.mode=auto`); ingress redaction; injected "instructions" can only shape a *proposal*, which the action gate re-derives and re-validates |
-| **Cluster logs / events / status** (pod logs, controller logs, kube events) | Yes, redacted | RBAC + app-layer namespace allowlist bound what's readable ([Security model → RBAC](security-model.md#least-privilege-rbac)); redact-before-truncate at the tool-output chokepoint; mrkdwn/HTML escaping keeps quoted lines inert in chat |
+| **Cluster logs / events / status** (pod logs, controller logs, kube events) | Yes, redacted | RBAC + app-layer namespace allowlist bound what's readable ([Security model → RBAC]({{< relref "security-model.md#least-privilege-rbac" >}})); redact-before-truncate at the tool-output chokepoint; mrkdwn/HTML escaping keeps quoted lines inert in chat |
 | **Git diffs** (`what_changed`) | Yes, redacted | Same chokepoint; `kind: Secret` `data:`/`stringData:` values masked even inside diff markers |
 | **MCP tool output** (operator-added servers) | Yes, redacted | Same single chokepoint (no per-tool wiring to forget); no cluster-mutating MCP tools exist; MCP endpoints get the SecureClient redirect guard and the cleartext-key startup check |
 | **KB catalog entries** (poisoned recall) | Yes | Recall disabled under `auto`; recalled findings go through the adversarial verify pass; unconfirmable recalls get their confidence capped; entries enter the catalog via human-reviewed PRs |
@@ -280,7 +280,7 @@ audit log; see [Security model → Tamper-evident audit log](security-model.md#t
 
 ## 7. What this architecture does not claim
 
-Honesty is part of the design (see [Security model → Honest limitations](security-model.md#honest-limitations)):
+Honesty is part of the design (see [Security model → Honest limitations]({{< relref "security-model.md#honest-limitations" >}})):
 
 - **A prompt injection can still bias an answer.** The controls above bound *consequences* — no
   write without the gate, no secret past the redactor's coverage, no live markup in chat — but a
@@ -291,4 +291,4 @@ Honesty is part of the design (see [Security model → Honest limitations](secur
 - **Configured endpoints are trusted** (§4). The network guards defend against redirects and
   response content, not against a hostile operator-supplied hostname.
 - **The audit chain can't detect tail-truncation** without an external anchor — see
-  [Security model → Tamper-evident audit log](security-model.md#tamper-evident-audit-log).
+  [Security model → Tamper-evident audit log]({{< relref "security-model.md#tamper-evident-audit-log" >}}).
