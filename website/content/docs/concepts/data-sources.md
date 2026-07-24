@@ -211,4 +211,4 @@ Allowlist matching is enforced **server-side before any network call**: the mode
 make RunLore clone repos you explicitly listed. A wrong repo guess fails at ref resolution
 (the tag won't exist) and the error response lists nearby tags so the model can self-correct.
 
-Full key reference and token-cost details: [configuration.md → `source_repos`](configuration.md#source_repos--source-repo-allowlist-for-source_diff).
+Full key reference and token-cost details: [configuration.md → `source_repos`]({{< relref "/docs/configuration/configuration.md#source_repos--source-repo-allowlist-for-source_diff" >}}).
