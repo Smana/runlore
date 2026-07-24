@@ -111,30 +111,7 @@ tools, but never *require* them).
 
 > 📐 The detailed component diagram is on the [Architecture page]({{< relref "/docs/concepts/architecture" >}}). The ASCII sketch below is a quick text rendering.
 
-```
- triggers:  [ incident webhook (Alertmanager/VMAlert) ── trigger policy ── | GitOps failures | timer | chat | CLI ]
-                          │
-          ┌──────── RunLore agent  (Go — `lore serve` / `lore investigate`) ────────┐
-          │  Investigator — ReAct loop                                               │
-          │   ├─ what-changed spine    (revision history + Git diff)                 │
-          │   ├─ catalog retrieval      (cached OKF index — instant recall)          │
-          │   ├─ runbook grounding      (OKF playbooks)                              │
-          │   ├─ tool orchestration     (providers, built-in + MCP)                  │
-          │   └─ hypothesis ranker + explicit `unresolved`                           │
-          │  Curator — confidence-routed: known→recall · novel→PR · uncertain→chat  │
-          │  Catalog — syncer + local mirror + bleve/chromem-go index (kb_search)    │
-          │  Model: Anthropic | OpenAI-compatible (in-cluster vLLM | Ollama)         │
-          │  Audit log (append-only) → (P3) cross-incident memory                    │
-          └───────────┬──────────────────────────────┬──────────────────────────────┘
-        providers     │ (built-in clients)           │ git forge (issues/PRs)
-   ┌──────┬───────────┼─────────┬────────┬─────────┐  └─► GitHub (now) / GitLab (later)
-   ▼      ▼           ▼         ▼        ▼         ▼
- gitops  metrics    logs     network  cloud     model
- flux|   vm|prom    vl       hubble   (P2 SDK)  …
- argocd  (PromQL)
-   │
-   └─ what-changed: client-go (revision history) + go-git (diff between revisions)
-```
+![RunLore architecture — React → Investigate → Learn](/docs/concepts/architecture/runlore-architecture.svg)
 
 Components map 1:1 to `internal/` packages (§13).
 

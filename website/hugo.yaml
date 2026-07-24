@@ -60,6 +60,9 @@ params:
   footer:
     enable: true
     displayCopyright: true
+    displayPoweredBy: false
+  imageZoom:
+    enable: true
   theme:
     default: system
     displayToggle: true
