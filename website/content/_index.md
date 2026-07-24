@@ -17,7 +17,7 @@ layout: hextra-home
   Runs on your models, as a single Go binary in your cluster.
 {{< /hextra/hero-subtitle >}}
 
-{{< hextra/hero-button text="Get Started" link="docs/getting-started" >}}
+{{< hextra/hero-button text="Get Started" link="docs/getting-started/" >}}
 
 {{< hextra/feature-grid cols="2" >}}
   {{< hextra/feature-card title="Learns your platform"
