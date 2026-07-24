@@ -1,4 +1,7 @@
-# Observability
+---
+title: Observability
+weight: 10
+---
 
 RunLore self-instruments with structured logs and Prometheus-compatible metrics, and
 ships a portable Grafana dashboard plus alert rules. Everything here works against

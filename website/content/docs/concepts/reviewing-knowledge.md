@@ -1,4 +1,7 @@
-# Reviewing & approving RunLore's knowledge
+---
+title: Reviewing Knowledge
+weight: 50
+---
 
 > **Your part of the learning loop.** RunLore investigates incidents and proposes
 > what it learned as a **pull request to your knowledge-base repo**. You are the

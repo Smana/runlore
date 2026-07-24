@@ -1,4 +1,7 @@
-# Configuration reference
+---
+title: Configuration Reference
+weight: 10
+---
 
 A navigable map of RunLore's configuration, organized by subsystem.
 

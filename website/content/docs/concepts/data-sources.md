@@ -1,4 +1,7 @@
-# Investigation data sources
+---
+title: Data Sources
+weight: 40
+---
 
 RunLore correlates signals from **pluggable** backends. Every source is an interface
 (`internal/providers/providers.go`), so the investigation loop and the knowledge catalog are

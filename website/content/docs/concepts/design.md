@@ -1,4 +1,7 @@
-# RunLore — Design
+---
+title: Design
+weight: 10
+---
 
 > A self-improving SRE agent that **reacts** to *any* incident — whatever the cause — **investigates**
 > the likely cause by forming and testing hypotheses across your signals (sharpest at *what changed*,

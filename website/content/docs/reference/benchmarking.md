@@ -1,4 +1,7 @@
-# Benchmarking models with RunLore
+---
+title: Benchmarking
+weight: 20
+---
 
 RunLore is model-agnostic: you pick the model behind the investigation loop. This
 page shows how to benchmark several models against RunLore's own eval harness in

@@ -1,4 +1,7 @@
-# RunLore's learning loop — how the agent gets better over time
+---
+title: Learning Loop
+weight: 30
+---
 
 > Companion to [`design.md`](design.md). This document explains the **learning
 > loop** specifically: what "learning" means in RunLore, how each stage works, and

@@ -1,4 +1,7 @@
-# RunLore — Architecture
+---
+title: Architecture
+weight: 20
+---
 
 The detailed architecture as the **React → Investigate → Learn** flow, with the read-only
 data-source fan-out and the learning-loop feedback. (The README's "How it works" diagram is the

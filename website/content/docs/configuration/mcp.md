@@ -1,4 +1,7 @@
-# MCP — RunLore as server and as client
+---
+title: MCP
+weight: 20
+---
 
 MCP is RunLore's extension layer, in **both directions**:
 

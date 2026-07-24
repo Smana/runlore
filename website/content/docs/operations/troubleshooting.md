@@ -1,4 +1,7 @@
-# Troubleshooting
+---
+title: Troubleshooting
+weight: 20
+---
 
 How to diagnose the most common *"why didn't RunLore do X?"* situations. RunLore exposes
 two diagnostic channels:

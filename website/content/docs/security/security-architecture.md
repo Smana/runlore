@@ -1,4 +1,7 @@
-# LLM security architecture
+---
+title: Security Architecture
+weight: 20
+---
 
 RunLore feeds **attacker-influenceable text** — alert annotations, pod logs, Kubernetes events, git
 diffs, MCP tool output — to an LLM, and then delivers the model's reply to chat, a git repo, and (on

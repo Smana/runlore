@@ -1,4 +1,7 @@
-# Upgrade & Uninstall
+---
+title: Upgrade & Uninstall
+weight: 30
+---
 
 How to upgrade RunLore in place, what survives a restart, and how to remove it cleanly.
 

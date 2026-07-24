@@ -1,4 +1,7 @@
-# Security model
+---
+title: Security Model
+weight: 10
+---
 
 What RunLore is allowed to do, how that's enforced, and the honest limitations. This is the **runtime**
 security model — how the agent behaves in your cluster. For the LLM-specific trust story — prompt

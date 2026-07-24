@@ -1,4 +1,7 @@
-# kb-steward — a Claude Code skill for your knowledge base
+---
+title: kb-steward
+weight: 10
+---
 
 > RunLore investigates and proposes knowledge automatically. **kb-steward** is
 > the human half: a [Claude Code](https://code.claude.com/docs) skill that

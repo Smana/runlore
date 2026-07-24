@@ -1,4 +1,7 @@
-# Getting Started (Kubernetes)
+---
+title: Getting Started
+weight: 10
+---
 
 This guide deploys RunLore into a real cluster: it reacts to incidents, investigates them with an
 LLM (grounded in your knowledge catalog), delivers findings to chat, and — optionally — curates what

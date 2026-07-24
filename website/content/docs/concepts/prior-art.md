@@ -1,4 +1,7 @@
-# Prior art & positioning
+---
+title: Prior Art
+weight: 60
+---
 
 Where RunLore sits in the AI-SRE landscape (mid-2026). The honest version: the autonomous
 "alert → RCA → Slack" runtime is a **commodity**, and change-diff RCA is **no longer unique**. RunLore's

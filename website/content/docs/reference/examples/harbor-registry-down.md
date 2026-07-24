@@ -1,4 +1,7 @@
-# End-to-end example: Harbor registry down (IAM access-key quota)
+---
+title: Harbor registry down
+weight: 30
+---
 
 A complete walkthrough of RunLore handling a **real** production incident on an
 EKS cluster — from an Alertmanager alert to a merged knowledge-base entry — plus
