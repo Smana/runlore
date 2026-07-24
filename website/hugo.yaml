@@ -1,0 +1,68 @@
+baseURL: https://runlore.io/
+title: RunLore
+languageCode: en-us
+enableRobotsTXT: true
+enableGitInfo: true
+
+# Drift guard: any unresolved internal ref (relref/ref) fails the build.
+refLinksErrorLevel: ERROR
+
+module:
+  # Hextra v0.10+ uses the `try` template func → fail clearly on older Hugo
+  # instead of a cryptic "function \"try\" not defined" parse error.
+  hugoVersion:
+    min: "0.146.0"
+  imports:
+    - path: github.com/imfing/hextra
+
+markup:
+  goldmark:
+    renderer:
+      unsafe: true
+  highlight:
+    noClasses: false
+
+menu:
+  main:
+    - name: Docs
+      pageRef: /docs
+      weight: 1
+    - name: GitHub
+      weight: 2
+      url: "https://github.com/Smana/runlore"
+      params:
+        icon: github
+    - name: Search
+      weight: 3
+      params:
+        type: search
+
+params:
+  description: "An open-source SRE agent that investigates incidents — and remembers what it learns."
+  navbar:
+    displayTitle: false
+    displayLogo: true
+    logo:
+      path: images/logo-wordmark.svg
+      dark: images/logo-wordmark-dark.svg
+      link: /
+      width: 132
+      height: 40
+  search:
+    enable: true
+    type: flexsearch
+    flexsearch:
+      index: content
+      tokenize: forward
+  editURL:
+    enable: true
+    base: "https://github.com/Smana/runlore/edit/main/website/content"
+  footer:
+    enable: true
+    displayCopyright: true
+    displayPoweredBy: false
+  imageZoom:
+    enable: true
+  theme:
+    default: system
+    displayToggle: true

@@ -18,3 +18,8 @@ coverage.txt
 
 # eval live-run recorded fixtures (regenerable; committed reports are the durable record)
 eval/fixtures/
+
+# Hugo docs site (website/)
+website/public/
+website/resources/
+website/.hugo_build.lock

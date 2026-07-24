@@ -1,0 +1,60 @@
+name: Docs check
+
+# Validates the documentation on every change: the Hugo site must build
+# (a broken internal link fails the build via refLinksErrorLevel: ERROR),
+# and README/CONTRIBUTING must not reintroduce raw docs/*.md links.
+on:
+  pull_request:
+    paths:
+      - 'website/**'
+      - 'README.md'
+      - 'CONTRIBUTING.md'
+      - '.github/workflows/docs-check.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'website/**'
+      - 'README.md'
+      - 'CONTRIBUTING.md'
+      - '.github/workflows/docs-check.yml'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: docs-check-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: Build docs site
+    runs-on: ubuntu-latest
+    env:
+      HUGO_VERSION: "0.156.0"
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: stable
+
+      - name: Install Hugo Extended
+        run: |
+          wget -O /tmp/hugo.deb \
+            "https://github.com/gohugoio/hugo/releases/download/v${HUGO_VERSION}/hugo_extended_${HUGO_VERSION}_linux-amd64.deb"
+          sudo dpkg -i /tmp/hugo.deb
+
+      - name: Build the site (broken internal refs fail here)
+        working-directory: website
+        # No bare `hugo mod get` — it would upgrade the pinned Hextra.
+        run: hugo --minify --gc
+
+      - name: README/CONTRIBUTING must not link to raw docs/*.md
+        run: |
+          if grep -nE '\]\((\.?/)?docs/[a-z0-9/_-]+\.md' README.md CONTRIBUTING.md; then
+            echo "::error::README/CONTRIBUTING still link to raw docs/*.md — repoint to https://runlore.io/docs/…"
+            exit 1
+          fi
+          echo "OK: no raw docs/*.md links in README/CONTRIBUTING"

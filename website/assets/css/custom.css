@@ -1,0 +1,73 @@
+/* ============================================================
+   RunLore landing-page polish
+   Brand palette: navy #101f4b · blue #3b82f6 · teal #14c9a6
+   ============================================================ */
+
+/* Soft brand glow behind the hero (the .hero-glow div is used only on home) */
+.hero-glow {
+  position: absolute;
+  top: -140px;
+  left: 50%;
+  width: min(1150px, 94vw);
+  height: 660px;
+  transform: translateX(-50%);
+  z-index: 0;
+  pointer-events: none;
+  background:
+    radial-gradient(52% 50% at 28% 32%, rgba(20, 201, 166, 0.16), transparent 70%),
+    radial-gradient(50% 46% at 74% 42%, rgba(59, 130, 246, 0.15), transparent 72%);
+  filter: blur(10px);
+}
+:root:not([data-theme="dark"]) .hero-glow { opacity: 0.5; }
+.hextra-container, main .content { position: relative; z-index: 1; }
+
+/* ---- "How it works" flow diagram ---- */
+.rl-eyebrow {
+  margin: 3rem 0 0;
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: #14c9a6;
+}
+.rl-flow {
+  width: 100%;
+  max-width: 1180px;
+  margin: 1.25rem 0 0.5rem;
+}
+.rl-flow svg { width: 100%; height: auto; display: block; }
+
+.rl-flow .rl-node   { fill: rgba(20, 201, 166, 0.06); stroke: #14c9a6; stroke-width: 1.5; }
+.rl-flow .rl-agent  { fill: rgba(20, 201, 166, 0.13); stroke: #14c9a6; stroke-width: 2.5; }
+.rl-flow .rl-src    { fill: rgba(59, 130, 246, 0.08); stroke: #3b82f6; stroke-width: 1.25; }
+.rl-flow .rl-title  { fill: currentColor; font-weight: 700; font-size: 17px; }
+.rl-flow .rl-title-lg { fill: currentColor; font-weight: 800; font-size: 21px; }
+.rl-flow .rl-sub    { fill: currentColor; opacity: 0.6; font-size: 12.5px; }
+.rl-flow .rl-src-lbl{ fill: #3b82f6; font-size: 12.5px; font-weight: 600; }
+.rl-flow .rl-hint   { fill: #14c9a6; font-size: 12.5px; font-weight: 700; letter-spacing: 0.04em; }
+.rl-flow .rl-ico    { stroke: #14c9a6; fill: none; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
+.rl-flow .rl-ico-fill { fill: #14c9a6; stroke: none; }
+.rl-flow .rl-line   { stroke: #3b82f6; stroke-width: 1.25; fill: none; opacity: 0.45; }
+.rl-flow .rl-arrow  { stroke: #64748b; stroke-width: 2.25; fill: none; }
+.rl-flow .rl-arrow-head { fill: #64748b; }
+.rl-flow .rl-cap    { fill: currentColor; opacity: 0.55; font-size: 12.5px; font-style: italic; }
+.rl-flow .rl-loop   { stroke: #3b82f6; stroke-width: 2; stroke-dasharray: 6 6; fill: none; opacity: 0.9; }
+.rl-flow .rl-loop-head { fill: #3b82f6; }
+.rl-flow .rl-loop-lbl { fill: #3b82f6; font-size: 13px; font-weight: 700; }
+
+/* ---- Feature cards + docs cards: subtle lift + teal accent on hover ---- */
+.hextra-feature-grid a:hover,
+.hextra-card:hover {
+  border-color: rgba(20, 201, 166, 0.55) !important;
+  box-shadow: 0 8px 30px -12px rgba(20, 201, 166, 0.25);
+  transition: border-color 0.2s ease, box-shadow 0.2s ease, transform 0.2s ease;
+  transform: translateY(-2px);
+}
+
+/* "Browse the docs" section heading on the home page */
+.rl-section {
+  margin-top: 3.75rem;
+  margin-bottom: 1rem;
+  font-size: 1.7rem;
+  font-weight: 700;
+}
