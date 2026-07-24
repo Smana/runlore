@@ -28,10 +28,7 @@ func truncateOutput(s string, maxBytes int) (string, int) {
 	head := keep / 2
 	tail := keep - head
 
-	// Back head off to the start of the rune that straddles the cut point.
-	for head > 0 && !utf8.RuneStart(s[head]) {
-		head--
-	}
+	head = runeAlignedCut(s, head)
 	// Advance the tail start forward past any continuation bytes.
 	tailStart := len(s) - tail
 	for tailStart < len(s) && !utf8.RuneStart(s[tailStart]) {
@@ -40,4 +37,18 @@ func truncateOutput(s string, maxBytes int) (string, int) {
 
 	trimmed := len(s) - head - (len(s) - tailStart)
 	return s[:head] + fmt.Sprintf("\n…[truncated %d bytes]…\n", trimmed) + s[tailStart:], trimmed
+}
+
+// runeAlignedCut returns cut backed off to the start of the rune straddling
+// it, so s[:runeAlignedCut(s, cut)] is always valid UTF-8. A cut at or past
+// len(s) is clamped to len(s). Shared by truncateOutput, trimRow, and
+// writeHunk — the one definition of "cut a string without splitting a rune".
+func runeAlignedCut(s string, cut int) int {
+	if cut >= len(s) {
+		return len(s)
+	}
+	for cut > 0 && !utf8.RuneStart(s[cut]) {
+		cut--
+	}
+	return cut
 }

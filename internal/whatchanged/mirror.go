@@ -109,8 +109,11 @@ func mirrorKey(url string) string {
 // evictLocked deletes oldest-mtime mirrors until fewer than max remain,
 // making room for the mirror about to be cloned at keep. A dir whose entry
 // read/write lock is currently held (an in-flight Acquire) is skipped —
-// never delete a mirror out from under a reader. Touches disk state only;
-// best-effort by design (an undeletable dir is skipped, not fatal).
+// never delete a mirror out from under a reader. Only entries whose names
+// are mirror keys (isMirrorName) are considered — foreign content such as the
+// source_diff "source/" subdir or operator files on a mirror PV is never touched.
+// Touches disk state only; best-effort by design (an undeletable dir is skipped,
+// not fatal).
 func (m *MirrorCache) evictLocked(keep string) {
 	entries, err := os.ReadDir(m.dir)
 	if err != nil || len(entries) < m.max {
@@ -135,6 +138,9 @@ func (m *MirrorCache) evictLocked(keep string) {
 	}
 	m.mu.Unlock()
 	for _, de := range entries {
+		if !isMirrorName(de.Name()) {
+			continue
+		}
 		p := filepath.Join(m.dir, de.Name())
 		if p == keep || locked[p] {
 			continue
@@ -149,4 +155,20 @@ func (m *MirrorCache) evictLocked(keep string) {
 	for i := 0; len(victims)-i > m.max-1 && i < len(victims); i++ {
 		_ = os.RemoveAll(victims[i].path)
 	}
+}
+
+// isMirrorName reports whether a directory entry was created by mirrorKey
+// (16 hex chars). Eviction must only ever consider its own mirrors: the
+// root may also hold foreign content — the source_diff cache lives in a
+// "source" subdir, and an operator PV can carry stray files.
+func isMirrorName(name string) bool {
+	if len(name) != 16 {
+		return false
+	}
+	for _, c := range name {
+		if (c < '0' || c > '9') && (c < 'a' || c > 'f') {
+			return false
+		}
+	}
+	return true
 }

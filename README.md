@@ -38,7 +38,8 @@ next time gets an instant answer — no fresh investigation.
 **Who it's for** — **SRE and platform teams** who want their incident knowledge **portable and
 self-hosted** (no lock-in, your models, your data), and would rather an agent say *"I don't know"* than
 guess. It shines if you run **GitOps** (Flux/Argo CD) — RunLore turns *"what changed?"* into an exact Git
-diff — but GitOps isn't required: every data source is pluggable, and an unset one simply disables its tool.
+diff (and, with an opt-in source-repo allowlist, into the offending commit inside an image bump) — but
+GitOps isn't required: every data source is pluggable, and an unset one simply disables its tool.
 
 ## See it in action
 
