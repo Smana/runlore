@@ -8,7 +8,7 @@ LLM (grounded in your knowledge catalog), delivers findings to chat, and — opt
 it learns back to a Git repo as pull requests.
 
 **Running in-cluster (`lore serve`, via Helm) is the recommended way to run RunLore** — that's how it
-reacts to incidents continuously and closes the Learn loop. The CLI (`lore investigate "<symptom>"`) is
+reacts to incidents continuously and closes the Learn loop. The CLI (`lore investigate --alert "<symptom>"`) is
 for one-off local runs against the same engine; see [CONTRIBUTING.md](https://github.com/Smana/runlore/blob/main/CONTRIBUTING.md) for that.
 
 RunLore is **read-only on your cluster**: it never mutates workloads. Its only writes go to the Git
@@ -464,9 +464,9 @@ identity** — no static AWS keys.
      "Statement": [
        { "Effect": "Allow", "Action": ["cloudtrail:LookupEvents"], "Resource": "*" },
        { "Effect": "Allow", "Action": [
-           "ec2:DescribeInstances", "ec2:DescribeInstanceStatus", "ec2:DescribeTags",
+           "ec2:DescribeInstances", "ec2:DescribeInstanceStatus",
            "autoscaling:DescribeAutoScalingGroups", "autoscaling:DescribeScalingActivities",
-           "eks:DescribeCluster", "eks:DescribeNodegroup", "eks:ListNodegroups"
+           "eks:DescribeNodegroup", "eks:ListNodegroups"
          ], "Resource": "*" }
      ]
    }
@@ -583,7 +583,7 @@ raw findings from vetted knowledge:
 - **`solved`** — root cause confirmed *and the resolution captured*. **Only `solved` entries with a
   written resolution should be merged** as a reusable Playbook — that's the quality gate that keeps the
   catalog trustworthy.
-- **`wont-fix`** — closed without a Playbook.
+- **`wontfix`** — closed without a Playbook.
 
 (High-confidence findings open as a **PR** drafting an OKF entry; lower-confidence ones open as an
 **issue** to triage.)

@@ -354,7 +354,7 @@ The two load-bearing ideas:
     them. The `"trigger:"` namespace ensures a trigger value can never collide with a
     prose cause from the fallback.
   - **Cause-keyed (fallback).** When there is no trigger key — a triggerless, manual
-    `lore investigate "<symptom>"` — it falls back to
+    `lore investigate --alert "<symptom>"` — it falls back to
     `sha256(resource-ref + "|" + normalized cause token-set)`, the order-independent
     significant-token set of the top root cause. This itself falls back to the raw
     lowercased summary when tokenization would erase a terse/acronym cause (e.g.

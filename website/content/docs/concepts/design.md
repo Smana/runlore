@@ -132,7 +132,7 @@ relevance, and LLM cost are all controlled here.
 - **GitOps-failure-triggered** (secondary): `GitOpsProvider.WatchFailures()` surfaces `Ready=False`
   (Flux) / `Degraded`/`OutOfSync` (ArgoCD) → catch a bad rollout before a metrics alert fires.
 - **Proactive watch** (Phase 3): periodic scan for SLO burn-rate / drift.
-- **On-demand**: `lore investigate "<symptom>"` or a chat mention in Slack/Matrix (same engine, human-initiated).
+- **On-demand**: `lore investigate --alert "<symptom>"` or a chat mention in Slack/Matrix (same engine, human-initiated).
 
 Example trigger policy (`internal/config`, `config.TriggerPolicy`). Source *enablement*
 lives under `sources.<name>`; the `triggers` block is purely the match/ignore/dedup
@@ -222,7 +222,7 @@ never for a one-off uncertain finding.) Every learned entry cites its **evidence
 
 **Lifecycle labels gate the catalog's quality.** Curated artifacts carry a lifecycle label —
 `triggered` (raw, just opened) → `investigating` → `solved` (root cause confirmed *and* resolution
-captured) — plus `wont-fix`. Only a **`solved` entry with a written resolution** should be merged as a
+captured) — plus `wontfix`. Only a **`solved` entry with a written resolution** should be merged as a
 reusable Playbook, so unverified findings can't silently become "knowledge."
 
 **Re-running on demand (`reinvestigate`).** RunLore takes no inbound GitHub webhooks, so re-triggering is
