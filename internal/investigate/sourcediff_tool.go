@@ -91,12 +91,12 @@ func (t SourceDiffTool) Description() string {
 // list so a large allowlist can't bloat the per-step standing prompt cost. The
 // full set is always named in the mismatch error (paid only on a miss).
 func describePatterns(patterns []string) string {
-	const max = 8
-	if len(patterns) <= max {
+	const maxListed = 8
+	if len(patterns) <= maxListed {
 		return strings.Join(patterns, ", ")
 	}
-	return strings.Join(patterns[:max], ", ") +
-		fmt.Sprintf(", … and %d more (a mismatch error lists all)", len(patterns)-max)
+	return strings.Join(patterns[:maxListed], ", ") +
+		fmt.Sprintf(", … and %d more (a mismatch error lists all)", len(patterns)-maxListed)
 }
 
 // Schema returns the JSON schema for the arguments.
@@ -256,19 +256,19 @@ func renderZoom(b *strings.Builder, files []sourceDiffFile, zoom []string) {
 // renderSummaryHunks emits the largest non-generated files' hunks within the
 // summary budget, and tells the model how to read what was left out.
 func renderSummaryHunks(b *strings.Builder, files []sourceDiffFile) {
-	real := make([]int, 0, len(files))
+	realFiles := make([]int, 0, len(files))
 	for i, f := range files {
 		if !f.generated {
-			real = append(real, i)
+			realFiles = append(realFiles, i)
 		}
 	}
-	sort.Slice(real, func(i, j int) bool {
-		a, c := files[real[i]], files[real[j]]
+	sort.Slice(realFiles, func(i, j int) bool {
+		a, c := files[realFiles[i]], files[realFiles[j]]
 		return a.add+a.del > c.add+c.del
 	})
 	b.WriteString("hunks (largest changes first):\n")
 	budget, omitted := sourceDiffSummaryBytes, 0
-	for _, i := range real {
+	for _, i := range realFiles {
 		if budget <= 0 {
 			omitted++
 			continue
