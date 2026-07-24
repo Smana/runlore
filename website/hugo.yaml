@@ -32,6 +32,10 @@ menu:
       url: "https://github.com/Smana/runlore"
       params:
         icon: github
+    - name: Search
+      weight: 3
+      params:
+        type: search
 
 params:
   description: "An open-source SRE agent that investigates incidents — and remembers what it learns."
