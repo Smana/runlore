@@ -91,7 +91,7 @@ A second table gives the per-case pass rate (k-of-n) for each model, with `flaky
 flagged when runs disagree too much to trust. Case rows are sorted by name and the
 JSON is deterministic, so two reports diff cleanly.
 
-Rubric dimensions and the pass gate are defined in [`eval/rubric.md`](../eval/rubric.md).
+Rubric dimensions and the pass gate are defined in [`eval/rubric.md`](https://github.com/Smana/runlore/blob/main/eval/rubric.md).
 Token usage is the provider-reported count per completion (see
 `providers.Usage`), summed across the loop **and** the judge by the runner's
 `CountingModel` wrapper.

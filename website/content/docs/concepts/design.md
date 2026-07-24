@@ -109,7 +109,7 @@ tools, but never *require* them).
 
 ## 5. Architecture
 
-> 📐 The detailed component diagram is [`architecture/runlore-architecture.md`](architecture/runlore-architecture.md) (mermaid). The ASCII sketch below is a quick text rendering.
+> 📐 The detailed component diagram is [`architecture/runlore-architecture.md`]({{< relref "architecture.md" >}}) (mermaid). The ASCII sketch below is a quick text rendering.
 
 ```
  triggers:  [ incident webhook (Alertmanager/VMAlert) ── trigger policy ── | GitOps failures | timer | chat | CLI ]

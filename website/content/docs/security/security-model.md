@@ -7,7 +7,7 @@ What RunLore is allowed to do, how that's enforced, and the honest limitations. 
 security model — how the agent behaves in your cluster. For the LLM-specific trust story — prompt
 injection, redaction boundaries, untrusted-output handling, network guards — see the
 [LLM security architecture]({{< relref "security-architecture.md" >}}). For reporting a vulnerability, see
-[`SECURITY.md`](../SECURITY.md). For the deeper design rationale, see [Design §9]({{< relref "design.md" >}}).
+[`SECURITY.md`](https://github.com/Smana/runlore/blob/main/SECURITY.md). For the deeper design rationale, see [Design §9]({{< relref "design.md" >}}).
 
 The guiding principle: **safety is enforced in code, not promised in prose.** The agent's own claims
 (and the LLM's output) are never trusted for an authorization decision.

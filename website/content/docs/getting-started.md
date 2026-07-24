@@ -9,17 +9,17 @@ it learns back to a Git repo as pull requests.
 
 **Running in-cluster (`lore serve`, via Helm) is the recommended way to run RunLore** — that's how it
 reacts to incidents continuously and closes the Learn loop. The CLI (`lore investigate "<symptom>"`) is
-for one-off local runs against the same engine; see [CONTRIBUTING.md](../CONTRIBUTING.md) for that.
+for one-off local runs against the same engine; see [CONTRIBUTING.md](https://github.com/Smana/runlore/blob/main/CONTRIBUTING.md) for that.
 
 RunLore is **read-only on your cluster**: it never mutates workloads. Its only writes go to the Git
 forge (issues/PRs on a repo you designate).
 
-> For local development / testing on k3d, see [CONTRIBUTING.md](../CONTRIBUTING.md) instead.
+> For local development / testing on k3d, see [CONTRIBUTING.md](https://github.com/Smana/runlore/blob/main/CONTRIBUTING.md) instead.
 
 > **Just want a quick look first?** `hack/demo.sh` runs `lore serve` locally with a keyless config and
 > fires mocked Alertmanager alerts through the trigger policy — no cluster, no LLM, no credentials
 > (just Go + `curl`). It shows which alerts become incidents; the full investigate → chat → curate loop
-> below needs the cluster, LLM, and KB repo. See the [README quickstart](../README.md#-try-it-in-one-minute--no-cluster-no-keys).
+> below needs the cluster, LLM, and KB repo. See the [README quickstart](https://github.com/Smana/runlore/blob/main/README.md#-try-it-in-one-minute--no-cluster-no-keys).
 
 ## Prerequisites
 
@@ -104,7 +104,7 @@ incidents, platform constraints.
    platform as the catalog grows.
 
    > Writing entries by hand? The full field-by-field contract lives in
-   > [`okf-format.md`](../plugins/kb-steward/skills/kb-steward/references/okf-format.md), and
+   > [`okf-format.md`](https://github.com/Smana/runlore/blob/main/plugins/kb-steward/skills/kb-steward/references/okf-format.md), and
    > `lore validate-kb <catalog-dir>` checks a catalog against it.
 
 3. **Make it available in-cluster.** Two options:
@@ -621,4 +621,4 @@ want a sharper answer. Only RunLore-originated issues (carrying the `runlore` la
 - [Security model]({{< relref "security-model.md" >}}) — read-only posture, redaction, RBAC, the action gate.
 - [Upgrade & uninstall]({{< relref "upgrade-uninstall.md" >}}) — `helm upgrade`/`uninstall`, what persists, and cleanup.
 - [Design]({{< relref "design.md" >}}) — architecture and the autonomy ladder.
-- [CONTRIBUTING.md](../CONTRIBUTING.md) — run the full feature suite locally on k3d.
+- [CONTRIBUTING.md](https://github.com/Smana/runlore/blob/main/CONTRIBUTING.md) — run the full feature suite locally on k3d.

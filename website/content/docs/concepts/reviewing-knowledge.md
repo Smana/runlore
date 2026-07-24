@@ -119,7 +119,7 @@ appended to `log.md` — all in the one diff you review.
 > **Writing entries by hand?** The field-by-field contract — which frontmatter
 > keys the loader parses, which the merge gate requires, and what each one does
 > for recall — is documented in
-> [`okf-format.md`](../plugins/kb-steward/skills/kb-steward/references/okf-format.md),
+> [`okf-format.md`](https://github.com/Smana/runlore/blob/main/plugins/kb-steward/skills/kb-steward/references/okf-format.md),
 > shipped as part of the [kb-steward skill]({{< relref "kb-steward.md" >}}) but useful on its own.
 
 ---

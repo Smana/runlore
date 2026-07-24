@@ -93,7 +93,7 @@ A portable dashboard lives at [`deploy/observability/grafana/runlore.json`](../d
 It uses a single `datasource` template variable (type Prometheus), so it works with a
 Prometheus **or** a VictoriaMetrics datasource with no edits. Import it via
 **Dashboards → Import → Upload JSON**, or provision it. See the
-[grafana README](../deploy/observability/grafana/README.md).
+[grafana README](https://github.com/Smana/runlore/blob/main/deploy/observability/grafana/README.md).
 
 It panels every `runlore_` series above, including the output-truncation rate
 (`tool_output_truncated_bytes_total`), the coalesced-batch-size distribution
@@ -117,5 +117,5 @@ The rule set covers liveness (`RunloreAgentDown`), HA (`RunloreNoActiveLeader`,
 `RunloreInvestigationsDropped`, throttling), quality (tool/model error rates,
 investigation errors), latency (model p95, slow resolution), and cost
 (`RunloreInvestigationCostHigh`). Thresholds are starting points — tune to your
-volume. See the [alerts README](../deploy/observability/alerts/README.md) for the
+volume. See the [alerts README](https://github.com/Smana/runlore/blob/main/deploy/observability/alerts/README.md) for the
 per-alert metric dependencies and operator discovery notes.
