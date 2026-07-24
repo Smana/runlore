@@ -8,6 +8,54 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 RunLore is **pre-1.0 and under active development** — there are no tagged releases
 yet, so everything currently lives under `[Unreleased]`.
 
+## [0.11.0](https://github.com/Smana/runlore/compare/v0.10.0...v0.11.0) (2026-07-24)
+
+
+### Features
+
+* Argo CD executor — approve-rung parity with Flux (M3) ([#371](https://github.com/Smana/runlore/issues/371)) ([e4f3a31](https://github.com/Smana/runlore/commit/e4f3a31010f22f57b5b0d1d0d29660502e2a92ca))
+* **cli:** lore kb import — seed the catalog from existing runbooks (D1) ([#369](https://github.com/Smana/runlore/issues/369)) ([ebfdf85](https://github.com/Smana/runlore/commit/ebfdf85d787e4b315c8c7cab7088952d52c7760a))
+* curator automation phase 2 — in-server sweeps, dry-run by default (D2) ([#370](https://github.com/Smana/runlore/issues/370)) ([b93dfae](https://github.com/Smana/runlore/commit/b93dfae36b47639e1969d1b24c21fd9f4726335a))
+* **eval:** public nightly eval scorecard (F2) ([#368](https://github.com/Smana/runlore/issues/368)) ([e54966e](https://github.com/Smana/runlore/commit/e54966e063edbce2e7a2de0f0458deef19be80f3))
+* Grafana Loki logs backend behind LogsProvider (M1) ([#372](https://github.com/Smana/runlore/issues/372)) ([c744a8b](https://github.com/Smana/runlore/commit/c744a8bc8bb93287894a31e24d68bcb11a464d98))
+* **kb-steward:** nudge capturing a precise change-anchor in Cause ([#382](https://github.com/Smana/runlore/issues/382)) ([41d5b9e](https://github.com/Smana/runlore/commit/41d5b9e5d747090f731ae587e3dc7fe8fdd0fd9b))
+* **skill:** kb-steward — an agent skill for stewarding the knowledge catalog ([#346](https://github.com/Smana/runlore/issues/346)) ([7e0ffe8](https://github.com/Smana/runlore/commit/7e0ffe8095a1e6e7aeec12a871b16749660350f2))
+* source-repo whitelist unlocks source_diff — from "the image bumped" to the offending commit ([#359](https://github.com/Smana/runlore/issues/359)) ([010d33d](https://github.com/Smana/runlore/commit/010d33d0230fa2a780daeaac767436b9db9f6023))
+
+
+### Bug Fixes
+
+* **curator:** emit honest Resolution content on no-action verdicts ([#350](https://github.com/Smana/runlore/issues/350)) ([72f80c5](https://github.com/Smana/runlore/commit/72f80c5cb4a9efdfbb2e8d278e5543a474dd1a37))
+* **eval:** satisfy revive package-comments and staticcheck S1016 ([#374](https://github.com/Smana/runlore/issues/374)) ([2672373](https://github.com/Smana/runlore/commit/26723739d6fed97237e3ba5e2d667fe0b0aae10b))
+* **forge:** stop stamping last_validated on drafted entries ([#358](https://github.com/Smana/runlore/issues/358)) ([8fca6b1](https://github.com/Smana/runlore/commit/8fca6b1282622a70cbf5d41ca1989951c469a270))
+* **helm:** skip controller_logs RBAC for a missing namespace instead of failing install ([#344](https://github.com/Smana/runlore/issues/344)) ([dc08525](https://github.com/Smana/runlore/commit/dc08525f44daacd735e62e97491281edf22fa705))
+* **kbvalidate:** title-limit error says bytes, the unit it measures ([#356](https://github.com/Smana/runlore/issues/356)) ([64441a6](https://github.com/Smana/runlore/commit/64441a6b8f44aaa04f92d593d8a7689fefd4a9dc))
+* **release-chart:** authenticate cosign to GHCR before signing ([#377](https://github.com/Smana/runlore/issues/377)) ([22868cf](https://github.com/Smana/runlore/commit/22868cff0e9f0216078c7f61067c8f0227767975))
+* **skill:** kb-steward — correct forge-behavior claims found in review ([#355](https://github.com/Smana/runlore/issues/355)) ([38cb6cd](https://github.com/Smana/runlore/commit/38cb6cdddd1193fe4ac1dcdfc46b7d2af1d15f66))
+* **skill:** kb-steward — Flow 4 scan catches unrecallable resource fields ([#352](https://github.com/Smana/runlore/issues/352)) ([eb7556e](https://github.com/Smana/runlore/commit/eb7556ee74cfd449d7b711ea4f4127876d0d2762))
+* **skill:** kb-steward — harden Flow 3 PR triage from first field test ([#347](https://github.com/Smana/runlore/issues/347)) ([87dd77d](https://github.com/Smana/runlore/commit/87dd77de5679d762f255d87ab27314145bce7279))
+* **skill:** kb-steward — quote rewritten titles containing colons ([#354](https://github.com/Smana/runlore/issues/354)) ([2adb06b](https://github.com/Smana/runlore/commit/2adb06ba11314fc10ee5ef45bea2191d6e67cd1c))
+* **skill:** kb-steward — validate with the version the KB repo's CI pins ([#353](https://github.com/Smana/runlore/issues/353)) ([d02ba8f](https://github.com/Smana/runlore/commit/d02ba8f3697c37c4d4836b9a6c605304a08d6a4a))
+* **skill:** kb-steward — write-path findings from second field test ([#351](https://github.com/Smana/runlore/issues/351)) ([2ba7519](https://github.com/Smana/runlore/commit/2ba75199c3371970ee8c10c176de5942fe321d85))
+
+
+### Documentation
+
+* add a worked post-incident example session to the kb-steward page ([#357](https://github.com/Smana/runlore/issues/357)) ([4d03f9f](https://github.com/Smana/runlore/commit/4d03f9fac34c5abbc9c51cb3d6137368ca25069e))
+* add v0.11.0 roadmap spec and per-item implementation plans ([#363](https://github.com/Smana/runlore/issues/363)) ([0f4913e](https://github.com/Smana/runlore/commit/0f4913e9cdd2ce3fa1e670d735c4ddc3e4b6a0ee))
+* https baseURL fix + highlight OKF knowledge base in the hero diagram ([#380](https://github.com/Smana/runlore/issues/380)) ([7f7d010](https://github.com/Smana/runlore/commit/7f7d010db96c3df5d2b285170a29976abf3099d6))
+* Hugo + Hextra documentation site (runlore.io) ([bdc922a](https://github.com/Smana/runlore/commit/bdc922a8f3cb7cf0f174094c776c21a67c3828f8))
+* **kb-steward:** point skill + plugin links at runlore.io ([#381](https://github.com/Smana/runlore/issues/381)) ([beadc8c](https://github.com/Smana/runlore/commit/beadc8c6059f26d8f10518b91a9a13c69f84f475))
+* **prior-art:** refresh to July 2026 — Klaudia Memory, Aurora, opensre collision, Datadog pricing, ITBench-AA ([#364](https://github.com/Smana/runlore/issues/364)) ([dd7a840](https://github.com/Smana/runlore/commit/dd7a84043d5cdc5a0d39673f8a5fab10218ae7d2))
+* **readme:** claim first-mover OKF-producing agent positioning ([#366](https://github.com/Smana/runlore/issues/366)) ([963d706](https://github.com/Smana/runlore/commit/963d7068bc2b29945587e0afb9503fbb4a439fe0))
+* **readme:** surface recall trust gates and MCP server/client ([#365](https://github.com/Smana/runlore/issues/365)) ([37e6268](https://github.com/Smana/runlore/commit/37e6268ee18b32722892e57e045f9ad6e15f36bb))
+* **source_repos:** make the GitHub App access requirement explicit ([#378](https://github.com/Smana/runlore/issues/378)) ([2928b6f](https://github.com/Smana/runlore/commit/2928b6f4f6c27f7ef79ceb57c6a68477ca19a80e))
+
+
+### Continuous Integration
+
+* publish Helm chart to GHCR as an OCI artifact (F1) ([#367](https://github.com/Smana/runlore/issues/367)) ([3c3a429](https://github.com/Smana/runlore/commit/3c3a4297db8f6c3c41b8709c5f43f20ef3b241cd))
+
 ## [0.10.0](https://github.com/Smana/runlore/compare/v0.9.2...v0.10.0) (2026-07-20)
 
 
