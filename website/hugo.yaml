@@ -39,6 +39,9 @@ menu:
 
 params:
   description: "An open-source SRE agent that investigates incidents — and remembers what it learns."
+  # Default social-share card (Open Graph / Twitter). Pages may override via front-matter `images`.
+  images:
+    - images/og-card.png
   navbar:
     displayTitle: false
     displayLogo: true

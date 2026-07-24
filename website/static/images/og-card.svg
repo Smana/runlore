@@ -1,0 +1,49 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="630" viewBox="0 0 1200 630">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#0a1330"/>
+      <stop offset="1" stop-color="#070d20"/>
+    </linearGradient>
+    <radialGradient id="glow" cx="0.5" cy="0.34" r="0.5">
+      <stop offset="0" stop-color="#14c9a6" stop-opacity="0.24"/>
+      <stop offset="1" stop-color="#14c9a6" stop-opacity="0"/>
+    </radialGradient>
+    <radialGradient id="glow2" cx="0.5" cy="0.34" r="0.62">
+      <stop offset="0" stop-color="#3b82f6" stop-opacity="0.16"/>
+      <stop offset="1" stop-color="#3b82f6" stop-opacity="0"/>
+    </radialGradient>
+  </defs>
+
+  <rect width="1200" height="630" fill="url(#bg)"/>
+  <rect width="1200" height="630" fill="url(#glow2)"/>
+  <ellipse cx="600" cy="210" rx="540" ry="250" fill="url(#glow)"/>
+
+  <!-- teal top accent -->
+  <rect x="0" y="0" width="1200" height="6" fill="#14c9a6"/>
+
+  <!-- owl + wordmark lockup (from logo-wordmark-dark.svg, 520x160) -->
+  <g transform="translate(252,84) scale(1.15)">
+    <g transform="translate(6,-12)">
+      <path d="M110,166 C88,156 60,156 40,164 L40,188 C60,180 86,180 110,190 C134,180 160,180 180,188 L180,164 C160,156 132,156 110,166 Z" fill="#3b82f6"/>
+      <path d="M110,52 C101,36 87,28 72,31 C51,35 43,58 46,89 C48,126 71,160 110,170 C149,160 172,126 174,89 C177,58 169,35 148,31 C133,28 119,36 110,52 Z" fill="#F1F5F9"/>
+      <path d="M110,64 C104,54 92,49 81,53 C66,58 62,79 68,97 C74,114 91,124 110,130 C129,124 146,114 152,97 C158,79 154,58 139,53 C128,49 116,54 110,64 Z" fill="#FFFFFF"/>
+      <line x1="90" y1="86" x2="130" y2="86" stroke="#14c9a6" stroke-width="3"/>
+      <circle cx="90" cy="86" r="12" fill="#101f4b"/>
+      <circle cx="130" cy="86" r="12" fill="#101f4b"/>
+      <circle cx="90" cy="86" r="5" fill="#14c9a6"/>
+      <circle cx="130" cy="86" r="5" fill="#14c9a6"/>
+      <path d="M104,100 L116,100 L110,113 Z" fill="#14c9a6"/>
+    </g>
+    <text x="230" y="112" font-family="'Space Grotesk','DejaVu Sans',sans-serif" font-weight="600" font-size="86" letter-spacing="-2" fill="#F1F5F9">run<tspan fill="#14c9a6">lore</tspan></text>
+  </g>
+
+  <!-- tagline -->
+  <text x="600" y="398" text-anchor="middle" font-family="'Space Grotesk','Liberation Sans',sans-serif" font-weight="600" font-size="42" letter-spacing="-1" fill="#e2e8f0">The SRE agent that speeds up investigations</text>
+  <text x="600" y="454" text-anchor="middle" font-family="'Space Grotesk','Liberation Sans',sans-serif" font-weight="600" font-size="42" letter-spacing="-1" fill="#8aa0bf">…and learns from your context</text>
+
+  <!-- divider -->
+  <rect x="500" y="506" width="200" height="2" rx="1" fill="#14c9a6" opacity="0.55"/>
+
+  <!-- bottom badge line -->
+  <text x="600" y="560" text-anchor="middle" xml:space="preserve" font-family="'Space Grotesk','Liberation Sans',sans-serif" font-size="30"><tspan fill="#14c9a6" font-weight="600">runlore.io</tspan><tspan fill="#5b6b86">   ·   </tspan><tspan fill="#94a3b8">Free &amp; open source   ·   Apache-2.0</tspan></text>
+</svg>

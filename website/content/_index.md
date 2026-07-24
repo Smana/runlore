@@ -1,6 +1,9 @@
 ---
 title: RunLore
 layout: hextra-home
+description: "The SRE agent that speeds up investigations — and learns from your context. Reads your cluster, metrics, logs, network and Git in parallel, then posts a confidence-scored root cause to chat. Read-only by default, runs on your models, one Go binary."
+images:
+  - images/og-card.png
 ---
 
 <div class="hero-glow"></div>
