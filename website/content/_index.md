@@ -10,20 +10,21 @@ layout: hextra-home
 {{< /hextra/hero-badge >}}
 
 {{< hextra/hero-headline >}}
-  An open-source SRE agent that investigates incidents
+  The SRE agent that speeds up investigations
 {{< /hextra/hero-headline >}}
 
 {{< hextra/hero-subtitle >}}
-  …and remembers what it learns. Read-only by default — it reads your cluster,
-  metrics, logs and network flows, and its only writes go to Git via reviewed PRs.
-  Runs on your models, as a single Go binary in your cluster.
+  …and learns from your context. RunLore reads your cluster, metrics, logs and
+  network flows in parallel, reasons over them, and posts a confidence-scored root
+  cause to chat — its only writes go to Git via reviewed PRs. Read-only by default,
+  runs on your models, one Go binary.
 {{< /hextra/hero-subtitle >}}
 
 {{< hextra/hero-button text="Get Started" link="docs/getting-started/" >}}
 {{< hextra/hero-button text="View on GitHub" link="https://github.com/Smana/runlore" style="background:transparent;border:1px solid rgba(148,163,184,0.45);color:inherit" >}}
 
-<p class="rl-eyebrow">How it works</p>
-<div class="rl-flow"><svg viewBox="0 0 920 200" role="img" aria-label="How RunLore works: Investigate, Open a PR, Instant recall — and it learns your platform"><rect class="rl-chip" x="8" y="36" width="240" height="60" rx="14"/><circle class="rl-ico" cx="36" cy="62" r="7"/><line class="rl-ico" x1="41" y1="67" x2="47" y2="73"/><text class="rl-label" x="62" y="72">Investigate</text><rect class="rl-chip" x="340" y="36" width="240" height="60" rx="14"/><circle class="rl-ico" cx="364" cy="52" r="4.5"/><circle class="rl-ico" cx="364" cy="80" r="4.5"/><path class="rl-ico" d="M364 56 v20"/><circle class="rl-ico" cx="382" cy="66" r="4.5"/><path class="rl-ico" d="M364 66 q0 -10 14 -12"/><text class="rl-label" x="398" y="72">Open a PR</text><rect class="rl-chip" x="672" y="36" width="240" height="60" rx="14"/><path class="rl-ico-fill" d="M700 44 l-14 24 h9 l-5 20 16 -26 h-9 z"/><text class="rl-label" x="722" y="72">Instant recall</text><line class="rl-arrow" x1="256" y1="66" x2="332" y2="66"/><path class="rl-arrow-head" d="M332 66 l-9 -5 v10 z"/><line class="rl-arrow" x1="588" y1="66" x2="664" y2="66"/><path class="rl-arrow-head" d="M664 66 l-9 -5 v10 z"/><path class="rl-loop" d="M792 96 V150 Q792 164 778 164 H142 Q128 164 128 150 V104"/><path class="rl-loop-head" d="M128 98 l-5 9 h10 z"/><text class="rl-loop-label" x="460" y="187" text-anchor="middle">↺ learns your platform</text></svg></div>
+<p class="rl-eyebrow">From alert to root cause — fast</p>
+<div class="rl-flow"><svg viewBox="0 0 980 288" role="img" aria-label="RunLore reads your whole stack in parallel to turn an alert into a confidence-scored root cause in minutes, and instantly recalls known incidents in seconds."><text class="rl-src-lbl" x="480" y="16" text-anchor="middle">reads your whole stack — in parallel</text><rect class="rl-src" x="248" y="28" width="84" height="28" rx="8"/><text class="rl-sub" x="290" y="46" text-anchor="middle">metrics</text><rect class="rl-src" x="340" y="28" width="64" height="28" rx="8"/><text class="rl-sub" x="372" y="46" text-anchor="middle">logs</text><rect class="rl-src" x="412" y="28" width="82" height="28" rx="8"/><text class="rl-sub" x="453" y="46" text-anchor="middle">cluster</text><rect class="rl-src" x="502" y="28" width="88" height="28" rx="8"/><text class="rl-sub" x="546" y="46" text-anchor="middle">network</text><rect class="rl-src" x="598" y="28" width="120" height="28" rx="8"/><text class="rl-sub" x="658" y="46" text-anchor="middle">what changed</text><path class="rl-line" d="M290 56 L458 104"/><path class="rl-line" d="M372 56 L470 104"/><path class="rl-line" d="M453 56 L480 104"/><path class="rl-line" d="M546 56 L492 104"/><path class="rl-line" d="M658 56 L504 104"/><rect class="rl-node" x="20" y="122" width="170" height="64" rx="14"/><path class="rl-ico" d="M46 162 c0 -9 4 -14 8 -14 c4 0 8 5 8 14 l2 3 h-20 z"/><path class="rl-ico" d="M52 168 a2.4 2.4 0 0 0 4 0"/><text class="rl-title" x="74" y="150" font-size="15">Alert fires</text><text class="rl-sub" x="74" y="168">or GitOps failure</text><line class="rl-arrow" x1="192" y1="154" x2="350" y2="154"/><path class="rl-arrow-head" d="M350 154 l-10 -5 v10 z"/><rect class="rl-agent" x="356" y="104" width="248" height="100" rx="18"/><circle class="rl-ico" cx="390" cy="150" r="9"/><line class="rl-ico" x1="397" y1="157" x2="405" y2="165"/><text class="rl-title-lg" x="420" y="151">RunLore</text><text class="rl-sub" x="420" y="176">investigates — read-only</text><text class="rl-hint" x="686" y="140" text-anchor="middle">in minutes</text><line class="rl-arrow" x1="604" y1="154" x2="764" y2="154"/><path class="rl-arrow-head" d="M764 154 l-10 -5 v10 z"/><rect class="rl-node" x="770" y="122" width="190" height="64" rx="14"/><path class="rl-ico" d="M788 154 l6 6 l12 -14"/><text class="rl-title" x="816" y="150" font-size="14.5">Root cause</text><text class="rl-sub" x="816" y="168">confidence → chat</text><path class="rl-loop" d="M865 186 V234 Q865 246 853 246 H494 Q480 246 480 234 V210"/><path class="rl-loop-head" d="M480 203 l-5 9 h10 z"/><text class="rl-loop-lbl" x="665" y="268" text-anchor="middle">⚡ seen before → instant recall, in seconds</text></svg></div>
 
 {{< hextra/feature-grid cols="2" >}}
   {{< hextra/feature-card icon="academic-cap" title="Learns your platform"
@@ -34,4 +35,15 @@ layout: hextra-home
     subtitle="Turns “what changed?” into an exact Git answer — the rendered-manifest diff of the revisions Flux or Argo CD reconciled." >}}
   {{< hextra/feature-card icon="chip" title="Your models · one Go binary"
     subtitle="A single self-hosted Go binary running in your cluster on your own model providers. Portable, no lock-in, your data." >}}
+{{< /hextra/feature-grid >}}
+
+<h2 class="rl-section">Browse the docs</h2>
+
+{{< hextra/feature-grid cols="3" >}}
+  {{< hextra/feature-card link="docs/getting-started/" icon="book-open" title="Getting Started" subtitle="Deploy RunLore into a cluster and watch it react." >}}
+  {{< hextra/feature-card link="docs/concepts/" icon="light-bulb" title="Concepts" subtitle="The design, the learning loop, and the data sources." >}}
+  {{< hextra/feature-card link="docs/configuration/" icon="cog" title="Configuration" subtitle="Configure the agent, its sources, and MCP." >}}
+  {{< hextra/feature-card link="docs/operations/" icon="server" title="Operations" subtitle="Run, observe, troubleshoot, and upgrade." >}}
+  {{< hextra/feature-card link="docs/security/" icon="shield-check" title="Security" subtitle="Read-only default, the action gate, the trust model." >}}
+  {{< hextra/feature-card link="docs/reference/" icon="bookmark" title="Reference" subtitle="Tools, benchmarks, and worked examples." >}}
 {{< /hextra/feature-grid >}}
