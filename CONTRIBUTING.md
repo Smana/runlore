@@ -1,7 +1,7 @@
 # Contributing
 
 Thanks for hacking on RunLore. This covers local development and testing. For *deploying* RunLore to a
-real cluster, see [docs/getting-started.md](docs/getting-started.md).
+real cluster, see [docs/getting-started.md](https://runlore.io/docs/getting-started/).
 
 ## Prerequisites
 
@@ -130,7 +130,7 @@ fake model, so `go test ./internal/eval/` runs without an API key.
 `lore eval --compare <spec.yaml>` benchmarks **several** models against the same replay suite in one
 command and writes an aggregated report (markdown + JSON) to `eval/reports/`: per-model rubric medians,
 pass rate, coverage, confident-wrong count, total tokens, and optional estimated cost. Grading is by one
-fixed, blind judge so scores are comparable. See **[docs/benchmarking.md](docs/benchmarking.md)** for the
+fixed, blind judge so scores are comparable. See **[docs/benchmarking.md](https://runlore.io/docs/reference/benchmarking/)** for the
 spec shape, the report columns, and how to publish results honestly. The pipeline has a keyless offline
 test (`go test ./internal/app/ -run TestRunEvalCompareOffline`).
 

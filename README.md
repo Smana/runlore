@@ -14,7 +14,7 @@
 [![Go Report Card](https://goreportcard.com/badge/github.com/Smana/runlore)](https://goreportcard.com/report/github.com/Smana/runlore)
 [![Go Version](https://img.shields.io/github/go-mod/go-version/Smana/runlore)](go.mod)
 [![License: Apache 2.0](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](LICENSE)
-[![Status](https://img.shields.io/badge/status-active%20development-brightgreen)](docs/design.md)
+[![Status](https://img.shields.io/badge/status-active%20development-brightgreen)](https://runlore.io/docs/concepts/design/)
 
 </div>
 
@@ -87,7 +87,7 @@ flowchart LR
 5. **A human reviews and merges** — after adding resolution context, the PR is merged.
    That entry is indexed: the same incident next time gets an instant answer, no re-investigation.
 
-> 📐 **Detailed architecture:** [`docs/architecture/runlore-architecture.md`](docs/architecture/runlore-architecture.md) — the full component diagram (the flow above is the summary).
+> 📐 **Detailed architecture:** [`docs/architecture/runlore-architecture.md`](https://runlore.io/docs/concepts/architecture/) — the full component diagram (the flow above is the summary).
 
 ## 📚 The learning loop
 
@@ -114,7 +114,7 @@ keeps resolving incidents gains trust, one that keeps failing decays toward re-i
 Even then, the recalled finding goes through the same adversarial verify pass as a fresh one; the
 shipped eval suite includes a poisoned-entry scenario proving a bad entry is rejected at recall time.
 
-→ **[How the learning loop works](docs/learning-loop.md)** · **[Reviewing & approving knowledge](docs/reviewing-knowledge.md)**
+→ **[How the learning loop works](https://runlore.io/docs/concepts/learning-loop/)** · **[Reviewing & approving knowledge](https://runlore.io/docs/concepts/reviewing-knowledge/)**
 
 > [!NOTE]
 > **What about "PR fatigue"?**
@@ -133,7 +133,7 @@ shipped eval suite includes a poisoned-entry scenario proving a bad entry is rej
 > it cross-check RunLore's draft against what you found while resolving the incident, and enrich it
 > with your context. You keep the *decision* — not the line-by-line reading.
 >
-> **Optionally, put an agent on the queue.** The [kb-steward skill](docs/kb-steward.md) triages open KB
+> **Optionally, put an agent on the queue.** The [kb-steward skill](https://runlore.io/docs/reference/kb-steward/) triages open KB
 > PRs from your terminal — quality and duplicate check per PR, a merge / refine / close call with the
 > concrete fix, and a pointer at the volume levers (`forge.skip_verdicts`, `min_confidence`,
 > `dup_score`) when the queue is systematically noisy. It
@@ -148,7 +148,7 @@ shipped eval suite includes a poisoned-entry scenario proving a bad entry is rej
 
 Every backend is pluggable behind an interface — **wire what you run; an unset source just disables
 its tool.** GitOps (Flux / Argo CD) anchors the *what-changed* spine; everything else is optional and
-additive. Full setup detail in **[Data sources](docs/data-sources.md)**.
+additive. Full setup detail in **[Data sources](https://runlore.io/docs/concepts/data-sources/)**.
 
 | Category | Supported | Config |
 |---|---|---|
@@ -219,7 +219,7 @@ helm install runlore oci://ghcr.io/smana/charts/runlore -n runlore --create-name
 Then point a source at RunLore — for example, route your Alertmanager alerts to
 `http://runlore.runlore.svc:8080/webhook/alertmanager` — and it starts investigating immediately.
 
-**→ [Full getting-started guide](docs/getting-started.md)** — KB repo setup, GitHub App,
+**→ [Full getting-started guide](https://runlore.io/docs/getting-started/)** — KB repo setup, GitHub App,
 credentials, complete `values.yaml` reference, data sources, and verification steps.
 
 ## Why RunLore
@@ -232,7 +232,7 @@ credentials, complete `values.yaml` reference, data sources, and verification st
 
 RunLore is **GitOps-engine-agnostic** (Flux + Argo CD), **metrics-backend-agnostic**
 (VictoriaMetrics + Prometheus), with pluggable logs and CNI-agnostic network signals. Change-aware RCA
-isn't unique — commercial tools (Komodor, Anyshift) diff changes too ([prior art](docs/prior-art.md)).
+isn't unique — commercial tools (Komodor, Anyshift) diff changes too ([prior art](https://runlore.io/docs/concepts/prior-art/)).
 The wedge is the **combination the open tools don't have**: that signal feeding an **open, portable
 catalog you own** — [OKF](https://github.com/GoogleCloudPlatform/knowledge-catalog)-compatible
 markdown, not a proprietary store; as far as we know RunLore is the **first agent that *produces*
@@ -271,9 +271,9 @@ we test hardest.
 
 ## Docs
 
-📐 [Design](docs/design.md) · 📚 [Learning loop](docs/learning-loop.md) · ✅ [Reviewing knowledge](docs/reviewing-knowledge.md) · 🧑‍🔧 [KB steward skill](docs/kb-steward.md) · 🚀 [Getting started](docs/getting-started.md) · 🧪 [Worked example](docs/examples/harbor-registry-down.md) ·
-🔌 [Data sources](docs/data-sources.md) · ⚙️ [Configuration](docs/configuration.md) · 🔗 [MCP — server & client](docs/mcp.md) · 📊 [Observability](docs/observability.md) · 🩺 [Troubleshooting](docs/troubleshooting.md) ·
-🔒 [Security model](docs/security-model.md) · 🛡 [LLM security architecture](docs/security-architecture.md) · ⬆️ [Upgrade & uninstall](docs/upgrade-uninstall.md) · 🧭 [Prior art](docs/prior-art.md) · 📊 [Benchmarking models](docs/benchmarking.md) · 🧮 [Nightly eval scorecard](https://github.com/Smana/runlore/blob/eval-scorecard/scorecard.md) · 🛠 [Contributing](CONTRIBUTING.md)
+📐 [Design](https://runlore.io/docs/concepts/design/) · 📚 [Learning loop](https://runlore.io/docs/concepts/learning-loop/) · ✅ [Reviewing knowledge](https://runlore.io/docs/concepts/reviewing-knowledge/) · 🧑‍🔧 [KB steward skill](https://runlore.io/docs/reference/kb-steward/) · 🚀 [Getting started](https://runlore.io/docs/getting-started/) · 🧪 [Worked example](https://runlore.io/docs/reference/examples/harbor-registry-down/) ·
+🔌 [Data sources](https://runlore.io/docs/concepts/data-sources/) · ⚙️ [Configuration](https://runlore.io/docs/configuration/configuration/) · 🔗 [MCP — server & client](https://runlore.io/docs/configuration/mcp/) · 📊 [Observability](https://runlore.io/docs/operations/observability/) · 🩺 [Troubleshooting](https://runlore.io/docs/operations/troubleshooting/) ·
+🔒 [Security model](https://runlore.io/docs/security/security-model/) · 🛡 [LLM security architecture](https://runlore.io/docs/security/security-architecture/) · ⬆️ [Upgrade & uninstall](https://runlore.io/docs/operations/upgrade-uninstall/) · 🧭 [Prior art](https://runlore.io/docs/concepts/prior-art/) · 📊 [Benchmarking models](https://runlore.io/docs/reference/benchmarking/) · 🧮 [Nightly eval scorecard](https://github.com/Smana/runlore/blob/eval-scorecard/scorecard.md) · 🛠 [Contributing](CONTRIBUTING.md)
 
 ## License
 
