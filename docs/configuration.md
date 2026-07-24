@@ -523,11 +523,17 @@ source_repos:
 - `allow` — patterns the model may diff, `host/org/repo`-shaped with per-segment globs
   (`*` never crosses `/`). Matching is enforced server-side **before any network call** —
   the model can only make RunLore clone repos you listed, whatever it writes.
-- **Auth:** private **GitHub** repos reuse the forge GitHub App installation token (install
-  the App on those repos with `contents: read`). The token is confined to the forge's own
-  host — a repo on any other host (e.g. a `gitlab.com/...` entry) is cloned **anonymously**,
-  so the GitHub token is never transmitted off-host; public repos need nothing and private
-  non-GitHub hosts are not supported yet. Because the model chooses which allowlisted repo to
+- **Auth — grant the forge GitHub App access to each private source repo.** `source_diff`
+  clones with the **forge GitHub App installation token**, so for every **private GitHub**
+  repo in `allow` the App must be **installed on that repo with `contents: read`** — an
+  installation token is scoped to the repos the App is installed on, so a private repo that
+  is not granted fails to clone (`404`/`repository not found`) even though the entry is
+  correct. Add it under the App's **Repository access** (or check with
+  `gh api /installation/repositories`). The token is confined to the forge's own host — a
+  repo on any other host (e.g. a `gitlab.com/...` entry) is cloned **anonymously**, so the
+  GitHub token is never transmitted off-host; public GitHub repos need no grant (an
+  installation token reads any public repo regardless of scope) and private non-GitHub hosts
+  are not supported yet. Because the model chooses which allowlisted repo to
   diff, keep the allowlist **and** the App's installation scope no broader than the source you
   intend RunLore to read — a wide `github.com/org/*` glob plus an org-wide install lets the
   agent diff any repo in that org.

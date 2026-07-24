@@ -194,9 +194,17 @@ source_repos:
     - gitlab.com/acme/infra-modules  # or exact host/org/repo
 ```
 
-**Auth:** private **GitHub** repos reuse the forge GitHub App installation token — install
-the App on those repos with `contents: read`. Public repos need nothing. Private non-GitHub
-hosts are not supported yet.
+**Auth — the forge GitHub App must be granted access to each private source repo.**
+`source_diff` clones over HTTPS with the **forge GitHub App installation token** (the same
+App as `forge.github_app`), and that token attaches to *every* clone on the forge's host.
+For each **private GitHub** repo you list, the App must be **installed on that repo with
+`contents: read`** — otherwise the installation token is out of scope and the clone fails
+(`404`/`repository not found`), even though the URL looks right. Grant access in the App's
+settings (**Repository access → Only select repositories → add the repo**), or verify with
+`gh api /installation/repositories`. Keep that installation scope as tight as the allowlist.
+Public GitHub repos need no grant — an installation token can read any public repo regardless
+of scope. Entries on a non-forge host (e.g. `gitlab.com/...`) clone **anonymously** (the
+GitHub token is never sent off-host); private non-GitHub hosts are not supported yet.
 
 RunLore performs **read-only clones with no working-tree checkout** — bare mirrors when the
 mirror cache is enabled (the default), or a no-checkout clone per call when the cache is
