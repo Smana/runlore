@@ -8,6 +8,10 @@ enableGitInfo: true
 refLinksErrorLevel: ERROR
 
 module:
+  # Hextra v0.10+ uses the `try` template func → fail clearly on older Hugo
+  # instead of a cryptic "function \"try\" not defined" parse error.
+  hugoVersion:
+    min: "0.146.0"
   imports:
     - path: github.com/imfing/hextra
 
