@@ -4,7 +4,7 @@
   "version": "0.10.0",
   "description": "Interviews SREs and turns platform knowledge into recall-grade OKF entries for a RunLore knowledge catalog",
   "author": { "name": "Smaine Kahlouch" },
-  "homepage": "https://github.com/Smana/runlore/blob/main/docs/kb-steward.md",
+  "homepage": "https://runlore.io/docs/reference/kb-steward/",
   "repository": "https://github.com/Smana/runlore",
   "license": "Apache-2.0",
   "keywords": ["runlore", "sre", "knowledge-base", "okf"]
