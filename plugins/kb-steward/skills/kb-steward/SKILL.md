@@ -100,7 +100,7 @@ Target for a first sitting: 5–15 entries the SRE confirms are true.
    each. Retirement PRs touch only their entry file — they merge in any order.
 7. If most of the queue is noise, say so and point at the config levers:
    `forge.skip_verdicts: ["no_action"]`, `forge.min_confidence`,
-   `forge.dup_score` (see RunLore's docs/reviewing-knowledge.md).
+   `forge.dup_score` (see https://runlore.io/docs/concepts/reviewing-knowledge/).
 
 ## Flow 4 — Maintenance
 
