@@ -59,7 +59,10 @@ Target for a first sitting: 5–15 entries the SRE confirms are true.
 3. Near-duplicate check: search the catalog for the resource and alert/title
    keywords. Prefer updating + revalidating an existing entry.
 4. Draft one Incident entry (`## Symptom` / `## Cause` / `## Investigate` /
-   `## Resolution`); add a Playbook only if the procedure generalizes.
+   `## Resolution`); add a Playbook only if the procedure generalizes. **Anchor
+   `## Cause` to the precise change** when there is one — the offending commit/PR
+   (RunLore's `source_diff` surfaces it behind a version bump), the exact image/
+   chart version, or the GitOps revision — not just "a deploy went out".
 5. Checklist + secret scan, then the git flow.
 
 ## Flow 3 — PR triage

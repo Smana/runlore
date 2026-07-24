@@ -101,8 +101,11 @@ happens after resolution; diagnosis is RunLore's (or the human's) job.
    `resource` stays the actually-faulty workload.
 2. **Impact & timeline** — start, detection, mitigation, resolution times;
    blast radius.
-3. **What changed** — deploys, config, infra around onset? Git SHAs or
-   releases if known.
+3. **What changed** — deploys, config, infra around onset? Capture the
+   **precise change-anchor** when known: the offending commit or PR (RunLore's
+   `source_diff` pins this behind an image/chart bump), the exact version, or the
+   GitOps revision. A specific anchor is far stronger recall + repair signal than
+   "a deploy went out".
 4. **Root cause — with pushback.** Don't accept the first answer:
    - "Is that the cause, or the first symptom you noticed?"
    - "If you rolled only that back, would it recur?"
