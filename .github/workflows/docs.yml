@@ -1,0 +1,53 @@
+name: Docs site
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'website/**'
+      - '.github/workflows/docs.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    env:
+      HUGO_VERSION: "0.156.0"
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-go@v5
+        with:
+          go-version: stable
+      - name: Install Hugo Extended
+        run: |
+          wget -O /tmp/hugo.deb \
+            "https://github.com/gohugoio/hugo/releases/download/v${HUGO_VERSION}/hugo_extended_${HUGO_VERSION}_linux-amd64.deb"
+          sudo dpkg -i /tmp/hugo.deb
+      - name: Configure Pages
+        id: pages
+        uses: actions/configure-pages@v5
+      - name: Build
+        working-directory: website
+        # No `hugo mod get` — it would upgrade the pinned Hextra. The build
+        # fetches the exact version from go.mod/go.sum automatically.
+        run: hugo --minify --gc --baseURL "${{ steps.pages.outputs.base_url }}/"
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: website/public
+      - name: Deploy
+        id: deployment
+        uses: actions/deploy-pages@v4
