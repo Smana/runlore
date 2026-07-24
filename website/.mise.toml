@@ -1,0 +1,4 @@
+[tools]
+# Docs site toolchain. Hugo Extended >= 0.146 is required by Hextra >= 0.10.
+# Pinned so `hugo` resolves correctly when working under website/.
+hugo = "0.156.0"
