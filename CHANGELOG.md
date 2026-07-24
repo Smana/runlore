@@ -8,6 +8,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 RunLore is **pre-1.0 and under active development** — there are no tagged releases
 yet, so everything currently lives under `[Unreleased]`.
 
+## [0.11.1](https://github.com/Smana/runlore/compare/v0.11.0...v0.11.1) (2026-07-24)
+
+
+### Documentation
+
+* **website:** add social share card (og:image) for runlore.io ([#383](https://github.com/Smana/runlore/issues/383)) ([2ce5718](https://github.com/Smana/runlore/commit/2ce57182fc566352a0b8a5e2f96ba2828e716042))
+
 ## [0.11.0](https://github.com/Smana/runlore/compare/v0.10.0...v0.11.0) (2026-07-24)
 
 
