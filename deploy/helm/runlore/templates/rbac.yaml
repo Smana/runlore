@@ -130,9 +130,10 @@ subjects:
 {{- if .Values.rbac.allowActions }}
 {{- range .Values.rbac.actionNamespaces }}
 ---
-# Namespace-scoped execution rights (config.actions): patch Flux resources in THIS
-# namespace only — never cluster-wide — so the blast radius is bounded. The set
-# should mirror config.actions.allow.namespaces.
+# Namespace-scoped execution rights (config.actions): patch GitOps resources (Flux
+# Kustomizations/HelmReleases, Argo CD Applications) in THIS namespace only — never
+# cluster-wide — so the blast radius is bounded. The set should mirror
+# config.actions.allow.namespaces.
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
 metadata:
@@ -146,6 +147,12 @@ rules:
     verbs: ["get", "patch"]
   - apiGroups: ["helm.toolkit.fluxcd.io"]
     resources: ["helmreleases"]
+    verbs: ["get", "patch"]
+  # Argo CD executor (config.gitops.engine: argocd): pause/resume auto-sync and
+  # refresh are merge patches on the Application; pause/resume also GET the app
+  # first to read/restore the prior sync policy, so the Role is self-contained.
+  - apiGroups: ["argoproj.io"]
+    resources: ["applications"]
     verbs: ["get", "patch"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1

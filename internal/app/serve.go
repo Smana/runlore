@@ -22,7 +22,6 @@ import (
 	"github.com/Smana/runlore/internal/action"
 	"github.com/Smana/runlore/internal/coalesce"
 	"github.com/Smana/runlore/internal/config"
-	fluxexec "github.com/Smana/runlore/internal/executor/flux"
 	"github.com/Smana/runlore/internal/investigate"
 	"github.com/Smana/runlore/internal/logging"
 	_ "github.com/Smana/runlore/internal/notify/templated" // self-registers the templated notifier
@@ -93,7 +92,7 @@ func RunServe(version string, args []string) error {
 	var (
 		gitops    providers.GitOpsProvider
 		clientset *kubernetes.Clientset
-		executor  action.Executor // rung-2 action executor (Flux), when a cluster is reachable
+		executor  action.Executor // rung-2/3 action executor for the configured GitOps engine, when a cluster is reachable
 	)
 	if restCfg, err := RestConfig(); err != nil {
 		log.Warn("no kube client; GitOps features + leader election disabled", "err", err)
@@ -102,7 +101,7 @@ func RunServe(version string, args []string) error {
 			log.Warn("dynamic client unavailable; GitOps features disabled", "err", derr)
 		} else {
 			gitops = BuildGitOps(cfg, dc, log)
-			executor = fluxexec.New(dc)
+			executor = BuildExecutor(cfg, dc)
 		}
 		if cs, cerr := kubernetes.NewForConfig(restCfg); cerr != nil {
 			log.Warn("clientset unavailable; leader election disabled", "err", cerr)
@@ -319,6 +318,19 @@ func RunServe(version string, args []string) error {
 		if mfb := BuildMatrixFeedback(cfg, ledger, log); mfb != nil {
 			log.Info("matrix feedback reactions enabled", "room", cfg.Notify.Matrix.RoomID)
 			go mfb.Run(workCtx)
+		}
+		// In-server grooming sweeps (leader-only, like the pollers above, so one
+		// replica grooms): the same passes as `lore curate`, on a timer, over the
+		// live ledger. Cancelled with workCtx on leadership loss.
+		if sw := BuildSweeper(cfg, ledger, aud, log); sw != nil {
+			mode := config.SweepApply
+			if cfg.Curate.Sweeps.DryRun() {
+				mode = config.SweepDryRun
+				log.Info("curate sweeps in dry-run: candidates are logged (and audited when actions.audit_log_path is set) " +
+					"but nothing is written to the forge — set curate.sweeps.mode: apply to act, mode: off to silence")
+			}
+			log.Info("curate sweeps enabled", "mode", mode, "interval", cfg.Curate.Sweeps.Interval.Std())
+			go sw.Run(workCtx)
 		}
 	}
 

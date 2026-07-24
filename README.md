@@ -10,6 +10,7 @@
 **An open-source SRE agent that investigates incidents — and remembers what it learns.**
 
 [![CI](https://github.com/Smana/runlore/actions/workflows/ci.yaml/badge.svg)](https://github.com/Smana/runlore/actions/workflows/ci.yaml)
+[![Nightly eval](https://img.shields.io/endpoint?url=https%3A%2F%2Fraw.githubusercontent.com%2FSmana%2Frunlore%2Feval-scorecard%2Fbadge.json)](https://github.com/Smana/runlore/blob/eval-scorecard/scorecard.md)
 [![Go Report Card](https://goreportcard.com/badge/github.com/Smana/runlore)](https://goreportcard.com/report/github.com/Smana/runlore)
 [![Go Version](https://img.shields.io/github/go-mod/go-version/Smana/runlore)](go.mod)
 [![License: Apache 2.0](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](LICENSE)
@@ -106,6 +107,14 @@ The autonomous *alert → RCA → chat* loop is a commodity. What isn't: a knowl
 Git repo you control, PR-reviewed, with full provenance. Knowledge that consistently resolves
 incidents gains trust; knowledge that keeps failing decays.
 
+An instant recall is never a blind cache hit — three gates stand in front of it: the entry must
+**structurally match** the incident (same workload/resource, retrieval score above a floor), it must
+**win by a clear margin** over the runner-up entry (ambiguous matches fall through to a full
+investigation), and its confidence is **weighted by its real-world track record** — an entry that
+keeps resolving incidents gains trust, one that keeps failing decays toward re-investigation.
+Even then, the recalled finding goes through the same adversarial verify pass as a fresh one; the
+shipped eval suite includes a poisoned-entry scenario proving a bad entry is rejected at recall time.
+
 → **[How the learning loop works](docs/learning-loop.md)** · **[Reviewing & approving knowledge](docs/reviewing-knowledge.md)**
 
 > [!NOTE]
@@ -154,6 +163,7 @@ additive. Full setup detail in **[Data sources](docs/data-sources.md)**.
 | **Triggers** *(sources)* | Alertmanager webhook · GitOps failures · PagerDuty webhook *(new)* | `sources.*` |
 | **Notifiers** | Slack *(bot token: threaded summary + detail; opt-in 👍/👎 buttons)* · Matrix *(opt-in 👍/👎 reactions)* — both feed the learning loop · Slack incoming webhook / generic webhook *(single verdict-first message)* | `notify.*` |
 | **Knowledge base** *(git forge)* | GitHub *(App auth)* | `forge.*` |
+| **MCP** | Server — query your KB from Claude Code / any MCP client · Client — wire external MCP tool servers into investigations (allowlist-gated) | `mcp.*` |
 
 ## ⚡ Try it in one minute — no cluster, no keys
 
@@ -197,12 +207,15 @@ Wire your credentials into a Kubernetes `Secret`, point the chart at them via a 
 (GitOps engine, LLM endpoint, KB repo, notification), and install:
 
 ```bash
-helm install runlore deploy/helm/runlore -n runlore --create-namespace -f values.yaml
+helm install runlore oci://ghcr.io/smana/charts/runlore -n runlore --create-namespace -f values.yaml
 ```
 
-> The chart ships **in this repo** (`git clone` first) — there is no `helm repo add` / OCI registry
-> yet. A minimal starting point for `values.yaml` is
+> The chart is an **OCI artifact on GHCR** — no `git clone`, no `helm repo add`. It is published and
+> cosign-signed on every release; pin a version with `--version X.Y.Z`. A minimal starting point for
+> `values.yaml` is
 > [`deploy/helm/runlore/values-minimal.yaml`](deploy/helm/runlore/values-minimal.yaml).
+> Working from a clone (dev alternative):
+> `helm install runlore deploy/helm/runlore -n runlore --create-namespace -f values.yaml`.
 
 Then point a source at RunLore — for example, route your Alertmanager alerts to
 `http://runlore.runlore.svc:8080/webhook/alertmanager` — and it starts investigating immediately.
@@ -222,12 +235,14 @@ RunLore is **GitOps-engine-agnostic** (Flux + Argo CD), **metrics-backend-agnost
 (VictoriaMetrics + Prometheus), with pluggable logs and CNI-agnostic network signals. Change-aware RCA
 isn't unique — commercial tools (Komodor, Anyshift) diff changes too ([prior art](docs/prior-art.md)).
 The wedge is the **combination the open tools don't have**: that signal feeding an **open, portable
-catalog you own** ([OKF](https://github.com/GoogleCloudPlatform/knowledge-catalog)-compatible markdown,
-not a proprietary store), from an agent that's **honest about the sub-50% reality**:
+catalog you own** — [OKF](https://github.com/GoogleCloudPlatform/knowledge-catalog)-compatible
+markdown, not a proprietary store; as far as we know RunLore is the **first agent that *produces*
+OKF entries from its own investigations** — from an agent that's **honest about the sub-50% reality**:
 
 - `unresolved` is a first-class answer;
 - an adversarial *verify* pass can only ever *lower* a finding's confidence, never raise it;
-- every claim is checked by a shipped eval harness.
+- every claim is checked by a shipped eval harness, and the nightly results are
+  [published — pass, fail, model, and cost included](https://github.com/Smana/runlore/blob/eval-scorecard/scorecard.md).
 
 ## Project status & stability
 
@@ -239,8 +254,11 @@ between commits. It's usable today, but "stable" means different things across t
   notifier** (Slack in the eval) + **GitHub** for the knowledge base. This is the path the
   [nightly eval](CONTRIBUTING.md#nightly-eval-ci) and the [k3d e2e suite](CONTRIBUTING.md#end-to-end-on-k3d)
   exercise — run it with confidence.
-- **Argo CD is now end-to-end tested**, alongside Flux: the k3d suite reconfigures to the `argocd`
-  engine and drives an `Application Degraded` failure through a full investigation.
+- **Argo CD is now end-to-end tested**, alongside Flux — including the **`approve` rung**: the k3d
+  suite reconfigures to the `argocd` engine, drives an `Application Degraded` failure through a full
+  investigation, then human-approves a **pause-auto-sync** action that executes reversibly (the prior
+  `syncPolicy.automated` is preserved for resume). Both engines share the same reversible-only,
+  allowlisted action envelope.
 - **Functional but less exercised:** **Matrix**, **Gemini**, the **PagerDuty** webhook source, cloud
   integrations, and the network (Hubble) provider. They work and are unit-tested, but see less
   real-world mileage — expect rougher edges and please file issues.
@@ -256,7 +274,7 @@ we test hardest.
 
 📐 [Design](docs/design.md) · 📚 [Learning loop](docs/learning-loop.md) · ✅ [Reviewing knowledge](docs/reviewing-knowledge.md) · 🧑‍🔧 [KB steward skill](docs/kb-steward.md) · 🚀 [Getting started](docs/getting-started.md) · 🧪 [Worked example](docs/examples/harbor-registry-down.md) ·
 🔌 [Data sources](docs/data-sources.md) · ⚙️ [Configuration](docs/configuration.md) · 🔗 [MCP — server & client](docs/mcp.md) · 📊 [Observability](docs/observability.md) · 🩺 [Troubleshooting](docs/troubleshooting.md) ·
-🔒 [Security model](docs/security-model.md) · 🛡 [LLM security architecture](docs/security-architecture.md) · ⬆️ [Upgrade & uninstall](docs/upgrade-uninstall.md) · 🧭 [Prior art](docs/prior-art.md) · 📊 [Benchmarking models](docs/benchmarking.md) · 🛠 [Contributing](CONTRIBUTING.md)
+🔒 [Security model](docs/security-model.md) · 🛡 [LLM security architecture](docs/security-architecture.md) · ⬆️ [Upgrade & uninstall](docs/upgrade-uninstall.md) · 🧭 [Prior art](docs/prior-art.md) · 📊 [Benchmarking models](docs/benchmarking.md) · 🧮 [Nightly eval scorecard](https://github.com/Smana/runlore/blob/eval-scorecard/scorecard.md) · 🛠 [Contributing](CONTRIBUTING.md)
 
 ## License
 

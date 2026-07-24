@@ -96,6 +96,14 @@ func isDuplicatePair(a, b providers.CuratedIssue, thr float64) bool {
 	return jaccard(titleTokens(a.Title), titleTokens(b.Title)) >= thr
 }
 
+// TitleJaccard scores two entry titles by Jaccard similarity over their
+// noise-filtered token sets — the same fuzzy-duplicate primitive Dedup uses
+// for markerless PRs, shared with `lore kb import` so "duplicate" means the
+// same thing at import time and at curation time. ≥0.6 is the house threshold.
+func TitleJaccard(a, b string) float64 {
+	return jaccard(titleTokens(a), titleTokens(b))
+}
+
 var titleNoise = map[string]bool{"kb": true, "in": true, "the": true, "due": true, "to": true, "a": true, "of": true, "and": true}
 
 func titleTokens(s string) map[string]bool {

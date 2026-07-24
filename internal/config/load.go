@@ -203,4 +203,9 @@ func applyDefaults(c *Config) {
 			r.Prior = 2.0
 		}
 	}
+	// In-server sweep interval: always filled (harmless when mode: off) so callers
+	// never see a zero interval.
+	if c.Curate.Sweeps.Interval == 0 {
+		c.Curate.Sweeps.Interval = Duration(6 * time.Hour)
+	}
 }

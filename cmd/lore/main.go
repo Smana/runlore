@@ -29,10 +29,12 @@ Usage:
   lore catalog sync [--config <path>]                 clone/pull + index the knowledge catalog
   lore kb search <query> [--config <path>] [--dir <catalog>] [-k 10] [--json] [--ledger <jsonl>]   search the knowledge base
   lore kb show <entry> [--config <path>] [--dir <catalog>]   print one KB entry (frontmatter card + body)
+  lore kb import <src-dir> [--into <kb-dir>] [--dry-run] [--model]   convert existing runbooks/postmortems into OKF entries (cold-start seeding)
   lore eval [--config <path>] [--cases <dir>]         replay recorded cases, score RCA identification
   lore eval --live [--scenarios <dir>] [--n 3]        live-fire on the cluster: grade coverage + RCA
   lore eval --compare <spec.yaml> [--n 3]             benchmark several models over the replay suite
-  lore curate [--config <path>]                       groom the KB backlog (dedup open PRs)
+  lore eval scorecard -report <replay.json> -dir <out>  render the public scorecard (markdown + badge + history) from a replay report
+  lore curate [--config <path>] [--dry-run]           groom the KB backlog (dedup/stale/suppress…)
   lore mcp [--config <path>] [<catalog-dir>]          serve what-changed + KB search over MCP (stdio; Claude Code, HolmesGPT, …)
   lore audit verify --path <audit.jsonl>              re-walk the action audit log; report the first broken link
   lore version                                        print version

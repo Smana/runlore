@@ -184,6 +184,15 @@ config:
                                # Also the trigger for escalating a closed-unmerged (human-rejected) KB
                                # entry that keeps recurring: RunLore links the closed PR in a knowledge-gap
                                # issue rather than reopening it.
+    # In-server scheduled sweeps (leader-only): the serve pod runs the grooming
+    # passes on a timer whenever the KB forge (forge.kb_repo + forge.github_app) is
+    # configured — no CronJob or shared ledger volume needed, and the ledger-backed
+    # passes read the pod's LIVE outcome ledger. Default mode is DRY-RUN: every
+    # candidate action is logged (and recorded in the actions.audit_log_path hash
+    # chain when set) but nothing is written to the forge until you set mode: apply.
+    sweeps:
+      mode: dry-run   # dry-run (default) | apply | "off" (quote off — YAML)
+      interval: 6h    # first sweep runs one full interval after startup; min 10m
   # model:
   #   base_url: https://vllm.svc/v1
   #   model: <model-name>
@@ -267,7 +276,11 @@ config:
   #   github_app: { app_id: 0, installation_id: 0, private_key_env: GITHUB_APP_PRIVATE_KEY }
   # Investigate signals (optional). metrics/logs enable query_metrics/query_logs.
   # metrics: { url: http://vmsingle.observability.svc:8429 }   # PromQL (VictoriaMetrics/Prometheus)
-  # logs:    { url: http://victorialogs.observability.svc:9428 }  # LogsQL (VictoriaLogs)
+  # Logs backend (query_logs / logs_error_summary / discover_log_fields). The provider is
+  # auto-detected (Loki answers /loki/api/v1/status/buildinfo; anything else = VictoriaLogs);
+  # pin it with `provider:` if the backend is unreachable at chart-install time.
+  # logs:    { url: http://victorialogs.observability.svc:9428 }                # VictoriaLogs (LogsQL)
+  # logs:    { url: http://loki-gateway.observability.svc:80, provider: loki }  # Grafana Loki (LogQL)
   # Network-flow signal (network_drops). PLUGGABLE + CNI-agnostic — no CNI assumed,
   # none default-on. Choose ONE provider (see docs/data-sources.md):
   # network:
@@ -372,10 +385,12 @@ serviceAccount:
 # read GitRepositories. Cluster-scoped because the informer watches all namespaces.
 rbac:
   create: true
-  # allowActions grants patch on Flux resources for rung-2 execution
+  # allowActions grants patch on GitOps resources (Flux Kustomizations/HelmReleases,
+  # Argo CD Applications) for rung-2 execution
   # (config.actions.mode: approve). Off by default — read-only without it.
   allowActions: false
-  # Namespaces where the agent may patch Flux resources (suspend/resume/reconcile).
+  # Namespaces where the agent may patch GitOps resources (suspend/resume/reconcile;
+  # for Argo CD this is where your Application objects live, e.g. argocd).
   # Granted as namespace-scoped Roles ONLY here — never cluster-wide — so the blast
   # radius is bounded. Mirror config.actions.allow.namespaces. Empty = no patch
   # rights at all (actions fail closed at the RBAC layer even if mode is enabled).
@@ -500,9 +515,11 @@ tolerations: []
 affinity: {}
 podAnnotations: {}
 
-# Phase-2 backlog groomer (lore curate) as a scheduled Job. Opt-in: writes to the
-# KB forge (closes duplicate/stale PRs), so it stays disabled until you set the
-# GitHub App credentials and enable it.
+# Phase-2 backlog groomer (lore curate) as a scheduled Job — the OUT-OF-SERVER
+# alternative to config.curate.sweeps (which the serve pod runs itself, leader-only,
+# dry-run by default). Prefer the in-server sweeps: the CronJob needs the outcome
+# ledger on a shared volume to run its ledger-backed passes. Both paths are
+# idempotent, so enabling both is safe, just redundant.
 curate:
   cronjob:
     enabled: false

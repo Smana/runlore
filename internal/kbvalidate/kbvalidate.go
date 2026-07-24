@@ -56,6 +56,21 @@ var requiredIncidentSections = []struct{ key, head string }{
 	{"resolution", "Resolution"},
 }
 
+// HasIncidentSections reports whether body carries every required Incident
+// evidence section (Symptom/Cause/Resolution), each present and non-empty — the
+// same rule ValidateStructural enforces for Incidents. Exposed so `lore kb
+// import` classifies a document as an Incident by the exact gate it must pass,
+// rather than restating the section set.
+func HasIncidentSections(body string) bool {
+	secs := Sections(body)
+	for _, s := range requiredIncidentSections {
+		if secs[s.key] == "" {
+			return false
+		}
+	}
+	return true
+}
+
 // WarnInvalid is the load-time strict-warn hook: it calls onInvalid(path, errs)
 // for each invalid entry; the caller logs + increments a metric, but the entry
 // is still served (one bad entry never empties the catalog). Returns the count
@@ -169,7 +184,7 @@ func ValidateStructural(e catalog.Entry) []Issue {
 	// Incident bodies must carry the OKF evidence sections; Playbook/Concept are
 	// intentionally relaxed in v1 (free-form runbooks/concepts).
 	if e.Type == "Incident" {
-		secs := sections(e.Body)
+		secs := Sections(e.Body)
 		for _, s := range requiredIncidentSections {
 			content, ok := secs[s.key]
 			switch {
@@ -187,8 +202,10 @@ func ValidateStructural(e catalog.Entry) []Issue {
 	return out
 }
 
-// sections maps each "## Heading" (lowercased) to its trimmed content.
-func sections(body string) map[string]string {
+// Sections maps each "## Heading" (lowercased) to its trimmed content. Exported
+// so `lore kb import` can infer Incident-vs-Playbook from a source document's
+// OKF sections using the same heading parser the validator gates on.
+func Sections(body string) map[string]string {
 	out := map[string]string{}
 	cur := ""
 	var buf []string

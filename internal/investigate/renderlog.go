@@ -22,7 +22,16 @@ type LogFields struct {
 	PodField       string // stream label for the pod name; "" ⇒ default
 	LevelField     string // severity field (after the unpack pipe); "" ⇒ default
 	UnpackPipe     string // LogsQL pipe promoting JSON body to fields; "" ⇒ default
+	Dialect        string // query dialect; "" ⇒ LogsQL (see Dialect*)
 }
+
+// Dialect values for LogFields.Dialect — which query language the configured
+// logs backend speaks. The zero value is LogsQL so every existing caller and
+// fake is untouched; the app layer sets DialectLogQL when the backend is Loki.
+const (
+	DialectLogsQL = ""      // VictoriaLogs LogsQL (shipped default)
+	DialectLogQL  = "logql" // Grafana Loki LogQL
+)
 
 // Shipped log-field defaults. These MUST stay byte-identical to the strings the code
 // hardcoded before logs.fields was configurable — they are the fallback that keeps
@@ -39,6 +48,25 @@ const (
 // result directly. An empty UnpackPipe restores the default pipe (disabling it is
 // out of scope for v1).
 func (f LogFields) resolved() LogFields {
+	if f.Dialect == DialectLogQL {
+		// Loki convention: promtail/alloy stream labels + Loki 3.x detected_level
+		// (structured metadata — no parser pipe by default). Mirrors
+		// config.LogFields.ResolvedFor (internal/config/config.go), which is the
+		// normal fill path; this is the in-package fallback for zero-field callers.
+		if f.ContainerField == "" {
+			f.ContainerField = "container"
+		}
+		if f.NamespaceField == "" {
+			f.NamespaceField = "namespace"
+		}
+		if f.PodField == "" {
+			f.PodField = "pod"
+		}
+		if f.LevelField == "" {
+			f.LevelField = "detected_level"
+		}
+		return f
+	}
 	if f.ContainerField == "" {
 		f.ContainerField = defaultContainerField
 	}
@@ -55,6 +83,43 @@ func (f LogFields) resolved() LogFields {
 		f.UnpackPipe = defaultUnpackPipe
 	}
 	return f
+}
+
+// queryLang names the dialect (bare) for tool schemas ("raw LogQL"/"raw LogsQL").
+func (f LogFields) queryLang() string {
+	if f.Dialect == DialectLogQL {
+		return "LogQL"
+	}
+	return "LogsQL"
+}
+
+// dialectLabel names the dialect with its backend for tool descriptions — the
+// description-side counterpart of queryLang(), so both forms derive the dialect
+// from one place and no tool description can name the wrong one.
+func (f LogFields) dialectLabel() string {
+	if f.Dialect == DialectLogQL {
+		return "LogQL (Grafana Loki)"
+	}
+	return "LogsQL (VictoriaLogs)"
+}
+
+// rawQueryGuidance is the dialect- and field-aware instruction for a raw `query`
+// override, interpolated with the RESOLVED field names so an operator's
+// config.logs.fields overrides reach the model verbatim (rather than a hardcoded
+// `detected_level`/`namespace` a custom collector may not have). Shared by the
+// log tools' descriptions so the guidance and the query builder can't drift.
+func (f LogFields) rawQueryGuidance() string {
+	c := f.resolved()
+	if f.Dialect == DialectLogQL {
+		return fmt.Sprintf("If you write a raw `query`: it MUST start with a stream selector using Loki stream labels, "+
+			"e.g. `{%s=\"apps\", %s=\"x\"}`; filter severity with `| %s=\"error\"` (no parser needed) or parse first with `| json` / `| logfmt`. "+
+			"Do NOT use VictoriaLogs LogsQL syntax (unpack_json, _msg, field:value filters).",
+			c.NamespaceField, c.ContainerField, c.LevelField)
+	}
+	return fmt.Sprintf("If you write a raw `query`: stream labels use DOT notation (%s, %s), NOT underscores; "+
+		"to filter by severity you MUST unpack JSON first, e.g. `{%s=\"x\"} | %s | %s:error`. "+
+		"Do NOT use `level=error` — that is Prometheus/Loki syntax and is invalid LogsQL.",
+		c.ContainerField, c.NamespaceField, c.ContainerField, c.UnpackPipe, c.LevelField)
 }
 
 // logGroup is one distinct log message with its repeat count, the span over which

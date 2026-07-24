@@ -7,7 +7,10 @@ import (
 
 	"k8s.io/client-go/dynamic"
 
+	"github.com/Smana/runlore/internal/action"
 	"github.com/Smana/runlore/internal/config"
+	argoexec "github.com/Smana/runlore/internal/executor/argocd"
+	fluxexec "github.com/Smana/runlore/internal/executor/flux"
 	"github.com/Smana/runlore/internal/providers"
 	"github.com/Smana/runlore/internal/providers/gitops/argocd"
 	"github.com/Smana/runlore/internal/providers/gitops/flux"
@@ -34,6 +37,17 @@ func BuildGitOps(cfg *config.Config, dc dynamic.Interface, log *slog.Logger) pro
 	}
 	log.Info("gitops engine", "engine", "flux")
 	return flux.New(flux.NewDynamicReader(dc), differ)
+}
+
+// BuildExecutor returns the rung-2/3 action executor for the configured GitOps
+// engine — the same engine switch as BuildGitOps, so the executor always
+// matches the provider that proposed the target (an Argo Application action
+// must never reach the Flux executor and vice versa).
+func BuildExecutor(cfg *config.Config, dc dynamic.Interface) action.Executor {
+	if GitopsEngine(cfg) == "argocd" {
+		return argoexec.New(dc)
+	}
+	return fluxexec.New(dc)
 }
 
 // GitOpsFromKube builds the GitOps provider from the ambient kubeconfig (best-effort).

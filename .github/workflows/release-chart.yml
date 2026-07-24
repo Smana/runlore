@@ -1,0 +1,108 @@
+name: Release Chart
+
+# Publishes deploy/helm/runlore to GHCR as an OCI artifact:
+#   helm install runlore oci://ghcr.io/smana/charts/runlore
+#
+# Triggered by the v* tag (created by release-please via its PAT, same as
+# release-binaries.yml). No separate chart versioning exists: release-please
+# bumps Chart.yaml version/appVersion in the release PR (extra-files in
+# release-please-config.json), so the chart version equals the tag by
+# construction — the guard step below enforces it. GoReleaser owns the
+# binaries and the container image; this workflow owns the chart artifact.
+# workflow_dispatch exists for a one-time backfill publish of the current
+# chart version from main (the guard only runs on tag refs).
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+# Top-level least privilege; the job elevates only what it needs.
+permissions:
+  contents: read
+
+env:
+  CHART: deploy/helm/runlore
+
+jobs:
+  publish:
+    name: Package, push and sign
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      # Push the chart OCI artifact to GHCR (GitHub Packages).
+      packages: write
+      # Keyless cosign signing of the pushed chart digest — the OIDC token
+      # identifies this workflow to Fulcio (same posture as the release image
+      # and checksums in release-binaries.yml).
+      id-token: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+
+      - name: Install Helm
+        uses: azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310 # v5.0.1
+
+      # Guard: on tag refs the chart version must equal the tag. release-please
+      # keeps them in lockstep, so a mismatch means a hand-crafted or re-pointed
+      # tag — refuse to publish a mislabeled chart. Skipped on workflow_dispatch
+      # from a branch (the backfill case).
+      - name: Verify chart version matches tag
+        if: startsWith(github.ref, 'refs/tags/')
+        run: |
+          set -euo pipefail
+          chart_version="$(awk '/^version:/ {print $2}' "$CHART/Chart.yaml")"
+          if [[ "v${chart_version}" != "${GITHUB_REF_NAME}" ]]; then
+            echo "Chart.yaml version v${chart_version} does not match tag ${GITHUB_REF_NAME}" >&2
+            exit 1
+          fi
+
+      - name: Log in to GHCR (helm registry)
+        env:
+          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: helm registry login ghcr.io -u "${{ github.actor }}" --password-stdin <<< "$GHCR_TOKEN"
+
+      # helm lint also validates values.yaml against values.schema.json —
+      # cheap last-line defense even though chart.yml gates every chart change.
+      - name: Lint and package
+        run: |
+          set -euo pipefail
+          helm lint "$CHART"
+          helm package "$CHART" -d dist/
+
+      # ghcr/OCI refs must be lowercase; github.repository_owner can contain
+      # uppercase (e.g. "Smana") — same normalization as build-image.yml.
+      # Capture the pushed digest from helm's output for signing.
+      - name: Push chart to GHCR
+        id: push
+        run: |
+          set -euo pipefail
+          owner="${{ github.repository_owner }}"
+          repo="ghcr.io/${owner,,}/charts"
+          out="$(helm push dist/runlore-*.tgz "oci://${repo}" 2>&1)"
+          echo "$out"
+          digest="$(sed -n 's/^Digest: //p' <<< "$out")"
+          if [[ -z "$digest" ]]; then
+            echo "could not parse pushed digest from helm output" >&2
+            exit 1
+          fi
+          echo "ref=${repo}/runlore" >> "$GITHUB_OUTPUT"
+          echo "digest=${digest}" >> "$GITHUB_OUTPUT"
+
+      - name: Install cosign
+        uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
+
+      - name: Sign chart (cosign keyless)
+        run: cosign sign --yes "${{ steps.push.outputs.ref }}@${{ steps.push.outputs.digest }}"
+
+      - name: Publish summary
+        run: |
+          {
+            echo "## Helm chart published"
+            echo ""
+            echo '```bash'
+            echo "helm install runlore oci://${{ steps.push.outputs.ref }} --version <version> -n runlore --create-namespace -f values.yaml"
+            echo '```'
+            echo ""
+            echo "**Digest**: \`${{ steps.push.outputs.digest }}\`"
+            echo "**Signature**: cosign keyless (Fulcio, GitHub Actions OIDC)"
+          } >> "$GITHUB_STEP_SUMMARY"

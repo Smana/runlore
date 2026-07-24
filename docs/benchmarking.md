@@ -4,6 +4,12 @@ RunLore is model-agnostic: you pick the model behind the investigation loop. Thi
 page shows how to benchmark several models against RunLore's own eval harness in
 **one command** and publish an honest comparison.
 
+> RunLore's own nightly numbers are public: the replay eval publishes a
+> per-scenario scorecard — pass/fail, recall outcomes, confidence calibration,
+> model, date, and cost — to the
+> [`eval-scorecard` branch](https://github.com/Smana/runlore/blob/eval-scorecard/scorecard.md)
+> on every run, red or green.
+
 > [!IMPORTANT]
 > **Run RunLore on *your* models**
 >

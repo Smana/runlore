@@ -5,3 +5,11 @@ model:
   provider: anthropic
   model: claude-haiku-4-5-20251001
   api_key_env: RUNLORE_EVAL_API_KEY
+  # Optional: token rates (USD per MILLION tokens) so the published scorecard
+  # reports an honest per-run cost. claude-haiku-4-5 list prices, 2026-07
+  # (same figures as eval/compare.example.yaml). Wrong rates only skew the
+  # cost figure, never the pass/fail scoring.
+  pricing:
+    input_usd_per_mtok: 1.00
+    output_usd_per_mtok: 5.00
+    cached_input_usd_per_mtok: 0.10
