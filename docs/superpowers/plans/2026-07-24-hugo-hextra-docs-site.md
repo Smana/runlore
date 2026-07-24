@@ -10,7 +10,7 @@
 
 ## Global Constraints
 
-- Hugo **Extended** required, version **≥ 0.134.0** (Hextra floor). CI pins `HUGO_VERSION: "0.140.0"`.
+- Hugo **Extended** required, version **≥ 0.146.0** (floor of Hextra v0.10+). Standardize on **0.156.0**: local via `website/.mise.toml`, CI via `HUGO_VERSION: "0.156.0"`. Hextra is pinned in `website/go.mod` (v0.12.3) — **CI must not run bare `hugo mod get`** (it would upgrade the pin and can break against a fixed Hugo); the build fetches the pinned module automatically.
 - Hugo Module path for the site: `github.com/Smana/runlore/website`.
 - `baseURL: https://runlore.io/` (apex). `CNAME` file content: `runlore.io`.
 - Hextra module import: `github.com/imfing/hextra`.
@@ -490,7 +490,7 @@ jobs:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}
     env:
-      HUGO_VERSION: "0.140.0"
+      HUGO_VERSION: "0.156.0"
     steps:
       - uses: actions/checkout@v4
         with:
@@ -508,9 +508,9 @@ jobs:
         uses: actions/configure-pages@v5
       - name: Build
         working-directory: website
-        run: |
-          hugo mod get
-          hugo --minify --gc --baseURL "${{ steps.pages.outputs.base_url }}/"
+        # No `hugo mod get` — it would upgrade the pinned Hextra. The build
+        # fetches the exact version from go.mod/go.sum automatically.
+        run: hugo --minify --gc --baseURL "${{ steps.pages.outputs.base_url }}/"
       - uses: actions/upload-pages-artifact@v3
         with:
           path: website/public
