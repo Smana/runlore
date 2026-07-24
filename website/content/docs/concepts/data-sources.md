@@ -18,6 +18,7 @@ assumed).
 | Cloud control plane | `cloud_*` | `CloudProvider` | AWS (CloudTrail + EC2/ASG/EKS) | `cloud.provider` |
 | Kubernetes | `pod_status`, `kube_events`, `controller_logs`, `pod_logs` | `KubeReader`/`LogReader` | client-go | (in-cluster) |
 | Knowledge | `kb_search` | catalog index | bleve BM25 | `catalog.*` |
+| Source repos | `source_diff` | built-in (go-git) | any git host over HTTPS (GitHub App auth) | `source_repos.allow` |
 
 ## Network flows are CNI-agnostic
 
@@ -181,3 +182,33 @@ sources:
 
 Requests without a Kubernetes workload recall only resource-less entries (the
 scopeless tier) — same as PagerDuty.
+
+## Source repos
+
+`what_changed` surfaces manifest-layer changes ("image `v1.2.2 → v1.2.3`"). Registering
+source repos deepens that to the actual code behind such a bump — commit subjects, a
+per-file diffstat, and the largest changed hunks — turning a correlation into a cause.
+This powers the `source_diff` tool; **unset (default) ⇒ the tool is not registered**.
+
+```yaml
+source_repos:
+  allow:
+    - github.com/acme/*              # every repo directly under the org
+    - gitlab.com/acme/infra-modules  # or exact host/org/repo
+```
+
+**Auth:** private **GitHub** repos reuse the forge GitHub App installation token — install
+the App on those repos with `contents: read`. Public repos need nothing. Private non-GitHub
+hosts are not supported yet.
+
+RunLore performs **read-only clones with no working-tree checkout** — bare mirrors when the
+mirror cache is enabled (the default), or a no-checkout clone per call when the cache is
+disabled. Either way, no writes are made to the source repo. Mirrors reuse the
+`gitops.mirror` directory (a `source/` subdir of the same root), so warm mirrors cost
+nothing after the first clone.
+
+Allowlist matching is enforced **server-side before any network call**: the model can only
+make RunLore clone repos you explicitly listed. A wrong repo guess fails at ref resolution
+(the tag won't exist) and the error response lists nearby tags so the model can self-correct.
+
+Full key reference and token-cost details: [configuration.md → `source_repos`](configuration.md#source_repos--source-repo-allowlist-for-source_diff).

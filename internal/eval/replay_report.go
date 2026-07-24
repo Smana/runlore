@@ -52,12 +52,7 @@ func (c Campaign) Report(at, model string, usage providers.Usage, costUSD *float
 		InputTokens: usage.InputTokens, OutputTokens: usage.OutputTokens, CostUSD: costUSD,
 	}
 	for _, a := range c.Aggregates {
-		rep.Cases = append(rep.Cases, ReportCase{
-			Name: a.Name, Runs: a.Runs, PassRate: a.PassRate, Reached: a.Reached, Flaky: a.Flaky,
-			Confidence: a.Confidence, Missing: a.Missing, OverClaimed: a.OverClaimed,
-			HasRecall: a.HasRecall, ExpectRecall: a.ExpectRecall,
-			RecallFired: a.RecallFired, RecallShortCircuit: a.RecallShortCircuit,
-		})
+		rep.Cases = append(rep.Cases, ReportCase(a))
 	}
 	return rep
 }

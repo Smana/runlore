@@ -1,0 +1,159 @@
+// SPDX-License-Identifier: Apache-2.0
+
+// Package sourcerepo gates which source repositories the source_diff
+// investigation tool may clone. The allowlist match is the security boundary:
+// the model names a repo, but only operator-listed patterns ever reach the
+// network — no SSRF / arbitrary-clone, regardless of what the model writes.
+package sourcerepo
+
+import (
+	"fmt"
+	"path"
+	"strings"
+)
+
+// Allowlist holds the operator's source-repo allow patterns, pre-validated.
+// Patterns are host/org/repo shaped and matched with path.Match, so '*' never
+// crosses a '/': "github.com/acme/*" allows every repo directly under acme
+// but not "github.com/acme/x/y". A local filesystem pattern (leading '/') is
+// supported for tests/dev and matched the same way.
+type Allowlist struct {
+	patterns []string
+}
+
+// New validates and compiles allow patterns. Rejected at load time (config
+// validation calls this): an empty list, an empty pattern, a scheme, "..",
+// whitespace, or a glob path.Match itself rejects. Patterns are stored with
+// the host segment lowercased (DNS names are case-insensitive).
+func New(patterns []string) (*Allowlist, error) {
+	if len(patterns) == 0 {
+		return nil, fmt.Errorf("empty allowlist")
+	}
+	compiled := make([]string, 0, len(patterns))
+	for _, p := range patterns {
+		p = strings.TrimSpace(p)
+		switch {
+		case p == "":
+			return nil, fmt.Errorf("empty pattern")
+		case strings.Contains(p, "://"):
+			return nil, fmt.Errorf("pattern %q must not carry a scheme — write host/org/repo", p)
+		case strings.Contains(p, ".."):
+			return nil, fmt.Errorf("pattern %q must not contain '..'", p)
+		case strings.ContainsAny(p, " \t"):
+			return nil, fmt.Errorf("pattern %q must not contain whitespace", p)
+		}
+		if _, err := path.Match(p, "probe"); err != nil {
+			return nil, fmt.Errorf("bad pattern %q: %w", p, err)
+		}
+		compiled = append(compiled, lowerHost(p))
+	}
+	return &Allowlist{patterns: compiled}, nil
+}
+
+// Patterns returns the normalized allow patterns, for the tool description
+// (the model picks a repo from this list) and for error messages.
+func (a *Allowlist) Patterns() []string {
+	out := make([]string, len(a.patterns))
+	copy(out, a.patterns)
+	return out
+}
+
+// Match normalizes a model-supplied repo reference and reports whether it is
+// allowed, returning the canonical clone URL. It accepts the shapes a model
+// plausibly emits — "github.com/acme/x", "https://github.com/acme/x.git",
+// "git@github.com:acme/x.git", "ssh://git@github.com/acme/x" — all reduced to
+// host/org/repo BEFORE matching, so a scheme or userinfo can never smuggle a
+// non-allowed host past the gate. The returned clone URL is built from the
+// NORMALIZED form ("https://" + host/org/repo, or the path itself for a local
+// pattern), never from the raw input.
+func (a *Allowlist) Match(raw string) (cloneURL string, ok bool) {
+	cand, err := normalize(raw)
+	if err != nil {
+		return "", false
+	}
+	for _, p := range a.patterns {
+		if m, err := path.Match(p, cand); err == nil && m {
+			if strings.HasPrefix(cand, "/") {
+				return cand, true
+			}
+			return "https://" + cand, true
+		}
+	}
+	return "", false
+}
+
+// normalize reduces a repo reference to matchable host/org/repo (or a local
+// absolute path). It strips a scheme and scp-style git@host: prefix, drops a
+// trailing .git and slash, lowercases the host segment, and rejects anything
+// that still smells like smuggling (userinfo '@', '..', whitespace, empties).
+func normalize(raw string) (string, error) {
+	s := strings.TrimSpace(raw)
+	for _, scheme := range []string{"https://", "http://", "ssh://"} {
+		s = strings.TrimPrefix(s, scheme)
+	}
+	// Handle both ssh-style formats:
+	// - scp-style: git@github.com:acme/x → github.com/acme/x
+	// - ssh URL: git@github.com/acme/x → github.com/acme/x
+	// Only strip a leading userinfo when the part before '@' is a bare username
+	// (no '/', ':', or further '@'). Any other '@'-containing input is left as-is
+	// and rejected by the strings.Contains(s, "@") guard below.
+	if at := strings.Index(s, "@"); at >= 0 && !strings.HasPrefix(s, "/") && !strings.ContainsAny(s[:at], "/:@") {
+		host := s[at+1:]
+		// scp-style only when the ':' precedes any '/': git@host:org/x → host/org/x.
+		if c := strings.IndexByte(host, ':'); c >= 0 && !strings.Contains(host[:c], "/") {
+			host = host[:c] + "/" + host[c+1:]
+		}
+		s = host
+	}
+	s = strings.TrimSuffix(s, "/")
+	s = strings.TrimSuffix(s, ".git")
+	s = strings.TrimSuffix(s, "/") // "x/.git" leaves a slash after the .git strip
+	switch {
+	case s == "":
+		return "", fmt.Errorf("empty repo")
+	case strings.Contains(s, ".."):
+		return "", fmt.Errorf("repo %q contains '..'", raw)
+	case strings.Contains(s, "@"):
+		return "", fmt.Errorf("repo %q contains userinfo", raw)
+	}
+	// Strict character allowlist on the normalized host/org/repo. This is the
+	// teeth of the boundary: a bare `..` check is not enough because a git
+	// server may percent-decode `%2e%2e%2f` back into traversal AFTER the match,
+	// escaping the allowed org. Rejecting anything outside [A-Za-z0-9._/-] kills
+	// percent-encoding, control chars, query/fragment, ports (':'), and
+	// whitespace in one gate — none of which appears in a real host/org/repo.
+	if bad := firstDisallowedRepoChar(s); bad != -1 {
+		return "", fmt.Errorf("repo %q contains a disallowed character %q (allowed: letters, digits, . _ - /)", raw, s[bad])
+	}
+	return lowerHost(s), nil
+}
+
+// firstDisallowedRepoChar returns the byte index of the first character not
+// allowed in a normalized host/org/repo, or -1 if all are allowed. ASCII-only
+// by construction — a multi-byte rune's lead byte is >0x7f and is rejected,
+// which also blocks homoglyph hosts.
+func firstDisallowedRepoChar(s string) int {
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		switch {
+		case c >= 'a' && c <= 'z', c >= 'A' && c <= 'Z', c >= '0' && c <= '9':
+		case c == '.' || c == '_' || c == '-' || c == '/':
+		default:
+			return i
+		}
+	}
+	return -1
+}
+
+// lowerHost lowercases the first path segment (the host — DNS names are
+// case-insensitive; org/repo are not). Local paths (leading '/') pass through.
+func lowerHost(s string) string {
+	if strings.HasPrefix(s, "/") {
+		return s
+	}
+	host, rest, found := strings.Cut(s, "/")
+	if !found {
+		return strings.ToLower(s)
+	}
+	return strings.ToLower(host) + "/" + rest
+}

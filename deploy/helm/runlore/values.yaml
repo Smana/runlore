@@ -290,6 +290,15 @@ config:
   #   # aws: { region: eu-west-3, log_group: /aws/vpc/flowlogs }
   #   # provider: gcp-firewall-logs          # any GCP VPC (incl. GKE)
   #   # gcp: { project: my-gcp-project }
+  # Source-repo allowlist (source_diff). OPT-IN — unset ⇒ the tool is not registered.
+  # Lets the agent diff app/module source between two versions a bump names (e.g.
+  # image v1.2.2→v1.2.3), reading the offending commit. Patterns are host/org/repo
+  # globs; matching is server-side. Private GitHub repos reuse forge.github_app
+  # (contents:read); the token is confined to the forge host (see docs/configuration.md).
+  # source_repos:
+  #   allow:
+  #     - github.com/acme/*                  # every repo under the org
+  #     # - gitlab.com/acme/infra-modules    # or an exact host/org/repo
 
 # Secret-backed env vars (model API key, Slack webhook, Matrix token, GitHub key).
 # Reference an existing Secret — RunLore never inlines credentials.
