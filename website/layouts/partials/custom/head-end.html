@@ -1,0 +1,10 @@
+{{/*
+  Custom <head> additions.
+  Hextra emits og:title/og:image/twitter:* but not og:description or og:site_name.
+  Complete the Open Graph set so link cards (Bluesky, LinkedIn, Facebook — which
+  read OG strictly) show a description and site name.
+*/}}
+{{- with (.Description | default site.Params.description) }}
+<meta property="og:description" content="{{ . }}">
+{{- end }}
+<meta property="og:site_name" content="{{ site.Title }}">
