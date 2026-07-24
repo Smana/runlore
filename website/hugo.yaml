@@ -40,14 +40,14 @@ menu:
 params:
   description: "An open-source SRE agent that investigates incidents — and remembers what it learns."
   navbar:
-    displayTitle: true
+    displayTitle: false
     displayLogo: true
     logo:
-      path: images/logo.svg
-      dark: images/logo-dark.svg
+      path: images/logo-wordmark.svg
+      dark: images/logo-wordmark-dark.svg
       link: /
-      width: 32
-      height: 32
+      width: 132
+      height: 40
   search:
     enable: true
     type: flexsearch

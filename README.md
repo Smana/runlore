@@ -9,6 +9,9 @@
 
 **An open-source SRE agent that investigates incidents — and remembers what it learns.**
 
+### 📖 Read the docs → **[runlore.io](https://runlore.io/)**
+
+[![Docs](https://img.shields.io/badge/docs-runlore.io-14C9A6?logo=readthedocs&logoColor=white)](https://runlore.io/)
 [![CI](https://github.com/Smana/runlore/actions/workflows/ci.yaml/badge.svg)](https://github.com/Smana/runlore/actions/workflows/ci.yaml)
 [![Nightly eval](https://img.shields.io/endpoint?url=https%3A%2F%2Fraw.githubusercontent.com%2FSmana%2Frunlore%2Feval-scorecard%2Fbadge.json)](https://github.com/Smana/runlore/blob/eval-scorecard/scorecard.md)
 [![Go Report Card](https://goreportcard.com/badge/github.com/Smana/runlore)](https://goreportcard.com/report/github.com/Smana/runlore)
