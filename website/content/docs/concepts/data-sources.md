@@ -39,7 +39,7 @@ network:
 Works on **any AWS VPC**, including EKS clusters running the AWS VPC CNI (where Cilium is absent).
 Reads `REJECT` records from the CloudWatch Logs group that receives your VPC Flow Logs. Read-only;
 auth is in-cluster identity (EKS Pod Identity / IRSA) — no static keys. Requires
-`logs:DescribeLogGroups`/`logs:FilterLogEvents` on the target log group.
+`logs:FilterLogEvents` on the target log group.
 ```yaml
 network:
   provider: aws-vpc-flow-logs
@@ -62,7 +62,7 @@ network:
 
 ### Adding another provider
 Implement `providers.NetworkProvider` (a single `Drops(ctx, sel, window)` method), then add a
-`case` in `buildModelAndTools` keyed off `network.provider`. Candidates: Azure NSG Flow Logs, or
+`case` in `BuildModelAndTools` keyed off `network.provider`. Candidates: Azure NSG Flow Logs, or
 CNI-agnostic eBPF (Microsoft **Retina** exposes a Hubble-compatible flow API, so it can reuse the
 `hubble` provider directly).
 

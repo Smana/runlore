@@ -39,7 +39,7 @@ list and comments, follow each link to `values.yaml`.
 ### `sources` — what wakes RunLore
 Per-source enablement map; presence enables a source. `alertmanager: {}` mounts the incident webhook;
 `gitops: { enabled: true }` watches GitOps `Ready=False`; `pagerduty: {}` mounts the PagerDuty V3
-incident webhook. Known keys: `alertmanager`, `gitops`, `pagerduty`.
+incident webhook. Known keys: `alertmanager`, `gitops`, `pagerduty`, `custom`.
 
 - **`pagerduty`** — mounts `POST /webhook/pagerduty` for [PagerDuty V3 webhook subscriptions](https://developer.pagerduty.com/docs/webhooks-overview).
   `incident.triggered` starts an investigation; `incident.resolved` closes the outcome (like an
@@ -463,8 +463,8 @@ mcp:
   Use `https://` whenever the server is on a public network.
 
 ### `curate` — Phase-2 backlog groomer
-- `stale_after` — close unprotected KB PRs idle longer than this; **default `720h`** (30 days);
-  `0` disables stale-close.
+- `stale_after` — close unprotected KB PRs idle longer than this; **code default `0` (disabled)** —
+  the Helm chart ships `720h` (30 days). `0`/unset disables stale-close.
 - `recurrence_threshold` — open a knowledge-gap issue after this many unresolved occurrences of a
   pattern; **default `3`**. A knowledge-gap issue flags patterns RunLore keeps encountering without
   resolving — a signal to write a runbook.

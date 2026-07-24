@@ -113,7 +113,7 @@ tools, but never *require* them).
 
 ![RunLore architecture — React → Investigate → Learn](/docs/concepts/architecture/runlore-architecture.svg)
 
-Components map 1:1 to `internal/` packages (§13).
+The main components map onto `internal/` packages — see the illustrative layout in §13.
 
 ## 6. The three pillars
 
@@ -353,14 +353,16 @@ reference combo; Argo + Prometheus exercises the abstraction.
 **The agent never queries git at investigation time.** A `Catalog` subsystem keeps it fast:
 
 ```
-KB git repo  ──syncer──►  local mirror  ──build──►  index:  bleve (BM25)  [+ chromem-go (vectors)]
+KB git repo  ──syncer──►  local mirror  ──build──►  index:  bleve (BM25)  [+ opt-in vectors: cosine + RRF]
   (truth)    (poll HEAD ±webhook/Receiver)              ▲
                                           kb_search(query, k)  — in-process, sub-ms, no git/network
 ```
 - **Syncer** polls remote `HEAD` (cheap), pulls on change, **incrementally re-indexes** changed
   entries. Optional push-webhook / Flux `Receiver` for instant refresh.
-- **Index** is embedded + persisted: **`bleve`** (BM25) in v1 — no embedding dependency, genuinely
-  "easy"; **`chromem-go`** (pure-Go vectors) added later, embeddings served by the in-cluster vLLM.
+- **Index** is embedded + persisted: **`bleve`** (BM25) — no embedding dependency, genuinely
+  "easy". Hybrid vector recall (opt-in, `catalog.instant_recall.hybrid`) is **already implemented** as an
+  in-process **cosine + RRF fusion** over a persisted vector cache (`internal/embed`,
+  `internal/catalog/hybrid.go`) — no vector-DB dependency; embeddings are served by the in-cluster vLLM.
   Both pure-Go → the single binary holds the whole retrieval stack.
 - **Sync mechanism** (default A; B is the in-cluster upgrade):
   - **A — built-in self-syncer** (poll + optional webhook). Fewest moving parts. *Default.*
@@ -439,9 +441,12 @@ as the baseline and makes failure handling a first-class primitive.
 ## 11. Tech stack
 
 - **Go 1.26**, single static binary (`goreleaser` / `ko` for images).
-- `client-go` (Flux/Argo CRDs, k8s), **`go-git`** (revision diffs), `cobra` (CLI), `bleve` (BM25),
-  `chromem-go` (vectors, later), official **Go MCP SDK** (extension tools),
-  `anthropic-sdk-go` + `openai-go` (models).
+- `client-go` (Flux/Argo CRDs, k8s), **`go-git`** (revision diffs), `bleve` (BM25 index).
+- **Everything else is hand-rolled — deliberately, to keep one static binary with no SDK sprawl:**
+  the CLI is a stdlib `switch os.Args[1]` (no cobra); the MCP server *and* client are dependency-free
+  (`internal/mcp` speaks streamable-HTTP directly); the model clients
+  (`internal/model/{anthropic,openai,gemini}`) are `net/http` against the raw provider APIs; and vector
+  recall is an in-process cosine + RRF fusion (`internal/embed`), not a vector-DB dependency.
 - Distribution: single binary + container image + **Helm chart** (`deploy/helm/runlore`).
 
 ## 12. Phased roadmap (read-only by default; autonomy ladder's lower rungs shipped)
@@ -464,8 +469,10 @@ internal/
   config/                      config + auto-discovery of providers
   investigate/                 the ReAct investigation loop + output contract
   whatchanged/                 revision history + go-git diffs → []Change (the spine)
-  catalog/                     syncer + local mirror + bleve/chromem-go index + kb_search
+  catalog/                     syncer + local mirror + bleve BM25 (+ opt-in vector) index + kb_search
   curator/                     confidence-routed Issue/PR crystallization → OKF entries
+  curate/                      Phase-2 backlog groomer (dedup, lifecycle, retirement sweeps)
+  outcome/                     outcome ledger — Beta-posterior decay over resolve/vote counts
   audit/                       append-only decision/tool-call log
   model/                       ModelProvider impls (anthropic, gemini, openai-compatible)
   notify/                      Notifier impls (slack, matrix; pagerduty/incident.io later)
@@ -502,8 +509,9 @@ docs/                          design.md, learning-loop.md, getting-started.md, 
    ```
    Non-GitHub hosts (GitLab, self-hosted) fall back to a scoped access token / deploy key — auth is
    per-host. Local `lore investigate` can use ambient git credentials instead of the App.
-2. **Embedding source** for vector search — defer vectors to a later phase (BM25-first keeps v1
-   dependency-free); when added, serve embeddings from the in-cluster vLLM.
+2. **Embedding model** for vector search — hybrid vector recall is now **implemented** (opt-in,
+   in-process cosine + RRF, embeddings from the in-cluster vLLM); the remaining question is which
+   embedding model to standardize on.
 3. **Multi-replica index** — v1 single-replica with a local index; later, shared PVC or per-replica
    rebuild from the mirror.
 4. **Noise control** — only novel/unresolved investigations open issues; instant-recall short-circuits

@@ -106,7 +106,7 @@
         <mxCell id="D3" value="Logs — VictoriaLogs" style="rounded=1;absoluteArcSize=1;arcSize=10;html=0;fontFamily=Helvetica;fontSize=14;fontColor=#1E293B;fillColor=#FFFFFF;strokeColor=#94A3B8;strokeWidth=1.5;" vertex="1" parent="1">
           <mxGeometry x="740" y="1310" width="290" height="70" as="geometry" />
         </mxCell>
-        <mxCell id="D4" value="Network —&#xa;Hubble / AWS VPC" style="rounded=1;absoluteArcSize=1;arcSize=10;html=0;fontFamily=Helvetica;fontSize=14;fontColor=#1E293B;fillColor=#FFFFFF;strokeColor=#94A3B8;strokeWidth=1.5;" vertex="1" parent="1">
+        <mxCell id="D4" value="Network —&#xa;Hubble / AWS VPC / GCP Firewall" style="rounded=1;absoluteArcSize=1;arcSize=10;html=0;fontFamily=Helvetica;fontSize=14;fontColor=#1E293B;fillColor=#FFFFFF;strokeColor=#94A3B8;strokeWidth=1.5;" vertex="1" parent="1">
           <mxGeometry x="1070" y="1310" width="290" height="80" as="geometry" />
         </mxCell>
         <mxCell id="D5" value="Cloud — AWS CloudTrail" style="rounded=1;absoluteArcSize=1;arcSize=10;html=0;fontFamily=Helvetica;fontSize=14;fontColor=#1E293B;fillColor=#FFFFFF;strokeColor=#94A3B8;strokeWidth=1.5;" vertex="1" parent="1">
