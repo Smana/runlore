@@ -44,7 +44,9 @@ jobs:
         working-directory: website
         # No `hugo mod get` — it would upgrade the pinned Hextra. The build
         # fetches the exact version from go.mod/go.sum automatically.
-        run: hugo --minify --gc --baseURL "${{ steps.pages.outputs.base_url }}/"
+        # baseURL comes from hugo.yaml (https://runlore.io/) — do NOT override with
+        # configure-pages' output, which resolves to http:// and yields http canonical URLs.
+        run: hugo --minify --gc
       - uses: actions/upload-pages-artifact@v3
         with:
           path: website/public
