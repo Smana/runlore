@@ -5,6 +5,8 @@ package app
 import (
 	"bytes"
 	"context"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -192,5 +194,40 @@ func TestShippedTranscriptToolsStillExist(t *testing.T) {
 		if !have[name] {
 			t.Errorf("shipped transcript calls tool %q, which no longer exists — re-record with `lore demo investigate --record %s`", name, demoDefaultTranscript)
 		}
+	}
+}
+
+// TestDemoNotifyRequiresAConfiguredNotifier pins --notify's failure mode.
+//
+// The demo's promise is that it touches nothing: no cluster, no API key, no
+// network. --notify is the single exception, so it must be impossible to ask for
+// delivery and silently get none — a demo that prints "done" while posting
+// nowhere is worse than one that refuses.
+func TestDemoNotifyRequiresAConfiguredNotifier(t *testing.T) {
+	dir := t.TempDir()
+	cfgPath := filepath.Join(dir, "runlore.yaml")
+	// A model is configured but NO notify block.
+	if err := os.WriteFile(cfgPath, []byte(`
+model:
+  provider: openai
+  base_url: http://unused.invalid/v1
+  model: replay
+`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	var out, errOut bytes.Buffer
+	err := runDemoInvestigateWithModel([]string{
+		"--scenarios", "../../examples/scenarios",
+		"--scenario", "harbor-chart-bump",
+		"--offline", "testdata/demo-transcript.json",
+		"--config", cfgPath,
+		"--notify",
+	}, &out, &errOut, nil)
+	if err == nil {
+		t.Fatal("--notify with no notifier configured must fail, not silently deliver nothing")
+	}
+	if !strings.Contains(err.Error(), "notify") {
+		t.Errorf("the error must name what is missing so the user can fix it: %v", err)
 	}
 }
