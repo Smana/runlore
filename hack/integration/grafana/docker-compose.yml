@@ -1,0 +1,28 @@
+# Local verification recipe for the `grafana` source (see
+# website/content/docs/integrations/grafana.md). Starts a real Grafana with a
+# provisioned alert rule and contact point wired to a `lore serve` running on
+# the host — no Prometheus/VictoriaMetrics needed, the rule queries the
+# built-in TestData datasource so it fires and resolves on a fixed pulse.
+#
+# Usage: see README.md in this directory.
+services:
+  grafana:
+    image: grafana/grafana:11.3.0
+    ports:
+      - "3000:3000"
+    environment:
+      GF_SECURITY_ADMIN_PASSWORD: admin
+      GF_AUTH_ANONYMOUS_ENABLED: "true"
+      GF_AUTH_ANONYMOUS_ORG_ROLE: Admin
+      # Read by provisioning/alerting/contactpoints.yml via Grafana's
+      # provisioning-file env expansion — keep this in sync with the
+      # `token_env` value in runlore.config.yaml.
+      GRAFANA_WEBHOOK_TOKEN: ${GRAFANA_WEBHOOK_TOKEN:-demo-token}
+    volumes:
+      - ./provisioning:/etc/grafana/provisioning:ro
+    extra_hosts:
+      # Linux Docker has no host.docker.internal by default; this makes the
+      # contact point's http://host.docker.internal:8080 reach the `lore serve`
+      # process running on the host (also works out of the box on Docker
+      # Desktop for macOS/Windows).
+      - "host.docker.internal:host-gateway"

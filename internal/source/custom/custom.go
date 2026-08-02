@@ -9,6 +9,8 @@ import (
 	"os"
 	"time"
 
+	"gopkg.in/yaml.v3"
+
 	"github.com/Smana/runlore/internal/config"
 	"github.com/Smana/runlore/internal/curator"
 	"github.com/Smana/runlore/internal/investigate"
@@ -126,6 +128,38 @@ func (s *Source) Decode(body []byte, h http.Header) (source.DecodeResult, error)
 	return out, nil
 }
 
+// Build compiles a `sources.custom`-shaped yaml.Node (its `instances:` map)
+// into a ready Source: parses and validates every instance's field mapping,
+// resolves each instance's token (and the shared server.webhook_token_env
+// fallback), and enforces actions.mode=auto's fail-closed token requirement.
+// Exported so an adapter that delegates to this mapper with baked-in
+// defaults (internal/source/grafana) reuses the same validation and
+// token-resolution path instead of re-implementing it.
+func Build(node yaml.Node, cfg *config.Config) (*Source, error) {
+	insts, err := parseConfig(node)
+	if err != nil {
+		return nil, err
+	}
+	shared := ""
+	if cfg != nil && cfg.Server.WebhookTokenEnv != "" {
+		shared = osGetenv(cfg.Server.WebhookTokenEnv)
+	}
+	for name, inst := range insts {
+		if inst.tokenEnv != "" {
+			inst.token = osGetenv(inst.tokenEnv)
+			if inst.token == "" {
+				return nil, fmt.Errorf("sources.custom.instances.%s: token_env %q is empty", name, inst.tokenEnv)
+			}
+		}
+		// Fail closed under mode=auto: an unattended executor must not
+		// accept unauthenticated vendor webhooks (PagerDuty precedent).
+		if cfg != nil && cfg.Actions.Mode == config.ActionAuto && inst.token == "" && shared == "" {
+			return nil, fmt.Errorf("actions.mode=auto requires a token for sources.custom.instances.%s (token_env or server.webhook_token_env)", name)
+		}
+	}
+	return &Source{instances: insts, shared: shared}, nil
+}
+
 func init() {
 	source.Register(source.Descriptor{
 		Name: "custom",
@@ -135,28 +169,7 @@ func init() {
 			if !ok {
 				return nil, nil // disabled: no sources.custom key
 			}
-			insts, err := parseConfig(node)
-			if err != nil {
-				return nil, err
-			}
-			shared := ""
-			if d.Cfg != nil && d.Cfg.Server.WebhookTokenEnv != "" {
-				shared = osGetenv(d.Cfg.Server.WebhookTokenEnv)
-			}
-			for name, inst := range insts {
-				if inst.tokenEnv != "" {
-					inst.token = osGetenv(inst.tokenEnv)
-					if inst.token == "" {
-						return nil, fmt.Errorf("sources.custom.instances.%s: token_env %q is empty", name, inst.tokenEnv)
-					}
-				}
-				// Fail closed under mode=auto: an unattended executor must not
-				// accept unauthenticated vendor webhooks (PagerDuty precedent).
-				if d.Cfg != nil && d.Cfg.Actions.Mode == config.ActionAuto && inst.token == "" && shared == "" {
-					return nil, fmt.Errorf("actions.mode=auto requires a token for sources.custom.instances.%s (token_env or server.webhook_token_env)", name)
-				}
-			}
-			return &Source{instances: insts, shared: shared}, nil
+			return Build(node, d.Cfg)
 		},
 	})
 }

@@ -1,0 +1,14 @@
+apiVersion: 1
+
+contactPoints:
+  - orgId: 1
+    name: runlore
+    receivers:
+      - uid: runlore-webhook
+        type: webhook
+        disableResolveMessage: false # a resolved alert must reach RunLore too
+        settings:
+          url: http://host.docker.internal:8080/webhook/grafana
+          httpMethod: POST
+          authorization_scheme: Bearer
+          authorization_credentials: ${GRAFANA_WEBHOOK_TOKEN}

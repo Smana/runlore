@@ -37,20 +37,24 @@ func repoRoot(t *testing.T) string {
 // the list.
 func TestShippedExampleConfigsLoad(t *testing.T) {
 	root := repoRoot(t)
-	shipped := []string{
-		filepath.Join(root, "hack", "demo.config.yaml"),
+	shipped := []struct {
+		path      string
+		wantMount string // sources.<name> that must be wired for the config to serve its purpose
+	}{
+		{filepath.Join(root, "hack", "demo.config.yaml"), "alertmanager"},
+		{filepath.Join(root, "hack", "integration", "grafana", "runlore.config.yaml"), "grafana"},
 	}
-	for _, path := range shipped {
-		t.Run(filepath.Base(path), func(t *testing.T) {
-			if _, err := os.Stat(path); err != nil {
+	for _, s := range shipped {
+		t.Run(filepath.Base(s.path), func(t *testing.T) {
+			if _, err := os.Stat(s.path); err != nil {
 				t.Fatalf("shipped config missing: %v", err)
 			}
-			c, err := Load(path)
+			c, err := Load(s.path)
 			if err != nil {
 				t.Fatalf("shipped config must load under the strict loader: %v", err)
 			}
-			if _, ok := c.Sources["alertmanager"]; !ok {
-				t.Errorf("expected sources.alertmanager to be wired (the demo fires alertmanager webhooks)")
+			if _, ok := c.Sources[s.wantMount]; !ok {
+				t.Errorf("expected sources.%s to be wired", s.wantMount)
 			}
 		})
 	}

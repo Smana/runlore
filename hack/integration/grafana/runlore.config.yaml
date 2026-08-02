@@ -1,0 +1,11 @@
+# Config for `lore serve` in the hack/integration/grafana/ local verification
+# recipe — committed + parse-tested (internal/config, see
+# TestShippedExampleConfigsLoad).
+sources:
+  grafana:
+    token_env: GRAFANA_WEBHOOK_TOKEN
+triggers:
+  incidents:
+    match:
+      severity: [critical, warning]
+    dedup: { window: 30m }
