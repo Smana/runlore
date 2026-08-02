@@ -19,10 +19,20 @@ import (
 
 // Case is one replayable incident.
 type Case struct {
-	Name     string            `yaml:"name"`
-	Prompt   string            `yaml:"prompt"` // the incident description (seeds the loop)
-	Tools    map[string]string `yaml:"tools"`  // tool name -> recorded evidence the tool returns
-	Expected Expected          `yaml:"expected"`
+	Name string `yaml:"name"`
+	// AlertTitle is the incident title a REAL trigger would carry (e.g. the
+	// Alertmanager alertname). Optional; DisplayName falls back to Name.
+	//
+	// It matters because Name is a file-ish slug and the loop uses DisplayName as the
+	// Request title. A full investigation overwrites that with a title the model
+	// writes, so the slug never shows — but INSTANT RECALL short-circuits before the
+	// model runs, so it delivers a card titled "harbor-chart-bump" where production
+	// would read "HarborProbeFailure". Same reason recall's query is weaker: the
+	// slug is most of what buildRecallQuery gets.
+	AlertTitle string            `yaml:"alert_title,omitempty"`
+	Prompt     string            `yaml:"prompt"` // the incident description (seeds the loop)
+	Tools      map[string]string `yaml:"tools"`  // tool name -> recorded evidence the tool returns
+	Expected   Expected          `yaml:"expected"`
 	// GroundTruth is optional live-scenario ground truth carried into replay. When
 	// present it unlocks the richer scoring the model-comparison benchmark reports:
 	// data-source coverage (expected_sources) and blind LLM-judge rubric grading

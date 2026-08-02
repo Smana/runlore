@@ -4,6 +4,11 @@
 # loop can be watched end to end. Reuses the eval Case shape:
 #   lore demo investigate --scenario harbor-chart-bump
 name: harbor-chart-bump
+# The title a real trigger would carry. `name` is a slug for --scenario and report
+# labels; a full investigation replaces it with a title the model writes, but instant
+# recall short-circuits before the model, so without this the recalled card is titled
+# "harbor-chart-bump" where production would read the alertname.
+alert_title: HarborProbeFailure
 prompt: |
   HarborProbeFailure (critical, prod, namespace apps): harbor-core readiness probes
   are failing and the Service is returning 503s.

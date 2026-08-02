@@ -149,8 +149,15 @@ func (c Case) FakeTools() []investigate.Tool {
 // unexported fields.
 func (c Case) Symptom() string { return c.Prompt }
 
-// DisplayName returns the case's name for demo/report labeling.
-func (c Case) DisplayName() string { return c.Name }
+// DisplayName returns the incident title for demo/report labeling: the case's
+// alert_title when set, else its name. See Case.AlertTitle for why the distinction
+// is load-bearing on the instant-recall path.
+func (c Case) DisplayName() string {
+	if c.AlertTitle != "" {
+		return c.AlertTitle
+	}
+	return c.Name
+}
 
 // AffectedWorkload returns the case's affected workload (zero when unset), so the demo
 // can seed the Request.Workload exactly as runOne does.

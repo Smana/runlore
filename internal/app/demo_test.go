@@ -263,3 +263,33 @@ func TestDemoCatalogWiresRecall(t *testing.T) {
 		t.Errorf("recall was never consulted despite --catalog:\n%s", errOut.String())
 	}
 }
+
+// TestDemoScenarioSelectorIsTheSlug pins --scenario to the case's name, not its
+// display title.
+//
+// alert_title exists so a recalled card reads "HarborProbeFailure" rather than a
+// file slug — recall short-circuits before the model, so it delivers the REQUEST
+// title verbatim. Routing DisplayName into the selector as well broke
+// `--scenario harbor-chart-bump` outright: the lookup started demanding the alert
+// title, and the error even advertised it as the available id.
+func TestDemoScenarioSelectorIsTheSlug(t *testing.T) {
+	var out, errOut bytes.Buffer
+	err := runDemoInvestigateWithModel([]string{
+		"--scenarios", "../../examples/scenarios",
+		"--scenario", "harbor-chart-bump", // the slug, NOT "HarborProbeFailure"
+		"--offline", "testdata/demo-transcript.json",
+	}, &out, &errOut, nil)
+	if err != nil {
+		t.Fatalf("--scenario must select by slug: %v\nstderr:\n%s", err, errOut.String())
+	}
+	// And the incident the loop is handed carries the alert title, so a recalled
+	// card is labelled the way a real trigger would be.
+	//
+	// Anchored to the demo's own header, which is printed FROM DisplayName. A bare
+	// substring check passes vacuously: the scenario's prompt already contains
+	// "HarborProbeFailure", so it held even with alert_title removed entirely.
+	if !strings.Contains(out.String(), `investigating "HarborProbeFailure"`) {
+		t.Errorf("the request title must be the alert_title, or a recalled card is "+
+			"labelled with a file slug:\n%s", out.String())
+	}
+}
