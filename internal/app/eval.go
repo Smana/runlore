@@ -5,9 +5,11 @@ package app
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
+	"io/fs"
 	"log/slog"
 	"os"
 	"os/exec"
@@ -38,34 +40,48 @@ func RunEval(args []string) error {
 	if len(args) > 0 && args[0] == "scorecard" {
 		return RunEvalScorecard(args[1:])
 	}
-	fs := flag.NewFlagSet("eval", flag.ContinueOnError)
-	cfgPath := fs.String("config", "runlore.yaml", "path to config file")
-	casesDir := fs.String("cases", "examples/eval", "directory of replay cases")
-	live := fs.Bool("live", false, "live-fire mode: run scenarios against the real cluster")
-	scnDir := fs.String("scenarios", "eval/scenarios", "directory of live-fire scenarios")
-	recordDir := fs.String("record", "eval/fixtures", "where to write recorded runs (replay corpus)")
-	reportDir := fs.String("report-dir", "eval/reports", "where to write the campaign report")
-	prevReport := fs.String("baseline", "", "previous report JSON for regression diff")
-	n := fs.Int("n", 1, "runs per case: replay defaults to 1, live to 10 when unset")
-	failUnder := fs.Float64("fail-under", 0, "fail (non-zero exit) when campaign pass-rate < this (0 = no gate)")
-	stamp := fs.String("stamp", "", "report timestamp (RFC3339); blank = now")
-	jProvider := fs.String("judge-provider", "", "judge model provider (default: investigation model)")
-	jBaseURL := fs.String("judge-base-url", "", "judge model base URL")
-	jModel := fs.String("judge-model", "", "judge model name")
-	jKeyEnv := fs.String("judge-api-key-env", "", "env var holding the judge API key")
-	compare := fs.String("compare", "", "path to a model-comparison spec (benchmark several models over the replay suite)")
-	if err := fs.Parse(args); err != nil {
+	flags := flag.NewFlagSet("eval", flag.ContinueOnError)
+	cfgPath := flags.String("config", "runlore.yaml", "path to config file")
+	casesDir := flags.String("cases", "examples/eval", "directory of replay cases")
+	live := flags.Bool("live", false, "live-fire mode: run scenarios against the real cluster")
+	scnDir := flags.String("scenarios", "eval/scenarios", "directory of live-fire scenarios")
+	recordDir := flags.String("record", "eval/fixtures", "where to write recorded runs (replay corpus)")
+	reportDir := flags.String("report-dir", "eval/reports", "where to write the campaign report")
+	prevReport := flags.String("baseline", "", "previous report JSON for regression diff")
+	n := flags.Int("n", 1, "runs per case: replay defaults to 1, live to 10 when unset")
+	failUnder := flags.Float64("fail-under", 0, "fail (non-zero exit) when campaign pass-rate < this (0 = no gate)")
+	stamp := flags.String("stamp", "", "report timestamp (RFC3339); blank = now")
+	jProvider := flags.String("judge-provider", "", "judge model provider (default: investigation model)")
+	jBaseURL := flags.String("judge-base-url", "", "judge model base URL")
+	jModel := flags.String("judge-model", "", "judge model name")
+	jKeyEnv := flags.String("judge-api-key-env", "", "env var holding the judge API key")
+	compare := flags.String("compare", "", "path to a model-comparison spec (benchmark several models over the replay suite)")
+	if err := flags.Parse(args); err != nil {
 		return err
 	}
-	nExplicit := false
-	fs.Visit(func(f *flag.Flag) {
-		if f.Name == "n" {
+	nExplicit, cfgExplicit := false, false
+	flags.Visit(func(f *flag.Flag) {
+		switch f.Name {
+		case "n":
 			nExplicit = true
+		case "config":
+			cfgExplicit = true
 		}
 	})
 	cfg, err := config.Load(*cfgPath)
 	if err != nil {
-		return err
+		// --compare's spec carries its own per-entry models (and, via judge:, often its
+		// own judge), so it is the one path that can run with no runlore.yaml at all.
+		// Forgive ONLY that exact case: the default path (--config not given) AND the
+		// file simply absent. An explicitly-passed --config must still hard-fail (a
+		// typo'd path must never be silently ignored), and a file that exists but fails
+		// to parse/validate must still hard-fail on the default path too (it is broken,
+		// not absent) — errors.Is(fs.ErrNotExist) is what tells "absent" apart from
+		// "broken".
+		if *compare == "" || cfgExplicit || !errors.Is(err, fs.ErrNotExist) {
+			return err
+		}
+		cfg = &config.Config{}
 	}
 	// The comparison spec carries its own per-entry models (and optionally its own
 	// judge), so it does NOT require a configured config.model — it only borrows the

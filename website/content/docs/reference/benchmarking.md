@@ -30,7 +30,10 @@ lore eval --compare eval/compare.example.yaml --cases examples/eval -n 3
 This benchmarks every model in the spec against the same replay cases, grades each
 run with one fixed judge, and writes an aggregated report to
 `eval/reports/<stamp>-compare.md` (human) and `.json` (machine). It needs **no
-`config.model`** — the spec carries its own per-entry models and judge.
+`runlore.yaml` at all** as long as the spec's `judge:` block supplies the judge (or
+you pass `--judge-*` flags) — the spec already carries its own per-entry models.
+Without a `judge:` block, `--judge-*` flags, or a config file's `config.model`,
+`--compare` fails fast with a clear error instead of silently grading nothing.
 
 ### The comparison spec
 
@@ -67,8 +70,11 @@ gemini is rejected), `prices` (optional; omit to omit the cost column for that
 entry). Unknown keys are rejected so a typo in a published spec fails loudly.
 
 The **judge** precedence is: `--judge-*` flags → the spec's `judge:` block →
-`config.model`. Keeping the judge in the spec makes a published comparison
-self-describing — the judge disclosure travels with the results.
+`config.model` (only checked when a config file is loaded). Keeping the judge in
+the spec makes a published comparison self-describing — the judge disclosure
+travels with the results — and it's what lets `--compare` run with no
+`runlore.yaml` present. If none of the three supplies a judge, the command errors
+instead of quietly disabling rubric grading.
 
 ## The report
 

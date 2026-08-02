@@ -4,8 +4,10 @@ package app
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -236,5 +238,208 @@ models:
 	}
 	if !strings.Contains(string(md), "est. cost (USD)") || !strings.Contains(string(md), "openai/mock-judge") {
 		t.Fatalf("markdown missing expected columns:\n%s", md)
+	}
+}
+
+// TestRunEvalCompareNoConfigFile drives the documented one-liner
+// (`lore eval --compare ... --cases ... -n 3`) through the real CLI entry point
+// (RunEval, not RunEvalCompare directly) from a working directory that has NO
+// runlore.yaml at all. The spec carries its own judge block, so — per
+// benchmarking.md — this must succeed: config.Load's "file absent" error must be
+// forgiven for --compare on the untouched default --config path.
+func TestRunEvalCompareNoConfigFile(t *testing.T) {
+	srv := mockModelServer(t)
+	base := srv.URL + "/v1"
+
+	dir := t.TempDir()
+	casesDir := filepath.Join(dir, "cases")
+	if err := os.MkdirAll(casesDir, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	writeCompareCase(t, casesDir)
+
+	spec := fmt.Sprintf(`
+judge:
+  provider: openai
+  base_url: %s
+  model: mock-judge
+models:
+  - name: model-a
+    provider: openai
+    base_url: %s
+    model: mock-a
+`, base, base)
+	comparePath := filepath.Join(dir, "compare.yaml")
+	if err := os.WriteFile(comparePath, []byte(spec), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	reportDir := filepath.Join(dir, "reports")
+
+	// A fresh, empty working directory: no runlore.yaml anywhere near it. RunEval's
+	// --config default ("runlore.yaml") resolves relative to cwd, so this is what
+	// actually exercises the "no config file present" branch — cwd must not resolve
+	// to the config.Load call at all.
+	t.Chdir(t.TempDir())
+
+	err := RunEval([]string{
+		"--compare", comparePath,
+		"--cases", casesDir,
+		"--report-dir", reportDir,
+		"--stamp", "2026-07-02T00:00:00Z",
+		"-n", "1",
+	})
+	if err != nil {
+		t.Fatalf("RunEval with no runlore.yaml present: %v", err)
+	}
+
+	if _, err := os.Stat(filepath.Join(reportDir, "2026-07-02T00-00-00Z-compare.json")); err != nil {
+		t.Fatalf("report not written: %v", err)
+	}
+}
+
+// TestRunEvalCompareExplicitConfigMissingErrors asserts that a typo'd,
+// explicitly-passed --config still hard-fails even on the --compare path: only the
+// untouched DEFAULT path forgives an absent config file, never an explicit one.
+func TestRunEvalCompareExplicitConfigMissingErrors(t *testing.T) {
+	dir := t.TempDir()
+	casesDir := filepath.Join(dir, "cases")
+	if err := os.MkdirAll(casesDir, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	writeCompareCase(t, casesDir)
+
+	spec := `
+judge:
+  provider: openai
+  base_url: http://unused
+  model: mock-judge
+models:
+  - name: model-a
+    provider: openai
+    base_url: http://unused
+    model: mock-a
+`
+	comparePath := filepath.Join(dir, "compare.yaml")
+	if err := os.WriteFile(comparePath, []byte(spec), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	err := RunEval([]string{
+		"--config", filepath.Join(dir, "does-not-exist.yaml"),
+		"--compare", comparePath,
+		"--cases", casesDir,
+		"--report-dir", filepath.Join(dir, "reports"),
+	})
+	if err == nil {
+		t.Fatal("explicit --config pointing at a missing file must still error")
+	}
+	if !errors.Is(err, fs.ErrNotExist) {
+		t.Fatalf("want a not-exist error, got: %v", err)
+	}
+}
+
+// TestRunEvalCompareDefaultConfigMalformedErrors asserts that a runlore.yaml that
+// EXISTS but fails to parse is never silently treated as "absent": only a missing
+// file is forgiven on the default --config path, never a broken one.
+func TestRunEvalCompareDefaultConfigMalformedErrors(t *testing.T) {
+	dir := t.TempDir()
+	casesDir := filepath.Join(dir, "cases")
+	if err := os.MkdirAll(casesDir, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	writeCompareCase(t, casesDir)
+
+	spec := `
+judge:
+  provider: openai
+  base_url: http://unused
+  model: mock-judge
+models:
+  - name: model-a
+    provider: openai
+    base_url: http://unused
+    model: mock-a
+`
+	comparePath := filepath.Join(dir, "compare.yaml")
+	if err := os.WriteFile(comparePath, []byte(spec), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	workDir := t.TempDir()
+	// Unknown field: KnownFields(true) rejects it, so this is a parse error, not a
+	// missing-file error — errors.Is(err, fs.ErrNotExist) must be false for it.
+	if err := os.WriteFile(filepath.Join(workDir, "runlore.yaml"), []byte("model:\n  bogus_field: true\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Chdir(workDir)
+
+	err := RunEval([]string{
+		"--compare", comparePath,
+		"--cases", casesDir,
+		"--report-dir", filepath.Join(dir, "reports"),
+	})
+	if err == nil {
+		t.Fatal("malformed default runlore.yaml must still error, not be silently skipped")
+	}
+	if errors.Is(err, fs.ErrNotExist) {
+		t.Fatalf("a malformed file must not look like a missing one: %v", err)
+	}
+}
+
+// TestRunEvalCompareNoJudgeSourceErrors asserts the third precedence rule from
+// benchmarking.md end to end: with no --judge-* flags, no spec judge: block, and a
+// zero-value config (no config.model), --compare must fail with a clear,
+// actionable error instead of silently disabling rubric grading.
+func TestRunEvalCompareNoJudgeSourceErrors(t *testing.T) {
+	dir := t.TempDir()
+	casesDir := filepath.Join(dir, "cases")
+	if err := os.MkdirAll(casesDir, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	writeCompareCase(t, casesDir)
+
+	// No judge: block at all.
+	spec := `
+models:
+  - name: model-a
+    provider: openai
+    base_url: http://127.0.0.1:0
+    model: mock-a
+`
+	comparePath := filepath.Join(dir, "compare.yaml")
+	if err := os.WriteFile(comparePath, []byte(spec), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	// Judge resolution happens before any per-entry model call, so this must fail
+	// fast without ever dialing the (deliberately unreachable) entry endpoint.
+	err := RunEvalCompare(&config.Config{}, comparePath, casesDir, filepath.Join(dir, "reports"), "2026-07-02T00:00:00Z", 1, "", "", "", "")
+	if err == nil {
+		t.Fatal("compare with no judge source (no flags, no spec judge, no config.model) must error")
+	}
+	if !strings.Contains(err.Error(), "judge") {
+		t.Fatalf("error should explain the missing judge, got: %v", err)
+	}
+}
+
+// TestRunEvalNonCompareStillRequiresConfig locks down that the --compare carve-out
+// does not leak into the plain `lore eval` path: with no runlore.yaml present and
+// no --compare flag, RunEval must fail exactly as it always has.
+func TestRunEvalNonCompareStillRequiresConfig(t *testing.T) {
+	dir := t.TempDir()
+	casesDir := filepath.Join(dir, "cases")
+	if err := os.MkdirAll(casesDir, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	writeCompareCase(t, casesDir)
+
+	t.Chdir(t.TempDir())
+
+	err := RunEval([]string{"--cases", casesDir})
+	if err == nil {
+		t.Fatal("plain eval with no runlore.yaml present must still error")
+	}
+	if !errors.Is(err, fs.ErrNotExist) {
+		t.Fatalf("want a not-exist error from config.Load, got: %v", err)
 	}
 }

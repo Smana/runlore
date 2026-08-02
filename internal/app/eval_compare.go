@@ -41,7 +41,10 @@ func RunEvalCompare(cfg *config.Config, comparePath, casesDir, reportDir, stamp 
 		return fmt.Errorf("no eval cases found in %s", casesDir)
 	}
 
-	judge, judgeLabel := buildCompareJudge(cfg, spec.Judge, jProvider, jBaseURL, jModel, jKeyEnv)
+	judge, judgeLabel, err := buildCompareJudge(cfg, spec.Judge, jProvider, jBaseURL, jModel, jKeyEnv)
+	if err != nil {
+		return err
+	}
 	log := slog.New(slog.NewTextHandler(io.Discard, nil))
 	maxTokens := effectiveMaxTokens(cfg.Model.MaxTokens)
 	ctx := context.Background()
@@ -91,22 +94,25 @@ func RunEvalCompare(cfg *config.Config, comparePath, casesDir, reportDir, stamp 
 
 // buildCompareJudge resolves the fixed judge for a comparison run, and returns a
 // "provider/model" disclosure label for the report. Precedence: --judge-* flags,
-// then the spec's judge block, then the configured investigation model. A nil
-// judge (no flags, no spec judge, no config model) disables rubric grading —
-// pass/coverage/token columns still populate.
-func buildCompareJudge(cfg *config.Config, specJudge *eval.JudgeSpec, jProvider, jBaseURL, jModel, jKeyEnv string) (eval.Judge, string) {
+// then the spec's judge block, then the configured investigation model. This is
+// documented as the ONLY way `--compare` runs without a runlore.yaml (the spec
+// supplies its own judge), so unlike a plain judge-optional benchmark, silently
+// falling back to "no judge" here would contradict that promise — none of the
+// three sources present is a hard error, not a quiet "rubric grading disabled".
+func buildCompareJudge(cfg *config.Config, specJudge *eval.JudgeSpec, jProvider, jBaseURL, jModel, jKeyEnv string) (eval.Judge, string, error) {
 	if jModel != "" || jProvider != "" {
-		return eval.ModelJudge{Model: BuildJudgeModel(cfg, jProvider, jBaseURL, jModel, jKeyEnv)}, providerModel(jProvider, jModel)
+		return eval.ModelJudge{Model: BuildJudgeModel(cfg, jProvider, jBaseURL, jModel, jKeyEnv)}, providerModel(jProvider, jModel), nil
 	}
 	if specJudge != nil {
 		m := NewModelClient(specJudge.Provider, specJudge.BaseURL, specJudge.Model,
 			os.Getenv(specJudge.APIKeyEnv), effectiveMaxTokens(cfg.Model.MaxTokens), "", "")
-		return eval.ModelJudge{Model: m}, providerModel(specJudge.Provider, specJudge.Model)
+		return eval.ModelJudge{Model: m}, providerModel(specJudge.Provider, specJudge.Model), nil
 	}
 	if ModelConfigured(cfg) {
-		return eval.ModelJudge{Model: BuildJudgeModel(cfg, "", "", "", "")}, providerModel(cfg.Model.Provider, cfg.Model.Model)
+		return eval.ModelJudge{Model: BuildJudgeModel(cfg, "", "", "", "")}, providerModel(cfg.Model.Provider, cfg.Model.Model), nil
 	}
-	return nil, "(none — rubric grading disabled)"
+	return nil, "", fmt.Errorf("compare requires a judge: set --judge-model (or --judge-provider), " +
+		"add a judge: block to the compare spec, or set config.model in the config file")
 }
 
 // providerModel renders a "provider/model" label, defaulting an empty provider to
