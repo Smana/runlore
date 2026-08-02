@@ -2,14 +2,19 @@
 # Only the model block is needed — replay scenarios supply their own evidence.
 # Set the repo secret RUNLORE_EVAL_API_KEY to the API key for this provider.
 model:
-  provider: anthropic
-  model: claude-haiku-4-5-20251001
+  provider: openai
+  base_url: https://api.z.ai/api/paas/v4   # GLM, OpenAI-compatible
+  model: glm-4.5-air
   api_key_env: RUNLORE_EVAL_API_KEY
-  # Optional: token rates (USD per MILLION tokens) so the published scorecard
-  # reports an honest per-run cost. claude-haiku-4-5 list prices, 2026-07
-  # (same figures as eval/compare.example.yaml). Wrong rates only skew the
+  # glm-4.5-air list prices (USD per MILLION tokens), checked 2026-08-02, so the
+  # published scorecard reports an honest per-run cost. Wrong rates only skew the
   # cost figure, never the pass/fail scoring.
+  #
+  # cached_input is set equal to the input rate rather than to a real cache
+  # discount, which we have not confirmed for this model. That can only ever
+  # OVERstate the published cost — the safe direction for a number whose whole
+  # value is that a skeptic can check it.
   pricing:
-    input_usd_per_mtok: 1.00
-    output_usd_per_mtok: 5.00
-    cached_input_usd_per_mtok: 0.10
+    input_usd_per_mtok: 0.20
+    output_usd_per_mtok: 1.10
+    cached_input_usd_per_mtok: 0.20
