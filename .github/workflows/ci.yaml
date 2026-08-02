@@ -34,13 +34,17 @@ jobs:
         run: test -z "$(gofmt -l .)"
       - name: test (with race detector)
         run: go test -race ./...
-      - name: validate the knowledge commons (OKF merge gate)
+      - name: validate the shipped runbook seeds (OKF merge gate)
         # `lore validate-kb` exits non-zero on any structural error, so an entry the
-        # loader would reject cannot land in the bundle RunLore ships as day-one
-        # knowledge. Built from THIS checkout rather than a pinned release: the
-        # validator and the entries move together, and a PR touching both must be
-        # judged against its own gate.
-        run: go run ./cmd/lore validate-kb examples/kb-commons
+        # loader would reject cannot land in what RunLore ships as example knowledge.
+        # Built from THIS checkout rather than a pinned release: the validator and the
+        # entries move together, and a PR touching both must be judged against its own
+        # gate.
+        #
+        # The knowledge commons is NOT validated here — it lives in
+        # github.com/Smana/runlore-kb-commons and runs this same validator in its own
+        # CI. A copy here would be a fork that drifts, not a second safety net.
+        run: go run ./cmd/lore validate-kb examples/runbooks
       - name: govulncheck
         # Checks the module graph against the Go vulnerability DB; fails on a
         # known-vulnerable, reachable call path. Run via `go run` to avoid a
