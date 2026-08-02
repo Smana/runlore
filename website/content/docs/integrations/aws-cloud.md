@@ -46,6 +46,21 @@ kubectl -n runlore logs deploy/runlore | grep -E 'tool=cloud_'
 - If the AWS client fails to build (bad region, no reachable credential chain), RunLore logs a warning
   and disables the cloud tools rather than failing startup — the investigation loop still runs without
   them.
+- **Cilium clusters only — a known NetworkPolicy trap.** The EKS Pod Identity credential endpoint runs
+  on the node **host network** (`169.254.170.23:80`), which Cilium classifies as the `host` entity. A
+  plain Kubernetes `NetworkPolicy` **cannot** match that entity, so the SDK's credential fetch is
+  silently dropped and the cloud tools just hang. Set `networkPolicy.awsPodIdentity: true` (chart
+  value) to render a `CiliumNetworkPolicy` that allows it:
+  ```yaml
+  networkPolicy:
+    enabled: true
+    awsPodIdentity: true   # CiliumNetworkPolicy: egress to host:80 for the Pod Identity endpoint
+  ```
+  Confirm with Hubble if calls hang: `hubble observe --pod runlore/<pod> --verdict DROPPED` showing
+  `169.254.170.23:80 (host) … DROPPED` is this exact issue.
+- **Memory** — a thorough run (a "pro" model over the full step budget with the cloud tools enabled) is
+  the memory peak; the chart default limit is `1.5Gi`. Lower it only if you use a smaller model / fewer
+  tools.
 - Complements, doesn't replace, [Source repos]({{< relref "source-repos.md" >}}) and GitOps
   `what_changed`: this is the layer for changes that happened **outside** your GitOps pipeline
   entirely.
