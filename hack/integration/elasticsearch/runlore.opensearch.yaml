@@ -1,0 +1,8 @@
+# Config for `lore investigate` against the OpenSearch container started by
+# hack/integration/elasticsearch/docker-compose.yml. No auth (security plugin
+# disabled in the compose file) — a real deployment sets token_env/headers,
+# see website/content/docs/integrations/opensearch.md.
+logs:
+  url: http://localhost:9201
+  provider: opensearch
+  index: logs-*

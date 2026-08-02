@@ -482,14 +482,25 @@ func TestLogsBackendSelection(t *testing.T) {
 		http.NotFound(w, r)
 	}))
 	defer vlSrv.Close()
+	esSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/loki/api/v1/status/buildinfo" {
+			http.NotFound(w, r)
+			return
+		}
+		_, _ = io.WriteString(w, `{"version":{"number":"8.11.3"}}`)
+	}))
+	defer esSrv.Close()
 
 	tests := []struct {
 		name, url, pin, wantDialect string
 	}{
 		{"auto-detect loki", lokiSrv.URL, "", investigate.DialectLogQL},
 		{"auto-detect fail-safe victorialogs", vlSrv.URL, "", investigate.DialectLogsQL},
+		{"auto-detect elasticsearch", esSrv.URL, "", investigate.DialectElastic},
 		{"pinned loki skips probe", vlSrv.URL, "loki", investigate.DialectLogQL},
 		{"pinned victorialogs skips probe", lokiSrv.URL, "victorialogs", investigate.DialectLogsQL},
+		{"pinned elasticsearch skips probe", vlSrv.URL, "elasticsearch", investigate.DialectElastic},
+		{"pinned opensearch skips probe", vlSrv.URL, "opensearch", investigate.DialectElastic},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {

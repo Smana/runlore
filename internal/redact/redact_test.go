@@ -41,6 +41,7 @@ func TestSecretsMasks(t *testing.T) {
 		{"secret env", "DB_SECRET=s3cr3t-value-xyz", "s3cr3t-value-xyz", ""},
 		{"url creds", "postgres://app:sup3rs3cret@db.svc:5432/x", "sup3rs3cret", "postgres://app:"},
 		{"bearer", "Authorization: Bearer abcDEF123456ghiJKL789", "abcDEF123456ghiJKL789", "Bearer"},
+		{"elasticsearch apikey auth header", "Authorization: ApiKey VnVhQ2ZHY0JDZGJrUW0=", "VnVhQ2ZHY0JDZGJrUW0=", "ApiKey"},
 		{"private key", "k:\n-----BEGIN RSA PRIVATE KEY-----\nMIIBwetcetc\n-----END RSA PRIVATE KEY-----\n", "MIIBwetcetc", ""},
 	}
 	for _, tc := range cases {

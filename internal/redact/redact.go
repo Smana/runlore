@@ -70,9 +70,13 @@ var rules = []rule{
 	{regexp.MustCompile(`\bAIza[0-9A-Za-z_-]{35}\b`), mask},
 	// Credentials in a URL: scheme://user:PASSWORD@host → mask the password.
 	{regexp.MustCompile(`([a-zA-Z][a-zA-Z0-9+.\-]*://[^\s:@/]+:)[^\s@/]+(@)`), `${1}[REDACTED]${2}`},
-	// HTTP auth header tokens — keep the scheme, mask the credential.
+	// HTTP auth header tokens — keep the scheme, mask the credential. ApiKey is
+	// Elasticsearch/OpenSearch's own auth scheme (Authorization: ApiKey <base64
+	// id:key>) — the documented workaround for an ES API key, which (unlike a
+	// bearer token) has no recognizable prefix of its own to match on.
 	{regexp.MustCompile(`(?i)(bearer\s+)[A-Za-z0-9._~+/=-]{12,}`), `${1}[REDACTED]`},
 	{regexp.MustCompile(`(?i)(basic\s+)[A-Za-z0-9+/=]{8,}`), `${1}[REDACTED]`},
+	{regexp.MustCompile(`(?i)(apikey\s+)[A-Za-z0-9+/=]{8,}`), `${1}[REDACTED]`},
 	// Sensitive key = value / key: value (the value is masked, the key kept). An
 	// env-var-style prefix (DB_SECRET, OPENAI_API_KEY) is allowed before the keyword.
 	{regexp.MustCompile(`(?i)([\w.\-]*(?:password|passwd|secret|api[_-]?key|access[_-]?key|secret[_-]?key|private[_-]?key|client[_-]?secret|token|credentials?|dsn|connection[_-]?string)"?\s*[:=]\s*"?)([^\s"',}]+)`), `${1}[REDACTED]`},

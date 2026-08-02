@@ -728,7 +728,7 @@ func TestVectorCacheConfigDefaults(t *testing.T) {
 // philosophy: a typo'd key never fails silently), because a silent fallback to
 // victorialogs against a Loki endpoint would break every logs tool at runtime.
 func TestLogsProviderValidate(t *testing.T) {
-	for _, ok := range []string{"", "victorialogs", "loki"} {
+	for _, ok := range []string{"", "victorialogs", "loki", "elasticsearch", "opensearch"} {
 		c := &Config{}
 		c.Logs.Provider = ok
 		if err := c.Validate(); err != nil {
