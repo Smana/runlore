@@ -49,7 +49,9 @@ func BuildModelAndTools(ctx context.Context, cfg *config.Config, gp providers.Gi
 		apiKey = os.Getenv(cfg.Model.APIKeyEnv)
 	}
 	model := BuildModel(cfg, apiKey)
-	forgeTok := BuildForgeTokenSource(cfg, log)
+	// Catalog sync reads the KB repo, so it follows forge.provider — not the
+	// GitHub-App-only source used by the curate/sweep/differ paths.
+	forgeTok := BuildKBTokenSource(cfg, log)
 	var tools []investigate.Tool
 	if gp != nil {
 		tools = append(tools, investigate.WhatChangedTool{GitOps: gp})

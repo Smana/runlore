@@ -109,9 +109,23 @@ func TestOpenPR(t *testing.T) {
 		t.Fatalf("ref = %q", ref.URL)
 	}
 
-	// branch creation is folded into the commit call via start_branch
-	if commitBody["branch"] == "" || commitBody["start_branch"] != "main" {
-		t.Fatalf("commit body missing branch/start_branch: %+v", commitBody)
+	// Branch creation is folded into the commit call via start_branch.
+	//
+	// Asserted as a typed string, not `commitBody["branch"] == ""`: that compares an
+	// `any` against a string, so a MISSING key (nil) is not equal to "" and the check
+	// silently passes. The property that actually matters is that the entry lands on a
+	// fresh runlore branch — a regression setting branch: c.baseBranch would commit the
+	// draft straight to main, bypassing the review gate that is the whole point of the
+	// forge write surface.
+	branch, _ := commitBody["branch"].(string)
+	if !strings.HasPrefix(branch, "runlore/kb-") {
+		t.Fatalf("commit must target a fresh runlore/kb-* branch, got %q (body: %+v)", branch, commitBody)
+	}
+	if branch == "main" || branch == commitBody["start_branch"] {
+		t.Fatalf("entry must never be committed to the base branch, got branch=%q start_branch=%v", branch, commitBody["start_branch"])
+	}
+	if commitBody["start_branch"] != "main" {
+		t.Fatalf("commit must branch from the configured base, got start_branch=%v", commitBody["start_branch"])
 	}
 	actions, ok := commitBody["actions"].([]any)
 	if !ok || len(actions) == 0 {
@@ -776,5 +790,60 @@ func TestOpenPRSurvivesBundleReadFailure(t *testing.T) {
 	}
 	if len(actions) != 1 {
 		t.Fatalf("want the entry action alone when bundle reads fail, got %+v", actions)
+	}
+}
+
+// TestWritesAreNotRetried: DoWithRetry retries on network errors, 429 and 5xx —
+// all of which can fire AFTER the server already applied a write. A proxy
+// returning 504 on a landed POST /repository/commits used to make RunLore re-send
+// it with start_branch against a branch that now exists; GitLab answers 400
+// "A branch called ... already exists" and OpenPR reports failure for a commit
+// that SUCCEEDED, leaving the drafted entry on an orphan branch with no MR.
+func TestWritesAreNotRetried(t *testing.T) {
+	var posts int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if isBundleRead(r) {
+			bundleAbsent(w)
+			return
+		}
+		if r.Method == http.MethodPost {
+			posts++
+		}
+		w.WriteHeader(http.StatusBadGateway) // retryable status
+		_, _ = w.Write([]byte(`{"message":"gateway"}`))
+	}))
+	defer srv.Close()
+
+	c := New(srv.URL, "o/r", "main", staticToken("tok"))
+	_, _ = c.OpenPR(context.Background(), providers.KBEntry{Type: "Incident", Title: "db outage", Body: "## body"})
+	if posts != 1 {
+		t.Fatalf("a write must be attempted exactly once, got %d attempts — retrying a POST risks applying it twice", posts)
+	}
+}
+
+// TestTokenNeverAppearsInErrors: statusError embeds the response body, which is
+// server-controlled. Nothing else pins that the credential stays out of errors
+// that get logged and surfaced to operators.
+func TestTokenNeverAppearsInErrors(t *testing.T) {
+	const secret = "glpat-SUPERSECRETVALUE1234"
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if isBundleRead(r) {
+			bundleAbsent(w)
+			return
+		}
+		w.WriteHeader(http.StatusUnauthorized)
+		// A hostile/naive server echoing the credential back must not get it
+		// laundered into our error text.
+		_, _ = w.Write([]byte(`{"message":"401 Unauthorized for token ` + secret + `"}`))
+	}))
+	defer srv.Close()
+
+	c := New(srv.URL, "o/r", "main", staticToken(secret))
+	_, err := c.OpenPR(context.Background(), providers.KBEntry{Type: "Incident", Title: "db outage", Body: "## body"})
+	if err == nil {
+		t.Fatal("want an error from a 401")
+	}
+	if strings.Contains(err.Error(), secret) {
+		t.Fatalf("the token leaked into an error operators will see and log:\n%s", err.Error())
 	}
 }

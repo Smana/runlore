@@ -56,7 +56,7 @@ func RunCatalogSync(args []string) error {
 		if t := os.Getenv(env); t != "" {
 			token = func(context.Context) (string, error) { return t, nil }
 		}
-	} else if ft := BuildForgeTokenSource(cfg, log); ft != nil {
+	} else if ft := BuildKBTokenSource(cfg, log); ft != nil {
 		token = catalog.TokenFunc(ft)
 	}
 	syncer := &catalog.Syncer{URL: g.URL, Branch: g.Branch, Dir: dir, Token: token, Log: log}

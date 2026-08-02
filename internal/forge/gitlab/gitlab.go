@@ -22,6 +22,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"net/url"
 	"regexp"
@@ -49,6 +50,24 @@ type Client struct {
 	baseBranch  string
 	token       TokenFunc
 	http        *http.Client
+	// Log reports pagination degradation. Optional: nil means the warnings are
+	// dropped, which keeps New's signature stable for callers that don't have a
+	// logger. WithLogger attaches one.
+	log *slog.Logger
+}
+
+// WithLogger attaches a logger used to report silent-degradation cases (see
+// listPaged). Returns the receiver so it can be chained onto New.
+func (c *Client) WithLogger(l *slog.Logger) *Client {
+	c.log = l
+	return c
+}
+
+// warn logs when a logger is attached, and is a no-op otherwise.
+func (c *Client) warn(msg string, args ...any) {
+	if c.log != nil {
+		c.log.Warn(msg, args...)
+	}
 }
 
 // DefaultBaseURL is the public gitlab.com instance root. Override for a
@@ -145,7 +164,24 @@ func (c *Client) request(ctx context.Context, method, path string, body any) ([]
 			return nil, nil, err
 		}
 	}
-	resp, err := httpx.DoWithRetry(ctx, c.http, 3, func() (*http.Request, error) {
+	// Retry ONLY idempotent requests. DoWithRetry retries on a network error, 429
+	// and 5xx — all of which can fire AFTER the server has already applied a write.
+	// A proxy returning 504 on a landed POST /repository/commits means the retry
+	// re-sends it with start_branch against a branch that now exists, GitLab answers
+	// 400 "A branch called ... already exists", and OpenPR reports failure for a
+	// commit that succeeded: the drafted entry sits on an orphan branch with no MR
+	// and the operator is told curation failed. POST .../notes duplicates a comment
+	// the same way.
+	//
+	// GETs are where the retry actually earns its keep anyway — the paginated list
+	// calls are the request-hungry path that meets rate limiting. Retrying writes
+	// safely needs a pre-flight "does this branch already exist" check, which is a
+	// larger change than the win justifies.
+	attempts := 3
+	if method != http.MethodGet {
+		attempts = 1
+	}
+	resp, err := httpx.DoWithRetry(ctx, c.http, attempts, func() (*http.Request, error) {
 		var rdr io.Reader
 		if raw != nil {
 			rdr = bytes.NewReader(raw)
@@ -167,7 +203,15 @@ func (c *Client) request(ctx context.Context, method, path string, body any) ([]
 	defer func() { _ = resp.Body.Close() }()
 	data, _ := io.ReadAll(resp.Body)
 	if resp.StatusCode/100 != 2 {
-		return nil, resp.Header, &statusError{method: method, path: path, status: resp.StatusCode, body: string(data[:min(len(data), 512)])}
+		// The body is server-controlled and lands in logs and operator-facing errors.
+		// A server that echoes the credential back — a debug endpoint, a chatty proxy,
+		// a misconfigured auth layer — would otherwise get it laundered straight into
+		// our error text. Strip it rather than trusting the far end not to reflect it.
+		body := string(data[:min(len(data), 512)])
+		if tok != "" {
+			body = strings.ReplaceAll(body, tok, "[REDACTED]")
+		}
+		return nil, resp.Header, &statusError{method: method, path: path, status: resp.StatusCode, body: body}
 	}
 	return data, resp.Header, nil
 }
@@ -303,10 +347,25 @@ func (c *Client) listPaged(ctx context.Context, resource, state, label string) (
 		// on the last page. Absent (a proxy that strips it, or keyset pagination)
 		// is treated as "done" too: under-fetching one page is recoverable, an
 		// endless loop is not.
-		if strings.TrimSpace(hdr.Get("X-Next-Page")) == "" {
-			break
+		next := strings.TrimSpace(hdr.Get("X-Next-Page"))
+		if next == "" {
+			// Distinguish "genuinely the last page" from "the cursor was stripped".
+			// GitLab sets X-Next-Page to "" on the last page, so an ABSENT header on
+			// a FULL page means something between us and GitLab dropped it — and we
+			// are about to under-read. That matters: this list feeds the curator's
+			// dedup, so reading a truncated backlog makes RunLore file a duplicate
+			// merge request on every recurrence, forever, with nothing erroring.
+			if _, present := hdr[http.CanonicalHeaderKey("X-Next-Page")]; !present && len(raw) == perPage {
+				c.warn("gitlab pagination cursor absent on a full page — the merge-request backlog may be truncated, which makes duplicate-MR detection unreliable",
+					"resource", resource, "page", page, "per_page", perPage)
+			}
+			return all, nil
 		}
 	}
+	// Fell out of the loop: the page cap fired rather than the cursor running out,
+	// so this list is definitively incomplete. Same dedup consequence as above.
+	c.warn("gitlab pagination hit the page cap — the merge-request backlog is truncated, so duplicate-MR detection is reading a partial list",
+		"resource", resource, "max_pages", maxListPages, "items", len(all))
 	return all, nil
 }
 
