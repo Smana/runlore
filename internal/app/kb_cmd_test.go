@@ -317,3 +317,79 @@ func TestKBShowAmbiguousBasename(t *testing.T) {
 		}
 	}
 }
+
+// TestKBSearchReadsCommonsWithEmptyOwnCatalog is the regression this whole
+// feature exists to prevent. The commons ships knowledge for operators who have
+// curated NOTHING yet, so an empty own-catalog is its designed state — and
+// `lore kb search` is the most natural way someone verifies it worked.
+//
+// loadKBCatalog used to call catalog.New(catalog.dir) directly, bypassing the
+// commons wiring that BuildCatalog does. The CLI answered "catalog has no
+// entries" while a fully-indexed commons root sat one directory over: the same
+// two-hand-wired-paths divergence as #414, in a different file.
+func TestKBSearchReadsCommonsWithEmptyOwnCatalog(t *testing.T) {
+	own := t.TempDir() // deliberately empty — the day-one state
+	commons := t.TempDir()
+	writeEntryFile(t, commons, "playbooks/pod-unschedulable.md",
+		"---\ntype: Playbook\ntitle: Pod stuck Pending, scheduler finds no node\n"+
+			"description: FailedScheduling with insufficient cpu or an untolerated taint\n"+
+			"tags: [scheduling, pending, FailedScheduling]\n---\n# Symptom\n\nPending with FailedScheduling.\n")
+
+	cfg := filepath.Join(t.TempDir(), "runlore.yaml")
+	if err := os.WriteFile(cfg, []byte(
+		"catalog:\n  dir: "+own+"\n  commons:\n    url: https://github.com/Smana/runlore-kb-commons\n"+
+			"    dir: "+commons+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	var out strings.Builder
+	if err := runKBSearch([]string{"--config", cfg, "pod", "pending", "FailedScheduling"}, &out); err != nil {
+		t.Fatalf("search with an empty own-catalog must fall back to the commons, got: %v", err)
+	}
+	got := out.String()
+	if !strings.Contains(got, "pod-unschedulable.md") {
+		t.Errorf("commons entry not returned:\n%s", got)
+	}
+	// Provenance must be visible: a reader has to be able to tell shared knowledge
+	// from their own at a glance, because the two warrant different trust.
+	if !strings.Contains(got, "commons/") {
+		t.Errorf("commons entries must be visibly marked as such in the ENTRY column:\n%s", got)
+	}
+}
+
+// TestKBSearchExplicitDirIgnoresCommons: --dir is the escape hatch for pointing
+// at an arbitrary checkout. Folding a configured commons into it would make the
+// flag lie about what it read.
+func TestKBSearchExplicitDirIgnoresCommons(t *testing.T) {
+	own := writeKBFixture(t)
+	commons := t.TempDir()
+	writeEntryFile(t, commons, "playbooks/only-in-commons.md",
+		"---\ntype: Playbook\ntitle: Crashloop web configmap generic playbook\n"+
+			"description: crashloop web configmap\ntags: [crashloop]\n---\n# Symptom\n\ncrashloop web configmap\n")
+
+	cfg := filepath.Join(t.TempDir(), "runlore.yaml")
+	if err := os.WriteFile(cfg, []byte(
+		"catalog:\n  dir: "+own+"\n  commons:\n    url: https://github.com/Smana/runlore-kb-commons\n"+
+			"    dir: "+commons+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	var out strings.Builder
+	if err := runKBSearch([]string{"--config", cfg, "--dir", own, "crashloop", "web", "configmap"}, &out); err != nil {
+		t.Fatalf("runKBSearch: %v", err)
+	}
+	if strings.Contains(out.String(), "only-in-commons") {
+		t.Errorf("--dir must read exactly that directory, not a configured commons:\n%s", out.String())
+	}
+}
+
+func writeEntryFile(t *testing.T, dir, rel, content string) {
+	t.Helper()
+	full := filepath.Join(dir, rel)
+	if err := os.MkdirAll(filepath.Dir(full), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(full, []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
