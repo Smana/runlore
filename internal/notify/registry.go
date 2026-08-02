@@ -33,6 +33,18 @@ func Register(d Descriptor) {
 	registry[d.Name] = d
 }
 
+// Registered returns every registered notifier descriptor, sorted by name.
+// It exists so a docs drift guard can enumerate what is actually wired rather
+// than trusting a hand-maintained list — the same reason source.Registered does.
+func Registered() []Descriptor {
+	out := make([]Descriptor, 0, len(registry))
+	for _, d := range registry {
+		out = append(out, d)
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
+	return out
+}
+
 // BuildEnabled builds every registered notifier whose Build returns non-nil,
 // in deterministic (name-sorted) order, and wraps them in a Multi.
 func BuildEnabled(deps Deps) (*Multi, error) {
