@@ -117,7 +117,9 @@ investigation), and its confidence is **weighted by its real-world track record*
 keeps resolving incidents gains trust, one that keeps failing decays toward re-investigation.
 Even then, the recalled finding goes through the same adversarial verify pass as a fresh one — and if
 that pass can't run (e.g. a model outage), recall fails closed and falls through to a full
-investigation rather than serving the answer unreviewed. The shipped eval suite includes a
+investigation rather than serving the answer unreviewed. That trade isn't free: the fallback is a
+full ReAct loop instead of one model call, and it lands exactly when the verify endpoint is already
+unhealthy — worth knowing ahead of an incident, not during one. The shipped eval suite includes a
 poisoned-entry scenario proving a bad entry is rejected at recall time.
 
 → **[How the learning loop works](https://runlore.io/docs/concepts/learning-loop/)** · **[Reviewing & approving knowledge](https://runlore.io/docs/concepts/reviewing-knowledge/)**

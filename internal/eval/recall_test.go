@@ -227,6 +227,7 @@ func TestShippedPoisonedRecallCaseFires(t *testing.T) {
 func TestCheckRecall(t *testing.T) {
 	fired := investigate.RecallDecision{Fired: true, ShortCircuited: true}
 	withdrawn := investigate.RecallDecision{Fired: true}
+	unavailable := investigate.RecallDecision{Fired: true, VerifyUnavailable: true}
 	none := investigate.RecallDecision{}
 	tests := []struct {
 		want string
@@ -242,14 +243,30 @@ func TestCheckRecall(t *testing.T) {
 		{"rejected", fired, false},
 		{"fired", fired, true},
 		{"fired", withdrawn, true},
+		{"fired", unavailable, true},
 		{"fired", none, false},
 		{"bogus", fired, false},
+		// THE DISTINCTION under test (finding #3): a verify pass that REJECTED the
+		// entry and one that could NOT RUN both leave ShortCircuited==false, but they
+		// must report differently — a flapping model endpoint must not be reported as,
+		// or accepted in place of, a genuine adversarial rejection.
+		{"verify_unavailable", unavailable, true},
+		{"verify_unavailable", withdrawn, false},
+		{"withdrawn", unavailable, false},
 	}
 	for _, tt := range tests {
 		got := checkRecall(tt.want, tt.d) == ""
 		if got != tt.ok {
 			t.Errorf("checkRecall(%q, %+v) ok=%v, want %v", tt.want, tt.d, got, tt.ok)
 		}
+	}
+	// The two paths must produce DIFFERENT `got` buckets, not merely different pass/fail
+	// outcomes against one `want` — checkRecall("", ...) always passes, so assert the
+	// mismatch messages themselves differ when probed against the same unmet want.
+	wMsg := checkRecall("short_circuit", withdrawn)
+	uMsg := checkRecall("short_circuit", unavailable)
+	if wMsg == uMsg {
+		t.Fatalf("verify-rejected and verify-unavailable must report distinctly, both got %q", wMsg)
 	}
 }
 

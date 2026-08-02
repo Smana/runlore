@@ -97,10 +97,28 @@ func TestShippedPoisonedRecallCaseWithdrawnWhenModelDown(t *testing.T) {
 		t.Fatal("FAIL-OPEN REGRESSION: recall short-circuited on the poisoned entry although verify could not run (model error) " +
 			"— the poisoned, unreviewed catalog answer was delivered as a confident finding")
 	}
-	// Nothing was ever delivered: the forced fall-through to a full investigation then
-	// hits the SAME always-erroring model on its own first step, so Investigate returns
-	// an error and OnComplete never fires. This proves the poisoned answer was
-	// genuinely withdrawn, not silently swapped for an equally-unreviewed substitute.
+	// This scenario is specifically "verify could not run", not "verify ran and
+	// rejected" — the two meanings Fired && !ShortCircuited otherwise collapses (see
+	// RecallDecision.VerifyUnavailable). Assert the field distinguishes them: a model
+	// outage must report VerifyUnavailable=true, not the generic withdrawn shape a
+	// genuine adversarial rejection would also produce.
+	if !decision.VerifyUnavailable {
+		t.Fatalf("expected VerifyUnavailable=true (fail-closed because verify could not run, not because it reviewed and rejected the entry), got %+v", decision)
+	}
+	// Withdrawal itself is already proven above (Fired && !ShortCircuited) — that is
+	// the load-bearing assertion. delivered==0 here proves something narrower: nothing
+	// was silently swapped in for the withdrawn recall. It happens because the
+	// fall-through investigation ALSO hits the same always-erroring model on its own
+	// first step, so Investigate returns an error before OnComplete ever fires — it
+	// carries no information about withdrawal on its own (a model that came back up for
+	// the fallback loop would legitimately deliver something here too). What this
+	// assertion (with invErr below) rules out is a fail-closed path that gives up
+	// silently instead of genuinely falling through: a mutation that short-circuited
+	// tryRecall's fail-closed branch into an early `return nil, true` (report the
+	// near-miss, skip the loop, deliver nothing, pretend success) would ALSO leave
+	// delivered==0 with decision.ShortCircuited==false — indistinguishable from the
+	// real fix by the withdrawal assertion alone. It is caught here because that
+	// mutation makes no second model call, so invErr would wrongly be nil too.
 	if delivered != 0 {
 		t.Fatalf("nothing should have been delivered (poisoned recall withdrawn; the fallback loop also hit the down model), got %d deliveries", delivered)
 	}

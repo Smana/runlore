@@ -230,6 +230,56 @@ func TestOnRecallReportsDecision(t *testing.T) {
 	})
 }
 
+// TestRecallVerifyUnavailableIncrementsRecallHits covers the production signal for the
+// fail-closed path (finding #4 of the recall-verify review): OnRecall is eval-only — its
+// only production consumer is internal/eval — so the sole production-facing signals for
+// "recall fired but verify could not run" are a Warn log line and, after this test,
+// recall_hits_total{result="unavailable"}. Before this fix the fail-closed branch in
+// tryRecall never touched li.Recall.Metrics.RecallHits at all: an operator watching
+// recall throughput would see recall_hits_total go flat during a verify outage with no
+// label explaining why, indistinguishable from recall simply not firing.
+func TestRecallVerifyUnavailableIncrementsRecallHits(t *testing.T) {
+	t.Cleanup(func() { otel.SetMeterProvider(noop.NewMeterProvider()) })
+
+	h, shutdown, err := telemetry.Setup(context.Background())
+	if err != nil {
+		t.Fatalf("telemetry setup: %v", err)
+	}
+	t.Cleanup(func() { _ = shutdown(context.Background()) })
+	m := telemetry.NewMetrics()
+
+	strongHit := fakeScored{hits: []catalog.ScoredEntry{
+		{Entry: catalog.Entry{Title: "Known incident", Description: "chart bump", Path: "known.md", Resource: "tooling/harbor"}, Score: 5.0}}}
+	inner := &scriptModel{responses: []providers.CompletionResponse{
+		// the fall-through loop's own investigation + its own verify pass (working again)
+		{ToolCalls: []providers.ToolCall{{ID: "f1", Name: submitFindingsName, Args: `{"confidence":0.8,"root_causes":[{"summary":"freshly investigated","confidence":0.8}]}`}}},
+		{ToolCalls: []providers.ToolCall{{ID: "v2", Name: submitVerdictsName, Args: `{"verdicts":[{"index":0,"verdict":"keep","confidence":0.8}]}`}}},
+	}}
+	model := &errThenScriptModel{n: 1, err: errors.New("401 authentication_error: invalid x-api-key"), inner: inner}
+
+	li := &LoopInvestigator{
+		Model:      model,
+		Verify:     true,
+		Log:        slog.New(slog.NewTextHandler(io.Discard, nil)),
+		Recall:     &Recall{MinScore: 2.0, Catalog: strongHit, Metrics: m},
+		OnComplete: func(providers.Investigation) {},
+	}
+	if err := li.Investigate(context.Background(), Request{Title: "HarborProbeFailure", Workload: providers.Workload{Namespace: "tooling", Name: "harbor"}}); err != nil {
+		t.Fatalf("Investigate: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/metrics", nil)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	body := rec.Body.String()
+	if !strings.Contains(body, "runlore_recall_hits_total") {
+		t.Fatalf("runlore_recall_hits_total not in metrics:\n%s", body)
+	}
+	if !strings.Contains(body, `result="unavailable"`) {
+		t.Fatalf(`expected recall_hits_total{result="unavailable"} on the fail-closed path:%s`, body)
+	}
+}
+
 func TestLoopRefusalUnresolved(t *testing.T) {
 	// The model declines the turn (a safety/refusal stop reason, empty content). The
 	// loop must deliver a first-class `unresolved` result and STOP after one call —

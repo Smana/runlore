@@ -226,6 +226,17 @@ Then two safety backstops before the recalled answer is delivered:
   built from real tool evidence, so a down reviewer there leaves them as-is instead of
   discarding real evidence.
 
+  Failing closed here is the correct trade, but it is not free, and both costs land
+  precisely when things are already going wrong: **cost/load amplification** — a
+  recall that would have cost one model call now costs a full ReAct loop, up to
+  `MaxSteps` (default 20) model calls plus tool calls, arriving exactly when the
+  verify endpoint is unhealthy; and a **slow-verify timeout interaction** — the
+  investigation's overall `Timeout` bounds the whole run *including* the failed verify
+  call, so if verify fails by exhausting that deadline rather than erroring fast, the
+  fall-through inherits an already-spent budget and the user gets a synthetic timeout
+  result where they previously got the recalled answer. Worth knowing before an
+  on-call incident, not discovering during one.
+
 **Confidence is derived, never asserted** (`deriveRecallConfidence`,
 `outcomeFactor`): it's a function of the BM25 score, the margin, the structural-match
 strength, and the Bayesian-smoothed resolve-rate — and it is **capped at 0.90**. The
@@ -609,9 +620,13 @@ eval harness and treats its outputs as the source of truth:
 - **The closed loop is exercised in eval.** A poisoned-entry scenario proves a crafted
   wrong recall is *caught* by the verify pass — the poisoned answer is withdrawn and the
   agent **falls through to a real investigation** rather than publishing it — not just
-  that the agent organically searched the KB. The same withdrawal holds when the
-  verifier itself is unavailable (§3, "On a model outage it fails closed"): recall is
-  never delivered unreviewed just because the reviewer couldn't run.
+  that the agent organically searched the KB.
+- **The verify-unavailable case is pinned by a regression test, not eval.** A live-model
+  replay can't reliably force a verify *outage* on demand, so the model-down variant
+  (§3, "On a model outage it fails closed") is guarded outside the eval suite: a Go
+  regression test replays the same shipped poisoned-entry fixture against a model that
+  always errors and asserts the same withdrawal holds — recall is never delivered
+  unreviewed just because the reviewer couldn't run.
 - **CI.** A nightly (+ manual) workflow runs the replay eval with a fail-under gate
   and uploads the report; it's intentionally *not* a per-PR blocker (it drives a live
   model and can't run on fork PRs), while the deterministic scoring logic is unit-
