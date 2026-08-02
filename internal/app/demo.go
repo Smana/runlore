@@ -77,6 +77,7 @@ func runDemoInvestigateWithModel(args []string, out, errOut io.Writer, model pro
 	cfgPath := fs.String("config", "", "optional runlore.yaml; when omitted the demo uses a zero-config default model")
 	offline := fs.String("offline", "", "replay a recorded transcript instead of calling a model — no API key, no network (use \"default\" for the shipped one)")
 	record := fs.String("record", "", "record this run's model turns to a transcript file for later --offline replay")
+	deliver := fs.Bool("notify", false, "also DELIVER the findings through the notifiers in --config (Slack, Matrix, webhook), not just print them")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -198,6 +199,28 @@ func runDemoInvestigateWithModel(args []string, out, errOut io.Writer, model pro
 		return fmt.Errorf("the loop produced no findings")
 	}
 	demoPrintf(out, "\n== submit_findings ==\n%s\n", notify.Format(*result))
+
+	// --notify sends the SAME findings through the real notifiers. The demo already
+	// runs the real loop over recorded evidence; this makes the delivered artifact
+	// real too, so a Slack card can be produced without a cluster, an incident, or
+	// an API key.
+	//
+	// It is opt-in because the demo's whole promise is that it touches nothing.
+	// Posting to a webhook is the one thing here that leaves the machine.
+	if *deliver {
+		n, nerr := BuildNotifier(cfg, log)
+		if nerr != nil {
+			return fmt.Errorf("build notifiers for --notify: %w", nerr)
+		}
+		if n.Len() == 0 {
+			return fmt.Errorf("--notify needs at least one notifier configured in --config " +
+				"(notify.slack / notify.matrix / notify.webhook); none found")
+		}
+		if derr := n.Deliver(ctx, *result); derr != nil {
+			return fmt.Errorf("deliver findings: %w", derr)
+		}
+		demoPrintf(out, "\ndelivered to %d notifier(s)\n", n.Len())
+	}
 
 	if recorder != nil {
 		if err := recorder.Write(*record, time.Now().UTC().Format(time.RFC3339)); err != nil {
