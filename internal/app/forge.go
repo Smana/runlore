@@ -46,6 +46,19 @@ func BuildForgeTokenSource(cfg *config.Config, log *slog.Logger) ForgeToken {
 // token_env at config-load time, but an operator can still forget to actually
 // set the env var when deploying, so this stays a warn-and-disable (not a
 // panic) exactly like BuildForgeTokenSource's own credential checks.
+func BuildGitLabTokenSource(cfg *config.Config, log *slog.Logger) ForgeToken {
+	te := cfg.Forge.GitLab.TokenEnv
+	if te == "" {
+		return nil
+	}
+	tok := os.Getenv(te)
+	if tok == "" {
+		log.Warn("gitlab forge auth disabled: empty token env", "env", te)
+		return nil
+	}
+	return func(context.Context) (string, error) { return tok, nil }
+}
+
 // BuildKBTokenSource picks the credential for reading the KNOWLEDGE-BASE repo —
 // the catalog git-sync — by forge provider.
 //
@@ -67,17 +80,4 @@ func BuildKBTokenSource(cfg *config.Config, log *slog.Logger) ForgeToken {
 		return BuildGitLabTokenSource(cfg, log)
 	}
 	return BuildForgeTokenSource(cfg, log)
-}
-
-func BuildGitLabTokenSource(cfg *config.Config, log *slog.Logger) ForgeToken {
-	te := cfg.Forge.GitLab.TokenEnv
-	if te == "" {
-		return nil
-	}
-	tok := os.Getenv(te)
-	if tok == "" {
-		log.Warn("gitlab forge auth disabled: empty token env", "env", te)
-		return nil
-	}
-	return func(context.Context) (string, error) { return tok, nil }
 }
