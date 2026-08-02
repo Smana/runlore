@@ -3,6 +3,7 @@
 package app
 
 import (
+	"context"
 	"encoding/json"
 	"flag"
 	"fmt"
@@ -38,10 +39,22 @@ func RunKB(args []string) error {
 }
 
 // loadKBCatalog opens the catalog for the read commands: an explicit --dir
-// wins; otherwise config catalog.dir. The CLI never clones — a git-synced
-// catalog is materialized by `lore catalog sync` (or a running agent), so the
-// error message points there instead of failing cryptically.
+// wins; otherwise config catalog.dir PLUS the commons root when one is
+// configured. The CLI never clones — a git-synced catalog (either root) is
+// materialized by `lore catalog sync` or a running agent, so the error message
+// points there instead of failing cryptically.
+//
+// The commons must be honoured here, not just in BuildCatalog. Its whole purpose
+// is that an operator has knowledge on day one, before curating anything — so the
+// empty-own-catalog case is the one it exists for, and `lore kb search` is the
+// most natural way someone checks whether it worked. Reading only catalog.dir
+// answered "your catalog is empty" while 22 indexed entries sat one root over.
+//
+// An explicit --dir still means exactly that directory: it is the escape hatch for
+// pointing at an arbitrary checkout, and silently folding in a configured commons
+// would make it lie.
 func loadKBCatalog(cfgPath, dir string) (*catalog.Catalog, error) {
+	commonsDir := ""
 	if dir == "" {
 		cfg, err := config.Load(cfgPath)
 		if err != nil {
@@ -51,13 +64,33 @@ func loadKBCatalog(cfgPath, dir string) (*catalog.Catalog, error) {
 		if dir == "" {
 			return nil, fmt.Errorf("no catalog configured (set catalog.dir or pass --dir <catalog>)")
 		}
+		// url is what enables the commons (matching armCommons, which no-ops
+		// without it), and dir is where a sync already put it on disk.
+		if cfg.Catalog.Commons.URL != "" {
+			commonsDir = cfg.Catalog.Commons.Dir
+		}
 	}
-	cat, err := catalog.New(dir)
-	if err != nil {
-		return nil, fmt.Errorf("load catalog %s: %w (for a git-synced catalog, run `lore catalog sync` first)", dir, err)
+	if commonsDir == "" {
+		cat, err := catalog.New(dir)
+		if err != nil {
+			return nil, fmt.Errorf("load catalog %s: %w (for a git-synced catalog, run `lore catalog sync` first)", dir, err)
+		}
+		if cat.Len() == 0 {
+			return nil, fmt.Errorf("catalog %s has no entries (for a git-synced catalog, run `lore catalog sync` first)", dir)
+		}
+		return cat, nil
+	}
+
+	// Both roots: SetCommonsDir before the load, since ReloadContext is what reads
+	// the commons alongside the primary root. No syncer — this is a short-lived
+	// read command and the CLI never clones.
+	cat := catalog.NewEmpty()
+	cat.SetCommonsDir(commonsDir)
+	if _, err := cat.ReloadContext(context.Background(), dir); err != nil {
+		return nil, fmt.Errorf("load catalog %s (commons %s): %w (for a git-synced catalog, run `lore catalog sync` first)", dir, commonsDir, err)
 	}
 	if cat.Len() == 0 {
-		return nil, fmt.Errorf("catalog %s has no entries (for a git-synced catalog, run `lore catalog sync` first)", dir)
+		return nil, fmt.Errorf("catalog %s and commons %s are both empty (for a git-synced catalog, run `lore catalog sync` first)", dir, commonsDir)
 	}
 	return cat, nil
 }
