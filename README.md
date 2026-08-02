@@ -14,6 +14,7 @@
 [![Docs](https://img.shields.io/badge/docs-runlore.io-14C9A6?logo=readthedocs&logoColor=white)](https://runlore.io/)
 [![CI](https://github.com/Smana/runlore/actions/workflows/ci.yaml/badge.svg)](https://github.com/Smana/runlore/actions/workflows/ci.yaml)
 [![Nightly eval](https://img.shields.io/endpoint?url=https%3A%2F%2Fraw.githubusercontent.com%2FSmana%2Frunlore%2Feval-scorecard%2Fbadge.json)](https://runlore.io/eval)
+[![OpenSSF Scorecard](https://api.scorecard.dev/projects/github.com/Smana/runlore/badge)](https://scorecard.dev/viewer/?uri=github.com/Smana/runlore)
 [![Go Report Card](https://goreportcard.com/badge/github.com/Smana/runlore)](https://goreportcard.com/report/github.com/Smana/runlore)
 [![Go Version](https://img.shields.io/github/go-mod/go-version/Smana/runlore)](go.mod)
 [![License: Apache 2.0](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](LICENSE)
@@ -278,6 +279,12 @@ we test hardest.
 📐 [Design](https://runlore.io/docs/concepts/design/) · 📚 [Learning loop](https://runlore.io/docs/concepts/learning-loop/) · ✅ [Reviewing knowledge](https://runlore.io/docs/concepts/reviewing-knowledge/) · 🧑‍🔧 [KB steward skill](https://runlore.io/docs/reference/kb-steward/) · 🚀 [Getting started](https://runlore.io/docs/getting-started/) · 🧪 [Worked example](https://runlore.io/docs/reference/examples/harbor-registry-down/) ·
 🔌 [Data sources](https://runlore.io/docs/concepts/data-sources/) · ⚙️ [Configuration](https://runlore.io/docs/configuration/configuration/) · 🔗 [MCP — server & client](https://runlore.io/docs/configuration/mcp/) · 📊 [Observability](https://runlore.io/docs/operations/observability/) · 🩺 [Troubleshooting](https://runlore.io/docs/operations/troubleshooting/) ·
 🔒 [Security model](https://runlore.io/docs/security/security-model/) · 🛡 [LLM security architecture](https://runlore.io/docs/security/security-architecture/) · ⬆️ [Upgrade & uninstall](https://runlore.io/docs/operations/upgrade-uninstall/) · 🧭 [Prior art](https://runlore.io/docs/concepts/prior-art/) · 📊 [Benchmarking models](https://runlore.io/docs/reference/benchmarking/) · 🧮 [Nightly eval scorecard](https://github.com/Smana/runlore/blob/eval-scorecard/scorecard.md) · 🛠 [Contributing](CONTRIBUTING.md)
+
+## Who's using RunLore
+
+Teams running RunLore in production are listed in [`ADOPTERS.md`](ADOPTERS.md) — open a PR to add
+yours, or say hello in a [discussion](https://github.com/Smana/runlore/discussions) if you'd rather
+stay unlisted.
 
 ## License
 
