@@ -231,3 +231,35 @@ model:
 		t.Errorf("the error must name what is missing so the user can fix it: %v", err)
 	}
 }
+
+// TestDemoCatalogWiresRecall pins that --catalog actually consults the knowledge
+// base through the real Recall gate.
+//
+// The shipped entry names the harbor-chart-bump scenario's workload, so recall
+// reaches its decision — which the demo prints. What it must NOT do is quietly run
+// a full investigation while claiming a catalog was loaded.
+func TestDemoCatalogWiresRecall(t *testing.T) {
+	var out, errOut bytes.Buffer
+	err := runDemoInvestigateWithModel([]string{
+		"--scenarios", "../../examples/scenarios",
+		"--scenario", "harbor-chart-bump",
+		"--offline", "testdata/demo-transcript.json",
+		"--catalog", "../../examples/demo/catalog",
+	}, &out, &errOut, nil)
+	if err != nil {
+		t.Fatalf("demo with --catalog: %v\nstderr:\n%s", err, errOut.String())
+	}
+	got := out.String()
+	if !strings.Contains(got, "knowledge catalog: 1 entr") {
+		t.Errorf("the shipped demo catalog must load exactly one entry:\n%s", got)
+	}
+	// The demo's recall gate is NOT production's, and saying so is the point — a
+	// reader must not mistake a permissive BM25 floor for the real bar.
+	if !strings.Contains(got, "DEMO values, not production's") {
+		t.Errorf("the demo must disclose that its recall gate is not production's:\n%s", got)
+	}
+	// The gate itself must have been consulted, not skipped.
+	if !strings.Contains(errOut.String(), "instant recall") {
+		t.Errorf("recall was never consulted despite --catalog:\n%s", errOut.String())
+	}
+}
