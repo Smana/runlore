@@ -20,6 +20,12 @@ assumed).
 | Knowledge | `kb_search` | catalog index | bleve BM25 | `catalog.*` |
 | Source repos | `source_diff` | built-in (go-git) | any git host over HTTPS (GitHub App auth) | `source_repos.allow` |
 
+> **This page explains the model; it is not the setup guide.** Each backend has its own page under
+> [Integrations]({{< relref "/docs/integrations/_index.md" >}}) with the minimal config, how to
+> verify it locally, and the gotchas — and
+> [Configuration]({{< relref "/docs/configuration/configuration.md" >}}) is the exhaustive key
+> reference. The per-provider sections below link straight to them.
+
 ## Network flows are CNI-agnostic
 
 The `network_drops` tool surfaces **denied / dropped** flows (NetworkPolicy denials,
@@ -28,6 +34,7 @@ It is **pluggable and does not assume any particular CNI**. Pick the provider th
 environment via `network.provider`; no provider is enabled by default.
 
 ### `hubble` — Cilium Hubble
+
 eBPF flow visibility with rich drop reasons. Requires the **Cilium** CNI + Hubble Relay.
 ```yaml
 network:
@@ -35,7 +42,10 @@ network:
   hubble: { url: hubble-relay.kube-system:80 }   # Relay gRPC host:port
 ```
 
+**Wire it:** [Cilium Hubble]({{< relref "/docs/integrations/hubble.md" >}})
+
 ### `aws-vpc-flow-logs` — AWS VPC Flow Logs
+
 Works on **any AWS VPC**, including EKS clusters running the AWS VPC CNI (where Cilium is absent).
 Reads `REJECT` records from the CloudWatch Logs group that receives your VPC Flow Logs. Read-only;
 auth is in-cluster identity (EKS Pod Identity / IRSA) — no static keys. Requires
@@ -45,10 +55,13 @@ network:
   provider: aws-vpc-flow-logs
   aws: { region: eu-west-3, log_group: /aws/vpc/flowlogs }
 ```
+
+**Wire it:** [AWS VPC Flow Logs]({{< relref "/docs/integrations/aws-vpc-flow-logs.md" >}})
 > Note: VPC Flow Logs are IP-based, so v1 returns recent VPC-wide `REJECT`s rather than
 > pod-scoped flows (the namespace/pod selector is not mapped to IPs).
 
 ### `gcp-firewall-logs` — GCP Firewall Rules Logging
+
 Works on **any GCP VPC**, including GKE. Reads `DENIED` connections from Cloud Logging
 (`compute.googleapis.com/firewall`). Requires **Firewall Rules Logging** enabled on the relevant
 rules. Read-only; auth is Workload Identity / ADC. Needs `logging.logEntries.list` (e.g. the
@@ -58,6 +71,8 @@ network:
   provider: gcp-firewall-logs
   gcp: { project: my-gcp-project }
 ```
+
+**Wire it:** [GCP Firewall Logs]({{< relref "/docs/integrations/gcp-firewall-logs.md" >}})
 > Same IP-based caveat as AWS: v1 returns recent subnet/VPC-wide `DENIED` connections.
 
 ### Adding another provider
@@ -81,12 +96,16 @@ Pin it with `provider:` when the backend is unreachable at startup or sits behin
 confuses the probe.
 
 ### `victorialogs` — VictoriaLogs (default)
+
 ```yaml
 logs:
   url: http://victorialogs.observability.svc:9428
 ```
 
+**Wire it:** [VictoriaLogs]({{< relref "/docs/integrations/victorialogs.md" >}})
+
 ### `loki` — Grafana Loki
+
 ```yaml
 logs:
   url: http://loki-gateway.observability.svc:80
@@ -94,6 +113,8 @@ logs:
   # token_env: LOKI_TOKEN                 # bearer token, by env-var indirection
   # headers: { X-Scope-OrgID: my-tenant } # multi-tenant Loki
 ```
+
+**Wire it:** [Grafana Loki]({{< relref "/docs/integrations/loki.md" >}})
 
 Field-convention defaults differ per provider; override any of them via `logs.fields`:
 
