@@ -303,10 +303,10 @@ func pickScenario(cases []eval.Case, id string) (eval.Case, error) {
 	}
 	var have []string
 	for _, c := range cases {
-		if c.DisplayName() == id {
+		if c.Name == id {
 			return c, nil
 		}
-		have = append(have, c.DisplayName())
+		have = append(have, c.Name)
 	}
 	return eval.Case{}, fmt.Errorf("scenario %q not found; available: %s", id, strings.Join(have, ", "))
 }
