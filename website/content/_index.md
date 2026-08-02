@@ -37,7 +37,7 @@ images:
   {{< hextra/feature-card icon="cube-transparent" title="GitOps-native provenance"
     subtitle="Turns “what changed?” into an exact Git answer — the rendered-manifest diff of the revisions Flux or Argo CD reconciled. That provenance is what makes the knowledge trustworthy." >}}
   {{< hextra/feature-card icon="chip" title="Your models · one Go binary"
-    subtitle="A single self-hosted Go binary running in your cluster on your own model providers. Any OpenAI-compatible endpoint, or native Anthropic. No lock-in, your data. Point it at any MCP server for tools it doesn't ship." >}}
+    subtitle="A single self-hosted Go binary running in your cluster on your own model providers. Any OpenAI-compatible endpoint, or native Anthropic. No lock-in, your data. Point it at any MCP server for tools it doesn’t ship." >}}
 {{< /hextra/feature-grid >}}
 
 <h2 class="rl-section">Browse the docs</h2>
