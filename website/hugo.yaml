@@ -41,7 +41,7 @@ menu:
         type: search
 
 params:
-  description: "The SRE agent that builds a memory your team reviews. Every verified root cause becomes a pull request in a Git repo you own — merge it, and the next occurrence is answered in seconds."
+  description: "No two platforms fail the same way. RunLore learns yours — investigating your incidents, then opening a pull request with the cause it verified. What you merge becomes a memory tailor-made for your systems."
   # Default social-share card (Open Graph / Twitter). Pages may override via front-matter `images`.
   images:
     - images/og-card.png

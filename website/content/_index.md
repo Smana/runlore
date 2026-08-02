@@ -1,7 +1,7 @@
 ---
 title: RunLore
 layout: hextra-home
-description: "The SRE agent that builds a memory your team reviews. RunLore investigates incidents like any other agent — the difference is what happens next: every verified root cause becomes a pull request in a Git repo you own. Merge it, and the next time that failure appears it is answered in seconds, from knowledge your team approved."
+description: "No two platforms fail the same way. RunLore learns yours. It investigates your incidents, then opens a pull request with the cause it verified. What you merge becomes a memory tailor-made for your systems — your architecture, your constraints, the failures that keep coming back — and the next occurrence is answered from it in seconds."
 images:
   - images/og-card.png
 ---
@@ -13,14 +13,14 @@ images:
 {{< /hextra/hero-badge >}}
 
 {{< hextra/hero-headline >}}
-  The SRE agent that builds a memory your team reviews.
+  No two platforms fail the same way. RunLore learns yours.
 {{< /hextra/hero-headline >}}
 
 {{< hextra/hero-subtitle >}}
-  It investigates incidents like any other agent. The difference is what happens
-  next: every verified root cause becomes a pull request in a Git repo you own.
-  You merge it, and the next time that failure appears it's answered in seconds —
-  from knowledge your team approved.
+  It investigates your incidents, then opens a pull request with the cause it
+  verified. What you merge becomes a memory tailor-made for your systems — your
+  architecture, your constraints, the failures that keep coming back — and the
+  next occurrence is answered from it in seconds.
 {{< /hextra/hero-subtitle >}}
 
 {{< hextra/hero-button text="Get Started" link="docs/getting-started/" >}}
