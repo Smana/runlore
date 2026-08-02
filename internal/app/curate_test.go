@@ -6,6 +6,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"log/slog"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -114,5 +115,40 @@ func TestBuildCurateAgentPassComposition(t *testing.T) {
 	agent = BuildCurateAgent(cfg, forge, ledger, discardLog())
 	if len(agent.Passes) != 7 {
 		t.Fatalf("full agent: want 7 passes (suppress dedup lifecycle queue recurrence contested retirement), got %d", len(agent.Passes))
+	}
+}
+
+// TestRunCurateGitLabNamesTheRealLimitation pins the error a GitLab operator gets.
+//
+// BuildForgeTokenSource only mints GitHub App tokens, so a GitLab-configured
+// deployment always fails this check — but NOT because anything is misconfigured:
+// Phase-2 grooming simply has no GitLab code path. The old message told them to go
+// configure a GitHub App, which they cannot have and which would not help. That is
+// a wild goose chase, so the message must name the real limitation instead.
+func TestRunCurateGitLabNamesTheRealLimitation(t *testing.T) {
+	dir := t.TempDir()
+	cfgPath := filepath.Join(dir, "runlore.yaml")
+	if err := os.WriteFile(cfgPath, []byte(`
+forge:
+  provider: gitlab
+  kb_repo: acme/kb
+  gitlab:
+    token_env: TEST_CURATE_GL_TOKEN
+`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	err := RunCurate([]string{"-config", cfgPath})
+	if err == nil {
+		t.Fatal("lore curate must fail for a GitLab-configured deployment")
+	}
+	msg := err.Error()
+	if strings.Contains(strings.ToLower(msg), "github app") {
+		t.Fatalf("must not send a GitLab operator after a GitHub App they cannot have: %q", msg)
+	}
+	for _, want := range []string{"GitLab", "grooming"} {
+		if !strings.Contains(msg, want) {
+			t.Fatalf("error must name the real limitation (missing %q): %q", want, msg)
+		}
 	}
 }

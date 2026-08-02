@@ -44,6 +44,17 @@ func RunCurate(args []string) error {
 	log := logging.FromConfig(os.Stderr, cfg.Logging.Format, cfg.Logging.Level)
 	tok := BuildForgeTokenSource(cfg, log)
 	if tok == nil {
+		// A GitLab-configured deployment always lands here, and NOT because the
+		// operator got their config wrong: BuildForgeTokenSource only mints GitHub
+		// App tokens, because Phase-2 grooming has no GitLab code path at all.
+		// Sending them off to configure a GitHub App — which they cannot have and
+		// would not help — is a wild goose chase, so name the real limitation.
+		// See website/content/docs/integrations/gitlab.md#not-yet-supported-on-gitlab.
+		if cfg.Forge.Provider == "gitlab" {
+			return fmt.Errorf("lore curate does not support GitLab yet (forge.provider: gitlab): " +
+				"the Learn loop works on GitLab, but the Phase-2 grooming passes are GitHub-only — " +
+				"review KB merge requests by hand for now")
+		}
 		return fmt.Errorf("curate requires a configured GitHub App (forge.github_app)")
 	}
 	// Same audit chain as the action executors (actions.audit_log_path); Nop when

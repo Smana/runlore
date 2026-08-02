@@ -21,7 +21,17 @@ func BuildSweeper(cfg *config.Config, ledger *outcome.Ledger, aud audit.Auditor,
 	}
 	tok := BuildForgeTokenSource(cfg, log)
 	if tok == nil || cfg.Forge.KBRepo == "" {
-		return nil // no forge, nothing to groom — sweeps are strictly additive
+		// Say so out loud. Reaching here means the operator EXPLICITLY asked for
+		// sweeps (Sweeps.Enabled() is true just above), so returning nil in silence
+		// is indistinguishable from sweeps running and finding nothing to groom —
+		// the backlog quietly rots and the logs never mention it. The very next
+		// branch already warns on its failure; this one was the odd one out.
+		//
+		// A GitLab deployment lands here every time (grooming is GitHub-only), which
+		// is the case most likely to be mistaken for "working".
+		log.Warn("curate sweeps disabled: no usable KB forge — Phase-2 grooming is GitHub-only",
+			"provider", forgeProviderName(cfg), "kb_repo", cfg.Forge.KBRepo)
+		return nil
 	}
 	guarded, err := buildGuardedForge(cfg, tok, cfg.Curate.Sweeps.DryRun(), aud, log)
 	if err != nil {
