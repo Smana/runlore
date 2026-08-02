@@ -183,6 +183,23 @@ func (r *Recall) lookupWithUsage(ctx context.Context, req Request, totals *provi
 	// active, so a retired entry can never fire on any path.
 	var agreeing []catalog.ScoredEntry
 	for _, h := range hits {
+		// Commons entries ground kb_search; they NEVER answer an incident on their own.
+		//
+		// This has to be a structural check, not an inference from resource-lessness.
+		// The reasoning everywhere else — "a resource-less entry can never agree with a
+		// workload-carrying alert" — is true but incomplete: resourceAgrees has a
+		// matchScopeless tier for requests that carry NO workload at all (PagerDuty, a
+		// generic webhook, Grafana without Kubernetes labels), and a resource-less
+		// commons entry agrees with exactly those. So a generic playbook could
+		// short-circuit a real incident with textbook advice, which is the single
+		// outcome the commons was designed never to produce.
+		//
+		// Enforced here rather than in resourceAgrees because it is a provenance rule,
+		// not a scoping rule: the entry is disqualified by WHERE IT CAME FROM, however
+		// well it matches.
+		if h.Entry.Commons {
+			continue
+		}
 		if !entryActive(h.Entry) {
 			continue
 		}
