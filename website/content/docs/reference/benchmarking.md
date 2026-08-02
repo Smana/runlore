@@ -9,9 +9,8 @@ page shows how to benchmark several models against RunLore's own eval harness in
 
 > RunLore's own nightly numbers are public: the replay eval publishes a
 > per-scenario scorecard — pass/fail, recall outcomes, confidence calibration,
-> model, date, and cost — to the
-> [`eval-scorecard` branch](https://github.com/Smana/runlore/blob/eval-scorecard/scorecard.md)
-> on every run, red or green.
+> model, date, and cost — on every run, red or green.
+> **→ [The nightly scorecard](/eval)**
 
 > [!IMPORTANT]
 > **Run RunLore on *your* models**

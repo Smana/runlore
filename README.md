@@ -13,7 +13,7 @@
 
 [![Docs](https://img.shields.io/badge/docs-runlore.io-14C9A6?logo=readthedocs&logoColor=white)](https://runlore.io/)
 [![CI](https://github.com/Smana/runlore/actions/workflows/ci.yaml/badge.svg)](https://github.com/Smana/runlore/actions/workflows/ci.yaml)
-[![Nightly eval](https://img.shields.io/endpoint?url=https%3A%2F%2Fraw.githubusercontent.com%2FSmana%2Frunlore%2Feval-scorecard%2Fbadge.json)](https://github.com/Smana/runlore/blob/eval-scorecard/scorecard.md)
+[![Nightly eval](https://img.shields.io/endpoint?url=https%3A%2F%2Fraw.githubusercontent.com%2FSmana%2Frunlore%2Feval-scorecard%2Fbadge.json)](https://runlore.io/eval)
 [![Go Report Card](https://goreportcard.com/badge/github.com/Smana/runlore)](https://goreportcard.com/report/github.com/Smana/runlore)
 [![Go Version](https://img.shields.io/github/go-mod/go-version/Smana/runlore)](go.mod)
 [![License: Apache 2.0](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](LICENSE)

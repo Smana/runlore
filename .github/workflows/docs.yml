@@ -7,6 +7,8 @@ on:
       - 'website/**'
       - '.github/workflows/docs.yml'
   workflow_dispatch:
+  repository_dispatch:
+    types: [scorecard-updated]
 
 permissions:
   contents: read
@@ -40,6 +42,28 @@ jobs:
       - name: Configure Pages
         id: pages
         uses: actions/configure-pages@v5
+      # Pull the published scorecard from the eval-scorecard orphan branch and render
+      # it as /eval. The branch is the nightly's publishing target; copying it in at
+      # build time keeps main free of generated numbers. A missing branch is NOT a
+      # failure — the committed placeholder stands in, so the docs deploy and the
+      # link stay alive either way.
+      - name: Render the eval scorecard page
+        run: |
+          set -euo pipefail
+          if ! git fetch --depth=1 origin eval-scorecard 2>/dev/null; then
+            echo "::notice title=Eval scorecard::branch not published yet — keeping the placeholder"
+            exit 0
+          fi
+          published=$(git log -1 --format=%cI FETCH_HEAD)
+          {
+            echo "---"
+            echo "title: Eval scorecard"
+            echo "---"
+            echo
+            echo "*Published ${published} from the [\`eval-scorecard\`](https://github.com/Smana/runlore/tree/eval-scorecard) branch.*"
+            echo
+            git show FETCH_HEAD:scorecard.md
+          } > website/content/eval.md
       - name: Build
         working-directory: website
         # No `hugo mod get` — it would upgrade the pinned Hextra. The build

@@ -105,3 +105,13 @@ jobs:
           git -C "$OUT" add -A
           git -C "$OUT" commit -m "chore(eval): nightly scorecard $(date -u +%Y-%m-%d)" || { echo "no changes to publish"; exit 0; }
           git -C "$OUT" push origin eval-scorecard
+
+      # Tell the docs site to rebuild so /eval shows the fresh numbers. Without this
+      # the page would only refresh when someone happens to push to website/.
+      - name: trigger docs rebuild
+        if: always() && steps.guard.outputs.has_key == 'true' && github.ref == 'refs/heads/main'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh api "repos/${GITHUB_REPOSITORY}/dispatches" \
+            -f event_type=scorecard-updated
