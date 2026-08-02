@@ -566,7 +566,13 @@ func (li *LoopInvestigator) Investigate(ctx context.Context, req Request) error 
 				// Ground the review in the tool results the loop actually gathered: pass
 				// the accumulated history so verifyFindings can excerpt (bounded, redacted)
 				// the tool transcript and check each cited evidence traces to a tool result.
-				inv = li.verifyFindings(ctx, req, inv, messages, &verifyTotals)
+				// The `verified` signal is deliberately ignored here: these findings were
+				// already built from independently-gathered tool evidence before verify
+				// ran, so a down reviewer falls back to "deliver the real evidence as-is"
+				// rather than discarding it — unlike the recall short-circuit path
+				// (tryRecall, below), where verify is the ONLY check and this signal is
+				// load-bearing (see verifyFindings' doc comment for why the two differ).
+				inv, _ = li.verifyFindings(ctx, req, inv, messages, &verifyTotals)
 			}
 			inv.Actions = li.reviewActions(ctx, inv.Actions)
 			// A submission produced only because the final-step nudge forced it is a
@@ -648,12 +654,40 @@ func (li *LoopInvestigator) tryRecall(ctx context.Context, req Request, result *
 		rec = capRecallConfidence(rec, recallUnconfirmedCap)
 	}
 	initialConfidence := rec.Confidence
+	verified := true // no Verify configured ⇒ nothing to fail; behaves as before
 	if li.Verify {
 		// Catalog content is untrusted: verify a recalled finding too, so a
 		// crafted high-recall entry can't bypass the adversarial review. No loop
 		// ran on this short-circuit path, so there is no tool transcript to ground
 		// against (nil) — the recalled finding is judged on the catalog text alone.
-		rec = li.verifyFindings(ctx, req, rec, nil, verifyTotals)
+		rec, verified = li.verifyFindings(ctx, req, rec, nil, verifyTotals)
+	}
+	if !verified {
+		// verifyFindings could not run (model error, or no usable verdicts) rather than
+		// having reviewed and approved rec. On the full-investigation call site that
+		// distinction is safe to ignore — the findings there are independently grounded
+		// in real tool evidence. Here it is NOT: rec is text and confidence lifted
+		// straight from a possibly-poisoned catalog entry, and verify is the entire
+		// adversarial check on it. Treating "could not run" the same as "ran and kept"
+		// would let untrusted catalog content bypass review just by the reviewer being
+		// unavailable — so force the SAME fall-through an outright non-match takes
+		// (entry == nil, above), never deliver rec as-is. Logged distinctly (a
+		// dedicated "unavailable" line, not the "rejected by verify" one below) so an
+		// operator can tell recall was skipped because the reviewer was down, not
+		// because it reviewed the entry and found it wanting.
+		li.emitRecall(RecallDecision{Fired: true, Entry: entry.Path})
+		li.Log.Warn("instant recall verify unavailable; running full investigation instead of delivering it unreviewed",
+			"title", req.Title, "entry", entry.Path)
+		// …with the same C2 near-miss enrichment the verify-rejection fall-through below
+		// gets (see its comment for why this matters): an entry that fired but could not
+		// be reviewed is excluded from resurfacing as a "possibly-related" lead, same as
+		// a refuted one — it was never confirmed innocent, just unreviewed.
+		nearMiss = li.Recall.nearMissExcluding(ctx, req, append(outcomeRejected, entry.Path)...)
+		if nearMiss != nil {
+			li.Log.Info("recall near-miss after verify unavailable: surfacing an unverified related entry in the seed",
+				"title", req.Title, "unverified", entry.Path, "entry", nearMiss.Path)
+		}
+		return nearMiss, false
 	}
 	// Instrument the recall result by verify outcome.
 	if m := li.Recall.Metrics; m != nil {

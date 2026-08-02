@@ -216,7 +216,15 @@ Then two safety backstops before the recalled answer is delivered:
   the finding **only on the evidence given** and can *only lower* confidence. Because
   the confirm step injected real cluster state, verify can now actually catch a stale
   or wrong note (previously it only saw a tautological "matched entry X" string and
-  was a no-op on the recall path).
+  was a no-op on the recall path). **On a model outage it fails closed here**: verify
+  is the recalled answer's *only* adversarial check (unlike a full investigation,
+  there is no independently-gathered tool evidence backing it), so a verify pass that
+  could not run — a model error, or a response with no usable verdict — is treated as
+  a fire-gate **miss**, not an approval, and forces the same fall-through to a full
+  investigation an outright rejection takes. This is a deliberately different policy
+  from the full-investigation call site, where verify only augments findings already
+  built from real tool evidence, so a down reviewer there leaves them as-is instead of
+  discarding real evidence.
 
 **Confidence is derived, never asserted** (`deriveRecallConfidence`,
 `outcomeFactor`): it's a function of the BM25 score, the margin, the structural-match
@@ -601,7 +609,9 @@ eval harness and treats its outputs as the source of truth:
 - **The closed loop is exercised in eval.** A poisoned-entry scenario proves a crafted
   wrong recall is *caught* by the verify pass — the poisoned answer is withdrawn and the
   agent **falls through to a real investigation** rather than publishing it — not just
-  that the agent organically searched the KB.
+  that the agent organically searched the KB. The same withdrawal holds when the
+  verifier itself is unavailable (§3, "On a model outage it fails closed"): recall is
+  never delivered unreviewed just because the reviewer couldn't run.
 - **CI.** A nightly (+ manual) workflow runs the replay eval with a fail-under gate
   and uploads the report; it's intentionally *not* a per-PR blocker (it drives a live
   model and can't run on fork PRs), while the deterministic scoring logic is unit-

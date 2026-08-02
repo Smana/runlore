@@ -167,6 +167,42 @@ func TestOnRecallReportsDecision(t *testing.T) {
 		}
 	})
 
+	t.Run("verify_unavailable", func(t *testing.T) {
+		// THE REGRESSION THIS FIX CLOSES: recall fires but the verify pass cannot run
+		// (a model error — the whole point of the trust gate: catalog text is untrusted
+		// and verify is the recall path's sole adversarial check). tryRecall must treat
+		// "verify could not run" as a forced fall-through — the SAME outcome as verify
+		// reviewing and rejecting the entry — not as approval. The decision must report
+		// Fired=true, ShortCircuited=false, and the loop must actually run and deliver
+		// its own fresh finding rather than the unreviewed catalog text.
+		inner := &scriptModel{responses: []providers.CompletionResponse{
+			// the fall-through loop's own investigation
+			{ToolCalls: []providers.ToolCall{{ID: "f1", Name: submitFindingsName, Args: `{"confidence":0.8,"root_causes":[{"summary":"freshly investigated","confidence":0.8}]}`}}},
+			// the fall-through loop's own verify pass (working again)
+			{ToolCalls: []providers.ToolCall{{ID: "v2", Name: submitVerdictsName, Args: `{"verdicts":[{"index":0,"verdict":"keep","confidence":0.8}]}`}}},
+		}}
+		model := &errThenScriptModel{n: 1, err: errors.New("401 authentication_error: invalid x-api-key"), inner: inner}
+		var got *providers.Investigation
+		var d RecallDecision
+		li := &LoopInvestigator{
+			Model:      model,
+			Verify:     true,
+			Log:        discard,
+			Recall:     &Recall{MinScore: 2.0, Catalog: strongHit},
+			OnRecall:   func(rd RecallDecision) { d = rd },
+			OnComplete: func(inv providers.Investigation) { got = &inv },
+		}
+		if err := li.Investigate(context.Background(), Request{Title: "HarborProbeFailure", Workload: wl}); err != nil {
+			t.Fatalf("Investigate: %v", err)
+		}
+		if !d.Fired || d.ShortCircuited || d.Entry != "known.md" {
+			t.Fatalf("expected fired+withdrawn (verify unavailable) on known.md, got %+v", d)
+		}
+		if got == nil || len(got.RootCauses) != 1 || got.RootCauses[0].Summary != "freshly investigated" {
+			t.Fatalf("expected the fall-through loop's fresh finding, not the unreviewed catalog text, got %+v", got)
+		}
+	})
+
 	t.Run("did_not_fire", func(t *testing.T) {
 		// A below-threshold hit: recall is consulted but no gate clears; the decision
 		// must report Fired=false and the loop runs.
@@ -744,6 +780,26 @@ func (m *errModel) Complete(_ context.Context, _ providers.CompletionRequest) (p
 	return providers.CompletionResponse{}, m.err
 }
 
+// errThenScriptModel fails the first n calls with err, then delegates to inner — a
+// model outage that resolves partway through an investigation. Used to simulate the
+// recall verify pass erroring (the outage) while the loop it forces a fall-through to
+// still gets a working model on its own first call (the outage has since cleared, or a
+// retry succeeded — either way, the test only needs "verify's call failed").
+type errThenScriptModel struct {
+	n     int
+	err   error
+	inner *scriptModel
+	calls int
+}
+
+func (m *errThenScriptModel) Complete(ctx context.Context, req providers.CompletionRequest) (providers.CompletionResponse, error) {
+	m.calls++
+	if m.calls <= m.n {
+		return providers.CompletionResponse{}, m.err
+	}
+	return m.inner.Complete(ctx, req)
+}
+
 // TestInvestigateModelError asserts a non-deadline model error bubbles up wrapped
 // as "model: …" (so the caller/queue sees a real failure), as opposed to the
 // deadline path which delivers a synthetic timeout result and returns nil.
@@ -771,6 +827,67 @@ func TestInvestigateModelError(t *testing.T) {
 	}
 	if model.calls != 1 {
 		t.Fatalf("a model error must end the loop after one call, got %d", model.calls)
+	}
+}
+
+// mixedStep is one entry in a mixedModel script: either a normal response, or (when
+// err is set) a forced error for that call.
+type mixedStep struct {
+	resp providers.CompletionResponse
+	err  error
+}
+
+// mixedModel replays a scripted sequence where any given call may be a normal
+// response OR a forced error — used to place a model failure at an exact point in a
+// multi-call investigation (e.g. the loop's own findings succeed, and only the
+// SUBSEQUENT verify call fails), which scriptModel (always nil error) and errModel
+// (always error) cannot express on their own.
+type mixedModel struct {
+	steps []mixedStep
+	i     int
+}
+
+func (m *mixedModel) Complete(_ context.Context, _ providers.CompletionRequest) (providers.CompletionResponse, error) {
+	s := m.steps[m.i]
+	m.i++
+	return s.resp, s.err
+}
+
+// TestVerifyErrorFullInvestigationKeepsFindingsAsIs pins loop.go's full-investigation
+// call site (as distinct from the recall short-circuit path this same defect fix
+// changes): a verify error there must still keep the findings AS-IS, unchanged — NOT
+// force a fall-through or discard them. This is deliberately the opposite policy from
+// tryRecall's, and correctly so — see verifyFindings' doc comment for why: these
+// findings were already built from independently-gathered tool evidence before verify
+// ever ran, so a down reviewer falls back to delivering the real evidence rather than
+// losing it. Losing the fix would show up here as a fall-through/failed investigation
+// instead of the original finding.
+func TestVerifyErrorFullInvestigationKeepsFindingsAsIs(t *testing.T) {
+	model := &mixedModel{steps: []mixedStep{
+		// step 0: the loop concludes with a real finding.
+		{resp: providers.CompletionResponse{ToolCalls: []providers.ToolCall{
+			{ID: "1", Name: submitFindingsName, Args: `{"confidence":0.8,"root_causes":[{"summary":"oom","confidence":0.8,"evidence":["OOMKilled"]}]}`}}}},
+		// step 1: the verify pass — the model is down.
+		{err: errors.New("401 authentication_error: invalid x-api-key")},
+	}}
+	var got *providers.Investigation
+	li := &LoopInvestigator{
+		Model:      model,
+		Log:        slog.New(slog.NewTextHandler(io.Discard, nil)),
+		Verify:     true,
+		OnComplete: func(inv providers.Investigation) { got = &inv },
+	}
+	if err := li.Investigate(context.Background(), Request{Title: "x"}); err != nil {
+		t.Fatalf("Investigate: %v", err)
+	}
+	if got == nil {
+		t.Fatal("OnComplete not called")
+	}
+	if len(got.RootCauses) != 1 || got.RootCauses[0].Summary != "oom" || got.Confidence != 0.8 {
+		t.Fatalf("a verify error on the full-investigation path must keep findings unchanged, got %+v", got)
+	}
+	if model.i != 2 {
+		t.Fatalf("expected 2 model calls (findings + failed verify), got %d", model.i)
 	}
 }
 
