@@ -7,6 +7,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/Smana/runlore/internal/config"
 )
 
 // TestResolveFromOpenAIEnv: with no runlore.yaml, an OpenAI-compatible endpoint in the
@@ -156,5 +158,34 @@ func TestConfigFromEnvGetsInvestigationDefaults(t *testing.T) {
 	if envCfg.Investigation.Timeout != fileCfg.Investigation.Timeout {
 		t.Errorf("env-synthesized timeout = %v, want the loaded-config default %v",
 			envCfg.Investigation.Timeout, fileCfg.Investigation.Timeout)
+	}
+}
+
+// TestDisabledToolsNamesWhatIsOff: a thin answer must be explainable. When metrics,
+// logs and the catalog are unset, the command says so once on stderr rather than
+// leaving the user wondering why the agent never looked at their dashboards.
+func TestDisabledToolsNamesWhatIsOff(t *testing.T) {
+	cfg := &config.Config{Model: config.Model{Model: "m", BaseURL: "http://x/v1"}}
+	got := disabledTools(cfg)
+	joined := strings.Join(got, " ")
+	for _, want := range []string{"metrics", "logs", "knowledge catalog"} {
+		if !strings.Contains(joined, want) {
+			t.Errorf("disabledTools() = %v, must mention %q", got, want)
+		}
+	}
+}
+
+// TestDisabledToolsSilentWhenWired: nothing to warn about when everything is set.
+// Note the shapes: config.MetricsConfig and config.LogsConfig embed config.Endpoint
+// inline (config.go:116, :131, :76), so URL is set through the embedded struct.
+func TestDisabledToolsSilentWhenWired(t *testing.T) {
+	cfg := &config.Config{
+		Model:   config.Model{Model: "m", BaseURL: "http://x/v1"},
+		Metrics: config.MetricsConfig{Endpoint: config.Endpoint{URL: "http://vm:8429"}},
+		Logs:    config.LogsConfig{Endpoint: config.Endpoint{URL: "http://vl:9428"}},
+		Catalog: config.Catalog{Dir: "/kb"},
+	}
+	if got := disabledTools(cfg); len(got) != 0 {
+		t.Errorf("disabledTools() = %v, want none", got)
 	}
 }

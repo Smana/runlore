@@ -7,8 +7,10 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"strings"
 
 	"github.com/Smana/runlore/internal/action"
+	"github.com/Smana/runlore/internal/config"
 	"github.com/Smana/runlore/internal/investigate"
 	"github.com/Smana/runlore/internal/logging"
 	"github.com/Smana/runlore/internal/notify"
@@ -22,6 +24,10 @@ func RunInvestigate(args []string) error {
 	alert := fs.String("alert", "", "alert/symptom name to investigate")
 	namespace := fs.String("namespace", "", "namespace of the affected workload")
 	message := fs.String("message", "", "free-text symptom description")
+	modelName := fs.String("model", "", "override the model name")
+	baseURL := fs.String("base-url", "", "override the OpenAI-compatible endpoint")
+	metricsURL := fs.String("metrics-url", "", "PromQL endpoint — enables query_metrics")
+	logsURL := fs.String("logs-url", "", "logs endpoint — enables query_logs")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -37,8 +43,26 @@ func RunInvestigate(args []string) error {
 	if err != nil {
 		return err
 	}
+	// Flags override the resolved config. They are how a user points the CLI at their
+	// stack without writing a file.
+	if *modelName != "" {
+		cfg.Model.Model = *modelName
+	}
+	if *baseURL != "" {
+		cfg.Model.BaseURL = *baseURL
+	}
+	if *metricsURL != "" {
+		cfg.Metrics.URL = *metricsURL
+	}
+	if *logsURL != "" {
+		cfg.Logs.URL = *logsURL
+	}
 	if !ModelConfigured(cfg) {
 		return fmt.Errorf("investigate requires a configured model (set config.model)")
+	}
+	if off := disabledTools(cfg); len(off) > 0 {
+		fmt.Fprintf(os.Stderr, "note: running without %s — pass --metrics-url/--logs-url or a --config to enable them\n",
+			strings.Join(off, ", "))
 	}
 	// Progress logs go to stderr; the findings go to stdout.
 	log := logging.FromConfig(os.Stderr, cfg.Logging.Format, cfg.Logging.Level)
@@ -69,4 +93,21 @@ func RunInvestigate(args []string) error {
 	}
 	fmt.Println(notify.Format(*result))
 	return nil
+}
+
+// disabledTools names the investigation signals this run will NOT have, so a thin
+// answer is explainable rather than mysterious. The CLI deliberately degrades
+// instead of demanding a full stack — but silence about it would look like a bug.
+func disabledTools(cfg *config.Config) []string {
+	var off []string
+	if cfg.Metrics.URL == "" {
+		off = append(off, "metrics (query_metrics)")
+	}
+	if cfg.Logs.URL == "" {
+		off = append(off, "logs (query_logs)")
+	}
+	if cfg.Catalog.Dir == "" && cfg.Catalog.Git.URL == "" {
+		off = append(off, "knowledge catalog (kb_search, instant recall)")
+	}
+	return off
 }
