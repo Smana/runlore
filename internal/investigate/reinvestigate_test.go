@@ -21,7 +21,7 @@ type fakeForge struct {
 func (f *fakeForge) ListIssuesByLabel(context.Context, string) ([]providers.CuratedIssue, error) {
 	return f.issues, nil
 }
-func (f *fakeForge) Comment(_ context.Context, n int, body string) error {
+func (f *fakeForge) CommentOnIssue(_ context.Context, n int, body string) error {
 	if f.comments == nil {
 		f.comments = map[int]string{}
 	}

@@ -742,3 +742,54 @@ func TestLogsProviderValidate(t *testing.T) {
 		t.Fatalf("unknown provider must fail with a logs.provider error, got %v", err)
 	}
 }
+
+// TestValidateForgeProviderGitLab pins the fail-closed contract for the GitLab
+// forge provider: a missing token_env, and an obviously-invalid kb_repo, both
+// abort Validate rather than let `serve` come up with curation silently
+// disabled — the exact failure mode a self-hosted GitLab team would otherwise
+// discover only when no PR ever appears.
+func TestValidateForgeProviderGitLab(t *testing.T) {
+	ok := &Config{}
+	ok.Forge.Provider = "gitlab"
+	ok.Forge.KBRepo = "my-group/runlore-kb"
+	ok.Forge.GitLab.TokenEnv = "GITLAB_TOKEN"
+	if err := ok.Validate(); err != nil {
+		t.Fatalf("a well-formed gitlab forge config must validate clean, got: %v", err)
+	}
+
+	nested := &Config{}
+	nested.Forge.Provider = "gitlab"
+	nested.Forge.KBRepo = "my-group/subgroup/runlore-kb"
+	nested.Forge.GitLab.TokenEnv = "GITLAB_TOKEN"
+	if err := nested.Validate(); err != nil {
+		t.Fatalf("a nested-group kb_repo must validate clean, got: %v", err)
+	}
+
+	noToken := &Config{}
+	noToken.Forge.Provider = "gitlab"
+	noToken.Forge.KBRepo = "my-group/runlore-kb"
+	if err := noToken.Validate(); err == nil || !strings.Contains(err.Error(), "forge.gitlab.token_env") {
+		t.Fatalf("gitlab provider with no token_env must be rejected, got: %v", err)
+	}
+
+	badRepo := &Config{}
+	badRepo.Forge.Provider = "gitlab"
+	badRepo.Forge.GitLab.TokenEnv = "GITLAB_TOKEN"
+	badRepo.Forge.KBRepo = "not-a-project-path"
+	if err := badRepo.Validate(); err == nil || !strings.Contains(err.Error(), "forge.kb_repo") {
+		t.Fatalf("kb_repo without a namespace must be rejected, got: %v", err)
+	}
+
+	unknown := &Config{}
+	unknown.Forge.Provider = "bitbucket"
+	if err := unknown.Validate(); err == nil || !strings.Contains(err.Error(), "forge.provider") {
+		t.Fatalf("an unknown forge.provider must be rejected, got: %v", err)
+	}
+
+	// Backward compatibility: an absent (empty) provider is "github" and
+	// requires none of the gitlab fields.
+	def := &Config{}
+	if err := def.Validate(); err != nil {
+		t.Fatalf("an empty forge.provider must validate clean (defaults to github), got: %v", err)
+	}
+}

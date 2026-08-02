@@ -6,6 +6,11 @@ package github
 // in step with the entry a PR adds, so the bundle stays self-describing for every
 // OKF consumer (progressive-disclosure index, chronological change log) and the
 // reviewer sees the whole change in one diff.
+//
+// Only the GitHub-specific transport lives here (a read + a PUT per file, four
+// calls in all). The markdown surgery itself is okf.UpdateIndex / okf.UpdateLog,
+// shared with internal/forge/gitlab so the bundle's shape can't depend on which
+// forge hosts the KB.
 
 import (
 	"context"
@@ -16,6 +21,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/Smana/runlore/internal/okf"
 	"github.com/Smana/runlore/internal/providers"
 )
 
@@ -32,7 +38,7 @@ func (c *Client) maintainBundle(ctx context.Context, e providers.KBEntry, entryP
 	}
 	if found {
 		if err := c.putFile(ctx, "index.md", branch, idxSHA,
-			"runlore: index "+e.Title, updateIndex(idx, e, entryPath)); err != nil {
+			"runlore: index "+e.Title, okf.UpdateIndex(idx, e, entryPath)); err != nil {
 			return err
 		}
 	}
@@ -42,74 +48,7 @@ func (c *Client) maintainBundle(ctx context.Context, e providers.KBEntry, entryP
 		return fmt.Errorf("read log.md: %w", err)
 	}
 	return c.putFile(ctx, "log.md", branch, logSHA,
-		"runlore: log "+e.Title, updateLog(logMD, e, entryPath, date))
-}
-
-// updateIndex appends the entry's link line to its "## <Type>s" section of an
-// OKF index (creating the section at the end when absent). Links are relative to
-// the bundle root, matching the seed index style.
-func updateIndex(existing []byte, e providers.KBEntry, entryPath string) []byte {
-	section := "## " + e.Type + "s"
-	line := fmt.Sprintf("- [%s](%s) — %s", e.Title, entryPath, e.Description)
-
-	lines := strings.Split(strings.TrimRight(string(existing), "\n"), "\n")
-	start := -1
-	for i, l := range lines {
-		if strings.TrimSpace(l) == section {
-			start = i
-			break
-		}
-	}
-	if start == -1 {
-		lines = append(lines, "", section, "", line)
-		return []byte(strings.Join(lines, "\n") + "\n")
-	}
-	// Insert at the section's end: just before the next heading, or at EOF.
-	end := len(lines)
-	for i := start + 1; i < len(lines); i++ {
-		if strings.HasPrefix(strings.TrimSpace(lines[i]), "#") {
-			end = i
-			break
-		}
-	}
-	// Trim the section's trailing blank lines so the new line joins the list.
-	for end > start+1 && strings.TrimSpace(lines[end-1]) == "" {
-		end--
-	}
-	out := append(append(append([]string{}, lines[:end]...), line), lines[end:]...)
-	return []byte(strings.Join(out, "\n") + "\n")
-}
-
-// updateLog records the entry in an OKF log: flat date-grouped entries, newest
-// first, bold action word (§7). A nil/empty existing log gets the standard shape.
-func updateLog(existing []byte, e providers.KBEntry, entryPath, date string) []byte {
-	heading := "## " + date
-	line := fmt.Sprintf("* **Creation**: Added [%s](%s).", e.Title, entryPath)
-
-	cur := strings.TrimRight(string(existing), "\n")
-	if strings.TrimSpace(cur) == "" {
-		return []byte("# Knowledge catalog update log\n\n" + heading + "\n\n" + line + "\n")
-	}
-	lines := strings.Split(cur, "\n")
-	for i, l := range lines {
-		if strings.TrimSpace(l) != heading {
-			continue
-		}
-		// Today's heading exists (it is the newest — logs are newest-first):
-		// slot the line right under it.
-		out := append(append(append([]string{}, lines[:i+1]...), "", line), lines[i+1:]...)
-		return []byte(strings.Join(out, "\n") + "\n")
-	}
-	// New (newest) date: insert the heading after the H1 title, before older dates.
-	at := len(lines)
-	for i, l := range lines {
-		if strings.HasPrefix(strings.TrimSpace(l), "## ") {
-			at = i
-			break
-		}
-	}
-	out := append(append(append([]string{}, lines[:at]...), heading, "", line, ""), lines[at:]...)
-	return []byte(strings.Join(out, "\n") + "\n")
+		"runlore: log "+e.Title, okf.UpdateLog(logMD, e, entryPath, date))
 }
 
 // getFile reads a file's content + blob SHA at ref via the contents API.

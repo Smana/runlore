@@ -301,10 +301,28 @@ func (c *Client) ListClosedUnmergedPRsByLabel(ctx context.Context, label string)
 	return out, nil
 }
 
-// Comment posts a comment on an issue.
+// Comment posts a comment on an issue. It is the curate.Forge surface (Phase-2
+// grooming), which stays kind-agnostic because GitHub genuinely is.
 func (c *Client) Comment(ctx context.Context, number int, body string) error {
 	return c.do(ctx, http.MethodPost, fmt.Sprintf("/repos/%s/%s/issues/%d/comments", c.owner, c.repo, number),
 		map[string]any{"body": body}, nil)
+}
+
+// CommentOnPR and CommentOnIssue are the explicitly-scoped comment methods
+// providers.CurationForge / providers.ReinvestForge require. On GitHub they are
+// literally the same call: issues and pull requests share ONE number sequence
+// and ONE comments endpoint (the issues-comments endpoint serves PR discussion
+// too), so a number names exactly one artifact and there is nothing to
+// disambiguate. They exist as separate names purely so the compiler can enforce
+// the distinction on forges where a number IS ambiguous — GitLab keeps
+// independent iid sequences for merge requests and issues.
+func (c *Client) CommentOnPR(ctx context.Context, number int, body string) error {
+	return c.Comment(ctx, number, body)
+}
+
+// CommentOnIssue posts a comment on an issue; see CommentOnPR.
+func (c *Client) CommentOnIssue(ctx context.Context, number int, body string) error {
+	return c.Comment(ctx, number, body)
 }
 
 // ListIssueCommentBodies fetches ALL pages of an issue/PR's comment bodies (the

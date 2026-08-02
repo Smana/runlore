@@ -18,6 +18,14 @@ func TestSecretsMasks(t *testing.T) {
 	}{
 		{"github token", "found ghp_0123456789abcdefghijABCDEFGHIJ0123 here", "ghp_0123456789abcdefghijABCDEFGHIJ0123", "found"},
 		{"github fine-grained pat", "token github_pat_11ABCDE0123456789_abcdefghijklmnopqrstuvwxyzABCDEFGH used", "github_pat_11ABCDE0123456789_abcdefghijklmnopqrstuvwxyzABCDEFGH", "token"},
+		{"gitlab project access token", "PRIVATE-TOKEN: glpat-aBcDeFgHiJkLmNoPqRsT here", "glpat-aBcDeFgHiJkLmNoPqRsT", "here"},
+		// GitLab's routable token format embeds dot-separated segments; the WHOLE
+		// token must go, not just the part before the first dot.
+		{"gitlab routable token", "PRIVATE-TOKEN: glpat-aBcDeFgHiJkLmNoPqRsT.01.1a2b3c4d5 here", "1a2b3c4d5", "here"},
+		{"gitlab runner routable token", "runner registered with glrt-t1_aBcDeFgHiJkLmNoPqRsT.0a.02b3c4d5e now", "02b3c4d5e", "now"},
+		// Widening the suffix class with '.' must not swallow a sentence-ending
+		// period: the trailing \b forces the engine back off it.
+		{"gitlab token ends a sentence", "rotate glpat-aBcDeFgHiJkLmNoPqRsT. Then restart", "glpat-aBcDeFgHiJkLmNoPqRsT", ". Then restart"},
 		{"openai key", "OPENAI_API_KEY=sk-abcdefghijklmnopqrstuvwx", "sk-abcdefghijklmnopqrstuvwx", ""},
 		{"openai key mid sentence", "the key sk-abcdefghijklmnopqrstuvwx is here", "sk-abcdefghijklmnopqrstuvwx", "the key"},
 		{"stripe live secret key", "stripe sk_live_0123456789abcdefABCDEF here", "sk_live_0123456789abcdefABCDEF", "stripe"},

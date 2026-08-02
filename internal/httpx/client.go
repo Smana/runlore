@@ -17,8 +17,13 @@ const maxRedirects = 10
 // sensitiveAuthHeaders are request headers that carry a provider credential. Go's
 // net/http strips Authorization/Cookie itself on a host-changing redirect but NOT
 // custom headers, so DenyInternalRedirect deletes these explicitly (canonical form;
-// http.Header.Del is case-insensitive). x-api-key = Anthropic, x-goog-api-key = Gemini.
-var sensitiveAuthHeaders = []string{"X-Api-Key", "X-Goog-Api-Key", "Authorization"}
+// http.Header.Del is case-insensitive). x-api-key = Anthropic, x-goog-api-key = Gemini,
+// private-token = GitLab (a project/group access token with full `api` scope — the
+// broadest credential in this list, and exactly the custom-header case Go will NOT
+// strip on its own; DenyInternalRedirect's internal-target check does not cover it
+// either, since a public→public redirect is allowed and an internal-origin chain
+// returns early).
+var sensitiveAuthHeaders = []string{"X-Api-Key", "X-Goog-Api-Key", "Authorization", "Private-Token"}
 
 // SecureClient returns an http.Client with the given timeout and the
 // DenyInternalRedirect policy. Use it for every outbound call to an operator- or

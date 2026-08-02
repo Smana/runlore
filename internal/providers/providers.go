@@ -533,7 +533,10 @@ type ProgressNotifier interface {
 type CurationForge interface {
 	OpenPR(ctx context.Context, entry KBEntry) (Ref, error)
 	ListPRsByLabel(ctx context.Context, label string) ([]CuratedIssue, error)
-	Comment(ctx context.Context, number int, body string) error
+	// CommentOnPR posts a comment on the PULL REQUEST / MERGE REQUEST numbered
+	// `number`. See the scoped-comment note on ReinvestForge.CommentOnIssue for
+	// why the artifact kind is in the method name rather than left to the forge.
+	CommentOnPR(ctx context.Context, number int, body string) error
 }
 
 // CuratedIssue is a minimal view of a curated KB issue, used by the re-investigate
@@ -552,8 +555,20 @@ type CuratedIssue struct {
 type ReinvestForge interface {
 	// ListIssuesByLabel returns open issues carrying the given label.
 	ListIssuesByLabel(ctx context.Context, label string) ([]CuratedIssue, error)
-	// Comment posts a comment on an issue.
-	Comment(ctx context.Context, number int, body string) error
+	// CommentOnIssue posts a comment on the ISSUE numbered `number`.
+	//
+	// The artifact kind is part of the method NAME, not a runtime guess by the
+	// forge, because on GitLab a bare number does not identify one artifact:
+	// merge requests and issues have INDEPENDENT iid sequences, both starting at
+	// 1, so in a busy KB project issue #3 and merge request !3 both exist and are
+	// unrelated. A forge that had to infer the kind (say, "try MRs first, fall
+	// back to issues on 404") would post the re-investigation findings onto a
+	// random merge request, get a 200 back, and leave no trace of the misroute.
+	// GitHub has no such ambiguity — issues and PRs share one number sequence and
+	// one comments endpoint — so both of its scoped methods are the same call;
+	// the split exists so the COMPILER, not a code reviewer, enforces the
+	// distinction on the forges where it is load-bearing.
+	CommentOnIssue(ctx context.Context, number int, body string) error
 	// ReplaceLabel removes one label and adds another (lifecycle transition);
 	// either side may be empty to only add or only remove.
 	ReplaceLabel(ctx context.Context, number int, remove, add string) error

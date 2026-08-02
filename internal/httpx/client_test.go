@@ -114,13 +114,17 @@ func TestDenyInternalRedirectBlocksExternalToInternal(t *testing.T) {
 	}
 }
 
-// mkreqWithKeys builds a redirect-target request carrying the three provider key headers.
+// mkreqWithKeys builds a redirect-target request carrying every provider credential
+// header. PRIVATE-TOKEN is set with GitLab's own (non-canonical) casing on purpose:
+// Header.Set canonicalizes to "Private-Token", which is what sensitiveAuthHeaders
+// must list for Header.Del to match — pinning that here keeps the two in step.
 func mkreqWithKeys(t *testing.T, rawurl string) *http.Request {
 	t.Helper()
 	r := mkreq(t, rawurl)
 	r.Header.Set("X-Api-Key", "sk-secret")
 	r.Header.Set("X-Goog-Api-Key", "goog-secret")
 	r.Header.Set("Authorization", "Bearer tok")
+	r.Header.Set("PRIVATE-TOKEN", "glpat-aBcDeFgHiJkLmNoPqRsT")
 	return r
 }
 
@@ -134,10 +138,52 @@ func TestDenyInternalRedirectStripsKeyOnCrossHost(t *testing.T) {
 	if err := DenyInternalRedirect(target, []*http.Request{origin}); err != nil {
 		t.Fatalf("public cross-host redirect should be allowed (headers stripped), got %v", err)
 	}
-	for _, h := range []string{"X-Api-Key", "X-Goog-Api-Key", "Authorization"} {
+	for _, h := range []string{"X-Api-Key", "X-Goog-Api-Key", "Authorization", "PRIVATE-TOKEN"} {
 		if got := target.Header.Get(h); got != "" {
 			t.Fatalf("header %s must be stripped on cross-host redirect, got %q", h, got)
 		}
+	}
+}
+
+// TestDenyInternalRedirectStripsGitLabTokenPublicToPublic is the GitLab-specific
+// half of the header-stripping contract, kept as its own test because the two
+// guards that LOOK like they already cover it do not: Go's net/http strips only
+// Authorization/Cookie (PRIVATE-TOKEN is a custom header, so it is replayed), and
+// DenyInternalRedirect's internal-target check never fires on a public→public
+// redirect. The credential in question carries GitLab's full `api` scope, so
+// replaying it to an attacker-controlled host is a total KB-project compromise.
+func TestDenyInternalRedirectStripsGitLabTokenPublicToPublic(t *testing.T) {
+	orig := lookupIP
+	defer func() { lookupIP = orig }()
+	lookupIP = func(string) ([]net.IP, error) { return []net.IP{net.ParseIP("93.184.216.34")}, nil } // public
+
+	origin := mkreq(t, "https://gitlab.com/api/v4/projects/g%2Fp/merge_requests")
+	target := mkreq(t, "https://attacker.example/collect")
+	target.Header.Set("PRIVATE-TOKEN", "glpat-aBcDeFgHiJkLmNoPqRsT")
+	if err := DenyInternalRedirect(target, []*http.Request{origin}); err != nil {
+		t.Fatalf("public cross-host redirect should be allowed (header stripped), got %v", err)
+	}
+	if got := target.Header.Get("PRIVATE-TOKEN"); got != "" {
+		t.Fatalf("PRIVATE-TOKEN must not survive a cross-host redirect, got %q", got)
+	}
+}
+
+// TestDenyInternalRedirectKeepsGitLabTokenOnSameHost is the other half: a
+// self-managed instance doing an http→https upgrade or a trailing-slash redirect
+// on ITSELF must stay authenticated, or every forge call 401s.
+func TestDenyInternalRedirectKeepsGitLabTokenOnSameHost(t *testing.T) {
+	orig := lookupIP
+	defer func() { lookupIP = orig }()
+	lookupIP = func(string) ([]net.IP, error) { return []net.IP{net.ParseIP("93.184.216.34")}, nil } // public
+
+	origin := mkreq(t, "http://gitlab.example.com/api/v4/projects/g%2Fp")
+	target := mkreq(t, "https://gitlab.example.com/api/v4/projects/g%2Fp")
+	target.Header.Set("PRIVATE-TOKEN", "glpat-aBcDeFgHiJkLmNoPqRsT")
+	if err := DenyInternalRedirect(target, []*http.Request{origin}); err != nil {
+		t.Fatalf("same-host redirect should be allowed, got %v", err)
+	}
+	if target.Header.Get("PRIVATE-TOKEN") == "" {
+		t.Fatal("PRIVATE-TOKEN must be retained on a same-host redirect")
 	}
 }
 
@@ -152,7 +198,8 @@ func TestDenyInternalRedirectKeepsKeyOnSameHost(t *testing.T) {
 	if err := DenyInternalRedirect(target, []*http.Request{origin}); err != nil {
 		t.Fatalf("same-host redirect should be allowed, got %v", err)
 	}
-	if target.Header.Get("X-Api-Key") == "" || target.Header.Get("X-Goog-Api-Key") == "" || target.Header.Get("Authorization") == "" {
+	if target.Header.Get("X-Api-Key") == "" || target.Header.Get("X-Goog-Api-Key") == "" ||
+		target.Header.Get("Authorization") == "" || target.Header.Get("PRIVATE-TOKEN") == "" {
 		t.Fatal("key headers must be retained on a same-host redirect")
 	}
 }
