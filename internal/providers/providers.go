@@ -868,15 +868,10 @@ func (r CompletionResponse) Refused() bool {
 
 // Usage is the provider-reported token accounting for one completion.
 type Usage struct {
-	InputTokens  int // total prompt/input tokens billed, INCLUDING any served from cache (normalized across providers)
-	OutputTokens int // generated/output tokens in the reply
-	// CachedInputTokens is the subset of InputTokens that was a cache READ (Anthropic
-	// cache_read_input_tokens, OpenAI prompt_tokens_details.cached_tokens, Gemini
-	// cachedContentTokenCount) — the saving. 0 when the provider reports none.
-	CachedInputTokens int
-	// CacheWriteTokens is input tokens WRITTEN to the cache this request (Anthropic
-	// cache_creation_input_tokens, billed ~1.25x). 0 for providers that don't report it.
-	CacheWriteTokens int
+	InputTokens       int `json:"input_tokens"`        // total prompt/input tokens billed, INCLUDING any served from cache (normalized across providers)
+	OutputTokens      int `json:"output_tokens"`       // generated/output tokens in the reply
+	CachedInputTokens int `json:"cached_input_tokens"` // subset of InputTokens that was a cache READ (Anthropic cache_read_input_tokens, OpenAI prompt_tokens_details.cached_tokens, Gemini cachedContentTokenCount) — the saving. 0 when the provider reports none.
+	CacheWriteTokens  int `json:"cache_write_tokens"`  // input tokens WRITTEN to the cache this request (Anthropic cache_creation_input_tokens, billed ~1.25x). 0 for providers that don't report it.
 }
 
 // ToolCall is a model request to invoke a tool.
