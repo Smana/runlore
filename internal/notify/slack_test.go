@@ -293,11 +293,22 @@ func TestSlackSummaryLayout(t *testing.T) {
 			t.Fatalf("summary blocks missing %q:\n%s", want, s)
 		}
 	}
-	// Finding #1: the verdict line must carry the verdict ALONE — the header
-	// above already spelled out the title/alert name in full.
+	// Finding #1, as corrected: the verdict line carries the verdict plus the
+	// investigation's own title, because this fixture sets AlertName — so the
+	// header anchored on "HarborDown", the alert, and NOT on the title.
+	//
+	// The original assertion here was "the verdict line must carry the verdict
+	// ALONE — the header above already spelled out the title/alert name in full".
+	// That holds only when no alert named the investigation. With an alert, the
+	// header shows the question that woke the on-call and the title is the answer
+	// RunLore reached; suppressing it left the card never stating its conclusion.
+	// TestSlackCardShowsConclusionOnAlertPath pins both directions.
 	texts := mrkdwnTexts(blocks)
-	if strings.Contains(texts[0], "harbor is degraded") {
-		t.Fatalf("verdict block must not restate the title:\n%s", texts[0])
+	if !strings.Contains(texts[0], "harbor is degraded") {
+		t.Fatalf("verdict block must carry the title when the header anchored on the alert name:\n%s", texts[0])
+	}
+	if strings.Count(s, "harbor is degraded") != 1 {
+		t.Fatalf("the title must render exactly once on the card, got %d:\n%s", strings.Count(s, "harbor is degraded"), s)
 	}
 	// Finding #5: confidence and the agent identity must not repeat between the
 	// header area and the footer.
@@ -1035,4 +1046,68 @@ func TestSlackBotDeliverFeedbackButtons(t *testing.T) {
 			t.Fatalf("detail thread must not repeat the buttons, got: %s", b)
 		}
 	}
+}
+
+// TestSlackCardShowsConclusionOnAlertPath pins the investigation's own title onto
+// the card for alert-triggered incidents.
+//
+// The header anchors on the ALERT NAME whenever the source supplied one, so on the
+// Alertmanager path — the primary trigger — it renders the question that woke the
+// on-call, not the answer RunLore reached. A layout change once dropped the title
+// on the reasoning that "the header already shows it", which is true only for the
+// alert-less path. The result was a card that never stated its own conclusion.
+func TestSlackCardShowsConclusionOnAlertPath(t *testing.T) {
+	const conclusion = "api crash-looping after the payments/api chart bump"
+
+	t.Run("alert named: header shows the alert, so the title must appear too", func(t *testing.T) {
+		inv := providers.Investigation{
+			Title:     conclusion,
+			AlertName: "KubePodCrashLooping",
+			Verdict:   providers.VerdictActionRequired,
+			Resource:  providers.Workload{Kind: "Deployment", Name: "api", Namespace: "payments"},
+		}
+		body := renderSlackBlocks(t, inv)
+		if !strings.Contains(body, conclusion) {
+			t.Errorf("the card never states its own conclusion — %q is absent:\n%s", conclusion, body)
+		}
+		if !strings.Contains(body, "KubePodCrashLooping") {
+			t.Errorf("the alert name should still anchor the header:\n%s", body)
+		}
+	})
+
+	t.Run("no alert: header IS the title, so it must not be repeated", func(t *testing.T) {
+		inv := providers.Investigation{
+			Title:    conclusion,
+			Verdict:  providers.VerdictActionRequired,
+			Resource: providers.Workload{Kind: "Deployment", Name: "api", Namespace: "payments"},
+		}
+		body := renderSlackBlocks(t, inv)
+		if n := strings.Count(body, conclusion); n != 1 {
+			t.Errorf("title should appear exactly once (header only), got %d:\n%s", n, body)
+		}
+	})
+
+	t.Run("no verdict: the conclusion still appears", func(t *testing.T) {
+		inv := providers.Investigation{
+			Title:     conclusion,
+			AlertName: "KubePodCrashLooping",
+			Resource:  providers.Workload{Kind: "Deployment", Name: "api", Namespace: "payments"},
+		}
+		body := renderSlackBlocks(t, inv)
+		if !strings.Contains(body, conclusion) {
+			t.Errorf("a verdict-less investigation still has a conclusion; %q is absent:\n%s", conclusion, body)
+		}
+	})
+}
+
+// renderSlackBlocks marshals just the summary blocks, so a title appearing only in
+// the detail thread or the push-notification fallback cannot satisfy the assertions
+// above — the card itself has to carry it.
+func renderSlackBlocks(t *testing.T, inv providers.Investigation) string {
+	t.Helper()
+	b, err := json.Marshal(summaryBlocks(inv))
+	if err != nil {
+		t.Fatalf("marshal summary blocks: %v", err)
+	}
+	return string(b)
 }

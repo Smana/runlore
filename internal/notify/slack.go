@@ -390,15 +390,32 @@ func summaryBlocks(inv providers.Investigation) []map[string]any {
 		{"type": "header", "text": map[string]any{"type": "plain_text", "text": truncate(head, 150), "emoji": true}},
 	}
 
-	// 2. Verdict owns the second slot — the headline actionability call, ALONE.
-	// The header above already shows the full title (verbatim, or the alert
-	// name + scope) — restating it here duplicated up to its full word count
-	// before any NEW information reached a woken-up phone screen. Absent when
-	// the model omitted a verdict (old / recall investigations); confidence
-	// (2b, below) still renders either way, so the layout stays complete.
+	// 2. Verdict owns the second slot — the headline actionability call, plus the
+	// investigation's own title WHEN THE HEADER DID NOT ALREADY SHOW IT.
+	//
+	// The header shows the title verbatim only when the source named no alert.
+	// On the alert-driven path — Alertmanager, the primary trigger — it shows the
+	// ALERT NAME and scope instead, which is the question, not the answer. Dropping
+	// the title unconditionally therefore removed the agent's one-line conclusion
+	// from exactly the incidents it matters most for: "KubePodCrashLooping —
+	// prod/payments/api" is what woke the on-call; "api crash-looping after the
+	// payments/api chart bump" is what RunLore worked out.
+	//
+	// So it is restated only when it would not be a duplicate. Untrusted model
+	// output, hence escaped, and truncated to stay inside Slack's block limit.
+	// Absent when the model omitted a verdict (old / recall investigations);
+	// confidence (2b, below) renders either way, so the layout stays complete.
 	if vEmoji, label := verdictBadge(inv.Verdict); label != "" {
+		line := fmt.Sprintf("%s *%s*", vEmoji, label)
+		if inv.AlertName != "" && inv.Title != "" {
+			line += " — " + escapeMrkdwn(title)
+		}
 		blocks = append(blocks, map[string]any{"type": "section", "text": map[string]any{"type": "mrkdwn",
-			"text": fmt.Sprintf("%s *%s*", vEmoji, label)}})
+			"text": truncate(line, 2900)}})
+	} else if inv.AlertName != "" && inv.Title != "" {
+		// No verdict to anchor it to, but the conclusion still has to appear.
+		blocks = append(blocks, map[string]any{"type": "section", "text": map[string]any{"type": "mrkdwn",
+			"text": truncate(escapeMrkdwn(title), 2900)}})
 	}
 
 	// 2b. Confidence — shown exactly ONCE, here in the header area, whether or
