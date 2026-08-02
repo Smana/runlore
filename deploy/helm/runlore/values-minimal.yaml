@@ -1,6 +1,11 @@
 # Minimal profile — investigate + notify, nothing else. Read-only: no knowledge
 # catalog, no curation, no actions. Create the `runlore-secrets` Secret and point
 # Alertmanager at the webhook first; step up with values-standard.yaml.
+#
+# An OVERLAY on the chart's values.yaml, not the effective config: Helm deep-merges
+# the two, so the running agent also carries the chart defaults absent here (the
+# GitOps source, critical-only triggers, leader election, the investigation rate
+# limit…). deploy/helm/runlore/values.yaml is the exhaustive list.
 # https://runlore.io/docs/getting-started/#step-4--configure-and-install
 replicaCount: 1              # one worker; values-full.yaml adds leader-elected HA
 image:

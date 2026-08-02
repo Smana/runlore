@@ -135,11 +135,12 @@ forge (issues/PRs on a repo you designate).
 > For local development / testing on k3d, see
 > [CONTRIBUTING.md](https://github.com/Smana/runlore/blob/main/CONTRIBUTING.md) instead.
 
-The walkthrough below wires **one golden path** — Prometheus/VictoriaMetrics metrics, an
-OpenAI-compatible LLM, GitHub for curation, and Slack for delivery — the same combination the
-nightly eval and k3d e2e suite exercise. The shipped values profiles default to **Anthropic**
-instead (one API key, no endpoint of your own to run); swapping either way is a two-line change.
-Every other data source, LLM, notifier, or forge is
+The walkthrough below wires **one golden path** — Prometheus/VictoriaMetrics metrics, GitHub for
+curation, Slack for delivery, and **Anthropic** for the model. That is what the shipped values
+profiles and the `Secret` in [Step 3](#step-3--credentials) use: one API key, no endpoint of your
+own to run. Pointing it at any **OpenAI-compatible** endpoint instead is a two-line change
+(`provider: openai` + `base_url`) — and that is the combination the nightly eval and the k3d e2e
+suite exercise, so neither path is untested. Every other data source, LLM, notifier, or forge is
 equally supported; each gets a one-line pointer to its own page under
 [Integrations]({{< relref "/docs/integrations/_index.md" >}}) as it comes up below.
 
@@ -503,6 +504,12 @@ NetworkPolicy **cannot** match it and the credential fetch is silently dropped. 
 `networkPolicy.awsPodIdentity: true` (chart value) to render a `CiliumNetworkPolicy` that allows it —
 see that page's Notes for the exact YAML and the `hubble observe … DROPPED` command that confirms
 this is the issue you're hitting.
+
+> **Under `networkPolicy.strict: true`, that flag is not enough.** It covers only the credential
+> fetch; the AWS API calls themselves (CloudTrail, EKS, EC2, STS — public regional endpoints on
+> 443) are ordinary egress and are dropped unless you declare them too, leaving both cloud tools
+> silently empty. `values-full.yaml` shows the `networkPolicy.extraEgress` rule and how to pin the
+> CIDR (PrivateLink endpoint subnets, or your NAT gateway EIP).
 
 ---
 

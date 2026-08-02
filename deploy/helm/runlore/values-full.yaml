@@ -1,8 +1,16 @@
-# Full profile — everything the chart exposes, wired the way a production cluster
-# wants it: leader-elected HA, a durable data path, a default-deny NetworkPolicy,
-# rung-2 (human-approved) actions, cloud + network-flow evidence, and instant recall.
+# Full profile — the hardened production shape: leader-elected HA, a durable data
+# path, a default-deny NetworkPolicy, rung-2 (human-approved) actions, cloud +
+# network-flow evidence, and instant recall.
 #
-# It is a REFERENCE, not a drop-in: the cloud/network blocks below describe one
+# It is an OVERLAY on the chart's own values.yaml, NOT the effective config. Helm
+# deep-merges the two, so what actually runs also carries every default this file
+# leaves unmentioned — resources, probes, tolerations, affinity, curate.cronjob,
+# the trigger debounces, the coalesce/rate-limit ceilings. Nothing here is the
+# complete picture of a running install; deploy/helm/runlore/values.yaml is the
+# exhaustive, commented list. The keys below are the ones a production install has
+# to decide for itself.
+#
+# It is also a REFERENCE, not a drop-in: the cloud/network blocks below describe one
 # concrete environment (EKS + Cilium), and every CIDR, repo, ID and namespace is a
 # placeholder. Read it top to bottom, keep what matches your cluster, delete the rest —
 # every block here is independently optional. Start from values-standard.yaml if you
@@ -57,6 +65,16 @@ podDisruptionBudget:
   create: true
   minAvailable: 1
 
+# The identity the AWS calls under config.cloud below authenticate as. EKS Pod
+# Identity needs NO annotation (the association is created on the AWS side — that is
+# the mode networkPolicy.awsPodIdentity exists for). IRSA binds the read-only role by
+# annotation instead, and without it the AWS SDK finds no credentials at all, so
+# cloud_what_changed / cloud_resource_health fail at runtime rather than at install.
+serviceAccount:
+  create: true
+  annotations: {}
+  #   eks.amazonaws.com/role-arn: arn:aws:iam::123456789012:role/runlore-readonly
+
 # Cluster-write RBAC for the action ladder. actionNamespaces MIRRORS
 # config.actions.allow.namespaces below and is granted as namespace-scoped Roles
 # only — never cluster-wide — so the blast radius stays bounded. flux-system and
@@ -66,8 +84,13 @@ rbac:
   actionNamespaces: [apps]
   controllerLogNamespaces: [flux-system] # where pods/log is granted for controller_logs
 
-# Default-deny egress: the agent may ONLY reach what is listed here, so the model
-# endpoint, the git forge and every backend below must be declared or it goes dark.
+# Default-deny egress: the agent may ONLY reach what is listed here. That means
+# EVERY endpoint this file turns on under `config:` — model API, git forge, the
+# Kubernetes API, metrics, logs, Hubble, AWS — needs a matching rule, or the CNI
+# drops the traffic with NO error anywhere: the tool it served just returns nothing.
+# Treat the two halves as one edit; adding a `url:` below without a rule here is the
+# single easiest way to make this profile quietly useless.
+#
 # Ingress is scoped to the namespace that owns Alertmanager — combined with the
 # webhook token, that is what stops a neighbour pod POSTing synthetic alerts and
 # burning your model spend. Leave strict: false if pinning egress IPs is impractical;
@@ -76,14 +99,30 @@ networkPolicy:
   enabled: true
   strict: true
   egress:
-    # The three allowlists below open port 443 only (6443 for apiServerCIDRs) — enough
-    # for the model API and the git forge, both HTTPS and off-cluster.
-    allowedCIDRs: ["203.0.113.10/32"] # the egress IPs your model provider + forge resolve to
+    # allowedCIDRs and namespaceSelectors open port 443 ONLY; apiServerCIDRs opens
+    # 6443 ONLY. Everything else needs an extraEgress rule further down.
+    #
+    # allowedCIDRs is NOT just the model provider: it must carry every off-cluster
+    # HTTPS destination — the model API, the git forge (api.github.com AND
+    # codeload.github.com for the catalog clone), and, on a MANAGED control plane,
+    # the Kubernetes API itself. Hostnames resolve to IPs that move, so pin the CIDR
+    # your traffic actually leaves through: a NAT gateway EIP, an egress proxy, or a
+    # PrivateLink endpoint subnet — not a DNS answer you resolved once.
+    allowedCIDRs:
+      - "203.0.113.10/32" # model provider + git forge (e.g. this cluster's NAT gateway EIP)
+      - "10.0.0.1/32" # the EKS API server endpoint — managed APIs are on 443, see below
     namespaceSelectors: [] # in-cluster backends that speak 443 (none in this example)
-    apiServerCIDRs: ["10.0.0.1/32"] # the Kubernetes API endpoint(s) on 6443
-  # Anything on ANOTHER port has to be spelled out here — extraEgress is appended
-  # verbatim in both modes. These mirror the endpoints configured under `config:`
-  # below; change the two together or the tool silently stops answering.
+    # apiServerCIDRs renders port 6443 ONLY, which is the SELF-MANAGED shape (kubeadm,
+    # k3s, RKE). EKS — and GKE/AKS — serve the API on 443, so on this profile's EKS
+    # framing the endpoint goes in allowedCIDRs above and this list stays EMPTY. Put an
+    # EKS endpoint here instead and every Kubernetes read (pod status, events, logs) is
+    # silently dropped. Confirm which shape you have before choosing:
+    #   kubectl -n default get endpoints kubernetes
+    apiServerCIDRs: []
+  # Anything on ANOTHER port, or needing its own justification, is spelled out here —
+  # extraEgress is appended verbatim in both modes. These mirror the endpoints
+  # configured under `config:` below; change the two together or the tool silently
+  # stops answering.
   extraEgress:
     - to:
         - namespaceSelector:
@@ -96,12 +135,31 @@ networkPolicy:
             matchLabels: { kubernetes.io/metadata.name: kube-system }
       ports:
         - { protocol: TCP, port: 80 } # Hubble Relay gRPC — config.network.hubble.url
+    # AWS control plane — config.cloud below. awsPodIdentity covers ONLY the
+    # 169.254.170.23:80 credential fetch; the API calls themselves (cloudtrail, eks,
+    # ec2, autoscaling, sts — all `*.eu-west-3.amazonaws.com` on 443) are ordinary
+    # HTTPS egress and are dropped without this rule, leaving cloud_what_changed and
+    # cloud_resource_health permanently empty. AWS endpoint IPs are dynamic, so pin
+    # one of these instead of a resolved address, narrowest first:
+    #   1. interface VPC endpoints (PrivateLink) for cloudtrail/eks/ec2/sts, and list
+    #      the endpoint SUBNET CIDRs here — the traffic never leaves the VPC;
+    #   2. your NAT gateway EIP (the same CIDR as allowedCIDRs above when egress is
+    #      shared — then this rule is redundant and can be deleted);
+    #   3. the region's AMAZON prefixes from AWS ip-ranges.json (wide, and it moves).
+    # Delete this rule entirely if you delete config.cloud.
+    - to:
+        - ipBlock:
+            cidr: 10.0.16.0/20 # PLACEHOLDER: the PrivateLink endpoint subnets in eu-west-3
+      ports:
+        - { protocol: TCP, port: 443 }
   ingressFrom:
     - namespaceSelector:
         matchLabels: { kubernetes.io/metadata.name: monitoring }
   # Cilium only: the EKS Pod Identity credential endpoint (169.254.170.23:80) runs on
   # the node host network, which a plain NetworkPolicy cannot match — the credential
-  # fetch is then silently dropped and the AWS tools below never authenticate.
+  # fetch is then silently dropped and the AWS tools below never authenticate. This
+  # is the CREDENTIAL fetch only; the AWS API calls it authorises need the 443 rule
+  # in extraEgress above.
   awsPodIdentity: true
 
 vmServiceScrape:
@@ -174,7 +232,9 @@ config:
   # Cloud control plane (read-only, in-cluster identity — no static AWS keys). Unlocks
   # cloud_what_changed (CloudTrail) and cloud_resource_health, so an infra change that
   # never touched GitOps is still visible. Needs the IAM policy bound to the
-  # ServiceAccount via EKS Pod Identity or IRSA.
+  # ServiceAccount via EKS Pod Identity or IRSA (see serviceAccount above) — AND, under
+  # networkPolicy.strict, the 443 egress rule in extraEgress above, or both tools
+  # return nothing at all.
   cloud:
     provider: aws
     region: eu-west-3

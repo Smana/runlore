@@ -6,6 +6,12 @@
 # values-full.yaml adds HA, persistence, a locked-down NetworkPolicy, the action
 # ladder, and the optional cloud / network-flow signals.
 #
+# This file is an OVERLAY on the chart's values.yaml, not the effective config: Helm
+# deep-merges the two, so the running agent also carries the chart defaults nothing
+# here mentions (resources, probes, the trigger debounces, the coalesce and
+# rate-limit ceilings, leader election…). deploy/helm/runlore/values.yaml is the
+# exhaustive list.
+#
 # Prerequisites — the KB repo, the GitHub App, and this Secret:
 # https://runlore.io/docs/getting-started/#the-full-loop--production-install
 #
@@ -21,6 +27,9 @@
 # Replace every `your-org` / placeholder ID below before installing.
 
 replicaCount: 1 # one worker; values-full.yaml adds leader-elected HA
+
+image:
+  tag: "" # defaults to the chart appVersion; PIN IT in production
 
 envFrom:
   - secretRef:
