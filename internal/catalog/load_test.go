@@ -46,6 +46,40 @@ Ready=False after a chart bump.
 	}
 }
 
+// TestLoadSkipsRepoRootDocs: a catalog served from a Git repository carries the
+// conventional repo documents, and none of them are knowledge. This is a real
+// regression, not a hypothetical: the public commons repo has a CONTRIBUTING.md,
+// and the loader used to index it as an entry — polluting kb_search, and tripping
+// the validator because it carries no OKF frontmatter.
+//
+// Uppercase deliberately: these files are conventionally uppercase, so a
+// case-sensitive check would skip none of them.
+func TestLoadSkipsRepoRootDocs(t *testing.T) {
+	dir := t.TempDir()
+	writeEntry(t, dir, "real-entry.md", "---\ntype: Playbook\ntitle: Real\ndescription: d\n---\nbody\n")
+	for _, name := range []string{
+		"CONTRIBUTING.md", "CODE_OF_CONDUCT.md", "SECURITY.md",
+		"CHANGELOG.md", "LICENSE.md", "GOVERNANCE.md", "MAINTAINERS.md", "SUPPORT.md",
+	} {
+		writeEntry(t, dir, name, "# repo doc, no OKF frontmatter\n")
+	}
+
+	entries, skipped, err := Load(dir)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if len(skipped) != 0 {
+		t.Errorf("repo docs must be skipped silently, not reported as unparseable: %v", skipped)
+	}
+	if len(entries) != 1 || entries[0].Title != "Real" {
+		got := make([]string, len(entries))
+		for i, e := range entries {
+			got[i] = e.Path
+		}
+		t.Fatalf("want exactly 1 entry (the real one), got %d: %v", len(entries), got)
+	}
+}
+
 // TestLoadParsesTimestampAndFingerprint: curated entries carry a timestamp
 // (OKF-recommended) and a deterministic dedup fingerprint in frontmatter — both
 // written by the forge serializer and consumed back here (recency-aware ranking,

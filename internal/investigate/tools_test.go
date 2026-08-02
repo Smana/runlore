@@ -279,3 +279,49 @@ func TestParseFindingsAffectedResource(t *testing.T) {
 		t.Fatalf("affected_resource not parsed into inv.Resource: %+v", inv.Resource)
 	}
 }
+
+// TestDataGapsForbidsSpeculation pins the anti-speculation guidance in the
+// submit_findings schema.
+//
+// A real investigation reported:
+//
+//	Flux gotk_reconcile_condition and kube_pod_container_status_waiting_reason
+//	metrics did not match (metric names may differ in this cluster)
+//
+// Both halves were wrong as stated. kube_pod_container_status_waiting_reason had
+// 210 live series — kube-state-metrics only emits it WHILE a container waits, so an
+// instant query is empty on a healthy cluster. The observation was right; the cause
+// was invented. And the model had a way to check: query_metrics already returns
+// "use discover_metrics ... to list what this workload actually exports", and
+// discover_metrics is registered.
+//
+// Prompt text has no compiler, so this is the only thing keeping the instruction
+// from being dropped in a future edit of a long JSON string.
+func TestDataGapsForbidsSpeculation(t *testing.T) {
+	// Parse the schema rather than slicing it: an earlier version of this test cut
+	// the description at the first "}," which lands inside {"type":"string"}, so it
+	// asserted against an empty string and failed for the wrong reason.
+	var schema struct {
+		Properties map[string]struct {
+			Description string `json:"description"`
+		} `json:"properties"`
+	}
+	if err := json.Unmarshal([]byte(submitFindingsSpec().Schema), &schema); err != nil {
+		t.Fatalf("submit_findings schema is not valid JSON: %v", err)
+	}
+	desc := schema.Properties["data_gaps"].Description
+	if desc == "" {
+		t.Fatal("data_gaps has no description — this guard is inert")
+	}
+
+	for _, want := range []string{
+		"discover_metrics",    // the tool that answers "does this metric exist"
+		"discover_log_fields", // its logs-side counterpart
+		"speculate",           // the prohibition itself
+	} {
+		if !strings.Contains(desc, want) {
+			t.Errorf("data_gaps guidance must mention %q, or the model will guess at causes "+
+				"it could have checked:\n%s", want, desc)
+		}
+	}
+}

@@ -73,6 +73,52 @@
 .rl-flow .rl-loop-head { fill: #3b82f6; }
 .rl-flow .rl-loop-lbl { fill: #3b82f6; font-size: 13px; font-weight: 700; }
 
+/* ---- "What it actually produces": the two output cards ----
+   Placed directly under the flow diagram, which is an ABSTRACTION — boxes and
+   arrows describing a loop. A reader who has just been shown a diagram is owed
+   the real thing next, before being asked to read four feature cards about it.
+   The screenshots were previously README-only, so a visitor arriving at the site
+   never saw the product's actual output anywhere.
+
+   Two columns on desktop because the pairing IS the argument: the same failure,
+   investigated once and then recalled. Stacked below 900px — these are dense
+   screenshots and half a viewport wide makes them unreadable rather than compact. */
+.rl-shots {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 1.75rem;
+  margin: 1.5rem 0 0;
+}
+@media (max-width: 900px) {
+  .rl-shots { grid-template-columns: 1fr; }
+}
+.rl-shot {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+.rl-shot img {
+  width: 100%;
+  height: auto;
+  display: block;
+  border-radius: 12px;
+  border: 1px solid rgba(148, 163, 184, 0.35);
+  /* Slack cards are rendered on white. On a dark page an unbounded white block
+     glares, so the border and a slight lift keep it reading as a screenshot
+     rather than a hole punched in the layout. */
+  box-shadow: 0 10px 34px -18px rgba(15, 23, 42, 0.55);
+}
+.rl-shot figcaption {
+  margin-top: 0.7rem;
+  font-size: 14px;
+  opacity: 0.72;
+  line-height: 1.5;
+}
+.rl-shot figcaption strong {
+  opacity: 1;
+  font-weight: 700;
+}
+
 /* ---- Feature cards + docs cards: subtle lift + teal accent on hover ---- */
 .hextra-feature-grid a:hover,
 .hextra-card:hover {

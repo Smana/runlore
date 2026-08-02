@@ -307,7 +307,7 @@ project path, e.g. `group/project`, nested groups allowed), `base_branch` (defau
 **empty** — draft every verdict). `github_app` — `app_id`, `installation_id`, and `private_key_ref`
 **or** `private_key_env`. `gitlab` — `base_url` (self-managed instance root; omit for gitlab.com) and
 `token_env` (a project/group access token, scope `api`); see
-[Integrations → GitLab]({{< relref "/docs/integrations/gitlab.md" >}}). `provider: gitlab` with no
+[Integrations → GitLab]({{< relref "/docs/integrations/forge/gitlab.md" >}}). `provider: gitlab` with no
 `gitlab.token_env`, or a `kb_repo` that isn't a valid GitLab project path, fails config load closed.
 
 `skip_verdicts` is a list of investigation verdicts that must **not** draft a KB PR — the finding

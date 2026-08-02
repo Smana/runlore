@@ -3,6 +3,7 @@
 package docsguard
 
 import (
+	"fmt"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -34,6 +35,9 @@ type integrationFrontMatter struct {
 		Kind string `yaml:"kind"`
 		ID   string `yaml:"id"`
 	} `yaml:"integration"`
+	// Weight drives the sidebar order; nil means the page declared none.
+	// See TestIntegrationWeightsAreUniqueAndBanded.
+	Weight *int `yaml:"weight"`
 }
 
 // integrationPage is one docs page's claim: "I document the id under kind".
@@ -226,4 +230,53 @@ func repoRoot(t *testing.T) string {
 		}
 		dir = parent
 	}
+}
+
+// TestIntegrationPagesAreLinkedFromTheIndex closes the gap the per-type
+// restructure exposed: four pages (grafana, elasticsearch, opensearch, gitlab)
+// existed, were reachable, and were reflected against their registries — but the
+// integrations landing page never listed them. Every guard passed. The pages were
+// simply invisible to anyone browsing rather than deep-linking.
+//
+// TestIntegrationPagesMatchRegistries pins page ↔ CODE. This pins page ↔ INDEX,
+// which is the direction a reader actually travels.
+func TestIntegrationPagesAreLinkedFromTheIndex(t *testing.T) {
+	root := repoRoot(t)
+	dir := filepath.Join(root, "website", "content", "docs", "integrations")
+
+	index, err := os.ReadFile(filepath.Join(dir, "_index.md")) //nolint:gosec // test-owned path
+	if err != nil {
+		t.Fatalf("read integrations _index.md: %v", err)
+	}
+
+	var checked int
+	err = filepath.WalkDir(dir, func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if d.IsDir() || !strings.HasSuffix(d.Name(), ".md") || d.Name() == "_index.md" {
+			return nil
+		}
+		// The landing page links by section-relative path, e.g. link="forge/gitlab/".
+		rel, rerr := filepath.Rel(dir, path)
+		if rerr != nil {
+			return rerr
+		}
+		want := fmt.Sprintf("link=%q", strings.TrimSuffix(filepath.ToSlash(rel), ".md")+"/")
+		if !strings.Contains(string(index), want) {
+			t.Errorf("%s has no card on the integrations landing page — add one with %s, "+
+				"or a reader browsing the section will never find it", rel, want)
+		}
+		checked++
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("walk %s: %v", dir, err)
+	}
+	// Guard the guard: a restructure that moves the pages elsewhere must not leave
+	// this test silently iterating over nothing.
+	if checked == 0 {
+		t.Fatal("no integration pages found — this guard is now inert")
+	}
+	t.Logf("verified %d integration pages are linked from the landing page", checked)
 }

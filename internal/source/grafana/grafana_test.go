@@ -26,9 +26,11 @@ import (
 // package directory, which is where `go test` runs.
 //
 // The guard lives here rather than in internal/docsguard (the repo's home for
-// this drift class) only because that package does not exist on this branch —
-// it arrives with the sibling docs branch. Move it there once they merge.
-const grafanaDocPath = "../../../website/content/docs/integrations/grafana.md"
+// this drift class) because it needs this package's unexported defaults
+// (defaultItems, defaultLabels, defaultMapping) to compare against. Moving it
+// would mean exporting them for a test's benefit; parsing the page from here is
+// the smaller cost.
+const grafanaDocPath = "../../../website/content/docs/integrations/triggers/grafana.md"
 
 // mappingRow matches one row of the published "Built-in mapping" table:
 //

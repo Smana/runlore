@@ -48,4 +48,16 @@ type Entry struct {
 	LastValidated string
 	Body          string // markdown body (after frontmatter)
 	Path          string // file path relative to the bundle root
+	// Commons marks an entry loaded from the shared upstream catalog
+	// (catalog.commons) rather than the operator's own KB.
+	//
+	// It is provenance, and it is load-bearing in three places: search orders a
+	// user's own entry ABOVE a commons entry at equal score, the curator refuses
+	// to write into the commons root, and every surface that shows the entry says
+	// where it came from — an on-call must never mistake shipped generic advice
+	// for their platform's recorded truth.
+	//
+	// False for every entry loaded the original way, so a deployment without a
+	// commons root behaves exactly as before.
+	Commons bool
 }

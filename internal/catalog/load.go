@@ -12,10 +12,10 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-// Load walks dir and parses every concept .md file into an Entry. The reserved
-// OKF files index.md and log.md — and a repo README.md — are skipped: they are
-// human-facing docs, not knowledge entries, so indexing them would pollute search
-// and (README, which carries no OKF frontmatter) trip the validator for no reason.
+// Load walks dir and parses every concept .md file into an Entry. Reserved files
+// (see reservedBundleFiles) are skipped: they are human-facing docs, not knowledge
+// entries, so indexing them would pollute search and — carrying no OKF frontmatter —
+// trip the validator for no reason.
 //
 // A file that fails to parse (e.g. malformed YAML frontmatter) is skipped rather
 // than failing the whole load — its path is returned in skipped so the caller can
@@ -52,15 +52,38 @@ func Load(dir string) (entries []Entry, skipped []string, err error) {
 	return entries, skipped, nil
 }
 
+// reservedBundleFiles are filenames that are never knowledge entries: the OKF
+// bundle files (index.md, log.md) plus the conventional repo documents any
+// catalog served from a Git repository will carry.
+//
+// The repo-document set is not hypothetical. The public commons repo has a
+// CONTRIBUTING.md — as does every repo that accepts contributions — and the
+// loader used to index it as a knowledge entry: it pollutes kb_search, and
+// because it carries no OKF frontmatter it also trips the validator for no
+// reason. Matched case-insensitively, since these are conventionally uppercase.
+var reservedBundleFiles = map[string]bool{
+	"index.md":           true,
+	"log.md":             true,
+	"readme.md":          true,
+	"contributing.md":    true,
+	"code_of_conduct.md": true,
+	"security.md":        true,
+	"changelog.md":       true,
+	"license.md":         true,
+	"governance.md":      true,
+	"maintainers.md":     true,
+	"support.md":         true,
+}
+
 // IsEntryFile reports whether a base filename is an OKF catalog entry file: a
-// non-hidden .md that is not one of the reserved bundle files (index.md /
-// log.md / README.md). Load and `lore kb import` share it so "what counts as an
-// entry" is defined once and their notions can't drift.
+// non-hidden .md that is not one of the reserved bundle files. Load and
+// `lore kb import` share it so "what counts as an entry" is defined once and
+// their notions can't drift.
 func IsEntryFile(base string) bool {
 	if strings.HasPrefix(base, ".") || !strings.HasSuffix(base, ".md") {
 		return false
 	}
-	return base != "index.md" && base != "log.md" && !strings.EqualFold(base, "readme.md")
+	return !reservedBundleFiles[strings.ToLower(base)]
 }
 
 // entryMeta is the exact set of frontmatter keys the loader parses, keyed by

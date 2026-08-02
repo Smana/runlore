@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/Smana/runlore/internal/catalog"
 	"github.com/Smana/runlore/internal/config"
 	"github.com/Smana/runlore/internal/eval"
 	"github.com/Smana/runlore/internal/investigate"
@@ -40,6 +41,16 @@ const (
 // user sees genuine model output with no key and no network. Re-record it with
 // `lore demo investigate --record <path>`.
 const demoDefaultTranscript = "examples/demo/harbor-chart-bump.transcript.json"
+
+// demoDefaultCatalog is the shipped one-entry knowledge catalog `--catalog default`
+// loads. It holds the CURATED result of the harbor-chart-bump investigation, so
+// running that same scenario twice shows the loop closing: the first run reasons its
+// way to the cause, the second is answered from the entry the first one produced.
+//
+// That second run is the only offline way to see an INSTANT RECALL card. Recall
+// short-circuits before the model is ever called, so unlike a full investigation it
+// cannot be captured in a transcript — there are no model turns to record.
+const demoDefaultCatalog = "examples/demo/catalog"
 
 // RunDemo dispatches the `lore demo <subcommand>` family. Today only `investigate` is
 // wired: a zero-cluster, full-loop demonstration of the real investigator against fake
@@ -77,6 +88,8 @@ func runDemoInvestigateWithModel(args []string, out, errOut io.Writer, model pro
 	cfgPath := fs.String("config", "", "optional runlore.yaml; when omitted the demo uses a zero-config default model")
 	offline := fs.String("offline", "", "replay a recorded transcript instead of calling a model — no API key, no network (use \"default\" for the shipped one)")
 	record := fs.String("record", "", "record this run's model turns to a transcript file for later --offline replay")
+	deliver := fs.Bool("notify", false, "also DELIVER the findings through the notifiers in --config (Slack, Matrix, webhook), not just print them")
+	catalogDir := fs.String("catalog", "", "knowledge-catalog directory to consult with INSTANT RECALL before investigating (use \"default\" for the shipped demo entry)")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -174,11 +187,56 @@ func runDemoInvestigateWithModel(args []string, out, errOut io.Writer, model pro
 		tools = append(tools, tracingTool{inner: t, out: out})
 	}
 
+	// --catalog consults the knowledge base before investigating, through the SAME
+	// Recall gate production uses. When an entry matches strongly enough the loop
+	// short-circuits and the delivered card is a recall card — the "answered in
+	// seconds" half of the product, which no transcript can demonstrate.
+	var recall *investigate.Recall
+	if *catalogDir != "" {
+		dir := *catalogDir
+		if dir == "default" {
+			dir = demoDefaultCatalog
+		}
+		cat, cerr := catalog.New(dir)
+		if cerr != nil {
+			return fmt.Errorf("load demo catalog %s: %w", dir, cerr)
+		}
+		// Gate values, stated plainly because they are NOT production's.
+		//
+		// Production gates instant recall on the RERANKER's calibrated confidence; the
+		// BM25 SoloFloor (default 4.0) is the legacy fallback and is not reachable by
+		// raw BM25, whose scores run ~0.1-1.2 (see config.InstantRecall). The reranker
+		// needs a model, and this demo's whole point is that it needs neither model nor
+		// key — so an offline recall demo has to gate on BM25 at a reachable value.
+		//
+		// The alternative was to leave the thresholds at the zero-config defaults,
+		// which are 0 — meaning ANY hit fires. That is worse: it looks like a gate and
+		// is not one. These are explicit, and the demo prints them, so nobody mistakes
+		// this for the production bar.
+		const demoMinScore, demoSoloFloor = 0.02, 0.02
+		recall = &investigate.Recall{
+			Catalog:   cat,
+			MinScore:  demoMinScore,
+			SoloFloor: demoSoloFloor,
+			// Structural agreement is NOT relaxed: the entry must still name the
+			// incident's workload, which is the gate that stops a generic entry
+			// answering a specific incident. That one is production's.
+			RequireWorkloadMatch: cfg.Catalog.InstantRecall.RequireWorkloadMatch,
+			MarginGap:            cfg.Catalog.InstantRecall.MarginGap,
+			Log:                  log,
+		}
+		demoPrintf(out, "knowledge catalog: %d entr(ies) from %s\n", cat.Len(), dir)
+		demoPrintf(out, "   recall gate: BM25 min_score=%.2f solo_floor=%.2f — DEMO values, not production's.\n"+
+			"   production gates on the reranker's calibrated confidence, which needs a model.\n",
+			demoMinScore, demoSoloFloor)
+	}
+
 	var result *providers.Investigation
 	li := &investigate.LoopInvestigator{
 		Model:         model,
 		VerifyModel:   verifyModel,
 		Tools:         tools,
+		Recall:        recall,
 		Log:           log,
 		Verify:        true,
 		ModelProvider: cfg.Model.Provider,
@@ -198,6 +256,28 @@ func runDemoInvestigateWithModel(args []string, out, errOut io.Writer, model pro
 		return fmt.Errorf("the loop produced no findings")
 	}
 	demoPrintf(out, "\n== submit_findings ==\n%s\n", notify.Format(*result))
+
+	// --notify sends the SAME findings through the real notifiers. The demo already
+	// runs the real loop over recorded evidence; this makes the delivered artifact
+	// real too, so a Slack card can be produced without a cluster, an incident, or
+	// an API key.
+	//
+	// It is opt-in because the demo's whole promise is that it touches nothing.
+	// Posting to a webhook is the one thing here that leaves the machine.
+	if *deliver {
+		n, nerr := BuildNotifier(cfg, log)
+		if nerr != nil {
+			return fmt.Errorf("build notifiers for --notify: %w", nerr)
+		}
+		if n.Len() == 0 {
+			return fmt.Errorf("--notify needs at least one notifier configured in --config " +
+				"(notify.slack / notify.matrix / notify.webhook); none found")
+		}
+		if derr := n.Deliver(ctx, *result); derr != nil {
+			return fmt.Errorf("deliver findings: %w", derr)
+		}
+		demoPrintf(out, "\ndelivered to %d notifier(s)\n", n.Len())
+	}
 
 	if recorder != nil {
 		if err := recorder.Write(*record, time.Now().UTC().Format(time.RFC3339)); err != nil {
@@ -223,10 +303,10 @@ func pickScenario(cases []eval.Case, id string) (eval.Case, error) {
 	}
 	var have []string
 	for _, c := range cases {
-		if c.DisplayName() == id {
+		if c.Name == id {
 			return c, nil
 		}
-		have = append(have, c.DisplayName())
+		have = append(have, c.Name)
 	}
 	return eval.Case{}, fmt.Errorf("scenario %q not found; available: %s", id, strings.Join(have, ", "))
 }

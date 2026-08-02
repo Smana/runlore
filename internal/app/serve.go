@@ -179,7 +179,10 @@ func RunServe(version string, args []string) error {
 		log.Info("outcome ledger enabled", "path", cfg.Outcome.LedgerPath, "max_events", maxEvents)
 	}
 
-	inv, cat, err := BuildInvestigator(ctx, cfg, gitops, approvals, auto, metrics, ledger, log)
+	// Built ONCE and shared: a second Deps means a second catalog, hence a second
+	// git-sync goroutine racing the first on the same on-disk checkout.
+	deps := BuildDeps(ctx, cfg, gitops, metrics, ledger, log)
+	inv, cat, err := BuildInvestigator(ctx, cfg, deps, approvals, auto, metrics, ledger, log)
 	if err != nil {
 		return fmt.Errorf("build investigator: %w", err)
 	}
@@ -236,7 +239,7 @@ func RunServe(version string, args []string) error {
 			"max_batch", cc.MaxBatch, "cooldown", cc.Cooldown.Std())
 	}
 
-	reinv := BuildReinvestigator(ctx, cfg, gitops, metrics, log)
+	reinv := BuildReinvestigator(cfg, deps, metrics, log)
 
 	// failureDedup is created ONCE (process scope), not per leadership term, so it
 	// survives leader flaps: the gitops informer's initial-LIST replay of every

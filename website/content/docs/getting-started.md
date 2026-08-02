@@ -152,11 +152,11 @@ equally supported; each gets a one-line pointer to its own page under
   [k3d](https://k3d.io/) / [kind](https://kind.sigs.k8s.io/) (follow each project's install docs).
 - `kubectl` + `helm` (v3.12+).
 - An **LLM** — the shipped values profiles use native
-  [Anthropic]({{< relref "/docs/integrations/anthropic.md" >}}) (one API key, nothing to run); any
+  [Anthropic]({{< relref "/docs/integrations/llm/anthropic.md" >}}) (one API key, nothing to run); any
   **OpenAI-compatible** endpoint (in-cluster [vLLM](https://github.com/vllm-project/vllm),
   [Ollama](https://ollama.com/), OpenAI, OpenRouter) is a two-line swap. Keep the
   model in-cluster if you don't want telemetry to leave your boundary — see
-  [Local / keyless]({{< relref "/docs/integrations/local-keyless.md" >}}).
+  [Local / keyless]({{< relref "/docs/integrations/llm/local-keyless.md" >}}).
 
 ### Recommended
 
@@ -166,7 +166,7 @@ equally supported; each gets a one-line pointer to its own page under
   GitOps-failure trigger (Flux `Kustomization`/`HelmRelease`, or Argo CD `Application`, going
   `Ready=False`) — RunLore's sharpest signal. **Not required**: every data source is pluggable, and
   an unset one just disables the tool it would have unlocked — see
-  [GitOps failures]({{< relref "/docs/integrations/gitops.md" >}}). Without it, RunLore still reacts
+  [GitOps failures]({{< relref "/docs/integrations/triggers/gitops.md" >}}). Without it, RunLore still reacts
   to Alertmanager alerts and investigates with whatever other signals you've wired.
 - A **GitHub App** for curation — [Step 2](#step-2--github-app-for-curation-optional) below.
   **Without it the Learn loop (curation) is disabled**: RunLore still reacts and investigates, it
@@ -179,22 +179,22 @@ Everything else is genuinely pluggable — an unset one just disables the tool o
 have unlocked, nothing else changes. Full catalog:
 [Integrations]({{< relref "/docs/integrations/_index.md" >}}).
 
-- **Data sources** — [Prometheus/VictoriaMetrics]({{< relref "/docs/integrations/prometheus.md" >}})
-  (used below), [VictoriaLogs]({{< relref "/docs/integrations/victorialogs.md" >}}) or
-  [Loki]({{< relref "/docs/integrations/loki.md" >}}) for logs, a network-flow signal
-  ([Hubble]({{< relref "/docs/integrations/hubble.md" >}}) — Cilium only,
-  [AWS VPC Flow Logs]({{< relref "/docs/integrations/aws-vpc-flow-logs.md" >}}), or
-  [GCP Firewall Logs]({{< relref "/docs/integrations/gcp-firewall-logs.md" >}}) — RunLore does
-  **not** assume Cilium), [AWS cloud control plane]({{< relref "/docs/integrations/aws-cloud.md" >}})
+- **Data sources** — [Prometheus/VictoriaMetrics]({{< relref "/docs/integrations/data-sources/prometheus.md" >}})
+  (used below), [VictoriaLogs]({{< relref "/docs/integrations/data-sources/victorialogs.md" >}}) or
+  [Loki]({{< relref "/docs/integrations/data-sources/loki.md" >}}) for logs, a network-flow signal
+  ([Hubble]({{< relref "/docs/integrations/data-sources/hubble.md" >}}) — Cilium only,
+  [AWS VPC Flow Logs]({{< relref "/docs/integrations/data-sources/aws-vpc-flow-logs.md" >}}), or
+  [GCP Firewall Logs]({{< relref "/docs/integrations/data-sources/gcp-firewall-logs.md" >}}) — RunLore does
+  **not** assume Cilium), [AWS cloud control plane]({{< relref "/docs/integrations/data-sources/aws-cloud.md" >}})
   (also see [Step 4b](#step-4b--aws-cloud-provider-optional) below),
-  [source repos]({{< relref "/docs/integrations/source-repos.md" >}}) for real Git diffs behind a
-  version bump, and [MCP]({{< relref "/docs/integrations/mcp.md" >}}) for tools RunLore doesn't ship
+  [source repos]({{< relref "/docs/integrations/data-sources/source-repos.md" >}}) for real Git diffs behind a
+  version bump, and [MCP]({{< relref "/docs/integrations/data-sources/mcp.md" >}}) for tools RunLore doesn't ship
   natively.
 - **A notifier for delivery** — this walkthrough uses
-  [Slack]({{< relref "/docs/integrations/slack.md" >}}); a
-  [Matrix]({{< relref "/docs/integrations/matrix.md" >}}) account, a generic
-  [webhook]({{< relref "/docs/integrations/webhook.md" >}}), or a
-  [templated]({{< relref "/docs/integrations/templated.md" >}}) payload (Teams, Discord, ntfy…) all
+  [Slack]({{< relref "/docs/integrations/notifications/slack.md" >}}); a
+  [Matrix]({{< relref "/docs/integrations/notifications/matrix.md" >}}) account, a generic
+  [webhook]({{< relref "/docs/integrations/notifications/webhook.md" >}}), or a
+  [templated]({{< relref "/docs/integrations/notifications/templated.md" >}}) payload (Teams, Discord, ntfy…) all
   work the same way.
 - [External Secrets Operator](https://external-secrets.io/) to sync credentials from a vault
   (recommended over raw `Secret`s in production).
@@ -304,6 +304,34 @@ configured in your `runlore.yaml` refines titles/descriptions/tags (purely
 optional — a model failure falls back to the deterministic result). Re-running
 the same import is a no-op.
 
+## Step 1c — Add the knowledge commons (optional)
+
+If you have no runbooks to import either, point RunLore at the
+[knowledge commons](https://github.com/Smana/runlore-kb-commons) — a shared, vendor-neutral
+bundle of generic playbooks (CrashLoopBackOff, unbound PVCs, stuck cert-manager challenges,
+unschedulable pods) that ships as a **second, read-only catalog root**:
+
+```yaml
+catalog:
+  dir: /var/lib/runlore/catalog          # your own catalog, from Step 1
+  commons:
+    url: https://github.com/Smana/runlore-kb-commons
+    branch: main
+    interval: 24h
+    dir: /var/lib/runlore/commons        # must differ from catalog.dir
+```
+
+Both roots are indexed together and your own entries win scoring ties, so the commons acts as
+a floor and never competes with knowledge from your own incidents. The curator never writes
+to it.
+
+One property to know before enabling it: **commons entries never fire instant recall.** They
+are resource-less by design, and recall's structural filter rejects a resource-less entry for
+any alert carrying a workload. They ground `kb_search` mid-investigation instead — which is
+the honest role for a generic playbook. See
+[Knowledge Commons]({{< relref "concepts/knowledge-commons.md" >}}) for why that is the
+correct behaviour rather than a limitation.
+
 ---
 
 ## Step 2 — GitHub App for curation (optional)
@@ -345,7 +373,7 @@ installation tokens minted on demand from the App's private key (no long-lived c
 - RunLore's writes are confined to the forge — it has **no cluster-mutating permissions**.
 
 Full key reference and the source-repo App-access edge case:
-[Integrations → GitHub]({{< relref "/docs/integrations/github.md" >}}).
+[Integrations → GitHub]({{< relref "/docs/integrations/forge/github.md" >}}).
 
 ---
 
@@ -435,9 +463,9 @@ config:
 Everything left out is genuinely optional: an unset data source disables the tool it would have
 unlocked, and an unset `forge` disables curation. Swap the `model` block for any of the
 [LLM providers]({{< relref "/docs/integrations/_index.md" >}}), and the `notify` block for
-[Matrix]({{< relref "/docs/integrations/matrix.md" >}}), a
-[webhook]({{< relref "/docs/integrations/webhook.md" >}}), or a
-[templated]({{< relref "/docs/integrations/templated.md" >}}) payload.
+[Matrix]({{< relref "/docs/integrations/notifications/matrix.md" >}}), a
+[webhook]({{< relref "/docs/integrations/notifications/webhook.md" >}}), or a
+[templated]({{< relref "/docs/integrations/notifications/templated.md" >}}) payload.
 
 ### Step up: standard and full
 
@@ -446,8 +474,8 @@ adds the half that makes RunLore more than a one-shot investigator: `catalog.git
 `config.catalog.git` (the KB repo from [step 1](#step-1--create-the-knowledge-catalog-repo), re-pulled
 on an interval so merged PRs flow back into what the agent searches), `config.forge` with the GitHub
 App from [step 2](#step-2--github-app-for-curation-optional), and the
-[metrics]({{< relref "/docs/integrations/prometheus.md" >}}) +
-[logs]({{< relref "/docs/integrations/victorialogs.md" >}}) endpoints the investigation queries for
+[metrics]({{< relref "/docs/integrations/data-sources/prometheus.md" >}}) +
+[logs]({{< relref "/docs/integrations/data-sources/victorialogs.md" >}}) endpoints the investigation queries for
 evidence. It also turns on JSON logging and the `/metrics` endpoint with a `VMServiceScrape`.
 
 **[`values-full.yaml`](https://github.com/Smana/runlore/blob/main/deploy/helm/runlore/values-full.yaml)**
@@ -457,8 +485,8 @@ leader election (only the leader investigates), a `StatefulSet` + PVC so the out
 hash-chained audit log survive restarts, `networkPolicy.strict` with an explicit egress allowlist and
 ingress scoped to your monitoring namespace, `actions.mode: approve` (envelope-filtered remediations
 that execute **only** after a human click — see [Design]({{< relref "design.md" >}})), the
-[AWS cloud control plane]({{< relref "/docs/integrations/aws-cloud.md" >}}) and a
-[network-flow signal]({{< relref "/docs/integrations/hubble.md" >}}), and
+[AWS cloud control plane]({{< relref "/docs/integrations/data-sources/aws-cloud.md" >}}) and a
+[network-flow signal]({{< relref "/docs/integrations/data-sources/hubble.md" >}}), and
 `catalog.instant_recall` — which short-circuits the LLM loop entirely when the catalog already holds a
 trustworthy answer.
 
@@ -496,7 +524,7 @@ Enables the `cloud_what_changed` (CloudTrail) and `cloud_resource_health` (EC2/A
 agent can see infra changes that never touched GitOps. **Read-only**, authenticated with **in-cluster
 identity** — no static AWS keys. Full config, the read-only IAM policy, and how it binds to the
 ServiceAccount (EKS Pod Identity or IRSA):
-[Integrations → AWS cloud control plane]({{< relref "/docs/integrations/aws-cloud.md" >}}).
+[Integrations → AWS cloud control plane]({{< relref "/docs/integrations/data-sources/aws-cloud.md" >}}).
 
 **Cilium clusters only** — the EKS Pod Identity credential endpoint runs on the node host network
 (`169.254.170.23:80`), which Cilium classifies as the `host` entity, so a plain Kubernetes

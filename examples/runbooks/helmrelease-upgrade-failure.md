@@ -29,8 +29,9 @@ gateway 5xx.
 
 # Resolution
 
-- **Reversible first:** roll back to the previous revision (Flux: `flux rollback hr/<name>`;
-  ArgoCD: roll back to the previous history revision).
+- **Reversible first:** roll back to the previous revision (Flux: revert the chart version or
+  values in Git and `flux reconcile hr <name>`; ArgoCD: roll back to the previous history
+  revision).
 - **Then fix forward:** correct the values / install the CRD / release the stuck migration lock.
 
 # Citations

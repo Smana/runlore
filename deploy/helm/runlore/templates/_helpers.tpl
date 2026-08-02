@@ -44,6 +44,30 @@ entry here — the mount by name is identical either way.
 */}}
 {{- define "runlore.podTemplate" -}}
 {{- $usesVolumeClaimTemplates := and (eq .Values.workloadKind "StatefulSet") .Values.persistence.enabled -}}
+{{- /*
+  The knowledge commons gets its own writable checkout. The mount path is READ FROM
+  config.catalog.commons.dir rather than duplicated as a chart value: a second knob
+  would be free to drift from the one the agent actually reads, and the failure mode
+  of that drift is silent — an empty commons root indexes as zero entries and looks
+  exactly like "no commons configured".
+
+  url is what enables the feature (matching armCommons, which no-ops without it), so
+  a dir set without a url renders nothing here and the agent's own validation is what
+  reports it. A url WITHOUT a dir cannot be defaulted safely — it would have to guess
+  a path, and guessing catalog.mountPath would let an upstream sync overwrite the
+  operator's own catalog — so fail rendering with the fix named.
+*/ -}}
+{{- $commons := (.Values.config.catalog | default dict).commons | default dict -}}
+{{- $commonsDir := "" -}}
+{{- if $commons.url -}}
+{{-   $commonsDir = $commons.dir | default "" -}}
+{{-   if not $commonsDir -}}
+{{-     fail "config.catalog.commons.url is set but config.catalog.commons.dir is empty — set it to a path OUTSIDE config.catalog.dir (e.g. /var/lib/runlore/commons); the two roots must not share a directory" -}}
+{{-   end -}}
+{{-   if eq $commonsDir (.Values.config.catalog.dir | default "") -}}
+{{-     fail "config.catalog.commons.dir must differ from config.catalog.dir — sharing one root lets an upstream commons sync overwrite the catalog you curate into" -}}
+{{-   end -}}
+{{- end -}}
 metadata:
   annotations:
     checksum/config: {{ include (print .Template.BasePath "/configmap.yaml") . | sha256sum }}
@@ -159,6 +183,10 @@ spec:
         - name: catalog
           mountPath: {{ .Values.catalog.mountPath }}
         {{- end }}
+        {{- if $commonsDir }}
+        - name: commons
+          mountPath: {{ $commonsDir }}
+        {{- end }}
   volumes:
     - name: config
       configMap:
@@ -179,6 +207,15 @@ spec:
       {{- else }}
       emptyDir: {}
       {{- end }}
+    {{- end }}
+    {{- if $commonsDir }}
+    # Deliberately an emptyDir, never a PVC: the commons is a read-only mirror of an
+    # upstream repo, re-cloned on startup and re-synced on its own (much longer)
+    # interval. Nothing here is authored locally, so there is nothing to lose on
+    # restart — and keeping it off the persisted data path means an upstream sync can
+    # never dirty the volume the outcome ledger and audit log live on.
+    - name: commons
+      emptyDir: {}
     {{- end }}
   {{- with .Values.nodeSelector }}
   nodeSelector:

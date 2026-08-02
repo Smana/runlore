@@ -9,6 +9,8 @@ import (
 	"slices"
 	"strings"
 
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
+
 	"github.com/Smana/runlore/internal/providers"
 )
 
@@ -97,6 +99,22 @@ func (t PodLogsTool) Call(ctx context.Context, args string) (string, error) {
 	}
 	lines, err := t.Logs.PodLogs(ctx, providers.PodLogQuery{Namespace: in.Namespace, LabelSelector: in.Selector, SinceMinutes: since, Previous: in.Previous})
 	if err != nil {
+		// An RBAC denial here is EXPECTED and configuration-driven, not a fault: the
+		// app layer always permits the incident's own namespace, while pods/log RBAC
+		// is granted only over rbac.controllerLogNamespaces — deliberately, because
+		// pod logs carry secrets and are streamed to an external model.
+		//
+		// Surfacing the raw Kubernetes "is forbidden" here left the model to invent a
+		// reason. It reported "the runlore serviceaccount lacks pods/log RBAC in the
+		// tooling namespace", which reads to an operator like a misconfiguration to
+		// chase rather than a policy with a named lever. Say which lever.
+		if apierrors.IsForbidden(err) {
+			return fmt.Sprintf("pod logs for namespace %q are not readable: pods/log RBAC is granted only "+
+				"over the configured controller-log namespaces, because pod logs may carry secrets and are "+
+				"sent to the model. This is a deliberate boundary, not a fault — an operator widens it by "+
+				"adding %q to rbac.controllerLogNamespaces. Use kube_events, pod_status or query_logs "+
+				"(collector-side, redacted) instead.", in.Namespace, in.Namespace), nil
+		}
 		return "", err
 	}
 	if len(lines) == 0 {

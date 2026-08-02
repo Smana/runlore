@@ -5,6 +5,8 @@ package app
 import (
 	"bytes"
 	"context"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -192,5 +194,102 @@ func TestShippedTranscriptToolsStillExist(t *testing.T) {
 		if !have[name] {
 			t.Errorf("shipped transcript calls tool %q, which no longer exists — re-record with `lore demo investigate --record %s`", name, demoDefaultTranscript)
 		}
+	}
+}
+
+// TestDemoNotifyRequiresAConfiguredNotifier pins --notify's failure mode.
+//
+// The demo's promise is that it touches nothing: no cluster, no API key, no
+// network. --notify is the single exception, so it must be impossible to ask for
+// delivery and silently get none — a demo that prints "done" while posting
+// nowhere is worse than one that refuses.
+func TestDemoNotifyRequiresAConfiguredNotifier(t *testing.T) {
+	dir := t.TempDir()
+	cfgPath := filepath.Join(dir, "runlore.yaml")
+	// A model is configured but NO notify block.
+	if err := os.WriteFile(cfgPath, []byte(`
+model:
+  provider: openai
+  base_url: http://unused.invalid/v1
+  model: replay
+`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	var out, errOut bytes.Buffer
+	err := runDemoInvestigateWithModel([]string{
+		"--scenarios", "../../examples/scenarios",
+		"--scenario", "harbor-chart-bump",
+		"--offline", "testdata/demo-transcript.json",
+		"--config", cfgPath,
+		"--notify",
+	}, &out, &errOut, nil)
+	if err == nil {
+		t.Fatal("--notify with no notifier configured must fail, not silently deliver nothing")
+	}
+	if !strings.Contains(err.Error(), "notify") {
+		t.Errorf("the error must name what is missing so the user can fix it: %v", err)
+	}
+}
+
+// TestDemoCatalogWiresRecall pins that --catalog actually consults the knowledge
+// base through the real Recall gate.
+//
+// The shipped entry names the harbor-chart-bump scenario's workload, so recall
+// reaches its decision — which the demo prints. What it must NOT do is quietly run
+// a full investigation while claiming a catalog was loaded.
+func TestDemoCatalogWiresRecall(t *testing.T) {
+	var out, errOut bytes.Buffer
+	err := runDemoInvestigateWithModel([]string{
+		"--scenarios", "../../examples/scenarios",
+		"--scenario", "harbor-chart-bump",
+		"--offline", "testdata/demo-transcript.json",
+		"--catalog", "../../examples/demo/catalog",
+	}, &out, &errOut, nil)
+	if err != nil {
+		t.Fatalf("demo with --catalog: %v\nstderr:\n%s", err, errOut.String())
+	}
+	got := out.String()
+	if !strings.Contains(got, "knowledge catalog: 1 entr") {
+		t.Errorf("the shipped demo catalog must load exactly one entry:\n%s", got)
+	}
+	// The demo's recall gate is NOT production's, and saying so is the point — a
+	// reader must not mistake a permissive BM25 floor for the real bar.
+	if !strings.Contains(got, "DEMO values, not production's") {
+		t.Errorf("the demo must disclose that its recall gate is not production's:\n%s", got)
+	}
+	// The gate itself must have been consulted, not skipped.
+	if !strings.Contains(errOut.String(), "instant recall") {
+		t.Errorf("recall was never consulted despite --catalog:\n%s", errOut.String())
+	}
+}
+
+// TestDemoScenarioSelectorIsTheSlug pins --scenario to the case's name, not its
+// display title.
+//
+// alert_title exists so a recalled card reads "HarborProbeFailure" rather than a
+// file slug — recall short-circuits before the model, so it delivers the REQUEST
+// title verbatim. Routing DisplayName into the selector as well broke
+// `--scenario harbor-chart-bump` outright: the lookup started demanding the alert
+// title, and the error even advertised it as the available id.
+func TestDemoScenarioSelectorIsTheSlug(t *testing.T) {
+	var out, errOut bytes.Buffer
+	err := runDemoInvestigateWithModel([]string{
+		"--scenarios", "../../examples/scenarios",
+		"--scenario", "harbor-chart-bump", // the slug, NOT "HarborProbeFailure"
+		"--offline", "testdata/demo-transcript.json",
+	}, &out, &errOut, nil)
+	if err != nil {
+		t.Fatalf("--scenario must select by slug: %v\nstderr:\n%s", err, errOut.String())
+	}
+	// And the incident the loop is handed carries the alert title, so a recalled
+	// card is labelled the way a real trigger would be.
+	//
+	// Anchored to the demo's own header, which is printed FROM DisplayName. A bare
+	// substring check passes vacuously: the scenario's prompt already contains
+	// "HarborProbeFailure", so it held even with alert_title removed entirely.
+	if !strings.Contains(out.String(), `investigating "HarborProbeFailure"`) {
+		t.Errorf("the request title must be the alert_title, or a recalled card is "+
+			"labelled with a file slug:\n%s", out.String())
 	}
 }

@@ -108,9 +108,18 @@ networkPolicy:
     # the Kubernetes API itself. Hostnames resolve to IPs that move, so pin the CIDR
     # your traffic actually leaves through: a NAT gateway EIP, an egress proxy, or a
     # PrivateLink endpoint subnet — not a DNS answer you resolved once.
+    # BOTH entries are PLACEHOLDERS. They are ALLOW rules, so a value copied verbatim
+    # does not fail closed — it silently grants egress to whatever sits at that address
+    # in YOUR network. Replace both before applying this profile.
+    #
+    # 203.0.113.0/24 is RFC 5737 TEST-NET-3 (documentation-only, routes nowhere), which
+    # is why it is safe to ship. There is no documentation range for RFC 1918, so the
+    # second entry is a plausible-looking private address and is the more dangerous of
+    # the two to leave in place.
     allowedCIDRs:
-      - "203.0.113.10/32" # model provider + git forge (e.g. this cluster's NAT gateway EIP)
-      - "10.0.0.1/32" # the EKS API server endpoint — managed APIs are on 443, see below
+      - "203.0.113.10/32" # PLACEHOLDER — model provider + git forge (e.g. this cluster's NAT gateway EIP)
+      - "10.0.0.1/32" # PLACEHOLDER — the EKS API server endpoint; managed APIs are on 443, see below
+      #   resolve yours: kubectl -n default get endpoints kubernetes
     namespaceSelectors: [] # in-cluster backends that speak 443 (none in this example)
     # apiServerCIDRs renders port 6443 ONLY, which is the SELF-MANAGED shape (kubeadm,
     # k3s, RKE). EKS — and GKE/AKS — serve the API on 443, so on this profile's EKS
@@ -208,6 +217,28 @@ config:
     # is no per-corpus BM25 threshold to tune.
     instant_recall:
       enabled: true
+
+    # A SECOND, read-only catalog root: a shared corpus of generic playbooks that
+    # covers common failure classes, so kb_search returns something useful on day one
+    # before you have curated an entry of your own. Both roots are indexed together.
+    #
+    # Two properties are worth knowing before you enable it:
+    #   - Commons entries NEVER fire instant recall. They are resource-less by
+    #     construction (they describe a failure class, not one cluster's workload),
+    #     and recall's structural filter rejects a resource-less entry for any alert
+    #     that carries a workload. They ground kb_search, which applies no such filter.
+    #   - The curator never writes here. Drafted entries always land in your own
+    #     catalog repo; the commons is a mirror of upstream and stays pristine.
+    # On a scoring tie your own entry wins, so the commons can only ever be a floor.
+    #
+    # dir MUST differ from catalog.dir above — the chart refuses to render otherwise.
+    # It is mounted as an emptyDir and re-cloned on startup; nothing is authored here.
+    commons:
+      url: https://github.com/Smana/runlore-kb-commons
+      branch: main
+      interval: 24h                     # a shared corpus changes slowly; do not poll it like your own
+      dir: /var/lib/runlore/commons
+      # token_env: COMMONS_TOKEN        # only for a PRIVATE commons repo
 
   # The learning loop's memory: which diagnoses actually resolved the incident. It
   # weighs recall trust, and it is what recurrence_cooldown and the grooming sweeps
