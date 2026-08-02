@@ -184,19 +184,36 @@ func ScorecardMarkdown(rep Report, history []HistoryEntry, inUSD, cachedUSD, out
 //
 // Returns "" when prices are unset or the report carries no per-case token data;
 // a fabricated or zeroed cost would be worse than no cost at all.
+//
+// inUSD and outUSD are each required (OR, not AND): config.Pricing's rates are
+// independently optional and validatePricing only rejects negatives, so a config
+// setting one and omitting the other passes validation. If we only checked
+// inUSD==0 && outUSD==0, a lone rate would slip through and EstimateCostUSD would
+// silently multiply the other token type by zero — understating the published
+// cost with no signal anything is wrong.
 func costSection(rep Report, inUSD, cachedUSD, outUSD float64) string {
-	if inUSD == 0 && outUSD == 0 {
+	if inUSD == 0 || outUSD == 0 {
 		return ""
 	}
 	var full, recall []ReportCase
+	var mixed int
 	for _, c := range rep.Cases {
 		if c.InputTokens == 0 && c.OutputTokens == 0 {
 			continue // no usage reported for this case
 		}
-		if c.RecallShortCircuit > 0 {
+		// RecallShortCircuit is a COUNT of repeats that short-circuited, not a
+		// bool: a case's Runs repeats can disagree (e.g. 1 of 5 recalled, 4 ran the
+		// full loop). Bucketing "> 0" into recall would label that case an instant
+		// recall while its rendered token figure is the median across all Runs —
+		// mostly full-investigation tokens. Only the unanimous ends of the split are
+		// trustworthy; anything in between is excluded (see below), not guessed at.
+		switch c.RecallShortCircuit {
+		case c.Runs:
 			recall = append(recall, c)
-		} else {
+		case 0:
 			full = append(full, c)
+		default:
+			mixed++
 		}
 	}
 	if len(full) == 0 && len(recall) == 0 {
@@ -208,6 +225,13 @@ func costSection(rep Report, inUSD, cachedUSD, outUSD float64) string {
 	fmt.Fprintf(&b, "Median provider-reported tokens per case on `%s`, priced at $%.2f/MTok in · $%.2f/MTok out. ",
 		rep.Model, inUSD, outUSD)
 	b.WriteString("Replay evidence, so tool latency and live-cluster variance are excluded.\n\n")
+	if mixed > 0 {
+		// Disclosed, not dropped silently: a mixed case's median token count would
+		// blend recall and full-loop paths, understating whichever row it got
+		// stuffed into. Naming the count is what keeps this table honest.
+		fmt.Fprintf(&b, "%d case(s) whose repeats disagreed about recall are excluded from this table — "+
+			"their median token count would mix both paths.\n\n", mixed)
+	}
 	b.WriteString("| path | cases | median in tok | median out tok | est. cost |\n|---|---|---|---|---|\n")
 	row := func(label string, cs []ReportCase) {
 		if len(cs) == 0 {
@@ -220,6 +244,10 @@ func costSection(rep Report, inUSD, cachedUSD, outUSD float64) string {
 			outs = append(outs, float64(c.OutputTokens))
 		}
 		mi, mo := medianFloat(ins), medianFloat(outs)
+		// CachedInputTokens is left at its zero value: ReportCase carries no
+		// per-case cached-token field today, so cachedUSD is accepted here only
+		// for signature completeness against EstimateCostUSD. It starts actually
+		// discounting anything once ReportCase gains that field.
 		cost := EstimateCostUSD(
 			providers.Usage{InputTokens: int(mi), OutputTokens: int(mo)},
 			inUSD, cachedUSD, outUSD)

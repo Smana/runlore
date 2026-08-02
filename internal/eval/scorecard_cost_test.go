@@ -51,6 +51,21 @@ func TestCostSectionOmittedWithoutPrices(t *testing.T) {
 	}
 }
 
+// TestCostSectionOmittedWithOnlyOneRateSet: config.Pricing's rates are each
+// independently optional, so a config can set input_usd_per_mtok and omit
+// output_usd_per_mtok (or vice versa) and still pass validatePricing. If the guard
+// only rejected inUSD==0 && outUSD==0, this would slip through and EstimateCostUSD
+// would silently price the zero-rate token type at $0 — understating the published
+// cost with no signal anything is wrong. Covers both directions of the omission.
+func TestCostSectionOmittedWithOnlyOneRateSet(t *testing.T) {
+	if got := costSection(costReport(), 1.00, 0, 0); got != "" {
+		t.Errorf("expected no cost section with outUSD unset, got:\n%s", got)
+	}
+	if got := costSection(costReport(), 0, 0, 5.00); got != "" {
+		t.Errorf("expected no cost section with inUSD unset, got:\n%s", got)
+	}
+}
+
 // TestCostSectionOmittedWithoutTokens: an old report carrying no per-case tokens must
 // not render an empty or zeroed table.
 func TestCostSectionOmittedWithoutTokens(t *testing.T) {
@@ -60,6 +75,59 @@ func TestCostSectionOmittedWithoutTokens(t *testing.T) {
 	}
 	if got := costSection(rep, 1.00, 0.10, 5.00); got != "" {
 		t.Errorf("expected no cost section without token data, got:\n%s", got)
+	}
+}
+
+// TestCostSectionExcludesMixedRecallCases: RecallShortCircuit is a COUNT of
+// repeats that short-circuited, not a boolean. A case whose repeats disagree
+// (e.g. 1 of 5 recalled) belongs to neither row — its median token figure would
+// blend recall and full-loop paths — so it must be excluded from both the
+// "full investigation" and "instant recall" buckets entirely.
+func TestCostSectionExcludesMixedRecallCases(t *testing.T) {
+	rep := costReport()
+	rep.Cases = append(rep.Cases, ReportCase{
+		Name: "flaky-recall", Runs: 5, Reached: true, HasRecall: true,
+		RecallShortCircuit: 2, InputTokens: 50000, OutputTokens: 1800,
+	})
+	got := costSection(rep, 1.00, 0.10, 5.00)
+	if strings.Contains(got, "flaky-recall") {
+		t.Errorf("mixed-recall case name leaked into the table:\n%s", got)
+	}
+	// The full/recall row counts must still reflect only the two unanimous cases.
+	if !strings.Contains(got, "| full investigation | 1 |") {
+		t.Errorf("full investigation row should count 1 case, not the mixed one:\n%s", got)
+	}
+	if !strings.Contains(got, "| instant recall | 1 |") {
+		t.Errorf("instant recall row should count 1 case, not the mixed one:\n%s", got)
+	}
+}
+
+// TestCostSectionDisclosesExcludedMixedCases: dropping a mixed case silently
+// would understate full-loop cost in the exact table meant to be trustworthy —
+// the disclosure must name the count and the reason.
+func TestCostSectionDisclosesExcludedMixedCases(t *testing.T) {
+	rep := costReport()
+	rep.Cases = append(rep.Cases,
+		ReportCase{Name: "flaky-recall-1", Runs: 5, Reached: true, HasRecall: true,
+			RecallShortCircuit: 2, InputTokens: 50000, OutputTokens: 1800},
+		ReportCase{Name: "flaky-recall-2", Runs: 4, Reached: true, HasRecall: true,
+			RecallShortCircuit: 1, InputTokens: 40000, OutputTokens: 1500},
+	)
+	got := costSection(rep, 1.00, 0.10, 5.00)
+	if !strings.Contains(got, "2 case(s)") {
+		t.Errorf("disclosure must name the excluded count (2):\n%s", got)
+	}
+	if !strings.Contains(got, "disagreed about recall") {
+		t.Errorf("disclosure must state the reason for exclusion:\n%s", got)
+	}
+}
+
+// TestCostSectionNoDisclosureWithoutExclusions: the disclosure must not appear
+// when every case unanimously landed in one bucket — nothing was excluded.
+func TestCostSectionNoDisclosureWithoutExclusions(t *testing.T) {
+	got := costSection(costReport(), 1.00, 0.10, 5.00)
+	if strings.Contains(got, "excluded from this table") {
+		t.Errorf("disclosure should not appear when nothing was excluded:\n%s", got)
 	}
 }
 
