@@ -20,6 +20,7 @@ import (
 	_ "github.com/Smana/runlore/internal/source/alertmanager" // self-registers the "alertmanager" source
 	_ "github.com/Smana/runlore/internal/source/custom"       // self-registers the "custom" source
 	_ "github.com/Smana/runlore/internal/source/gitops"       // self-registers the "gitops" source
+	_ "github.com/Smana/runlore/internal/source/grafana"      // self-registers the "grafana" source
 	_ "github.com/Smana/runlore/internal/source/pagerduty"    // self-registers the "pagerduty" source
 	// notify's own package (imported above) self-registers "slack" and "matrix"
 	// directly via their own init() funcs — no blank import needed for those two.
