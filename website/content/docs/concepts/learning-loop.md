@@ -138,12 +138,23 @@ then the answer is confirmed against live state and re-reviewed.
 > corpora — the BM25 score is demoted to retrieval-ranking-only (pick the top-K).
 >
 > Measured on the eval harness at default thresholds (`recalleval_test.go`,
-> `TestRecallEvalRerankFireRate`):
+> `TestRecallEvalRerankFireRate`) over **11 label-derived positives and 2 negatives**:
 >
 > | | fire-rate (label positives) | precision | negatives fired |
 > |---|---|---|---|
 > | rerank **off** | 0/11 (0.00) | — | 0/2 |
 > | rerank **on** | **11/11 (1.00)** | **1.00** | **0/2** |
+>
+> **What this does and does not measure.** The rerank-**on** row uses a *scripted*
+> reranker — a stand-in that returns the correct candidate at fixed confidence. So the
+> row measures the **fire gate and the corpus's structural agreement**, not a model's
+> reranking accuracy: it proves that when the reranker is right, the calibrated gate
+> fires at the default threshold, which BM25-magnitude gating never did. It is **not a
+> model benchmark**. For what a real model achieves on real incidents, the honest
+> reference point is ITBench: frontier models identify the root cause **< 50%** of the
+> time (see [Benchmarking]({{< relref "/docs/reference/benchmarking.md" >}})). The
+> corpus here is small and hand-built; treat these numbers as a regression guard on the
+> gate, not as a field measurement.
 >
 > **Cost & false-recall discipline.** The reranker runs *before* the "free"
 > short-circuit, so it is bounded: one call, `rerank_k` candidates, and only when
