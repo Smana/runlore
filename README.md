@@ -172,6 +172,23 @@ additive. Full setup detail in **[Data sources](https://runlore.io/docs/concepts
 | **Knowledge base** *(git forge)* | GitHub *(App auth)* | `forge.*` |
 | **MCP** | Server — query your KB from Claude Code / any MCP client · Client — wire external MCP tool servers into investigations (allowlist-gated) | `mcp.*` |
 
+## No native integration? Point RunLore at any MCP server
+
+RunLore ships a **narrow, deliberate native tool set** — cluster, metrics, logs, network flows,
+GitOps history, cloud control plane, knowledge search. It does not try to match the
+[56 built-in toolsets](https://holmesgpt.dev/latest/data-sources/builtin-toolsets/) of the
+largest OSS agent, and it shouldn't.
+
+Instead it ships an **MCP client**: point it at any Model Context Protocol server (`mcp.servers`
+in the config) and those tools join the investigation loop, governed by the same allowlist and
+the same read-only posture as everything else. Whatever your stack has that RunLore doesn't
+ship natively, MCP closes the gap.
+
+RunLore is also an MCP **server** — `lore mcp` exposes what-changed and knowledge-base search
+to Claude Code, HolmesGPT, or any other MCP client.
+
+→ [MCP configuration](https://runlore.io/docs/configuration/mcp/)
+
 ## ⚡ Try it in one minute — no cluster, no keys
 
 Before you wire up a cluster, watch RunLore investigate a real incident and reach a real root

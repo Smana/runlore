@@ -27,18 +27,21 @@ menu:
     - name: Docs
       pageRef: /docs
       weight: 1
-    - name: GitHub
+    - name: Compare
+      pageRef: /compare
       weight: 2
+    - name: GitHub
+      weight: 3
       url: "https://github.com/Smana/runlore"
       params:
         icon: github
     - name: Search
-      weight: 3
+      weight: 4
       params:
         type: search
 
 params:
-  description: "An open-source SRE agent that investigates incidents — and remembers what it learns."
+  description: "The SRE agent that builds a memory your team reviews. Every verified root cause becomes a pull request in a Git repo you own — merge it, and the next occurrence is answered in seconds."
   # Default social-share card (Open Graph / Twitter). Pages may override via front-matter `images`.
   images:
     - images/og-card.png

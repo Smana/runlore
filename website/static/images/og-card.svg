@@ -38,8 +38,9 @@
   </g>
 
   <!-- tagline -->
-  <text x="600" y="398" text-anchor="middle" font-family="'Space Grotesk','Liberation Sans',sans-serif" font-weight="600" font-size="42" letter-spacing="-1" fill="#e2e8f0">The SRE agent that speeds up investigations</text>
-  <text x="600" y="454" text-anchor="middle" font-family="'Space Grotesk','Liberation Sans',sans-serif" font-weight="600" font-size="42" letter-spacing="-1" fill="#8aa0bf">…and learns from your context</text>
+  <text x="600" y="372" text-anchor="middle" font-family="'Space Grotesk','Liberation Sans',sans-serif" font-weight="600" font-size="40" letter-spacing="-1" fill="#e2e8f0">The SRE agent that builds a memory</text>
+  <text x="600" y="424" text-anchor="middle" font-family="'Space Grotesk','Liberation Sans',sans-serif" font-weight="600" font-size="40" letter-spacing="-1" fill="#e2e8f0">your team reviews.</text>
+  <text x="600" y="468" text-anchor="middle" font-family="'Space Grotesk','Liberation Sans',sans-serif" font-weight="600" font-size="24" letter-spacing="-0.3" fill="#8aa0bf">Every verified root cause becomes a pull request you merge</text>
 
   <!-- divider -->
   <rect x="500" y="506" width="200" height="2" rx="1" fill="#14c9a6" opacity="0.55"/>
