@@ -61,11 +61,6 @@ jobs:
         # No bare `hugo mod get` — it would upgrade the pinned Hextra.
         run: hugo --minify --gc
 
-      - name: Screenshots must not predate the card renderer
-        # Needs full history (fetch-depth: 0 above) — it compares git commit times,
-        # not mtimes, which a fresh clone would make all equal.
-        run: hack/check-screenshots-fresh.sh
-
       - name: In-page anchors must resolve
         # refLinksErrorLevel: ERROR above covers relref between pages; it does not look
         # at fragment links within a page. Runs against the HTML the step above rendered.
@@ -78,3 +73,8 @@ jobs:
             exit 1
           fi
           echo "OK: no raw docs/*.md links in README/CONTRIBUTING"
+
+      - name: Screenshots must not predate the card renderer
+        # Needs full history (fetch-depth: 0 above) — it compares git commit times,
+        # not mtimes, which a fresh clone would make all equal.
+        run: hack/check-screenshots-fresh.sh
