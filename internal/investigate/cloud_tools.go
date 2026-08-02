@@ -25,8 +25,10 @@ func (t CloudWhatChangedTool) Name() string { return "cloud_what_changed" }
 func (t CloudWhatChangedTool) Description() string {
 	return "List recent MUTATING AWS control-plane events (CloudTrail) — ASG/EC2/EKS/RDS/SG changes, " +
 		"manual actions, and other infra changes invisible to GitOps. Use when no Git change explains " +
-		"the incident. Optional resource scopes to an instance-id/ASG/ARN; since_minutes default 90 " +
-		"(CloudTrail lags ~15m)."
+		"the incident. Optional resource is an EXACT CloudTrail ResourceName — a full ARN, instance-id, " +
+		"ASG name, or a resource's full path (e.g. a Secrets Manager secret's \"apps/team/name\") — never a " +
+		"service name or substring; OMIT it to see every mutating event, which is the right move when you do " +
+		"not know the exact identifier. since_minutes default 90 (CloudTrail lags ~15m)."
 }
 
 // Schema returns the JSON schema for the arguments.
@@ -49,14 +51,44 @@ func (t CloudWhatChangedTool) Call(ctx context.Context, args string) (string, er
 	}
 	end := time.Now()
 	start := end.Add(-time.Duration(since) * time.Minute)
-	changes, err := t.Cloud.CloudChanges(ctx, providers.Selector{Name: in.Resource}, providers.TimeWindow{Start: start, End: end})
+	window := providers.TimeWindow{Start: start, End: end}
+	changes, err := t.Cloud.CloudChanges(ctx, providers.Selector{Name: in.Resource}, window)
 	if err != nil {
 		return "", err
 	}
+
+	// CloudTrail's ResourceName lookup is an EXACT match on the full AWS resource
+	// name or ARN — not a substring, not a service name. A guessed scope therefore
+	// returns zero events that are indistinguishable from "nothing changed", and the
+	// model reasonably concludes the control plane was quiet.
+	//
+	// That is not hypothetical. An AWS Secrets Manager secret was deleted, CloudTrail
+	// recorded it under ResourceName "apps/app-wizard/llm", and the investigation
+	// tried "secretsmanager", "secretsmanager.amazonaws.com" and "app-wizard" — all
+	// exact-match misses. It reported the deletion event as uncapturable and left
+	// "who deleted it" as an open question, with the answer sitting one unscoped
+	// lookup away.
+	//
+	// So a scoped miss retries unscoped rather than dead-ending. The banner says the
+	// filter was dropped, because silently widening a query the model asked to narrow
+	// would be worse than the dead end.
+	var widened bool
+	if len(changes) == 0 && in.Resource != "" {
+		all, aerr := t.Cloud.CloudChanges(ctx, providers.Selector{}, window)
+		if aerr == nil && len(all) > 0 {
+			changes, widened = all, true
+		}
+	}
+
 	if len(changes) == 0 {
 		return "no mutating AWS events in the window", nil
 	}
 	var b strings.Builder
+	if widened {
+		fmt.Fprintf(&b, "resource %q matched no CloudTrail events — ResourceName is an exact match on the "+
+			"full AWS resource name or ARN (e.g. a secret's full path \"apps/team/name\"), not a service or "+
+			"substring. Showing ALL mutating events in the window instead:\n", in.Resource)
+	}
 	renderRows(&b, len(changes), "more", func(i int) {
 		c := changes[i]
 		fmt.Fprintf(&b, "%s %s %s/%s\n", c.When.Format(time.RFC3339), c.ManagedBy, c.Workload.Kind, c.Workload.Name)
