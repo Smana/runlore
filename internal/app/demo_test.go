@@ -86,3 +86,43 @@ func TestRunDemoInvestigateUnknownScenario(t *testing.T) {
 		t.Errorf("error should name the missing scenario and list the available ones, got: %v", err)
 	}
 }
+
+// TestDemoOfflineThroughSeam is the funnel guarantee: with NO api key and NO network,
+// `demo investigate --offline` drives the real loop over the real fixture tools and
+// renders the real verdict card. This is what hack/demo.sh shows a first-time
+// visitor. It asserts through the same writer seam the existing end-to-end test uses.
+func TestDemoOfflineThroughSeam(t *testing.T) {
+	var out, errOut bytes.Buffer
+	err := runDemoInvestigateWithModel([]string{
+		"--scenarios", "../../examples/scenarios",
+		"--scenario", "harbor-chart-bump",
+		"--offline", "testdata/demo-transcript.json",
+	}, &out, &errOut, nil)
+	if err != nil {
+		t.Fatalf("demo --offline: %v\nstderr:\n%s", err, errOut.String())
+	}
+	got := out.String()
+	for _, want := range []string{"→ what_changed", "submit_findings", "migration"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("output missing %q, got:\n%s", want, got)
+		}
+	}
+	// Provenance: a replayed card must say it is replayed, and name the model.
+	if !strings.Contains(got, "recorded") {
+		t.Errorf("output must disclose that the model turns are recorded, got:\n%s", got)
+	}
+}
+
+// TestDemoOfflineNeedsNoAPIKey proves the key check is skipped on the offline path —
+// the whole point of --offline.
+func TestDemoOfflineNeedsNoAPIKey(t *testing.T) {
+	t.Setenv("ANTHROPIC_API_KEY", "")
+	var out, errOut bytes.Buffer
+	if err := runDemoInvestigateWithModel([]string{
+		"--scenarios", "../../examples/scenarios",
+		"--scenario", "harbor-chart-bump",
+		"--offline", "testdata/demo-transcript.json",
+	}, &out, &errOut, nil); err != nil {
+		t.Fatalf("offline demo must not require a key, got: %v", err)
+	}
+}

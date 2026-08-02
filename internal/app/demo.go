@@ -9,11 +9,13 @@ import (
 	"io"
 	"os"
 	"strings"
+	"time"
 
 	"github.com/Smana/runlore/internal/config"
 	"github.com/Smana/runlore/internal/eval"
 	"github.com/Smana/runlore/internal/investigate"
 	"github.com/Smana/runlore/internal/logging"
+	"github.com/Smana/runlore/internal/model/replay"
 	"github.com/Smana/runlore/internal/notify"
 	"github.com/Smana/runlore/internal/providers"
 )
@@ -32,6 +34,12 @@ const (
 	demoDefaultModel    = "claude-sonnet-4-5"
 	demoDefaultKeyEnv   = "ANTHROPIC_API_KEY"
 )
+
+// demoDefaultTranscript is the recorded transcript `--offline` replays when no path
+// is given: a REAL investigation captured once against a live model, so a first-time
+// user sees genuine model output with no key and no network. Re-record it with
+// `lore demo investigate --record <path>`.
+const demoDefaultTranscript = "examples/demo/harbor-chart-bump.transcript.json"
 
 // RunDemo dispatches the `lore demo <subcommand>` family. Today only `investigate` is
 // wired: a zero-cluster, full-loop demonstration of the real investigator against fake
@@ -67,6 +75,8 @@ func runDemoInvestigateWithModel(args []string, out, errOut io.Writer, model pro
 	scenario := fs.String("scenario", "", "scenario id to run (default: the first in --scenarios)")
 	scenariosDir := fs.String("scenarios", demoDefaultScenarios, "directory of curated scenario fixtures")
 	cfgPath := fs.String("config", "", "optional runlore.yaml; when omitted the demo uses a zero-config default model")
+	offline := fs.String("offline", "", "replay a recorded transcript instead of calling a model — no API key, no network (use \"default\" for the shipped one)")
+	record := fs.String("record", "", "record this run's model turns to a transcript file for later --offline replay")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -88,14 +98,35 @@ func runDemoInvestigateWithModel(args []string, out, errOut io.Writer, model pro
 		return err
 	}
 
-	// Build the real model unless the test injected one. When building it, insist on a
-	// model API key first (the one thing the demo genuinely needs) and fail with clear,
-	// friendly guidance rather than a stack trace or a hang on the first model call.
+	// Resolve the model. Three paths, in precedence order:
+	//   1. a test-injected model (the existing seam) — used verbatim;
+	//   2. --offline — replay a recorded transcript: no key, no network;
+	//   3. the live model built from config, optionally wrapped by --record.
+	//
+	// Paths 1 and 2 both answer the verify turns from the SAME model (verifyModel is
+	// nil), because a transcript is one ordered stream. --record forces the same
+	// shape, so what is recorded is exactly what will later replay.
 	verifyModel := BuildVerifyModel(cfg)
-	if model == nil {
+	var transcript *replay.Transcript
+	var recorder *replay.Recorder
+	switch {
+	case model != nil:
+		verifyModel = nil // the injected model answers verify turns itself
+	case *offline != "":
+		path := *offline
+		if path == "default" {
+			path = demoDefaultTranscript
+		}
+		t, err := replay.Load(path)
+		if err != nil {
+			return err
+		}
+		transcript, model, verifyModel = t, replay.New(t), nil
+	default:
 		if apiKeyEnv != "" && os.Getenv(apiKeyEnv) == "" {
 			return fmt.Errorf("the demo needs a model API key: set %s to your key "+
-				"(or point --config at a runlore.yaml with a configured model). "+
+				"(or point --config at a runlore.yaml with a configured model, or run with "+
+				"--offline default to replay a recorded investigation with no key at all). "+
 				"Everything else runs against built-in fake providers — no cluster required", apiKeyEnv)
 		}
 		apiKey := ""
@@ -103,14 +134,23 @@ func runDemoInvestigateWithModel(args []string, out, errOut io.Writer, model pro
 			apiKey = os.Getenv(apiKeyEnv)
 		}
 		model = BuildModel(cfg, apiKey)
-	} else {
-		verifyModel = nil // the scripted test model answers verify turns itself
+		if *record != "" {
+			recorder = replay.NewRecorder(model,
+				replay.Recorded{Provider: cfg.Model.Provider, Model: cfg.Model.Model}, c.DisplayName())
+			model, verifyModel = recorder, nil // record one ordered stream, replayable as-is
+		}
 	}
 
 	log := logging.FromConfig(errOut, cfg.Logging.Format, cfg.Logging.Level)
 	ctx := context.Background()
 
-	demoPrintf(out, "== RunLore demo: investigating %q (fake providers, no cluster) ==\n\n", c.DisplayName())
+	if transcript != nil {
+		demoPrintf(out, "== RunLore demo: investigating %q (recorded model turns, fake providers, no cluster) ==\n", c.DisplayName())
+		demoPrintf(out, "   model turns recorded %s with %s/%s\n\n",
+			transcript.RecordedAt, transcript.RecordedWith.Provider, transcript.RecordedWith.Model)
+	} else {
+		demoPrintf(out, "== RunLore demo: investigating %q (fake providers, no cluster) ==\n\n", c.DisplayName())
+	}
 	demoPrintf(out, "incident: %s\n\n", oneLineIndent(c.Symptom()))
 
 	// Wrap each fake tool so every ReAct step (tool name + short args + truncated
@@ -145,6 +185,13 @@ func runDemoInvestigateWithModel(args []string, out, errOut io.Writer, model pro
 		return fmt.Errorf("the loop produced no findings")
 	}
 	demoPrintf(out, "\n== submit_findings ==\n%s\n", notify.Format(*result))
+
+	if recorder != nil {
+		if err := recorder.Write(*record, time.Now().UTC().Format(time.RFC3339)); err != nil {
+			return fmt.Errorf("write transcript: %w", err)
+		}
+		demoPrintf(out, "\ntranscript written to %s — replay it with `lore demo investigate --offline %s`\n", *record, *record)
+	}
 	return nil
 }
 
