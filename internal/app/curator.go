@@ -12,6 +12,7 @@ import (
 	"github.com/Smana/runlore/internal/config"
 	"github.com/Smana/runlore/internal/curator"
 	"github.com/Smana/runlore/internal/investigate"
+	"github.com/Smana/runlore/internal/outcome"
 	"github.com/Smana/runlore/internal/providers"
 	"github.com/Smana/runlore/internal/telemetry"
 
@@ -114,16 +115,16 @@ func forgeProviderName(cfg *config.Config) string {
 // BuildReinvestigator returns a poller that re-runs KB issues labelled
 // "reinvestigate" and posts the fresh findings back, or nil when the forge isn't
 // configured. RunLore polls the forge (outbound) — it has no inbound webhooks.
-func BuildReinvestigator(ctx context.Context, cfg *config.Config, gp providers.GitOpsProvider, metrics *telemetry.Metrics, log *slog.Logger) *investigate.Reinvestigator {
+func BuildReinvestigator(ctx context.Context, cfg *config.Config, gp providers.GitOpsProvider, metrics *telemetry.Metrics, ledger *outcome.Ledger, log *slog.Logger) *investigate.Reinvestigator {
 	client := buildForge(cfg, log)
 	if client == nil {
 		return nil
 	}
 	model, tools, recall, _ := BuildModelAndTools(ctx, cfg, gp, metrics, log)
-	if recall != nil {
-		recall.Metrics = metrics
-		recall.Log = log
-	}
+	// Same wiring as the investigator, including the outcome ledger — a
+	// re-investigation must not fire recall on an entry a normal investigation
+	// would have rejected on its outcome history.
+	wireRecall(recall, metrics, ledger, log)
 	run := func(ctx context.Context, req investigate.Request) (providers.Investigation, error) {
 		var res providers.Investigation
 		var got bool

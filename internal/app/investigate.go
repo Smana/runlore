@@ -471,6 +471,32 @@ func kbMatchScore(recall *investigate.Recall) float64 {
 // still allowing legitimately slow queries (log scans, range PromQL) to finish.
 const defaultToolTimeout = 60 * time.Second
 
+// wireRecall attaches the runtime dependencies BuildModelAndTools cannot supply,
+// for every path that builds a Recall.
+//
+// It exists because there is more than one such path — the investigator and the
+// reinvestigator — and each used to wire these by hand. They diverged: the
+// reinvestigate path set Metrics and Log but left Outcome nil, and Recall
+// documents `nil ⇒ no outcome decay`. So a KB entry whose recorded outcomes
+// should have suppressed it stayed suppressed for a normal investigation and
+// could still fire instant recall on a re-investigation — the same
+// confidently-wrong-answer failure the outcome gate exists to prevent.
+//
+// One function, so a field added here reaches every path by construction.
+// TestWireRecallIsTheOnlyPlaceRecallDepsAreSet keeps it that way.
+func wireRecall(r *investigate.Recall, metrics *telemetry.Metrics, ledger *outcome.Ledger, log *slog.Logger) {
+	if r == nil {
+		return
+	}
+	r.Metrics = metrics
+	r.Log = log
+	// *outcome.Ledger satisfies OutcomeStats; a nil ledger disables decay, which is
+	// correct when the operator disabled the ledger and wrong when we simply forgot.
+	if ledger != nil {
+		r.Outcome = ledger
+	}
+}
+
 // BuildInvestigator returns the LLM ReAct investigator when a model is configured,
 // otherwise the read-only LogInvestigator. It also returns the catalog (nil when
 // no model is configured or no catalog is wired).
@@ -480,11 +506,7 @@ func BuildInvestigator(ctx context.Context, cfg *config.Config, gp providers.Git
 		return investigate.LogInvestigator{Log: log}, nil, nil
 	}
 	model, tools, recall, cat := BuildModelAndTools(ctx, cfg, gp, metrics, log)
-	if recall != nil {
-		recall.Metrics = metrics
-		recall.Log = log
-		recall.Outcome = ledger // outcome-driven decay (serve path); *outcome.Ledger satisfies OutcomeStats
-	}
+	wireRecall(recall, metrics, ledger, log)
 	log.Info("using LLM investigator", "provider", ModelProvider(cfg), "model", cfg.Model.Model, "tools", len(tools))
 	notifier, err := BuildNotifier(cfg, log)
 	if err != nil {

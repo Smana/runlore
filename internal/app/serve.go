@@ -236,7 +236,7 @@ func RunServe(version string, args []string) error {
 			"max_batch", cc.MaxBatch, "cooldown", cc.Cooldown.Std())
 	}
 
-	reinv := BuildReinvestigator(ctx, cfg, gitops, metrics, log)
+	reinv := BuildReinvestigator(ctx, cfg, gitops, metrics, ledger, log)
 
 	// failureDedup is created ONCE (process scope), not per leadership term, so it
 	// survives leader flaps: the gitops informer's initial-LIST replay of every
