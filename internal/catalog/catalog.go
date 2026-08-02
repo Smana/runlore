@@ -6,6 +6,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"sort"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -41,10 +42,23 @@ type Catalog struct {
 	// across reloads — the prerequisite for incremental Index/Delete), so search
 	// hits resolve IDs through it instead of parsing positions.
 	pathIdx map[string]int
+	// dir is the operator's own catalog root, recorded on each Reload so
+	// WriteRootFor can answer where the curator may write. commonsDir is the
+	// optional shared upstream root (SetCommonsDir); empty disables it.
+	dir        string
+	commonsDir string
 	// Log, when set (wiring time, before the first Reload), surfaces non-fatal
 	// reload degradations — an embed failure that leaves hybrid BM25-only. Nil-safe.
 	Log *slog.Logger
 }
+
+// commonsPathPrefix namespaces commons entries' Path values.
+//
+// Path is relative to its OWN root, so the same filename in both roots collides:
+// pathIdx would resolve one to the other, and bleve — which keys documents by Path —
+// would index the second over the first, silently losing an entry. Prefixing keeps
+// the two corpora distinct in both structures.
+const commonsPathPrefix = "commons/"
 
 // pathIndex maps each entry's Path to its slice position — the resolution table
 // for path-keyed bleve doc IDs. Built alongside every entries swap.
@@ -112,6 +126,35 @@ func NewEmpty() *Catalog {
 	return &Catalog{index: idx, pathIdx: map[string]int{}}
 }
 
+// SetCommonsDir points the catalog at a SECOND, read-only root loaded alongside the
+// operator's own. Empty (the default) means no commons root and byte-for-byte the
+// previous behaviour.
+//
+// It is a separate directory, never a subdirectory of the user's KB: the commons is
+// synced from an upstream repo, and letting it share a root with the git-sync mirror
+// would let an upstream change dirty the operator's own checkout.
+func (c *Catalog) SetCommonsDir(dir string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.commonsDir = dir
+}
+
+// WriteRootFor returns the directory the curator may write this entry into, or ""
+// when the entry is not writable.
+//
+// A commons entry is never writable: the corpus is upstream and shared, so a local
+// curation writing into it would both corrupt the shared view and be silently
+// reverted by the next sync. Returning "" — rather than the commons path — is what
+// makes that a structural property instead of a rule someone has to remember.
+func (c *Catalog) WriteRootFor(e Entry) string {
+	if e.Commons {
+		return ""
+	}
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.dir
+}
+
 // Reload rebuilds the index from dir and swaps it in atomically. The new index is
 // built outside the lock so concurrent Search is only blocked for the swap. It
 // returns the list of skipped (unparseable) entry paths so the caller can warn;
@@ -129,6 +172,30 @@ func (c *Catalog) ReloadContext(ctx context.Context, dir string) ([]string, erro
 	if err != nil {
 		return nil, err
 	}
+	// Append the commons root, marked. Loaded AFTER the user's own entries so a
+	// path collision resolves to the operator's copy, and so the stable order the
+	// tie-break relies on puts their entries first.
+	c.mu.RLock()
+	commonsDir := c.commonsDir
+	c.mu.RUnlock()
+	if commonsDir != "" {
+		cEntries, cSkipped, cErr := Load(commonsDir)
+		if cErr != nil {
+			// A broken commons root must not take the operator's own KB down with
+			// it: their entries are the ones an incident depends on.
+			if c.Log != nil {
+				c.Log.Warn("commons catalog failed to load; continuing with the local catalog only",
+					"dir", commonsDir, "err", cErr)
+			}
+		} else {
+			for i := range cEntries {
+				cEntries[i].Commons = true
+				cEntries[i].Path = commonsPathPrefix + cEntries[i].Path
+			}
+			entries = append(entries, cEntries...)
+			skipped = append(skipped, cSkipped...)
+		}
+	}
 	idx, err := buildIndex(entries)
 	if err != nil {
 		return nil, err
@@ -136,6 +203,7 @@ func (c *Catalog) ReloadContext(ctx context.Context, dir string) ([]string, erro
 	vectors, cache := c.embedWithCache(ctx, entries)
 	c.mu.Lock()
 	old := c.index
+	c.dir = dir
 	c.index, c.entries, c.vectors, c.pathIdx = idx, entries, vectors, pathIndex(entries)
 	if cache != nil {
 		c.vecCache = cache
@@ -341,5 +409,18 @@ func (c *Catalog) SearchScored(query string, k int) ([]ScoredEntry, error) {
 		}
 		out = append(out, ScoredEntry{Entry: c.entries[i], Score: hit.Score})
 	}
+	// Provenance breaks ties: at equal relevance the operator's OWN entry outranks a
+	// shipped generic one. A commons entry beating their own runbook on a coin-flip
+	// of index order is the wrong default — theirs describes this platform, the
+	// commons describes a failure class.
+	//
+	// Stable, and keyed only on equal scores, so it never reorders a genuine
+	// relevance difference.
+	sort.SliceStable(out, func(a, b int) bool {
+		if out[a].Score != out[b].Score {
+			return out[a].Score > out[b].Score
+		}
+		return !out[a].Entry.Commons && out[b].Entry.Commons
+	})
 	return out, nil
 }
