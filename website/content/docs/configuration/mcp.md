@@ -1,6 +1,7 @@
 ---
 title: MCP
 weight: 20
+description: "Point RunLore at any MCP server to add tools it doesn't ship natively — and expose RunLore's own what-changed and knowledge search to any MCP client."
 ---
 
 MCP is RunLore's extension layer, in **both directions**:

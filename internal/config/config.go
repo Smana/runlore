@@ -372,7 +372,7 @@ type Investigation struct {
 	MaxSteps                  int       `yaml:"max_steps"`                    // 0 ⇒ loop default (20)
 	MaxToolOutputBytes        int       `yaml:"max_tool_output_bytes"`        // unset/0 ⇒ bounded default (32768); -1 ⇒ unlimited
 	MaxTokensPerInvestigation int       `yaml:"max_tokens_per_investigation"` // unset/0 ⇒ bounded default (100000); -1 ⇒ unlimited
-	Timeout                   Duration  `yaml:"timeout"`                      // per-investigation deadline; 0 ⇒ default (10m) via applyDefaults
+	Timeout                   Duration  `yaml:"timeout"`                      // per-investigation deadline; 0 ⇒ default (10m) via ApplyDefaults
 	ToolTimeout               Duration  `yaml:"tool_timeout"`                 // per-TOOL-call timeout so one hung tool can't eat the budget; 0 ⇒ default (60s) at construction
 
 	// RecurrenceCooldown (opt-in, 0 = off) suppresses re-investigating a trigger
@@ -411,7 +411,7 @@ type Investigation struct {
 // fails the investigation.
 type ProgressUpdates struct {
 	Enabled    bool `yaml:"enabled"`
-	EverySteps int  `yaml:"every_steps"` // emit a ping every N steps; 0 ⇒ default 5 (applyDefaults). Must be > 0 when enabled.
+	EverySteps int  `yaml:"every_steps"` // emit a ping every N steps; 0 ⇒ default 5 (ApplyDefaults). Must be > 0 when enabled.
 }
 
 // Coalesce folds correlated incidents into one investigation.
@@ -427,7 +427,7 @@ type Coalesce struct {
 // RateLimit caps investigation starts per sliding window.
 type RateLimit struct {
 	// MaxPerWindow caps investigation STARTS per Window. nil (unset) defaults to
-	// 30 (see applyDefaults) — a cost-DoS guard, since per-incident spend is
+	// 30 (see ApplyDefaults) — a cost-DoS guard, since per-incident spend is
 	// bounded but the count of incidents was not. An EXPLICIT 0 preserves the
 	// pre-default unlimited behavior for configs that opted into it.
 	MaxPerWindow *int     `yaml:"max_per_window"`
@@ -709,14 +709,14 @@ type TriggerPolicy struct {
 // Debounce fires immediately on every Ready=False (the original behavior).
 type GitOpsFailureTrigger struct {
 	// Debounce is a pointer so an unset key (nil ⇒ 60s default, applied in
-	// applyDefaults) is distinguishable from an explicit `debounce: 0` (fire
+	// ApplyDefaults) is distinguishable from an explicit `debounce: 0` (fire
 	// immediately). A plain Duration can't tell the two apart — both are the zero
 	// value — which is why `debounce: 0` used to be silently clobbered to 60s.
 	Debounce *Duration `yaml:"debounce"`
 }
 
 // DebounceWindow is the GitOps-failure debounce window. nil (unset) reads as 0
-// here, but applyDefaults fills an unset trigger with 60s; an explicit 0
+// here, but ApplyDefaults fills an unset trigger with 60s; an explicit 0
 // means fire immediately on every Ready=False.
 func (g GitOpsFailureTrigger) DebounceWindow() time.Duration {
 	if g.Debounce == nil {
@@ -741,7 +741,7 @@ type IncidentTrigger struct {
 	// (which batches the survivors afterwards) and `dedup` (which still suppresses
 	// re-fires before the hold begins).
 	//
-	// A pointer, so an unset key (nil ⇒ 60s default, applied in applyDefaults) is
+	// A pointer, so an unset key (nil ⇒ 60s default, applied in ApplyDefaults) is
 	// distinguishable from an explicit `debounce: 0` (investigate immediately, on
 	// every fire) — mirroring gitops_failures.debounce.
 	//
@@ -757,7 +757,7 @@ type IncidentTrigger struct {
 	// sequence whose firing already passed into the investigation queue still burns
 	// a full paid investigation.
 	//
-	// A pointer, so an unset key (nil ⇒ true, applied in applyDefaults) is
+	// A pointer, so an unset key (nil ⇒ true, applied in ApplyDefaults) is
 	// distinguishable from an explicit `cancel_queued_on_resolve: false` — mirroring
 	// Debounce.
 	//
@@ -778,7 +778,7 @@ type IncidentTrigger struct {
 }
 
 // DebounceWindow is the incident debounce hold. nil (unset) reads as 0 here, but
-// applyDefaults fills an unset trigger with 60s; an explicit 0 means investigate
+// ApplyDefaults fills an unset trigger with 60s; an explicit 0 means investigate
 // immediately on every fire. NOTE: the hold never applies to a critical alert —
 // see investigate.Request.IsCritical and source.incidentDebouncer.Hold.
 func (t IncidentTrigger) DebounceWindow() time.Duration {
@@ -789,7 +789,7 @@ func (t IncidentTrigger) DebounceWindow() time.Duration {
 }
 
 // CancelQueuedOnResolveEnabled reports whether a queued investigation is dropped
-// when its alert resolves first. nil (unset) reads as false here, but applyDefaults
+// when its alert resolves first. nil (unset) reads as false here, but ApplyDefaults
 // fills an unset trigger with true; an explicit `false` is left untouched. Mirrors
 // DebounceWindow.
 func (t IncidentTrigger) CancelQueuedOnResolveEnabled() bool {
@@ -1119,13 +1119,13 @@ func (c *Config) Validate() error {
 		}
 	}
 	// Interim progress updates: a non-positive cadence while enabled is a
-	// misconfiguration (applyDefaults fills an unset 0 with 5, so only an explicit
+	// misconfiguration (ApplyDefaults fills an unset 0 with 5, so only an explicit
 	// negative reaches here). Validate fail-loud rather than silently never pinging.
 	if c.Investigation.ProgressUpdates.Enabled && c.Investigation.ProgressUpdates.EverySteps <= 0 {
 		return fmt.Errorf("investigation.progress_updates.every_steps must be > 0 when enabled, got %d", c.Investigation.ProgressUpdates.EverySteps)
 	}
 	// gitops.mirror.max caps the persistent what_changed mirror count; 0 means the
-	// applyDefaults value (10). A negative cap is always a misconfiguration.
+	// ApplyDefaults value (10). A negative cap is always a misconfiguration.
 	if c.GitOps.Mirror.Max < 0 {
 		return fmt.Errorf("gitops.mirror.max must be >= 0 (0 = use the default 10), got %d", c.GitOps.Mirror.Max)
 	}
@@ -1146,7 +1146,7 @@ func (c *Config) Validate() error {
 			return err
 		}
 	}
-	// Reject a negative rate-limit budget: applyDefaults fills an unset nil with 30,
+	// Reject a negative rate-limit budget: ApplyDefaults fills an unset nil with 30,
 	// so only an explicit negative reaches here — fail loud rather than silently
 	// treating it as unlimited.
 	if mpw := c.Investigation.RateLimit.MaxPerWindow; mpw != nil && *mpw < 0 {
@@ -1269,7 +1269,7 @@ func (c *Config) Validate() error {
 		}
 	}
 	// Instant-recall reranker (opt-in): its knobs are only meaningful when enabled.
-	// applyDefaults fills unset (0) values, so only an explicitly out-of-range setting
+	// ApplyDefaults fills unset (0) values, so only an explicitly out-of-range setting
 	// reaches here — fail loud rather than silently gating on a nonsensical threshold.
 	// A threshold in (0,1] is a calibrated PROBABILITY (the reranker returns 0.0–1.0);
 	// a value >1 or <=0 could never fire (or always fire), defeating the gate.
@@ -1286,7 +1286,7 @@ func (c *Config) Validate() error {
 		}
 	}
 	// Retirement pass (opt-in): its knobs are only meaningful when enabled, and a
-	// disabled block is never validated. applyDefaults fills unset (0) values while
+	// disabled block is never validated. ApplyDefaults fills unset (0) values while
 	// enabled, so only an explicitly out-of-range setting reaches here. Floor is a
 	// calibrated posterior-mean success rate: it MUST match recall's outcome_floor
 	// range (0,1] — a floor >1 would retire everything, <=0 nothing. min_observations

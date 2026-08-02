@@ -14,7 +14,7 @@ func TestApplyDefaultsCoalesceEnabled(t *testing.T) {
 	// Only coalesce.enabled set — all numeric fields should get safe defaults.
 	var c Config
 	c.Investigation.Coalesce.Enabled = true
-	applyDefaults(&c)
+	ApplyDefaults(&c)
 	co := c.Investigation.Coalesce
 	if co.Debounce.Std() != 30*time.Second {
 		t.Fatalf("default Debounce: got %v, want 30s", co.Debounce.Std())
@@ -34,7 +34,7 @@ func TestApplyDefaultsRateLimitWindow(t *testing.T) {
 	var c Config
 	n := 10
 	c.Investigation.RateLimit.MaxPerWindow = &n
-	applyDefaults(&c)
+	ApplyDefaults(&c)
 	if c.Investigation.RateLimit.Window.Std() != time.Hour {
 		t.Fatalf("default Window: got %v, want 1h", c.Investigation.RateLimit.Window.Std())
 	}
@@ -43,14 +43,14 @@ func TestApplyDefaultsRateLimitWindow(t *testing.T) {
 func TestApplyDefaultsInvestigationTimeout(t *testing.T) {
 	// Unset ⇒ a 10m per-investigation deadline is applied (active out of the box).
 	var c Config
-	applyDefaults(&c)
+	ApplyDefaults(&c)
 	if c.Investigation.Timeout.Std() != 10*time.Minute {
 		t.Fatalf("default investigation Timeout: got %v, want 10m", c.Investigation.Timeout.Std())
 	}
 	// Explicit value is respected, not overwritten.
 	var c2 Config
 	c2.Investigation.Timeout = Duration(2 * time.Minute)
-	applyDefaults(&c2)
+	ApplyDefaults(&c2)
 	if c2.Investigation.Timeout.Std() != 2*time.Minute {
 		t.Fatalf("explicit Timeout overwritten: got %v, want 2m", c2.Investigation.Timeout.Std())
 	}
@@ -60,14 +60,14 @@ func TestApplyDefaultsToolTimeout(t *testing.T) {
 	// Unset ⇒ 60s default is applied so cfg.Investigation.ToolTimeout is non-zero
 	// after Load(); BuildInvestigator's 0→60s guard then becomes a no-op safety net.
 	var c Config
-	applyDefaults(&c)
+	ApplyDefaults(&c)
 	if c.Investigation.ToolTimeout.Std() != 60*time.Second {
 		t.Fatalf("default ToolTimeout: got %v, want 60s", c.Investigation.ToolTimeout.Std())
 	}
 	// Explicit value is respected, not overwritten.
 	var c2 Config
 	c2.Investigation.ToolTimeout = Duration(30 * time.Second)
-	applyDefaults(&c2)
+	ApplyDefaults(&c2)
 	if c2.Investigation.ToolTimeout.Std() != 30*time.Second {
 		t.Fatalf("explicit ToolTimeout overwritten: got %v, want 30s", c2.Investigation.ToolTimeout.Std())
 	}
@@ -97,7 +97,7 @@ func TestApplyDefaultsInstantRecall(t *testing.T) {
 	// enabled with no tuning → margin/solo gates and decay knobs default to active values.
 	var c Config
 	c.Catalog.InstantRecall.Enabled = true
-	applyDefaults(&c)
+	ApplyDefaults(&c)
 	ir := c.Catalog.InstantRecall
 	if ir.MinScore != 1.0 || ir.MarginGap != 1.0 || ir.SoloFloor != 4.0 {
 		t.Fatalf("instant-recall defaults not applied: %+v", ir)
@@ -113,7 +113,7 @@ func TestApplyDefaultsRecallDecayExplicit(t *testing.T) {
 	c.Catalog.InstantRecall.Enabled = true
 	c.Catalog.InstantRecall.OutcomePrior = 5.0
 	c.Catalog.InstantRecall.OutcomeFloor = 0.3
-	applyDefaults(&c)
+	ApplyDefaults(&c)
 	ir := c.Catalog.InstantRecall
 	if ir.OutcomePrior != 5.0 || ir.OutcomeFloor != 0.3 {
 		t.Fatalf("explicit recall-decay values overwritten: %+v", ir)
@@ -147,7 +147,7 @@ func TestApplyDefaultsRecallRerank(t *testing.T) {
 	// the stable, corpus-independent values (nothing to set for it to work).
 	var c Config
 	c.Catalog.InstantRecall.Enabled = true // Rerank unset ⇒ ON
-	applyDefaults(&c)
+	ApplyDefaults(&c)
 	ir := c.Catalog.InstantRecall
 	if ir.RerankThreshold != 0.7 || ir.RerankK != 5 || ir.RerankMinScore != 0.1 {
 		t.Fatalf("rerank defaults not applied under the default-on path: %+v", ir)
@@ -156,7 +156,7 @@ func TestApplyDefaultsRecallRerank(t *testing.T) {
 	var off Config
 	off.Catalog.InstantRecall.Enabled = true
 	off.Catalog.InstantRecall.Rerank = rerankPtr(false)
-	applyDefaults(&off)
+	ApplyDefaults(&off)
 	if off.Catalog.InstantRecall.RerankThreshold != 0 || off.Catalog.InstantRecall.RerankK != 0 {
 		t.Fatalf("rerank knobs must stay zero when rerank is explicitly off: %+v", off.Catalog.InstantRecall)
 	}
@@ -165,7 +165,7 @@ func TestApplyDefaultsRecallRerank(t *testing.T) {
 	ex.Catalog.InstantRecall.Enabled = true
 	ex.Catalog.InstantRecall.RerankThreshold = 0.85
 	ex.Catalog.InstantRecall.RerankK = 3
-	applyDefaults(&ex)
+	ApplyDefaults(&ex)
 	if ex.Catalog.InstantRecall.RerankThreshold != 0.85 || ex.Catalog.InstantRecall.RerankK != 3 {
 		t.Fatalf("explicit rerank values overwritten: %+v", ex.Catalog.InstantRecall)
 	}
@@ -179,7 +179,7 @@ func TestValidateRecallRerank(t *testing.T) {
 	}
 	// Defaulted config validates.
 	ok := base()
-	applyDefaults(&ok)
+	ApplyDefaults(&ok)
 	if err := ok.Validate(); err != nil {
 		t.Fatalf("defaulted rerank config must validate, got %v", err)
 	}
@@ -198,7 +198,7 @@ func TestValidateRecallRerank(t *testing.T) {
 	c.Catalog.InstantRecall.RerankThreshold = 0.7
 	c.Catalog.InstantRecall.RerankK = 0 // explicit-but-would-default; force via a post-default check
 	c.Catalog.InstantRecall.RerankMinScore = 0.1
-	// applyDefaults would fill K=5, so exercise Validate directly with an out-of-range K.
+	// ApplyDefaults would fill K=5, so exercise Validate directly with an out-of-range K.
 	c.Catalog.InstantRecall.RerankK = -1
 	if err := c.Validate(); err == nil || !strings.Contains(err.Error(), "rerank_k") {
 		t.Fatalf("rerank_k -1 must be rejected, got %v", err)
@@ -227,7 +227,7 @@ func TestApplyDefaultsDoesNotOverride(t *testing.T) {
 	c.Investigation.Coalesce.Enabled = true
 	c.Investigation.Coalesce.Debounce = Duration(5 * time.Second)
 	c.Investigation.Coalesce.MaxBatch = 3
-	applyDefaults(&c)
+	ApplyDefaults(&c)
 	if c.Investigation.Coalesce.Debounce.Std() != 5*time.Second {
 		t.Fatalf("explicit Debounce overwritten: got %v", c.Investigation.Coalesce.Debounce.Std())
 	}
@@ -295,7 +295,7 @@ func TestApplyDefaultsProgressUpdates(t *testing.T) {
 	// Enabled without an explicit cadence ⇒ default 5.
 	var c Config
 	c.Investigation.ProgressUpdates.Enabled = true
-	applyDefaults(&c)
+	ApplyDefaults(&c)
 	if c.Investigation.ProgressUpdates.EverySteps != 5 {
 		t.Fatalf("default every_steps: got %d, want 5", c.Investigation.ProgressUpdates.EverySteps)
 	}
@@ -303,20 +303,20 @@ func TestApplyDefaultsProgressUpdates(t *testing.T) {
 	var c2 Config
 	c2.Investigation.ProgressUpdates.Enabled = true
 	c2.Investigation.ProgressUpdates.EverySteps = 3
-	applyDefaults(&c2)
+	ApplyDefaults(&c2)
 	if c2.Investigation.ProgressUpdates.EverySteps != 3 {
 		t.Fatalf("explicit every_steps overwritten: got %d, want 3", c2.Investigation.ProgressUpdates.EverySteps)
 	}
 	// Disabled ⇒ left at 0 (unused).
 	var c3 Config
-	applyDefaults(&c3)
+	ApplyDefaults(&c3)
 	if c3.Investigation.ProgressUpdates.EverySteps != 0 {
 		t.Fatalf("disabled every_steps must stay 0, got %d", c3.Investigation.ProgressUpdates.EverySteps)
 	}
 }
 
 func TestValidateProgressUpdatesEverySteps(t *testing.T) {
-	// Enabled with a negative cadence is rejected (applyDefaults fills unset 0 with 5,
+	// Enabled with a negative cadence is rejected (ApplyDefaults fills unset 0 with 5,
 	// so only an explicit negative reaches Validate).
 	var c Config
 	c.Investigation.ProgressUpdates.Enabled = true
@@ -361,7 +361,7 @@ func TestValidatePricingNonNegative(t *testing.T) {
 func TestApplyDefaultsResourceCaps(t *testing.T) {
 	// Unset (zero) → bounded defaults are applied (match the Helm chart values.yaml).
 	var c Config
-	applyDefaults(&c)
+	ApplyDefaults(&c)
 	if c.Investigation.MaxToolOutputBytes != 32768 {
 		t.Fatalf("default MaxToolOutputBytes: got %d, want 32768", c.Investigation.MaxToolOutputBytes)
 	}
@@ -378,7 +378,7 @@ func TestApplyDefaultsResourceCapsUnlimited(t *testing.T) {
 	var c Config
 	c.Investigation.MaxToolOutputBytes = -1
 	c.Investigation.MaxTokensPerInvestigation = -1
-	applyDefaults(&c)
+	ApplyDefaults(&c)
 	if c.Investigation.MaxToolOutputBytes != 0 {
 		t.Fatalf("-1 MaxToolOutputBytes must map to 0 (unlimited sentinel), got %d", c.Investigation.MaxToolOutputBytes)
 	}
@@ -393,7 +393,7 @@ func TestApplyDefaultsResourceCapsExplicit(t *testing.T) {
 	var c Config
 	c.Investigation.MaxToolOutputBytes = 16384
 	c.Investigation.MaxTokensPerInvestigation = 50000
-	applyDefaults(&c)
+	ApplyDefaults(&c)
 	if c.Investigation.MaxToolOutputBytes != 16384 {
 		t.Fatalf("explicit MaxToolOutputBytes overwritten: got %d, want 16384", c.Investigation.MaxToolOutputBytes)
 	}
