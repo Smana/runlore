@@ -9,6 +9,11 @@ defensible reason to exist is the **combination** the open tools don't have — 
 outcome-weighted** knowledge catalog, grounded in the **exact GitOps change**, from an agent that is
 **honest about the sub-50% reality** — all self-hostable.
 
+> Looking for a head-to-head? See [RunLore vs HolmesGPT]({{< relref "/compare/holmesgpt.md" >}}),
+> [vs k8sgpt]({{< relref "/compare/k8sgpt.md" >}}), and [vs Aurora]({{< relref "/compare/aurora.md" >}}).
+> This page is the underlying research — the full landscape, including the commercial
+> vendors and the eval reality.
+
 ## Open source
 
 | Project | What it is | Learns? | vs RunLore |
