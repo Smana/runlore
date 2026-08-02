@@ -50,23 +50,26 @@ GitOps isn't required: every data source is pluggable, and an unset one simply d
 Two sides of the same incident, delivered to your chat (shown here in Slack; Matrix delivers the same findings) — the whole point of the learning loop in one place.
 
 **First time — a full investigation.** A verdict-first summary: the actionability call
-(no action / suggested / required / inconclusive), the confidence-scored root cause, the alert
-metadata and recurrence, top-cause "why", suggested next steps, ruled-out hypotheses and data gaps,
-and a link to the pull request it opened in your knowledge base. With the Slack notifier's **bot token**, the full
-analysis lands as a threaded reply under that summary. The footer shows the real cost — model calls
-and tokens.
+(no action / suggested / required / inconclusive), the confidence-scored root cause, top-cause "why",
+suggested next steps it will *not* apply for you, and the affected resource with what changed in Git.
+Alert metadata, recurrence and a link to the knowledge-base PR appear alongside when the incident
+carries them. With the Slack notifier's **bot token**, the full analysis lands as a threaded reply —
+open questions, data gaps and ruled-out hypotheses. The footer shows the real cost: model calls and
+tokens.
 
 <div align="center">
-<img src="assets/slack-notification.png" alt="RunLore Slack notification — verdict-first summary with confidence-scored root cause, alert metadata, recurrence, suggested next steps, ruled-out hypotheses and a link to the knowledge-base PR" width="760" />
+<img src="assets/slack-notification.png" alt="RunLore Slack notification — a verdict-first card headed 'Harbor Core Readiness Probe Failure Due to Database Migration Deadlock': Action required, High confidence 90%, the evidence behind the cause, read-only suggested next steps, the affected resource, and a threaded full analysis with open questions, data gaps and ruled-out hypotheses" width="760" />
 </div>
 
 **Next time — an instant recall.** Once that entry is merged, the same incident — even under a
 *different, generic alert* — is answered straight from your knowledge base: **no investigation, no new
-PR**, just the known cause, the human-reviewed resolution, and the entry's resolve-rate track record.
-An order of magnitude cheaper (two model calls vs a full ReAct loop), delivered in seconds.
+PR**, just the known cause, the human-reviewed resolution, and the entry it came from. An order of
+magnitude cheaper (a single model call below, against a full ReAct loop), delivered in seconds. Once
+the entry has a track record, its resolve rate is shown alongside — and it weighs whether recall is
+trusted enough to fire at all.
 
 <div align="center">
-<img src="assets/recall-notification.png" alt="RunLore Slack notification — an instant recall: an ⚡ Instant recall banner (answered from the knowledge base, no investigation run), the known cause and validated resolution, and the entry's resolve-rate track record" width="760" />
+<img src="assets/recall-notification.png" alt="RunLore Slack notification — an instant recall: an ⚡ Instant recall banner reading 'answered from your knowledge base, no investigation was run', the known cause, a citation of the knowledge-base entry harbor-core-migration-deadlock.md, and a single model call at 93% cached tokens" width="760" />
 </div>
 
 ## How it works
