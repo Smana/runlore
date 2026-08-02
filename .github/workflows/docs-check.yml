@@ -9,6 +9,11 @@ on:
       - 'website/**'
       - 'README.md'
       - 'CONTRIBUTING.md'
+      - 'assets/**'
+      # The card renderer: changing it is what makes the shipped screenshots wrong.
+      - 'internal/notify/slack.go'
+      - 'internal/notify/format.go'
+      - 'hack/check-screenshots-fresh.sh'
       - '.github/workflows/docs-check.yml'
   push:
     branches: [main]
@@ -16,6 +21,11 @@ on:
       - 'website/**'
       - 'README.md'
       - 'CONTRIBUTING.md'
+      - 'assets/**'
+      # The card renderer: changing it is what makes the shipped screenshots wrong.
+      - 'internal/notify/slack.go'
+      - 'internal/notify/format.go'
+      - 'hack/check-screenshots-fresh.sh'
       - '.github/workflows/docs-check.yml'
 
 permissions:
@@ -50,6 +60,11 @@ jobs:
         working-directory: website
         # No bare `hugo mod get` — it would upgrade the pinned Hextra.
         run: hugo --minify --gc
+
+      - name: Screenshots must not predate the card renderer
+        # Needs full history (fetch-depth: 0 above) — it compares git commit times,
+        # not mtimes, which a fresh clone would make all equal.
+        run: hack/check-screenshots-fresh.sh
 
       - name: In-page anchors must resolve
         # refLinksErrorLevel: ERROR above covers relref between pages; it does not look
