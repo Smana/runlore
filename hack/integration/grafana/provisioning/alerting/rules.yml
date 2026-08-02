@@ -1,0 +1,70 @@
+apiVersion: 1
+
+groups:
+  - orgId: 1
+    name: runlore-demo
+    folder: RunLore Demo
+    interval: 10s
+    rules:
+      - uid: runlore-demo-highcpu
+        title: HighCPU
+        # No `for:` delay — fires on the first breaching evaluation, so the
+        # webhook round-trip to RunLore is visible within one `interval`.
+        for: 0s
+        condition: C
+        data:
+          - refId: A
+            datasourceUid: testdata
+            relativeTimeRange:
+              from: 600
+              to: 0
+            model:
+              refId: A
+              # Predictable Pulse alternates onValue/offValue every
+              # timeStep*onCount / timeStep*offCount seconds, with no manual
+              # action needed to both fire AND resolve the rule — 20s high
+              # (100), then 20s low (0), on repeat.
+              #
+              # The settings MUST nest under `pulseWave` and the interval key
+              # MUST be `timeStep`: Grafana's TestData backend decodes
+              # model.pulseWave into a PulseWaveQuery{TimeStep,OnCount,
+              # OffCount,OnValue,OffValue} (pkg/tsdb/grafana-testdata-datasource/
+              # scenarios.go). Flat `step:`/`onCount:` keys at model level are
+              # silently ignored — the scenario then runs with a zero timeStep
+              # and returns no usable series, so the rule never crosses 50 and
+              # goes to execErrState instead.
+              scenarioId: predictable_pulse
+              pulseWave:
+                timeStep: 10
+                onCount: 2
+                offCount: 2
+                onValue: 100
+                offValue: 0
+          - refId: B
+            datasourceUid: __expr__
+            model:
+              refId: B
+              type: reduce
+              expression: A
+              reducer: last
+          - refId: C
+            datasourceUid: __expr__
+            model:
+              refId: C
+              type: threshold
+              expression: B
+              conditions:
+                - evaluator:
+                    type: gt
+                    params: [50]
+        noDataState: OK
+        execErrState: Error
+        annotations:
+          # fields.message: annotations.summary
+          summary: CPU is high on api-0
+        labels:
+          # Grafana injects `alertname: <rule title>` automatically — no need
+          # to set it here. These map to fields.severity / .namespace / .workload_name.
+          severity: critical
+          namespace: payments
+          pod: api-0

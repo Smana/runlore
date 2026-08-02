@@ -153,28 +153,10 @@ aborts startup — mappings never fail silently at ingest.
 
 ### Grafana Alerting
 
-```yaml
-sources:
-  custom:
-    instances:
-      grafana:
-        token_env: GRAFANA_WEBHOOK_TOKEN
-        items: alerts
-        fields:
-          title: labels.alertname
-          message: annotations.summary
-          severity: labels.severity
-          namespace: labels.namespace
-          workload_name: labels.pod
-          fingerprint: fingerprint
-          resolved: status
-        labels: labels
-        defaults: { environment: prod }
-```
-
-Point a Grafana webhook contact point at
-`https://<runlore>/webhook/custom/grafana` with an `Authorization: Bearer …`
-custom header.
+Grafana Alerting is a **first-class source**, not a hand-written `custom` mapping: `sources.grafana`
+registers its own `POST /webhook/grafana` endpoint with this exact field mapping baked in as the
+default (every field stays overridable). See [Grafana Alerting]({{< relref "/docs/integrations/grafana.md" >}})
+for the minimal config and the full mapping table.
 
 ### Datadog (custom webhook payload)
 

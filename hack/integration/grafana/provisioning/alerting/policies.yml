@@ -1,0 +1,9 @@
+apiVersion: 1
+
+policies:
+  - orgId: 1
+    receiver: runlore
+    group_by: ["alertname"]
+    group_wait: 0s
+    group_interval: 10s
+    repeat_interval: 1h
