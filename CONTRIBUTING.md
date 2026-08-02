@@ -178,7 +178,8 @@ into a real cluster's catalog and `RUNLORE_POISON_READY` set, or it SKIPs.
 ## Quick local demo (no cluster)
 
 ```bash
-hack/demo.sh    # fires mocked Alertmanager alerts through the trigger policy
+hack/demo.sh                 # a real investigation on recorded evidence (no cluster, no key)
+hack/demo-trigger-policy.sh  # fires mocked Alertmanager alerts through the trigger policy
 ```
 
 ## Submitting a change

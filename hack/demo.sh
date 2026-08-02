@@ -1,30 +1,16 @@
 #!/usr/bin/env bash
-# Demo: run `lore serve` and fire mocked Alertmanager alerts through the trigger policy.
+# Demo: a REAL RunLore investigation, on recorded evidence, with no cluster, no API
+# key and no network. The model turns are replayed from a transcript recorded once
+# against a live model (examples/demo/*.transcript.json); the tools, the
+# investigation loop and the rendered verdict card are the production code paths.
 #
-# The Alertmanager webhook JSON is the mock "event". examples/alertmanager-webhook.json
-# exercises every policy path: match, dedup (repeated fingerprint), wrong-severity,
-# wrong-environment, ignore-list, and a resolved alert (dropped before the decision).
-#
+# Requires: Go. Nothing else.
 # Usage: hack/demo.sh
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-ADDR=":18080"
 BIN="$(mktemp -d)/lore"
-CFG="$ROOT/hack/demo.config.yaml"   # committed + parse-tested (internal/config)
-LOG="$(mktemp)"
 
 go build -o "$BIN" "$ROOT/cmd/lore"
-
-"$BIN" serve --config "$CFG" --addr "$ADDR" > "$LOG" 2>&1 &
-SRV=$!
-trap 'kill "$SRV" 2>/dev/null || true' EXIT
-
-# Wait for the server, then fire the mock alerts.
-curl -s --retry-connrefused --retry 10 --retry-delay 1 -o /dev/null "http://localhost${ADDR}/healthz"
-curl -s -o /dev/null -w 'webhook HTTP %{http_code}\n' \
-  -XPOST "http://localhost${ADDR}/webhook/alertmanager" \
-  --data @"$ROOT/examples/alertmanager-webhook.json"
-
-echo "=== trigger-policy decisions ==="
-grep "msg=incident" "$LOG"
+cd "$ROOT"          # the transcript + scenario paths are repo-relative
+"$BIN" demo investigate --offline default

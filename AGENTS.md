@@ -14,16 +14,21 @@ go build ./... && go vet ./... && go test ./... && gofmt -l . && golangci-lint r
 - Linter config: [`.golangci.yml`](.golangci.yml) (golangci-lint **v2**). CI runs the same gate
   ([`.github/workflows/ci.yaml`](.github/workflows/ci.yaml)).
 
-## Try it — mock alert, end to end
+## Try it
 
 ```bash
-hack/demo.sh
+hack/demo.sh                 # a real investigation on recorded evidence (no cluster, no key)
+hack/demo-trigger-policy.sh  # fires mocked Alertmanager alerts through the trigger policy
 ```
 
-Builds `lore`, runs `lore serve`, and fires the mocked Alertmanager batch in
-[`examples/alertmanager-webhook.json`](examples/alertmanager-webhook.json) through the trigger
-policy — printing the investigate/skip decision per alert (covers match, dedup, severity/environment
-filters, ignore-list, and resolved-drop). That JSON shape is what Alertmanager/VMAlert POST.
+`hack/demo.sh` replays a recorded model transcript through the real investigation loop and
+renders a real verdict card — no cluster, no API key, no network.
+
+`hack/demo-trigger-policy.sh` builds `lore`, runs `lore serve`, and fires the mocked Alertmanager
+batch in [`examples/alertmanager-webhook.json`](examples/alertmanager-webhook.json) through the
+trigger policy — printing the investigate/skip decision per alert (covers match, dedup,
+severity/environment filters, ignore-list, and resolved-drop). That JSON shape is what
+Alertmanager/VMAlert POST.
 
 ## Conventions
 

@@ -88,31 +88,20 @@ func runDemoInvestigateWithModel(args []string, out, errOut io.Writer, model pro
 	if len(cases) == 0 {
 		return fmt.Errorf("no scenarios found in %s", *scenariosDir)
 	}
-	c, err := pickScenario(cases, *scenario)
-	if err != nil {
-		return err
-	}
 
 	cfg, apiKeyEnv, err := demoConfig(*cfgPath)
 	if err != nil {
 		return err
 	}
 
-	// Resolve the model. Three paths, in precedence order:
-	//   1. a test-injected model (the existing seam) — used verbatim;
-	//   2. --offline — replay a recorded transcript: no key, no network;
-	//   3. the live model built from config, optionally wrapped by --record.
-	//
-	// Paths 1 and 2 both answer the verify turns from the SAME model (verifyModel is
-	// nil), because a transcript is one ordered stream. --record forces the same
-	// shape, so what is recorded is exactly what will later replay.
-	verifyModel := BuildVerifyModel(cfg)
+	// --offline replays a transcript, so load it before picking the scenario: with no
+	// explicit --scenario, the transcript's OWN Scenario field is the default. Without
+	// this, an omitted --scenario would fall back to the first scenario in the
+	// directory, which need not be the one the transcript was recorded against — the
+	// demo would then announce one incident and replay tool calls for another.
+	scenarioID := *scenario
 	var transcript *replay.Transcript
-	var recorder *replay.Recorder
-	switch {
-	case model != nil:
-		verifyModel = nil // the injected model answers verify turns itself
-	case *offline != "":
+	if model == nil && *offline != "" {
 		path := *offline
 		if path == "default" {
 			path = demoDefaultTranscript
@@ -121,7 +110,31 @@ func runDemoInvestigateWithModel(args []string, out, errOut io.Writer, model pro
 		if err != nil {
 			return err
 		}
-		transcript, model, verifyModel = t, replay.New(t), nil
+		transcript = t
+		if scenarioID == "" {
+			scenarioID = t.Scenario
+		}
+	}
+	c, err := pickScenario(cases, scenarioID)
+	if err != nil {
+		return err
+	}
+
+	// Resolve the model. Three paths, in precedence order:
+	//   1. a test-injected model (the existing seam) — used verbatim;
+	//   2. --offline — replay the transcript loaded above: no key, no network;
+	//   3. the live model built from config, optionally wrapped by --record.
+	//
+	// Paths 1 and 2 both answer the verify turns from the SAME model (verifyModel is
+	// nil), because a transcript is one ordered stream. --record forces the same
+	// shape, so what is recorded is exactly what will later replay.
+	verifyModel := BuildVerifyModel(cfg)
+	var recorder *replay.Recorder
+	switch {
+	case model != nil:
+		verifyModel = nil // the injected model answers verify turns itself
+	case transcript != nil:
+		model, verifyModel = replay.New(transcript), nil
 	default:
 		if apiKeyEnv != "" && os.Getenv(apiKeyEnv) == "" {
 			return fmt.Errorf("the demo needs a model API key: set %s to your key "+

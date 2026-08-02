@@ -8,6 +8,8 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/Smana/runlore/internal/eval"
+	"github.com/Smana/runlore/internal/model/replay"
 	"github.com/Smana/runlore/internal/providers"
 )
 
@@ -113,6 +115,41 @@ func TestDemoOfflineThroughSeam(t *testing.T) {
 	}
 }
 
+// TestDemoOfflineDefaultsScenarioToTranscript is the regression guard for the bug
+// where `--offline` with no `--scenario` fell back to pickScenario's default: the
+// FIRST scenario in the directory (alphabetically, "crashloop-after-deploy"), not the
+// scenario the shipped transcript was actually recorded against ("harbor-chart-bump").
+// That mismatch made the demo announce one incident while replaying tool calls and a
+// verdict for a completely different one — exactly what a first-time visitor sees.
+// This replays the real shipped transcript with NO --scenario and asserts the
+// rendered incident is the transcript's own scenario, not the directory's first entry.
+func TestDemoOfflineDefaultsScenarioToTranscript(t *testing.T) {
+	tr, err := replay.Load("../../" + demoDefaultTranscript)
+	if err != nil {
+		t.Fatalf("load shipped transcript: %v", err)
+	}
+	if tr.Scenario != "harbor-chart-bump" {
+		t.Fatalf("test assumes the shipped transcript is scenario %q, got %q — update the assertions below", "harbor-chart-bump", tr.Scenario)
+	}
+
+	var out, errOut bytes.Buffer
+	err = runDemoInvestigateWithModel([]string{
+		"--scenarios", "../../examples/scenarios",
+		"--offline", "../../" + demoDefaultTranscript,
+	}, &out, &errOut, nil)
+	if err != nil {
+		t.Fatalf("demo --offline with no --scenario: %v\nstderr:\n%s", err, errOut.String())
+	}
+
+	got := out.String()
+	if !strings.Contains(got, "HarborProbeFailure") {
+		t.Errorf("expected the transcript's own scenario (harbor-chart-bump) announced, got:\n%s", got)
+	}
+	if strings.Contains(got, "CheckoutPodCrashLoop") {
+		t.Errorf("demo announced the directory's first scenario (crashloop-after-deploy) instead of the transcript's own, got:\n%s", got)
+	}
+}
+
 // TestDemoOfflineNeedsNoAPIKey proves the key check is skipped on the offline path —
 // the whole point of --offline.
 func TestDemoOfflineNeedsNoAPIKey(t *testing.T) {
@@ -124,5 +161,36 @@ func TestDemoOfflineNeedsNoAPIKey(t *testing.T) {
 		"--offline", "testdata/demo-transcript.json",
 	}, &out, &errOut, nil); err != nil {
 		t.Fatalf("offline demo must not require a key, got: %v", err)
+	}
+}
+
+// TestShippedTranscriptToolsStillExist is the DRIFT GUARD over the fixture the demo
+// actually ships. Every tool the transcript calls must still be registered by the
+// demo's fixture tools; a renamed or removed tool fails CI here instead of breaking
+// the demo silently for every new visitor.
+func TestShippedTranscriptToolsStillExist(t *testing.T) {
+	tr, err := replay.Load("../../" + demoDefaultTranscript)
+	if err != nil {
+		t.Fatalf("load shipped transcript: %v", err)
+	}
+	cases, err := eval.Load("../../examples/scenarios")
+	if err != nil {
+		t.Fatalf("load scenarios: %v", err)
+	}
+	c, err := pickScenario(cases, tr.Scenario)
+	if err != nil {
+		t.Fatalf("the transcript's scenario %q is gone: %v", tr.Scenario, err)
+	}
+	have := map[string]bool{
+		// Loop-control tools are answered by the loop itself, not the fixture set.
+		"submit_findings": true, "submit_verdicts": true,
+	}
+	for _, tool := range c.FakeTools() {
+		have[tool.Name()] = true
+	}
+	for _, name := range tr.ToolNames() {
+		if !have[name] {
+			t.Errorf("shipped transcript calls tool %q, which no longer exists — re-record with `lore demo investigate --record %s`", name, demoDefaultTranscript)
+		}
 	}
 }
