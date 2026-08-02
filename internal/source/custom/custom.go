@@ -109,7 +109,10 @@ func (s *Source) Decode(body []byte, h http.Header) (source.DecodeResult, error)
 			fps = []string{fingerprint}
 		}
 		out.Requests = append(out.Requests, investigate.Request{
-			Source:       investigate.SourceCustom,
+			// Per-instance (see WithSource), not a package constant: Source is
+			// part of investigate's workqueue coalescing key, so an adapter
+			// delegating here must be able to claim its own value.
+			Source:       inst.src,
 			Title:        title,
 			Severity:     severity,
 			Environment:  get("environment"),
@@ -134,9 +137,13 @@ func (s *Source) Decode(body []byte, h http.Header) (source.DecodeResult, error)
 // fallback), and enforces actions.mode=auto's fail-closed token requirement.
 // Exported so an adapter that delegates to this mapper with baked-in
 // defaults (internal/source/grafana) reuses the same validation and
-// token-resolution path instead of re-implementing it.
-func Build(node yaml.Node, cfg *config.Config) (*Source, error) {
-	insts, err := parseConfig(node)
+// token-resolution path instead of re-implementing it. Such an adapter passes
+// WithConfigPath/WithSource so startup errors name the key the operator really
+// wrote and its investigations stay distinct from a custom instance's; with no
+// options this is exactly the plain `sources.custom` build.
+func Build(node yaml.Node, cfg *config.Config, opts ...Option) (*Source, error) {
+	o := resolveOptions(opts)
+	insts, err := parseConfig(node, opts...)
 	if err != nil {
 		return nil, err
 	}
@@ -145,16 +152,17 @@ func Build(node yaml.Node, cfg *config.Config) (*Source, error) {
 		shared = osGetenv(cfg.Server.WebhookTokenEnv)
 	}
 	for name, inst := range insts {
+		where := o.instancePath(name)
 		if inst.tokenEnv != "" {
 			inst.token = osGetenv(inst.tokenEnv)
 			if inst.token == "" {
-				return nil, fmt.Errorf("sources.custom.instances.%s: token_env %q is empty", name, inst.tokenEnv)
+				return nil, fmt.Errorf("%s: token_env %q is empty", where, inst.tokenEnv)
 			}
 		}
 		// Fail closed under mode=auto: an unattended executor must not
 		// accept unauthenticated vendor webhooks (PagerDuty precedent).
 		if cfg != nil && cfg.Actions.Mode == config.ActionAuto && inst.token == "" && shared == "" {
-			return nil, fmt.Errorf("actions.mode=auto requires a token for sources.custom.instances.%s (token_env or server.webhook_token_env)", name)
+			return nil, fmt.Errorf("actions.mode=auto requires a token for %s (token_env or server.webhook_token_env)", where)
 		}
 	}
 	return &Source{instances: insts, shared: shared}, nil

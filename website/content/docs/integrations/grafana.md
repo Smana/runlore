@@ -10,7 +10,7 @@ investigations, without hand-copying nine dot-path field mappings into `sources.
 `grafana` is a thin wrapper: it registers `POST /webhook/grafana` and delegates every byte of
 extraction — dot-path field lookup, `alerts` batching, severity mapping, resolved-event handling,
 the 1MiB body cap, the per-delivery request cap and startup mapping validation — to the same
-[custom webhook mapper]({{< relref "/docs/concepts/data-sources.md#custom-webhooks-any-vendor-no-code" >}})
+[custom webhook mapper]({{< relref "/docs/concepts/data-sources.md#custom-webhooks--any-vendor-no-code" >}})
 that powers `sources.custom`, with the field paths below baked in as defaults.
 
 ## Minimal config
@@ -52,7 +52,7 @@ sources:
 ```
 
 The same goes for `items`, `labels`, `defaults`, and `severity_map` — see
-[Data sources → Custom webhooks]({{< relref "/docs/concepts/data-sources.md#custom-webhooks-any-vendor-no-code" >}})
+[Data sources → Custom webhooks]({{< relref "/docs/concepts/data-sources.md#custom-webhooks--any-vendor-no-code" >}})
 for the full key reference, since it is the same mapper underneath.
 
 ## Verify it locally
@@ -86,7 +86,7 @@ investigation).
 
 ## Reference
 
-- [Data sources → Custom webhooks]({{< relref "/docs/concepts/data-sources.md#custom-webhooks-any-vendor-no-code" >}})
+- [Data sources → Custom webhooks]({{< relref "/docs/concepts/data-sources.md#custom-webhooks--any-vendor-no-code" >}})
   — the mapper `grafana` delegates to; full key reference for `items`, `fields`, `defaults`,
   `severity_map`, `resolved_value`.
 - [Configuration → `sources`]({{< relref "/docs/configuration/configuration.md#sources--what-wakes-runlore" >}}).

@@ -18,6 +18,7 @@ import (
 
 	"gopkg.in/yaml.v3"
 
+	"github.com/Smana/runlore/internal/investigate"
 	"github.com/Smana/runlore/internal/source"
 	"github.com/Smana/runlore/internal/source/custom"
 )
@@ -77,7 +78,14 @@ func (s *Source) Authenticate(body []byte, h http.Header) bool {
 // what the core did (or, on this wildcard-less route, did not) set on the
 // inbound request.
 func withInstance(h http.Header) http.Header {
+	// http.Header(nil).Clone() returns a nil Header, and Set on a nil map
+	// panics. Built.Handler always hands us a non-nil header so this is
+	// unreachable in the server, but Decode/Authenticate are exported and a
+	// direct caller passing nil must not take the process down.
 	h2 := h.Clone()
+	if h2 == nil {
+		h2 = http.Header{}
+	}
 	h2.Set(source.InstanceHeader, instanceName)
 	return h2
 }
@@ -159,11 +167,21 @@ func init() {
 			}
 			n, err := mergedNode(node)
 			if err != nil {
-				return nil, fmt.Errorf("sources.grafana: %w", err)
+				return nil, err // mergedNode's errors already name sources.grafana
 			}
-			inner, err := custom.Build(n, d.Cfg)
+			// WithConfigPath: the mapping is compiled under the synthetic
+			// instance name "grafana", a path (sources.custom.instances.grafana)
+			// that appears nowhere in the operator's file — startup errors must
+			// name the key they actually wrote. WithSource: keep Grafana
+			// investigations out of sources.custom's workqueue coalescing key.
+			// Both errors are returned unwrapped for the same reason: the core
+			// already prefixes `source "grafana": `, and custom now names the
+			// config path itself.
+			inner, err := custom.Build(n, d.Cfg,
+				custom.WithConfigPath("sources.grafana"),
+				custom.WithSource(investigate.SourceGrafana))
 			if err != nil {
-				return nil, fmt.Errorf("sources.grafana: %w", err)
+				return nil, err
 			}
 			return &Source{inner: inner}, nil
 		},

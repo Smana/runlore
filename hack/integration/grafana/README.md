@@ -30,6 +30,9 @@ no manual "make it fire" step is needed.
 3. Watch the `lore serve` logs. Within ~20s of Grafana starting, the `HighCPU` rule's TestData
    query crosses its threshold and Grafana POSTs a `firing` alert to `/webhook/grafana`. Confirm:
    - the log line shows an admitted/investigating request
+   - `source=grafana` — **not** `source=custom`, even though the mapping is the custom mapper
+     underneath (`sources.grafana` claims its own `investigate.Source`, so its incidents never
+     coalesce with a same-titled one from a `sources.custom` instance)
    - `namespace=payments`, `workload=api-0` (from `labels.namespace` / `labels.pod`)
    - the title is `HighCPU` (Grafana's auto-injected `alertname` label = the rule title)
 

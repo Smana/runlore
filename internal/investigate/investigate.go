@@ -37,6 +37,13 @@ const (
 	// SourceCustom means the investigation was triggered by a generic
 	// (config-mapped) vendor webhook — sources.custom.
 	SourceCustom Source = "custom"
+	// SourceGrafana means the investigation was triggered by Grafana Alerting —
+	// sources.grafana. It delegates extraction to the same mapper as
+	// SourceCustom but MUST keep its own value: Source is part of the
+	// workqueue's coalescing key (see keyOf), so sharing "custom" would make a
+	// Grafana incident silently coalesce with a same-titled one from a
+	// sources.custom instance on the same workload.
+	SourceGrafana Source = "grafana"
 )
 
 // SeverityCritical is the paging-grade alert severity. It is the ONE spelling
