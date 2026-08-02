@@ -572,6 +572,13 @@ func mrkdwnTexts(blocks []map[string]any) []string {
 func TestSlackBlocksEscapeUntrustedText(t *testing.T) {
 	inv := providers.Investigation{
 		Confidence: 0.9,
+		// AlertName + Title together exercise the card's conclusion line: with an
+		// alert named, the header anchors on it and the model's Title is restated
+		// beside the verdict, so Title becomes untrusted text ON THE CARD and has
+		// to be escaped there. Without AlertName that branch never runs.
+		AlertName: "KubePodCrashLooping",
+		Title:     "root cause: <https://evil.example|click here to remediate>",
+		Verdict:   providers.VerdictActionRequired,
 		RootCauses: []providers.Hypothesis{{
 			Summary:         "summary with <b> tag",
 			Confidence:      0.9,
@@ -594,6 +601,7 @@ func TestSlackBlocksEscapeUntrustedText(t *testing.T) {
 	}
 	for _, want := range []string{
 		"&lt;https://evil.example|click here to remediate&gt;",
+		"root cause: &lt;https://evil.example|click here to remediate&gt;", // the Title, on the card
 		"summary with &lt;b&gt; tag",
 		"chart@&lt;v2&gt;",     // ChangeRef, surfaced in the metadata fields and the detail RC section
 		"restart &amp; verify", // SuggestedAction, surfaced in next steps
@@ -1110,4 +1118,37 @@ func renderSlackBlocks(t *testing.T, inv providers.Investigation) string {
 		t.Fatalf("marshal summary blocks: %v", err)
 	}
 	return string(b)
+}
+
+// TestSlackCardEscapesTitleOnBothBranches covers the two places the card can put
+// the model's title: appended to the verdict line, and standing alone when the
+// model gave no verdict. Both carry untrusted model output.
+//
+// This exists because the first attempt to cover it was VACUOUS: the untrusted-text
+// fixture carried no Verdict, so only the standalone branch ever ran, and deleting
+// escapeMrkdwn from the verdict line passed the entire suite.
+func TestSlackCardEscapesTitleOnBothBranches(t *testing.T) {
+	const hostile = "<https://evil.example|click here to remediate>"
+	for _, tc := range []struct {
+		name    string
+		verdict providers.Verdict
+	}{
+		{"verdict present, title appended to the verdict line", providers.VerdictActionRequired},
+		{"no verdict, title stands alone", ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			inv := providers.Investigation{
+				AlertName: "KubePodCrashLooping",
+				Title:     hostile,
+				Verdict:   tc.verdict,
+			}
+			joined := strings.Join(mrkdwnTexts(summaryBlocks(inv)), "\n")
+			if strings.Contains(joined, hostile) {
+				t.Fatalf("model title rendered as a LIVE mrkdwn link — phishing vector on the card:\n%s", joined)
+			}
+			if !strings.Contains(joined, "&lt;https://evil.example|click here to remediate&gt;") {
+				t.Fatalf("title neither escaped nor present:\n%s", joined)
+			}
+		})
+	}
 }
