@@ -10,15 +10,14 @@ confidence bar) against your knowledge-catalog repo, via a scoped GitHub App.
 ## Minimal config
 
 ```yaml
-config:
-  forge:
-    kb_repo: your-org/runlore-kb            # the repo the App is installed on
-    base_branch: main
-    skip_verdicts: [no_action]              # keep benign/self-healed findings out of the PR queue
-    github_app:
-      app_id: 123456
-      installation_id: 7654321
-      private_key_env: GITHUB_APP_PRIVATE_KEY
+forge:
+  kb_repo: your-org/runlore-kb            # the repo the App is installed on
+  base_branch: main
+  skip_verdicts: [no_action]              # keep benign/self-healed findings out of the PR queue
+  github_app:
+    app_id: 123456
+    installation_id: 7654321
+    private_key_env: GITHUB_APP_PRIVATE_KEY
 ```
 
 ### Create the App

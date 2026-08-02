@@ -10,15 +10,14 @@ integration: {kind: source, id: gitops}
 ## Minimal config
 
 ```yaml
-config:
+gitops:
+  engine: flux          # or "argocd"
+sources:
   gitops:
-    engine: flux          # or "argocd"
-  sources:
-    gitops:
-      enabled: true        # also react to Flux/Argo CD Ready=False
-  triggers:
-    gitops_failures:
-      debounce: 60s          # require a failure to persist this long before investigating
+    enabled: true        # also react to Flux/Argo CD Ready=False
+triggers:
+  gitops_failures:
+    debounce: 60s          # require a failure to persist this long before investigating
 ```
 
 ## Verify it locally
