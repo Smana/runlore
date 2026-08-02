@@ -42,6 +42,11 @@ type ReportCase struct {
 	ExpectRecall       string `json:"expect_recall,omitempty"`
 	RecallFired        int    `json:"recall_fired_runs,omitempty"`
 	RecallShortCircuit int    `json:"recall_short_circuit_runs,omitempty"`
+
+	// Per-case token spend (median over the repeats) — what the scorecard's
+	// cost-per-investigation table is computed from.
+	InputTokens  int `json:"input_tokens,omitempty"`
+	OutputTokens int `json:"output_tokens,omitempty"`
 }
 
 // Report projects the campaign plus its provenance into the serializable report.

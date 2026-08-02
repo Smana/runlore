@@ -42,6 +42,16 @@ func (c *CountingModel) Total() providers.Usage {
 	return c.total
 }
 
+// UsageCounter is the "how many tokens so far" capability the runner needs to
+// attribute spend per case. CountingModel implements it; a plain model does not, and
+// the runner simply records zero usage in that case.
+type UsageCounter interface {
+	Total() providers.Usage
+}
+
+// compile-time assertion: the counting wrapper satisfies the capability.
+var _ UsageCounter = (*CountingModel)(nil)
+
 // ComparedRun is one replay run of one case for one model entry: the
 // deterministic keyword score, the tool-call coverage, and (when the case
 // carries ground truth and a judge is set) the judge's rubric verdict.
