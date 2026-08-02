@@ -789,4 +789,9 @@ step "RESULTS"
 echo "PASS=$PASS FAIL=$FAIL"
 echo "--- runlore.log (tail) ---"; tail -n 15 /tmp/runlore.log
 echo "--- mock.log (tail) ---";   tail -n 15 /tmp/runlore-mock.log
-[[ "$FAIL" == "0" ]] && green "ALL FEATURES VERIFIED" || { red "$FAIL CHECK(S) FAILED"; exit 1; }
+if [[ "$FAIL" == "0" ]]; then
+  green "ALL FEATURES VERIFIED"
+else
+  red "$FAIL CHECK(S) FAILED"
+  exit 1
+fi

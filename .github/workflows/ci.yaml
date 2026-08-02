@@ -44,7 +44,9 @@ jobs:
         with:
           version: v2.12.2
       - name: shellcheck
-        # -S warning: gate on real bugs (warning/error), not style/info nits — keeps
-        # the gate meaningful without a repo-wide style pass. Preinstalled on the
-        # ubuntu-latest runner image.
-        run: shellcheck -S warning hack/*.sh website/static/install.sh
+        # Default severity, deliberately: install.sh is fetched and executed by users
+        # over the network, so it is the last script in this repo that should sit
+        # behind a lowered gate. The one pre-existing info-level note that blocked the
+        # default was fixed rather than muted.
+        # Preinstalled on the ubuntu-latest runner image.
+        run: shellcheck hack/*.sh website/static/install.sh
