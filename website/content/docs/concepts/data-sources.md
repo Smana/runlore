@@ -42,7 +42,7 @@ network:
   hubble: { url: hubble-relay.kube-system:80 }   # Relay gRPC host:port
 ```
 
-**Wire it:** [Cilium Hubble]({{< relref "/docs/integrations/hubble.md" >}})
+**Wire it:** [Cilium Hubble]({{< relref "/docs/integrations/data-sources/hubble.md" >}})
 
 ### `aws-vpc-flow-logs` — AWS VPC Flow Logs
 
@@ -56,7 +56,7 @@ network:
   aws: { region: eu-west-3, log_group: /aws/vpc/flowlogs }
 ```
 
-**Wire it:** [AWS VPC Flow Logs]({{< relref "/docs/integrations/aws-vpc-flow-logs.md" >}})
+**Wire it:** [AWS VPC Flow Logs]({{< relref "/docs/integrations/data-sources/aws-vpc-flow-logs.md" >}})
 > Note: VPC Flow Logs are IP-based, so v1 returns recent VPC-wide `REJECT`s rather than
 > pod-scoped flows (the namespace/pod selector is not mapped to IPs).
 
@@ -72,7 +72,7 @@ network:
   gcp: { project: my-gcp-project }
 ```
 
-**Wire it:** [GCP Firewall Logs]({{< relref "/docs/integrations/gcp-firewall-logs.md" >}})
+**Wire it:** [GCP Firewall Logs]({{< relref "/docs/integrations/data-sources/gcp-firewall-logs.md" >}})
 > Same IP-based caveat as AWS: v1 returns recent subnet/VPC-wide `DENIED` connections.
 
 ### Adding another provider
@@ -105,7 +105,7 @@ logs:
   url: http://victorialogs.observability.svc:9428
 ```
 
-**Wire it:** [VictoriaLogs]({{< relref "/docs/integrations/victorialogs.md" >}})
+**Wire it:** [VictoriaLogs]({{< relref "/docs/integrations/data-sources/victorialogs.md" >}})
 
 ### `loki` — Grafana Loki
 
@@ -117,7 +117,7 @@ logs:
   # headers: { X-Scope-OrgID: my-tenant } # multi-tenant Loki
 ```
 
-**Wire it:** [Grafana Loki]({{< relref "/docs/integrations/loki.md" >}})
+**Wire it:** [Grafana Loki]({{< relref "/docs/integrations/data-sources/loki.md" >}})
 
 ### `elasticsearch` / `opensearch` — Elasticsearch and OpenSearch
 ```yaml
@@ -129,7 +129,7 @@ logs:
 ```
 Both distributions speak the identical classic `_search` DSL, so one client serves both.
 
-**Wire it:** [Elasticsearch]({{< relref "/docs/integrations/elasticsearch.md" >}}) · [OpenSearch]({{< relref "/docs/integrations/opensearch.md" >}})
+**Wire it:** [Elasticsearch]({{< relref "/docs/integrations/data-sources/elasticsearch.md" >}}) · [OpenSearch]({{< relref "/docs/integrations/data-sources/opensearch.md" >}})
 
 Field-convention defaults differ per provider; override any of them via `logs.fields`:
 
@@ -179,7 +179,7 @@ aborts startup — mappings never fail silently at ingest.
 
 Grafana Alerting is a **first-class source**, not a hand-written `custom` mapping: `sources.grafana`
 registers its own `POST /webhook/grafana` endpoint with this exact field mapping baked in as the
-default (every field stays overridable). See [Grafana Alerting]({{< relref "/docs/integrations/grafana.md" >}})
+default (every field stays overridable). See [Grafana Alerting]({{< relref "/docs/integrations/triggers/grafana.md" >}})
 for the minimal config and the full mapping table.
 
 ### Datadog (custom webhook payload)
