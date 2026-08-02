@@ -51,43 +51,43 @@ rather than implying a standard exists.
 
 ### GitOps
 
-- [Flux HelmRelease stuck Ready=False after an upgrade](playbooks/flux-helmrelease-upgrade-failed-20260802.md)
-- [Flux HelmRelease terminal state with retries exhausted or Stalled](playbooks/flux-helmrelease-retries-exhausted-20260802.md)
-- [Flux Kustomization Ready=False on build or apply failure](playbooks/flux-kustomization-build-failed-20260802.md)
-- [Argo CD Application health Degraded after a sync](playbooks/argocd-application-degraded-20260802.md)
-- [Argo CD Application stuck OutOfSync and never converging](playbooks/argocd-application-outofsync-stuck-20260802.md)
+- [Flux HelmRelease stuck Ready=False after an upgrade](playbooks/flux-helmrelease-upgrade-failed.md)
+- [Flux HelmRelease terminal state with retries exhausted or Stalled](playbooks/flux-helmrelease-retries-exhausted.md)
+- [Flux Kustomization Ready=False on build or apply failure](playbooks/flux-kustomization-build-failed.md)
+- [Argo CD Application health Degraded after a sync](playbooks/argocd-application-degraded.md)
+- [Argo CD Application stuck OutOfSync and never converging](playbooks/argocd-application-outofsync-stuck.md)
 
 ### Workloads
 
-- [Pod in CrashLoopBackOff shortly after a deploy](playbooks/pod-crashloopbackoff-after-deploy-20260802.md)
-- [Container OOMKilled with exit code 137](playbooks/container-oomkilled-20260802.md)
-- [Pod Running but never Ready because the readiness probe fails](playbooks/readiness-probe-failure-20260802.md)
-- [Pod stuck in ImagePullBackOff or ErrImagePull](playbooks/imagepullbackoff-20260802.md)
-- [Pod blocked in Init state because an init container fails](playbooks/init-container-failure-20260802.md)
+- [Pod in CrashLoopBackOff shortly after a deploy](playbooks/pod-crashloopbackoff-after-deploy.md)
+- [Container OOMKilled with exit code 137](playbooks/container-oomkilled.md)
+- [Pod Running but never Ready because the readiness probe fails](playbooks/readiness-probe-failure.md)
+- [Pod stuck in ImagePullBackOff or ErrImagePull](playbooks/imagepullbackoff.md)
+- [Pod blocked in Init state because an init container fails](playbooks/init-container-failure.md)
 
 ### Storage
 
-- [PersistentVolumeClaim stuck Pending and never bound](playbooks/pvc-pending-unbound-20260802.md)
-- [PersistentVolume filling up and about to run out of space](playbooks/persistentvolume-filling-up-20260802.md)
-- [Pod unschedulable with volume node affinity conflict](playbooks/volume-node-affinity-conflict-20260802.md)
+- [PersistentVolumeClaim stuck Pending and never bound](playbooks/pvc-pending-unbound.md)
+- [PersistentVolume filling up and about to run out of space](playbooks/persistentvolume-filling-up.md)
+- [Pod unschedulable with volume node affinity conflict](playbooks/volume-node-affinity-conflict.md)
 
 ### Networking
 
-- [In-cluster DNS resolution failures via CoreDNS](playbooks/dns-resolution-failure-20260802.md)
-- [Traffic silently dropped by a NetworkPolicy](playbooks/networkpolicy-denial-20260802.md)
-- [Service has no endpoints so traffic to it fails](playbooks/service-no-endpoints-20260802.md)
+- [In-cluster DNS resolution failures via CoreDNS](playbooks/dns-resolution-failure.md)
+- [Traffic silently dropped by a NetworkPolicy](playbooks/networkpolicy-denial.md)
+- [Service has no endpoints so traffic to it fails](playbooks/service-no-endpoints.md)
 
 ### Certificates
 
-- [cert-manager Certificate not ready with a stuck ACME order or challenge](playbooks/certmanager-challenge-stuck-20260802.md)
-- [TLS certificate approaching expiry without renewing](playbooks/certificate-expiring-soon-20260802.md)
+- [cert-manager Certificate not ready with a stuck ACME order or challenge](playbooks/certmanager-challenge-stuck.md)
+- [TLS certificate approaching expiry without renewing](playbooks/certificate-expiring-soon.md)
 
 ### Nodes and scheduling
 
-- [Node NotReady or unreachable and its pods stop being rescheduled promptly](playbooks/node-notready-20260802.md)
-- [Node under memory pressure evicting pods](playbooks/node-memory-pressure-eviction-20260802.md)
-- [Node under disk pressure evicting pods and refusing image pulls](playbooks/node-disk-pressure-eviction-20260802.md)
-- [Pod stuck Pending because the scheduler finds no suitable node](playbooks/pod-unschedulable-20260802.md)
+- [Node NotReady or unreachable and its pods stop being rescheduled promptly](playbooks/node-notready.md)
+- [Node under memory pressure evicting pods](playbooks/node-memory-pressure-eviction.md)
+- [Node under disk pressure evicting pods and refusing image pulls](playbooks/node-disk-pressure-eviction.md)
+- [Pod stuck Pending because the scheduler finds no suitable node](playbooks/pod-unschedulable.md)
 
 ## Contributing
 
