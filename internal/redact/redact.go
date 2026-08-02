@@ -70,13 +70,30 @@ var rules = []rule{
 	{regexp.MustCompile(`\bAIza[0-9A-Za-z_-]{35}\b`), mask},
 	// Credentials in a URL: scheme://user:PASSWORD@host → mask the password.
 	{regexp.MustCompile(`([a-zA-Z][a-zA-Z0-9+.\-]*://[^\s:@/]+:)[^\s@/]+(@)`), `${1}[REDACTED]${2}`},
-	// HTTP auth header tokens — keep the scheme, mask the credential. ApiKey is
-	// Elasticsearch/OpenSearch's own auth scheme (Authorization: ApiKey <base64
-	// id:key>) — the documented workaround for an ES API key, which (unlike a
-	// bearer token) has no recognizable prefix of its own to match on.
+	// HTTP auth header tokens — keep the scheme, mask the credential.
 	{regexp.MustCompile(`(?i)(bearer\s+)[A-Za-z0-9._~+/=-]{12,}`), `${1}[REDACTED]`},
 	{regexp.MustCompile(`(?i)(basic\s+)[A-Za-z0-9+/=]{8,}`), `${1}[REDACTED]`},
-	{regexp.MustCompile(`(?i)(apikey\s+)[A-Za-z0-9+/=]{8,}`), `${1}[REDACTED]`},
+	// ApiKey is Elasticsearch/OpenSearch's own auth scheme (Authorization: ApiKey
+	// <base64 id:key>) — the documented workaround for an ES API key, which
+	// (unlike a bearer token) has no recognizable prefix of its own to match on.
+	//
+	// Two rules, deliberately, because "apikey" is also an ordinary English-ish
+	// word that shows up in prose all over log lines, runbooks and findings. A
+	// single `(?i)(apikey\s+)[A-Za-z0-9+/=]{8,}` rule masked ANY 8+ character
+	// word following it — "apikey rotation policy" became "apikey [REDACTED]
+	// policy" and "see the ApiKey documentation page" became "ApiKey [REDACTED]
+	// page". Planting spurious [REDACTED] markers in a finding is not a safe
+	// failure: it makes the investigation output look like it leaked a secret and
+	// destroys otherwise-correct text.
+	//
+	//  1. With the Authorization-header context, ANY credential shape is masked —
+	//     "Authorization: ApiKey <x>" is never prose.
+	//  2. Bare "ApiKey <x>" (a header dump with the key stripped, a curl snippet)
+	//     only when the token is unmistakably a base64 credential: 20+ characters
+	//     from the base64 alphabet. A real ES API key is ~50-60; the longest words
+	//     that trip rule 1's old form ("documentation", 13) fall well short.
+	{regexp.MustCompile(`(?i)(authorization"?\s*[:=]?\s*"?apikey\s+)[A-Za-z0-9._~+/=-]{8,}`), `${1}[REDACTED]`},
+	{regexp.MustCompile(`(?i)(\bapikey\s+)[A-Za-z0-9+/]{20,}={0,2}`), `${1}[REDACTED]`},
 	// Sensitive key = value / key: value (the value is masked, the key kept). An
 	// env-var-style prefix (DB_SECRET, OPENAI_API_KEY) is allowed before the keyword.
 	{regexp.MustCompile(`(?i)([\w.\-]*(?:password|passwd|secret|api[_-]?key|access[_-]?key|secret[_-]?key|private[_-]?key|client[_-]?secret|token|credentials?|dsn|connection[_-]?string)"?\s*[:=]\s*"?)([^\s"',}]+)`), `${1}[REDACTED]`},

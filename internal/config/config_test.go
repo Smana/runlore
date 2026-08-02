@@ -743,6 +743,7 @@ func TestLogsProviderValidate(t *testing.T) {
 	}
 }
 
+
 // TestValidateForgeProviderGitLab pins the fail-closed contract for the GitLab
 // forge provider: a missing token_env, and an obviously-invalid kb_repo, both
 // abort Validate rather than let `serve` come up with curation silently
@@ -791,5 +792,46 @@ func TestValidateForgeProviderGitLab(t *testing.T) {
 	def := &Config{}
 	if err := def.Validate(); err != nil {
 		t.Fatalf("an empty forge.provider must validate clean (defaults to github), got: %v", err)
+	}
+}
+// TestLogsIndexValidate: logs.index is interpolated into the Elasticsearch
+// request PATH. The client escapes it so a malformed value can no longer change
+// the request's SHAPE, but escaping alone turns a typo into a puzzling 4xx from
+// the cluster mid-investigation instead of a startup failure naming the config
+// key — the "fails closed and loudly" contract every other key here honours.
+func TestLogsIndexValidate(t *testing.T) {
+	for _, ok := range []string{
+		"",                        // unset ⇒ the logs-* default
+		"logs-*",                  // the shipped default, spelled out
+		"logs-app-*,logs-infra-*", // multi-index list
+		"filebeat-8.11.3-2026.08.02",
+		"remote_cluster:logs-*", // cross-cluster search
+		".ds-logs-generic-default",
+	} {
+		c := &Config{}
+		c.Logs.Index = ok
+		if err := c.Validate(); err != nil {
+			t.Fatalf("logs.index %q must validate, got %v", ok, err)
+		}
+	}
+	for _, bad := range []struct{ index, want string }{
+		{"a/b", "forbid"},             // used to add a path segment
+		{"logs-*?pretty", "forbid"},   // used to land in the query string
+		{"logs *", "forbid"},          // whitespace
+		{"logs-#1", "forbid"},         // fragment
+		{"logs-app-*,", "empty"},      // trailing comma in the list
+		{"logs-app-*,,x", "empty"},    // doubled comma
+		{"-logs-*", "must not start"}, // ES exclusion syntax; matches nothing
+		{"_logs", "must not start"},   // ES-reserved
+		{"Logs-*", "must be lowercase"}} {
+		c := &Config{}
+		c.Logs.Index = bad.index
+		err := c.Validate()
+		if err == nil {
+			t.Fatalf("logs.index %q must be rejected at startup", bad.index)
+		}
+		if !strings.Contains(err.Error(), "logs.index") || !strings.Contains(err.Error(), bad.want) {
+			t.Fatalf("logs.index %q: error must name the key and the reason %q, got %v", bad.index, bad.want, err)
+		}
 	}
 }

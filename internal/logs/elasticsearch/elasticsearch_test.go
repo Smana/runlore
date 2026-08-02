@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -504,5 +505,505 @@ func TestWithLevelFieldAndTimestampField(t *testing.T) {
 	sort, _ := gotBody["sort"].([]any)
 	if _, ok := sort[0].(map[string]any)["event.created"]; !ok {
 		t.Fatalf("custom timestamp field not used for sort: %+v", sort)
+	}
+}
+
+// TestLevelFieldOverrideReachesTheWire pins WithLevelField on the request body
+// of the ONE request that actually emits a level field. Query does not (it only
+// sorts and range-filters on the timestamp), so asserting the override there —
+// as this file used to — proves nothing: deleting `.WithLevelField(...)` from
+// internal/app/investigate.go's Elasticsearch branch kept the whole suite green.
+// Hits' `by_level` terms aggregation is where the config key has to land.
+func TestLevelFieldOverrideReachesTheWire(t *testing.T) {
+	var gotBody map[string]any
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewDecoder(r.Body).Decode(&gotBody)
+		_, _ = io.WriteString(w, `{"aggregations":{"by_time":{"buckets":[]}}}`)
+	}))
+	defer srv.Close()
+
+	c := New(srv.URL, "logs-*").WithLevelField("severity").WithTimestampField("event.created")
+	if _, err := c.Hits(context.Background(), "*", providers.TimeWindow{}, time.Minute); err != nil {
+		t.Fatalf("Hits: %v", err)
+	}
+	aggs, _ := gotBody["aggs"].(map[string]any)
+	byTime, _ := aggs["by_time"].(map[string]any)
+	dh, _ := byTime["date_histogram"].(map[string]any)
+	if dh["field"] != "event.created" {
+		t.Fatalf("timestamp override missing from date_histogram: %+v", dh)
+	}
+	sub, _ := byTime["aggs"].(map[string]any)
+	byLevel, _ := sub["by_level"].(map[string]any)
+	terms, _ := byLevel["terms"].(map[string]any)
+	if terms["field"] != "severity" {
+		t.Fatalf("level override did not reach by_level.terms.field: got %v, want \"severity\"", terms["field"])
+	}
+}
+
+// TestMessageFieldOverrideReachesTheWire: WithMessageField had no test at all.
+// It is what lets an operator point at an aggregatable multi-field
+// (`message.keyword`) and skip the client-side fallback entirely, so losing the
+// wiring would silently downgrade every logs_error_summary to sample-scoped
+// counts with nothing failing.
+func TestMessageFieldOverrideReachesTheWire(t *testing.T) {
+	var gotBody map[string]any
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewDecoder(r.Body).Decode(&gotBody)
+		_, _ = io.WriteString(w, `{"aggregations":{"top_messages":{"buckets":[]}}}`)
+	}))
+	defer srv.Close()
+
+	c := New(srv.URL, "logs-*").WithMessageField("log.message")
+	if _, err := c.TopMessages(context.Background(), "*", providers.TimeWindow{}, 10); err != nil {
+		t.Fatalf("TopMessages: %v", err)
+	}
+	aggs, _ := gotBody["aggs"].(map[string]any)
+	tm, _ := aggs["top_messages"].(map[string]any)
+	terms, _ := tm["terms"].(map[string]any)
+	if terms["field"] != "log.message" {
+		t.Fatalf("message override did not reach top_messages.terms.field: got %v, want \"log.message\"", terms["field"])
+	}
+}
+
+// TestMessageFieldOverrideDrivesTheFallbackSource: the message-field override
+// must also decide which key the CLIENT-SIDE fallback reads out of `_source`.
+// A wired aggregation with an unwired fallback would return k empty messages.
+func TestMessageFieldOverrideDrivesTheFallbackSource(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var body map[string]any
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		if aggs, ok := body["aggs"].(map[string]any); ok {
+			if _, ok := aggs["top_messages"]; ok {
+				w.WriteHeader(http.StatusBadRequest)
+				_, _ = io.WriteString(w, esTextFieldRejection)
+				return
+			}
+		}
+		_, _ = io.WriteString(w, `{"hits":{"total":{"value":1},"hits":[
+		  {"_source":{"@timestamp":"2026-08-02T10:00:03.000Z","log":{"message":"connection refused"}}}
+		]}}`)
+	}))
+	defer srv.Close()
+
+	msgs, err := New(srv.URL, "logs-*").WithMessageField("log.message").
+		TopMessages(context.Background(), "*", providers.TimeWindow{}, 10)
+	if err != nil {
+		t.Fatalf("TopMessages: %v", err)
+	}
+	if len(msgs) != 1 || msgs[0].Message != "connection refused" {
+		t.Fatalf("fallback did not read the overridden message field: %+v", msgs)
+	}
+}
+
+// esTextFieldRejection / osTextFieldRejection are the two distributions' REAL
+// wording for the text-field aggregation rejection, captured verbatim from
+// Elasticsearch 8.15.0 and OpenSearch 2.17.0 during the live verification run
+// (see live_verify_test.go). They are NOT the same string: the
+// "Fielddata is disabled on [x] in [y]." sentence is Elasticsearch-only. Both
+// fixtures exist so a future "simplification" of isTextFieldAggError to a single
+// literal substring fails here rather than in production on OpenSearch.
+const esTextFieldRejection = `{
+  "error": {
+    "type": "search_phase_execution_exception",
+    "reason": "all shards failed",
+    "caused_by": {
+      "type": "illegal_argument_exception",
+      "reason": "Fielddata is disabled on [message] in [logs-demo]. Text fields are not optimised for operations that require per-document field data like aggregations and sorting, so these operations are disabled by default. Please use a keyword field instead. Alternatively, set fielddata=true on [message] in order to load field data by uninverting the inverted index. Note that this can use significant memory."
+    }
+  },
+  "status": 400
+}`
+
+const osTextFieldRejection = `{
+  "error": {
+    "type": "search_phase_execution_exception",
+    "reason": "all shards failed",
+    "caused_by": {
+      "type": "illegal_argument_exception",
+      "reason": "Text fields are not optimised for operations that require per-document field data like aggregations and sorting, so these operations are disabled by default. Please use a keyword field instead. Alternatively, set fielddata=true on [message] in order to load field data by uninverting the inverted index. Note that this can use significant memory."
+    }
+  },
+  "status": 400
+}`
+
+// TestIsTextFieldAggErrorBothDistributions: the fallback's ONLY trigger, pinned
+// against both real wordings plus the negatives it must not swallow.
+func TestIsTextFieldAggErrorBothDistributions(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		status int
+		body   string
+		want   bool
+	}{
+		{"elasticsearch 8.15 wording", 400, esTextFieldRejection, true},
+		{"opensearch 2.17 wording (no `Fielddata is disabled` prefix)", 400, osTextFieldRejection, true},
+		{"a different 400 must propagate", 400, `{"error":{"type":"parse_exception","reason":"bad query"}}`, false},
+		{"the same wording on a non-400 is not this case", 500, esTextFieldRejection, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := isTextFieldAggError(tc.status, []byte(tc.body)); got != tc.want {
+				t.Fatalf("isTextFieldAggError = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+// TestTopMessagesLatchesTheDoomedAggregation: ECS `message` is text-only by
+// DEFAULT, so the server-side aggregation is not an optimistic edge case — it is
+// the path every single logs_error_summary takes, and every one of those wrote a
+// guaranteed-400 into the cluster's error log before falling back. The rejection
+// is a property of the index mapping, so it is learned once and latched; the
+// second call must go straight to the fallback.
+func TestTopMessagesLatchesTheDoomedAggregation(t *testing.T) {
+	var aggAttempts, plainSearches int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var body map[string]any
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		if aggs, ok := body["aggs"].(map[string]any); ok {
+			if _, ok := aggs["top_messages"]; ok {
+				aggAttempts++
+				w.WriteHeader(http.StatusBadRequest)
+				_, _ = io.WriteString(w, osTextFieldRejection)
+				return
+			}
+		}
+		plainSearches++
+		_, _ = io.WriteString(w, `{"hits":{"total":{"value":1},"hits":[
+		  {"_source":{"@timestamp":"2026-08-02T10:00:03.000Z","message":"connection refused"}}
+		]}}`)
+	}))
+	defer srv.Close()
+
+	c := New(srv.URL, "logs-*")
+	for i := 1; i <= 3; i++ {
+		msgs, err := c.TopMessages(context.Background(), "*", providers.TimeWindow{}, 10)
+		if err != nil {
+			t.Fatalf("call %d: %v", i, err)
+		}
+		if len(msgs) != 1 {
+			t.Fatalf("call %d returned %d messages, want 1", i, len(msgs))
+		}
+	}
+	if aggAttempts != 1 {
+		t.Fatalf("the doomed aggregation must be attempted ONCE, not once per call: got %d attempts", aggAttempts)
+	}
+	if plainSearches != 3 {
+		t.Fatalf("every call must still return results via the fallback: got %d fallback searches, want 3", plainSearches)
+	}
+}
+
+// TestTopMessagesLatchIsConcurrencySafe: the investigation loop runs tools in
+// parallel against ONE Client, so the latch has to be race-free (it is an
+// atomic, not a bare bool). Meaningful under `go test -race`.
+func TestTopMessagesLatchIsConcurrencySafe(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var body map[string]any
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		if aggs, ok := body["aggs"].(map[string]any); ok {
+			if _, ok := aggs["top_messages"]; ok {
+				w.WriteHeader(http.StatusBadRequest)
+				_, _ = io.WriteString(w, esTextFieldRejection)
+				return
+			}
+		}
+		_, _ = io.WriteString(w, `{"hits":{"total":{"value":1},"hits":[
+		  {"_source":{"@timestamp":"2026-08-02T10:00:03.000Z","message":"connection refused"}}
+		]}}`)
+	}))
+	defer srv.Close()
+
+	c := New(srv.URL, "logs-*")
+	var wg sync.WaitGroup
+	errs := make(chan error, 8)
+	for i := 0; i < 8; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			if _, err := c.TopMessages(context.Background(), "*", providers.TimeWindow{}, 10); err != nil {
+				errs <- err
+			}
+		}()
+	}
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		t.Fatalf("concurrent TopMessages: %v", err)
+	}
+}
+
+// shardFailureResponse is a HTTP 200 that is only PARTIALLY complete: over a
+// rolling `logs-*` pattern whose index template gained `message.keyword`
+// partway through, the terms aggregation succeeds on the newer indices and is
+// rejected on the older ones. Elasticsearch does NOT fail the search — it
+// returns 200, `_shards.failed > 0`, and whatever the surviving shards produced.
+const shardFailureResponse = `{
+  "took": 7, "timed_out": false,
+  "_shards": {
+    "total": 4, "successful": 2, "skipped": 0, "failed": 2,
+    "failures": [
+      {"shard": 0, "index": "logs-2026.06.01", "node": "n1",
+       "reason": {"type": "illegal_argument_exception",
+                  "reason": "Fielddata is disabled on [message] in [logs-2026.06.01]. Text fields are not optimised for operations that require per-document field data. Alternatively, set fielddata=true on [message]."}}
+    ]
+  },
+  "hits": {"total": {"value": 400, "relation": "eq"}, "hits": []},
+  "aggregations": {
+    "top_messages": {
+      "buckets": [
+        {"key": "only the NEW indices saw this", "doc_count": 9,
+         "first_seen": {"value": 1785664800000, "value_as_string": "2026-08-02T10:00:00.000Z"},
+         "last_seen":  {"value": 1785665100000, "value_as_string": "2026-08-02T10:05:00.000Z"}}
+      ]
+    }
+  }
+}`
+
+// TestTopMessagesPartialAggregationFallsBack: a partially-failing aggregation
+// parses perfectly and would be reported to the model as the definitive top
+// messages while covering only part of the window. It must not pass silently —
+// the client-side fallback (a plain _search over a text field, which is not what
+// the shards choked on) gets a complete answer instead.
+func TestTopMessagesPartialAggregationFallsBack(t *testing.T) {
+	var aggAttempts, plainSearches int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var body map[string]any
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		if aggs, ok := body["aggs"].(map[string]any); ok {
+			if _, ok := aggs["top_messages"]; ok {
+				aggAttempts++
+				// HTTP 200 — the whole point of this finding.
+				_, _ = io.WriteString(w, shardFailureResponse)
+				return
+			}
+		}
+		plainSearches++
+		_, _ = io.WriteString(w, `{"hits":{"total":{"value":2},"hits":[
+		  {"_source":{"@timestamp":"2026-08-02T10:00:03.000Z","message":"connection refused to 10.0.0.7"}},
+		  {"_source":{"@timestamp":"2026-08-02T10:00:02.000Z","message":"connection refused to 10.0.0.9"}}
+		]}}`)
+	}))
+	defer srv.Close()
+
+	msgs, err := New(srv.URL, "logs-*").TopMessages(context.Background(), "*", providers.TimeWindow{}, 10)
+	if err != nil {
+		t.Fatalf("TopMessages: %v", err)
+	}
+	if aggAttempts != 1 || plainSearches != 1 {
+		t.Fatalf("want one aggregation attempt then one fallback search, got agg=%d plain=%d", aggAttempts, plainSearches)
+	}
+	if len(msgs) != 1 || msgs[0].Count != 2 {
+		t.Fatalf("expected the COMPLETE client-side answer, got %+v", msgs)
+	}
+	if strings.Contains(msgs[0].Message, "only the NEW indices") {
+		t.Fatalf("silently-partial aggregation buckets were reported as complete: %+v", msgs)
+	}
+}
+
+// TestTopMessagesPartialFailureIsNotLatched: unlike the mapping rejection, a
+// shard failure can be transient (a node briefly out). Permanently downgrading a
+// working corpus-wide aggregation over one blip would be the wrong trade, so the
+// next call must try server-side again.
+func TestTopMessagesPartialFailureIsNotLatched(t *testing.T) {
+	var aggAttempts int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var body map[string]any
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		if aggs, ok := body["aggs"].(map[string]any); ok {
+			if _, ok := aggs["top_messages"]; ok {
+				aggAttempts++
+				if aggAttempts == 1 {
+					_, _ = io.WriteString(w, shardFailureResponse)
+					return
+				}
+				_, _ = io.WriteString(w, `{
+				  "_shards": {"total": 4, "successful": 4, "failed": 0},
+				  "aggregations": {"top_messages": {"buckets": [
+				    {"key": "recovered", "doc_count": 42,
+				     "first_seen": {"value": 1785664800000, "value_as_string": "2026-08-02T10:00:00.000Z"},
+				     "last_seen":  {"value": 1785665100000, "value_as_string": "2026-08-02T10:05:00.000Z"}}
+				  ]}}
+				}`)
+				return
+			}
+		}
+		_, _ = io.WriteString(w, `{"hits":{"total":{"value":1},"hits":[
+		  {"_source":{"@timestamp":"2026-08-02T10:00:03.000Z","message":"fallback line"}}
+		]}}`)
+	}))
+	defer srv.Close()
+
+	c := New(srv.URL, "logs-*")
+	if _, err := c.TopMessages(context.Background(), "*", providers.TimeWindow{}, 10); err != nil {
+		t.Fatalf("first TopMessages: %v", err)
+	}
+	msgs, err := c.TopMessages(context.Background(), "*", providers.TimeWindow{}, 10)
+	if err != nil {
+		t.Fatalf("second TopMessages: %v", err)
+	}
+	if aggAttempts != 2 {
+		t.Fatalf("a transient shard failure must not latch: got %d aggregation attempts, want 2", aggAttempts)
+	}
+	if len(msgs) != 1 || msgs[0].Message != "recovered" {
+		t.Fatalf("the recovered server-side aggregation should be used: %+v", msgs)
+	}
+}
+
+// TestHitsPartialAggregationErrors: []providers.Bucket has no channel for an
+// in-band notice, and a silently-short histogram understates the very spike
+// logs_error_summary exists to find — so a partial result fails loudly. The
+// caller (internal/investigate/logs_summary_tool.go) degrades gracefully.
+func TestHitsPartialAggregationErrors(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = io.WriteString(w, `{
+		  "_shards": {"total": 4, "successful": 2, "skipped": 0, "failed": 2},
+		  "aggregations": {"by_time": {"buckets": [
+		    {"key": 1785664800000, "doc_count": 5, "by_level": {"buckets": [{"key": "error", "doc_count": 3}]}}
+		  ]}}
+		}`)
+	}))
+	defer srv.Close()
+	_, err := New(srv.URL, "logs-*").Hits(context.Background(), "*", providers.TimeWindow{}, time.Minute)
+	if err == nil {
+		t.Fatal("a 200 with failed shards must not be reported as a complete histogram")
+	}
+	if !strings.Contains(err.Error(), "2 of 4 shards failed") {
+		t.Fatalf("error must name the partiality, got %v", err)
+	}
+}
+
+// TestQueryPartialResultsAreFlagged: Query keeps the hits (they are real
+// evidence) but appends a Time-less/Fields-less sentinel, the same mechanism the
+// truncation cap uses, so the model is told the view is incomplete.
+func TestQueryPartialResultsAreFlagged(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = io.WriteString(w, `{
+		  "_shards": {"total": 4, "successful": 3, "skipped": 0, "failed": 1,
+		    "failures": [{"shard": 0, "index": "logs-2026.06.01",
+		      "reason": {"type": "query_shard_exception", "reason": "no mapping found"}}]},
+		  "hits": {"total": {"value": 1}, "hits": [
+		    {"_source": {"@timestamp": "2026-08-02T10:00:01.000Z", "message": "connection refused"}}
+		  ]}
+		}`)
+	}))
+	defer srv.Close()
+	res, err := New(srv.URL, "logs-*").Query(context.Background(), "*", providers.TimeWindow{})
+	if err != nil {
+		t.Fatalf("Query: %v", err)
+	}
+	if len(res) != 2 {
+		t.Fatalf("want the hit plus a partiality sentinel, got %d: %+v", len(res), res)
+	}
+	last := res[len(res)-1]
+	if !strings.Contains(last.Message, "partial results") || !strings.Contains(last.Message, "1 of 4 shards failed") {
+		t.Fatalf("partiality sentinel missing or unhelpful: %q", last.Message)
+	}
+	if !last.Time.IsZero() || len(last.Fields) != 0 {
+		t.Fatalf("the sentinel must not look like a real log entry: %+v", last)
+	}
+}
+
+// TestQueryEpochMillisTimestamp: a `date` field may be MAPPED as epoch_millis,
+// in which case `_source` carries a JSON NUMBER. Before this was handled,
+// encoding/json's float64 plus fmt.Sprint produced "1.7856648e+12", time.Parse
+// failed, and EVERY LogLine.Time came back zero — no error anywhere, but the
+// timeline render and the fallback's first→last spans all silently collapsed.
+func TestQueryEpochMillisTimestamp(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = io.WriteString(w, `{"hits":{"total":{"value":1},"hits":[
+		  {"_source":{"@timestamp":1785664801000,"message":"connection refused","event":{"duration":123456789}}}
+		]}}`)
+	}))
+	defer srv.Close()
+	res, err := New(srv.URL, "logs-*").Query(context.Background(), "*", providers.TimeWindow{})
+	if err != nil {
+		t.Fatalf("Query: %v", err)
+	}
+	if len(res) != 1 {
+		t.Fatalf("want 1 line, got %d", len(res))
+	}
+	if got := res[0].Time.UTC().Format(time.RFC3339); got != "2026-08-02T10:00:01Z" {
+		t.Fatalf("epoch-millis timestamp not parsed: Time=%v (%q)", res[0].Time, got)
+	}
+	// Large JSON numbers must not reach the model in scientific notation.
+	if got := res[0].Fields["event.duration"]; got != "123456789" {
+		t.Fatalf("numeric field rendered as %q, want %q", got, "123456789")
+	}
+	if got := res[0].Fields["@timestamp"]; got != "1785664801000" {
+		t.Fatalf("epoch-millis field rendered as %q", got)
+	}
+}
+
+// TestFlattenJSONNumbers pins the number rendering directly, including the
+// fractional case that must NOT be turned into an integer.
+func TestFlattenJSONNumbers(t *testing.T) {
+	var doc map[string]any
+	if err := json.Unmarshal([]byte(`{
+	  "event": {"duration": 123456789, "ratio": 0.5},
+	  "http": {"response": {"status_code": 503, "bytes": 1785664801000}},
+	  "ok": true, "nothing": null
+	}`), &doc); err != nil {
+		t.Fatalf("fixture: %v", err)
+	}
+	flat := map[string]string{}
+	flattenJSON("", doc, flat)
+	for k, want := range map[string]string{
+		"event.duration":            "123456789",
+		"event.ratio":               "0.5",
+		"http.response.status_code": "503",
+		"http.response.bytes":       "1785664801000",
+		"ok":                        "true",
+	} {
+		if got := flat[k]; got != want {
+			t.Errorf("flat[%q] = %q, want %q", k, got, want)
+		}
+	}
+	if _, ok := flat["nothing"]; ok {
+		t.Errorf("explicit JSON null must be skipped, got %q", flat["nothing"])
+	}
+}
+
+// TestIndexPathIsEscaped: the index pattern is operator-controlled config
+// pasted into a URL path. Unescaped, `a/b` added a path SEGMENT (targeting a
+// different endpoint entirely) and `logs-*?pretty` moved everything after the
+// `?` into the query string. `*` and `,` must survive unescaped — they are
+// legal path-segment sub-delims and load-bearing to Elasticsearch (index
+// wildcard, multi-index list).
+func TestIndexPathIsEscaped(t *testing.T) {
+	for _, tc := range []struct {
+		index    string
+		wantPath string
+		wantRaw  string
+	}{
+		{"logs-*", "/logs-*/_search", ""},
+		{"logs-app-*,logs-infra-*", "/logs-app-*,logs-infra-*/_search", ""},
+		{"a/b", "/a%2Fb/_search", ""},
+		{"logs-*?pretty", "/logs-*%3Fpretty/_search", ""},
+	} {
+		t.Run(tc.index, func(t *testing.T) {
+			// Assert on the RAW request line, not r.URL.Path: net/http's server
+			// percent-decodes Path before a handler sees it, which would hide the
+			// very escaping under test (a%2Fb reads back as a/b there).
+			var gotURI, gotRawQuery string
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				gotURI = r.RequestURI
+				gotRawQuery = r.URL.RawQuery
+				_, _ = io.WriteString(w, `{"hits":{"total":{"value":0},"hits":[]}}`)
+			}))
+			defer srv.Close()
+			if _, err := New(srv.URL, tc.index).Query(context.Background(), "*", providers.TimeWindow{}); err != nil {
+				t.Fatalf("Query: %v", err)
+			}
+			if gotURI != tc.wantPath {
+				t.Fatalf("request URI = %q, want %q", gotURI, tc.wantPath)
+			}
+			if gotRawQuery != tc.wantRaw {
+				t.Fatalf("index leaked into the query string: RawQuery=%q", gotRawQuery)
+			}
+			// Exactly one index segment before /_search — nothing the operator
+			// wrote can add another.
+			if strings.Count(strings.Trim(gotURI, "/"), "/") != 1 {
+				t.Fatalf("request URI has extra path segments: %q", gotURI)
+			}
+		})
 	}
 }

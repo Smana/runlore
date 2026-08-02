@@ -609,3 +609,79 @@ func TestLogToolDescriptionsDialect(t *testing.T) {
 		}
 	}
 }
+
+// TestBuildElasticQueryEscaping pins query-INJECTION safety, not formatting.
+// buildElasticQuery interpolates with `%q`, whose Go escaping coincides exactly
+// with Lucene's quoted-phrase escaping (`"` → `\"`, `\` → `\\`) — nothing here
+// asserted that, so a cosmetic refactor to `%s` with hand-written quotes would
+// have passed the whole suite while letting an attacker-chosen namespace or pod
+// name break out of the phrase and widen the query across every tenant's logs
+// in a multi-tenant cluster.
+func TestBuildElasticQueryEscaping(t *testing.T) {
+	elastic := LogFields{Dialect: DialectElastic}
+	for _, tc := range []struct {
+		name, container, namespace, want string
+	}{
+		{
+			name:      "quote-and-clause breakout attempt",
+			namespace: `api" OR *:* OR "`,
+			want:      `kubernetes.namespace:"api\" OR *:* OR \""`,
+		},
+		{
+			name:      "trailing backslash cannot escape the closing quote",
+			namespace: `api\`,
+			want:      `kubernetes.namespace:"api\\"`,
+		},
+		{
+			name:      "backslash-quote cannot smuggle a real quote through",
+			namespace: `api\"`,
+			want:      `kubernetes.namespace:"api\\\""`,
+		},
+		{
+			name:      "wildcard and boolean operators stay literal inside the phrase",
+			namespace: `api* AND kubernetes.namespace:kube-system`,
+			want:      `kubernetes.namespace:"api* AND kubernetes.namespace:kube-system"`,
+		},
+		{
+			name:      "the container field is interpolated the same way",
+			container: `web" OR *:*`,
+			want:      `kubernetes.container.name:"web\" OR *:*"`,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := buildLogsQLWith("", tc.container, tc.namespace, "", elastic)
+			if err != nil {
+				t.Fatalf("buildLogsQLWith: %v", err)
+			}
+			if got != tc.want {
+				t.Fatalf("got  %s\nwant %s", got, tc.want)
+			}
+			// Independently of the exact bytes: the value must not be able to
+			// terminate its phrase early, which is the property that actually
+			// prevents injection.
+			if !valueStaysInsideOnePhrase(got) {
+				t.Fatalf("value escaped its quoted phrase: %s", got)
+			}
+		})
+	}
+}
+
+// valueStaysInsideOnePhrase walks a single `field:"value"` clause under LUCENE's
+// escaping rules (a backslash escapes the next character inside a phrase) and
+// reports whether the closing quote is the last byte — i.e. whether the
+// interpolated value could inject trailing clauses.
+func valueStaysInsideOnePhrase(clause string) bool {
+	open := strings.Index(clause, `"`)
+	if open < 0 {
+		return false
+	}
+	for i := open + 1; i < len(clause); i++ {
+		switch clause[i] {
+		case '\\':
+			i++ // the escaped character is literal, whatever it is
+		case '"':
+			return i == len(clause)-1
+		}
+	}
+	return false
+}

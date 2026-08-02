@@ -21,7 +21,9 @@ import (
 	"os"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/Smana/runlore/internal/httpx"
@@ -42,6 +44,18 @@ type Client struct {
 	timestampField string            // field the range filter/sort/date_histogram use; "" ⇒ defaultTimestampField
 	messageField   string            // field TopMessages aggregates over; "" ⇒ defaultMessageField
 	http           *http.Client
+
+	// msgFieldNotAggregatable is a sticky, one-shot latch: once the backend has
+	// told us messageField cannot be aggregated server-side, TopMessages stops
+	// re-asking. Without it the DEFAULT configuration (ECS `message` is
+	// text-only, no keyword sub-field) burns a guaranteed-failing round trip on
+	// EVERY logs_error_summary call — and each one also lands in the cluster's
+	// own error log, which looks like a RunLore bug to whoever reads it.
+	// Whether the field is aggregatable is a property of the index MAPPING, so
+	// the answer cannot change under a running process without an operator
+	// reindexing and restarting; latching it is safe. atomic (not a bare bool)
+	// because the investigation loop runs tools concurrently against one Client.
+	msgFieldNotAggregatable atomic.Bool
 }
 
 // defaultIndex is the ECS/Filebeat convention index pattern, used when
@@ -149,7 +163,24 @@ func (c *Client) Query(ctx context.Context, query string, w providers.TimeWindow
 	if len(resp.Hits.Hits) >= c.maxLines {
 		out = append(out, providers.TruncationLine(int64(c.maxLines)))
 	}
+	// A 200 with failed shards is a PARTIAL view (see shardFailure). Say so in
+	// band rather than dropping the lines: the same reasoning as the truncation
+	// sentinel — the model must know the view is incomplete, and a returned
+	// error here would throw away hits that are perfectly good evidence.
+	if partial, reason := shardFailure(respBody); partial {
+		out = append(out, partialLine(reason))
+	}
 	return out, nil
+}
+
+// partialLine is the shard-failure sibling of providers.TruncationLine: a
+// Time-less, Fields-less sentinel so it can never be mistaken for a real log
+// entry (and so the client-side aggregation in topMessagesClientSide skips it
+// by the same test it already uses for the truncation sentinel).
+func partialLine(reason string) providers.LogLine {
+	return providers.LogLine{
+		Message: fmt.Sprintf("… partial results: %s — some indices in the pattern could not be searched; this view is incomplete", reason),
+	}
 }
 
 // sourceToLine flattens one hit's ECS-nested `_source` document into a
@@ -160,14 +191,39 @@ func (c *Client) sourceToLine(source map[string]any) providers.LogLine {
 	flat := map[string]string{}
 	flattenJSON("", source, flat)
 	ll := providers.LogLine{Message: flat[c.messageField], Fields: flat}
-	if ts := flat[c.timestampField]; ts != "" {
-		if t, err := time.Parse(time.RFC3339, ts); err == nil {
-			ll.Time = t
-		} else if t, err := time.Parse("2006-01-02T15:04:05.999Z07:00", ts); err == nil {
-			ll.Time = t
-		}
+	if t, ok := parseESTime(flat[c.timestampField]); ok {
+		ll.Time = t
 	}
 	return ll
+}
+
+// parseESTime decodes the two on-the-wire shapes an Elasticsearch/OpenSearch
+// `date` field can reach us in.
+//
+//  1. RFC 3339 / ISO-8601 ("2026-08-02T10:00:01.000Z") — the default
+//     strict_date_optional_time rendering, and by far the common case. Go's
+//     time.Parse accepts the fractional second against the plain RFC3339 layout,
+//     so no second layout is needed (an earlier ".999Z07:00" fallback here was
+//     dead code).
+//  2. Bare epoch MILLISECONDS ("1785664800000"). A `date` mapping may be
+//     declared `"format": "epoch_millis"`, in which case `_source` carries a JSON
+//     NUMBER, not a string. That is legal ES, and before this was handled every
+//     LogLine.Time silently came back zero: no error anywhere, but the timeline
+//     render and the client-side fallback's first→last spans all collapsed.
+//     epoch_millis is the only numeric date format ES applies by default;
+//     epoch_second needs an explicit mapping and is deliberately not guessed at,
+//     since the two are indistinguishable from the value alone.
+func parseESTime(ts string) (time.Time, bool) {
+	if ts == "" {
+		return time.Time{}, false
+	}
+	if t, err := time.Parse(time.RFC3339, ts); err == nil {
+		return t, true
+	}
+	if ms, err := strconv.ParseInt(ts, 10, 64); err == nil {
+		return time.UnixMilli(ms).UTC(), true
+	}
+	return time.Time{}, false
 }
 
 // flattenJSON walks a decoded JSON value and writes leaf scalars into out,
@@ -190,6 +246,14 @@ func flattenJSON(prefix string, v any, out map[string]string) {
 		// skip
 	case string:
 		out[prefix] = t
+	case float64:
+		// encoding/json decodes EVERY JSON number into float64, and fmt.Sprint on
+		// a float64 switches to scientific notation past ~7 significant digits —
+		// so `event.duration: 123456789` would reach the model as "1.23456789e+08"
+		// and an epoch-millis `@timestamp` as "1.7856648e+12", which parseESTime
+		// could never decode. 'f' with precision -1 prints the shortest form that
+		// round-trips, keeping integral values integral.
+		out[prefix] = strconv.FormatFloat(t, 'f', -1, 64)
 	default:
 		out[prefix] = fmt.Sprint(t)
 	}
@@ -197,8 +261,11 @@ func flattenJSON(prefix string, v any, out map[string]string) {
 
 // searchBody builds the shared `_search` request body: a query_string query
 // (or match_all when query is empty) plus an optional range filter on
-// timestampField for the window bounds. size <= 0 omits the size key (used by
-// Hits/TopMessages, which want size:0 — hits only from aggregations). sortDesc
+// timestampField for the window bounds. A size >= 0 is sent verbatim, INCLUDING
+// size:0 — that is the value Hits/TopMessages pass to say "aggregation buckets
+// only, return no hits", and omitting the key there would make ES fall back to
+// its default of 10 hits per aggregation request. Only a negative size omits the
+// key (no caller does today). sortDesc
 // adds the newest-first sort Query needs; Hits/TopMessages don't (they read
 // only aggregations, so sorting individual hits is pointless cost).
 func (c *Client) searchBody(query string, w providers.TimeWindow, size int, sortDesc bool) map[string]any {
@@ -238,6 +305,64 @@ func (c *Client) rangeFilter(w providers.TimeWindow) map[string]any {
 	return map[string]any{"range": map[string]any{c.timestampField: r}}
 }
 
+// indexPath renders the configured index pattern as ONE percent-escaped URL
+// path segment. Pasting it in raw let an operator's config silently change the
+// request's SHAPE rather than its target: `index: "a/b"` added a path segment
+// (hitting a different endpoint entirely), and `index: "logs-*?pretty"` moved
+// everything after the `?` into the query string. Escaping is the fix, but two
+// characters are restored afterwards because they are both legal unescaped in a
+// path segment (RFC 3986 sub-delims) and load-bearing to Elasticsearch: `*` is
+// the index wildcard `logs-*` itself, and `,` is its multi-index list separator
+// (`logs-app-*,logs-infra-*`). Escaping THOSE would depend on the server
+// percent-decoding the path to keep working; escaping `/`, `?`, `#`, and
+// whitespace — the actual injections — does not.
+func (c *Client) indexPath() string {
+	esc := url.PathEscape(c.index)
+	esc = strings.ReplaceAll(esc, "%2A", "*")
+	esc = strings.ReplaceAll(esc, "%2C", ",")
+	return esc
+}
+
+// shardFailure reports whether a HTTP 200 `_search` response is only PARTIALLY
+// complete, and a short reason if so.
+//
+// Elasticsearch does not fail a search that some shards could not serve: it
+// returns 200 with `_shards.failed > 0` and whatever the surviving shards
+// produced. The realistic trigger here is mapping drift across a rolling
+// `logs-*` pattern — the index template gained a `message.keyword` sub-field
+// partway through, so a `terms` aggregation on it succeeds on the newer indices
+// and is rejected on the older ones. The aggregation then comes back looking
+// perfectly well-formed while covering only part of the window, and
+// logs_error_summary would report those counts as complete. Callers must treat
+// a true here as "this answer is not the whole answer".
+func shardFailure(body []byte) (bool, string) {
+	var resp struct {
+		Shards struct {
+			Total      int `json:"total"`
+			Successful int `json:"successful"`
+			Failed     int `json:"failed"`
+			Failures   []struct {
+				Index  string `json:"index"`
+				Reason struct {
+					Type   string `json:"type"`
+					Reason string `json:"reason"`
+				} `json:"reason"`
+			} `json:"failures"`
+		} `json:"_shards"`
+	}
+	// A body that does not parse is not this function's problem — the caller
+	// unmarshals it properly right after and reports the real error.
+	if err := json.Unmarshal(body, &resp); err != nil || resp.Shards.Failed == 0 {
+		return false, ""
+	}
+	reason := fmt.Sprintf("%d of %d shards failed", resp.Shards.Failed, resp.Shards.Total)
+	if len(resp.Shards.Failures) > 0 {
+		f := resp.Shards.Failures[0]
+		reason += fmt.Sprintf(" (%s on %s: %s)", f.Reason.Type, f.Index, f.Reason.Reason)
+	}
+	return true, reason
+}
+
 // search POSTs a `_search` (or `_field_caps` via searchGet) request body and
 // returns the raw response body + HTTP status WITHOUT interpreting the status —
 // TopMessages needs the raw (status, body) pair to distinguish a genuine error
@@ -247,7 +372,7 @@ func (c *Client) search(ctx context.Context, body map[string]any) ([]byte, int, 
 	if err != nil {
 		return nil, 0, fmt.Errorf("encode search body: %w", err)
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.baseURL+"/"+c.index+"/_search", bytes.NewReader(buf))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.baseURL+"/"+c.indexPath()+"/_search", bytes.NewReader(buf))
 	if err != nil {
 		return nil, 0, err
 	}
@@ -304,6 +429,14 @@ func (c *Client) Hits(ctx context.Context, query string, w providers.TimeWindow,
 	if err != nil {
 		return nil, err
 	}
+	// Unlike Query, []Bucket has no channel for an in-band notice, and a
+	// silently-short histogram is worse than no histogram: it understates the
+	// very spike logs_error_summary exists to find. Fail loudly instead — the
+	// caller (internal/investigate/logs_summary_tool.go) degrades gracefully,
+	// still rendering top messages and surfacing this reason.
+	if partial, reason := shardFailure(respBody); partial {
+		return nil, fmt.Errorf("logs histogram is incomplete: %s", reason)
+	}
 	var resp struct {
 		Aggregations struct {
 			ByTime struct {
@@ -333,12 +466,32 @@ func (c *Client) Hits(ctx context.Context, query string, w providers.TimeWindow,
 }
 
 // isTextFieldAggError reports whether an Elasticsearch/OpenSearch error
-// response is the specific "aggregating over a text-only field" rejection —
-// the wording ES emits verbatim (OpenSearch, forked from ES 7.10, kept it) when
-// a terms aggregation targets a field mapped `text` with no keyword sub-field,
-// which is exactly how ECS ships the `message` field by default. Any OTHER 400
-// (a malformed query, a missing index) must NOT match, so a real failure still
-// surfaces as an error instead of being silently swallowed into the fallback.
+// response is the specific "aggregating over a text-only field" rejection a
+// terms aggregation gets when its target field is mapped `text` with no keyword
+// sub-field — exactly how ECS ships `message` by default.
+//
+// DO NOT "simplify" this to a single, more literal substring. The rejection
+// wording is NOT identical across the two distributions; it was captured
+// verbatim from both (see live_verify_test.go):
+//
+//	ES 8.15.0:        "Fielddata is disabled on [message] in [logs-demo]. Text
+//	                   fields are not optimised for operations that require
+//	                   per-document field data … Please use a keyword field
+//	                   instead. Alternatively, set fielddata=true on [message] …"
+//	OpenSearch 2.17.0: "Text fields are not optimised for operations that require
+//	                   per-document field data … Alternatively, set
+//	                   fielddata=true on [message] …"
+//
+// The `Fielddata is disabled on [x] in [y].` sentence is ELASTICSEARCH-ONLY —
+// matching on it would silently break the fallback on OpenSearch, turning every
+// logs_error_summary there into a hard error. What both wordings do share, and
+// all this therefore keys on, is two lowercased tokens: "fielddata" (from
+// `set fielddata=true`) and "text field" (a substring of "Text fields are not
+// optimised"). Both were confirmed present in both distributions' real output.
+//
+// Any OTHER 400 (a malformed query, a missing index) must NOT match, so a real
+// failure still surfaces as an error instead of being silently swallowed into
+// the fallback — TestTopMessagesRealErrorPropagates pins that.
 func isTextFieldAggError(status int, body []byte) bool {
 	if status != http.StatusBadRequest {
 		return false
@@ -362,6 +515,12 @@ func (c *Client) TopMessages(ctx context.Context, query string, w providers.Time
 	if k <= 0 {
 		k = 10
 	}
+	// Sticky: a previous call already learned this field is not aggregatable, so
+	// skip straight to the fallback instead of re-issuing a request we know the
+	// backend will reject (and log as an error on its side).
+	if c.msgFieldNotAggregatable.Load() {
+		return c.topMessagesClientSide(ctx, query, w, k)
+	}
 	body := c.searchBody(query, w, 0, false)
 	body["aggs"] = map[string]any{
 		"top_messages": map[string]any{
@@ -378,9 +537,24 @@ func (c *Client) TopMessages(ctx context.Context, query string, w providers.Time
 	}
 	if status != http.StatusOK {
 		if isTextFieldAggError(status, respBody) {
+			// Latch it: the mapping will not change under this process.
+			c.msgFieldNotAggregatable.Store(true)
 			return c.topMessagesClientSide(ctx, query, w, k)
 		}
 		return nil, fmt.Errorf("logs status %d: %s", status, string(respBody))
+	}
+	// A 200 whose shards partly failed (see shardFailure) — the mapping-drift
+	// case, where only the OLDER indices in the pattern lack the aggregatable
+	// sub-field. The buckets that came back parse perfectly and would be
+	// reported as the definitive top messages while covering only part of the
+	// window. Take the client-side path instead: a plain `_search` over a `text`
+	// field is not what the shards choked on, so the fallback gets a COMPLETE
+	// (if sample-capped) answer. Deliberately NOT latched — unlike the mapping
+	// rejection above, a shard failure can be transient (a node briefly out),
+	// and permanently downgrading a working aggregation over one blip would be
+	// the wrong trade.
+	if partial, _ := shardFailure(respBody); partial {
+		return c.topMessagesClientSide(ctx, query, w, k)
 	}
 	var resp struct {
 		Aggregations struct {
@@ -416,13 +590,8 @@ type aggStat struct {
 }
 
 func (a aggStat) parsed() time.Time {
-	if a.ValueAsString != "" {
-		if t, err := time.Parse(time.RFC3339, a.ValueAsString); err == nil {
-			return t
-		}
-		if t, err := time.Parse("2006-01-02T15:04:05.999Z07:00", a.ValueAsString); err == nil {
-			return t
-		}
+	if t, ok := parseESTime(a.ValueAsString); ok {
+		return t
 	}
 	if a.Value != 0 {
 		return time.UnixMilli(int64(a.Value)).UTC()
@@ -497,7 +666,7 @@ func collapseNums(msg string) string { return reNumToken.ReplaceAllString(msg, "
 // by).
 func (c *Client) FieldNames(ctx context.Context, _ string, _ providers.TimeWindow) ([]providers.FieldCount, error) {
 	v := url.Values{"fields": {"*"}}
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.baseURL+"/"+c.index+"/_field_caps?"+v.Encode(), nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.baseURL+"/"+c.indexPath()+"/_field_caps?"+v.Encode(), nil)
 	if err != nil {
 		return nil, err
 	}

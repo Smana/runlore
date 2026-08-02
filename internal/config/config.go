@@ -1433,6 +1433,36 @@ func (c *Config) Validate() error {
 		return fmt.Errorf("logs.provider must be %q, %q, %q, %q, or empty (auto-detect); got %q",
 			LogsProviderVictoriaLogs, LogsProviderLoki, LogsProviderElasticsearch, LogsProviderOpenSearch, c.Logs.Provider)
 	}
+	// logs.index goes straight into the request PATH
+	// (internal/logs/elasticsearch.Client.indexPath). The client escapes it, so a
+	// malformed value can no longer change the request's shape — but escaping
+	// turns a typo into a puzzling 4xx from Elasticsearch mid-investigation
+	// ("no such index [a%2Fb]") rather than a startup failure naming the config
+	// key. Reject the malformed shapes here instead, loudly and once.
+	if idx := c.Logs.Index; idx != "" {
+		// Elasticsearch itself forbids all of these in an index name; `/` and `?`
+		// additionally used to be the path/query-string injections. `*` (wildcard),
+		// `,` (multi-index list) and `:` (cross-cluster `remote:index`) are all
+		// legal index-EXPRESSION syntax and deliberately allowed.
+		if i := strings.IndexAny(idx, "/\\?\"<>|# \t\n\r"); i >= 0 {
+			return fmt.Errorf("logs.index %q contains %q, which Elasticsearch/OpenSearch forbid in an index name (allowed: lowercase letters, digits, - _ + . and the `*` wildcard; separate multiple patterns with `,`)", idx, string(idx[i]))
+		}
+		// `,` IS legal — it is the multi-index list separator (logs-app-*,logs-infra-*)
+		// — but an empty element in that list is a typo (a trailing or doubled comma).
+		for _, part := range strings.Split(idx, ",") {
+			if part == "" {
+				return fmt.Errorf("logs.index %q has an empty pattern in its comma-separated list", idx)
+			}
+			// ES rejects a name starting with -, _ or +; a leading `-` in particular
+			// is its EXCLUSION syntax and silently matches nothing on its own.
+			if strings.HasPrefix(part, "-") || strings.HasPrefix(part, "_") || strings.HasPrefix(part, "+") {
+				return fmt.Errorf("logs.index pattern %q must not start with -, _ or + (Elasticsearch reserves those; a leading `-` is exclusion syntax)", part)
+			}
+		}
+		if idx != strings.ToLower(idx) {
+			return fmt.Errorf("logs.index %q must be lowercase (Elasticsearch/OpenSearch index names are), got mixed case", idx)
+		}
+	}
 	switch c.Actions.Mode {
 	case "", ActionOff, ActionSuggest:
 		return nil // read-only-ish: nothing to execute

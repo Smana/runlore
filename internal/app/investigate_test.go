@@ -523,3 +523,76 @@ func TestLogsBackendSelection(t *testing.T) {
 		})
 	}
 }
+
+// TestElasticFieldOverridesReachTheWire is the regression guard for the
+// `logs.fields` → Elasticsearch-client wiring in BuildModelAndTools. The client
+// package's own tests prove WithLevelField/WithMessageField/WithTimestampField
+// land in the request body when they are CALLED; only this test proves the app
+// layer still calls them. Before it existed, deleting
+// `.WithLevelField(...).WithMessageField(...)` from the elasticsearch branch of
+// BuildModelAndTools left the entire suite green while every operator override
+// of `logs.fields` silently stopped taking effect against a live cluster.
+//
+// It drives the real logs_error_summary tool end to end, so the assertions are
+// on the bytes an actual Elasticsearch would receive.
+func TestElasticFieldOverridesReachTheWire(t *testing.T) {
+	t.Setenv("KUBECONFIG", filepath.Join(t.TempDir(), "nonexistent-kubeconfig"))
+
+	var bodies []map[string]any
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var body map[string]any
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		bodies = append(bodies, body)
+		_, _ = io.WriteString(w, `{"aggregations":{"by_time":{"buckets":[]},"top_messages":{"buckets":[]}}}`)
+	}))
+	defer srv.Close()
+
+	cfg := &config.Config{Model: config.Model{Provider: "openai", BaseURL: "http://vllm:8000/v1", Model: "test-model"}}
+	cfg.Logs.URL = srv.URL
+	cfg.Logs.Provider = "elasticsearch"
+	cfg.Logs.Fields.LevelField = "severity"
+	cfg.Logs.Fields.MessageField = "log.message"
+	cfg.Logs.Fields.TimestampField = "event.created"
+
+	_, tools, _, _ := BuildModelAndTools(context.Background(), cfg, nil, nil, discardLog())
+	var summary investigate.Tool
+	for _, tool := range tools {
+		if tool.Name() == "logs_error_summary" {
+			summary = tool
+		}
+	}
+	if summary == nil {
+		t.Fatal("logs_error_summary not registered")
+	}
+	if _, err := summary.Call(context.Background(), `{"namespace":"apps","level":"error"}`); err != nil {
+		t.Fatalf("logs_error_summary: %v", err)
+	}
+
+	// Both aggregations go out as separate requests (Hits, then TopMessages);
+	// collect the three field names across whichever body carries each.
+	var gotLevel, gotMessage, gotTimestamp string
+	for _, body := range bodies {
+		aggs, _ := body["aggs"].(map[string]any)
+		if byTime, ok := aggs["by_time"].(map[string]any); ok {
+			dh, _ := byTime["date_histogram"].(map[string]any)
+			gotTimestamp, _ = dh["field"].(string)
+			sub, _ := byTime["aggs"].(map[string]any)
+			byLevel, _ := sub["by_level"].(map[string]any)
+			terms, _ := byLevel["terms"].(map[string]any)
+			gotLevel, _ = terms["field"].(string)
+		}
+		if tm, ok := aggs["top_messages"].(map[string]any); ok {
+			terms, _ := tm["terms"].(map[string]any)
+			gotMessage, _ = terms["field"].(string)
+		}
+	}
+	if gotLevel != "severity" {
+		t.Errorf("logs.fields.level_field did not reach by_level.terms.field: got %q, want %q", gotLevel, "severity")
+	}
+	if gotMessage != "log.message" {
+		t.Errorf("logs.fields.message_field did not reach top_messages.terms.field: got %q, want %q", gotMessage, "log.message")
+	}
+	if gotTimestamp != "event.created" {
+		t.Errorf("logs.fields.timestamp_field did not reach date_histogram.field: got %q, want %q", gotTimestamp, "event.created")
+	}
+}

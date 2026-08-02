@@ -478,6 +478,19 @@ func buildLogQL(raw, container, namespace, level string, conv LogFields) (string
 // `{label="value"}` stream selector, or `unpack_json`/`_msg:`, the model's
 // likely mistakes coming from the other two dialects), mirroring the LogsQL
 // `level=` guard and the LogQL VictoriaLogs-ism guard in spirit.
+//
+// SECURITY — the `%q` verbs below are load-bearing; do NOT "tidy" them into
+// `%s` with hand-written quotes. Container and namespace names reach this
+// function from tool arguments the model chose, which in a multi-tenant cluster
+// can be attacker-influenced (a pod name, a namespace label). Go's %q escaping
+// happens to be EXACTLY Lucene's quoted-phrase escaping: `"` → `\"` and `\` →
+// `\\`, which is the only pair Lucene recognises inside a phrase. So a value
+// like `api" OR *:* OR "` stays one literal phrase instead of becoming three
+// clauses that widen the query across every tenant's logs. Swapping in
+// `%s` with manual quotes silently reopens that — TestBuildElasticQueryEscaping
+// pins the exact payloads. (Control characters are the one cosmetic difference:
+// %q renders them as `\n`/`\x00`, which Lucene reads as the escaped literal
+// character — harmless, and it still cannot terminate the phrase.)
 func buildElasticQuery(raw, container, namespace, level string, conv LogFields) (string, error) {
 	if raw != "" {
 		if strings.Contains(raw, "unpack_json") || strings.Contains(raw, "_msg:") || strings.HasPrefix(strings.TrimSpace(raw), "{") {

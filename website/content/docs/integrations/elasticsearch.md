@@ -74,7 +74,17 @@ kubectl -n runlore logs deploy/runlore | grep -E 'tool=query_logs|tool=logs_erro
   first→last spans are then **per-sample, not corpus-wide**, the same caveat Loki's client-side
   fallback carries. If your index template adds an aggregatable multi-field (commonly
   `message.keyword`), point `logs.fields.message_field` at it to get the corpus-wide, server-side
-  path instead.
+  path instead. RunLore learns the rejection once per process and goes straight to the fallback
+  afterwards, so the default configuration does not repeat a request the cluster will always refuse.
+  (OpenSearch's wording for the same rejection differs slightly — RunLore matches the part both
+  distributions emit, verified against real clusters of each.)
+- **Partial results are flagged, never silently reported as complete.** Elasticsearch answers a
+  search some shards could not serve with HTTP 200 and `_shards.failed > 0` — typically when a
+  rolling `logs-*` pattern spans a mapping change, so a `terms` aggregation succeeds on the newer
+  indices and is rejected on the older ones. `query_logs` appends an explicit "partial results"
+  line, `logs_error_summary`'s top messages switch to the client-side path (which is unaffected),
+  and its histogram reports the partiality as an error rather than showing a chart that understates
+  the spike.
 - **`discover_log_fields` lists the INDEX'S MAPPED fields, not fields present only in matching
   documents.** It uses `_field_caps`, a mapping-introspection endpoint with no query/window scope —
   broader than VictoriaLogs'/Loki's discovery (which is scoped to what a query actually matched), and

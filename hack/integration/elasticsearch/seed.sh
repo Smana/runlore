@@ -107,5 +107,14 @@ curl -sf -X POST "${BASE_URL}/${INDEX}/_refresh" >/dev/null
 
 echo
 echo "seeded ${BASE_URL}/${INDEX} — sanity check:"
-curl -sf -X POST "${BASE_URL}/${INDEX}/_search" -H 'Content-Type: application/json' \
-  -d '{"size":0,"query":{"match_all":{}}}' | grep -o '"value":[0-9]*' | head -1
+# `grep -o … | head -1` was the original here, and under `set -o pipefail` its
+# exit status was a coin flip: head closes the pipe the moment it has its line,
+# grep dies of SIGPIPE (141), pipefail promotes that to the pipeline's status,
+# and since this is the script's LAST command it became the script's status —
+# non-zero on a perfectly successful seed, depending only on whether grep had
+# already finished writing. `grep -m1` gives the same "first match only" with
+# nothing downstream to close the pipe. A missing match means the search itself
+# failed, which SHOULD be fatal, so it is deliberately left un-guarded.
+TOTAL="$(curl -sf -X POST "${BASE_URL}/${INDEX}/_search" -H 'Content-Type: application/json' \
+  -d '{"size":0,"query":{"match_all":{}}}')"
+printf '%s' "${TOTAL}" | grep -o -m1 '"value":[0-9]*'

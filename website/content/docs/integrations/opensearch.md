@@ -64,12 +64,19 @@ kubectl -n runlore logs deploy/runlore | grep -E 'tool=query_logs|tool=logs_erro
 tools:**
 
 - **`logs_error_summary`'s top messages fall back to client-side aggregation when the message field
-  is `text`-only** — the default for ECS's `message` field on OpenSearch too (it rejects the same
-  `terms` aggregation with the same `illegal_argument_exception` wording ES does). Point
-  `logs.fields.message_field` at an aggregatable multi-field (e.g. `message.keyword`) to get the
-  corpus-wide, server-side path instead of the per-sample fallback.
+  is `text`-only** — the default for ECS's `message` field on OpenSearch too: it rejects the same
+  `terms` aggregation with the same `illegal_argument_exception`. The rejection *message* is
+  slightly different (OpenSearch omits the `Fielddata is disabled on [field] in [index].` sentence
+  Elasticsearch opens with); RunLore matches on the part both emit, verified against real clusters
+  of each. Point `logs.fields.message_field` at an aggregatable multi-field (e.g. `message.keyword`)
+  to get the corpus-wide, server-side path instead of the per-sample fallback.
 - **`discover_log_fields` lists the INDEX'S MAPPED fields** via `_field_caps` (present on OpenSearch
   2.x), not fields scoped to a query's matches, and reports no per-field hit count.
+- **Partial results are flagged, never silently reported as complete.** OpenSearch answers a search
+  some shards could not serve with HTTP 200 and `_shards.failed > 0` — typically when a rolling
+  `logs-*` pattern spans a mapping change. `query_logs` appends an explicit "partial results" line,
+  `logs_error_summary`'s top messages switch to the client-side path, and its histogram reports the
+  partiality as an error rather than showing a short bar chart.
 - The error-volume histogram is corpus-wide and server-side (`log.level` is `keyword`-typed under
   ECS).
 
