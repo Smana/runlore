@@ -13,6 +13,7 @@ import (
 	"net"
 	"net/url"
 	"path"
+	"regexp"
 	"slices"
 	"strings"
 	"time"
@@ -969,6 +970,25 @@ func isPrivateHost(host string) bool {
 	return false
 }
 
+// gitlabProjectPathRE matches a GitLab project's namespace path: at least two
+// slash-separated segments (a group and a project — GitLab allows nested
+// groups, so "group/subgroup/project" is valid too), each segment starting
+// with an alphanumeric or underscore and continuing with alphanumerics,
+// underscores, dots, or dashes. It is a deliberately conservative subset of
+// GitLab's real path grammar — good enough to catch the actual failure mode
+// this check exists for (an owner/name-shaped GitHub path pasted into a
+// GitLab config, a stray leading/trailing slash, or a bare project name with
+// no namespace), not a full re-implementation of GitLab's validator.
+var gitlabProjectPathRE = regexp.MustCompile(`^[a-zA-Z0-9_][a-zA-Z0-9_.-]*(/[a-zA-Z0-9_][a-zA-Z0-9_.-]*)+$`)
+
+// validGitLabProjectPath reports whether s looks like a GitLab project path
+// ("group/project", optionally nested). Used to fail config load closed on an
+// obviously-wrong kb_repo rather than let every forge call 404 at runtime in a
+// way that reads as a permissions problem.
+func validGitLabProjectPath(s string) bool {
+	return gitlabProjectPathRE.MatchString(s)
+}
+
 // checkSecureKeyEndpoint rejects a base_url that would send an API key in cleartext.
 // A key is "present" when apiKeyEnv is non-empty; an empty base_url uses the provider's
 // built-in (https) default and is always fine. http is allowed only to a private host.
@@ -1237,6 +1257,28 @@ func (c *Config) Validate() error {
 			return fmt.Errorf("forge.skip_verdicts[%d]: unknown verdict %q (want no_action|action_suggested|action_required|inconclusive)", i, v)
 		}
 	}
+	// Forge provider selection: fails CLOSED. An unknown provider, a "gitlab"
+	// provider with no token_env (curation would otherwise silently disable
+	// rather than the operator learning at startup that it never wired up), or a
+	// kb_repo that is not a valid GitLab project path, all abort config load
+	// rather than letting `serve` come up with curation quietly turned off.
+	switch c.Forge.Provider {
+	case "", "github":
+		// no additional required fields today — an absent github_app simply
+		// disables curation (existing, backward-compatible behaviour).
+	case "gitlab":
+		if c.Forge.GitLab.TokenEnv == "" {
+			return fmt.Errorf("forge.provider is \"gitlab\" but forge.gitlab.token_env is empty — set it to the env var holding a project/group access token (scope: api), or curation would silently never activate")
+		}
+		if c.Forge.KBRepo != "" && !validGitLabProjectPath(c.Forge.KBRepo) {
+			return fmt.Errorf("forge.kb_repo %q is not a valid GitLab project path (want \"group/project\", optionally nested: \"group/subgroup/project\")", c.Forge.KBRepo)
+		}
+		if err := checkSecureKeyEndpoint("forge.gitlab.base_url", "forge.gitlab.token_env", c.Forge.GitLab.BaseURL, c.Forge.GitLab.TokenEnv); err != nil {
+			return err
+		}
+	default:
+		return fmt.Errorf("forge.provider %q is invalid (want \"github\" or \"gitlab\")", c.Forge.Provider)
+	}
 	// The recurrence cooldown reads the outcome ledger's trigger index; without a
 	// ledger it would silently never suppress — fail loud instead. A negative
 	// duration is always a misconfiguration (mirrors tool_timeout).
@@ -1405,9 +1447,14 @@ func (s Sweeps) DryRun() bool { return s.Mode == "" || s.Mode == SweepDryRun }
 
 // Forge holds git-forge authentication and the curation target repo.
 type Forge struct {
+	// Provider selects the forge backend: "github" (default, empty ⇒ github) or
+	// "gitlab". Only one of GitHubApp / GitLab is meaningful at a time, matching
+	// whichever provider is selected.
+	Provider      string    `yaml:"provider"`
 	GitHubApp     GitHubApp `yaml:"github_app"`
-	KBRepo        string    `yaml:"kb_repo"`        // "owner/name" — the catalog repo for curation
-	BaseBranch    string    `yaml:"base_branch"`    // PR target branch (default "main")
+	GitLab        GitLab    `yaml:"gitlab"`
+	KBRepo        string    `yaml:"kb_repo"`        // GitHub: "owner/name"; GitLab: the project path ("group/project", possibly nested)
+	BaseBranch    string    `yaml:"base_branch"`    // PR/MR target branch (default "main")
 	GitHubAPIURL  string    `yaml:"github_api_url"` // override for GHES/tests (default https://api.github.com)
 	DupScore      float64   `yaml:"dup_score"`      // file-time catalog BM25 dedup threshold (default 5.0)
 	MinConfidence float64   `yaml:"min_confidence"` // file-time quality gate: min overall confidence (default 0.75)
@@ -1417,6 +1464,16 @@ type Forge struct {
 	// inconclusive). Empty (default) draws no distinction: every verdict is eligible,
 	// preserving pre-gate behaviour. Recommended production value: ["no_action"].
 	SkipVerdicts []string `yaml:"skip_verdicts"`
+}
+
+// GitLab holds GitLab forge credentials. Unlike GitHubApp (a short-lived,
+// minted installation token), GitLab has no GitHub-App equivalent bot
+// identity: auth is a static project or group access token (scope: api),
+// referenced by env-var indirection only — the config stores the env var
+// NAME, never the token value — and sent as the PRIVATE-TOKEN header.
+type GitLab struct {
+	BaseURL  string `yaml:"base_url"`  // self-managed instance root, e.g. https://gitlab.example.com; empty = gitlab.com
+	TokenEnv string `yaml:"token_env"` // env var holding the project/group access token
 }
 
 // GitHubApp holds GitHub App credentials. The private key mints 1-hour

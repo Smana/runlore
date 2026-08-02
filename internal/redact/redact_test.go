@@ -18,6 +18,7 @@ func TestSecretsMasks(t *testing.T) {
 	}{
 		{"github token", "found ghp_0123456789abcdefghijABCDEFGHIJ0123 here", "ghp_0123456789abcdefghijABCDEFGHIJ0123", "found"},
 		{"github fine-grained pat", "token github_pat_11ABCDE0123456789_abcdefghijklmnopqrstuvwxyzABCDEFGH used", "github_pat_11ABCDE0123456789_abcdefghijklmnopqrstuvwxyzABCDEFGH", "token"},
+		{"gitlab project access token", "PRIVATE-TOKEN: glpat-aBcDeFgHiJkLmNoPqRsT here", "glpat-aBcDeFgHiJkLmNoPqRsT", "here"},
 		{"openai key", "OPENAI_API_KEY=sk-abcdefghijklmnopqrstuvwx", "sk-abcdefghijklmnopqrstuvwx", ""},
 		{"openai key mid sentence", "the key sk-abcdefghijklmnopqrstuvwx is here", "sk-abcdefghijklmnopqrstuvwx", "the key"},
 		{"stripe live secret key", "stripe sk_live_0123456789abcdefABCDEF here", "sk_live_0123456789abcdefABCDEF", "stripe"},

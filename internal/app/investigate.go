@@ -486,7 +486,7 @@ func BuildInvestigator(ctx context.Context, cfg *config.Config, gp providers.Git
 		return nil, nil, err
 	}
 	log.Info("delivery notifiers", "count", notifier.Len())
-	cur := BuildCurator(cfg, BuildForgeTokenSource(cfg, log), cat, metrics, log)
+	cur := BuildCurator(cfg, cat, metrics, log)
 	// Assign via a concrete-nil check so a disabled curator (BuildCurator returns a
 	// nil *curator.Curator) stays a nil interface — not a non-nil typed-nil that would
 	// pass onInvestigationComplete's `cur != nil` guard and panic on Curate.

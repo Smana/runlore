@@ -36,6 +36,13 @@ var rules = []rule{
 	{regexp.MustCompile(`gh[pousr]_[A-Za-z0-9]{20,}`), mask},
 	// GitHub fine-grained personal access token.
 	{regexp.MustCompile(`\bgithub_pat_[0-9A-Za-z_]{22,}\b`), mask},
+	// GitLab tokens: personal/project/group access tokens (glpat-), CI/CD job
+	// tokens (glcbt-), runner authentication tokens (glrt-), pipeline trigger
+	// tokens (glptt-), and feed tokens (glft-) all share this prefixed-random-
+	// suffix shape. The forge client sends this value as the PRIVATE-TOKEN
+	// header on every request — this rule is the backstop that keeps it from
+	// reaching a log even if it ever ends up quoted in tool output or an error.
+	{regexp.MustCompile(`\bgl(?:pat|cbt|rt|ptt|ft)-[A-Za-z0-9_-]{20,}\b`), mask},
 	// OpenAI / Anthropic-style keys (anchored so a benign "sk-" inside a word
 	// like "task-management" is not matched).
 	{regexp.MustCompile(`\bsk-[A-Za-z0-9_-]{16,}\b`), mask},
