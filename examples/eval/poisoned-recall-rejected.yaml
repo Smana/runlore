@@ -1,0 +1,64 @@
+name: poisoned-recall-rejected
+prompt: eval-victim pods not starting in namespace runlore-eval (image pull errors)
+tools:
+  discover_log_fields: no fields found for {kubernetes.pod_namespace="runlore-eval"} in the last 60m —
+    nothing matched; widen the selector or check the namespace/container name.
+  gitops_resource_status: ''
+  incident_timeline: '11:06:23 [event] Failed Pod/eval-victim-7d64dd75-ks455 (x2): Failed to pull image
+    "registry.k8s.io/pause:v9.9.9-does-not-exist": rpc error: code = NotFound desc = failed to pull…
+
+    11:06:23 [event] Failed Pod/eval-victim-7d64dd75-ks455 (x2): Error: ErrImagePull
+
+    11:06:36 [event] Failed Pod/eval-victim-7d64dd75-ks455 (x2): Error: ImagePullBackOff
+
+    '
+  kube_events: '2026-08-02T11:06:36Z Warning Pod/eval-victim-7d64dd75-ks455 Failed (x2): Error: ImagePullBackOff
+
+    2026-08-02T11:06:23Z Warning Pod/eval-victim-7d64dd75-ks455 Failed (x2): Failed to pull image "registry.k8s.io/pause:v9.9.9-does-not-exist":
+    rpc error: code = NotFound desc = failed to pull and unpack image "registry.k8s.io/pause:v9.9.9-does-not-exist":
+    failed to resolve image: registry.k8s.io/pause:v9.9.9-does-not-exist: not found
+
+    2026-08-02T11:06:23Z Warning Pod/eval-victim-7d64dd75-ks455 Failed (x2): Error: ErrImagePull
+
+    '
+  pod_logs: 'eval-victim-7d64dd75-ks455/app: log stream failed: container "app" in pod "eval-victim-7d64dd75-ks455"
+    is waiting to start: trying and failing to pull image
+
+    '
+  pod_status: "eval-victim-7d64dd75-ks455  Pending ready=0/1 age=28s ip=100.64.62.167 node=ip-10-0-10-21.eu-west-3.compute.internal\
+    \ hostIP=10.0.10.21\n  ⚠ app: ErrImagePull: rpc error: code = NotFound desc = failed to pull and unpack\
+    \ image \"registry.k8s.io/pause:v9.9.9-does-not-exist\": failed to resolve image: registry.k8s.io/pause:v9.9.9-does-not-exist:\
+    \ not found\neval-victim-789dff8486-n5wxf  Running ready=1/1 age=28s ip=100.64.101.12 node=ip-10-0-22-115.eu-west-3.compute.internal\
+    \ hostIP=10.0.22.115\n"
+  query_logs: no log lines matched — if logs were expected, the collector field names may differ from
+    the assumed schema (try discover_log_fields to see the real fields), or narrow/loosen the query; consider
+    pod_logs for a specific pod
+  what_changed: no changes found for the given selector
+  workload_ownership: 'Pod/eval-victim-789dff8486-n5wxf → ReplicaSet/eval-victim-789dff8486 → Deployment/eval-victim
+    (no GitOps tracking label on the top controller — owner unresolved)
+
+    drift: DRIFTED — signal=last-applied-configuration; Deployment/eval-victim live spec no longer matches
+    its last kubectl-applied configuration (a manual out-of-band edit); a GitOps reconcile has not reverted
+    it
+
+    '
+expected:
+  must_contain:
+  - image
+  - pull
+  min_confidence: 0.5
+  root_cause_entities: []
+  distractors: []
+ground_truth:
+  root_cause: The eval-victim Deployment image was changed to tag v9.9.9-does-not-exist, which cannot
+    be pulled (ImagePullBackOff/ErrImagePull). This is the TRUE cause — NOT the catalogued "stale ConfigMap
+    key" the poisoned entry asserts. A correct run rejects the recalled poisoned cause on the verify pass
+    and re-investigates to the bad image tag.
+  expected_sources:
+  - kubernetes
+  - logs
+  optional_sources:
+  - gitops
+  - kb
+  expected_action: revert the image tag to a valid one (roll back the change)
+  must_reach_root: true

@@ -1,0 +1,175 @@
+name: gitops-broken-kustomization
+prompt: Flux Kustomization eval-victim-broken is not ready in flux-system
+tools:
+  controller_logs: no matching controller log lines
+  gitops_resource_status: ''
+  gitops_tree: "ExternalArtifact flux-system/infra-artifact (Ready=True)\n  ArtifactGenerator flux-system/monorepo-split\
+    \ (Ready=unknown)\n"
+  incident_timeline: '09:40:08 [flux] Kustomization flux-artifact-generators (sync) ToRev 61f10084de7d
+
+    09:40:08 [flux] Kustomization flux-system (sync) ToRev 61f10084de7d
+
+    10:12:42 [event] ArtifactFailed Kustomization/eval-victim-broken: kustomization path not found: stat
+    /tmp/kustomization-653102481/this/path/does/not/exist: no such file or direc…
+
+    10:13:43 [event] ArtifactFailed Kustomization/eval-victim-broken: kustomization path not found: stat
+    /tmp/kustomization-3316512015/this/path/does/not/exist: no such file or dire…
+
+    11:00:16 [flux] Kustomization security (sync) ToRev 24ab559a92bf
+
+    11:00:30 [flux] Kustomization tooling (sync) ToRev 6111429a0e7e
+
+    11:01:03 [flux] Kustomization observability-victoria-metrics-k8s-stack (sync) ToRev e0a8d21a91ac
+
+    11:01:17 [flux] Kustomization observability-victoria-traces (sync) ToRev e0a8d21a91ac
+
+    11:01:30 [flux] Kustomization infrastructure (sync) ToRev 8304df1acd67
+
+    11:01:43 [flux] Kustomization flux-previews (sync) ToRev 2cc54e16efc9
+
+    11:01:44 [flux] Kustomization karpenter-nodepools (sync) ToRev 8304df1acd67
+
+    11:01:48 [flux] Kustomization flux-operator (sync) ToRev 2cc54e16efc9
+
+    11:01:54 [event] ArtifactFailed Kustomization/eval-victim-broken: kustomization path not found: stat
+    /tmp/kustomization-2540724022/this/path/does/not/exist: no such file or dire…
+
+    11:01:56 [flux] Kustomization crossplane-controller (sync) ToRev 8304df1acd67
+
+    11:01:58 [flux] Kustomization zitadel (sync) ToRev 24ab559a92bf
+
+    11:02:02 [flux] Kustomization crds (sync) ToRev b7860f109019
+
+    11:02:04 [flux] Kustomization apps (sync) ToRev fc127c49a14a
+
+    11:02:04 [flux] Kustomization crossplane-providers (sync) ToRev 8304df1acd67
+
+    11:02:08 [flux] Kustomization karpenter (sync) ToRev 8304df1acd67
+
+    11:02:08 [flux] Kustomization observability-grafana-operator (sync) ToRev e0a8d21a91ac
+
+    11:02:09 [flux] Kustomization crossplane-configuration (sync) ToRev 8304df1acd67
+
+    11:02:20 [flux] Kustomization flux-observability (sync) ToRev 2cc54e16efc9
+
+    11:02:23 [flux] Kustomization eks-pod-identities (sync) ToRev 24ab559a92bf
+
+    11:02:26 [flux] Kustomization flux-notifications (sync) ToRev 2cc54e16efc9
+
+    11:02:28 [flux] Kustomization flux-sources (sync) ToRev 2cc54e16efc9
+
+    11:02:31 [flux] Kustomization namespaces (sync) ToRev 4a782fb666a6
+
+    11:02:35 [flux] Kustomization observability (sync) ToRev e0a8d21a91ac
+
+    '
+  kube_events: '2026-08-02T11:01:54Z Warning Kustomization/eval-victim-broken ArtifactFailed: kustomization
+    path not found: stat /tmp/kustomization-2540724022/this/path/does/not/exist: no such file or directory
+
+    2026-08-02T10:13:43Z Warning Kustomization/eval-victim-broken ArtifactFailed: kustomization path not
+    found: stat /tmp/kustomization-3316512015/this/path/does/not/exist: no such file or directory
+
+    2026-08-02T10:12:42Z Warning Kustomization/eval-victim-broken ArtifactFailed: kustomization path not
+    found: stat /tmp/kustomization-653102481/this/path/does/not/exist: no such file or directory
+
+    '
+  pod_status: 'flux-operator-5588d47674-28zhg  Running ready=1/1 age=3h ip=100.64.40.118 node=ip-10-0-3-147.eu-west-3.compute.internal
+    hostIP=10.0.3.147
+
+    helm-controller-7c554c47df-vfhtq  Running ready=1/1 restarts=1 age=3h last-exit=2026-08-02T07:26:53Z
+    ip=100.64.48.186 node=ip-10-0-9-161.eu-west-3.compute.internal hostIP=10.0.9.161
+
+    helm-controller-apps-866976d6c7-xc4d7  Running ready=1/1 restarts=1 age=3h last-exit=2026-08-02T07:26:53Z
+    ip=100.64.39.45 node=ip-10-0-3-147.eu-west-3.compute.internal hostIP=10.0.3.147
+
+    kustomize-controller-6547f475d8-djskv  Running ready=1/1 restarts=1 age=3h last-exit=2026-08-02T07:26:55Z
+    ip=100.64.5.158 node=ip-10-0-9-161.eu-west-3.compute.internal hostIP=10.0.9.161
+
+    kustomize-controller-apps-66c4495cb-nwnxb  Running ready=1/1 age=3h ip=100.64.41.224 node=ip-10-0-3-147.eu-west-3.compute.internal
+    hostIP=10.0.3.147
+
+    notification-controller-764494b746-wjrxn  Running ready=1/1 restarts=1 age=3h last-exit=2026-08-02T07:26:56Z
+    ip=100.64.52.201 node=ip-10-0-9-161.eu-west-3.compute.internal hostIP=10.0.9.161
+
+    source-controller-75b58bb9cd-29fxp  Running ready=1/1 age=3h ip=100.64.56.236 node=ip-10-0-3-147.eu-west-3.compute.internal
+    hostIP=10.0.3.147
+
+    source-controller-apps-699948546b-qqc9v  Running ready=1/1 restarts=1 age=3h last-exit=2026-08-02T07:26:56Z
+    ip=100.64.29.34 node=ip-10-0-9-161.eu-west-3.compute.internal hostIP=10.0.9.161
+
+    source-watcher-66dcc65f9c-4scwk  Running ready=1/1 age=3h ip=100.64.61.101 node=ip-10-0-3-147.eu-west-3.compute.internal
+    hostIP=10.0.3.147
+
+    source-watcher-apps-649cf8c59d-cv6t6  Running ready=1/1 age=3h ip=100.64.34.206 node=ip-10-0-3-147.eu-west-3.compute.internal
+    hostIP=10.0.3.147
+
+    '
+  what_changed: "flux Kustomization/apps (sync): ..fc127c49a14acae3dec276cbd52cf76db03023b417cb71e77d5a3fae33bd9365\
+    \ at 2026-08-02T11:02:04Z\nflux Kustomization/crds (sync): ..b7860f10901909e60b407b4cc952c62e12026d14771300383ff1b554a1fe5ec3\
+    \ at 2026-08-02T11:02:02Z\nflux Kustomization/crossplane-configuration (sync): ..8304df1acd67978228dbeb91214a60deeb83a0edaee7cde7efa4492f66897b4a\
+    \ at 2026-08-02T11:02:09Z\nflux Kustomization/crossplane-controller (sync): ..8304df1acd67978228dbeb91214a60deeb83a0edaee7cde7efa4492f66897b4a\
+    \ at 2026-08-02T11:01:56Z\nflux Kustomization/crossplane-providers (sync): ..8304df1acd67978228dbeb91214a60deeb83a0edaee7cde7efa4492f66897b4a\
+    \ at 2026-08-02T11:02:04Z\nflux Kustomization/eks-pod-identities (sync): ..24ab559a92bfd453834f2c2c04725f4baee26362eeb6125c438cbb9d83835426\
+    \ at 2026-08-02T11:02:23Z\nflux Kustomization/flux-artifact-generators (sync): ..61f10084de7dd17c688b61c1a52710289beac146\
+    \ at 2026-08-02T09:40:08Z\nflux Kustomization/flux-notifications (sync): ..2cc54e16efc957736ada9b6ac81387ddd81db6e55d1d705adf21996ffbe0694d\
+    \ at 2026-08-02T11:02:26Z\nflux Kustomization/flux-observability (sync): ..2cc54e16efc957736ada9b6ac81387ddd81db6e55d1d705adf21996ffbe0694d\
+    \ at 2026-08-02T11:02:20Z\nflux Kustomization/flux-operator (sync): ..2cc54e16efc957736ada9b6ac81387ddd81db6e55d1d705adf21996ffbe0694d\
+    \ at 2026-08-02T11:02:48Z\nflux Kustomization/flux-previews (sync): ..2cc54e16efc957736ada9b6ac81387ddd81db6e55d1d705adf21996ffbe0694d\
+    \ at 2026-08-02T11:02:44Z\nflux Kustomization/flux-sources (sync): ..2cc54e16efc957736ada9b6ac81387ddd81db6e55d1d705adf21996ffbe0694d\
+    \ at 2026-08-02T11:02:28Z\nflux Kustomization/flux-system (sync): ..61f10084de7dd17c688b61c1a52710289beac146\
+    \ at 2026-08-02T09:40:08Z\n  diffstat:\n    clusters/mycluster-0/infrastructure/infrastructure.yaml\
+    \ (+8/-0)\n    clusters/mycluster-0/llm-platform.yaml (+45/-0)\n  --- clusters/mycluster-0/infrastructure/infrastructure.yaml\n\
+    diff --git a/clusters/mycluster-0/infrastructure/infrastructure.yaml b/clusters/mycluster-0/infrastructure/infrastructure.yaml\n\
+    index bf1aa59c077bcacae3635e4f67cd4419473ec0e1..43a76fe79921ee264e4373fde9dc07918ce85391 100644\n\
+    --- a/clusters/mycluster-0/infrastructure/infrastructure.yaml\n+++ b/clusters/mycluster-0/infrastructure/infrastructure.yaml\n\
+    @@ -30,3 +30,11 @@     - apiVersion: helm.toolkit.fluxcd.io/v2\n       kind: HelmRelease\n       name:\
+    \ external-dns\n       namespace: kube-system\n+    - apiVersion: helm.toolkit.fluxcd.io/v2\n+   \
+    \   kind: HelmRelease\n+      name: aws-efs-csi-driver\n+      namespace: kube-system\n+    - apiVersion:\
+    \ helm.toolkit.fluxcd.io/v2\n+      kind: HelmRelease\n+      name: keda\n+      namespace: keda\n\
+    \  --- clusters/mycluster-0/llm-platform.yaml\ndiff --git a/clusters/mycluster-0/llm-platform.yaml\
+    \ b/clusters/mycluster-0/llm-platform.yaml\nnew file mode 100644\nindex 0000000000000000000000000000000000000000..f74c4ce95e3c6ed6454d5360bc007e47740dce2d\n\
+    --- /dev/null\n+++ b/clusters/mycluster-0/llm-platform.yaml\n@@ -0,0 +1,45 @@\n+---\n+# LLM Platform\
+    \ — opt-in Flux umbrella.\n+#\n+# Default: spec.suspend = true → none of the LLM-specific Flux\n+#\
+    \ Kustomizations under clusters/mycluster-0-llm-platform/ are created,\n+# so no LLM resources land\
+    \ in the cluster (no vllm-semantic-router,\n+# no NVIDIA device plugin, no GPU NodePool, no LLM apps,\
+    \ no LLM EPI).\n+#\n+# Mirrors the OpenTofu opt-in (opentofu/llm-platform/workflows.tm.hcl,\n+# gated\
+    \ by $TM_LLM_PLATFORM_ENABLED). Together they form the complete\n+# opt-in surface for the self-hosted\
+    \ LLM platform.\n+#\n+# Enable on this cluster:\n+#   flux resume kustomization llm-platform -n flux-system\n\
+    +#\n+# Disable again (children stay until you also remove them — `prune: true`\n+# only applies to\
+    \ source removal, not suspend):\n+#   flux suspend kustomization llm-platform -n flux-system\n+#\n\
+    +# Full teardown (suspend AND remove children + their resources):\n+#   flux suspend kustomization\
+    \ llm-platform -n flux-system\n+#   flux delete kustomization \\\n+#     llm-platform-apps llm-platform-gpu-nodepools\
+    \ \\\n+#     llm-platform-security-epi runtimeclass-nvidia vllm-semantic-router \\\n+#     -n flux-system\
+    \ --silent\n+#   # Then delete the OpenTofu-side resources via:\n+#   #   TM_LLM_PLATFORM_ENABLED=true\
+    \ terramate -C opentofu/llm-platform script run destroy\n+apiVersion: kustomize.toolkit.fluxcd.io/v1\n\
+    +kind: Kustomization\n+metadata:\n+  name: llm-platform\n+  namespace: flux-system\n+spec:\n+  suspend:\
+    \ true\n+  prune: true\n+  interval: 1m0s\n+  timeout: 5m0s\n+  # MUST be a sibling of clusters/mycluster-0/\
+    \ (not a sub-path), otherwise the\n+  # `flux-system` Kustomization that syncs `clusters/mycluster-0/`\
+    \ recursively\n+  # would auto-discover the child Flux Kustomizations and apply them\n+  # directly\
+    \ — bypassing the umbrella's `spec.suspend: true` gate.\n+  path: ./clusters/mycluster-0-llm-platform\n\
+    +  sourceRef:\n+    kind: GitRepository\n+    name: flux-system\nflux Kustomization/infrastructure\
+    \ (sync): ..8304df1acd67978228dbeb91214a60deeb83a0edaee7cde7efa4492f66897b4a at 2026-08-02T11:01:30Z\n\
+    flux Kustomization/karpenter (sync): ..8304df1acd67978228dbeb91214a60deeb83a0edaee7cde7efa4492f66897b4a\
+    \ at 2026-08-02T11:02:08Z\nflux Kustomization/karpenter-nodepools (sync): ..8304df1acd67978228dbeb91214a60deeb83a0edaee7cde7efa4492f66897b4a\
+    \ at 2026-08-02T11:02:47Z\nflux Kustomization/namespaces (sync): ..4a782fb666a6ee0c7588f5300ce84460563c296061e0e7806ca0d980d491ea36\
+    \ at 2026-08-02T11:02:31Z\nflux Kustomization/observability (sync): ..e0a8d21a91ac770f97266da0a0de53d27641f44e39d2abe64eb49790cf573482\
+    \ at 2026-08-02T11:02:35Z\nflux Kustomization/observability-grafana-operator (sync): ..e0a8d21a91ac770f97266da0a0de53d27641f44e39d2abe64eb49790cf573482\
+    \ at 2026-08-02T11:02:08Z\nflux Kustomization/observability-victoria-metrics-k8s-stack (sync): ..e0a8d21a91ac770f97266da0a0de53d27641f44e39d2abe64eb49790cf573482\
+    \ at 2026-08-02T11:01:03Z\n…and 4 more changes (narrow with a workload name)\n"
+expected:
+  must_contain:
+  - kustomization
+  - path
+  min_confidence: 0.5
+  root_cause_entities: []
+  distractors: []
+ground_truth:
+  root_cause: Kustomization/eval-victim-broken references spec.path ./this/path/does/not/exist, which
+    does not exist in the infra-artifact source, so the build fails and the Kustomization is Ready=False
+    (BuildFailed). The source ExternalArtifact itself is healthy — the bad path is the root cause.
+  expected_sources:
+  - gitops
+  optional_sources:
+  - kubernetes
+  expected_action: correct spec.path (or remove the Kustomization)
+  must_reach_root: true
