@@ -27,13 +27,16 @@ menu:
     - name: Docs
       pageRef: /docs
       weight: 1
-    - name: GitHub
+    - name: Compare
+      pageRef: /compare
       weight: 2
+    - name: GitHub
+      weight: 3
       url: "https://github.com/Smana/runlore"
       params:
         icon: github
     - name: Search
-      weight: 3
+      weight: 4
       params:
         type: search
 
