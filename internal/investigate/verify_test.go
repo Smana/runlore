@@ -398,3 +398,67 @@ func TestVerifyFindingsReportsVerifiedWhenNothingToReview(t *testing.T) {
 		t.Fatal("no root causes to review must report verified=true, not a failure")
 	}
 }
+
+// TestVerifyOutOfRangeVerdictsCountAsUnreviewed: a non-empty verdict list is not
+// the same as a review having happened. applyVerdicts KEEPS any cause the reviewer
+// did not mention, so verdicts whose indices all fall outside the root-cause range
+// used to review nothing while still returning verified=true.
+//
+// On the recall path that is the serious one: catalog text short-circuits a live
+// incident and the delivered investigation is stamped Verified: true. This is #395's
+// fail-closed gate one layer down — the gate fired, but on a review that never
+// touched a finding.
+//
+// Reachable exactly where this repo already documents flaky forced tool_choice
+// (local OpenAI-compatible servers), i.e. when fail-closed matters most.
+func TestVerifyOutOfRangeVerdictsCountAsUnreviewed(t *testing.T) {
+	li := &LoopInvestigator{Log: slog.New(slog.NewTextHandler(io.Discard, nil))}
+	inv := providers.Investigation{
+		Confidence: 0.8,
+		RootCauses: []providers.Hypothesis{{Summary: "oom", Confidence: 0.8}},
+	}
+
+	// Index 7 against a one-cause investigation: reviews nothing.
+	model := &scriptModel{responses: []providers.CompletionResponse{
+		{ToolCalls: []providers.ToolCall{{ID: "1", Name: submitVerdictsName, Args: `{"verdicts":[{"index":7,"verdict":"reject"}]}`}}},
+	}}
+	li.Model = model
+	_, verified := li.verifyFindings(context.Background(), Request{Title: "x"}, inv, nil, nil)
+	if verified {
+		t.Fatal("verdicts that reference no actual root cause must NOT count as a review — " +
+			"otherwise recall short-circuits an incident on findings nothing reviewed, stamped Verified: true")
+	}
+
+	// Control: an in-range verdict IS a review. Without this, the assertion above
+	// would also pass if verifyFindings simply never returned true.
+	model2 := &scriptModel{responses: []providers.CompletionResponse{
+		{ToolCalls: []providers.ToolCall{{ID: "1", Name: submitVerdictsName, Args: `{"verdicts":[{"index":0,"verdict":"keep"}]}`}}},
+	}}
+	li.Model = model2
+	if _, ok := li.verifyFindings(context.Background(), Request{Title: "x"}, inv, nil, nil); !ok {
+		t.Fatal("an in-range verdict must count as a genuine review")
+	}
+}
+
+// TestApplyVerdictsKeepsOnUnrecognizedVerdict: the verdict switch had no default,
+// so a case variant ("KEEP") or a synonym ("approve") matched no branch and the
+// root cause was dropped — silently, with nothing logged. On the full-investigation
+// path that discards a real, evidenced finding and forces the verdict inconclusive.
+// An unparseable reviewer response is a reviewer malfunction, not a judgement about
+// the finding.
+func TestApplyVerdictsKeepsOnUnrecognizedVerdict(t *testing.T) {
+	li := &LoopInvestigator{Log: slog.New(slog.NewTextHandler(io.Discard, nil))}
+	for _, v := range []string{"KEEP", " keep ", "Downgrade", "approve", "definitely-not-a-verdict"} {
+		t.Run(v, func(t *testing.T) {
+			inv := providers.Investigation{
+				Confidence: 0.8,
+				RootCauses: []providers.Hypothesis{{Summary: "oom", Confidence: 0.8, Evidence: []string{"OOMKilled"}}},
+			}
+			out := applyVerdicts(li, Request{}, inv, []verdict{{Index: 0, Verdict: v}})
+			if len(out.RootCauses) != 1 {
+				t.Fatalf("verdict %q dropped the root cause (kept %d) — an unparseable verdict must never delete evidence",
+					v, len(out.RootCauses))
+			}
+		})
+	}
+}

@@ -137,6 +137,26 @@ func (li *LoopInvestigator) verifyFindings(ctx context.Context, req Request, inv
 		li.Log.Warn("verify pass returned no usable verdicts; keeping findings as-is", "title", req.Title)
 		return inv, false
 	}
+	// Non-empty is not the same as "a review happened". applyVerdicts keeps any cause
+	// the reviewer did not mention, so a response whose indices all fall outside
+	// [0, len(RootCauses)) — {"verdicts":[{"index":7,"verdict":"reject"}]} against a
+	// one-cause investigation — reviewed NOTHING while returning verified=true. On the
+	// recall path that lets catalog text short-circuit an incident stamped
+	// `Verified: true`; on the full path it launders an unreviewed finding.
+	//
+	// Reachable exactly where this repo already documents flaky forced tool_choice
+	// (local OpenAI-compatible servers), which is when a fail-closed gate matters most.
+	covered := 0
+	for _, v := range verds {
+		if v.Index >= 0 && v.Index < len(inv.RootCauses) {
+			covered++
+		}
+	}
+	if covered == 0 {
+		li.Log.Warn("verify pass returned verdicts that reference no actual root cause; treating as unreviewed",
+			"title", req.Title, "verdicts", len(verds), "root_causes", len(inv.RootCauses))
+		return inv, false
+	}
 	return applyVerdicts(li, req, inv, verds), true
 }
 
@@ -156,27 +176,41 @@ func applyVerdicts(li *LoopInvestigator, req Request, inv providers.Investigatio
 	kept := make([]providers.Hypothesis, 0, len(inv.RootCauses))
 	for i, rc := range inv.RootCauses {
 		v, ok := byIndex[i]
+		// Normalize before comparing. The switch below has no fall-through for an
+		// unrecognized verdict, so "KEEP", "approve" or a stray space used to match
+		// no case at all and DROP the root cause silently — on the full-investigation
+		// path that discards a real, evidenced finding and forces the verdict to
+		// inconclusive, with nothing logged to say why.
+		verd := strings.ToLower(strings.TrimSpace(v.Verdict))
 		switch {
-		case !ok || v.Verdict == "keep":
+		case !ok || verd == "keep":
 			// A keep carrying a confidence may only lower the score, never raise
 			// it; a keep with no/zero confidence leaves the original untouched.
 			if ok && v.Confidence > 0 {
 				rc.Confidence = min(rc.Confidence, clamp01(v.Confidence))
 			}
 			kept = append(kept, rc)
-		case v.Verdict == "downgrade":
+		case verd == "downgrade":
 			if v.Confidence > 0 {
 				rc.Confidence = min(rc.Confidence, clamp01(v.Confidence))
 			} else {
 				rc.Confidence /= 2
 			}
 			kept = append(kept, rc)
-		case v.Verdict == "reject":
+		case verd == "reject":
 			// A rejected hypothesis is honesty about what was disproven, not an open
 			// question for a human — it belongs in RuledOut (with the disproving
 			// reason), not Unresolved.
 			inv.RuledOut = append(inv.RuledOut, fmt.Sprintf("%s — %s", rc.Summary, v.Reason))
 			li.Log.Info("verify: rejected root cause", "title", req.Title, "summary", rc.Summary, "reason", v.Reason)
+		default:
+			// An unrecognized verdict is a reviewer malfunction, not a judgement about
+			// the finding. Keep the cause — silently deleting evidence because the
+			// reviewer said something unparseable is the worst available answer — and
+			// log loudly enough that the malfunction is visible.
+			li.Log.Warn("verify: unrecognized verdict; keeping the root cause unchanged",
+				"title", req.Title, "verdict", v.Verdict, "summary", rc.Summary)
+			kept = append(kept, rc)
 		}
 	}
 	inv.RootCauses = kept
