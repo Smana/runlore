@@ -25,17 +25,23 @@ func Load(path string) (*Config, error) {
 	if err := dec.Decode(&c); err != nil {
 		return nil, fmt.Errorf("parse config: %w", err)
 	}
-	applyDefaults(&c)
+	ApplyDefaults(&c)
 	if err := c.Validate(); err != nil {
 		return nil, fmt.Errorf("invalid config: %w", err)
 	}
 	return &c, nil
 }
 
-// applyDefaults fills in safe zero-value defaults for optional fields so that a
+// ApplyDefaults fills in safe zero-value defaults for optional fields so that a
 // minimal config (e.g. coalesce.enabled: true with no sub-fields) is valid and
 // predictable without requiring every field to be spelled out.
-func applyDefaults(c *Config) {
+//
+// Exported so that a *Config built OUTSIDE Load — e.g. a config synthesized
+// in-process from environment variables for the zero-config CLI path — can be
+// brought to the same defaulted state as one read from a runlore.yaml. There must
+// be exactly one place that knows these values; a second copy (even a "just the
+// timeout" one) would drift the moment either side changes.
+func ApplyDefaults(c *Config) {
 	// Coalesce defaults: when enabled without explicit tuning, choose conservative
 	// values that reduce storm noise without introducing too much investigation lag.
 	if c.Investigation.Coalesce.Enabled {

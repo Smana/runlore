@@ -100,3 +100,61 @@ func TestExistingConfigWins(t *testing.T) {
 		t.Errorf("model = %q, want the file's value", cfg.Model.Model)
 	}
 }
+
+// TestMalformedDefaultConfigIsError: a runlore.yaml that EXISTS at the default path
+// but fails to parse (here: an unknown key, rejected by config.Load's
+// KnownFields(true)) must be a hard error — never papered over by falling back to
+// environment synthesis. Silently synthesizing here would run the investigation
+// against a guessed model while hiding the operator's broken file from them. Valid
+// model env vars are set precisely so a bug that ignores the parse error and falls
+// through to configFromEnv would otherwise succeed unnoticed.
+func TestMalformedDefaultConfigIsError(t *testing.T) {
+	dir := t.TempDir()
+	t.Chdir(dir)
+	t.Setenv("ANTHROPIC_API_KEY", "sk-ant-test")
+	if err := os.WriteFile(filepath.Join(dir, defaultConfigPath), []byte(
+		"model:\n  not_a_real_field: true\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	_, err := resolveInvestigateConfig(defaultConfigPath, false)
+	if err == nil {
+		t.Fatal("a malformed default config must be an error, not silently replaced by env synthesis")
+	}
+}
+
+// TestConfigFromEnvGetsInvestigationDefaults: the synthesized (zero-config) path
+// must reach config.ApplyDefaults exactly as a loaded one does. Without this, a
+// zero-config investigation runs with Investigation.Timeout == 0, and
+// LoopInvestigator.Investigate only applies a deadline when Timeout > 0 — i.e. no
+// deadline at all, while the identical command with a minimal runlore.yaml gets the
+// defaulted 10m. This test pins that the two construction paths cannot diverge.
+func TestConfigFromEnvGetsInvestigationDefaults(t *testing.T) {
+	dir := t.TempDir()
+	t.Chdir(dir)
+	t.Setenv("ANTHROPIC_API_KEY", "sk-ant-test")
+
+	envCfg, err := resolveInvestigateConfig(defaultConfigPath, false)
+	if err != nil {
+		t.Fatalf("resolve (env): %v", err)
+	}
+	if envCfg.Investigation.Timeout == 0 {
+		t.Fatal("zero-config path: Investigation.Timeout must be defaulted (non-zero), got 0 (no per-investigation deadline)")
+	}
+
+	// A minimal, real runlore.yaml with the same model settings must produce the
+	// SAME defaulted timeout — the two paths are not allowed to disagree.
+	fileDir := t.TempDir()
+	filePath := filepath.Join(fileDir, "runlore.yaml")
+	if err := os.WriteFile(filePath, []byte(
+		"model:\n  provider: anthropic\n  model: claude-sonnet-5\n  api_key_env: ANTHROPIC_API_KEY\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	fileCfg, err := resolveInvestigateConfig(filePath, true)
+	if err != nil {
+		t.Fatalf("resolve (file): %v", err)
+	}
+	if envCfg.Investigation.Timeout != fileCfg.Investigation.Timeout {
+		t.Errorf("env-synthesized timeout = %v, want the loaded-config default %v",
+			envCfg.Investigation.Timeout, fileCfg.Investigation.Timeout)
+	}
+}

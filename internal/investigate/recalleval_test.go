@@ -11,7 +11,7 @@ package investigate
 // which is exactly how the live "recall never fires on KubePodNotReady" gap went
 // unnoticed: a generic alertname + terse annotation is a ~2-token BM25 query
 // against a differently-worded runbook, scoring ~0.096 live — far below the
-// production solo_floor of 4.0 (config.applyDefaults).
+// production solo_floor of 4.0 (config.ApplyDefaults).
 //
 // This harness closes that hole. It builds a REAL catalog.Catalog (real bleve
 // BM25, no fake scorer) over a fixture KB modeled on the live runlore-kb, feeds it
@@ -42,7 +42,7 @@ import (
 	"github.com/Smana/runlore/internal/providers"
 )
 
-// --- production thresholds (mirror config.applyDefaults InstantRecall defaults) ---
+// --- production thresholds (mirror config.ApplyDefaults InstantRecall defaults) ---
 // Kept as named constants so the harness gates EXACTLY as production does — no
 // test ever tunes these down to force a fire (the whole point is to measure the
 // real gap).
@@ -712,7 +712,7 @@ func TestRecallEvalGitOpsRetrievable(t *testing.T) {
 
 // --- reranker: the calibrated-confidence fire gate, measured on the REAL corpus ---
 //
-// The default reranker knobs, mirrored from config.applyDefaults. The threshold is the
+// The default reranker knobs, mirrored from config.ApplyDefaults. The threshold is the
 // crux: unlike prodSoloFloor (4.0, an ABSOLUTE BM25 magnitude that only fits a
 // hand-tuned corpus) it is a corpus-INDEPENDENT calibrated confidence, so the SAME
 // default fires across corpora.

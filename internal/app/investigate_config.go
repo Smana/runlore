@@ -54,7 +54,13 @@ func resolveInvestigateConfig(path string, explicit bool) (*config.Config, error
 // configFromEnv synthesizes a minimal, model-only config from the environment. Every
 // data source stays unset, so each disables its own tool — no cluster, no Flux, no
 // KB repo, no forge and no notifier are required to get an answer.
+//
+// The returned config is run through config.ApplyDefaults before it is handed back,
+// same as one read by config.Load — otherwise fields like Investigation.Timeout
+// would stay at their zero value here while a loaded config gets ApplyDefaults'
+// 10m, and an environment-only investigation would run with no deadline at all.
 func configFromEnv() (*config.Config, error) {
+	var cfg *config.Config
 	switch {
 	case os.Getenv(envOpenAIBaseURL) != "":
 		m := config.Model{
@@ -66,19 +72,21 @@ func configFromEnv() (*config.Config, error) {
 		if os.Getenv(envOpenAIKey) != "" {
 			m.APIKeyEnv = envOpenAIKey
 		}
-		return &config.Config{Model: m}, nil
+		cfg = &config.Config{Model: m}
 	case os.Getenv(envAnthropicKey) != "":
-		return &config.Config{Model: config.Model{
+		cfg = &config.Config{Model: config.Model{
 			Provider:  "anthropic",
 			Model:     defaultAnthropicModel,
 			APIKeyEnv: envAnthropicKey,
-		}}, nil
+		}}
 	default:
 		return nil, fmt.Errorf(
 			"no model configured: set %s (+ optional %s / %s) for an OpenAI-compatible endpoint, "+
 				"or %s for Anthropic — or write a %s and pass it with --config",
 			envOpenAIBaseURL, envOpenAIKey, envOpenAIModel, envAnthropicKey, defaultConfigPath)
 	}
+	config.ApplyDefaults(cfg)
+	return cfg, nil
 }
 
 // or returns a when non-empty, else b.

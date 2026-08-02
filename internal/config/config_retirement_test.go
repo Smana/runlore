@@ -11,7 +11,7 @@ func TestApplyDefaultsRetirementEnabled(t *testing.T) {
 	// Only retirement.enabled set — the three tuning knobs get the recall-gate defaults.
 	var c Config
 	c.Curate.Retirement.Enabled = true
-	applyDefaults(&c)
+	ApplyDefaults(&c)
 	r := c.Curate.Retirement
 	if r.MinObservations != 3 {
 		t.Errorf("default MinObservations: got %d, want 3", r.MinObservations)
@@ -26,7 +26,7 @@ func TestApplyDefaultsRetirementEnabled(t *testing.T) {
 	// Explicit values are respected, not overwritten.
 	var c2 Config
 	c2.Curate.Retirement = Retirement{Enabled: true, MinObservations: 5, Floor: 0.3, Prior: 4.0}
-	applyDefaults(&c2)
+	ApplyDefaults(&c2)
 	if r2 := c2.Curate.Retirement; r2.MinObservations != 5 || r2.Floor != 0.3 || r2.Prior != 4.0 {
 		t.Fatalf("explicit retirement tuning overwritten: %+v", r2)
 	}
@@ -36,7 +36,7 @@ func TestApplyDefaultsRetirementDisabled(t *testing.T) {
 	// Disabled (the default): the pass is opt-in, so no defaults are filled — the
 	// block stays at its zero value and never wires the pass in.
 	var c Config
-	applyDefaults(&c)
+	ApplyDefaults(&c)
 	if r := c.Curate.Retirement; r.MinObservations != 0 || r.Floor != 0 || r.Prior != 0 {
 		t.Fatalf("defaults must not be applied while retirement is disabled: %+v", r)
 	}
