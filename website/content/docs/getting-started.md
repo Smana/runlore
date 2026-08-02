@@ -304,6 +304,34 @@ configured in your `runlore.yaml` refines titles/descriptions/tags (purely
 optional — a model failure falls back to the deterministic result). Re-running
 the same import is a no-op.
 
+## Step 1c — Add the knowledge commons (optional)
+
+If you have no runbooks to import either, point RunLore at the
+[knowledge commons](https://github.com/Smana/runlore-kb-commons) — a shared, vendor-neutral
+bundle of generic playbooks (CrashLoopBackOff, unbound PVCs, stuck cert-manager challenges,
+unschedulable pods) that ships as a **second, read-only catalog root**:
+
+```yaml
+catalog:
+  dir: /var/lib/runlore/catalog          # your own catalog, from Step 1
+  commons:
+    url: https://github.com/Smana/runlore-kb-commons
+    branch: main
+    interval: 24h
+    dir: /var/lib/runlore/commons        # must differ from catalog.dir
+```
+
+Both roots are indexed together and your own entries win scoring ties, so the commons acts as
+a floor and never competes with knowledge from your own incidents. The curator never writes
+to it.
+
+One property to know before enabling it: **commons entries never fire instant recall.** They
+are resource-less by design, and recall's structural filter rejects a resource-less entry for
+any alert carrying a workload. They ground `kb_search` mid-investigation instead — which is
+the honest role for a generic playbook. See
+[Knowledge Commons]({{< relref "concepts/knowledge-commons.md" >}}) for why that is the
+correct behaviour rather than a limitation.
+
 ---
 
 ## Step 2 — GitHub App for curation (optional)

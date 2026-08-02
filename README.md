@@ -111,6 +111,11 @@ The autonomous *alert → RCA → chat* loop is a commodity. What isn't: a knowl
 Git repo you control, PR-reviewed, with full provenance. Knowledge that consistently resolves
 incidents gains trust; knowledge that keeps failing decays.
 
+Starting from empty is optional. The [knowledge commons](https://github.com/Smana/runlore-kb-commons)
+is a shared bundle of generic playbooks you can mount as a second, read-only catalog root, so
+`kb_search` is useful on day one. Your own entries always win ties, and the curator never writes
+there — it is a floor, not a substitute for knowledge from your own incidents.
+
 An instant recall is never a blind cache hit — three gates stand in front of it: the entry must
 **structurally match** the incident (same workload/resource, retrieval score above a floor), it must
 **win by a clear margin** over the runner-up entry (ambiguous matches fall through to a full
