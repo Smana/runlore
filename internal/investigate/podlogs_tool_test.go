@@ -4,8 +4,12 @@ package investigate
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"testing"
+
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 
 	"github.com/Smana/runlore/internal/providers"
 )
@@ -130,5 +134,52 @@ func TestPodLogsToolRejectsOutOfAllowlistNamespace(t *testing.T) {
 	}
 	if !strings.Contains(out, "pod_log_namespaces") {
 		t.Fatalf("rejection should point at the pod_log_namespaces allowlist, got: %q", out)
+	}
+}
+
+// fakeForbiddenLogs returns the RBAC denial the Kubernetes API produces when
+// pods/log is not granted for the requested namespace.
+type fakeForbiddenLogs struct{}
+
+func (fakeForbiddenLogs) Query(context.Context, string, providers.TimeWindow) (providers.LogResult, error) {
+	return nil, nil
+}
+
+func (fakeForbiddenLogs) PodLogs(_ context.Context, q providers.PodLogQuery) (providers.LogResult, error) {
+	return nil, apierrors.NewForbidden(
+		schema.GroupResource{Resource: "pods/log"}, "",
+		errors.New(`User "system:serviceaccount:runlore:runlore" cannot get resource "pods/log" in API group "" in the namespace "`+q.Namespace+`"`))
+}
+
+// TestPodLogsForbiddenNamesTheLever pins the RBAC-denial message.
+//
+// The app layer always permits the INCIDENT's own namespace, while pods/log RBAC is
+// granted only over the controller-log namespaces — deliberately, since pod logs
+// carry secrets and are streamed to an external model. So a denial here is the
+// normal, configured outcome for any incident outside those namespaces.
+//
+// Returning the raw Kubernetes error left the model to invent a reason: a real
+// investigation reported "the runlore serviceaccount lacks pods/log RBAC in the
+// tooling namespace", which reads to an operator like a misconfiguration to chase
+// rather than a policy with a named lever. It must name the lever, and it must not
+// fail the tool call — an expected denial is not an error.
+func TestPodLogsForbiddenNamesTheLever(t *testing.T) {
+	tool := PodLogsTool{Logs: fakeForbiddenLogs{}, IncidentNamespace: "tooling"}
+	out, err := tool.Call(context.Background(), `{"namespace":"tooling","selector":"app=harbor"}`)
+	if err != nil {
+		t.Fatalf("an expected RBAC denial must not fail the tool call: %v", err)
+	}
+	for _, want := range []string{"tooling", "rbac.controllerLogNamespaces", "deliberate"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("denial message must contain %q so the operator can act on it:\n%s", want, out)
+		}
+	}
+	// It must not read as a defect in RunLore.
+	if strings.Contains(strings.ToLower(out), "lacks") {
+		t.Errorf("message frames a deliberate boundary as a missing grant:\n%s", out)
+	}
+	// It must point at what DOES work, so the investigation recovers.
+	if !strings.Contains(out, "kube_events") && !strings.Contains(out, "query_logs") {
+		t.Errorf("message must name a usable alternative:\n%s", out)
 	}
 }
