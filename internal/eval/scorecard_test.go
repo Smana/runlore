@@ -71,7 +71,9 @@ func TestScorecardMarkdown(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	md := ScorecardMarkdown(rep, entries)
+	// This report predates per-case token attribution, so 0,0,0 exercises the "no
+	// cost section" path — this test asserts on the sections the cost block doesn't touch.
+	md := ScorecardMarkdown(rep, entries, 0, 0, 0)
 	for _, want := range []string{
 		"# RunLore nightly eval scorecard",
 		"lore eval -config eval/ci.runlore.yaml -cases examples/eval -n 5 -fail-under 0.7", // reproduce command

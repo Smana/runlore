@@ -24,6 +24,12 @@ type Report struct {
 	OutputTokens int          `json:"output_tokens,omitempty"`
 	CostUSD      *float64     `json:"cost_usd,omitempty"` // present only when config.model.pricing is set
 	Cases        []ReportCase `json:"cases"`
+
+	// Token rates (USD per MTok) this run was priced at, carried so the published
+	// scorecard can show a per-path cost breakdown without re-reading any config.
+	InputUSDPerMTok       float64 `json:"input_usd_per_mtok,omitempty"`
+	CachedInputUSDPerMTok float64 `json:"cached_input_usd_per_mtok,omitempty"`
+	OutputUSDPerMTok      float64 `json:"output_usd_per_mtok,omitempty"`
 }
 
 // ReportCase is one case's k-of-n verdict in the report.

@@ -134,6 +134,13 @@ func RunEval(args []string) error {
 		}
 		usage := counting.Total()
 		rep := camp.Report(st, cfg.Model.Provider+"/"+cfg.Model.Model, usage, evalCostUSD(cfg, usage))
+		// Carry the rates in the report so the scorecard renderer — which reads a
+		// report from disk with no config in hand — can show the per-path cost split.
+		if p := cfg.Model.Pricing; p != nil {
+			rep.InputUSDPerMTok = p.InputUSDPerMTok
+			rep.CachedInputUSDPerMTok = p.CachedInputUSDPerMTok
+			rep.OutputUSDPerMTok = p.OutputUSDPerMTok
+		}
 		if b, err := rep.JSON(); err != nil {
 			fmt.Fprintf(os.Stderr, "eval: report not written: %v\n", err)
 		} else if mkErr := os.MkdirAll(*reportDir, 0o750); mkErr != nil {
