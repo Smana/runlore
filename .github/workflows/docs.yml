@@ -41,7 +41,7 @@ jobs:
           sudo dpkg -i /tmp/hugo.deb
       - name: Configure Pages
         id: pages
-        uses: actions/configure-pages@v5
+        uses: actions/configure-pages@v6
       # Pull the published scorecard from the eval-scorecard orphan branch and render
       # it as /eval. The branch is the nightly's publishing target; copying it in at
       # build time keeps main free of generated numbers. A missing branch is NOT a
@@ -80,9 +80,9 @@ jobs:
         # baseURL comes from hugo.yaml (https://runlore.io/) — do NOT override with
         # configure-pages' output, which resolves to http:// and yields http canonical URLs.
         run: hugo --minify --gc
-      - uses: actions/upload-pages-artifact@v3
+      - uses: actions/upload-pages-artifact@v5
         with:
           path: website/public
       - name: Deploy
         id: deployment
-        uses: actions/deploy-pages@v4
+        uses: actions/deploy-pages@v5

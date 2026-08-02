@@ -67,17 +67,37 @@ func parseVerdicts(args string) ([]verdict, error) {
 
 // verifyFindings runs one adversarial review pass over the investigation's root
 // causes, rejecting correlation-only/unverified claims and downgrading unproven
-// ones before delivery/curation. Best-effort: on any verifier error the findings
-// pass through unchanged (verification must never lose a real finding). The verify
-// completion's token usage is accumulated into totals (when non-nil) so the
-// per-investigation cost includes the verify pass.
+// ones before delivery/curation. The verify completion's token usage is accumulated
+// into totals (when non-nil) so the per-investigation cost includes the verify pass.
 // transcript is the loop's accumulated message history (may be nil, e.g. the
 // recall short-circuit path where no loop ran). A bounded, redacted excerpt of its
 // tool results is fed to the reviewer so groundedness ("does this cause trace to a
 // tool result?") can be checked rather than merely asserted.
-func (li *LoopInvestigator) verifyFindings(ctx context.Context, req Request, inv providers.Investigation, transcript []providers.Message, totals *providers.UsageTotals) providers.Investigation {
+//
+// The second return, verified, reports whether an adversarial review actually
+// happened: true when the returned investigation reflects a completed review
+// (including the trivial case of no root causes to review — there is nothing an
+// adversarial pass could reject), false when the review could not be completed (a
+// model error, or a response with no usable verdicts) and inv is returned exactly as
+// given.
+//
+// Callers differ in how load-bearing that signal is, and MUST differ deliberately:
+//   - The full-investigation call site (loop.go, after the ReAct loop) may ignore
+//     verified and keep findings as-is on failure. There, the findings were already
+//     built from independently-gathered tool evidence before verify ever ran — verify
+//     is a second opinion on real evidence, not the only check, so losing a real
+//     finding to a down reviewer would be the worse failure mode. Best-effort is
+//     correct there.
+//   - The recall short-circuit call site (tryRecall, loop.go) MUST treat
+//     verified==false as a forced fall-through to a full investigation. There is no
+//     independently-gathered evidence on that path — the "as-is" investigation is text
+//     and confidence lifted directly from a possibly-poisoned catalog entry, and verify
+//     is the ENTIRE adversarial check. Passing it through unreviewed on a model error
+//     would let untrusted catalog content bypass review by the simple expedient of the
+//     reviewer being unavailable.
+func (li *LoopInvestigator) verifyFindings(ctx context.Context, req Request, inv providers.Investigation, transcript []providers.Message, totals *providers.UsageTotals) (result providers.Investigation, verified bool) {
 	if len(inv.RootCauses) == 0 {
-		return inv
+		return inv, true
 	}
 	// Route the adversarial pass to a cheaper/faster model when one is configured;
 	// otherwise reuse the main investigation model. Verify always runs (the honesty
@@ -96,7 +116,7 @@ func (li *LoopInvestigator) verifyFindings(ctx context.Context, req Request, inv
 	})
 	if err != nil {
 		li.Log.Warn("verify pass failed; keeping findings as-is", "title", req.Title, "err", err)
-		return inv
+		return inv, false
 	}
 	// Count the verify completion toward the per-investigation token/cost total.
 	if totals != nil {
@@ -110,9 +130,14 @@ func (li *LoopInvestigator) verifyFindings(ctx context.Context, req Request, inv
 		}
 	}
 	if len(verds) == 0 {
-		return inv
+		// The model responded but produced no verdict for the reviewer to apply (wrong
+		// tool called, or garbled/empty args) — no review actually happened, the same
+		// practical outcome as an error. Logged distinctly (there is no `err` here) so
+		// this degenerate case is not silently indistinguishable from a genuine approval.
+		li.Log.Warn("verify pass returned no usable verdicts; keeping findings as-is", "title", req.Title)
+		return inv, false
 	}
-	return applyVerdicts(li, req, inv, verds)
+	return applyVerdicts(li, req, inv, verds), true
 }
 
 // applyVerdicts rewrites the investigation per the review: rejected root causes

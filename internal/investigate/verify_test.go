@@ -4,6 +4,7 @@ package investigate
 
 import (
 	"context"
+	"errors"
 	"io"
 	"log/slog"
 	"strings"
@@ -323,5 +324,77 @@ func TestVerifyUsesVerifyModel(t *testing.T) {
 	}
 	if got == nil || len(got.RootCauses) != 1 || got.RootCauses[0].Confidence != 0.7 {
 		t.Fatalf("expected kept cause at verify confidence 0.7, got %+v", got)
+	}
+}
+
+// TestVerifyFindingsReportsUnverifiedOnModelError pins the "could not run" signal
+// verifyFindings owes its callers: a model error must report verified=false, distinct
+// from a completed review, so a caller for which verify is the SOLE adversarial check
+// (tryRecall, loop.go) can tell "approved" and "never ran" apart and refuse to treat
+// the latter as the former. This is the signal the recall-verify fail-open regression
+// (poisoned-recall-verify eval scenario) hinged on missing.
+func TestVerifyFindingsReportsUnverifiedOnModelError(t *testing.T) {
+	model := &errModel{err: errors.New("401 authentication_error: invalid x-api-key")}
+	li := &LoopInvestigator{Model: model, Log: slog.New(slog.NewTextHandler(io.Discard, nil))}
+	inv := providers.Investigation{
+		Confidence: 0.9,
+		RootCauses: []providers.Hypothesis{{Summary: "stale configmap", Confidence: 0.9}},
+	}
+	got, verified := li.verifyFindings(context.Background(), Request{Title: "x"}, inv, nil, nil)
+	if verified {
+		t.Fatal("a model error must report verified=false")
+	}
+	if len(got.RootCauses) != 1 || got.RootCauses[0].Summary != "stale configmap" || got.Confidence != 0.9 {
+		t.Fatalf("the investigation must still be returned UNCHANGED on a verify error (callers that ignore verified rely on this), got %+v", got)
+	}
+}
+
+// TestVerifyFindingsReportsUnverifiedOnNoUsableVerdicts covers the other "review did
+// not actually happen" case: the model responded without error but called no tool (or
+// an unparseable one), so there is no verdict to apply. Practically identical to a
+// model error from a caller's point of view — no adversarial review occurred — so it
+// must also report verified=false, not silently pass as approval.
+func TestVerifyFindingsReportsUnverifiedOnNoUsableVerdicts(t *testing.T) {
+	model := &scriptModel{responses: []providers.CompletionResponse{{Text: "looks fine to me"}}} // no tool call
+	li := &LoopInvestigator{Model: model, Log: slog.New(slog.NewTextHandler(io.Discard, nil))}
+	inv := providers.Investigation{
+		Confidence: 0.9,
+		RootCauses: []providers.Hypothesis{{Summary: "stale configmap", Confidence: 0.9}},
+	}
+	got, verified := li.verifyFindings(context.Background(), Request{Title: "x"}, inv, nil, nil)
+	if verified {
+		t.Fatal("a response with no usable verdicts must report verified=false")
+	}
+	if len(got.RootCauses) != 1 || got.RootCauses[0].Summary != "stale configmap" {
+		t.Fatalf("the investigation must still be returned unchanged, got %+v", got)
+	}
+}
+
+// TestVerifyFindingsReportsVerifiedOnSuccess is the positive pin: a completed review
+// (verdicts applied) reports verified=true.
+func TestVerifyFindingsReportsVerifiedOnSuccess(t *testing.T) {
+	model := &scriptModel{responses: []providers.CompletionResponse{
+		{ToolCalls: []providers.ToolCall{{ID: "1", Name: submitVerdictsName, Args: `{"verdicts":[{"index":0,"verdict":"keep","confidence":0.8}]}`}}},
+	}}
+	li := &LoopInvestigator{Model: model, Log: slog.New(slog.NewTextHandler(io.Discard, nil))}
+	inv := providers.Investigation{
+		Confidence: 0.9,
+		RootCauses: []providers.Hypothesis{{Summary: "oom", Confidence: 0.9}},
+	}
+	_, verified := li.verifyFindings(context.Background(), Request{Title: "x"}, inv, nil, nil)
+	if !verified {
+		t.Fatal("a completed review must report verified=true")
+	}
+}
+
+// TestVerifyFindingsReportsVerifiedWhenNothingToReview covers the trivial early
+// return (no root causes to review): there is nothing for an adversarial pass to
+// reject, so this is not a failure — it must report verified=true (a caller like
+// tryRecall must not force a fall-through here; there is no root cause to lose).
+func TestVerifyFindingsReportsVerifiedWhenNothingToReview(t *testing.T) {
+	li := &LoopInvestigator{Model: &scriptModel{}, Log: slog.New(slog.NewTextHandler(io.Discard, nil))}
+	_, verified := li.verifyFindings(context.Background(), Request{Title: "x"}, providers.Investigation{}, nil, nil)
+	if !verified {
+		t.Fatal("no root causes to review must report verified=true, not a failure")
 	}
 }

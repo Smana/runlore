@@ -86,13 +86,22 @@ func checkRecall(want string, d investigate.RecallDecision) string {
 	switch {
 	case d.Fired && d.ShortCircuited:
 		got = "short_circuit"
+	case d.Fired && d.VerifyUnavailable:
+		// Distinct from "withdrawn" below: the entry fired but the fail-closed gate
+		// forced the fall-through because verify itself could not run — not because it
+		// reviewed the entry and rejected it. Collapsing this into "withdrawn" is
+		// exactly the ambiguity this branch exists to remove — see
+		// RecallDecision.VerifyUnavailable. Without it, a flapping verify endpoint
+		// would still satisfy expect_recall: withdrawn and publish a green result that
+		// means something entirely different from a genuine adversarial rejection.
+		got = "verify_unavailable"
 	case d.Fired:
 		got = "withdrawn"
 	}
 	switch want {
 	case "":
 		return ""
-	case "short_circuit", "withdrawn", "rejected":
+	case "short_circuit", "withdrawn", "rejected", "verify_unavailable":
 		if got != want {
 			return fmt.Sprintf("expect_recall=%s but recall %s", want, got)
 		}
