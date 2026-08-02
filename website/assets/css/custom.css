@@ -21,6 +21,24 @@
 :root:not([data-theme="dark"]) .hero-glow { opacity: 0.5; }
 .hextra-container, main .content { position: relative; z-index: 1; }
 
+/* Proof line: a claim meant to be READ, not a label. Deliberately NOT .rl-eyebrow
+   — that is the flow diagram's caption style below (12px uppercase, tracked out,
+   teal), which is built for three words of orientation. A full sentence set that
+   way reads as shouting, and the link buried inside it stops looking clickable.
+   It sits after the feature grid on purpose: by then the cards have made the whole
+   claim, and "fine, but how well does it actually work?" is the reader's next
+   thought — which is exactly what a nightly per-scenario scorecard answers. */
+.rl-proof {
+  margin: 2.5rem 0 0;
+  font-size: 15px;
+  opacity: 0.75;
+}
+.rl-proof a {
+  color: #14c9a6;
+  text-decoration: underline;
+  text-underline-offset: 3px;
+}
+
 /* ---- "How it works" flow diagram ---- */
 .rl-eyebrow {
   margin: 3rem 0 0;
