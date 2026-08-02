@@ -106,7 +106,10 @@ func disabledTools(cfg *config.Config) []string {
 	if cfg.Logs.URL == "" {
 		off = append(off, "logs (query_logs)")
 	}
-	if cfg.Catalog.Dir == "" && cfg.Catalog.Git.URL == "" {
+	// Reuse the enablement helper rather than restating its condition: the notice
+	// must name exactly what the tool wiring actually gates on, and two copies of
+	// that rule would eventually disagree.
+	if !CatalogConfigured(cfg) {
 		off = append(off, "knowledge catalog (kb_search, instant recall)")
 	}
 	return off
