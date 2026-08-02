@@ -20,13 +20,15 @@ reference every page here deep-links into.
 What starts an investigation.
 
 {{< hextra/feature-grid cols="4" >}}
-  {{< hextra/feature-card link="alertmanager/" icon="bell" title="Alertmanager"
+  {{< hextra/feature-card link="triggers/alertmanager/" icon="bell" title="Alertmanager"
     subtitle="Prometheus/VMAlert webhook — the primary trigger." >}}
-  {{< hextra/feature-card link="gitops/" icon="cube-transparent" title="GitOps failures"
+  {{< hextra/feature-card link="triggers/gitops/" icon="cube-transparent" title="GitOps failures"
     subtitle="React to Flux or Argo CD Ready=False, not just alerts." >}}
-  {{< hextra/feature-card link="pagerduty/" icon="shield-exclamation" title="PagerDuty"
+  {{< hextra/feature-card link="triggers/pagerduty/" icon="shield-exclamation" title="PagerDuty"
     subtitle="Trigger investigations from PagerDuty incidents." >}}
-  {{< hextra/feature-card link="custom-webhook/" icon="puzzle" title="Custom webhook"
+  {{< hextra/feature-card link="triggers/grafana/" icon="bell" title="Grafana Alerting"
+    subtitle="Grafana's own alert webhook, as a first-class source." >}}
+  {{< hextra/feature-card link="triggers/custom-webhook/" icon="puzzle" title="Custom webhook"
     subtitle="Map any vendor's alert JSON with dot-path field extraction — no code." >}}
 {{< /hextra/feature-grid >}}
 
@@ -35,13 +37,13 @@ What starts an investigation.
 What runs the investigation loop.
 
 {{< hextra/feature-grid cols="4" >}}
-  {{< hextra/feature-card link="openai-compatible/" icon="chip" title="OpenAI-compatible"
+  {{< hextra/feature-card link="llm/openai-compatible/" icon="chip" title="OpenAI-compatible"
     subtitle="vLLM, Ollama, OpenAI, OpenRouter — any endpoint that supports forced tool_choice." >}}
-  {{< hextra/feature-card link="anthropic/" icon="chip" title="Anthropic"
+  {{< hextra/feature-card link="llm/anthropic/" icon="chip" title="Anthropic"
     subtitle="Native Claude, keyed or in-cluster via a compatible gateway." >}}
-  {{< hextra/feature-card link="gemini/" icon="chip" title="Gemini"
+  {{< hextra/feature-card link="llm/gemini/" icon="chip" title="Gemini"
     subtitle="Google's models over the OpenAI-compatible endpoint — version caveats apply." >}}
-  {{< hextra/feature-card link="local-keyless/" icon="terminal" title="Local / keyless"
+  {{< hextra/feature-card link="llm/local-keyless/" icon="terminal" title="Local / keyless"
     subtitle="In-cluster vLLM or Ollama — no API key, no egress." >}}
 {{< /hextra/feature-grid >}}
 
@@ -51,25 +53,29 @@ What the agent reads for signal — every one is optional; an unset data source 
 it would have unlocked.
 
 {{< hextra/feature-grid cols="3" >}}
-  {{< hextra/feature-card link="prometheus/" icon="database" title="Prometheus / VictoriaMetrics"
+  {{< hextra/feature-card link="data-sources/prometheus/" icon="database" title="Prometheus / VictoriaMetrics"
     subtitle="PromQL metrics — the query_metrics tools." >}}
-  {{< hextra/feature-card link="victorialogs/" icon="database" title="VictoriaLogs"
+  {{< hextra/feature-card link="data-sources/victorialogs/" icon="database" title="VictoriaLogs"
     subtitle="LogsQL — the default logs backend." >}}
-  {{< hextra/feature-card link="loki/" icon="database" title="Grafana Loki"
+  {{< hextra/feature-card link="data-sources/loki/" icon="database" title="Grafana Loki"
     subtitle="LogQL, auto-detected at startup." >}}
-  {{< hextra/feature-card link="kubernetes/" icon="cube" title="Kubernetes"
+  {{< hextra/feature-card link="data-sources/elasticsearch/" icon="database" title="Elasticsearch"
+    subtitle="ECS-shaped logs over the _search API." >}}
+  {{< hextra/feature-card link="data-sources/opensearch/" icon="database" title="OpenSearch"
+    subtitle="The AWS-managed fork, same query path." >}}
+  {{< hextra/feature-card link="data-sources/kubernetes/" icon="cube" title="Kubernetes"
     subtitle="Pod status, events, controller and pod logs — client-go, in-cluster." >}}
-  {{< hextra/feature-card link="hubble/" icon="globe" title="Cilium Hubble"
+  {{< hextra/feature-card link="data-sources/hubble/" icon="globe" title="Cilium Hubble"
     subtitle="eBPF flow visibility with rich drop reasons." >}}
-  {{< hextra/feature-card link="aws-vpc-flow-logs/" icon="cloud" title="AWS VPC Flow Logs"
+  {{< hextra/feature-card link="data-sources/aws-vpc-flow-logs/" icon="cloud" title="AWS VPC Flow Logs"
     subtitle="Network drops on any AWS VPC, Cilium or not." >}}
-  {{< hextra/feature-card link="gcp-firewall-logs/" icon="cloud" title="GCP Firewall Logs"
+  {{< hextra/feature-card link="data-sources/gcp-firewall-logs/" icon="cloud" title="GCP Firewall Logs"
     subtitle="DENIED connections on any GCP VPC, including GKE." >}}
-  {{< hextra/feature-card link="aws-cloud/" icon="cloud-download" title="AWS cloud control plane"
+  {{< hextra/feature-card link="data-sources/aws-cloud/" icon="cloud-download" title="AWS cloud control plane"
     subtitle="CloudTrail + EC2/ASG/EKS — what changed outside GitOps." >}}
-  {{< hextra/feature-card link="source-repos/" icon="link" title="Source repos"
+  {{< hextra/feature-card link="data-sources/source-repos/" icon="link" title="Source repos"
     subtitle="Turns a manifest bump into the actual code diff behind it." >}}
-  {{< hextra/feature-card link="mcp/" icon="puzzle" title="MCP"
+  {{< hextra/feature-card link="data-sources/mcp/" icon="puzzle" title="MCP"
     subtitle="Extend the agent's own toolbox with remote MCP tools — no Go required." >}}
 {{< /hextra/feature-grid >}}
 
@@ -78,13 +84,13 @@ it would have unlocked.
 Where findings are delivered.
 
 {{< hextra/feature-grid cols="4" >}}
-  {{< hextra/feature-card link="slack/" icon="chat" title="Slack"
+  {{< hextra/feature-card link="notifications/slack/" icon="chat" title="Slack"
     subtitle="Incoming webhook or bot token, with optional Approve/Reject buttons." >}}
-  {{< hextra/feature-card link="matrix/" icon="chat-alt" title="Matrix"
+  {{< hextra/feature-card link="notifications/matrix/" icon="chat-alt" title="Matrix"
     subtitle="Deliver to any Matrix room via an access token." >}}
-  {{< hextra/feature-card link="webhook/" icon="link" title="Webhook"
+  {{< hextra/feature-card link="notifications/webhook/" icon="link" title="Webhook"
     subtitle="Generic outgoing webhook — plug in anything that takes JSON." >}}
-  {{< hextra/feature-card link="templated/" icon="chat-alt-2" title="Templated"
+  {{< hextra/feature-card link="notifications/templated/" icon="chat-alt-2" title="Templated"
     subtitle="Named instances with your own Go-template payload, e.g. Microsoft Teams." >}}
 {{< /hextra/feature-grid >}}
 
@@ -93,6 +99,8 @@ Where findings are delivered.
 Where the Learn loop writes findings back to.
 
 {{< hextra/feature-grid cols="4" >}}
-  {{< hextra/feature-card link="github/" icon="external-link" title="GitHub"
+  {{< hextra/feature-card link="forge/github/" icon="external-link" title="GitHub"
     subtitle="A scoped GitHub App drafts PRs and issues against your KB repo." >}}
+  {{< hextra/feature-card link="forge/gitlab/" icon="external-link" title="GitLab"
+    subtitle="A project or group access token drafts merge requests — self-hosted or gitlab.com." >}}
 {{< /hextra/feature-grid >}}

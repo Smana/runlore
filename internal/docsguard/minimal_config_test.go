@@ -4,6 +4,7 @@ package docsguard
 
 import (
 	"bytes"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -55,20 +56,31 @@ func extractMinimalConfig(body []byte) ([]byte, bool) {
 // config.Config" — invisible to a human reader, obvious to the parser.
 func TestIntegrationMinimalConfigsParse(t *testing.T) {
 	dir := filepath.Join("..", "..", "website", "content", "docs", "integrations")
-	entries, err := os.ReadDir(dir)
+	// WalkDir, not ReadDir: the pages live in per-type subdirectories
+	// (triggers/, llm/, data-sources/, notifications/, forge/). A non-recursive
+	// read would find zero pages — the checked==0 floor below is what turns that
+	// into a loud failure instead of a guard that passes while checking nothing.
+	var pages []string
+	err := filepath.WalkDir(dir, func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if d.IsDir() || filepath.Ext(d.Name()) != ".md" || d.Name() == "_index.md" {
+			return nil
+		}
+		pages = append(pages, path)
+		return nil
+	})
 	if err != nil {
-		t.Fatalf("read integrations dir: %v", err)
+		t.Fatalf("walk integrations dir: %v", err)
 	}
 
 	checked := 0
-	for _, e := range entries {
-		if e.IsDir() || filepath.Ext(e.Name()) != ".md" || e.Name() == "_index.md" {
-			continue
-		}
-		page := filepath.Join(dir, e.Name())
+	for _, page := range pages {
+		name := filepath.Base(page)
 		body, err := os.ReadFile(page) //nolint:gosec // test-owned path under the repo
 		if err != nil {
-			t.Fatalf("read %s: %v", e.Name(), err)
+			t.Fatalf("read %s: %v", name, err)
 		}
 		block, ok := extractMinimalConfig(body)
 		if !ok {
@@ -78,13 +90,13 @@ func TestIntegrationMinimalConfigsParse(t *testing.T) {
 			continue
 		}
 
-		tmp := filepath.Join(t.TempDir(), e.Name()+".yaml")
+		tmp := filepath.Join(t.TempDir(), name+".yaml")
 		if err := os.WriteFile(tmp, block, 0o600); err != nil {
-			t.Fatalf("write temp config for %s: %v", e.Name(), err)
+			t.Fatalf("write temp config for %s: %v", name, err)
 		}
 		if _, err := config.Load(tmp); err != nil {
 			t.Errorf("%s: the documented Minimal config does not load — a reader "+
-				"pasting it gets a hard startup failure: %v", e.Name(), err)
+				"pasting it gets a hard startup failure: %v", name, err)
 		}
 		checked++
 	}
