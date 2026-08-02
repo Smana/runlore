@@ -16,7 +16,7 @@ requests. This page has three stops, each independently worth doing on its own:
 ## Try it — no cluster, no keys
 
 Before wiring anything, watch RunLore reach a real root cause over recorded evidence — no
-Kubernetes, no LLM key, no network:
+Kubernetes, no LLM key, no network. You only need Go and git:
 
 ```bash
 git clone https://github.com/Smana/runlore && cd runlore
@@ -164,7 +164,7 @@ equally supported; each gets a one-line pointer to its own page under
   an unset one just disables the tool it would have unlocked — see
   [GitOps failures]({{< relref "/docs/integrations/gitops.md" >}}). Without it, RunLore still reacts
   to Alertmanager alerts and investigates with whatever other signals you've wired.
-- A **GitHub App** for curation — [Step 2](#step-2-github-app-for-curation-optional) below.
+- A **GitHub App** for curation — [Step 2](#step-2--github-app-for-curation-optional) below.
   **Without it the Learn loop (curation) is disabled**: RunLore still reacts and investigates, it
   just can't write what it learns back to your KB repo. Since the learning loop is RunLore's
   differentiator, this is **strongly recommended**.
@@ -182,7 +182,7 @@ have unlocked, nothing else changes. Full catalog:
   [AWS VPC Flow Logs]({{< relref "/docs/integrations/aws-vpc-flow-logs.md" >}}), or
   [GCP Firewall Logs]({{< relref "/docs/integrations/gcp-firewall-logs.md" >}}) — RunLore does
   **not** assume Cilium), [AWS cloud control plane]({{< relref "/docs/integrations/aws-cloud.md" >}})
-  (also see [Step 4b](#step-4b-aws-cloud-provider-optional) below),
+  (also see [Step 4b](#step-4b--aws-cloud-provider-optional) below),
   [source repos]({{< relref "/docs/integrations/source-repos.md" >}}) for real Git diffs behind a
   version bump, and [MCP]({{< relref "/docs/integrations/mcp.md" >}}) for tools RunLore doesn't ship
   natively.
@@ -248,9 +248,9 @@ incidents, platform constraints.
    **Option A — Git-sync (recommended; closes the read/write loop).** RunLore clones the repo and
    re-pulls it on an interval, re-indexing automatically. When curation merges a PR into this repo, the
    new knowledge flows straight back into what the agent searches — no manual step. Configure it under
-   `config.catalog.git` ([step 4](#step-4-configure-and-install)) and set `catalog.gitSync: true` (which
+   `config.catalog.git` ([step 4](#step-4--configure-and-install)) and set `catalog.gitSync: true` (which
    mounts a writable mirror). A **private** repo authenticates with the **same curation GitHub App** by
-   default ([step 2](#step-2-github-app-for-curation-optional)) — one credential for both reads and
+   default ([step 2](#step-2--github-app-for-curation-optional)) — one credential for both reads and
    writes; set `git.token_env` only to use a different token.
 
    **Option B — ConfigMap (static).** Mount a snapshot; refresh it yourself when the repo changes:
@@ -333,7 +333,7 @@ installation tokens minted on demand from the App's private key (no long-lived c
 ### Security best practices
 
 - **Never commit the private key** or put it in `values.yaml`. Store it in a `Secret`
-  ([step 3](#step-3-credentials)) — ideally synced from a vault via External Secrets.
+  ([step 3](#step-3--credentials)) — ideally synced from a vault via External Secrets.
 - **Scope the installation** to specific repos, and grant only the three write permissions above.
 - Installation tokens are already **short-lived (1h) and auto-refreshed** — there is no long-lived
   token to leak. **Rotate the App private key** periodically anyway.
