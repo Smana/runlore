@@ -1,0 +1,18 @@
+{
+  "version": 1,
+  "scenario": "harbor-chart-bump",
+  "recorded_at": "2026-08-02T09:14:00Z",
+  "recorded_with": {"provider": "anthropic", "model": "claude-sonnet-5"},
+  "turns": [
+    {
+      "text": "",
+      "tool_calls": [{"id": "1", "name": "what_changed", "args": "{\"namespace\":\"harbor\"}"}],
+      "usage": {"input_tokens": 4211, "output_tokens": 96}
+    },
+    {
+      "text": "",
+      "tool_calls": [{"id": "2", "name": "submit_findings", "args": "{\"confidence\":0.86}"}],
+      "usage": {"input_tokens": 5310, "output_tokens": 402}
+    }
+  ]
+}

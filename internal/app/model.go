@@ -72,12 +72,6 @@ func BuildVerifyModel(cfg *config.Config) providers.ModelProvider {
 	if v == nil {
 		return nil
 	}
-	or := func(a, b string) string {
-		if a != "" {
-			return a
-		}
-		return b
-	}
 	apiKey := ""
 	if keyEnv := or(v.APIKeyEnv, cfg.Model.APIKeyEnv); keyEnv != "" {
 		apiKey = os.Getenv(keyEnv)

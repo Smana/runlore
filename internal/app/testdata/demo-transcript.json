@@ -1,0 +1,14 @@
+{
+  "version": 1,
+  "scenario": "harbor-chart-bump",
+  "recorded_at": "2026-08-02T00:00:00Z",
+  "recorded_with": {"provider": "test", "model": "fixture"},
+  "turns": [
+    {"tool_calls": [{"id": "1", "name": "what_changed", "args": "{\"namespace\":\"apps\"}"}],
+     "usage": {"input_tokens": 4211, "output_tokens": 96}},
+    {"tool_calls": [{"id": "2", "name": "submit_findings", "args": "{\"confidence\":0.8,\"root_causes\":[{\"summary\":\"chart 1.15 bump enabled a DB migration on harbor-db that blocks harbor-core\",\"confidence\":0.8}]}"}],
+     "usage": {"input_tokens": 5310, "output_tokens": 402}},
+    {"tool_calls": [{"id": "3", "name": "submit_verdicts", "args": "{\"verdicts\":[{\"index\":0,\"verdict\":\"keep\",\"confidence\":0.8}]}"}],
+     "usage": {"input_tokens": 900, "output_tokens": 40}}
+  ]
+}

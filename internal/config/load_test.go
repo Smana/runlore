@@ -12,7 +12,7 @@ import (
 
 // loadDoc writes doc to a temp runlore.yaml and Loads it — i.e. it exercises the real
 // entry point, defaults included. Tests that assert a DEFAULT must go through Load:
-// a bare &Config{} skips applyDefaults and would silently pin the zero value instead.
+// a bare &Config{} skips ApplyDefaults and would silently pin the zero value instead.
 func loadDoc(t *testing.T, doc string) *Config {
 	t.Helper()
 	p := filepath.Join(t.TempDir(), "runlore.yaml")
@@ -172,7 +172,7 @@ triggers:
 	if err != nil {
 		t.Fatalf("load: %v", err)
 	}
-	// An explicit `debounce: 0` must survive applyDefaults (not be clobbered to the
+	// An explicit `debounce: 0` must survive ApplyDefaults (not be clobbered to the
 	// 60s default for an unset window), so the trigger fires immediately.
 	if c.Triggers.GitOpsFailures.Debounce == nil {
 		t.Fatal("explicit debounce:0 should be non-nil (distinguishable from unset)")
@@ -213,7 +213,7 @@ sources:
   alertmanager: {}
 `)
 	if c.Triggers.Incidents.CancelQueuedOnResolve == nil {
-		t.Fatal("unset cancel_queued_on_resolve must be defaulted (non-nil) by applyDefaults")
+		t.Fatal("unset cancel_queued_on_resolve must be defaulted (non-nil) by ApplyDefaults")
 	}
 	if !c.Triggers.Incidents.CancelQueuedOnResolveEnabled() {
 		t.Fatal("cancel_queued_on_resolve must default to TRUE")
@@ -325,7 +325,7 @@ sources:
   alertmanager: {}
 `)
 	if c.Investigation.RateLimit.MaxPerWindow == nil {
-		t.Fatal("unset max_per_window must be defaulted (non-nil) by applyDefaults")
+		t.Fatal("unset max_per_window must be defaulted (non-nil) by ApplyDefaults")
 	}
 	if got := *c.Investigation.RateLimit.MaxPerWindow; got != 30 {
 		t.Fatalf("unset max_per_window must default to 30, got %d", got)

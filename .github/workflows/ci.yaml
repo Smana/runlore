@@ -43,3 +43,10 @@ jobs:
         uses: golangci/golangci-lint-action@ba0d7d2ec06a0ea1cb5fa41b2e4a3ab91d21278a # v9.3.0
         with:
           version: v2.12.2
+      - name: shellcheck
+        # Default severity, deliberately: install.sh is fetched and executed by users
+        # over the network, so it is the last script in this repo that should sit
+        # behind a lowered gate. The one pre-existing info-level note that blocked the
+        # default was fixed rather than muted.
+        # Preinstalled on the ubuntu-latest runner image.
+        run: shellcheck hack/*.sh website/static/install.sh

@@ -13,7 +13,7 @@ import (
 func TestSweepsDefaults(t *testing.T) {
 	// Zero value ⇒ sweeps enabled in dry-run at 6h: safe-by-default, no required config.
 	var c Config
-	applyDefaults(&c)
+	ApplyDefaults(&c)
 	if got := c.Curate.Sweeps.Interval.Std(); got != 6*time.Hour {
 		t.Fatalf("sweeps.interval default: want 6h, got %v", got)
 	}

@@ -9,7 +9,7 @@ import (
 )
 
 // DefaultSweepInterval is the fallback cadence when no interval is configured.
-// config.applyDefaults ships the same value; this guard only protects direct users.
+// config.ApplyDefaults ships the same value; this guard only protects direct users.
 const DefaultSweepInterval = 6 * time.Hour
 
 // Sweeper runs the grooming Agent on a fixed interval until ctx is done — the

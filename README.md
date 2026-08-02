@@ -174,31 +174,49 @@ additive. Full setup detail in **[Data sources](https://runlore.io/docs/concepts
 
 ## ⚡ Try it in one minute — no cluster, no keys
 
-Before you wire up a cluster, see the front of the pipeline for yourself. This runs `lore serve`
-locally with a keyless demo config and fires a batch of mocked Alertmanager alerts at it — no
-Kubernetes, no LLM, no credentials. You only need Go and `curl`:
+Before you wire up a cluster, watch RunLore investigate a real incident and reach a real root
+cause — no Kubernetes, no LLM key, no network. You only need Go:
 
 ```bash
 hack/demo.sh
 ```
 
-It builds the binary, starts the server, POSTs [`examples/alertmanager-webhook.json`](examples/alertmanager-webhook.json)
-to the webhook, and prints the **trigger policy** deciding which alerts become incidents:
+It builds the binary and replays a transcript recorded once against a live model through the
+**real investigation loop**: the same ReAct tool calls, verify pass, and verdict-card renderer
+that run in production, over fake (but realistic) evidence:
 
 ```text
-=== trigger-policy decisions ===
-msg=incident alert=HarborProbeFailure severity=critical namespace=apps investigate=true  reason="matched trigger policy"
-msg=incident alert=HarborProbeFailure severity=critical namespace=apps investigate=false reason="deduplicated (still-firing)"
-msg=incident alert=NoisyWarn        severity=warning  namespace=apps investigate=false reason="filtered by trigger policy"
-msg=incident alert=StagingCrit      severity=critical namespace=apps investigate=false reason="filtered by trigger policy"
-msg=incident alert=Watchdog         severity=critical namespace=apps investigate=false reason="filtered by trigger policy"
+== RunLore demo: investigating "harbor-chart-bump" (recorded model turns, fake providers, no cluster) ==
+   model turns recorded 2026-08-02T07:48:52Z with openai/glm-4.5-air
+
+incident: HarborProbeFailure (critical, prod, namespace apps): harbor-core readiness probes
+are failing and the Service is returning 503s.
+
+→ what_changed()
+  flux Kustomization/apps aaa111..bbb222 --- apps/harbor/values.yaml - tag: 1.14.2 + tag: 1.15.0 …
+→ query_metrics()
+  up{job="harbor-core"} = 0 kube_pod_container_status_restarts_total{pod="harbor-db-0"} = 7
+→ query_logs()
+  harbor-db-0 FATAL: could not obtain migration lock; another migration is in progress …
+
+== submit_findings ==
+*Investigation* — confidence 90%
+🔥 Verdict: Action required
+Resource: Deployment apps/harbor-core
+1. *Database migration deadlock preventing harbor-db pod from starting, causing harbor-core
+   connection failures* (90%)
+   • harbor-db-0 FATAL: could not obtain migration lock; another migration is in progress
+   • Chart bump to 1.15.0 enabled DB schema migrations
+   → suggested: Investigate and resolve the migration deadlock in harbor-db pod, then restart
+     the database to clear the lock (reversible)
 ```
 
-That's one alert admitted (critical + prod), the rest correctly deduped, severity-filtered,
-environment-filtered, and ignore-listed — the exact gate that controls noise and LLM cost in
-production. The demo stops there: a full investigation (root cause → chat → PR) needs a real cluster,
-an LLM, and a knowledge base, which is the production install below. To exercise every feature
-end-to-end on a throwaway cluster, `hack/e2e-k3d.sh` spins one up with [k3d](https://k3d.io/).
+That is a genuine root cause, not canned copy — recorded once against a live model, replayed
+forever with zero key and zero network. Wiring a cluster below gets you this over live evidence,
+with chat and knowledge-base write-back. Curious about the filter that decides what gets
+investigated in the first place? `hack/demo-trigger-policy.sh` fires mocked Alertmanager alerts
+through the trigger policy. To exercise every feature end-to-end on a throwaway cluster,
+`hack/e2e-k3d.sh` spins one up with [k3d](https://k3d.io/).
 
 ## 🚀 Getting started (production install)
 
