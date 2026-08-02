@@ -85,7 +85,7 @@ rotate. The `--certificate-identity-regexp` above pins verification to the
 exact workflow that is allowed to produce that artifact, not just "signed by
 someone."
 
-An [OpenSSF Scorecard](https://securityscorecards.dev/) analysis runs weekly
+An [OpenSSF Scorecard](https://scorecard.dev/) analysis runs weekly
 and on every push to `main`; results are on the repo's
 [Security tab](https://github.com/Smana/runlore/security) (Code scanning alerts)
 and the badge in [`README.md`](README.md).
