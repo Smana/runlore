@@ -9,6 +9,7 @@
 package config
 
 import (
+	"cmp"
 	"fmt"
 	"net"
 	"net/url"
@@ -192,15 +193,42 @@ type LogFields struct {
 }
 
 // Default log-field convention: the VictoriaLogs + vector kubernetes-metadata
-// layout RunLore shipped with. Each Resolved default MUST equal one of these so an
-// unset config reproduces the previous hardcoded behaviour exactly.
-const (
-	defaultLogContainerField = "kubernetes.container_name"
-	defaultLogNamespaceField = "kubernetes.pod_namespace"
-	defaultLogPodField       = "kubernetes.pod_name"
-	defaultLogLevelField     = "log.level"
-	defaultLogUnpackPipe     = "unpack_json"
-)
+// layout RunLore shipped with. These values MUST NOT change — an unset config
+// has to reproduce the previous hardcoded behaviour exactly.
+var defaultLogFields = LogFields{
+	ContainerField: "kubernetes.container_name",
+	NamespaceField: "kubernetes.pod_namespace",
+	PodField:       "kubernetes.pod_name",
+	LevelField:     "log.level",
+	UnpackPipe:     "unpack_json",
+}
+
+// Default log-field convention for Loki: the promtail/Grafana-Alloy stream-label
+// layout plus Loki 3.x's auto-detected severity (detected_level is structured
+// metadata, filterable WITHOUT a parser stage — hence no default unpack pipe, so
+// UnpackPipe stays as-set here, empty meaning no parser stage).
+// An operator on Loki 2.x (no detected_level) overrides logs.fields, e.g.
+// {level_field: level, unpack_pipe: logfmt}.
+var defaultLokiFields = LogFields{
+	ContainerField: "container",
+	NamespaceField: "namespace",
+	PodField:       "pod",
+	LevelField:     "detected_level",
+}
+
+// Default log-field convention for Elasticsearch/OpenSearch: the ECS
+// (Elastic Common Schema) layout Filebeat and most ECS-compliant collectors
+// ship. Both distributions get the SAME defaults — they are the same wire
+// format under a fork, not two different conventions. UnpackPipe has no default
+// (and stays unused): these backends have no parser-pipe concept.
+var defaultECSFields = LogFields{
+	ContainerField: "kubernetes.container.name",
+	NamespaceField: "kubernetes.namespace",
+	PodField:       "kubernetes.pod.name",
+	LevelField:     "log.level",
+	TimestampField: "@timestamp",
+	MessageField:   "message",
+}
 
 // Resolved returns the field convention with every unset value filled from the
 // shipped defaults, so callers can use the result without repeating the fallbacks.
@@ -210,48 +238,8 @@ const (
 // they had a fully-zero struct. To keep the "any override" case simple, an empty
 // UnpackPipe here falls back to the default; disabling it is out of scope for v1.
 func (f LogFields) Resolved() LogFields {
-	if f.ContainerField == "" {
-		f.ContainerField = defaultLogContainerField
-	}
-	if f.NamespaceField == "" {
-		f.NamespaceField = defaultLogNamespaceField
-	}
-	if f.PodField == "" {
-		f.PodField = defaultLogPodField
-	}
-	if f.LevelField == "" {
-		f.LevelField = defaultLogLevelField
-	}
-	if f.UnpackPipe == "" {
-		f.UnpackPipe = defaultLogUnpackPipe
-	}
-	return f
+	return f.withDefaults(defaultLogFields)
 }
-
-// Default log-field convention for Loki: the promtail/Grafana-Alloy stream-label
-// layout plus Loki 3.x's auto-detected severity (detected_level is structured
-// metadata, filterable WITHOUT a parser stage — hence no default unpack pipe).
-// An operator on Loki 2.x (no detected_level) overrides logs.fields, e.g.
-// {level_field: level, unpack_pipe: logfmt}.
-const (
-	defaultLokiContainerField = "container"
-	defaultLokiNamespaceField = "namespace"
-	defaultLokiPodField       = "pod"
-	defaultLokiLevelField     = "detected_level"
-)
-
-// Default log-field convention for Elasticsearch/OpenSearch: the ECS
-// (Elastic Common Schema) layout Filebeat and most ECS-compliant collectors
-// ship. Both distributions get the SAME defaults — they are the same wire
-// format under a fork, not two different conventions.
-const (
-	defaultECSContainerField = "kubernetes.container.name"
-	defaultECSNamespaceField = "kubernetes.namespace"
-	defaultECSPodField       = "kubernetes.pod.name"
-	defaultECSLevelField     = "log.level"
-	defaultECSTimestampField = "@timestamp"
-	defaultECSMessageField   = "message"
-)
 
 // ResolvedFor resolves the field convention for a specific logs provider: Loki
 // gets Loki-appropriate defaults, Elasticsearch/OpenSearch get ECS defaults;
@@ -260,51 +248,26 @@ const (
 func (f LogFields) ResolvedFor(provider string) LogFields {
 	switch provider {
 	case LogsProviderLoki:
-		return f.resolvedForLoki()
+		return f.withDefaults(defaultLokiFields)
 	case LogsProviderElasticsearch, LogsProviderOpenSearch:
-		return f.resolvedForECS()
+		return f.withDefaults(defaultECSFields)
 	default:
 		return f.Resolved()
 	}
 }
 
-func (f LogFields) resolvedForLoki() LogFields {
-	if f.ContainerField == "" {
-		f.ContainerField = defaultLokiContainerField
-	}
-	if f.NamespaceField == "" {
-		f.NamespaceField = defaultLokiNamespaceField
-	}
-	if f.PodField == "" {
-		f.PodField = defaultLokiPodField
-	}
-	if f.LevelField == "" {
-		f.LevelField = defaultLokiLevelField
-	}
-	// UnpackPipe stays as-set (empty = no parser stage): detected_level needs none.
-	return f
-}
-
-func (f LogFields) resolvedForECS() LogFields {
-	if f.ContainerField == "" {
-		f.ContainerField = defaultECSContainerField
-	}
-	if f.NamespaceField == "" {
-		f.NamespaceField = defaultECSNamespaceField
-	}
-	if f.PodField == "" {
-		f.PodField = defaultECSPodField
-	}
-	if f.LevelField == "" {
-		f.LevelField = defaultECSLevelField
-	}
-	if f.TimestampField == "" {
-		f.TimestampField = defaultECSTimestampField
-	}
-	if f.MessageField == "" {
-		f.MessageField = defaultECSMessageField
-	}
-	// UnpackPipe stays unused: Elasticsearch/OpenSearch have no parser-pipe concept.
+// withDefaults fills every unset field of f from d and returns the result, so a
+// convention only has to declare the values it defines: a field d leaves empty
+// (Loki/ECS have no UnpackPipe, VictoriaLogs no timestamp/message field) is left
+// exactly as the operator set it.
+func (f LogFields) withDefaults(d LogFields) LogFields {
+	f.ContainerField = cmp.Or(f.ContainerField, d.ContainerField)
+	f.NamespaceField = cmp.Or(f.NamespaceField, d.NamespaceField)
+	f.PodField = cmp.Or(f.PodField, d.PodField)
+	f.LevelField = cmp.Or(f.LevelField, d.LevelField)
+	f.UnpackPipe = cmp.Or(f.UnpackPipe, d.UnpackPipe)
+	f.TimestampField = cmp.Or(f.TimestampField, d.TimestampField)
+	f.MessageField = cmp.Or(f.MessageField, d.MessageField)
 	return f
 }
 

@@ -24,14 +24,15 @@ func init() {
 	Register(Descriptor{
 		Name: "slack",
 		Build: func(d Deps) (providers.Notifier, error) {
+			sl := d.Cfg.Notify.Slack
 			// Bot token (chat.postMessage) takes precedence over an incoming webhook.
-			if sl := d.Cfg.Notify.Slack; sl.BotTokenEnv != "" && sl.Channel != "" {
+			if sl.BotTokenEnv != "" && sl.Channel != "" {
 				if tok := os.Getenv(sl.BotTokenEnv); tok != "" {
 					b := NewSlackBot(tok, sl.Channel)
 					b.FeedbackButtons = sl.FeedbackButtons
 					return b, nil
 				}
-			} else if sl := d.Cfg.Notify.Slack; sl.WebhookURLEnv != "" {
+			} else if sl.WebhookURLEnv != "" {
 				if url := os.Getenv(sl.WebhookURLEnv); url != "" {
 					s := NewSlack(url)
 					s.FeedbackButtons = sl.FeedbackButtons
@@ -684,9 +685,7 @@ func confidenceBadge(inv providers.Investigation) (emoji, level string, pct int)
 	c := inv.Confidence
 	if !inv.Recalled {
 		for _, rc := range inv.RootCauses {
-			if rc.Confidence > c {
-				c = rc.Confidence
-			}
+			c = max(c, rc.Confidence)
 		}
 	}
 	pct = int(c*100 + 0.5)
@@ -727,23 +726,18 @@ func recallConfidenceNote(inv providers.Investigation, deliveredPct int) string 
 // short line, exactly once, not woven into prose. "" when there is nothing to
 // link (a fresh, uncurated investigation with no recall/match context).
 func entryLink(inv providers.Investigation) string {
-	url := inv.CuratedURL
-	if url == "" {
-		url = inv.PrevCuratedURL
-	}
+	url := cmp.Or(inv.CuratedURL, inv.PrevCuratedURL)
 	if url == "" && inv.MatchedKnowledge != nil {
 		url = inv.MatchedKnowledge.URL
 	}
 	if url != "" {
 		return fmt.Sprintf("📚 <%s|view entry>", escapeMrkdwn(url))
 	}
-	path := ""
+	var path string
 	if inv.Prior != nil {
 		path = inv.Prior.EntryPath
 	}
-	if path == "" {
-		path = inv.RecalledEntry
-	}
+	path = cmp.Or(path, inv.RecalledEntry)
 	if path == "" && inv.MatchedKnowledge != nil {
 		path = inv.MatchedKnowledge.Path
 	}

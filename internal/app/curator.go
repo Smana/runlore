@@ -3,6 +3,7 @@
 package app
 
 import (
+	"cmp"
 	"context"
 	"fmt"
 	"log/slog"
@@ -105,10 +106,7 @@ func BuildCurator(cfg *config.Config, cat *catalog.Catalog, metrics *telemetry.M
 // forgeProviderName returns the effective forge provider name for logging
 // ("github" when Provider is left at its empty default).
 func forgeProviderName(cfg *config.Config) string {
-	if cfg.Forge.Provider == "" {
-		return "github"
-	}
-	return cfg.Forge.Provider
+	return cmp.Or(cfg.Forge.Provider, "github")
 }
 
 // BuildReinvestigator returns a poller that re-runs KB issues labelled

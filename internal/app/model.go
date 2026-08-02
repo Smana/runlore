@@ -6,6 +6,7 @@
 package app
 
 import (
+	"cmp"
 	"os"
 
 	"github.com/Smana/runlore/internal/config"
@@ -72,13 +73,11 @@ func BuildVerifyModel(cfg *config.Config) providers.ModelProvider {
 	if v == nil {
 		return nil
 	}
-	apiKey := ""
-	if keyEnv := or(v.APIKeyEnv, cfg.Model.APIKeyEnv); keyEnv != "" {
-		apiKey = os.Getenv(keyEnv)
-	}
-	return NewModelClient(or(v.Provider, cfg.Model.Provider),
-		or(v.BaseURL, cfg.Model.BaseURL), or(v.Model, cfg.Model.Model), apiKey,
-		verifyMaxTokens(cfg), or(v.Effort, cfg.Model.Effort), or(v.Thinking, cfg.Model.Thinking))
+	// os.Getenv("") is "", so an unset key env on both sides is the keyless case.
+	apiKey := os.Getenv(cmp.Or(v.APIKeyEnv, cfg.Model.APIKeyEnv))
+	return NewModelClient(cmp.Or(v.Provider, cfg.Model.Provider),
+		cmp.Or(v.BaseURL, cfg.Model.BaseURL), cmp.Or(v.Model, cfg.Model.Model), apiKey,
+		verifyMaxTokens(cfg), cmp.Or(v.Effort, cfg.Model.Effort), cmp.Or(v.Thinking, cfg.Model.Thinking))
 }
 
 // BuildJudgeModel builds the (stronger) grader model from --judge-* flags, falling

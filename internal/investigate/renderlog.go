@@ -3,6 +3,7 @@
 package investigate
 
 import (
+	"cmp"
 	"fmt"
 	"regexp"
 	"strings"
@@ -36,73 +37,59 @@ const (
 	DialectElastic = "query_string" // Elasticsearch/OpenSearch Lucene query_string
 )
 
-// Shipped log-field defaults. These MUST stay byte-identical to the strings the code
-// hardcoded before logs.fields was configurable — they are the fallback that keeps
-// the maintainer's test cluster working when the config is unset.
-const (
-	defaultContainerField = "kubernetes.container_name"
-	defaultNamespaceField = "kubernetes.pod_namespace"
-	defaultPodField       = "kubernetes.pod_name"
-	defaultLevelField     = "log.level"
-	defaultUnpackPipe     = "unpack_json"
+// Shipped log-field defaults, one convention per dialect. These MUST stay
+// byte-identical to the strings the code hardcoded before logs.fields was
+// configurable — they are the fallback that keeps the maintainer's test cluster
+// working when the config is unset. Each MIRRORS the matching branch of
+// config.LogFields.ResolvedFor (internal/config/config.go), which is the normal
+// fill path; these are the in-package fallback for zero-field callers.
+//
+// A convention declares only what it defines: Loki's detected_level is structured
+// metadata needing no parser stage, and Elasticsearch/OpenSearch have no
+// parser-pipe concept at all, so neither sets UnpackPipe — resolved() then leaves
+// it exactly as the caller had it.
+var (
+	// VictoriaLogs + vector kubernetes-metadata layout (the shipped default).
+	defaultLogsQLFields = LogFields{
+		ContainerField: "kubernetes.container_name",
+		NamespaceField: "kubernetes.pod_namespace",
+		PodField:       "kubernetes.pod_name",
+		LevelField:     "log.level",
+		UnpackPipe:     "unpack_json",
+	}
+	// Loki convention: promtail/alloy stream labels + Loki 3.x detected_level.
+	defaultLogQLFields = LogFields{
+		ContainerField: "container",
+		NamespaceField: "namespace",
+		PodField:       "pod",
+		LevelField:     "detected_level",
+	}
+	// ECS (Elastic Common Schema), shared by Elasticsearch and OpenSearch.
+	defaultElasticFields = LogFields{
+		ContainerField: "kubernetes.container.name",
+		NamespaceField: "kubernetes.namespace",
+		PodField:       "kubernetes.pod.name",
+		LevelField:     "log.level",
+	}
 )
 
-// resolved fills every unset field from the shipped default so callers can use the
-// result directly. An empty UnpackPipe restores the default pipe (disabling it is
-// out of scope for v1).
+// resolved fills every unset field from the shipped default for f.Dialect so
+// callers can use the result directly. An empty UnpackPipe restores the LogsQL
+// default pipe (disabling it is out of scope for v1); the other two dialects
+// define no pipe, so it stays as-set there.
 func (f LogFields) resolved() LogFields {
-	if f.Dialect == DialectLogQL {
-		// Loki convention: promtail/alloy stream labels + Loki 3.x detected_level
-		// (structured metadata — no parser pipe by default). Mirrors
-		// config.LogFields.ResolvedFor (internal/config/config.go), which is the
-		// normal fill path; this is the in-package fallback for zero-field callers.
-		if f.ContainerField == "" {
-			f.ContainerField = "container"
-		}
-		if f.NamespaceField == "" {
-			f.NamespaceField = "namespace"
-		}
-		if f.PodField == "" {
-			f.PodField = "pod"
-		}
-		if f.LevelField == "" {
-			f.LevelField = "detected_level"
-		}
-		return f
+	d := defaultLogsQLFields
+	switch f.Dialect {
+	case DialectLogQL:
+		d = defaultLogQLFields
+	case DialectElastic:
+		d = defaultElasticFields
 	}
-	if f.Dialect == DialectElastic {
-		// ECS (Elastic Common Schema) convention, shared by Elasticsearch and
-		// OpenSearch. Mirrors config.LogFields.ResolvedFor's ECS branch; this is
-		// the in-package fallback for zero-field callers.
-		if f.ContainerField == "" {
-			f.ContainerField = "kubernetes.container.name"
-		}
-		if f.NamespaceField == "" {
-			f.NamespaceField = "kubernetes.namespace"
-		}
-		if f.PodField == "" {
-			f.PodField = "kubernetes.pod.name"
-		}
-		if f.LevelField == "" {
-			f.LevelField = "log.level"
-		}
-		return f
-	}
-	if f.ContainerField == "" {
-		f.ContainerField = defaultContainerField
-	}
-	if f.NamespaceField == "" {
-		f.NamespaceField = defaultNamespaceField
-	}
-	if f.PodField == "" {
-		f.PodField = defaultPodField
-	}
-	if f.LevelField == "" {
-		f.LevelField = defaultLevelField
-	}
-	if f.UnpackPipe == "" {
-		f.UnpackPipe = defaultUnpackPipe
-	}
+	f.ContainerField = cmp.Or(f.ContainerField, d.ContainerField)
+	f.NamespaceField = cmp.Or(f.NamespaceField, d.NamespaceField)
+	f.PodField = cmp.Or(f.PodField, d.PodField)
+	f.LevelField = cmp.Or(f.LevelField, d.LevelField)
+	f.UnpackPipe = cmp.Or(f.UnpackPipe, d.UnpackPipe)
 	return f
 }
 

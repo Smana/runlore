@@ -594,7 +594,7 @@ func BuildInvestigator(ctx context.Context, cfg *config.Config, deps *Deps, appr
 		log.Info("interim progress updates enabled", "every_steps", progressEverySteps)
 	}
 	// Per-investigation cost reporting (optional). The verify override inherits the
-	// main pricing when it sets none (whole-struct or() inherit), so a cheaper verify
+	// main pricing when it sets none (whole-struct inherit), so a cheaper verify
 	// model is costed correctly.
 	mainPricing := toPricing(cfg.Model.Pricing)
 	verifyPricing := mainPricing

@@ -3,6 +3,7 @@
 package app
 
 import (
+	"cmp"
 	"errors"
 	"fmt"
 	"io/fs"
@@ -65,7 +66,7 @@ func configFromEnv() (*config.Config, error) {
 	case os.Getenv(envOpenAIBaseURL) != "":
 		m := config.Model{
 			BaseURL: os.Getenv(envOpenAIBaseURL),
-			Model:   or(os.Getenv(envOpenAIModel), defaultOpenAIModel),
+			Model:   cmp.Or(os.Getenv(envOpenAIModel), defaultOpenAIModel),
 		}
 		// Keyless is a first-class case here: an in-cluster vLLM or a local Ollama
 		// needs no credential, and demanding one would break the most private setup.
@@ -87,12 +88,4 @@ func configFromEnv() (*config.Config, error) {
 	}
 	config.ApplyDefaults(cfg)
 	return cfg, nil
-}
-
-// or returns a when non-empty, else b.
-func or(a, b string) string {
-	if a != "" {
-		return a
-	}
-	return b
 }

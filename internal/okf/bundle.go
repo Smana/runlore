@@ -17,6 +17,7 @@ package okf
 
 import (
 	"fmt"
+	"slices"
 	"strings"
 
 	"github.com/Smana/runlore/internal/providers"
@@ -56,8 +57,7 @@ func UpdateIndex(existing []byte, e providers.KBEntry, entryPath string) []byte 
 	for end > start+1 && strings.TrimSpace(lines[end-1]) == "" {
 		end--
 	}
-	out := append(append(append([]string{}, lines[:end]...), line), lines[end:]...)
-	return []byte(strings.Join(out, "\n") + "\n")
+	return []byte(strings.Join(slices.Insert(lines, end, line), "\n") + "\n")
 }
 
 // UpdateLog records the entry in an OKF log: flat date-grouped entries, newest
@@ -79,8 +79,7 @@ func UpdateLog(existing []byte, e providers.KBEntry, entryPath, date string) []b
 		}
 		// Today's heading exists (it is the newest — logs are newest-first):
 		// slot the line right under it.
-		out := append(append(append([]string{}, lines[:i+1]...), "", line), lines[i+1:]...)
-		return []byte(strings.Join(out, "\n") + "\n")
+		return []byte(strings.Join(slices.Insert(lines, i+1, "", line), "\n") + "\n")
 	}
 	// New (newest) date: insert the heading after the H1 title, before older dates.
 	at := len(lines)
@@ -90,6 +89,5 @@ func UpdateLog(existing []byte, e providers.KBEntry, entryPath, date string) []b
 			break
 		}
 	}
-	out := append(append(append([]string{}, lines[:at]...), heading, "", line, ""), lines[at:]...)
-	return []byte(strings.Join(out, "\n") + "\n")
+	return []byte(strings.Join(slices.Insert(lines, at, heading, "", line, ""), "\n") + "\n")
 }
