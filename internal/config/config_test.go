@@ -743,7 +743,6 @@ func TestLogsProviderValidate(t *testing.T) {
 	}
 }
 
-
 // TestValidateForgeProviderGitLab pins the fail-closed contract for the GitLab
 // forge provider: a missing token_env, and an obviously-invalid kb_repo, both
 // abort Validate rather than let `serve` come up with curation silently
@@ -794,6 +793,7 @@ func TestValidateForgeProviderGitLab(t *testing.T) {
 		t.Fatalf("an empty forge.provider must validate clean (defaults to github), got: %v", err)
 	}
 }
+
 // TestLogsIndexValidate: logs.index is interpolated into the Elasticsearch
 // request PATH. The client escapes it so a malformed value can no longer change
 // the request's SHAPE, but escaping alone turns a typo into a puzzling 4xx from
