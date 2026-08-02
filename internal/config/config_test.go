@@ -835,3 +835,49 @@ func TestLogsIndexValidate(t *testing.T) {
 		}
 	}
 }
+
+// TestCommonsCatalogValidation pins the fail-closed cases for the shared catalog.
+//
+// Both are silent-degradation bugs otherwise: a missing dir leaves the commons
+// simply absent (an operator who configured it sees nothing and no error), and a
+// shared dir lets an upstream sync write into the operator's own checkout — which
+// with git-sync enabled means the two fight on every reconcile.
+func TestCommonsCatalogValidation(t *testing.T) {
+	base := func() *Config {
+		c := &Config{}
+		c.Catalog.Dir = "/var/lib/runlore/catalog"
+		c.Catalog.Commons.URL = "https://github.com/Smana/runlore-kb-commons"
+		return c
+	}
+
+	t.Run("url without dir is rejected", func(t *testing.T) {
+		c := base()
+		if err := c.Validate(); err == nil || !strings.Contains(err.Error(), "catalog.commons.dir") {
+			t.Fatalf("want a commons.dir error, got: %v", err)
+		}
+	})
+
+	t.Run("dir equal to catalog.dir is rejected", func(t *testing.T) {
+		c := base()
+		c.Catalog.Commons.Dir = c.Catalog.Dir
+		if err := c.Validate(); err == nil || !strings.Contains(err.Error(), "must differ") {
+			t.Fatalf("want a distinct-directory error, got: %v", err)
+		}
+	})
+
+	t.Run("distinct dir validates", func(t *testing.T) {
+		c := base()
+		c.Catalog.Commons.Dir = "/var/lib/runlore/commons"
+		if err := c.Validate(); err != nil {
+			t.Fatalf("a well-formed commons config must validate: %v", err)
+		}
+	})
+
+	t.Run("absent commons is unaffected", func(t *testing.T) {
+		c := &Config{}
+		c.Catalog.Dir = "/var/lib/runlore/catalog"
+		if err := c.Validate(); err != nil {
+			t.Fatalf("no commons configured must stay valid: %v", err)
+		}
+	})
+}

@@ -527,9 +527,39 @@ type LeaderElection struct {
 // a mounted Dir (e.g. a ConfigMap) or a Git repo to sync (which closes the
 // read/write loop — the curator's merged PRs flow back into what the agent reads).
 type Catalog struct {
-	Dir           string        `yaml:"dir"` // OKF bundle path (mounted ConfigMap, or the git-sync mirror)
-	Git           CatalogGit    `yaml:"git"`
-	InstantRecall InstantRecall `yaml:"instant_recall"`
+	Dir           string         `yaml:"dir"` // OKF bundle path (mounted ConfigMap, or the git-sync mirror)
+	Git           CatalogGit     `yaml:"git"`
+	Commons       CatalogCommons `yaml:"commons"`
+	InstantRecall InstantRecall  `yaml:"instant_recall"`
+}
+
+// CatalogCommons is an optional SECOND, read-only catalog root synced from a shared
+// upstream repo and indexed alongside the operator's own.
+//
+// Off by default. Adopting someone else's corpus is a choice, not something that
+// should happen on an upgrade — and the entries it carries are generic by design,
+// so they must never be mistaken for the platform's own recorded truth. Three
+// properties follow from that and are enforced, not documented:
+//
+//   - every commons entry is MARKED as such wherever it surfaces;
+//   - at equal relevance the operator's own entry ranks first;
+//   - the curator can never write into the commons root (catalog.WriteRootFor).
+//
+// What it does NOT do is fire instant recall. Recall applies a structural filter —
+// a resource-less entry never agrees with a workload-carrying alert — and commons
+// entries are resource-less by construction because they describe a failure class
+// rather than one cluster's workload. They ground kb_search, which applies no such
+// filter. That is genuine day-one value; claiming recall would not be.
+type CatalogCommons struct {
+	URL      string   `yaml:"url"`      // shared catalog repo; empty disables the commons root
+	Branch   string   `yaml:"branch"`   // default "main"
+	Interval Duration `yaml:"interval"` // re-sync period (default 24h — a shared corpus changes slowly)
+	// Dir is where the commons is checked out. It MUST differ from catalog.dir: the
+	// two are separate corpora, and sharing a root would let an upstream sync dirty
+	// the operator's own checkout.
+	Dir string `yaml:"dir"`
+	// TokenEnv names an env var holding a read token for a private commons repo.
+	TokenEnv string `yaml:"token_env"`
 }
 
 // Outcome configures the learning-loop outcome ledger.
@@ -1380,6 +1410,20 @@ func (c *Config) Validate() error {
 		}
 		if c.Outcome.LedgerPath == "" {
 			return fmt.Errorf("notify.matrix.feedback_reactions requires outcome.ledger_path: ratings are recorded in the outcome ledger")
+		}
+	}
+	// Commons catalog (opt-in): a second, read-only root. Fail closed on a
+	// misconfiguration rather than degrading to a silently-absent corpus.
+	if cc := c.Catalog.Commons; cc.URL != "" {
+		if cc.Dir == "" {
+			return fmt.Errorf("catalog.commons.url is set but catalog.commons.dir is empty: the shared catalog needs its own checkout directory")
+		}
+		// Sharing a directory with the operator's own catalog would let an upstream
+		// sync write into their checkout — and, with git-sync enabled, fight the
+		// mirror on every reconcile. Distinct roots is the whole basis of the
+		// read-only guarantee.
+		if cc.Dir == c.Catalog.Dir {
+			return fmt.Errorf("catalog.commons.dir must differ from catalog.dir (both are %q): the shared catalog is a SEPARATE, read-only root and must not share the operator's checkout", cc.Dir)
 		}
 	}
 	// Instant-recall reranker (opt-in): its knobs are only meaningful when enabled.
