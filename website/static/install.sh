@@ -53,7 +53,47 @@ echo "downloading $archive ($VERSION)"
 curl -fsSL "$base/$archive" -o "$tmp/$archive"
 curl -fsSL "$base/checksums.txt" -o "$tmp/checksums.txt"
 
-# Verify BEFORE extracting. A checksum mismatch means a corrupted or tampered
+# Verify the SIGNATURE on checksums.txt first, when cosign is available.
+#
+# Why this matters: the checksum alone only proves the archive arrived intact.
+# checksums.txt is fetched from the same origin as the archive, so anyone able to
+# replace one can replace the other, and the hash would match a malicious build
+# perfectly. The cosign bundle is signed by the release workflow's short-lived
+# Fulcio identity and recorded in Rekor — that is the part an attacker holding
+# the release assets cannot forge.
+#
+# cosign is NOT required: most machines running a one-line installer won't have
+# it, and demanding it would push people toward downloading the binary by hand
+# with no verification at all. When it is missing we say so plainly rather than
+# implying a guarantee we did not check. When it IS present, verification is
+# mandatory — a failure aborts. LORE_SKIP_COSIGN=1 opts out deliberately.
+if [ "${LORE_SKIP_COSIGN:-0}" = "1" ]; then
+  echo "note: signature verification skipped (LORE_SKIP_COSIGN=1) — checksum only."
+elif command -v cosign >/dev/null 2>&1; then
+  if ! curl -fsSL "$base/checksums.txt.bundle" -o "$tmp/checksums.txt.bundle"; then
+    echo "cosign is installed but $VERSION publishes no checksums.txt.bundle." >&2
+    echo "Aborting rather than silently downgrading to checksum-only verification." >&2
+    echo "Re-run with LORE_SKIP_COSIGN=1 to install anyway." >&2
+    exit 1
+  fi
+  if cosign verify-blob \
+      --bundle "$tmp/checksums.txt.bundle" \
+      --certificate-identity-regexp "https://github.com/$REPO/\.github/workflows/release-binaries\.yml@.*" \
+      --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \
+      "$tmp/checksums.txt" >/dev/null 2>&1; then
+    echo "signature verified: checksums.txt (cosign, keyless)"
+  else
+    echo "SIGNATURE VERIFICATION FAILED for checksums.txt — aborting, nothing installed" >&2
+    exit 1
+  fi
+else
+  echo "note: cosign not found — verifying the checksum only. That proves the"
+  echo "      download is intact, not that it is the release we published."
+  echo "      Install cosign (https://docs.sigstore.dev/cosign/installation/) to"
+  echo "      verify the signature too."
+fi
+
+# Verify the checksum BEFORE extracting. A mismatch means a corrupted or tampered
 # download, and extracting it anyway would defeat the point of checking — abort
 # with nothing installed rather than silently trusting the bytes.
 ( cd "$tmp" && grep " $archive\$" checksums.txt | sha256sum -c - >/dev/null ) \
