@@ -29,6 +29,9 @@ func NewRecorder(inner providers.ModelProvider, meta Recorded, scenario string) 
 	return &Recorder{inner: inner, meta: meta, scenario: scenario}
 }
 
+// compile-time assertion: the recorder is substitutable for the live model it wraps.
+var _ providers.ModelProvider = (*Recorder)(nil)
+
 // Complete delegates and captures the response. A failed call is NOT captured: a
 // transcript must contain only turns that really happened, or replay would diverge
 // from the live run it claims to reproduce.

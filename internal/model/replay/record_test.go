@@ -51,7 +51,7 @@ func TestRecordRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatalf("reload: %v", err)
 	}
-	if tr.Scenario != "harbor-chart-bump" || tr.RecordedWith.Model != "claude-sonnet-5" {
+	if tr.Scenario != "harbor-chart-bump" || tr.RecordedWith.Model != "claude-sonnet-5" || tr.RecordedAt != "2026-08-02T09:14:00Z" {
 		t.Errorf("provenance lost: %+v", tr)
 	}
 	if len(tr.Turns) != 2 {
