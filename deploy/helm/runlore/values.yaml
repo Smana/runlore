@@ -224,6 +224,13 @@ config:
   #     api_key_env: OPENAI_API_KEY
   # catalog:
   #   dir: /var/lib/runlore/catalog
+  #   # A second, read-only root of generic playbooks so kb_search is useful before
+  #   # you have curated anything. Never fires instant recall (its entries are
+  #   # resource-less by design) and the curator never writes to it. dir must differ
+  #   # from catalog.dir. See values-full.yaml for the annotated version.
+  #   commons:
+  #     url: https://github.com/Smana/runlore-kb-commons
+  #     dir: /var/lib/runlore/commons
   #   instant_recall:
   #     enabled: true
   #     min_score: 1.0                 # similarity floor for the top hit (shipped default)
