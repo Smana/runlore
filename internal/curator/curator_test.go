@@ -35,7 +35,7 @@ func (f *fakeForge) OpenPR(_ context.Context, e providers.KBEntry) (providers.Re
 func (f *fakeForge) ListPRsByLabel(_ context.Context, _ string) ([]providers.CuratedIssue, error) {
 	return f.openPRs, nil
 }
-func (f *fakeForge) Comment(_ context.Context, n int, _ string) error {
+func (f *fakeForge) CommentOnPR(_ context.Context, n int, _ string) error {
 	f.commented = append(f.commented, n)
 	return nil
 }

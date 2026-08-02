@@ -109,32 +109,40 @@ func (e *statusError) Error() string {
 	return fmt.Sprintf("gitlab %s %s: status %d: %s", e.method, e.path, e.status, e.body)
 }
 
-// isNotFound reports whether err is a statusError carrying a 404 — the same
-// "a number that doesn't exist as THIS resource type" signal github.Client's
-// IsPROpen relies on, reused here to disambiguate an MR iid from an issue iid
-// in Comment (see its doc comment).
+// isNotFound reports whether err is a statusError carrying a 404 — "this
+// resource does not exist here". Used by getRawFile, where a missing bundle file
+// is an expected, non-error outcome rather than a failure.
+//
+// It is deliberately NOT used to guess an artifact's KIND from a number. That
+// idiom works on GitHub (github.Client.IsPROpen), where issues and PRs share one
+// number sequence so a number is never both; on GitLab the sequences are
+// independent, so a number is usually BOTH an issue and a merge request and a
+// 404 proves nothing. See CommentOnPR / CommentOnIssue.
 func isNotFound(err error) bool {
 	var se *statusError
 	return errors.As(err, &se) && se.status == http.StatusNotFound
 }
 
-// do performs an authenticated JSON request and decodes the response into out
-// (if non-nil). It retries on a network error, 429, or 5xx via httpx.DoWithRetry
-// (already used by internal/mcp and internal/embed) — a self-hosted GitLab
-// instance under load, or gitlab.com's own rate limiting, is a realistic
-// operational case, so retry/backoff is built in here from the start rather
-// than left for a later pass. A 404 (or any other 4xx) is never retried — see
-// isNotFound, which some callers rely on for fast, deliberate fallback.
-func (c *Client) do(ctx context.Context, method, path string, body, out any) error {
+// request performs an authenticated request and returns the raw response body
+// and the response headers. It retries on a network error, 429, or 5xx via
+// httpx.DoWithRetry (already used by internal/mcp and internal/embed) — a
+// self-hosted GitLab instance under load, or gitlab.com's own rate limiting, is
+// a realistic operational case, so retry/backoff is built in here from the start
+// rather than left for a later pass. A 404 (or any other 4xx) is never retried.
+//
+// Headers are returned (not swallowed as `do` used to) because GitLab puts the
+// pagination cursor there: X-Next-Page is the only trustworthy "is there more?"
+// signal — see listPaged.
+func (c *Client) request(ctx context.Context, method, path string, body any) ([]byte, http.Header, error) {
 	tok, err := c.token(ctx)
 	if err != nil {
-		return fmt.Errorf("token: %w", err)
+		return nil, nil, fmt.Errorf("token: %w", err)
 	}
 	var raw []byte
 	if body != nil {
 		raw, err = json.Marshal(body)
 		if err != nil {
-			return err
+			return nil, nil, err
 		}
 	}
 	resp, err := httpx.DoWithRetry(ctx, c.http, 3, func() (*http.Request, error) {
@@ -154,12 +162,23 @@ func (c *Client) do(ctx context.Context, method, path string, body, out any) err
 		return req, nil
 	})
 	if err != nil {
-		return err
+		return nil, nil, err
 	}
 	defer func() { _ = resp.Body.Close() }()
 	data, _ := io.ReadAll(resp.Body)
 	if resp.StatusCode/100 != 2 {
-		return &statusError{method: method, path: path, status: resp.StatusCode, body: string(data[:min(len(data), 512)])}
+		return nil, resp.Header, &statusError{method: method, path: path, status: resp.StatusCode, body: string(data[:min(len(data), 512)])}
+	}
+	return data, resp.Header, nil
+}
+
+// do performs an authenticated JSON request and decodes the response into out
+// (if non-nil) — the convenience wrapper over request for the calls that do not
+// care about response headers.
+func (c *Client) do(ctx context.Context, method, path string, body, out any) error {
+	data, _, err := c.request(ctx, method, path, body)
+	if err != nil {
+		return err
 	}
 	if out != nil && len(data) > 0 {
 		return json.Unmarshal(data, out)
@@ -175,21 +194,29 @@ func (c *Client) do(ctx context.Context, method, path string, body, out any) err
 // carry them). GitLab folds the first three into ONE call: the Commits API
 // creates `branch` from `start_branch` when `branch` doesn't already exist, so
 // there is no separate branch-creation round trip. And GitLab's create-MR call
-// accepts `labels` directly, so there is no follow-up label call either — the
-// whole lifecycle is two requests instead of five.
+// accepts `labels` directly, so there is no follow-up label call either.
+//
+// The same one-call shape absorbs OKF bundle maintenance: the index.md/log.md
+// writes are extra ACTIONS on the entry's own commit (see bundleActions), where
+// GitHub needs four further round trips against the branch it just made.
 func (c *Client) OpenPR(ctx context.Context, e providers.KBEntry) (providers.Ref, error) {
 	slug := slugify(e.Title)
 	now := time.Now().Unix()
 	branch := fmt.Sprintf("runlore/kb-%s-%d", slug, now)
 	path := entryPath(e, slug, now)
 
+	actions := []map[string]any{
+		{"action": "create", "file_path": path, "content": renderEntry(e)},
+	}
+	// Read the bundle files from the TARGET branch: `branch` doesn't exist yet,
+	// the same commit call is what creates it.
+	actions = append(actions, c.bundleActions(ctx, e, path, c.baseBranch)...)
+
 	commitBody := map[string]any{
 		"branch":         branch,
 		"start_branch":   c.baseBranch,
 		"commit_message": "runlore: draft KB entry " + e.Title,
-		"actions": []map[string]any{
-			{"action": "create", "file_path": path, "content": renderEntry(e)},
-		},
+		"actions":        actions,
 	}
 	if err := c.do(ctx, http.MethodPost, fmt.Sprintf("/projects/%s/repository/commits", c.projectSeg()), commitBody, nil); err != nil {
 		return providers.Ref{}, err
@@ -229,22 +256,54 @@ func (r rawItem) curated() providers.CuratedIssue {
 	return providers.CuratedIssue{Number: r.IID, Title: r.Title, Body: r.Description, Labels: r.Labels, UpdatedAt: r.UpdatedAt}
 }
 
+// perPage is the page size RunLore ASKS for. GitLab clamps it to the instance's
+// max_page_size application setting, which an admin can lower — so the size we
+// ask for is never the size we get, and a short page must not be read as "the
+// last page" (see listPaged).
+const perPage = 100
+
+// maxListPages bounds the pagination loop. It is a backstop, not the normal exit:
+// 100 pages is ~10k labelled artifacts, far past any real KB backlog. It exists
+// because the termination signal is remote — an instance (or a caching proxy in
+// front of it) that ignores the `page` parameter would keep serving page 1 with
+// its X-Next-Page header set forever, and an unbounded loop there hangs the
+// curator instead of failing.
+const maxListPages = 100
+
 // listPaged fetches ALL pages of resource ("merge_requests" | "issues") in the
-// given state carrying label. GitLab caps a page at 100 like GitHub; without
-// this loop a label search past the first 100 would be silently truncated.
+// given state carrying label.
+//
+// Termination comes from GitLab's X-Next-Page header (empty on the last page),
+// NOT from a short page. The short-page heuristic — the obvious one, and what
+// github.Client still uses against a forge whose page size is fixed — is wrong
+// here: GitLab clamps per_page to the admin-settable, instance-wide
+// max_page_size, so on an instance lowered to 50 the very first page comes back
+// short and the loop would stop after 50 open merge requests. The curator's
+// dedup then never sees the MR it should coalesce onto, and files a duplicate KB
+// entry on every recurrence — silently, since nothing errored.
 func (c *Client) listPaged(ctx context.Context, resource, state, label string) ([]providers.CuratedIssue, error) {
 	var all []providers.CuratedIssue
-	for page := 1; ; page++ {
-		var raw []rawItem
-		path := fmt.Sprintf("/projects/%s/%s?state=%s&labels=%s&per_page=100&page=%d",
-			c.projectSeg(), resource, state, url.QueryEscape(label), page)
-		if err := c.do(ctx, http.MethodGet, path, nil, &raw); err != nil {
+	for page := 1; page <= maxListPages; page++ {
+		path := fmt.Sprintf("/projects/%s/%s?state=%s&labels=%s&per_page=%d&page=%d",
+			c.projectSeg(), resource, state, url.QueryEscape(label), perPage, page)
+		data, hdr, err := c.request(ctx, http.MethodGet, path, nil)
+		if err != nil {
 			return nil, err
+		}
+		var raw []rawItem
+		if len(data) > 0 {
+			if err := json.Unmarshal(data, &raw); err != nil {
+				return nil, err
+			}
 		}
 		for _, r := range raw {
 			all = append(all, r.curated())
 		}
-		if len(raw) < 100 {
+		// GitLab sets X-Next-Page to the next page number and to an EMPTY string
+		// on the last page. Absent (a proxy that strips it, or keyset pagination)
+		// is treated as "done" too: under-fetching one page is recoverable, an
+		// endless loop is not.
+		if strings.TrimSpace(hdr.Get("X-Next-Page")) == "" {
 			break
 		}
 	}
@@ -261,28 +320,35 @@ func (c *Client) ListIssuesByLabel(ctx context.Context, label string) ([]provide
 	return c.listPaged(ctx, "issues", "opened", label)
 }
 
-// Comment posts a note on a merge request OR an issue, identified only by its
-// project-scoped iid.
+// CommentOnPR posts a note on the MERGE REQUEST with this iid (the curation
+// duplicate-coalesce path). CommentOnIssue posts a note on the ISSUE with this
+// iid (the re-investigation path).
 //
-// This is the sharpest divergence from GitHub: GitHub gives issues and pull
-// requests ONE shared number space and ONE shared comments endpoint, so
-// Comment(number) is never ambiguous. GitLab does not — merge requests and
-// issues are separate resources, each with its OWN iid sequence starting at 1
-// and its OWN notes endpoint. The providers.CurationForge / ReinvestForge
-// interfaces pass only a bare int (no "this is an MR" flag), because that
-// contract was shaped by GitHub's model. So Comment tries the merge-request
-// notes endpoint first (the far more common caller: curation's duplicate-PR
-// coalesce) and falls back to the issue notes endpoint on a 404 (the
-// reinvestigate path, which always names an issue) — the same 404-as-type-
-// discriminator idiom github.Client.IsPROpen already relies on.
-func (c *Client) Comment(ctx context.Context, number int, body string) error {
-	err := c.do(ctx, http.MethodPost, fmt.Sprintf("/projects/%s/merge_requests/%d/notes", c.projectSeg(), number),
+// This is the sharpest divergence from GitHub, and the reason
+// providers.CurationForge / ReinvestForge name the artifact kind in the METHOD
+// rather than leaving the client to work it out. GitHub gives issues and pull
+// requests ONE shared number space and ONE shared comments endpoint, so a bare
+// number is never ambiguous. GitLab gives merge requests and issues SEPARATE
+// resources, each with its own iid sequence starting at 1 and its own notes
+// endpoint — so in a KB project with 40 open merge requests, issue #3 and merge
+// request !3 both exist and have nothing to do with each other.
+//
+// There is therefore no runtime rule that can recover the caller's intent. In
+// particular a "try merge requests first, fall back to issues on 404" probe —
+// the idiom github.Client.IsPROpen can safely use — is actively harmful here:
+// the MR call SUCCEEDS, the note lands on an unrelated merge request, GitLab
+// returns 200, and the re-investigation looks handled while its findings are
+// nowhere near the issue that asked for them. Splitting the method is what makes
+// that a compile error instead of a silent misroute.
+func (c *Client) CommentOnPR(ctx context.Context, number int, body string) error {
+	return c.do(ctx, http.MethodPost, fmt.Sprintf("/projects/%s/merge_requests/%d/notes", c.projectSeg(), number),
 		map[string]any{"body": body}, nil)
-	if isNotFound(err) {
-		return c.do(ctx, http.MethodPost, fmt.Sprintf("/projects/%s/issues/%d/notes", c.projectSeg(), number),
-			map[string]any{"body": body}, nil)
-	}
-	return err
+}
+
+// CommentOnIssue posts a note on the issue with this iid; see CommentOnPR.
+func (c *Client) CommentOnIssue(ctx context.Context, number int, body string) error {
+	return c.do(ctx, http.MethodPost, fmt.Sprintf("/projects/%s/issues/%d/notes", c.projectSeg(), number),
+		map[string]any{"body": body}, nil)
 }
 
 // ReplaceLabel removes one label and adds another on an issue (the only

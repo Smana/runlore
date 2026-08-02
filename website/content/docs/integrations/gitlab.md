@@ -87,10 +87,31 @@ curl --header "PRIVATE-TOKEN: $GITLAB_TOKEN" \
   16.x/15.x installs are likely fine too, just not part of the tested matrix.
 - RunLore's writes are confined to the forge — it has **no cluster-mutating permissions**.
 
+## Not yet supported on GitLab
+
+The Learn loop is complete on GitLab: an investigation drafts a merge request, a recurrence
+coalesces onto the open one instead of duplicating it, the `reinvestigate` label re-runs the
+investigation and posts the findings back, and `index.md`/`log.md` stay in step with every entry.
+
+**Phase-2 grooming is GitHub-only.** These do not work on a GitLab-hosted knowledge base today:
+
+| What | Behaviour on GitLab |
+|------|--------------------|
+| `lore curate` (the backlog-grooming CLI: dedup, lifecycle, queue, recurrence, contested, retirement passes) | **Fails to start**, with a message naming a GitHub App — it has no GitLab code path |
+| In-server sweeps (`curate.sweeps.mode: apply`) | **Silently disabled** — no sweeper is built, and nothing in the logs says so |
+| Source-repo diff cloning for private repos (`gitops` source cloning) | GitHub-App auth only — unrelated to which forge hosts the KB, but it bites the same operator |
+
+Concretely: nothing prunes the KB backlog, stale merge requests are never closed, and entries are
+never promoted to `ready-to-merge` when the underlying incident resolves. Review and merge KB merge
+requests by hand until GitLab support lands in the grooming agent.
+
 ## Reference
 
 - [Configuration → `forge`]({{< relref "/docs/configuration/configuration.md#forge--the-git-host-for-curation" >}})
   for the full key reference.
 - [Learning loop]({{< relref "/docs/concepts/learning-loop.md" >}}) — the full curate/triage lifecycle.
+  Note that it documents the **GitHub** lifecycle end to end; see [Not yet supported on
+  GitLab](#not-yet-supported-on-gitlab) for the Phase-2 grooming passes a GitLab-hosted KB does not
+  get yet.
 - [GitHub]({{< relref "/docs/integrations/github.md" >}}) — the other supported forge, for a
   side-by-side comparison of the two auth models.

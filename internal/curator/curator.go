@@ -122,7 +122,9 @@ func (c *Curator) Curate(ctx context.Context, inv providers.Investigation) (prov
 	if n, ok, err := c.duplicateOpenPR(ctx, inv); err != nil {
 		c.Log.Warn("dedup: list open PRs failed", "err", err)
 	} else if ok {
-		if err := c.Forge.Comment(ctx, n, coalesceComment(inv)); err != nil {
+		// n came from ListPRsByLabel, so it is a PR/MR number — CommentOnPR, not
+		// the issue-scoped call (on GitLab the two number spaces are disjoint).
+		if err := c.Forge.CommentOnPR(ctx, n, coalesceComment(inv)); err != nil {
 			c.recordCuration(ctx, "pr", "error")
 			return providers.Ref{}, fmt.Errorf("coalesce comment: %w", err)
 		}

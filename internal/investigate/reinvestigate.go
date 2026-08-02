@@ -74,7 +74,10 @@ func (r *Reinvestigator) pollOnce(ctx context.Context) {
 			r.Log.Warn("reinvestigate: run failed", "issue", is.Number, "err", err)
 			continue
 		}
-		if err := r.Forge.Comment(ctx, is.Number, reinvestComment(inv)); err != nil {
+		// is.Number came from ListIssuesByLabel, so it is an ISSUE iid — the
+		// issue-scoped call is mandatory here, not a stylistic choice: on GitLab a
+		// merge request with the same iid usually also exists and is unrelated.
+		if err := r.Forge.CommentOnIssue(ctx, is.Number, reinvestComment(inv)); err != nil {
 			r.Log.Warn("reinvestigate: comment failed", "issue", is.Number, "err", err)
 			continue
 		}

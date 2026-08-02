@@ -42,7 +42,12 @@ var rules = []rule{
 	// suffix shape. The forge client sends this value as the PRIVATE-TOKEN
 	// header on every request — this rule is the backstop that keeps it from
 	// reaching a log even if it ever ends up quoted in tool output or an error.
-	{regexp.MustCompile(`\bgl(?:pat|cbt|rt|ptt|ft)-[A-Za-z0-9_-]{20,}\b`), mask},
+	// The suffix class includes '.' because GitLab's newer ROUTABLE tokens embed
+	// dot-separated segments (`glpat-<payload>.<version>.<crc>`); without it the
+	// mask would stop at the first dot and leak the rest of the token verbatim.
+	// The trailing \b still anchors the match, so a sentence-ending period after
+	// a non-routable token is not swallowed (the engine backtracks off it).
+	{regexp.MustCompile(`\bgl(?:pat|cbt|rt|ptt|ft)-[A-Za-z0-9_.-]{20,}\b`), mask},
 	// OpenAI / Anthropic-style keys (anchored so a benign "sk-" inside a word
 	// like "task-management" is not matched).
 	{regexp.MustCompile(`\bsk-[A-Za-z0-9_-]{16,}\b`), mask},
