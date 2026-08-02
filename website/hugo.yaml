@@ -30,13 +30,20 @@ menu:
     - name: Compare
       pageRef: /compare
       weight: 2
-    - name: GitHub
+    # The nightly scorecard is the project's main evidence that its claims are
+    # checkable, and it publishes reds as readily as greens. It had exactly two
+    # inbound links and no nav entry, which made the one page a skeptic wants
+    # the hardest one to find.
+    - name: Eval
+      pageRef: /eval
       weight: 3
+    - name: GitHub
+      weight: 4
       url: "https://github.com/Smana/runlore"
       params:
         icon: github
     - name: Search
-      weight: 4
+      weight: 5
       params:
         type: search
 
