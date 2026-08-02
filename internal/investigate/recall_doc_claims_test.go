@@ -21,6 +21,13 @@ const docClaimsPath = "../../website/content/docs/concepts/learning-loop.md"
 // with a scripted reranker that accepts the correct target by construction, so the
 // row measures the fire gate, not model judgment — a page that quotes the number
 // without saying so overstates it.
+//
+// WHAT THIS GUARD DOES NOT PROTECT. The caveat check is keyword presence, not meaning.
+// A reviewer demonstrated the gap: prose that keeps these words while asserting the
+// opposite — that real models reach the same fire-rate, "confirming the reranker's
+// real-world accuracy" — still passes. Semantic checking of prose is not achievable
+// here, so treat this half as a reminder to a future editor, not a proof. The NUMBERS
+// above are genuinely pinned; the framing around them still needs a human to read it.
 func TestRecallDocClaimsMatchMeasurement(t *testing.T) {
 	raw, err := os.ReadFile(docClaimsPath)
 	if err != nil {
