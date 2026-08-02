@@ -58,3 +58,26 @@ func BuildGitLabTokenSource(cfg *config.Config, log *slog.Logger) ForgeToken {
 	}
 	return func(context.Context) (string, error) { return tok, nil }
 }
+
+// BuildKBTokenSource picks the credential for reading the KNOWLEDGE-BASE repo —
+// the catalog git-sync — by forge provider.
+//
+// This is deliberately separate from BuildForgeTokenSource, which mints GitHub App
+// installation tokens and is correct for the GitHub-only paths (curate, sweeps, the
+// what-changed differ that clones source repos). Catalog sync is different: it reads
+// the same repo the curator writes to, so it must follow forge.provider.
+//
+// Before this existed, catalog sync fell back to the GitHub App identity on every
+// deployment. On GitLab that source is nil, so the syncer cloned ANONYMOUSLY: with a
+// private KB project, RunLore opened the merge request, a human merged it, and the
+// merged knowledge never came back into the catalog. The learning loop was severed at
+// the seam, silently — the log line explaining the fallback did not even fire, because
+// the token source was nil rather than wrong.
+//
+// catalog.git.token_env still wins over this; it is the explicit escape hatch.
+func BuildKBTokenSource(cfg *config.Config, log *slog.Logger) ForgeToken {
+	if cfg.Forge.Provider == "gitlab" {
+		return BuildGitLabTokenSource(cfg, log)
+	}
+	return BuildForgeTokenSource(cfg, log)
+}

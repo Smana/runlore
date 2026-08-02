@@ -82,9 +82,13 @@ curl --header "PRIVATE-TOKEN: $GITLAB_TOKEN" \
   with curation silently disabled.
 - TLS verification is always on; there is no `insecure_skip_verify` escape hatch. A self-signed
   instance needs a certificate your cluster's trust store already accepts.
-- Tested against **GitLab 16.x and 17.x** (self-managed) and gitlab.com; the API surface RunLore uses
-  (Commits, Merge Requests, Issues, Notes) has been stable across the v4 API for years, so earlier
-  16.x/15.x installs are likely fine too, just not part of the tested matrix.
+- **Not yet verified against a live GitLab instance.** The provider is built against the GitLab v4
+  REST API (Commits, Merge Requests, Issues, Notes), whose surface has been stable for years, and it
+  is covered by tests that assert the exact requests it sends — but no one has yet run it end to end
+  against a real self-managed instance or gitlab.com. If you are the first, please
+  [tell us what you find](https://github.com/Smana/runlore/issues). The most likely rough edges are a
+  reverse proxy normalising the `%2F` in an encoded project path, and the role you need to commit to
+  a protected default branch.
 - RunLore's writes are confined to the forge — it has **no cluster-mutating permissions**.
 
 ## Not yet supported on GitLab
@@ -98,7 +102,7 @@ investigation and posts the findings back, and `index.md`/`log.md` stay in step 
 | What | Behaviour on GitLab |
 |------|--------------------|
 | `lore curate` (the backlog-grooming CLI: dedup, lifecycle, queue, recurrence, contested, retirement passes) | **Fails to start**, with a message naming a GitHub App — it has no GitLab code path |
-| In-server sweeps (`curate.sweeps.mode: apply`) | **Silently disabled** — no sweeper is built, and nothing in the logs says so |
+| In-server sweeps (`curate.sweeps.mode: apply`) | **Disabled, and it says so.** No sweeper is built, and startup logs `curate sweeps disabled: no usable KB forge — Phase-2 grooming is GitHub-only` |
 | Source-repo diff cloning for private repos (`gitops` source cloning) | GitHub-App auth only — unrelated to which forge hosts the KB, but it bites the same operator |
 
 Concretely: nothing prunes the KB backlog, stale merge requests are never closed, and entries are
