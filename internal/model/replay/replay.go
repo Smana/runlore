@@ -88,8 +88,8 @@ type Provider struct {
 // New wraps a loaded transcript as a model provider.
 func New(t *Transcript) *Provider { return &Provider{t: t} }
 
-// Transcript exposes the replayed transcript so callers can render its provenance.
-func (p *Provider) Transcript() *Transcript { return p.t }
+// compile-time assertion: the replay provider satisfies the model interface.
+var _ providers.ModelProvider = (*Provider)(nil)
 
 // Complete returns the next recorded turn, ignoring the request entirely — the
 // transcript is a fixed script, not a function of the prompt.

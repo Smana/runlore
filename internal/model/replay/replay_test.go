@@ -4,6 +4,8 @@ package replay_test
 
 import (
 	"context"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -84,10 +86,26 @@ func TestToolNames(t *testing.T) {
 	}
 }
 
-// TestLoadRejectsEmptyTranscript: an empty turns list would fail later, deep in the
-// loop, with a confusing message. Fail at load with a clear one instead.
-func TestLoadRejectsEmptyTranscript(t *testing.T) {
+// TestLoadRejectsMissingFile: a missing file fails at load so the error can name
+// the file, rather than later midway through a demo.
+func TestLoadRejectsMissingFile(t *testing.T) {
 	if _, err := replay.Load("testdata/does-not-exist.json"); err == nil {
 		t.Fatal("expected an error for a missing transcript")
+	}
+}
+
+// TestLoadRejectsEmptyTranscript: a transcript with no turns would fail later,
+// mid-demo, with a confusing error. Fail at load, naming the file.
+func TestLoadRejectsEmptyTranscript(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "empty.json")
+	if err := os.WriteFile(path, []byte(`{"version":1,"scenario":"x","turns":[]}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	_, err := replay.Load(path)
+	if err == nil {
+		t.Fatal("expected an error for a transcript with no turns")
+	}
+	if !strings.Contains(err.Error(), "no turns") {
+		t.Errorf("error should say the transcript has no turns, got: %v", err)
 	}
 }
