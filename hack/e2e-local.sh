@@ -40,7 +40,7 @@ step()  { printf '\n\033[1;36m== %s ==\033[0m\n' "$*"; }
 free_port() {
   local pid
   pid=$(ss -ltnp 2>/dev/null | grep ":$1 " | grep -oP 'pid=\K[0-9]+' | head -1) || true
-  [[ -n "$pid" ]] && kill "$pid" 2>/dev/null || true
+  if [[ -n "$pid" ]]; then kill "$pid" 2>/dev/null || true; fi
 }
 
 # ---------------------------------------------------------------------------
@@ -140,7 +140,7 @@ provider_host() {
 # ---------------------------------------------------------------------------
 
 cleanup() {
-  [[ -n "$MOCK_PID" ]] && kill "$MOCK_PID" 2>/dev/null || true
+  if [[ -n "$MOCK_PID" ]]; then kill "$MOCK_PID" 2>/dev/null || true; fi
   free_port "$MOCK_PORT"; free_port 9998
   if [[ "$KEEP" == "0" ]]; then
     provider_delete_cluster
