@@ -44,11 +44,20 @@ type Case struct {
 	// when CatalogDir is set.
 	Recall *CaseRecall `yaml:"recall,omitempty"`
 	// ExpectRecall asserts the recall outcome mechanically and fails the case when unmet:
-	//   short_circuit — recall fired and its answer was delivered (loop skipped)
-	//   withdrawn     — recall fired but the verify pass rejected it and the loop fell
-	//                   through to a full investigation
-	//   fired         — recall fired (either short_circuit or withdrawn)
-	//   rejected      — a recall gate rejected the hit: recall never fired
+	//   short_circuit     — recall fired and its answer was delivered (loop skipped)
+	//   withdrawn         — recall fired, the verify pass REVIEWED the entry and
+	//                       rejected it, and the loop fell through to a full
+	//                       investigation
+	//   verify_unavailable — recall fired but the verify pass could not run at all
+	//                        (model error, or a response with no usable verdict); the
+	//                        fail-closed gate forced the same fall-through as an
+	//                        outright rejection, but for a different reason — a case
+	//                        asserting "withdrawn" does NOT pass on this outcome, so a
+	//                        flapping model endpoint surfaces as a failure rather than
+	//                        a green run that means something else
+	//   fired             — recall fired (short_circuit, withdrawn, or
+	//                       verify_unavailable)
+	//   rejected          — a recall gate rejected the hit: recall never fired
 	// Empty ⇒ no recall assertion (existing cases are unaffected).
 	ExpectRecall string `yaml:"expect_recall,omitempty"`
 
