@@ -51,6 +51,11 @@ jobs:
         # No bare `hugo mod get` — it would upgrade the pinned Hextra.
         run: hugo --minify --gc
 
+      - name: In-page anchors must resolve
+        # refLinksErrorLevel: ERROR above covers relref between pages; it does not look
+        # at fragment links within a page. Runs against the HTML the step above rendered.
+        run: hack/check-anchors.sh
+
       - name: README/CONTRIBUTING must not link to raw docs/*.md
         run: |
           if grep -nE '\]\((\.?/)?docs/[a-z0-9/_-]+\.md' README.md CONTRIBUTING.md; then

@@ -3,59 +3,199 @@ title: Getting Started
 weight: 10
 ---
 
-This guide deploys RunLore into a real cluster: it reacts to incidents, investigates them with an
-LLM (grounded in your knowledge catalog), delivers findings to chat, and — optionally — curates what
-it learns back to a Git repo as pull requests.
+RunLore reacts to incidents, investigates them with an LLM (grounded in your knowledge catalog),
+delivers findings to chat, and — optionally — curates what it learns back to a Git repo as pull
+requests. This page has three stops, each independently worth doing on its own:
 
-**Running in-cluster (`lore serve`, via Helm) is the recommended way to run RunLore** — that's how it
-reacts to incidents continuously and closes the Learn loop. The CLI (`lore investigate --alert "<symptom>"`) is
-for one-off local runs against the same engine; see [CONTRIBUTING.md](https://github.com/Smana/runlore/blob/main/CONTRIBUTING.md) for that.
+1. **[Try it](#try-it--no-cluster-no-keys)** — a real root cause, no cluster, no keys, ~60 seconds.
+2. **[Investigate your own stack](#investigate-your-own-stack--kubeconfig--one-api-key)** — one CLI
+   command against your cluster, no config file.
+3. **[The full loop](#the-full-loop--production-install)** — `lore serve` in-cluster: continuous
+   reaction, chat delivery, and knowledge curation.
+
+## Try it — no cluster, no keys
+
+Before wiring anything, watch RunLore reach a real root cause over recorded evidence — no
+Kubernetes, no LLM key, no network. You only need Go and git:
+
+```bash
+git clone https://github.com/Smana/runlore && cd runlore
+hack/demo.sh
+```
+
+`hack/demo.sh` builds the binary and runs `lore demo investigate --offline default` — replaying a
+transcript recorded once against a live model through the **real investigation loop**: the same
+ReAct tool calls, verify pass, and verdict-card renderer that run in `lore serve`, over fake (but
+realistic) evidence for a Harbor chart-bump incident:
+
+```text
+== RunLore demo: investigating "harbor-chart-bump" (recorded model turns, fake providers, no cluster) ==
+   model turns recorded 2026-08-02T07:48:52Z with openai/glm-4.5-air
+
+→ what_changed()
+  flux Kustomization/apps aaa111..bbb222 --- apps/harbor/values.yaml - tag: 1.14.2 + tag: 1.15.0 …
+
+== submit_findings ==
+*Investigation* — confidence 90%
+🔥 Verdict: Action required
+Resource: Deployment apps/harbor-core
+1. *Database migration deadlock preventing harbor-db pod from starting, causing harbor-core
+   connection failures* (90%)
+   → suggested: Investigate and resolve the migration deadlock in harbor-db pod, then restart
+     the database to clear the lock (reversible)
+```
+
+That `model turns recorded … with openai/glm-4.5-air` line is not decoration — it's the honesty
+mechanism. Nothing here is scripted for the demo: the model's reasoning was captured once against a
+live model and is replayed byte-for-byte, so the card discloses exactly **when** and **with which
+model** it was produced, rather than letting you mistake a replay for a live run. Model behavior on
+the same evidence can drift release to release, so that provenance line is what tells you how
+current the transcript is. Re-record it yourself against your own model with `--record` — see the
+[CLI reference]({{< relref "/docs/reference/cli.md" >}}).
+
+Already have `lore` installed (see [below](#investigate-your-own-stack--kubeconfig--one-api-key))?
+The command `hack/demo.sh` runs is just:
+
+```bash
+lore demo investigate --offline default
+```
+
+run from inside a clone — the demo fixtures under `examples/` are read from disk at startup, not
+embedded in the released binary, so this one needs the repo checked out.
+
+Curious about the **filter** that decides what gets investigated in the first place, rather than the
+investigation itself? `hack/demo-trigger-policy.sh` fires mocked Alertmanager alerts through the
+trigger policy — no LLM involved at all.
+
+---
+
+## Investigate your own stack — kubeconfig + one API key
+
+Ready to point it at something real? `lore investigate` runs one on-demand investigation against
+**your** cluster and prints the findings — no `runlore.yaml`, no Helm install. First, get the
+binary:
+
+```bash
+curl -fsSL https://runlore.io/install.sh | sh
+# or: go install github.com/Smana/runlore/cmd/lore@latest
+```
+
+Then, with a working `kubeconfig` and **one** model credential exported:
+
+```bash
+export ANTHROPIC_API_KEY=sk-ant-...          # or OPENAI_BASE_URL (+ OPENAI_API_KEY / OPENAI_MODEL)
+lore investigate --alert "HarborProbeFailure" --namespace apps
+```
+
+With no `--config`, `investigate` synthesizes a **model-only** config straight from the
+environment — every data source stays unset, so each one simply disables the tool it would have
+unlocked rather than demanding a full stack:
+
+| Env var | Effect |
+|---|---|
+| `OPENAI_BASE_URL` (+ optional `OPENAI_API_KEY`, `OPENAI_MODEL`) | any OpenAI-compatible endpoint — keyless if the endpoint itself needs no credential (e.g. a local vLLM/Ollama) |
+| `ANTHROPIC_API_KEY` | native Anthropic, checked if no `OPENAI_BASE_URL` is set |
+
+Four flags override whatever that resolves to, so you can point the CLI at your stack without
+writing a file at all:
+
+| Flag | Overrides |
+|---|---|
+| `--model` | the model name |
+| `--base-url` | the OpenAI-compatible endpoint |
+| `--metrics-url` | PromQL endpoint — enables the `query_metrics` tool |
+| `--logs-url` | logs endpoint — enables the `query_logs` tool |
+
+`investigate` never refuses to run just because a signal is missing — it runs on whatever's
+configured and says so on stderr:
+
+```text
+note: running without metrics (query_metrics), logs (query_logs), knowledge catalog (kb_search, instant recall) — pass --metrics-url/--logs-url or a --config to enable them
+```
+
+**That notice means "under-configured," not "broken."** The investigation still runs to completion
+and still reaches a verdict — just over whatever evidence is actually available. Treat it as a
+checklist for widening the picture (another flag, a `--config` pointing at a fuller `runlore.yaml`),
+not as an error to work around. Full flag/env reference:
+[CLI]({{< relref "/docs/reference/cli.md" >}}).
+
+---
+
+## The full loop — production install
+
+This is where RunLore stops being a one-off lookup and starts reacting to incidents continuously,
+delivering to chat, and — once a knowledge-catalog repo is wired up — curating what it learns back
+as pull requests (the Learn loop, RunLore's differentiator). **Running in-cluster (`lore serve`,
+via Helm) is the recommended way to get there** — the CLI above is for one-off local runs against
+the same engine.
 
 RunLore is **read-only on your cluster**: it never mutates workloads. Its only writes go to the Git
 forge (issues/PRs on a repo you designate).
 
-> For local development / testing on k3d, see [CONTRIBUTING.md](https://github.com/Smana/runlore/blob/main/CONTRIBUTING.md) instead.
+> For local development / testing on k3d, see
+> [CONTRIBUTING.md](https://github.com/Smana/runlore/blob/main/CONTRIBUTING.md) instead.
 
-> **Just want a quick look first?** `hack/demo.sh` runs `lore serve` locally with a keyless config and
-> fires mocked Alertmanager alerts through the trigger policy — no cluster, no LLM, no credentials
-> (just Go + `curl`). It shows which alerts become incidents; the full investigate → chat → curate loop
-> below needs the cluster, LLM, and KB repo. See the [README quickstart](https://github.com/Smana/runlore/blob/main/README.md#-try-it-in-one-minute--no-cluster-no-keys).
+The walkthrough below wires **one golden path** — Prometheus/VictoriaMetrics metrics, GitHub for
+curation, Slack for delivery, and **Anthropic** for the model. That is what the shipped values
+profiles and the `Secret` in [Step 3](#step-3--credentials) use: one API key, no endpoint of your
+own to run. Pointing it at any **OpenAI-compatible** endpoint instead is a two-line change
+(`provider: openai` + `base_url`) — and that is the combination the nightly eval and the k3d e2e
+suite exercise, so neither path is untested. Every other data source, LLM, notifier, or forge is
+equally supported; each gets a one-line pointer to its own page under
+[Integrations]({{< relref "/docs/integrations/_index.md" >}}) as it comes up below.
 
 ## Prerequisites
 
 ### Required
 
-- A **Kubernetes cluster running [Flux](https://fluxcd.io/flux/installation/) or
-  [Argo CD](https://argo-cd.readthedocs.io/en/stable/getting_started/)** — select with
-  `config.gitops.engine` (`flux` default, or `argocd`). The what-changed spine + failure trigger read
-  the engine's resources (Flux `Kustomization`/`GitRepository`, or Argo CD `Application`s). Any
-  conformant cluster works — EKS, GKE, AKS, or local [k3d](https://k3d.io/) / [kind](https://kind.sigs.k8s.io/)
-  (follow each project's install docs); RunLore only needs Flux or Argo CD running on it.
-- An **LLM** — either an **OpenAI-compatible** endpoint (in-cluster
-  [vLLM](https://github.com/vllm-project/vllm), [Ollama](https://ollama.com/), OpenAI, OpenRouter) or
-  **native Anthropic** (`model.provider: anthropic`). Keep it in-cluster if you don't want telemetry to
-  leave your boundary.
+- A **Kubernetes cluster** — any conformant cluster works: EKS, GKE, AKS, or local
+  [k3d](https://k3d.io/) / [kind](https://kind.sigs.k8s.io/) (follow each project's install docs).
 - `kubectl` + `helm` (v3.12+).
+- An **LLM** — the shipped values profiles use native
+  [Anthropic]({{< relref "/docs/integrations/anthropic.md" >}}) (one API key, nothing to run); any
+  **OpenAI-compatible** endpoint (in-cluster [vLLM](https://github.com/vllm-project/vllm),
+  [Ollama](https://ollama.com/), OpenAI, OpenRouter) is a two-line swap. Keep the
+  model in-cluster if you don't want telemetry to leave your boundary — see
+  [Local / keyless]({{< relref "/docs/integrations/local-keyless.md" >}}).
 
-### Optional (but recommended)
+### Recommended
 
-- A **GitHub App** for curation — [step 2](#step-2-github-app-for-curation-optional). **Without it the
-  Learn loop (curation) is disabled**: RunLore still reacts and investigates, but it can't write what it
-  learns back to your KB repo. Since the learning loop is RunLore's differentiator, this is **strongly
-  recommended**.
+- **[Flux](https://fluxcd.io/flux/installation/) or
+  [Argo CD](https://argo-cd.readthedocs.io/en/stable/getting_started/) running on that cluster** —
+  select with `config.gitops.engine` (`flux` default, or `argocd`). This unlocks the what-changed spine and the
+  GitOps-failure trigger (Flux `Kustomization`/`HelmRelease`, or Argo CD `Application`, going
+  `Ready=False`) — RunLore's sharpest signal. **Not required**: every data source is pluggable, and
+  an unset one just disables the tool it would have unlocked — see
+  [GitOps failures]({{< relref "/docs/integrations/gitops.md" >}}). Without it, RunLore still reacts
+  to Alertmanager alerts and investigates with whatever other signals you've wired.
+- A **GitHub App** for curation — [Step 2](#step-2--github-app-for-curation-optional) below.
+  **Without it the Learn loop (curation) is disabled**: RunLore still reacts and investigates, it
+  just can't write what it learns back to your KB repo. Since the learning loop is RunLore's
+  differentiator, this is **strongly recommended**.
 
 ### Optional
 
-- A **metrics** backend (VictoriaMetrics/Prometheus), a **logs** backend (VictoriaLogs),
-  and/or a **network-flow** source — they enable the `query_metrics` / `query_logs` / `network_drops`
-  investigation tools. The network signal is **pluggable and CNI-agnostic**: Cilium Hubble, **AWS VPC
-  Flow Logs** (any AWS VPC, incl. EKS with the AWS VPC CNI), or **GCP Firewall Logs** (any GCP VPC,
-  incl. GKE). RunLore does **not** assume Cilium.
-- **AWS** read-only access — enables the `cloud_what_changed` (CloudTrail) and
-  `cloud_resource_health` (EC2/ASG/EKS) tools, the cloud-control-plane "what changed" lens for infra
-  changes outside GitOps. Auth is in-cluster identity (**EKS Pod Identity** or IRSA) — no static keys.
-  See [step 4b](#step-4b-aws-cloud-provider-optional).
-- A **notifier** for delivery — a **Slack incoming webhook**, a **Matrix** account, or a generic outgoing webhook.
+Everything else is genuinely pluggable — an unset one just disables the tool or channel it would
+have unlocked, nothing else changes. Full catalog:
+[Integrations]({{< relref "/docs/integrations/_index.md" >}}).
+
+- **Data sources** — [Prometheus/VictoriaMetrics]({{< relref "/docs/integrations/prometheus.md" >}})
+  (used below), [VictoriaLogs]({{< relref "/docs/integrations/victorialogs.md" >}}) or
+  [Loki]({{< relref "/docs/integrations/loki.md" >}}) for logs, a network-flow signal
+  ([Hubble]({{< relref "/docs/integrations/hubble.md" >}}) — Cilium only,
+  [AWS VPC Flow Logs]({{< relref "/docs/integrations/aws-vpc-flow-logs.md" >}}), or
+  [GCP Firewall Logs]({{< relref "/docs/integrations/gcp-firewall-logs.md" >}}) — RunLore does
+  **not** assume Cilium), [AWS cloud control plane]({{< relref "/docs/integrations/aws-cloud.md" >}})
+  (also see [Step 4b](#step-4b--aws-cloud-provider-optional) below),
+  [source repos]({{< relref "/docs/integrations/source-repos.md" >}}) for real Git diffs behind a
+  version bump, and [MCP]({{< relref "/docs/integrations/mcp.md" >}}) for tools RunLore doesn't ship
+  natively.
+- **A notifier for delivery** — this walkthrough uses
+  [Slack]({{< relref "/docs/integrations/slack.md" >}}); a
+  [Matrix]({{< relref "/docs/integrations/matrix.md" >}}) account, a generic
+  [webhook]({{< relref "/docs/integrations/webhook.md" >}}), or a
+  [templated]({{< relref "/docs/integrations/templated.md" >}}) payload (Teams, Discord, ntfy…) all
+  work the same way.
 - [External Secrets Operator](https://external-secrets.io/) to sync credentials from a vault
   (recommended over raw `Secret`s in production).
 
@@ -112,9 +252,9 @@ incidents, platform constraints.
    **Option A — Git-sync (recommended; closes the read/write loop).** RunLore clones the repo and
    re-pulls it on an interval, re-indexing automatically. When curation merges a PR into this repo, the
    new knowledge flows straight back into what the agent searches — no manual step. Configure it under
-   `config.catalog.git` ([step 4](#step-4-configure-and-install)) and set `catalog.gitSync: true` (which
+   `config.catalog.git` ([step 4](#step-4--configure-and-install)) and set `catalog.gitSync: true` (which
    mounts a writable mirror). A **private** repo authenticates with the **same curation GitHub App** by
-   default ([step 2](#step-2-github-app-for-curation-optional)) — one credential for both reads and
+   default ([step 2](#step-2--github-app-for-curation-optional)) — one credential for both reads and
    writes; set `git.token_env` only to use a different token.
 
    **Option B — ConfigMap (static).** Mount a snapshot; refresh it yourself when the repo changes:
@@ -197,12 +337,15 @@ installation tokens minted on demand from the App's private key (no long-lived c
 ### Security best practices
 
 - **Never commit the private key** or put it in `values.yaml`. Store it in a `Secret`
-  ([step 3](#step-3-credentials)) — ideally synced from a vault via External Secrets.
+  ([step 3](#step-3--credentials)) — ideally synced from a vault via External Secrets.
 - **Scope the installation** to specific repos, and grant only the three write permissions above.
 - Installation tokens are already **short-lived (1h) and auto-refreshed** — there is no long-lived
   token to leak. **Rotate the App private key** periodically anyway.
 - Restrict who can administer the App in your org.
 - RunLore's writes are confined to the forge — it has **no cluster-mutating permissions**.
+
+Full key reference and the source-repo App-access edge case:
+[Integrations → GitHub]({{< relref "/docs/integrations/github.md" >}}).
 
 ---
 
@@ -213,12 +356,15 @@ Create a `Secret` with the credentials your config references by env-var name. I
 
 ```bash
 kubectl -n runlore create secret generic runlore-secrets \
-  --from-literal=OPENAI_API_KEY='<model-api-key-or-omit-if-keyless>' \
+  --from-literal=ANTHROPIC_API_KEY='<model-api-key>' \
   --from-literal=RUNLORE_WEBHOOK_TOKEN="$(openssl rand -hex 32)" \
   --from-literal=SLACK_WEBHOOK_URL='https://hooks.slack.com/services/...' \
-  --from-literal=MATRIX_TOKEN='<matrix-access-token>' \
   --from-file=GITHUB_APP_PRIVATE_KEY=/path/to/app-private-key.pem
 ```
+
+On an OpenAI-compatible endpoint the key is `OPENAI_API_KEY` instead (omit it entirely when the
+endpoint is keyless), and `values-full.yaml` adds one more: `APPROVAL_TOKEN`, which gates the action
+approval and kill-switch endpoints.
 
 > **`RUNLORE_WEBHOOK_TOKEN` is required once a model is configured.** The `serve` path
 > **fails closed** — it refuses to start with an anonymous alert webhook when an LLM is wired (the
@@ -227,207 +373,104 @@ kubectl -n runlore create secret generic runlore-secrets \
 
 Only include the keys you use. The chart injects the whole Secret as env vars via `envFrom`, and the
 config references each by its env-var name (`api_key_env`, `webhook_url_env`, `private_key_env`, …).
+Wiring Matrix, a generic webhook, or another notifier instead of Slack follows the exact same
+pattern — see the notifier's own page under
+[Integrations]({{< relref "/docs/integrations/_index.md" >}}) for its env-var names.
 
 ---
 
 ## Step 4 — Configure and install
 
 RunLore installs **in-cluster with one Helm command** (this is the recommended deployment). You give it
-a `values.yaml` and run `helm install` — jump to **[Install](#install)** below if you just want the
-command.
+a `values.yaml` and run `helm install` — pick one of the three shipped profiles below rather than
+writing one from scratch, or jump to **[Install](#install)** if you just want the command.
 
-### The configuration you'll provide
+### Pick a profile
 
-Create a `values.yaml`. This is a complete production-style example — trim what you don't use:
+The chart ships **three profiles**, each a valid install on its own. Start at the one that matches
+what you have wired, and step up later by copying blocks from the next:
 
-> In a hurry? [`deploy/helm/runlore/values-minimal.yaml`](../deploy/helm/runlore/values-minimal.yaml)
-> is a copy-paste **investigate + notify** starting point (no KB/curation yet — CI-checked against
-> the config schema). The annotated example below is the full golden path.
+| Profile | What it wires | Start here if |
+|---|---|---|
+| [`values-minimal.yaml`](https://github.com/Smana/runlore/blob/main/deploy/helm/runlore/values-minimal.yaml) | Alert webhook, a model, Slack. Read-only, ~15 lines. | You want to see it react to a real alert today. |
+| [`values-standard.yaml`](https://github.com/Smana/runlore/blob/main/deploy/helm/runlore/values-standard.yaml) | **+** git-synced knowledge catalog, GitHub App curation, metrics + logs evidence, JSON logs and `/metrics`. | You did steps 1–2 and want the **learning loop**. |
+| [`values-full.yaml`](https://github.com/Smana/runlore/blob/main/deploy/helm/runlore/values-full.yaml) | **+** leader-elected HA, persistence, a default-deny NetworkPolicy, the approve-rung action ladder, AWS cloud + network-flow signals, instant recall. | You are hardening a production install. |
+
+All three are validated in CI against the chart's `values.schema.json` **and** the agent's config
+schema, so a block you copy out of one is known to load.
+
+> **A values file is not a `runlore.yaml`.** Everything the agent itself reads is nested under
+> `config:` — the chart unwraps that block verbatim into the mounted `runlore.yaml`. The sibling
+> top-level keys (`replicaCount`, `catalog`, `persistence`, `rbac`, `networkPolicy`…) are
+> **chart-level** and never reach the agent. The per-integration pages under
+> [Integrations]({{< relref "/docs/integrations/_index.md" >}}) show raw `runlore.yaml` snippets: nest
+> them under `config:` when pasting into a values file.
+
+### Start: `values-minimal.yaml`
+
+This is the whole file — investigate and notify, nothing else. It references the Secret from
+[step 3](#step-3--credentials) by env-var name:
 
 ```yaml
+replicaCount: 1              # one worker; values-full.yaml adds leader-elected HA
 image:
-  repository: ghcr.io/smana/runlore
-  tag: ""            # defaults to the chart appVersion; pin in production
-
-# HA: 2+ replicas, one active leader; every warm replica is Ready and a non-leader
-# proxies incoming webhooks to the leader. See leader_election below.
-# If you also set persistence.enabled: true, pick workloadKind explicitly: the default
-# Deployment shares one PVC across every replica (fine with an RWX StorageClass like
-# EFS; an RWO one like EBS can't attach it to a standby on a different node — set
-# workloadKind: StatefulSet instead, which gives each replica its own volume via
-# volumeClaimTemplates at the cost of an empty outcome ledger for whichever replica
-# becomes leader next).
-replicaCount: 2
-
-# Inject the whole Secret as env vars (referenced by *_env config keys below).
+  tag: ""                    # defaults to the chart appVersion; pin it in production
 envFrom:
   - secretRef:
-      name: runlore-secrets
-
-# Catalog source (step 1). Option A — git-sync (recommended): a writable mirror.
-catalog:
-  gitSync: true
-  mountPath: /var/lib/runlore/catalog
-  # Option B — static ConfigMap instead:
-  # configMap: runlore-catalog
-
+      name: runlore-secrets  # ANTHROPIC_API_KEY, RUNLORE_WEBHOOK_TOKEN, SLACK_WEBHOOK_URL
 config:
-  # GitOps engine the what-changed spine + failure watch read.
-  gitops:
-    engine: flux          # or "argocd"
-  # Enable sources: a key under `sources.<name>` turns that source on. Presence is
-  # enablement; the value is the source's own config. The webhook auth token stays
-  # server-level (server.webhook_token_env).
   sources:
-    alertmanager: {}           # enable the Alertmanager/VMAlert webhook source
-    gitops:
-      enabled: true            # also react to Flux/Argo CD Ready=False
-  # React: only investigate what matters (controls noise + LLM cost). These are the
-  # match/failure POLICIES; enablement lives under `sources` above.
-  triggers:
-    incidents:
-      match:
-        severity: [critical, warning]   # match against the alert's labels
-        # environment: [prod]           # only matches alerts that CARRY an `environment`
-                                        # label — omit it if yours don't, or nothing fires
-      dedup: { window: 30m }
-      # debounce: 60s          # hold a NON-CRITICAL firing alert this long, then skip it
-                               # if it self-resolved within the window (default 60s; 0s =
-                               # off). A `critical` alert is NEVER held — a debounce must
-                               # never delay the first look at a page.
-      # cancel_queued_on_resolve: true   # default. Drop a QUEUED (not yet started)
-                               # investigation when the alert resolves first. This is what
-                               # filters a self-resolving CRITICAL, at zero added latency.
-    # gitops_failures:
-    #   debounce: 60s          # re-check window before investigating a Flux failure
-
-  # Investigate: the model + the catalog the loop searches.
+    alertmanager: {}         # presence is enablement — accept the alert webhook
   model:
-    base_url: http://vllm.llm.svc:8000/v1   # any OpenAI-compatible endpoint
-    model: <your-model-name>
-    api_key_env: OPENAI_API_KEY             # omit/empty for keyless (in-cluster vLLM/Ollama)
-    # — or native Anthropic instead:
-    # provider: anthropic
-    # model: claude-sonnet-5
-    # api_key_env: ANTHROPIC_API_KEY        # base_url defaults to api.anthropic.com
-  catalog:
-    dir: /var/lib/runlore/catalog           # must match catalog.mountPath above
-    git:                                     # omit this block if using a static ConfigMap
-      url: https://github.com/your-org/runlore-kb
-      branch: main
-      interval: 5m
-      # token_env: KB_GIT_TOKEN              # optional; private repos reuse the curation GitHub App by default
-    # Instant recall: skip the LLM loop when the catalog has a trustworthy match for
-    # the incident (faster, cheaper). Off by default. Once enabled, the fire-gate is
-    # calibrated by an LLM reranker (on by default) — no per-corpus BM25 tuning needed;
-    # min_score is only a trivial secondary cost guard. See docs/learning-loop.md (§3).
-    # instant_recall: { enabled: true }
-
-  # Investigate signals (optional) — enable the query_metrics / query_logs tools.
-  metrics:
-    url: http://vmsingle.observability.svc:8429       # PromQL API base (VictoriaMetrics, or Prometheus on :9090)
-  logs:
-    url: http://victorialogs.observability.svc:9428   # VictoriaLogs base (LogsQL)
-  # Network-flow signal (optional) — the network_drops tool. PLUGGABLE and CNI-agnostic:
-  # RunLore does NOT assume Cilium. Pick the provider matching your environment; an empty/
-  # absent `network` block disables the tool. Choose ONE:
-  network:
-    provider: hubble                                  # Cilium Hubble (requires the Cilium CNI)
-    hubble:
-      url: hubble-relay.kube-system:80                # Hubble Relay gRPC host:port
-    # provider: aws-vpc-flow-logs                     # any AWS VPC (incl. EKS + AWS VPC CNI) — REJECT records
-    # aws:
-    #   region: eu-west-3
-    #   log_group: /aws/vpc/flowlogs                  # CloudWatch Logs group receiving the VPC Flow Logs
-    # provider: gcp-firewall-logs                     # any GCP VPC (incl. GKE) — DENIED firewall connections
-    # gcp:
-    #   project: my-gcp-project
-  # Cloud context (AWS) — enables cloud_what_changed (CloudTrail) + cloud_resource_health
-  # (EC2/ASG/EKS). Read-only; auth is in-cluster identity (no keys). See step 4b.
-  cloud:
-    provider: aws
-    region: eu-west-3
-    cluster_name: your-cluster        # scopes EKS nodegroup / ASG queries
-
-  # Deliver: one or both.
+    provider: anthropic      # or `openai` + base_url for any OpenAI-compatible endpoint
+    model: claude-sonnet-5
+    api_key_env: ANTHROPIC_API_KEY
+  server:
+    webhook_token_env: RUNLORE_WEBHOOK_TOKEN  # MANDATORY once a model is set (serve fails closed)
   notify:
     slack:
       webhook_url_env: SLACK_WEBHOOK_URL
-      # — or a bot token (chat.postMessage) instead of an incoming webhook; the bot
-      #   must be a member of the channel (invite it / `conversations.join`):
-      # bot_token_env: SLACK_BOT_TOKEN              # xoxb-… (takes precedence over webhook_url_env);
-      #                                             #   posts a verdict-first summary + threaded full analysis
-      # channel: C0123456789                        # channel ID or name to post to
-      # signing_secret_env: SLACK_SIGNING_SECRET   # enables Approve/Reject buttons (needs actions.mode: approve)
-      #   ↳ Approve/Reject also needs Interactivity turned ON in the Slack app:
-      #     api.slack.com/apps → your app → Interactivity & Shortcuts → toggle On,
-      #     Request URL = https://<your-runlore-host>/slack/interactions. Read-only
-      #     deployments (no actions) need none of this.
-      # feedback_buttons: true                     # OPT-IN 👍/👎 buttons: one-click human rating of the
-      #                                            #   diagnosis, recorded in the outcome ledger and weighing
-      #                                            #   the recalled entry's trust (the learning loop's human
-      #                                            #   ground truth). Needs the SAME Interactivity Request URL
-      #                                            #   exposure as Approve/Reject above (Slack must reach
-      #                                            #   /slack/interactions) + signing_secret_env +
-      #                                            #   outcome.ledger_path — startup fails loud otherwise.
-    matrix:
-      homeserver: https://matrix.org
-      room_id: "!yourroom:matrix.org"
-      access_token_env: MATRIX_TOKEN
-
-  # Learn: curate findings to your KB repo (omit this block to disable).
-  forge:
-    kb_repo: your-org/runlore-kb            # the repo from step 1
-    base_branch: main
-    skip_verdicts: [no_action]              # keep benign/self-healed/synthetic findings out of the PR queue (chat still notified)
-    # github_api_url: https://ghe.example.com/api/v3   # only for GitHub Enterprise Server
-    github_app:
-      app_id: 123456                         # from step 2
-      installation_id: 7654321               # from step 2
-      private_key_env: GITHUB_APP_PRIVATE_KEY
-
-  # Autonomy ladder. Default (omitted) = off = read-only findings only.
-  #   suggest — propose envelope-filtered remediations, never executed.
-  #   approve — register them for human approval (curl or Slack buttons); an approved
-  #             action executes a reversible Flux op (suspend/resume/reconcile).
-  #   auto    — execute eligible actions WITHOUT approval. Heavily gated (below).
-  # approve + auto require chart rbac.allowActions=true.
-  # actions:
-  #   mode: approve
-  #   approval_token_env: APPROVAL_TOKEN   # gate the approval + kill-switch endpoints
-  #   audit_log_path: /var/lib/runlore/catalog/audit.jsonl   # REQUIRED for approve + auto (hash-chained audit; fails closed on open)
-  #   allow:
-  #     reversible_only: true              # withhold irreversible suggestions
-  #     max_blast_radius: 5
-  #     kinds: [HelmRelease, Kustomization, Application]
-  #   # rung-3 unattended execution (mode: auto). Layered safety: auto ONLY ever runs
-  #   # reversible actions, and every decision is logged + delivered. Start with dry_run.
-  #   auto:
-  #     dry_run: true                      # log "would execute" without executing
-  #     min_confidence: 0.85               # only auto-execute above this confidence
-  #     max_per_window: 3                  # rate limit (anti-storm)
-  #     window: 1h
-  #   # Kill-switch (instant, no redeploy): POST /actions/pause | /actions/resume
-  #   # (X-Approval-Token). Scope which incidents auto acts on via the trigger policy.
-  #   # NOTE: floats like min_confidence must be set via a values file or
-  #   # `helm --set-json` — plain `--set x=0.85` is coerced to a string.
-
-  # HA toggle (default on; harmless with 1 replica).
-  leader_election:
-    enabled: true
-
-  # Webhook token — MANDATORY once a model is configured (serve fails closed without it).
-  # The alert webhook's labels/annotations flow into the LLM prompt and bill the model,
-  # so an unauthenticated caller must not reach it. Set this to the env var you placed
-  # in the Secret (step 3 generates it: openssl rand -hex 32).
-  server:
-    webhook_token_env: RUNLORE_WEBHOOK_TOKEN
 ```
+
+Everything left out is genuinely optional: an unset data source disables the tool it would have
+unlocked, and an unset `forge` disables curation. Swap the `model` block for any of the
+[LLM providers]({{< relref "/docs/integrations/_index.md" >}}), and the `notify` block for
+[Matrix]({{< relref "/docs/integrations/matrix.md" >}}), a
+[webhook]({{< relref "/docs/integrations/webhook.md" >}}), or a
+[templated]({{< relref "/docs/integrations/templated.md" >}}) payload.
+
+### Step up: standard and full
+
+**[`values-standard.yaml`](https://github.com/Smana/runlore/blob/main/deploy/helm/runlore/values-standard.yaml)**
+adds the half that makes RunLore more than a one-shot investigator: `catalog.gitSync: true` plus
+`config.catalog.git` (the KB repo from [step 1](#step-1--create-the-knowledge-catalog-repo), re-pulled
+on an interval so merged PRs flow back into what the agent searches), `config.forge` with the GitHub
+App from [step 2](#step-2--github-app-for-curation-optional), and the
+[metrics]({{< relref "/docs/integrations/prometheus.md" >}}) +
+[logs]({{< relref "/docs/integrations/victorialogs.md" >}}) endpoints the investigation queries for
+evidence. It also turns on JSON logging and the `/metrics` endpoint with a `VMServiceScrape`.
+
+**[`values-full.yaml`](https://github.com/Smana/runlore/blob/main/deploy/helm/runlore/values-full.yaml)**
+is the annotated reference for a hardened install — read it top to bottom rather than pasting it, since
+its cloud and network blocks describe one concrete environment (EKS + Cilium). It adds: 2 replicas with
+leader election (only the leader investigates), a `StatefulSet` + PVC so the outcome ledger and the
+hash-chained audit log survive restarts, `networkPolicy.strict` with an explicit egress allowlist and
+ingress scoped to your monitoring namespace, `actions.mode: approve` (envelope-filtered remediations
+that execute **only** after a human click — see [Design]({{< relref "design.md" >}})), the
+[AWS cloud control plane]({{< relref "/docs/integrations/aws-cloud.md" >}}) and a
+[network-flow signal]({{< relref "/docs/integrations/hubble.md" >}}), and
+`catalog.instant_recall` — which short-circuits the LLM loop entirely when the catalog already holds a
+trustworthy answer.
+
+Every key either profile sets is documented in
+[Configuration]({{< relref "/docs/configuration/configuration.md" >}}), and the chart's own
+[`values.yaml`](https://github.com/Smana/runlore/blob/main/deploy/helm/runlore/values.yaml) carries the
+exhaustive, commented list of chart-level knobs.
 
 ### Install
 
-With the `values.yaml` above, deploy RunLore with a single command — the chart is an OCI artifact
-on GHCR, published on every release:
+Save your chosen profile as `values.yaml`, edit the placeholders, and deploy with a single command —
+the chart is an OCI artifact on GHCR, published on every release:
 
 ```bash
 helm install runlore oci://ghcr.io/smana/charts/runlore -n runlore --create-namespace -f values.yaml
@@ -451,46 +494,22 @@ cosign verify ghcr.io/smana/charts/runlore:<version> \
 
 Enables the `cloud_what_changed` (CloudTrail) and `cloud_resource_health` (EC2/ASG/EKS) tools so the
 agent can see infra changes that never touched GitOps. **Read-only**, authenticated with **in-cluster
-identity** — no static AWS keys.
+identity** — no static AWS keys. Full config, the read-only IAM policy, and how it binds to the
+ServiceAccount (EKS Pod Identity or IRSA):
+[Integrations → AWS cloud control plane]({{< relref "/docs/integrations/aws-cloud.md" >}}).
 
-1. **Config** — add the `config.cloud` block ([step 4](#step-4-configure-and-install)): `provider: aws`,
-   your `region`, and the EKS `cluster_name` (scopes nodegroup/ASG queries).
+**Cilium clusters only** — the EKS Pod Identity credential endpoint runs on the node host network
+(`169.254.170.23:80`), which Cilium classifies as the `host` entity, so a plain Kubernetes
+NetworkPolicy **cannot** match it and the credential fetch is silently dropped. Set
+`networkPolicy.awsPodIdentity: true` (chart value) to render a `CiliumNetworkPolicy` that allows it —
+see that page's Notes for the exact YAML and the `hubble observe … DROPPED` command that confirms
+this is the issue you're hitting.
 
-2. **IAM (read-only)** — grant the agent's ServiceAccount a role with *only* these actions, no writes:
-
-   ```json
-   {
-     "Version": "2012-10-17",
-     "Statement": [
-       { "Effect": "Allow", "Action": ["cloudtrail:LookupEvents"], "Resource": "*" },
-       { "Effect": "Allow", "Action": [
-           "ec2:DescribeInstances", "ec2:DescribeInstanceStatus",
-           "autoscaling:DescribeAutoScalingGroups", "autoscaling:DescribeScalingActivities",
-           "eks:DescribeNodegroup", "eks:ListNodegroups"
-         ], "Resource": "*" }
-     ]
-   }
-   ```
-
-   Bind it to the `runlore` ServiceAccount via **[EKS Pod Identity](https://docs.aws.amazon.com/eks/latest/userguide/pod-identities.html)**
-   (preferred) or IRSA. The SDK's default credential chain picks it up — nothing to configure in RunLore.
-
-3. **Cilium clusters only** — the EKS Pod Identity credential endpoint runs on the node host network
-   (`169.254.170.23:80`), which Cilium classifies as the `host` entity. A plain Kubernetes NetworkPolicy
-   **cannot** match it, so the SDK's credential fetch is silently dropped and the cloud tools hang. Set
-   `networkPolicy.awsPodIdentity: true` (chart value) to render a `CiliumNetworkPolicy` that allows it:
-
-   ```yaml
-   networkPolicy:
-     enabled: true
-     awsPodIdentity: true   # CiliumNetworkPolicy: egress to host:80 for the Pod Identity endpoint
-   ```
-
-   Confirm with Hubble if calls hang: `hubble observe --pod runlore/<pod> --verdict DROPPED` showing
-   `169.254.170.23:80 (host) … DROPPED` is this exact issue.
-
-4. **Memory** — a thorough run (a "pro" model over the full step budget with the cloud tools) is the
-   memory peak; the chart default limit is `1.5Gi`. Lower it only if you use a smaller model / fewer tools.
+> **Under `networkPolicy.strict: true`, that flag is not enough.** It covers only the credential
+> fetch; the AWS API calls themselves (CloudTrail, EKS, EC2, STS — public regional endpoints on
+> 443) are ordinary egress and are dropped unless you declare them too, leaving both cloud tools
+> silently empty. `values-full.yaml` shows the `networkPolicy.extraEgress` rule and how to pin the
+> CIDR (PrivateLink endpoint subnets, or your NAT gateway EIP).
 
 ---
 
@@ -548,7 +567,7 @@ source), so lock that down before pointing a real alert stream at it:
            matchLabels: { kubernetes.io/metadata.name: monitoring }
    ```
 
-See the [Security model]({{< relref "security-model.md" >}}) for the full posture — redaction, RBAC, the action gate.
+See the [Security model]({{< relref "/docs/security/security-model.md" >}}) for the full posture — redaction, RBAC, the action gate.
 
 ---
 
@@ -568,7 +587,7 @@ Expected lines: `catalog loaded … entries=N`, `using LLM investigator`, `watch
 `curator enabled` (if configured), `runlore serving`.
 
 Fire a test: trigger a `critical`/`prod` alert (or `flux suspend`+break a Kustomization). You should see
-`msg=incident … investigate=true` → `msg=findings …`, a message in Slack/Matrix, and (if curation is on)
+`msg=incident … investigate=true` → `msg=findings …`, a message in Slack, and (if curation is on)
 `msg=curated url=…` pointing at a PR/issue on your KB repo.
 
 ---
@@ -616,9 +635,13 @@ want a sharper answer. Only RunLore-originated issues (carrying the `runlore` la
 
 ## Next
 
+- [Integrations]({{< relref "/docs/integrations/_index.md" >}}) — every trigger, LLM, data source,
+  notifier, and forge RunLore plugs into, each with a minimal config and a local-verification recipe.
+- [CLI reference]({{< relref "/docs/reference/cli.md" >}}) — the full `lore demo` / `lore investigate`
+  flag and env-var reference from the tiers above.
 - [Configuration]({{< relref "/docs/configuration/configuration.md" >}}) — every config key, organized by subsystem.
 - [Troubleshooting]({{< relref "troubleshooting.md" >}}) — why an investigation didn't start, timed out, or didn't file a PR.
-- [Security model]({{< relref "security-model.md" >}}) — read-only posture, redaction, RBAC, the action gate.
+- [Security model]({{< relref "/docs/security/security-model.md" >}}) — read-only posture, redaction, RBAC, the action gate.
 - [Upgrade & uninstall]({{< relref "upgrade-uninstall.md" >}}) — `helm upgrade`/`uninstall`, what persists, and cleanup.
 - [Design]({{< relref "design.md" >}}) — architecture and the autonomy ladder.
 - [CONTRIBUTING.md](https://github.com/Smana/runlore/blob/main/CONTRIBUTING.md) — run the full feature suite locally on k3d.

@@ -182,6 +182,31 @@ hack/demo.sh                 # a real investigation on recorded evidence (no clu
 hack/demo-trigger-policy.sh  # fires mocked Alertmanager alerts through the trigger policy
 ```
 
+## Docs site (Hugo)
+
+```bash
+cd website && hugo server        # http://localhost:1313
+hugo --minify --gc               # what CI builds
+hack/check-anchors.sh            # in-page anchors must resolve (run after a build)
+```
+
+**Hugo ≥ 0.146.0 is required**, and CI pins **0.156.0**
+([`docs.yml`](.github/workflows/docs.yml)). The pinned Hextra theme uses the `try` template
+function, so an older binary fails with:
+
+```
+function "try" not defined
+```
+
+That error names the template, not the version, so it reads like a theme bug. It is not — check
+`hugo version` first. Every website change in this repo has hit it at least once.
+
+Two things the build will not catch on its own, hence the extra step above:
+`refLinksErrorLevel: ERROR` validates `relref` links **between** pages but ignores `#fragment`
+links **within** one, and a heading containing an em dash renders a **double** hyphen in its id
+(`## Step 2 — GitHub App` → `#step-2--github-app`). `hack/check-anchors.sh` checks both against
+the rendered HTML.
+
 ## Submitting a change
 
 1. Branch from `main`.

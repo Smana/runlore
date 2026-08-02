@@ -49,7 +49,7 @@ agents ignore it harmlessly. Nothing else in the file assumes a runtime.
 
 Reading the catalog is already agent-agnostic by a different route: `lore mcp
 <kb-dir>` serves `kb_search` and `kb_get` to any MCP client, with no cluster,
-model, or config — see [MCP]({{< relref "mcp.md" >}}). This skill is the writing half.
+model, or config — see [MCP]({{< relref "/docs/configuration/mcp.md" >}}). This skill is the writing half.
 
 ## What it does
 

@@ -48,6 +48,19 @@ jobs:
       - name: helm lint
         run: helm lint "$CHART"
 
+      # The three values profiles Getting Started sends readers to (minimal/standard/full)
+      # are what most operators actually install with, but a bare `helm lint` only ever
+      # sees values.yaml — a profile that drifted from the schema or broke templating
+      # would first fail at a user's `helm install`. Lint each merged tree too.
+      # internal/config also checks their `config:` blocks against the agent's own schema.
+      - name: helm lint (values profiles)
+        run: |
+          set -euo pipefail
+          for profile in "$CHART"/values-*.yaml; do
+            echo "== $profile"
+            helm lint "$CHART" -f "$profile"
+          done
+
       # Install the pinned kubeconform release, verifying the tarball checksum before
       # extracting so a tampered/swapped asset can't run in CI.
       - name: Install kubeconform
