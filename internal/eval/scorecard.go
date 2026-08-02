@@ -12,6 +12,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
+
+	"github.com/Smana/runlore/internal/providers"
 )
 
 const (
@@ -106,8 +108,14 @@ func BadgeJSON(rep Report) []byte {
 
 // ScorecardMarkdown renders the browsable public scorecard: reproduce command,
 // provenance (model, date, cost), per-scenario table with recall outcomes, a
-// confidence-calibration summary, and the run history.
-func ScorecardMarkdown(rep Report, history []HistoryEntry) string {
+// cost-per-investigation breakdown, a confidence-calibration summary, and the run
+// history.
+//
+// inUSD/cachedUSD/outUSD are the token rates (USD per MTok) this run was priced at.
+// They travel as explicit floats rather than a *config.Pricing so this package does
+// not take a dependency on internal/config; RunEvalScorecard reads a report from
+// disk with no config in hand and forwards the rates carried on Report instead.
+func ScorecardMarkdown(rep Report, history []HistoryEntry, inUSD, cachedUSD, outUSD float64) string {
 	var b strings.Builder
 	b.WriteString("# RunLore nightly eval scorecard\n\n")
 	b.WriteString("Auto-published by [`.github/workflows/eval.yaml`](https://github.com/Smana/runlore/blob/main/.github/workflows/eval.yaml) — ")
@@ -133,6 +141,8 @@ func ScorecardMarkdown(rep Report, history []HistoryEntry) string {
 		fmt.Fprintf(&b, "| %s | %s | %.0f%% (n=%d) | %.2f | %s | %s |\n",
 			c.Name, resultCell(c), c.PassRate*100, c.Runs, c.Confidence, recallCell(c), notesCell(c))
 	}
+
+	b.WriteString(costSection(rep, inUSD, cachedUSD, outUSD))
 
 	b.WriteString("\n## Confidence calibration\n\n")
 	var confidentWrong, underConfident []string
@@ -163,6 +173,89 @@ func ScorecardMarkdown(rep Report, history []HistoryEntry) string {
 		}
 		fmt.Fprintf(&b, "| %s | %s | %d/%d | %.0f%% | %s |\n", h.At, h.Model, h.Reached, h.Total, h.PassRate*100, cost)
 	}
+	return b.String()
+}
+
+// costSection renders the cost-per-investigation comparison: what a full
+// investigation costs against what an instant recall costs, on this run's model at
+// this run's prices. It is the single most concrete claim the learning loop makes —
+// recall is roughly an order of magnitude cheaper — and publishing it turns an
+// assertion into a measurement.
+//
+// Returns "" when prices are unset or the report carries no per-case token data;
+// a fabricated or zeroed cost would be worse than no cost at all.
+//
+// inUSD and outUSD are each required (OR, not AND): config.Pricing's rates are
+// independently optional and validatePricing only rejects negatives, so a config
+// setting one and omitting the other passes validation. If we only checked
+// inUSD==0 && outUSD==0, a lone rate would slip through and EstimateCostUSD would
+// silently multiply the other token type by zero — understating the published
+// cost with no signal anything is wrong.
+func costSection(rep Report, inUSD, cachedUSD, outUSD float64) string {
+	if inUSD == 0 || outUSD == 0 {
+		return ""
+	}
+	var full, recall []ReportCase
+	var mixed int
+	for _, c := range rep.Cases {
+		if c.InputTokens == 0 && c.OutputTokens == 0 {
+			continue // no usage reported for this case
+		}
+		// RecallShortCircuit is a COUNT of repeats that short-circuited, not a
+		// bool: a case's Runs repeats can disagree (e.g. 1 of 5 recalled, 4 ran the
+		// full loop). Bucketing "> 0" into recall would label that case an instant
+		// recall while its rendered token figure is the median across all Runs —
+		// mostly full-investigation tokens. Only the unanimous ends of the split are
+		// trustworthy; anything in between is excluded (see below), not guessed at.
+		switch c.RecallShortCircuit {
+		case c.Runs:
+			recall = append(recall, c)
+		case 0:
+			full = append(full, c)
+		default:
+			mixed++
+		}
+	}
+	if len(full) == 0 && len(recall) == 0 {
+		return ""
+	}
+
+	var b strings.Builder
+	b.WriteString("\n## Cost per investigation\n\n")
+	fmt.Fprintf(&b, "Median provider-reported tokens per case on `%s`, priced at $%.2f/MTok in · $%.2f/MTok out. ",
+		rep.Model, inUSD, outUSD)
+	b.WriteString("Replay evidence, so tool latency and live-cluster variance are excluded.\n\n")
+	if mixed > 0 {
+		// Disclosed, not dropped silently: a mixed case's median token count would
+		// blend recall and full-loop paths, understating whichever row it got
+		// stuffed into. Naming the count is what keeps this table honest.
+		fmt.Fprintf(&b, "%d case(s) whose repeats disagreed about recall are excluded from this table — "+
+			"their median token count would mix both paths.\n\n", mixed)
+	}
+	b.WriteString("| path | cases | median in tok | median out tok | est. cost |\n|---|---|---|---|---|\n")
+	row := func(label string, cs []ReportCase) {
+		if len(cs) == 0 {
+			return
+		}
+		ins := make([]float64, 0, len(cs))
+		outs := make([]float64, 0, len(cs))
+		for _, c := range cs {
+			ins = append(ins, float64(c.InputTokens))
+			outs = append(outs, float64(c.OutputTokens))
+		}
+		mi, mo := medianFloat(ins), medianFloat(outs)
+		// CachedInputTokens is left at its zero value: ReportCase carries no
+		// per-case cached-token field today, so cachedUSD is accepted here only
+		// for signature completeness against EstimateCostUSD. It starts actually
+		// discounting anything once ReportCase gains that field.
+		cost := EstimateCostUSD(
+			providers.Usage{InputTokens: int(mi), OutputTokens: int(mo)},
+			inUSD, cachedUSD, outUSD)
+		fmt.Fprintf(&b, "| %s | %d | %s | %s | $%.3f |\n",
+			label, len(cs), compactTokens(int(mi)), compactTokens(int(mo)), cost)
+	}
+	row("full investigation", full)
+	row("instant recall", recall)
 	return b.String()
 }
 

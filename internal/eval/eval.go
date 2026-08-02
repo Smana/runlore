@@ -174,6 +174,12 @@ type CaseAggregate struct {
 	ExpectRecall       string
 	RecallFired        int
 	RecallShortCircuit int
+
+	// InputTokens / OutputTokens are the MEDIAN provider-reported spend per run for
+	// this case — the basis of the published cost-per-investigation figure. Zero when
+	// the model does not report usage.
+	InputTokens  int
+	OutputTokens int
 }
 
 // Campaign is the aggregate of a multi-repeat replay run.
@@ -226,16 +232,40 @@ func (r *Runner) RunN(ctx context.Context, cases []Case, n int) Campaign {
 
 func (r *Runner) aggregateCase(ctx context.Context, c Case, n int) CaseAggregate {
 	results := make([]Result, 0, n)
+	counter, counted := r.Model.(UsageCounter)
 	for i := 0; i < n; i++ {
-		results = append(results, r.runOne(ctx, c))
+		var before providers.Usage
+		if counted {
+			before = counter.Total()
+		}
+		res := r.runOne(ctx, c)
+		if counted {
+			// Sequential by construction (RunN → aggregateCase → runOne), so the
+			// delta over this window is exactly this run's spend.
+			res.Usage = usageDelta(before, counter.Total())
+		}
+		results = append(results, res)
 	}
 	return aggregateResults(c, results)
+}
+
+// usageDelta returns the spend between two cumulative snapshots. The counter only
+// grows, so a negative result is impossible; clamping is unnecessary.
+func usageDelta(before, after providers.Usage) providers.Usage {
+	return providers.Usage{
+		InputTokens:       after.InputTokens - before.InputTokens,
+		OutputTokens:      after.OutputTokens - before.OutputTokens,
+		CachedInputTokens: after.CachedInputTokens - before.CachedInputTokens,
+		CacheWriteTokens:  after.CacheWriteTokens - before.CacheWriteTokens,
+	}
 }
 
 // aggregateResults folds the repeats of one case into its k-of-n aggregate. Pure —
 // separated from the runner so the fold (including recall counting) is unit-testable.
 func aggregateResults(c Case, results []Result) CaseAggregate {
 	confs := make([]float64, 0, len(results))
+	ins := make([]float64, 0, len(results))
+	outs := make([]float64, 0, len(results))
 	missSet := map[string]struct{}{}
 	ocSet := map[string]struct{}{}
 	passes, fired, shortCircuits := 0, 0, 0
@@ -250,6 +280,8 @@ func aggregateResults(c Case, results []Result) CaseAggregate {
 			shortCircuits++
 		}
 		confs = append(confs, res.Confidence)
+		ins = append(ins, float64(res.Usage.InputTokens))
+		outs = append(outs, float64(res.Usage.OutputTokens))
 		for _, m := range res.Missing {
 			missSet[m] = struct{}{}
 		}
@@ -271,6 +303,8 @@ func aggregateResults(c Case, results []Result) CaseAggregate {
 		ExpectRecall:       c.ExpectRecall,
 		RecallFired:        fired,
 		RecallShortCircuit: shortCircuits,
+		InputTokens:        int(medianFloat(ins)),
+		OutputTokens:       int(medianFloat(outs)),
 	}
 }
 

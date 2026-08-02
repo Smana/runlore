@@ -52,7 +52,7 @@ func RunEvalScorecard(args []string) error {
 	if err := os.WriteFile(histPath, hist, 0o644); err != nil { //nolint:gosec // published artifact, world-readable
 		return err
 	}
-	md := eval.ScorecardMarkdown(rep, entries)
+	md := eval.ScorecardMarkdown(rep, entries, rep.InputUSDPerMTok, rep.CachedInputUSDPerMTok, rep.OutputUSDPerMTok)
 	if err := os.WriteFile(filepath.Join(*dir, "scorecard.md"), []byte(md), 0o644); err != nil { //nolint:gosec
 		return err
 	}

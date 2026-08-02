@@ -2,7 +2,8 @@
 # gates on a 70% pass-rate.
 #
 # IMPORTANT: this job requires the RUNLORE_EVAL_API_KEY repo secret (an
-# Anthropic API key). When the secret is absent the run is skipped gracefully
+# key for whichever provider eval/ci.runlore.yaml pins — currently GLM via its
+# OpenAI-compatible endpoint). When the secret is absent the run is skipped gracefully
 # (job exits 0) so the nightly schedule does not produce spurious failures —
 # but the skip is LOUD: a `::warning::` annotation (surfaced in the Actions
 # run summary / checks UI) plus a $GITHUB_STEP_SUMMARY line, so a run with no
@@ -56,7 +57,7 @@ jobs:
         run: |
           echo "::warning title=Eval skipped::RUNLORE_EVAL_API_KEY is not set — the nightly eval did NOT run"
           echo "## eval skipped" >> "$GITHUB_STEP_SUMMARY"
-          echo "The \`RUNLORE_EVAL_API_KEY\` repo secret (Anthropic API key) is not configured, so this run did **not** exercise the eval harness. Set the secret to enable nightly eval runs." >> "$GITHUB_STEP_SUMMARY"
+          echo "The \`RUNLORE_EVAL_API_KEY\` repo secret (the API key for the provider pinned in \`eval/ci.runlore.yaml\`) is not configured, so this run did **not** exercise the eval harness. Set the secret to enable nightly eval runs." >> "$GITHUB_STEP_SUMMARY"
 
       - name: build lore binary
         if: steps.guard.outputs.has_key == 'true'
@@ -105,3 +106,13 @@ jobs:
           git -C "$OUT" add -A
           git -C "$OUT" commit -m "chore(eval): nightly scorecard $(date -u +%Y-%m-%d)" || { echo "no changes to publish"; exit 0; }
           git -C "$OUT" push origin eval-scorecard
+
+      # Tell the docs site to rebuild so /eval shows the fresh numbers. Without this
+      # the page would only refresh when someone happens to push to website/.
+      - name: trigger docs rebuild
+        if: always() && steps.guard.outputs.has_key == 'true' && github.ref == 'refs/heads/main'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh api "repos/${GITHUB_REPOSITORY}/dispatches" \
+            -f event_type=scorecard-updated

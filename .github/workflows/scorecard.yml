@@ -1,0 +1,42 @@
+# OpenSSF Scorecard — a weekly automated assessment of this repo's supply-chain
+# posture (branch protection, pinned dependencies, signed releases, SAST…). Results
+# publish to the Security tab; the badge in the README links to the public report.
+#
+# Job permissions match exactly what ossf/scorecard-action's own README documents
+# for a public repo (see ossf/scorecard's own scorecard-analysis.yml, which this
+# mirrors) — job-level `permissions:` fully replaces the workflow-level `read-all`
+# for this job, so nothing beyond these two scopes is granted.
+name: OpenSSF Scorecard
+on:
+  branch_protection_rule:
+  schedule:
+    - cron: "30 5 * * 1"      # Mondays 05:30 UTC
+  push:
+    branches: [main]
+
+permissions: read-all
+
+jobs:
+  analysis:
+    name: Scorecard analysis
+    runs-on: ubuntu-latest
+    permissions:
+      security-events: write   # upload the SARIF result to the Security tab
+      id-token: write          # publish the signed result to the public API
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Run analysis
+        uses: ossf/scorecard-action@2d1146689b8cda280b9bc96326124645441f03bc # v2.4.4
+        with:
+          results_file: results.sarif
+          results_format: sarif
+          publish_results: true
+
+      - name: Upload to code-scanning
+        uses: github/codeql-action/upload-sarif@f205ea1c3313d32999d8d6a48b4f6530d4437b38 # v4.37.4
+        with:
+          sarif_file: results.sarif

@@ -21,6 +21,11 @@ type Result struct {
 	// so recall behaviour is asserted mechanically, not inferred from the finding.
 	RecallFired        bool
 	RecallShortCircuit bool
+
+	// Usage is the provider-reported token spend of THIS run, attributed by the
+	// runner differencing its cumulative counter. Zero means the provider reported
+	// nothing — treated downstream as unknown, never as free.
+	Usage providers.Usage
 }
 
 // Score reports whether the investigation identifies the expected root cause.
