@@ -9,7 +9,6 @@ import (
 	"os"
 
 	"github.com/Smana/runlore/internal/action"
-	"github.com/Smana/runlore/internal/config"
 	"github.com/Smana/runlore/internal/investigate"
 	"github.com/Smana/runlore/internal/logging"
 	"github.com/Smana/runlore/internal/notify"
@@ -19,7 +18,7 @@ import (
 // RunInvestigate runs a single on-demand investigation and prints the findings.
 func RunInvestigate(args []string) error {
 	fs := flag.NewFlagSet("investigate", flag.ContinueOnError)
-	cfgPath := fs.String("config", "runlore.yaml", "path to config file")
+	cfgPath := fs.String("config", "", "path to config file (default: ./runlore.yaml if present, else the environment)")
 	alert := fs.String("alert", "", "alert/symptom name to investigate")
 	namespace := fs.String("namespace", "", "namespace of the affected workload")
 	message := fs.String("message", "", "free-text symptom description")
@@ -29,7 +28,12 @@ func RunInvestigate(args []string) error {
 	if *alert == "" && *message == "" {
 		return fmt.Errorf("provide --alert and/or --message")
 	}
-	cfg, err := config.Load(*cfgPath)
+	explicit := *cfgPath != ""
+	path := *cfgPath
+	if path == "" {
+		path = defaultConfigPath
+	}
+	cfg, err := resolveInvestigateConfig(path, explicit)
 	if err != nil {
 		return err
 	}
