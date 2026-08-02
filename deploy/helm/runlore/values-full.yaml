@@ -108,9 +108,18 @@ networkPolicy:
     # the Kubernetes API itself. Hostnames resolve to IPs that move, so pin the CIDR
     # your traffic actually leaves through: a NAT gateway EIP, an egress proxy, or a
     # PrivateLink endpoint subnet — not a DNS answer you resolved once.
+    # BOTH entries are PLACEHOLDERS. They are ALLOW rules, so a value copied verbatim
+    # does not fail closed — it silently grants egress to whatever sits at that address
+    # in YOUR network. Replace both before applying this profile.
+    #
+    # 203.0.113.0/24 is RFC 5737 TEST-NET-3 (documentation-only, routes nowhere), which
+    # is why it is safe to ship. There is no documentation range for RFC 1918, so the
+    # second entry is a plausible-looking private address and is the more dangerous of
+    # the two to leave in place.
     allowedCIDRs:
-      - "203.0.113.10/32" # model provider + git forge (e.g. this cluster's NAT gateway EIP)
-      - "10.0.0.1/32" # the EKS API server endpoint — managed APIs are on 443, see below
+      - "203.0.113.10/32" # PLACEHOLDER — model provider + git forge (e.g. this cluster's NAT gateway EIP)
+      - "10.0.0.1/32" # PLACEHOLDER — the EKS API server endpoint; managed APIs are on 443, see below
+      #   resolve yours: kubectl -n default get endpoints kubernetes
     namespaceSelectors: [] # in-cluster backends that speak 443 (none in this example)
     # apiServerCIDRs renders port 6443 ONLY, which is the SELF-MANAGED shape (kubeadm,
     # k3s, RKE). EKS — and GKE/AKS — serve the API on 443, so on this profile's EKS
