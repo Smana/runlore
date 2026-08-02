@@ -1,0 +1,225 @@
+# Full profile — everything the chart exposes, wired the way a production cluster
+# wants it: leader-elected HA, a durable data path, a default-deny NetworkPolicy,
+# rung-2 (human-approved) actions, cloud + network-flow evidence, and instant recall.
+#
+# It is a REFERENCE, not a drop-in: the cloud/network blocks below describe one
+# concrete environment (EKS + Cilium), and every CIDR, repo, ID and namespace is a
+# placeholder. Read it top to bottom, keep what matches your cluster, delete the rest —
+# every block here is independently optional. Start from values-standard.yaml if you
+# want the learning loop without the operational hardening, or values-minimal.yaml for
+# investigate + notify only.
+#
+# https://runlore.io/docs/getting-started/#the-full-loop--production-install
+#
+# The Secret this expects (one extra key over values-standard.yaml: APPROVAL_TOKEN,
+# which gates the action approval + kill-switch endpoints):
+#
+#   kubectl -n runlore create secret generic runlore-secrets \
+#     --from-literal=ANTHROPIC_API_KEY=sk-ant-... \
+#     --from-literal=RUNLORE_WEBHOOK_TOKEN="$(openssl rand -hex 32)" \
+#     --from-literal=APPROVAL_TOKEN="$(openssl rand -hex 32)" \
+#     --from-literal=SLACK_WEBHOOK_URL=https://hooks.slack.com/services/... \
+#     --from-file=GITHUB_APP_PRIVATE_KEY=/path/to/app-private-key.pem
+
+# HA: every warm replica is Ready and serves the webhook, but only the elected
+# leader investigates — a non-leader proxies incoming work to it in one hop.
+replicaCount: 2
+
+# StatefulSet, not Deployment, because persistence is on below: a Deployment shares
+# ONE PVC across replicas, which an RWO (EBS-class) volume cannot attach to a standby
+# on another node. volumeClaimTemplates give each replica its own volume instead.
+# Trade-off: a new leader starts with an EMPTY local outcome ledger (the catalog is
+# unaffected — it re-clones from git). With an RWX StorageClass (EFS) prefer
+# workloadKind: Deployment + accessModes: [ReadWriteMany] and keep the ledger.
+workloadKind: StatefulSet
+
+image:
+  tag: "" # defaults to the chart appVersion; PIN IT in production
+
+envFrom:
+  - secretRef:
+      name: runlore-secrets
+
+catalog:
+  gitSync: true
+  mountPath: /var/lib/runlore/catalog
+
+# Durability for the writable data path: without it the outcome ledger and the
+# hash-chained action audit log live in an emptyDir and are destroyed on every
+# restart, upgrade and failover.
+persistence:
+  enabled: true
+  storageClass: "" # cluster default; must be RWO-capable for the accessModes below
+  accessModes: [ReadWriteOnce]
+  size: 5Gi
+
+podDisruptionBudget:
+  create: true
+  minAvailable: 1
+
+# Cluster-write RBAC for the action ladder. actionNamespaces MIRRORS
+# config.actions.allow.namespaces below and is granted as namespace-scoped Roles
+# only — never cluster-wide — so the blast radius stays bounded. flux-system and
+# kube-system are protected built-ins and can never be action targets.
+rbac:
+  allowActions: true
+  actionNamespaces: [apps]
+  controllerLogNamespaces: [flux-system] # where pods/log is granted for controller_logs
+
+# Default-deny egress: the agent may ONLY reach what is listed here, so the model
+# endpoint, the git forge and every backend below must be declared or it goes dark.
+# Ingress is scoped to the namespace that owns Alertmanager — combined with the
+# webhook token, that is what stops a neighbour pod POSTing synthetic alerts and
+# burning your model spend. Leave strict: false if pinning egress IPs is impractical;
+# ingressFrom is worth setting either way.
+networkPolicy:
+  enabled: true
+  strict: true
+  egress:
+    # The three allowlists below open port 443 only (6443 for apiServerCIDRs) — enough
+    # for the model API and the git forge, both HTTPS and off-cluster.
+    allowedCIDRs: ["203.0.113.10/32"] # the egress IPs your model provider + forge resolve to
+    namespaceSelectors: [] # in-cluster backends that speak 443 (none in this example)
+    apiServerCIDRs: ["10.0.0.1/32"] # the Kubernetes API endpoint(s) on 6443
+  # Anything on ANOTHER port has to be spelled out here — extraEgress is appended
+  # verbatim in both modes. These mirror the endpoints configured under `config:`
+  # below; change the two together or the tool silently stops answering.
+  extraEgress:
+    - to:
+        - namespaceSelector:
+            matchLabels: { kubernetes.io/metadata.name: observability }
+      ports:
+        - { protocol: TCP, port: 8429 } # VictoriaMetrics — config.metrics.url
+        - { protocol: TCP, port: 9428 } # VictoriaLogs — config.logs.url
+    - to:
+        - namespaceSelector:
+            matchLabels: { kubernetes.io/metadata.name: kube-system }
+      ports:
+        - { protocol: TCP, port: 80 } # Hubble Relay gRPC — config.network.hubble.url
+  ingressFrom:
+    - namespaceSelector:
+        matchLabels: { kubernetes.io/metadata.name: monitoring }
+  # Cilium only: the EKS Pod Identity credential endpoint (169.254.170.23:80) runs on
+  # the node host network, which a plain NetworkPolicy cannot match — the credential
+  # fetch is then silently dropped and the AWS tools below never authenticate.
+  awsPodIdentity: true
+
+vmServiceScrape:
+  enabled: true
+
+config:
+  gitops:
+    engine: flux # or "argocd"
+
+  sources:
+    alertmanager: {}
+    gitops:
+      enabled: true
+
+  triggers:
+    incidents:
+      match:
+        severity: [critical, warning]
+      dedup: { window: 30m }
+
+  model:
+    provider: anthropic # or `openai` + base_url for any OpenAI-compatible endpoint
+    model: claude-sonnet-5
+    api_key_env: ANTHROPIC_API_KEY
+    # Route the adversarial verify pass to a cheaper model to cut the +1 call per
+    # investigation. Verify ALWAYS runs; this only lowers its cost.
+    verify:
+      model: claude-haiku-4-5
+
+  server:
+    webhook_token_env: RUNLORE_WEBHOOK_TOKEN
+
+  notify:
+    slack:
+      webhook_url_env: SLACK_WEBHOOK_URL
+
+  catalog:
+    dir: /var/lib/runlore/catalog # must match catalog.mountPath above
+    git:
+      url: https://github.com/your-org/runlore-kb
+      branch: main
+      interval: 5m
+    # Instant recall short-circuits the whole LLM loop when the catalog already holds
+    # a trustworthy answer for this incident — the payoff for curating knowledge back.
+    # The fire gate is a CALIBRATED LLM reranker (on by default once enabled), so there
+    # is no per-corpus BM25 threshold to tune.
+    instant_recall:
+      enabled: true
+
+  # The learning loop's memory: which diagnoses actually resolved the incident. It
+  # weighs recall trust, and it is what recurrence_cooldown and the grooming sweeps
+  # read. Keep it UNDER catalog.mountPath so it lands on the volume above.
+  outcome:
+    ledger_path: /var/lib/runlore/catalog/outcomes.jsonl
+
+  forge:
+    kb_repo: your-org/runlore-kb
+    base_branch: main
+    skip_verdicts: [no_action]
+    github_app:
+      app_id: 123456
+      installation_id: 7654321
+      private_key_env: GITHUB_APP_PRIVATE_KEY
+
+  metrics:
+    url: http://vmsingle.observability.svc:8429
+  logs:
+    url: http://victorialogs.observability.svc:9428
+
+  # Cloud control plane (read-only, in-cluster identity — no static AWS keys). Unlocks
+  # cloud_what_changed (CloudTrail) and cloud_resource_health, so an infra change that
+  # never touched GitOps is still visible. Needs the IAM policy bound to the
+  # ServiceAccount via EKS Pod Identity or IRSA.
+  cloud:
+    provider: aws
+    region: eu-west-3
+    cluster_name: your-eks-cluster
+
+  # Network-flow evidence for network_drops. PLUGGABLE and CNI-agnostic — hubble is
+  # one of three providers (aws-vpc-flow-logs and gcp-firewall-logs need no Cilium).
+  network:
+    provider: hubble
+    hubble:
+      url: hubble-relay.kube-system:80
+
+  investigation:
+    # Skip re-investigating a trigger that was answered CONCLUSIVELY less than this
+    # long ago — otherwise a still-firing alert re-investigates on every Alertmanager
+    # repeat and a broken Kustomization on every ~10m resync. An inconclusive prior
+    # always retries; a 👎 re-arms immediately. Requires outcome.ledger_path above.
+    recurrence_cooldown: 30m
+    coalesce:
+      enabled: true # fold a correlated alert storm into ONE investigation
+    rate_limit:
+      max_per_window: 20 # investigations per hour; the cost ceiling
+
+  # Autonomy ladder, rung 2: RunLore proposes envelope-filtered remediations and
+  # executes one ONLY after an explicit human approval (a token-gated POST, or Slack
+  # Approve/Reject buttons). Nothing runs unattended — that is rung 3 (`mode: auto`),
+  # which additionally requires auto.min_confidence / max_per_window. The envelope is
+  # re-checked at execution time, and both rungs fail closed without the two
+  # credentials below.
+  actions:
+    mode: approve
+    approval_token_env: APPROVAL_TOKEN # also gates the /actions/pause kill-switch
+    audit_log_path: /var/lib/runlore/catalog/audit.jsonl # hash-chained; fails closed on open
+    allow:
+      reversible_only: true # withhold irreversible suggestions entirely
+      namespaces: [apps] # mirror rbac.actionNamespaces above
+      max_blast_radius: 5
+      kinds: [HelmRelease, Kustomization, Application]
+
+  leader_election:
+    enabled: true
+    name: runlore-leader
+
+  logging:
+    format: json
+    level: info
+  telemetry:
+    metrics_enabled: true

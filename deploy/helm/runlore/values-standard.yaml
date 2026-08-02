@@ -1,0 +1,106 @@
+# Standard profile — the whole loop on a real cluster: react, investigate with
+# metrics + logs as evidence, deliver to chat, and LEARN (curate verified findings
+# back to a knowledge-catalog repo as PRs). This is the profile most teams want.
+#
+# One rung down, values-minimal.yaml does investigate + notify only. One rung up,
+# values-full.yaml adds HA, persistence, a locked-down NetworkPolicy, the action
+# ladder, and the optional cloud / network-flow signals.
+#
+# Prerequisites — the KB repo, the GitHub App, and this Secret:
+# https://runlore.io/docs/getting-started/#the-full-loop--production-install
+#
+#   kubectl -n runlore create secret generic runlore-secrets \
+#     --from-literal=ANTHROPIC_API_KEY=sk-ant-... \
+#     --from-literal=RUNLORE_WEBHOOK_TOKEN="$(openssl rand -hex 32)" \
+#     --from-literal=SLACK_WEBHOOK_URL=https://hooks.slack.com/services/... \
+#     --from-file=GITHUB_APP_PRIVATE_KEY=/path/to/app-private-key.pem
+#
+#   helm install runlore oci://ghcr.io/smana/charts/runlore -n runlore \
+#     --create-namespace -f values-standard.yaml
+#
+# Replace every `your-org` / placeholder ID below before installing.
+
+replicaCount: 1 # one worker; values-full.yaml adds leader-elected HA
+
+envFrom:
+  - secretRef:
+      name: runlore-secrets
+
+# Git-sync the knowledge catalog into a WRITABLE mirror: RunLore clones the KB repo
+# and re-pulls on an interval, so a merged curation PR flows straight back into what
+# the agent searches — that is what closes the learning loop. (A static ConfigMap
+# snapshot works too, via `configMap:`, but you refresh it by hand.)
+catalog:
+  gitSync: true
+  mountPath: /var/lib/runlore/catalog
+
+# Scrape RunLore's own /metrics (pairs with config.telemetry.metrics_enabled below).
+# Needs the VictoriaMetrics Operator CRD — drop this block if you don't run it.
+vmServiceScrape:
+  enabled: true
+
+config:
+  gitops:
+    engine: flux # or "argocd"
+
+  # A key under `sources.<name>` turns that source on; its value is the source's
+  # own config. Presence is enablement.
+  sources:
+    alertmanager: {} # the incident webhook
+    gitops:
+      enabled: true # also react to Flux/Argo CD Ready=False
+
+  # Match POLICY for admitted alerts — the real filter on noise and LLM spend.
+  triggers:
+    incidents:
+      match:
+        severity: [critical, warning]
+      dedup: { window: 30m } # don't re-investigate a still-firing alert within 30m
+
+  model:
+    provider: anthropic # or `openai` + base_url for any OpenAI-compatible endpoint
+    model: claude-sonnet-5
+    api_key_env: ANTHROPIC_API_KEY
+
+  server:
+    webhook_token_env: RUNLORE_WEBHOOK_TOKEN # MANDATORY once a model is set (serve fails closed)
+
+  notify:
+    slack:
+      webhook_url_env: SLACK_WEBHOOK_URL
+
+  # The catalog the investigation loop searches. `dir` MUST equal catalog.mountPath
+  # above — that is the volume git-sync writes into.
+  catalog:
+    dir: /var/lib/runlore/catalog
+    git:
+      url: https://github.com/your-org/runlore-kb
+      branch: main
+      interval: 5m
+      # token_env: KB_GIT_TOKEN  # optional; a PRIVATE repo reuses the App below by default
+
+  # Curation — the LEARN half. A verified, confident root cause opens a PR drafting
+  # an OKF entry on the KB repo; anything below the bar is delivered to chat only.
+  forge:
+    kb_repo: your-org/runlore-kb
+    base_branch: main
+    skip_verdicts: [no_action] # benign/self-healed findings stay in chat, no PR
+    github_app:
+      app_id: 123456 # from the GitHub App you created
+      installation_id: 7654321
+      private_key_env: GITHUB_APP_PRIVATE_KEY
+
+  # Evidence backends: each URL registers the tool it unlocks (query_metrics,
+  # query_logs). Leave one out and the agent simply investigates without it.
+  metrics:
+    url: http://vmsingle.observability.svc:8429 # PromQL API base (or Prometheus on :9090)
+  logs:
+    url: http://victorialogs.observability.svc:9428 # LogsQL; for Loki add `provider: loki`
+
+  # RunLore's own observability: JSON logs so they are ingestible, /metrics for the
+  # VMServiceScrape above.
+  logging:
+    format: json
+    level: info
+  telemetry:
+    metrics_enabled: true

@@ -137,7 +137,9 @@ forge (issues/PRs on a repo you designate).
 
 The walkthrough below wires **one golden path** — Prometheus/VictoriaMetrics metrics, an
 OpenAI-compatible LLM, GitHub for curation, and Slack for delivery — the same combination the
-nightly eval and k3d e2e suite exercise. Every other data source, LLM, notifier, or forge is
+nightly eval and k3d e2e suite exercise. The shipped values profiles default to **Anthropic**
+instead (one API key, no endpoint of your own to run); swapping either way is a two-line change.
+Every other data source, LLM, notifier, or forge is
 equally supported; each gets a one-line pointer to its own page under
 [Integrations]({{< relref "/docs/integrations/_index.md" >}}) as it comes up below.
 
@@ -148,9 +150,10 @@ equally supported; each gets a one-line pointer to its own page under
 - A **Kubernetes cluster** — any conformant cluster works: EKS, GKE, AKS, or local
   [k3d](https://k3d.io/) / [kind](https://kind.sigs.k8s.io/) (follow each project's install docs).
 - `kubectl` + `helm` (v3.12+).
-- An **LLM** — this walkthrough uses an **OpenAI-compatible** endpoint (in-cluster
-  [vLLM](https://github.com/vllm-project/vllm), [Ollama](https://ollama.com/), OpenAI, OpenRouter).
-  Prefer native Claude? See [Anthropic]({{< relref "/docs/integrations/anthropic.md" >}}). Keep the
+- An **LLM** — the shipped values profiles use native
+  [Anthropic]({{< relref "/docs/integrations/anthropic.md" >}}) (one API key, nothing to run); any
+  **OpenAI-compatible** endpoint (in-cluster [vLLM](https://github.com/vllm-project/vllm),
+  [Ollama](https://ollama.com/), OpenAI, OpenRouter) is a two-line swap. Keep the
   model in-cluster if you don't want telemetry to leave your boundary — see
   [Local / keyless]({{< relref "/docs/integrations/local-keyless.md" >}}).
 
@@ -352,11 +355,15 @@ Create a `Secret` with the credentials your config references by env-var name. I
 
 ```bash
 kubectl -n runlore create secret generic runlore-secrets \
-  --from-literal=OPENAI_API_KEY='<model-api-key-or-omit-if-keyless>' \
+  --from-literal=ANTHROPIC_API_KEY='<model-api-key>' \
   --from-literal=RUNLORE_WEBHOOK_TOKEN="$(openssl rand -hex 32)" \
   --from-literal=SLACK_WEBHOOK_URL='https://hooks.slack.com/services/...' \
   --from-file=GITHUB_APP_PRIVATE_KEY=/path/to/app-private-key.pem
 ```
+
+On an OpenAI-compatible endpoint the key is `OPENAI_API_KEY` instead (omit it entirely when the
+endpoint is keyless), and `values-full.yaml` adds one more: `APPROVAL_TOKEN`, which gates the action
+approval and kill-switch endpoints.
 
 > **`RUNLORE_WEBHOOK_TOKEN` is required once a model is configured.** The `serve` path
 > **fails closed** — it refuses to start with an anonymous alert webhook when an LLM is wired (the
@@ -374,160 +381,95 @@ pattern — see the notifier's own page under
 ## Step 4 — Configure and install
 
 RunLore installs **in-cluster with one Helm command** (this is the recommended deployment). You give it
-a `values.yaml` and run `helm install` — jump to **[Install](#install)** below if you just want the
-command.
+a `values.yaml` and run `helm install` — pick one of the three shipped profiles below rather than
+writing one from scratch, or jump to **[Install](#install)** if you just want the command.
 
-### The configuration you'll provide
+### Pick a profile
 
-Create a `values.yaml`. This wires the **one golden path** this walkthrough uses — Flux, an
-OpenAI-compatible model, Prometheus/VictoriaMetrics, GitHub, and Slack; trim what you don't need, and
-swap in any of the pluggable alternatives from [Prerequisites](#prerequisites) above (each is a drop-in
-config block, not a different product):
+The chart ships **three profiles**, each a valid install on its own. Start at the one that matches
+what you have wired, and step up later by copying blocks from the next:
 
-> In a hurry? [`deploy/helm/runlore/values-minimal.yaml`](https://github.com/Smana/runlore/blob/main/deploy/helm/runlore/values-minimal.yaml)
-> is a copy-paste **investigate + notify** starting point (no KB/curation yet — CI-checked against
-> the config schema). The annotated example below is the full golden path.
+| Profile | What it wires | Start here if |
+|---|---|---|
+| [`values-minimal.yaml`](https://github.com/Smana/runlore/blob/main/deploy/helm/runlore/values-minimal.yaml) | Alert webhook, a model, Slack. Read-only, ~15 lines. | You want to see it react to a real alert today. |
+| [`values-standard.yaml`](https://github.com/Smana/runlore/blob/main/deploy/helm/runlore/values-standard.yaml) | **+** git-synced knowledge catalog, GitHub App curation, metrics + logs evidence, JSON logs and `/metrics`. | You did steps 1–2 and want the **learning loop**. |
+| [`values-full.yaml`](https://github.com/Smana/runlore/blob/main/deploy/helm/runlore/values-full.yaml) | **+** leader-elected HA, persistence, a default-deny NetworkPolicy, the approve-rung action ladder, AWS cloud + network-flow signals, instant recall. | You are hardening a production install. |
+
+All three are validated in CI against the chart's `values.schema.json` **and** the agent's config
+schema, so a block you copy out of one is known to load.
+
+> **A values file is not a `runlore.yaml`.** Everything the agent itself reads is nested under
+> `config:` — the chart unwraps that block verbatim into the mounted `runlore.yaml`. The sibling
+> top-level keys (`replicaCount`, `catalog`, `persistence`, `rbac`, `networkPolicy`…) are
+> **chart-level** and never reach the agent. The per-integration pages under
+> [Integrations]({{< relref "/docs/integrations/_index.md" >}}) show raw `runlore.yaml` snippets: nest
+> them under `config:` when pasting into a values file.
+
+### Start: `values-minimal.yaml`
+
+This is the whole file — investigate and notify, nothing else. It references the Secret from
+[step 3](#step-3--credentials) by env-var name:
 
 ```yaml
+replicaCount: 1              # one worker; values-full.yaml adds leader-elected HA
 image:
-  repository: ghcr.io/smana/runlore
-  tag: ""            # defaults to the chart appVersion; pin in production
-
-# HA: 2+ replicas, one active leader; every warm replica is Ready and a non-leader
-# proxies incoming webhooks to the leader. See leader_election below.
-# If you also set persistence.enabled: true, pick workloadKind explicitly: the default
-# Deployment shares one PVC across every replica (fine with an RWX StorageClass like
-# EFS; an RWO one like EBS can't attach it to a standby on a different node — set
-# workloadKind: StatefulSet instead, which gives each replica its own volume via
-# volumeClaimTemplates at the cost of an empty outcome ledger for whichever replica
-# becomes leader next).
-replicaCount: 2
-
-# Inject the whole Secret as env vars (referenced by *_env config keys below).
+  tag: ""                    # defaults to the chart appVersion; pin it in production
 envFrom:
   - secretRef:
-      name: runlore-secrets
-
-# Catalog source (step 1). Option A — git-sync (recommended): a writable mirror.
-catalog:
-  gitSync: true
-  mountPath: /var/lib/runlore/catalog
-  # Option B — static ConfigMap instead:
-  # configMap: runlore-catalog
-
+      name: runlore-secrets  # ANTHROPIC_API_KEY, RUNLORE_WEBHOOK_TOKEN, SLACK_WEBHOOK_URL
 config:
-  # GitOps engine the what-changed spine + failure watch read. Not set up yet? Leave
-  # the sources.gitops block below out entirely — see Prerequisites → Recommended.
-  gitops:
-    engine: flux          # or "argocd"
-  # Enable sources: a key under `sources.<name>` turns that source on. Presence is
-  # enablement; the value is the source's own config. The webhook auth token stays
-  # server-level (server.webhook_token_env).
   sources:
-    alertmanager: {}           # enable the Alertmanager/VMAlert webhook source
-    gitops:
-      enabled: true            # also react to Flux/Argo CD Ready=False
-  # React: only investigate what matters (controls noise + LLM cost). These are the
-  # match/failure POLICIES; enablement lives under `sources` above.
-  triggers:
-    incidents:
-      match:
-        severity: [critical, warning]   # match against the alert's labels
-        # environment: [prod]           # only matches alerts that CARRY an `environment`
-                                        # label — omit it if yours don't, or nothing fires
-      dedup: { window: 30m }
-      # debounce: 60s          # hold a NON-CRITICAL firing alert this long, then skip it
-                               # if it self-resolved within the window (default 60s; 0s =
-                               # off). A `critical` alert is NEVER held — a debounce must
-                               # never delay the first look at a page.
-      # cancel_queued_on_resolve: true   # default. Drop a QUEUED (not yet started)
-                               # investigation when the alert resolves first. This is what
-                               # filters a self-resolving CRITICAL, at zero added latency.
-
-  # Investigate: the model + the catalog the loop searches. Native Claude or a local/
-  # keyless endpoint instead? See Integrations → Anthropic / Local-keyless (Prerequisites
-  # above) — same shape, different provider block.
+    alertmanager: {}         # presence is enablement — accept the alert webhook
   model:
-    base_url: http://vllm.llm.svc:8000/v1   # any OpenAI-compatible endpoint
-    model: <your-model-name>
-    api_key_env: OPENAI_API_KEY             # omit/empty for keyless (in-cluster vLLM/Ollama)
-  catalog:
-    dir: /var/lib/runlore/catalog           # must match catalog.mountPath above
-    git:                                     # omit this block if using a static ConfigMap
-      url: https://github.com/your-org/runlore-kb
-      branch: main
-      interval: 5m
-      # token_env: KB_GIT_TOKEN              # optional; private repos reuse the curation GitHub App by default
-    # Instant recall: skip the LLM loop when the catalog has a trustworthy match for
-    # the incident (faster, cheaper). Off by default. Once enabled, the fire-gate is
-    # calibrated by an LLM reranker (on by default) — no per-corpus BM25 tuning needed;
-    # min_score is only a trivial secondary cost guard. See docs/learning-loop.md (§3).
-    # instant_recall: { enabled: true }
-
-  # Investigate signals (optional) — enables the query_metrics tool. Logs (VictoriaLogs/
-  # Loki), a network-flow signal, and the AWS cloud control plane are equally pluggable —
-  # see Prerequisites → Optional above for each one's own config block.
-  metrics:
-    url: http://vmsingle.observability.svc:8429       # PromQL API base (VictoriaMetrics, or Prometheus on :9090)
-
-  # Deliver findings to chat.
+    provider: anthropic      # or `openai` + base_url for any OpenAI-compatible endpoint
+    model: claude-sonnet-5
+    api_key_env: ANTHROPIC_API_KEY
+  server:
+    webhook_token_env: RUNLORE_WEBHOOK_TOKEN  # MANDATORY once a model is set (serve fails closed)
   notify:
     slack:
       webhook_url_env: SLACK_WEBHOOK_URL
-      # A bot token, Approve/Reject buttons, and 👍/👎 feedback are all opt-in —
-      # see Integrations → Slack for the full set of knobs and their prerequisites.
-
-  # Learn: curate findings to your KB repo (omit this block to disable).
-  forge:
-    kb_repo: your-org/runlore-kb            # the repo from step 1
-    base_branch: main
-    skip_verdicts: [no_action]              # keep benign/self-healed/synthetic findings out of the PR queue (chat still notified)
-    github_app:
-      app_id: 123456                         # from step 2
-      installation_id: 7654321               # from step 2
-      private_key_env: GITHUB_APP_PRIVATE_KEY
-
-  # Autonomy ladder. Default (omitted) = off = read-only findings only.
-  #   suggest — propose envelope-filtered remediations, never executed.
-  #   approve — register them for human approval (curl or Slack buttons); an approved
-  #             action executes a reversible Flux op (suspend/resume/reconcile).
-  #   auto    — execute eligible actions WITHOUT approval. Heavily gated (below).
-  # approve + auto require chart rbac.allowActions=true.
-  # actions:
-  #   mode: approve
-  #   approval_token_env: APPROVAL_TOKEN   # gate the approval + kill-switch endpoints
-  #   audit_log_path: /var/lib/runlore/catalog/audit.jsonl   # REQUIRED for approve + auto (hash-chained audit; fails closed on open)
-  #   allow:
-  #     reversible_only: true              # withhold irreversible suggestions
-  #     max_blast_radius: 5
-  #     kinds: [HelmRelease, Kustomization, Application]
-  #   # rung-3 unattended execution (mode: auto). auto ONLY ever runs reversible
-  #   # actions, and every decision is logged + delivered. Start with dry_run.
-  #   auto:
-  #     dry_run: true                      # log "would execute" without executing
-  #     min_confidence: 0.85               # only auto-execute above this confidence
-  #     max_per_window: 3                  # rate limit (anti-storm)
-  #     window: 1h
-  #   # Kill-switch (instant, no redeploy): POST /actions/pause | /actions/resume
-  #   # (X-Approval-Token). NOTE: floats like min_confidence must be set via a values
-  #   # file or `helm --set-json` — plain `--set x=0.85` is coerced to a string.
-
-  # HA toggle (default on; harmless with 1 replica).
-  leader_election:
-    enabled: true
-
-  # Webhook token — MANDATORY once a model is configured (serve fails closed without it).
-  # The alert webhook's labels/annotations flow into the LLM prompt and bill the model,
-  # so an unauthenticated caller must not reach it. Set this to the env var you placed
-  # in the Secret (step 3 generates it: openssl rand -hex 32).
-  server:
-    webhook_token_env: RUNLORE_WEBHOOK_TOKEN
 ```
+
+Everything left out is genuinely optional: an unset data source disables the tool it would have
+unlocked, and an unset `forge` disables curation. Swap the `model` block for any of the
+[LLM providers]({{< relref "/docs/integrations/_index.md" >}}), and the `notify` block for
+[Matrix]({{< relref "/docs/integrations/matrix.md" >}}), a
+[webhook]({{< relref "/docs/integrations/webhook.md" >}}), or a
+[templated]({{< relref "/docs/integrations/templated.md" >}}) payload.
+
+### Step up: standard and full
+
+**[`values-standard.yaml`](https://github.com/Smana/runlore/blob/main/deploy/helm/runlore/values-standard.yaml)**
+adds the half that makes RunLore more than a one-shot investigator: `catalog.gitSync: true` plus
+`config.catalog.git` (the KB repo from [step 1](#step-1--create-the-knowledge-catalog-repo), re-pulled
+on an interval so merged PRs flow back into what the agent searches), `config.forge` with the GitHub
+App from [step 2](#step-2--github-app-for-curation-optional), and the
+[metrics]({{< relref "/docs/integrations/prometheus.md" >}}) +
+[logs]({{< relref "/docs/integrations/victorialogs.md" >}}) endpoints the investigation queries for
+evidence. It also turns on JSON logging and the `/metrics` endpoint with a `VMServiceScrape`.
+
+**[`values-full.yaml`](https://github.com/Smana/runlore/blob/main/deploy/helm/runlore/values-full.yaml)**
+is the annotated reference for a hardened install — read it top to bottom rather than pasting it, since
+its cloud and network blocks describe one concrete environment (EKS + Cilium). It adds: 2 replicas with
+leader election (only the leader investigates), a `StatefulSet` + PVC so the outcome ledger and the
+hash-chained audit log survive restarts, `networkPolicy.strict` with an explicit egress allowlist and
+ingress scoped to your monitoring namespace, `actions.mode: approve` (envelope-filtered remediations
+that execute **only** after a human click — see [Design]({{< relref "design.md" >}})), the
+[AWS cloud control plane]({{< relref "/docs/integrations/aws-cloud.md" >}}) and a
+[network-flow signal]({{< relref "/docs/integrations/hubble.md" >}}), and
+`catalog.instant_recall` — which short-circuits the LLM loop entirely when the catalog already holds a
+trustworthy answer.
+
+Every key either profile sets is documented in
+[Configuration]({{< relref "/docs/configuration/configuration.md" >}}), and the chart's own
+[`values.yaml`](https://github.com/Smana/runlore/blob/main/deploy/helm/runlore/values.yaml) carries the
+exhaustive, commented list of chart-level knobs.
 
 ### Install
 
-With the `values.yaml` above, deploy RunLore with a single command — the chart is an OCI artifact
-on GHCR, published on every release:
+Save your chosen profile as `values.yaml`, edit the placeholders, and deploy with a single command —
+the chart is an OCI artifact on GHCR, published on every release:
 
 ```bash
 helm install runlore oci://ghcr.io/smana/charts/runlore -n runlore --create-namespace -f values.yaml

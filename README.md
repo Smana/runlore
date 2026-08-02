@@ -254,9 +254,13 @@ helm install runlore oci://ghcr.io/smana/charts/runlore -n runlore --create-name
 ```
 
 > The chart is an **OCI artifact on GHCR** — no `git clone`, no `helm repo add`. It is published and
-> cosign-signed on every release; pin a version with `--version X.Y.Z`. A minimal starting point for
-> `values.yaml` is
-> [`deploy/helm/runlore/values-minimal.yaml`](deploy/helm/runlore/values-minimal.yaml).
+> cosign-signed on every release; pin a version with `--version X.Y.Z`. Don't write `values.yaml` from
+> scratch — the chart ships three profiles:
+> [`values-minimal.yaml`](deploy/helm/runlore/values-minimal.yaml) (investigate + notify, ~15 lines),
+> [`values-standard.yaml`](deploy/helm/runlore/values-standard.yaml) (adds the knowledge catalog,
+> curation, metrics + logs), and
+> [`values-full.yaml`](deploy/helm/runlore/values-full.yaml) (adds HA, persistence, NetworkPolicy, the
+> action ladder).
 > Working from a clone (dev alternative):
 > `helm install runlore deploy/helm/runlore -n runlore --create-namespace -f values.yaml`.
 
