@@ -254,8 +254,9 @@ func TestSlackBlocksLayout(t *testing.T) {
 
 // TestSlackSummaryLayout proves the verdict-first summary: the header anchors on
 // the alert name, the second block is the verdict section (NOT the old top
-// confidence context line), the metadata fields carry cluster + recurrence, and
-// confidence has moved to the footer.
+// confidence context line), confidence follows immediately in the header area,
+// and the metadata fields (cluster + recurrence) land AFTER the answer/action —
+// never before them.
 func TestSlackSummaryLayout(t *testing.T) {
 	inv := providers.Investigation{
 		Title:       "harbor is degraded",
@@ -280,12 +281,164 @@ func TestSlackSummaryLayout(t *testing.T) {
 	if blocks[1]["type"] != "section" {
 		t.Fatalf("block[1] must be the verdict section, not %v (old top confidence line must be gone)", blocks[1]["type"])
 	}
+	// Confidence immediately follows the verdict — it owns the header area, not
+	// the footer.
+	if blocks[2]["type"] != "context" {
+		t.Fatalf("block[2] must be the confidence context line, not %v", blocks[2]["type"])
+	}
 	raw, _ := json.Marshal(blocks)
 	s := string(raw)
 	for _, want := range []string{"HarborDown", "No action needed", "*Cluster:*", "*Recurrence:*", "confidence", "view entry"} {
 		if !contains(s, want) {
 			t.Fatalf("summary blocks missing %q:\n%s", want, s)
 		}
+	}
+	// Finding #1: the verdict line must carry the verdict ALONE — the header
+	// above already spelled out the title/alert name in full.
+	texts := mrkdwnTexts(blocks)
+	if strings.Contains(texts[0], "harbor is degraded") {
+		t.Fatalf("verdict block must not restate the title:\n%s", texts[0])
+	}
+	// Finding #5: confidence and the agent identity must not repeat between the
+	// header area and the footer.
+	if strings.Count(s, "80%") != 1 {
+		t.Fatalf("confidence (80%%) must render exactly once, got %d times:\n%s", strings.Count(s, "80%"), s)
+	}
+	if strings.Contains(s, "RunLore SRE agent") {
+		t.Fatalf("agent self-identification must not render on the card:\n%s", s)
+	}
+	// Finding: metadata (Why comes first, then metadata fields — "Resource" et al
+	// drop below the answer/action). The "fields" block must come after the "Why"
+	// section.
+	whyIdx, fieldsIdx := -1, -1
+	for i, b := range blocks {
+		if _, ok := b["fields"]; ok {
+			fieldsIdx = i
+		}
+		if txt, ok := b["text"].(map[string]any); ok {
+			if s, _ := txt["text"].(string); strings.HasPrefix(s, "*Why:*") {
+				whyIdx = i
+			}
+		}
+	}
+	if whyIdx == -1 || fieldsIdx == -1 || fieldsIdx < whyIdx {
+		t.Fatalf("metadata fields (idx %d) must come AFTER Why (idx %d)", fieldsIdx, whyIdx)
+	}
+}
+
+// TestSlackSummaryOmitsRuledOutAndDataGaps proves findings #2/#3: an
+// investigation with root causes, ruled-out hypotheses and data gaps renders
+// NEITHER list in the summary card (both are already carried in full in the
+// threaded detail — see TestSlackDetailBlocksCarriesRuledOutAndDataGaps) — the
+// summary's fold space goes to Why and Suggested next steps instead.
+func TestSlackSummaryOmitsRuledOutAndDataGaps(t *testing.T) {
+	inv := providers.Investigation{
+		Title:      "t",
+		Confidence: 0.8,
+		RootCauses: []providers.Hypothesis{{Summary: "cause", Confidence: 0.8, SuggestedAction: "do x"}},
+		RuledOut:   []string{"network partition"},
+		DataGaps:   []string{"disk metrics unavailable"},
+	}
+	txt := blocksText(t, summaryBlocks(inv))
+	for _, absent := range []string{"Ruled out", "Data gaps", "network partition", "disk metrics unavailable"} {
+		if strings.Contains(txt, absent) {
+			t.Errorf("summary must not render %q — it belongs only in the thread\n%s", absent, txt)
+		}
+	}
+}
+
+// TestSlackDetailBlocksCarriesRuledOutAndDataGaps proves the thread reply still
+// carries the full Ruled-out and Data-gaps lists (nothing is lost — it just
+// isn't duplicated in the summary).
+func TestSlackDetailBlocksCarriesRuledOutAndDataGaps(t *testing.T) {
+	inv := providers.Investigation{
+		Title:      "t",
+		RootCauses: []providers.Hypothesis{{Summary: "cause"}},
+		RuledOut:   []string{"network partition"},
+		DataGaps:   []string{"disk metrics unavailable"},
+	}
+	txt := blocksText(t, detailBlocks(inv))
+	for _, want := range []string{"*❌ Ruled out:*", "network partition", "*⚠️ Data gaps:*", "disk metrics unavailable"} {
+		if !strings.Contains(txt, want) {
+			t.Errorf("detail thread missing %q\n%s", want, txt)
+		}
+	}
+}
+
+// TestSlackHypothesisPluralization proves finding #7: "1 more hypothesis" is
+// singular, not "1 more hypotheses".
+func TestSlackHypothesisPluralization(t *testing.T) {
+	inv := providers.Investigation{
+		Title: "t",
+		RootCauses: []providers.Hypothesis{
+			{Summary: "top cause", Confidence: 0.8},
+			{Summary: "second cause", Confidence: 0.5},
+		},
+	}
+	txt := blocksText(t, summaryBlocks(inv))
+	if !strings.Contains(txt, "1 more hypothesis below") {
+		t.Errorf("expected singular 'hypothesis' for a count of 1:\n%s", txt)
+	}
+	if strings.Contains(txt, "1 more hypotheses") {
+		t.Errorf("must not use the plural for a count of 1:\n%s", txt)
+	}
+
+	inv.RootCauses = append(inv.RootCauses, providers.Hypothesis{Summary: "third cause"})
+	txt = blocksText(t, summaryBlocks(inv))
+	if !strings.Contains(txt, "2 more hypotheses below") {
+		t.Errorf("expected plural 'hypotheses' for a count of 2:\n%s", txt)
+	}
+}
+
+// TestSlackWhatChangedNone proves finding #7: an empty ChangeRef renders an
+// informative clause, not the bare word "none" (which reads as a missing
+// field on a woken-up phone screen).
+func TestSlackWhatChangedNone(t *testing.T) {
+	inv := providers.Investigation{
+		Title:      "t",
+		RootCauses: []providers.Hypothesis{{Summary: "infra fault"}}, // no ChangeRef
+	}
+	txt := blocksText(t, summaryBlocks(inv))
+	if strings.Contains(txt, "*What changed:*\nnone") {
+		t.Errorf("must not render the bare placeholder \"none\":\n%s", txt)
+	}
+	if !strings.Contains(txt, "No Git change") {
+		t.Errorf("expected an informative clause in place of \"none\":\n%s", txt)
+	}
+}
+
+// TestSlackRecallConfidenceDisagreement proves finding #4: when a recalled
+// entry's own (top-hypothesis) confidence differs from the delivered,
+// outcome-weighted confidence, the card discloses BOTH, labeled — never two
+// bare, seemingly-contradictory percentages — and the number renders exactly
+// once outside that explicit disclosure.
+func TestSlackRecallConfidenceDisagreement(t *testing.T) {
+	inv := providers.Investigation{
+		Title:      "HarborRegistryDown",
+		Recalled:   true,
+		Confidence: 0.78,                                                                           // outcome-weighted delivered confidence
+		RootCauses: []providers.Hypothesis{{Summary: "AccessKey hit IAM quota", Confidence: 0.95}}, // entry's own match confidence
+	}
+	txt := blocksText(t, summaryBlocks(inv))
+	if !strings.Contains(txt, "78%") {
+		t.Errorf("delivered confidence (78%%) must headline the card:\n%s", txt)
+	}
+	if !strings.Contains(txt, "entry's own confidence 95%, adjusted to 78% by its track record") {
+		t.Errorf("must disclose the entry's own confidence and label it:\n%s", txt)
+	}
+	// The bare "95%" must never appear on its own — it only ever appears inside
+	// the disambiguating sentence above.
+	if strings.Count(txt, "95%") != 1 {
+		t.Errorf("own confidence (95%%) must appear exactly once (inside the disclosure), got %d:\n%s",
+			strings.Count(txt, "95%"), txt)
+	}
+
+	// When the two agree (post-rounding), no disclosure renders — nothing to
+	// disambiguate.
+	inv.RootCauses[0].Confidence = 0.78
+	txt = blocksText(t, summaryBlocks(inv))
+	if strings.Contains(txt, "entry's own confidence") {
+		t.Errorf("must not disclose anything when the two confidences agree:\n%s", txt)
 	}
 }
 
@@ -416,12 +569,11 @@ func TestSlackBlocksEscapeUntrustedText(t *testing.T) {
 			SuggestedAction: "restart & verify",
 			Reversible:      true,
 		}},
-		Unresolved:     []string{"why <img> appears in logs"},
-		RuledOut:       []string{"disproven by <script> in logs"},
-		DataGaps:       []string{"metrics <unavailable> for db"},
-		Actions:        []providers.Action{{Description: "scale down <deploy>", ApprovalID: "a1"}},
-		CuratedURL:     "https://github.com/o/r/issues/9",
-		PrevCuratedURL: "https://kb.example/prev?a=1&b=2",
+		Unresolved: []string{"why <img> appears in logs"},
+		RuledOut:   []string{"disproven by <script> in logs"},
+		DataGaps:   []string{"metrics <unavailable> for db"},
+		Actions:    []providers.Action{{Description: "scale down <deploy>", ApprovalID: "a1"}},
+		CuratedURL: "https://github.com/o/r/issues/9",
 	}
 	joined := strings.Join(mrkdwnTexts(append(summaryBlocks(inv), detailBlocks(inv)...)), "\n")
 
@@ -436,17 +588,14 @@ func TestSlackBlocksEscapeUntrustedText(t *testing.T) {
 		"restart &amp; verify", // SuggestedAction, surfaced in next steps
 		"why &lt;img&gt; appears in logs",
 		"scale down &lt;deploy&gt;",
-		"disproven by &lt;script&gt; in logs", // RuledOut item
-		"metrics &lt;unavailable&gt; for db",  // DataGaps item
-		"https://kb.example/prev?a=1&amp;b=2", // PrevCuratedURL, escaped inside the recurrence link
+		// RuledOut/DataGaps no longer render in the SUMMARY (findings #2/#3) —
+		// both are only in detailBlocks, which is included in `joined` above.
+		"disproven by &lt;script&gt; in logs",
+		"metrics &lt;unavailable&gt; for db",
 	} {
 		if !strings.Contains(joined, want) {
 			t.Errorf("blocks missing escaped untrusted text %q:\n%s", want, joined)
 		}
-	}
-	// The recurrence URL must not survive with a raw ampersand (would split the link).
-	if strings.Contains(joined, "prev?a=1&b=2") {
-		t.Fatalf("PrevCuratedURL kept a raw & inside the link:\n%s", joined)
 	}
 	// Formatter-emitted markup must keep working: bold rank, code confidence,
 	// reversibility italics, and the KB link the formatter constructs itself.
@@ -454,6 +603,17 @@ func TestSlackBlocksEscapeUntrustedText(t *testing.T) {
 		if !strings.Contains(joined, want) {
 			t.Errorf("blocks missing formatter-emitted markup %q:\n%s", want, joined)
 		}
+	}
+}
+
+// TestEntryLinkEscapesURL proves entryLink escapes its untrusted URL sources
+// (PrevCuratedURL, MatchedKnowledge.URL) — the single footer "view entry" link
+// (finding #6) must never let a hostile & split or corrupt the mrkdwn link.
+func TestEntryLinkEscapesURL(t *testing.T) {
+	got := entryLink(providers.Investigation{PrevCuratedURL: "https://kb.example/prev?a=1&b=2"})
+	want := "📚 <https://kb.example/prev?a=1&amp;b=2|view entry>"
+	if got != want {
+		t.Errorf("entryLink(PrevCuratedURL) = %q, want %q", got, want)
 	}
 }
 
@@ -599,15 +759,17 @@ func TestSlackSummaryBlocksPriorKnowledge(t *testing.T) {
 		"📚 *Seen before ×3*",
 		"*Prior cause:* ConfigMap truncated &lt;v5.4&gt;", // untrusted entry text is escaped
 		"*Prior resolution:* revert &amp; pin 5.3.2",
-		"previous entry",   // link label
-		"resolve rate 3/3", // track record
+		"resolve rate 3/3",              // track record
+		"<https://kb/pr/12|view entry>", // the entry link now lives once, in the footer
 	} {
 		if !strings.Contains(txt, want) {
 			t.Errorf("summary blocks missing %q\n%s", want, txt)
 		}
 	}
-	// The new block replaces the old pointers: no duplicate recurrence renders.
-	for _, absent := range []string{"Previously investigated", "*Recurrence:*"} {
+	// The new block replaces the old pointers: no duplicate recurrence renders,
+	// and the entry link is never inlined mid-prose (finding #6) — it lives only
+	// in the footer.
+	for _, absent := range []string{"Previously investigated", "*Recurrence:*", "previous entry"} {
 		if strings.Contains(txt, absent) {
 			t.Errorf("summary blocks must not still render %q when Prior is set\n%s", absent, txt)
 		}
@@ -635,8 +797,8 @@ func TestSlackSummaryBlocksRecall(t *testing.T) {
 		"no investigation was run",
 		"*Known cause:* AccessKey hit IAM quota",
 		"*Validated resolution:* delete an unused access key",
-		"`harbor-registry-down.md`", // entry path shown inline when no curated URL
 		"resolve rate 3/3",
+		"📚 `harbor-registry-down.md`", // entry path shown once, in the footer, when no curated URL
 	} {
 		if !strings.Contains(txt, want) {
 			t.Errorf("recall summary missing %q\n%s", want, txt)
@@ -647,11 +809,21 @@ func TestSlackSummaryBlocksRecall(t *testing.T) {
 			t.Errorf("recall block must not use the fresh-recurrence framing %q\n%s", absent, txt)
 		}
 	}
+	// The bare path must never appear INLINE in the recall block's prose
+	// (finding #6 — it is the most-clickable thing on the card, and Slack can
+	// truncate a long section mid-word); it belongs only in the footer.
+	texts := mrkdwnTexts(summaryBlocks(inv)) // [confidence ctx, prior block, footer]
+	if len(texts) < 2 || strings.Contains(texts[1], "harbor-registry-down.md") {
+		t.Errorf("entry path must not be inlined in the prior/recall block, got blocks: %v", texts)
+	}
 	// With a curated URL, the entry links instead of showing the bare path.
 	inv.PrevCuratedURL = "https://kb/pr/42"
 	txt = blocksText(t, summaryBlocks(inv))
-	if !strings.Contains(txt, "knowledge-base entry") {
+	if !strings.Contains(txt, "<https://kb/pr/42|view entry>") {
 		t.Errorf("recall with curated URL must link the knowledge-base entry\n%s", txt)
+	}
+	if strings.Contains(txt, "harbor-registry-down.md") {
+		t.Errorf("a resolvable URL must replace the bare path, not add to it\n%s", txt)
 	}
 }
 
@@ -663,8 +835,13 @@ func TestSlackSummaryBlocksRecurrenceWithoutPrior(t *testing.T) {
 		PrevCuratedURL: "https://kb/pr/12",
 	}
 	txt := blocksText(t, summaryBlocks(inv))
-	if !strings.Contains(txt, "Previously investigated") {
-		t.Errorf("legacy recurrence pointer missing without Prior\n%s", txt)
+	// The previous-conclusion pointer now lives in the footer's single entry
+	// link (finding #6), not as its own "Previously investigated" line.
+	if !strings.Contains(txt, "<https://kb/pr/12|view entry>") {
+		t.Errorf("footer entry link missing without Prior\n%s", txt)
+	}
+	if strings.Contains(txt, "Previously investigated") {
+		t.Errorf("the legacy inline pointer must be gone (superseded by the footer link)\n%s", txt)
 	}
 	if strings.Contains(txt, "Seen before") {
 		t.Errorf("Seen-before block must not render without Prior\n%s", txt)
@@ -684,18 +861,18 @@ func TestSlackSummaryBlocksPriorKnowledgePartial(t *testing.T) {
 	}{
 		{
 			label: "cause only", prior: &providers.PriorKnowledge{Cause: "c"}, prevURL: "https://kb/pr/1",
-			want:   []string{"*Prior cause:* c", "previous entry"},
+			want:   []string{"*Prior cause:* c", "<https://kb/pr/1|view entry>"},
 			absent: []string{"*Prior resolution:*", "resolve rate"},
 		},
 		{
 			label: "resolution only", prior: &providers.PriorKnowledge{Resolution: "r"}, prevURL: "https://kb/pr/1",
-			want:   []string{"*Prior resolution:* r", "previous entry"},
+			want:   []string{"*Prior resolution:* r", "<https://kb/pr/1|view entry>"},
 			absent: []string{"*Prior cause:*", "resolve rate"},
 		},
 		{
 			label: "track record without link", prior: &providers.PriorKnowledge{Cause: "c", Recalls: 2, Resolved: 1},
 			want:   []string{"*Prior cause:* c", "resolve rate 1/2"},
-			absent: []string{"previous entry"},
+			absent: []string{"view entry"},
 		},
 	}
 	for _, c := range cases {
@@ -744,16 +921,20 @@ func TestSlackSummaryBlocksMatchedKnowledge(t *testing.T) {
 	}
 }
 
-// TestSlackSummaryBlocksMatchedKnowledgeURL: when a web URL is derivable it renders
-// as a link (label = path) instead of an inline code path.
+// TestSlackSummaryBlocksMatchedKnowledgeURL: when a web URL is derivable it
+// renders as a link in the footer (finding #6 — never inlined as a path) instead
+// of an inline code path.
 func TestSlackSummaryBlocksMatchedKnowledgeURL(t *testing.T) {
 	inv := providers.Investigation{
 		Title: "t", Confidence: 0.8,
 		MatchedKnowledge: &providers.MatchedEntry{Title: "Runbook", Path: "runbooks/h.md", URL: "https://kb/runbooks/h.md", Score: 5},
 	}
 	txt := blocksText(t, summaryBlocks(inv))
-	if !strings.Contains(txt, "<https://kb/runbooks/h.md|runbooks/h.md>") {
+	if !strings.Contains(txt, "<https://kb/runbooks/h.md|view entry>") {
 		t.Errorf("expected a linked entry, got\n%s", txt)
+	}
+	if strings.Contains(txt, "runbooks/h.md|runbooks/h.md") {
+		t.Errorf("must not use the path as the link label:\n%s", txt)
 	}
 }
 

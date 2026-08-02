@@ -313,6 +313,92 @@ func TestFormatProgress(t *testing.T) {
 	}
 }
 
+// TestFormatTitleOnce proves the CLI/Matrix text names the incident (a gap the
+// Slack card's header always covered but Format never did), and only once.
+func TestFormatTitleOnce(t *testing.T) {
+	out := Format(providers.Investigation{Title: "HarborRegistryDown", Confidence: 0.5})
+	if !strings.Contains(out, "🔍 HarborRegistryDown") {
+		t.Fatalf("expected the title on its own header-style line:\n%s", out)
+	}
+	if strings.Count(out, "HarborRegistryDown") != 1 {
+		t.Fatalf("title must render exactly once, got %d:\n%s", strings.Count(out, "HarborRegistryDown"), out)
+	}
+}
+
+// TestFormatConfidenceMatchesSlack proves Format and the Slack card headline
+// the SAME confidence number for the same investigation (both now call
+// confidenceBadge) — before this fix Format used the raw, un-maxed
+// inv.Confidence while Slack maxed it against the top root cause, so a model
+// that left the top-level field at 0 while ranking an 80%-confidence cause
+// would show "0%" on the terminal and "80%" on Slack for the same incident.
+func TestFormatConfidenceMatchesSlack(t *testing.T) {
+	inv := providers.Investigation{
+		Title:      "t",
+		Confidence: 0,                                                       // model left top-level at 0 …
+		RootCauses: []providers.Hypothesis{{Summary: "x", Confidence: 0.8}}, // … but the root cause is 80%
+	}
+	out := Format(inv)
+	if !strings.Contains(out, "confidence · 80%") {
+		t.Fatalf("Format must headline the maxed confidence (80%%), matching Slack:\n%s", out)
+	}
+	if strings.Contains(out, "confidence · 0%") {
+		t.Fatalf("Format must not show the raw, un-maxed 0%%:\n%s", out)
+	}
+}
+
+// TestFormatMetadataBelowAnswer proves the reordering: trigger-time metadata
+// (Resource/alert facts/Started) now renders AFTER the root causes, mirroring
+// the Slack card's move — orienting detail is not the thing to lead with.
+func TestFormatMetadataBelowAnswer(t *testing.T) {
+	inv := providers.Investigation{
+		Title:      "t",
+		Confidence: 0.8,
+		Resource:   providers.Workload{Kind: "Pod", Namespace: "ns", Name: "p"},
+		StartedAt:  time.Date(2026, 7, 3, 10, 0, 0, 0, time.UTC),
+		RootCauses: []providers.Hypothesis{{Summary: "the root cause", Confidence: 0.8}},
+	}
+	out := Format(inv)
+	whyIdx := strings.Index(out, "the root cause")
+	resourceIdx := strings.Index(out, "Resource:")
+	if whyIdx == -1 || resourceIdx == -1 || resourceIdx < whyIdx {
+		t.Fatalf("Resource (idx %d) must come AFTER the root cause (idx %d):\n%s", resourceIdx, whyIdx, out)
+	}
+}
+
+// TestFormatRecallConfidenceDisagreement mirrors
+// TestSlackRecallConfidenceDisagreement: the CLI/Matrix text must disclose a
+// recalled entry's own confidence when it diverges from the delivered one,
+// exactly like Slack — the two notifiers must never diverge in what they claim.
+func TestFormatRecallConfidenceDisagreement(t *testing.T) {
+	inv := providers.Investigation{
+		Title:      "HarborRegistryDown",
+		Recalled:   true,
+		Confidence: 0.78,
+		RootCauses: []providers.Hypothesis{{Summary: "AccessKey hit IAM quota", Confidence: 0.95}},
+	}
+	out := Format(inv)
+	if !strings.Contains(out, "78%") {
+		t.Fatalf("delivered confidence (78%%) must headline:\n%s", out)
+	}
+	if !strings.Contains(out, "entry's own confidence 95%, adjusted to 78% by its track record") {
+		t.Fatalf("must disclose the entry's own confidence, labeled:\n%s", out)
+	}
+}
+
+// TestFormatVerifiedFooter proves the verify signal — visible on the Slack
+// card's footer — is also surfaced in the shared text, so CLI/Matrix readers
+// aren't missing information Slack users have.
+func TestFormatVerifiedFooter(t *testing.T) {
+	inv := providers.Investigation{Title: "t", Confidence: 0.8, Verified: true}
+	if out := Format(inv); !strings.Contains(out, "✓ verified") {
+		t.Fatalf("expected the verified marker:\n%s", out)
+	}
+	inv.Verified = false
+	if out := Format(inv); strings.Contains(out, "✓ verified") {
+		t.Fatalf("must omit the verified marker when Verified is false:\n%s", out)
+	}
+}
+
 // TestFormatUsageFooter covers the one-line cost footer: token summary always,
 // dollar figure only when priced, and omission when no model call was made.
 func TestFormatUsageFooter(t *testing.T) {
