@@ -27,10 +27,13 @@ type LogFields struct {
 
 // Dialect values for LogFields.Dialect — which query language the configured
 // logs backend speaks. The zero value is LogsQL so every existing caller and
-// fake is untouched; the app layer sets DialectLogQL when the backend is Loki.
+// fake is untouched; the app layer sets DialectLogQL when the backend is Loki,
+// DialectElastic when it is Elasticsearch/OpenSearch (both speak the same
+// Lucene query_string dialect — one value covers both).
 const (
-	DialectLogsQL = ""      // VictoriaLogs LogsQL (shipped default)
-	DialectLogQL  = "logql" // Grafana Loki LogQL
+	DialectLogsQL  = ""             // VictoriaLogs LogsQL (shipped default)
+	DialectLogQL   = "logql"        // Grafana Loki LogQL
+	DialectElastic = "query_string" // Elasticsearch/OpenSearch Lucene query_string
 )
 
 // Shipped log-field defaults. These MUST stay byte-identical to the strings the code
@@ -67,6 +70,24 @@ func (f LogFields) resolved() LogFields {
 		}
 		return f
 	}
+	if f.Dialect == DialectElastic {
+		// ECS (Elastic Common Schema) convention, shared by Elasticsearch and
+		// OpenSearch. Mirrors config.LogFields.ResolvedFor's ECS branch; this is
+		// the in-package fallback for zero-field callers.
+		if f.ContainerField == "" {
+			f.ContainerField = "kubernetes.container.name"
+		}
+		if f.NamespaceField == "" {
+			f.NamespaceField = "kubernetes.namespace"
+		}
+		if f.PodField == "" {
+			f.PodField = "kubernetes.pod.name"
+		}
+		if f.LevelField == "" {
+			f.LevelField = "log.level"
+		}
+		return f
+	}
 	if f.ContainerField == "" {
 		f.ContainerField = defaultContainerField
 	}
@@ -87,8 +108,11 @@ func (f LogFields) resolved() LogFields {
 
 // queryLang names the dialect (bare) for tool schemas ("raw LogQL"/"raw LogsQL").
 func (f LogFields) queryLang() string {
-	if f.Dialect == DialectLogQL {
+	switch f.Dialect {
+	case DialectLogQL:
 		return "LogQL"
+	case DialectElastic:
+		return "Elasticsearch query_string"
 	}
 	return "LogsQL"
 }
@@ -97,8 +121,11 @@ func (f LogFields) queryLang() string {
 // description-side counterpart of queryLang(), so both forms derive the dialect
 // from one place and no tool description can name the wrong one.
 func (f LogFields) dialectLabel() string {
-	if f.Dialect == DialectLogQL {
+	switch f.Dialect {
+	case DialectLogQL:
 		return "LogQL (Grafana Loki)"
+	case DialectElastic:
+		return "Lucene query_string (Elasticsearch/OpenSearch)"
 	}
 	return "LogsQL (VictoriaLogs)"
 }
@@ -110,11 +137,17 @@ func (f LogFields) dialectLabel() string {
 // log tools' descriptions so the guidance and the query builder can't drift.
 func (f LogFields) rawQueryGuidance() string {
 	c := f.resolved()
-	if f.Dialect == DialectLogQL {
+	switch f.Dialect {
+	case DialectLogQL:
 		return fmt.Sprintf("If you write a raw `query`: it MUST start with a stream selector using Loki stream labels, "+
 			"e.g. `{%s=\"apps\", %s=\"x\"}`; filter severity with `| %s=\"error\"` (no parser needed) or parse first with `| json` / `| logfmt`. "+
 			"Do NOT use VictoriaLogs LogsQL syntax (unpack_json, _msg, field:value filters).",
 			c.NamespaceField, c.ContainerField, c.LevelField)
+	case DialectElastic:
+		return fmt.Sprintf("If you write a raw `query`: it is a Lucene query_string expression, e.g. `%s:\"apps\" AND %s:\"error\"`; "+
+			"combine clauses with AND/OR/NOT, quote exact values, and use * for a wildcard. "+
+			"Do NOT use VictoriaLogs LogsQL or Grafana LogQL syntax (no `{label=\"value\"}` selectors, no `|` pipes).",
+			c.NamespaceField, c.LevelField)
 	}
 	return fmt.Sprintf("If you write a raw `query`: stream labels use DOT notation (%s, %s), NOT underscores; "+
 		"to filter by severity you MUST unpack JSON first, e.g. `{%s=\"x\"} | %s | %s:error`. "+

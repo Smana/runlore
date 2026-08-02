@@ -4,6 +4,7 @@ package investigate
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"testing"
 	"time"
@@ -16,6 +17,8 @@ type fakeLogStats struct {
 	buckets  []providers.Bucket
 	msgs     []providers.MsgCount
 	gotQuery string
+	hitsErr  error
+	msgsErr  error
 }
 
 func (f *fakeLogStats) Query(context.Context, string, providers.TimeWindow) (providers.LogResult, error) {
@@ -23,10 +26,10 @@ func (f *fakeLogStats) Query(context.Context, string, providers.TimeWindow) (pro
 }
 func (f *fakeLogStats) Hits(_ context.Context, query string, _ providers.TimeWindow, _ time.Duration) ([]providers.Bucket, error) {
 	f.gotQuery = query
-	return f.buckets, nil
+	return f.buckets, f.hitsErr
 }
 func (f *fakeLogStats) TopMessages(context.Context, string, providers.TimeWindow, int) ([]providers.MsgCount, error) {
-	return f.msgs, nil
+	return f.msgs, f.msgsErr
 }
 
 func TestLogsErrorSummaryTool(t *testing.T) {
@@ -113,3 +116,66 @@ func TestSimilarRuns(t *testing.T) {
 		}
 	}
 }
+
+// TestLogsErrorSummaryPartialFailuresAreDisclosed pins BOTH degradation paths.
+//
+// The Elasticsearch client deliberately returns an error from Hits when a search
+// reports failed shards, on the reasoning that a silently-short histogram
+// understates the very spike this tool exists to find. That reasoning only holds
+// if the missing half is DISCLOSED — an absent histogram is otherwise
+// indistinguishable from "no matching lines" to the model reading the output.
+//
+// The two branches were asymmetric when this test was written: TopMessages'
+// failure was reported, Hits' was swallowed.
+func TestLogsErrorSummaryPartialFailuresAreDisclosed(t *testing.T) {
+	base := time.Date(2024, 1, 1, 10, 0, 0, 0, time.UTC)
+	buckets := []providers.Bucket{{Time: base, Level: "error", Count: 7}}
+	msgs := []providers.MsgCount{{Message: "connection refused", Count: 7, First: base, Last: base}}
+
+	for _, tc := range []struct {
+		name         string
+		f            *fakeLogStats
+		wantContains string
+		wantAbsent   string
+	}{
+		{
+			name:         "histogram fails, top messages survive",
+			f:            &fakeLogStats{msgs: msgs, hitsErr: errPartial},
+			wantContains: "histogram: unavailable",
+			wantAbsent:   "top messages: unavailable",
+		},
+		{
+			name:         "top messages fail, histogram survives",
+			f:            &fakeLogStats{buckets: buckets, msgsErr: errPartial},
+			wantContains: "top messages: unavailable",
+			wantAbsent:   "histogram: unavailable",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			out, err := (LogsErrorSummaryTool{Logs: tc.f}).Call(context.Background(), `{"namespace":"apps"}`)
+			if err != nil {
+				t.Fatalf("one side failing must still return output, got err: %v", err)
+			}
+			if !strings.Contains(out, tc.wantContains) {
+				t.Errorf("the failed half is not disclosed to the model.\nwant substring %q in:\n%s", tc.wantContains, out)
+			}
+			if strings.Contains(out, tc.wantAbsent) {
+				t.Errorf("the surviving half was reported as unavailable.\nunexpected %q in:\n%s", tc.wantAbsent, out)
+			}
+			if !strings.Contains(out, errPartial.Error()) {
+				t.Errorf("the REASON is missing — %q must reach the model:\n%s", errPartial.Error(), out)
+			}
+		})
+	}
+}
+
+// TestLogsErrorSummaryBothFailing keeps the existing hard-failure contract: when
+// neither half is available there is nothing to disclose, so the tool errors.
+func TestLogsErrorSummaryBothFailing(t *testing.T) {
+	f := &fakeLogStats{hitsErr: errPartial, msgsErr: errPartial}
+	if _, err := (LogsErrorSummaryTool{Logs: f}).Call(context.Background(), `{"namespace":"apps"}`); err == nil {
+		t.Fatal("both halves failing must return an error, not an empty-looking summary")
+	}
+}
+
+var errPartial = errors.New("logs histogram is incomplete: 2 of 5 shards failed")

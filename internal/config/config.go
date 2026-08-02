@@ -99,15 +99,21 @@ const (
 )
 
 // Logs backend providers for config.logs.provider. Unlike the metrics backends
-// (which share the Prometheus HTTP API and differ only in dialect), VictoriaLogs
-// and Loki have entirely different query APIs, so this selects the CLIENT, not a
-// flavor of one. Empty ⇒ auto-detect at startup (Loki answers
-// /loki/api/v1/status/buildinfo; VictoriaLogs does not), failing safe to
+// (which share the Prometheus HTTP API and differ only in dialect), these
+// backends have entirely different query APIs, so this selects the CLIENT, not
+// a flavor of one. Empty ⇒ auto-detect at startup (internal/logs.Detect: Loki
+// answers /loki/api/v1/status/buildinfo; Elasticsearch/OpenSearch answer GET /
+// with a version document; VictoriaLogs answers neither), failing safe to
 // victorialogs — the provider RunLore shipped with — so an unreachable backend
-// at startup reproduces today's behaviour exactly.
+// at startup reproduces today's behaviour exactly. These values MUST equal
+// internal/logs.Provider* exactly (see that package's comment) — they are also
+// the ids internal/docsguard reflects a docs/integrations page's
+// `integration: {kind: logs, id: ...}` claim against.
 const (
-	LogsProviderVictoriaLogs = "victorialogs" // LogsQL over /select/logsql/* (shipped default)
-	LogsProviderLoki         = "loki"         // LogQL over /loki/api/v1/*
+	LogsProviderVictoriaLogs  = "victorialogs"  // LogsQL over /select/logsql/* (shipped default)
+	LogsProviderLoki          = "loki"          // LogQL over /loki/api/v1/*
+	LogsProviderElasticsearch = "elasticsearch" // classic _search DSL (Lucene query_string) over /<index>/_search
+	LogsProviderOpenSearch    = "opensearch"    // same _search DSL as Elasticsearch — a fork, not a different API
 )
 
 // MetricsConfig is the metrics backend endpoint plus an OPTIONAL flavor override.
@@ -133,9 +139,15 @@ type LogsConfig struct {
 	Endpoint `yaml:",inline"`
 
 	// Provider optionally pins the logs backend implementation instead of
-	// auto-detecting it: "loki" or "victorialogs" (see LogsProvider*). Empty ⇒
-	// probe once at startup, failing safe to victorialogs.
+	// auto-detecting it: "loki", "elasticsearch", "opensearch", or
+	// "victorialogs" (see LogsProvider*). Empty ⇒ probe once at startup,
+	// failing safe to victorialogs.
 	Provider string `yaml:"provider"`
+
+	// Index is the Elasticsearch/OpenSearch index pattern to search (e.g.
+	// "logs-*"). Ignored by victorialogs/loki. Empty ⇒ "logs-*" (the
+	// Filebeat/ECS convention).
+	Index string `yaml:"index"`
 
 	Fields LogFields `yaml:"fields"`
 }
@@ -160,7 +172,22 @@ type LogFields struct {
 	// UnpackPipe is the LogsQL pipe that promotes JSON body fields to top-level
 	// fields so LevelField becomes filterable. Default: unpack_json. Set to a
 	// different pipe (or leave empty to disable) if your logs are already flat.
+	// Elasticsearch/OpenSearch have no parser-pipe concept — ignored for them.
 	UnpackPipe string `yaml:"unpack_pipe"`
+
+	// TimestampField is the Elasticsearch/OpenSearch field the range filter,
+	// sort, and date_histogram aggregation key on. Ignored by victorialogs/loki
+	// (both have a built-in time concept, no configurable field name). Default:
+	// @timestamp (the ECS convention).
+	TimestampField string `yaml:"timestamp_field"`
+
+	// MessageField is the Elasticsearch/OpenSearch field TopMessages
+	// aggregates over. Ignored by victorialogs/loki. Default: message (the ECS
+	// convention) — which ships `text`-only with no keyword sub-field by
+	// default, so TopMessages transparently falls back to client-side
+	// aggregation unless this is pointed at an aggregatable field (e.g. a
+	// `message.keyword` multi-field your index template adds).
+	MessageField string `yaml:"message_field"`
 }
 
 // Default log-field convention: the VictoriaLogs + vector kubernetes-metadata
@@ -212,13 +239,35 @@ const (
 	defaultLokiLevelField     = "detected_level"
 )
 
-// ResolvedFor resolves the field convention for a specific logs provider:
-// Loki gets Loki-appropriate defaults; anything else (victorialogs, "") keeps
-// Resolved()'s shipped VictoriaLogs behaviour. Explicitly-set fields always win.
+// Default log-field convention for Elasticsearch/OpenSearch: the ECS
+// (Elastic Common Schema) layout Filebeat and most ECS-compliant collectors
+// ship. Both distributions get the SAME defaults — they are the same wire
+// format under a fork, not two different conventions.
+const (
+	defaultECSContainerField = "kubernetes.container.name"
+	defaultECSNamespaceField = "kubernetes.namespace"
+	defaultECSPodField       = "kubernetes.pod.name"
+	defaultECSLevelField     = "log.level"
+	defaultECSTimestampField = "@timestamp"
+	defaultECSMessageField   = "message"
+)
+
+// ResolvedFor resolves the field convention for a specific logs provider: Loki
+// gets Loki-appropriate defaults, Elasticsearch/OpenSearch get ECS defaults;
+// anything else (victorialogs, "") keeps Resolved()'s shipped VictoriaLogs
+// behaviour. Explicitly-set fields always win.
 func (f LogFields) ResolvedFor(provider string) LogFields {
-	if provider != LogsProviderLoki {
+	switch provider {
+	case LogsProviderLoki:
+		return f.resolvedForLoki()
+	case LogsProviderElasticsearch, LogsProviderOpenSearch:
+		return f.resolvedForECS()
+	default:
 		return f.Resolved()
 	}
+}
+
+func (f LogFields) resolvedForLoki() LogFields {
 	if f.ContainerField == "" {
 		f.ContainerField = defaultLokiContainerField
 	}
@@ -232,6 +281,29 @@ func (f LogFields) ResolvedFor(provider string) LogFields {
 		f.LevelField = defaultLokiLevelField
 	}
 	// UnpackPipe stays as-set (empty = no parser stage): detected_level needs none.
+	return f
+}
+
+func (f LogFields) resolvedForECS() LogFields {
+	if f.ContainerField == "" {
+		f.ContainerField = defaultECSContainerField
+	}
+	if f.NamespaceField == "" {
+		f.NamespaceField = defaultECSNamespaceField
+	}
+	if f.PodField == "" {
+		f.PodField = defaultECSPodField
+	}
+	if f.LevelField == "" {
+		f.LevelField = defaultECSLevelField
+	}
+	if f.TimestampField == "" {
+		f.TimestampField = defaultECSTimestampField
+	}
+	if f.MessageField == "" {
+		f.MessageField = defaultECSMessageField
+	}
+	// UnpackPipe stays unused: Elasticsearch/OpenSearch have no parser-pipe concept.
 	return f
 }
 
@@ -1356,10 +1428,40 @@ func (c *Config) Validate() error {
 	// logs.provider is a small enum; reject typos at startup rather than silently
 	// falling back to the wrong client against a live backend.
 	switch c.Logs.Provider {
-	case "", LogsProviderVictoriaLogs, LogsProviderLoki:
+	case "", LogsProviderVictoriaLogs, LogsProviderLoki, LogsProviderElasticsearch, LogsProviderOpenSearch:
 	default:
-		return fmt.Errorf("logs.provider must be %q, %q, or empty (auto-detect); got %q",
-			LogsProviderVictoriaLogs, LogsProviderLoki, c.Logs.Provider)
+		return fmt.Errorf("logs.provider must be %q, %q, %q, %q, or empty (auto-detect); got %q",
+			LogsProviderVictoriaLogs, LogsProviderLoki, LogsProviderElasticsearch, LogsProviderOpenSearch, c.Logs.Provider)
+	}
+	// logs.index goes straight into the request PATH
+	// (internal/logs/elasticsearch.Client.indexPath). The client escapes it, so a
+	// malformed value can no longer change the request's shape — but escaping
+	// turns a typo into a puzzling 4xx from Elasticsearch mid-investigation
+	// ("no such index [a%2Fb]") rather than a startup failure naming the config
+	// key. Reject the malformed shapes here instead, loudly and once.
+	if idx := c.Logs.Index; idx != "" {
+		// Elasticsearch itself forbids all of these in an index name; `/` and `?`
+		// additionally used to be the path/query-string injections. `*` (wildcard),
+		// `,` (multi-index list) and `:` (cross-cluster `remote:index`) are all
+		// legal index-EXPRESSION syntax and deliberately allowed.
+		if i := strings.IndexAny(idx, "/\\?\"<>|# \t\n\r"); i >= 0 {
+			return fmt.Errorf("logs.index %q contains %q, which Elasticsearch/OpenSearch forbid in an index name (allowed: lowercase letters, digits, - _ + . and the `*` wildcard; separate multiple patterns with `,`)", idx, string(idx[i]))
+		}
+		// `,` IS legal — it is the multi-index list separator (logs-app-*,logs-infra-*)
+		// — but an empty element in that list is a typo (a trailing or doubled comma).
+		for _, part := range strings.Split(idx, ",") {
+			if part == "" {
+				return fmt.Errorf("logs.index %q has an empty pattern in its comma-separated list", idx)
+			}
+			// ES rejects a name starting with -, _ or +; a leading `-` in particular
+			// is its EXCLUSION syntax and silently matches nothing on its own.
+			if strings.HasPrefix(part, "-") || strings.HasPrefix(part, "_") || strings.HasPrefix(part, "+") {
+				return fmt.Errorf("logs.index pattern %q must not start with -, _ or + (Elasticsearch reserves those; a leading `-` is exclusion syntax)", part)
+			}
+		}
+		if idx != strings.ToLower(idx) {
+			return fmt.Errorf("logs.index %q must be lowercase (Elasticsearch/OpenSearch index names are), got mixed case", idx)
+		}
 	}
 	switch c.Actions.Mode {
 	case "", ActionOff, ActionSuggest:

@@ -401,6 +401,9 @@ func buildLogsQLWith(raw, container, namespace, level string, conv LogFields) (s
 	if conv.Dialect == DialectLogQL {
 		return buildLogQL(raw, container, namespace, level, conv)
 	}
+	if conv.Dialect == DialectElastic {
+		return buildElasticQuery(raw, container, namespace, level, conv)
+	}
 	if raw != "" {
 		if strings.Contains(raw, "level=") {
 			return "", fmt.Errorf("invalid LogsQL: `level=` is Prometheus/Loki syntax. Filter severity with `| %s | %s:error` (after a stream selector), or use the container/namespace/level params", conv.UnpackPipe, conv.LevelField)
@@ -465,6 +468,52 @@ func buildLogQL(raw, container, namespace, level string, conv LogFields) (string
 		q += fmt.Sprintf(" | %s=%q", conv.LevelField, level)
 	}
 	return q, nil
+}
+
+// buildElasticQuery composes a valid Elasticsearch/OpenSearch Lucene
+// query_string expression from the resolved ECS field convention:
+// `<field>:"value" AND <field>:"value"` — the SAME classic `_search` DSL both
+// distributions speak (internal/logs/elasticsearch). A raw query passes through
+// but is rejected when it looks like carried-over LogsQL/LogQL syntax (a
+// `{label="value"}` stream selector, or `unpack_json`/`_msg:`, the model's
+// likely mistakes coming from the other two dialects), mirroring the LogsQL
+// `level=` guard and the LogQL VictoriaLogs-ism guard in spirit.
+//
+// SECURITY — the `%q` verbs below are load-bearing; do NOT "tidy" them into
+// `%s` with hand-written quotes. Container and namespace names reach this
+// function from tool arguments the model chose, which in a multi-tenant cluster
+// can be attacker-influenced (a pod name, a namespace label). Go's %q escaping
+// happens to be EXACTLY Lucene's quoted-phrase escaping: `"` → `\"` and `\` →
+// `\\`, which is the only pair Lucene recognises inside a phrase. So a value
+// like `api" OR *:* OR "` stays one literal phrase instead of becoming three
+// clauses that widen the query across every tenant's logs. Swapping in
+// `%s` with manual quotes silently reopens that — TestBuildElasticQueryEscaping
+// pins the exact payloads. (Control characters are the one cosmetic difference:
+// %q renders them as `\n`/`\x00`, which Lucene reads as the escaped literal
+// character — harmless, and it still cannot terminate the phrase.)
+func buildElasticQuery(raw, container, namespace, level string, conv LogFields) (string, error) {
+	if raw != "" {
+		if strings.Contains(raw, "unpack_json") || strings.Contains(raw, "_msg:") || strings.HasPrefix(strings.TrimSpace(raw), "{") {
+			return "", fmt.Errorf("invalid Elasticsearch query_string: that looks like LogsQL/LogQL syntax. "+
+				"Use Lucene query_string syntax, e.g. `%s:%q AND %s:%q`, or use the container/namespace/level params",
+				conv.NamespaceField, "apps", conv.LevelField, "error")
+		}
+		return raw, nil
+	}
+	var clauses []string
+	if container != "" {
+		clauses = append(clauses, fmt.Sprintf("%s:%q", conv.ContainerField, container))
+	}
+	if namespace != "" {
+		clauses = append(clauses, fmt.Sprintf("%s:%q", conv.NamespaceField, namespace))
+	}
+	if len(clauses) == 0 {
+		return "", fmt.Errorf("provide a raw `query`, or `container`/`namespace` to build one")
+	}
+	if level != "" {
+		clauses = append(clauses, fmt.Sprintf("%s:%q", conv.LevelField, level))
+	}
+	return strings.Join(clauses, " AND "), nil
 }
 
 // Name returns the tool name.

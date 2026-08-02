@@ -78,3 +78,47 @@ func TestLogFieldsResolvedForLoki(t *testing.T) {
 		t.Fatalf("victorialogs resolution must be unchanged")
 	}
 }
+
+// TestLogFieldsResolvedForECS: ResolvedFor(elasticsearch) and
+// ResolvedFor(opensearch) both fill the SAME ECS (Elastic Common Schema)
+// convention — the two distributions speak an identical wire format, so they
+// must not drift into two different defaults. TimestampField/MessageField are
+// ECS-specific fields with no VictoriaLogs/Loki analogue. Any explicitly-set
+// field wins over the default.
+func TestLogFieldsResolvedForECS(t *testing.T) {
+	want := LogFields{
+		ContainerField: "kubernetes.container.name",
+		NamespaceField: "kubernetes.namespace",
+		PodField:       "kubernetes.pod.name",
+		LevelField:     "log.level",
+		TimestampField: "@timestamp",
+		MessageField:   "message",
+	}
+	for _, provider := range []string{LogsProviderElasticsearch, LogsProviderOpenSearch} {
+		got := LogFields{}.ResolvedFor(provider)
+		if got != want {
+			t.Fatalf("%s defaults = %+v, want %+v", provider, got, want)
+		}
+	}
+	over := LogFields{LevelField: "severity", MessageField: "log.message"}.ResolvedFor(LogsProviderElasticsearch)
+	if over.LevelField != "severity" || over.MessageField != "log.message" || over.TimestampField != "@timestamp" {
+		t.Fatalf("overrides must win, defaults fill the rest: %+v", over)
+	}
+}
+
+// TestLogsConfigIndexField confirms `logs.index` parses at the top level
+// (Elasticsearch/OpenSearch-specific, ignored by victorialogs/loki).
+func TestLogsConfigIndexField(t *testing.T) {
+	const y = `
+url: https://es:9200
+provider: elasticsearch
+index: logs-*
+`
+	var lc LogsConfig
+	if err := yaml.Unmarshal([]byte(y), &lc); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if lc.Index != "logs-*" {
+		t.Fatalf("index not parsed: %+v", lc)
+	}
+}

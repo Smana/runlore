@@ -495,6 +495,87 @@ func TestBuildLogQL(t *testing.T) {
 	}
 }
 
+// TestBuildElasticQuery: with Dialect=DialectElastic the same structured
+// params compile to a Lucene query_string expression, and raw queries carrying
+// LogsQL/LogQL-isms (the model's likely carry-over mistakes) are rejected with
+// a correcting error so the model retries in-dialect.
+func TestBuildElasticQuery(t *testing.T) {
+	elastic := LogFields{Dialect: DialectElastic}
+	tests := []struct {
+		name, raw, container, namespace, level string
+		conv                                   LogFields
+		want                                   string
+		wantErr                                string
+	}{
+		{name: "structured selector + level", container: "harbor-core", namespace: "apps", level: "error", conv: elastic,
+			want: `kubernetes.container.name:"harbor-core" AND kubernetes.namespace:"apps" AND log.level:"error"`},
+		{name: "namespace only, no level", namespace: "apps", conv: elastic,
+			want: `kubernetes.namespace:"apps"`},
+		{name: "custom fields", container: "core", level: "error",
+			conv: LogFields{Dialect: DialectElastic, ContainerField: "kubernetes.container_name", LevelField: "severity"},
+			want: `kubernetes.container_name:"core" AND severity:"error"`},
+		{name: "raw passthrough", raw: `message:"connection refused" AND log.level:"error"`, conv: elastic,
+			want: `message:"connection refused" AND log.level:"error"`},
+		{name: "raw LogsQL-ism rejected (unpack_json)", raw: `{namespace="apps"} | unpack_json | log.level:error`, conv: elastic,
+			wantErr: "LogsQL/LogQL"},
+		{name: "raw LogsQL _msg: filter rejected", raw: `_msg:"error"`, conv: elastic,
+			wantErr: "LogsQL/LogQL"},
+		{name: "raw LogQL stream selector rejected", raw: `{namespace="apps"} |= "refused"`, conv: elastic,
+			wantErr: "LogsQL/LogQL"},
+		{name: "nothing given", conv: elastic, wantErr: "provide a raw"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := buildLogsQLWith(tc.raw, tc.container, tc.namespace, tc.level, tc.conv)
+			if tc.wantErr != "" {
+				if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+					t.Fatalf("err = %v, want containing %q", err, tc.wantErr)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("buildLogsQLWith: %v", err)
+			}
+			if got != tc.want {
+				t.Fatalf("got %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+// TestLogToolDescriptionsDialectElastic mirrors TestLogToolDescriptionsDialect
+// for the Elasticsearch/OpenSearch dialect: the model must be told
+// "Elasticsearch query_string" / "Lucene query_string (Elasticsearch/OpenSearch)"
+// — never LogsQL or LogQL — in every log tool's description and schema.
+func TestLogToolDescriptionsDialectElastic(t *testing.T) {
+	elastic := LogFields{Dialect: DialectElastic}
+	q := QueryLogsTool{Fields: elastic}
+	if !strings.Contains(q.Description(), "Lucene query_string (Elasticsearch/OpenSearch)") || strings.Contains(q.Description(), "invalid LogsQL") {
+		t.Fatalf("elastic description wrong: %s", q.Description())
+	}
+	if !strings.Contains(q.Schema(), "raw Elasticsearch query_string") {
+		t.Fatalf("elastic schema wrong: %s", q.Schema())
+	}
+	// The description must interpolate the CONFIGURED field names (not
+	// hardcoded kubernetes.namespace/log.level), so a field override reaches
+	// the model verbatim.
+	custom := QueryLogsTool{Fields: LogFields{Dialect: DialectElastic, LevelField: "severity", NamespaceField: "ns"}}
+	if !strings.Contains(custom.Description(), `severity:"error"`) || !strings.Contains(custom.Description(), `ns:"apps"`) {
+		t.Fatalf("elastic description must interpolate configured field names: %s", custom.Description())
+	}
+	for _, tool := range []interface {
+		Description() string
+		Schema() string
+	}{LogsErrorSummaryTool{Fields: elastic}, DiscoverLogFieldsTool{Fields: elastic}} {
+		if strings.Contains(tool.Schema(), "LogsQL") || strings.Contains(tool.Schema(), "raw LogQL") {
+			t.Fatalf("elastic-dialect schema must not mention the other dialects: %s", tool.Schema())
+		}
+		if strings.Contains(tool.Description(), "LogsQL") {
+			t.Fatalf("elastic-dialect description must not mention LogsQL: %s", tool.Description())
+		}
+	}
+}
+
 // TestLogToolDescriptionsDialect: on a Loki deployment the model must be told
 // LogQL — never LogsQL — in every tool description and schema, and vice versa.
 func TestLogToolDescriptionsDialect(t *testing.T) {
@@ -527,4 +608,80 @@ func TestLogToolDescriptionsDialect(t *testing.T) {
 			t.Fatalf("loki-dialect description must not mention LogsQL: %s", tool.Description())
 		}
 	}
+}
+
+// TestBuildElasticQueryEscaping pins query-INJECTION safety, not formatting.
+// buildElasticQuery interpolates with `%q`, whose Go escaping coincides exactly
+// with Lucene's quoted-phrase escaping (`"` → `\"`, `\` → `\\`) — nothing here
+// asserted that, so a cosmetic refactor to `%s` with hand-written quotes would
+// have passed the whole suite while letting an attacker-chosen namespace or pod
+// name break out of the phrase and widen the query across every tenant's logs
+// in a multi-tenant cluster.
+func TestBuildElasticQueryEscaping(t *testing.T) {
+	elastic := LogFields{Dialect: DialectElastic}
+	for _, tc := range []struct {
+		name, container, namespace, want string
+	}{
+		{
+			name:      "quote-and-clause breakout attempt",
+			namespace: `api" OR *:* OR "`,
+			want:      `kubernetes.namespace:"api\" OR *:* OR \""`,
+		},
+		{
+			name:      "trailing backslash cannot escape the closing quote",
+			namespace: `api\`,
+			want:      `kubernetes.namespace:"api\\"`,
+		},
+		{
+			name:      "backslash-quote cannot smuggle a real quote through",
+			namespace: `api\"`,
+			want:      `kubernetes.namespace:"api\\\""`,
+		},
+		{
+			name:      "wildcard and boolean operators stay literal inside the phrase",
+			namespace: `api* AND kubernetes.namespace:kube-system`,
+			want:      `kubernetes.namespace:"api* AND kubernetes.namespace:kube-system"`,
+		},
+		{
+			name:      "the container field is interpolated the same way",
+			container: `web" OR *:*`,
+			want:      `kubernetes.container.name:"web\" OR *:*"`,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := buildLogsQLWith("", tc.container, tc.namespace, "", elastic)
+			if err != nil {
+				t.Fatalf("buildLogsQLWith: %v", err)
+			}
+			if got != tc.want {
+				t.Fatalf("got  %s\nwant %s", got, tc.want)
+			}
+			// Independently of the exact bytes: the value must not be able to
+			// terminate its phrase early, which is the property that actually
+			// prevents injection.
+			if !valueStaysInsideOnePhrase(got) {
+				t.Fatalf("value escaped its quoted phrase: %s", got)
+			}
+		})
+	}
+}
+
+// valueStaysInsideOnePhrase walks a single `field:"value"` clause under LUCENE's
+// escaping rules (a backslash escapes the next character inside a phrase) and
+// reports whether the closing quote is the last byte — i.e. whether the
+// interpolated value could inject trailing clauses.
+func valueStaysInsideOnePhrase(clause string) bool {
+	open := strings.Index(clause, `"`)
+	if open < 0 {
+		return false
+	}
+	for i := open + 1; i < len(clause); i++ {
+		switch clause[i] {
+		case '\\':
+			i++ // the escaped character is literal, whatever it is
+		case '"':
+			return i == len(clause)-1
+		}
+	}
+	return false
 }

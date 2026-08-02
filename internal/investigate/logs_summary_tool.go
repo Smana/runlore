@@ -104,7 +104,16 @@ func (t LogsErrorSummaryTool) Call(ctx context.Context, args string) (string, er
 
 	var b strings.Builder
 	fmt.Fprintf(&b, "query: %s (last %dm)\n", query, since)
-	b.WriteString(renderHitsHistogram(buckets, step))
+	// Symmetric with the top-messages branch below. Without this, a histogram
+	// that failed on its own renders as simply absent — and "no histogram" is
+	// indistinguishable from "no matching lines" to the model reading this,
+	// which is the silently-partial failure the shard-failure check exists to
+	// prevent, moved one layer up.
+	if hErr != nil {
+		fmt.Fprintf(&b, "histogram: unavailable (%v)\n", hErr)
+	} else {
+		b.WriteString(renderHitsHistogram(buckets, step))
+	}
 	if mErr != nil {
 		fmt.Fprintf(&b, "top messages: unavailable (%v)\n", mErr)
 	} else {

@@ -41,6 +41,7 @@ func TestSecretsMasks(t *testing.T) {
 		{"secret env", "DB_SECRET=s3cr3t-value-xyz", "s3cr3t-value-xyz", ""},
 		{"url creds", "postgres://app:sup3rs3cret@db.svc:5432/x", "sup3rs3cret", "postgres://app:"},
 		{"bearer", "Authorization: Bearer abcDEF123456ghiJKL789", "abcDEF123456ghiJKL789", "Bearer"},
+		{"elasticsearch apikey auth header", "Authorization: ApiKey VnVhQ2ZHY0JDZGJrUW0=", "VnVhQ2ZHY0JDZGJrUW0=", "ApiKey"},
 		{"private key", "k:\n-----BEGIN RSA PRIVATE KEY-----\nMIIBwetcetc\n-----END RSA PRIVATE KEY-----\n", "MIIBwetcetc", ""},
 	}
 	for _, tc := range cases {
@@ -142,6 +143,12 @@ func TestSecretsKeepsBenign(t *testing.T) {
 		"this is task-management, disk-usage and ask-me-anything",
 		// "ya29." substring inside a larger word must not match.
 		"the library libya29things is fine",
+		// "apikey" is an ordinary word in prose. A rule matching any 8+ char word
+		// after it planted [REDACTED] into findings that had leaked nothing —
+		// "apikey rotation policy" -> "apikey [REDACTED] policy".
+		"apikey rotation policy is documented in the runbook",
+		"see the ApiKey documentation page for the header format",
+		"the apikey settings were unchanged",
 	}
 	for _, s := range benign {
 		if got := Secrets(s); got != s {
@@ -167,5 +174,48 @@ func TestAWSSecretRequiresCue(t *testing.T) {
 	noCue := "blob value " + val + " end"
 	if got := Secrets(noCue); got != noCue {
 		t.Fatalf("40-char value without AWS cue must survive, got %q", got)
+	}
+}
+
+// TestApiKeyRedactionRequiresCredentialShape pins BOTH halves of the ApiKey
+// rule split: the Authorization-header form masks any credential shape, the
+// bare form only fires on something that is unmistakably a base64 credential,
+// and prose is left completely alone. The original single rule
+// (`(?i)(apikey\s+)[A-Za-z0-9+/=]{8,}`) redacted the prose cases too, which is
+// not a safe failure — it makes a clean finding read as if it leaked a secret.
+func TestApiKeyRedactionRequiresCredentialShape(t *testing.T) {
+	redacted := []struct{ name, in, gone string }{
+		{"authorization header, short credential",
+			"Authorization: ApiKey VnVhQ2ZHY0JDZGJrUW0=", "VnVhQ2ZHY0JDZGJrUW0="},
+		{"authorization header, lowercase scheme",
+			"authorization: apikey VnVhQ2ZHY0JDZGJrUW0=", "VnVhQ2ZHY0JDZGJrUW0="},
+		{"quoted YAML header value",
+			`headers: {Authorization: "ApiKey VnVhQ2ZHY0JDZGJrUW0="}`, "VnVhQ2ZHY0JDZGJrUW0="},
+		{"bare ApiKey with a real ES-sized base64 credential",
+			"curl -H 'ApiKey ZFpUZW04SUJKSTZ4cVAwWVBXcXo6ekJTSHhCUlJTWkc0T29UMGJn'",
+			"ZFpUZW04SUJKSTZ4cVAwWVBXcXo6ekJTSHhCUlJTWkc0T29UMGJn"},
+	}
+	for _, tc := range redacted {
+		t.Run(tc.name, func(t *testing.T) {
+			out := Secrets(tc.in)
+			if strings.Contains(out, tc.gone) {
+				t.Fatalf("credential survived redaction: %q -> %q", tc.in, out)
+			}
+			if !strings.Contains(out, "[REDACTED") {
+				t.Fatalf("expected a redaction marker, got %q", out)
+			}
+		})
+	}
+
+	// Prose: the two strings the reviewer reproduced, plus neighbours.
+	for _, s := range []string{
+		"apikey rotation policy",
+		"see the ApiKey documentation page",
+		"APIKEY provisioning happens at bootstrap",
+		"apikey lifecycle",
+	} {
+		if got := Secrets(s); got != s {
+			t.Errorf("prose was over-redacted:\n  in:  %q\n  out: %q", s, got)
+		}
 	}
 }

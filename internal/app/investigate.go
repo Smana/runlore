@@ -23,6 +23,7 @@ import (
 	"github.com/Smana/runlore/internal/httpx"
 	"github.com/Smana/runlore/internal/investigate"
 	"github.com/Smana/runlore/internal/logs"
+	"github.com/Smana/runlore/internal/logs/elasticsearch"
 	"github.com/Smana/runlore/internal/logs/loki"
 	"github.com/Smana/runlore/internal/logs/victorialogs"
 	"github.com/Smana/runlore/internal/mcp"
@@ -164,6 +165,10 @@ func BuildModelAndTools(ctx context.Context, cfg *config.Config, gp providers.Gi
 		case config.LogsProviderLoki:
 			lg = loki.NewWithAuth(cfg.Logs.URL, cfg.Logs.TokenEnv, cfg.Logs.Headers).WithLevelField(lf.LevelField)
 			dialect = investigate.DialectLogQL
+		case config.LogsProviderElasticsearch, config.LogsProviderOpenSearch:
+			lg = elasticsearch.NewWithAuth(cfg.Logs.URL, cfg.Logs.Index, cfg.Logs.TokenEnv, cfg.Logs.Headers).
+				WithLevelField(lf.LevelField).WithTimestampField(lf.TimestampField).WithMessageField(lf.MessageField)
+			dialect = investigate.DialectElastic
 		default: // victorialogs — the shipped default
 			lg = victorialogs.NewWithAuth(cfg.Logs.URL, cfg.Logs.TokenEnv, cfg.Logs.Headers).WithLevelField(lf.LevelField)
 		}

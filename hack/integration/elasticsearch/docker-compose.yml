@@ -1,0 +1,64 @@
+# Local verification recipe for the `elasticsearch`/`opensearch` logs providers
+# (see website/content/docs/integrations/elasticsearch.md and opensearch.md).
+# Starts a single-node Elasticsearch AND a single-node OpenSearch, both with
+# security disabled (plain HTTP) — fine for a throwaway local test cluster;
+# RunLore's client always verifies TLS in a real deployment (see the docs
+# page), this recipe simply doesn't use TLS at all.
+#
+# HOST PREREQUISITE — on Linux, BOTH images refuse to start unless the kernel's
+# mmap limit is raised; this is by far the most common "it just exits" report:
+#
+#   sudo sysctl -w vm.max_map_count=262144        # this boot only
+#   echo 'vm.max_map_count=262144' | sudo tee /etc/sysctl.d/99-opensearch.conf
+#
+# The failure is a bootstrap check in the container log ("max virtual memory
+# areas vm.max_map_count [65530] is too low"), not a compose error, so `docker
+# compose ps` just shows the container restarting.
+#
+# The image tags below are the versions this recipe was actually verified
+# against (see README.md), not floating latest.
+#
+# Usage: see README.md in this directory.
+services:
+  elasticsearch:
+    image: docker.elastic.co/elasticsearch/elasticsearch:8.15.0
+    environment:
+      discovery.type: single-node
+      xpack.security.enabled: "false"
+      xpack.security.http.ssl.enabled: "false"
+      ES_JAVA_OPTS: "-Xms512m -Xmx512m"
+    ports:
+      - "9200:9200"
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:9200/_cluster/health || exit 1"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+
+  opensearch:
+    image: opensearchproject/opensearch:2.17.0
+    environment:
+      discovery.type: single-node
+      # DISABLE_SECURITY_PLUGIN + DISABLE_INSTALL_DEMO_CONFIG is the pair the
+      # OpenSearch image documents for a plain-HTTP dev node, and the pair this
+      # recipe was verified with. `plugins.security.disabled` alone is NOT
+      # enough: the entrypoint still runs install_demo_configuration.sh on every
+      # start, which generates demo TLS certs and (on 2.12+) fails the container
+      # outright when no admin password is supplied. Disabling the demo config
+      # is what makes OPENSEARCH_INITIAL_ADMIN_PASSWORD unnecessary here — the
+      # comment this replaced claimed the password was required on 2.11.1, which
+      # was simply wrong (that requirement landed in 2.12).
+      DISABLE_SECURITY_PLUGIN: "true"
+      DISABLE_INSTALL_DEMO_CONFIG: "true"
+      OPENSEARCH_JAVA_OPTS: "-Xms512m -Xmx512m"
+    ports:
+      - "9201:9200"
+    ulimits:
+      memlock:
+        soft: -1
+        hard: -1
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:9200/_cluster/health || exit 1"]
+      interval: 5s
+      timeout: 5s
+      retries: 30

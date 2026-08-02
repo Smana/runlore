@@ -12,7 +12,6 @@ import (
 
 	"gopkg.in/yaml.v3"
 
-	"github.com/Smana/runlore/internal/logs"
 	"github.com/Smana/runlore/internal/notify"
 	_ "github.com/Smana/runlore/internal/notify/templated" // self-registers the "templated" notifier
 	_ "github.com/Smana/runlore/internal/notify/webhook"   // self-registers the "webhook" notifier
@@ -74,10 +73,17 @@ func TestIntegrationPagesMatchRegistries(t *testing.T) {
 
 	pages := loadIntegrationPages(t, dir)
 
+	// Read the ids out of detect.go itself rather than restating them here; see
+	// logsProviderIDs for why a hand-written copy is the bug this guard is for.
+	logsIDs, err := logsProviderIDs(root)
+	if err != nil {
+		t.Fatalf("resolve logs provider ids: %v", err)
+	}
+
 	registries := map[string]reflectedRegistry{
 		"source":   {source: "source.Registered()", ids: idSet(sourceNames())},
 		"notifier": {source: "notify.Registered()", ids: idSet(notifierNames())},
-		"logs":     {source: "internal/logs/detect.go provider constants", ids: idSet([]string{logs.ProviderVictoriaLogs, logs.ProviderLoki})},
+		"logs":     {source: "internal/logs/detect.go provider constants", ids: idSet(logsIDs)},
 	}
 
 	// Direction 1: every page claiming a reflected kind must resolve to a

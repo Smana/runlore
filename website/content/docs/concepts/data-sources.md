@@ -13,7 +13,7 @@ assumed).
 |---|---|---|---|---|
 | GitOps "what changed" | `what_changed`, `gitops_*` | `GitOpsProvider` | Flux, ArgoCD | `gitops.engine` |
 | Metrics | `query_metrics`, `query_metrics_range` | `MetricsProvider` | VictoriaMetrics, Prometheus (PromQL) | `metrics.url` |
-| Logs | `query_logs`, `logs_error_summary`, `discover_log_fields` | `LogsProvider` | VictoriaLogs (LogsQL) · Grafana Loki (LogQL) | `logs.url` (+ optional `logs.provider`) |
+| Logs | `query_logs`, `logs_error_summary`, `discover_log_fields` | `LogsProvider` | VictoriaLogs (LogsQL) · Grafana Loki (LogQL) · Elasticsearch/OpenSearch (`_search` DSL) | `logs.url` (+ optional `logs.provider`) |
 | Network flows | `network_drops` | `NetworkProvider` | Cilium Hubble · AWS VPC Flow Logs · GCP Firewall Logs | `network.provider` |
 | Cloud control plane | `cloud_*` | `CloudProvider` | AWS (CloudTrail + EC2/ASG/EKS) | `cloud.provider` |
 | Kubernetes | `pod_status`, `kube_events`, `controller_logs`, `pod_logs` | `KubeReader`/`LogReader` | client-go | (in-cluster) |
@@ -86,14 +86,17 @@ CNI-agnostic eBPF (Microsoft **Retina** exposes a Hubble-compatible flow API, so
 
 ## Logs backends
 
-The logs signal is pluggable behind `LogsProvider`: **VictoriaLogs** (LogsQL) and **Grafana
-Loki** (LogQL). All three log tools — `query_logs`, `logs_error_summary`,
-`discover_log_fields` — work on both; the model is told the right query language automatically.
+The logs signal is pluggable behind `LogsProvider`: **VictoriaLogs** (LogsQL), **Grafana
+Loki** (LogQL), and **Elasticsearch/OpenSearch** (the classic `_search` DSL, identical on both
+distributions). All three log tools — `query_logs`, `logs_error_summary`,
+`discover_log_fields` — work on all of them; the model is told the right query language
+automatically.
 
 The provider is **auto-detected** at startup (Loki answers `/loki/api/v1/status/buildinfo`;
-VictoriaLogs does not) and **fails safe to VictoriaLogs**, so existing configs are untouched.
-Pin it with `provider:` when the backend is unreachable at startup or sits behind a proxy that
-confuses the probe.
+Elasticsearch/OpenSearch answer `GET /` with a version document, `distribution: opensearch`
+identifying OpenSearch specifically; VictoriaLogs answers neither) and **fails safe to
+VictoriaLogs**, so existing configs are untouched. Pin it with `provider:` when the backend is
+unreachable at startup or sits behind a proxy that confuses the probe.
 
 ### `victorialogs` — VictoriaLogs (default)
 
@@ -116,15 +119,29 @@ logs:
 
 **Wire it:** [Grafana Loki]({{< relref "/docs/integrations/loki.md" >}})
 
+### `elasticsearch` / `opensearch` — Elasticsearch and OpenSearch
+```yaml
+logs:
+  url: https://elasticsearch.observability.svc:9200
+  provider: elasticsearch      # or opensearch — optional, auto-detected when omitted
+  index: logs-*                # index pattern
+  # token_env: ES_TOKEN                 # bearer / API key, by env-var indirection
+```
+Both distributions speak the identical classic `_search` DSL, so one client serves both.
+
+**Wire it:** [Elasticsearch]({{< relref "/docs/integrations/elasticsearch.md" >}}) · [OpenSearch]({{< relref "/docs/integrations/opensearch.md" >}})
+
 Field-convention defaults differ per provider; override any of them via `logs.fields`:
 
-| `logs.fields` key | VictoriaLogs default | Loki default |
-|---|---|---|
-| `container_field` | `kubernetes.container_name` | `container` |
-| `namespace_field` | `kubernetes.pod_namespace` | `namespace` |
-| `pod_field` | `kubernetes.pod_name` | `pod` |
-| `level_field` | `log.level` | `detected_level` |
-| `unpack_pipe` | `unpack_json` | *(none — `detected_level` is structured metadata)* |
+| `logs.fields` key | VictoriaLogs default | Loki default | Elasticsearch/OpenSearch default (ECS) |
+|---|---|---|---|
+| `container_field` | `kubernetes.container_name` | `container` | `kubernetes.container.name` |
+| `namespace_field` | `kubernetes.pod_namespace` | `namespace` | `kubernetes.namespace` |
+| `pod_field` | `kubernetes.pod_name` | `pod` | `kubernetes.pod.name` |
+| `level_field` | `log.level` | `detected_level` | `log.level` |
+| `unpack_pipe` | `unpack_json` | *(none — `detected_level` is structured metadata)* | *(not applicable)* |
+| `timestamp_field` | *(not applicable)* | *(not applicable)* | `@timestamp` |
+| `message_field` | *(not applicable)* | *(not applicable)* | `message` |
 
 > Loki parity notes: `logs_error_summary`'s histogram uses a LogQL metric query
 > (`sum by (detected_level) (count_over_time(…))`); its *top messages* are aggregated
@@ -134,6 +151,13 @@ Field-convention defaults differ per provider; override any of them via `logs.fi
 > labels only). On Loki 2.x there is no `detected_level` — set
 > `logs: { fields: { level_field: level, unpack_pipe: logfmt } }` (or `json`) to match your
 > collector.
+
+> Elasticsearch/OpenSearch parity notes: `logs_error_summary`'s top messages fall back to
+> **client-side aggregation** when `message_field` is a `text`-only field — the ECS default, since
+> `message` ships with no `keyword` sub-field. `discover_log_fields` uses `_field_caps`, a mapping
+> introspection endpoint with no query/window scope and no per-field hit count — broader but less
+> precise than VictoriaLogs'/Loki's query-scoped discovery. See the integration pages linked above
+> for the full detail.
 
 ## Custom webhooks — any vendor, no code
 
