@@ -497,16 +497,47 @@ func wireRecall(r *investigate.Recall, metrics *telemetry.Metrics, ledger *outco
 	}
 }
 
-// BuildInvestigator returns the LLM ReAct investigator when a model is configured,
-// otherwise the read-only LogInvestigator. It also returns the catalog (nil when
-// no model is configured or no catalog is wired).
-func BuildInvestigator(ctx context.Context, cfg *config.Config, gp providers.GitOpsProvider, approvals *action.Approvals, auto *action.Auto, metrics *telemetry.Metrics, ledger *outcome.Ledger, log *slog.Logger) (investigate.Investigator, *catalog.Catalog, error) {
+// Deps are the investigation dependencies that must be built ONCE per process and
+// shared by every consumer.
+//
+// The catalog is why this type exists. When catalog.git is configured, building one
+// starts a background Syncer goroutine that git-clones and pulls into
+// catalog.dir — and on a failed clone it os.RemoveAll's that directory. serve used
+// to build the catalog twice (once for the investigator, once for the
+// reinvestigator), so two syncers ran concurrently against the SAME path, either
+// able to delete the checkout from under the other mid-pull. Live pods showed both:
+// two "catalog git-sync enabled" lines and two "catalog synced" 4ms apart.
+//
+// It also meant the reinvestigator searched a DIFFERENT index than the
+// investigator, so a freshly curated entry was visible to one and not the other.
+type Deps struct {
+	Model   providers.ModelProvider
+	Tools   []investigate.Tool
+	Recall  *investigate.Recall // nil when instant recall is disabled
+	Catalog *catalog.Catalog    // nil when no catalog is configured
+}
+
+// BuildDeps assembles the shared dependencies, or nil when no model is configured
+// (in which case there is nothing to investigate WITH, and callers fall back to
+// their read-only paths). Call it once; pass the result everywhere.
+func BuildDeps(ctx context.Context, cfg *config.Config, gp providers.GitOpsProvider, metrics *telemetry.Metrics, ledger *outcome.Ledger, log *slog.Logger) *Deps {
 	if !ModelConfigured(cfg) {
-		log.Info("no model configured; using log-only investigator")
-		return investigate.LogInvestigator{Log: log}, nil, nil
+		return nil
 	}
 	model, tools, recall, cat := BuildModelAndTools(ctx, cfg, gp, metrics, log)
 	wireRecall(recall, metrics, ledger, log)
+	return &Deps{Model: model, Tools: tools, Recall: recall, Catalog: cat}
+}
+
+// BuildInvestigator returns the LLM ReAct investigator when a model is configured,
+// otherwise the read-only LogInvestigator. It also returns the catalog (nil when
+// no model is configured or no catalog is wired).
+func BuildInvestigator(ctx context.Context, cfg *config.Config, deps *Deps, approvals *action.Approvals, auto *action.Auto, metrics *telemetry.Metrics, ledger *outcome.Ledger, log *slog.Logger) (investigate.Investigator, *catalog.Catalog, error) {
+	if deps == nil {
+		log.Info("no model configured; using log-only investigator")
+		return investigate.LogInvestigator{Log: log}, nil, nil
+	}
+	model, tools, recall, cat := deps.Model, deps.Tools, deps.Recall, deps.Catalog
 	log.Info("using LLM investigator", "provider", ModelProvider(cfg), "model", cfg.Model.Model, "tools", len(tools))
 	notifier, err := BuildNotifier(cfg, log)
 	if err != nil {

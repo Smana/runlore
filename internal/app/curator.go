@@ -12,7 +12,6 @@ import (
 	"github.com/Smana/runlore/internal/config"
 	"github.com/Smana/runlore/internal/curator"
 	"github.com/Smana/runlore/internal/investigate"
-	"github.com/Smana/runlore/internal/outcome"
 	"github.com/Smana/runlore/internal/providers"
 	"github.com/Smana/runlore/internal/telemetry"
 
@@ -115,16 +114,21 @@ func forgeProviderName(cfg *config.Config) string {
 // BuildReinvestigator returns a poller that re-runs KB issues labelled
 // "reinvestigate" and posts the fresh findings back, or nil when the forge isn't
 // configured. RunLore polls the forge (outbound) — it has no inbound webhooks.
-func BuildReinvestigator(ctx context.Context, cfg *config.Config, gp providers.GitOpsProvider, metrics *telemetry.Metrics, ledger *outcome.Ledger, log *slog.Logger) *investigate.Reinvestigator {
+func BuildReinvestigator(cfg *config.Config, deps *Deps, metrics *telemetry.Metrics, log *slog.Logger) *investigate.Reinvestigator {
 	client := buildForge(cfg, log)
 	if client == nil {
 		return nil
 	}
-	model, tools, recall, _ := BuildModelAndTools(ctx, cfg, gp, metrics, log)
-	// Same wiring as the investigator, including the outcome ledger — a
-	// re-investigation must not fire recall on an entry a normal investigation
-	// would have rejected on its outcome history.
-	wireRecall(recall, metrics, ledger, log)
+	if deps == nil {
+		// No model: there is nothing to re-investigate WITH. Previously this built a
+		// second model/catalog anyway and produced an investigator that could not run.
+		log.Info("reinvestigate poller disabled: no model configured")
+		return nil
+	}
+	// The SAME model, tools, recall and catalog the investigator uses — not a second
+	// copy. See Deps: a second catalog means a second git-sync goroutine on the same
+	// directory, and an index that disagrees with the investigator's.
+	model, tools, recall := deps.Model, deps.Tools, deps.Recall
 	run := func(ctx context.Context, req investigate.Request) (providers.Investigation, error) {
 		var res providers.Investigation
 		var got bool

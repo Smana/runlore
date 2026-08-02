@@ -118,3 +118,80 @@ func TestWireRecallIsTheOnlyPlaceRecallDepsAreSet(t *testing.T) {
 		t.Fatal("no source file mentioning Recall was parsed — this guard is inert")
 	}
 }
+
+// TestOnlyKnownCallersBuildACatalog guards the shared-catalog invariant.
+//
+// Building a catalog is not pure construction: with catalog.git configured it starts
+// a background Syncer goroutine that clones and pulls into catalog.dir, and
+// os.RemoveAll's that directory when a clone fails. Two catalogs in one process mean
+// two syncers racing on one checkout — either able to delete it under the other —
+// plus two indexes that can disagree about whether a freshly curated entry exists.
+//
+// serve did exactly that: BuildInvestigator and BuildReinvestigator each called
+// BuildModelAndTools, which builds a catalog. Live pods logged two
+// "catalog git-sync enabled" lines and two "catalog synced" 4ms apart.
+//
+// The guard is on BuildModelAndTools, not BuildCatalog: the regression re-appears by
+// calling the WRAPPER twice, which an earlier version of this test missed entirely
+// (the mutation reintroducing the bug passed). The allowlist is explicit so a fourth
+// caller has to justify itself here rather than quietly doubling the syncers.
+func TestOnlyKnownCallersBuildACatalog(t *testing.T) {
+	allowed := map[string]string{
+		"BuildDeps":      "the one serve-path builder; every serve consumer shares its result",
+		"RunEvalLive":    "`lore eval`, a separate one-shot process",
+		"RunInvestigate": "`lore investigate`, a separate one-shot process",
+	}
+
+	files, err := filepath.Glob(filepath.Join(".", "*.go"))
+	if err != nil {
+		t.Fatalf("glob: %v", err)
+	}
+	fset := token.NewFileSet()
+	found := 0
+
+	for _, path := range files {
+		if strings.HasSuffix(path, "_test.go") {
+			continue
+		}
+		src, err := os.ReadFile(path) //nolint:gosec // test-owned path in this package
+		if err != nil {
+			t.Fatalf("read %s: %v", path, err)
+		}
+		if !strings.Contains(string(src), "BuildModelAndTools") &&
+			!strings.Contains(string(src), "BuildCatalog") {
+			continue
+		}
+		f, err := parser.ParseFile(fset, path, src, 0)
+		if err != nil {
+			t.Fatalf("parse %s: %v", path, err)
+		}
+		for _, decl := range f.Decls {
+			fn, ok := decl.(*ast.FuncDecl)
+			if !ok || fn.Body == nil || fn.Name.Name == "BuildModelAndTools" {
+				continue
+			}
+			ast.Inspect(fn.Body, func(n ast.Node) bool {
+				call, ok := n.(*ast.CallExpr)
+				if !ok {
+					return true
+				}
+				id, ok := call.Fun.(*ast.Ident)
+				if !ok || (id.Name != "BuildModelAndTools" && id.Name != "BuildCatalog") {
+					return true
+				}
+				found++
+				if _, ok := allowed[fn.Name.Name]; !ok {
+					t.Errorf("%s: %s calls %s, which builds a catalog — share the one from "+
+						"BuildDeps instead, or a second git-sync goroutine races the first on "+
+						"the same on-disk checkout",
+						filepath.Base(path), fn.Name.Name, id.Name)
+				}
+				return true
+			})
+		}
+	}
+
+	if found == 0 {
+		t.Fatal("no catalog-building call found — it was renamed and this guard is inert")
+	}
+}
