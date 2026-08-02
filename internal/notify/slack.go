@@ -207,21 +207,25 @@ const (
 )
 
 // slackMessage builds the Slack payload: a verdict-first Block Kit summary
-// (header → verdict → metadata fields → why → next steps → ruled-out/data-gaps →
-// recurrence → confidence footer → approval buttons) followed by an optional
-// detail section (full evidence + the complete open-questions / data-gaps /
-// ruled-out lists). This is the single-message composition used by the webhook
-// path; threading is a later concern. The "text" field is fallbackText — the
-// one-line notification/accessibility summary.
+// (header → verdict, alone → confidence, shown once → seen-before/recall
+// context → matched-known-runbook → why, generous — it's the answer → suggested
+// next steps → metadata fields, now BELOW the answer/action → footer:
+// provenance only — verified, model calls, cost, the one view-entry link →
+// approval buttons) followed by an optional detail section (full evidence + the
+// complete open-questions / ruled-out / data-gap lists — ruled-out and
+// data-gaps render ONLY here, never in the summary, so a phone reader hits the
+// answer before any "Show more"). This is the single-message composition used
+// by the webhook path; threading is a later concern. The "text" field is
+// fallbackText — the one-line notification/accessibility summary.
 //
 // Escape invariant: the fallback is no longer escapeMrkdwn(Format(inv)) — it is
 // fallbackText, which escapes its one untrusted field (the model title) itself.
-// Every untrusted string interpolated into an mrkdwn block (title in the verdict
-// section, alert metadata + ChangeRef in the fields, evidence, ruled-out /
-// data-gap items, PrevCuratedURL inside the recurrence link) is passed through
-// escapeMrkdwn at the point of use. Headers are plain_text (never escaped) and
-// slackDate emits a raw <!date^…> token that is blocks-only — it must never enter
-// the escaped fallback text.
+// Every untrusted string interpolated into an mrkdwn block (the verdict/why
+// sections, alert metadata + ChangeRef in the fields, evidence, ruled-out
+// items, PrevCuratedURL inside the entry link) is passed through escapeMrkdwn
+// at the point of use. Headers are plain_text (never escaped) and slackDate
+// emits a raw <!date^…> token that is blocks-only — it must never enter the
+// escaped fallback text.
 func slackMessage(inv providers.Investigation) map[string]any {
 	return slackMessageWith(inv, false)
 }
@@ -339,14 +343,22 @@ var mrkdwnEscaper = strings.NewReplacer("&", "&amp;", "<", "&lt;", ">", "&gt;")
 // escape-first approach of the Matrix notifier's mrkdwnToHTML.
 func escapeMrkdwn(s string) string { return mrkdwnEscaper.Replace(s) }
 
-// summaryBlocks renders the triage summary as Block Kit, top-down as an on-call
-// reads it: what/where (header) → verdict → key facts (fields) → seen-before KB
-// recall (when present) → matched-known-runbook (when a full loop reused a known
-// entry) → why → what to do → honest limits → recurrence → confidence footer →
-// approval buttons. The full
-// analysis (every hypothesis with all evidence, the complete open-questions /
-// data-gaps / ruled-out lists) lives in detailBlocks; slackMessage appends the
-// two for the single-message webhook path.
+// summaryBlocks renders the triage summary as Block Kit, optimized for a
+// woken-up on-call reading on a phone: everything actionable sits above the
+// first "Show more" collapse. Top-down: what/where (header) → verdict, alone →
+// the delivered confidence, shown exactly once → seen-before KB recall (when
+// present) → matched-known-runbook (when a full loop reused a known entry) →
+// why, rendered generously — it's the answer the reader came for → suggested
+// next steps → trigger-time metadata (resource/started/what-changed/
+// recurrence) — orienting detail, so it drops BELOW the answer and the
+// action, not above it → footer: provenance only (verified, model calls,
+// cost, the one "view entry" link) → approval buttons. Ruled-out and
+// data-gaps are deliberately absent from the summary — both are already
+// carried in full in detailBlocks' thread reply, so repeating them here would
+// only cost fold space the answer needs. The full analysis (every hypothesis
+// with all evidence, the complete open-questions / data-gaps / ruled-out
+// lists) lives in detailBlocks; slackMessage appends the two for the
+// single-message webhook path.
 func summaryBlocks(inv providers.Investigation) []map[string]any {
 	title := displayTitle(inv.Title)
 	emoji, level, pct := confidenceBadge(inv)
@@ -378,29 +390,37 @@ func summaryBlocks(inv providers.Investigation) []map[string]any {
 		{"type": "header", "text": map[string]any{"type": "plain_text", "text": truncate(head, 150), "emoji": true}},
 	}
 
-	// 2. Verdict owns the second slot — the headline actionability call. When the
-	// model omitted a verdict (old / recall investigations) fall back to the
-	// confidence context line so the layout stays complete and readable.
+	// 2. Verdict owns the second slot — the headline actionability call, ALONE.
+	// The header above already shows the full title (verbatim, or the alert
+	// name + scope) — restating it here duplicated up to its full word count
+	// before any NEW information reached a woken-up phone screen. Absent when
+	// the model omitted a verdict (old / recall investigations); confidence
+	// (2b, below) still renders either way, so the layout stays complete.
 	if vEmoji, label := verdictBadge(inv.Verdict); label != "" {
 		blocks = append(blocks, map[string]any{"type": "section", "text": map[string]any{"type": "mrkdwn",
-			"text": truncate(fmt.Sprintf("%s *%s* — %s", vEmoji, label, escapeMrkdwn(title)), 2900)}})
-	} else {
-		blocks = append(blocks, map[string]any{"type": "context", "elements": []map[string]any{
-			{"type": "mrkdwn", "text": fmt.Sprintf("%s *%s confidence* · %d%%  ·  🤖 RunLore SRE agent", emoji, level, pct)}}})
+			"text": fmt.Sprintf("%s *%s*", vEmoji, label)}})
 	}
 
-	// 3. Metadata fields — the trigger-time facts an on-call scans first.
-	if fields := metadataFields(inv); len(fields) > 0 {
-		blocks = append(blocks, map[string]any{"type": "section", "fields": fields})
+	// 2b. Confidence — shown exactly ONCE, here in the header area, whether or
+	// not a verdict rendered above. It never repeats in the footer (provenance
+	// only, block 8) and the agent identity isn't restated here either — the
+	// Slack app's own name/icon already says who posted this. A recalled
+	// investigation's own top-hypothesis confidence can legitimately differ
+	// from this DELIVERED number (see confidenceBadge); when it does,
+	// recallConfidenceNote spells out both so the reader never has to
+	// reconcile two bare, seemingly-contradictory percentages alone.
+	confText := fmt.Sprintf("%s *%s confidence* · %d%%", emoji, level, pct)
+	if note := recallConfidenceNote(inv, pct); note != "" {
+		confText += "\n_" + note + "_"
 	}
+	blocks = append(blocks, map[string]any{"type": "context", "elements": []map[string]any{
+		{"type": "mrkdwn", "text": confText}}})
 
-	// 3b. Prior knowledge — on a recurring incident with a merged KB entry, quote
+	// 3. Prior knowledge — on a recurring incident with a merged KB entry, quote
 	// what the KB already says (cause + human-reviewed resolution + track record)
 	// before the current analysis: history frames how the on-call reads what
 	// follows, with zero clicks. The entry excerpts are untrusted (model prose,
-	// human edits) and escaped; when this block renders, the legacy Recurrence
-	// field and the previously-investigated context pointer are suppressed —
-	// count, date and link all live here.
+	// human edits) and escaped.
 	if p := inv.Prior; p != nil {
 		var s strings.Builder
 		// Two shapes share this block. A RECALL short-circuited the loop: without an
@@ -420,48 +440,35 @@ func summaryBlocks(inv providers.Investigation) []map[string]any {
 		if p.Resolution != "" {
 			fmt.Fprintf(&s, "\n*%s:* %s", resLabel, escapeMrkdwn(p.Resolution))
 		}
-		foot := make([]string, 0, 2)
-		switch {
-		case inv.PrevCuratedURL != "":
-			label := "previous entry"
-			if inv.Recalled {
-				label = "knowledge-base entry"
-			}
-			foot = append(foot, fmt.Sprintf("<%s|%s>", escapeMrkdwn(inv.PrevCuratedURL), label))
-		case inv.Recalled && p.EntryPath != "":
-			foot = append(foot, fmt.Sprintf("`%s`", escapeMrkdwn(p.EntryPath)))
-		}
+		// The entry itself (filename or link) is deliberately NOT inlined here —
+		// it is the single most-clickable thing on the card, and a section this
+		// long is exactly what Slack's client collapses/truncates mid-word
+		// behind "Show more". It lives once, in the footer (entryLink), on its
+		// own short line that is never truncated.
 		if p.Recalls > 0 {
-			foot = append(foot, fmt.Sprintf("resolve rate %d/%d", p.Resolved, p.Recalls))
-		}
-		if len(foot) > 0 {
-			fmt.Fprintf(&s, "\n%s", strings.Join(foot, " · "))
+			fmt.Fprintf(&s, "\nresolve rate %d/%d", p.Resolved, p.Recalls)
 		}
 		blocks = append(blocks, map[string]any{"type": "section", "text": map[string]any{"type": "mrkdwn", "text": truncate(s.String(), 2900)}})
 	}
 
-	// 3c. Existing-KB match — a full investigation whose kb_search matched a known
+	// 4. Existing-KB match — a full investigation whose kb_search matched a known
 	// runbook/entry at clear-match strength. Make it VISIBLE that RunLore already had
 	// knowledge for this incident: the live gap was a 95%-confidence kb_search hit that
 	// the on-call could not see. Suppressed when Prior is set — the recurrence block
 	// above already says "seen before" with richer context, so don't double-render.
-	// Title/path are untrusted (entry frontmatter) and escaped; a derived URL renders
-	// as a link, else the bare path shows inline as code.
+	// Title is untrusted (entry frontmatter) and escaped; path/URL are not inlined
+	// here — same reasoning as the Prior block above — entryLink surfaces the
+	// reference once, in the footer.
 	if mk := inv.MatchedKnowledge; mk != nil && inv.Prior == nil {
-		var s strings.Builder
-		fmt.Fprintf(&s, "📚 *Matches known runbook:* %s", escapeMrkdwn(mk.Title))
-		switch {
-		case mk.URL != "":
-			fmt.Fprintf(&s, " (<%s|%s>)", escapeMrkdwn(mk.URL), escapeMrkdwn(mk.Path))
-		case mk.Path != "":
-			fmt.Fprintf(&s, " (`%s`)", escapeMrkdwn(mk.Path))
-		}
-		s.WriteString(" — RunLore has prior knowledge for this incident.")
-		blocks = append(blocks, map[string]any{"type": "section", "text": map[string]any{"type": "mrkdwn", "text": truncate(s.String(), 2900)}})
+		text := fmt.Sprintf("📚 *Matches known runbook:* %s — RunLore has prior knowledge for this incident.",
+			escapeMrkdwn(mk.Title))
+		blocks = append(blocks, map[string]any{"type": "section", "text": map[string]any{"type": "mrkdwn", "text": truncate(text, 2900)}})
 	}
 
-	// 4. Top root cause: the single most-likely why, with up to three evidence
-	// bullets. Deeper hypotheses and full evidence move to the detail section.
+	// 5. Top root cause: the single most-likely why — the answer the reader came
+	// for, so it gets the full 2900-char block budget like every other section
+	// (nothing here is capped tighter), with up to three evidence bullets.
+	// Deeper hypotheses and full evidence move to the detail section.
 	if len(inv.RootCauses) > 0 {
 		rc := inv.RootCauses[0]
 		var s strings.Builder
@@ -475,12 +482,16 @@ func summaryBlocks(inv providers.Investigation) []map[string]any {
 		}
 		blocks = append(blocks, map[string]any{"type": "section", "text": map[string]any{"type": "mrkdwn", "text": truncate(s.String(), 2900)}})
 		if n := len(inv.RootCauses) - 1; n > 0 {
+			word := "hypotheses"
+			if n == 1 {
+				word = "hypothesis"
+			}
 			blocks = append(blocks, map[string]any{"type": "context", "elements": []map[string]any{
-				{"type": "mrkdwn", "text": fmt.Sprintf("_…%d more hypotheses below_", n)}}})
+				{"type": "mrkdwn", "text": fmt.Sprintf("_…%d more %s below_", n, word)}}})
 		}
 	}
 
-	// 5. Suggested next steps — the resolution guide (per-root-cause suggestions +
+	// 6. Suggested next steps — the resolution guide (per-root-cause suggestions +
 	// policy actions, de-duplicated, reversibility-flagged), capped at three.
 	if steps := nextSteps(inv); len(steps) > 0 {
 		var s strings.Builder
@@ -497,56 +508,36 @@ func summaryBlocks(inv providers.Investigation) []map[string]any {
 			map[string]any{"type": "section", "text": map[string]any{"type": "mrkdwn", "text": truncate(s.String(), 2900)}})
 	}
 
-	// 6. Ruled out — honest limits, capped at three (the full list is in the detail
-	// section). Each item is untrusted and escaped.
-	if len(inv.RuledOut) > 0 {
-		var s strings.Builder
-		s.WriteString("❌ *Ruled out:*")
-		for i, r := range inv.RuledOut {
-			if i >= 3 {
-				fmt.Fprintf(&s, "\n• _…%d more_", len(inv.RuledOut)-i)
-				break
-			}
-			fmt.Fprintf(&s, "\n• %s", escapeMrkdwn(r))
-		}
-		blocks = append(blocks, map[string]any{"type": "section", "text": map[string]any{"type": "mrkdwn", "text": truncate(s.String(), 2900)}})
+	// 7. Metadata fields — trigger-time facts (resource, started, what-changed,
+	// recurrence counter). Orienting detail, not the thing to lead with, so it
+	// sits BELOW the answer (5) and the action (6) rather than above them.
+	if fields := metadataFields(inv); len(fields) > 0 {
+		blocks = append(blocks, map[string]any{"type": "section", "fields": fields})
 	}
 
-	// 7. Data gaps — signals we could not obtain, as a compact context line.
-	if len(inv.DataGaps) > 0 {
-		escaped := make([]string, len(inv.DataGaps))
-		for i, d := range inv.DataGaps {
-			escaped[i] = escapeMrkdwn(d)
-		}
-		blocks = append(blocks, map[string]any{"type": "context", "elements": []map[string]any{
-			{"type": "mrkdwn", "text": truncate("⚠️ Data gaps: "+strings.Join(escaped, " · "), 2900)}}})
-	}
-
-	// 8. Recurrence pointer to the previous investigation's conclusion. The link is
-	// formatter-constructed; escaping the URL inside it is what Slack's docs
-	// prescribe (a raw & / < / > would corrupt the link).
-	if inv.PrevCuratedURL != "" && inv.Prior == nil {
-		blocks = append(blocks, map[string]any{"type": "context", "elements": []map[string]any{
-			{"type": "mrkdwn", "text": fmt.Sprintf("🔁 Previously investigated — <%s|previous conclusion>", escapeMrkdwn(inv.PrevCuratedURL))}}})
-	}
-
-	// 9. Confidence footer — verdict owns the top, so confidence, verification, the
-	// agent tag, the KB link, and the usage one-liner all live at the bottom.
-	foot := []string{fmt.Sprintf("%s %s confidence · %d%%", emoji, level, pct)}
+	// 8. Footer — provenance only: verified, model calls/cost, and the single
+	// link to view the entry (this investigation's own curated entry, or — on
+	// a recall/seen-before card with nothing freshly curated — the prior/
+	// recalled/matched entry; see entryLink). Confidence and the agent identity
+	// are NOT repeated here: confidence already owns the header (2b), and the
+	// Slack app's own identity already says who posted this — showing either
+	// twice reads as the card disagreeing with itself, not reinforcing it.
+	var foot []string
 	if inv.Verified {
 		foot = append(foot, "✓ verified")
 	}
-	foot = append(foot, "🤖 RunLore SRE agent")
-	if inv.CuratedURL != "" {
-		foot = append(foot, fmt.Sprintf("📚 <%s|view entry>", escapeMrkdwn(inv.CuratedURL)))
+	if link := entryLink(inv); link != "" {
+		foot = append(foot, link)
 	}
 	if u := usageFooter(inv.Usage); u != "" {
 		foot = append(foot, u) // trusted scaffolding — digits/labels only, no mrkdwn meta
 	}
-	blocks = append(blocks, map[string]any{"type": "context", "elements": []map[string]any{
-		{"type": "mrkdwn", "text": truncate(strings.Join(foot, "  ·  "), 2900)}}})
+	if len(foot) > 0 {
+		blocks = append(blocks, map[string]any{"type": "context", "elements": []map[string]any{
+			{"type": "mrkdwn", "text": truncate(strings.Join(foot, "  ·  "), 2900)}}})
+	}
 
-	// 10. Interactive Approve/Reject for any action awaiting approval (rung-2).
+	// 9. Interactive Approve/Reject for any action awaiting approval (rung-2).
 	for _, a := range inv.Actions {
 		if a.ApprovalID == "" {
 			continue
@@ -601,7 +592,9 @@ func metadataFields(inv providers.Investigation) []map[string]any {
 		if ch := inv.RootCauses[0].ChangeRef; ch != "" {
 			add("What changed", truncate(escapeMrkdwn(ch), 200))
 		} else {
-			add("What changed", "none")
+			// "none" reads as a missing field on a woken-up phone screen; say what
+			// was actually established instead — no change was implicated.
+			add("What changed", "No Git change identified — likely infrastructure-induced")
 		}
 	}
 	if inv.Occurrences > 1 && inv.Prior == nil {
@@ -660,15 +653,23 @@ func appendListSection(blocks []map[string]any, header string, items []string) [
 	return append(blocks, map[string]any{"type": "section", "text": map[string]any{"type": "mrkdwn", "text": truncate(s.String(), 2900)}})
 }
 
-// confidenceBadge returns a visual confidence indicator. The headline confidence
-// is the max of the overall score and the top root cause's — models frequently
-// leave the top-level field at 0 while ranking a high-confidence root cause, and
-// showing "0%" next to an 80% root cause reads as broken.
+// confidenceBadge returns the DELIVERED headline confidence. For most
+// investigations this is the max of the overall score and the top root
+// cause's — models frequently leave the top-level field at 0 while ranking a
+// high-confidence root cause, and showing "0%" next to an 80% root cause reads
+// as broken. A RECALLED investigation is the one exception: inv.Confidence
+// there is a deliberately computed, outcome-weighted number (the recall
+// pipeline's own match confidence, decayed by the entry's track record) and
+// must render AS-IS — maxing it against the top hypothesis's raw match
+// confidence would silently hide a bad track record behind the larger number.
+// See recallConfidenceNote for how the two are disclosed when they diverge.
 func confidenceBadge(inv providers.Investigation) (emoji, level string, pct int) {
 	c := inv.Confidence
-	for _, rc := range inv.RootCauses {
-		if rc.Confidence > c {
-			c = rc.Confidence
+	if !inv.Recalled {
+		for _, rc := range inv.RootCauses {
+			if rc.Confidence > c {
+				c = rc.Confidence
+			}
 		}
 	}
 	pct = int(c*100 + 0.5)
@@ -680,6 +681,59 @@ func confidenceBadge(inv providers.Investigation) (emoji, level string, pct int)
 	default:
 		return "🔴", "Low", pct
 	}
+}
+
+// recallConfidenceNote discloses a recalled entry's own match confidence
+// (the top hypothesis's, before outcome/track-record weighting) when it
+// differs, post-rounding, from the delivered confidence confidenceBadge
+// headlines — so the two never sit on the card as two bare percentages that
+// look like a contradiction. Returns "" when there is nothing to disambiguate
+// (not a recall, no root cause, or the two already round to the same number).
+func recallConfidenceNote(inv providers.Investigation, deliveredPct int) string {
+	if !inv.Recalled || len(inv.RootCauses) == 0 {
+		return ""
+	}
+	ownPct := int(inv.RootCauses[0].Confidence*100 + 0.5)
+	if ownPct == deliveredPct {
+		return ""
+	}
+	return fmt.Sprintf("entry's own confidence %d%%, adjusted to %d%% by its track record", ownPct, deliveredPct)
+}
+
+// entryLink resolves the single "view entry" reference for the footer: this
+// investigation's own curated entry when it produced one, else the
+// previous/recalled entry's link, else — only when no URL is derivable — the
+// bare catalog path as inline code. Centralising it here is what fixes a card
+// that inlined a truncated entry filename mid-sentence: a KB entry path is the
+// single most-clickable thing on the card, and Slack's client can collapse or
+// truncate a long paragraph mid-word — so the reference belongs on its own
+// short line, exactly once, not woven into prose. "" when there is nothing to
+// link (a fresh, uncurated investigation with no recall/match context).
+func entryLink(inv providers.Investigation) string {
+	url := inv.CuratedURL
+	if url == "" {
+		url = inv.PrevCuratedURL
+	}
+	if url == "" && inv.MatchedKnowledge != nil {
+		url = inv.MatchedKnowledge.URL
+	}
+	if url != "" {
+		return fmt.Sprintf("📚 <%s|view entry>", escapeMrkdwn(url))
+	}
+	path := ""
+	if inv.Prior != nil {
+		path = inv.Prior.EntryPath
+	}
+	if path == "" {
+		path = inv.RecalledEntry
+	}
+	if path == "" && inv.MatchedKnowledge != nil {
+		path = inv.MatchedKnowledge.Path
+	}
+	if path == "" {
+		return ""
+	}
+	return fmt.Sprintf("📚 `%s`", escapeMrkdwn(path))
 }
 
 // nextSteps collects the actionable remediations (root-cause suggestions + policy

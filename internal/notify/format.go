@@ -29,7 +29,17 @@ func verdictBadge(v providers.Verdict) (emoji, label string) {
 }
 
 // Format renders an Investigation as a concise markdown-ish message used by all
-// notifiers.
+// notifiers (CLI, Matrix). Its ordering and de-duplication deliberately mirror
+// the Slack card (slack.go's summaryBlocks) — the two must never diverge in
+// what they claim: title → verdict, alone → confidence, shown exactly once
+// (+ recall disambiguation when a recalled entry's own confidence differs from
+// the delivered one) → seen-before/recall context → matched-known-runbook →
+// root causes (the "why", rendered in full — there is no thread to defer to
+// here) → honest limits (unresolved / ruled out / data gaps — kept, unlike the
+// Slack SUMMARY card: this single flat message has no thread for them to live
+// in instead) → suggested actions → trigger-time metadata (resource/alert
+// facts/started) — orienting detail, so it drops below the answer and the
+// action rather than leading with it → footer (verified / KB link / usage).
 //
 // Invariant: every literal this function emits (labels, separators, bullets)
 // avoids the three mrkdwn-meta chars & < >. The Slack fallback is
@@ -38,24 +48,20 @@ func verdictBadge(v providers.Verdict) (emoji, label string) {
 // *bold*; TestFormatScaffoldingHasNoMrkdwnMeta guards it.
 func Format(inv providers.Investigation) string {
 	var b strings.Builder
-	fmt.Fprintf(&b, "*Investigation* — confidence %.0f%%\n", inv.Confidence*100)
-	// The model verdict is the headline actionability call — show it right under
-	// confidence. Empty/unknown verdicts render nothing (never invent one).
+	// The title anchors the message the same way the Slack header does — without
+	// it, a CLI/Matrix reader has no idea which incident this text describes.
+	fmt.Fprintf(&b, "🔍 %s\n", displayTitle(inv.Title))
+	// The model verdict is the headline actionability call, alone — the title
+	// line above already named the incident.
 	if emoji, label := verdictBadge(inv.Verdict); label != "" {
 		fmt.Fprintf(&b, "%s Verdict: %s\n", emoji, label)
 	}
-	// Name the affected resource up front: it is the first thing an on-call needs
-	// (which workload is this about?) and it isn't otherwise in the shared text.
-	if ref := inv.Resource.Ref(); ref != "" {
-		fmt.Fprintf(&b, "Resource: %s\n", strings.TrimSpace(inv.Resource.Kind+" "+ref))
-	}
-	// Compact trigger-time metadata line, assembled from whatever the source
-	// stamped — omitted entirely for sources that carry none of it.
-	if meta := metadataLine(inv); meta != "" {
-		fmt.Fprintf(&b, "%s\n", meta)
-	}
-	if !inv.StartedAt.IsZero() {
-		fmt.Fprintf(&b, "Started: %s\n", inv.StartedAt.UTC().Format(time.RFC3339))
+	// Confidence — shown once. confidenceBadge is the SAME function Slack calls,
+	// so the two never headline different numbers for the same investigation.
+	emoji, level, pct := confidenceBadge(inv)
+	fmt.Fprintf(&b, "%s %s confidence · %d%%\n", emoji, level, pct)
+	if note := recallConfidenceNote(inv, pct); note != "" {
+		fmt.Fprintf(&b, "   (%s)\n", note)
 	}
 	// Seen-before block: only when this is a repeat of a known incident (a first
 	// sighting — Occurrences ≤ 1, or 0 = ledger disabled — prints nothing). When
@@ -166,12 +172,29 @@ func Format(inv providers.Investigation) string {
 			fmt.Fprintf(&b, "   • %s%s\n", a.Description, rev)
 		}
 	}
+	// Trigger-time metadata — resource, alert facts, incident start. Orienting
+	// detail, not the thing to lead with, so it sits below the answer (root
+	// causes) and the action (suggested steps) rather than above them, mirroring
+	// the Slack card's move.
+	if ref := inv.Resource.Ref(); ref != "" {
+		fmt.Fprintf(&b, "Resource: %s\n", strings.TrimSpace(inv.Resource.Kind+" "+ref))
+	}
+	if meta := metadataLine(inv); meta != "" {
+		fmt.Fprintf(&b, "%s\n", meta)
+	}
+	if !inv.StartedAt.IsZero() {
+		fmt.Fprintf(&b, "Started: %s\n", inv.StartedAt.UTC().Format(time.RFC3339))
+	}
+	// Footer — provenance: verification, the KB link, and the usage/cost summary.
+	// Appended ONLY to the shared delivery message — never to the curated KB body
+	// (the curator builds its own body and does not call Format), so cost never
+	// pollutes the knowledge base.
+	if inv.Verified {
+		b.WriteString("✓ verified\n")
+	}
 	if inv.CuratedURL != "" {
 		fmt.Fprintf(&b, "📚 Knowledge base: %s\n", inv.CuratedURL)
 	}
-	// Cost footer: a one-line usage summary for humans, appended ONLY to the shared
-	// delivery message — never to the curated KB body (the curator builds its own
-	// body and does not call Format), so cost never pollutes the knowledge base.
 	if foot := usageFooter(inv.Usage); foot != "" {
 		fmt.Fprintf(&b, "%s\n", foot)
 	}
