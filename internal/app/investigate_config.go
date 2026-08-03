@@ -86,6 +86,14 @@ func configFromEnv() (*config.Config, error) {
 			envOpenAIBaseURL, envOpenAIKey, envOpenAIModel, envAnthropicKey, defaultConfigPath)
 	}
 	config.ApplyDefaults(cfg)
+	// Validate too, not just default. Load's contract is defaults THEN validation, and
+	// the checks that only live in Validate include checkSecureKeyEndpoint — so
+	// OPENAI_BASE_URL=http://gpu.public.example/v1 with an API key was rejected when it
+	// came from a YAML file and accepted when synthesized from the environment, sending
+	// the key in cleartext over the public internet.
+	if err := cfg.Validate(); err != nil {
+		return nil, fmt.Errorf("environment-derived config is invalid: %w", err)
+	}
 	return cfg, nil
 }
 

@@ -374,9 +374,16 @@ func demoConfig(path string) (cfg *config.Config, keyEnv string, err error) {
 		}
 		return loaded, loaded.Model.APIKeyEnv, nil
 	}
-	return &config.Config{Model: config.Model{
+	// ApplyDefaults, not a bare struct. Without it Investigation.Timeout stays 0 and
+	// the loop arms no deadline at all (loop.go only sets one when Timeout > 0), so
+	// `lore demo investigate` with a real key ran unbounded while the same command
+	// with --config got the defaulted 10m. Same bug class the investigate path fixed
+	// by routing configFromEnv through ApplyDefaults.
+	cfg = &config.Config{Model: config.Model{
 		Provider:  demoDefaultProvider,
 		Model:     demoDefaultModel,
 		APIKeyEnv: demoDefaultKeyEnv,
-	}}, demoDefaultKeyEnv, nil
+	}}
+	config.ApplyDefaults(cfg)
+	return cfg, demoDefaultKeyEnv, nil
 }

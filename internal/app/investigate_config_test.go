@@ -189,3 +189,25 @@ func TestDisabledToolsSilentWhenWired(t *testing.T) {
 		t.Errorf("disabledTools() = %v, want none", got)
 	}
 }
+
+// TestConfigFromEnvIsValidated: ApplyDefaults and Validate are both halves of
+// Load's contract, and the env path only ran the first. checkSecureKeyEndpoint
+// lives in Validate, so an API key aimed at a plaintext public endpoint was
+// rejected from a YAML file and accepted from the environment — sending the
+// credential in cleartext over the public internet.
+func TestConfigFromEnvIsValidated(t *testing.T) {
+	t.Setenv(envOpenAIBaseURL, "http://gpu.public.example/v1")
+	t.Setenv(envOpenAIKey, "sk-secret")
+	t.Setenv(envOpenAIModel, "gpt-4o")
+	if _, err := configFromEnv(); err == nil {
+		t.Fatal("an API key sent to a plaintext public endpoint must be rejected on the env path, " +
+			"exactly as it is when the same settings come from runlore.yaml")
+	}
+
+	// Control: the same shape over TLS is fine, so the assertion above is not just
+	// "configFromEnv always errors".
+	t.Setenv(envOpenAIBaseURL, "https://gpu.public.example/v1")
+	if _, err := configFromEnv(); err != nil {
+		t.Fatalf("a TLS endpoint must still be accepted: %v", err)
+	}
+}
