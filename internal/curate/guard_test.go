@@ -6,6 +6,7 @@ import (
 	"context"
 	"errors"
 	"testing"
+	"time"
 
 	"github.com/Smana/runlore/internal/audit"
 	"github.com/Smana/runlore/internal/providers"
@@ -13,17 +14,19 @@ import (
 
 // Guard must satisfy every pass-facing forge surface, so one wrapper covers all passes.
 var (
-	_ Forge          = Guard{}
-	_ RetireForge    = Guard{}
-	_ ClosedPRLister = Guard{}
-	_ ContestedForge = Guard{}
+	_ Forge           = Guard{}
+	_ RetireForge     = Guard{}
+	_ RevalidateForge = Guard{}
+	_ ClosedPRLister  = Guard{}
+	_ ContestedForge  = Guard{}
 )
 
 // fakeGuarded extends the shared fakeForge with the wider GuardedForge surface.
 type fakeGuarded struct {
 	fakeForge
-	retired  []string
-	closeErr error
+	retired     []string
+	revalidated []string
+	closeErr    error
 }
 
 func (f *fakeGuarded) ListClosedUnmergedPRsByLabel(context.Context, string) ([]providers.CuratedIssue, error) {
@@ -34,6 +37,10 @@ func (f *fakeGuarded) IsPROpen(context.Context, int) (bool, error)              
 func (f *fakeGuarded) OpenRetirePR(_ context.Context, entryPath, _ string) (providers.Ref, error) {
 	f.retired = append(f.retired, entryPath)
 	return providers.Ref{URL: "https://forge/pr/1"}, nil
+}
+func (f *fakeGuarded) OpenRevalidatePR(_ context.Context, entryPath string, _ time.Time, _ time.Duration, _ string) (providers.Ref, error) {
+	f.revalidated = append(f.revalidated, entryPath)
+	return providers.Ref{URL: "https://forge/pr/2"}, nil
 }
 func (f *fakeGuarded) Close(ctx context.Context, n int) error {
 	if f.closeErr != nil {
@@ -56,14 +63,23 @@ func TestGuardDryRunSkipsWritesButAudits(t *testing.T) {
 	if _, err := g.OpenRetirePR(context.Background(), "entries/a.md", "body"); err != nil {
 		t.Fatal(err)
 	}
-	if len(inner.closed) != 0 || len(inner.retired) != 0 {
-		t.Fatalf("dry-run must not reach the forge: closed=%v retired=%v", inner.closed, inner.retired)
+	validated := time.Date(2026, 8, 3, 12, 0, 0, 0, time.UTC)
+	if _, err := g.OpenRevalidatePR(context.Background(), "entries/b.md", validated, time.Hour, "body"); err != nil {
+		t.Fatal(err)
 	}
-	if len(aud.recs) != 2 || aud.recs[0].Decision != audit.DecisionDryRun || aud.recs[0].Actor != "curate" {
-		t.Fatalf("want 2 dry-run audit records with actor=curate, got %+v", aud.recs)
+	if len(inner.closed) != 0 || len(inner.retired) != 0 || len(inner.revalidated) != 0 {
+		t.Fatalf("dry-run must not reach the forge: closed=%v retired=%v revalidated=%v",
+			inner.closed, inner.retired, inner.revalidated)
+	}
+	if len(aud.recs) != 3 || aud.recs[0].Decision != audit.DecisionDryRun || aud.recs[0].Actor != "curate" {
+		t.Fatalf("want 3 dry-run audit records with actor=curate, got %+v", aud.recs)
 	}
 	if aud.recs[0].Op != "kb.close" || aud.recs[0].Target != "pr/7" {
 		t.Fatalf("record[0] = %+v, want op kb.close target pr/7", aud.recs[0])
+	}
+	// The revalidation record names the entry AND the date under proposal.
+	if r := aud.recs[2]; r.Op != "kb.revalidate-pr" || r.Target != "entries/b.md" || r.Reason != "2026-08-03" {
+		t.Fatalf("record[2] = %+v, want op kb.revalidate-pr target entries/b.md reason 2026-08-03", r)
 	}
 }
 

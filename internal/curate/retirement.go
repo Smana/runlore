@@ -28,8 +28,11 @@ type RetireForge interface {
 	OpenRetirePR(ctx context.Context, entryPath, body string) (providers.Ref, error)
 }
 
-// RetireStats is the ledger view the pass needs: the per-entry outcome roll-up.
-type RetireStats interface {
+// EntryStats is the ledger view the decay-driven passes need: the per-entry
+// outcome roll-up. Retirement and Revalidation share it deliberately — they gate
+// on opposite sides of the SAME aggregate, so reading it through one interface is
+// what keeps them from ever disagreeing about an entry's track record.
+type EntryStats interface {
 	OpenCounts() (map[string]outcome.Aggregate, error)
 }
 
@@ -44,7 +47,7 @@ type RetireStats interface {
 // re-nagged. Opt-in (see config): retirement is a judgment call an operator enables.
 type Retirement struct {
 	Forge           RetireForge
-	Stats           RetireStats
+	Stats           EntryStats
 	MinObservations int     // sustained-decay bar: total observations before retirement is considered
 	Floor           float64 // retire when Factor(Prior) < Floor
 	Prior           float64 // k — must equal recall's outcome_prior so both gates agree

@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log/slog"
 	"strings"
+	"time"
 
 	"github.com/Smana/runlore/internal/audit"
 	"github.com/Smana/runlore/internal/providers"
@@ -15,12 +16,13 @@ import (
 // GuardedForge is the union of every read and write the grooming passes perform —
 // the surface Guard wraps. Composed from the pass role interfaces so it stays in
 // sync with them by construction (RetireForge adds ListClosedUnmergedPRsByLabel +
-// OpenRetirePR; ContestedForge adds ListIssueCommentBodies + IsPROpen; overlapping
-// methods across the embedded sets are legal since Go 1.14). *github.Client
-// satisfies it (pinned in internal/app).
+// OpenRetirePR; RevalidateForge adds OpenRevalidatePR; ContestedForge adds
+// ListIssueCommentBodies + IsPROpen; overlapping methods across the embedded sets
+// are legal since Go 1.14). *github.Client satisfies it (pinned in internal/app).
 type GuardedForge interface {
 	Forge
 	RetireForge
+	RevalidateForge
 	ContestedForge
 }
 
@@ -99,6 +101,23 @@ func (g Guard) OpenRetirePR(ctx context.Context, entryPath, body string) (provid
 	err := g.write("kb.retire-pr", entryPath, "", func() error {
 		var ierr error
 		ref, ierr = g.Inner.OpenRetirePR(ctx, entryPath, body)
+		return ierr
+	})
+	return ref, err
+}
+
+// OpenRevalidatePR opens a revalidate PR for a still-working entry (audited;
+// skipped in dry-run). The audited reason is the date under proposal — the one
+// fact a reviewer of the audit chain needs. Note that a dry-run reports every
+// CANDIDATE: the "already fresh enough" check lives behind the forge call
+// (ErrRecentlyValidated), which dry-run never makes, so the report is a superset
+// of what an apply run would open — the same over-report retirement's
+// ErrAlreadyRetired has.
+func (g Guard) OpenRevalidatePR(ctx context.Context, entryPath string, validated time.Time, minGap time.Duration, body string) (providers.Ref, error) {
+	var ref providers.Ref
+	err := g.write("kb.revalidate-pr", entryPath, validated.UTC().Format(time.DateOnly), func() error {
+		var ierr error
+		ref, ierr = g.Inner.OpenRevalidatePR(ctx, entryPath, validated, minGap, body)
 		return ierr
 	})
 	return ref, err

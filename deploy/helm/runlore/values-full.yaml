@@ -255,6 +255,33 @@ config:
       installation_id: 7654321
       private_key_env: GITHUB_APP_PRIVATE_KEY
 
+  # Phase-2 grooming. The chart's values.yaml already ships stale_after,
+  # recurrence_threshold and the in-server sweeps (DRY-RUN by default — nothing below
+  # reaches the forge until you set curate.sweeps.mode: apply there). What is added
+  # here is the one grooming pass a production install has to decide for itself.
+  curate:
+    # How a catalog entry EARNS freshness. RunLore leaves `last_validated` unset when
+    # it drafts an entry — the field claims a HUMAN confirmed the entry works, and a
+    # fresh draft has no such confirmation — so without this pass an entry's freshness
+    # can only ever decay from its creation date. When an entry is recalled for a live
+    # incident and that incident then RESOLVES, this opens a human-reviewed PR stamping
+    # `last_validated` with the resolve date: a one-line frontmatter edit, no status or
+    # content change, and merging it IS the confirmation. RunLore never writes it.
+    #
+    # It changes what an on-call reader sees only once catalog.instant_recall.stale_after
+    # is set — that age gate is the thing that reads `last_validated`. With no
+    # stale_after there is no staleness down-weight, and so nothing for this pass to
+    # keep an entry ahead of.
+    revalidation:
+      enabled: true
+      min_interval: 720h # at most one confirmation PR per entry per month
+      max_open: 5 # never leave more than this many waiting on a reviewer
+      # floor/prior default to 0.5 / 2.0 — the SAME outcome gate recall's Gate 3 and
+      # the retirement pass use. Keeping them equal is what makes the two passes
+      # complementary rather than contradictory: strictly below the floor is
+      # retirement's territory, at or above it is this pass's, so one sweep can never
+      # propose retiring and revalidating the same entry.
+
   metrics:
     url: http://vmsingle.observability.svc:8429
   logs:

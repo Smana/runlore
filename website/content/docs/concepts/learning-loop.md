@@ -444,9 +444,9 @@ ledger, so they stay source-neutral):
   KB PR so the reviewer sees the contest before merging; idempotent via a hidden
   per-trigger marker in the comment, no mutable store.
 
-Finally, an **opt-in** pass closes the *garbage-collection* half of the loop — the
-mirror image of curation, where decay existed but had no consequence beyond recall
-rejection:
+Finally, two **opt-in** passes act on an entry's own track record rather than on the
+PR backlog — the *garbage-collection* half of the loop, where decay existed but had no
+consequence beyond recall rejection, and its mirror image:
 
 - **Retirement** (`curate.retirement.enabled`, default **off**) — opens a
   human-reviewed *retire* PR for a **merged** catalog entry whose outcome factor stayed
@@ -470,6 +470,34 @@ rejection:
     keep surfacing it (status-visible) for KB archaeology. A merged retirement PR is
     therefore effective end-to-end. Fail-safe: an absent or unknown status is treated as
     active (OKF §9 tolerance), so pre-retirement catalogs behave exactly as before.
+- **Revalidation** (`curate.revalidation.enabled`, default **off**) — the mirror
+  image: it opens a human-reviewed *revalidate* PR for a **merged** entry that was
+  recalled for a live incident which then **resolved**, proposing to stamp
+  `last_validated` with that resolve date. This is the seam that lets the field be
+  *earned*: before it, freshness could only decay (§6). One resolved recall is the
+  whole evidence bar — deliberately, because it is a far denser chain of checks than
+  retirement's evidence: the entry won recall's gates, was confirmed against **live
+  cluster state**, survived the adversarial **verify** pass, was delivered as the
+  answer, and the incident then cleared. Retirement needs `min_observations` to tell
+  a bad recall from noise; a confirmation does not. The PR makes a **one-line
+  frontmatter edit** and nothing else — no status change, no content change — and,
+  as with retirement, a human merges: `last_validated` claims *human* confirmation,
+  and merging **is** that act, so RunLore can bring the evidence but must never
+  write the field itself. Anti-spam is two-layered: a candidate date must be at
+  least `min_interval` (default **720h**) newer than what the entry already records,
+  checked against the file on the base branch so a merged stamp silences the next
+  sweep with no state to keep; and `max_open` (default **5**) bounds how many
+  revalidation PRs may await review at once, counting ones earlier sweeps left open
+  — so enabling the pass on a mature catalog drains a queue instead of flooding one.
+  Idempotent and **human-veto-aware** through the same hidden per-entry marker, and
+  the marker is keyed on the entry *path*, never the date, precisely so a decline
+  stays declined rather than returning monthly.
+  - **Retirement wins where they meet.** Both passes read the same aggregate and
+    the same `outcome.Aggregate.Factor`, and they are **disjoint by construction**:
+    retirement fires strictly *below* the trust floor, revalidation only *at or
+    above* it. So one sweep can never propose retiring and revalidating the same
+    entry, and an entry recall already refuses to fire is never stamped "still
+    valid", whatever a stale resolve in its history says.
 
 ---
 
@@ -536,8 +564,17 @@ pre-field behaviour byte-for-byte):
   and the adversarial **verify** pass remain the hard gates against a genuinely drifted
   answer, and the outcome floor (Gate 3) keeps priority (track record beats calendar).
   Staleness only stops a five-year-old runbook looking as confident as yesterday's. A
-  dateless or unparseable-date entry is exempt. `last_validated` is stamped at entry
-  creation (= `timestamp`) and is the seam a future confirmation flow refreshes.
+  dateless or unparseable-date entry is exempt.
+
+  **`last_validated` is unset when RunLore drafts an entry** — the field claims a
+  *human* confirmed the entry works, and a fresh draft has none, so the drafter has
+  no honest value to write (`renderEntry`, `internal/forge/github`). Freshness
+  therefore falls back to `timestamp` until the field is **earned**, which is what
+  the opt-in **revalidation pass** (§5) is for: when a recall of the entry is
+  followed by the incident actually resolving, it opens a PR proposing that resolve
+  date, and **a human merging that PR is the confirmation the field claims**. Until
+  then an entry can only get older; with the pass enabled, a note that keeps working
+  keeps its freshness.
 
 A `low_outcome` rejection does not abandon recall outright: the gate walks a small,
 bounded set of further structurally-agreeing candidates (the runner-up fallback) —
