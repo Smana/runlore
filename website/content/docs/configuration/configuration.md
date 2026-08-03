@@ -357,8 +357,12 @@ limitations, kept distinct from human-only open questions):
 - **Slack, bot token (`bot_token_env`).** Posts a compact verdict-first summary to `channel`, then the
   full analysis as a **threaded reply**. When `signing_secret_env` is set and action mode is `approve`,
   the summary carries Approve/Reject buttons on any suggested remediation (see below).
-- **Slack incoming webhook (`webhook_url_env`), Matrix, generic webhook.** Deliver the same content as a
-  **single** message (incoming webhooks cannot thread and expose no interaction buttons).
+- **Slack incoming webhook (`webhook_url_env`).** Delivers the same content as a **single** message
+  (incoming webhooks cannot thread). Interactive buttons *do* render and dispatch on this path —
+  incoming webhooks follow the same rules as `chat.postMessage`, and a click is answered through the
+  interaction's `response_url`, which needs no bot token.
+- **Matrix, generic webhook.** Deliver the same content as a **single** message, with no interaction
+  buttons (Matrix feedback arrives as reactions instead — see `matrix.feedback_reactions` below).
 
 **Generic webhook JSON payload** gained `verdict`, `severity`, `environment`, `cluster`, `tenant`,
 `alert_name`, `started_at` (RFC3339, empty when unknown), `occurrences`, `prev_curated_url`, `ruled_out`
@@ -381,8 +385,17 @@ This is the primary trust signal for incidents that have **no resolve channel** 
 > endpoint and the same exposure approve-mode buttons use; if you already run `actions.mode: approve`
 > with Slack buttons, nothing new is exposed). Route it through your ingress/gateway; if you use the
 > chart's `networkPolicy.ingressFrom`, allow your ingress controller, not the internet. Startup **fails
-> loud** unless both `signing_secret_env` (every click is HMAC-verified, ±5 min replay window) and
-> `outcome.ledger_path` (where ratings land) are set.
+> loud** unless `signing_secret_env` (every click is HMAC-verified, ±5 min replay window),
+> `outcome.ledger_path` (where ratings land) **and a Slack delivery target** — `webhook_url_env`, or
+> `bot_token_env` with `channel` — are all set. A button only exists on a message RunLore actually
+> delivered, so feedback with no delivery target configured could never work.
+
+> [!NOTE]
+> **Mount the credential, too.** If the env var naming the webhook URL / bot token is present but
+> **empty** (an unmounted secret, a blank Helm value), the Slack notifier is skipped entirely: nothing
+> is delivered, no buttons render and no rating can be recorded. Config validation cannot see runtime
+> emptiness, so startup logs a **warning** instead of announcing the feature — grep the logs for
+> `no slack delivery target resolved` after enabling it.
 
 Feedback is deliberately **unprivileged**: any signature-valid member of your workspace can rate — a
 rating is an opinion feeding the learning loop, not a cluster mutation (approve/reject keep their

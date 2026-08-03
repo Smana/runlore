@@ -15,6 +15,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/Smana/runlore/internal/config"
 	"github.com/Smana/runlore/internal/providers"
 )
 
@@ -1237,6 +1238,76 @@ func TestSlackCardEscapesTitleOnBothBranches(t *testing.T) {
 			}
 			if !strings.Contains(joined, "&lt;https://evil.example|click here to remediate&gt;") {
 				t.Fatalf("title neither escaped nor present:\n%s", joined)
+			}
+		})
+	}
+}
+
+// TestSlackDeliveryTarget pins what the Slack builder resolves against the
+// environment — the fact a startup guard needs in order to warn instead of
+// announcing feedback buttons nobody will ever see. The set-but-EMPTY cases are
+// the live gap: an unmounted secret leaves the env var present and empty, the
+// builder returns nil, the notifier is skipped and nothing is delivered.
+func TestSlackDeliveryTarget(t *testing.T) {
+	tests := []struct {
+		name string
+		sl   config.SlackNotify
+		env  map[string]string
+		want string
+	}{
+		{name: "nothing configured", want: ""},
+		{
+			name: "incoming webhook, env present",
+			sl:   config.SlackNotify{WebhookURLEnv: "TEST_SLACK_WEBHOOK_URL"},
+			env:  map[string]string{"TEST_SLACK_WEBHOOK_URL": "https://hooks.slack.com/services/x"},
+			want: "webhook",
+		},
+		{
+			name: "incoming webhook, env set but empty",
+			sl:   config.SlackNotify{WebhookURLEnv: "TEST_SLACK_WEBHOOK_URL"},
+			env:  map[string]string{"TEST_SLACK_WEBHOOK_URL": ""},
+			want: "",
+		},
+		{
+			name: "bot token + channel, env present",
+			sl:   config.SlackNotify{BotTokenEnv: "TEST_SLACK_BOT_TOKEN", Channel: "C123"},
+			env:  map[string]string{"TEST_SLACK_BOT_TOKEN": "xoxb-test"},
+			want: "bot",
+		},
+		{
+			// The bot token wins when configured, so an empty one does NOT silently
+			// fall back to a configured webhook — pinned, because that asymmetry is
+			// exactly the shape an operator misreads as "the webhook still works".
+			name: "bot token set but empty, webhook configured",
+			sl:   config.SlackNotify{BotTokenEnv: "TEST_SLACK_BOT_TOKEN", Channel: "C123", WebhookURLEnv: "TEST_SLACK_WEBHOOK_URL"},
+			env:  map[string]string{"TEST_SLACK_BOT_TOKEN": "", "TEST_SLACK_WEBHOOK_URL": "https://hooks.slack.com/services/x"},
+			want: "",
+		},
+		{
+			name: "bot token without a channel falls through to the webhook",
+			sl:   config.SlackNotify{BotTokenEnv: "TEST_SLACK_BOT_TOKEN", WebhookURLEnv: "TEST_SLACK_WEBHOOK_URL"},
+			env:  map[string]string{"TEST_SLACK_BOT_TOKEN": "xoxb-test", "TEST_SLACK_WEBHOOK_URL": "https://hooks.slack.com/services/x"},
+			want: "webhook",
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			for k, v := range tc.env {
+				t.Setenv(k, v)
+			}
+			if got := SlackDeliveryTarget(tc.sl); got != tc.want {
+				t.Fatalf("SlackDeliveryTarget = %q, want %q", got, tc.want)
+			}
+			// The builder must agree with the guard: a resolved target builds a
+			// notifier, an unresolved one is skipped.
+			cfg := &config.Config{}
+			cfg.Notify.Slack = tc.sl
+			n, err := registry["slack"].Build(Deps{Cfg: cfg, Log: discardLog})
+			if err != nil {
+				t.Fatalf("build: %v", err)
+			}
+			if (n != nil) != (tc.want != "") {
+				t.Fatalf("builder returned notifier=%v, but SlackDeliveryTarget said %q", n != nil, tc.want)
 			}
 		})
 	}

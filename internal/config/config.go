@@ -799,8 +799,9 @@ type SlackNotify struct {
 	// messages; clicks are recorded in the outcome ledger and weigh the recalled
 	// entry's trust like resolve signals do. Requires exposing POST
 	// /slack/interactions to Slack (an interactivity Request URL — the same
-	// endpoint approve-mode buttons use) plus signing_secret_env and
-	// outcome.ledger_path; Validate fails loud when either is missing.
+	// endpoint approve-mode buttons use), signing_secret_env, outcome.ledger_path
+	// AND a delivery target (webhook_url_env, or bot_token_env + channel — buttons
+	// render and dispatch on either path); Validate fails loud when any is missing.
 	FeedbackButtons bool `yaml:"feedback_buttons"`
 }
 
@@ -1446,6 +1447,26 @@ func (c *Config) Validate() error {
 		}
 		if c.Outcome.LedgerPath == "" {
 			return fmt.Errorf("notify.slack.feedback_buttons requires outcome.ledger_path: ratings are recorded in the outcome ledger")
+		}
+		// …and a delivery target, because a button only ever exists on a message the
+		// Slack notifier delivered. That notifier is built from an incoming webhook OR
+		// a bot token + channel; with neither, notify/slack.go's builder returns nil and
+		// the notifier is skipped silently — no message, no buttons, no feedback, while
+		// startup happily reported the feature on.
+		//
+		// Either target qualifies: Slack dispatches block_actions for interactive
+		// components posted through an incoming webhook exactly as it does for
+		// chat.postMessage ("incoming webhooks conform to the same rules and
+		// functionality as any of our other messaging APIs"), and the click is answered
+		// via the payload's response_url, which needs no bot token. Requiring the bot
+		// token here would break working webhook deployments.
+		//
+		// This mirrors the builder's static preconditions exactly, so it rejects only
+		// configs where no notifier could ever be built regardless of the environment —
+		// i.e. where the buttons were already dead. Runtime emptiness (an env var set
+		// but unmounted) is not knowable here; app.SlackFeedbackDeliverable warns for it.
+		if sl := c.Notify.Slack; sl.WebhookURLEnv == "" && (sl.BotTokenEnv == "" || sl.Channel == "") {
+			return fmt.Errorf("notify.slack.feedback_buttons requires a Slack delivery target: set notify.slack.webhook_url_env, or notify.slack.bot_token_env together with notify.slack.channel — with neither the Slack notifier is skipped, so no message is delivered, no buttons render and no feedback can ever be recorded")
 		}
 	}
 	// Same fail-loud contract for the Matrix reaction listener: without the

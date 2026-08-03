@@ -18,6 +18,28 @@ func BuildNotifier(cfg *config.Config, log *slog.Logger) (*notify.Multi, error) 
 	return notify.BuildEnabled(notify.Deps{Cfg: cfg, Log: log})
 }
 
+// SlackFeedbackDeliverable reports whether the opt-in 👍/👎 buttons can actually
+// reach Slack, and warns when they cannot. Call it only with
+// notify.slack.feedback_buttons on.
+//
+// Validate already requires a delivery target to be CONFIGURED alongside the
+// option, but configuration is not delivery: the env var holding the webhook URL
+// or bot token can be present and EMPTY at runtime (an unmounted secret, a blank
+// Helm value), and the Slack builder then returns no notifier at all. Nothing is
+// delivered, so no buttons render and no rating can ever be recorded — while
+// startup announced the feature as enabled. That is the same runtime gap
+// BuildMatrixFeedback closes for an empty Matrix access token, checked the same
+// way and in the same place.
+func SlackFeedbackDeliverable(cfg *config.Config, log *slog.Logger) bool {
+	sl := cfg.Notify.Slack
+	if notify.SlackDeliveryTarget(sl) != "" {
+		return true
+	}
+	log.Warn("slack feedback_buttons enabled but no slack delivery target resolved (credential env var empty); no message is delivered, so no buttons render and no feedback can be recorded",
+		"webhook_url_env", sl.WebhookURLEnv, "bot_token_env", sl.BotTokenEnv, "channel", sl.Channel)
+	return false
+}
+
 // BuildMatrixFeedback assembles the opt-in Matrix reaction listener
 // (notify.matrix.feedback_reactions): nil unless the option is on, the outcome
 // ledger persists, and the access token is actually present — a listener that

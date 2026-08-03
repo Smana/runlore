@@ -389,8 +389,16 @@ func RunServe(version string, args []string) error {
 	// the option, and Enabled() guards the typed-nil/disabled-ledger cases) — so
 	// with the option off the endpoint behaves exactly as before.
 	if cfg.Notify.Slack.FeedbackButtons && ledger.Enabled() {
+		// The recorder is wired either way — a click that does arrive must land in the
+		// ledger — but the capability is only ANNOUNCED when a Slack message can
+		// actually carry the buttons. SlackFeedbackDeliverable warns instead when the
+		// delivery credential is empty at runtime and the notifier was skipped:
+		// "enabled" printed over a sink that delivers nothing is the lie this guard
+		// exists to stop.
 		acts.Feedback = ledger
-		log.Info("slack feedback buttons enabled", "endpoint", "/slack/interactions")
+		if SlackFeedbackDeliverable(cfg, log) {
+			log.Info("slack feedback buttons enabled", "endpoint", "/slack/interactions")
+		}
 	}
 	// /readyz is process + catalog health, NOT leadership (#264): every warm
 	// replica reports Ready (so `helm upgrade --wait` / Flux kstatus succeeds
