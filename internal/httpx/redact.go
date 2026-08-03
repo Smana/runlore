@@ -76,6 +76,37 @@ func SanitizeURLError(err error) error {
 	return fmt.Errorf("%s %s: %w", ue.Op, loc, ue.Err)
 }
 
+// maxErrorBody caps how much of an upstream response body is embedded in an
+// error. A JSON error envelope is well under it; the cap bounds what an upstream
+// returning megabytes can do to a log line.
+const maxErrorBody = 512
+
+// SafeErrorBody prepares an upstream response body for embedding in an error
+// that will be logged and shown to operators: it strips the credentials the
+// request carried, then caps the length.
+//
+// The body is server-controlled. A server that echoes the credential back — a
+// debug endpoint, a chatty proxy, a misconfigured auth layer — would otherwise
+// get it laundered straight into our own error text, and from there into the
+// operator's log store, which is one of the stores RunLore reads back as
+// evidence. Strip it rather than trusting the far end not to reflect it.
+//
+// Stripping happens BEFORE the cap so a credential straddling the cut cannot
+// leave a fragment behind. Empty secrets are ignored, so a caller can pass an
+// optional token unguarded.
+func SafeErrorBody(body []byte, secrets ...string) string {
+	s := string(body)
+	for _, sec := range secrets {
+		if sec != "" {
+			s = strings.ReplaceAll(s, sec, "[REDACTED]")
+		}
+	}
+	if len(s) > maxErrorBody {
+		s = s[:maxErrorBody]
+	}
+	return s
+}
+
 // RequestID returns the first present upstream request-id header (by the
 // precedence in requestIDHeaders), sanitized for safe logging. It returns "" when
 // none is set. The result is operator-trusted correlation metadata — not body

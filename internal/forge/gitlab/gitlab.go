@@ -203,14 +203,10 @@ func (c *Client) request(ctx context.Context, method, path string, body any) ([]
 	defer func() { _ = resp.Body.Close() }()
 	data, _ := io.ReadAll(resp.Body)
 	if resp.StatusCode/100 != 2 {
-		// The body is server-controlled and lands in logs and operator-facing errors.
-		// A server that echoes the credential back — a debug endpoint, a chatty proxy,
-		// a misconfigured auth layer — would otherwise get it laundered straight into
-		// our error text. Strip it rather than trusting the far end not to reflect it.
-		body := string(data[:min(len(data), 512)])
-		if tok != "" {
-			body = strings.ReplaceAll(body, tok, "[REDACTED]")
-		}
+		// The body is server-controlled and lands in logs and operator-facing
+		// errors; httpx.SafeErrorBody strips the credential it was sent with and
+		// caps the length. Shared with the GitHub client — see its doc comment.
+		body := httpx.SafeErrorBody(data, tok)
 		return nil, resp.Header, &statusError{method: method, path: path, status: resp.StatusCode, body: body}
 	}
 	return data, resp.Header, nil

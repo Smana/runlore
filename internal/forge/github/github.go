@@ -84,7 +84,11 @@ func (c *Client) do(ctx context.Context, method, path string, body, out any) err
 	defer func() { _ = resp.Body.Close() }()
 	data, _ := io.ReadAll(resp.Body)
 	if resp.StatusCode/100 != 2 {
-		return fmt.Errorf("github %s %s: status %d: %s", method, path, resp.StatusCode, string(data[:min(len(data), 512)]))
+		// The body is server-controlled and lands in logs and operator-facing
+		// errors; httpx.SafeErrorBody strips the credential it was sent with and
+		// caps the length. Same reasoning (and the same helper) as the GitLab
+		// client — and the App installation token it launders is live for an hour.
+		return fmt.Errorf("github %s %s: status %d: %s", method, path, resp.StatusCode, httpx.SafeErrorBody(data, tok))
 	}
 	if out != nil {
 		return json.Unmarshal(data, out)

@@ -15,8 +15,12 @@ import (
 	"github.com/Smana/runlore/internal/providers"
 )
 
-func staticToken(string) func(context.Context) (string, error) {
-	return func(context.Context) (string, error) { return "tok", nil }
+// staticToken is a TokenFunc that always mints tok. It used to IGNORE its
+// argument and hand back the literal "tok" regardless — harmless while every
+// caller passed "tok", and a trap for any test that cares which credential the
+// client actually sent (see TestTokenNeverAppearsInErrors).
+func staticToken(tok string) func(context.Context) (string, error) {
+	return func(context.Context) (string, error) { return tok, nil }
 }
 
 func TestOpenIssue(t *testing.T) {
@@ -583,5 +587,35 @@ func TestRenderEntryNeutralizeImages(t *testing.T) {
 	// The neutralized form must be present so reviewers still know there was an image ref.
 	if !strings.Contains(rendered, "`[image: beacon]`") {
 		t.Errorf("renderEntry missing neutralized image label:\n%s", rendered)
+	}
+}
+
+// TestTokenNeverAppearsInErrors is the GitHub half of the guard the GitLab
+// client already carries: do() embeds the response body in its error, the body
+// is server-controlled, and the error is logged and shown to operators. A debug
+// endpoint, a chatty proxy or a misconfigured auth layer that echoes the
+// Authorization credential back would otherwise get it laundered straight into
+// our own error text — and the App installation token it launders is live for
+// an hour.
+func TestTokenNeverAppearsInErrors(t *testing.T) {
+	const secret = "ghs_INSTALLATIONTOKEN1234567890abcdef"
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusUnauthorized)
+		_, _ = w.Write([]byte(`{"message":"Bad credentials for ` + secret + `"}`))
+	}))
+	defer srv.Close()
+
+	c := New(srv.URL, "o", "r", "main", staticToken(secret))
+	_, err := c.OpenIssue(context.Background(), providers.Investigation{Title: "Boom"})
+	if err == nil {
+		t.Fatal("want an error from a 401")
+	}
+	if strings.Contains(err.Error(), secret) {
+		t.Fatalf("the token leaked into an error operators will see and log:\n%s", err.Error())
+	}
+	// The rest of the body must survive — it is how an operator tells a bad
+	// credential from a missing scope.
+	if !strings.Contains(err.Error(), "Bad credentials") {
+		t.Fatalf("stripping must not swallow the diagnostic body:\n%s", err.Error())
 	}
 }

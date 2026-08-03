@@ -3,6 +3,7 @@
 package httpx
 
 import (
+	"bytes"
 	"errors"
 	"net/http"
 	"net/url"
@@ -114,5 +115,30 @@ func TestSanitizeURLError(t *testing.T) {
 	// A non-url.Error is returned untouched.
 	if got := SanitizeURLError(cause); !errors.Is(got, cause) {
 		t.Fatalf("a plain error must pass through: %v", got)
+	}
+}
+
+// TestSafeErrorBody: the two forge clients embed an upstream response body in
+// errors that get logged. Stripping must happen before the length cap, or a
+// credential straddling the cut leaves a fragment behind.
+func TestSafeErrorBody(t *testing.T) {
+	const secret = "glpat-SUPERSECRETVALUE1234"
+
+	got := SafeErrorBody([]byte(`{"message":"401 for `+secret+`"}`), secret)
+	if strings.Contains(got, secret) {
+		t.Errorf("credential survived: %q", got)
+	}
+	if !strings.Contains(got, "401 for") {
+		t.Errorf("diagnostic body must survive: %q", got)
+	}
+
+	// The secret sits astride the 512-byte cut: cap-then-strip would keep its head.
+	pad := strings.Repeat("x", maxErrorBody-len(secret)/2)
+	if got := SafeErrorBody([]byte(pad+secret+"tail"), secret); strings.Contains(got, secret[:8]) {
+		t.Errorf("a credential straddling the cap left a fragment: %q", got)
+	}
+
+	if got := SafeErrorBody(bytes.Repeat([]byte("y"), 4096), ""); len(got) != maxErrorBody {
+		t.Errorf("body not capped: len=%d want %d", len(got), maxErrorBody)
 	}
 }
