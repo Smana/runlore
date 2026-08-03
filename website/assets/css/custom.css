@@ -110,9 +110,11 @@
 }
 /* These cards carry real text — a root cause, a token footer — at roughly 6px
    in a half-width column (see the .rl-shots note above). Rather than shrink the
-   grid, each shot links to its own full-size file: detail on demand, no JS, no
-   lightbox library, and it still works if scripting is off or the click becomes
-   a long-press. The cursor and the lift are the only affordance that says so. */
+   grid, clicking one enlarges it IN PLACE via a :target overlay. Deliberately not
+   a new tab: sending someone to a bare PNG drops them out of the page and makes
+   Back the only way home, which reads as a broken link rather than a zoom. And
+   deliberately not a JS lightbox: no dependency, and it degrades to a same-page
+   anchor if anything goes wrong. The cursor and the lift are the affordance. */
 .rl-shot-zoom {
   display: block;
   cursor: zoom-in;
@@ -136,6 +138,56 @@
   .rl-shot-zoom { transition: none; }
   .rl-shot-zoom:hover,
   .rl-shot-zoom:focus-visible { transform: none; }
+}
+
+/* The enlarged view. Hidden until its id is the URL fragment, so the whole thing
+   is one CSS state change — no script, and the browser's Back button closes it,
+   which is the behaviour people already expect from a fragment. */
+.rl-shot-overlay {
+  display: none;
+  position: fixed;
+  inset: 0;
+  z-index: 60;
+  background: rgba(2, 6, 23, 0.88);
+  padding: 3rem 1.25rem;
+  overflow-y: auto;
+  text-align: center;
+}
+.rl-shot-overlay:target {
+  display: block;
+}
+.rl-shot-overlay img {
+  /* The shots are tall (up to 1328x2046). Cap by WIDTH and let height run, so the
+     overlay scrolls rather than shrinking the text back to unreadable — the whole
+     point of enlarging. max-width tracks the natural width so it never upscales
+     into blur. */
+  width: min(100%, 1328px);
+  height: auto;
+  border-radius: 12px;
+  box-shadow: 0 30px 80px -30px rgba(0, 0, 0, 0.85);
+}
+.rl-shot-overlay-close {
+  position: fixed;
+  top: 1rem;
+  right: 1.5rem;
+  z-index: 61;
+  width: 2.5rem;
+  height: 2.5rem;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 1.75rem;
+  line-height: 1;
+  border-radius: 999px;
+  color: #e2e8f0;
+  background: rgba(15, 23, 42, 0.85);
+  border: 1px solid rgba(148, 163, 184, 0.45);
+  text-decoration: none;
+}
+.rl-shot-overlay-close:hover,
+.rl-shot-overlay-close:focus-visible {
+  color: #fff;
+  border-color: #14c9a6;
 }
 .rl-shot figcaption {
   margin-top: 0.7rem;
