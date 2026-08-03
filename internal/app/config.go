@@ -6,6 +6,7 @@ import (
 	"fmt"
 
 	"github.com/Smana/runlore/internal/config"
+	"github.com/Smana/runlore/internal/source"
 )
 
 // ModelProvider returns the configured model provider name (default "openai").
@@ -91,56 +92,115 @@ func WebhookAuthWarning(alertmanagerEnabled bool, webhookToken string, mode conf
 		"reachable beyond trusted networks (docs/security-model.md)"
 }
 
-// RecallDecayWarning decides the startup warning for a learning loop whose
-// feedback edge cannot be shown to accumulate ground truth, returning "" when no
-// warning is warranted.
+// ResolveCapableSource reports whether any ENABLED source could deliver a resolve
+// event at all. It reads the adapter CONTRACT, never a hardcoded list of names, so
+// it cannot drift from source.Registered(): a Webhook source's Decode returns
+// source.DecodeResult, which carries Resolved; a Watcher's Watch returns a channel
+// of investigation requests and has nowhere to put a resolution. A deployment whose
+// only enabled sources are watchers (GitOps failures) therefore PROVABLY has no
+// resolve channel — as does the re-investigate poller, which is not a source at all
+// and derives its own synthetic fingerprints.
 //
-// Instant recall's Gate 3 weighs a candidate entry by its recorded track record,
-// and is deliberately fail-safe: an entry the outcome ledger has never seen scores
-// factor 1 and fires (absence of evidence must never block a recall). The
-// corollary is that a ledger which never accumulates ground truth turns that gate
-// into a silent no-op for EVERY entry — and the retirement pass, which shares the
-// same factor and floor, into one that can never propose anything. Trust stops
-// being derived from whether the entry actually worked, which is the claim the
-// whole learning loop rests on.
+// "Capable", not "will": for an enabled webhook source, whether the operator wired
+// resolves through (Alertmanager's send_resolved, a custom mapping's `resolved`
+// field) stays outside RunLore's config and outside this answer.
+func ResolveCapableSource(built []source.Built) bool {
+	for _, b := range built {
+		if b.Desc.Kind == source.Webhook {
+			return true
+		}
+	}
+	return false
+}
+
+// RecallDecayWarning decides the startup warning for a learning loop whose feedback
+// edge cannot be shown to accumulate ground truth, returning "" when no warning is
+// warranted. resolveCapable comes from ResolveCapableSource and decides how much the
+// warning is entitled to claim.
 //
-// Ground truth reaches the ledger through two channels, and only one of them is
+// Instant recall's Gate 3 weighs a candidate entry by its recorded track record and
+// is deliberately fail-safe: an entry the outcome ledger has never seen scores factor
+// 1 and fires (absence of evidence must never block a recall). A ledger that
+// accumulates no ground truth therefore degrades that gate — and the retirement pass,
+// which shares the same factor and floor — but NOT uniformly, and that difference is
+// the whole reason there are two messages below.
+//
+// Ground truth reaches the ledger through three paths, only one of which is fully
 // observable from here:
 //
-//   - Human 👍/👎 feedback — opt-in on both notifiers, so its state IS in this
-//     config.
-//   - Resolve events from the incident source — NOT determinable at startup.
-//     `sources` records which adapters are enabled, not whether they emit
-//     resolves, and Alertmanager's `send_resolved` lives in the operator's
-//     receiver config, which RunLore never reads. Resolvability is decided
-//     per event from the fingerprint at record time (see the ledger.Open call in
-//     investigate.go), a runtime fact this function cannot anticipate.
+//   - Human 👍/👎 feedback — opt-in on both notifiers, so its state IS in this config.
+//   - Resolve events from the incident source. Whether a resolve can EVER arrive is
+//     determinable (ResolveCapableSource, off the registry's Kind); whether it
+//     actually does is not — Alertmanager's `send_resolved` lives in the operator's
+//     receiver config, which RunLore never reads.
+//   - Machine confirmations (outcome.Ledger.Confirm) — a FRESH investigation that
+//     re-derives an existing entry's DupFingerprint. Wired unconditionally on the
+//     serve path (cur.Confirmations in investigate.go), it needs no feedback channel
+//     and no resolve, and folds into the same Aggregate.Factor at confirmWeight. So
+//     the gate is never a no-op for literally every entry, and neither message claims
+//     it is: confirms are recovery evidence only — they can lift an entry, never sink
+//     one, and retirement ignores them (its observation count is recalls + votes).
 //
-// So the warning names the risk it can actually establish — neither feedback
-// channel is on, leaving an unverifiable resolve channel as the only remaining
-// source of truth — and explicitly does not claim resolves never arrive. It stays
-// a warning, never a hard failure: a deployment whose Alertmanager does send
-// resolves is correctly configured.
+// What actually happens when the resolve channel is silent depends on the FINGERPRINT,
+// and the two cases fail in OPPOSITE directions:
 //
-// Silent when instant recall is off (nothing recalls, so there is no trust to
-// decay) or when outcome.ledger_path is unset (the operator turned the learning
-// loop off, which `lore curate` likewise reports as an info, not a warning).
-func RecallDecayWarning(cfg *config.Config) string {
+//   - A synthetic fingerprint (GitOps failure, re-investigate poll) is recorded
+//     Resolvable=false, so applyOpenLocked never counts it. The entry never enters
+//     OpenCounts, outcomeGate returns (1, true), and it keeps firing at full trust
+//     however wrong it has become.
+//   - A REAL alert fingerprint is recorded Resolvable=true whether or not a resolve
+//     ever follows: resolvability is derived from the fingerprint prefix alone
+//     (`resolvable := !outcome.Derived(fp)` in investigate.go), never from
+//     send_resolved, which RunLore cannot see. Each recall increments Recalls while
+//     Resolved stays 0, the factor falls monotonically, and the entry is REJECTED
+//     once it crosses outcome_floor — one unresolved recall already suffices at the
+//     defaults (prior 2, floor 0.5 ⇒ factor 1/3). A rejected recall records nothing,
+//     so it stays there; and because retirement counts recalls, the frozen count
+//     never reaches min_observations either. The entry is neither used nor retired.
+//
+// A message naming only the first case would tell an Alertmanager operator the
+// opposite of what will happen to them, so both are named whenever both are possible.
+// The warning never hard-fails: a deployment whose source does send resolves is
+// correctly configured, and the hedged variant says so outright.
+//
+// Silent when instant recall is off (nothing recalls, so there is no trust to decay)
+// or when outcome.ledger_path is unset (the operator turned the learning loop off,
+// which `lore curate` likewise reports as an info, not a warning).
+func RecallDecayWarning(cfg *config.Config, resolveCapable bool) string {
 	if !cfg.Catalog.InstantRecall.Enabled || cfg.Outcome.LedgerPath == "" {
 		return ""
 	}
 	if cfg.Notify.Slack.FeedbackButtons || cfg.Notify.Matrix.FeedbackReactions {
 		return ""
 	}
-	return "instant recall is enabled with an outcome ledger, but no feedback channel is on " +
-		"(notify.slack.feedback_buttons and notify.matrix.feedback_reactions are both off): the only " +
-		"remaining way an entry can earn or lose trust is a resolved-alert webhook from your incident " +
-		"source, and whether yours sends those is not in this config — RunLore cannot tell from here. " +
-		"Where they do not arrive, recall confidence never moves and no entry is ever proposed for " +
-		"retirement: a knowledge entry that has stopped working keeps being recalled at full trust. " +
-		"Turn on notify.slack.feedback_buttons or notify.matrix.feedback_reactions, and keep " +
+	const fix = "Turn on notify.slack.feedback_buttons or notify.matrix.feedback_reactions, and keep " +
 		"outcome.ledger_path on a persistent volume so what it records survives a restart " +
 		"(docs/concepts/learning-loop.md)"
+	if !resolveCapable {
+		// No hedge is warranted here: every enabled source is a watcher, so no resolve
+		// can reach the ledger by construction and only the full-trust case is reachable.
+		return "instant recall is enabled with an outcome ledger, but nothing can write ground truth to " +
+			"it: no feedback channel is on (notify.slack.feedback_buttons and " +
+			"notify.matrix.feedback_reactions are both off) and no enabled source can deliver a resolve " +
+			"event at all — watcher sources (GitOps failures) and the re-investigate poller carry " +
+			"synthetic fingerprints no resolved-alert webhook can ever match. Recalled entries therefore " +
+			"stay at full trust indefinitely: outcome decay never rejects one and retirement never " +
+			"proposes one, so an entry that has stopped working keeps being recalled and nothing surfaces " +
+			"it for review. A human 👍/👎 is the only ground truth this deployment can accumulate. " + fix
+	}
+	return "instant recall is enabled with an outcome ledger, but no feedback channel is on " +
+		"(notify.slack.feedback_buttons and notify.matrix.feedback_reactions are both off), leaving a " +
+		"resolved-alert webhook from your incident source as the only ground truth that can move an " +
+		"entry's trust — and whether yours sends those is not in this config, so RunLore cannot tell " +
+		"from here. If they arrive, decay works and this line is safe to ignore. If they do not, trust " +
+		"goes wrong in BOTH directions. An entry recalled against a real alert fingerprint has the " +
+		"recall counted and the resolve never recorded, so its factor falls until it crosses " +
+		"catalog.instant_recall.outcome_floor and instant recall STOPS FIRING it — one unresolved " +
+		"recall already suffices at the defaults, and a rejected recall records nothing, so it stays " +
+		"there. An entry recalled from a source with no resolve channel (GitOps failures, " +
+		"re-investigate polls) never enters the ledger roll-up at all and keeps being recalled at full " +
+		"trust however stale it is. Neither reaches retirement, so nothing surfaces either failure for " +
+		"review. " + fix
 }
 
 // RequirePagerDutyAuth is the PagerDuty analogue of RequireWebhookAuth. The
