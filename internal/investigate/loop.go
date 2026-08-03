@@ -626,7 +626,7 @@ func (li *LoopInvestigator) Investigate(ctx context.Context, req Request) error 
 //
 // It threads two pieces of Investigate's state by pointer, mirroring the inline block
 // exactly: `result` (the deferred completion-metric label — "recall" on a short
-// circuit) and `verifyTotals` (so the opt-in reranker + the recall verify pass price
+// circuit) and `verifyTotals` (so the reranker + the recall verify pass price
 // their tokens into the per-investigation cost; both run on the verify tier).
 //
 // Instant recall is disabled under auto-execution: a poisoned catalog entry must not
@@ -638,7 +638,7 @@ func (li *LoopInvestigator) tryRecall(ctx context.Context, req Request, result *
 	if li.Recall == nil || (li.Actions != nil && li.Actions.IsAuto()) {
 		return nil, false
 	}
-	// Thread verifyTotals so the (opt-in) reranker's tokens fold into the
+	// Thread verifyTotals so the reranker's tokens fold into the
 	// per-investigation cost — it runs on the verify tier, so it prices there.
 	entry, conf, outcomeRejected := li.Recall.lookupWithUsage(ctx, req, verifyTotals)
 	if entry == nil {

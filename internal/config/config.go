@@ -1494,7 +1494,7 @@ func (c *Config) Validate() error {
 			return fmt.Errorf("catalog.commons.dir (%q) and catalog.dir (%q) must not contain one another: the loader walks recursively, so a nested root is indexed twice — once as shared, once as the operator's own", com, own)
 		}
 	}
-	// Instant-recall reranker (opt-in): its knobs are only meaningful when enabled.
+	// Instant-recall reranker (ON by default): its knobs are only meaningful when enabled.
 	// ApplyDefaults fills unset (0) values, so only an explicitly out-of-range setting
 	// reaches here — fail loud rather than silently gating on a nonsensical threshold.
 	// A threshold in (0,1] is a calibrated PROBABILITY (the reranker returns 0.0–1.0);

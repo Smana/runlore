@@ -81,7 +81,7 @@ func BuildModelAndTools(ctx context.Context, cfg *config.Config, gp providers.Gi
 				"margin_gap", cfg.Catalog.InstantRecall.MarginGap, "solo_floor", cfg.Catalog.InstantRecall.SoloFloor,
 				"outcome_prior", cfg.Catalog.InstantRecall.OutcomePrior, "outcome_floor", cfg.Catalog.InstantRecall.OutcomeFloor,
 				"stale_after", cfg.Catalog.InstantRecall.StaleAfter.Std())
-			// LLM reranker (opt-in): replace the corpus-dependent BM25-magnitude fire gate
+			// LLM reranker (ON by default): replace the corpus-dependent BM25-magnitude fire gate
 			// with a CALIBRATED match-confidence gate. Route the one cheap call to the
 			// verify tier (cheaper/faster) when configured, else the main model — mirroring
 			// how verifyFindings picks its model. Metrics/Log are set here so the reranker

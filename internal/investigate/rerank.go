@@ -18,7 +18,9 @@ import (
 	"github.com/Smana/runlore/internal/telemetry"
 )
 
-// Reranker is the opt-in LLM reranking stage of instant recall.
+// Reranker is the LLM reranking stage of instant recall. It is ON by default whenever
+// instant_recall is enabled; only an explicit `rerank: false` falls back to the legacy
+// BM25-magnitude gate.
 //
 // WHY it exists. Query enrichment fixed retrieval RANKING (the correct runbook now
 // ranks #1 on real BM25), but the short-circuit still gated on the ABSOLUTE BM25
@@ -38,9 +40,11 @@ import (
 // through confirmRecall (live-state confrontation) and the adversarial verifyFindings
 // pass. This is a retrieval-time decision, NOT a second verify.
 //
-// COST discipline. It is one cheap call (~1–2k tokens vs the ~100k a full
-// investigation costs) and only ever runs when retrieval already surfaced a plausible
-// candidate (Recall.lookup applies the MinScore cost guard before calling rank).
+// COST discipline. It is one cheap call (~1–2k tokens) that buys back a whole
+// investigation when it fires — the recorded demo transcript's came to 7 calls /
+// ~15.6k tokens, and max_tokens_per_investigation caps a run at 100k. It only ever
+// runs when retrieval already surfaced a plausible candidate (Recall.lookup applies
+// the MinScore cost guard before calling rank).
 //
 // FALSE-RECALL guard. A reranker that hallucinates a match is worse than no recall, so
 // rank fails SAFE: a model error, a "no match", or an entry_id outside the candidate

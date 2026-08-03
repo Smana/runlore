@@ -52,8 +52,9 @@ type Recall struct {
 	// short-circuits only on the reranker's CALIBRATED, corpus-INDEPENDENT match
 	// confidence. nil ⇒ the BM25-magnitude gate is used, byte-for-byte unchanged. The
 	// structural pre-filter, outcome decay, confirm and verify steps are identical
-	// either way — the reranker only changes WHICH signal decides the fire. Opt-in
-	// (catalog.instant_recall.rerank). See the Reranker doc for the full rationale.
+	// either way — the reranker only changes WHICH signal decides the fire. ON by
+	// default (catalog.instant_recall.rerank: nil ⇒ on). See the Reranker doc for the
+	// full rationale.
 	Rerank *Reranker
 
 	Outcome      OutcomeStats // optional; nil ⇒ no outcome decay
@@ -223,8 +224,8 @@ func (r *Recall) lookupWithUsage(ctx context.Context, req Request, totals *provi
 
 	// The fire gate produces the recalled entry `e` and its confidence `conf`. Two
 	// mutually-exclusive gates set them:
-	//   - Reranker gate (opt-in): a CALIBRATED, corpus-independent match confidence.
-	//   - BM25-magnitude gate (default): the classic margin/solo-floor logic, unchanged.
+	//   - Reranker gate (default): a CALIBRATED, corpus-independent match confidence.
+	//   - BM25-magnitude gate (`rerank: false`): the classic margin/solo-floor logic, unchanged.
 	var e catalog.Entry
 	var conf float64
 	var margin float64 // meaningful only in the magnitude gate; 0 (and logged as such) under rerank
