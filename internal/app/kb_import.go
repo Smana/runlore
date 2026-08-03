@@ -171,8 +171,10 @@ func runKBImport(args []string, w io.Writer) error {
 }
 
 // collectSources walks src for importable markdown, mirroring catalog.Load's
-// skip rules (internal/catalog/load.go): hidden files/dirs, non-.md, and the
-// reserved index.md / log.md / README.md are not knowledge entries.
+// skip rules (internal/catalog/load.go): non-regular files, hidden files/dirs,
+// non-.md, and the reserved index.md / log.md / README.md are not knowledge
+// entries. The mirroring is the contract — importing a file the loader would
+// refuse writes an entry into the KB that the catalog then declines to serve.
 func collectSources(src string) ([]string, error) {
 	var out []string
 	err := filepath.WalkDir(src, func(path string, d fs.DirEntry, werr error) error {
@@ -184,6 +186,11 @@ func collectSources(src string) ([]string, error) {
 			if path != src && strings.HasPrefix(base, ".") {
 				return filepath.SkipDir
 			}
+			return nil
+		}
+		// Same reason as the loader: a symlink is not a knowledge entry, and the
+		// os.ReadFile that follows would follow it out of src.
+		if !d.Type().IsRegular() {
 			return nil
 		}
 		if !catalog.IsEntryFile(base) {

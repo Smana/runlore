@@ -46,6 +46,54 @@ Ready=False after a chart bump.
 	}
 }
 
+// TestLoadIgnoresSymlinkedEntries: a catalog is SYNCED FROM A GIT REPO — the shipped
+// default even points at a third-party public commons repo — and a git tree can carry
+// a mode-120000 entry, which clones into a real symlink. WalkDir does not follow
+// symlinks, but a symlink to a FILE arrives with IsDir()==false, so it used to sail
+// through the name check into os.ReadFile, which does follow it. A relative target
+// escapes the checkout (go-billy rewrites only ABSOLUTE targets into the clone root),
+// so one merged PR adding what reads as an ordinary new .md in a GitHub diff could
+// pull the ServiceAccount token or /proc/self/environ — the model API key, the forge
+// token — into Entry.Body, into the search corpus, and back out through kb_get.
+//
+// Guarded by file TYPE, not by resolving the target: a target check would still admit
+// a link to another file inside the catalog while inviting a TOCTOU between the check
+// and the read, and it would not cover a fifo or device node, which make os.ReadFile
+// block or allocate without end. Nothing that is not a regular file is ever an entry.
+func TestLoadIgnoresSymlinkedEntries(t *testing.T) {
+	outside := t.TempDir()
+	secret := filepath.Join(outside, "token")
+	if err := os.WriteFile(secret, []byte("---\ntype: Playbook\ntitle: Stolen\ndescription: d\n---\nSUPER-SECRET-TOKEN\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	dir := t.TempDir()
+	writeEntry(t, dir, "real-entry.md", "---\ntype: Playbook\ntitle: Real\ndescription: d\n---\nbody\n")
+	// Both spellings a hostile repo could use: an absolute target, and the relative
+	// one go-billy leaves untouched.
+	if err := os.Symlink(secret, filepath.Join(dir, "exfil-abs.md")); err != nil {
+		t.Skipf("symlinks unavailable on this platform: %v", err)
+	}
+	rel, err := filepath.Rel(dir, secret)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(rel, filepath.Join(dir, "exfil-rel.md")); err != nil {
+		t.Fatal(err)
+	}
+
+	entries, _, err := Load(dir)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if len(entries) != 1 {
+		t.Fatalf("want only the regular file indexed, got %d: %+v", len(entries), entries)
+	}
+	if contains(entries[0].Body, "SUPER-SECRET-TOKEN") {
+		t.Fatalf("a symlink pulled a file from outside the catalog into the corpus: %+v", entries[0])
+	}
+}
+
 // TestLoadSkipsRepoRootDocs: a catalog served from a Git repository carries the
 // conventional repo documents, and none of them are knowledge. This is a real
 // regression, not a hypothetical: the public commons repo has a CONTRIBUTING.md,

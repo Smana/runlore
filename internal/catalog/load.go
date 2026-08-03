@@ -35,6 +35,19 @@ func Load(dir string) (entries []Entry, skipped []string, err error) {
 			}
 			return nil
 		}
+		// Only regular files are entries. A catalog is synced from a Git repo — the
+		// shipped default points at a third-party public commons — and a mode-120000
+		// tree entry clones into a real symlink. WalkDir does not follow symlinks, but
+		// a symlink to a FILE arrives here with IsDir()==false, and os.ReadFile below
+		// DOES follow it: a relative target (go-billy only rewrites absolute ones into
+		// the clone root) reads the ServiceAccount token or /proc/self/environ into
+		// Entry.Body, into the search corpus, and back out through kb_get. Checking the
+		// type rather than resolving the target also covers fifos and device nodes,
+		// which would make the read block or allocate forever, and leaves no TOCTOU
+		// window between a path check and the open.
+		if !d.Type().IsRegular() {
+			return nil
+		}
 		if !IsEntryFile(base) {
 			return nil
 		}
