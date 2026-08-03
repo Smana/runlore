@@ -9,7 +9,6 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
-	"strings"
 	"time"
 
 	git "github.com/go-git/go-git/v5"
@@ -17,11 +16,9 @@ import (
 	"github.com/go-git/go-git/v5/plumbing"
 	"github.com/go-git/go-git/v5/plumbing/object"
 	githttp "github.com/go-git/go-git/v5/plumbing/transport/http"
-)
 
-// tagRefPrefix is the fully-qualified namespace of a tag. Together with a bare
-// object id it spells the two IMMUTABLE revisions a Syncer accepts — see Syncer.Branch.
-const tagRefPrefix = "refs/tags/"
+	"github.com/Smana/runlore/internal/gitrev"
+)
 
 // pinRefSpecs is what a pin fetch asks for: every branch and every tag. A pin may
 // name any commit in the repository, so narrowing this would make "bump the pin"
@@ -29,27 +26,6 @@ const tagRefPrefix = "refs/tags/"
 var pinRefSpecs = []gitcfg.RefSpec{
 	"+refs/heads/*:refs/remotes/origin/*",
 	"+refs/tags/*:refs/tags/*",
-}
-
-// isObjectID reports whether s is a full-length git object id (SHA-1 40 hex chars,
-// SHA-256 64). Abbreviations are deliberately NOT accepted: they are ambiguous, and
-// a 7-character hex string is as likely to be a tag name as a commit.
-//
-// internal/config carries the same rule for the operator-facing side of the same
-// contract (config.isObjectID). Keep the two in step: config decides what may be
-// written, this decides what the resulting string means.
-func isObjectID(s string) bool {
-	if len(s) != 40 && len(s) != 64 {
-		return false
-	}
-	for _, r := range s {
-		switch {
-		case r >= '0' && r <= '9', r >= 'a' && r <= 'f', r >= 'A' && r <= 'F':
-		default:
-			return false
-		}
-	}
-	return true
 }
 
 // SyncDelta names the repo-relative paths that changed between two synced
@@ -82,7 +58,8 @@ type Syncer struct {
 	// It is one field rather than two because a syncer follows exactly one revision;
 	// the operator-facing surface (catalog.commons.branch vs .ref) is where the two
 	// intentions are kept apart, and config.ApplyDefaults normalises a `ref` into the
-	// spellings above. Same contract, read from its two ends.
+	// spellings above. Same contract, read from its two ends — and from one shared
+	// definition, internal/gitrev, so neither end can drift away from the other.
 	Branch string
 	Dir    string
 	Token  TokenFunc // nil / empty => anonymous (public repo)
@@ -121,7 +98,7 @@ func (s *Syncer) branch() string {
 // pin returns the immutable revision this syncer is frozen at, and whether it is
 // pinned at all. An unpinned syncer tracks branch().
 func (s *Syncer) pin() (plumbing.Revision, bool) {
-	if strings.HasPrefix(s.Branch, tagRefPrefix) || isObjectID(s.Branch) {
+	if gitrev.IsPinned(s.Branch) {
 		return plumbing.Revision(s.Branch), true
 	}
 	return "", false
@@ -138,7 +115,7 @@ func (s *Syncer) cloneOptions(auth *githttp.BasicAuth) *git.CloneOptions {
 	case !pinned:
 		o.ReferenceName = plumbing.NewBranchReferenceName(s.branch())
 		o.SingleBranch = true
-	case strings.HasPrefix(string(rev), tagRefPrefix):
+	case gitrev.IsTagRef(string(rev)):
 		o.ReferenceName = plumbing.ReferenceName(rev)
 		o.SingleBranch = true
 	}

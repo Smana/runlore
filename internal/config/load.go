@@ -8,6 +8,8 @@ import (
 	"time"
 
 	"gopkg.in/yaml.v3"
+
+	"github.com/Smana/runlore/internal/gitrev"
 )
 
 // Load reads, strictly parses, and validates a RunLore config file. Unknown keys
@@ -179,7 +181,7 @@ func ApplyDefaults(c *Config) {
 		// reject, instead of silently preferring one of the two.
 		switch {
 		case cc.Ref != "" && cc.Branch == "":
-			cc.Branch = pinnedRevision(cc.Ref)
+			cc.Branch = gitrev.QualifyTag(cc.Ref)
 		case cc.Ref == "" && cc.Branch == "":
 			cc.Branch = "main"
 		}
