@@ -167,7 +167,7 @@ func (c *Client) Query(ctx context.Context, query string, w providers.TimeWindow
 	// band rather than dropping the lines: the same reasoning as the truncation
 	// sentinel — the model must know the view is incomplete, and a returned
 	// error here would throw away hits that are perfectly good evidence.
-	if partial, reason := shardFailure(respBody); partial {
+	if partial, reason := shardFailure(respBody, c.index); partial {
 		out = append(out, partialLine(reason))
 	}
 	return out, nil
@@ -284,8 +284,20 @@ func (c *Client) searchBody(query string, w providers.TimeWindow, size int, sort
 		body["size"] = size
 	}
 	if sortDesc {
-		body["sort"] = []map[string]any{{c.timestampField: map[string]any{"order": "desc"}}}
+		// unmapped_type keeps a rolling logs-* pattern searchable when an OLDER index
+		// in it has no mapping for the timestamp field. Without it ES rejects the whole
+		// search with "No mapping found for [@timestamp] in order to sort on" — a dead
+		// end mid-incident, and one that looks like a RunLore bug rather than a mapping
+		// gap.
+		body["sort"] = []map[string]any{{c.timestampField: map[string]any{"order": "desc", "unmapped_type": "date"}}}
 	}
+	// NOT projected with _source, deliberately. size:1000 does pull complete ECS
+	// documents (2-5 KB each) when the renderer reads only a handful of fields, so the
+	// saving would be real — but the pod/container field NAMES are operator-configured
+	// in internal/investigate (logs.fields.*), and this client does not know them. A
+	// projection built from what the client knows would silently drop the fields the
+	// renderer groups by whenever an operator has customised them. Worth doing once
+	// the conventions are threaded through; not worth risking blank pod columns for.
 	return body
 }
 
@@ -335,9 +347,9 @@ func (c *Client) indexPath() string {
 // perfectly well-formed while covering only part of the window, and
 // logs_error_summary would report those counts as complete. Callers must treat
 // a true here as "this answer is not the whole answer".
-func shardFailure(body []byte) (bool, string) {
+func shardFailure(body []byte, indexPattern string) (bool, string) {
 	var resp struct {
-		Shards struct {
+		Shards *struct {
 			Total      int `json:"total"`
 			Successful int `json:"successful"`
 			Failed     int `json:"failed"`
@@ -352,7 +364,31 @@ func shardFailure(body []byte) (bool, string) {
 	}
 	// A body that does not parse is not this function's problem — the caller
 	// unmarshals it properly right after and reports the real error.
-	if err := json.Unmarshal(body, &resp); err != nil || resp.Shards.Failed == 0 {
+	if err := json.Unmarshal(body, &resp); err != nil {
+		return false, ""
+	}
+	// An index PATTERN that matches nothing is a 200, not a 404: allow_no_indices
+	// defaults to true for wildcards, so `POST /logs-*/_search` against a cluster
+	// with no logs-* index returns {"_shards":{"total":0,...},"hits":{"hits":[]}}.
+	//
+	// Without this, zero shards reads as zero hits and the model is told the workload
+	// logged nothing — when in fact RunLore never looked at an index. A wrong
+	// logs.index is the single most likely misconfiguration for this provider (an ILM
+	// rollover to logs-app-*, a data-stream naming scheme, a typo'd prefix), and
+	// config validation only checks character legality, not that the pattern resolves.
+	//
+	// _shards.total == 0 is the unambiguous signal: can-match skipping increments
+	// `skipped`, it does not reduce `total`.
+	// A POINTER, so an absent _shards object (a stub server, a proxy that rewrote
+	// the envelope) is distinguishable from a present one reporting zero. Only a
+	// _shards that IS there and says total:0 means "the pattern resolved to nothing".
+	if resp.Shards == nil {
+		return false, ""
+	}
+	if resp.Shards.Total == 0 {
+		return true, fmt.Sprintf("index pattern %q matched no indices — check logs.index", indexPattern)
+	}
+	if resp.Shards.Failed == 0 {
 		return false, ""
 	}
 	reason := fmt.Sprintf("%d of %d shards failed", resp.Shards.Failed, resp.Shards.Total)
@@ -434,7 +470,7 @@ func (c *Client) Hits(ctx context.Context, query string, w providers.TimeWindow,
 	// very spike logs_error_summary exists to find. Fail loudly instead — the
 	// caller (internal/investigate/logs_summary_tool.go) degrades gracefully,
 	// still rendering top messages and surfacing this reason.
-	if partial, reason := shardFailure(respBody); partial {
+	if partial, reason := shardFailure(respBody, c.index); partial {
 		return nil, fmt.Errorf("logs histogram is incomplete: %s", reason)
 	}
 	var resp struct {
@@ -553,7 +589,7 @@ func (c *Client) TopMessages(ctx context.Context, query string, w providers.Time
 	// rejection above, a shard failure can be transient (a node briefly out),
 	// and permanently downgrading a working aggregation over one blip would be
 	// the wrong trade.
-	if partial, _ := shardFailure(respBody); partial {
+	if partial, _ := shardFailure(respBody, c.index); partial {
 		return c.topMessagesClientSide(ctx, query, w, k)
 	}
 	var resp struct {
@@ -680,17 +716,67 @@ func (c *Client) FieldNames(ctx context.Context, _ string, _ providers.TimeWindo
 	if resp.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("logs status %d: %s", resp.StatusCode, string(body))
 	}
+	// Decode the capability object rather than skipping it: it carries
+	// metadata_field, which is how ES marks its own plumbing (_id, _index, _seq_no,
+	// _version, _routing, _ignored). Those are not fields an operator can filter logs
+	// on, and left in they crowd out the ones that matter — see the ordering note below.
 	var fc struct {
-		Fields map[string]json.RawMessage `json:"fields"`
+		Indices []string `json:"indices"`
+		Fields  map[string]map[string]struct {
+			MetadataField bool `json:"metadata_field"`
+		} `json:"fields"`
 	}
 	if err := json.Unmarshal(body, &fc); err != nil {
 		return nil, fmt.Errorf("parse field_caps: %w", err)
 	}
+	// An index pattern matching nothing answers 200 with an empty field map — the
+	// same zero-shard case shardFailure handles for _search. Returning an empty slice
+	// here made discover_log_fields print "nothing matched; widen the selector",
+	// pointing the model at the selector when the index pattern is the cause. This
+	// tool is the designated recovery path for a failed query_logs, so misdirecting
+	// here costs an investigation.
+	if len(fc.Fields) == 0 {
+		return nil, fmt.Errorf("index pattern %q matched no fields — the pattern likely resolves to no indices; check logs.index", c.index)
+	}
 	names := make([]string, 0, len(fc.Fields))
-	for name := range fc.Fields {
-		names = append(names, name)
+	for name, caps := range fc.Fields {
+		meta := false
+		for _, cap := range caps {
+			if cap.MetadataField {
+				meta = true
+				break
+			}
+		}
+		if !meta {
+			names = append(names, name)
+		}
 	}
 	sort.Strings(names)
+	// Surface the CONFIGURED fields first. Alphabetical order alone puts @timestamp
+	// and the ECS agent.*/cloud.*/data_stream.* families ahead of message, log.level
+	// and kubernetes.*, and renderRows caps output at 50 rows — so on a typical ECS +
+	// k8s mapping the model asked "what fields exist?" and got back ES plumbing and
+	// cloud metadata, with the ones it needs past the cut.
+	priority := []string{c.timestampField, c.levelField, c.messageField}
+	rank := make(map[string]int, len(priority))
+	for i, f := range priority {
+		if f != "" {
+			if _, dup := rank[f]; !dup {
+				rank[f] = i
+			}
+		}
+	}
+	sort.SliceStable(names, func(a, b int) bool {
+		ra, oka := rank[names[a]]
+		rb, okb := rank[names[b]]
+		if oka != okb {
+			return oka
+		}
+		if oka && okb {
+			return ra < rb
+		}
+		return false // stable: preserves the alphabetical order established above
+	})
 	out := make([]providers.FieldCount, 0, len(names))
 	for _, name := range names {
 		out = append(out, providers.FieldCount{Name: name})
