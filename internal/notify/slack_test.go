@@ -401,20 +401,71 @@ func TestSlackHypothesisPluralization(t *testing.T) {
 	}
 }
 
-// TestSlackWhatChangedNone proves finding #7: an empty ChangeRef renders an
-// informative clause, not the bare word "none" (which reads as a missing
-// field on a woken-up phone screen).
-func TestSlackWhatChangedNone(t *testing.T) {
+// TestSlackWhatChangedOmittedWhenUnknown: an absent ChangeRef renders NO
+// "What changed" field at all.
+//
+// This test previously asserted the opposite — that the card printed
+// "No Git change identified — likely infrastructure-induced". That was a
+// fabricated conclusion. change_ref is OPTIONAL in submit_findings, and
+// WhatChangedTool is only registered when a GitOps provider is configured, so in
+// a deployment without Flux/Argo the clause fired on EVERY card, and on recall
+// cards where no investigation ran at all. An empty optional field is not
+// evidence of absence, and "likely infrastructure-induced" is an inference the
+// investigation never made — it points a woken-up on-call away from the recent
+// deploy, the first thing they should check.
+//
+// The fixture's own "infra fault" summary shows the unsound inference had been
+// baked into the test as well as the renderer.
+func TestSlackWhatChangedOmittedWhenUnknown(t *testing.T) {
 	inv := providers.Investigation{
 		Title:      "t",
-		RootCauses: []providers.Hypothesis{{Summary: "infra fault"}}, // no ChangeRef
+		RootCauses: []providers.Hypothesis{{Summary: "some cause"}}, // no ChangeRef
 	}
 	txt := blocksText(t, summaryBlocks(inv))
-	if strings.Contains(txt, "*What changed:*\nnone") {
-		t.Errorf("must not render the bare placeholder \"none\":\n%s", txt)
+	if strings.Contains(txt, "What changed") {
+		t.Errorf("the card must not render a \"What changed\" field when the investigation never established one:\n%s", txt)
 	}
-	if !strings.Contains(txt, "No Git change") {
-		t.Errorf("expected an informative clause in place of \"none\":\n%s", txt)
+	if strings.Contains(txt, "infrastructure-induced") {
+		t.Errorf("the card must not infer a cause from an absent optional field:\n%s", txt)
+	}
+
+	// Control: when the investigation DID establish a change, it is rendered.
+	inv.RootCauses[0].ChangeRef = "apps/harbor/values.yaml: tag 1.14.2 -> 1.15.0"
+	txt = blocksText(t, summaryBlocks(inv))
+	if !strings.Contains(txt, "What changed") || !strings.Contains(txt, "1.15.0") {
+		t.Errorf("an established change must still be rendered:\n%s", txt)
+	}
+}
+
+// TestSlackCardDoesNotRestateTheAlertAsItsConclusion: inv.Title falls back to
+// req.Title, and for Alertmanager and Grafana req.Title IS labels.alertname —
+// and every synthesised terminal result (non-convergence, budget, timeout,
+// refusal) sets Title: req.Title unconditionally. Without a guard the header and
+// the verdict line print the same string twice, which is #399's original finding
+// and #409's stated failure, on precisely the inconclusive cards where restating
+// the alert as the answer misleads most.
+func TestSlackCardDoesNotRestateTheAlertAsItsConclusion(t *testing.T) {
+	inv := providers.Investigation{
+		AlertName:  "KubePodCrashLooping",
+		Title:      "KubePodCrashLooping", // the loop's fallback: same string
+		Verdict:    "action_required",
+		Confidence: 0.8,
+	}
+	txt := blocksText(t, summaryBlocks(inv))
+	// The header and the *Alert:* metadata field are both legitimate occurrences.
+	// The defect is specifically the VERDICT line appending it as the conclusion.
+	if strings.Contains(txt, "Action required*\u0026mdash;") || strings.Contains(txt, `Action required* \u2014 KubePodCrashLooping`) {
+		t.Errorf("the verdict line restated the alert name as the card's own conclusion:\n%s", txt)
+	}
+	if strings.Contains(txt, "*Action required* — KubePodCrashLooping") {
+		t.Errorf("the verdict line restated the alert name as the card's own conclusion:\n%s", txt)
+	}
+
+	// Control: a genuine conclusion distinct from the alert IS shown.
+	inv.Title = "Harbor chart bump deadlocked the DB migration"
+	txt = blocksText(t, summaryBlocks(inv))
+	if !strings.Contains(txt, "Harbor chart bump deadlocked") {
+		t.Errorf("a real conclusion must still be rendered alongside the verdict:\n%s", txt)
 	}
 }
 

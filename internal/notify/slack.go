@@ -408,13 +408,21 @@ func summaryBlocks(inv providers.Investigation) []map[string]any {
 	// confidence (2b, below) renders either way, so the layout stays complete.
 	if vEmoji, label := verdictBadge(inv.Verdict); label != "" {
 		line := fmt.Sprintf("%s *%s*", vEmoji, label)
-		if inv.AlertName != "" && inv.Title != "" {
+		if inv.AlertName != "" && inv.Title != "" && !strings.EqualFold(strings.TrimSpace(inv.Title), strings.TrimSpace(inv.AlertName)) {
 			line += " — " + escapeMrkdwn(title)
 		}
 		blocks = append(blocks, map[string]any{"type": "section", "text": map[string]any{"type": "mrkdwn",
 			"text": truncate(line, 2900)}})
-	} else if inv.AlertName != "" && inv.Title != "" {
+	} else if inv.AlertName != "" && inv.Title != "" && !strings.EqualFold(strings.TrimSpace(inv.Title), strings.TrimSpace(inv.AlertName)) {
 		// No verdict to anchor it to, but the conclusion still has to appear.
+		//
+		// Both branches skip when Title is just the alert name again. inv.Title falls
+		// back to req.Title (loop.go), and for Alertmanager and Grafana req.Title IS
+		// labels.alertname — and every synthesised terminal result (non-convergence,
+		// budget, timeout, refusal) sets Title: req.Title unconditionally. Without this
+		// the header and the conclusion line print the same string twice, which is
+		// #399's original finding, on precisely the inconclusive cards where restating
+		// the alert as the answer misleads most.
 		blocks = append(blocks, map[string]any{"type": "section", "text": map[string]any{"type": "mrkdwn",
 			"text": truncate(escapeMrkdwn(title), 2900)}})
 	}
@@ -606,13 +614,20 @@ func metadataFields(inv providers.Investigation) []map[string]any {
 		add("Resource", escapeMrkdwn(strings.TrimSpace(inv.Resource.Kind+" "+ref)))
 	}
 	add("Started", slackDate(inv.StartedAt))
+	// Only rendered when the investigation actually established a change. change_ref
+	// is OPTIONAL in submit_findings, and WhatChangedTool is only registered when a
+	// GitOps provider is configured — so in a deployment without Flux/Argo the field
+	// is empty on every card, and on a recall card no investigation ran at all.
+	//
+	// The previous else-branch printed "No Git change identified — likely
+	// infrastructure-induced" in exactly those cases. An absent optional field is not
+	// evidence of absence, and "likely infrastructure-induced" is an inference the
+	// investigation never made: the same speculation-from-silence that #420 forbade on
+	// the prompt side. Operationally it points a woken-up on-call AWAY from the recent
+	// deploy, which is the first thing they should check.
 	if len(inv.RootCauses) > 0 {
 		if ch := inv.RootCauses[0].ChangeRef; ch != "" {
 			add("What changed", truncate(escapeMrkdwn(ch), 200))
-		} else {
-			// "none" reads as a missing field on a woken-up phone screen; say what
-			// was actually established instead — no change was implicated.
-			add("What changed", "No Git change identified — likely infrastructure-induced")
 		}
 	}
 	if inv.Occurrences > 1 && inv.Prior == nil {
