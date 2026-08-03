@@ -3,7 +3,10 @@
 package httpx
 
 import (
+	"errors"
+	"fmt"
 	"net/http"
+	"net/url"
 	"strings"
 )
 
@@ -38,6 +41,39 @@ func SanitizeHeader(s string) string {
 		}
 	}
 	return strings.TrimSpace(b.String())
+}
+
+// SanitizeURLError rewrites a *url.Error so only the scheme and host survive —
+// never the path or query. Use it on every error out of http.Client.Do or
+// http.NewRequest whose URL may be a credential.
+//
+// For an incoming webhook (Slack, Discord, Teams) the URL *is* the credential: the
+// secret lives in the path. net/http builds a *url.Error whose Error() prints the
+// full URL, and it masks only the userinfo password — the path is verbatim:
+//
+//	Post "https://hooks.slack.com/services/T0/B0/REAL_SECRET": dial tcp: ...
+//
+// Wrapping that with %w and logging it writes a live posting credential into the
+// operator's log store on any transient DNS or dial failure. No attacker required.
+//
+// The cause is re-wrapped with %w, so errors.Is/As against the underlying error
+// (context.DeadlineExceeded, net.Error) keeps working; the *url.Error itself is
+// deliberately dropped, since it is the thing carrying the secret.
+func SanitizeURLError(err error) error {
+	var ue *url.Error
+	if !errors.As(err, &ue) {
+		return err
+	}
+	// Parse failures fall back to "?" rather than to ue.URL: an unparseable URL is
+	// exactly the case where echoing it back is least justified.
+	loc := "?"
+	if u, perr := url.Parse(ue.URL); perr == nil && u.Host != "" {
+		loc = u.Scheme + "://" + u.Host
+	}
+	if ue.Err == nil {
+		return fmt.Errorf("%s %s", ue.Op, loc)
+	}
+	return fmt.Errorf("%s %s: %w", ue.Op, loc, ue.Err)
 }
 
 // RequestID returns the first present upstream request-id header (by the

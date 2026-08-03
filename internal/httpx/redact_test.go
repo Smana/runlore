@@ -3,7 +3,9 @@
 package httpx
 
 import (
+	"errors"
 	"net/http"
+	"net/url"
 	"strings"
 	"testing"
 )
@@ -68,5 +70,49 @@ func TestRequestID(t *testing.T) {
 				t.Errorf("RequestID(%v) = %q, want %q", tc.headers, got, tc.want)
 			}
 		})
+	}
+}
+
+// TestSanitizeURLError: for an incoming webhook the URL is the credential — the
+// secret is the path — and net/http masks only the userinfo password, so the
+// secret survives into any error that wraps it, and from there into the logs.
+func TestSanitizeURLError(t *testing.T) {
+	const secret = "XoXbSuperSecretWebhookKey123"
+	cause := errors.New("dial tcp: lookup hooks.slack.com: no such host")
+
+	got := SanitizeURLError(&url.Error{
+		Op:  "Post",
+		URL: "https://hooks.slack.com/services/T00000000/B00000000/" + secret,
+		Err: cause,
+	})
+	if strings.Contains(got.Error(), secret) {
+		t.Fatalf("the webhook secret survived sanitizing: %v", got)
+	}
+	if !strings.Contains(got.Error(), "https://hooks.slack.com") {
+		t.Fatalf("the host must be kept — it is what makes the error diagnosable: %v", got)
+	}
+	// The cause must stay unwrappable, or callers lose errors.Is on timeouts.
+	if !errors.Is(got, cause) {
+		t.Fatalf("cause no longer unwraps: %v", got)
+	}
+
+	// A userinfo password is masked by net/http, but the path never is; check we
+	// drop both regardless of what the URL carries.
+	got = SanitizeURLError(&url.Error{Op: "Post", URL: "https://u:pw@example.com/a/" + secret, Err: cause})
+	for _, leak := range []string{secret, "pw"} {
+		if strings.Contains(got.Error(), leak) {
+			t.Fatalf("%q survived sanitizing: %v", leak, got)
+		}
+	}
+
+	// Unparseable URL: fall back to a placeholder rather than echoing it.
+	got = SanitizeURLError(&url.Error{Op: "Post", URL: "://" + secret, Err: cause})
+	if strings.Contains(got.Error(), secret) {
+		t.Fatalf("an unparseable URL must not be echoed: %v", got)
+	}
+
+	// A non-url.Error is returned untouched.
+	if got := SanitizeURLError(cause); !errors.Is(got, cause) {
+		t.Fatalf("a plain error must pass through: %v", got)
 	}
 }
