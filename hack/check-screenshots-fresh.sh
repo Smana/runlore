@@ -37,7 +37,7 @@ RENDERER=(internal/notify/slack.go internal/notify/format.go)
 #     fails again, so an acknowledgement cannot silently become permanent.
 #
 # Clear it (set to "") in the same commit that lands retaken screenshots.
-ACKNOWLEDGED_RENDERER="e4b802769aa1f276c9322860a36f6f5de4d75458"
+ACKNOWLEDGED_RENDERER="a97b1df68c58cc4663d86f42ee160ca5f9f5a638"
 ACKNOWLEDGED_REASON="The VISUAL drift is still #432's: it removed the fabricated 'What changed: No Git change identified' line and both shipped screenshots still show it. Retaking needs a live Slack workspace, unavailable until the demo cluster is rebuilt. The named commit is newer only because a security fix (webhook URL sanitised out of an error log) touched slack.go without changing a pixel — RENDERER cannot tell visual edits from non-visual ones, so it re-armed on a no-op."
 
 last_commit_time() {

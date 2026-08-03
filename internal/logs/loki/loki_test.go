@@ -4,6 +4,7 @@ package loki
 
 import (
 	"context"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -11,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/Smana/runlore/internal/httpx"
 	"github.com/Smana/runlore/internal/providers"
 )
 
@@ -299,5 +301,31 @@ func TestFieldNamesBothDown(t *testing.T) {
 	defer srv.Close()
 	if _, err := New(srv.URL).FieldNames(context.Background(), `{a="b"}`, providers.TimeWindow{}); err == nil {
 		t.Fatalf("both endpoints failing must error")
+	}
+}
+
+// TestQueryRefusesAnOversizedResponse — see the VictoriaLogs sibling: the query
+// is model-chosen, the pod is memory-capped, and the overflow must reach the
+// model as actionable text rather than as an OOM or a silent partial result.
+func TestQueryRefusesAnOversizedResponse(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = io.WriteString(w, `{"data":{"result":[{"stream":{"app":"a"},"values":[`)
+		entry := `["1700000000000000000","` + strings.Repeat("x", 900) + `"],`
+		for n := 0; n < httpx.MaxResponseBytes+(1<<10); n += len(entry) {
+			_, _ = io.WriteString(w, entry)
+		}
+		_, _ = io.WriteString(w, `["1700000000000000000","last"]]}]}}`)
+	}))
+	defer srv.Close()
+
+	_, err := New(srv.URL).Query(context.Background(), `{app="a"}`, providers.TimeWindow{})
+	if err == nil {
+		t.Fatal("an over-cap response must not be read whole")
+	}
+	if !errors.Is(err, httpx.ErrResponseTooLarge) {
+		t.Fatalf("want ErrResponseTooLarge, got %v", err)
+	}
+	if !strings.Contains(err.Error(), "narrow the query") {
+		t.Errorf("the error must tell the model what to do: %v", err)
 	}
 }

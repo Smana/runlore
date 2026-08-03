@@ -15,7 +15,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"io"
 	"net/http"
 	"net/url"
 	"os"
@@ -416,7 +415,17 @@ func (c *Client) search(ctx context.Context, body map[string]any) ([]byte, int, 
 		return nil, 0, fmt.Errorf("logs query: %w", err)
 	}
 	defer func() { _ = resp.Body.Close() }()
-	respBody, _ := io.ReadAll(resp.Body)
+	// Bounded: the query is model-chosen and the pod is memory-capped, so an
+	// unbounded read turns one over-broad query into an OOM. The ERROR body gets
+	// the same generous bound rather than the 512-byte diagnostic prefix the
+	// sibling backends use, because here it is parsed, not just printed:
+	// isTextFieldAggError and shardFailure read it to pick the fallback path, and
+	// an ES root_cause envelope can push the interesting substring past 512 bytes.
+	// Capping for display happens where it is formatted into an error instead.
+	respBody, err := httpx.ReadBody(resp.Body)
+	if err != nil {
+		return nil, 0, fmt.Errorf("logs query: %w", err)
+	}
 	return respBody, resp.StatusCode, nil
 }
 
@@ -428,7 +437,7 @@ func (c *Client) doSearch(ctx context.Context, body map[string]any) ([]byte, err
 		return nil, err
 	}
 	if status != http.StatusOK {
-		return nil, fmt.Errorf("logs status %d: %s", status, string(respBody))
+		return nil, fmt.Errorf("logs status %d: %s", status, httpx.SafeErrorBody(respBody))
 	}
 	return respBody, nil
 }
@@ -574,7 +583,7 @@ func (c *Client) TopMessages(ctx context.Context, query string, w providers.Time
 			c.msgFieldNotAggregatable.Store(true)
 			return c.topMessagesClientSide(ctx, query, w, k)
 		}
-		return nil, fmt.Errorf("logs status %d: %s", status, string(respBody))
+		return nil, fmt.Errorf("logs status %d: %s", status, httpx.SafeErrorBody(respBody))
 	}
 	// A 200 whose shards partly failed (see shardFailure) — the mapping-drift
 	// case, where only the OLDER indices in the pattern lack the aggregatable
@@ -712,9 +721,14 @@ func (c *Client) FieldNames(ctx context.Context, _ string, _ providers.TimeWindo
 		return nil, fmt.Errorf("logs query: %w", err)
 	}
 	defer func() { _ = resp.Body.Close() }()
-	body, _ := io.ReadAll(resp.Body)
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("logs status %d: %s", resp.StatusCode, string(body))
+		return nil, fmt.Errorf("logs status %d: %s", resp.StatusCode, httpx.ReadErrorBody(resp.Body))
+	}
+	// Bounded: _field_caps over a wide index pattern is one of the biggest
+	// responses this client can draw, and the pod is memory-capped.
+	body, err := httpx.ReadBody(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("logs query: %w", err)
 	}
 	// Decode the capability object rather than skipping it: it carries
 	// metadata_field, which is how ES marks its own plumbing (_id, _index, _seq_no,

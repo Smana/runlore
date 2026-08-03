@@ -4,12 +4,17 @@ package prometheus
 
 import (
 	"context"
+	"errors"
+	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
+	"github.com/Smana/runlore/internal/httpx"
 	"github.com/Smana/runlore/internal/providers"
 )
 
@@ -327,5 +332,43 @@ func TestWithFlavorPinsAndShortCircuits(t *testing.T) {
 	c.WithFlavor(FlavorUnknown)
 	if c.Flavor() != FlavorVictoriaMetrics {
 		t.Fatalf("stray WithFlavor downgraded flavor to %q", c.Flavor())
+	}
+}
+
+// TestQueryRefusesAnOversizedResponse: the PromQL is model-chosen and the pod is
+// memory-capped, so an unbounded io.ReadAll let one over-broad expression
+// ({__name__=~".+"} over a long window) pull the whole series set into memory.
+// The read is bounded at httpx.MaxResponseBytes, and the overflow must reach the
+// model as actionable text — the loop hands a tool error back verbatim
+// ("error: <text>"), so the model learns it did not see everything and what to
+// change, rather than getting a truncated body that fails to parse.
+func TestQueryRefusesAnOversizedResponse(t *testing.T) {
+	// A syntactically valid envelope, deliberately larger than the cap.
+	var b strings.Builder
+	b.WriteString(`{"status":"success","data":{"resultType":"vector","result":[`)
+	for b.Len() < httpx.MaxResponseBytes+(1<<10) {
+		if b.Len() > 60 {
+			b.WriteString(",")
+		}
+		fmt.Fprintf(&b, `{"metric":{"__name__":"up","instance":"pod-%d.namespace.svc.cluster.local:9090"},"value":[1700000000,"1"]}`, b.Len())
+	}
+	b.WriteString(`]}}`)
+	body := b.String()
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = io.WriteString(w, body)
+	}))
+	defer srv.Close()
+
+	_, err := New(srv.URL).Query(context.Background(), `{__name__=~".+"}`, time.Now())
+	if err == nil {
+		t.Fatal("an over-cap response must not be read whole")
+	}
+	if !errors.Is(err, httpx.ErrResponseTooLarge) {
+		t.Fatalf("want ErrResponseTooLarge, got %v", err)
+	}
+	// Actionable for the model, not just a parse failure.
+	if !strings.Contains(err.Error(), "narrow the query") {
+		t.Errorf("the error must tell the model what to do: %v", err)
 	}
 }
