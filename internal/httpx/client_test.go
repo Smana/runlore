@@ -98,6 +98,36 @@ func TestDenyInternalRedirectAllowsInternalOrigin(t *testing.T) {
 	}
 }
 
+// TestDenyInternalRedirectBlocksLinkLocalFromInternalOrigin pins the one target the
+// internal-origin exemption must NOT cover. Most RunLore egress (metrics, logs, MCP,
+// an in-cluster model) starts at a ClusterIP, so that exemption applies to the
+// majority of outbound traffic — and it is right for private↔private, where a
+// backend legitimately redirects to itself. Link-local is different in kind: nothing
+// in a cluster 3xx-redirects to 169.254.0.0/16, and the one thing living there is the
+// cloud metadata service. A compromised in-cluster backend (or a hostile MCP server
+// on a private address) answering 302 → 169.254.169.254 would otherwise have its
+// IMDSv1 credentials read and handed to the model, which publishes them into a KB PR,
+// a Slack card or a webhook — a complete exfiltration path.
+func TestDenyInternalRedirectBlocksLinkLocalFromInternalOrigin(t *testing.T) {
+	orig := lookupIP
+	defer func() { lookupIP = orig }()
+	lookupIP = func(host string) ([]net.IP, error) {
+		if host == "loki.monitoring.svc.cluster.local" {
+			return []net.IP{net.ParseIP("10.96.0.10")}, nil // in-cluster origin
+		}
+		return []net.IP{net.ParseIP("169.254.169.254")}, nil
+	}
+	origin := mkreq(t, "http://loki.monitoring.svc.cluster.local/loki/api/v1/query")
+	for _, target := range []string{
+		"http://169.254.169.254/latest/meta-data/iam/security-credentials/",
+		"http://metadata.example/latest/meta-data/", // via DNS, same destination
+	} {
+		if err := DenyInternalRedirect(mkreq(t, target), []*http.Request{origin}); err == nil {
+			t.Fatalf("a redirect to link-local %s must be denied even from an in-cluster origin", target)
+		}
+	}
+}
+
 func TestDenyInternalRedirectBlocksExternalToInternal(t *testing.T) {
 	orig := lookupIP
 	defer func() { lookupIP = orig }()

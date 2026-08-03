@@ -58,15 +58,31 @@ func DenyInternalRedirect(req *http.Request, via []*http.Request) error {
 			}
 		}
 	}
-	// In-cluster-origin chains redirect among private addresses legitimately — only
-	// guard chains that began at a public endpoint.
-	if len(via) > 0 && hostIsInternal(via[0].URL.Hostname()) {
-		return nil
-	}
 	host := req.URL.Hostname()
 	ips, err := lookupIP(host)
 	if err != nil {
 		return fmt.Errorf("redirect host %q: %w", host, err)
+	}
+	// Link-local is refused from EVERY origin, including an in-cluster one — it is the
+	// one internal target the exemption below must not cover. Nothing in a cluster
+	// legitimately 3xx-redirects into 169.254.0.0/16, and what answers there is the
+	// cloud metadata service. Most RunLore egress (metrics, logs, MCP, an in-cluster
+	// model) starts at a ClusterIP, so leaving this to the exemption switched the
+	// guard off for the majority of outbound traffic: a compromised backend or a
+	// hostile MCP server answering 302 → 169.254.169.254 would have its IMDSv1
+	// credentials read into tool output and then published by the model into a KB PR,
+	// a Slack card or a webhook. The key-stripping above removes the credentials we
+	// SEND; this removes the one we would otherwise FETCH.
+	for _, ip := range ips {
+		if ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() {
+			return fmt.Errorf("refusing redirect to link-local address %s (host %q)", ip, host)
+		}
+	}
+	// Everything else: in-cluster-origin chains redirect among private addresses
+	// legitimately (http→https, a trailing slash, a backend behind a proxy), so only
+	// guard chains that began at a public endpoint.
+	if len(via) > 0 && hostIsInternal(via[0].URL.Hostname()) {
+		return nil
 	}
 	for _, ip := range ips {
 		if isInternalIP(ip) {
