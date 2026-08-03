@@ -80,20 +80,21 @@ jobs:
             exit 0
           fi
           published=$(git log -1 --format=%cI FETCH_HEAD)
-          # The scorecard's summary line carries the scenario count of THAT run
-          # ("**2/4 scenarios reached**"). Lift it so the provenance sentence states the
-          # count as a property of the run, letting a reader diff it against the case
-          # directory the framing links to. If the format ever changes the match is
-          # empty and the sentence degrades to the date alone — never a wrong number.
-          total=$(printf '%s\n' "$scorecard" | sed -n 's/.*\*\*[0-9][0-9]*\/\([0-9][0-9]*\) scenarios reached.*/\1/p' | head -1)
+          # The scenario count of THAT run, so the provenance sentence states it as a
+          # property of the run and a reader can diff it against the case directory the
+          # framing links to. It comes from history.jsonl — the machine-readable artifact
+          # `lore eval scorecard` writes into the same commit, whose last line is this run
+          # — rather than being scraped back out of scorecard.md's prose, which would bind
+          # this step to a Go format string nothing ties to the docs. Absent file or field
+          # ⇒ empty ⇒ the sentence degrades to the date alone, never a wrong number.
+          total=$(git show FETCH_HEAD:history.jsonl 2>/dev/null | tail -1 | jq -r '.total // empty' 2>/dev/null || true)
           covered=""
           if [ -n "$total" ]; then
             noun="scenarios"
             if [ "$total" = "1" ]; then noun="scenario"; fi
             covered=" It covered the **${total} ${noun}** the suite held at that time."
           fi
-          block=$(mktemp)
-          {
+          block=$({
             echo "> **Published ${published}** from the [\`eval-scorecard\`](https://github.com/Smana/runlore/tree/eval-scorecard)"
             echo "> branch.${covered}"
             echo "> The [case definitions](https://github.com/Smana/runlore/tree/main/examples/eval) are the suite as"
@@ -104,13 +105,14 @@ jobs:
             # A no-op if the generator ever stops emitting it. `/./,$!d` then eats the
             # blank line it left behind, so the block above is always separated from the
             # scorecard by exactly one — whether or not the H1 was there to delete.
-            printf '%s\n' "$scorecard" | sed -e '1{/^# /d;}' -e '/./,$!d'
-          } > "$block"
-          # getline reads the block verbatim — no shell interpolation of scorecard text
-          # (it is full of backticks, $ and quotes). Both markers are kept so the
-          # substitution stays repeatable.
-          awk -v block="$block" '
-            $0 == "<!-- scorecard:begin -->" { print; skip = 1; while ((getline line < block) > 0) print line; close(block); next }
+            sed -e '1{/^# /d;}' -e '/./,$!d' <<<"$scorecard"
+          })
+          # ENVIRON hands awk the block verbatim: no escape processing (which is what
+          # rules out `awk -v`) and no shell interpolation of scorecard text, which is
+          # full of backticks, $ and quotes. Both markers are kept so the substitution
+          # stays repeatable.
+          BLOCK="$block" awk '
+            $0 == "<!-- scorecard:begin -->" { print; print ENVIRON["BLOCK"]; skip = 1; next }
             $0 == "<!-- scorecard:end -->"   { skip = 0 }
             !skip { print }
           ' "$page" > "$page.new"
