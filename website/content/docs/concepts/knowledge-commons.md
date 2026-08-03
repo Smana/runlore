@@ -36,7 +36,8 @@ deserve different amounts of trust and you should be able to tell them apart at 
 
 **Your entry wins ties.** When a commons entry and one of your own score equally, yours
 ranks first. Knowledge written from your actual incidents beats a generic description of the
-same failure class, so the commons can only ever act as a floor — never as competition.
+same failure class. That decides equal scores only — which corpus leads on a given alert is a
+relevance question, answered [below](#which-corpus-leads-and-when).
 
 **The curator never writes to it.** Drafted entries always land in your own catalog repo.
 The commons directory is a mirror of an upstream repository and stays pristine; there is no
@@ -68,6 +69,59 @@ still gets gathered; the playbook just makes gathering it faster.
 
 To get instant recall you need entries scoped to your workloads (`resource:
 <namespace>/<name>`). Those are the ones RunLore drafts for you from your own incidents.
+
+## Which corpus leads, and when
+
+`kb_search` is where commons entries do their work, and how much of it they keep depends on
+what is failing. It is worth stating precisely, because nothing warns you when a playbook that
+used to surface stops surfacing — or when one you assumed you had replaced surfaces anyway.
+
+**Every `kb_search` query is enriched with the incident's workload.** Whatever the model types,
+RunLore appends the failing workload's namespace and normalized name — plus the alert name —
+server-side, before the query reaches the index. The reason is retrieval quality: a
+label-derived alert's text is one or two generic tokens, and the object that identifies the
+incident lives only in the labels. That is the same vocabulary mismatch
+[instant recall]({{< relref "learning-loop.md" >}}) already solves, fixed here the same way.
+
+Enrichment is not a provenance rule and knows nothing about which root an entry came from. It
+lifts whichever entries contain those tokens — and *demotes* the ones that do not, because
+BM25 scores a partly-matched query below a fully-matched one, so adding terms an entry cannot
+match costs it rank. **The entry that names the failing object leads.** Which entries can do
+that depends on the object:
+
+**Application workloads — your entries, and only yours.** `payments` and `checkout-api` appear
+in no generic playbook: a commons entry names a failure class and carries no `resource`. So
+once you have curated an incident for `payments/checkout-api`, an alert on that workload puts
+*your* entry first — even when the two describe the same failure in nearly the same words, and
+even when the commons entry scores higher on the symptom text alone (BM25 normalizes for
+document length, and your entry carries a `resource` line the commons entry may not). On an
+empty catalog the commons `CrashLoopBackOff` playbook leads that same alert; measured against
+the shipped corpus, one curated incident of your own moves it behind yours by roughly an order
+of magnitude. For this class the commons really is a floor that fades.
+
+**Platform components — the commons can lead, and usually should.** The playbooks name
+cert-manager, ArgoCD, CoreDNS and `kube-system` explicitly, in their tags and in the `kubectl`
+commands they tell you to run. When the failing workload *is* one of those — namespace
+`cert-manager`, workload `cert-manager-webhook` — the enrichment tokens match the shared
+playbook too, and it can take the top slot from an entry of yours about a certificate on some
+other service. It should: it describes the component that is actually broken, while yours
+describes a different object.
+
+The rule is per *object*, not per failure class. Curate an incident for the platform component
+itself — `resource: cert-manager/cert-manager-webhook` — and your entry carries those same
+tokens, competes on the symptom text again, and leads. Until then the shared playbook holds
+that slot regardless of how much unrelated knowledge you have accumulated.
+
+**Your entry wins ties**, as above. That settles equal scores only; it does not override a
+relevance gap in either direction, and the gaps enrichment opens are far larger than a tie.
+
+There is no knob either way — enrichment is unconditional and the tie-break is not
+configurable — so plan for both directions. A commons entry can fall out of the top hits for a
+failure class you have learned, which is the intended outcome; if losing it costs you
+something, your own entry for that class is too narrow. And a commons entry can hold the top
+slot for a platform component you have *not* learned, well past the point where you assume your
+own catalog is answering. In both cases the fix is the same: write the entry for the object the
+alert actually names.
 
 ## Scope discipline
 
