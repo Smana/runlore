@@ -44,6 +44,25 @@ jobs:
         # The knowledge commons is NOT validated here — it lives in
         # github.com/Smana/runlore-kb-commons and runs this same validator in its own
         # CI. A copy here would be a fork that drifts, not a second safety net.
+        #
+        # ONE acknowledged exception to that rule:
+        # examples/eval/fixtures/commons-memory/ holds three playbooks copied verbatim
+        # from that repo (snapshot 2026-08-03). It is a fork, and it will drift.
+        #
+        # It exists because examples/eval/node-eviction-{with,no}-commons.yaml are an
+        # A/B pair that publishes a delta, and an A/B whose treatment corpus can change
+        # underneath it measures the upstream repo's edit history instead of the
+        # commons. Pinning is the only way that number is reproducible.
+        #
+        # It is deliberately NOT added to the validate-kb argument list: validating a
+        # snapshot here would gate this repo's CI on the contents of another repo, which
+        # is the coupling the policy above exists to prevent. It is a fixture, not
+        # shipped knowledge — nothing in the agent's serving path reads it.
+        #
+        # Refresh (and update the date in that directory's README.txt in the same
+        # commit):
+        #   gh api repos/Smana/runlore-kb-commons/contents/playbooks/<file>.md \
+        #     --jq '.content' | base64 -d
         run: go run ./cmd/lore validate-kb examples/runbooks
       - name: govulncheck
         # Checks the module graph against the Go vulnerability DB; fails on a

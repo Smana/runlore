@@ -126,9 +126,42 @@ func NewEmpty() *Catalog {
 	return &Catalog{index: idx, pathIdx: map[string]int{}}
 }
 
+// NewWithCommons loads the operator's own bundle at dir TOGETHER with a read-only
+// commons root, indexing both. An empty commonsDir is exactly New(dir).
+//
+// It exists so the ordering is stated once instead of re-derived per call site.
+// Entry.Commons is stamped during the reload's commons pass and nowhere else
+// (ReloadContext), so the commons root must be set BEFORE the load that has to see
+// it. A caller that loads first gets commons entries indexed UNMARKED — and an
+// unmarked commons entry is free to fire instant recall, the single outcome the
+// commons was designed never to produce. Hand-wiring that sequence twice is already
+// how the investigator and the reinvestigator ended up reading different indexes
+// (#414); this is the one function to reach for instead.
+//
+// Callers that must arm the commons on an ALREADY-BUILT catalog — one that carries a
+// syncer, an embedder or a vector cache attached at construction, as app.armCommons
+// does — cannot use this and call SetCommonsDir directly. The same ordering rule
+// applies to them; it is restated there.
+func NewWithCommons(ctx context.Context, dir, commonsDir string) (*Catalog, error) {
+	if commonsDir == "" {
+		return New(dir)
+	}
+	c := NewEmpty()
+	c.SetCommonsDir(commonsDir)
+	if _, err := c.ReloadContext(ctx, dir); err != nil {
+		return nil, err
+	}
+	return c, nil
+}
+
 // SetCommonsDir points the catalog at a SECOND, read-only root loaded alongside the
 // operator's own. Empty (the default) means no commons root and byte-for-byte the
 // previous behaviour.
+//
+// Call it BEFORE the reload that must index the commons: Entry.Commons is stamped
+// during the reload's commons pass, so a root set afterwards is invisible until the
+// next reload. Prefer NewWithCommons, which encodes that order; this setter is for
+// catalogs that are already constructed and wired.
 //
 // It is a separate directory, never a subdirectory of the user's KB: the commons is
 // synced from an upstream repo, and letting it share a root with the git-sync mirror

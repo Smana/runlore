@@ -263,6 +263,49 @@ func TestGateError(t *testing.T) {
 	}
 }
 
+// TestGateErrorSkipsMeasurementCases pins the `gate: false` opt-out end to end: a
+// measurement case's failure must not turn the nightly red, and — the part that is easy
+// to get wrong — it must leave the denominator too. Excluding it from the numerator
+// alone would make the gate STRICTER by adding a case that can never pass.
+func TestGateErrorSkipsMeasurementCases(t *testing.T) {
+	no := false
+	miss := Case{Name: "miss", Prompt: "x", Tools: map[string]string{"what_changed": "y"},
+		Expected: Expected{MustContain: []string{"network policy"}}}
+	measurement := miss
+	measurement.Name, measurement.Gate = "measurement", &no
+
+	// One real case that passes, one measurement case that fails. Ungated, that is a
+	// 0.5 pass-rate and a red nightly; the whole point of the opt-out is that it is not.
+	camp := newRateRunner(5).RunN(context.Background(), []Case{harborCase(), measurement}, 5)
+	if camp.GatedTotal() != 1 || camp.GatedReached() != 1 {
+		t.Fatalf("want 1 gate-bearing case, reached: got total=%d reached=%d", camp.GatedTotal(), camp.GatedReached())
+	}
+	if camp.GatedPassRate() != 1 {
+		t.Fatalf("the failing measurement case must not lower the GATED pass-rate, got %.2f", camp.GatedPassRate())
+	}
+	if err := GateError(camp, 0.7); err != nil {
+		t.Fatalf("a failing measurement case must not fail the gate, got %v", err)
+	}
+
+	// The published view still counts it: PassRate/ReachedCases stay over every case
+	// that ran, because the scorecard's job is to report the number, not to hide it.
+	if camp.PassRate() != 0.5 || camp.ReachedCases() != 1 {
+		t.Fatalf("the report must still see both cases, got rate=%.2f reached=%d", camp.PassRate(), camp.ReachedCases())
+	}
+
+	// And the opt-out is opt-IN only: the same case without `gate:` still gates.
+	camp = newRateRunner(5).RunN(context.Background(), []Case{harborCase(), miss}, 5)
+	if err := GateError(camp, 0.7); err == nil {
+		t.Fatal("a case that does NOT set gate: false must still fail the gate")
+	}
+
+	// A campaign of nothing but measurements has nothing to regress and must not fail.
+	camp = newRateRunner(5).RunN(context.Background(), []Case{measurement}, 5)
+	if err := GateError(camp, 0.7); err != nil {
+		t.Fatalf("an all-measurement campaign has no gate to fail, got %v", err)
+	}
+}
+
 func TestReplayDefaultsPreserveBehavior(t *testing.T) {
 	// n=1 (the replay default) runs each case once; GateError with the default
 	// fail-under (0) never gates, so local `lore eval` keeps exiting 0.
@@ -493,10 +536,19 @@ func TestRunOneCommonsGroundsKBSearchButNeverFiresRecall(t *testing.T) {
 	}
 }
 
-// TestRunOneWithoutCommonsDirOffersNoKBSearch is the additivity guard: a case that
-// sets only catalog_dir replays exactly as it did before commons_dir existed — no
-// kb_search tool, so the shipped catalog_dir case keeps its tool surface.
-func TestRunOneWithoutCommonsDirOffersNoKBSearch(t *testing.T) {
+// TestRunOneCatalogOnlyCaseOffersKBSearchLikeProduction pins the replay's tool surface
+// to production's rule: kb_search is offered whenever a catalog EXISTS, not only when a
+// commons is configured.
+//
+// This assertion is the inverse of the one this test shipped with, deliberately.
+// Production (app.BuildModelAndTools) appends KBSearchTool on `cat != nil`, above and
+// independent of instant recall and of the commons, and internal/eval's own live arm
+// takes its BaseTools from that same function. A commons-only gate left the replay arm
+// as the odd one out, so a catalog_dir case replayed a tool surface no deployment ever
+// ships: after verify withdraws a recalled entry, production's model can still look the
+// entry up and the replay's could not. Matching production is worth more than holding
+// the previous tool surface fixed.
+func TestRunOneCatalogOnlyCaseOffersKBSearchLikeProduction(t *testing.T) {
 	dir := t.TempDir()
 	c := Case{
 		Name:       "catalog-only",
@@ -512,8 +564,8 @@ func TestRunOneWithoutCommonsDirOffersNoKBSearch(t *testing.T) {
 		findings("fresh investigation result"), verdict("keep"),
 	}}
 	res := (&Runner{Model: model, Log: discardLog()}).runOne(context.Background(), c)
-	if slices.Contains(model.offeredTools(), "kb_search") {
-		t.Fatalf("a catalog_dir-only case must replay with its previous tool surface, got %v", model.offeredTools())
+	if !slices.Contains(model.offeredTools(), "kb_search") {
+		t.Fatalf("a catalog-bearing case must offer kb_search exactly as production does, got %v", model.offeredTools())
 	}
 	if !res.Pass {
 		t.Fatalf("catalog-only case should still pass: %+v", res)
@@ -549,19 +601,20 @@ func TestShippedCommonsGroundingPairIsControlled(t *testing.T) {
 	if with.CommonsDir == without.CommonsDir {
 		t.Fatal("the pair must point at DIFFERENT commons roots — that is the only variable")
 	}
-	if with.Prompt != without.Prompt {
-		t.Fatal("paired cases must replay the same incident prompt")
+	// Zero the only two fields allowed to differ, then require EVERYTHING else to be
+	// equal. A field-by-field comparison can only ever guard the fields someone
+	// remembered to list, and the fields most able to skew the measurement are the ones
+	// least likely to be listed: alert_title feeds kbSearchEnrichment, so a divergence
+	// there hands the two arms different kb_search queries; ground_truth is the LLM
+	// judge's rubric; catalog_dir would give one arm real, non-commons recall. Whole-
+	// struct equality also covers Case fields that do not exist yet.
+	a, b := with, without
+	a.Name, b.Name = "", ""
+	a.CommonsDir, b.CommonsDir = "", ""
+	if !reflect.DeepEqual(a, b) {
+		t.Fatalf("the paired cases must differ ONLY in name and commons_dir\nwith:    %+v\nwithout: %+v", a, b)
 	}
-	if !reflect.DeepEqual(with.Tools, without.Tools) {
-		t.Fatal("paired cases must replay byte-identical recorded evidence")
-	}
-	if !reflect.DeepEqual(with.Expected, without.Expected) {
-		t.Fatal("paired cases must be scored against the same expectation")
-	}
-	if !reflect.DeepEqual(with.Recall, without.Recall) || with.ExpectRecall != without.ExpectRecall {
-		t.Fatal("paired cases must use the same recall gates and assertion")
-	}
-	if with.Workload != nil || without.Workload != nil {
+	if with.Workload != nil {
 		t.Fatal("the pair must stay workload-LESS: the scopeless tier is what makes expect_recall: rejected test the provenance skip")
 	}
 	if len(with.Expected.RootCauseEntities) == 0 || len(with.Expected.Distractors) == 0 {
@@ -569,6 +622,9 @@ func TestShippedCommonsGroundingPairIsControlled(t *testing.T) {
 	}
 	if with.ExpectRecall != "rejected" {
 		t.Fatalf("the commons case must assert expect_recall: rejected, got %q", with.ExpectRecall)
+	}
+	if with.gates() {
+		t.Fatal("the pair is a MEASUREMENT — its failure is the finding, not a regression — so it must not vote on the nightly gate (gate: false)")
 	}
 }
 
@@ -631,7 +687,7 @@ func TestShippedCommonsCaseGroundsTheLoop(t *testing.T) {
 	c := shippedCase(t, "node-eviction-with-commons")
 	model := &recordingModel{resp: []providers.CompletionResponse{
 		kbSearch("pods evicted node low on memory"),
-		findings("analytics/report-worker consumed the node: its memory request is 256Mi while it uses 7.1Gi, so the scheduler overcommitted ip-10-0-22-115 and the kubelet evicted its neighbours; raise its memory request"),
+		findings("analytics/report-worker consumed the node: its memory request is 256Mi while it uses 7.42Gi, so the scheduler overcommitted ip-10-0-22-115 and the kubelet evicted its neighbours; raise its memory request"),
 		verdict("keep"),
 	}}
 	res := (&Runner{Model: model, Log: discardLog()}).runOne(context.Background(), c)
@@ -643,5 +699,33 @@ func TestShippedCommonsCaseGroundsTheLoop(t *testing.T) {
 	}
 	if !res.Pass {
 		t.Fatalf("the shipped commons case should pass on a finding that names the true consumer: %+v", res)
+	}
+}
+
+// TestShippedCommonsControlArmReplaysAgainstAnEmptyIndex replays the OTHER half of the
+// pair end to end. Without it the control was only ever checked statically (its corpus
+// indexes nothing), leaving the arm that actually produces the baseline number
+// unexercised: kb_search over an empty index has its own return path
+// ("no matching catalog entries"), and a baseline that errored or hung mid-loop would
+// surface as a mysterious nightly failure rather than as a number.
+func TestShippedCommonsControlArmReplaysAgainstAnEmptyIndex(t *testing.T) {
+	c := shippedCase(t, "node-eviction-no-commons")
+	model := &recordingModel{resp: []providers.CompletionResponse{
+		kbSearch("pods evicted node low on memory"),
+		findings("analytics/report-worker consumed the node: its memory request is 256Mi while it uses 7.42Gi, so the scheduler overcommitted ip-10-0-22-115 and the kubelet evicted its neighbours; raise its memory request"),
+		verdict("keep"),
+	}}
+	res := (&Runner{Model: model, Log: discardLog()}).runOne(context.Background(), c)
+	if !slices.Contains(model.offeredTools(), "kb_search") {
+		t.Fatalf("both arms must offer the same tools, or the pair measures the tool surface too, got %v", model.offeredTools())
+	}
+	if !strings.Contains(model.toolText(), "no matching catalog entries") {
+		t.Fatalf("the control's kb_search must answer from an EMPTY index; tool results were:\n%s", model.toolText())
+	}
+	if res.RecallFired {
+		t.Fatalf("an empty catalog cannot fire recall: %+v", res)
+	}
+	if !res.Pass {
+		t.Fatalf("the control arm must still complete and score on the same finding: %+v", res)
 	}
 }

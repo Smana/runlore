@@ -87,6 +87,23 @@ type Case struct {
 	// Empty ⇒ no recall assertion (existing cases are unaffected).
 	ExpectRecall string `yaml:"expect_recall,omitempty"`
 
+	// Gate controls whether this case counts toward the nightly -fail-under threshold.
+	// Absent ⇒ true: every case gates unless it opts out, so nothing changes by
+	// accident. `gate: false` marks a case that exists to MEASURE rather than to
+	// assert.
+	//
+	// The distinction is not cosmetic. A -fail-under 0.7 campaign tolerates exactly one
+	// missed case whatever the case count (3/4 and 5/6 both clear it; 2/4 and 4/6 both
+	// do not), so a case whose failure is the intended FINDING would spend the whole
+	// budget and leave a genuine regression elsewhere with nowhere to show up. Worse,
+	// CI would report the measurement as the regression. A measurement case still runs,
+	// still scores and still appears in the published scorecard — it just does not vote
+	// on whether the nightly is red.
+	//
+	// A pointer so an absent field is distinguishable from an explicit `gate: false`;
+	// see Case.gates.
+	Gate *bool `yaml:"gate,omitempty"`
+
 	// dir is the directory the case file was loaded from, used to resolve CatalogDir
 	// and CommonsDir. Set by Load; unexported so YAML never populates it.
 	dir string
@@ -156,13 +173,17 @@ func isYAML(name string) bool {
 // must REFUSE the commons entry; see Case.CommonsDir).
 func (c Case) hasCatalog() bool { return c.CatalogDir != "" || c.CommonsDir != "" }
 
+// gates reports whether this case votes on the nightly -fail-under gate. Absent
+// (the default) counts as true, so a case only ever leaves the gate by saying so.
+func (c Case) gates() bool { return c.Gate == nil || *c.Gate }
+
 // buildCatalog loads the case's knowledge fixtures into a catalog wired the way
 // production is.
 //
 // Without a commons root this is exactly the previous one-liner, so the shipped
-// catalog_dir cases replay unchanged. With one, the catalog is built the way the app
-// builds it — an empty catalog, a commons root set, then a reload — because
-// Entry.Commons is stamped during the reload's commons pass and nowhere else.
+// catalog_dir cases replay unchanged. With one it goes through
+// catalog.NewWithCommons, which is where the "commons root set BEFORE the load"
+// ordering that stamps Entry.Commons is stated.
 //
 // A commons-only case gets a fresh EMPTY directory as the operator's own root, which
 // is not a workaround but the scenario itself: a deployment that has curated nothing
@@ -170,24 +191,39 @@ func (c Case) hasCatalog() bool { return c.CatalogDir != "" || c.CommonsDir != "
 // has read it — entries and the index live in memory from then on — so the catalog
 // owns nothing on disk and the caller has no lifetime to manage.
 func (c Case) buildCatalog(ctx context.Context) (*catalog.Catalog, error) {
-	if c.CommonsDir == "" {
-		return catalog.New(filepath.Join(c.dir, c.CatalogDir))
-	}
 	own := filepath.Join(c.dir, c.CatalogDir)
+	if c.CommonsDir == "" {
+		return catalog.New(own)
+	}
+	commons := filepath.Join(c.dir, c.CommonsDir)
+	// An unreadable commons root is FATAL here, and only here. ReloadContext warns and
+	// continues when the commons fails to load, which is right in production — the
+	// operator's own entries are what an incident depends on and must not go down with
+	// a flaky upstream — and exactly wrong for a measurement. A mistyped or moved path
+	// would silently rebuild this case as a second CONTROL: a treatment arm with an
+	// empty corpus, publishing a delta of zero that is indistinguishable from the
+	// honest finding the case files tell readers to trust.
+	fi, err := os.Stat(commons)
+	if err != nil {
+		return nil, fmt.Errorf("commons root: %w", err)
+	}
+	if !fi.IsDir() {
+		return nil, fmt.Errorf("commons root %s is not a directory", commons)
+	}
 	if c.CatalogDir == "" {
-		d, err := os.MkdirTemp("", "runlore-eval-own-")
-		if err != nil {
-			return nil, fmt.Errorf("empty own-catalog root: %w", err)
+		d, mkErr := os.MkdirTemp("", "runlore-eval-own-")
+		if mkErr != nil {
+			return nil, fmt.Errorf("empty own-catalog root: %w", mkErr)
 		}
 		defer func() { _ = os.RemoveAll(d) }()
 		own = d
 	}
-	cat := catalog.NewEmpty()
-	cat.SetCommonsDir(filepath.Join(c.dir, c.CommonsDir))
-	// Named for the OWN root deliberately: ReloadContext only ever returns an error
-	// for that root — a commons Load failure is warned and swallowed inside it — so
-	// blaming the commons here would send a reader to the wrong directory.
-	if _, err := cat.ReloadContext(ctx, own); err != nil {
+	cat, err := catalog.NewWithCommons(ctx, own, commons)
+	if err != nil {
+		// Named for the OWN root deliberately: the reload only ever returns an error for
+		// that root — a commons Load failure is warned and swallowed inside it, and the
+		// stat above is what catches the case that matters — so blaming the commons here
+		// would send a reader to the wrong directory.
 		return nil, fmt.Errorf("load catalog root %s: %w", own, err)
 	}
 	return cat, nil

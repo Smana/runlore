@@ -43,6 +43,12 @@ type ReportCase struct {
 	Missing     []string `json:"missing,omitempty"`
 	OverClaimed []string `json:"over_claimed,omitempty"`
 
+	// Gated says whether this case voted on the nightly -fail-under threshold. NOT
+	// omitempty: false is the informative value here (a measurement case, whose low
+	// score is a finding rather than a regression), and omitempty would drop exactly
+	// the cases a reader needs to spot. See Case.Gate.
+	Gated bool `json:"gated"`
+
 	// Recall telemetry (cases with a catalog fixture only).
 	HasRecall          bool   `json:"has_recall,omitempty"`
 	ExpectRecall       string `json:"expect_recall,omitempty"`
@@ -56,6 +62,11 @@ type ReportCase struct {
 }
 
 // Report projects the campaign plus its provenance into the serializable report.
+//
+// PassRate/Reached/Total stay over EVERY case that ran, gate-bearing or not: a
+// measurement case's number is the reason it exists, so the published scorecard must
+// show it. Only GateError narrows to the gate-bearing subset (Campaign.GatedPassRate).
+// The per-case `gated` flag is what lets a reader tell the two populations apart.
 func (c Campaign) Report(at, model string, usage providers.Usage, costUSD *float64) Report {
 	rep := Report{
 		At: at, Model: model, N: c.N,
