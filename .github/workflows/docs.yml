@@ -42,14 +42,30 @@ jobs:
       - name: Configure Pages
         id: pages
         uses: actions/configure-pages@v6
-      # Pull the published scorecard from the eval-scorecard orphan branch and render
-      # it as /eval. The branch is the nightly's publishing target; copying it in at
-      # build time keeps main free of generated numbers. A missing branch is NOT a
-      # failure — the committed placeholder stands in, so the docs deploy and the
-      # link stay alive either way.
+      # Pull the published scorecard from the eval-scorecard orphan branch and splice
+      # it into /eval. The branch is the nightly's publishing target; copying it in at
+      # build time keeps main free of generated numbers.
+      #
+      # This INJECTS between the page's `scorecard:begin/end` markers rather than
+      # rewriting the file: the framing above the markers (what a scenario is, what the
+      # number does not mean, where the cases live) is hand-written and must survive
+      # every republish. Overwriting the page — the previous behaviour — destroyed it.
+      #
+      # A missing branch is NOT a failure — the committed placeholder stands in, so the
+      # docs deploy and the link stay alive either way.
       - name: Render the eval scorecard page
         run: |
           set -euo pipefail
+          page=website/content/eval.md
+          # A lost marker is a repo-side regression, not a publishing hiccup: awk would
+          # silently drop the scorecard (begin missing) or truncate the page (end
+          # missing), and /eval would keep claiming nothing has been published. Fail loud.
+          for marker in '<!-- scorecard:begin -->' '<!-- scorecard:end -->'; do
+            if ! grep -qF "$marker" "$page"; then
+              echo "::error title=Eval scorecard::$page is missing its '$marker' marker — the published scorecard has nowhere to go"
+              exit 1
+            fi
+          done
           if ! git fetch --depth=1 origin eval-scorecard 2>/dev/null; then
             echo "::notice title=Eval scorecard::branch not published yet — keeping the placeholder"
             exit 0
@@ -64,15 +80,41 @@ jobs:
             exit 0
           fi
           published=$(git log -1 --format=%cI FETCH_HEAD)
+          # The scorecard's summary line carries the scenario count of THAT run
+          # ("**2/4 scenarios reached**"). Lift it so the provenance sentence states the
+          # count as a property of the run, letting a reader diff it against the case
+          # directory the framing links to. If the format ever changes the match is
+          # empty and the sentence degrades to the date alone — never a wrong number.
+          total=$(printf '%s\n' "$scorecard" | sed -n 's/.*\*\*[0-9][0-9]*\/\([0-9][0-9]*\) scenarios reached.*/\1/p' | head -1)
+          covered=""
+          if [ -n "$total" ]; then
+            noun="scenarios"
+            if [ "$total" = "1" ]; then noun="scenario"; fi
+            covered=" It covered the **${total} ${noun}** the suite held at that time."
+          fi
+          block=$(mktemp)
           {
-            echo "---"
-            echo "title: Eval scorecard"
-            echo "---"
+            echo "> **Published ${published}** from the [\`eval-scorecard\`](https://github.com/Smana/runlore/tree/eval-scorecard)"
+            echo "> branch.${covered}"
+            echo "> The [case definitions](https://github.com/Smana/runlore/tree/main/examples/eval) are the suite as"
+            echo "> it stands today — more files there than this run covered means it has grown since."
             echo
-            echo "*Published ${published} from the [\`eval-scorecard\`](https://github.com/Smana/runlore/tree/eval-scorecard) branch.*"
-            echo
-            printf '%s\n' "$scorecard"
-          } > website/content/eval.md
+            # Drop the generated H1: the page already has one (its title), and the
+            # scorecard's own `##` sections then sit at the same level as the framing's.
+            # A no-op if the generator ever stops emitting it. `/./,$!d` then eats the
+            # blank line it left behind, so the block above is always separated from the
+            # scorecard by exactly one — whether or not the H1 was there to delete.
+            printf '%s\n' "$scorecard" | sed -e '1{/^# /d;}' -e '/./,$!d'
+          } > "$block"
+          # getline reads the block verbatim — no shell interpolation of scorecard text
+          # (it is full of backticks, $ and quotes). Both markers are kept so the
+          # substitution stays repeatable.
+          awk -v block="$block" '
+            $0 == "<!-- scorecard:begin -->" { print; skip = 1; while ((getline line < block) > 0) print line; close(block); next }
+            $0 == "<!-- scorecard:end -->"   { skip = 0 }
+            !skip { print }
+          ' "$page" > "$page.new"
+          mv "$page.new" "$page"
       - name: Build
         working-directory: website
         # No `hugo mod get` — it would upgrade the pinned Hextra. The build
