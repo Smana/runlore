@@ -14,6 +14,29 @@ import (
 // for merge — auto-closing it would discard that editorial work.
 var protectedLabels = []string{"solved", "ready-to-merge", "accepted", "investigating", "knowledge-gap"}
 
+// entryEditLabels mark the lifecycle proposals the decay-driven passes open —
+// Retirement's retire PRs and Revalidation's revalidate PRs. RunLore must never
+// close one itself, by ANY pass.
+//
+// Those passes keep no store: an entry's history is reconstructed from the forge
+// on every run, where a still-open proposal means "already asked" and a
+// CLOSED-UNMERGED one means "a human declined — never ask again". Nothing in that
+// signal distinguishes a reviewer's close from RunLore's own housekeeping, so a
+// stale-sweep or dedup close is read straight back as a permanent veto, and the
+// entry is never proposed again for a decision no human ever made. Excluding them
+// keeps the veto meaning exactly what it claims. The cost is that an unreviewed
+// proposal stays open indefinitely; Revalidation's MaxOpen is what bounds that
+// queue instead, and closing one by hand is then a real veto rather than an
+// accident.
+var entryEditLabels = []string{retireLabel, revalidateLabel}
+
+// isEntryEditProposal reports whether a PR is a retire/revalidate proposal about
+// an EXISTING merged entry rather than a draft of a new one.
+func isEntryEditProposal(labels []string) bool {
+	_, ok := firstLabelIn(labels, entryEditLabels)
+	return ok
+}
+
 // Lifecycle closes stale, unprotected KB artifacts — those with no forge activity
 // within StaleAfter. A PR whose age is unknown (zero UpdatedAt) is never closed.
 type Lifecycle struct {
@@ -37,6 +60,9 @@ func (l Lifecycle) Run(ctx context.Context) error {
 		return err
 	}
 	for _, pr := range prs {
+		if isEntryEditProposal(pr.Labels) {
+			continue // only a human may close one of these — see entryEditLabels
+		}
 		if isProtected(pr.Labels) || pr.UpdatedAt.IsZero() || now().Sub(pr.UpdatedAt) <= l.StaleAfter {
 			continue
 		}
