@@ -561,10 +561,35 @@ func isHex(s string) bool {
 	return true
 }
 
+// A `branch` key means "track whatever upstream moves this to", so a pinned
+// spelling under one promises an operator the opposite of what it delivers. These
+// say what to write INSTEAD; the rule itself is rejectPinnedBranch, stated once.
+const (
+	commonsBranchRemedy = "use catalog.commons.ref to pin a tag or a commit — branch tracks a moving branch"
+	// The operator's OWN catalog shares the syncer with the commons, so a pinned
+	// spelling there would work — and that is the problem. Pinning is for a corpus you
+	// do not control; this one you do.
+	catalogGitBranchRemedy = "your own catalog is deliberately not pinnable, because the curator opens PRs against it and a frozen read root leaves \"merged\" and \"in use\" diverging forever with no signal. Only catalog.commons (a repo you do not control) can be pinned, with `ref`"
+)
+
+// rejectPinnedBranch fails when the value of a `branch` key names an immutable
+// revision. Neither branch key can honour one today either (both clone
+// refs/heads/refs/tags/…), so no configuration that works is broken by catching it
+// at load instead of at clone.
+func rejectPinnedBranch(key, branch, remedy string) error {
+	if !gitrev.IsPinned(branch) {
+		return nil
+	}
+	return fmt.Errorf("%s = %q names an immutable revision: %s", key, branch, remedy)
+}
+
 // validateCommonsRevision fails closed on any way of asking for two revisions at
 // once, or for a "pin" that is not actually immutable. Every case here would
 // otherwise leave an operator believing their corpus is frozen while it moves —
 // the precise belief the option exists to make true.
+//
+// The commons is where the two keys really differ: it has the `ref` escape hatch
+// that catalog.git deliberately does not.
 func validateCommonsRevision(cc CatalogCommons) error {
 	// Both keys set. ApplyDefaults folds a ref into an EMPTY branch only, so the two
 	// being non-empty and disagreeing is exactly "the operator wrote both".
@@ -573,12 +598,7 @@ func validateCommonsRevision(cc CatalogCommons) error {
 	}
 	switch {
 	case cc.Ref == "":
-		// A pinned spelling under `branch` would freeze the corpus while the key says
-		// it tracks one. It cannot work today either (it clones refs/heads/refs/tags/…),
-		// so no configuration that works is broken by rejecting it at load.
-		if gitrev.IsPinned(cc.Branch) {
-			return fmt.Errorf("catalog.commons.branch = %q names an immutable revision; use catalog.commons.ref to pin a tag or commit — branch tracks a moving branch", cc.Branch)
-		}
+		return rejectPinnedBranch("catalog.commons.branch", cc.Branch, commonsBranchRemedy)
 	case strings.HasPrefix(cc.Ref, "refs/") && !gitrev.IsTagRef(cc.Ref):
 		// refs/heads/main under `ref` is the dangerous one: the syncer would treat any
 		// qualified ref as a pin and never fetch again, silently freezing the commons
@@ -588,18 +608,6 @@ func validateCommonsRevision(cc CatalogCommons) error {
 		return fmt.Errorf("catalog.commons.ref = %q looks like an abbreviated commit id; pin the full 40-character SHA (abbreviations are ambiguous)", cc.Ref)
 	}
 	return nil
-}
-
-// validateCatalogGitRevision keeps the operator's OWN catalog on a tracked branch.
-// It shares the syncer with the commons, so a pinned spelling here would work —
-// and that is the problem: the curator opens PRs against this repo, so a frozen
-// read root makes "merged" and "in use" diverge forever with no signal. Pinning is
-// for a corpus you do not control; this one you do.
-func validateCatalogGitRevision(g CatalogGit) error {
-	if g.URL == "" || !gitrev.IsPinned(g.Branch) {
-		return nil
-	}
-	return fmt.Errorf("catalog.git.branch = %q names an immutable revision, but your own catalog is deliberately not pinnable: the curator's merged PRs must reach the index. Only catalog.commons (a repo you do not control) can be pinned with `ref`", g.Branch)
 }
 
 // Outcome configures the learning-loop outcome ledger.
@@ -1452,8 +1460,10 @@ func (c *Config) Validate() error {
 			return fmt.Errorf("notify.matrix.feedback_reactions requires outcome.ledger_path: ratings are recorded in the outcome ledger")
 		}
 	}
-	if err := validateCatalogGitRevision(c.Catalog.Git); err != nil {
-		return err
+	if g := c.Catalog.Git; g.URL != "" {
+		if err := rejectPinnedBranch("catalog.git.branch", g.Branch, catalogGitBranchRemedy); err != nil {
+			return err
+		}
 	}
 	// Commons catalog (opt-in): a second, read-only root. Fail closed on a
 	// misconfiguration rather than degrading to a silently-absent corpus.
