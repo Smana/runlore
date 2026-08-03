@@ -20,5 +20,18 @@ tools:
     (no dropped flows)
 expected:
   # The agent should tie the failure to the chart bump's DB migration on harbor-db.
+  # All three keywords appear VERBATIM in the evidence above, so they only mean
+  # something because scoring matches the CLAIM (title + hypothesis summary/action),
+  # never the recorded tool output — see Score in internal/eval/score.go. They are all
+  # words a correct claim uses: "the harbor chart bump to 1.15 started a DB schema
+  # migration that harbor-db is still holding a lock on".
   must_contain: [chart, migration, harbor-db]
   min_confidence: 0.5
+  # harbor-db is what the migration actually stalls. harbor-core is deliberately NOT
+  # required: it is the symptom (503s / failing probes), not the cause.
+  root_cause_entities: [harbor-db]
+  # The network is this case's planted negative control: network_drops reports "(no
+  # dropped flows)", yet "connect: connection refused" invites a connectivity verdict
+  # anyway. Blaming it is the shallow wrong answer the evidence already excludes, and a
+  # correct claim (migration lock) has no reason to name it.
+  distractors: [network]

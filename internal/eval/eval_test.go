@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strings"
 	"testing"
 
 	"github.com/Smana/runlore/internal/providers"
@@ -56,6 +57,79 @@ func TestScore(t *testing.T) {
 	}
 	if r := Score("c", inv, Expected{MustContain: []string{"chart"}, MinConfidence: 0.95}); r.Pass {
 		t.Fatalf("expected fail on confidence floor, got %+v", r)
+	}
+}
+
+// TestMustContainMatchesClaimNotEvidence pins the haystack must_contain is matched
+// over: the CLAIM (title + each hypothesis's summary and suggested action), never the
+// evidence the replay tools handed the model. Matching over the evidence made the
+// keyword gate self-fulfilling — an agent that merely quotes its own recorded input,
+// or that names the keyword only while RULING IT OUT, scored a pass.
+func TestMustContainMatchesClaimNotEvidence(t *testing.T) {
+	exp := Expected{MustContain: []string{"harbor-db"}, MinConfidence: 0.5}
+	tests := []struct {
+		name string
+		inv  providers.Investigation
+		want bool
+	}{
+		{
+			name: "named as the cause in the summary",
+			inv: providers.Investigation{Confidence: 0.8, RootCauses: []providers.Hypothesis{{
+				Summary: "the chart bump enabled a schema migration that stalled harbor-db",
+			}}},
+			want: true,
+		},
+		{
+			name: "named in the suggested action",
+			inv: providers.Investigation{Confidence: 0.8, RootCauses: []providers.Hypothesis{{
+				Summary:         "the chart bump enabled a blocking schema migration",
+				SuggestedAction: "clear the stale migration lock on harbor-db",
+			}}},
+			want: true,
+		},
+		{
+			name: "named in the title",
+			inv: providers.Investigation{
+				Confidence: 0.8,
+				Title:      "harbor-db stuck on a schema migration lock",
+				RootCauses: []providers.Hypothesis{{Summary: "the chart bump is the trigger"}},
+			},
+			want: true,
+		},
+		{
+			name: "only quoted back from the recorded evidence",
+			inv: providers.Investigation{Confidence: 0.8, RootCauses: []providers.Hypothesis{{
+				Summary:  "unclear, possibly a transient blip",
+				Evidence: []string{"harbor-db-0  FATAL: could not obtain migration lock"},
+			}}},
+			want: false,
+		},
+		{
+			name: "only named while ruling it out",
+			inv: providers.Investigation{
+				Confidence: 0.8,
+				RootCauses: []providers.Hypothesis{{Summary: "unclear, possibly a transient blip"}},
+				RuledOut:   []string{"harbor-db: its migration finished before the outage window"},
+			},
+			want: false,
+		},
+		{
+			name: "only listed as unresolved or a data gap",
+			inv: providers.Investigation{
+				Confidence: 0.8,
+				RootCauses: []providers.Hypothesis{{Summary: "unclear, possibly a transient blip"}},
+				Unresolved: []string{"whether harbor-db ever finished its migration"},
+				DataGaps:   []string{"no harbor-db logs before 09:00"},
+			},
+			want: false,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := Score("c", tt.inv, exp); got.Pass != tt.want {
+				t.Fatalf("Pass = %v, want %v (missing: %v)", got.Pass, tt.want, got.Missing)
+			}
+		})
 	}
 }
 
@@ -178,6 +252,40 @@ expected:
 		len(cases[0].Expected.RootCauseEntities) != 2 ||
 		len(cases[0].Expected.Distractors) != 1 {
 		t.Fatalf("entity fields not parsed: %+v", cases[0].Expected)
+	}
+}
+
+// TestShippedCasesScoreEntities guards the shipped gold set: entity scoring — recall
+// over root_cause_entities and the over-claim penalty over distractors — engages only
+// when root_cause_entities is non-empty (see Score), so a case that ships empty lists
+// is silently scored by keywords alone and the over-claim penalty never fires. It also
+// rejects a distractor that is a substring of one of the case's own entities, because
+// Score suppresses those as "explained by a correct claim" — such a distractor is dead
+// weight that looks like coverage.
+func TestShippedCasesScoreEntities(t *testing.T) {
+	cases, err := Load(filepath.Join("..", "..", "examples", "eval"))
+	if err != nil {
+		t.Fatalf("Load examples/eval: %v", err)
+	}
+	if len(cases) == 0 {
+		t.Fatal("no shipped cases loaded")
+	}
+	for _, c := range cases {
+		t.Run(c.Name, func(t *testing.T) {
+			if len(c.Expected.RootCauseEntities) == 0 {
+				t.Fatal("no root_cause_entities: entity scoring and the over-claim penalty never engage for this case")
+			}
+			if len(c.Expected.Distractors) == 0 {
+				t.Fatal("no distractors: this case cannot detect over-claiming")
+			}
+			for _, d := range c.Expected.Distractors {
+				for _, e := range c.Expected.RootCauseEntities {
+					if strings.Contains(strings.ToLower(e), strings.ToLower(d)) {
+						t.Errorf("distractor %q is a substring of required entity %q — Score suppresses it, so it can never fire", d, e)
+					}
+				}
+			}
+		})
 	}
 }
 

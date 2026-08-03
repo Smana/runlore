@@ -29,23 +29,25 @@ type Result struct {
 }
 
 // Score reports whether the investigation identifies the expected root cause.
-// Keyword recall (must_contain) is matched over the full findings text. Entity
-// scoring — recall over root_cause_entities and an over-claim penalty over
-// distractors — is matched over the CLAIM text only (what was blamed), and engages
-// only when root_cause_entities is set. A case passes when nothing is missing,
-// no distractor was blamed, and confidence meets the floor.
+// Everything is matched over the CLAIM text (what was blamed — see claimText):
+// keyword recall (must_contain), entity recall (root_cause_entities) and the
+// over-claim penalty (distractors). Matching must_contain over the full findings
+// text would make the gate self-fulfilling in a REPLAY eval — the tool output is
+// evidence the harness itself handed the model, so an agent that merely quotes it
+// back, or that names the keyword only while ruling it out, would score a pass.
+// Entity scoring engages only when root_cause_entities is set. A case passes when
+// nothing is missing, no distractor was blamed, and confidence meets the floor.
 func Score(name string, inv providers.Investigation, exp Expected) Result {
-	hay := strings.ToLower(investigationText(inv))
+	claim := strings.ToLower(claimText(inv))
 	var missing []string
 	for _, kw := range exp.MustContain {
-		if !strings.Contains(hay, strings.ToLower(kw)) {
+		if !strings.Contains(claim, strings.ToLower(kw)) {
 			missing = append(missing, kw)
 		}
 	}
 
 	var overClaimed []string
 	if len(exp.RootCauseEntities) > 0 {
-		claim := strings.ToLower(claimText(inv))
 		for _, e := range exp.RootCauseEntities {
 			if !strings.Contains(claim, strings.ToLower(e)) {
 				missing = append(missing, e)
@@ -85,7 +87,7 @@ func Score(name string, inv providers.Investigation, exp Expected) Result {
 
 // claimText is what the investigation BLAMED: the title plus each hypothesis's
 // summary and suggested action. It deliberately excludes Evidence and Unresolved
-// so entity matching means "named as a cause", not "mentioned while ruling out".
+// so matching means "named as a cause", not "mentioned while ruling out".
 func claimText(inv providers.Investigation) string {
 	var b strings.Builder
 	b.WriteString(inv.Title)
@@ -95,7 +97,9 @@ func claimText(inv providers.Investigation) string {
 	return b.String()
 }
 
-// investigationText flattens the findings into one searchable string.
+// investigationText flattens the findings into one searchable string. Used to show
+// the LLM judge the WHOLE answer (claim plus the evidence and caveats behind it);
+// deterministic scoring uses claimText instead — see Score.
 func investigationText(inv providers.Investigation) string {
 	var b strings.Builder
 	b.WriteString(inv.Title)

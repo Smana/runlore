@@ -43,12 +43,26 @@ tools:
 
     '
 expected:
+  # Matched over the CLAIM only (title + hypothesis summary/action), so quoting the
+  # recorded ImagePullBackOff events back is not enough — the agent has to blame them.
   must_contain:
   - image
   - pull
   min_confidence: 0.5
-  root_cause_entities: []
-  distractors: []
+  # The claim must blame the workload and the tag that cannot be resolved. "v9.9.9" is
+  # the shortest distinctive form: it matches whether the claim quotes the bare tag or
+  # the full registry.k8s.io/pause:v9.9.9-does-not-exist reference.
+  root_cause_entities:
+  - eval-victim
+  - v9.9.9
+  # configmap: the catalogued poisoned cause this scenario exists to reject (see
+  # ground_truth below) — a correct run never names a ConfigMap, because none is
+  # involved. "tracking label": workload_ownership reports "no GitOps tracking label on
+  # the top controller — owner unresolved", a real red herring in this evidence that
+  # has nothing to do with the pull failure.
+  distractors:
+  - configmap
+  - tracking label
 ground_truth:
   root_cause: The eval-victim Deployment image was changed to tag v9.9.9-does-not-exist, which cannot
     be pulled (ImagePullBackOff/ErrImagePull). This is the TRUE cause — NOT the catalogued "stale ConfigMap

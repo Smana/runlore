@@ -157,12 +157,26 @@ tools:
     \ at 2026-08-02T11:02:08Z\nflux Kustomization/observability-victoria-metrics-k8s-stack (sync): ..e0a8d21a91ac770f97266da0a0de53d27641f44e39d2abe64eb49790cf573482\
     \ at 2026-08-02T11:01:03Z\n…and 4 more changes (narrow with a workload name)\n"
 expected:
+  # Matched over the CLAIM only (title + hypothesis summary/action), so echoing the
+  # recorded ArtifactFailed events back is not enough — the agent has to blame them.
   must_contain:
   - kustomization
   - path
   min_confidence: 0.5
-  root_cause_entities: []
-  distractors: []
+  # The claim must blame the Kustomization and the path it points at. "does/not/exist"
+  # is the tail of ./this/path/does/not/exist, so it matches whether the claim quotes
+  # spec.path or the full /tmp/kustomization-<n>/... build path from the events.
+  root_cause_entities:
+  - eval-victim-broken
+  - does/not/exist
+  # monorepo-split: the ArtifactGenerator sitting at Ready=unknown in gitops_tree — the
+  # classic wrong blame here is the source rather than the bad path, and the source is
+  # in fact healthy. llm-platform: the newest thing in what_changed (a whole new,
+  # SUSPENDED Flux Kustomization added in the same sync) — the "blame the last change"
+  # trap. A correct claim about eval-victim-broken's path names neither.
+  distractors:
+  - monorepo-split
+  - llm-platform
 ground_truth:
   root_cause: Kustomization/eval-victim-broken references spec.path ./this/path/does/not/exist, which
     does not exist in the infra-artifact source, so the build fails and the Kustomization is Ready=False

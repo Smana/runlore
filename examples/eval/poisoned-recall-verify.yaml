@@ -58,5 +58,16 @@ expected:
   # failure — NOT the poisoned entry's fabricated ConfigMap drift. "image" + "pull"
   # both match "ImagePullBackOff"/"image pull" and would NOT appear in the poisoned
   # ConfigMap answer, so this also fails loudly if verify wrongly kept the recall.
+  # Matched over the CLAIM only, so echoing the recorded pod_status is not enough.
   must_contain: [image, pull]
   min_confidence: 0.5
+  # The claim must blame the workload and the tag that cannot be resolved. "v9.9.9" is
+  # the shortest distinctive form: it matches whether the claim quotes the bare tag or
+  # the full registry.k8s.io/pause:v9.9.9-does-not-exist reference.
+  root_cause_entities: [eval-victim, v9.9.9]
+  # The poisoned catalog entry's fabricated cause — the eval-victim-config ConfigMap's
+  # drifted APP_MODE key. Both spellings are listed because a kept recall may name the
+  # ConfigMap by kind or by name. Neither can appear in a correct claim: there is no
+  # ConfigMap in this incident at all, so a hit here means verify's rejection was
+  # undone somewhere downstream.
+  distractors: [eval-victim-config, configmap]
