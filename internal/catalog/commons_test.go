@@ -5,6 +5,8 @@ package catalog
 import (
 	"context"
 	"testing"
+
+	"github.com/blevesearch/bleve/v2"
 )
 
 // writeOKF drops a minimal, valid OKF entry into dir, on top of the package's
@@ -56,29 +58,31 @@ func TestCommonsRootIsIndexedAlongsideTheUsersOwn(t *testing.T) {
 // TestUsersOwnEntryWinsATie is the important one: your platform's recorded truth
 // outranks generic advice whenever the two score equally.
 //
-// THE FILENAMES ARE LOAD-BEARING. bleve breaks equal-score ties by document ID, and
-// the document ID is Entry.Path. This test's original fixture used "a.md" (own) and
+// THE FILENAMES ARE LOAD-BEARING. This test's original fixture used "a.md" (own) and
 // "b.md" (commons, indexed as "commons/b.md") — so bleve ALREADY returned the
 // operator's entry first and SearchScored's provenance sort was a no-op. Deleting the
 // tie-break entirely left the test green. It was a guard over nothing.
 //
-// So the commons entry is deliberately named to sort BEFORE the operator's, making
-// bleve hand back the WRONG order and leaving the provenance sort as the only thing
-// that can fix it. The invariant is asserted below rather than left to a comment,
-// because a rename would otherwise silently return this test to vacuity.
+// So the commons entry is now named to come back FIRST from bleve, leaving the
+// provenance sort as the only thing that can produce the order asserted below.
+//
+// That precondition is MEASURED against the live index rather than predicted from the
+// filenames, because predicting it means betting on an implementation detail. bleve's
+// only documented tie-break for equal scores is HitNumber — the order the collector saw
+// the hits ("impose order based on index natural sort order", search/sort.go). That this
+// currently equals ascending document-ID order is a property of the index this catalog
+// builds (bleve.NewMemOnly => upsidedown + gtreap, whose term-frequency rows are keyed
+// ...<docID> and iterated in byte order), not a bleve guarantee: bleve's own default
+// index type is scorch, which numbers documents by insertion instead — and ReloadContext
+// appends the commons LAST, so under scorch bleve would hand back the operator's entry
+// first and this test would go quietly vacuous again. Asserting what bleve actually
+// returns turns that into a loud failure.
 func TestUsersOwnEntryWinsATie(t *testing.T) {
 	own, commons := t.TempDir(), t.TempDir()
 	// Byte-identical bodies and titles => identical BM25 scores. The ONLY thing
 	// that can order them is provenance.
 	const same = "readiness probe failing after a deploy"
 	const ownName, commonsName = "z-our-incident.md", "a-generic-playbook.md"
-	commonsDocID := commonsPathPrefix + commonsName
-	if commonsDocID >= ownName {
-		t.Fatalf("fixture is no longer adversarial: bleve breaks equal-score ties by doc ID, "+
-			"so the commons doc ID (%q) must sort BEFORE the operator's (%q) — otherwise "+
-			"bleve's own order already satisfies the assertion and this test passes with "+
-			"the provenance tie-break deleted", commonsDocID, ownName)
-	}
 	writeOKF(t, own, ownName, same, same)
 	writeOKF(t, commons, commonsName, same, same)
 
@@ -87,6 +91,27 @@ func TestUsersOwnEntryWinsATie(t *testing.T) {
 	if _, err := c.ReloadContext(context.Background(), own); err != nil {
 		t.Fatalf("reload: %v", err)
 	}
+
+	// The precondition, measured on the same query the assertion below uses.
+	commonsDocID := commonsPathPrefix + commonsName
+	raw := bleve.NewMatchQuery(same)
+	raw.SetField("text")
+	res, err := c.index.Search(bleve.NewSearchRequestOptions(raw, 5, 0, false))
+	if err != nil {
+		t.Fatalf("raw index search: %v", err)
+	}
+	ids := make([]string, len(res.Hits))
+	for i, h := range res.Hits {
+		ids[i] = h.ID
+	}
+	if len(ids) < 2 || ids[0] != commonsDocID {
+		t.Fatalf("fixture is no longer adversarial: bleve's own order must put the commons "+
+			"doc (%q) FIRST, so that only the provenance tie-break can produce the order "+
+			"asserted below; got %q. Rename the fixtures until it does — and if it is bleve's "+
+			"ordering that changed rather than the names, re-derive what makes this test "+
+			"adversarial before trusting it again", commonsDocID, ids)
+	}
+
 	hits, err := c.SearchScored(same, 5)
 	if err != nil {
 		t.Fatal(err)
