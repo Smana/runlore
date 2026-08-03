@@ -178,7 +178,6 @@ func RunServe(version string, args []string) error {
 	if cfg.Outcome.LedgerPath != "" {
 		log.Info("outcome ledger enabled", "path", cfg.Outcome.LedgerPath, "max_events", maxEvents)
 	}
-
 	// Built ONCE and shared: a second Deps means a second catalog, hence a second
 	// git-sync goroutine racing the first on the same on-disk checkout.
 	deps := BuildDeps(ctx, cfg, gitops, metrics, ledger, log)
@@ -271,6 +270,22 @@ func RunServe(version string, args []string) error {
 	built, err := source.BuildEnabled(source.Deps{Cfg: cfg, GitOps: gitops, Log: log, Raw: cfg.Sources})
 	if err != nil {
 		return fmt.Errorf("build sources: %w", err)
+	}
+	// A ledger that accumulates no ground truth degrades instant recall's outcome gate
+	// and the retirement pass — in opposite directions depending on the fingerprint,
+	// and silently either way. Raised HERE rather than beside the ledger construction
+	// above because the honest wording depends on `built`: with no webhook source
+	// enabled, no resolve can arrive by construction and the warning drops its hedge.
+	// Once, at startup — the condition is pure config, so anywhere on the incident path
+	// would repeat the same paragraph per alert. See RecallDecayWarning for what this
+	// can and cannot establish about the three ground-truth paths.
+	// resolve_capable_source is the one fact here a machine wants that the prose cannot
+	// give it: which of the two variants fired, without substring-matching a paragraph.
+	// The feedback flags are not worth emitting — the warning only exists when both are
+	// off — and the ledger path is already on the startup line above.
+	resolveCapable := ResolveCapableSource(built)
+	if msg := RecallDecayWarning(cfg, resolveCapable); msg != "" {
+		log.Warn(msg, "resolve_capable_source", resolveCapable)
 	}
 	// The queue (not alertEnq, which may be the coalescer) is wired as the
 	// pipeline's Canceller; the pipeline only calls it when

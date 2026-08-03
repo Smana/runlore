@@ -3,10 +3,15 @@
 package app
 
 import (
+	"fmt"
+	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/Smana/runlore/internal/config"
+	"github.com/Smana/runlore/internal/outcome"
+	"github.com/Smana/runlore/internal/source"
 )
 
 // TestRequireWebhookAuth asserts the serve-path fail-closed guard: a configured
@@ -114,6 +119,284 @@ func TestRequirePagerDutyAuth(t *testing.T) {
 				t.Fatalf("RequirePagerDutyAuth err = %v, wantErr = %v", err, tc.wantErr)
 			}
 		})
+	}
+}
+
+// webhookSource / watcherSource are the two adapter shapes ResolveCapableSource
+// distinguishes. Only Desc.Kind is read, so the Impl may be nil.
+var (
+	webhookSource = source.Built{Desc: source.Descriptor{Name: "alertmanager", Kind: source.Webhook}}
+	watcherSource = source.Built{Desc: source.Descriptor{Name: "gitops", Kind: source.Watcher}}
+)
+
+// TestResolveCapableSource pins the capability read to the adapter CONTRACT rather
+// than to a list of source names. A Webhook source's Decode returns a DecodeResult
+// carrying Resolved; a Watcher's Watch returns a request channel with nowhere to put
+// a resolution — so "can a resolve ever arrive?" is answerable from Kind alone, and
+// stays answerable when a new source registers.
+func TestResolveCapableSource(t *testing.T) {
+	tests := []struct {
+		name  string
+		built []source.Built
+		want  bool
+	}{
+		{"no sources at all → nothing can resolve", nil, false},
+		{"watcher only (GitOps failures) → nothing can resolve", []source.Built{watcherSource}, false},
+		{"webhook only → a resolve is possible", []source.Built{webhookSource}, true},
+		{"webhook + watcher → a resolve is possible", []source.Built{watcherSource, webhookSource}, true},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := ResolveCapableSource(tc.built); got != tc.want {
+				t.Errorf("ResolveCapableSource(%v) = %v, want %v", tc.built, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestRecallDecayWarning covers the (instant recall × outcome ledger × feedback
+// channel) matrix behind the learning loop's feedback edge.
+//
+// Gate 3 (outcome decay) is fail-safe: an entry absent from the ledger's OpenCounts
+// returns factor 1 and fires. That is correct — absence of evidence must never block
+// a recall — but it means a ledger that accumulates no ground truth stops deriving
+// trust from whether an entry actually worked, and the retirement pass (same factor,
+// same floor) loses the evidence it proposes on.
+//
+// Human feedback is the one ground-truth path fully readable from this config, so the
+// warning fires on the combination that is knowably at risk: recall on, a ledger
+// configured to hold the evidence, and neither feedback channel enabled. Recall off ⇒
+// nothing recalls, so there is no trust to decay. Ledger unset ⇒ the operator turned
+// the learning loop off deliberately (the `lore curate` precedent treats that as an
+// info, not a warning), so nagging about it would be noise. The predicate is
+// independent of resolveCapable — that only decides the WORDING.
+func TestRecallDecayWarning(t *testing.T) {
+	const ledger = "/var/lib/runlore/catalog/outcomes.jsonl"
+	tests := []struct {
+		name       string
+		recall     bool
+		ledgerPath string
+		slack      bool
+		matrix     bool
+		wantWarn   bool
+	}{
+		{"recall + ledger + no feedback → warns (the edge is unverifiable)", true, ledger, false, false, true},
+		{"recall + ledger + slack buttons → silent", true, ledger, true, false, false},
+		{"recall + ledger + matrix reactions → silent", true, ledger, false, true, false},
+		{"recall + ledger + both channels → silent", true, ledger, true, true, false},
+		{"recall + no ledger → silent (learning loop off by choice)", true, "", false, false, false},
+		{"recall + no ledger + slack buttons → silent", true, "", true, false, false},
+		{"no recall + ledger + no feedback → silent (nothing recalls)", false, ledger, false, false, false},
+		{"no recall + ledger + both channels → silent", false, ledger, true, true, false},
+		{"no recall + no ledger → silent", false, "", false, false, false},
+	}
+	for _, tc := range tests {
+		for _, capable := range []bool{true, false} {
+			t.Run(fmt.Sprintf("%s [resolve_capable=%v]", tc.name, capable), func(t *testing.T) {
+				cfg := &config.Config{}
+				cfg.Catalog.InstantRecall.Enabled = tc.recall
+				cfg.Outcome.LedgerPath = tc.ledgerPath
+				cfg.Notify.Slack.FeedbackButtons = tc.slack
+				cfg.Notify.Matrix.FeedbackReactions = tc.matrix
+
+				got := RecallDecayWarning(cfg, capable)
+				if (got != "") != tc.wantWarn {
+					t.Fatalf("RecallDecayWarning(recall=%v, ledger=%q, slack=%v, matrix=%v, capable=%v) = %q, wantWarn = %v",
+						tc.recall, tc.ledgerPath, tc.slack, tc.matrix, capable, got, tc.wantWarn)
+				}
+				if !tc.wantWarn {
+					return
+				}
+				// The message has to be actionable: name both fixes (a feedback channel,
+				// and persisting the ledger) and the doc that explains the edge.
+				for _, want := range []string{
+					"notify.slack.feedback_buttons",
+					"notify.matrix.feedback_reactions",
+					"outcome.ledger_path",
+					"persistent volume",
+					"docs/concepts/learning-loop.md",
+				} {
+					if !strings.Contains(got, want) {
+						t.Errorf("warning is missing the fix pointer %q: %q", want, got)
+					}
+				}
+			})
+		}
+	}
+}
+
+// TestRecallDecayWarningStatesWhatActuallyHappens is a DRIFT GUARD over the real
+// ledger: it MEASURES what a silent resolve channel does to an entry, then requires
+// the warning to say that and not its opposite.
+//
+// This exists because the first version of the warning claimed one consequence —
+// "keeps being recalled at full trust" — for both fingerprint shapes, and that is
+// only true for one of them. The measurement below is the evidence:
+//
+//   - a REAL alert fingerprint is recorded Resolvable=true (resolvability comes from
+//     outcome.Derived(fp), never from send_resolved), so Recalls climbs while Resolved
+//     stays 0 and the factor drops UNDER the default floor after a single recall. The
+//     entry stops being recalled. Telling that operator their entry keeps firing at
+//     full trust is precisely backwards.
+//   - a DERIVED fingerprint (GitOps, re-investigate) is Resolvable=false and never
+//     enters OpenCounts at all, so outcomeGate's fail-safe returns factor 1: that one
+//     really does keep firing at full trust.
+//
+// The keyword assertions are only as good as the measurement they hang off, which is
+// the point: if the resolvable rule, the Factor formula or the defaults change so that
+// a real fingerprint no longer decays, the MEASUREMENT half fails first and forces
+// whoever changed it to revisit the prose.
+func TestRecallDecayWarningStatesWhatActuallyHappens(t *testing.T) {
+	cfg := &config.Config{}
+	cfg.Catalog.InstantRecall.Enabled = true
+	cfg.Outcome.LedgerPath = "/var/lib/runlore/catalog/outcomes.jsonl"
+	config.ApplyDefaults(cfg)
+	prior, floor := cfg.Catalog.InstantRecall.OutcomePrior, cfg.Catalog.InstantRecall.OutcomeFloor
+
+	led, err := outcome.New(filepath.Join(t.TempDir(), "outcomes.jsonl"))
+	if err != nil {
+		t.Fatalf("ledger: %v", err)
+	}
+	now := time.Now()
+	open := func(fp, entry string) {
+		t.Helper()
+		resolvable := !outcome.Derived(fp) // exactly what investigate.go stamps
+		if err := led.Open(outcome.Event{
+			Fingerprint: fp, Kind: "recall", Entry: entry,
+			Resolvable: &resolvable, At: now, StartedAt: now.Add(-time.Minute),
+		}); err != nil {
+			t.Fatalf("open %s: %v", fp, err)
+		}
+	}
+
+	// A real alert fingerprint, recalled once, never resolved.
+	const realEntry = "kb/real.md"
+	open("a1b2c3d4e5f6a7b8", realEntry)
+	counts, err := led.OpenCounts()
+	if err != nil {
+		t.Fatalf("open counts: %v", err)
+	}
+	agg, seen := counts[realEntry]
+	if !seen {
+		t.Fatalf("a resolvable recall must enter OpenCounts; got %v", counts)
+	}
+	factor := agg.Factor(prior)
+	if factor >= floor {
+		t.Fatalf("MEASUREMENT CHANGED: one unresolved recall now scores %.4f, at or above the "+
+			"floor %.2f (prior %.1f) — the warning's 'stops firing' claim may no longer hold; "+
+			"re-measure before editing the prose", factor, floor, prior)
+	}
+
+	// A derived fingerprint, recalled once: never counted, so never decays.
+	const derivedEntry = "kb/gitops.md"
+	open(outcome.DeriveFingerprint(outcome.GitOpsFingerprintPrefix, "ns/app|Failed"), derivedEntry)
+	counts, err = led.OpenCounts()
+	if err != nil {
+		t.Fatalf("open counts: %v", err)
+	}
+	if _, seen := counts[derivedEntry]; seen {
+		t.Fatalf("MEASUREMENT CHANGED: a derived-fingerprint recall now enters OpenCounts — the "+
+			"warning's 'full trust' claim may no longer hold; got %v", counts[derivedEntry])
+	}
+
+	// Now hold the prose to both measured outcomes. Both are reachable wherever a
+	// webhook source is enabled (a deployment may run Alertmanager AND the GitOps
+	// watcher), so the hedged variant must name both.
+	hedged := RecallDecayWarning(cfg, true)
+	if hedged == "" {
+		t.Fatal("expected the warning to fire for recall + ledger + no feedback")
+	}
+	for _, want := range []string{
+		"outcome_floor", // the decay-to-rejection case, measured above
+		"STOPS FIRING",
+		"full trust", // the derived-fingerprint case, also measured above
+	} {
+		if !strings.Contains(hedged, want) {
+			t.Errorf("hedged warning must state the measured consequence %q: %q", want, hedged)
+		}
+	}
+	// The failure this guard was written for: naming ONLY the benign case. A message
+	// that says trust never moves is the opposite of the measurement above.
+	lower := strings.ToLower(hedged)
+	for _, forbidden := range []string{
+		"confidence never moves",
+		"trust never moves",
+		"never decays",
+		"no entry is ever proposed for retirement: a knowledge entry that has stopped working keeps being recalled at full trust",
+	} {
+		if strings.Contains(lower, forbidden) {
+			t.Errorf("warning claims %q, contradicting the measured decay-to-rejection case: %q", forbidden, hedged)
+		}
+	}
+
+	// With no webhook source enabled, the decay case is UNREACHABLE — every
+	// fingerprint is derived — so the strong variant must not threaten the operator
+	// with a rejection that cannot happen to them.
+	strong := RecallDecayWarning(cfg, false)
+	if !strings.Contains(strong, "full trust") {
+		t.Errorf("watcher-only warning must state the full-trust consequence: %q", strong)
+	}
+	if strings.Contains(strong, "STOPS FIRING") || strings.Contains(strong, "outcome_floor") {
+		t.Errorf("watcher-only warning must not threaten a floor rejection that cannot occur "+
+			"without a resolvable fingerprint: %q", strong)
+	}
+}
+
+// TestRecallDecayWarningHedgesOnlyWhereItMust splits the honesty question in two.
+//
+// Where a webhook source IS enabled, whether resolves actually arrive is unknowable:
+// Alertmanager's `send_resolved` lives in the operator's receiver config, which
+// RunLore never reads, and a custom mapping's `resolved` field is per-instance. The
+// message may say the resolve channel is the only one LEFT and that we cannot see it;
+// it must not claim resolves never arrive. Telling a correctly-configured operator
+// their loop is broken is the lie that trains people to ignore the line.
+//
+// Where NO webhook source is enabled the opposite applies: a watcher's Watch returns
+// investigation requests only, so no resolve can arrive by construction. Hedging there
+// understates a fact RunLore can prove, and hedged warnings get ignored too.
+func TestRecallDecayWarningHedgesOnlyWhereItMust(t *testing.T) {
+	cfg := &config.Config{}
+	cfg.Catalog.InstantRecall.Enabled = true
+	cfg.Outcome.LedgerPath = "/var/lib/runlore/catalog/outcomes.jsonl"
+
+	hedged := RecallDecayWarning(cfg, true)
+	if !strings.Contains(hedged, "cannot tell from here") {
+		t.Errorf("with a webhook source enabled the warning must hedge on the resolve channel "+
+			"it cannot observe: %q", hedged)
+	}
+	if !strings.Contains(hedged, "safe to ignore") {
+		t.Errorf("the hedged warning must tell an operator whose source DOES resolve that they "+
+			"are fine, or it reads as a false alarm: %q", hedged)
+	}
+	// Phrasings that would state the unobservable as fact. These target claims about
+	// whether resolves ARRIVE, which is what RunLore cannot see. They deliberately do
+	// NOT forbid "no resolve channel": that describes GitOps/re-investigate sources,
+	// whose synthetic fingerprints no resolve can match by construction — a proven
+	// fact, and one the message needs. A blunter blacklist ("no resolve") rejected the
+	// true statement along with the false ones.
+	lower := strings.ToLower(hedged)
+	for _, forbidden := range []string{
+		"resolves never arrive",
+		"no resolves arrive",
+		"sends no resolves",
+		"does not send resolves",
+		"your source will not",
+		"will stay empty",
+	} {
+		if strings.Contains(lower, forbidden) {
+			t.Errorf("warning asserts %q, which this process cannot determine: %q", forbidden, hedged)
+		}
+	}
+
+	// The watcher-only variant is entitled to assert it, and should: the hedge would
+	// be false modesty about something the source contract settles.
+	strong := RecallDecayWarning(cfg, false)
+	if strings.Contains(strong, "cannot tell from here") {
+		t.Errorf("with no webhook source enabled, resolvability IS determinable — the warning "+
+			"must not hedge: %q", strong)
+	}
+	if !strings.Contains(strong, "no enabled source can deliver a resolve event") {
+		t.Errorf("watcher-only warning must state the proven fact it rests on: %q", strong)
 	}
 }
 
