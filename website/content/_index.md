@@ -36,8 +36,8 @@ images:
     <figcaption><strong>An investigation.</strong> The verdict first, then the evidence behind it — plus what it ruled out, what it still doesn&rsquo;t know, and next steps it will <em>not</em> apply for you.</figcaption>
   </figure>
   <figure class="rl-shot">
-    <img src="/images/recall-notification.png" width="1336" height="1346" loading="lazy" alt="RunLore Slack notification showing an instant recall: an ⚡ Instant recall banner reading 'answered from your knowledge base, no investigation was run', the known cause, the citation of the knowledge-base entry harbor-core-migration-deadlock.md, and a single model call at 93% cached tokens." />
-    <figcaption><strong>The same failure, next time.</strong> Answered straight from the entry you merged &mdash; one model call, no investigation, and it cites the entry so you can check it.</figcaption>
+    <img src="/images/recall-notification.png" width="1336" height="1346" loading="lazy" alt="RunLore Slack notification showing an instant recall: an ⚡ Instant recall banner reading 'answered from your knowledge base, no investigation was run', the known cause, the citation of the knowledge-base entry harbor-core-migration-deadlock.md, and a cost footer showing this offline demo's single model call at 93% cached tokens." />
+    <figcaption><strong>The same failure, next time.</strong> Answered straight from the entry you merged &mdash; no investigation, and it cites the entry so you can check it. As shipped that is two model calls (the reranker, then the adversarial verify pass) against the seven the same incident's full investigation took; the card shows one because the offline demo turns the reranker off.</figcaption>
   </figure>
 </div>
 
