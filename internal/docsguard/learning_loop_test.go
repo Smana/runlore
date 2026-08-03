@@ -91,30 +91,85 @@ func TestLastValidatedClaimREsFlip(t *testing.T) {
 // curateBlocks maps the config-key prefixes the learning-loop page cites to the
 // struct that actually defines them, so a renamed YAML tag fails here rather than
 // silently leaving a reader configuring a key that no longer exists.
-var curateBlocks = map[string]any{
-	"curate.retirement.":   config.Retirement{},
-	"curate.revalidation.": config.Revalidation{},
+// curateBlocks maps each `curate.<block>.` prefix to the struct that defines it,
+// DERIVED from config.Curate's own yaml tags rather than hand-listed. A
+// hand-listed map only ever covers the blocks someone remembered: the page also
+// cites curate.sweeps.* keys, which an earlier alternation of just
+// (retirement|revalidation) skipped while the "did I check anything?" backstop
+// stayed green — so the guard read as full coverage and was a subset.
+func curateBlocks() map[string]reflect.Type {
+	out := map[string]reflect.Type{}
+	rt := reflect.TypeOf(config.Curate{})
+	for i := range rt.NumField() {
+		f := rt.Field(i)
+		if f.Type.Kind() != reflect.Struct {
+			continue // a scalar knob like stale_after, not a block of keys
+		}
+		if tag, _, _ := strings.Cut(f.Tag.Get("yaml"), ","); tag != "" && tag != "-" {
+			out["curate."+tag+"."] = f.Type
+		}
+	}
+	return out
 }
 
-var curateKeyRE = regexp.MustCompile(`curate\.(retirement|revalidation)\.([a-z_]+)`)
+var curateKeyRE = regexp.MustCompile(`curate\.([a-z_]+)\.([a-z_]+)`)
 
-// TestLearningLoopCitesRealCurateKeys checks every `curate.retirement.*` /
-// `curate.revalidation.*` key the page names against the yaml tags of the config
-// structs, in both directions of trust: the key must exist, and the guard must
-// have found keys to check at all.
+// TestLearningLoopCitesRealCurateKeys checks every `curate.<block>.<key>` the page
+// names against the yaml tags of the struct that defines the block, in both
+// directions of trust: the block and the key must exist, and the guard must have
+// found something to check at all.
 func TestLearningLoopCitesRealCurateKeys(t *testing.T) {
 	doc := readDoc(t, learningLoopPath)
+	blocks := curateBlocks()
 	var checked int
 	for _, m := range curateKeyRE.FindAllStringSubmatch(doc, -1) {
-		prefix, key := "curate."+m[1]+".", m[2]
-		if !yamlTags(curateBlocks[prefix])[key] {
-			t.Errorf("learning-loop.md cites %s%s, which is not a yaml key of %T — fix the page or the config struct",
-				prefix, key, curateBlocks[prefix])
-		}
+		block, key := m[1], m[2]
 		checked++
+		rt, ok := blocks["curate."+block+"."]
+		if !ok {
+			t.Errorf("learning-loop.md cites curate.%s.%s, but config.Curate declares no %q block — "+
+				"fix the page or the config struct", block, key, block)
+			continue
+		}
+		if !yamlTags(rt)[key] {
+			t.Errorf("learning-loop.md cites curate.%s.%s, which is not a yaml key of %s — "+
+				"fix the page or the config struct", block, key, rt)
+		}
 	}
 	if checked == 0 {
-		t.Fatal("no curate.retirement/revalidation keys found in learning-loop.md — this guard is now inert")
+		t.Fatal("no curate.<block>.<key> citations found in learning-loop.md — this guard is now inert")
+	}
+}
+
+// TestCurateBlockDerivationIsComplete is the mutation guard for the derivation
+// above. It must find EVERY struct block on config.Curate — the whole point of
+// deriving it — and yamlTags must accept only keys a block really declares.
+func TestCurateBlockDerivationIsComplete(t *testing.T) {
+	blocks := curateBlocks()
+	for _, want := range []string{"curate.retirement.", "curate.revalidation.", "curate.sweeps."} {
+		if _, ok := blocks[want]; !ok {
+			t.Errorf("derivation missed %s — keys under it would go unchecked", want)
+		}
+	}
+	rt := reflect.TypeOf(config.Curate{})
+	var wantBlocks int
+	for i := range rt.NumField() {
+		if rt.Field(i).Type.Kind() == reflect.Struct {
+			wantBlocks++
+		}
+	}
+	if len(blocks) != wantBlocks {
+		t.Errorf("derived %d blocks from %d struct fields on config.Curate — a block is being dropped",
+			len(blocks), wantBlocks)
+	}
+	// Both directions on the tag lookup, so a yamlTags that answered "yes" (or
+	// "no") to everything cannot pass.
+	sweeps := yamlTags(blocks["curate.sweeps."])
+	if !sweeps["mode"] || !sweeps["interval"] {
+		t.Error("yamlTags missed a key config.Sweeps declares")
+	}
+	if sweeps["schedule"] || sweeps["Mode"] {
+		t.Error("yamlTags accepted a key config.Sweeps does not declare")
 	}
 }
 
@@ -163,10 +218,9 @@ func shortDuration(d time.Duration) string {
 	return d.String()
 }
 
-// yamlTags returns the set of yaml key names declared by v's struct fields.
-func yamlTags(v any) map[string]bool {
+// yamlTags returns the set of yaml key names declared by a struct type's fields.
+func yamlTags(rt reflect.Type) map[string]bool {
 	out := map[string]bool{}
-	rt := reflect.TypeOf(v)
 	for i := range rt.NumField() {
 		tag, _, _ := strings.Cut(rt.Field(i).Tag.Get("yaml"), ",")
 		if tag != "" && tag != "-" {
