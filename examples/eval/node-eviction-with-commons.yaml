@@ -1,0 +1,201 @@
+# TREATMENT arm of the knowledge-commons pair. Its twin,
+# node-eviction-no-commons.yaml, replays the SAME incident against an EMPTY commons.
+# Everything below is byte-identical between the two files except commons_dir; the
+# delta between their scores is what the commons was worth on this incident.
+#
+# Why this incident. The commons claims exactly one thing: it grounds kb_search
+# mid-loop so a fresh deployment has something to reason from. That claim is only
+# testable where a generic playbook changes the ANSWER, so the evidence here carries a
+# plausible wrong answer the playbook is what resolves:
+#
+#   * The kubelet's own eviction message blames the victim ("Container app was using
+#     214Mi, request is 128Mi") — the node playbook's first line of guidance is that the
+#     evicted pod is usually not the culprit.
+#   * report-worker sits at 7.42GiB against an 8Gi LIMIT, so limits say it is fine. Only
+#     comparing usage with its 256Mi REQUEST shows the scheduler was overcommitting the
+#     node — "compare consumption with requests, not limits" is step 3 of the playbook.
+#   * index-builder is genuinely OOMKilled (exit 137) on the same node, and the two
+#     playbooks name each other in "# Not covered" precisely because this pair is easy
+#     to confuse.
+#
+# All of that evidence is present in BOTH arms. Nothing is withheld from the baseline —
+# a case that only scores well because the control was starved measures nothing.
+#
+# Authored (not cluster-recorded): the recorded corpus had no incident of this class.
+# So the arithmetic is stated in the evidence itself, and it closes:
+#
+#   requests  128Mi+128Mi+256Mi+2Gi+64Mi + 5.42Gi (17 others) = 8.0Gi of 15.6Gi allocatable
+#   usage     7.42+1.96+0.209+0.203+0.179 GiB + 5.55Gi (17 others) = 15.52Gi
+#   node      15.52Gi of pods + 0.4Gi kube/system-reserved ~= 15.92Gi of 16Gi capacity,
+#             leaving MemAvailable 78MiB — the 99% the alert fired on
+#   gap       usage - requests = 7.5Gi, of which report-worker alone is 7.17Gi (95%)
+#
+# The eviction OUTCOME follows from the kubelet's documented ranking instead of
+# contradicting it. The kubelet evicts pods that exceed their requests first, ordered by
+# Priority and then by how far each exceeds its request. report-worker is furthest above
+# its request by an order of magnitude, but carries priority 10000; fluent-bit is
+# system-node-critical; index-builder is Guaranteed and sits BELOW its request, so it
+# lands in the bucket evicted last. That leaves the two priority-0 checkout-api pods at
+# the head of the queue — which is exactly who the kubelet killed. An authored incident
+# that contradicted how Kubernetes actually evicts would teach the LLM judge, which
+# grades against ground_truth below, a rule that is simply false.
+name: node-eviction-with-commons
+alert_title: NodeMemoryHighUtilization
+# No `workload:`. A node-scoped alert carries none, and that is deliberate: a
+# workload-less request is the ONE tier where a resource-less commons entry
+# structurally agrees with an incident (matchScopeless). Recall refuses it anyway, on
+# provenance — so `expect_recall: rejected` below tests the guarantee itself rather
+# than a resource mismatch that would have rejected any entry.
+prompt: |
+  NodeMemoryHighUtilization (warning, prod): node ip-10-0-22-115.eu-west-3.compute.internal
+  is at 99% memory utilisation and the kubelet has begun evicting pods. Checkout error
+  rate is climbing.
+commons_dir: fixtures/commons-memory
+# Wide-open gates. Nothing here is meant to keep recall out — the corpus is a strong
+# lexical match for this incident and would fire under these thresholds if it were the
+# operator's own knowledge. The ONLY thing standing between these playbooks and a
+# short-circuit is their provenance.
+recall:
+  min_score: 0.01
+  solo_floor: 0.01
+  margin_gap: 0.01
+expect_recall: rejected
+# MEASUREMENT, not assertion. This pair exists to produce a number, and the honest
+# number may be zero — the case files say so and mean it. A case whose failure is the
+# finding must not spend the nightly campaign's only tolerated miss (-fail-under 0.7
+# fails on the SECOND miss, whatever the case count). The guarantees that must never
+# regress — recall refusing a commons entry, kb_search actually grounding the loop —
+# are pinned by unit tests that run on every PR, not by the nightly.
+gate: false
+tools:
+  pod_status: |
+    node ip-10-0-22-115.eu-west-3.compute.internal — capacity 16Gi, allocatable 15.6Gi
+    pods on this node (memory request / limit / QoS / Priority)
+    payments/checkout-api-6f4b9c7d8-2xk4p   Failed   ready=0/1  request=128Mi  limit=(none)  qos=Burstable   priority=0
+      ✗ reason=Evicted  "The node was low on resource: memory. Threshold quantity: 100Mi,
+        available: 78Mi. Container app was using 214Mi, request is 128Mi."
+    payments/checkout-api-6f4b9c7d8-9wsdq   Failed   ready=0/1  request=128Mi  limit=(none)  qos=Burstable   priority=0
+      ✗ reason=Evicted  "The node was low on resource: memory. Container app was using
+        208Mi, request is 128Mi."
+    analytics/report-worker-7c9f4d5b6-jt2lm Running  ready=1/1  request=256Mi  limit=8Gi     qos=Burstable   priority=10000 (batch-critical)
+    search/index-builder-5d8c6b4f9-nk7vt    Running  ready=1/1  request=2Gi    limit=2Gi     qos=Guaranteed  priority=0
+      ⚠ app: last state Terminated  reason=OOMKilled  exitCode=137  restarts=6
+    kube-system/fluent-bit-w9p2c            Running  ready=1/1  request=64Mi   limit=256Mi   qos=Burstable   priority=2000000000 (system-node-critical)
+    (17 further pods, 5.42Gi of requests combined; none more than 24Mi above its own request)
+    sum of memory requests scheduled on this node: 8.0Gi of 15.6Gi allocatable
+  kube_events: |
+    2026-08-03T09:12:41Z Warning Node/ip-10-0-22-115 EvictionThresholdMet: Attempting to reclaim memory
+    2026-08-03T09:12:43Z Warning Pod/checkout-api-6f4b9c7d8-2xk4p Evicted: The node was low on resource: memory
+    2026-08-03T09:12:43Z Warning Pod/checkout-api-6f4b9c7d8-9wsdq Evicted: The node was low on resource: memory
+    2026-08-03T09:12:44Z Normal  Node/ip-10-0-22-115 NodeHasInsufficientMemory: status is now: NodeHasInsufficientMemory
+    2026-08-03T08:57:02Z Warning Pod/index-builder-5d8c6b4f9-nk7vt BackOff: Back-off restarting failed container app
+    2026-08-03T02:14:08Z Normal  Node/ip-10-0-22-115 NodeAllocatableEnforced: Updated Node Allocatable limit across pods
+  query_metrics: |
+    container_memory_working_set_bytes{node="ip-10-0-22-115"} (5m avg, by pod)
+      analytics/report-worker-7c9f4d5b6-jt2lm 7.42 GiB
+      search/index-builder-5d8c6b4f9-nk7vt    1.96 GiB
+      payments/checkout-api-6f4b9c7d8-2xk4p    214 MiB
+      payments/checkout-api-6f4b9c7d8-9wsdq    208 MiB
+      kube-system/fluent-bit-w9p2c             183 MiB
+      (17 further pods, 5.55 GiB combined; none above 384 MiB)
+      sum over all pods on this node: 15.52 GiB
+
+    kube_pod_container_resource_requests{resource="memory", node="ip-10-0-22-115"}
+      search/index-builder     2Gi
+      analytics/report-worker  256Mi
+      payments/checkout-api    128Mi
+      kube-system/fluent-bit   64Mi
+      sum over all pods on this node: 8.0 GiB
+
+    kube_pod_container_resource_limits{resource="memory", node="ip-10-0-22-115"}
+      analytics/report-worker  8Gi
+      search/index-builder     2Gi
+      kube-system/fluent-bit   256Mi
+      payments/checkout-api    (no limit set)
+
+    node_memory_MemTotal_bytes{instance="ip-10-0-22-115"}     = 16 GiB
+    node_memory_MemAvailable_bytes{instance="ip-10-0-22-115"} = 78 MiB
+      (allocatable is 15.6 GiB; the 0.4 GiB gap to capacity is kube-reserved +
+       system-reserved + evictionHard, which is where the kubelet/containerd/OS
+       working set lives — so 15.52 GiB of pods plus 0.4 GiB of node overhead accounts
+       for 15.92 GiB of the 16 GiB, leaving the 78 MiB above)
+  what_changed: |
+    flux Kustomization/analytics  9f3a21..c7d004  (reconciled 2026-08-03T08:41:12Z)
+    --- analytics/report-worker/values.yaml
+    -  parallelWorkers: 4
+    +  parallelWorkers: 16        # nightly backfill throughput
+       resources:
+         requests:
+           memory: 256Mi          # unchanged
+         limits:
+           memory: 8Gi            # unchanged
+       priorityClassName: batch-critical   # unchanged
+
+    no changes to payments/checkout-api or search/index-builder in the last 24h
+  workload_ownership: |
+    Pod/report-worker-7c9f4d5b6-jt2lm → ReplicaSet/report-worker-7c9f4d5b6 → Deployment/report-worker
+      (namespace analytics; flux Kustomization/analytics)
+    Pod/checkout-api-6f4b9c7d8-2xk4p → ReplicaSet/checkout-api-6f4b9c7d8 → Deployment/checkout-api
+      (namespace payments; flux Kustomization/payments)
+    Pod/index-builder-5d8c6b4f9-nk7vt → ReplicaSet/index-builder-5d8c6b4f9 → Deployment/index-builder
+      (namespace search; flux Kustomization/search)
+  query_logs: |
+    ingress-nginx  upstream connect error or disconnect/reset before headers → payments/checkout-api (x412 in 5m)
+    report-worker  backfill batch 118/240 complete (16 workers)
+    index-builder  starting segment merge (heap target 1.5Gi)
+expected:
+  # Scored on WHAT WAS BLAMED, not on keyword overlap: root_cause_entities is matched
+  # over the claim text only, and a distractor found there is an over-claim.
+  #
+  # Two entities that LOOK like distractors are deliberately absent from the list, for
+  # the same reason: Score() penalises a distractor named in the CLAIM, and a correct
+  # claim names both of them.
+  #
+  #   * checkout-api — a correct claim names the victim as the affected party
+  #     ("...so the kubelet evicted checkout-api"). Listing it would fail correct
+  #     investigations, which is worse than not scoring the trap at all.
+  #   * index-builder — the ground truth below names it too. Distinguishing a bounded,
+  #     Guaranteed, container-level OOMKill from node-level pressure IS the
+  #     discriminating step here, and the commons playbook's "# Not covered" section
+  #     actively tells the model to make it. Listing it would therefore penalise the
+  #     GROUNDED arm hardest, and the pair would report the commons as harmful in
+  #     exactly the runs where it helped.
+  #
+  # That leaves one valid distractor. The case stays scored on entity precision rather
+  # than dropping back to keyword overlap, and no replacement was invented to pad the
+  # list — an entity a correct claim has no reason to name is the only thing that
+  # belongs here, and there is exactly one.
+  root_cause_entities: [report-worker]
+  distractors:
+    - fluent-bit      # over its 64Mi request, but 183MiB of a 15.6GiB node — and
+                      # system-node-critical, so the kubelet never queued it at all
+  must_contain: [memory, request]
+  min_confidence: 0.5
+ground_truth:
+  root_cause: |
+    analytics/report-worker went from 4 to 16 parallel workers without its memory
+    request changing (256Mi), so its working set grew to 7.42GiB while the scheduler
+    kept placing work on ip-10-0-22-115 as if it needed 256Mi. Pod memory requests on
+    the node sum to 8.0Gi of 15.6Gi allocatable while actual pod usage reached 15.52Gi,
+    and report-worker alone accounts for 7.17Gi of that 7.5Gi gap — textbook overcommit.
+
+    The kubelet then evicted by its documented ranking: pods exceeding their requests
+    first, ordered by Priority and then by how far each exceeds its request.
+    report-worker is furthest above its request by an order of magnitude, but it carries
+    the batch-critical PriorityClass (10000), so the kubelet skipped it and took the
+    highest-ranked priority-0 pods instead — payments/checkout-api, 86Mi and 80Mi above
+    their 128Mi requests. The evicted pods are victims, not the cause; the PriorityClass
+    is why the victims were the payments API specifically.
+
+    search/index-builder's OOMKills are a separate, self-limiting container-sizing
+    problem: it is Guaranteed (request == limit == 2Gi) and runs BELOW its request, so
+    it sits in the bucket the kubelet evicts last and never contributed to node pressure
+    at all.
+  expected_sources: [kubernetes, metrics]
+  optional_sources: [gitops, kb, logs]
+  expected_action: |
+    Raise analytics/report-worker's memory request to match its real working set (and
+    bring its request and limit closer together) so the scheduler stops overcommitting
+    the node; do it in Git and reconcile. Separately, reconsider why a nightly backfill
+    outranks the payments API in the kubelet's eviction order.
+  must_reach_root: true

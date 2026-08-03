@@ -70,26 +70,21 @@ func loadKBCatalog(cfgPath, dir string) (*catalog.Catalog, error) {
 			commonsDir = cfg.Catalog.Commons.Dir
 		}
 	}
-	if commonsDir == "" {
-		cat, err := catalog.New(dir)
-		if err != nil {
+	// One root or both, through the same constructor — NewWithCommons degrades to
+	// New(dir) on an empty commonsDir and owns the "commons set before the load"
+	// ordering. No syncer either way: this is a short-lived read command and the CLI
+	// never clones.
+	cat, err := catalog.NewWithCommons(context.Background(), dir, commonsDir)
+	if err != nil {
+		if commonsDir == "" {
 			return nil, fmt.Errorf("load catalog %s: %w (for a git-synced catalog, run `lore catalog sync` first)", dir, err)
 		}
-		if cat.Len() == 0 {
-			return nil, fmt.Errorf("catalog %s has no entries (for a git-synced catalog, run `lore catalog sync` first)", dir)
-		}
-		return cat, nil
-	}
-
-	// Both roots: SetCommonsDir before the load, since ReloadContext is what reads
-	// the commons alongside the primary root. No syncer — this is a short-lived
-	// read command and the CLI never clones.
-	cat := catalog.NewEmpty()
-	cat.SetCommonsDir(commonsDir)
-	if _, err := cat.ReloadContext(context.Background(), dir); err != nil {
 		return nil, fmt.Errorf("load catalog %s (commons %s): %w (for a git-synced catalog, run `lore catalog sync` first)", dir, commonsDir, err)
 	}
 	if cat.Len() == 0 {
+		if commonsDir == "" {
+			return nil, fmt.Errorf("catalog %s has no entries (for a git-synced catalog, run `lore catalog sync` first)", dir)
+		}
 		return nil, fmt.Errorf("catalog %s and commons %s are both empty (for a git-synced catalog, run `lore catalog sync` first)", dir, commonsDir)
 	}
 	return cat, nil

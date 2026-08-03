@@ -8,11 +8,9 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
-	"path/filepath"
 	"sort"
 	"strings"
 
-	"github.com/Smana/runlore/internal/catalog"
 	"github.com/Smana/runlore/internal/investigate"
 	"github.com/Smana/runlore/internal/providers"
 )
@@ -42,11 +40,23 @@ func (r *Runner) runOne(ctx context.Context, c Case) Result {
 	// the replay exercises the closed recall→verify loop exactly as production does
 	// (BuildModelAndTools). Cases without a fixture replay with no recall, unchanged.
 	var recall *investigate.Recall
-	if c.CatalogDir != "" {
-		cat, err := catalog.New(filepath.Join(c.dir, c.CatalogDir))
+	if c.hasCatalog() {
+		cat, err := c.buildCatalog(ctx)
 		if err != nil {
 			return Result{Name: c.Name, Missing: []string{noteCatalogFixtureError + err.Error()}}
 		}
+		// kb_search is offered on catalog EXISTENCE, which is the rule production uses:
+		// BuildModelAndTools appends KBSearchTool whenever the catalog is non-nil, above
+		// and independent of both instant recall and the commons. Gating it on
+		// commons_dir instead would invent a second rule and leave the replay arm
+		// disagreeing with production AND with the live arm, which takes its BaseTools
+		// straight from BuildModelAndTools — a catalog_dir case would then replay a tool
+		// surface no deployment ever ships (after verify withdraws a recalled entry,
+		// production's model can still look the entry up; the replay's could not).
+		//
+		// For a commons case this is additionally the ONLY route by which the corpus can
+		// reach the model at all, since recall refuses commons entries by provenance.
+		tools = append(tools, investigate.KBSearchTool{Catalog: cat})
 		rc := c.recallConfig()
 		recall = &investigate.Recall{
 			Catalog:              cat,
@@ -180,6 +190,12 @@ type CaseAggregate struct {
 	Missing     []string // union of missing keywords/entities across repeats
 	OverClaimed []string // union of over-claimed distractors across repeats
 
+	// Gated echoes the case's `gate:` field: true (the default) means this case votes
+	// on the nightly -fail-under threshold. False marks a measurement case whose
+	// failure is a finding rather than a regression — it still runs, still scores and
+	// still appears in the report, but GateError skips it. See Case.Gate.
+	Gated bool
+
 	// Recall telemetry aggregated over the repeats (cases with a catalog fixture only):
 	// HasRecall marks the case as recall-exercising, ExpectRecall echoes its assertion,
 	// and the counters say in how many of the N repeats recall fired / short-circuited.
@@ -218,6 +234,45 @@ func (c Campaign) PassRate() float64 {
 		return 0
 	}
 	return float64(c.ReachedCases()) / float64(len(c.Aggregates))
+}
+
+// GatedTotal counts the cases that vote on the nightly -fail-under threshold, and
+// GatedReached how many of those reached RCA. They exist alongside PassRate /
+// ReachedCases rather than replacing them: the published scorecard reports every case
+// that RAN, gate-bearing or not, because a measurement case's number is the point of
+// running it. Only the gate narrows its view. The two agree unless some case sets
+// `gate: false`.
+func (c Campaign) GatedTotal() int {
+	n := 0
+	for _, a := range c.Aggregates {
+		if a.Gated {
+			n++
+		}
+	}
+	return n
+}
+
+// GatedReached counts gate-bearing cases whose pass-rate met the k-of-n bar.
+func (c Campaign) GatedReached() int {
+	n := 0
+	for _, a := range c.Aggregates {
+		if a.Gated && a.Reached {
+			n++
+		}
+	}
+	return n
+}
+
+// GatedPassRate is the fraction of gate-bearing cases that reached RCA — the number
+// -fail-under is compared against. Zero gate-bearing cases returns 1: a campaign made
+// entirely of measurements has nothing to regress, and reporting 0 there would fail
+// every such run.
+func (c Campaign) GatedPassRate() float64 {
+	total := c.GatedTotal()
+	if total == 0 {
+		return 1
+	}
+	return float64(c.GatedReached()) / float64(total)
 }
 
 // FlakyNames lists cases whose repeats disagreed too much to trust.
@@ -312,7 +367,8 @@ func aggregateResults(c Case, results []Result) CaseAggregate {
 		Confidence:         medianFloat(confs),
 		Missing:            sortedSet(missSet),
 		OverClaimed:        sortedSet(ocSet),
-		HasRecall:          c.CatalogDir != "",
+		Gated:              c.gates(),
+		HasRecall:          c.hasCatalog(),
 		ExpectRecall:       c.ExpectRecall,
 		RecallFired:        fired,
 		RecallShortCircuit: shortCircuits,
@@ -333,21 +389,31 @@ func sortedSet(m map[string]struct{}) []string {
 	return out
 }
 
-// GateError returns a non-nil error when the campaign pass-rate is below failUnder
-// (which is only enforced when failUnder > 0). The message names the cases that did
-// not reach RCA and any flaky cases, so CI logs explain the failure.
+// GateError returns a non-nil error when the campaign's GATED pass-rate is below
+// failUnder (which is only enforced when failUnder > 0). The message names the
+// gate-bearing cases that did not reach RCA and any flaky cases, so CI logs explain
+// the failure.
+//
+// It reads GatedPassRate, not PassRate: a case marked `gate: false` exists to produce
+// a number whose low value is a finding, and letting it fail the nightly would report
+// the measurement as a regression — while also consuming the single miss the threshold
+// tolerates, leaving a real regression elsewhere nowhere to surface. Such cases still
+// run and still appear in the report; they only lose the vote.
 func GateError(c Campaign, failUnder float64) error {
-	if failUnder <= 0 || c.PassRate() >= failUnder {
+	if failUnder <= 0 || c.GatedPassRate() >= failUnder {
 		return nil
 	}
 	var missed []string
 	for _, a := range c.Aggregates {
-		if !a.Reached {
+		if a.Gated && !a.Reached {
 			missed = append(missed, a.Name)
 		}
 	}
 	msg := fmt.Sprintf("eval gate failed: pass-rate %.0f%% < threshold %.0f%% (reached %d/%d)",
-		c.PassRate()*100, failUnder*100, c.ReachedCases(), len(c.Aggregates))
+		c.GatedPassRate()*100, failUnder*100, c.GatedReached(), c.GatedTotal())
+	if ungated := len(c.Aggregates) - c.GatedTotal(); ungated > 0 {
+		msg += fmt.Sprintf("; %d measurement-only case(s) excluded from the gate", ungated)
+	}
 	if len(missed) > 0 {
 		msg += "; missed: " + strings.Join(missed, ", ")
 	}

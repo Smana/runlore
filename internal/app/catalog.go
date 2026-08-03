@@ -23,6 +23,14 @@ import (
 // Two hand-wired copies is how the investigator and reinvestigator ended up reading
 // different indexes (#414); one function makes divergence impossible.
 //
+// It cannot use catalog.NewWithCommons — the catalog it arms is already built and
+// already carries an embedder, a vector cache and a syncer, and reconstructing it here
+// would drop all three. So the ordering that constructor encodes is honoured by hand:
+// SetCommonsDir runs before the reload the syncer triggers, because Entry.Commons is
+// stamped during that reload's commons pass and a root set afterwards would index the
+// shared corpus UNMARKED — and an unmarked commons entry is free to fire instant
+// recall.
+//
 // The commons syncer is separate from the operator's own: its own directory, its own
 // (much longer) interval, and a failure that logs rather than propagates. A shared
 // upstream corpus being briefly unavailable must never degrade the operator's own

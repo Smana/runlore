@@ -7,6 +7,7 @@
 package eval
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -14,6 +15,7 @@ import (
 
 	"gopkg.in/yaml.v3"
 
+	"github.com/Smana/runlore/internal/catalog"
 	"github.com/Smana/runlore/internal/providers"
 )
 
@@ -49,9 +51,23 @@ type Case struct {
 	// as production does — so the closed recall→verify loop is exercised mechanically in
 	// the replay eval. Absent ⇒ the case replays with no recall, unchanged.
 	CatalogDir string `yaml:"catalog_dir,omitempty"`
+	// CommonsDir, when set, points at a directory of knowledge-base markdown entries
+	// RELATIVE to the case file, loaded as the KNOWLEDGE COMMONS — a second, read-only
+	// root indexed alongside the operator's own (catalog.SetCommonsDir).
+	//
+	// It is deliberately NOT CatalogDir with a different name. Entries loaded through
+	// CatalogDir come back with Entry.Commons == false: they are the operator's own
+	// knowledge, and instant recall may answer an incident from them. Pointing
+	// CatalogDir at a commons snapshot would therefore replay an ordinary local
+	// catalog and quietly contradict the one guarantee the commons makes.
+	//
+	// Setting it also wires kb_search into the replay loop, because that is the ONLY
+	// route by which a commons entry can ever reach the model (recall refuses it by
+	// provenance). A case without this field keeps its previous tool surface exactly.
+	CommonsDir string `yaml:"commons_dir,omitempty"`
 	// Recall optionally tunes the recall gates for this case (mirrors config
 	// instant_recall). Absent (or a zero field) ⇒ the production default. Consulted only
-	// when CatalogDir is set.
+	// when a knowledge fixture is present (CatalogDir and/or CommonsDir).
 	Recall *CaseRecall `yaml:"recall,omitempty"`
 	// ExpectRecall asserts the recall outcome mechanically and fails the case when unmet:
 	//   short_circuit     — recall fired and its answer was delivered (loop skipped)
@@ -71,8 +87,25 @@ type Case struct {
 	// Empty ⇒ no recall assertion (existing cases are unaffected).
 	ExpectRecall string `yaml:"expect_recall,omitempty"`
 
-	// dir is the directory the case file was loaded from, used to resolve CatalogDir.
-	// Set by Load; unexported so YAML never populates it.
+	// Gate controls whether this case counts toward the nightly -fail-under threshold.
+	// Absent ⇒ true: every case gates unless it opts out, so nothing changes by
+	// accident. `gate: false` marks a case that exists to MEASURE rather than to
+	// assert.
+	//
+	// The distinction is not cosmetic. A -fail-under 0.7 campaign tolerates exactly one
+	// missed case whatever the case count (3/4 and 5/6 both clear it; 2/4 and 4/6 both
+	// do not), so a case whose failure is the intended FINDING would spend the whole
+	// budget and leave a genuine regression elsewhere with nowhere to show up. Worse,
+	// CI would report the measurement as the regression. A measurement case still runs,
+	// still scores and still appears in the published scorecard — it just does not vote
+	// on whether the nightly is red.
+	//
+	// A pointer so an absent field is distinguishable from an explicit `gate: false`;
+	// see Case.gates.
+	Gate *bool `yaml:"gate,omitempty"`
+
+	// dir is the directory the case file was loaded from, used to resolve CatalogDir
+	// and CommonsDir. Set by Load; unexported so YAML never populates it.
 	dir string
 }
 
@@ -131,7 +164,7 @@ func Load(dir string) ([]Case, error) {
 		if c.Name == "" {
 			c.Name = strings.TrimSuffix(e.Name(), filepath.Ext(e.Name()))
 		}
-		c.dir = dir // resolve CatalogDir relative to the case file's directory
+		c.dir = dir // resolve CatalogDir/CommonsDir relative to the case file's directory
 		cases = append(cases, c)
 	}
 	return cases, nil
@@ -139,6 +172,68 @@ func Load(dir string) ([]Case, error) {
 
 func isYAML(name string) bool {
 	return strings.HasSuffix(name, ".yaml") || strings.HasSuffix(name, ".yml")
+}
+
+// hasCatalog reports whether the case ships any knowledge fixture — its own catalog,
+// a commons root, or both. It is what arms instant recall + the verify pass for the
+// replay, so a commons-only case is still recall-exercising (recall is consulted and
+// must REFUSE the commons entry; see Case.CommonsDir).
+func (c Case) hasCatalog() bool { return c.CatalogDir != "" || c.CommonsDir != "" }
+
+// gates reports whether this case votes on the nightly -fail-under gate. Absent
+// (the default) counts as true, so a case only ever leaves the gate by saying so.
+func (c Case) gates() bool { return c.Gate == nil || *c.Gate }
+
+// buildCatalog loads the case's knowledge fixtures into a catalog wired the way
+// production is.
+//
+// Without a commons root this is exactly the previous one-liner, so the shipped
+// catalog_dir cases replay unchanged. With one it goes through
+// catalog.NewWithCommons, which is where the "commons root set BEFORE the load"
+// ordering that stamps Entry.Commons is stated.
+//
+// A commons-only case gets a fresh EMPTY directory as the operator's own root, which
+// is not a workaround but the scenario itself: a deployment that has curated nothing
+// yet is the state the commons exists to cover. It is removed as soon as the reload
+// has read it — entries and the index live in memory from then on — so the catalog
+// owns nothing on disk and the caller has no lifetime to manage.
+func (c Case) buildCatalog(ctx context.Context) (*catalog.Catalog, error) {
+	own := filepath.Join(c.dir, c.CatalogDir)
+	if c.CommonsDir == "" {
+		return catalog.New(own)
+	}
+	commons := filepath.Join(c.dir, c.CommonsDir)
+	// An unreadable commons root is FATAL here, and only here. ReloadContext warns and
+	// continues when the commons fails to load, which is right in production — the
+	// operator's own entries are what an incident depends on and must not go down with
+	// a flaky upstream — and exactly wrong for a measurement. A mistyped or moved path
+	// would silently rebuild this case as a second CONTROL: a treatment arm with an
+	// empty corpus, publishing a delta of zero that is indistinguishable from the
+	// honest finding the case files tell readers to trust.
+	fi, err := os.Stat(commons)
+	if err != nil {
+		return nil, fmt.Errorf("commons root: %w", err)
+	}
+	if !fi.IsDir() {
+		return nil, fmt.Errorf("commons root %s is not a directory", commons)
+	}
+	if c.CatalogDir == "" {
+		d, mkErr := os.MkdirTemp("", "runlore-eval-own-")
+		if mkErr != nil {
+			return nil, fmt.Errorf("empty own-catalog root: %w", mkErr)
+		}
+		defer func() { _ = os.RemoveAll(d) }()
+		own = d
+	}
+	cat, err := catalog.NewWithCommons(ctx, own, commons)
+	if err != nil {
+		// Named for the OWN root deliberately: the reload only ever returns an error for
+		// that root — a commons Load failure is warned and swallowed inside it, and the
+		// stat above is what catches the case that matters — so blaming the commons here
+		// would send a reader to the wrong directory.
+		return nil, fmt.Errorf("load catalog root %s: %w", own, err)
+	}
+	return cat, nil
 }
 
 // workload maps the case's optional workload to a providers.Workload (zero when unset).
