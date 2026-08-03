@@ -8,6 +8,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 RunLore is **pre-1.0 and under active development** — there are no tagged releases
 yet, so everything currently lives under `[Unreleased]`.
 
+## [0.13.1](https://github.com/Smana/runlore/compare/v0.13.0...v0.13.1) (2026-08-03)
+
+
+### Bug Fixes
+
+* **website:** enlarge the homepage screenshots in place instead of opening a new tab ([#456](https://github.com/Smana/runlore/issues/456)) ([d251ed4](https://github.com/Smana/runlore/commit/d251ed48a57067b90c969d743bf12b0add90c200))
+
 ## [0.13.0](https://github.com/Smana/runlore/compare/v0.12.0...v0.13.0) (2026-08-03)
 
 
