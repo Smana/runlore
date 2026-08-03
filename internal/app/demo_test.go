@@ -293,3 +293,32 @@ func TestDemoScenarioSelectorIsTheSlug(t *testing.T) {
 			"labelled with a file slug:\n%s", out.String())
 	}
 }
+
+// TestDemoConfigGetsInvestigationDefaults: demoConfig's zero-config path returned
+// a bare struct, so Investigation.Timeout stayed 0 — and the loop only arms a
+// deadline when Timeout > 0. `lore demo investigate` with a real key therefore ran
+// UNBOUNDED, while the same command with --config got the defaulted 10m. Asserted
+// as equality with the file path rather than merely non-zero, so the two cannot
+// drift apart again.
+func TestDemoConfigGetsInvestigationDefaults(t *testing.T) {
+	envCfg, _, err := demoConfig("")
+	if err != nil {
+		t.Fatalf("demoConfig: %v", err)
+	}
+	if envCfg.Investigation.Timeout.Std() == 0 {
+		t.Fatal("the zero-config demo path must get ApplyDefaults' timeout — 0 means the loop arms no deadline at all")
+	}
+
+	path := filepath.Join(t.TempDir(), "runlore.yaml")
+	if err := os.WriteFile(path, []byte("model:\n  provider: openai\n  model: m\n  api_key_env: K\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	fileCfg, _, err := demoConfig(path)
+	if err != nil {
+		t.Fatalf("demoConfig(file): %v", err)
+	}
+	if envCfg.Investigation.Timeout.Std() != fileCfg.Investigation.Timeout.Std() {
+		t.Fatalf("zero-config timeout %v != file-config timeout %v — the two paths must default identically",
+			envCfg.Investigation.Timeout.Std(), fileCfg.Investigation.Timeout.Std())
+	}
+}
