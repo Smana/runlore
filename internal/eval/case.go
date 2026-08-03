@@ -96,7 +96,7 @@ type CaseRecall struct {
 
 // Expected is the RCA scoring spec for a case.
 type Expected struct {
-	MustContain       []string `yaml:"must_contain"`        // keywords that must appear in the findings (recall, over claim text)
+	MustContain       []string `yaml:"must_contain"`        // keywords that must appear in the claim (recall, over claim text)
 	MinConfidence     float64  `yaml:"min_confidence"`      // confidence floor (0 = no floor)
 	RootCauseEntities []string `yaml:"root_cause_entities"` // entities that MUST be named as the cause (entity recall, over claim text)
 	Distractors       []string `yaml:"distractors"`         // plausible-but-wrong entities that must NOT be blamed (over-claim/FP); only evaluated when root_cause_entities is non-empty

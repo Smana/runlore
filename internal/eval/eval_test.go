@@ -10,7 +10,6 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
-	"strings"
 	"testing"
 
 	"github.com/Smana/runlore/internal/providers"
@@ -279,10 +278,8 @@ func TestShippedCasesScoreEntities(t *testing.T) {
 				t.Fatal("no distractors: this case cannot detect over-claiming")
 			}
 			for _, d := range c.Expected.Distractors {
-				for _, e := range c.Expected.RootCauseEntities {
-					if strings.Contains(strings.ToLower(e), strings.ToLower(d)) {
-						t.Errorf("distractor %q is a substring of required entity %q — Score suppresses it, so it can never fire", d, e)
-					}
+				if coveredByEntity(c.Expected.RootCauseEntities, d) {
+					t.Errorf("distractor %q is a substring of one of %v — Score suppresses it, so it can never fire", d, c.Expected.RootCauseEntities)
 				}
 			}
 		})
