@@ -59,24 +59,25 @@ func setLastValidated(content []byte, at time.Time, minGap time.Duration) ([]byt
 	}
 	stamp := "last_validated: " + at.UTC().Format(lastValidatedLayout)
 	validatedAt := -1                     // index of the existing last_validated line, -1 when absent
-	var validatedVal, timestampVal string // the two recorded dates, raw scalars
+	var validatedVal, timestampVal string // the two recorded dates, as scalars
+	var validatedComment string           // any trailing comment on that line, kept across the restamp
 	for i, ln := range lines {
-		key, val, ok := strings.Cut(ln, ":")
+		key, scalar, comment, ok := frontmatterValue(ln)
 		if !ok {
 			continue
 		}
-		switch strings.TrimSpace(key) {
+		switch key {
 		case "status":
 			// The same two inactive states recall filters on (investigate's
 			// entryActive); an absent or foreign status stays active, per OKF §9
 			// tolerance, so pre-status catalogs are revalidated like any other.
-			if s := strings.ToLower(strings.TrimSpace(val)); s == "retired" || s == "draft" {
+			if inactiveStatus(scalar) {
 				return nil, ErrEntryInactive
 			}
 		case "last_validated":
-			validatedAt, validatedVal = i, val
+			validatedAt, validatedVal, validatedComment = i, scalar, comment
 		case "timestamp":
-			timestampVal = val
+			timestampVal = scalar
 		}
 	}
 	// Freshness on record is last_validated, else timestamp — recall's own age-gate
@@ -93,21 +94,14 @@ func setLastValidated(content []byte, at time.Time, minGap time.Duration) ([]byt
 		return nil, ErrRecentlyValidated
 	}
 	if validatedAt >= 0 {
-		lines[validatedAt] = stamp
+		// Keep whatever note the author wrote beside the date. It is theirs, the
+		// reviewer sees it next to the new value in the diff, and silently deleting
+		// it on a routine restamp would be the pass editing prose it has no business
+		// touching.
+		lines[validatedAt] = stamp + validatedComment
 		return []byte("---\n" + strings.Join(lines, "\n") + rest), nil
 	}
 	return []byte("---\n" + stamp + "\n" + strings.Join(lines, "\n") + rest), nil
-}
-
-// unquoteScalar strips the surrounding quotes yaml.Marshal adds to a date-shaped
-// scalar (okf.Render emits `last_validated: "2026-08-03T10:00:00Z"`), so the
-// hand-parsed value matches what a YAML reader would see.
-func unquoteScalar(s string) string {
-	s = strings.TrimSpace(s)
-	if len(s) >= 2 && (s[0] == '"' || s[0] == '\'') && s[len(s)-1] == s[0] {
-		return s[1 : len(s)-1]
-	}
-	return s
 }
 
 // OpenRevalidatePR opens a human-reviewed PR that stamps `last_validated:

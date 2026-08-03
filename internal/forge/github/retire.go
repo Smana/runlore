@@ -27,13 +27,18 @@ func setStatusRetired(content []byte) (out []byte, already bool, err error) {
 		return nil, false, err
 	}
 	for i, ln := range lines {
-		if key, val, ok := strings.Cut(ln, ":"); ok && strings.TrimSpace(key) == "status" {
-			if strings.TrimSpace(val) == "retired" {
-				return content, true, nil
-			}
-			lines[i] = "status: retired"
-			return []byte("---\n" + strings.Join(lines, "\n") + rest), false, nil
+		key, scalar, comment, ok := frontmatterValue(ln)
+		if !ok || key != "status" {
+			continue
 		}
+		// Read the value as a YAML reader would: `status: "retired"` and
+		// `status: Retired` are both already retired to everything that loads the
+		// catalog, so a PR for either would propose a no-op.
+		if strings.ToLower(unquoteScalar(scalar)) == "retired" {
+			return content, true, nil
+		}
+		lines[i] = "status: retired" + comment // keep any note the author left on the line
+		return []byte("---\n" + strings.Join(lines, "\n") + rest), false, nil
 	}
 	return []byte("---\nstatus: retired\n" + strings.Join(lines, "\n") + rest), false, nil
 }

@@ -113,3 +113,73 @@ func frontmatterBlock(content []byte) (lines []string, rest string, err error) {
 	}
 	return strings.Split(body[:end], "\n"), body[end:], nil
 }
+
+// frontmatterValue reads one frontmatter line as key, scalar and trailing comment.
+// ok is false for a line carrying no key at all. Both stamps hand-parse the block
+// (a re-marshal would reformat a human-authored artifact under review), so this is
+// the single place that decides what the value of a line actually is.
+func frontmatterValue(line string) (key, scalar, comment string, ok bool) {
+	k, afterColon, ok := strings.Cut(line, ":")
+	if !ok {
+		return "", "", "", false
+	}
+	scalar, comment = scalarAndComment(afterColon)
+	return strings.TrimSpace(k), scalar, comment, true
+}
+
+// scalarAndComment splits the text after a key's colon into its scalar and any
+// trailing comment, the comment carrying the whitespace that separated the two so
+// a surgical edit can re-emit it unchanged.
+//
+// A YAML reader does not see a comment as part of a value, and neither may we. A
+// perfectly legal `last_validated: 2026-07-20  # confirmed by alice` otherwise
+// parses as an unreadable date: the entry looks like it has nothing on record, so
+// the anti-spam gate never fires, the entry is restamped on every sweep, and the
+// human's note is destroyed each time.
+//
+// A '#' opens a comment only when it follows whitespace (or opens the value) AND
+// sits outside quotes — `foo#bar` is the scalar "foo#bar", and a '#' inside a
+// quoted scalar is data.
+func scalarAndComment(afterColon string) (scalar, comment string) {
+	var quote byte
+	for i := range len(afterColon) {
+		c := afterColon[i]
+		switch {
+		case quote != 0:
+			if c == quote {
+				quote = 0
+			}
+		case c == '"' || c == '\'':
+			quote = c
+		case c == '#' && (i == 0 || afterColon[i-1] == ' ' || afterColon[i-1] == '\t'):
+			sep := i
+			for sep > 0 && (afterColon[sep-1] == ' ' || afterColon[sep-1] == '\t') {
+				sep--
+			}
+			return afterColon[:sep], afterColon[sep:]
+		}
+	}
+	return afterColon, ""
+}
+
+// unquoteScalar strips the surrounding quotes yaml.Marshal adds to a scalar
+// (okf.Render emits `last_validated: "2026-08-03T10:00:00Z"`), so a hand-parsed
+// value means what a YAML reader would say it means.
+func unquoteScalar(s string) string {
+	s = strings.TrimSpace(s)
+	if len(s) >= 2 && (s[0] == '"' || s[0] == '\'') && s[len(s)-1] == s[0] {
+		return s[1 : len(s)-1]
+	}
+	return s
+}
+
+// inactiveStatus reports whether a raw frontmatter status scalar names one of the
+// two states recall refuses to fire (investigate's entryActive). It reads the
+// value exactly as a YAML reader would — quotes stripped, case-insensitive —
+// because `status: "retired"` is retired to everything that loads the catalog,
+// and a stamp that disagreed would edit an entry recall has already written off.
+// An absent or foreign status stays active, per OKF §9 tolerance.
+func inactiveStatus(scalar string) bool {
+	s := strings.ToLower(unquoteScalar(scalar))
+	return s == "retired" || s == "draft"
+}

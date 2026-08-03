@@ -66,6 +66,32 @@ func TestSetLastValidated(t *testing.T) {
 			want: "---\nlast_validated: 2026-08-03\ntype: Incident\ntitle: t\n---\nbody\n",
 		},
 		{
+			// A trailing YAML comment is not part of the value. Reading it as one
+			// made the date unparseable, which reads as "nothing on record" — so the
+			// anti-spam gate never fired, the entry was restamped on EVERY sweep,
+			// and the author's note was destroyed each time.
+			name:    "a trailing comment does not hide a last_validated inside minGap",
+			in:      "---\ntype: Incident\nlast_validated: 2026-07-20 # confirmed by alice\n---\nbody\n",
+			skipErr: ErrRecentlyValidated,
+		},
+		{
+			name: "a genuine restamp keeps the author's note beside the date",
+			in:   "---\ntype: Incident\nlast_validated: 2025-01-02  # confirmed by alice\n---\nbody\n",
+			want: "---\ntype: Incident\nlast_validated: 2026-08-03  # confirmed by alice\n---\nbody\n",
+		},
+		{
+			name:    "a commented timestamp is still the freshness fallback",
+			in:      "---\ntype: Incident\ntimestamp: 2026-07-25 # drafted here\n---\nbody\n",
+			skipErr: ErrRecentlyValidated,
+		},
+		{
+			// A '#' inside a quoted scalar is data, and a '#' with no leading
+			// whitespace does not open a comment either.
+			name: "a hash inside a quoted value is not a comment",
+			in:   "---\ntitle: \"alert #42 fired\"\ntype: Incident\n---\nbody\n",
+			want: "---\nlast_validated: 2026-08-03\ntitle: \"alert #42 fired\"\ntype: Incident\n---\nbody\n",
+		},
+		{
 			name: "an unparseable last_validated is repaired, not trusted",
 			in:   "---\ntype: Incident\nlast_validated: someday\n---\nbody\n",
 			want: "---\ntype: Incident\nlast_validated: 2026-08-03\n---\nbody\n",
@@ -80,6 +106,19 @@ func TestSetLastValidated(t *testing.T) {
 		{
 			name:    "a draft entry is never revalidated",
 			in:      "---\ntype: Incident\nstatus: Draft\ntimestamp: 2020-01-02\n---\nbody\n",
+			skipErr: ErrEntryInactive,
+		},
+		{
+			// `status: "retired"` is retired to everything that LOADS the catalog,
+			// so the stamp must agree — otherwise RunLore proposes confirming an
+			// entry recall already refuses to fire.
+			name:    "a quoted retired status is still inactive",
+			in:      "---\ntype: Incident\nstatus: \"retired\"\ntimestamp: 2020-01-02\n---\nbody\n",
+			skipErr: ErrEntryInactive,
+		},
+		{
+			name:    "a quoted draft status carrying a comment is still inactive",
+			in:      "---\ntype: Incident\nstatus: 'draft' # not ready yet\ntimestamp: 2020-01-02\n---\nbody\n",
 			skipErr: ErrEntryInactive,
 		},
 		{

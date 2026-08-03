@@ -45,6 +45,37 @@ func TestSetStatusRetired(t *testing.T) {
 			t.Errorf("content changed on already-retired entry")
 		}
 	})
+	// A status value must mean what a YAML reader says it means. `status: "retired"`
+	// and `status: Retired` are already retired to everything that loads the
+	// catalog, so proposing a retire PR for either would propose a no-op — and
+	// rewriting the line would show a reviewer a diff that changes nothing.
+	for _, in := range []string{
+		"---\nstatus: \"retired\"\ntype: Incident\n---\nbody\n",
+		"---\nstatus: 'retired'\ntype: Incident\n---\nbody\n",
+		"---\nstatus: Retired\ntype: Incident\n---\nbody\n",
+		"---\nstatus: retired # gone since 2025\ntype: Incident\n---\nbody\n",
+	} {
+		t.Run("already retired: "+strings.SplitN(in, "\n", 3)[1], func(t *testing.T) {
+			out, already, err := setStatusRetired([]byte(in))
+			if err != nil || !already {
+				t.Fatalf("err=%v already=%v", err, already)
+			}
+			if string(out) != in {
+				t.Errorf("content changed on an already-retired entry:\n%s", out)
+			}
+		})
+	}
+	t.Run("retiring keeps the author's note on the status line", func(t *testing.T) {
+		in := "---\ntype: Incident\nstatus: active  # reviewed 2026-01\n---\nbody\n"
+		out, already, err := setStatusRetired([]byte(in))
+		if err != nil || already {
+			t.Fatalf("err=%v already=%v", err, already)
+		}
+		want := "---\ntype: Incident\nstatus: retired  # reviewed 2026-01\n---\nbody\n"
+		if string(out) != want {
+			t.Errorf("got:\n%s\nwant:\n%s", out, want)
+		}
+	})
 	t.Run("no frontmatter is an error, never a blind write", func(t *testing.T) {
 		if _, _, err := setStatusRetired([]byte("just a body\n")); err == nil {
 			t.Fatal("want error on missing frontmatter")
