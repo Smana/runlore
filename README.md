@@ -58,22 +58,23 @@ open questions, data gaps and ruled-out hypotheses. The footer shows the real co
 tokens.
 
 <div align="center">
-<img src="assets/slack-notification.png" alt="RunLore Slack notification — a verdict-first card headed 'Harbor Core Readiness Probe Failure Due to Database Migration Deadlock': Action required, High confidence 90%, the evidence behind the cause, read-only suggested next steps, the affected resource, and a threaded full analysis with open questions, data gaps and ruled-out hypotheses" width="760" />
+<img src="assets/slack-notification.png" alt="RunLore Slack notification — a verdict-first card headed 'ImageGalleryUnavailable — apps/xplane-image-gallery': Action required, High confidence 92%, the cause traced to a manual AWS Secrets Manager DeleteSecret, read-only suggested next steps, a What changed line citing the CloudTrail event, a footer of 7 model calls and 121,758 in / 9,596 out tokens, feedback buttons, and a link to the knowledge-base pull request it opened" width="760" />
 </div>
 
 **Next time — an instant recall.** Once that entry is merged, the same incident — even under a
 *different, generic alert* — is answered straight from your knowledge base: **no investigation, no new
 PR**, just the known cause, the human-reviewed resolution, and the entry it came from. Several times
 cheaper, delivered in seconds: as shipped a recall is **two** model calls — the LLM reranker that
-picks the entry, then the adversarial verify pass — against the **7 calls and ~15.6k tokens** the
-same incident's full investigation took on the recorded transcript
-([`examples/demo/harbor-chart-bump.transcript.json`](examples/demo/harbor-chart-bump.transcript.json)).
-The card below shows a *single* call because the offline `--catalog` demo turns the reranker off (it
-would need a model key); the shipped default pays both. Once the entry has a track record, its
-resolve rate is shown alongside — and it weighs whether recall is trusted enough to fire at all.
+picks the entry, then the adversarial verify pass — against the **7 calls** the same incident's full
+investigation took. Both cards above and below are that one incident on a live cluster, so the cost is
+a matched pair: **8,289 tokens recalled against 131,354 investigated — about 6%.** A recall is
+re-checked, not replayed: the verify pass is why the recalled card reads 78% where the stored entry
+says 92%, and it will fall through to a full investigation if it cannot confirm the entry. Once the
+entry has a track record, its resolve rate is shown alongside — and it weighs whether recall is
+trusted enough to fire at all.
 
 <div align="center">
-<img src="assets/recall-notification.png" alt="RunLore Slack notification — an instant recall: an ⚡ Instant recall banner reading 'answered from your knowledge base, no investigation was run', the known cause, a citation of the knowledge-base entry harbor-core-migration-deadlock.md, and a cost footer showing this offline demo's single model call at 93% cached tokens" width="760" />
+<img src="assets/recall-notification.png" alt="RunLore Slack notification — an instant recall: an ⚡ Instant recall banner reading 'answered from your knowledge base, no investigation was run', the known cause carried over from the merged entry, High confidence 78% after the verify pass, and a cost footer showing 2 model calls and 4,764 in / 3,525 out tokens" width="760" />
 </div>
 
 ## How it works

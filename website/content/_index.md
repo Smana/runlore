@@ -32,12 +32,16 @@ images:
 <p class="rl-eyebrow">What it actually produces</p>
 <div class="rl-shots">
   <figure class="rl-shot">
-    <img src="/images/slack-notification.png" width="1342" height="1764" loading="lazy" alt="RunLore Slack notification: a verdict-first incident card headed 'Harbor Core Readiness Probe Failure Due to Database Migration Deadlock' with an Action required flag, High confidence 90%, the evidence behind the cause, read-only suggested next steps, the affected resource, and a threaded full analysis listing open questions, data gaps and ruled-out hypotheses." />
+    <a class="rl-shot-zoom" href="/images/slack-notification.png" target="_blank" rel="noopener" aria-label="Open the full-size investigation screenshot">
+      <img src="/images/slack-notification.png" width="1328" height="2046" loading="lazy" alt="RunLore Slack notification: a verdict-first incident card headed 'ImageGalleryUnavailable — apps/xplane-image-gallery' with an Action required flag, High confidence 92%, the cause traced to a manual AWS Secrets Manager DeleteSecret, read-only suggested next steps, a What changed line citing the CloudTrail event, a cost footer of 7 model calls and 121,758 in / 9,596 out tokens, feedback buttons, and a link to the knowledge-base pull request it opened." />
+    </a>
     <figcaption><strong>An investigation.</strong> The verdict first, then the evidence behind it — plus what it ruled out, what it still doesn&rsquo;t know, and next steps it will <em>not</em> apply for you.</figcaption>
   </figure>
   <figure class="rl-shot">
-    <img src="/images/recall-notification.png" width="1336" height="1346" loading="lazy" alt="RunLore Slack notification showing an instant recall: an ⚡ Instant recall banner reading 'answered from your knowledge base, no investigation was run', the known cause, the citation of the knowledge-base entry harbor-core-migration-deadlock.md, and a cost footer showing this offline demo's single model call at 93% cached tokens." />
-    <figcaption><strong>The same failure, next time.</strong> Answered straight from the entry you merged &mdash; no investigation, and it cites the entry so you can check it. As shipped that is two model calls (the reranker, then the adversarial verify pass) against the seven the same incident&rsquo;s full investigation took; the card shows one because the offline demo turns the reranker off.</figcaption>
+    <a class="rl-shot-zoom" href="/images/recall-notification.png" target="_blank" rel="noopener" aria-label="Open the full-size instant-recall screenshot">
+      <img src="/images/recall-notification.png" width="1328" height="1812" loading="lazy" alt="RunLore Slack notification showing an instant recall: an ⚡ Instant recall banner reading 'answered from your knowledge base, no investigation was run', the known cause carried over from the merged entry, High confidence 78% after the verify pass, and a cost footer showing 2 model calls and 4,764 in / 3,525 out tokens." />
+    </a>
+    <figcaption><strong>The same failure, next time.</strong> Answered straight from the entry you merged &mdash; no investigation, no second pull request, and it cites the entry so you can check it. Two model calls (the reranker, then the adversarial verify pass) against the seven the same incident&rsquo;s full investigation took: <strong>8,289 tokens instead of 131,354</strong>. The verify pass is why the confidence reads lower than the stored entry&rsquo;s &mdash; a recall is re-checked, not replayed.</figcaption>
   </figure>
 </div>
 
