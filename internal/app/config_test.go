@@ -215,13 +215,14 @@ func TestRecallDecayWarningDoesNotAssertTheResolveChannelIsDead(t *testing.T) {
 		t.Errorf("warning must hedge on the resolve channel it cannot observe: %q", got)
 	}
 	// Phrasings that would state the unobservable as fact.
+	lower := strings.ToLower(got)
 	for _, forbidden := range []string{
 		"no resolve",
 		"never resolve",
 		"resolves never",
 		"will stay empty",
 	} {
-		if strings.Contains(strings.ToLower(got), forbidden) {
+		if strings.Contains(lower, forbidden) {
 			t.Errorf("warning asserts %q, which this process cannot determine: %q", forbidden, got)
 		}
 	}

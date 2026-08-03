@@ -70,15 +70,14 @@ func TestServeGuardFailClosed(t *testing.T) {
 // warning about it would be noise. `lore curate` already has its own ledger
 // startup report (LogLedgerStartup).
 func TestRecallDecayWarningIsEmittedOnceAtStartup(t *testing.T) {
-	const guarded = "RecallDecayWarning"
-	allowed := map[string]bool{"RunServe": true}
+	const guarded, caller = "RecallDecayWarning", "RunServe"
 
 	files, err := filepath.Glob(filepath.Join(".", "*.go"))
 	if err != nil {
 		t.Fatalf("glob: %v", err)
 	}
 	fset := token.NewFileSet()
-	calls := map[string]int{}
+	callerCalls := 0
 
 	for _, path := range files {
 		if strings.HasSuffix(path, "_test.go") {
@@ -109,8 +108,9 @@ func TestRecallDecayWarningIsEmittedOnceAtStartup(t *testing.T) {
 				if !ok || id.Name != guarded {
 					return true
 				}
-				calls[fn.Name.Name]++
-				if !allowed[fn.Name.Name] {
+				if fn.Name.Name == caller {
+					callerCalls++
+				} else {
 					t.Errorf("%s: %s calls %s — it must be raised once on the serve startup path, "+
 						"not per investigation", filepath.Base(path), fn.Name.Name, guarded)
 				}
@@ -119,8 +119,8 @@ func TestRecallDecayWarningIsEmittedOnceAtStartup(t *testing.T) {
 		}
 	}
 
-	if calls["RunServe"] != 1 {
-		t.Fatalf("RunServe must call %s exactly once (got %d) — otherwise the startup warning "+
-			"is either absent or duplicated", guarded, calls["RunServe"])
+	if callerCalls != 1 {
+		t.Fatalf("%s must call %s exactly once (got %d) — otherwise the startup warning "+
+			"is either absent or duplicated", caller, guarded, callerCalls)
 	}
 }
