@@ -115,8 +115,10 @@ zero credentials.
 `lore eval` replays recorded incident cases through the investigation loop and reports the
 root-cause-identification rate — use it to measure (and guard against regressions in) RCA quality as
 the loop/prompt/tools evolve. A case (`examples/eval/*.yaml`) records the evidence each tool returns and
-the keywords the findings must contain; the loop runs against the **configured model** with that
-evidence, and each case is scored pass/fail.
+the keywords the **claim** must contain; the loop runs against the **configured model** with that
+evidence, and each case is scored pass/fail. Scoring reads the claim only — the title plus each
+hypothesis's summary and suggested action — never the replayed evidence, which the harness itself fed
+the model (see `Score` in `internal/eval/score.go`).
 
 ```bash
 lore eval --config runlore.yaml --cases examples/eval
