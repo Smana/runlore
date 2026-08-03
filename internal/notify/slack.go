@@ -82,14 +82,19 @@ func (s *Slack) post(ctx context.Context, msg map[string]any) error {
 	if err != nil {
 		return err
 	}
+	// Both error paths are sanitized: an incoming-webhook URL IS the credential (the
+	// secret is its path), net/http reports it verbatim inside a *url.Error — it masks
+	// only a userinfo password — and this error is logged at Error level on the way
+	// out. Otherwise a single DNS blip writes a live posting credential into the
+	// operator's log store, which is one of the stores RunLore itself reads back.
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, s.webhookURL, bytes.NewReader(body))
 	if err != nil {
-		return err
+		return httpx.SanitizeURLError(err)
 	}
 	req.Header.Set("Content-Type", "application/json")
 	resp, err := s.http.Do(req)
 	if err != nil {
-		return fmt.Errorf("slack post: %w", err)
+		return fmt.Errorf("slack post: %w", httpx.SanitizeURLError(err))
 	}
 	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode/100 != 2 {

@@ -3,7 +3,10 @@
 package httpx
 
 import (
+	"errors"
+	"fmt"
 	"net/http"
+	"net/url"
 	"strings"
 )
 
@@ -38,6 +41,70 @@ func SanitizeHeader(s string) string {
 		}
 	}
 	return strings.TrimSpace(b.String())
+}
+
+// SanitizeURLError rewrites a *url.Error so only the scheme and host survive —
+// never the path or query. Use it on every error out of http.Client.Do or
+// http.NewRequest whose URL may be a credential.
+//
+// For an incoming webhook (Slack, Discord, Teams) the URL *is* the credential: the
+// secret lives in the path. net/http builds a *url.Error whose Error() prints the
+// full URL, and it masks only the userinfo password — the path is verbatim:
+//
+//	Post "https://hooks.slack.com/services/T0/B0/REAL_SECRET": dial tcp: ...
+//
+// Wrapping that with %w and logging it writes a live posting credential into the
+// operator's log store on any transient DNS or dial failure. No attacker required.
+//
+// The cause is re-wrapped with %w, so errors.Is/As against the underlying error
+// (context.DeadlineExceeded, net.Error) keeps working; the *url.Error itself is
+// deliberately dropped, since it is the thing carrying the secret.
+func SanitizeURLError(err error) error {
+	var ue *url.Error
+	if !errors.As(err, &ue) {
+		return err
+	}
+	// Parse failures fall back to "?" rather than to ue.URL: an unparseable URL is
+	// exactly the case where echoing it back is least justified.
+	loc := "?"
+	if u, perr := url.Parse(ue.URL); perr == nil && u.Host != "" {
+		loc = u.Scheme + "://" + u.Host
+	}
+	if ue.Err == nil {
+		return fmt.Errorf("%s %s", ue.Op, loc)
+	}
+	return fmt.Errorf("%s %s: %w", ue.Op, loc, ue.Err)
+}
+
+// maxErrorBody caps how much of an upstream response body is embedded in an
+// error. A JSON error envelope is well under it; the cap bounds what an upstream
+// returning megabytes can do to a log line.
+const maxErrorBody = 512
+
+// SafeErrorBody prepares an upstream response body for embedding in an error
+// that will be logged and shown to operators: it strips the credentials the
+// request carried, then caps the length.
+//
+// The body is server-controlled. A server that echoes the credential back — a
+// debug endpoint, a chatty proxy, a misconfigured auth layer — would otherwise
+// get it laundered straight into our own error text, and from there into the
+// operator's log store, which is one of the stores RunLore reads back as
+// evidence. Strip it rather than trusting the far end not to reflect it.
+//
+// Stripping happens BEFORE the cap so a credential straddling the cut cannot
+// leave a fragment behind. Empty secrets are ignored, so a caller can pass an
+// optional token unguarded.
+func SafeErrorBody(body []byte, secrets ...string) string {
+	s := string(body)
+	for _, sec := range secrets {
+		if sec != "" {
+			s = strings.ReplaceAll(s, sec, "[REDACTED]")
+		}
+	}
+	if len(s) > maxErrorBody {
+		s = s[:maxErrorBody]
+	}
+	return s
 }
 
 // RequestID returns the first present upstream request-id header (by the

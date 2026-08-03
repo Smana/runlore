@@ -141,10 +141,11 @@ func (c *Client) queryPage(ctx context.Context, query string, w providers.TimeWi
 	}
 	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(resp.Body)
-		return nil, fmt.Errorf("logs status %d: %s", resp.StatusCode, string(body))
+		return nil, fmt.Errorf("logs status %d: %s", resp.StatusCode, httpx.ReadErrorBody(resp.Body))
 	}
-	return parseNDJSON(resp.Body)
+	// CappedReader, not io.LimitReader: the scanner would read a cap as a clean
+	// end-of-stream and hand back a partial page as if it were the whole answer.
+	return parseNDJSON(httpx.CappedReader(resp.Body))
 }
 
 // Hits returns the per-step match count over the window, split by log level when
@@ -281,9 +282,14 @@ func (c *Client) postForm(ctx context.Context, path string, form url.Values) ([]
 		return nil, fmt.Errorf("logs query: %w", err)
 	}
 	defer func() { _ = resp.Body.Close() }()
-	body, _ := io.ReadAll(resp.Body)
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("logs status %d: %s", resp.StatusCode, string(body))
+		return nil, fmt.Errorf("logs status %d: %s", resp.StatusCode, httpx.ReadErrorBody(resp.Body))
+	}
+	// Bounded: the LogsQL is model-chosen and the pod is memory-capped, so an
+	// unbounded read turns one over-broad expression into an OOM.
+	body, err := httpx.ReadBody(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("logs query: %w", err)
 	}
 	return body, nil
 }

@@ -87,9 +87,14 @@ func (n *Notifier) deliverOne(ctx context.Context, in instance, p notify.Payload
 	if buf.Len() > maxBody {
 		return fmt.Errorf("rendered body %d bytes exceeds cap %d", buf.Len(), maxBody)
 	}
+	// Sanitized: a templated instance points at Teams/Discord/ntfy/incident.io,
+	// whose incoming-webhook URL carries its secret in the PATH — the URL is the
+	// credential. net/http's *url.Error prints that URL verbatim (it masks only a
+	// userinfo password), and this error is logged at Error level by the delivery
+	// path. Same treatment as the slack and webhook notifiers.
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, in.url, &buf)
 	if err != nil {
-		return err
+		return httpx.SanitizeURLError(err)
 	}
 	req.Header.Set("Content-Type", in.contentType)
 	if in.token != "" {
@@ -97,7 +102,7 @@ func (n *Notifier) deliverOne(ctx context.Context, in instance, p notify.Payload
 	}
 	resp, err := n.client.Do(req)
 	if err != nil {
-		return err
+		return httpx.SanitizeURLError(err)
 	}
 	defer func() { _, _ = io.Copy(io.Discard, resp.Body); _ = resp.Body.Close() }()
 	if resp.StatusCode >= 300 {

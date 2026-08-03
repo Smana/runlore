@@ -122,3 +122,33 @@ func TestDeliverNon2xxAndSizeCap(t *testing.T) {
 		t.Errorf("want size-cap error, got %v", err)
 	}
 }
+
+// TestDeliverErrorNeverLeaksTheURL: a templated instance targets Teams/Discord/
+// ntfy/incident.io, whose incoming-webhook URL carries the secret IN THE PATH —
+// the URL *is* the credential. net/http reports both a request-build failure and
+// a transport failure as a *url.Error whose Error() prints the URL verbatim (it
+// masks a userinfo password and nothing else), and Deliver's error is logged at
+// Error level by the delivery path. Both sites must go through
+// httpx.SanitizeURLError, which keeps op + scheme://host and drops path/query.
+func TestDeliverErrorNeverLeaksTheURL(t *testing.T) {
+	const secret = "T0ZZZ-B0ZZZ-DoNotLogThisWebhookSecret"
+
+	// Transport failure: a listener that is already closed ⇒ connection refused.
+	srv := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
+	dead := srv.URL + "/services/" + secret
+	srv.Close()
+
+	// Request-build failure: a control character makes url.Parse fail, and
+	// url.Parse's own *url.Error carries the raw (secret-bearing) URL.
+	malformed := "https://hooks.example.com/services/" + secret + "\n"
+
+	for name, target := range map[string]string{"transport": dead, "request build": malformed} {
+		err := testNotifier(t, `{{ .Title }}`, target).Deliver(context.Background(), providers.Investigation{Title: "x"})
+		if err == nil {
+			t.Fatalf("%s: want a delivery error, got nil", name)
+		}
+		if strings.Contains(err.Error(), secret) {
+			t.Errorf("%s: error leaks the webhook credential: %v", name, err)
+		}
+	}
+}

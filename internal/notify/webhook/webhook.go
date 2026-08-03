@@ -53,14 +53,18 @@ func (n *Notifier) Deliver(ctx context.Context, inv providers.Investigation) err
 	if err != nil {
 		return err
 	}
+	// Sanitized: the configured URL can itself be the credential — a Discord/Teams/
+	// Slack-compatible incoming webhook carries its secret in the path — and
+	// net/http's *url.Error prints the URL verbatim (it masks only a userinfo
+	// password). This error is logged at Error level by the delivery path.
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, n.url, bytes.NewReader(body))
 	if err != nil {
-		return err
+		return httpx.SanitizeURLError(err)
 	}
 	req.Header.Set("Content-Type", "application/json")
 	resp, err := n.client.Do(req)
 	if err != nil {
-		return err
+		return httpx.SanitizeURLError(err)
 	}
 	defer func() { _, _ = io.Copy(io.Discard, resp.Body); _ = resp.Body.Close() }()
 	if resp.StatusCode >= 300 {

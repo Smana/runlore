@@ -8,7 +8,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"io"
 	"net/http"
 	"net/url"
 	"os"
@@ -261,9 +260,14 @@ func (c *Client) getRaw(ctx context.Context, path string, v url.Values) (json.Ra
 		return nil, fmt.Errorf("metrics query: %w", err)
 	}
 	defer func() { _ = resp.Body.Close() }()
-	data, _ := io.ReadAll(resp.Body)
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("metrics status %d: %s", resp.StatusCode, string(data))
+		return nil, fmt.Errorf("metrics status %d: %s", resp.StatusCode, httpx.ReadErrorBody(resp.Body))
+	}
+	// Bounded: the PromQL is model-chosen and the pod is memory-capped, so an
+	// unbounded read turns one over-broad expression into an OOM.
+	data, err := httpx.ReadBody(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("metrics query: %w", err)
 	}
 	var r struct {
 		Status string          `json:"status"`
@@ -290,9 +294,14 @@ func (c *Client) get(ctx context.Context, path string, v url.Values) (*apiRespon
 		return nil, fmt.Errorf("metrics query: %w", err)
 	}
 	defer func() { _ = resp.Body.Close() }()
-	data, _ := io.ReadAll(resp.Body)
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("metrics status %d: %s", resp.StatusCode, string(data))
+		return nil, fmt.Errorf("metrics status %d: %s", resp.StatusCode, httpx.ReadErrorBody(resp.Body))
+	}
+	// Bounded: the PromQL is model-chosen and the pod is memory-capped, so an
+	// unbounded read turns one over-broad expression into an OOM.
+	data, err := httpx.ReadBody(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("metrics query: %w", err)
 	}
 	var r apiResponse
 	if err := json.Unmarshal(data, &r); err != nil {

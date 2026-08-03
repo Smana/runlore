@@ -4,6 +4,7 @@ package victorialogs
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -12,6 +13,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/Smana/runlore/internal/httpx"
 	"github.com/Smana/runlore/internal/providers"
 )
 
@@ -356,5 +358,31 @@ func TestQueryPagination(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// TestQueryRefusesAnOversizedResponse: the LogsQL is model-chosen and the pod is
+// memory-capped. The NDJSON stream is bounded too, not just the io.ReadAll
+// paths — a streaming parser must not mistake a memory cap for the end of the
+// stream and report a partial result as complete. Overflow surfaces as
+// actionable text, which the loop hands to the model verbatim.
+func TestQueryRefusesAnOversizedResponse(t *testing.T) {
+	line := `{"_time":"2026-01-01T00:00:00Z","_msg":"` + strings.Repeat("x", 900) + `"}` + "\n"
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		for n := 0; n < httpx.MaxResponseBytes+(1<<10); n += len(line) {
+			_, _ = io.WriteString(w, line)
+		}
+	}))
+	defer srv.Close()
+
+	_, err := New(srv.URL).Query(context.Background(), "*", providers.TimeWindow{})
+	if err == nil {
+		t.Fatal("an over-cap response must not be read whole")
+	}
+	if !errors.Is(err, httpx.ErrResponseTooLarge) {
+		t.Fatalf("want ErrResponseTooLarge, got %v", err)
+	}
+	if !strings.Contains(err.Error(), "narrow the query") {
+		t.Errorf("the error must tell the model what to do: %v", err)
 	}
 }

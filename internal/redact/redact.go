@@ -137,10 +137,16 @@ var kindAnyRE = regexp.MustCompile(`^kind:\s*\S`)
 var dataKeyRE = regexp.MustCompile(`^(\s*)(data|stringData):\s*$`)
 
 // dataEntryRE matches a `  key: value` mapping entry inside a data block,
-// capturing indentation, the "key:" portion, and the value. Block scalars
-// (`key: |` / `key: >`) are handled separately so their following lines are
-// masked too.
+// capturing indentation, the "key:" portion, and the value. An entry also OWNS
+// every following line indented deeper than its key — see k8sSecretData.
 var dataEntryRE = regexp.MustCompile(`^(\s*)([^\s:][^:]*:\s*)(\S.*)$`)
+
+// blockScalarHeaderRE matches a YAML block-scalar header used as an entry's
+// value: `|` or `>` plus the optional indentation/chomping indicators (`|-`,
+// `|+`, `>2-`) and an optional trailing comment. The header is STRUCTURE, not
+// value — it says "a multi-line value was here" and nothing about its content —
+// so it is preserved while the lines it owns are masked.
+var blockScalarHeaderRE = regexp.MustCompile(`^[|>][0-9+-]{0,2}(\s+#.*)?$`)
 
 // k8sSecretData performs a line-oriented pass that masks the VALUES under a
 // `data:`/`stringData:` block of a `kind: Secret` document, preserving keys and
@@ -148,10 +154,25 @@ var dataEntryRE = regexp.MustCompile(`^(\s*)([^\s:][^:]*:\s*)(\S.*)$`)
 // left untouched. It tolerates git-diff line markers ("+ ", "- ", leading
 // space) because a Secret most often surfaces inside a `what_changed` diff.
 //
-// Every masked value is also LEARNED (second return): the raw token and, for a
-// base64 `data:` value, its decoded plaintext. The caller scrubs those literals
-// from the whole payload — the same secret quoted decoded in a log line or
-// encoded in an event must not outlive the manifest that names it.
+// A value may be MULTI-LINE: `key: |` (or `>`, or a plain scalar continued on
+// the next line) puts the secret on the following, more-indented lines. Every
+// line indented deeper than an entry's key therefore belongs to that entry and
+// is masked in place, indentation preserved. Blank lines belong to the value too
+// (YAML block scalars keep them), so they do not end the block — otherwise
+// everything after the first blank line would come through verbatim. The
+// ownership test is the indent, never the `|` marker: the generic key=value rule
+// runs BEFORE this pass and rewrites `password: |` to `password: [REDACTED]`,
+// erasing the marker while leaving the body — which is exactly the partial mask
+// this handling exists to close.
+//
+// Every masked SINGLE-LINE value is also LEARNED (second return): the raw token
+// and, for a base64 `data:` value, its decoded plaintext. The caller scrubs those
+// literals from the whole payload — the same secret quoted decoded in a log line
+// or encoded in an event must not outlive the manifest that names it. Multi-line
+// bodies are deliberately NOT learned: their lines are fragments of one value,
+// and scrubbing a fragment payload-wide would mask ordinary text (a
+// `retries: 3` line out of an embedded config file) everywhere else it appears.
+// Masking in place stops the leak; scrubbing fragments would only blind the model.
 //
 // A data block ends at: a dedent to a column <= the data key's indent, a new
 // top-level key, a `kind:` line, or a YAML document separator ("---"). The pass
@@ -166,6 +187,7 @@ func k8sSecretData(s string) (string, []string) {
 	inSecret := false    // current YAML document is a kind: Secret
 	inDataBlock := false // currently inside that Secret's data:/stringData: block
 	dataIndent := 0      // indent (in columns) of the data: key
+	entryIndent := -1    // indent of the open entry key; it owns deeper lines (-1: none)
 	stringData := false  // the current block is stringData: (plaintext values)
 	var learned []string // secret literals to scrub payload-wide
 
@@ -175,14 +197,14 @@ func k8sSecretData(s string) (string, []string) {
 
 		// Document boundary: a separator resets all document state.
 		if docMarkerRE.MatchString(body) {
-			inSecret, inDataBlock = false, false
+			inSecret, inDataBlock, entryIndent = false, false, -1
 			continue
 		}
 
 		// A new document's kind: line (re)sets whether we are in a Secret.
 		if kindAnyRE.MatchString(body) {
 			inSecret = kindSecretRE.MatchString(body)
-			inDataBlock = false
+			inDataBlock, entryIndent = false, -1
 			continue
 		}
 
@@ -192,10 +214,22 @@ func k8sSecretData(s string) (string, []string) {
 
 		if inDataBlock {
 			indent := leadingSpaces(body)
-			// Block ends on dedent to <= the data key indent, or a blank line
-			// that is not part of the block. Blank lines inside indented data
-			// are unusual; treat a blank line as ending the block.
-			if strings.TrimSpace(body) == "" {
+			blank := strings.TrimSpace(body) == ""
+
+			// Continuation of the open entry's value: deeper than its key, or
+			// blank (a blank line is part of a block scalar, so it must not end
+			// the value — see the doc comment).
+			if entryIndent >= 0 && (blank || indent > entryIndent) {
+				if txt := strings.TrimSpace(body); txt != "" && txt != mask {
+					lines[i] = prefix + body[:indent] + mask
+				}
+				continue
+			}
+			entryIndent = -1
+
+			// No entry open: a blank line ends the block (blank lines between
+			// indented data keys are not a shape real manifests produce).
+			if blank {
 				inDataBlock = false
 				continue
 			}
@@ -205,8 +239,15 @@ func k8sSecretData(s string) (string, []string) {
 				// be a sibling key — re-evaluate below.
 			} else {
 				if entry := dataEntryRE.FindStringSubmatch(body); entry != nil {
+					// The entry now owns every following deeper-indented line.
+					entryIndent = leadingSpaces(entry[1])
 					val := strings.TrimRight(entry[3], " ")
-					if val != mask {
+					switch {
+					case blockScalarHeaderRE.MatchString(val):
+						// Keep the header; the lines it owns are masked above.
+					case val == mask:
+						// Already masked (this pass, or a rule that ran before it).
+					default:
 						learned = append(learned, learnSecretValues(val, stringData)...)
 						lines[i] = prefix + entry[1] + entry[2] + mask
 					}
@@ -217,7 +258,7 @@ func k8sSecretData(s string) (string, []string) {
 
 		// Detect the start of a data:/stringData: block within the Secret.
 		if dk := dataKeyRE.FindStringSubmatch(body); dk != nil {
-			inDataBlock = true
+			inDataBlock, entryIndent = true, -1
 			dataIndent = leadingSpaces(dk[1])
 			stringData = dk[2] == "stringData"
 			continue

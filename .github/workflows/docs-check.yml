@@ -41,19 +41,24 @@ jobs:
     runs-on: ubuntu-latest
     env:
       HUGO_VERSION: "0.156.0"
+      # Keep in step with docs.yml — same release, same pin. See the note there for
+      # why the checksum is pinned alongside the version.
+      HUGO_SHA256: "28111b85cd44c258c0cc59da00ae2210c12a55749b7fd77e7421ab963b7adcda"
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
 
-      - uses: actions/setup-go@v5
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version: stable
 
       - name: Install Hugo Extended
         run: |
+          set -euo pipefail
           wget -O /tmp/hugo.deb \
             "https://github.com/gohugoio/hugo/releases/download/v${HUGO_VERSION}/hugo_extended_${HUGO_VERSION}_linux-amd64.deb"
+          echo "${HUGO_SHA256}  /tmp/hugo.deb" | sha256sum -c -
           sudo dpkg -i /tmp/hugo.deb
 
       - name: Build the site (broken internal refs fail here)
