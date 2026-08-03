@@ -167,15 +167,14 @@ func runDemoInvestigateWithModel(args []string, out, errOut io.Writer, model pro
 	case transcript != nil:
 		model, verifyModel = replay.New(transcript), nil
 	default:
-		if apiKeyEnv != "" && os.Getenv(apiKeyEnv) == "" {
+		// An empty apiKeyEnv is the keyless case (e.g. a local vLLM base_url):
+		// os.Getenv("") is "", which BuildModel takes as "no credential".
+		apiKey := os.Getenv(apiKeyEnv)
+		if apiKeyEnv != "" && apiKey == "" {
 			return fmt.Errorf("the demo needs a model API key: set %s to your key "+
 				"(or point --config at a runlore.yaml with a configured model, or run with "+
 				"--offline default to replay a recorded investigation with no key at all). "+
 				"Everything else runs against built-in fake providers — no cluster required", apiKeyEnv)
-		}
-		apiKey := ""
-		if apiKeyEnv != "" {
-			apiKey = os.Getenv(apiKeyEnv)
 		}
 		model = BuildModel(cfg, apiKey)
 		if *record != "" {
@@ -357,11 +356,10 @@ func (t tracingTool) Call(ctx context.Context, args string) (string, error) {
 // oneLineArgs flattens a JSON args blob to a single line for the step trace ("{}" for
 // the common empty-object case reads as no-args).
 func oneLineArgs(s string) string {
-	s = strings.TrimSpace(s)
-	if s == "" || s == "{}" {
+	if t := strings.TrimSpace(s); t == "" || t == "{}" {
 		return ""
 	}
-	return strings.Join(strings.Fields(s), " ")
+	return oneLineIndent(s)
 }
 
 // oneLineIndent flattens whitespace-heavy multi-line tool output / incident text to a

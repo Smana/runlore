@@ -261,27 +261,24 @@ func flattenJSON(prefix string, v any, out map[string]string) {
 
 // searchBody builds the shared `_search` request body: a query_string query
 // (or match_all when query is empty) plus an optional range filter on
-// timestampField for the window bounds. A size >= 0 is sent verbatim, INCLUDING
-// size:0 — that is the value Hits/TopMessages pass to say "aggregation buckets
-// only, return no hits", and omitting the key there would make ES fall back to
-// its default of 10 hits per aggregation request. Only a negative size omits the
-// key (no caller does today). sortDesc
-// adds the newest-first sort Query needs; Hits/TopMessages don't (they read
-// only aggregations, so sorting individual hits is pointless cost).
+// timestampField for the window bounds. size is ALWAYS sent, including size:0 —
+// that is the value Hits/TopMessages pass to say "aggregation buckets only,
+// return no hits", and omitting the key there would make ES fall back to its
+// default of 10 hits per aggregation request. sortDesc adds the newest-first
+// sort Query needs; Hits/TopMessages don't (they read only aggregations, so
+// sorting individual hits is pointless cost).
 func (c *Client) searchBody(query string, w providers.TimeWindow, size int, sortDesc bool) map[string]any {
-	must := []map[string]any{}
+	match := map[string]any{"match_all": map[string]any{}}
 	if query != "" {
-		must = append(must, map[string]any{"query_string": map[string]any{"query": query}})
-	} else {
-		must = append(must, map[string]any{"match_all": map[string]any{}})
+		match = map[string]any{"query_string": map[string]any{"query": query}}
 	}
-	boolQ := map[string]any{"must": must}
+	boolQ := map[string]any{"must": []map[string]any{match}}
 	if rangeFilter := c.rangeFilter(w); rangeFilter != nil {
 		boolQ["filter"] = []map[string]any{rangeFilter}
 	}
-	body := map[string]any{"query": map[string]any{"bool": boolQ}}
-	if size >= 0 {
-		body["size"] = size
+	body := map[string]any{
+		"query": map[string]any{"bool": boolQ},
+		"size":  size,
 	}
 	if sortDesc {
 		// unmapped_type keeps a rolling logs-* pattern searchable when an OLDER index
@@ -399,10 +396,10 @@ func shardFailure(body []byte, indexPattern string) (bool, string) {
 	return true, reason
 }
 
-// search POSTs a `_search` (or `_field_caps` via searchGet) request body and
-// returns the raw response body + HTTP status WITHOUT interpreting the status —
-// TopMessages needs the raw (status, body) pair to distinguish a genuine error
-// from the specific text-field aggregation rejection it falls back on.
+// search POSTs a `_search` request body and returns the raw response body + HTTP
+// status WITHOUT interpreting the status — TopMessages needs the raw (status,
+// body) pair to distinguish a genuine error from the specific text-field
+// aggregation rejection it falls back on.
 func (c *Client) search(ctx context.Context, body map[string]any) ([]byte, int, error) {
 	buf, err := json.Marshal(body)
 	if err != nil {
@@ -663,10 +660,13 @@ func (c *Client) topMessagesClientSide(ctx context.Context, query string, w prov
 		}
 		g := &groups[i]
 		g.count++
-		if !l.Time.IsZero() && (g.first.IsZero() || l.Time.Before(g.first)) {
+		if l.Time.IsZero() {
+			continue // an undated line still counts, but cannot move the span
+		}
+		if g.first.IsZero() || l.Time.Before(g.first) {
 			g.first = l.Time
 		}
-		if !l.Time.IsZero() && l.Time.After(g.last) {
+		if l.Time.After(g.last) {
 			g.last = l.Time
 		}
 	}

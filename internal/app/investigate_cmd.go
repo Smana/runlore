@@ -3,6 +3,7 @@
 package app
 
 import (
+	"cmp"
 	"context"
 	"flag"
 	"fmt"
@@ -35,11 +36,7 @@ func RunInvestigate(args []string) error {
 		return fmt.Errorf("provide --alert and/or --message")
 	}
 	explicit := *cfgPath != ""
-	path := *cfgPath
-	if path == "" {
-		path = defaultConfigPath
-	}
-	cfg, err := resolveInvestigateConfig(path, explicit)
+	cfg, err := resolveInvestigateConfig(cmp.Or(*cfgPath, defaultConfigPath), explicit)
 	if err != nil {
 		return err
 	}

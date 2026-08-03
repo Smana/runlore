@@ -14,6 +14,7 @@ package grafana
 
 import (
 	"fmt"
+	"maps"
 	"net/http"
 
 	"gopkg.in/yaml.v3"
@@ -133,23 +134,15 @@ func mergedNode(user yaml.Node) (yaml.Node, error) {
 // wholesale-replaced when the user sets it. This is what makes "every field
 // stays overridable" true without forcing an all-or-nothing block.
 func mergeMaps(defaults, user map[string]any) map[string]any {
-	out := make(map[string]any, len(defaults)+len(user))
-	for k, v := range defaults {
-		out[k] = v
-	}
+	out := maps.Clone(defaults)
 	for k, v := range user {
-		if dm, ok := out[k].(map[string]any); ok {
-			if um, ok := v.(map[string]any); ok {
-				merged := make(map[string]any, len(dm)+len(um))
-				for kk, vv := range dm {
-					merged[kk] = vv
-				}
-				for kk, vv := range um {
-					merged[kk] = vv
-				}
-				out[k] = merged
-				continue
-			}
+		dm, defaultIsMap := out[k].(map[string]any)
+		um, userIsMap := v.(map[string]any)
+		if defaultIsMap && userIsMap {
+			merged := maps.Clone(dm)
+			maps.Copy(merged, um)
+			out[k] = merged
+			continue
 		}
 		out[k] = v
 	}

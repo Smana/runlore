@@ -64,27 +64,38 @@ func Detect(ctx context.Context, baseURL, tokenEnv string, headers map[string]st
 	return ProviderVictoriaLogs
 }
 
-// detectLoki probes /loki/api/v1/status/buildinfo, returning ProviderLoki on a
-// recognised response and "" (not a fail-safe default — Detect owns that) on
-// any failure, so Detect can try the next probe.
-func detectLoki(ctx context.Context, base, tokenEnv string, headers map[string]string) string {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, base+"/loki/api/v1/status/buildinfo", nil)
+// probeBody issues one probe GET and returns the (bounded) response body, or nil
+// on ANY failure — a malformed URL, a transport error, or a non-200. Every probe
+// is best-effort by contract: nil means "not this backend", never an error to
+// propagate, so the caller returns "" and Detect moves to the next probe (or its
+// fail-safe default). The read is capped at 4 KiB: the documents parsed here are
+// small, and an unbounded read of an arbitrary operator-supplied endpoint is not.
+func probeBody(ctx context.Context, url, tokenEnv string, headers map[string]string) []byte {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
-		return ""
+		return nil
 	}
 	applyProbeAuth(req, tokenEnv, headers)
 	resp, err := httpx.SecureClient(10 * time.Second).Do(req)
 	if err != nil {
-		return ""
+		return nil
 	}
 	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusOK {
-		return ""
+		return nil
 	}
 	body, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+	return body
+}
+
+// detectLoki probes /loki/api/v1/status/buildinfo, returning ProviderLoki on a
+// recognised response and "" (not a fail-safe default — Detect owns that) on
+// any failure, so Detect can try the next probe.
+func detectLoki(ctx context.Context, base, tokenEnv string, headers map[string]string) string {
 	var bi struct {
 		Version string `json:"version"`
 	}
+	body := probeBody(ctx, base+"/loki/api/v1/status/buildinfo", tokenEnv, headers)
 	if json.Unmarshal(body, &bi) != nil || bi.Version == "" {
 		return "" // a 200 that is not buildinfo (proxy page) is not Loki
 	}
@@ -95,26 +106,13 @@ func detectLoki(ctx context.Context, base, tokenEnv string, headers map[string]s
 // OpenSearch serve at their root), returning ProviderOpenSearch or
 // ProviderElasticsearch on a recognised response, "" on any failure.
 func detectElastic(ctx context.Context, base, tokenEnv string, headers map[string]string) string {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, base+"/", nil)
-	if err != nil {
-		return ""
-	}
-	applyProbeAuth(req, tokenEnv, headers)
-	resp, err := httpx.SecureClient(10 * time.Second).Do(req)
-	if err != nil {
-		return ""
-	}
-	defer func() { _ = resp.Body.Close() }()
-	if resp.StatusCode != http.StatusOK {
-		return ""
-	}
-	body, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
 	var root struct {
 		Version struct {
 			Number       string `json:"number"`
 			Distribution string `json:"distribution"`
 		} `json:"version"`
 	}
+	body := probeBody(ctx, base+"/", tokenEnv, headers)
 	if json.Unmarshal(body, &root) != nil || root.Version.Number == "" {
 		return "" // a 200 that carries no version.number (e.g. VictoriaLogs' HTML root) is neither
 	}
