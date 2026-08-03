@@ -8,6 +8,7 @@ import (
 	"sync"
 
 	"github.com/Smana/runlore/internal/investigate"
+	"github.com/Smana/runlore/internal/redact"
 )
 
 // toolSource maps each investigation tool to its data-source group. submit_findings
@@ -68,11 +69,25 @@ func (t recordingTool) Name() string        { return t.inner.Name() }
 func (t recordingTool) Description() string { return t.inner.Description() }
 func (t recordingTool) Schema() string      { return t.inner.Schema() }
 
+// Call delegates, records, and returns the inner result UNCHANGED — the loop
+// applies its own redaction to the copy the model sees.
+//
+// What is recorded is redacted here, because this decorator sits inside the
+// loop: investigate applies redact.Secrets to a tool's return value only after
+// the tool has returned, so the recorder would otherwise hold the raw cluster
+// evidence. `lore eval --live --record` then writes that to disk as a replayable
+// case (app.RunEvalLive → eval.WriteCase), which a human may later promote into
+// the tracked fixture corpus — putting a live cluster secret in git. Recording
+// is an egress just like the model call is, so it gets the same treatment.
+//
+// The recorded error text is redacted too: backends build their errors from the
+// upstream response body ("logs status 401: …"), which can carry the credential
+// the request was rejected for.
 func (t recordingTool) Call(ctx context.Context, args string) (string, error) {
 	out, err := t.inner.Call(ctx, args)
-	c := Call{Name: t.inner.Name(), Args: args, Output: out}
+	c := Call{Name: t.inner.Name(), Args: args, Output: redact.Secrets(out)}
 	if err != nil {
-		c.Err = err.Error()
+		c.Err = redact.Secrets(err.Error())
 	}
 	t.rec.record(c)
 	return out, err
