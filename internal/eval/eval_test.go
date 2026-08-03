@@ -495,7 +495,7 @@ func TestRunOneCommonsGroundsKBSearchButNeverFiresRecall(t *testing.T) {
 
 // TestRunOneWithoutCommonsDirOffersNoKBSearch is the additivity guard: a case that
 // sets only catalog_dir replays exactly as it did before commons_dir existed — no
-// kb_search tool, so the four shipped recall cases keep their tool surface.
+// kb_search tool, so the shipped catalog_dir case keeps its tool surface.
 func TestRunOneWithoutCommonsDirOffersNoKBSearch(t *testing.T) {
 	dir := t.TempDir()
 	c := Case{
@@ -520,27 +520,32 @@ func TestRunOneWithoutCommonsDirOffersNoKBSearch(t *testing.T) {
 	}
 }
 
+// shippedCase returns the named case from the REAL examples/eval corpus, failing the
+// test when it is absent. Fatal-on-miss rather than nil-returning is the point: every
+// shipped-case guard below asserts nothing at all if a rename quietly turns it into a
+// no-op, so the lookup itself has to be the thing that fails.
+func shippedCase(t *testing.T, name string) Case {
+	t.Helper()
+	cases, err := Load(filepath.Join("..", "..", "examples", "eval"))
+	if err != nil {
+		t.Fatalf("Load examples/eval: %v", err)
+	}
+	for _, c := range cases {
+		if c.Name == name {
+			return c
+		}
+	}
+	t.Fatalf("examples/eval has no case named %q", name)
+	return Case{}
+}
+
 // TestShippedCommonsGroundingPairIsControlled guards the shipped A/B: the two cases
 // must differ in the commons corpus and NOTHING ELSE. A paired eval whose halves
 // drift apart stops measuring the commons and starts measuring the drift, and the
 // published delta would keep looking like a number the whole time.
 func TestShippedCommonsGroundingPairIsControlled(t *testing.T) {
-	cases, err := Load(filepath.Join("..", "..", "examples", "eval"))
-	if err != nil {
-		t.Fatalf("Load examples/eval: %v", err)
-	}
-	var with, without *Case
-	for i := range cases {
-		switch cases[i].Name {
-		case "node-eviction-with-commons":
-			with = &cases[i]
-		case "node-eviction-no-commons":
-			without = &cases[i]
-		}
-	}
-	if with == nil || without == nil {
-		t.Fatal("the paired commons cases are not both present in examples/eval")
-	}
+	with := shippedCase(t, "node-eviction-with-commons")
+	without := shippedCase(t, "node-eviction-no-commons")
 	if with.CommonsDir == without.CommonsDir {
 		t.Fatal("the pair must point at DIFFERENT commons roots — that is the only variable")
 	}
@@ -582,10 +587,7 @@ func TestShippedCommonsCorpusIsGenericAndInert(t *testing.T) {
 			continue
 		}
 		checked++
-		cat, cleanup, err := c.buildCatalog(context.Background())
-		if cleanup != nil {
-			defer cleanup()
-		}
+		cat, err := c.buildCatalog(context.Background())
 		if err != nil {
 			t.Fatalf("%s: build catalog: %v", c.Name, err)
 		}
@@ -626,25 +628,13 @@ func TestShippedCommonsCorpusIsGenericAndInert(t *testing.T) {
 // "the commons was configured but never reached the model". It asserts the playbook
 // body is what kb_search handed back, and that recall still refused it.
 func TestShippedCommonsCaseGroundsTheLoop(t *testing.T) {
-	cases, err := Load(filepath.Join("..", "..", "examples", "eval"))
-	if err != nil {
-		t.Fatalf("Load examples/eval: %v", err)
-	}
-	var c *Case
-	for i := range cases {
-		if cases[i].Name == "node-eviction-with-commons" {
-			c = &cases[i]
-		}
-	}
-	if c == nil {
-		t.Fatal("examples/eval/node-eviction-with-commons.yaml not loaded")
-	}
+	c := shippedCase(t, "node-eviction-with-commons")
 	model := &recordingModel{resp: []providers.CompletionResponse{
 		kbSearch("pods evicted node low on memory"),
 		findings("analytics/report-worker consumed the node: its memory request is 256Mi while it uses 7.1Gi, so the scheduler overcommitted ip-10-0-22-115 and the kubelet evicted its neighbours; raise its memory request"),
 		verdict("keep"),
 	}}
-	res := (&Runner{Model: model, Log: discardLog()}).runOne(context.Background(), *c)
+	res := (&Runner{Model: model, Log: discardLog()}).runOne(context.Background(), c)
 	if res.RecallFired {
 		t.Fatalf("the shipped commons case must never fire instant recall: %+v", res)
 	}

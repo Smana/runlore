@@ -87,8 +87,8 @@ type Case struct {
 	// Empty ⇒ no recall assertion (existing cases are unaffected).
 	ExpectRecall string `yaml:"expect_recall,omitempty"`
 
-	// dir is the directory the case file was loaded from, used to resolve CatalogDir.
-	// Set by Load; unexported so YAML never populates it.
+	// dir is the directory the case file was loaded from, used to resolve CatalogDir
+	// and CommonsDir. Set by Load; unexported so YAML never populates it.
 	dir string
 }
 
@@ -140,7 +140,7 @@ func Load(dir string) ([]Case, error) {
 		if c.Name == "" {
 			c.Name = strings.TrimSuffix(e.Name(), filepath.Ext(e.Name()))
 		}
-		c.dir = dir // resolve CatalogDir relative to the case file's directory
+		c.dir = dir // resolve CatalogDir/CommonsDir relative to the case file's directory
 		cases = append(cases, c)
 	}
 	return cases, nil
@@ -157,8 +157,7 @@ func isYAML(name string) bool {
 func (c Case) hasCatalog() bool { return c.CatalogDir != "" || c.CommonsDir != "" }
 
 // buildCatalog loads the case's knowledge fixtures into a catalog wired the way
-// production is. The returned cleanup (nil when there is nothing to remove) must be
-// called by the caller once the catalog is done with.
+// production is.
 //
 // Without a commons root this is exactly the previous one-liner, so the shipped
 // catalog_dir cases replay unchanged. With one, the catalog is built the way the app
@@ -167,30 +166,31 @@ func (c Case) hasCatalog() bool { return c.CatalogDir != "" || c.CommonsDir != "
 //
 // A commons-only case gets a fresh EMPTY directory as the operator's own root, which
 // is not a workaround but the scenario itself: a deployment that has curated nothing
-// yet is the state the commons exists to cover.
-func (c Case) buildCatalog(ctx context.Context) (*catalog.Catalog, func(), error) {
+// yet is the state the commons exists to cover. It is removed as soon as the reload
+// has read it — entries and the index live in memory from then on — so the catalog
+// owns nothing on disk and the caller has no lifetime to manage.
+func (c Case) buildCatalog(ctx context.Context) (*catalog.Catalog, error) {
 	if c.CommonsDir == "" {
-		cat, err := catalog.New(filepath.Join(c.dir, c.CatalogDir))
-		return cat, nil, err
+		return catalog.New(filepath.Join(c.dir, c.CatalogDir))
 	}
 	own := filepath.Join(c.dir, c.CatalogDir)
-	var cleanup func()
 	if c.CatalogDir == "" {
 		d, err := os.MkdirTemp("", "runlore-eval-own-")
 		if err != nil {
-			return nil, nil, fmt.Errorf("empty own-catalog root: %w", err)
+			return nil, fmt.Errorf("empty own-catalog root: %w", err)
 		}
-		own, cleanup = d, func() { _ = os.RemoveAll(d) }
+		defer func() { _ = os.RemoveAll(d) }()
+		own = d
 	}
 	cat := catalog.NewEmpty()
 	cat.SetCommonsDir(filepath.Join(c.dir, c.CommonsDir))
+	// Named for the OWN root deliberately: ReloadContext only ever returns an error
+	// for that root — a commons Load failure is warned and swallowed inside it — so
+	// blaming the commons here would send a reader to the wrong directory.
 	if _, err := cat.ReloadContext(ctx, own); err != nil {
-		if cleanup != nil {
-			cleanup()
-		}
-		return nil, nil, fmt.Errorf("load commons root: %w", err)
+		return nil, fmt.Errorf("load catalog root %s: %w", own, err)
 	}
-	return cat, cleanup, nil
+	return cat, nil
 }
 
 // workload maps the case's optional workload to a providers.Workload (zero when unset).

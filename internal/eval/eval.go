@@ -31,10 +31,7 @@ func (r *Runner) runOne(ctx context.Context, c Case) Result {
 	// (BuildModelAndTools). Cases without a fixture replay with no recall, unchanged.
 	var recall *investigate.Recall
 	if c.hasCatalog() {
-		cat, cleanup, err := c.buildCatalog(ctx)
-		if cleanup != nil {
-			defer cleanup()
-		}
+		cat, err := c.buildCatalog(ctx)
 		if err != nil {
 			return Result{Name: c.Name, Missing: []string{"catalog fixture load error: " + err.Error()}}
 		}
