@@ -65,16 +65,27 @@ func TestCommonsEntryNeverFiresRecall(t *testing.T) {
 }
 
 // TestEnrichmentRanksTheOperatorsEntryAboveTheCommons pins the retrieval policy
-// documented in website/content/docs/concepts/knowledge-commons.md ("A floor that
-// fades as you learn"): once this platform has curated its own entry for a failure
-// class, that entry outranks the commons entry for the same class.
+// documented in website/content/docs/concepts/knowledge-commons.md ("Which corpus
+// leads, and when") for APPLICATION workloads: once this platform has curated its own
+// entry for the failing object, that entry outranks the commons entry for the same
+// failure class.
 //
 // The mechanism is query enrichment, not a provenance rule. kb_search appends the
-// incident's workload ref server-side (kbSearchEnrichment), and those tokens are
-// cluster-specific — the commons is resource-less by construction, so the enrichment
-// can only ever lift a LOCAL entry's BM25 score. The alertname half of the enrichment
-// is generic, and both fixtures below carry it in their tags, so this test is not a
-// strawman: the workload ref alone does the discriminating.
+// incident's workload ref server-side (kbSearchEnrichment); enrichment knows nothing
+// about provenance and lifts whichever entries contain those tokens. What makes the
+// local entry the only one that CAN contain them is the object this fixture picked:
+// payments/checkout-api is an application workload, and no generic playbook names it.
+//
+// That is a per-object property, NOT a general rule about the commons. The shipped
+// playbooks name cert-manager, ArgoCD, CoreDNS and kube-system explicitly — in their
+// tags and in the kubectl commands they carry — so an alert on one of THOSE workloads
+// lifts the commons entry too, and it can legitimately take the top slot. Do not
+// generalize this test into "enrichment can never lift a commons entry": it cannot
+// here, only because of the object this fixture picked.
+//
+// The alertname half of the enrichment is generic, and both fixtures below carry it in
+// their tags, so this test is not a strawman: the workload ref alone does the
+// discriminating.
 //
 // The two arms are the whole test. The enriched arm alone would be vacuous if the
 // fixture happened to favour the operator's entry for unrelated reasons, so the bare
@@ -97,9 +108,9 @@ func TestEnrichmentRanksTheOperatorsEntryAboveTheCommons(t *testing.T) {
 		commonsName = "crashloopbackoff.md"
 		commonsPath = "commons/" + commonsName // catalog namespaces commons paths
 	)
-	// Identical symptom text and identical tags. The ONE difference is the `resource`
-	// argument below — the line a commons entry may never carry: the resource this
-	// platform actually runs.
+	// Identical symptom text and identical tags. The only difference that reaches the
+	// index is the `resource` argument below — the line a commons entry may never carry.
+	// (`type` differs too, but it is not part of the indexed text; see entryText.)
 	own, commons := t.TempDir(), t.TempDir()
 	write := func(dir, name, kind, resource string) {
 		t.Helper()
@@ -151,8 +162,9 @@ func TestEnrichmentRanksTheOperatorsEntryAboveTheCommons(t *testing.T) {
 	}
 	if rankOf(t, enriched, ownPath) > rankOf(t, enriched, commonsPath) {
 		t.Errorf("the commons entry outranked the operator's own on an ENRICHED query.\n"+
-			"enrichment = %q; those tokens are cluster-specific and the commons is resource-less "+
-			"by construction, so a local entry for the same failure class must win.\n%s",
+			"enrichment = %q; those tokens name an APPLICATION workload that no generic "+
+			"playbook contains, so only the local entry can match them here — a commons entry "+
+			"winning this fixture means the workload ref stopped reaching the index.\n%s",
 			enrich, enriched)
 	}
 }
