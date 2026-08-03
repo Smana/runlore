@@ -8,6 +8,39 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 RunLore is **pre-1.0 and under active development** — there are no tagged releases
 yet, so everything currently lives under `[Unreleased]`.
 
+## [0.13.0](https://github.com/Smana/runlore/compare/v0.12.0...v0.13.0) (2026-08-03)
+
+
+### Features
+
+* **catalog:** let the knowledge commons pin a tag or commit instead of tracking a branch ([#449](https://github.com/Smana/runlore/issues/449)) ([5e92867](https://github.com/Smana/runlore/commit/5e92867261b01adb3b0fab6f0a1e685a6e223a61))
+* **curate:** earn last_validated from a resolved recall ([#448](https://github.com/Smana/runlore/issues/448)) ([cf65a60](https://github.com/Smana/runlore/commit/cf65a604ca12f021d67ede1120e1d33627f344b6))
+* **eval:** measure what the knowledge commons actually contributes ([#447](https://github.com/Smana/runlore/issues/447)) ([1cc2e19](https://github.com/Smana/runlore/commit/1cc2e19e1624ddbf0b7e6edfdb09e379a65d7a31))
+* **serve:** warn at startup when the learning loop has no feedback edge ([#441](https://github.com/Smana/runlore/issues/441)) ([b4f634a](https://github.com/Smana/runlore/commit/b4f634aed6c8a141b063c283d3c4c2c18ca0772f))
+
+
+### Bug Fixes
+
+* **eval:** distinguish an errored eval run from a genuine zero score ([#442](https://github.com/Smana/runlore/issues/442)) ([c8cf703](https://github.com/Smana/runlore/commit/c8cf703030dcfce5b357d5fe3cd879f608959bb1))
+* **eval:** score must_contain over the claim, and make entity precision engage ([#440](https://github.com/Smana/runlore/issues/440)) ([f1e9105](https://github.com/Smana/runlore/commit/f1e91056958101cad3d3b1a82064347f929b8665))
+* **metrics:** measure what a recall spends instead of asserting what it saved ([#444](https://github.com/Smana/runlore/issues/444)) ([cd27003](https://github.com/Smana/runlore/commit/cd27003ceb2719502b8c4dfc936eebdf5b37b4be))
+* **notify:** require and verify a Slack delivery target for feedback buttons ([#452](https://github.com/Smana/runlore/issues/452)) ([e999554](https://github.com/Smana/runlore/commit/e99955442a51ba29f3e3b72c7e0557e9ea3c1619))
+* **security:** close four hardening gaps found while reviewing the eval scorecard ([#450](https://github.com/Smana/runlore/issues/450)) ([0db119c](https://github.com/Smana/runlore/commit/0db119cf874cd256ea44915e7e2246e9fcd6860d))
+
+
+### Documentation
+
+* **commons:** state the floor-that-fades ranking policy, and un-vacuum the tie-break guard ([#445](https://github.com/Smana/runlore/issues/445)) ([2763dba](https://github.com/Smana/runlore/commit/2763dba8f5cad39585942a841b42700309db221d))
+* correct the instant-recall cost claim to the configuration we ship ([#443](https://github.com/Smana/runlore/issues/443)) ([5138393](https://github.com/Smana/runlore/commit/51383936d1e53a87329cb264adbf76a1cd9d3041))
+* **eval:** frame the eval page so the number can be read correctly ([#446](https://github.com/Smana/runlore/issues/446)) ([9da499f](https://github.com/Smana/runlore/commit/9da499f8abcf50e7a6d3cd8ff7fbc22ada94726b))
+* **recall:** stop the Go comments calling the reranker opt-in ([#451](https://github.com/Smana/runlore/issues/451)) ([084b0bf](https://github.com/Smana/runlore/commit/084b0bf2465637ef79433b0dc85aef3cf138f54b))
+* retake both Slack screenshots from a live incident, and clear the staleness escape ([#455](https://github.com/Smana/runlore/issues/455)) ([3c87467](https://github.com/Smana/runlore/commit/3c87467ca2763c53ec94ba6a1238fd6bdf48517c))
+
+
+### Continuous Integration
+
+* re-point the screenshot acknowledgement after the squash merges ([#454](https://github.com/Smana/runlore/issues/454)) ([60453fe](https://github.com/Smana/runlore/commit/60453fe459afd077c61bd92af9dbffd7c53d92ec))
+
 ## [0.12.0](https://github.com/Smana/runlore/compare/v0.11.0...v0.12.0) (2026-08-03)
 
 
