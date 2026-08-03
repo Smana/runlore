@@ -20,12 +20,13 @@ import (
 	"github.com/Smana/runlore/internal/gitrev"
 )
 
-// pinRefSpecs is what a pin fetch asks for: every branch and every tag. A pin may
-// name any commit in the repository, so narrowing this would make "bump the pin"
-// work for some revisions and silently not for others.
+// pinRefSpecs is what a pin fetch asks for: every branch. A pin may name any commit
+// in the repository, so narrowing this would make "bump the pin" work for some
+// revisions and silently not for others. Tags are NOT listed here: the fetch below
+// sets Tags: git.AllTags, and go-git appends +refs/tags/*:refs/tags/* itself for
+// that mode — spelling it out again just fetched the same refspec twice.
 var pinRefSpecs = []gitcfg.RefSpec{
 	"+refs/heads/*:refs/remotes/origin/*",
-	"+refs/tags/*:refs/tags/*",
 }
 
 // SyncDelta names the repo-relative paths that changed between two synced
