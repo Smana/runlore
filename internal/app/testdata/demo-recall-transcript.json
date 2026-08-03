@@ -1,0 +1,27 @@
+{
+  "version": 1,
+  "scenario": "harbor-chart-bump",
+  "recorded_at": "2026-08-02T00:00:00Z",
+  "recorded_with": {
+    "provider": "test",
+    "model": "fixture"
+  },
+  "turns": [
+    {
+      "text": "",
+      "tool_calls": [
+        {
+          "ID": "call_verify_0001",
+          "Name": "submit_verdicts",
+          "Args": "{\"verdicts\": [{\"index\": 0, \"verdict\": \"keep\", \"reason\": \"the recalled cause still matches this incident\"}]}"
+        }
+      ],
+      "usage": {
+        "input_tokens": 100,
+        "output_tokens": 20,
+        "cached_input_tokens": 90,
+        "cache_write_tokens": 0
+      }
+    }
+  ]
+}

@@ -243,7 +243,7 @@ func TestDemoCatalogWiresRecall(t *testing.T) {
 	err := runDemoInvestigateWithModel([]string{
 		"--scenarios", "../../examples/scenarios",
 		"--scenario", "harbor-chart-bump",
-		"--offline", "testdata/demo-transcript.json",
+		"--offline", "testdata/demo-recall-transcript.json",
 		"--catalog", "../../examples/demo/catalog",
 	}, &out, &errOut, nil)
 	if err != nil {
@@ -258,9 +258,46 @@ func TestDemoCatalogWiresRecall(t *testing.T) {
 	if !strings.Contains(got, "DEMO values, not production's") {
 		t.Errorf("the demo must disclose that its recall gate is not production's:\n%s", got)
 	}
-	// The gate itself must have been consulted, not skipped.
-	if !strings.Contains(errOut.String(), "instant recall") {
-		t.Errorf("recall was never consulted despite --catalog:\n%s", errOut.String())
+	// The gate must have FIRED and the recall must have been DELIVERED — not merely
+	// consulted.
+	//
+	// Asserting on "instant recall" in stderr proved nothing: that string is also a
+	// substring of the WITHDRAWAL line ("instant recall verify unavailable; running
+	// full investigation instead of delivering it unreviewed"). The demo spent its
+	// entire life demonstrating recall being withdrawn, and this test read as coverage.
+	if strings.Contains(errOut.String(), "verify unavailable") {
+		t.Errorf("recall was withdrawn rather than delivered — the demo is supposed to SHOW a recall card:\n%s", errOut.String())
+	}
+	if !strings.Contains(got, "Instant recall") {
+		t.Errorf("no instant-recall card was delivered:\n%s", got)
+	}
+	// A delivered recall skips the loop entirely, so no tool step may be printed.
+	if strings.Contains(got, "→ ") {
+		t.Errorf("recall short-circuits the loop, so no tool steps may run:\n%s", got)
+	}
+}
+
+// TestDemoOfflineWithoutCatalogRunsTheWholeLoop is the control for
+// TestDemoCatalogWiresRecall: without --catalog the SAME scenario must run the full
+// investigation, first tool step included.
+//
+// It exists because the recall bug was visible here as a side effect: the verify
+// pass consumed the transcript's first turn, so the fall-through investigation
+// started at turn 2 and silently lost its opening what_changed step. A trace that
+// is complete in one mode and truncated in the other is the cheap signal that the
+// transcript and the code path have drifted apart.
+func TestDemoOfflineWithoutCatalogRunsTheWholeLoop(t *testing.T) {
+	var out, errOut bytes.Buffer
+	err := runDemoInvestigateWithModel([]string{
+		"--scenarios", "../../examples/scenarios",
+		"--scenario", "harbor-chart-bump",
+		"--offline", "testdata/demo-transcript.json",
+	}, &out, &errOut, nil)
+	if err != nil {
+		t.Fatalf("demo without --catalog: %v\nstderr:\n%s", err, errOut.String())
+	}
+	if !strings.Contains(out.String(), "→ ") {
+		t.Errorf("without a catalog the full loop must run and print its tool steps:\n%s", out.String())
 	}
 }
 

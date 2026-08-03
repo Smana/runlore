@@ -47,10 +47,21 @@ const demoDefaultTranscript = "examples/demo/harbor-chart-bump.transcript.json"
 // running that same scenario twice shows the loop closing: the first run reasons its
 // way to the cause, the second is answered from the entry the first one produced.
 //
-// That second run is the only offline way to see an INSTANT RECALL card. Recall
-// short-circuits before the model is ever called, so unlike a full investigation it
-// cannot be captured in a transcript — there are no model turns to record.
+// That second run is the only offline way to see an INSTANT RECALL card.
+//
+// Recall short-circuits before the LOOP, not before the MODEL: the adversarial
+// verify pass that stands in front of every recall is itself a model call. So the
+// recall path does have a turn to record — one submit_verdicts response — and it
+// needs its own transcript. Replaying the full-investigation transcript here fed
+// the verify pass the loop's first turn (a what_changed tool call), which is not a
+// verdict, so #395's fail-closed gate correctly WITHDREW the recall and the demo
+// showed a full investigation with its first step already consumed.
 const demoDefaultCatalog = "examples/demo/catalog"
+
+// demoRecallTranscript is replayed instead of demoDefaultTranscript when --catalog
+// is combined with --offline. It holds the single model turn the recall path makes:
+// the adversarial verify pass approving the cached answer.
+const demoRecallTranscript = "examples/demo/harbor-chart-bump.recall.transcript.json"
 
 // RunDemo dispatches the `lore demo <subcommand>` family. Today only `investigate` is
 // wired: a zero-cluster, full-loop demonstration of the real investigator against fake
@@ -117,7 +128,14 @@ func runDemoInvestigateWithModel(args []string, out, errOut io.Writer, model pro
 	if model == nil && *offline != "" {
 		path := *offline
 		if path == "default" {
-			path = demoDefaultTranscript
+			// With a catalog loaded, recall fires and the ONLY model call is the
+			// verify pass — a different transcript from the full loop's. An explicit
+			// --offline <path> still wins; this only resolves the "default" alias.
+			if *catalogDir != "" {
+				path = demoRecallTranscript
+			} else {
+				path = demoDefaultTranscript
+			}
 		}
 		t, err := replay.Load(path)
 		if err != nil {
