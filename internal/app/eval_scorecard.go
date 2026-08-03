@@ -37,6 +37,19 @@ func RunEvalScorecard(args []string) error {
 	if rep.Total == 0 {
 		return fmt.Errorf("report %s has no cases — refusing to publish an empty scorecard", *report)
 	}
+	// An ERRORED run (eval.Report.Errored: every case failed before anything could be
+	// scored) is PUBLISHED, labelled — not refused like the empty report above. The
+	// two look alike and are not. A report with no cases is malformed and carries no
+	// information, so writing it would replace the last real numbers with a blank. An
+	// errored run is well-formed and does carry information — the provider was
+	// unavailable on this date — and refusing it would leave the branch showing the
+	// previous green run, making a broken provider indistinguishable from a nightly
+	// that never fired. That silence is the failure mode the scorecard exists to
+	// prevent, so the run publishes with a grey badge, an "ERRORED" summary and an
+	// `errored` history line instead of as a 0% score.
+	if rep.Errored() {
+		fmt.Printf("scorecard: run %s ERRORED — no case produced a scoreable result; publishing it labelled, not as a 0%% score\n", rep.At)
+	}
 	if err := os.MkdirAll(*dir, 0o750); err != nil {
 		return err
 	}
