@@ -280,8 +280,11 @@ config:
   #     # signing_secret_env: SLACK_SIGNING_SECRET  # only needed for rung-2 approve/reject buttons
   #     # feedback_buttons: true        # OPT-IN 👍/👎 rating buttons feeding the learning loop.
   #     #   Requires Slack to reach POST /slack/interactions (Interactivity Request URL through
-  #     #   your ingress — same exposure as approve/reject buttons), plus signing_secret_env
-  #     #   and outcome.ledger_path. Startup fails loud if either is missing.
+  #     #   your ingress — same exposure as approve/reject buttons), plus signing_secret_env,
+  #     #   outcome.ledger_path AND a delivery target (Option A or Option B above — buttons
+  #     #   render on either). Startup fails loud if any is missing. Mount the secret too: an
+  #     #   EMPTY credential env var skips the Slack notifier entirely (startup warns, no
+  #     #   buttons are delivered and no rating can be recorded).
   #   matrix: { homeserver: https://matrix.org, room_id: "!r:hs", access_token_env: MATRIX_TOKEN }
   #   # matrix.feedback_reactions: true  # OPT-IN 👍/👎 reactions feeding the learning loop.
   #   #   ZERO-INGRESS (outbound /sync long-poll — nothing to expose, unlike Slack buttons).

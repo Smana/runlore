@@ -589,37 +589,113 @@ func TestValidateSkipVerdicts(t *testing.T) {
 }
 
 // TestValidateFeedbackButtons guards the opt-in contract of the Slack feedback
-// loop: enabling notify.slack.feedback_buttons requires BOTH the signing secret
-// (clicks arrive on the exposed /slack/interactions endpoint and must be
-// signature-verified) and the outcome ledger (a rendered button whose click
-// cannot be recorded would be a lie). Off (the default) validates clean with
-// neither.
+// loop end to end: enabling notify.slack.feedback_buttons requires the signing
+// secret (clicks arrive on the exposed /slack/interactions endpoint and must be
+// signature-verified), the outcome ledger (a rendered button whose click cannot
+// be recorded would be a lie) AND a delivery target — a button only exists on a
+// message the Slack notifier actually delivered, and that notifier is only built
+// from an incoming webhook or a bot token + channel. Both are genuine targets:
+// Slack dispatches block_actions for interactive components posted either way,
+// and the click is answered via the payload's response_url, which needs no bot
+// token. Off (the default) validates clean with none of it.
 func TestValidateFeedbackButtons(t *testing.T) {
-	off := &Config{}
-	if err := off.Validate(); err != nil {
-		t.Fatalf("feedback_buttons off must validate clean, got: %v", err)
+	const (
+		secretEnv  = "SLACK_SIGNING_SECRET"
+		ledgerPath = "/var/lib/runlore/outcomes.jsonl"
+	)
+	// on returns a config with feedback_buttons and everything BUT the delivery
+	// target, so each case only spells out the target combination under test.
+	on := func() *Config {
+		c := &Config{}
+		c.Notify.Slack.FeedbackButtons = true
+		c.Notify.Slack.SigningSecretEnv = secretEnv
+		c.Outcome.LedgerPath = ledgerPath
+		return c
 	}
-
-	noSecret := &Config{}
-	noSecret.Notify.Slack.FeedbackButtons = true
-	noSecret.Outcome.LedgerPath = "/var/lib/runlore/outcomes.jsonl"
-	if err := noSecret.Validate(); err == nil {
-		t.Fatal("feedback_buttons without notify.slack.signing_secret_env must be rejected")
+	tests := []struct {
+		name    string
+		cfg     func() *Config
+		wantErr string // substring the rejection must name; "" ⇒ must validate clean
+	}{
+		{name: "off by default", cfg: func() *Config { return &Config{} }},
+		{
+			name: "on without the signing secret",
+			cfg: func() *Config {
+				c := on()
+				c.Notify.Slack.SigningSecretEnv = ""
+				c.Notify.Slack.WebhookURLEnv = "SLACK_WEBHOOK_URL"
+				return c
+			},
+			wantErr: "notify.slack.signing_secret_env",
+		},
+		{
+			name: "on without the outcome ledger",
+			cfg: func() *Config {
+				c := on()
+				c.Outcome.LedgerPath = ""
+				c.Notify.Slack.WebhookURLEnv = "SLACK_WEBHOOK_URL"
+				return c
+			},
+			wantErr: "outcome.ledger_path",
+		},
+		{
+			name:    "on with no delivery target at all",
+			cfg:     on,
+			wantErr: "notify.slack.webhook_url_env",
+		},
+		{
+			name: "on with a bot token but no channel",
+			cfg: func() *Config {
+				c := on()
+				c.Notify.Slack.BotTokenEnv = "SLACK_BOT_TOKEN"
+				return c
+			},
+			wantErr: "notify.slack.channel",
+		},
+		{
+			name: "on with an incoming webhook",
+			cfg: func() *Config {
+				c := on()
+				c.Notify.Slack.WebhookURLEnv = "SLACK_WEBHOOK_URL"
+				return c
+			},
+		},
+		{
+			name: "on with a bot token and channel",
+			cfg: func() *Config {
+				c := on()
+				c.Notify.Slack.BotTokenEnv = "SLACK_BOT_TOKEN"
+				c.Notify.Slack.Channel = "#alerts"
+				return c
+			},
+		},
+		{
+			name: "on with both targets",
+			cfg: func() *Config {
+				c := on()
+				c.Notify.Slack.WebhookURLEnv = "SLACK_WEBHOOK_URL"
+				c.Notify.Slack.BotTokenEnv = "SLACK_BOT_TOKEN"
+				c.Notify.Slack.Channel = "#alerts"
+				return c
+			},
+		},
 	}
-
-	noLedger := &Config{}
-	noLedger.Notify.Slack.FeedbackButtons = true
-	noLedger.Notify.Slack.SigningSecretEnv = "SLACK_SIGNING_SECRET"
-	if err := noLedger.Validate(); err == nil {
-		t.Fatal("feedback_buttons without outcome.ledger_path must be rejected")
-	}
-
-	ok := &Config{}
-	ok.Notify.Slack.FeedbackButtons = true
-	ok.Notify.Slack.SigningSecretEnv = "SLACK_SIGNING_SECRET"
-	ok.Outcome.LedgerPath = "/var/lib/runlore/outcomes.jsonl"
-	if err := ok.Validate(); err != nil {
-		t.Fatalf("feedback_buttons with secret + ledger must validate clean, got: %v", err)
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			err := tc.cfg().Validate()
+			if tc.wantErr == "" {
+				if err != nil {
+					t.Fatalf("must validate clean, got: %v", err)
+				}
+				return
+			}
+			if err == nil {
+				t.Fatalf("must be rejected (error naming %q), got nil", tc.wantErr)
+			}
+			if !strings.Contains(err.Error(), tc.wantErr) {
+				t.Fatalf("error must name the missing key %q, got: %v", tc.wantErr, err)
+			}
+		})
 	}
 }
 

@@ -44,8 +44,10 @@ kubectl -n runlore logs deploy/runlore | grep 'msg=findings'
 ## Notes
 
 - A **bot token takes precedence** over `webhook_url_env` when both are set.
-- An **incoming webhook** delivers the same content as a **single** message — it cannot thread and
-  exposes no interaction buttons.
+- An **incoming webhook** delivers the same content as a **single** message — it cannot thread. It
+  *does* carry interaction buttons: incoming webhooks follow the same messaging rules as
+  `chat.postMessage`, and a click is answered through the interaction's `response_url`, so neither
+  Approve/Reject nor `feedback_buttons` needs a bot token.
 - **Approve/Reject buttons** (`actions.mode: approve`) and **`feedback_buttons`** (opt-in 👍/👎 rating)
   both need `signing_secret_env` set **and** the same exposure: Slack **Interactivity** turned on, with
   Request URL `https://<your-runlore-host>/slack/interactions` reachable **from Slack's servers**.
@@ -54,8 +56,13 @@ kubectl -n runlore logs deploy/runlore | grep 'msg=findings'
   - Read-only deployments (no actions, no feedback buttons) need none of this.
   - Route it through your ingress/gateway; if you use the chart's `networkPolicy.ingressFrom`, allow
     your ingress controller, not the internet.
-- `feedback_buttons: true` also requires `outcome.ledger_path` — startup fails loud otherwise. Ratings
-  land in the outcome ledger and weigh the recalled entry's trust, exactly like resolve signals do.
+- `feedback_buttons: true` also requires `outcome.ledger_path` **and a delivery target**
+  (`webhook_url_env`, or `bot_token_env` with `channel`) — startup fails loud otherwise, since a button
+  only exists on a message RunLore actually delivered. Ratings land in the outcome ledger and weigh the
+  recalled entry's trust, exactly like resolve signals do.
+- Mount the credential too: an env var that is set but **empty** skips the Slack notifier altogether —
+  nothing is delivered, no buttons render, no rating can be recorded. Validation cannot see that, so
+  startup warns (`no slack delivery target resolved`) instead of reporting the feature enabled.
 - Feedback is deliberately **unprivileged**: any signature-valid member of your workspace can rate
   (approve/reject keep their own `approver_ids` allowlist). One live vote per (trigger key, Slack user);
   latest wins.

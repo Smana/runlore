@@ -16,28 +16,53 @@ import (
 	"strings"
 	"time"
 
+	"github.com/Smana/runlore/internal/config"
 	"github.com/Smana/runlore/internal/httpx"
 	"github.com/Smana/runlore/internal/providers"
 )
+
+// Delivery targets SlackDeliveryTarget can resolve to.
+const (
+	slackTargetBot     = "bot"     // chat.postMessage with a bot token
+	slackTargetWebhook = "webhook" // incoming webhook
+)
+
+// SlackDeliveryTarget reports which delivery path the Slack notifier resolves to
+// for sl against the current environment: "bot" (chat.postMessage), "webhook"
+// (incoming webhook), or "" when neither is usable — nothing configured, or the
+// env var holding the credential is present but EMPTY (an unmounted secret). ""
+// means the builder below returns no notifier and Slack delivery is silently
+// skipped, which is why this is exported: a startup guard must be able to detect
+// that without re-deriving the precedence rules and drifting from them.
+func SlackDeliveryTarget(sl config.SlackNotify) string {
+	// Bot token (chat.postMessage) takes precedence over an incoming webhook: when
+	// it is configured, an empty token does NOT fall back to the webhook.
+	if sl.BotTokenEnv != "" && sl.Channel != "" {
+		if os.Getenv(sl.BotTokenEnv) != "" {
+			return slackTargetBot
+		}
+		return ""
+	}
+	if sl.WebhookURLEnv != "" && os.Getenv(sl.WebhookURLEnv) != "" {
+		return slackTargetWebhook
+	}
+	return ""
+}
 
 func init() {
 	Register(Descriptor{
 		Name: "slack",
 		Build: func(d Deps) (providers.Notifier, error) {
 			sl := d.Cfg.Notify.Slack
-			// Bot token (chat.postMessage) takes precedence over an incoming webhook.
-			if sl.BotTokenEnv != "" && sl.Channel != "" {
-				if tok := os.Getenv(sl.BotTokenEnv); tok != "" {
-					b := NewSlackBot(tok, sl.Channel)
-					b.FeedbackButtons = sl.FeedbackButtons
-					return b, nil
-				}
-			} else if sl.WebhookURLEnv != "" {
-				if url := os.Getenv(sl.WebhookURLEnv); url != "" {
-					s := NewSlack(url)
-					s.FeedbackButtons = sl.FeedbackButtons
-					return s, nil
-				}
+			switch SlackDeliveryTarget(sl) {
+			case slackTargetBot:
+				b := NewSlackBot(os.Getenv(sl.BotTokenEnv), sl.Channel)
+				b.FeedbackButtons = sl.FeedbackButtons
+				return b, nil
+			case slackTargetWebhook:
+				s := NewSlack(os.Getenv(sl.WebhookURLEnv))
+				s.FeedbackButtons = sl.FeedbackButtons
+				return s, nil
 			}
 			return nil, nil
 		},
