@@ -172,9 +172,10 @@ func (c *Catalog) ReloadContext(ctx context.Context, dir string) ([]string, erro
 	if err != nil {
 		return nil, err
 	}
-	// Append the commons root, marked. Loaded AFTER the user's own entries so a
-	// path collision resolves to the operator's copy, and so the stable order the
-	// tie-break relies on puts their entries first.
+	// Append the commons root, marked and path-prefixed. The prefix — not this order —
+	// is what keeps the two roots from colliding (see
+	// TestSameFilenameInBothRootsDoesNotCollide), and provenance at equal scores is
+	// decided explicitly in SearchScored. Load order is not load-bearing for ranking.
 	c.mu.RLock()
 	commonsDir := c.commonsDir
 	c.mu.RUnlock()
