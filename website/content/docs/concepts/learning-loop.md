@@ -239,9 +239,12 @@ Then two safety backstops before the recalled answer is delivered:
 
   Failing closed here is the correct trade, but it is not free, and both costs land
   precisely when things are already going wrong: **cost/load amplification** — a
-  recall that would have cost one model call now costs a full ReAct loop, up to
-  `MaxSteps` (default 20) model calls plus tool calls, arriving exactly when the
-  verify endpoint is unhealthy; and a **slow-verify timeout interaction** — the
+  recall that would have cost two model calls (the reranker, which is on by default,
+  then verify) now costs those two *plus* a full ReAct loop, up to `MaxSteps`
+  (default 20) model calls plus tool calls — the reranker's call and the failed
+  verify call are already spent when the fall-through starts, and it all arrives
+  exactly when the verify endpoint is unhealthy; and a **slow-verify timeout
+  interaction** — the
   investigation's overall `Timeout` bounds the whole run *including* the failed verify
   call, so if verify fails by exhausting that deadline rather than erroring fast, the
   fall-through inherits an already-spent budget and the user gets a synthetic timeout

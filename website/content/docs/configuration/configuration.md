@@ -196,6 +196,24 @@ incident webhook. Known keys: `alertmanager`, `gitops`, `pagerduty`, `custom`.
   still goes through live-state confirm + the adversarial verify pass, exactly as before — the reranker
   is a *retrieval-time* "which candidate + confident enough to short-circuit" decision, not a second
   verify.
+
+  **What it costs in steady state** (budget for this before enabling). The reranker sits *in front of*
+  the short-circuit, so the call is spent on every incident that reaches it — **including the ones
+  that do not fire**: a `match=false`, a confidence under `rerank_threshold`, or a model error has
+  already paid for the call before falling through to the full investigation. The only thing that
+  prevents the call is `rerank_min_score`, and its default **0.1** sits at the *bottom* of the
+  ~0.1–1.2 band real enriched BM25 scores occupy, so it skips the call only when retrieval surfaced
+  essentially nothing. In practice, then, enabling instant recall adds **one model call to the floor
+  cost of nearly every investigation that has a structurally-agreeing candidate**, and buys back the
+  ~100k of a full investigation on the subset that fires. A fired recall is consequently **two** model
+  calls — rerank, then the verify pass (`Verify: true` is unconditional) — not one.
+  **Measure it, don't estimate it:** the reranker's traffic carries `provider="rerank"` on
+  `runlore_model_requests_total` and `runlore_model_request_duration_seconds`, so
+  `runlore_model_requests_total{provider="rerank"}` against `runlore_recall_hits_total` and
+  `runlore_recall_rejections_total{reason="rerank_low_confidence"}` gives you calls-paid vs
+  recalls-fired on your own corpus (see [Observability]({{< relref "/docs/operations/observability.md" >}})).
+  If the ratio is bad, raise `rerank_min_score` toward your corpus's real score regime — that trades
+  recall coverage for calls not made.
 - `instant_recall.hybrid` (**EXPERIMENTAL**, off by default; needs `model.embeddings`) — switches recall
   to fused **BM25 + embedding** retrieval, gated on **cosine** similarity (`hybrid_min_score` default
   **0.80**, `hybrid_margin_gap` default **0.05**) instead of the BM25 magnitude. *Provenance:* the hybrid

@@ -63,13 +63,17 @@ tokens.
 
 **Next time — an instant recall.** Once that entry is merged, the same incident — even under a
 *different, generic alert* — is answered straight from your knowledge base: **no investigation, no new
-PR**, just the known cause, the human-reviewed resolution, and the entry it came from. An order of
-magnitude cheaper (a single model call below, against a full ReAct loop), delivered in seconds. Once
-the entry has a track record, its resolve rate is shown alongside — and it weighs whether recall is
-trusted enough to fire at all.
+PR**, just the known cause, the human-reviewed resolution, and the entry it came from. Several times
+cheaper, delivered in seconds: as shipped a recall is **two** model calls — the LLM reranker that
+picks the entry, then the adversarial verify pass — against the **7 calls and ~15.6k tokens** the
+same incident's full investigation took on the recorded transcript
+([`examples/demo/harbor-chart-bump.transcript.json`](examples/demo/harbor-chart-bump.transcript.json)).
+The card below shows a *single* call because the offline `--catalog` demo turns the reranker off (it
+would need a model key); the shipped default pays both. Once the entry has a track record, its
+resolve rate is shown alongside — and it weighs whether recall is trusted enough to fire at all.
 
 <div align="center">
-<img src="assets/recall-notification.png" alt="RunLore Slack notification — an instant recall: an ⚡ Instant recall banner reading 'answered from your knowledge base, no investigation was run', the known cause, a citation of the knowledge-base entry harbor-core-migration-deadlock.md, and a single model call at 93% cached tokens" width="760" />
+<img src="assets/recall-notification.png" alt="RunLore Slack notification — an instant recall: an ⚡ Instant recall banner reading 'answered from your knowledge base, no investigation was run', the known cause, a citation of the knowledge-base entry harbor-core-migration-deadlock.md, and a cost footer showing this offline demo's single model call at 93% cached tokens" width="760" />
 </div>
 
 ## How it works
@@ -126,10 +130,10 @@ investigation), and its confidence is **weighted by its real-world track record*
 keeps resolving incidents gains trust, one that keeps failing decays toward re-investigation.
 Even then, the recalled finding goes through the same adversarial verify pass as a fresh one — and if
 that pass can't run (e.g. a model outage), recall fails closed and falls through to a full
-investigation rather than serving the answer unreviewed. That trade isn't free: the fallback is a
-full ReAct loop instead of one model call, and it lands exactly when the verify endpoint is already
-unhealthy — worth knowing ahead of an incident, not during one. The shipped eval suite includes a
-poisoned-entry scenario proving a bad entry is rejected at recall time.
+investigation rather than serving the answer unreviewed. That trade isn't free: you pay the
+reranker's call and the failed verify call and *then* a full ReAct loop, and it lands exactly when
+the verify endpoint is already unhealthy — worth knowing ahead of an incident, not during one. The
+shipped eval suite includes a poisoned-entry scenario proving a bad entry is rejected at recall time.
 
 → **[How the learning loop works](https://runlore.io/docs/concepts/learning-loop/)** · **[Reviewing & approving knowledge](https://runlore.io/docs/concepts/reviewing-knowledge/)**
 

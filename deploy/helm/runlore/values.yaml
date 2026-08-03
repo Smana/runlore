@@ -238,10 +238,16 @@ config:
   #     solo_floor: 4.0                # confident bar when there is only one hit
   #     require_workload_match: false  # true = exact namespace+workload; false = namespace-level agreement is enough
   #     # LLM reranker (ON by default when instant_recall is enabled): replaces the
-  #     # (solo_floor/margin_gap) with a CALIBRATED, corpus-independent match-confidence
-  #     # gate. One cheap call ranks the top-K structurally-agreeing candidates; fires only
-  #     # when the reranker's 0-1 confidence clears rerank_threshold. Routes to model.verify
-  #     # (cheaper/faster) when configured. Default off ⇒ the magnitude gate is unchanged.
+  #     # BM25-magnitude gate (solo_floor/margin_gap) with a CALIBRATED, corpus-independent
+  #     # match-confidence gate. One cheap call ranks the top-K structurally-agreeing
+  #     # candidates; fires only when the reranker's 0-1 confidence clears rerank_threshold.
+  #     # Routes to model.verify (cheaper/faster) when configured.
+  #     # COST: the call sits IN FRONT of the short-circuit, so it is paid whenever a
+  #     # structurally-agreeing candidate clears rerank_min_score — including the incidents
+  #     # that then fall through to a full investigation. At the default 0.1 (real enriched
+  #     # BM25 scores run ~0.1-1.2) that guard rarely trips, so budget one extra model call
+  #     # on nearly every investigation. Measure it: provider="rerank" on
+  #     # runlore_model_requests_total.
   #     # rerank: false                # DEFAULT is on; set false to fall back to the legacy BM25-magnitude gate
   #     rerank_threshold: 0.7          # calibrated match-confidence bar to short-circuit (probability; no per-corpus tuning)
   #     rerank_k: 5                    # candidates ranked in the one call (bounded for cost)
