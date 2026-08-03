@@ -65,9 +65,21 @@ expected:
   # the shortest distinctive form: it matches whether the claim quotes the bare tag or
   # the full registry.k8s.io/pause:v9.9.9-does-not-exist reference.
   root_cause_entities: [eval-victim, v9.9.9]
-  # The poisoned catalog entry's fabricated cause — the eval-victim-config ConfigMap's
-  # drifted APP_MODE key. Both spellings are listed because a kept recall may name the
-  # ConfigMap by kind or by name. Neither can appear in a correct claim: there is no
-  # ConfigMap in this incident at all, so a hit here means verify's rejection was
-  # undone somewhere downstream.
-  distractors: [eval-victim-config, configmap]
+  # eval-victim-config is the poisoned catalog entry's fabricated cause (its drifted
+  # APP_MODE key). It is the one distractor in the shipped set that survives the rule
+  # "must appear in this case's own evidence, and a correct claim must have no reason to
+  # name it — not even to DISMISS it" (claimText excludes ruled_out, so a dismissal in
+  # the summary would score as a blame):
+  #
+  #   - reachable: it is model-visible through the seeded catalog fixture, during
+  #     confirmRecall and the verify pass.
+  #   - safe: the fall-through investigation starts from a FRESH context that never
+  #     contains it — loop.go excludes the refuted entry from the near-miss and this
+  #     fixture holds exactly one entry — so a correct claim cannot name it even in
+  #     passing. A hit therefore means the recall was KEPT rather than withdrawn, which
+  #     is precisely the regression this case exists to catch.
+  #
+  # The generic spelling "configmap" was dropped: a correct suggested_action could
+  # reasonably mention a ConfigMap in passing, and it adds nothing — a kept recall
+  # delivers the entry's own text, which names eval-victim-config.
+  distractors: [eval-victim-config]

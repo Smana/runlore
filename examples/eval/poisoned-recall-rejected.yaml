@@ -55,14 +55,22 @@ expected:
   root_cause_entities:
   - eval-victim
   - v9.9.9
-  # configmap: the catalogued poisoned cause this scenario exists to reject (see
-  # ground_truth below) — a correct run never names a ConfigMap, because none is
-  # involved. "tracking label": workload_ownership reports "no GitOps tracking label on
-  # the top controller — owner unresolved", a real red herring in this evidence that
-  # has nothing to do with the pull failure.
-  distractors:
-  - configmap
-  - tracking label
+  # no valid distractor: this case cannot detect over-claiming.
+  #
+  # A distractor must be an entity that appears in this case's own evidence AND that a
+  # correct claim has no reason to name — not even to DISMISS, because claimText
+  # excludes ruled_out, so a dismissal written into the summary scores as a blame.
+  #
+  # "configmap" was listed here and is wrong twice over: this case ships no catalog_dir,
+  # so no poisoned entry is ever recalled, and the word appears nowhere in its evidence
+  # — it could only fire on a hallucination. (The ConfigMap belongs to the recall
+  # scenario in poisoned-recall-verify.yaml, which does seed the fixture; the
+  # ground_truth prose below describes the LIVE eval/scenarios variant of this case,
+  # not this replay one.) "tracking label" is worse: workload_ownership reports a real
+  # out-of-band drift with no GitOps tracking label, and that IS how the tag came to
+  # change — so the BETTER claim ("a manual edit set the tag and nothing reverted it,
+  # because there is no tracking label") would score as an over-claim.
+  distractors: []
 ground_truth:
   root_cause: The eval-victim Deployment image was changed to tag v9.9.9-does-not-exist, which cannot
     be pulled (ImagePullBackOff/ErrImagePull). This is the TRUE cause — NOT the catalogued "stale ConfigMap

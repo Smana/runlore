@@ -10,7 +10,10 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strings"
 	"testing"
+
+	"gopkg.in/yaml.v3"
 
 	"github.com/Smana/runlore/internal/providers"
 )
@@ -254,15 +257,32 @@ expected:
 	}
 }
 
-// TestShippedCasesScoreEntities guards the shipped gold set: entity scoring — recall
-// over root_cause_entities and the over-claim penalty over distractors — engages only
-// when root_cause_entities is non-empty (see Score), so a case that ships empty lists
-// is silently scored by keywords alone and the over-claim penalty never fires. It also
-// rejects a distractor that is a substring of one of the case's own entities, because
-// Score suppresses those as "explained by a correct claim" — such a distractor is dead
-// weight that looks like coverage.
+// noDistractorJustification is the marker a case must carry, as a YAML comment, to
+// ship an empty distractors list. A case that cannot detect over-claiming is an
+// acceptable outcome — a distractor a CORRECT claim might name is worse than none —
+// but it has to be on the record, so the gap reads as a decision and not an oversight.
+const noDistractorJustification = "no valid distractor:"
+
+// TestShippedCasesScoreEntities guards the shipped gold set on three counts.
+//
+// Entity scoring — recall over root_cause_entities and the over-claim penalty over
+// distractors — engages only when root_cause_entities is non-empty (see Score), so a
+// case that ships an empty list is silently scored by keywords alone.
+//
+// A distractor must be able to FIRE. Two ways it cannot: being a substring of one of
+// the case's own entities (Score suppresses those as "explained by a correct claim"),
+// or appearing nowhere in the evidence the model is actually shown — the prompt, the
+// recorded tool output, and any seeded catalog fixture. The second is the trap this
+// test was extended for: a distractor naming something the model never sees can only
+// fire on a hallucination, so it reads as over-claim coverage while providing none.
+//
+// It does NOT verify the other half of a good distractor — that a correct claim has no
+// reason to name it, not even to dismiss it, which claimText's exclusion of ruled_out
+// makes a real hazard. That half is a judgement call and lives in each case file's
+// comment.
 func TestShippedCasesScoreEntities(t *testing.T) {
-	cases, err := Load(filepath.Join("..", "..", "examples", "eval"))
+	dir := filepath.Join("..", "..", "examples", "eval")
+	cases, err := Load(dir)
 	if err != nil {
 		t.Fatalf("Load examples/eval: %v", err)
 	}
@@ -275,15 +295,79 @@ func TestShippedCasesScoreEntities(t *testing.T) {
 				t.Fatal("no root_cause_entities: entity scoring and the over-claim penalty never engage for this case")
 			}
 			if len(c.Expected.Distractors) == 0 {
-				t.Fatal("no distractors: this case cannot detect over-claiming")
+				if !strings.Contains(caseFileText(t, dir, c.Name), noDistractorJustification) {
+					t.Fatalf("empty distractors and no %q comment in the case file: this case cannot detect over-claiming, so state why", noDistractorJustification)
+				}
+				return
 			}
+			evidence := caseEvidence(t, dir, c)
 			for _, d := range c.Expected.Distractors {
 				if coveredByEntity(c.Expected.RootCauseEntities, d) {
 					t.Errorf("distractor %q is a substring of one of %v — Score suppresses it, so it can never fire", d, c.Expected.RootCauseEntities)
 				}
+				if !strings.Contains(evidence, strings.ToLower(d)) {
+					t.Errorf("distractor %q appears nowhere in this case's prompt, recorded tool output or catalog fixture — nothing can blame it but a hallucination, so it looks like over-claim coverage without being any", d)
+				}
 			}
 		})
 	}
+}
+
+// caseEvidence is everything this case puts in front of the model, lower-cased: the
+// seed prompt, every recorded tool output, and — when the case seeds a catalog fixture
+// — the entries in it, which instant recall and the verify pass do show the model.
+func caseEvidence(t *testing.T, dir string, c Case) string {
+	t.Helper()
+	var b strings.Builder
+	b.WriteString(c.Prompt)
+	for _, out := range c.Tools {
+		b.WriteString(" " + out)
+	}
+	if c.CatalogDir != "" {
+		entries, err := filepath.Glob(filepath.Join(dir, c.CatalogDir, "*"))
+		if err != nil {
+			t.Fatalf("glob catalog_dir %q: %v", c.CatalogDir, err)
+		}
+		if len(entries) == 0 {
+			t.Fatalf("catalog_dir %q holds no entries", c.CatalogDir)
+		}
+		for _, p := range entries {
+			data, err := os.ReadFile(p) //nolint:gosec // G304: path comes from the repo's own cases dir
+			if err != nil {
+				t.Fatalf("read catalog entry %s: %v", p, err)
+			}
+			b.Write(append([]byte(" "), data...))
+		}
+	}
+	return strings.ToLower(b.String())
+}
+
+// caseFileText returns the RAW YAML the named case was loaded from. The guard needs it
+// because the justification for an empty distractors list is a comment, which the
+// parser strips before it ever reaches a Case.
+func caseFileText(t *testing.T, dir, name string) string {
+	t.Helper()
+	paths, err := filepath.Glob(filepath.Join(dir, "*.y*ml"))
+	if err != nil {
+		t.Fatalf("glob %s: %v", dir, err)
+	}
+	for _, p := range paths {
+		data, err := os.ReadFile(p) //nolint:gosec // G304: path comes from the repo's own cases dir
+		if err != nil {
+			t.Fatalf("read %s: %v", p, err)
+		}
+		var head struct {
+			Name string `yaml:"name"`
+		}
+		if err := yaml.Unmarshal(data, &head); err != nil {
+			t.Fatalf("parse %s: %v", p, err)
+		}
+		if head.Name == name || strings.TrimSuffix(filepath.Base(p), filepath.Ext(p)) == name {
+			return string(data)
+		}
+	}
+	t.Fatalf("no case file in %s declares name %q", dir, name)
+	return ""
 }
 
 // rateModel passes (names harbor-db) on its first passN Complete-pairs, then fails.

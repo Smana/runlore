@@ -20,18 +20,34 @@ tools:
     (no dropped flows)
 expected:
   # The agent should tie the failure to the chart bump's DB migration on harbor-db.
-  # All three keywords appear VERBATIM in the evidence above, so they only mean
-  # something because scoring matches the CLAIM (title + hypothesis summary/action),
-  # never the recorded tool output — see Score in internal/eval/score.go. They are all
-  # words a correct claim uses: "the harbor chart bump to 1.15 started a DB schema
-  # migration that harbor-db is still holding a lock on".
-  must_contain: [chart, migration, harbor-db]
+  # Scored over the CLAIM (title + each hypothesis's summary and suggested action),
+  # never the recorded tool output — see Score in internal/eval/score.go.
+  #
+  # must_contain and root_cause_entities are the SAME match (same haystack, same
+  # case-insensitive substring rule), so listing a term in both just requires it twice.
+  # The split below is editorial: "migration" is the mechanism, harbor-db is the entity
+  # blamed for it.
+  #
+  # "chart" is deliberately NOT required. It names the change VEHICLE, not the cause,
+  # and models routinely cite the bump as evidence rather than in the claim — the
+  # recorded answer in examples/demo/harbor-chart-bump.transcript.json, which the README
+  # showcases as a successful investigation, puts "Chart bump to 1.15.0 enabled DB
+  # schema migrations" in evidence[] and would fail this gate. "migration" + harbor-db
+  # pin the cause, and that answer names both in its claim.
+  must_contain: [migration]
   min_confidence: 0.5
   # harbor-db is what the migration actually stalls. harbor-core is deliberately NOT
   # required: it is the symptom (503s / failing probes), not the cause.
   root_cause_entities: [harbor-db]
-  # The network is this case's planted negative control: network_drops reports "(no
-  # dropped flows)", yet "connect: connection refused" invites a connectivity verdict
-  # anyway. Blaming it is the shallow wrong answer the evidence already excludes, and a
-  # correct claim (migration lock) has no reason to name it.
-  distractors: [network]
+  # no valid distractor: this case cannot detect over-claiming.
+  #
+  # A distractor must be an entity that appears in this case's own evidence AND that a
+  # correct claim has no reason to name — not even to DISMISS, because claimText
+  # excludes ruled_out, so a dismissal written into the summary scores as a blame.
+  # Every entity here fails that test: harbor-core is the cascade victim a correct claim
+  # names as the symptom; 1.14.2/1.15.0 and values.yaml are the change a correct claim
+  # cites; and "network" is actively invited by the network_drops tool plus "connect:
+  # connection refused", so a correct claim reasonably writes "…a symptom, not a network
+  # fault (no dropped flows)" — which would score as an over-claim. Admitting the gap
+  # beats shipping a distractor that fails right answers.
+  distractors: []

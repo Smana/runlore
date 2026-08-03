@@ -163,19 +163,23 @@ expected:
   - kustomization
   - path
   min_confidence: 0.5
-  # The claim must blame the Kustomization and the path it points at. "does/not/exist"
-  # is the tail of ./this/path/does/not/exist, so it matches whether the claim quotes
-  # spec.path or the full /tmp/kustomization-<n>/... build path from the events.
+  # The claim must blame the Kustomization by name. The bad path itself is already
+  # covered by must_contain: path — requiring the verbatim "does/not/exist" would score
+  # QUOTING STYLE rather than correctness, failing an equally correct claim that says
+  # "points at a directory that is missing from the artifact".
   root_cause_entities:
   - eval-victim-broken
-  - does/not/exist
-  # monorepo-split: the ArtifactGenerator sitting at Ready=unknown in gitops_tree — the
-  # classic wrong blame here is the source rather than the bad path, and the source is
-  # in fact healthy. llm-platform: the newest thing in what_changed (a whole new,
-  # SUSPENDED Flux Kustomization added in the same sync) — the "blame the last change"
-  # trap. A correct claim about eval-victim-broken's path names neither.
+  # llm-platform: the newest thing in what_changed — a whole new Flux Kustomization
+  # added in the same sync, and SUSPENDED, so it changed nothing in the cluster. It is
+  # the "blame the last change" trap, and nothing in the evidence invites a correct
+  # claim to mention it, not even to rule it out.
+  #
+  # monorepo-split (the ArtifactGenerator at Ready=unknown) was considered and REJECTED
+  # as a distractor: the missing path is missing *from that artifact*, so a correct
+  # claim may legitimately name the generator or the ExternalArtifact for context, or
+  # note that the source is healthy. claimText excludes ruled_out, so either phrasing
+  # would score as an over-claim on a right answer.
   distractors:
-  - monorepo-split
   - llm-platform
 ground_truth:
   root_cause: Kustomization/eval-victim-broken references spec.path ./this/path/does/not/exist, which
