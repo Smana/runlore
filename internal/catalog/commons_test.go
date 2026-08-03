@@ -55,13 +55,31 @@ func TestCommonsRootIsIndexedAlongsideTheUsersOwn(t *testing.T) {
 
 // TestUsersOwnEntryWinsATie is the important one: your platform's recorded truth
 // outranks generic advice whenever the two score equally.
+//
+// THE FILENAMES ARE LOAD-BEARING. bleve breaks equal-score ties by document ID, and
+// the document ID is Entry.Path. This test's original fixture used "a.md" (own) and
+// "b.md" (commons, indexed as "commons/b.md") — so bleve ALREADY returned the
+// operator's entry first and SearchScored's provenance sort was a no-op. Deleting the
+// tie-break entirely left the test green. It was a guard over nothing.
+//
+// So the commons entry is deliberately named to sort BEFORE the operator's, making
+// bleve hand back the WRONG order and leaving the provenance sort as the only thing
+// that can fix it. The invariant is asserted below rather than left to a comment,
+// because a rename would otherwise silently return this test to vacuity.
 func TestUsersOwnEntryWinsATie(t *testing.T) {
 	own, commons := t.TempDir(), t.TempDir()
 	// Byte-identical bodies and titles => identical BM25 scores. The ONLY thing
 	// that can order them is provenance.
 	const same = "readiness probe failing after a deploy"
-	writeOKF(t, own, "a.md", same, same)
-	writeOKF(t, commons, "b.md", same, same)
+	const ownName, commonsName = "z-our-incident.md", "a-generic-playbook.md"
+	if commonsPathPrefix+commonsName >= ownName {
+		t.Fatalf("fixture is no longer adversarial: bleve breaks equal-score ties by doc ID, "+
+			"so the commons doc ID (%q) must sort BEFORE the operator's (%q) — otherwise "+
+			"bleve's own order already satisfies the assertion and this test passes with "+
+			"the provenance tie-break deleted", commonsPathPrefix+commonsName, ownName)
+	}
+	writeOKF(t, own, ownName, same, same)
+	writeOKF(t, commons, commonsName, same, same)
 
 	c := NewEmpty()
 	c.SetCommonsDir(commons)
@@ -75,9 +93,12 @@ func TestUsersOwnEntryWinsATie(t *testing.T) {
 	if len(hits) < 2 {
 		t.Fatalf("want both entries, got %d", len(hits))
 	}
+	// Not a Skip. Identical corpus text must produce identical BM25 scores; if it
+	// stops doing so the premise of this test is gone, and skipping would retire the
+	// tie-break guard in silence rather than telling anyone.
 	if hits[0].Score != hits[1].Score {
-		t.Skipf("bleve did not score them identically (%v vs %v) — tie-break untested here",
-			hits[0].Score, hits[1].Score)
+		t.Fatalf("byte-identical entries scored differently (%v vs %v) — the tie-break can no "+
+			"longer be exercised by this fixture; re-derive it", hits[0].Score, hits[1].Score)
 	}
 	if hits[0].Entry.Commons {
 		t.Error("at equal score the user's OWN entry must rank first; a shipped generic " +

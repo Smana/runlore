@@ -69,6 +69,47 @@ still gets gathered; the playbook just makes gathering it faster.
 To get instant recall you need entries scoped to your workloads (`resource:
 <namespace>/<name>`). Those are the ones RunLore drafts for you from your own incidents.
 
+## A floor that fades as you learn
+
+`kb_search` is where commons entries do their work, and their share of it shrinks as your own
+catalog fills. That is deliberate — but it has to be said out loud, because nothing warns you
+when a playbook that used to surface stops surfacing.
+
+Two mechanisms tilt retrieval towards your own entries. Neither does anything on day one, when
+there is nothing of yours to tilt towards; both grow stronger as you curate.
+
+**Every `kb_search` query is enriched with the incident's workload.** Whatever the model types,
+RunLore appends the failing workload's namespace and normalized name — plus the alert name —
+server-side, before the query reaches the index. The reason is retrieval quality: a
+label-derived alert's text is one or two generic tokens, and the object that identifies the
+incident lives only in the labels. That is the same vocabulary mismatch
+[instant recall]({{< relref "learning-loop.md" >}}) already solves, fixed here the same way.
+
+The effect on ranking is structural. `payments` and `checkout-api` are tokens only *your*
+entries can contain; a commons entry names a failure class, carries no `resource`, and knows
+nothing about your clusters. So enrichment can lift your entry's score and can never lift a
+commons entry's. (The alert name is the exception — a commons entry may well list
+`KubePodCrashLooping` in its tags, so that one term lifts both.)
+
+**Your entry wins ties**, as above. Ties are much rarer than the gap enrichment opens, but they
+resolve in the same direction.
+
+So: with an empty catalog the commons `CrashLoopBackOff` playbook is the only hit for a
+crash-looping pod, and it ranks first. Once you have curated an incident for
+`payments/checkout-api`, an alert on that workload puts *your* entry first — even when the two
+describe the same failure in nearly the same words, and even when the commons entry scores
+higher on the symptom text alone (BM25 normalizes for document length, and your entry carries a
+`resource` line the commons entry may not).
+
+Reclaiming that slot is the point rather than a side effect. Both entries describe the same
+failure class; only one was written from an incident on this platform, with your namespaces,
+your registry, and a cause somebody confirmed. When both exist, that is the one to read first.
+
+The consequence to plan for: a commons entry can fall out of the top hits for a failure class
+you have already learned, and there is no knob to stop it — enrichment is unconditional and the
+tie-break is not configurable. If losing it costs you something real, the signal is that your
+own entry for that class is wrong or too narrow. Fix the entry.
+
 ## Scope discipline
 
 Every commons entry ends with a `# Not covered` section naming the adjacent failure classes
