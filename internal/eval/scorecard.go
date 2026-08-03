@@ -279,8 +279,10 @@ func ScorecardMarkdown(rep Report, history []HistoryEntry, inUSD, cachedUSD, out
 // costSection renders the cost-per-investigation comparison: what a full
 // investigation costs against what an instant recall costs, on this run's model at
 // this run's prices. It is the single most concrete claim the learning loop makes —
-// recall is roughly an order of magnitude cheaper — and publishing it turns an
-// assertion into a measurement.
+// that recall is substantially cheaper than investigating afresh — and publishing it
+// turns an assertion into a measurement. Deliberately no ratio in this comment: the
+// point of the table is that the run supplies the number, so asserting one here would
+// be exactly the guess this section exists to replace.
 //
 // Returns "" when prices are unset or the report carries no per-case token data;
 // a fabricated or zeroed cost would be worse than no cost at all.
