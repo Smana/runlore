@@ -236,6 +236,18 @@ config:
     commons:
       url: https://github.com/Smana/runlore-kb-commons
       branch: main
+      # ref: v1.2.0                     # PIN the corpus — comment out `branch` above to use it
+      #
+      # branch and ref are mutually exclusive (the agent refuses to start with both).
+      #   branch: upstream edits reach kb_search at the next interval — you get shared
+      #           fixes without doing anything, from a repo you do not control.
+      #   ref:    a tag or a full 40-character commit id. The corpus is frozen until
+      #           you bump it, so you can read the upstream diff before it grounds an
+      #           investigation. Polling a pin costs nothing (nothing can move), and
+      #           you stop receiving upstream corrections until you move it yourself.
+      # Neither is the safe choice in the abstract — pick the one that matches how
+      # much you want to review. What pinning does NOT change: commons entries are
+      # read-only, never curated into, and can never fire instant recall.
       interval: 24h                     # a shared corpus changes slowly; do not poll it like your own
       dir: /var/lib/runlore/commons
       # token_env: COMMONS_TOKEN        # only for a PRIVATE commons repo

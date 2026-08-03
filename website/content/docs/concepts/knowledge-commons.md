@@ -93,3 +93,36 @@ means an upstream sync cannot dirty the volume holding your outcome ledger and a
 `commons.dir` must differ from `catalog.dir`. Both the agent's config validation and the
 Helm chart refuse to start with a shared root, because one directory serving both corpora
 would let an upstream sync overwrite the entries you curate.
+
+### Tracking a branch, or pinning a revision
+
+`commons.branch` tracks a moving branch: an upstream edit reaches `kb_search` at the next
+interval. Shared corrections arrive without you doing anything — which is the point of a
+commons, and also means the corpus moves without you looking.
+
+`commons.ref` is the other side of that trade. Pin a tag or a full 40-character commit id
+and the corpus is frozen until you move it, so you can read the upstream diff before it
+grounds an investigation:
+
+```yaml
+catalog:
+  commons:
+    url: https://github.com/Smana/runlore-kb-commons
+    ref: v1.2.0                      # a tag name, or a full commit id
+    dir: /var/lib/runlore/commons
+```
+
+`branch` and `ref` are mutually exclusive — setting both fails at startup rather than
+quietly picking one. A pinned revision cannot move, so the periodic sync becomes a local
+no-op rather than a fetch, and the index is rebuilt only on startup or when you move the
+pin. Your own `catalog.git` repo is deliberately not pinnable: the curator opens PRs
+against it, and freezing it would leave "merged" and "in use" permanently apart.
+
+Be precise about what pinning buys, because an unpinned commons is not a hazard you are
+patching. The properties that keep a shared corpus in its place hold either way: its
+entries are read-only, the curator never writes to them, yours win ties, and none of them
+can fire instant recall. What an upstream edit can still influence is what `kb_search`
+puts in front of the model mid-investigation — evidence is still gathered, the verdict is
+still reached against your cluster, but the prompt was shaped by someone else's most
+recent commit. Pinning narrows that to changes you have read. It cannot judge them for
+you: a pin you bump without reading the diff buys exactly nothing.
