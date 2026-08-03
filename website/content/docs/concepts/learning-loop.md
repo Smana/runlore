@@ -444,9 +444,9 @@ ledger, so they stay source-neutral):
   KB PR so the reviewer sees the contest before merging; idempotent via a hidden
   per-trigger marker in the comment, no mutable store.
 
-Finally, an **opt-in** pass closes the *garbage-collection* half of the loop — the
-mirror image of curation, where decay existed but had no consequence beyond recall
-rejection:
+Finally, two **opt-in** passes act on an entry's own track record rather than on the
+PR backlog — the *garbage-collection* half of the loop, where decay existed but had no
+consequence beyond recall rejection, and its mirror image:
 
 - **Retirement** (`curate.retirement.enabled`, default **off**) — opens a
   human-reviewed *retire* PR for a **merged** catalog entry whose outcome factor stayed
@@ -470,6 +470,53 @@ rejection:
     keep surfacing it (status-visible) for KB archaeology. A merged retirement PR is
     therefore effective end-to-end. Fail-safe: an absent or unknown status is treated as
     active (OKF §9 tolerance), so pre-retirement catalogs behave exactly as before.
+- **Revalidation** (`curate.revalidation.enabled`, default **off**) — the mirror
+  image: it opens a human-reviewed *revalidate* PR for a **merged** entry that was
+  recalled for a live incident which then **resolved**, proposing to stamp
+  `last_validated` with that resolve date. This is the seam that lets the field be
+  *earned*: before it, freshness could only decay (§6). One resolved recall is the
+  whole evidence bar — deliberately, because it is a far denser chain of checks than
+  retirement's evidence: the entry won recall's gates, was confirmed against **live
+  cluster state**, survived the adversarial **verify** pass, was delivered as the
+  answer, and the incident then cleared. Retirement needs `min_observations` to tell
+  a bad recall from noise; a confirmation does not. The PR makes a **one-line
+  frontmatter edit** and nothing else — no status change, no content change — and,
+  as with retirement, a human merges: `last_validated` claims *human* confirmation,
+  and merging **is** that act, so RunLore can bring the evidence but must never
+  write the field itself. Anti-spam is two-layered: a candidate date must be at
+  least `min_interval` (default **720h**) newer than what the entry already records,
+  checked against the file on the base branch so a merged stamp silences the next
+  sweep with no state to keep; and `max_open` (default **5**) bounds how many
+  revalidation PRs may await review at once, counting ones earlier sweeps left open
+  — so enabling the pass on a mature catalog drains a queue instead of flooding one.
+  Idempotent and **human-veto-aware** through the same hidden per-entry marker, and
+  the marker is keyed on the entry *path*, never the date, precisely so a decline
+  stays declined rather than returning monthly. That veto is also why **no other
+  pass may close a retire or revalidate PR**: these passes keep no store, so a
+  closed-unmerged proposal *is* the record of a human declining, and RunLore closing
+  its own proposal — as a stale artifact, or as a title-similar "duplicate" — would
+  be indistinguishable from that. Both the stale sweep and dedup skip them; the
+  queue bound above is what keeps an unreviewed backlog finite instead.
+  - **Retirement wins where they meet.** Both passes read the same aggregate and
+    the same `outcome.Aggregate.Factor`, and within one sweep they are **disjoint by
+    construction**: retirement fires strictly *below* the trust floor, revalidation
+    only *at or above* it. So one sweep can never propose retiring and revalidating
+    the same entry, and an entry recall already refuses to fire is never stamped
+    "still valid", whatever a stale resolve in its history says.
+
+    That construction is arithmetic, not a rule either pass applies, so it holds
+    only while both read the **same** floor and prior. `curate.revalidation.floor`
+    and `curate.revalidation.prior` therefore *inherit* `curate.retirement`'s when
+    left unset, and setting them to different values while both passes are enabled
+    is rejected at config load — unequal floors would otherwise leave a band where
+    both passes fire on one entry.
+
+    **Across sweeps the guarantee is weaker, by design.** An entry whose factor
+    recovers after a retire PR was already opened can pick up a revalidate PR while
+    that retire PR is still open. Nothing suppresses it, because both proposals are
+    then honest: the track record really did decay, and it really has recovered. A
+    reviewer holding both decides which one the entry deserves — merging the retire
+    PR makes the revalidation moot, since a retired entry is refused outright.
 
 ---
 
@@ -492,13 +539,33 @@ confidence  =  clamp( base_confidence × factor , 0 , 0.90 )
 
 Human 👍/👎 votes are **extra Bernoulli observations in the same posterior** — a 👍 is
 one success, a 👎 one failure, each weighing exactly like a resolved/unresolved recall.
-That matters most where the resolve signal *cannot exist*: sources with no resolve
-channel (**GitOps failures**, reinvestigate polls, Alertmanager without `send_resolved`)
-are deliberately excluded from resolve-based decay, so without feedback their entries'
-trust is frozen at the prior forever. A human's explicit 👎 (a Slack click or a Matrix
-reaction) is the only ground truth those paths can ever accumulate — and it is a
-judgment on the *diagnosis itself*, which an
-alert merely clearing never proves.
+That matters most where the resolve signal *cannot exist*.
+
+**What is excluded from resolve-based decay is decided by the fingerprint, and by
+nothing else.** RunLore mints a synthetic id for an incident that carries no external
+alert fingerprint, and exactly those two shapes are excluded: **GitOps failures**
+(`gitops:…`) and **re-investigate polls** (`reinvestigate:…`). Such a recall is still
+recorded for recurrence, but it never enters the `OpenCounts` roll-up — so Gate 3 never
+computes a factor for it at all and falls through to its fail-safe (*absence of evidence
+must never block a recall*), which is **1.0**: full trust, **not** the 0.5 prior mean.
+An entry recalled only from those sources therefore keeps firing at full confidence
+however wrong it has become, and retirement never surfaces it either, because an entry
+the roll-up has never seen is not a candidate. A human's explicit 👎 (a Slack click or a
+Matrix reaction) is the only ground truth those paths can ever accumulate — and it is a
+judgment on the *diagnosis itself*, which an alert merely clearing never proves.
+
+**An Alertmanager alert is never in that excluded set** — not even when its receiver has
+`send_resolved` off. Resolvability is read off the fingerprint alone
+(`resolvable := !outcome.Derived(fp)`), never off `send_resolved`, which lives in the
+operator's receiver config: RunLore never reads it, and has no startup or per-event
+signal it could condition on. A real alert fingerprint is always recorded resolvable, so
+when the resolve never comes the failure runs the **opposite** way from the synthetic
+case. Every recall increments `recalls` while `resolved` stays 0, and the factor drops
+at once: **one** unresolved recall already lands the entry at **0.333**, below the
+shipped `outcome_floor` of **0.5**, and Gate 3 stops firing it. A rejected recall
+records nothing further, so it stays there — and retirement does not rescue it either,
+because the observation count freezes at 1, below `min_observations`. Neither failure
+mode is self-correcting; a 👍/👎 channel is the one thing that closes both.
 
 ```mermaid
 stateDiagram-v2
@@ -536,8 +603,17 @@ pre-field behaviour byte-for-byte):
   and the adversarial **verify** pass remain the hard gates against a genuinely drifted
   answer, and the outcome floor (Gate 3) keeps priority (track record beats calendar).
   Staleness only stops a five-year-old runbook looking as confident as yesterday's. A
-  dateless or unparseable-date entry is exempt. `last_validated` is stamped at entry
-  creation (= `timestamp`) and is the seam a future confirmation flow refreshes.
+  dateless or unparseable-date entry is exempt.
+
+  **`last_validated` is unset when RunLore drafts an entry** — the field claims a
+  *human* confirmed the entry works, and a fresh draft has none, so the drafter has
+  no honest value to write (`renderEntry`, `internal/forge/github`). Freshness
+  therefore falls back to `timestamp` until the field is **earned**, which is what
+  the opt-in **revalidation pass** (§5) is for: when a recall of the entry is
+  followed by the incident actually resolving, it opens a PR proposing that resolve
+  date, and **a human merging that PR is the confirmation the field claims**. Until
+  then an entry can only get older; with the pass enabled, a note that keeps working
+  keeps its freshness.
 
 A `low_outcome` rejection does not abandon recall outright: the gate walks a small,
 bounded set of further structurally-agreeing candidates (the runner-up fallback) —

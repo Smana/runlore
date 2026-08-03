@@ -109,8 +109,8 @@ func buildGuardedForge(cfg *config.Config, tok ForgeToken, dryRun bool, aud audi
 
 // BuildCurateAgent assembles the grooming passes over a (typically Guard-wrapped)
 // forge. ledger may be nil — the ledger-backed passes (Queue, Recurrence,
-// Contested, Retirement) are then skipped. Shared by the one-shot `lore curate`
-// CLI and the in-server sweeper so the two can never drift.
+// Contested, Retirement, Revalidation) are then skipped. Shared by the one-shot
+// `lore curate` CLI and the in-server sweeper so the two can never drift.
 //
 // StaleAfter is honoured as-is: 0/unset disables the lifecycle sweep (Lifecycle.Run
 // returns early). The Helm chart ships config.curate.stale_after: 720h, so scheduled
@@ -159,6 +159,24 @@ func BuildCurateAgent(cfg *config.Config, forge curate.GuardedForge, ledger *out
 			Floor:           cfg.Curate.Retirement.Floor,
 			Prior:           cfg.Curate.Retirement.Prior,
 			Log:             log,
+		})
+	}
+	// Revalidation (opt-in) is retirement's mirror image: it proposes CONFIRMING a
+	// merged entry that was recalled for a live incident which then resolved, by
+	// stamping `last_validated` — the field the forge deliberately leaves unset at
+	// draft time because it claims human confirmation. Merging the PR is that
+	// confirmation; RunLore only brings the evidence. Sharing the retirement floor
+	// keeps the two disjoint (below the floor is retirement's, at or above it is
+	// this pass's), so one sweep can never propose both for the same entry.
+	if cfg.Curate.Revalidation.Enabled {
+		agent.Passes = append(agent.Passes, curate.Revalidation{
+			Forge:       forge,
+			Stats:       ledger,
+			MinInterval: cfg.Curate.Revalidation.MinInterval.Std(),
+			MaxOpen:     cfg.Curate.Revalidation.MaxOpen,
+			Floor:       cfg.Curate.Revalidation.Floor,
+			Prior:       cfg.Curate.Revalidation.Prior,
+			Log:         log,
 		})
 	}
 	return agent

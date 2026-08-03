@@ -235,6 +235,39 @@ func ApplyDefaults(c *Config) {
 			r.Prior = 2.0
 		}
 	}
+	// Revalidation pass defaults (opt-in), filled on the same terms as retirement's.
+	// MinInterval caps one entry to one confirmation PR a month; MaxOpen caps the
+	// whole review queue.
+	//
+	// Floor/Prior INHERIT retirement's (already defaulted just above) rather than
+	// restating the constants, because the disjointness the two passes claim is
+	// arithmetic, not editorial: retirement fires strictly below the floor and
+	// revalidation at or above it, which partitions entries only while both read the
+	// SAME number. Deriving one from the other means an operator who tunes
+	// retirement gets a still-coherent pair by default instead of a silent overlap
+	// band. Retirement's own default backstops the case where it is disabled or
+	// unset, so an unconfigured revalidation still lands on the recall gate's 0.5/2.0.
+	if c.Curate.Revalidation.Enabled {
+		r := &c.Curate.Revalidation
+		if r.MinInterval == 0 {
+			r.MinInterval = Duration(720 * time.Hour)
+		}
+		if r.MaxOpen == 0 {
+			r.MaxOpen = 5
+		}
+		if r.Floor == 0 {
+			r.Floor = c.Curate.Retirement.Floor
+		}
+		if r.Floor == 0 {
+			r.Floor = 0.5
+		}
+		if r.Prior == 0 {
+			r.Prior = c.Curate.Retirement.Prior
+		}
+		if r.Prior == 0 {
+			r.Prior = 2.0
+		}
+	}
 	// In-server sweep interval: always filled (harmless when mode: off) so callers
 	// never see a zero interval.
 	if c.Curate.Sweeps.Interval == 0 {

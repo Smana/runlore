@@ -59,7 +59,7 @@ func (m mapStats) OpenCounts() (map[string]outcome.Aggregate, error) { return m,
 // *github.Client must satisfy the consumer-side RetireForge interface.
 var _ RetireForge = (*github.Client)(nil)
 
-func newRetirement(forge RetireForge, stats RetireStats) Retirement {
+func newRetirement(forge RetireForge, stats EntryStats) Retirement {
 	return Retirement{
 		Forge:           forge,
 		Stats:           stats,

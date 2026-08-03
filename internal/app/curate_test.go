@@ -18,13 +18,15 @@ import (
 	"github.com/Smana/runlore/internal/outcome"
 )
 
-// The retirement pass is wired in RunCurate with *github.Client as its forge and
-// *outcome.Ledger as its stats source; pin both seams at compile time so a drift in
-// either interface fails here rather than in the wiring block.
+// The retirement and revalidation passes are wired in RunCurate with
+// *github.Client as their forge and *outcome.Ledger as their stats source; pin
+// every seam at compile time so a drift in any of them fails here rather than in
+// the wiring block.
 var (
-	_ curate.RetireForge  = (*github.Client)(nil)
-	_ curate.RetireStats  = (*outcome.Ledger)(nil)
-	_ curate.GuardedForge = (*github.Client)(nil)
+	_ curate.RetireForge     = (*github.Client)(nil)
+	_ curate.RevalidateForge = (*github.Client)(nil)
+	_ curate.EntryStats      = (*outcome.Ledger)(nil)
+	_ curate.GuardedForge    = (*github.Client)(nil)
 )
 
 // captureLog returns a logger writing JSON records into buf so a test can assert
@@ -115,6 +117,38 @@ func TestBuildCurateAgentPassComposition(t *testing.T) {
 	agent = BuildCurateAgent(cfg, forge, ledger, discardLog())
 	if len(agent.Passes) != 7 {
 		t.Fatalf("full agent: want 7 passes (suppress dedup lifecycle queue recurrence contested retirement), got %d", len(agent.Passes))
+	}
+}
+
+// TestBuildCurateAgentWiresRevalidation pins the opt-in wiring of the
+// revalidation pass, including that its knobs come from config rather than from
+// the pass's zero value (a MaxOpen of 0 would silently propose nothing).
+func TestBuildCurateAgentWiresRevalidation(t *testing.T) {
+	forge := github.New("https://forge.invalid", "o", "r", "main", nil)
+	ledger, err := outcome.New(filepath.Join(t.TempDir(), "ledger.jsonl"))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Default (disabled): the ledger-backed set stops at Contested.
+	cfg := &config.Config{}
+	if n := len(BuildCurateAgent(cfg, forge, ledger, discardLog()).Passes); n != 6 {
+		t.Fatalf("revalidation must be opt-in: want 6 passes, got %d", n)
+	}
+
+	cfg.Curate.Revalidation = config.Revalidation{
+		Enabled: true, MinInterval: config.Duration(168 * time.Hour), MaxOpen: 3, Floor: 0.5, Prior: 2.0,
+	}
+	passes := BuildCurateAgent(cfg, forge, ledger, discardLog()).Passes
+	if len(passes) != 7 {
+		t.Fatalf("want 7 passes with revalidation enabled, got %d", len(passes))
+	}
+	p, ok := passes[6].(curate.Revalidation)
+	if !ok {
+		t.Fatalf("last pass = %T, want curate.Revalidation", passes[6])
+	}
+	if p.MinInterval != 168*time.Hour || p.MaxOpen != 3 || p.Floor != 0.5 || p.Prior != 2.0 {
+		t.Fatalf("revalidation knobs not wired from config: %+v", p)
 	}
 }
 

@@ -6,6 +6,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"slices"
 	"sort"
 	"strings"
 
@@ -32,6 +33,15 @@ func (d Dedup) Run(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("list PRs: %w", err)
 	}
+	// Retire/revalidate proposals are not dedup candidates, as canonical or as
+	// duplicate. Dedup collapses duplicate DRAFTS of one entry; those are proposals
+	// about DISTINCT entries that already exist. They carry no DupFingerprint, so
+	// they would fall through to the title-Jaccard fallback — which on "KB
+	// revalidate: <path>" titles measures path similarity rather than subject
+	// similarity, and scores two unrelated entries filed under one directory well
+	// above the threshold. Closing one is also unrecoverable: the pass that opened
+	// it reads its own closed proposal back as a human veto (see entryEditLabels).
+	prs = slices.DeleteFunc(prs, func(pr providers.CuratedIssue) bool { return isEntryEditProposal(pr.Labels) })
 	sort.Slice(prs, func(i, j int) bool { return prs[i].Number < prs[j].Number })
 	canonicalOf := map[int]int{} // dup PR number -> canonical PR number
 	for i := range prs {
