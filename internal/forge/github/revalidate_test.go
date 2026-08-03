@@ -264,6 +264,40 @@ func TestOpenRevalidatePR(t *testing.T) {
 		}
 	})
 
+	// The label is the only index a revalidate PR has: the pass finds its own open
+	// proposals, its human vetoes and its queue depth by listing on it. An
+	// unlabelled PR is invisible, so the next sweep would open another for the same
+	// entry — every sweep, without bound. That must fail loudly, naming the PR a
+	// human now has to deal with.
+	t.Run("a labelling failure is an error naming the orphaned PR", func(t *testing.T) {
+		mux := http.NewServeMux()
+		mux.HandleFunc("GET /repos/o/r/contents/{path...}", func(w http.ResponseWriter, _ *http.Request) {
+			_ = json.NewEncoder(w).Encode(map[string]any{"content": wrapBase64([]byte(entry)), "sha": "s"})
+		})
+		mux.HandleFunc("GET /repos/o/r/git/ref/heads/main", func(w http.ResponseWriter, _ *http.Request) {
+			_, _ = w.Write([]byte(`{"object":{"sha":"basesha"}}`))
+		})
+		mux.HandleFunc("POST /repos/o/r/git/refs", func(w http.ResponseWriter, _ *http.Request) { _, _ = w.Write([]byte(`{}`)) })
+		mux.HandleFunc("PUT /repos/o/r/contents/{path...}", func(w http.ResponseWriter, _ *http.Request) { _, _ = w.Write([]byte(`{}`)) })
+		mux.HandleFunc("POST /repos/o/r/pulls", func(w http.ResponseWriter, _ *http.Request) {
+			_, _ = w.Write([]byte(`{"html_url":"https://github.com/o/r/pull/42","number":42}`))
+		})
+		mux.HandleFunc("POST /repos/o/r/issues/42/labels", func(w http.ResponseWriter, _ *http.Request) {
+			w.WriteHeader(http.StatusForbidden)
+		})
+		srv := httptest.NewServer(mux)
+		defer srv.Close()
+
+		c := New(srv.URL, "o", "r", "main", staticToken("tok"))
+		_, err := c.OpenRevalidatePR(context.Background(), "incidents/t.md", at, minGap, "body")
+		if err == nil {
+			t.Fatal("an unlabelled proposal is invisible to the pass; that must not pass silently")
+		}
+		if !strings.Contains(err.Error(), "https://github.com/o/r/pull/42") {
+			t.Errorf("the error must name the PR a human has to label or close, got %q", err)
+		}
+	})
+
 	t.Run("404 on the entry file errors with no further calls", func(t *testing.T) {
 		var calls []string
 		mux := http.NewServeMux()

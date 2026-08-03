@@ -4,12 +4,14 @@ package curate
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"strings"
 	"time"
 
 	"github.com/Smana/runlore/internal/audit"
+	"github.com/Smana/runlore/internal/forge/github"
 	"github.com/Smana/runlore/internal/providers"
 )
 
@@ -108,11 +110,16 @@ func (g Guard) OpenRetirePR(ctx context.Context, entryPath, body string) (provid
 
 // OpenRevalidatePR opens a revalidate PR for a still-working entry (audited;
 // skipped in dry-run). The audited reason is the date under proposal — the one
-// fact a reviewer of the audit chain needs. Note that a dry-run reports every
-// CANDIDATE: the "already fresh enough" check lives behind the forge call
-// (ErrRecentlyValidated), which dry-run never makes, so the report is a superset
-// of what an apply run would open — the same over-report retirement's
-// ErrAlreadyRetired has.
+// fact a reviewer of the audit chain needs.
+//
+// What a dry-run reports is NOT what an apply run would open, and it errs in BOTH
+// directions, so do not size review load from it. The "already fresh enough" check
+// lives behind the forge call (ErrRecentlyValidated), which a dry-run never makes,
+// so a reported candidate may already be fresh — an over-report. But a dry-run
+// returns nil, which SPENDS the pass's open-PR budget, so the report also stops at
+// max_open, while an apply run skips fresh entries for free and walks further down
+// the candidate list — an under-report. Read it as "these entries are in scope",
+// not "these PRs will open".
 func (g Guard) OpenRevalidatePR(ctx context.Context, entryPath string, validated time.Time, minGap time.Duration, body string) (providers.Ref, error) {
 	var ref providers.Ref
 	err := g.write("kb.revalidate-pr", entryPath, validated.UTC().Format(time.DateOnly), func() error {
@@ -133,11 +140,30 @@ func (g Guard) write(op, target, reason string, do func() error) error {
 		return nil
 	}
 	if err := do(); err != nil {
-		g.record(op, target, audit.DecisionFailed, err.Error())
+		g.record(op, target, doneSkipOrFailed(err), err.Error())
 		return err
 	}
 	g.record(op, target, audit.DecisionExecuted, reason)
 	return nil
+}
+
+// doneSkipOrFailed classifies a forge error for the audit chain. The entry-edit
+// stamps return sentinels meaning "the forge looked and no edit was warranted" —
+// nothing was attempted and nothing failed — so recording them as failures writes
+// a claim into an append-only chain that is simply untrue. Nor is it a rare
+// mislabel: for revalidation the done-skip IS the steady state, because every
+// healthy entry is a candidate on every sweep and nearly all of them are already
+// fresh. The chain would fill with "failed" records describing a pass working
+// exactly as designed, and drown the records that mean something.
+func doneSkipOrFailed(err error) audit.Decision {
+	switch {
+	case errors.Is(err, github.ErrRecentlyValidated),
+		errors.Is(err, github.ErrEntryInactive),
+		errors.Is(err, github.ErrAlreadyRetired):
+		return audit.DecisionSkipped
+	default:
+		return audit.DecisionFailed
+	}
 }
 
 // record appends to the audit chain; a failed audit write must never abort the

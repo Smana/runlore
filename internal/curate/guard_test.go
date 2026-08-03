@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/Smana/runlore/internal/audit"
+	"github.com/Smana/runlore/internal/forge/github"
 	"github.com/Smana/runlore/internal/providers"
 )
 
@@ -24,9 +25,10 @@ var (
 // fakeGuarded extends the shared fakeForge with the wider GuardedForge surface.
 type fakeGuarded struct {
 	fakeForge
-	retired     []string
-	revalidated []string
-	closeErr    error
+	retired       []string
+	revalidated   []string
+	closeErr      error
+	revalidateErr error
 }
 
 func (f *fakeGuarded) ListClosedUnmergedPRsByLabel(context.Context, string) ([]providers.CuratedIssue, error) {
@@ -39,6 +41,9 @@ func (f *fakeGuarded) OpenRetirePR(_ context.Context, entryPath, _ string) (prov
 	return providers.Ref{URL: "https://forge/pr/1"}, nil
 }
 func (f *fakeGuarded) OpenRevalidatePR(_ context.Context, entryPath string, _ time.Time, _ time.Duration, _ string) (providers.Ref, error) {
+	if f.revalidateErr != nil {
+		return providers.Ref{}, f.revalidateErr
+	}
 	f.revalidated = append(f.revalidated, entryPath)
 	return providers.Ref{URL: "https://forge/pr/2"}, nil
 }
@@ -106,6 +111,38 @@ func TestGuardFailureIsAuditedAndPropagated(t *testing.T) {
 	}
 	if len(aud.recs) != 1 || aud.recs[0].Decision != audit.DecisionFailed {
 		t.Fatalf("want a failed audit record, got %+v", aud.recs)
+	}
+}
+
+// TestGuardAuditsDoneSkipsAsSkippedNotFailed pins the disposition of the entry-edit
+// sentinels. They mean the forge looked and no edit was warranted — nothing was
+// attempted, so nothing failed. It matters beyond tidiness: for revalidation the
+// done-skip is the STEADY state (every healthy entry is a candidate every sweep,
+// and nearly all are already fresh), so mislabelling it would fill an append-only
+// chain with "failed" records describing a pass working exactly as designed.
+func TestGuardAuditsDoneSkipsAsSkippedNotFailed(t *testing.T) {
+	skips := []error{github.ErrRecentlyValidated, github.ErrEntryInactive, github.ErrAlreadyRetired}
+	for _, sentinel := range skips {
+		t.Run(sentinel.Error(), func(t *testing.T) {
+			inner, aud := &fakeGuarded{revalidateErr: sentinel}, &recAudit{}
+			g := Guard{Inner: inner, Audit: aud, Log: discardLog()}
+			_, err := g.OpenRevalidatePR(context.Background(), "entries/a.md", time.Now(), time.Hour, "body")
+			if !errors.Is(err, sentinel) {
+				t.Fatalf("the sentinel must still reach the pass, got %v", err)
+			}
+			if len(aud.recs) != 1 || aud.recs[0].Decision != audit.DecisionSkipped {
+				t.Fatalf("want one skipped record, got %+v", aud.recs)
+			}
+		})
+	}
+	// A genuine forge error is still a failure.
+	inner, aud := &fakeGuarded{revalidateErr: errors.New("forge 502")}, &recAudit{}
+	g := Guard{Inner: inner, Audit: aud, Log: discardLog()}
+	if _, err := g.OpenRevalidatePR(context.Background(), "entries/a.md", time.Now(), time.Hour, "body"); err == nil {
+		t.Fatal("want the forge error to propagate")
+	}
+	if len(aud.recs) != 1 || aud.recs[0].Decision != audit.DecisionFailed {
+		t.Fatalf("a real forge error must stay a failure, got %+v", aud.recs)
 	}
 }
 

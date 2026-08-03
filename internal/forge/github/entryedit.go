@@ -19,13 +19,13 @@ import (
 // revalidation (`last_validated: <date>`) are the two instances; they differ
 // only in the stamp and the PR's naming, so the six-call GitHub dance lives here
 // once rather than being copy-pasted per pass — the two can never drift apart on
-// branch naming, sha handling, or best-effort labelling.
+// branch naming, sha handling, or labelling.
 type entryEdit struct {
 	path        string                       // entry path on the base branch
 	stamp       func([]byte) ([]byte, error) // the frontmatter edit; a sentinel error means "nothing to do"
 	verb        string                       // "retire" | "revalidate": names the branch AND the commit
 	titlePrefix string                       // PR title prefix
-	labels      []string                     // labels applied best-effort after the PR opens
+	labels      []string                     // applied after the PR opens; a failure here IS an error (step 6)
 	body        string                       // reviewer-facing body (carries the caller's hidden marker)
 }
 
@@ -89,10 +89,21 @@ func (c *Client) openEntryEditPR(ctx context.Context, e entryEdit) (providers.Re
 		map[string]any{"title": e.titlePrefix + e.path, "head": branch, "base": c.baseBranch, "body": e.body}, &out); err != nil {
 		return providers.Ref{}, err
 	}
-	// 6. label the PR. Best-effort: a labelling failure must not lose the PR (same
-	// contract as OpenPR), so the error is intentionally ignored.
+	// 6. label the PR. NOT best-effort, unlike OpenPR: for these proposals the label
+	// is the only index that exists. The pass finds its own open PRs, its human
+	// vetoes and its queue depth by listing on it, so an unlabelled proposal is
+	// invisible — the hidden marker in its body is never scanned, it never counts
+	// against max_open, and the next sweep opens another one for the same entry,
+	// every sweep, without bound. Silently arming that loop is worse than failing
+	// loudly, so the error carries the PR's URL: the PR really is open, and a human
+	// must label or close it. The pass isolates this per entry, so one such failure
+	// never starves the rest of the sweep.
 	if out.Number != 0 {
-		_ = c.addLabels(ctx, out.Number, e.labels)
+		if err := c.addLabels(ctx, out.Number, e.labels); err != nil {
+			return providers.Ref{}, fmt.Errorf(
+				"%s is open but UNLABELLED, so the %s pass cannot see it — label or close it by hand: %w",
+				out.HTMLURL, e.verb, err)
+		}
 	}
 	return providers.Ref{URL: out.HTMLURL}, nil
 }
