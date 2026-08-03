@@ -21,36 +21,15 @@ import (
 // commit, so anything that checks it out has to peel it first.
 func tagUpstream(t *testing.T, src, tag string) plumbing.Hash {
 	t.Helper()
-	repo, err := git.PlainOpen(src)
-	if err != nil {
-		t.Fatalf("tagUpstream: open: %v", err)
-	}
-	head, err := repo.Head()
-	if err != nil {
-		t.Fatalf("tagUpstream: head: %v", err)
-	}
-	_, err = repo.CreateTag(tag, head.Hash(), &git.CreateTagOptions{
+	head := upstreamHead(t, src)
+	_, err := openUpstream(t, src).CreateTag(tag, head, &git.CreateTagOptions{
 		Tagger:  &object.Signature{Name: "t", Email: "t@example.com", When: time.Unix(1_700_000_000, 0)},
 		Message: tag,
 	})
 	if err != nil {
 		t.Fatalf("tagUpstream: tag %s: %v", tag, err)
 	}
-	return head.Hash()
-}
-
-// upstreamHead returns the current HEAD commit of the upstream repo at src.
-func upstreamHead(t *testing.T, src string) plumbing.Hash {
-	t.Helper()
-	repo, err := git.PlainOpen(src)
-	if err != nil {
-		t.Fatalf("upstreamHead: open: %v", err)
-	}
-	head, err := repo.Head()
-	if err != nil {
-		t.Fatalf("upstreamHead: head: %v", err)
-	}
-	return head.Hash()
+	return head
 }
 
 func exists(t *testing.T, path string) bool {
@@ -213,9 +192,7 @@ func TestSyncPinnedFetchesARevisionTheMirrorHasNotSeen(t *testing.T) {
 func TestSyncPinnedRecoversFromCorruptMirror(t *testing.T) {
 	src, _ := pinnedUpstream(t)
 	dir := t.TempDir()
-	if err := os.WriteFile(filepath.Join(dir, ".git"), []byte("garbage"), 0o600); err != nil {
-		t.Fatal(err)
-	}
+	plantCorruptMirror(t, dir)
 	s := &Syncer{URL: src, Branch: "refs/tags/v1.0.0", Dir: dir, Log: testLogger()}
 	if _, _, err := s.Sync(context.Background()); err != nil {
 		t.Fatalf("a corrupt mirror must be discarded and re-cloned at the pin, got: %v", err)
@@ -272,23 +249,15 @@ func TestRunRetriesReindexOnAPinnedRevision(t *testing.T) {
 			return nil
 		})
 	}()
-	waitCycle := func() {
-		t.Helper()
-		select {
-		case tick <- time.Time{}:
-		case <-time.After(30 * time.Second):
-			t.Fatal("Run never came back for a tick — the poll loop is stuck")
-		}
-	}
-	waitCycle() // accepted only once the initial (failing) sync finished
+	waitCycle(t, tick) // accepted only once the initial (failing) sync finished
 	if n := calls.Load(); n != 1 {
 		t.Fatalf("initial sync fired onSync %d times, want 1", n)
 	}
-	waitCycle() // drains the retry poll started by the send above
+	waitCycle(t, tick) // drains the retry poll started by the send above
 	if n := calls.Load(); n != 2 {
 		t.Fatalf("a failed re-index must be retried on the next tick even though the pin cannot move, fired %d", n)
 	}
-	waitCycle() // the retry succeeded; nothing may fire again
+	waitCycle(t, tick) // the retry succeeded; nothing may fire again
 	if n := calls.Load(); n != 2 {
 		t.Fatalf("after a successful re-index a pinned poll must not re-index again, fired %d", n)
 	}

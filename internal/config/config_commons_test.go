@@ -3,8 +3,6 @@
 package config
 
 import (
-	"os"
-	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -126,22 +124,14 @@ func TestCatalogGitBranchRejectsAPinnedSpelling(t *testing.T) {
 // TestCommonsRefLoadsFromYAML: the key has to survive the strict decoder
 // (KnownFields) — a struct field nobody can spell in runlore.yaml is dead weight.
 func TestCommonsRefLoadsFromYAML(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "runlore.yaml")
-	const doc = `
+	c := loadDoc(t, `
 catalog:
   dir: /var/lib/runlore/catalog
   commons:
     url: https://github.com/Smana/runlore-kb-commons
     ref: v1.2.0
     dir: /var/lib/runlore/commons
-`
-	if err := os.WriteFile(path, []byte(doc), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	c, err := Load(path)
-	if err != nil {
-		t.Fatalf("Load: %v", err)
-	}
+`)
 	if got := c.Catalog.Commons.Branch; got != "refs/tags/v1.2.0" {
 		t.Fatalf("effective commons revision = %q, want refs/tags/v1.2.0", got)
 	}
