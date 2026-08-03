@@ -6,6 +6,7 @@ import (
 	"context"
 	"errors"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 
@@ -223,6 +224,52 @@ func TestScorecardMarkdownErrored(t *testing.T) {
 		if strings.Contains(md, forbidden) {
 			t.Fatalf("errored scorecard must not render %q in:\n%s", forbidden, md)
 		}
+	}
+}
+
+// markdownLink matches an inline markdown link's href — `[text](href)` — including
+// the ones whose text is code-fenced, which is how this generator writes them.
+var markdownLink = regexp.MustCompile(`\]\(([^)\s]+)`)
+
+// TestScorecardMarkdownEmitsNoRelativeLinks pins the one property a relative href
+// violates. scorecard.md is read in two places with different bases: as the blob on
+// the eval-scorecard branch, and spliced into website/content/eval.md as
+// https://runlore.io/eval. `](history.jsonl)` resolved on the first and 404'd on the
+// second for as long as the page existed, because neither guard covers it — Hugo's
+// refLinksErrorLevel grades `relref` and hack/check-anchors.sh grades in-page
+// fragments, and a plain relative link is neither.
+//
+// So the assertion is over EVERY href the renderer emits, not over the one that was
+// wrong: the next section added to this file gets graded the day it is written.
+func TestScorecardMarkdownEmitsNoRelativeLinks(t *testing.T) {
+	// Rates are set so costSection actually renders for the fixture that carries
+	// per-case tokens — an unrendered section proves nothing about its links.
+	for _, tc := range []struct {
+		name string
+		rep  Report
+	}{
+		{"green run", scorecardFixtureReport()},
+		{"errored run", erroredFixtureReport()},
+		{"genuine zero, with the cost table", genuineZeroReport()},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_, entries, err := AppendHistory(nil, HistoryFromReport(tc.rep))
+			if err != nil {
+				t.Fatal(err)
+			}
+			md := ScorecardMarkdown(tc.rep, entries, 3, 0.3, 15)
+			hrefs := markdownLink.FindAllStringSubmatch(md, -1)
+			if len(hrefs) == 0 {
+				t.Fatalf("no links found — the scan is broken, not the output:\n%s", md)
+			}
+			for _, m := range hrefs {
+				href := m[1]
+				if strings.HasPrefix(href, "https://") || strings.HasPrefix(href, "http://") || strings.HasPrefix(href, "#") {
+					continue
+				}
+				t.Errorf("relative href %q: it resolves under the eval-scorecard blob but 404s under https://runlore.io/eval — emit an absolute URL", href)
+			}
+		})
 	}
 }
 

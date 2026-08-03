@@ -282,7 +282,15 @@ func ScorecardMarkdown(rep Report, history []HistoryEntry, inUSD, cachedUSD, out
 	}
 
 	b.WriteString("\n## History\n\n")
-	fmt.Fprintf(&b, "Newest first, last %d shown — the full log is [`history.jsonl`](history.jsonl). ", historyShown)
+	// Absolute, not `](history.jsonl)`. This file is read in two places: as the blob
+	// on the eval-scorecard branch, where a sibling-relative href resolves, and
+	// spliced into https://runlore.io/eval, where the same href resolves to
+	// /eval/history.jsonl and 404s. The blob URL is correct in both, and it is the
+	// only href the generator emits that is not already absolute. Nothing would have
+	// caught the relative form either: Hugo's refLinksErrorLevel only grades `relref`
+	// and hack/check-anchors.sh only grades in-page fragments.
+	fmt.Fprintf(&b, "Newest first, last %d shown — the full log is "+
+		"[`history.jsonl`](https://github.com/Smana/runlore/blob/eval-scorecard/history.jsonl). ", historyShown)
 	b.WriteString("Runs below the CI gate publish here exactly like green ones. ")
 	b.WriteString("A run that reached no answer to score at all is labelled in the pass-rate column instead of scored — it is not a 0%.\n\n")
 	b.WriteString("| date | model | reached | pass-rate | est. cost |\n|---|---|---|---|---|\n")
