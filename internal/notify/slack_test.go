@@ -542,7 +542,13 @@ func TestEscapeMrkdwn(t *testing.T) {
 
 // mrkdwnTexts collects every mrkdwn text the blocks would send to Slack, so
 // tests assert on what Slack will actually parse (json.Marshal would obscure
-// this by encoding < and > as </>).
+// this by encoding < and > as \u003c/\u003e).
+//
+// It walks text, elements AND fields. Omitting fields made the entire
+// metadataFields block — Severity, AlertName, Tenant, Cluster, Resource,
+// ChangeRef, all of them untrusted — invisible to every test using this helper,
+// including the escaping test. Deleting escapeMrkdwn from any of those sites left
+// the suite green.
 func mrkdwnTexts(blocks []map[string]any) []string {
 	var out []string
 	grab := func(v any) {
@@ -553,32 +559,57 @@ func mrkdwnTexts(blocks []map[string]any) []string {
 			}
 		}
 	}
-	for _, b := range blocks {
-		grab(b["text"])
-		if els, _ := b["elements"].([]map[string]any); els != nil {
+	// Slack block bodies are built as []map[string]any here but decode as []any
+	// through JSON; accept both so the helper can't go blind on a shape change.
+	grabList := func(v any) {
+		switch els := v.(type) {
+		case []map[string]any:
+			for _, el := range els {
+				grab(el)
+			}
+		case []any:
 			for _, el := range els {
 				grab(el)
 			}
 		}
+	}
+	for _, b := range blocks {
+		grab(b["text"])
+		grabList(b["elements"])
+		grabList(b["fields"])
 	}
 	return out
 }
 
 // TestSlackBlocksEscapeUntrustedText proves that model/tool-derived fields
 // (summaries, evidence quoting cluster logs, change refs, action descriptions,
-// unresolved items) cannot inject Slack mrkdwn — most importantly the
-// <url|text> link form, a phishing vector in incident notifications — while the
-// formatter's own markup (bold, code, the KB link it constructs) keeps working.
+// unresolved items, and every metadata field) cannot inject Slack mrkdwn — most
+// importantly the <url|text> link form, a phishing vector in incident
+// notifications — while the formatter's own markup keeps working.
+//
+// Every untrusted field carries its OWN marker, and every marker is asserted in
+// BOTH directions: the raw form absent, the escaped form present.
+//
+// That pairing is the point. Most of these fields render at two sites (the summary
+// card and the detail blocks, or a metadata field and a section), so a
+// "the escaped form appears somewhere in the joined payload" assertion passes when
+// escapeMrkdwn is deleted at ONE of them — the other site still supplies it. With a
+// per-field marker and a negative assertion, a single-site regression leaves its raw
+// marker in the payload and fails. #412 caught exactly that regression for Title
+// after it shipped; this is the shape that catches it for the other eleven sites.
 func TestSlackBlocksEscapeUntrustedText(t *testing.T) {
 	inv := providers.Investigation{
 		Confidence: 0.9,
-		// AlertName + Title together exercise the card's conclusion line: with an
-		// alert named, the header anchors on it and the model's Title is restated
-		// beside the verdict, so Title becomes untrusted text ON THE CARD and has
-		// to be escaped there. Without AlertName that branch never runs.
-		AlertName: "KubePodCrashLooping",
+		// AlertName + Title together exercise the card's conclusion line. Title must
+		// differ from AlertName or the conclusion line is (correctly) suppressed as a
+		// restatement of the alert.
+		AlertName: "KubePodCrashLooping<alertname>",
 		Title:     "root cause: <https://evil.example|click here to remediate>",
 		Verdict:   providers.VerdictActionRequired,
+		Severity:  "critical<sev>",
+		Tenant:    "team<tenant>",
+		Cluster:   "prod<cluster>",
+		Resource:  providers.Workload{Kind: "Deployment", Namespace: "apps<ns>", Name: "web<name>"},
 		RootCauses: []providers.Hypothesis{{
 			Summary:         "summary with <b> tag",
 			Confidence:      0.9,
@@ -595,27 +626,34 @@ func TestSlackBlocksEscapeUntrustedText(t *testing.T) {
 	}
 	joined := strings.Join(mrkdwnTexts(append(summaryBlocks(inv), detailBlocks(inv)...)), "\n")
 
-	// The hostile log line must render inert, never as a clickable link.
-	if strings.Contains(joined, "<https://evil.example") {
-		t.Fatalf("hostile evidence rendered as live mrkdwn link:\n%s", joined)
-	}
-	for _, want := range []string{
-		"&lt;https://evil.example|click here to remediate&gt;",
-		"root cause: &lt;https://evil.example|click here to remediate&gt;", // the Title, on the card
-		"summary with &lt;b&gt; tag",
-		"chart@&lt;v2&gt;",     // ChangeRef, surfaced in the metadata fields and the detail RC section
-		"restart &amp; verify", // SuggestedAction, surfaced in next steps
-		"why &lt;img&gt; appears in logs",
-		"scale down &lt;deploy&gt;",
-		// RuledOut/DataGaps no longer render in the SUMMARY (findings #2/#3) —
-		// both are only in detailBlocks, which is included in `joined` above.
-		"disproven by &lt;script&gt; in logs",
-		"metrics &lt;unavailable&gt; for db",
+	// Each untrusted field, checked BOTH ways. raw must be absent everywhere;
+	// escaped must be present. A single-site escaping regression fails on `raw`.
+	for _, tc := range []struct{ name, raw, escaped string }{
+		{"Title (conclusion line)", "<https://evil.example|click", "&lt;https://evil.example|click here to remediate&gt;"},
+		{"root-cause Summary", "<b> tag", "summary with &lt;b&gt; tag"},
+		{"ChangeRef (metadata field)", "chart@<v2>", "chart@&lt;v2&gt;"},
+		{"SuggestedAction (next steps)", "restart & verify", "restart &amp; verify"},
+		{"Unresolved", "<img> appears", "why &lt;img&gt; appears in logs"},
+		{"RuledOut", "<script> in logs", "disproven by &lt;script&gt; in logs"},
+		{"DataGaps", "<unavailable> for db", "metrics &lt;unavailable&gt; for db"},
+		{"Action.Description", "<deploy>", "scale down &lt;deploy&gt;"},
+		{"Severity (metadata field)", "critical<sev>", "critical&lt;sev&gt;"},
+		{"AlertName (metadata field)", "KubePodCrashLooping<alertname>", "KubePodCrashLooping&lt;alertname&gt;"},
+		{"Tenant (metadata field)", "team<tenant>", "team&lt;tenant&gt;"},
+		{"Cluster (metadata field)", "prod<cluster>", "prod&lt;cluster&gt;"},
+		{"Resource namespace (metadata field)", "apps<ns>", "apps&lt;ns&gt;"},
+		{"Resource name (metadata field)", "web<name>", "web&lt;name&gt;"},
 	} {
-		if !strings.Contains(joined, want) {
-			t.Errorf("blocks missing escaped untrusted text %q:\n%s", want, joined)
-		}
+		t.Run(tc.name, func(t *testing.T) {
+			if strings.Contains(joined, tc.raw) {
+				t.Errorf("%s reached Slack UNESCAPED (raw %q present):\n%s", tc.name, tc.raw, joined)
+			}
+			if !strings.Contains(joined, tc.escaped) {
+				t.Errorf("%s missing its escaped form %q:\n%s", tc.name, tc.escaped, joined)
+			}
+		})
 	}
+
 	// Formatter-emitted markup must keep working: bold rank, code confidence,
 	// reversibility italics, and the KB link the formatter constructs itself.
 	for _, want := range []string{"*1. ", "`90%`", "_(reversible)_", "<https://github.com/o/r/issues/9|view entry>"} {
