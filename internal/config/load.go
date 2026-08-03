@@ -160,6 +160,19 @@ func ApplyDefaults(c *Config) {
 	// Instant-recall trust defaults: when enabled without explicit tuning, keep the
 	// margin and solo gates active. A zero margin_gap/solo_floor would degrade recall
 	// to a bare similarity threshold — the exact brittleness this feature removes.
+	// The commons syncer polls a SHARED, public upstream repo. Its documented default
+	// is 24h ("a shared corpus changes slowly"), but nothing filled it — so an unset
+	// interval reached Syncer.Run as 0 and fell through to the syncer's generic 5m
+	// fallback: 288x the documented rate against someone else's GitHub repo, with the
+	// startup log cheerfully printing "interval=0s".
+	if c.Catalog.Commons.URL != "" {
+		if c.Catalog.Commons.Interval.Std() == 0 {
+			c.Catalog.Commons.Interval = Duration(24 * time.Hour)
+		}
+		if c.Catalog.Commons.Branch == "" {
+			c.Catalog.Commons.Branch = "main"
+		}
+	}
 	if c.Catalog.InstantRecall.Enabled {
 		ir := &c.Catalog.InstantRecall
 		if ir.MinScore == 0 {

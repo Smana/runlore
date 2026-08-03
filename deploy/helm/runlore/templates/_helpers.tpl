@@ -56,6 +56,12 @@ entry here — the mount by name is identical either way.
   reports it. A url WITHOUT a dir cannot be defaulted safely — it would have to guess
   a path, and guessing catalog.mountPath would let an upstream sync overwrite the
   operator's own catalog — so fail rendering with the fix named.
+
+  The two roots are checked for CONTAINMENT, not just equality: the loader walks
+  recursively, so a commons root nested under the catalog is indexed twice — once
+  as shared, once as the operator's own, unmarked and competing in the tie-break.
+  The agent validates this too; failing at render keeps a bad values file from
+  ever reaching a cluster.
 */ -}}
 {{- $commons := (.Values.config.catalog | default dict).commons | default dict -}}
 {{- $commonsDir := "" -}}
@@ -64,8 +70,13 @@ entry here — the mount by name is identical either way.
 {{-   if not $commonsDir -}}
 {{-     fail "config.catalog.commons.url is set but config.catalog.commons.dir is empty — set it to a path OUTSIDE config.catalog.dir (e.g. /var/lib/runlore/commons); the two roots must not share a directory" -}}
 {{-   end -}}
-{{-   if eq $commonsDir (.Values.config.catalog.dir | default "") -}}
+{{-   $catalogDir := clean (.Values.config.catalog.dir | default "") -}}
+{{-   $commonsClean := clean $commonsDir -}}
+{{-   if eq $commonsClean $catalogDir -}}
 {{-     fail "config.catalog.commons.dir must differ from config.catalog.dir — sharing one root lets an upstream commons sync overwrite the catalog you curate into" -}}
+{{-   end -}}
+{{-   if or (hasPrefix (printf "%s/" $catalogDir) $commonsClean) (hasPrefix (printf "%s/" $commonsClean) $catalogDir) -}}
+{{-     fail (printf "config.catalog.commons.dir (%s) and config.catalog.dir (%s) must not contain one another — the loader walks recursively, so a nested root is indexed twice" $commonsClean $catalogDir) -}}
 {{-   end -}}
 {{- end -}}
 metadata:

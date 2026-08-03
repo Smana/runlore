@@ -27,7 +27,7 @@ import (
 // (much longer) interval, and a failure that logs rather than propagates. A shared
 // upstream corpus being briefly unavailable must never degrade the operator's own
 // catalog, which is the one an incident actually depends on.
-func armCommons(ctx context.Context, cfg *config.Config, cat *catalog.Catalog, log *slog.Logger) {
+func armCommons(ctx context.Context, cfg *config.Config, cat *catalog.Catalog, primaryDir string, log *slog.Logger) {
 	cc := cfg.Catalog.Commons
 	if cc.URL == "" || cc.Dir == "" {
 		return
@@ -46,7 +46,7 @@ func armCommons(ctx context.Context, cfg *config.Config, cat *catalog.Catalog, l
 		// ReloadDelta mutates the index by the operator's own paths. Reloading the
 		// primary root re-reads the commons alongside it, which is both correct and
 		// cheap at this interval.
-		if _, err := cat.ReloadContext(ctx, cfg.Catalog.Dir); err != nil {
+		if _, err := cat.ReloadContext(ctx, primaryDir); err != nil {
 			log.Warn("commons catalog reload failed; keeping the previous index", "dir", cc.Dir, "err", err)
 			return err
 		}
@@ -142,7 +142,7 @@ func BuildCatalog(ctx context.Context, cfg *config.Config, forgeTok ForgeToken, 
 			warnInvalid(cat)
 			return nil
 		})
-		armCommons(ctx, cfg, cat, log)
+		armCommons(ctx, cfg, cat, dir, log)
 		log.Info("catalog git-sync enabled", "url", cfg.Catalog.Git.URL, "dir", dir)
 		return cat
 	}
@@ -175,7 +175,7 @@ func BuildCatalog(ctx context.Context, cfg *config.Config, forgeTok ForgeToken, 
 		// Arm the commons BEFORE logging the count: armCommons triggers a reload that
 		// pulls the shared root in, so logging first would report a number that is
 		// already stale.
-		armCommons(ctx, cfg, cat, log)
+		armCommons(ctx, cfg, cat, cfg.Catalog.Dir, log)
 		log.Info("catalog loaded", "dir", cfg.Catalog.Dir, "entries", cat.Len())
 		warnInvalid(cat)
 		return cat

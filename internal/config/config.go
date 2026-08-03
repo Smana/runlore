@@ -13,6 +13,7 @@ import (
 	"net"
 	"net/url"
 	"path"
+	"path/filepath"
 	"regexp"
 	"slices"
 	"strings"
@@ -1422,8 +1423,20 @@ func (c *Config) Validate() error {
 		// sync write into their checkout — and, with git-sync enabled, fight the
 		// mirror on every reconcile. Distinct roots is the whole basis of the
 		// read-only guarantee.
-		if cc.Dir == c.Catalog.Dir {
-			return fmt.Errorf("catalog.commons.dir must differ from catalog.dir (both are %q): the shared catalog is a SEPARATE, read-only root and must not share the operator's checkout", cc.Dir)
+		// Cleaned + containment, not string equality. Load walks recursively, so
+		// commons.dir: /var/lib/runlore/catalog/commons under catalog.dir:
+		// /var/lib/runlore/catalog passed the old check and then indexed every commons
+		// entry TWICE — once prefixed and marked, once as the operator's own, unmarked
+		// and competing in the tie-break as a local entry. It also did exactly what the
+		// error says it prevents: an upstream sync writing inside the operator's mirror.
+		// A trailing slash slipped through for the same reason.
+		own := filepath.Clean(c.Catalog.Dir)
+		com := filepath.Clean(cc.Dir)
+		if own == com {
+			return fmt.Errorf("catalog.commons.dir must differ from catalog.dir (both resolve to %q): the shared catalog is a SEPARATE, read-only root and must not share the operator's checkout", com)
+		}
+		if within(com, own) || within(own, com) {
+			return fmt.Errorf("catalog.commons.dir (%q) and catalog.dir (%q) must not contain one another: the loader walks recursively, so a nested root is indexed twice — once as shared, once as the operator's own", com, own)
 		}
 	}
 	// Instant-recall reranker (opt-in): its knobs are only meaningful when enabled.
@@ -1631,4 +1644,17 @@ type GitHubApp struct {
 	InstallationID int64  `yaml:"installation_id"`
 	PrivateKeyRef  string `yaml:"private_key_ref"` // Secret name/key (e.g. via External Secrets)
 	PrivateKeyEnv  string `yaml:"private_key_env"` // v1: env var holding the PEM private key
+}
+
+// within reports whether child is inside parent. Compared on cleaned, separator-
+// terminated paths so /a/b is not treated as inside /a/bc.
+func within(child, parent string) bool {
+	if parent == "" || child == "" {
+		return false
+	}
+	rel, err := filepath.Rel(parent, child)
+	if err != nil {
+		return false
+	}
+	return rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator))
 }
