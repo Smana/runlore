@@ -90,6 +90,77 @@ func TestValidateRevalidation(t *testing.T) {
 	}
 }
 
+// TestRevalidationInheritsRetirementCalibration pins the derivation that keeps the
+// two passes disjoint: an operator who tunes retirement's floor must not silently
+// get a revalidation pass still gating on 0.5, which would leave a band where one
+// entry is proposed for both.
+func TestRevalidationInheritsRetirementCalibration(t *testing.T) {
+	var c Config
+	c.Curate.Retirement = Retirement{Enabled: true, Floor: 0.7, Prior: 3.0}
+	c.Curate.Revalidation.Enabled = true // floor/prior left unset
+	ApplyDefaults(&c)
+	if r := c.Curate.Revalidation; r.Floor != 0.7 || r.Prior != 3.0 {
+		t.Fatalf("revalidation must inherit retirement's calibration, got floor=%g prior=%g", r.Floor, r.Prior)
+	}
+	if err := c.Validate(); err != nil {
+		t.Fatalf("an inherited pair must validate: %v", err)
+	}
+
+	// With no retirement block the recall gate's own defaults still apply.
+	var off Config
+	off.Curate.Revalidation.Enabled = true
+	ApplyDefaults(&off)
+	if r := off.Curate.Revalidation; r.Floor != 0.5 || r.Prior != 2.0 {
+		t.Fatalf("with no retirement block the recall-gate defaults must apply, got floor=%g prior=%g", r.Floor, r.Prior)
+	}
+}
+
+// TestValidateRejectsDivergentDecayCalibration is the enforcement half. The
+// disjointness the docs assert is arithmetic, not a rule either pass applies, so
+// two deliberately different values must fail loud rather than open an overlap
+// band at runtime.
+func TestValidateRejectsDivergentDecayCalibration(t *testing.T) {
+	both := func(retFloor, revFloor, retPrior, revPrior float64) *Config {
+		c := &Config{}
+		c.Curate.Retirement = Retirement{Enabled: true, MinObservations: 3, Floor: retFloor, Prior: retPrior}
+		c.Curate.Revalidation = Revalidation{
+			Enabled: true, MinInterval: Duration(720 * time.Hour), MaxOpen: 5, Floor: revFloor, Prior: revPrior,
+		}
+		return c
+	}
+	if err := both(0.5, 0.5, 2.0, 2.0).Validate(); err != nil {
+		t.Fatalf("a matched pair must validate: %v", err)
+	}
+	cases := []struct {
+		name string
+		cfg  *Config
+		want string
+	}{
+		// 0.6 vs 0.4 is the overlap band made concrete: an entry at factor 0.5 is
+		// below retirement's floor AND at-or-above revalidation's, so both propose it.
+		{"unequal floors", both(0.6, 0.4, 2.0, 2.0), "curate.revalidation.floor"},
+		{"unequal priors", both(0.5, 0.5, 2.0, 4.0), "curate.revalidation.prior"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			err := tc.cfg.Validate()
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("want an error naming %s, got %v", tc.want, err)
+			}
+			if !strings.Contains(err.Error(), "inherit") {
+				t.Errorf("the error must tell the operator how to fix it, got %q", err)
+			}
+		})
+	}
+
+	// Only one pass on: there is no pair to reconcile, however odd the other block.
+	solo := both(0.9, 0.2, 5.0, 1.0)
+	solo.Curate.Retirement.Enabled = false
+	if err := solo.Validate(); err != nil {
+		t.Fatalf("with retirement disabled there is no pair to reconcile: %v", err)
+	}
+}
+
 // TestRevalidationLoadsFromYAML pins the YAML key names — the pass is configured
 // entirely through them, and a renamed field would silently leave it disabled.
 func TestRevalidationLoadsFromYAML(t *testing.T) {

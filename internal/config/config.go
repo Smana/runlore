@@ -1451,6 +1451,27 @@ func (c *Config) Validate() error {
 			return fmt.Errorf("curate.revalidation.max_open must be >= 1 (the reviewer-queue bound), got %d", r.MaxOpen)
 		}
 	}
+	// With BOTH passes on, their calibration must be identical. They partition
+	// entries by comparing one outcome factor against one floor — retirement
+	// strictly below it, revalidation at or above — so the disjointness they claim
+	// is a property of the arithmetic, not a rule either pass enforces. Unequal
+	// floors leave a band where both fire; unequal priors compute different factors
+	// from the same ledger. Either way one entry can be proposed for retirement AND
+	// revalidation in a single sweep. Leaving revalidation's knobs unset inherits
+	// retirement's (ApplyDefaults), so reaching here means two values were set apart
+	// deliberately.
+	if c.Curate.Retirement.Enabled && c.Curate.Revalidation.Enabled {
+		if ret, rev := c.Curate.Retirement.Floor, c.Curate.Revalidation.Floor; ret != rev {
+			return fmt.Errorf("curate.revalidation.floor (%g) must equal curate.retirement.floor (%g): "+
+				"the two passes gate on opposite sides of the same outcome factor, so unequal floors leave a band where "+
+				"one entry is proposed for retirement and revalidation at once — omit curate.revalidation.floor to inherit", rev, ret)
+		}
+		if ret, rev := c.Curate.Retirement.Prior, c.Curate.Revalidation.Prior; ret != rev {
+			return fmt.Errorf("curate.revalidation.prior (%g) must equal curate.retirement.prior (%g): "+
+				"a different prior computes a different factor from the same ledger, so the two passes would disagree about "+
+				"the same entry's track record — omit curate.revalidation.prior to inherit", rev, ret)
+		}
+	}
 	// In-server sweeps: an unknown mode must fail loud (a typo like "apply" silently
 	// falling back to dry-run would mean the operator believes grooming is live when
 	// it is not), and a sub-10m interval would hammer the forge listing endpoints.
@@ -1585,9 +1606,20 @@ type Revalidation struct {
 	// MaxOpen bounds how many revalidation PRs may await review at once (default
 	// 5), counting the ones earlier sweeps left open. It is what keeps the first
 	// sweep on a mature catalog from proposing every long-confirmed entry at once.
-	MaxOpen int     `yaml:"max_open"`
-	Floor   float64 `yaml:"floor"` // revalidate at/above this factor (default 0.5, the retirement boundary)
-	Prior   float64 `yaml:"prior"` // Beta prior strength k (default 2.0)
+	//
+	// Note that each sweep still costs one forge read per candidate whose entry is
+	// already fresh: the anti-spam check reads the file on the base branch, which is
+	// where the answer actually lives, so a merged stamp silences the next sweep
+	// with no state to keep. Raise curate.sweeps.interval, not MaxOpen, if a large
+	// catalog makes that read budget uncomfortable.
+	MaxOpen int `yaml:"max_open"`
+	// Floor and Prior are the decay calibration, and they must match
+	// curate.retirement's: the two passes partition entries by comparing one factor
+	// against one floor, so they only stay disjoint while both read the same
+	// numbers. Leave them unset to inherit retirement's (falling back to the recall
+	// gate's 0.5 / 2.0); setting them to different values is a config error.
+	Floor float64 `yaml:"floor"` // revalidate at/above this factor (inherits curate.retirement.floor; else 0.5)
+	Prior float64 `yaml:"prior"` // Beta prior strength k (inherits curate.retirement.prior; else 2.0)
 }
 
 // Sweep modes: dry-run observes (log + audit, zero forge writes), apply acts,

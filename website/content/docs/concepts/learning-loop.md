@@ -491,13 +491,32 @@ consequence beyond recall rejection, and its mirror image:
   — so enabling the pass on a mature catalog drains a queue instead of flooding one.
   Idempotent and **human-veto-aware** through the same hidden per-entry marker, and
   the marker is keyed on the entry *path*, never the date, precisely so a decline
-  stays declined rather than returning monthly.
+  stays declined rather than returning monthly. That veto is also why **no other
+  pass may close a retire or revalidate PR**: these passes keep no store, so a
+  closed-unmerged proposal *is* the record of a human declining, and RunLore closing
+  its own proposal — as a stale artifact, or as a title-similar "duplicate" — would
+  be indistinguishable from that. Both the stale sweep and dedup skip them; the
+  queue bound above is what keeps an unreviewed backlog finite instead.
   - **Retirement wins where they meet.** Both passes read the same aggregate and
-    the same `outcome.Aggregate.Factor`, and they are **disjoint by construction**:
-    retirement fires strictly *below* the trust floor, revalidation only *at or
-    above* it. So one sweep can never propose retiring and revalidating the same
-    entry, and an entry recall already refuses to fire is never stamped "still
-    valid", whatever a stale resolve in its history says.
+    the same `outcome.Aggregate.Factor`, and within one sweep they are **disjoint by
+    construction**: retirement fires strictly *below* the trust floor, revalidation
+    only *at or above* it. So one sweep can never propose retiring and revalidating
+    the same entry, and an entry recall already refuses to fire is never stamped
+    "still valid", whatever a stale resolve in its history says.
+
+    That construction is arithmetic, not a rule either pass applies, so it holds
+    only while both read the **same** floor and prior. `curate.revalidation.floor`
+    and `curate.revalidation.prior` therefore *inherit* `curate.retirement`'s when
+    left unset, and setting them to different values while both passes are enabled
+    is rejected at config load — unequal floors would otherwise leave a band where
+    both passes fire on one entry.
+
+    **Across sweeps the guarantee is weaker, by design.** An entry whose factor
+    recovers after a retire PR was already opened can pick up a revalidate PR while
+    that retire PR is still open. Nothing suppresses it, because both proposals are
+    then honest: the track record really did decay, and it really has recovered. A
+    reviewer holding both decides which one the entry deserves — merging the retire
+    PR makes the revalidation moot, since a retired entry is refused outright.
 
 ---
 

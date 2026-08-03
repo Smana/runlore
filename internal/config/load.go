@@ -223,10 +223,17 @@ func ApplyDefaults(c *Config) {
 		}
 	}
 	// Revalidation pass defaults (opt-in), filled on the same terms as retirement's.
-	// Floor/Prior mirror the recall gate AND retirement, which is what makes the two
-	// passes complementary rather than overlapping: retirement fires strictly below
-	// the floor, revalidation at or above it. MinInterval caps one entry to one
-	// confirmation PR a month; MaxOpen caps the whole review queue.
+	// MinInterval caps one entry to one confirmation PR a month; MaxOpen caps the
+	// whole review queue.
+	//
+	// Floor/Prior INHERIT retirement's (already defaulted just above) rather than
+	// restating the constants, because the disjointness the two passes claim is
+	// arithmetic, not editorial: retirement fires strictly below the floor and
+	// revalidation at or above it, which partitions entries only while both read the
+	// SAME number. Deriving one from the other means an operator who tunes
+	// retirement gets a still-coherent pair by default instead of a silent overlap
+	// band. Retirement's own default backstops the case where it is disabled or
+	// unset, so an unconfigured revalidation still lands on the recall gate's 0.5/2.0.
 	if c.Curate.Revalidation.Enabled {
 		r := &c.Curate.Revalidation
 		if r.MinInterval == 0 {
@@ -236,7 +243,13 @@ func ApplyDefaults(c *Config) {
 			r.MaxOpen = 5
 		}
 		if r.Floor == 0 {
+			r.Floor = c.Curate.Retirement.Floor
+		}
+		if r.Floor == 0 {
 			r.Floor = 0.5
+		}
+		if r.Prior == 0 {
+			r.Prior = c.Curate.Retirement.Prior
 		}
 		if r.Prior == 0 {
 			r.Prior = 2.0

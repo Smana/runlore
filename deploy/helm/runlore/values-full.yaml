@@ -276,11 +276,18 @@ config:
       enabled: true
       min_interval: 720h # at most one confirmation PR per entry per month
       max_open: 5 # never leave more than this many waiting on a reviewer
-      # floor/prior default to 0.5 / 2.0 — the SAME outcome gate recall's Gate 3 and
-      # the retirement pass use. Keeping them equal is what makes the two passes
-      # complementary rather than contradictory: strictly below the floor is
-      # retirement's territory, at or above it is this pass's, so one sweep can never
-      # propose retiring and revalidating the same entry.
+      # floor/prior are left unset on purpose: they INHERIT curate.retirement's (which
+      # default to 0.5 / 2.0 — the same outcome gate recall's Gate 3 uses), and setting
+      # them to two different values while both passes are enabled is rejected at load.
+      # Equality is what makes the passes complementary rather than contradictory:
+      # strictly below the floor is retirement's territory, at or above it is this
+      # pass's, so one sweep can never propose retiring and revalidating one entry.
+      #
+      # Sizing note: max_open bounds the REVIEW queue, not the forge reads. Every sweep
+      # still costs one read per candidate whose entry is already fresh — the anti-spam
+      # check reads the file on the base branch, which is what lets a merged stamp
+      # silence the next sweep with no state to keep. On a large catalog raise
+      # curate.sweeps.interval rather than lowering max_open.
 
   metrics:
     url: http://vmsingle.observability.svc:8429
