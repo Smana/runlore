@@ -109,8 +109,8 @@ func buildGuardedForge(cfg *config.Config, tok ForgeToken, dryRun bool, aud audi
 
 // BuildCurateAgent assembles the grooming passes over a (typically Guard-wrapped)
 // forge. ledger may be nil — the ledger-backed passes (Queue, Recurrence,
-// Contested, Retirement, Revalidation) are then skipped. Shared by the one-shot `lore curate`
-// CLI and the in-server sweeper so the two can never drift.
+// Contested, Retirement, Revalidation) are then skipped. Shared by the one-shot
+// `lore curate` CLI and the in-server sweeper so the two can never drift.
 //
 // StaleAfter is honoured as-is: 0/unset disables the lifecycle sweep (Lifecycle.Run
 // returns early). The Helm chart ships config.curate.stale_after: 720h, so scheduled

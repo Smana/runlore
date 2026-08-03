@@ -137,11 +137,17 @@ func retireBody(path string, agg outcome.Aggregate, factor, floor float64, marke
 }
 
 // retireMarker is the hidden idempotency/veto marker embedded in a retire PR body:
-// one per entry path. The path is hashed rather than embedded verbatim so a path
-// with "--"/">" sequences can never break out of the HTML comment.
-func retireMarker(entryPath string) string {
+// one per entry path. See entryMarker for the shared construction.
+func retireMarker(entryPath string) string { return entryMarker("retire", entryPath) }
+
+// entryMarker renders the hidden per-entry marker the decay-driven passes embed in
+// the PR bodies they open and scan back for idempotency and the human veto. The
+// path is hashed rather than embedded verbatim so a path with "--"/">" sequences
+// can never break out of the HTML comment; kind keeps one pass's markers from ever
+// matching another's.
+func entryMarker(kind, entryPath string) string {
 	sum := sha256.Sum256([]byte(entryPath))
-	return fmt.Sprintf("<!-- runlore:retire:%x -->", sum[:8])
+	return fmt.Sprintf("<!-- runlore:%s:%x -->", kind, sum[:8])
 }
 
 // bodiesOf projects the PR bodies for marker scanning.

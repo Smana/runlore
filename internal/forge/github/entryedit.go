@@ -21,21 +21,21 @@ import (
 // once rather than being copy-pasted per pass — the two can never drift apart on
 // branch naming, sha handling, or best-effort labelling.
 type entryEdit struct {
-	path         string                       // entry path on the base branch
-	stamp        func([]byte) ([]byte, error) // the frontmatter edit; a sentinel error means "nothing to do"
-	branchPrefix string                       // "retire" | "revalidate"
-	commitVerb   string                       // commit-message verb
-	titlePrefix  string                       // PR title prefix
-	labels       []string                     // labels applied best-effort after the PR opens
-	body         string                       // reviewer-facing body (carries the caller's hidden marker)
+	path        string                       // entry path on the base branch
+	stamp       func([]byte) ([]byte, error) // the frontmatter edit; a sentinel error means "nothing to do"
+	verb        string                       // "retire" | "revalidate": names the branch AND the commit
+	titlePrefix string                       // PR title prefix
+	labels      []string                     // labels applied best-effort after the PR opens
+	body        string                       // reviewer-facing body (carries the caller's hidden marker)
 }
 
 // openEntryEditPR performs the fetch → stamp → branch → commit → PR → label
 // sequence for one entryEdit. It never merges and never deletes: the PR is the
 // proposal and a human is the load-bearing gate. A stamp sentinel (already
-// retired, recently validated, inactive entry) is returned verbatim so the
-// caller's pass can treat it as a done-skip; a 404 on the entry file surfaces as
-// an error (entry deleted → the pass logs and skips it).
+// retired, recently validated, inactive entry) is wrapped with the entry path and
+// returned, so `errors.Is` still identifies it and the caller's pass can treat it
+// as a done-skip; a 404 on the entry file surfaces as an error (entry deleted →
+// the pass logs and skips it).
 func (c *Client) openEntryEditPR(ctx context.Context, e entryEdit) (providers.Ref, error) {
 	// 1. fetch the entry on the base branch: its content and blob sha.
 	var file struct {
@@ -65,7 +65,7 @@ func (c *Client) openEntryEditPR(ctx context.Context, e entryEdit) (providers.Re
 		return providers.Ref{}, err
 	}
 	// 3. create the edit branch.
-	branch := fmt.Sprintf("runlore/%s-%s-%d", e.branchPrefix, slugify(e.path), time.Now().Unix())
+	branch := fmt.Sprintf("runlore/%s-%s-%d", e.verb, slugify(e.path), time.Now().Unix())
 	if err := c.do(ctx, http.MethodPost, fmt.Sprintf("/repos/%s/%s/git/refs", c.owner, c.repo),
 		map[string]any{"ref": "refs/heads/" + branch, "sha": ref.Object.SHA}, nil); err != nil {
 		return providers.Ref{}, err
@@ -73,7 +73,7 @@ func (c *Client) openEntryEditPR(ctx context.Context, e entryEdit) (providers.Re
 	// 4. update the entry file in place — the file sha makes this an update, not a create.
 	if err := c.do(ctx, http.MethodPut, fmt.Sprintf("/repos/%s/%s/contents/%s", c.owner, c.repo, e.path),
 		map[string]any{
-			"message": "runlore: " + e.commitVerb + " " + e.path,
+			"message": "runlore: " + e.verb + " " + e.path,
 			"content": base64.StdEncoding.EncodeToString(stamped),
 			"branch":  branch,
 			"sha":     file.SHA,

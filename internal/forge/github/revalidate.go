@@ -58,8 +58,8 @@ func setLastValidated(content []byte, at time.Time, minGap time.Duration) ([]byt
 		return nil, err
 	}
 	stamp := "last_validated: " + at.UTC().Format(lastValidatedLayout)
-	validatedAt := -1             // index of the existing last_validated line, -1 when absent
-	var validated, stamped string // the two recorded dates, raw scalars
+	validatedAt := -1                     // index of the existing last_validated line, -1 when absent
+	var validatedVal, timestampVal string // the two recorded dates, raw scalars
 	for i, ln := range lines {
 		key, val, ok := strings.Cut(ln, ":")
 		if !ok {
@@ -74,18 +74,18 @@ func setLastValidated(content []byte, at time.Time, minGap time.Duration) ([]byt
 				return nil, ErrEntryInactive
 			}
 		case "last_validated":
-			validatedAt, validated = i, val
+			validatedAt, validatedVal = i, val
 		case "timestamp":
-			stamped = val
+			timestampVal = val
 		}
 	}
 	// Freshness on record is last_validated, else timestamp — recall's own age-gate
 	// fallback, so what this pass refreshes is exactly what that gate reads. An
 	// absent or unparseable date means nothing is on record: there is a fact to
 	// establish, so stamp it (which also repairs the unparseable value).
-	recorded := stamped
+	recorded := timestampVal
 	if validatedAt >= 0 {
-		recorded = validated
+		recorded = validatedVal
 	}
 	if t, ok := catalog.ParseEntryDate(unquoteScalar(recorded)); ok && at.Sub(t) < minGap {
 		// Also the never-write-backwards guard: a date in the FUTURE (a human
@@ -119,12 +119,11 @@ func unquoteScalar(s string) string {
 // ErrRecentlyValidated / ErrEntryInactive when no PR is warranted (no PR opened).
 func (c *Client) OpenRevalidatePR(ctx context.Context, entryPath string, validated time.Time, minGap time.Duration, body string) (providers.Ref, error) {
 	return c.openEntryEditPR(ctx, entryEdit{
-		path:         entryPath,
-		stamp:        func(raw []byte) ([]byte, error) { return setLastValidated(raw, validated, minGap) },
-		branchPrefix: "revalidate",
-		commitVerb:   "revalidate",
-		titlePrefix:  "KB revalidate: ",
-		labels:       revalidateLabels,
-		body:         body,
+		path:        entryPath,
+		stamp:       func(raw []byte) ([]byte, error) { return setLastValidated(raw, validated, minGap) },
+		verb:        "revalidate",
+		titlePrefix: "KB revalidate: ",
+		labels:      revalidateLabels,
+		body:        body,
 	})
 }

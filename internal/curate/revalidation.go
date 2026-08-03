@@ -4,7 +4,6 @@ package curate
 
 import (
 	"context"
-	"crypto/sha256"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -150,7 +149,7 @@ func (p Revalidation) Run(ctx context.Context) error {
 	}
 
 	for _, path := range candidates {
-		if budget == 0 {
+		if budget <= 0 {
 			p.Log.Info("revalidation: open-PR budget spent; remaining candidates wait for the next sweep",
 				"max_open", maxOpen)
 			return nil
@@ -209,9 +208,5 @@ func revalidateBody(path string, agg outcome.Aggregate, factor float64, marker s
 }
 
 // revalidateMarker is the hidden idempotency/veto marker embedded in a revalidate
-// PR body: one per entry path. The path is hashed rather than embedded verbatim so
-// a path with "--"/">" sequences can never break out of the HTML comment.
-func revalidateMarker(entryPath string) string {
-	sum := sha256.Sum256([]byte(entryPath))
-	return fmt.Sprintf("<!-- runlore:revalidate:%x -->", sum[:8])
-}
+// PR body: one per entry path. See entryMarker for why the path is hashed.
+func revalidateMarker(entryPath string) string { return entryMarker("revalidate", entryPath) }

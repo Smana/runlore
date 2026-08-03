@@ -63,10 +63,9 @@ func (c *Client) OpenRetirePR(ctx context.Context, entryPath, body string) (prov
 			}
 			return out, nil
 		},
-		branchPrefix: "retire",
-		commitVerb:   "retire",
-		titlePrefix:  "KB retire: ",
-		labels:       retireLabels,
-		body:         body,
+		verb:        "retire",
+		titlePrefix: "KB retire: ",
+		labels:      retireLabels,
+		body:        body,
 	})
 }
