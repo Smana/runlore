@@ -117,6 +117,116 @@ func TestRequirePagerDutyAuth(t *testing.T) {
 	}
 }
 
+// TestRecallDecayWarning covers the (instant recall × outcome ledger × feedback
+// channel) matrix behind the learning loop's feedback edge.
+//
+// Gate 3 (outcome decay) is fail-safe: an entry absent from the ledger's
+// OpenCounts returns factor 1 and fires. That is correct — absence of evidence
+// must never block a recall — but it means a ledger that never accumulates ground
+// truth turns the gate into a silent no-op for EVERY entry, and the retirement
+// pass (same factor, same floor) into one that can never propose anything.
+//
+// Ground truth reaches the ledger through exactly two channels, and human
+// feedback is the only one this process can observe from its own config. So the
+// warning fires on the one combination that is knowably at risk: recall on, a
+// ledger configured to hold the evidence, and neither feedback channel enabled.
+// Recall off ⇒ nothing recalls, so there is no trust to decay. Ledger unset ⇒ the
+// operator turned the learning loop off deliberately (the `lore curate` precedent
+// treats that as an info, not a warning), so nagging about it would be noise.
+func TestRecallDecayWarning(t *testing.T) {
+	const ledger = "/var/lib/runlore/catalog/outcomes.jsonl"
+	tests := []struct {
+		name       string
+		recall     bool
+		ledgerPath string
+		slack      bool
+		matrix     bool
+		wantWarn   bool
+	}{
+		{"recall + ledger + no feedback → warns (the edge is inert)", true, ledger, false, false, true},
+		{"recall + ledger + slack buttons → silent", true, ledger, true, false, false},
+		{"recall + ledger + matrix reactions → silent", true, ledger, false, true, false},
+		{"recall + ledger + both channels → silent", true, ledger, true, true, false},
+		{"recall + no ledger → silent (learning loop off by choice)", true, "", false, false, false},
+		{"recall + no ledger + slack buttons → silent", true, "", true, false, false},
+		{"no recall + ledger + no feedback → silent (nothing recalls)", false, ledger, false, false, false},
+		{"no recall + ledger + both channels → silent", false, ledger, true, true, false},
+		{"no recall + no ledger → silent", false, "", false, false, false},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := &config.Config{}
+			cfg.Catalog.InstantRecall.Enabled = tc.recall
+			cfg.Outcome.LedgerPath = tc.ledgerPath
+			cfg.Notify.Slack.FeedbackButtons = tc.slack
+			cfg.Notify.Matrix.FeedbackReactions = tc.matrix
+
+			got := RecallDecayWarning(cfg)
+			if (got != "") != tc.wantWarn {
+				t.Fatalf("RecallDecayWarning(recall=%v, ledger=%q, slack=%v, matrix=%v) = %q, wantWarn = %v",
+					tc.recall, tc.ledgerPath, tc.slack, tc.matrix, got, tc.wantWarn)
+			}
+			if !tc.wantWarn {
+				return
+			}
+			// The message has to be actionable: name both fixes (a feedback channel,
+			// and persisting the ledger) and the doc that explains the edge.
+			for _, want := range []string{
+				"notify.slack.feedback_buttons",
+				"notify.matrix.feedback_reactions",
+				"outcome.ledger_path",
+				"persistent volume",
+				"docs/concepts/learning-loop.md",
+			} {
+				if !strings.Contains(got, want) {
+					t.Errorf("warning is missing the fix pointer %q: %q", want, got)
+				}
+			}
+			// …and it has to state the CONSEQUENCE an operator cares about, not the
+			// mechanism: a stale entry keeps being trusted.
+			if !strings.Contains(got, "full trust") {
+				t.Errorf("warning does not state the operator-visible consequence: %q", got)
+			}
+		})
+	}
+}
+
+// TestRecallDecayWarningDoesNotAssertTheResolveChannelIsDead is the honesty guard.
+//
+// Nothing in RunLore's configuration says whether the incident source actually
+// emits resolves: `sources` records enablement only, and Alertmanager's
+// `send_resolved` lives in the operator's receiver config, which RunLore never
+// reads. (internal/app/investigate.go decides resolvability per event, from the
+// fingerprint — a runtime fact, not a startup one.) So the warning may say the
+// resolve channel is the only one LEFT, and that we cannot see it from here; it
+// must not claim resolves never arrive. A deployment whose Alertmanager does send
+// them is fine, and telling that operator their loop is broken would be a lie
+// that trains them to ignore the line.
+func TestRecallDecayWarningDoesNotAssertTheResolveChannelIsDead(t *testing.T) {
+	cfg := &config.Config{}
+	cfg.Catalog.InstantRecall.Enabled = true
+	cfg.Outcome.LedgerPath = "/var/lib/runlore/catalog/outcomes.jsonl"
+
+	got := RecallDecayWarning(cfg)
+	if got == "" {
+		t.Fatal("expected the warning to fire for recall + ledger + no feedback")
+	}
+	if !strings.Contains(got, "cannot tell from here") {
+		t.Errorf("warning must hedge on the resolve channel it cannot observe: %q", got)
+	}
+	// Phrasings that would state the unobservable as fact.
+	for _, forbidden := range []string{
+		"no resolve",
+		"never resolve",
+		"resolves never",
+		"will stay empty",
+	} {
+		if strings.Contains(strings.ToLower(got), forbidden) {
+			t.Errorf("warning asserts %q, which this process cannot determine: %q", forbidden, got)
+		}
+	}
+}
+
 // TestModelProvider locks in the provider-name normalization: anthropic/gemini
 // pass through; everything else (including "" and unknown) defaults to "openai".
 func TestModelProvider(t *testing.T) {

@@ -14,6 +14,12 @@ package app
 // on the serve path only (not in config.Validate) because `lore investigate`
 // legitimately needs a model without a webhook.
 import (
+	"go/ast"
+	"go/parser"
+	"go/token"
+	"os"
+	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/Smana/runlore/internal/config"
@@ -48,4 +54,73 @@ func TestServeGuardFailClosed(t *testing.T) {
 			t.Fatalf("RequireWebhookAuth must accept when no model is configured: %v", err)
 		}
 	})
+}
+
+// TestRecallDecayWarningIsEmittedOnceAtStartup pins WHERE the warning is raised.
+//
+// The condition is pure config, so it is equally true on every incident — which is
+// exactly the failure mode to prevent. Called from the investigation path (or from
+// wireRecall, or the recall gate) it would repeat the same paragraph on every
+// alert and be muted within a day. It belongs on the serve startup path, once,
+// next to the other startup config warnings.
+//
+// `lore investigate` is deliberately NOT a caller: that one-shot CLI never wires a
+// ledger into Recall at all (see wireRecall — only the serve path calls it), so
+// outcome decay is off there by construction rather than by misconfiguration, and
+// warning about it would be noise. `lore curate` already has its own ledger
+// startup report (LogLedgerStartup).
+func TestRecallDecayWarningIsEmittedOnceAtStartup(t *testing.T) {
+	const guarded = "RecallDecayWarning"
+	allowed := map[string]bool{"RunServe": true}
+
+	files, err := filepath.Glob(filepath.Join(".", "*.go"))
+	if err != nil {
+		t.Fatalf("glob: %v", err)
+	}
+	fset := token.NewFileSet()
+	calls := map[string]int{}
+
+	for _, path := range files {
+		if strings.HasSuffix(path, "_test.go") {
+			continue
+		}
+		src, err := os.ReadFile(path) //nolint:gosec // test-owned path in this package
+		if err != nil {
+			t.Fatalf("read %s: %v", path, err)
+		}
+		if !strings.Contains(string(src), guarded) {
+			continue
+		}
+		f, err := parser.ParseFile(fset, path, src, 0)
+		if err != nil {
+			t.Fatalf("parse %s: %v", path, err)
+		}
+		for _, decl := range f.Decls {
+			fn, ok := decl.(*ast.FuncDecl)
+			if !ok || fn.Body == nil || fn.Name.Name == guarded {
+				continue
+			}
+			ast.Inspect(fn.Body, func(n ast.Node) bool {
+				call, ok := n.(*ast.CallExpr)
+				if !ok {
+					return true
+				}
+				id, ok := call.Fun.(*ast.Ident)
+				if !ok || id.Name != guarded {
+					return true
+				}
+				calls[fn.Name.Name]++
+				if !allowed[fn.Name.Name] {
+					t.Errorf("%s: %s calls %s — it must be raised once on the serve startup path, "+
+						"not per investigation", filepath.Base(path), fn.Name.Name, guarded)
+				}
+				return true
+			})
+		}
+	}
+
+	if calls["RunServe"] != 1 {
+		t.Fatalf("RunServe must call %s exactly once (got %d) — otherwise the startup warning "+
+			"is either absent or duplicated", guarded, calls["RunServe"])
+	}
 }

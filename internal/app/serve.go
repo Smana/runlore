@@ -178,6 +178,14 @@ func RunServe(version string, args []string) error {
 	if cfg.Outcome.LedgerPath != "" {
 		log.Info("outcome ledger enabled", "path", cfg.Outcome.LedgerPath, "max_events", maxEvents)
 	}
+	// A ledger that never accumulates ground truth leaves instant recall's outcome
+	// gate a no-op for every entry (it is fail-safe by design, so it degrades to
+	// "allow") and the retirement pass with nothing to propose — silently. Say it
+	// once here, at startup, rather than per investigation. See RecallDecayWarning
+	// for what this can and cannot establish about the two ground-truth channels.
+	if msg := RecallDecayWarning(cfg); msg != "" {
+		log.Warn(msg)
+	}
 
 	// Built ONCE and shared: a second Deps means a second catalog, hence a second
 	// git-sync goroutine racing the first on the same on-disk checkout.

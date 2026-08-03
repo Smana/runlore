@@ -91,6 +91,58 @@ func WebhookAuthWarning(alertmanagerEnabled bool, webhookToken string, mode conf
 		"reachable beyond trusted networks (docs/security-model.md)"
 }
 
+// RecallDecayWarning decides the startup warning for a learning loop whose
+// feedback edge cannot be shown to accumulate ground truth, returning "" when no
+// warning is warranted.
+//
+// Instant recall's Gate 3 weighs a candidate entry by its recorded track record,
+// and is deliberately fail-safe: an entry the outcome ledger has never seen scores
+// factor 1 and fires (absence of evidence must never block a recall). The
+// corollary is that a ledger which never accumulates ground truth turns that gate
+// into a silent no-op for EVERY entry — and the retirement pass, which shares the
+// same factor and floor, into one that can never propose anything. Trust stops
+// being derived from whether the entry actually worked, which is the claim the
+// whole learning loop rests on.
+//
+// Ground truth reaches the ledger through two channels, and only one of them is
+// observable from here:
+//
+//   - Human 👍/👎 feedback — opt-in on both notifiers, so its state IS in this
+//     config.
+//   - Resolve events from the incident source — NOT determinable at startup.
+//     `sources` records which adapters are enabled, not whether they emit
+//     resolves, and Alertmanager's `send_resolved` lives in the operator's
+//     receiver config, which RunLore never reads. Resolvability is decided
+//     per event from the fingerprint at record time (see the ledger.Open call in
+//     investigate.go), a runtime fact this function cannot anticipate.
+//
+// So the warning names the risk it can actually establish — neither feedback
+// channel is on, leaving an unverifiable resolve channel as the only remaining
+// source of truth — and explicitly does not claim resolves never arrive. It stays
+// a warning, never a hard failure: a deployment whose Alertmanager does send
+// resolves is correctly configured.
+//
+// Silent when instant recall is off (nothing recalls, so there is no trust to
+// decay) or when outcome.ledger_path is unset (the operator turned the learning
+// loop off, which `lore curate` likewise reports as an info, not a warning).
+func RecallDecayWarning(cfg *config.Config) string {
+	if !cfg.Catalog.InstantRecall.Enabled || cfg.Outcome.LedgerPath == "" {
+		return ""
+	}
+	if cfg.Notify.Slack.FeedbackButtons || cfg.Notify.Matrix.FeedbackReactions {
+		return ""
+	}
+	return "instant recall is enabled with an outcome ledger, but no feedback channel is on " +
+		"(notify.slack.feedback_buttons and notify.matrix.feedback_reactions are both off): the only " +
+		"remaining way an entry can earn or lose trust is a resolved-alert webhook from your incident " +
+		"source, and whether yours sends those is not in this config — RunLore cannot tell from here. " +
+		"Where they do not arrive, recall confidence never moves and no entry is ever proposed for " +
+		"retirement: a knowledge entry that has stopped working keeps being recalled at full trust. " +
+		"Turn on notify.slack.feedback_buttons or notify.matrix.feedback_reactions, and keep " +
+		"outcome.ledger_path on a persistent volume so what it records survives a restart " +
+		"(docs/concepts/learning-loop.md)"
+}
+
 // RequirePagerDutyAuth is the PagerDuty analogue of RequireWebhookAuth. The
 // PagerDuty source authenticates /webhook/pagerduty with its own
 // X-PagerDuty-Signature verification (not the shared server.webhook_token_env
