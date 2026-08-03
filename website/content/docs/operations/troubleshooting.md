@@ -136,13 +136,22 @@ Instant recall requires `catalog.instant_recall.enabled: true` **and** a confide
   candidates were rejected:
   | `reason` | meaning | lever |
   |---|---|---|
-  | `no_resource_match` | top hit didn't match the incident's workload | `instant_recall.require_workload_match` |
-  | `low_margin` | top hit too close to the runner-up (ambiguous) | `instant_recall.margin_gap` (default 1.0) |
+  | `no_resource_match` | no candidate's stored resource agreed with the incident's workload — the reranker was never reached | `instant_recall.require_workload_match` |
+  | `rerank_no_signal` | retrieval surfaced nothing plausible, so the paid ranking call was skipped | `instant_recall.rerank_min_score` (default 0.1) |
+  | `rerank_low_confidence` | the reranker returned no match, a confidence under the bar, or an error | `instant_recall.rerank_threshold` (default 0.7) |
+  | `low_margin` | **legacy gate only** (`rerank: false`) — top hit too close to the runner-up | `instant_recall.margin_gap` (default 1.0) |
   | `low_outcome` | the entry's real-world resolve-rate decayed below the floor | `instant_recall.outcome_floor` (default 0.5) |
-- `runlore_recall_score` (BM25 at the decision point) sitting below `instant_recall.min_score`
-  (default 1.0) ⇒ the catalog has no strong match yet. Recall **compounds** — it improves as merged
-  PRs accrete. A cold catalog legitimately won't recall.
-- Decision detail is logged at `msg="instant recall decision"` with `score`, `margin`, `confidence`.
+- **Check which gate is live before tuning anything.** The LLM reranker is **on by default** once
+  instant recall is enabled, and it *replaces* the BM25-magnitude gate — so on a default install
+  `min_score`, `margin_gap` and `solo_floor` play no part in the fire decision and tuning them
+  changes nothing. They apply only under `instant_recall.rerank: false`.
+- `runlore_recall_score` (BM25 at the decision point) is still recorded under the reranker, but there
+  it only *ranks* candidates: a score too low to spend a call on shows up as `rerank_no_signal`
+  against `rerank_min_score` (default 0.1), not against `min_score`. Either way a cold catalog
+  legitimately won't recall — recall **compounds** as merged PRs accrete.
+- Decision detail is logged at `msg="instant recall decision"` with `score`, `margin`, `confidence`;
+  under the reranker the fire decision itself is logged at `msg="recall reranker decision"` with
+  `match`, `entry_id`, `confidence` and the model's own one-line `reason`.
 - A recalled answer that fails the adversarial verify pass falls through to a full investigation:
   `msg="instant recall rejected by verify; running full investigation"`.
 
