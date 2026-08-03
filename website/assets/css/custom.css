@@ -108,6 +108,35 @@
      rather than a hole punched in the layout. */
   box-shadow: 0 10px 34px -18px rgba(15, 23, 42, 0.55);
 }
+/* These cards carry real text — a root cause, a token footer — at roughly 6px
+   in a half-width column (see the .rl-shots note above). Rather than shrink the
+   grid, each shot links to its own full-size file: detail on demand, no JS, no
+   lightbox library, and it still works if scripting is off or the click becomes
+   a long-press. The cursor and the lift are the only affordance that says so. */
+.rl-shot-zoom {
+  display: block;
+  cursor: zoom-in;
+  border-radius: 12px;
+  transition: transform 0.18s ease, box-shadow 0.18s ease;
+}
+.rl-shot-zoom:hover,
+.rl-shot-zoom:focus-visible {
+  transform: translateY(-2px);
+}
+.rl-shot-zoom:hover img,
+.rl-shot-zoom:focus-visible img {
+  border-color: rgba(20, 201, 166, 0.55);
+  box-shadow: 0 16px 40px -16px rgba(15, 23, 42, 0.7);
+}
+.rl-shot-zoom:focus-visible {
+  outline: 2px solid #14c9a6;
+  outline-offset: 3px;
+}
+@media (prefers-reduced-motion: reduce) {
+  .rl-shot-zoom { transition: none; }
+  .rl-shot-zoom:hover,
+  .rl-shot-zoom:focus-visible { transform: none; }
+}
 .rl-shot figcaption {
   margin-top: 0.7rem;
   font-size: 14px;
