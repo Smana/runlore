@@ -5,11 +5,14 @@ package eval
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"log/slog"
 	"os"
 	"path/filepath"
+	"reflect"
 	"slices"
+	"strings"
 	"testing"
 
 	"github.com/Smana/runlore/internal/providers"
@@ -296,5 +299,359 @@ func TestCampaignJSON(t *testing.T) {
 	}
 	if len(got.Cases) != 1 || got.Cases[0].Name != "harbor" || !got.Cases[0].Reached {
 		t.Fatalf("unexpected case rows: %+v", got.Cases)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Knowledge-commons grounding
+//
+// The commons has exactly one claimed value: it grounds kb_search mid-loop so a
+// fresh deployment has something to reason from before it has curated anything of
+// its own (website/content/docs/concepts/knowledge-commons.md). Everything pinned
+// until now was the NEGATIVE half of that promise — a commons entry can never fire
+// instant recall. These tests pin the replay wiring the positive half needs:
+// a case may load a SECOND, commons root, its entries are marked as such, they
+// reach the model only through kb_search, and recall still refuses them.
+// ---------------------------------------------------------------------------
+
+// recordingModel replays a scripted sequence of responses AND keeps every request it
+// was handed, so a test can assert what the loop actually put in front of the model:
+// the tool specs it was offered, and the tool OUTPUT it read back. Asserting on the
+// finding alone cannot distinguish "the playbook grounded the answer" from "the
+// scripted answer happened to say the right words".
+type recordingModel struct {
+	resp []providers.CompletionResponse
+	i    int
+	reqs []providers.CompletionRequest
+}
+
+func (m *recordingModel) Complete(_ context.Context, req providers.CompletionRequest) (providers.CompletionResponse, error) {
+	m.reqs = append(m.reqs, req)
+	if m.i >= len(m.resp) {
+		return providers.CompletionResponse{}, fmt.Errorf("recordingModel: unscripted call #%d", m.i+1)
+	}
+	r := m.resp[m.i]
+	m.i++
+	return r, nil
+}
+
+// toolText concatenates every tool result the loop fed back to the model.
+func (m *recordingModel) toolText() string {
+	var b strings.Builder
+	for _, r := range m.reqs {
+		for _, msg := range r.Messages {
+			if msg.Role == "tool" {
+				b.WriteString(msg.Content + "\n")
+			}
+		}
+	}
+	return b.String()
+}
+
+// offeredTools lists the tool names advertised on the first completion.
+func (m *recordingModel) offeredTools() []string {
+	if len(m.reqs) == 0 {
+		return nil
+	}
+	names := make([]string, 0, len(m.reqs[0].Tools))
+	for _, s := range m.reqs[0].Tools {
+		names = append(names, s.Name)
+	}
+	return names
+}
+
+// kbSearch scripts one kb_search tool call.
+func kbSearch(query string) providers.CompletionResponse {
+	return providers.CompletionResponse{ToolCalls: []providers.ToolCall{
+		{ID: "kb", Name: "kb_search", Args: `{"query":"` + query + `"}`}}}
+}
+
+// commonsMarker is a sentence that exists only in the commons fixture, so finding it
+// in a tool result proves the shared corpus (not the case's recorded evidence) is
+// what reached the model.
+const commonsMarker = "The evicted pod is usually not the culprit"
+
+// writeCommonsFixture writes a resource-less generic playbook under dir/commons —
+// the shape every real commons entry has — and returns "commons".
+func writeCommonsFixture(t *testing.T, dir string) string {
+	t.Helper()
+	cd := filepath.Join(dir, "commons")
+	if err := os.MkdirAll(cd, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	entry := `---
+type: Playbook
+title: Node under memory pressure evicting pods
+description: the kubelet evicts pods with reason Evicted when a node reports MemoryPressure
+tags: [node, memory, pressure, eviction, evicted, overcommit, requests]
+---
+
+# Symptom
+
+Pods on one node show Status: Evicted with "The node was low on resource: memory".
+` + commonsMarker + `.
+
+# Not covered
+
+- Container-level OOMKills at a container's own limit.
+`
+	if err := os.WriteFile(filepath.Join(cd, "node-memory-pressure-eviction.md"), []byte(entry), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return "commons"
+}
+
+// TestLoadParsesCommonsDir pins the schema addition: commons_dir is a DISTINCT root
+// from catalog_dir. Pointing catalog_dir at a commons snapshot would load it as the
+// operator's own catalog — entries unmarked, free to fire recall — which is the exact
+// opposite of what a commons case must exercise.
+func TestLoadParsesCommonsDir(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "c.yaml"), []byte(`
+name: grounded
+prompt: node is evicting pods
+commons_dir: fixtures/commons-memory
+expect_recall: rejected
+tools:
+  pod_status: "Evicted"
+expected:
+  must_contain: [memory]
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cases, err := Load(dir)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if len(cases) != 1 || cases[0].CommonsDir != "fixtures/commons-memory" {
+		t.Fatalf("commons_dir not parsed: %+v", cases[0])
+	}
+	if cases[0].CatalogDir != "" {
+		t.Fatalf("commons_dir must not populate catalog_dir: %+v", cases[0])
+	}
+	if !cases[0].hasCatalog() {
+		t.Fatal("a commons-only case must still count as catalog-bearing (it seeds recall + kb_search)")
+	}
+}
+
+// TestRunOneCommonsGroundsKBSearchButNeverFiresRecall drives the real Catalog +
+// Recall + kb_search stack through a commons-only case and asserts BOTH halves of
+// the commons contract on the replay path:
+//
+//	positive — the playbook text reaches the model mid-loop, through kb_search;
+//	negative — instant recall refuses it, so it can never answer the incident.
+//
+// The request deliberately carries NO workload. That is the matchScopeless tier, the
+// one place a resource-less entry structurally agrees with an incident — so the
+// rejection here is caused by the provenance skip in recall.go and nothing else.
+func TestRunOneCommonsGroundsKBSearchButNeverFiresRecall(t *testing.T) {
+	dir := t.TempDir()
+	commons := writeCommonsFixture(t, dir)
+	base := Case{
+		Name:     "node-eviction",
+		Prompt:   "node ip-10-0-22-115 is at 97% memory utilisation and the kubelet is evicting pods",
+		Recall:   &CaseRecall{MinScore: 0.01, SoloFloor: 0.01, MarginGap: 0.01},
+		Tools:    map[string]string{"pod_status": "checkout-api-abc  Failed  Evicted  The node was low on resource: memory"},
+		Expected: Expected{MustContain: []string{"memory"}},
+		dir:      dir,
+	}
+
+	c := base
+	c.CommonsDir = commons
+	c.ExpectRecall = "rejected"
+	model := &recordingModel{resp: []providers.CompletionResponse{
+		kbSearch("pods evicted node low on memory"),
+		findings("the node ran out of memory because a neighbour overcommitted it"),
+		verdict("keep"),
+	}}
+	res := (&Runner{Model: model, Log: discardLog()}).runOne(context.Background(), c)
+	if res.RecallFired {
+		t.Fatalf("a COMMONS entry fired instant recall through the replay runner: %+v", res)
+	}
+	if !slices.Contains(model.offeredTools(), "kb_search") {
+		t.Fatalf("a commons case must offer kb_search — it is the ONLY path the commons reaches the model, got %v", model.offeredTools())
+	}
+	if !strings.Contains(model.toolText(), commonsMarker) {
+		t.Fatalf("the commons playbook never reached the model mid-loop; tool results were:\n%s", model.toolText())
+	}
+	if !res.Pass {
+		t.Fatalf("commons case should pass: %+v", res)
+	}
+
+	// THE CONTROL. Same corpus, same request, same gates — loaded as the operator's
+	// OWN catalog instead. Recall fires and short-circuits, so the rejection above is
+	// attributable to provenance alone and not to a corpus recall could never match.
+	// Without this, expect_recall: rejected would pass just as happily on an empty
+	// index and assert nothing.
+	own := base
+	own.CatalogDir = commons
+	own.ExpectRecall = "short_circuit"
+	ownModel := &recordingModel{resp: []providers.CompletionResponse{verdict("keep")}}
+	ownRes := (&Runner{Model: ownModel, Log: discardLog()}).runOne(context.Background(), own)
+	if !ownRes.RecallFired || !ownRes.RecallShortCircuit {
+		t.Fatalf("control: the identical corpus loaded as the operator's OWN catalog must fire recall, else the commons rejection proves nothing: %+v", ownRes)
+	}
+}
+
+// TestRunOneWithoutCommonsDirOffersNoKBSearch is the additivity guard: a case that
+// sets only catalog_dir replays exactly as it did before commons_dir existed — no
+// kb_search tool, so the four shipped recall cases keep their tool surface.
+func TestRunOneWithoutCommonsDirOffersNoKBSearch(t *testing.T) {
+	dir := t.TempDir()
+	c := Case{
+		Name:       "catalog-only",
+		Prompt:     "eval-victim pods not starting",
+		Workload:   &CaseWorkload{Namespace: "runlore-eval", Name: "eval-victim"},
+		CatalogDir: writeKBFixture(t, dir, "other-ns/other-app"),
+		Recall:     &CaseRecall{MinScore: 0.01, SoloFloor: 0.01, MarginGap: 0.01},
+		Tools:      map[string]string{"what_changed": "nothing relevant"},
+		Expected:   Expected{MustContain: []string{"fresh"}},
+		dir:        dir,
+	}
+	model := &recordingModel{resp: []providers.CompletionResponse{
+		findings("fresh investigation result"), verdict("keep"),
+	}}
+	res := (&Runner{Model: model, Log: discardLog()}).runOne(context.Background(), c)
+	if slices.Contains(model.offeredTools(), "kb_search") {
+		t.Fatalf("a catalog_dir-only case must replay with its previous tool surface, got %v", model.offeredTools())
+	}
+	if !res.Pass {
+		t.Fatalf("catalog-only case should still pass: %+v", res)
+	}
+}
+
+// TestShippedCommonsGroundingPairIsControlled guards the shipped A/B: the two cases
+// must differ in the commons corpus and NOTHING ELSE. A paired eval whose halves
+// drift apart stops measuring the commons and starts measuring the drift, and the
+// published delta would keep looking like a number the whole time.
+func TestShippedCommonsGroundingPairIsControlled(t *testing.T) {
+	cases, err := Load(filepath.Join("..", "..", "examples", "eval"))
+	if err != nil {
+		t.Fatalf("Load examples/eval: %v", err)
+	}
+	var with, without *Case
+	for i := range cases {
+		switch cases[i].Name {
+		case "node-eviction-with-commons":
+			with = &cases[i]
+		case "node-eviction-no-commons":
+			without = &cases[i]
+		}
+	}
+	if with == nil || without == nil {
+		t.Fatal("the paired commons cases are not both present in examples/eval")
+	}
+	if with.CommonsDir == without.CommonsDir {
+		t.Fatal("the pair must point at DIFFERENT commons roots — that is the only variable")
+	}
+	if with.Prompt != without.Prompt {
+		t.Fatal("paired cases must replay the same incident prompt")
+	}
+	if !reflect.DeepEqual(with.Tools, without.Tools) {
+		t.Fatal("paired cases must replay byte-identical recorded evidence")
+	}
+	if !reflect.DeepEqual(with.Expected, without.Expected) {
+		t.Fatal("paired cases must be scored against the same expectation")
+	}
+	if !reflect.DeepEqual(with.Recall, without.Recall) || with.ExpectRecall != without.ExpectRecall {
+		t.Fatal("paired cases must use the same recall gates and assertion")
+	}
+	if with.Workload != nil || without.Workload != nil {
+		t.Fatal("the pair must stay workload-LESS: the scopeless tier is what makes expect_recall: rejected test the provenance skip")
+	}
+	if len(with.Expected.RootCauseEntities) == 0 || len(with.Expected.Distractors) == 0 {
+		t.Fatal("the pair must be scored on entity precision (root_cause_entities + distractors), not keyword overlap")
+	}
+	if with.ExpectRecall != "rejected" {
+		t.Fatalf("the commons case must assert expect_recall: rejected, got %q", with.ExpectRecall)
+	}
+}
+
+// TestShippedCommonsCorpusIsGenericAndInert pins the fixture's load-bearing
+// properties: the "with" corpus is real generic playbooks (resource-less, scoped by a
+// "# Not covered" section) that load as COMMONS entries, and the "without" corpus is
+// genuinely empty so the baseline models a fresh deployment.
+func TestShippedCommonsCorpusIsGenericAndInert(t *testing.T) {
+	cases, err := Load(filepath.Join("..", "..", "examples", "eval"))
+	if err != nil {
+		t.Fatalf("Load examples/eval: %v", err)
+	}
+	checked := 0
+	for _, c := range cases {
+		if c.Name != "node-eviction-with-commons" && c.Name != "node-eviction-no-commons" {
+			continue
+		}
+		checked++
+		cat, cleanup, err := c.buildCatalog(context.Background())
+		if cleanup != nil {
+			defer cleanup()
+		}
+		if err != nil {
+			t.Fatalf("%s: build catalog: %v", c.Name, err)
+		}
+		entries := cat.Entries()
+		if c.Name == "node-eviction-no-commons" {
+			if len(entries) != 0 {
+				t.Fatalf("the baseline must index NOTHING (a fresh deployment), got %d entries", len(entries))
+			}
+			continue
+		}
+		if len(entries) < 2 {
+			t.Fatalf("the commons corpus must hold several playbooks, got %d", len(entries))
+		}
+		for _, e := range entries {
+			if !e.Commons {
+				t.Fatalf("%s loaded UNMARKED — a commons_dir entry that is not Commons is free to fire recall", e.Path)
+			}
+			if e.Type != "Playbook" {
+				t.Fatalf("%s: commons entries are generic playbooks, got type %q", e.Path, e.Type)
+			}
+			if e.Resource != "" {
+				t.Fatalf("%s: a commons entry must be resource-less, got %q", e.Path, e.Resource)
+			}
+			if !strings.Contains(e.Body, "# Not covered") {
+				t.Fatalf("%s: scope discipline is load-bearing — every commons entry states its own boundary", e.Path)
+			}
+		}
+	}
+	// Without this the loop is vacuous: rename or delete either arm and every
+	// assertion above is simply skipped, leaving a green test guarding nothing.
+	if checked != 2 {
+		t.Fatalf("expected to check both arms of the commons pair, checked %d", checked)
+	}
+}
+
+// TestShippedCommonsCaseGroundsTheLoop replays the shipped commons case with a
+// scripted model — no API key, no network — so nightly CI cannot silently degrade to
+// "the commons was configured but never reached the model". It asserts the playbook
+// body is what kb_search handed back, and that recall still refused it.
+func TestShippedCommonsCaseGroundsTheLoop(t *testing.T) {
+	cases, err := Load(filepath.Join("..", "..", "examples", "eval"))
+	if err != nil {
+		t.Fatalf("Load examples/eval: %v", err)
+	}
+	var c *Case
+	for i := range cases {
+		if cases[i].Name == "node-eviction-with-commons" {
+			c = &cases[i]
+		}
+	}
+	if c == nil {
+		t.Fatal("examples/eval/node-eviction-with-commons.yaml not loaded")
+	}
+	model := &recordingModel{resp: []providers.CompletionResponse{
+		kbSearch("pods evicted node low on memory"),
+		findings("analytics/report-worker consumed the node: its memory request is 256Mi while it uses 7.1Gi, so the scheduler overcommitted ip-10-0-22-115 and the kubelet evicted its neighbours; raise its memory request"),
+		verdict("keep"),
+	}}
+	res := (&Runner{Model: model, Log: discardLog()}).runOne(context.Background(), *c)
+	if res.RecallFired {
+		t.Fatalf("the shipped commons case must never fire instant recall: %+v", res)
+	}
+	if !strings.Contains(model.toolText(), "The evicted pod is usually not the culprit") {
+		t.Fatalf("the shipped commons corpus never reached the model through kb_search:\n%s", model.toolText())
+	}
+	if !res.Pass {
+		t.Fatalf("the shipped commons case should pass on a finding that names the true consumer: %+v", res)
 	}
 }

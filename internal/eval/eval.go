@@ -8,11 +8,9 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
-	"path/filepath"
 	"sort"
 	"strings"
 
-	"github.com/Smana/runlore/internal/catalog"
 	"github.com/Smana/runlore/internal/investigate"
 	"github.com/Smana/runlore/internal/providers"
 )
@@ -32,8 +30,11 @@ func (r *Runner) runOne(ctx context.Context, c Case) Result {
 	// the replay exercises the closed recall→verify loop exactly as production does
 	// (BuildModelAndTools). Cases without a fixture replay with no recall, unchanged.
 	var recall *investigate.Recall
-	if c.CatalogDir != "" {
-		cat, err := catalog.New(filepath.Join(c.dir, c.CatalogDir))
+	if c.hasCatalog() {
+		cat, cleanup, err := c.buildCatalog(ctx)
+		if cleanup != nil {
+			defer cleanup()
+		}
 		if err != nil {
 			return Result{Name: c.Name, Missing: []string{"catalog fixture load error: " + err.Error()}}
 		}
@@ -46,6 +47,15 @@ func (r *Runner) runOne(ctx context.Context, c Case) Result {
 			RequireWorkloadMatch: rc.RequireWorkloadMatch,
 			OutcomePrior:         rc.OutcomePrior,
 			OutcomeFloor:         rc.OutcomeFloor,
+		}
+		// A commons case also needs kb_search, because grounding the mid-loop search is
+		// the ONLY thing the commons claims to do — recall refuses its entries by
+		// provenance, so without this tool the corpus could not reach the model at all
+		// and the case would measure nothing. Gated on CommonsDir rather than on the
+		// catalog being present so the shipped catalog_dir cases keep the exact tool
+		// surface they replay with today.
+		if c.CommonsDir != "" {
+			tools = append(tools, investigate.KBSearchTool{Catalog: cat})
 		}
 	}
 	var got providers.Investigation
@@ -302,7 +312,7 @@ func aggregateResults(c Case, results []Result) CaseAggregate {
 		Confidence:         medianFloat(confs),
 		Missing:            sortedSet(missSet),
 		OverClaimed:        sortedSet(ocSet),
-		HasRecall:          c.CatalogDir != "",
+		HasRecall:          c.hasCatalog(),
 		ExpectRecall:       c.ExpectRecall,
 		RecallFired:        fired,
 		RecallShortCircuit: shortCircuits,

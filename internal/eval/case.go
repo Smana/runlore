@@ -7,6 +7,7 @@
 package eval
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -14,6 +15,7 @@ import (
 
 	"gopkg.in/yaml.v3"
 
+	"github.com/Smana/runlore/internal/catalog"
 	"github.com/Smana/runlore/internal/providers"
 )
 
@@ -49,9 +51,23 @@ type Case struct {
 	// as production does — so the closed recall→verify loop is exercised mechanically in
 	// the replay eval. Absent ⇒ the case replays with no recall, unchanged.
 	CatalogDir string `yaml:"catalog_dir,omitempty"`
+	// CommonsDir, when set, points at a directory of knowledge-base markdown entries
+	// RELATIVE to the case file, loaded as the KNOWLEDGE COMMONS — a second, read-only
+	// root indexed alongside the operator's own (catalog.SetCommonsDir).
+	//
+	// It is deliberately NOT CatalogDir with a different name. Entries loaded through
+	// CatalogDir come back with Entry.Commons == false: they are the operator's own
+	// knowledge, and instant recall may answer an incident from them. Pointing
+	// CatalogDir at a commons snapshot would therefore replay an ordinary local
+	// catalog and quietly contradict the one guarantee the commons makes.
+	//
+	// Setting it also wires kb_search into the replay loop, because that is the ONLY
+	// route by which a commons entry can ever reach the model (recall refuses it by
+	// provenance). A case without this field keeps its previous tool surface exactly.
+	CommonsDir string `yaml:"commons_dir,omitempty"`
 	// Recall optionally tunes the recall gates for this case (mirrors config
 	// instant_recall). Absent (or a zero field) ⇒ the production default. Consulted only
-	// when CatalogDir is set.
+	// when a knowledge fixture is present (CatalogDir and/or CommonsDir).
 	Recall *CaseRecall `yaml:"recall,omitempty"`
 	// ExpectRecall asserts the recall outcome mechanically and fails the case when unmet:
 	//   short_circuit     — recall fired and its answer was delivered (loop skipped)
@@ -132,6 +148,49 @@ func Load(dir string) ([]Case, error) {
 
 func isYAML(name string) bool {
 	return strings.HasSuffix(name, ".yaml") || strings.HasSuffix(name, ".yml")
+}
+
+// hasCatalog reports whether the case ships any knowledge fixture — its own catalog,
+// a commons root, or both. It is what arms instant recall + the verify pass for the
+// replay, so a commons-only case is still recall-exercising (recall is consulted and
+// must REFUSE the commons entry; see Case.CommonsDir).
+func (c Case) hasCatalog() bool { return c.CatalogDir != "" || c.CommonsDir != "" }
+
+// buildCatalog loads the case's knowledge fixtures into a catalog wired the way
+// production is. The returned cleanup (nil when there is nothing to remove) must be
+// called by the caller once the catalog is done with.
+//
+// Without a commons root this is exactly the previous one-liner, so the shipped
+// catalog_dir cases replay unchanged. With one, the catalog is built the way the app
+// builds it — an empty catalog, a commons root set, then a reload — because
+// Entry.Commons is stamped during the reload's commons pass and nowhere else.
+//
+// A commons-only case gets a fresh EMPTY directory as the operator's own root, which
+// is not a workaround but the scenario itself: a deployment that has curated nothing
+// yet is the state the commons exists to cover.
+func (c Case) buildCatalog(ctx context.Context) (*catalog.Catalog, func(), error) {
+	if c.CommonsDir == "" {
+		cat, err := catalog.New(filepath.Join(c.dir, c.CatalogDir))
+		return cat, nil, err
+	}
+	own := filepath.Join(c.dir, c.CatalogDir)
+	var cleanup func()
+	if c.CatalogDir == "" {
+		d, err := os.MkdirTemp("", "runlore-eval-own-")
+		if err != nil {
+			return nil, nil, fmt.Errorf("empty own-catalog root: %w", err)
+		}
+		own, cleanup = d, func() { _ = os.RemoveAll(d) }
+	}
+	cat := catalog.NewEmpty()
+	cat.SetCommonsDir(filepath.Join(c.dir, c.CommonsDir))
+	if _, err := cat.ReloadContext(ctx, own); err != nil {
+		if cleanup != nil {
+			cleanup()
+		}
+		return nil, nil, fmt.Errorf("load commons root: %w", err)
+	}
+	return cat, cleanup, nil
 }
 
 // workload maps the case's optional workload to a providers.Workload (zero when unset).
