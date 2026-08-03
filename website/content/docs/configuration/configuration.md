@@ -189,13 +189,38 @@ incident webhook. Known keys: `alertmanager`, `gitops`, `pagerduty`, `custom`.
   **5** (candidates ranked per call; bounded for cost), `rerank_min_score` **0.1** (trivial
   retrieval-score floor below which the paid call is skipped — the cost guard). The call routes to
   **`model.verify`** when configured (cheaper/faster), else the main model. It costs ~1–2k tokens and
-  saves the ~100k of a full investigation when it fires. False-recall guards: it only ever ranks
-  candidates that already passed the structural filter, ignores any `entry_id` it did not offer
+  buys back a whole investigation when it fires — the recorded demo transcript's came to 7 calls /
+  ~15.6k tokens, and `max_tokens_per_investigation` caps a run at 100k. False-recall guards: it only
+  ever ranks candidates that already passed the structural filter, ignores any `entry_id` it did not offer
   (hallucination guard), and fails **safe** on a "no match", a low confidence, or a model error (fall
   through to a full investigation). Off ⇒ the BM25-magnitude gate is unchanged. The recalled answer
   still goes through live-state confirm + the adversarial verify pass, exactly as before — the reranker
   is a *retrieval-time* "which candidate + confident enough to short-circuit" decision, not a second
   verify.
+
+  **What it costs in steady state** (budget for this before enabling). The reranker sits *in front of*
+  the short-circuit, so the call is spent on every incident that reaches it — **including the ones
+  that do not fire**: a `match=false`, a confidence under `rerank_threshold`, or a model error has
+  already paid for the call before falling through to the full investigation — as has a `low_outcome`
+  rejection, which is decided *after* the ranking. A candidate that fails retrieval or the structural
+  filter never reaches the reranker at all; past that point the last guard is `rerank_min_score`, and
+  its default **0.1** sits at the *bottom* of the ~0.1–1.2 band real enriched BM25 scores occupy, so
+  it skips the call only when retrieval surfaced essentially nothing.
+  In practice, then, enabling instant recall adds **one model call to the floor
+  cost of nearly every investigation that has a structurally-agreeing candidate**, and buys back a
+  full investigation on the subset that fires. A fired recall is consequently **two** model calls —
+  rerank, then the verify pass (always on; no config key disables it — `model.verify` only *routes*
+  it to a cheaper tier) — not one. The one exception is the runner-up path: when outcome decay
+  rejects the ranked winner, a second (and final) ranking call runs over the remaining candidates, so
+  a recall that fires from the fallback costs **three**.
+  **Measure it, don't estimate it:** the reranker's traffic carries `provider="rerank"` on
+  `runlore_model_requests_total` and `runlore_model_request_duration_seconds`, so
+  `runlore_model_requests_total{provider="rerank"}` against `runlore_recall_hits_total` and
+  `runlore_recall_rejections_total{reason=~"rerank_low_confidence|low_outcome"}` gives you calls-paid
+  vs recalls-fired on your own corpus; `reason="no_resource_match"` tells you whether the reranker is
+  being reached at all (see [Observability]({{< relref "/docs/operations/observability.md" >}})).
+  If the ratio is bad, raise `rerank_min_score` toward your corpus's real score regime — that trades
+  recall coverage for calls not made.
 - `instant_recall.hybrid` (**EXPERIMENTAL**, off by default; needs `model.embeddings`) — switches recall
   to fused **BM25 + embedding** retrieval, gated on **cosine** similarity (`hybrid_min_score` default
   **0.80**, `hybrid_margin_gap` default **0.05**) instead of the BM25 magnitude. *Provenance:* the hybrid
