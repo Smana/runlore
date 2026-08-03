@@ -8,6 +8,71 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 RunLore is **pre-1.0 and under active development** — there are no tagged releases
 yet, so everything currently lives under `[Unreleased]`.
 
+## [0.12.0](https://github.com/Smana/runlore/compare/v0.11.0...v0.12.0) (2026-08-03)
+
+
+### Features
+
+* **catalog:** a second read-only catalog root for shared knowledge ([#424](https://github.com/Smana/runlore/issues/424)) ([dc53410](https://github.com/Smana/runlore/commit/dc534105f403bd4974c8de65e9881060c71837e3))
+* **demo:** --catalog shows the instant-recall half of the loop ([#418](https://github.com/Smana/runlore/issues/418)) ([b1724c3](https://github.com/Smana/runlore/commit/b1724c3076d55737324ffd8742e1cc1b7d8fe31f))
+* **demo:** --notify delivers the replayed findings to real notifiers ([#417](https://github.com/Smana/runlore/issues/417)) ([ac095b9](https://github.com/Smana/runlore/commit/ac095b9d0d4e711a3860718a56387f4cea4956da))
+* **demo:** a real root cause in one command — no cluster, no API key ([#396](https://github.com/Smana/runlore/issues/396)) ([aa9dba4](https://github.com/Smana/runlore/commit/aa9dba44d338b8c0e980b6199468d7f8e032d7c7))
+* **eval:** publish cost per investigation and an honest recall scorecard ([#397](https://github.com/Smana/runlore/issues/397)) ([db0db73](https://github.com/Smana/runlore/commit/db0db73be0bfb257cba44f7f18e2b0f2f32ff9bf))
+* **forge:** GitLab forge provider for the Learn loop ([#404](https://github.com/Smana/runlore/issues/404)) ([93dc736](https://github.com/Smana/runlore/commit/93dc7364dd3286bb9c61b9dc5410f3233b611a45))
+* **kb:** move the commons to its own repo, skip repo docs in the loader ([#425](https://github.com/Smana/runlore/issues/425)) ([4221b35](https://github.com/Smana/runlore/commit/4221b354e1349b39246c71f8ee390612a09a9495))
+* **kb:** ship a generic knowledge commons bundle ([#423](https://github.com/Smana/runlore/issues/423)) ([1ebe788](https://github.com/Smana/runlore/commit/1ebe788e17c711ae3e9ca0bbb2510844ca8d9045))
+* **logs:** Elasticsearch and OpenSearch logs providers ([#408](https://github.com/Smana/runlore/issues/408)) ([fa88976](https://github.com/Smana/runlore/commit/fa88976b5d4f31a2a5a1c5817364ac6b05e0a90b))
+* **source:** register Grafana Alerting as a first-class webhook source ([#405](https://github.com/Smana/runlore/issues/405)) ([fe920b4](https://github.com/Smana/runlore/commit/fe920b440cccc99651439c8cde7f1df5dace062e))
+
+
+### Bug Fixes
+
+* **app:** stop misdirecting GitLab operators on the Phase-2 grooming gap ([#410](https://github.com/Smana/runlore/issues/410)) ([af0880e](https://github.com/Smana/runlore/commit/af0880eaa470e9bddc5ea9f25d27bb5614c66c5c))
+* **assets:** outline the wordmark text so it stops rendering in a fallback font ([#429](https://github.com/Smana/runlore/issues/429)) ([d1cebf4](https://github.com/Smana/runlore/commit/d1cebf424bb827270f9271beb8cd7b98b20e41d5))
+* **catalog:** keep the commons indexed, default its interval, reject nested roots ([#434](https://github.com/Smana/runlore/issues/434)) ([5a96fc3](https://github.com/Smana/runlore/commit/5a96fc31ac2360c9747743e78dbf85d463c612a2))
+* **cli:** lore kb search reads the commons, not just your own catalog ([#427](https://github.com/Smana/runlore/issues/427)) ([c9a4c5d](https://github.com/Smana/runlore/commit/c9a4c5d89ec462c10b03139a0a2d9198185b658b))
+* **cloud:** retry unscoped when a CloudTrail resource filter matches nothing ([#416](https://github.com/Smana/runlore/issues/416)) ([0e0d5e3](https://github.com/Smana/runlore/commit/0e0d5e3907797b03e1326e564442df82bf8fd66d))
+* **config:** run the env and demo paths through the whole of Load's contract ([#436](https://github.com/Smana/runlore/issues/436)) ([1b213de](https://github.com/Smana/runlore/commit/1b213dea68aa720cdc6b2f2a686e47b2c95d5305))
+* **demo:** --catalog demonstrates instant recall, not recall being withdrawn ([#438](https://github.com/Smana/runlore/issues/438)) ([c514c02](https://github.com/Smana/runlore/commit/c514c02b822146b51db19ec2daecb22754995c72))
+* **demo:** scenarios carry an alert title, so a recalled card is not slug-titled ([#421](https://github.com/Smana/runlore/issues/421)) ([62eb461](https://github.com/Smana/runlore/commit/62eb461399e29ea777c9b77d0991c191e3bf0adc))
+* **gitlab:** stop retrying writes, report pagination truncation, correct the docs ([#430](https://github.com/Smana/runlore/issues/430)) ([8c91590](https://github.com/Smana/runlore/commit/8c91590152fc19ec4bd2563c97d69c8fe4c9fced))
+* **logs:** a zero-match index pattern is not silence ([#433](https://github.com/Smana/runlore/issues/433)) ([f3a474a](https://github.com/Smana/runlore/commit/f3a474a554bef3e146a208837e66f67bf89fc6ef))
+* **notify:** reorder the incident card so the answer leads, not the metadata ([#399](https://github.com/Smana/runlore/issues/399)) ([042eaa6](https://github.com/Smana/runlore/commit/042eaa62971bd01198045486f1042c0597e26630))
+* **notify:** stop the card asserting a cause it never established ([#432](https://github.com/Smana/runlore/issues/432)) ([d2c2de8](https://github.com/Smana/runlore/commit/d2c2de8b5af5d2b3056d4f2de02f3511de839124))
+* **notify:** the card must state its own conclusion, not just the alert ([#409](https://github.com/Smana/runlore/issues/409)) ([37b7d63](https://github.com/Smana/runlore/commit/37b7d63c03ca8089183004d9de67bf27dbf77635))
+* **prompt:** forbid speculating a cause in data_gaps ([#420](https://github.com/Smana/runlore/issues/420)) ([21d8fcf](https://github.com/Smana/runlore/commit/21d8fcfa073cbf9cde5ca4eb2eb9954ed6ee5040))
+* **recall:** close two fail-open paths in the instant-recall short-circuit ([#431](https://github.com/Smana/runlore/issues/431)) ([68aa8c2](https://github.com/Smana/runlore/commit/68aa8c263381b5d6bfee1c7a83cd6032630cd0c3))
+* **recall:** fail closed when the adversarial verify pass cannot run ([#395](https://github.com/Smana/runlore/issues/395)) ([a96d560](https://github.com/Smana/runlore/commit/a96d56035632a883bc5b95dc340863d15b3e7cdf))
+* **recall:** one catalog, one recall gate — serve built both twice ([#414](https://github.com/Smana/runlore/issues/414)) ([0300a8f](https://github.com/Smana/runlore/commit/0300a8f42f770dc7e905b3927537c89255af6b81))
+* **tools:** name the lever when pod_logs is denied by RBAC ([#415](https://github.com/Smana/runlore/issues/415)) ([785739d](https://github.com/Smana/runlore/commit/785739d53b5a86d7e13bcea96316f44b1625dc1f))
+
+
+### Documentation
+
+* **chart:** mark both allowedCIDRs entries as placeholders ([#419](https://github.com/Smana/runlore/issues/419)) ([99acbc6](https://github.com/Smana/runlore/commit/99acbc659ecdabe10dbec8c4c62e85cd5609c280))
+* **distribution:** stage the three upstream listing artifacts, unsubmitted ([#428](https://github.com/Smana/runlore/issues/428)) ([eb75a54](https://github.com/Smana/runlore/commit/eb75a54e579ca924d93af1d558e7191c2f03d605))
+* **integrations:** group the 27 integration pages by type ([#411](https://github.com/Smana/runlore/issues/411)) ([ee3bded](https://github.com/Smana/runlore/commit/ee3bded0f2d1fad432b949543283ca7405b98423))
+* **integrations:** integrations section, three-tier Getting Started, and drift guards ([#403](https://github.com/Smana/runlore/issues/403)) ([e757be4](https://github.com/Smana/runlore/commit/e757be4f7c2c5f3138ff35804642cd66418cc04b))
+* preserve the improvement-report specs and plans ([#422](https://github.com/Smana/runlore/issues/422)) ([e96ef8a](https://github.com/Smana/runlore/commit/e96ef8a5398fd63b388f637285a2eeed6bcd7a73))
+* refresh the notification screenshots and show them on the homepage ([#426](https://github.com/Smana/runlore/issues/426)) ([ea9bed0](https://github.com/Smana/runlore/commit/ea9bed084ccadb8307a18d4a57153f9b7874b263))
+* **website:** add social share card (og:image) for runlore.io ([#383](https://github.com/Smana/runlore/issues/383)) ([2ce5718](https://github.com/Smana/runlore/commit/2ce57182fc566352a0b8a5e2f96ba2828e716042))
+* **website:** drop the superlative from the eval eyebrow ([#401](https://github.com/Smana/runlore/issues/401)) ([dc0559e](https://github.com/Smana/runlore/commit/dc0559e4c7befbf32a4d5903d42be001d2a24554))
+* **website:** lead with knowledge ownership, not investigation speed ([#398](https://github.com/Smana/runlore/issues/398)) ([7a86ef0](https://github.com/Smana/runlore/commit/7a86ef0854d1a223c23d0fe9bedbc1a0694b9476))
+* **website:** lead with the claim an SRE nods at ([#400](https://github.com/Smana/runlore/issues/400)) ([9e8b592](https://github.com/Smana/runlore/commit/9e8b5920966b8c3e472508b03876ca73f91c5c66))
+* **website:** move the eval scorecard line out of the hero ([#407](https://github.com/Smana/runlore/issues/407)) ([192b634](https://github.com/Smana/runlore/commit/192b634e28487c09e8bfca9fc3fb01aff86172d8))
+* **website:** put the eval scorecard in the top nav ([#402](https://github.com/Smana/runlore/issues/402)) ([c1711a1](https://github.com/Smana/runlore/commit/c1711a1a2dd46eb350a24a23cddb249c164afac5))
+
+
+### Code Refactoring
+
+* collapse duplicated fallback and probe logic across the v0.11.0..HEAD surface ([#435](https://github.com/Smana/runlore/issues/435)) ([5505782](https://github.com/Smana/runlore/commit/55057824594638fadc5f0f1432efe95536cde6e8))
+
+
+### Continuous Integration
+
+* acknowledge the known screenshot staleness instead of blocking on it ([#439](https://github.com/Smana/runlore/issues/439)) ([747ac7c](https://github.com/Smana/runlore/commit/747ac7c0dcfadaad22260217d8afe2a0f34f82d3))
+* fail when the shipped screenshots predate the card renderer ([#413](https://github.com/Smana/runlore/issues/413)) ([c6232cc](https://github.com/Smana/runlore/commit/c6232cc44ac3f696d8bec2353148576b4c72a721))
+
 ## [0.11.0](https://github.com/Smana/runlore/compare/v0.10.0...v0.11.0) (2026-07-24)
 
 
