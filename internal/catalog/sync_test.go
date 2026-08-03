@@ -71,14 +71,53 @@ func initBareUpstream(t *testing.T) string {
 	return src
 }
 
+// openUpstream opens the test upstream repo at src.
+func openUpstream(t *testing.T, src string) *git.Repository {
+	t.Helper()
+	repo, err := git.PlainOpen(src)
+	if err != nil {
+		t.Fatalf("open upstream %s: %v", src, err)
+	}
+	return repo
+}
+
+// upstreamHead returns the current HEAD commit of the upstream repo at src.
+func upstreamHead(t *testing.T, src string) plumbing.Hash {
+	t.Helper()
+	head, err := openUpstream(t, src).Head()
+	if err != nil {
+		t.Fatalf("upstream %s head: %v", src, err)
+	}
+	return head.Hash()
+}
+
+// plantCorruptMirror writes a `.git` that PlainOpen cannot read while Stat still
+// sees it — the "an earlier clone was killed mid-write" state Sync has to recover
+// from rather than erroring on every future poll forever.
+func plantCorruptMirror(t *testing.T, dir string) {
+	t.Helper()
+	if err := os.WriteFile(filepath.Join(dir, ".git"), []byte("garbage"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// waitCycle hands Run one poll tick. Run only receives from the (unbuffered) tick
+// channel BETWEEN poll cycles, so a send that completes proves the previous cycle
+// has finished. That is the synchronisation point which replaces every sleep.
+func waitCycle(t *testing.T, tick chan<- time.Time) {
+	t.Helper()
+	select {
+	case tick <- time.Time{}:
+	case <-time.After(30 * time.Second): // a hang, not a timing assumption
+		t.Fatal("Run never came back for a tick — the poll loop is stuck")
+	}
+}
+
 // commitToUpstream opens the repo at src, writes a file (creating parent dirs
 // as needed), and commits it.
 func commitToUpstream(t *testing.T, src, name, content string) {
 	t.Helper()
-	repo, err := git.PlainOpen(src)
-	if err != nil {
-		t.Fatalf("commitToUpstream: open: %v", err)
-	}
+	repo := openUpstream(t, src)
 	if dir := filepath.Dir(filepath.Join(src, name)); dir != src {
 		if err := os.MkdirAll(dir, 0o755); err != nil {
 			t.Fatalf("commitToUpstream: mkdir: %v", err)
@@ -164,10 +203,7 @@ func commit(t *testing.T, repo *git.Repository, dir, name, content string) {
 func TestSyncRecoversFromCorruptMirror(t *testing.T) {
 	src := initBareUpstream(t)
 	dir := t.TempDir()
-	// Plant a corrupt mirror: a `.git` that PlainOpen cannot read (Stat still sees it).
-	if err := os.WriteFile(filepath.Join(dir, ".git"), []byte("garbage"), 0o644); err != nil {
-		t.Fatal(err)
-	}
+	plantCorruptMirror(t, dir)
 	s := &Syncer{URL: src, Branch: "main", Dir: dir, Log: testLogger()}
 	if _, _, err := s.Sync(context.Background()); err != nil {
 		t.Fatalf("Sync should recover by re-cloning a corrupt mirror, got: %v", err)
@@ -233,26 +269,14 @@ func TestRunReloadsOnlyOnChange(t *testing.T) {
 		s.Run(ctx, time.Hour, func(*SyncDelta) error { calls.Add(1); return nil }) // interval unused: tick drives the loop
 	}()
 
-	// Run only receives from the (unbuffered) tick channel between poll cycles, so a
-	// send that completes proves the PREVIOUS cycle has finished. That is the
-	// synchronisation point which replaces every sleep.
-	waitCycle := func() {
-		t.Helper()
-		select {
-		case tick <- time.Time{}:
-		case <-time.After(30 * time.Second): // a hang, not a timing assumption
-			t.Fatal("Run never came back for a tick — the poll loop is stuck")
-		}
-	}
-
 	// The first send is accepted only once the INITIAL sync has completed.
-	waitCycle()
+	waitCycle(t, tick)
 	if n := calls.Load(); n != 1 {
 		t.Fatalf("initial sync must fire onSync exactly once, fired %d", n)
 	}
 
 	// That tick ran a poll against an unchanged upstream; the next send proves it ended.
-	waitCycle()
+	waitCycle(t, tick)
 	if n := calls.Load(); n != 1 {
 		t.Fatalf("with no HEAD change onSync must not fire again, fired %d", n)
 	}
@@ -270,8 +294,8 @@ func TestRunReloadsOnlyOnChange(t *testing.T) {
 	// after the commit was already visible has completed. onSync fires on exactly one of
 	// the two — whichever first sees rev != lastRev — so the count is 2 either way.
 	commitToUpstream(t, src, "new.md", "# new")
-	waitCycle()
-	waitCycle()
+	waitCycle(t, tick)
+	waitCycle(t, tick)
 	if n := calls.Load(); n != 2 {
 		t.Fatalf("a new upstream commit must trigger exactly one more onSync, total %d (want 2)", n)
 	}

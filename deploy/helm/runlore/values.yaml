@@ -231,6 +231,11 @@ config:
   #   commons:
   #     url: https://github.com/Smana/runlore-kb-commons
   #     dir: /var/lib/runlore/commons
+  #     # Tracks branch `main` by default: upstream edits reach kb_search within a
+  #     # day, from a repo you do not control. Set `ref: v1.2.0` instead (a tag or a
+  #     # full commit id; mutually exclusive with branch) to freeze the corpus until
+  #     # you have reviewed what changed. Trade: reviewed updates vs shared fixes for
+  #     # free. Polling a pinned ref is a no-op.
   #   instant_recall:
   #     enabled: true
   #     min_score: 1.0                 # similarity floor for the top hit (shipped default)

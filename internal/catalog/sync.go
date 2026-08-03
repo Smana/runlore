@@ -12,10 +12,22 @@ import (
 	"time"
 
 	git "github.com/go-git/go-git/v5"
+	gitcfg "github.com/go-git/go-git/v5/config"
 	"github.com/go-git/go-git/v5/plumbing"
 	"github.com/go-git/go-git/v5/plumbing/object"
 	githttp "github.com/go-git/go-git/v5/plumbing/transport/http"
+
+	"github.com/Smana/runlore/internal/gitrev"
 )
+
+// pinRefSpecs is what a pin fetch asks for: every branch. A pin may name any commit
+// in the repository, so narrowing this would make "bump the pin" work for some
+// revisions and silently not for others. Tags are NOT listed here: the fetch below
+// sets Tags: git.AllTags, and go-git appends +refs/tags/*:refs/tags/* itself for
+// that mode — spelling it out again just fetched the same refspec twice.
+var pinRefSpecs = []gitcfg.RefSpec{
+	"+refs/heads/*:refs/remotes/origin/*",
+}
 
 // SyncDelta names the repo-relative paths that changed between two synced
 // revisions. A nil *SyncDelta means "unknown" — the caller must do a full
@@ -33,7 +45,22 @@ type TokenFunc func(ctx context.Context) (string, error)
 // onSync after each successful sync so the reader can re-index. This closes the
 // read/write loop: the curator's merged PRs flow back into what the agent searches.
 type Syncer struct {
-	URL    string
+	URL string
+	// Branch is the revision the mirror follows. A bare name is a BRANCH and is
+	// tracked: every poll pulls whatever upstream moved it to. Two spellings instead
+	// PIN the mirror to an immutable revision that no upstream push can change:
+	//
+	//	refs/tags/<name>       a tag
+	//	<40- or 64-char hex>   a commit id
+	//
+	// Anything unqualified stays a branch, so every configuration written before
+	// pinning existed resolves down the identical path, byte for byte.
+	//
+	// It is one field rather than two because a syncer follows exactly one revision;
+	// the operator-facing surface (catalog.commons.branch vs .ref) is where the two
+	// intentions are kept apart, and config.ApplyDefaults normalises a `ref` into the
+	// spellings above. Same contract, read from its two ends — and from one shared
+	// definition, internal/gitrev, so neither end can drift away from the other.
 	Branch string
 	Dir    string
 	Token  TokenFunc // nil / empty => anonymous (public repo)
@@ -67,6 +94,78 @@ func (s *Syncer) branch() string {
 		return "main"
 	}
 	return s.Branch
+}
+
+// pin returns the immutable revision this syncer is frozen at, and whether it is
+// pinned at all. An unpinned syncer tracks branch().
+func (s *Syncer) pin() (plumbing.Revision, bool) {
+	if gitrev.IsPinned(s.Branch) {
+		return plumbing.Revision(s.Branch), true
+	}
+	return "", false
+}
+
+// cloneOptions selects what the initial clone fetches. A branch and a tag are both
+// refs, so both stay the cheap single-ref clone this syncer has always done. A bare
+// commit id is not a ref and cannot be a clone target at all, so that case clones
+// the repository's refs and checkoutPin moves HEAD onto the commit afterwards.
+func (s *Syncer) cloneOptions(auth *githttp.BasicAuth) *git.CloneOptions {
+	o := &git.CloneOptions{URL: s.URL, Auth: auth}
+	rev, pinned := s.pin()
+	switch {
+	case !pinned:
+		o.ReferenceName = plumbing.NewBranchReferenceName(s.branch())
+		o.SingleBranch = true
+	case gitrev.IsTagRef(string(rev)):
+		o.ReferenceName = plumbing.ReferenceName(rev)
+		o.SingleBranch = true
+	}
+	return o
+}
+
+// checkoutPin puts the mirror on the pinned revision, fetching ONLY when the mirror
+// has never seen it — a fresh commit-id pin, or an operator who reviewed upstream,
+// bumped the pin and restarted onto the checkout they already had.
+//
+// A pin cannot move, so the steady state (the mirror is already there) costs one
+// local resolve and no network at all. That is what keeps a periodic poll on a
+// pinned corpus free rather than re-cloning on every tick; the poll is kept, not
+// skipped, because it is also what retries a failed re-index and re-materialises a
+// checkout that went missing.
+//
+// A pin the repository does not contain is an error, never a silent fallback: the
+// operator named a revision and must not end up quietly indexing a different one.
+func (s *Syncer) checkoutPin(ctx context.Context, repo *git.Repository, auth *githttp.BasicAuth, rev plumbing.Revision) error {
+	hash, err := repo.ResolveRevision(rev)
+	if err != nil {
+		ferr := repo.FetchContext(ctx, &git.FetchOptions{
+			Auth:     auth,
+			RefSpecs: pinRefSpecs,
+			Tags:     git.AllTags,
+			Force:    true,
+		})
+		if ferr != nil && !errors.Is(ferr, git.NoErrAlreadyUpToDate) {
+			return fmt.Errorf("fetch for pinned revision %s: %w", rev, ferr)
+		}
+		if hash, err = repo.ResolveRevision(rev); err != nil {
+			return fmt.Errorf("pinned revision %s not found in %s: %w", rev, s.URL, err)
+		}
+	}
+	// ResolveRevision (rather than a raw ref lookup) peels an annotated tag, so hash
+	// is a COMMIT and comparable to HEAD, which always is one. Checkout would peel a
+	// tag object on its own; what the peel buys is that the comparison below can
+	// actually short-circuit, instead of re-checking out the same tree every poll.
+	if head, herr := repo.Head(); herr == nil && head.Hash() == *hash {
+		return nil
+	}
+	wt, err := repo.Worktree()
+	if err != nil {
+		return err
+	}
+	if err := wt.Checkout(&git.CheckoutOptions{Hash: *hash, Force: true}); err != nil {
+		return fmt.Errorf("checkout pinned revision %s: %w", rev, err)
+	}
+	return nil
 }
 
 // diffPaths lists the paths that differ between two commits. Any failure
@@ -105,27 +204,55 @@ func (s *Syncer) diffPaths(repo *git.Repository, from, to plumbing.Hash) *SyncDe
 	return d
 }
 
-// Sync clones the repo if the mirror is absent, otherwise fast-forwards it, and
-// reports whether HEAD moved since the previous sync (true on the first sync).
-// The returned *SyncDelta names the changed/removed paths between the previous
-// and new revision; it is nil ("unknown") on the first sync or any diff error,
-// which the caller must treat as a full reload.
+// Sync clones the repo if the mirror is absent, otherwise brings it to the wanted
+// revision, and reports whether HEAD moved since the previous sync (true on the
+// first sync). The returned *SyncDelta names the changed/removed paths between the
+// previous and new revision; it is nil ("unknown") on the first sync or any diff
+// error, which the caller must treat as a full reload.
+//
+// A pinned Syncer (see Branch) differs in exactly one place — how an existing
+// mirror is advanced. Clone, corrupt-mirror recovery and the HEAD-gated change
+// detection below are shared, deliberately: pinning changes which revision the
+// mirror lands on, not how the syncer decides something moved. A pin therefore
+// reports changed=true once, then changed=false forever, and Run's re-index gate
+// does the rest with no special case of its own.
 func (s *Syncer) Sync(ctx context.Context) (bool, *SyncDelta, error) {
 	auth, err := s.auth(ctx)
 	if err != nil {
 		return false, nil, fmt.Errorf("auth: %w", err)
 	}
-	ref := plumbing.NewBranchReferenceName(s.branch())
-	clone := func() (*git.Repository, error) {
-		repo, cerr := git.PlainCloneContext(ctx, s.Dir, false, &git.CloneOptions{
-			URL:           s.URL,
-			ReferenceName: ref,
+	pinRev, pinned := s.pin()
+	// advance brings an EXISTING mirror to the wanted revision: a pull for a tracked
+	// branch, a (normally network-free) checkout for a pin.
+	advance := func(repo *git.Repository) error {
+		if pinned {
+			return s.checkoutPin(ctx, repo, auth, pinRev)
+		}
+		wt, werr := repo.Worktree()
+		if werr != nil {
+			return werr
+		}
+		perr := wt.PullContext(ctx, &git.PullOptions{
+			ReferenceName: plumbing.NewBranchReferenceName(s.branch()),
 			SingleBranch:  true,
 			Auth:          auth,
+			Force:         true,
 		})
+		if perr != nil && !errors.Is(perr, git.NoErrAlreadyUpToDate) {
+			return perr
+		}
+		return nil
+	}
+	clone := func() (*git.Repository, error) {
+		repo, cerr := git.PlainCloneContext(ctx, s.Dir, false, s.cloneOptions(auth))
+		if cerr == nil && pinned {
+			// A tag clone already landed on the pin and this is a no-op; a commit-id
+			// clone landed on the default branch and still has to move.
+			cerr = s.checkoutPin(ctx, repo, auth, pinRev)
+		}
 		if cerr != nil {
 			// Drop the partial checkout so an interrupted/failed clone can't leave a
-			// half-written .git that wedges every future Pull — the next tick re-clones.
+			// half-written .git that wedges every future sync — the next tick re-clones.
 			_ = os.RemoveAll(s.Dir)
 			return nil, cerr
 		}
@@ -146,20 +273,8 @@ func (s *Syncer) Sync(ctx context.Context) (bool, *SyncDelta, error) {
 		if repo, err = clone(); err != nil {
 			return false, nil, err
 		}
-	} else {
-		wt, werr := repo.Worktree()
-		if werr != nil {
-			return false, nil, werr
-		}
-		perr := wt.PullContext(ctx, &git.PullOptions{
-			ReferenceName: ref,
-			SingleBranch:  true,
-			Auth:          auth,
-			Force:         true,
-		})
-		if perr != nil && !errors.Is(perr, git.NoErrAlreadyUpToDate) {
-			return false, nil, perr
-		}
+	} else if err = advance(repo); err != nil {
+		return false, nil, err
 	}
 	head, err := repo.Head()
 	if err != nil {

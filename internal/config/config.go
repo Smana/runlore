@@ -22,6 +22,7 @@ import (
 
 	"gopkg.in/yaml.v3"
 
+	"github.com/Smana/runlore/internal/gitrev"
 	"github.com/Smana/runlore/internal/providers"
 	"github.com/Smana/runlore/internal/sourcerepo"
 )
@@ -515,8 +516,24 @@ type Catalog struct {
 // rather than one cluster's workload. They ground kb_search, which applies no such
 // filter. That is genuine day-one value; claiming recall would not be.
 type CatalogCommons struct {
-	URL      string   `yaml:"url"`      // shared catalog repo; empty disables the commons root
-	Branch   string   `yaml:"branch"`   // default "main"
+	URL string `yaml:"url"` // shared catalog repo; empty disables the commons root
+	// Branch tracks a MOVING branch: whatever upstream pushes there reaches the index
+	// at the next interval. Default "main".
+	//
+	// After ApplyDefaults it carries the effective revision handed to the syncer,
+	// which is a tag ref or a commit id when Ref pinned it — a syncer follows exactly
+	// one revision and there is no honest way to hand it two.
+	Branch string `yaml:"branch"`
+	// Ref pins the commons to an IMMUTABLE revision — a tag name (`v1.2.0`, also
+	// accepted fully qualified as `refs/tags/v1.2.0`) or a full 40-character commit
+	// id — instead of tracking a branch. Mutually exclusive with Branch.
+	//
+	// The commons is synced from a repository the operator does not own, and its
+	// entries reach the model mid-incident through kb_search. Pinning is how an
+	// operator reviews what upstream changed before it grounds an investigation, at
+	// the cost of not receiving shared fixes until they bump the pin. Both are
+	// legitimate trades; tracking a branch stays the default.
+	Ref      string   `yaml:"ref"`
 	Interval Duration `yaml:"interval"` // re-sync period (default 24h — a shared corpus changes slowly)
 	// Dir is where the commons is checked out. It MUST differ from catalog.dir: the
 	// two are separate corpora, and sharing a root would let an upstream sync dirty
@@ -524,6 +541,73 @@ type CatalogCommons struct {
 	Dir string `yaml:"dir"`
 	// TokenEnv names an env var holding a read token for a private commons repo.
 	TokenEnv string `yaml:"token_env"`
+}
+
+// isHex reports whether s is non-empty and made only of hex digits. It backs the
+// "did you mean a commit id?" diagnostic below, and so must also fire on the
+// abbreviations gitrev.IsObjectID rejects — odd lengths included, which is why it
+// is not encoding/hex.
+func isHex(s string) bool {
+	if s == "" {
+		return false
+	}
+	for _, r := range s {
+		switch {
+		case r >= '0' && r <= '9', r >= 'a' && r <= 'f', r >= 'A' && r <= 'F':
+		default:
+			return false
+		}
+	}
+	return true
+}
+
+// A `branch` key means "track whatever upstream moves this to", so a pinned
+// spelling under one promises an operator the opposite of what it delivers. These
+// say what to write INSTEAD; the rule itself is rejectPinnedBranch, stated once.
+const (
+	commonsBranchRemedy = "use catalog.commons.ref to pin a tag or a commit — branch tracks a moving branch"
+	// The operator's OWN catalog shares the syncer with the commons, so a pinned
+	// spelling there would work — and that is the problem. Pinning is for a corpus you
+	// do not control; this one you do.
+	catalogGitBranchRemedy = "your own catalog is deliberately not pinnable, because the curator opens PRs against it and a frozen read root leaves \"merged\" and \"in use\" diverging forever with no signal. Only catalog.commons (a repo you do not control) can be pinned, with `ref`"
+)
+
+// rejectPinnedBranch fails when the value of a `branch` key names an immutable
+// revision. Neither branch key can honour one today either (both clone
+// refs/heads/refs/tags/…), so no configuration that works is broken by catching it
+// at load instead of at clone.
+func rejectPinnedBranch(key, branch, remedy string) error {
+	if !gitrev.IsPinned(branch) {
+		return nil
+	}
+	return fmt.Errorf("%s = %q names an immutable revision: %s", key, branch, remedy)
+}
+
+// validateCommonsRevision fails closed on any way of asking for two revisions at
+// once, or for a "pin" that is not actually immutable. Every case here would
+// otherwise leave an operator believing their corpus is frozen while it moves —
+// the precise belief the option exists to make true.
+//
+// The commons is where the two keys really differ: it has the `ref` escape hatch
+// that catalog.git deliberately does not.
+func validateCommonsRevision(cc CatalogCommons) error {
+	// Both keys set. ApplyDefaults folds a ref into an EMPTY branch only, so the two
+	// being non-empty and disagreeing is exactly "the operator wrote both".
+	if cc.Ref != "" && cc.Branch != "" && cc.Branch != gitrev.QualifyTag(cc.Ref) {
+		return fmt.Errorf("catalog.commons: set either branch (%q, tracks a moving branch) or ref (%q, pins an immutable revision), not both", cc.Branch, cc.Ref)
+	}
+	switch {
+	case cc.Ref == "":
+		return rejectPinnedBranch("catalog.commons.branch", cc.Branch, commonsBranchRemedy)
+	case strings.HasPrefix(cc.Ref, "refs/") && !gitrev.IsTagRef(cc.Ref):
+		// refs/heads/main under `ref` is the dangerous one: the syncer would treat any
+		// qualified ref as a pin and never fetch again, silently freezing the commons
+		// on whatever the branch pointed at the day it was cloned.
+		return fmt.Errorf("catalog.commons.ref = %q is not an immutable revision (only %s… or a full commit id can be pinned); use catalog.commons.branch to track a branch", cc.Ref, gitrev.TagRefPrefix)
+	case isHex(cc.Ref) && len(cc.Ref) >= 7 && !gitrev.IsObjectID(cc.Ref):
+		return fmt.Errorf("catalog.commons.ref = %q looks like an abbreviated commit id; pin the full 40-character SHA (abbreviations are ambiguous)", cc.Ref)
+	}
+	return nil
 }
 
 // Outcome configures the learning-loop outcome ledger.
@@ -1376,11 +1460,19 @@ func (c *Config) Validate() error {
 			return fmt.Errorf("notify.matrix.feedback_reactions requires outcome.ledger_path: ratings are recorded in the outcome ledger")
 		}
 	}
+	if g := c.Catalog.Git; g.URL != "" {
+		if err := rejectPinnedBranch("catalog.git.branch", g.Branch, catalogGitBranchRemedy); err != nil {
+			return err
+		}
+	}
 	// Commons catalog (opt-in): a second, read-only root. Fail closed on a
 	// misconfiguration rather than degrading to a silently-absent corpus.
 	if cc := c.Catalog.Commons; cc.URL != "" {
 		if cc.Dir == "" {
 			return fmt.Errorf("catalog.commons.url is set but catalog.commons.dir is empty: the shared catalog needs its own checkout directory")
+		}
+		if err := validateCommonsRevision(cc); err != nil {
+			return err
 		}
 		// Sharing a directory with the operator's own catalog would let an upstream
 		// sync write into their checkout — and, with git-sync enabled, fight the

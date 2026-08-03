@@ -8,6 +8,8 @@ import (
 	"time"
 
 	"gopkg.in/yaml.v3"
+
+	"github.com/Smana/runlore/internal/gitrev"
 )
 
 // Load reads, strictly parses, and validates a RunLore config file. Unknown keys
@@ -165,12 +167,23 @@ func ApplyDefaults(c *Config) {
 	// interval reached Syncer.Run as 0 and fell through to the syncer's generic 5m
 	// fallback: 288x the documented rate against someone else's GitHub repo, with the
 	// startup log cheerfully printing "interval=0s".
-	if c.Catalog.Commons.URL != "" {
-		if c.Catalog.Commons.Interval.Std() == 0 {
-			c.Catalog.Commons.Interval = Duration(24 * time.Hour)
+	if cc := &c.Catalog.Commons; cc.URL != "" {
+		if cc.Interval.Std() == 0 {
+			cc.Interval = Duration(24 * time.Hour)
 		}
-		if c.Catalog.Commons.Branch == "" {
-			c.Catalog.Commons.Branch = "main"
+		// branch and ref are two operator intentions — track a moving branch, or pin an
+		// immutable revision — but a syncer follows exactly ONE revision. Collapse them
+		// here, into git's own spelling, so the pin travels on the wire that already
+		// exists rather than on a second field the syncer would have to reconcile.
+		//
+		// The fold deliberately refuses to overwrite a branch the operator set: that
+		// leaves a conflicting pair intact for Validate (which runs after this) to
+		// reject, instead of silently preferring one of the two.
+		switch {
+		case cc.Ref != "" && cc.Branch == "":
+			cc.Branch = gitrev.QualifyTag(cc.Ref)
+		case cc.Ref == "" && cc.Branch == "":
+			cc.Branch = "main"
 		}
 	}
 	if c.Catalog.InstantRecall.Enabled {
