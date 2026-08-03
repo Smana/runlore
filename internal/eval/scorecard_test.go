@@ -87,6 +87,32 @@ func TestReportErrored(t *testing.T) {
 		noSubmit.Cases[i].Missing = []string{"no findings (loop did not submit)"}
 	}
 
+	// The hardest partial outage: a silent-usage provider, and the repeats that DID
+	// get through were all judged wrong. CaseAggregate unions Missing across the
+	// repeats, so the case carries the outage marker AND the note the survivor
+	// earned. Neither the token test nor the per-case pass-rate test sees the
+	// survivor — the notes are the only trace it left, and a run that scored one
+	// answer is a measurement, thin as it is.
+	partialSilent := erroredFixtureReport()
+	partialSilent.CostUSD = nil
+	partialSilent.Cases[0].Missing = append(partialSilent.Cases[0].Missing, "ImagePullBackOff")
+	partialSilent.Cases[1].Missing = append(partialSilent.Cases[1].Missing, "over-claimed: apps/web")
+
+	// Same shape, but the survivor reached the model and never submitted.
+	partialNoSubmit := erroredFixtureReport()
+	partialNoSubmit.CostUSD = nil
+	for i := range partialNoSubmit.Cases {
+		partialNoSubmit.Cases[i].Missing = append(partialNoSubmit.Cases[i].Missing, "no findings (loop did not submit)")
+	}
+
+	// A correct answer below the confidence floor: Score sets Pass=false with an
+	// EMPTY Missing. No note at all is not evidence that nothing ran.
+	confFloorOnly := erroredFixtureReport()
+	confFloorOnly.CostUSD = nil
+	for i := range confFloorOnly.Cases {
+		confFloorOnly.Cases[i].Missing = nil
+	}
+
 	// One case errored, the other genuinely missed: the run still measured something.
 	oneCaseOnly := erroredFixtureReport()
 	oneCaseOnly.Cases[1].Missing = []string{"ImagePullBackOff"}
@@ -111,7 +137,10 @@ func TestReportErrored(t *testing.T) {
 		{"genuine 0% from a silent-usage provider", silentUsage, false},
 		{"partial outage (tokens were spent)", partialOutage, false},
 		{"partial outage (a case had passing repeats)", somePassed, false},
+		{"partial outage (silent usage, every survivor judged wrong)", partialSilent, false},
+		{"partial outage (silent usage, survivor never submitted)", partialNoSubmit, false},
 		{"model answered but never submitted", noSubmit, false},
+		{"failed on the confidence floor with nothing missing", confFloorOnly, false},
 		{"only one case errored", oneCaseOnly, false},
 		{"green run", scorecardFixtureReport(), false},
 		{"no cases at all", empty, false},

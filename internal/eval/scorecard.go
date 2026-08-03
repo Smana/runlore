@@ -84,6 +84,11 @@ var runErrorMarkers = []string{noteInvestigationError, noteCatalogFixtureError}
 // some tokens fails the token test and renders as today's plain 0%: the predicate
 // can only ever under-label, never claim "errored" about a run that measured
 // something.
+//
+// The last gap the token and pass-rate tests leave open is a partial outage on a
+// silent-usage provider where every repeat that DID get through was judged wrong:
+// no tokens to see, no passing repeat to see. erroredCase closes it by reading the
+// whole Missing set rather than looking for one marker in it — see there.
 func (rep Report) Errored() bool {
 	if len(rep.Cases) == 0 || rep.Reached > 0 || rep.InputTokens > 0 || rep.OutputTokens > 0 {
 		return false
@@ -96,14 +101,40 @@ func (rep Report) Errored() bool {
 	return true
 }
 
-// erroredCase reports whether a case carries a marker proving at least one of its
-// repeats never reached a scoreable answer.
+// erroredCase reports whether EVERY note this case left behind is a run-error
+// marker — i.e. nothing in the case's record came from judging an answer.
+//
+// "Every", not "any", is the load-bearing word. CaseAggregate.Missing is the UNION
+// over the repeats, so a partial outage leaves the outage marker sitting next to
+// the notes the surviving repeats earned ("ImagePullBackOff", "over-claimed: …",
+// "no findings (loop did not submit)"). Matching one marker anywhere in that set
+// would call such a case "never ran" while it is holding the evidence that it did
+// — over-labelling, the one direction Errored must never take. A wholly errored
+// case cannot contain a non-marker note: runOne returns at the failure with that
+// single note and never reaches Score.
+//
+// An EMPTY Missing is not errored either, and the emptiness check is not
+// redundant with the loop: a case that answered correctly but below the confidence
+// floor fails with nothing missing at all, and "no notes" is the absence of
+// evidence, not evidence of absence.
 func erroredCase(c ReportCase) bool {
+	if len(c.Missing) == 0 {
+		return false
+	}
 	for _, m := range c.Missing {
-		for _, marker := range runErrorMarkers {
-			if strings.HasPrefix(m, marker) {
-				return true
-			}
+		if !isRunErrorNote(m) {
+			return false
+		}
+	}
+	return true
+}
+
+// isRunErrorNote reports whether a single Missing note is one runOne writes when a
+// repeat never reached a scoreable answer.
+func isRunErrorNote(note string) bool {
+	for _, marker := range runErrorMarkers {
+		if strings.HasPrefix(note, marker) {
+			return true
 		}
 	}
 	return false
