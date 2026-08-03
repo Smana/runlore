@@ -34,13 +34,26 @@ type Metrics struct {
 	HistorySummarizations      metric.Int64Counter // compaction events whose elided batch was replaced by a model digest
 	HistorySummarizeFallbacks  metric.Int64Counter // summarize-mode compactions that fell back to plain elision (summarizer error/refusal/truncation)
 	RecallHits                 metric.Int64Counter // KB cache hits, labelled by verify result
-	RecallTokensSaved          metric.Int64Counter // estimated tokens saved by a recall short-circuit
+	RecallTokensSpent          metric.Int64Counter // tokens a DELIVERED recall short-circuit actually spent (reranker + adversarial verify) — a measurement, not a saving estimate; see the recall-saving recipe below
 	RecallRejections           metric.Int64Counter // recalls rejected before short-circuit (label: reason)
 	CoalesceBatchSize          metric.Int64Histogram
 	InvestigationTokens        metric.Int64Histogram
 	// Per-investigation model usage totals (loop + verify), recorded once at
 	// delivery — the actual provider-reported spend, distinct from the pre-request
-	// InvestigationTokens estimate.
+	// InvestigationTokens estimate. All carry the `result` label, with the same
+	// vocabulary as InvestigationsCompleted.
+	//
+	// THE RECALL-SAVING RECIPE (the one true form — the observability docs and the Grafana
+	// "Cost & efficiency" row state this same one). Compare two means, both measured:
+	//
+	//	recall:    recall_tokens_spent_total / investigations_completed_total{result="recall"}
+	//	full loop: (investigation_input_tokens_sum + investigation_output_tokens_sum){result!="recall"}
+	//	           / investigation_input_tokens_count{result!="recall"}
+	//
+	// The GAP between them is the saving. The `result` filter is load-bearing: unfiltered,
+	// these histograms cover recall short-circuits too, so the full-loop term would contain
+	// the very runs being subtracted from it and the measured saving would shrink as recall
+	// got better. Never difference the counter out of an unfiltered total.
 	InvestigationModelCalls        metric.Int64Histogram
 	InvestigationInputTokens       metric.Int64Histogram
 	InvestigationOutputTokens      metric.Int64Histogram
@@ -99,16 +112,16 @@ func NewMetrics() *Metrics {
 		HistorySummarizations:      ctr("history_summarizations_total", "compaction events whose elided batch was replaced by a model-produced digest"),
 		HistorySummarizeFallbacks:  ctr("history_summarize_fallbacks_total", "summarize-mode compactions that fell back to plain elision (summarizer error/refusal/truncation)"),
 		RecallHits:                 ctr("recall_hits_total", "KB instant-recall short-circuits (label: result)"),
-		RecallTokensSaved:          ctr("recall_tokens_saved_total", "estimated tokens saved by recall short-circuits"),
+		RecallTokensSpent:          ctr("recall_tokens_spent_total", "model tokens (input incl. cached + output) actually spent by delivered recall short-circuits: the LLM reranker plus the adversarial verify pass"),
 		RecallRejections:           ctr("recall_rejections_total", "recalls rejected before short-circuit (label: reason)"),
 		CoalesceBatchSize:          hist("coalesce_batch_size", "incidents per flushed batch"),
 		InvestigationTokens:        hist("investigation_tokens_estimated", "per-investigation token estimate (investigation loop only; excludes the adversarial verify phase)"),
 
-		InvestigationModelCalls:        hist("investigation_model_calls", "model completions per investigation (loop + verify)"),
-		InvestigationInputTokens:       hist("investigation_input_tokens", "provider-reported input tokens per investigation, including cached (loop + verify)"),
-		InvestigationOutputTokens:      hist("investigation_output_tokens", "provider-reported output tokens per investigation (loop + verify)"),
-		InvestigationCachedInputTokens: hist("investigation_cached_input_tokens", "input tokens served from cache per investigation (loop + verify)"),
-		InvestigationCostUSD:           histF("investigation_cost_usd", "estimated per-investigation cost in USD (only when model.pricing is configured)"),
+		InvestigationModelCalls:        hist("investigation_model_calls", "model completions per investigation (loop + verify; label: result)"),
+		InvestigationInputTokens:       hist("investigation_input_tokens", "provider-reported input tokens per investigation, including cached (loop + verify; label: result)"),
+		InvestigationOutputTokens:      hist("investigation_output_tokens", "provider-reported output tokens per investigation (loop + verify; label: result)"),
+		InvestigationCachedInputTokens: hist("investigation_cached_input_tokens", "input tokens served from cache per investigation (loop + verify; label: result)"),
+		InvestigationCostUSD:           histF("investigation_cost_usd", "estimated per-investigation cost in USD (only when model.pricing is configured; label: result)"),
 		RecallScore:                    histF("recall_score", "BM25 score at the recall decision point"),
 		CurationDedupScore:             histF("curation_dedup_score", "catalog top-hit BM25 score at the curation dedup decision"),
 		OutcomesOpened:                 ctr("outcomes_opened_total", "investigations recorded in the outcome ledger (label: kind)"),

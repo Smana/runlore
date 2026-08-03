@@ -287,7 +287,11 @@ func (li *LoopInvestigator) Investigate(ctx context.Context, req Request) error 
 		// chokepoint — every exit (happy path, recall short-circuit, timeout, refusal, budget
 		// kill, max-steps) routes through it, so no delivered investigation can miss it.
 		inv.InvestigationStartedAt = start
-		li.recordUsageMetrics(ctx, inv.Usage)
+		// Every caller sets `result` BEFORE calling finish, so the usage histograms carry
+		// the same completion label the deferred completion metric records — which is what
+		// lets a dashboard read a recall's cost and a full loop's off the same instrument
+		// instead of differencing one out of a total that already contains it.
+		li.recordUsageMetrics(ctx, inv.Usage, result)
 		li.deliver(req, inv)
 	}
 	defer func() {
@@ -725,12 +729,17 @@ func (li *LoopInvestigator) tryRecall(ctx context.Context, req Request, result *
 		}
 		m.RecallHits.Add(ctx, 1, metric.WithAttributes(attribute.String("result", recallResult)))
 		if len(rec.RootCauses) > 0 {
-			// Tokens are only "saved" when the recall actually short-circuits the loop.
-			saved := int64(li.MaxTokensPerInvestigation)
-			if saved == 0 {
-				saved = defaultRecallTokensSavedEstimate // conservative proxy when budget is unconfigured
-			}
-			m.RecallTokensSaved.Add(ctx, saved)
+			// What this short-circuit COST, measured — not a guess at what it saved. By
+			// here verifyTotals holds every model call the recall path made (the opt-in
+			// reranker plus the adversarial verify pass), so the real number is already in
+			// hand: a dashboard differences it against the per-investigation token
+			// histograms recordUsageMetrics emits to size what recall avoided. Cached input
+			// is included (providers.Usage.InputTokens already counts it), matching those
+			// histograms.
+			//
+			// Delivered short-circuits only: a recall the verify pass refutes falls through
+			// to a full investigation, which reports these tokens in its own totals.
+			m.RecallTokensSpent.Add(ctx, int64(verifyTotals.InputTokens+verifyTotals.OutputTokens))
 		}
 	}
 	if len(rec.RootCauses) > 0 {

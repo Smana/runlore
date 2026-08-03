@@ -7,7 +7,7 @@ metadata:
     # Distinguishes the scrapeable metrics Service from the StatefulSet's headless
     # governing Service below. Both otherwise carry identical labels, so the
     # VMServiceScrape (which selects selectorLabels) matched BOTH and scraped every
-    # pod twice, doubling all counters (e.g. tokens-saved, hits).
+    # pod twice, doubling all counters (e.g. recall tokens-spent, hits).
     app.kubernetes.io/component: server
 spec:
   type: {{ .Values.service.type }}

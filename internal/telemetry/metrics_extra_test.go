@@ -36,6 +36,7 @@ func TestNewInstrumentsExposeContractNames(t *testing.T) {
 	m.ModelRequests.Add(ctx, 1, metric.WithAttributes(attribute.String("provider", "anthropic"), attribute.String("result", "ok")))
 	m.ModelRequestDuration.Record(ctx, 0.9, metric.WithAttributes(attribute.String("provider", "anthropic")))
 	m.Curations.Add(ctx, 1, metric.WithAttributes(attribute.String("kind", "pr"), attribute.String("result", "opened")))
+	m.RecallTokensSpent.Add(ctx, 2200)
 
 	if err := RegisterRuntimeGauges("1.2.3", func() bool { return true }); err != nil {
 		t.Fatalf("register gauges: %v", err)
@@ -54,6 +55,9 @@ func TestNewInstrumentsExposeContractNames(t *testing.T) {
 		"runlore_model_requests_total",
 		"runlore_model_request_duration_seconds",
 		"runlore_curations_total",
+		// The recall cost series the Grafana "Cost & efficiency" row differences
+		// against the per-investigation token histograms.
+		"runlore_recall_tokens_spent_total",
 		"runlore_build_info",
 		"runlore_leader",
 	}
@@ -61,6 +65,11 @@ func TestNewInstrumentsExposeContractNames(t *testing.T) {
 		if !strings.Contains(body, name) {
 			t.Errorf("missing series %q in /metrics output", name)
 		}
+	}
+	// The retired series asserted a saving equal to the configured budget ceiling; it
+	// must not come back alongside its measured replacement.
+	if strings.Contains(body, "runlore_recall_tokens_saved_total") {
+		t.Error("runlore_recall_tokens_saved_total is retired — recall cost is now measured, not asserted")
 	}
 	// build_info must carry the version label, and leader must read 1 here.
 	if !strings.Contains(body, `version="1.2.3"`) {
