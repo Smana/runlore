@@ -38,6 +38,14 @@ type HistoryEntry struct {
 	InputTokens  int      `json:"input_tokens,omitempty"`
 	OutputTokens int      `json:"output_tokens,omitempty"`
 	CostUSD      *float64 `json:"cost_usd,omitempty"`
+
+	// Errored records that this run produced no scoreable result at all (see
+	// Report.Errored) so the label is durable: the history is re-rendered into the
+	// scorecard table on every publish, long after the report it came from is gone.
+	// omitempty keeps the field absent on ordinary runs, and absence unmarshals to
+	// false — exactly right for the lines written before this field existed, which
+	// were all real runs.
+	Errored bool `json:"errored,omitempty"`
 }
 
 // HistoryFromReport projects a replay report onto its one-line history record.
@@ -46,7 +54,90 @@ func HistoryFromReport(rep Report) HistoryEntry {
 		At: rep.At, Model: rep.Model, N: rep.N,
 		PassRate: rep.PassRate, Reached: rep.Reached, Total: rep.Total,
 		InputTokens: rep.InputTokens, OutputTokens: rep.OutputTokens, CostUSD: rep.CostUSD,
+		Errored: rep.Errored(),
 	}
+}
+
+// runErrorMarkers are the prefixes Runner.runOne records in a case's Missing when a
+// repeat never produced an answer to score at all: the provider call failed, or the
+// case's catalog fixture would not load. They are the only POSITIVE evidence that a
+// case did not run — every other Missing note (a keyword the findings lacked, an
+// over-claimed distractor, "no findings (loop did not submit)") means the model did
+// answer and the answer was judged.
+var runErrorMarkers = []string{noteInvestigationError, noteCatalogFixtureError}
+
+// Errored reports whether this run produced no evidence about the model whatsoever:
+// every case failed before anything could be scored. Such a run's 0% is an artefact
+// of a broken run, not a measurement, and publishing it as a pass-rate would make a
+// public claim about the model that the run cannot support.
+//
+// The predicate keys on the run-error markers rather than on "spent nothing".
+// Result.Usage documents zero tokens as UNKNOWN, never as free — a provider that
+// reports no usage is ordinary — so a token-only test would label a genuine 0% from
+// such a provider an outage, which is the same lie in the other direction. Spending
+// nothing is kept only as a NECESSARY condition: it rules out a partial outage where
+// some repeats did reach the model, and whatever they scored is real data. Per-case
+// PassRate carries the same duty for providers that report no usage at all — any
+// passing repeat means something was genuinely scored.
+//
+// The conjunction is deliberately asymmetric. A provider that dies after billing
+// some tokens fails the token test and renders as today's plain 0%: the predicate
+// can only ever under-label, never claim "errored" about a run that measured
+// something.
+//
+// The last gap the token and pass-rate tests leave open is a partial outage on a
+// silent-usage provider where every repeat that DID get through was judged wrong:
+// no tokens to see, no passing repeat to see. erroredCase closes it by reading the
+// whole Missing set rather than looking for one marker in it — see there.
+func (rep Report) Errored() bool {
+	if len(rep.Cases) == 0 || rep.Reached > 0 || rep.InputTokens > 0 || rep.OutputTokens > 0 {
+		return false
+	}
+	for _, c := range rep.Cases {
+		if c.PassRate > 0 || !erroredCase(c) {
+			return false
+		}
+	}
+	return true
+}
+
+// erroredCase reports whether EVERY note this case left behind is a run-error
+// marker — i.e. nothing in the case's record came from judging an answer.
+//
+// "Every", not "any", is the load-bearing word. CaseAggregate.Missing is the UNION
+// over the repeats, so a partial outage leaves the outage marker sitting next to
+// the notes the surviving repeats earned ("ImagePullBackOff", "over-claimed: …",
+// "no findings (loop did not submit)"). Matching one marker anywhere in that set
+// would call such a case "never ran" while it is holding the evidence that it did
+// — over-labelling, the one direction Errored must never take. A wholly errored
+// case cannot contain a non-marker note: runOne returns at the failure with that
+// single note and never reaches Score.
+//
+// An EMPTY Missing is not errored either, and the emptiness check is not
+// redundant with the loop: a case that answered correctly but below the confidence
+// floor fails with nothing missing at all, and "no notes" is the absence of
+// evidence, not evidence of absence.
+func erroredCase(c ReportCase) bool {
+	if len(c.Missing) == 0 {
+		return false
+	}
+	for _, m := range c.Missing {
+		if !isRunErrorNote(m) {
+			return false
+		}
+	}
+	return true
+}
+
+// isRunErrorNote reports whether a single Missing note is one runOne writes when a
+// repeat never reached a scoreable answer.
+func isRunErrorNote(note string) bool {
+	for _, marker := range runErrorMarkers {
+		if strings.HasPrefix(note, marker) {
+			return true
+		}
+	}
+	return false
 }
 
 // AppendHistory appends e to the JSONL history, replacing any line with the same
@@ -87,9 +178,16 @@ func AppendHistory(existing []byte, e HistoryEntry) ([]byte, []HistoryEntry, err
 // BadgeJSON renders the shields.io "endpoint" badge document
 // (https://shields.io/badges/endpoint-badge) for the README pass-rate badge.
 // Color bands: ≥90% brightgreen, ≥ the 70% CI gate green, ≥50% yellow, else red.
+// An errored run gets no band at all — see below.
 func BadgeJSON(rep Report) []byte {
+	message := fmt.Sprintf("%d/%d scenarios · %.0f%%", rep.Reached, rep.Total, rep.PassRate*100)
 	color := "red"
 	switch {
+	case rep.Errored():
+		// Grey is shields' convention for "no result", and the message drops the
+		// pass-rate entirely: a red "0/2 · 0%" reads as "the model scored zero", which
+		// is a claim about a third party that an outage cannot support.
+		message, color = "errored · no model response", "lightgrey"
 	case rep.PassRate >= 0.9:
 		color = "brightgreen"
 	case rep.PassRate >= evalMinPassRate:
@@ -100,7 +198,7 @@ func BadgeJSON(rep Report) []byte {
 	b, _ := json.Marshal(map[string]any{
 		"schemaVersion": 1,
 		"label":         "nightly eval",
-		"message":       fmt.Sprintf("%d/%d scenarios · %.0f%%", rep.Reached, rep.Total, rep.PassRate*100),
+		"message":       message,
 		"color":         color,
 	})
 	return b
@@ -118,48 +216,96 @@ func BadgeJSON(rep Report) []byte {
 func ScorecardMarkdown(rep Report, history []HistoryEntry, inUSD, cachedUSD, outUSD float64) string {
 	var b strings.Builder
 	b.WriteString("# RunLore nightly eval scorecard\n\n")
-	b.WriteString("Auto-published by [`.github/workflows/eval.yaml`](https://github.com/Smana/runlore/blob/main/.github/workflows/eval.yaml) — ")
-	b.WriteString("the replay eval scores the model+loop over recorded incident evidence (no live cluster), so anyone can reproduce it:\n\n")
+	// Two things, deliberately: which workflow wrote this file, and the command that
+	// reproduces it. What the eval IS — replay over fixed evidence, no live cluster,
+	// what the pass-rate does and does not mean — is stated by the repo-authored
+	// framing in website/content/eval.md, which wraps this block on the published
+	// page. Saying it here too put the same claim on one page twice, tens of rendered
+	// lines apart, and the framing is the copy a human edits.
+	//
+	// The reproduce command stays because it is not framing: it belongs next to the
+	// numbers it reproduces, and it is the one thing the framing loses — the
+	// placeholder that carries it lives BETWEEN the scorecard markers and is
+	// overwritten by this block on every publish.
+	b.WriteString("Auto-published by [`.github/workflows/eval.yaml`](https://github.com/Smana/runlore/blob/main/.github/workflows/eval.yaml). Reproduce it yourself:\n\n")
 	b.WriteString("```\nlore eval -config eval/ci.runlore.yaml -cases examples/eval -n 5 -fail-under 0.7\n```\n\n")
 
+	errored := rep.Errored()
 	fmt.Fprintf(&b, "**Latest run:** %s", rep.At)
 	if rep.Model != "" {
 		fmt.Fprintf(&b, " · model `%s`", rep.Model)
 	}
-	fmt.Fprintf(&b, " · **%d/%d scenarios reached (%.0f%%)** · n=%d runs/case, k-of-n bar %.0f%%",
-		rep.Reached, rep.Total, rep.PassRate*100, rep.N, evalMinPassRate*100)
-	if rep.CostUSD != nil {
-		fmt.Fprintf(&b, " · est. cost $%.2f (%s in / %s out tokens)",
-			*rep.CostUSD, compactTokens(rep.InputTokens), compactTokens(rep.OutputTokens))
-	} else if rep.InputTokens+rep.OutputTokens > 0 {
-		fmt.Fprintf(&b, " · %s in / %s out tokens", compactTokens(rep.InputTokens), compactTokens(rep.OutputTokens))
+	if errored {
+		// No pass-rate, and no cost either: a $0.00 next to an outage reads as "the
+		// run was free" when it means "nothing ever ran".
+		fmt.Fprintf(&b, " · **⚠️ ERRORED — no result** · n=%d runs/case\n\n", rep.N)
+		b.WriteString("Every case failed before the model returned an answer, so nothing was scored and " +
+			"nothing was spent. This run is published as **errored** rather than as 0% on purpose: a 0% " +
+			"would be a measurement of the model, and this run measured nothing. The errors are in the table below.\n\n")
+	} else {
+		fmt.Fprintf(&b, " · **%d/%d scenarios reached (%.0f%%)** · n=%d runs/case, k-of-n bar %.0f%%",
+			rep.Reached, rep.Total, rep.PassRate*100, rep.N, evalMinPassRate*100)
+		if rep.CostUSD != nil {
+			fmt.Fprintf(&b, " · est. cost $%.2f (%s in / %s out tokens)",
+				*rep.CostUSD, compactTokens(rep.InputTokens), compactTokens(rep.OutputTokens))
+		} else if rep.InputTokens+rep.OutputTokens > 0 {
+			fmt.Fprintf(&b, " · %s in / %s out tokens", compactTokens(rep.InputTokens), compactTokens(rep.OutputTokens))
+		}
+		b.WriteString("\n\n")
 	}
-	b.WriteString("\n\n## Scenarios (latest run)\n\n")
-	b.WriteString("| scenario | result | pass-rate | median confidence | recall | notes |\n")
-	b.WriteString("|---|---|---|---|---|---|\n")
-	for _, c := range rep.Cases {
-		fmt.Fprintf(&b, "| %s | %s | %.0f%% (n=%d) | %.2f | %s | %s |\n",
-			c.Name, resultCell(c), c.PassRate*100, c.Runs, c.Confidence, recallCell(c), notesCell(c))
+	b.WriteString("## Scenarios (latest run)\n\n")
+	if errored {
+		// The usual columns would be all zeros here — a 0% pass-rate and a 0.00 median
+		// confidence for a case the model never saw are fabricated precision. The error
+		// is the only thing this run actually observed, so it is the only thing shown.
+		b.WriteString("| scenario | result | error |\n|---|---|---|\n")
+		for _, c := range rep.Cases {
+			fmt.Fprintf(&b, "| %s | 🚫 ERRORED | %s |\n", c.Name, notesCell(c))
+		}
+	} else {
+		b.WriteString("| scenario | result | pass-rate | median confidence | recall | notes |\n")
+		b.WriteString("|---|---|---|---|---|---|\n")
+		for _, c := range rep.Cases {
+			fmt.Fprintf(&b, "| %s | %s | %.0f%% (n=%d) | %.2f | %s | %s |\n",
+				c.Name, resultCell(c), c.PassRate*100, c.Runs, c.Confidence, recallCell(c), notesCell(c))
+		}
 	}
 
 	b.WriteString(costSection(rep, inUSD, cachedUSD, outUSD))
 
-	b.WriteString("\n## Confidence calibration\n\n")
-	var confidentWrong, underConfident []string
-	for _, c := range rep.Cases {
-		if !c.Reached && c.Confidence >= confidentWrongFloor {
-			confidentWrong = append(confidentWrong, c.Name)
+	// Calibration is skipped on an errored run: with every confidence at zero the two
+	// bullets would both read "none", which a reader takes as "the model was neither
+	// overconfident nor underconfident" — another finding this run never observed.
+	if !errored {
+		b.WriteString("\n## Confidence calibration\n\n")
+		var confidentWrong, underConfident []string
+		for _, c := range rep.Cases {
+			if !c.Reached && c.Confidence >= confidentWrongFloor {
+				confidentWrong = append(confidentWrong, c.Name)
+			}
+			if c.Reached && c.Confidence < underConfidentCeil {
+				underConfident = append(underConfident, c.Name)
+			}
 		}
-		if c.Reached && c.Confidence < underConfidentCeil {
-			underConfident = append(underConfident, c.Name)
-		}
+		fmt.Fprintf(&b, "- **Confidently wrong** (missed with median confidence ≥ %.2f): %s\n", confidentWrongFloor, nameList(confidentWrong))
+		fmt.Fprintf(&b, "- **Underconfident** (reached with median confidence < %.2f): %s\n", underConfidentCeil, nameList(underConfident))
 	}
-	fmt.Fprintf(&b, "- **Confidently wrong** (missed with median confidence ≥ %.2f): %s\n", confidentWrongFloor, nameList(confidentWrong))
-	fmt.Fprintf(&b, "- **Underconfident** (reached with median confidence < %.2f): %s\n", underConfidentCeil, nameList(underConfident))
 
 	b.WriteString("\n## History\n\n")
-	fmt.Fprintf(&b, "Newest first, last %d shown — the full log is [`history.jsonl`](history.jsonl). ", historyShown)
-	b.WriteString("Runs below the CI gate publish here exactly like green ones.\n\n")
+	// Absolute, not `](history.jsonl)`. This file is read in two places: as the blob
+	// on the eval-scorecard branch, where a sibling-relative href resolves, and
+	// spliced into https://runlore.io/eval, where the same href resolves to
+	// /eval/history.jsonl and 404s. The blob URL is correct in both, and it is the
+	// only href the generator emits that is not already absolute. Nothing would have
+	// caught the relative form either: Hugo's refLinksErrorLevel only grades `relref`
+	// and hack/check-anchors.sh only grades in-page fragments.
+	fmt.Fprintf(&b, "Newest first, last %d shown — the full log is "+
+		"[`history.jsonl`](https://github.com/Smana/runlore/blob/eval-scorecard/history.jsonl). ", historyShown)
+	// Only the legend for the column the reader is looking at. "Runs below the CI
+	// gate publish here exactly like green ones" used to sit here and now lives in
+	// website/content/eval.md's framing, which says it in the page's own voice — the
+	// errored label is the one thing in this table the framing does not explain.
+	b.WriteString("A run that reached no answer to score at all is labelled in the pass-rate column instead of scored — it is not a 0%.\n\n")
 	b.WriteString("| date | model | reached | pass-rate | est. cost |\n|---|---|---|---|---|\n")
 	shown := history
 	if len(shown) > historyShown {
@@ -167,6 +313,12 @@ func ScorecardMarkdown(rep Report, history []HistoryEntry, inUSD, cachedUSD, out
 	}
 	for i := len(shown) - 1; i >= 0; i-- {
 		h := shown[i]
+		if h.Errored {
+			// Every score column is withheld, not zeroed: this row must not be
+			// comparable with the real ones stacked above and below it.
+			fmt.Fprintf(&b, "| %s | %s | — | ⚠️ errored | — |\n", h.At, h.Model)
+			continue
+		}
 		cost := "—"
 		if h.CostUSD != nil {
 			cost = fmt.Sprintf("$%.2f", *h.CostUSD)
@@ -179,8 +331,10 @@ func ScorecardMarkdown(rep Report, history []HistoryEntry, inUSD, cachedUSD, out
 // costSection renders the cost-per-investigation comparison: what a full
 // investigation costs against what an instant recall costs, on this run's model at
 // this run's prices. It is the single most concrete claim the learning loop makes —
-// recall is roughly an order of magnitude cheaper — and publishing it turns an
-// assertion into a measurement.
+// that recall is substantially cheaper than investigating afresh — and publishing it
+// turns an assertion into a measurement. Deliberately no ratio in this comment: the
+// point of the table is that the run supplies the number, so asserting one here would
+// be exactly the guess this section exists to replace.
 //
 // Returns "" when prices are unset or the report carries no per-case token data;
 // a fabricated or zeroed cost would be worse than no cost at all.
@@ -281,11 +435,21 @@ func recallCell(c ReportCase) string {
 	return s
 }
 
+// cellEscaper makes a freeform note safe inside one markdown table cell: a raw "|"
+// would split the row into phantom columns and a raw newline would end it early,
+// silently corrupting the published table. One replacer, built once — Replacer never
+// rescans its own output, so the "\|" emitted for a pipe cannot be re-matched, and
+// "\r\n" wins over the lone "\r"/"\n" because it is listed first.
+var cellEscaper = strings.NewReplacer("|", `\|`, "\r\n", " ", "\n", " ", "\r", " ")
+
+// notesCell renders a case's Missing notes into one markdown table cell. The notes
+// are freeform — on the errored path they carry a verbatim provider error string —
+// so they are escaped before they reach the table.
 func notesCell(c ReportCase) string {
 	if len(c.Missing) == 0 {
 		return "—"
 	}
-	return strings.Join(c.Missing, ", ")
+	return cellEscaper.Replace(strings.Join(c.Missing, ", "))
 }
 
 func nameList(names []string) string {
