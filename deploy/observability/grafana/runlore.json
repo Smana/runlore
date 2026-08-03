@@ -255,7 +255,7 @@
         "type": "prometheus",
         "uid": "${datasource}"
       },
-      "description": "Estimated model tokens NOT spent because a recall short-circuited a full investigation \u2014 the compounding payoff of the catalog.",
+      "description": "Model tokens a delivered recall short-circuit actually cost (reranker + adversarial verify), provider-reported. This is the measured COST, not an assumed saving \u2014 compare it against tokens/investigation in the \"Token cost: full loop vs recall\" panel to see the payoff.",
       "fieldConfig": {
         "defaults": {
           "color": {
@@ -304,13 +304,13 @@
             "uid": "${datasource}"
           },
           "editorMode": "code",
-          "expr": "sum(increase(runlore_recall_tokens_saved_total[$__range]))",
-          "legendFormat": "saved",
+          "expr": "sum(increase(runlore_recall_tokens_spent_total[$__range]))",
+          "legendFormat": "spent",
           "refId": "A",
           "instant": true
         }
       ],
-      "title": "Tokens saved by recall",
+      "title": "Tokens spent by recall",
       "type": "stat"
     },
     {
@@ -1256,7 +1256,7 @@
         "type": "prometheus",
         "uid": "${datasource}"
       },
-      "description": "Per-investigation token estimate (p50 / p95) and estimated tokens saved per second via recall.",
+      "description": "Per-investigation token estimate (p50 / p95, investigation loop only) against the provider-reported tokens a delivered recall short-circuit actually costs (reranker + adversarial verify). The GAP between the two is the saving — both sides measured, neither assumed.",
       "fieldConfig": {
         "defaults": {
           "color": {
@@ -1304,20 +1304,7 @@
           },
           "unit": "short"
         },
-        "overrides": [
-          {
-            "matcher": {
-              "id": "byName",
-              "options": "tokens saved /s"
-            },
-            "properties": [
-              {
-                "id": "custom.axisPlacement",
-                "value": "right"
-              }
-            ]
-          }
-        ]
+        "overrides": []
       },
       "gridPos": {
         "h": 8,
@@ -1369,12 +1356,12 @@
             "uid": "${datasource}"
           },
           "editorMode": "code",
-          "expr": "sum(rate(runlore_recall_tokens_saved_total[$__rate_interval]))",
-          "legendFormat": "tokens saved /s",
+          "expr": "sum(increase(runlore_recall_tokens_spent_total[$__rate_interval])) / clamp_min(sum(increase(runlore_investigations_completed_total{result=\"recall\"}[$__rate_interval])), 1)",
+          "legendFormat": "tokens/recall (measured)",
           "refId": "C"
         }
       ],
-      "title": "Token cost & savings",
+      "title": "Token cost: full loop vs recall",
       "type": "timeseries"
     },
     {

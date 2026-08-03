@@ -76,7 +76,7 @@ estimate) keep the SDK defaults and are read as heatmaps, not percentiles.
 | Metric | Type | Labels | Meaning |
 |---|---|---|---|
 | `runlore_recall_hits_total` | counter | `result` | instant-recall short-circuits |
-| `runlore_recall_tokens_saved_total` | counter | — | estimated tokens saved by recall |
+| `runlore_recall_tokens_spent_total` | counter | — | tokens a **delivered** recall short-circuit actually cost (LLM reranker + adversarial verify). It is a measurement, not a saving estimate: difference it against `runlore_investigation_input_tokens` + `runlore_investigation_output_tokens` to size what recall avoided |
 | `runlore_recall_rejections_total` | counter | `reason` | recalls rejected before short-circuit |
 | `runlore_recall_score` | histogram | — | BM25 score at the recall decision |
 | `runlore_outcomes_opened_total` | counter | `kind` | investigations recorded as open |

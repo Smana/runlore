@@ -12,9 +12,9 @@ Panels are grouped into collapsible rows:
 | **Alert intake** | Received / coalesced / suppressed alert rates |
 | **Investigations** | Started/throttled/dropped rates; duration p50/p95/p99; completion rate by result |
 | **Tools & model** | Tool call rate by tool; tool error ratio; tool latency p95 by tool; model request rate by provider; model error ratio; model latency p95 by provider |
-| **Recall efficacy** | Recall hits/rejections + tokens-saved rate; BM25 recall-score heatmap |
+| **Recall efficacy** | Recall hits/rejections + tokens actually spent by recall; BM25 recall-score heatmap |
 | **Learning loop** | Outcomes opened by kind + incidents resolved; resolution time p50/p95; recall outcome by result (pie); curation rate by kind/result |
-| **Cost** | Per-investigation token estimate p50/p95 + tokens-saved rate |
+| **Cost** | Per-investigation token estimate p50/p95 vs measured tokens per delivered recall (the gap is the saving) |
 
 Units follow conventions: rates use `ops`/`reqps`, durations use `s`, ratios use `percentunit`, token counts use `short`.
 

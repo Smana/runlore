@@ -34,10 +34,17 @@ type Metrics struct {
 	HistorySummarizations      metric.Int64Counter // compaction events whose elided batch was replaced by a model digest
 	HistorySummarizeFallbacks  metric.Int64Counter // summarize-mode compactions that fell back to plain elision (summarizer error/refusal/truncation)
 	RecallHits                 metric.Int64Counter // KB cache hits, labelled by verify result
-	RecallTokensSaved          metric.Int64Counter // estimated tokens saved by a recall short-circuit
-	RecallRejections           metric.Int64Counter // recalls rejected before short-circuit (label: reason)
-	CoalesceBatchSize          metric.Int64Histogram
-	InvestigationTokens        metric.Int64Histogram
+	// RecallTokensSpent is what a DELIVERED recall short-circuit actually cost:
+	// provider-reported input (incl. cached) + output tokens across the LLM reranker
+	// and the adversarial verify pass. It is a measurement, not a saving estimate —
+	// difference it against the InvestigationInputTokens / InvestigationOutputTokens
+	// histograms to size what recall avoided. It replaces recall_tokens_saved_total,
+	// which asserted a saving equal to the configured budget CEILING (>6x a real
+	// investigation's observed spend) and never subtracted the recall's own cost.
+	RecallTokensSpent   metric.Int64Counter
+	RecallRejections    metric.Int64Counter // recalls rejected before short-circuit (label: reason)
+	CoalesceBatchSize   metric.Int64Histogram
+	InvestigationTokens metric.Int64Histogram
 	// Per-investigation model usage totals (loop + verify), recorded once at
 	// delivery — the actual provider-reported spend, distinct from the pre-request
 	// InvestigationTokens estimate.
@@ -99,7 +106,7 @@ func NewMetrics() *Metrics {
 		HistorySummarizations:      ctr("history_summarizations_total", "compaction events whose elided batch was replaced by a model-produced digest"),
 		HistorySummarizeFallbacks:  ctr("history_summarize_fallbacks_total", "summarize-mode compactions that fell back to plain elision (summarizer error/refusal/truncation)"),
 		RecallHits:                 ctr("recall_hits_total", "KB instant-recall short-circuits (label: result)"),
-		RecallTokensSaved:          ctr("recall_tokens_saved_total", "estimated tokens saved by recall short-circuits"),
+		RecallTokensSpent:          ctr("recall_tokens_spent_total", "model tokens (input incl. cached + output) actually spent by delivered recall short-circuits: the LLM reranker plus the adversarial verify pass"),
 		RecallRejections:           ctr("recall_rejections_total", "recalls rejected before short-circuit (label: reason)"),
 		CoalesceBatchSize:          hist("coalesce_batch_size", "incidents per flushed batch"),
 		InvestigationTokens:        hist("investigation_tokens_estimated", "per-investigation token estimate (investigation loop only; excludes the adversarial verify phase)"),
