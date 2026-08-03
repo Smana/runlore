@@ -1256,7 +1256,7 @@
         "type": "prometheus",
         "uid": "${datasource}"
       },
-      "description": "Per-investigation token estimate (p50 / p95, investigation loop only) against the provider-reported tokens a delivered recall short-circuit actually costs (reranker + adversarial verify). The GAP between the two is the saving — both sides measured, neither assumed.",
+      "description": "Per-investigation token estimate (p50 / p95, investigation loop only) against the provider-reported tokens a delivered recall short-circuit actually costs (reranker + adversarial verify). The GAP between the two is the saving. Note the asymmetry: the p50/p95 series are the pre-request chars/4 ESTIMATE (loop only, excludes verify), the recall series is provider-reported.",
       "fieldConfig": {
         "defaults": {
           "color": {

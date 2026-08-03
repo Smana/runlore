@@ -100,7 +100,6 @@ func TestRecallTokensSpentTracksObservedUsage(t *testing.T) {
 							Score: 5.0,
 						}}},
 					},
-					OnComplete: func(providers.Investigation) {},
 				}
 				return li, Request{Title: "HarborProbeFailure", Workload: providers.Workload{Namespace: "tooling", Name: "harbor"}}
 			},
@@ -128,7 +127,6 @@ func TestRecallTokensSpentTracksObservedUsage(t *testing.T) {
 					Log:                       discard,
 					Metrics:                   m,
 					Recall:                    r,
-					OnComplete:                func(providers.Investigation) {},
 				}
 				return li, okReq()
 			},
@@ -141,11 +139,7 @@ func TestRecallTokensSpentTracksObservedUsage(t *testing.T) {
 			m, read := meteredInstruments(t)
 			li, req := tc.build(m)
 			var delivered providers.Investigation
-			prev := li.OnComplete
-			li.OnComplete = func(inv providers.Investigation) {
-				delivered = inv
-				prev(inv)
-			}
+			li.OnComplete = func(inv providers.Investigation) { delivered = inv }
 			if err := li.Investigate(context.Background(), req); err != nil {
 				t.Fatalf("Investigate: %v", err)
 			}

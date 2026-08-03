@@ -725,28 +725,17 @@ func (li *LoopInvestigator) tryRecall(ctx context.Context, req Request, result *
 		}
 		m.RecallHits.Add(ctx, 1, metric.WithAttributes(attribute.String("result", recallResult)))
 		if len(rec.RootCauses) > 0 {
-			// Record what this short-circuit COST, not a guess at what it saved. The
-			// previous counter added MaxTokensPerInvestigation — the configured budget
-			// CEILING (100k by default), which is not an observation of anything: the
-			// repo's own recorded full investigation
-			// (examples/demo/harbor-chart-bump.transcript.json) is 7 model calls totalling
-			// 14,034 in / 1,537 out, so the series overstated the saving by >6x. It also never
-			// subtracted the recall's own spend, which under the shipped defaults is TWO
-			// model calls (the LLM reranker + the adversarial verify pass), not zero.
+			// What this short-circuit COST, measured — not a guess at what it saved. By
+			// here verifyTotals holds every model call the recall path made (the opt-in
+			// reranker plus the adversarial verify pass), so the real number is already in
+			// hand: a dashboard differences it against the per-investigation token
+			// histograms recordUsageMetrics emits to size what recall avoided. Cached input
+			// is included (providers.Usage.InputTokens already counts it), matching those
+			// histograms.
 			//
-			// Measuring beats asserting, and there is nothing to estimate here: both of
-			// those calls have already accumulated into verifyTotals by this point, so the
-			// real number is in hand. Emitting the actual spend lets a dashboard difference
-			// it against the InvestigationInputTokens/InvestigationOutputTokens histograms
-			// recordUsageMetrics already emits for full investigations — a saving derived
-			// from two measurements instead of one constant. Cached input is included
-			// (providers.Usage.InputTokens already counts it), matching those histograms.
-			//
-			// Only on a delivered short-circuit: a recall the verify pass refutes falls
-			// through to a full investigation, and its tokens are reported there as part of
-			// that investigation's own totals.
-			spent := int64(verifyTotals.InputTokens + verifyTotals.OutputTokens)
-			m.RecallTokensSpent.Add(ctx, spent)
+			// Delivered short-circuits only: a recall the verify pass refutes falls through
+			// to a full investigation, which reports these tokens in its own totals.
+			m.RecallTokensSpent.Add(ctx, int64(verifyTotals.InputTokens+verifyTotals.OutputTokens))
 		}
 	}
 	if len(rec.RootCauses) > 0 {
