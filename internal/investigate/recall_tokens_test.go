@@ -196,12 +196,26 @@ func TestRecallTokensSpentNotRecordedOnFallThrough(t *testing.T) {
 				Score: 5.0,
 			}}},
 		},
-		OnComplete: func(providers.Investigation) {},
 	}
+	var delivered providers.Investigation
+	li.OnComplete = func(inv providers.Investigation) { delivered = inv }
 	if err := li.Investigate(context.Background(), Request{Title: "HarborProbeFailure", Workload: providers.Workload{Namespace: "tooling", Name: "harbor"}}); err != nil {
 		t.Fatalf("Investigate: %v", err)
 	}
 	if got, ok := read("runlore_recall_tokens_spent_total"); ok {
 		t.Fatalf("runlore_recall_tokens_spent_total = %d on a verify-rejected recall; it must only count delivered short-circuits", got)
+	}
+	// …and the other half of "not double-counted": the refuted recall's tokens are not
+	// DROPPED either, they are carried by the full investigation that ran instead. Both
+	// halves have to hold — skipping the counter would otherwise be indistinguishable
+	// from losing the spend entirely, and the recall's 960 tokens were really paid.
+	const (
+		refutedRecall = 900 + 60   // the verify pass that refuted the recalled entry
+		fullLoop      = 2000 + 100 // the fall-through loop's own submit_findings turn
+		loopVerify    = 300 + 20   // …and the verify pass over its findings
+	)
+	if got, want := delivered.Usage.InputTokens+delivered.Usage.OutputTokens, refutedRecall+fullLoop+loopVerify; got != want {
+		t.Fatalf("delivered usage = %d tokens, want %d — the refuted recall's %d tokens must still be billed to the full investigation that replaced it (in %d / out %d)",
+			got, want, refutedRecall, delivered.Usage.InputTokens, delivered.Usage.OutputTokens)
 	}
 }

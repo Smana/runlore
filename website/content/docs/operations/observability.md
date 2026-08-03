@@ -70,13 +70,23 @@ estimate) keep the SDK defaults and are read as heatmaps, not percentiles.
 | `runlore_tool_call_duration_seconds` | histogram | `tool` | per-tool latency |
 | `runlore_model_requests_total` | counter | `provider`, `result` | LLM completion requests (`ok`/`error`) |
 | `runlore_model_request_duration_seconds` | histogram | `provider` | LLM completion latency |
-| `runlore_investigation_tokens_estimated` | histogram | — | per-investigation token estimate |
+| `runlore_investigation_tokens_estimated` | histogram | — | per-investigation token estimate (pre-request `chars/4` heuristic, investigation loop only — excludes the adversarial verify phase). This is what the `RunloreInvestigationCostHigh` alert watches |
+| `runlore_investigation_model_calls` | histogram | `result` | model completions per investigation (loop + verify) |
+| `runlore_investigation_input_tokens` | histogram | `result` | provider-reported input tokens per investigation, including cached (loop + verify) |
+| `runlore_investigation_output_tokens` | histogram | `result` | provider-reported output tokens per investigation (loop + verify) |
+| `runlore_investigation_cached_input_tokens` | histogram | `result` | input tokens served from cache per investigation (loop + verify) |
+| `runlore_investigation_cost_usd` | histogram | `result` | estimated per-investigation cost in USD (only when `model.pricing` is configured) |
+
+The five usage histograms carry the same `result` values as
+`runlore_investigations_completed_total`, so `{result="recall"}` selects exactly the
+investigations a recall short-circuited and `{result!="recall"}` exactly those that ran
+the full loop. That split is what makes the recall saving measurable — see below.
 
 ### Recall, learning loop & curation
 | Metric | Type | Labels | Meaning |
 |---|---|---|---|
 | `runlore_recall_hits_total` | counter | `result` | instant-recall short-circuits |
-| `runlore_recall_tokens_spent_total` | counter | — | tokens a **delivered** recall short-circuit actually cost (LLM reranker + adversarial verify). It is a measurement, not a saving estimate: difference it against `runlore_investigation_input_tokens` + `runlore_investigation_output_tokens` to size what recall avoided |
+| `runlore_recall_tokens_spent_total` | counter | — | tokens a **delivered** recall short-circuit actually cost (LLM reranker + adversarial verify). A measurement, not a saving estimate — see [Measuring the recall saving](#measuring-the-recall-saving) |
 | `runlore_recall_rejections_total` | counter | `reason` | recalls rejected before short-circuit |
 | `runlore_recall_score` | histogram | — | BM25 score at the recall decision |
 | `runlore_outcomes_opened_total` | counter | `kind` | investigations recorded as open |
@@ -86,6 +96,37 @@ estimate) keep the SDK defaults and are read as heatmaps, not percentiles.
 | `runlore_curations_total` | counter | `kind`, `result` | curation outcomes (`opened`/`coalesced`/`error`) |
 | `runlore_curation_dedup_score` | histogram | — | catalog top-hit BM25 score at the dedup decision |
 | `runlore_catalog_embed_degraded_total` | counter | — | catalog reloads that left hybrid recall without vectors (embed failure — recall degrades to BM25-only until the next successful sync) |
+
+### Measuring the recall saving
+
+RunLore never asserts a saving — it measures both sides and lets you subtract them.
+Compare two means, both provider-reported, both per investigation:
+
+```promql
+# what a delivered recall short-circuit costs
+sum(increase(runlore_recall_tokens_spent_total[$__range]))
+  / sum(increase(runlore_investigations_completed_total{result="recall"}[$__range]))
+
+# what an investigation that ran the full loop costs
+(
+    sum(increase(runlore_investigation_input_tokens_sum{result!="recall"}[$__range]))
+  + sum(increase(runlore_investigation_output_tokens_sum{result!="recall"}[$__range]))
+)
+  / sum(increase(runlore_investigation_input_tokens_count{result!="recall"}[$__range]))
+```
+
+The **gap between the two is the saving**. `$__range` is the Grafana range variable —
+substitute a window (`[24h]`) to run these in Prometheus directly. The dashboard plots
+exactly these two series in **💸 Cost & efficiency**, and the **🧠 Learning loop** row
+reduces them to one number, `1 - recall/full-loop`, as the "Recall token savings" stat.
+
+> [!WARNING]
+> **The `{result!="recall"}` filter is load-bearing.**
+>
+> Unfiltered, these histograms cover recall short-circuits too — so the "full loop" term
+> would contain the very runs you are subtracting from it, and the measured saving would
+> *shrink* as recall got better. Never difference `recall_tokens_spent_total` out of an
+> unfiltered per-investigation total.
 
 ## Grafana dashboard
 

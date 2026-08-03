@@ -287,7 +287,11 @@ func (li *LoopInvestigator) Investigate(ctx context.Context, req Request) error 
 		// chokepoint — every exit (happy path, recall short-circuit, timeout, refusal, budget
 		// kill, max-steps) routes through it, so no delivered investigation can miss it.
 		inv.InvestigationStartedAt = start
-		li.recordUsageMetrics(ctx, inv.Usage)
+		// Every caller sets `result` BEFORE calling finish, so the usage histograms carry
+		// the same completion label the deferred completion metric records — which is what
+		// lets a dashboard read a recall's cost and a full loop's off the same instrument
+		// instead of differencing one out of a total that already contains it.
+		li.recordUsageMetrics(ctx, inv.Usage, result)
 		li.deliver(req, inv)
 	}
 	defer func() {

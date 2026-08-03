@@ -5,6 +5,9 @@ package investigate
 import (
 	"context"
 
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/metric"
+
 	"github.com/Smana/runlore/internal/providers"
 )
 
@@ -69,15 +72,26 @@ func (li *LoopInvestigator) aggregateUsage(loop, verify providers.UsageTotals) p
 
 // recordUsageMetrics emits the per-investigation token totals (and estimated cost
 // when priced) to telemetry. Nil-safe: a no-op when metrics are disabled.
-func (li *LoopInvestigator) recordUsageMetrics(ctx context.Context, u providers.UsageTotals) {
+//
+// result carries the SAME completion label investigations_completed_total uses (the
+// caller sets it before every finish), so `{result="recall"}` selects exactly the
+// delivered recall short-circuits and `{result!="recall"}` exactly the investigations
+// that ran the full loop. Without it these histograms mixed both populations with no
+// way to tell them apart, and the "recall saving" was a subtraction whose subtrahend
+// silently contained its own minuend: the more work recall short-circuited, the more
+// recall runs dragged the per-investigation quantiles down, so the measured saving
+// shrank precisely as recall got better. One label turns that subtraction into a
+// filter.
+func (li *LoopInvestigator) recordUsageMetrics(ctx context.Context, u providers.UsageTotals, result string) {
 	if li.Metrics == nil {
 		return
 	}
-	li.Metrics.InvestigationModelCalls.Record(ctx, int64(u.ModelCalls))
-	li.Metrics.InvestigationInputTokens.Record(ctx, int64(u.InputTokens))
-	li.Metrics.InvestigationOutputTokens.Record(ctx, int64(u.OutputTokens))
-	li.Metrics.InvestigationCachedInputTokens.Record(ctx, int64(u.CachedInputTokens))
+	attrs := metric.WithAttributes(attribute.String("result", result))
+	li.Metrics.InvestigationModelCalls.Record(ctx, int64(u.ModelCalls), attrs)
+	li.Metrics.InvestigationInputTokens.Record(ctx, int64(u.InputTokens), attrs)
+	li.Metrics.InvestigationOutputTokens.Record(ctx, int64(u.OutputTokens), attrs)
+	li.Metrics.InvestigationCachedInputTokens.Record(ctx, int64(u.CachedInputTokens), attrs)
 	if u.Priced {
-		li.Metrics.InvestigationCostUSD.Record(ctx, u.CostUSD)
+		li.Metrics.InvestigationCostUSD.Record(ctx, u.CostUSD, attrs)
 	}
 }
