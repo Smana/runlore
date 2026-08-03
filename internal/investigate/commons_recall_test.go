@@ -94,19 +94,23 @@ func TestEnrichmentRanksTheOperatorsEntryAboveTheCommons(t *testing.T) {
 		body  = "# Symptom\n\nThe pod restarts repeatedly after a rollout.\n\n" +
 			"# Checks\n\nInspect the previous container's exit code and logs.\n"
 		ownPath     = "checkout-crashloop.md"
-		commonsPath = "commons/crashloopbackoff.md" // catalog namespaces commons paths
+		commonsName = "crashloopbackoff.md"
+		commonsPath = "commons/" + commonsName // catalog namespaces commons paths
 	)
-	// Identical symptom text and identical tags. The ONE difference is the line a
-	// commons entry may never carry: the resource this platform actually runs.
+	// Identical symptom text and identical tags. The ONE difference is the `resource`
+	// argument below — the line a commons entry may never carry: the resource this
+	// platform actually runs.
 	own, commons := t.TempDir(), t.TempDir()
-	write := func(dir, name, frontmatter string) {
+	write := func(dir, name, kind, resource string) {
 		t.Helper()
-		if err := os.WriteFile(filepath.Join(dir, name), []byte(frontmatter+tags+"\n---\n"+body), 0o600); err != nil {
+		md := "---\ntype: " + kind + "\ntitle: " + title + "\ndescription: " + desc + "\n" +
+			resource + tags + "\n---\n" + body
+		if err := os.WriteFile(filepath.Join(dir, name), []byte(md), 0o600); err != nil {
 			t.Fatal(err)
 		}
 	}
-	write(own, ownPath, "---\ntype: Incident\ntitle: "+title+"\ndescription: "+desc+"\nresource: payments/checkout-api\n")
-	write(commons, "crashloopbackoff.md", "---\ntype: Playbook\ntitle: "+title+"\ndescription: "+desc+"\n")
+	write(own, ownPath, "Incident", "resource: payments/checkout-api\n")
+	write(commons, commonsName, "Playbook", "")
 
 	cat := catalog.NewEmpty()
 	cat.SetCommonsDir(commons)
@@ -127,8 +131,11 @@ func TestEnrichmentRanksTheOperatorsEntryAboveTheCommons(t *testing.T) {
 	}
 	// The model searches by symptom — what the enriched tool description tells it to do.
 	const args = `{"query":"crashloopbackoff after a deploy"}`
+	// The two arms differ in exactly one thing: whether the tool is bound to the
+	// request's enrichment. Same catalog, same model-issued query.
+	tool, enrich := KBSearchTool{Catalog: cat}, kbSearchEnrichment(req)
 
-	bare, err := KBSearchTool{Catalog: cat}.Call(context.Background(), args)
+	bare, err := tool.Call(context.Background(), args)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -138,7 +145,7 @@ func TestEnrichmentRanksTheOperatorsEntryAboveTheCommons(t *testing.T) {
 			"enrichment. Re-derive the fixture.\n%s", bare)
 	}
 
-	enriched, err := KBSearchTool{Catalog: cat}.withEnrichment(kbSearchEnrichment(req)).Call(context.Background(), args)
+	enriched, err := tool.withEnrichment(enrich).Call(context.Background(), args)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -146,7 +153,7 @@ func TestEnrichmentRanksTheOperatorsEntryAboveTheCommons(t *testing.T) {
 		t.Errorf("the commons entry outranked the operator's own on an ENRICHED query.\n"+
 			"enrichment = %q; those tokens are cluster-specific and the commons is resource-less "+
 			"by construction, so a local entry for the same failure class must win.\n%s",
-			kbSearchEnrichment(req), enriched)
+			enrich, enriched)
 	}
 }
 

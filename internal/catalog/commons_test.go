@@ -72,11 +72,12 @@ func TestUsersOwnEntryWinsATie(t *testing.T) {
 	// that can order them is provenance.
 	const same = "readiness probe failing after a deploy"
 	const ownName, commonsName = "z-our-incident.md", "a-generic-playbook.md"
-	if commonsPathPrefix+commonsName >= ownName {
+	commonsDocID := commonsPathPrefix + commonsName
+	if commonsDocID >= ownName {
 		t.Fatalf("fixture is no longer adversarial: bleve breaks equal-score ties by doc ID, "+
 			"so the commons doc ID (%q) must sort BEFORE the operator's (%q) — otherwise "+
 			"bleve's own order already satisfies the assertion and this test passes with "+
-			"the provenance tie-break deleted", commonsPathPrefix+commonsName, ownName)
+			"the provenance tie-break deleted", commonsDocID, ownName)
 	}
 	writeOKF(t, own, ownName, same, same)
 	writeOKF(t, commons, commonsName, same, same)
