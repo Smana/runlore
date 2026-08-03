@@ -159,3 +159,45 @@ func TestSameFilenameInBothRootsDoesNotCollide(t *testing.T) {
 		t.Errorf("search for the commons entry resolved to the USER's entry — the doc IDs collided: %+v", theirs[0])
 	}
 }
+
+// TestIncrementalSyncKeepsTheCommonsIndexed: ReloadDelta replaced entries and
+// pathIdx wholesale with what Load(operatorRoot) returned, while the delta only
+// ever describes the operator's root. The commons documents stayed in the live
+// bleve index but vanished from pathIdx, so SearchScored dropped them — and they
+// still consumed top-k slots, so searches also returned fewer results than asked
+// for. Every operator sync after the first silently un-indexed the whole shared
+// corpus until the commons syncer's own much slower tick healed it.
+func TestIncrementalSyncKeepsTheCommonsIndexed(t *testing.T) {
+	own := t.TempDir()
+	commons := t.TempDir()
+	writeEntry(t, own, "mine.md", "---\ntype: Incident\ntitle: My own outage\ndescription: mine\nresource: apps/web\n---\nbody\n")
+	writeEntry(t, commons, "generic.md", "---\ntype: Playbook\ntitle: Generic crashloop playbook\ndescription: generic\n---\nbody\n")
+
+	cat := NewEmpty()
+	cat.SetCommonsDir(commons)
+	if _, err := cat.ReloadContext(context.Background(), own); err != nil {
+		t.Fatal(err)
+	}
+	if cat.Len() != 2 {
+		t.Fatalf("fixture: want both roots indexed, got %d", cat.Len())
+	}
+
+	// An incremental sync of the OPERATOR's root only — the normal steady state.
+	writeEntry(t, own, "second.md", "---\ntype: Incident\ntitle: Another outage\ndescription: second\nresource: apps/api\n---\nbody\n")
+	if _, err := cat.ReloadDelta(context.Background(), own, &SyncDelta{Changed: []string{"second.md"}}); err != nil {
+		t.Fatal(err)
+	}
+	if cat.Len() != 3 {
+		t.Fatalf("after an incremental sync the catalog has %d entries, want 3 — the commons was dropped", cat.Len())
+	}
+	hits, _ := cat.SearchScored("generic crashloop playbook", 5)
+	found := false
+	for _, h := range hits {
+		if h.Entry.Commons {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("the commons entry is no longer searchable after an incremental sync of the operator's own root; hits=%d", len(hits))
+	}
+}

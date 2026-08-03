@@ -881,3 +881,57 @@ func TestCommonsCatalogValidation(t *testing.T) {
 		}
 	})
 }
+
+// TestCommonsIntervalDefaultsToTheDocumentedRate: the commons syncer polls a
+// SHARED, public upstream repo, and its documented default is 24h. Nothing filled
+// it, so an unset interval reached Syncer.Run as 0 and fell through to the
+// syncer's generic 5-minute fallback — 288x the documented rate against someone
+// else's GitHub repo — while the startup log printed "interval=0s".
+func TestCommonsIntervalDefaultsToTheDocumentedRate(t *testing.T) {
+	c := &Config{}
+	c.Catalog.Dir = "/var/lib/runlore/catalog"
+	c.Catalog.Commons.URL = "https://github.com/Smana/runlore-kb-commons"
+	c.Catalog.Commons.Dir = "/var/lib/runlore/commons"
+	ApplyDefaults(c)
+	if got := c.Catalog.Commons.Interval.Std(); got != 24*time.Hour {
+		t.Fatalf("commons interval = %v, want 24h (the documented default; 0 falls through to the syncer's 5m)", got)
+	}
+	if c.Catalog.Commons.Branch != "main" {
+		t.Fatalf("commons branch = %q, want main", c.Catalog.Commons.Branch)
+	}
+}
+
+// TestCommonsDirMustNotNestInsideCatalogDir: the loader walks recursively, so a
+// commons root nested under the operator's catalog is indexed TWICE — once
+// prefixed and marked as shared, once as the operator's own, unmarked and
+// competing in the tie-break as a local entry. Exact string equality missed it,
+// and missed a trailing slash too.
+func TestCommonsDirMustNotNestInsideCatalogDir(t *testing.T) {
+	for _, tc := range []struct{ name, own, commons string }{
+		{"commons nested in catalog", "/var/lib/runlore/catalog", "/var/lib/runlore/catalog/commons"},
+		{"catalog nested in commons", "/var/lib/runlore/commons/own", "/var/lib/runlore/commons"},
+		{"trailing slash", "/var/lib/runlore/catalog", "/var/lib/runlore/catalog/"},
+		{"unclean path", "/var/lib/runlore/catalog", "/var/lib/runlore/catalog/../catalog"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			c := &Config{}
+			c.Catalog.Dir = tc.own
+			c.Catalog.Commons.URL = "https://example.com/kb"
+			c.Catalog.Commons.Dir = tc.commons
+			ApplyDefaults(c)
+			if err := c.Validate(); err == nil {
+				t.Fatalf("want a validation error for catalog.dir=%q commons.dir=%q — a shared root must never overlap the operator's own", tc.own, tc.commons)
+			}
+		})
+	}
+
+	// Control: genuinely separate roots must still validate.
+	c := &Config{}
+	c.Catalog.Dir = "/var/lib/runlore/catalog"
+	c.Catalog.Commons.URL = "https://example.com/kb"
+	c.Catalog.Commons.Dir = "/var/lib/runlore/commons"
+	ApplyDefaults(c)
+	if err := c.Validate(); err != nil {
+		t.Fatalf("separate roots must validate, got: %v", err)
+	}
+}

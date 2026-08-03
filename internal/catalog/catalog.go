@@ -230,7 +230,16 @@ func (c *Catalog) ReloadContext(ctx context.Context, dir string) ([]string, erro
 // ANY index mutation fails: an incremental error must never leave a wrong
 // index behind.
 func (c *Catalog) ReloadDelta(ctx context.Context, dir string, delta *SyncDelta) ([]string, error) {
-	if delta == nil || !c.ready.Load() {
+	// A configured commons forces the full path. The delta describes the OPERATOR's
+	// root only, while the incremental swap replaces c.entries/pathIdx wholesale with
+	// what Load(dir) returned — so the commons docs stayed in the live bleve index but
+	// vanished from pathIdx, and SearchScored dropped them while they still consumed
+	// top-k slots. Every sync after the first silently un-indexed the entire shared
+	// corpus until the commons syncer's own (much slower) tick healed it.
+	c.mu.RLock()
+	hasCommons := c.commonsDir != ""
+	c.mu.RUnlock()
+	if delta == nil || !c.ready.Load() || hasCommons {
 		return c.ReloadContext(ctx, dir)
 	}
 	entries, skipped, err := Load(dir)
