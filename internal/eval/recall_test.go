@@ -211,7 +211,10 @@ func TestShippedPoisonedRecallCaseFires(t *testing.T) {
 	}
 	model := &seqModel{resp: []providers.CompletionResponse{
 		verdict("reject"), // verify rejects the poisoned recall
-		findings("the image tag registry.k8s.io/pause:v9.9.9-does-not-exist cannot be pulled (ImagePullBackOff)"),
+		// A realistic CORRECT claim: it blames the workload and the unresolvable tag.
+		// Scoring reads the claim, not the replayed evidence, so a finding that merely
+		// quoted pod_status back would (rightly) no longer pass here.
+		findings("eval-victim cannot start: its image tag registry.k8s.io/pause:v9.9.9-does-not-exist cannot be pulled (ImagePullBackOff)"),
 		verdict("keep"), // verify keeps the fresh finding
 	}}
 	r := &Runner{Model: model, Log: discardLog()}

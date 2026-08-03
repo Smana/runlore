@@ -95,11 +95,18 @@ type CaseRecall struct {
 }
 
 // Expected is the RCA scoring spec for a case.
+//
+// MustContain and RootCauseEntities are NOT two independent gates: Score matches both
+// over the same haystack (the claim — see claimText) with the same case-insensitive
+// substring rule, so a term listed in both is simply required twice. The only
+// behavioural difference is that a non-empty RootCauseEntities switches ON the
+// Distractors over-claim penalty. Keep the split editorial — mechanism words in
+// MustContain, blamed entities in RootCauseEntities — and don't duplicate across them.
 type Expected struct {
-	MustContain       []string `yaml:"must_contain"`        // keywords that must appear in the findings (recall, over full findings text)
+	MustContain       []string `yaml:"must_contain"`        // keywords that must appear in the claim (recall, over claim text)
 	MinConfidence     float64  `yaml:"min_confidence"`      // confidence floor (0 = no floor)
-	RootCauseEntities []string `yaml:"root_cause_entities"` // entities that MUST be named as the cause (entity recall, over claim text)
-	Distractors       []string `yaml:"distractors"`         // plausible-but-wrong entities that must NOT be blamed (over-claim/FP); only evaluated when root_cause_entities is non-empty
+	RootCauseEntities []string `yaml:"root_cause_entities"` // entities that MUST be named as the cause; same match as MustContain, and its presence is what enables Distractors
+	Distractors       []string `yaml:"distractors"`         // entities present in the case's own evidence that a correct claim has no reason to name — not even to dismiss, since claimText excludes ruled_out; only evaluated when root_cause_entities is non-empty
 }
 
 // Load reads every *.yaml / *.yml case in dir.

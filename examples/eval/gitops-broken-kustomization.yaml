@@ -157,12 +157,30 @@ tools:
     \ at 2026-08-02T11:02:08Z\nflux Kustomization/observability-victoria-metrics-k8s-stack (sync): ..e0a8d21a91ac770f97266da0a0de53d27641f44e39d2abe64eb49790cf573482\
     \ at 2026-08-02T11:01:03Z\n…and 4 more changes (narrow with a workload name)\n"
 expected:
+  # Matched over the CLAIM only (title + hypothesis summary/action), so echoing the
+  # recorded ArtifactFailed events back is not enough — the agent has to blame them.
   must_contain:
   - kustomization
   - path
   min_confidence: 0.5
-  root_cause_entities: []
-  distractors: []
+  # The claim must blame the Kustomization by name. The bad path itself is already
+  # covered by must_contain: path — requiring the verbatim "does/not/exist" would score
+  # QUOTING STYLE rather than correctness, failing an equally correct claim that says
+  # "points at a directory that is missing from the artifact".
+  root_cause_entities:
+  - eval-victim-broken
+  # llm-platform: the newest thing in what_changed — a whole new Flux Kustomization
+  # added in the same sync, and SUSPENDED, so it changed nothing in the cluster. It is
+  # the "blame the last change" trap, and nothing in the evidence invites a correct
+  # claim to mention it, not even to rule it out.
+  #
+  # monorepo-split (the ArtifactGenerator at Ready=unknown) was considered and REJECTED
+  # as a distractor: the missing path is missing *from that artifact*, so a correct
+  # claim may legitimately name the generator or the ExternalArtifact for context, or
+  # note that the source is healthy. claimText excludes ruled_out, so either phrasing
+  # would score as an over-claim on a right answer.
+  distractors:
+  - llm-platform
 ground_truth:
   root_cause: Kustomization/eval-victim-broken references spec.path ./this/path/does/not/exist, which
     does not exist in the infra-artifact source, so the build fails and the Kustomization is Ready=False

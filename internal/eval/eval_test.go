@@ -10,7 +10,10 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strings"
 	"testing"
+
+	"gopkg.in/yaml.v3"
 
 	"github.com/Smana/runlore/internal/providers"
 )
@@ -56,6 +59,79 @@ func TestScore(t *testing.T) {
 	}
 	if r := Score("c", inv, Expected{MustContain: []string{"chart"}, MinConfidence: 0.95}); r.Pass {
 		t.Fatalf("expected fail on confidence floor, got %+v", r)
+	}
+}
+
+// TestMustContainMatchesClaimNotEvidence pins the haystack must_contain is matched
+// over: the CLAIM (title + each hypothesis's summary and suggested action), never the
+// evidence the replay tools handed the model. Matching over the evidence made the
+// keyword gate self-fulfilling — an agent that merely quotes its own recorded input,
+// or that names the keyword only while RULING IT OUT, scored a pass.
+func TestMustContainMatchesClaimNotEvidence(t *testing.T) {
+	exp := Expected{MustContain: []string{"harbor-db"}, MinConfidence: 0.5}
+	tests := []struct {
+		name string
+		inv  providers.Investigation
+		want bool
+	}{
+		{
+			name: "named as the cause in the summary",
+			inv: providers.Investigation{Confidence: 0.8, RootCauses: []providers.Hypothesis{{
+				Summary: "the chart bump enabled a schema migration that stalled harbor-db",
+			}}},
+			want: true,
+		},
+		{
+			name: "named in the suggested action",
+			inv: providers.Investigation{Confidence: 0.8, RootCauses: []providers.Hypothesis{{
+				Summary:         "the chart bump enabled a blocking schema migration",
+				SuggestedAction: "clear the stale migration lock on harbor-db",
+			}}},
+			want: true,
+		},
+		{
+			name: "named in the title",
+			inv: providers.Investigation{
+				Confidence: 0.8,
+				Title:      "harbor-db stuck on a schema migration lock",
+				RootCauses: []providers.Hypothesis{{Summary: "the chart bump is the trigger"}},
+			},
+			want: true,
+		},
+		{
+			name: "only quoted back from the recorded evidence",
+			inv: providers.Investigation{Confidence: 0.8, RootCauses: []providers.Hypothesis{{
+				Summary:  "unclear, possibly a transient blip",
+				Evidence: []string{"harbor-db-0  FATAL: could not obtain migration lock"},
+			}}},
+			want: false,
+		},
+		{
+			name: "only named while ruling it out",
+			inv: providers.Investigation{
+				Confidence: 0.8,
+				RootCauses: []providers.Hypothesis{{Summary: "unclear, possibly a transient blip"}},
+				RuledOut:   []string{"harbor-db: its migration finished before the outage window"},
+			},
+			want: false,
+		},
+		{
+			name: "only listed as unresolved or a data gap",
+			inv: providers.Investigation{
+				Confidence: 0.8,
+				RootCauses: []providers.Hypothesis{{Summary: "unclear, possibly a transient blip"}},
+				Unresolved: []string{"whether harbor-db ever finished its migration"},
+				DataGaps:   []string{"no harbor-db logs before 09:00"},
+			},
+			want: false,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := Score("c", tt.inv, exp); got.Pass != tt.want {
+				t.Fatalf("Pass = %v, want %v (missing: %v)", got.Pass, tt.want, got.Missing)
+			}
+		})
 	}
 }
 
@@ -179,6 +255,119 @@ expected:
 		len(cases[0].Expected.Distractors) != 1 {
 		t.Fatalf("entity fields not parsed: %+v", cases[0].Expected)
 	}
+}
+
+// noDistractorJustification is the marker a case must carry, as a YAML comment, to
+// ship an empty distractors list. A case that cannot detect over-claiming is an
+// acceptable outcome — a distractor a CORRECT claim might name is worse than none —
+// but it has to be on the record, so the gap reads as a decision and not an oversight.
+const noDistractorJustification = "no valid distractor:"
+
+// TestShippedCasesScoreEntities guards the shipped gold set on three counts.
+//
+// Entity scoring — recall over root_cause_entities and the over-claim penalty over
+// distractors — engages only when root_cause_entities is non-empty (see Score), so a
+// case that ships an empty list is silently scored by keywords alone.
+//
+// A distractor must be able to FIRE. Two ways it cannot: being a substring of one of
+// the case's own entities (Score suppresses those as "explained by a correct claim"),
+// or appearing nowhere in the evidence the model is actually shown — the prompt, the
+// recorded tool output, and any seeded catalog fixture. The second is the trap this
+// test was extended for: a distractor naming something the model never sees can only
+// fire on a hallucination, so it reads as over-claim coverage while providing none.
+//
+// It does NOT verify the other half of a good distractor — that a correct claim has no
+// reason to name it, not even to dismiss it, which claimText's exclusion of ruled_out
+// makes a real hazard. That half is a judgement call and lives in each case file's
+// comment.
+func TestShippedCasesScoreEntities(t *testing.T) {
+	dir := filepath.Join("..", "..", "examples", "eval")
+	cases, err := Load(dir)
+	if err != nil {
+		t.Fatalf("Load examples/eval: %v", err)
+	}
+	if len(cases) == 0 {
+		t.Fatal("no shipped cases loaded")
+	}
+	for _, c := range cases {
+		t.Run(c.Name, func(t *testing.T) {
+			if len(c.Expected.RootCauseEntities) == 0 {
+				t.Fatal("no root_cause_entities: entity scoring and the over-claim penalty never engage for this case")
+			}
+			if len(c.Expected.Distractors) == 0 {
+				if !strings.Contains(caseFileText(t, dir, c.Name), noDistractorJustification) {
+					t.Fatalf("empty distractors and no %q comment in the case file: this case cannot detect over-claiming, so state why", noDistractorJustification)
+				}
+				return
+			}
+			evidence := caseEvidence(t, dir, c)
+			for _, d := range c.Expected.Distractors {
+				if coveredByEntity(c.Expected.RootCauseEntities, d) {
+					t.Errorf("distractor %q is a substring of one of %v — Score suppresses it, so it can never fire", d, c.Expected.RootCauseEntities)
+				}
+				if !strings.Contains(evidence, strings.ToLower(d)) {
+					t.Errorf("distractor %q appears nowhere in this case's prompt, recorded tool output or catalog fixture — nothing can blame it but a hallucination, so it looks like over-claim coverage without being any", d)
+				}
+			}
+		})
+	}
+}
+
+// caseEvidence is everything this case puts in front of the model, lower-cased: the
+// seed prompt, every recorded tool output, and — when the case seeds a catalog fixture
+// — the entries in it, which instant recall and the verify pass do show the model.
+func caseEvidence(t *testing.T, dir string, c Case) string {
+	t.Helper()
+	var b strings.Builder
+	b.WriteString(c.Prompt)
+	for _, out := range c.Tools {
+		b.WriteString(" " + out)
+	}
+	if c.CatalogDir != "" {
+		entries, err := filepath.Glob(filepath.Join(dir, c.CatalogDir, "*"))
+		if err != nil {
+			t.Fatalf("glob catalog_dir %q: %v", c.CatalogDir, err)
+		}
+		if len(entries) == 0 {
+			t.Fatalf("catalog_dir %q holds no entries", c.CatalogDir)
+		}
+		for _, p := range entries {
+			data, err := os.ReadFile(p) //nolint:gosec // G304: path comes from the repo's own cases dir
+			if err != nil {
+				t.Fatalf("read catalog entry %s: %v", p, err)
+			}
+			b.Write(append([]byte(" "), data...))
+		}
+	}
+	return strings.ToLower(b.String())
+}
+
+// caseFileText returns the RAW YAML the named case was loaded from. The guard needs it
+// because the justification for an empty distractors list is a comment, which the
+// parser strips before it ever reaches a Case.
+func caseFileText(t *testing.T, dir, name string) string {
+	t.Helper()
+	paths, err := filepath.Glob(filepath.Join(dir, "*.y*ml"))
+	if err != nil {
+		t.Fatalf("glob %s: %v", dir, err)
+	}
+	for _, p := range paths {
+		data, err := os.ReadFile(p) //nolint:gosec // G304: path comes from the repo's own cases dir
+		if err != nil {
+			t.Fatalf("read %s: %v", p, err)
+		}
+		var head struct {
+			Name string `yaml:"name"`
+		}
+		if err := yaml.Unmarshal(data, &head); err != nil {
+			t.Fatalf("parse %s: %v", p, err)
+		}
+		if head.Name == name || strings.TrimSuffix(filepath.Base(p), filepath.Ext(p)) == name {
+			return string(data)
+		}
+	}
+	t.Fatalf("no case file in %s declares name %q", dir, name)
+	return ""
 }
 
 // rateModel passes (names harbor-db) on its first passN Complete-pairs, then fails.
