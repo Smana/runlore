@@ -112,7 +112,7 @@ func (cr *ComparisonRunner) runOnce(ctx context.Context, c Case) ComparedRun {
 	}
 	req := investigate.Request{Source: investigate.SourceAlert, Title: c.Name, Message: c.Prompt}
 	if err := li.Investigate(ctx, req); err != nil {
-		return ComparedRun{Result: Result{Name: c.Name, Missing: []string{"investigation error: " + err.Error()}}}
+		return ComparedRun{Result: Result{Name: c.Name, Missing: []string{noteInvestigationError + err.Error()}}}
 	}
 	if !done {
 		return ComparedRun{Result: Result{Name: c.Name, Missing: []string{"no findings (loop did not submit)"}}}

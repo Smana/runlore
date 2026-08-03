@@ -23,6 +23,16 @@ type Runner struct {
 	Log   *slog.Logger
 }
 
+// Run-error notes: the two Result.Missing entries that mean a repeat never produced
+// an answer to score at all, as opposed to answering something that was then judged
+// wrong. Report.Errored keys on these prefixes to tell a broken run apart from a
+// genuine zero, so producer and consumer share these constants instead of matching
+// literals across files — the coupling is a compiler edge, not a string coincidence.
+const (
+	noteInvestigationError  = "investigation error: "
+	noteCatalogFixtureError = "catalog fixture load error: "
+)
+
 func (r *Runner) runOne(ctx context.Context, c Case) Result {
 	tools := make([]investigate.Tool, 0, len(c.Tools))
 	for name, output := range c.Tools {
@@ -35,7 +45,7 @@ func (r *Runner) runOne(ctx context.Context, c Case) Result {
 	if c.CatalogDir != "" {
 		cat, err := catalog.New(filepath.Join(c.dir, c.CatalogDir))
 		if err != nil {
-			return Result{Name: c.Name, Missing: []string{"catalog fixture load error: " + err.Error()}}
+			return Result{Name: c.Name, Missing: []string{noteCatalogFixtureError + err.Error()}}
 		}
 		rc := c.recallConfig()
 		recall = &investigate.Recall{
@@ -64,7 +74,7 @@ func (r *Runner) runOne(ctx context.Context, c Case) Result {
 	}
 	req := investigate.Request{Source: investigate.SourceAlert, Title: c.Name, Message: c.Prompt, Workload: c.workload()}
 	if err := li.Investigate(ctx, req); err != nil {
-		return Result{Name: c.Name, Missing: []string{"investigation error: " + err.Error()}}
+		return Result{Name: c.Name, Missing: []string{noteInvestigationError + err.Error()}}
 	}
 	if !done {
 		return Result{Name: c.Name, Missing: []string{"no findings (loop did not submit)"}}

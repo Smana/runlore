@@ -220,10 +220,10 @@ func TestScorecardMarkdownGenuineZeroStillRendersAsFailure(t *testing.T) {
 	}
 }
 
-// TestHistoryErroredIsDurableAndBackwardCompatible: the flag must survive a
-// round-trip through history.jsonl (so past errored runs stay labelled on every
-// future re-render), and lines written before the field existed must degrade to
-// "not errored" rather than to a guess.
+// TestHistoryErroredIsDurable: the flag must survive a round-trip through
+// history.jsonl (so past errored runs stay labelled on every future re-render), and
+// lines written before the field existed must degrade to "not errored" rather than
+// to a guess.
 func TestHistoryErroredIsDurable(t *testing.T) {
 	legacy := []byte(`{"at":"2026-07-23T06:00:00Z","model":"anthropic/claude-haiku-4-5-20251001","n":5,"pass_rate":0.5,"reached":1,"total":2,"cost_usd":0.16}` + "\n")
 	out, entries, err := AppendHistory(legacy, HistoryFromReport(erroredFixtureReport()))

@@ -64,7 +64,7 @@ func HistoryFromReport(rep Report) HistoryEntry {
 // case did not run — every other Missing note (a keyword the findings lacked, an
 // over-claimed distractor, "no findings (loop did not submit)") means the model did
 // answer and the answer was judged.
-var runErrorMarkers = []string{"investigation error: ", "catalog fixture load error: "}
+var runErrorMarkers = []string{noteInvestigationError, noteCatalogFixtureError}
 
 // Errored reports whether this run produced no evidence about the model whatsoever:
 // every case failed before anything could be scored. Such a run's 0% is an artefact
@@ -383,17 +383,21 @@ func recallCell(c ReportCase) string {
 	return s
 }
 
+// cellEscaper makes a freeform note safe inside one markdown table cell: a raw "|"
+// would split the row into phantom columns and a raw newline would end it early,
+// silently corrupting the published table. One replacer, built once — Replacer never
+// rescans its own output, so the "\|" emitted for a pipe cannot be re-matched, and
+// "\r\n" wins over the lone "\r"/"\n" because it is listed first.
+var cellEscaper = strings.NewReplacer("|", `\|`, "\r\n", " ", "\n", " ", "\r", " ")
+
 // notesCell renders a case's Missing notes into one markdown table cell. The notes
 // are freeform — on the errored path they carry a verbatim provider error string —
-// so a raw "|" would split the row into phantom columns and a raw newline would end
-// it early, silently corrupting the published table.
+// so they are escaped before they reach the table.
 func notesCell(c ReportCase) string {
 	if len(c.Missing) == 0 {
 		return "—"
 	}
-	s := strings.Join(c.Missing, ", ")
-	s = strings.ReplaceAll(s, "|", `\|`)
-	return strings.NewReplacer("\r\n", " ", "\n", " ", "\r", " ").Replace(s)
+	return cellEscaper.Replace(strings.Join(c.Missing, ", "))
 }
 
 func nameList(names []string) string {
