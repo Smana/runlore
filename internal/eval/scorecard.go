@@ -216,8 +216,18 @@ func BadgeJSON(rep Report) []byte {
 func ScorecardMarkdown(rep Report, history []HistoryEntry, inUSD, cachedUSD, outUSD float64) string {
 	var b strings.Builder
 	b.WriteString("# RunLore nightly eval scorecard\n\n")
-	b.WriteString("Auto-published by [`.github/workflows/eval.yaml`](https://github.com/Smana/runlore/blob/main/.github/workflows/eval.yaml) — ")
-	b.WriteString("the replay eval scores the model+loop over recorded incident evidence (no live cluster), so anyone can reproduce it:\n\n")
+	// Two things, deliberately: which workflow wrote this file, and the command that
+	// reproduces it. What the eval IS — replay over fixed evidence, no live cluster,
+	// what the pass-rate does and does not mean — is stated by the repo-authored
+	// framing in website/content/eval.md, which wraps this block on the published
+	// page. Saying it here too put the same claim on one page twice, tens of rendered
+	// lines apart, and the framing is the copy a human edits.
+	//
+	// The reproduce command stays because it is not framing: it belongs next to the
+	// numbers it reproduces, and it is the one thing the framing loses — the
+	// placeholder that carries it lives BETWEEN the scorecard markers and is
+	// overwritten by this block on every publish.
+	b.WriteString("Auto-published by [`.github/workflows/eval.yaml`](https://github.com/Smana/runlore/blob/main/.github/workflows/eval.yaml). Reproduce it yourself:\n\n")
 	b.WriteString("```\nlore eval -config eval/ci.runlore.yaml -cases examples/eval -n 5 -fail-under 0.7\n```\n\n")
 
 	errored := rep.Errored()
@@ -291,7 +301,10 @@ func ScorecardMarkdown(rep Report, history []HistoryEntry, inUSD, cachedUSD, out
 	// and hack/check-anchors.sh only grades in-page fragments.
 	fmt.Fprintf(&b, "Newest first, last %d shown — the full log is "+
 		"[`history.jsonl`](https://github.com/Smana/runlore/blob/eval-scorecard/history.jsonl). ", historyShown)
-	b.WriteString("Runs below the CI gate publish here exactly like green ones. ")
+	// Only the legend for the column the reader is looking at. "Runs below the CI
+	// gate publish here exactly like green ones" used to sit here and now lives in
+	// website/content/eval.md's framing, which says it in the page's own voice — the
+	// errored label is the one thing in this table the framing does not explain.
 	b.WriteString("A run that reached no answer to score at all is labelled in the pass-rate column instead of scored — it is not a 0%.\n\n")
 	b.WriteString("| date | model | reached | pass-rate | est. cost |\n|---|---|---|---|---|\n")
 	shown := history
