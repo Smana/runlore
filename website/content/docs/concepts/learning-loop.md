@@ -539,13 +539,33 @@ confidence  =  clamp( base_confidence × factor , 0 , 0.90 )
 
 Human 👍/👎 votes are **extra Bernoulli observations in the same posterior** — a 👍 is
 one success, a 👎 one failure, each weighing exactly like a resolved/unresolved recall.
-That matters most where the resolve signal *cannot exist*: sources with no resolve
-channel (**GitOps failures**, reinvestigate polls, Alertmanager without `send_resolved`)
-are deliberately excluded from resolve-based decay, so without feedback their entries'
-trust is frozen at the prior forever. A human's explicit 👎 (a Slack click or a Matrix
-reaction) is the only ground truth those paths can ever accumulate — and it is a
-judgment on the *diagnosis itself*, which an
-alert merely clearing never proves.
+That matters most where the resolve signal *cannot exist*.
+
+**What is excluded from resolve-based decay is decided by the fingerprint, and by
+nothing else.** RunLore mints a synthetic id for an incident that carries no external
+alert fingerprint, and exactly those two shapes are excluded: **GitOps failures**
+(`gitops:…`) and **re-investigate polls** (`reinvestigate:…`). Such a recall is still
+recorded for recurrence, but it never enters the `OpenCounts` roll-up — so Gate 3 never
+computes a factor for it at all and falls through to its fail-safe (*absence of evidence
+must never block a recall*), which is **1.0**: full trust, **not** the 0.5 prior mean.
+An entry recalled only from those sources therefore keeps firing at full confidence
+however wrong it has become, and retirement never surfaces it either, because an entry
+the roll-up has never seen is not a candidate. A human's explicit 👎 (a Slack click or a
+Matrix reaction) is the only ground truth those paths can ever accumulate — and it is a
+judgment on the *diagnosis itself*, which an alert merely clearing never proves.
+
+**An Alertmanager alert is never in that excluded set** — not even when its receiver has
+`send_resolved` off. Resolvability is read off the fingerprint alone
+(`resolvable := !outcome.Derived(fp)`), never off `send_resolved`, which lives in the
+operator's receiver config: RunLore never reads it, and has no startup or per-event
+signal it could condition on. A real alert fingerprint is always recorded resolvable, so
+when the resolve never comes the failure runs the **opposite** way from the synthetic
+case. Every recall increments `recalls` while `resolved` stays 0, and the factor drops
+at once: **one** unresolved recall already lands the entry at **0.333**, below the
+shipped `outcome_floor` of **0.5**, and Gate 3 stops firing it. A rejected recall
+records nothing further, so it stays there — and retirement does not rescue it either,
+because the observation count freezes at 1, below `min_observations`. Neither failure
+mode is self-correcting; a 👍/👎 channel is the one thing that closes both.
 
 ```mermaid
 stateDiagram-v2

@@ -460,7 +460,7 @@ func TestDeriveFingerprintStableAndPrefixed(t *testing.T) {
 func boolPtr(b bool) *bool { return &b }
 
 // TestNonResolvableRecallOpenNotCountedButInEpisodes pins Defect 2: a recall open from
-// a source with NO resolve channel (Resolvable=false — GitOps / send_resolved off) must
+// a source with NO resolve channel (Resolvable=false — GitOps / reinvestigate) must
 // NOT increment Recalls (so a correct entry's resolve-rate can't decay on evidence that
 // can never arrive), yet it MUST still appear in Episodes so recurrence counting keeps
 // working.

@@ -92,9 +92,15 @@ type Event struct {
 	User string `json:"user,omitempty"`
 
 	// Resolvable is set on an open when we know whether a ground-truth resolve signal
-	// can ever arrive for it: true for sources with a resolve channel (Alertmanager,
-	// PagerDuty), false for sources that never emit one (GitOps, reinvestigate, or
-	// Alertmanager with send_resolved off). A pointer for a three-state distinction:
+	// can ever arrive for it. The answer is read off the FINGERPRINT and nothing else
+	// (`resolvable := !outcome.Derived(fp)` on the delivery path): true for every real
+	// alert fingerprint (Alertmanager, PagerDuty), false only for the synthetic ids of
+	// sources that emit no fingerprint at all — GitOps and reinvestigate, and only
+	// those (see Derived). An Alertmanager receiver with send_resolved off is NOT
+	// excluded and cannot be: send_resolved lives in the operator's receiver config,
+	// which RunLore never reads, so there is no signal to condition on — such an open
+	// is counted like any other and its entry decays (see applyOpenLocked).
+	// A pointer for a three-state distinction:
 	// nil ⇒ the field is absent, i.e. a LEGACY open written before this field existed —
 	// those came from Alertmanager/PagerDuty and are treated as resolvable. Only a
 	// non-resolvable recall open is excluded from recall decay (see applyOpenLocked).
@@ -592,12 +598,23 @@ func (l *Ledger) Reload() error {
 // counts as resolved. Must be called with mu held (or during single-threaded New).
 func (l *Ledger) applyOpenLocked(e Event) {
 	// A recall open counts toward decay ONLY when it is resolvable — i.e. a resolve
-	// signal for it can actually arrive. A non-resolvable recall (GitOps, reinvestigate,
-	// or Alertmanager with send_resolved off) neither builds nor erodes trust: counting
-	// it toward Recalls with no possible Resolved would decay a CORRECT entry's
-	// resolve-rate forever, on evidence the source can never provide. So decay is only
-	// learned where a ground-truth resolve signal exists. Episodes()/Occurrences() still
-	// include EVERY open regardless of resolvability, so recurrence counting is unaffected.
+	// signal for it can actually arrive. A non-resolvable recall (GitOps or
+	// reinvestigate — the synthetic fingerprints, and only those) neither builds nor
+	// erodes trust: counting it toward Recalls with no possible Resolved would decay a
+	// CORRECT entry's resolve-rate forever, on evidence the source can never provide.
+	// So decay is only learned where a ground-truth resolve signal exists.
+	//
+	// The exclusion is drawn on the fingerprint, so it cannot cover an Alertmanager
+	// receiver with send_resolved off (RunLore never reads that config): those opens
+	// ARE counted, and if the resolve never arrives the entry decays instead — one
+	// unresolved recall reaches Factor 1/3 at the shipped defaults (prior 2, floor
+	// 0.5), which the recall gate rejects. The two cases therefore fail in OPPOSITE
+	// directions: an excluded entry never enters agg at all, so the gate's fail-safe
+	// keeps it at full trust; a counted one is rejected and, recording nothing further,
+	// stays below the floor with its observation count frozen.
+	//
+	// Episodes()/Occurrences() still include EVERY open regardless of resolvability,
+	// so recurrence counting is unaffected.
 	counted := e.Kind == "recall" && e.Entry != "" && e.resolvable()
 	if counted {
 		a := l.agg[e.Entry]
