@@ -57,15 +57,30 @@ jobs:
         run: |
           set -euo pipefail
           page=website/content/eval.md
-          # A lost marker is a repo-side regression, not a publishing hiccup: awk would
-          # silently drop the scorecard (begin missing) or truncate the page (end
-          # missing), and /eval would keep claiming nothing has been published. Fail loud.
-          for marker in '<!-- scorecard:begin -->' '<!-- scorecard:end -->'; do
-            if ! grep -qF "$marker" "$page"; then
-              echo "::error title=Eval scorecard::$page is missing its '$marker' marker — the published scorecard has nowhere to go"
-              exit 1
-            fi
-          done
+          # A malformed marker pair is a repo-side regression, not a publishing hiccup,
+          # and every way of getting it wrong fails SILENTLY: the awk below splices on
+          # `$0 == marker`, so it matches WHOLE lines. A stray trailing space on the
+          # begin marker means awk never injects and /eval keeps telling readers nothing
+          # has been published — on a green deploy. The same on the end marker means awk
+          # never leaves skip mode, so everything from begin to EOF is dropped. Doubled
+          # markers inject twice; a reversed pair duplicates the page body.
+          #
+          # So this guard uses awk's own comparison rather than a substring grep, which
+          # would green-light every one of those, and asserts the whole shape: one of
+          # each marker, on its own line, in order. internal/docsguard pins the same
+          # shape at PR time, where the fix is cheap; this is belt-and-braces for a
+          # marker lost in a merge, and it runs before the fetch so a malformed page is
+          # reported even when there is nothing to publish.
+          if ! shape=$(awk '
+            $0 == "<!-- scorecard:begin -->" { b++; bl = NR }
+            $0 == "<!-- scorecard:end -->"   { e++; el = NR }
+            END {
+              if (b != 1 || e != 1) { printf "expected exactly one of each marker on its own line, found %d begin / %d end", b + 0, e + 0; exit 1 }
+              if (bl > el) { printf "the end marker (line %d) comes before the begin marker (line %d)", el, bl; exit 1 }
+            }' "$page"); then
+            echo "::error title=Eval scorecard::$page has a malformed scorecard marker block — $shape; the published scorecard has nowhere to go"
+            exit 1
+          fi
           if ! git fetch --depth=1 origin eval-scorecard 2>/dev/null; then
             echo "::notice title=Eval scorecard::branch not published yet — keeping the placeholder"
             exit 0
