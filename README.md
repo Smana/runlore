@@ -131,7 +131,7 @@ keeps resolving incidents gains trust, one that keeps failing decays toward re-i
 Even then, the recalled finding goes through the same adversarial verify pass as a fresh one — and if
 that pass can't run (e.g. a model outage), recall fails closed and falls through to a full
 investigation rather than serving the answer unreviewed. That trade isn't free: you pay the
-reranker's call and the failed verify call and *then* a full ReAct loop, and it lands exactly when
+reranker's call, the failed verify call, and *then* a full ReAct loop, and it lands exactly when
 the verify endpoint is already unhealthy — worth knowing ahead of an incident, not during one. The
 shipped eval suite includes a poisoned-entry scenario proving a bad entry is rejected at recall time.
 

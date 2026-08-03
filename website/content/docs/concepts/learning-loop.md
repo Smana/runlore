@@ -157,18 +157,19 @@ then the answer is confirmed against live state and re-reviewed.
 > gate, not as a field measurement.
 >
 > **Cost & false-recall discipline.** The reranker runs *before* the "free"
-> short-circuit, so it is bounded: one call, `rerank_k` candidates, and only when
-> retrieval already surfaced a plausible candidate (a trivial `rerank_min_score` cost
-> guard — no call otherwise). It routes to `model.verify` (cheaper/faster) when
-> configured, costs ~1–2k tokens, and saves the ~100k of a full investigation when it
-> fires. A reranker that hallucinates a match is worse than no recall, so it fails
-> **safe**: it only ranks candidates that already passed the structural filter, ignores
-> any `entry_id` it did not offer, and treats a "no match", a low confidence, or a
-> model error as a fall-through to a full investigation (the negative cases fire on
-> **zero** entries). Everything downstream is unchanged — the recalled answer still
-> goes through live-state **confirm** and the adversarial **verify** pass. The reranker
-> is a *retrieval-time* decision ("which candidate + confident enough to short-circuit"),
-> **not** a second verify.
+> short-circuit, so its call is paid on every incident that reaches it — the ones that
+> then fall through to a full investigation included: one call over `rerank_k`
+> candidates, skipped only when the top score is under `rerank_min_score` (default
+> **0.1**, the bottom of the ~0.1–1.2 band real scores occupy, so it rarely skips). It
+> routes to `model.verify` (cheaper/faster) when configured, costs ~1–2k tokens, and
+> saves the ~100k of a full investigation when it fires. A reranker that hallucinates a
+> match is worse than no recall, so it fails **safe**: it only ranks candidates that
+> already passed the structural filter, ignores any `entry_id` it did not offer, and
+> treats a "no match", a low confidence, or a model error as a fall-through to a full
+> investigation (the negative cases fire on **zero** entries). Everything downstream is
+> unchanged — the recalled answer still goes through live-state **confirm** and the
+> adversarial **verify** pass. The reranker is a *retrieval-time* decision ("which
+> candidate + confident enough to short-circuit"), **not** a second verify.
 
 ```mermaid
 flowchart TD
@@ -241,15 +242,14 @@ Then two safety backstops before the recalled answer is delivered:
   precisely when things are already going wrong: **cost/load amplification** — a
   recall that would have cost two model calls (the reranker, which is on by default,
   then verify) now costs those two *plus* a full ReAct loop, up to `MaxSteps`
-  (default 20) model calls plus tool calls — the reranker's call and the failed
-  verify call are already spent when the fall-through starts, and it all arrives
-  exactly when the verify endpoint is unhealthy; and a **slow-verify timeout
-  interaction** — the
-  investigation's overall `Timeout` bounds the whole run *including* the failed verify
-  call, so if verify fails by exhausting that deadline rather than erroring fast, the
-  fall-through inherits an already-spent budget and the user gets a synthetic timeout
-  result where they previously got the recalled answer. Worth knowing before an
-  on-call incident, not discovering during one.
+  (default 20) model calls plus tool calls — both already spent when the fall-through
+  starts, and all of it arriving exactly when the verify endpoint is unhealthy; and a
+  **slow-verify timeout interaction** — the investigation's overall `Timeout` bounds
+  the whole run *including* the failed verify call, so if verify fails by exhausting
+  that deadline rather than erroring fast, the fall-through inherits an already-spent
+  budget and the user gets a synthetic timeout result where they previously got the
+  recalled answer. Worth knowing before an on-call incident, not discovering during
+  one.
 
 **Confidence is derived, never asserted** (`deriveRecallConfidence`,
 `outcomeFactor`): it's a function of the BM25 score, the margin, the structural-match

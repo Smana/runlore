@@ -204,9 +204,9 @@ incident webhook. Known keys: `alertmanager`, `gitops`, `pagerduty`, `custom`.
   prevents the call is `rerank_min_score`, and its default **0.1** sits at the *bottom* of the
   ~0.1–1.2 band real enriched BM25 scores occupy, so it skips the call only when retrieval surfaced
   essentially nothing. In practice, then, enabling instant recall adds **one model call to the floor
-  cost of nearly every investigation that has a structurally-agreeing candidate**, and buys back the
-  ~100k of a full investigation on the subset that fires. A fired recall is consequently **two** model
-  calls — rerank, then the verify pass (`Verify: true` is unconditional) — not one.
+  cost of nearly every investigation that has a structurally-agreeing candidate**, and buys back a
+  full investigation on the subset that fires. A fired recall is consequently **two** model calls —
+  rerank, then the verify pass (always on; no setting disables it) — not one.
   **Measure it, don't estimate it:** the reranker's traffic carries `provider="rerank"` on
   `runlore_model_requests_total` and `runlore_model_request_duration_seconds`, so
   `runlore_model_requests_total{provider="rerank"}` against `runlore_recall_hits_total` and

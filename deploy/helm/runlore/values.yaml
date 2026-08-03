@@ -246,8 +246,8 @@ config:
   #     # structurally-agreeing candidate clears rerank_min_score — including the incidents
   #     # that then fall through to a full investigation. At the default 0.1 (real enriched
   #     # BM25 scores run ~0.1-1.2) that guard rarely trips, so budget one extra model call
-  #     # on nearly every investigation. Measure it: provider="rerank" on
-  #     # runlore_model_requests_total.
+  #     # on nearly every investigation that surfaces such a candidate. Measure it:
+  #     # provider="rerank" on runlore_model_requests_total.
   #     # rerank: false                # DEFAULT is on; set false to fall back to the legacy BM25-magnitude gate
   #     rerank_threshold: 0.7          # calibrated match-confidence bar to short-circuit (probability; no per-corpus tuning)
   #     rerank_k: 5                    # candidates ranked in the one call (bounded for cost)
