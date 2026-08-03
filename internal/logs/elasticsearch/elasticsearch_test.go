@@ -472,10 +472,53 @@ func TestFieldNames(t *testing.T) {
 	if len(fields) != 3 {
 		t.Fatalf("want 3 fields, got %d: %+v", len(fields), fields)
 	}
-	// Deterministic (alphabetical) order, since field_caps carries no frequency
-	// signal to sort by.
-	if fields[0].Name != "kubernetes.namespace" || fields[0].Hits != 0 {
-		t.Fatalf("fields[0] = %+v", fields[0])
+	// CONFIGURED fields lead, then alphabetical for the rest.
+	//
+	// field_caps carries no frequency signal, so alphabetical was the only ordering
+	// available — but renderRows caps output at 50 rows, and on a real ECS + k8s
+	// mapping (60-90 fields) pure alphabetical puts @timestamp and the
+	// agent.*/cloud.*/data_stream.* families first and pushes message, log.level and
+	// kubernetes.* past the cut. The model asks "what fields exist?" to recover from
+	// a failed query_logs and gets back ES plumbing and cloud metadata.
+	if fields[0].Name != "message" {
+		t.Fatalf("the configured message field must lead, got fields[0] = %+v (all: %+v)", fields[0], fields)
+	}
+	rest := []string{fields[1].Name, fields[2].Name}
+	if rest[0] != "kubernetes.namespace" || rest[1] != "kubernetes.pod.name" {
+		t.Fatalf("non-configured fields must stay alphabetical, got %v", rest)
+	}
+}
+
+// TestQueryZeroMatchingIndicesIsNotSilence: an index PATTERN that matches nothing
+// answers 200, not 404 — allow_no_indices defaults to true for wildcards. Without
+// a check on _shards.total, zero shards read as zero hits and query_logs told the
+// model "no log lines matched", i.e. the workload logged nothing. It didn't:
+// RunLore never looked at an index. A wrong logs.index is the most likely
+// misconfiguration for this provider, and config validation only checks that the
+// pattern is character-legal, not that it resolves.
+func TestQueryZeroMatchingIndicesIsNotSilence(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`{"took":1,"_shards":{"total":0,"successful":0,"skipped":0,"failed":0},"hits":{"total":{"value":0},"hits":[]}}`))
+	}))
+	defer srv.Close()
+
+	lines, err := New(srv.URL, "logs-*").Query(context.Background(), "x", providers.TimeWindow{})
+	if err != nil {
+		t.Fatalf("Query: %v", err)
+	}
+	var joined string
+	for _, l := range lines {
+		joined += l.Message
+	}
+	if !strings.Contains(joined, "matched no indices") {
+		t.Fatalf("a pattern resolving to zero indices must say so, not read as silence; got %+v", lines)
+	}
+
+	// FieldNames is the designated recovery path — it must not repeat the lie by
+	// returning an empty slice, which renders as "widen the selector".
+	_, ferr := New(srv.URL, "logs-*").FieldNames(context.Background(), "", providers.TimeWindow{})
+	if ferr == nil {
+		t.Fatal("FieldNames on a zero-match pattern must error, not return an empty field list")
 	}
 }
 
