@@ -1,21 +1,23 @@
 # RunLore nightly eval scorecard
 
-Auto-published by [`.github/workflows/eval.yaml`](https://github.com/Smana/runlore/blob/main/.github/workflows/eval.yaml) — the replay eval scores the model+loop over recorded incident evidence (no live cluster), so anyone can reproduce it:
+Auto-published by [`.github/workflows/eval.yaml`](https://github.com/Smana/runlore/blob/main/.github/workflows/eval.yaml). Reproduce it yourself:
 
 ```
 lore eval -config eval/ci.runlore.yaml -cases examples/eval -n 5 -fail-under 0.7
 ```
 
-**Latest run:** 2026-08-03T09:51:36Z · model `openai/glm-4.5-air` · **4/4 scenarios reached (100%)** · n=5 runs/case, k-of-n bar 70% · est. cost $0.22 (915.4k in / 29.6k out tokens)
+**Latest run:** 2026-08-09T07:04:09Z · model `openai/glm-4.5-air` · **1/6 scenarios reached (17%)** · n=5 runs/case, k-of-n bar 70% · est. cost $0.28 (1.1M in / 58.6k out tokens)
 
 ## Scenarios (latest run)
 
 | scenario | result | pass-rate | median confidence | recall | notes |
 |---|---|---|---|---|---|
 | gitops-broken-kustomization | ✅ PASS | 100% (n=5) | 0.90 | — | — |
-| harbor-chart-bump | ✅ PASS | 100% (n=5) | 0.90 | — | — |
-| poisoned-recall-rejected | ✅ PASS | 100% (n=5) | 0.90 | — | — |
-| poisoned-recall-verify | ✅ PASS | 100% (n=5) | 0.95 | fired 5/5 · short-circuit 0/5 (expect: withdrawn) | — |
+| harbor-chart-bump | ❌ MISS | 0% (n=5) | 0.90 | — | harbor-db |
+| node-eviction-no-commons | ❌ MISS | 0% (n=5) | 0.70 | fired 0/5 · short-circuit 0/5 (expect: rejected) | request |
+| node-eviction-with-commons | ⚠️ FLAKY | 40% (n=5) | 0.00 | fired 0/5 · short-circuit 0/5 (expect: rejected) | report-worker, request |
+| poisoned-recall-rejected | ❌ MISS | 0% (n=5) | 0.60 | — | eval-victim, pull, v9.9.9 |
+| poisoned-recall-verify | ❌ MISS | 0% (n=5) | 0.90 | fired 5/5 · short-circuit 0/5 (expect: withdrawn) | pull, v9.9.9 |
 
 ## Cost per investigation
 
@@ -23,19 +25,20 @@ Median provider-reported tokens per case on `openai/glm-4.5-air`, priced at $0.2
 
 | path | cases | median in tok | median out tok | est. cost |
 |---|---|---|---|---|
-| full investigation | 4 | 37.6k | 1.4k | $0.009 |
+| full investigation | 6 | 30.3k | 1.9k | $0.008 |
 
 ## Confidence calibration
 
-- **Confidently wrong** (missed with median confidence ≥ 0.70): none
+- **Confidently wrong** (missed with median confidence ≥ 0.70): 3 — harbor-chart-bump, node-eviction-no-commons, poisoned-recall-verify
 - **Underconfident** (reached with median confidence < 0.50): none
 
 ## History
 
-Newest first, last 30 shown — the full log is [`history.jsonl`](history.jsonl). Runs below the CI gate publish here exactly like green ones.
+Newest first, last 30 shown — the full log is [`history.jsonl`](https://github.com/Smana/runlore/blob/eval-scorecard/history.jsonl). A run that reached no answer to score at all is labelled in the pass-rate column instead of scored — it is not a 0%.
 
 | date | model | reached | pass-rate | est. cost |
 |---|---|---|---|---|
+| 2026-08-09T07:04:09Z | openai/glm-4.5-air | 1/6 | 17% | $0.28 |
 | 2026-08-03T09:51:36Z | openai/glm-4.5-air | 4/4 | 100% | $0.22 |
 | 2026-08-02T08:35:01Z | openai/glm-4.5-air | 2/2 | 100% | $0.05 |
 | 2026-08-02T08:12:29Z | anthropic/claude-haiku-4-5-20251001 | 0/2 | 0% | $0.00 |
