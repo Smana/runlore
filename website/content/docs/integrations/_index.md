@@ -77,6 +77,8 @@ it would have unlocked.
     subtitle="Turns a manifest bump into the actual code diff behind it." >}}
   {{< hextra/feature-card link="data-sources/mcp/" icon="puzzle" title="MCP"
     subtitle="Extend the agent's own toolbox with remote MCP tools — no Go required." >}}
+  {{< hextra/feature-card link="data-sources/grafana-mcp/" icon="chart-square-bar" title="Grafana (via MCP)"
+    subtitle="Deploy annotations GitOps can't see, and whether an incident is already open — a worked MCP example." >}}
 {{< /hextra/feature-grid >}}
 
 ## Notifications
