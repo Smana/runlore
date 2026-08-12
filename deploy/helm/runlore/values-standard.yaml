@@ -127,6 +127,35 @@ config:
       interval: 24h # a shared corpus changes slowly; do not poll it like your own
       dir: /var/lib/runlore/commons
 
+    # INSTANT RECALL IS OFF IN THIS PROFILE — deliberately. This is the one place where
+    # the headline behaviour (a repeat incident answered in seconds for a fraction of the
+    # cost) does NOT describe what you just installed, so it is worth saying plainly
+    # rather than leaving you to wonder why it never fires.
+    #
+    # Why: a recall is not a cache hit. Its confidence is weighted by each entry's real
+    # resolve rate, and that record lives in the outcome ledger — a file. This profile has
+    # no persistent volume (catalog and commons are both emptyDir), so a ledger here would
+    # reset on every restart and every entry would look untested forever. Recall would
+    # still fire; it would just have no track record behind it, which is the property that
+    # makes short-circuiting an investigation safe rather than reckless.
+    #
+    # To turn it on, add all three. The first is what makes the other two mean anything:
+    #
+    #   persistence:
+    #     enabled: true
+    #     size: 5Gi
+    #   config:
+    #     outcome:
+    #       ledger_path: /var/lib/runlore/catalog/outcomes.jsonl  # under catalog.mountPath
+    #     catalog:
+    #       instant_recall:
+    #         enabled: true
+    #
+    # Worth adding at the same time: notify.slack.feedback_buttons (which also requires
+    # notify.slack.signing_secret_env) — 👍/👎 is what writes real outcomes to that ledger.
+    # Without it the ledger records only what the loop infers, and trust decays more slowly
+    # than your on-call's actual experience. values-full.yaml ships this whole set together.
+
   # Curation — the LEARN half. A verified, confident root cause opens a PR drafting
   # an OKF entry on the KB repo; anything below the bar is delivered to chat only.
   forge:
