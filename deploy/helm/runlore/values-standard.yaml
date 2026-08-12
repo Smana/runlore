@@ -88,6 +88,33 @@ config:
       interval: 5m
       # token_env: KB_GIT_TOKEN  # optional; a PRIVATE repo reuses the App below by default
 
+    # A SECOND, read-only catalog root, ON in this profile. Without it a fresh install
+    # searches an empty catalog: the learning loop only starts paying once YOU have
+    # curated entries, which is weeks of incidents away. The commons is a shared corpus
+    # of generic playbooks (CrashLoopBackOff, ImagePullBackOff, unbound PVCs, stuck
+    # cert-manager challenges…) so kb_search grounds an investigation from day one.
+    #
+    # What this does NOT do: commons entries never fire instant recall. They are
+    # resource-less by construction — they describe a failure class, not one cluster's
+    # workload — and recall's structural filter rejects a resource-less entry for any
+    # alert carrying a workload. Day-one value here is BETTER INVESTIGATIONS, not the
+    # cheap instant answers; those still require entries curated from your own incidents.
+    #
+    # Your own entries win scoring ties, and the curator never writes here — drafted
+    # entries always land in your KB repo above. The commons can only ever be a floor.
+    #
+    # It tracks `main` of a repo you do not control, so upstream corrections reach you
+    # without action. To review before it grounds anything, replace `branch` with
+    # `ref: <40-char commit id>` (mutually exclusive; the agent refuses both). Removing
+    # the block entirely is also fine — everything else in this profile still works.
+    #
+    # `dir` MUST sit outside catalog.dir; the chart refuses to render otherwise.
+    commons:
+      url: https://github.com/Smana/runlore-kb-commons
+      branch: main
+      interval: 24h # a shared corpus changes slowly; do not poll it like your own
+      dir: /var/lib/runlore/commons
+
   # Curation — the LEARN half. A verified, confident root cause opens a PR drafting
   # an OKF entry on the KB repo; anything below the bar is delivered to chat only.
   forge:

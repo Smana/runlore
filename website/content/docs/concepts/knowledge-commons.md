@@ -3,14 +3,24 @@ title: Knowledge Commons
 weight: 55
 ---
 
-A fresh RunLore deployment has an empty catalog. `kb_search` returns nothing, and it stays
-that way until you have investigated enough incidents to curate entries of your own. The
-**knowledge commons** fills that gap: a shared, read-only corpus of generic playbooks —
-`CrashLoopBackOff`, `ImagePullBackOff`, unbound PVCs, stuck cert-manager challenges,
-unschedulable pods — that covers failure *classes* every Kubernetes platform hits.
+A RunLore deployment starts with an empty catalog of its own. `kb_search` returns nothing
+from it, and it stays that way until you have investigated enough incidents to curate entries
+worth keeping. The **knowledge commons** fills that gap: a shared, read-only corpus of generic
+playbooks — `CrashLoopBackOff`, `ImagePullBackOff`, unbound PVCs, stuck cert-manager
+challenges, unschedulable pods — that covers failure *classes* every Kubernetes platform hits.
 
-It is a **second catalog root**, indexed alongside your own. Enable it and the investigation
-loop has something to ground on from day one.
+It is a **second catalog root**, indexed alongside your own, so the investigation loop has
+something to ground on from day one.
+
+> [!NOTE]
+> **It is on by default in the `standard` Helm profile.** If you installed with
+> `values-standard.yaml` you already have it; `minimal` and the chart defaults leave it off,
+> and `full` enables it too. Remove the `catalog.commons` block to opt out — nothing else
+> depends on it.
+
+What it does *not* do is make instant recall work on day one — see
+[below](#why-commons-entries-never-fire-instant-recall). Day-one value is a better-grounded
+*investigation*, not a cheap instant answer.
 
 ```yaml
 catalog:
