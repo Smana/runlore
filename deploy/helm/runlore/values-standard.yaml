@@ -104,9 +104,21 @@ config:
     # entries always land in your KB repo above. The commons can only ever be a floor.
     #
     # It tracks `main` of a repo you do not control, so upstream corrections reach you
-    # without action. To review before it grounds anything, replace `branch` with
-    # `ref: <40-char commit id>` (mutually exclusive; the agent refuses both). Removing
-    # the block entirely is also fine — everything else in this profile still works.
+    # without action. To review before it grounds anything, replace `branch` with `ref:`
+    # — a tag or a full 40-character commit id (mutually exclusive with branch; the
+    # agent refuses both). Removing the block entirely is also fine: everything else in
+    # this profile still works.
+    #
+    # It cannot break your install. The commons syncer runs in the background, off the
+    # startup path: if the clone fails — no egress, GitHub down, a typo here — it logs a
+    # warning and the agent serves normally from your own catalog. The one cost of a
+    # failed clone is that the retry waits a full `interval` (below), so a transient
+    # failure at boot means no commons until the next tick or a pod restart.
+    #
+    # Egress: this is an HTTPS clone, so the chart's default NetworkPolicy (any
+    # destination on 443) already allows it. Under `networkPolicy.strict: true` you must
+    # add the host to egress.allowedCIDRs — already covered if your own KB repo is on
+    # the same forge, and a separate entry if it is not.
     #
     # `dir` MUST sit outside catalog.dir; the chart refuses to render otherwise.
     commons:
