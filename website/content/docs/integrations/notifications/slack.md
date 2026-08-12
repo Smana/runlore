@@ -72,6 +72,6 @@ kubectl -n runlore logs deploy/runlore | grep 'msg=findings'
 
 - [Configuration → `notify`]({{< relref "/docs/configuration/configuration.md#notify--where-findings-go" >}})
   for the full key reference.
-- [Security model → the feedback channels]({{< relref "/docs/security/security-model.md#the-feedback-channels--exposure--trust-model" >}})
+- [Security model → the feedback channels]({{< relref "/docs/security/security-model.md#the-feedback-channels---exposure--trust-model" >}})
   for the exposure and vote trust model.
 - [Learning loop]({{< relref "/docs/concepts/learning-loop.md" >}}) — how feedback weighs recall.

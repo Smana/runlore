@@ -404,7 +404,7 @@ user)**, latest wins — duplicate clicks are idempotent and changing your mind 
 is an ephemeral "feedback recorded" note visible only to the clicker; the investigation message is
 never modified. With the option off (the default), no buttons render and the endpoint behaves exactly
 as before (404 unless approve mode wired it). Exposure hardening and the vote trust model are
-detailed in [security-model.md]({{< relref "security-model.md#the-feedback-channels--exposure--trust-model" >}}).
+detailed in [security-model.md]({{< relref "security-model.md#the-feedback-channels---exposure--trust-model" >}}).
 
 **Matrix 👍/👎 — `matrix.feedback_reactions` (opt-in, default `false`).** The same feedback loop over
 Matrix **reactions**: react 👍/👎 to a RunLore investigation message and the rating lands in the
@@ -416,7 +416,7 @@ before startup, ignores every emoji except 👍/👎, and only counts votes on m
 sent** (attribution is anchored on `/whoami`; a member-crafted message carrying the trigger field
 attributes nothing). Startup fails loud unless `homeserver`/`room_id`/`access_token_env` and
 `outcome.ledger_path` are set. Use an **invite-only room** — any room member can vote (see
-[security-model.md]({{< relref "security-model.md#the-feedback-channels--exposure--trust-model" >}})).
+[security-model.md]({{< relref "security-model.md#the-feedback-channels---exposure--trust-model" >}})).
 
 ### Generic templated notifier (`notify.templated`)
 
