@@ -93,10 +93,22 @@ spec:
       containers:
         - name: mcp-grafana
           image: grafana/mcp-grafana:latest   # pin a digest in production
+          # `command` REPLACES the image entrypoint on purpose. The published
+          # entrypoint bakes in `--transport sse --address 0.0.0.0:8000`, and a
+          # Kubernetes `args:` replaces CMD, not ENTRYPOINT — so passing the
+          # transport as args alone appends it and you end up starting with both
+          # `--transport sse` and `--transport streamable-http`. Replacing the
+          # command means the flags below are the whole command line, which also
+          # means `--address` has to be repeated here.
+          #
           # --disable-write drops every mutating tool server-side. RunLore's own
           # allowlist below already prevents them being called; this makes it
           # true even if that allowlist is later widened by mistake.
-          args: ["-t", "streamable-http", "--disable-write"]
+          command: ["/app/mcp-grafana"]
+          args:
+            - --transport=streamable-http
+            - --address=0.0.0.0:8000
+            - --disable-write
           ports:
             - {name: http, containerPort: 8000}
           env:
@@ -111,6 +123,12 @@ spec:
             allowPrivilegeEscalation: false
             readOnlyRootFilesystem: true
             runAsNonRoot: true
+            # runAsUser is REQUIRED alongside runAsNonRoot here. The image declares
+            # `USER mcp-grafana` — a name, not a uid — and the kubelet cannot prove a
+            # named user is non-root, so it refuses to start the container with
+            # "container has runAsNonRoot and image has non-numeric user". 1000 is the
+            # uid that name resolves to in the published image.
+            runAsUser: 1000
             capabilities: {drop: ["ALL"]}
 ---
 apiVersion: v1
@@ -152,9 +170,42 @@ second one later cannot silently register its full toolset. The allowlist is enf
 an unlisted tool is never registered, so the model cannot call it even if it tries.
 
 No `token_env` here: the server is reached over in-cluster `http://`, and it holds the Grafana
-credential itself rather than passing yours through. RunLore **rejects a bearer token sent over
-plaintext HTTP at startup**, so if you expose `mcp-grafana` outside the cluster, terminate TLS and
-use `https://` before adding `token_env`.
+credential itself rather than passing yours through.
+
+If you do put a token on it, note where the guard actually bites. RunLore rejects a token over
+plaintext `http://` **to a public host** only — an in-cluster address is treated as private and
+allowed, which is why the `…svc.cluster.local` URL above needs no TLS. Private means a loopback or
+[RFC 1918](https://datatracker.ietf.org/doc/html/rfc1918) address, `localhost`, a single-label
+service name, or a host ending in `.svc`, `.cluster.local`, `.local` or `.internal`. Expose
+`mcp-grafana` on anything outside that set and you must terminate TLS and use `https://` before
+adding `token_env` — startup fails otherwise.
+
+## If you run the chart's NetworkPolicy, open port 8000
+
+This is the step most likely to make the recipe look like it silently did nothing.
+`networkPolicy.enabled` renders `policyTypes: [Ingress, Egress]`, and **neither egress mode lets
+this through on its own**: the permissive default opens only 443 and 6443, and `strict: true`
+denies by default and allows only what you declare. `mcp-grafana` listens on **8000**, so it is
+blocked either way, in the same namespace or not.
+
+Add it via `extraEgress`, which is appended verbatim in both modes:
+
+```yaml
+networkPolicy:
+  egress:
+    extraEgress:
+      - to:
+          - podSelector:
+              matchLabels:
+                app: mcp-grafana
+        ports:
+          - protocol: TCP
+            port: 8000
+```
+
+Add a `namespaceSelector` alongside the `podSelector` if you put `mcp-grafana` in a different
+namespace from RunLore. And remember `mcp-grafana` needs its *own* egress to reach Grafana — a
+policy selecting it, not RunLore, if your cluster defaults to deny.
 
 ## Verify it
 
