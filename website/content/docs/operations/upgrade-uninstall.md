@@ -128,3 +128,42 @@ kubectl delete statefulset <release-name> -n <namespace> --cascade=orphan
 
 Deployments are unaffected (no immutable template fields beyond the selector, which
 was always version-less).
+
+## Upgrading to 0.14.0 on the `standard` profile: new outbound traffic
+
+From **0.14.0**, an install using `values-standard.yaml` mounts the
+[knowledge commons]({{< relref "/docs/concepts/knowledge-commons.md" >}}) as a second, read-only
+catalog root. In practice that means the agent clones
+[`Smana/runlore-kb-commons`](https://github.com/Smana/runlore-kb-commons) at startup and re-syncs
+it every 24h.
+
+It is a second git fetch rather than a new capability — the profile already syncs your own KB repo
+over the network — but it is a repo **you do not control**, tracking `main`. `minimal` and the
+chart defaults are unaffected; `full` already enabled it.
+
+**It cannot break the upgrade.** The commons syncer runs in the background, off the startup path:
+if the clone fails, it logs a warning and the agent serves normally from your own catalog. Two
+situations are worth recognising *before* you go looking for a bug, because both present the same
+way — recurring sync warnings and no other symptom:
+
+- **`networkPolicy.strict: true`** denies egress by default, so the clone is blocked unless the
+  host is in `egress.allowedCIDRs`. Already covered if your own KB repo is on the same forge; a
+  separate entry if it is not.
+- **Restricted or air-gapped egress** behaves identically — warnings, no commons, nothing else
+  affected.
+
+One more thing worth knowing if the first clone fails: the retry waits a full `interval` (24h by
+default), so a transient failure at boot means no commons until the next tick or a pod restart.
+
+### If you would rather not
+
+Three supported ways out, none of which degrade anything else:
+
+- **Opt out** — delete the `catalog.commons` block from your values.
+- **Review before it grounds anything** — replace `branch: main` with `ref:` (a tag or a full
+  40-character commit id; the two are mutually exclusive and the agent refuses both).
+- **Serve it yourself** — mirror the corpus into a repo you control and point `url` at that.
+
+Note what this does *not* change: commons entries are read-only, are never curated into, and
+**can never fire an instant recall** — they ground `kb_search` during a full investigation. See
+[Knowledge commons]({{< relref "/docs/concepts/knowledge-commons.md" >}}).
