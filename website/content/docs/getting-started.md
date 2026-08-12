@@ -304,12 +304,16 @@ configured in your `runlore.yaml` refines titles/descriptions/tags (purely
 optional — a model failure falls back to the deterministic result). Re-running
 the same import is a no-op.
 
-## Step 1c — Add the knowledge commons (optional)
+## Step 1c — The knowledge commons (already on in `standard`)
 
-If you have no runbooks to import either, point RunLore at the
-[knowledge commons](https://github.com/Smana/runlore-kb-commons) — a shared, vendor-neutral
-bundle of generic playbooks (CrashLoopBackOff, unbound PVCs, stuck cert-manager challenges,
-unschedulable pods) that ships as a **second, read-only catalog root**:
+If you have no runbooks to import either, the
+[knowledge commons](https://github.com/Smana/runlore-kb-commons) covers the gap — a shared,
+vendor-neutral bundle of generic playbooks (CrashLoopBackOff, unbound PVCs, stuck cert-manager
+challenges, unschedulable pods) mounted as a **second, read-only catalog root**.
+
+**The `standard` and `full` profiles enable it for you**, so if you installed with one of
+those, skip ahead — this step is already done. Add the block yourself only when starting from
+`minimal` or the chart defaults, or when you want to pin the corpus:
 
 ```yaml
 catalog:
