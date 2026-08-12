@@ -135,7 +135,7 @@ incidents gains trust; knowledge that keeps failing decays.
 Starting from empty is optional — and in the `standard` Helm profile you don't. The
 [knowledge commons](https://github.com/Smana/runlore-kb-commons) is a shared bundle of generic
 playbooks mounted as a second, read-only catalog root, so `kb_search` is useful on day one; it
-ships on in `standard` and `full`, off in `minimal`. Your own entries always win ties, and the
+ships on in `standard` and `full`, off in `minimal` and the chart defaults. Your own entries win ties, and the
 curator never writes there — it is a floor, not a substitute for knowledge from your own
 incidents, and commons entries never fire instant recall.
 
