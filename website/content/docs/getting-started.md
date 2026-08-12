@@ -451,6 +451,8 @@ envFrom:
   - secretRef:
       name: runlore-secrets  # ANTHROPIC_API_KEY, RUNLORE_WEBHOOK_TOKEN, SLACK_WEBHOOK_URL
 config:
+  gitops:
+    engine: flux             # or "argocd" — stated because the default is flux either way
   sources:
     alertmanager: {}         # presence is enablement — accept the alert webhook
   model:
