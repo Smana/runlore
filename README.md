@@ -353,11 +353,41 @@ between commits. It's usable today, but "stable" means different things across t
 If you stay on the golden path with a human in the approval loop, you're on the surface
 we test hardest.
 
+## Who maintains this
+
+**One person, today.** RunLore is written and maintained by [@Smana](https://github.com/Smana).
+That is the honest answer to the question you should be asking before you run an agent next to
+your production cluster, so here is what it does and doesn't mean.
+
+**What it means.** There is no support rotation and no SLA. Issues get answered as fast as one
+person with a day job can answer them. A bus-factor of one is a real risk and no amount of test
+coverage retires it.
+
+**What it doesn't mean.** If RunLore stopped being maintained tomorrow, you would lose the
+agent — not what it learned. That is deliberate, and it is the whole reason the knowledge base
+is shaped the way it is:
+
+- Your catalog is **plain [OKF](https://github.com/GoogleCloudPlatform/knowledge-catalog)
+  markdown in a Git repo you already own**. Not a database, not a proprietary format, not
+  hosted here. It stays greppable and readable by whatever you use next.
+- There is **no hosted component** and no account. Nothing switches off remotely.
+- It's **Apache-2.0**, a single Go binary, with a published Helm chart. Fork it and carry on.
+
+So the worst case is that you stop getting new features and keep everything you built. That
+trade is the point — the same reason the catalog is portable is the reason abandonment isn't
+fatal.
+
+**Reducing the risk.** The fastest way to widen the bus factor is people running RunLore and
+saying where it breaks. If you're using it, [`ADOPTERS.md`](ADOPTERS.md) or a
+[discussion](https://github.com/Smana/runlore/discussions) helps — anonymously is fine. If you
+want to go further, [`CONTRIBUTING.md`](CONTRIBUTING.md) has the setup, and the
+[roadmap](ROADMAP.md) says what's next and what's deliberately out of scope.
+
 ## Docs
 
 📐 [Design](https://runlore.io/docs/concepts/design/) · 📚 [Learning loop](https://runlore.io/docs/concepts/learning-loop/) · ✅ [Reviewing knowledge](https://runlore.io/docs/concepts/reviewing-knowledge/) · 🧑‍🔧 [KB steward skill](https://runlore.io/docs/reference/kb-steward/) · 🚀 [Getting started](https://runlore.io/docs/getting-started/) · 🧪 [Worked example](https://runlore.io/docs/reference/examples/harbor-registry-down/) ·
 🔌 [Data sources](https://runlore.io/docs/concepts/data-sources/) · ⚙️ [Configuration](https://runlore.io/docs/configuration/configuration/) · 🔗 [MCP — server & client](https://runlore.io/docs/configuration/mcp/) · 📊 [Observability](https://runlore.io/docs/operations/observability/) · 🩺 [Troubleshooting](https://runlore.io/docs/operations/troubleshooting/) ·
-🔒 [Security model](https://runlore.io/docs/security/security-model/) · 🛡 [LLM security architecture](https://runlore.io/docs/security/security-architecture/) · ⬆️ [Upgrade & uninstall](https://runlore.io/docs/operations/upgrade-uninstall/) · 🧭 [Prior art](https://runlore.io/docs/concepts/prior-art/) · 📊 [Benchmarking models](https://runlore.io/docs/reference/benchmarking/) · 🧮 [Nightly eval scorecard](https://runlore.io/eval) · 🛠 [Contributing](CONTRIBUTING.md)
+🔒 [Security model](https://runlore.io/docs/security/security-model/) · 🛡 [LLM security architecture](https://runlore.io/docs/security/security-architecture/) · ⬆️ [Upgrade & uninstall](https://runlore.io/docs/operations/upgrade-uninstall/) · 🧭 [Prior art](https://runlore.io/docs/concepts/prior-art/) · 📊 [Benchmarking models](https://runlore.io/docs/reference/benchmarking/) · 🧮 [Nightly eval scorecard](https://runlore.io/eval) · 🗺 [Roadmap](ROADMAP.md) · 🛠 [Contributing](CONTRIBUTING.md)
 
 ## Who's using RunLore
 
