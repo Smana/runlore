@@ -254,6 +254,11 @@ investigated in the first place? `hack/demo-trigger-policy.sh` fires mocked Aler
 through the trigger policy. To exercise every feature end-to-end on a throwaway cluster,
 `hack/e2e-k3d.sh` spins one up with [k3d](https://k3d.io/).
 
+**Ran it? Tell me where it would have been wrong.** Whether that verdict matches a failure you
+have actually had — and where it would have missed on *your* platform — is the single most useful
+thing you can send, and that includes deciding RunLore isn't for you. A
+[discussion](https://github.com/Smana/runlore/discussions) is enough; no deployment required.
+
 ## Who it's for
 
 **SRE and platform teams** who want their incident knowledge **portable and self-hosted** (no
@@ -359,6 +364,10 @@ we test hardest.
 Teams running RunLore in production are listed in [`ADOPTERS.md`](ADOPTERS.md) — open a PR to add
 yours, or say hello in a [discussion](https://github.com/Smana/runlore/discussions) if you'd rather
 stay unlisted.
+
+Nothing deployed yet? That's still worth hearing. Running
+[`hack/demo.sh`](#-try-it-in-one-minute--no-cluster-no-keys) takes a minute and needs no cluster,
+and what it got wrong about your platform is more useful to me than a star.
 
 ## License
 
