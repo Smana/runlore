@@ -8,6 +8,11 @@ integration: {kind: mcp, id: mcp}
 Protocol](https://modelcontextprotocol.io) tools, over streamable-HTTP (JSON-RPC 2.0) — no Go code
 required.
 
+> [!NOTE]
+> This page is the mechanics. For a complete, deployable example against a real vendor — server
+> Deployment, allowlist, and which tools are worth wiring — see
+> [Grafana (via MCP)]({{< relref "/docs/integrations/data-sources/grafana-mcp.md" >}}).
+
 ## Minimal config
 
 ```yaml
