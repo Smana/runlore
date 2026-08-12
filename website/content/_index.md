@@ -35,13 +35,13 @@ images:
     <a class="rl-shot-zoom" href="#shot-investigation" aria-label="Enlarge the investigation screenshot">
       <img src="/images/slack-notification.png" width="1328" height="2046" loading="lazy" alt="RunLore Slack notification: a verdict-first incident card headed 'ImageGalleryUnavailable — apps/xplane-image-gallery' with an Action required flag, High confidence 92%, the cause traced to a manual AWS Secrets Manager DeleteSecret, read-only suggested next steps, a What changed line citing the CloudTrail event, a cost footer of 7 model calls and 121,758 in / 9,596 out tokens, feedback buttons, and a link to the knowledge-base pull request it opened." />
     </a>
-    <figcaption><strong>An investigation.</strong> The verdict first, then the evidence behind it — plus what it ruled out, what it still doesn&rsquo;t know, and next steps it will <em>not</em> apply for you.</figcaption>
+    <figcaption><strong>An investigation — 7 model calls, 131,354 tokens.</strong> The verdict first, then the evidence behind it — plus what it ruled out, what it still doesn&rsquo;t know, and next steps it will <em>not</em> apply for you.</figcaption>
   </figure>
   <figure class="rl-shot">
     <a class="rl-shot-zoom" href="#shot-recall" aria-label="Enlarge the instant-recall screenshot">
       <img src="/images/recall-notification.png" width="1328" height="1812" loading="lazy" alt="RunLore Slack notification showing an instant recall: an ⚡ Instant recall banner reading 'answered from your knowledge base, no investigation was run', the known cause carried over from the merged entry, High confidence 78% after the verify pass, and a cost footer showing 2 model calls and 4,764 in / 3,525 out tokens." />
     </a>
-    <figcaption><strong>The same failure, next time.</strong> Answered straight from the entry you merged &mdash; no investigation, no second pull request, and it cites the entry so you can check it. Two model calls (the reranker, then the adversarial verify pass) against the seven the same incident&rsquo;s full investigation took: <strong>8,289 tokens instead of 131,354</strong>. The verify pass is why the confidence reads lower than the stored entry&rsquo;s &mdash; a recall is re-checked, not replayed.</figcaption>
+    <figcaption><strong>The same failure, next time &mdash; 2 model calls, 8,289 tokens. About 6% of the cost, in seconds.</strong> Answered straight from the entry you merged: no investigation, no second pull request, and it cites the entry so you can check it. The two calls are the reranker and the adversarial verify pass &mdash; which is why the confidence reads lower than the stored entry&rsquo;s. A recall is re-checked, not replayed.</figcaption>
   </figure>
 </div>
 
@@ -52,6 +52,13 @@ images:
 <div class="rl-shot-overlay" id="shot-recall" role="dialog" aria-label="Instant-recall screenshot, enlarged">
   <a class="rl-shot-overlay-close" href="#shots" aria-label="Close">&times;</a>
   <img src="/images/recall-notification.png" width="1328" height="1812" loading="lazy" alt="" />
+</div>
+
+<p class="rl-eyebrow">Try it before you wire anything up</p>
+<div class="rl-try">
+  <p class="rl-try-lead">Watch RunLore investigate that incident and reach that root cause on your own machine — <strong>no Kubernetes, no LLM key, no network.</strong> You only need Go.</p>
+  <pre><code>git clone https://github.com/Smana/runlore &amp;&amp; cd runlore &amp;&amp; hack/demo.sh</code></pre>
+  <p class="rl-try-note">It replays a transcript recorded once against a live model through the <em>real</em> investigation loop — the same ReAct tool calls, verify pass and verdict renderer that run in production, over fake but realistic evidence. About a minute, most of it the Go build. <a href="https://github.com/Smana/runlore#-try-it-in-one-minute--no-cluster-no-keys">See what it prints →</a></p>
 </div>
 
 {{< hextra/feature-grid cols="2" >}}
