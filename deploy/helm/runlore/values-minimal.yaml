@@ -2,6 +2,15 @@
 # catalog, no curation, no actions. Create the `runlore-secrets` Secret and point
 # Alertmanager at the webhook first; step up with values-standard.yaml.
 #
+# What "investigate" means HERE, precisely: no metrics and no logs backend is wired,
+# so query_metrics and query_logs are never registered. The loop runs on Kubernetes
+# state (pod status, events, controller logs) plus the GitOps diff. That is a real
+# investigation and it reaches real root causes — but it is a narrower one than a
+# full install, and `serve` does NOT warn about it at startup (the "running without
+# metrics/logs" notice exists only on the `lore investigate` CLI path). Add
+# config.metrics.url and config.logs.url — see values-standard.yaml — the moment you
+# want evidence from beyond the cluster itself.
+#
 # An OVERLAY on the chart's values.yaml, not the effective config: Helm deep-merges
 # the two, so the running agent also carries the chart defaults absent here (the
 # GitOps source, critical-only triggers, leader election, the investigation rate
@@ -14,6 +23,15 @@ envFrom:
   - secretRef:
       name: runlore-secrets  # ANTHROPIC_API_KEY, RUNLORE_WEBHOOK_TOKEN, SLACK_WEBHOOK_URL
 config:
+  # Stated explicitly, though `flux` is also the built-in default — that is the point.
+  # The chart default enables the gitops SOURCE (react to Flux/Argo CD Ready=False),
+  # and what_changed reads this same engine. Leave the key out on an Argo CD cluster
+  # and you get a watcher for CRDs that do not exist and a what_changed that finds
+  # nothing, silently, because falling back to a default is not an error. Writing it
+  # here changes nothing for Flux users; it makes the choice visible to everyone else.
+  gitops:
+    engine: flux             # or "argocd"
+
   sources:
     alertmanager: {}         # presence is enablement — accept the alert webhook
   model:
