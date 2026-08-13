@@ -6,7 +6,6 @@ import (
 	"time"
 
 	"github.com/Smana/runlore/internal/outcome"
-	"github.com/Smana/runlore/internal/providers"
 )
 
 // RecurrenceStats is the per-TriggerKey ledger snapshot the suppression gate
@@ -23,12 +22,27 @@ type RecurrenceStats interface {
 // as fresh noise — the recall short-circuit only helps once the KB PR is MERGED,
 // so the human-review window is exactly when the repetition is worst.
 //
-// The gate is deliberately human-deferential, in both directions:
-//   - it only suppresses a CONCLUSIVE prior answer (verdict no_action /
-//     action_suggested / action_required) — an inconclusive or pre-verdict prior
-//     never suppresses, because there is no answer worth not repeating;
-//   - a standing 👎 on the trigger breaks the cooldown immediately — a human
-//     saying "that diagnosis is wrong" re-arms the very next occurrence.
+// The gate reads two independent facts off the ledger's per-trigger index, and
+// conflating them is what broke it once already (#471):
+//
+//   - WHEN did we last look? The newest open of any kind, conclusive or not. The
+//     cooldown lapses from there, because a full investigation was paid for at that
+//     moment whatever it concluded.
+//   - Is there an ANSWER worth not repeating? The newest CONCLUSIVE prior (verdict
+//     no_action / action_suggested / action_required), which is not necessarily the
+//     newest one. Anchoring this on the latest prior instead let a single run that
+//     mislabelled a known recurrence as `inconclusive` erase an arbitrarily long
+//     history of conclusive ones — and since the evidence does not change between
+//     firings, neither does the mislabel, so the gate stayed disarmed and every
+//     later firing bought a full investigation. Reading the newest conclusive prior
+//     costs one run per mislabel instead of all of them.
+//
+// A trigger that has NEVER concluded still bypasses the gate on every firing: there
+// is no answer to stand on, and suppressing would leave the on-call with silence.
+//
+// The gate is deliberately human-deferential in the other direction too: a standing
+// 👎 on the trigger breaks the cooldown immediately — a human saying "that diagnosis
+// is wrong" re-arms the very next occurrence.
 //
 // A suppressed occurrence makes no model call, sends no notification, and
 // records no ledger open. (It does still consume a workqueue turn and a
@@ -47,25 +61,43 @@ type RecurrenceGate struct {
 	Cooldown time.Duration // 0 disables the gate (default: off, opt-in)
 }
 
-// suppress reports whether req should be suppressed, returning the prior
+// recurrenceDecision is WHY the gate did or did not suppress an occurrence. The
+// gate's failure surface is "suppression silently stops happening" — with a bare
+// boolean, a gate that never fires again looks exactly like a quiet trigger, and
+// runlore_recurrence_suppressed simply stays at zero with nothing to explain it
+// (#471). Naming each outcome lets the caller log the reason, so the interesting
+// one — within the cooldown, but nothing conclusive to stand on — is visible.
+type recurrenceDecision string
+
+const (
+	recurrenceOff            recurrenceDecision = "gate_off"            // no gate, no cooldown, or no trigger key
+	recurrenceFirstLook      recurrenceDecision = "first_look"          // this trigger has never been investigated
+	recurrenceCooldownLapsed recurrenceDecision = "cooldown_lapsed"     // the last look is older than the cooldown
+	recurrenceNoAnswer       recurrenceDecision = "no_conclusive_prior" // looked recently, but never reached an answer
+	recurrenceContested      recurrenceDecision = "contested_by_human"  // a standing 👎 re-arms investigation
+	recurrenceSuppressed     recurrenceDecision = "recurrence_suppressed"
+)
+
+// suppressed reports whether d is the one decision that skips the paid loop.
+func (d recurrenceDecision) suppressed() bool { return d == recurrenceSuppressed }
+
+// decide reports whether req should be suppressed and why, returning the prior
 // investigation's facts for the caller's log line. now is a parameter so the
 // decision matrix is testable without sleeping.
-func (g *RecurrenceGate) suppress(req Request, now time.Time) (outcome.TriggerRecurrence, bool) {
+func (g *RecurrenceGate) decide(req Request, now time.Time) (outcome.TriggerRecurrence, recurrenceDecision) {
 	if g == nil || g.Outcome == nil || g.Cooldown <= 0 || req.TriggerKey == "" {
-		return outcome.TriggerRecurrence{}, false
+		return outcome.TriggerRecurrence{}, recurrenceOff
 	}
 	r := g.Outcome.Recurrence(req.TriggerKey)
-	if r.Count == 0 || now.Sub(r.Last) >= g.Cooldown {
-		return r, false
+	switch {
+	case r.Count == 0:
+		return r, recurrenceFirstLook
+	case now.Sub(r.Last) >= g.Cooldown:
+		return r, recurrenceCooldownLapsed
+	case !r.Concluded():
+		return r, recurrenceNoAnswer // we still owe a real answer: retry
+	case r.Contested():
+		return r, recurrenceContested
 	}
-	switch providers.Verdict(r.Verdict) {
-	case providers.VerdictNoAction, providers.VerdictActionSuggested, providers.VerdictActionRequired:
-		// conclusive — eligible for suppression
-	default:
-		return r, false // inconclusive or pre-verdict: retry, we owe a real answer
-	}
-	if r.Contested() {
-		return r, false // a human contested the diagnosis: cooldown broken
-	}
-	return r, true
+	return r, recurrenceSuppressed
 }

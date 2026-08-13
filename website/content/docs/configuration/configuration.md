@@ -115,18 +115,22 @@ incident webhook. Known keys: `alertmanager`, `gitops`, `pagerduty`, `custom`.
 - `rate_limit` — `max_per_window` (**default 30**; an explicit **0 = unlimited**), `window` (default **1h**),
   `max_requeues`.
 - `recurrence_cooldown` — **opt-in (default 0 = off)** per-trigger suppression: skip re-investigating a
-  trigger whose previous investigation completed less than this long ago, **concluded** (verdict ≠
-  `inconclusive`), and has **no standing 👎 feedback**. Without it, nothing keys on the trigger before
+  trigger that was **looked at** less than this long ago and for which **an answer stands** — some
+  prior investigation of it reached a conclusion (verdict ≠ `inconclusive`), **not necessarily the most
+  recent one** — with **no standing 👎 feedback**. Without it, nothing keys on the trigger before
   the paid loop: a still-firing alert re-investigates on every Alertmanager `repeat_interval` and a
   persistently-failing GitOps resource on every informer resync (**~10 minutes**) — each a full model
   run re-delivering the same answer as fresh noise. A suppressed occurrence costs nothing and says
   nothing (no model call, no notification, no ledger open — the previous notification remains *the*
   answer); the next occurrence past the cooldown re-investigates in full. Two human-deferential
-  escape hatches: an inconclusive prior never suppresses (there is no answer worth repeating), and a
+  escape hatches: a trigger that has **never** concluded is re-investigated on every firing however
+  often it fires (there is no answer to stand on, and silence would leave you with nothing), and a
   👎 on the previous message re-arms investigation immediately (see
   [`notify.slack.feedback_buttons`](#notify--where-findings-go)). Requires `outcome.ledger_path`
   (fails loud at startup without it). A sensible production value is `30m`–`1h`. Suppressions show up
-  as `runlore_investigations_completed_total{result="recurrence_suppressed"}`.
+  as `runlore_investigations_completed_total{result="recurrence_suppressed"}`; the one bypass worth
+  watching — fired again inside its cooldown, but nothing conclusive to stand on — logs an INFO line
+  naming the trigger.
 - `timeout` — per-investigation deadline, **default 10m** (bounds a hung tool/clone so it can't starve
   the single-worker queue).
 - `tool_timeout` — per-**tool**-call timeout, **default 60s** (0 = use the default). Bounds a single

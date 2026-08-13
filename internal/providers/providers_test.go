@@ -29,6 +29,23 @@ func TestCompletionResponseRefused(t *testing.T) {
 	}
 }
 
+// TestVerdictConclusive pins the ONE definition of "this verdict is an answer":
+// the three actionability verdicts conclude, inconclusive does not, and neither
+// does an unset or unknown value (a pre-verdict ledger event, or a model reply the
+// parser could not normalize).
+func TestVerdictConclusive(t *testing.T) {
+	for _, v := range []providers.Verdict{providers.VerdictNoAction, providers.VerdictActionSuggested, providers.VerdictActionRequired} {
+		if !v.Conclusive() {
+			t.Errorf("verdict %q should report Conclusive()==true", v)
+		}
+	}
+	for _, v := range []providers.Verdict{providers.VerdictInconclusive, "", "maybe", "NO_ACTION"} {
+		if v.Conclusive() {
+			t.Errorf("verdict %q should report Conclusive()==false", v)
+		}
+	}
+}
+
 // TestNormalizeWorkloadName pins the shared pod-hash normalization now homed in the
 // providers package (both curator dedup and instant-recall matching call it). The
 // boundary is the safe one the curator tests already established: strip a

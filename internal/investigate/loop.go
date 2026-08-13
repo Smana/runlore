@@ -306,15 +306,28 @@ func (li *LoopInvestigator) Investigate(ctx context.Context, req Request) error 
 	// suppressed occurrence makes no model call, sends no notification, records no
 	// ledger open (see RecurrenceGate for why not recording the open is load-bearing
 	// — and for the workqueue/rate-limit slot it does still spend); the next
-	// occurrence past the cooldown re-investigates in full. An inconclusive prior
-	// never suppresses, and a standing 👎 re-arms investigation immediately.
-	if prior, ok := li.Recurrence.suppress(req, time.Now()); ok {
+	// occurrence past the cooldown re-investigates in full. The cooldown lapses from
+	// the last look of any kind, but only a STANDING conclusive answer earns
+	// suppression, and a standing 👎 re-arms investigation immediately.
+	prior, decision := li.Recurrence.decide(req, time.Now())
+	switch {
+	case decision.suppressed():
 		result = "recurrence_suppressed"
 		li.Log.Info("recurrence cooldown: suppressing re-investigation",
 			"title", req.Title, "trigger_key", req.TriggerKey,
 			"occurrences", prior.Count, "last_investigated", prior.Last,
-			"verdict", prior.Verdict, "prev_url", prior.CuratedURL)
+			"verdict", prior.Verdict, "standing_answer", prior.Conclusive.Title,
+			"standing_verdict", prior.Conclusive.Verdict, "answered_at", prior.Conclusive.At,
+			"prev_url", prior.CuratedURL)
 		return nil
+	case decision == recurrenceNoAnswer:
+		// The one bypass worth saying out loud: the trigger fired again inside its
+		// cooldown and we paid for a full investigation anyway, because no prior run has
+		// ever answered it. Without this line the gate looks broken (#471) rather than
+		// correctly deferential — the two are indistinguishable from the metric alone.
+		li.Log.Info("recurrence cooldown: re-investigating inside the cooldown — no conclusive answer stands yet",
+			"title", req.Title, "trigger_key", req.TriggerKey,
+			"occurrences", prior.Count, "last_investigated", prior.Last, "verdict", prior.Verdict)
 	}
 	// tryRecall runs the instant-recall short-circuit + near-miss block: it delivers
 	// (finish) and reports done==true when a recalled answer survives verify, and

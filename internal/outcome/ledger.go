@@ -22,6 +22,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/Smana/runlore/internal/providers"
 )
 
 // Fingerprint prefixes for incidents RunLore assigns a synthetic id to because the
@@ -227,6 +229,11 @@ type triggerAggJSON struct {
 	CuratedURL string    `json:"curated_url,omitempty"`
 	Entry      string    `json:"entry,omitempty"`
 	Verdict    string    `json:"verdict,omitempty"`
+	// Conclusive mirrors triggerAgg.conclusive. Absent from a checkpoint written
+	// before #471; a replay then reconstructs it from the retained tail only, which
+	// degrades to today's behaviour (no standing answer ⇒ no suppression) rather
+	// than inventing one.
+	Conclusive *ConclusivePrior `json:"conclusive,omitempty"`
 }
 
 type feedbackVoteJSON struct {
@@ -246,7 +253,12 @@ type triggerAgg struct {
 	last       time.Time
 	curatedURL string // CuratedURL of the newest open
 	entry      string // Entry of the newest open ("" for fresh) — feedback attribution target
-	verdict    string // Verdict of the newest open — the suppression gate's "conclusive?" input
+	verdict    string // Verdict of the newest open (may be inconclusive/"")
+	// conclusive is the newest open whose verdict was an ANSWER, folded separately
+	// from the newest open so a single inconclusive run cannot erase the answer
+	// standing behind it — the distinction the suppression gate turns on (#471).
+	// Zero value when this trigger has never concluded.
+	conclusive ConclusivePrior
 }
 
 // feedbackVote is the fold state of one (TriggerKey, user) feedback: the rating
@@ -432,7 +444,11 @@ func (l *Ledger) seedCheckpointLocked(cd *checkpointData) {
 		l.open[fp] = ev
 	}
 	for k, v := range cd.ByTrigger {
-		l.byTrigger[k] = triggerAgg{count: v.Count, last: v.Last, curatedURL: v.CuratedURL, entry: v.Entry, verdict: v.Verdict}
+		a := triggerAgg{count: v.Count, last: v.Last, curatedURL: v.CuratedURL, entry: v.Entry, verdict: v.Verdict}
+		if v.Conclusive != nil {
+			a.conclusive = *v.Conclusive
+		}
+		l.byTrigger[k] = a
 	}
 	for k, v := range cd.Votes {
 		l.votes[k] = feedbackVote{rating: v.Rating, entry: v.Entry}
@@ -491,7 +507,12 @@ func (l *Ledger) snapshotCheckpointLocked() *checkpointData {
 	if len(l.byTrigger) > 0 {
 		cd.ByTrigger = make(map[string]triggerAggJSON, len(l.byTrigger))
 		for k, v := range l.byTrigger {
-			cd.ByTrigger[k] = triggerAggJSON{Count: v.count, Last: v.last, CuratedURL: v.curatedURL, Entry: v.entry, Verdict: v.verdict}
+			j := triggerAggJSON{Count: v.count, Last: v.last, CuratedURL: v.curatedURL, Entry: v.entry, Verdict: v.verdict}
+			if v.conclusive.Verdict != "" {
+				c := v.conclusive
+				j.Conclusive = &c
+			}
+			cd.ByTrigger[k] = j
 		}
 	}
 	if len(l.votes) > 0 {
@@ -808,6 +829,14 @@ func (l *Ledger) applyTriggerLocked(e Event) {
 		a.entry = e.Entry
 		a.verdict = e.Verdict
 	}
+	// The conclusive prior advances on its own clock and is never CLEARED by a later
+	// inconclusive open: the standing answer for a trigger outlives a run that failed
+	// to reach one. Guarded on its own timestamp so an overlapping investigation
+	// completing out of order (opens are stamped at completion) cannot rewind it to an
+	// older answer.
+	if providers.Verdict(e.Verdict).Conclusive() && !e.At.Before(a.conclusive.At) {
+		a.conclusive = ConclusivePrior{At: e.At, Verdict: e.Verdict, Title: e.Title, CuratedURL: e.CuratedURL}
+	}
 	l.byTrigger[e.TriggerKey] = a
 }
 
@@ -831,6 +860,22 @@ type TriggerRecurrence struct {
 	Verdict      string // newest open's verdict ("" for pre-verdict events)
 	CuratedURL   string
 	FeedbackDown int // LIVE 👎 votes for this trigger, after per-user dedup
+	// Conclusive is the newest prior that actually ANSWERED — not necessarily the
+	// newest one. Zero value when this trigger has never concluded.
+	Conclusive ConclusivePrior
+}
+
+// ConclusivePrior is the newest investigation of a trigger whose verdict was an
+// answer (see providers.Verdict.Conclusive): when it landed, what it concluded, its
+// one-line diagnosis and its KB link. It is tracked apart from the newest open
+// because those are different questions — "when did we last look?" versus "do we
+// have an answer worth not repeating?" — and conflating them is what let a single
+// inconclusive run erase an arbitrarily long history of conclusive ones (#471).
+type ConclusivePrior struct {
+	At         time.Time `json:"at"`
+	Verdict    string    `json:"verdict"`
+	Title      string    `json:"title,omitempty"`
+	CuratedURL string    `json:"curated_url,omitempty"`
 }
 
 // Contested reports whether the trigger carries standing 👎 feedback — the ONE
@@ -839,6 +884,12 @@ type TriggerRecurrence struct {
 // #288). Layers consulting different notions of contested-ness is exactly the
 // divergence that issue was about; add nuance here, not at the call sites.
 func (r TriggerRecurrence) Contested() bool { return r.FeedbackDown > 0 }
+
+// Concluded reports whether an ANSWER stands for this trigger — some prior
+// investigation reached a conclusive verdict, whether or not the most recent one
+// did. The suppression gate's eligibility test: without this, an answer is only
+// ever as durable as the last run that happened to land on it.
+func (r TriggerRecurrence) Concluded() bool { return r.Conclusive.Verdict != "" }
 
 // Recurrence returns the trigger's recurrence snapshot. FeedbackDown counts the
 // votes map's current "down" entries for the key — O(live votes), which stays
@@ -851,7 +902,7 @@ func (l *Ledger) Recurrence(triggerKey string) TriggerRecurrence {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	a := l.byTrigger[triggerKey]
-	tr := TriggerRecurrence{Count: a.count, Last: a.last, Verdict: a.verdict, CuratedURL: a.curatedURL}
+	tr := TriggerRecurrence{Count: a.count, Last: a.last, Verdict: a.verdict, CuratedURL: a.curatedURL, Conclusive: a.conclusive}
 	prefix := triggerKey + "\x00"
 	for k, v := range l.votes {
 		if v.rating == "down" && strings.HasPrefix(k, prefix) {

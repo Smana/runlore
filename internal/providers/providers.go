@@ -634,6 +634,21 @@ const (
 	VerdictInconclusive    Verdict = "inconclusive"     // could not be determined with available data
 )
 
+// Conclusive reports whether v is an ANSWER — the investigation reached a
+// judgement the on-call can act on (or deliberately not act on). It is the ONE
+// definition of "conclusive" shared by every consumer that must distinguish an
+// answer from the absence of one: the outcome ledger's per-trigger index and the
+// recurrence suppression gate that reads it. inconclusive is not an answer, and
+// neither is "" (a pre-verdict ledger event, or a reply the parser could not
+// normalize) — both mean "we still owe a real answer".
+func (v Verdict) Conclusive() bool {
+	switch v {
+	case VerdictNoAction, VerdictActionSuggested, VerdictActionRequired:
+		return true
+	}
+	return false
+}
+
 // ValidVerdict reports whether v is one of the model-facing enum values; the
 // parser normalizes anything else to "" so formatters can safely omit it.
 func ValidVerdict(v Verdict) bool {

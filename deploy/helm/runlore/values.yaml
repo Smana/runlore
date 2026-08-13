@@ -156,10 +156,11 @@ config:
                                 #   explicit 0 = unlimited; UNSET now defaults to 30
       # window: 1h
       # max_requeues: 3
-    # recurrence_cooldown: 30m  # OPT-IN: skip re-investigating a trigger answered conclusively less
-    #                           #   than this long ago (a still-firing alert otherwise re-investigates
-    #                           #   every repeat_interval; a failing GitOps resource every ~10m resync).
-    #                           #   An inconclusive prior always retries; a 👎 re-arms immediately.
+    # recurrence_cooldown: 30m  # OPT-IN: skip re-investigating a trigger looked at less than this long
+    #                           #   ago that already has a conclusive answer on record (a still-firing
+    #                           #   alert otherwise re-investigates every repeat_interval; a failing
+    #                           #   GitOps resource every ~10m resync). A trigger that has NEVER
+    #                           #   concluded always retries; a 👎 re-arms immediately.
     #                           #   Requires outcome.ledger_path.
   # Structured logging. In-cluster defaults to JSON so logs are ingestible by
   # Loki / VictoriaLogs / CloudWatch; switch format to "text" for human-readable
