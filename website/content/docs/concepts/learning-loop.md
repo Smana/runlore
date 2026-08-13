@@ -650,6 +650,18 @@ investigation immediately. So feedback does two jobs: it weighs *recalled knowle
 (the decay above) and it governs *when the agent may repeat itself* — both steered
 by the same single human 👍/👎 signal.
 
+**Past the cooldown, the agent is told what it already concluded.** A recurrence
+that outlives its cooldown gets a deliberate fresh look — but not a blind one: the
+seed opens with the standing answer for that trigger (what was concluded, how
+actionable it was, and how long ago), quoted as data and never as an instruction.
+This exists because the agent otherwise has no way to report "this is the same known
+fault": the verdict enum has no value for it, so it reaches for `inconclusive`, which
+means the opposite and throws away a diagnosis it already had. The block says what to
+do instead — confirm against live state, then restate the cause with the actionability
+verdict it deserves, or name the new cause and put the old one in `ruled_out`. It is
+wired to the trigger index directly, not to the opt-in cooldown, so it works whether
+or not suppression is enabled.
+
 **👎 recovery.** A standing 👎 forces re-investigation — and when that fresh
 investigation independently reaches the same conclusion (identical dedup
 fingerprint), the curator records a *confirmation* in the outcome ledger instead of

@@ -56,9 +56,22 @@ type RecurrenceStats interface {
 // suppressed firings (only the recurrence_suppressed metric and a log line see
 // them) — a future consumer needing raw firing frequency is the moment to
 // promote suppression to a first-class event kind, not before.
+// The gate itself holds no ledger: LoopInvestigator.TriggerHistory reads the
+// per-trigger snapshot once per investigation and hands it here, so the suppression
+// decision and the seed's known-recurrence block are made from the same facts.
 type RecurrenceGate struct {
-	Outcome  RecurrenceStats
 	Cooldown time.Duration // 0 disables the gate (default: off, opt-in)
+}
+
+// priorForTrigger reads the trigger's recurrence snapshot: what earlier
+// investigations of this same incident concluded. Zero value — a clean "nothing
+// known" that every consumer already handles — when no ledger is wired, the ledger
+// is disabled, or the request carries no trigger key to group by.
+func (li *LoopInvestigator) priorForTrigger(triggerKey string) outcome.TriggerRecurrence {
+	if li.TriggerHistory == nil || triggerKey == "" {
+		return outcome.TriggerRecurrence{}
+	}
+	return li.TriggerHistory.Recurrence(triggerKey)
 }
 
 // recurrenceDecision is WHY the gate did or did not suppress an occurrence. The
@@ -81,23 +94,22 @@ const (
 // suppressed reports whether d is the one decision that skips the paid loop.
 func (d recurrenceDecision) suppressed() bool { return d == recurrenceSuppressed }
 
-// decide reports whether req should be suppressed and why, returning the prior
-// investigation's facts for the caller's log line. now is a parameter so the
-// decision matrix is testable without sleeping.
-func (g *RecurrenceGate) decide(req Request, now time.Time) (outcome.TriggerRecurrence, recurrenceDecision) {
-	if g == nil || g.Outcome == nil || g.Cooldown <= 0 || req.TriggerKey == "" {
-		return outcome.TriggerRecurrence{}, recurrenceOff
+// decide reports whether req should be suppressed and why, given the trigger's
+// prior-investigation snapshot. A pure function of (config, history, clock): now is
+// a parameter so the decision matrix is testable without sleeping.
+func (g *RecurrenceGate) decide(req Request, prior outcome.TriggerRecurrence, now time.Time) recurrenceDecision {
+	if g == nil || g.Cooldown <= 0 || req.TriggerKey == "" {
+		return recurrenceOff
 	}
-	r := g.Outcome.Recurrence(req.TriggerKey)
 	switch {
-	case r.Count == 0:
-		return r, recurrenceFirstLook
-	case now.Sub(r.Last) >= g.Cooldown:
-		return r, recurrenceCooldownLapsed
-	case !r.Concluded():
-		return r, recurrenceNoAnswer // we still owe a real answer: retry
-	case r.Contested():
-		return r, recurrenceContested
+	case prior.Count == 0:
+		return recurrenceFirstLook
+	case now.Sub(prior.Last) >= g.Cooldown:
+		return recurrenceCooldownLapsed
+	case !prior.Concluded():
+		return recurrenceNoAnswer // we still owe a real answer: retry
+	case prior.Contested():
+		return recurrenceContested
 	}
-	return r, recurrenceSuppressed
+	return recurrenceSuppressed
 }

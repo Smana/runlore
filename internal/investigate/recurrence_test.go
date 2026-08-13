@@ -41,43 +41,66 @@ func TestRecurrenceGateDecisions(t *testing.T) {
 	// still standing behind it, from 2h ago.
 	mislabelled := outcome.TriggerRecurrence{Count: 2, Last: recent, Verdict: "inconclusive",
 		Conclusive: outcome.ConclusivePrior{At: stale, Verdict: "action_required", Title: "broken down-migration"}}
+	on := &RecurrenceGate{Cooldown: time.Hour}
 	cases := []struct {
-		name string
-		gate *RecurrenceGate
-		req  Request
-		want recurrenceDecision
+		name  string
+		gate  *RecurrenceGate
+		req   Request
+		prior outcome.TriggerRecurrence
+		want  recurrenceDecision
 	}{
 		{"suppresses a fresh conclusive uncontested recurrence",
-			&RecurrenceGate{Outcome: fakeRecurrenceStats{concluded(1, recent, "no_action")}, Cooldown: time.Hour}, req, recurrenceSuppressed},
+			on, req, concluded(1, recent, "no_action"), recurrenceSuppressed},
 		{"action_required is conclusive too",
-			&RecurrenceGate{Outcome: fakeRecurrenceStats{concluded(2, recent, "action_required")}, Cooldown: time.Hour}, req, recurrenceSuppressed},
-		{"nil gate never suppresses", nil, req, recurrenceOff},
+			on, req, concluded(2, recent, "action_required"), recurrenceSuppressed},
+		{"nil gate never suppresses", nil, req, concluded(1, recent, "no_action"), recurrenceOff},
 		{"cooldown 0 (off) never suppresses",
-			&RecurrenceGate{Outcome: fakeRecurrenceStats{concluded(1, recent, "no_action")}}, req, recurrenceOff},
+			&RecurrenceGate{}, req, concluded(1, recent, "no_action"), recurrenceOff},
 		{"no trigger key never suppresses",
-			&RecurrenceGate{Outcome: fakeRecurrenceStats{concluded(1, recent, "no_action")}, Cooldown: time.Hour}, Request{Title: "t"}, recurrenceOff},
-		{"never investigated",
-			&RecurrenceGate{Outcome: fakeRecurrenceStats{}, Cooldown: time.Hour}, req, recurrenceFirstLook},
+			on, Request{Title: "t"}, concluded(1, recent, "no_action"), recurrenceOff},
+		{"never investigated", on, req, outcome.TriggerRecurrence{}, recurrenceFirstLook},
 		{"cooldown expired — re-investigate",
-			&RecurrenceGate{Outcome: fakeRecurrenceStats{concluded(3, stale, "no_action")}, Cooldown: time.Hour}, req, recurrenceCooldownLapsed},
+			on, req, concluded(3, stale, "no_action"), recurrenceCooldownLapsed},
 		{"inconclusive prior, nothing ever concluded — retry, we owe a real answer",
-			&RecurrenceGate{Outcome: fakeRecurrenceStats{outcome.TriggerRecurrence{Count: 1, Last: recent, Verdict: "inconclusive"}}, Cooldown: time.Hour}, req, recurrenceNoAnswer},
+			on, req, outcome.TriggerRecurrence{Count: 1, Last: recent, Verdict: "inconclusive"}, recurrenceNoAnswer},
 		{"pre-verdict prior (old events) — retry",
-			&RecurrenceGate{Outcome: fakeRecurrenceStats{outcome.TriggerRecurrence{Count: 1, Last: recent}}, Cooldown: time.Hour}, req, recurrenceNoAnswer},
+			on, req, outcome.TriggerRecurrence{Count: 1, Last: recent}, recurrenceNoAnswer},
 		{"inconclusive prior with an answer standing behind it — suppress; the mislabel costs one run",
-			&RecurrenceGate{Outcome: fakeRecurrenceStats{mislabelled}, Cooldown: time.Hour}, req, recurrenceSuppressed},
+			on, req, mislabelled, recurrenceSuppressed},
 		{"a standing 👎 breaks the cooldown — the human re-arms investigation",
-			&RecurrenceGate{Outcome: fakeRecurrenceStats{outcome.TriggerRecurrence{Count: 1, Last: recent, Verdict: "no_action",
-				Conclusive: outcome.ConclusivePrior{At: recent, Verdict: "no_action"}, FeedbackDown: 1}}, Cooldown: time.Hour}, req, recurrenceContested},
+			on, req, outcome.TriggerRecurrence{Count: 1, Last: recent, Verdict: "no_action",
+				Conclusive: outcome.ConclusivePrior{At: recent, Verdict: "no_action"}, FeedbackDown: 1}, recurrenceContested},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			_, got := c.gate.decide(c.req, now)
+			got := c.gate.decide(c.req, c.prior, now)
 			if got != c.want {
 				t.Fatalf("decide = %q, want %q", got, c.want)
 			}
 			if want := c.want == recurrenceSuppressed; got.suppressed() != want {
 				t.Fatalf("decision %q suppressed() = %v, want %v", got, got.suppressed(), want)
+			}
+		})
+	}
+}
+
+// TestPriorForTriggerIsNothingKnownWithoutALedger: the two consumers of a trigger's
+// history — the suppression gate and the seed's known-recurrence block — must both
+// see a clean "nothing known" when there is nothing to read, rather than needing a
+// nil check of their own.
+func TestPriorForTriggerIsNothingKnownWithoutALedger(t *testing.T) {
+	full := fakeRecurrenceStats{concluded(2, time.Now(), "action_required")}
+	for _, c := range []struct {
+		name string
+		li   *LoopInvestigator
+		key  string
+	}{
+		{"no ledger wired", &LoopInvestigator{}, "k"},
+		{"no trigger key to group by", &LoopInvestigator{TriggerHistory: full}, ""},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			if got := c.li.priorForTrigger(c.key); got.Count != 0 || got.Concluded() {
+				t.Fatalf("priorForTrigger = %+v, want the zero value", got)
 			}
 		})
 	}
@@ -99,13 +122,13 @@ func TestRecurrenceGateSuppressionSurvivesOneMislabelledRun(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ledger: %v", err)
 	}
-	gate := &RecurrenceGate{Outcome: led, Cooldown: 30 * time.Minute}
+	li := &LoopInvestigator{TriggerHistory: led, Recurrence: &RecurrenceGate{Cooldown: 30 * time.Minute}}
 	req := Request{Title: "wet-collab-api CrashLoopBackOff", TriggerKey: "k"}
 	t0 := time.Unix(60000, 0)
 	investigated := 0
 	for i := 0; i < 18; i++ { // every 10m for 3h
 		now := t0.Add(time.Duration(i) * 10 * time.Minute)
-		if _, d := gate.decide(req, now); d.suppressed() {
+		if li.Recurrence.decide(req, li.priorForTrigger(req.TriggerKey), now).suppressed() {
 			continue
 		}
 		investigated++
@@ -134,13 +157,13 @@ func TestRecurrenceGateNeverSuppressesAnUnansweredTrigger(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ledger: %v", err)
 	}
-	gate := &RecurrenceGate{Outcome: led, Cooldown: 30 * time.Minute}
+	li := &LoopInvestigator{TriggerHistory: led, Recurrence: &RecurrenceGate{Cooldown: 30 * time.Minute}}
 	req := Request{Title: "t", TriggerKey: "k"}
 	t0 := time.Unix(70000, 0)
 	for i := 0; i < 6; i++ {
 		now := t0.Add(time.Duration(i) * 5 * time.Minute)
-		prior, d := gate.decide(req, now)
-		if d.suppressed() {
+		prior := li.priorForTrigger(req.TriggerKey)
+		if li.Recurrence.decide(req, prior, now).suppressed() {
 			t.Fatalf("firing %d suppressed with no answer standing: %+v", i, prior)
 		}
 		if err := led.Open(outcome.Event{Fingerprint: fmt.Sprintf("f%d", i), Kind: "fresh", TriggerKey: "k",
@@ -158,13 +181,11 @@ func TestInvestigateSuppressedRecurrenceSkipsModelAndDelivery(t *testing.T) {
 	model := &blockingModel{}
 	delivered := 0
 	li := &LoopInvestigator{
-		Model:      model,
-		Log:        slog.New(slog.NewTextHandler(io.Discard, nil)),
-		OnComplete: func(providers.Investigation) { delivered++ },
-		Recurrence: &RecurrenceGate{
-			Outcome:  fakeRecurrenceStats{concluded(1, time.Now().Add(-time.Minute), "no_action")},
-			Cooldown: time.Hour,
-		},
+		Model:          model,
+		Log:            slog.New(slog.NewTextHandler(io.Discard, nil)),
+		OnComplete:     func(providers.Investigation) { delivered++ },
+		Recurrence:     &RecurrenceGate{Cooldown: time.Hour},
+		TriggerHistory: fakeRecurrenceStats{concluded(1, time.Now().Add(-time.Minute), "no_action")},
 	}
 	if err := li.Investigate(context.Background(), Request{Title: "t", TriggerKey: "k"}); err != nil {
 		t.Fatalf("Investigate: %v", err)
