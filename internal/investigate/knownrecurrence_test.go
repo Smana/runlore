@@ -25,19 +25,15 @@ import (
 func TestSeedPromptShowsTheStandingAnswer(t *testing.T) {
 	req := Request{Title: "KubePodCrashLooping", Source: SourceAlert,
 		Workload: providers.Workload{Namespace: "apps", Name: "wet-collab-api"}}
-	prior := outcome.TriggerRecurrence{Count: 3, Last: time.Now().Add(-90 * time.Minute), Verdict: "action_required",
-		Conclusive: outcome.ConclusivePrior{
-			At:      time.Now().Add(-3 * time.Hour),
-			Verdict: "action_required",
-			Title:   "wet-collab-api CrashLoopBackOff from a broken DB down-migration to schema 94",
-		}}
+	prior := standing(3, time.Now().Add(-90*time.Minute), time.Now().Add(-3*time.Hour),
+		"action_required", "wet-collab-api CrashLoopBackOff from a broken DB down-migration to schema 94")
 
 	got := seedPrompt(req, seedContext{prior: prior})
 	for _, want := range []string{
 		"broken DB down-migration to schema 94", // the standing diagnosis
 		"action_required",                       // how actionable it was
 		"3h00m",                                 // how long ago it was reached
-		"4th",                                   // which occurrence this is (3 priors + this one, as the card counts them)
+		"occurrence #4",                         // 3 priors + this one, matching how the card counts them
 	} {
 		if !strings.Contains(got, want) {
 			t.Errorf("seed prompt missing %q, got:\n%s", want, got)
@@ -62,10 +58,12 @@ func TestSeedPromptShowsTheStandingAnswer(t *testing.T) {
 	}
 }
 
-// TestFmtAgeTiers: the seed asks the model to WEIGH how old a standing answer is, so
-// the age has to be readable at the distances that actually occur. Without a day
-// tier a three-week-old answer renders "504h00m" and the model has to divide by 24
-// to make the very judgement the design delegates to it.
+// TestFmtAgeTiers covers BOTH callers, which want different things from the same
+// helper. The standing-answer line asks the model to WEIGH an age, and without a day
+// tier three weeks renders "504h00m" — arithmetic the design delegates to the model.
+// The incident-start anchor exists so the model can size since_minutes windows to
+// cover the onset, so the day tier must keep the hours: a bare "1d" covering
+// 24h-47h59m would put that onset out of reach.
 func TestFmtAgeTiers(t *testing.T) {
 	cases := map[time.Duration]string{
 		20 * time.Second:              "<1m", // rounds to 0m
@@ -75,9 +73,10 @@ func TestFmtAgeTiers(t *testing.T) {
 		3 * time.Hour:                 "3h00m",
 		3*time.Hour + 7*time.Minute:   "3h07m",
 		23*time.Hour + 59*time.Minute: "23h59m",
-		24 * time.Hour:                "1d",
-		21 * 24 * time.Hour:           "21d",
-		180 * 24 * time.Hour:          "180d",
+		24 * time.Hour:                "1d00h",
+		30 * time.Hour:                "1d06h", // the incident-start anchor still needs the hours
+		21*24*time.Hour + 3*time.Hour: "21d03h",
+		180 * 24 * time.Hour:          "180d00h",
 	}
 	for d, want := range cases {
 		if got := fmtAge(d); got != want {
@@ -107,51 +106,43 @@ func TestSeedPromptOmitsTheBlockWithoutAStandingAnswer(t *testing.T) {
 	}
 }
 
-// TestStandingAnswerIsWithheldFromAContestedTrigger: a human 👎'd this diagnosis,
-// which is precisely what forces a fresh look. Handing the model the rejected cause
-// and telling it to restate it would launder the rejection into its opposite: the
-// restated finding dedups onto the same entry, and the curator records a
-// CONFIRMATION for it (curator.Curate → Confirmations.Confirm), which is 👎-recovery
-// evidence. That is the same rubber stamp BuildReinvestigator is denied history to
-// avoid; the serve path feeds the very same Confirm.
-func TestStandingAnswerIsWithheldFromAContestedTrigger(t *testing.T) {
-	prior := outcome.TriggerRecurrence{Count: 2, Last: time.Now().Add(-2 * time.Hour), Verdict: "action_required",
-		FeedbackDown: 1, // a human rejected this conclusion
-		Conclusive: outcome.ConclusivePrior{At: time.Now().Add(-2 * time.Hour),
-			Verdict: "action_required", Title: "broken DB down-migration to schema 94"}}
-	li := &LoopInvestigator{}
-	if got := li.replayableStandingAnswer(prior); got.Concluded() {
-		t.Fatalf("a contested diagnosis must not be replayed into the seed, got %+v", got.Conclusive)
-	}
-	// The trigger's own recurrence facts survive — only the answer is withheld, since
-	// "you have seen this before" is not the part a 👎 contests.
-	if got := li.replayableStandingAnswer(prior); got.Count != 2 {
-		t.Fatalf("withholding the answer must not erase the occurrence count, got %+v", got)
-	}
-}
-
-// TestStandingAnswerIsWithheldUnderAutoExecution: under actions.mode=auto, recall
-// and its near-miss lead are both withheld from the prompt (tryRecall's !IsAuto
-// gate) on the explicit reasoning that a poisoned entry must not shape "even the
-// prompt under auto". A prior conclusion is the same class of text — model prose
-// authored over untrusted tool output — so it sits behind the same gate. Framing
-// alone is what the codebase already judged insufficient here.
-func TestStandingAnswerIsWithheldUnderAutoExecution(t *testing.T) {
-	prior := outcome.TriggerRecurrence{Count: 2, Last: time.Now().Add(-2 * time.Hour), Verdict: "action_required",
-		Conclusive: outcome.ConclusivePrior{At: time.Now().Add(-2 * time.Hour),
-			Verdict: "action_required", Title: "broken DB down-migration to schema 94"}}
-	auto := &LoopInvestigator{Actions: action.New(config.ActionPolicy{Mode: config.ActionAuto})}
-	if got := auto.replayableStandingAnswer(prior); got.Concluded() {
-		t.Fatalf("the standing answer must not enter the prompt under auto, got %+v", got.Conclusive)
-	}
-	// …and it IS replayed on the default read-only path, where the same reasoning
-	// does not apply (nothing the prompt shapes can execute).
-	suggest := &LoopInvestigator{Actions: action.New(config.ActionPolicy{})}
-	if got := suggest.replayableStandingAnswer(prior); !got.Concluded() {
-		t.Fatalf("the standing answer must still be replayed when no action can execute, got %+v", got)
-	}
-	if got := (&LoopInvestigator{}).replayableStandingAnswer(prior); !got.Concluded() {
-		t.Fatalf("a nil action policy must not withhold the standing answer, got %+v", got)
+// TestStandingAnswerIsWithheldWhereReplayingItDoesHarm pins the two cases where the
+// model must NOT be shown its own prior conclusion:
+//
+//   - CONTESTED. A 👎 is what forces the fresh look. Handing back the rejected cause
+//     and telling the model to restate it launders the rejection into its opposite —
+//     the restated finding dedups onto the same entry and curator.Curate records a
+//     CONFIRMATION, which counts as 👎-recovery evidence.
+//   - AUTO. Recall and its near-miss lead are both withheld from the prompt under
+//     actions.mode=auto (tryRecall's !IsAuto gate) so a poisoned entry shapes "not
+//     even the prompt". A prior conclusion is the same class of text, so it sits
+//     behind the same gate; framing alone is what that gate judged insufficient.
+func TestStandingAnswerIsWithheldWhereReplayingItDoesHarm(t *testing.T) {
+	answered := time.Now().Add(-2 * time.Hour)
+	prior := standing(2, answered, answered, "action_required", "broken DB down-migration to schema 94")
+	for _, c := range []struct {
+		name       string
+		li         *LoopInvestigator
+		prior      outcome.TriggerRecurrence
+		wantReplay bool
+	}{
+		{"a contested diagnosis is withheld", &LoopInvestigator{}, contested(prior), false},
+		{"auto execution withholds it", &LoopInvestigator{Actions: action.New(config.ActionPolicy{Mode: config.ActionAuto})}, prior, false},
+		{"the read-only default replays it — nothing the prompt shapes can execute",
+			&LoopInvestigator{Actions: action.New(config.ActionPolicy{})}, prior, true},
+		{"a nil action policy must not withhold it", &LoopInvestigator{}, prior, true},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			got := c.li.replayableStandingAnswer(c.prior)
+			if got.Concluded() != c.wantReplay {
+				t.Fatalf("replayed = %v, want %v (conclusive=%+v)", got.Concluded(), c.wantReplay, got.Conclusive)
+			}
+			// Only the ANSWER is ever withheld: "you have seen this before" is not the
+			// part a 👎 contests, and the count still shapes the seed's occurrence line.
+			if got.Count != 2 {
+				t.Fatalf("withholding must not erase the occurrence count, got %+v", got)
+			}
+		})
 	}
 }
 

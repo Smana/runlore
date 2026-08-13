@@ -24,8 +24,28 @@ func (f fakeRecurrenceStats) Recurrence(string) outcome.TriggerRecurrence { retu
 // always move together there, and building them by hand invites a snapshot that no
 // ledger could ever emit.
 func concluded(count int, at time.Time, verdict string) outcome.TriggerRecurrence {
-	return outcome.TriggerRecurrence{Count: count, Last: at, Verdict: verdict,
-		Conclusive: outcome.ConclusivePrior{At: at, Verdict: verdict}}
+	return standing(count, at, at, verdict, "")
+}
+
+// contested marks a snapshot as carrying one standing 👎.
+func contested(r outcome.TriggerRecurrence) outcome.TriggerRecurrence {
+	r.FeedbackDown = 1
+	return r
+}
+
+// standing builds the snapshot for a trigger whose newest open is NOT its newest
+// conclusive one — an answer from answeredAt with a later, non-conclusive run on top
+// at last. The shape #471 turns on, and the one every hand-built literal gets wrong.
+func standing(count int, last, answeredAt time.Time, verdict, title string) outcome.TriggerRecurrence {
+	r := outcome.TriggerRecurrence{Count: count, Last: last,
+		Conclusive: outcome.ConclusivePrior{At: answeredAt, Verdict: verdict, Title: title}}
+	// The newest open's verdict is the conclusive one only when they are the same open.
+	if last.Equal(answeredAt) {
+		r.Verdict = verdict
+	} else {
+		r.Verdict = string(providers.VerdictInconclusive)
+	}
+	return r
 }
 
 // TestRecurrenceGateDecisions pins the full suppression matrix, asserting the
@@ -39,8 +59,7 @@ func TestRecurrenceGateDecisions(t *testing.T) {
 	req := Request{Title: "t", TriggerKey: "k"}
 	// An inconclusive run 5m ago with the action_required answer it failed to restate
 	// still standing behind it, from 2h ago.
-	mislabelled := outcome.TriggerRecurrence{Count: 2, Last: recent, Verdict: "inconclusive",
-		Conclusive: outcome.ConclusivePrior{At: stale, Verdict: "action_required", Title: "broken down-migration"}}
+	mislabelled := standing(2, recent, stale, "action_required", "broken down-migration")
 	on := &RecurrenceGate{Cooldown: time.Hour}
 	cases := []struct {
 		name  string
@@ -68,8 +87,7 @@ func TestRecurrenceGateDecisions(t *testing.T) {
 		{"inconclusive prior with an answer standing behind it — suppress; the mislabel costs one run",
 			on, req, mislabelled, recurrenceSuppressed},
 		{"a standing 👎 breaks the cooldown — the human re-arms investigation",
-			on, req, outcome.TriggerRecurrence{Count: 1, Last: recent, Verdict: "no_action",
-				Conclusive: outcome.ConclusivePrior{At: recent, Verdict: "no_action"}, FeedbackDown: 1}, recurrenceContested},
+			on, req, contested(concluded(1, recent, "no_action")), recurrenceContested},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {

@@ -17,26 +17,21 @@ import (
 // question for a human, or a data gap all account for the verdict; none of the
 // three means the payload contradicts itself, and the card ships empty (#471).
 func TestUnaccountedInconclusive(t *testing.T) {
-	inconclusive := func(mut func(*providers.Investigation)) providers.Investigation {
-		inv := providers.Investigation{Title: "t", Verdict: providers.VerdictInconclusive}
-		mut(&inv)
-		return inv
-	}
+	const inconclusive = providers.VerdictInconclusive
 	cases := []struct {
 		name string
 		inv  providers.Investigation
 		want bool
 	}{
-		{"inconclusive with nothing to show for it", inconclusive(func(*providers.Investigation) {}), true},
-		{"a data gap accounts for it", inconclusive(func(i *providers.Investigation) {
-			i.DataGaps = []string{"pod_logs: RBAC denied"}
-		}), false},
-		{"an open question accounts for it", inconclusive(func(i *providers.Investigation) {
-			i.Unresolved = []string{"was the migration reverted by hand?"}
-		}), false},
-		{"a named cause accounts for it", inconclusive(func(i *providers.Investigation) {
-			i.RootCauses = []providers.Hypothesis{{Summary: "broken down-migration"}}
-		}), false},
+		{"inconclusive with nothing to show for it",
+			providers.Investigation{Title: "t", Verdict: inconclusive}, true},
+		{"a data gap accounts for it",
+			providers.Investigation{Title: "t", Verdict: inconclusive, DataGaps: []string{"pod_logs: RBAC denied"}}, false},
+		{"an open question accounts for it",
+			providers.Investigation{Title: "t", Verdict: inconclusive, Unresolved: []string{"reverted by hand?"}}, false},
+		{"a named cause accounts for it",
+			providers.Investigation{Title: "t", Verdict: inconclusive,
+				RootCauses: []providers.Hypothesis{{Summary: "broken down-migration"}}}, false},
 		{"a conclusive verdict is never flagged, however thin",
 			providers.Investigation{Title: "t", Verdict: providers.VerdictActionRequired}, false},
 		{"an omitted verdict is a parse concern, not this one",

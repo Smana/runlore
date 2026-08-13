@@ -229,11 +229,17 @@ type triggerAggJSON struct {
 	CuratedURL string    `json:"curated_url,omitempty"`
 	Entry      string    `json:"entry,omitempty"`
 	Verdict    string    `json:"verdict,omitempty"`
-	// Conclusive mirrors triggerAgg.conclusive. Absent from a checkpoint written
-	// before #471; a replay then reconstructs it from the retained tail only, which
-	// degrades to today's behaviour (no standing answer ⇒ no suppression) rather
-	// than inventing one.
-	Conclusive *ConclusivePrior `json:"conclusive,omitempty"`
+	// Conclusive mirrors triggerAgg.conclusive. omitzero (not omitempty, which does
+	// not apply to structs) keeps it out of the file when the trigger has never
+	// concluded. Absent from a checkpoint written before #471; a replay then
+	// reconstructs it from the retained tail only, which degrades to today's
+	// behaviour (no standing answer ⇒ no suppression) rather than inventing one.
+	//
+	// The classification is made at fold time, so a checkpoint freezes the definition
+	// of "conclusive" in force when it was written. That is recoverable rather than
+	// lossy: the raw verdict travels with it, so Concluded re-checks it on every read
+	// and a future migration can re-derive whatever it needs.
+	Conclusive ConclusivePrior `json:"conclusive,omitzero"`
 }
 
 type feedbackVoteJSON struct {
@@ -444,11 +450,8 @@ func (l *Ledger) seedCheckpointLocked(cd *checkpointData) {
 		l.open[fp] = ev
 	}
 	for k, v := range cd.ByTrigger {
-		a := triggerAgg{count: v.Count, last: v.Last, curatedURL: v.CuratedURL, entry: v.Entry, verdict: v.Verdict}
-		if v.Conclusive != nil {
-			a.conclusive = *v.Conclusive
-		}
-		l.byTrigger[k] = a
+		l.byTrigger[k] = triggerAgg{count: v.Count, last: v.Last, curatedURL: v.CuratedURL,
+			entry: v.Entry, verdict: v.Verdict, conclusive: v.Conclusive}
 	}
 	for k, v := range cd.Votes {
 		l.votes[k] = feedbackVote{rating: v.Rating, entry: v.Entry}
@@ -507,12 +510,8 @@ func (l *Ledger) snapshotCheckpointLocked() *checkpointData {
 	if len(l.byTrigger) > 0 {
 		cd.ByTrigger = make(map[string]triggerAggJSON, len(l.byTrigger))
 		for k, v := range l.byTrigger {
-			j := triggerAggJSON{Count: v.count, Last: v.last, CuratedURL: v.curatedURL, Entry: v.entry, Verdict: v.verdict}
-			if v.conclusive.Verdict != "" {
-				c := v.conclusive
-				j.Conclusive = &c
-			}
-			cd.ByTrigger[k] = j
+			cd.ByTrigger[k] = triggerAggJSON{Count: v.count, Last: v.last, CuratedURL: v.curatedURL,
+				Entry: v.entry, Verdict: v.verdict, Conclusive: v.conclusive}
 		}
 	}
 	if len(l.votes) > 0 {
@@ -850,10 +849,10 @@ func (l *Ledger) Occurrences(triggerKey string) (int, time.Time, string) {
 	return r.Count, r.Last, r.CuratedURL
 }
 
-// TriggerRecurrence is the per-TriggerKey snapshot the pre-investigation
-// suppression gate reads: how many investigations this trigger has had, when the
-// last one was and what it concluded, its KB link, and how many humans currently
-// contest that conclusion.
+// TriggerRecurrence is the per-TriggerKey snapshot read once before each
+// investigation: how many investigations this trigger has had, when the last one was
+// and what it concluded, its KB link, how many humans currently contest that
+// conclusion, and — separately from the latest run — the standing answer, if any.
 type TriggerRecurrence struct {
 	Count        int
 	Last         time.Time
@@ -879,17 +878,25 @@ type ConclusivePrior struct {
 }
 
 // Contested reports whether the trigger carries standing 👎 feedback — the ONE
-// definition of "a human contests this diagnosis" shared by every suppression
-// layer that must yield to it (the recurrence gate and the coalescer's cooldown,
-// #288). Layers consulting different notions of contested-ness is exactly the
-// divergence that issue was about; add nuance here, not at the call sites.
+// definition of "a human contests this diagnosis" shared by every layer that must
+// yield to it (#288): investigation suppression, the coalescer's cooldown, and
+// whether a prior conclusion may be replayed into the prompt. Layers consulting
+// different notions of contested-ness is exactly the divergence that issue was
+// about; add nuance here, not at the call sites.
 func (r TriggerRecurrence) Contested() bool { return r.FeedbackDown > 0 }
 
 // Concluded reports whether an ANSWER stands for this trigger — some prior
 // investigation reached a conclusive verdict, whether or not the most recent one
 // did. The suppression gate's eligibility test: without this, an answer is only
 // ever as durable as the last run that happened to land on it.
-func (r TriggerRecurrence) Concluded() bool { return r.Conclusive.Verdict != "" }
+//
+// It re-checks the stored verdict through the same predicate that folded it rather
+// than trusting a non-empty string, so a checkpoint written under an older
+// definition of "conclusive" (see triggerAggJSON.Conclusive) cannot make a verdict
+// stand that today's definition rejects.
+func (r TriggerRecurrence) Concluded() bool {
+	return providers.Verdict(r.Conclusive.Verdict).Conclusive()
+}
 
 // Recurrence returns the trigger's recurrence snapshot. FeedbackDown counts the
 // votes map's current "down" entries for the key — O(live votes), which stays
