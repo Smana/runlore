@@ -333,13 +333,23 @@ func (li *LoopInvestigator) Investigate(ctx context.Context, req Request) error 
 	decision := li.Recurrence.decide(req, prior, time.Now())
 	switch {
 	case decision.suppressed():
-		result = "recurrence_suppressed"
+		// The decision value IS the metric label (documented as
+		// investigations_completed_total{result="recurrence_suppressed"}) — assign it
+		// rather than re-spelling the string, so the two cannot drift apart.
+		result = string(decision)
+		// The newest open's KB link is EMPTY in exactly the #471 case (a mislabelled
+		// run files no PR), so fall back to the link of the answer actually being stood
+		// on — otherwise the operator asking "which answer?" gets a blank.
+		prevURL := prior.CuratedURL
+		if prevURL == "" {
+			prevURL = prior.Conclusive.CuratedURL
+		}
 		li.Log.Info("recurrence cooldown: suppressing re-investigation",
 			"title", req.Title, "trigger_key", req.TriggerKey,
 			"occurrences", prior.Count, "last_investigated", prior.Last,
 			"verdict", prior.Verdict, "standing_answer", prior.Conclusive.Title,
 			"standing_verdict", prior.Conclusive.Verdict, "answered_at", prior.Conclusive.At,
-			"prev_url", prior.CuratedURL)
+			"prev_url", prevURL)
 		return nil
 	case decision == recurrenceNoAnswer:
 		// The one bypass worth saying out loud: the trigger fired again inside its
@@ -398,7 +408,8 @@ func (li *LoopInvestigator) Investigate(ctx context.Context, req Request) error 
 	// egress redaction covers the untrusted text they carry too: the near-miss lead's
 	// catalog prose and the known-recurrence block's quoted prior conclusion.
 	messages := []providers.Message{{Role: "user",
-		Content: redact.Secrets(seedPrompt(req, seedContext{nearMiss: nearMiss, prior: prior}))}}
+		Content: redact.Secrets(seedPrompt(req, seedContext{
+			nearMiss: nearMiss, prior: li.replayableStandingAnswer(prior)}))}}
 	maxSteps := li.MaxSteps
 	if maxSteps <= 0 {
 		// Enough headroom to query every signal source (gitops/cloud/logs/metrics/
@@ -1328,10 +1339,14 @@ func seedPrompt(req Request, sc seedContext) string {
 	//
 	// The age is stated rather than filtered on: a three-hour-old answer and a
 	// three-week-old one deserve different weight, and that is a judgement the model
-	// makes with the evidence in front of it, not one a threshold here can make. The
-	// counterweight matters as much as the block: an occurrence that got this far is
-	// past its cooldown, so it is a deliberate FRESH look — the prior is framed as
-	// something to confirm, never as settled fact.
+	// makes with the evidence in front of it, not one a threshold here can make.
+	//
+	// Which puts the whole weight of not-anchoring on the framing, so it has to hold
+	// on its own. Do NOT reason from "anything reaching here is past its cooldown":
+	// recurrence_cooldown defaults to OFF, so this block routinely greets an
+	// Alertmanager repeat that arrived seconds after the last answer. The prior is
+	// therefore framed as something to confirm against live state, never as settled
+	// fact, in every case rather than only the stale ones.
 	//
 	// The quoted title is a prior investigation's own words, and those were shaped by
 	// tool output that is untrusted by definition. Replaying it into a fresh prompt
@@ -1379,12 +1394,20 @@ func kbSectionOrNone(s string) string {
 	return "(none recorded)"
 }
 
-// fmtAge renders a duration as a compact human age ("42m", "3h07m"); anything
-// under a minute (including a negative age from clock skew) reads "<1m".
+// fmtAge renders a duration as a compact human age ("42m", "3h07m", "21d").
+// Rounding to the minute happens FIRST, so "<1m" covers what rounds to zero —
+// under 30s, and any negative age from clock skew.
+// The day tier exists because the model is asked to WEIGH an age (how much trust a
+// standing answer still deserves), and "504h00m" makes it do arithmetic to find out
+// that means three weeks. Days are rendered alone: at that distance the hours are
+// noise, and the reader wants the magnitude.
 func fmtAge(d time.Duration) string {
 	d = d.Round(time.Minute)
 	if d < time.Minute {
 		return "<1m"
+	}
+	if days := d / (24 * time.Hour); days > 0 {
+		return fmt.Sprintf("%dd", days)
 	}
 	if h := d / time.Hour; h > 0 {
 		return fmt.Sprintf("%dh%02dm", h, (d%time.Hour)/time.Minute)

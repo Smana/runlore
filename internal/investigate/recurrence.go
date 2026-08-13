@@ -75,6 +75,32 @@ func (li *LoopInvestigator) priorForTrigger(triggerKey string) outcome.TriggerRe
 	return li.TriggerHistory.Recurrence(triggerKey)
 }
 
+// replayableStandingAnswer strips the standing answer out of prior when SHOWING it
+// to the model would do harm, leaving the trigger's other recurrence facts intact —
+// "you have seen this before" is safe in both cases below; "and here is what you
+// concluded" is not. Suppression is a separate question and reads the unfiltered
+// snapshot: withholding an answer from the prompt says nothing about whether the
+// investigation was worth running.
+//
+//   - CONTESTED. A 👎 is what forces the fresh look in the first place. Handing back
+//     the rejected cause and asking the model to restate it would launder the
+//     rejection into its opposite: the restated finding dedups onto the same entry
+//     and the curator records a CONFIRMATION, which counts as 👎-recovery evidence.
+//     That is the same rubber stamp BuildReinvestigator is denied history to avoid —
+//     and the serve path feeds the very same Confirm.
+//   - AUTO EXECUTION. Instant recall and its near-miss lead are both withheld under
+//     actions.mode=auto (see tryRecall) so that a poisoned catalog entry can shape
+//     "not even the prompt under auto". A prior conclusion is the same class of text:
+//     model prose authored over tool output an attacker may have influenced. Careful
+//     framing is exactly what that gate already judged insufficient here, so this
+//     block earns no exemption from it.
+func (li *LoopInvestigator) replayableStandingAnswer(prior outcome.TriggerRecurrence) outcome.TriggerRecurrence {
+	if prior.Contested() || (li.Actions != nil && li.Actions.IsAuto()) {
+		prior.Conclusive = outcome.ConclusivePrior{}
+	}
+	return prior
+}
+
 // recurrenceDecision is WHY the gate did or did not suppress an occurrence. The
 // gate's failure surface is "suppression silently stops happening" — with a bare
 // boolean, a gate that never fires again looks exactly like a quiet trigger, and

@@ -148,7 +148,9 @@ config:
       # debounce: 30s           # flush batch quiet for this long
       # max_wait: 2m            # force flush even if alerts are STILL ARRIVING; a batch flushes on
       #                         #   whichever of debounce/max_wait hits first, so raising this alone
-      #                         #   batches nothing — a quiet batch already left after `debounce`
+      #                         #   batches nothing — a quiet batch already left after `debounce`.
+      #                         #   Conversely, raising debounce ABOVE this does nothing either: keep
+      #                         #   max_wait > debounce or this cuts the wider batch short
       # max_batch: 50           # flush when batch reaches this size
       # cooldown: 10m           # suppress re-alerts for a group after a flush (a new critical
       #                         #   alertname or a standing 👎 on the trigger bypasses suppression)

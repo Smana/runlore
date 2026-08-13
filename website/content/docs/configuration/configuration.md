@@ -120,11 +120,16 @@ incident webhook. Known keys: `alertmanager`, `gitops`, `pagerduty`, `custom`.
   1. **`correlation_labels`.** Without them the key is the Alertmanager `groupKey`, and a typical
      `group_by` includes `alertname` — so siblings never share a key however long you wait. Group by
      what the alerts have in common instead (e.g. `[node]`, or `[namespace, pod]`).
-  2. **A `debounce` wider than the gap between them.** A batch flushes when it has been quiet for
-     `debounce` **or** older than `max_wait`, whichever comes first. With the default `debounce: 30s`,
-     a lone alert flushes 30s after it arrives — so **raising `max_wait` on its own cannot batch
-     anything**, and siblings 2 minutes apart need a `debounce` above 2m to land in one batch. The
-     cost is paid in latency on every alert, so widen it deliberately.
+  2. **A `debounce` wider than the gap between them — and a `max_wait` above that.** A batch flushes
+     when it has been quiet for `debounce` **or** older than `max_wait`, whichever comes first. With
+     the default `debounce: 30s` a lone alert flushes ~30s after it arrives, so **raising `max_wait`
+     on its own cannot batch anything**. Siblings 2 minutes apart need `debounce` above 2m — and then
+     `max_wait` must be raised past it too, or the default `max_wait: 2m` flushes the batch before the
+     wider `debounce` ever applies. Both knobs move together, and the latency is paid on **every**
+     alert, so widen them deliberately.
+
+  Flush decisions are made on a sweep tick of `debounce / 2`, so both deadlines are approximate — a
+  batch flushes up to half a `debounce` after the deadline it crossed.
 - `rate_limit` — `max_per_window` (**default 30**; an explicit **0 = unlimited**), `window` (default **1h**),
   `max_requeues`.
 - `recurrence_cooldown` — **opt-in (default 0 = off)** per-trigger suppression: skip re-investigating a

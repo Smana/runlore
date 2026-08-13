@@ -10,6 +10,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/Smana/runlore/internal/action"
+	"github.com/Smana/runlore/internal/config"
 	"github.com/Smana/runlore/internal/outcome"
 	"github.com/Smana/runlore/internal/providers"
 )
@@ -60,6 +62,30 @@ func TestSeedPromptShowsTheStandingAnswer(t *testing.T) {
 	}
 }
 
+// TestFmtAgeTiers: the seed asks the model to WEIGH how old a standing answer is, so
+// the age has to be readable at the distances that actually occur. Without a day
+// tier a three-week-old answer renders "504h00m" and the model has to divide by 24
+// to make the very judgement the design delegates to it.
+func TestFmtAgeTiers(t *testing.T) {
+	cases := map[time.Duration]string{
+		20 * time.Second:              "<1m", // rounds to 0m
+		30 * time.Second:              "1m",  // rounds UP to a minute before the <1m test
+		-5 * time.Minute:              "<1m", // clock skew
+		42 * time.Minute:              "42m",
+		3 * time.Hour:                 "3h00m",
+		3*time.Hour + 7*time.Minute:   "3h07m",
+		23*time.Hour + 59*time.Minute: "23h59m",
+		24 * time.Hour:                "1d",
+		21 * 24 * time.Hour:           "21d",
+		180 * 24 * time.Hour:          "180d",
+	}
+	for d, want := range cases {
+		if got := fmtAge(d); got != want {
+			t.Errorf("fmtAge(%s) = %q, want %q", d, got, want)
+		}
+	}
+}
+
 // TestSeedPromptOmitsTheBlockWithoutAStandingAnswer: no answer, no block. A first
 // sighting and a trigger that has only ever come back inconclusive must both get the
 // plain seed — inventing a "previously: nothing" line would be noise, and quoting an
@@ -78,6 +104,54 @@ func TestSeedPromptOmitsTheBlockWithoutAStandingAnswer(t *testing.T) {
 				t.Errorf("seed prompt volunteered a standing answer it does not have, got:\n%s", got)
 			}
 		})
+	}
+}
+
+// TestStandingAnswerIsWithheldFromAContestedTrigger: a human 👎'd this diagnosis,
+// which is precisely what forces a fresh look. Handing the model the rejected cause
+// and telling it to restate it would launder the rejection into its opposite: the
+// restated finding dedups onto the same entry, and the curator records a
+// CONFIRMATION for it (curator.Curate → Confirmations.Confirm), which is 👎-recovery
+// evidence. That is the same rubber stamp BuildReinvestigator is denied history to
+// avoid; the serve path feeds the very same Confirm.
+func TestStandingAnswerIsWithheldFromAContestedTrigger(t *testing.T) {
+	prior := outcome.TriggerRecurrence{Count: 2, Last: time.Now().Add(-2 * time.Hour), Verdict: "action_required",
+		FeedbackDown: 1, // a human rejected this conclusion
+		Conclusive: outcome.ConclusivePrior{At: time.Now().Add(-2 * time.Hour),
+			Verdict: "action_required", Title: "broken DB down-migration to schema 94"}}
+	li := &LoopInvestigator{}
+	if got := li.replayableStandingAnswer(prior); got.Concluded() {
+		t.Fatalf("a contested diagnosis must not be replayed into the seed, got %+v", got.Conclusive)
+	}
+	// The trigger's own recurrence facts survive — only the answer is withheld, since
+	// "you have seen this before" is not the part a 👎 contests.
+	if got := li.replayableStandingAnswer(prior); got.Count != 2 {
+		t.Fatalf("withholding the answer must not erase the occurrence count, got %+v", got)
+	}
+}
+
+// TestStandingAnswerIsWithheldUnderAutoExecution: under actions.mode=auto, recall
+// and its near-miss lead are both withheld from the prompt (tryRecall's !IsAuto
+// gate) on the explicit reasoning that a poisoned entry must not shape "even the
+// prompt under auto". A prior conclusion is the same class of text — model prose
+// authored over untrusted tool output — so it sits behind the same gate. Framing
+// alone is what the codebase already judged insufficient here.
+func TestStandingAnswerIsWithheldUnderAutoExecution(t *testing.T) {
+	prior := outcome.TriggerRecurrence{Count: 2, Last: time.Now().Add(-2 * time.Hour), Verdict: "action_required",
+		Conclusive: outcome.ConclusivePrior{At: time.Now().Add(-2 * time.Hour),
+			Verdict: "action_required", Title: "broken DB down-migration to schema 94"}}
+	auto := &LoopInvestigator{Actions: action.New(config.ActionPolicy{Mode: config.ActionAuto})}
+	if got := auto.replayableStandingAnswer(prior); got.Concluded() {
+		t.Fatalf("the standing answer must not enter the prompt under auto, got %+v", got.Conclusive)
+	}
+	// …and it IS replayed on the default read-only path, where the same reasoning
+	// does not apply (nothing the prompt shapes can execute).
+	suggest := &LoopInvestigator{Actions: action.New(config.ActionPolicy{})}
+	if got := suggest.replayableStandingAnswer(prior); !got.Concluded() {
+		t.Fatalf("the standing answer must still be replayed when no action can execute, got %+v", got)
+	}
+	if got := (&LoopInvestigator{}).replayableStandingAnswer(prior); !got.Concluded() {
+		t.Fatalf("a nil action policy must not withhold the standing answer, got %+v", got)
 	}
 }
 
