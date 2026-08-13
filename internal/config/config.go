@@ -414,10 +414,12 @@ type Investigation struct {
 	ToolTimeout               Duration  `yaml:"tool_timeout"`                 // per-TOOL-call timeout so one hung tool can't eat the budget; 0 ⇒ default (60s) at construction
 
 	// RecurrenceCooldown (opt-in, 0 = off) suppresses re-investigating a trigger
-	// whose previous investigation completed less than this long ago, concluded
-	// (verdict ≠ inconclusive), and has no standing 👎 feedback. Without it a
-	// still-firing alert re-investigates on every Alertmanager repeat_interval and
-	// a persistently-failing GitOps resource on every informer resync (~10m).
+	// whose previous investigation completed less than this long ago, provided some
+	// prior investigation of it reached a conclusion (a verdict other than
+	// inconclusive — not necessarily the most recent one) and no 👎 feedback stands
+	// against it. Without it a still-firing alert re-investigates on every
+	// Alertmanager repeat_interval and a persistently-failing GitOps resource on
+	// every informer resync (~10m).
 	// Requires outcome.ledger_path (the gate reads the ledger's trigger index).
 	RecurrenceCooldown Duration `yaml:"recurrence_cooldown"`
 

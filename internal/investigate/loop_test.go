@@ -1520,7 +1520,7 @@ func TestBudgetNudgeForcesSubmitFindings(t *testing.T) {
 	// unforced and step 1 — grown by the assistant turn and the tool result — trips
 	// the nudge.
 	req := Request{Title: "budget-forcing"}
-	seed := []providers.Message{{Role: "user", Content: redact.Secrets(seedPrompt(req, nil))}}
+	seed := []providers.Message{{Role: "user", Content: redact.Secrets(seedPrompt(req, seedContext{}))}}
 	li.MaxTokensPerInvestigation = estimateTokens(li.system(), seed, []providers.ToolSpec{submitFindingsSpec()})
 	if err := li.Investigate(context.Background(), req); err != nil {
 		t.Fatalf("Investigate: %v", err)
@@ -1741,7 +1741,7 @@ func TestSeedPrompt(t *testing.T) {
 			Severity:    "critical",
 			Environment: "prod",
 		}
-		got := seedPrompt(req, nil)
+		got := seedPrompt(req, seedContext{})
 		if !strings.Contains(got, "Severity: critical.") {
 			t.Errorf("seed prompt missing severity, got %q", got)
 		}
@@ -1751,7 +1751,7 @@ func TestSeedPrompt(t *testing.T) {
 	})
 	t.Run("omits severity and environment when empty", func(t *testing.T) {
 		req := Request{Title: "PodCrashLooping", Source: SourceAlert}
-		got := seedPrompt(req, nil)
+		got := seedPrompt(req, seedContext{})
 		if strings.Contains(got, "Severity:") {
 			t.Errorf("seed prompt should omit empty severity, got %q", got)
 		}
@@ -1761,7 +1761,7 @@ func TestSeedPrompt(t *testing.T) {
 	})
 	t.Run("anchors the incident start time so the model can size tool windows", func(t *testing.T) {
 		at := time.Now().Add(-42 * time.Minute)
-		got := seedPrompt(Request{Title: "PodCrashLooping", Source: SourceAlert, At: at}, nil)
+		got := seedPrompt(Request{Title: "PodCrashLooping", Source: SourceAlert, At: at}, seedContext{})
 		if !strings.Contains(got, "Incident started: "+at.UTC().Format(time.RFC3339)) {
 			t.Errorf("seed prompt missing incident start time, got %q", got)
 		}
@@ -1773,7 +1773,7 @@ func TestSeedPrompt(t *testing.T) {
 		}
 	})
 	t.Run("omits the start line when At is zero", func(t *testing.T) {
-		got := seedPrompt(Request{Title: "X", Source: SourceAlert}, nil)
+		got := seedPrompt(Request{Title: "X", Source: SourceAlert}, seedContext{})
 		if strings.Contains(got, "Incident started:") {
 			t.Errorf("seed prompt should omit a zero start time, got %q", got)
 		}
@@ -1793,7 +1793,7 @@ func TestSeedPrompt(t *testing.T) {
 			},
 			Message: "already surfaced as the message",
 		}
-		got := seedPrompt(req, nil)
+		got := seedPrompt(req, seedContext{})
 		if !strings.Contains(got, `container="app"`) || !strings.Contains(got, `pod="web-abc123"`) {
 			t.Errorf("seed prompt missing alert labels, got %q", got)
 		}
@@ -1807,7 +1807,7 @@ func TestSeedPrompt(t *testing.T) {
 	})
 	t.Run("clips oversized label values", func(t *testing.T) {
 		long := strings.Repeat("x", 2000)
-		got := seedPrompt(Request{Title: "X", Source: SourceAlert, Labels: map[string]string{"big": long}}, nil)
+		got := seedPrompt(Request{Title: "X", Source: SourceAlert, Labels: map[string]string{"big": long}}, seedContext{})
 		if strings.Contains(got, long) {
 			t.Errorf("seed prompt should clip a 2000-char label value")
 		}
@@ -1825,7 +1825,7 @@ func TestSeedPrompt(t *testing.T) {
 			Workload:           providers.Workload{Namespace: "apps", Name: "web"},
 			CoalescedWorkloads: []string{"apps/worker", "data/postgres"},
 		}
-		got := seedPrompt(req, nil)
+		got := seedPrompt(req, seedContext{})
 		if !strings.Contains(got, "apps/web") {
 			t.Errorf("seed must still name the representative workload, got %q", got)
 		}
@@ -1838,7 +1838,7 @@ func TestSeedPrompt(t *testing.T) {
 	})
 	t.Run("omits the coalesced block for a single alert", func(t *testing.T) {
 		// A non-coalesced alert carries no CoalescedWorkloads, so no batch block appears.
-		got := seedPrompt(Request{Title: "X", Source: SourceAlert, Workload: providers.Workload{Namespace: "apps", Name: "web"}}, nil)
+		got := seedPrompt(Request{Title: "X", Source: SourceAlert, Workload: providers.Workload{Namespace: "apps", Name: "web"}}, seedContext{})
 		if strings.Contains(got, "coalesced batch") {
 			t.Errorf("single alert should not emit a coalesced-batch block, got %q", got)
 		}

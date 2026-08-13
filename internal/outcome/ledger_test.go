@@ -1303,6 +1303,49 @@ func TestRecurrenceVerdictSurvivesReplayAndCheckpoint(t *testing.T) {
 	}
 }
 
+// TestRecurrenceConclusivePriorSurvivesAnInconclusiveRun: the newest CONCLUSIVE
+// open is folded SEPARATELY from the newest open, so one inconclusive run cannot
+// erase the answer standing behind it (#471). Both must survive a plain replay and
+// a compaction, since the suppression gate reads them on every occurrence.
+func TestRecurrenceConclusivePriorSurvivesAnInconclusiveRun(t *testing.T) {
+	p := filepath.Join(t.TempDir(), "o.jsonl")
+	l, _ := New(p)
+	t0 := time.Unix(43000, 0)
+	_ = l.Open(Event{Fingerprint: "f1", Kind: "fresh", TriggerKey: "k", Title: "broken down-migration to schema 94",
+		CuratedURL: "https://kb/1", Verdict: "action_required", At: t0})
+	_ = l.Open(Event{Fingerprint: "f2", Kind: "fresh", TriggerKey: "k", Title: "pre-existing, not a new incident",
+		Verdict: "inconclusive", At: t0.Add(time.Hour)})
+	assert := func(what string, r TriggerRecurrence) {
+		t.Helper()
+		// The newest open is still the inconclusive one — that fold is untouched.
+		if r.Count != 2 || !r.Last.Equal(t0.Add(time.Hour)) || r.Verdict != "inconclusive" {
+			t.Fatalf("%s: newest open = %+v, want count=2 last=+1h verdict=inconclusive", what, r)
+		}
+		// …and the conclusive answer behind it still stands, with its own facts.
+		if !r.Concluded() || r.Conclusive.Verdict != "action_required" || !r.Conclusive.At.Equal(t0) ||
+			r.Conclusive.Title != "broken down-migration to schema 94" || r.Conclusive.CuratedURL != "https://kb/1" {
+			t.Fatalf("%s: conclusive prior = %+v, want the +0h action_required open", what, r.Conclusive)
+		}
+	}
+	assert("live", l.Recurrence("k"))
+	l2, _ := New(p) // plain replay
+	assert("replayed", l2.Recurrence("k"))
+	c, _ := NewWithMaxEvents(p, 1) // compaction absorbs both opens into a checkpoint
+	assert("checkpointed", c.Recurrence("k"))
+
+	// A trigger that has ONLY ever come back inconclusive has no answer to stand on.
+	_ = l.Open(Event{Fingerprint: "f3", Kind: "fresh", TriggerKey: "never", Verdict: "inconclusive", At: t0})
+	if r := l.Recurrence("never"); r.Concluded() || r.Conclusive.Verdict != "" || !r.Conclusive.At.IsZero() {
+		t.Fatalf("never-concluded trigger = %+v, want an empty conclusive prior", r.Conclusive)
+	}
+	// An out-of-order open (an overlapping investigation completing late) never
+	// rewinds the conclusive prior to an older answer.
+	_ = l.Open(Event{Fingerprint: "f4", Kind: "fresh", TriggerKey: "k", Title: "older", Verdict: "no_action", At: t0.Add(-time.Hour)})
+	if r := l.Recurrence("k"); r.Conclusive.Verdict != "action_required" || !r.Conclusive.At.Equal(t0) {
+		t.Fatalf("a late older open rewound the conclusive prior: %+v", r.Conclusive)
+	}
+}
+
 // TestContestedTriggersGroupsStandingDowns pins the grouping semantics: one
 // entry per trigger with at least one STANDING 👎 (per-user latest-wins, so a
 // moved vote no longer counts), joined with the trigger's newest-open KB link —

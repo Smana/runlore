@@ -637,12 +637,30 @@ trust in it and overturn it.
 The same per-trigger index also powers the **recurrence cooldown**
 (`investigation.recurrence_cooldown`, opt-in): a trigger the agent conclusively
 answered moments ago is not re-investigated — no model call, no duplicate
-notification — until the cooldown lapses. The escape hatches are human-deferential
-by design: an `inconclusive` prior never suppresses (there is no answer worth
-repeating), and a standing 👎 on the trigger re-arms investigation immediately. So
-feedback does two jobs: it weighs *recalled knowledge* (the decay above) and it
-governs *when the agent may repeat itself* — both steered by the same single
-human 👍/👎 signal.
+notification — until the cooldown lapses. The index tracks two separate facts about
+a trigger, because they answer different questions: **when did we last look** (the
+newest investigation, whatever it concluded — the cooldown lapses from there) and
+**does an answer stand** (the newest investigation that actually *concluded*, which
+need not be the newest one). Keeping them apart is what stops one run that mislabels
+a known recurrence as `inconclusive` from erasing the answer behind it and re-arming
+the full cost of every later firing. The escape hatches are human-deferential by
+design: a trigger that has **never** concluded is re-investigated on every firing
+(there is no answer to stand on), and a standing 👎 on the trigger re-arms
+investigation immediately. So feedback does two jobs: it weighs *recalled knowledge*
+(the decay above) and it governs *when the agent may repeat itself* — both steered
+by the same single human 👍/👎 signal.
+
+**Past the cooldown, the agent is told what it already concluded.** A recurrence
+that outlives its cooldown gets a deliberate fresh look — but not a blind one: the
+seed opens with the standing answer for that trigger (what was concluded, how
+actionable it was, and how long ago), quoted as data and never as an instruction.
+This exists because the agent otherwise has no way to report "this is the same known
+fault": the verdict enum has no value for it, so it reaches for `inconclusive`, which
+means the opposite and throws away a diagnosis it already had. The block says what to
+do instead — confirm against live state, then restate the cause with the actionability
+verdict it deserves, or name the new cause and put the old one in `ruled_out`. It is
+wired to the trigger index directly, not to the opt-in cooldown, so it works whether
+or not suppression is enabled.
 
 **👎 recovery.** A standing 👎 forces re-investigation — and when that fresh
 investigation independently reaches the same conclusion (identical dedup

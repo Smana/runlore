@@ -325,10 +325,11 @@ config:
       url: hubble-relay.kube-system:80
 
   investigation:
-    # Skip re-investigating a trigger that was answered CONCLUSIVELY less than this
-    # long ago — otherwise a still-firing alert re-investigates on every Alertmanager
-    # repeat and a broken Kustomization on every ~10m resync. An inconclusive prior
-    # always retries; a 👎 re-arms immediately. Requires outcome.ledger_path above.
+    # Skip re-investigating a trigger looked at less than this long ago that already
+    # has a CONCLUSIVE answer on record — otherwise a still-firing alert
+    # re-investigates on every Alertmanager repeat and a broken Kustomization on every
+    # ~10m resync. A trigger that has never concluded always retries; a 👎 re-arms
+    # immediately. Requires outcome.ledger_path above.
     recurrence_cooldown: 30m
     coalesce:
       enabled: true # fold a correlated alert storm into ONE investigation
