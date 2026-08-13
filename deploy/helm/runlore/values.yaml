@@ -146,11 +146,16 @@ config:
     coalesce:
       enabled: true             # fold a correlated alert storm into ONE investigation
       # debounce: 30s           # flush batch quiet for this long
-      # max_wait: 2m            # force flush even if still receiving alerts
+      # max_wait: 2m            # force flush even if alerts are STILL ARRIVING; a batch flushes on
+      #                         #   whichever of debounce/max_wait hits first, so raising this alone
+      #                         #   batches nothing — a quiet batch already left after `debounce`
       # max_batch: 50           # flush when batch reaches this size
       # cooldown: 10m           # suppress re-alerts for a group after a flush (a new critical
       #                         #   alertname or a standing 👎 on the trigger bypasses suppression)
-      # correlation_labels: []  # group by label values instead of AM groupKey
+      # correlation_labels: []  # group by label values instead of AM groupKey. REQUIRED to merge
+      #                         #   SIBLING alerts (KubeNodeNotReady + KubeNodeUnreachable on one
+      #                         #   node): the groupKey usually includes alertname, so they never
+      #                         #   share a key. Also needs a debounce wider than their arrival gap.
     rate_limit:
       max_per_window: 20        # cap investigations per window (window defaults to 1h);
                                 #   explicit 0 = unlimited; UNSET now defaults to 30

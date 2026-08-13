@@ -112,6 +112,19 @@ incident webhook. Known keys: `alertmanager`, `gitops`, `pagerduty`, `custom`.
   on the trigger** (the feedback re-arm, see [learning-loop]({{< relref "learning-loop.md" >}}) — batched on the
   normal `debounce`, so a contested storm still collapses to one re-investigation). Suppressions log
   an INFO line and count in `runlore_alerts_suppressed_total`.
+
+  **Batching *sibling* alerts takes both knobs.** Two alerts describing one physical event —
+  `KubeNodeNotReady` and `KubeNodeUnreachable` on the same node, or the pod and deployment alerts for
+  one crash-looping workload — only merge if you set **both** of these:
+
+  1. **`correlation_labels`.** Without them the key is the Alertmanager `groupKey`, and a typical
+     `group_by` includes `alertname` — so siblings never share a key however long you wait. Group by
+     what the alerts have in common instead (e.g. `[node]`, or `[namespace, pod]`).
+  2. **A `debounce` wider than the gap between them.** A batch flushes when it has been quiet for
+     `debounce` **or** older than `max_wait`, whichever comes first. With the default `debounce: 30s`,
+     a lone alert flushes 30s after it arrives — so **raising `max_wait` on its own cannot batch
+     anything**, and siblings 2 minutes apart need a `debounce` above 2m to land in one batch. The
+     cost is paid in latency on every alert, so widen it deliberately.
 - `rate_limit` — `max_per_window` (**default 30**; an explicit **0 = unlimited**), `window` (default **1h**),
   `max_requeues`.
 - `recurrence_cooldown` — **opt-in (default 0 = off)** per-trigger suppression: skip re-investigating a
