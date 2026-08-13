@@ -155,8 +155,15 @@ type LoopInvestigator struct {
 	// incident has been investigated and what the last CONCLUSIVE run concluded. Read
 	// once per investigation and shared by its two consumers — the Recurrence gate's
 	// suppression decision and the seed's known-recurrence block — so the two can
-	// never disagree about a trigger's history. Wired unconditionally (a disabled
-	// ledger answers with zero values); nil ⇒ neither consumer sees any history.
+	// never disagree about a trigger's history. On the serve path it is wired
+	// unconditionally (a disabled ledger answers with zero values); nil ⇒ neither
+	// consumer sees any history.
+	//
+	// Deliberately left nil by the curator's re-investigator (app.BuildReinvestigator):
+	// that path exists to reach a verdict INDEPENDENTLY of the one on record — a
+	// contested entry recovers only when a fresh run agrees with it on its own, and
+	// seeding the standing answer would make that agreement worthless. Wiring it there
+	// would quietly convert the 👎-recovery evidence into a rubber stamp.
 	TriggerHistory RecurrenceStats
 
 	// OnRecall, when set, receives one RecallDecision per investigation whenever a
@@ -355,7 +362,6 @@ func (li *LoopInvestigator) Investigate(ctx context.Context, req Request) error 
 	if done {
 		return nil
 	}
-	seed := seedContext{nearMiss: nearMiss, prior: prior}
 	// Bind incident-scoped tools (pod_logs) to THIS investigation's namespace before
 	// use: a single LoopInvestigator serves many requests, so the namespace allowlist
 	// that includes the incident's own namespace must be set per request, not at
@@ -388,9 +394,11 @@ func (li *LoopInvestigator) Investigate(ctx context.Context, req Request) error 
 
 	// Redact secrets from the (untrusted) incident text before it enters the prompt,
 	// so a secret in an alert annotation/message never reaches the model provider. The
-	// near-miss block (when present) is part of the same seed string, so the single
-	// egress redaction covers the untrusted catalog text it carries too.
-	messages := []providers.Message{{Role: "user", Content: redact.Secrets(seedPrompt(req, seed))}}
+	// seedContext blocks (when present) are part of the same seed string, so this single
+	// egress redaction covers the untrusted text they carry too: the near-miss lead's
+	// catalog prose and the known-recurrence block's quoted prior conclusion.
+	messages := []providers.Message{{Role: "user",
+		Content: redact.Secrets(seedPrompt(req, seedContext{nearMiss: nearMiss, prior: prior}))}}
 	maxSteps := li.MaxSteps
 	if maxSteps <= 0 {
 		// Enough headroom to query every signal source (gitops/cloud/logs/metrics/

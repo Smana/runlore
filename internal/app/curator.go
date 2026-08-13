@@ -130,6 +130,11 @@ func BuildReinvestigator(cfg *config.Config, deps *Deps, metrics *telemetry.Metr
 	run := func(ctx context.Context, req investigate.Request) (providers.Investigation, error) {
 		var res providers.Investigation
 		var got bool
+		// No TriggerHistory here, deliberately: this run exists to reach a verdict
+		// INDEPENDENTLY of the one on record. A contested entry recovers only when a
+		// fresh investigation agrees with it on its own, so seeding the standing answer
+		// would turn that recovery evidence into a rubber stamp. See
+		// LoopInvestigator.TriggerHistory.
 		li := &investigate.LoopInvestigator{
 			Model: model, VerifyModel: BuildVerifyModel(cfg), Tools: tools, Recall: recall, Verify: true, Log: log,
 			Metrics:                   metrics,

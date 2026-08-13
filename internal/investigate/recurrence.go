@@ -56,6 +56,7 @@ type RecurrenceStats interface {
 // suppressed firings (only the recurrence_suppressed metric and a log line see
 // them) — a future consumer needing raw firing frequency is the moment to
 // promote suppression to a first-class event kind, not before.
+//
 // The gate itself holds no ledger: LoopInvestigator.TriggerHistory reads the
 // per-trigger snapshot once per investigation and hands it here, so the suppression
 // decision and the seed's known-recurrence block are made from the same facts.
