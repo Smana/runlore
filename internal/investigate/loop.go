@@ -592,6 +592,13 @@ func (li *LoopInvestigator) Investigate(ctx context.Context, req Request) error 
 			// already covers a delivered recall).
 			stampMatchedKnowledge(&inv, kbHits.top())
 			li.Log.Info("investigation evidence gathered", "title", req.Title, "tools_used", used)
+			// Say it out loud when the submission contradicts itself, BEFORE verify can
+			// rewrite it: this is the model's own payload, and the mislabel that motivated
+			// #471 was invisible until someone read the empty card it produced.
+			if unaccountedInconclusive(inv) {
+				li.Log.Warn("submit_findings: verdict=inconclusive with no cause, no open question and no data gap — the delivered card will have no Why and no next steps",
+					"title", inv.Title, "trigger_key", req.TriggerKey, "confidence", inv.Confidence, "tools_used", used)
+			}
 			if li.Metrics != nil {
 				// Usage-anchored when the provider reported usage; heuristic otherwise.
 				li.Metrics.InvestigationTokens.Record(ctx, int64(calib.estimate(sys, messages, specs)))

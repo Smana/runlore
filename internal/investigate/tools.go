@@ -188,6 +188,23 @@ func parseFindings(args string) (providers.Investigation, error) {
 	return buildInvestigation(f), nil
 }
 
+// unaccountedInconclusive reports whether a submitted finding claims it could not
+// determine the cause while giving no account of what blocked it: no root cause, no
+// question for a human, no data gap. That payload contradicts itself — an honest
+// "I could not determine" always has something in one of those three channels — and
+// it is what the model produced when it reached for `inconclusive` to mean "this is
+// already known" (#471): a Slack card with no Why, no evidence and no next steps,
+// and nothing for the verify pass to check. Cheap and pure, so the loop can say so
+// at the source, where the payload is still attributable to the call that made it.
+//
+// Deliberately NOT an error: the finding is still delivered. Rejecting it would
+// spend another model call to re-ask a question the model just answered badly, and a
+// thin answer beats no answer for the human reading the card.
+func unaccountedInconclusive(inv providers.Investigation) bool {
+	return inv.Verdict == providers.VerdictInconclusive &&
+		len(inv.RootCauses) == 0 && len(inv.Unresolved) == 0 && len(inv.DataGaps) == 0
+}
+
 // buildInvestigation maps the parsed findings shape onto a providers.Investigation,
 // clamping confidences. Shared by the direct and the tolerant parse paths.
 func buildInvestigation(f findings) providers.Investigation {
