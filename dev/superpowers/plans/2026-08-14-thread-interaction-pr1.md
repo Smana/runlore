@@ -766,7 +766,6 @@ import (
 
 	"github.com/Smana/runlore/internal/catalog"
 	"github.com/Smana/runlore/internal/kbvalidate"
-	"github.com/Smana/runlore/internal/providers"
 )
 
 var noteAt = time.Date(2026, 8, 14, 10, 30, 0, 0, time.UTC)
@@ -853,9 +852,9 @@ func TestConceptEntryTitleIsBounded(t *testing.T) {
 		}
 	}
 }
-
-var _ = providers.KBEntry{}
 ```
+
+The test imports `catalog` and `kbvalidate` but **not** `providers` — no test here names a `providers` type. Do not add a blank identifier to keep an unused import alive; drop the import.
 
 - [ ] **Step 2: Run test to verify it fails**
 
@@ -2756,7 +2755,7 @@ func BuildThreadRegistry(cfg *config.Config) (*thread.Registry, error) {
 // guard, same reason, as SlackFeedbackDeliverable.
 func ThreadCaptureDeliverable(cfg *config.Config, log *slog.Logger) bool {
 	sl := cfg.Notify.Slack
-	if notify.SlackDeliveryTarget(sl) == slackTargetBotName {
+	if notify.SlackBotDelivery(sl) {
 		return true
 	}
 	log.Warn("slack thread_capture enabled but no bot-token delivery target resolved (credential env var empty); "+
@@ -2764,11 +2763,18 @@ func ThreadCaptureDeliverable(cfg *config.Config, log *slog.Logger) bool {
 		"bot_token_env", sl.BotTokenEnv, "channel", sl.Channel)
 	return false
 }
+```
 
-// slackTargetBotName mirrors the notifier's internal bot-target constant.
-// Thread capture requires that exact path: the webhook target returns no message
-// ts, so there is no thread root.
-const slackTargetBotName = "bot"
+`SlackBotDelivery` does not exist yet. Add it to `internal/notify/slack.go` beside `SlackDeliveryTarget` rather than restating the `"bot"` literal in `app`:
+
+```go
+// SlackBotDelivery reports whether Slack delivery resolves to the BOT-token path
+// (chat.postMessage) rather than an incoming webhook. Thread capture requires
+// exactly that path — a webhook returns no message ts, so there is no thread
+// root — and asking here keeps the target vocabulary in one package.
+func SlackBotDelivery(sl config.SlackNotify) bool {
+	return SlackDeliveryTarget(sl) == slackTargetBot
+}
 ```
 
 - [ ] **Step 4: Run tests to verify they pass**
