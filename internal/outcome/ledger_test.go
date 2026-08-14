@@ -1604,3 +1604,73 @@ func TestLegacyOpenWithoutStartedAtUsesAgeBound(t *testing.T) {
 		})
 	}
 }
+
+// TestResolveChannelLive pins the resolve-channel liveness proof that gates
+// resolve-based decay. It answers one question — "could a resolve ever arrive?" —
+// and must answer it conservatively (unknown ⇒ false ⇒ decay withheld ⇒ the entry
+// keeps firing), survive compaction, and never be confused with pairing success.
+func TestResolveChannelLive(t *testing.T) {
+	t0 := time.Unix(17000, 0)
+
+	t.Run("nil ledger reports dead", func(t *testing.T) {
+		var l *Ledger
+		if l.ResolveChannelLive() {
+			t.Fatal("a nil ledger must report the channel dead (conservative default)")
+		}
+	})
+
+	t.Run("opens alone never prove a channel", func(t *testing.T) {
+		l, _ := New(filepath.Join(t.TempDir(), "o.jsonl"))
+		for i := range 5 {
+			_ = l.Open(Event{Fingerprint: fmt.Sprintf("fp%d", i), Kind: "recall", Entry: "x.md", At: t0})
+		}
+		if l.ResolveChannelLive() {
+			t.Fatal("recall opens are the trial count, not evidence a resolve can arrive; " +
+				"this is exactly the send_resolved:false shape that must stay dead")
+		}
+	})
+
+	t.Run("one resolve proves it", func(t *testing.T) {
+		l, _ := New(filepath.Join(t.TempDir(), "o.jsonl"))
+		_ = l.Open(Event{Fingerprint: "fp", Kind: "recall", Entry: "x.md", At: t0})
+		if _, _, err := l.Resolve("fp", t0.Add(time.Minute)); err != nil {
+			t.Fatalf("Resolve: %v", err)
+		}
+		if !l.ResolveChannelLive() {
+			t.Fatal("a delivered resolve must mark the channel live")
+		}
+	})
+
+	t.Run("an unpaired resolve still proves it", func(t *testing.T) {
+		// Liveness is a property of the SENDER, so it must not depend on whether the
+		// resolve found an open to pair with.
+		l, _ := New(filepath.Join(t.TempDir(), "o.jsonl"))
+		if _, _, err := l.Resolve("never-opened", t0); err != nil {
+			t.Fatalf("Resolve: %v", err)
+		}
+		if !l.ResolveChannelLive() {
+			t.Fatal("an orphan resolve still proves the sender emits resolves")
+		}
+	})
+
+	t.Run("survives reload and compaction", func(t *testing.T) {
+		p := filepath.Join(t.TempDir(), "o.jsonl")
+		l, _ := New(p)
+		_ = l.Open(Event{Fingerprint: "fp", Kind: "recall", Entry: "x.md", At: t0})
+		if _, _, err := l.Resolve("fp", t0.Add(time.Minute)); err != nil {
+			t.Fatalf("Resolve: %v", err)
+		}
+		// Pad past the bound so the reload compacts the proving resolve into a checkpoint.
+		for i := range 20 {
+			_ = l.Open(Event{Fingerprint: fmt.Sprintf("pad%d", i), Kind: "recall", Entry: "x.md", At: t0})
+		}
+		l2, err := NewWithMaxEvents(p, 5)
+		if err != nil {
+			t.Fatalf("NewWithMaxEvents: %v", err)
+		}
+		if !l2.ResolveChannelLive() {
+			t.Fatal("compaction must carry the liveness proof into the checkpoint; losing it " +
+				"would silently switch a healthy deployment back to withheld decay")
+		}
+	})
+}

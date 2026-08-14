@@ -58,8 +58,8 @@ func Format(inv providers.Investigation) string {
 	}
 	// Confidence — shown once. confidenceBadge is the SAME function Slack calls,
 	// so the two never headline different numbers for the same investigation.
-	emoji, level, pct := confidenceBadge(inv)
-	fmt.Fprintf(&b, "%s %s confidence · %d%%\n", emoji, level, pct)
+	emoji, level, pct, stated := confidenceBadge(inv)
+	fmt.Fprintf(&b, "%s %s\n", emoji, confidenceText(level, pct, stated))
 	if note := recallConfidenceNote(inv, pct); note != "" {
 		fmt.Fprintf(&b, "   (%s)\n", note)
 	}
@@ -125,7 +125,13 @@ func Format(inv providers.Investigation) string {
 		}
 	}
 	for i, rc := range inv.RootCauses {
-		fmt.Fprintf(&b, "%d. *%s* (%.0f%%)\n", i+1, rc.Summary, rc.Confidence*100)
+		// An unstated per-cause confidence renders as nothing rather than "(0%)" —
+		// same reason as the headline; see confidenceText.
+		if rc.Confidence > 0 {
+			fmt.Fprintf(&b, "%d. *%s* (%.0f%%)\n", i+1, rc.Summary, rc.Confidence*100)
+		} else {
+			fmt.Fprintf(&b, "%d. *%s*\n", i+1, rc.Summary)
+		}
 		// The change the root cause pins the incident on — previously rendered only
 		// in the Slack blocks, so Matrix/webhook/CLI readers never saw it.
 		if rc.ChangeRef != "" {

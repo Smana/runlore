@@ -108,7 +108,10 @@ func evalWorkloadFromLabels(labels map[string]string) (kind, name string) {
 		{"daemonset", "DaemonSet"},
 		{"replicaset", "ReplicaSet"},
 		{"cronjob", "CronJob"},
-		{"job", "Job"},
+		// job_name, not job: `job` is the Prometheus SCRAPE job, never a Kubernetes
+		// Job. See alertmanager.workloadFromLabels for why reading it here shadowed
+		// the real workload on every metric-derived alert.
+		{"job_name", "Job"},
 	} {
 		if v := labels[c.label]; v != "" {
 			return c.kind, v

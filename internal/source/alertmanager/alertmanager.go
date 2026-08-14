@@ -36,6 +36,17 @@ type amAlert struct {
 
 // workloadFromLabels derives the affected workload (kind, name) from Alertmanager
 // labels, preferring a stable controller name over an ephemeral pod name.
+//
+// The Kubernetes Job name is `job_name`, NOT `job`. In Prometheus `job` is the
+// SCRAPE job — it is present on essentially every metric-derived alert and names the
+// scrape target, not a workload. Reading it as a Kubernetes Job was wrong twice over:
+// it invented a Job that does not exist, and — because this loop runs ahead of the
+// `pod` fallback — it SHADOWED the real object the alert was about. Live examples on
+// a VictoriaMetrics stack: `KubeJobFailed` carries job="kube-state-metrics" with the
+// actual Job in job_name, and `TooManyLogs` carries job="vmagent-victoria-metrics-
+// k8s-stack" for a Deployment, which was reported as `Job observability/vmagent-…`.
+// kube-state-metrics has exposed the Job name as job_name since it began setting
+// job="kube-state-metrics" on its own series, so job_name is the only correct source.
 func workloadFromLabels(labels map[string]string) (kind, name string) {
 	for _, c := range []struct{ label, kind string }{
 		{"deployment", "Deployment"},
@@ -43,7 +54,7 @@ func workloadFromLabels(labels map[string]string) (kind, name string) {
 		{"daemonset", "DaemonSet"},
 		{"replicaset", "ReplicaSet"},
 		{"cronjob", "CronJob"},
-		{"job", "Job"},
+		{"job_name", "Job"},
 	} {
 		if v := labels[c.label]; v != "" {
 			return c.kind, v

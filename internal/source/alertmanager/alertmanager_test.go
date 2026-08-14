@@ -167,6 +167,29 @@ func TestWorkloadFromLabels(t *testing.T) {
 		{"workload with type", map[string]string{"workload": "w", "workload_type": "Rollout"}, "Rollout", "w"},
 		{"workload no type -> empty kind", map[string]string{"workload": "w"}, "", "w"},
 		{"none", map[string]string{"severity": "critical"}, "", ""},
+
+		// `job` is the Prometheus SCRAPE job, not a Kubernetes Job. It rides on
+		// essentially every metric-derived alert, so treating it as a workload both
+		// invented a Job and shadowed the real object.
+		{
+			"scrape job alone is not a workload",
+			map[string]string{"job": "kube-state-metrics"},
+			"", "",
+		},
+		{
+			// Live shape of KubeJobFailed: job=kube-state-metrics (the scraper),
+			// job_name=the actual Job.
+			"job_name is the Kubernetes Job",
+			map[string]string{"job": "kube-state-metrics", "job_name": "backup-27460"},
+			"Job", "backup-27460",
+		},
+		{
+			// Live shape of TooManyLogs: the scrape job happens to be named after a
+			// Deployment. The pod label is the only real object here.
+			"scrape job does not shadow the pod",
+			map[string]string{"job": "vmagent-victoria-metrics-k8s-stack", "pod": "vmagent-victoria-metrics-k8s-stack-58cfb869b-tpzzf"},
+			"Pod", "vmagent-victoria-metrics-k8s-stack-58cfb869b-tpzzf",
+		},
 	}
 	for _, c := range cases {
 		k, n := workloadFromLabels(c.labels)

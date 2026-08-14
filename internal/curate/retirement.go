@@ -34,6 +34,12 @@ type RetireForge interface {
 // what keeps them from ever disagreeing about an entry's track record.
 type EntryStats interface {
 	OpenCounts() (map[string]outcome.Aggregate, error)
+	// ResolveChannelLive reports whether a resolve could ever arrive in this
+	// deployment. Retirement must consult it for the same reason the recall gate does
+	// (see investigate.Recall.outcomeGate): where no resolve can arrive, an entry's
+	// unresolved recalls are not failures, and retiring on them would garbage-collect
+	// correct entries. Sharing this interface is what stops the two gates disagreeing.
+	ResolveChannelLive() bool
 }
 
 // Retirement opens a human-reviewed "retire" PR for a merged catalog entry whose
@@ -64,8 +70,15 @@ func (p Retirement) Run(ctx context.Context) error {
 	// Candidate = an entry whose decay is BOTH deep (Factor < Floor) and sustained
 	// (>= MinObservations observations) — a single bad recall must never retire an
 	// entry. Sorted for deterministic logs and tests.
+	// Where no resolve can ever arrive, an unresolved recall is not a failed one — see
+	// EntryStats.ResolveChannelLive. Human votes still count, so the pass keeps working
+	// on those deployments; only entries with NO outcome at all are spared.
+	resolveChannelLive := p.Stats.ResolveChannelLive()
 	var candidates []string
 	for path, agg := range counts {
+		if !agg.HasEvidence() && !resolveChannelLive {
+			continue
+		}
 		obs := agg.Recalls + agg.FeedbackUp + agg.FeedbackDown
 		if obs < p.MinObservations {
 			continue

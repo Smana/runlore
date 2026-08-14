@@ -232,14 +232,25 @@ func TestRecallDecayGateFailSafeIsFullTrustNotThePrior(t *testing.T) {
 	unreachableFloor := 1.0000001
 
 	derivedFP := outcome.DeriveFingerprint(outcome.GitOpsFingerprintPrefix, "apps/worker|HealthCheckFailed")
-	if !recallFires(t, derivedFP, unreachableFloor) {
+	if !recallFires(t, derivedFP, unreachableFloor, true) {
 		t.Errorf("a recall whose only history is an excluded (synthetic) fingerprint was rejected at "+
 			"floor %v — it should never reach a factor at all, so §6's claim of the 1.0 fail-safe "+
 			"(and not the %g prior) is now wrong", unreachableFloor, f.priorMean)
 	}
-	if recallFires(t, realFingerprint, f.floor) {
+	if recallFires(t, realFingerprint, f.floor, true) {
 		t.Errorf("a recall with ONE unresolved real-fingerprint history (factor %.3f) still fires at "+
-			"the shipped floor %g — §6 says instant recall stops firing it", f.realFactor, f.floor)
+			"the shipped floor %g on a deployment whose resolve channel is PROVEN live — §6 says "+
+			"instant recall stops firing it", f.realFactor, f.floor)
+	}
+	// The other half of §6's qualification, and the live bug it was written for: the
+	// SAME history on a deployment that has never delivered a resolve must still fire.
+	// Counting it decays a correct entry on evidence the source cannot provide, which
+	// locked instant recall out after a single use (measured: one recall ever, then the
+	// same alert re-investigated from scratch three times in 12h).
+	if !recallFires(t, realFingerprint, f.floor, false) {
+		t.Errorf("a recall with ONE unresolved real-fingerprint history was rejected at floor %g on a "+
+			"deployment where NO resolve has ever arrived — with no resolve channel the silence is "+
+			"not evidence of failure, and decaying on it disables the entry permanently", f.floor)
 	}
 	page := flattenProse(readDoc(t, learningLoopPath))
 	if pagePriorFreezeRE.MatchString(page) {
@@ -257,7 +268,14 @@ func TestRecallDecayGateFailSafeIsFullTrustNotThePrior(t *testing.T) {
 // magnitude gates are tuned low (a one-entry corpus scores small) so the only gate
 // that can reject here is outcome decay — proven by the ledger-less baseline, which
 // must fire.
-func recallFires(t *testing.T, fp string, floor float64) bool {
+//
+// resolveChannelLive seeds the ledger with one resolve on an UNRELATED fingerprint.
+// That resolve credits nothing (it belongs to no open here) — it exists only to prove
+// the deployment's resolve channel works, which is the precondition resolve-based decay
+// now requires: silence after a recall is evidence of failure only where a resolve
+// could have arrived. Without it the fixture is indistinguishable from an Alertmanager
+// receiver running send_resolved:false, where decay is deliberately withheld.
+func recallFires(t *testing.T, fp string, floor float64, resolveChannelLive bool) bool {
 	t.Helper()
 	cat := decayGuardCatalog(t)
 	entry := cat.Entries()[0].Path
@@ -270,6 +288,14 @@ func recallFires(t *testing.T, fp string, floor float64) bool {
 		t.Fatalf("outcome.New: %v", err)
 	}
 	openUnresolvedRecall(t, l, fp, entry)
+	if resolveChannelLive {
+		if _, _, err := l.Resolve("0000deadbeef0000", time.Now()); err != nil {
+			t.Fatalf("ledger.Resolve (channel-liveness seed): %v", err)
+		}
+		if !l.ResolveChannelLive() {
+			t.Fatal("seeding one resolve must mark the channel live; the liveness signal has moved")
+		}
+	}
 	return runRecall(t, cat, l, floor)
 }
 

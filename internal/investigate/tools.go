@@ -76,9 +76,9 @@ func submitFindingsSpec() providers.ToolSpec {
 "confidence":{"type":"number"},
 "affected_resource":{"type":"object","description":"the workload your investigation identified as the failing/affected resource","properties":{"kind":{"type":"string"},"name":{"type":"string"},"namespace":{"type":"string"}}},
 "root_causes":{"type":"array","items":{"type":"object","properties":{
-"summary":{"type":"string"},"confidence":{"type":"number"},"change_ref":{"type":"string"},
+"summary":{"type":"string"},"confidence":{"type":"number","description":"how strongly the evidence supports THIS root cause, 0-1. Required: an omitted confidence is delivered as 0%, which reads to the on-call as 'no confidence' and buries a sound finding under a red badge"},"change_ref":{"type":"string"},
 "evidence":{"type":"array","items":{"type":"string"}},"suggested_action":{"type":"string"},"reversible":{"type":"boolean"}},
-"required":["summary"]}},
+"required":["summary","confidence"]}},
 "unresolved":{"type":"array","items":{"type":"string"},"description":"genuine open questions only a human can answer - put tool or data limitations in data_gaps instead"},
 "verdict":{"type":"string","enum":["no_action","action_suggested","action_required","inconclusive"],"description":"actionability for the on-call: no_action (benign/self-healed/synthetic), action_suggested (a human should follow the next steps), action_required (live impact needing prompt action), inconclusive (you genuinely could not determine the cause, and data_gaps/unresolved say what blocked you). A recurrence of a fault you DID identify is NOT inconclusive - naming a known cause again is still a conclusion, so restate it with the actionability verdict it deserves"},
 "ruled_out":{"type":"array","items":{"type":"string"},"description":"hypotheses you considered and REJECTED, one line each naming the disproving evidence"},

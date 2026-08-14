@@ -563,16 +563,33 @@ judgment on the *diagnosis itself*, which an alert merely clearing never proves.
 
 **An Alertmanager alert is never in that excluded set** — not even when its receiver has
 `send_resolved` off. Resolvability is read off the fingerprint alone
-(`resolvable := !outcome.Derived(fp)`), never off `send_resolved`, which lives in the
-operator's receiver config: RunLore never reads it, and has no startup or per-event
-signal it could condition on. A real alert fingerprint is always recorded resolvable, so
-when the resolve never comes the failure runs the **opposite** way from the synthetic
-case. Every recall increments `recalls` while `resolved` stays 0, and the factor drops
-at once: **one** unresolved recall already lands the entry at **0.333**, below the
-shipped `outcome_floor` of **0.5**, and Gate 3 stops firing it. A rejected recall
-records nothing further, so it stays there — and retirement does not rescue it either,
-because the observation count freezes at 1, below `min_observations`. Neither failure
-mode is self-correcting; a 👍/👎 channel is the one thing that closes both.
+(`resolvable := !outcome.Derived(fp)`), never off the receiver config, which RunLore
+cannot see. A real alert fingerprint is therefore always recorded resolvable, and every
+recall increments `recalls` while `resolved` stays 0. The factor drops at once: **one**
+unresolved recall already lands the entry at **0.333**, below the shipped
+`outcome_floor` of **0.5**.
+
+That arithmetic is correct only where a resolve could actually have arrived, so **Gate 3
+withholds decay until the ledger has observed at least one resolve, from any
+fingerprint** (`Ledger.ResolveChannelLive`). An entry with no outcome of any kind — no
+resolve, no vote, no confirmation — on a deployment that has never delivered a single
+resolve is not a failing entry; it is one nobody can grade, and decaying it treats *we
+never asked* as *the answer was wrong*. That is not hypothetical: measured on a shared
+cluster in 2026-08 with `send_resolved: false`, exactly one recall had ever fired and
+the same alert was then re-investigated from scratch three times in twelve hours.
+
+The withholding is scoped as tightly as possible. The moment the entry earns any ground
+truth, **or** the ledger sees any resolve at all, the full posterior applies —
+including every unresolved recall banked up to that point — so a genuinely stale entry
+on a working resolve channel still decays exactly as described above. A human 👎 bites
+either way, which is what makes it, per the paragraph above, the one signal a
+resolve-less deployment can always accumulate.
+
+Two consequences worth stating plainly. Turning `send_resolved` **on** is what makes
+resolve-based decay work at all, and it costs nothing: a resolved alert decodes to a
+resolution, never to an investigation. Leaving it **off** does not merely disable
+learning — it also silently voids `triggers.incidents.debounce`, which holds a firing
+alert and investigates only if no resolve arrived in the window.
 
 ```mermaid
 stateDiagram-v2
