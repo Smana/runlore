@@ -26,15 +26,40 @@ var recallConfirmTools = []string{"pod_status", "kube_events"}
 // absent tools, or a tool error yields gathered=false. gathered is true when at
 // least one confirm tool returned non-empty output (including "no pods"/"no events"
 // — still real current state).
-func (li *LoopInvestigator) confirmRecall(ctx context.Context, req Request, inv providers.Investigation) (providers.Investigation, bool) {
+//
+// It ALSO returns those results shaped as a tool transcript, which the caller passes
+// to verifyFindings. Both forms are needed and they are not redundant:
+//
+//   - the evidence bullets are what the DELIVERED card shows a human;
+//   - the transcript is what the REVIEWER is allowed to treat as verified fact.
+//
+// The verify prompt's central rule is "each cited piece of evidence must trace to a
+// tool result in the transcript excerpt below … if it cannot be found in the
+// transcript, treat it as unverified — reject or downgrade it". The recall path used
+// to pass a nil transcript, so renderForReview emitted no excerpt at all and that
+// rule was unsatisfiable BY CONSTRUCTION: every recalled finding was, correctly by
+// its own instructions, downgraded. The confirm output was sitting right there in the
+// evidence list, but as an assertion by the author rather than as tool output the
+// reviewer could check against — which is precisely the distinction the rule draws.
+//
+// Handing over the same results as a transcript makes the review sharper, not softer:
+// a reviewer that can read current state can now CONTRADICT a stale or poisoned entry
+// (entry says pods are OOMKilling, pod_status shows them Running) instead of being
+// reduced to "cannot verify" on everything.
+func (li *LoopInvestigator) confirmRecall(ctx context.Context, req Request, inv providers.Investigation) (providers.Investigation, []providers.Message, bool) {
 	if req.Workload.Namespace == "" || len(inv.RootCauses) == 0 {
-		return inv, false
+		return inv, nil, false
 	}
 	byName := make(map[string]Tool, len(li.Tools))
 	for _, t := range li.Tools {
 		byName[t.Name()] = t
 	}
 	gathered := false
+	// One synthetic assistant turn carrying the calls, then one tool turn per result —
+	// the shape transcriptExcerpt walks to label each result with the tool that
+	// produced it. Call IDs are deterministic (no loop ran, so nothing else mints them).
+	var calls []providers.ToolCall
+	var results []providers.Message
 	for _, name := range recallConfirmTools {
 		t, ok := byName[name]
 		if !ok {
@@ -52,9 +77,16 @@ func (li *LoopInvestigator) confirmRecall(ctx context.Context, req Request, inv 
 		}
 		inv.RootCauses[0].Evidence = append(inv.RootCauses[0].Evidence,
 			fmt.Sprintf("current state — %s:\n%s", name, out))
+		id := "recall-confirm-" + name
+		calls = append(calls, providers.ToolCall{ID: id, Name: name, Args: confirmArgs(req.Workload)})
+		results = append(results, providers.Message{Role: "tool", ToolCallID: id, Content: out})
 		gathered = true
 	}
-	return inv, gathered
+	if !gathered {
+		return inv, nil, false
+	}
+	transcript := append([]providers.Message{{Role: "assistant", ToolCalls: calls}}, results...)
+	return inv, transcript, true
 }
 
 // confirmArgs builds the JSON args for a confirmatory tool: namespace-scoped, but

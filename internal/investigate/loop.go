@@ -717,7 +717,7 @@ func (li *LoopInvestigator) tryRecall(ctx context.Context, req Request, result *
 	li.Log.Info("instant recall (catalog hit; skipping the loop)",
 		"title", req.Title, "entry", entry.Path, "confidence", fmt.Sprintf("%.2f", conf))
 	rec := recalledInvestigation(req, *entry, conf)
-	rec, confirmed := li.confirmRecall(ctx, req, rec)
+	rec, confirmTranscript, confirmed := li.confirmRecall(ctx, req, rec)
 	if !confirmed {
 		// Could not confront the entry with current state — be less assertive
 		// so an unverifiable recall does not present at full recall confidence.
@@ -727,10 +727,17 @@ func (li *LoopInvestigator) tryRecall(ctx context.Context, req Request, result *
 	verified := true // no Verify configured ⇒ nothing to fail; behaves as before
 	if li.Verify {
 		// Catalog content is untrusted: verify a recalled finding too, so a
-		// crafted high-recall entry can't bypass the adversarial review. No loop
-		// ran on this short-circuit path, so there is no tool transcript to ground
-		// against (nil) — the recalled finding is judged on the catalog text alone.
-		rec, verified = li.verifyFindings(ctx, req, rec, nil, verifyTotals)
+		// crafted high-recall entry can't bypass the adversarial review.
+		//
+		// The transcript is confirmRecall's tool results — the CURRENT cluster state,
+		// the only independently-gathered fact on this path and so the only thing the
+		// reviewer may treat as verified. Passing nil here (as this did) left the
+		// prompt's groundedness rule with nothing to check against, which downgraded
+		// every recalled finding on principle; see confirmRecall for the full account.
+		// It is still nil when confirm gathered nothing (no namespace, tools absent,
+		// every call errored) — the review then runs on catalog text alone, which is
+		// exactly the case recallUnconfirmedCap above has already de-rated.
+		rec, verified = li.verifyFindings(ctx, req, rec, confirmTranscript, verifyTotals)
 	}
 	if !verified {
 		// verifyFindings could not run (model error, or no usable verdicts) rather than

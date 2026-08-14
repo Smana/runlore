@@ -40,7 +40,7 @@ func TestConfirmRecallAppendsCurrentState(t *testing.T) {
 	ps := &fakeConfirmTool{name: "pod_status", out: "web CrashLoopBackOff"}
 	li := &LoopInvestigator{Tools: []Tool{ps}}
 	req := Request{Workload: providers.Workload{Namespace: "apps", Name: "web"}}
-	inv, gathered := li.confirmRecall(context.Background(), req, recalledInv())
+	inv, _, gathered := li.confirmRecall(context.Background(), req, recalledInv())
 	if !gathered {
 		t.Fatal("expected gathered=true when a confirm tool returns output")
 	}
@@ -59,7 +59,7 @@ func TestConfirmRecallIsNamespaceWideNotObjectScoped(t *testing.T) {
 	ev := &fakeConfirmTool{name: "kube_events", out: "Warning"}
 	li := &LoopInvestigator{Tools: []Tool{ps, ev}}
 	req := Request{Workload: providers.Workload{Namespace: "apps", Name: "web"}}
-	if _, gathered := li.confirmRecall(context.Background(), req, recalledInv()); !gathered {
+	if _, _, gathered := li.confirmRecall(context.Background(), req, recalledInv()); !gathered {
 		t.Fatal("expected gathered=true")
 	}
 	if !strings.Contains(ps.gotArgs, `"namespace":"apps"`) {
@@ -77,7 +77,7 @@ func TestConfirmRecallNoNamespaceSkips(t *testing.T) {
 	ps := &fakeConfirmTool{name: "pod_status", out: "x"}
 	li := &LoopInvestigator{Tools: []Tool{ps}}
 	req := Request{Workload: providers.Workload{}} // no namespace
-	inv, gathered := li.confirmRecall(context.Background(), req, recalledInv())
+	inv, _, gathered := li.confirmRecall(context.Background(), req, recalledInv())
 	if gathered {
 		t.Fatal("no namespace must skip confirmation")
 	}
@@ -92,7 +92,7 @@ func TestConfirmRecallNoNamespaceSkips(t *testing.T) {
 func TestConfirmRecallToolsAbsentSkips(t *testing.T) {
 	li := &LoopInvestigator{Tools: []Tool{&fakeConfirmTool{name: "what_changed", out: "x"}}}
 	req := Request{Workload: providers.Workload{Namespace: "apps"}}
-	if _, gathered := li.confirmRecall(context.Background(), req, recalledInv()); gathered {
+	if _, _, gathered := li.confirmRecall(context.Background(), req, recalledInv()); gathered {
 		t.Fatal("no confirm tools present must yield gathered=false")
 	}
 }
@@ -102,7 +102,7 @@ func TestConfirmRecallToolErrorTolerated(t *testing.T) {
 	good := &fakeConfirmTool{name: "kube_events", out: "Warning FailedMount"}
 	li := &LoopInvestigator{Tools: []Tool{bad, good}}
 	req := Request{Workload: providers.Workload{Namespace: "apps", Name: "web"}}
-	inv, gathered := li.confirmRecall(context.Background(), req, recalledInv())
+	inv, _, gathered := li.confirmRecall(context.Background(), req, recalledInv())
 	if !gathered {
 		t.Fatal("one tool erroring must not prevent the other from confirming")
 	}
@@ -119,5 +119,81 @@ func TestCapRecallConfidenceOnlyLowers(t *testing.T) {
 	}
 	if out.RootCauses[1].Confidence != 0.5 {
 		t.Fatalf("a value already below the ceiling must be untouched, got %v", out.RootCauses[1].Confidence)
+	}
+}
+
+// TestConfirmRecallGroundsTheReview pins the fix for recalled findings being
+// downgraded on principle rather than on their merits.
+//
+// The verify prompt's central rule is "each cited piece of evidence must trace to a
+// tool result in the transcript excerpt below … if it cannot be found in the
+// transcript, treat it as unverified — reject or downgrade it". The recall path
+// passed a nil transcript, so renderForReview emitted NO excerpt section at all and
+// that rule was unsatisfiable by construction — the reviewer was told to check
+// against a document that did not exist, and correctly downgraded every recall.
+// Measured live: the only recall that ever fired went 0.72 -> 0.45, and
+// runlore_recall_hits_total{result="downgraded"} was 1 of 1.
+//
+// The confirm output was always there, but as an evidence bullet — an assertion by
+// the author, not tool output the reviewer may treat as fact. That is exactly the
+// distinction the groundedness rule draws, so it has to be handed over as both.
+func TestConfirmRecallGroundsTheReview(t *testing.T) {
+	ps := &fakeConfirmTool{name: "pod_status", out: "web-abc  Running ready=1/1"}
+	ev := &fakeConfirmTool{name: "kube_events", out: "(no Warning events)"}
+	li := &LoopInvestigator{Tools: []Tool{ps, ev}}
+	req := Request{Title: "WebDown", Workload: providers.Workload{Namespace: "apps", Name: "web"}}
+
+	inv, transcript, gathered := li.confirmRecall(context.Background(), req, recalledInv())
+	if !gathered {
+		t.Fatal("expected gathered=true")
+	}
+
+	// The transcript must be the shape transcriptExcerpt walks: an assistant turn
+	// carrying the calls (so each result can be labelled with its tool) plus one tool
+	// turn per result. Without the assistant turn the excerpt renders "[tool]" for
+	// everything and the reviewer cannot tell pod_status from kube_events.
+	if len(transcript) != 3 {
+		t.Fatalf("want 1 assistant turn + 2 tool results, got %d messages", len(transcript))
+	}
+	if transcript[0].Role != "assistant" || len(transcript[0].ToolCalls) != 2 {
+		t.Fatalf("first message must be the assistant turn carrying both calls, got %+v", transcript[0])
+	}
+	for _, m := range transcript[1:] {
+		if m.Role != "tool" || m.ToolCallID == "" {
+			t.Fatalf("result messages must be tool turns with a call id, got %+v", m)
+		}
+	}
+
+	// The property that actually matters: the review the model sees now CONTAINS a
+	// transcript excerpt, with each result attributed to the tool that produced it.
+	review := renderForReview(req, inv, transcript)
+	if !strings.Contains(review, "Tool transcript excerpt") {
+		t.Fatalf("the review must carry a transcript excerpt, else the prompt's groundedness "+
+			"rule is unsatisfiable and every recall is downgraded on principle:\n%s", review)
+	}
+	for _, want := range []string{"[pod_status] web-abc  Running ready=1/1", "[kube_events] (no Warning events)"} {
+		if !strings.Contains(review, want) {
+			t.Errorf("review must attribute each result to its tool; missing %q:\n%s", want, review)
+		}
+	}
+}
+
+// TestConfirmRecallNoTranscriptWhenNothingGathered keeps the degraded path honest: if
+// no current state could be gathered there is nothing the reviewer may treat as
+// verified, so it must get NO transcript rather than an empty or fabricated one. The
+// caller de-rates that case via recallUnconfirmedCap.
+func TestConfirmRecallNoTranscriptWhenNothingGathered(t *testing.T) {
+	li := &LoopInvestigator{Tools: []Tool{&fakeConfirmTool{name: "pod_status", out: "  "}}}
+	req := Request{Workload: providers.Workload{Namespace: "apps", Name: "web"}}
+	_, transcript, gathered := li.confirmRecall(context.Background(), req, recalledInv())
+	if gathered {
+		t.Fatal("blank tool output must not count as gathered")
+	}
+	if transcript != nil {
+		t.Fatalf("no gathered state must yield a nil transcript, got %+v", transcript)
+	}
+	// And a nil transcript must still render a reviewable message (no excerpt section).
+	if review := renderForReview(req, recalledInv(), nil); strings.Contains(review, "Tool transcript excerpt") {
+		t.Fatalf("a nil transcript must not render an empty excerpt section:\n%s", review)
 	}
 }
