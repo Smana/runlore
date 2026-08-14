@@ -465,7 +465,13 @@ func summaryBlocks(inv providers.Investigation) []map[string]any {
 	// from this DELIVERED number (see confidenceBadge); when it does,
 	// recallConfidenceNote spells out both so the reader never has to
 	// reconcile two bare, seemingly-contradictory percentages alone.
-	confText := fmt.Sprintf("%s *%s*", emoji, confidenceText(level, pct, stated))
+	// Bold covers the level only, never the percentage — byte-identical to what the
+	// README's shipped card captures show. The unstated variant has no level to bold,
+	// so it bolds the whole phrase.
+	confText := fmt.Sprintf("%s *%s confidence* · %d%%", emoji, level, pct)
+	if !stated {
+		confText = fmt.Sprintf("%s *%s*", emoji, confidenceText(level, pct, stated))
+	}
 	if note := recallConfidenceNote(inv, pct); note != "" {
 		confText += "\n_" + note + "_"
 	}
