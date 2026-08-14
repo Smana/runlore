@@ -1258,13 +1258,23 @@ func (r *recordingThreadSink) Register(root, channel string, inv providers.Inves
 	r.root, r.channel, r.inv, r.calls = root, channel, inv, r.calls+1
 }
 
+// TestSlackBotRegistersTheThreadRoot proves the registered thread root is the
+// SUMMARY post's ts, never the detail reply's — the mock deliberately returns a
+// different ts per call (111.222 then 999.888) so a regression that captured the
+// detail reply's ts instead (e.g. registration moved to after the detail post,
+// reusing an overwritten ts variable) is caught: with a single shared ts for
+// both calls, that regression would be invisible.
 func TestSlackBotRegistersTheThreadRoot(t *testing.T) {
 	var posts []map[string]any
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		var m map[string]any
 		_ = json.NewDecoder(r.Body).Decode(&m)
 		posts = append(posts, m)
-		_, _ = w.Write([]byte(`{"ok":true,"ts":"111.222"}`))
+		if len(posts) == 1 {
+			_, _ = w.Write([]byte(`{"ok":true,"ts":"111.222"}`))
+		} else {
+			_, _ = w.Write([]byte(`{"ok":true,"ts":"999.888"}`))
+		}
 	}))
 	defer srv.Close()
 
@@ -1273,7 +1283,15 @@ func TestSlackBotRegistersTheThreadRoot(t *testing.T) {
 	b.baseURL = srv.URL
 	b.Threads = sink
 
-	inv := providers.Investigation{Title: "OOMKilled", TriggerKey: "tk-1", CuratedURL: "https://github.com/o/r/pull/42"}
+	// Unresolved forces a non-empty detailBlocks, so Deliver actually posts a
+	// second (threaded) message — without it this investigation has no detail
+	// beyond the summary and the discriminating half of this test never runs.
+	inv := providers.Investigation{
+		Title:      "OOMKilled",
+		TriggerKey: "tk-1",
+		CuratedURL: "https://github.com/o/r/pull/42",
+		Unresolved: []string{"why the pod restarted a second time"},
+	}
 	if err := b.Deliver(context.Background(), inv); err != nil {
 		t.Fatalf("Deliver: %v", err)
 	}
@@ -1282,7 +1300,7 @@ func TestSlackBotRegistersTheThreadRoot(t *testing.T) {
 		t.Fatalf("Register calls = %d, want 1 (the summary root only, never the detail reply)", sink.calls)
 	}
 	if sink.root != "111.222" {
-		t.Errorf("root = %q, want 111.222", sink.root)
+		t.Errorf("root = %q, want 111.222 (the summary's ts, not the detail reply's 999.888)", sink.root)
 	}
 	if sink.channel != "C1" {
 		t.Errorf("channel = %q, want C1", sink.channel)
@@ -1290,8 +1308,11 @@ func TestSlackBotRegistersTheThreadRoot(t *testing.T) {
 	if sink.inv.TriggerKey != "tk-1" {
 		t.Errorf("investigation not passed through: %+v", sink.inv)
 	}
-	if len(posts) == 0 {
-		t.Fatal("nothing was posted")
+	if len(posts) != 2 {
+		t.Fatalf("got %d POSTs, want 2 (summary + detail reply)", len(posts))
+	}
+	if posts[1]["thread_ts"] != "111.222" {
+		t.Errorf("detail reply thread_ts = %v, want 111.222 (the summary's ts) — registration must not disturb the detail post", posts[1]["thread_ts"])
 	}
 }
 
