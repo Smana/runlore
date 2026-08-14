@@ -37,8 +37,8 @@ RENDERER=(internal/notify/slack.go internal/notify/format.go)
 #     fails again, so an acknowledgement cannot silently become permanent.
 #
 # Clear it (set to "") in the same commit that lands retaken screenshots.
-ACKNOWLEDGED_RENDERER=""
-ACKNOWLEDGED_REASON=""
+ACKNOWLEDGED_RENDERER="96e1dc6df8eefc1f7651b6ef0d2f02567e53e3ce"
+ACKNOWLEDGED_REASON="adds a 'confidence not stated' variant for a finding that carries no confidence at all. The stated-confidence line both captures actually show is byte-identical — 96e1dc6 exists specifically to restore its bolding after an incidental change — so neither image is WRONG, only incomplete: they cannot show a variant that had not been written when they were taken. Retake when a live workspace is next available."
 
 last_commit_time() {
   local t
