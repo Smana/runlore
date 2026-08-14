@@ -76,10 +76,10 @@ func parseVerdicts(args string) ([]verdict, error) {
 // rather than merely asserted.
 //
 // Passing nil is a claim, not merely an option: it says nothing here is independently
-// verified, leaving the prompt's groundedness rule with nothing to check against, so
-// the reviewer can only downgrade. Reserve it for when that is actually true (confirm
-// gathered no state at all). Handing nil to a path that DID gather evidence downgrades
-// sound findings on principle — see confirmRecall for the live case where it did.
+// verified, which leaves the groundedness rule with nothing to check against, so the
+// reviewer can only downgrade. Reserve it for when that is actually true — handing nil
+// to a path that DID gather evidence downgrades sound findings on principle, as the
+// recall path once did (see confirmRecall).
 //
 // The second return, verified, reports whether an adversarial review actually
 // happened: true when the returned investigation reflects a completed review
@@ -281,7 +281,8 @@ const maxVerifyTranscriptBytes = 4000
 // leak. The MOST RECENT tool results are preferred (they are the ones the model saw
 // just before concluding, so the most decision-relevant) and the excerpt is assembled
 // oldest-first up to maxVerifyTranscriptBytes. Returns "" when there are no tool
-// results (e.g. the recall short-circuit path, where no loop ran).
+// results — a loop that concluded without calling a tool, or a recall whose confirm
+// step gathered nothing (a confirmed recall DOES carry results; see confirmRecall).
 func transcriptExcerpt(transcript []providers.Message) string {
 	// Collect tool-result contents with a short call-name label (from the assistant
 	// turn that requested them) so the reviewer can tell which tool produced what.

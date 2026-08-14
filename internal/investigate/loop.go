@@ -717,8 +717,8 @@ func (li *LoopInvestigator) tryRecall(ctx context.Context, req Request, result *
 	li.Log.Info("instant recall (catalog hit; skipping the loop)",
 		"title", req.Title, "entry", entry.Path, "confidence", fmt.Sprintf("%.2f", conf))
 	rec := recalledInvestigation(req, *entry, conf)
-	rec, confirmTranscript, confirmed := li.confirmRecall(ctx, req, rec)
-	if !confirmed {
+	rec, confirmTranscript := li.confirmRecall(ctx, req, rec)
+	if confirmTranscript == nil {
 		// Could not confront the entry with current state — be less assertive
 		// so an unverifiable recall does not present at full recall confidence.
 		rec = capRecallConfidence(rec, recallUnconfirmedCap)
@@ -729,14 +729,11 @@ func (li *LoopInvestigator) tryRecall(ctx context.Context, req Request, result *
 		// Catalog content is untrusted: verify a recalled finding too, so a
 		// crafted high-recall entry can't bypass the adversarial review.
 		//
-		// The transcript is confirmRecall's tool results — the CURRENT cluster state,
+		// The transcript is confirmRecall's tool results — the current cluster state,
 		// the only independently-gathered fact on this path and so the only thing the
-		// reviewer may treat as verified. Passing nil here (as this did) left the
-		// prompt's groundedness rule with nothing to check against, which downgraded
-		// every recalled finding on principle; see confirmRecall for the full account.
-		// It is still nil when confirm gathered nothing (no namespace, tools absent,
-		// every call errored) — the review then runs on catalog text alone, which is
-		// exactly the case recallUnconfirmedCap above has already de-rated.
+		// reviewer may treat as verified. It is nil only when confirm gathered nothing,
+		// the case recallUnconfirmedCap above has already de-rated; see confirmRecall
+		// for why passing nil to a path that DID gather evidence downgrades it.
 		rec, verified = li.verifyFindings(ctx, req, rec, confirmTranscript, verifyTotals)
 	}
 	if !verified {
