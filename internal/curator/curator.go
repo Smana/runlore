@@ -114,10 +114,33 @@ func (c *Curator) Curate(ctx context.Context, inv providers.Investigation) (prov
 		if c.Metrics != nil {
 			c.Metrics.CurationDedupScore.Record(ctx, hits[0].Score)
 		}
+		// Log the score on EVERY dedup decision, not only when the gate fires.
+		//
+		// dup_score cannot be tuned by observation unless the below-threshold case is
+		// visible, and previously only the firing branch logged. A deployment where the
+		// gate never fires therefore produced no score data at all — and the
+		// curation_dedup_score histogram cannot fill that gap, because its lowest
+		// boundary above zero is 5, which is also the default threshold: every
+		// non-firing observation collapses into one bucket.
+		//
+		// Not hypothetical. On a ~50-entry catalog measured 2026-08-14 the BM25 scores
+		// run sub-1 (a live instant-recall hit scored 0.494) against the default
+		// dup_score of 5.0, so the gate is effectively inert: RunLore re-filed an entry
+		// for a fault the catalog already documented, under the same resource. Nothing
+		// in the operator's data could have told them what to set instead.
+		//
+		// Info rather than Debug: curation is infrequent (5 decisions in 30 days on that
+		// deployment), so this is a handful of lines, and it is the only way to answer
+		// "what should dup_score be?".
 		if hits[0].Score >= c.DupScore {
-			c.Log.Info("finding duplicates a catalog entry; not filing", "entry", hits[0].Entry.Title, "score", hits[0].Score)
+			c.Log.Info("dedup: duplicates a catalog entry; not filing",
+				"entry", hits[0].Entry.Title, "path", hits[0].Entry.Path,
+				"score", hits[0].Score, "dup_score", c.DupScore)
 			return providers.Ref{}, nil
 		}
+		c.Log.Info("dedup: top hit below dup_score; filing",
+			"top_entry", hits[0].Entry.Title, "path", hits[0].Entry.Path,
+			"score", hits[0].Score, "dup_score", c.DupScore)
 	}
 	if n, ok, err := c.duplicateOpenPR(ctx, inv); err != nil {
 		c.Log.Warn("dedup: list open PRs failed", "err", err)
