@@ -8,6 +8,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 RunLore is **pre-1.0 and under active development** — there are no tagged releases
 yet, so everything currently lives under `[Unreleased]`.
 
+## [0.14.0](https://github.com/Smana/runlore/compare/v0.13.0...v0.14.0) (2026-08-14)
+
+
+### Features
+
+* **chart:** enable the knowledge commons in the standard profile ([#464](https://github.com/Smana/runlore/issues/464)) ([02b9fb3](https://github.com/Smana/runlore/commit/02b9fb33afb0bec9f7e3172216d1bd836e7e0b27))
+
+
+### Bug Fixes
+
+* **ci:** check cross-page anchors, and fix three that were already broken ([#468](https://github.com/Smana/runlore/issues/468)) ([de26d0c](https://github.com/Smana/runlore/commit/de26d0c9882aa1d7219bc2876b338bfc91306fb3))
+* **curator:** log the dedup score on every decision, not only when it fires ([#480](https://github.com/Smana/runlore/issues/480)) ([3977055](https://github.com/Smana/runlore/commit/39770552ca9030227112d545def8ec6a183f787e))
+* **eval:** stop the nightly eval dying silently at its own timeout ([#477](https://github.com/Smana/runlore/issues/477)) ([cba3a9e](https://github.com/Smana/runlore/commit/cba3a9e899a437ce954831a1fbe0f65accab683d))
+* **recall:** ground the adversarial review of a recalled finding ([#476](https://github.com/Smana/runlore/issues/476)) ([04f36dd](https://github.com/Smana/runlore/commit/04f36dd7828739fa8b4b95d30ae28c9d1360a967))
+* **recall:** stop instant recall self-destructing after a single use ([#475](https://github.com/Smana/runlore/issues/475)) ([0280367](https://github.com/Smana/runlore/commit/02803679726992b3b79e8b123bfca5bcb99c9cc8))
+* **recurrence:** anchor suppression on a standing conclusive prior ([#472](https://github.com/Smana/runlore/issues/472)) ([19dc724](https://github.com/Smana/runlore/commit/19dc7240a2d1118484e38eb001818ef820d50077)), closes [#471](https://github.com/Smana/runlore/issues/471)
+* **website:** enlarge the homepage screenshots in place instead of opening a new tab ([#456](https://github.com/Smana/runlore/issues/456)) ([d251ed4](https://github.com/Smana/runlore/commit/d251ed48a57067b90c969d743bf12b0add90c200))
+
+
+### Documentation
+
+* add a worked Grafana MCP recipe ([#463](https://github.com/Smana/runlore/issues/463)) ([3916650](https://github.com/Smana/runlore/commit/3916650d2f7266a275c93c67a9d2d54ae903069a))
+* ask for feedback where the demo ends ([#461](https://github.com/Smana/runlore/issues/461)) ([fd92e52](https://github.com/Smana/runlore/commit/fd92e5285901de415d781a017ae949e1ad4bb69e))
+* **chart:** make the minimal profile's gitops engine and evidence gaps explicit ([#470](https://github.com/Smana/runlore/issues/470)) ([d25894b](https://github.com/Smana/runlore/commit/d25894b939394ed943fc8188651af2de2732188d))
+* **chart:** say why instant recall is off in the standard profile ([#466](https://github.com/Smana/runlore/issues/466)) ([037b383](https://github.com/Smana/runlore/commit/037b38324fdb22adb4f5cb559d191f3f5449d96c))
+* **chart:** state the commons failure mode and correct two details ([#465](https://github.com/Smana/runlore/issues/465)) ([50cd4f9](https://github.com/Smana/runlore/commit/50cd4f90b80724c3c836ba69c44120cfdeb6c64f))
+* lead with the recall cost delta and the zero-setup trial ([#460](https://github.com/Smana/runlore/issues/460)) ([ae22452](https://github.com/Smana/runlore/commit/ae224522c62356d2bd8d4c0af173b64bcdab4eed))
+* publish a roadmap and name the bus factor ([#462](https://github.com/Smana/runlore/issues/462)) ([dae9ca2](https://github.com/Smana/runlore/commit/dae9ca27142440d429c51e882c51debcb314f5dd))
+* **security:** make the security section index answer the question it exists for ([#469](https://github.com/Smana/runlore/issues/469)) ([3b57565](https://github.com/Smana/runlore/commit/3b5756574a2f733dd9354198876bde784b26a4be))
+
 ## [0.13.0](https://github.com/Smana/runlore/compare/v0.12.0...v0.13.0) (2026-08-03)
 
 
