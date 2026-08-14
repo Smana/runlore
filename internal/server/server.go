@@ -20,6 +20,7 @@ import (
 	"runtime/debug"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/Smana/runlore/internal/action"
@@ -38,6 +39,9 @@ type Server struct {
 	webhookToken string            // optional bearer token required on POST /webhook/alertmanager
 	approvers    map[string]bool   // Slack user IDs permitted to approve actions (empty = none)
 	guard        *authGuard        // failed-auth backoff for the shared-token endpoints
+	threads      ThreadHandler     // nil unless notify.slack.thread_capture is on
+	seenEvents   *seenSet          // Slack event_id dedup for delivery retries
+	eventSlots   chan struct{}     // bounds concurrent detached mention handlers
 
 	metrics http.Handler // optional; GET /metrics (OTel Prometheus exposition)
 	log     *slog.Logger
@@ -58,6 +62,14 @@ type FeedbackRecorder interface {
 	Feedback(triggerKey, rating, user string, at time.Time) error
 }
 
+// ThreadHandler processes a human message addressed to RunLore inside a thread.
+// Implemented by *thread.Mention. It returns nothing: the endpoint acks Slack
+// within its 3s deadline and the handler runs detached, replying in the thread
+// itself.
+type ThreadHandler interface {
+	HandleMention(ctx context.Context, channel, root, author, text string)
+}
+
 // Actions bundles the optional rung-2/rung-3 wiring: the approval queue, the auto
 // kill-switch, the shared control token, the Slack signing secret, and the opt-in
 // feedback recorder.
@@ -67,8 +79,9 @@ type Actions struct {
 	Feedback     FeedbackRecorder // opt-in 👍/👎 recording (notify.slack.feedback_buttons)
 	Token        string
 	SlackSecret  string
-	WebhookToken string   // optional bearer token required on POST /webhook/alertmanager
-	ApproverIDs  []string // Slack user IDs permitted to approve actions
+	WebhookToken string        // optional bearer token required on POST /webhook/alertmanager
+	ApproverIDs  []string      // Slack user IDs permitted to approve actions
+	Threads      ThreadHandler // opt-in thread capture (notify.slack.thread_capture)
 }
 
 // New builds a Server. ready reports whether this replica should serve; nil =
@@ -94,7 +107,10 @@ func New(ready func() bool, acts Actions, built []source.Built, pipe *source.Pip
 		approvals: acts.Approvals, pauser: acts.Pauser, feedback: acts.Feedback,
 		token: acts.Token, slackSecret: acts.SlackSecret,
 		webhookToken: acts.WebhookToken, approvers: approvers, metrics: metricsHandler, log: log,
-		guard: newAuthGuard(),
+		guard:      newAuthGuard(),
+		threads:    acts.Threads,
+		seenEvents: newSeenSet(1024),
+		eventSlots: make(chan struct{}, 4),
 	}
 	mux := http.NewServeMux()
 	// work marks a route as work-bearing: on a follower the request is proxied
@@ -105,6 +121,7 @@ func New(ready func() bool, acts Actions, built []source.Built, pipe *source.Pip
 	// wrapped: probes and scrapes are always about THIS replica.
 	work := fwd.middleware // nil-receiver safe: identity when fwd == nil
 	mux.Handle("POST /slack/interactions", work(http.HandlerFunc(s.handleSlackInteraction)))
+	mux.Handle("POST /slack/events", work(http.HandlerFunc(s.handleSlackEvent)))
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusOK)
 	})
@@ -380,6 +397,130 @@ func (s *Server) handleSlackInteraction(w http.ResponseWriter, r *http.Request) 
 	// ack must NOT — replacing would wipe the investigation the rating is about.
 	replace := act.ActionID == "runlore_approve" || act.ActionID == "runlore_reject"
 	s.updateSlack(r.Context(), p.ResponseURL, msg, replace)
+}
+
+// slackEvent is the subset of Slack's Events API envelope this server reads.
+type slackEvent struct {
+	Type      string `json:"type"`
+	Challenge string `json:"challenge"`
+	EventID   string `json:"event_id"`
+	Event     struct {
+		Type     string `json:"type"`
+		User     string `json:"user"`
+		BotID    string `json:"bot_id"`
+		Text     string `json:"text"`
+		Channel  string `json:"channel"`
+		TS       string `json:"ts"`
+		ThreadTS string `json:"thread_ts"`
+	} `json:"event"`
+}
+
+// handleSlackEvent receives Events API deliveries for the opt-in thread capture:
+// a human writing `@runlore …` inside an investigation thread.
+//
+// Only app_mention is subscribed — never message.channels. That is explicit
+// consent: RunLore reads nothing in a channel it was not addressed in, and there
+// is no firehose to filter.
+//
+// The endpoint acks BEFORE doing any work. Slack retries anything it does not
+// see acked within 3 seconds, and a knowledge write is a forge round-trip; a
+// synchronous handler would be retried mid-write and file the note repeatedly.
+func (s *Server) handleSlackEvent(w http.ResponseWriter, r *http.Request) {
+	if s.threads == nil || s.slackSecret == "" {
+		http.Error(w, "slack events not enabled", http.StatusNotFound)
+		return
+	}
+	body, err := io.ReadAll(io.LimitReader(r.Body, 1<<20))
+	if err != nil {
+		http.Error(w, "read body", http.StatusBadRequest)
+		return
+	}
+	if !s.verifySlack(r.Header, body) {
+		s.log.Warn("rejected slack event: bad signature")
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		return
+	}
+	var ev slackEvent
+	if err := json.Unmarshal(body, &ev); err != nil {
+		http.Error(w, "bad payload", http.StatusBadRequest)
+		return
+	}
+
+	// The subscription handshake: Slack posts a challenge to the Request URL and
+	// expects it echoed. Signature-verified like everything else on this endpoint.
+	if ev.Type == "url_verification" {
+		w.Header().Set("Content-Type", "text/plain")
+		_, _ = w.Write([]byte(ev.Challenge))
+		return
+	}
+
+	// Ack first, unconditionally: every path below this line is a reason to IGNORE
+	// the event, and an ignored event still has to be acked or Slack keeps retrying it.
+	w.WriteHeader(http.StatusOK)
+
+	if ev.Type != "event_callback" || ev.Event.Type != "app_mention" {
+		return
+	}
+	// Loop guard: never act on our own messages, or any other app's.
+	if ev.Event.BotID != "" || ev.Event.User == "" {
+		return
+	}
+	// Only replies inside a thread carry a root to attribute knowledge to. A
+	// top-level mention has ts but no thread_ts.
+	if ev.Event.ThreadTS == "" {
+		return
+	}
+	if ev.EventID != "" && !s.seenEvents.add(ev.EventID) {
+		s.log.Debug("slack event: duplicate delivery ignored", "event_id", ev.EventID)
+		return
+	}
+
+	// Detached from the request: the response is already written. WithoutCancel
+	// keeps request-scoped values while surviving the handler's return.
+	ctx := context.WithoutCancel(r.Context())
+	select {
+	case s.eventSlots <- struct{}{}:
+	default:
+		s.log.Warn("slack event: mention dropped, handler pool saturated", "channel", ev.Event.Channel)
+		return
+	}
+	go func() {
+		defer func() { <-s.eventSlots }()
+		defer func() {
+			if rec := recover(); rec != nil {
+				s.log.Error("recovered from thread handler panic", "panic", rec, "stack", string(debug.Stack()))
+			}
+		}()
+		s.threads.HandleMention(ctx, ev.Event.Channel, ev.Event.ThreadTS, ev.Event.User, ev.Event.Text)
+	}()
+}
+
+// seenSet is a bounded set of recently-seen ids. It exists so Slack's delivery
+// retries are ignored rather than filing the same note twice. Reset past the cap
+// rather than evicted individually: the live working set is the last few
+// minutes of events, so the crude bound is exact enough and has no ordering cost.
+type seenSet struct {
+	mu   sync.Mutex
+	cap  int
+	seen map[string]struct{}
+}
+
+func newSeenSet(capacity int) *seenSet {
+	return &seenSet{cap: capacity, seen: make(map[string]struct{}, capacity)}
+}
+
+// add records id and reports whether it was NEW (true = act on it).
+func (s *seenSet) add(id string) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if _, dup := s.seen[id]; dup {
+		return false
+	}
+	if len(s.seen) >= s.cap {
+		s.seen = make(map[string]struct{}, s.cap)
+	}
+	s.seen[id] = struct{}{}
+	return true
 }
 
 // verifySlack validates the Slack request signature (HMAC-SHA256 over
