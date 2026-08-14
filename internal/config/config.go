@@ -803,10 +803,15 @@ type SlackNotify struct {
 	// AND a delivery target (webhook_url_env, or bot_token_env + channel — buttons
 	// render and dispatch on either path); Validate fails loud when any is missing.
 	FeedbackButtons bool `yaml:"feedback_buttons"`
-	// ThreadCapture (opt-in, default off), when set on the bot delivery path,
-	// registers each delivered investigation's thread root so a later reply in
-	// that thread can be attributed to it. Requires the bot-token path
-	// (bot_token_env + channel) — a webhook cannot carry a conversation back.
+	// ThreadCapture (opt-in, default off) registers each delivered investigation's
+	// thread root so a later `@runlore note: …` reply in that thread can be
+	// attributed to it and written into the knowledge base. Requires exposing
+	// POST /slack/events to Slack (an Events API Request URL subscribed to
+	// app_mention), signing_secret_env — mentions arrive on that exposed
+	// endpoint and must be signature-verified, same as feedback_buttons above —
+	// AND the bot-token path (bot_token_env + channel): a webhook returns no
+	// message ts, so there is no thread root to attribute a reply to. Validate
+	// fails loud when any is missing.
 	ThreadCapture bool `yaml:"thread_capture"`
 }
 
