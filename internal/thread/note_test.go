@@ -6,6 +6,7 @@ import (
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/Smana/runlore/internal/catalog"
 	"github.com/Smana/runlore/internal/kbvalidate"
@@ -43,6 +44,10 @@ func TestConceptEntryPassesTheMergeGate(t *testing.T) {
 		{"no resource", Context{Title: "ImageGalleryUnavailable", TriggerKey: "tk-1"}},
 		{"no title", Context{TriggerKey: "tk-1"}},
 		{"empty context", Context{}},
+		// tc.Title comes from raw, untrusted alert text (inv.Title). A title
+		// carrying an embedded newline must still clear the merge gate: nothing
+		// upstream of ConceptEntry guarantees a single-line title.
+		{"title with embedded newline", Context{Title: "ImageGalleryUnavailable\r\nX-Injected: header"}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -85,13 +90,29 @@ func TestConceptEntryCarriesTriggerKeyNotFingerprint(t *testing.T) {
 }
 
 func TestConceptEntryTitleIsBounded(t *testing.T) {
-	e := ConceptEntry(Context{Title: strings.Repeat("x", 400)}, "alice", "y", noteAt)
-	issues := kbvalidate.ValidateStructural(catalog.Entry{
-		Type: e.Type, Title: e.Title, Description: e.Description, Body: e.Body,
-	})
-	for _, is := range issues {
-		if is.Severity == kbvalidate.SeverityError {
-			t.Errorf("long source title must not break the gate: %s: %s", is.Field, is.Message)
-		}
+	tests := []struct {
+		name  string
+		title string
+	}{
+		{"ascii", strings.Repeat("x", 400)},
+		// A repeated 3-byte CJK rune forces the truncation cut to land inside a
+		// multi-byte sequence unless the isRuneStart walk correctly backs off it.
+		{"multibyte rune boundary", strings.Repeat("国", 400)},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			e := ConceptEntry(Context{Title: tt.title}, "alice", "y", noteAt)
+			if !utf8.ValidString(e.Title) {
+				t.Fatalf("title is not valid UTF-8 after truncation: %q", e.Title)
+			}
+			issues := kbvalidate.ValidateStructural(catalog.Entry{
+				Type: e.Type, Title: e.Title, Description: e.Description, Body: e.Body,
+			})
+			for _, is := range issues {
+				if is.Severity == kbvalidate.SeverityError {
+					t.Errorf("long source title must not break the gate: %s: %s", is.Field, is.Message)
+				}
+			}
+		})
 	}
 }

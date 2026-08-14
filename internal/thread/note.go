@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"strings"
 	"time"
+	"unicode"
 
 	"github.com/Smana/runlore/internal/providers"
 )
@@ -46,7 +47,7 @@ func NoteBody(tc Context, author, text string, at time.Time) string {
 func ConceptEntry(tc Context, author, text string, at time.Time) providers.KBEntry {
 	title := "Operator note"
 	if tc.Title != "" {
-		title = "Operator note: " + tc.Title
+		title = "Operator note: " + singleLine(tc.Title)
 	}
 	title = truncate(title, maxNoteTitle)
 
@@ -89,17 +90,38 @@ func transportName(t string) string {
 	return t
 }
 
-// neutralizeImages defuses markdown image syntax so a note cannot embed a remote
-// image (a tracking pixel, or a request from the reviewer's browser) into a PR
-// body. The URL survives as ordinary text — a reviewer must still be able to see
-// what was linked.
+// neutralizeImages defuses Markdown image syntax (`![...](...)`) so a note
+// cannot embed a remote image (a tracking pixel, or a request fired from a
+// reviewer's browser) into a PR body via that syntax. The URL survives as
+// ordinary text — a reviewer must still be able to see what was linked.
+//
+// This does NOT cover raw HTML: a note containing `<img src="...">` passes
+// through unchanged, and both GitHub and GitLab render raw HTML in PR/MR
+// bodies. internal/forge/github.neutralizeImages and
+// internal/forge/gitlab.neutralizeImages share this function's name and
+// purpose but are separate, regex-based implementations with the same gap —
+// none of the three is a shared helper, and none of them sanitises HTML.
 func neutralizeImages(s string) string {
 	return strings.ReplaceAll(s, "![", "!&#91;")
 }
 
-// truncate shortens s to at most n BYTES, on a rune boundary, appending an
-// ellipsis when it cuts. Bytes, because that is what the validator's limit
-// counts.
+// singleLine collapses \r, \n and any other Unicode control character to a
+// space, so text pulled from untrusted sources (an alert title, in
+// particular) can never break a single-line YAML title — kbvalidate rejects
+// any title containing \r or \n outright.
+func singleLine(s string) string {
+	return strings.Map(func(r rune) rune {
+		if r == '\r' || r == '\n' || unicode.IsControl(r) {
+			return ' '
+		}
+		return r
+	}, s)
+}
+
+// truncate shortens s to around n bytes: it cuts at or before byte index n-1
+// (walking back to a rune boundary) and appends a 3-byte "…", so the result
+// can be up to n+2 bytes in the worst case. Bytes, because that is what the
+// validator's limit counts.
 func truncate(s string, n int) string {
 	if len(s) <= n {
 		return s
