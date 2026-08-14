@@ -9,6 +9,7 @@ import (
 	"strings"
 
 	"github.com/Smana/runlore/internal/providers"
+	"github.com/Smana/runlore/internal/redact"
 )
 
 // recallUnconfirmedCap is the recall-confidence ceiling applied when current cluster
@@ -75,6 +76,13 @@ func (li *LoopInvestigator) confirmRecall(ctx context.Context, req Request, inv 
 		if out = strings.TrimSpace(out); out == "" {
 			continue
 		}
+		// The same LLM-vendor egress boundary dispatchTools applies to every tool
+		// result. This path calls the tool directly rather than through runTool, so
+		// this is the only place it can be applied — and it must be, because BOTH
+		// forms below reach the verify model, and redactInvestigation does not run
+		// until deliver(), long after verify. Redact before truncating so a secret
+		// near the cap is still masked.
+		out, _ = truncateOutput(redact.Secrets(out), li.MaxToolOutputBytes)
 		inv.RootCauses[0].Evidence = append(inv.RootCauses[0].Evidence,
 			fmt.Sprintf("current state — %s:\n%s", name, out))
 		id := "recall-confirm-" + name
