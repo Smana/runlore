@@ -67,6 +67,16 @@ func (r *Responder) now() time.Time {
 	return time.Now()
 }
 
+// log returns r.Log, defaulting to slog.Default() so a zero-value Responder
+// (or one built without wiring a logger explicitly) never panics on a log
+// call.
+func (r *Responder) log() *slog.Logger {
+	if r.Log != nil {
+		return r.Log
+	}
+	return slog.Default()
+}
+
 func (r *Responder) maxNotes() int {
 	if r.MaxNotesPerThread <= 0 {
 		return DefaultMaxNotesPerThread
@@ -96,15 +106,18 @@ func (r *Responder) Handle(ctx context.Context, tc Context, author, raw string) 
 	}
 
 	at := r.now()
-	reply, err := r.write(ctx, tc, author, p.Text, at, p.Intent)
+	reply, landed, err := r.write(ctx, tc, author, p.Text, at, p.Intent)
 	if err != nil {
 		return reply, err
 	}
 
-	// The budget is consumed only by a write that landed: a forge outage must not
+	// The budget is consumed only by a write that landed: a forge outage — or a
+	// global-rate-limit throttle, which also returns with no error — must not
 	// burn the thread's allowance.
-	if uerr := r.Registry.Update(tc.Root, func(c *Context) { c.Notes++ }); uerr != nil {
-		r.Log.Warn("thread: note counter write-back failed", "root", tc.Root, "err", uerr)
+	if landed {
+		if uerr := r.Registry.Update(tc.Root, func(c *Context) { c.Notes++ }); uerr != nil {
+			r.log().Warn("thread: note counter write-back failed", "root", tc.Root, "err", uerr)
+		}
 	}
 	if p.Intent == IntentFreeform {
 		reply += "\n_Tip: prefix with `note:` to record something explicitly._"
@@ -113,8 +126,11 @@ func (r *Responder) Handle(ctx context.Context, tc Context, author, raw string) 
 }
 
 // write routes the note to the open KB PR, to the PR this thread already opened,
-// or to a new standalone Concept PR — in that order.
-func (r *Responder) write(ctx context.Context, tc Context, author, text string, at time.Time, intent Intent) (string, error) {
+// or to a new standalone Concept PR — in that order. The returned bool reports
+// whether a write actually landed in the knowledge base: it is false both on
+// error and on the (non-error) global-rate-limit throttle, so a caller can
+// distinguish "nothing happened" from "a write happened" independently of err.
+func (r *Responder) write(ctx context.Context, tc Context, author, text string, at time.Time, intent Intent) (string, bool, error) {
 	// The route is derived from the thread context alone. It is never influenced
 	// by the message text.
 	for _, url := range []string{tc.CuratedURL, tc.NoteURL} {
@@ -123,28 +139,30 @@ func (r *Responder) write(ctx context.Context, tc Context, author, text string, 
 			continue
 		}
 		if err := r.Forge.CommentOnPR(ctx, n, NoteBody(tc, author, text, at)); err != nil {
-			return fmt.Sprintf("⚠️ I could not save that to the knowledge base: %v", err),
+			return fmt.Sprintf("⚠️ I could not save that to the knowledge base: %v", err), false,
 				fmt.Errorf("comment on PR %d: %w", n, err)
 		}
-		r.Log.Info("thread: note recorded on KB PR", "pr", n, "root", tc.Root, "author", author, "intent", intent.String())
-		return fmt.Sprintf("📝 Noted on the knowledge-base PR #%d — %s", n, url), nil
+		r.log().Info("thread: note recorded on KB PR", "pr", n, "root", tc.Root, "author", author, "intent", intent.String())
+		return fmt.Sprintf("📝 Noted on the knowledge-base PR #%d — %s", n, url), true, nil
 	}
 
 	if r.OpenPRs != nil && !r.OpenPRs.Allow() {
-		return "⚠️ I have opened too many knowledge-base PRs recently and paused. Try again shortly.", nil
+		// A throttle is not a failure — no error — but nothing landed, so the
+		// caller must not charge the thread's note budget for it.
+		return "⚠️ I have opened too many knowledge-base PRs recently and paused. Try again shortly.", false, nil
 	}
 	ref, err := r.Forge.OpenPR(ctx, ConceptEntry(tc, author, text, at))
 	if err != nil {
-		return fmt.Sprintf("⚠️ I could not save that to the knowledge base: %v", err),
+		return fmt.Sprintf("⚠️ I could not save that to the knowledge base: %v", err), false,
 			fmt.Errorf("open note PR: %w", err)
 	}
 	if uerr := r.Registry.Update(tc.Root, func(c *Context) { c.NoteURL = ref.URL }); uerr != nil {
-		r.Log.Warn("thread: note PR write-back failed; a later note in this thread may open a second PR",
+		r.log().Warn("thread: note PR write-back failed; a later note in this thread may open a second PR",
 			"root", tc.Root, "url", ref.URL, "err", uerr)
 	}
-	r.Log.Info("thread: note opened a standalone KB PR", "url", ref.URL, "root", tc.Root, "author", author, "intent", intent.String())
+	r.log().Info("thread: note opened a standalone KB PR", "url", ref.URL, "root", tc.Root, "author", author, "intent", intent.String())
 	if n, ok := PRNumber(ref.URL); ok {
-		return fmt.Sprintf("📝 Opened knowledge-base PR #%d with your note — %s", n, ref.URL), nil
+		return fmt.Sprintf("📝 Opened knowledge-base PR #%d with your note — %s", n, ref.URL), true, nil
 	}
-	return "📝 Opened a knowledge-base PR with your note — " + ref.URL, nil
+	return "📝 Opened a knowledge-base PR with your note — " + ref.URL, true, nil
 }

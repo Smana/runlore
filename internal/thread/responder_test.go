@@ -217,6 +217,15 @@ func TestHandleOpenPRRateLimit(t *testing.T) {
 	if len(f.opened) != 1 {
 		t.Fatalf("opened = %d, want 1 — the global OpenPR budget caps the second", len(f.opened))
 	}
+	// Thread "b" hit the global rate limit: nothing landed in the knowledge base
+	// for it, so its per-thread budget must be untouched.
+	throttled, ok := r.Registry.Get("b")
+	if !ok {
+		t.Fatal("registry lost thread b")
+	}
+	if throttled.Notes != 0 {
+		t.Errorf("Notes = %d for the throttled thread, want 0 — a throttled write must not burn the thread's budget", throttled.Notes)
+	}
 }
 
 func TestHandleFreeformIsCapturedWhenNoModelIsWired(t *testing.T) {
@@ -307,5 +316,42 @@ func TestHandleUnparseableCuratedURLFallsBackToOpeningAPR(t *testing.T) {
 	}
 	if len(f.opened) != 1 {
 		t.Fatalf("a URL with no parseable PR number must fall back to OpenPR; opened = %d", len(f.opened))
+	}
+}
+
+func TestMaxNotesDefaultsWhenUnset(t *testing.T) {
+	r := &Responder{}
+	if got := r.maxNotes(); got != DefaultMaxNotesPerThread {
+		t.Errorf("maxNotes() = %d, want DefaultMaxNotesPerThread (%d)", got, DefaultMaxNotesPerThread)
+	}
+	r.MaxNotesPerThread = -5
+	if got := r.maxNotes(); got != DefaultMaxNotesPerThread {
+		t.Errorf("maxNotes() with a non-positive override = %d, want the default %d", got, DefaultMaxNotesPerThread)
+	}
+}
+
+func TestHandlePrefersCuratedURLOverNoteURL(t *testing.T) {
+	f := &fakeForge{}
+	r := newTestResponder(t, f)
+	tc := Context{
+		Root:       "111.222",
+		CuratedURL: "https://github.com/o/r/pull/42",
+		NoteURL:    "https://github.com/o/r/pull/77",
+	}
+	if err := r.Registry.Put(tc); err != nil {
+		t.Fatalf("Put: %v", err)
+	}
+
+	if _, err := r.Handle(context.Background(), tc, "alice", "note: x"); err != nil {
+		t.Fatalf("Handle: %v", err)
+	}
+	if len(f.comments) != 1 {
+		t.Fatalf("comments = %d, want 1", len(f.comments))
+	}
+	if f.comments[0].number != 42 {
+		t.Errorf("commented on PR %d, want 42 — CuratedURL must win when both CuratedURL and NoteURL are set", f.comments[0].number)
+	}
+	if len(f.opened) != 0 {
+		t.Errorf("must not open a PR when CuratedURL is already linked; opened %d", len(f.opened))
 	}
 }
