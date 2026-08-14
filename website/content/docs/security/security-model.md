@@ -193,11 +193,12 @@ against the app **signing secret** (HMAC-SHA256 over the raw body, ±5-minute ti
 against replay, constant-time compare) *before* any parsing-derived action; unsigned or stale
 requests are rejected and the body read is capped at 1 MiB. Replay within the window is idempotent
 by the vote dedup. The message-update callback (`response_url`) is restricted to
-`https://*.slack.com` with a bounded client (no SSRF). **Expose only the path, not the pod**: route
-*only* `/slack/interactions` through your ingress/gateway — the same listener also serves the
-alert webhook (open when `server.webhook_token_env` is unset!), `/metrics`, and the token-gated
-control endpoints, none of which belong on the internet. If any part of the server is reachable
-from outside, set `server.webhook_token_env` regardless of action mode.
+`https://*.slack.com` with a bounded client (no SSRF). **Expose only the paths you use, not the
+pod**: route `/slack/interactions` — and, if [thread capture](#slack-thread-capture-notifyslackthread_capture--a-second-exposed-endpoint)
+is also enabled, `/slack/events` too — through your ingress/gateway, and nothing else; the same
+listener also serves the alert webhook (open when `server.webhook_token_env` is unset!), `/metrics`,
+and the token-gated control endpoints, none of which belong on the internet. If any part of the
+server is reachable from outside, set `server.webhook_token_env` regardless of action mode.
 
 **Matrix (`notify.matrix.feedback_reactions`) — nothing exposed, one explicit check.** Reactions
 arrive over the client-server `/sync` **long-poll — an outbound HTTPS request** authenticated by
@@ -210,6 +211,26 @@ counting a vote **only when the reacted-to event was sent by the bot itself** �
 listen at all until that identity is known. Operational requirement: because vote identity is room
 membership, use an **invite-only room** (and prefer disabling federation for it); in a federated
 room, remote homeservers assert their own users' identities.
+
+## Slack thread capture (`notify.slack.thread_capture`) — a second exposed endpoint
+
+Opt-in and separate from the feedback channels above: replying `@runlore note: …` inside an
+investigation thread lets a human write what they know straight into a knowledge-base PR — reviewed
+and merged like any other curated entry, never applied automatically. It shares the Slack
+interactivity callback's *exposure* story above, but none of its vote trust model, which is why it
+gets its own section here instead of folding into that one.
+
+Mentions arrive on `POST /slack/events`, a Slack Events API Request URL subscribed to `app_mention`
+only — never `message.channels` — so RunLore reads nothing in a channel it was not addressed in. The
+route exists on every deployment, but is a no-op unless opted in: with `notify.slack.thread_capture`
+off (the default) it answers **404**, exactly like `/slack/interactions` above when no feedback path
+is configured. Once enabled, every request passes the *identical* check as the interactivity
+callback, before any parsing-derived action: HMAC-SHA256 over the raw body against the app
+**signing secret**, the same ±5-minute timestamp window against replay, constant-time compare, and a
+1 MiB body cap. The Events API subscription handshake (Slack's `url_verification` challenge) is
+verified the same way, so an attacker cannot repoint your endpoint by guessing the Request URL. See
+**Expose only the paths you use** above — `/slack/events` needs the same ingress treatment as
+`/slack/interactions`, nothing more.
 
 ## Honest limitations
 

@@ -285,6 +285,13 @@ config:
   #     #   render on either). Startup fails loud if any is missing. Mount the secret too: an
   #     #   EMPTY credential env var skips the Slack notifier entirely (startup warns, no
   #     #   buttons are delivered and no rating can be recorded).
+  #     # thread_capture: true          # OPT-IN: a human reply in an investigation thread
+  #     #   ("@runlore note: …") is written into the knowledge base as a reviewed PR. Requires
+  #     #   Option B (bot_token_env + channel — a webhook returns no thread ts, so there's no
+  #     #   thread to attribute a reply to) PLUS signing_secret_env (mentions arrive on the
+  #     #   exposed POST /slack/events endpoint and must be signature-verified, same as
+  #     #   feedback_buttons above). Startup fails loud if either is missing; that endpoint
+  #     #   404s whenever this is off.
   #   matrix: { homeserver: https://matrix.org, room_id: "!r:hs", access_token_env: MATRIX_TOKEN }
   #   # matrix.feedback_reactions: true  # OPT-IN 👍/👎 reactions feeding the learning loop.
   #   #   ZERO-INGRESS (outbound /sync long-poll — nothing to expose, unlike Slack buttons).
