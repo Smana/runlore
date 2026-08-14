@@ -3,6 +3,7 @@
 package curator
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"io"
@@ -473,5 +474,47 @@ func TestCurateRecordsDedupScore(t *testing.T) {
 	h.ServeHTTP(rec, req)
 	if !strings.Contains(rec.Body.String(), "runlore_curation_dedup_score") {
 		t.Fatalf("runlore_curation_dedup_score not found in metrics output:\n%s", rec.Body.String())
+	}
+}
+
+// TestCurateLogsDedupScoreBothWays pins the property that makes dup_score tunable:
+// the top-hit BM25 score is logged on EVERY dedup decision, not only when the gate
+// fires.
+//
+// Before this, only the firing branch logged. A deployment whose scores never reach
+// the threshold produced no score data at all, and the curation_dedup_score histogram
+// could not fill the gap — its lowest boundary above zero is 5, the same as the default
+// threshold, so every non-firing observation lands in one bucket. Measured on a
+// ~50-entry catalog: BM25 scores run sub-1 against a dup_score of 5.0, so the gate is
+// inert and the operator has nothing to tune from.
+func TestCurateLogsDedupScoreBothWays(t *testing.T) {
+	capture := func(score float64) string {
+		var buf bytes.Buffer
+		c := newCurator(&fakeForge{}, fakeScored{score: score, title: "Some entry"})
+		c.Log = slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelInfo}))
+		if _, err := c.Curate(context.Background(), goodFinding()); err != nil {
+			t.Fatalf("curate at score %v: %v", score, err)
+		}
+		return buf.String()
+	}
+
+	// Below the 5.0 threshold: the entry IS filed, and the score must still be logged —
+	// this is the case that previously produced nothing.
+	below := capture(2.0)
+	if !strings.Contains(below, "score=2") {
+		t.Errorf("a below-threshold dedup decision must log its score; got:\n%s", below)
+	}
+	if !strings.Contains(below, "dup_score=5") {
+		t.Errorf("the log must carry the threshold it was compared against, so the two "+
+			"can be read together; got:\n%s", below)
+	}
+
+	// At/above the threshold: still logged, and still carries both numbers.
+	above := capture(7.5)
+	if !strings.Contains(above, "score=7.5") || !strings.Contains(above, "dup_score=5") {
+		t.Errorf("an above-threshold dedup decision must log score and threshold; got:\n%s", above)
+	}
+	if !strings.Contains(above, "not filing") {
+		t.Errorf("the suppressing branch must still say it suppressed the PR; got:\n%s", above)
 	}
 }
