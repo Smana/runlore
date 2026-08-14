@@ -190,6 +190,13 @@ type Ledger struct {
 	// compaction does not lose it.
 	staleResolves int
 
+	// resolvesSeen counts every resolve event this ledger has ever folded, paired or
+	// not. It is not a statistic — it is the PROOF that a ground-truth resolve channel
+	// exists at all, which resolve-based decay is meaningless without (see
+	// ResolveChannelLive). Deliberately incremented before any pairing decision: a
+	// resolve that buffers, or is dropped as stale, still proves the channel works.
+	resolvesSeen int
+
 	// maxEvents bounds the JSONL before loadLocked compacts it (0 disables). corruptLines
 	// records how many lines the last load could not parse (so the skip is observable, not
 	// silent). log carries a logger for those warnings; never nil after New.
@@ -221,6 +228,11 @@ type checkpointData struct {
 	TriggerConfirms map[string]int               `json:"trigger_confirms,omitempty"`
 	DroppedResolves int                          `json:"dropped_resolves,omitempty"`
 	StaleResolves   int                          `json:"stale_resolves,omitempty"`
+	// ResolvesSeen carries the resolve-channel liveness proof across compaction. Absent
+	// from a checkpoint written before this field existed; a replay then reconstructs it
+	// from the retained tail only, which degrades to "channel not proven" — conservative
+	// (decay is withheld), never the reverse.
+	ResolvesSeen int `json:"resolves_seen,omitempty"`
 }
 
 type triggerAggJSON struct {
@@ -403,6 +415,7 @@ func (l *Ledger) resetStateLocked() {
 	l.triggerConfirms = map[string]int{}
 	l.droppedResolves = 0
 	l.staleResolves = 0
+	l.resolvesSeen = 0
 }
 
 // foldLocked folds one replayed event into the derived state. Open/resolve maintain the
@@ -468,6 +481,7 @@ func (l *Ledger) seedCheckpointLocked(cd *checkpointData) {
 	}
 	l.droppedResolves += cd.DroppedResolves
 	l.staleResolves += cd.StaleResolves
+	l.resolvesSeen += cd.ResolvesSeen
 }
 
 // compactLocked rewrites the ledger file as [checkpoint][recent tail]: it folds the
@@ -506,6 +520,7 @@ func (l *Ledger) snapshotCheckpointLocked() *checkpointData {
 		PendingResolves: l.pendingResolves,
 		DroppedResolves: l.droppedResolves,
 		StaleResolves:   l.staleResolves,
+		ResolvesSeen:    l.resolvesSeen,
 	}
 	if len(l.byTrigger) > 0 {
 		cd.ByTrigger = make(map[string]triggerAggJSON, len(l.byTrigger))
@@ -673,6 +688,10 @@ func (l *Ledger) applyOpenLocked(e Event) {
 // if it was a counted recall, credit its resolution; with no pending open, buffer
 // the resolve for a later open. Must be called with mu held (or during New).
 func (l *Ledger) applyResolveLocked(fp string, at time.Time) {
+	// Channel-liveness proof, recorded before any pairing decision: whether this
+	// resolve pairs, buffers, or is discarded says nothing about whether the SENDER
+	// emits resolves, and that is the only question ResolveChannelLive answers.
+	l.resolvesSeen++
 	stack := l.pendingOpens[fp]
 	if len(stack) == 0 {
 		// No pending open yet — buffer this resolve for a later open (resolve-before-open).
@@ -1062,6 +1081,18 @@ type Aggregate struct {
 // confirmation — with k=2 and floor 0.5, one 👎 needs TWO confirmations to recover.
 const confirmWeight = 0.5
 
+// HasEvidence reports whether the aggregate holds any ground-truth OUTCOME —
+// a paired resolve, a human vote, or a machine confirmation.
+//
+// Recalls is deliberately excluded: it is the count of times the entry was USED,
+// which is the trial count, not an outcome. An aggregate with recalls and nothing
+// else says only "we answered N times and heard nothing back". Whether that silence
+// means failure depends entirely on whether a resolve could have arrived — see
+// Ledger.ResolveChannelLive, the other half of this decision.
+func (a Aggregate) HasEvidence() bool {
+	return a.Resolved > 0 || a.FeedbackUp > 0 || a.FeedbackDown > 0 || a.Confirms > 0
+}
+
 // Factor is the entry's outcome-decay factor: the posterior mean of a symmetric
 // Beta(k/2, k/2) prior over the success rate, folding resolves, human votes, and
 // machine confirmations into one trust signal:
@@ -1083,6 +1114,44 @@ func (a Aggregate) Factor(k float64) float64 {
 	return (float64(a.Resolved+a.FeedbackUp) + c + k/2) / (float64(a.Recalls+a.FeedbackUp+a.FeedbackDown) + c + k)
 }
 
+// ResolveChannelLive reports whether a ground-truth resolve signal can actually
+// reach this ledger — true once ANY resolve event has ever been folded.
+//
+// Resolve-based decay assumes silence after a recall is evidence of failure. That
+// only holds when a resolve COULD have arrived. Two deployments make it false:
+// Alertmanager configured with `send_resolved: false`, and any source whose
+// notifications simply never carry a resolve. In both, every recall increments
+// Recalls with a Resolved that can never follow, so the Beta posterior collapses:
+// with the default k=2, ONE recall takes a correct entry to (0+1)/(1+2)=0.333,
+// below the 0.5 floor, and instant recall is disabled for that entry forever.
+// Measured live on a shared cluster in 2026-08: exactly one recall had ever fired
+// and the same alert was then re-investigated from scratch three times in 12h.
+//
+// docs/learning-loop.md already promises this case is excluded ("sources with no
+// resolve channel … are deliberately excluded from resolve-based decay"), but the
+// only signal the open path had was outcome.Derived(fingerprint) — which detects a
+// SYNTHETIC fingerprint (GitOps, reinvestigate) and cannot see the sender's
+// Alertmanager config. This closes that gap empirically instead: a channel that has
+// never delivered a single resolve is not a channel.
+//
+// Why liveness is read at GATE time and never at fold time: the cached aggregate is
+// contractually "equal to a fresh full replay for any event sequence". Skipping the
+// Recalls++ while the channel looked dead would make that false — a resolve arriving
+// later would leave earlier opens uncounted live, yet counted after a restart replays
+// the file with the proof already in hand. Counting stays unconditional; only the
+// interpretation of the counts is conditioned.
+//
+// Conservative in every failure mode: unknown ⇒ withhold decay ⇒ an entry keeps
+// firing. A nil ledger reports false.
+func (l *Ledger) ResolveChannelLive() bool {
+	if l == nil {
+		return false
+	}
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.resolvesSeen > 0
+}
+
 // OpenCounts rolls recall episodes up per catalog entry (fresh investigations
 // carry no entry). It is the input to recall decay: resolve-rate ≈
 // (Resolved+k)/(Recalls+k), and runs on the recall hot path once per incident
@@ -1094,6 +1163,10 @@ func (a Aggregate) Factor(k float64) float64 {
 // Episodes() replay may diverge.
 // A disabled/empty ledger yields an empty (non-nil) map. The returned map is a
 // fresh copy the caller may freely mutate.
+//
+// The counts alone do not decide decay: an unresolved recall is evidence of failure
+// only where a resolve could have arrived, so the gate reads ResolveChannelLive
+// alongside them.
 //
 // Behaviour note: because the read moved to New/Reload, OpenCounts no longer performs
 // file I/O and so can no longer return a read error — any error reading the ledger

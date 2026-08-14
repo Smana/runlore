@@ -271,9 +271,15 @@ func TestOutcomeFactor(t *testing.T) {
 type fakeOutcome struct {
 	counts map[string]outcome.Aggregate
 	err    error
+	// deadResolveChannel models a deployment where a resolve can never arrive
+	// (Alertmanager with send_resolved off, or a source with no resolve channel).
+	// Zero value = live, so every pre-existing decay test keeps asserting decay.
+	deadResolveChannel bool
 }
 
 func (f fakeOutcome) OpenCounts() (map[string]outcome.Aggregate, error) { return f.counts, f.err }
+
+func (f fakeOutcome) ResolveChannelLive() bool { return !f.deadResolveChannel }
 
 // soloRecall builds a Recall over a single strong hit that clears the margin +
 // solo gates for an apps/web workload, with decay configured (k=2, floor=0.5).

@@ -306,12 +306,12 @@ func feedbackBlocks(inv providers.Investigation) []map[string]any {
 // never embeds a slackDate token (raw <>), so it stays a single safe line.
 func fallbackText(inv providers.Investigation) string {
 	title := displayTitle(inv.Title)
-	_, level, pct := confidenceBadge(inv)
+	_, level, pct, stated := confidenceBadge(inv)
 	s := "🔍 " + title
 	if _, label := verdictBadge(inv.Verdict); label != "" {
 		s += " — " + label
 	}
-	return escapeMrkdwn(fmt.Sprintf("%s (%s confidence · %d%%)", s, level, pct))
+	return escapeMrkdwn(fmt.Sprintf("%s (%s)", s, confidenceText(level, pct, stated)))
 }
 
 // displayTitle falls back to a generic label when the model/trigger gave no title.
@@ -392,7 +392,7 @@ func escapeMrkdwn(s string) string { return mrkdwnEscaper.Replace(s) }
 // single-message webhook path.
 func summaryBlocks(inv providers.Investigation) []map[string]any {
 	title := displayTitle(inv.Title)
-	emoji, level, pct := confidenceBadge(inv)
+	emoji, level, pct, stated := confidenceBadge(inv)
 
 	// 1. Header (plain_text — Slack renders it literally, no mrkdwn parsing, so the
 	// untrusted alert name / title needs no escaping). When the source named the
@@ -465,7 +465,13 @@ func summaryBlocks(inv providers.Investigation) []map[string]any {
 	// from this DELIVERED number (see confidenceBadge); when it does,
 	// recallConfidenceNote spells out both so the reader never has to
 	// reconcile two bare, seemingly-contradictory percentages alone.
+	// Bold covers the level only, never the percentage — byte-identical to what the
+	// README's shipped card captures show. The unstated variant has no level to bold,
+	// so it bolds the whole phrase.
 	confText := fmt.Sprintf("%s *%s confidence* · %d%%", emoji, level, pct)
+	if !stated {
+		confText = fmt.Sprintf("%s *%s*", emoji, confidenceText(level, pct, stated))
+	}
 	if note := recallConfidenceNote(inv, pct); note != "" {
 		confText += "\n_" + note + "_"
 	}
@@ -686,7 +692,13 @@ func detailBlocks(inv providers.Investigation) []map[string]any {
 	}
 	for i, rc := range inv.RootCauses {
 		var s strings.Builder
-		fmt.Fprintf(&s, "*%d. %s*  `%.0f%%`", i+1, escapeMrkdwn(rc.Summary), rc.Confidence*100)
+		// An unstated per-cause confidence renders as nothing rather than a `0%`
+		// chip — same reason as the headline; see confidenceText.
+		if rc.Confidence > 0 {
+			fmt.Fprintf(&s, "*%d. %s*  `%.0f%%`", i+1, escapeMrkdwn(rc.Summary), rc.Confidence*100)
+		} else {
+			fmt.Fprintf(&s, "*%d. %s*", i+1, escapeMrkdwn(rc.Summary))
+		}
 		if rc.ChangeRef != "" {
 			fmt.Fprintf(&s, "\n📦 *What changed:* `%s`", escapeMrkdwn(rc.ChangeRef))
 		}
@@ -726,22 +738,48 @@ func appendListSection(blocks []map[string]any, header string, items []string) [
 // must render AS-IS — maxing it against the top hypothesis's raw match
 // confidence would silently hide a bad track record behind the larger number.
 // See recallConfidenceNote for how the two are disclosed when they diverge.
-func confidenceBadge(inv providers.Investigation) (emoji, level string, pct int) {
+// The fourth return, `stated`, separates "the model assessed this as very low" from
+// "the model assessed nothing at all" — see confidenceText for why those two must not
+// render alike.
+func confidenceBadge(inv providers.Investigation) (emoji, level string, pct int, stated bool) {
 	c := inv.Confidence
 	if !inv.Recalled {
 		for _, rc := range inv.RootCauses {
 			c = max(c, rc.Confidence)
 		}
 	}
+	// A recalled investigation's confidence is derived by the recall pipeline, never
+	// left to a model, so it is always stated — even at 0.
+	stated = inv.Recalled || c > 0
 	pct = int(c*100 + 0.5)
 	switch {
 	case c >= 0.7:
-		return "🟢", "High", pct
+		return "🟢", "High", pct, stated
 	case c >= 0.4:
-		return "🟡", "Medium", pct
+		return "🟡", "Medium", pct, stated
+	case stated:
+		return "🔴", "Low", pct, stated
 	default:
-		return "🔴", "Low", pct
+		return "⚪", "Unstated", pct, stated
 	}
+}
+
+// confidenceText renders the confidence fragment every delivery path headlines, so the
+// four of them can never disagree about the same investigation.
+//
+// When the model stated no confidence anywhere it reads "confidence not stated" rather
+// than "Low confidence · 0%". An absent self-assessment is not a zero one, and the
+// difference is not cosmetic: `confidence` was optional in the findings schema, so a
+// model that simply omitted it turned a sound, fully-evidenced, verify-passed finding
+// into a red 0% card. Observed live — a NodeSystemSaturation investigation that
+// correctly pinned a workspace pod consuming 7 of a node's 8 cores, metrics quoted,
+// shipped as "🔴 Low confidence · 0%". Per-root-cause confidence is now required in the
+// schema; this is the honest fallback for a model that ignores it.
+func confidenceText(level string, pct int, stated bool) string {
+	if !stated {
+		return "confidence not stated"
+	}
+	return fmt.Sprintf("%s confidence · %d%%", level, pct)
 }
 
 // recallConfidenceNote discloses a recalled entry's own match confidence

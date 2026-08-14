@@ -88,6 +88,95 @@ apps/worker pods are OOMKilled shortly after a values change lowered the memory 
 	}
 }
 
+// TestRecallDecayWithheldWithoutResolveChannel pins the fix for the live failure
+// where instant recall fired exactly ONCE and was then locked out permanently.
+//
+// The deployment ran Alertmanager with `send_resolved: false`, so a resolve could
+// never arrive. Recalls still incremented, Resolved could not, and with k=2 a single
+// recall put a correct, human-validated entry at (0+1)/(1+2)=0.333 — below the 0.5
+// floor. Measured: one recall total, then the same alert re-investigated from scratch
+// three times in 12h. docs/learning-loop.md already promised this case was excluded
+// from resolve-based decay; only outcome.Derived(fingerprint) enforced it, which
+// cannot see the sender's config.
+//
+// The contract this pins: silence decays an entry only where a resolve was POSSIBLE.
+func TestRecallDecayWithheldWithoutResolveChannel(t *testing.T) {
+	dir := t.TempDir()
+	entry := `---
+type: Incident
+title: worker OOMKilled after memory limit drop
+description: apps/worker pods OOMKilled; raise the container memory limit
+resource: apps/worker
+tags: [oom, memory, worker]
+---
+
+# Symptom
+apps/worker pods are OOMKilled shortly after a values change lowered the memory limit.
+`
+	if err := os.WriteFile(filepath.Join(dir, "worker-oom.md"), []byte(entry), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cat, err := catalog.New(dir)
+	if err != nil {
+		t.Fatalf("catalog.New: %v", err)
+	}
+	path := cat.Entries()[0].Path
+
+	req := Request{
+		Title:    "WorkerOOM",
+		Message:  "apps/worker pods OOMKilled after memory limit drop",
+		Workload: providers.Workload{Namespace: "apps", Name: "worker"},
+	}
+	newRecall := func(o OutcomeStats) *Recall {
+		return &Recall{
+			Catalog:      cat,
+			MinScore:     0.001,
+			SoloFloor:    0.001,
+			MarginGap:    0.001,
+			Outcome:      o,
+			OutcomePrior: 2.0,
+			OutcomeFloor: 0.5,
+		}
+	}
+	// The exact live shape: recalled once, nothing heard back, no resolve channel.
+	unresolvable := map[string]outcome.Aggregate{path: {Recalls: 1, Resolved: 0}}
+
+	// Premise guard: under the plain formula this history IS sub-floor. Without the
+	// channel check the entry would be rejected here — that is the bug being fixed.
+	if f := outcomeFactor(1, 0, 0, 0, 0, 2.0); f >= 0.5 {
+		t.Fatalf("fixture invalid: outcomeFactor(1,0,0,0,0,2)=%v must be below the 0.5 floor "+
+			"for this test to exercise the withheld decay", f)
+	}
+
+	// Dead channel + no other evidence → decay is withheld, recall still fires.
+	dead := newRecall(fakeOutcome{counts: unresolvable, deadResolveChannel: true})
+	if e, conf := dead.lookup(context.Background(), req); e == nil {
+		t.Fatal("recall must FIRE when no resolve could ever have arrived: an ungradeable " +
+			"entry is not a failing one, and decaying it locks recall out after a single use")
+	} else if conf <= 0 {
+		t.Fatalf("fired recall must carry a positive confidence, got %v", conf)
+	}
+
+	// Same history on a LIVE channel → the silence is real evidence → still rejected.
+	// This is the guard against over-correcting: the intended decay must survive.
+	live := newRecall(fakeOutcome{counts: unresolvable})
+	if e, _ := live.lookup(context.Background(), req); e != nil {
+		t.Fatalf("with a working resolve channel an unresolved recall must still decay "+
+			"and be REJECTED, but it fired: %+v", e)
+	}
+
+	// A 👎 is ground truth these deployments CAN accumulate (docs/learning-loop.md),
+	// so it must bite even with a dead channel — the withholding is scoped to entries
+	// with no evidence at all, not to every entry on a resolve-less source.
+	voted := newRecall(fakeOutcome{
+		counts:             map[string]outcome.Aggregate{path: {Recalls: 1, FeedbackDown: 1}},
+		deadResolveChannel: true,
+	})
+	if e, _ := voted.lookup(context.Background(), req); e != nil {
+		t.Fatalf("a human 👎 must still decay the entry on a resolve-less source, but recall fired: %+v", e)
+	}
+}
+
 // TestRecallRecoversAfterConfirmations pins the 👎 recovery contract end to end
 // over the real Recall gate: one standing 👎 rejects the recall; one machine
 // confirmation still rejects (human outranks a single confirm); the second

@@ -346,6 +346,42 @@ func TestFormatConfidenceMatchesSlack(t *testing.T) {
 	}
 }
 
+// TestUnstatedConfidenceIsNotLowConfidence pins the distinction between "the model
+// judged this very unlikely" and "the model judged nothing".
+//
+// `confidence` used to be optional everywhere in the findings schema, so a model that
+// omitted it on the top level AND every root cause produced a delivered 0 — and the
+// verify pass, which may only LOWER, pinned it there. The card then read "🔴 Low
+// confidence · 0%" on an investigation that named a concrete cause, quoted metrics for
+// it, and passed the adversarial review. Observed live on NodeSystemSaturation. A red
+// 0% badge on sound work teaches the on-call to ignore the number entirely.
+func TestUnstatedConfidenceIsNotLowConfidence(t *testing.T) {
+	unstated := providers.Investigation{
+		Title:      "NodeSystemSaturation",
+		RootCauses: []providers.Hypothesis{{Summary: "workspace pod consuming 7 of 8 cores"}},
+		Verified:   true,
+	}
+	out := Format(unstated)
+	if strings.Contains(out, "0%") {
+		t.Fatalf("an unstated confidence must not be rendered as a number:\n%s", out)
+	}
+	if !strings.Contains(out, "confidence not stated") {
+		t.Fatalf("an unstated confidence must say so:\n%s", out)
+	}
+	if strings.Contains(out, "Low confidence") {
+		t.Fatalf("absent is not low — the two must not render alike:\n%s", out)
+	}
+
+	// Guard against over-correcting: a genuine low confidence still reads as Low.
+	low := providers.Investigation{
+		Title:      "NodeSystemSaturation",
+		RootCauses: []providers.Hypothesis{{Summary: "maybe", Confidence: 0.1}},
+	}
+	if out := Format(low); !strings.Contains(out, "Low confidence · 10%") {
+		t.Fatalf("a stated low confidence must still render as Low:\n%s", out)
+	}
+}
+
 // TestFormatMetadataBelowAnswer proves the reordering: trigger-time metadata
 // (Resource/alert facts/Started) now renders AFTER the root causes, mirroring
 // the Slack card's move — orienting detail is not the thing to lead with.
