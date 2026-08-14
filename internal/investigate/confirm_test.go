@@ -111,6 +111,38 @@ func TestConfirmRecallToolErrorTolerated(t *testing.T) {
 	}
 }
 
+// TestConfirmRecallRedactsBeforeTheModelSeesIt pins the egress boundary on this path.
+//
+// confirmRecall calls its tools DIRECTLY rather than through runTool/dispatchTools, so
+// it does not inherit the loop's `truncateOutput(redact.Secrets(...))` hook, and the
+// only other scrubber (redactInvestigation) runs in deliver() — AFTER verify. Both the
+// evidence bullet and the transcript reach the verify model via renderForReview, so
+// without masking here a secret in a pod's terminated message or a FailedMount event
+// ships to the provider verbatim. pod_status advertises exactly that content ("the
+// message names the exact cause, e.g. a missing Secret/ConfigMap key").
+func TestConfirmRecallRedactsBeforeTheModelSeesIt(t *testing.T) {
+	const secret = "ghp_0123456789abcdefghijklmnopqrstuvwx"
+	ps := &fakeConfirmTool{name: "pod_status", out: "web CrashLoopBackOff: bad token " + secret}
+	li := &LoopInvestigator{Tools: []Tool{ps}}
+	req := Request{Workload: providers.Workload{Namespace: "apps", Name: "web"}}
+
+	inv, transcript, gathered := li.confirmRecall(context.Background(), req, recalledInv())
+	if !gathered {
+		t.Fatal("expected gathered=true")
+	}
+	// Both forms, and the assembled review that carries them to the provider.
+	if joined := strings.Join(inv.RootCauses[0].Evidence, "\n"); strings.Contains(joined, secret) {
+		t.Errorf("evidence bullet leaks the token: %q", joined)
+	}
+	if review := renderForReview(req, inv, transcript); strings.Contains(review, secret) {
+		t.Errorf("the message sent to the verify model leaks the token:\n%s", review)
+	}
+	// The surrounding diagnostic text must survive — masking, not dropping.
+	if !strings.Contains(strings.Join(inv.RootCauses[0].Evidence, "\n"), "CrashLoopBackOff") {
+		t.Error("redaction must mask the secret, not discard the tool output")
+	}
+}
+
 func TestCapRecallConfidenceOnlyLowers(t *testing.T) {
 	inv := providers.Investigation{Confidence: 0.9, RootCauses: []providers.Hypothesis{{Confidence: 0.9}, {Confidence: 0.5}}}
 	out := capRecallConfidence(inv, 0.70)
