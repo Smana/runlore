@@ -435,6 +435,59 @@ func TestReplayCampaignPassRate(t *testing.T) {
 	}
 }
 
+// TestRunNReportsProgressPerCase pins the hook that makes a long campaign legible.
+//
+// RunN is sequential and returns nothing until every case is done, so a nightly run
+// killed by a CI timeout printed NOTHING — for a week that made "the eval is broken"
+// look identical to "the eval is slow", with no indication of which case ate the
+// budget. The hook must fire once per case, in case order, and carry a running count.
+func TestRunNReportsProgressPerCase(t *testing.T) {
+	miss := Case{Name: "miss", Prompt: "x", Tools: map[string]string{"what_changed": "y"},
+		Expected: Expected{MustContain: []string{"network policy"}}}
+	cases := []Case{harborCase(), miss}
+
+	r := newRateRunner(5)
+	type tick struct {
+		done, total int
+		name        string
+		reached     bool
+	}
+	var ticks []tick
+	r.OnCaseDone = func(done, total int, a CaseAggregate) {
+		ticks = append(ticks, tick{done, total, a.Name, a.Reached})
+	}
+	camp := r.RunN(context.Background(), cases, 5)
+
+	if len(ticks) != len(cases) {
+		t.Fatalf("want one tick per case, got %d for %d cases", len(ticks), len(cases))
+	}
+	for i, got := range ticks {
+		if got.done != i+1 || got.total != len(cases) {
+			t.Errorf("tick %d: want done=%d total=%d, got done=%d total=%d", i, i+1, len(cases), got.done, got.total)
+		}
+		if got.name != cases[i].Name {
+			t.Errorf("tick %d: want case %q (case order), got %q", i, cases[i].Name, got.name)
+		}
+	}
+	// The aggregate handed to the hook must be the one that lands in the campaign —
+	// progress reporting a different verdict than the report would be worse than none.
+	if !ticks[0].reached || ticks[1].reached {
+		t.Errorf("hook must carry each case's real verdict, got %+v", ticks)
+	}
+	if len(camp.Aggregates) != len(cases) {
+		t.Fatalf("campaign must be unaffected by the hook, got %d aggregates", len(camp.Aggregates))
+	}
+}
+
+// A nil hook is the normal case (every caller but the CLI) and must not panic.
+func TestRunNNilProgressHookIsFine(t *testing.T) {
+	r := newRateRunner(5)
+	r.OnCaseDone = nil
+	if camp := r.RunN(context.Background(), []Case{harborCase()}, 1); len(camp.Aggregates) != 1 {
+		t.Fatalf("want 1 aggregate, got %d", len(camp.Aggregates))
+	}
+}
+
 func TestGateError(t *testing.T) {
 	miss := Case{Name: "miss", Prompt: "x", Tools: map[string]string{"what_changed": "y"},
 		Expected: Expected{MustContain: []string{"network policy"}}}

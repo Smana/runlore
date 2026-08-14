@@ -117,6 +117,21 @@ func RunEval(args []string) error {
 	}
 	counting := &eval.CountingModel{Inner: BuildModel(cfg, apiKey)}
 	runner := &eval.Runner{Model: counting, Log: slog.New(slog.NewTextHandler(io.Discard, nil))}
+	// Progress to STDERR (stdout carries the result table the report/scorecard read):
+	// a nightly campaign is ~30 sequential live investigations and used to print
+	// nothing at all until it finished, so a run killed by a CI timeout was
+	// indistinguishable from a slow one and showed no clue as to which case ate the
+	// budget. Elapsed time is cumulative from the campaign start.
+	start := time.Now()
+	fmt.Fprintf(os.Stderr, "eval: %d cases x n=%d, running sequentially\n", len(cases), *n)
+	runner.OnCaseDone = func(done, total int, a eval.CaseAggregate) {
+		status := "MISSED"
+		if a.Reached {
+			status = "REACHED"
+		}
+		fmt.Fprintf(os.Stderr, "eval: [%d/%d] %-32s %-7s pass-rate=%.0f%%  elapsed=%s\n",
+			done, total, a.Name, status, a.PassRate*100, time.Since(start).Round(time.Second))
+	}
 	camp := runner.RunN(context.Background(), cases, *n)
 	for _, a := range camp.Aggregates {
 		status := "MISSED"
