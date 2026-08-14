@@ -49,6 +49,14 @@ func SlackDeliveryTarget(sl config.SlackNotify) string {
 	return ""
 }
 
+// SlackBotDelivery reports whether Slack delivery resolves to the BOT-token path
+// (chat.postMessage) rather than an incoming webhook. Thread capture requires
+// exactly that path — a webhook returns no message ts, so there is no thread
+// root — and asking here keeps the target vocabulary in one package.
+func SlackBotDelivery(sl config.SlackNotify) bool {
+	return SlackDeliveryTarget(sl) == slackTargetBot
+}
+
 // ThreadSink records the thread root a delivered investigation was posted to.
 // Implemented by *thread.Registry; declared here as an interface so the notifier
 // never imports the thread package and stays ignorant of how the mapping is

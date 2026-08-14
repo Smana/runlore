@@ -37,6 +37,7 @@ import (
 	_ "github.com/Smana/runlore/internal/source/grafana"      // self-registers the Grafana Alerting webhook source
 	"github.com/Smana/runlore/internal/source/pagerduty"
 	"github.com/Smana/runlore/internal/telemetry"
+	"github.com/Smana/runlore/internal/thread"
 	"github.com/Smana/runlore/internal/trigger"
 )
 
@@ -181,7 +182,11 @@ func RunServe(version string, args []string) error {
 	// Built ONCE and shared: a second Deps means a second catalog, hence a second
 	// git-sync goroutine racing the first on the same on-disk checkout.
 	deps := BuildDeps(ctx, cfg, gitops, metrics, ledger, log)
-	inv, cat, err := BuildInvestigator(ctx, cfg, deps, approvals, auto, metrics, ledger, log)
+	threadRegistry, err := BuildThreadRegistry(cfg)
+	if err != nil {
+		return fmt.Errorf("thread registry: %w", err)
+	}
+	inv, cat, notifier, err := BuildInvestigator(ctx, cfg, deps, approvals, auto, metrics, ledger, threadRegistry, log)
 	if err != nil {
 		return fmt.Errorf("build investigator: %w", err)
 	}
@@ -398,6 +403,42 @@ func RunServe(version string, args []string) error {
 		acts.Feedback = ledger
 		if SlackFeedbackDeliverable(cfg, log) {
 			log.Info("slack feedback buttons enabled", "endpoint", "/slack/interactions")
+		}
+	}
+	// Opt-in thread capture: wire the handler ONLY when the option is on, the
+	// registry persists, a forge can be reached, and a notifier can reply. A
+	// capture path that took someone's knowledge and said nothing back — or had
+	// nowhere to write it — would be worse than not having one.
+	if cfg.Notify.Slack.ThreadCapture && threadRegistry.Enabled() {
+		forge := buildForge(cfg, log)
+		// notifier is nil on the log-only path (no model configured); ThreadReplier
+		// is a pointer-receiver method that dereferences it, so a nil check here
+		// avoids a startup panic on that otherwise-valid configuration.
+		var replier providers.ThreadNotifier
+		if notifier != nil {
+			replier = notifier.ThreadReplier()
+		}
+		switch {
+		case forge == nil:
+			log.Warn("slack thread_capture enabled but no forge is configured (forge.kb_repo / credentials); knowledge cannot be written")
+		case replier == nil:
+			log.Warn("slack thread_capture enabled but no thread-capable notifier resolved; replies cannot be posted")
+		default:
+			acts.Threads = &thread.Mention{
+				Responder: &thread.Responder{
+					Forge:             forge,
+					Registry:          threadRegistry,
+					MaxNotesPerThread: thread.DefaultMaxNotesPerThread,
+					OpenPRs:           ratelimit.New(20, time.Hour),
+					Log:               log,
+				},
+				Registry: threadRegistry,
+				Replier:  replier,
+				Log:      log,
+			}
+			if ThreadCaptureDeliverable(cfg, log) {
+				log.Info("slack thread capture enabled", "endpoint", "/slack/events")
+			}
 		}
 	}
 	// /readyz is process + catalog health, NOT leadership (#264): every warm

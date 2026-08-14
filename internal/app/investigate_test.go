@@ -233,7 +233,7 @@ func TestBuildInvestigatorSelectsImplementation(t *testing.T) {
 		if deps != nil {
 			t.Fatal("BuildDeps must return nil when no model is configured")
 		}
-		inv, cat, err := BuildInvestigator(context.Background(), cfg, deps, nil, nil, nil, nil, log)
+		inv, cat, _, err := BuildInvestigator(context.Background(), cfg, deps, nil, nil, nil, nil, nil, log)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -248,7 +248,7 @@ func TestBuildInvestigatorSelectsImplementation(t *testing.T) {
 	t.Run("model -> LoopInvestigator", func(t *testing.T) {
 		cfg := &config.Config{Model: config.Model{Provider: "openai", BaseURL: "http://vllm:8000/v1", Model: "test-model"}}
 		deps := BuildDeps(context.Background(), cfg, nil, nil, nil, log)
-		inv, _, err := BuildInvestigator(context.Background(), cfg, deps, nil, nil, nil, nil, log)
+		inv, _, _, err := BuildInvestigator(context.Background(), cfg, deps, nil, nil, nil, nil, nil, log)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -262,7 +262,7 @@ func TestBuildInvestigatorSelectsImplementation(t *testing.T) {
 		// the other investigation defaults.
 		cfg := &config.Config{Model: config.Model{Provider: "openai", BaseURL: "http://vllm:8000/v1", Model: "test-model"}}
 		deps := BuildDeps(context.Background(), cfg, nil, nil, nil, log)
-		inv, _, err := BuildInvestigator(context.Background(), cfg, deps, nil, nil, nil, nil, log)
+		inv, _, _, err := BuildInvestigator(context.Background(), cfg, deps, nil, nil, nil, nil, nil, log)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -277,7 +277,7 @@ func TestBuildInvestigatorSelectsImplementation(t *testing.T) {
 		// Explicit tool_timeout flows through unchanged.
 		cfg.Investigation.ToolTimeout = config.Duration(5 * time.Second)
 		deps2 := BuildDeps(context.Background(), cfg, nil, nil, nil, log)
-		inv2, _, err := BuildInvestigator(context.Background(), cfg, deps2, nil, nil, nil, nil, log)
+		inv2, _, _, err := BuildInvestigator(context.Background(), cfg, deps2, nil, nil, nil, nil, nil, log)
 		if err != nil {
 			t.Fatal(err)
 		}

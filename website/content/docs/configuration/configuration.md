@@ -345,8 +345,8 @@ synthetic findings out of the review queue while still notifying chat (see
 
 ### `notify` — where findings go
 `slack` (`webhook_url_env` or `bot_token_env`, `channel`, `signing_secret_env`, `approver_ids`,
-`feedback_buttons`), `matrix` (`homeserver`, `room_id`, `access_token_env`), plus inline blocks for any
-registered notifier (e.g. `webhook` with `url_env`).
+`feedback_buttons`, `thread_capture`), `matrix` (`homeserver`, `room_id`, `access_token_env`), plus
+inline blocks for any registered notifier (e.g. `webhook` with `url_env`).
 
 Every notifier now leads with the model's **verdict** (`no_action` / `action_suggested` /
 `action_required` / `inconclusive`) and carries the trigger-time alert metadata (severity, environment,

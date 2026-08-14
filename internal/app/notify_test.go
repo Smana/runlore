@@ -4,11 +4,15 @@ package app
 
 import (
 	"bytes"
+	"io"
 	"log/slog"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
 	"github.com/Smana/runlore/internal/config"
+	"github.com/Smana/runlore/internal/thread"
 )
 
 // TestSlackFeedbackDeliverable covers the runtime half of the feedback-buttons
@@ -88,5 +92,74 @@ func TestSlackFeedbackDeliverable(t *testing.T) {
 				t.Fatalf("the warning must contain the documented grep phrase %q, got: %s", documentedGrep, out)
 			}
 		})
+	}
+}
+
+func TestBuildThreadRegistryDisabledWithoutCapture(t *testing.T) {
+	cfg := &config.Config{}
+	cfg.Outcome.LedgerPath = filepath.Join(t.TempDir(), "ledger.jsonl")
+	reg, err := BuildThreadRegistry(cfg)
+	if err != nil {
+		t.Fatalf("BuildThreadRegistry: %v", err)
+	}
+	if reg.Enabled() {
+		t.Fatal("thread capture off must yield a disabled registry")
+	}
+}
+
+func TestBuildThreadRegistryUsesTheLedgerDirectory(t *testing.T) {
+	dir := t.TempDir()
+	cfg := &config.Config{}
+	cfg.Outcome.LedgerPath = filepath.Join(dir, "ledger.jsonl")
+	cfg.Notify.Slack = config.SlackNotify{
+		BotTokenEnv: "T", Channel: "C1", SigningSecretEnv: "S", ThreadCapture: true,
+	}
+
+	reg, err := BuildThreadRegistry(cfg)
+	if err != nil {
+		t.Fatalf("BuildThreadRegistry: %v", err)
+	}
+	if !reg.Enabled() {
+		t.Fatal("thread capture on with a ledger path must yield an enabled registry")
+	}
+	if err := reg.Put(thread.Context{Root: "1"}); err != nil {
+		t.Fatalf("Put: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "threads.jsonl")); err != nil {
+		t.Fatalf("registry must persist beside the ledger: %v", err)
+	}
+}
+
+func TestBuildThreadRegistryDisabledWithoutLedgerPath(t *testing.T) {
+	// The registry needs somewhere durable to live. Without a ledger path there is
+	// no state directory, so capture degrades to unavailable rather than to
+	// silently-forgetful.
+	cfg := &config.Config{}
+	cfg.Notify.Slack = config.SlackNotify{
+		BotTokenEnv: "T", Channel: "C1", SigningSecretEnv: "S", ThreadCapture: true,
+	}
+	reg, err := BuildThreadRegistry(cfg)
+	if err != nil {
+		t.Fatalf("BuildThreadRegistry: %v", err)
+	}
+	if reg.Enabled() {
+		t.Fatal("no ledger path must yield a disabled registry")
+	}
+}
+
+func TestThreadCaptureDeliverable(t *testing.T) {
+	t.Setenv("SLACK_BOT_TOKEN_PRESENT", "xoxb-real")
+
+	cfg := &config.Config{}
+	cfg.Notify.Slack = config.SlackNotify{
+		BotTokenEnv: "SLACK_BOT_TOKEN_PRESENT", Channel: "C1", SigningSecretEnv: "S", ThreadCapture: true,
+	}
+	if !ThreadCaptureDeliverable(cfg, slog.New(slog.NewTextHandler(io.Discard, nil))) {
+		t.Fatal("a present bot token must be deliverable")
+	}
+
+	cfg.Notify.Slack.BotTokenEnv = "SLACK_BOT_TOKEN_ABSENT"
+	if ThreadCaptureDeliverable(cfg, slog.New(slog.NewTextHandler(io.Discard, nil))) {
+		t.Fatal("an empty bot-token env means no message is delivered, so no thread exists to reply in")
 	}
 }
