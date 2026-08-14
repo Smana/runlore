@@ -803,6 +803,11 @@ type SlackNotify struct {
 	// AND a delivery target (webhook_url_env, or bot_token_env + channel — buttons
 	// render and dispatch on either path); Validate fails loud when any is missing.
 	FeedbackButtons bool `yaml:"feedback_buttons"`
+	// ThreadCapture (opt-in, default off), when set on the bot delivery path,
+	// registers each delivered investigation's thread root so a later reply in
+	// that thread can be attributed to it. Requires the bot-token path
+	// (bot_token_env + channel) — a webhook cannot carry a conversation back.
+	ThreadCapture bool `yaml:"thread_capture"`
 }
 
 // MatrixNotify configures Matrix delivery.

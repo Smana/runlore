@@ -528,6 +528,19 @@ type ProgressNotifier interface {
 	DeliverProgress(ctx context.Context, up ProgressUpdate) error
 }
 
+// ThreadNotifier is the optional capability of carrying a conversation back into
+// a delivered notification's thread. A notifier that cannot — an incoming
+// webhook, the generic HTTP sink — simply does not implement it, and thread
+// interaction is unavailable on that transport. Same contract as an unset data
+// source disabling its tool: no capability is ever faked.
+type ThreadNotifier interface {
+	Notifier
+	// ReplyInThread posts text into the thread rooted at root, in channel. Both
+	// handles are transport-specific opaque strings (Slack: thread_ts and a
+	// channel id).
+	ReplyInThread(ctx context.Context, root, channel, text string) error
+}
+
 // CurationForge is the forge surface the curator's file-time gate needs: open a
 // drafted PR, list open KB PRs (dedup), and comment to coalesce duplicates.
 type CurationForge interface {

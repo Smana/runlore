@@ -1248,6 +1248,105 @@ func TestSlackCardEscapesTitleOnBothBranches(t *testing.T) {
 // announcing feedback buttons nobody will ever see. The set-but-EMPTY cases are
 // the live gap: an unmounted secret leaves the env var present and empty, the
 // builder returns nil, the notifier is skipped and nothing is delivered.
+type recordingThreadSink struct {
+	root, channel string
+	inv           providers.Investigation
+	calls         int
+}
+
+func (r *recordingThreadSink) Register(root, channel string, inv providers.Investigation) {
+	r.root, r.channel, r.inv, r.calls = root, channel, inv, r.calls+1
+}
+
+func TestSlackBotRegistersTheThreadRoot(t *testing.T) {
+	var posts []map[string]any
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var m map[string]any
+		_ = json.NewDecoder(r.Body).Decode(&m)
+		posts = append(posts, m)
+		_, _ = w.Write([]byte(`{"ok":true,"ts":"111.222"}`))
+	}))
+	defer srv.Close()
+
+	sink := &recordingThreadSink{}
+	b := NewSlackBot("xoxb-test", "C1")
+	b.baseURL = srv.URL
+	b.Threads = sink
+
+	inv := providers.Investigation{Title: "OOMKilled", TriggerKey: "tk-1", CuratedURL: "https://github.com/o/r/pull/42"}
+	if err := b.Deliver(context.Background(), inv); err != nil {
+		t.Fatalf("Deliver: %v", err)
+	}
+
+	if sink.calls != 1 {
+		t.Fatalf("Register calls = %d, want 1 (the summary root only, never the detail reply)", sink.calls)
+	}
+	if sink.root != "111.222" {
+		t.Errorf("root = %q, want 111.222", sink.root)
+	}
+	if sink.channel != "C1" {
+		t.Errorf("channel = %q, want C1", sink.channel)
+	}
+	if sink.inv.TriggerKey != "tk-1" {
+		t.Errorf("investigation not passed through: %+v", sink.inv)
+	}
+	if len(posts) == 0 {
+		t.Fatal("nothing was posted")
+	}
+}
+
+func TestSlackBotDeliverSucceedsWithNoThreadSink(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`{"ok":true,"ts":"111.222"}`))
+	}))
+	defer srv.Close()
+
+	b := NewSlackBot("xoxb-test", "C1")
+	b.baseURL = srv.URL
+	// Threads deliberately left nil.
+	if err := b.Deliver(context.Background(), providers.Investigation{Title: "OOMKilled"}); err != nil {
+		t.Fatalf("Deliver with a nil thread sink: %v", err)
+	}
+}
+
+func TestSlackBotReplyInThread(t *testing.T) {
+	var got map[string]any
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewDecoder(r.Body).Decode(&got)
+		_, _ = w.Write([]byte(`{"ok":true,"ts":"333.444"}`))
+	}))
+	defer srv.Close()
+
+	b := NewSlackBot("xoxb-test", "C-default")
+	b.baseURL = srv.URL
+	if err := b.ReplyInThread(context.Background(), "111.222", "C-live", "📝 Noted"); err != nil {
+		t.Fatalf("ReplyInThread: %v", err)
+	}
+
+	if got["thread_ts"] != "111.222" {
+		t.Errorf("thread_ts = %v, want 111.222", got["thread_ts"])
+	}
+	if got["channel"] != "C-live" {
+		t.Errorf("channel = %v, want C-live (the live event's channel, not the configured default)", got["channel"])
+	}
+	if got["text"] != "📝 Noted" {
+		t.Errorf("text = %v, want the reply text", got["text"])
+	}
+}
+
+func TestMultiThreadReplier(t *testing.T) {
+	bot := NewSlackBot("xoxb-test", "C1")
+	m := NewMulti(slog.New(slog.NewTextHandler(io.Discard, nil)), NewSlack("https://hooks.slack.com/x"), bot)
+	if got := m.ThreadReplier(); got != providers.ThreadNotifier(bot) {
+		t.Fatalf("ThreadReplier = %v, want the bot notifier", got)
+	}
+
+	none := NewMulti(slog.New(slog.NewTextHandler(io.Discard, nil)), NewSlack("https://hooks.slack.com/x"))
+	if got := none.ThreadReplier(); got != nil {
+		t.Fatalf("ThreadReplier = %v, want nil when no notifier can reply", got)
+	}
+}
+
 func TestSlackDeliveryTarget(t *testing.T) {
 	tests := []struct {
 		name string
