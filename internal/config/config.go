@@ -1474,6 +1474,21 @@ func (c *Config) Validate() error {
 			return fmt.Errorf("notify.slack.feedback_buttons requires a Slack delivery target: set notify.slack.webhook_url_env, or notify.slack.bot_token_env together with notify.slack.channel — with neither the Slack notifier is skipped, so no message is delivered, no buttons render and no feedback can ever be recorded")
 		}
 	}
+	// Thread capture cannot work without the same signature verification as
+	// feedback_buttons (mentions arrive on an exposed HTTP endpoint) or without
+	// the bot-token delivery path: an incoming webhook returns no message ts, so
+	// there is no thread root to attribute a reply to.
+	if sl := c.Notify.Slack; sl.ThreadCapture {
+		if sl.SigningSecretEnv == "" {
+			return fmt.Errorf("notify.slack.thread_capture requires notify.slack.signing_secret_env: mentions arrive on the exposed POST /slack/events endpoint and must be signature-verified")
+		}
+		if sl.BotTokenEnv == "" {
+			return fmt.Errorf("notify.slack.thread_capture requires notify.slack.bot_token_env: an incoming webhook returns no message ts, so there is no thread to attribute a reply to")
+		}
+		if sl.Channel == "" {
+			return fmt.Errorf("notify.slack.thread_capture requires notify.slack.channel (it is required alongside bot_token_env)")
+		}
+	}
 	// Same fail-loud contract for the Matrix reaction listener: without the
 	// notifier fields it would sync nothing, without the ledger it would record
 	// nowhere — both silent lies to whoever enabled the option.
