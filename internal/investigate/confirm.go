@@ -9,6 +9,7 @@ import (
 	"strings"
 
 	"github.com/Smana/runlore/internal/providers"
+	"github.com/Smana/runlore/internal/redact"
 )
 
 // recallUnconfirmedCap is the recall-confidence ceiling applied when current cluster
@@ -23,38 +24,42 @@ var recallConfirmTools = []string{"pod_status", "kube_events"}
 // confirmRecall gathers current cluster state for the recalled workload and appends
 // it to the top hypothesis's evidence, so the verify pass can judge the recalled
 // cause against reality rather than a tautology. Best-effort: a missing namespace,
-// absent tools, or a tool error yields gathered=false. gathered is true when at
-// least one confirm tool returned non-empty output (including "no pods"/"no events"
-// — still real current state).
+// absent tools, or a tool error gathers nothing. Empty output does not count, but
+// "no pods"/"no events" does — that IS real current state.
 //
-// It ALSO returns those results shaped as a tool transcript, which the caller passes
-// to verifyFindings. Both forms are needed and they are not redundant:
+// It returns those results in two forms, which are not redundant:
 //
 //   - the evidence bullets are what the DELIVERED card shows a human;
 //   - the transcript is what the REVIEWER is allowed to treat as verified fact.
 //
-// The verify prompt's central rule is "each cited piece of evidence must trace to a
-// tool result in the transcript excerpt below … if it cannot be found in the
-// transcript, treat it as unverified — reject or downgrade it". The recall path used
+// The distinction matters because verifyPrompt's groundedness rule (verify.go)
+// requires each cited piece of evidence to trace to a tool result in the transcript
+// excerpt, and treats what it cannot find there as unverified. The recall path used
 // to pass a nil transcript, so renderForReview emitted no excerpt at all and that
 // rule was unsatisfiable BY CONSTRUCTION: every recalled finding was, correctly by
 // its own instructions, downgraded. The confirm output was sitting right there in the
 // evidence list, but as an assertion by the author rather than as tool output the
-// reviewer could check against — which is precisely the distinction the rule draws.
+// reviewer could check against — precisely the distinction the rule draws.
 //
 // Handing over the same results as a transcript makes the review sharper, not softer:
 // a reviewer that can read current state can now CONTRADICT a stale or poisoned entry
 // (entry says pods are OOMKilling, pod_status shows them Running) instead of being
 // reduced to "cannot verify" on everything.
-func (li *LoopInvestigator) confirmRecall(ctx context.Context, req Request, inv providers.Investigation) (providers.Investigation, []providers.Message, bool) {
+//
+// A nil transcript means nothing was gathered — the only state the caller needs, and
+// the case it de-rates via recallUnconfirmedCap.
+func (li *LoopInvestigator) confirmRecall(ctx context.Context, req Request, inv providers.Investigation) (providers.Investigation, []providers.Message) {
 	if req.Workload.Namespace == "" || len(inv.RootCauses) == 0 {
-		return inv, nil, false
+		return inv, nil
 	}
 	byName := make(map[string]Tool, len(li.Tools))
 	for _, t := range li.Tools {
 		byName[t.Name()] = t
 	}
-	gathered := false
+	// Invariant across the loop (it encodes the namespace only). Recording the SAME
+	// string the call was made with also keeps the transcript's args honest by
+	// construction, rather than resting on two marshals agreeing.
+	args := confirmArgs(req.Workload)
 	// One synthetic assistant turn carrying the calls, then one tool turn per result —
 	// the shape transcriptExcerpt walks to label each result with the tool that
 	// produced it. Call IDs are deterministic (no loop ran, so nothing else mints them).
@@ -65,7 +70,7 @@ func (li *LoopInvestigator) confirmRecall(ctx context.Context, req Request, inv 
 		if !ok {
 			continue
 		}
-		out, err := t.Call(ctx, confirmArgs(req.Workload))
+		out, err := t.Call(ctx, args)
 		if err != nil {
 			if li.Log != nil {
 				li.Log.Debug("recall confirm tool failed", "tool", name, "err", err)
@@ -75,18 +80,23 @@ func (li *LoopInvestigator) confirmRecall(ctx context.Context, req Request, inv 
 		if out = strings.TrimSpace(out); out == "" {
 			continue
 		}
+		// The same LLM-vendor egress boundary dispatchTools applies to every tool
+		// result. This path calls the tool directly rather than through runTool, so
+		// this is the only place it can be applied — and it must be, because BOTH
+		// forms below reach the verify model, and redactInvestigation does not run
+		// until deliver(), long after verify. Redact before truncating so a secret
+		// near the cap is still masked.
+		out, _ = truncateOutput(redact.Secrets(out), li.MaxToolOutputBytes)
 		inv.RootCauses[0].Evidence = append(inv.RootCauses[0].Evidence,
 			fmt.Sprintf("current state — %s:\n%s", name, out))
 		id := "recall-confirm-" + name
-		calls = append(calls, providers.ToolCall{ID: id, Name: name, Args: confirmArgs(req.Workload)})
+		calls = append(calls, providers.ToolCall{ID: id, Name: name, Args: args})
 		results = append(results, providers.Message{Role: "tool", ToolCallID: id, Content: out})
-		gathered = true
 	}
-	if !gathered {
-		return inv, nil, false
+	if len(results) == 0 {
+		return inv, nil
 	}
-	transcript := append([]providers.Message{{Role: "assistant", ToolCalls: calls}}, results...)
-	return inv, transcript, true
+	return inv, append([]providers.Message{{Role: "assistant", ToolCalls: calls}}, results...)
 }
 
 // confirmArgs builds the JSON args for a confirmatory tool: namespace-scoped, but
