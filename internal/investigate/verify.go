@@ -69,10 +69,17 @@ func parseVerdicts(args string) ([]verdict, error) {
 // causes, rejecting correlation-only/unverified claims and downgrading unproven
 // ones before delivery/curation. The verify completion's token usage is accumulated
 // into totals (when non-nil) so the per-investigation cost includes the verify pass.
-// transcript is the loop's accumulated message history (may be nil, e.g. the
-// recall short-circuit path where no loop ran). A bounded, redacted excerpt of its
-// tool results is fed to the reviewer so groundedness ("does this cause trace to a
-// tool result?") can be checked rather than merely asserted.
+// transcript is the tool history the reviewer may treat as verified fact: the loop's
+// accumulated messages on the full path, confirmRecall's current-state results on the
+// recall short-circuit. A bounded, redacted excerpt of its tool results is fed to the
+// reviewer so groundedness ("does this cause trace to a tool result?") can be checked
+// rather than merely asserted.
+//
+// Passing nil is a claim, not merely an option: it says nothing here is independently
+// verified, leaving the prompt's groundedness rule with nothing to check against, so
+// the reviewer can only downgrade. Reserve it for when that is actually true (confirm
+// gathered no state at all). Handing nil to a path that DID gather evidence downgrades
+// sound findings on principle — see confirmRecall for the live case where it did.
 //
 // The second return, verified, reports whether an adversarial review actually
 // happened: true when the returned investigation reflects a completed review
