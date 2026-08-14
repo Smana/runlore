@@ -1316,6 +1316,61 @@ func TestSlackBotRegistersTheThreadRoot(t *testing.T) {
 	}
 }
 
+// TestSlackBotRegistersThreadRootDespiteFailedDetailPost proves the requirement
+// TestSlackBotRegistersTheThreadRoot cannot prove on its own: registration must
+// happen BEFORE the detail post, so a failed detail post cannot cost it. With
+// both mocked posts succeeding (as in every other test in this file), a
+// regression that moved the Register call to AFTER the detail-post block —
+// while still referencing the same ts variable — would leave calls==1,
+// root=="111.222", 2 POSTs and thread_ts=="111.222" all still passing: nothing
+// exercises the failure the ordering exists to protect against.
+//
+// Here the mock's SECOND post (the detail reply) returns a Slack logical
+// failure ({"ok":false}, which SlackBot.post treats as an error just like a
+// non-2xx status). Deliver must still have registered the summary's ts exactly
+// once: with Register before the detail post that holds regardless of the
+// detail post's outcome; with Register moved after it, the early return on the
+// detail post's error means Register is never reached and calls stays 0.
+func TestSlackBotRegistersThreadRootDespiteFailedDetailPost(t *testing.T) {
+	var posts int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		posts++
+		w.Header().Set("Content-Type", "application/json")
+		if posts == 1 {
+			_, _ = w.Write([]byte(`{"ok":true,"ts":"111.222"}`))
+		} else {
+			_, _ = w.Write([]byte(`{"ok":false,"error":"ratelimited"}`))
+		}
+	}))
+	defer srv.Close()
+
+	sink := &recordingThreadSink{}
+	b := NewSlackBot("xoxb-test", "C1")
+	b.baseURL = srv.URL
+	b.Threads = sink
+
+	// Unresolved forces a non-empty detailBlocks, so Deliver actually attempts
+	// the second (threaded) post that then fails.
+	inv := providers.Investigation{
+		Title:      "OOMKilled",
+		TriggerKey: "tk-1",
+		Unresolved: []string{"why the pod restarted a second time"},
+	}
+	err := b.Deliver(context.Background(), inv)
+	if err == nil {
+		t.Fatal("a failed detail post must surface an error")
+	}
+	if posts != 2 {
+		t.Fatalf("got %d POSTs, want 2 (summary + the failed detail attempt)", posts)
+	}
+	if sink.calls != 1 {
+		t.Fatalf("Register calls = %d, want 1 — the summary's thread root must be registered even though the detail post failed", sink.calls)
+	}
+	if sink.root != "111.222" {
+		t.Errorf("root = %q, want 111.222 (the summary's ts)", sink.root)
+	}
+}
+
 func TestSlackBotDeliverSucceedsWithNoThreadSink(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		_, _ = w.Write([]byte(`{"ok":true,"ts":"111.222"}`))
