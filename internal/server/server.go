@@ -26,22 +26,44 @@ import (
 	"github.com/Smana/runlore/internal/action"
 	"github.com/Smana/runlore/internal/httpx"
 	"github.com/Smana/runlore/internal/source"
+	"github.com/Smana/runlore/internal/telemetry"
+)
+
+const (
+	// maxConcurrentMentions bounds detached Slack mention handlers running at once
+	// (s.eventSlots). Each slot holds one forge round-trip — read the thread,
+	// comment or open a PR — not a heavy computation, so a wide pool stays cheap.
+	// What is NOT cheap is exceeding it: the ack has already gone out, so a mention
+	// dropped here is unrecoverable (Slack will never retry it). 16 gives real
+	// headroom over the previous 4 while still bounding an internet-facing endpoint
+	// against unbounded goroutines.
+	maxConcurrentMentions = 16
+	// maxConcurrentBusyNotices bounds the best-effort "I'm too busy, try again"
+	// replies sent when maxConcurrentMentions is saturated (s.busySlots).
+	// Deliberately separate and small: telling humans about an overload is itself
+	// a Slack round-trip, and it must never become the next unbounded-goroutine
+	// problem. A burst wide enough to exhaust even this budget just means those
+	// humans see nothing beyond the (Error-level) log line — no worse than before
+	// this fix, never worse than that.
+	maxConcurrentBusyNotices = 4
 )
 
 // Server handles incoming incident webhooks and applies the trigger policy.
 type Server struct {
-	ready        func() bool
-	approvals    *action.Approvals // nil unless action mode "approve" is configured
-	pauser       Pauser            // nil unless action mode "auto" is configured (kill-switch)
-	feedback     FeedbackRecorder  // nil unless notify.slack.feedback_buttons is on (with an enabled ledger)
-	token        string            // shared secret for the approval/control endpoints (required when actions enabled)
-	slackSecret  string            // Slack signing secret; verifies interactive button clicks
-	webhookToken string            // optional bearer token required on POST /webhook/alertmanager
-	approvers    map[string]bool   // Slack user IDs permitted to approve actions (empty = none)
-	guard        *authGuard        // failed-auth backoff for the shared-token endpoints
-	threads      ThreadHandler     // nil unless notify.slack.thread_capture is on
-	seenEvents   *seenSet          // Slack event_id dedup for delivery retries
-	eventSlots   chan struct{}     // bounds concurrent detached mention handlers
+	ready            func() bool
+	approvals        *action.Approvals  // nil unless action mode "approve" is configured
+	pauser           Pauser             // nil unless action mode "auto" is configured (kill-switch)
+	feedback         FeedbackRecorder   // nil unless notify.slack.feedback_buttons is on (with an enabled ledger)
+	token            string             // shared secret for the approval/control endpoints (required when actions enabled)
+	slackSecret      string             // Slack signing secret; verifies interactive button clicks
+	webhookToken     string             // optional bearer token required on POST /webhook/alertmanager
+	approvers        map[string]bool    // Slack user IDs permitted to approve actions (empty = none)
+	guard            *authGuard         // failed-auth backoff for the shared-token endpoints
+	threads          ThreadHandler      // nil unless notify.slack.thread_capture is on
+	seenEvents       *seenSet           // Slack event_id dedup for delivery retries
+	eventSlots       chan struct{}      // bounds concurrent detached mention handlers
+	busySlots        chan struct{}      // separate, smaller bound for the "pool saturated" reply
+	telemetryMetrics *telemetry.Metrics // nil unless telemetry is configured; nil-safe throughout
 
 	metrics http.Handler // optional; GET /metrics (OTel Prometheus exposition)
 	log     *slog.Logger
@@ -68,6 +90,11 @@ type FeedbackRecorder interface {
 // itself.
 type ThreadHandler interface {
 	HandleMention(ctx context.Context, channel, root, author, text string)
+	// Busy tells the human their message could not be accepted right now, so they
+	// know to send it again rather than assume it was recorded. Called when the
+	// detached handler pool is saturated; must be best-effort and safe to call
+	// with no reply transport configured.
+	Busy(ctx context.Context, channel, root string)
 }
 
 // Actions bundles the optional rung-2/rung-3 wiring: the approval queue, the auto
@@ -79,9 +106,10 @@ type Actions struct {
 	Feedback     FeedbackRecorder // opt-in 👍/👎 recording (notify.slack.feedback_buttons)
 	Token        string
 	SlackSecret  string
-	WebhookToken string        // optional bearer token required on POST /webhook/alertmanager
-	ApproverIDs  []string      // Slack user IDs permitted to approve actions
-	Threads      ThreadHandler // opt-in thread capture (notify.slack.thread_capture)
+	WebhookToken string             // optional bearer token required on POST /webhook/alertmanager
+	ApproverIDs  []string           // Slack user IDs permitted to approve actions
+	Threads      ThreadHandler      // opt-in thread capture (notify.slack.thread_capture)
+	Metrics      *telemetry.Metrics // optional; nil-safe — powers the mentions-dropped-on-saturation counter
 }
 
 // New builds a Server. ready reports whether this replica should serve; nil =
@@ -107,10 +135,12 @@ func New(ready func() bool, acts Actions, built []source.Built, pipe *source.Pip
 		approvals: acts.Approvals, pauser: acts.Pauser, feedback: acts.Feedback,
 		token: acts.Token, slackSecret: acts.SlackSecret,
 		webhookToken: acts.WebhookToken, approvers: approvers, metrics: metricsHandler, log: log,
-		guard:      newAuthGuard(),
-		threads:    acts.Threads,
-		seenEvents: newSeenSet(1024),
-		eventSlots: make(chan struct{}, 4),
+		guard:            newAuthGuard(),
+		threads:          acts.Threads,
+		seenEvents:       newSeenSet(1024),
+		eventSlots:       make(chan struct{}, maxConcurrentMentions),
+		busySlots:        make(chan struct{}, maxConcurrentBusyNotices),
+		telemetryMetrics: acts.Metrics,
 	}
 	mux := http.NewServeMux()
 	// work marks a route as work-bearing: on a follower the request is proxied
@@ -478,21 +508,49 @@ func (s *Server) handleSlackEvent(w http.ResponseWriter, r *http.Request) {
 	// Detached from the request: the response is already written. WithoutCancel
 	// keeps request-scoped values while surviving the handler's return.
 	ctx := context.WithoutCancel(r.Context())
-	select {
-	case s.eventSlots <- struct{}{}:
-	default:
-		s.log.Warn("slack event: mention dropped, handler pool saturated", "channel", ev.Event.Channel)
+	if s.dispatch(s.eventSlots, func() {
+		s.threads.HandleMention(ctx, ev.Event.Channel, ev.Event.ThreadTS, ev.Event.User, ev.Event.Text)
+	}) {
 		return
 	}
+
+	// The pool is saturated. The ack already went out (top of this handler), so
+	// Slack will never retry this delivery — without the two lines below, the
+	// human's note would be gone with nothing to show for it but a log line. Error,
+	// not Warn: this loss is permanent and unrecoverable, for a feature whose entire
+	// premise is not losing the operator's knowledge.
+	s.log.Error("slack event: mention dropped, handler pool saturated", "channel", ev.Event.Channel, "root", ev.Event.ThreadTS)
+	if s.telemetryMetrics != nil {
+		s.telemetryMetrics.MentionsDroppedOnSaturation.Add(ctx, 1)
+	}
+	// Telling the human is itself another Slack round-trip, so it gets the same
+	// treatment as the mention handler itself: detached and bounded, under its own
+	// small budget, never blocking this request goroutine.
+	s.dispatch(s.busySlots, func() {
+		s.threads.Busy(ctx, ev.Event.Channel, ev.Event.ThreadTS)
+	})
+}
+
+// dispatch runs fn detached, gated by slots — a bounded semaphore channel — so the
+// caller never blocks: it reports whether fn was actually started. With slots full it
+// returns false immediately (non-blocking) and fn never runs. A panic inside fn is
+// recovered and logged rather than crashing the process.
+func (s *Server) dispatch(slots chan struct{}, fn func()) bool {
+	select {
+	case slots <- struct{}{}:
+	default:
+		return false
+	}
 	go func() {
-		defer func() { <-s.eventSlots }()
+		defer func() { <-slots }()
 		defer func() {
 			if rec := recover(); rec != nil {
-				s.log.Error("recovered from thread handler panic", "panic", rec, "stack", string(debug.Stack()))
+				s.log.Error("recovered from detached handler panic", "panic", rec, "stack", string(debug.Stack()))
 			}
 		}()
-		s.threads.HandleMention(ctx, ev.Event.Channel, ev.Event.ThreadTS, ev.Event.User, ev.Event.Text)
+		fn()
 	}()
+	return true
 }
 
 // seenSet is a bounded set of recently-seen ids. It exists so Slack's delivery

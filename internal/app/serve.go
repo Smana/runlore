@@ -385,6 +385,11 @@ func RunServe(version string, args []string) error {
 		SlackSecret:  slackSigningSecret,
 		WebhookToken: webhookToken,
 		ApproverIDs:  cfg.Notify.Slack.ApproverIDs,
+		// metrics is always non-nil (bound to the global no-op provider when
+		// telemetry is disabled), so this is unconditional — same as cz.Metrics
+		// above — and the dropped-mentions counter is simply a no-op until a real
+		// provider is configured.
+		Metrics: metrics,
 	}
 	if auto != nil {
 		acts.Pauser = auto // avoid a typed-nil interface when auto is disabled

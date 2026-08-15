@@ -101,6 +101,31 @@ func TestMentionSurvivesAReplyFailure(t *testing.T) {
 	}
 }
 
+func TestMentionBusyRepliesInThreadWithoutTouchingTheKB(t *testing.T) {
+	f, rep := &fakeForge{}, &fakeReplier{}
+	m := newTestMention(t, f, rep)
+
+	m.Busy(context.Background(), "C1", "111.222")
+
+	if len(rep.replies) != 1 {
+		t.Fatalf("replies = %d, want 1 — Busy must post an in-thread notice", len(rep.replies))
+	}
+	if rep.replies[0] == "" {
+		t.Fatal("Busy must not post an empty reply")
+	}
+	if len(f.comments) != 0 || len(f.opened) != 0 {
+		t.Fatal("Busy must never touch the knowledge base — it only tells the human to retry")
+	}
+}
+
+func TestMentionBusyWithNoReplierIsNoop(t *testing.T) {
+	f := &fakeForge{}
+	m := newTestMention(t, f, nil)
+	m.Replier = nil
+
+	m.Busy(context.Background(), "C1", "111.222") // must not panic
+}
+
 func TestMentionWithNoReplierStillWrites(t *testing.T) {
 	f := &fakeForge{}
 	m := newTestMention(t, f, nil)

@@ -46,6 +46,16 @@ func (m *Mention) HandleMention(ctx context.Context, channel, root, author, text
 	m.reply(ctx, root, channel, reply)
 }
 
+// Busy tells the human their message could not be accepted right now, so they know
+// to send it again rather than assume it was recorded. It is called off the request
+// goroutine that received the mention, under its own small concurrency budget — see
+// Server.handleSlackEvent — so it can never itself become an unbounded liability.
+// Best-effort and nil-Replier-safe, exactly like reply.
+func (m *Mention) Busy(ctx context.Context, channel, root string) {
+	m.reply(ctx, root, channel,
+		"I'm handling too many messages right now — please send that again in a moment.")
+}
+
 // reply posts best-effort. The knowledge write has already succeeded by this
 // point and is never rolled back because the acknowledgement could not be
 // delivered.
