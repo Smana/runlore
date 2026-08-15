@@ -437,7 +437,19 @@ reserved and not supported yet — add the `reinvestigate` label to the knowledg
 > HMAC-verified, same as feedback buttons), `bot_token_env` **with** `channel` (an incoming webhook
 > returns no message ts, so there is no thread root to attribute a reply to) **and**
 > `outcome.ledger_path` are all set — the thread registry that maps a Slack thread to its investigation
-> is stored beside the ledger, so it survives a restart or a leader failover.
+> is stored beside the ledger.
+
+> [!WARNING]
+> **That location surviving a restart or a leader failover depends on your deployment shape** — the
+> Helm chart's default (`persistence.enabled: false`) is an `emptyDir`, **DESTROYED** on pod restart,
+> upgrade, or leader failover, and taking the thread registry with it. Persistence alone is not enough
+> either: `workloadKind: StatefulSet` with a `ReadWriteOnce` volume gives each replica its OWN copy, so
+> a new leader taking over on a **different** replica still starts with an empty registry. Only
+> `persistence.enabled: true` **with** `workloadKind: Deployment` **and** a `ReadWriteMany` accessMode
+> puts the registry on the one volume every replica shares. `POST /slack/events` is leader-forwarded, so
+> without that combination a restart or failover orphans every open thread: a human replying
+> `@runlore note: …` to a thread delivered before it is told RunLore has no context for that thread,
+> and the knowledge this feature exists to capture is lost.
 
 > [!NOTE]
 > **Mount the credential, too.** If `bot_token_env` names an env var that is present but **empty** (an

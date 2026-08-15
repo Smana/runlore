@@ -95,12 +95,28 @@ outcome:
 ```
 
 `thread_capture: true` also requires `outcome.ledger_path` — the thread registry
-that maps a Slack thread to its investigation is stored beside the ledger, so it
-survives a restart or a leader failover. Startup fails loud without it, the same
-way it fails loud without `signing_secret_env`, `bot_token_env` and `channel`
-above.
+that maps a Slack thread to its investigation is stored beside the ledger.
+Startup fails loud without it, the same way it fails loud without
+`signing_secret_env`, `bot_token_env` and `channel` above.
+
+That location surviving a restart or a leader failover depends on your
+deployment shape, not on `outcome.ledger_path` alone: the Helm chart's default
+(`persistence.enabled: false`) is an `emptyDir`, destroyed on every restart,
+upgrade or failover, and a `StatefulSet` + `ReadWriteOnce` volume still gives
+each replica its own copy — only `persistence.enabled: true` with
+`workloadKind: Deployment` and a `ReadWriteMany` accessMode puts the registry on
+the one volume every replica shares. See [Configuration →
+`notify`]({{< relref "/docs/configuration/configuration.md#notify--where-findings-go" >}})
+for the full breakdown. Without that combination, a restart or failover empties
+the registry: a reply to a thread delivered before it gets "I don't have
+context for this thread," even though the finding is still on screen.
 
 In your Slack app:
+
+`POST /slack/events` 404s until `thread_capture: true` is actually deployed and
+running, so configure the Event Subscription only once that rollout is live —
+otherwise Slack's URL verification fails and the feature looks broken before
+it's even been tried.
 
 1. **OAuth & Permissions** → add the `app_mentions:read` bot scope (`chat:write`
    is already required for delivery), then reinstall the app.
