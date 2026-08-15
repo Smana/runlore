@@ -83,6 +83,14 @@ const apiSuffix = "/api/v4"
 // the OKF lifecycle: triggered → investigating → solved).
 var lifecycleLabels = []string{"runlore", "triggered"}
 
+// prLabels appends e.ExtraLabels to the standard lifecycle labels — additive,
+// never a replacement (see providers.KBEntry.ExtraLabels). Mirrors
+// github.Client's helper of the same name; always returns a fresh slice since
+// lifecycleLabels is a shared package var.
+func prLabels(e providers.KBEntry) []string {
+	return append(append([]string{}, lifecycleLabels...), e.ExtraLabels...)
+}
+
 // New builds a client. baseURL is the GitLab INSTANCE root (empty defaults to
 // gitlab.com); projectPath is the project's namespace path ("group/project",
 // or a nested "group/subgroup/project") — NOT URL-encoded here, encoding
@@ -271,7 +279,7 @@ func (c *Client) OpenPR(ctx context.Context, e providers.KBEntry) (providers.Ref
 		"target_branch": c.baseBranch,
 		"title":         "KB: " + e.Title,
 		"description":   c.mrBody(e),
-		"labels":        strings.Join(lifecycleLabels, ","),
+		"labels":        strings.Join(prLabels(e), ","),
 	}
 	if err := c.do(ctx, http.MethodPost, fmt.Sprintf("/projects/%s/merge_requests", c.projectSeg()), mrBody, &out); err != nil {
 		return providers.Ref{}, err

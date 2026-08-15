@@ -785,10 +785,20 @@ type KBEntry struct {
 	// an entry whose fault sits deeper than its alert is permanently unrecallable.
 	AlertResource string
 	Tags          []string
-	Body          string   // markdown
-	Fingerprint   string   // deterministic dedup fingerprint (see curator.DupFingerprint)
-	Confidence    float64  // overall investigation confidence; queryable extension frontmatter (0 = unset)
-	Provenance    []string // distinct causing-change refs; queryable extension frontmatter
+	// ExtraLabels are additional FORGE labels (GitHub/GitLab issue/PR labels)
+	// OpenPR appends to its standard lifecycle labels ("runlore", "triggered").
+	// Unlike Tags above — which renders into the committed OKF entry's
+	// frontmatter and never reaches the forge — ExtraLabels never renders into
+	// the entry file; it exists purely so a later pass can recognise and
+	// exclude specific PRs from auto-closing (e.g. a standalone operator note
+	// — see internal/curate's isOperatorNote). Additive only: OpenPR must
+	// APPEND these alongside the lifecycle labels, never replace them with it.
+	// Empty/nil for an ordinary curated finding.
+	ExtraLabels []string
+	Body        string   // markdown
+	Fingerprint string   // deterministic dedup fingerprint (see curator.DupFingerprint)
+	Confidence  float64  // overall investigation confidence; queryable extension frontmatter (0 = unset)
+	Provenance  []string // distinct causing-change refs; queryable extension frontmatter
 	// Reviewer context, rendered in the PR BODY only — never in the committed
 	// entry file (renderEntry ignores these), so the catalog and validator are
 	// untouched. Related is the draft-time BM25 neighborhood; the recurrence

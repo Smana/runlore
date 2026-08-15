@@ -37,6 +37,33 @@ func isEntryEditProposal(labels []string) bool {
 	return ok
 }
 
+// operatorNoteLabel marks a standalone KB PR opened from a human's thread
+// reply (thread.ConceptEntry, which appends it via providers.KBEntry.
+// ExtraLabels). RunLore must never auto-close one itself, by ANY pass — an
+// operator note IS a human's contribution, so closing it here is the same
+// class of hazard entryEditLabels guards against: RunLore's own housekeeping
+// producing a close that is indistinguishable from a human veto.
+//
+// internal/thread depends only on providers and internal/catalog by design,
+// so this literal is duplicated — not imported — from thread.noteForgeLabel.
+// Kept in sync by hand.
+const operatorNoteLabel = "runlore-operator-note"
+
+// isOperatorNote reports whether a PR is a standalone note filed from a
+// Slack/Matrix thread reply (see operatorNoteLabel) — never a candidate for
+// auto-closing by dedup or the stale sweep.
+func isOperatorNote(labels []string) bool {
+	return slices.Contains(labels, operatorNoteLabel)
+}
+
+// isAutoCloseExempt reports whether a PR must never be auto-closed by ANY
+// curate pass (dedup, the stale sweep): entry-edit proposals and standalone
+// operator notes share the same hazard — see entryEditLabels and
+// operatorNoteLabel for why each, on its own, is a permanent, unintended veto.
+func isAutoCloseExempt(labels []string) bool {
+	return isEntryEditProposal(labels) || isOperatorNote(labels)
+}
+
 // Lifecycle closes stale, unprotected KB artifacts — those with no forge activity
 // within StaleAfter. A PR whose age is unknown (zero UpdatedAt) is never closed.
 type Lifecycle struct {
@@ -60,8 +87,8 @@ func (l Lifecycle) Run(ctx context.Context) error {
 		return err
 	}
 	for _, pr := range prs {
-		if isEntryEditProposal(pr.Labels) {
-			continue // only a human may close one of these — see entryEditLabels
+		if isAutoCloseExempt(pr.Labels) {
+			continue // only a human may close one of these — see entryEditLabels / operatorNoteLabel
 		}
 		if isProtected(pr.Labels) || pr.UpdatedAt.IsZero() || now().Sub(pr.UpdatedAt) <= l.StaleAfter {
 			continue

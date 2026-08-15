@@ -126,3 +126,94 @@ func TestEntryEditProposalDetectionIsLabelExact(t *testing.T) {
 		})
 	}
 }
+
+// An operator note (internal/thread.ConceptEntry) is a human's own contribution
+// filed via thread capture, not a curator-drafted finding. It carries the same
+// self-veto hazard as an entry-edit proposal — a close by RunLore's own
+// housekeeping is indistinguishable from a human veto — for a stronger reason:
+// ConceptEntry deliberately leaves Fingerprint unset, so every note PR falls
+// through dedup's title-Jaccard fallback, and every note PR shares the title
+// prefix "KB: Operator note: <finding title>". Two notes on the SAME recurring
+// incident therefore score a Jaccard of 1.0 — the strongest possible match —
+// with no label protection at all.
+
+// operatorNoteTitle is the shared, colliding title two notes on the same
+// recurring incident would carry — arming the hazard these tests pin.
+const operatorNoteTitle = "KB: Operator note: Kustomization DependencyNotReady"
+
+func TestDedupNeverClosesAnOperatorNote(t *testing.T) {
+	// Arm the hazard: identical titles score the maximum possible Jaccard.
+	if score := jaccard(titleTokens(operatorNoteTitle), titleTokens(operatorNoteTitle)); score != 1 {
+		t.Fatalf("fixture titles score %.2f, not the maximal match this test needs to exercise the hazard", score)
+	}
+
+	f := &fakeForge{prs: []providers.CuratedIssue{
+		{Number: 30, Title: operatorNoteTitle, Labels: []string{"runlore", operatorNoteLabel}},
+		{Number: 31, Title: operatorNoteTitle, Labels: []string{"runlore", operatorNoteLabel}},
+		// Control: two genuine curated findings (no note label) must still dedup —
+		// the exclusion must not weaken dedup for ordinary drafts.
+		{Number: 20, Title: "KB: Kustomization DependencyNotReady missing GitRepository"},
+		{Number: 21, Title: "KB: Kustomization DependencyNotReady due to missing GitRepository"},
+	}}
+	if err := (Dedup{Forge: f, Log: discardLog()}).Run(context.Background()); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	for _, n := range []int{30, 31} {
+		if containsInt(f.closed, n) {
+			t.Errorf("Dedup closed operator note #%d as a duplicate of the other — RunLore closing "+
+				"one human's correction is indistinguishable from a human veto of it (closed=%v)", n, f.closed)
+		}
+	}
+	if len(f.closed) != 1 || f.closed[0] != 21 {
+		t.Fatalf("the genuine duplicate curated finding #21 must still close, got %v", f.closed)
+	}
+}
+
+func TestLifecycleNeverClosesAnOperatorNote(t *testing.T) {
+	now := lifecycleNow()
+	const staleAfter = 30 * 24 * time.Hour
+	updated := now.Add(-40 * 24 * time.Hour)
+	if now.Sub(updated) <= staleAfter {
+		t.Fatalf("fixture PRs are not stale, so this test no longer exercises the hazard")
+	}
+
+	f := &fakeForge{prs: []providers.CuratedIssue{
+		{Number: 30, Labels: []string{"runlore", operatorNoteLabel}, UpdatedAt: updated},
+		// Control: an ordinary stale KB draft, which the sweep must still close.
+		{Number: 20, Labels: []string{"runlore"}, UpdatedAt: updated},
+	}}
+	l := Lifecycle{Forge: f, StaleAfter: staleAfter, Now: func() time.Time { return now }, Log: discardLog()}
+	if err := l.Run(context.Background()); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if containsInt(f.closed, 30) {
+		t.Errorf("the stale sweep closed operator note #30 — an unreviewed human correction "+
+			"would be silently discarded (closed=%v)", f.closed)
+	}
+	if len(f.closed) != 1 || f.closed[0] != 20 {
+		t.Fatalf("the ordinary stale KB draft #20 must still close, got %v", f.closed)
+	}
+}
+
+// TestOperatorNoteDetectionIsLabelExact is the mutation guard for the predicate
+// itself, mirroring TestEntryEditProposalDetectionIsLabelExact.
+func TestOperatorNoteDetectionIsLabelExact(t *testing.T) {
+	cases := []struct {
+		name   string
+		labels []string
+		want   bool
+	}{
+		{"operator note", []string{"runlore", operatorNoteLabel}, true},
+		{"ordinary KB draft", []string{"runlore"}, false},
+		{"protected KB draft", []string{"runlore", "ready-to-merge"}, false},
+		{"entry-edit proposal", []string{"runlore", retireLabel}, false},
+		{"no labels", nil, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := isOperatorNote(tc.labels); got != tc.want {
+				t.Errorf("isOperatorNote(%v) = %v, want %v", tc.labels, got, tc.want)
+			}
+		})
+	}
+}

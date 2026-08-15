@@ -89,6 +89,25 @@ func TestConceptEntryCarriesTriggerKeyNotFingerprint(t *testing.T) {
 	}
 }
 
+// TestConceptEntryCarriesTheNoteForgeLabel pins that every ConceptEntry PR
+// carries noteForgeLabel — the label internal/curate's isOperatorNote reads
+// back to exclude a standalone operator note from every auto-closing pass.
+// Without it, two notes on the same recurring incident (identical "Operator
+// note: <title>" PR titles, no dedup fingerprint) would be paired and closed
+// by RunLore's own dedup sweep.
+func TestConceptEntryCarriesTheNoteForgeLabel(t *testing.T) {
+	e := ConceptEntry(Context{Title: "ImageGalleryUnavailable"}, "alice", "x", noteAt)
+	found := false
+	for _, l := range e.ExtraLabels {
+		if l == noteForgeLabel {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("ExtraLabels = %v, want it to contain %q", e.ExtraLabels, noteForgeLabel)
+	}
+}
+
 func TestConceptEntryTitleIsBounded(t *testing.T) {
 	tests := []struct {
 		name  string

@@ -36,6 +36,24 @@ func NoteBody(tc Context, author, text string, at time.Time) string {
 	return b.String()
 }
 
+// noteForgeLabel marks a standalone KB PR opened from a human's thread reply
+// (see ConceptEntry) so curate's auto-closing passes (dedup, the stale sweep)
+// can recognise and skip it — see isOperatorNote in internal/curate.
+//
+// It matters because ConceptEntry deliberately leaves Fingerprint unset (a
+// note is not a curated finding — see the comment below), so two notes are
+// ALWAYS compared by dedup's title-Jaccard fallback. Every note PR shares the
+// title prefix "KB: Operator note: <finding title>", so two notes on the same
+// recurring incident score a Jaccard of 1.0 — the strongest possible dedup
+// match. Without this label RunLore would silently close a human's
+// correction as a "duplicate" of another human's correction, which defeats
+// the entire premise of thread capture.
+//
+// internal/thread depends only on providers and internal/catalog by design,
+// so this literal is duplicated — not imported — in internal/curate. Kept in
+// sync by hand, the same tradeoff already made for neutralizeImages below.
+const noteForgeLabel = "runlore-operator-note"
+
 // ConceptEntry builds the standalone KB entry for a note that has no open PR to
 // land on — a recall (which never curates), a skipped verdict, or a coalesced
 // finding.
@@ -75,6 +93,7 @@ func ConceptEntry(tc Context, author, text string, at time.Time) providers.KBEnt
 		Description: truncate(fmt.Sprintf("Operator knowledge captured from a %s thread by @%s.", transportName(tc.Transport), author), maxNoteTitle*2),
 		Resource:    tc.Resource,
 		Tags:        []string{"operator-note", transportName(tc.Transport)},
+		ExtraLabels: []string{noteForgeLabel},
 		Body:        body.String(),
 		// Fingerprint, Confidence and Provenance are deliberately unset: the dedup
 		// fingerprint identifies a CURATED FINDING, and stamping a note with one

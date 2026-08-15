@@ -150,6 +150,38 @@ func TestOpenPR(t *testing.T) {
 	}
 }
 
+// TestOpenPRAppendsExtraLabels pins that KBEntry.ExtraLabels reaches the MR's
+// labels field APPENDED to the standard lifecycle labels, never in place of
+// them — the mechanism internal/thread.ConceptEntry relies on to mark a
+// standalone operator note so curate's auto-closing passes can exclude it.
+func TestOpenPRAppendsExtraLabels(t *testing.T) {
+	var mrBody map[string]any
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case isBundleRead(r):
+			bundleAbsent(w)
+		case strings.HasSuffix(r.URL.EscapedPath(), "/repository/commits"):
+			_, _ = w.Write([]byte(`{"id":"deadbeef"}`))
+		case strings.HasSuffix(r.URL.EscapedPath(), "/merge_requests"):
+			_ = json.NewDecoder(r.Body).Decode(&mrBody)
+			_, _ = w.Write([]byte(`{"iid":9,"web_url":"https://gitlab.com/o/r/-/merge_requests/9"}`))
+		default:
+			t.Fatalf("unexpected request: %s %s", r.Method, r.URL.EscapedPath())
+		}
+	}))
+	defer srv.Close()
+
+	c := New(srv.URL, "o/r", "main", staticToken("tok"))
+	if _, err := c.OpenPR(context.Background(), providers.KBEntry{
+		Type: "Concept", Title: "Operator note: X", Body: "b", ExtraLabels: []string{"runlore-operator-note"},
+	}); err != nil {
+		t.Fatalf("OpenPR: %v", err)
+	}
+	if labels, _ := mrBody["labels"].(string); labels != "runlore,triggered,runlore-operator-note" {
+		t.Fatalf("labels = %q, want runlore,triggered,runlore-operator-note", labels)
+	}
+}
+
 // TestOpenPRFingerprintMarkerRoundTrips proves the dedup fingerprint survives a
 // round trip through the MR description exactly like the GitHub PR body.
 func TestOpenPRFingerprintMarkerRoundTrips(t *testing.T) {

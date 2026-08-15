@@ -205,6 +205,91 @@ func TestOpenPR(t *testing.T) {
 	}
 }
 
+// TestOpenPRAppendsExtraLabels pins that KBEntry.ExtraLabels reaches the labels
+// call APPENDED to the standard lifecycle labels, never in place of them — the
+// mechanism internal/thread.ConceptEntry relies on to mark a standalone operator
+// note so curate's auto-closing passes can exclude it.
+func TestOpenPRAppendsExtraLabels(t *testing.T) {
+	var gotLabels []string
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /repos/o/r/git/ref/heads/main", func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`{"object":{"sha":"basesha"}}`))
+	})
+	mux.HandleFunc("POST /repos/o/r/git/refs", func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`{}`))
+	})
+	mux.HandleFunc("GET /repos/o/r/contents/{path...}", func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusNotFound)
+	})
+	mux.HandleFunc("PUT /repos/o/r/contents/{path...}", func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`{}`))
+	})
+	mux.HandleFunc("POST /repos/o/r/pulls", func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`{"html_url":"https://github.com/o/r/pull/9","number":9}`))
+	})
+	mux.HandleFunc("POST /repos/o/r/issues/9/labels", func(w http.ResponseWriter, r *http.Request) {
+		var body struct {
+			Labels []string `json:"labels"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		gotLabels = body.Labels
+		_, _ = w.Write([]byte(`{}`))
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	c := New(srv.URL, "o", "r", "main", staticToken("tok"))
+	if _, err := c.OpenPR(context.Background(), providers.KBEntry{
+		Type: "Concept", Title: "Operator note: X", Body: "b", ExtraLabels: []string{"runlore-operator-note"},
+	}); err != nil {
+		t.Fatalf("OpenPR: %v", err)
+	}
+	if want := []string{"runlore", "triggered", "runlore-operator-note"}; strings.Join(gotLabels, ",") != strings.Join(want, ",") {
+		t.Fatalf("labels = %v, want %v", gotLabels, want)
+	}
+}
+
+// TestOpenPRWithNoExtraLabelsAppliesOnlyLifecycleLabels is the control for
+// TestOpenPRAppendsExtraLabels: an ordinary curated finding (no ExtraLabels)
+// must get exactly the two lifecycle labels, unchanged by the new field.
+func TestOpenPRWithNoExtraLabelsAppliesOnlyLifecycleLabels(t *testing.T) {
+	var gotLabels []string
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /repos/o/r/git/ref/heads/main", func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`{"object":{"sha":"basesha"}}`))
+	})
+	mux.HandleFunc("POST /repos/o/r/git/refs", func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`{}`))
+	})
+	mux.HandleFunc("GET /repos/o/r/contents/{path...}", func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusNotFound)
+	})
+	mux.HandleFunc("PUT /repos/o/r/contents/{path...}", func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`{}`))
+	})
+	mux.HandleFunc("POST /repos/o/r/pulls", func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`{"html_url":"https://github.com/o/r/pull/9","number":9}`))
+	})
+	mux.HandleFunc("POST /repos/o/r/issues/9/labels", func(w http.ResponseWriter, r *http.Request) {
+		var body struct {
+			Labels []string `json:"labels"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		gotLabels = body.Labels
+		_, _ = w.Write([]byte(`{}`))
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	c := New(srv.URL, "o", "r", "main", staticToken("tok"))
+	if _, err := c.OpenPR(context.Background(), providers.KBEntry{Type: "Incident", Title: "DB outage", Body: "b"}); err != nil {
+		t.Fatalf("OpenPR: %v", err)
+	}
+	if want := []string{"runlore", "triggered"}; strings.Join(gotLabels, ",") != strings.Join(want, ",") {
+		t.Fatalf("labels = %v, want %v", gotLabels, want)
+	}
+}
+
 // TestOpenPREntryPath pins the entry file path: a type directory plus a
 // fingerprint-suffixed slug, so two different incidents that share a title can't
 // collide on the same path (the contents PUT would 422 on the second PR after the
