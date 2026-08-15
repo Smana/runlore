@@ -115,7 +115,7 @@ func BuildThreadMention(cfg *config.Config, threadRegistry *thread.Registry, for
 			Forge:             forge,
 			Registry:          threadRegistry,
 			MaxNotesPerThread: thread.DefaultMaxNotesPerThread,
-			OpenPRs:           ratelimit.New(20, time.Hour),
+			ForgeWrites:       ratelimit.New(20, time.Hour),
 			Log:               log,
 		},
 		Registry: threadRegistry,

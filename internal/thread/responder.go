@@ -58,13 +58,19 @@ type Responder struct {
 	Forge    Forge
 	Registry *Registry
 	// MaxNotesPerThread caps knowledge writes per thread; <= 0 means
-	// DefaultMaxNotesPerThread.
+	// DefaultMaxNotesPerThread. A separate, narrower control than ForgeWrites:
+	// it bounds one thread's share, not the total.
 	MaxNotesPerThread int
-	// OpenPRs caps how often a standalone note PR may be opened, globally. A
-	// chatty channel must not become a forge incident. nil means unlimited.
-	OpenPRs *ratelimit.Window
-	Now     func() time.Time
-	Log     *slog.Logger
+	// ForgeWrites caps every forge write this responder makes — a CommentOnPR
+	// exactly as much as an OpenPR — globally, per hour. It is checked once, in
+	// write(), upstream of which route gets chosen, so neither route can spend
+	// a budget the other does not draw from: a chatty channel must not become a
+	// forge (or, once a model sits ahead of this same check, a token-spend)
+	// incident regardless of which route its notes happen to take. nil means
+	// unlimited.
+	ForgeWrites *ratelimit.Window
+	Now         func() time.Time
+	Log         *slog.Logger
 }
 
 // prNumberRe matches the numeric id in a GitHub pull URL or a GitLab merge-request
@@ -163,6 +169,20 @@ func (r *Responder) Handle(ctx context.Context, tc Context, author, raw string) 
 // error and on the (non-error) global-rate-limit throttle, so a caller can
 // distinguish "nothing happened" from "a write happened" independently of err.
 func (r *Responder) write(ctx context.Context, tc Context, author, text string, at time.Time, intent Intent) (string, bool, error) {
+	// Checked once, upstream of BOTH write routes below: a CommentOnPR spends
+	// this budget exactly like an OpenPR does. Gating only the OpenPR branch —
+	// as an earlier version of this method did — left the comment route bounded
+	// solely by the per-thread cap (20) times however many threads the registry
+	// happened to be holding (up to 2000), not by this window at all. A future
+	// model call on this same path belongs ahead of this check too, and nothing
+	// about this placement — upstream of the route branch — needs to change to
+	// put it there.
+	if r.ForgeWrites != nil && !r.ForgeWrites.Allow() {
+		// A throttle is not a failure — no error — but nothing landed, so the
+		// caller must not charge the thread's note budget for it.
+		return "⚠️ I have made too many knowledge-base writes recently and paused. Try again shortly.", false, nil
+	}
+
 	// The route is derived from the thread context alone. It is never influenced
 	// by the message text.
 	for _, url := range []string{tc.CuratedURL, tc.NoteURL} {
@@ -203,11 +223,6 @@ func (r *Responder) write(ctx context.Context, tc Context, author, text string, 
 		return fmt.Sprintf("📝 Noted on the knowledge-base PR #%d — %s", n, url), true, nil
 	}
 
-	if r.OpenPRs != nil && !r.OpenPRs.Allow() {
-		// A throttle is not a failure — no error — but nothing landed, so the
-		// caller must not charge the thread's note budget for it.
-		return "⚠️ I have opened too many knowledge-base PRs recently and paused. Try again shortly.", false, nil
-	}
 	ref, err := r.Forge.OpenPR(ctx, ConceptEntry(tc, author, text, at))
 	if err != nil {
 		return fmt.Sprintf("⚠️ I could not save that to the knowledge base: %v", err), false,

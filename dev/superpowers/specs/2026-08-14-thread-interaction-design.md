@@ -174,8 +174,14 @@ the corpus shows drift.
 `internal/ratelimit.Window` on two axes, both leader-local:
 
 - Per thread: 20 notes total (further mentions get a reply, no write).
-- Per hour, global: caps `OpenPR` calls and (when the chat layer is on) model
-  calls, so a chatty channel cannot become a forge- or token-spend incident.
+- Per hour, global (`Responder.ForgeWrites`): caps every forge write this
+  feature makes — `CommentOnPR` exactly as much as `OpenPR` — checked once in
+  `write()` upstream of which route gets chosen, and (when the chat layer is
+  on) will cap model calls the same way, so a chatty channel cannot become a
+  forge- or token-spend incident. An earlier version of this window gated only
+  `OpenPR`; `CommentOnPR` returned before ever reaching the check, so the real
+  ceiling was the per-thread cap times however many threads the registry was
+  holding (up to 2000) — not a global budget at all.
 
 ## Slack transport
 

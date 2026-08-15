@@ -82,7 +82,7 @@ func newTestResponder(t *testing.T, f *fakeForge) *Responder {
 		Forge:             f,
 		Registry:          reg,
 		MaxNotesPerThread: 3,
-		OpenPRs:           ratelimit.New(10, time.Hour),
+		ForgeWrites:       ratelimit.New(10, time.Hour),
 		Now:               func() time.Time { return noteAt },
 		Log:               slog.New(slog.NewTextHandler(io.Discard, nil)),
 	}
@@ -225,7 +225,7 @@ func TestHandlePerThreadCap(t *testing.T) {
 func TestHandleOpenPRRateLimit(t *testing.T) {
 	f := &fakeForge{}
 	r := newTestResponder(t, f)
-	r.OpenPRs = ratelimit.New(1, time.Hour)
+	r.ForgeWrites = ratelimit.New(1, time.Hour)
 
 	for _, root := range []string{"a", "b"} {
 		tc := Context{Root: root}
@@ -237,7 +237,7 @@ func TestHandleOpenPRRateLimit(t *testing.T) {
 		}
 	}
 	if len(f.opened) != 1 {
-		t.Fatalf("opened = %d, want 1 — the global OpenPR budget caps the second", len(f.opened))
+		t.Fatalf("opened = %d, want 1 — the global write budget caps the second", len(f.opened))
 	}
 	// Thread "b" hit the global rate limit: nothing landed in the knowledge base
 	// for it, so its per-thread budget must be untouched.
@@ -247,6 +247,114 @@ func TestHandleOpenPRRateLimit(t *testing.T) {
 	}
 	if throttled.Notes != 0 {
 		t.Errorf("Notes = %d for the throttled thread, want 0 — a throttled write must not burn the thread's budget", throttled.Notes)
+	}
+}
+
+// TestHandleGlobalRateLimitGatesCommentsToo pins the fix for the defect where
+// the global hourly window only ever gated OpenPR: write() returned from the
+// CommentOnPR branch before the window check was ever reached, so commenting
+// on an already-linked PR was bounded only by the per-thread cap (20) times
+// however many threads the registry happened to be holding (up to 2000) —
+// not by the global window the design spec says exists so "a chatty channel
+// cannot become a forge- or token-spend incident".
+func TestHandleGlobalRateLimitGatesCommentsToo(t *testing.T) {
+	f := &fakeForge{}
+	r := newTestResponder(t, f)
+	r.ForgeWrites = ratelimit.New(1, time.Hour)
+
+	tc1 := Context{Root: "a", CuratedURL: "https://github.com/o/r/pull/42"}
+	if err := r.Registry.Put(tc1); err != nil {
+		t.Fatalf("Put: %v", err)
+	}
+	if _, err := r.Handle(context.Background(), tc1, "alice", "note: first"); err != nil {
+		t.Fatalf("Handle: %v", err)
+	}
+
+	tc2 := Context{Root: "b", CuratedURL: "https://github.com/o/r/pull/77"}
+	if err := r.Registry.Put(tc2); err != nil {
+		t.Fatalf("Put: %v", err)
+	}
+	reply, err := r.Handle(context.Background(), tc2, "bob", "note: second")
+	if err != nil {
+		t.Fatalf("Handle: %v", err)
+	}
+	if len(f.comments) != 1 {
+		t.Fatalf("comments = %d, want 1 — the global window must gate CommentOnPR too, not just OpenPR", len(f.comments))
+	}
+	if !strings.Contains(strings.ToLower(reply), "paused") {
+		t.Errorf("the throttled reply must say so: %q", reply)
+	}
+	// Thread "b" was throttled, not written: its per-thread budget must be
+	// untouched, exactly like the OpenPR-route throttle case above.
+	throttled, ok := r.Registry.Get("b")
+	if !ok {
+		t.Fatal("registry lost thread b")
+	}
+	if throttled.Notes != 0 {
+		t.Errorf("Notes = %d for the throttled thread, want 0", throttled.Notes)
+	}
+}
+
+// TestHandleGlobalRateLimitIsSharedAcrossBothRoutes proves the comment route
+// and the OpenPR route draw from ONE budget rather than each silently getting
+// its own: a comment landing must be able to exhaust the window a subsequent
+// OpenPR then hits, and vice versa.
+func TestHandleGlobalRateLimitIsSharedAcrossBothRoutes(t *testing.T) {
+	f := &fakeForge{}
+	r := newTestResponder(t, f)
+	r.ForgeWrites = ratelimit.New(1, time.Hour)
+
+	// First write takes the comment route and spends the whole shared budget.
+	tc1 := Context{Root: "a", CuratedURL: "https://github.com/o/r/pull/42"}
+	if err := r.Registry.Put(tc1); err != nil {
+		t.Fatalf("Put: %v", err)
+	}
+	if _, err := r.Handle(context.Background(), tc1, "alice", "note: first"); err != nil {
+		t.Fatalf("Handle: %v", err)
+	}
+
+	// Second write would take the OpenPR route (no linked PR at all) — but the
+	// shared budget is already spent, by the FIRST write's comment.
+	tc2 := Context{Root: "b"}
+	if err := r.Registry.Put(tc2); err != nil {
+		t.Fatalf("Put: %v", err)
+	}
+	if _, err := r.Handle(context.Background(), tc2, "bob", "note: second"); err != nil {
+		t.Fatalf("Handle: %v", err)
+	}
+
+	if len(f.comments) != 1 || len(f.opened) != 0 {
+		t.Fatalf("comments=%d opened=%d, want 1/0 — one shared budget across both write routes", len(f.comments), len(f.opened))
+	}
+}
+
+// TestHandlePerThreadCapIndependentOfGlobalWindow pins that the per-thread cap
+// (a separate, narrower control) still applies on its own even when the
+// global window is generous enough never to bind — the two must not collapse
+// into one check now that the global window gates both routes.
+func TestHandlePerThreadCapIndependentOfGlobalWindow(t *testing.T) {
+	f := &fakeForge{}
+	r := newTestResponder(t, f)
+	r.MaxNotesPerThread = 1
+	r.ForgeWrites = ratelimit.New(100, time.Hour)
+	tc := Context{Root: "a", CuratedURL: "https://github.com/o/r/pull/42"}
+	if err := r.Registry.Put(tc); err != nil {
+		t.Fatalf("Put: %v", err)
+	}
+
+	if _, err := r.Handle(context.Background(), tc, "alice", "note: first"); err != nil {
+		t.Fatalf("Handle: %v", err)
+	}
+	cur, _ := r.Registry.Get("a")
+	reply, err := r.Handle(context.Background(), cur, "alice", "note: second")
+	if err != nil {
+		t.Fatalf("Handle: %v", err)
+	}
+	if len(f.comments) != 1 {
+		t.Fatalf("comments = %d, want 1 — the per-thread cap must still bind independently of the global window", len(f.comments))
+	}
+	if !strings.Contains(strings.ToLower(reply), "limit") {
+		t.Errorf("the capped reply must say so: %q", reply)
 	}
 }
 
