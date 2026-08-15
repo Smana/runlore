@@ -232,6 +232,45 @@ func TestRegistryGetOrCreatePersistsFallbackOnMiss(t *testing.T) {
 	}
 }
 
+// TestRegistryGetOrCreateOnDisabledRegistryReturnsSentinel pins that a
+// disabled registry (no ledger path) cannot silently report the same outcome
+// as "a concurrent caller already established this entry" — created=false,
+// err=nil is exactly that outcome, and a disabled registry establishes
+// nothing, so it must return a distinguishable, non-nil error instead.
+func TestRegistryGetOrCreateOnDisabledRegistryReturnsSentinel(t *testing.T) {
+	r, err := NewRegistry("", time.Hour, 10)
+	if err != nil {
+		t.Fatalf("NewRegistry: %v", err)
+	}
+	tc, created, gerr := r.GetOrCreate("r1", Context{Root: "r1", CuratedURL: "https://github.com/o/r/pull/1"})
+	if !errors.Is(gerr, ErrThreadNotEstablishable) {
+		t.Fatalf("GetOrCreate on a disabled registry = %v, want ErrThreadNotEstablishable", gerr)
+	}
+	if created {
+		t.Fatal("a registry that established nothing must not report created = true")
+	}
+	if tc != (Context{}) {
+		t.Fatalf("tc = %+v, want the zero value alongside this error", tc)
+	}
+}
+
+// TestRegistryGetOrCreateOnEmptyRootReturnsSentinel mirrors the
+// disabled-registry case for an empty root: neither may be reported as the
+// "concurrent winner" outcome (created=false, err=nil).
+func TestRegistryGetOrCreateOnEmptyRootReturnsSentinel(t *testing.T) {
+	r, err := NewRegistry(filepath.Join(t.TempDir(), "threads.jsonl"), time.Hour, 10)
+	if err != nil {
+		t.Fatalf("NewRegistry: %v", err)
+	}
+	_, created, gerr := r.GetOrCreate("", Context{CuratedURL: "https://github.com/o/r/pull/1"})
+	if !errors.Is(gerr, ErrThreadNotEstablishable) {
+		t.Fatalf("GetOrCreate(root=\"\") = %v, want ErrThreadNotEstablishable", gerr)
+	}
+	if created {
+		t.Fatal("an empty root must not report created = true")
+	}
+}
+
 // TestRegistryGetOrCreateConcurrentFirstCallersEstablishExactlyOneEntry pins
 // the fix for the concurrency hole in the rehydrate path: two never-before-
 // tracked messages arriving close together used to each independently decide

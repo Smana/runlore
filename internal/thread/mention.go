@@ -4,6 +4,7 @@ package thread
 
 import (
 	"context"
+	"errors"
 	"log/slog"
 )
 
@@ -64,14 +65,32 @@ func (m *Mention) HandleMention(ctx context.Context, channel, root, author, text
 		var created bool
 		var err error
 		tc, created, err = m.Registry.GetOrCreate(root, *fallback)
-		if err != nil {
+		switch {
+		case errors.Is(err, ErrThreadNotEstablishable):
+			// The registry could not record anything at all (disabled, or an
+			// empty root) — NOT the same outcome as a concurrent caller already
+			// winning the race (created=false, err=nil): that case hands back a
+			// real, persisted entry to use. This one hands back the zero-value
+			// Context, which must never be mistaken for "the established entry"
+			// and carried into a write — that is exactly what would open a
+			// contextless "Operator note" PR with no title, trigger key, or
+			// resource, for every message, bounded only by the global hourly
+			// window. Refuse the same way an outright registry miss with no
+			// fallback does.
+			m.Log.Info("thread: mention in an unrecognised thread and the registry cannot establish one",
+				"root", root, "channel", channel, "author", author, "err", err)
+			m.reply(ctx, root, channel,
+				"I don't have context for this thread — I can only record knowledge in a thread I started, "+
+					"and only for a limited time after the finding was posted.")
+			return
+		case err != nil:
 			// The rehydration write itself failed (e.g. a disk error): the fallback
 			// is still used for THIS message — refusing outright would drop the
 			// human's words for certain — but the cap and counter may not be
 			// enforced for this thread until a later write succeeds.
 			m.Log.Warn("thread: could not rehydrate the registry from a fallback context; this thread's cap may not be enforced",
 				"root", root, "channel", channel, "author", author, "err", err)
-		} else if !created {
+		case !created:
 			// Another goroutine's concurrent message won the race to rehydrate this
 			// thread first; this one observed and is using that entry instead.
 			m.Log.Info("thread: registry already rehydrated by a concurrent message; using the established entry",

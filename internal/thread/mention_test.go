@@ -11,6 +11,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 )
 
 // mu guards replies: TestMentionConcurrentFirstMessagesRehydrateRegistryOnceAndCountEveryWrite
@@ -224,6 +225,49 @@ func TestMentionRegistryHitTakesPrecedenceOverFallback(t *testing.T) {
 
 	if len(f.comments) != 1 || f.comments[0].number != 42 {
 		t.Fatalf("must use the registry's CuratedURL (42), not the fallback's (999): comments=%+v", f.comments)
+	}
+}
+
+// TestMentionFallbackOnDisabledRegistryDoesNotWriteWithZeroValueContext pins
+// that GetOrCreate's ErrThreadNotEstablishable is handled explicitly rather
+// than falling into the "concurrent winner" branch: a disabled registry
+// cannot establish a fallback, and the zero-value Context that comes back
+// alongside that error must never be carried into a write — a contextless
+// "Operator note" PR with no title, trigger key, or resource, bounded only by
+// the global hourly window.
+func TestMentionFallbackOnDisabledRegistryDoesNotWriteWithZeroValueContext(t *testing.T) {
+	f, rep := &fakeForge{}, &fakeReplier{}
+	m := newTestMention(t, f, rep)
+	disabled, err := NewRegistry("", time.Hour, 10)
+	if err != nil {
+		t.Fatalf("NewRegistry: %v", err)
+	}
+	m.Registry = disabled
+	m.Responder.Registry = disabled
+	fallback := &Context{Root: "r1", CuratedURL: "https://github.com/o/r/pull/42"}
+
+	m.HandleMention(context.Background(), "C1", "r1", "alice", "note: x", fallback)
+
+	if len(f.comments) != 0 || len(f.opened) != 0 {
+		t.Fatalf("a registry that cannot establish a fallback must never reach a write: comments=%d opened=%d",
+			len(f.comments), len(f.opened))
+	}
+	if len(rep.replies) != 1 {
+		t.Fatalf("replies = %d, want 1 — the human must still be told", len(rep.replies))
+	}
+}
+
+// TestMentionFallbackOnEmptyRootDoesNotWriteWithZeroValueContext mirrors the
+// disabled-registry case for an empty root reaching GetOrCreate.
+func TestMentionFallbackOnEmptyRootDoesNotWriteWithZeroValueContext(t *testing.T) {
+	f, rep := &fakeForge{}, &fakeReplier{}
+	m := newTestMention(t, f, rep)
+	fallback := &Context{Root: "", CuratedURL: "https://github.com/o/r/pull/42"}
+
+	m.HandleMention(context.Background(), "C1", "", "alice", "note: x", fallback)
+
+	if len(f.comments) != 0 || len(f.opened) != 0 {
+		t.Fatalf("an empty root must never reach a write: comments=%d opened=%d", len(f.comments), len(f.opened))
 	}
 }
 

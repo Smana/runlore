@@ -23,6 +23,17 @@ import (
 // forever, so it never incremented and the cap never engaged.
 var ErrThreadNotTracked = errors.New("thread: root not tracked by the registry")
 
+// ErrThreadNotEstablishable is returned by GetOrCreate when the registry
+// cannot record anything at all for root — a disabled registry (no ledger
+// path) or an empty root — as distinct from created=false, err=nil, which
+// means a CONCURRENT caller already established the entry and this call is
+// handing back what they wrote. The two outcomes must never be conflated:
+// created=false with a nil error says "someone else did this, use their
+// entry"; this error says "no one did, there is nothing to use". A caller
+// that receives it must not proceed with the zero-value Context returned
+// alongside it as if it were a real, persisted entry.
+var ErrThreadNotEstablishable = errors.New("thread: root cannot be established by the registry")
+
 // Registry maps a thread root to the investigation it delivered, so a later
 // reply can be attributed. It is append-only JSONL on disk, replayed on open —
 // the same durability mechanism outcome.Ledger uses, and for the same reason:
@@ -247,6 +258,16 @@ func (r *Registry) Update(root string, fn func(*Context)) error {
 // so a caller can log the rehydration once rather than on every subsequent
 // hit.
 //
+// A disabled registry or an empty root can establish nothing at all: that
+// case returns ErrThreadNotEstablishable (created=false) rather than the
+// same (Context{}, false, nil) a genuine concurrent-loser observes on a
+// registry hit. The two must stay distinguishable — created=false with a nil
+// error means "a concurrent caller already wrote a real entry, here it is";
+// this error means "there is no entry, and none can be made". A caller that
+// conflated them would carry a zero-value Context — no Root, no CuratedURL,
+// no NoteURL — into a write believing it was the thread's established
+// context.
+//
 // It exists so a caller with a fallback context (Mention.HandleMention, when
 // the registry has lost a thread to TTL expiry, a restart, or a leader
 // failover) never has to sequence its own Get() and Put(): two of those,
@@ -273,7 +294,7 @@ func (r *Registry) Update(root string, fn func(*Context)) error {
 // registry-only race is accepted rather than hidden.
 func (r *Registry) GetOrCreate(root string, fallback Context) (tc Context, created bool, err error) {
 	if !r.Enabled() || root == "" {
-		return Context{}, false, nil
+		return Context{}, false, ErrThreadNotEstablishable
 	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
