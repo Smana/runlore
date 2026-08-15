@@ -239,6 +239,29 @@ func (r *Responder) write(ctx context.Context, tc Context, author, text string, 
 		return "⚠️ I have made too many knowledge-base writes recently and paused. Try again shortly.", false, nil
 	}
 
+	// Serialize concurrent writes for THIS root — not the registry's own
+	// mutex, which is never held across the forge round-trip below, so this
+	// only blocks another write for the SAME thread, never Get/Put/Update or
+	// a write for a different thread. Deferred immediately after acquiring,
+	// so any return path below — success, a forge error, or a panic — always
+	// releases it; a write that never released this would wedge every later
+	// note in the thread behind it forever.
+	release := r.Registry.lockRoot(tc.Root)
+	defer release()
+
+	// Re-read the registry now that the guard is held: another write for
+	// this same root may have landed and updated NoteURL while this call was
+	// waiting for the lock, and the routing decision below must see THAT,
+	// not the possibly-stale tc captured before the wait. This is what turns
+	// "two callers can both observe NoteURL == '' and both open a PR" (the
+	// residual race GetOrCreate's doc comment describes) into "the second
+	// caller sees the first caller's PR and comments on it instead." A miss
+	// here (disabled registry, or the entry aged out mid-request) leaves tc
+	// exactly as the caller passed it, same as before this guard existed.
+	if fresh, ok := r.Registry.Get(tc.Root); ok {
+		tc = fresh
+	}
+
 	// The route is derived from the thread context alone. It is never influenced
 	// by the message text.
 	for _, url := range []string{tc.CuratedURL, tc.NoteURL} {

@@ -6,6 +6,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"path/filepath"
@@ -87,6 +88,14 @@ type fakeForge struct {
 	// prOpenCalls records every number IsPROpen was asked about, in order, so
 	// a test can pin that the check runs before a comment is ever posted.
 	prOpenCalls []int
+	// entered/proceed are an optional rendezvous used only by the
+	// different-roots concurrency test: when entered is non-nil, OpenPR
+	// signals its arrival on entered and then blocks on proceed, so the test
+	// can prove two OpenPR calls for two different roots are inside the
+	// forge call AT THE SAME TIME — something a per-root guard must allow,
+	// unlike two calls for the SAME root.
+	entered chan struct{}
+	proceed chan struct{}
 }
 
 func (f *fakeForge) IsPROpen(_ context.Context, number int) (bool, error) {
@@ -116,6 +125,10 @@ func (f *fakeForge) CommentOnPR(_ context.Context, number int, body string) erro
 }
 
 func (f *fakeForge) OpenPR(_ context.Context, e providers.KBEntry) (providers.Ref, error) {
+	if f.entered != nil {
+		f.entered <- struct{}{}
+		<-f.proceed
+	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if f.openErr != nil {
@@ -924,5 +937,132 @@ func TestHandleSuccessfulWritesIncrementCounterByRoute(t *testing.T) {
 	got, ok := read("runlore_thread_notes_written_total")
 	if !ok || got != 2 {
 		t.Errorf("runlore_thread_notes_written_total = %d (ok=%v), want 2 (one per landed route)", got, ok)
+	}
+}
+
+// TestResponderConcurrentFirstNotesOnSameRootProduceExactlyOneOpenPR pins the
+// close of the residual race Registry.GetOrCreate's doc comment describes:
+// atomic rehydration alone stops two callers from creating DIVERGENT
+// registry entries, but it does not stop them from both observing the SAME
+// entry's NoteURL == "" and both calling OpenPR before either write updates
+// it. The per-root write guard closes that: write() re-reads the registry
+// under the guard, so every writer after the first sees the NoteURL the
+// first one just landed and comments instead of opening again.
+//
+// Driven with real goroutines, not a simulated ordering — the hazard is a
+// genuine race between concurrent write() calls for the same root.
+func TestResponderConcurrentFirstNotesOnSameRootProduceExactlyOneOpenPR(t *testing.T) {
+	f := &fakeForge{}
+	r := newTestResponder(t, f)
+	r.MaxNotesPerThread = 1000                  // the per-thread cap is not what this test pins
+	r.ForgeWrites = ratelimit.New(0, time.Hour) // 0 = unlimited; the global budget is not what this test pins
+	root := "unknown-thread"
+	if err := r.Registry.Put(Context{Root: root}); err != nil {
+		t.Fatalf("Put: %v", err)
+	}
+
+	const n = 20
+	var wg sync.WaitGroup
+	for i := 0; i < n; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			tc, ok := r.Registry.Get(root)
+			if !ok {
+				t.Errorf("Get[%d]: registry lost the root mid-test", i)
+				return
+			}
+			if _, err := r.Handle(context.Background(), tc, fmt.Sprintf("user%d", i), "note: concurrent"); err != nil {
+				t.Errorf("Handle[%d]: %v", i, err)
+			}
+		}(i)
+	}
+	wg.Wait()
+
+	comments, opened := f.counts()
+	if opened != 1 {
+		t.Fatalf("opened = %d, want exactly 1 — every concurrent first note on the same thread must land on the ONE PR the first writer opens, not open its own", opened)
+	}
+	if comments != n-1 {
+		t.Fatalf("comments = %d, want %d — every writer after the first must comment on that one PR", comments, n-1)
+	}
+}
+
+// TestResponderConcurrentNotesOnDifferentRootsAreNotSerialized proves the
+// per-root guard is exactly that — per ROOT — and not a global lock in
+// disguise: two notes on two DIFFERENT threads must be able to be inside the
+// forge call at the same time. The fakeForge rendezvous (entered/proceed)
+// makes this a deterministic proof rather than a timing guess: the test only
+// proceeds past the wait once BOTH goroutines have signalled they are inside
+// OpenPR simultaneously; if the guard wrongly serialized them, the second
+// signal would never arrive and the test would time out.
+func TestResponderConcurrentNotesOnDifferentRootsAreNotSerialized(t *testing.T) {
+	f := &fakeForge{entered: make(chan struct{}, 2), proceed: make(chan struct{})}
+	r := newTestResponder(t, f)
+	for _, root := range []string{"root-a", "root-b"} {
+		if err := r.Registry.Put(Context{Root: root}); err != nil {
+			t.Fatalf("Put(%s): %v", root, err)
+		}
+	}
+
+	var wg sync.WaitGroup
+	for _, root := range []string{"root-a", "root-b"} {
+		wg.Add(1)
+		go func(root string) {
+			defer wg.Done()
+			tc, _ := r.Registry.Get(root)
+			if _, err := r.Handle(context.Background(), tc, "alice", "note: x"); err != nil {
+				t.Errorf("Handle(%s): %v", root, err)
+			}
+		}(root)
+	}
+
+	timeout := time.After(2 * time.Second)
+	for i := 0; i < 2; i++ {
+		select {
+		case <-f.entered:
+		case <-timeout:
+			t.Fatal("two different-root writes must be able to overlap inside the forge call, but a second one never arrived — the guard is serializing across roots")
+		}
+	}
+	close(f.proceed)
+	wg.Wait()
+}
+
+// TestResponderWriteErrorReleasesTheGuard pins that a forge failure does not
+// leave the per-root guard held: the release must be unconditional (deferred
+// right after acquisition), or a single failed write on a root would block
+// every later write on that same root forever.
+func TestResponderWriteErrorReleasesTheGuard(t *testing.T) {
+	f := &fakeForge{openErr: errors.New("503 unavailable")}
+	r := newTestResponder(t, f)
+	root := "r1"
+	if err := r.Registry.Put(Context{Root: root}); err != nil {
+		t.Fatalf("Put: %v", err)
+	}
+
+	if _, err := r.Handle(context.Background(), Context{Root: root}, "alice", "note: first"); err == nil {
+		t.Fatal("test setup: the first write must fail")
+	}
+
+	f.mu.Lock()
+	f.openErr = nil
+	f.mu.Unlock()
+
+	done := make(chan struct{})
+	go func() {
+		if _, err := r.Handle(context.Background(), Context{Root: root}, "bob", "note: second"); err != nil {
+			t.Errorf("Handle after a failed write: %v", err)
+		}
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("a failed write left the per-root guard held — the second write on the same root deadlocked")
+	}
+
+	if len(f.opened) != 1 {
+		t.Fatalf("opened = %d, want 1 — the second write must have actually landed, not just returned", len(f.opened))
 	}
 }

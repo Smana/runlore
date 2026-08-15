@@ -339,6 +339,69 @@ func TestRegistryGetOrCreateConcurrentFirstCallersEstablishExactlyOneEntry(t *te
 	}
 }
 
+// TestRegistryLockRootReleasesOnPanic pins that the per-root write guard is
+// released even when the code holding it panics: the release must be
+// deferred right after acquisition, or one panicking write would leave every
+// later write on that root blocked forever — the guard's own worst-case
+// leak, distinct from the "unbounded map growth" leak the guard's doc
+// comment addresses separately.
+func TestRegistryLockRootReleasesOnPanic(t *testing.T) {
+	r, err := NewRegistry(filepath.Join(t.TempDir(), "threads.jsonl"), time.Hour, 10)
+	if err != nil {
+		t.Fatalf("NewRegistry: %v", err)
+	}
+
+	func() {
+		defer func() { _ = recover() }()
+		release := r.lockRoot("r1")
+		defer release()
+		panic("simulated failure mid-write")
+	}()
+
+	done := make(chan struct{})
+	go func() {
+		release := r.lockRoot("r1")
+		release()
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("lockRoot(\"r1\") deadlocked after a panicking holder — the guard was not released")
+	}
+}
+
+// TestRegistryLockRootMapDoesNotLeakEntries pins the bound on the guard map:
+// once every holder of a root's lock has released it, no trace of that root
+// remains in the bookkeeping map — it is bounded by concurrency (how many
+// writes are in flight right now), not by history (how many roots were ever
+// written to).
+func TestRegistryLockRootMapDoesNotLeakEntries(t *testing.T) {
+	r, err := NewRegistry(filepath.Join(t.TempDir(), "threads.jsonl"), time.Hour, 10)
+	if err != nil {
+		t.Fatalf("NewRegistry: %v", err)
+	}
+
+	const n = 20
+	var wg sync.WaitGroup
+	for i := 0; i < n; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			release := r.lockRoot(fmt.Sprintf("root-%d", i%3))
+			release()
+		}(i)
+	}
+	wg.Wait()
+
+	r.mu.Lock()
+	remaining := len(r.writeLocks)
+	r.mu.Unlock()
+	if remaining != 0 {
+		t.Fatalf("writeLocks has %d entries left after every holder released — the map is leaking", remaining)
+	}
+}
+
 func TestRegistryRegisterIgnoresEmptyRoot(t *testing.T) {
 	r, err := NewRegistry(filepath.Join(t.TempDir(), "threads.jsonl"), time.Hour, 10)
 	if err != nil {

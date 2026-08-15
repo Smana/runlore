@@ -56,6 +56,83 @@ type Registry struct {
 	byID  map[string]Context
 	order []string // insertion order, oldest first; the eviction queue
 	now   func() time.Time
+
+	// writeLocks maps a thread root to the guard serialising forge writes for
+	// that root — see lockRoot. Guarded by mu, same as byID/order, but never
+	// held WHILE a caller is holding the per-root lock itself: mu only
+	// protects the brief bookkeeping of acquiring or releasing an entry, so a
+	// slow forge round-trip under a root's lock never blocks Get/Put/Update or
+	// a different root's writer.
+	writeLocks map[string]*rootLock
+}
+
+// rootLock is one thread root's write-serialization guard: mu is the actual
+// lock a writer holds across its forge round-trip, and refs counts how many
+// callers currently hold or are waiting for it. refs is read and written only
+// under Registry.mu, so the bookkeeping decision "can this entry be deleted
+// now" is never racing the decision "does this entry already exist, reuse
+// it" — see lockRoot.
+type rootLock struct {
+	mu   sync.Mutex
+	refs int
+}
+
+// lockRoot acquires the write-serialization guard for root and returns a
+// release function the caller must call exactly once — typically deferred
+// right after acquisition, so a panic or an early return still releases it —
+// to unlock and let the entry be reclaimed. root == "" is never serialized
+// (Put and Update are already no-ops for it) and returns a no-op release.
+//
+// This is what closes the residual duplicate-PR race GetOrCreate's doc
+// comment describes: two concurrent notes on the same never-before-tracked
+// thread both call this before deciding CommentOnPR vs OpenPR. Whichever
+// arrives first proceeds immediately; every other caller for the SAME root
+// blocks until it releases — not on Registry.mu, which is never held across
+// the wait, so Get/Put/Update and a DIFFERENT root's lockRoot are completely
+// unaffected. The second caller can then re-read the registry after
+// acquiring the lock and see the NoteURL the first caller just wrote back,
+// instead of the stale empty value it captured before waiting.
+//
+// Bounded by concurrency, not by history: an entry exists in writeLocks only
+// for a root that has a lock currently held or awaited (refs > 0). The
+// moment the last holder releases (refs reaches 0), the entry is deleted —
+// under mu, in the same critical section that would otherwise let a
+// concurrent new caller observe and reuse it — so a root written to a
+// million times sequentially, one write at a time, leaves nothing behind
+// once each write completes: at most one entry per root with a write
+// IN FLIGHT right now, never one per root ever seen.
+func (r *Registry) lockRoot(root string) func() {
+	if root == "" {
+		return func() {}
+	}
+	r.mu.Lock()
+	if r.writeLocks == nil {
+		r.writeLocks = map[string]*rootLock{}
+	}
+	l, ok := r.writeLocks[root]
+	if !ok {
+		l = &rootLock{}
+		r.writeLocks[root] = l
+	}
+	l.refs++
+	r.mu.Unlock()
+
+	l.mu.Lock()
+
+	released := false
+	return func() {
+		if released {
+			return // defensive: release must run exactly once, but never double-unlock if it somehow doesn't
+		}
+		released = true
+		l.mu.Unlock()
+		r.mu.Lock()
+		l.refs--
+		if l.refs == 0 {
+			delete(r.writeLocks, root)
+		}
+		r.mu.Unlock()
+	}
 }
 
 // NewRegistry opens (replaying) the registry at path. An empty path returns a
