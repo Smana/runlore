@@ -31,6 +31,26 @@ type Forge interface {
 // DefaultMaxNotesPerThread bounds how many knowledge writes one thread can make.
 const DefaultMaxNotesPerThread = 20
 
+// ReinvestigateNotSupportedReply is what Handle answers a reserved
+// "reinvestigate:" command with. Exported so any other caller that must
+// answer the identical reserved command elsewhere posts identical text
+// rather than a second literal that could drift from this one.
+//
+// The wording is deliberate on three points a reserved-command reply must
+// make, all in one message, because the human is not looking at the code
+// that decided this: (1) a re-run is not supported from a thread, plainly;
+// (2) NOTHING was recorded — the human must never be left believing either
+// that a re-run started or that their words were saved, which is the actual
+// harm this whole grammar fix exists to close, worse than either outcome
+// alone; (3) how to proceed either way — rephrase without the reserved word
+// to record a note, or use the real `reinvestigate` label to actually
+// re-run. Spelling out "without `reinvestigate:`" here avoids telling the
+// human to retry something that will fail again the same way, since Parse
+// now refuses that token anywhere in the message, not only at position 0.
+const ReinvestigateNotSupportedReply = "Re-running an investigation from a thread is not supported yet, " +
+	"and nothing was recorded. To save this as a note, rephrase without `reinvestigate:` and use `note:`. " +
+	"To actually re-run, add the `reinvestigate` label to the knowledge-base issue."
+
 // Responder turns an addressed thread message into a knowledge-base write and
 // returns the text to post back. It is transport-agnostic: every chat-system
 // concern lives in the adapter that calls it.
@@ -98,8 +118,7 @@ func (r *Responder) Handle(ctx context.Context, tc Context, author, raw string) 
 
 	switch p.Intent {
 	case IntentReinvestigate:
-		return "Re-running an investigation from a thread is not supported yet. " +
-			"Add the `reinvestigate` label to the KB issue to re-run, or use `note:` to record what you know.", nil
+		return ReinvestigateNotSupportedReply, nil
 	case IntentNote, IntentFreeform:
 	}
 

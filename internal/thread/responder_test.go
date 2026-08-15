@@ -287,6 +287,73 @@ func TestHandleReinvestigateIsReservedNotImplemented(t *testing.T) {
 	}
 }
 
+// TestHandleReservedPrefixAnywhereIsRefused is the regression test for the
+// defect this commit fixes: Parse used to match "reinvestigate:" only at
+// position 0 of the mention-stripped text, so a single filler word between
+// the mention and the command — "<@U0BOT> please reinvestigate: …" — fell
+// through to IntentFreeform, which Handle treats identically to an explicit
+// "note:": the operator's re-run request was silently written to the
+// knowledge base and reported back as "Noted", leaving them believing
+// something happened when nothing did. Driven through the real
+// Responder.Handle with a fake Forge and asserting ZERO forge calls, not
+// just the parsed intent — a correct Intent with a still-broken Handle
+// wiring would pass a parse-only test and still write to the forge.
+func TestHandleReservedPrefixAnywhereIsRefused(t *testing.T) {
+	tests := []struct {
+		name string
+		text string
+	}{
+		{"leading filler word", "<@U0BOT> please reinvestigate: the network issue"},
+		{"different leading filler", "<@U0BOT> can you reinvestigate: this"},
+		{"position 0, unchanged from before this fix", "<@U0BOT> reinvestigate: go look"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			f := &fakeForge{}
+			r := newTestResponder(t, f)
+			tc := Context{Root: "111.222", CuratedURL: "https://github.com/o/r/pull/42"}
+
+			reply, err := r.Handle(context.Background(), tc, "alice", tt.text)
+			if err != nil {
+				t.Fatalf("Handle: %v", err)
+			}
+			if len(f.comments) != 0 || len(f.opened) != 0 {
+				t.Fatalf("forge calls: %d comments, %d opened — want 0/0, a reserved command must never write to the knowledge base no matter what precedes it (text: %q)",
+					len(f.comments), len(f.opened), tt.text)
+			}
+			if reply != ReinvestigateNotSupportedReply {
+				t.Errorf("reply = %q, want the reserved-command reply %q", reply, ReinvestigateNotSupportedReply)
+			}
+		})
+	}
+}
+
+// TestHandleReservedWordWithoutColonIsStillRecorded is the narrowness
+// counterpart to TestHandleReservedPrefixAnywhereIsRefused: ordinary prose
+// using the bare word "reinvestigate" — no trailing ':' — must still be
+// captured as a note. This is what proves the fix is a colon-anchored token
+// match, not a blanket refusal of the word wherever it appears.
+func TestHandleReservedWordWithoutColonIsStillRecorded(t *testing.T) {
+	f := &fakeForge{}
+	r := newTestResponder(t, f)
+	tc := Context{Root: "111.222", CuratedURL: "https://github.com/o/r/pull/42"}
+	if err := r.Registry.Put(tc); err != nil {
+		t.Fatalf("Put: %v", err)
+	}
+
+	reply, err := r.Handle(context.Background(), tc, "alice",
+		"<@U0BOT> we had to reinvestigate the DNS path and it was stale")
+	if err != nil {
+		t.Fatalf("Handle: %v", err)
+	}
+	if len(f.comments) != 1 {
+		t.Fatalf("comments = %d, want 1 — prose using the bare word without a colon must still be recorded", len(f.comments))
+	}
+	if reply == ReinvestigateNotSupportedReply {
+		t.Errorf("reply = %q, want the note recorded, not refused", reply)
+	}
+}
+
 func TestHandleEmptyTextAsksForContent(t *testing.T) {
 	f := &fakeForge{}
 	r := newTestResponder(t, f)
