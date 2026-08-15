@@ -9,7 +9,8 @@ type Intent int
 
 const (
 	// IntentFreeform is anything without a recognised prefix — a question, or a
-	// statement RunLore is left to interpret.
+	// statement RunLore is left to interpret. Responder.Handle never writes to
+	// the knowledge base for this intent; see FreeformNotRecordedReply.
 	IntentFreeform Intent = iota
 	// IntentNote is an explicit "note:" — capture this verbatim into the KB.
 	IntentNote

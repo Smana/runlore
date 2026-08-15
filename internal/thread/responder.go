@@ -55,6 +55,24 @@ const ReinvestigateNotSupportedReply = "Re-running an investigation from a threa
 	"and nothing was recorded. To save this as a note, rephrase without `reinvestigate:` and use `note:`. " +
 	"To actually re-run, add the `reinvestigate` label to the knowledge-base issue."
 
+// FreeformNotRecordedReply is what Handle answers an addressed message with
+// no recognised prefix (IntentFreeform) — a question, or any other prose with
+// no explicit "note:". Freeform text is never written to the knowledge base:
+// a security audit found the previous default — treating it identically to
+// an explicit note — meant an on-call typing something as ordinary as
+// "anyone checked what runlore said about the CNI?" inside an investigation
+// thread silently opened or commented a KB PR, with no signal the human ever
+// intended to record anything.
+//
+// The wording makes the same two points ReinvestigateNotSupportedReply does,
+// for the identical reason: (1) plainly, NOTHING was recorded — the human
+// must never be left believing their words were saved when they were not,
+// which is worse than a refusal they can act on; (2) exactly how to record it
+// instead. It does not scold: addressing the bot with a plain sentence is a
+// reasonable thing to do, not a mistake.
+const FreeformNotRecordedReply = "I didn't record that — nothing was saved. To save this as a note, " +
+	"reply with `note: <text>`, for example: `note: the real cause was a spot-node reclaim`."
+
 // Responder turns an addressed thread message into a knowledge-base write and
 // returns the text to post back. It is transport-agnostic: every chat-system
 // concern lives in the adapter that calls it.
@@ -148,7 +166,12 @@ func (r *Responder) Handle(ctx context.Context, tc Context, author, raw string) 
 	switch p.Intent {
 	case IntentReinvestigate:
 		return ReinvestigateNotSupportedReply, nil
-	case IntentNote, IntentFreeform:
+	case IntentFreeform:
+		// No explicit "note:" — never a knowledge-base write. See
+		// FreeformNotRecordedReply's doc comment for why this must never be
+		// silently treated as a note the way it used to be.
+		return FreeformNotRecordedReply, nil
+	case IntentNote:
 	}
 
 	if p.Text == "" {
@@ -160,7 +183,7 @@ func (r *Responder) Handle(ctx context.Context, tc Context, author, raw string) 
 	}
 
 	at := r.now()
-	reply, landed, err := r.write(ctx, tc, author, p.Text, at, p.Intent)
+	reply, landed, err := r.write(ctx, tc, author, p.Text, at)
 	if err != nil {
 		return reply, err
 	}
@@ -180,9 +203,6 @@ func (r *Responder) Handle(ctx context.Context, tc Context, author, raw string) 
 				fmt.Errorf("note counter write-back for root %q: %w", tc.Root, uerr)
 		}
 	}
-	if p.Intent == IntentFreeform {
-		reply += "\n_Tip: prefix with `note:` to record something explicitly._"
-	}
 	return reply, nil
 }
 
@@ -191,7 +211,11 @@ func (r *Responder) Handle(ctx context.Context, tc Context, author, raw string) 
 // whether a write actually landed in the knowledge base: it is false both on
 // error and on the (non-error) global-rate-limit throttle, so a caller can
 // distinguish "nothing happened" from "a write happened" independently of err.
-func (r *Responder) write(ctx context.Context, tc Context, author, text string, at time.Time, intent Intent) (string, bool, error) {
+//
+// Reached only for IntentNote: Handle returns before calling write for both
+// IntentReinvestigate and IntentFreeform, so every write this method makes is
+// an explicit, human-requested note.
+func (r *Responder) write(ctx context.Context, tc Context, author, text string, at time.Time) (string, bool, error) {
 	// Checked once, upstream of BOTH write routes below: a CommentOnPR spends
 	// this budget exactly like an OpenPR does. Gating only the OpenPR branch —
 	// as an earlier version of this method did — left the comment route bounded
@@ -253,7 +277,7 @@ func (r *Responder) write(ctx context.Context, tc Context, author, text string, 
 			return fmt.Sprintf("⚠️ I could not save that to the knowledge base: %v", err), false,
 				fmt.Errorf("comment on PR %d: %w", n, err)
 		}
-		r.log().Info("thread: note recorded on KB PR", "pr", n, "root", tc.Root, "author", author, "intent", intent.String())
+		r.log().Info("thread: note recorded on KB PR", "pr", n, "root", tc.Root, "author", author)
 		r.recordWrite(ctx, "comment")
 		return fmt.Sprintf("📝 Noted on the knowledge-base PR #%d — %s", n, url), true, nil
 	}
@@ -267,7 +291,7 @@ func (r *Responder) write(ctx context.Context, tc Context, author, text string, 
 		r.log().Warn("thread: note PR write-back failed; a later note in this thread may open a second PR",
 			"root", tc.Root, "url", ref.URL, "err", uerr)
 	}
-	r.log().Info("thread: note opened a standalone KB PR", "url", ref.URL, "root", tc.Root, "author", author, "intent", intent.String())
+	r.log().Info("thread: note opened a standalone KB PR", "url", ref.URL, "root", tc.Root, "author", author)
 	r.recordWrite(ctx, "open_pr")
 	if n, ok := PRNumber(ref.URL); ok {
 		return fmt.Sprintf("📝 Opened knowledge-base PR #%d with your note — %s", n, ref.URL), true, nil

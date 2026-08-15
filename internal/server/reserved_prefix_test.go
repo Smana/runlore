@@ -159,17 +159,26 @@ func TestSlackEventReservedPrefixAnywhereIsRefused(t *testing.T) {
 	}
 }
 
-// TestSlackEventReservedWordWithoutColonIsStillRecorded is the narrowness
-// counterpart, on the same real Slack pipeline: ordinary prose using the
-// bare word "reinvestigate" — no trailing ':' — must still be captured as a
-// note. This is what proves the fix is a colon-anchored token match, not a
-// blanket refusal of the word wherever it appears.
-func TestSlackEventReservedWordWithoutColonIsStillRecorded(t *testing.T) {
+// TestSlackEventNoteContainingReservedWordWithoutColonIsCaptured is the
+// narrowness counterpart, on the same real Slack pipeline: an explicit note
+// whose text happens to contain the bare word "reinvestigate" — no trailing
+// ':' — must still be captured, not refused as the reserved command. This is
+// what proves the fix is a colon-anchored token match, not a blanket refusal
+// of the word wherever it appears.
+//
+// This test used to drive the pipeline with NO "note:" prefix at all — under
+// the old contract, freeform text was captured exactly like an explicit note,
+// so that was sufficient to exercise the reserved-word boundary. Freeform no
+// longer writes to the knowledge base at all (see
+// thread.FreeformNotRecordedReply), so an explicit "note:" prefix is now
+// required to reach the write path; the reserved-word boundary this test
+// pins is otherwise unchanged.
+func TestSlackEventNoteContainingReservedWordWithoutColonIsCaptured(t *testing.T) {
 	const root = "111.222"
 	s, forge, rep := newRealThreadPipeline(t, root)
 
 	body := fmt.Sprintf(`{"type":"event_callback","event_id":"E-narrow","event":{"type":"app_mention","user":"U1","text":%q,"channel":"C1","ts":"333.444","thread_ts":%q}}`,
-		"<@U0BOT> we had to reinvestigate the DNS path and it was stale", root)
+		"<@U0BOT> note: we had to reinvestigate the DNS path and it was stale", root)
 	rec := httptest.NewRecorder()
 	s.Handler().ServeHTTP(rec, signedEventRequest(t, body))
 	if rec.Code != 200 {
@@ -178,9 +187,38 @@ func TestSlackEventReservedWordWithoutColonIsStillRecorded(t *testing.T) {
 	waitForReply(t, rep)
 
 	if opened, _ := forge.counts(); opened != 1 {
-		t.Fatalf("forge.opened = %d, want 1 — prose using the bare word without a colon must still be recorded", opened)
+		t.Fatalf("forge.opened = %d, want 1 — a note whose text contains the bare word without a colon must still be recorded", opened)
 	}
 	if got := rep.snapshot(); len(got) != 1 || got[0] == thread.ReinvestigateNotSupportedReply {
 		t.Fatalf("replies = %+v, want the note recorded, not refused", got)
+	}
+}
+
+// TestSlackEventFreeformWritesNothing is the sibling regression test for the
+// second grammar defect a security audit found on this same pipeline:
+// thread.Responder.Handle used to treat IntentFreeform identically to an
+// explicit "note:", so ANY addressed message with no recognised prefix —
+// including something as ordinary as "anyone checked what runlore said about
+// the CNI?" — silently wrote to the knowledge base. Driven through the REAL
+// handleSlackEvent → eventDispatcher → thread.Mention.HandleMention →
+// thread.Responder.Handle pipeline, asserting ZERO forge calls.
+func TestSlackEventFreeformWritesNothing(t *testing.T) {
+	const root = "111.333"
+	s, forge, rep := newRealThreadPipeline(t, root)
+
+	body := fmt.Sprintf(`{"type":"event_callback","event_id":"E-freeform","event":{"type":"app_mention","user":"U1","text":%q,"channel":"C1","ts":"333.444","thread_ts":%q}}`,
+		"<@U0BOT> anyone checked what runlore said about the CNI?", root)
+	rec := httptest.NewRecorder()
+	s.Handler().ServeHTTP(rec, signedEventRequest(t, body))
+	if rec.Code != 200 {
+		t.Fatalf("status = %d, want 200", rec.Code)
+	}
+	waitForReply(t, rep)
+
+	if opened, commented := forge.counts(); opened != 0 || commented != 0 {
+		t.Fatalf("forge: opened=%d commented=%d, want 0/0 — freeform text must never write to the knowledge base", opened, commented)
+	}
+	if got := rep.snapshot(); len(got) != 1 || got[0] != thread.FreeformNotRecordedReply {
+		t.Fatalf("replies = %+v, want exactly one reply %q", got, thread.FreeformNotRecordedReply)
 	}
 }

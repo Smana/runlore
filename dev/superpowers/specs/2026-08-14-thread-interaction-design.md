@@ -136,8 +136,22 @@ derived from `Context` alone.
 | Input | Behaviour | Model calls |
 |---|---|---|
 | `@runlore note: <text>` | Verbatim capture. Works with no model configured. | 0 |
-| `@runlore <anything else>` | Chat layer if `model.chat` is set; otherwise treated as `note:` with a reply saying so. | 0 or 1 |
+| `@runlore <anything else>` | Chat layer if `model.chat` is set. Otherwise: **nothing is written** — a reply says so plainly and shows the `note: <text>` form. | 0 or 1 |
 | `@runlore reinvestigate: …` | Reserved. Replies that it is not supported yet. | 0 |
+
+**`@runlore <anything else>` without a model wired does NOT fall back to
+`note:` capture.** An earlier version of this table said it did — that was
+changed after a security audit: treating unprefixed text as an implicit note
+meant an on-call typing something as ordinary as *"anyone checked what
+runlore said about the CNI?"* inside an investigation thread opened or
+commented a KB PR with no signal they meant to record anything, and it made
+the reserved `reinvestigate:` prefix pointless — a message that evaded that
+prefix match (a filler word ahead of it, or the bare word with no colon) fell
+through to freeform, which wrote anyway. `IntentFreeform` (`internal/thread`)
+still exists as a distinct, parsed intent — this is a routing decision in
+`Responder.Handle`, not a grammar removal — it now performs zero forge calls
+and replies with `FreeformNotRecordedReply`, which states plainly that
+nothing was recorded and shows the `note:` form.
 
 Reserving `reinvestigate:` in v1 — even unimplemented — is what makes adding it
 later a handler case rather than a grammar migration.

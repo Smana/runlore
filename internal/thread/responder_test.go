@@ -423,7 +423,22 @@ func TestHandlePerThreadCapIndependentOfGlobalWindow(t *testing.T) {
 	}
 }
 
-func TestHandleFreeformIsCapturedWhenNoModelIsWired(t *testing.T) {
+// TestHandleFreeformPerformsZeroForgeCallsAndRepliesWithHowTo pins the fixed
+// contract for an addressed message with no recognised prefix. This test used
+// to be TestHandleFreeformIsCapturedWhenNoModelIsWired and asserted the
+// OPPOSITE: that freeform text was captured into the knowledge base exactly
+// like an explicit "note:". A security audit found that the wrong default —
+// an on-call typing "anyone checked what runlore said about the CNI?" inside
+// an investigation thread opened or commented a KB PR with no explicit intent
+// to record anything, and it made the reserved reinvestigate: prefix
+// pointless: a message that evaded THAT prefix match (e.g. a filler word
+// ahead of it, or the word with no colon) fell through to freeform, which
+// wrote anyway.
+//
+// Freeform must now write NOTHING — zero forge calls — and reply with a
+// notice that (a) says plainly nothing was recorded and (b) shows the exact
+// way to record it explicitly.
+func TestHandleFreeformPerformsZeroForgeCallsAndRepliesWithHowTo(t *testing.T) {
 	f := &fakeForge{}
 	r := newTestResponder(t, f)
 	tc := Context{Root: "111.222", CuratedURL: "https://github.com/o/r/pull/42"}
@@ -431,15 +446,46 @@ func TestHandleFreeformIsCapturedWhenNoModelIsWired(t *testing.T) {
 		t.Fatalf("Put: %v", err)
 	}
 
-	reply, err := r.Handle(context.Background(), tc, "alice", "<@U0BOT> the cause was a spot reclaim")
+	reply, err := r.Handle(context.Background(), tc, "alice", "<@U0BOT> anyone checked what runlore said about the CNI?")
 	if err != nil {
 		t.Fatalf("Handle: %v", err)
 	}
-	if len(f.comments) != 1 {
-		t.Fatalf("freeform must still be captured; comments = %d", len(f.comments))
+	if len(f.comments) != 0 || len(f.opened) != 0 {
+		t.Fatalf("freeform must write NOTHING to the knowledge base; comments=%d opened=%d", len(f.comments), len(f.opened))
 	}
-	if !strings.Contains(strings.ToLower(reply), "note:") {
-		t.Errorf("the reply should teach the explicit prefix: %q", reply)
+	if !strings.Contains(strings.ToLower(reply), "nothing") {
+		t.Errorf("the reply must say plainly that nothing was recorded: %q", reply)
+	}
+	if !strings.Contains(reply, "note:") {
+		t.Errorf("the reply must show how to record it explicitly with note\": %q", reply)
+	}
+	if reply != FreeformNotRecordedReply {
+		t.Errorf("reply = %q, want the shared FreeformNotRecordedReply constant so every freeform message gets identical wording", reply)
+	}
+}
+
+// TestHandleFreeformWithEmptyTextAlsoDoesNotWrite covers the boundary case: a
+// bare mention with nothing after it ("<@U0BOT>") parses as IntentFreeform
+// with empty Text (see grammar_test.go). It must not fall through to the
+// "Tell me what to record" note-empty-text prompt, and — like every other
+// freeform message — must never write.
+func TestHandleFreeformWithEmptyTextAlsoDoesNotWrite(t *testing.T) {
+	f := &fakeForge{}
+	r := newTestResponder(t, f)
+	tc := Context{Root: "111.222", CuratedURL: "https://github.com/o/r/pull/42"}
+	if err := r.Registry.Put(tc); err != nil {
+		t.Fatalf("Put: %v", err)
+	}
+
+	reply, err := r.Handle(context.Background(), tc, "alice", "<@U0BOT>")
+	if err != nil {
+		t.Fatalf("Handle: %v", err)
+	}
+	if len(f.comments) != 0 || len(f.opened) != 0 {
+		t.Fatalf("an empty freeform message must write NOTHING; comments=%d opened=%d", len(f.comments), len(f.opened))
+	}
+	if reply != FreeformNotRecordedReply {
+		t.Errorf("reply = %q, want FreeformNotRecordedReply", reply)
 	}
 }
 
@@ -501,12 +547,21 @@ func TestHandleReservedPrefixAnywhereIsRefused(t *testing.T) {
 	}
 }
 
-// TestHandleReservedWordWithoutColonIsStillRecorded is the narrowness
-// counterpart to TestHandleReservedPrefixAnywhereIsRefused: ordinary prose
-// using the bare word "reinvestigate" — no trailing ':' — must still be
-// captured as a note. This is what proves the fix is a colon-anchored token
-// match, not a blanket refusal of the word wherever it appears.
-func TestHandleReservedWordWithoutColonIsStillRecorded(t *testing.T) {
+// TestHandleNoteContainingReservedWordWithoutColonIsCaptured is the
+// Handle-level narrowness counterpart to TestHandleReservedPrefixAnywhereIsRefused:
+// an explicit note whose TEXT happens to contain the bare word
+// "reinvestigate" — no trailing ':' — must still be captured normally, not
+// refused as the reserved command. This is what proves the reserved-token
+// match is colon-anchored, not a blanket refusal of the word wherever it
+// appears.
+//
+// This test used to drive Handle with NO "note:" prefix at all — under the
+// old contract, freeform text was captured exactly like an explicit note, so
+// that was sufficient to exercise the reserved-word boundary. Freeform no
+// longer writes (see TestHandleFreeformPerformsZeroForgeCallsAndRepliesWithHowTo),
+// so an explicit "note:" prefix is now required to reach the write path at
+// all; the reserved-word boundary this test pins is otherwise unchanged.
+func TestHandleNoteContainingReservedWordWithoutColonIsCaptured(t *testing.T) {
 	f := &fakeForge{}
 	r := newTestResponder(t, f)
 	tc := Context{Root: "111.222", CuratedURL: "https://github.com/o/r/pull/42"}
@@ -515,12 +570,12 @@ func TestHandleReservedWordWithoutColonIsStillRecorded(t *testing.T) {
 	}
 
 	reply, err := r.Handle(context.Background(), tc, "alice",
-		"<@U0BOT> we had to reinvestigate the DNS path and it was stale")
+		"<@U0BOT> note: we had to reinvestigate the DNS path and it was stale")
 	if err != nil {
 		t.Fatalf("Handle: %v", err)
 	}
 	if len(f.comments) != 1 {
-		t.Fatalf("comments = %d, want 1 — prose using the bare word without a colon must still be recorded", len(f.comments))
+		t.Fatalf("comments = %d, want 1 — a note whose text contains the bare word without a colon must still be recorded", len(f.comments))
 	}
 	if reply == ReinvestigateNotSupportedReply {
 		t.Errorf("reply = %q, want the note recorded, not refused", reply)
