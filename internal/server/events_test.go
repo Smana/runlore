@@ -103,6 +103,35 @@ func (b *blockingThreadHandler) busyCalls() []struct{ channel, root string } {
 	return append([]struct{ channel, root string }(nil), b.busy...)
 }
 
+// ctxAwareThreadHandler is a ThreadHandler whose HandleMention blocks until EITHER
+// the test releases it (release) or its own context is cancelled (ctxDone fires) —
+// deterministic on both axes via channels, never a wall-clock sleep. It backs the
+// mention-handler-timeout and shutdown-drain tests below.
+type ctxAwareThreadHandler struct {
+	entered chan struct{}
+	release chan struct{}
+	ctxDone chan struct{}
+}
+
+func newCtxAwareThreadHandler() *ctxAwareThreadHandler {
+	return &ctxAwareThreadHandler{
+		entered: make(chan struct{}, 1),
+		release: make(chan struct{}),
+		ctxDone: make(chan struct{}, 1),
+	}
+}
+
+func (h *ctxAwareThreadHandler) HandleMention(ctx context.Context, _, _, _, _ string) {
+	h.entered <- struct{}{}
+	select {
+	case <-ctx.Done():
+		h.ctxDone <- struct{}{}
+	case <-h.release:
+	}
+}
+
+func (h *ctxAwareThreadHandler) Busy(context.Context, string, string) {}
+
 // meteredInstruments installs a REAL SDK meter provider backed by a manual reader and
 // returns the instrument set bound to it, plus a reader that sums an int64 counter by
 // its exported series name (0, false when the series was never recorded). The provider
@@ -386,5 +415,113 @@ func TestEventsSaturatedPoolWithNilMetricsDoesNotPanic(t *testing.T) {
 	case <-h.busyDone:
 	case <-time.After(2 * time.Second):
 		t.Fatal("Busy was never called for the dropped mention")
+	}
+}
+
+// TestEventsMentionHandlerContextTimesOut is the regression test for the
+// unbounded-lifetime defect: handleSlackEvent used to hand the detached
+// handler a context.WithoutCancel-derived context with NO deadline, so a
+// degraded/rate-limited forge could hold a pool slot indefinitely instead of
+// for as long as the mention itself takes. s.mentionTimeout is shortened here
+// so the test proves the real wiring deterministically, without waiting out
+// the production mentionHandlerTimeout (2 minutes) for real.
+func TestEventsMentionHandlerContextTimesOut(t *testing.T) {
+	h := newCtxAwareThreadHandler()
+	s := newEventServer(t, h)
+	s.mentionTimeout = 20 * time.Millisecond
+	t.Cleanup(func() { close(h.release) }) // safety net if the handler is somehow still blocked
+
+	body := `{"type":"event_callback","event_id":"Etimeout","event":{"type":"app_mention","user":"U1","text":"note: x","channel":"C1","thread_ts":"111.222"}}`
+	rec := httptest.NewRecorder()
+	s.Handler().ServeHTTP(rec, signedEventRequest(t, body))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", rec.Code)
+	}
+
+	select {
+	case <-h.entered:
+	case <-time.After(2 * time.Second):
+		t.Fatal("handler never started")
+	}
+	select {
+	case <-h.ctxDone:
+	case <-time.After(2 * time.Second):
+		t.Fatal("handler outran its timeout without its context being cancelled — an unbounded " +
+			"detached handler can hold a pool slot for as long as a degraded forge stays degraded")
+	}
+}
+
+// TestDrainWaitsForInFlightHandler is the regression test for the no-shutdown-drain
+// defect: httpSrv.Shutdown only waits for request HANDLERS, and handleSlackEvent's
+// detached goroutine has already escaped that scope by the time it does its actual
+// work — so without Server.Drain, SIGTERM could kill the process mid-OpenPR with the
+// human told nothing. The handler is released only after Drain is proven to still be
+// blocked, so the assertion cannot pass vacuously.
+func TestDrainWaitsForInFlightHandler(t *testing.T) {
+	h := newCtxAwareThreadHandler()
+	s := newEventServer(t, h)
+	var releaseOnce sync.Once
+	release := func() { releaseOnce.Do(func() { close(h.release) }) }
+	t.Cleanup(release)
+
+	body := `{"type":"event_callback","event_id":"Edrain","event":{"type":"app_mention","user":"U1","text":"note: x","channel":"C1","thread_ts":"111.222"}}`
+	rec := httptest.NewRecorder()
+	s.Handler().ServeHTTP(rec, signedEventRequest(t, body))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", rec.Code)
+	}
+	select {
+	case <-h.entered:
+	case <-time.After(2 * time.Second):
+		t.Fatal("handler never started")
+	}
+
+	drainDone := make(chan struct{})
+	go func() {
+		s.Drain(context.Background())
+		close(drainDone)
+	}()
+
+	select {
+	case <-drainDone:
+		t.Fatal("Drain returned before the in-flight handler finished — shutdown would have abandoned it")
+	case <-time.After(200 * time.Millisecond):
+	}
+
+	release() // let the handler finish
+
+	select {
+	case <-drainDone:
+	case <-time.After(2 * time.Second):
+		t.Fatal("Drain did not return after the in-flight handler finished")
+	}
+}
+
+// TestDrainIsBounded proves Drain never blocks shutdown forever: with the handler
+// still running and never released, Drain must still return once its OWN ctx's
+// deadline fires.
+func TestDrainIsBounded(t *testing.T) {
+	h := newCtxAwareThreadHandler()
+	s := newEventServer(t, h)
+	t.Cleanup(func() { close(h.release) }) // release the still-blocked handler so it doesn't leak past the test
+
+	body := `{"type":"event_callback","event_id":"Ebound","event":{"type":"app_mention","user":"U1","text":"note: x","channel":"C1","thread_ts":"111.222"}}`
+	rec := httptest.NewRecorder()
+	s.Handler().ServeHTTP(rec, signedEventRequest(t, body))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", rec.Code)
+	}
+	select {
+	case <-h.entered:
+	case <-time.After(2 * time.Second):
+		t.Fatal("handler never started")
+	}
+
+	dctx, cancel := context.WithTimeout(context.Background(), 30*time.Millisecond)
+	defer cancel()
+	start := time.Now()
+	s.Drain(dctx)
+	if elapsed := time.Since(start); elapsed > 2*time.Second {
+		t.Fatalf("Drain took %v to return after its bound expired — it must never block shutdown forever", elapsed)
 	}
 }

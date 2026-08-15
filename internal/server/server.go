@@ -46,6 +46,23 @@ const (
 	// humans see nothing beyond the (Error-level) log line — no worse than before
 	// this fix, never worse than that.
 	maxConcurrentBusyNotices = 4
+	// mentionHandlerTimeout bounds how long a single detached Slack mention
+	// handler (see handleSlackEvent) may run before its context is cancelled.
+	//
+	// Justified against the WORST case, not the common one. github.Client.OpenPR
+	// — the path a standalone operator-note PR takes — makes ~6 sequential forge
+	// calls (get the base ref, create the branch, PUT the entry file, PUT
+	// index.md, PUT log.md, open the PR), each riding httpx.SecureClient's own
+	// 30s HTTP timeout. A degraded or rate-limited forge can hold every one of
+	// those calls to its full 30s, which is close to 3 minutes for one mention —
+	// and, unbounded (the previous context.WithoutCancel behaviour, which strips
+	// the deadline along with cancellation), that mention would hold one of
+	// maxConcurrentMentions slots for as long as the forge stays degraded, not
+	// for as long as the mention itself takes. 2 minutes leaves the common case
+	// (a healthy forge; every call returns in well under a second) enormous
+	// headroom while still guaranteeing the whole pool drains through a forge
+	// outage in bounded time instead of being held hostage indefinitely.
+	mentionHandlerTimeout = 2 * time.Minute
 )
 
 // Server handles incoming incident webhooks and applies the trigger policy.
@@ -64,6 +81,14 @@ type Server struct {
 	eventSlots       chan struct{}      // bounds concurrent detached mention handlers
 	busySlots        chan struct{}      // separate, smaller bound for the "pool saturated" reply
 	telemetryMetrics *telemetry.Metrics // nil unless telemetry is configured; nil-safe throughout
+	// mentionTimeout bounds a detached mention/busy handler's context (see
+	// mentionHandlerTimeout). Defaulted by New; a field rather than a bare
+	// reference to the constant so tests can shorten it deterministically
+	// instead of waiting out the real 2 minutes to prove the wiring cancels.
+	mentionTimeout time.Duration
+	// wg tracks every detached handler dispatch (see dispatch) so Drain can wait
+	// for them at shutdown instead of abandoning whatever is in flight.
+	wg sync.WaitGroup
 
 	metrics http.Handler // optional; GET /metrics (OTel Prometheus exposition)
 	log     *slog.Logger
@@ -141,6 +166,7 @@ func New(ready func() bool, acts Actions, built []source.Built, pipe *source.Pip
 		eventSlots:       make(chan struct{}, maxConcurrentMentions),
 		busySlots:        make(chan struct{}, maxConcurrentBusyNotices),
 		telemetryMetrics: acts.Metrics,
+		mentionTimeout:   mentionHandlerTimeout,
 	}
 	mux := http.NewServeMux()
 	// work marks a route as work-bearing: on a follower the request is proxied
@@ -506,9 +532,15 @@ func (s *Server) handleSlackEvent(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Detached from the request: the response is already written. WithoutCancel
-	// keeps request-scoped values while surviving the handler's return.
-	ctx := context.WithoutCancel(r.Context())
+	// keeps request-scoped values while surviving the handler's return; the
+	// fresh WithTimeout then bounds how long the detached work may run instead
+	// of leaving it unbounded (WithoutCancel strips any deadline too) — see
+	// mentionHandlerTimeout. cancel is always invoked by exactly one of the
+	// three paths below (the mention closure, the busy closure, or the trailing
+	// call when neither pool accepts the work) — never left uncalled.
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(r.Context()), s.mentionTimeout)
 	if s.dispatch(s.eventSlots, func() {
+		defer cancel()
 		s.threads.HandleMention(ctx, ev.Event.Channel, ev.Event.ThreadTS, ev.Event.User, ev.Event.Text)
 	}) {
 		return
@@ -526,22 +558,28 @@ func (s *Server) handleSlackEvent(w http.ResponseWriter, r *http.Request) {
 	// Telling the human is itself another Slack round-trip, so it gets the same
 	// treatment as the mention handler itself: detached and bounded, under its own
 	// small budget, never blocking this request goroutine.
-	s.dispatch(s.busySlots, func() {
+	if !s.dispatch(s.busySlots, func() {
+		defer cancel()
 		s.threads.Busy(ctx, ev.Event.Channel, ev.Event.ThreadTS)
-	})
+	}) {
+		cancel() // neither pool accepted the work: nothing else will call cancel
+	}
 }
 
 // dispatch runs fn detached, gated by slots — a bounded semaphore channel — so the
 // caller never blocks: it reports whether fn was actually started. With slots full it
 // returns false immediately (non-blocking) and fn never runs. A panic inside fn is
-// recovered and logged rather than crashing the process.
+// recovered and logged rather than crashing the process. Every dispatched fn is
+// tracked in s.wg so Drain can wait for it at shutdown instead of abandoning it.
 func (s *Server) dispatch(slots chan struct{}, fn func()) bool {
 	select {
 	case slots <- struct{}{}:
 	default:
 		return false
 	}
+	s.wg.Add(1)
 	go func() {
+		defer s.wg.Done()
 		defer func() { <-slots }()
 		defer func() {
 			if rec := recover(); rec != nil {
@@ -551,6 +589,29 @@ func (s *Server) dispatch(slots chan struct{}, fn func()) bool {
 		fn()
 	}()
 	return true
+}
+
+// Drain waits for every currently in-flight detached handler dispatched via
+// dispatch (mention processing, and the "busy" reply sent when the pool is
+// saturated) to finish, bounded by ctx. Call it during shutdown AFTER the HTTP
+// listener has stopped accepting new requests (so dispatch can no longer be
+// invoked) and before tearing down anything a handler might still depend on.
+//
+// Mirrors investigate.Queue.Drain's shape: if ctx's deadline fires first,
+// Drain returns anyway rather than blocking shutdown forever. A handler still
+// running at that point is not killed — its own mentionTimeout-bounded
+// context (see handleSlackEvent) is what eventually stops it — Drain simply
+// stops waiting on it.
+func (s *Server) Drain(ctx context.Context) {
+	done := make(chan struct{})
+	go func() {
+		s.wg.Wait()
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-ctx.Done():
+	}
 }
 
 // seenSet is a bounded set of recently-seen ids. It exists so Slack's delivery

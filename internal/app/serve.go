@@ -443,7 +443,10 @@ func RunServe(version string, args []string) error {
 	}
 	httpSrv := NewHTTPServer(*addr, srv.Handler())
 	// Graceful shutdown: on SIGTERM, stop accepting webhooks, let the in-flight
-	// investigation finish within a bounded grace (lease still held), then release.
+	// investigation AND any detached Slack mention handler (see
+	// server.Server.Drain — handleSlackEvent acks and returns before its work is
+	// done, so httpSrv.Shutdown alone does not wait for it) finish within a
+	// bounded grace (lease still held), then release.
 	drained := make(chan struct{})
 	go func() {
 		defer close(drained)
@@ -451,6 +454,13 @@ func RunServe(version string, args []string) error {
 		log.Info("shutdown: stopping intake; draining in-flight investigation")
 		_ = httpSrv.Shutdown(context.Background())
 		dctx, cancelDrain := context.WithTimeout(context.Background(), drainGracePeriod)
+		// Detached mention handlers first: they are a direct extension of the HTTP
+		// intake httpSrv.Shutdown just stopped, and — unlike the investigation
+		// queue — they do not depend on workCtx/the leader lease, so draining them
+		// has no ordering requirement relative to stopWork() below. Both drains
+		// share dctx's single deadline rather than getting drainGracePeriod each,
+		// so total shutdown time stays bounded the same way it always has.
+		srv.Drain(dctx)
 		queue.Drain(dctx)
 		cancelDrain()
 		stopWork() // release the leader lease + stop the queue/watch/coalescer
