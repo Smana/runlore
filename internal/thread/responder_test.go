@@ -652,13 +652,19 @@ func TestHandleFallsBackToNoteURLWhenCuratedURLIsMerged(t *testing.T) {
 	}
 }
 
-// TestHandleIsPROpenErrorFallsBackToOpeningAPR pins the chosen behaviour when
-// the open-check itself fails (network blip, rate limit): treat it the same as
-// "not open" rather than either commenting blindly (risking the silent loss on
-// a possibly-merged PR) or refusing outright (losing the note for certain). The
-// worst case is one extra small Concept PR — an already-accepted cost per the
-// design doc — but the human's words are never dropped.
-func TestHandleIsPROpenErrorFallsBackToOpeningAPR(t *testing.T) {
+// TestHandleIsPROpenErrorDoesNotEscalateToOpeningAPR pins the corrected
+// behaviour when the open-check itself fails (network blip, rate limit, forge
+// outage). An earlier version of this test pinned the OPPOSITE choice —
+// falling through to OpenPR, on the reasoning that dropping the note outright
+// would be worse. The reasoning was sound; the direction was wrong: on
+// GitHub, escalating turns a ~2-call comment into a ~7-call PR creation
+// (branch, file PUTs, PR, labels) exactly when the forge is already
+// degraded — hitting a read rate limit makes RunLore write MORE, onto an
+// already-struggling forge. This must instead be distinguished from a closed
+// PR (TestHandleMergedCuratedURLFallsBackToOpeningAPR): "could not tell"
+// reports the failure to the human so they can retry; it never silently drops
+// the note, and never claims success either.
+func TestHandleIsPROpenErrorDoesNotEscalateToOpeningAPR(t *testing.T) {
 	f := &fakeForge{prOpenErr: errors.New("503 rate limited")}
 	r := newTestResponder(t, f)
 	tc := Context{Root: "111.222", Title: "OOM", CuratedURL: "https://github.com/o/r/pull/42"}
@@ -667,17 +673,24 @@ func TestHandleIsPROpenErrorFallsBackToOpeningAPR(t *testing.T) {
 	}
 
 	reply, err := r.Handle(context.Background(), tc, "alice", "note: x")
-	if err != nil {
-		t.Fatalf("Handle: %v", err)
+	if err == nil {
+		t.Fatal("an open-check failure must be reported as an error, not swallowed")
 	}
 	if len(f.comments) != 0 {
 		t.Fatalf("an open-check failure must never risk a comment on a possibly-merged PR; comments = %d", len(f.comments))
 	}
-	if len(f.opened) != 1 {
-		t.Fatalf("an open-check failure must still preserve the note via a standalone PR; opened = %d", len(f.opened))
+	if len(f.opened) != 0 {
+		t.Fatalf("an open-check failure must NOT escalate to opening a new PR; opened = %d", len(f.opened))
 	}
-	if !strings.Contains(reply, "99") {
-		t.Errorf("reply must name the PR it actually opened: %q", reply)
+	if reply == "" {
+		t.Fatal("the human must still be told what happened to their note")
+	}
+	if strings.Contains(reply, "99") {
+		t.Errorf("reply must not claim a PR was opened when none was: %q", reply)
+	}
+	cur, _ := r.Registry.Get("111.222")
+	if cur.Notes != 0 {
+		t.Errorf("a write that did not land must not consume the per-thread budget; Notes = %d", cur.Notes)
 	}
 }
 

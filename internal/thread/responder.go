@@ -193,18 +193,20 @@ func (r *Responder) write(ctx context.Context, tc Context, author, text string, 
 		open, err := r.Forge.IsPROpen(ctx, n)
 		if err != nil {
 			// The open-check itself failed (network blip, rate limit, forge
-			// outage). Two bad options were on the table: comment blindly, which
-			// risks landing the note on a MERGED pull request — silently lost,
-			// since a merged PR is never indexed by the catalog, which is the
-			// exact failure this check exists to prevent — or refuse outright,
-			// which loses the note for certain. Treating the error the same as
-			// "not open" and falling through to the standalone-Concept path below
-			// avoids both: the worst case is one extra small Concept PR (an
-			// already-accepted cost — see the design doc's "Known cost" on
-			// standalone note entries), but the human's words are never dropped.
-			r.log().Warn("thread: PR open-check failed; treating as not open rather than risk commenting onto a merged PR",
-				"pr", n, "root", tc.Root, "err", err)
-			continue
+			// outage) — "we could not tell", which is NOT the same case as "the PR
+			// is closed" just below. An earlier version of this method treated the
+			// two identically and fell through to the standalone-Concept path,
+			// reasoning that dropping the note outright was the worse of the two
+			// remaining options. That reasoning was sound but the direction was
+			// wrong: on GitHub, OpenPR is a ~7-call sequence (branch, file PUTs,
+			// PR, labels) against a ~2-call CommentOnPR, so escalating here turns
+			// one degraded forge call into six more of them — exactly when the
+			// forge is already struggling. Report the failure honestly instead:
+			// the note is not silently dropped, and success is not falsely
+			// claimed either, so the human knows to retry.
+			r.log().Warn("thread: PR open-check failed; not escalating to opening a new PR", "pr", n, "root", tc.Root, "err", err)
+			return fmt.Sprintf("⚠️ I could not reach the forge to check PR #%d — nothing was saved. Please try again.", n), false,
+				fmt.Errorf("check PR %d open: %w", n, err)
 		}
 		if !open {
 			// A merged/closed PR is never indexed by the catalog, so a comment
