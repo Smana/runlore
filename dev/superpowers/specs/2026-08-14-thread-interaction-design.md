@@ -306,6 +306,31 @@ not just the first one after the miss. `Registry.Update` returns
 `Responder.Handle` now reports that case to the human rather than claiming the
 write succeeded outright.
 
+**Concurrent first messages on one never-before-tracked thread** are a
+narrower, separate hazard from the sequential case above, and closing it took
+two mechanisms, not one — worth being precise about which does which:
+
+- `Registry.GetOrCreate` folds the miss-check and the rehydrate-create into
+  one atomic operation. Without it, two racing Get-then-Put sequences could
+  let a LATE Put clobber an earlier caller's entry — discarding `NoteURL` /
+  `Notes` state that caller had already written back — leaving the registry
+  looking as if nothing had been recorded yet. `GetOrCreate` closes that: every
+  concurrent caller shares the one entry the first one's goroutine persists.
+- That alone does not stop two callers who both observe that ONE shared
+  entry's `NoteURL == ""` from both deciding to open a standalone PR, before
+  either one's forge write has returned to update it. What closes THAT is a
+  per-root write guard in `Responder.write`: writers for the same root are
+  serialised, and each re-reads the registry after acquiring the guard, so
+  the second writer sees the first writer's freshly-landed `NoteURL` and
+  comments on it instead of opening its own.
+
+Both apply identically regardless of transport, since they live in the
+shared, transport-neutral `internal/thread` core Matrix reuses untouched.
+The one case neither mechanism can help is a root the registry has already
+lost track of by write time (TTL expiry, eviction, restart) — there is
+nothing durable left to read or write back to, which is the same,
+already-covered degradation as the sequential case above.
+
 ### Inbound: the existing `/sync` loop
 
 `MatrixFeedback.Run` already long-polls with a server-side filter scoped to one
@@ -441,7 +466,7 @@ the investigation loop.
 | Failure | Behaviour |
 |---|---|
 | Registry miss on Slack (unknown thread, TTL expiry, thread predating the upgrade) | Reply naming the limitation. Never a silent drop. |
-| Registry miss on Matrix | Lookup is unaffected (context is on the event). Only the `NoteURL` write-back is lost, so a second note may open a second PR. |
+| Registry miss on Matrix | Lookup is unaffected (context is on the event). `GetOrCreate` rehydrates the registry from the event's stamped context, so the `NoteURL` write-back and note counter keep working normally for every later note — see "Concurrent first messages" above for the narrower case of several first notes racing on the same never-before-tracked thread, which is closed by a separate per-root write guard. A root the registry has since lost track of (TTL, eviction, restart) still has nowhere durable to write back to. |
 | `CommentOnPR` / `OpenPR` fails | Reply reports the failure with the error; the human still has their text on screen and can retry. Logged at warn. |
 | Model call fails | Degrade to verbatim capture; reply notes the answer is unavailable. |
 | Reply post fails | Logged at warn. The KB write already succeeded and is not rolled back. |

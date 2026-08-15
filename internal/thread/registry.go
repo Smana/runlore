@@ -350,25 +350,32 @@ func (r *Registry) Update(root string, fn func(*Context)) error {
 // failover) never has to sequence its own Get() and Put(): two of those,
 // called from separate goroutines, race — both can miss Get, both then Put
 // their own copy of the fallback, and each individual Put is itself atomic
-// but the PAIR is not, so two concurrent callers can each walk away believing
-// they established "the" entry for the thread. Handle then routes on
-// Notes: 0 and NoteURL: "" — state neither caller's copy shares with the
-// other's — from two contexts that both look like the thread's one true
-// entry, letting both take the OpenPR route and open two standalone PRs for
-// one thread. Folding the check and the create into one critical section
-// closes that: whichever caller's goroutine reaches the lock first persists
-// the entry: every other caller — arriving before or after — observes that
-// one persisted entry instead of creating its own.
+// but the PAIR is not, so a LATER Put can CLOBBER an earlier one: caller A's
+// Put lands, A's forge write then writes NoteURL/Notes back onto that entry
+// via Update, and only after that does caller B's late Put land with its
+// own fresh (Notes: 0, NoteURL: "") copy of the fallback — silently
+// discarding everything A had already recorded. A third caller arriving
+// later would then see that reset state as if nothing had ever been
+// written. Folding the check and the create into one critical section
+// closes THAT: whichever caller's goroutine reaches the lock first persists
+// the ONE entry for the root; every other caller — arriving before or
+// after — observes and shares that single entry instead of creating (and
+// potentially clobbering with) its own.
 //
-// Closing this does not close every race downstream of it, and this doc
-// comment says so on purpose rather than implying otherwise: two concurrent
-// callers can still both observe the SAME freshly-created entry with
-// NoteURL == "" before either one's forge write returns and updates it — see
-// Responder.write, which reads NoteURL to choose CommentOnPR vs OpenPR.
-// Closing THAT window would mean holding this method's lock across a network
-// round-trip, serialising every note-write this process makes behind one
-// HTTP request; that trade is refused deliberately, and the narrower,
-// registry-only race is accepted rather than hidden.
+// GetOrCreate's atomicity by itself does not stop two callers who both
+// observe that one shared entry's NoteURL == "" from both deciding to open
+// a standalone PR — the same entry, read by two concurrent callers before
+// either one's forge write has returned to update it. What closes THAT is
+// Responder.write's per-root guard (see lockRoot): it serialises writers for
+// one root and re-reads the registry after acquiring the guard, so the
+// second writer for a root sees the first writer's freshly-landed NoteURL
+// and comments on it instead of opening its own. That guard — not
+// GetOrCreate's atomicity on its own — is where the duplicate-PR outcome is
+// actually closed, for any root the registry is still tracking at write
+// time; a root the registry has lost track of by then (eviction, TTL,
+// restart) has nowhere durable to record "a PR was already opened", which is
+// the separate, already-documented degradation ErrThreadNotTracked and
+// mention.go's fallback-persistence-failure path describe.
 func (r *Registry) GetOrCreate(root string, fallback Context) (tc Context, created bool, err error) {
 	if !r.Enabled() || root == "" {
 		return Context{}, false, ErrThreadNotEstablishable

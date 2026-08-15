@@ -47,11 +47,20 @@ type Mention struct {
 // Registry.GetOrCreate call rather than a separate Get() followed by a Put():
 // two messages arriving close together in a never-before-tracked thread would
 // otherwise both miss Get, both build their own copy of the fallback, and
-// both Put it — each Put is itself atomic, but the pair is not, so both
-// callers could walk away believing they had established the thread's one
-// entry and both take the OpenPR route below, producing two standalone PRs
-// for one thread. See Registry.GetOrCreate's doc comment for the residual
-// race this narrows but does not eliminate.
+// both Put it — each Put is itself atomic, but the pair is not, so a late Put
+// could CLOBBER an earlier caller's entry, discarding NoteURL/Notes state
+// that caller had already written back after its own forge write landed.
+// GetOrCreate closes that: every caller shares the one entry the first
+// caller's goroutine persists, instead of racing to create (and potentially
+// clobber) their own.
+//
+// GetOrCreate's atomicity alone does not stop two callers who both observe
+// that ONE shared entry's NoteURL == "" from both taking the OpenPR route
+// below — what closes that is Responder.write's per-root guard, which
+// serialises writers for a root and re-reads the registry before choosing a
+// route, so the second writer sees the first writer's freshly-landed
+// NoteURL. See Registry.GetOrCreate's doc comment for the full account of
+// which mechanism closes which outcome.
 func (m *Mention) HandleMention(ctx context.Context, channel, root, author, text string, fallback *Context) {
 	tc, ok := m.Registry.Get(root)
 	if !ok {

@@ -5,7 +5,9 @@ package thread
 import (
 	"errors"
 	"fmt"
+	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -275,11 +277,18 @@ func TestRegistryGetOrCreateOnEmptyRootReturnsSentinel(t *testing.T) {
 // the fix for the concurrency hole in the rehydrate path: two never-before-
 // tracked messages arriving close together used to each independently decide
 // "the registry misses, so I persist my own copy of the fallback" — two
-// non-atomic Get-then-Put sequences racing, rather than one atomic operation.
-// Both callers could walk away believing they had established THE entry for
-// the thread, each with its own Notes: 0 / NoteURL: "", which is what let
-// Mention.HandleMention route both to OpenPR and produce two standalone PRs
-// for one thread.
+// non-atomic Get-then-Put sequences racing, rather than one atomic operation,
+// where a late Put could CLOBBER an earlier caller's entry (discarding
+// NoteURL/Notes state that caller had already written back). This test pins
+// that GetOrCreate now closes THAT: every concurrent caller shares the one
+// entry the first one's goroutine persists, rather than each risking
+// creating (and clobbering with) its own.
+//
+// It does not, by itself, prove no duplicate PR is ever opened — two callers
+// sharing this one entry can still both read its NoteURL == "" before either
+// one's forge write updates it. That outcome is closed separately, by
+// Responder.write's per-root guard — see
+// TestResponderConcurrentFirstNotesOnSameRootProduceExactlyOneOpenPR.
 //
 // Driven with real goroutines under -race, not a simulated ordering: the
 // hazard is a genuine data race between two lock acquisitions (Get, then
@@ -399,6 +408,45 @@ func TestRegistryLockRootMapDoesNotLeakEntries(t *testing.T) {
 	r.mu.Unlock()
 	if remaining != 0 {
 		t.Fatalf("writeLocks has %d entries left after every holder released — the map is leaking", remaining)
+	}
+}
+
+// TestConcurrencyDocsDoNotOverclaimGetOrCreateAloneClosesTheDuplicatePR pins
+// that four places explaining the concurrent-first-message fix no longer
+// carry the overclaim an earlier version made: that folding GetOrCreate's
+// check and create into one atomic operation, by itself, closes the
+// duplicate-PR outcome. It does not — it closes the CLOBBER (a losing
+// caller's Put overwriting a winner's already-updated entry); the
+// duplicate-PR outcome is closed separately, by Responder.write's per-root
+// guard (commit "serialise writes per thread root"). Each marker below is a
+// distinctive substring from the text this test replaces, chosen so the test
+// fails (proving the overclaim is still present) until the doc comment is
+// actually corrected, and stays failing if it ever regresses.
+func TestConcurrencyDocsDoNotOverclaimGetOrCreateAloneClosesTheDuplicatePR(t *testing.T) {
+	cases := []struct {
+		file    string
+		removed string
+	}{
+		{"registry.go", "Closing this does not close every race downstream of it"},
+		{"mention.go", "for one thread. See Registry.GetOrCreate's doc comment for the residual"},
+		// Split across a concatenation so the marker itself, read back out of
+		// THIS file's own source below, is not a false self-match: the two
+		// literals are adjacent only once joined at runtime, never as a
+		// contiguous run of source bytes.
+		{"registry_test.go", "Mention.HandleMention route both to OpenPR" + " and produce two standalone PRs"},
+		{"../../dev/superpowers/specs/2026-08-14-thread-interaction-design.md",
+			"Only the `NoteURL` write-back is lost, so a second note may open a second PR."},
+	}
+	for _, tt := range cases {
+		src, err := os.ReadFile(tt.file) //nolint:gosec // test-owned relative path
+		if err != nil {
+			t.Fatalf("read %s: %v", tt.file, err)
+		}
+		if strings.Contains(string(src), tt.removed) {
+			t.Errorf("%s still carries the superseded text %q — GetOrCreate's atomicity alone does not "+
+				"close the duplicate-PR outcome (it closes the clobber); say what each mechanism actually does",
+				tt.file, tt.removed)
+		}
 	}
 }
 
