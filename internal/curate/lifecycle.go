@@ -56,13 +56,54 @@ func isOperatorNote(labels []string) bool {
 	return slices.Contains(labels, operatorNoteLabel)
 }
 
-// isAutoCloseExempt reports whether a PR must never be auto-closed by ANY
-// curate pass (dedup, the stale sweep): entry-edit proposals and standalone
-// operator notes share the same hazard — see entryEditLabels and
-// operatorNoteLabel for why each, on its own, is a permanent, unintended veto.
+// isAutoCloseExempt reports whether a PR must never be auto-closed by Dedup.
+// It does NOT govern the stale sweep — see Lifecycle.Run, which exempts only
+// isEntryEditProposal, not isOperatorNote. The two exemptions look identical
+// (both cover entryEditLabels and operatorNoteLabel) but rest on different
+// rationale for each label, worth stating precisely rather than conflating,
+// since conflating them is exactly what led an earlier version of this
+// comment astray:
+//
+//   - entryEditLabels (retire/revalidate proposals): the veto hazard is real
+//     here. Revalidation and Retirement keep no store — they reconstruct an
+//     entry's history from the forge on every run, with no memory of WHO
+//     closed a prior proposal, so a close by RunLore's own housekeeping is
+//     byte-for-byte the same signal as a human's "no" and is read back as a
+//     permanent veto for a decision nobody made. This is why entry-edit
+//     proposals are exempt from BOTH Dedup and the stale sweep.
+//
+//   - operatorNoteLabel (standalone notes filed via thread capture): the veto
+//     hazard does NOT apply here, and the mechanism that would make it apply
+//     does not read a note's close back as anything. ClosedPRSuppression
+//     skips every markerless PR (suppression.go, the `fp == "" → continue`
+//     branch), and thread.ConceptEntry deliberately leaves Fingerprint unset
+//     precisely so a note never collides with a curated finding — so an
+//     auto-closed note is never suppressed, never escalated, never read back
+//     as a veto by anything in this codebase. Operator notes stay exempt from
+//     DEDUP for a narrower, genuine reason instead: ConceptEntry always
+//     titles a note "KB: Operator note: <finding title>", so two notes on the
+//     same recurring incident score ~1.0 on the title-Jaccard fallback (see
+//     TestDedupNeverClosesAnOperatorNote) — closing one as a "duplicate" of
+//     the other would discard a human's contribution outright. They are NOT
+//     exempt from the stale sweep: closing an untouched note is ordinary
+//     housekeeping, not discarding one, provided the close comment says so
+//     and invites reopening — see staleOperatorNoteComment.
 func isAutoCloseExempt(labels []string) bool {
 	return isEntryEditProposal(labels) || isOperatorNote(labels)
 }
+
+// staleComment is posted on an ordinary stale KB draft before the sweep
+// closes it.
+const staleComment = "Closed as stale by RunLore curate (no progress in the staleness window). Reopen if still relevant."
+
+// staleOperatorNoteComment is posted on a stale operator note before the
+// sweep closes it — deliberately distinct wording from staleComment (see
+// isAutoCloseExempt's doc comment): this close is routine housekeeping, not
+// a rejection of the human's contribution, and the knowledge is not
+// discarded — reopening restores it for review.
+const staleOperatorNoteComment = "Closed as stale by RunLore curate — this operator note saw no activity within " +
+	"the staleness window. This is routine housekeeping, not a rejection of your note: nothing about it is discarded, " +
+	"and reopening this pull request restores it for review."
 
 // Lifecycle closes stale, unprotected KB artifacts — those with no forge activity
 // within StaleAfter. A PR whose age is unknown (zero UpdatedAt) is never closed.
@@ -73,7 +114,11 @@ type Lifecycle struct {
 	Log        *slog.Logger
 }
 
-// Run closes stale, unprotected artifacts with a comment.
+// Run closes stale, unprotected artifacts with a comment. Entry-edit
+// proposals (isEntryEditProposal) are exempt — see isAutoCloseExempt's doc
+// comment for why. Operator notes are NOT exempt here, unlike from Dedup:
+// an untouched note past StaleAfter is closed too, with its own comment
+// (staleOperatorNoteComment) that says so plainly and invites reopening.
 func (l Lifecycle) Run(ctx context.Context) error {
 	if l.StaleAfter <= 0 {
 		return nil
@@ -87,15 +132,19 @@ func (l Lifecycle) Run(ctx context.Context) error {
 		return err
 	}
 	for _, pr := range prs {
-		if isAutoCloseExempt(pr.Labels) {
-			continue // only a human may close one of these — see entryEditLabels / operatorNoteLabel
+		if isEntryEditProposal(pr.Labels) {
+			continue // only a human may close one of these — see entryEditLabels
 		}
 		if isProtected(pr.Labels) || pr.UpdatedAt.IsZero() || now().Sub(pr.UpdatedAt) <= l.StaleAfter {
 			continue
 		}
+		comment := staleComment
+		if isOperatorNote(pr.Labels) {
+			comment = staleOperatorNoteComment
+		}
 		// Comment first; if the back-ref comment fails, do NOT close (preserve the
 		// "why" for whoever reopens it) — mirrors Dedup.
-		if err := l.Forge.Comment(ctx, pr.Number, "Closed as stale by RunLore curate (no progress in the staleness window). Reopen if still relevant."); err != nil {
+		if err := l.Forge.Comment(ctx, pr.Number, comment); err != nil {
 			l.Log.Warn("stale: comment failed; not closing", "pr", pr.Number, "err", err)
 			continue
 		}

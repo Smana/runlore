@@ -4,6 +4,7 @@ package curate
 
 import (
 	"context"
+	"strings"
 	"testing"
 	"time"
 
@@ -169,7 +170,19 @@ func TestDedupNeverClosesAnOperatorNote(t *testing.T) {
 	}
 }
 
-func TestLifecycleNeverClosesAnOperatorNote(t *testing.T) {
+// TestLifecycleClosesAnUntouchedOperatorNote pins the corrected behaviour:
+// the stale sweep DOES close an operator note nobody has touched within
+// StaleAfter. This used to be TestLifecycleNeverClosesAnOperatorNote and
+// asserted the opposite; that rationale was factually wrong for the stale
+// sweep specifically. ClosedPRSuppression skips every markerless PR
+// (suppression.go, the `fp == "" → continue` branch), and thread.ConceptEntry
+// deliberately leaves Fingerprint unset, so an auto-closed note is NEVER read
+// back as a human veto by anything in this codebase — the hazard the old
+// exemption was defending against does not exist for notes. Closing an
+// untouched note is ordinary housekeeping, not discarding one, PROVIDED the
+// close comment says so plainly and invites reopening — which this test also
+// pins, distinctly from the ordinary stale-draft comment.
+func TestLifecycleClosesAnUntouchedOperatorNote(t *testing.T) {
 	now := lifecycleNow()
 	const staleAfter = 30 * 24 * time.Hour
 	updated := now.Add(-40 * 24 * time.Hour)
@@ -186,12 +199,26 @@ func TestLifecycleNeverClosesAnOperatorNote(t *testing.T) {
 	if err := l.Run(context.Background()); err != nil {
 		t.Fatalf("Run: %v", err)
 	}
-	if containsInt(f.closed, 30) {
-		t.Errorf("the stale sweep closed operator note #30 — an unreviewed human correction "+
-			"would be silently discarded (closed=%v)", f.closed)
+	if !containsInt(f.closed, 30) {
+		t.Fatalf("the stale sweep must close an untouched operator note past StaleAfter, got closed=%v", f.closed)
 	}
-	if len(f.closed) != 1 || f.closed[0] != 20 {
-		t.Fatalf("the ordinary stale KB draft #20 must still close, got %v", f.closed)
+	if len(f.closed) != 2 || !containsInt(f.closed, 20) {
+		t.Fatalf("the ordinary stale KB draft #20 must still close too, got %v", f.closed)
+	}
+
+	noteComment := f.commentBodies[30]
+	if noteComment == "" {
+		t.Fatal("the stale sweep must comment before closing an operator note")
+	}
+	lower := strings.ToLower(noteComment)
+	if !strings.Contains(lower, "reopen") {
+		t.Errorf("the note close comment must invite reopening: %q", noteComment)
+	}
+	if !strings.Contains(lower, "housekeeping") && !strings.Contains(lower, "not") {
+		t.Errorf("the note close comment must say plainly this is routine, not a rejection: %q", noteComment)
+	}
+	if noteComment == f.commentBodies[20] {
+		t.Error("the operator-note close comment must be distinct from the ordinary stale-draft comment, not generic wording that reads as a rejection")
 	}
 }
 

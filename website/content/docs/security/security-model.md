@@ -215,8 +215,14 @@ room, remote homeservers assert their own users' identities.
 ## Slack thread capture (`notify.slack.thread_capture`) — a second exposed endpoint
 
 Opt-in and separate from the feedback channels above: replying `@runlore note: …` inside an
-investigation thread lets a human write what they know straight into a knowledge-base PR — reviewed
-and merged like any other curated entry, never applied automatically. It shares the Slack
+investigation thread lets a human write what they know straight into a knowledge-base PR, never
+applied automatically — but it is **not** reviewed and merged like any other curated entry. It has
+its own, deliberately different lifecycle: a note PR is markerless by design (no `DupFingerprint`),
+so `curate`'s dedup pass never auto-closes it as a "duplicate" of another note on the same recurring
+incident — closing one outright would discard a human's contribution. It is **not** exempt from the
+stale sweep, though: an untouched note past the configured staleness window is closed like any other
+stale draft, with a comment that says so and invites reopening — routine housekeeping, not a
+rejection, and nothing is discarded (reopening the PR restores it for review). It shares the Slack
 interactivity callback's *exposure* story above, but none of its vote trust model, which is why it
 gets its own section here instead of folding into that one.
 
