@@ -5,6 +5,7 @@ package thread
 import (
 	"bufio"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"sync"
@@ -12,6 +13,15 @@ import (
 
 	"github.com/Smana/runlore/internal/providers"
 )
+
+// ErrThreadNotTracked is returned by Update when the registry has no entry for
+// the requested root. It exists so a caller can tell "this write could not be
+// recorded" apart from "recorded" instead of treating both the same way, which
+// is what let the per-thread note cap in Responder.Handle go permanently inert
+// for a thread the registry had lost (TTL expiry, restart, leader failover,
+// eviction at the max-live bound): the counter write-back silently no-op'd
+// forever, so it never incremented and the cap never engaged.
+var ErrThreadNotTracked = errors.New("thread: root not tracked by the registry")
 
 // Registry maps a thread root to the investigation it delivered, so a later
 // reply can be attributed. It is append-only JSONL on disk, replayed on open —
@@ -207,8 +217,14 @@ func (r *Registry) Get(root string) (Context, bool) {
 }
 
 // Update applies fn to the stored context for root and durably records the
-// result. It is how the responder writes back NoteURL and the note counter. A
-// miss is not an error: the thread is simply no longer tracked.
+// result. It is how the responder writes back NoteURL and the note counter.
+//
+// A disabled registry (no ledger path) is a silent no-op, same as before — it
+// is not an error case a caller needs to react to, and notify.slack.thread_capture
+// already refuses to enable at all without a ledger path, so this branch is
+// unreachable in a working deployment. A root the registry does NOT currently
+// track is different: it means this write is about to go uncounted, and that
+// is exactly the case ErrThreadNotTracked exists to surface rather than hide.
 func (r *Registry) Update(root string, fn func(*Context)) error {
 	if !r.Enabled() || root == "" {
 		return nil
@@ -217,7 +233,7 @@ func (r *Registry) Update(root string, fn func(*Context)) error {
 	defer r.mu.Unlock()
 	tc, ok := r.byID[root]
 	if !ok {
-		return nil
+		return ErrThreadNotTracked
 	}
 	fn(&tc)
 	tc.Root = root // fn must not be able to re-key the entry

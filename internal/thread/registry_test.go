@@ -3,6 +3,7 @@
 package thread
 
 import (
+	"errors"
 	"path/filepath"
 	"testing"
 	"time"
@@ -137,6 +138,37 @@ func TestRegistryRegisterFromInvestigation(t *testing.T) {
 	}
 	if got.TriggerKey != "tk-1" || got.CuratedURL != "https://github.com/o/r/pull/42" || got.RecalledEntry != "incidents/foo.md" {
 		t.Fatalf("Register lost fields: %+v", got)
+	}
+}
+
+// TestRegistryUpdateOnUnknownRootIsDistinguishableFromSuccess pins the fix for
+// the defect where an Update on a root the registry does not track returned
+// nil exactly as a successful update would — a caller (Responder, writing back
+// the per-thread note counter) could not tell "counted" from "silently
+// dropped", which is what let the per-thread cap go permanently inert for any
+// thread the registry had lost track of.
+func TestRegistryUpdateOnUnknownRootIsDistinguishableFromSuccess(t *testing.T) {
+	r, err := NewRegistry(filepath.Join(t.TempDir(), "threads.jsonl"), time.Hour, 10)
+	if err != nil {
+		t.Fatalf("NewRegistry: %v", err)
+	}
+	if err := r.Update("nope", func(c *Context) { c.Notes++ }); !errors.Is(err, ErrThreadNotTracked) {
+		t.Fatalf("Update(unknown root) = %v, want ErrThreadNotTracked", err)
+	}
+}
+
+// TestRegistryUpdateOnDisabledRegistryIsStillANoOp pins that a disabled
+// registry (no ledger path) keeps its existing silent-no-op contract: that
+// case is refused upstream by config validation whenever thread capture is
+// on, so it must not start returning ErrThreadNotTracked and be confused for
+// a tracking miss.
+func TestRegistryUpdateOnDisabledRegistryIsStillANoOp(t *testing.T) {
+	r, err := NewRegistry("", time.Hour, 10)
+	if err != nil {
+		t.Fatalf("NewRegistry: %v", err)
+	}
+	if err := r.Update("anything", func(c *Context) { c.Notes++ }); err != nil {
+		t.Fatalf("Update on a disabled registry must remain a no-op, got %v", err)
 	}
 }
 

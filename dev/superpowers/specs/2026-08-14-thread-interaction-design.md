@@ -262,16 +262,29 @@ Widen both sides:
   reusing the same fetch and the same `keyByEvent` cache (renamed).
 
 **Where Matrix does use the registry.** Reading context off the event covers
-lookup, but not the `NoteURL` write-back: a Matrix event is immutable, so "this
-thread already opened a standalone PR" cannot be stamped back onto the root after
-the fact. `OpenPR` offers no protection of its own — its branch name carries a
-unix timestamp (`github.go:120`), so a second call opens a second PR rather than
-no-oping.
+lookup even when the registry has no entry for the root — but the registry is
+not write-only for Matrix either, and an earlier version of this section
+claimed otherwise ("only this one field, only when a standalone PR is opened
+… a registry miss costs at most one duplicate PR, never a lost note"). That
+undersold the actual exposure: `Registry.Update` used to return success (nil)
+on a miss exactly as it does on a hit, so a fallback context substituted fresh
+on every message was never counted anywhere — the per-thread cap went
+silently inert for the rest of that thread's life, not bounded at "at most
+one" of anything, and a Matrix event is immutable so the `NoteURL` write-back
+("this thread already opened a standalone PR") could never be stamped back
+onto the root at all, meaning every later note reopened another PR.
 
-The registry is therefore transport-neutral, and Matrix writes to it too — but
-only this one field, and only when a standalone PR is opened. It is never on the
-Matrix read path, so a registry miss there (restart, TTL expiry) costs at most one
-duplicate PR in a thread, never a lost note.
+The transport-neutral core (`thread.Mention.HandleMention`, `internal/thread`)
+now closes this the other way: a transport-supplied fallback context is
+treated as a signal to REHYDRATE the registry on a miss — the fallback is
+stored under that root before the message is handled, exactly like a fresh
+`Register` — so the per-thread cap, the `NoteURL` write-back, and the note
+counter all keep working normally for every following message in the thread,
+not just the first one after the miss. `Registry.Update` returns
+`ErrThreadNotTracked` (rather than nil) on a genuine miss so a caller can tell
+"counted" from "silently dropped" instead of assuming success either way, and
+`Responder.Handle` now reports that case to the human rather than claiming the
+write succeeded outright.
 
 ### Inbound: the existing `/sync` loop
 

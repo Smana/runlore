@@ -141,7 +141,14 @@ func (r *Responder) Handle(ctx context.Context, tc Context, author, raw string) 
 	// burn the thread's allowance.
 	if landed {
 		if uerr := r.Registry.Update(tc.Root, func(c *Context) { c.Notes++ }); uerr != nil {
-			r.log().Warn("thread: note counter write-back failed", "root", tc.Root, "err", uerr)
+			// The knowledge itself is already saved on the forge — that is not in
+			// question — but the per-thread cap can no longer be trusted for this
+			// thread, so this must be reported rather than returned as a plain
+			// success: an uncountable write is exactly what let the cap go
+			// permanently inert before ErrThreadNotTracked existed to catch it.
+			r.log().Warn("thread: note counter write-back failed; this thread's cap may no longer be enforced", "root", tc.Root, "err", uerr)
+			return reply + "\n⚠️ I saved that, but could not update this thread's note count — its limit may not be enforced correctly from here.",
+				fmt.Errorf("note counter write-back for root %q: %w", tc.Root, uerr)
 		}
 	}
 	if p.Intent == IntentFreeform {

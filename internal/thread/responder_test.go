@@ -392,6 +392,29 @@ func TestHandleForgeFailureIsReportedNotSwallowed(t *testing.T) {
 	}
 }
 
+// TestHandleUncountableWriteIsSurfaced pins the fix for the defect where
+// Registry.Update returning nil on a miss was indistinguishable from a
+// successful counter write-back: Handle would report success even though the
+// per-thread cap had just silently failed to record the write. tc is
+// deliberately never Put into the registry, so the Notes++ write-back at the
+// end of Handle misses and must now be surfaced rather than swallowed.
+func TestHandleUncountableWriteIsSurfaced(t *testing.T) {
+	f := &fakeForge{}
+	r := newTestResponder(t, f)
+	tc := Context{Root: "111.222", CuratedURL: "https://github.com/o/r/pull/42"}
+
+	reply, err := r.Handle(context.Background(), tc, "alice", "note: x")
+	if err == nil {
+		t.Fatal("an update that cannot be recorded must be surfaced as an error, not swallowed")
+	}
+	if len(f.comments) != 1 {
+		t.Fatalf("the forge write itself must still have landed; comments = %d", len(f.comments))
+	}
+	if reply == "" {
+		t.Fatal("the human must still learn what happened")
+	}
+}
+
 func TestHandleUnparseableCuratedURLFallsBackToOpeningAPR(t *testing.T) {
 	f := &fakeForge{}
 	r := newTestResponder(t, f)

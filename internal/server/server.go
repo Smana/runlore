@@ -27,6 +27,7 @@ import (
 	"github.com/Smana/runlore/internal/httpx"
 	"github.com/Smana/runlore/internal/source"
 	"github.com/Smana/runlore/internal/telemetry"
+	"github.com/Smana/runlore/internal/thread"
 )
 
 const (
@@ -114,7 +115,10 @@ type FeedbackRecorder interface {
 // within its 3s deadline and the handler runs detached, replying in the thread
 // itself.
 type ThreadHandler interface {
-	HandleMention(ctx context.Context, channel, root, author, text string)
+	// HandleMention's fallback carries a Context a transport decoded some other
+	// way than the registry, for use only when the registry has no entry for
+	// root. Slack has no such source, so this call site always passes nil.
+	HandleMention(ctx context.Context, channel, root, author, text string, fallback *thread.Context)
 	// Busy tells the human their message could not be accepted right now, so they
 	// know to send it again rather than assume it was recorded. Called when the
 	// detached handler pool is saturated; must be best-effort and safe to call
@@ -541,7 +545,9 @@ func (s *Server) handleSlackEvent(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(context.WithoutCancel(r.Context()), s.mentionTimeout)
 	if s.dispatch(s.eventSlots, func() {
 		defer cancel()
-		s.threads.HandleMention(ctx, ev.Event.Channel, ev.Event.ThreadTS, ev.Event.User, ev.Event.Text)
+		// Slack carries no context a fallback could be decoded from — nil here
+		// always means "consult the registry only", never "skip the registry".
+		s.threads.HandleMention(ctx, ev.Event.Channel, ev.Event.ThreadTS, ev.Event.User, ev.Event.Text, nil)
 	}) {
 		return
 	}

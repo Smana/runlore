@@ -24,6 +24,7 @@ import (
 	"go.opentelemetry.io/otel/sdk/metric/metricdata"
 
 	"github.com/Smana/runlore/internal/telemetry"
+	"github.com/Smana/runlore/internal/thread"
 )
 
 type capturingThreadHandler struct {
@@ -38,7 +39,7 @@ func newCapturingThreadHandler() *capturingThreadHandler {
 	return &capturingThreadHandler{done: make(chan struct{}, 16), busyDone: make(chan struct{}, 16)}
 }
 
-func (c *capturingThreadHandler) HandleMention(_ context.Context, channel, root, author, text string) {
+func (c *capturingThreadHandler) HandleMention(_ context.Context, channel, root, author, text string, _ *thread.Context) {
 	c.mu.Lock()
 	c.calls = append(c.calls, struct{ channel, root, author, text string }{channel, root, author, text})
 	c.mu.Unlock()
@@ -85,7 +86,7 @@ func newBlockingThreadHandler(capacity int) *blockingThreadHandler {
 	}
 }
 
-func (b *blockingThreadHandler) HandleMention(_ context.Context, _, _, _, _ string) {
+func (b *blockingThreadHandler) HandleMention(_ context.Context, _, _, _, _ string, _ *thread.Context) {
 	b.entered <- struct{}{}
 	<-b.release
 }
@@ -121,7 +122,7 @@ func newCtxAwareThreadHandler() *ctxAwareThreadHandler {
 	}
 }
 
-func (h *ctxAwareThreadHandler) HandleMention(ctx context.Context, _, _, _, _ string) {
+func (h *ctxAwareThreadHandler) HandleMention(ctx context.Context, _, _, _, _ string, _ *thread.Context) {
 	h.entered <- struct{}{}
 	select {
 	case <-ctx.Done():
