@@ -1493,6 +1493,9 @@ func (c *Config) Validate() error {
 		if sl.Channel == "" {
 			return fmt.Errorf("notify.slack.thread_capture requires notify.slack.channel (it is required alongside bot_token_env)")
 		}
+		if c.Outcome.LedgerPath == "" {
+			return fmt.Errorf("notify.slack.thread_capture requires outcome.ledger_path: the thread registry lives beside the ledger and must survive a restart and a leader failover, so without a ledger path there is nowhere durable to record which thread belongs to which investigation")
+		}
 	}
 	// Same fail-loud contract for the Matrix reaction listener: without the
 	// notifier fields it would sync nothing, without the ledger it would record

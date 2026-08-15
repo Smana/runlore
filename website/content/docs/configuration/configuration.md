@@ -418,6 +418,37 @@ attributes nothing). Startup fails loud unless `homeserver`/`room_id`/`access_to
 `outcome.ledger_path` are set. Use an **invite-only room** — any room member can vote (see
 [security-model.md]({{< relref "security-model.md#the-feedback-channels--exposure--trust-model" >}})).
 
+**🧵 Thread capture — `thread_capture` (opt-in, default `false`).** When enabled, replying inside a
+Slack investigation thread with `@runlore note: <text>` writes what you know back into the knowledge
+base as a reviewed PR — a comment on the finding's existing KB PR, or a small `Concept` entry PR when
+the finding has none (an instant recall, or a `no_action` verdict), so the knowledge still lands
+somewhere. A human reviews and merges it like every other entry. `@runlore reinvestigate: …` is
+reserved and not supported yet — add the `reinvestigate` label to the knowledge-base issue instead.
+
+> [!IMPORTANT]
+> **Enabling this requires exposing the agent to Slack.**
+>
+> Mentions arrive as HTTPS callbacks on **`POST /slack/events`**, so that endpoint must be reachable
+> **from Slack's servers**: Slack **Event Subscriptions** enabled, Request URL set to
+> `https://<your-runlore-host>/slack/events`, subscribed to the `app_mention` bot event (Slack verifies
+> the URL with a signed challenge, so the endpoint must be reachable before you save). Route it through
+> your ingress/gateway; if you use the chart's `networkPolicy.ingressFrom`, allow your ingress
+> controller, not the internet. Startup **fails loud** unless `signing_secret_env` (every mention is
+> HMAC-verified, same as feedback buttons), `bot_token_env` **with** `channel` (an incoming webhook
+> returns no message ts, so there is no thread root to attribute a reply to) **and**
+> `outcome.ledger_path` are all set — the thread registry that maps a Slack thread to its investigation
+> is stored beside the ledger, so it survives a restart or a leader failover.
+
+> [!NOTE]
+> **Mount the credential, too.** If `bot_token_env` names an env var that is present but **empty** (an
+> unmounted secret, a blank Helm value), the Slack notifier is skipped entirely: no message is
+> delivered, so no thread exists to capture knowledge in. Config validation cannot see runtime
+> emptiness, so startup logs a **warning** instead of announcing the feature — grep the logs for
+> `no bot-token delivery target resolved` after enabling it.
+
+With the option off (the default), `@runlore note: …` mentions are ignored and the endpoint behaves
+exactly as before (404 unless another feature wired it).
+
 ### Generic templated notifier (`notify.templated`)
 
 Deliver findings to **any** webhook-speaking service — Microsoft Teams, Discord,

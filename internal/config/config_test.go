@@ -1014,10 +1014,11 @@ func TestCommonsDirMustNotNestInsideCatalogDir(t *testing.T) {
 
 // TestValidateThreadCapture guards the opt-in contract of
 // notify.slack.thread_capture: it requires the signing secret (mentions arrive
-// on the exposed POST /slack/events endpoint and must be signature-verified)
-// and the bot-token delivery path (bot_token_env + channel) — a webhook returns
-// no message ts, so there is no thread root to attribute a reply to. Off (the
-// default) validates clean with none of it.
+// on the exposed POST /slack/events endpoint and must be signature-verified),
+// the bot-token delivery path (bot_token_env + channel) — a webhook returns
+// no message ts, so there is no thread root to attribute a reply to — and
+// outcome.ledger_path, because the thread registry lives beside the ledger.
+// Off (the default) validates clean with none of it.
 func TestValidateThreadCapture(t *testing.T) {
 	base := func() *Config {
 		c := &Config{}
@@ -1027,6 +1028,7 @@ func TestValidateThreadCapture(t *testing.T) {
 			SigningSecretEnv: "SLACK_SIGNING_SECRET",
 			ThreadCapture:    true,
 		}
+		c.Outcome.LedgerPath = "/var/lib/runlore/outcomes.jsonl"
 		return c
 	}
 
@@ -1050,6 +1052,9 @@ func TestValidateThreadCapture(t *testing.T) {
 		{"bot token without a channel", func(c *Config) {
 			c.Notify.Slack.Channel = ""
 		}, "channel"},
+		{"missing ledger path", func(c *Config) {
+			c.Outcome.LedgerPath = ""
+		}, "ledger_path"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

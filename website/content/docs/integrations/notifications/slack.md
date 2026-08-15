@@ -91,8 +91,14 @@ notify:
     signing_secret_env: SLACK_SIGNING_SECRET
     thread_capture: true
 outcome:
-  ledger_path: /var/lib/runlore/outcome.jsonl   # required: the registry lives beside it
+  ledger_path: /var/lib/runlore/outcome.jsonl   # required: the thread registry lives beside it
 ```
+
+`thread_capture: true` also requires `outcome.ledger_path` — the thread registry
+that maps a Slack thread to its investigation is stored beside the ledger, so it
+survives a restart or a leader failover. Startup fails loud without it, the same
+way it fails loud without `signing_secret_env`, `bot_token_env` and `channel`
+above.
 
 In your Slack app:
 
