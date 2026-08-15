@@ -569,6 +569,49 @@ func TestNoRetryOn404(t *testing.T) {
 	}
 }
 
+// TestIsPROpen mirrors github.Client's TestIsPROpen: it must hit the MERGE
+// REQUEST endpoint specifically (never falling back to issues — see the
+// package doc on isNotFound), and report open only for GitLab's "opened"
+// state ("closed", "merged" and "locked" all report false).
+func TestIsPROpen(t *testing.T) {
+	state := "opened"
+	var gotPath string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.EscapedPath()
+		_, _ = fmt.Fprintf(w, `{"iid":7,"state":%q}`, state)
+	}))
+	defer srv.Close()
+	c := New(srv.URL, "o/r", "main", staticToken("tok"))
+
+	open, err := c.IsPROpen(context.Background(), 7)
+	if err != nil || !open {
+		t.Fatalf("IsPROpen(opened) = %v, %v; want true, nil", open, err)
+	}
+	if gotPath != "/api/v4/projects/o%2Fr/merge_requests/7" {
+		t.Fatalf("path = %q, want the scoped merge_requests endpoint", gotPath)
+	}
+
+	for _, s := range []string{"closed", "merged", "locked"} {
+		state = s
+		open, err = c.IsPROpen(context.Background(), 7)
+		if err != nil || open {
+			t.Fatalf("IsPROpen(%s) = %v, %v; want false, nil", s, open, err)
+		}
+	}
+}
+
+func TestIsPROpenPropagatesForgeErrors(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		http.Error(w, `{"message":"404 Not found"}`, http.StatusNotFound)
+	}))
+	defer srv.Close()
+	c := New(srv.URL, "o/r", "main", staticToken("tok"))
+
+	if _, err := c.IsPROpen(context.Background(), 7); err == nil {
+		t.Fatal("IsPROpen must propagate a forge error rather than reporting closed")
+	}
+}
+
 func TestDefaultBaseURLIsGitLabCom(t *testing.T) {
 	c := New("", "o/r", "main", staticToken("tok"))
 	if !strings.HasPrefix(c.baseURL, "https://gitlab.com") {

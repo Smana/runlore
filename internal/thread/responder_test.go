@@ -25,6 +25,28 @@ type fakeForge struct {
 	openURL string
 	openErr error
 	commErr error
+	// prOpen reports the open state IsPROpen returns for a given PR number.
+	// A number absent from the map defaults to true (open) so every existing
+	// test — none of which sets prOpen — keeps exercising the "comment on the
+	// open PR" path unmodified.
+	prOpen map[int]bool
+	// prOpenErr, when set, makes IsPROpen fail for every number — used to pin
+	// the open-check error-path behaviour.
+	prOpenErr error
+	// prOpenCalls records every number IsPROpen was asked about, in order, so
+	// a test can pin that the check runs before a comment is ever posted.
+	prOpenCalls []int
+}
+
+func (f *fakeForge) IsPROpen(_ context.Context, number int) (bool, error) {
+	f.prOpenCalls = append(f.prOpenCalls, number)
+	if f.prOpenErr != nil {
+		return false, f.prOpenErr
+	}
+	if open, ok := f.prOpen[number]; ok {
+		return open, nil
+	}
+	return true, nil
 }
 
 func (f *fakeForge) CommentOnPR(_ context.Context, number int, body string) error {
@@ -327,6 +349,137 @@ func TestMaxNotesDefaultsWhenUnset(t *testing.T) {
 	r.MaxNotesPerThread = -5
 	if got := r.maxNotes(); got != DefaultMaxNotesPerThread {
 		t.Errorf("maxNotes() with a non-positive override = %d, want the default %d", got, DefaultMaxNotesPerThread)
+	}
+}
+
+// TestHandleMergedCuratedURLFallsBackToOpeningAPR pins the fix for the bug this
+// commit closes: a CuratedURL that has already merged must never be commented
+// on — a comment on a merged PR is never indexed by the catalog, so the
+// knowledge is silently lost while the human is told it was saved. The
+// responder must instead open a standalone Concept PR, exactly as it does for
+// a thread with no CuratedURL at all.
+func TestHandleMergedCuratedURLFallsBackToOpeningAPR(t *testing.T) {
+	f := &fakeForge{prOpen: map[int]bool{42: false}}
+	r := newTestResponder(t, f)
+	tc := Context{Root: "111.222", Title: "OOM", CuratedURL: "https://github.com/o/r/pull/42"}
+	if err := r.Registry.Put(tc); err != nil {
+		t.Fatalf("Put: %v", err)
+	}
+
+	reply, err := r.Handle(context.Background(), tc, "alice", "note: spot reclaim, not OOM")
+	if err != nil {
+		t.Fatalf("Handle: %v", err)
+	}
+	if len(f.comments) != 0 {
+		t.Fatalf("must never comment on a merged PR; comments = %d", len(f.comments))
+	}
+	if len(f.opened) != 1 {
+		t.Fatalf("a merged CuratedURL must fall back to opening a standalone PR; opened = %d", len(f.opened))
+	}
+	if f.opened[0].Type != "Concept" {
+		t.Errorf("Type = %q, want Concept", f.opened[0].Type)
+	}
+	if !strings.Contains(reply, "99") {
+		t.Errorf("reply must name the PR it actually opened: %q", reply)
+	}
+}
+
+// TestHandleOpenCuratedURLStillComments is the sibling of the merged case: an
+// open PR must still receive the comment, and the open-check must run first.
+func TestHandleOpenCuratedURLStillComments(t *testing.T) {
+	f := &fakeForge{prOpen: map[int]bool{42: true}}
+	r := newTestResponder(t, f)
+	tc := Context{Root: "111.222", Title: "OOM", CuratedURL: "https://github.com/o/r/pull/42"}
+	if err := r.Registry.Put(tc); err != nil {
+		t.Fatalf("Put: %v", err)
+	}
+
+	if _, err := r.Handle(context.Background(), tc, "alice", "note: x"); err != nil {
+		t.Fatalf("Handle: %v", err)
+	}
+	if len(f.comments) != 1 || f.comments[0].number != 42 {
+		t.Fatalf("an open PR must still receive the comment; comments = %+v", f.comments)
+	}
+	if len(f.prOpenCalls) == 0 || f.prOpenCalls[0] != 42 {
+		t.Fatalf("IsPROpen must be checked before commenting; calls = %v", f.prOpenCalls)
+	}
+}
+
+// TestHandleMergedNoteURLFallsBackToOpeningANewPR is the NoteURL half of the
+// same fix — the spec's routing gives NoteURL (the standalone PR a previous
+// note in this thread opened) the exact same "must be open" invariant.
+func TestHandleMergedNoteURLFallsBackToOpeningANewPR(t *testing.T) {
+	f := &fakeForge{prOpen: map[int]bool{77: false}}
+	r := newTestResponder(t, f)
+	tc := Context{Root: "111.222", Title: "OOM", NoteURL: "https://github.com/o/r/pull/77"}
+	if err := r.Registry.Put(tc); err != nil {
+		t.Fatalf("Put: %v", err)
+	}
+
+	if _, err := r.Handle(context.Background(), tc, "alice", "note: x"); err != nil {
+		t.Fatalf("Handle: %v", err)
+	}
+	if len(f.comments) != 0 {
+		t.Fatalf("must never comment on a merged NoteURL PR; comments = %d", len(f.comments))
+	}
+	if len(f.opened) != 1 {
+		t.Fatalf("a merged NoteURL must fall back to opening a new standalone PR; opened = %d", len(f.opened))
+	}
+}
+
+// TestHandleFallsBackToNoteURLWhenCuratedURLIsMerged exercises both links being
+// set at once (see TestHandlePrefersCuratedURLOverNoteURL for the open/open
+// case): when CuratedURL has merged but NoteURL is still open, the note must
+// land on NoteURL rather than opening a third PR.
+func TestHandleFallsBackToNoteURLWhenCuratedURLIsMerged(t *testing.T) {
+	f := &fakeForge{prOpen: map[int]bool{42: false, 77: true}}
+	r := newTestResponder(t, f)
+	tc := Context{
+		Root:       "111.222",
+		CuratedURL: "https://github.com/o/r/pull/42",
+		NoteURL:    "https://github.com/o/r/pull/77",
+	}
+	if err := r.Registry.Put(tc); err != nil {
+		t.Fatalf("Put: %v", err)
+	}
+
+	if _, err := r.Handle(context.Background(), tc, "alice", "note: x"); err != nil {
+		t.Fatalf("Handle: %v", err)
+	}
+	if len(f.opened) != 0 {
+		t.Fatalf("must not open a third PR when NoteURL is still open; opened = %d", len(f.opened))
+	}
+	if len(f.comments) != 1 || f.comments[0].number != 77 {
+		t.Fatalf("must fall back to the still-open NoteURL; comments = %+v", f.comments)
+	}
+}
+
+// TestHandleIsPROpenErrorFallsBackToOpeningAPR pins the chosen behaviour when
+// the open-check itself fails (network blip, rate limit): treat it the same as
+// "not open" rather than either commenting blindly (risking the silent loss on
+// a possibly-merged PR) or refusing outright (losing the note for certain). The
+// worst case is one extra small Concept PR — an already-accepted cost per the
+// design doc — but the human's words are never dropped.
+func TestHandleIsPROpenErrorFallsBackToOpeningAPR(t *testing.T) {
+	f := &fakeForge{prOpenErr: errors.New("503 rate limited")}
+	r := newTestResponder(t, f)
+	tc := Context{Root: "111.222", Title: "OOM", CuratedURL: "https://github.com/o/r/pull/42"}
+	if err := r.Registry.Put(tc); err != nil {
+		t.Fatalf("Put: %v", err)
+	}
+
+	reply, err := r.Handle(context.Background(), tc, "alice", "note: x")
+	if err != nil {
+		t.Fatalf("Handle: %v", err)
+	}
+	if len(f.comments) != 0 {
+		t.Fatalf("an open-check failure must never risk a comment on a possibly-merged PR; comments = %d", len(f.comments))
+	}
+	if len(f.opened) != 1 {
+		t.Fatalf("an open-check failure must still preserve the note via a standalone PR; opened = %d", len(f.opened))
+	}
+	if !strings.Contains(reply, "99") {
+		t.Errorf("reply must name the PR it actually opened: %q", reply)
 	}
 }
 

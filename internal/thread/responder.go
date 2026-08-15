@@ -20,6 +20,12 @@ import (
 type Forge interface {
 	CommentOnPR(ctx context.Context, number int, body string) error
 	OpenPR(ctx context.Context, e providers.KBEntry) (providers.Ref, error)
+	// IsPROpen reports whether the pull/merge request numbered `number` is
+	// still open. write() calls this before commenting on a linked PR: a
+	// comment on a MERGED pull request is never indexed by the catalog, so
+	// commenting there would silently lose the human's knowledge while telling
+	// them it was saved. github.Client and gitlab.Client both implement it.
+	IsPROpen(ctx context.Context, number int) (bool, error)
 }
 
 // DefaultMaxNotesPerThread bounds how many knowledge writes one thread can make.
@@ -136,6 +142,31 @@ func (r *Responder) write(ctx context.Context, tc Context, author, text string, 
 	for _, url := range []string{tc.CuratedURL, tc.NoteURL} {
 		n, ok := PRNumber(url)
 		if !ok {
+			continue
+		}
+		open, err := r.Forge.IsPROpen(ctx, n)
+		if err != nil {
+			// The open-check itself failed (network blip, rate limit, forge
+			// outage). Two bad options were on the table: comment blindly, which
+			// risks landing the note on a MERGED pull request — silently lost,
+			// since a merged PR is never indexed by the catalog, which is the
+			// exact failure this check exists to prevent — or refuse outright,
+			// which loses the note for certain. Treating the error the same as
+			// "not open" and falling through to the standalone-Concept path below
+			// avoids both: the worst case is one extra small Concept PR (an
+			// already-accepted cost — see the design doc's "Known cost" on
+			// standalone note entries), but the human's words are never dropped.
+			r.log().Warn("thread: PR open-check failed; treating as not open rather than risk commenting onto a merged PR",
+				"pr", n, "root", tc.Root, "err", err)
+			continue
+		}
+		if !open {
+			// A merged/closed PR is never indexed by the catalog, so a comment
+			// there would be silently lost while the human is told it was saved.
+			// Fall through to the standalone-Concept path instead — the same
+			// path the design doc's non-goal on amending a merged entry
+			// prescribes: "v1 opens a new entry that links the one it corrects."
+			r.log().Info("thread: linked PR is no longer open; opening a standalone note instead", "pr", n, "root", tc.Root)
 			continue
 		}
 		if err := r.Forge.CommentOnPR(ctx, n, NoteBody(tc, author, text, at)); err != nil {
