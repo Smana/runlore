@@ -78,7 +78,11 @@ into the knowledge base:
 The note lands as a comment on that finding's knowledge-base PR. When the
 finding has no PR — an instant recall, or a `no_action` verdict — RunLore opens
 a small `Concept` entry PR instead, so the knowledge still lands somewhere. A
-human reviews and merges it, like every other entry.
+human reviews and merges it, like every other entry. If nobody does, the
+`curate` stale sweep still applies: an untouched note PR past
+`curate.stale_after` (the Helm chart ships `720h`) is closed like any other
+stale draft, with a comment explaining why — it can be reopened for review at
+any time.
 
 `@runlore reinvestigate: …` is reserved and not supported yet; add the
 `reinvestigate` label to the knowledge-base issue to re-run an investigation.

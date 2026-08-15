@@ -422,8 +422,11 @@ attributes nothing). Startup fails loud unless `homeserver`/`room_id`/`access_to
 Slack investigation thread with `@runlore note: <text>` writes what you know back into the knowledge
 base as a reviewed PR — a comment on the finding's existing KB PR, or a small `Concept` entry PR when
 the finding has none (an instant recall, or a `no_action` verdict), so the knowledge still lands
-somewhere. A human reviews and merges it like every other entry. `@runlore reinvestigate: …` is
-reserved and not supported yet — add the `reinvestigate` label to the knowledge-base issue instead.
+somewhere. A human reviews and merges it like every other entry. If nobody does, it is not exempt from
+the `curate` stale sweep either: an untouched note PR past `curate.stale_after` (the Helm chart ships
+`720h`) is closed like any other stale draft, with a comment explaining why — reopening it restores it
+for review, nothing is discarded. `@runlore reinvestigate: …` is reserved and not supported yet — add
+the `reinvestigate` label to the knowledge-base issue instead.
 
 > [!IMPORTANT]
 > **Enabling this requires exposing the agent to Slack.**

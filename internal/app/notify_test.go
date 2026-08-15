@@ -16,6 +16,7 @@ import (
 	"github.com/Smana/runlore/internal/config"
 	"github.com/Smana/runlore/internal/notify"
 	"github.com/Smana/runlore/internal/providers"
+	"github.com/Smana/runlore/internal/telemetry"
 	"github.com/Smana/runlore/internal/thread"
 )
 
@@ -283,6 +284,50 @@ func TestBuildThreadMentionWiresWhenEverythingIsReachable(t *testing.T) {
 	}
 	if !strings.Contains(buf.String(), "slack thread capture enabled") {
 		t.Fatalf("must log that thread capture is enabled; got: %s", buf.String())
+	}
+}
+
+// TestBuildThreadMentionWiresForgeWritesAndMetrics pins wiring that none of
+// the other TestBuildThreadMention* tests check: with everything reachable,
+// the returned Responder must actually carry the global rate limit and the
+// metrics instrument set — the same idiom TestWireRecallSetsEveryRuntimeDependency
+// uses for investigate.Recall (see wire_recall_test.go).
+//
+// Both assignments are load-bearing but invisible to the rest of the suite if
+// dropped: Responder.write nil-checks ForgeWrites before calling it
+// (`if r.ForgeWrites != nil && !r.ForgeWrites.Allow()`), so a missing
+// ForgeWrites does not panic or fail any existing test — it just silently
+// makes the one global write budget this feature has unlimited. Metrics is
+// nil-safe the same way throughout Responder, so a missing Metrics silently
+// drops ThreadWritesThrottled and ThreadNotesWritten to zero in production
+// with nothing else noticing.
+func TestBuildThreadMentionWiresForgeWritesAndMetrics(t *testing.T) {
+	t.Setenv("TEST_THREAD_WIRING_BOT_TOKEN", "xoxb-real")
+	cfg := &config.Config{}
+	cfg.Notify.Slack = config.SlackNotify{
+		BotTokenEnv: "TEST_THREAD_WIRING_BOT_TOKEN", Channel: "C1", SigningSecretEnv: "S", ThreadCapture: true,
+	}
+	log := slog.New(slog.NewTextHandler(io.Discard, nil))
+	reg, err := thread.NewRegistry(filepath.Join(t.TempDir(), "threads.jsonl"), time.Hour, 10)
+	if err != nil {
+		t.Fatalf("NewRegistry: %v", err)
+	}
+	notifier, err := notify.BuildEnabled(notify.Deps{Cfg: cfg, Log: log})
+	if err != nil {
+		t.Fatalf("BuildEnabled: %v", err)
+	}
+	metrics := telemetry.NewMetrics()
+
+	m := BuildThreadMention(cfg, reg, fakeThreadForge{}, notifier, metrics, log)
+	if m == nil {
+		t.Fatal("must wire the handler when everything is reachable")
+	}
+	if m.Responder.ForgeWrites == nil {
+		t.Fatal("Responder.ForgeWrites is nil — the global forge-write rate limit is unenforced in production")
+	}
+	if m.Responder.Metrics != metrics {
+		t.Fatal("Responder.Metrics is not the *telemetry.Metrics passed to BuildThreadMention — " +
+			"ThreadWritesThrottled/ThreadNotesWritten go dead")
 	}
 }
 

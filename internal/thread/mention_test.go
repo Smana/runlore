@@ -12,6 +12,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/Smana/runlore/internal/ratelimit"
 )
 
 // mu guards replies: TestMentionConcurrentFirstMessagesRehydrateRegistryOnceAndCountEveryWrite
@@ -274,25 +276,28 @@ func TestMentionFallbackOnEmptyRootDoesNotWriteWithZeroValueContext(t *testing.T
 // TestMentionConcurrentFirstMessagesRehydrateRegistryOnceAndCountEveryWrite
 // drives HandleMention itself with real goroutines under -race: several
 // concurrent first messages on one never-before-tracked thread, all supplying
-// the same fallback. It pins the two guarantees the atomic
-// Registry.GetOrCreate gives regardless of forge timing: (1) the registry
-// ends up with exactly ONE entry for the root — not several divergent ones
-// each caller thought was "the" entry — and (2) the note counter on that one
-// entry equals the number of writes that actually landed, whatever that
-// number turns out to be.
+// the same fallback. It pins three guarantees together: (1) the registry ends
+// up with exactly ONE entry for the root — not several divergent ones each
+// caller thought was "the" entry (Registry.GetOrCreate's atomicity); (2) the
+// note counter on that one entry equals the number of writes that actually
+// landed; and (3) exactly ONE of those writes opens a standalone PR — every
+// other one comments on it (Responder.write's per-root guard).
 //
-// It deliberately does NOT assert how many standalone PRs got opened.
-// Closing the double-rehydration race does not close every race downstream of
-// it: two goroutines can still both observe the freshly-created entry's
-// NoteURL == "" before either one's OpenPR call returns and updates it — see
-// Registry.GetOrCreate's doc comment. Pinning opened == 1 here would pin a
-// guarantee this fix does not make, and would make the test flaky besides.
+// The fallback deliberately carries no CuratedURL: an earlier version of this
+// test set one, which routed every goroutine to CommentOnPR on an
+// already-open PR and never exercised OpenPR at all — the exact route this
+// test is about — while its own comment argued at length that pinning
+// opened == 1 would be premature. It is not premature once the per-root
+// write guard exists: every writer re-reads the registry under that guard
+// before choosing a route, so the second and later writers see the first
+// writer's freshly-landed NoteURL.
 func TestMentionConcurrentFirstMessagesRehydrateRegistryOnceAndCountEveryWrite(t *testing.T) {
 	f, rep := &fakeForge{}, &fakeReplier{}
 	m := newTestMention(t, f, rep)
-	m.Responder.MaxNotesPerThread = 1000 // the cap itself is not what this test pins
+	m.Responder.MaxNotesPerThread = 1000                  // the per-thread cap is not what this test pins
+	m.Responder.ForgeWrites = ratelimit.New(0, time.Hour) // 0 = unlimited; the global budget is not what this test pins
 	root := "unknown-thread"
-	fallback := &Context{Root: root, CuratedURL: "https://github.com/o/r/pull/42"}
+	fallback := &Context{Root: root}
 
 	const n = 12
 	var wg sync.WaitGroup
@@ -311,6 +316,12 @@ func TestMentionConcurrentFirstMessagesRehydrateRegistryOnceAndCountEveryWrite(t
 	}
 
 	comments, opened := f.counts()
+	if opened != 1 {
+		t.Fatalf("opened = %d, want exactly 1 — every concurrent first message on the same thread must land on the ONE PR the first writer opens", opened)
+	}
+	if comments != n-1 {
+		t.Fatalf("comments = %d, want %d — every writer after the first must comment on that one PR", comments, n-1)
+	}
 	landed := comments + opened
 	if stored.Notes != landed {
 		t.Fatalf("Notes = %d, want %d — the counter must reflect every write that actually landed, even under concurrency", stored.Notes, landed)
