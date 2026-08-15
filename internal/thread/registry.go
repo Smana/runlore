@@ -241,6 +241,57 @@ func (r *Registry) Update(root string, fn func(*Context)) error {
 	return r.appendLocked(tc)
 }
 
+// GetOrCreate returns the tracked context for root, atomically creating and
+// persisting one from fallback when the registry has no entry for root yet.
+// created reports whether THIS call was the one that established the entry,
+// so a caller can log the rehydration once rather than on every subsequent
+// hit.
+//
+// It exists so a caller with a fallback context (Mention.HandleMention, when
+// the registry has lost a thread to TTL expiry, a restart, or a leader
+// failover) never has to sequence its own Get() and Put(): two of those,
+// called from separate goroutines, race — both can miss Get, both then Put
+// their own copy of the fallback, and each individual Put is itself atomic
+// but the PAIR is not, so two concurrent callers can each walk away believing
+// they established "the" entry for the thread. Handle then routes on
+// Notes: 0 and NoteURL: "" — state neither caller's copy shares with the
+// other's — from two contexts that both look like the thread's one true
+// entry, letting both take the OpenPR route and open two standalone PRs for
+// one thread. Folding the check and the create into one critical section
+// closes that: whichever caller's goroutine reaches the lock first persists
+// the entry: every other caller — arriving before or after — observes that
+// one persisted entry instead of creating its own.
+//
+// Closing this does not close every race downstream of it, and this doc
+// comment says so on purpose rather than implying otherwise: two concurrent
+// callers can still both observe the SAME freshly-created entry with
+// NoteURL == "" before either one's forge write returns and updates it — see
+// Responder.write, which reads NoteURL to choose CommentOnPR vs OpenPR.
+// Closing THAT window would mean holding this method's lock across a network
+// round-trip, serialising every note-write this process makes behind one
+// HTTP request; that trade is refused deliberately, and the narrower,
+// registry-only race is accepted rather than hidden.
+func (r *Registry) GetOrCreate(root string, fallback Context) (tc Context, created bool, err error) {
+	if !r.Enabled() || root == "" {
+		return Context{}, false, nil
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.expireLocked()
+	if existing, ok := r.byID[root]; ok {
+		return existing, false, nil
+	}
+	fallback.Root = root
+	if fallback.At.IsZero() {
+		fallback.At = r.now()
+	}
+	r.putLocked(fallback)
+	if err := r.appendLocked(fallback); err != nil {
+		return fallback, true, err
+	}
+	return fallback, true, nil
+}
+
 // Register records a delivered investigation against the thread root it was
 // posted to. It implements notify.ThreadSink, so the Slack notifier can hand
 // over the ts it already has without knowing what a registry is. Best-effort by

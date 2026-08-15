@@ -4,7 +4,9 @@ package thread
 
 import (
 	"errors"
+	"fmt"
 	"path/filepath"
+	"sync"
 	"testing"
 	"time"
 
@@ -169,6 +171,132 @@ func TestRegistryUpdateOnDisabledRegistryIsStillANoOp(t *testing.T) {
 	}
 	if err := r.Update("anything", func(c *Context) { c.Notes++ }); err != nil {
 		t.Fatalf("Update on a disabled registry must remain a no-op, got %v", err)
+	}
+}
+
+// TestRegistryGetOrCreateHitWinsOverFallback pins that a registry hit is
+// always returned over a caller-supplied fallback — a hit carries NoteURL /
+// Notes state a fresh fallback stamp cannot reconstruct.
+func TestRegistryGetOrCreateHitWinsOverFallback(t *testing.T) {
+	r, err := NewRegistry(filepath.Join(t.TempDir(), "threads.jsonl"), time.Hour, 10)
+	if err != nil {
+		t.Fatalf("NewRegistry: %v", err)
+	}
+	if err := r.Put(Context{Root: "r1", Notes: 3, CuratedURL: "https://github.com/o/r/pull/1"}); err != nil {
+		t.Fatalf("Put: %v", err)
+	}
+
+	tc, created, err := r.GetOrCreate("r1", Context{Root: "r1", CuratedURL: "https://github.com/o/r/pull/999"})
+	if err != nil {
+		t.Fatalf("GetOrCreate: %v", err)
+	}
+	if created {
+		t.Fatal("a registry hit must not be reported as created")
+	}
+	if tc.Notes != 3 || tc.CuratedURL != "https://github.com/o/r/pull/1" {
+		t.Fatalf("GetOrCreate must return the tracked entry, not the fallback: %+v", tc)
+	}
+}
+
+// TestRegistryGetOrCreatePersistsFallbackOnMiss pins the miss half of the
+// contract: a genuine miss creates and durably persists the fallback,
+// reporting created = true.
+func TestRegistryGetOrCreatePersistsFallbackOnMiss(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "threads.jsonl")
+	r, err := NewRegistry(path, time.Hour, 10)
+	if err != nil {
+		t.Fatalf("NewRegistry: %v", err)
+	}
+	tc, created, err := r.GetOrCreate("r1", Context{CuratedURL: "https://github.com/o/r/pull/42"})
+	if err != nil {
+		t.Fatalf("GetOrCreate: %v", err)
+	}
+	if !created {
+		t.Fatal("a genuine miss must report created = true")
+	}
+	if tc.Root != "r1" {
+		t.Fatalf("Root = %q, want it stamped to the requested root", tc.Root)
+	}
+
+	// Durable: a fresh registry opened from the same path must replay it.
+	r2, err := NewRegistry(path, time.Hour, 10)
+	if err != nil {
+		t.Fatalf("reopen: %v", err)
+	}
+	stored, ok := r2.Get("r1")
+	if !ok {
+		t.Fatal("GetOrCreate's write was not durably persisted")
+	}
+	if stored.CuratedURL != "https://github.com/o/r/pull/42" {
+		t.Fatalf("CuratedURL = %q, want it preserved", stored.CuratedURL)
+	}
+}
+
+// TestRegistryGetOrCreateConcurrentFirstCallersEstablishExactlyOneEntry pins
+// the fix for the concurrency hole in the rehydrate path: two never-before-
+// tracked messages arriving close together used to each independently decide
+// "the registry misses, so I persist my own copy of the fallback" — two
+// non-atomic Get-then-Put sequences racing, rather than one atomic operation.
+// Both callers could walk away believing they had established THE entry for
+// the thread, each with its own Notes: 0 / NoteURL: "", which is what let
+// Mention.HandleMention route both to OpenPR and produce two standalone PRs
+// for one thread.
+//
+// Driven with real goroutines under -race, not a simulated ordering: the
+// hazard is a genuine data race between two lock acquisitions (Get, then
+// Put), not a logic bug a single goroutine could exhibit.
+func TestRegistryGetOrCreateConcurrentFirstCallersEstablishExactlyOneEntry(t *testing.T) {
+	r, err := NewRegistry(filepath.Join(t.TempDir(), "threads.jsonl"), time.Hour, 100)
+	if err != nil {
+		t.Fatalf("NewRegistry: %v", err)
+	}
+
+	const n = 50
+	var wg sync.WaitGroup
+	created := make([]bool, n)
+	got := make([]Context, n)
+	errs := make([]error, n)
+	for i := 0; i < n; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			fallback := Context{Root: "unknown", CuratedURL: fmt.Sprintf("https://github.com/o/r/pull/%d", i+1)}
+			tc, wasCreated, gerr := r.GetOrCreate("unknown", fallback)
+			created[i], got[i], errs[i] = wasCreated, tc, gerr
+		}(i)
+	}
+	wg.Wait()
+
+	for i, gerr := range errs {
+		if gerr != nil {
+			t.Fatalf("GetOrCreate[%d]: %v", i, gerr)
+		}
+	}
+
+	winners := 0
+	for _, c := range created {
+		if c {
+			winners++
+		}
+	}
+	if winners != 1 {
+		t.Fatalf("winners = %d, want exactly 1 — exactly one concurrent caller must establish the entry", winners)
+	}
+
+	established := got[0].CuratedURL
+	for i, tc := range got {
+		if tc.CuratedURL != established {
+			t.Fatalf("caller %d observed CuratedURL %q, want the single established value %q — every caller must see the SAME entry, not its own fallback",
+				i, tc.CuratedURL, established)
+		}
+	}
+
+	stored, ok := r.Get("unknown")
+	if !ok {
+		t.Fatal("registry lost the entry after concurrent GetOrCreate calls")
+	}
+	if stored.CuratedURL != established {
+		t.Fatalf("stored.CuratedURL = %q, want %q", stored.CuratedURL, established)
 	}
 }
 

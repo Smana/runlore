@@ -5,18 +5,25 @@ package thread
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"strings"
+	"sync"
 	"testing"
 )
 
+// mu guards replies: TestMentionConcurrentFirstMessagesRehydrateRegistryOnceAndCountEveryWrite
+// drives HandleMention from real goroutines, all of which reply.
 type fakeReplier struct {
+	mu      sync.Mutex
 	replies []string
 	err     error
 }
 
 func (f *fakeReplier) ReplyInThread(_ context.Context, _, _, text string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	f.replies = append(f.replies, text)
 	return f.err
 }
@@ -217,5 +224,51 @@ func TestMentionRegistryHitTakesPrecedenceOverFallback(t *testing.T) {
 
 	if len(f.comments) != 1 || f.comments[0].number != 42 {
 		t.Fatalf("must use the registry's CuratedURL (42), not the fallback's (999): comments=%+v", f.comments)
+	}
+}
+
+// TestMentionConcurrentFirstMessagesRehydrateRegistryOnceAndCountEveryWrite
+// drives HandleMention itself with real goroutines under -race: several
+// concurrent first messages on one never-before-tracked thread, all supplying
+// the same fallback. It pins the two guarantees the atomic
+// Registry.GetOrCreate gives regardless of forge timing: (1) the registry
+// ends up with exactly ONE entry for the root — not several divergent ones
+// each caller thought was "the" entry — and (2) the note counter on that one
+// entry equals the number of writes that actually landed, whatever that
+// number turns out to be.
+//
+// It deliberately does NOT assert how many standalone PRs got opened.
+// Closing the double-rehydration race does not close every race downstream of
+// it: two goroutines can still both observe the freshly-created entry's
+// NoteURL == "" before either one's OpenPR call returns and updates it — see
+// Registry.GetOrCreate's doc comment. Pinning opened == 1 here would pin a
+// guarantee this fix does not make, and would make the test flaky besides.
+func TestMentionConcurrentFirstMessagesRehydrateRegistryOnceAndCountEveryWrite(t *testing.T) {
+	f, rep := &fakeForge{}, &fakeReplier{}
+	m := newTestMention(t, f, rep)
+	m.Responder.MaxNotesPerThread = 1000 // the cap itself is not what this test pins
+	root := "unknown-thread"
+	fallback := &Context{Root: root, CuratedURL: "https://github.com/o/r/pull/42"}
+
+	const n = 12
+	var wg sync.WaitGroup
+	for i := 0; i < n; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			m.HandleMention(context.Background(), "C1", root, fmt.Sprintf("user%d", i), "note: concurrent", fallback)
+		}(i)
+	}
+	wg.Wait()
+
+	stored, ok := m.Registry.Get(root)
+	if !ok {
+		t.Fatal("registry lost the thread after concurrent first messages")
+	}
+
+	comments, opened := f.counts()
+	landed := comments + opened
+	if stored.Notes != landed {
+		t.Fatalf("Notes = %d, want %d — the counter must reflect every write that actually landed, even under concurrency", stored.Notes, landed)
 	}
 }

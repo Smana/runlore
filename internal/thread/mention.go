@@ -41,6 +41,16 @@ type Mention struct {
 // cap, the NoteURL write-back and the note counter all keep working from then
 // on, instead of the fallback being substituted fresh (and un-countable) on
 // every single reply.
+//
+// The registry miss and the fallback rehydration are done as one atomic
+// Registry.GetOrCreate call rather than a separate Get() followed by a Put():
+// two messages arriving close together in a never-before-tracked thread would
+// otherwise both miss Get, both build their own copy of the fallback, and
+// both Put it — each Put is itself atomic, but the pair is not, so both
+// callers could walk away believing they had established the thread's one
+// entry and both take the OpenPR route below, producing two standalone PRs
+// for one thread. See Registry.GetOrCreate's doc comment for the residual
+// race this narrows but does not eliminate.
 func (m *Mention) HandleMention(ctx context.Context, channel, root, author, text string, fallback *Context) {
 	tc, ok := m.Registry.Get(root)
 	if !ok {
@@ -51,15 +61,21 @@ func (m *Mention) HandleMention(ctx context.Context, channel, root, author, text
 					"and only for a limited time after the finding was posted.")
 			return
 		}
-		tc = *fallback
-		tc.Root = root
-		if err := m.Registry.Put(tc); err != nil {
+		var created bool
+		var err error
+		tc, created, err = m.Registry.GetOrCreate(root, *fallback)
+		if err != nil {
 			// The rehydration write itself failed (e.g. a disk error): the fallback
 			// is still used for THIS message — refusing outright would drop the
 			// human's words for certain — but the cap and counter may not be
 			// enforced for this thread until a later write succeeds.
 			m.Log.Warn("thread: could not rehydrate the registry from a fallback context; this thread's cap may not be enforced",
 				"root", root, "channel", channel, "author", author, "err", err)
+		} else if !created {
+			// Another goroutine's concurrent message won the race to rehydrate this
+			// thread first; this one observed and is using that entry instead.
+			m.Log.Info("thread: registry already rehydrated by a concurrent message; using the established entry",
+				"root", root, "channel", channel, "author", author)
 		}
 	}
 	// The channel is taken from the live event rather than the stored (or

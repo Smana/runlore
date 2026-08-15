@@ -10,6 +10,7 @@ import (
 	"log/slog"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -60,6 +61,13 @@ func meteredInstruments(t *testing.T) (*telemetry.Metrics, func(series string) (
 }
 
 type fakeForge struct {
+	// mu guards every field below. Every test using fakeForge so far has been
+	// single-goroutine, so this is a no-op for them; concurrency tests (see
+	// TestMentionConcurrentFirstMessagesRehydrateRegistryOnceAndCountEveryWrite)
+	// drive HandleMention from real goroutines, and without this lock two
+	// goroutines appending to the same slice concurrently is itself a data
+	// race the -race detector would catch, independent of anything under test.
+	mu       sync.Mutex
 	comments []struct {
 		number int
 		body   string
@@ -82,6 +90,8 @@ type fakeForge struct {
 }
 
 func (f *fakeForge) IsPROpen(_ context.Context, number int) (bool, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	f.prOpenCalls = append(f.prOpenCalls, number)
 	if f.prOpenErr != nil {
 		return false, f.prOpenErr
@@ -93,6 +103,8 @@ func (f *fakeForge) IsPROpen(_ context.Context, number int) (bool, error) {
 }
 
 func (f *fakeForge) CommentOnPR(_ context.Context, number int, body string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	if f.commErr != nil {
 		return f.commErr
 	}
@@ -104,6 +116,8 @@ func (f *fakeForge) CommentOnPR(_ context.Context, number int, body string) erro
 }
 
 func (f *fakeForge) OpenPR(_ context.Context, e providers.KBEntry) (providers.Ref, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	if f.openErr != nil {
 		return providers.Ref{}, f.openErr
 	}
@@ -113,6 +127,14 @@ func (f *fakeForge) OpenPR(_ context.Context, e providers.KBEntry) (providers.Re
 		url = "https://github.com/o/r/pull/99"
 	}
 	return providers.Ref{URL: url}, nil
+}
+
+// counts returns the number of comments and PRs opened so far, taken under
+// the lock so a concurrency test can read them safely.
+func (f *fakeForge) counts() (comments, opened int) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return len(f.comments), len(f.opened)
 }
 
 func newTestResponder(t *testing.T, f *fakeForge) *Responder {
