@@ -37,7 +37,6 @@ import (
 	_ "github.com/Smana/runlore/internal/source/grafana"      // self-registers the Grafana Alerting webhook source
 	"github.com/Smana/runlore/internal/source/pagerduty"
 	"github.com/Smana/runlore/internal/telemetry"
-	"github.com/Smana/runlore/internal/thread"
 	"github.com/Smana/runlore/internal/trigger"
 )
 
@@ -413,38 +412,10 @@ func RunServe(version string, args []string) error {
 	// Opt-in thread capture: wire the handler ONLY when the option is on, the
 	// registry persists, a forge can be reached, and a notifier can reply. A
 	// capture path that took someone's knowledge and said nothing back — or had
-	// nowhere to write it — would be worse than not having one.
+	// nowhere to write it — would be worse than not having one. See
+	// BuildThreadMention for why deliverability is checked before the notifier.
 	if cfg.Notify.Slack.ThreadCapture && threadRegistry.Enabled() {
-		forge := buildForge(cfg, log)
-		// notifier is nil on the log-only path (no model configured); ThreadReplier
-		// is a pointer-receiver method that dereferences it, so a nil check here
-		// avoids a startup panic on that otherwise-valid configuration.
-		var replier providers.ThreadNotifier
-		if notifier != nil {
-			replier = notifier.ThreadReplier()
-		}
-		switch {
-		case forge == nil:
-			log.Warn("slack thread_capture enabled but no forge is configured (forge.kb_repo / credentials); knowledge cannot be written")
-		case replier == nil:
-			log.Warn("slack thread_capture enabled but no thread-capable notifier resolved; replies cannot be posted")
-		default:
-			acts.Threads = &thread.Mention{
-				Responder: &thread.Responder{
-					Forge:             forge,
-					Registry:          threadRegistry,
-					MaxNotesPerThread: thread.DefaultMaxNotesPerThread,
-					OpenPRs:           ratelimit.New(20, time.Hour),
-					Log:               log,
-				},
-				Registry: threadRegistry,
-				Replier:  replier,
-				Log:      log,
-			}
-			if ThreadCaptureDeliverable(cfg, log) {
-				log.Info("slack thread capture enabled", "endpoint", "/slack/events")
-			}
-		}
+		acts.Threads = BuildThreadMention(cfg, threadRegistry, buildForge(cfg, log), notifier, log)
 	}
 	// /readyz is process + catalog health, NOT leadership (#264): every warm
 	// replica reports Ready (so `helm upgrade --wait` / Flux kstatus succeeds

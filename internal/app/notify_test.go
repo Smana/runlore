@@ -4,14 +4,18 @@ package app
 
 import (
 	"bytes"
+	"context"
 	"io"
 	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/Smana/runlore/internal/config"
+	"github.com/Smana/runlore/internal/notify"
+	"github.com/Smana/runlore/internal/providers"
 	"github.com/Smana/runlore/internal/thread"
 )
 
@@ -161,5 +165,139 @@ func TestThreadCaptureDeliverable(t *testing.T) {
 	cfg.Notify.Slack.BotTokenEnv = "SLACK_BOT_TOKEN_ABSENT"
 	if ThreadCaptureDeliverable(cfg, slog.New(slog.NewTextHandler(io.Discard, nil))) {
 		t.Fatal("an empty bot-token env means no message is delivered, so no thread exists to reply in")
+	}
+}
+
+// fakeThreadForge is a minimal thread.Forge stub — TestBuildThreadMention*
+// only needs a non-nil forge to get past the "no forge configured" case; none
+// of these tests exercise an actual write.
+type fakeThreadForge struct{}
+
+func (fakeThreadForge) CommentOnPR(context.Context, int, string) error { return nil }
+func (fakeThreadForge) OpenPR(context.Context, providers.KBEntry) (providers.Ref, error) {
+	return providers.Ref{}, nil
+}
+func (fakeThreadForge) IsPROpen(context.Context, int) (bool, error) { return true, nil }
+
+// TestBuildThreadMentionNamesTheBotTokenCause pins the fix for the dead-code
+// warning: ThreadCaptureDeliverable's "no bot-token delivery target resolved"
+// message names the SPECIFIC, actionable cause (an env var that resolves empty
+// at runtime) and configuration.md / slack.md both tell operators to grep the
+// logs for it. But reaching that warning's call site used to require
+// replier != nil, which (since only *notify.SlackBot implements
+// providers.ThreadNotifier, and it is only ever built when SlackBotDelivery
+// resolves true) meant the "false" branch inside ThreadCaptureDeliverable
+// could never execute in production — the generic "no thread-capable notifier
+// resolved" message fired instead, every time, masking the real cause.
+//
+// This test builds a REAL *notify.Multi the way serve.go does (via
+// notify.BuildEnabled against a config with the bot-token env present but
+// empty at runtime — a mounted-but-blank secret) and asserts the specific
+// message is what actually reaches the log.
+func TestBuildThreadMentionNamesTheBotTokenCause(t *testing.T) {
+	t.Setenv("TEST_THREAD_BOT_TOKEN_EMPTY", "")
+	cfg := &config.Config{}
+	cfg.Notify.Slack = config.SlackNotify{
+		BotTokenEnv: "TEST_THREAD_BOT_TOKEN_EMPTY", Channel: "C1", SigningSecretEnv: "S", ThreadCapture: true,
+	}
+	var buf bytes.Buffer
+	log := slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelWarn}))
+
+	reg, err := thread.NewRegistry(filepath.Join(t.TempDir(), "threads.jsonl"), time.Hour, 10)
+	if err != nil {
+		t.Fatalf("NewRegistry: %v", err)
+	}
+	notifier, err := notify.BuildEnabled(notify.Deps{Cfg: cfg, Log: log})
+	if err != nil {
+		t.Fatalf("BuildEnabled: %v", err)
+	}
+
+	m := BuildThreadMention(cfg, reg, fakeThreadForge{}, notifier, log)
+	if m != nil {
+		t.Fatal("must not wire the handler when the bot token cannot actually deliver")
+	}
+	out := buf.String()
+	const documentedGrep = "no bot-token delivery target resolved"
+	if !strings.Contains(out, documentedGrep) {
+		t.Fatalf("must log the specific, documented cause %q; got: %s", documentedGrep, out)
+	}
+	if strings.Contains(out, "no thread-capable notifier resolved") {
+		t.Fatalf("must not ALSO log the generic message once the specific cause is known; got: %s", out)
+	}
+}
+
+// TestBuildThreadMentionStillReportsNoNotifierWhenNoneWasBuilt is the other
+// half: when replier is nil for a reason ThreadCaptureDeliverable cannot see
+// (no notifier built at all — the log-only, no-model path), the generic
+// message must still fire.
+func TestBuildThreadMentionStillReportsNoNotifierWhenNoneWasBuilt(t *testing.T) {
+	t.Setenv("TEST_THREAD_BOT_TOKEN_PRESENT", "xoxb-real")
+	cfg := &config.Config{}
+	cfg.Notify.Slack = config.SlackNotify{
+		BotTokenEnv: "TEST_THREAD_BOT_TOKEN_PRESENT", Channel: "C1", SigningSecretEnv: "S", ThreadCapture: true,
+	}
+	var buf bytes.Buffer
+	log := slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelWarn}))
+
+	reg, err := thread.NewRegistry(filepath.Join(t.TempDir(), "threads.jsonl"), time.Hour, 10)
+	if err != nil {
+		t.Fatalf("NewRegistry: %v", err)
+	}
+
+	// notifier is nil, exactly as serve.go passes it on the log-only (no model
+	// configured) startup path.
+	m := BuildThreadMention(cfg, reg, fakeThreadForge{}, nil, log)
+	if m != nil {
+		t.Fatal("must not wire the handler when no notifier was built at all")
+	}
+	out := buf.String()
+	if !strings.Contains(out, "no thread-capable notifier resolved") {
+		t.Fatalf("must fall back to the generic message when the cause is not a bot-token one; got: %s", out)
+	}
+}
+
+// TestBuildThreadMentionWiresWhenEverythingIsReachable is the success path:
+// forge reachable, bot-token delivery resolves, so the handler is wired and
+// the "enabled" line is logged.
+func TestBuildThreadMentionWiresWhenEverythingIsReachable(t *testing.T) {
+	t.Setenv("TEST_THREAD_BOT_TOKEN_OK", "xoxb-real")
+	cfg := &config.Config{}
+	cfg.Notify.Slack = config.SlackNotify{
+		BotTokenEnv: "TEST_THREAD_BOT_TOKEN_OK", Channel: "C1", SigningSecretEnv: "S", ThreadCapture: true,
+	}
+	var buf bytes.Buffer
+	log := slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelInfo}))
+
+	reg, err := thread.NewRegistry(filepath.Join(t.TempDir(), "threads.jsonl"), time.Hour, 10)
+	if err != nil {
+		t.Fatalf("NewRegistry: %v", err)
+	}
+	notifier, err := notify.BuildEnabled(notify.Deps{Cfg: cfg, Log: log})
+	if err != nil {
+		t.Fatalf("BuildEnabled: %v", err)
+	}
+
+	m := BuildThreadMention(cfg, reg, fakeThreadForge{}, notifier, log)
+	if m == nil {
+		t.Fatal("must wire the handler when forge, bot-token delivery and the notifier are all reachable")
+	}
+	if !strings.Contains(buf.String(), "slack thread capture enabled") {
+		t.Fatalf("must log that thread capture is enabled; got: %s", buf.String())
+	}
+}
+
+// TestBuildThreadMentionReportsMissingForge pins the unchanged forge==nil case.
+func TestBuildThreadMentionReportsMissingForge(t *testing.T) {
+	cfg := &config.Config{}
+	cfg.Notify.Slack.ThreadCapture = true
+	var buf bytes.Buffer
+	log := slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelWarn}))
+
+	m := BuildThreadMention(cfg, &thread.Registry{}, nil, nil, log)
+	if m != nil {
+		t.Fatal("must not wire the handler when no forge is configured")
+	}
+	if !strings.Contains(buf.String(), "no forge is configured") {
+		t.Fatalf("must name the missing forge; got: %s", buf.String())
 	}
 }

@@ -11,6 +11,8 @@ import (
 	"github.com/Smana/runlore/internal/config"
 	"github.com/Smana/runlore/internal/notify"
 	"github.com/Smana/runlore/internal/outcome"
+	"github.com/Smana/runlore/internal/providers"
+	"github.com/Smana/runlore/internal/ratelimit"
 	"github.com/Smana/runlore/internal/thread"
 )
 
@@ -67,6 +69,59 @@ func ThreadCaptureDeliverable(cfg *config.Config, log *slog.Logger) bool {
 		"no message is delivered, so no thread exists to capture knowledge in",
 		"bot_token_env", sl.BotTokenEnv, "channel", sl.Channel)
 	return false
+}
+
+// BuildThreadMention assembles the Slack thread-capture handler when
+// notify.slack.thread_capture can actually work end to end, or returns nil
+// (warning exactly once, naming the specific reason) when it cannot. Called
+// only with the option on and threadRegistry persisted — see serve.go.
+//
+// ThreadCaptureDeliverable is checked BEFORE asking notifier for a replier —
+// not after, as an earlier version of this wiring did. replier == nil is
+// ambiguous on its own: it is nil both when the bot-token env resolves empty
+// at runtime (the specific, actionable cause ThreadCaptureDeliverable
+// diagnoses and names) AND when no notifier was built at all (the log-only,
+// no-model path — see notifier's nil check below). Checking deliverability
+// first means the specific cause is reported whenever it is the true one,
+// instead of being masked every time by the generic "no thread-capable
+// notifier resolved" message — which is what happened before: by the time the
+// switch reached its replier check, replier != nil already implied a
+// *notify.SlackBot existed in Multi, which is only ever built when
+// SlackBotDelivery(sl) had already returned true, so ThreadCaptureDeliverable's
+// own "no bot-token delivery target resolved" warning could never fire in
+// production. This ordering is what makes it reachable.
+func BuildThreadMention(cfg *config.Config, threadRegistry *thread.Registry, forge thread.Forge, notifier *notify.Multi, log *slog.Logger) *thread.Mention {
+	if forge == nil {
+		log.Warn("slack thread_capture enabled but no forge is configured (forge.kb_repo / credentials); knowledge cannot be written")
+		return nil
+	}
+	if !ThreadCaptureDeliverable(cfg, log) {
+		return nil
+	}
+	// notifier is nil on the log-only path (no model configured); ThreadReplier
+	// is a pointer-receiver method that dereferences it, so a nil check here
+	// avoids a startup panic on that otherwise-valid configuration.
+	var replier providers.ThreadNotifier
+	if notifier != nil {
+		replier = notifier.ThreadReplier()
+	}
+	if replier == nil {
+		log.Warn("slack thread_capture enabled but no thread-capable notifier resolved; replies cannot be posted")
+		return nil
+	}
+	log.Info("slack thread capture enabled", "endpoint", "/slack/events")
+	return &thread.Mention{
+		Responder: &thread.Responder{
+			Forge:             forge,
+			Registry:          threadRegistry,
+			MaxNotesPerThread: thread.DefaultMaxNotesPerThread,
+			OpenPRs:           ratelimit.New(20, time.Hour),
+			Log:               log,
+		},
+		Registry: threadRegistry,
+		Replier:  replier,
+		Log:      log,
+	}
 }
 
 // SlackFeedbackDeliverable reports whether the opt-in 👍/👎 buttons can actually
