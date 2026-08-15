@@ -212,7 +212,7 @@ func TestBuildThreadMentionNamesTheBotTokenCause(t *testing.T) {
 		t.Fatalf("BuildEnabled: %v", err)
 	}
 
-	m := BuildThreadMention(cfg, reg, fakeThreadForge{}, notifier, log)
+	m := BuildThreadMention(cfg, reg, fakeThreadForge{}, notifier, nil, log)
 	if m != nil {
 		t.Fatal("must not wire the handler when the bot token cannot actually deliver")
 	}
@@ -246,7 +246,7 @@ func TestBuildThreadMentionStillReportsNoNotifierWhenNoneWasBuilt(t *testing.T) 
 
 	// notifier is nil, exactly as serve.go passes it on the log-only (no model
 	// configured) startup path.
-	m := BuildThreadMention(cfg, reg, fakeThreadForge{}, nil, log)
+	m := BuildThreadMention(cfg, reg, fakeThreadForge{}, nil, nil, log)
 	if m != nil {
 		t.Fatal("must not wire the handler when no notifier was built at all")
 	}
@@ -277,7 +277,7 @@ func TestBuildThreadMentionWiresWhenEverythingIsReachable(t *testing.T) {
 		t.Fatalf("BuildEnabled: %v", err)
 	}
 
-	m := BuildThreadMention(cfg, reg, fakeThreadForge{}, notifier, log)
+	m := BuildThreadMention(cfg, reg, fakeThreadForge{}, notifier, nil, log)
 	if m == nil {
 		t.Fatal("must wire the handler when forge, bot-token delivery and the notifier are all reachable")
 	}
@@ -293,7 +293,7 @@ func TestBuildThreadMentionReportsMissingForge(t *testing.T) {
 	var buf bytes.Buffer
 	log := slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelWarn}))
 
-	m := BuildThreadMention(cfg, &thread.Registry{}, nil, nil, log)
+	m := BuildThreadMention(cfg, &thread.Registry{}, nil, nil, nil, log)
 	if m != nil {
 		t.Fatal("must not wire the handler when no forge is configured")
 	}

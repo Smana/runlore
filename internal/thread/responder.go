@@ -10,8 +10,12 @@ import (
 	"strconv"
 	"time"
 
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/metric"
+
 	"github.com/Smana/runlore/internal/providers"
 	"github.com/Smana/runlore/internal/ratelimit"
+	"github.com/Smana/runlore/internal/telemetry"
 )
 
 // Forge is the write surface a thread note needs. It is a subset of
@@ -71,6 +75,14 @@ type Responder struct {
 	ForgeWrites *ratelimit.Window
 	Now         func() time.Time
 	Log         *slog.Logger
+	// Metrics is optional and nil-safe throughout — the same contract every
+	// other *telemetry.Metrics field in RunLore follows: nil means telemetry is
+	// not configured, and every call site guards it before use. Powers
+	// ThreadWritesThrottled and ThreadNotesWritten (see
+	// internal/telemetry/metrics.go), the counters that make this feature's
+	// throttling and write volume visible to an operator instead of only ever
+	// showing up in logs.
+	Metrics *telemetry.Metrics
 }
 
 // prNumberRe matches the numeric id in a GitHub pull URL or a GitLab merge-request
@@ -107,6 +119,17 @@ func (r *Responder) log() *slog.Logger {
 		return r.Log
 	}
 	return slog.Default()
+}
+
+// recordWrite increments ThreadNotesWritten for a write that just landed,
+// labelled by which route landed it ("comment" or "open_pr"). Nil-safe: a
+// no-op whenever Metrics is not wired, exactly like every other optional
+// *telemetry.Metrics use in RunLore.
+func (r *Responder) recordWrite(ctx context.Context, route string) {
+	if r.Metrics == nil {
+		return
+	}
+	r.Metrics.ThreadNotesWritten.Add(ctx, 1, metric.WithAttributes(attribute.String("route", route)))
 }
 
 func (r *Responder) maxNotes() int {
@@ -178,6 +201,15 @@ func (r *Responder) write(ctx context.Context, tc Context, author, text string, 
 	// about this placement — upstream of the route branch — needs to change to
 	// put it there.
 	if r.ForgeWrites != nil && !r.ForgeWrites.Allow() {
+		// This is the one global cap this feature has, so it must be visible to
+		// an operator: Warn (not Info) because a saturated write budget is an
+		// operational condition worth seeing, and the counter because a log line
+		// alone cannot be graphed, alerted on, or summed over a window the way
+		// MentionsDroppedOnSaturation already can be.
+		r.log().Warn("thread: global forge-write budget exhausted; throttling", "root", tc.Root, "author", author)
+		if r.Metrics != nil {
+			r.Metrics.ThreadWritesThrottled.Add(ctx, 1)
+		}
 		// A throttle is not a failure — no error — but nothing landed, so the
 		// caller must not charge the thread's note budget for it.
 		return "⚠️ I have made too many knowledge-base writes recently and paused. Try again shortly.", false, nil
@@ -222,6 +254,7 @@ func (r *Responder) write(ctx context.Context, tc Context, author, text string, 
 				fmt.Errorf("comment on PR %d: %w", n, err)
 		}
 		r.log().Info("thread: note recorded on KB PR", "pr", n, "root", tc.Root, "author", author, "intent", intent.String())
+		r.recordWrite(ctx, "comment")
 		return fmt.Sprintf("📝 Noted on the knowledge-base PR #%d — %s", n, url), true, nil
 	}
 
@@ -235,6 +268,7 @@ func (r *Responder) write(ctx context.Context, tc Context, author, text string, 
 			"root", tc.Root, "url", ref.URL, "err", uerr)
 	}
 	r.log().Info("thread: note opened a standalone KB PR", "url", ref.URL, "root", tc.Root, "author", author, "intent", intent.String())
+	r.recordWrite(ctx, "open_pr")
 	if n, ok := PRNumber(ref.URL); ok {
 		return fmt.Sprintf("📝 Opened knowledge-base PR #%d with your note — %s", n, ref.URL), true, nil
 	}

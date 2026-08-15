@@ -13,6 +13,7 @@ import (
 	"github.com/Smana/runlore/internal/outcome"
 	"github.com/Smana/runlore/internal/providers"
 	"github.com/Smana/runlore/internal/ratelimit"
+	"github.com/Smana/runlore/internal/telemetry"
 	"github.com/Smana/runlore/internal/thread"
 )
 
@@ -90,7 +91,11 @@ func ThreadCaptureDeliverable(cfg *config.Config, log *slog.Logger) bool {
 // SlackBotDelivery(sl) had already returned true, so ThreadCaptureDeliverable's
 // own "no bot-token delivery target resolved" warning could never fire in
 // production. This ordering is what makes it reachable.
-func BuildThreadMention(cfg *config.Config, threadRegistry *thread.Registry, forge thread.Forge, notifier *notify.Multi, log *slog.Logger) *thread.Mention {
+// metrics is always non-nil in production (bound to the global no-op provider
+// when telemetry is disabled — see serve.go) but the parameter itself stays
+// nil-safe: thread.Responder guards it before every use, same as every other
+// optional *telemetry.Metrics field in RunLore.
+func BuildThreadMention(cfg *config.Config, threadRegistry *thread.Registry, forge thread.Forge, notifier *notify.Multi, metrics *telemetry.Metrics, log *slog.Logger) *thread.Mention {
 	if forge == nil {
 		log.Warn("slack thread_capture enabled but no forge is configured (forge.kb_repo / credentials); knowledge cannot be written")
 		return nil
@@ -116,6 +121,7 @@ func BuildThreadMention(cfg *config.Config, threadRegistry *thread.Registry, for
 			Registry:          threadRegistry,
 			MaxNotesPerThread: thread.DefaultMaxNotesPerThread,
 			ForgeWrites:       ratelimit.New(20, time.Hour),
+			Metrics:           metrics,
 			Log:               log,
 		},
 		Registry: threadRegistry,

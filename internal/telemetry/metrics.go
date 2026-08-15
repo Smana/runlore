@@ -29,6 +29,8 @@ type Metrics struct {
 	IncidentsDebounced          metric.Int64Counter // firing alerts dropped as self-resolving (resolved within the incident debounce window)
 	IncidentsDroppedOnShutdown  metric.Int64Counter // firing alerts LOST: still held in the debounce window when the process shut down (accepted, never investigated)
 	MentionsDroppedOnSaturation metric.Int64Counter // slack mentions LOST: the concurrent handler pool was saturated when the human's note arrived (accepted, acked, never processed)
+	ThreadNotesWritten          metric.Int64Counter // knowledge writes LANDED via internal/thread's @runlore note: path — CommentOnPR or OpenPR (label: route)
+	ThreadWritesThrottled       metric.Int64Counter // thread note writes DENIED by internal/thread's global per-hour forge-write window (Responder.ForgeWrites) and told to retry — this feature's one global cap, otherwise invisible to an operator
 	ToolOutputTruncatedBytes    metric.Int64Counter
 	HistoryCompactions          metric.Int64Counter // mid-loop history compaction events
 	HistoryElidedBytes          metric.Int64Counter // tool-output bytes elided by compaction
@@ -108,6 +110,8 @@ func NewMetrics() *Metrics {
 		IncidentsDebounced:          ctr("incidents_debounced_total", "firing alerts dropped as self-resolving: a matching resolved webhook arrived within the incident debounce window before investigating"),
 		IncidentsDroppedOnShutdown:  ctr("incidents_dropped_on_shutdown_total", "firing alerts LOST: still held in the incident debounce window when the process shut down — accepted (200 to Alertmanager) but never investigated, and not retried until Alertmanager's repeat_interval"),
 		MentionsDroppedOnSaturation: ctr("mentions_dropped_on_saturation_total", "slack mentions LOST: the concurrent handler pool was saturated when the human's `@runlore note:` arrived — accepted (200 to Slack) and acked, but never processed; the human is told to retry via a best-effort in-thread reply"),
+		ThreadNotesWritten:          ctr("thread_notes_written_total", "knowledge writes landed from an `@runlore note:` thread reply, via CommentOnPR or OpenPR (label: route)"),
+		ThreadWritesThrottled:       ctr("thread_writes_throttled_total", "thread note writes denied by internal/thread's global per-hour forge-write window and told to retry"),
 		ToolOutputTruncatedBytes:    ctr("tool_output_truncated_bytes_total", "bytes elided by output truncation"),
 		HistoryCompactions:          ctr("history_compactions_total", "mid-loop tool-output history compaction events"),
 		HistoryElidedBytes:          ctr("history_elided_bytes_total", "tool-output bytes elided by mid-loop compaction"),

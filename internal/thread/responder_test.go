@@ -3,6 +3,7 @@
 package thread
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"io"
@@ -12,9 +13,51 @@ import (
 	"testing"
 	"time"
 
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/metric/noop"
+	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
+	"go.opentelemetry.io/otel/sdk/metric/metricdata"
+
 	"github.com/Smana/runlore/internal/providers"
 	"github.com/Smana/runlore/internal/ratelimit"
+	"github.com/Smana/runlore/internal/telemetry"
 )
+
+// meteredInstruments installs a REAL SDK meter provider backed by a manual
+// reader and returns the instrument set bound to it, plus a reader that sums
+// an int64 counter by its exported series name (0, false when the series was
+// never recorded). The provider is global, so a test using this must not run
+// in parallel with another that does; the cleanup restores the no-op
+// provider. Mirrors internal/server/events_test.go's helper of the same name.
+func meteredInstruments(t *testing.T) (*telemetry.Metrics, func(series string) (int64, bool)) {
+	t.Helper()
+	reader := sdkmetric.NewManualReader()
+	otel.SetMeterProvider(sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader)))
+	t.Cleanup(func() { otel.SetMeterProvider(noop.NewMeterProvider()) })
+	return telemetry.NewMetrics(), func(series string) (int64, bool) {
+		var rm metricdata.ResourceMetrics
+		if err := reader.Collect(context.Background(), &rm); err != nil {
+			t.Fatalf("collect metrics: %v", err)
+		}
+		for _, sm := range rm.ScopeMetrics {
+			for _, md := range sm.Metrics {
+				if md.Name != series {
+					continue
+				}
+				sum, ok := md.Data.(metricdata.Sum[int64])
+				if !ok {
+					t.Fatalf("series %q is not an int64 sum (%T)", series, md.Data)
+				}
+				var total int64
+				for _, dp := range sum.DataPoints {
+					total += dp.Value
+				}
+				return total, true
+			}
+		}
+		return 0, false
+	}
+}
 
 type fakeForge struct {
 	comments []struct {
@@ -717,5 +760,92 @@ func TestHandlePrefersCuratedURLOverNoteURL(t *testing.T) {
 	}
 	if len(f.opened) != 0 {
 		t.Errorf("must not open a PR when CuratedURL is already linked; opened %d", len(f.opened))
+	}
+}
+
+// TestHandleThrottlePathLogsAndIncrementsCounter pins the fix for the defect
+// where a global-window throttle returned a reply string with no log line and
+// no metric: an operator had no way to tell the feature was throttling at
+// all. The throttle must now log at a level an operator will see AND
+// increment ThreadWritesThrottled.
+func TestHandleThrottlePathLogsAndIncrementsCounter(t *testing.T) {
+	var logBuf bytes.Buffer
+	f := &fakeForge{}
+	r := newTestResponder(t, f)
+	r.ForgeWrites = ratelimit.New(1, time.Hour)
+	r.ForgeWrites.Allow() // spend the one slot in the budget so the write below is denied
+	r.Log = slog.New(slog.NewTextHandler(&logBuf, &slog.HandlerOptions{Level: slog.LevelWarn}))
+	m, read := meteredInstruments(t)
+	r.Metrics = m
+
+	tc := Context{Root: "a", CuratedURL: "https://github.com/o/r/pull/42"}
+	if err := r.Registry.Put(tc); err != nil {
+		t.Fatalf("Put: %v", err)
+	}
+	if _, err := r.Handle(context.Background(), tc, "alice", "note: x"); err != nil {
+		t.Fatalf("Handle: %v", err)
+	}
+
+	if !strings.Contains(logBuf.String(), "thread") {
+		t.Errorf("the throttle must log at a level an operator will see; log = %q", logBuf.String())
+	}
+	got, ok := read("runlore_thread_writes_throttled_total")
+	if !ok || got != 1 {
+		t.Errorf("runlore_thread_writes_throttled_total = %d (ok=%v), want 1", got, ok)
+	}
+}
+
+// TestHandleThrottlePathWithNilMetricsDoesNotPanic proves the counter is
+// nil-safe: a Responder with no Metrics wired (the common case whenever
+// telemetry is not configured) must not panic on the throttle path.
+func TestHandleThrottlePathWithNilMetricsDoesNotPanic(t *testing.T) {
+	f := &fakeForge{}
+	r := newTestResponder(t, f)
+	r.ForgeWrites = ratelimit.New(1, time.Hour)
+	r.ForgeWrites.Allow() // spend the one slot in the budget so the write below is denied
+	r.Metrics = nil
+
+	tc := Context{Root: "a", CuratedURL: "https://github.com/o/r/pull/42"}
+	if err := r.Registry.Put(tc); err != nil {
+		t.Fatalf("Put: %v", err)
+	}
+	reply, err := r.Handle(context.Background(), tc, "alice", "note: x") // must not panic
+	if err != nil {
+		t.Fatalf("Handle: %v", err)
+	}
+	if !strings.Contains(strings.ToLower(reply), "paused") {
+		t.Fatalf("test setup did not actually reach the throttle path: reply = %q", reply)
+	}
+}
+
+// TestHandleSuccessfulWritesIncrementCounterByRoute pins the sibling fix: the
+// audit noted notes-written was slog.Info only, with no metric, so an
+// operator could see throttling but not volume. Both landing routes must
+// increment ThreadNotesWritten, distinguished by the route label.
+func TestHandleSuccessfulWritesIncrementCounterByRoute(t *testing.T) {
+	f := &fakeForge{}
+	r := newTestResponder(t, f)
+	m, read := meteredInstruments(t)
+	r.Metrics = m
+
+	commentTC := Context{Root: "a", CuratedURL: "https://github.com/o/r/pull/42"}
+	if err := r.Registry.Put(commentTC); err != nil {
+		t.Fatalf("Put: %v", err)
+	}
+	if _, err := r.Handle(context.Background(), commentTC, "alice", "note: via comment"); err != nil {
+		t.Fatalf("Handle: %v", err)
+	}
+
+	openTC := Context{Root: "b"}
+	if err := r.Registry.Put(openTC); err != nil {
+		t.Fatalf("Put: %v", err)
+	}
+	if _, err := r.Handle(context.Background(), openTC, "bob", "note: via open pr"); err != nil {
+		t.Fatalf("Handle: %v", err)
+	}
+
+	got, ok := read("runlore_thread_notes_written_total")
+	if !ok || got != 2 {
+		t.Errorf("runlore_thread_notes_written_total = %d (ok=%v), want 2 (one per landed route)", got, ok)
 	}
 }
