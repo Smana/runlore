@@ -68,8 +68,8 @@ estimate) keep the SDK defaults and are read as heatmaps, not percentiles.
 |---|---|---|---|
 | `runlore_tool_calls_total` | counter | `tool`, `result` | investigation tool calls (`ok`/`error`) |
 | `runlore_tool_call_duration_seconds` | histogram | `tool` | per-tool latency |
-| `runlore_model_requests_total` | counter | `provider`, `result` | LLM completion requests (`ok`/`error`) |
-| `runlore_model_request_duration_seconds` | histogram | `provider` | LLM completion latency |
+| `runlore_model_requests_total` | counter | `provider`, `result` | LLM requests (`ok`/`error`). `provider` is the wire protocol for the main model, plus the synthetic tiers `rerank` (instant recall's LLM reranker) and `embed` (the `/embeddings` endpoint on the hybrid-recall path) |
+| `runlore_model_request_duration_seconds` | histogram | `provider` | LLM request latency, same `provider` vocabulary |
 | `runlore_investigation_tokens_estimated` | histogram | — | per-investigation token estimate (pre-request `chars/4` heuristic, investigation loop only — excludes the adversarial verify phase). This is what the `RunloreInvestigationCostHigh` alert watches |
 | `runlore_investigation_model_calls` | histogram | `result` | model completions per investigation (loop + verify) |
 | `runlore_investigation_input_tokens` | histogram | `result` | provider-reported input tokens per investigation, including cached (loop + verify) |

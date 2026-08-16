@@ -220,6 +220,18 @@ incident webhook. Known keys: `alertmanager`, `gitops`, `pagerduty`, `custom`.
   does not bill a class separately, set that rate equal to the one it shares (e.g.
   `cached_input_usd_per_mtok: <your input rate>`) — the corresponding token count is then always 0, so
   it costs nothing and the warning goes quiet.
+
+  **What these ceilings do *not* cover.** Both bound ONE investigation. Stated plainly, because a
+  limit whose scope is assumed is a limit that surprises someone:
+
+  | Outside the ceilings | Why, and what does bound it |
+  |---|---|
+  | Anything above one investigation | There is no daily, monthly or global budget. Total exposure is `investigation.rate_limit.max_per_window` (default 30 starts/hour) × the per-investigation ceiling — a product of two knobs, not a budget |
+  | The `/embeddings` endpoint | On the hybrid-recall path (`catalog.instant_recall.hybrid` + `model.embeddings`) it is called once per recall query — **inside** an investigation — and in bulk on every catalog reload. Its tokens are not in the investigation's totals and it is not gated by either ceiling. It IS visible: `runlore_model_requests_total{provider="embed"}` and `runlore_model_input_tokens_total{provider="embed"}` |
+  | The adversarial verify pass's own cost | It runs after the last budget check, unconditionally, because verify is the honesty guarantee. A successful run can therefore deliver a `CostUSD` slightly above `max_cost_per_investigation` with no trip recorded |
+  | `lore eval` | Builds its investigators with no ceilings and no pricing at all. Bounded only by the step budget |
+  | CLI-only model calls | `lore validate --semantic`, `lore kb import --model`, and the eval judge each make completions outside any investigation. None runs under `serve` |
+  | Non-model spend | Cloud API calls, git clones, metrics and logs queries are unpriced everywhere |
 - `compaction` — how mid-loop history compaction treats the older tool outputs it elides once the
   estimate crosses the compaction target (0.7× `max_tokens_per_investigation`). **`elide`** (default)
   drops their bodies for short markers (lossy). **`summarize`** first asks a model for **one** compact

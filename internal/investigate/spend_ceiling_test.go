@@ -196,8 +196,11 @@ func TestCostCeilingIsInertWithoutPricing(t *testing.T) {
 	}
 }
 
-// TestCompactionDigestCountsTowardTheRunningTotal closes the last model call that was
-// spending outside the per-investigation accounting.
+// TestCompactionDigestCountsTowardTheRunningTotal closes the last COMPLETION inside
+// the investigation loop that was spending outside the per-investigation accounting.
+// Not the last spend path overall: the /embeddings call on the hybrid-recall query
+// path also runs inside an investigation and is still uncounted (instrumented, not
+// bounded — see internal/embed and the inventory in docs/configuration).
 //
 // Under `compaction: summarize` the loop pays for an extra completion on every
 // compaction event: a digest of the batch it just elided. Its tokens reached
