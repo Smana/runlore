@@ -112,21 +112,43 @@ incident webhook. Known keys: `alertmanager`, `gitops`, `pagerduty`, `custom`.
   on the trigger** (the feedback re-arm, see [learning-loop]({{< relref "learning-loop.md" >}}) — batched on the
   normal `debounce`, so a contested storm still collapses to one re-investigation). Suppressions log
   an INFO line and count in `runlore_alerts_suppressed_total`.
+
+  **Batching *sibling* alerts takes both knobs.** Two alerts describing one physical event —
+  `KubeNodeNotReady` and `KubeNodeUnreachable` on the same node, or the pod and deployment alerts for
+  one crash-looping workload — only merge if you set **both** of these:
+
+  1. **`correlation_labels`.** Without them the key is the Alertmanager `groupKey`, and a typical
+     `group_by` includes `alertname` — so siblings never share a key however long you wait. Group by
+     what the alerts have in common instead (e.g. `[node]`, or `[namespace, pod]`).
+  2. **A `debounce` wider than the gap between them — and a `max_wait` above that.** A batch flushes
+     when it has been quiet for `debounce` **or** older than `max_wait`, whichever comes first. With
+     the default `debounce: 30s` a lone alert flushes ~30s after it arrives, so **raising `max_wait`
+     on its own cannot batch anything**. Siblings 2 minutes apart need `debounce` above 2m — and then
+     `max_wait` must be raised past it too, or the default `max_wait: 2m` flushes the batch before the
+     wider `debounce` ever applies. Both knobs move together, and the latency is paid on **every**
+     alert, so widen them deliberately.
+
+  Flush decisions are made on a sweep tick of `debounce / 2`, so both deadlines are approximate — a
+  batch flushes up to half a `debounce` after the deadline it crossed.
 - `rate_limit` — `max_per_window` (**default 30**; an explicit **0 = unlimited**), `window` (default **1h**),
   `max_requeues`.
 - `recurrence_cooldown` — **opt-in (default 0 = off)** per-trigger suppression: skip re-investigating a
-  trigger whose previous investigation completed less than this long ago, **concluded** (verdict ≠
-  `inconclusive`), and has **no standing 👎 feedback**. Without it, nothing keys on the trigger before
+  trigger that was **looked at** less than this long ago and for which **an answer stands** — some
+  prior investigation of it reached a conclusion (verdict ≠ `inconclusive`), **not necessarily the most
+  recent one** — with **no standing 👎 feedback**. Without it, nothing keys on the trigger before
   the paid loop: a still-firing alert re-investigates on every Alertmanager `repeat_interval` and a
   persistently-failing GitOps resource on every informer resync (**~10 minutes**) — each a full model
   run re-delivering the same answer as fresh noise. A suppressed occurrence costs nothing and says
   nothing (no model call, no notification, no ledger open — the previous notification remains *the*
   answer); the next occurrence past the cooldown re-investigates in full. Two human-deferential
-  escape hatches: an inconclusive prior never suppresses (there is no answer worth repeating), and a
+  escape hatches: a trigger that has **never** concluded is re-investigated on every firing however
+  often it fires (there is no answer to stand on, and silence would leave you with nothing), and a
   👎 on the previous message re-arms investigation immediately (see
   [`notify.slack.feedback_buttons`](#notify--where-findings-go)). Requires `outcome.ledger_path`
   (fails loud at startup without it). A sensible production value is `30m`–`1h`. Suppressions show up
-  as `runlore_investigations_completed_total{result="recurrence_suppressed"}`.
+  as `runlore_investigations_completed_total{result="recurrence_suppressed"}`; the one bypass worth
+  watching — fired again inside its cooldown, but nothing conclusive to stand on — logs an INFO line
+  naming the trigger.
 - `timeout` — per-investigation deadline, **default 10m** (bounds a hung tool/clone so it can't starve
   the single-worker queue).
 - `tool_timeout` — per-**tool**-call timeout, **default 60s** (0 = use the default). Bounds a single
@@ -404,7 +426,7 @@ user)**, latest wins — duplicate clicks are idempotent and changing your mind 
 is an ephemeral "feedback recorded" note visible only to the clicker; the investigation message is
 never modified. With the option off (the default), no buttons render and the endpoint behaves exactly
 as before (404 unless approve mode wired it). Exposure hardening and the vote trust model are
-detailed in [security-model.md]({{< relref "security-model.md#the-feedback-channels--exposure--trust-model" >}}).
+detailed in [security-model.md]({{< relref "security-model.md#the-feedback-channels---exposure--trust-model" >}}).
 
 **Matrix 👍/👎 — `matrix.feedback_reactions` (opt-in, default `false`).** The same feedback loop over
 Matrix **reactions**: react 👍/👎 to a RunLore investigation message and the rating lands in the
@@ -416,7 +438,7 @@ before startup, ignores every emoji except 👍/👎, and only counts votes on m
 sent** (attribution is anchored on `/whoami`; a member-crafted message carrying the trigger field
 attributes nothing). Startup fails loud unless `homeserver`/`room_id`/`access_token_env` and
 `outcome.ledger_path` are set. Use an **invite-only room** — any room member can vote (see
-[security-model.md]({{< relref "security-model.md#the-feedback-channels--exposure--trust-model" >}})).
+[security-model.md]({{< relref "security-model.md#the-feedback-channels---exposure--trust-model" >}})).
 
 **🧵 Thread capture — `thread_capture` (opt-in, default `false`).** When enabled, replying inside a
 Slack investigation thread with `@runlore note: <text>` writes what you know back into the knowledge

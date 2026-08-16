@@ -22,6 +22,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/Smana/runlore/internal/providers"
 )
 
 // Fingerprint prefixes for incidents RunLore assigns a synthetic id to because the
@@ -188,6 +190,13 @@ type Ledger struct {
 	// compaction does not lose it.
 	staleResolves int
 
+	// resolvesSeen counts every resolve event this ledger has ever folded, paired or
+	// not. It is not a statistic — it is the PROOF that a ground-truth resolve channel
+	// exists at all, which resolve-based decay is meaningless without (see
+	// ResolveChannelLive). Deliberately incremented before any pairing decision: a
+	// resolve that buffers, or is dropped as stale, still proves the channel works.
+	resolvesSeen int
+
 	// maxEvents bounds the JSONL before loadLocked compacts it (0 disables). corruptLines
 	// records how many lines the last load could not parse (so the skip is observable, not
 	// silent). log carries a logger for those warnings; never nil after New.
@@ -219,6 +228,11 @@ type checkpointData struct {
 	TriggerConfirms map[string]int               `json:"trigger_confirms,omitempty"`
 	DroppedResolves int                          `json:"dropped_resolves,omitempty"`
 	StaleResolves   int                          `json:"stale_resolves,omitempty"`
+	// ResolvesSeen carries the resolve-channel liveness proof across compaction. Absent
+	// from a checkpoint written before this field existed; a replay then reconstructs it
+	// from the retained tail only, which degrades to "channel not proven" — conservative
+	// (decay is withheld), never the reverse.
+	ResolvesSeen int `json:"resolves_seen,omitempty"`
 }
 
 type triggerAggJSON struct {
@@ -227,6 +241,17 @@ type triggerAggJSON struct {
 	CuratedURL string    `json:"curated_url,omitempty"`
 	Entry      string    `json:"entry,omitempty"`
 	Verdict    string    `json:"verdict,omitempty"`
+	// Conclusive mirrors triggerAgg.conclusive. omitzero (not omitempty, which does
+	// not apply to structs) keeps it out of the file when the trigger has never
+	// concluded. Absent from a checkpoint written before #471; a replay then
+	// reconstructs it from the retained tail only, which degrades to today's
+	// behaviour (no standing answer ⇒ no suppression) rather than inventing one.
+	//
+	// The classification is made at fold time, so a checkpoint freezes the definition
+	// of "conclusive" in force when it was written. That is recoverable rather than
+	// lossy: the raw verdict travels with it, so Concluded re-checks it on every read
+	// and a future migration can re-derive whatever it needs.
+	Conclusive ConclusivePrior `json:"conclusive,omitzero"`
 }
 
 type feedbackVoteJSON struct {
@@ -246,7 +271,12 @@ type triggerAgg struct {
 	last       time.Time
 	curatedURL string // CuratedURL of the newest open
 	entry      string // Entry of the newest open ("" for fresh) — feedback attribution target
-	verdict    string // Verdict of the newest open — the suppression gate's "conclusive?" input
+	verdict    string // Verdict of the newest open (may be inconclusive/"")
+	// conclusive is the newest open whose verdict was an ANSWER, folded separately
+	// from the newest open so a single inconclusive run cannot erase the answer
+	// standing behind it — the distinction the suppression gate turns on (#471).
+	// Zero value when this trigger has never concluded.
+	conclusive ConclusivePrior
 }
 
 // feedbackVote is the fold state of one (TriggerKey, user) feedback: the rating
@@ -385,6 +415,7 @@ func (l *Ledger) resetStateLocked() {
 	l.triggerConfirms = map[string]int{}
 	l.droppedResolves = 0
 	l.staleResolves = 0
+	l.resolvesSeen = 0
 }
 
 // foldLocked folds one replayed event into the derived state. Open/resolve maintain the
@@ -432,7 +463,8 @@ func (l *Ledger) seedCheckpointLocked(cd *checkpointData) {
 		l.open[fp] = ev
 	}
 	for k, v := range cd.ByTrigger {
-		l.byTrigger[k] = triggerAgg{count: v.Count, last: v.Last, curatedURL: v.CuratedURL, entry: v.Entry, verdict: v.Verdict}
+		l.byTrigger[k] = triggerAgg{count: v.Count, last: v.Last, curatedURL: v.CuratedURL,
+			entry: v.Entry, verdict: v.Verdict, conclusive: v.Conclusive}
 	}
 	for k, v := range cd.Votes {
 		l.votes[k] = feedbackVote{rating: v.Rating, entry: v.Entry}
@@ -449,6 +481,7 @@ func (l *Ledger) seedCheckpointLocked(cd *checkpointData) {
 	}
 	l.droppedResolves += cd.DroppedResolves
 	l.staleResolves += cd.StaleResolves
+	l.resolvesSeen += cd.ResolvesSeen
 }
 
 // compactLocked rewrites the ledger file as [checkpoint][recent tail]: it folds the
@@ -487,11 +520,13 @@ func (l *Ledger) snapshotCheckpointLocked() *checkpointData {
 		PendingResolves: l.pendingResolves,
 		DroppedResolves: l.droppedResolves,
 		StaleResolves:   l.staleResolves,
+		ResolvesSeen:    l.resolvesSeen,
 	}
 	if len(l.byTrigger) > 0 {
 		cd.ByTrigger = make(map[string]triggerAggJSON, len(l.byTrigger))
 		for k, v := range l.byTrigger {
-			cd.ByTrigger[k] = triggerAggJSON{Count: v.count, Last: v.last, CuratedURL: v.curatedURL, Entry: v.entry, Verdict: v.verdict}
+			cd.ByTrigger[k] = triggerAggJSON{Count: v.count, Last: v.last, CuratedURL: v.curatedURL,
+				Entry: v.entry, Verdict: v.verdict, Conclusive: v.conclusive}
 		}
 	}
 	if len(l.votes) > 0 {
@@ -653,6 +688,10 @@ func (l *Ledger) applyOpenLocked(e Event) {
 // if it was a counted recall, credit its resolution; with no pending open, buffer
 // the resolve for a later open. Must be called with mu held (or during New).
 func (l *Ledger) applyResolveLocked(fp string, at time.Time) {
+	// Channel-liveness proof, recorded before any pairing decision: whether this
+	// resolve pairs, buffers, or is discarded says nothing about whether the SENDER
+	// emits resolves, and that is the only question ResolveChannelLive answers.
+	l.resolvesSeen++
 	stack := l.pendingOpens[fp]
 	if len(stack) == 0 {
 		// No pending open yet — buffer this resolve for a later open (resolve-before-open).
@@ -808,6 +847,14 @@ func (l *Ledger) applyTriggerLocked(e Event) {
 		a.entry = e.Entry
 		a.verdict = e.Verdict
 	}
+	// The conclusive prior advances on its own clock and is never CLEARED by a later
+	// inconclusive open: the standing answer for a trigger outlives a run that failed
+	// to reach one. Guarded on its own timestamp so an overlapping investigation
+	// completing out of order (opens are stamped at completion) cannot rewind it to an
+	// older answer.
+	if providers.Verdict(e.Verdict).Conclusive() && !e.At.Before(a.conclusive.At) {
+		a.conclusive = ConclusivePrior{At: e.At, Verdict: e.Verdict, Title: e.Title, CuratedURL: e.CuratedURL}
+	}
 	l.byTrigger[e.TriggerKey] = a
 }
 
@@ -821,24 +868,54 @@ func (l *Ledger) Occurrences(triggerKey string) (int, time.Time, string) {
 	return r.Count, r.Last, r.CuratedURL
 }
 
-// TriggerRecurrence is the per-TriggerKey snapshot the pre-investigation
-// suppression gate reads: how many investigations this trigger has had, when the
-// last one was and what it concluded, its KB link, and how many humans currently
-// contest that conclusion.
+// TriggerRecurrence is the per-TriggerKey snapshot read once before each
+// investigation: how many investigations this trigger has had, when the last one was
+// and what it concluded, its KB link, how many humans currently contest that
+// conclusion, and — separately from the latest run — the standing answer, if any.
 type TriggerRecurrence struct {
 	Count        int
 	Last         time.Time
 	Verdict      string // newest open's verdict ("" for pre-verdict events)
 	CuratedURL   string
 	FeedbackDown int // LIVE 👎 votes for this trigger, after per-user dedup
+	// Conclusive is the newest prior that actually ANSWERED — not necessarily the
+	// newest one. Zero value when this trigger has never concluded.
+	Conclusive ConclusivePrior
+}
+
+// ConclusivePrior is the newest investigation of a trigger whose verdict was an
+// answer (see providers.Verdict.Conclusive): when it landed, what it concluded, its
+// one-line diagnosis and its KB link. It is tracked apart from the newest open
+// because those are different questions — "when did we last look?" versus "do we
+// have an answer worth not repeating?" — and conflating them is what let a single
+// inconclusive run erase an arbitrarily long history of conclusive ones (#471).
+type ConclusivePrior struct {
+	At         time.Time `json:"at"`
+	Verdict    string    `json:"verdict"`
+	Title      string    `json:"title,omitempty"`
+	CuratedURL string    `json:"curated_url,omitempty"`
 }
 
 // Contested reports whether the trigger carries standing 👎 feedback — the ONE
-// definition of "a human contests this diagnosis" shared by every suppression
-// layer that must yield to it (the recurrence gate and the coalescer's cooldown,
-// #288). Layers consulting different notions of contested-ness is exactly the
-// divergence that issue was about; add nuance here, not at the call sites.
+// definition of "a human contests this diagnosis" shared by every layer that must
+// yield to it (#288): investigation suppression, the coalescer's cooldown, and
+// whether a prior conclusion may be replayed into the prompt. Layers consulting
+// different notions of contested-ness is exactly the divergence that issue was
+// about; add nuance here, not at the call sites.
 func (r TriggerRecurrence) Contested() bool { return r.FeedbackDown > 0 }
+
+// Concluded reports whether an ANSWER stands for this trigger — some prior
+// investigation reached a conclusive verdict, whether or not the most recent one
+// did. The suppression gate's eligibility test: without this, an answer is only
+// ever as durable as the last run that happened to land on it.
+//
+// It re-checks the stored verdict through the same predicate that folded it rather
+// than trusting a non-empty string, so a checkpoint written under an older
+// definition of "conclusive" (see triggerAggJSON.Conclusive) cannot make a verdict
+// stand that today's definition rejects.
+func (r TriggerRecurrence) Concluded() bool {
+	return providers.Verdict(r.Conclusive.Verdict).Conclusive()
+}
 
 // Recurrence returns the trigger's recurrence snapshot. FeedbackDown counts the
 // votes map's current "down" entries for the key — O(live votes), which stays
@@ -851,7 +928,7 @@ func (l *Ledger) Recurrence(triggerKey string) TriggerRecurrence {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	a := l.byTrigger[triggerKey]
-	tr := TriggerRecurrence{Count: a.count, Last: a.last, Verdict: a.verdict, CuratedURL: a.curatedURL}
+	tr := TriggerRecurrence{Count: a.count, Last: a.last, Verdict: a.verdict, CuratedURL: a.curatedURL, Conclusive: a.conclusive}
 	prefix := triggerKey + "\x00"
 	for k, v := range l.votes {
 		if v.rating == "down" && strings.HasPrefix(k, prefix) {
@@ -1004,6 +1081,18 @@ type Aggregate struct {
 // confirmation — with k=2 and floor 0.5, one 👎 needs TWO confirmations to recover.
 const confirmWeight = 0.5
 
+// HasEvidence reports whether the aggregate holds any ground-truth OUTCOME —
+// a paired resolve, a human vote, or a machine confirmation.
+//
+// Recalls is deliberately excluded: it is the count of times the entry was USED,
+// which is the trial count, not an outcome. An aggregate with recalls and nothing
+// else says only "we answered N times and heard nothing back". Whether that silence
+// means failure depends entirely on whether a resolve could have arrived — see
+// Ledger.ResolveChannelLive, the other half of this decision.
+func (a Aggregate) HasEvidence() bool {
+	return a.Resolved > 0 || a.FeedbackUp > 0 || a.FeedbackDown > 0 || a.Confirms > 0
+}
+
 // Factor is the entry's outcome-decay factor: the posterior mean of a symmetric
 // Beta(k/2, k/2) prior over the success rate, folding resolves, human votes, and
 // machine confirmations into one trust signal:
@@ -1025,6 +1114,44 @@ func (a Aggregate) Factor(k float64) float64 {
 	return (float64(a.Resolved+a.FeedbackUp) + c + k/2) / (float64(a.Recalls+a.FeedbackUp+a.FeedbackDown) + c + k)
 }
 
+// ResolveChannelLive reports whether a ground-truth resolve signal can actually
+// reach this ledger — true once ANY resolve event has ever been folded.
+//
+// Resolve-based decay assumes silence after a recall is evidence of failure. That
+// only holds when a resolve COULD have arrived. Two deployments make it false:
+// Alertmanager configured with `send_resolved: false`, and any source whose
+// notifications simply never carry a resolve. In both, every recall increments
+// Recalls with a Resolved that can never follow, so the Beta posterior collapses:
+// with the default k=2, ONE recall takes a correct entry to (0+1)/(1+2)=0.333,
+// below the 0.5 floor, and instant recall is disabled for that entry forever.
+// Measured live on a shared cluster in 2026-08: exactly one recall had ever fired
+// and the same alert was then re-investigated from scratch three times in 12h.
+//
+// docs/learning-loop.md already promises this case is excluded ("sources with no
+// resolve channel … are deliberately excluded from resolve-based decay"), but the
+// only signal the open path had was outcome.Derived(fingerprint) — which detects a
+// SYNTHETIC fingerprint (GitOps, reinvestigate) and cannot see the sender's
+// Alertmanager config. This closes that gap empirically instead: a channel that has
+// never delivered a single resolve is not a channel.
+//
+// Why liveness is read at GATE time and never at fold time: the cached aggregate is
+// contractually "equal to a fresh full replay for any event sequence". Skipping the
+// Recalls++ while the channel looked dead would make that false — a resolve arriving
+// later would leave earlier opens uncounted live, yet counted after a restart replays
+// the file with the proof already in hand. Counting stays unconditional; only the
+// interpretation of the counts is conditioned.
+//
+// Conservative in every failure mode: unknown ⇒ withhold decay ⇒ an entry keeps
+// firing. A nil ledger reports false.
+func (l *Ledger) ResolveChannelLive() bool {
+	if l == nil {
+		return false
+	}
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.resolvesSeen > 0
+}
+
 // OpenCounts rolls recall episodes up per catalog entry (fresh investigations
 // carry no entry). It is the input to recall decay: resolve-rate ≈
 // (Resolved+k)/(Recalls+k), and runs on the recall hot path once per incident
@@ -1036,6 +1163,10 @@ func (a Aggregate) Factor(k float64) float64 {
 // Episodes() replay may diverge.
 // A disabled/empty ledger yields an empty (non-nil) map. The returned map is a
 // fresh copy the caller may freely mutate.
+//
+// The counts alone do not decide decay: an unresolved recall is evidence of failure
+// only where a resolve could have arrived, so the gate reads ResolveChannelLive
+// alongside them.
 //
 // Behaviour note: because the read moved to New/Reload, OpenCounts no longer performs
 // file I/O and so can no longer return a read error — any error reading the ledger

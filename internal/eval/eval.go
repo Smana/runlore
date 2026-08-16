@@ -19,6 +19,13 @@ import (
 type Runner struct {
 	Model providers.ModelProvider
 	Log   *slog.Logger
+	// OnCaseDone, when set, is called after each case finishes its n repeats, in
+	// case order. RunN is sequential and holds every result until the whole campaign
+	// ends, so without this a nightly run emits nothing for its entire duration —
+	// which left an eval that was being killed at the 20-minute mark looking
+	// indistinguishable from one that was merely slow. Progress only; the campaign
+	// value is unaffected.
+	OnCaseDone func(done, total int, a CaseAggregate)
 }
 
 // Run-error notes: the two Result.Missing entries that mean a repeat never produced
@@ -293,7 +300,11 @@ func (r *Runner) RunN(ctx context.Context, cases []Case, n int) Campaign {
 	}
 	camp := Campaign{N: n}
 	for _, c := range cases {
-		camp.Aggregates = append(camp.Aggregates, r.aggregateCase(ctx, c, n))
+		a := r.aggregateCase(ctx, c, n)
+		camp.Aggregates = append(camp.Aggregates, a)
+		if r.OnCaseDone != nil {
+			r.OnCaseDone(len(camp.Aggregates), len(cases), a)
+		}
 	}
 	return camp
 }

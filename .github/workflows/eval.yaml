@@ -8,6 +8,22 @@
 # but the skip is LOUD: a `::warning::` annotation (surfaced in the Actions
 # run summary / checks UI) plus a $GITHUB_STEP_SUMMARY line, so a run with no
 # key configured can never be mistaken for a real green eval.
+#
+# The same honesty requirement applies to a run that OVERRUNS, and used not to hold.
+# The eval is ~30 live LLM investigations run sequentially (6 cases x -n 5), so it is
+# slow and its duration drifts with the suite, the provider, and how often recall
+# falls through to a full investigation. Every nightly run from 2026-08-07 to
+# 2026-08-14 hit the old 20-minute JOB ceiling mid-run: `lore` was killed with no
+# report written, no scorecard was published, and the run reported itself as
+# CANCELLED — which GitHub does not notify on the way it notifies on failure. A
+# broken eval therefore looked like a run somebody had cancelled, for a week, while
+# the docs site kept rebuilding against the last real numbers (2026-08-09) as if
+# they were fresh.
+#
+# So the budget is enforced INSIDE the step by `timeout`, whose exit 124 fails the
+# step and turns the job RED. timeout-minutes stays above it as a pure backstop: it
+# must never be the thing that fires, because a job-level timeout is the silent
+# outcome. Raise EVAL_BUDGET, not just timeout-minutes, when the suite grows.
 name: eval
 on:
   schedule:
@@ -24,10 +40,19 @@ concurrency:
   group: eval-${{ github.ref }}
   cancel-in-progress: true
 
+env:
+  # The eval's real budget. `timeout` enforces it so an overrun is a FAILED step
+  # (notified) rather than a cancelled job (silent). Keep it comfortably below the
+  # job's timeout-minutes so this is always what fires first.
+  EVAL_BUDGET: 40m
+
 jobs:
   replay-eval:
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    # Backstop only — EVAL_BUDGET above is the budget that should ever fire. Kept
+    # well above it (40m budget + ~3m for checkout/setup/build + publish headroom)
+    # precisely so a job-level cancel stops being a possible outcome.
+    timeout-minutes: 55
     permissions:
       contents: write   # push the scorecard to the eval-scorecard branch only
     steps:
@@ -67,7 +92,21 @@ jobs:
         if: steps.guard.outputs.has_key == 'true'
         env:
           RUNLORE_EVAL_API_KEY: ${{ secrets.RUNLORE_EVAL_API_KEY }}
-        run: ./lore eval -config eval/ci.runlore.yaml -cases examples/eval -n 5 -fail-under 0.7 -report-dir eval/reports
+        run: |
+          # `|| rc=$?` rather than `if ! …`, which would capture the negated status.
+          rc=0
+          timeout "$EVAL_BUDGET" \
+            ./lore eval -config eval/ci.runlore.yaml -cases examples/eval \
+              -n 5 -fail-under 0.7 -report-dir eval/reports || rc=$?
+          if [ "$rc" -eq 124 ]; then
+            # Distinguish "did not finish" from "finished and scored badly". Only the
+            # latter is a statement about the model; this one measured nothing, and
+            # writes no report, so the scorecard step below must not publish.
+            echo "::error title=Eval timed out::the eval did not finish within $EVAL_BUDGET and was killed, so nothing was scored and no report was written. Either the suite/provider got slower (raise EVAL_BUDGET) or a case is hanging."
+            echo "## eval timed out" >> "$GITHUB_STEP_SUMMARY"
+            echo "The eval exceeded its \`$EVAL_BUDGET\` budget and was killed before writing a report. **No scorecard was published** and the numbers on the docs site are unchanged." >> "$GITHUB_STEP_SUMMARY"
+          fi
+          exit "$rc"
 
       - name: upload report
         # always() so a genuine eval failure (key present, score < gate) still
@@ -80,6 +119,7 @@ jobs:
           if-no-files-found: warn
 
       - name: publish scorecard (eval-scorecard branch)
+        id: publish
         # always(): a gate failure (score < 70%) must publish exactly like a pass —
         # the scorecard's value is honesty. Guarded to main so a workflow_dispatch
         # from a feature branch can't overwrite the published numbers, and to
@@ -89,8 +129,12 @@ jobs:
           set -euo pipefail
           REPORT=$(ls -t eval/reports/*-replay.json 2>/dev/null | head -1 || true)
           if [ -z "$REPORT" ]; then
-            echo "::warning title=Scorecard skipped::no replay report found (eval crashed before writing one)"
-            exit 0
+            # A completed eval ALWAYS writes a report, pass or fail — so no report means
+            # the run never got far enough to measure anything. That was a warning with
+            # exit 0 until 2026-08-14, which is how a week of dead nightlies stayed
+            # quiet. It is a failure: there is nothing to publish and nothing to read.
+            echo "::error title=Scorecard not published::no replay report found — the eval never finished, so nothing was measured"
+            exit 1
           fi
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
@@ -104,13 +148,23 @@ jobs:
           fi
           ./lore eval scorecard -report "$REPORT" -dir "$OUT"
           git -C "$OUT" add -A
-          git -C "$OUT" commit -m "chore(eval): nightly scorecard $(date -u +%Y-%m-%d)" || { echo "no changes to publish"; exit 0; }
-          git -C "$OUT" push origin eval-scorecard
+          if git -C "$OUT" commit -m "chore(eval): nightly scorecard $(date -u +%Y-%m-%d)"; then
+            git -C "$OUT" push origin eval-scorecard
+            echo "published=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "no changes to publish"
+          fi
 
       # Tell the docs site to rebuild so /eval shows the fresh numbers. Without this
       # the page would only refresh when someone happens to push to website/.
+      #
+      # Gated on the scorecard having ACTUALLY been published, not merely on the job
+      # having run: rebuilding after a timed-out or unchanged run re-publishes the last
+      # numbers with a fresh build date, which is how stale figures come to look
+      # current. `published` can only be set by the step above, so this also subsumes
+      # its has_key and main-branch guards.
       - name: trigger docs rebuild
-        if: always() && steps.guard.outputs.has_key == 'true' && github.ref == 'refs/heads/main'
+        if: always() && steps.publish.outputs.published == 'true'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |

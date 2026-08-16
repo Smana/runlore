@@ -56,6 +56,18 @@ type mapStats map[string]outcome.Aggregate
 
 func (m mapStats) OpenCounts() (map[string]outcome.Aggregate, error) { return m, nil }
 
+// Live by default, so every pre-existing retirement test keeps asserting the
+// resolve-driven decay it was written for. deadChannelStats is the opt-in variant.
+func (m mapStats) ResolveChannelLive() bool { return true }
+
+// deadChannelStats models a deployment where a resolve can never arrive
+// (Alertmanager with send_resolved off, or a source with no resolve channel).
+type deadChannelStats map[string]outcome.Aggregate
+
+func (m deadChannelStats) OpenCounts() (map[string]outcome.Aggregate, error) { return m, nil }
+
+func (m deadChannelStats) ResolveChannelLive() bool { return false }
+
 // *github.Client must satisfy the consumer-side RetireForge interface.
 var _ RetireForge = (*github.Client)(nil)
 
@@ -98,6 +110,27 @@ func TestRetirement(t *testing.T) {
 		}
 		if !strings.Contains(body, "merging this PR retires the entry") {
 			t.Errorf("body missing veto-honest phrasing:\n%s", body)
+		}
+	})
+
+	t.Run("spares unresolvable entries when no resolve can ever arrive", func(t *testing.T) {
+		// Same aggregates as above, on a deployment where a resolve never arrives
+		// (Alertmanager with send_resolved off). Unresolved recalls are then not
+		// failures — retiring on them would garbage-collect correct entries. This
+		// mirrors investigate.Recall.outcomeGate so the two gates cannot disagree.
+		stats := deadChannelStats{
+			"incidents/decayed-recalls.md": {Recalls: 3},                  // no outcome at all -> spare
+			"incidents/decayed-votes.md":   {Recalls: 2, FeedbackDown: 1}, // a human 👎 is ground truth -> retire
+			"incidents/healthy.md":         {Recalls: 4, Resolved: 4},     // factor 0.83 -> keep
+		}
+		forge := &fakeRetireForge{}
+		if err := newRetirement(forge, stats).Run(context.Background()); err != nil {
+			t.Fatalf("Run: %v", err)
+		}
+		want := []string{"incidents/decayed-votes.md"}
+		if !slices.Equal(forge.proposed, want) {
+			t.Fatalf("proposed=%v, want %v — recalls with no possible resolve must not retire "+
+				"an entry, but human feedback must still bite", forge.proposed, want)
 		}
 	})
 

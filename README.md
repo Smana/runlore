@@ -34,48 +34,61 @@ next time gets an instant answer — no fresh investigation.
 
 **Learns your platform · single Go binary · runs in your cluster · on your models.**
 
-> **The autonomy ladder.** Teams that want more than the read-only default can climb `suggest` →
-> `approve`: even at the top supported rung RunLore only executes *reversible* GitOps operations after
-> an **explicit human approval** — a human stays in the loop at every step
-> (see [Project status](#project-status--stability)).
-
-**Who it's for** — **SRE and platform teams** who want their incident knowledge **portable and
-self-hosted** (no lock-in, your models, your data), and would rather an agent say *"I don't know"* than
-guess. It shines if you run **GitOps** (Flux/Argo CD) — RunLore turns *"what changed?"* into an exact Git
-diff (and, with an opt-in source-repo allowlist, into the offending commit inside an image bump) — but
-GitOps isn't required: every data source is pluggable, and an unset one simply disables its tool.
-
 ## See it in action
 
-Two sides of the same incident, delivered to your chat (shown here in Slack; Matrix delivers the same findings) — the whole point of the learning loop in one place.
+The same incident, twice — and the second time is the whole point. Shown here in Slack; Matrix
+delivers the same findings.
 
-**First time — a full investigation.** A verdict-first summary: the actionability call
-(no action / suggested / required / inconclusive), the confidence-scored root cause, top-cause "why",
-suggested next steps it will *not* apply for you, and the affected resource with what changed in Git.
-Alert metadata, recurrence and a link to the knowledge-base PR appear alongside when the incident
-carries them. With the Slack notifier's **bot token**, the full analysis lands as a threaded reply —
-open questions, data gaps and ruled-out hypotheses. The footer shows the real cost: model calls and
-tokens.
+**First time — a full investigation.** **7 model calls, 131,354 tokens.** A verdict-first card: the
+actionability call, a confidence-scored root cause with the evidence behind it, and suggested next
+steps it will *not* apply for you.
 
 <div align="center">
 <img src="assets/slack-notification.png" alt="RunLore Slack notification — a verdict-first card headed 'ImageGalleryUnavailable — apps/xplane-image-gallery': Action required, High confidence 92%, the cause traced to a manual AWS Secrets Manager DeleteSecret, read-only suggested next steps, a What changed line citing the CloudTrail event, a footer of 7 model calls and 121,758 in / 9,596 out tokens, feedback buttons, and a link to the knowledge-base pull request it opened" width="760" />
 </div>
 
-**Next time — an instant recall.** Once that entry is merged, the same incident — even under a
-*different, generic alert* — is answered straight from your knowledge base: **no investigation, no new
-PR**, just the known cause, the human-reviewed resolution, and the entry it came from. Several times
-cheaper, delivered in seconds: as shipped a recall is **two** model calls — the LLM reranker that
-picks the entry, then the adversarial verify pass — against the **7 calls** the same incident's full
-investigation took. Both cards above and below are that one incident on a live cluster, so the cost is
-a matched pair: **8,289 tokens recalled against 131,354 investigated — about 6%.** A recall is
-re-checked, not replayed: the verify pass is why the recalled card reads 78% where the stored entry
-says 92%, and it will fall through to a full investigation if it cannot confirm the entry. Once the
-entry has a track record, its resolve rate is shown alongside — and it weighs whether recall is
-trusted enough to fire at all.
+**Next time — an instant recall. 2 model calls, 8,289 tokens: about 6% of the cost, in seconds.**
+Once you merge the entry, the same failure — even under a *different, generic alert* — is answered
+straight from your knowledge base: no investigation, no second PR, and it cites the entry so you can
+check it.
 
 <div align="center">
 <img src="assets/recall-notification.png" alt="RunLore Slack notification — an instant recall: an ⚡ Instant recall banner reading 'answered from your knowledge base, no investigation was run', the known cause carried over from the merged entry, High confidence 78% after the verify pass, and a cost footer showing 2 model calls and 4,764 in / 3,525 out tokens" width="760" />
 </div>
+
+<details>
+<summary><b>What's in those cards, in full</b></summary>
+
+Both cards are that one incident on a live cluster, so the cost is a matched pair — 8,289 tokens
+recalled against 131,354 investigated.
+
+**On the investigation.** The actionability call is one of *no action / suggested / required /
+inconclusive*. Alert metadata, recurrence and a link to the knowledge-base PR appear alongside when
+the incident carries them. With the Slack notifier's **bot token**, the full analysis lands as a
+threaded reply — open questions, data gaps and ruled-out hypotheses. The footer shows the real cost:
+model calls and tokens.
+
+**On the recall.** As shipped it is **two** model calls — the LLM reranker that picks the entry, then
+the adversarial verify pass — against the **7** the full investigation took. A recall is *re-checked,
+not replayed*: the verify pass is why the recalled card reads 78% where the stored entry says 92%,
+and it falls through to a full investigation if it cannot confirm the entry. Once the entry has a
+track record its resolve rate is shown alongside, and that record weighs whether recall is trusted
+enough to fire at all.
+
+</details>
+
+## ⚡ Try it in one minute — no cluster, no keys
+
+Before you wire up anything, watch RunLore investigate a real incident and reach a real root cause —
+no Kubernetes, no LLM key, no network. You only need Go:
+
+```bash
+hack/demo.sh
+```
+
+It replays a transcript recorded once against a live model through the **real investigation loop**:
+the same ReAct tool calls, verify pass, and verdict-card renderer that run in production, over fake
+(but realistic) evidence. [What it prints ↓](#what-the-demo-prints)
 
 ## How it works
 
@@ -119,10 +132,12 @@ The autonomous *alert → RCA → chat* loop is a commodity. What isn't: a knowl
 Git repo you control, PR-reviewed, with full provenance. Knowledge that consistently resolves
 incidents gains trust; knowledge that keeps failing decays.
 
-Starting from empty is optional. The [knowledge commons](https://github.com/Smana/runlore-kb-commons)
-is a shared bundle of generic playbooks you can mount as a second, read-only catalog root, so
-`kb_search` is useful on day one. Your own entries always win ties, and the curator never writes
-there — it is a floor, not a substitute for knowledge from your own incidents.
+Starting from empty is optional — and in the `standard` Helm profile you don't. The
+[knowledge commons](https://github.com/Smana/runlore-kb-commons) is a shared bundle of generic
+playbooks mounted as a second, read-only catalog root, so `kb_search` is useful on day one; it
+ships on in `standard` and `full`, off in `minimal` and the chart defaults. Your own entries win ties, and the
+curator never writes there — it is a floor, not a substitute for knowledge from your own
+incidents, and commons entries never fire instant recall.
 
 An instant recall is never a blind cache hit — three gates stand in front of it: the entry must
 **structurally match** the incident (same workload/resource, retrieval score above a floor), it must
@@ -203,18 +218,10 @@ to Claude Code, HolmesGPT, or any other MCP client.
 
 → [MCP configuration](https://runlore.io/docs/configuration/mcp/)
 
-## ⚡ Try it in one minute — no cluster, no keys
+## What the demo prints
 
-Before you wire up a cluster, watch RunLore investigate a real incident and reach a real root
-cause — no Kubernetes, no LLM key, no network. You only need Go:
-
-```bash
-hack/demo.sh
-```
-
-It builds the binary and replays a transcript recorded once against a live model through the
-**real investigation loop**: the same ReAct tool calls, verify pass, and verdict-card renderer
-that run in production, over fake (but realistic) evidence:
+[`hack/demo.sh`](#-try-it-in-one-minute--no-cluster-no-keys) builds the binary and replays the
+recorded transcript through the real investigation loop:
 
 ```text
 == RunLore demo: investigating "harbor-chart-bump" (recorded model turns, fake providers, no cluster) ==
@@ -248,6 +255,24 @@ with chat and knowledge-base write-back. Curious about the filter that decides w
 investigated in the first place? `hack/demo-trigger-policy.sh` fires mocked Alertmanager alerts
 through the trigger policy. To exercise every feature end-to-end on a throwaway cluster,
 `hack/e2e-k3d.sh` spins one up with [k3d](https://k3d.io/).
+
+**Ran it? Tell me where it would have been wrong.** Whether that verdict matches a failure you
+have actually had — and where it would have missed on *your* platform — is the single most useful
+thing you can send, and that includes deciding RunLore isn't for you. A
+[discussion](https://github.com/Smana/runlore/discussions) is enough; no deployment required.
+
+## Who it's for
+
+**SRE and platform teams** who want their incident knowledge **portable and self-hosted** (no
+lock-in, your models, your data), and would rather an agent say *"I don't know"* than guess. It
+shines if you run **GitOps** (Flux/Argo CD) — RunLore turns *"what changed?"* into an exact Git diff
+(and, with an opt-in source-repo allowlist, into the offending commit inside an image bump) — but
+GitOps isn't required: every data source is pluggable, and an unset one simply disables its tool.
+
+> **The autonomy ladder.** Teams that want more than the read-only default can climb `suggest` →
+> `approve`: even at the top supported rung RunLore only executes *reversible* GitOps operations after
+> an **explicit human approval** — a human stays in the loop at every step
+> (see [Project status](#project-status--stability)).
 
 ## 🚀 Getting started (production install)
 
@@ -312,7 +337,7 @@ between commits. It's usable today, but "stable" means different things across t
 - **The supported golden path is eval-tested and stable.** That's **Flux** +
   **VictoriaMetrics / Prometheus** + an **Anthropic or OpenAI-compatible** model + a **chat
   notifier** (Slack in the eval) + **GitHub** for the knowledge base. This is the path the
-  [nightly eval](CONTRIBUTING.md#nightly-eval-ci) and the [k3d e2e suite](CONTRIBUTING.md#end-to-end-on-k3d)
+  [nightly eval](CONTRIBUTING.md#nightly-eval-ci) and the [k3d e2e suite](CONTRIBUTING.md#end-to-end-on-k3d-or-kind)
   exercise — run it with confidence.
 - **Argo CD is now end-to-end tested**, alongside Flux — including the **`approve` rung**: the k3d
   suite reconfigures to the `argocd` engine, drives an `Application Degraded` failure through a full
@@ -330,17 +355,51 @@ between commits. It's usable today, but "stable" means different things across t
 If you stay on the golden path with a human in the approval loop, you're on the surface
 we test hardest.
 
+## Who maintains this
+
+**One person, today.** RunLore is written and maintained by [@Smana](https://github.com/Smana).
+That is the honest answer to the question you should be asking before you run an agent next to
+your production cluster, so here is what it does and doesn't mean.
+
+**What it means.** There is no support rotation and no SLA. Issues get answered as fast as one
+person with a day job can answer them. A bus-factor of one is a real risk and no amount of test
+coverage retires it.
+
+**What it doesn't mean.** If RunLore stopped being maintained tomorrow, you would lose the
+agent — not what it learned. That is deliberate, and it is the whole reason the knowledge base
+is shaped the way it is:
+
+- Your catalog is **plain [OKF](https://github.com/GoogleCloudPlatform/knowledge-catalog)
+  markdown in a Git repo you already own**. Not a database, not a proprietary format, not
+  hosted here. It stays greppable and readable by whatever you use next.
+- There is **no hosted component** and no account. Nothing switches off remotely.
+- It's **Apache-2.0**, a single Go binary, with a published Helm chart. Fork it and carry on.
+
+So the worst case is that you stop getting new features and keep everything you built. That
+trade is the point — the same reason the catalog is portable is the reason abandonment isn't
+fatal.
+
+**Reducing the risk.** The fastest way to widen the bus factor is people running RunLore and
+saying where it breaks. If you're using it, [`ADOPTERS.md`](ADOPTERS.md) or a
+[discussion](https://github.com/Smana/runlore/discussions) helps — anonymously is fine. If you
+want to go further, [`CONTRIBUTING.md`](CONTRIBUTING.md) has the setup, and the
+[roadmap](ROADMAP.md) says what's next and what's deliberately out of scope.
+
 ## Docs
 
 📐 [Design](https://runlore.io/docs/concepts/design/) · 📚 [Learning loop](https://runlore.io/docs/concepts/learning-loop/) · ✅ [Reviewing knowledge](https://runlore.io/docs/concepts/reviewing-knowledge/) · 🧑‍🔧 [KB steward skill](https://runlore.io/docs/reference/kb-steward/) · 🚀 [Getting started](https://runlore.io/docs/getting-started/) · 🧪 [Worked example](https://runlore.io/docs/reference/examples/harbor-registry-down/) ·
 🔌 [Data sources](https://runlore.io/docs/concepts/data-sources/) · ⚙️ [Configuration](https://runlore.io/docs/configuration/configuration/) · 🔗 [MCP — server & client](https://runlore.io/docs/configuration/mcp/) · 📊 [Observability](https://runlore.io/docs/operations/observability/) · 🩺 [Troubleshooting](https://runlore.io/docs/operations/troubleshooting/) ·
-🔒 [Security model](https://runlore.io/docs/security/security-model/) · 🛡 [LLM security architecture](https://runlore.io/docs/security/security-architecture/) · ⬆️ [Upgrade & uninstall](https://runlore.io/docs/operations/upgrade-uninstall/) · 🧭 [Prior art](https://runlore.io/docs/concepts/prior-art/) · 📊 [Benchmarking models](https://runlore.io/docs/reference/benchmarking/) · 🧮 [Nightly eval scorecard](https://runlore.io/eval) · 🛠 [Contributing](CONTRIBUTING.md)
+🔒 [Security model](https://runlore.io/docs/security/security-model/) · 🛡 [LLM security architecture](https://runlore.io/docs/security/security-architecture/) · ⬆️ [Upgrade & uninstall](https://runlore.io/docs/operations/upgrade-uninstall/) · 🧭 [Prior art](https://runlore.io/docs/concepts/prior-art/) · 📊 [Benchmarking models](https://runlore.io/docs/reference/benchmarking/) · 🧮 [Nightly eval scorecard](https://runlore.io/eval) · 🗺 [Roadmap](ROADMAP.md) · 🛠 [Contributing](CONTRIBUTING.md)
 
 ## Who's using RunLore
 
 Teams running RunLore in production are listed in [`ADOPTERS.md`](ADOPTERS.md) — open a PR to add
 yours, or say hello in a [discussion](https://github.com/Smana/runlore/discussions) if you'd rather
 stay unlisted.
+
+Nothing deployed yet? That's still worth hearing. Running
+[`hack/demo.sh`](#-try-it-in-one-minute--no-cluster-no-keys) takes a minute and needs no cluster,
+and what it got wrong about your platform is more useful to me than a star.
 
 ## License
 

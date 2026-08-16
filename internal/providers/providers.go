@@ -647,14 +647,27 @@ const (
 	VerdictInconclusive    Verdict = "inconclusive"     // could not be determined with available data
 )
 
-// ValidVerdict reports whether v is one of the model-facing enum values; the
-// parser normalizes anything else to "" so formatters can safely omit it.
-func ValidVerdict(v Verdict) bool {
+// Conclusive reports whether v is an ANSWER — the investigation reached a
+// judgement the on-call can act on (or deliberately not act on). It is the ONE
+// definition of "conclusive": the outcome ledger folds its per-trigger standing
+// answer with it, and TriggerRecurrence.Concluded re-checks stored verdicts through
+// it, so the writer and the reader cannot disagree. inconclusive is not an answer,
+// and neither is "" (a pre-verdict ledger event, or a reply the parser could not
+// normalize) — both mean "we still owe a real answer".
+func (v Verdict) Conclusive() bool {
 	switch v {
-	case VerdictNoAction, VerdictActionSuggested, VerdictActionRequired, VerdictInconclusive:
+	case VerdictNoAction, VerdictActionSuggested, VerdictActionRequired:
 		return true
 	}
 	return false
+}
+
+// ValidVerdict reports whether v is one of the model-facing enum values; the
+// parser normalizes anything else to "" so formatters can safely omit it. Defined
+// in terms of Conclusive so the three actionability verdicts are enumerated once —
+// a fifth verdict is then one switch to update, not two adjacent ones.
+func ValidVerdict(v Verdict) bool {
+	return v.Conclusive() || v == VerdictInconclusive
 }
 
 // Investigation is the structured output contract of an investigation.

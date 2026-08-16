@@ -37,8 +37,14 @@ RENDERER=(internal/notify/slack.go internal/notify/format.go)
 #     fails again, so an acknowledgement cannot silently become permanent.
 #
 # Clear it (set to "") in the same commit that lands retaken screenshots.
-ACKNOWLEDGED_RENDERER=""
-ACKNOWLEDGED_REASON=""
+#
+# Pin the commit AS IT EXISTS ON MAIN. This repo squash-merges, so a branch SHA is dead
+# on arrival: #475 acknowledged its own branch commit (96e1dc6), the squash collapsed
+# that into 0280367, and main went red the moment it merged. An acknowledgement can
+# therefore only be written by a PR that does NOT itself touch the renderer, naming the
+# squash commit that last did.
+ACKNOWLEDGED_RENDERER="02803679726992b3b79e8b123bfca5bcb99c9cc8"
+ACKNOWLEDGED_REASON="#475 added a 'confidence not stated' variant for a finding that carries no confidence at all. The stated-confidence line both captures actually show is byte-identical — an incidental re-bolding was deliberately reverted to keep it so — meaning neither image is WRONG, only incomplete: they cannot show a variant that did not exist when they were taken. Retake when a live workspace is next available."
 
 last_commit_time() {
   local t

@@ -1303,6 +1303,49 @@ func TestRecurrenceVerdictSurvivesReplayAndCheckpoint(t *testing.T) {
 	}
 }
 
+// TestRecurrenceConclusivePriorSurvivesAnInconclusiveRun: the newest CONCLUSIVE
+// open is folded SEPARATELY from the newest open, so one inconclusive run cannot
+// erase the answer standing behind it (#471). Both must survive a plain replay and
+// a compaction, since the suppression gate reads them on every occurrence.
+func TestRecurrenceConclusivePriorSurvivesAnInconclusiveRun(t *testing.T) {
+	p := filepath.Join(t.TempDir(), "o.jsonl")
+	l, _ := New(p)
+	t0 := time.Unix(43000, 0)
+	_ = l.Open(Event{Fingerprint: "f1", Kind: "fresh", TriggerKey: "k", Title: "broken down-migration to schema 94",
+		CuratedURL: "https://kb/1", Verdict: "action_required", At: t0})
+	_ = l.Open(Event{Fingerprint: "f2", Kind: "fresh", TriggerKey: "k", Title: "pre-existing, not a new incident",
+		Verdict: "inconclusive", At: t0.Add(time.Hour)})
+	assert := func(what string, r TriggerRecurrence) {
+		t.Helper()
+		// The newest open is still the inconclusive one — that fold is untouched.
+		if r.Count != 2 || !r.Last.Equal(t0.Add(time.Hour)) || r.Verdict != "inconclusive" {
+			t.Fatalf("%s: newest open = %+v, want count=2 last=+1h verdict=inconclusive", what, r)
+		}
+		// …and the conclusive answer behind it still stands, with its own facts.
+		if !r.Concluded() || r.Conclusive.Verdict != "action_required" || !r.Conclusive.At.Equal(t0) ||
+			r.Conclusive.Title != "broken down-migration to schema 94" || r.Conclusive.CuratedURL != "https://kb/1" {
+			t.Fatalf("%s: conclusive prior = %+v, want the +0h action_required open", what, r.Conclusive)
+		}
+	}
+	assert("live", l.Recurrence("k"))
+	l2, _ := New(p) // plain replay
+	assert("replayed", l2.Recurrence("k"))
+	c, _ := NewWithMaxEvents(p, 1) // compaction absorbs both opens into a checkpoint
+	assert("checkpointed", c.Recurrence("k"))
+
+	// A trigger that has ONLY ever come back inconclusive has no answer to stand on.
+	_ = l.Open(Event{Fingerprint: "f3", Kind: "fresh", TriggerKey: "never", Verdict: "inconclusive", At: t0})
+	if r := l.Recurrence("never"); r.Concluded() || r.Conclusive.Verdict != "" || !r.Conclusive.At.IsZero() {
+		t.Fatalf("never-concluded trigger = %+v, want an empty conclusive prior", r.Conclusive)
+	}
+	// An out-of-order open (an overlapping investigation completing late) never
+	// rewinds the conclusive prior to an older answer.
+	_ = l.Open(Event{Fingerprint: "f4", Kind: "fresh", TriggerKey: "k", Title: "older", Verdict: "no_action", At: t0.Add(-time.Hour)})
+	if r := l.Recurrence("k"); r.Conclusive.Verdict != "action_required" || !r.Conclusive.At.Equal(t0) {
+		t.Fatalf("a late older open rewound the conclusive prior: %+v", r.Conclusive)
+	}
+}
+
 // TestContestedTriggersGroupsStandingDowns pins the grouping semantics: one
 // entry per trigger with at least one STANDING 👎 (per-user latest-wins, so a
 // moved vote no longer counts), joined with the trigger's newest-open KB link —
@@ -1560,4 +1603,74 @@ func TestLegacyOpenWithoutStartedAtUsesAgeBound(t *testing.T) {
 			assertPairing(t, l, "x.md", tc.wantResolved)
 		})
 	}
+}
+
+// TestResolveChannelLive pins the resolve-channel liveness proof that gates
+// resolve-based decay. It answers one question — "could a resolve ever arrive?" —
+// and must answer it conservatively (unknown ⇒ false ⇒ decay withheld ⇒ the entry
+// keeps firing), survive compaction, and never be confused with pairing success.
+func TestResolveChannelLive(t *testing.T) {
+	t0 := time.Unix(17000, 0)
+
+	t.Run("nil ledger reports dead", func(t *testing.T) {
+		var l *Ledger
+		if l.ResolveChannelLive() {
+			t.Fatal("a nil ledger must report the channel dead (conservative default)")
+		}
+	})
+
+	t.Run("opens alone never prove a channel", func(t *testing.T) {
+		l, _ := New(filepath.Join(t.TempDir(), "o.jsonl"))
+		for i := range 5 {
+			_ = l.Open(Event{Fingerprint: fmt.Sprintf("fp%d", i), Kind: "recall", Entry: "x.md", At: t0})
+		}
+		if l.ResolveChannelLive() {
+			t.Fatal("recall opens are the trial count, not evidence a resolve can arrive; " +
+				"this is exactly the send_resolved:false shape that must stay dead")
+		}
+	})
+
+	t.Run("one resolve proves it", func(t *testing.T) {
+		l, _ := New(filepath.Join(t.TempDir(), "o.jsonl"))
+		_ = l.Open(Event{Fingerprint: "fp", Kind: "recall", Entry: "x.md", At: t0})
+		if _, _, err := l.Resolve("fp", t0.Add(time.Minute)); err != nil {
+			t.Fatalf("Resolve: %v", err)
+		}
+		if !l.ResolveChannelLive() {
+			t.Fatal("a delivered resolve must mark the channel live")
+		}
+	})
+
+	t.Run("an unpaired resolve still proves it", func(t *testing.T) {
+		// Liveness is a property of the SENDER, so it must not depend on whether the
+		// resolve found an open to pair with.
+		l, _ := New(filepath.Join(t.TempDir(), "o.jsonl"))
+		if _, _, err := l.Resolve("never-opened", t0); err != nil {
+			t.Fatalf("Resolve: %v", err)
+		}
+		if !l.ResolveChannelLive() {
+			t.Fatal("an orphan resolve still proves the sender emits resolves")
+		}
+	})
+
+	t.Run("survives reload and compaction", func(t *testing.T) {
+		p := filepath.Join(t.TempDir(), "o.jsonl")
+		l, _ := New(p)
+		_ = l.Open(Event{Fingerprint: "fp", Kind: "recall", Entry: "x.md", At: t0})
+		if _, _, err := l.Resolve("fp", t0.Add(time.Minute)); err != nil {
+			t.Fatalf("Resolve: %v", err)
+		}
+		// Pad past the bound so the reload compacts the proving resolve into a checkpoint.
+		for i := range 20 {
+			_ = l.Open(Event{Fingerprint: fmt.Sprintf("pad%d", i), Kind: "recall", Entry: "x.md", At: t0})
+		}
+		l2, err := NewWithMaxEvents(p, 5)
+		if err != nil {
+			t.Fatalf("NewWithMaxEvents: %v", err)
+		}
+		if !l2.ResolveChannelLive() {
+			t.Fatal("compaction must carry the liveness proof into the checkpoint; losing it " +
+				"would silently switch a healthy deployment back to withheld decay")
+		}
+	})
 }

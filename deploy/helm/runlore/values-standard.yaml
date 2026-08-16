@@ -88,6 +88,74 @@ config:
       interval: 5m
       # token_env: KB_GIT_TOKEN  # optional; a PRIVATE repo reuses the App below by default
 
+    # A SECOND, read-only catalog root, ON in this profile. Without it a fresh install
+    # searches an empty catalog: the learning loop only starts paying once YOU have
+    # curated entries, which is weeks of incidents away. The commons is a shared corpus
+    # of generic playbooks (CrashLoopBackOff, ImagePullBackOff, unbound PVCs, stuck
+    # cert-manager challenges…) so kb_search grounds an investigation from day one.
+    #
+    # What this does NOT do: commons entries never fire instant recall. They are
+    # resource-less by construction — they describe a failure class, not one cluster's
+    # workload — and recall's structural filter rejects a resource-less entry for any
+    # alert carrying a workload. Day-one value here is BETTER INVESTIGATIONS, not the
+    # cheap instant answers; those still require entries curated from your own incidents.
+    #
+    # Your own entries win scoring ties, and the curator never writes here — drafted
+    # entries always land in your KB repo above. The commons can only ever be a floor.
+    #
+    # It tracks `main` of a repo you do not control, so upstream corrections reach you
+    # without action. To review before it grounds anything, replace `branch` with `ref:`
+    # — a tag or a full 40-character commit id (mutually exclusive with branch; the
+    # agent refuses both). Removing the block entirely is also fine: everything else in
+    # this profile still works.
+    #
+    # It cannot break your install. The commons syncer runs in the background, off the
+    # startup path: if the clone fails — no egress, GitHub down, a typo here — it logs a
+    # warning and the agent serves normally from your own catalog. The one cost of a
+    # failed clone is that the retry waits a full `interval` (below), so a transient
+    # failure at boot means no commons until the next tick or a pod restart.
+    #
+    # Egress: this is an HTTPS clone, so the chart's default NetworkPolicy (any
+    # destination on 443) already allows it. Under `networkPolicy.strict: true` you must
+    # add the host to egress.allowedCIDRs — already covered if your own KB repo is on
+    # the same forge, and a separate entry if it is not.
+    #
+    # `dir` MUST sit outside catalog.dir; the chart refuses to render otherwise.
+    commons:
+      url: https://github.com/Smana/runlore-kb-commons
+      branch: main
+      interval: 24h # a shared corpus changes slowly; do not poll it like your own
+      dir: /var/lib/runlore/commons
+
+    # INSTANT RECALL IS OFF IN THIS PROFILE — deliberately. This is the one place where
+    # the headline behaviour (a repeat incident answered in seconds for a fraction of the
+    # cost) does NOT describe what you just installed, so it is worth saying plainly
+    # rather than leaving you to wonder why it never fires.
+    #
+    # Why: a recall is not a cache hit. Its confidence is weighted by each entry's real
+    # resolve rate, and that record lives in the outcome ledger — a file. This profile has
+    # no persistent volume (catalog and commons are both emptyDir), so a ledger here would
+    # reset on every restart and every entry would look untested forever. Recall would
+    # still fire; it would just have no track record behind it, which is the property that
+    # makes short-circuiting an investigation safe rather than reckless.
+    #
+    # To turn it on, add all three. The first is what makes the other two mean anything:
+    #
+    #   persistence:
+    #     enabled: true
+    #     size: 5Gi
+    #   config:
+    #     outcome:
+    #       ledger_path: /var/lib/runlore/catalog/outcomes.jsonl  # under catalog.mountPath
+    #     catalog:
+    #       instant_recall:
+    #         enabled: true
+    #
+    # Worth adding at the same time: notify.slack.feedback_buttons (which also requires
+    # notify.slack.signing_secret_env) — 👍/👎 is what writes real outcomes to that ledger.
+    # Without it the ledger records only what the loop infers, and trust decays more slowly
+    # than your on-call's actual experience. values-full.yaml ships this whole set together.
+
   # Curation — the LEARN half. A verified, confident root cause opens a PR drafting
   # an OKF entry on the KB repo; anything below the bar is delivered to chat only.
   forge:

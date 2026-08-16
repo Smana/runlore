@@ -6,11 +6,12 @@ import (
 	"time"
 
 	"github.com/Smana/runlore/internal/outcome"
-	"github.com/Smana/runlore/internal/providers"
 )
 
-// RecurrenceStats is the per-TriggerKey ledger snapshot the suppression gate
-// reads. *outcome.Ledger satisfies it.
+// RecurrenceStats reads the per-TriggerKey ledger snapshot behind
+// LoopInvestigator.TriggerHistory, which serves both consumers of a trigger's past:
+// the suppression gate below and the seed's known-recurrence block.
+// *outcome.Ledger satisfies it.
 type RecurrenceStats interface {
 	Recurrence(triggerKey string) outcome.TriggerRecurrence
 }
@@ -23,12 +24,27 @@ type RecurrenceStats interface {
 // as fresh noise — the recall short-circuit only helps once the KB PR is MERGED,
 // so the human-review window is exactly when the repetition is worst.
 //
-// The gate is deliberately human-deferential, in both directions:
-//   - it only suppresses a CONCLUSIVE prior answer (verdict no_action /
-//     action_suggested / action_required) — an inconclusive or pre-verdict prior
-//     never suppresses, because there is no answer worth not repeating;
-//   - a standing 👎 on the trigger breaks the cooldown immediately — a human
-//     saying "that diagnosis is wrong" re-arms the very next occurrence.
+// The gate turns on two independent facts from the trigger's snapshot, and
+// conflating them is what broke it once already (#471):
+//
+//   - WHEN did we last look? The newest open of any kind, conclusive or not. The
+//     cooldown lapses from there, because a full investigation was paid for at that
+//     moment whatever it concluded.
+//   - Is there an ANSWER worth not repeating? The newest CONCLUSIVE prior (verdict
+//     no_action / action_suggested / action_required), which is not necessarily the
+//     newest one. Anchoring this on the latest prior instead let a single run that
+//     mislabelled a known recurrence as `inconclusive` erase an arbitrarily long
+//     history of conclusive ones — and since the evidence does not change between
+//     firings, neither does the mislabel, so the gate stayed disarmed and every
+//     later firing bought a full investigation. Reading the newest conclusive prior
+//     costs one run per mislabel instead of all of them.
+//
+// A trigger that has NEVER concluded still bypasses the gate on every firing: there
+// is no answer to stand on, and suppressing would leave the on-call with silence.
+//
+// The gate is deliberately human-deferential in the other direction too: a standing
+// 👎 on the trigger breaks the cooldown immediately — a human saying "that diagnosis
+// is wrong" re-arms the very next occurrence.
 //
 // A suppressed occurrence makes no model call, sends no notification, and
 // records no ledger open. (It does still consume a workqueue turn and a
@@ -42,30 +58,67 @@ type RecurrenceStats interface {
 // suppressed firings (only the recurrence_suppressed metric and a log line see
 // them) — a future consumer needing raw firing frequency is the moment to
 // promote suppression to a first-class event kind, not before.
+//
+// The gate itself holds no ledger: LoopInvestigator.TriggerHistory reads the
+// per-trigger snapshot once per investigation and hands it here, so the suppression
+// decision and the seed's known-recurrence block are made from the same facts.
 type RecurrenceGate struct {
-	Outcome  RecurrenceStats
 	Cooldown time.Duration // 0 disables the gate (default: off, opt-in)
 }
 
-// suppress reports whether req should be suppressed, returning the prior
-// investigation's facts for the caller's log line. now is a parameter so the
-// decision matrix is testable without sleeping.
-func (g *RecurrenceGate) suppress(req Request, now time.Time) (outcome.TriggerRecurrence, bool) {
-	if g == nil || g.Outcome == nil || g.Cooldown <= 0 || req.TriggerKey == "" {
-		return outcome.TriggerRecurrence{}, false
+// priorForTrigger reads the trigger's recurrence snapshot: what earlier
+// investigations of this same incident concluded. Zero value — a clean "nothing
+// known" that every consumer already handles — when no ledger is wired, the ledger
+// is disabled, or the request carries no trigger key to group by.
+func (li *LoopInvestigator) priorForTrigger(triggerKey string) outcome.TriggerRecurrence {
+	if li.TriggerHistory == nil || triggerKey == "" {
+		return outcome.TriggerRecurrence{}
 	}
-	r := g.Outcome.Recurrence(req.TriggerKey)
-	if r.Count == 0 || now.Sub(r.Last) >= g.Cooldown {
-		return r, false
+	return li.TriggerHistory.Recurrence(triggerKey)
+}
+
+// recurrenceDecision is WHY the gate did or did not suppress an occurrence. The
+// gate's failure surface is "suppression silently stops happening", and a bare
+// boolean cannot tell that apart from a quiet trigger: every firing looks the same
+// from outside, and investigations_completed_total simply never gains a
+// recurrence_suppressed sample (#471). Naming each outcome lets the caller log which
+// branch a firing took, so the gate can be observed rather than inferred.
+//
+// These values are the gate's own vocabulary, deliberately NOT the metric label —
+// investigations_completed_total{result=…} is a documented dashboard contract, and
+// tying it to an internal reason name would mean a rename for clarity here silently
+// breaks a dashboard there. The caller spells the label as a literal, as it does for
+// every other result value.
+type recurrenceDecision string
+
+const (
+	recurrenceOff            recurrenceDecision = "gate_off"            // no gate, no cooldown, or no trigger key
+	recurrenceFirstLook      recurrenceDecision = "first_look"          // this trigger has never been investigated
+	recurrenceCooldownLapsed recurrenceDecision = "cooldown_lapsed"     // the last look is older than the cooldown
+	recurrenceNoAnswer       recurrenceDecision = "no_conclusive_prior" // looked recently, but never reached an answer
+	recurrenceContested      recurrenceDecision = "contested_by_human"  // a standing 👎 re-arms investigation
+	recurrenceSuppressed     recurrenceDecision = "suppressed"          // the one decision that skips the paid loop
+)
+
+// suppressed reports whether d is the one decision that skips the paid loop.
+func (d recurrenceDecision) suppressed() bool { return d == recurrenceSuppressed }
+
+// decide reports whether req should be suppressed and why, given the trigger's
+// prior-investigation snapshot. A pure function of (config, history, clock): now is
+// a parameter so the decision matrix is testable without sleeping.
+func (g *RecurrenceGate) decide(req Request, prior outcome.TriggerRecurrence, now time.Time) recurrenceDecision {
+	if g == nil || g.Cooldown <= 0 || req.TriggerKey == "" {
+		return recurrenceOff
 	}
-	switch providers.Verdict(r.Verdict) {
-	case providers.VerdictNoAction, providers.VerdictActionSuggested, providers.VerdictActionRequired:
-		// conclusive — eligible for suppression
-	default:
-		return r, false // inconclusive or pre-verdict: retry, we owe a real answer
+	switch {
+	case prior.Count == 0:
+		return recurrenceFirstLook
+	case now.Sub(prior.Last) >= g.Cooldown:
+		return recurrenceCooldownLapsed
+	case !prior.Concluded():
+		return recurrenceNoAnswer // we still owe a real answer: retry
+	case prior.Contested():
+		return recurrenceContested
 	}
-	if r.Contested() {
-		return r, false // a human contested the diagnosis: cooldown broken
-	}
-	return r, true
+	return recurrenceSuppressed
 }

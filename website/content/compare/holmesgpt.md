@@ -92,6 +92,11 @@ server]({{< relref "/docs/configuration/mcp.md" >}}) closes — RunLore is an MC
 investigation toolbox with zero Go code. It is not the same as a maintained,
 first-party integration, and we're not pretending otherwise.
 
+What that looks like in practice, end to end — server Deployment, tool allowlist,
+and which tools are actually worth wiring — is written up for Grafana:
+[Grafana (via MCP)]({{< relref "/docs/integrations/data-sources/grafana-mcp.md" >}}).
+The shape is the same for any other vendor; only the image and the tool names change.
+
 ## Pick HolmesGPT instead if…
 
 - You need a specific vendor toolset **today** — Datadog, New Relic, Splunk, and

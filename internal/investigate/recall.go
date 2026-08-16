@@ -22,6 +22,11 @@ import (
 // *outcome.Ledger satisfies it.
 type OutcomeStats interface {
 	OpenCounts() (map[string]outcome.Aggregate, error)
+	// ResolveChannelLive reports whether a ground-truth resolve signal can actually
+	// arrive. Resolve-based decay reads post-recall silence as failure, which is only
+	// sound when a resolve was possible; see outcome.Ledger.ResolveChannelLive for the
+	// deployments where it is not, and outcomeGate for what is withheld when it is false.
+	ResolveChannelLive() bool
 }
 
 // Recall short-circuits an investigation when the knowledge catalog already has a
@@ -649,6 +654,22 @@ func clampF(v, lo, hi float64) float64 {
 func (r *Recall) outcomeGate(counts map[string]outcome.Aggregate, path string) (float64, bool) {
 	agg, ok := counts[path]
 	if !ok {
+		return 1, true
+	}
+	// Second fail-safe, same principle as the first: an entry that has been recalled
+	// but has accumulated NO outcome of any kind — no resolve, no vote, no confirm —
+	// while the deployment has never delivered a single resolve is not a failing entry.
+	// It is an entry nobody can grade. Decaying it treats "we never asked" as "the
+	// answer was wrong": with the default k=2 a single recall lands at 0.333, under the
+	// 0.5 floor, and the entry is locked out permanently after ONE use. Withhold decay
+	// until some ground truth exists — a human 👍/👎 still works here and is, per
+	// docs/learning-loop.md, the only evidence these deployments can ever accumulate.
+	//
+	// Scoped tightly so the intended decay is untouched: the moment the entry earns any
+	// evidence, OR the ledger observes any resolve at all, the full posterior applies —
+	// including every unresolved recall banked up to that point. A genuinely stale entry
+	// on a working resolve channel still decays exactly as before.
+	if !agg.HasEvidence() && !r.Outcome.ResolveChannelLive() {
 		return 1, true
 	}
 	f := outcomeFactor(agg.Recalls, agg.Resolved, agg.FeedbackUp, agg.FeedbackDown, agg.Confirms, r.OutcomePrior)
