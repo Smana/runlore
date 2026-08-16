@@ -1908,8 +1908,8 @@ func TestTryRecallDisabledUnderAuto(t *testing.T) {
 
 // TestEnforceBudgetNudgeThenHardKill unit-tests the extracted enforceBudget helper
 // directly across its two over-budget outcomes on a fixed message set: the first call
-// (nudge not yet fired) appends the budget nudge, flips budgetNudged, sets the sticky
-// toolChoice, and reports done==false; the second (nudge already fired, still over)
+// (ladder not yet engaged) appends the budget nudge, latches budgetStop, sets the
+// sticky toolChoice, and reports done==false; the second (already engaged, still over)
 // hard-kills — delivering once, setting result, and reporting done==true.
 func TestEnforceBudgetNudgeThenHardKill(t *testing.T) {
 	discard := slog.New(slog.NewTextHandler(io.Discard, nil))
@@ -1921,18 +1921,20 @@ func TestEnforceBudgetNudgeThenHardKill(t *testing.T) {
 	specs := []providers.ToolSpec{submitFindingsSpec()}
 	messages := []providers.Message{{Role: "user", Content: "seed"}}
 	var calib tokenCalibration
-	budgetNudged, compactionLogged := false, false
+	budgetStop := ""
+	compactionLogged := false
 	toolChoice := ""
 	result := "unresolved"
 	delivered := 0
 	finish := func(providers.Investigation) { delivered++ }
 
 	// First over-budget call: nudge fires, no delivery.
-	if done := li.enforceBudget(context.Background(), Request{Title: "x"}, sys, specs, &calib, &providers.UsageTotals{}, &providers.UsageTotals{}, &messages, &budgetNudged, &compactionLogged, &toolChoice, &result, finish); done {
+	if done := li.enforceBudget(context.Background(), Request{Title: "x"}, sys, specs, &calib, &providers.UsageTotals{}, &providers.UsageTotals{}, &messages, &budgetStop, &compactionLogged, &toolChoice, &result, finish); done {
 		t.Fatal("first over-budget call must nudge (done==false), not hard-kill")
 	}
-	if !budgetNudged {
-		t.Fatal("first over-budget call must set budgetNudged")
+	if budgetStop != budgetReasonRequestTokens {
+		t.Fatalf("first over-budget call must latch the ceiling that engaged the ladder; got %q, want %q",
+			budgetStop, budgetReasonRequestTokens)
 	}
 	if toolChoice != submitFindingsName {
 		t.Fatalf("nudge must make toolChoice sticky-force %q, got %q", submitFindingsName, toolChoice)
@@ -1945,7 +1947,7 @@ func TestEnforceBudgetNudgeThenHardKill(t *testing.T) {
 	}
 
 	// Second over-budget call: hard-kill, exactly one delivery.
-	if done := li.enforceBudget(context.Background(), Request{Title: "x", Fingerprint: "fp-kill"}, sys, specs, &calib, &providers.UsageTotals{}, &providers.UsageTotals{}, &messages, &budgetNudged, &compactionLogged, &toolChoice, &result, finish); !done {
+	if done := li.enforceBudget(context.Background(), Request{Title: "x", Fingerprint: "fp-kill"}, sys, specs, &calib, &providers.UsageTotals{}, &providers.UsageTotals{}, &messages, &budgetStop, &compactionLogged, &toolChoice, &result, finish); !done {
 		t.Fatal("second over-budget call must hard-kill (done==true)")
 	}
 	if result != "budget_exceeded" {

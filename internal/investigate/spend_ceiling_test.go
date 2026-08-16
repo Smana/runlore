@@ -287,6 +287,82 @@ func TestBudgetTripTelemetryNamesTheCeilingAndRung(t *testing.T) {
 	}
 }
 
+// TestBudgetTripReportsOneCeilingForTheWholeRun pins that a run names ONE ceiling.
+//
+// budgetTrip is an ordered switch (tokens_request → tokens_total → cost) re-evaluated
+// on every rung, so the two rungs can disagree: the ceilings below are set so the COST
+// arm is the one that stops the run, while the nudged turn it concedes pushes the token
+// total past its own ceiling. Re-evaluated at the kill, the ordered switch answers
+// "tokens_total" — a different knob from the one the operator was told about at the
+// nudge, and the wrong one to raise. The delivered stub then names the cumulative token
+// budget for a run that only ever exceeded its dollar ceiling, and
+// `sum by (reason) (rate(...))` splits one stop across two series.
+//
+// The reason is therefore latched when the ladder first engages and carried to the
+// kill. Recomputing at the kill with the original ordering would not fix this: the
+// spend it reads has grown since, so the ordering can still land on a different arm.
+// Only the ceiling that FIRST stopped the run answers "which knob do I raise".
+func TestBudgetTripReportsOneCeilingForTheWholeRun(t *testing.T) {
+	t.Cleanup(func() { otel.SetMeterProvider(noop.NewMeterProvider()) })
+	h, shutdown, err := telemetry.Setup(context.Background())
+	if err != nil {
+		t.Fatalf("telemetry setup: %v", err)
+	}
+	t.Cleanup(func() { _ = shutdown(context.Background()) })
+
+	// Per call: 30_010 tokens, $0.3005. Each step projects one more request on top:
+	// +30_000 tokens, +$0.30 (input only — see projectSpend).
+	//   after 2 calls: 60_020 tokens / $0.6010 → projects to  90_020 / $0.9010
+	//   after 3 calls: 90_030 tokens / $0.9015 → projects to 120_030 / $1.2015
+	// $0.85 is crossed a step BEFORE 100_000 is, so the COST arm engages the ladder;
+	// by the kill the token projection is over too, and the ordered switch — which
+	// puts tokens ahead of cost — would answer tokens_total if it were re-evaluated.
+	const (
+		perEst     = 30_000 // the anchored estimate of the next request
+		tokCeiling = 100_000
+	)
+	var got providers.Investigation
+	li := &LoopInvestigator{
+		Model:                     &reportingRunawayModel{inputTokens: perEst},
+		Log:                       slog.New(slog.NewTextHandler(io.Discard, nil)),
+		MaxSteps:                  10,
+		Pricing:                   costPricing,
+		MaxTokensPerInvestigation: tokCeiling,
+		MaxCostPerInvestigation:   0.85,
+		Metrics:                   telemetry.NewMetrics(),
+		OnComplete:                func(inv providers.Investigation) { got = inv },
+	}
+	if err := li.Investigate(context.Background(), Request{Title: "one-ceiling", Fingerprint: "fp-one"}); err != nil {
+		t.Fatalf("Investigate: %v", err)
+	}
+
+	body := scrapeMetrics(t, h)
+	for _, want := range []string{
+		`reason="cost",stage="nudge"`,
+		`reason="cost",stage="kill"`,
+	} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("budget-trip telemetry missing %s — the ceiling that stopped the run must be "+
+				"the one reported on BOTH rungs:\n%s", want, body)
+		}
+	}
+	// Premise: at the kill the TOKEN arm is genuinely crossed too — otherwise the
+	// ordered switch would have nothing else to name and the test would pass vacuously.
+	if spent := got.Usage.InputTokens + got.Usage.OutputTokens; spent+perEst <= tokCeiling {
+		t.Fatalf("premise failed — by the kill the projected token total must be over %d so the "+
+			"ordered switch has a second arm to land on; spent %d, projected %d",
+			tokCeiling, spent, spent+perEst)
+	}
+	if strings.Contains(body, `reason="tokens_total"`) {
+		t.Fatalf("the kill renamed the ceiling: this run was stopped by max_cost_per_investigation, "+
+			"so a tokens_total series tells the operator to raise the wrong knob:\n%s", body)
+	}
+	if !mentions(got.Unresolved, "cost ceiling") {
+		t.Fatalf("the delivered stub must name the ceiling that stopped the run (the cost one); got: %v",
+			got.Unresolved)
+	}
+}
+
 // bulkTool is a tool whose result is a fixed, large blob, so the message history —
 // and therefore every subsequent request — grows the way a real tool-heavy
 // investigation's does. size is the reply length in bytes.

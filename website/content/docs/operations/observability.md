@@ -76,7 +76,13 @@ estimate) keep the SDK defaults and are read as heatmaps, not percentiles.
 | `runlore_investigation_output_tokens` | histogram | `result` | provider-reported output tokens per investigation (loop + verify) |
 | `runlore_investigation_cached_input_tokens` | histogram | `result` | input tokens served from cache per investigation (loop + verify) |
 | `runlore_investigation_cost_usd` | histogram | `result` | estimated per-investigation cost in USD (only when `model.pricing` is configured) |
-| `runlore_investigation_budget_trips_total` | counter | `reason`, `stage` | spend ceilings crossed during an investigation. `reason` = `tokens_request` (the next request alone exceeded `max_tokens_per_investigation`), `tokens_total` (the run's cumulative tokens did), or `cost` (`max_cost_per_investigation`). `stage` = `nudge` (forced to conclude early; findings still delivered) or `kill` (hard-stopped, `result="budget_exceeded"`) |
+| `runlore_investigation_budget_trips_total` | counter | `reason`, `stage` | spend ceilings crossed during an investigation. `reason` = `tokens_request` (the next request alone exceeded `max_tokens_per_investigation`), `tokens_total` (the run's projected cumulative tokens did), or `cost` (`max_cost_per_investigation`). `stage` = `nudge` (forced to conclude early; findings still delivered) or `kill` (hard-stopped, `result="budget_exceeded"`) |
+
+**One run reports one `reason`.** The ceiling that first engaged the ladder is latched at the nudge
+and carried to the kill, so the two rungs of a single stop always agree. Without that, the nudged
+turn's own spend could push a *second* ceiling over the line and the kill would name that one
+instead — telling you to raise a knob that never stopped anything, and splitting one stop across two
+series in the `sum by (reason)` recipe below.
 
 `budget_trips_total{stage="nudge"}` is the one to alert on. A nudged investigation completes and
 records `result="resolved"` like any other, so it is invisible in every other series — only this
