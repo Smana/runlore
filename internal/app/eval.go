@@ -34,6 +34,82 @@ func evalCostUSD(cfg *config.Config, u providers.Usage) *float64 {
 	return &c
 }
 
+// evalSpend is the per-investigation ceiling set every eval runner is handed. It is
+// the operator's CONFIGURED investigation.* ceilings and model.pricing, unchanged:
+// an eval replays the production loop, so a case that would be nudged or hard-killed
+// in production must be here too. Eval-only keys would let the corpus be scored under
+// limits the cluster does not have.
+//
+// This bounds ONE investigation. A campaign is cases x n of them, so these ceilings
+// multiply by the corpus size and bound nothing about the run as a whole — that is
+// what --max-total-tokens (eval.CampaignBudget) is for.
+func evalSpend(cfg *config.Config) eval.Spend {
+	loopPricing, verifyPricing := investigationPricing(cfg)
+	return eval.Spend{
+		MaxTokensPerInvestigation: cfg.Investigation.MaxTokensPerInvestigation,
+		MaxCostPerInvestigation:   cfg.Investigation.MaxCostPerInvestigation,
+		Pricing:                   loopPricing,
+		VerifyPricing:             verifyPricing,
+	}
+}
+
+// configForAbsentFile is the config `lore eval --compare` runs on when the default
+// runlore.yaml simply does not exist — the one eval path documented as needing no
+// config, because the comparison spec carries its own per-entry models.
+//
+// It is NOT a bare &config.Config{}: an empty config's max_tokens_per_investigation
+// is 0, and every consumer in internal/investigate reads 0 as "unlimited". That made
+// the one invocation which needs no config also the only one that benchmarked several
+// models, N times over the whole corpus, with no token ceiling at all.
+// config.ApplyDefaults puts the same bounded default there that config.Load would.
+func configForAbsentFile() *config.Config {
+	cfg := &config.Config{}
+	config.ApplyDefaults(cfg)
+	return cfg
+}
+
+// campaignContext returns the context an eval campaign walks its cases under,
+// cancelled the moment budget crosses its ceiling. The budget's refusal already
+// stops the SPEND at the model boundary; cancelling is what stops the campaign from
+// walking every remaining case only to record it as a broken run.
+func campaignContext(budget *eval.CampaignBudget) (context.Context, context.CancelFunc) {
+	ctx, cancel := context.WithCancel(context.Background())
+	if budget != nil {
+		budget.OnExceeded = cancel
+	}
+	return ctx, cancel
+}
+
+// reportCampaignHalt says on STDERR why a campaign is short, and what it spent. A
+// truncated run whose report simply contains fewer cases than the corpus is
+// indistinguishable from a corpus that shrank, so the halt has to announce itself:
+// `ran` of `total` cases, and the ceiling that stopped it.
+func reportCampaignHalt(budget *eval.CampaignBudget, ran, total int) {
+	if !budget.Exceeded() {
+		return
+	}
+	fmt.Fprintf(os.Stderr,
+		"eval: STOPPED after %d/%d cases — campaign token ceiling exceeded "+
+			"(--max-total-tokens=%d, spent %d). The report below covers only the cases that ran.\n",
+		ran, total, budget.MaxTokens, budget.SpentTokens())
+}
+
+// reportJudgeSpend prints what the grading model cost, which nothing used to report.
+// The judge is a SEPARATE (usually stronger) model called once per graded run, so its
+// spend is invisible to the per-case counters that wrap only the investigation model
+// — the campaign could publish a cost figure that omitted a whole model. Printed even
+// at zero: "the judge spent nothing" and "nobody is counting the judge" must not look
+// the same.
+func reportJudgeSpend(cfg *config.Config, judge *eval.CountingModel) {
+	u := judge.Total()
+	line := fmt.Sprintf("eval: judge model spend: %d input / %d output tokens",
+		u.InputTokens, u.OutputTokens)
+	if c := evalCostUSD(cfg, u); c != nil {
+		line += fmt.Sprintf(" (~$%.4f at model.pricing)", *c)
+	}
+	fmt.Fprintln(os.Stderr, line)
+}
+
 // RunEval replays recorded incident cases through the investigation loop and
 // reports the RCA-identification rate. Requires a configured model.
 func RunEval(args []string) error {
@@ -56,6 +132,9 @@ func RunEval(args []string) error {
 	jModel := flags.String("judge-model", "", "judge model name")
 	jKeyEnv := flags.String("judge-api-key-env", "", "env var holding the judge API key")
 	compare := flags.String("compare", "", "path to a model-comparison spec (benchmark several models over the replay suite)")
+	maxTotalTokens := flags.Int("max-total-tokens", 0,
+		"ceiling on the WHOLE campaign's model tokens across every model it drives (0 = no ceiling); "+
+			"investigation.max_tokens_per_investigation still bounds each case")
 	if err := flags.Parse(args); err != nil {
 		return err
 	}
@@ -81,16 +160,17 @@ func RunEval(args []string) error {
 		if *compare == "" || cfgExplicit || !errors.Is(err, fs.ErrNotExist) {
 			return err
 		}
-		cfg = &config.Config{}
+		cfg = configForAbsentFile()
 	}
 	// The comparison spec carries its own per-entry models (and optionally its own
 	// judge), so it does NOT require a configured config.model — it only borrows the
 	// config's output-token cap and, as a fallback, the config judge.
+	budget := &eval.CampaignBudget{MaxTokens: *maxTotalTokens}
 	if *compare != "" {
 		if !nExplicit {
 			*n = compareDefaultN
 		}
-		return RunEvalCompare(cfg, *compare, *casesDir, *reportDir, *stamp, *n,
+		return RunEvalCompare(cfg, budget, *compare, *casesDir, *reportDir, *stamp, *n,
 			*jProvider, *jBaseURL, *jModel, *jKeyEnv)
 	}
 	if !ModelConfigured(cfg) {
@@ -100,7 +180,7 @@ func RunEval(args []string) error {
 		if !nExplicit {
 			*n = 10
 		}
-		return RunEvalLive(cfg, *scnDir, *recordDir, *reportDir, *prevReport, *stamp, *n,
+		return RunEvalLive(cfg, budget, *scnDir, *recordDir, *reportDir, *prevReport, *stamp, *n,
 			*jProvider, *jBaseURL, *jModel, *jKeyEnv)
 	}
 	// ---- existing replay path (unchanged) ----
@@ -115,8 +195,14 @@ func RunEval(args []string) error {
 	if cfg.Model.APIKeyEnv != "" {
 		apiKey = os.Getenv(cfg.Model.APIKeyEnv)
 	}
-	counting := &eval.CountingModel{Inner: BuildModel(cfg, apiKey)}
-	runner := &eval.Runner{Model: counting, Log: slog.New(slog.NewTextHandler(io.Discard, nil))}
+	ctx, cancel := campaignContext(budget)
+	defer cancel()
+	counting := &eval.CountingModel{Inner: budget.Wrap(BuildModel(cfg, apiKey))}
+	runner := &eval.Runner{
+		Model: counting,
+		Log:   slog.New(slog.NewTextHandler(io.Discard, nil)),
+		Spend: evalSpend(cfg),
+	}
 	// Progress to STDERR (stdout carries the result table the report/scorecard read):
 	// a nightly campaign is ~30 sequential live investigations and used to print
 	// nothing at all until it finished, so a run killed by a CI timeout was
@@ -132,7 +218,8 @@ func RunEval(args []string) error {
 		fmt.Fprintf(os.Stderr, "eval: [%d/%d] %-32s %-7s pass-rate=%.0f%%  elapsed=%s\n",
 			done, total, a.Name, status, a.PassRate*100, time.Since(start).Round(time.Second))
 	}
-	camp := runner.RunN(context.Background(), cases, *n)
+	camp := runner.RunN(ctx, cases, *n)
+	reportCampaignHalt(budget, len(camp.Aggregates), len(cases))
 	for _, a := range camp.Aggregates {
 		status := "MISSED"
 		if a.Reached {
@@ -201,8 +288,10 @@ func (shellStepRunner) Run(ctx context.Context, step string) error {
 	return cmd.Run()
 }
 
-// RunEvalLive runs the live-fire campaign and writes a dated report.
-func RunEvalLive(cfg *config.Config, scnDir, recordDir, reportDir, prevReport, stamp string, n int,
+// RunEvalLive runs the live-fire campaign and writes a dated report. budget bounds
+// the whole campaign's model tokens (nil ⇒ no ceiling and no accounting).
+func RunEvalLive(cfg *config.Config, budget *eval.CampaignBudget,
+	scnDir, recordDir, reportDir, prevReport, stamp string, n int,
 	jProvider, jBaseURL, jModel, jKeyEnv string) error {
 	scns, err := eval.LoadScenarios(scnDir)
 	if err != nil {
@@ -212,12 +301,18 @@ func RunEvalLive(cfg *config.Config, scnDir, recordDir, reportDir, prevReport, s
 		return fmt.Errorf("no scenarios found in %s", scnDir)
 	}
 	log := logging.FromConfig(os.Stderr, cfg.Logging.Format, cfg.Logging.Level)
-	ctx := context.Background()
+	ctx, cancel := campaignContext(budget)
+	defer cancel()
 	model, tools, recall, _ := BuildModelAndTools(ctx, cfg, GitOpsFromKube(cfg, log), nil, log)
-	judge := eval.ModelJudge{Model: BuildJudgeModel(cfg, jProvider, jBaseURL, jModel, jKeyEnv)}
+	// Both models go through the campaign budget: the judge is called once per run,
+	// so on a 10-scenario x n=10 campaign it is a hundred completions of a model
+	// nothing was counting.
+	judgeSpend := &eval.CountingModel{Inner: budget.Wrap(BuildJudgeModel(cfg, jProvider, jBaseURL, jModel, jKeyEnv))}
+	judge := eval.ModelJudge{Model: judgeSpend}
 
 	runner := &eval.LiveRunner{
-		Model: model, BaseTools: tools, Judge: judge, Steps: shellStepRunner{}, Log: log, N: n, Recall: recall,
+		Model: budget.Wrap(model), BaseTools: tools, Judge: judge, Steps: shellStepRunner{},
+		Log: log, N: n, Recall: recall, Spend: evalSpend(cfg),
 		OnRecord: func(scn eval.Scenario, calls []eval.Call) {
 			if err := eval.WriteCase(recordDir, eval.RecordedCase(scn, calls)); err != nil {
 				log.Warn("record case failed", "id", scn.ID, "err", err)
@@ -226,9 +321,17 @@ func RunEvalLive(cfg *config.Config, scnDir, recordDir, reportDir, prevReport, s
 	}
 	var results []eval.LiveResult
 	for _, scn := range scns {
+		// A live scenario mutates a real cluster (setup/teardown shell steps), so a
+		// halted campaign must stop STARTING scenarios, not merely stop paying for
+		// their model calls.
+		if ctx.Err() != nil {
+			break
+		}
 		log.Info("running scenario", "id", scn.ID)
 		results = append(results, runner.RunScenario(ctx, scn))
 	}
+	reportCampaignHalt(budget, len(results), len(scns))
+	reportJudgeSpend(cfg, judgeSpend)
 
 	if stamp == "" {
 		stamp = time.Now().UTC().Format(time.RFC3339)

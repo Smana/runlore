@@ -76,15 +76,24 @@ type ComparisonRunner struct {
 	Model providers.ModelProvider // the entry under test (wrap with CountingModel for token totals)
 	Judge Judge                   // fixed across entries; nil skips rubric grading
 	Log   *slog.Logger
+	// Spend is the per-investigation ceiling set handed to every benchmarked loop.
+	// One set across all entries on purpose: an entry that is allowed to spend more
+	// than its rivals is not being compared with them.
+	Spend Spend
 }
 
-// RunCases replays every case n times against the entry's model.
+// RunCases replays every case n times against the entry's model. It stops early on
+// a cancelled context — a campaign-wide halt (Ctrl-C, or CampaignBudget tripping)
+// must not keep grinding every remaining case into the same failure.
 func (cr *ComparisonRunner) RunCases(ctx context.Context, cases []Case, n int) []ComparedCase {
 	if n < 1 {
 		n = 1
 	}
 	out := make([]ComparedCase, 0, len(cases))
 	for _, c := range cases {
+		if ctx.Err() != nil {
+			break
+		}
 		cc := ComparedCase{Name: c.Name}
 		for i := 0; i < n; i++ {
 			cc.Runs = append(cc.Runs, cr.runOnce(ctx, c))
@@ -106,6 +115,11 @@ func (cr *ComparisonRunner) runOnce(ctx context.Context, c Case) ComparedRun {
 		Model: cr.Model,
 		Tools: wrap(tools, rec),
 		Log:   cr.Log,
+		// Identical ceilings for every entry — see ComparisonRunner.Spend.
+		MaxTokensPerInvestigation: cr.Spend.MaxTokensPerInvestigation,
+		MaxCostPerInvestigation:   cr.Spend.MaxCostPerInvestigation,
+		Pricing:                   cr.Spend.Pricing,
+		VerifyPricing:             cr.Spend.VerifyPricing,
 		OnComplete: func(inv providers.Investigation) {
 			got, done = inv, true
 		},
