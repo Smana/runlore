@@ -376,9 +376,16 @@ func TestBudgetTripReportsOneCeilingForTheWholeRun(t *testing.T) {
 // bulkTool is a tool whose result is a fixed, large blob, so the message history —
 // and therefore every subsequent request — grows the way a real tool-heavy
 // investigation's does. size is the reply length in bytes.
-type bulkTool struct{ size int }
+//
+// name decides whether compaction may touch those blobs: compactHistory keeps
+// `what_changed` and the rest of the root-cause skeleton verbatim, so a fixture using
+// that name models a transcript that cannot be shrunk at all.
+type bulkTool struct {
+	size int
+	name string
+}
 
-func (bulkTool) Name() string        { return "what_changed" }
+func (b bulkTool) Name() string      { return b.name }
 func (bulkTool) Description() string { return "returns a bulky tool result" }
 func (bulkTool) Schema() string      { return `{"type":"object"}` }
 func (b bulkTool) Call(context.Context, string) (string, error) {
@@ -484,15 +491,24 @@ func (m *growingUsageModel) largestBilled() int {
 // the PROJECTED total (spent + the request about to be sent) moves the trip one turn
 // earlier, so the nudged turn is the request that crosses rather than the one after it.
 func TestTokenCeilingBoundsTheTokensActuallyDelivered(t *testing.T) {
-	const ceiling = 100_000
-	model := &growingUsageModel{density: 2, tool: "what_changed"}
+	// Run at the SHIPPED defaults, because the overshoot figure the docs quote is the
+	// one an operator meets. It also keeps the fixture honest: every request has to stay
+	// inside the per-request bound the ceiling derives, which the premise below asserts.
+	var c config.Config
+	config.ApplyDefaults(&c)
+	ceiling := c.Investigation.MaxTokensPerInvestigation
+	// An ORDINARY tool, not a keep-listed one: compaction is part of the shipped
+	// behaviour, so a fixture whose every blob is exempt from it would measure a
+	// configuration nobody runs — and would be stopped by the per-request arm instead,
+	// which is a different guard from the one this test measures.
+	model := &growingUsageModel{density: 2, tool: "big_tool"}
 	var got providers.Investigation
 	li := &LoopInvestigator{
 		Model:                     model,
-		Tools:                     []Tool{bulkTool{size: 32768}},
+		Tools:                     []Tool{bulkTool{size: c.Investigation.MaxToolOutputBytes, name: "big_tool"}},
 		Log:                       slog.New(slog.NewTextHandler(io.Discard, nil)),
 		MaxSteps:                  20,
-		MaxToolOutputBytes:        32768,
+		MaxToolOutputBytes:        c.Investigation.MaxToolOutputBytes,
 		MaxTokensPerInvestigation: ceiling,
 		OnComplete:                func(inv providers.Investigation) { got = inv },
 	}
@@ -507,6 +523,15 @@ func TestTokenCeilingBoundsTheTokensActuallyDelivered(t *testing.T) {
 		t.Fatalf("premise failed — the ceiling must stop a growing run before max_steps; %d calls of %d, billed %v",
 			model.calls, li.MaxSteps, model.billed)
 	}
+	// Premise: it is the CUMULATIVE arm being measured. Every request stayed inside the
+	// per-request bound, so nothing here was stopped for being individually oversized —
+	// otherwise this measures the wrong guard while reading as though it measures this
+	// one, and the overshoot it reports is not the overshoot the docs quote.
+	if largest := model.largestBilled(); largest > requestBudget(ceiling) {
+		t.Fatalf("premise failed — a single request billed %d against a %d per-request bound, so the "+
+			"per-request arm stopped this run and the cumulative overshoot is not what was measured; "+
+			"billed %v", largest, requestBudget(ceiling), model.billed)
+	}
 	if largest := model.largestBilled(); delivered > ceiling+largest {
 		t.Fatalf("a %d-token ceiling delivered %d tokens (%.2fx), billed per call %v.\n"+
 			"The ladder concedes ONE request past the trip (the nudged turn), so the most an "+
@@ -514,7 +539,7 @@ func TestTokenCeilingBoundsTheTokensActuallyDelivered(t *testing.T) {
 			"second oversized request charged after the ceiling was already known to be crossed: "+
 			"the cumulative arm must trip on spent+est — what the run will have cost once this "+
 			"request is sent — not on what it has cost already.",
-			ceiling, delivered, float64(delivered)/ceiling, model.billed, ceiling+largest)
+			ceiling, delivered, float64(delivered)/float64(ceiling), model.billed, ceiling+largest)
 	}
 }
 

@@ -202,7 +202,9 @@ func overBudget(est, budget int) bool { return budget > 0 && est > budget }
 // became cumulative, so this changes what one request may cost for nobody. The fraction
 // is small enough that a growing transcript reaches the compaction trigger with the run
 // budget still largely unspent: measured at the shipped max_tool_output_bytes,
-// compaction fires on the sixth request with 186 718 of 400 000 tokens spent.
+// compaction fires on the sixth request with 186 758 of 400 000 tokens spent (the
+// figure TestCompactionFiresBeforeTheCumulativeCeiling drives, and asserts is under the
+// ceiling).
 const requestBudgetFraction = 0.25
 
 // requestBudget converts an investigation's cumulative token budget into the ceiling
