@@ -151,6 +151,13 @@ func RunServe(version string, args []string) error {
 	if msg := WebhookAuthWarning(alertmanagerEnabled, webhookToken, cfg.Actions.Mode); msg != "" {
 		log.Warn(msg)
 	}
+	// A cost ceiling with no usable rate card is not a stricter limit that rarely
+	// fires — it can never fire. Raised here, beside the other pure-config startup
+	// warnings and once per process: the condition does not change between incidents,
+	// so anywhere on the investigation path would repeat it per alert.
+	if msg := CostCeilingWithoutPricingWarning(cfg); msg != "" {
+		log.Warn(msg)
+	}
 
 	// Set up the single shared OTel metrics instance before building the investigator
 	// so recall + the investigation loop can record to it from the first request.

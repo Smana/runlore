@@ -74,6 +74,120 @@ func TestTokenCeilingIsARunningTotal(t *testing.T) {
 	}
 }
 
+// costPerCallUSD is what one reportingRunawayModel{inputTokens: 30_000} completion
+// costs under costPricing: 30_000 input @ $10/Mtok = $0.3000, plus its 10 output
+// tokens @ $50/Mtok = $0.0005.
+const costPerCallUSD = 0.3005
+
+// costPricing is the rate card costPerCallUSD is derived from.
+var costPricing = &Pricing{InputUSDPerMTok: 10, OutputUSDPerMTok: 50}
+
+// costCeilingInvestigator builds a runaway loop whose every completion reports the
+// same usage. Pricing is passed in so the caller can also exercise the unpriced
+// case, where the ceiling is inert by construction.
+func costCeilingInvestigator(pricing *Pricing, ceilingUSD float64) (*LoopInvestigator, *reportingRunawayModel) {
+	model := &reportingRunawayModel{inputTokens: 30_000}
+	return &LoopInvestigator{
+		Model:   model,
+		Log:     slog.New(slog.NewTextHandler(io.Discard, nil)),
+		Pricing: pricing,
+		// The token ceiling is OFF so nothing but the currency comparison can stop
+		// this loop — otherwise a passing test would not tell the two apart.
+		MaxTokensPerInvestigation: 0,
+		MaxCostPerInvestigation:   ceilingUSD,
+		MaxSteps:                  10,
+		OnComplete:                func(providers.Investigation) {},
+	}, model
+}
+
+// TestCostCeilingStopsTheInvestigation pins the second half of the audit finding:
+// there was no ceiling denominated in CURRENCY at any scope. model.pricing computed
+// a cost at the END of an investigation and nothing compared it to anything.
+//
+// The token ceiling is explicitly disabled here, so the only thing that can stop this
+// runaway loop before max_steps is max_cost_per_investigation. One call costs
+// $0.3005; against a $1.00 ceiling the fourth call is the first to cross it, so the
+// ladder nudges on the step after that and kills on the one after.
+func TestCostCeilingStopsTheInvestigation(t *testing.T) {
+	const (
+		perCallUSD = costPerCallUSD
+		ceilingUSD = 1.00
+	)
+	li, model := costCeilingInvestigator(costPricing, ceilingUSD)
+	var got *providers.Investigation
+	li.OnComplete = func(inv providers.Investigation) { got = &inv }
+	if err := li.Investigate(context.Background(), Request{Title: "runaway-cost", Fingerprint: "fp-cost"}); err != nil {
+		t.Fatalf("Investigate: %v", err)
+	}
+
+	freeCalls := 0
+	for spent := 0.0; spent <= ceilingUSD; spent += perCallUSD {
+		freeCalls++
+	}
+	if want := freeCalls + 1; model.calls != want {
+		t.Fatalf("model was called %d times at $%.2f per call against a $%.2f ceiling "+
+			"(estimated spend $%.2f); want %d. model.pricing must gate the run, not merely report on it.",
+			model.calls, perCallUSD, ceilingUSD, float64(model.calls)*perCallUSD, want)
+	}
+	if got == nil {
+		t.Fatal("OnComplete never called: the cost hard-kill must still deliver an unresolved result")
+	}
+	if !mentions(got.Unresolved, "cost") {
+		t.Fatalf("the hard-kill result must name the cost ceiling it hit; got: %v", got.Unresolved)
+	}
+	// Premise: the delivered finding really is priced, so the comparison had a
+	// dollar figure to work with rather than passing on a zero.
+	if !got.Usage.Priced || got.Usage.CostUSD <= ceilingUSD {
+		t.Fatalf("premise failed — delivered usage must be priced and over the ceiling: %+v", got.Usage)
+	}
+}
+
+// TestOverCostBudgetRequiresAPricedTotal pins the guard that separates "$0 spent so
+// far" from "no dollar figure exists". Both leave UsageTotals.CostUSD at 0, so only
+// the Priced flag can tell them apart, and only the first may be compared.
+//
+// Today aggregateUsage never produces a CostUSD without setting Priced, so the loop
+// test above cannot reach this case — which is exactly why it is pinned here
+// directly. Reading CostUSD without the flag is the bug that would let an unpriced
+// deployment believe a ceiling was in force.
+func TestOverCostBudgetRequiresAPricedTotal(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		spent   providers.UsageTotals
+		ceiling float64
+		want    bool
+	}{
+		{"unpriced totals never trip, whatever CostUSD holds",
+			providers.UsageTotals{CostUSD: 5, Priced: false}, 1, false},
+		{"priced and over", providers.UsageTotals{CostUSD: 5, Priced: true}, 1, true},
+		{"priced and under", providers.UsageTotals{CostUSD: 0.5, Priced: true}, 1, false},
+		{"priced exactly at the ceiling is not over (strict >)",
+			providers.UsageTotals{CostUSD: 1, Priced: true}, 1, false},
+		{"no ceiling configured", providers.UsageTotals{CostUSD: 999, Priced: true}, 0, false},
+	} {
+		if got := overCostBudget(tc.spent, tc.ceiling); got != tc.want {
+			t.Errorf("%s: overCostBudget(%+v, %v) = %v, want %v", tc.name, tc.spent, tc.ceiling, got, tc.want)
+		}
+	}
+}
+
+// TestCostCeilingIsInertWithoutPricing states the limitation plainly rather than
+// leaving it implied: with no model.pricing there is no cost to compare, so
+// max_cost_per_investigation cannot fire and the run goes the full distance. This is
+// exactly the silent-no-op that CostCeilingWithoutPricingWarning exists to announce
+// at startup — the guard for that lives in internal/app.
+func TestCostCeilingIsInertWithoutPricing(t *testing.T) {
+	li, model := costCeilingInvestigator(nil /* unpriced */, 0.01)
+	if err := li.Investigate(context.Background(), Request{Title: "unpriced"}); err != nil {
+		t.Fatalf("Investigate: %v", err)
+	}
+	if model.calls != li.MaxSteps {
+		t.Fatalf("model was called %d times, want %d (the full step budget): an unpriced "+
+			"investigation has no cost to compare, so the ceiling must be inert — not "+
+			"accidentally firing on a zero cost", model.calls, li.MaxSteps)
+	}
+}
+
 // TestBudgetTripTelemetryNamesTheCeilingAndRung pins what an operator can actually
 // see when a ceiling fires in production.
 //

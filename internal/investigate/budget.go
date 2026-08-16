@@ -19,6 +19,9 @@ const (
 	// budgetReasonTotalTokens: the tokens this investigation has ALREADY spent
 	// (provider-reported, loop + verify) exceed MaxTokensPerInvestigation.
 	budgetReasonTotalTokens = "tokens_total"
+	// budgetReasonCost: the estimated USD this investigation has already spent
+	// exceeds MaxCostPerInvestigation.
+	budgetReasonCost = "cost"
 )
 
 // Ladder rungs, used as the `stage` label on the budget-trip metric: a ceiling is
@@ -43,8 +46,11 @@ func spentTokens(t providers.UsageTotals) int { return t.InputTokens + t.OutputT
 // to know whether to raise tokens or dollars.
 func budgetKillResult(req Request, reason string) providers.Investigation {
 	which := "per-request token budget (investigation.max_tokens_per_investigation)"
-	if reason == budgetReasonTotalTokens {
+	switch reason {
+	case budgetReasonTotalTokens:
 		which = "cumulative token budget (investigation.max_tokens_per_investigation)"
+	case budgetReasonCost:
+		which = "estimated cost ceiling (investigation.max_cost_per_investigation)"
 	}
 	return providers.Investigation{
 		Title:       req.Title,
@@ -171,6 +177,20 @@ func (c *tokenCalibration) heuristicTarget(target int) int {
 
 // overBudget reports whether est exceeds budget. budget <= 0 means unlimited.
 func overBudget(est, budget int) bool { return budget > 0 && est > budget }
+
+// overCostBudget reports whether an investigation's accumulated estimated spend
+// exceeds ceiling, in USD. ceiling <= 0 means no cost ceiling.
+//
+// The Priced guard states the contract rather than relying on a coincidence:
+// CostUSD is 0 both for "this run has cost nothing yet" and for "no model.pricing
+// is configured, so no cost was ever computed", and only the first is a figure that
+// may be compared. aggregateUsage happens to leave the unpriced case at 0 today, so
+// the guard changes no outcome — but a comparison that reads CostUSD without asking
+// whether it means anything is the shape of the bug where an unpriced deployment
+// believes a ceiling is in force.
+func overCostBudget(spent providers.UsageTotals, ceiling float64) bool {
+	return ceiling > 0 && spent.Priced && spent.CostUSD > ceiling
+}
 
 // budgetNudge is the single-use message injected once when the token estimate
 // exceeds MaxTokensPerInvestigation, prompting the model to wrap up now.

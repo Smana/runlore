@@ -232,3 +232,52 @@ func GitopsEngine(cfg *config.Config) string {
 	}
 	return "flux"
 }
+
+// CostCeilingWithoutPricingWarning decides the startup warning for a cost ceiling
+// that cannot fire, returning "" when no warning is warranted.
+//
+// investigation.max_cost_per_investigation is compared against the investigation's
+// running estimated spend, and that estimate exists only when model.pricing supplies
+// token rates: aggregateUsage sets UsageTotals.Priced (and a CostUSD worth reading)
+// off cfg.Model.Pricing alone. So a ceiling configured without pricing is not a
+// stricter limit that rarely fires — it is structurally incapable of firing, for
+// every investigation, forever. An operator who wrote a dollar figure into their
+// config has stated an intent to cap spend; leaving that intent silently inert is the
+// exact "a limit that is neither enforced nor signalled" shape this warning exists to
+// break. It stays a warning rather than a hard failure because the rest of the
+// deployment is perfectly valid: unpriced token accounting is a supported mode, and
+// refusing to start would punish a config that is merely incomplete.
+//
+// Two distinct dead configurations, two messages, because the fix differs:
+//
+//   - No model.pricing at all — nothing is priced, so add the rates.
+//   - model.pricing present but every rate 0 — cost is computed and is always exactly
+//     $0.00, which is under any positive ceiling. This one is the more dangerous of
+//     the two: the finding footer prints "~$0.00" and the investigation_cost_usd
+//     metric reports zero, so the deployment LOOKS instrumented for cost. A rate card
+//     of all zeros is a placeholder someone meant to fill in.
+//
+// model.verify.pricing is deliberately not consulted: it only overrides the verify
+// pass's rates and inherits model.pricing when unset, so it can neither make an
+// unpriced investigation priced nor rescue an all-zero main rate card.
+func CostCeilingWithoutPricingWarning(cfg *config.Config) string {
+	if cfg.Investigation.MaxCostPerInvestigation <= 0 {
+		return ""
+	}
+	const fix = "Set model.pricing (input_usd_per_mtok, output_usd_per_mtok, cached_input_usd_per_mtok) " +
+		"to your provider's rates, or drop the ceiling and bound spend with " +
+		"investigation.max_tokens_per_investigation instead (docs/configuration/configuration.md)"
+	p := cfg.Model.Pricing
+	if p == nil {
+		return fmt.Sprintf("investigation.max_cost_per_investigation is set ($%g) but model.pricing is not "+
+			"configured, so NO cost is ever computed and the ceiling can never fire — this deployment has no "+
+			"spend limit denominated in currency. "+fix, cfg.Investigation.MaxCostPerInvestigation)
+	}
+	if p.InputUSDPerMTok == 0 && p.OutputUSDPerMTok == 0 && p.CachedInputUSDPerMTok == 0 {
+		return fmt.Sprintf("investigation.max_cost_per_investigation is set ($%g) but every model.pricing rate "+
+			"is 0, so every investigation costs exactly $0.00 and the ceiling can never fire — while the "+
+			"notification footer and runlore_investigation_cost_usd both report a cost, making the deployment "+
+			"look instrumented for spend when it is not. "+fix, cfg.Investigation.MaxCostPerInvestigation)
+	}
+	return ""
+}

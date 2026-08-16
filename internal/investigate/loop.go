@@ -191,7 +191,18 @@ type LoopInvestigator struct {
 
 	// Cost controls (0 means disabled/unlimited):
 	MaxToolOutputBytes        int // truncate tool results larger than this before adding to history
-	MaxTokensPerInvestigation int // inject a budget-nudge message when the estimated token count exceeds this
+	MaxTokensPerInvestigation int // ceiling on BOTH the next request's estimated size and the investigation's accumulated tokens
+
+	// MaxCostPerInvestigation is the ceiling, in USD, on this investigation's
+	// accumulated estimated spend (loop tokens priced at Pricing, verify tokens at
+	// VerifyPricing — the same arithmetic aggregateUsage reports on the finding).
+	// 0 ⇒ no cost ceiling.
+	//
+	// It is INERT without Pricing: an unpriced investigation has no dollar figure to
+	// compare against, so the ceiling can never fire. That combination is a
+	// misconfiguration worth saying out loud rather than failing silently — see
+	// app.CostCeilingWithoutPricingWarning, raised on the startup path.
+	MaxCostPerInvestigation float64
 
 	// Compaction selects how mid-loop history compaction treats the tool outputs it
 	// elides: "" / "elide" (default) drops their bodies for markers; "summarize" first
@@ -848,6 +859,8 @@ func (li *LoopInvestigator) budgetTrip(est int, spent providers.UsageTotals) str
 		return budgetReasonRequestTokens
 	case overBudget(spentTokens(spent), li.MaxTokensPerInvestigation):
 		return budgetReasonTotalTokens
+	case overCostBudget(spent, li.MaxCostPerInvestigation):
+		return budgetReasonCost
 	}
 	return ""
 }
@@ -923,7 +936,8 @@ func (li *LoopInvestigator) enforceBudget(ctx context.Context, req Request, sys 
 		li.Log.Info("investigation budget nudge: forcing the model to conclude",
 			"title", req.Title, "reason", reason,
 			"estimate_tokens", est, "spent_tokens", spentTokens(spent),
-			"budget_tokens", li.MaxTokensPerInvestigation)
+			"budget_tokens", li.MaxTokensPerInvestigation,
+			"spent_usd", spent.CostUSD, "budget_usd", li.MaxCostPerInvestigation)
 		*messages = append(*messages, providers.Message{Role: "user", Content: budgetNudge})
 		*budgetNudged = true
 		// From here on, force submit_findings on every remaining request: the
@@ -941,7 +955,9 @@ func (li *LoopInvestigator) enforceBudget(ctx context.Context, req Request, sys 
 		"reason", reason,
 		"estimate_tokens", est,
 		"spent_tokens", spentTokens(spent),
-		"budget_tokens", li.MaxTokensPerInvestigation)
+		"budget_tokens", li.MaxTokensPerInvestigation,
+		"spent_usd", spent.CostUSD,
+		"budget_usd", li.MaxCostPerInvestigation)
 	if li.Metrics != nil {
 		li.Metrics.InvestigationsDropped.Add(ctx, 1)
 	}

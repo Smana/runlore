@@ -535,3 +535,65 @@ func TestOutcomeKind(t *testing.T) {
 		t.Fatalf("OutcomeKind(false) = %q, want %q", got, "fresh")
 	}
 }
+
+// TestCostCeilingWithoutPricingWarning covers the (ceiling set × pricing shape)
+// matrix. The two dead configurations warn; a ceiling with real rates, and no ceiling
+// at all, stay silent — a warning that fired on a correct config would be muted
+// within a day and take the real ones with it.
+func TestCostCeilingWithoutPricingWarning(t *testing.T) {
+	rates := &config.Pricing{InputUSDPerMTok: 3, OutputUSDPerMTok: 15}
+	zeroed := &config.Pricing{}
+
+	tests := []struct {
+		name     string
+		ceiling  float64
+		pricing  *config.Pricing
+		wantWarn bool
+		wantSays string // a phrase the message must carry, naming the specific dead config
+	}{
+		{"no ceiling, no pricing", 0, nil, false, ""},
+		{"no ceiling, with pricing", 0, rates, false, ""},
+		{"ceiling with real rates", 2.5, rates, false, ""},
+		{"ceiling, no pricing at all", 2.5, nil, true, "model.pricing is not configured"},
+		{"ceiling, all rates zero", 2.5, zeroed, true, "every model.pricing rate is 0"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := &config.Config{}
+			cfg.Investigation.MaxCostPerInvestigation = tc.ceiling
+			cfg.Model.Pricing = tc.pricing
+			got := CostCeilingWithoutPricingWarning(cfg)
+			if (got != "") != tc.wantWarn {
+				t.Fatalf("CostCeilingWithoutPricingWarning(ceiling=%v, pricing=%+v) = %q, wantWarn = %v",
+					tc.ceiling, tc.pricing, got, tc.wantWarn)
+			}
+			if !tc.wantWarn {
+				return
+			}
+			if !strings.Contains(got, tc.wantSays) {
+				t.Fatalf("message must name the specific dead configuration (%q): %q", tc.wantSays, got)
+			}
+			// Every warning must carry the key at issue and a way out; a paragraph
+			// that only says "this is wrong" costs an operator a docs hunt.
+			for _, want := range []string{"max_cost_per_investigation", "model.pricing", "can never fire"} {
+				if !strings.Contains(got, want) {
+					t.Fatalf("message missing %q — it must name the key, the missing input and the consequence: %q", want, got)
+				}
+			}
+		})
+	}
+}
+
+// TestCostCeilingWarningIgnoresVerifyPricing pins that model.verify.pricing cannot
+// silence the warning. It only overrides the VERIFY pass's rates and inherits
+// model.pricing when unset, so it can neither price an otherwise-unpriced
+// investigation nor rescue an all-zero main rate card — a deployment that sets it
+// alone still has a ceiling that never fires.
+func TestCostCeilingWarningIgnoresVerifyPricing(t *testing.T) {
+	cfg := &config.Config{}
+	cfg.Investigation.MaxCostPerInvestigation = 2.5
+	cfg.Model.Verify = &config.ModelOverride{Pricing: &config.Pricing{InputUSDPerMTok: 3, OutputUSDPerMTok: 15}}
+	if got := CostCeilingWithoutPricingWarning(cfg); got == "" {
+		t.Fatal("model.verify.pricing alone leaves the loop unpriced — the ceiling still cannot fire, so the warning must stand")
+	}
+}
