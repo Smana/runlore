@@ -93,7 +93,14 @@ func BuildCatalog(ctx context.Context, cfg *config.Config, forgeTok ForgeToken, 
 		if e.APIKeyEnv != "" {
 			key = os.Getenv(e.APIKeyEnv)
 		}
-		embedder = embed.New(e.BaseURL, e.Model, key)
+		ec := embed.New(e.BaseURL, e.Model, key)
+		// The embeddings endpoint bills like any other model call — once per
+		// hybrid-recall query, and in bulk on every catalog reload — so give it the
+		// shared metrics instance. It reports under provider="embed" on the same
+		// instruments as the main/verify/rerank tiers. That makes the spend visible,
+		// not bounded; see the inventory in docs/configuration/configuration.md.
+		ec.Metrics = metrics
+		embedder = ec
 		log.Info("hybrid recall: embeddings endpoint configured", "base_url", e.BaseURL, "model", e.Model)
 	}
 	// armVecCache persists the embedding cache across restarts (default on with

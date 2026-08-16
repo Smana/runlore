@@ -14,7 +14,8 @@ import (
 // label, the log line and the delivered unresolved entry.
 const (
 	// budgetReasonRequestTokens: the next request on its own would exceed
-	// MaxTokensPerInvestigation. Caught before it is sent.
+	// requestBudget(MaxTokensPerInvestigation) — a quarter of the run's budget.
+	// Caught before it is sent.
 	budgetReasonRequestTokens = "tokens_request"
 	// budgetReasonTotalTokens: the tokens this investigation has ALREADY spent
 	// (provider-reported, loop + verify) exceed MaxTokensPerInvestigation.
@@ -45,7 +46,7 @@ func spentTokens(t providers.UsageTotals) int { return t.InputTokens + t.OutputT
 // operator reading only the notification should not have to correlate a log line
 // to know whether to raise tokens or dollars.
 func budgetKillResult(req Request, reason string) providers.Investigation {
-	which := "per-request token budget (investigation.max_tokens_per_investigation)"
+	which := "per-request token budget (a quarter of investigation.max_tokens_per_investigation)"
 	switch reason {
 	case budgetReasonTotalTokens:
 		which = "cumulative token budget (investigation.max_tokens_per_investigation)"
@@ -177,6 +178,44 @@ func (c *tokenCalibration) heuristicTarget(target int) int {
 
 // overBudget reports whether est exceeds budget. budget <= 0 means unlimited.
 func overBudget(est, budget int) bool { return budget > 0 && est > budget }
+
+// requestBudgetFraction is the share of an investigation's whole token budget that
+// ONE request may take: a ceiling has to fund at least four full-size requests to be
+// a run budget at all.
+//
+// The two quantities need separate thresholds because they are separate failures with
+// separate fixes. "This run has spent too much in total" is answered by raising
+// max_tokens_per_investigation; "this single request is too big" is answered by
+// shrinking a request — max_tool_output_bytes, compaction — and raising the run budget
+// does not help. Comparing one request against the whole run's budget states that a
+// single request may consume the entire investigation, which bounds nothing, and drags
+// mid-loop compaction down with it: compaction triggers at 0.7x whatever bounds one
+// request, so pointed at the cumulative number its trigger sits at 0.7x a figure the
+// run's ACCUMULATED spend reaches first. On a monotonically growing transcript
+// sum(est_i) crosses the ceiling long before any single est_i reaches 0.7 of it, so
+// the ladder always fires first and compaction is unreachable at every configuration.
+//
+// A quarter, rather than an operator-facing knob: this is a structural relationship
+// between two quantities, not a preference. It also derives, rather than duplicates,
+// the bound the per-request check has always used — at the shipped default it is 100
+// 000 tokens with compaction at 70 000, exactly the pair in force before the ceiling
+// became cumulative, so this changes what one request may cost for nobody. The fraction
+// is small enough that a growing transcript reaches the compaction trigger with the run
+// budget still largely unspent: measured at the shipped max_tool_output_bytes,
+// compaction fires on the sixth request with 186 758 of 400 000 tokens spent (the
+// figure TestCompactionFiresBeforeTheCumulativeCeiling drives, and asserts is under the
+// ceiling).
+const requestBudgetFraction = 0.25
+
+// requestBudget converts an investigation's cumulative token budget into the ceiling
+// on ONE request. cumulative <= 0 (unlimited) passes straight through, so an operator
+// who opted out with -1 is not handed a derived bound they never asked for.
+func requestBudget(cumulative int) int {
+	if cumulative <= 0 {
+		return 0
+	}
+	return int(float64(cumulative) * requestBudgetFraction)
+}
 
 // overCostBudget reports whether an investigation's accumulated estimated spend
 // exceeds ceiling, in USD. ceiling <= 0 means no cost ceiling.

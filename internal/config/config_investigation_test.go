@@ -356,7 +356,7 @@ func TestValidatePricingNonNegative(t *testing.T) {
 
 // TestApplyDefaultsResourceCaps locks in the safe-by-default resource caps
 // (C3/B3-budget): a zero-value config must get the bounded Helm-chart defaults
-// (32768 bytes / 100000 tokens) so that `lore serve --config` and `lore
+// (32768 bytes / 400000 tokens) so that `lore serve --config` and `lore
 // investigate` are never silently unbounded.
 func TestApplyDefaultsResourceCaps(t *testing.T) {
 	// Unset (zero) → bounded defaults are applied (match the Helm chart values.yaml).
@@ -365,8 +365,8 @@ func TestApplyDefaultsResourceCaps(t *testing.T) {
 	if c.Investigation.MaxToolOutputBytes != 32768 {
 		t.Fatalf("default MaxToolOutputBytes: got %d, want 32768", c.Investigation.MaxToolOutputBytes)
 	}
-	if c.Investigation.MaxTokensPerInvestigation != 100000 {
-		t.Fatalf("default MaxTokensPerInvestigation: got %d, want 100000", c.Investigation.MaxTokensPerInvestigation)
+	if c.Investigation.MaxTokensPerInvestigation != 400000 {
+		t.Fatalf("default MaxTokensPerInvestigation: got %d, want 400000", c.Investigation.MaxTokensPerInvestigation)
 	}
 }
 
@@ -405,7 +405,7 @@ func TestApplyDefaultsResourceCapsExplicit(t *testing.T) {
 // TestMaxCostPerInvestigationIsOptIn pins the config surface of the USD ceiling and,
 // deliberately, its DIFFERENCE from the token sibling above.
 //
-// max_tokens_per_investigation ships a bounded default (100000) because a token is a
+// max_tokens_per_investigation ships a bounded default (400000) because a token is a
 // provider-neutral unit: the same number means the same thing on every model, so a
 // safe default can be chosen for an operator. A dollar is not. A self-hosted operator
 // picks their own model and supplies their own rates via model.pricing, so any default

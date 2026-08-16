@@ -171,11 +171,32 @@ func TestCompactSkipsBodiesNoLargerThanMarker(t *testing.T) {
 	}
 }
 
+// TestCompactionTarget pins the two derived thresholds and, more importantly, their
+// ORDER: compaction has to trigger below the bound on one request, which has to sit
+// below the run's whole budget. Collapse any two of the three and the middle rung
+// stops existing — which is how compaction became unreachable once the per-request
+// check and the run budget were read off the same number.
 func TestCompactionTarget(t *testing.T) {
+	if requestBudget(0) != 0 || requestBudget(-5) != 0 {
+		t.Fatal("cumulative<=0 is the unlimited sentinel: it must not derive a per-request bound")
+	}
 	if compactionTarget(0) != 0 || compactionTarget(-5) != 0 {
 		t.Fatal("budget<=0 disables compaction")
 	}
-	if got := compactionTarget(100000); got != 70000 {
-		t.Fatalf("compactionTarget(100000)=%d, want 70000", got)
+	// At the shipped default the derived pair is the one that was already in force
+	// before this ceiling became cumulative, so what a single request may cost, and the
+	// size at which compaction kicks in, are unchanged for every existing deployment.
+	if got := requestBudget(400000); got != 100000 {
+		t.Fatalf("requestBudget(400000)=%d, want 100000", got)
+	}
+	if got := compactionTarget(400000); got != 70000 {
+		t.Fatalf("compactionTarget(400000)=%d, want 70000", got)
+	}
+	for _, cumulative := range []int{6_000, 100_000, 400_000, 5_000_000} {
+		target, req := compactionTarget(cumulative), requestBudget(cumulative)
+		if target <= 0 || target >= req || req >= cumulative {
+			t.Errorf("thresholds must stay strictly ordered compaction < request < run at "+
+				"cumulative=%d; got target=%d request=%d", cumulative, target, req)
+		}
 	}
 }

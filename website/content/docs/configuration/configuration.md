@@ -165,27 +165,49 @@ incident webhook. Known keys: `alertmanager`, `gitops`, `pagerduty`, `custom`.
   findings**; if the model has not concluded by the next step it is **hard-stopped** with
   `result="budget_exceeded"` and an unresolved stub naming the ceiling it hit. Both rungs are counted
   by `runlore_investigation_budget_trips_total{reason,stage}`.
-- `max_tokens_per_investigation` (**default 100000**; `-1` = unlimited) — a **cumulative** ceiling on
+- `max_tokens_per_investigation` (**default 400000**; `-1` = unlimited) — a **cumulative** ceiling on
   one investigation's model tokens (provider-reported input + output, loop **and** verify, including
-  a recall short-circuit's reranker/verify calls). The estimated size of the **next request** is
-  checked against the same number as well, so a single oversized request is still caught before it is
-  billed.
+  a recall short-circuit's reranker/verify calls).
 
-  > **This ceiling used to bound one request, not the run.** It was previously compared only against
-  > the estimated size of the next request, so twenty steps of 99k each passed cleanly against a 100k
-  > "budget". It is now a running total, which means **the same number binds far earlier than it
-  > used to**: at the default, a long tool-heavy investigation that resends a growing history every
-  > step can now stop after a handful of turns. If your investigations start reporting
-  > `budget_exceeded` after upgrading, that is the ceiling doing what it says — raise
-  > `max_tokens_per_investigation` to the total you are actually willing to pay per incident (the sum
-  > across all turns, not the size of one), or set `-1` for the old unbounded behaviour.
+  **One number, two thresholds.** A quarter of it — **100 000** at the default — additionally bounds
+  the estimated size of any **single request**, so one oversized request is caught before it is
+  billed, and mid-loop compaction triggers at 70 % of *that* (**70 000**). The two are separate
+  failures with separate fixes: "this run has spent too much in total" is answered by raising
+  `max_tokens_per_investigation`; "this one request is too big" is answered by lowering
+  `max_tool_output_bytes` or enabling `compaction`, and raising the run budget does not help. A run
+  stopped by the per-request bound is labelled `reason="tokens_request"`, one stopped by the running
+  total `reason="tokens_total"`.
+
+  > **This ceiling used to bound one request, not the run — and its default has been raised to
+  > match.** It was previously compared only against the estimated size of the next request, so
+  > twenty steps of 99k each passed cleanly against a `100000` "budget". It is now a running total.
+  > Read that way the old value funded only four or five steps, so the default is now **400000**: an
+  > investigation whose every tool result is at the shipped `max_tool_output_bytes` costs ≈327 000
+  > tokens over seven model calls, and an ordinary tool-heavy one (8 KiB results, twelve steps)
+  > ≈379 000. **If you set `max_tokens_per_investigation` explicitly, your value is untouched and is
+  > now read as a whole-run budget** — a config that said `100000` still says `100000`, and now means
+  > roughly four steps rather than twenty. Set it to the total you are willing to pay per incident
+  > (summed across all turns, not the size of one), or `-1` for the old unbounded behaviour. Watch
+  > `runlore_investigation_budget_trips_total` after upgrading.
+
+  **Budget for the ceiling plus one request.** The check runs *before* each request and compares the
+  **projected** total — what the run has already spent plus the estimated size of the request about
+  to be sent — so a run stops on the first request that would carry it past the number. That request
+  is still sent: the nudge exists to give the model one turn to conclude. The delivered total can
+  therefore exceed the ceiling **by up to the size of a single request**, and because the transcript
+  grows every step that is the *largest* request of the run. That conceded request is itself bounded
+  by the per-request quarter, so **≈1.25× the number you set** is the figure to budget against.
+  Measured at the shipped defaults, with `max_tool_output_bytes: 32768` and a provider reporting real
+  usage: **≈467 000 tokens delivered against a 400 000 ceiling**, ≈1.17×. The same applies to
+  `max_cost_per_investigation` below, whose projection prices the pending request's input at
+  `model.pricing` — its output length is not knowable before it is sent, so the projection errs low.
 
 - `max_cost_per_investigation` (**no default — opt-in**) — the same ceiling denominated in **USD**,
   compared against the running estimated spend priced from `model.pricing` (and `model.verify.pricing`
   for the verify pass). Unset or `0` means no cost ceiling. There is deliberately **no `-1` opt-out**:
   `0` already means off, and a negative value is rejected at startup rather than quietly read as one.
 
-  *Why opt-in when the token ceiling ships a default:* a token is provider-neutral — 100000 means the
+  *Why opt-in when the token ceiling ships a default:* a token is provider-neutral — 400000 means the
   same thing on every model, so a safe value can be chosen on your behalf. A dollar is not. You pick
   your own model and supply your own rates, so any figure RunLore shipped would be generous for one
   deployment and punitive for the next, and would silently cut runs short on an upgrade nobody asked
@@ -197,8 +219,32 @@ incident webhook. Known keys: `alertmanager`, `gitops`, `pagerduty`, `custom`.
   present with **every rate at `0`**: cost is then always exactly `$0.00`, which is under any ceiling,
   while the notification footer and `runlore_investigation_cost_usd` both report a figure and make the
   deployment look instrumented for spend.
+
+  **Fill in all three rates.** A rate left at `0` is not "this class is free" — it is a whole class of
+  real spend estimated at `$0.00`. `cached_input_usd_per_mtok` is the one most often forgotten, and
+  every provider RunLore speaks reports cache reads separately (Anthropic `cache_read_input_tokens`,
+  OpenAI `prompt_tokens_details.cached_tokens`, Gemini `cachedContentTokenCount`), so on a cache-heavy
+  run omitting it understates the input term several-fold: the ceiling still fires, but only after
+  materially more real spend than the number you wrote, and the footer and metric report the same
+  under-estimate. RunLore warns at startup and names each rate left at `0`. If your provider genuinely
+  does not bill a class separately, set that rate equal to the one it shares (e.g.
+  `cached_input_usd_per_mtok: <your input rate>`) — the corresponding token count is then always 0, so
+  it costs nothing and the warning goes quiet.
+
+  **What these ceilings do *not* cover.** Both bound ONE investigation. Stated plainly, because a
+  limit whose scope is assumed is a limit that surprises someone:
+
+  | Outside the ceilings | Why, and what does bound it |
+  |---|---|
+  | Anything above one investigation | There is no daily, monthly or global budget. Total exposure is `investigation.rate_limit.max_per_window` (default 30 starts/hour) × the per-investigation ceiling — a product of two knobs, not a budget |
+  | The `/embeddings` endpoint | On the hybrid-recall path (`catalog.instant_recall.hybrid` + `model.embeddings`) it is called once per recall query — **inside** an investigation — and in bulk on every catalog reload. Its tokens are not in the investigation's totals and it is not gated by either ceiling. It IS visible: `runlore_model_requests_total{provider="embed"}` and `runlore_model_input_tokens_total{provider="embed"}` |
+  | The adversarial verify pass's own cost | It runs after the last budget check, unconditionally, because verify is the honesty guarantee. A successful run can therefore deliver a `CostUSD` slightly above `max_cost_per_investigation` with no trip recorded |
+  | `lore eval` | Builds its investigators with no ceilings and no pricing at all. Bounded only by the step budget |
+  | CLI-only model calls | `lore validate --semantic`, `lore kb import --model`, and the eval judge each make completions outside any investigation. None runs under `serve` |
+  | Non-model spend | Cloud API calls, git clones, metrics and logs queries are unpriced everywhere |
 - `compaction` — how mid-loop history compaction treats the older tool outputs it elides once the
-  estimate crosses the compaction target (0.7× `max_tokens_per_investigation`). **`elide`** (default)
+  estimate crosses the compaction target — 0.7× the **per-request** budget, itself a quarter of
+  `max_tokens_per_investigation` (see above). **`elide`** (default)
   drops their bodies for short markers (lossy). **`summarize`** first asks a model for **one** compact
   factual digest of the elided batch (per compaction event) — "preserve identifiers, timestamps, error
   strings, counts; no speculation" — and keeps that, clearly labelled, in place of the markers.
@@ -254,7 +300,7 @@ incident webhook. Known keys: `alertmanager`, `gitops`, `pagerduty`, `custom`.
   retrieval-score floor below which the paid call is skipped — the cost guard). The call routes to
   **`model.verify`** when configured (cheaper/faster), else the main model. It costs ~1–2k tokens and
   buys back a whole investigation when it fires — the recorded demo transcript's came to 7 calls /
-  ~15.6k tokens, and `max_tokens_per_investigation` caps a run at 100k. False-recall guards: it only
+  ~15.6k tokens, against a `max_tokens_per_investigation` default of 400k. False-recall guards: it only
   ever ranks candidates that already passed the structural filter, ignores any `entry_id` it did not offer
   (hallucination guard), and fails **safe** on a "no match", a low confidence, or a model error (fall
   through to a full investigation). Off ⇒ the BM25-magnitude gate is unchanged. The recalled answer

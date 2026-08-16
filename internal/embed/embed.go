@@ -25,7 +25,11 @@ import (
 	"strings"
 	"time"
 
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/metric"
+
 	"github.com/Smana/runlore/internal/httpx"
+	"github.com/Smana/runlore/internal/telemetry"
 )
 
 // Client calls an OpenAI-compatible /embeddings endpoint.
@@ -34,6 +38,20 @@ type Client struct {
 	model   string
 	apiKey  string
 	http    *http.Client
+
+	// Metrics is optional (nil-safe) telemetry for the embeddings endpoint. It is a
+	// PAID API — called once per hybrid-recall query, from inside an investigation
+	// that has spend ceilings, and in bulk on every catalog reload — and until it was
+	// wired here nothing counted its calls, its latency or its tokens. Recording
+	// under provider="embed" on the shared model instruments keeps it separable by
+	// label instead of inventing a metric name, matching the reranker's precedent.
+	//
+	// This makes the spend VISIBLE, not bounded: the query embed is not folded into
+	// the per-investigation totals (it does not flow through the Embedder interface,
+	// which returns vectors only) and the corpus embed runs on the git-sync goroutine
+	// with no investigation to charge. See the spend inventory in
+	// docs/configuration/configuration.md.
+	Metrics *telemetry.Metrics
 }
 
 // New builds an embeddings client. apiKey may be empty (keyless vLLM/Ollama).
@@ -56,6 +74,14 @@ type embedResponse struct {
 		Index     int       `json:"index"`
 		Embedding []float32 `json:"embedding"`
 	} `json:"data"`
+	// Usage is what the endpoint says it billed. The OpenAI-compatible /embeddings
+	// wire format returns it (vLLM and Ollama's shims included) and this struct used
+	// to discard it, which is why embedding spend had no token figure anywhere.
+	// Absent from a server that omits it ⇒ zero, and zero is simply not recorded.
+	Usage struct {
+		PromptTokens int `json:"prompt_tokens"`
+		TotalTokens  int `json:"total_tokens"`
+	} `json:"usage"`
 }
 
 // maxEmbedBatch bounds the inputs per /embeddings request. Providers cap the
@@ -100,7 +126,9 @@ func (c *Client) embedBatch(ctx context.Context, texts []string) ([][]float32, e
 		}
 		return r, nil
 	}
+	start := time.Now()
 	resp, err := httpx.DoWithRetry(ctx, c.http, 3, newReq)
+	c.recordRequest(ctx, start, err)
 	if err != nil {
 		return nil, fmt.Errorf("embeddings request: %w", err)
 	}
@@ -117,6 +145,9 @@ func (c *Client) embedBatch(ctx context.Context, texts []string) ([][]float32, e
 	var er embedResponse
 	if err := json.Unmarshal(data, &er); err != nil {
 		return nil, fmt.Errorf("parse response: %w", err)
+	}
+	if c.Metrics != nil && er.Usage.PromptTokens > 0 {
+		c.Metrics.ModelInputTokens.Add(ctx, int64(er.Usage.PromptTokens), embedAttrs)
 	}
 	if len(er.Data) != len(texts) {
 		return nil, fmt.Errorf("embeddings: got %d vectors for %d inputs", len(er.Data), len(texts))
@@ -135,6 +166,26 @@ func (c *Client) embedBatch(ctx context.Context, texts []string) ([][]float32, e
 		}
 	}
 	return out, nil
+}
+
+// embedAttrs labels every embeddings sample with provider="embed", so the endpoint's
+// call volume, latency and tokens sit beside the main/verify/rerank tiers on the same
+// instruments and a dashboard can select or exclude it with one label matcher.
+var embedAttrs = metric.WithAttributes(attribute.String("provider", "embed"))
+
+// recordRequest emits one /embeddings round trip's call count and latency. Nil-safe:
+// a Client with no Metrics (every CLI path) records nothing.
+func (c *Client) recordRequest(ctx context.Context, start time.Time, err error) {
+	if c.Metrics == nil {
+		return
+	}
+	res := "ok"
+	if err != nil {
+		res = "error"
+	}
+	c.Metrics.ModelRequests.Add(ctx, 1, metric.WithAttributes(
+		attribute.String("provider", "embed"), attribute.String("result", res)))
+	c.Metrics.ModelRequestDuration.Record(ctx, time.Since(start).Seconds(), embedAttrs)
 }
 
 // Cosine returns the cosine similarity of two equal-length vectors, in [-1, 1].
