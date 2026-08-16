@@ -233,7 +233,8 @@ incident webhook. Known keys: `alertmanager`, `gitops`, `pagerduty`, `custom`.
   | CLI-only model calls | `lore validate --semantic`, `lore kb import --model`, and the eval judge each make completions outside any investigation. None runs under `serve` |
   | Non-model spend | Cloud API calls, git clones, metrics and logs queries are unpriced everywhere |
 - `compaction` — how mid-loop history compaction treats the older tool outputs it elides once the
-  estimate crosses the compaction target (0.7× `max_tokens_per_investigation`). **`elide`** (default)
+  estimate crosses the compaction target — 0.7× the **per-request** budget, itself a quarter of
+  `max_tokens_per_investigation` (see above). **`elide`** (default)
   drops their bodies for short markers (lossy). **`summarize`** first asks a model for **one** compact
   factual digest of the elided batch (per compaction event) — "preserve identifiers, timestamps, error
   strings, counts; no speculation" — and keeps that, clearly labelled, in place of the markers.

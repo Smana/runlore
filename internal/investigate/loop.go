@@ -190,8 +190,11 @@ type LoopInvestigator struct {
 	ToolTimeout time.Duration
 
 	// Cost controls (0 means disabled/unlimited):
-	MaxToolOutputBytes        int // truncate tool results larger than this before adding to history
-	MaxTokensPerInvestigation int // ceiling on BOTH the next request's estimated size and the investigation's accumulated tokens
+	MaxToolOutputBytes int // truncate tool results larger than this before adding to history
+	// MaxTokensPerInvestigation is the CUMULATIVE token ceiling for one investigation.
+	// It also derives the bound on a single request — requestBudget, a quarter of it —
+	// and, from that, the mid-loop compaction target.
+	MaxTokensPerInvestigation int
 
 	// MaxCostPerInvestigation is the ceiling, in USD, on this investigation's
 	// accumulated estimated spend (loop tokens priced at Pricing, verify tokens at
@@ -862,9 +865,15 @@ func (li *LoopInvestigator) tryRecall(ctx context.Context, req Request, result *
 // structurally cannot — twenty affordable requests. Order only decides which reason
 // is reported when several are true at once; any one of them enters the same ladder,
 // and the reason is latched at the nudge so the kill cannot rename it.
+//
+// It compares against requestBudget, NOT against the cumulative ceiling: the two are
+// different failures with different fixes, and reusing one number for both says a
+// single request may consume the whole investigation — which bounds nothing and leaves
+// mid-loop compaction (0.7x whatever bounds one request) unreachable. See
+// requestBudgetFraction.
 func (li *LoopInvestigator) budgetTrip(est int, spent providers.UsageTotals) string {
 	switch {
-	case overBudget(est, li.MaxTokensPerInvestigation):
+	case overBudget(est, requestBudget(li.MaxTokensPerInvestigation)):
 		return budgetReasonRequestTokens
 	case overBudget(spentTokens(spent)+est, li.MaxTokensPerInvestigation):
 		return budgetReasonTotalTokens
@@ -929,7 +938,7 @@ func (li *LoopInvestigator) enforceBudget(ctx context.Context, req Request, sys 
 	// Mid-loop compaction: before the budget guard, elide superseded/old tool outputs
 	// to stay under budget so a long investigation can finish instead of hard-killing.
 	// The target is converted into raw-heuristic space (compactHistory measures with
-	// estimateTokens) so a calibrated loop compacts down to a REAL 0.7×budget.
+	// estimateTokens) so a calibrated loop compacts down to a REAL compaction target.
 	if target := compactionTarget(li.MaxTokensPerInvestigation); target > 0 && est > target {
 		if compacted, elided, removed := compactHistoryDetailed(*messages, sys, specs, calib.heuristicTarget(target)); elided > 0 {
 			// summarize mode: replace the just-elided batch with one model-produced

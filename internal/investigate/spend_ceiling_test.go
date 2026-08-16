@@ -6,6 +6,7 @@ import (
 	"context"
 	"io"
 	"log/slog"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -21,26 +22,26 @@ import (
 // spend, not merely the size of the next request.
 //
 // The shape that made the old guard vacuous is reproduced exactly: every request
-// is modest (30k reported input tokens, well under the 100k ceiling), the message
-// history stays tiny, and the model never winds down. Under a next-request-only
-// check nothing ever exceeds the ceiling, so the loop runs the full step budget
-// and bills ~10 x 30k against a "100k budget". With a running total the ladder
-// must engage on the step whose request would carry the run past 100_000 — the
-// fourth, since 3 x 30_010 already spent plus a fourth ~30k request projects to
-// 120_030.
+// is modest — 60k reported input tokens, comfortably under the 100_000 bound this
+// ceiling derives for one request — the message history stays tiny, and the model
+// never winds down. Under a next-request-only check nothing ever exceeds anything,
+// so the loop runs the full step budget and bills ~10 x 60k against a "400k budget".
+// With a running total the ladder must engage on the step whose request would carry
+// the run past 400_000: the seventh, since 6 x 60_010 already spent plus a seventh
+// ~60k request projects to 420_060.
 //
 // The exact call count is the assertion, not a range: it pins WHERE on the ladder
-// the stop happens. Three free calls, one nudged call (the model is told to conclude
+// the stop happens. Six free calls, one nudged call (the model is told to conclude
 // and forced to submit_findings), then the hard-kill — the same two-rung ladder the
 // per-request ceiling has always used, so an operator sees one behaviour.
 func TestTokenCeilingIsARunningTotal(t *testing.T) {
 	const (
-		perCall  = 30_010 // reportingRunawayModel: 30_000 input + 10 output
-		perEst   = 30_000 // the anchored estimate of the NEXT request: its input half
-		ceiling  = 100_000
+		perCall  = 60_010 // reportingRunawayModel: 60_000 input + 10 output
+		perEst   = 60_000 // the anchored estimate of the NEXT request: its input half
+		ceiling  = 400_000
 		maxSteps = 10
 	)
-	model := &reportingRunawayModel{inputTokens: 30_000}
+	model := &reportingRunawayModel{inputTokens: perEst}
 	var got *providers.Investigation
 	li := &LoopInvestigator{
 		Model:                     model,
@@ -260,10 +261,12 @@ func TestBudgetTripTelemetryNamesTheCeilingAndRung(t *testing.T) {
 	t.Cleanup(func() { _ = shutdown(context.Background()) })
 
 	li := &LoopInvestigator{
-		Model:                     &reportingRunawayModel{inputTokens: 30_000},
+		// 60k per request against a 400_000 ceiling: modest next to the 100_000 bound
+		// the ceiling derives for one request, so only the CUMULATIVE arm can fire.
+		Model:                     &reportingRunawayModel{inputTokens: 60_000},
 		Log:                       slog.New(slog.NewTextHandler(io.Discard, nil)),
 		MaxSteps:                  10,
-		MaxTokensPerInvestigation: 100_000,
+		MaxTokensPerInvestigation: 400_000,
 		Metrics:                   telemetry.NewMetrics(),
 		OnComplete:                func(providers.Investigation) {},
 	}
@@ -313,16 +316,18 @@ func TestBudgetTripReportsOneCeilingForTheWholeRun(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = shutdown(context.Background()) })
 
-	// Per call: 30_010 tokens, $0.3005. Each step projects one more request on top:
-	// +30_000 tokens, +$0.30 (input only — see projectSpend).
-	//   after 2 calls: 60_020 tokens / $0.6010 → projects to  90_020 / $0.9010
-	//   after 3 calls: 90_030 tokens / $0.9015 → projects to 120_030 / $1.2015
-	// $0.85 is crossed a step BEFORE 100_000 is, so the COST arm engages the ladder;
+	// Per call: 60_010 tokens, $0.6005. Each step projects one more request on top:
+	// +60_000 tokens, +$0.60 (input only — see projectSpend).
+	//   after 4 calls: 240_040 tokens / $2.4020 → projects to 300_040 / $3.0020
+	//   after 5 calls: 300_050 tokens / $3.0025 → projects to 360_050 / $3.6025
+	// $3.40 is crossed a step BEFORE 400_000 is, so the COST arm engages the ladder;
 	// by the kill the token projection is over too, and the ordered switch — which
 	// puts tokens ahead of cost — would answer tokens_total if it were re-evaluated.
+	// 60_000 stays under the 100_000 bound the ceiling derives for one request, so the
+	// per-request arm is not a third candidate here.
 	const (
-		perEst     = 30_000 // the anchored estimate of the next request
-		tokCeiling = 100_000
+		perEst     = 60_000 // the anchored estimate of the next request
+		tokCeiling = 400_000
 	)
 	var got providers.Investigation
 	li := &LoopInvestigator{
@@ -331,7 +336,7 @@ func TestBudgetTripReportsOneCeilingForTheWholeRun(t *testing.T) {
 		MaxSteps:                  10,
 		Pricing:                   costPricing,
 		MaxTokensPerInvestigation: tokCeiling,
-		MaxCostPerInvestigation:   0.85,
+		MaxCostPerInvestigation:   3.40,
 		Metrics:                   telemetry.NewMetrics(),
 		OnComplete:                func(inv providers.Investigation) { got = inv },
 	}
@@ -388,15 +393,39 @@ func (b bulkTool) Call(context.Context, string) (string, error) {
 // It concludes the moment the loop forces submit_findings, i.e. on the nudged turn,
 // so a run takes the ladder's BEST case: nudge, one more request, done. Every worse
 // path (model keeps rambling, hard-kill) bills at least as much.
+//
+// tool names the tool it calls each turn, because that decides whether mid-loop
+// compaction may touch the transcript at all: `what_changed` is on compactHistory's
+// keep list (never elided), `big_tool` is ordinary and therefore elidable. A fixture
+// that only ever calls a keep-listed tool cannot observe compaction, so the field is
+// explicit rather than defaulted.
 type growingUsageModel struct {
 	density int
+	tool    string
 	calls   int
 	billed  []int // reported input+output tokens per call, in order
+
+	// elidedAtCall is the 1-based index of the first request that arrived carrying an
+	// elision marker — i.e. the first request compaction had shrunk. 0 means compaction
+	// never fired. spentBeforeElision is what the run had already billed at that point,
+	// so a test can assert compaction happened while the ceiling still had headroom
+	// rather than after the ladder had already stopped the run.
+	elidedAtCall       int
+	spentBeforeElision int
 }
 
 func (m *growingUsageModel) Complete(_ context.Context, req providers.CompletionRequest) (providers.CompletionResponse, error) {
 	m.calls++
 	const out = 300
+	if m.elidedAtCall == 0 {
+		for _, msg := range req.Messages {
+			if isElidedMarker(msg.Content) {
+				m.elidedAtCall = m.calls
+				m.spentBeforeElision = m.spent()
+				break
+			}
+		}
+	}
 	in := m.density * estimateTokens(req.System, req.Messages, req.Tools)
 	m.billed = append(m.billed, in+out)
 	resp := providers.CompletionResponse{Usage: providers.Usage{InputTokens: in, OutputTokens: out}}
@@ -405,8 +434,20 @@ func (m *growingUsageModel) Complete(_ context.Context, req providers.Completion
 			Args: `{"confidence":0.5,"root_causes":[{"summary":"wrapped up at the ceiling"}]}`}}
 		return resp, nil
 	}
-	resp.ToolCalls = []providers.ToolCall{{ID: "t", Name: "what_changed", Args: `{}`}}
+	// A distinct id per call: compactHistory attributes a tool RESULT to its tool
+	// through the call id, and a fixture that reused one id would make every result
+	// look like a repeat of the same call.
+	resp.ToolCalls = []providers.ToolCall{{ID: "t" + strconv.Itoa(m.calls), Name: m.tool, Args: `{}`}}
 	return resp, nil
+}
+
+// spent is everything this model has reported so far.
+func (m *growingUsageModel) spent() int {
+	n := 0
+	for _, b := range m.billed {
+		n += b
+	}
+	return n
 }
 
 // largestBilled returns the biggest single completion this model was billed for.
@@ -436,7 +477,7 @@ func (m *growingUsageModel) largestBilled() int {
 // earlier, so the nudged turn is the request that crosses rather than the one after it.
 func TestTokenCeilingBoundsTheTokensActuallyDelivered(t *testing.T) {
 	const ceiling = 100_000
-	model := &growingUsageModel{density: 2}
+	model := &growingUsageModel{density: 2, tool: "what_changed"}
 	var got providers.Investigation
 	li := &LoopInvestigator{
 		Model:                     model,
@@ -466,6 +507,144 @@ func TestTokenCeilingBoundsTheTokensActuallyDelivered(t *testing.T) {
 			"the cumulative arm must trip on spent+est — what the run will have cost once this "+
 			"request is sent — not on what it has cost already.",
 			ceiling, delivered, float64(delivered)/ceiling, model.billed, ceiling+largest)
+	}
+}
+
+// TestCompactionFiresBeforeTheCumulativeCeiling pins the property that made
+// `compaction: summarize` dead code the moment the token ceiling became a running
+// total: mid-loop compaction has to be REACHABLE.
+//
+// Compaction is the loop's answer to a transcript that outgrows one request. It has
+// to trigger off a bound on ONE request, because that is the quantity it can do
+// something about — it shrinks the next request; it cannot un-spend what is already
+// billed. Keyed off the CUMULATIVE ceiling instead, its trigger sits at 0.7x a number
+// the run's accumulated spend reaches first: on a monotonically growing transcript
+// sum(est_i) passes the ceiling long before any single est_i reaches 0.7 of it, so the
+// ladder always stops the run first and compaction never runs. Measured at the shipped
+// tool-output cap before this was split: the largest single request of a run was 51 323
+// tokens against a 70 000 trigger — compaction never fired at any ceiling.
+//
+// The whole existing compaction suite passed throughout, because its main model
+// reports ZERO usage: with loopTotals pinned at 0 the cumulative arm can never engage,
+// so those tests cannot see this at all. That is why this one drives the loop with a
+// model that reports usage proportional to the request it was actually sent, and why
+// it asserts the run had really started spending before compaction fired.
+func TestCompactionFiresBeforeTheCumulativeCeiling(t *testing.T) {
+	const ceiling = 400_000
+	// big_tool is NOT on compactHistory's keep list, so its outputs are elidable —
+	// the case an operator's log/diff-heavy investigation actually hits.
+	model := &growingUsageModel{density: 2, tool: "big_tool"}
+	var got providers.Investigation
+	li := &LoopInvestigator{
+		Model:                     model,
+		Tools:                     []Tool{bigTool{size: 32768}},
+		Log:                       slog.New(slog.NewTextHandler(io.Discard, nil)),
+		MaxSteps:                  20,
+		MaxToolOutputBytes:        32768,
+		MaxTokensPerInvestigation: ceiling,
+		OnComplete:                func(inv providers.Investigation) { got = inv },
+	}
+	if err := li.Investigate(context.Background(), Request{Title: "compaction-reachable", Fingerprint: "fp-compact"}); err != nil {
+		t.Fatalf("Investigate: %v", err)
+	}
+
+	// Premise: this fixture really is billing tokens. A model reporting zero usage
+	// keeps the cumulative arm at 0 forever, which is exactly how the regression hid.
+	if delivered := got.Usage.InputTokens + got.Usage.OutputTokens; delivered == 0 {
+		t.Fatal("premise failed — the model reported no usage, so the cumulative ceiling was " +
+			"never engaged and this test could not observe the interaction it exists to pin")
+	}
+	if model.elidedAtCall == 0 {
+		t.Fatalf("mid-loop compaction never fired in %d requests against a %d-token ceiling "+
+			"(billed per call %v). The compaction trigger must key off the bound on ONE request, "+
+			"not off the cumulative run budget: keyed off the cumulative number its trigger sits "+
+			"above what a single request ever reaches, so the ladder stops the run first and "+
+			"`compaction: summarize` cannot run at any default-shaped config.",
+			model.calls, ceiling, model.billed)
+	}
+	// …and it fired while the ceiling still had headroom. Compaction that only ever
+	// ran on the nudged turn would technically "fire" while still being useless: by
+	// then the spend it exists to avoid has already happened.
+	if model.spentBeforeElision >= ceiling {
+		t.Fatalf("compaction first fired on call %d, by which point the run had already billed "+
+			"%d of its %d-token ceiling — compaction exists to keep a run under the ceiling, so "+
+			"firing at or past it buys nothing", model.elidedAtCall, model.spentBeforeElision, ceiling)
+	}
+}
+
+// TestPerRequestCeilingIsAFractionOfTheCumulativeOne pins the second half of the same
+// split: the per-request arm needs its OWN threshold.
+//
+// One number cannot mean both "what the whole run may spend" and "what one request may
+// spend". Read as a run budget it is right; reused as the per-request bound it says a
+// single request may consume the entire investigation's budget — which is no bound at
+// all, and leaves compaction (0.7x of it) unreachable. So the per-request arm compares
+// against requestBudget: a quarter of the run's budget, i.e. "the ceiling must fund at
+// least four full-size requests".
+//
+// The fixture is the shape only the per-request arm can catch: one request four times
+// the size of a normal one, arriving while the run's cumulative spend is still well
+// under the ceiling. Against a per-request arm set to the whole ceiling, nothing stops
+// it — the run drifts on and is eventually stopped by the cumulative arm instead, which
+// names a different knob to the operator and lets the oversized request be billed twice
+// over before anything reacts.
+func TestPerRequestCeilingIsAFractionOfTheCumulativeOne(t *testing.T) {
+	t.Cleanup(func() { otel.SetMeterProvider(noop.NewMeterProvider()) })
+	h, shutdown, err := telemetry.Setup(context.Background())
+	if err != nil {
+		t.Fatalf("telemetry setup: %v", err)
+	}
+	t.Cleanup(func() { _ = shutdown(context.Background()) })
+
+	// perCall is over the per-request bound but small enough that three of them still
+	// project under the run budget — so the cumulative arm demonstrably has room left
+	// when the per-request arm fires, and only the per-request arm can explain the stop.
+	const (
+		ceiling  = 400_000 // ⇒ per-request bound 100_000
+		perCall  = 120_000 // one request, a fifth over that bound
+		wantCall = 2       // one free call, then the nudged one; the next check kills
+	)
+	model := &reportingRunawayModel{inputTokens: perCall}
+	var got providers.Investigation
+	li := &LoopInvestigator{
+		Model:                     model,
+		Log:                       slog.New(slog.NewTextHandler(io.Discard, nil)),
+		MaxSteps:                  10,
+		MaxTokensPerInvestigation: ceiling,
+		Metrics:                   telemetry.NewMetrics(),
+		OnComplete:                func(inv providers.Investigation) { got = inv },
+	}
+	if err := li.Investigate(context.Background(), Request{Title: "oversized-request", Fingerprint: "fp-req"}); err != nil {
+		t.Fatalf("Investigate: %v", err)
+	}
+
+	if model.calls != wantCall {
+		t.Fatalf("the model was called %d times, want %d: a request of %d tokens is over a %d-token "+
+			"per-request bound (a quarter of the %d ceiling) and must be caught before it is sent "+
+			"a second time, not left to the cumulative arm several requests later",
+			model.calls, wantCall, perCall, ceiling/4, ceiling)
+	}
+	// Premise: the CUMULATIVE arm cannot be what stopped this. Even projecting one more
+	// request on top of everything billed, the run is under the ceiling — so a stop here
+	// can only have come from the per-request arm.
+	spent := got.Usage.InputTokens + got.Usage.OutputTokens
+	if spent+perCall > ceiling {
+		t.Fatalf("premise failed — the run billed %d and projects to %d against a %d ceiling, so "+
+			"the cumulative arm could have stopped it and this test would pass vacuously",
+			spent, spent+perCall, ceiling)
+	}
+	body := scrapeMetrics(t, h)
+	if !strings.Contains(body, `reason="tokens_request"`) {
+		t.Fatalf("a single oversized request must be reported as a per-request trip — the operator's "+
+			"fix is to shrink one request (max_tool_output_bytes, compaction), not to raise the run "+
+			"budget:\n%s", body)
+	}
+	if strings.Contains(body, `reason="tokens_total"`) {
+		t.Fatalf("this run never approached its cumulative budget, so a tokens_total series points "+
+			"the operator at the wrong knob:\n%s", body)
+	}
+	if !mentions(got.Unresolved, "per-request") {
+		t.Fatalf("the delivered stub must name the per-request bound it hit; got: %v", got.Unresolved)
 	}
 }
 

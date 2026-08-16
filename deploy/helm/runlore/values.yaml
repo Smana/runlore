@@ -141,7 +141,8 @@ config:
     # Cap each tool result fed back to the model (truncates large logs/diffs). -1 = unlimited.
     max_tool_output_bytes: 32768
     # How mid-loop history compaction treats the older tool outputs it elides once the
-    # estimate crosses 0.7x max_tokens_per_investigation. "elide" (default) drops their
+    # estimate crosses the compaction target: 0.7x the PER-REQUEST budget, itself a
+    # quarter of max_tokens_per_investigation. "elide" (default) drops their
     # bodies for short markers (lossy). "summarize" first asks a model for ONE compact
     # factual digest of the elided batch per compaction event (routed to model.verify when
     # set, else the main model) and keeps that in place of the markers; any summarizer
