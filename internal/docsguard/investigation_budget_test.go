@@ -70,7 +70,9 @@ func TestInvestigationSpendCeilingsMatchTheDocs(t *testing.T) {
 // not the size of one request. It bounded only the request until this was fixed, and
 // the difference is the whole reason the same 100000 now stops runs it used to let
 // through — a page that describes it as a context/request ceiling would leave an
-// operator unable to explain their own budget_exceeded results.
+// operator unable to explain their own budget_exceeded results. (The default moved
+// with the meaning — 100000 funded four or five steps read as a run budget — so this
+// test's sibling above pins the number off ApplyDefaults rather than off this prose.)
 func TestConfigurationPageStatesTheCumulativeTokenSemantics(t *testing.T) {
 	doc := flattenProse(readDoc(t, configurationPath))
 	if !strings.Contains(doc, "a **cumulative** ceiling on one investigation's model tokens") {
@@ -99,7 +101,7 @@ var overshootClaims = []string{
 // TestConfigurationPageStatesTheOvershoot pins the ceiling's real cost, not its
 // nominal one. The ladder concedes one request past the trip on purpose — the nudge
 // has to give the model a turn to conclude — and because the transcript grows every
-// step, that request is the LARGEST of the run. A page that prints "default 100000"
+// step, that request is the LARGEST of the run. A page that prints "default 400000"
 // and stops there understates the bill by a whole request, which is the same
 // claim-vs-code gap the cumulative-semantics fix exists to close.
 func TestConfigurationPageStatesTheOvershoot(t *testing.T) {

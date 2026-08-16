@@ -164,7 +164,7 @@ then the answer is confirmed against live state and re-reviewed.
 > **0.1**, the bottom of the ~0.1–1.2 band real scores occupy, so it rarely skips). It
 > routes to `model.verify` (cheaper/faster) when configured, costs ~1–2k tokens, and
 > buys back a whole investigation when it fires — the recorded demo transcript's came to
-> 7 calls / ~15.6k tokens, and `max_tokens_per_investigation` caps a run at 100k. A
+> 7 calls / ~15.6k tokens, against a `max_tokens_per_investigation` default of 400k. A
 > reranker that hallucinates a match is worse than no recall, so it fails **safe**: it
 > only ranks candidates that already passed the structural filter, ignores any
 > `entry_id` it did not offer, and

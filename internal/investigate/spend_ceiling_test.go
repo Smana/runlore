@@ -6,6 +6,7 @@ import (
 	"context"
 	"io"
 	"log/slog"
+	"os"
 	"strconv"
 	"strings"
 	"testing"
@@ -13,6 +14,7 @@ import (
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/metric/noop"
 
+	"github.com/Smana/runlore/internal/config"
 	"github.com/Smana/runlore/internal/providers"
 	"github.com/Smana/runlore/internal/telemetry"
 )
@@ -399,11 +401,17 @@ func (b bulkTool) Call(context.Context, string) (string, error) {
 // keep list (never elided), `big_tool` is ordinary and therefore elidable. A fixture
 // that only ever calls a keep-listed tool cannot observe compaction, so the field is
 // explicit rather than defaulted.
+// convergesAfter is how many tool calls the model makes before submitting findings of
+// its own accord; 0 means it never winds down and only a forced submit_findings stops
+// it. nudged records whether the spend ladder was what forced it — distinct from the
+// loop's own final-step nudge, which is not a budget event.
 type growingUsageModel struct {
-	density int
-	tool    string
-	calls   int
-	billed  []int // reported input+output tokens per call, in order
+	density        int
+	tool           string
+	convergesAfter int
+	calls          int
+	nudged         bool
+	billed         []int // reported input+output tokens per call, in order
 
 	// elidedAtCall is the 1-based index of the first request that arrived carrying an
 	// elision marker — i.e. the first request compaction had shrunk. 0 means compaction
@@ -417,21 +425,21 @@ type growingUsageModel struct {
 func (m *growingUsageModel) Complete(_ context.Context, req providers.CompletionRequest) (providers.CompletionResponse, error) {
 	m.calls++
 	const out = 300
-	if m.elidedAtCall == 0 {
-		for _, msg := range req.Messages {
-			if isElidedMarker(msg.Content) {
-				m.elidedAtCall = m.calls
-				m.spentBeforeElision = m.spent()
-				break
-			}
+	for _, msg := range req.Messages {
+		if m.elidedAtCall == 0 && isElidedMarker(msg.Content) {
+			m.elidedAtCall = m.calls
+			m.spentBeforeElision = m.spent()
+		}
+		if msg.Content == budgetNudge {
+			m.nudged = true
 		}
 	}
 	in := m.density * estimateTokens(req.System, req.Messages, req.Tools)
 	m.billed = append(m.billed, in+out)
 	resp := providers.CompletionResponse{Usage: providers.Usage{InputTokens: in, OutputTokens: out}}
-	if req.ToolChoice == submitFindingsName {
+	if req.ToolChoice == submitFindingsName || (m.convergesAfter > 0 && m.calls > m.convergesAfter) {
 		resp.ToolCalls = []providers.ToolCall{{ID: "s", Name: submitFindingsName,
-			Args: `{"confidence":0.5,"root_causes":[{"summary":"wrapped up at the ceiling"}]}`}}
+			Args: `{"confidence":0.5,"root_causes":[{"summary":"concluded"}]}`}}
 		return resp, nil
 	}
 	// A distinct id per call: compactHistory attributes a tool RESULT to its tool
@@ -645,6 +653,169 @@ func TestPerRequestCeilingIsAFractionOfTheCumulativeOne(t *testing.T) {
 	}
 	if !mentions(got.Unresolved, "per-request") {
 		t.Fatalf("the delivered stub must name the per-request bound it hit; got: %v", got.Unresolved)
+	}
+}
+
+// TestShippedTokenCeilingFundsARealInvestigation sizes the shipped default against
+// what an investigation actually costs, rather than against what the number used to
+// mean.
+//
+// 100000 was chosen when it bounded ONE request, and survived the change to cumulative
+// semantics unrevisited — under which it funded four or five steps. A default that cuts
+// a normal investigation short is as wrong as no default at all: the operator's first
+// experience is a stream of result="budget_exceeded" on incidents that were converging
+// fine, and the only remedy the docs can offer is to raise the number RunLore chose.
+//
+// So the bar is stated as investigations that must FINISH, at the tool-output sizes the
+// shipped config permits, and the default is read from ApplyDefaults rather than
+// written here — retuning either key re-runs this against the other. The rows are the
+// cost curve's three regimes: spend grows quadratically in steps, because the whole
+// transcript is re-sent every turn, so the affordable step count falls sharply as tool
+// results get bigger.
+//
+//	tool result | steps | model calls | cumulative tokens
+//	   32768 B  |     6 |           7 |           327 022  (compaction fires)
+//	    8192 B  |    12 |          13 |           379 022
+//	    2048 B  |    19 |          20 |           286 354  (the whole max_steps budget)
+//
+// 400000 is the smallest round figure that funds all three. The 8 KiB row binds: an
+// ordinary tool-heavy incident costs 379 022 tokens, so anything at or below 350000 cuts
+// it off. The 2 KiB row is why max_steps: 20 is a reachable setting again rather than
+// two shipped defaults where one can never be met. And the ceiling's own overshoot is
+// covered by the quarter that bounds one request, so the delivered total stays inside
+// ~1.25x the number an operator budgets against.
+func TestShippedTokenCeilingFundsARealInvestigation(t *testing.T) {
+	var c config.Config
+	config.ApplyDefaults(&c)
+	ceiling, toolCap := c.Investigation.MaxTokensPerInvestigation, c.Investigation.MaxToolOutputBytes
+
+	for _, tc := range []struct {
+		name      string
+		toolBytes int
+		steps     int
+	}{
+		{"every tool result at the shipped cap", toolCap, 6},
+		{"a quarter of the cap: an ordinary tool-heavy incident", toolCap / 4, 12},
+		{"small results, run out to the whole step budget", toolCap / 16, 19},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			model := &growingUsageModel{density: 2, tool: "big_tool", convergesAfter: tc.steps}
+			var got providers.Investigation
+			li := &LoopInvestigator{
+				Model:                     model,
+				Tools:                     []Tool{bigTool{size: tc.toolBytes}},
+				Log:                       slog.New(slog.NewTextHandler(io.Discard, nil)),
+				MaxSteps:                  20,
+				MaxToolOutputBytes:        toolCap,
+				MaxTokensPerInvestigation: ceiling,
+				OnComplete:                func(inv providers.Investigation) { got = inv },
+			}
+			if err := li.Investigate(context.Background(), Request{Title: "sizing", Fingerprint: "fp-sizing"}); err != nil {
+				t.Fatalf("Investigate: %v", err)
+			}
+			delivered := got.Usage.InputTokens + got.Usage.OutputTokens
+			if model.nudged {
+				t.Fatalf("a %d-step investigation with %d-byte tool results was cut short by the "+
+					"spend ladder after %d of %d calls (%d tokens billed against a %d-token ceiling). "+
+					"The shipped default has to fund an investigation that converges normally at the "+
+					"tool-output sizes the shipped max_tool_output_bytes permits — otherwise every "+
+					"real incident ends in budget_exceeded and the only fix is to raise the number "+
+					"RunLore picked.",
+					tc.steps, tc.toolBytes, model.calls, tc.steps+1, delivered, ceiling)
+			}
+			if len(got.RootCauses) == 0 {
+				t.Fatalf("the investigation delivered no root cause: %+v", got)
+			}
+			if want := tc.steps + 1; model.calls != want {
+				t.Fatalf("model called %d times, want %d (%d tool turns then the conclusion): "+
+					"something other than the spend ceiling changed how far the loop got",
+					model.calls, want, tc.steps)
+			}
+		})
+	}
+}
+
+// Operator-facing surfaces that state the spend ceilings' numbers. internal/docsguard
+// pins the cumulative default off ApplyDefaults; the DERIVED figures can only be pinned
+// from in here, where requestBudget and compactionTarget live.
+const (
+	spendDocPath   = "../../website/content/docs/configuration/configuration.md"
+	spendChartPath = "../../deploy/helm/runlore/values.yaml"
+)
+
+// ungroupDigits removes the spaces a prose page puts inside long numbers ("100 000"),
+// so one anchor matches both the page's typography and the chart's bare integers.
+func ungroupDigits(s string) string {
+	out := []rune(s)
+	for i := 1; i+1 < len(out); i++ {
+		if out[i] == ' ' && out[i-1] >= '0' && out[i-1] <= '9' && out[i+1] >= '0' && out[i+1] <= '9' {
+			out[i] = 0
+		}
+	}
+	var b strings.Builder
+	for _, r := range out {
+		if r != 0 {
+			b.WriteRune(r)
+		}
+	}
+	return b.String()
+}
+
+// TestSpendCeilingDocsStateTheDerivedThresholds pins the two numbers an operator can
+// only get from the page, because nothing in the config file spells them out: the bound
+// on ONE request, and the size at which mid-loop compaction starts.
+//
+// Both are derived from max_tokens_per_investigation, so retuning that key — or the
+// fraction it derives them with — silently changes what the page means while every word
+// on it stays true-looking. That is the drift this repo keeps shipping, and the reason
+// docsguard exists; these two just cannot live there, since the derivation is internal
+// to this package. The overshoot multiplier is pinned for the same reason: it is
+// 1 + the fraction, and it is what an operator multiplies their bill by.
+//
+// Each anchor is the SENTENCE that makes the claim, with the derived figure computed
+// from the code rather than typed in — so a retune of the fraction and a rewrite of the
+// prose both fail here. The digits alone would not do: these pages quote several
+// six-figure token counts, and the migration note names the old default in its own
+// right, so an anchor on "100000" is satisfied by prose that says something else
+// entirely (demonstrated — deleting the per-request sentence left a digits-only guard
+// passing).
+func TestSpendCeilingDocsStateTheDerivedThresholds(t *testing.T) {
+	var c config.Config
+	config.ApplyDefaults(&c)
+	ceiling := c.Investigation.MaxTokensPerInvestigation
+	perRequest := strconv.Itoa(requestBudget(ceiling))
+	compaction := strconv.Itoa(compactionTarget(ceiling))
+	overshoot := strconv.FormatFloat(1+requestBudgetFraction, 'g', -1, 64)
+
+	for _, tc := range []struct {
+		path   string
+		claims []string
+	}{
+		{spendDocPath, []string{
+			"A quarter of it — **" + perRequest + "** at the default — additionally bounds",
+			"mid-loop compaction triggers at 70 % of *that* (**" + compaction + "**)",
+			"≈" + overshoot + "× the number you set",
+		}},
+		{spendChartPath, []string{
+			"A QUARTER of this (" + perRequest + " here) additionally bounds",
+			"compaction triggers at 70% of that quarter (" + compaction + ")",
+			"budget ~" + overshoot + "x",
+		}},
+	} {
+		raw, err := os.ReadFile(tc.path)
+		if err != nil {
+			t.Fatalf("read %s: %v", tc.path, err)
+		}
+		doc := ungroupDigits(string(raw))
+		for _, want := range tc.claims {
+			if !strings.Contains(doc, want) {
+				t.Errorf("%s no longer states %q. At a %d-token ceiling one request is bounded at "+
+					"%d, compaction triggers at %d, and a run may still deliver %sx the ceiling — "+
+					"none of which an operator can compute from the page, so all three have to be "+
+					"written down and kept honest here.",
+					tc.path, want, ceiling, requestBudget(ceiling), compactionTarget(ceiling), overshoot)
+			}
+		}
 	}
 }
 

@@ -129,7 +129,7 @@ func ApplyDefaults(c *Config) {
 	// Safe-by-default resource caps (C3/B3-budget): anyone running `lore serve
 	// --config` or `lore investigate` directly gets the same bounded defaults as
 	// the Helm chart (values.yaml: max_tool_output_bytes=32768,
-	// max_tokens_per_investigation=100000). Without these defaults only the chart
+	// max_tokens_per_investigation=400000). Without these defaults only the chart
 	// values.yaml applied the caps; a bare YAML config or a direct CLI run got
 	// unlimited tool output and token budget, enabling unbounded LLM cost and
 	// memory pressure.
@@ -151,7 +151,7 @@ func ApplyDefaults(c *Config) {
 	case -1:
 		c.Investigation.MaxTokensPerInvestigation = 0 // -1 is the user-visible opt-out; map to consumer sentinel
 	case 0:
-		c.Investigation.MaxTokensPerInvestigation = 100000 // match the Helm chart default
+		c.Investigation.MaxTokensPerInvestigation = 400000 // match the Helm chart default
 	}
 	// Interim progress-update default: when enabled without an explicit cadence,
 	// ping every 5 steps — frequent enough to reassure on a long investigation,

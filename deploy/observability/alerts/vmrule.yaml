@@ -178,9 +178,11 @@ spec:
             runbook_url: "https://github.com/Smana/runlore/blob/main/docs/observability.md#runloreslowresolution"
 
         # 12. Investigation token cost is high.
-        # p95 estimated tokens per investigation over 30m exceeds 100k — a cost
-        # guardrail. 100000 is a starting point; set it from your token budget
-        # and the model's pricing.
+        # runlore_investigation_tokens_estimated records the size of the LAST request an
+        # investigation made, not its cumulative spend, so 100000 is the per-request
+        # bound the agent itself enforces (a quarter of max_tokens_per_investigation's
+        # 400000 default): p95 at that bound means typical runs are ending on a
+        # maximum-size request. Scale it with max_tokens_per_investigation if you retune.
         - alert: RunloreInvestigationCostHigh
           expr: histogram_quantile(0.95, sum(rate(runlore_investigation_tokens_estimated_bucket[30m])) by (le)) > 100000
           for: 30m
@@ -188,5 +190,5 @@ spec:
             severity: warning
           annotations:
             summary: "RunLore investigation token cost is high"
-            description: "p95 estimated tokens per investigation is {{ $value | humanize }} over the last 30m (>100k) — investigations are consuming an unusually large token budget; review cost."
+            description: "p95 estimated tokens per investigation is {{ $value | humanize }} over the last 30m (>100k) — typical investigations are ending on a request at the per-request bound; review cost, max_tool_output_bytes and compaction."
             runbook_url: "https://github.com/Smana/runlore/blob/main/docs/observability.md#runloreinvestigationcosthigh"

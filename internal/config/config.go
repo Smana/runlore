@@ -409,7 +409,7 @@ type Investigation struct {
 	RateLimit                 RateLimit `yaml:"rate_limit"`
 	MaxSteps                  int       `yaml:"max_steps"`                    // 0 ⇒ loop default (20)
 	MaxToolOutputBytes        int       `yaml:"max_tool_output_bytes"`        // unset/0 ⇒ bounded default (32768); -1 ⇒ unlimited
-	MaxTokensPerInvestigation int       `yaml:"max_tokens_per_investigation"` // CUMULATIVE token ceiling for one investigation; unset/0 ⇒ bounded default (100000); -1 ⇒ unlimited
+	MaxTokensPerInvestigation int       `yaml:"max_tokens_per_investigation"` // CUMULATIVE token ceiling for one investigation, and a quarter of it bounds any single request; unset/0 ⇒ bounded default (400000); -1 ⇒ unlimited
 	Timeout                   Duration  `yaml:"timeout"`                      // per-investigation deadline; 0 ⇒ default (10m) via ApplyDefaults
 	ToolTimeout               Duration  `yaml:"tool_timeout"`                 // per-TOOL-call timeout so one hung tool can't eat the budget; 0 ⇒ default (60s) at construction
 
@@ -418,7 +418,7 @@ type Investigation struct {
 	// same nudge-then-hard-stop ladder as the token ceiling.
 	//
 	// OPT-IN, with no default and no -1 opt-out — deliberately unlike the token key
-	// above. A token is provider-neutral, so 100000 means the same thing on every
+	// above. A token is provider-neutral, so 400000 means the same thing on every
 	// deployment and can be chosen on an operator's behalf. A dollar cannot: a
 	// self-hosted operator picks their own model and supplies their own rates, so any
 	// shipped USD figure would be generous for one deployment and punitive for the
