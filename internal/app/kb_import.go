@@ -70,10 +70,19 @@ func runKBImport(args []string, w io.Writer) error {
 
 	// Optional model — same opt-in shape as `lore validate-kb --semantic`:
 	// no usable model config degrades to deterministic-only with a warning.
+	//
+	// Counted, not merely built: Enrich makes one completion PER IMPORTED FILE, and
+	// seeding a KB from an existing runbook repo is hundreds of files in one
+	// unattended command. Nothing used to count them — not an investigation's usage
+	// totals, not any budget, not a metric — so the command could spend real money and
+	// report none of it. enrichSpend stays nil when no model is in play, and the
+	// summary below then says nothing rather than claiming a zero spend.
+	var enrichSpend *providers.CountingModel
 	var model providers.ModelProvider
 	if *useModel {
 		if cfgErr == nil && ModelConfigured(cfg) {
-			model = BuildModel(cfg, os.Getenv(cfg.Model.APIKeyEnv))
+			enrichSpend = &providers.CountingModel{Inner: BuildModel(cfg, os.Getenv(cfg.Model.APIKeyEnv))}
+			model = enrichSpend
 		} else {
 			fmt.Fprintln(os.Stderr, "kb import: --model set but no usable model in config; running deterministic only")
 		}
@@ -161,6 +170,9 @@ func runKBImport(args []string, w io.Writer) error {
 		}
 	}
 	_ = tw.Flush()
+	if enrichSpend != nil {
+		_, _ = fmt.Fprintf(w, "\n%s\n", ModelSpendLine(cfg, "kb import", enrichSpend.Total()))
+	}
 	if *dryRun {
 		_, _ = fmt.Fprintf(w, "\ndry-run: would import %d, skip %d (of %d sources); nothing written\n", imported, skipped, len(actions))
 		return nil

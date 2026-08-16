@@ -5,42 +5,19 @@ package eval
 import (
 	"context"
 	"log/slog"
-	"sync"
 
 	"github.com/Smana/runlore/internal/investigate"
 	"github.com/Smana/runlore/internal/providers"
 )
 
-// CountingModel wraps a ModelProvider and sums the provider-reported token usage
-// across completions. The loop only logs/meters each response's Usage, so this
-// wrapper is what turns per-response usage into a per-benchmark total.
-type CountingModel struct {
-	Inner providers.ModelProvider
-
-	mu    sync.Mutex
-	total providers.Usage
-}
-
-// Complete delegates to Inner and accumulates the response usage on success.
-func (c *CountingModel) Complete(ctx context.Context, req providers.CompletionRequest) (providers.CompletionResponse, error) {
-	resp, err := c.Inner.Complete(ctx, req)
-	if err == nil {
-		c.mu.Lock()
-		c.total.InputTokens += resp.Usage.InputTokens
-		c.total.OutputTokens += resp.Usage.OutputTokens
-		c.total.CachedInputTokens += resp.Usage.CachedInputTokens
-		c.total.CacheWriteTokens += resp.Usage.CacheWriteTokens
-		c.mu.Unlock()
-	}
-	return resp, err
-}
-
-// Total returns the usage accumulated so far.
-func (c *CountingModel) Total() providers.Usage {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	return c.total
-}
+// CountingModel is providers.CountingModel. The wrapper started here — the loop only
+// logs/meters each response's Usage, so something had to turn per-response usage into
+// a per-benchmark total — but that need turned out to belong to every one-shot
+// command (`lore kb import`, `lore validate-kb`), none of which can reasonably reach
+// into the eval harness for it. The alias keeps this package's call sites and its
+// exported name intact while the implementation lives beside the interface it
+// decorates.
+type CountingModel = providers.CountingModel
 
 // UsageCounter is the "how many tokens so far" capability the runner needs to
 // attribute spend per case. CountingModel implements it; a plain model does not, and

@@ -304,6 +304,18 @@ configured in your `runlore.yaml` refines titles/descriptions/tags (purely
 optional — a model failure falls back to the deterministic result). Re-running
 the same import is a no-op.
 
+`--model` costs money: it is **one model call per imported file**, so a repo of
+several hundred runbooks is several hundred completions in one unattended command.
+The import reports what it spent when it finishes, and `lore validate-kb --semantic`
+— one call per catalog entry — prints the same line on stderr:
+
+```text
+kb import: model spend: 184300 input / 12400 output tokens (~$0.7389 at model.pricing)
+```
+
+The dollar figure appears only when `model.pricing` supplies rates; without it you
+get the token counts alone, rather than a `$0.00` that would read as "free".
+
 ## Step 1c — The knowledge commons (already on in `standard`)
 
 If you have no runbooks to import either, the

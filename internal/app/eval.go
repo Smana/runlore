@@ -94,20 +94,33 @@ func reportCampaignHalt(budget *eval.CampaignBudget, ran, total int) {
 		ran, total, budget.MaxTokens, budget.SpentTokens())
 }
 
-// reportJudgeSpend prints what the grading model cost, which nothing used to report.
-// The judge is a SEPARATE (usually stronger) model called once per graded run, so its
-// spend is invisible to the per-case counters that wrap only the investigation model
-// — the campaign could publish a cost figure that omitted a whole model. Printed even
-// at zero: "the judge spent nothing" and "nobody is counting the judge" must not look
-// the same.
-func reportJudgeSpend(cfg *config.Config, judge *eval.CountingModel) {
-	u := judge.Total()
-	line := fmt.Sprintf("eval: judge model spend: %d input / %d output tokens",
-		u.InputTokens, u.OutputTokens)
+// ModelSpendLine renders what a one-shot command spent on the model: always the
+// provider-reported token counts, and a USD estimate only when model.pricing supplies
+// rates. Exported because the KB commands need the same sentence, and because a
+// second hand-rolled formatter is how "~$0.0000" ends up printed on an unpriced run,
+// which reads as "this was free" rather than "nobody priced it".
+//
+// A one-shot command is where this belongs at all: the OTel instruments in
+// internal/telemetry are exported by a Prometheus endpoint that telemetry.Setup
+// installs under `lore serve` only, so in a CLI process they bind to the global
+// no-op meter and nothing ever scrapes them. The command's own output is the only
+// place its spend can actually be seen.
+func ModelSpendLine(cfg *config.Config, what string, u providers.Usage) string {
+	line := fmt.Sprintf("%s: model spend: %d input / %d output tokens", what, u.InputTokens, u.OutputTokens)
 	if c := evalCostUSD(cfg, u); c != nil {
 		line += fmt.Sprintf(" (~$%.4f at model.pricing)", *c)
 	}
-	fmt.Fprintln(os.Stderr, line)
+	return line
+}
+
+// reportJudgeSpend prints what the grading model cost, which nothing used to report.
+// The judge is a SEPARATE (usually stronger) model called once per graded run, so its
+// spend is invisible to the per-entry counters that wrap only the model under test —
+// the campaign could publish a token figure that omitted a whole model. Printed even
+// at zero: "the judge spent nothing" and "nobody is counting the judge" must not look
+// the same.
+func reportJudgeSpend(cfg *config.Config, judge *eval.CountingModel) {
+	fmt.Fprintln(os.Stderr, ModelSpendLine(cfg, "eval: judge", judge.Total()))
 }
 
 // RunEval replays recorded incident cases through the investigation loop and

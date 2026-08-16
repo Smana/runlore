@@ -105,7 +105,7 @@ would make the comparison meaningless. The judge's own spend is reported separat
 on stderr at the end of the run:
 
 ```text
-eval: judge model spend: 412340 input / 18220 output tokens (~$1.3762 at model.pricing)
+eval: judge: model spend: 412340 input / 18220 output tokens (~$1.3762 at model.pricing)
 ```
 
 ## Spend controls
