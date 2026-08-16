@@ -180,6 +180,18 @@ incident webhook. Known keys: `alertmanager`, `gitops`, `pagerduty`, `custom`.
   > `max_tokens_per_investigation` to the total you are actually willing to pay per incident (the sum
   > across all turns, not the size of one), or set `-1` for the old unbounded behaviour.
 
+  **Budget for the ceiling plus one request.** The check runs *before* each request and compares the
+  **projected** total — what the run has already spent plus the estimated size of the request about
+  to be sent — so a run stops on the first request that would carry it past the number. That request
+  is still sent: the nudge exists to give the model one turn to conclude. The delivered total can
+  therefore exceed the ceiling **by up to the size of a single request**, and because the transcript
+  grows every step that is the *largest* request of the run. Measured at the shipped defaults, with
+  `max_tool_output_bytes: 32768` and a provider reporting real usage: **≈117 000 tokens delivered
+  against a 100 000 ceiling**, ≈1.2×. Size the ceiling with that headroom in mind rather than reading
+  it as an exact cap. The same applies to `max_cost_per_investigation` below, whose projection prices
+  the pending request's input at `model.pricing` — its output length is not knowable before it is
+  sent, so the projection errs low.
+
 - `max_cost_per_investigation` (**no default — opt-in**) — the same ceiling denominated in **USD**,
   compared against the running estimated spend priced from `model.pricing` (and `model.verify.pricing`
   for the verify pass). Unset or `0` means no cost ceiling. There is deliberately **no `-1` opt-out**:

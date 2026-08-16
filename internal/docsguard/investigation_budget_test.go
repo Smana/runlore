@@ -86,3 +86,48 @@ func TestConfigurationPageStatesTheCumulativeTokenSemantics(t *testing.T) {
 			"without model.pricing — a ceiling that cannot fire has to be documented as such")
 	}
 }
+
+// overshootClaims are the two halves of the statement an operator budgets money
+// against: WHAT is compared (the projected total, not spend already gone) and HOW FAR
+// past the ceiling a run may still be billed (one request).
+var overshootClaims = []string{
+	"compares the **projected** total — what the run has already spent plus the estimated size " +
+		"of the request about to be sent",
+	"exceed the ceiling **by up to the size of a single request**",
+}
+
+// TestConfigurationPageStatesTheOvershoot pins the ceiling's real cost, not its
+// nominal one. The ladder concedes one request past the trip on purpose — the nudge
+// has to give the model a turn to conclude — and because the transcript grows every
+// step, that request is the LARGEST of the run. A page that prints "default 100000"
+// and stops there understates the bill by a whole request, which is the same
+// claim-vs-code gap the cumulative-semantics fix exists to close.
+func TestConfigurationPageStatesTheOvershoot(t *testing.T) {
+	doc := flattenProse(readDoc(t, configurationPath))
+	for _, want := range overshootClaims {
+		if !strings.Contains(doc, want) {
+			t.Errorf("configuration.md must state %q — an operator sizing "+
+				"max_tokens_per_investigation has to know the ceiling is not an exact cap", want)
+		}
+	}
+}
+
+// TestOvershootClaimsRejectTheNominalWording is the mutation test for the guard above:
+// a page that describes the ceiling as a plain cap, or that says the check runs
+// against spend already incurred, must not satisfy either anchor. Without this, an
+// anchor loose enough to match any budget prose would pin nothing.
+func TestOvershootClaimsRejectTheNominalWording(t *testing.T) {
+	for _, nominal := range []string{
+		"a cumulative ceiling on one investigation's model tokens, checked against what the " +
+			"run has already spent; a run stops as soon as it crosses the number",
+		"the ceiling caps a run at 100k tokens",
+		"the overshoot is about two requests by design",
+	} {
+		flat := flattenProse(nominal)
+		for _, claim := range overshootClaims {
+			if strings.Contains(flat, claim) {
+				t.Errorf("anchor %q matches nominal wording %q — it pins nothing", claim, nominal)
+			}
+		}
+	}
+}

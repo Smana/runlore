@@ -25,16 +25,18 @@ import (
 // history stays tiny, and the model never winds down. Under a next-request-only
 // check nothing ever exceeds the ceiling, so the loop runs the full step budget
 // and bills ~10 x 30k against a "100k budget". With a running total the ladder
-// must engage after the fourth call, which is the first moment accumulated spend
-// (4 x 30_010 = 120_040) crosses 100_000.
+// must engage on the step whose request would carry the run past 100_000 — the
+// fourth, since 3 x 30_010 already spent plus a fourth ~30k request projects to
+// 120_030.
 //
 // The exact call count is the assertion, not a range: it pins WHERE on the ladder
-// the stop happens. Four free calls, one nudged call (the model is told to conclude
+// the stop happens. Three free calls, one nudged call (the model is told to conclude
 // and forced to submit_findings), then the hard-kill — the same two-rung ladder the
 // per-request ceiling has always used, so an operator sees one behaviour.
 func TestTokenCeilingIsARunningTotal(t *testing.T) {
 	const (
 		perCall  = 30_010 // reportingRunawayModel: 30_000 input + 10 output
+		perEst   = 30_000 // the anchored estimate of the NEXT request: its input half
 		ceiling  = 100_000
 		maxSteps = 10
 	)
@@ -51,12 +53,13 @@ func TestTokenCeilingIsARunningTotal(t *testing.T) {
 		t.Fatalf("Investigate: %v", err)
 	}
 
-	// freeCalls = the smallest k whose accumulated spend k*perCall crosses the
-	// ceiling; the nudge fires at the top of the step after those. One nudged call
-	// follows (the model is forced to conclude and refuses), then the next check
-	// hard-kills — so the model is called freeCalls+1 times in total.
+	// freeCalls = how many requests fit before the PROJECTED total (what is already
+	// spent plus the request about to be sent) crosses the ceiling. The nudge fires on
+	// the step after those; one nudged call follows (the model is forced to conclude
+	// and refuses), then the next check hard-kills — so the model is called
+	// freeCalls+1 times in total.
 	freeCalls := 0
-	for spent := 0; spent <= ceiling; spent += perCall {
+	for spent := 0; spent+perEst <= ceiling; spent += perCall {
 		freeCalls++
 	}
 	wantCalls := freeCalls + 1
@@ -106,11 +109,16 @@ func costCeilingInvestigator(pricing *Pricing, ceilingUSD float64) (*LoopInvesti
 //
 // The token ceiling is explicitly disabled here, so the only thing that can stop this
 // runaway loop before max_steps is max_cost_per_investigation. One call costs
-// $0.3005; against a $1.00 ceiling the fourth call is the first to cross it, so the
-// ladder nudges on the step after that and kills on the one after.
+// $0.3005, and the pending request projects at $0.30 (its input half, priced as
+// uncached); against a $1.00 ceiling the fourth request is the first whose projection
+// crosses, so the ladder nudges on that step and kills on the one after.
 func TestCostCeilingStopsTheInvestigation(t *testing.T) {
 	const (
 		perCallUSD = costPerCallUSD
+		// estCostUSD is what the NEXT request projects at: 30_000 input tokens at
+		// $10/Mtok. Output length is unknown before the request is sent, so the
+		// projection deliberately omits it and errs low.
+		estCostUSD = 0.30
 		ceilingUSD = 1.00
 	)
 	li, model := costCeilingInvestigator(costPricing, ceilingUSD)
@@ -121,7 +129,7 @@ func TestCostCeilingStopsTheInvestigation(t *testing.T) {
 	}
 
 	freeCalls := 0
-	for spent := 0.0; spent <= ceilingUSD; spent += perCallUSD {
+	for spent := 0.0; spent+estCostUSD <= ceilingUSD; spent += perCallUSD {
 		freeCalls++
 	}
 	if want := freeCalls + 1; model.calls != want {
@@ -276,6 +284,109 @@ func TestBudgetTripTelemetryNamesTheCeilingAndRung(t *testing.T) {
 	// so a series labelled tokens_request would be pointing at the wrong knob.
 	if strings.Contains(body, `reason="tokens_request"`) {
 		t.Fatalf("modest requests must not be reported as a per-request trip:\n%s", body)
+	}
+}
+
+// bulkTool is a tool whose result is a fixed, large blob, so the message history —
+// and therefore every subsequent request — grows the way a real tool-heavy
+// investigation's does. size is the reply length in bytes.
+type bulkTool struct{ size int }
+
+func (bulkTool) Name() string        { return "what_changed" }
+func (bulkTool) Description() string { return "returns a bulky tool result" }
+func (bulkTool) Schema() string      { return `{"type":"object"}` }
+func (b bulkTool) Call(context.Context, string) (string, error) {
+	return strings.Repeat("evidence line for the investigation transcript\n", b.size/45), nil
+}
+
+// growingUsageModel reports provider usage proportional to the request it was
+// actually sent, so the reported total grows monotonically with the transcript —
+// which is what makes the requests AFTER a ceiling trips the largest of the run.
+// density is the tokens-per-heuristic-token ratio a real tokenizer shows once JSON
+// envelope and role overhead are counted; reporting off the request rather than off
+// a fixed script means the fixture cannot drift away from what the loop really sent.
+//
+// It concludes the moment the loop forces submit_findings, i.e. on the nudged turn,
+// so a run takes the ladder's BEST case: nudge, one more request, done. Every worse
+// path (model keeps rambling, hard-kill) bills at least as much.
+type growingUsageModel struct {
+	density int
+	calls   int
+	billed  []int // reported input+output tokens per call, in order
+}
+
+func (m *growingUsageModel) Complete(_ context.Context, req providers.CompletionRequest) (providers.CompletionResponse, error) {
+	m.calls++
+	const out = 300
+	in := m.density * estimateTokens(req.System, req.Messages, req.Tools)
+	m.billed = append(m.billed, in+out)
+	resp := providers.CompletionResponse{Usage: providers.Usage{InputTokens: in, OutputTokens: out}}
+	if req.ToolChoice == submitFindingsName {
+		resp.ToolCalls = []providers.ToolCall{{ID: "s", Name: submitFindingsName,
+			Args: `{"confidence":0.5,"root_causes":[{"summary":"wrapped up at the ceiling"}]}`}}
+		return resp, nil
+	}
+	resp.ToolCalls = []providers.ToolCall{{ID: "t", Name: "what_changed", Args: `{}`}}
+	return resp, nil
+}
+
+// largestBilled returns the biggest single completion this model was billed for.
+func (m *growingUsageModel) largestBilled() int {
+	n := 0
+	for _, b := range m.billed {
+		if b > n {
+			n = b
+		}
+	}
+	return n
+}
+
+// TestTokenCeilingBoundsTheTokensActuallyDelivered measures what the ceiling costs
+// rather than asserting what the guard compares.
+//
+// The ladder is allowed exactly ONE request past the trip by design: the nudge has to
+// give the model a turn to conclude. So the honest bound is `ceiling + the largest
+// single completion the run made` — one request of residual overshoot, no more.
+//
+// Comparing what is ALREADY spent against the ceiling cannot hold that bound: the
+// cumulative arm only fires once spend has crossed, and THEN spends a further request
+// on the nudged turn — and because the transcript grows monotonically, that request is
+// the largest of the run. Two of the run's biggest requests land past the ceiling
+// instead of one, which is how a 100k ceiling delivers ~1.9x its number. Tripping on
+// the PROJECTED total (spent + the request about to be sent) moves the trip one turn
+// earlier, so the nudged turn is the request that crosses rather than the one after it.
+func TestTokenCeilingBoundsTheTokensActuallyDelivered(t *testing.T) {
+	const ceiling = 100_000
+	model := &growingUsageModel{density: 2}
+	var got providers.Investigation
+	li := &LoopInvestigator{
+		Model:                     model,
+		Tools:                     []Tool{bulkTool{size: 32768}},
+		Log:                       slog.New(slog.NewTextHandler(io.Discard, nil)),
+		MaxSteps:                  20,
+		MaxToolOutputBytes:        32768,
+		MaxTokensPerInvestigation: ceiling,
+		OnComplete:                func(inv providers.Investigation) { got = inv },
+	}
+	if err := li.Investigate(context.Background(), Request{Title: "delivered-tokens", Fingerprint: "fp-delivered"}); err != nil {
+		t.Fatalf("Investigate: %v", err)
+	}
+
+	delivered := got.Usage.InputTokens + got.Usage.OutputTokens
+	// Premise: the run really did have to be stopped by the ceiling, and it really did
+	// grow — otherwise the bound below would hold for uninteresting reasons.
+	if model.calls < 3 || model.calls >= li.MaxSteps {
+		t.Fatalf("premise failed — the ceiling must stop a growing run before max_steps; %d calls of %d, billed %v",
+			model.calls, li.MaxSteps, model.billed)
+	}
+	if largest := model.largestBilled(); delivered > ceiling+largest {
+		t.Fatalf("a %d-token ceiling delivered %d tokens (%.2fx), billed per call %v.\n"+
+			"The ladder concedes ONE request past the trip (the nudged turn), so the most an "+
+			"operator may be billed is ceiling+largest request = %d. Anything beyond that is a "+
+			"second oversized request charged after the ceiling was already known to be crossed: "+
+			"the cumulative arm must trip on spent+est — what the run will have cost once this "+
+			"request is sent — not on what it has cost already.",
+			ceiling, delivered, float64(delivered)/ceiling, model.billed, ceiling+largest)
 	}
 }
 

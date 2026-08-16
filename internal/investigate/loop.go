@@ -843,20 +843,46 @@ func (li *LoopInvestigator) tryRecall(ctx context.Context, req Request, result *
 // recall path's reranker and verify calls are both already folded in by the time the
 // loop's first step runs).
 //
+// The cumulative arms compare the PROJECTED total — spent + est, what the run will
+// have cost once this request is sent — not what it has cost already. Comparing spend
+// already gone concedes a whole extra request after the ceiling is known to be
+// crossed, and because the transcript grows monotonically that request is the largest
+// of the run: measured, a 100 000-token ceiling delivered 186 742 tokens. Projecting
+// moves the trip one turn earlier, so the request the ladder concedes for the nudge is
+// the one that crosses rather than the one after it. Some overshoot remains by design
+// — the nudged turn still has to be paid for — bounded by one request (see
+// TestTokenCeilingBoundsTheTokensActuallyDelivered).
+//
 // The per-request check comes first and is kept for what it alone catches: a single
 // oversized request, caught BEFORE it is billed. The running totals catch what it
 // structurally cannot — twenty affordable requests. Order only decides which reason
-// is reported when several are true at once; any one of them enters the same ladder.
+// is reported when several are true at once; any one of them enters the same ladder,
+// and the reason is latched at the nudge so the kill cannot rename it.
 func (li *LoopInvestigator) budgetTrip(est int, spent providers.UsageTotals) string {
 	switch {
 	case overBudget(est, li.MaxTokensPerInvestigation):
 		return budgetReasonRequestTokens
-	case overBudget(spentTokens(spent), li.MaxTokensPerInvestigation):
+	case overBudget(spentTokens(spent)+est, li.MaxTokensPerInvestigation):
 		return budgetReasonTotalTokens
-	case overCostBudget(spent, li.MaxCostPerInvestigation):
+	case overCostBudget(li.projectSpend(spent, est), li.MaxCostPerInvestigation):
 		return budgetReasonCost
 	}
 	return ""
+}
+
+// projectSpend folds the pending request's estimated cost into spent, so the cost
+// ceiling is compared against the same projected total the token ceiling uses.
+//
+// The pending request is priced as uncached input at the MAIN model's rate: before it
+// is sent the loop knows neither its cache-hit rate nor how long the answer will be,
+// and both omissions err towards counting too little — so this is a lower bound on
+// what the request will actually cost, never an inflated one. spent is a value copy;
+// the caller's totals are untouched.
+func (li *LoopInvestigator) projectSpend(spent providers.UsageTotals, est int) providers.UsageTotals {
+	if li.Pricing != nil {
+		spent.CostUSD += li.Pricing.cost(providers.UsageTotals{InputTokens: est})
+	}
+	return spent
 }
 
 // enforceBudget runs the per-step spend guard extracted from Investigate: it
