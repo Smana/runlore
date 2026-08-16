@@ -188,6 +188,51 @@ func TestCostCeilingIsInertWithoutPricing(t *testing.T) {
 	}
 }
 
+// TestCompactionDigestCountsTowardTheRunningTotal closes the last model call that was
+// spending outside the per-investigation accounting.
+//
+// Under `compaction: summarize` the loop pays for an extra completion on every
+// compaction event: a digest of the batch it just elided. Its tokens reached
+// model_input_tokens_total but never loopTotals/verifyTotals, so they were absent from
+// the delivered cost footer, from investigation_cost_usd, and — once the ceilings
+// became running totals — from both ceilings. A ceiling with a hole in it is worse
+// than none, because it reports a number the operator believes.
+//
+// It is folded into the VERIFY totals, not the loop's: the digest call routes to
+// VerifyModel when one is configured, so aggregateUsage's existing split prices it at
+// the verify rate, which is the rate that was actually billed.
+func TestCompactionDigestCountsTowardTheRunningTotal(t *testing.T) {
+	// Small enough that the digests fit summarizeLoop's 6000-token ceiling: this test
+	// is about the tokens being COUNTED, and a fixture that also tripped the ceiling
+	// would stop the loop early and confuse the two properties.
+	const digestTokens = 400
+	sm := &fakeSummarizer{resp: providers.CompletionResponse{
+		Text:  digestSentinel,
+		Usage: providers.Usage{InputTokens: digestTokens, OutputTokens: 7},
+	}}
+	li, got := summarizeLoop(t, sm, nil)
+	// The main scriptModel reports zero usage, so every token in the delivered totals
+	// is the summarizer's — and the digest count is exactly its call count.
+	if err := li.Investigate(context.Background(), Request{Title: "digest accounting"}); err != nil {
+		t.Fatalf("Investigate: %v", err)
+	}
+	digests := sm.count()
+	if digests == 0 {
+		t.Fatal("premise failed — no compaction digest was produced, so there is nothing to account for")
+	}
+	wantTokens := digests * (digestTokens + 7)
+	if spent := got.Usage.InputTokens + got.Usage.OutputTokens; spent != wantTokens {
+		t.Fatalf("delivered usage counts %d tokens after %d compaction digests; want %d — "+
+			"the digest call is billed like any other, so a running-total ceiling that cannot "+
+			"see it under-counts every summarize-mode investigation",
+			spent, digests, wantTokens)
+	}
+	if got.Usage.ModelCalls < digests {
+		t.Fatalf("delivered usage counts %d model calls but the summarizer alone made %d",
+			got.Usage.ModelCalls, digests)
+	}
+}
+
 // TestBudgetTripTelemetryNamesTheCeilingAndRung pins what an operator can actually
 // see when a ceiling fires in production.
 //

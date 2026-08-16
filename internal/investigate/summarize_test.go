@@ -215,7 +215,17 @@ func TestSummarizeBudgetAccountingAndOnePerEvent(t *testing.T) {
 
 	// A distinctive input-token count so we can see it land in the counter. The main
 	// scriptModel reports zero usage, so any nonzero model_input_tokens is the summarizer's.
-	const summTokens = 4242
+	//
+	// It must also FIT the loop's budget: summarizeLoop configures a 6000-token ceiling,
+	// and the digest call's tokens now count against it like any other model call. The
+	// old fixture spent 4242 per digest — three digests, 12726 tokens, over twice the
+	// ceiling it ran under — and completed only because that spend was invisible to the
+	// budget. Under a running total the same fixture is a budget overrun, and the
+	// investigation correctly hard-stops before reaching submit_findings, which would
+	// fail this test's premise. The magnitude is arbitrary to what is being asserted
+	// here (the tokens are counted, one digest per compaction event), so it is lowered
+	// rather than any assertion being relaxed.
+	const summTokens = 1234
 	sm := &fakeSummarizer{resp: providers.CompletionResponse{
 		Text:  digestSentinel,
 		Usage: providers.Usage{InputTokens: summTokens},

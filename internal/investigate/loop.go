@@ -443,13 +443,7 @@ func (li *LoopInvestigator) Investigate(ctx context.Context, req Request) error 
 		// the sticky toolChoice, and the one-shot budgetNudged/compactionLogged flags)
 		// through pointers so behaviour is identical to the inline block, and reports
 		// done==true after delivering the hard-kill result — the caller then returns nil.
-		// Everything this investigation has already paid for, priced the same way the
-		// delivered finding is (aggregateUsage — loop tokens at the main rate, verify
-		// tokens at the verify rate). verifyTotals is already populated here whenever
-		// the recall path ran and fell through, so a recall that spent a reranker + a
-		// verify call before the loop even started counts against the same ceiling.
-		spent := li.aggregateUsage(loopTotals, verifyTotals)
-		if li.enforceBudget(ctx, req, sys, specs, &calib, spent, &messages, &budgetNudged, &compactionLogged, &toolChoice, &result, finish) {
+		if li.enforceBudget(ctx, req, sys, specs, &calib, &loopTotals, &verifyTotals, &messages, &budgetNudged, &compactionLogged, &toolChoice, &result, finish) {
 			return nil
 		}
 		// Step-budget exhaustion: on the LAST step (only this request remains), force a
@@ -871,10 +865,13 @@ func (li *LoopInvestigator) budgetTrip(est int, spent providers.UsageTotals) str
 // already fired, hard-kills the investigation. It reports done==true after delivering
 // the hard-kill result (through `finish`) so Investigate returns nil.
 //
-// `spent` is the investigation's accumulated, provider-reported usage; it makes the
-// token ceiling a RUNNING TOTAL rather than a per-request check. Compaction can shrink
-// the next request but can never un-spend what is already billed, so a cumulative trip
-// falls straight through to the ladder — which is the point.
+// `loopTotals`/`verifyTotals` are the investigation's accumulated, provider-reported
+// usage; combining them here makes the ceilings RUNNING TOTALS rather than per-request
+// checks. Compaction can shrink the next request but can never un-spend what is
+// already billed, so a cumulative trip falls straight through to the ladder — which is
+// the point. They arrive by pointer because summarize-mode compaction, run below,
+// makes a model call of its own that must land in the same total it is then measured
+// against.
 //
 // It mutates the loop-local state it needs through pointers so behaviour is byte-for-
 // byte the inline block's: `messages` (compaction reassigns it; the nudge appends to
@@ -884,7 +881,7 @@ func (li *LoopInvestigator) budgetTrip(est int, spent providers.UsageTotals) str
 // set to "budget_exceeded" on a hard-kill). The token estimate is the chars/4 heuristic
 // anchored to the previous completion's reported usage (calib); providers that report
 // no usage fall back to the pure heuristic.
-func (li *LoopInvestigator) enforceBudget(ctx context.Context, req Request, sys string, specs []providers.ToolSpec, calib *tokenCalibration, spent providers.UsageTotals, messages *[]providers.Message, budgetNudged, compactionLogged *bool, toolChoice, result *string, finish func(providers.Investigation)) (done bool) {
+func (li *LoopInvestigator) enforceBudget(ctx context.Context, req Request, sys string, specs []providers.ToolSpec, calib *tokenCalibration, loopTotals, verifyTotals *providers.UsageTotals, messages *[]providers.Message, budgetNudged, compactionLogged *bool, toolChoice, result *string, finish func(providers.Investigation)) (done bool) {
 	// Budget control: when the estimated request size exceeds the configured ceiling,
 	// inject a one-time nudge asking the model to wrap up. If the model did not wind
 	// down and the estimate is still over budget on the next step, hard-kill: deliver
@@ -900,7 +897,7 @@ func (li *LoopInvestigator) enforceBudget(ctx context.Context, req Request, sys 
 			// digest (best-effort — on any summarizer failure `compacted` already
 			// carries the plain elision markers, so this only ever adds information).
 			if li.Compaction == compactionSummarize {
-				li.summarizeElided(ctx, compacted, removed)
+				li.summarizeElided(ctx, compacted, removed, verifyTotals)
 			}
 			*messages = compacted
 			est = calib.estimate(sys, *messages, specs)
@@ -919,6 +916,11 @@ func (li *LoopInvestigator) enforceBudget(ctx context.Context, req Request, sys 
 			}
 		}
 	}
+	// Priced the same way the delivered finding is (loop tokens at Pricing, verify
+	// tokens at VerifyPricing). Read AFTER compaction so a summarize-mode digest call
+	// counts against the ceiling on the very step that paid for it, and after tryRecall
+	// so a recall fall-through's reranker + verify calls are already in it.
+	spent := li.aggregateUsage(*loopTotals, *verifyTotals)
 	reason := li.budgetTrip(est, spent)
 	if reason == "" {
 		return false

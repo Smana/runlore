@@ -206,8 +206,10 @@ incident webhook. Known keys: `alertmanager`, `gitops`, `pagerduty`, `custom`.
   summarizer error, refusal, or truncation falls back to plain elision — a compaction failure never
   loses the investigation. The digest is derived only from the already-redacted tool outputs, so it
   adds no new egress path. Requires `max_tokens_per_investigation > 0` (compaction is off without a
-  budget). Metrics: `history_summarizations_total`, `history_summarize_fallbacks_total`; the digest
-  call's token usage is counted into `model_input_tokens_total`.
+  budget). Metrics: `history_summarizations_total`, `history_summarize_fallbacks_total`. **The digest
+  call is billed like any other**, so its tokens count into `model_input_tokens_total`, into the
+  investigation's reported usage and cost, and against both spend ceilings — including when the
+  summarizer errors or truncates, since a failed call still consumed its input.
 - `progress_updates` — interim delivery for long investigations. **Off by default.** `enabled`; when
   enabled the loop delivers a progress ping (incident title, step count, tools used so far, and the
   model's latest interim text — redacted and mrkdwn-escaped like any other untrusted field) every

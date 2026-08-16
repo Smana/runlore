@@ -38,7 +38,13 @@ Do NOT speculate, diagnose, rank causes, or add anything not present in the inpu
 // stored in history — already run through redact.Secrets at ingestion (loop.go). The
 // digest is derived only from that already-redacted text, so it introduces no new
 // egress seam; the delivery-time egress redaction still covers anything human-facing.
-func (li *LoopInvestigator) summarizeElided(ctx context.Context, out []providers.Message, removed []elidedOutput) bool {
+// totals accumulates this call's provider-reported usage into the investigation's
+// running spend. It is the VERIFY totals, because the digest call routes to
+// VerifyModel when one is configured — so aggregateUsage's existing loop/verify split
+// prices it at the rate that was actually billed. Counting it is not optional
+// bookkeeping: the spend ceilings compare against these totals, and a model call they
+// cannot see makes every summarize-mode investigation under-count its own spend.
+func (li *LoopInvestigator) summarizeElided(ctx context.Context, out []providers.Message, removed []elidedOutput, totals *providers.UsageTotals) bool {
 	if len(removed) == 0 {
 		return false
 	}
@@ -60,6 +66,11 @@ func (li *LoopInvestigator) summarizeElided(ctx context.Context, out []providers
 		System:   summarizePrompt,
 		Messages: []providers.Message{{Role: "user", Content: b.String()}},
 	})
+	// Fold the digest call into the per-investigation totals BEFORE the fail-safe
+	// returns below: a summarizer that errored, refused or truncated still billed for
+	// the tokens it consumed, and a ceiling that only counts successful calls would let
+	// a flapping summarizer spend without limit.
+	addUsage(totals, resp.Usage)
 	// Count the summarizer's cost into the model-request metrics exactly like a main
 	// loop call, so its token spend is not invisible. It is NOT anchored into the
 	// token calibration (calib): that ratio must reflect the MAIN request's
