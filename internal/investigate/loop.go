@@ -432,7 +432,13 @@ func (li *LoopInvestigator) Investigate(ctx context.Context, req Request) error 
 		// the sticky toolChoice, and the one-shot budgetNudged/compactionLogged flags)
 		// through pointers so behaviour is identical to the inline block, and reports
 		// done==true after delivering the hard-kill result — the caller then returns nil.
-		if li.enforceBudget(ctx, req, sys, specs, &calib, &messages, &budgetNudged, &compactionLogged, &toolChoice, &result, finish) {
+		// Everything this investigation has already paid for, priced the same way the
+		// delivered finding is (aggregateUsage — loop tokens at the main rate, verify
+		// tokens at the verify rate). verifyTotals is already populated here whenever
+		// the recall path ran and fell through, so a recall that spent a reranker + a
+		// verify call before the loop even started counts against the same ceiling.
+		spent := li.aggregateUsage(loopTotals, verifyTotals)
+		if li.enforceBudget(ctx, req, sys, specs, &calib, spent, &messages, &budgetNudged, &compactionLogged, &toolChoice, &result, finish) {
 			return nil
 		}
 		// Step-budget exhaustion: on the LAST step (only this request remains), force a
@@ -826,11 +832,36 @@ func (li *LoopInvestigator) tryRecall(ctx context.Context, req Request, result *
 	return nearMiss, false
 }
 
-// enforceBudget runs the per-step token-budget guard extracted from Investigate: it
+// budgetTrip reports which spend ceiling this step has crossed, or "" for none.
+// est is the anchored size of the request about to be sent; spent is everything the
+// investigation has ALREADY paid for (loop + whatever verify usage is known — the
+// recall path's reranker and verify calls are both already folded in by the time the
+// loop's first step runs).
+//
+// The per-request check comes first and is kept for what it alone catches: a single
+// oversized request, caught BEFORE it is billed. The running totals catch what it
+// structurally cannot — twenty affordable requests. Order only decides which reason
+// is reported when several are true at once; any one of them enters the same ladder.
+func (li *LoopInvestigator) budgetTrip(est int, spent providers.UsageTotals) string {
+	switch {
+	case overBudget(est, li.MaxTokensPerInvestigation):
+		return budgetReasonRequestTokens
+	case overBudget(spentTokens(spent), li.MaxTokensPerInvestigation):
+		return budgetReasonTotalTokens
+	}
+	return ""
+}
+
+// enforceBudget runs the per-step spend guard extracted from Investigate: it
 // estimates the request size, compacts old tool outputs mid-loop to stay under budget,
-// and — when still over — injects the one-time budget nudge and, if that already fired,
-// hard-kills the investigation. It reports done==true after delivering the hard-kill
-// result (through `finish`) so Investigate returns nil.
+// and — when a ceiling is crossed — injects the one-time budget nudge and, if that
+// already fired, hard-kills the investigation. It reports done==true after delivering
+// the hard-kill result (through `finish`) so Investigate returns nil.
+//
+// `spent` is the investigation's accumulated, provider-reported usage; it makes the
+// token ceiling a RUNNING TOTAL rather than a per-request check. Compaction can shrink
+// the next request but can never un-spend what is already billed, so a cumulative trip
+// falls straight through to the ladder — which is the point.
 //
 // It mutates the loop-local state it needs through pointers so behaviour is byte-for-
 // byte the inline block's: `messages` (compaction reassigns it; the nudge appends to
@@ -840,7 +871,7 @@ func (li *LoopInvestigator) tryRecall(ctx context.Context, req Request, result *
 // set to "budget_exceeded" on a hard-kill). The token estimate is the chars/4 heuristic
 // anchored to the previous completion's reported usage (calib); providers that report
 // no usage fall back to the pure heuristic.
-func (li *LoopInvestigator) enforceBudget(ctx context.Context, req Request, sys string, specs []providers.ToolSpec, calib *tokenCalibration, messages *[]providers.Message, budgetNudged, compactionLogged *bool, toolChoice, result *string, finish func(providers.Investigation)) (done bool) {
+func (li *LoopInvestigator) enforceBudget(ctx context.Context, req Request, sys string, specs []providers.ToolSpec, calib *tokenCalibration, spent providers.UsageTotals, messages *[]providers.Message, budgetNudged, compactionLogged *bool, toolChoice, result *string, finish func(providers.Investigation)) (done bool) {
 	// Budget control: when the estimated request size exceeds the configured ceiling,
 	// inject a one-time nudge asking the model to wrap up. If the model did not wind
 	// down and the estimate is still over budget on the next step, hard-kill: deliver
@@ -875,31 +906,48 @@ func (li *LoopInvestigator) enforceBudget(ctx context.Context, req Request, sys 
 			}
 		}
 	}
-	if overBudget(est, li.MaxTokensPerInvestigation) {
-		if !*budgetNudged {
-			*messages = append(*messages, providers.Message{Role: "user", Content: budgetNudge})
-			*budgetNudged = true
-			// From here on, force submit_findings on every remaining request: the
-			// model has been told to wrap up, so it must conclude — it may not
-			// ramble in prose or keep calling investigation tools. Normal loop
-			// steps (before the nudge) keep ToolChoice empty so the model stays
-			// free to pick tools or answer.
-			*toolChoice = submitFindingsName
-		} else {
-			// Hard-kill: nudge already fired but the model is still over budget.
-			li.Log.Warn("investigation hard-stopped at token budget",
-				"title", req.Title,
-				"estimate_tokens", est,
-				"budget_tokens", li.MaxTokensPerInvestigation)
-			if li.Metrics != nil {
-				li.Metrics.InvestigationsDropped.Add(ctx, 1)
-			}
-			*result = "budget_exceeded"
-			finish(budgetKillResult(req))
-			return true
+	reason := li.budgetTrip(est, spent)
+	if reason == "" {
+		return false
+	}
+	// One counter, two labels: `reason` says which ceiling an operator has to raise,
+	// `stage` says whether the run still delivered findings (nudge) or died (kill).
+	trip := func(stage string) {
+		if li.Metrics != nil {
+			li.Metrics.InvestigationBudgetTrips.Add(ctx, 1, metric.WithAttributes(
+				attribute.String("reason", reason), attribute.String("stage", stage)))
 		}
 	}
-	return false
+	if !*budgetNudged {
+		trip(budgetStageNudge)
+		li.Log.Info("investigation budget nudge: forcing the model to conclude",
+			"title", req.Title, "reason", reason,
+			"estimate_tokens", est, "spent_tokens", spentTokens(spent),
+			"budget_tokens", li.MaxTokensPerInvestigation)
+		*messages = append(*messages, providers.Message{Role: "user", Content: budgetNudge})
+		*budgetNudged = true
+		// From here on, force submit_findings on every remaining request: the
+		// model has been told to wrap up, so it must conclude — it may not
+		// ramble in prose or keep calling investigation tools. Normal loop
+		// steps (before the nudge) keep ToolChoice empty so the model stays
+		// free to pick tools or answer.
+		*toolChoice = submitFindingsName
+		return false
+	}
+	// Hard-kill: nudge already fired but a ceiling is still crossed.
+	trip(budgetStageKill)
+	li.Log.Warn("investigation hard-stopped at token budget",
+		"title", req.Title,
+		"reason", reason,
+		"estimate_tokens", est,
+		"spent_tokens", spentTokens(spent),
+		"budget_tokens", li.MaxTokensPerInvestigation)
+	if li.Metrics != nil {
+		li.Metrics.InvestigationsDropped.Add(ctx, 1)
+	}
+	*result = "budget_exceeded"
+	finish(budgetKillResult(req, reason))
+	return true
 }
 
 // maxConcurrentToolCalls bounds how many of one assistant turn's tool calls run at

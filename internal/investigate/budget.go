@@ -8,16 +8,51 @@ import (
 	"github.com/Smana/runlore/internal/providers"
 )
 
-// budgetKillResult synthesises an unresolved investigation for use when the
-// token-budget hard-kill fires (nudge fired, model did not submit findings in time).
-func budgetKillResult(req Request) providers.Investigation {
+// Spend-ceiling reasons. Every ceiling feeds the SAME two-rung ladder (nudge once
+// with a forced submit_findings, then hard-kill with result="budget_exceeded"), so
+// the reason is what tells an operator WHICH ceiling stopped a run — on the metric
+// label, the log line and the delivered unresolved entry.
+const (
+	// budgetReasonRequestTokens: the next request on its own would exceed
+	// MaxTokensPerInvestigation. Caught before it is sent.
+	budgetReasonRequestTokens = "tokens_request"
+	// budgetReasonTotalTokens: the tokens this investigation has ALREADY spent
+	// (provider-reported, loop + verify) exceed MaxTokensPerInvestigation.
+	budgetReasonTotalTokens = "tokens_total"
+)
+
+// Ladder rungs, used as the `stage` label on the budget-trip metric: a ceiling is
+// tripped twice before a run dies, and the two are operationally different — a
+// nudge still delivers real findings, a kill delivers an unresolved stub.
+const (
+	budgetStageNudge = "nudge"
+	budgetStageKill  = "kill"
+)
+
+// spentTokens is the running per-investigation token total a ceiling is compared
+// against: provider-reported input (which INCLUDES cached — see providers.Usage)
+// plus output, summed over every model call the investigation has made so far.
+// Same arithmetic as the recall_tokens_spent_total counter, so "tokens spent"
+// means one thing across RunLore.
+func spentTokens(t providers.UsageTotals) int { return t.InputTokens + t.OutputTokens }
+
+// budgetKillResult synthesises an unresolved investigation for use when a spend
+// ceiling's hard-kill fires (nudge fired, model did not submit findings in time).
+// reason names the ceiling so the delivered finding says which limit was hit — an
+// operator reading only the notification should not have to correlate a log line
+// to know whether to raise tokens or dollars.
+func budgetKillResult(req Request, reason string) providers.Investigation {
+	which := "per-request token budget (investigation.max_tokens_per_investigation)"
+	if reason == budgetReasonTotalTokens {
+		which = "cumulative token budget (investigation.max_tokens_per_investigation)"
+	}
 	return providers.Investigation{
 		Title:       req.Title,
 		Resource:    req.Workload,
 		Fingerprint: req.Fingerprint,
 		Verdict:     providers.VerdictInconclusive,
 		Unresolved: []string{
-			"investigation stopped: token budget exceeded after nudge (model did not submit findings in time)",
+			"investigation stopped: " + which + " exceeded after nudge (model did not submit findings in time)",
 		},
 	}
 }

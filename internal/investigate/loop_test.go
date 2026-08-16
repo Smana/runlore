@@ -1928,7 +1928,7 @@ func TestEnforceBudgetNudgeThenHardKill(t *testing.T) {
 	finish := func(providers.Investigation) { delivered++ }
 
 	// First over-budget call: nudge fires, no delivery.
-	if done := li.enforceBudget(context.Background(), Request{Title: "x"}, sys, specs, &calib, &messages, &budgetNudged, &compactionLogged, &toolChoice, &result, finish); done {
+	if done := li.enforceBudget(context.Background(), Request{Title: "x"}, sys, specs, &calib, providers.UsageTotals{}, &messages, &budgetNudged, &compactionLogged, &toolChoice, &result, finish); done {
 		t.Fatal("first over-budget call must nudge (done==false), not hard-kill")
 	}
 	if !budgetNudged {
@@ -1945,7 +1945,7 @@ func TestEnforceBudgetNudgeThenHardKill(t *testing.T) {
 	}
 
 	// Second over-budget call: hard-kill, exactly one delivery.
-	if done := li.enforceBudget(context.Background(), Request{Title: "x", Fingerprint: "fp-kill"}, sys, specs, &calib, &messages, &budgetNudged, &compactionLogged, &toolChoice, &result, finish); !done {
+	if done := li.enforceBudget(context.Background(), Request{Title: "x", Fingerprint: "fp-kill"}, sys, specs, &calib, providers.UsageTotals{}, &messages, &budgetNudged, &compactionLogged, &toolChoice, &result, finish); !done {
 		t.Fatal("second over-budget call must hard-kill (done==true)")
 	}
 	if result != "budget_exceeded" {
