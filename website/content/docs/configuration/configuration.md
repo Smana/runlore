@@ -209,6 +209,17 @@ incident webhook. Known keys: `alertmanager`, `gitops`, `pagerduty`, `custom`.
   present with **every rate at `0`**: cost is then always exactly `$0.00`, which is under any ceiling,
   while the notification footer and `runlore_investigation_cost_usd` both report a figure and make the
   deployment look instrumented for spend.
+
+  **Fill in all three rates.** A rate left at `0` is not "this class is free" — it is a whole class of
+  real spend estimated at `$0.00`. `cached_input_usd_per_mtok` is the one most often forgotten, and
+  every provider RunLore speaks reports cache reads separately (Anthropic `cache_read_input_tokens`,
+  OpenAI `prompt_tokens_details.cached_tokens`, Gemini `cachedContentTokenCount`), so on a cache-heavy
+  run omitting it understates the input term several-fold: the ceiling still fires, but only after
+  materially more real spend than the number you wrote, and the footer and metric report the same
+  under-estimate. RunLore warns at startup and names each rate left at `0`. If your provider genuinely
+  does not bill a class separately, set that rate equal to the one it shares (e.g.
+  `cached_input_usd_per_mtok: <your input rate>`) — the corresponding token count is then always 0, so
+  it costs nothing and the warning goes quiet.
 - `compaction` — how mid-loop history compaction treats the older tool outputs it elides once the
   estimate crosses the compaction target (0.7× `max_tokens_per_investigation`). **`elide`** (default)
   drops their bodies for short markers (lossy). **`summarize`** first asks a model for **one** compact
