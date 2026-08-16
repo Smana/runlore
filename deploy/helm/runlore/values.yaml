@@ -110,15 +110,29 @@ config:
     name: runlore-leader
   # Cost controls — these ship with SAFE, BOUNDED defaults (not unlimited) so a
   # default install can't run away in LLM spend. Tune for your environment, or set
-  # a field to 0 for unlimited (where noted). Coalesce/rate-limit sub-fields left
+  # a field to -1 for unlimited (where noted). Coalesce/rate-limit sub-fields left
   # unset default in the agent to 30s debounce, 2m max-wait, 50 batch, 10m cooldown,
   # 1h window.
   investigation:
-    # Per-investigation context ceiling (estimated request tokens): when crossed, the
-    # agent is nudged to wrap up, then hard-stops and delivers what it has rather than
-    # growing context unbounded. 0 = unlimited.
+    # CUMULATIVE token ceiling for ONE investigation: the provider-reported tokens of
+    # every model call it makes (loop + verify), plus a check that the next request
+    # alone doesn't exceed this. When crossed, the agent is nudged to wrap up and
+    # forced to submit findings, then hard-stops and delivers what it has.
+    # -1 = unlimited.
+    #
+    # NOTE this bounds the WHOLE RUN, not one request — it used to bound only the next
+    # request, so 100000 now binds far earlier than it did before. If investigations
+    # start reporting result="budget_exceeded", raise this to the total you are willing
+    # to pay per incident (summed across all turns), not the size of one turn.
     max_tokens_per_investigation: 100000
-    # Cap each tool result fed back to the model (truncates large logs/diffs). 0 = unlimited.
+    # The same ceiling in USD, compared against the running estimated spend. OPT-IN:
+    # unset/0 = no cost ceiling. Deliberately not defaulted — a dollar figure depends on
+    # the model and rates you chose, so RunLore cannot pick one for you.
+    #
+    # REQUIRES model.pricing: with no rates configured there is no cost to compare and
+    # this can never fire (the agent warns loudly at startup if you set it anyway).
+    # max_cost_per_investigation: 2.50
+    # Cap each tool result fed back to the model (truncates large logs/diffs). -1 = unlimited.
     max_tool_output_bytes: 32768
     # How mid-loop history compaction treats the older tool outputs it elides once the
     # estimate crosses 0.7x max_tokens_per_investigation. "elide" (default) drops their

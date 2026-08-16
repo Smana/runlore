@@ -76,6 +76,21 @@ estimate) keep the SDK defaults and are read as heatmaps, not percentiles.
 | `runlore_investigation_output_tokens` | histogram | `result` | provider-reported output tokens per investigation (loop + verify) |
 | `runlore_investigation_cached_input_tokens` | histogram | `result` | input tokens served from cache per investigation (loop + verify) |
 | `runlore_investigation_cost_usd` | histogram | `result` | estimated per-investigation cost in USD (only when `model.pricing` is configured) |
+| `runlore_investigation_budget_trips_total` | counter | `reason`, `stage` | spend ceilings crossed during an investigation. `reason` = `tokens_request` (the next request alone exceeded `max_tokens_per_investigation`), `tokens_total` (the run's cumulative tokens did), or `cost` (`max_cost_per_investigation`). `stage` = `nudge` (forced to conclude early; findings still delivered) or `kill` (hard-stopped, `result="budget_exceeded"`) |
+
+`budget_trips_total{stage="nudge"}` is the one to alert on. A nudged investigation completes and
+records `result="resolved"` like any other, so it is invisible in every other series — only this
+counter distinguishes "the ceiling is comfortable" from "the ceiling has been silently truncating
+investigations for a week":
+
+```promql
+# share of investigations cut short by a ceiling, whether or not they died
+sum(rate(runlore_investigation_budget_trips_total{stage="nudge"}[1h]))
+  / sum(rate(runlore_investigations_completed_total[1h]))
+
+# which ceiling to raise
+sum by (reason) (rate(runlore_investigation_budget_trips_total[1h]))
+```
 
 The five usage histograms carry the same `result` values as
 `runlore_investigations_completed_total`, so `{result="recall"}` selects exactly the

@@ -155,8 +155,48 @@ incident webhook. Known keys: `alertmanager`, `gitops`, `pagerduty`, `custom`.
   hung/slow provider (a stuck git clone, an unresponsive metrics/logs endpoint) so it can't eat the
   whole per-investigation budget; on expiry the tool result is a non-fatal "timed out" note and the
   investigation continues.
-- `max_steps` (**default 20**), `max_tool_output_bytes` (0 = unlimited), `max_tokens_per_investigation`
-  (0 = unlimited, else a hard token ceiling).
+- `max_steps` (**default 20**) — model turns one investigation may take.
+- `max_tool_output_bytes` (**default 32768**; `-1` = unlimited) — each tool result is truncated to
+  this many bytes before it is fed back to the model.
+
+- **Spend ceilings** — two knobs bound what one investigation may spend, and both feed the **same
+  two-rung ladder**, so there is one behaviour to learn and one result code to watch. On the first
+  crossing RunLore injects a nudge and forces `submit_findings`, so the run **still delivers real
+  findings**; if the model has not concluded by the next step it is **hard-stopped** with
+  `result="budget_exceeded"` and an unresolved stub naming the ceiling it hit. Both rungs are counted
+  by `runlore_investigation_budget_trips_total{reason,stage}`.
+- `max_tokens_per_investigation` (**default 100000**; `-1` = unlimited) — a **cumulative** ceiling on
+  one investigation's model tokens (provider-reported input + output, loop **and** verify, including
+  a recall short-circuit's reranker/verify calls). The estimated size of the **next request** is
+  checked against the same number as well, so a single oversized request is still caught before it is
+  billed.
+
+  > **This ceiling used to bound one request, not the run.** It was previously compared only against
+  > the estimated size of the next request, so twenty steps of 99k each passed cleanly against a 100k
+  > "budget". It is now a running total, which means **the same number binds far earlier than it
+  > used to**: at the default, a long tool-heavy investigation that resends a growing history every
+  > step can now stop after a handful of turns. If your investigations start reporting
+  > `budget_exceeded` after upgrading, that is the ceiling doing what it says — raise
+  > `max_tokens_per_investigation` to the total you are actually willing to pay per incident (the sum
+  > across all turns, not the size of one), or set `-1` for the old unbounded behaviour.
+
+- `max_cost_per_investigation` (**no default — opt-in**) — the same ceiling denominated in **USD**,
+  compared against the running estimated spend priced from `model.pricing` (and `model.verify.pricing`
+  for the verify pass). Unset or `0` means no cost ceiling. There is deliberately **no `-1` opt-out**:
+  `0` already means off, and a negative value is rejected at startup rather than quietly read as one.
+
+  *Why opt-in when the token ceiling ships a default:* a token is provider-neutral — 100000 means the
+  same thing on every model, so a safe value can be chosen on your behalf. A dollar is not. You pick
+  your own model and supply your own rates, so any figure RunLore shipped would be generous for one
+  deployment and punitive for the next, and would silently cut runs short on an upgrade nobody asked
+  for.
+
+  **It does nothing without `model.pricing`.** With no rates configured there is no cost to compare,
+  so the ceiling can never fire — for any investigation, ever. RunLore says so loudly at startup
+  rather than letting the limit sit inert, and warns about the same trap when `model.pricing` is
+  present with **every rate at `0`**: cost is then always exactly `$0.00`, which is under any ceiling,
+  while the notification footer and `runlore_investigation_cost_usd` both report a figure and make the
+  deployment look instrumented for spend.
 - `compaction` — how mid-loop history compaction treats the older tool outputs it elides once the
   estimate crosses the compaction target (0.7× `max_tokens_per_investigation`). **`elide`** (default)
   drops their bodies for short markers (lossy). **`summarize`** first asks a model for **one** compact
@@ -345,6 +385,12 @@ the delivered finding gains a footer line (`N model calls · X in / Y out tokens
 show. Totals sum the investigation loop **and** the verify pass — loop tokens price at `model.pricing`,
 verify tokens at `model.verify.pricing` (inheriting `model.pricing` when empty). Cost never enters the
 curated KB entry, only the notification.
+
+`pricing` is also what makes `investigation.max_cost_per_investigation` (see the `investigation`
+section above) enforceable — without it there is no cost to compare, so a configured USD ceiling can
+never fire and RunLore warns about it at startup. Rates are yours to supply and RunLore never fetches or updates them, so a ceiling
+is only as accurate as the numbers here: check them against your provider's price list when you change
+model or tier, or the ceiling drifts away from the bill it is meant to bound.
 
 ### `forge` — the Git host for curation
 `provider` (`github` — the default — or `gitlab`), `kb_repo` (GitHub: `owner/name`; GitLab: the
