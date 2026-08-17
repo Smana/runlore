@@ -2464,8 +2464,10 @@ func TestReplyQuotesTheRecordedNote(t *testing.T) {
 		if len(f.opened) != 1 {
 			t.Fatalf("opened = %d, want 1", len(f.opened))
 		}
+		// The entry is named after the NOTE, not after the finding the thread was
+		// about ("OOM in payments") — see noteEntryTitle.
 		want := "📝 Opened knowledge-base PR #99 with your note — «https://github.com/o/r/pull/99»\n" +
-			"Entry: «Operator note: OOM in payments»\n" +
+			"Entry: «Operator note: stale since Karpenter»\n" +
 			"> «stale since Karpenter»"
 		if got := RenderReply(reply, visibleEscape); got != want {
 			t.Errorf("rendered reply =\n%q\nwant\n%q", got, want)
@@ -2779,7 +2781,7 @@ func TestReplyQuotesTheModelDraftAsModelDrafted(t *testing.T) {
 // the "Entry:" line second, so the message read
 //
 //	Drafted by RunLore from your message — not your own words, pending review:
-//	Entry: Operator note: OOM in payments
+//	Entry: Operator note: the real cause was a spot-node reclaim
 //	> the real cause was a spot-node reclaim
 //
 // — a colon promising a quote, answered by a title. Two colons in a row, the
@@ -2933,7 +2935,7 @@ func TestOpenPRStatusLineNamesWhoseNoteItOpenedWith(t *testing.T) {
 		// why that order moved.
 		want := "> «Noted — that changes the root cause.»\n" +
 			"📝 Opened knowledge-base PR #99 with a note drafted from your message — «https://github.com/o/r/pull/99»\n" +
-			"Entry: «Operator note: OOM in payments»\n" +
+			"Entry: «Operator note: The real cause was a spot-node reclaim, not the CNI.»\n" +
 			"Drafted by RunLore from your message — not your own words, pending review:\n" +
 			"> «The real cause was a spot-node reclaim, not the CNI.»"
 		if got := RenderReply(reply, visibleEscape); got != want {

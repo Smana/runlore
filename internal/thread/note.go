@@ -18,6 +18,30 @@ import (
 // characters.
 const maxNoteTitle = 90
 
+// noteTitlePrefix leads every generated entry title. What follows it is the
+// NOTE's own claim, not the finding's headline — see noteEntryTitle.
+const noteTitlePrefix = "Operator note: "
+
+// The description's parts are each bounded on their own, so the line as a whole
+// is bounded without a final truncation — which would cut the provenance clause,
+// the one part that must never be lost (see conceptDescription).
+const (
+	// maxNoteDescriptionClaim gives the note's own words room for roughly two
+	// sentences. Bigger than the title's share deliberately: the description is
+	// the half of instant recall's root-cause claim that can afford to be
+	// complete, and the merge gate puts no limit on it (only `title` is capped).
+	maxNoteDescriptionClaim = 200
+	// maxNoteDescriptionContext bounds the finding title carried as context. 120
+	// is the merge gate's own title limit, which curator.CapTitle already caps
+	// every curated title to — so an ordinary finding arrives here WHOLE, and the
+	// alert's distinguishing words (the ones that make the note reachable from
+	// the alert again) are not the ones a cut takes off the end.
+	maxNoteDescriptionContext = 120
+	// maxNoteAuthor bounds a chat handle. Defensive: an author string comes from
+	// the transport, and nothing else here caps it.
+	maxNoteAuthor = 40
+)
+
 // DefaultMaxNoteBytes bounds one human message's INPUT, in bytes, before it
 // is written to the knowledge base or shown to a model.
 //
@@ -309,11 +333,11 @@ func cutToRuneBoundary(s string, n int) string {
 // It matters because ConceptEntry deliberately leaves Fingerprint unset (a
 // note is not a curated finding — see the comment below), so two notes are
 // ALWAYS compared by dedup's title-Jaccard fallback. Every note PR shares the
-// title prefix "KB: Operator note: <finding title>", so two notes on the same
-// recurring incident score a Jaccard of 1.0 — the strongest possible dedup
-// match. Without this label RunLore would silently close a human's
-// correction as a "duplicate" of another human's correction, which defeats
-// the entire premise of thread capture.
+// title prefix "KB: Operator note: ", and two humans correcting the same
+// recurring incident write about the same thing in much the same words, so
+// their titles score near the top of that fallback. Without this label RunLore
+// would silently close a human's correction as a "duplicate" of another
+// human's correction, which defeats the entire premise of thread capture.
 //
 // internal/thread depends only on providers and internal/catalog by design,
 // so this literal is duplicated — not imported — in internal/curate. Kept in
@@ -339,12 +363,6 @@ const noteForgeLabel = "runlore-operator-note"
 // outlives the pull request it arrived on. Redaction is idempotent, so a field
 // NoteBody already masked costs nothing here.
 func ConceptEntry(tc Context, n Note, at time.Time, maxBytes int) providers.KBEntry {
-	title := "Operator note"
-	if tc.Title != "" {
-		title = "Operator note: " + noteField(tc.Title)
-	}
-	title = truncate(title, maxNoteTitle)
-
 	var body strings.Builder
 	body.WriteString(NoteBody(tc, n, at, maxBytes))
 	if tc.RecalledEntry != "" || tc.TriggerKey != "" || tc.Resource != "" {
@@ -365,9 +383,13 @@ func ConceptEntry(tc Context, n Note, at time.Time, maxBytes int) providers.KBEn
 
 	return providers.KBEntry{
 		Type:        "Concept",
-		Title:       title,
-		Description: truncate(conceptDescription(tc, n), maxNoteTitle*2),
-		Resource:    tc.Resource,
+		Title:       noteEntryTitle(tc, n),
+		Description: conceptDescription(tc, n),
+		// Narrowed to the one whitespace-free value the merge gate accepts — the
+		// body's Context section above still carries tc.Resource in full. See
+		// providers.EntryResourceRef for what this closes and why it narrows
+		// rather than drops.
+		Resource:    providers.EntryResourceRef(tc.Resource),
 		Tags:        []string{"operator-note", transportName(tc.Transport)},
 		ExtraLabels: []string{noteForgeLabel},
 		Body:        body.String(),
@@ -377,16 +399,148 @@ func ConceptEntry(tc Context, n Note, at time.Time, maxBytes int) providers.KBEn
 	}
 }
 
-// conceptDescription renders the entry's one-line description, which is the
-// only provenance a catalog listing or a search hit shows — the body's
-// heading never reaches either. It therefore has to make the same
-// human-wrote-it / model-drafted-it distinction NoteBody's header does,
-// otherwise the distinction survives only for a reader who opens the entry.
-func conceptDescription(tc Context, n Note) string {
-	if n.modelDrafted() {
-		return fmt.Sprintf("Note drafted by RunLore from @%s's %s thread message, pending review.", noteField(n.Author), transportName(tc.Transport))
+// noteEntryTitle names the entry after the NOTE, not after the finding the note
+// was written in reply to.
+//
+// The finding's title used to BE the identity ("Operator note: <finding
+// title>"), and that is wrong twice over.
+//
+// It files a note that CORRECTS a finding under the headline of the very thing
+// it corrects. Live, the reranker then matched such an entry and quoted the
+// refuted hypothesis back as its grounds for matching.
+//
+// And it truncated on a byte boundary, so the title routinely ended mid-word
+// ("… stu…"). That is not cosmetic: instant recall builds its whole root-cause
+// claim as `title + " — " + description` (investigate.recalledInvestigation),
+// and a Concept note has no Cause/Resolution sections to add to it — by
+// construction, since escapeOKFSections exists to stop a note forging them. So
+// those two fields ARE the claim verify judges, verify correctly rejected an
+// unintelligible one every time, and a corrected entry could never take the
+// cheap instant-recall path it exists to earn.
+//
+// The finding is not dropped, it is demoted from identity to CONTEXT:
+// conceptDescription names it, and the body's "Thread:" line and Context section
+// carry it in full.
+func noteEntryTitle(tc Context, n Note) string {
+	if claim := noteClaim(n.Text, maxNoteTitle-len(noteTitlePrefix)); claim != "" {
+		return noteTitlePrefix + claim
 	}
-	return fmt.Sprintf("Operator knowledge captured from a %s thread by @%s.", transportName(tc.Transport), noteField(n.Author))
+	// Only reachable when the note is empty or is nothing but markup:
+	// Responder.Handle answers an empty "note:" without writing, and freeform
+	// files nothing for an empty draft. Naming the finding still beats a bare
+	// "Operator note", and "on" reads as ABOUT the finding rather than as a claim
+	// the note makes about it.
+	if s := collapseSpaces(noteField(tc.Title)); s != "" {
+		return truncateWords("Operator note on "+s, maxNoteTitle)
+	}
+	return "Operator note"
+}
+
+// noteClaim renders the note's own leading words as one bounded, single-line
+// claim: redacted and flattened (noteField), squeezed, stripped of the Markdown
+// a chat reply opens with, and cut on a WORD boundary.
+//
+// It returns "" for a note that has no word in it at all — a lone bullet, a row
+// of punctuation. "Operator note: -" is not an identity, and the caller has a
+// better fallback than a title that says nothing.
+func noteClaim(text string, maxBytes int) string {
+	s := stripLeadingMarkup(collapseSpaces(noteField(text)))
+	if !hasWordRune(s) {
+		return ""
+	}
+	return truncateWords(s, maxBytes)
+}
+
+// hasWordRune reports whether s carries anything a reader would call a word.
+func hasWordRune(s string) bool {
+	for _, r := range s {
+		if unicode.IsLetter(r) || unicode.IsDigit(r) {
+			return true
+		}
+	}
+	return false
+}
+
+// conceptDescription renders the entry's one-line description.
+//
+// It is the only provenance a catalog listing or a search hit shows — the body's
+// heading never reaches either — so it has to make the same human-wrote-it /
+// model-drafted-it distinction NoteBody's header does, otherwise the distinction
+// survives only for a reader who opens the entry.
+//
+// It also has to carry SIGNAL, which it used to carry none of: a fixed sentence
+// naming the author and the transport, byte-identical across every operator
+// note, on the field with three consumers that all read it as content. It is
+// half of what instant recall hands verify as the root-cause claim (see
+// noteEntryTitle), it is what the reranker is shown for each candidate
+// (investigate.renderRerankCandidates), and it is indexed for lexical search
+// (catalog.Entry's search text).
+//
+// So it renders three things in this order:
+//
+//   - the provenance clause FIRST, because a listing that clips the line must
+//     never clip the fact that RunLore, not the human, wrote the text;
+//   - the finding the note annotates, as context — it is what keeps the note
+//     reachable from the alert that produced it, and it must not be the note's
+//     identity (see noteEntryTitle);
+//   - the note's own claim, at greater length than the title had room for.
+//
+// Every part is bounded on its own rather than the whole line truncated at the
+// end, so the provenance clause can never be the part that gets cut.
+func conceptDescription(tc Context, n Note) string {
+	var b strings.Builder
+	who := truncateWords(collapseSpaces(noteField(n.Author)), maxNoteAuthor)
+	if n.modelDrafted() {
+		fmt.Fprintf(&b, "Note drafted by RunLore from @%s's %s thread message, pending review", who, transportName(tc.Transport))
+	} else {
+		fmt.Fprintf(&b, "Operator knowledge from @%s via %s", who, transportName(tc.Transport))
+	}
+	if s := truncateWords(collapseSpaces(noteField(tc.Title)), maxNoteDescriptionContext); s != "" {
+		fmt.Fprintf(&b, ", on the finding %q", s)
+	}
+	if claim := noteClaim(n.Text, maxNoteDescriptionClaim); claim != "" {
+		fmt.Fprintf(&b, ": %s", claim)
+	} else {
+		b.WriteString(".")
+	}
+	return b.String()
+}
+
+// collapseSpaces squeezes every run of whitespace to a single space and trims
+// the ends — the shape a one-line YAML title or description needs. noteField
+// already maps line breaks (and the control/format runes that render as one) to
+// spaces; this removes the runs they leave behind.
+func collapseSpaces(s string) string { return strings.Join(strings.Fields(s), " ") }
+
+// leadingMarkupMarkers are the one-character Markdown markers a chat reply
+// opens a line with. Only a marker followed by a SPACE counts, so "-1 replica"
+// keeps its minus sign.
+const leadingMarkupMarkers = ">-*+"
+
+// stripLeadingMarkup removes the Markdown a chat reply routinely opens with — a
+// bullet, a blockquote marker, an ATX heading — so a note's title reads as its
+// claim rather than as "- the cause was …".
+//
+// Heading detection goes through atxHeadingText, the same parse the read path
+// performs, rather than a second spelling of it.
+//
+// Bounded rather than looped to a fixed point: nesting deeper than a few levels
+// is not something a chat reply does, and a bound is one less way for untrusted
+// text to control how long this runs.
+func stripLeadingMarkup(s string) string {
+	s = strings.TrimSpace(s)
+	for range 4 {
+		if h := atxHeadingText(s); h != "" {
+			s = h
+			continue
+		}
+		if len(s) >= 2 && strings.IndexByte(leadingMarkupMarkers, s[0]) >= 0 && s[1] == ' ' {
+			s = strings.TrimSpace(s[2:])
+			continue
+		}
+		break
+	}
+	return s
 }
 
 // transportName normalises an empty transport so rendering never emits "via ".
@@ -568,6 +722,33 @@ func singleLine(s string) string {
 		}
 		return r
 	}, s)
+}
+
+// truncateWords shortens s to around n bytes like truncate, but cuts on a WORD
+// boundary wherever one is available.
+//
+// truncate's rune-boundary cut is right for a machine-generated field nobody
+// reads as a sentence, and wrong for anything a model then has to UNDERSTAND: it
+// produced entry titles ending "… stu…", which verify rejected as
+// unintelligible rather than as false — see noteEntryTitle for the whole path.
+//
+// The word boundary is only taken when it keeps at least half of what was cut
+// to. A single unbroken token longer than the budget — a URL, a hash, one very
+// long word — has no boundary to cut on, and backing off to an early space would
+// throw away nearly everything the field had room for; there, the rune boundary
+// is the honest cut. Trailing punctuation left dangling by the cut is dropped so
+// the mark reads as a continuation, not as a comma followed by an ellipsis.
+//
+// Like truncate, the result can exceed n by the ellipsis' 2 extra bytes.
+func truncateWords(s string, n int) string {
+	if len(s) <= n {
+		return s
+	}
+	kept := cutToRuneBoundary(s, n-1)
+	if i := strings.LastIndexByte(kept, ' '); i > 0 && 2*i >= len(kept) {
+		kept = kept[:i]
+	}
+	return strings.TrimRight(kept, " ,;:—-") + "…"
 }
 
 // truncate shortens s to around n bytes: it cuts at or before byte index n-1
