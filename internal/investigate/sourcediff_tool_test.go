@@ -56,6 +56,60 @@ func TestSourceDiffRejectsNonAllowlistedRepo(t *testing.T) {
 	}
 }
 
+// TestSourceDiffClonesOnlyTheAllowlistedURL guards the boundary that RunLore
+// #495's SSH→HTTPS clone normalisation must not weaken.
+//
+// The allowlist is a security control, and it is only a control while the string
+// it CHECKED is the string that gets CLONED. Whatever spelling the model sends —
+// including the SSH forms #495 taught the clone layer to understand — the URL
+// handed to the differ must be the canonical one Allowlist.Match itself produced,
+// never the model's raw text and never a second, independently-normalised copy of
+// it. Two normalisations of one input is exactly how an allow check gets bypassed.
+func TestSourceDiffClonesOnlyTheAllowlistedURL(t *testing.T) {
+	const canonical = "https://github.com/acme/checkout"
+
+	t.Run("every allowed spelling collapses to the checked URL", func(t *testing.T) {
+		for _, repo := range []string{
+			"github.com/acme/checkout",
+			"https://github.com/acme/checkout.git",
+			"git@github.com:acme/checkout.git",
+			"ssh://git@github.com/acme/checkout",
+			"git@GitHub.COM:acme/checkout.git",
+		} {
+			f := &fakeSourceDiffer{sc: fixtureChanges()}
+			tool := SourceDiffTool{Source: f, Allow: mustAllow(t, "github.com/acme/*")}
+			if _, err := tool.Call(context.Background(), `{"repo":"`+repo+`","from":"1","to":"2"}`); err != nil {
+				t.Fatalf("%s: unexpected error: %v", repo, err)
+			}
+			if f.gotURL != canonical {
+				t.Fatalf("%s: cloned %q, want the allowlist's own canonical URL %q", repo, f.gotURL, canonical)
+			}
+		}
+	})
+
+	// Crafted so a sloppy normaliser and the allowlist would disagree: the SSH
+	// userinfo (or a path segment) names the ALLOWED host while the real
+	// authority is foreign. These must be refused outright — never reshaped into
+	// a URL that clones the foreign host.
+	t.Run("crafted host/userinfo divergence is refused, not normalised", func(t *testing.T) {
+		for _, repo := range []string{
+			"ssh://git@github.com@evil.example/acme/checkout",
+			"git@evil.example:github.com/acme/checkout",
+			"ssh://git@github.com:22/acme/checkout",
+			"git@github.com:acme/../evil/checkout.git",
+		} {
+			f := &fakeSourceDiffer{sc: fixtureChanges()}
+			tool := SourceDiffTool{Source: f, Allow: mustAllow(t, "github.com/acme/*")}
+			if _, err := tool.Call(context.Background(), `{"repo":"`+repo+`","from":"1","to":"2"}`); err == nil {
+				t.Fatalf("%s: want an allowlist rejection, got none (cloned %q)", repo, f.gotURL)
+			}
+			if f.gotURL != "" {
+				t.Fatalf("%s: a rejected repo still reached the clone layer as %q", repo, f.gotURL)
+			}
+		}
+	})
+}
+
 func TestSourceDiffSummary(t *testing.T) {
 	f := &fakeSourceDiffer{sc: fixtureChanges()}
 	tool := SourceDiffTool{Source: f, Allow: mustAllow(t, "github.com/acme/*")}
