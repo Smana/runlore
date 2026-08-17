@@ -17,6 +17,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/url"
+	"reflect"
 	"runtime/debug"
 	"strconv"
 	"strings"
@@ -123,6 +124,42 @@ type ThreadHandler interface {
 	Busy(ctx context.Context, channel, root string)
 }
 
+// liveThreadHandler normalises a TYPED-NIL handler to a true nil interface, so
+// that "no handler wired" is representable in exactly one way.
+//
+// Actions.Threads is an INTERFACE, but the builder that fills it in production
+// (app.BuildThreadMention) returns a CONCRETE *thread.Mention, and returns nil
+// for three separate misconfigurations: no forge configured, no bot-token
+// delivery target resolved, no thread-capable notifier resolved. A nil concrete
+// pointer stored in an interface is a NON-NIL interface value, so
+// handleSlackEvent's `s.threads == nil` test read "wired" in all three states.
+// The endpoint then answered 401 rather than 404 to an operator's pre-flight
+// probe — reading as "live, you just signed it wrong" — and acked a real signed
+// app_mention 200 before dereferencing the nil receiver, losing the human's note
+// to a recovered panic in a detached goroutine.
+//
+// Normalising HERE rather than at the call site is deliberate. `s.threads ==
+// nil` decides whether an internet-facing endpoint exists at all; a safety guard
+// whose correctness depends on every present and future caller remembering to
+// nil-check before filling an exported struct field is not a safety guard. The
+// call sites are still expected to assign guarded — see RunServe, and the
+// TestActionsInterfaceFieldsAreNeverAssignedRawBuilderResults guard in
+// internal/app that enforces it for the whole class — but the invariant no
+// longer depends on them.
+//
+// Only pointers are checked: every ThreadHandler this process can construct is a
+// pointer receiver, and reflect.Value.IsNil panics on kinds that cannot be nil.
+// Cost is one reflect call per process, in New.
+func liveThreadHandler(h ThreadHandler) ThreadHandler {
+	if h == nil {
+		return nil
+	}
+	if v := reflect.ValueOf(h); v.Kind() == reflect.Pointer && v.IsNil() {
+		return nil
+	}
+	return h
+}
+
 // Actions bundles the optional rung-2/rung-3 wiring: the approval queue, the auto
 // kill-switch, the shared control token, the Slack signing secret, and the opt-in
 // feedback recorder.
@@ -162,7 +199,7 @@ func New(ready func() bool, acts Actions, built []source.Built, pipe *source.Pip
 		token: acts.Token, slackSecret: acts.SlackSecret,
 		webhookToken: acts.WebhookToken, approvers: approvers, metrics: metricsHandler, log: log,
 		guard:            newAuthGuard(),
-		threads:          acts.Threads,
+		threads:          liveThreadHandler(acts.Threads),
 		seenEvents:       newSeenSet(1024),
 		telemetryMetrics: acts.Metrics,
 		eventDispatcher:  thread.NewDispatcher(maxConcurrentMentions, mentionHandlerTimeout, log),
