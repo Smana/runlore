@@ -461,8 +461,9 @@ synthetic findings out of the review queue while still notifying chat (see
 
 ### `notify` — where findings go
 `slack` (`webhook_url_env` or `bot_token_env`, `channel`, `signing_secret_env`, `approver_ids`,
-`feedback_buttons`, `thread_capture`), `matrix` (`homeserver`, `room_id`, `access_token_env`), plus
-inline blocks for any registered notifier (e.g. `webhook` with `url_env`).
+`feedback_buttons`, `thread_capture`), `matrix` (`homeserver`, `room_id`, `access_token_env`,
+`feedback_reactions`, `thread_capture`), plus inline blocks for any registered notifier (e.g.
+`webhook` with `url_env`).
 
 Every notifier now leads with the model's **verdict** (`no_action` / `action_suggested` /
 `action_required` / `inconclusive`) and carries the trigger-time alert metadata (severity, environment,
@@ -534,6 +535,17 @@ attributes nothing). Startup fails loud unless `homeserver`/`room_id`/`access_to
 `outcome.ledger_path` are set. Use an **invite-only room** — any room member can vote (see
 [security-model.md]({{< relref "security-model.md#the-feedback-channels---exposure--trust-model" >}})).
 
+> [!NOTE]
+> **`feedback_reactions` and Matrix `thread_capture` (below) are two independently-gated
+> capabilities sharing ONE listener.** Turning on either starts the same leader-only `/sync` long-poll
+> goroutine — there is one Matrix listener and one `/sync` connection per process, never two, no matter
+> how many of the two flags are on. Each flag independently controls both what that shared `/sync`
+> filter asks the homeserver for (`m.reaction` for `feedback_reactions`, `m.room.message` for
+> `thread_capture`) AND, in code, whether the corresponding handler is allowed to act — enabling one
+> never turns the other's handling on. The practical upshot: enabling only one still means both ride
+> the same poll loop, so a homeserver hiccup or a leadership change pauses whichever of the two you
+> have enabled together.
+
 **🧵 Thread capture — `thread_capture` (opt-in, default `false`).** When enabled, replying inside a
 Slack investigation thread with `@runlore note: <text>` writes what you know back into the knowledge
 base as a reviewed PR — a comment on the finding's existing KB PR, or a small `Concept` entry PR when
@@ -579,6 +591,41 @@ the `reinvestigate` label to the knowledge-base issue instead.
 
 With the option off (the default), `@runlore note: …` mentions are ignored and the endpoint behaves
 exactly as before (404 unless another feature wired it).
+
+**🧵 Matrix thread capture — `thread_capture` (opt-in, default `false`).** The same feature as
+Slack's thread capture, over Matrix: replying inside an investigation thread with
+`@runlore note: <text>` writes what you know back into the knowledge base as a reviewed PR — a
+comment on the finding's existing KB PR, or a small `Concept` entry PR when the finding has none, so
+the knowledge still lands somewhere. A human reviews and merges it like every other entry.
+`@runlore reinvestigate: …` is reserved and not supported yet. RunLore recognises being addressed via
+MSC3952 `m.mentions`, or — as a fallback — the bot's full Matrix ID or localpart in the message body;
+a reply is attributed to its thread via the MSC3440 `m.thread` relation (falling back to
+`m.in_reply_to`). One thread registry backs both transports, so a thread capture note is written back
+through the same responder Slack's uses (same per-hour PR-open budget, same `Concept`-entry fallback).
+
+> [!IMPORTANT]
+> **The `/sync` filter widens while this is on — said plainly, not softened.** With
+> `thread_capture: false` (the default), RunLore's `/sync` filter requests only `["m.reaction"]`.
+> With `thread_capture: true`, it widens to `["m.reaction","m.room.message"]`: **the process now
+> receives message events** from the configured room, where before it received only reactions.
+> RunLore acts only on messages that address it and are rooted in one of its own investigation
+> messages — everything else is dropped immediately, its body never logged — but every message
+> in the room does transit the process first. Unlike Slack's thread capture, **no exposed HTTP
+> endpoint, no ingress change and no new permission is required**: this rides the same outbound
+> long-poll RunLore already runs for `feedback_reactions`. See
+> [security-model.md → Matrix thread
+> capture]({{< relref "/docs/security/security-model.md#matrix-thread-capture-notifymatrixthread_capture--a-widened-sync-filter" >}})
+> for the full trade-off against Slack's exposed endpoint.
+
+> [!NOTE]
+> **Mount the credential, too.** If `access_token_env` names an env var that is present but **empty**,
+> the listener never starts: no message is delivered or received, and no knowledge can be captured.
+> Config validation cannot see runtime emptiness, so startup logs a **warning** naming the empty env
+> var instead of announcing the feature.
+
+Startup fails loud unless `homeserver`/`room_id`/`access_token_env` and `outcome.ledger_path` are set
+— the same requirement `matrix.feedback_reactions` has above. With the option off (the default), the
+`/sync` filter is unchanged and `@runlore note: …` mentions are not read.
 
 ### Generic templated notifier (`notify.templated`)
 

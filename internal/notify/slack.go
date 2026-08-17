@@ -63,7 +63,11 @@ func SlackBotDelivery(sl config.SlackNotify) bool {
 // stored. Nil-safe by contract at every call site: registration is best-effort
 // and must never affect delivery.
 type ThreadSink interface {
-	Register(root, channel string, inv providers.Investigation)
+	// Register records inv against root, on channel, as delivered over
+	// transport (the caller's own Transport() — "slack", "matrix", …), so the
+	// stored entry is attributed to the transport that actually delivered it
+	// rather than assumed.
+	Register(transport, root, channel string, inv providers.Investigation)
 }
 
 func init() {
@@ -195,7 +199,7 @@ func (s *SlackBot) Deliver(ctx context.Context, inv providers.Investigation) err
 	// Record the thread root so a reply here can be attributed. Best-effort and
 	// nil-safe: capture is an opt-in extra, delivery is the contract.
 	if s.Threads != nil && ts != "" {
-		s.Threads.Register(ts, s.channel, inv)
+		s.Threads.Register(s.Transport(), ts, s.channel, inv)
 	}
 	detail := detailBlocks(inv)
 	if ts == "" || len(detail) == 0 {
@@ -225,6 +229,10 @@ func (s *SlackBot) ReplyInThread(ctx context.Context, root, channel, text string
 	_, err := s.post(ctx, msg)
 	return err
 }
+
+// Transport identifies this notifier's chat system (providers.ThreadNotifier),
+// the key Multi.ThreadRepliers scopes thread replies by.
+func (s *SlackBot) Transport() string { return "slack" }
 
 // post targets the message at the configured channel and sends it via
 // chat.postMessage, surfacing transport and Slack API (ok:false) errors, and
@@ -963,15 +971,31 @@ func (m *Multi) DeliverProgress(ctx context.Context, up providers.ProgressUpdate
 // Len reports how many notifiers are configured.
 func (m *Multi) Len() int { return len(m.notifiers) }
 
-// ThreadReplier returns the first configured notifier that can carry a reply
-// back into a thread, or nil when none can. The wiring needs one concrete
-// replier and Multi is where the built notifiers live; this is the same
-// capability discovery Deliver does for ProgressNotifier, exposed.
-func (m *Multi) ThreadReplier() providers.ThreadNotifier {
+// ThreadRepliers returns the configured notifiers that can carry a reply back
+// into a thread, keyed by Transport(). The wiring needs the concrete replier
+// for the specific transport a thread lives on — Multi is where the built
+// notifiers live, so this is the same capability discovery Deliver does for
+// ProgressNotifier, exposed and transport-scoped: with two thread-capable
+// transports configured (Slack, Matrix), picking just the first one found
+// would answer one transport's threads on the other, or not at all.
+//
+// When two notifiers report the same transport, the first registered wins
+// and the collision is logged — silently dropping one would be the same
+// class of bug this scoping fixes.
+func (m *Multi) ThreadRepliers() map[string]providers.ThreadNotifier {
+	repliers := make(map[string]providers.ThreadNotifier)
 	for _, n := range m.notifiers {
-		if tn, ok := n.(providers.ThreadNotifier); ok {
-			return tn
+		tn, ok := n.(providers.ThreadNotifier)
+		if !ok {
+			continue
 		}
+		transport := tn.Transport()
+		if _, collide := repliers[transport]; collide {
+			m.log.Warn("multiple thread-capable notifiers registered for the same transport; keeping the first, dropping the rest",
+				"transport", transport)
+			continue
+		}
+		repliers[transport] = tn
 	}
-	return nil
+	return repliers
 }

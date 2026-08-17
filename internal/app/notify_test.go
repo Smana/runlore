@@ -15,6 +15,7 @@ import (
 
 	"github.com/Smana/runlore/internal/config"
 	"github.com/Smana/runlore/internal/notify"
+	"github.com/Smana/runlore/internal/outcome"
 	"github.com/Smana/runlore/internal/providers"
 	"github.com/Smana/runlore/internal/telemetry"
 	"github.com/Smana/runlore/internal/thread"
@@ -135,6 +136,31 @@ func TestBuildThreadRegistryUsesTheLedgerDirectory(t *testing.T) {
 	}
 }
 
+// TestBuildThreadRegistryEnabledForMatrixOnly pins the Task 8 fix: the
+// registry must persist for a deployment that only turns on
+// notify.matrix.thread_capture (Slack's flag left off). Before this fix,
+// BuildThreadRegistry's gate checked ONLY notify.slack.thread_capture, so a
+// Matrix-only deployment always got a disabled (no-op) registry no matter how
+// notify.matrix.thread_capture and outcome.ledger_path were set — Matrix
+// thread capture could never work.
+func TestBuildThreadRegistryEnabledForMatrixOnly(t *testing.T) {
+	dir := t.TempDir()
+	cfg := &config.Config{}
+	cfg.Outcome.LedgerPath = filepath.Join(dir, "ledger.jsonl")
+	cfg.Notify.Matrix = config.MatrixNotify{
+		Homeserver: "https://matrix.example.org", RoomID: "!room:example.org",
+		AccessTokenEnv: "T", ThreadCapture: true,
+	}
+
+	reg, err := BuildThreadRegistry(cfg)
+	if err != nil {
+		t.Fatalf("BuildThreadRegistry: %v", err)
+	}
+	if !reg.Enabled() {
+		t.Fatal("matrix thread_capture alone (slack's flag off) must yield an enabled registry")
+	}
+}
+
 func TestBuildThreadRegistryDisabledWithoutLedgerPath(t *testing.T) {
 	// The registry needs somewhere durable to live. Without a ledger path there is
 	// no state directory, so capture degrades to unavailable rather than to
@@ -213,7 +239,7 @@ func TestBuildThreadMentionNamesTheBotTokenCause(t *testing.T) {
 		t.Fatalf("BuildEnabled: %v", err)
 	}
 
-	m := BuildThreadMention(cfg, reg, fakeThreadForge{}, notifier, nil, log)
+	m := BuildThreadMention(cfg, &thread.Responder{Forge: fakeThreadForge{}, Registry: reg}, notifier, log)
 	if m != nil {
 		t.Fatal("must not wire the handler when the bot token cannot actually deliver")
 	}
@@ -247,7 +273,7 @@ func TestBuildThreadMentionStillReportsNoNotifierWhenNoneWasBuilt(t *testing.T) 
 
 	// notifier is nil, exactly as serve.go passes it on the log-only (no model
 	// configured) startup path.
-	m := BuildThreadMention(cfg, reg, fakeThreadForge{}, nil, nil, log)
+	m := BuildThreadMention(cfg, &thread.Responder{Forge: fakeThreadForge{}, Registry: reg}, nil, log)
 	if m != nil {
 		t.Fatal("must not wire the handler when no notifier was built at all")
 	}
@@ -278,7 +304,7 @@ func TestBuildThreadMentionWiresWhenEverythingIsReachable(t *testing.T) {
 		t.Fatalf("BuildEnabled: %v", err)
 	}
 
-	m := BuildThreadMention(cfg, reg, fakeThreadForge{}, notifier, nil, log)
+	m := BuildThreadMention(cfg, &thread.Responder{Forge: fakeThreadForge{}, Registry: reg}, notifier, log)
 	if m == nil {
 		t.Fatal("must wire the handler when forge, bot-token delivery and the notifier are all reachable")
 	}
@@ -288,10 +314,11 @@ func TestBuildThreadMentionWiresWhenEverythingIsReachable(t *testing.T) {
 }
 
 // TestBuildThreadMentionWiresForgeWritesAndMetrics pins wiring that none of
-// the other TestBuildThreadMention* tests check: with everything reachable,
-// the returned Responder must actually carry the global rate limit and the
-// metrics instrument set — the same idiom TestWireRecallSetsEveryRuntimeDependency
-// uses for investigate.Recall (see wire_recall_test.go).
+// the other TestBuildThreadMention* tests check: the shared Responder built by
+// buildThreadResponder (see serve.go) and threaded through BuildThreadMention
+// must actually carry the global rate limit and the metrics instrument set —
+// the same idiom TestWireRecallSetsEveryRuntimeDependency uses for
+// investigate.Recall (see wire_recall_test.go).
 //
 // Both assignments are load-bearing but invisible to the rest of the suite if
 // dropped: Responder.write nil-checks ForgeWrites before calling it
@@ -317,8 +344,9 @@ func TestBuildThreadMentionWiresForgeWritesAndMetrics(t *testing.T) {
 		t.Fatalf("BuildEnabled: %v", err)
 	}
 	metrics := telemetry.NewMetrics()
+	responder := buildThreadResponder(reg, fakeThreadForge{}, metrics, log)
 
-	m := BuildThreadMention(cfg, reg, fakeThreadForge{}, notifier, metrics, log)
+	m := BuildThreadMention(cfg, responder, notifier, log)
 	if m == nil {
 		t.Fatal("must wire the handler when everything is reachable")
 	}
@@ -326,23 +354,233 @@ func TestBuildThreadMentionWiresForgeWritesAndMetrics(t *testing.T) {
 		t.Fatal("Responder.ForgeWrites is nil — the global forge-write rate limit is unenforced in production")
 	}
 	if m.Responder.Metrics != metrics {
-		t.Fatal("Responder.Metrics is not the *telemetry.Metrics passed to BuildThreadMention — " +
+		t.Fatal("Responder.Metrics is not the *telemetry.Metrics passed to buildThreadResponder — " +
 			"ThreadWritesThrottled/ThreadNotesWritten go dead")
 	}
 }
 
-// TestBuildThreadMentionReportsMissingForge pins the unchanged forge==nil case.
+// TestBuildThreadMentionReportsMissingForge pins the unchanged
+// responder==nil/Forge==nil case.
 func TestBuildThreadMentionReportsMissingForge(t *testing.T) {
 	cfg := &config.Config{}
 	cfg.Notify.Slack.ThreadCapture = true
 	var buf bytes.Buffer
 	log := slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelWarn}))
 
-	m := BuildThreadMention(cfg, &thread.Registry{}, nil, nil, nil, log)
+	m := BuildThreadMention(cfg, nil, nil, log)
 	if m != nil {
 		t.Fatal("must not wire the handler when no forge is configured")
 	}
 	if !strings.Contains(buf.String(), "no forge is configured") {
 		t.Fatalf("must name the missing forge; got: %s", buf.String())
+	}
+}
+
+// fakeMatrixReplier is a minimal providers.ThreadNotifier stub identifying as
+// the "matrix" transport — enough for BuildMatrixFeedback's / buildMatrixThreadMention's
+// tests to resolve a replier via Multi.ThreadRepliers() without a live homeserver.
+type fakeMatrixReplier struct{}
+
+func (fakeMatrixReplier) Deliver(context.Context, providers.Investigation) error { return nil }
+func (fakeMatrixReplier) ReplyInThread(context.Context, string, string, string) error {
+	return nil
+}
+func (fakeMatrixReplier) Transport() string { return "matrix" }
+
+// readyMatrixResponder builds a *thread.Responder with a real, enabled
+// registry (backed by a temp file) and a fake forge — everything
+// buildMatrixThreadMention needs to succeed, for the test cases that want it
+// reachable.
+func readyMatrixResponder(t *testing.T) *thread.Responder {
+	t.Helper()
+	reg, err := thread.NewRegistry(filepath.Join(t.TempDir(), "threads.jsonl"), time.Hour, 10)
+	if err != nil {
+		t.Fatalf("NewRegistry: %v", err)
+	}
+	return &thread.Responder{Forge: fakeThreadForge{}, Registry: reg}
+}
+
+// TestBuildMatrixThreadMentionReportsMissingForge mirrors
+// TestBuildThreadMentionReportsMissingForge for the Matrix analogue.
+func TestBuildMatrixThreadMentionReportsMissingForge(t *testing.T) {
+	cfg := &config.Config{}
+	cfg.Notify.Matrix.ThreadCapture = true
+	var buf bytes.Buffer
+	log := slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelWarn}))
+
+	m := buildMatrixThreadMention(cfg, nil, nil, log)
+	if m != nil {
+		t.Fatal("must not wire the handler when no forge is configured")
+	}
+	if !strings.Contains(buf.String(), "no forge is configured") {
+		t.Fatalf("must name the missing forge; got: %s", buf.String())
+	}
+}
+
+// TestBuildMatrixThreadMentionReportsDisabledRegistry pins the registry guard:
+// a responder whose Registry is disabled (no path — e.g. outcome.ledger_path
+// unset) must degrade rather than wire a Mention no reply could ever be
+// attributed through.
+func TestBuildMatrixThreadMentionReportsDisabledRegistry(t *testing.T) {
+	cfg := &config.Config{}
+	cfg.Notify.Matrix.ThreadCapture = true
+	var buf bytes.Buffer
+	log := slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelWarn}))
+
+	responder := &thread.Responder{Forge: fakeThreadForge{}, Registry: &thread.Registry{}} // disabled: empty path
+	m := buildMatrixThreadMention(cfg, responder, nil, log)
+	if m != nil {
+		t.Fatal("must not wire the handler when the thread registry is disabled")
+	}
+	if !strings.Contains(buf.String(), "thread registry is unavailable") {
+		t.Fatalf("must name the disabled registry; got: %s", buf.String())
+	}
+}
+
+// TestBuildMatrixFeedbackNeitherOptionOnIsNil pins the compound top gate: with
+// BOTH notify.matrix.feedback_reactions and notify.matrix.thread_capture off,
+// no listener is built at all — same as before Task 8.
+func TestBuildMatrixFeedbackNeitherOptionOnIsNil(t *testing.T) {
+	cfg := &config.Config{}
+	cfg.Notify.Matrix = config.MatrixNotify{Homeserver: "https://matrix.example.org", RoomID: "!room:x", AccessTokenEnv: "T"}
+	ledger, err := outcome.New(filepath.Join(t.TempDir(), "ledger.jsonl"))
+	if err != nil {
+		t.Fatalf("outcome.New: %v", err)
+	}
+	log := slog.New(slog.NewTextHandler(io.Discard, nil))
+
+	mfb := BuildMatrixFeedback(cfg, ledger, nil, nil, nil, nil, nil, log)
+	if mfb != nil {
+		t.Fatal("neither option on must yield no listener")
+	}
+}
+
+// TestBuildMatrixFeedbackTokenEmptyDisables pins the unchanged runtime-empty
+// access-token guard, now covering both options (message must not go stale
+// once thread_capture can also request the listener).
+func TestBuildMatrixFeedbackTokenEmptyDisables(t *testing.T) {
+	t.Setenv("TEST_MATRIX_TOKEN_EMPTY", "")
+	cfg := &config.Config{}
+	cfg.Notify.Matrix = config.MatrixNotify{
+		Homeserver: "https://matrix.example.org", RoomID: "!room:x",
+		AccessTokenEnv: "TEST_MATRIX_TOKEN_EMPTY", FeedbackReactions: true,
+	}
+	ledger, err := outcome.New(filepath.Join(t.TempDir(), "ledger.jsonl"))
+	if err != nil {
+		t.Fatalf("outcome.New: %v", err)
+	}
+	var buf bytes.Buffer
+	log := slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelWarn}))
+
+	mfb := BuildMatrixFeedback(cfg, ledger, nil, nil, nil, nil, nil, log)
+	if mfb != nil {
+		t.Fatal("an empty access token must disable the listener")
+	}
+	if !strings.Contains(buf.String(), "TEST_MATRIX_TOKEN_EMPTY") {
+		t.Fatalf("must name the empty env var; got: %s", buf.String())
+	}
+}
+
+// TestBuildMatrixFeedbackThreadCaptureWiresStandalone pins the Task 8 fix at
+// the top gate: the listener must build — and thread capture must wire — from
+// notify.matrix.thread_capture ALONE, with feedback_reactions off. Before this
+// wiring, BuildMatrixFeedback's top gate checked ONLY FeedbackReactions, so
+// thread_capture had no observable effect no matter what Task 6/7 built (see
+// task-6-report.md's "Concerns").
+func TestBuildMatrixFeedbackThreadCaptureWiresStandalone(t *testing.T) {
+	t.Setenv("TEST_MATRIX_TOKEN_STANDALONE", "matrix-token")
+	cfg := &config.Config{}
+	cfg.Notify.Matrix = config.MatrixNotify{
+		Homeserver: "https://matrix.example.org", RoomID: "!room:x",
+		AccessTokenEnv: "TEST_MATRIX_TOKEN_STANDALONE", ThreadCapture: true, // FeedbackReactions left false
+	}
+	ledger, err := outcome.New(filepath.Join(t.TempDir(), "ledger.jsonl"))
+	if err != nil {
+		t.Fatalf("outcome.New: %v", err)
+	}
+	var buf bytes.Buffer
+	log := slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelInfo}))
+
+	responder := readyMatrixResponder(t)
+	dispatch := thread.NewDispatcher(4, time.Minute, log)
+	busyDispatch := thread.NewDispatcher(4, time.Minute, log)
+	notifier := notify.NewMulti(log, fakeMatrixReplier{})
+
+	mfb := BuildMatrixFeedback(cfg, ledger, responder, dispatch, busyDispatch, notifier, nil, log)
+	if mfb == nil {
+		t.Fatal("thread_capture alone (feedback_reactions off) must still build the listener")
+	}
+	if mfb.Mentions == nil || mfb.Dispatch == nil || mfb.BusyDispatch == nil {
+		t.Fatal("thread_capture on with a reachable registry, forge and replier must wire Mentions, Dispatch and BusyDispatch")
+	}
+	if !strings.Contains(buf.String(), "matrix thread capture enabled") {
+		t.Fatalf("must log that thread capture is enabled; got: %s", buf.String())
+	}
+}
+
+// TestBuildMatrixFeedbackThreadCaptureOffLeavesNeitherWired pins "supplying no
+// option must leave thread capture off": with thread_capture off (even with
+// everything else reachable), the built listener carries neither Mentions nor
+// Dispatch, exactly reproducing the pre-thread-capture listener.
+func TestBuildMatrixFeedbackThreadCaptureOffLeavesNeitherWired(t *testing.T) {
+	t.Setenv("TEST_MATRIX_TOKEN_OFF", "matrix-token")
+	cfg := &config.Config{}
+	cfg.Notify.Matrix = config.MatrixNotify{
+		Homeserver: "https://matrix.example.org", RoomID: "!room:x",
+		AccessTokenEnv: "TEST_MATRIX_TOKEN_OFF", FeedbackReactions: true, // thread_capture left false
+	}
+	ledger, err := outcome.New(filepath.Join(t.TempDir(), "ledger.jsonl"))
+	if err != nil {
+		t.Fatalf("outcome.New: %v", err)
+	}
+	log := slog.New(slog.NewTextHandler(io.Discard, nil))
+
+	responder := readyMatrixResponder(t)
+	dispatch := thread.NewDispatcher(4, time.Minute, log)
+	busyDispatch := thread.NewDispatcher(4, time.Minute, log)
+	notifier := notify.NewMulti(log, fakeMatrixReplier{})
+
+	mfb := BuildMatrixFeedback(cfg, ledger, responder, dispatch, busyDispatch, notifier, nil, log)
+	if mfb == nil {
+		t.Fatal("feedback_reactions on must still build the listener")
+	}
+	if mfb.Mentions != nil || mfb.Dispatch != nil || mfb.BusyDispatch != nil {
+		t.Fatal("thread_capture off must leave Mentions, Dispatch and BusyDispatch nil")
+	}
+}
+
+// TestBuildMatrixFeedbackDegradesWithoutReplier pins the no-panic degrade:
+// with thread_capture on but no notifier built at all (so no Matrix replier is
+// resolvable), the listener still builds (feedback_reactions covers that) but
+// leaves thread capture off and logs the specific cause — never panics.
+func TestBuildMatrixFeedbackDegradesWithoutReplier(t *testing.T) {
+	t.Setenv("TEST_MATRIX_TOKEN_NOREPLIER", "matrix-token")
+	cfg := &config.Config{}
+	cfg.Notify.Matrix = config.MatrixNotify{
+		Homeserver: "https://matrix.example.org", RoomID: "!room:x",
+		AccessTokenEnv: "TEST_MATRIX_TOKEN_NOREPLIER", FeedbackReactions: true, ThreadCapture: true,
+	}
+	ledger, err := outcome.New(filepath.Join(t.TempDir(), "ledger.jsonl"))
+	if err != nil {
+		t.Fatalf("outcome.New: %v", err)
+	}
+	var buf bytes.Buffer
+	log := slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelWarn}))
+
+	responder := readyMatrixResponder(t)
+	dispatch := thread.NewDispatcher(4, time.Minute, log)
+	busyDispatch := thread.NewDispatcher(4, time.Minute, log)
+
+	// notifier is nil: no notifier built at all — the same "no replier resolvable"
+	// case BuildThreadMention's Slack analogue covers.
+	mfb := BuildMatrixFeedback(cfg, ledger, responder, dispatch, busyDispatch, nil, nil, log)
+	if mfb == nil {
+		t.Fatal("feedback_reactions on must still build the listener even when thread capture cannot wire")
+	}
+	if mfb.Mentions != nil || mfb.Dispatch != nil || mfb.BusyDispatch != nil {
+		t.Fatal("no resolvable Matrix replier must leave thread capture off")
+	}
+	if !strings.Contains(buf.String(), "no Matrix thread-capable notifier resolved") {
+		t.Fatalf("must log the specific cause; got: %s", buf.String())
 	}
 }

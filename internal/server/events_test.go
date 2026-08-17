@@ -423,13 +423,13 @@ func TestEventsSaturatedPoolWithNilMetricsDoesNotPanic(t *testing.T) {
 // unbounded-lifetime defect: handleSlackEvent used to hand the detached
 // handler a context.WithoutCancel-derived context with NO deadline, so a
 // degraded/rate-limited forge could hold a pool slot indefinitely instead of
-// for as long as the mention itself takes. s.mentionTimeout is shortened here
-// so the test proves the real wiring deterministically, without waiting out
-// the production mentionHandlerTimeout (2 minutes) for real.
+// for as long as the mention itself takes. s.eventDispatcher is swapped for one
+// with a short timeout here so the test proves the real wiring deterministically,
+// without waiting out the production mentionHandlerTimeout (2 minutes) for real.
 func TestEventsMentionHandlerContextTimesOut(t *testing.T) {
 	h := newCtxAwareThreadHandler()
 	s := newEventServer(t, h)
-	s.mentionTimeout = 20 * time.Millisecond
+	s.eventDispatcher = thread.NewDispatcher(maxConcurrentMentions, 20*time.Millisecond, discardLog)
 	t.Cleanup(func() { close(h.release) }) // safety net if the handler is somehow still blocked
 
 	body := `{"type":"event_callback","event_id":"Etimeout","event":{"type":"app_mention","user":"U1","text":"note: x","channel":"C1","thread_ts":"111.222"}}`
@@ -524,5 +524,111 @@ func TestDrainIsBounded(t *testing.T) {
 	s.Drain(dctx)
 	if elapsed := time.Since(start); elapsed > 2*time.Second {
 		t.Fatalf("Drain took %v to return after its bound expired — it must never block shutdown forever", elapsed)
+	}
+}
+
+// syncLogBuf is a concurrency-safe io.Writer that captures log output so a test
+// can inspect exactly what was logged (slog handlers may be written to from
+// multiple goroutines).
+type syncLogBuf struct {
+	mu  sync.Mutex
+	buf strings.Builder
+}
+
+func (b *syncLogBuf) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.Write(p)
+}
+
+func (b *syncLogBuf) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.String()
+}
+
+// TestDrainAwaitsBusyDispatcherConcurrentlyWithEventDispatcher is the
+// regression test for the sequential-drain defect: Server.Drain used to drain
+// eventDispatcher and busyDispatcher one after another against the SAME ctx.
+// Once eventDispatcher's wait hit ctx.Done() (mention work outlasting the
+// grace period — precisely the degraded-forge scenario the drain exists for),
+// busyDispatcher.Drain(ctx) was handed an already-expired context and returned
+// almost instantly WITHOUT waiting for its own real in-flight work — while
+// still logging "drain timed out with work still in flight" for work it never
+// actually awaited.
+//
+// This constructs exactly that state: eventDispatcher holds work that never
+// completes (so its Drain call is guaranteed to hit ctx.Done()), and
+// busyDispatcher holds REAL in-flight work that finishes with a huge margin
+// inside the grace period — but only if busyDispatcher gets to wait for it
+// concurrently with eventDispatcher, rather than being queued behind it.
+func TestDrainAwaitsBusyDispatcherConcurrentlyWithEventDispatcher(t *testing.T) {
+	logBuf := &syncLogBuf{}
+	s := New(nil, Actions{}, nil, nil, nil, nil, slog.New(slog.NewTextHandler(logBuf, nil)))
+
+	// eventDispatcher's one in-flight handler never completes on its own — it
+	// only stops when Drain gives up on its ctx, matching "mention work
+	// outlasts the grace period".
+	eventRelease := make(chan struct{})
+	t.Cleanup(func() { close(eventRelease) })
+	if !s.eventDispatcher.Go(context.Background(), func(context.Context) { <-eventRelease }) {
+		t.Fatal("eventDispatcher.Go refused")
+	}
+
+	// busyDispatcher's one in-flight handler is REAL work that finishes on its
+	// own well before the grace period ends.
+	busyStarted := make(chan struct{})
+	busyFinished := make(chan struct{})
+	busyRelease := make(chan struct{})
+	if !s.busyDispatcher.Go(context.Background(), func(context.Context) {
+		close(busyStarted)
+		<-busyRelease
+		close(busyFinished)
+	}) {
+		t.Fatal("busyDispatcher.Go refused")
+	}
+	<-busyStarted
+
+	const grace = 150 * time.Millisecond
+	ctx, cancel := context.WithTimeout(context.Background(), grace)
+	defer cancel()
+
+	// Release the busy work at a fixed, generous margin before the grace
+	// period ends: a Drain that gives busyDispatcher independent access to the
+	// full ctx budget has ~110ms of slack to observe this; a Drain that only
+	// starts waiting on busyDispatcher AFTER eventDispatcher has already
+	// exhausted that budget gets none, no matter how early the busy work
+	// finished.
+	go func() {
+		time.Sleep(40 * time.Millisecond)
+		close(busyRelease)
+	}()
+
+	drainDone := make(chan struct{})
+	go func() {
+		s.Drain(ctx)
+		close(drainDone)
+	}()
+
+	select {
+	case <-busyFinished:
+	case <-time.After(2 * time.Second):
+		t.Fatal("busy work never finished")
+	}
+	select {
+	case <-drainDone:
+	case <-time.After(2 * time.Second):
+		t.Fatal("Drain never returned")
+	}
+
+	// eventDispatcher's work never finished, so exactly one legitimate timeout
+	// log is expected. A second occurrence means busyDispatcher was ALSO
+	// handed an expired context and logged a spurious timeout for work that
+	// had already completed on its own — the exact defect this test guards
+	// against.
+	const timeoutMsg = "drain timed out with work still in flight"
+	if got := strings.Count(logBuf.String(), timeoutMsg); got != 1 {
+		t.Fatalf("%q logged %d times, want exactly 1 (only eventDispatcher's genuine timeout); log:\n%s",
+			timeoutMsg, got, logBuf.String())
 	}
 }

@@ -128,7 +128,7 @@ func TestRegistryRegisterFromInvestigation(t *testing.T) {
 		RecalledEntry: "incidents/foo.md",
 		Resource:      providers.Workload{Kind: "Deployment", Name: "gallery", Namespace: "apps"},
 	}
-	r.Register("111.222", "C1", inv)
+	r.Register("slack", "111.222", "C1", inv)
 
 	got, ok := r.Get("111.222")
 	if !ok {
@@ -455,8 +455,30 @@ func TestRegistryRegisterIgnoresEmptyRoot(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewRegistry: %v", err)
 	}
-	r.Register("", "C1", providers.Investigation{Title: "x"})
+	r.Register("slack", "", "C1", providers.Investigation{Title: "x"})
 	if _, ok := r.Get(""); ok {
 		t.Fatal("an empty root must never be stored")
+	}
+}
+
+// TestRegistryRegisterUsesCallerTransport proves Register stamps the
+// transport its CALLER passed, not a hardcoded one — Register used to always
+// write Transport: "slack" regardless of which notifier called it, which
+// mislabels every Matrix-originated note as coming from Slack in the
+// generated KB PR (thread.NoteBody / thread.ConceptEntry render tc.Transport
+// verbatim). A registry fed by a Matrix delivery must record "matrix".
+func TestRegistryRegisterUsesCallerTransport(t *testing.T) {
+	r, err := NewRegistry(filepath.Join(t.TempDir(), "threads.jsonl"), time.Hour, 10)
+	if err != nil {
+		t.Fatalf("NewRegistry: %v", err)
+	}
+	r.Register("matrix", "$evt123", "!room:example.org", providers.Investigation{Title: "OOMKilled"})
+
+	got, ok := r.Get("$evt123")
+	if !ok {
+		t.Fatal("Register did not store the thread")
+	}
+	if got.Transport != "matrix" {
+		t.Fatalf("Transport = %q, want matrix — Register must not hardcode the caller's transport", got.Transport)
 	}
 }

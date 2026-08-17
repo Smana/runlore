@@ -35,6 +35,24 @@ A good report lets us reproduce and assess impact quickly:
 - **reproduction steps** or a proof of concept;
 - any relevant logs or config — **redact secrets, tokens, and cluster identifiers**.
 
+## Opt-in features that widen what RunLore receives
+
+Two chat-transport features are off by default and change RunLore's exposure or inbound event
+surface once turned on:
+
+- **`notify.slack.thread_capture`** exposes a second HTTP endpoint, `POST /slack/events`, alongside
+  the alert webhook and (if used) `/slack/interactions`.
+- **`notify.matrix.thread_capture`** exposes nothing new, but widens RunLore's Matrix `/sync` filter
+  from `["m.reaction"]` to also include `["m.room.message"]`. Stated plainly: **the process starts
+  receiving message events** from the configured room, where by default it receives only reactions.
+  RunLore acts only on messages that address it and are rooted in one of its own messages —
+  everything else is dropped immediately without its body being logged, but every message in the
+  room does transit the process first.
+
+Both are opt-in, both fail closed on missing credentials, and full detail — the addressing/attribution
+checks, the invite-only-room recommendation, and why Matrix still needs no exposed endpoint for this —
+is in the runtime [security model](https://runlore.io/docs/security/security-model/#matrix-thread-capture-notifymatrixthread_capture--a-widened-sync-filter).
+
 ## Supply chain
 
 Every tagged release (`v*`) ships with the following, all produced by

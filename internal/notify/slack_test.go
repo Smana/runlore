@@ -1249,13 +1249,13 @@ func TestSlackCardEscapesTitleOnBothBranches(t *testing.T) {
 // the live gap: an unmounted secret leaves the env var present and empty, the
 // builder returns nil, the notifier is skipped and nothing is delivered.
 type recordingThreadSink struct {
-	root, channel string
-	inv           providers.Investigation
-	calls         int
+	transport, root, channel string
+	inv                      providers.Investigation
+	calls                    int
 }
 
-func (r *recordingThreadSink) Register(root, channel string, inv providers.Investigation) {
-	r.root, r.channel, r.inv, r.calls = root, channel, inv, r.calls+1
+func (r *recordingThreadSink) Register(transport, root, channel string, inv providers.Investigation) {
+	r.transport, r.root, r.channel, r.inv, r.calls = transport, root, channel, inv, r.calls+1
 }
 
 // TestSlackBotRegistersTheThreadRoot proves the registered thread root is the
@@ -1304,6 +1304,9 @@ func TestSlackBotRegistersTheThreadRoot(t *testing.T) {
 	}
 	if sink.channel != "C1" {
 		t.Errorf("channel = %q, want C1", sink.channel)
+	}
+	if sink.transport != "slack" {
+		t.Errorf("transport = %q, want slack", sink.transport)
 	}
 	if sink.inv.TriggerKey != "tk-1" {
 		t.Errorf("investigation not passed through: %+v", sink.inv)
@@ -1410,16 +1413,52 @@ func TestSlackBotReplyInThread(t *testing.T) {
 	}
 }
 
-func TestMultiThreadReplier(t *testing.T) {
+func TestMultiThreadRepliersAreTransportScoped(t *testing.T) {
 	bot := NewSlackBot("xoxb-test", "C1")
-	m := NewMulti(slog.New(slog.NewTextHandler(io.Discard, nil)), NewSlack("https://hooks.slack.com/x"), bot)
-	if got := m.ThreadReplier(); got != providers.ThreadNotifier(bot) {
-		t.Fatalf("ThreadReplier = %v, want the bot notifier", got)
-	}
+	mx := NewMatrix("https://hs.example.org", "!room:example.org", "tok")
+	m := NewMulti(slog.New(slog.NewTextHandler(io.Discard, nil)), NewSlack("https://hooks.slack.com/x"), bot, mx)
 
-	none := NewMulti(slog.New(slog.NewTextHandler(io.Discard, nil)), NewSlack("https://hooks.slack.com/x"))
-	if got := none.ThreadReplier(); got != nil {
-		t.Fatalf("ThreadReplier = %v, want nil when no notifier can reply", got)
+	got := m.ThreadRepliers()
+	if len(got) != 2 {
+		t.Fatalf("ThreadRepliers = %d entries, want 2", len(got))
+	}
+	if got["slack"] != providers.ThreadNotifier(bot) {
+		t.Errorf("slack replier = %v, want the SlackBot", got["slack"])
+	}
+	if got["matrix"] != providers.ThreadNotifier(mx) {
+		t.Errorf("matrix replier = %v, want the Matrix notifier", got["matrix"])
+	}
+}
+
+func TestMultiThreadRepliersEmptyWhenNoneCanReply(t *testing.T) {
+	m := NewMulti(slog.New(slog.NewTextHandler(io.Discard, nil)), NewSlack("https://hooks.slack.com/x"))
+	if got := m.ThreadRepliers(); len(got) != 0 {
+		t.Fatalf("ThreadRepliers = %v, want empty", got)
+	}
+}
+
+// TestMultiThreadRepliersLogsTransportCollision pins the collision-handling
+// requirement: two notifiers reporting the same transport must not silently
+// drop one (the same class of bug the transport-keyed lookup exists to fix).
+// The first-registered notifier wins and the collision is logged, naming the
+// transport.
+func TestMultiThreadRepliersLogsTransportCollision(t *testing.T) {
+	var buf bytes.Buffer
+	log := slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelWarn}))
+	first := NewSlackBot("xoxb-first", "C1")
+	second := NewSlackBot("xoxb-second", "C2")
+	m := NewMulti(log, first, second)
+
+	got := m.ThreadRepliers()
+	if len(got) != 1 {
+		t.Fatalf("ThreadRepliers = %d entries, want 1 (collision keeps only the first)", len(got))
+	}
+	if got["slack"] != providers.ThreadNotifier(first) {
+		t.Errorf("slack replier = %v, want the first-registered SlackBot", got["slack"])
+	}
+	out := buf.String()
+	if !strings.Contains(out, "slack") {
+		t.Fatalf("must log a warning naming the colliding transport; got: %s", out)
 	}
 }
 

@@ -238,6 +238,46 @@ verified the same way, so an attacker cannot repoint your endpoint by guessing t
 **Expose only the paths you use** above — `/slack/events` needs the same ingress treatment as
 `/slack/interactions`, nothing more.
 
+## Matrix thread capture (`notify.matrix.thread_capture`) — a widened `/sync` filter
+
+Opt-in and separate from the feedback channels above, same as Slack's: replying `@runlore note: …`
+inside an investigation thread lets a human write what they know straight into a knowledge-base PR —
+reviewed and merged like any other curated entry, never applied automatically. It shares Matrix
+feedback's *exposure* story above (nothing inbound-reachable), but not its vote trust model, which is
+why it gets its own section here too.
+
+**The `/sync` filter widens while this is on — stated plainly, not softened.** With
+`notify.matrix.thread_capture` off (the default), RunLore's `/sync` filter requests only
+`["m.reaction"]`: the process receives reactions in the configured room and nothing else. With
+`notify.matrix.thread_capture: true`, the filter widens to `["m.reaction","m.room.message"]` —
+**the process now receives message events** from the configured room, where before it received only
+reactions. That is what the option does the moment it is on; it is not a hypothetical worst case.
+
+RunLore does not act on every message it receives. Two checks run before anything else happens: is
+the message addressed to it (`m.mentions`, or the bot's own MXID/localpart appearing in the body —
+the same detection `addressed()` implements in the listener), and is it rooted, via the `m.thread`
+relation or the `m.in_reply_to` fallback, in one of RunLore's own investigation messages (the same
+sender-is-the-bot trust anchor the feedback-reactions attribution check above uses). A message that
+fails either check is dropped immediately, and its body is never logged. But — the honest part —
+**every message in the room does transit the process first**: the homeserver delivers it over
+`/sync`, and RunLore parses it far enough to run those two checks, before deciding to discard it. A
+member's ordinary chatter, and anything typed in a thread RunLore never started, reaches the process
+and is read, even though nothing from it is ever stored or written anywhere.
+
+**The trade Matrix makes here is the transport's genuine advantage over Slack.** Enabling this needs
+no exposed HTTP endpoint, no ingress change, and no new Kubernetes permission: the widened filter
+rides the same outbound long-poll RunLore already runs for `feedback_reactions`, so there is nothing
+new to route through your ingress or open in a NetworkPolicy. Weigh the two transports' opposite
+trade-offs before choosing between them: [Slack's thread
+capture](#slack-thread-capture-notifyslackthread_capture--a-second-exposed-endpoint) keeps its
+inbound event stream limited to `app_mention` but adds an exposed, internet-reachable endpoint;
+Matrix's stays unexposed but widens what it reads from a room it already polls.
+
+Operational requirement, same reasoning as `matrix.feedback_reactions` above: use an **invite-only
+room**. With thread capture on, every room member's messages reach the process (even though only an
+addressed, correctly-rooted one is ever acted on), so an open room widens who can even attempt to be
+heard by it.
+
 ## Honest limitations
 
 - **The model sees cluster data.** Even with redaction, tool output reaches your model provider. The

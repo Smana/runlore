@@ -845,6 +845,15 @@ type MatrixNotify struct {
 	// OUTBOUND request authenticated by the access token above. Requires the three
 	// notifier fields and outcome.ledger_path; Validate fails loud otherwise.
 	FeedbackReactions bool `yaml:"feedback_reactions"`
+	// ThreadCapture (opt-in, default off) registers each delivered investigation's
+	// thread root so a later `@runlore note: …` reply in that thread can be
+	// attributed to it and written into the knowledge base. Like FeedbackReactions,
+	// nothing is exposed: mentions arrive over the same client-server /sync
+	// long-poll, authenticated by the access token above. Requires the three
+	// notifier fields (homeserver, room_id, access_token_env) and
+	// outcome.ledger_path — the thread registry lives beside the ledger and must
+	// survive a restart and a leader failover; Validate fails loud otherwise.
+	ThreadCapture bool `yaml:"thread_capture"`
 }
 
 // GitOps selects the GitOps engine RunLore reads (what-changed + failure watch).
@@ -1533,6 +1542,19 @@ func (c *Config) Validate() error {
 		}
 		if c.Outcome.LedgerPath == "" {
 			return fmt.Errorf("notify.matrix.feedback_reactions requires outcome.ledger_path: ratings are recorded in the outcome ledger")
+		}
+	}
+	// Same fail-loud contract for the Matrix thread-capture listener: without the
+	// notifier fields it would sync nothing, without the ledger the thread
+	// registry has nowhere durable to live — both silent lies to whoever enabled
+	// the option.
+	if c.Notify.Matrix.ThreadCapture {
+		m := c.Notify.Matrix
+		if m.Homeserver == "" || m.RoomID == "" || m.AccessTokenEnv == "" {
+			return fmt.Errorf("notify.matrix.thread_capture requires homeserver, room_id and access_token_env (the listener long-polls the configured room and authenticates as the bot)")
+		}
+		if c.Outcome.LedgerPath == "" {
+			return fmt.Errorf("notify.matrix.thread_capture requires outcome.ledger_path: the thread registry lives beside the ledger and must survive a restart and a leader failover, so without a ledger path there is nowhere durable to record which thread belongs to which investigation")
 		}
 	}
 	if g := c.Catalog.Git; g.URL != "" {

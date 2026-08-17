@@ -398,15 +398,16 @@ func (r *Registry) GetOrCreate(root string, fallback Context) (tc Context, creat
 }
 
 // Register records a delivered investigation against the thread root it was
-// posted to. It implements notify.ThreadSink, so the Slack notifier can hand
-// over the ts it already has without knowing what a registry is. Best-effort by
-// contract: a failure here must never affect delivery, so the error is dropped.
-func (r *Registry) Register(root, channel string, inv providers.Investigation) {
+// posted to on transport. It implements notify.ThreadSink, so a notifier (Slack,
+// Matrix, …) can hand over the root/channel it already has, plus which transport
+// delivered it, without knowing what a registry is. Best-effort by contract: a
+// failure here must never affect delivery, so the error is dropped.
+func (r *Registry) Register(transport, root, channel string, inv providers.Investigation) {
 	if root == "" {
 		return
 	}
 	_ = r.Put(Context{
-		Transport:     "slack",
+		Transport:     transport,
 		Root:          root,
 		Channel:       channel,
 		TriggerKey:    inv.TriggerKey,
