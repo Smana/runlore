@@ -7,6 +7,7 @@ import (
 	"slices"
 	"strings"
 
+	"github.com/Smana/runlore/internal/providers"
 	"github.com/Smana/runlore/internal/providers/gitops/argocd"
 	"github.com/Smana/runlore/internal/providers/gitops/flux"
 )
@@ -94,6 +95,73 @@ func gitopsUnsupportedKind(engine, kind string) string {
 		"about whether the object exists — it is a statement about this tool's scope, not " +
 		"about the cluster. Do NOT treat it as evidence of absence or as a root cause. To " +
 		"check a non-GitOps object, use pod_status, kube_events or query_metrics."
+}
+
+// gitopsLookupAnswer renders a read that returned no object, as what the lookup
+// ESTABLISHED rather than as a verdict on the cluster.
+//
+// The wording this replaces — "searched the given namespace, flux-system, and all
+// namespaces by name, and no such object exists" — was wrong in three separate states,
+// all of which reach it on the SUPPORTED-kind path that engine scoping does not touch:
+//
+//   - a CRD the API does not serve 404s exactly like an absent object, so #503's own
+//     mechanism survived here untouched;
+//   - a Forbidden on the all-namespaces List was swallowed, so the answer claimed a
+//     cluster-wide search that RBAC had refused;
+//   - on Argo CD flux-system is never searched, yet the sentence named it — and the
+//     branch's own test asserted that string with Engine:"argocd".
+//
+// So the scopes come from the provider (only searches that actually completed are
+// listed) and each reason gets its own answer. Nothing here says "does not exist": the
+// earlier forbidden-word list contained that exact phrase and "no such object exists"
+// slipped past it, which is why the wording is checked against the SHAPE of the claim
+// below rather than a blocklist.
+func gitopsLookupAnswer(id string, lk providers.Lookup) string {
+	const notEvidence = " This is NOT evidence that the object is absent and NOT a root " +
+		"cause — do not build a mechanism on it."
+	switch lk.Reason {
+	case providers.LookupKindNotServed:
+		return id + ": the API server serves no such resource type on this cluster, so no " +
+			"object of that kind could be returned by any query." + notEvidence +
+			" It says the CRD is missing or not installed, which is a fact about the cluster's " +
+			"API surface, not about this object."
+	case providers.LookupDenied:
+		return id + ": " + searchedClause(lk.Scopes) + " returned no object, and the " +
+			"cluster-wide search by name was DENIED by RBAC, so it never ran." + notEvidence +
+			" The object may exist in a namespace this agent cannot list."
+	default:
+		return id + ": NOT FOUND — " + searchedClause(lk.Scopes) + " returned no object of " +
+			"that name. That is the result of a name lookup, not a diagnosis: whether an " +
+			"absence explains the incident is for you to establish from other evidence, so do " +
+			"not assume it is the root cause. If you expected it to exist, re-check the " +
+			"kind/name and namespace before concluding it was deleted."
+	}
+}
+
+// searchedClause names the scopes a provider actually completed. With none recorded it
+// stays silent about scope rather than inventing one — the failure being fixed here is a
+// message that named searches that never happened.
+func searchedClause(scopes []string) string {
+	if len(scopes) == 0 {
+		return "the lookup"
+	}
+	return "a search of " + strings.Join(scopes, ", ")
+}
+
+// gitopsLookupNote is the one-line form for a dependency-tree node.
+func gitopsLookupNote(lk providers.Lookup) string {
+	switch lk.Reason {
+	case providers.LookupKindNotServed:
+		return "kind not served by this cluster's API (not evidence of absence)"
+	case providers.LookupDenied:
+		return "search DENIED by RBAC (not evidence of absence)"
+	case providers.LookupUnresolvable:
+		return "not a kind these tools resolve — not looked up (not evidence of absence)"
+	case providers.LookupFailed:
+		return "read FAILED (not evidence of absence)"
+	default:
+		return "not found by name"
+	}
 }
 
 // gitopsKindSchema builds the argument schema with kind constrained to what the engine can

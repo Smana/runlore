@@ -14,13 +14,18 @@ import (
 
 // ResourceStatus reports an Argo CD Application's health + sync status, key
 // source/destination refs, error conditions, and recent Events — the Argo analogue of
-// the Flux inspector's "why is it failing" lens. A missing Application is reported via
-// NotFound (often the cascade root), not an error.
+// the Flux inspector's "why is it failing" lens. A read that returns no Application is
+// reported via NotFound + Lookup, not an error, so the caller can say what the negative
+// established rather than assert the Application is absent.
 func (p *Provider) ResourceStatus(ctx context.Context, w providers.Workload) (providers.ResourceStatus, error) {
 	rs := providers.ResourceStatus{Workload: w, Refs: map[string]string{}}
 	u, err := p.reader.GetApplication(ctx, w.Namespace, w.Name)
+	if lk, ok := providers.LookupOf(err); ok {
+		rs.NotFound, rs.Lookup = true, lk
+		return rs, nil
+	}
 	if apierrors.IsNotFound(err) {
-		rs.NotFound = true
+		rs.NotFound, rs.Lookup = true, providers.Lookup{Reason: providers.LookupAbsent}
 		return rs, nil
 	}
 	if err != nil {
@@ -72,18 +77,28 @@ func (p *Provider) appNode(ctx context.Context, w providers.Workload, seen map[s
 	}
 	seen[key] = true
 	u, err := p.reader.GetApplication(ctx, w.Namespace, w.Name)
+	if lk, ok := providers.LookupOf(err); ok {
+		node.NotFound = lk.Reason == providers.LookupAbsent
+		node.Lookup = lk
+		return node
+	}
 	if apierrors.IsNotFound(err) {
 		node.NotFound = true
+		node.Lookup = providers.Lookup{Reason: providers.LookupAbsent}
 		return node
 	}
 	if err != nil {
-		return node
+		node.Lookup = providers.Lookup{Reason: providers.LookupFailed}
+		return node // do not claim the node exists with an unknown Ready state
 	}
 	node.Ready, node.Reason, _ = appReady(u)
 	for _, r := range managedResources(u) {
 		if r.Kind == "Application" && r.Name != "" { // app-of-apps: recurse, surface if not healthy
 			child := p.appNode(ctx, providers.Workload{Kind: "Application", Name: r.Name, Namespace: r.Namespace}, seen)
-			if child.Ready != "True" || child.NotFound || len(child.Children) > 0 {
+			// Lookup covers every read that returned no object, not just an absent one:
+			// a child whose read was denied or errored is exactly what the tree must
+			// surface rather than silently drop as "healthy enough".
+			if child.Ready != "True" || child.Lookup.Reason != "" || len(child.Children) > 0 {
 				node.Children = append(node.Children, child)
 			}
 			continue

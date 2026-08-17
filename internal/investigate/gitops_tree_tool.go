@@ -67,9 +67,12 @@ func (t GitOpsTreeTool) Call(ctx context.Context, args string) (string, error) {
 	return b.String(), nil
 }
 
-// recordObservedTree records every existing (non-NotFound) node of a dependency tree.
+// recordObservedTree records every node whose object was actually READ. A node carrying
+// a Lookup is one the API did not return — absent, denied, an unserved or unresolvable
+// kind, or a failed read — and recording it as observed would let an action target a
+// resource nothing confirmed server-side (see guardUnobservedTargets).
 func recordObservedTree(ctx context.Context, n providers.DepNode) {
-	if !n.NotFound {
+	if n.Lookup.Reason == "" && !n.NotFound {
 		recordObserved(ctx, n.Workload)
 	}
 	for _, c := range n.Children {
@@ -78,13 +81,17 @@ func recordObservedTree(ctx context.Context, n providers.DepNode) {
 }
 
 // renderDepNode renders a node and its children with indentation, flagging the
-// not-Ready / NOT FOUND nodes that are candidate roots.
+// not-Ready nodes and the ones the API did not return.
 func renderDepNode(b *strings.Builder, n providers.DepNode, depth int) {
 	indent := strings.Repeat("  ", depth)
 	id := fmt.Sprintf("%s %s/%s", n.Workload.Kind, n.Workload.Namespace, n.Workload.Name)
 	switch {
-	case n.NotFound:
-		fmt.Fprintf(b, "%s%s: NOT FOUND  ← root\n", indent, id)
+	case n.Lookup.Reason != "" || n.NotFound:
+		// No "← root". The branch's own commit message says that arrow "hands back a
+		// root cause outright", which was the argument for refusing an out-of-scope kind
+		// here — and then it stayed on the supported path, so the two tools contradicted
+		// each other about the same object. Nominating the root is the loop's job.
+		fmt.Fprintf(b, "%s%s: %s\n", indent, id, gitopsLookupNote(n.Lookup))
 	case n.Ready == "False" || n.Ready == "Unknown":
 		fmt.Fprintf(b, "%s%s (Ready=%s%s)\n", indent, id, n.Ready, reasonSuffix(n.Reason))
 	case n.Ready == "":

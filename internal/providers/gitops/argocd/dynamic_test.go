@@ -4,14 +4,20 @@ package argocd
 
 import (
 	"context"
+	"errors"
+	"slices"
 	"strings"
 	"testing"
 	"time"
 
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	dynamicfake "k8s.io/client-go/dynamic/fake"
+	k8stesting "k8s.io/client-go/testing"
+
+	"github.com/Smana/runlore/internal/providers"
 )
 
 func TestApplicationFromUnstructured(t *testing.T) {
@@ -206,5 +212,51 @@ func TestDynamicReaderWatch(t *testing.T) {
 		}
 	case <-time.After(5 * time.Second):
 		t.Fatal("timed out waiting for informer event")
+	}
+}
+
+// TestGetApplicationNeverClaimsFluxSystem pins the scopes this reader actually searches.
+//
+// Argo CD has no flux-system convention and appNode/GetApplication never look there, yet
+// the reply built on this lookup said "searched the given namespace, flux-system, and
+// all namespaces" on every engine — and the fix's own test asserted that string with
+// Engine:"argocd". Reporting the scopes from the provider is what makes the sentence
+// true by construction.
+func TestGetApplicationNeverClaimsFluxSystem(t *testing.T) {
+	gvrToListKind := map[schema.GroupVersionResource]string{applicationGVR: "ApplicationList"}
+	forbidden := apierrors.NewForbidden(schema.GroupResource{Group: "argoproj.io", Resource: "applications"},
+		"", errors.New("no permission"))
+
+	for _, tc := range []struct {
+		name       string
+		listErr    error
+		wantReason providers.LookupReason
+		wantScopes []string
+	}{
+		{"absent", nil, providers.LookupAbsent, []string{"apps", providers.AllNamespaces}},
+		{"cluster-wide search denied", forbidden, providers.LookupDenied, []string{"apps"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			client := dynamicfake.NewSimpleDynamicClientWithCustomListKinds(runtime.NewScheme(), gvrToListKind)
+			if tc.listErr != nil {
+				client.PrependReactor("list", "applications", func(k8stesting.Action) (bool, runtime.Object, error) {
+					return true, nil, tc.listErr
+				})
+			}
+			_, err := NewDynamicReader(client).GetApplication(context.Background(), "apps", "api")
+			lk, ok := providers.LookupOf(err)
+			if !ok {
+				t.Fatalf("no Lookup attached: %v", err)
+			}
+			if lk.Reason != tc.wantReason {
+				t.Errorf("Reason = %q, want %q", lk.Reason, tc.wantReason)
+			}
+			if !slices.Equal(lk.Scopes, tc.wantScopes) {
+				t.Errorf("Scopes = %v, want %v", lk.Scopes, tc.wantScopes)
+			}
+			if slices.Contains(lk.Scopes, "flux-system") {
+				t.Error("the Argo CD reader reported searching flux-system, which it never does")
+			}
+		})
 	}
 }

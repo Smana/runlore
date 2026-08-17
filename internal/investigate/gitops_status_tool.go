@@ -62,14 +62,11 @@ func (t GitOpsStatusTool) Call(ctx context.Context, args string) (string, error)
 	}
 	id := fmt.Sprintf("%s %s/%s", in.Kind, in.Namespace, in.Name)
 	if rs.NotFound {
-		// Reports the lookup, not a verdict. This previously read "the object genuinely
-		// does not exist (likely the cascade root)" — two claims past what one name lookup
-		// establishes, and the model quoted them as evidence. Absence is a fact worth
-		// stating; that the absence CAUSED the incident is for the loop to establish.
-		return id + ": NOT FOUND — searched the given namespace, flux-system, and all namespaces " +
-			"by name, and no such object exists. Whether that absence explains the incident is for " +
-			"you to establish from other evidence — do not assume it is the root cause. If you " +
-			"expected it to exist, re-check the kind/name rather than concluding it was deleted.", nil
+		// Reports the lookup, not a verdict — and reports WHICH lookup, from the scopes
+		// the provider actually completed. The first version of this fix still asserted
+		// "no such object exists" over a fixed scope list that named flux-system even on
+		// Argo CD, where nothing ever searches it. See gitopsLookupAnswer.
+		return gitopsLookupAnswer(id, rs.Lookup), nil
 	}
 	// F2: the inspector confirmed this resource exists server-side — record it observed.
 	recordObserved(ctx, providers.Workload{Kind: in.Kind, Name: in.Name, Namespace: in.Namespace})

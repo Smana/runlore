@@ -256,6 +256,164 @@ func TestGitOpsNotFoundDoesNotNominateARootCause(t *testing.T) {
 	}
 }
 
+// TestGitOpsNegativeReportsTheLookupNotAVerdict covers the three states in which the
+// softened NOT FOUND wording was still false. All of them are on the SUPPORTED-kind
+// path, which engine scoping does not touch, so #503's mechanism survived there:
+//
+//   - an unserved CRD 404s exactly like an absent object;
+//   - a Forbidden on the all-namespaces List was swallowed, so the answer claimed a
+//     cluster-wide search that never ran;
+//   - flux-system was named unconditionally, including on Argo CD, which never
+//     searches it — and the earlier test asserted that very string with Engine:"argocd".
+//
+// The old wording's own guard is why this checks the SHAPE of the claim rather than a
+// blocklist: the forbidden-word list contained "does not exist", and "and no such object
+// exists" walked straight past it.
+func TestGitOpsNegativeReportsTheLookupNotAVerdict(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		engine  string
+		lookup  providers.Lookup
+		want    []string
+		wantNot []string
+	}{
+		{
+			name:   "absent on argocd names only the scopes that ran",
+			engine: "argocd",
+			lookup: providers.Lookup{Reason: providers.LookupAbsent,
+				Scopes: []string{"apps", providers.AllNamespaces}},
+			want: []string{"NOT FOUND", "apps", providers.AllNamespaces, "do not assume it is the root cause"},
+			// The whole point: Argo CD never searches flux-system, so the answer may not
+			// say it did.
+			wantNot: []string{"flux-system"},
+		},
+		{
+			name:   "unserved CRD is reported as a missing type, not a missing object",
+			engine: "flux",
+			lookup: providers.Lookup{Reason: providers.LookupKindNotServed, Scopes: []string{"apps", "flux-system"}},
+			want: []string{"serves no such resource type",
+				"NOT evidence that the object is absent"},
+			wantNot: []string{"NOT FOUND"},
+		},
+		{
+			name:   "denied cluster-wide search is reported as denied",
+			engine: "flux",
+			lookup: providers.Lookup{Reason: providers.LookupDenied, Scopes: []string{"apps", "flux-system"}},
+			want: []string{"DENIED by RBAC", "never ran", "NOT evidence that the object is absent",
+				"may exist in a namespace this agent cannot list"},
+			// The search it did not do must not be listed as one it did.
+			wantNot: []string{providers.AllNamespaces},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			insp := fakeInspector{status: providers.ResourceStatus{NotFound: true, Lookup: tc.lookup}}
+			kind := "HelmRelease"
+			if tc.engine == "argocd" {
+				kind = "Application"
+			}
+			out, err := GitOpsStatusTool{Inspector: insp, Engine: tc.engine}.Call(context.Background(),
+				`{"kind":"`+kind+`","name":"api","namespace":"apps"}`)
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, w := range tc.want {
+				if !strings.Contains(out, w) {
+					t.Errorf("answer is missing %q:\n%s", w, out)
+				}
+			}
+			for _, w := range tc.wantNot {
+				if strings.Contains(out, w) {
+					t.Errorf("answer claims %q, which this lookup did not establish:\n%s", w, out)
+				}
+			}
+			// No wording, in any state, may assert the object is absent from the cluster.
+			for _, claim := range []string{"does not exist", "no such object exists", "genuinely", "cascade root"} {
+				if strings.Contains(strings.ToLower(out), claim) {
+					t.Errorf("answer asserts %q from one name lookup:\n%s", claim, out)
+				}
+			}
+		})
+	}
+}
+
+// TestGitOpsTreeReportsTheLookupPerNode is gitops_tree's half of the same property. It
+// used to render a node the API never returned as "NOT FOUND  ← root" — which this
+// branch's own comment calls nominating the absence as the cause outright — and a node
+// whose read merely FAILED as "(Ready=unknown)", asserting an object nobody read.
+func TestGitOpsTreeReportsTheLookupPerNode(t *testing.T) {
+	tree := providers.DepNode{
+		Workload: providers.Workload{Kind: "Kustomization", Name: "apps", Namespace: "flux-system"},
+		Ready:    "False", Reason: "DependencyNotReady",
+		Children: []providers.DepNode{
+			{Workload: providers.Workload{Kind: "GitRepository", Name: "gone", Namespace: "flux-system"},
+				NotFound: true, Lookup: providers.Lookup{Reason: providers.LookupAbsent}},
+			{Workload: providers.Workload{Kind: "HelmRelease", Name: "denied", Namespace: "apps"},
+				Lookup: providers.Lookup{Reason: providers.LookupDenied}},
+			{Workload: providers.Workload{Kind: "ArtifactGenerator", Name: "split", Namespace: "flux-system"},
+				Lookup: providers.Lookup{Reason: providers.LookupUnresolvable}},
+			{Workload: providers.Workload{Kind: "Bucket", Name: "flaky", Namespace: "flux-system"},
+				Lookup: providers.Lookup{Reason: providers.LookupFailed}},
+		},
+	}
+	out, err := GitOpsTreeTool{Inspector: fakeInspector{tree: tree}, Engine: "flux"}.Call(context.Background(),
+		`{"kind":"Kustomization","name":"apps","namespace":"flux-system"}`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{
+		"gone: not found by name",
+		"denied: search DENIED by RBAC (not evidence of absence)",
+		"split: not a kind these tools resolve — not looked up (not evidence of absence)",
+		"flaky: read FAILED (not evidence of absence)",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("tree is missing %q:\n%s", want, out)
+		}
+	}
+	// A node nobody could read must never render as an existing one.
+	if strings.Contains(out, "Ready=unknown") {
+		t.Errorf("a node the API did not return is rendered with a Ready state:\n%s", out)
+	}
+	if strings.Contains(out, "← root") {
+		t.Errorf("the tree still nominates a root cause from one name lookup:\n%s", out)
+	}
+}
+
+// TestGitOpsTreeRecordsOnlyNodesItActuallyRead pins the observed-set side of the same
+// change. recordObservedTree gated on NotFound alone, so a node whose read was DENIED or
+// errored — never returned by the API — was recorded as server-confirmed and became a
+// legitimate action target (guardUnobservedTargets). Only a node the provider actually
+// read may count.
+func TestGitOpsTreeRecordsOnlyNodesItActuallyRead(t *testing.T) {
+	tree := providers.DepNode{
+		Workload: providers.Workload{Kind: "Kustomization", Name: "apps", Namespace: "flux-system"}, Ready: "True",
+		Children: []providers.DepNode{
+			{Workload: providers.Workload{Kind: "HelmRelease", Name: "denied", Namespace: "apps"},
+				Lookup: providers.Lookup{Reason: providers.LookupDenied}},
+			{Workload: providers.Workload{Kind: "Bucket", Name: "flaky", Namespace: "flux-system"},
+				Lookup: providers.Lookup{Reason: providers.LookupFailed}},
+		},
+	}
+	ctx := WithObservedResources(context.Background())
+	if _, err := (GitOpsTreeTool{Inspector: fakeInspector{tree: tree}, Engine: "flux"}).Call(ctx,
+		`{"kind":"Kustomization","name":"apps","namespace":"flux-system"}`); err != nil {
+		t.Fatal(err)
+	}
+	obs := observedFrom(ctx)
+	if !obs.matches(providers.Workload{Name: "apps", Namespace: "flux-system"}) {
+		t.Error("a node that WAS read is not recorded as observed")
+	}
+	for _, ghost := range []providers.Workload{
+		{Name: "denied", Namespace: "apps"},
+		{Name: "flaky", Namespace: "flux-system"},
+	} {
+		if obs.matches(ghost) {
+			t.Errorf("%s/%s was recorded as observed, but the API never returned it",
+				ghost.Namespace, ghost.Name)
+		}
+	}
+}
+
 // TestGitOpsDescriptionsMatchTheEngine stops the prose and the enum drifting apart: a
 // description naming kinds the schema refuses would send the model to a dead end, which is
 // the same class of confusion in the opposite direction.

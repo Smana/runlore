@@ -15,6 +15,7 @@ package providers
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"regexp"
 	"strings"
@@ -209,11 +210,83 @@ type GitOpsProvider interface {
 	WatchFailures(ctx context.Context) (<-chan FailureEvent, error)
 }
 
+// LookupReason says what a read that returned no object actually ESTABLISHED, which is
+// not always "the object is absent".
+//
+// The dynamic client reports a 404 identically whether a served kind has no object of
+// that name or the API serves no such kind at all; an RBAC-refused cluster-wide search
+// never ran; and a kind the provider has no mapping for never reached the API at all.
+// Collapsing those into one "not found" is how runlore#503 turned a limit of the tool
+// into a claim about the cluster. A provider knows which case it hit, so it says so.
+type LookupReason string
+
+const (
+	// LookupAbsent — the kind is served, the search ran, and no object of that name came
+	// back from any scope searched. The only reason that is genuinely about the object.
+	LookupAbsent LookupReason = "absent"
+	// LookupKindNotServed — the API serves no such resource type, so no object of that
+	// kind could have been returned. Says nothing about the named object.
+	LookupKindNotServed LookupReason = "kind-not-served"
+	// LookupDenied — a search the answer would otherwise claim to have made was refused
+	// by RBAC and never ran. The object may sit in a scope this agent cannot read.
+	LookupDenied LookupReason = "denied"
+	// LookupUnresolvable — this provider has no mapping for the kind, so no request was
+	// ever issued. A statement about the provider's scope, not about the cluster.
+	LookupUnresolvable LookupReason = "unresolvable"
+	// LookupFailed — the read errored for some other reason, so nothing was established.
+	LookupFailed LookupReason = "failed"
+)
+
+// AllNamespaces is the Lookup scope name for a completed cluster-wide search by name.
+const AllNamespaces = "all namespaces"
+
+// Lookup records what a name lookup DID, so a tool can report the lookup instead of
+// asserting a conclusion the lookup does not support.
+type Lookup struct {
+	Reason LookupReason
+	// Scopes are the search scopes the provider actually COMPLETED, in order: a
+	// namespace name, or AllNamespaces. A scope that was skipped or refused is not
+	// listed — naming a search that never ran is the false half of #503's message,
+	// which claimed the namespace, flux-system and all namespaces unconditionally.
+	Scopes []string
+}
+
+// LookupError is a failed read that knows what it established. Providers return it so a
+// caller can report the lookup rather than infer a verdict from a bare 404; the
+// underlying API error is wrapped, so apierrors.IsNotFound and friends still work.
+type LookupError struct {
+	Lookup Lookup
+	Err    error
+}
+
+func (e *LookupError) Error() string {
+	if e.Err == nil {
+		return string(e.Lookup.Reason)
+	}
+	return string(e.Lookup.Reason) + ": " + e.Err.Error()
+}
+
+func (e *LookupError) Unwrap() error { return e.Err }
+
+// LookupOf recovers the Lookup a provider attached to a failed read, reporting false
+// for a nil error or one that carries no such record.
+func LookupOf(err error) (Lookup, bool) {
+	var le *LookupError
+	if errors.As(err, &le) {
+		return le.Lookup, true
+	}
+	return Lookup{}, false
+}
+
 // ResourceStatus is a read-only snapshot of a GitOps/Kubernetes object's health,
 // used to investigate WHY a resource is failing (not just that it is).
 type ResourceStatus struct {
 	Workload Workload
-	NotFound bool              // the object does not exist (often the cascade root)
+	// NotFound reports that the read returned no object. Lookup says what that
+	// ESTABLISHED — read them together, because "not found" on its own does not
+	// distinguish an absent object from an unserved kind or a denied search.
+	NotFound bool
+	Lookup   Lookup
 	Ready    string            // Ready condition status: "True"/"False"/"Unknown"/""
 	Reason   string            // Ready condition reason
 	Message  string            // Ready condition message
@@ -226,6 +299,11 @@ type ResourceStatus struct {
 type DepNode struct {
 	Workload Workload
 	NotFound bool
+	// Lookup is set whenever this node's own read returned no object — absent, unserved
+	// kind, denied, unresolvable kind, or a failed read. A zero Lookup means the object
+	// WAS read, so a renderer has to consult it before printing a Ready state: a node
+	// whose read failed used to render as "(Ready=unknown)", which asserts it exists.
+	Lookup   Lookup
 	Ready    string // Ready condition status
 	Reason   string
 	Children []DepNode

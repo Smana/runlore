@@ -17,6 +17,8 @@ import (
 	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/dynamic/dynamicinformer"
 	"k8s.io/client-go/tools/cache"
+
+	"github.com/Smana/runlore/internal/providers"
 )
 
 // applicationGVR is the Argo CD Application resource.
@@ -80,7 +82,14 @@ func (r *dynamicReader) ListApplications(ctx context.Context) ([]application, er
 // live in the argocd namespace, not the workload's; if the caller passes the
 // workload's namespace and the app isn't there, fall back to a name search across all
 // namespaces before trusting the NotFound.
+//
+// A read that returns no object comes back as a providers.LookupError carrying the
+// scopes this call actually completed and what the negative established. Note what is
+// NOT among those scopes: Argo CD has no flux-system convention and this reader never
+// looks there, so nothing downstream may claim it did — the reply it feeds used to name
+// flux-system unconditionally, on every engine (runlore#503).
 func (r *dynamicReader) GetApplication(ctx context.Context, namespace, name string) (*unstructured.Unstructured, error) {
+	lk := providers.Lookup{Reason: providers.LookupAbsent, Scopes: []string{namespace}}
 	u, err := r.client.Resource(applicationGVR).Namespace(namespace).Get(ctx, name, metav1.GetOptions{})
 	if err == nil {
 		return u, nil
@@ -88,14 +97,26 @@ func (r *dynamicReader) GetApplication(ctx context.Context, namespace, name stri
 	if !apierrors.IsNotFound(err) {
 		return nil, err
 	}
-	if list, lerr := r.client.Resource(applicationGVR).Namespace(metav1.NamespaceAll).List(ctx, metav1.ListOptions{}); lerr == nil {
+	list, lerr := r.client.Resource(applicationGVR).Namespace(metav1.NamespaceAll).List(ctx, metav1.ListOptions{})
+	switch {
+	case lerr == nil:
+		lk.Scopes = append(lk.Scopes, providers.AllNamespaces)
 		for i := range list.Items {
 			if list.Items[i].GetName() == name {
 				return &list.Items[i], nil
 			}
 		}
+	case apierrors.IsForbidden(lerr):
+		// The cluster-wide search never ran; the old `if lerr == nil` swallowed that and
+		// let the answer claim a search RBAC had refused.
+		lk.Reason = providers.LookupDenied
+	case apierrors.IsNotFound(lerr):
+		// A List against a served resource returns an empty list, never a 404, so a 404
+		// here means the Application CRD is not served — an Argo CD tool pointed at a
+		// cluster without Argo CD, which is not evidence about the named object.
+		lk.Reason = providers.LookupKindNotServed
 	}
-	return nil, err // genuinely absent in every namespace: return the original NotFound
+	return nil, &providers.LookupError{Lookup: lk, Err: err}
 }
 
 // ListEvents returns recent Event lines for an involved object, filtered by name
