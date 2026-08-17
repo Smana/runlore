@@ -120,6 +120,10 @@
         "controllerLogNamespaces": {
           "type": "array",
           "items": { "type": "string" }
+        },
+        "resourceSpecRules": {
+          "type": "array",
+          "items": { "type": "object" }
         }
       }
     },
