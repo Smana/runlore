@@ -51,6 +51,17 @@ func TestModelTokenCountersConstructed(t *testing.T) {
 	}
 }
 
+func TestMentionsDroppedOnSaturationCounterConstructed(t *testing.T) {
+	// Same shape as IncidentsDroppedOnShutdown: accepted, acked, never processed.
+	// With no provider configured the global meter is a no-op; the instrument must
+	// still construct and be safe to record.
+	m := NewMetrics()
+	if m.MentionsDroppedOnSaturation == nil {
+		t.Fatal("NewMetrics must construct MentionsDroppedOnSaturation")
+	}
+	m.MentionsDroppedOnSaturation.Add(context.Background(), 1)
+}
+
 func TestNewMetricsInvestigationUsageInstruments(t *testing.T) {
 	m := NewMetrics()
 	if m.InvestigationModelCalls == nil || m.InvestigationInputTokens == nil ||

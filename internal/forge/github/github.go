@@ -101,6 +101,14 @@ func (c *Client) do(ctx context.Context, method, path string, body, out any) err
 // a "solved" entry with a captured resolution should be merged as a Playbook.
 var lifecycleLabels = []string{"runlore", "triggered"}
 
+// prLabels appends e.ExtraLabels to the standard lifecycle labels — additive,
+// never a replacement (see providers.KBEntry.ExtraLabels). Always returns a
+// fresh slice: lifecycleLabels is a shared package var and must never be
+// mutated in place by an append that happens to reuse its backing array.
+func prLabels(e providers.KBEntry) []string {
+	return append(append([]string{}, lifecycleLabels...), e.ExtraLabels...)
+}
+
 // OpenIssue files an issue describing the investigation.
 func (c *Client) OpenIssue(ctx context.Context, inv providers.Investigation) (providers.Ref, error) {
 	body := map[string]any{"title": issueTitle(inv), "body": issueBody(inv), "labels": lifecycleLabels}
@@ -157,7 +165,7 @@ func (c *Client) OpenPR(ctx context.Context, e providers.KBEntry) (providers.Ref
 	// issues endpoint). Best-effort: a labelling failure must not lose the PR, so
 	// the error is intentionally ignored — the PR URL is already returned.
 	if out.Number != 0 {
-		_ = c.addLabels(ctx, out.Number, lifecycleLabels)
+		_ = c.addLabels(ctx, out.Number, prLabels(e))
 	}
 	return providers.Ref{URL: out.HTMLURL}, nil
 }

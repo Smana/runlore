@@ -16,7 +16,12 @@ import (
 type fakeForge struct {
 	prs       []providers.CuratedIssue
 	commented []int
-	closed    []int
+	// commentBodies is keyed by PR number, capturing the text Comment posted —
+	// so a test can pin exact wording (e.g. the stale sweep's operator-note
+	// comment must read differently from its ordinary one), not just that a
+	// comment happened.
+	commentBodies map[int]string
+	closed        []int
 }
 
 func (f *fakeForge) ListPRsByLabel(context.Context, string) ([]providers.CuratedIssue, error) {
@@ -25,8 +30,12 @@ func (f *fakeForge) ListPRsByLabel(context.Context, string) ([]providers.Curated
 func (f *fakeForge) ListIssuesByLabel(context.Context, string) ([]providers.CuratedIssue, error) {
 	return nil, nil
 }
-func (f *fakeForge) Comment(_ context.Context, n int, _ string) error {
+func (f *fakeForge) Comment(_ context.Context, n int, body string) error {
 	f.commented = append(f.commented, n)
+	if f.commentBodies == nil {
+		f.commentBodies = map[int]string{}
+	}
+	f.commentBodies[n] = body
 	return nil
 }
 func (f *fakeForge) ReplaceLabel(context.Context, int, string, string) error { return nil }

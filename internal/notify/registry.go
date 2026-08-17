@@ -15,6 +15,9 @@ import (
 type Deps struct {
 	Cfg *config.Config
 	Log *slog.Logger
+	// Threads receives the thread root of each delivered investigation, so a
+	// later reply can be attributed. nil (the default) disables thread capture.
+	Threads ThreadSink
 }
 
 // Descriptor describes a self-registering notifier.

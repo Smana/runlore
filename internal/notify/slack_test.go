@@ -1248,6 +1248,181 @@ func TestSlackCardEscapesTitleOnBothBranches(t *testing.T) {
 // announcing feedback buttons nobody will ever see. The set-but-EMPTY cases are
 // the live gap: an unmounted secret leaves the env var present and empty, the
 // builder returns nil, the notifier is skipped and nothing is delivered.
+type recordingThreadSink struct {
+	root, channel string
+	inv           providers.Investigation
+	calls         int
+}
+
+func (r *recordingThreadSink) Register(root, channel string, inv providers.Investigation) {
+	r.root, r.channel, r.inv, r.calls = root, channel, inv, r.calls+1
+}
+
+// TestSlackBotRegistersTheThreadRoot proves the registered thread root is the
+// SUMMARY post's ts, never the detail reply's — the mock deliberately returns a
+// different ts per call (111.222 then 999.888) so a regression that captured the
+// detail reply's ts instead (e.g. registration moved to after the detail post,
+// reusing an overwritten ts variable) is caught: with a single shared ts for
+// both calls, that regression would be invisible.
+func TestSlackBotRegistersTheThreadRoot(t *testing.T) {
+	var posts []map[string]any
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var m map[string]any
+		_ = json.NewDecoder(r.Body).Decode(&m)
+		posts = append(posts, m)
+		if len(posts) == 1 {
+			_, _ = w.Write([]byte(`{"ok":true,"ts":"111.222"}`))
+		} else {
+			_, _ = w.Write([]byte(`{"ok":true,"ts":"999.888"}`))
+		}
+	}))
+	defer srv.Close()
+
+	sink := &recordingThreadSink{}
+	b := NewSlackBot("xoxb-test", "C1")
+	b.baseURL = srv.URL
+	b.Threads = sink
+
+	// Unresolved forces a non-empty detailBlocks, so Deliver actually posts a
+	// second (threaded) message — without it this investigation has no detail
+	// beyond the summary and the discriminating half of this test never runs.
+	inv := providers.Investigation{
+		Title:      "OOMKilled",
+		TriggerKey: "tk-1",
+		CuratedURL: "https://github.com/o/r/pull/42",
+		Unresolved: []string{"why the pod restarted a second time"},
+	}
+	if err := b.Deliver(context.Background(), inv); err != nil {
+		t.Fatalf("Deliver: %v", err)
+	}
+
+	if sink.calls != 1 {
+		t.Fatalf("Register calls = %d, want 1 (the summary root only, never the detail reply)", sink.calls)
+	}
+	if sink.root != "111.222" {
+		t.Errorf("root = %q, want 111.222 (the summary's ts, not the detail reply's 999.888)", sink.root)
+	}
+	if sink.channel != "C1" {
+		t.Errorf("channel = %q, want C1", sink.channel)
+	}
+	if sink.inv.TriggerKey != "tk-1" {
+		t.Errorf("investigation not passed through: %+v", sink.inv)
+	}
+	if len(posts) != 2 {
+		t.Fatalf("got %d POSTs, want 2 (summary + detail reply)", len(posts))
+	}
+	if posts[1]["thread_ts"] != "111.222" {
+		t.Errorf("detail reply thread_ts = %v, want 111.222 (the summary's ts) — registration must not disturb the detail post", posts[1]["thread_ts"])
+	}
+}
+
+// TestSlackBotRegistersThreadRootDespiteFailedDetailPost proves the requirement
+// TestSlackBotRegistersTheThreadRoot cannot prove on its own: registration must
+// happen BEFORE the detail post, so a failed detail post cannot cost it. With
+// both mocked posts succeeding (as in every other test in this file), a
+// regression that moved the Register call to AFTER the detail-post block —
+// while still referencing the same ts variable — would leave calls==1,
+// root=="111.222", 2 POSTs and thread_ts=="111.222" all still passing: nothing
+// exercises the failure the ordering exists to protect against.
+//
+// Here the mock's SECOND post (the detail reply) returns a Slack logical
+// failure ({"ok":false}, which SlackBot.post treats as an error just like a
+// non-2xx status). Deliver must still have registered the summary's ts exactly
+// once: with Register before the detail post that holds regardless of the
+// detail post's outcome; with Register moved after it, the early return on the
+// detail post's error means Register is never reached and calls stays 0.
+func TestSlackBotRegistersThreadRootDespiteFailedDetailPost(t *testing.T) {
+	var posts int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		posts++
+		w.Header().Set("Content-Type", "application/json")
+		if posts == 1 {
+			_, _ = w.Write([]byte(`{"ok":true,"ts":"111.222"}`))
+		} else {
+			_, _ = w.Write([]byte(`{"ok":false,"error":"ratelimited"}`))
+		}
+	}))
+	defer srv.Close()
+
+	sink := &recordingThreadSink{}
+	b := NewSlackBot("xoxb-test", "C1")
+	b.baseURL = srv.URL
+	b.Threads = sink
+
+	// Unresolved forces a non-empty detailBlocks, so Deliver actually attempts
+	// the second (threaded) post that then fails.
+	inv := providers.Investigation{
+		Title:      "OOMKilled",
+		TriggerKey: "tk-1",
+		Unresolved: []string{"why the pod restarted a second time"},
+	}
+	err := b.Deliver(context.Background(), inv)
+	if err == nil {
+		t.Fatal("a failed detail post must surface an error")
+	}
+	if posts != 2 {
+		t.Fatalf("got %d POSTs, want 2 (summary + the failed detail attempt)", posts)
+	}
+	if sink.calls != 1 {
+		t.Fatalf("Register calls = %d, want 1 — the summary's thread root must be registered even though the detail post failed", sink.calls)
+	}
+	if sink.root != "111.222" {
+		t.Errorf("root = %q, want 111.222 (the summary's ts)", sink.root)
+	}
+}
+
+func TestSlackBotDeliverSucceedsWithNoThreadSink(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`{"ok":true,"ts":"111.222"}`))
+	}))
+	defer srv.Close()
+
+	b := NewSlackBot("xoxb-test", "C1")
+	b.baseURL = srv.URL
+	// Threads deliberately left nil.
+	if err := b.Deliver(context.Background(), providers.Investigation{Title: "OOMKilled"}); err != nil {
+		t.Fatalf("Deliver with a nil thread sink: %v", err)
+	}
+}
+
+func TestSlackBotReplyInThread(t *testing.T) {
+	var got map[string]any
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewDecoder(r.Body).Decode(&got)
+		_, _ = w.Write([]byte(`{"ok":true,"ts":"333.444"}`))
+	}))
+	defer srv.Close()
+
+	b := NewSlackBot("xoxb-test", "C-default")
+	b.baseURL = srv.URL
+	if err := b.ReplyInThread(context.Background(), "111.222", "C-live", "📝 Noted"); err != nil {
+		t.Fatalf("ReplyInThread: %v", err)
+	}
+
+	if got["thread_ts"] != "111.222" {
+		t.Errorf("thread_ts = %v, want 111.222", got["thread_ts"])
+	}
+	if got["channel"] != "C-live" {
+		t.Errorf("channel = %v, want C-live (the live event's channel, not the configured default)", got["channel"])
+	}
+	if got["text"] != "📝 Noted" {
+		t.Errorf("text = %v, want the reply text", got["text"])
+	}
+}
+
+func TestMultiThreadReplier(t *testing.T) {
+	bot := NewSlackBot("xoxb-test", "C1")
+	m := NewMulti(slog.New(slog.NewTextHandler(io.Discard, nil)), NewSlack("https://hooks.slack.com/x"), bot)
+	if got := m.ThreadReplier(); got != providers.ThreadNotifier(bot) {
+		t.Fatalf("ThreadReplier = %v, want the bot notifier", got)
+	}
+
+	none := NewMulti(slog.New(slog.NewTextHandler(io.Discard, nil)), NewSlack("https://hooks.slack.com/x"))
+	if got := none.ThreadReplier(); got != nil {
+		t.Fatalf("ThreadReplier = %v, want nil when no notifier can reply", got)
+	}
+}
+
 func TestSlackDeliveryTarget(t *testing.T) {
 	tests := []struct {
 		name string

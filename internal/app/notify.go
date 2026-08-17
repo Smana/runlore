@@ -5,17 +5,129 @@ package app
 import (
 	"log/slog"
 	"os"
+	"path/filepath"
+	"time"
 
 	"github.com/Smana/runlore/internal/config"
 	"github.com/Smana/runlore/internal/notify"
 	"github.com/Smana/runlore/internal/outcome"
+	"github.com/Smana/runlore/internal/providers"
+	"github.com/Smana/runlore/internal/ratelimit"
+	"github.com/Smana/runlore/internal/telemetry"
+	"github.com/Smana/runlore/internal/thread"
 )
 
 // BuildNotifier assembles the configured chat notifiers (best-effort fan-out)
 // via the notifier registry. Slack/Matrix (and any registered sink, e.g. the
 // generic webhook) self-register; each Build reads its own config.
-func BuildNotifier(cfg *config.Config, log *slog.Logger) (*notify.Multi, error) {
-	return notify.BuildEnabled(notify.Deps{Cfg: cfg, Log: log})
+//
+// threads (nil to disable) is handed to notifiers that can capture a thread
+// root, so a later reply there can be attributed to this investigation.
+func BuildNotifier(cfg *config.Config, threads notify.ThreadSink, log *slog.Logger) (*notify.Multi, error) {
+	return notify.BuildEnabled(notify.Deps{Cfg: cfg, Log: log, Threads: threads})
+}
+
+// Thread-registry bounds. A thread stays answerable for a week — long enough for
+// a Monday follow-up on a Friday incident, short enough that the live set stays
+// small — and the size cap is the real backstop for a busy channel.
+const (
+	threadRegistryTTL = 7 * 24 * time.Hour
+	threadRegistryMax = 2000
+)
+
+// BuildThreadRegistry assembles the thread-context registry backing
+// notify.slack.thread_capture: nil-path (disabled) unless the option is on AND
+// the outcome ledger has a path.
+//
+// The ledger path is the dependency because it names the durable state
+// directory — the registry has to survive a restart or a leader failover for the
+// same reason the ledger does, and inventing a second location for one file
+// would be a second thing to mount. Without it, capture degrades to
+// unavailable, which the human is told, rather than to silently forgetful.
+func BuildThreadRegistry(cfg *config.Config) (*thread.Registry, error) {
+	if !cfg.Notify.Slack.ThreadCapture || cfg.Outcome.LedgerPath == "" {
+		return thread.NewRegistry("", threadRegistryTTL, threadRegistryMax)
+	}
+	path := filepath.Join(filepath.Dir(cfg.Outcome.LedgerPath), "threads.jsonl")
+	return thread.NewRegistry(path, threadRegistryTTL, threadRegistryMax)
+}
+
+// ThreadCaptureDeliverable reports whether thread capture can actually work, and
+// warns when it cannot. Call it only with notify.slack.thread_capture on.
+//
+// Validate already requires the bot-token fields alongside the option, but
+// configuration is not delivery: the env var holding the token can be present
+// and EMPTY at runtime (an unmounted secret, a blank Helm value), and the Slack
+// builder then returns no notifier at all. No message is posted, so no thread
+// exists to reply in — while startup announced the feature as enabled. Same
+// guard, same reason, as SlackFeedbackDeliverable.
+func ThreadCaptureDeliverable(cfg *config.Config, log *slog.Logger) bool {
+	sl := cfg.Notify.Slack
+	if notify.SlackBotDelivery(sl) {
+		return true
+	}
+	log.Warn("slack thread_capture enabled but no bot-token delivery target resolved (credential env var empty); "+
+		"no message is delivered, so no thread exists to capture knowledge in",
+		"bot_token_env", sl.BotTokenEnv, "channel", sl.Channel)
+	return false
+}
+
+// BuildThreadMention assembles the Slack thread-capture handler when
+// notify.slack.thread_capture can actually work end to end, or returns nil
+// (warning exactly once, naming the specific reason) when it cannot. Called
+// only with the option on and threadRegistry persisted — see serve.go.
+//
+// ThreadCaptureDeliverable is checked BEFORE asking notifier for a replier —
+// not after, as an earlier version of this wiring did. replier == nil is
+// ambiguous on its own: it is nil both when the bot-token env resolves empty
+// at runtime (the specific, actionable cause ThreadCaptureDeliverable
+// diagnoses and names) AND when no notifier was built at all (the log-only,
+// no-model path — see notifier's nil check below). Checking deliverability
+// first means the specific cause is reported whenever it is the true one,
+// instead of being masked every time by the generic "no thread-capable
+// notifier resolved" message — which is what happened before: by the time the
+// switch reached its replier check, replier != nil already implied a
+// *notify.SlackBot existed in Multi, which is only ever built when
+// SlackBotDelivery(sl) had already returned true, so ThreadCaptureDeliverable's
+// own "no bot-token delivery target resolved" warning could never fire in
+// production. This ordering is what makes it reachable.
+// metrics is always non-nil in production (bound to the global no-op provider
+// when telemetry is disabled — see serve.go) but the parameter itself stays
+// nil-safe: thread.Responder guards it before every use, same as every other
+// optional *telemetry.Metrics field in RunLore.
+func BuildThreadMention(cfg *config.Config, threadRegistry *thread.Registry, forge thread.Forge, notifier *notify.Multi, metrics *telemetry.Metrics, log *slog.Logger) *thread.Mention {
+	if forge == nil {
+		log.Warn("slack thread_capture enabled but no forge is configured (forge.kb_repo / credentials); knowledge cannot be written")
+		return nil
+	}
+	if !ThreadCaptureDeliverable(cfg, log) {
+		return nil
+	}
+	// notifier is nil on the log-only path (no model configured); ThreadReplier
+	// is a pointer-receiver method that dereferences it, so a nil check here
+	// avoids a startup panic on that otherwise-valid configuration.
+	var replier providers.ThreadNotifier
+	if notifier != nil {
+		replier = notifier.ThreadReplier()
+	}
+	if replier == nil {
+		log.Warn("slack thread_capture enabled but no thread-capable notifier resolved; replies cannot be posted")
+		return nil
+	}
+	log.Info("slack thread capture enabled", "endpoint", "/slack/events")
+	return &thread.Mention{
+		Responder: &thread.Responder{
+			Forge:             forge,
+			Registry:          threadRegistry,
+			MaxNotesPerThread: thread.DefaultMaxNotesPerThread,
+			ForgeWrites:       ratelimit.New(20, time.Hour),
+			Metrics:           metrics,
+			Log:               log,
+		},
+		Registry: threadRegistry,
+		Replier:  replier,
+		Log:      log,
+	}
 }
 
 // SlackFeedbackDeliverable reports whether the opt-in 👍/👎 buttons can actually

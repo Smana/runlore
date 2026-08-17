@@ -83,6 +83,14 @@ const apiSuffix = "/api/v4"
 // the OKF lifecycle: triggered → investigating → solved).
 var lifecycleLabels = []string{"runlore", "triggered"}
 
+// prLabels appends e.ExtraLabels to the standard lifecycle labels — additive,
+// never a replacement (see providers.KBEntry.ExtraLabels). Mirrors
+// github.Client's helper of the same name; always returns a fresh slice since
+// lifecycleLabels is a shared package var.
+func prLabels(e providers.KBEntry) []string {
+	return append(append([]string{}, lifecycleLabels...), e.ExtraLabels...)
+}
+
 // New builds a client. baseURL is the GitLab INSTANCE root (empty defaults to
 // gitlab.com); projectPath is the project's namespace path ("group/project",
 // or a nested "group/subgroup/project") — NOT URL-encoded here, encoding
@@ -271,12 +279,30 @@ func (c *Client) OpenPR(ctx context.Context, e providers.KBEntry) (providers.Ref
 		"target_branch": c.baseBranch,
 		"title":         "KB: " + e.Title,
 		"description":   c.mrBody(e),
-		"labels":        strings.Join(lifecycleLabels, ","),
+		"labels":        strings.Join(prLabels(e), ","),
 	}
 	if err := c.do(ctx, http.MethodPost, fmt.Sprintf("/projects/%s/merge_requests", c.projectSeg()), mrBody, &out); err != nil {
 		return providers.Ref{}, err
 	}
 	return providers.Ref{URL: out.WebURL}, nil
+}
+
+// IsPROpen reports whether the merge request with this iid is currently OPEN
+// (GitLab state "opened"; "closed", "merged" and "locked" all report false).
+// Mirrors github.Client.IsPROpen's name and (bool, error) shape — both satisfy
+// thread.Forge, which uses this to refuse to comment onto a merged KB pull/merge
+// request (a comment there is never indexed by the catalog, silently losing the
+// knowledge). Unlike GitHub's version this hits the MERGE REQUEST endpoint
+// directly rather than probing and falling back: see the package doc on
+// isNotFound for why a number-based kind guess is unsafe on GitLab.
+func (c *Client) IsPROpen(ctx context.Context, number int) (bool, error) {
+	var out struct {
+		State string `json:"state"` // "opened" | "closed" | "merged" | "locked"
+	}
+	if err := c.do(ctx, http.MethodGet, fmt.Sprintf("/projects/%s/merge_requests/%d", c.projectSeg(), number), nil, &out); err != nil {
+		return false, err
+	}
+	return out.State == "opened", nil
 }
 
 // rawItem is the common shape of a GitLab merge-request or issue list item —

@@ -150,6 +150,38 @@ func TestOpenPR(t *testing.T) {
 	}
 }
 
+// TestOpenPRAppendsExtraLabels pins that KBEntry.ExtraLabels reaches the MR's
+// labels field APPENDED to the standard lifecycle labels, never in place of
+// them — the mechanism internal/thread.ConceptEntry relies on to mark a
+// standalone operator note so curate's auto-closing passes can exclude it.
+func TestOpenPRAppendsExtraLabels(t *testing.T) {
+	var mrBody map[string]any
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case isBundleRead(r):
+			bundleAbsent(w)
+		case strings.HasSuffix(r.URL.EscapedPath(), "/repository/commits"):
+			_, _ = w.Write([]byte(`{"id":"deadbeef"}`))
+		case strings.HasSuffix(r.URL.EscapedPath(), "/merge_requests"):
+			_ = json.NewDecoder(r.Body).Decode(&mrBody)
+			_, _ = w.Write([]byte(`{"iid":9,"web_url":"https://gitlab.com/o/r/-/merge_requests/9"}`))
+		default:
+			t.Fatalf("unexpected request: %s %s", r.Method, r.URL.EscapedPath())
+		}
+	}))
+	defer srv.Close()
+
+	c := New(srv.URL, "o/r", "main", staticToken("tok"))
+	if _, err := c.OpenPR(context.Background(), providers.KBEntry{
+		Type: "Concept", Title: "Operator note: X", Body: "b", ExtraLabels: []string{"runlore-operator-note"},
+	}); err != nil {
+		t.Fatalf("OpenPR: %v", err)
+	}
+	if labels, _ := mrBody["labels"].(string); labels != "runlore,triggered,runlore-operator-note" {
+		t.Fatalf("labels = %q, want runlore,triggered,runlore-operator-note", labels)
+	}
+}
+
 // TestOpenPRFingerprintMarkerRoundTrips proves the dedup fingerprint survives a
 // round trip through the MR description exactly like the GitHub PR body.
 func TestOpenPRFingerprintMarkerRoundTrips(t *testing.T) {
@@ -566,6 +598,49 @@ func TestNoRetryOn404(t *testing.T) {
 	}
 	if attempts != 1 {
 		t.Fatalf("404 must not be retried, got %d attempts", attempts)
+	}
+}
+
+// TestIsPROpen mirrors github.Client's TestIsPROpen: it must hit the MERGE
+// REQUEST endpoint specifically (never falling back to issues — see the
+// package doc on isNotFound), and report open only for GitLab's "opened"
+// state ("closed", "merged" and "locked" all report false).
+func TestIsPROpen(t *testing.T) {
+	state := "opened"
+	var gotPath string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.EscapedPath()
+		_, _ = fmt.Fprintf(w, `{"iid":7,"state":%q}`, state)
+	}))
+	defer srv.Close()
+	c := New(srv.URL, "o/r", "main", staticToken("tok"))
+
+	open, err := c.IsPROpen(context.Background(), 7)
+	if err != nil || !open {
+		t.Fatalf("IsPROpen(opened) = %v, %v; want true, nil", open, err)
+	}
+	if gotPath != "/api/v4/projects/o%2Fr/merge_requests/7" {
+		t.Fatalf("path = %q, want the scoped merge_requests endpoint", gotPath)
+	}
+
+	for _, s := range []string{"closed", "merged", "locked"} {
+		state = s
+		open, err = c.IsPROpen(context.Background(), 7)
+		if err != nil || open {
+			t.Fatalf("IsPROpen(%s) = %v, %v; want false, nil", s, open, err)
+		}
+	}
+}
+
+func TestIsPROpenPropagatesForgeErrors(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		http.Error(w, `{"message":"404 Not found"}`, http.StatusNotFound)
+	}))
+	defer srv.Close()
+	c := New(srv.URL, "o/r", "main", staticToken("tok"))
+
+	if _, err := c.IsPROpen(context.Background(), 7); err == nil {
+		t.Fatal("IsPROpen must propagate a forge error rather than reporting closed")
 	}
 }
 

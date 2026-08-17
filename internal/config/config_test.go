@@ -1011,3 +1011,64 @@ func TestCommonsDirMustNotNestInsideCatalogDir(t *testing.T) {
 		t.Fatalf("separate roots must validate, got: %v", err)
 	}
 }
+
+// TestValidateThreadCapture guards the opt-in contract of
+// notify.slack.thread_capture: it requires the signing secret (mentions arrive
+// on the exposed POST /slack/events endpoint and must be signature-verified),
+// the bot-token delivery path (bot_token_env + channel) — a webhook returns
+// no message ts, so there is no thread root to attribute a reply to — and
+// outcome.ledger_path, because the thread registry lives beside the ledger.
+// Off (the default) validates clean with none of it.
+func TestValidateThreadCapture(t *testing.T) {
+	base := func() *Config {
+		c := &Config{}
+		c.Notify.Slack = SlackNotify{
+			BotTokenEnv:      "SLACK_BOT_TOKEN",
+			Channel:          "C1",
+			SigningSecretEnv: "SLACK_SIGNING_SECRET",
+			ThreadCapture:    true,
+		}
+		c.Outcome.LedgerPath = "/var/lib/runlore/outcomes.jsonl"
+		return c
+	}
+
+	tests := []struct {
+		name    string
+		mutate  func(*Config)
+		wantErr string
+	}{
+		{"valid", func(*Config) {}, ""},
+		{"off needs nothing", func(c *Config) {
+			c.Notify.Slack = SlackNotify{ThreadCapture: false}
+		}, ""},
+		{"missing signing secret", func(c *Config) {
+			c.Notify.Slack.SigningSecretEnv = ""
+		}, "signing_secret_env"},
+		{"webhook-only delivery", func(c *Config) {
+			c.Notify.Slack.BotTokenEnv = ""
+			c.Notify.Slack.Channel = ""
+			c.Notify.Slack.WebhookURLEnv = "SLACK_WEBHOOK_URL"
+		}, "bot_token_env"},
+		{"bot token without a channel", func(c *Config) {
+			c.Notify.Slack.Channel = ""
+		}, "channel"},
+		{"missing ledger path", func(c *Config) {
+			c.Outcome.LedgerPath = ""
+		}, "ledger_path"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			c := base()
+			tt.mutate(c)
+			err := c.Validate()
+			switch {
+			case tt.wantErr == "" && err != nil:
+				t.Fatalf("Validate() = %v, want nil", err)
+			case tt.wantErr != "" && err == nil:
+				t.Fatalf("Validate() = nil, want an error mentioning %q", tt.wantErr)
+			case tt.wantErr != "" && !strings.Contains(err.Error(), tt.wantErr):
+				t.Fatalf("Validate() = %v, want it to mention %q", err, tt.wantErr)
+			}
+		})
+	}
+}

@@ -551,17 +551,19 @@ func BuildDeps(ctx context.Context, cfg *config.Config, gp providers.GitOpsProvi
 
 // BuildInvestigator returns the LLM ReAct investigator when a model is configured,
 // otherwise the read-only LogInvestigator. It also returns the catalog (nil when
-// no model is configured or no catalog is wired).
-func BuildInvestigator(ctx context.Context, cfg *config.Config, deps *Deps, approvals *action.Approvals, auto *action.Auto, metrics *telemetry.Metrics, ledger *outcome.Ledger, log *slog.Logger) (investigate.Investigator, *catalog.Catalog, error) {
+// no model is configured or no catalog is wired) and the notifier it builds
+// internally (nil on the log-only path), so a caller that needs a handle on the
+// replier — e.g. to wire thread capture — does not have to build a second one.
+func BuildInvestigator(ctx context.Context, cfg *config.Config, deps *Deps, approvals *action.Approvals, auto *action.Auto, metrics *telemetry.Metrics, ledger *outcome.Ledger, threads notify.ThreadSink, log *slog.Logger) (investigate.Investigator, *catalog.Catalog, *notify.Multi, error) {
 	if deps == nil {
 		log.Info("no model configured; using log-only investigator")
-		return investigate.LogInvestigator{Log: log}, nil, nil
+		return investigate.LogInvestigator{Log: log}, nil, nil, nil
 	}
 	model, tools, recall, cat := deps.Model, deps.Tools, deps.Recall, deps.Catalog
 	log.Info("using LLM investigator", "provider", ModelProvider(cfg), "model", cfg.Model.Model, "tools", len(tools))
-	notifier, err := BuildNotifier(cfg, log)
+	notifier, err := BuildNotifier(cfg, threads, log)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
 	log.Info("delivery notifiers", "count", notifier.Len())
 	cur := BuildCurator(cfg, cat, metrics, log)
@@ -653,7 +655,7 @@ func BuildInvestigator(ctx context.Context, cfg *config.Config, deps *Deps, appr
 		OnComplete: func(found providers.Investigation) {
 			onInvestigationComplete(ctx, found, ledger, prior, curOrNil, notifier, auto, approvals, metrics, log)
 		},
-	}, cat, nil
+	}, cat, notifier, nil
 }
 
 // investigationCurator opens a KB issue/PR for an investigation's findings.

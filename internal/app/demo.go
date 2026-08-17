@@ -292,7 +292,7 @@ func runDemoInvestigateWithModel(args []string, out, errOut io.Writer, model pro
 	// It is opt-in because the demo's whole promise is that it touches nothing.
 	// Posting to a webhook is the one thing here that leaves the machine.
 	if *deliver {
-		n, nerr := BuildNotifier(cfg, log)
+		n, nerr := BuildNotifier(cfg, nil, log)
 		if nerr != nil {
 			return fmt.Errorf("build notifiers for --notify: %w", nerr)
 		}

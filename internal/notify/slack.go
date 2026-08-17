@@ -49,6 +49,23 @@ func SlackDeliveryTarget(sl config.SlackNotify) string {
 	return ""
 }
 
+// SlackBotDelivery reports whether Slack delivery resolves to the BOT-token path
+// (chat.postMessage) rather than an incoming webhook. Thread capture requires
+// exactly that path — a webhook returns no message ts, so there is no thread
+// root — and asking here keeps the target vocabulary in one package.
+func SlackBotDelivery(sl config.SlackNotify) bool {
+	return SlackDeliveryTarget(sl) == slackTargetBot
+}
+
+// ThreadSink records the thread root a delivered investigation was posted to.
+// Implemented by *thread.Registry; declared here as an interface so the notifier
+// never imports the thread package and stays ignorant of how the mapping is
+// stored. Nil-safe by contract at every call site: registration is best-effort
+// and must never affect delivery.
+type ThreadSink interface {
+	Register(root, channel string, inv providers.Investigation)
+}
+
 func init() {
 	Register(Descriptor{
 		Name: "slack",
@@ -58,6 +75,9 @@ func init() {
 			case slackTargetBot:
 				b := NewSlackBot(os.Getenv(sl.BotTokenEnv), sl.Channel)
 				b.FeedbackButtons = sl.FeedbackButtons
+				if sl.ThreadCapture {
+					b.Threads = d.Threads
+				}
 				return b, nil
 			case slackTargetWebhook:
 				s := NewSlack(os.Getenv(sl.WebhookURLEnv))
@@ -140,6 +160,10 @@ type SlackBot struct {
 	// FeedbackButtons — see Slack.FeedbackButtons; on the bot path the buttons sit
 	// on the channel summary message, never on the detail thread reply.
 	FeedbackButtons bool
+	// Threads, when set (notify.slack.thread_capture), receives the summary
+	// message's ts so a later reply in that thread can be attributed to this
+	// investigation. Never set from the detail reply — the root is the handle.
+	Threads ThreadSink
 }
 
 // NewSlackBot builds a bot-token Slack notifier posting to channel (ID or name).
@@ -150,6 +174,7 @@ func NewSlackBot(token, channel string) *SlackBot {
 var (
 	_ providers.Notifier         = (*SlackBot)(nil)
 	_ providers.ProgressNotifier = (*SlackBot)(nil)
+	_ providers.ThreadNotifier   = (*SlackBot)(nil)
 )
 
 // Deliver posts the compact summary to the channel, then the full analysis as a
@@ -166,6 +191,11 @@ func (s *SlackBot) Deliver(ctx context.Context, inv providers.Investigation) err
 	ts, err := s.post(ctx, map[string]any{"text": fallbackText(inv), "blocks": summary})
 	if err != nil {
 		return err
+	}
+	// Record the thread root so a reply here can be attributed. Best-effort and
+	// nil-safe: capture is an opt-in extra, delivery is the contract.
+	if s.Threads != nil && ts != "" {
+		s.Threads.Register(ts, s.channel, inv)
 	}
 	detail := detailBlocks(inv)
 	if ts == "" || len(detail) == 0 {
@@ -184,12 +214,26 @@ func (s *SlackBot) DeliverProgress(ctx context.Context, up providers.ProgressUpd
 	return err
 }
 
+// ReplyInThread posts text as a reply in the thread rooted at root
+// (providers.ThreadNotifier). It targets the channel it is given rather than the
+// configured default: a reply can only go where the message it answers was sent.
+func (s *SlackBot) ReplyInThread(ctx context.Context, root, channel, text string) error {
+	msg := map[string]any{"text": text, "thread_ts": root}
+	if channel != "" {
+		msg["channel"] = channel
+	}
+	_, err := s.post(ctx, msg)
+	return err
+}
+
 // post targets the message at the configured channel and sends it via
 // chat.postMessage, surfacing transport and Slack API (ok:false) errors, and
 // returns the posted message's ts — the handle a threaded reply keys on ("" on
 // the empty-body 2xx path). Shared by Deliver and DeliverProgress.
 func (s *SlackBot) post(ctx context.Context, msg map[string]any) (string, error) {
-	msg["channel"] = s.channel
+	if _, ok := msg["channel"]; !ok {
+		msg["channel"] = s.channel
+	}
 	body, err := json.Marshal(msg)
 	if err != nil {
 		return "", err
@@ -918,3 +962,16 @@ func (m *Multi) DeliverProgress(ctx context.Context, up providers.ProgressUpdate
 
 // Len reports how many notifiers are configured.
 func (m *Multi) Len() int { return len(m.notifiers) }
+
+// ThreadReplier returns the first configured notifier that can carry a reply
+// back into a thread, or nil when none can. The wiring needs one concrete
+// replier and Multi is where the built notifiers live; this is the same
+// capability discovery Deliver does for ProgressNotifier, exposed.
+func (m *Multi) ThreadReplier() providers.ThreadNotifier {
+	for _, n := range m.notifiers {
+		if tn, ok := n.(providers.ThreadNotifier); ok {
+			return tn
+		}
+	}
+	return nil
+}

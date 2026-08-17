@@ -821,6 +821,16 @@ type SlackNotify struct {
 	// AND a delivery target (webhook_url_env, or bot_token_env + channel — buttons
 	// render and dispatch on either path); Validate fails loud when any is missing.
 	FeedbackButtons bool `yaml:"feedback_buttons"`
+	// ThreadCapture (opt-in, default off) registers each delivered investigation's
+	// thread root so a later `@runlore note: …` reply in that thread can be
+	// attributed to it and written into the knowledge base. Requires exposing
+	// POST /slack/events to Slack (an Events API Request URL subscribed to
+	// app_mention), signing_secret_env — mentions arrive on that exposed
+	// endpoint and must be signature-verified, same as feedback_buttons above —
+	// AND the bot-token path (bot_token_env + channel): a webhook returns no
+	// message ts, so there is no thread root to attribute a reply to. Validate
+	// fails loud when any is missing.
+	ThreadCapture bool `yaml:"thread_capture"`
 }
 
 // MatrixNotify configures Matrix delivery.
@@ -1493,6 +1503,24 @@ func (c *Config) Validate() error {
 		// but unmounted) is not knowable here; app.SlackFeedbackDeliverable warns for it.
 		if sl := c.Notify.Slack; sl.WebhookURLEnv == "" && (sl.BotTokenEnv == "" || sl.Channel == "") {
 			return fmt.Errorf("notify.slack.feedback_buttons requires a Slack delivery target: set notify.slack.webhook_url_env, or notify.slack.bot_token_env together with notify.slack.channel — with neither the Slack notifier is skipped, so no message is delivered, no buttons render and no feedback can ever be recorded")
+		}
+	}
+	// Thread capture cannot work without the same signature verification as
+	// feedback_buttons (mentions arrive on an exposed HTTP endpoint) or without
+	// the bot-token delivery path: an incoming webhook returns no message ts, so
+	// there is no thread root to attribute a reply to.
+	if sl := c.Notify.Slack; sl.ThreadCapture {
+		if sl.SigningSecretEnv == "" {
+			return fmt.Errorf("notify.slack.thread_capture requires notify.slack.signing_secret_env: mentions arrive on the exposed POST /slack/events endpoint and must be signature-verified")
+		}
+		if sl.BotTokenEnv == "" {
+			return fmt.Errorf("notify.slack.thread_capture requires notify.slack.bot_token_env: an incoming webhook returns no message ts, so there is no thread to attribute a reply to")
+		}
+		if sl.Channel == "" {
+			return fmt.Errorf("notify.slack.thread_capture requires notify.slack.channel (it is required alongside bot_token_env)")
+		}
+		if c.Outcome.LedgerPath == "" {
+			return fmt.Errorf("notify.slack.thread_capture requires outcome.ledger_path: the thread registry lives beside the ledger and must survive a restart and a leader failover, so without a ledger path there is nowhere durable to record which thread belongs to which investigation")
 		}
 	}
 	// Same fail-loud contract for the Matrix reaction listener: without the

@@ -188,7 +188,11 @@ func RunServe(version string, args []string) error {
 	// Built ONCE and shared: a second Deps means a second catalog, hence a second
 	// git-sync goroutine racing the first on the same on-disk checkout.
 	deps := BuildDeps(ctx, cfg, gitops, metrics, ledger, log)
-	inv, cat, err := BuildInvestigator(ctx, cfg, deps, approvals, auto, metrics, ledger, log)
+	threadRegistry, err := BuildThreadRegistry(cfg)
+	if err != nil {
+		return fmt.Errorf("thread registry: %w", err)
+	}
+	inv, cat, notifier, err := BuildInvestigator(ctx, cfg, deps, approvals, auto, metrics, ledger, threadRegistry, log)
 	if err != nil {
 		return fmt.Errorf("build investigator: %w", err)
 	}
@@ -387,6 +391,11 @@ func RunServe(version string, args []string) error {
 		SlackSecret:  slackSigningSecret,
 		WebhookToken: webhookToken,
 		ApproverIDs:  cfg.Notify.Slack.ApproverIDs,
+		// metrics is always non-nil (bound to the global no-op provider when
+		// telemetry is disabled), so this is unconditional — same as cz.Metrics
+		// above — and the dropped-mentions counter is simply a no-op until a real
+		// provider is configured.
+		Metrics: metrics,
 	}
 	if auto != nil {
 		acts.Pauser = auto // avoid a typed-nil interface when auto is disabled
@@ -406,6 +415,14 @@ func RunServe(version string, args []string) error {
 		if SlackFeedbackDeliverable(cfg, log) {
 			log.Info("slack feedback buttons enabled", "endpoint", "/slack/interactions")
 		}
+	}
+	// Opt-in thread capture: wire the handler ONLY when the option is on, the
+	// registry persists, a forge can be reached, and a notifier can reply. A
+	// capture path that took someone's knowledge and said nothing back — or had
+	// nowhere to write it — would be worse than not having one. See
+	// BuildThreadMention for why deliverability is checked before the notifier.
+	if cfg.Notify.Slack.ThreadCapture && threadRegistry.Enabled() {
+		acts.Threads = BuildThreadMention(cfg, threadRegistry, buildForge(cfg, log), notifier, metrics, log)
 	}
 	// /readyz is process + catalog health, NOT leadership (#264): every warm
 	// replica reports Ready (so `helm upgrade --wait` / Flux kstatus succeeds
@@ -433,7 +450,10 @@ func RunServe(version string, args []string) error {
 	}
 	httpSrv := NewHTTPServer(*addr, srv.Handler())
 	// Graceful shutdown: on SIGTERM, stop accepting webhooks, let the in-flight
-	// investigation finish within a bounded grace (lease still held), then release.
+	// investigation AND any detached Slack mention handler (see
+	// server.Server.Drain — handleSlackEvent acks and returns before its work is
+	// done, so httpSrv.Shutdown alone does not wait for it) finish within a
+	// bounded grace (lease still held), then release.
 	drained := make(chan struct{})
 	go func() {
 		defer close(drained)
@@ -441,6 +461,13 @@ func RunServe(version string, args []string) error {
 		log.Info("shutdown: stopping intake; draining in-flight investigation")
 		_ = httpSrv.Shutdown(context.Background())
 		dctx, cancelDrain := context.WithTimeout(context.Background(), drainGracePeriod)
+		// Detached mention handlers first: they are a direct extension of the HTTP
+		// intake httpSrv.Shutdown just stopped, and — unlike the investigation
+		// queue — they do not depend on workCtx/the leader lease, so draining them
+		// has no ordering requirement relative to stopWork() below. Both drains
+		// share dctx's single deadline rather than getting drainGracePeriod each,
+		// so total shutdown time stays bounded the same way it always has.
+		srv.Drain(dctx)
 		queue.Drain(dctx)
 		cancelDrain()
 		stopWork() // release the leader lease + stop the queue/watch/coalescer
