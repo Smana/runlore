@@ -381,10 +381,13 @@ func ConceptEntry(tc Context, n Note, at time.Time, maxBytes int) providers.KBEn
 		}
 	}
 
+	// Derived ONCE, from the same bounded text the body above files, and shared by
+	// both identity fields — see noteClaim and noteClaimSource.
+	claim := noteClaim(n.Text, maxBytes)
 	return providers.KBEntry{
 		Type:        "Concept",
-		Title:       noteEntryTitle(tc, n),
-		Description: conceptDescription(tc, n),
+		Title:       noteEntryTitle(tc, claim),
+		Description: conceptDescription(tc, n, claim),
 		// Narrowed to the one whitespace-free value the merge gate accepts — the
 		// body's Context section above still carries tc.Resource in full. See
 		// providers.EntryResourceRef for what this closes and why it narrows
@@ -421,9 +424,11 @@ func ConceptEntry(tc Context, n Note, at time.Time, maxBytes int) providers.KBEn
 // The finding is not dropped, it is demoted from identity to CONTEXT:
 // conceptDescription names it, and the body's "Thread:" line and Context section
 // carry it in full.
-func noteEntryTitle(tc Context, n Note) string {
-	if claim := noteClaim(n.Text, maxNoteTitle-len(noteTitlePrefix)); claim != "" {
-		return noteTitlePrefix + claim
+// claim is the note's own words, already bounded and defused by noteClaim; the
+// title re-cuts it to its own smaller budget.
+func noteEntryTitle(tc Context, claim string) string {
+	if claim != "" {
+		return noteTitlePrefix + truncateWords(claim, maxNoteTitle-len(noteTitlePrefix))
 	}
 	// Only reachable when the note is empty or is nothing but markup:
 	// Responder.Handle answers an empty "note:" without writing, and freeform
@@ -437,18 +442,75 @@ func noteEntryTitle(tc Context, n Note) string {
 }
 
 // noteClaim renders the note's own leading words as one bounded, single-line
-// claim: redacted and squeezed to one line (noteLine), stripped of the Markdown
-// a chat reply opens with, and cut on a WORD boundary.
+// claim: drawn from at most maxBytes of the message (noteClaimSource), redacted,
+// squeezed and defused (noteLine), stripped of the Markdown a chat reply opens
+// with, and cut on a WORD boundary.
+//
+// It is bounded to maxNoteDescriptionClaim — the largest budget any caller has —
+// and callers needing less re-cut the result, so this runs ONCE per entry rather
+// than once per field. Two calls over a 1 MiB message cost ~1 s and ~86 MB
+// between them; see noteClaimSource for the rest of that story.
 //
 // It returns "" for a note that has no word in it at all — a lone bullet, a row
 // of punctuation. "Operator note: -" is not an identity, and the caller has a
 // better fallback than a title that says nothing.
 func noteClaim(text string, maxBytes int) string {
-	s := stripLeadingMarkup(noteLine(text))
+	s := stripLeadingMarkup(noteLine(noteClaimSource(text, maxBytes)))
 	if !strings.ContainsFunc(s, func(r rune) bool { return unicode.IsLetter(r) || unicode.IsDigit(r) }) {
 		return ""
 	}
-	return truncateWords(s, maxBytes)
+	return truncateWords(s, maxNoteDescriptionClaim)
+}
+
+// noteClaimSource bounds the raw message a claim is drawn from to maxBytes — the
+// operator's own notify.thread.max_note_bytes, the same cap the BODY is filed
+// under.
+//
+// Two reasons, and the second is the one that makes maxBytes the right number
+// rather than merely a small one.
+//
+// Cost. Nothing upstream bounds Note.Text: DefaultMaxNoteBytes is applied inside
+// NoteBody -> noteText -> capNoteText, which is downstream of here, while a
+// Matrix event carries up to 64 KiB and a Slack request body up to 1 MiB. Run
+// unbounded, one claim over a 1 MiB message costs ~500 ms and ~43 MB in
+// redact.Secrets and strings.Fields alone — roughly what the whole entry cost
+// before claims existed — on a path any channel member can trigger. Bounded, the
+// same claim costs ~3.7 ms and ~0.35 MB.
+//
+// Coherence. The title and description must never quote words the entry BODY
+// does not contain, and the body holds maxBytes of the message. Drawing the
+// claim from more text than the body kept would let an entry be titled after a
+// sentence a reviewer cannot find anywhere in it.
+//
+// The trailing partial token is dropped whenever the cut actually bites, and
+// that is a REDACTION guarantee, not tidiness. noteText redacts BEFORE it caps,
+// precisely because redact.Secrets needs a whole token to recognise one — the
+// GitHub rule wants 20+ suffix characters, the JWT rule three segments — so a
+// half-cut secret is one it no longer matches, and the surviving prefix would
+// ship verbatim into a title. Here the cut necessarily comes first (redacting
+// first is the cost this function exists to avoid), so the cut is made harmless
+// instead: a secret can only ever be severed AT the cut, and the severed piece
+// is exactly the last token. Dropping it means no fragment of a secret can reach
+// a claim, whatever maxBytes an operator configures — which a "maxBytes is much
+// larger than the claim budget" argument would NOT give, since config.Validate
+// rejects only a negative one.
+//
+// A message with no whitespace at all in its first maxBytes is one unbroken
+// token — a base64 blob, not a sentence — and yields no claim rather than a
+// possibly-severed one. The title then falls back to naming the finding.
+func noteClaimSource(text string, maxBytes int) string {
+	if maxBytes <= 0 {
+		maxBytes = DefaultMaxNoteBytes
+	}
+	if len(text) <= maxBytes {
+		return text
+	}
+	cut := cutToRuneBoundary(text, maxBytes)
+	i := strings.LastIndexFunc(cut, unicode.IsSpace)
+	if i < 0 {
+		return ""
+	}
+	return cut[:i]
 }
 
 // conceptDescription renders the entry's one-line description.
@@ -477,7 +539,8 @@ func noteClaim(text string, maxBytes int) string {
 //
 // Every part is bounded on its own rather than the whole line truncated at the
 // end, so the provenance clause can never be the part that gets cut.
-func conceptDescription(tc Context, n Note) string {
+// claim is the note's own words, already bounded and defused by noteClaim.
+func conceptDescription(tc Context, n Note, claim string) string {
 	who := truncateWords(noteLine(n.Author), maxNoteAuthor)
 	var b strings.Builder
 	if n.modelDrafted() {
@@ -488,7 +551,7 @@ func conceptDescription(tc Context, n Note) string {
 	if s := truncateWords(noteLine(tc.Title), maxNoteDescriptionContext); s != "" {
 		fmt.Fprintf(&b, ", on the finding %q", s)
 	}
-	if claim := noteClaim(n.Text, maxNoteDescriptionClaim); claim != "" {
+	if claim != "" {
 		fmt.Fprintf(&b, ": %s", claim)
 	} else {
 		b.WriteString(".")
@@ -502,11 +565,55 @@ func conceptDescription(tc Context, n Note) string {
 // spaces, then strings.Fields squeezes the runs they leave behind and trims the
 // ends.
 //
-// One function rather than two composed at each call site, because no caller
-// wants either half alone: a squeezed but unredacted field would put a secret in
-// an entry's title, which outlives the pull request it arrived on (see
-// ConceptEntry).
-func noteLine(s string) string { return strings.Join(strings.Fields(noteField(s)), " ") }
+// One function rather than three composed at each call site, because no caller
+// wants any part alone: a squeezed but unredacted field would put a secret in an
+// entry's title, which outlives the pull request it arrived on (see
+// ConceptEntry), and an undefused one is the hole below.
+//
+// The defusal is what makes this safe to put in FRONTMATTER, and it is the half
+// noteField does not do. A title and a description are not read only out of the
+// YAML: okf.UpdateIndex interpolates both into index.md as `- [%s](%s) — %s`,
+// okf.UpdateLog interpolates the title into log.md, and github.prBody puts the
+// description in the pull-request body — three markdown renderers, none of which
+// defuses anything (prBody applies the image regex alone, and that copy still
+// carries the raw-HTML gap its own comment admits). All three write a PERMANENT,
+// merged repository file.
+//
+// Two concrete failures, both measured before this was added: a note reading
+// `<img src="https://evil.example/px.gif">` put a live tracking pixel into
+// index.md and log.md, firing from every reader's browser; and a note reading
+// `boom](evil)` produced `- [Operator note: boom](evil) ## Incidents](path.md)`,
+// so the index's own link FOR THAT ENTRY pointed at the attacker's URL.
+//
+// It runs BEFORE every caller's truncation, not after, because the defusals
+// EXPAND — up to 3x for neutralizeImages, 2.5x for neutralizeHTML — and each
+// caller then bounds the result to a budget it states. Defusing afterwards would
+// make every one of those budgets a lie by the same factor: maxNoteAuthor and
+// maxNoteDescriptionContext are applied here and never re-cut, and the
+// finding-fallback title in noteEntryTitle is capped once at maxNoteTitle, which
+// is what keeps it inside the merge gate's 120 bytes.
+//
+// The note's own claim is the one field that would survive the wrong order, and
+// only by accident: noteClaim bounds it and noteEntryTitle re-cuts it, so the
+// title comes out short either way while the DESCRIPTION carries the whole
+// expansion. Ordering it here means no field depends on that accident.
+//
+// A cut landing inside an escape ("&lt;" cut to "&l") is cosmetic and cannot
+// re-expose markup: neither defusal's output contains a "<" or a "![" for a
+// later cut to uncover.
+//
+// escapeOKFSections is deliberately NOT applied. It defuses ATX headings, which
+// are a BODY concern: a heading has to start a line, and this is a single line
+// interpolated mid-line into every one of those sinks. Frontmatter is never
+// parsed for OKF sections at all.
+func noteLine(s string) string {
+	return defuseMarkup(strings.Join(strings.Fields(noteField(s)), " "))
+}
+
+// defuseMarkup neutralises the two markup shapes an identity field can smuggle
+// into a renderer: image syntax and raw HTML. It is the pair noteText applies to
+// the note BODY, minus the heading escape — see noteLine for why.
+func defuseMarkup(s string) string { return neutralizeImages(neutralizeHTML(s)) }
 
 // leadingMarkupMarkers are the one-character Markdown markers a chat reply
 // opens a line with. Only a marker followed by a SPACE counts, so "-1 replica"
@@ -523,6 +630,12 @@ const leadingMarkupMarkers = ">-*+"
 // Bounded rather than looped to a fixed point: nesting deeper than a few levels
 // is not something a chat reply does, and a bound is one less way for untrusted
 // text to control how long this runs.
+//
+// So it strips up to four levels, not all of them: "- - - - - - - - the cause"
+// keeps the markers the bound did not reach. That is the deliberate trade and
+// not a case worth chasing — the cost is a slightly uglier title on input nobody
+// writes by accident, while the alternative hands an unbounded loop to text
+// anyone in the channel can send.
 func stripLeadingMarkup(s string) string {
 	s = strings.TrimSpace(s)
 	for range 4 {
@@ -735,8 +848,19 @@ func singleLine(s string) string {
 // is the honest cut. Trailing punctuation left dangling by the cut is dropped so
 // the mark reads as a continuation, not as a comma followed by an ellipsis.
 //
-// Like truncate, the result can exceed n by the ellipsis' 2 extra bytes.
+// Like truncate, the result can exceed n by the ellipsis' 2 extra bytes — but
+// only for a positive n. A budget of zero or less leaves no room even for the
+// mark, so it yields "" rather than a bare "…" that would break the bound this
+// comment states; unlike truncate, which panics outright at n == 0.
+//
+// It assumes valid UTF-8, which every call site guarantees by piping through
+// noteLine (strings.Map replaces each invalid byte with U+FFFD). Called directly
+// on invalid UTF-8 it can emit invalid UTF-8: cutToRuneBoundary walks back over
+// continuation bytes, and a lone continuation byte is not one.
 func truncateWords(s string, n int) string {
+	if n <= 0 {
+		return ""
+	}
 	if len(s) <= n {
 		return s
 	}

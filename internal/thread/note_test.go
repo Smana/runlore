@@ -883,7 +883,13 @@ func TestConceptEntryIsTitledAfterTheNoteNotTheFinding(t *testing.T) {
 	}
 	// The finding's own distinctive words must not be the entry's identity. They
 	// are still carried as CONTEXT, in the description and the body.
-	if strings.Contains(e.Title, "OutOfSync") {
+	//
+	// "Core Argo CD" comes from the START of the finding title, deliberately, not
+	// "OutOfSync" from its end: the old code cut the title at 90 bytes and lost
+	// "OutOfSync" anyway, so a guard naming the tail passes against the very code
+	// this test exists to reject. Only a word the broken title really carried
+	// discriminates between fixed and unfixed.
+	if strings.Contains(e.Title, "Core Argo CD") {
 		t.Errorf("the title is still the finding's headline, which is what the note contradicts: %q", e.Title)
 	}
 	if !strings.Contains(e.Description, "OutOfSync") || !strings.Contains(e.Body, "OutOfSync") {
@@ -1054,5 +1060,94 @@ func TestTruncateWordsCutsOnAWordBoundary(t *testing.T) {
 				t.Errorf("truncateWords(%q, %d) = %q is %d bytes, over the documented n+2 worst case", tt.s, tt.n, got, len(got))
 			}
 		})
+	}
+}
+
+// TestNoteClaimIsDrawnOnlyFromTheTextTheBodyFiles pins the bound on the claim's
+// INPUT. Nothing upstream caps Note.Text — DefaultMaxNoteBytes is applied inside
+// NoteBody, downstream of the claim — while a Matrix event carries up to 64 KiB
+// and a Slack body up to 1 MiB.
+//
+// The assertion is the COHERENCE one rather than a timing one, because it is the
+// property a reader can check: an entry must never be titled after words its own
+// body does not contain.
+func TestNoteClaimIsDrawnOnlyFromTheTextTheBodyFiles(t *testing.T) {
+	// The cap must be SMALLER than maxNoteDescriptionClaim, or the fixture proves
+	// nothing: with a cap of 300 the claim's own 200-byte budget stops short of
+	// the sentinel anyway, and an entirely unbounded claim passes the test.
+	const maxBytes = 60
+	if maxBytes >= maxNoteDescriptionClaim {
+		t.Fatalf("fixture is inert: a cap of %d is past the claim's own %d-byte budget", maxBytes, maxNoteDescriptionClaim)
+	}
+	// "beyond" sits past the cap but well inside the claim's budget.
+	note := "opening words " + strings.Repeat("x ", 30) + "beyond-the-cap-sentinel"
+	if len(note) <= maxBytes {
+		t.Fatalf("fixture is inert: the note is %d bytes, inside the %d-byte cap", len(note), maxBytes)
+	}
+	e := ConceptEntry(Context{Title: "OOM"}, HumanNote("alice", note), noteAt, maxBytes)
+
+	for name, field := range map[string]string{"title": e.Title, "description": e.Description, "body": e.Body} {
+		if strings.Contains(field, "beyond-the-cap-sentinel") {
+			t.Errorf("%s quotes text from past the note cap, which the body never filed: %q", name, field)
+		}
+	}
+	if !strings.Contains(e.Title, "opening words") {
+		t.Errorf("the claim must still come from the start of the note: %q", e.Title)
+	}
+}
+
+// TestNoteClaimCannotLeakASecretSeveredByItsOwnCut is the redaction half of that
+// bound, and the reason noteClaimSource drops the trailing partial token.
+//
+// noteText redacts BEFORE it caps, because redact.Secrets needs a whole token to
+// match one. The claim path cuts FIRST (redacting a 1 MiB message is the cost the
+// cut exists to avoid), so a secret straddling the cut would be handed to
+// redaction already severed — unrecognised, and its surviving prefix would ship
+// verbatim into a title that outlives the pull request.
+//
+// The cap here is small on purpose. It makes the cut land inside the secret with
+// the claim budget still spanning it, which is exactly the case a "maxBytes is
+// far larger than the claim" argument would wave away — config.Validate rejects
+// only a NEGATIVE max_note_bytes, so nothing stops an operator configuring this.
+func TestNoteClaimCannotLeakASecretSeveredByItsOwnCut(t *testing.T) {
+	const secret = "ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZ012345"
+	const maxBytes = 120
+	// Pad so the cut falls 12 bytes into the secret, leaving a long prefix.
+	lead := "note " + strings.Repeat(" ", maxBytes-12-len("note "))
+	note := lead + secret
+	severed := secret[:12]
+
+	if len(lead) >= maxBytes || len(note) <= maxBytes {
+		t.Fatalf("fixture is inert: the cut at %d does not fall inside the secret (lead=%d, note=%d)", maxBytes, len(lead), len(note))
+	}
+	e := ConceptEntry(Context{Title: "OOM"}, HumanNote("alice", note), noteAt, maxBytes)
+
+	for name, field := range map[string]string{"title": e.Title, "description": e.Description} {
+		if strings.Contains(field, severed) {
+			t.Errorf("%s carries %q, a fragment of a secret that the claim's own cut severed past recognition: %q", name, severed, field)
+		}
+	}
+}
+
+// TestNoteClaimYieldsNothingForOneUnbrokenToken covers what dropping the partial
+// token costs: a message with no whitespace at all inside the cap is one token —
+// a base64 blob, not a sentence — and there is no safe piece of it to keep.
+func TestNoteClaimYieldsNothingForOneUnbrokenToken(t *testing.T) {
+	e := ConceptEntry(Context{Title: "OOM in payments"}, HumanNote("alice", strings.Repeat("a", 500)), noteAt, 100)
+	if want := "Operator note on OOM in payments"; e.Title != want {
+		t.Errorf("Title = %q, want the finding fallback %q", e.Title, want)
+	}
+}
+
+// TestTruncateWordsHoldsItsBoundAtAZeroBudget pins the edge its doc comment
+// states. It used to return a bare "…" — 3 bytes for a 0-byte budget, breaking
+// the "n+2 worst case" the comment promises. Unreachable today (every budget is
+// a positive constant), which is exactly why it needs a test rather than a
+// reader's attention.
+func TestTruncateWordsHoldsItsBoundAtAZeroBudget(t *testing.T) {
+	for _, n := range []int{0, -1, -100} {
+		if got := truncateWords("the cause was a spot reclaim", n); got != "" {
+			t.Errorf("truncateWords(_, %d) = %q, want %q", n, got, "")
+		}
 	}
 }

@@ -89,15 +89,31 @@ func (w Workload) Ref() string {
 // against and is a real object, so keeping it preserves the index. Nothing is
 // lost — the full list still reaches the entry BODY verbatim.
 //
-// Whitespace-free input is returned unchanged, so this is a no-op for every ref a
-// well-formed Workload produces: a Kubernetes object name cannot contain a space.
-// It deliberately does NOT split a comma-joined list that carries no whitespace
-// ("a,b,c"): that value clears the gate today, and quietly rewriting what a merged
-// entry is indexed under is a bigger change than closing the gate defect.
+// Whitespace-free input is returned EXACTLY as given — the single-field early
+// return below exists for that promise alone. It is what lets every caller say
+// that no entry which merges today is written differently, and it is why the
+// punctuation trim is guarded rather than unconditional: an unguarded trim also
+// rewrites "argocd/app," and "a;b;", which are whitespace-free, clear the gate
+// today, and are none of this function's business.
+//
+// So it deliberately does NOT split a comma-joined list that carries no
+// whitespace ("a,b,c"): that value merges today, and quietly rewriting what an
+// existing entry is indexed under is a bigger change than closing a gate defect.
+//
+// KNOWN CONSEQUENCE: two different multi-object findings that happen to lead with
+// the same object now write the SAME `resource`, while curator.DupFingerprint
+// keeps them distinct (it hashes the full, un-narrowed Ref()). So the frontmatter
+// index can collide where the dedup identity does not — a new class, and stated
+// here rather than left to be discovered. It is strictly better than what it
+// replaces, where neither entry could be merged at all, and the entry body still
+// distinguishes them for a reader.
 func EntryResourceRef(ref string) string {
 	fields := strings.Fields(ref)
 	if len(fields) == 0 {
 		return ""
+	}
+	if len(fields) == 1 {
+		return fields[0]
 	}
 	// Trailing list punctuation is what the split left behind ("argocd/essentials,"),
 	// not part of the name; a trailing "/" would leave a ref with an empty name half.

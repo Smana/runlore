@@ -287,6 +287,14 @@ func TestEntryResourceRefNarrowsToTheMergeGatesShape(t *testing.T) {
 		{"empty stays empty", "", ""},
 		{"whitespace-only yields empty rather than a blank resource", "   \t ", ""},
 		{"a comma-joined list WITHOUT whitespace clears the gate already and is left alone", "argocd/a,b,c", "argocd/a,b,c"},
+		// The "whitespace-free input is returned exactly as given" promise is what
+		// lets every caller say no entry that merges today is written differently,
+		// so it has to hold for input the punctuation trim would otherwise rewrite.
+		// These three end IN that trim's cutset, which the case above does not —
+		// and an unguarded TrimRight silently changed all three.
+		{"a trailing comma is left alone when there was nothing to split", "argocd/a,b,c,", "argocd/a,b,c,"},
+		{"a trailing semicolon likewise", "a;b;", "a;b;"},
+		{"a trailing slash likewise", "argocd/app/", "argocd/app/"},
 		{"surrounding whitespace is trimmed", "  tooling/harbor  ", "tooling/harbor"},
 		{"a tab separator counts as whitespace too", "tooling/harbor\tregistry", "tooling/harbor"},
 		{"a dangling slash would leave an empty name half", "tooling/ harbor", "tooling"},
