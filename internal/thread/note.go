@@ -430,35 +430,25 @@ func noteEntryTitle(tc Context, n Note) string {
 	// files nothing for an empty draft. Naming the finding still beats a bare
 	// "Operator note", and "on" reads as ABOUT the finding rather than as a claim
 	// the note makes about it.
-	if s := collapseSpaces(noteField(tc.Title)); s != "" {
+	if s := noteLine(tc.Title); s != "" {
 		return truncateWords("Operator note on "+s, maxNoteTitle)
 	}
 	return "Operator note"
 }
 
 // noteClaim renders the note's own leading words as one bounded, single-line
-// claim: redacted and flattened (noteField), squeezed, stripped of the Markdown
+// claim: redacted and squeezed to one line (noteLine), stripped of the Markdown
 // a chat reply opens with, and cut on a WORD boundary.
 //
 // It returns "" for a note that has no word in it at all — a lone bullet, a row
 // of punctuation. "Operator note: -" is not an identity, and the caller has a
 // better fallback than a title that says nothing.
 func noteClaim(text string, maxBytes int) string {
-	s := stripLeadingMarkup(collapseSpaces(noteField(text)))
-	if !hasWordRune(s) {
+	s := stripLeadingMarkup(noteLine(text))
+	if !strings.ContainsFunc(s, func(r rune) bool { return unicode.IsLetter(r) || unicode.IsDigit(r) }) {
 		return ""
 	}
 	return truncateWords(s, maxBytes)
-}
-
-// hasWordRune reports whether s carries anything a reader would call a word.
-func hasWordRune(s string) bool {
-	for _, r := range s {
-		if unicode.IsLetter(r) || unicode.IsDigit(r) {
-			return true
-		}
-	}
-	return false
 }
 
 // conceptDescription renders the entry's one-line description.
@@ -488,14 +478,14 @@ func hasWordRune(s string) bool {
 // Every part is bounded on its own rather than the whole line truncated at the
 // end, so the provenance clause can never be the part that gets cut.
 func conceptDescription(tc Context, n Note) string {
+	who := truncateWords(noteLine(n.Author), maxNoteAuthor)
 	var b strings.Builder
-	who := truncateWords(collapseSpaces(noteField(n.Author)), maxNoteAuthor)
 	if n.modelDrafted() {
 		fmt.Fprintf(&b, "Note drafted by RunLore from @%s's %s thread message, pending review", who, transportName(tc.Transport))
 	} else {
 		fmt.Fprintf(&b, "Operator knowledge from @%s via %s", who, transportName(tc.Transport))
 	}
-	if s := truncateWords(collapseSpaces(noteField(tc.Title)), maxNoteDescriptionContext); s != "" {
+	if s := truncateWords(noteLine(tc.Title), maxNoteDescriptionContext); s != "" {
 		fmt.Fprintf(&b, ", on the finding %q", s)
 	}
 	if claim := noteClaim(n.Text, maxNoteDescriptionClaim); claim != "" {
@@ -506,11 +496,17 @@ func conceptDescription(tc Context, n Note) string {
 	return b.String()
 }
 
-// collapseSpaces squeezes every run of whitespace to a single space and trims
-// the ends — the shape a one-line YAML title or description needs. noteField
-// already maps line breaks (and the control/format runes that render as one) to
-// spaces; this removes the runs they leave behind.
-func collapseSpaces(s string) string { return strings.Join(strings.Fields(s), " ") }
+// noteLine prepares one identity field — an author, an alert-derived title, the
+// note text — for a single-line YAML title or description: noteField redacts it
+// and maps line breaks (and the control/format runes that render as one) to
+// spaces, then strings.Fields squeezes the runs they leave behind and trims the
+// ends.
+//
+// One function rather than two composed at each call site, because no caller
+// wants either half alone: a squeezed but unredacted field would put a secret in
+// an entry's title, which outlives the pull request it arrived on (see
+// ConceptEntry).
+func noteLine(s string) string { return strings.Join(strings.Fields(noteField(s)), " ") }
 
 // leadingMarkupMarkers are the one-character Markdown markers a chat reply
 // opens a line with. Only a marker followed by a SPACE counts, so "-1 replica"
