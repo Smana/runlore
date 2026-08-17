@@ -409,9 +409,25 @@ type Investigation struct {
 	RateLimit                 RateLimit `yaml:"rate_limit"`
 	MaxSteps                  int       `yaml:"max_steps"`                    // 0 ⇒ loop default (20)
 	MaxToolOutputBytes        int       `yaml:"max_tool_output_bytes"`        // unset/0 ⇒ bounded default (32768); -1 ⇒ unlimited
-	MaxTokensPerInvestigation int       `yaml:"max_tokens_per_investigation"` // unset/0 ⇒ bounded default (100000); -1 ⇒ unlimited
+	MaxTokensPerInvestigation int       `yaml:"max_tokens_per_investigation"` // CUMULATIVE token ceiling for one investigation, and a quarter of it bounds any single request; unset/0 ⇒ bounded default (400000); -1 ⇒ unlimited
 	Timeout                   Duration  `yaml:"timeout"`                      // per-investigation deadline; 0 ⇒ default (10m) via ApplyDefaults
 	ToolTimeout               Duration  `yaml:"tool_timeout"`                 // per-TOOL-call timeout so one hung tool can't eat the budget; 0 ⇒ default (60s) at construction
+
+	// MaxCostPerInvestigation caps one investigation's ESTIMATED spend in USD, priced
+	// from model.pricing (and model.verify.pricing for the verify pass). It feeds the
+	// same nudge-then-hard-stop ladder as the token ceiling.
+	//
+	// OPT-IN, with no default and no -1 opt-out — deliberately unlike the token key
+	// above. A token is provider-neutral, so 400000 means the same thing on every
+	// deployment and can be chosen on an operator's behalf. A dollar cannot: a
+	// self-hosted operator picks their own model and supplies their own rates, so any
+	// shipped USD figure would be generous for one deployment and punitive for the
+	// next. 0 already means "no ceiling", which leaves -1 nothing to express; a
+	// negative value is rejected by Validate rather than quietly read as an opt-out.
+	//
+	// INERT without model.pricing — no cost is computed, so nothing can be compared.
+	// app.CostCeilingWithoutPricingWarning says so at startup.
+	MaxCostPerInvestigation float64 `yaml:"max_cost_per_investigation"` // unset/0 ⇒ no cost ceiling
 
 	// RecurrenceCooldown (opt-in, 0 = off) suppresses re-investigating a trigger
 	// whose previous investigation completed less than this long ago, provided some
@@ -1318,6 +1334,14 @@ func (c *Config) Validate() error {
 		if err := validatePricing("model.verify.pricing", v.Pricing); err != nil {
 			return err
 		}
+	}
+	// Reject a negative cost ceiling. The sibling max_tokens_per_investigation teaches
+	// operators that -1 means "unlimited", so the idiom WILL be copied here — where 0
+	// already means no ceiling and a negative value would read as an explicit opt-out
+	// while being indistinguishable from one only by accident. Say what to write.
+	if mc := c.Investigation.MaxCostPerInvestigation; mc < 0 {
+		return fmt.Errorf("investigation.max_cost_per_investigation must be >= 0, got %g "+
+			"(unlike max_tokens_per_investigation there is no -1 opt-out: 0 or unset already means no cost ceiling)", mc)
 	}
 	// Reject a negative rate-limit budget: ApplyDefaults fills an unset nil with 30,
 	// so only an explicit negative reaches here — fail loud rather than silently

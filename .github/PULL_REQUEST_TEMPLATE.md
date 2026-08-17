@@ -27,3 +27,7 @@ Thanks for contributing to RunLore! Keep the change small and focused
 - [ ] Test added first (TDD) — the failing test came before the implementation
 - [ ] Docs updated (README / `docs/`) if behavior or config changed
 - [ ] Respects **read-only-first**: no new cluster writes; the only writes are to Git via reviewed PRs
+- [ ] If this changes what an existing config key **means**: the PR **title** carries `!`
+      (`fix(scope)!: …`) and the squash body carries a `BREAKING CHANGE:` footer with the migration
+      note — that footer is the only thing that reaches `CHANGELOG.md` besides the subject line
+      (see [Releasing](../CONTRIBUTING.md#releasing))

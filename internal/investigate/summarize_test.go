@@ -67,12 +67,17 @@ func summarizeLoop(t *testing.T, sm providers.ModelProvider, m *telemetry.Metric
 	}})
 	got := new(providers.Investigation)
 	li := &LoopInvestigator{
-		Model:                     &scriptModel{responses: resp},
-		VerifyModel:               sm,
-		Tools:                     []Tool{bigTool{size: 4000}},
-		Log:                       slog.New(slog.NewTextHandler(io.Discard, nil)),
-		MaxSteps:                  10,
-		MaxTokensPerInvestigation: 6000,
+		Model:       &scriptModel{responses: resp},
+		VerifyModel: sm,
+		Tools:       []Tool{bigTool{size: 4000}},
+		Log:         slog.New(slog.NewTextHandler(io.Discard, nil)),
+		MaxSteps:    10,
+		// The run budget whose derived PER-REQUEST bound is 6000, and whose compaction
+		// trigger is therefore 4200 — the two thresholds this fixture was authored
+		// against, back when one number served as both. Stated as the run budget it
+		// always meant, the digest calls have a whole investigation's budget to fit
+		// inside rather than one request's.
+		MaxTokensPerInvestigation: 24000,
 		Compaction:                "summarize",
 		ModelProvider:             "anthropic",
 		Metrics:                   m,
@@ -215,6 +220,20 @@ func TestSummarizeBudgetAccountingAndOnePerEvent(t *testing.T) {
 
 	// A distinctive input-token count so we can see it land in the counter. The main
 	// scriptModel reports zero usage, so any nonzero model_input_tokens is the summarizer's.
+	//
+	// It must also FIT the loop's budget: the digest call's tokens count against the
+	// run's ceiling like any other model call, so a fixture that overruns it hard-stops
+	// before reaching submit_findings and fails this test's premise rather than its
+	// assertions.
+	//
+	// This figure was lowered twice while the ceiling was cumulative but the per-request
+	// check and mid-loop compaction still read off the same number: 4242 became 1234,
+	// then 303, because each digest had to fit under what was nominally a whole
+	// investigation's budget minus a pending request. Both reductions were symptoms, not
+	// fixture noise — the squeeze that shrank them is exactly the one that made mid-loop
+	// compaction unreachable (see requestBudgetFraction). With the per-request bound
+	// derived separately, summarizeLoop states a run budget of 24000 whose request bound
+	// is the 6000 it always meant, and the original 4242 fits again.
 	const summTokens = 4242
 	sm := &fakeSummarizer{resp: providers.CompletionResponse{
 		Text:  digestSentinel,

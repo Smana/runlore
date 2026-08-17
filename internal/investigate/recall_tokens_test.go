@@ -57,8 +57,8 @@ func meteredInstruments(t *testing.T) (*telemetry.Metrics, func(series string) (
 // recall ACTUALLY spent, not to the configured budget ceiling.
 //
 // The regression it guards: the counter used to record MaxTokensPerInvestigation (the
-// ceiling — 100k by default, ~7x a real investigation's observed spend) and never
-// subtracted the recall's own model calls, so the series asserted a saving nobody
+// ceiling — 400k by default, many times a real investigation's observed spend) and
+// never subtracted the recall's own model calls, so the series asserted a saving nobody
 // measured. Both cases below configure a 100_000 ceiling precisely so a metric that
 // still reads the ceiling cannot pass.
 //

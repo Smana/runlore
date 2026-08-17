@@ -1516,12 +1516,14 @@ func TestBudgetNudgeForcesSubmitFindings(t *testing.T) {
 		MaxSteps:   10,
 		OnComplete: func(inv providers.Investigation) { got = &inv },
 	}
-	// Budget = exactly the step-0 estimate (overBudget is a strict >), so step 0 is
-	// unforced and step 1 — grown by the assistant turn and the tool result — trips
-	// the nudge.
+	// PER-REQUEST budget = exactly the step-0 estimate (overBudget is a strict >), so
+	// step 0 is unforced and step 1 — grown by the assistant turn and the tool result —
+	// trips the nudge. The configured ceiling is four times that, because the arm this
+	// fixture exercises compares against requestBudget (a quarter of the run's budget),
+	// not against the run's budget itself; x4 keeps the threshold it was written for.
 	req := Request{Title: "budget-forcing"}
 	seed := []providers.Message{{Role: "user", Content: redact.Secrets(seedPrompt(req, seedContext{}))}}
-	li.MaxTokensPerInvestigation = estimateTokens(li.system(), seed, []providers.ToolSpec{submitFindingsSpec()})
+	li.MaxTokensPerInvestigation = 4 * estimateTokens(li.system(), seed, []providers.ToolSpec{submitFindingsSpec()})
 	if err := li.Investigate(context.Background(), req); err != nil {
 		t.Fatalf("Investigate: %v", err)
 	}
@@ -1711,11 +1713,14 @@ func TestCompactionLetsInvestigationFinish(t *testing.T) {
 
 	var got *providers.Investigation
 	li := &LoopInvestigator{
-		Model:                     &scriptModel{responses: resp},
-		Tools:                     []Tool{bigTool{size: 4000}},
-		Log:                       slog.New(slog.NewTextHandler(io.Discard, nil)),
-		MaxSteps:                  10,
-		MaxTokensPerInvestigation: 6000, // low: without compaction, 6 x ~1000-token outputs hard-kill
+		Model:    &scriptModel{responses: resp},
+		Tools:    []Tool{bigTool{size: 4000}},
+		Log:      slog.New(slog.NewTextHandler(io.Discard, nil)),
+		MaxSteps: 10,
+		// Low: without compaction, 6 x ~1000-token outputs hard-kill. Expressed as the
+		// run budget whose derived PER-REQUEST bound is 6000 — the threshold this fixture
+		// was written against, back when one number served as both.
+		MaxTokensPerInvestigation: 24000,
 		OnComplete:                func(inv providers.Investigation) { got = &inv },
 	}
 	if err := li.Investigate(context.Background(), Request{Title: "compaction finish test"}); err != nil {
@@ -1908,31 +1913,33 @@ func TestTryRecallDisabledUnderAuto(t *testing.T) {
 
 // TestEnforceBudgetNudgeThenHardKill unit-tests the extracted enforceBudget helper
 // directly across its two over-budget outcomes on a fixed message set: the first call
-// (nudge not yet fired) appends the budget nudge, flips budgetNudged, sets the sticky
-// toolChoice, and reports done==false; the second (nudge already fired, still over)
+// (ladder not yet engaged) appends the budget nudge, latches budgetStop, sets the
+// sticky toolChoice, and reports done==false; the second (already engaged, still over)
 // hard-kills — delivering once, setting result, and reporting done==true.
 func TestEnforceBudgetNudgeThenHardKill(t *testing.T) {
 	discard := slog.New(slog.NewTextHandler(io.Discard, nil))
 	li := &LoopInvestigator{
 		Log:                       discard,
-		MaxTokensPerInvestigation: 1, // any real prompt exceeds this ⇒ always over budget
+		MaxTokensPerInvestigation: 4, // per-request bound 1 ⇒ any real prompt is over budget
 	}
 	sys := li.system()
 	specs := []providers.ToolSpec{submitFindingsSpec()}
 	messages := []providers.Message{{Role: "user", Content: "seed"}}
 	var calib tokenCalibration
-	budgetNudged, compactionLogged := false, false
+	budgetStop := ""
+	compactionLogged := false
 	toolChoice := ""
 	result := "unresolved"
 	delivered := 0
 	finish := func(providers.Investigation) { delivered++ }
 
 	// First over-budget call: nudge fires, no delivery.
-	if done := li.enforceBudget(context.Background(), Request{Title: "x"}, sys, specs, &calib, &messages, &budgetNudged, &compactionLogged, &toolChoice, &result, finish); done {
+	if done := li.enforceBudget(context.Background(), Request{Title: "x"}, sys, specs, &calib, &providers.UsageTotals{}, &providers.UsageTotals{}, &messages, &budgetStop, &compactionLogged, &toolChoice, &result, finish); done {
 		t.Fatal("first over-budget call must nudge (done==false), not hard-kill")
 	}
-	if !budgetNudged {
-		t.Fatal("first over-budget call must set budgetNudged")
+	if budgetStop != budgetReasonRequestTokens {
+		t.Fatalf("first over-budget call must latch the ceiling that engaged the ladder; got %q, want %q",
+			budgetStop, budgetReasonRequestTokens)
 	}
 	if toolChoice != submitFindingsName {
 		t.Fatalf("nudge must make toolChoice sticky-force %q, got %q", submitFindingsName, toolChoice)
@@ -1945,7 +1952,7 @@ func TestEnforceBudgetNudgeThenHardKill(t *testing.T) {
 	}
 
 	// Second over-budget call: hard-kill, exactly one delivery.
-	if done := li.enforceBudget(context.Background(), Request{Title: "x", Fingerprint: "fp-kill"}, sys, specs, &calib, &messages, &budgetNudged, &compactionLogged, &toolChoice, &result, finish); !done {
+	if done := li.enforceBudget(context.Background(), Request{Title: "x", Fingerprint: "fp-kill"}, sys, specs, &calib, &providers.UsageTotals{}, &providers.UsageTotals{}, &messages, &budgetStop, &compactionLogged, &toolChoice, &result, finish); !done {
 		t.Fatal("second over-budget call must hard-kill (done==true)")
 	}
 	if result != "budget_exceeded" {

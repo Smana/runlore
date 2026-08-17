@@ -4,6 +4,7 @@ package app
 
 import (
 	"fmt"
+	"strings"
 
 	"github.com/Smana/runlore/internal/config"
 	"github.com/Smana/runlore/internal/source"
@@ -231,4 +232,103 @@ func GitopsEngine(cfg *config.Config) string {
 		return "argocd"
 	}
 	return "flux"
+}
+
+// CostCeilingWithoutPricingWarning decides the startup warning for a cost ceiling
+// that cannot fire, returning "" when no warning is warranted.
+//
+// investigation.max_cost_per_investigation is compared against the investigation's
+// running estimated spend, and that estimate exists only when model.pricing supplies
+// token rates: aggregateUsage sets UsageTotals.Priced (and a CostUSD worth reading)
+// off cfg.Model.Pricing alone. So a ceiling configured without pricing is not a
+// stricter limit that rarely fires — it is structurally incapable of firing, for
+// every investigation, forever. An operator who wrote a dollar figure into their
+// config has stated an intent to cap spend; leaving that intent silently inert is the
+// exact "a limit that is neither enforced nor signalled" shape this warning exists to
+// break. It stays a warning rather than a hard failure because the rest of the
+// deployment is perfectly valid: unpriced token accounting is a supported mode, and
+// refusing to start would punish a config that is merely incomplete.
+//
+// Three dead-or-lying configurations, three messages, because the fix differs:
+//
+//   - No model.pricing at all — nothing is priced, so add the rates.
+//   - model.pricing present but every rate 0 — cost is computed and is always exactly
+//     $0.00, which is under any positive ceiling. This one is more dangerous than the
+//     first: the finding footer prints "~$0.00" and the investigation_cost_usd
+//     metric reports zero, so the deployment LOOKS instrumented for cost. A rate card
+//     of all zeros is a placeholder someone meant to fill in.
+//   - model.pricing present with SOME rate at 0 — the ceiling fires, but late, and by
+//     an amount nothing reveals. Every token class RunLore counts is billed by every
+//     provider it speaks: cost() prices uncached input, cached input and output
+//     separately (internal/investigate/cost.go), and all three clients populate
+//     CachedInputTokens (anthropic CacheReadInputTokens, openai
+//     prompt_tokens_details.cached_tokens, gemini cachedContentTokenCount). So a rate
+//     left at 0 does not mean "this class is free", it means a whole class of real
+//     spend is estimated at $0 — the most commonly forgotten being
+//     cached_input_usd_per_mtok, which on a cache-heavy run understates the input term
+//     several-fold while the footer and the metric report a confident wrong number.
+//     This is the all-zero case's own reasoning applied to a rate card that is merely
+//     incomplete rather than empty.
+//
+// Why warn rather than refuse to price (leaving UsageTotals.Priced false, so the
+// ceiling goes inert): that would trade a ceiling that binds late for no ceiling at
+// all, silently, which is precisely the failure the first two messages exist to
+// announce. An incomplete rate card still yields a real, comparable number — it is
+// just an under-estimate — so the honest move is to keep enforcing it and tell the
+// operator which rate is making it loose. A deployment whose provider genuinely does
+// not bill a class separately can silence the warning by setting that rate to the one
+// it shares (e.g. cached_input_usd_per_mtok = input_usd_per_mtok), which costs it
+// nothing because the corresponding token count is then always 0.
+//
+// model.verify.pricing is deliberately not consulted: it only overrides the verify
+// pass's rates and inherits model.pricing when unset, so it can neither make an
+// unpriced investigation priced nor rescue an all-zero main rate card.
+func CostCeilingWithoutPricingWarning(cfg *config.Config) string {
+	if cfg.Investigation.MaxCostPerInvestigation <= 0 {
+		return ""
+	}
+	const fix = "Set model.pricing (input_usd_per_mtok, output_usd_per_mtok, cached_input_usd_per_mtok) " +
+		"to your provider's rates, or drop the ceiling and bound spend with " +
+		"investigation.max_tokens_per_investigation instead (docs/configuration/configuration.md)"
+	p := cfg.Model.Pricing
+	if p == nil {
+		return fmt.Sprintf("investigation.max_cost_per_investigation is set ($%g) but model.pricing is not "+
+			"configured, so NO cost is ever computed and the ceiling can never fire — this deployment has no "+
+			"spend limit denominated in currency. "+fix, cfg.Investigation.MaxCostPerInvestigation)
+	}
+	if p.InputUSDPerMTok == 0 && p.OutputUSDPerMTok == 0 && p.CachedInputUSDPerMTok == 0 {
+		return fmt.Sprintf("investigation.max_cost_per_investigation is set ($%g) but every model.pricing rate "+
+			"is 0, so every investigation costs exactly $0.00 and the ceiling can never fire — while the "+
+			"notification footer and runlore_investigation_cost_usd both report a cost, making the deployment "+
+			"look instrumented for spend when it is not. "+fix, cfg.Investigation.MaxCostPerInvestigation)
+	}
+	if missing := unpricedRates(p); len(missing) > 0 {
+		return fmt.Sprintf("investigation.max_cost_per_investigation is set ($%g) but model.pricing leaves %s "+
+			"at 0, so every token of that kind is estimated at $0.00 — the ceiling still fires, but only after "+
+			"materially more real spend than its number, and the notification footer and "+
+			"runlore_investigation_cost_usd both report the same under-estimate. Every provider RunLore speaks "+
+			"bills all three token classes and reports them separately. "+fix,
+			cfg.Investigation.MaxCostPerInvestigation, strings.Join(missing, " and "))
+	}
+	return ""
+}
+
+// unpricedRates names the model.pricing keys left at 0, in the order they appear in
+// the config, so the warning can list every one rather than sending the operator round
+// the loop once per rate.
+func unpricedRates(p *config.Pricing) []string {
+	var missing []string
+	for _, r := range []struct {
+		key  string
+		rate float64
+	}{
+		{"input_usd_per_mtok", p.InputUSDPerMTok},
+		{"output_usd_per_mtok", p.OutputUSDPerMTok},
+		{"cached_input_usd_per_mtok", p.CachedInputUSDPerMTok},
+	} {
+		if r.rate == 0 {
+			missing = append(missing, r.key)
+		}
+	}
+	return missing
 }

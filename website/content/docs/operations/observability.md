@@ -68,14 +68,35 @@ estimate) keep the SDK defaults and are read as heatmaps, not percentiles.
 |---|---|---|---|
 | `runlore_tool_calls_total` | counter | `tool`, `result` | investigation tool calls (`ok`/`error`) |
 | `runlore_tool_call_duration_seconds` | histogram | `tool` | per-tool latency |
-| `runlore_model_requests_total` | counter | `provider`, `result` | LLM completion requests (`ok`/`error`) |
-| `runlore_model_request_duration_seconds` | histogram | `provider` | LLM completion latency |
+| `runlore_model_requests_total` | counter | `provider`, `result` | LLM requests (`ok`/`error`). `provider` is the wire protocol for the main model, plus the synthetic tiers `rerank` (instant recall's LLM reranker) and `embed` (the `/embeddings` endpoint on the hybrid-recall path) |
+| `runlore_model_request_duration_seconds` | histogram | `provider` | LLM request latency, same `provider` vocabulary |
 | `runlore_investigation_tokens_estimated` | histogram | — | per-investigation token estimate (pre-request `chars/4` heuristic, investigation loop only — excludes the adversarial verify phase). This is what the `RunloreInvestigationCostHigh` alert watches |
 | `runlore_investigation_model_calls` | histogram | `result` | model completions per investigation (loop + verify) |
 | `runlore_investigation_input_tokens` | histogram | `result` | provider-reported input tokens per investigation, including cached (loop + verify) |
 | `runlore_investigation_output_tokens` | histogram | `result` | provider-reported output tokens per investigation (loop + verify) |
 | `runlore_investigation_cached_input_tokens` | histogram | `result` | input tokens served from cache per investigation (loop + verify) |
 | `runlore_investigation_cost_usd` | histogram | `result` | estimated per-investigation cost in USD (only when `model.pricing` is configured) |
+| `runlore_investigation_budget_trips_total` | counter | `reason`, `stage` | spend ceilings crossed during an investigation. `reason` = `tokens_request` (the next request alone exceeded `max_tokens_per_investigation`), `tokens_total` (the run's projected cumulative tokens did), or `cost` (`max_cost_per_investigation`). `stage` = `nudge` (forced to conclude early; findings still delivered) or `kill` (hard-stopped, `result="budget_exceeded"`) |
+
+**One run reports one `reason`.** The ceiling that first engaged the ladder is latched at the nudge
+and carried to the kill, so the two rungs of a single stop always agree. Without that, the nudged
+turn's own spend could push a *second* ceiling over the line and the kill would name that one
+instead — telling you to raise a knob that never stopped anything, and splitting one stop across two
+series in the `sum by (reason)` recipe below.
+
+`budget_trips_total{stage="nudge"}` is the one to alert on. A nudged investigation completes and
+records `result="resolved"` like any other, so it is invisible in every other series — only this
+counter distinguishes "the ceiling is comfortable" from "the ceiling has been silently truncating
+investigations for a week":
+
+```promql
+# share of investigations cut short by a ceiling, whether or not they died
+sum(rate(runlore_investigation_budget_trips_total{stage="nudge"}[1h]))
+  / sum(rate(runlore_investigations_completed_total[1h]))
+
+# which ceiling to raise
+sum by (reason) (rate(runlore_investigation_budget_trips_total[1h]))
+```
 
 The five usage histograms carry the same `result` values as
 `runlore_investigations_completed_total`, so `{result="recall"}` selects exactly the

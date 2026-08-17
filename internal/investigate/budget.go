@@ -8,16 +8,58 @@ import (
 	"github.com/Smana/runlore/internal/providers"
 )
 
-// budgetKillResult synthesises an unresolved investigation for use when the
-// token-budget hard-kill fires (nudge fired, model did not submit findings in time).
-func budgetKillResult(req Request) providers.Investigation {
+// Spend-ceiling reasons. Every ceiling feeds the SAME two-rung ladder (nudge once
+// with a forced submit_findings, then hard-kill with result="budget_exceeded"), so
+// the reason is what tells an operator WHICH ceiling stopped a run — on the metric
+// label, the log line and the delivered unresolved entry.
+const (
+	// budgetReasonRequestTokens: the next request on its own would exceed
+	// requestBudget(MaxTokensPerInvestigation) — a quarter of the run's budget.
+	// Caught before it is sent.
+	budgetReasonRequestTokens = "tokens_request"
+	// budgetReasonTotalTokens: the tokens this investigation has ALREADY spent
+	// (provider-reported, loop + verify) exceed MaxTokensPerInvestigation.
+	budgetReasonTotalTokens = "tokens_total"
+	// budgetReasonCost: the estimated USD this investigation has already spent
+	// exceeds MaxCostPerInvestigation.
+	budgetReasonCost = "cost"
+)
+
+// Ladder rungs, used as the `stage` label on the budget-trip metric: a ceiling is
+// tripped twice before a run dies, and the two are operationally different — a
+// nudge still delivers real findings, a kill delivers an unresolved stub.
+const (
+	budgetStageNudge = "nudge"
+	budgetStageKill  = "kill"
+)
+
+// spentTokens is the running per-investigation token total a ceiling is compared
+// against: provider-reported input (which INCLUDES cached — see providers.Usage)
+// plus output, summed over every model call the investigation has made so far.
+// Same arithmetic as the recall_tokens_spent_total counter, so "tokens spent"
+// means one thing across RunLore.
+func spentTokens(t providers.UsageTotals) int { return t.InputTokens + t.OutputTokens }
+
+// budgetKillResult synthesises an unresolved investigation for use when a spend
+// ceiling's hard-kill fires (nudge fired, model did not submit findings in time).
+// reason names the ceiling so the delivered finding says which limit was hit — an
+// operator reading only the notification should not have to correlate a log line
+// to know whether to raise tokens or dollars.
+func budgetKillResult(req Request, reason string) providers.Investigation {
+	which := "per-request token budget (a quarter of investigation.max_tokens_per_investigation)"
+	switch reason {
+	case budgetReasonTotalTokens:
+		which = "cumulative token budget (investigation.max_tokens_per_investigation)"
+	case budgetReasonCost:
+		which = "estimated cost ceiling (investigation.max_cost_per_investigation)"
+	}
 	return providers.Investigation{
 		Title:       req.Title,
 		Resource:    req.Workload,
 		Fingerprint: req.Fingerprint,
 		Verdict:     providers.VerdictInconclusive,
 		Unresolved: []string{
-			"investigation stopped: token budget exceeded after nudge (model did not submit findings in time)",
+			"investigation stopped: " + which + " exceeded after nudge (model did not submit findings in time)",
 		},
 	}
 }
@@ -136,6 +178,58 @@ func (c *tokenCalibration) heuristicTarget(target int) int {
 
 // overBudget reports whether est exceeds budget. budget <= 0 means unlimited.
 func overBudget(est, budget int) bool { return budget > 0 && est > budget }
+
+// requestBudgetFraction is the share of an investigation's whole token budget that
+// ONE request may take: a ceiling has to fund at least four full-size requests to be
+// a run budget at all.
+//
+// The two quantities need separate thresholds because they are separate failures with
+// separate fixes. "This run has spent too much in total" is answered by raising
+// max_tokens_per_investigation; "this single request is too big" is answered by
+// shrinking a request — max_tool_output_bytes, compaction — and raising the run budget
+// does not help. Comparing one request against the whole run's budget states that a
+// single request may consume the entire investigation, which bounds nothing, and drags
+// mid-loop compaction down with it: compaction triggers at 0.7x whatever bounds one
+// request, so pointed at the cumulative number its trigger sits at 0.7x a figure the
+// run's ACCUMULATED spend reaches first. On a monotonically growing transcript
+// sum(est_i) crosses the ceiling long before any single est_i reaches 0.7 of it, so
+// the ladder always fires first and compaction is unreachable at every configuration.
+//
+// A quarter, rather than an operator-facing knob: this is a structural relationship
+// between two quantities, not a preference. It also derives, rather than duplicates,
+// the bound the per-request check has always used — at the shipped default it is 100
+// 000 tokens with compaction at 70 000, exactly the pair in force before the ceiling
+// became cumulative, so this changes what one request may cost for nobody. The fraction
+// is small enough that a growing transcript reaches the compaction trigger with the run
+// budget still largely unspent: measured at the shipped max_tool_output_bytes,
+// compaction fires on the sixth request with 186 758 of 400 000 tokens spent (the
+// figure TestCompactionFiresBeforeTheCumulativeCeiling drives, and asserts is under the
+// ceiling).
+const requestBudgetFraction = 0.25
+
+// requestBudget converts an investigation's cumulative token budget into the ceiling
+// on ONE request. cumulative <= 0 (unlimited) passes straight through, so an operator
+// who opted out with -1 is not handed a derived bound they never asked for.
+func requestBudget(cumulative int) int {
+	if cumulative <= 0 {
+		return 0
+	}
+	return int(float64(cumulative) * requestBudgetFraction)
+}
+
+// overCostBudget reports whether an investigation's accumulated estimated spend
+// exceeds ceiling, in USD. ceiling <= 0 means no cost ceiling.
+//
+// The Priced guard states the contract rather than relying on a coincidence:
+// CostUSD is 0 both for "this run has cost nothing yet" and for "no model.pricing
+// is configured, so no cost was ever computed", and only the first is a figure that
+// may be compared. aggregateUsage happens to leave the unpriced case at 0 today, so
+// the guard changes no outcome — but a comparison that reads CostUSD without asking
+// whether it means anything is the shape of the bug where an unpriced deployment
+// believes a ceiling is in force.
+func overCostBudget(spent providers.UsageTotals, ceiling float64) bool {
+	return ceiling > 0 && spent.Priced && spent.CostUSD > ceiling
+}
 
 // budgetNudge is the single-use message injected once when the token estimate
 // exceeds MaxTokensPerInvestigation, prompting the model to wrap up now.

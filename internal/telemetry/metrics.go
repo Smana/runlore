@@ -18,12 +18,19 @@ const scope = "github.com/Smana/runlore"
 
 // Metrics is the RunLore instrument set, created once and shared.
 type Metrics struct {
-	AlertsReceived             metric.Int64Counter
-	AlertsCoalesced            metric.Int64Counter
-	AlertsSuppressed           metric.Int64Counter
-	InvestigationsStarted      metric.Int64Counter
-	InvestigationsThrottled    metric.Int64Counter
-	InvestigationsDropped      metric.Int64Counter
+	AlertsReceived          metric.Int64Counter
+	AlertsCoalesced         metric.Int64Counter
+	AlertsSuppressed        metric.Int64Counter
+	InvestigationsStarted   metric.Int64Counter
+	InvestigationsThrottled metric.Int64Counter
+	InvestigationsDropped   metric.Int64Counter
+	// InvestigationBudgetTrips counts spend ceilings crossed DURING an investigation
+	// (label: reason, stage). InvestigationsDropped already counts the kills, but a
+	// bare drop cannot say which ceiling to raise, and it cannot see the rung below —
+	// the nudge, which still delivers findings and so leaves no other trace that the
+	// run was cut short. `reason` distinguishes the ceilings from one another;
+	// `stage` distinguishes nudge (concluded early) from kill (unresolved stub).
+	InvestigationBudgetTrips   metric.Int64Counter
 	InvestigationsCancelled    metric.Int64Counter // queued (not yet started) investigations cancelled because the incident resolved first (cancel_queued_on_resolve)
 	GitOpsFailuresDebounced    metric.Int64Counter // GitOps failures dropped as transient (cleared within the debounce window)
 	IncidentsDebounced         metric.Int64Counter // firing alerts dropped as self-resolving (resolved within the incident debounce window)
@@ -101,7 +108,8 @@ func NewMetrics() *Metrics {
 		AlertsSuppressed:           ctr("alerts_suppressed_total", "incidents dropped by cooldown"),
 		InvestigationsStarted:      ctr("investigations_started_total", "investigations actually begun"),
 		InvestigationsThrottled:    ctr("investigations_throttled_total", "starts requeued by the rate limiter"),
-		InvestigationsDropped:      ctr("investigations_dropped_total", "investigations dropped — rate-limiter max_requeues or token-budget hard-kill"),
+		InvestigationsDropped:      ctr("investigations_dropped_total", "investigations dropped — rate-limiter max_requeues or spend-ceiling hard-kill"),
+		InvestigationBudgetTrips:   ctr("investigation_budget_trips_total", "spend ceilings crossed during an investigation (label: reason=tokens_request|tokens_total|cost, stage=nudge|kill)"),
 		InvestigationsCancelled:    ctr("investigations_cancelled_total", "queued (not yet started) investigations cancelled: the incident resolved before its investigation began (triggers.incidents.cancel_queued_on_resolve)"),
 		GitOpsFailuresDebounced:    ctr("gitops_failures_debounced_total", "GitOps failures dropped as transient: cleared within the debounce window before investigating"),
 		IncidentsDebounced:         ctr("incidents_debounced_total", "firing alerts dropped as self-resolving: a matching resolved webhook arrived within the incident debounce window before investigating"),

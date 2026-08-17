@@ -14,6 +14,11 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/metric/noop"
+
+	"github.com/Smana/runlore/internal/telemetry"
 )
 
 func TestEmbed(t *testing.T) {
@@ -39,6 +44,70 @@ func TestEmbed(t *testing.T) {
 	}
 	if len(vecs) != 2 || vecs[0][0] != 1.0 || vecs[1][1] != 1.0 {
 		t.Fatalf("vectors not placed by index: %v", vecs)
+	}
+}
+
+// TestEmbedRecordsItsSpend closes the fourth spend path that ran inside `serve` with
+// no accounting at all. The /embeddings endpoint is a paid API called once per
+// hybrid-recall query — inside an investigation that believes it has a ceiling — and
+// in bulk on every catalog reload, and nothing counted its calls, its latency or its
+// tokens. A spend path nobody can see is worse than one nobody bounds.
+//
+// It records under provider="embed" on the SAME instruments the main, verify and
+// rerank tiers use, so the traffic is separable by label rather than needing a metric
+// name of its own — the precedent the reranker set.
+func TestEmbedRecordsItsSpend(t *testing.T) {
+	t.Cleanup(func() { otel.SetMeterProvider(noop.NewMeterProvider()) })
+	h, shutdown, err := telemetry.Setup(context.Background())
+	if err != nil {
+		t.Fatalf("telemetry setup: %v", err)
+	}
+	t.Cleanup(func() { _ = shutdown(context.Background()) })
+
+	const promptTokens = 4242
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`{"data":[{"index":0,"embedding":[1.0,0.0]}],` +
+			`"usage":{"prompt_tokens":` + strconv.Itoa(promptTokens) +
+			`,"total_tokens":` + strconv.Itoa(promptTokens) + `}}`))
+	}))
+	defer srv.Close()
+
+	c := New(srv.URL, "text-embed", "")
+	c.Metrics = telemetry.NewMetrics()
+	if _, err := c.Embed(context.Background(), []string{"a"}); err != nil {
+		t.Fatalf("Embed: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/metrics", nil)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	body := rec.Body.String()
+	for _, want := range []string{
+		`runlore_model_requests_total`,
+		`provider="embed"`,
+		`runlore_model_request_duration_seconds`,
+		`runlore_model_input_tokens_total`,
+	} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("embedding spend is invisible: metrics missing %s\n%s", want, body)
+		}
+	}
+	if !strings.Contains(body, strconv.Itoa(promptTokens)) {
+		t.Fatalf("the provider reported %d prompt tokens and none reached "+
+			"model_input_tokens_total — the /embeddings response's usage block is being discarded:\n%s",
+			promptTokens, body)
+	}
+}
+
+// TestEmbedMetricsAreOptional pins that the instrumentation is nil-safe: every CLI
+// path builds a Client without telemetry, and none of them may panic for it.
+func TestEmbedMetricsAreOptional(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`{"data":[{"index":0,"embedding":[1.0]}]}`))
+	}))
+	defer srv.Close()
+	if _, err := New(srv.URL, "m", "").Embed(context.Background(), []string{"a"}); err != nil {
+		t.Fatalf("a Client with no Metrics must still embed: %v", err)
 	}
 }
 

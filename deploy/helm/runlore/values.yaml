@@ -110,18 +110,49 @@ config:
     name: runlore-leader
   # Cost controls — these ship with SAFE, BOUNDED defaults (not unlimited) so a
   # default install can't run away in LLM spend. Tune for your environment, or set
-  # a field to 0 for unlimited (where noted). Coalesce/rate-limit sub-fields left
+  # a field to -1 for unlimited (where noted). Coalesce/rate-limit sub-fields left
   # unset default in the agent to 30s debounce, 2m max-wait, 50 batch, 10m cooldown,
   # 1h window.
   investigation:
-    # Per-investigation context ceiling (estimated request tokens): when crossed, the
-    # agent is nudged to wrap up, then hard-stops and delivers what it has rather than
-    # growing context unbounded. 0 = unlimited.
-    max_tokens_per_investigation: 100000
-    # Cap each tool result fed back to the model (truncates large logs/diffs). 0 = unlimited.
+    # CUMULATIVE token ceiling for ONE investigation: the provider-reported tokens of
+    # every model call it makes (loop + verify). When crossed, the agent is nudged to
+    # wrap up and forced to submit findings, then hard-stops and delivers what it has.
+    # -1 = unlimited.
+    #
+    # A QUARTER of this (100000 here) additionally bounds ONE request's estimated size,
+    # and mid-loop compaction triggers at 70% of that quarter (70000). The two are
+    # different problems: "the run spent too much in total" (reason=tokens_total) is
+    # fixed by raising this number, "one request is too big" (reason=tokens_request) by
+    # lowering max_tool_output_bytes or enabling compaction below.
+    #
+    # NOTE this bounds the WHOLE RUN, not one request — it used to bound only the next
+    # request. Read as a run budget the old 100000 default funded four or five steps, so
+    # the default was raised to 400000: an investigation whose every tool result hits
+    # max_tool_output_bytes costs ~327000 tokens over seven model calls, and an ordinary
+    # tool-heavy one (8 KiB results, twelve steps) ~379000. AN EXPLICIT VALUE HERE IS
+    # LEFT ALONE and is now read as a whole-run budget: if you pinned 100000, it still
+    # says 100000 and now means ~four steps. Set it to the total you are willing to pay
+    # per incident (summed across all turns), not the size of one turn.
+    #
+    # BUDGET FOR THIS NUMBER PLUS ONE REQUEST. The check compares the PROJECTED total
+    # (already spent + the request about to be sent), so a run stops on the first
+    # request that would cross — but that request is still sent, because the nudge has
+    # to give the model a turn to conclude. That conceded request is itself capped at the
+    # quarter above, so budget ~1.25x. Measured at these defaults: ~467000 tokens
+    # delivered against a 400000 ceiling (~1.17x).
+    max_tokens_per_investigation: 400000
+    # The same ceiling in USD, compared against the running estimated spend. OPT-IN:
+    # unset/0 = no cost ceiling. Deliberately not defaulted — a dollar figure depends on
+    # the model and rates you chose, so RunLore cannot pick one for you.
+    #
+    # REQUIRES model.pricing: with no rates configured there is no cost to compare and
+    # this can never fire (the agent warns loudly at startup if you set it anyway).
+    # max_cost_per_investigation: 2.50
+    # Cap each tool result fed back to the model (truncates large logs/diffs). -1 = unlimited.
     max_tool_output_bytes: 32768
     # How mid-loop history compaction treats the older tool outputs it elides once the
-    # estimate crosses 0.7x max_tokens_per_investigation. "elide" (default) drops their
+    # estimate crosses the compaction target: 0.7x the PER-REQUEST budget, itself a
+    # quarter of max_tokens_per_investigation. "elide" (default) drops their
     # bodies for short markers (lossy). "summarize" first asks a model for ONE compact
     # factual digest of the elided batch per compaction event (routed to model.verify when
     # set, else the main model) and keeps that in place of the markers; any summarizer

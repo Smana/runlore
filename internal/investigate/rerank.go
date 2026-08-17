@@ -42,7 +42,7 @@ import (
 //
 // COST discipline. It is one cheap call (~1–2k tokens) that buys back a whole
 // investigation when it fires — the recorded demo transcript's came to 7 calls /
-// ~15.6k tokens, and max_tokens_per_investigation caps a run at 100k. It only ever
+// ~15.6k tokens, against a max_tokens_per_investigation default of 400k. It only ever
 // runs when retrieval already surfaced a plausible candidate (Recall.lookup applies
 // the MinScore cost guard before calling rank).
 //
