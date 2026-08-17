@@ -197,6 +197,27 @@ func gitopsKindProse(engine string) string {
 		"whether such an object exists; use pod_status, kube_events or query_metrics for those."
 }
 
+// engineFromTools reports the GitOps engine the REGISTERED tools are scoped to, empty
+// when no GitOps introspection tool is wired.
+//
+// The system prompt is built from this rather than from a field on the investigator, so
+// the prose and the schemas cannot disagree at any of the six LoopInvestigator
+// construction sites. A prompt that tells the model to follow a Kustomization's sourceRef
+// and read kustomize-controller's logs, next to a schema that refuses Flux kinds and a
+// tool list with no controller_logs in it, is prompt/schema mismatch — which is how #503
+// reached the model in the first place.
+func engineFromTools(tools []Tool) string {
+	for _, t := range tools {
+		switch g := t.(type) {
+		case GitOpsStatusTool:
+			return g.Engine
+		case GitOpsTreeTool:
+			return g.Engine
+		}
+	}
+	return ""
+}
+
 // engineDisplayName renders an engine for prose.
 func engineDisplayName(engine string) string {
 	if engine == "argocd" {

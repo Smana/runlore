@@ -24,7 +24,64 @@ import (
 	"github.com/Smana/runlore/internal/telemetry"
 )
 
-const systemPrompt = `You are an SRE incident investigator. The cause is unknown — investigate by
+// systemPrompt assembles the system prompt for the GitOps engine this deployment runs.
+//
+// It is engine-conditional because the tool SCHEMAS are: gitops_resource_status refuses
+// Flux kinds under argocd, and controller_logs is not registered there at all, yet the
+// prompt told the model to follow a Kustomization's sourceRef and read
+// kustomize-controller's logs. A prompt that instructs what the schema forbids is how the
+// original bug (#503) reached the model — three HelmRelease/Kustomization lookups on a
+// cluster with no Flux CRDs, all answered "NOT FOUND", all cited as evidence.
+func systemPrompt(engine string) string {
+	return systemPromptIntro +
+		"\n\n" + gitopsDrillPrompt(engine) +
+		"\n\n" + workloadPrompt(engine) +
+		"\n\n" + systemPromptRigor
+}
+
+// gitopsDrillPrompt is the symptom-to-root drill, in the vocabulary of the engine that is
+// actually wired — including which controller logs are reachable: controller_logs is
+// registered under Flux ONLY (see app.clusterTools), so naming it under argocd sends the
+// model at a tool that is not in its list.
+func gitopsDrillPrompt(engine string) string {
+	if engine == "argocd" {
+		return `Drill from symptom to ROOT cause — don't stop at the first failing resource. When an Argo CD
+Application is failing, call gitops_resource_status on it; read its sync/health status, conditions and
+source refs; use gitops_tree to walk its managed resources (and app-of-apps children) down to the
+failing one; and use query_logs on the responsible controller (argocd-application-controller,
+argocd-repo-server) to learn WHY it failed. Confirm hypotheses with metrics and, where relevant,
+network drops.`
+	}
+	return `Drill from symptom to ROOT cause — don't stop at the first failing resource. When a Flux
+resource is failing, call gitops_resource_status on it; follow its sourceRef/dependsOn; use gitops_tree
+to find the root (a not-Ready node, or one the API did not return); and use controller_logs /
+query_logs on the relevant controller (e.g. kustomize-controller, source-controller, helm-controller)
+to learn WHY it failed. Confirm hypotheses with metrics and, where relevant, network drops.`
+}
+
+// workloadPrompt is the pod-level triage paragraph. Only the two engine-specific tokens
+// vary — the symptom shape it opens with, and where the owning GitOps object lives —
+// so the paragraph itself stays single-sourced.
+func workloadPrompt(engine string) string {
+	stuck, where := "a HelmRelease install timing out", `remember the Flux Kustomization/HelmRelease
+usually lives in flux-system, not the workload's namespace; but you do NOT need to hunt for it —
+what_changed takes the FAILING WORKLOAD'S namespace and resolves the owning Kustomization for you.`
+	if engine == "argocd" {
+		stuck, where = "an Application stuck Progressing or Degraded", `remember the Argo CD Application
+usually lives in the argocd namespace, not the workload's; but you do NOT need to hunt for it —
+what_changed takes the FAILING WORKLOAD'S namespace and resolves the owning Application for you.`
+	}
+	return `When a WORKLOAD won't run (pods not Ready, ` + stuck + `), the cause is usually at
+the pod level — call pod_status on the namespace FIRST: it names container failures verbatim
+(CreateContainerConfigError → the exact missing Secret/ConfigMap key; ImagePullBackOff; CrashLoopBackOff;
+RunContainerError). Then call kube_events for causes that live only in the event stream
+(FailedScheduling "Insufficient cpu/memory", FailedMount, FailedAttachVolume, failing probes). These two
+tools see pod-level failures that logs and GitOps status cannot — a container that never started has no
+logs, and "Insufficient cpu" is an Event, not a log line. When you inspect a GitOps object directly
+(gitops_resource_status/gitops_tree), ` + where
+}
+
+const systemPromptIntro = `You are an SRE incident investigator. The cause is unknown — investigate by
 calling the available tools to gather evidence (start with what_changed), reason about both
 change-caused and no-change causes, then call submit_findings exactly once with ranked root causes,
 evidence, and anything you could not determine. Be honest about uncertainty.
@@ -43,32 +100,16 @@ root cause and the fix directly; use it to guide the rest of the investigation.
 A tool ERROR or "unavailable" backend means MISSING DATA — it is NEVER evidence of a problem. If
 network_drops errors, that does NOT mean there is a network issue; if query_logs errors, that does
 NOT mean logging is the cause. Note the missing signal as unresolved and base your conclusion on the
-tools that DID return data. Do not blame the subsystem whose tool failed.
+tools that DID return data. Do not blame the subsystem whose tool failed.`
 
-Drill from symptom to ROOT cause — don't stop at the first failing resource. When a Flux/GitOps
-resource is failing, call gitops_resource_status on it; follow its sourceRef/dependsOn; use gitops_tree
-to find the root (a not-Ready or NOT FOUND node); and use controller_logs / query_logs on the
-relevant controller (e.g. kustomize-controller, source-controller, helm-controller) to learn WHY it
-failed. Confirm hypotheses with metrics and, where relevant, network drops.
-
-When a WORKLOAD won't run (pods not Ready, a HelmRelease install timing out), the cause is usually at
-the pod level — call pod_status on the namespace FIRST: it names container failures verbatim
-(CreateContainerConfigError → the exact missing Secret/ConfigMap key; ImagePullBackOff; CrashLoopBackOff;
-RunContainerError). Then call kube_events for causes that live only in the event stream
-(FailedScheduling "Insufficient cpu/memory", FailedMount, FailedAttachVolume, failing probes). These two
-tools see pod-level failures that logs and Flux status cannot — a container that never started has no
-logs, and "Insufficient cpu" is an Event, not a log line. When you inspect a GitOps object directly
-(gitops_resource_status/gitops_tree), remember the Flux Kustomization/HelmRelease usually lives in
-flux-system, not the workload's namespace; but you do NOT need to hunt for it — what_changed takes the
-FAILING WORKLOAD'S namespace and resolves the owning Kustomization/Application for you.
-
-RIGOR — correctness over plausibility. A wrong-but-confident root cause is worse than an honest
+const systemPromptRigor = `RIGOR — correctness over plausibility. A wrong-but-confident root cause is worse than an honest
 "unresolved":
 - Correlation is NOT causation. "The incident started after change X" does not prove X caused it.
   Before naming a change as a root cause you MUST read its actual diff and confirm it plausibly
   affects THIS failing workload (its namespace, or a resource it depends on). Call what_changed with
-  the failing workload's namespace and let it resolve the owning GitOps object — do not query
-  flux-system directly for it, and do not pin the incident on an unrelated cluster-wide change.
+  the failing workload's namespace and let it resolve the owning GitOps object — do not query the
+  GitOps controller's own namespace directly for it, and do not pin the incident on an unrelated
+  cluster-wide change.
 - Never propose reverting or modifying something you have not inspected. If you couldn't read a
   change's diff, you cannot claim it's the cause — say so in unresolved.
 - Calibrate confidence to the evidence: a verified causal chain (read the change, saw the matching
@@ -250,7 +291,7 @@ type LoopInvestigator struct {
 // system returns the system prompt, extended with action proposals when the policy is
 // enabled, and with an MCP-tools note when external MCP tools (name contains "__") are present.
 func (li *LoopInvestigator) system() string {
-	s := systemPrompt
+	s := systemPrompt(engineFromTools(li.Tools))
 	if li.Actions != nil && li.Actions.Enabled() {
 		s += "\n\n" + actionsPrompt
 	}
