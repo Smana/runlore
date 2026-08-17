@@ -81,6 +81,18 @@ var reservedBundleFiles = []string{"index.md", "log.md"}
 // refusing degrades to a comment, and a wrong write silently rewrites somebody
 // else's change with no signal that it happened.
 //
+// WHAT IT DOES NOT GUARANTEE, stated plainly because an earlier version of this
+// comment overclaimed it: the result is "the one changed path that is a
+// non-reserved .md", which is not the same proposition as "the catalog entry".
+// A request that renamed the entry and also touched some other markdown resolves
+// to whichever of the two the filter leaves, with no error, because there is
+// nothing here to compare against. Nor can it detect a TRUNCATED listing: one
+// page of a large request that happens to hold exactly one non-reserved .md
+// resolves just as cleanly to the wrong file. Callers therefore verify that what
+// they got is an entry BEFORE writing to it (HasFrontmatter) and refuse a listing
+// that may have been cut. This function narrows the candidates; it is not the
+// last gate.
+//
 // It lives here, beside the functions that put those reserved files on the
 // branch in the first place, and is shared by both forge clients for the reason
 // this file's header gives: two copies of a rule about the bundle's shape drift,
@@ -121,6 +133,59 @@ func AppendBlock(existing []byte, block string) []byte {
 		return []byte(block + "\n")
 	}
 	return []byte(cur + "\n\n" + block + "\n")
+}
+
+// HasFrontmatter reports whether raw opens with a CLOSED YAML frontmatter fence,
+// i.e. whether it is an OKF entry rather than something else that happens to be
+// markdown.
+//
+// It exists for one caller shape and one failure: an append that reads the entry,
+// appends to what it read, and writes the result back. If the read yields
+// nothing, AppendBlock returns the block ALONE (that is its correct behaviour —
+// it is how a first draft is built), and the write then replaces a whole entry
+// with the newest note. Frontmatter, every earlier note, gone, and the write
+// reports success because it carried a valid blob sha.
+//
+// The empty case is not hypothetical. GitHub's contents API answers a blob over
+// 1 MB with an EMPTY content field and encoding "none", which base64-decodes
+// without error, so a "successful" read hands back zero bytes. Callers must treat
+// a false here as a refusal, not a reason to create the file.
+//
+// The fence must be FIRST: leading blank lines or an HTML comment before it mean
+// the file is not what the caller thinks it is, and guessing is the behaviour
+// this exists to prevent. A lone opening fence with no close is likewise refused.
+func HasFrontmatter(raw []byte) bool {
+	s := string(raw)
+	const fence = "---\n"
+	if !strings.HasPrefix(s, fence) {
+		return false
+	}
+	return strings.Contains(s[len(fence):], "\n---")
+}
+
+// NoteMarker renders the invisible idempotency marker an appended note carries,
+// keyed to that note. It is an HTML comment so it never renders in the entry a
+// human reviews or the catalog indexes.
+//
+// The key must identify ONE note. A marker matching any note would suppress
+// every note after the first — the original bug wearing a different hat.
+func NoteMarker(key string) string { return "<!-- runlore-note:" + key + " -->" }
+
+// HasNoteMarker reports whether raw already carries the note keyed by key, so a
+// replayed delivery appends nothing a second time.
+//
+// A comment is visibly duplicate and dies at merge; a duplicated APPEND is
+// permanent catalog content that kb_search then indexes twice. Retries are real:
+// the Slack event dedupe is per-process and its seen-set is cleared wholesale
+// when full, so a restart, a failover or a busy channel all replay.
+//
+// An empty key means "no idempotency", never "matches everything" — the latter
+// would drop every note from any caller that omitted a key.
+func HasNoteMarker(raw []byte, key string) bool {
+	if key == "" {
+		return false
+	}
+	return strings.Contains(string(raw), NoteMarker(key))
 }
 
 // UpdateLog records the entry in an OKF log: flat date-grouped entries, newest

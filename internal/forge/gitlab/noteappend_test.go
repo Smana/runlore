@@ -4,54 +4,165 @@ package gitlab
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
 	"strings"
+	"sync"
 	"testing"
+
+	"github.com/Smana/runlore/internal/okf"
+	"github.com/Smana/runlore/internal/providers"
 )
 
 const noteEntry = "---\ntype: Concept\ntitle: Operator note: OOM\n---\n\n### 📝 Operator note\n\nthe first note\n"
 
-// appendServer stubs the three calls AppendToEntryOnPR makes: the MR (source
-// branch + changed paths), the raw entry on that branch, and the commit that
-// writes it back. The commit body is captured into commit.
-func appendServer(t *testing.T, branch string, changed []string, entry, content string, commit *map[string]any) *httptest.Server {
+// emptyEntry asks the stub to serve a ZERO-BYTE file; "" means "serve the
+// default entry", so the two need different spellings.
+const emptyEntry = "\x00"
+
+// stubMR is a configurable GitLab stub serving ONE note merge request, mirroring
+// github's stubPR knob for knob so both clients' guards are exercised the same
+// way rather than each drifting to whatever its own tests happened to cover.
+type stubMR struct {
+	state    string // "opened" unless set
+	branch   string // source_branch; "runlore/kb-oom-1" unless set
+	srcProj  int64  // source_project_id; defaults equal to target (same-project MR)
+	changed  []string
+	entry    string
+	encoding string // "base64" unless set
+
+	// commitStatus, when non-zero, is the status the Commits API answers with —
+	// 400 is what a stale last_commit_id gets.
+	commitStatus int
+	// commitLands models a lost RESPONSE to a commit GitLab already applied: the
+	// content is updated, then the call fails. The only way to reach appendLanded.
+	commitLands bool
+
+	mu         sync.Mutex
+	content    string
+	lastCommit string
+	commits    []map[string]any
+}
+
+func (s *stubMR) or(v, def string) string {
+	if v == "" {
+		return def
+	}
+	return v
+}
+
+func (s *stubMR) start(t *testing.T) *Client {
 	t.Helper()
-	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	if s.content == emptyEntry {
+		s.content = ""
+	} else {
+		s.content = s.or(s.content, noteEntry)
+	}
+	s.lastCommit = "commit0"
+	if s.changed == nil {
+		s.changed = []string{"index.md", "log.md", "concepts/oom-1.md"}
+	}
+	s.entry = s.or(s.entry, "concepts/oom-1.md")
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		path := r.URL.EscapedPath()
 		switch {
 		case strings.HasSuffix(path, "/merge_requests/84/changes"):
-			var b strings.Builder
-			b.WriteString(`{"source_branch":"` + branch + `","changes":[`)
-			for i, f := range changed {
-				if i > 0 {
-					b.WriteString(",")
-				}
-				b.WriteString(`{"new_path":"` + f + `"}`)
+			changes := make([]map[string]string, 0, len(s.changed))
+			for _, f := range s.changed {
+				changes = append(changes, map[string]string{"new_path": f})
 			}
-			b.WriteString("]}")
-			_, _ = w.Write([]byte(b.String()))
+			src := s.srcProj
+			if src == 0 {
+				src = 7
+			}
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"state": s.or(s.state, "opened"), "source_branch": s.or(s.branch, "runlore/kb-oom-1"),
+				"source_project_id": src, "target_project_id": 7, "changes": changes,
+			})
 		case strings.Contains(path, "/repository/files/"):
+			s.mu.Lock()
+			defer s.mu.Unlock()
 			// The file path must arrive URL-encoded as ONE segment and be read at
 			// the merge request's own ref — GitLab 404s an unencoded "/" in a way
 			// that looks like a permissions problem, so this is asserted rather
-			// than assumed.
-			want := "/repository/files/" + url.PathEscape(entry) + "/raw"
-			if !strings.HasSuffix(path, want) || r.URL.Query().Get("ref") != branch {
+			// than assumed. Note the absence of a "/raw" suffix: the NON-raw
+			// endpoint is the one carrying last_commit_id, which is why the client
+			// stopped using /raw here.
+			want := "/repository/files/" + url.PathEscape(s.entry)
+			if !strings.HasSuffix(path, want) || r.URL.Query().Get("ref") != s.or(s.branch, "runlore/kb-oom-1") {
 				w.WriteHeader(http.StatusNotFound)
 				return
 			}
-			_, _ = w.Write([]byte(content))
+			enc := s.or(s.encoding, "base64")
+			content := base64.StdEncoding.EncodeToString([]byte(s.content))
+			if enc != "base64" {
+				content = ""
+			}
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"encoding": enc, "content": content, "last_commit_id": s.lastCommit,
+			})
 		case strings.HasSuffix(path, "/repository/commits"):
-			_ = json.NewDecoder(r.Body).Decode(commit)
+			var body map[string]any
+			_ = json.NewDecoder(r.Body).Decode(&body)
+			s.mu.Lock()
+			defer s.mu.Unlock()
+			s.commits = append(s.commits, body)
+			if s.commitStatus == 0 {
+				if actions, ok := body["actions"].([]any); ok && len(actions) == 1 {
+					if a, ok := actions[0].(map[string]any); ok {
+						s.content, _ = a["content"].(string)
+						s.lastCommit += "x"
+					}
+				}
+			}
+			if s.commitStatus != 0 || s.commitLands {
+				status := s.commitStatus
+				if status == 0 {
+					status = http.StatusBadGateway
+				}
+				w.WriteHeader(status)
+				return
+			}
 			_, _ = w.Write([]byte(`{"id":"abc123"}`))
 		default:
 			t.Errorf("unexpected request: %s %s", r.Method, path)
 			w.WriteHeader(http.StatusNotFound)
 		}
 	}))
+	t.Cleanup(srv.Close)
+	return New(srv.URL, "o/r", "main", staticToken("tok"))
+}
+
+func (s *stubMR) writes() []map[string]any {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return append([]map[string]any(nil), s.commits...)
+}
+
+func (s *stubMR) entryContent() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.content
+}
+
+// action returns the single file action of commit i.
+func (s *stubMR) action(t *testing.T, i int) map[string]any {
+	t.Helper()
+	commits := s.writes()
+	if len(commits) <= i {
+		t.Fatalf("commits = %d, want more than %d", len(commits), i)
+	}
+	actions, _ := commits[i]["actions"].([]any)
+	if len(actions) != 1 {
+		t.Fatalf("actions = %v, want exactly one (the entry update)", commits[i]["actions"])
+	}
+	a, _ := actions[0].(map[string]any)
+	return a
 }
 
 // TestAppendToEntryOnPRUpdatesTheEntryOnTheSourceBranch is the GitLab half of
@@ -59,33 +170,22 @@ func appendServer(t *testing.T, branch string, changed []string, entry, content 
 // source branch, keeping every note already there — rather than a discussion
 // note the catalog never indexes.
 func TestAppendToEntryOnPRUpdatesTheEntryOnTheSourceBranch(t *testing.T) {
-	var commit map[string]any
-	srv := appendServer(t, "runlore/kb-oom-1",
-		[]string{"index.md", "log.md", "concepts/oom-1.md"}, "concepts/oom-1.md", noteEntry, &commit)
-	defer srv.Close()
-
-	c := New(srv.URL, "o/r", "main", staticToken("tok"))
-	if err := c.AppendToEntryOnPR(context.Background(), 84, "### 📝 Operator note\n\nthe second note"); err != nil {
+	s := &stubMR{}
+	c := s.start(t)
+	if err := c.AppendToEntryOnPR(context.Background(), 84, "### 📝 Operator note\n\nthe second note", "k1"); err != nil {
 		t.Fatalf("AppendToEntryOnPR: %v", err)
 	}
-	if commit == nil {
-		t.Fatal("nothing was committed")
+	if got := s.writes()[0]["branch"]; got != "runlore/kb-oom-1" {
+		t.Errorf("branch = %v, want the merge request's own source branch", got)
 	}
-	if commit["branch"] != "runlore/kb-oom-1" {
-		t.Errorf("branch = %v, want the merge request's own source branch", commit["branch"])
+	a := s.action(t, 0)
+	if a["action"] != "update" {
+		t.Errorf("action = %v, want update — a create would 400 on an existing file", a["action"])
 	}
-	actions, _ := commit["actions"].([]any)
-	if len(actions) != 1 {
-		t.Fatalf("actions = %v, want exactly one (the entry update)", commit["actions"])
+	if a["file_path"] != "concepts/oom-1.md" {
+		t.Errorf("file_path = %v, want the entry — index.md and log.md are bundle upkeep", a["file_path"])
 	}
-	action, _ := actions[0].(map[string]any)
-	if action["action"] != "update" {
-		t.Errorf("action = %v, want update — a create would 400 on an existing file", action["action"])
-	}
-	if action["file_path"] != "concepts/oom-1.md" {
-		t.Errorf("file_path = %v, want the entry — index.md and log.md are bundle upkeep", action["file_path"])
-	}
-	body, _ := action["content"].(string)
+	body, _ := a["content"].(string)
 	if !strings.Contains(body, "the first note") || !strings.Contains(body, "the second note") {
 		t.Errorf("the entry must keep every note, got:\n%s", body)
 	}
@@ -94,26 +194,182 @@ func TestAppendToEntryOnPRUpdatesTheEntryOnTheSourceBranch(t *testing.T) {
 	}
 }
 
-// TestAppendToEntryOnPRNeutralizesImages: the appended block gets the same image
-// defusal renderEntry gives a first draft, so a note written straight into an
-// entry cannot carry what a drafted one could not.
-func TestAppendToEntryOnPRNeutralizesImages(t *testing.T) {
-	var commit map[string]any
-	srv := appendServer(t, "b", []string{"concepts/oom-1.md"}, "concepts/oom-1.md", noteEntry, &commit)
-	defer srv.Close()
-
-	c := New(srv.URL, "o/r", "main", staticToken("tok"))
-	if err := c.AppendToEntryOnPR(context.Background(), 84, "look ![px](https://evil.example/px.gif)"); err != nil {
+// TestAppendToEntryOnPRSendsLastCommitID is the concurrency control, and the
+// property this client CLAIMED to mirror from GitHub while not holding it.
+//
+// The Commits API overwrites unconditionally unless the update action carries
+// last_commit_id. Without it this read-modify-write silently reverts anyone who
+// committed to the entry in between — a reviewer fixing a typo in the web IDE
+// has their change erased by the next note in the thread, with nothing anywhere
+// reporting it. GitHub gets the same property free from the blob sha its
+// contents API hands back; here it has to be asked for.
+func TestAppendToEntryOnPRSendsLastCommitID(t *testing.T) {
+	s := &stubMR{}
+	c := s.start(t)
+	if err := c.AppendToEntryOnPR(context.Background(), 84, "the second note", "k1"); err != nil {
 		t.Fatalf("AppendToEntryOnPR: %v", err)
 	}
-	actions, _ := commit["actions"].([]any)
-	action, _ := actions[0].(map[string]any)
-	body, _ := action["content"].(string)
+	if got := s.action(t, 0)["last_commit_id"]; got != "commit0" {
+		t.Errorf("last_commit_id = %v, want the id just read — without it a racing writer is silently reverted", got)
+	}
+}
+
+// TestAppendToEntryOnPRPropagatesAConflict: GitLab answers a stale
+// last_commit_id with 400. The racing writer keeps their commit, and this note
+// must surface as an error so the caller degrades to a comment rather than
+// losing the human's words.
+func TestAppendToEntryOnPRPropagatesAConflict(t *testing.T) {
+	s := &stubMR{commitStatus: http.StatusBadRequest}
+	c := s.start(t)
+	if err := c.AppendToEntryOnPR(context.Background(), 84, "the second note", "k1"); err == nil {
+		t.Fatal("want an error so the caller falls back to a comment")
+	}
+	if strings.Contains(s.entryContent(), "the second note") {
+		t.Errorf("the entry must be untouched after a conflict:\n%s", s.entryContent())
+	}
+}
+
+// TestAppendToEntryOnPRRefusesAnUnreadableEntry: a read that reports success
+// while handing back nothing would make okf.AppendBlock replace the entry with
+// the single note being appended to it. See the GitHub sibling for the full
+// account of how that shape arises.
+func TestAppendToEntryOnPRRefusesAnUnreadableEntry(t *testing.T) {
+	s := &stubMR{encoding: "none"}
+	c := s.start(t)
+	if err := c.AppendToEntryOnPR(context.Background(), 84, "the second note", "k1"); err == nil {
+		t.Fatal("want an error: a read that returns nothing must never be treated as an empty entry")
+	}
+	if commits := s.writes(); len(commits) != 0 {
+		t.Fatalf("the entry was rewritten from an unreadable read: %+v", commits)
+	}
+}
+
+// TestAppendToEntryOnPRRefusesAFileThatIsNotAnEntry is the independent half of
+// the same guard: whatever the read yielded, it is written back only if it reads
+// as an OKF entry. It also covers what okf.EntryFile cannot promise — that the
+// one non-reserved .md in a request is the catalog entry.
+func TestAppendToEntryOnPRRefusesAFileThatIsNotAnEntry(t *testing.T) {
+	for name, content := range map[string]string{
+		"empty file":     emptyEntry,
+		"no frontmatter": "# Notes\n\nsome markdown a reviewer added\n",
+	} {
+		t.Run(name, func(t *testing.T) {
+			s := &stubMR{content: content}
+			c := s.start(t)
+			if err := c.AppendToEntryOnPR(context.Background(), 84, "note", "k1"); err == nil {
+				t.Fatal("want an error rather than a rewrite of a file that is not an entry")
+			}
+			if commits := s.writes(); len(commits) != 0 {
+				t.Fatalf("rewrote a non-entry: %+v", commits)
+			}
+		})
+	}
+}
+
+// TestAppendToEntryOnPRIsIdempotent: a replayed chat delivery must not append
+// the same note twice — unlike a duplicate comment, a duplicate append is
+// permanent catalog content that recall then serves twice.
+func TestAppendToEntryOnPRIsIdempotent(t *testing.T) {
+	s := &stubMR{}
+	c := s.start(t)
+	for i := range 3 {
+		if err := c.AppendToEntryOnPR(context.Background(), 84, "the second note", "k1"); err != nil {
+			t.Fatalf("call %d: %v", i, err)
+		}
+	}
+	if commits := s.writes(); len(commits) != 1 {
+		t.Fatalf("commits = %d, want 1 — a replayed delivery must not append the note again", len(commits))
+	}
+	if err := c.AppendToEntryOnPR(context.Background(), 84, "the third note", "k2"); err != nil {
+		t.Fatalf("a different note must still be appended: %v", err)
+	}
+	if commits := s.writes(); len(commits) != 2 {
+		t.Fatalf("commits = %d, want 2 — a different key is a different note", len(commits))
+	}
+}
+
+// TestAppendToEntryOnPRReportsSuccessWhenTheWriteLandedButTheResponseDidNot:
+// c.do errors for every failed round trip, including a response lost after
+// GitLab applied the commit. Reported as a failure, the caller files the note
+// again as a comment and labels the write on the COMMENT route — the wrong
+// answer to the one question that label exists to answer.
+func TestAppendToEntryOnPRReportsSuccessWhenTheWriteLandedButTheResponseDidNot(t *testing.T) {
+	s := &stubMR{commitLands: true}
+	c := s.start(t)
+	if err := c.AppendToEntryOnPR(context.Background(), 84, "the second note", "k1"); err != nil {
+		t.Fatalf("the commit landed; reporting failure sends the caller to double-write it as a comment: %v", err)
+	}
+	if !strings.Contains(s.entryContent(), "the second note") {
+		t.Fatalf("test is not exercising the case — the write did not land:\n%s", s.entryContent())
+	}
+}
+
+// TestAppendToEntryOnPRRefusesAnMRThatIsNoLongerOpen closes the window between
+// the caller's open-check and this write, and NAMES the case so the caller opens
+// a fresh entry rather than commenting onto a finished merge request.
+func TestAppendToEntryOnPRRefusesAnMRThatIsNoLongerOpen(t *testing.T) {
+	for _, state := range []string{"closed", "merged", "locked"} {
+		t.Run("state="+state, func(t *testing.T) {
+			s := &stubMR{state: state}
+			c := s.start(t)
+			err := c.AppendToEntryOnPR(context.Background(), 84, "note", "k1")
+			if !errors.Is(err, providers.ErrPRNotOpen) {
+				t.Fatalf("err = %v, want ErrPRNotOpen", err)
+			}
+			if commits := s.writes(); len(commits) != 0 {
+				t.Errorf("committed onto a %s merge request: %+v", state, commits)
+			}
+		})
+	}
+}
+
+// TestAppendToEntryOnPRRefusesAForkSourceBranch is the GitLab spelling of
+// GitHub's fork guard: source_branch is a bare branch name, so a fork's "main"
+// would be committed onto the configured project's own main. The two project ids
+// settle it with no extra lookup.
+func TestAppendToEntryOnPRRefusesAForkSourceBranch(t *testing.T) {
+	s := &stubMR{srcProj: 99, branch: "main"}
+	c := s.start(t)
+	if err := c.AppendToEntryOnPR(context.Background(), 84, "note", "k1"); err == nil {
+		t.Fatal("want a refusal rather than a commit onto the target project's branch")
+	}
+	if commits := s.writes(); len(commits) != 0 {
+		t.Errorf("committed from a fork merge request: %+v", commits)
+	}
+}
+
+// TestAppendToEntryOnPRNeutralizesImages keeps the appended block at the defusal
+// level renderEntry gives a first draft. Defence in depth: thread.NoteBody has
+// already rewritten "![" in the note TEXT, so what this actually covers is the
+// identity fields interpolated around it (author, thread title, which go through
+// noteField rather than the markdown defusals) and any future caller handing
+// this a block NoteBody did not build.
+func TestAppendToEntryOnPRNeutralizesImages(t *testing.T) {
+	s := &stubMR{}
+	c := s.start(t)
+	if err := c.AppendToEntryOnPR(context.Background(), 84, "look ![px](https://evil.example/px.gif)", "k1"); err != nil {
+		t.Fatalf("AppendToEntryOnPR: %v", err)
+	}
+	body, _ := s.action(t, 0)["content"].(string)
 	if strings.Contains(body, "![px](") || strings.Contains(body, "evil.example") {
 		t.Errorf("image markdown reached the entry file:\n%s", body)
 	}
 	if !strings.Contains(body, "`[image: px]`") {
 		t.Errorf("want the defused label renderEntry would have produced:\n%s", body)
+	}
+}
+
+// TestAppendToEntryOnPRMarkerIsInvisibleAndSingular: exactly one HTML-comment
+// marker per note, so it never renders in the entry the catalog serves.
+func TestAppendToEntryOnPRMarkerIsInvisibleAndSingular(t *testing.T) {
+	s := &stubMR{}
+	c := s.start(t)
+	if err := c.AppendToEntryOnPR(context.Background(), 84, "the second note", "k1"); err != nil {
+		t.Fatalf("AppendToEntryOnPR: %v", err)
+	}
+	body, _ := s.action(t, 0)["content"].(string)
+	if n := strings.Count(body, okf.NoteMarker("k1")); n != 1 {
+		t.Errorf("marker appears %d times, want 1:\n%s", n, body)
 	}
 }
 
@@ -126,16 +382,13 @@ func TestAppendToEntryOnPRRefusesWhenTheEntryIsAmbiguous(t *testing.T) {
 		"no entry":    {"index.md", "log.md"},
 	} {
 		t.Run(name, func(t *testing.T) {
-			var commit map[string]any
-			srv := appendServer(t, "b", changed, "concepts/a.md", noteEntry, &commit)
-			defer srv.Close()
-
-			c := New(srv.URL, "o/r", "main", staticToken("tok"))
-			if err := c.AppendToEntryOnPR(context.Background(), 84, "note"); err == nil {
+			s := &stubMR{changed: changed, entry: "concepts/a.md"}
+			c := s.start(t)
+			if err := c.AppendToEntryOnPR(context.Background(), 84, "note", "k1"); err == nil {
 				t.Fatal("want an error rather than a guess at which file to rewrite")
 			}
-			if commit != nil {
-				t.Errorf("committed %v despite an ambiguous entry", commit)
+			if commits := s.writes(); len(commits) != 0 {
+				t.Errorf("committed %v despite an ambiguous entry", commits)
 			}
 		})
 	}
@@ -145,15 +398,18 @@ func TestAppendToEntryOnPRRefusesWhenTheEntryIsAmbiguous(t *testing.T) {
 // source_branch must not become a commit onto the empty branch name, which
 // GitLab would resolve to the project default.
 func TestAppendToEntryOnPRRefusesWithoutASourceBranch(t *testing.T) {
-	var commit map[string]any
-	srv := appendServer(t, "", []string{"concepts/oom-1.md"}, "concepts/oom-1.md", noteEntry, &commit)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasSuffix(r.URL.EscapedPath(), "/merge_requests/84/changes") {
+			_, _ = w.Write([]byte(`{"state":"opened","source_project_id":7,"target_project_id":7,"changes":[]}`))
+			return
+		}
+		t.Errorf("reached %s %s past the source-branch guard", r.Method, r.URL.EscapedPath())
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
 	defer srv.Close()
 
 	c := New(srv.URL, "o/r", "main", staticToken("tok"))
-	if err := c.AppendToEntryOnPR(context.Background(), 84, "note"); err == nil {
+	if err := c.AppendToEntryOnPR(context.Background(), 84, "note", "k1"); err == nil {
 		t.Fatal("want an error when the merge request names no source branch")
-	}
-	if commit != nil {
-		t.Errorf("committed %v with no source branch", commit)
 	}
 }

@@ -75,9 +75,17 @@ type fakeForge struct {
 	// appends records every AppendToEntryOnPR call — the route a note takes onto
 	// the standalone PR thread capture itself opened, where the note has to reach
 	// the ENTRY FILE rather than the PR conversation the catalog never indexes.
+	//
+	// Recorded BEFORE appendErr is consulted, deliberately. A fake that returned
+	// the error without recording the call could not represent the failure that
+	// matters most here — the write LANDED and its response was lost — so a test
+	// named for the fallback could never observe the double-write that fallback
+	// then causes. The forge clients close that case by re-reading the entry
+	// (appendLanded); a fake unable to express it would pass either way.
 	appends []struct {
 		number int
 		body   string
+		key    string
 	}
 	opened  []providers.KBEntry
 	openURL string
@@ -85,7 +93,8 @@ type fakeForge struct {
 	commErr error
 	// appendErr, when set, fails every AppendToEntryOnPR — used to pin the
 	// degrade-to-a-comment fallback, so a forge that cannot rewrite the entry
-	// still keeps the human's words somewhere.
+	// still keeps the human's words somewhere. The call is still recorded, so a
+	// test can tell "it never ran" from "it ran and reported failure".
 	appendErr error
 	// prOpen reports the open state IsPROpen returns for a given PR number.
 	// A number absent from the map defaults to true (open) so every existing
@@ -134,17 +143,15 @@ func (f *fakeForge) CommentOnPR(_ context.Context, number int, body string) erro
 	return nil
 }
 
-func (f *fakeForge) AppendToEntryOnPR(_ context.Context, number int, body string) error {
+func (f *fakeForge) AppendToEntryOnPR(_ context.Context, number int, body, key string) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	if f.appendErr != nil {
-		return f.appendErr
-	}
 	f.appends = append(f.appends, struct {
 		number int
 		body   string
-	}{number, body})
-	return nil
+		key    string
+	}{number, body, key})
+	return f.appendErr
 }
 
 func (f *fakeForge) OpenPR(_ context.Context, e providers.KBEntry) (providers.Ref, error) {
@@ -497,6 +504,12 @@ func TestHandleAppendFailureFallsBackToCommenting(t *testing.T) {
 	if err != nil {
 		t.Fatalf("a failed append must degrade to a comment, not to an error: %v", err)
 	}
+	// The append must have been ATTEMPTED. Without this the test passes just as
+	// well against a responder that never tries the entry at all — which is the
+	// bug #493 fixed, reintroduced and reported as a fallback.
+	if len(f.appends) != 1 {
+		t.Fatalf("appends = %d, want 1 — the comment is a FALLBACK, reached only after trying the entry", len(f.appends))
+	}
 	if len(f.comments) != 1 || f.comments[0].number != 77 {
 		t.Fatalf("the note must still land as a comment; comments = %+v", f.comments)
 	}
@@ -506,6 +519,131 @@ func TestHandleAppendFailureFallsBackToCommenting(t *testing.T) {
 	if !strings.Contains(reply, "77") {
 		t.Errorf("the reply must still name where the note landed: %q", reply)
 	}
+}
+
+// TestHandleAppendOntoAClosedPRDoesNotFallBackToCommenting is the ONE append
+// failure that must not degrade to a comment.
+//
+// The open-check and the write are two round trips, and a reviewer merging a
+// note PR while an on-call is typing the next note falls between them. Past that
+// merge both remaining options are silent losses — a commit onto a merged
+// branch never reaches base, and a comment on a merged PR is never indexed by
+// the catalog — so the forge reports providers.ErrPRNotOpen and this must be
+// handled exactly like the open-check's own closed-PR case: open a standalone
+// entry. A note arriving a second too late must not be lost by a route the same
+// note a second earlier survives.
+func TestHandleAppendOntoAClosedPRDoesNotFallBackToCommenting(t *testing.T) {
+	f := &fakeForge{appendErr: fmt.Errorf("github PR 77 is %q: %w", "merged", providers.ErrPRNotOpen)}
+	r := newTestResponder(t, f)
+	tc := Context{Root: "111.222", Title: "OOM", NoteURL: "https://github.com/o/r/pull/77"}
+	if err := r.Registry.Put(tc); err != nil {
+		t.Fatalf("Put: %v", err)
+	}
+
+	reply, err := r.Handle(context.Background(), tc, "alice", "note: spot reclaim")
+	if err != nil {
+		t.Fatalf("Handle: %v", err)
+	}
+	if len(f.comments) != 0 {
+		t.Fatalf("must never comment onto a PR that closed under the write; comments = %+v", f.comments)
+	}
+	if len(f.opened) != 1 {
+		t.Fatalf("opened = %d, want 1 — a finished PR means a standalone entry, the same answer the open-check gives", len(f.opened))
+	}
+	if !strings.Contains(reply, "99") {
+		t.Errorf("the reply must name the standalone PR it opened: %q", reply)
+	}
+}
+
+// TestNoteKeyIsStableAcrossARetryAndUniquePerNote pins the idempotency key the
+// entry append is made safe with.
+//
+// Stable, because the deliveries above this layer replay and a replayed APPEND
+// is permanent duplicate catalog content (a replayed comment merely looked
+// silly). The obvious key — a hash of the rendered body — does NOT have this
+// property, which is the whole reason the key is computed here: the body carries
+// the provenance timestamp, so the replay of one note renders different bytes
+// and would sail straight past its own marker.
+//
+// Unique, because a key that collided would suppress a genuinely different note
+// while telling its author it was saved.
+func TestNoteKeyIsStableAcrossARetryAndUniquePerNote(t *testing.T) {
+	tc := Context{Root: "111.222"}
+	base := HumanNote("alice", "it was a spot reclaim")
+
+	if got, want := noteKey(tc, base), noteKey(tc, base); got != want {
+		t.Fatalf("noteKey is not deterministic: %q vs %q", got, want)
+	}
+	// The retry: same thread, same author, same words, a later attempt. The KEY
+	// must not move even though the rendered body does.
+	early := NoteBody(tc, base, noteAt, DefaultMaxNoteBytes)
+	late := NoteBody(tc, base, noteAt.Add(9*time.Minute), DefaultMaxNoteBytes)
+	if early == late {
+		t.Fatal("test is not exercising the case — the rendered body must differ between attempts")
+	}
+	// The key is computed from tc and n alone, neither of which the timestamp
+	// touches, so the determinism check above IS the survival property: a key
+	// derived from `early` and one derived from `late` could not both equal it.
+	if strings.Contains(early, noteKey(tc, base)) || strings.Contains(late, noteKey(tc, base)) {
+		t.Error("the key must not be a function of the rendered body — that is what breaks across a retry")
+	}
+
+	seen := map[string]string{}
+	for name, n := range map[string]struct {
+		tc Context
+		n  Note
+	}{
+		"the note":         {tc, base},
+		"different text":   {tc, HumanNote("alice", "it was the CNI")},
+		"different author": {tc, HumanNote("bob", "it was a spot reclaim")},
+		"different thread": {Context{Root: "333.444"}, base},
+	} {
+		k := noteKey(n.tc, n.n)
+		if other, dup := seen[k]; dup {
+			t.Errorf("%q and %q share a key — one of them would be silently dropped", name, other)
+		}
+		seen[k] = name
+	}
+	// The model-drafted note carries the same TEXT as the human one, so it shares
+	// the key deliberately: it is the same sentence landing in the same entry, and
+	// filing it twice is exactly what the marker exists to prevent.
+	if noteKey(tc, base) != noteKey(tc, ProposedNote("alice", "what happened?", "it was a spot reclaim")) {
+		t.Error("identical filed text in one thread must share a key regardless of which route proposed it")
+	}
+}
+
+// TestHandlePassesAStableKeyToTheForge is the wiring half: the key the forge is
+// given must be the one noteKey computes, and it must repeat across a replayed
+// delivery. A responder that passed "" (or a fresh value per call) would compile,
+// pass every other test here, and leave the append with no idempotency at all.
+func TestHandlePassesAStableKeyToTheForge(t *testing.T) {
+	f := &fakeForge{}
+	r := newTestResponder(t, f)
+	tc := Context{Root: "111.222", Title: "OOM", NoteURL: "https://github.com/o/r/pull/77"}
+	if err := r.Registry.Put(tc); err != nil {
+		t.Fatalf("Put: %v", err)
+	}
+
+	// The same message delivered twice — what a restart or a wiped dedup set
+	// produces upstream.
+	for i := range 2 {
+		cur, _ := r.Registry.Get("111.222")
+		if _, err := r.Handle(context.Background(), cur, "alice", "note: spot reclaim"); err != nil {
+			t.Fatalf("Handle %d: %v", i, err)
+		}
+	}
+	if len(f.appends) != 2 {
+		t.Fatalf("appends = %d, want 2 — this test needs both deliveries to reach the forge", len(f.appends))
+	}
+	want := noteKey(tc, HumanNote("alice", "spot reclaim"))
+	if f.appends[0].key != want {
+		t.Errorf("key = %q, want %q — the forge cannot dedup a key this layer never sends", f.appends[0].key, want)
+	}
+	if f.appends[0].key != f.appends[1].key {
+		t.Errorf("a replayed delivery sent a different key (%q then %q); the forge would append the note twice",
+			f.appends[0].key, f.appends[1].key)
+	}
+
 }
 
 func TestHandlePerThreadCap(t *testing.T) {

@@ -77,11 +77,23 @@ func (c *Client) getFile(ctx context.Context, path, ref string) (data []byte, sh
 		return nil, "", false, fmt.Errorf("github GET %s: status %d", path, resp.StatusCode)
 	}
 	var out struct {
-		SHA     string `json:"sha"`
-		Content string `json:"content"`
+		SHA      string `json:"sha"`
+		Content  string `json:"content"`
+		Encoding string `json:"encoding"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
 		return nil, "", false, err
+	}
+	// Refuse anything that is not base64. For a blob over 1 MB the contents API
+	// answers 200 with an EMPTY content field and encoding "none" — which
+	// base64-decodes without error, so a caller that trusts (raw, found) is handed
+	// zero bytes from a "successful" read. On the read-modify-write append path
+	// that becomes replacing a whole entry with the newest note, since
+	// okf.AppendBlock returns the block ALONE when what it appends to is empty.
+	// Failing here degrades to the caller's comment fallback; reading nothing
+	// silently does not.
+	if out.Encoding != "base64" {
+		return nil, "", false, fmt.Errorf("github GET %s: content encoding %q, want base64 (blob too large for the contents API?)", path, out.Encoding)
 	}
 	// The contents API base64-wraps with newlines; the std decoder wants them gone.
 	raw, err := base64.StdEncoding.DecodeString(strings.ReplaceAll(out.Content, "\n", ""))

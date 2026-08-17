@@ -148,3 +148,53 @@ func TestAppendBlockNormalisesSpacing(t *testing.T) {
 		t.Errorf("AppendBlock onto an empty file = %q, want no leading blank line", got)
 	}
 }
+
+// TestHasFrontmatterRefusesWhatWouldReplaceAnEntry is the guard that stands
+// between a read returning nothing and AppendBlock returning the note ALONE.
+// The two together are how an entry gets replaced by the newest note appended
+// to it, so the empty case is the one that matters most here.
+func TestHasFrontmatterRefusesWhatWouldReplaceAnEntry(t *testing.T) {
+	for name, tc := range map[string]struct {
+		content string
+		want    bool
+	}{
+		"a real entry":     {"---\ntype: Concept\n---\n\nbody\n", true},
+		"empty":            {"", false},
+		"plain markdown":   {"# Notes\n\nnot an entry\n", false},
+		"fence not first":  {"\n---\ntype: Concept\n---\n", false},
+		"fence unfinished": {"---", false},
+		"html then fence":  {"<!-- draft -->\n---\ntype: Concept\n---\n", false},
+	} {
+		t.Run(name, func(t *testing.T) {
+			if got := HasFrontmatter([]byte(tc.content)); got != tc.want {
+				t.Errorf("HasFrontmatter(%q) = %v, want %v", tc.content, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestNoteMarkerIsInvisibleAndKeyed: the marker must not render in the entry a
+// human or the catalog reads, and it must identify ONE note — a marker that
+// matched any note would suppress every note after the first, which is the
+// original bug wearing a different hat.
+func TestNoteMarkerIsInvisibleAndKeyed(t *testing.T) {
+	m := NoteMarker("abc123")
+	if !strings.HasPrefix(m, "<!--") || !strings.HasSuffix(m, "-->") {
+		t.Errorf("NoteMarker = %q, want an HTML comment so it never renders", m)
+	}
+	if !strings.Contains(m, "abc123") {
+		t.Errorf("NoteMarker = %q, want it to carry the key", m)
+	}
+	entry := []byte("---\ntype: Concept\n---\n\nnote one\n\n" + m + "\n")
+	if !HasNoteMarker(entry, "abc123") {
+		t.Error("HasNoteMarker must find the marker it wrote — otherwise a replay appends the note twice")
+	}
+	if HasNoteMarker(entry, "def456") {
+		t.Error("HasNoteMarker matched a DIFFERENT key — every later note in the thread would be silently dropped")
+	}
+	// An empty key means "no idempotency", never "matches everything": the latter
+	// would drop every note on any caller that omitted a key.
+	if HasNoteMarker(entry, "") {
+		t.Error("an empty key must never match")
+	}
+}

@@ -277,7 +277,7 @@ func (f *fakeThreadForge) CommentOnPR(_ context.Context, number int, body string
 
 func (f *fakeThreadForge) IsPROpen(context.Context, int) (bool, error) { return true, nil }
 
-func (f *fakeThreadForge) AppendToEntryOnPR(_ context.Context, _ int, _ string) error {
+func (f *fakeThreadForge) AppendToEntryOnPR(_ context.Context, _ int, _, _ string) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.appended++

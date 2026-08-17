@@ -4,6 +4,9 @@ package thread
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net/url"
@@ -48,10 +51,23 @@ type Forge interface {
 	// which treatment, and why the curator's PR deliberately still gets a
 	// comment.
 	//
-	// The forge locates the entry file from the pull request itself, so the
-	// contract here stays (number, body) — the same shape CommentOnPR takes, and
-	// no new state for the thread layer to persist and get wrong.
-	AppendToEntryOnPR(ctx context.Context, number int, body string) error
+	// The forge locates the entry file from the pull request itself, so no path
+	// is persisted here to go stale and misroute a commit later.
+	//
+	// key identifies this note so the write is IDEMPOTENT: an entry already
+	// carrying that key is left alone and success is reported. Unlike a comment,
+	// which is visibly duplicated conversation that dies at merge, a duplicated
+	// append is permanent catalog content that recall then serves twice — and the
+	// deliveries above this layer really do replay (see noteKey). The key is
+	// passed rather than derived from body inside the forge because body carries
+	// the provenance TIMESTAMP, so a retry renders different bytes; only this
+	// layer knows which inputs are stable.
+	//
+	// It may report providers.ErrPRNotOpen, which write() treats as the same case
+	// its own open-check does rather than as a failure to degrade around:
+	// commenting on a finished pull request is the silent loss that check exists
+	// to prevent.
+	AppendToEntryOnPR(ctx context.Context, number int, body, key string) error
 }
 
 // DefaultMaxNotesPerThread bounds how many knowledge writes one thread can make.
@@ -1149,9 +1165,18 @@ func noteTargets(tc Context) []noteTarget {
 func (r *Responder) addToPR(ctx context.Context, tc Context, n Note, at time.Time, num int, ours bool) (string, error) {
 	body := NoteBody(tc, n, at, r.maxNoteBytes())
 	if ours {
-		err := r.Forge.AppendToEntryOnPR(ctx, num, body)
+		err := r.Forge.AppendToEntryOnPR(ctx, num, body, noteKey(tc, n))
 		if err == nil {
 			return RouteAppend, nil
+		}
+		// The one failure that is NOT a reason to comment: the pull request
+		// finished between the open-check above and this write. A comment there is
+		// never indexed by the catalog, so falling back would be the silent loss
+		// the open-check exists to prevent, arriving through the window the check
+		// cannot cover. Passed up for write() to treat exactly as it treats its own
+		// closed-PR case — open a standalone entry instead.
+		if errors.Is(err, providers.ErrPRNotOpen) {
+			return "", err
 		}
 		r.log().Warn("thread: could not append the note to its entry; falling back to a comment, which the catalog will NOT index on merge",
 			"pr", num, "root", tc.Root, "err", err)
@@ -1160,6 +1185,40 @@ func (r *Responder) addToPR(ctx context.Context, tc Context, n Note, at time.Tim
 		return "", err
 	}
 	return RouteComment, nil
+}
+
+// noteKey is the stable identity of one note, used to make the entry append
+// idempotent (see okf.NoteMarker and Forge.AppendToEntryOnPR).
+//
+// It is needed because the layers above this one replay. internal/server dedups
+// Slack deliveries through a bounded, PER-PROCESS set that is wiped wholesale at
+// capacity (see seenSet), so a busy channel, a restart or a leader failover all
+// deliver the same message twice — and thread capture is detached from the ack,
+// so nothing downstream notices. As comments a replay was self-limiting: two
+// visibly identical comments on one pull request, both discarded at merge. As
+// appends it is two copies of the same knowledge in the catalog, indexed twice
+// and recalled twice, with no signal that either is a duplicate.
+//
+// The inputs are the ones that DO NOT move between a delivery and its replay:
+// the thread, the author, and the note's own text as written. Deliberately not
+// the rendered body, which carries the timestamp of the attempt — hashing that
+// yields a different key for the replay of the same note, which is the one case
+// this exists for. Deliberately not the thread's note counter either: a replay
+// re-enters write() at whatever count the registry has reached.
+//
+// Two genuinely identical notes from the same person in the same thread
+// therefore collapse into one. That is the right trade rather than a limitation:
+// the entry ends up saying what they said, once, and the alternative — a false
+// negative — is the permanent duplicate this is here to prevent.
+//
+// SHA-256 truncated to 16 hex characters. It is an identity, not a
+// authentication tag: the entry it is compared against is one RunLore wrote, and
+// note text reaching an entry has "<!" escaped out of it (see noteText), so a
+// marker cannot be forged into an entry to suppress a later note — which would
+// in any case require knowing that note's exact bytes in advance.
+func noteKey(tc Context, n Note) string {
+	sum := sha256.Sum256([]byte(tc.Root + "\x00" + n.Author + "\x00" + n.Text))
+	return hex.EncodeToString(sum[:])[:16]
 }
 
 // recordedOn renders the status line for a note that landed on a pull request
@@ -1283,6 +1342,17 @@ func (r *Responder) write(ctx context.Context, tc Context, n Note, at time.Time)
 			continue
 		}
 		route, err := r.addToPR(ctx, tc, n, at, num, candidate.ours)
+		// The PR was open a moment ago and is not any more — a reviewer merged it
+		// while this note was being written. Identical handling to the !open branch
+		// above, because it is the identical situation observed one round trip
+		// later: fall through and open a standalone entry. The two must not
+		// diverge, or a note that arrives a second too late is lost by a route the
+		// same note a second earlier survives.
+		if errors.Is(err, providers.ErrPRNotOpen) {
+			r.log().Info("thread: linked PR closed while the note was being written; opening a standalone note instead",
+				"pr", num, "root", tc.Root, "err", err)
+			continue
+		}
 		if err != nil {
 			return fmt.Sprintf("⚠️ I could not save that to the knowledge base: %s", Untrusted(err.Error())), nil,
 				fmt.Errorf("comment on PR %d: %w", num, err)

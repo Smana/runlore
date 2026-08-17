@@ -44,7 +44,7 @@ func (f *fakeSlackForge) CommentOnPR(context.Context, int, string) error {
 
 func (f *fakeSlackForge) IsPROpen(context.Context, int) (bool, error) { return true, nil }
 
-func (f *fakeSlackForge) AppendToEntryOnPR(context.Context, int, string) error {
+func (f *fakeSlackForge) AppendToEntryOnPR(context.Context, int, string, string) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.appended++

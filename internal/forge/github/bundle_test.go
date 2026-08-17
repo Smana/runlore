@@ -35,7 +35,7 @@ func TestOpenPRMaintainsBundleFiles(t *testing.T) {
 	})
 	mux.HandleFunc("GET /repos/o/r/contents/index.md", func(w http.ResponseWriter, _ *http.Request) {
 		content := base64.StdEncoding.EncodeToString([]byte("# Catalog\n\n## Incidents\n"))
-		_, _ = w.Write([]byte(`{"sha":"idxsha","content":"` + content + `"}`))
+		_, _ = w.Write([]byte(`{"sha":"idxsha","encoding":"base64","content":"` + content + `"}`))
 	})
 	mux.HandleFunc("GET /repos/o/r/contents/log.md", func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusNotFound)

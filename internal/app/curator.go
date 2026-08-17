@@ -35,7 +35,7 @@ type forgeClient interface {
 	providers.CurationForge
 	providers.ReinvestForge
 	IsPROpen(ctx context.Context, number int) (bool, error)
-	AppendToEntryOnPR(ctx context.Context, number int, body string) error
+	AppendToEntryOnPR(ctx context.Context, number int, body, key string) error
 }
 
 // buildForge constructs the curation/reinvestigation forge client selected by
