@@ -3,91 +3,121 @@
 package docsguard
 
 import (
-	"os"
 	"regexp"
 	"strings"
 	"testing"
+	"time"
+
+	"github.com/Smana/runlore/internal/kbvalidate"
+	"github.com/Smana/runlore/internal/thread"
 )
 
-// TestOperatorNotesAreNotClaimedToFireInstantRecall guards a claim the docs are tempting
-// to make and that is false.
-//
-// An operator note captured from a thread is written as a `Concept` entry. `Concept` is
-// evidence-free by design — chosen so a bare note clears the merge gate without
-// fabricating Symptom/Cause/Resolution sections nobody wrote — and an evidence chain is
-// exactly what the verify pass requires before a recall may short-circuit the loop. The
-// two are structurally incompatible: measured on a live cluster, six recalls of operator
-// notes at reranker confidence 0.82–0.92 produced six rejections, including one entry
-// with clean, specific metadata.
-//
-// So a note widens kb_search and never fires instant recall. Any page saying otherwise
-// promises a saving that does not exist, and — worse — would suggest a WRONG note gets
-// served back with confidence, when in fact verify is the gate that stops exactly that
-// (an adversarial test: a false note fooled the reranker at 0.92 and was caught here).
-//
-// This is a NEGATIVE guard: it cannot prove the docs describe the behaviour well, only
-// that no page asserts the specific falsehood. Stated so a passing run is not mistaken
-// for more than it is.
-func TestOperatorNotesAreNotClaimedToFireInstantRecall(t *testing.T) {
-	// A sentence tying operator notes to instant recall FIRING. Checked per SENTENCE,
-	// and a sentence carrying a negation is skipped — the honest pages are made of exactly
-	// such sentences ("a note widens kb_search; it does not enable instant recall"), and an
-	// earlier version of this guard stripped negation WORDS and then fired on the very
-	// paragraph documenting the limitation correctly. Matching the whole sentence and
-	// asking whether it is negated is the robust form.
-	claim := regexp.MustCompile(`(?i)(operator note|thread capture|@runlore note)`)
-	recall := regexp.MustCompile(`(?i)instant[- ]recall`)
-	affirm := regexp.MustCompile(`(?i)\b(fires?|firing|triggers?|enables?|short-circuits?|allows?)\b`)
-	negated := regexp.MustCompile(`(?i)\b(not|never|cannot|can't|without|nor|no)\b`)
+// operatorNotePage is the page whose §10 operator-note paragraph these guards pin.
+const operatorNotePage = "../../website/content/docs/concepts/learning-loop.md"
 
-	pages := threadDocPages(t)
-	for _, p := range pages {
-		b, err := os.ReadFile(p)
-		if err != nil {
-			t.Fatalf("read %s: %v", p, err)
-		}
-		for _, sentence := range splitSentences(string(b)) {
-			if !claim.MatchString(sentence) || !recall.MatchString(sentence) {
-				continue
-			}
-			if !affirm.MatchString(sentence) || negated.MatchString(sentence) {
-				continue
-			}
-			t.Errorf("%s claims operator notes fire instant recall, which they never do:\n  %q\n"+
-				"Notes widen kb_search only; verify rejects Concept entries (6/6 measured), and that "+
-				"rejection is also what stops a WRONG note being served with confidence.",
-				p, strings.TrimSpace(sentence))
-		}
+// filedOperatorNote runs the REAL filer — thread.ConceptEntry, the function the
+// standalone note route calls — over a realistic thread context, and returns the
+// entry it produces. Everything asserted below is read out of that entry rather than
+// restated, which is what package docsguard promises: a guard reflects over a runtime
+// source of truth, not over a hand-copied fact.
+func filedOperatorNote(t *testing.T) (description, body string) {
+	t.Helper()
+	tc := thread.Context{
+		Transport:  "slack",
+		Root:       "1723900000.000100",
+		Channel:    "C0DOCSGUARD",
+		Title:      "KubePodNotReady: harbor-registry",
+		Resource:   "tooling/harbor-registry",
+		TriggerKey: "KubePodNotReady|tooling/harbor-registry",
+	}
+	e := thread.ConceptEntry(
+		tc,
+		thread.HumanNote("alice", "this recurs after every spot-node reclaim, not a CNI fault"),
+		time.Date(2026, 8, 17, 9, 0, 0, 0, time.UTC),
+		0,
+	)
+	return e.Description, e.Body
+}
+
+// noteDescriptionRE is the shape conceptDescription actually renders for a
+// human-written note. The page QUOTES this sentence as the thing the adversarial
+// reviewer is asked to accept as a causal chain, so if the filer stops saying it — or
+// starts saying something that reads as evidence — the quotation is stale and the
+// paragraph's whole argument has to be re-derived.
+var noteDescriptionRE = regexp.MustCompile(`^Operator knowledge captured from a \w+ thread by @\S+\.$`)
+
+// TestOperatorNoteFilesNoCausalEvidence derives the two facts learning-loop.md §10
+// rests on, from the code that decides them:
+//
+//  1. the body a note files carries NO Symptom/Cause/Resolution — checked with
+//     kbvalidate.HasIncidentSections, the very predicate the merge gate uses, so a
+//     future NoteBody that starts rendering those sections fails here rather than
+//     silently making the page wrong;
+//  2. the one-line description it files says where the note came from, in the exact
+//     words the page quotes.
+//
+// Both are content properties of the filer, and that is the point: the page must NOT
+// claim verify is structurally barred from admitting a note. Nothing on the verify
+// path reads an entry's type — see TestRecalledEntryShowsTheReviewerNoBody in
+// internal/investigate — so the only true statement is that a note as filed today
+// carries nothing admissible.
+func TestOperatorNoteFilesNoCausalEvidence(t *testing.T) {
+	description, body := filedOperatorNote(t)
+
+	if kbvalidate.HasIncidentSections(body) {
+		t.Errorf("a filed operator note now carries the full Symptom/Cause/Resolution chain:\n%s\n"+
+			"learning-loop.md §10 says it carries no causal evidence — re-measure the verify behaviour "+
+			"and rewrite the paragraph before shipping this", body)
+	}
+	if !noteDescriptionRE.MatchString(description) {
+		t.Errorf("the filed description is %q, which no longer matches %v — learning-loop.md §10 quotes "+
+			"this sentence as what the reviewer is shown; update both together", description, noteDescriptionRE)
+	}
+
+	// The page quotes the same sentence, elided the way prose elides it (and wrapped,
+	// so the line break is part of the match). Anchored on both ends of the real
+	// sentence, so a rewritten description leaves a quotation that no longer exists.
+	if doc := readDoc(t, operatorNotePage); !strings.Contains(doc, "Operator knowledge captured\n  from a … thread by @…") {
+		t.Errorf("learning-loop.md §10 no longer quotes the description an operator note actually files (%q) — "+
+			"without it the paragraph asserts a rejection reason the reader cannot check", description)
 	}
 }
 
-// splitSentences breaks markdown into rough sentences for the guard above. Rough is
-// sufficient: the guard asks whether ONE claim and its negation co-occur, and both live in
-// the same sentence in every phrasing that matters.
-func splitSentences(src string) []string {
-	src = strings.ReplaceAll(src, "\n", " ")
-	return strings.FieldsFunc(src, func(r rune) bool { return r == '.' || r == ';' || r == '!' })
-}
+// TestOperatorNoteRecallCountIsTheMeasuredOne pins the one part of the paragraph that
+// is neither derivable from code nor checkable by a reader: the live-cluster
+// measurement behind #504. Four recalls, four rejections, at recall confidence
+// 0.82 / 0.85 / 0.90 / 0.92 — the issue's own evidence. An earlier draft of the page
+// said six, and attributed one of them to a hand-written entry that was never an
+// operator note at all.
+//
+// THIS GUARD CANNOT FAIL FROM THE CODE SIDE, and that is stated here rather than left
+// to be discovered: nothing in this repo reproduces those four rejections, and a
+// change to verify would not trip it. It is a consistency check between the page and a
+// recorded observation — enough to stop the count drifting again silently, and not
+// enough for a green run to mean the number is still true.
+func TestOperatorNoteRecallCountIsTheMeasuredOne(t *testing.T) {
+	doc := readDoc(t, operatorNotePage)
 
-// TestLearningLoopDocumentsTheRecallLimit is the positive half: the limitation must be
-// written down somewhere, not merely absent from the pages that would get it wrong.
-// Without this, deleting the paragraph would leave the negative guard above passing
-// vacuously.
-func TestLearningLoopDocumentsTheRecallLimit(t *testing.T) {
-	const page = "website/content/docs/concepts/learning-loop.md"
-	b, err := os.ReadFile("../../" + page)
-	if err != nil {
-		t.Fatalf("read %s: %v", page, err)
+	measured := regexp.MustCompile(`\*\*(\w+) recalls of operator notes across two\s+incidents, at recall confidence 0\.82–0\.92, and (\w+) rejections\*\*`)
+	m := measured.FindStringSubmatch(doc)
+	if m == nil {
+		t.Fatalf("learning-loop.md §10 no longer states the #504 measurement in the pinned form (%v) — "+
+			"if the sentence was reworded, reword this guard with it", measured)
 	}
-	src := strings.ToLower(string(b))
+	if m[1] != "four" || m[2] != "four" {
+		t.Errorf("learning-loop.md §10 says %s recalls / %s rejections; issue #504 measured four and four "+
+			"(0.82, 0.85, 0.90, 0.92) — re-measure before changing the number", m[1], m[2])
+	}
+
+	// Four-out-of-four is an observation, not a rule. Without these the page could keep
+	// the right number and still assert the impossibility claim the code does not make.
 	for _, want := range []string{
-		"widens `kb_search`", // what a note DOES do
-		"instant recall",     // what it does not
-		"concept",            // the entry type that makes it structural
-		"verify",             // the gate that rejects it
+		"not a rule in the code",
+		"Nothing on the\n  verify path reads an entry's `type`",
 	} {
-		if !strings.Contains(src, strings.ToLower(want)) {
-			t.Errorf("%s no longer explains the operator-note recall limit: missing %q", page, want)
+		if !strings.Contains(doc, want) {
+			t.Errorf("learning-loop.md §10 must keep the caveat containing %q — otherwise the measurement "+
+				"reads as a structural guarantee that the code does not make", want)
 		}
 	}
 }

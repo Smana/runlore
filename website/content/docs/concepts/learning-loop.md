@@ -11,12 +11,18 @@ weight: 30
 > answer from a git-versioned catalog — instant, no investigation; otherwise it
 > investigates. It then **captures** whether the incident actually resolved,
 > **curates** a verified, novel finding into a **human-reviewed pull request**, and
-> once a human merges it the note **compounds** (recall-able next time). What makes
+> once a human merges it the entry **compounds** (recall-able next time). What makes
 > this *learning* and not note-taking: a note's trust is **derived from its real-world
 > resolve-rate** (plus 👍/👎 votes), so a note that stops working **decays** and can be
 > overturned. And the human stays in the loop throughout — **RunLore drafts, a human
 > merges; nothing is auto-written.** (Deep dives: §3 Retrieve, §4 Capture, §6 Decay,
 > §8 Validation.)
+
+> **Terminology.** On this page a **note** always means a *curated entry* — the
+> symptom → cause → resolution record RunLore drafts and a human merges. An **operator
+> note** is a different object: a message a human writes in a chat thread, which RunLore
+> files to the KB. It is not evidence-bearing and it behaves differently on the recall
+> path; see §10.
 
 ---
 
@@ -800,31 +806,44 @@ Honesty is part of the design:
   coalesced or cross-namespace incidents — only applies to legacy/hand-filed PRs that
   carry no fingerprint marker.
 - **Nightly eval** only produces signal once a model API-key secret is configured.
-- **An operator note widens `kb_search`; it does not enable instant recall.** A note
-  captured from a thread is written as a `Concept` entry, and `Concept` is
-  evidence-free by design — that type was chosen precisely so a bare note clears the
-  merge gate without fabricating Symptom/Cause/Resolution sections nobody wrote. But an
-  evidence chain is exactly what the verify pass asks for before a recall may
-  short-circuit the loop, so the two are structurally incompatible. Measured on a live
-  cluster: **six recalls of operator notes across two incidents, at reranker confidence
-  0.82–0.92, and six rejections** — *"a match to a knowledge-base entry is not causal
-  evidence"*, *"a Slack thread opinion is not evidence"*. One of those six was a
-  hand-written entry with clean, specific metadata, so this is not a title-quality
-  problem.
+- **An operator note widens `kb_search`; so far it has never survived verify to fire an
+  instant recall.** A note carries no causal evidence, on either write route. The primary
+  route is a *comment on the curator's open pull request*, so the note is not a catalog
+  entry at all until a human folds it into one; only when there is no open PR does it
+  become a standalone entry of its own, typed `Concept` because `kbvalidate` demands
+  Symptom/Cause/Resolution for `Incident` and fabricating those sections would be a lie.
+  So there is never a recallable entry that is *both* the operator's words and an
+  evidence chain: on the primary route the note is not an entry, and on the standalone
+  route the entry has neither section — only the words, under a one-line description
+  saying exactly where they came from: *"Operator knowledge captured
+  from a … thread by @…"*.
 
-  **This is currently a safety property, not only a limitation.** In an adversarial
-  test a deliberately false note fooled the reranker completely (0.92, *"the canonical
-  runbook for this exact incident"*) and fired instant recall — and verify was the only
-  gate that caught it, after which the full loop reached the correct answer and rebutted
-  the note. So the honest summary is that notes pay off on the *slower* path and are
-  prevented from paying off wrongly on the fast one. They still pay off: on an identical
-  alert, a pointer-only note (no conclusion, no proof) moved a finding from a wrong
-  mechanism to the right one, 60% → 75% confidence, 15 → 7 model calls, ~$0.70 → ~$0.18.
+  That description is nearly all the adversarial reviewer ever sees of it.
+  `renderForReview` shows each root cause's **summary** — on the recall path, the entry's
+  title and description — plus its evidence bullets and the confirm step's tool
+  transcript. **The entry's body never reaches the reviewer**, which is exactly why
+  `kb_search` is the path a note pays off on: `kb_search` renders the whole entry, body
+  included. Measured on a live cluster: **four recalls of operator notes across two
+  incidents, at recall confidence 0.82–0.92, and four rejections** — *"a match to a
+  knowledge-base entry is not causal evidence"*, *"a Slack thread opinion is not
+  evidence"*.
 
-  Letting a *confirmed* note graduate to an `Incident` entry — carrying the evidence of
-  the investigation that confirmed it — is the promising fix, because it earns
-  admissibility rather than asserting it. It changes the curation lifecycle, so it needs
-  its own design.
+  **This is a property of what a note says, not a rule in the code.** Nothing on the
+  verify path reads an entry's `type`; an `Incident` entry recalled the same way goes
+  through the same function, and its Symptom/Cause/Resolution do not reach the reviewer
+  either. So *"a note can never be recalled"* would be the wrong lesson to take from
+  four-out-of-four: it is what the reviewer has judged every time it has been asked, on
+  this wording, not a gate that forbids the outcome. Changing what a note *files* is
+  therefore a live option — including letting a *confirmed* note graduate to an
+  `Incident` carrying the evidence of the investigation that confirmed it. That changes
+  the curation lifecycle, so it needs its own design.
+
+  **Meanwhile the rejections are doing safety work.** The poisoned-entry eval scenario
+  (§8) shows the same gate catching a crafted wrong recall, after which the loop falls
+  through to a real investigation instead of publishing it. And notes still pay off on
+  that slower path: on an identical alert, a pointer-only note (no conclusion, no proof)
+  moved a finding from a wrong mechanism to the right one, 60% → 75% confidence, 15 → 7
+  model calls, ~$0.70 → ~$0.18.
 
 The loop is closed and measured; these are the next increments, sequenced so each is
 its own reviewed change.

@@ -53,6 +53,14 @@ RunLore files it against that investigation's KB pull request, or opens a
 standalone note PR when there is none, and replies with a link to what it wrote.
 Your words are recorded verbatim, attributed to you.
 
+**Where a captured note pays off.** The four routes above all end in a merged pull
+request, but they do not all produce the same kind of entry. A captured note carries
+no symptom → cause → resolution chain, so once merged it widens what `kb_search` finds
+*during* an investigation — measurably useful — while the adversarial verify pass has
+so far rejected every recalled operator note rather than letting it answer an incident
+outright. [Learning Loop §10]({{< relref "learning-loop.md" >}}) has the measurement
+and why that is currently the safe behaviour.
+
 Optionally, with a `model.chat` block configured, plain questions in the thread are
 answered too — from the investigation's own evidence — and RunLore proposes a note
 itself when your message contained something durable. A model-drafted note is
