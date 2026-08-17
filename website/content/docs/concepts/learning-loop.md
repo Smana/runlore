@@ -800,6 +800,31 @@ Honesty is part of the design:
   coalesced or cross-namespace incidents — only applies to legacy/hand-filed PRs that
   carry no fingerprint marker.
 - **Nightly eval** only produces signal once a model API-key secret is configured.
+- **An operator note widens `kb_search`; it does not enable instant recall.** A note
+  captured from a thread is written as a `Concept` entry, and `Concept` is
+  evidence-free by design — that type was chosen precisely so a bare note clears the
+  merge gate without fabricating Symptom/Cause/Resolution sections nobody wrote. But an
+  evidence chain is exactly what the verify pass asks for before a recall may
+  short-circuit the loop, so the two are structurally incompatible. Measured on a live
+  cluster: **six recalls of operator notes across two incidents, at reranker confidence
+  0.82–0.92, and six rejections** — *"a match to a knowledge-base entry is not causal
+  evidence"*, *"a Slack thread opinion is not evidence"*. One of those six was a
+  hand-written entry with clean, specific metadata, so this is not a title-quality
+  problem.
+
+  **This is currently a safety property, not only a limitation.** In an adversarial
+  test a deliberately false note fooled the reranker completely (0.92, *"the canonical
+  runbook for this exact incident"*) and fired instant recall — and verify was the only
+  gate that caught it, after which the full loop reached the correct answer and rebutted
+  the note. So the honest summary is that notes pay off on the *slower* path and are
+  prevented from paying off wrongly on the fast one. They still pay off: on an identical
+  alert, a pointer-only note (no conclusion, no proof) moved a finding from a wrong
+  mechanism to the right one, 60% → 75% confidence, 15 → 7 model calls, ~$0.70 → ~$0.18.
+
+  Letting a *confirmed* note graduate to an `Incident` entry — carrying the evidence of
+  the investigation that confirmed it — is the promising fix, because it earns
+  admissibility rather than asserting it. It changes the curation lifecycle, so it needs
+  its own design.
 
 The loop is closed and measured; these are the next increments, sequenced so each is
 its own reviewed change.
