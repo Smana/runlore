@@ -27,13 +27,19 @@ type GitOpsTreeTool struct {
 // Name returns the tool name.
 func (t GitOpsTreeTool) Name() string { return "gitops_tree" }
 
-// Description returns the tool description.
+// Description returns the tool description, describing only the engine this deployment
+// actually runs — see GitOpsStatusTool.Description.
 func (t GitOpsTreeTool) Description() string {
-	return "Walk a GitOps resource's dependency graph (a Flux resource's dependsOn/sourceRef, or an " +
-		"Argo CD Application's managed-resource tree) and render it with each node's Ready/health state. " +
-		"Use it on a failing resource to find the ROOT cause — the first not-Ready/Degraded or NOT FOUND " +
-		"node — instead of the downstream symptom. GitOps objects ONLY, not arbitrary Kubernetes " +
-		"resources: " + gitopsKindProse(t.Engine)
+	graph := "a Flux resource's dependsOn/sourceRef edges"
+	if t.Engine == "argocd" {
+		graph = "an Argo CD Application's managed-resource tree"
+	}
+	return "Walk a GitOps resource's dependency graph (" + graph + ") and render it with each " +
+		"node's Ready/health state. Use it on a failing resource to look for the ROOT cause — the " +
+		"first not-Ready/Degraded node, or one the API did not return — instead of the downstream " +
+		"symptom. A node the API did not return is a lookup result, not a root cause: establish " +
+		"that from other evidence. GitOps objects ONLY, not arbitrary Kubernetes resources: " +
+		gitopsKindProse(t.Engine)
 }
 
 // Schema returns the JSON schema for the arguments.

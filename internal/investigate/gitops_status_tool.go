@@ -26,12 +26,18 @@ type GitOpsStatusTool struct {
 // Name returns the tool name.
 func (t GitOpsStatusTool) Name() string { return "gitops_resource_status" }
 
-// Description returns the tool description.
+// Description returns the tool description, describing only the engine this deployment
+// actually runs: naming the other one's concepts alongside an enum that refuses them is
+// the same dead end as advertising its kinds.
 func (t GitOpsStatusTool) Description() string {
-	return "Get a GitOps resource's status (a Flux Ready condition or an Argo CD " +
-		"Application's health/sync: status, reason, message), key spec refs, and recent Events. Use " +
-		"this to learn WHY a resource is failing — follow its refs to the root. This reads GitOps " +
-		"objects ONLY, not arbitrary Kubernetes resources: " + gitopsKindProse(t.Engine)
+	lens := "its Flux Ready condition"
+	if t.Engine == "argocd" {
+		lens = "the Argo CD Application's health/sync"
+	}
+	return "Get a GitOps resource's status (" + lens + ": status, reason, message), key spec " +
+		"refs, and recent Events. Use this to learn WHY a resource is failing — follow its refs " +
+		"to the root. This reads GitOps objects ONLY, not arbitrary Kubernetes resources: " +
+		gitopsKindProse(t.Engine)
 }
 
 // Schema returns the JSON schema for the arguments.

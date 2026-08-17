@@ -12,6 +12,9 @@ import (
 	"github.com/Smana/runlore/internal/providers"
 )
 
+// GitOpsEngine reports the engine this provider speaks — see flux.Provider.GitOpsEngine.
+func (p *Provider) GitOpsEngine() providers.Engine { return providers.EngineArgoCD }
+
 // ResourceStatus reports an Argo CD Application's health + sync status, key
 // source/destination refs, error conditions, and recent Events — the Argo analogue of
 // the Flux inspector's "why is it failing" lens. A read that returns no Application is

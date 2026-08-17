@@ -284,12 +284,78 @@ func TestGitOpsToolsAdvertiseTheConfiguredEngine(t *testing.T) {
 						t.Errorf("%s: engine %q offers %q, which that engine cannot own, enum = %v",
 							tl.Name(), tc.engine, absent, enum)
 					}
+					// The description is a second, independent channel to the model: prose
+					// naming a kind the enum refuses sends it to a dead end.
+					if strings.Contains(tl.Description(), absent) {
+						t.Errorf("%s: engine %q describes %q, which the enum refuses:\n%s",
+							tl.Name(), tc.engine, absent, tl.Description())
+					}
 				}
 			}
 			if found != 2 {
 				t.Fatalf("want gitops_resource_status + gitops_tree registered, found %d in %v", found, toolNames(tools))
 			}
 		})
+	}
+}
+
+// argoReportingGitOps is an inspecting provider that reports itself as Argo CD, the way
+// *argocd.Provider does. The config it is paired with says something else.
+type argoReportingGitOps struct{ inspectingGitOps }
+
+func (argoReportingGitOps) GitOpsEngine() providers.Engine { return providers.EngineArgoCD }
+
+// TestGitOpsToolsFollowTheWiredProvider pins where the engine comes from.
+//
+// The tool description states which engine this deployment runs, in the tool list, on
+// every turn. Sourcing that from gitops.engine means an operator typo decides it:
+// GitopsEngine folds "argo", "ArgoCD" and everything else into flux without a word
+// (pinned as intended by TestGitopsEngine), so an Argo CD cluster would be described as
+// running Flux and offered Flux kinds it can never own — runlore#503 reached by a
+// misspelling. The provider that will actually answer the calls knows better, so it is
+// asked.
+func TestGitOpsToolsFollowTheWiredProvider(t *testing.T) {
+	t.Setenv("KUBECONFIG", filepath.Join(t.TempDir(), "nonexistent-kubeconfig"))
+	log := discardLog()
+
+	cfg := &config.Config{Model: config.Model{Provider: "openai", BaseURL: "http://vllm:8000/v1", Model: "test-model"}}
+	cfg.GitOps.Engine = "argo" // a misspelling: GitopsEngine silently resolves it to flux
+	_, tools, _, _ := BuildModelAndTools(context.Background(), cfg, argoReportingGitOps{}, nil, log)
+
+	found := 0
+	for _, tl := range tools {
+		if tl.Name() != "gitops_resource_status" && tl.Name() != "gitops_tree" {
+			continue
+		}
+		found++
+		if enum := schemaKindEnum(t, tl.Name(), tl.Schema()); !slices.Equal(enum, []string{"Application"}) {
+			t.Errorf("%s: enum = %v, want [Application] — the wired provider reports Argo CD, "+
+				"whatever gitops.engine says", tl.Name(), enum)
+		}
+	}
+	if found != 2 {
+		t.Fatalf("want both GitOps tools registered, found %d", found)
+	}
+}
+
+// TestUnknownGitopsEngineWarns pins the startup warning for the same misconfiguration.
+// The fallback is deliberate and stays, but it must not be silent: a deployment scoped to
+// the wrong engine looks identical to a correctly configured one in every log line.
+func TestUnknownGitopsEngineWarns(t *testing.T) {
+	for _, quiet := range []string{"", "flux", "argocd"} {
+		if msg := UnknownGitopsEngineWarning(quiet); msg != "" {
+			t.Errorf("gitops.engine=%q is valid but warned: %s", quiet, msg)
+		}
+	}
+	for _, typo := range []string{"argo", "ArgoCD", "argo-cd", "fluxcd"} {
+		msg := UnknownGitopsEngineWarning(typo)
+		if msg == "" {
+			t.Errorf("gitops.engine=%q silently resolves to flux with no warning", typo)
+			continue
+		}
+		if !strings.Contains(msg, typo) {
+			t.Errorf("the warning for %q does not name the offending value: %s", typo, msg)
+		}
 	}
 }
 

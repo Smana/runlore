@@ -393,6 +393,11 @@ func parseRevision(rev string) string {
 	return rev
 }
 
+// GitOpsEngine reports the engine this provider speaks, so a consumer can describe the
+// deployment from the provider it was handed instead of from the unvalidated
+// gitops.engine string. It is the same fact every Change already carries.
+func (p *Provider) GitOpsEngine() providers.Engine { return providers.EngineFlux }
+
 // ResourceStatus returns a Flux/K8s object's Ready condition, key spec refs
 // (sourceRef, dependsOn, url) and recent Events — the "why is it failing" lens.
 // A read that returns no object is reported via NotFound + Lookup, not an error, so the

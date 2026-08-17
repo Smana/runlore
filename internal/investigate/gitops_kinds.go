@@ -177,13 +177,30 @@ func gitopsKindSchema(engine string) string {
 		`"required":["kind","name","namespace"]}`
 }
 
-// gitopsKindProse renders the supported kinds for a tool description, naming the engine so
-// the model is told why the list is short rather than left to infer a missing capability.
+// gitopsKindProse renders the supported kinds for a tool description, naming the engine
+// so the model is told why the list is short rather than left to infer a missing
+// capability.
+//
+// What it deliberately does NOT say is what used to follow: "this deployment runs Argo
+// CD; Flux kinds cannot exist here". That is a claim about the CLUSTER, made in the tool
+// list on every turn, derived from a config string nothing validates — app.GitopsEngine
+// maps "argo", "ArgoCD" and every other misspelling silently to flux — and false outright
+// on a cluster running both engines mid-migration. Before this branch that case produced
+// an honest tool ERROR, which the loop already reads as missing data; a fluent unhedged
+// claim in the prompt is worse, because the model has nothing to notice.
+//
+// Which kinds this tool resolves is a fact about the tool, and that is all this says.
 func gitopsKindProse(engine string) string {
-	if engine == "argocd" {
-		return "kind must be one of: " + strings.Join(GitOpsKinds(engine), ", ") +
-			" (this deployment runs Argo CD; Flux kinds cannot exist here)."
-	}
 	return "kind must be one of: " + strings.Join(GitOpsKinds(engine), ", ") +
-		" (this deployment runs Flux; Argo CD kinds cannot exist here)."
+		" — the GitOps kinds this deployment's " + engineDisplayName(engine) + " provider " +
+		"resolves. Any other kind is outside this tool's scope, which is not evidence about " +
+		"whether such an object exists; use pod_status, kube_events or query_metrics for those."
+}
+
+// engineDisplayName renders an engine for prose.
+func engineDisplayName(engine string) string {
+	if engine == "argocd" {
+		return "Argo CD"
+	}
+	return "Flux"
 }

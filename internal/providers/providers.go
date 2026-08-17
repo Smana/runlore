@@ -309,6 +309,18 @@ type DepNode struct {
 	Children []DepNode
 }
 
+// GitOpsEngineReporter is an optional capability: a GitOps provider naming the engine it
+// speaks. Consumers type-assert for it exactly like GitOpsInspector.
+//
+// It exists so a consumer can source the engine from the provider it was actually handed
+// rather than from gitops.engine, which nothing validates — "argo" and "ArgoCD" both fall
+// through to flux — and which therefore cannot support a statement about the deployment.
+// Both providers already tag every Change they emit with their Engine; this exposes the
+// same fact before there is a Change to read.
+type GitOpsEngineReporter interface {
+	GitOpsEngine() Engine
+}
+
 // GitOpsInspector is optional read-only deep introspection for an investigation:
 // a resource's status/refs/events and its dependency tree. Not every engine
 // implements it (Flux does); consumers type-assert for it.

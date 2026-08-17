@@ -417,26 +417,56 @@ func TestGitOpsTreeRecordsOnlyNodesItActuallyRead(t *testing.T) {
 // TestGitOpsDescriptionsMatchTheEngine stops the prose and the enum drifting apart: a
 // description naming kinds the schema refuses would send the model to a dead end, which is
 // the same class of confusion in the opposite direction.
+//
+// The flux side is checked too, and it was not before — which is how the descriptions kept
+// naming "an Argo CD Application" on a Flux deployment whose enum refuses that kind.
 func TestGitOpsDescriptionsMatchTheEngine(t *testing.T) {
-	for _, d := range []string{
-		GitOpsStatusTool{Engine: "argocd"}.Description(),
-		GitOpsTreeTool{Engine: "argocd"}.Description(),
+	for engine, foreign := range map[string][]string{
+		"argocd": {"HelmRelease", "Kustomization", "OCIRepository", "Flux"},
+		"flux":   {"Application", "Argo CD"},
 	} {
-		for _, flux := range []string{"HelmRelease", "Kustomization", "OCIRepository"} {
-			if strings.Contains(d, flux) {
-				t.Errorf("argocd description advertises the Flux kind %s:\n%s", flux, d)
+		for _, d := range []string{
+			GitOpsStatusTool{Engine: engine}.Description(),
+			GitOpsTreeTool{Engine: engine}.Description(),
+		} {
+			for _, other := range foreign {
+				if strings.Contains(d, other) {
+					t.Errorf("%s description mentions %q, which this deployment's enum refuses:\n%s",
+						engine, other, d)
+				}
+			}
+			for _, own := range GitOpsKinds(engine) {
+				if !strings.Contains(d, own) {
+					t.Errorf("%s description omits the supported kind %s:\n%s", engine, own, d)
+				}
 			}
 		}
-		if !strings.Contains(d, "Application") {
-			t.Errorf("argocd description does not name its one supported kind:\n%s", d)
-		}
 	}
-	for _, d := range []string{
-		GitOpsStatusTool{Engine: "flux"}.Description(),
-		GitOpsTreeTool{Engine: "flux"}.Description(),
-	} {
-		if !strings.Contains(d, "HelmRelease") {
-			t.Errorf("flux description does not name HelmRelease:\n%s", d)
+}
+
+// TestGitOpsProseMakesNoClaimAboutTheCluster is F4. The description read:
+//
+//	(this deployment runs Argo CD; Flux kinds cannot exist here)
+//
+// A cluster fact, stated in the tool list on every single turn, derived from an
+// UNVALIDATED config string: app.GitopsEngine maps "argo", "ArgoCD" and every other
+// misspelling silently to flux (pinned as intended by its own test), and a cluster
+// mid-migration runs both engines at once. Before this branch that case produced an
+// honest tool ERROR, which the loop already reads as missing data; the branch turned it
+// into a fluent unhedged claim. The lie moved out of the answer and into the prompt.
+//
+// The list of kinds is a fact about this tool. What cannot exist on the cluster is not.
+func TestGitOpsProseMakesNoClaimAboutTheCluster(t *testing.T) {
+	for _, engine := range []string{"flux", "argocd", ""} {
+		prose := gitopsKindProse(engine)
+		for _, claim := range []string{"cannot exist", "do not exist", "does not exist", "no Flux", "no Argo"} {
+			if strings.Contains(strings.ToLower(prose), strings.ToLower(claim)) {
+				t.Errorf("engine %q: the kind list asserts %q about the cluster:\n%s", engine, claim, prose)
+			}
+		}
+		if !strings.Contains(prose, "not evidence") {
+			t.Errorf("engine %q: the kind list does not say an out-of-scope kind is not evidence "+
+				"of absence:\n%s", engine, prose)
 		}
 	}
 }
