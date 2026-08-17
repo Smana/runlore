@@ -10,7 +10,7 @@ import (
 )
 
 const (
-	// compactionBudgetFraction is the fraction of MaxTokensPerInvestigation at which
+	// compactionBudgetFraction is the fraction of the PER-REQUEST budget at which
 	// compaction triggers and the size it elides back down to (headroom for more steps).
 	compactionBudgetFraction = 0.7
 	// keepRecentToolOutputs is the number of most-recent tool results kept verbatim
@@ -50,13 +50,18 @@ func isElidedMarker(s string) bool {
 	return strings.HasPrefix(s, elidedPrefix) && strings.HasSuffix(s, elidedSuffix)
 }
 
-// compactionTarget returns the estimate at/below which compaction stops: 0.7 * budget.
-// budget <= 0 disables compaction (returns 0).
-func compactionTarget(budget int) int {
-	if budget <= 0 {
-		return 0
-	}
-	return int(float64(budget) * compactionBudgetFraction)
+// compactionTarget returns the estimate at/below which compaction stops: 0.7 x the
+// budget for ONE request, itself a quarter of the investigation's cumulative token
+// budget. cumulative <= 0 disables compaction (returns 0).
+//
+// It keys off the per-request budget because that is the quantity compaction can act
+// on: it shrinks the NEXT request, and can never un-spend what is already billed.
+// Keyed off the cumulative budget the trigger sits at a size no single request reaches
+// before the run's accumulated spend has crossed the ceiling — see
+// requestBudgetFraction, and TestCompactionFiresBeforeTheCumulativeCeiling, which
+// drives the loop until compaction actually fires rather than asserting it could.
+func compactionTarget(cumulative int) int {
+	return int(float64(requestBudget(cumulative)) * compactionBudgetFraction)
 }
 
 // elidedOutput records one tool-result body that compaction removed: the tool that

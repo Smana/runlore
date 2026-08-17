@@ -248,17 +248,27 @@ func runDemoInvestigateWithModel(args []string, out, errOut io.Writer, model pro
 			demoMinScore, demoSoloFloor)
 	}
 
+	// The demo drives the operator's real, billed model against a canned scenario, so
+	// it carries the same spend ceilings as every other loop — a walkthrough is a bad
+	// place to discover an unbounded run.
+	loopPricing, verifyPricing := investigationPricing(cfg)
 	var result *providers.Investigation
 	li := &investigate.LoopInvestigator{
-		Model:         model,
-		VerifyModel:   verifyModel,
-		Tools:         tools,
-		Recall:        recall,
-		Log:           log,
-		Verify:        true,
-		ModelProvider: cfg.Model.Provider,
-		Timeout:       cfg.Investigation.Timeout.Std(),
-		OnComplete:    func(inv providers.Investigation) { result = &inv },
+		Model:                     model,
+		VerifyModel:               verifyModel,
+		Tools:                     tools,
+		Recall:                    recall,
+		Log:                       log,
+		Verify:                    true,
+		ModelProvider:             cfg.Model.Provider,
+		Pricing:                   loopPricing,
+		VerifyPricing:             verifyPricing,
+		MaxSteps:                  cfg.Investigation.MaxSteps,
+		MaxToolOutputBytes:        cfg.Investigation.MaxToolOutputBytes,
+		MaxTokensPerInvestigation: cfg.Investigation.MaxTokensPerInvestigation,
+		MaxCostPerInvestigation:   cfg.Investigation.MaxCostPerInvestigation,
+		Timeout:                   cfg.Investigation.Timeout.Std(),
+		OnComplete:                func(inv providers.Investigation) { result = &inv },
 	}
 	req := investigate.Request{
 		Source:   investigate.SourceAlert,

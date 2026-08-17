@@ -450,6 +450,24 @@ func toPricing(p *config.Pricing) *investigate.Pricing {
 	}
 }
 
+// investigationPricing returns the two rate cards every LoopInvestigator needs: the
+// main model's, and the verify pass's — which inherits the main one WHOLE when the
+// override sets none, so a cheaper verify model is costed at its own rates and an
+// unset one is not accidentally costed at zero.
+//
+// Shared by all four construction sites rather than repeated at each: pricing is no
+// longer only a reporting detail (a wrong or missing rate card used to mean a missing
+// dollar figure on a notification; it now means a cost ceiling that cannot fire), so
+// the derivation must be identical everywhere it is built.
+func investigationPricing(cfg *config.Config) (loop, verify *investigate.Pricing) {
+	loop = toPricing(cfg.Model.Pricing)
+	verify = loop
+	if v := cfg.Model.Verify; v != nil && v.Pricing != nil {
+		verify = toPricing(v.Pricing)
+	}
+	return loop, verify
+}
+
 // kbMatchScore returns the BM25 bar the kb-match visibility signal
 // (Investigation.MatchedKnowledge — the "📚 Matches known runbook" block) uses to decide
 // a full investigation's kb_search hit is a clear known-runbook match worth surfacing.
@@ -598,11 +616,7 @@ func BuildInvestigator(ctx context.Context, cfg *config.Config, deps *Deps, appr
 	// Per-investigation cost reporting (optional). The verify override inherits the
 	// main pricing when it sets none (whole-struct inherit), so a cheaper verify
 	// model is costed correctly.
-	mainPricing := toPricing(cfg.Model.Pricing)
-	verifyPricing := mainPricing
-	if v := cfg.Model.Verify; v != nil && v.Pricing != nil {
-		verifyPricing = toPricing(v.Pricing)
-	}
+	mainPricing, verifyPricing := investigationPricing(cfg)
 	// A nil *catalog.Catalog must stay a nil INTERFACE here: assigning a typed-nil
 	// *catalog.Catalog to prior would make prior != nil true (interface holds a
 	// non-nil type descriptor even with a nil pointer), and onInvestigationComplete's
@@ -631,6 +645,7 @@ func BuildInvestigator(ctx context.Context, cfg *config.Config, deps *Deps, appr
 		MaxSteps:                  cfg.Investigation.MaxSteps,
 		MaxToolOutputBytes:        cfg.Investigation.MaxToolOutputBytes,
 		MaxTokensPerInvestigation: cfg.Investigation.MaxTokensPerInvestigation,
+		MaxCostPerInvestigation:   cfg.Investigation.MaxCostPerInvestigation,
 		Compaction:                cfg.Investigation.Compaction,
 		Timeout:                   cfg.Investigation.Timeout.Std(),
 		ToolTimeout:               toolTimeout,

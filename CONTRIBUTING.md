@@ -221,6 +221,23 @@ the rendered HTML.
 Releases are fully automated from the [Conventional Commits](https://www.conventionalcommits.org/) you
 already write — there is nothing to tag by hand.
 
+> ### Changing existing behaviour? Say so, or the migration note goes nowhere.
+>
+> `CHANGELOG.md` renders **only the commit subject line** for every type. However good the explanation
+> in your commit body, an operator upgrading never sees it — the one exception is a
+> `BREAKING CHANGE:` footer, whose prose release-please lifts verbatim into a `⚠ BREAKING CHANGES`
+> section at the top of the release. So a change that alters what an existing config key *means* needs:
+>
+> 1. **`!` after the type/scope** — `fix(investigate)!: …` — and, because PRs are **squash-merged**,
+>    the PR **title** is what release-please parses, not the commits on your branch. Put the marker
+>    there.
+> 2. **A `BREAKING CHANGE:` footer in the squash-commit body** (editable in the GitHub merge dialog)
+>    carrying the migration paragraph: what changed, what an operator will observe, and what to set.
+>
+> Nothing in CI lints this — a missing marker fails silently by simply not appearing in the changelog,
+> which is why it is written down here. Pre-1.0 a breaking change bumps the **minor** version
+> (`bump-minor-pre-major` in `release-please-config.json`); it does not cut a 1.0.0.
+
 1. **You merge `feat:` / `fix:` / etc. PRs to `main`** as usual.
 2. **[release-please](https://github.com/googleapis/release-please) opens (and keeps updating) a release
    PR** — `.github/workflows/release-please.yml`. It computes the next [SemVer](https://semver.org/) from

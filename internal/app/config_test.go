@@ -535,3 +535,99 @@ func TestOutcomeKind(t *testing.T) {
 		t.Fatalf("OutcomeKind(false) = %q, want %q", got, "fresh")
 	}
 }
+
+// TestCostCeilingWithoutPricingWarning covers the (ceiling set × pricing shape)
+// matrix. Every rate card that cannot price what the provider actually bills warns;
+// a complete rate card, and no ceiling at all, stay silent — a warning that fired on a
+// correct config would be muted within a day and take the real ones with it.
+//
+// The PARTIAL cases are what the all-zero check missed. cached_input_usd_per_mtok is
+// the most commonly forgotten of the three, and all three model providers RunLore
+// speaks report cache reads (anthropic CacheReadInputTokens, openai
+// prompt_tokens_details.cached_tokens, gemini cachedContentTokenCount), so leaving it
+// at 0 prices every cache read at $0: on a cache-heavy run that under-estimates the
+// input term several-fold, the ceiling permits materially more than its number, and
+// the footer plus runlore_investigation_cost_usd report a confident wrong figure. Same
+// "looks instrumented for spend when it is not" failure the all-zero warning catches.
+func TestCostCeilingWithoutPricingWarning(t *testing.T) {
+	rates := &config.Pricing{InputUSDPerMTok: 3, OutputUSDPerMTok: 15, CachedInputUSDPerMTok: 0.3}
+	zeroed := &config.Pricing{}
+	noCached := &config.Pricing{InputUSDPerMTok: 3, OutputUSDPerMTok: 15}
+
+	tests := []struct {
+		name     string
+		ceiling  float64
+		pricing  *config.Pricing
+		wantWarn bool
+		wantSays string // a phrase the message must carry, naming the specific dead config
+	}{
+		{"no ceiling, no pricing", 0, nil, false, ""},
+		{"no ceiling, with pricing", 0, rates, false, ""},
+		{"no ceiling, partial rates", 0, noCached, false, ""},
+		{"ceiling with a complete rate card", 2.5, rates, false, ""},
+		{"ceiling, no pricing at all", 2.5, nil, true, "model.pricing is not configured"},
+		{"ceiling, all rates zero", 2.5, zeroed, true, "every model.pricing rate is 0"},
+		{"ceiling, cached rate omitted", 2.5, noCached, true, "cached_input_usd_per_mtok"},
+		{"ceiling, input rate omitted", 2.5,
+			&config.Pricing{OutputUSDPerMTok: 15, CachedInputUSDPerMTok: 0.3}, true, "input_usd_per_mtok"},
+		{"ceiling, output rate omitted", 2.5,
+			&config.Pricing{InputUSDPerMTok: 3, CachedInputUSDPerMTok: 0.3}, true, "output_usd_per_mtok"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := &config.Config{}
+			cfg.Investigation.MaxCostPerInvestigation = tc.ceiling
+			cfg.Model.Pricing = tc.pricing
+			got := CostCeilingWithoutPricingWarning(cfg)
+			if (got != "") != tc.wantWarn {
+				t.Fatalf("CostCeilingWithoutPricingWarning(ceiling=%v, pricing=%+v) = %q, wantWarn = %v",
+					tc.ceiling, tc.pricing, got, tc.wantWarn)
+			}
+			if !tc.wantWarn {
+				return
+			}
+			if !strings.Contains(got, tc.wantSays) {
+				t.Fatalf("message must name the specific dead configuration (%q): %q", tc.wantSays, got)
+			}
+			// Every warning must carry the key at issue and a way out; a paragraph
+			// that only says "this is wrong" costs an operator a docs hunt.
+			for _, want := range []string{"max_cost_per_investigation", "model.pricing"} {
+				if !strings.Contains(got, want) {
+					t.Fatalf("message missing %q — it must name the key, the missing input and the consequence: %q", want, got)
+				}
+			}
+		})
+	}
+}
+
+// TestPartialPricingWarningNamesEveryMissingRate pins that the message lists ALL the
+// rates left at 0, not just the first one found, and accuses none that are set. An
+// operator who fixes the one rate the warning named and restarts into the same warning
+// learns to distrust it.
+func TestPartialPricingWarningNamesEveryMissingRate(t *testing.T) {
+	cfg := &config.Config{}
+	cfg.Investigation.MaxCostPerInvestigation = 2.5
+	cfg.Model.Pricing = &config.Pricing{OutputUSDPerMTok: 15}
+	got := CostCeilingWithoutPricingWarning(cfg)
+	// The accusation clause must list both unset rates and neither the set one. Pinned
+	// as one phrase rather than three Contains calls because the remedy sentence names
+	// all three keys by design — only the accusation may be selective.
+	const want = "leaves input_usd_per_mtok and cached_input_usd_per_mtok at 0"
+	if !strings.Contains(got, want) {
+		t.Fatalf("the warning must accuse exactly the rates left at 0, want it to say %q: %q", want, got)
+	}
+}
+
+// TestCostCeilingWarningIgnoresVerifyPricing pins that model.verify.pricing cannot
+// silence the warning. It only overrides the VERIFY pass's rates and inherits
+// model.pricing when unset, so it can neither price an otherwise-unpriced
+// investigation nor rescue an all-zero main rate card — a deployment that sets it
+// alone still has a ceiling that never fires.
+func TestCostCeilingWarningIgnoresVerifyPricing(t *testing.T) {
+	cfg := &config.Config{}
+	cfg.Investigation.MaxCostPerInvestigation = 2.5
+	cfg.Model.Verify = &config.ModelOverride{Pricing: &config.Pricing{InputUSDPerMTok: 3, OutputUSDPerMTok: 15}}
+	if got := CostCeilingWithoutPricingWarning(cfg); got == "" {
+		t.Fatal("model.verify.pricing alone leaves the loop unpriced — the ceiling still cannot fire, so the warning must stand")
+	}
+}

@@ -179,7 +179,7 @@ models:
 	if err != nil {
 		t.Fatalf("config.Load: %v", err)
 	}
-	if err := RunEvalCompare(cfg, comparePath, casesDir, reportDir, "2026-07-02T00:00:00Z", 2, "", "", "", ""); err != nil {
+	if err := RunEvalCompare(cfg, nil, comparePath, casesDir, reportDir, "2026-07-02T00:00:00Z", 2, "", "", "", ""); err != nil {
 		t.Fatalf("RunEvalCompare: %v", err)
 	}
 
@@ -413,7 +413,7 @@ models:
 
 	// Judge resolution happens before any per-entry model call, so this must fail
 	// fast without ever dialing the (deliberately unreachable) entry endpoint.
-	err := RunEvalCompare(&config.Config{}, comparePath, casesDir, filepath.Join(dir, "reports"), "2026-07-02T00:00:00Z", 1, "", "", "", "")
+	err := RunEvalCompare(&config.Config{}, nil, comparePath, casesDir, filepath.Join(dir, "reports"), "2026-07-02T00:00:00Z", 1, "", "", "", "")
 	if err == nil {
 		t.Fatal("compare with no judge source (no flags, no spec judge, no config.model) must error")
 	}

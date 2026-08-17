@@ -3,7 +3,6 @@
 package app
 
 import (
-	"context"
 	"fmt"
 	"io"
 	"log/slog"
@@ -27,7 +26,8 @@ const compareDefaultN = 3
 // is fixed across entries (blind grading already anonymizes which model produced a
 // result), so scores are comparable. It reuses the single-run replay machinery per
 // entry via eval.ComparisonRunner.
-func RunEvalCompare(cfg *config.Config, comparePath, casesDir, reportDir, stamp string, n int,
+func RunEvalCompare(cfg *config.Config, budget *eval.CampaignBudget,
+	comparePath, casesDir, reportDir, stamp string, n int,
 	jProvider, jBaseURL, jModel, jKeyEnv string) error {
 	spec, err := eval.LoadCompareSpec(comparePath)
 	if err != nil {
@@ -41,28 +41,45 @@ func RunEvalCompare(cfg *config.Config, comparePath, casesDir, reportDir, stamp 
 		return fmt.Errorf("no eval cases found in %s", casesDir)
 	}
 
-	judge, judgeLabel, err := buildCompareJudge(cfg, spec.Judge, jProvider, jBaseURL, jModel, jKeyEnv)
+	judgeModel, judgeLabel, err := compareJudgeModel(cfg, spec.Judge, jProvider, jBaseURL, jModel, jKeyEnv)
 	if err != nil {
 		return err
 	}
+	// The judge grades every run of every entry — len(models) x len(cases) x n
+	// completions of a model no per-entry counter sees, since each entry's
+	// CountingModel wraps only the entry under test. Counting it separately keeps the
+	// per-entry attribution honest AND stops the judge being free.
+	judgeSpend := &eval.CountingModel{Inner: budget.Wrap(judgeModel)}
+	judge := eval.ModelJudge{Model: judgeSpend}
 	log := slog.New(slog.NewTextHandler(io.Discard, nil))
 	maxTokens := effectiveMaxTokens(cfg.Model.MaxTokens)
-	ctx := context.Background()
+	spend := evalSpend(cfg)
+	ctx, cancel := campaignContext(budget)
+	defer cancel()
 
 	models := make([]eval.ModelComparison, 0, len(spec.Models))
+	ranCases := 0
 	for _, entry := range spec.Models {
+		if ctx.Err() != nil {
+			break
+		}
 		apiKey := ""
 		if entry.APIKeyEnv != "" {
 			apiKey = os.Getenv(entry.APIKeyEnv)
 		}
 		counting := &eval.CountingModel{
-			Inner: NewModelClient(entry.Provider, entry.BaseURL, entry.Model, apiKey, maxTokens, entry.Effort, ""),
+			Inner: budget.Wrap(NewModelClient(entry.Provider, entry.BaseURL, entry.Model, apiKey, maxTokens, entry.Effort, "")),
 		}
-		runner := &eval.ComparisonRunner{Model: counting, Judge: judge, Log: log}
+		// One Spend across every entry: an entry allowed to spend more than its rivals
+		// is not being compared with them.
+		runner := &eval.ComparisonRunner{Model: counting, Judge: judge, Log: log, Spend: spend}
 		fmt.Printf("comparing %-20s (%s)\n", entry.Name, providerModel(entry.Provider, entry.Model))
 		compared := runner.RunCases(ctx, cases, n)
+		ranCases += len(compared)
 		models = append(models, eval.AggregateModel(entry, compared, counting.Total()))
 	}
+	reportCampaignHalt(budget, ranCases, len(spec.Models)*len(cases))
+	reportJudgeSpend(cfg, judgeSpend)
 
 	if stamp == "" {
 		stamp = time.Now().UTC().Format(time.RFC3339)
@@ -92,24 +109,28 @@ func RunEvalCompare(cfg *config.Config, comparePath, casesDir, reportDir, stamp 
 	return nil
 }
 
-// buildCompareJudge resolves the fixed judge for a comparison run, and returns a
-// "provider/model" disclosure label for the report. Precedence: --judge-* flags,
+// compareJudgeModel resolves the fixed judge MODEL for a comparison run, and returns
+// a "provider/model" disclosure label for the report. Precedence: --judge-* flags,
 // then the spec's judge block, then the configured investigation model. This is
 // documented as the ONLY way `--compare` runs without a runlore.yaml (the spec
 // supplies its own judge), so unlike a plain judge-optional benchmark, silently
 // falling back to "no judge" here would contradict that promise — none of the
 // three sources present is a hard error, not a quiet "rubric grading disabled".
-func buildCompareJudge(cfg *config.Config, specJudge *eval.JudgeSpec, jProvider, jBaseURL, jModel, jKeyEnv string) (eval.Judge, string, error) {
+//
+// It returns the bare model rather than a ready-made eval.Judge so the caller can
+// wrap it (campaign budget + spend counter) before it disappears behind the Judge
+// interface — a judge already boxed into an interface cannot be metered.
+func compareJudgeModel(cfg *config.Config, specJudge *eval.JudgeSpec, jProvider, jBaseURL, jModel, jKeyEnv string) (providers.ModelProvider, string, error) {
 	if jModel != "" || jProvider != "" {
-		return eval.ModelJudge{Model: BuildJudgeModel(cfg, jProvider, jBaseURL, jModel, jKeyEnv)}, providerModel(jProvider, jModel), nil
+		return BuildJudgeModel(cfg, jProvider, jBaseURL, jModel, jKeyEnv), providerModel(jProvider, jModel), nil
 	}
 	if specJudge != nil {
 		m := NewModelClient(specJudge.Provider, specJudge.BaseURL, specJudge.Model,
 			os.Getenv(specJudge.APIKeyEnv), effectiveMaxTokens(cfg.Model.MaxTokens), "", "")
-		return eval.ModelJudge{Model: m}, providerModel(specJudge.Provider, specJudge.Model), nil
+		return m, providerModel(specJudge.Provider, specJudge.Model), nil
 	}
 	if ModelConfigured(cfg) {
-		return eval.ModelJudge{Model: BuildJudgeModel(cfg, "", "", "", "")}, providerModel(cfg.Model.Provider, cfg.Model.Model), nil
+		return BuildJudgeModel(cfg, "", "", "", ""), providerModel(cfg.Model.Provider, cfg.Model.Model), nil
 	}
 	return nil, "", fmt.Errorf("compare requires a judge: set --judge-model (or --judge-provider), " +
 		"add a judge: block to the compare spec, or set config.model in the config file")

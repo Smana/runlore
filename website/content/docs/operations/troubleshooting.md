@@ -94,7 +94,7 @@ Check `runlore_investigations_completed_total{result=…}` — the `result` labe
 | `resolved` / `unresolved` | finished; `unresolved` = honest "couldn't determine" | `msg="investigation complete"` | — |
 | `recall` | answered instantly from the catalog | `msg="instant recall (catalog hit; skipping the loop)"` | — |
 | `timeout` | hit `investigation.timeout` (default **10m**) | `msg="investigation hit per-investigation deadline"` | raise `investigation.timeout`; check for a hung tool/provider |
-| `budget_exceeded` | hit `investigation.max_tokens_per_investigation` | `msg="investigation hard-stopped at token budget"` | raise the budget, or accept the cap |
+| `budget_exceeded` | hit a spend ceiling: `investigation.max_tokens_per_investigation` (the next request's size **or** the run's cumulative tokens) or `investigation.max_cost_per_investigation` | `msg="investigation hard-stopped at token budget"`, with `reason=tokens_request`, `tokens_total` or `cost` naming which | raise the ceiling `reason` names, or accept the cap |
 | `max_steps` | hit `investigation.max_steps` (default **20**) without calling `submit_findings` | `msg="investigation hit max steps"` | raise `max_steps`, or the loop is looping — inspect tool calls |
 | `max_steps_degraded` | hit `max_steps` but `submit_findings` was called mid-loop (degraded answer, not inconclusive) | `msg="investigation complete"` | the loop ran out of budget but still produced a finding — raise `max_steps` if you want a complete answer |
 | `inconclusive` | model never called `submit_findings` after a nudge | `msg="investigation inconclusive (no submit_findings after nudge)"` | often a weak/over-quantized model; try a stronger one |
@@ -103,6 +103,13 @@ Check `runlore_investigations_completed_total{result=…}` — the `result` labe
 Supporting metrics: `runlore_tool_calls_total{tool,result}` and `runlore_model_requests_total{provider,result}`
 (watch the `result="error"` slice), `runlore_model_responses_truncated_total` (completions cut off at the
 output-token ceiling — a frequent cause of `inconclusive`), and `runlore_investigation_duration_seconds{result}`.
+
+`result="budget_exceeded"` only counts the runs that **died**. Watch
+`runlore_investigation_budget_trips_total{reason,stage}` for the rung above it:
+`stage="nudge"` is an investigation that hit a ceiling, was forced to conclude early and still
+delivered findings — it looks like a normal `resolved` run in every other series, so a steadily
+rising nudge rate is how you learn your ceilings are cutting work short before any of them start
+failing.
 
 ---
 

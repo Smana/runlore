@@ -66,13 +66,25 @@ func RunInvestigate(args []string) error {
 	ctx := context.Background()
 
 	model, tools, recall, _ := BuildModelAndTools(ctx, cfg, GitOpsFromKube(cfg, log), nil, log)
+	// The one-shot CLI bills the operator's model exactly as the server does, so it
+	// gets the same spend ceilings. It ran with NONE of them until now, contradicting
+	// internal/config/load.go, which applies the bounded defaults precisely so that
+	// "anyone running `lore serve --config` or `lore investigate` directly" is covered
+	// — the defaults were computed and then never handed to the loop.
+	loopPricing, verifyPricing := investigationPricing(cfg)
 	var result *providers.Investigation
 	li := &investigate.LoopInvestigator{
 		Model: model, VerifyModel: BuildVerifyModel(cfg), Tools: tools, Recall: recall, Actions: action.New(cfg.Actions), Log: log, Verify: true,
-		ModelProvider: cfg.Model.Provider,
-		Timeout:       cfg.Investigation.Timeout.Std(),
-		KBMatchScore:  kbMatchScore(recall), // visibility bar tracks the configured recall floor
-		OnComplete:    func(inv providers.Investigation) { result = &inv },
+		ModelProvider:             cfg.Model.Provider,
+		Pricing:                   loopPricing,
+		VerifyPricing:             verifyPricing,
+		MaxSteps:                  cfg.Investigation.MaxSteps,
+		MaxToolOutputBytes:        cfg.Investigation.MaxToolOutputBytes,
+		MaxTokensPerInvestigation: cfg.Investigation.MaxTokensPerInvestigation,
+		MaxCostPerInvestigation:   cfg.Investigation.MaxCostPerInvestigation,
+		Timeout:                   cfg.Investigation.Timeout.Std(),
+		KBMatchScore:              kbMatchScore(recall), // visibility bar tracks the configured recall floor
+		OnComplete:                func(inv providers.Investigation) { result = &inv },
 	}
 	title := *alert
 	if title == "" {

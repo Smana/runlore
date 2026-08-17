@@ -29,6 +29,10 @@ type LiveRunner struct {
 	N         int                    // runs per scenario (default 1 if 0)
 	OnRecord  func(Scenario, []Call) // optional: persist the run's calls (replay corpus)
 	Recall    *investigate.Recall    // optional; when set, runOnce takes the instant-recall short-circuit (production path). nil ⇒ no recall.
+	// Spend is the per-investigation ceiling set handed to every live-fire loop. This
+	// arm drives the REAL model against a real cluster, N times per scenario, so its
+	// zero value is the most expensive omission of the three runners.
+	Spend Spend
 }
 
 // RunOutcome is one of the N runs of a scenario.
@@ -98,7 +102,13 @@ func (lr *LiveRunner) runOnce(ctx context.Context, scn Scenario) RunOutcome {
 	var inv providers.Investigation
 	li := &investigate.LoopInvestigator{
 		Model: lr.Model, Tools: wrap(lr.BaseTools, rec), Log: lr.Log, Verify: true, Recall: lr.Recall,
-		OnComplete: func(got providers.Investigation) { inv = got },
+		// The same ceilings production runs under — this arm IS the production loop,
+		// pointed at a real cluster.
+		MaxTokensPerInvestigation: lr.Spend.MaxTokensPerInvestigation,
+		MaxCostPerInvestigation:   lr.Spend.MaxCostPerInvestigation,
+		Pricing:                   lr.Spend.Pricing,
+		VerifyPricing:             lr.Spend.VerifyPricing,
+		OnComplete:                func(got providers.Investigation) { inv = got },
 	}
 	req := investigate.Request{
 		Source: investigate.SourceAlert, Title: scn.ID, Message: scn.Trigger.Symptom,

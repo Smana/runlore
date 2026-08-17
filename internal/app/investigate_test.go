@@ -603,3 +603,30 @@ func TestElasticFieldOverridesReachTheWire(t *testing.T) {
 		t.Errorf("logs.fields.timestamp_field did not reach date_histogram.field: got %q, want %q", gotTimestamp, "event.created")
 	}
 }
+
+// TestBuildInvestigatorWiresTheCostCeiling pins that investigation.max_cost_per_investigation
+// reaches the loop. A ceiling parsed into the config but never handed to the
+// investigator is the same silent no-op the warning exists to announce — except
+// nothing would announce it, because the warning's precondition (pricing configured)
+// would be satisfied.
+func TestBuildInvestigatorWiresTheCostCeiling(t *testing.T) {
+	t.Setenv("KUBECONFIG", filepath.Join(t.TempDir(), "nonexistent-kubeconfig"))
+	log := discardLog()
+	cfg := &config.Config{Model: config.Model{
+		Provider: "openai", BaseURL: "http://vllm:8000/v1", Model: "test-model",
+		Pricing: &config.Pricing{InputUSDPerMTok: 3, OutputUSDPerMTok: 15},
+	}}
+	cfg.Investigation.MaxCostPerInvestigation = 4.25
+	deps := BuildDeps(context.Background(), cfg, nil, nil, nil, log)
+	inv, _, _, err := BuildInvestigator(context.Background(), cfg, deps, nil, nil, nil, nil, nil, log)
+	if err != nil {
+		t.Fatal(err)
+	}
+	li, ok := inv.(*investigate.LoopInvestigator)
+	if !ok {
+		t.Fatalf("want *LoopInvestigator, got %T", inv)
+	}
+	if li.MaxCostPerInvestigation != 4.25 {
+		t.Fatalf("max_cost_per_investigation not wired: got %v, want 4.25", li.MaxCostPerInvestigation)
+	}
+}

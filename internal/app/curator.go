@@ -133,6 +133,10 @@ func BuildReinvestigator(cfg *config.Config, deps *Deps, metrics *telemetry.Metr
 	// copy. See Deps: a second catalog means a second git-sync goroutine on the same
 	// directory, and an index that disagrees with the investigator's.
 	model, tools, recall := deps.Model, deps.Tools, deps.Recall
+	// A re-investigation is a full paid loop, so it gets the same rate cards and the
+	// same ceilings as the serve path — without Pricing the cost ceiling below would
+	// be handed through and then be structurally unable to fire.
+	loopPricing, verifyPricing := investigationPricing(cfg)
 	run := func(ctx context.Context, req investigate.Request) (providers.Investigation, error) {
 		var res providers.Investigation
 		var got bool
@@ -147,9 +151,12 @@ func BuildReinvestigator(cfg *config.Config, deps *Deps, metrics *telemetry.Metr
 			Model: model, VerifyModel: BuildVerifyModel(cfg), Tools: tools, Recall: recall, Verify: true, Log: log,
 			Metrics:                   metrics,
 			ModelProvider:             cfg.Model.Provider,
+			Pricing:                   loopPricing,
+			VerifyPricing:             verifyPricing,
 			MaxSteps:                  cfg.Investigation.MaxSteps,
 			MaxToolOutputBytes:        cfg.Investigation.MaxToolOutputBytes,
 			MaxTokensPerInvestigation: cfg.Investigation.MaxTokensPerInvestigation,
+			MaxCostPerInvestigation:   cfg.Investigation.MaxCostPerInvestigation,
 			Timeout:                   cfg.Investigation.Timeout.Std(),
 			KBMatchScore:              kbMatchScore(recall), // visibility bar tracks the configured recall floor
 			OnComplete:                func(inv providers.Investigation) { res, got = inv, true },

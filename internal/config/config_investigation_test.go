@@ -356,7 +356,7 @@ func TestValidatePricingNonNegative(t *testing.T) {
 
 // TestApplyDefaultsResourceCaps locks in the safe-by-default resource caps
 // (C3/B3-budget): a zero-value config must get the bounded Helm-chart defaults
-// (32768 bytes / 100000 tokens) so that `lore serve --config` and `lore
+// (32768 bytes / 400000 tokens) so that `lore serve --config` and `lore
 // investigate` are never silently unbounded.
 func TestApplyDefaultsResourceCaps(t *testing.T) {
 	// Unset (zero) → bounded defaults are applied (match the Helm chart values.yaml).
@@ -365,8 +365,8 @@ func TestApplyDefaultsResourceCaps(t *testing.T) {
 	if c.Investigation.MaxToolOutputBytes != 32768 {
 		t.Fatalf("default MaxToolOutputBytes: got %d, want 32768", c.Investigation.MaxToolOutputBytes)
 	}
-	if c.Investigation.MaxTokensPerInvestigation != 100000 {
-		t.Fatalf("default MaxTokensPerInvestigation: got %d, want 100000", c.Investigation.MaxTokensPerInvestigation)
+	if c.Investigation.MaxTokensPerInvestigation != 400000 {
+		t.Fatalf("default MaxTokensPerInvestigation: got %d, want 400000", c.Investigation.MaxTokensPerInvestigation)
 	}
 }
 
@@ -399,5 +399,65 @@ func TestApplyDefaultsResourceCapsExplicit(t *testing.T) {
 	}
 	if c.Investigation.MaxTokensPerInvestigation != 50000 {
 		t.Fatalf("explicit MaxTokensPerInvestigation overwritten: got %d, want 50000", c.Investigation.MaxTokensPerInvestigation)
+	}
+}
+
+// TestMaxCostPerInvestigationIsOptIn pins the config surface of the USD ceiling and,
+// deliberately, its DIFFERENCE from the token sibling above.
+//
+// max_tokens_per_investigation ships a bounded default (400000) because a token is a
+// provider-neutral unit: the same number means the same thing on every model, so a
+// safe default can be chosen for an operator. A dollar is not. A self-hosted operator
+// picks their own model and supplies their own rates via model.pricing, so any default
+// denominated in USD would be generous for one deployment and punitive for the next —
+// and would silently cut runs short on an upgrade nobody asked for. Unset therefore
+// means NO cost ceiling, and there is no -1 opt-out to mirror (0 already means off,
+// so -1 would have no job).
+func TestMaxCostPerInvestigationIsOptIn(t *testing.T) {
+	var c Config
+	ApplyDefaults(&c)
+	if c.Investigation.MaxCostPerInvestigation != 0 {
+		t.Fatalf("max_cost_per_investigation must default to 0 (no ceiling), got %v — "+
+			"a dollar figure cannot be defaulted for an operator whose model and rates RunLore does not choose",
+			c.Investigation.MaxCostPerInvestigation)
+	}
+	var explicit Config
+	explicit.Investigation.MaxCostPerInvestigation = 2.5
+	ApplyDefaults(&explicit)
+	if explicit.Investigation.MaxCostPerInvestigation != 2.5 {
+		t.Fatalf("explicit max_cost_per_investigation overwritten: got %v, want 2.5",
+			explicit.Investigation.MaxCostPerInvestigation)
+	}
+}
+
+// TestMaxCostPerInvestigationParsesFromYAML pins the yaml key an operator actually
+// types; a struct-only test would pass with any tag.
+func TestMaxCostPerInvestigationParsesFromYAML(t *testing.T) {
+	var c Config
+	if err := yaml.Unmarshal([]byte("investigation:\n  max_cost_per_investigation: 1.75\n"), &c); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if c.Investigation.MaxCostPerInvestigation != 1.75 {
+		t.Fatalf("max_cost_per_investigation did not parse: got %v, want 1.75", c.Investigation.MaxCostPerInvestigation)
+	}
+}
+
+// TestValidateRejectsNegativeMaxCost fails a negative ceiling loudly instead of
+// treating it as "off". The token sibling teaches operators that -1 means unlimited;
+// copying that idiom here would produce a config that reads as an opt-out and
+// behaves as one only by accident, so it is rejected with the reason spelled out.
+func TestValidateRejectsNegativeMaxCost(t *testing.T) {
+	var c Config
+	c.Investigation.MaxCostPerInvestigation = -1
+	err := c.Validate()
+	if err == nil {
+		t.Fatal("a negative max_cost_per_investigation must be rejected, not silently disabled")
+	}
+	if !strings.Contains(err.Error(), "max_cost_per_investigation") {
+		t.Fatalf("error must name the offending key, got %v", err)
+	}
+	c.Investigation.MaxCostPerInvestigation = 1.5
+	if err := c.Validate(); err != nil {
+		t.Fatalf("a positive ceiling must be accepted: %v", err)
 	}
 }
