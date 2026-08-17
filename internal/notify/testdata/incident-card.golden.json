@@ -1,0 +1,644 @@
+[
+  {
+    "fixture": "action_required",
+    "card": {
+      "blocks": [
+        {
+          "text": {
+            "emoji": true,
+            "text": "🔍 HarborDown — platform/tooling/harbor",
+            "type": "plain_text"
+          },
+          "type": "header"
+        },
+        {
+          "text": {
+            "text": "🔥 *Action required* — harbor-db crash-looping after the chart 1.15 migration",
+            "type": "mrkdwn"
+          },
+          "type": "section"
+        },
+        {
+          "elements": [
+            {
+              "text": "🟢 *High confidence* · 92%",
+              "type": "mrkdwn"
+            }
+          ],
+          "type": "context"
+        },
+        {
+          "text": {
+            "text": "*Why:* chart 1.15 enabled DB migrations; harbor-db is in CrashLoopBackOff\n• pg_up=0 since 10:02\n• migration lock timeout in harbor-db logs\n• HelmRelease revision moved 1.14.2 -&gt; 1.15.0\n• _…1 more_",
+            "type": "mrkdwn"
+          },
+          "type": "section"
+        },
+        {
+          "elements": [
+            {
+              "text": "_…1 more hypothesis below_",
+              "type": "mrkdwn"
+            }
+          ],
+          "type": "context"
+        },
+        {
+          "type": "divider"
+        },
+        {
+          "text": {
+            "text": "*🛠 Suggested next steps*  _(read-only — RunLore won't apply these)_\n• flux rollback hr/harbor to 1.14.2  _(reversible)_\n• suspend the harbor HelmRelease  _(reversible)_",
+            "type": "mrkdwn"
+          },
+          "type": "section"
+        },
+        {
+          "fields": [
+            {
+              "text": "*Alert:*\nHarborDown (critical)",
+              "type": "mrkdwn"
+            },
+            {
+              "text": "*Cluster:*\nplatform · eu-west-1",
+              "type": "mrkdwn"
+            },
+            {
+              "text": "*Resource:*\nHelmRelease tooling/harbor",
+              "type": "mrkdwn"
+            },
+            {
+              "text": "*Started:*\n<!date^1783072800^{date_short_pretty} {time}|2026-07-03T10:00:00Z>",
+              "type": "mrkdwn"
+            },
+            {
+              "text": "*What changed:*\nflux-system/apps: abc123..def456",
+              "type": "mrkdwn"
+            },
+            {
+              "text": "*Recurrence:*\n🔁 #3 · last <!date^1780304400^{date_short_pretty} {time}|2026-06-01T09:00:00Z>",
+              "type": "mrkdwn"
+            }
+          ],
+          "type": "section"
+        },
+        {
+          "elements": [
+            {
+              "text": "✓ verified  ·  📚 <https://github.com/o/kb/pull/312|view entry>  ·  7 model calls · 121758 in / 9596 out tokens (0% cached)",
+              "type": "mrkdwn"
+            }
+          ],
+          "type": "context"
+        },
+        {
+          "text": {
+            "text": "*Proposed action:* suspend the harbor HelmRelease",
+            "type": "mrkdwn"
+          },
+          "type": "section"
+        },
+        {
+          "elements": [
+            {
+              "action_id": "runlore_approve",
+              "style": "primary",
+              "text": {
+                "text": "Approve",
+                "type": "plain_text"
+              },
+              "type": "button",
+              "value": "apr-7f3"
+            },
+            {
+              "action_id": "runlore_reject",
+              "style": "danger",
+              "text": {
+                "text": "Reject",
+                "type": "plain_text"
+              },
+              "type": "button",
+              "value": "apr-7f3"
+            }
+          ],
+          "type": "actions"
+        },
+        {
+          "type": "divider"
+        },
+        {
+          "text": {
+            "text": "*Full analysis*",
+            "type": "mrkdwn"
+          },
+          "type": "section"
+        },
+        {
+          "text": {
+            "text": "*1. chart 1.15 enabled DB migrations; harbor-db is in CrashLoopBackOff*  `92%`\n📦 *What changed:* `flux-system/apps: abc123..def456`\n• pg_up=0 since 10:02\n• migration lock timeout in harbor-db logs\n• HelmRelease revision moved 1.14.2 -&gt; 1.15.0\n• registry pod readiness probe failing on /api/v2.0/ping",
+            "type": "mrkdwn"
+          },
+          "type": "section"
+        },
+        {
+          "text": {
+            "text": "*2. the shared postgres volume filled up*  `11%`\n• no disk metrics available for harbor-db",
+            "type": "mrkdwn"
+          },
+          "type": "section"
+        },
+        {
+          "text": {
+            "text": "*❓ Open questions* _(needs a human)_\n• why the migration lock never released",
+            "type": "mrkdwn"
+          },
+          "type": "section"
+        },
+        {
+          "text": {
+            "text": "*⚠️ Data gaps:*\n• harbor-db disk metrics unavailable (scrape target down)",
+            "type": "mrkdwn"
+          },
+          "type": "section"
+        },
+        {
+          "text": {
+            "text": "*❌ Ruled out:*\n• network partition disproven by pg reachable from the api pod",
+            "type": "mrkdwn"
+          },
+          "type": "section"
+        },
+        {
+          "elements": [
+            {
+              "action_id": "runlore_feedback_up",
+              "text": {
+                "emoji": true,
+                "text": "👍 Accurate",
+                "type": "plain_text"
+              },
+              "type": "button",
+              "value": "HarborDown/tooling/harbor"
+            },
+            {
+              "action_id": "runlore_feedback_down",
+              "text": {
+                "emoji": true,
+                "text": "👎 Off-base",
+                "type": "plain_text"
+              },
+              "type": "button",
+              "value": "HarborDown/tooling/harbor"
+            }
+          ],
+          "type": "actions"
+        }
+      ],
+      "text": "🔍 harbor-db crash-looping after the chart 1.15 migration — Action required (High confidence · 92%)"
+    }
+  },
+  {
+    "fixture": "instant_recall",
+    "card": {
+      "blocks": [
+        {
+          "text": {
+            "emoji": true,
+            "text": "🔍 HarborDown — platform/tooling/harbor",
+            "type": "plain_text"
+          },
+          "type": "header"
+        },
+        {
+          "text": {
+            "text": "harbor-db crash-looping after the chart 1.15 migration",
+            "type": "mrkdwn"
+          },
+          "type": "section"
+        },
+        {
+          "elements": [
+            {
+              "text": "🟢 *High confidence* · 78%\n_entry's own confidence 94%, adjusted to 78% by its track record_",
+              "type": "mrkdwn"
+            }
+          ],
+          "type": "context"
+        },
+        {
+          "text": {
+            "text": "⚡ *Instant recall* — answered from your knowledge base, no investigation was run\n*Known cause:* chart 1.15 enables DB migrations that need a manual lock release\n*Validated resolution:* roll back to 1.14.2, clear the migration lock, then re-apply\nresolve rate 3/4",
+            "type": "mrkdwn"
+          },
+          "type": "section"
+        },
+        {
+          "text": {
+            "text": "*Why:* chart 1.15 enabled DB migrations; harbor-db is in CrashLoopBackOff",
+            "type": "mrkdwn"
+          },
+          "type": "section"
+        },
+        {
+          "fields": [
+            {
+              "text": "*Alert:*\nHarborDown",
+              "type": "mrkdwn"
+            },
+            {
+              "text": "*Cluster:*\nplatform · eu-west-1",
+              "type": "mrkdwn"
+            },
+            {
+              "text": "*Resource:*\nHelmRelease tooling/harbor",
+              "type": "mrkdwn"
+            },
+            {
+              "text": "*Started:*\n<!date^1783072800^{date_short_pretty} {time}|2026-07-03T10:00:00Z>",
+              "type": "mrkdwn"
+            }
+          ],
+          "type": "section"
+        },
+        {
+          "elements": [
+            {
+              "text": "✓ verified  ·  📚 <https://github.com/o/kb/pull/298|view entry>  ·  2 model calls · 4764 in / 3525 out tokens (0% cached)",
+              "type": "mrkdwn"
+            }
+          ],
+          "type": "context"
+        },
+        {
+          "elements": [
+            {
+              "action_id": "runlore_feedback_up",
+              "text": {
+                "emoji": true,
+                "text": "👍 Accurate",
+                "type": "plain_text"
+              },
+              "type": "button",
+              "value": "HarborDown/tooling/harbor"
+            },
+            {
+              "action_id": "runlore_feedback_down",
+              "text": {
+                "emoji": true,
+                "text": "👎 Off-base",
+                "type": "plain_text"
+              },
+              "type": "button",
+              "value": "HarborDown/tooling/harbor"
+            }
+          ],
+          "type": "actions"
+        }
+      ],
+      "text": "🔍 harbor-db crash-looping after the chart 1.15 migration (High confidence · 78%)"
+    }
+  },
+  {
+    "fixture": "seen_before",
+    "card": {
+      "blocks": [
+        {
+          "text": {
+            "emoji": true,
+            "text": "🔍 HarborDown — eu-west-1/tooling/harbor",
+            "type": "plain_text"
+          },
+          "type": "header"
+        },
+        {
+          "text": {
+            "text": "🛠 *Action suggested* — harbor-db crash-looping again after the chart bump",
+            "type": "mrkdwn"
+          },
+          "type": "section"
+        },
+        {
+          "elements": [
+            {
+              "text": "🟡 *Medium confidence* · 64%",
+              "type": "mrkdwn"
+            }
+          ],
+          "type": "context"
+        },
+        {
+          "text": {
+            "text": "📚 *Seen before ×2* — last <!date^1780304400^{date_short_pretty} {time}|2026-06-01T09:00:00Z>\n*Prior cause:* chart 1.15 enables DB migrations that need a manual lock release\n*Prior resolution:* roll back to 1.14.2, clear the migration lock, then re-apply\nresolve rate 3/4",
+            "type": "mrkdwn"
+          },
+          "type": "section"
+        },
+        {
+          "text": {
+            "text": "*Why:* the same migration lock, not released by the previous rollback\n• lock row still present in the migrations table",
+            "type": "mrkdwn"
+          },
+          "type": "section"
+        },
+        {
+          "fields": [
+            {
+              "text": "*Alert:*\nHarborDown",
+              "type": "mrkdwn"
+            },
+            {
+              "text": "*Cluster:*\neu-west-1",
+              "type": "mrkdwn"
+            },
+            {
+              "text": "*Resource:*\nHelmRelease tooling/harbor",
+              "type": "mrkdwn"
+            },
+            {
+              "text": "*Started:*\n<!date^1783072800^{date_short_pretty} {time}|2026-07-03T10:00:00Z>",
+              "type": "mrkdwn"
+            }
+          ],
+          "type": "section"
+        },
+        {
+          "elements": [
+            {
+              "text": "📚 <https://github.com/o/kb/pull/298|view entry>",
+              "type": "mrkdwn"
+            }
+          ],
+          "type": "context"
+        },
+        {
+          "elements": [
+            {
+              "action_id": "runlore_feedback_up",
+              "text": {
+                "emoji": true,
+                "text": "👍 Accurate",
+                "type": "plain_text"
+              },
+              "type": "button",
+              "value": "HarborDown/tooling/harbor"
+            },
+            {
+              "action_id": "runlore_feedback_down",
+              "text": {
+                "emoji": true,
+                "text": "👎 Off-base",
+                "type": "plain_text"
+              },
+              "type": "button",
+              "value": "HarborDown/tooling/harbor"
+            }
+          ],
+          "type": "actions"
+        }
+      ],
+      "text": "🔍 harbor-db crash-looping again after the chart bump — Action suggested (Medium confidence · 64%)"
+    }
+  },
+  {
+    "fixture": "matched_runbook",
+    "card": {
+      "blocks": [
+        {
+          "text": {
+            "emoji": true,
+            "text": "🔍 ImageGalleryUnavailable — apps/apps/xplane-image-gallery",
+            "type": "plain_text"
+          },
+          "type": "header"
+        },
+        {
+          "text": {
+            "text": "🔥 *Action required* — image pulls failing across the gallery namespace",
+            "type": "mrkdwn"
+          },
+          "type": "section"
+        },
+        {
+          "elements": [
+            {
+              "text": "🟢 *High confidence* · 71%",
+              "type": "mrkdwn"
+            }
+          ],
+          "type": "context"
+        },
+        {
+          "text": {
+            "text": "📚 *Matches known runbook:* Registry pull credentials deleted out of band — RunLore has prior knowledge for this incident.",
+            "type": "mrkdwn"
+          },
+          "type": "section"
+        },
+        {
+          "text": {
+            "text": "*Why:* a manual AWS Secrets Manager DeleteSecret removed the registry credentials\n• CloudTrail DeleteSecret at 09:58 by an IAM user",
+            "type": "mrkdwn"
+          },
+          "type": "section"
+        },
+        {
+          "fields": [
+            {
+              "text": "*Alert:*\nImageGalleryUnavailable",
+              "type": "mrkdwn"
+            },
+            {
+              "text": "*Cluster:*\napps",
+              "type": "mrkdwn"
+            },
+            {
+              "text": "*Resource:*\nDeployment apps/xplane-image-gallery",
+              "type": "mrkdwn"
+            },
+            {
+              "text": "*Started:*\n<!date^1783072800^{date_short_pretty} {time}|2026-07-03T10:00:00Z>",
+              "type": "mrkdwn"
+            },
+            {
+              "text": "*What changed:*\naws: DeleteSecret registry/pull-token",
+              "type": "mrkdwn"
+            }
+          ],
+          "type": "section"
+        },
+        {
+          "elements": [
+            {
+              "text": "📚 <https://github.com/o/kb/blob/main/entries/registry-credentials-deleted.md|view entry>  ·  4 model calls · 38210 in / 2914 out tokens (0% cached)",
+              "type": "mrkdwn"
+            }
+          ],
+          "type": "context"
+        },
+        {
+          "elements": [
+            {
+              "action_id": "runlore_feedback_up",
+              "text": {
+                "emoji": true,
+                "text": "👍 Accurate",
+                "type": "plain_text"
+              },
+              "type": "button",
+              "value": "fp-9a1"
+            },
+            {
+              "action_id": "runlore_feedback_down",
+              "text": {
+                "emoji": true,
+                "text": "👎 Off-base",
+                "type": "plain_text"
+              },
+              "type": "button",
+              "value": "fp-9a1"
+            }
+          ],
+          "type": "actions"
+        }
+      ],
+      "text": "🔍 image pulls failing across the gallery namespace — Action required (High confidence · 71%)"
+    }
+  },
+  {
+    "fixture": "no_confidence_stated",
+    "card": {
+      "blocks": [
+        {
+          "text": {
+            "emoji": true,
+            "text": "🔍 ImageGalleryUnavailable — apps/xplane-image-gallery",
+            "type": "plain_text"
+          },
+          "type": "header"
+        },
+        {
+          "text": {
+            "text": "❓ *Inconclusive* — could not determine why the gallery is unavailable",
+            "type": "mrkdwn"
+          },
+          "type": "section"
+        },
+        {
+          "elements": [
+            {
+              "text": "⚪ *confidence not stated*",
+              "type": "mrkdwn"
+            }
+          ],
+          "type": "context"
+        },
+        {
+          "text": {
+            "text": "*Why:* no signal separated a registry outage from a credentials change",
+            "type": "mrkdwn"
+          },
+          "type": "section"
+        },
+        {
+          "fields": [
+            {
+              "text": "*Alert:*\nImageGalleryUnavailable",
+              "type": "mrkdwn"
+            },
+            {
+              "text": "*Resource:*\nDeployment apps/xplane-image-gallery",
+              "type": "mrkdwn"
+            },
+            {
+              "text": "*Started:*\n<!date^1783072800^{date_short_pretty} {time}|2026-07-03T10:00:00Z>",
+              "type": "mrkdwn"
+            }
+          ],
+          "type": "section"
+        },
+        {
+          "type": "divider"
+        },
+        {
+          "text": {
+            "text": "*Full analysis*",
+            "type": "mrkdwn"
+          },
+          "type": "section"
+        },
+        {
+          "text": {
+            "text": "*1. no signal separated a registry outage from a credentials change*",
+            "type": "mrkdwn"
+          },
+          "type": "section"
+        },
+        {
+          "text": {
+            "text": "*⚠️ Data gaps:*\n• CloudTrail lookup returned no events in the window",
+            "type": "mrkdwn"
+          },
+          "type": "section"
+        },
+        {
+          "elements": [
+            {
+              "action_id": "runlore_feedback_up",
+              "text": {
+                "emoji": true,
+                "text": "👍 Accurate",
+                "type": "plain_text"
+              },
+              "type": "button",
+              "value": "fp-9a2"
+            },
+            {
+              "action_id": "runlore_feedback_down",
+              "text": {
+                "emoji": true,
+                "text": "👎 Off-base",
+                "type": "plain_text"
+              },
+              "type": "button",
+              "value": "fp-9a2"
+            }
+          ],
+          "type": "actions"
+        }
+      ],
+      "text": "🔍 could not determine why the gallery is unavailable — Inconclusive (confidence not stated)"
+    }
+  },
+  {
+    "fixture": "bare_recall",
+    "card": {
+      "blocks": [
+        {
+          "text": {
+            "emoji": true,
+            "text": "🔍 harbor-db migration lock",
+            "type": "plain_text"
+          },
+          "type": "header"
+        },
+        {
+          "elements": [
+            {
+              "text": "🟡 *Medium confidence* · 55%\n_entry's own confidence 0%, adjusted to 55% by its track record_",
+              "type": "mrkdwn"
+            }
+          ],
+          "type": "context"
+        },
+        {
+          "text": {
+            "text": "*Why:* the migration lock again",
+            "type": "mrkdwn"
+          },
+          "type": "section"
+        }
+      ],
+      "text": "🔍 harbor-db migration lock (Medium confidence · 55%)"
+    }
+  }
+]

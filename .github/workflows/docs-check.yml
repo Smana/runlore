@@ -10,9 +10,12 @@ on:
       - 'README.md'
       - 'CONTRIBUTING.md'
       - 'assets/**'
-      # The card renderer: changing it is what makes the shipped screenshots wrong.
-      - 'internal/notify/slack.go'
-      - 'internal/notify/format.go'
+      # The rendered card, not the files that render it: what makes the shipped
+      # screenshots wrong is a change a READER would notice, and this golden moves
+      # if and only if one happened. Triggering on slack.go instead ran the whole
+      # Hugo build for every transport change and, worse, failed the screenshot
+      # step on four PRs that moved no pixel.
+      - 'internal/notify/testdata/incident-card.golden.json'
       - 'hack/check-screenshots-fresh.sh'
       - '.github/workflows/docs-check.yml'
   push:
@@ -22,9 +25,12 @@ on:
       - 'README.md'
       - 'CONTRIBUTING.md'
       - 'assets/**'
-      # The card renderer: changing it is what makes the shipped screenshots wrong.
-      - 'internal/notify/slack.go'
-      - 'internal/notify/format.go'
+      # The rendered card, not the files that render it: what makes the shipped
+      # screenshots wrong is a change a READER would notice, and this golden moves
+      # if and only if one happened. Triggering on slack.go instead ran the whole
+      # Hugo build for every transport change and, worse, failed the screenshot
+      # step on four PRs that moved no pixel.
+      - 'internal/notify/testdata/incident-card.golden.json'
       - 'hack/check-screenshots-fresh.sh'
       - '.github/workflows/docs-check.yml'
 
@@ -79,7 +85,9 @@ jobs:
           fi
           echo "OK: no raw docs/*.md links in README/CONTRIBUTING"
 
-      - name: Screenshots must not predate the card renderer
-        # Needs full history (fetch-depth: 0 above) — it compares git commit times,
-        # not mtimes, which a fresh clone would make all equal.
+      - name: Screenshots must show the card RunLore actually draws
+        # Compares a digest of the rendered card, so it needs no git history — the
+        # fetch-depth: 0 above is Hugo's (lastmod from git), not this step's. The
+        # golden it reads is kept honest by TestSlackCardMatchesTheShippedGolden in
+        # the `ci` workflow; this step alone would accept a hand-edited file.
         run: hack/check-screenshots-fresh.sh
