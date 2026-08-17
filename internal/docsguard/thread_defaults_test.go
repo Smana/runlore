@@ -111,97 +111,165 @@ func TestThreadDefaultsMatchTheDocs(t *testing.T) {
 	}
 }
 
-// TestThreadBooleanDefaultsMatchTheDocs is the sibling of the test above for
-// the `notify.thread` defaults the docs state as a BOOLEAN.
+// TestAnnounceKBUpdatesDefaultMatchesTheDocs pins the default of
+// notify.thread.announce_kb_updates against every page that states it.
 //
-// The numeric guard parses numbers only, so a page stating that
-// `announce_kb_updates` defaults to `false` was pinned by nothing at all: the
-// key could be flipped to opt-OUT in code and four pages would keep telling an
-// operator it was off. That is worse than the numeric drift this file was
-// written for, because the key decides whether note content — what someone
-// typed in one thread — is broadcast to every configured sink. A doc saying
-// "off unless you set it" while the code ships it on is a privacy claim the
-// software does not honour.
+// The numeric guard parses numbers only, so a page stating this key's default
+// was pinned by nothing at all: it could be flipped to opt-OUT in code and four
+// pages would keep telling an operator it was off. That is worse than the
+// numeric drift this file was written for, because the key decides whether note
+// content — what someone typed in one thread — is broadcast to every configured
+// sink. A doc saying "off unless you set it" while the code ships it on is a
+// privacy claim the software does not honour.
 //
 // The default comes from decoding an EMPTY config through the real type, not
 // from a literal repeated here: that is what "the default" means operationally
 // — what an operator who wrote no such key gets.
 //
-// It used to be a HALF guard, biting only from the DOCS: AnnounceKBUpdates was a
-// plain bool with no unmarshaler, so decoding "{}" could only ever yield false
-// and no edit to internal/config could make an unconfigured deployment announce.
-// That is no longer true. The field is now config.AnnounceMode, which HAS a
-// custom unmarshaler and several non-boolean states, so the code side is
-// falsifiable in exactly the way the old comment said would take a type change —
-// and the type change happened. A default that resolved On() to true, by a
-// mistake in the unmarshaler or by someone deciding the empty state should
-// announce, now fails here against every page that promises otherwise.
+// # Why this is no longer the boolean guard it replaces
 //
-// It reads On() rather than the raw mode for the same reason the pages state a
-// boolean: the operator-facing claim is "nothing is broadcast unless you ask",
-// which is what On() answers. Which DESTINATION a mode selects is a different
-// claim, and internal/config's own tests pin that one.
+// This was a bool-only parse, and that had become a trap. The key stopped being
+// a boolean when it grew destinations (config.AnnounceMode: off, channel,
+// thread, both), but the parse still recognised only `true|false`. It passed
+// solely because every page happens to write `default **false**` before any
+// other boolean token — so rewriting a page to the equally correct
+// `default **off**`, the obvious follow-up edit, would have made the guard walk
+// past it, find the `true` in "# also true (= channel)" as the next boolean
+// after the word "default", and report that the docs claim the key defaults to
+// TRUE. The failure would have pointed the reader at changing the code default
+// on the strength of a sentence explaining an alias.
 //
-// What counts as a claim is narrower than for numbers, and deliberately so: the
-// word "default" must appear between the key (or the previous boolean in the
-// same unit) and the token. A boolean's YAML value in a sample is a
-// DEMONSTRATION rather than a default — `announce_kb_updates: true` is how a
-// page shows you how to turn an opt-in on — whereas a numeric sample
-// conventionally prints the default itself. Reading the YAML value as a claim
-// would fail every page that documents how to enable the feature.
-func TestThreadBooleanDefaultsMatchTheDocs(t *testing.T) {
+// So the vocabulary is the key's OWN, and a claim is now recognised only where
+// the value token immediately follows the word "default" (see
+// docAnnounceDefaultRE). Both halves matter: widening the vocabulary alone would
+// have made every ordinary "the thread reply" and "the channel post" in this
+// feature's prose a candidate claim, which is a far bigger surface of English
+// than `true|false` ever was.
+//
+// # What it does and does not verify
+//
+// It compares DESTINATIONS, not just on/off, through announceDocModes — which
+// is also where `false` and `off`, and `true` and `channel`, are recorded as the
+// same claim. That equivalence is the compatibility promise config.AnnounceMode
+// makes to an operator, so a page may state the default in either spelling and a
+// page that starts saying `channel` where the code says off still fails.
+//
+// It bites from BOTH sides now. It used to be a half guard — AnnounceKBUpdates
+// was a plain bool with no unmarshaler, so decoding "{}" could only ever yield
+// false and no edit to internal/config could make an unconfigured deployment
+// announce. The type has a custom unmarshaler and several states today, so a
+// default that resolved to anything but off — by a mistake in the unmarshaler,
+// or by someone deciding the empty state should announce — fails here against
+// every page that promises otherwise.
+func TestAnnounceKBUpdatesDefaultMatchesTheDocs(t *testing.T) {
 	var c config.Config
 	if err := yaml.Unmarshal([]byte("{}"), &c); err != nil {
 		t.Fatalf("decode an empty config: %v", err)
 	}
-	pinned := map[string]bool{
-		"announce_kb_updates": c.Notify.Thread.AnnounceKBUpdates.On(),
+	want := canonAnnounceMode(c.Notify.Thread.AnnounceKBUpdates)
+
+	// The pages are compared against the resolved DESTINATION above, but every
+	// consumer branches on On(), which is a different function. A default that
+	// reads "off" while On() answers true would satisfy every page below and
+	// still announce, so the two are pinned to each other here — otherwise this
+	// guard's claim ("no page promises an off state the code does not honour")
+	// rests on a value nothing downstream reads.
+	if got := c.Notify.Thread.AnnounceKBUpdates.On(); got != (want != config.AnnounceOff) {
+		t.Fatalf("an empty config resolves announce_kb_updates to destination %q but On() answers %v — "+
+			"the value these pages are checked against and the switch that decides whether anything is "+
+			"announced disagree, so every page below is being compared to the wrong thing",
+			string(want), got)
 	}
 
-	seenIn := make(map[string]map[string]bool, len(pinned))
+	seenIn := map[string]bool{}
 	for _, path := range threadDocPages(t) {
 		src, err := os.ReadFile(path)
 		if err != nil {
 			t.Fatalf("read %s: %v", path, err)
 		}
 		rel := relToRepo(t, path)
-		for _, c := range threadBoolClaims(rel, string(src), pinned) {
-			if seenIn[c.key] == nil {
-				seenIn[c.key] = map[string]bool{}
-			}
-			seenIn[c.key][c.file] = true
-			if c.bool == pinned[c.key] {
+		for _, claim := range announceDefaultClaims(rel, string(src)) {
+			seenIn[claim.file] = true
+			if canonAnnounceMode(announceDocModes[claim.text]) == want {
 				continue
 			}
-			t.Errorf("%s:%d states notify.thread.%s defaults to %v, but an empty config resolves it to %v.\n"+
-				"  claim: %s\n"+
+			t.Errorf("%s:%d states notify.thread.announce_kb_updates defaults to %q, but an empty config resolves it to %q.\n"+
 				"  Restate it here, or change the default — do not leave them disagreeing. "+
 				"announce_kb_updates decides whether a note written in one thread is broadcast to every "+
 				"configured sink, so a page promising it is off while the code ships it on is a claim about "+
 				"where an operator's words go that the software does not honour.",
-				c.file, c.line, c.key, c.bool, pinned[c.key], c.text)
+				claim.file, claim.line, claim.text, string(want))
 		}
 	}
 
-	// Guard the guard, exactly as the numeric test does: every pinned key is
-	// stated somewhere in the shipped docs today, so finding none means the
-	// parse stopped matching and this is reporting success over nothing.
-	for _, key := range sortedStrings(pinned) {
-		if len(seenIn[key]) == 0 {
-			t.Errorf("found no stated default for notify.thread.%s in any shipped page — "+
-				"either the docs stopped documenting it or threadBoolClaims no longer "+
-				"recognises how they phrase it, and this guard is inert for that key", key)
+	// Guard the guard, exactly as the numeric test does: the key is documented
+	// today, so finding nothing means the parse stopped matching and this is
+	// reporting success over nothing.
+	//
+	// It is stated on the configuration reference, both notification pages and the
+	// reviewing-knowledge concept page. Requiring several holds the guard to
+	// catching a PARTIAL fix — the failure where someone corrects one page and
+	// leaves the others promising the opposite.
+	if len(seenIn) < 3 {
+		t.Errorf("announce_kb_updates' default is stated on %d page(s); it is documented on the "+
+			"configuration reference, both notification pages and the reviewing-knowledge concept page, "+
+			"so a count this low means docAnnounceDefaultRE has stopped recognising how they phrase it "+
+			"and this guard is inert", len(seenIn))
+	}
+}
+
+// announceDocModes maps every spelling a page may state this default in onto the
+// destination it means. `false` and `off` are the same claim, and so are `true`
+// and `channel` — that equivalence is the compatibility promise
+// config.AnnounceMode makes, so a page is free to use either.
+var announceDocModes = map[string]config.AnnounceMode{
+	"false":   config.AnnounceOff,
+	"off":     config.AnnounceOff,
+	"true":    config.AnnounceChannel,
+	"channel": config.AnnounceChannel,
+	"thread":  config.AnnounceThread,
+	"both":    config.AnnounceBoth,
+}
+
+// canonAnnounceMode folds the absent key onto the explicit "off" so a doc
+// stating either spelling compares equal to a config that resolved to the other.
+func canonAnnounceMode(m config.AnnounceMode) config.AnnounceMode {
+	if m == "" {
+		return config.AnnounceOff
+	}
+	return m
+}
+
+// docAnnounceDefaultRE matches a stated default for this key: the word
+// "default", then at most a few bytes of markup or punctuation, then one of the
+// key's own values. The gap covers "default **false**", "default `off`",
+// "default false" and "default: channel"; it deliberately does NOT let arbitrary
+// prose sit between the two, which is what stops "…so a note written in one
+// thread…" from being read as a claim about a key mentioned a sentence earlier.
+var docAnnounceDefaultRE = regexp.MustCompile(`(?i)default[^\w]{0,4}(true|false|off|channel|thread|both)\b`)
+
+// announceDefaultClaims extracts the default claims one markdown page makes
+// about announce_kb_updates, attributed the way threadDefaultClaims attributes
+// numbers: the nearest config key before the match, so a "default off" belonging
+// to some other key is never read as this one's.
+func announceDefaultClaims(file, src string) []docClaim {
+	var claims []docClaim
+	for _, u := range splitDocUnits(src) {
+		keys := docKeyRE.FindAllStringIndex(u.text, -1)
+		for _, m := range docAnnounceDefaultRE.FindAllStringSubmatchIndex(u.text, -1) {
+			key, _ := nearestKeyBefore(u.text, keys, m[0])
+			if key != "announce_kb_updates" {
+				continue
+			}
+			claims = append(claims, docClaim{
+				file: file,
+				line: u.lineAt(m[0]),
+				key:  key,
+				text: strings.ToLower(u.text[m[2]:m[3]]),
+			})
 		}
 	}
-	// It is documented on the configuration reference, both notification pages
-	// and the reviewing-knowledge concept page. Requiring several holds the
-	// guard to catching a partial fix — the failure where someone corrects one
-	// page and leaves the others promising the opposite.
-	if n := len(seenIn["announce_kb_updates"]); n < 3 {
-		t.Errorf("announce_kb_updates' default is stated on only %d page(s); it is documented on the "+
-			"configuration reference, both notification pages and the reviewing-knowledge concept page, "+
-			"so a count this low means the guard has stopped seeing most of them", n)
-	}
+	return claims
 }
 
 // docQuoteCapRE matches the announcement's note-quote ceiling as the transport
@@ -311,45 +379,6 @@ func notifyIntConst(root, name string) (int64, error) {
 	return 0, fmt.Errorf("%s declares no const %s — it was renamed or moved, and this guard is inert", path, name)
 }
 
-// docBoolRE matches a boolean as the docs write it, bold markers and backticks
-// being separate tokens either side of it.
-var docBoolRE = regexp.MustCompile(`\b(?:true|false)\b`)
-
-// threadBoolClaims extracts the boolean default claims a single markdown page
-// makes about the pinned keys. It mirrors threadDefaultClaims — same units,
-// same nearest-key-before attribution — minus the YAML-value and table-cell
-// readings; see TestThreadBooleanDefaultsMatchTheDocs for why those two are
-// wrong for a boolean.
-func threadBoolClaims(file, src string, pinned map[string]bool) []docClaim {
-	var claims []docClaim
-	for _, u := range splitDocUnits(src) {
-		keys := docKeyRE.FindAllStringIndex(u.text, -1)
-		prevEnd := 0
-		for _, tok := range docBoolRE.FindAllStringIndex(u.text, -1) {
-			key, end := nearestKeyBefore(u.text, keys, tok[0])
-			anchor := max(end, prevEnd)
-			prevEnd = tok[1]
-			if key == "" {
-				continue
-			}
-			if _, ok := pinned[key]; !ok {
-				continue
-			}
-			if !strings.Contains(strings.ToLower(u.text[anchor:tok[0]]), "default") {
-				continue
-			}
-			claims = append(claims, docClaim{
-				file: file,
-				line: u.lineAt(tok[0]),
-				key:  key,
-				text: docSnippet(u.text, tok[0]-60, tok[1]+20),
-				bool: u.text[tok[0]:tok[1]] == "true",
-			})
-		}
-	}
-	return claims
-}
-
 // docClaim is one number a page states as a key's default, kept with enough
 // provenance to point an operator-facing failure at the exact line.
 type docClaim struct {
@@ -358,7 +387,6 @@ type docClaim struct {
 	key  string
 	text string
 	val  int64
-	bool bool
 }
 
 var (

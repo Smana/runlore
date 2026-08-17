@@ -558,6 +558,9 @@ func atxHeadingText(line string) string {
 // The plain space is excluded so ordinary text is left exactly as written;
 // everything else in those categories becomes one, which keeps the result the
 // same length in runes and never joins two words.
+//
+// FlattenLine is this same rule, exported for the chat notifiers — see its doc
+// comment for why it is shared rather than reimplemented there.
 func singleLine(s string) string {
 	return strings.Map(func(r rune) rune {
 		if r == ' ' {
@@ -569,6 +572,25 @@ func singleLine(s string) string {
 		return r
 	}, s)
 }
+
+// FlattenLine folds every break-or-reorder rune in s to a space, so a value a
+// caller intends to render as ONE line cannot become two.
+//
+// It exists for the chat notifiers' one-line announcement fields (an author, an
+// entry title, a forge URL), which are interpolated into a message at the left
+// margin rather than blockquoted — so unlike the note text, no later escape and
+// no "> " prefix stands between them and a forged line. A U+2028 inside an
+// author is a new visual line to every client that renders one, and the text
+// after it sits exactly where RunLore's own claims sit.
+//
+// Exported rather than reimplemented in internal/notify because that package has
+// already been bitten by a private copy of a break list: kbUpdateAnnouncement's
+// own doc records a local quoter that never learned a line is not only what "\n"
+// separates, and put a forged "📚 Knowledge base updated — …" at the left margin
+// of the findings channel. The list of what breaks a line belongs in one place;
+// this is that place, and QuoteUntrusted's mandatoryBreaks is its sibling for
+// multi-line text.
+func FlattenLine(s string) string { return singleLine(s) }
 
 // truncate shortens s to around n bytes: it cuts at or before byte index n-1
 // (walking back to a rune boundary) and appends a 3-byte "…", so the result

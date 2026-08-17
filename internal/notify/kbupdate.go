@@ -48,12 +48,15 @@ const (
 	kbFieldEllipsis = "…"
 )
 
-// kbUpdateAnnouncement composes the chat announcement for a knowledge-base
-// write that already landed, marking every untrusted span with thread.Untrusted
-// so the calling transport escapes it with its OWN escaper — the same boundary
-// PR3 drew for thread replies, and for the same reason: only this side knows
-// which bytes came from where, and only the transport knows what its chat
-// system treats as markup.
+// kbUpdateAnnouncement composes the CHANNEL form of the chat announcement for a
+// knowledge-base write that already landed, marking every untrusted span with
+// thread.Untrusted so the calling transport escapes it with its OWN escaper —
+// the same boundary PR3 drew for thread replies, and for the same reason: only
+// this side knows which bytes came from where, and only the transport knows what
+// its chat system treats as markup.
+//
+// kbThreadAnnouncement is the shorter form used when the announcement is
+// delivered into the thread the note came from; see it for why the two differ.
 //
 // It is a NEW egress for model-authored text, and a wider one than the reply it
 // accompanies: on the freeform route RunLore's own chat model wrote the note,
@@ -87,8 +90,8 @@ const (
 func kbUpdateAnnouncement(up providers.KBUpdate) string {
 	lines := []string{kbHeadline(up)}
 	if title := kbField(up.Title, kbTitleBytes); title != "" {
-		// Not blockquoted: it is one flattened line (see thread.noteField) that
-		// cannot reach the left margin on a line of its own.
+		// Not blockquoted: kbField has flattened it to one line, so it cannot
+		// reach the left margin on a line of its own.
 		lines = append(lines, "Entry: "+thread.Untrusted(title))
 	}
 	if from := kbProvenanceLine(up); from != "" {
@@ -100,6 +103,40 @@ func kbUpdateAnnouncement(up providers.KBUpdate) string {
 	}
 	if len(preview) < len(up.Note) {
 		lines = append(lines, kbNoteTruncatedNotice)
+	}
+	return strings.Join(lines, "\n")
+}
+
+// kbThreadAnnouncement composes the announcement for delivery INTO the thread
+// the note was typed in: the headline and the provenance line, and nothing else.
+//
+// It is deliberately not the same message as kbUpdateAnnouncement above, because
+// the reader is not the same reader. In a channel the announcement is the only
+// thing anyone sees about that write, so it carries the entry name and quotes
+// the note. In the originating thread, the reply to the person who typed is
+// sitting directly above it and already carries both — the same pull-request
+// URL, the same "Entry: …" line, and the same 512-byte quote of the same note
+// (see thread.recordedBlock). Repeating them would answer the complaint this
+// destination exists for by relocating it: the operator who wrote that three
+// notes produced three channel posts restating the thread would get three THREAD
+// posts restating the message directly above each one, which is worse, not
+// better — the two would be adjacent instead of a channel apart.
+//
+// What is left is exactly the delta: who wrote the note and which chat system
+// they typed it in. The reply does not say either — it answers the person who
+// typed, so it has no reason to name them — and the issue asking for this
+// destination named that delta as the reason to want the announcement at all.
+//
+// A consequence worth stating: ORDER between the two is not guaranteed. The
+// announcement is scheduled on the announcer's dispatcher before the reply is
+// posted (see thread.Responder.record and thread.Mention.reply), so it can land
+// first. That is tolerable only because this form does not restate the reply —
+// two messages that each say something the other does not read correctly in
+// either order, where a message and its near-duplicate do not.
+func kbThreadAnnouncement(up providers.KBUpdate) string {
+	lines := []string{kbHeadline(up)}
+	if from := kbProvenanceLine(up); from != "" {
+		lines = append(lines, from)
 	}
 	return strings.Join(lines, "\n")
 }
@@ -141,11 +178,35 @@ func kbProvenanceLine(up providers.KBUpdate) string {
 	return ""
 }
 
-// kbField caps one untrusted single-line field, marking the cut so a truncated
-// value is not read as a whole one. The ellipsis sits inside the span the
-// caller wraps it in, which costs nothing: neither escaper touches it.
+// kbField flattens and caps one untrusted single-line field, marking the cut so
+// a truncated value is not read as a whole one. The ellipsis sits inside the
+// span the caller wraps it in, which costs nothing: neither escaper touches it.
+//
+// It FLATTENS as well as capping, and that half is a safety property rather than
+// tidiness. Every caller interpolates the result into a line at the LEFT MARGIN
+// — "Entry: …", "By … in a slack thread", the headline's URL — where the note
+// text never goes: the note is blockquoted line by line by thread.QuoteUntrusted,
+// which splits on every mandatory break AND strips RunLore's status glyphs.
+// These fields have neither defence, so one U+2028 in an author renders a new
+// visual line whose content the sender chose, at the exact indent RunLore's own
+// claims sit at — a forged "📚 Knowledge base updated — opened PR #999" directly
+// under the real headline.
+//
+// Escaping does not cover it: neither escapeMrkdwn nor escapeMatrixReply touches
+// a line separator, because on every other path the breaks were already gone.
+// The producer in internal/thread does flatten these (see noteField), so this
+// closes the gap for a providers.KBUpdate composed anywhere else — which is the
+// premise of the field-classification guard in internal/providers: a notifier
+// answers for what it renders, not for who filled the struct.
+//
+// It matters most on the IN-THREAD announcement, where kbThreadAnnouncement
+// drops the title and the quote and the provenance line is one of only two lines
+// in the message.
+//
+// Flattening runs BEFORE the cap so a break cannot survive by sitting past the
+// ceiling, and it never changes the rune count, so it cannot push a field over.
 func kbField(s string, maxBytes int) string {
-	s = strings.TrimSpace(s)
+	s = strings.TrimSpace(thread.FlattenLine(s))
 	if len(s) <= maxBytes {
 		return s
 	}
@@ -224,7 +285,7 @@ func (s *SlackBot) DeliverKBUpdate(ctx context.Context, up providers.KBUpdate) e
 	toThread, toChannel := kbAnnounceTargets(up, s.Transport())
 	var errs []error
 	if toThread {
-		errs = append(errs, s.ReplyInThread(ctx, up.Root, up.Channel, kbUpdateAnnouncement(up)))
+		errs = append(errs, s.ReplyInThread(ctx, up.Root, up.Channel, kbThreadAnnouncement(up)))
 	}
 	if toChannel {
 		_, err := s.post(ctx, slackKBUpdateMessage(up))
@@ -247,7 +308,7 @@ func (m *Matrix) DeliverKBUpdate(ctx context.Context, up providers.KBUpdate) err
 	toThread, toRoom := kbAnnounceTargets(up, m.Transport())
 	var errs []error
 	if toThread {
-		errs = append(errs, m.ReplyInThread(ctx, up.Root, up.Channel, kbUpdateAnnouncement(up)))
+		errs = append(errs, m.ReplyInThread(ctx, up.Root, up.Channel, kbThreadAnnouncement(up)))
 	}
 	if toRoom {
 		_, err := m.send(ctx, m.roomID, map[string]any{

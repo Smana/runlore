@@ -15,17 +15,35 @@ import (
 	"time"
 
 	"github.com/Smana/runlore/internal/providers"
+	"github.com/Smana/runlore/internal/thread"
 )
 
 // hostileKBUpdate fills EVERY field providers.KBUpdate documents as untrusted —
-// Note, Title, Author, URL and Root, all five — with the payload that transport
-// treats as markup. Filling all five rather than the ones a renderer happens to
-// use today is the point: a field this announcement does not render yet is one
-// escape away from being rendered, and the assertion has to already cover it.
-func hostileKBUpdate(payload string) providers.KBUpdate {
+// Note, Title, Author, URL, Root and Channel, all six — with the payload that
+// transport treats as markup. Filling all six rather than the ones a renderer
+// happens to use today is the point: a field this announcement does not render
+// yet is one escape away from being rendered, and the assertion has to already
+// cover it.
+//
+// transport and delivery are PARAMETERS rather than constants because the
+// announcement now has two renderings and three destinations, and hostility is a
+// property of each. A fixture pinned to Transport "slack" with no Channel and no
+// Delivery — which is what this was — can only ever exercise the channel post:
+// kbAnnounceTargets refuses the thread route without both handles, so every
+// neutralisation assertion in this file silently covered one of the two paths.
+// Replacing both ReplyInThread calls with a raw, unescaped, unbounded post left
+// the entire repository green.
+//
+// Channel carries the payload rather than a benign id for the reason Root does:
+// it is a transport-reported string, so it is untrusted, and on the thread route
+// it is also ADDRESSING. Hostile bytes there prove it is used as a handle and
+// never interpolated into the message.
+func hostileKBUpdate(payload, transport string, delivery providers.KBDelivery) providers.KBUpdate {
 	return providers.KBUpdate{
-		Transport: "slack",
+		Transport: transport,
 		Root:      payload,
+		Channel:   payload,
+		Delivery:  delivery,
 		Route:     providers.KBRouteOpenPR,
 		PR:        99,
 		URL:       payload,
@@ -34,6 +52,39 @@ func hostileKBUpdate(payload string) providers.KBUpdate {
 		Note:      "the registry PVC filled up — " + payload,
 		At:        time.Date(2026, 8, 16, 9, 0, 0, 0, time.UTC),
 	}
+}
+
+// kbDestinations is every destination an announcement can be delivered at.
+// Hostility tests run the whole set: the in-thread rendering and the channel
+// rendering are different messages built by different functions and posted by
+// different methods, and "both" is the only case that exercises them together.
+var kbDestinations = []providers.KBDelivery{
+	providers.KBDeliverChannel, providers.KBDeliverThread, providers.KBDeliverBoth,
+}
+
+// kbDestName names a destination for a subtest, spelling the zero value "channel"
+// rather than "".
+func kbDestName(d providers.KBDelivery) string {
+	if d == providers.KBDeliverChannel {
+		return "channel"
+	}
+	return string(d)
+}
+
+// postedTexts returns the rendered message of EVERY post captured, so an
+// assertion covers each one rather than only (*sent)[0]. A "both" delivery makes
+// two posts from two different renderers, and reading the first would leave
+// whichever the transport happens to send second wholly unasserted.
+func postedTexts(t *testing.T, sent []string) []string {
+	t.Helper()
+	if len(sent) == 0 {
+		t.Fatal("nothing was posted at all")
+	}
+	out := make([]string, 0, len(sent))
+	for _, body := range sent {
+		out = append(out, postedThreadText(t, body))
+	}
+	return out
 }
 
 // kbUpdateSinkOnFakeTransport wires both chat notifiers at one httptest server
@@ -66,68 +117,141 @@ func kbUpdateSinkOnFakeTransport(t *testing.T) (map[string]providers.KBUpdateNot
 // same pair PR3's Untrusted/RenderReply boundary was built for, arriving
 // through a different door.
 func TestSlackKBUpdateAnnouncementNeutralisesUntrustedFields(t *testing.T) {
-	sinks, sent := kbUpdateSinkOnFakeTransport(t)
-	up := hostileKBUpdate("<!channel> <https://evil.example|https://github.com/acme/kb/pull/7>")
+	for _, dest := range kbDestinations {
+		t.Run(kbDestName(dest), func(t *testing.T) {
+			sinks, sent := kbUpdateSinkOnFakeTransport(t)
+			up := hostileKBUpdate("<!channel> <https://evil.example|https://github.com/acme/kb/pull/7>", "slack", dest)
 
-	*sent = nil
-	if err := sinks["slack"].DeliverKBUpdate(context.Background(), up); err != nil {
-		t.Fatalf("DeliverKBUpdate: %v", err)
-	}
-	if len(*sent) != 1 {
-		t.Fatalf("posted %d messages, want 1", len(*sent))
-	}
-	text := postedThreadText(t, (*sent)[0])
-
-	for _, live := range []string{"<!channel>", "<https://evil.example|"} {
-		if strings.Contains(text, live) {
-			t.Errorf("an untrusted field reached Slack as live mrkdwn (%q):\n%s", live, text)
-		}
-	}
-	if !strings.Contains(text, "&lt;!channel&gt;") {
-		t.Errorf("the untrusted text must still be READABLE, escaped rather than censored:\n%s", text)
-	}
-	// RunLore's own framing is not escaped with it: the blockquote markers are
-	// what keep the quoted note distinguishable from RunLore's own claims, and
-	// mrkdwnEscaper would turn them into literal "&gt; ".
-	if !strings.Contains(text, "\n> ") {
-		t.Errorf("the quoted note lost its blockquote markers to escaping:\n%s", text)
-	}
-	for _, line := range strings.Split(text, "\n") {
-		if strings.HasPrefix(line, "&gt;") {
-			t.Errorf("RunLore's own blockquote marker was escaped, so the quote no longer renders as one: %q", line)
-		}
-	}
-	if strings.Contains(text, "\ue000") {
-		t.Errorf("an untrusted-span mark reached the chat system:\n%s", text)
+			*sent = nil
+			if err := sinks["slack"].DeliverKBUpdate(context.Background(), up); err != nil {
+				t.Fatalf("DeliverKBUpdate: %v", err)
+			}
+			for i, text := range postedTexts(t, *sent) {
+				for _, live := range []string{"<!channel>", "<https://evil.example|"} {
+					if strings.Contains(text, live) {
+						t.Errorf("post %d: an untrusted field reached Slack as live mrkdwn (%q):\n%s", i, live, text)
+					}
+				}
+				if !strings.Contains(text, "&lt;!channel&gt;") {
+					t.Errorf("post %d: the untrusted text must still be READABLE, escaped rather than censored:\n%s", i, text)
+				}
+				if strings.Contains(text, "") {
+					t.Errorf("post %d: an untrusted-span mark reached the chat system:\n%s", i, text)
+				}
+				// RunLore's own framing is not escaped with the untrusted spans: the
+				// blockquote markers are what keep the quoted note distinguishable
+				// from RunLore's own claims, and mrkdwnEscaper would turn them into
+				// literal "&gt; ". Only the CHANNEL form quotes the note at all — the
+				// in-thread form drops it — so the marker is required exactly where
+				// the quote is and absent where it is not, which also pins that the
+				// two forms did not quietly become one message again.
+				if quoted := strings.Contains(text, "the registry PVC filled up"); quoted != strings.Contains(text, "\n> ") {
+					t.Errorf("post %d: the quoted note and its blockquote markers must arrive together:\n%s", i, text)
+				}
+				for _, line := range strings.Split(text, "\n") {
+					if strings.HasPrefix(line, "&gt;") {
+						t.Errorf("post %d: RunLore's own blockquote marker was escaped, so the quote no longer renders as one: %q", i, line)
+					}
+				}
+			}
+		})
 	}
 }
 
-// TestMatrixKBUpdateAnnouncementNeutralisesUntrustedFields is the same
-// guarantee against Matrix's own hazard. A plain m.notice body has no markup to
-// inject, but .m.rule.roomnotif matches "@room" in content.body and notifies
-// every member of the room — the direct analogue of Slack's <!channel>, and
-// reachable the same way, through text RunLore's model wrote.
+// TestMatrixKBUpdateAnnouncementNeutralisesUntrustedFields is the same guarantee
+// against Matrix's own hazard, across the same destinations. A plain m.notice
+// body has no markup to inject, but .m.rule.roomnotif matches "@room" in
+// content.body and notifies every member of the room — the direct analogue of
+// Slack's <!channel>, reachable the same way, through text RunLore's model
+// wrote. That push rule matches a THREADED m.notice exactly as it matches an
+// unthreaded one, so the m.thread relation buys the room nothing.
 func TestMatrixKBUpdateAnnouncementNeutralisesUntrustedFields(t *testing.T) {
+	for _, dest := range kbDestinations {
+		t.Run(kbDestName(dest), func(t *testing.T) {
+			sinks, sent := kbUpdateSinkOnFakeTransport(t)
+			up := hostileKBUpdate("@room now", "matrix", dest)
+
+			*sent = nil
+			if err := sinks["matrix"].DeliverKBUpdate(context.Background(), up); err != nil {
+				t.Fatalf("DeliverKBUpdate: %v", err)
+			}
+			for i, body := range postedTexts(t, *sent) {
+				if strings.Contains(body, "@room") {
+					t.Errorf("post %d: an untrusted field reached the room as a live @room ping:\n%s", i, body)
+				}
+				if !strings.Contains(body, "@\u2060room") {
+					t.Errorf("post %d: the token must be marked, not censored — a human still has to be able to read it:\n%s", i, body)
+				}
+				if strings.Contains(body, "") {
+					t.Errorf("post %d: an untrusted-span mark reached the room:\n%s", i, body)
+				}
+			}
+		})
+	}
+}
+
+// TestAnnouncementProvenanceCannotForgeALine is the in-thread form's own version
+// of the blockquote-escape defect below, aimed at the field that form still
+// renders.
+//
+// kbThreadAnnouncement drops the title and the note quote, so the message is the
+// headline plus "By <author> in a slack thread" — two lines, one of which
+// interpolates an untrusted value at the LEFT MARGIN with no blockquote around
+// it. thread.QuoteUntrusted, which is what makes a mandatory break harmless
+// inside the note, never sees this field, and neither escaper touches a line
+// separator. One U+2028 in an author therefore renders a third visual line the
+// sender chose, directly under RunLore's real headline and indented identically
+// — and the headline is precisely the line worth forging, because it is the one
+// claiming a pull request exists.
+//
+// Every mandatory break is driven rather than U+2028 alone, for the reason
+// thread.mandatoryBreaks exists: a list that learns one break at a time is wrong
+// until the next report. The channel destination runs with it because the same
+// field reaches the same margin there — the flattening closes both at once.
+func TestAnnouncementProvenanceCannotForgeALine(t *testing.T) {
+	const forged = "\U0001F4DA Knowledge base updated — opened PR #999 — https://evil.example/kb"
+
 	sinks, sent := kbUpdateSinkOnFakeTransport(t)
-	up := hostileKBUpdate("@room now")
-
-	*sent = nil
-	if err := sinks["matrix"].DeliverKBUpdate(context.Background(), up); err != nil {
-		t.Fatalf("DeliverKBUpdate: %v", err)
-	}
-	if len(*sent) != 1 {
-		t.Fatalf("posted %d messages, want 1", len(*sent))
-	}
-	body := postedThreadText(t, (*sent)[0])
-
-	if strings.Contains(body, "@room") {
-		t.Errorf("an untrusted field reached the room as a live @room ping:\n%s", body)
-	}
-	if !strings.Contains(body, "@\u2060room") {
-		t.Errorf("the token must be marked, not censored — a human still has to be able to read it:\n%s", body)
-	}
-	if strings.Contains(body, "\ue000") {
-		t.Errorf("an untrusted-span mark reached the room:\n%s", body)
+	for _, br := range []struct{ name, sep string }{
+		{"LF U+000A", "\n"},
+		{"CR U+000D", "\r"},
+		{"CRLF", "\r\n"},
+		{"VT U+000B", "\v"},
+		{"FF U+000C", "\f"},
+		{"NEL U+0085", "\u0085"},
+		{"LS U+2028", "\u2028"},
+		{"PS U+2029", "\u2029"},
+	} {
+		for _, dest := range kbDestinations {
+			t.Run(br.name+"/"+kbDestName(dest), func(t *testing.T) {
+				up := providers.KBUpdate{
+					Transport: "slack", Root: "111.222", Channel: "C-ORIGIN", Delivery: dest,
+					Route: providers.KBRouteOpenPR, PR: 42, URL: "https://github.com/o/r/pull/42",
+					Author: "alice" + br.sep + forged,
+					Note:   "the registry PVC filled up",
+				}
+				*sent = nil
+				if err := sinks["slack"].DeliverKBUpdate(context.Background(), up); err != nil {
+					t.Fatalf("DeliverKBUpdate: %v", err)
+				}
+				for i, text := range postedTexts(t, *sent) {
+					for n, line := range strings.Split(text, "\n") {
+						if n == 0 {
+							continue // RunLore's own headline, the only one allowed
+						}
+						if strings.HasPrefix(strings.TrimSpace(line), "\U0001F4DA") {
+							t.Errorf("post %d: a %s in the author put a forged RunLore headline at the left margin:\n%q",
+								i, br.name, text)
+						}
+					}
+					// Flattened, not censored: a human must still be able to read
+					// what the author field said, on the one line it is given.
+					if !strings.Contains(text, "alice") || !strings.Contains(text, "opened PR #999") {
+						t.Errorf("post %d: the author was censored rather than flattened:\n%q", i, text)
+					}
+				}
+			})
+		}
 	}
 }
 
@@ -535,7 +659,7 @@ func slackOrigin(d providers.KBDelivery) providers.KBUpdate {
 	return providers.KBUpdate{
 		Transport: "slack", Root: "111.222", Channel: "C-ORIGIN", Delivery: d,
 		Route: providers.KBRouteOpenPR, PR: 99, URL: "https://github.com/o/r/pull/99",
-		Author: "sre-jane", Note: "a spot reclaim",
+		Author: "sre-jane", Note: "a spot reclaim", Title: "Operator note: OOM in payments",
 	}
 }
 
@@ -601,9 +725,23 @@ func TestAnnouncementRoutesIntoTheOriginatingThread(t *testing.T) {
 			}
 			// It is still the announcement, not the thread reply: the provenance
 			// line is the whole reason to want it in the thread at all.
-			if text := postedThreadText(t, (*posts)[0].body); !strings.Contains(text, "sre-jane") ||
-				!strings.Contains(text, "Knowledge base updated") {
+			text := postedThreadText(t, (*posts)[0].body)
+			if !strings.Contains(text, "sre-jane") || !strings.Contains(text, "Knowledge base updated") {
 				t.Errorf("the threaded announcement lost its own content (who wrote the note, what landed):\n%s", text)
+			}
+			// And it is the SHORT form. In the thread, the reply RunLore already
+			// posted carries the entry title and quotes the note back; repeating
+			// both here is the echo this feature exists to remove, moved closer to
+			// its source rather than removed. Without these two assertions the
+			// reduced renderer can be swapped for the full one with the suite green
+			// — which is how the echo would come back.
+			for _, unwanted := range []struct{ frag, why string }{
+				{"Operator note: OOM in payments", "the entry title — the reply one message up already states it"},
+				{"a spot reclaim", "the note itself — the reply already quotes it back to the person who typed it"},
+			} {
+				if strings.Contains(text, unwanted.frag) {
+					t.Errorf("the in-thread announcement restates %s:\n%s", unwanted.why, text)
+				}
 			}
 		})
 	}
@@ -741,69 +879,154 @@ func TestAnnouncementFallsBackToTheChannelWithoutBothThreadHandles(t *testing.T)
 //
 // It is deliberately NOT what `true` maps to: `both` produces strictly more
 // messages than the shipped behaviour, so an operator has to ask for it.
+//
+// Both transports are driven. They do not share an implementation — each
+// DeliverKBUpdate composes its own two posts — so forcing the room half off when
+// the thread half fires leaves the other transport's test green, and Matrix is
+// the one where that mistake is easiest to make: its channel post is the
+// original inline m.send while Slack's is a helper call.
 func TestAnnouncementBothReachesTheThreadAndTheChannel(t *testing.T) {
-	slack, _, posts := kbRoutingSinks(t)
-	if err := slack.DeliverKBUpdate(context.Background(), slackOrigin(providers.KBDeliverBoth)); err != nil {
-		t.Fatalf("DeliverKBUpdate: %v", err)
-	}
-	if len(*posts) != 2 {
-		t.Fatalf("posted %d messages, want 2 (the thread and the channel)", len(*posts))
-	}
-	seen := map[string]string{}
-	for _, p := range *posts {
-		root, dest := p.threadedTo(t)
-		seen[root] = dest
-	}
-	if got, ok := seen["111.222"]; !ok || got != "C-ORIGIN" {
-		t.Errorf("no announcement reached the originating thread (root→dest: %v)", seen)
-	}
-	if got, ok := seen[""]; !ok || got != "C-CONFIGURED" {
-		t.Errorf("no unthreaded announcement reached the configured channel (root→dest: %v)", seen)
+	for _, tc := range []struct {
+		name                   string
+		up                     providers.KBUpdate
+		pick                   func(slack, matrix providers.KBUpdateNotifier) providers.KBUpdateNotifier
+		wantRoot               string
+		threadDest, configured string
+	}{
+		{
+			name:       "slack",
+			up:         slackOrigin(providers.KBDeliverBoth),
+			pick:       func(s, _ providers.KBUpdateNotifier) providers.KBUpdateNotifier { return s },
+			wantRoot:   "111.222",
+			threadDest: "C-ORIGIN",
+			configured: "C-CONFIGURED",
+		},
+		{
+			name:       "matrix",
+			up:         matrixOrigin(providers.KBDeliverBoth),
+			pick:       func(_, m providers.KBUpdateNotifier) providers.KBUpdateNotifier { return m },
+			wantRoot:   "$evt-root",
+			threadDest: "/_matrix/client/v3/rooms/!room-of-origin:example.org/send/m.room.message/",
+			configured: "/_matrix/client/v3/rooms/!configured-room:example.org/send/m.room.message/",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			slack, matrix, posts := kbRoutingSinks(t)
+			if err := tc.pick(slack, matrix).DeliverKBUpdate(context.Background(), tc.up); err != nil {
+				t.Fatalf("DeliverKBUpdate: %v", err)
+			}
+			if len(*posts) != 2 {
+				t.Fatalf("posted %d messages, want 2 (the thread and the channel)", len(*posts))
+			}
+			seen := map[string]string{}
+			for _, p := range *posts {
+				root, dest := p.threadedTo(t)
+				seen[root] = dest
+			}
+			if got, ok := seen[tc.wantRoot]; !ok || !strings.HasPrefix(got, tc.threadDest) {
+				t.Errorf("no announcement reached the originating thread (root→dest: %v)", seen)
+			}
+			if got, ok := seen[""]; !ok || !strings.HasPrefix(got, tc.configured) {
+				t.Errorf("no unthreaded announcement reached the configured channel/room (root→dest: %v)", seen)
+			}
+		})
 	}
 }
 
 // TestBothStillPostsToTheChannelWhenTheThreadPostFails pins that the two
 // deliveries are independent. A wedged or renamed thread must not cost the
-// broadcast a write that already landed on the forge, so the errors are joined
+// broadcast a write that already landed on the forge, so the errors are JOINED
 // rather than short-circuited.
+//
+// Matrix is driven alongside Slack, and it is the transport this matters most
+// on: a thread root that has been redacted still exists as an event id, so the
+// homeserver accepts the relation and the message renders detached — and a
+// room whose power levels changed rejects the send outright. Its channel post is
+// also the one written inline rather than through a helper, so a `return err`
+// slipped into the thread half is easiest to miss exactly here.
 func TestBothStillPostsToTheChannelWhenTheThreadPostFails(t *testing.T) {
-	var sent []kbPost
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		body, _ := io.ReadAll(r.Body)
-		sent = append(sent, kbPost{path: r.URL.Path, body: string(body)})
-		if strings.Contains(string(body), "thread_ts") {
-			_, _ = w.Write([]byte(`{"ok":false,"error":"thread_not_found"}`))
-			return
-		}
-		_, _ = w.Write([]byte(`{"ok":true,"ts":"1"}`))
-	}))
-	defer srv.Close()
+	for _, tc := range []struct {
+		name     string
+		up       providers.KBUpdate
+		failWhen string // substring of the request that identifies the THREAD post
+		build    func(url string) providers.KBUpdateNotifier
+	}{
+		{
+			name:     "slack",
+			up:       slackOrigin(providers.KBDeliverBoth),
+			failWhen: "thread_ts",
+			build: func(url string) providers.KBUpdateNotifier {
+				bot := NewSlackBot("xoxb-test", "C-CONFIGURED")
+				bot.baseURL = url
+				return bot
+			},
+		},
+		{
+			name:     "matrix",
+			up:       matrixOrigin(providers.KBDeliverBoth),
+			failWhen: "m.thread",
+			build: func(url string) providers.KBUpdateNotifier {
+				return NewMatrix(url, "!configured-room:example.org", "tok")
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var sent []kbPost
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				body, _ := io.ReadAll(r.Body)
+				sent = append(sent, kbPost{path: r.URL.Path, body: string(body)})
+				if strings.Contains(string(body), tc.failWhen) {
+					w.WriteHeader(http.StatusForbidden)
+					_, _ = w.Write([]byte(`{"ok":false,"error":"thread_not_found"}`))
+					return
+				}
+				_, _ = w.Write([]byte(`{"ok":true,"ts":"1","event_id":"$1"}`))
+			}))
+			defer srv.Close()
 
-	bot := NewSlackBot("xoxb-test", "C-CONFIGURED")
-	bot.baseURL = srv.URL
-
-	err := bot.DeliverKBUpdate(context.Background(), slackOrigin(providers.KBDeliverBoth))
-	if err == nil {
-		t.Error("a failed thread post must be reported, not swallowed here — the announcer is what decides to swallow it")
-	}
-	if len(sent) != 2 {
-		t.Fatalf("posted %d messages, want 2 — the channel half must survive the thread half failing", len(sent))
-	}
-	if root, _ := sent[1].threadedTo(t); root != "" {
-		t.Errorf("the second post is threaded (%q); the channel half never was", root)
+			if err := tc.build(srv.URL).DeliverKBUpdate(context.Background(), tc.up); err == nil {
+				t.Error("a failed thread post must be reported, not swallowed here — the announcer is what decides to swallow it")
+			}
+			if len(sent) != 2 {
+				t.Fatalf("posted %d messages, want 2 — the channel half must survive the thread half failing", len(sent))
+			}
+			if root, _ := sent[1].threadedTo(t); root != "" {
+				t.Errorf("the second post is threaded (%q); the channel half never was", root)
+			}
+		})
 	}
 }
 
-// TestKBUpdateFieldsAreAllRenderedOrDeliberatelyNot keeps the renderer honest
-// about the event it is given. providers.KBUpdate has a reflection test forcing
-// every field to be classified trusted or untrusted; this is the notifier's
-// side of it — a field added to the event must be either shown to the operator
-// or listed here as deliberately withheld, so "we forgot to render it" cannot
-// pass as "we chose not to".
+// TestKBUpdateFieldsAreAllRenderedOrDeliberatelyNot keeps the renderers honest
+// about the event they are given. providers.KBUpdate has a reflection test
+// forcing every field to be classified trusted or untrusted; this is the
+// notifier's side of it — a field added to the event must be either shown to the
+// operator or listed here as deliberately withheld, so "we forgot to render it"
+// cannot pass as "we chose not to".
+//
+// BOTH renderings are walked, each against its own list. There are two messages
+// now — the channel form and the shorter in-thread form — and this used to
+// inspect one: it set Delivery to "both" but on a matrix-born event delivered
+// through the SLACK sink, which is not the originating transport, so the thread
+// route was never taken and only the channel post was ever read. It looked
+// stronger than it was.
+//
+// The in-thread list is also what pins the reduced form itself. Title and Note
+// are WITHHELD there, deliberately: the reply to the person who typed is sitting
+// directly above it carrying both, and repeating them is the echo this
+// destination exists to remove. If someone points the thread post back at
+// kbUpdateAnnouncement, those two entries fail — which is the guard the
+// destination's whole justification rests on.
 func TestKBUpdateFieldsAreAllRenderedOrDeliberatelyNot(t *testing.T) {
-	// What the announcement must show, and the form it shows it in — Route is a
-	// sentence a human reads, not the raw enum value.
-	shows := map[string]string{
+	up := providers.KBUpdate{
+		Transport: "matrix", Root: "$evt-root", Channel: "!room-of-origin:example.org",
+		Delivery: providers.KBDeliverBoth, Route: providers.KBRouteOpenPR, PR: 4242,
+		URL: "https://github.com/o/r/pull/4242", Title: "Operator note: OOM",
+		Author: "sre-jane", Note: "a spot reclaim", At: time.Date(2026, 8, 16, 9, 0, 0, 0, time.UTC),
+	}
+	// Values a list may search for, one per field, so an entry cannot be written
+	// against a value the fixture does not carry.
+	value := map[string]string{
 		"Transport": "matrix",
 		"Route":     "opened PR",
 		"PR":        "4242",
@@ -811,64 +1034,77 @@ func TestKBUpdateFieldsAreAllRenderedOrDeliberatelyNot(t *testing.T) {
 		"Title":     "Operator note: OOM",
 		"Author":    "sre-jane",
 		"Note":      "a spot reclaim",
-	}
-	// Root and Channel are opaque per-transport handles (a Slack thread_ts and
-	// channel id, a Matrix event id and room id). They identify the thread for a
-	// programmatic consumer and address a threaded delivery; printed into a
-	// channel they are noise a human cannot act on, and the announcement already
-	// names the transport it came from. At is the wall clock of a message the
-	// chat system timestamps itself. Delivery is an instruction to the sink about
-	// where to post, not a fact about the write, so nothing about it belongs in
-	// the message a human reads.
-	withheld := map[string]string{
-		"Root":     "$evt-root",
-		"Channel":  "!room-of-origin:example.org",
-		"Delivery": "both",
-		"At":       "2026-08-16T09:00:00Z",
+		"Root":      "$evt-root",
+		"Channel":   "!room-of-origin:example.org",
+		"Delivery":  "both",
+		"At":        "2026-08-16T09:00:00Z",
 	}
 
-	sinks, sent := kbUpdateSinkOnFakeTransport(t)
-	up := providers.KBUpdate{
-		Transport: "matrix", Root: "$evt-root", Channel: "!room-of-origin:example.org",
-		Delivery: providers.KBDeliverBoth, Route: providers.KBRouteOpenPR, PR: 4242,
-		URL: "https://github.com/o/r/pull/4242", Title: "Operator note: OOM",
-		Author: "sre-jane", Note: "a spot reclaim", At: time.Date(2026, 8, 16, 9, 0, 0, 0, time.UTC),
-	}
-	*sent = nil
-	if err := sinks["slack"].DeliverKBUpdate(context.Background(), up); err != nil {
-		t.Fatalf("DeliverKBUpdate: %v", err)
-	}
-	text := postedThreadText(t, (*sent)[0])
-
-	rt := reflect.TypeOf(up)
-	for i := range rt.NumField() {
-		name := rt.Field(i).Name
-		want, shown := shows[name]
-		hide, hidden := withheld[name]
-		switch {
-		case shown == hidden:
-			t.Errorf("KBUpdate.%s is in neither or both of shows/withheld — decide whether an operator reading the channel is told it", name)
-		case shown && !strings.Contains(text, want):
-			t.Errorf("KBUpdate.%s must be announced as %q, and is not:\n%s", name, want, text)
-		case hidden && strings.Contains(text, hide):
-			t.Errorf("KBUpdate.%s is listed as deliberately withheld but is rendered — update the list or stop rendering it:\n%s", name, text)
-		}
-	}
-
-	// The reverse direction, which its internal/providers sibling
-	// (TestKBUpdateClassifiesEveryFieldForEscaping) already checks and this side
-	// did not: an entry naming a field KBUpdate no longer has asserts nothing
-	// about anything. The loop above only walks the STRUCT, so a renamed or
-	// deleted field leaves its entry behind, still listed, still reading in
-	// review as a decision someone made about a field that is being rendered —
-	// and the new field that replaced it falls straight into the "in neither"
-	// arm, whose message is about the new name rather than the stale one.
-	for _, m := range []map[string]string{shows, withheld} {
-		for name := range m {
-			if _, ok := rt.FieldByName(name); !ok {
-				t.Errorf("shows/withheld classifies %q, but KBUpdate has no such field — stale entry, "+
-					"so nothing is checking whatever replaced it", name)
+	for _, form := range []struct {
+		name   string
+		render func(providers.KBUpdate) string
+		shows  []string
+	}{
+		{
+			// The CHANNEL form is the only thing anyone in that channel sees about
+			// the write, so it carries the entry name and quotes the note.
+			name: "channel", render: kbUpdateAnnouncement,
+			shows: []string{"Transport", "Route", "PR", "URL", "Title", "Author", "Note"},
+		},
+		{
+			// The IN-THREAD form drops Title and Note: the reply above it already
+			// carries the same entry name and the same quote of the same note.
+			// What is left is exactly the delta the reply lacks.
+			name: "thread", render: kbThreadAnnouncement,
+			shows: []string{"Transport", "Route", "PR", "URL", "Author"},
+		},
+	} {
+		t.Run(form.name, func(t *testing.T) {
+			shown := map[string]bool{}
+			for _, name := range form.shows {
+				shown[name] = true
 			}
+			// Rendered through the real transport rather than read off the composer,
+			// so what is asserted is what goes on the wire.
+			text := thread.RenderReply(form.render(up), escapeMrkdwn)
+
+			rt := reflect.TypeOf(up)
+			for i := range rt.NumField() {
+				name := rt.Field(i).Name
+				want, ok := value[name]
+				if !ok {
+					t.Errorf("KBUpdate.%s has no entry in the value map — add one so both forms can be "+
+						"checked for it", name)
+					continue
+				}
+				switch {
+				case shown[name] && !strings.Contains(text, want):
+					t.Errorf("the %s announcement must show KBUpdate.%s as %q, and does not:\n%s",
+						form.name, name, want, text)
+				case !shown[name] && strings.Contains(text, want):
+					t.Errorf("the %s announcement renders KBUpdate.%s, which it is listed as withholding — "+
+						"update the list or stop rendering it:\n%s", form.name, name, text)
+				}
+			}
+			// The reverse direction: a `shows` entry naming a field KBUpdate no
+			// longer has asserts nothing about anything, and the loop above only
+			// walks the STRUCT, so a stale name would sit there reading in review as
+			// a decision someone made.
+			for _, name := range form.shows {
+				if _, ok := rt.FieldByName(name); !ok {
+					t.Errorf("the %s form claims to show %q, but KBUpdate has no such field — stale entry",
+						form.name, name)
+				}
+			}
+		})
+	}
+
+	// The value map is checked the same way, for the same reason.
+	rt := reflect.TypeOf(up)
+	for name := range value {
+		if _, ok := rt.FieldByName(name); !ok {
+			t.Errorf("the value map classifies %q, but KBUpdate has no such field — stale entry, "+
+				"so nothing is checking whatever replaced it", name)
 		}
 	}
 }
