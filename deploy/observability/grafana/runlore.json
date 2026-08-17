@@ -405,7 +405,7 @@
         "type": "prometheus",
         "uid": "${datasource}"
       },
-      "description": "Every fired recall by the verify pass's verdict: verified (kept), downgraded (confidence lowered), rejected (withdrawn \u2192 fell through to a full investigation). Watch the downgraded share.",
+      "description": "Every fired recall by the verify pass's verdict: verified (kept), downgraded (confidence lowered), rejected (withdrawn \u2192 fell through to a full investigation). Watch the downgraded share. Candidates rejected BEFORE firing never reach this panel \u2014 see 'Recall rejections by reason'. An operator note (a Concept entry) is expected to be rejected here: it carries no evidence chain by design.",
       "fieldConfig": {
         "defaults": {
           "color": {
@@ -501,7 +501,7 @@
         "type": "prometheus",
         "uid": "${datasource}"
       },
-      "description": "Why a candidate did NOT short-circuit: low_outcome (trust decayed), rerank_low_confidence / rerank_no_signal (reranker), low_margin (BM25). The diagnostic for 'recall never fires'.",
+      "description": "Why a candidate did NOT short-circuit, BEFORE the verify pass: no_resource_match (the incident's workload does not match any entry's resource \u2014 usually the largest share, and the one to check first), low_outcome (trust decayed), rerank_low_confidence / rerank_no_signal (reranker), low_margin (BM25). PRE-fire rejections only \u2014 a candidate that fired and was then withdrawn appears in 'Recall outcome by verify result', so diagnose 'recall never fires' across BOTH panels or you will read a verify problem as a matching problem.",
       "fieldConfig": {
         "defaults": {
           "color": {

@@ -73,19 +73,40 @@ func (w Workload) Ref() string {
 // names one ephemeral pod, not the controller family it belongs to.
 var reDeployPod = regexp.MustCompile(`-[a-f0-9]{8,10}-[a-z0-9]{5}$`) // <name>-<rs-hash>-<pod-hash>
 
-// NormalizeWorkloadName strips a trailing pod-name hash so a per-pod name reduces
-// to its controller family: a Deployment pod (<name>-<rs-hash>-<pod-hash>) and a
-// DaemonSet/StatefulSet-revision pod (<name>-<5-char hash containing a digit>)
-// both collapse to <name>. Names without such a suffix are returned unchanged, so
-// real trailing words (e.g. "redis-cache") are preserved. It is idempotent.
+// NormalizeWorkloadName strips a trailing per-pod suffix so a pod name reduces to its
+// controller family. Three shapes collapse to <name>:
 //
-// This is the single source of truth for pod-hash normalization. It is shared by
-// the curator dedup path (curator.DupFingerprint / IncidentKey — CORE-681, so the
-// same incident on a different pod dedupes to one KB entry) AND the instant-recall
-// structural gate (investigate.resourceAgrees), so a pod-scoped alert carrying the
-// volatile hash still matches the normalized workload stored on a KB entry. Homed
-// here — not in curator — because both packages already import providers, which
-// owns the Workload type; investigate must not import curator (no cycle).
+//	<name>-<rs-hash>-<pod-hash>   a Deployment/ReplicaSet pod
+//	<name>-<5-char hash w/ digit> a DaemonSet or ReplicaSet REVISION pod
+//	<name>-<ordinal>              a StatefulSet pod (vmagent-vmagent-0)
+//
+// Names without such a suffix are returned unchanged, so real trailing words (e.g.
+// "redis-cache") are preserved. It is idempotent.
+//
+// This is the single source of truth for pod-name normalization. It is shared by the
+// curator dedup path (curator.DupFingerprint / IncidentKey — CORE-681, so the same
+// incident on a different pod dedupes to one KB entry) AND the instant-recall structural
+// gate (investigate.resourceAgrees), so a pod-scoped alert carrying the volatile suffix
+// still matches the normalized workload stored on a KB entry. Homed here — not in
+// curator — because both packages already import providers, which owns the Workload
+// type; investigate must not import curator (no cycle).
+//
+// THE ORDINAL CASE WAS MISSING, and the omission was hidden by this comment: it used to
+// say "DaemonSet/StatefulSet-revision pod (<name>-<5-char hash containing a digit>)",
+// which describes the REVISION-hash form. A StatefulSet POD is <name>-<ordinal> — "-0",
+// "-1", "-12" — matching neither branch, so every replica was a distinct identity. Since
+// this function backs both the write path and the read path, the effect was doubled: the
+// corpus fragmented per replica AND a sibling could never match. Measured on a live
+// deployment, `no_resource_match` accounted for 38 of 56 recall evaluations over a week,
+// and the KB held two separate entries — vmagent-vmagent-0 and vmagent-vmagent-1 —
+// describing the same StatefulSet's memory behaviour, neither reachable from vmagent-2.
+//
+// The trade, stated because it is a judgement call and not obviously right: a Deployment
+// legitimately named "nginx-2" now normalizes to "nginx". That is accepted because the
+// KNOWLEDGE is almost never replica-specific — "vmagent is near its memory limit" is a
+// property of the workload — and the existing 5-char branch already accepts the same
+// class of risk. The guard against the worst of it is below: a purely numeric base is
+// left alone, so "10-0" is not silently truncated to "10".
 func NormalizeWorkloadName(name string) string {
 	if m := reDeployPod.FindString(name); m != "" {
 		return name[:len(name)-len(m)]
@@ -95,8 +116,38 @@ func NormalizeWorkloadName(name string) string {
 		if len(suf) == 5 && strings.ContainsAny(suf, "0123456789") && isAlnum(suf) {
 			return name[:i]
 		}
+		// StatefulSet ordinal. Bounded at 4 digits (kubectl's own practical ceiling is far
+		// below that) so a long numeric tail — a build id, an epoch — is not mistaken for
+		// a replica index, and rejected when the base is empty or itself numeric.
+		if len(suf) >= 1 && len(suf) <= 4 && isDigits(suf) && !isOrdinalSuffixUnsafe(name[:i], suf) {
+			return name[:i]
+		}
 	}
 	return name
+}
+
+// isOrdinalSuffixUnsafe reports cases where a trailing "-<digits>" must NOT be treated as
+// a StatefulSet ordinal: an empty base (nothing left to key on), a base that is itself
+// purely numeric (so "10-0" stays "10-0" rather than collapsing to a bare number), and a
+// zero-padded index, which Kubernetes never generates and therefore signals a name that
+// merely looks like an ordinal.
+func isOrdinalSuffixUnsafe(base, suf string) bool {
+	if base == "" || isDigits(base) {
+		return true
+	}
+	return len(suf) > 1 && suf[0] == '0'
+}
+
+func isDigits(s string) bool {
+	if s == "" {
+		return false
+	}
+	for _, r := range s {
+		if r < '0' || r > '9' {
+			return false
+		}
+	}
+	return true
 }
 
 func isAlnum(s string) bool {

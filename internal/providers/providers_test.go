@@ -264,3 +264,67 @@ func TestKBUpdateClassifiesEveryFieldForEscaping(t *testing.T) {
 		}
 	}
 }
+
+// TestNormalizeStatefulSetOrdinal pins the case that made instant recall unable to match a
+// sibling replica. The values are the ones actually observed in a live knowledge base,
+// where vmagent-vmagent-0 and vmagent-vmagent-1 existed as two separate entries about the
+// same StatefulSet's memory behaviour and neither was reachable from vmagent-vmagent-2.
+//
+// Because this function backs BOTH the curator's dedup key and the recall gate, the bug
+// fragmented the corpus on write and blocked matching on read.
+func TestNormalizeStatefulSetOrdinal(t *testing.T) {
+	for _, tc := range []struct{ in, want string }{
+		{"vmagent-vmagent-0", "vmagent-vmagent"},
+		{"vmagent-vmagent-1", "vmagent-vmagent"},
+		{"vmagent-vmagent-2", "vmagent-vmagent"},
+		{"vmagent-vmagent-12", "vmagent-vmagent"},
+		{"victorialogs-az-a-0", "victorialogs-az-a"},
+	} {
+		if got := providers.NormalizeWorkloadName(tc.in); got != tc.want {
+			t.Errorf("providers.NormalizeWorkloadName(%q) = %q, want %q", tc.in, got, tc.want)
+		}
+	}
+	// The property that matters is not the string but that siblings COLLAPSE TOGETHER —
+	// that is what lets knowledge learned on one replica be recalled for another.
+	if providers.NormalizeWorkloadName("vmagent-vmagent-0") != providers.NormalizeWorkloadName("vmagent-vmagent-2") {
+		t.Error("sibling replicas still normalize to different identities")
+	}
+}
+
+// TestNormalizeOrdinalDoesNotOverReach guards the accepted trade from spreading. Stripping
+// a trailing "-<digits>" is deliberate, but it must not eat a numeric base, a zero-padded
+// index (which Kubernetes never generates, so it signals a name that only looks like an
+// ordinal), or a long numeric tail such as a build id or an epoch.
+func TestNormalizeOrdinalDoesNotOverReach(t *testing.T) {
+	for _, in := range []string{
+		"10-0",           // numeric base: must not become "10"
+		"0",              // no separator at all
+		"-0",             // empty base
+		"app-007",        // zero-padded: not a k8s ordinal
+		"build-20260817", // 8 digits: an epoch/date, not a replica index
+		"redis-cache",    // a real trailing word, the case the original guard protects
+	} {
+		if got := providers.NormalizeWorkloadName(in); got != in {
+			t.Errorf("providers.NormalizeWorkloadName(%q) = %q, want it unchanged", in, got)
+		}
+	}
+}
+
+// TestNormalizeRemainsIdempotent: the doc comment promises idempotence and both call sites
+// rely on it — the curator normalizes a name that may already be normalized, and recall
+// normalizes both sides of a comparison. Adding a branch is exactly how that gets broken.
+func TestNormalizeRemainsIdempotent(t *testing.T) {
+	for _, in := range []string{
+		"vmagent-vmagent-0",
+		"vmsingle-victoria-metrics-k8s-stack-7f6f64568b-cnrmg",
+		"node-exporter-prometheus-node-exporter",
+		"harbor-registry-59598dbd57-ltkzw",
+		"redis-cache",
+		"10-0",
+	} {
+		once := providers.NormalizeWorkloadName(in)
+		if twice := providers.NormalizeWorkloadName(once); twice != once {
+			t.Errorf("not idempotent: %q -> %q -> %q", in, once, twice)
+		}
+	}
+}
