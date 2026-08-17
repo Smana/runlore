@@ -37,6 +37,7 @@ import (
 	_ "github.com/Smana/runlore/internal/source/grafana"      // self-registers the Grafana Alerting webhook source
 	"github.com/Smana/runlore/internal/source/pagerduty"
 	"github.com/Smana/runlore/internal/telemetry"
+	"github.com/Smana/runlore/internal/thread"
 	"github.com/Smana/runlore/internal/trigger"
 )
 
@@ -192,6 +193,23 @@ func RunServe(version string, args []string) error {
 	if err != nil {
 		return fmt.Errorf("thread registry: %w", err)
 	}
+	// One responder, two transports: built ONCE and shared by both Slack's and
+	// Matrix's thread-capture wiring below, so the per-hour OpenPRs budget
+	// (buildThreadResponder) bounds forge writes system-wide rather than once
+	// per transport. forge may be nil (no forge.kb_repo / credentials); the
+	// responder is still built so it stays the single shared instance either
+	// way — each transport's own guard reports the missing-forge case.
+	forge := buildForge(cfg, log)
+	threadResponder := buildThreadResponder(threadRegistry, forge, metrics, log)
+	// Matrix's detached mention handlers (one forge round-trip each), bounded
+	// and drained exactly like the Slack server's eventDispatcher — see
+	// matrixMentionConcurrency/matrixMentionTimeout. matrixBusyDispatch is the
+	// separate, smaller pool for "I'm too busy" replies when matrixDispatch is
+	// saturated — mirroring the Slack server's eventDispatcher/busyDispatcher
+	// split (internal/server/server.go) so telling a human about an overload
+	// never itself blocks the /sync goroutine.
+	matrixDispatch := thread.NewDispatcher(matrixMentionConcurrency, matrixMentionTimeout, log)
+	matrixBusyDispatch := thread.NewDispatcher(matrixBusyConcurrency, matrixMentionTimeout, log)
 	inv, cat, notifier, err := BuildInvestigator(ctx, cfg, deps, approvals, auto, metrics, ledger, threadRegistry, log)
 	if err != nil {
 		return fmt.Errorf("build investigator: %w", err)
@@ -343,10 +361,17 @@ func RunServe(version string, args []string) error {
 			log.Info("re-investigate poller enabled", "label", investigate.ReinvestigateLabel)
 			go reinv.Poll(workCtx, 2*time.Minute)
 		}
-		// Opt-in Matrix reaction listener — leader-only like the pollers above, so an
-		// HA deployment records each 👍/👎 exactly once, into the leader's ledger.
-		if mfb := BuildMatrixFeedback(cfg, ledger, log); mfb != nil {
-			log.Info("matrix feedback reactions enabled", "room", cfg.Notify.Matrix.RoomID)
+		// Opt-in Matrix listener (reactions and/or thread capture) — leader-only
+		// like the pollers above, so an HA deployment records each 👍/👎 exactly
+		// once, into the leader's ledger, and answers each mention exactly once.
+		// The "enabled" announcements are split so each only fires for the
+		// option that is actually on: BuildMatrixFeedback itself logs
+		// "matrix thread capture enabled" (see buildMatrixThreadMention) when
+		// that half wires successfully, so it must not be repeated here.
+		if mfb := BuildMatrixFeedback(cfg, ledger, threadResponder, matrixDispatch, matrixBusyDispatch, notifier, metrics, log); mfb != nil {
+			if cfg.Notify.Matrix.FeedbackReactions {
+				log.Info("matrix feedback reactions enabled", "room", cfg.Notify.Matrix.RoomID)
+			}
 			go mfb.Run(workCtx)
 		}
 		// In-server grooming sweeps (leader-only, like the pollers above, so one
@@ -422,7 +447,7 @@ func RunServe(version string, args []string) error {
 	// nowhere to write it — would be worse than not having one. See
 	// BuildThreadMention for why deliverability is checked before the notifier.
 	if cfg.Notify.Slack.ThreadCapture && threadRegistry.Enabled() {
-		acts.Threads = BuildThreadMention(cfg, threadRegistry, buildForge(cfg, log), notifier, metrics, log)
+		acts.Threads = BuildThreadMention(cfg, threadResponder, notifier, log)
 	}
 	// /readyz is process + catalog health, NOT leadership (#264): every warm
 	// replica reports Ready (so `helm upgrade --wait` / Flux kstatus succeeds
@@ -450,7 +475,7 @@ func RunServe(version string, args []string) error {
 	}
 	httpSrv := NewHTTPServer(*addr, srv.Handler())
 	// Graceful shutdown: on SIGTERM, stop accepting webhooks, let the in-flight
-	// investigation AND any detached Slack mention handler (see
+	// investigation AND any detached Slack or Matrix mention handler (see
 	// server.Server.Drain — handleSlackEvent acks and returns before its work is
 	// done, so httpSrv.Shutdown alone does not wait for it) finish within a
 	// bounded grace (lease still held), then release.
@@ -461,13 +486,20 @@ func RunServe(version string, args []string) error {
 		log.Info("shutdown: stopping intake; draining in-flight investigation")
 		_ = httpSrv.Shutdown(context.Background())
 		dctx, cancelDrain := context.WithTimeout(context.Background(), drainGracePeriod)
-		// Detached mention handlers first: they are a direct extension of the HTTP
-		// intake httpSrv.Shutdown just stopped, and — unlike the investigation
-		// queue — they do not depend on workCtx/the leader lease, so draining them
-		// has no ordering requirement relative to stopWork() below. Both drains
-		// share dctx's single deadline rather than getting drainGracePeriod each,
-		// so total shutdown time stays bounded the same way it always has.
+		// Detached mention handlers first: Slack's (srv.Drain) are a direct
+		// extension of the HTTP intake httpSrv.Shutdown just stopped; Matrix's
+		// (matrixDispatch.Drain, matrixBusyDispatch.Drain) are a direct extension
+		// of the /sync long-poll loop, whose dispatched work already runs on a
+		// context stripped of cancellation (thread.Dispatcher.Go), so it too
+		// survives independently of workCtx. None of these depend on
+		// workCtx/the leader lease — unlike the investigation queue — so
+		// draining them has no ordering requirement relative to stopWork()
+		// below. All four drains share dctx's single deadline rather than
+		// getting drainGracePeriod each, so total shutdown time stays bounded
+		// the same way it always has.
 		srv.Drain(dctx)
+		matrixDispatch.Drain(dctx)
+		matrixBusyDispatch.Drain(dctx)
 		queue.Drain(dctx)
 		cancelDrain()
 		stopWork() // release the leader lease + stop the queue/watch/coalescer

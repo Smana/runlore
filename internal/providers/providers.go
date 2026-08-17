@@ -539,6 +539,12 @@ type ThreadNotifier interface {
 	// handles are transport-specific opaque strings (Slack: thread_ts and a
 	// channel id).
 	ReplyInThread(ctx context.Context, root, channel, text string) error
+	// Transport names the chat system this notifier replies on ("slack",
+	// "matrix"). It is what lets a deployment running several transports route
+	// each thread's reply back to the system the human is actually in — the
+	// alternative, picking the first notifier that can reply, silently answers
+	// one transport's threads on another.
+	Transport() string
 }
 
 // CurationForge is the forge surface the curator's file-time gate needs: open a

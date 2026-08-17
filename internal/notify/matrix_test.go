@@ -11,6 +11,7 @@ import (
 	"testing"
 
 	"github.com/Smana/runlore/internal/providers"
+	"github.com/Smana/runlore/internal/thread"
 )
 
 func TestMatrixDeliver(t *testing.T) {
@@ -252,5 +253,297 @@ func TestMatrixDeliverEmbedsTriggerKey(t *testing.T) {
 	}
 	if _, ok := gotBody[triggerKeyContentField]; ok {
 		t.Fatalf("no trigger identity ⇒ field must be omitted, got %v", gotBody[triggerKeyContentField])
+	}
+}
+
+func TestMatrixDeliverRegistersTheEventAsThreadRoot(t *testing.T) {
+	var body map[string]any
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		_, _ = w.Write([]byte(`{"event_id":"$evt123"}`))
+	}))
+	defer srv.Close()
+
+	sink := &recordingThreadSink{}
+	m := NewMatrix(srv.URL, "!room:example.org", "tok")
+	m.Threads = sink
+
+	inv := providers.Investigation{Title: "OOMKilled", TriggerKey: "tk-1", CuratedURL: "https://github.com/o/r/pull/42"}
+	if err := m.Deliver(context.Background(), inv); err != nil {
+		t.Fatalf("Deliver: %v", err)
+	}
+
+	if sink.calls != 1 {
+		t.Fatalf("Register calls = %d, want 1", sink.calls)
+	}
+	if sink.root != "$evt123" {
+		t.Errorf("root = %q, want the sent event id $evt123", sink.root)
+	}
+	if sink.channel != "!room:example.org" {
+		t.Errorf("channel = %q, want the room id", sink.channel)
+	}
+	if sink.transport != "matrix" {
+		t.Errorf("transport = %q, want matrix", sink.transport)
+	}
+	if body[threadContentField] == nil {
+		t.Fatalf("the event content must carry %s: %v", threadContentField, body)
+	}
+	if body[triggerKeyContentField] != "tk-1" {
+		t.Errorf("the pre-existing trigger-key field must be unchanged, got %v", body[triggerKeyContentField])
+	}
+}
+
+func TestMatrixDeliverSucceedsWithNoThreadSink(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`{"event_id":"$evt123"}`))
+	}))
+	defer srv.Close()
+	m := NewMatrix(srv.URL, "!room:example.org", "tok")
+	if err := m.Deliver(context.Background(), providers.Investigation{Title: "OOMKilled"}); err != nil {
+		t.Fatalf("Deliver with a nil thread sink: %v", err)
+	}
+}
+
+func TestMatrixDeliverSucceedsWhenTheResponseHasNoEventID(t *testing.T) {
+	// A homeserver that returns 2xx with an unexpected body must not fail
+	// delivery — the message was sent; only the thread root is unknown.
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`{}`))
+	}))
+	defer srv.Close()
+	sink := &recordingThreadSink{}
+	m := NewMatrix(srv.URL, "!room:example.org", "tok")
+	m.Threads = sink
+	if err := m.Deliver(context.Background(), providers.Investigation{Title: "OOMKilled"}); err != nil {
+		t.Fatalf("Deliver: %v", err)
+	}
+	if sink.calls != 0 {
+		t.Fatal("an empty event id must never be registered")
+	}
+}
+
+// TestContextFromStamp proves the reconstructed thread.Context takes its Root
+// and Channel from the fetch parameters (the event itself), never from the
+// stamp — threadStamp carries no root/channel field, so there is nothing in a
+// forged stamp that could redirect where a note is written. stampFor and
+// contextFromStamp round-trip the rest of the identifiers unchanged; a later
+// task (the reaction/thread listener) builds its event lookup on this pair.
+func TestContextFromStamp(t *testing.T) {
+	inv := providers.Investigation{
+		TriggerKey:    "tk-1",
+		Title:         "OOMKilled",
+		Resource:      providers.Workload{Namespace: "prod", Name: "harbor-registry"},
+		Verdict:       providers.VerdictActionRequired,
+		CuratedURL:    "https://github.com/o/r/pull/42",
+		RecalledEntry: "catalog/oom.md",
+	}
+
+	got := contextFromStamp(stampFor(inv), "$evt123", "!room:example.org")
+
+	want := thread.Context{
+		Transport:     "matrix",
+		Root:          "$evt123",
+		Channel:       "!room:example.org",
+		TriggerKey:    "tk-1",
+		Title:         "OOMKilled",
+		Resource:      "prod/harbor-registry",
+		Verdict:       providers.VerdictActionRequired,
+		CuratedURL:    "https://github.com/o/r/pull/42",
+		RecalledEntry: "catalog/oom.md",
+	}
+	if got != want {
+		t.Fatalf("contextFromStamp = %+v, want %+v", got, want)
+	}
+}
+
+// TestMatrixEventStampTriggerKeyThroughDeliver pins Fix 2: Deliver writes the
+// legacy triggerKeyContentField as cmp.Or(TriggerKey, Fingerprint), but (pre-fix)
+// stamped the new threadContentField's trigger_key from TriggerKey alone — and
+// contextFromContent decodes threadContentField FIRST, returning as soon as it
+// decodes, so the legacy field was never even looked at on any event this
+// notifier produces. A re-investigation (Request built with a Fingerprint but no
+// TriggerKey — see internal/investigate/reinvestigate.go) would resolve an empty
+// TriggerKey, silently breaking notify.matrix.feedback_reactions for exactly the
+// operators who enabled nothing else on this branch.
+//
+// Driven through Matrix.Deliver's REAL posted content (round-tripped through
+// JSON exactly as fetchEvent would decode it), not a hand-built fixture — the
+// pre-existing "legacy trigger-key-only" fixture in TestMatrixContextFor carries
+// a field combination Deliver never actually emits (threadContentField absent),
+// which is why the shadowing was invisible.
+func TestMatrixEventStampTriggerKeyThroughDeliver(t *testing.T) {
+	const room = "!r:hs"
+	tests := []struct {
+		name        string
+		inv         providers.Investigation
+		wantTrigKey string
+	}{
+		{
+			name:        "alert: TriggerKey set",
+			inv:         providers.Investigation{Title: "OOMKilled", TriggerKey: "tk-1"},
+			wantTrigKey: "tk-1",
+		},
+		{
+			name:        "re-investigation: Fingerprint only, no TriggerKey",
+			inv:         providers.Investigation{Title: "OOMKilled", Fingerprint: "fp9"},
+			wantTrigKey: "fp9",
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			var gotBody map[string]any
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				_ = json.NewDecoder(r.Body).Decode(&gotBody)
+				_, _ = w.Write([]byte(`{"event_id":"$evt1"}`))
+			}))
+			defer srv.Close()
+
+			m := NewMatrix(srv.URL, room, "tok")
+			if err := m.Deliver(context.Background(), tc.inv); err != nil {
+				t.Fatalf("Deliver: %v", err)
+			}
+
+			gotCtx, ok := contextFromContent(gotBody, "$evt1", room)
+			if !ok {
+				t.Fatalf("contextFromContent: not recognised as one of RunLore's own investigation messages: %v", gotBody)
+			}
+			if gotCtx.TriggerKey != tc.wantTrigKey {
+				t.Errorf("TriggerKey = %q, want %q — the legacy trigger key is shadowed by the (fingerprint-blind) thread stamp", gotCtx.TriggerKey, tc.wantTrigKey)
+			}
+		})
+	}
+}
+
+// TestStampForFallsBackToFingerprint pins the write-side half of Fix 2:
+// stampFor must embed the same identity Deliver already writes into the legacy
+// field (cmp.Or(TriggerKey, Fingerprint)), not TriggerKey alone.
+func TestStampForFallsBackToFingerprint(t *testing.T) {
+	got := stampFor(providers.Investigation{Fingerprint: "fp9"})
+	if got.TriggerKey != "fp9" {
+		t.Fatalf("stampFor TriggerKey = %q, want %q (fingerprint fallback)", got.TriggerKey, "fp9")
+	}
+}
+
+// TestContextFromContentFallsBackToLegacyTriggerKey pins the read-side half of
+// Fix 2, in isolation from stampFor: even a threadContentField stamp whose own
+// trigger_key is empty must not shadow a non-empty legacy triggerKeyContentField
+// sitting in the same content map. Defense in depth alongside the stampFor fix —
+// covers a stamp built some other way than stampFor, now or later.
+func TestContextFromContentFallsBackToLegacyTriggerKey(t *testing.T) {
+	content := map[string]any{
+		threadContentField:     map[string]any{"title": "OOMKilled"}, // trigger_key deliberately absent
+		triggerKeyContentField: "tk-legacy",
+	}
+	got, ok := contextFromContent(content, "$evt1", "!r:hs")
+	if !ok {
+		t.Fatal("contextFromContent: want ok=true")
+	}
+	if got.TriggerKey != "tk-legacy" {
+		t.Errorf("TriggerKey = %q, want %q", got.TriggerKey, "tk-legacy")
+	}
+	if got.Title != "OOMKilled" {
+		t.Errorf("Title = %q, want the rest of the stamp preserved", got.Title)
+	}
+}
+
+func TestMatrixReplyInThread(t *testing.T) {
+	var body map[string]any
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		_, _ = w.Write([]byte(`{"event_id":"$reply1"}`))
+	}))
+	defer srv.Close()
+
+	m := NewMatrix(srv.URL, "!room:example.org", "tok")
+	if err := m.ReplyInThread(context.Background(), "$evt123", "!room:example.org", "📝 Noted"); err != nil {
+		t.Fatalf("ReplyInThread: %v", err)
+	}
+
+	rel, ok := body["m.relates_to"].(map[string]any)
+	if !ok {
+		t.Fatalf("reply must carry m.relates_to: %v", body)
+	}
+	if rel["rel_type"] != "m.thread" {
+		t.Errorf("rel_type = %v, want m.thread", rel["rel_type"])
+	}
+	if rel["event_id"] != "$evt123" {
+		t.Errorf("event_id = %v, want the thread root $evt123", rel["event_id"])
+	}
+	if body["body"] != "📝 Noted" {
+		t.Errorf("body = %v, want the reply text", body["body"])
+	}
+	if mt, _ := body["msgtype"].(string); mt != "m.notice" {
+		t.Errorf("msgtype = %v, want m.notice (so clients don't render it as a human message)", body["msgtype"])
+	}
+	// Replies are plain text — no rich formatting, unlike Deliver's content. A
+	// copy-paste from Deliver's content-building would silently carry these
+	// over; catch it here.
+	if _, ok := body["format"]; ok {
+		t.Errorf("reply content must not carry format: %v", body)
+	}
+	if _, ok := body["formatted_body"]; ok {
+		t.Errorf("reply content must not carry formatted_body: %v", body)
+	}
+}
+
+// TestMatrixReplyInThreadRoutesToThePassedChannel pins the routing in
+// ReplyInThread: room := cmp.Or(channel, m.roomID) must resolve to the passed
+// channel when it's non-empty, even though the notifier was configured with a
+// different room. TestMatrixReplyInThread alone can't catch a regression that
+// drops the channel parameter (e.g. "room := m.roomID") because it constructs
+// the notifier and calls ReplyInThread with the SAME room — this test uses
+// deliberately divergent values and checks the request's URL path, which is
+// where the Matrix send endpoint encodes the target room
+// (/_matrix/client/v3/rooms/{roomID}/send/...).
+func TestMatrixReplyInThreadRoutesToThePassedChannel(t *testing.T) {
+	var gotPath string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.Path
+		_, _ = w.Write([]byte(`{"event_id":"$reply1"}`))
+	}))
+	defer srv.Close()
+
+	m := NewMatrix(srv.URL, "!configured:example.org", "tok")
+	if err := m.ReplyInThread(context.Background(), "$evt123", "!live:example.org", "📝 Noted"); err != nil {
+		t.Fatalf("ReplyInThread: %v", err)
+	}
+
+	if !strings.Contains(gotPath, "/rooms/!live:example.org/send/") {
+		t.Fatalf("path = %q, want the reply routed to the passed channel !live:example.org", gotPath)
+	}
+	if strings.Contains(gotPath, "!configured") {
+		t.Fatalf("path = %q, must not target the configured room when a different channel was passed", gotPath)
+	}
+}
+
+// TestMatrixReplyInThreadFallsBackToConfiguredRoom proves an empty channel
+// argument falls back to the notifier's configured room — the other half of
+// cmp.Or(channel, m.roomID).
+func TestMatrixReplyInThreadFallsBackToConfiguredRoom(t *testing.T) {
+	var gotPath string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.Path
+		_, _ = w.Write([]byte(`{"event_id":"$reply1"}`))
+	}))
+	defer srv.Close()
+
+	m := NewMatrix(srv.URL, "!configured:example.org", "tok")
+	if err := m.ReplyInThread(context.Background(), "$evt123", "", "📝 Noted"); err != nil {
+		t.Fatalf("ReplyInThread: %v", err)
+	}
+
+	if !strings.Contains(gotPath, "/rooms/!configured:example.org/send/") {
+		t.Fatalf("path = %q, want the reply to fall back to the configured room !configured:example.org", gotPath)
+	}
+}
+
+func TestMatrixReplyInThreadReportsSendFailure(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusForbidden)
+	}))
+	defer srv.Close()
+	m := NewMatrix(srv.URL, "!room:example.org", "tok")
+	if err := m.ReplyInThread(context.Background(), "$evt123", "!room:example.org", "x"); err == nil {
+		t.Fatal("a non-2xx send must be reported")
 	}
 }

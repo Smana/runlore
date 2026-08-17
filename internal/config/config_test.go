@@ -767,6 +767,65 @@ func TestValidateMatrixFeedbackReactions(t *testing.T) {
 	}
 }
 
+// TestValidateMatrixThreadCapture guards the opt-in contract of
+// notify.matrix.thread_capture: it requires the same notifier fields as
+// feedback_reactions (homeserver, room_id, access_token_env — the listener
+// long-polls the configured room and authenticates as the bot) plus
+// outcome.ledger_path, because the thread registry lives beside the ledger
+// and must survive a restart and a leader failover. Off (the default)
+// validates clean with none of it.
+func TestValidateMatrixThreadCapture(t *testing.T) {
+	base := func() *Config {
+		c := &Config{}
+		c.Notify.Matrix = MatrixNotify{
+			Homeserver:     "https://matrix.example.org",
+			RoomID:         "!r:example.org",
+			AccessTokenEnv: "MATRIX_TOKEN",
+			ThreadCapture:  true,
+		}
+		c.Outcome.LedgerPath = "/var/lib/runlore/outcomes.jsonl"
+		return c
+	}
+
+	tests := []struct {
+		name    string
+		mutate  func(*Config)
+		wantErr string
+	}{
+		{"valid", func(*Config) {}, ""},
+		{"off needs nothing", func(c *Config) {
+			c.Notify.Matrix = MatrixNotify{ThreadCapture: false}
+		}, ""},
+		{"missing homeserver", func(c *Config) {
+			c.Notify.Matrix.Homeserver = ""
+		}, "homeserver"},
+		{"missing room_id", func(c *Config) {
+			c.Notify.Matrix.RoomID = ""
+		}, "room_id"},
+		{"missing access_token_env", func(c *Config) {
+			c.Notify.Matrix.AccessTokenEnv = ""
+		}, "access_token_env"},
+		{"missing ledger path", func(c *Config) {
+			c.Outcome.LedgerPath = ""
+		}, "ledger_path"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			c := base()
+			tt.mutate(c)
+			err := c.Validate()
+			switch {
+			case tt.wantErr == "" && err != nil:
+				t.Fatalf("Validate() = %v, want nil", err)
+			case tt.wantErr != "" && err == nil:
+				t.Fatalf("Validate() = nil, want an error mentioning %q", tt.wantErr)
+			case tt.wantErr != "" && !strings.Contains(err.Error(), tt.wantErr):
+				t.Fatalf("Validate() = %v, want it to mention %q", err, tt.wantErr)
+			}
+		})
+	}
+}
+
 // TestGitOpsMirrorConfig covers the gitops.mirror block: zero-value defaults to
 // enabled (the Rerank *bool idiom), an explicit false disables, and a negative
 // max is rejected by Validate.
