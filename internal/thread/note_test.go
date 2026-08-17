@@ -642,7 +642,7 @@ func TestNeutralizeImagesWorstCaseExpansionFactor(t *testing.T) {
 // framing region of the chat prompt (Investigation:/Resource:/Verdict:, the
 // evidence bullets) single-line, and U+2028 is a line break to many renderers
 // and tokenizers — so an alert-derived title could plausibly forge a framing
-// line. And ConceptEntry's title lands in YAML frontmatter, where singleLine's
+// line. And ConceptEntry's title lands in YAML frontmatter, where SingleLine's
 // own doc says it exists because kbvalidate rejects a title containing \r or
 // \n — and YAML 1.1 counts U+2028/U+2029 as line breaks too.
 func TestSingleLineFlattensEveryLineBreakAndFormatRune(t *testing.T) {
@@ -654,8 +654,8 @@ func TestSingleLineFlattensEveryLineBreakAndFormatRune(t *testing.T) {
 		'\u200b', '\u200e', '\u202e', // zero-width space, LTR mark, RTL override
 		'\u061c', '\ufeff', // ARABIC LETTER MARK, BOM
 	} {
-		if got, want := singleLine("before"+string(r)+"after"), "before after"; got != want {
-			t.Errorf("singleLine(U+%04X) = %q, want %q", r, got, want)
+		if got, want := SingleLine("before"+string(r)+"after"), "before after"; got != want {
+			t.Errorf("SingleLine(U+%04X) = %q, want %q", r, got, want)
 		}
 	}
 }
@@ -664,8 +664,8 @@ func TestSingleLineFlattensEveryLineBreakAndFormatRune(t *testing.T) {
 // not mangle a title just because it is not ASCII.
 func TestSingleLineLeavesOrdinaryTextAlone(t *testing.T) {
 	for _, s := range []string{"ImageGalleryUnavailable", "pod OOMKilled — burst pool", "déjà vu", "国际化 test", "emoji 🔥 title", "a b  c"} {
-		if got := singleLine(s); got != s {
-			t.Errorf("singleLine(%q) = %q, want it unchanged", s, got)
+		if got := SingleLine(s); got != s {
+			t.Errorf("SingleLine(%q) = %q, want it unchanged", s, got)
 		}
 	}
 }

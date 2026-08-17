@@ -10,7 +10,17 @@ import (
 	"time"
 
 	"github.com/Smana/runlore/internal/providers"
+	"github.com/Smana/runlore/internal/redact"
+	"github.com/Smana/runlore/internal/thread"
 )
+
+// curateErrorRunes caps the rendered curate-failure reason. It is a DIAGNOSTIC pointer,
+// not the payload: the full error is in the logs and the failure is counted by
+// runlore_curations_total{result="error"}, so the card only needs enough to tell an
+// operator which class of failure it was (auth, rate limit, validation). Deliberately
+// well under Slack's 3000-char section limit, because this line shares that budget with
+// the entire finding it is appended to.
+const curateErrorRunes = 300
 
 // verdictBadge maps a model verdict to its emoji + human label. Empty/unknown
 // verdicts return ("", "") and are rendered nowhere — never invent a verdict.
@@ -200,6 +210,24 @@ func Format(inv providers.Investigation) string {
 	}
 	if inv.CuratedURL != "" {
 		fmt.Fprintf(&b, "📚 Knowledge base: %s\n", inv.CuratedURL)
+	}
+	// The mirror of the line above, and the reason it exists: an EMPTY CuratedURL is
+	// ambiguous. It is the normal state for a finding below curate.min_confidence or
+	// carrying a skip_verdicts verdict — by far the common case — so "no KB link" cannot
+	// tell a human whether the learning loop is working. Without this line a failed write
+	// is indistinguishable from a skipped one, which is how a 403 ran unnoticed on a live
+	// deployment until an operator happened to write a thread note (that path DOES report
+	// it). The counter for alerting already exists: runlore_curations_total{result="error"}.
+	//
+	// redact → flatten → cap, the same order and for the same reasons as thread.chatSafe:
+	// a forge error carries a server-provided JSON body, so it may echo a credential, and
+	// a line break inside it would put that text at the left margin where RunLore's own
+	// status lines sit. thread.SingleLine rather than a local flattener on purpose — a
+	// second copy of the mandatory-break class list is exactly the drift
+	// notify.kbUpdateAnnouncement documents having been bitten by.
+	if inv.CurateError != "" {
+		fmt.Fprintf(&b, "⚠️ Could not save to the knowledge base: %s\n",
+			truncate(thread.SingleLine(redact.Secrets(inv.CurateError)), curateErrorRunes))
 	}
 	if foot := usageFooter(inv.Usage); foot != "" {
 		fmt.Fprintf(&b, "%s\n", foot)

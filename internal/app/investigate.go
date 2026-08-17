@@ -765,6 +765,14 @@ func onInvestigationComplete(ctx context.Context, found providers.Investigation,
 	if cur != nil {
 		if ref, err := cur.Curate(context.Background(), found); err != nil {
 			log.Error("curate findings", "err", err)
+			// Carry the reason to delivery. Logging alone made this failure invisible to
+			// the human: an empty CuratedURL renders identically whether the write was
+			// skipped by design (below min_confidence, or a skip_verdicts verdict) or
+			// attempted and failed, and skipping is by far the common case. Observed live
+			// — an 85%-confidence finding whose KB PR 403'd was indistinguishable from a
+			// below-threshold one, and the operator only noticed because they happened to
+			// write a thread note, which DOES report the failure.
+			found.CurateError = err.Error()
 		} else if ref.URL != "" {
 			found.CuratedURL = ref.URL
 			log.Info("curated", "url", ref.URL)

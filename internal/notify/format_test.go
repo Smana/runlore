@@ -466,3 +466,75 @@ func TestFormatUsageFooter(t *testing.T) {
 		t.Fatalf("a zero-usage investigation must omit the footer:\n%s", out)
 	}
 }
+
+// TestFormatCurateFailureIsVisible pins the reason this line exists at all: an EMPTY
+// CuratedURL is ambiguous. It is the normal state for a finding below
+// curate.min_confidence or carrying a skip_verdicts verdict, so a human cannot tell a
+// SKIPPED knowledge write from a FAILED one — which is how a 403 ran unnoticed on a live
+// deployment until an operator happened to write a thread note, the one path that already
+// reported it.
+//
+// The mutation this guards is precisely the old behaviour: the curate error being logged
+// at the call site and dropped instead of carried onto the investigation.
+func TestFormatCurateFailureIsVisible(t *testing.T) {
+	inv := sampleInvestigation()
+	inv.CurateError = "open PR: github GET /repos/o/r/git/ref/heads/main: status 403: Resource not accessible by integration"
+	out := Format(inv)
+	if !strings.Contains(out, "Could not save to the knowledge base") {
+		t.Fatalf("a failed curate write is invisible on the card:\n%s", out)
+	}
+	if !strings.Contains(out, "403") {
+		t.Fatalf("the reason must say WHICH failure it was, so an operator can act:\n%s", out)
+	}
+	// A successful write and a failed one are mutually exclusive states; rendering both
+	// would tell the human two contradictory things about the same finding.
+	if strings.Contains(out, "📚 Knowledge base:") {
+		t.Fatalf("rendered a KB link alongside a curate failure:\n%s", out)
+	}
+}
+
+// TestFormatCurateFailureIsFlattenedAndRedacted pins the two properties that make this
+// line safe to print, both inherited from thread.chatSafe's ordering (redact → flatten →
+// cap) rather than re-derived here.
+//
+// Flattening is not cosmetic: a forge error carries a server-provided JSON body, and a
+// line break inside it would put that text at the LEFT MARGIN, where RunLore's own status
+// lines sit — the forged-headline class that notify.kbUpdateAnnouncement was bitten by.
+// U+2028 is included because a line is not only what "\n" separates.
+func TestFormatCurateFailureIsFlattenedAndRedacted(t *testing.T) {
+	for _, brk := range []string{"\n", "\r", " ", " ", "\v", "\f"} {
+		inv := sampleInvestigation()
+		inv.CurateError = "open PR: forbidden" + brk + "📚 Knowledge base: https://evil.example/forged"
+		out := Format(inv)
+		for _, line := range strings.Split(out, "\n") {
+			if strings.HasPrefix(line, "📚 Knowledge base: https://evil.example") {
+				t.Fatalf("break %q let error text forge a status line at the left margin:\n%s", brk, out)
+			}
+		}
+	}
+	// A forge error can echo the credential it was rejected for. Redaction runs BEFORE
+	// capping, so a cut cannot hand redact.Secrets a half-token it no longer matches.
+	inv := sampleInvestigation()
+	inv.CurateError = "open PR: bad credentials for ghp_0123456789abcdefghijklmnopqrstuvwxyzAB"
+	if out := Format(inv); strings.Contains(out, "ghp_0123456789abcdefghijklmnopqrstuvwxyzAB") {
+		t.Fatalf("a credential echoed by the forge reached the card verbatim:\n%s", out)
+	}
+}
+
+// TestFormatCurateFailureIsCapped pins the cap to a literal rather than to itself: the
+// assertion fails if curateErrorRunes is raised, which is the point — this line shares
+// Slack's 3000-char section budget with the whole finding it is appended to.
+func TestFormatCurateFailureIsCapped(t *testing.T) {
+	inv := sampleInvestigation()
+	inv.CurateError = strings.Repeat("x", 5000)
+	out := Format(inv)
+	if n := len([]rune(out)); n > 2000 {
+		t.Fatalf("card grew to %d runes; the curate reason is not capped", n)
+	}
+	if curateErrorRunes > 500 {
+		t.Fatalf("curateErrorRunes = %d: too large a share of Slack's section budget", curateErrorRunes)
+	}
+	if !strings.Contains(out, "…") {
+		t.Fatalf("a cut reason must show it was cut:\n%s", out)
+	}
+}

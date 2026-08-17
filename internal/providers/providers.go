@@ -796,14 +796,20 @@ type Investigation struct {
 	// the exact bound on resolve-before-open pairing (see outcome.resolvesSince) — the open
 	// itself is stamped at COMPLETION, so without this the pairing window is unknowable.
 	InvestigationStartedAt time.Time
-	Actions                []Action    // proposed remediations (autonomy ladder; never executed at rung "suggest")
-	CuratedURL             string      // runtime: KB issue/PR the curator opened, linked in delivery (set after curation)
-	Fingerprint            string      // originating alert fingerprint; for outcome-ledger attribution
-	Fingerprints           []string    // coalesced batch fingerprints; one outcome open is recorded per entry
-	TriggerKey             string      // deterministic incident identity set at trigger time (alerts: host-invariant per-class key from curator.IncidentKey; GitOps: failing resource+condition). curator.DupFingerprint prefers it so reworded re-investigations (#137) AND the same alert on a different pod/node (CORE-681) still dedupe
-	RecalledEntry          string      // when Recalled: the catalog entry Path that was matched
-	Verified               bool        // true when the adversarial verify pass ran and a root cause survived it
-	Usage                  UsageTotals // per-investigation model token/cost accounting (loop + verify); surfaced to humans + metrics, never written to the curated KB body
+	Actions                []Action // proposed remediations (autonomy ladder; never executed at rung "suggest")
+	CuratedURL             string   // runtime: KB issue/PR the curator opened, linked in delivery (set after curation)
+	// CurateError is the reason the curator could not write this finding to the KB, set
+	// only when a write was ATTEMPTED and failed. It exists because an empty CuratedURL is
+	// ambiguous: it is also the normal state for a finding below curate.min_confidence or
+	// carrying a skip_verdicts verdict, so "no KB link" cannot tell a human whether the
+	// learning loop is working. Rendered by notify.Format; never written to the KB body.
+	CurateError   string
+	Fingerprint   string      // originating alert fingerprint; for outcome-ledger attribution
+	Fingerprints  []string    // coalesced batch fingerprints; one outcome open is recorded per entry
+	TriggerKey    string      // deterministic incident identity set at trigger time (alerts: host-invariant per-class key from curator.IncidentKey; GitOps: failing resource+condition). curator.DupFingerprint prefers it so reworded re-investigations (#137) AND the same alert on a different pod/node (CORE-681) still dedupe
+	RecalledEntry string      // when Recalled: the catalog entry Path that was matched
+	Verified      bool        // true when the adversarial verify pass ran and a root cause survived it
+	Usage         UsageTotals // per-investigation model token/cost accounting (loop + verify); surfaced to humans + metrics, never written to the curated KB body
 	// Recurrence facts stamped at completion from the outcome ledger's per-TriggerKey
 	// index (never seen by the model). They describe PRIOR investigations of the same
 	// TriggerKey; this run's own open is recorded after they are read.

@@ -197,7 +197,7 @@ func noteText(s string, maxBytes int) string {
 // longer tracks fences, because kbvalidate's parser does not either — but the
 // flattening still matters for the plain-heading case above.
 func noteField(s string) string {
-	return singleLine(redact.Secrets(s))
+	return SingleLine(redact.Secrets(s))
 }
 
 // blockquote prefixes EVERY line of s with "> ", so a quoted block cannot end
@@ -533,7 +533,7 @@ func atxHeadingText(line string) string {
 	return strings.TrimSpace(line[i:])
 }
 
-// singleLine collapses every rune that can break or reorder a line — any
+// SingleLine collapses every rune that can break or reorder a line — any
 // Unicode whitespace other than the plain space, every control character (Cc)
 // and every format character (Cf) — to a space, so text pulled from untrusted
 // sources (an alert title, in particular) can never break a single-line YAML
@@ -558,7 +558,7 @@ func atxHeadingText(line string) string {
 // The plain space is excluded so ordinary text is left exactly as written;
 // everything else in those categories becomes one, which keeps the result the
 // same length in runes and never joins two words.
-func singleLine(s string) string {
+func SingleLine(s string) string {
 	return strings.Map(func(r rune) rune {
 		if r == ' ' {
 			return r

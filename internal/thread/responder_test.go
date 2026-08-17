@@ -2658,7 +2658,7 @@ func TestReplyQuotesTheNoteAsUntrustedAndNothingElse(t *testing.T) {
 // margin, in RunLore's own vocabulary — the exact forgery modelVoice's
 // blockquote exists to stop, arriving through a rune that is not "\n".
 //
-// singleLine had already made this argument for the YAML title (see its doc
+// SingleLine had already made this argument for the YAML title (see its doc
 // comment: U+2028 and U+2029 are the ones "many renderers and tokenizers break
 // on"), and noteField applies it to Author and Title. The note BODY is the one
 // untrusted span rendered multi-line BY DESIGN, so it is the one span that
@@ -2701,7 +2701,7 @@ func TestQuotedNoteCannotBreakOutOfTheBlockquote(t *testing.T) {
 	}
 
 	// The other direction, and the reason the fix normalises BREAKS rather than
-	// mapping whitespace the way singleLine does: a tab, a no-break space and a
+	// mapping whitespace the way SingleLine does: a tab, a no-break space and a
 	// blank line are not line breaks, so the quote must carry them through
 	// untouched. Flattening them would censor the note the human asked to read.
 	t.Run("everything that is not a break survives byte for byte", func(t *testing.T) {
