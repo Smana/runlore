@@ -194,65 +194,87 @@ func TestGitOpsSchemaConstrainsKind(t *testing.T) {
 // (likely the cascade root)" — a claim about the world in reply to a question about the
 // tool's scope. The model quoted it as evidence, built a wrong mechanism on it, and advised
 // recovering from Git history an object that was in the cluster the whole time.
+//
+// Both engines are exercised. The first version of this test only ever set
+// Engine:"argocd", so the flux-side guard — which is the DEFAULT, and therefore what a
+// deployment that never sets gitops.engine actually runs — was never called at all.
 func TestGitOpsUnsupportedKindIsNotEvidenceOfAbsence(t *testing.T) {
-	for _, tc := range []struct {
-		tool string
-		call func(*countingInspector) (string, error)
-	}{
-		{"gitops_resource_status", func(i *countingInspector) (string, error) {
-			return GitOpsStatusTool{Inspector: i, Engine: "argocd"}.Call(context.Background(),
-				`{"kind":"VMServiceScrape","name":"datagrok-rabbitmq","namespace":"observability"}`)
-		}},
-		{"gitops_tree", func(i *countingInspector) (string, error) {
-			return GitOpsTreeTool{Inspector: i, Engine: "argocd"}.Call(context.Background(),
-				`{"kind":"VMServiceScrape","name":"datagrok-rabbitmq","namespace":"observability"}`)
-		}},
-	} {
-		insp := &countingInspector{notFound: true}
-		out, err := tc.call(insp)
-		if err != nil {
-			t.Fatalf("%s: %v", tc.tool, err)
+	for _, engine := range []string{"argocd", "flux", ""} {
+		// Two shapes of out-of-scope kind: one no engine owns (the live #503 case), and
+		// one the OTHER engine owns, which is the shape the model is most likely to try.
+		foreign := "Application" // flux (and the default) cannot own Argo CD's Application
+		if engine == "argocd" {
+			foreign = "HelmRelease"
 		}
-		// The words that made the old answer dangerous. "not found" is included because the
-		// tree renderer emits "NOT FOUND  ← root", which hands back a root cause outright.
-		for _, forbidden := range []string{"does not exist", "genuinely", "cascade root", "← root"} {
-			if strings.Contains(strings.ToLower(out), strings.ToLower(forbidden)) {
-				t.Errorf("%s: out-of-scope kind answered with %q — that is a claim about the cluster:\n%s",
-					tc.tool, forbidden, out)
+		for _, kind := range []string{"VMServiceScrape", foreign} {
+			for _, tc := range []struct {
+				tool string
+				call func(*countingInspector) (string, error)
+			}{
+				{"gitops_resource_status", func(i *countingInspector) (string, error) {
+					return GitOpsStatusTool{Inspector: i, Engine: engine}.Call(context.Background(),
+						`{"kind":"`+kind+`","name":"datagrok-rabbitmq","namespace":"observability"}`)
+				}},
+				{"gitops_tree", func(i *countingInspector) (string, error) {
+					return GitOpsTreeTool{Inspector: i, Engine: engine}.Call(context.Background(),
+						`{"kind":"`+kind+`","name":"datagrok-rabbitmq","namespace":"observability"}`)
+				}},
+			} {
+				insp := &countingInspector{notFound: true}
+				out, err := tc.call(insp)
+				if err != nil {
+					t.Fatalf("%s/%s/%s: %v", engine, kind, tc.tool, err)
+				}
+				id := engine + "/" + kind + "/" + tc.tool
+				// The words that made the old answer dangerous, plus the tree renderer's
+				// "← root", which handed back a root cause outright.
+				for _, forbidden := range []string{"does not exist", "genuinely", "cascade root", "← root"} {
+					if strings.Contains(strings.ToLower(out), strings.ToLower(forbidden)) {
+						t.Errorf("%s: out-of-scope kind answered with %q — that is a claim about the cluster:\n%s",
+							id, forbidden, out)
+					}
+				}
+				// The disclaimer is load-bearing: without it the model cannot tell that the
+				// reply is silent about existence rather than asserting absence.
+				if !strings.Contains(out, "NOTHING about whether the object exists") {
+					t.Errorf("%s: reply does not disclaim evidence of absence:\n%s", id, out)
+				}
+				// Refused BEFORE the lookup — a tool that cannot answer should not spend a call.
+				if insp.calls != 0 {
+					t.Errorf("%s: inspector was called %d times for an unsupported kind", id, insp.calls)
+				}
 			}
-		}
-		// The disclaimer is load-bearing: without it the model cannot tell that the reply
-		// is silent about existence rather than asserting absence.
-		if !strings.Contains(out, "NOTHING about whether the object exists") {
-			t.Errorf("%s: reply does not disclaim evidence of absence:\n%s", tc.tool, out)
-		}
-		// Refused BEFORE the lookup — a tool that cannot answer should not spend a call.
-		if insp.calls != 0 {
-			t.Errorf("%s: inspector was called %d times for an unsupported kind", tc.tool, insp.calls)
 		}
 	}
 }
 
 // TestGitOpsNotFoundDoesNotNominateARootCause covers the SUPPORTED-kind path. Absence is a
 // fact worth stating; that the absence caused the incident is for the loop to establish.
-// The old wording asserted both from a single name lookup.
+// The old wording asserted both from a single name lookup — and was only ever tested on
+// argocd, so the default engine's answer went unchecked.
 func TestGitOpsNotFoundDoesNotNominateARootCause(t *testing.T) {
-	insp := &countingInspector{notFound: true}
-	out, err := GitOpsStatusTool{Inspector: insp, Engine: "argocd"}.Call(context.Background(),
-		`{"kind":"Application","name":"runlore","namespace":"argocd"}`)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !strings.Contains(out, "NOT FOUND") {
-		t.Fatalf("a genuinely absent supported object must still report absence:\n%s", out)
-	}
-	for _, forbidden := range []string{"genuinely does not exist", "likely the cascade root"} {
-		if strings.Contains(out, forbidden) {
-			t.Errorf("NOT FOUND still over-claims with %q:\n%s", forbidden, out)
+	for _, tc := range []struct{ engine, kind, namespace string }{
+		{"argocd", "Application", "argocd"},
+		{"flux", "Kustomization", "flux-system"},
+		{"", "HelmRelease", "apps"},
+	} {
+		insp := &countingInspector{notFound: true}
+		out, err := GitOpsStatusTool{Inspector: insp, Engine: tc.engine}.Call(context.Background(),
+			`{"kind":"`+tc.kind+`","name":"runlore","namespace":"`+tc.namespace+`"}`)
+		if err != nil {
+			t.Fatal(err)
 		}
-	}
-	if !strings.Contains(out, "do not assume it is the root cause") {
-		t.Errorf("NOT FOUND does not warn against reading absence as causation:\n%s", out)
+		if !strings.Contains(out, "NOT FOUND") {
+			t.Fatalf("%s: an absent supported object must still report absence:\n%s", tc.engine, out)
+		}
+		for _, forbidden := range []string{"genuinely does not exist", "likely the cascade root", "no such object exists"} {
+			if strings.Contains(out, forbidden) {
+				t.Errorf("%s: NOT FOUND still over-claims with %q:\n%s", tc.engine, forbidden, out)
+			}
+		}
+		if !strings.Contains(out, "do not assume it is the root cause") {
+			t.Errorf("%s: NOT FOUND does not warn against reading absence as causation:\n%s", tc.engine, out)
+		}
 	}
 }
 
