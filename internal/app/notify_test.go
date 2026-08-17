@@ -205,7 +205,8 @@ func (fakeThreadForge) CommentOnPR(context.Context, int, string) error { return 
 func (fakeThreadForge) OpenPR(context.Context, providers.KBEntry) (providers.Ref, error) {
 	return providers.Ref{}, nil
 }
-func (fakeThreadForge) IsPROpen(context.Context, int) (bool, error) { return true, nil }
+func (fakeThreadForge) IsPROpen(context.Context, int) (bool, error)          { return true, nil }
+func (fakeThreadForge) AppendToEntryOnPR(context.Context, int, string) error { return nil }
 
 // TestBuildThreadMentionNamesTheBotTokenCause pins the fix for the dead-code
 // warning: ThreadCaptureDeliverable's "no bot-token delivery target resolved"

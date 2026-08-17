@@ -85,3 +85,66 @@ func TestUpdateLogCreatesAndPrepends(t *testing.T) {
 		t.Fatalf("second same-day entry missing:\n%s", got)
 	}
 }
+
+// TestEntryFilePicksTheEntryNotTheBundleUpkeep: a RunLore curation request
+// changes the entry plus, at most, index.md and log.md. Only the entry is what
+// a later commit (an appended operator note) must edit — writing into log.md
+// instead would corrupt the bundle and lose the note in one move.
+func TestEntryFilePicksTheEntryNotTheBundleUpkeep(t *testing.T) {
+	got, err := EntryFile([]string{"index.md", "concepts/oom-1755.md", "log.md"})
+	if err != nil {
+		t.Fatalf("EntryFile: %v", err)
+	}
+	if got != "concepts/oom-1755.md" {
+		t.Errorf("EntryFile = %q, want the entry", got)
+	}
+}
+
+// TestEntryFileRefusesToGuess: the caller's next move is a commit into a pull
+// request a human is reviewing. Anything other than exactly one candidate must
+// be an error — a refusal degrades to a comment, while a wrong write silently
+// rewrites somebody else's change.
+func TestEntryFileRefusesToGuess(t *testing.T) {
+	for name, changed := range map[string][]string{
+		"nothing at all":     nil,
+		"upkeep only":        {"index.md", "log.md"},
+		"two entries":        {"concepts/a.md", "incidents/b.md"},
+		"no markdown at all": {"Makefile", "go.mod"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			if got, err := EntryFile(changed); err == nil {
+				t.Errorf("EntryFile(%v) = %q, want an error rather than a guess", changed, got)
+			}
+		})
+	}
+}
+
+func TestAppendBlockKeepsWhatIsAlreadyThere(t *testing.T) {
+	got := string(AppendBlock([]byte("---\ntype: Concept\n---\n\nfirst note\n"), "second note"))
+	want := "---\ntype: Concept\n---\n\nfirst note\n\nsecond note\n"
+	if got != want {
+		t.Errorf("AppendBlock =\n%q\nwant\n%q", got, want)
+	}
+}
+
+// TestAppendBlockEmptyBlockChangesNothing: the caller's next move is a real
+// commit in a human's pull request, so appending nothing must not rewrite the
+// file — an empty-diff commit is noise a reviewer has to read.
+func TestAppendBlockEmptyBlockChangesNothing(t *testing.T) {
+	existing := []byte("body\n")
+	if got := string(AppendBlock(existing, "\n\n")); got != "body\n" {
+		t.Errorf("AppendBlock with an empty block = %q, want the file untouched", got)
+	}
+}
+
+// TestAppendBlockNormalisesSpacing pins the separation to exactly one blank
+// line however ragged either side is, so a note appended after a file that
+// already ends in three newlines does not drift further from one that does not.
+func TestAppendBlockNormalisesSpacing(t *testing.T) {
+	if got := string(AppendBlock([]byte("body\n\n\n"), "\n\nnote\n\n")); got != "body\n\nnote\n" {
+		t.Errorf("AppendBlock = %q, want exactly one blank line between the blocks", got)
+	}
+	if got := string(AppendBlock(nil, "note")); got != "note\n" {
+		t.Errorf("AppendBlock onto an empty file = %q, want no leading blank line", got)
+	}
+}

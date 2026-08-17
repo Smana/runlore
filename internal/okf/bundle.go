@@ -60,6 +60,69 @@ func UpdateIndex(existing []byte, e providers.KBEntry, entryPath string) []byte 
 	return []byte(strings.Join(slices.Insert(lines, end, line), "\n") + "\n")
 }
 
+// reservedBundleFiles are the OKF bundle files a curation PR touches ALONGSIDE
+// the entry it files (see UpdateIndex and UpdateLog, and the forge callers that
+// apply them). Subtracting them from a pull request's changed paths is what
+// leaves the entry itself.
+var reservedBundleFiles = []string{"index.md", "log.md"}
+
+// EntryFile picks the ONE catalog entry among a pull/merge request's changed
+// paths.
+//
+// It exists so a LATER commit onto that request — an operator note appended to
+// the entry it carries, see thread.Forge.AppendToEntryOnPR — can find the file
+// to edit without any caller having to remember where it was first written. A
+// RunLore curation request changes the entry plus, at most, the reserved pair
+// above, so what remains after removing them is the entry.
+//
+// Anything other than exactly one candidate is an ERROR rather than a guess.
+// The caller's next move is a commit into a pull request a human is reviewing,
+// and committing into the wrong file there is strictly worse than refusing:
+// refusing degrades to a comment, and a wrong write silently rewrites somebody
+// else's change with no signal that it happened.
+//
+// It lives here, beside the functions that put those reserved files on the
+// branch in the first place, and is shared by both forge clients for the reason
+// this file's header gives: two copies of a rule about the bundle's shape drift,
+// and a KB would then behave differently depending on which forge hosts it.
+func EntryFile(changed []string) (string, error) {
+	var entries []string
+	for _, p := range changed {
+		if !strings.HasSuffix(p, ".md") || slices.Contains(reservedBundleFiles, p) {
+			continue
+		}
+		entries = append(entries, p)
+	}
+	if len(entries) != 1 {
+		return "", fmt.Errorf("want exactly one catalog entry among the changed files, found %d: %v", len(entries), entries)
+	}
+	return entries[0], nil
+}
+
+// AppendBlock adds block to the end of an OKF entry's markdown, separated from
+// what is already there by one blank line and terminated by a newline.
+//
+// One blank line and NOTHING else: no "---" rule, no heading of its own. A
+// horizontal rule would be a second "---" in a file whose FIRST one delimits the
+// YAML frontmatter, and while every parser RunLore ships takes the first match
+// (see catalog.SplitFrontmatter, forge/github.frontmatterBlock), inviting a
+// reader of the raw file to wonder is not worth a divider. The blocks callers
+// append already open with their own heading, which separates them on the page.
+//
+// An empty block returns existing untouched — appending nothing must not rewrite
+// the file, since the caller's commit is a real change in a human's pull request.
+func AppendBlock(existing []byte, block string) []byte {
+	block = strings.Trim(block, "\n")
+	if block == "" {
+		return existing
+	}
+	cur := strings.TrimRight(string(existing), "\n")
+	if cur == "" {
+		return []byte(block + "\n")
+	}
+	return []byte(cur + "\n\n" + block + "\n")
+}
+
 // UpdateLog records the entry in an OKF log: flat date-grouped entries, newest
 // first, bold action word (§7). A nil/empty existing log gets the standard shape,
 // so callers CREATE log.md when the bundle lacks it — unlike index.md, its shape

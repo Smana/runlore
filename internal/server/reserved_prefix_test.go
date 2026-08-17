@@ -25,6 +25,7 @@ type fakeSlackForge struct {
 	mu        sync.Mutex
 	opened    int
 	commented int
+	appended  int
 }
 
 func (f *fakeSlackForge) OpenPR(context.Context, providers.KBEntry) (providers.Ref, error) {
@@ -43,10 +44,21 @@ func (f *fakeSlackForge) CommentOnPR(context.Context, int, string) error {
 
 func (f *fakeSlackForge) IsPROpen(context.Context, int) (bool, error) { return true, nil }
 
+func (f *fakeSlackForge) AppendToEntryOnPR(context.Context, int, string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.appended++
+	return nil
+}
+
+// counts sums EVERY knowledge-base write entry point, not only the two that
+// existed when this fake was written. A reserved command must reach none of
+// them, so a third route added later must be counted here or this fake would
+// keep reporting zero writes for a route it simply is not looking at.
 func (f *fakeSlackForge) counts() (opened, commented int) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	return f.opened, f.commented
+	return f.opened, f.commented + f.appended
 }
 
 // fakeSlackReplier is thread.Replier: it records every reply so the
