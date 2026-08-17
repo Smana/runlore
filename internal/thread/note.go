@@ -574,7 +574,16 @@ func singleLine(s string) string {
 // (walking back to a rune boundary) and appends a 3-byte "…", so the result
 // can be up to n+2 bytes in the worst case. Bytes, because that is what the
 // validator's limit counts.
+//
+// A budget of n <= 0 yields "", matching cutToRuneBoundary's guard rather than
+// diverging from it. Without it `cut := n - 1` is -1, the walk-back's `cut > 0`
+// condition keeps it there, and s[:-1] panics on any non-empty s. No shipped
+// caller passes a non-positive n today — they all pass a positive constant — so
+// this is defence against a future one, not a live fix.
 func truncate(s string, n int) string {
+	if n <= 0 {
+		return ""
+	}
 	if len(s) <= n {
 		return s
 	}

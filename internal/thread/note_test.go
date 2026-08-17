@@ -586,6 +586,38 @@ func TestNoteInputCapMidRuneCutStaysValidUTF8(t *testing.T) {
 	})
 }
 
+// TestTruncateNonPositiveBudgetYieldsNothing pins truncate's behaviour for a
+// budget of zero or less, which used to PANIC: `cut := n - 1` gives -1, the
+// walk-back loop's `cut > 0` guard declines to run, and `s[:-1]` on a non-empty
+// string is a slice-bounds-out-of-range.
+//
+// Not a live bug — every caller passes a positive constant (MaxEvidenceItemBytes,
+// maxNoteTitle, maxChatCatalogFieldBytes) — so this is defence, and it is here
+// because its sibling cutToRuneBoundary already carries exactly this guard. Two
+// byte-cutting helpers in one file, one of which crashes on an input the other
+// handles, is a difference a future caller has no way to anticipate.
+//
+// "" rather than "…": n <= 0 is no budget at all, and the ellipsis is 3 bytes.
+// An empty string is the only answer that respects the cap it was given, and it
+// is the answer cutToRuneBoundary already gives.
+func TestTruncateNonPositiveBudgetYieldsNothing(t *testing.T) {
+	for _, n := range []int{0, -1, -100} {
+		for _, s := range []string{"", "a", "hello", "玉玉玉"} {
+			if got := truncate(s, n); got != "" {
+				t.Errorf("truncate(%q, %d) = %q, want \"\"", s, n, got)
+			}
+		}
+	}
+	// Either side of the boundary is unchanged: n=1 leaves room for the mark and
+	// nothing else, and a budget the input already fits in returns it untouched.
+	if got := truncate("hello", 1); got != "…" {
+		t.Errorf("truncate(%q, 1) = %q, want %q", "hello", got, "…")
+	}
+	if got := truncate("hello", 5); got != "hello" {
+		t.Errorf("truncate(%q, 5) = %q, want it unchanged", "hello", got)
+	}
+}
+
 // TestNoteInputCapNonPositiveMeansTheDefault pins capNoteText's documented
 // choice for a caller-supplied maxBytes <= 0: fall back to
 // DefaultMaxNoteBytes rather than "unlimited". Diverging silently from
