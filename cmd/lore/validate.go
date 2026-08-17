@@ -33,17 +33,25 @@ func runValidateKB(args []string) error {
 	}
 
 	var model providers.ModelProvider
+	var priced *config.Config
 	if *semantic {
 		if cfg, err := config.Load(*cfgPath); err == nil && app.ModelConfigured(cfg) {
-			model = app.BuildModel(cfg, os.Getenv(cfg.Model.APIKeyEnv))
+			model, priced = app.BuildModel(cfg, os.Getenv(cfg.Model.APIKeyEnv)), cfg
 		} else {
 			fmt.Fprintln(os.Stderr, "validate-kb: --semantic set but no usable model in config; running structural only")
 		}
 	}
 
-	hadError, err := validateKB(os.Stdout, dir, *format, model)
+	hadError, usage, err := validateKB(os.Stdout, dir, *format, model)
 	if err != nil {
 		return err
+	}
+	// The advisory's spend goes to STDERR, not stdout: --format github streams
+	// annotations a CI parser reads, and a spend summary is not an annotation. Printed
+	// only when a model actually ran — a "0 input / 0 output" line on a
+	// structural-only run would make an absent thing look measured.
+	if priced != nil {
+		fmt.Fprintln(os.Stderr, app.ModelSpendLine(priced, "validate-kb --semantic", usage))
 	}
 	if hadError {
 		return fmt.Errorf("KB validation failed: structural errors found")
@@ -52,11 +60,27 @@ func runValidateKB(args []string) error {
 }
 
 // validateKB loads dir, structurally validates every entry, and (when model is
-// non-nil) appends the semantic advisory. It returns whether any Error was found.
-func validateKB(w io.Writer, dir, format string, model providers.ModelProvider) (bool, error) {
+// non-nil) appends the semantic advisory. It returns whether any Error was found,
+// and what the advisory spent.
+//
+// The usage return is the whole point of the counting wrapper below: the semantic
+// review is one model call PER ENTRY over a catalog directory, and nothing counted
+// them — not an investigation's usage totals, not any budget, not a metric. A
+// telemetry counter would not help: the Prometheus exporter is installed by
+// telemetry.Setup under `lore serve` alone, so in this one-shot process the
+// instruments bind to a no-op meter that nothing scrapes. Returning the total is
+// what lets the command say what it spent.
+func validateKB(w io.Writer, dir, format string, model providers.ModelProvider) (bool, providers.Usage, error) {
 	entries, skipped, err := catalog.Load(dir)
 	if err != nil {
-		return false, err
+		return false, providers.Usage{}, err
+	}
+	// Wrap only a real model: a nil ModelProvider must stay nil, since the loop below
+	// treats non-nil as "run the advisory".
+	var counting *providers.CountingModel
+	if model != nil {
+		counting = &providers.CountingModel{Inner: model}
+		model = counting
 	}
 	hadError := false
 
@@ -84,7 +108,10 @@ func validateKB(w io.Writer, dir, format string, model providers.ModelProvider) 
 			}
 		}
 	}
-	return hadError, nil
+	if counting == nil {
+		return hadError, providers.Usage{}, nil
+	}
+	return hadError, counting.Total(), nil
 }
 
 func emitIssue(w io.Writer, format, path string, iss kbvalidate.Issue) {

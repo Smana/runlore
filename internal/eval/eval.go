@@ -19,6 +19,10 @@ import (
 type Runner struct {
 	Model providers.ModelProvider
 	Log   *slog.Logger
+	// Spend is the per-investigation ceiling set handed to every replayed loop. Its
+	// zero value runs every case unbounded against the operator's paid model, which
+	// is what this runner did before it had the field.
+	Spend Spend
 	// OnCaseDone, when set, is called after each case finishes its n repeats, in
 	// case order. RunN is sequential and holds every result until the whole campaign
 	// ends, so without this a nightly run emits nothing for its entire duration —
@@ -85,6 +89,13 @@ func (r *Runner) runOne(ctx context.Context, c Case) Result {
 		Recall:   recall,
 		Verify:   recall != nil, // recall is untrusted; verify guards it (the property under test)
 		OnRecall: func(d investigate.RecallDecision) { decision = d },
+		// The same ceilings the production loop runs under: a case that would be
+		// nudged or hard-killed in production must be here too, or the campaign
+		// scores a loop no deployment ever runs.
+		MaxTokensPerInvestigation: r.Spend.MaxTokensPerInvestigation,
+		MaxCostPerInvestigation:   r.Spend.MaxCostPerInvestigation,
+		Pricing:                   r.Spend.Pricing,
+		VerifyPricing:             r.Spend.VerifyPricing,
 		OnComplete: func(inv providers.Investigation) {
 			got, done = inv, true
 		},
@@ -293,13 +304,21 @@ func (c Campaign) FlakyNames() []string {
 	return names
 }
 
-// RunN replays every case n times and returns the aggregated campaign.
+// RunN replays every case n times and returns the aggregated campaign. It stops
+// early on a cancelled context, so the campaign reports the cases it actually ran.
 func (r *Runner) RunN(ctx context.Context, cases []Case, n int) Campaign {
 	if n < 1 {
 		n = 1
 	}
 	camp := Campaign{N: n}
 	for _, c := range cases {
+		// A campaign-wide halt (Ctrl-C, or CampaignBudget tripping its ceiling and
+		// cancelling) must stop the walk. Without it the run keeps starting cases it
+		// cannot pay for and records each as a broken run — the same wall-clock spent,
+		// and a report that reads as a total failure rather than a truncated campaign.
+		if ctx.Err() != nil {
+			break
+		}
 		a := r.aggregateCase(ctx, c, n)
 		camp.Aggregates = append(camp.Aggregates, a)
 		if r.OnCaseDone != nil {

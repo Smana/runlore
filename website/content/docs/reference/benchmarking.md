@@ -97,9 +97,53 @@ flagged when runs disagree too much to trust. Case rows are sorted by name and t
 JSON is deterministic, so two reports diff cleanly.
 
 Rubric dimensions and the pass gate are defined in [`eval/rubric.md`](https://github.com/Smana/runlore/blob/main/eval/rubric.md).
-Token usage is the provider-reported count per completion (see
-`providers.Usage`), summed across the loop **and** the judge by the runner's
-`CountingModel` wrapper.
+Token usage is the provider-reported count per completion (see `providers.Usage`),
+summed by the runner's `CountingModel` wrapper. The `in tok` / `out tok` columns
+cover **the entry's own model only** — grading is done by one fixed judge shared
+across entries, so charging its tokens to whichever entry happened to be running
+would make the comparison meaningless. The judge's own spend is reported separately
+on stderr at the end of the run:
+
+```text
+eval: judge: model spend: 412340 input / 18220 output tokens (~$1.3762 at model.pricing)
+```
+
+## Spend controls
+
+An eval is the easiest way to spend real money quickly: it runs the full
+investigation loop over a whole corpus, several times per case, unattended. Two
+independent ceilings bound it, and they answer different questions.
+
+| ceiling | where it is set | what it bounds |
+|---|---|---|
+| `investigation.max_tokens_per_investigation` / `max_cost_per_investigation` | `runlore.yaml` (the same keys `lore serve` uses) | **one case**, exactly as in production |
+| `--max-total-tokens` | flag on `lore eval` | **the whole run**, across every model it drives |
+
+The per-case ceilings are deliberately the *same config keys* as production, not
+eval-only ones: an eval replays the production loop, so a case that would be nudged
+or hard-killed on your cluster must be cut short here too — otherwise the pass rate
+describes a loop no deployment ever runs. A `--compare` run with no `runlore.yaml`
+still gets the shipped default per case.
+
+`--max-total-tokens` is the run-level ceiling those cannot express: a 30-case corpus
+at `-n 10` under a 100k per-case ceiling authorises 30 million tokens, and nothing
+about "per case" says otherwise. It is denominated in **tokens, not dollars**,
+because a campaign routinely drives several different models at once (the entries
+under test plus the judge) and a single USD ceiling would have to price all of them
+from one rate card — misreporting exactly the multi-model run it most needs to bound.
+
+When it trips, every further completion is refused and the campaign stops starting
+new cases; the report covers the cases that actually ran, and the halt says so:
+
+```text
+eval: STOPPED after 12/30 cases — campaign token ceiling exceeded (--max-total-tokens=2000000, spent 2001430).
+```
+
+It cannot be a strict cap — a completion's size is unknowable before it is made, so
+the crossing call itself always completes and the overshoot is bounded by one
+completion. It also covers only model completions: a `--live` campaign's
+setup/teardown shell steps mutate a real cluster and spend no tokens at all, so
+nothing here bounds them.
 
 ## Publishing results honestly
 
