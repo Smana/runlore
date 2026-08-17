@@ -56,12 +56,18 @@ func TestSourceDiffRejectsNonAllowlistedRepo(t *testing.T) {
 	}
 }
 
-// TestSourceDiffClonesOnlyTheAllowlistedURL guards the boundary that RunLore
-// #495's SSH→HTTPS clone normalisation must not weaken.
+// TestSourceDiffClonesOnlyTheAllowlistedURL pins pre-existing behaviour that
+// RunLore #495 depends on but does not change.
 //
-// The allowlist is a security control, and it is only a control while the string
-// it CHECKED is the string that gets CLONED. Whatever spelling the model sends —
-// including the SSH forms #495 taught the clone layer to understand — the URL
+// It exercises sourcerepo + SourceDiffTool ONLY: fakeSourceDiffer short-circuits
+// before any whatchanged code runs, so nothing here reaches the SSH→HTTPS
+// rewrite, and this passes unmodified against origin/main — by design. The
+// interaction between the rewrite and the allowlist is covered by
+// whatchanged.TestCloneRewriteCannotBypassSourceRepoAllowlist.
+//
+// What it pins is the precondition that test depends on: the allowlist is a
+// security control only while the string it CHECKED is the string that gets
+// CLONED. Whatever spelling the model sends — the SSH forms included — the URL
 // handed to the differ must be the canonical one Allowlist.Match itself produced,
 // never the model's raw text and never a second, independently-normalised copy of
 // it. Two normalisations of one input is exactly how an allow check gets bypassed.

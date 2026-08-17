@@ -89,6 +89,30 @@ func TestSSHToHTTPS(t *testing.T) {
 		// go-git resolves the host to "user" here; the rewrite must report that
 		// same host and never promote the later, more plausible-looking one.
 		{"no host promotion from a later lookalike", "git@user:pass@github.com:acme/x.git", "https://user/pass@github.com:acme/x.git", true},
+		// Non-ASCII hosts. hostOf lowercases with strings.ToLower — Unicode SIMPLE
+		// case mapping — while net/http resolves through idna.Lookup.ToASCII, and
+		// the two disagree: ToLower maps U+0130 to 'i', so "gİthub.com" reads as
+		// "github.com" to the authorization check while net/http dials the
+		// separately registrable "xn--github-qyd.com". Refuse the class, not the
+		// one rune.
+		{"homoglyph host U+0130 is refused", "git@gİthub.com:org/repo.git", "", false},
+		{"homoglyph host under ssh scheme is refused", "ssh://git@gİthub.com/org/repo.git", "", false},
+		{"kelvin-sign host is refused", "git@bacKend.example:org/repo.git", "", false},
+		{"fullwidth host is refused", "git@ｇithub.com:org/repo.git", "", false},
+		{"zero-width space in the host is refused", "git@git\u200bhub.com:org/repo.git", "", false},
+		{"soft hyphen in the host is refused", "git@git\u00adhub.com:org/repo.git", "", false},
+		// A lone continuation byte is not valid UTF-8, so no rune-based check
+		// sees it and the round-trip guard passes it cleanly — only the byte
+		// scan rejects it. This pins the boundary at exactly 0x80: every valid
+		// non-ASCII rune has a lead byte >= 0xC2, so nothing else in this table
+		// would notice the boundary drifting upward.
+		{"raw 0x80 byte in the host is refused", "git@a\x80b.example:org/repo.git", "", false},
+		// Punycode written out is plain ASCII and stays its own distinct host —
+		// it must not be decoded back into a lookalike of anything.
+		{"punycode spelling is its own host", "git@xn--github-qyd.com:org/repo.git", "https://xn--github-qyd.com/org/repo.git", true},
+		// A non-ASCII PATH is not a host-confusion risk: it cannot change which
+		// host is dialled, and net/http escapes it on the wire.
+		{"non-ascii path is allowed", "git@github.com:org/répo.git", "https://github.com/org/répo.git", true},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -170,6 +194,17 @@ func TestSSHRewriteNeverReachesAForeignHost(t *testing.T) {
 		// Lookalikes: neither is the credential's host.
 		"git@github.com.attacker.example:org/repo.git",
 		"git@notgithub.com:org/repo.git",
+		// IDNA homoglyphs. These are the dangerous ones: hostOf lowercases with
+		// strings.ToLower, which maps U+0130 to 'i', so each of these reads as
+		// exactly "github.com" to the authorization check — while net/http
+		// resolves through idna.Lookup.ToASCII and dials a punycode host the
+		// attacker can register ("xn--github-qyd.com"), serve a valid cert for,
+		// and read the App token off the Authorization header.
+		"git@gİthub.com:org/repo.git",
+		"ssh://git@gİthub.com/org/repo.git",
+		"git@githუb.com:org/repo.git",
+		"git@ｇithub.com:org/repo.git",
+		"git@git\u200bhub.com:org/repo.git",
 	}
 	for _, raw := range foreign {
 		t.Run("foreign "+raw, func(t *testing.T) {

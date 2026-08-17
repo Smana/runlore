@@ -44,11 +44,27 @@ func BuildGitOps(cfg *config.Config, dc dynamic.Interface, log *slog.Logger) pro
 // TokenHost unset keeps every HTTPS clone that works today byte-identical,
 // including a GitHub Enterprise install whose API host differs from its git host
 // (githubGitHost derives from the API URL, so confining auth on it could withhold
-// the credential from a repo that clones fine today).
+// the credential from a repo that clones fine today). That bounds the REWRITE,
+// not the credential: a hostile HTTPS repoURL still receives the token — see
+// whatchanged.Differ.effectiveCloneURL for what is and is not closed.
+//
+// SSHRewriteHost is left EMPTY when there is no GitHub App credential, because
+// githubGitHost would otherwise name github.com for a deployment that holds no
+// github.com token — a host the rewrite must not trust on that basis. On a GitLab
+// forge BuildForgeTokenSource returns nil (it mints GitHub App tokens only), so
+// SSH repoURLs there still fail exactly as RunLore #495 reports. That gap is
+// LOGGED rather than papered over: handing the GitOps differ a GitLab credential
+// is a new credential path and belongs in its own change — the way
+// BuildKBTokenSource was split out for the identical silent failure on catalog
+// sync (see forge.go).
 func buildGitOpsDiffer(cfg *config.Config, log *slog.Logger) *whatchanged.Differ {
-	differ := &whatchanged.Differ{
-		TokenSource:    BuildForgeTokenSource(cfg, log),
-		SSHRewriteHost: githubGitHost(cfg.Forge.GitHubAPIURL),
+	differ := &whatchanged.Differ{TokenSource: BuildForgeTokenSource(cfg, log)}
+	if differ.TokenSource != nil {
+		differ.SSHRewriteHost = githubGitHost(cfg.Forge.GitHubAPIURL)
+	} else {
+		log.Warn("what_changed: no GitHub App credential; SSH repoURLs cannot be cloned and are "+
+			"not rewritten to HTTPS — change correlation stays empty for any GitOps object "+
+			"whose source is an SSH URL", "forge_provider", cfg.Forge.Provider)
 	}
 	if cfg.GitOps.Mirror.IsEnabled() {
 		if mc, err := whatchanged.NewMirrorCache(cfg.GitOps.Mirror.Dir, cfg.GitOps.Mirror.Max); err != nil {
