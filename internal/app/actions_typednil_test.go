@@ -8,9 +8,10 @@ import (
 	"go/parser"
 	"go/token"
 	"go/types"
+	"maps"
 	"os"
 	"path/filepath"
-	"sort"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -60,7 +61,7 @@ func TestActionsInterfaceFieldsAreNeverAssignedRawBuilderResults(t *testing.T) {
 	// and the guard below would pass forever having checked nothing.
 	if !fields["Threads"] || !fields["Pauser"] || !fields["Feedback"] {
 		t.Fatalf("expected Threads, Pauser and Feedback among server.Actions' interface fields, got %v — "+
-			"this guard has gone inert", sortedKeys(fields))
+			"this guard has gone inert", slices.Sorted(maps.Keys(fields)))
 	}
 
 	violations, sites := typedNilViolations("server.Actions", fields, parsePackage(t, "."))
@@ -387,13 +388,13 @@ type Actions struct {
 	for _, want := range []string{"Local", "Qualified", "Aliased", "Inline", "Anything"} {
 		if !fields[want] {
 			t.Errorf("field %q is an interface but was not detected; got %v — a field wired from a "+
-				"nil-returning builder would slip past the guard", want, sortedKeys(fields))
+				"nil-returning builder would slip past the guard", want, slices.Sorted(maps.Keys(fields)))
 		}
 	}
 	for _, notWant := range []string{"Struct", "Concrete", "Name", "IDs"} {
 		if fields[notWant] {
 			t.Errorf("field %q cannot hold a typed nil but was reported as an interface; got %v — "+
-				"the guard will cry wolf on correct code", notWant, sortedKeys(fields))
+				"the guard will cry wolf on correct code", notWant, slices.Sorted(maps.Keys(fields)))
 		}
 	}
 	// Outside the module: no sources to read, so it must fail CLOSED and say so.
@@ -458,17 +459,16 @@ func typedNilViolations(structName string, ifaceFields map[string]bool, files []
 	m := &typedNilModel{structName: structName, fields: ifaceFields}
 	m.collect(files)
 
-	var out []string
 	for _, fn := range m.funcs {
 		c := &typedNilChecker{model: m, fn: fn.name, bound: map[string]bool{}, safe: map[string]bool{}}
-		c.seedParams(fn.decl)
+		c.seedFields(fn.decl.Type.Params, fn.decl.Recv)
 		c.bindFixpoint(fn.decl.Body)
 		c.block(fn.decl.Body.List, nil)
-		out = append(out, c.found...)
+		violations = append(violations, c.found...)
 		sites += c.sites
 	}
-	sort.Strings(out)
-	return out, sites
+	slices.Sort(violations)
+	return violations, sites
 }
 
 // namedFunc is a function or method body to walk, with a display name that keeps
@@ -527,7 +527,7 @@ func (m *typedNilModel) collect(files []*ast.File) {
 			return true
 		})
 	}
-	sort.Slice(m.funcs, func(i, j int) bool { return m.funcs[i].name < m.funcs[j].name })
+	slices.SortFunc(m.funcs, func(a, b namedFunc) int { return strings.Compare(a.name, b.name) })
 }
 
 // flattenFields expands a result list into one entry per returned value, so
@@ -577,22 +577,19 @@ type typedNilChecker struct {
 	found []string
 }
 
-// seedParams binds parameters and the receiver when they are declared as the
-// guarded struct, which is what makes a `func wire(acts *server.Actions)` helper
-// visible to the checker.
-func (c *typedNilChecker) seedParams(fn *ast.FuncDecl) {
-	c.seedFields(fn.Type.Params, fn.Recv)
-}
-
-// seedFields is seedParams' body, taking the field lists directly so a function
-// LITERAL's parameters are seeded too. Without it the checker walked a literal's
-// body but not its signature, so
+// seedFields binds the entries of parameter and receiver lists that are declared
+// as the guarded struct, which is what makes a `func wire(acts *server.Actions)`
+// helper visible to the checker.
+//
+// It takes the field lists directly rather than a *ast.FuncDecl so a function
+// LITERAL's parameters are seeded on the same path. While they were not, the
+// checker walked a literal's body but not its signature, so
 //
 //	func(a *server.Actions) { a.Threads = Build(...) }(&acts)
 //
 // reintroduced the bug with the guard green — the named-helper shape was caught
 // and its immediately-invoked twin was not, which is a distinction no reader
-// would predict from the doc comment above.
+// would predict.
 func (c *typedNilChecker) seedFields(lists ...*ast.FieldList) {
 	for _, l := range lists {
 		if l == nil {
@@ -659,10 +656,8 @@ func (c *typedNilChecker) bind(body *ast.BlockStmt) {
 				}
 				// `var h server.ThreadHandler` with no initialiser is a true nil
 				// interface; a pointer type is not.
-				if len(s.Values) == 0 && s.Type != nil {
-					if _, isPtr := s.Type.(*ast.StarExpr); !isPtr && !c.everUnsafe(body, id.Name) {
-						c.safe[id.Name] = true
-					}
+				if len(s.Values) == 0 && s.Type != nil && !isPointer(s.Type) && !c.everUnsafe(body, id.Name) {
+					c.safe[id.Name] = true
 				}
 			}
 		case *ast.SelectorExpr:
@@ -777,7 +772,7 @@ func (c *typedNilChecker) stmt(st ast.Stmt, guarded map[string]bool) {
 			c.literals(r, guarded)
 		}
 	case *ast.DeclStmt:
-		ast.Inspect(s, func(n ast.Node) bool { c.literalNode(n, guarded); return true })
+		c.literals(s, guarded)
 	}
 }
 
@@ -823,23 +818,21 @@ func (c *typedNilChecker) rhsFor(s *ast.AssignStmt, i int, guarded map[string]bo
 	if !known {
 		return value, fmt.Sprintf("%s is called inline and its result types cannot be resolved here", callee)
 	}
-	if i >= len(res) {
-		return "", ""
-	}
-	if _, isPtr := res[i].(*ast.StarExpr); !isPtr {
+	if i >= len(res) || !isPointer(res[i]) {
 		return "", ""
 	}
 	return value, fmt.Sprintf("%s returns a concrete pointer in result %d and is assigned raw", callee, i)
 }
 
-// literals finds composite literals nested anywhere in e and checks their keyed
+// literals finds composite literals nested anywhere in n and checks their keyed
 // fields — `server.Actions{Threads: Build(...)}` is the same bug written a
-// different way.
-func (c *typedNilChecker) literals(e ast.Expr, guarded map[string]bool) {
-	if e == nil {
+// different way. It takes an ast.Node rather than an ast.Expr so a declaration
+// (`var acts = server.Actions{…}`) is searched on the same path.
+func (c *typedNilChecker) literals(n ast.Node, guarded map[string]bool) {
+	if n == nil {
 		return
 	}
-	ast.Inspect(e, func(n ast.Node) bool { c.literalNode(n, guarded); return true })
+	ast.Inspect(n, func(n ast.Node) bool { c.literalNode(n, guarded); return true })
 }
 
 func (c *typedNilChecker) literalNode(n ast.Node, guarded map[string]bool) {
@@ -887,11 +880,8 @@ func (c *typedNilChecker) unsafe(v ast.Expr, guarded map[string]bool) string {
 		if !known {
 			return fmt.Sprintf("%s is called inline and its result type cannot be resolved here", callee)
 		}
-		if len(res) == 0 {
-			return ""
-		}
-		if _, isPtr := res[0].(*ast.StarExpr); !isPtr {
-			return "" // returns the interface itself, so its `return nil` is a true nil
+		if len(res) == 0 || !isPointer(res[0]) {
+			return "" // no result, or it returns the interface itself, so its `return nil` is a true nil
 		}
 		return fmt.Sprintf("%s returns a concrete pointer and is assigned raw", callee)
 	}
@@ -960,6 +950,13 @@ func isNilIdent(e ast.Expr) bool {
 	return ok && id.Name == "nil"
 }
 
+// isPointer reports whether a type expression is a pointer, i.e. a value of it
+// can be a typed nil once stored in an interface.
+func isPointer(e ast.Expr) bool {
+	_, ok := e.(*ast.StarExpr)
+	return ok
+}
+
 // terminates reports whether a block always leaves the enclosing block, so an
 // `if x == nil { … }` before it filters x out of everything that follows.
 func terminates(b *ast.BlockStmt) bool {
@@ -984,12 +981,8 @@ func terminates(b *ast.BlockStmt) bool {
 
 func union(a, b map[string]bool) map[string]bool {
 	out := make(map[string]bool, len(a)+len(b))
-	for k := range a {
-		out[k] = true
-	}
-	for k := range b {
-		out[k] = true
-	}
+	maps.Copy(out, a)
+	maps.Copy(out, b)
 	return out
 }
 
@@ -1047,15 +1040,13 @@ func actionsInterfaceFields(t *testing.T, dir, structName string) (fields map[st
 				isIface, why = true, typ.Name
 			}
 		case *ast.SelectorExpr:
-			pkgName, ok := typ.X.(*ast.Ident)
-			if !ok {
-				isIface, why = true, types.ExprString(typ)
-				break
-			}
-			var resolved bool
-			isIface, resolved = crossPackageIsInterface(t, root, imports[pkgName.Name], typ.Sel.Name)
-			if !resolved {
-				isIface, why = true, types.ExprString(typ)
+			// Fail closed, then narrow: only a package name this file imports whose
+			// sources are readable can prove the type is NOT an interface.
+			isIface, why = true, types.ExprString(typ)
+			if pkgName, ok := typ.X.(*ast.Ident); ok {
+				if known, resolved := crossPackageIsInterface(t, root, imports[pkgName.Name], typ.Sel.Name); resolved {
+					isIface, why = known, ""
+				}
 			}
 		}
 		if !isIface {
@@ -1075,7 +1066,7 @@ func actionsInterfaceFields(t *testing.T, dir, structName string) (fields map[st
 			}
 		}
 	}
-	sort.Strings(unresolved)
+	slices.Sort(unresolved)
 	return fields, unresolved
 }
 
@@ -1249,13 +1240,4 @@ func isBuiltinType(name string) bool {
 		return true
 	}
 	return false
-}
-
-func sortedKeys[V any](m map[string]V) []string {
-	out := make([]string, 0, len(m))
-	for k := range m {
-		out = append(out, k)
-	}
-	sort.Strings(out)
-	return out
 }

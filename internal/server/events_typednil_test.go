@@ -6,8 +6,6 @@ import (
 	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/hex"
-	"io"
-	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"strconv"
@@ -92,7 +90,7 @@ func TestNewNormalisesTypedNilActions(t *testing.T) {
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			s := New(nil, tc.acts, nil, nil, nil, nil, slog.New(slog.NewTextHandler(io.Discard, nil)))
+			s := New(nil, tc.acts, nil, nil, nil, nil, discardLog)
 			req := httptest.NewRequest(tc.method, tc.path, strings.NewReader("{}"))
 			rec := httptest.NewRecorder()
 			s.Handler().ServeHTTP(rec, req)
@@ -109,7 +107,7 @@ func TestNewNormalisesTypedNilActions(t *testing.T) {
 	// before it ever reaches the dispatcher.
 	t.Run("Threads: a real signed mention is refused, never dispatched", func(t *testing.T) {
 		s := New(nil, Actions{SlackSecret: testSigningSecret, Threads: unbuiltThreads},
-			nil, nil, nil, nil, slog.New(slog.NewTextHandler(io.Discard, nil)))
+			nil, nil, nil, nil, discardLog)
 
 		body := `{"type":"event_callback","event_id":"Ev1","event":{"type":"app_mention","user":"U1","text":"<@U0BOT> note: the disk filled because of the log rotation job","channel":"C1","ts":"333.444","thread_ts":"111.222"}}`
 		ts := strconv.FormatInt(time.Now().Unix(), 10)
