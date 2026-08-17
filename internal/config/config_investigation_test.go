@@ -346,9 +346,18 @@ func TestValidatePricingNonNegative(t *testing.T) {
 	if err := c2.Validate(); err == nil || !strings.Contains(err.Error(), "model.verify.pricing") {
 		t.Fatalf("expected model.verify.pricing validation error, got %v", err)
 	}
+	// And on the chat override: model.chat.pricing is decoded like its siblings
+	// and documented like its siblings, so an invalid rate must fail at startup
+	// like its siblings rather than sit in the config looking authoritative.
+	var c3 Config
+	c3.Model.Chat = &ModelOverride{Model: "small-cheap-model", Pricing: &Pricing{CachedInputUSDPerMTok: -0.5}}
+	if err := c3.Validate(); err == nil || !strings.Contains(err.Error(), "model.chat.pricing") {
+		t.Fatalf("expected model.chat.pricing validation error, got %v", err)
+	}
 	// Non-negative rates pass.
 	var ok Config
 	ok.Model.Pricing = &Pricing{InputUSDPerMTok: 3, OutputUSDPerMTok: 15, CachedInputUSDPerMTok: 0.3}
+	ok.Model.Chat = &ModelOverride{Model: "small-cheap-model", Pricing: &Pricing{InputUSDPerMTok: 1, OutputUSDPerMTok: 5}}
 	if err := ok.Validate(); err != nil {
 		t.Fatalf("valid pricing rejected: %v", err)
 	}

@@ -132,6 +132,45 @@ it's even been tried.
 Only `app_mention` is subscribed — RunLore reads nothing in channels where it
 was not directly addressed.
 
+### Conversational replies
+
+Without `model.chat`, anything you say in the thread that is not `note:` gets a
+fixed reply telling you so, and nothing is recorded. Adding a `model.chat` block
+changes that: RunLore answers the question instead, from the investigation's own
+evidence plus the top knowledge-base hits, and files a note itself when your
+message contained a durable fact.
+
+```yaml
+model:
+  chat:
+    model: claude-haiku-4-5      # required — never inherited from model.model
+notify:
+  slack:
+    thread_capture: true         # the chat layer has no channel without it
+  thread:
+    chat_calls_per_hour: 30      # default 30
+    chat_tokens_per_hour: 107720 # default 107720 — derived, not round
+```
+
+**This is a paid path anyone in the channel can trigger.** With `model.chat` set,
+every message that mentions the app in an investigation thread and is not a
+recognised command costs **exactly one model call** — one structurally, not on
+average: the model is given a single forced tool and no search tool, so there is
+no agent loop.
+
+`@runlore note: …` still costs nothing — it is the same deterministic write it
+always was — and a bare mention with nothing after it costs nothing either.
+
+Spend is bounded by two global hourly ceilings (`chat_calls_per_hour`,
+`chat_tokens_per_hour`) shared across every thread and both transports. The token
+default is *derived* — what one maxed-out call can cost, times the call budget —
+which is why it is not a round number and why it moves when `max_note_bytes`
+moves. **It is not bounded in currency**: `model.pricing` is a reporting table,
+not a limit, and nothing compares a cost to a threshold and stops. Read
+[Conversational replies and what they cost]({{< relref "/docs/configuration/configuration.md#conversational-replies-and-what-they-cost" >}})
+before enabling it — it states the full set of bounds and, just as plainly, what
+has none.
+
 ## Reference
 
 - [Configuration → `notify`]({{< relref "/docs/configuration/configuration.md#notify--where-findings-go" >}})

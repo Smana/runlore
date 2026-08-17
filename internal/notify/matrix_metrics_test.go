@@ -80,7 +80,7 @@ func TestMatrixHandleMessageMentionDroppedLogsAndCounts(t *testing.T) {
 	<-running // the one slot is now occupied
 	defer close(block)
 
-	responder := &thread.Responder{Forge: &fakeReinvestigateForge{}, Log: matrixTestLog()}
+	responder := &thread.Responder{Forge: &fakeThreadForge{}, Log: matrixTestLog()}
 	f := NewMatrixFeedback(srv.URL, room, "tok", nil, matrixTestLog(),
 		WithThreadCapture(&thread.Mention{Responder: responder, Replier: rep, Log: matrixTestLog()}, d, busy),
 		WithMetrics(m))
@@ -124,7 +124,7 @@ func TestMatrixHandleMessageMentionDroppedNilMetricsSafe(t *testing.T) {
 	<-running
 	defer close(block)
 
-	responder := &thread.Responder{Forge: &fakeReinvestigateForge{}, Log: matrixTestLog()}
+	responder := &thread.Responder{Forge: &fakeThreadForge{}, Log: matrixTestLog()}
 	f := NewMatrixFeedback(srv.URL, room, "tok", nil, matrixTestLog(),
 		WithThreadCapture(&thread.Mention{Responder: responder, Replier: rep, Log: matrixTestLog()}, d, busy))
 	f.self = self

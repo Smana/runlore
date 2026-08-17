@@ -350,6 +350,73 @@ func TestMidStreamDrop(t *testing.T) {
 	}
 }
 
+// dropAfter serves a 200 stream, writes prefix, then hijacks and closes the TCP
+// connection — a provider dying mid-flight, after it already reported usage.
+func dropAfter(t *testing.T, prefix string) *httptest.Server {
+	t.Helper()
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		fl, ok := w.(http.Flusher)
+		if !ok {
+			t.Errorf("server needs http.Flusher")
+			return
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		_, _ = io.WriteString(w, prefix)
+		fl.Flush()
+		if hj, ok := w.(http.Hijacker); ok {
+			conn, _, _ := hj.Hijack()
+			_ = conn.Close()
+		}
+	}))
+}
+
+// TestErrorPreservesObservedUsage pins that a FAILED exchange still reports the
+// tokens the provider already told us it produced. Gemini resends the running
+// usageMetadata totals on its chunks, so once any chunk carrying one has been
+// folded the cost of the exchange is known even if the stream then dies, errors,
+// or ends without a finishReason. Returning a zero CompletionResponse there
+// charges a generation the provider really billed as free — internal/thread's
+// per-hour chat budget and the per-investigation cost total both read Usage.
+func TestErrorPreservesObservedUsage(t *testing.T) {
+	const chunk = `data: {"candidates":[{"content":{"role":"model","parts":[{"text":"partial"}]}}],"usageMetadata":{"promptTokenCount":1500,"candidatesTokenCount":800,"cachedContentTokenCount":300}}` + "\n\n"
+
+	cases := []struct {
+		name string
+		srv  func(t *testing.T) *httptest.Server
+	}{
+		{
+			name: "stream ended before a finishReason",
+			srv:  func(t *testing.T) *httptest.Server { return sseServer(t, nil, []string{chunk}) },
+		},
+		{
+			name: "connection dropped mid-stream",
+			srv:  func(t *testing.T) *httptest.Server { return dropAfter(t, chunk+`data: {"candid`) },
+		},
+		{
+			name: "provider error chunk mid-stream",
+			srv: func(t *testing.T) *httptest.Server {
+				return sseServer(t, nil, []string{chunk, `data: {"error":{"code":503,"status":"UNAVAILABLE","message":"overloaded"}}` + "\n\n"})
+			},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			srv := tc.srv(t)
+			defer srv.Close()
+			resp, err := New(srv.URL, "gemini-x", "k", 0).Complete(context.Background(), providers.CompletionRequest{
+				Messages: []providers.Message{{Role: "user", Content: "hi"}},
+			})
+			if err == nil {
+				t.Fatal("want an error for a failed exchange")
+			}
+			if resp.Usage.InputTokens != 1500 || resp.Usage.OutputTokens != 800 || resp.Usage.CachedInputTokens != 300 {
+				t.Fatalf("usage on the error path = %+v, want in=1500 out=800 cached=300 — the provider reported these before it failed, and billed them", resp.Usage)
+			}
+		})
+	}
+}
+
 // TestToolResultCoalescing verifies the OpenAI-shaped exchange (assistant tool_calls
 // + separate tool messages) maps to Gemini's model functionCall / coalesced user
 // functionResponse form, named by the originating call.

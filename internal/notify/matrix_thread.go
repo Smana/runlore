@@ -53,8 +53,21 @@ func stampFor(inv providers.Investigation) threadStamp {
 }
 
 // contextFromStamp rebuilds a thread.Context from a stamped event. root and
-// room come from the event itself, not from the stamp, so a forged stamp cannot
-// redirect where a note is written.
+// room come from the event itself, not from the stamp, so a forged stamp
+// cannot move a note into a different ROOM or thread.
+//
+// It does NOT follow that a forged stamp cannot redirect where a note is
+// WRITTEN, and this function is the wrong place to look for that guarantee:
+// curated_url is the write destination, and it comes straight out of the stamp
+// below. Two controls one layer up are what actually hold. First,
+// MatrixFeedback.contextFor discards the whole context unless the stamped
+// event's sender is the bot itself, so nobody else's message is ever read as a
+// stamp — that is the primary control. Second, thread.Responder.ForgeRepo
+// refuses to take a routing decision from a URL that does not name the one
+// repository RunLore writes to, so even a stamp that got through could not
+// point a note at another repository's pull-request numbering — not on another
+// host, and not on the same host either, which is what a host-only anchor left
+// wide open.
 func contextFromStamp(s threadStamp, root, room string) thread.Context {
 	return thread.Context{
 		Transport:      "matrix",

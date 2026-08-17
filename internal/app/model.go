@@ -40,6 +40,25 @@ func verifyMaxTokens(cfg *config.Config) int {
 	return parent
 }
 
+// chatDefaultMaxTokens bounds a chat reply's generated tokens when
+// model.chat.max_tokens is left unset. A thread reply is a sentence or two, not
+// an investigation, so this is deliberately NOT the (possibly much larger)
+// investigation ceiling: unlike verifyMaxTokens, which inherits the parent's
+// effective cap, chatMaxTokens falls back to this fixed, small default instead —
+// a member-triggerable path staying cheap must not depend on how generously the
+// investigation model happens to be capped. 1024 tokens is well over an order of
+// magnitude of headroom for a short conversational answer.
+const chatDefaultMaxTokens = 1024
+
+// chatMaxTokens resolves model.chat's effective output-token cap: its own
+// override when set (>0), otherwise chatDefaultMaxTokens.
+func chatMaxTokens(cfg *config.Config) int {
+	if c := cfg.Model.Chat; c != nil && c.MaxTokens > 0 {
+		return c.MaxTokens
+	}
+	return chatDefaultMaxTokens
+}
+
 // NewModelClient builds a ModelProvider for a wire protocol + endpoint. maxTokens
 // is the per-request output-token ceiling passed through to the provider. effort
 // is the opt-in reasoning knob (config-validated per provider; "" = omitted);
@@ -78,6 +97,23 @@ func BuildVerifyModel(cfg *config.Config) providers.ModelProvider {
 	return NewModelClient(cmp.Or(v.Provider, cfg.Model.Provider),
 		cmp.Or(v.BaseURL, cfg.Model.BaseURL), cmp.Or(v.Model, cfg.Model.Model), apiKey,
 		verifyMaxTokens(cfg), cmp.Or(v.Effort, cfg.Model.Effort), cmp.Or(v.Thinking, cfg.Model.Thinking))
+}
+
+// BuildChatModel builds the thread-conversation model from model.chat, or nil
+// when the block is absent — the presence of the block IS the feature switch,
+// the same contract BuildVerifyModel follows for model.verify.
+//
+// Unlike verify, config.Validate requires model.chat.model to be named
+// explicitly, so this never silently resolves to the investigation model.
+func BuildChatModel(cfg *config.Config) providers.ModelProvider {
+	c := cfg.Model.Chat
+	if c == nil {
+		return nil
+	}
+	apiKey := os.Getenv(cmp.Or(c.APIKeyEnv, cfg.Model.APIKeyEnv))
+	return NewModelClient(cmp.Or(c.Provider, cfg.Model.Provider),
+		cmp.Or(c.BaseURL, cfg.Model.BaseURL), c.Model, apiKey,
+		chatMaxTokens(cfg), cmp.Or(c.Effort, cfg.Model.Effort), cmp.Or(c.Thinking, cfg.Model.Thinking))
 }
 
 // BuildJudgeModel builds the (stronger) grader model from --judge-* flags, falling

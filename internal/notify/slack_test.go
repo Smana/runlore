@@ -17,6 +17,7 @@ import (
 
 	"github.com/Smana/runlore/internal/config"
 	"github.com/Smana/runlore/internal/providers"
+	"github.com/Smana/runlore/internal/thread"
 )
 
 func TestSlackDeliver(t *testing.T) {
@@ -1524,5 +1525,108 @@ func TestSlackDeliveryTarget(t *testing.T) {
 				t.Fatalf("builder returned notifier=%v, but SlackDeliveryTarget said %q", n != nil, tc.want)
 			}
 		})
+	}
+}
+
+// TestSlackBotReplyInThreadEscapesUntrustedSpansOnly closes the finding that
+// ReplyInThread posted its text raw while every other Slack text path escaped
+// first. Thread replies now carry model prose — and the model composes Slack
+// markup: "<https://evil.example/reauth|https://github.com/acme/kb/pull/7>"
+// renders as a clickable link whose VISIBLE text is a trusted knowledge-base
+// URL, in the very thread where RunLore posts genuine ones, and "<!channel>"
+// pings everyone in the room.
+//
+// Both halves are asserted, because escaping the assembled message would trade
+// one bug for another: mrkdwnEscaper turns ">" into "&gt;", and the reply's
+// blockquote markers — the control that keeps model words distinguishable from
+// RunLore's own status lines — are ">" characters RunLore itself wrote. So is
+// the "<text>" inside FreeformNotRecordedReply's example. Only the spans
+// thread.Untrusted marked may be escaped.
+func TestSlackBotReplyInThreadEscapesUntrustedSpansOnly(t *testing.T) {
+	var got map[string]any
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewDecoder(r.Body).Decode(&got)
+		_, _ = w.Write([]byte(`{"ok":true,"ts":"333.444"}`))
+	}))
+	defer srv.Close()
+
+	b := NewSlackBot("xoxb-test", "C-default")
+	b.baseURL = srv.URL
+	reply := "> " + thread.Untrusted("Re-auth: <https://evil.example/reauth|https://github.com/acme/kb/pull/7>") + "\n" +
+		"> " + thread.Untrusted("<!channel>") + "\n" +
+		"📝 Noted on the knowledge-base PR #42 — https://github.com/o/r/pull/42\n" +
+		thread.FreeformNotRecordedReply
+	if err := b.ReplyInThread(context.Background(), "111.222", "C-live", reply); err != nil {
+		t.Fatalf("ReplyInThread: %v", err)
+	}
+
+	text, _ := got["text"].(string)
+	// The untrusted spans are inert.
+	for _, live := range []string{"<https://evil.example/reauth|", "<!channel>"} {
+		if strings.Contains(text, live) {
+			t.Errorf("untrusted model prose reached Slack as live mrkdwn %q:\n%s", live, text)
+		}
+	}
+	for _, want := range []string{
+		"&lt;https://evil.example/reauth|https://github.com/acme/kb/pull/7&gt;",
+		"&lt;!channel&gt;",
+	} {
+		if !strings.Contains(text, want) {
+			t.Errorf("untrusted span was not escaped, want %q in:\n%s", want, text)
+		}
+	}
+	// RunLore's own framing still renders: the blockquote markers, the real
+	// knowledge-base URL, and the backticked example with its angle brackets.
+	for _, line := range strings.Split(text, "\n")[:2] {
+		if !strings.HasPrefix(line, "> ") {
+			t.Errorf("a blockquote marker was escaped away, so model prose reads as RunLore's own: %q", line)
+		}
+	}
+	if !strings.Contains(text, "📝 Noted on the knowledge-base PR #42 — https://github.com/o/r/pull/42") {
+		t.Errorf("RunLore's own status line must survive verbatim:\n%s", text)
+	}
+	if !strings.Contains(text, "`note: <text>`") {
+		t.Errorf("RunLore's own backticked example must survive verbatim:\n%s", text)
+	}
+}
+
+// TestThreadRepliersLeaveNoUntrustedMarksInThePostedText is the guard on the
+// in-band signal itself: thread.Untrusted marks spans with a private-use rune
+// that must never reach a human's screen. A Replier that forgets to call
+// thread.RenderReply would post it. Both transports are asserted here, from
+// the providers.ThreadNotifier surface, so a third one added later fails this
+// the moment it is wired into Multi.
+func TestThreadRepliersLeaveNoUntrustedMarksInThePostedText(t *testing.T) {
+	var sent []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		sent = append(sent, string(body))
+		_, _ = w.Write([]byte(`{"ok":true,"ts":"1","event_id":"$1"}`))
+	}))
+	defer srv.Close()
+
+	bot := NewSlackBot("xoxb-test", "C1")
+	bot.baseURL = srv.URL
+	mx := NewMatrix(srv.URL, "!room:example.org", "tok")
+	m := NewMulti(slog.New(slog.NewTextHandler(io.Discard, nil)), bot, mx)
+
+	repliers := m.ThreadRepliers()
+	if len(repliers) == 0 {
+		t.Fatal("test setup: no thread repliers to check")
+	}
+	for transport, tn := range repliers {
+		sent = nil
+		if err := tn.ReplyInThread(context.Background(), "$root", "", "> "+thread.Untrusted("hello")); err != nil {
+			t.Fatalf("%s ReplyInThread: %v", transport, err)
+		}
+		if len(sent) != 1 {
+			t.Fatalf("%s: sent %d requests, want 1", transport, len(sent))
+		}
+		// The mark is JSON-encoded as a \ue000 escape, so both forms are checked.
+		for _, mark := range []string{"\ue000", `\ue000`} {
+			if strings.Contains(sent[0], mark) {
+				t.Errorf("%s posted an untrusted-span mark to the chat system — ReplyInThread must call thread.RenderReply:\n%s", transport, sent[0])
+			}
+		}
 	}
 }

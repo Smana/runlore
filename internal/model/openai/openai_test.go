@@ -408,6 +408,78 @@ func TestMidStreamDrop(t *testing.T) {
 	}
 }
 
+// dropAfter serves a 200 stream, writes prefix, then hijacks and closes the TCP
+// connection — a provider dying mid-flight, after it already reported usage.
+func dropAfter(t *testing.T, prefix string) *httptest.Server {
+	t.Helper()
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		fl, ok := w.(http.Flusher)
+		if !ok {
+			t.Errorf("server needs http.Flusher")
+			return
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		_, _ = io.WriteString(w, prefix)
+		fl.Flush()
+		if hj, ok := w.(http.Hijacker); ok {
+			conn, _, _ := hj.Hijack()
+			_ = conn.Close()
+		}
+	}))
+}
+
+// TestErrorPreservesObservedUsage pins that a FAILED exchange still reports the
+// tokens the provider already told us it produced. An OpenAI-compatible server
+// sends usage in its own chunk (stream_options.include_usage); once that chunk
+// has been folded, the cost of the exchange is known even if the stream then
+// dies, garbles, or never terminates. Returning a zero CompletionResponse there
+// charges a generation the provider really billed as free — internal/thread's
+// per-hour chat budget and the per-investigation cost total both read Usage.
+//
+// The ordering below (usage before the terminator) is what a compatible server
+// that emits usage early produces; OpenAI itself sends usage last, and a drop
+// after ITS terminator is already a success, not an error.
+func TestErrorPreservesObservedUsage(t *testing.T) {
+	const content = "data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"partial\"}}]}\n\n"
+	const usage = "data: {\"choices\":[],\"usage\":{\"prompt_tokens\":1500,\"completion_tokens\":800,\"prompt_tokens_details\":{\"cached_tokens\":300}}}\n\n"
+
+	cases := []struct {
+		name string
+		srv  func(t *testing.T) *httptest.Server
+	}{
+		{
+			name: "stream ended before finish_reason or [DONE]",
+			srv:  func(t *testing.T) *httptest.Server { return sseServer(t, nil, []string{content, usage}) },
+		},
+		{
+			name: "connection dropped mid-stream",
+			srv:  func(t *testing.T) *httptest.Server { return dropAfter(t, content+usage+"data: {\"choi") },
+		},
+		{
+			name: "undecodable chunk mid-stream",
+			srv: func(t *testing.T) *httptest.Server {
+				return sseServer(t, nil, []string{content, usage, "data: {\"choices\": not-json}\n\n"})
+			},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			srv := tc.srv(t)
+			defer srv.Close()
+			resp, err := New(srv.URL, "m", "k", 0, "").Complete(context.Background(), providers.CompletionRequest{
+				Messages: []providers.Message{{Role: "user", Content: "hi"}},
+			})
+			if err == nil {
+				t.Fatal("want an error for a failed exchange")
+			}
+			if resp.Usage.InputTokens != 1500 || resp.Usage.OutputTokens != 800 || resp.Usage.CachedInputTokens != 300 {
+				t.Fatalf("usage on the error path = %+v, want in=1500 out=800 cached=300 — the provider reported these before it failed, and billed them", resp.Usage)
+			}
+		})
+	}
+}
+
 // TestUsageCachedTokens asserts prompt_tokens_details.cached_tokens maps to
 // CachedInputTokens (OpenAI prompt_tokens already includes the cached subset).
 func TestUsageCachedTokens(t *testing.T) {

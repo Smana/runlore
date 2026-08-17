@@ -203,10 +203,10 @@ func accumulate(r io.Reader) (providers.CompletionResponse, error) {
 
 	for gr, err := range clientcore.SSEEvents[genResponse](r) {
 		if err != nil {
-			return providers.CompletionResponse{}, fmt.Errorf("read stream: %w", err)
+			return out.CostOnly(), fmt.Errorf("read stream: %w", err)
 		}
 		if gr.Error != nil {
-			return providers.CompletionResponse{}, fmt.Errorf("gemini error: %s", gr.Error.Message)
+			return out.CostOnly(), fmt.Errorf("gemini error: %s", gr.Error.Message)
 		}
 		// usageMetadata accumulates across chunks (last non-nil block wins; Gemini
 		// resends the running totals, so the final chunk carries the full count).
@@ -248,7 +248,7 @@ func accumulate(r io.Reader) (providers.CompletionResponse, error) {
 	// A stream that ends before any finishReason is a mid-stream drop, not a clean
 	// completion — surface it as an error rather than a silently-truncated success.
 	if !sawFinish {
-		return providers.CompletionResponse{}, fmt.Errorf("stream ended before a finishReason (truncated upstream)")
+		return out.CostOnly(), fmt.Errorf("stream ended before a finishReason (truncated upstream)")
 	}
 	return out, nil
 }

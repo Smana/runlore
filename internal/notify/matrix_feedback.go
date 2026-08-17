@@ -594,10 +594,12 @@ func selfLocalpart(mxid string) string {
 // non-word RUNE (anything that is not a Unicode letter, digit, or combining
 // mark — see isWordRune) or the start/end of body. A plain strings.Contains
 // would treat the localpart "sre" as addressing RunLore inside "misread", or
-// "ops" inside "oops" — not cosmetic, since thread.Responder.Handle treats an
-// unprefixed message (IntentFreeform) the same as an explicit "note:", so a
-// false positive here can open or comment on a real knowledge-base PR
-// containing text nobody intended to record.
+// "ops" inside "oops" — not cosmetic, since anything this decides is addressed
+// reaches thread.Responder.Handle. An unprefixed message (IntentFreeform) no
+// longer writes on its own, but with model.chat configured it costs exactly
+// one paid model call, and the model may propose note content that is then
+// written to a real knowledge-base PR. A false positive here therefore spends
+// money and can record something nobody intended to record.
 func containsWord(body, word string) bool {
 	if word == "" {
 		return false

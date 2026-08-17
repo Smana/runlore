@@ -204,57 +204,83 @@ func TestStripSelfMentionCombiningMarkBoundary(t *testing.T) {
 // unless that exact name was actually resolved and passed in — "" here
 // simulates a profile lookup that never ran or never learned it.
 //
-// This is NOT, by itself, a safe degradation for an ordinary freeform
-// question — a nuisance at worst, since thread.Parse falls through to
-// IntentFreeform either way. For the RESERVED "reinvestigate:" prefix it
-// would have been the actual bug this file's
-// TestMatrixHandleMessageUnrelatedDisplayNameReinvestigateBackstop pins,
-// below, if thread.Parse itself did not ALSO match a reserved prefix
-// anywhere in the text (not only at position 0) — see thread.Parse's doc.
-// Because it does, the unstripped mention token here changes nothing about
-// whether "reinvestigate:" is still recognised downstream.
+// The unstripped token in front of the command no longer decides what Parse
+// SEES: thread.Parse matches every prefix as a whole, colon-anchored token
+// anywhere in the text, not only at position 0 (see thread.Parse's doc), so
+// "note:" here is still IntentNote rather than falling through to
+// IntentFreeform and, with model.chat configured, costing a model call.
+//
+// What the unstripped token still decides is Parsed.Anchored, which is false
+// here — and Responder.Handle treats an unanchored "note:" as freeform when no
+// chat layer is wired, precisely because the cost argument for the widening
+// only exists when there is a model call to save. So this failure to strip is
+// harmless where the widening pays for itself and reverts to the pre-chat
+// behaviour where it does not. The same anywhere-match is what keeps the
+// reserved "reinvestigate:" prefix recognised here — unconditionally, since a
+// refusal writes nothing — which
+// TestMatrixHandleMessageUnrelatedDisplayNameReinvestigateBackstop pins below.
 func TestMatrixMentionGrammarUnrelatedDisplayNameNotStripped(t *testing.T) {
 	text, stripped := stripSelfMention("Ops Bot: note: it was a bad deploy", "@runlore:hs", "")
 	if stripped {
 		t.Fatal("stripped = true, want false — an unrelated, unresolved display name must not match")
 	}
 	got := thread.Parse(text)
-	if got.Intent != thread.IntentFreeform {
-		t.Fatalf("Intent = %v, want %v — an unrelated display name is not stripped", got.Intent, thread.IntentFreeform)
+	if got.Intent != thread.IntentNote {
+		t.Fatalf("Intent = %v, want %v — an unstripped display name must not push a note onto the paid freeform path", got.Intent, thread.IntentNote)
+	}
+	if got.Text != "it was a bad deploy" {
+		t.Fatalf("Text = %q, want \"it was a bad deploy\" — the unstripped token must not be recorded as part of the note", got.Text)
 	}
 }
 
-// fakeReinvestigateForge is thread.Forge, recording whether either write
-// entry point was ever called. It is used to prove that
-// IntentReinvestigate — reached only once the mention is stripped
-// Matrix-side — never writes to the knowledge base, no matter which route
-// write() would otherwise have taken.
-type fakeReinvestigateForge struct {
+// fakeThreadForge is this package's thread.Forge stand-in. It records whether
+// either write entry point was ever called — which proves that
+// IntentReinvestigate, reached only once the mention is stripped Matrix-side,
+// never writes to the knowledge base no matter which route write() would
+// otherwise have taken — and, for the tests that care WHERE a note landed
+// rather than only whether one did, the number and body of every comment
+// (comments). Both are read under the mutex: every write below happens on a
+// Dispatch worker goroutine, never on the test's own.
+type fakeThreadForge struct {
 	mu        sync.Mutex
 	opened    int
 	commented int
+	comments  []forgeComment
 }
 
-func (f *fakeReinvestigateForge) OpenPR(context.Context, providers.KBEntry) (providers.Ref, error) {
+// forgeComment is one recorded CommentOnPR call.
+type forgeComment struct {
+	number int
+	body   string
+}
+
+func (f *fakeThreadForge) OpenPR(context.Context, providers.KBEntry) (providers.Ref, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.opened++
 	return providers.Ref{URL: "https://forge.example/pull/1"}, nil
 }
 
-func (f *fakeReinvestigateForge) CommentOnPR(context.Context, int, string) error {
+func (f *fakeThreadForge) CommentOnPR(_ context.Context, number int, body string) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.commented++
+	f.comments = append(f.comments, forgeComment{number: number, body: body})
 	return nil
 }
 
-func (f *fakeReinvestigateForge) IsPROpen(context.Context, int) (bool, error) { return true, nil }
+func (f *fakeThreadForge) IsPROpen(context.Context, int) (bool, error) { return true, nil }
 
-func (f *fakeReinvestigateForge) counts() (opened, commented int) {
+func (f *fakeThreadForge) counts() (opened, commented int) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return f.opened, f.commented
+}
+
+func (f *fakeThreadForge) commentsSnapshot() []forgeComment {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]forgeComment(nil), f.comments...)
 }
 
 // TestMatrixHandleMessageReinvestigateIsReservedNotFreeform is the end-to-end
@@ -280,7 +306,7 @@ func TestMatrixHandleMessageReinvestigateIsReservedNotFreeform(t *testing.T) {
 	if err := reg.Put(thread.Context{Root: "$root-ours", Transport: "matrix", Channel: room, TriggerKey: "trig-ours"}); err != nil {
 		t.Fatalf("registry Put: %v", err)
 	}
-	forge := &fakeReinvestigateForge{}
+	forge := &fakeThreadForge{}
 	responder := &thread.Responder{Forge: forge, Registry: reg, Log: matrixTestLog()}
 	rep := &fakeMentionReplier{doneAt: 1, done: make(chan struct{})}
 	mention := &thread.Mention{Responder: responder, Registry: reg, Replier: rep, Log: matrixTestLog()}
@@ -320,7 +346,7 @@ func TestMatrixHandleMessageReinvestigateIsReservedNotFreeform(t *testing.T) {
 // (an unstripped mention token hiding a reserved command, or a genuine note)
 // are still exactly what needs pinning, just via the ordinary Dispatch path
 // now instead of a dedicated one.
-func newBackstopFixture(t *testing.T) (*MatrixFeedback, *fakeReinvestigateForge, *fakeMentionReplier) {
+func newBackstopFixture(t *testing.T) (*MatrixFeedback, *fakeThreadForge, *fakeMentionReplier) {
 	t.Helper()
 	const room = "!r:hs"
 	const self = "@runlore:hs"
@@ -334,7 +360,7 @@ func newBackstopFixture(t *testing.T) (*MatrixFeedback, *fakeReinvestigateForge,
 	if err := reg.Put(thread.Context{Root: "$root-ours", Transport: "matrix", Channel: room, TriggerKey: "trig-ours"}); err != nil {
 		t.Fatalf("registry Put: %v", err)
 	}
-	forge := &fakeReinvestigateForge{}
+	forge := &fakeThreadForge{}
 	responder := &thread.Responder{Forge: forge, Registry: reg, Log: matrixTestLog()}
 	rep := &fakeMentionReplier{doneAt: 1, done: make(chan struct{})}
 	mention := &thread.Mention{Responder: responder, Registry: reg, Replier: rep, Log: matrixTestLog()}
@@ -414,25 +440,17 @@ func TestMatrixHandleMessageUnrelatedDisplayNameResolvedViaProfileLookup(t *test
 }
 
 // TestMatrixHandleMessageDisplayNameStrippedGenuineNoteStillRecorded proves
-// thread.Parse's reserved-anywhere match is narrow: prose that merely uses
-// the word "reinvestigate" mid-sentence — no trailing ':' — must still be
-// recorded as a genuine note, once the message is addressed in a form
-// stripSelfMention actually recognises (the resolved display name, mirroring
-// TestMatrixHandleMessageUnrelatedDisplayNameResolvedViaProfileLookup above).
+// thread.Parse's anywhere-match is narrow: prose that merely uses the word
+// "reinvestigate" mid-sentence — no trailing ':' — must still be recorded as a
+// genuine note. The colon anchor in commandTokenIndex is what makes that hold.
 //
-// This test used to run with the display name left UNSTRIPPED ("Ops Bot:
-// note: …" with no selfDisplayName set) and still pass — but only because
-// the write happened via IntentFreeform's old behaviour of writing exactly
-// like IntentNote (the security-audit bug FreeformNotRecordedReply's doc
-// comment describes; see internal/thread/responder.go). Now that Handle
-// never writes for IntentFreeform, an unrecognised leading token yields
-// IntentFreeform unconditionally — which never reaches a forge call no
-// matter what reservedTokenIndex decides — so that scenario can no longer
-// prove anything about reservedTokenIndex's narrowness specifically: it would
-// pass (opened == 0) for the wrong reason. Stripping the mention first is
-// what lets "note:" actually reach position 0 in thread.Parse and this test
-// exercise the intended thing again: a genuine note containing the bare word
-// "reinvestigate" is recorded, not refused.
+// It runs with the display name RESOLVED and stripped (mirroring
+// TestMatrixHandleMessageUnrelatedDisplayNameResolvedViaProfileLookup above)
+// rather than left in front of the command, so the assertion is about the
+// colon anchor and nothing else. Leaving the token in front would ALSO make
+// the note unanchored, and this fixture wires no chat layer, so Handle would
+// answer it as freeform — a failure produced by the anchor rule rather than by
+// the colon anchor under test.
 func TestMatrixHandleMessageDisplayNameStrippedGenuineNoteStillRecorded(t *testing.T) {
 	f, forge, rep := newBackstopFixture(t)
 	f.selfDisplayName = "Ops Bot"

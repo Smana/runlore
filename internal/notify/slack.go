@@ -19,6 +19,7 @@ import (
 	"github.com/Smana/runlore/internal/config"
 	"github.com/Smana/runlore/internal/httpx"
 	"github.com/Smana/runlore/internal/providers"
+	"github.com/Smana/runlore/internal/thread"
 )
 
 // Delivery targets SlackDeliveryTarget can resolve to.
@@ -221,8 +222,19 @@ func (s *SlackBot) DeliverProgress(ctx context.Context, up providers.ProgressUpd
 // ReplyInThread posts text as a reply in the thread rooted at root
 // (providers.ThreadNotifier). It targets the channel it is given rather than the
 // configured default: a reply can only go where the message it answers was sent.
+//
+// text is a composed reply, not a single untrusted string, so it goes through
+// thread.RenderReply rather than through escapeMrkdwn directly: only the spans
+// thread.Untrusted marked — model prose, a forge's own error text, a URL that
+// arrived from somewhere — are escaped, and RunLore's own framing is posted
+// verbatim. Escaping the whole message instead would close one hole and open
+// another: mrkdwnEscaper replaces ">" with "&gt;", and the ">" that prefixes
+// every line of model prose is what lets a human tell the model's words from
+// RunLore's claims about what it did (see thread.modelVoice). The angle
+// brackets in FreeformNotRecordedReply's backticked "`note: <text>`" example
+// are RunLore's own too.
 func (s *SlackBot) ReplyInThread(ctx context.Context, root, channel, text string) error {
-	msg := map[string]any{"text": text, "thread_ts": root}
+	msg := map[string]any{"text": thread.RenderReply(text, escapeMrkdwn), "thread_ts": root}
 	if channel != "" {
 		msg["channel"] = channel
 	}

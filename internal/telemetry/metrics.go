@@ -38,6 +38,9 @@ type Metrics struct {
 	MentionsDroppedOnSaturation metric.Int64Counter // chat mentions LOST (Slack app_mention, or a Matrix addressed thread message): the concurrent handler pool was saturated when the human's note arrived (accepted, never processed — Slack acks 200 and is never retried; Matrix's /sync position has already advanced and never redelivers)
 	ThreadNotesWritten          metric.Int64Counter // knowledge writes LANDED via internal/thread's @runlore note: path — CommentOnPR or OpenPR (label: route)
 	ThreadWritesThrottled       metric.Int64Counter // thread note writes DENIED by internal/thread's global per-hour forge-write window (Responder.ForgeWrites) and told to retry — this feature's one global cap, otherwise invisible to an operator
+	ThreadChatCalls             metric.Int64Counter // model calls made by the chat layer (internal/thread.Budget.Allow granted)
+	ThreadChatTokens            metric.Int64Counter // tokens the chat layer spent, from provider-reported usage — or a conservative estimate when the provider reported none (internal/thread.Chat.chargedUsage)
+	ThreadChatDenied            metric.Int64Counter // chat calls the budget refused (label: ceiling — "calls" or "tokens")
 	ToolOutputTruncatedBytes    metric.Int64Counter
 	HistoryCompactions          metric.Int64Counter // mid-loop history compaction events
 	HistoryElidedBytes          metric.Int64Counter // tool-output bytes elided by compaction
@@ -120,6 +123,9 @@ func NewMetrics() *Metrics {
 		MentionsDroppedOnSaturation: ctr("mentions_dropped_on_saturation_total", "chat mentions LOST — Slack app_mention or a Matrix addressed thread message: the concurrent handler pool was saturated when the human's `@runlore note:` arrived, accepted but never processed (Slack: acked 200, never retried; Matrix: /sync's position token already advanced, never redelivered); the human is told to retry via a best-effort in-thread reply"),
 		ThreadNotesWritten:          ctr("thread_notes_written_total", "knowledge writes landed from an `@runlore note:` thread reply, via CommentOnPR or OpenPR (label: route)"),
 		ThreadWritesThrottled:       ctr("thread_writes_throttled_total", "thread note writes denied by internal/thread's global per-hour forge-write window and told to retry"),
+		ThreadChatCalls:             ctr("thread_chat_calls_total", "model calls made by the chat layer, granted by internal/thread.Budget"),
+		ThreadChatTokens:            ctr("thread_chat_tokens_total", "tokens the chat layer spent, from provider-reported usage, or a conservative estimate when the provider reported none"),
+		ThreadChatDenied:            ctr("thread_chat_denied_total", "chat calls denied by internal/thread.Budget (label: ceiling — \"calls\" or \"tokens\")"),
 		ToolOutputTruncatedBytes:    ctr("tool_output_truncated_bytes_total", "bytes elided by output truncation"),
 		HistoryCompactions:          ctr("history_compactions_total", "mid-loop tool-output history compaction events"),
 		HistoryElidedBytes:          ctr("history_elided_bytes_total", "tool-output bytes elided by mid-loop compaction"),

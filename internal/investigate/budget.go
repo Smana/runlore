@@ -96,30 +96,22 @@ func refusalResult(req Request) providers.Investigation {
 	}
 }
 
-// estimateTokens approximates the request size (~4 chars/token) over everything
-// re-sent each step: the system prompt, the full tool schemas (name +
-// description + JSON Schema), and the message history — including the assistant
-// tool-call JSON (m.ToolCalls[].Args), which also goes over the wire. Counting
-// only m.Content systematically under-estimated a tool-heavy investigation,
-// letting the hard-kill guard fire late or never. This estimate drives the
-// PRE-request budget guard, so by itself it cannot use provider-reported usage
-// (which only exists post-response, on CompletionResponse.Usage) — that is
-// tokenCalibration's job: it scales this heuristic by the actual/heuristic ratio
-// observed on the previous completion. Uncalibrated, this remains an
-// under-estimate of the true wire size (it ignores JSON envelope/role overhead)
-// but the right order of magnitude, which is what the hard-kill needs.
+// estimateTokens is providers.EstimateTokens — the ~4 chars/token heuristic over
+// everything re-sent each step (system prompt, full tool schemas, message history
+// including the assistant tool-call JSON) — under this package's own name, which
+// the loop, compaction and their tests all read in terms of. It moved to
+// internal/providers when internal/thread needed the same measurement for its
+// chat budget; a second copy of a token heuristic would only drift from this one.
+//
+// This estimate drives the PRE-request budget guard, so by itself it cannot use
+// provider-reported usage (which only exists post-response, on
+// CompletionResponse.Usage) — that is tokenCalibration's job: it scales this
+// heuristic by the actual/heuristic ratio observed on the previous completion.
+// Uncalibrated, it remains an under-estimate of the true wire size (it ignores
+// JSON envelope/role overhead) but the right order of magnitude, which is what
+// the hard-kill needs.
 func estimateTokens(system string, msgs []providers.Message, tools []providers.ToolSpec) int {
-	n := len(system)
-	for _, t := range tools {
-		n += len(t.Name) + len(t.Description) + len(t.Schema)
-	}
-	for _, m := range msgs {
-		n += len(m.Content)
-		for _, tc := range m.ToolCalls {
-			n += len(tc.Args)
-		}
-	}
-	return n / 4
+	return providers.EstimateTokens(system, msgs, tools)
 }
 
 // tokenCalibration anchors the chars/4 pre-request heuristic to reality: after

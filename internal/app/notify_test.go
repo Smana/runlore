@@ -13,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/Smana/runlore/internal/catalog"
 	"github.com/Smana/runlore/internal/config"
 	"github.com/Smana/runlore/internal/notify"
 	"github.com/Smana/runlore/internal/outcome"
@@ -344,7 +345,7 @@ func TestBuildThreadMentionWiresForgeWritesAndMetrics(t *testing.T) {
 		t.Fatalf("BuildEnabled: %v", err)
 	}
 	metrics := telemetry.NewMetrics()
-	responder := buildThreadResponder(reg, fakeThreadForge{}, metrics, log)
+	responder := buildThreadResponder(cfg, reg, fakeThreadForge{}, nil, metrics, log)
 
 	m := BuildThreadMention(cfg, responder, notifier, log)
 	if m == nil {
@@ -356,6 +357,51 @@ func TestBuildThreadMentionWiresForgeWritesAndMetrics(t *testing.T) {
 	if m.Responder.Metrics != metrics {
 		t.Fatal("Responder.Metrics is not the *telemetry.Metrics passed to buildThreadResponder — " +
 			"ThreadWritesThrottled/ThreadNotesWritten go dead")
+	}
+}
+
+// TestBuildThreadResponderWiresTheForgeRepoRef pins that ForgeRepo is actually
+// wired, and to the same host AND repository the forge client is built from.
+// An unwired ForgeRepo is silent: routing simply stays unanchored, exactly as
+// it was before the field existed, so no other test in the suite would notice
+// — while a pull-request URL from any repository could again pick which PR a
+// note lands on inside the operator's own knowledge base.
+func TestBuildThreadResponderWiresTheForgeRepoRef(t *testing.T) {
+	log := slog.New(slog.NewTextHandler(io.Discard, nil))
+	reg, err := thread.NewRegistry("", time.Hour, 10)
+	if err != nil {
+		t.Fatalf("NewRegistry: %v", err)
+	}
+	for _, tt := range []struct {
+		name string
+		mut  func(*config.Config)
+		want string
+	}{
+		{"github default", func(*config.Config) {}, "github.com/acme/kb"},
+		{"github explicit api", func(c *config.Config) { c.Forge.GitHubAPIURL = "https://api.github.com" }, "github.com/acme/kb"},
+		{"github enterprise", func(c *config.Config) { c.Forge.GitHubAPIURL = "https://ghe.example.com/api/v3" }, "ghe.example.com/acme/kb"},
+		{"gitlab.com", func(c *config.Config) { c.Forge.Provider = "gitlab" }, "gitlab.com/acme/kb"},
+		{"gitlab self-managed", func(c *config.Config) {
+			c.Forge.Provider = "gitlab"
+			c.Forge.GitLab.BaseURL = "https://GitLab.Example.com"
+		}, "gitlab.example.com/acme/kb"},
+		{"gitlab nested group", func(c *config.Config) {
+			c.Forge.Provider = "gitlab"
+			c.Forge.KBRepo = "grp/sub/proj"
+		}, "gitlab.com/grp/sub/proj"},
+		// No kb_repo means no forge client either, so there is nothing to anchor
+		// to — and anchoring to a bare host would be exactly the weak check
+		// ForgeRepo replaced.
+		{"no kb_repo", func(c *config.Config) { c.Forge.KBRepo = "" }, ""},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := &config.Config{}
+			cfg.Forge.KBRepo = "acme/kb"
+			tt.mut(cfg)
+			if got := buildThreadResponder(cfg, reg, fakeThreadForge{}, nil, nil, log).ForgeRepo; got != tt.want {
+				t.Fatalf("ForgeRepo = %q, want %q", got, tt.want)
+			}
+		})
 	}
 }
 
@@ -582,5 +628,356 @@ func TestBuildMatrixFeedbackDegradesWithoutReplier(t *testing.T) {
 	}
 	if !strings.Contains(buf.String(), "no Matrix thread-capable notifier resolved") {
 		t.Fatalf("must log the specific cause; got: %s", buf.String())
+	}
+}
+
+// chatCfg returns a config with model.chat configured and thread capture on,
+// the shape every TestBuildThreadChat* case starts from.
+func chatCfg() *config.Config {
+	cfg := &config.Config{}
+	cfg.Model.Provider = "anthropic"
+	cfg.Model.Model = "big-expensive-model"
+	cfg.Model.APIKeyEnv = "TEST_CHAT_PARENT_KEY"
+	cfg.Notify.Slack.ThreadCapture = true
+	return cfg
+}
+
+// TestBuildThreadChatOffWithoutModelChat pins the feature switch: the presence
+// of the model.chat block IS the switch (BuildChatModel's contract), so an
+// absent block must yield no Chat at all — not an inert one. A nil *thread.Chat
+// on the Responder is what makes the freeform route behave exactly as it did in
+// PR2, which is the contract the responder's own tests assert.
+func TestBuildThreadChatOffWithoutModelChat(t *testing.T) {
+	cfg := chatCfg()
+	var buf bytes.Buffer
+	log := slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelWarn}))
+
+	if got := buildThreadChat(cfg, nil, nil, log); got != nil {
+		t.Fatalf("buildThreadChat with no model.chat = %+v, want nil (feature off)", got)
+	}
+	if buf.Len() != 0 {
+		t.Fatalf("an absent model.chat is the default, not a problem; must log nothing, got: %s", buf.String())
+	}
+}
+
+// TestBuildThreadChatWiresEveryField is the test this whole task exists for.
+//
+// Every field on thread.Chat is nil/zero-safe by design, so an UNWIRED field
+// degrades silently instead of failing: a missing Budget allows every call with
+// no ceiling at all, a missing Catalog quietly drops KB context from the
+// prompt, a missing MaxOutputTokens under-charges the budget against the real
+// cap an operator configured. None of that fails any other test in this suite —
+// which is exactly why this one enumerates the fields explicitly rather than
+// asserting the Chat is merely non-nil.
+func TestBuildThreadChatWiresEveryField(t *testing.T) {
+	t.Setenv("TEST_CHAT_PARENT_KEY", "sk-parent")
+	cfg := chatCfg()
+	cfg.Model.Chat = &config.ModelOverride{Model: "small-cheap-model", MaxTokens: 4096}
+	cfg.Notify.Thread.MaxNoteBytes = 4096
+	cfg.Notify.Thread.ChatCallsPerHour = 7
+	cfg.Notify.Thread.ChatTokensPerHour = 12345
+
+	cat := &catalog.Catalog{}
+	metrics := telemetry.NewMetrics()
+	log := slog.New(slog.NewTextHandler(io.Discard, nil))
+
+	chat := buildThreadChat(cfg, cat, metrics, log)
+	if chat == nil {
+		t.Fatal("model.chat configured must build the chat layer")
+	}
+	if chat.Model == nil {
+		t.Fatal("Chat.Model is nil — Answer returns false on every message and the paid feature is silently off")
+	}
+	if chat.Budget == nil {
+		t.Fatal("Chat.Budget is nil — every call is allowed, the spend has no ceiling at all")
+	}
+	calls, tokens := chat.Budget.Remaining()
+	if calls != 7 || tokens != 12345 {
+		t.Fatalf("Budget carries (%d calls, %d tokens), want the configured (7, 12345) from "+
+			"notify.thread.chat_calls_per_hour/chat_tokens_per_hour", calls, tokens)
+	}
+	if chat.Catalog != catalog.Searcher(cat) {
+		t.Fatalf("Chat.Catalog = %v, want the shared catalog — without it replies lose KB context silently", chat.Catalog)
+	}
+	if chat.MaxNoteBytes != cfg.Notify.Thread.EffectiveMaxNoteBytes() {
+		t.Fatalf("Chat.MaxNoteBytes = %d, want notify.thread.max_note_bytes (%d) — the same bound the "+
+			"Responder writes under", chat.MaxNoteBytes, cfg.Notify.Thread.EffectiveMaxNoteBytes())
+	}
+	if chat.MaxOutputTokens != chatMaxTokens(cfg) {
+		t.Fatalf("Chat.MaxOutputTokens = %d, want model.chat.max_tokens (%d) — otherwise the conservative "+
+			"charge applied when a provider reports no usage under-bills against the real cap",
+			chat.MaxOutputTokens, chatMaxTokens(cfg))
+	}
+	if chat.Metrics != metrics {
+		t.Fatal("Chat.Metrics is not the process instrument set — thread_chat_* telemetry goes dead")
+	}
+	if chat.Log == nil {
+		t.Fatal("Chat.Log is nil — every degraded path logs to the package default instead of the process logger")
+	}
+}
+
+// TestBuildThreadChatDegradesWithoutCatalog covers the no-catalog case: the
+// layer still builds and still answers, only without KB excerpts. The nil must
+// reach Chat.Catalog as a nil INTERFACE — assigning a typed-nil *catalog.Catalog
+// would make Chat.Catalog != nil true, and catalogHits would call Search on a nil
+// receiver instead of taking its documented no-hits branch.
+func TestBuildThreadChatDegradesWithoutCatalog(t *testing.T) {
+	t.Setenv("TEST_CHAT_PARENT_KEY", "sk-parent")
+	cfg := chatCfg()
+	cfg.Model.Chat = &config.ModelOverride{Model: "small-cheap-model"}
+	var buf bytes.Buffer
+	log := slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelWarn}))
+
+	chat := buildThreadChat(cfg, nil, nil, log)
+	if chat == nil {
+		t.Fatal("no catalog must degrade the reply quality, never disable the layer")
+	}
+	if chat.Catalog != nil {
+		t.Fatalf("Chat.Catalog = %v, want a nil interface (a typed-nil would panic in catalogHits)", chat.Catalog)
+	}
+	if !strings.Contains(buf.String(), "no catalog") {
+		t.Fatalf("must warn that replies carry no knowledge-base context; got: %s", buf.String())
+	}
+}
+
+// TestBuildThreadChatWarnsWhenTheCredentialIsEmpty covers the runtime half of
+// the contract Validate cannot see, the same gap ThreadCaptureDeliverable and
+// SlackFeedbackDeliverable close for their transports: an api_key_env that is
+// set but EMPTY (an unmounted secret, a blank Helm value) builds a client that
+// fails on every call. The layer still builds — Answer degrades to deterministic
+// capture on a provider error, which is the designed behaviour — but startup
+// must name the env var rather than announce a working feature.
+func TestBuildThreadChatWarnsWhenTheCredentialIsEmpty(t *testing.T) {
+	t.Setenv("TEST_CHAT_PARENT_KEY", "")
+	cfg := chatCfg()
+	cfg.Model.Chat = &config.ModelOverride{Model: "small-cheap-model"}
+	var buf bytes.Buffer
+	log := slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelWarn}))
+
+	chat := buildThreadChat(cfg, nil, nil, log)
+	if chat == nil {
+		t.Fatal("an empty credential must degrade at call time, not disable the layer at startup")
+	}
+	if !strings.Contains(buf.String(), "TEST_CHAT_PARENT_KEY") {
+		t.Fatalf("the warning must name the env var an operator has to fix; got: %s", buf.String())
+	}
+}
+
+// TestBuildThreadChatWarnsWhenNoTransportListens pins that
+// config.ChatWithoutCaptureWarning is actually EMITTED in production. The
+// warning catches an operator who configured a paid model for a feature no
+// transport can ever trigger; a guard with unit coverage and no production
+// caller is green and inert, which is the failure this test exists to prevent.
+func TestBuildThreadChatWarnsWhenNoTransportListens(t *testing.T) {
+	t.Setenv("TEST_CHAT_PARENT_KEY", "sk-parent")
+	cfg := chatCfg()
+	cfg.Notify.Slack.ThreadCapture = false
+	cfg.Model.Chat = &config.ModelOverride{Model: "small-cheap-model"}
+	var buf bytes.Buffer
+	log := slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelWarn}))
+
+	buildThreadChat(cfg, nil, nil, log)
+	if want := config.ChatWithoutCaptureWarning(cfg); want == "" {
+		t.Fatal("test setup is wrong: this config must warrant the warning")
+	} else if !strings.Contains(buf.String(), "dead config") {
+		t.Fatalf("must emit ChatWithoutCaptureWarning at startup; got: %s", buf.String())
+	}
+}
+
+// TestBuildThreadResponderCarriesTheChatLayer pins the last link in the chain:
+// the Chat must reach the ONE shared *thread.Responder both transports use.
+// Responder.freeform nil-checks Chat before every use, so a Chat built and then
+// dropped on the floor fails nothing — it just leaves the feature off in
+// production while every unit test of Chat itself stays green.
+func TestBuildThreadResponderCarriesTheChatLayer(t *testing.T) {
+	t.Setenv("TEST_CHAT_PARENT_KEY", "sk-parent")
+	cfg := chatCfg()
+	cfg.Model.Chat = &config.ModelOverride{Model: "small-cheap-model"}
+	log := slog.New(slog.NewTextHandler(io.Discard, nil))
+	reg, err := thread.NewRegistry(filepath.Join(t.TempDir(), "threads.jsonl"), time.Hour, 10)
+	if err != nil {
+		t.Fatalf("NewRegistry: %v", err)
+	}
+	chat := buildThreadChat(cfg, nil, nil, log)
+	if chat == nil {
+		t.Fatal("test setup is wrong: model.chat is configured")
+	}
+
+	r := buildThreadResponder(cfg, reg, fakeThreadForge{}, chat, nil, log)
+	if r.Chat != chat {
+		t.Fatal("Responder.Chat is not the shared chat layer — freeform stays on the PR2 deterministic path in production")
+	}
+	// And the PR2 shape survives: no model.chat means no Chat on the responder.
+	off := buildThreadResponder(chatCfg(), reg, fakeThreadForge{}, buildThreadChat(chatCfg(), nil, nil, log), nil, log)
+	if off.Chat != nil {
+		t.Fatalf("no model.chat must leave Responder.Chat nil, got %+v", off.Chat)
+	}
+}
+
+// threadBoundsCfg returns a config with EVERY notify.thread key set to a
+// distinctive non-default value, so a bound that arrives with its default
+// cannot be mistaken for one that was delivered. Chat capture and a ledger path
+// are on because BuildThreadRegistry needs both to build an enabled registry.
+func threadBoundsCfg(t *testing.T) *config.Config {
+	t.Helper()
+	cfg := chatCfg()
+	cfg.Model.Chat = &config.ModelOverride{Model: "small-cheap-model"}
+	cfg.Outcome.LedgerPath = filepath.Join(t.TempDir(), "outcome.jsonl")
+	cfg.Notify.Thread = config.ThreadNotify{
+		MaxNotesPerThread:  7,
+		ForgeWritesPerHour: 3,
+		RegistryTTL:        config.Duration(90 * time.Minute),
+		RegistryMax:        2,
+		MaxNoteBytes:       4321,
+		ChatCallsPerHour:   11,
+		ChatTokensPerHour:  4242,
+	}
+	return cfg
+}
+
+// TestNotifyThreadBoundsReachTheObjectsTheyConfigure pins DELIVERY for every
+// notify.thread key — the half the config tests cannot see.
+//
+// config_test.go covers parsing and defaulting thoroughly: given YAML, the
+// right number comes out of the Effective* resolver. What nothing covered is
+// whether that number reaches the object it configures. Replacing any of these
+// five with a hardcoded default in this file left the whole suite green:
+//
+//	MaxNoteBytes:      cfg.Notify.Thread.EffectiveMaxNoteBytes()      → 0
+//	MaxNotesPerThread: cfg.Notify.Thread.EffectiveMaxNotesPerThread() → 0
+//	ForgeWrites:       …EffectiveForgeWritesPerHour()                 → the default
+//	ttl :=             …EffectiveRegistryTTL()                        → the default
+//	maxLive :=         …EffectiveRegistryMax()                        → the default
+//
+// Each is silent in production: the operator who raised a bound sees the
+// documented behaviour of the value they did NOT configure, with no error and
+// no log line saying so. The two chat bounds are here too, so the table is the
+// whole block rather than "the ones that broke" — and max_note_bytes gets two
+// rows, because "one configured value covers the message on the way to the
+// model AND on the way to the knowledge base" is a claim this code makes and
+// only one of the two surfaces was pinned.
+//
+// The bounds that have no getter are asserted through BEHAVIOUR (a fourth forge
+// write is refused, a thread past the TTL stops being answerable, the oldest
+// thread is evicted at the cap) rather than through reflection: what an operator
+// is promised is the behaviour, and it is what a hardcoded default changes.
+func TestNotifyThreadBoundsReachTheObjectsTheyConfigure(t *testing.T) {
+	t.Setenv("TEST_CHAT_PARENT_KEY", "sk-parent")
+	for _, tc := range []struct {
+		key   string
+		check func(t *testing.T, reg *thread.Registry, r *thread.Responder, c *thread.Chat)
+	}{
+		{
+			key: "max_notes_per_thread",
+			check: func(t *testing.T, _ *thread.Registry, r *thread.Responder, _ *thread.Chat) {
+				if r.MaxNotesPerThread != 7 {
+					t.Errorf("Responder.MaxNotesPerThread = %d, want the configured 7 — a thread keeps "+
+						"writing knowledge past the cap the operator set", r.MaxNotesPerThread)
+				}
+			},
+		},
+		{
+			key: "forge_writes_per_hour",
+			check: func(t *testing.T, _ *thread.Registry, r *thread.Responder, _ *thread.Chat) {
+				if r.ForgeWrites == nil {
+					t.Fatal("Responder.ForgeWrites is nil — thread capture's one global cap on forge writes is absent entirely")
+				}
+				if got := r.ForgeWrites.Window(); got != time.Hour {
+					t.Errorf("ForgeWrites window = %s, want 1h — the key is per HOUR", got)
+				}
+				for i := 1; i <= 3; i++ {
+					if !r.ForgeWrites.Allow() {
+						t.Fatalf("forge write %d of the configured 3 was refused", i)
+					}
+				}
+				if r.ForgeWrites.Allow() {
+					t.Error("a 4th forge write was allowed against the configured budget of 3 — the " +
+						"default (20) is in force and the operator's ceiling is 6.7x what they asked for")
+				}
+			},
+		},
+		{
+			key: "max_note_bytes → the write path",
+			check: func(t *testing.T, _ *thread.Registry, r *thread.Responder, _ *thread.Chat) {
+				if r.MaxNoteBytes != 4321 {
+					t.Errorf("Responder.MaxNoteBytes = %d, want the configured 4321 — the message written "+
+						"to the knowledge base is bounded by the default instead", r.MaxNoteBytes)
+				}
+			},
+		},
+		{
+			key: "max_note_bytes → the prompt path",
+			check: func(t *testing.T, _ *thread.Registry, _ *thread.Responder, c *thread.Chat) {
+				if c.MaxNoteBytes != 4321 {
+					t.Errorf("Chat.MaxNoteBytes = %d, want the configured 4321 — the two surfaces have "+
+						"drifted, so one configured value no longer covers both", c.MaxNoteBytes)
+				}
+			},
+		},
+		{
+			key: "registry_ttl",
+			check: func(t *testing.T, reg *thread.Registry, _ *thread.Responder, _ *thread.Chat) {
+				mustPut(t, reg, thread.Context{Root: "stale", At: time.Now().Add(-2 * time.Hour)})
+				mustPut(t, reg, thread.Context{Root: "fresh"})
+				if _, ok := reg.Get("stale"); ok {
+					t.Error("a thread last touched 2h ago is still answerable under the configured 90m " +
+						"registry_ttl — the default (168h) is in force, so threads stay live for a week")
+				}
+				if _, ok := reg.Get("fresh"); !ok {
+					t.Error("a thread touched just now is not answerable — the TTL is far shorter than configured")
+				}
+			},
+		},
+		{
+			key: "registry_max",
+			check: func(t *testing.T, reg *thread.Registry, _ *thread.Responder, _ *thread.Chat) {
+				for _, root := range []string{"first", "second", "third"} {
+					mustPut(t, reg, thread.Context{Root: root})
+				}
+				if _, ok := reg.Get("first"); ok {
+					t.Error("the oldest of 3 threads survived a configured registry_max of 2 — the " +
+						"default (2000) is in force and the live set is unbounded for any real channel")
+				}
+				if _, ok := reg.Get("third"); !ok {
+					t.Error("the newest thread was evicted — eviction is not keeping the most recent entries")
+				}
+			},
+		},
+		{
+			key: "chat_calls_per_hour / chat_tokens_per_hour",
+			check: func(t *testing.T, _ *thread.Registry, _ *thread.Responder, c *thread.Chat) {
+				calls, tokens := c.Budget.Remaining()
+				if calls != 11 || tokens != 4242 {
+					t.Errorf("Chat.Budget allows (%d calls, %d tokens), want the configured (11, 4242) — "+
+						"the hourly spend ceiling is not the one the operator set", calls, tokens)
+				}
+			},
+		},
+	} {
+		t.Run(tc.key, func(t *testing.T) {
+			cfg := threadBoundsCfg(t)
+			log := slog.New(slog.NewTextHandler(io.Discard, nil))
+			reg, err := BuildThreadRegistry(cfg)
+			if err != nil {
+				t.Fatalf("BuildThreadRegistry: %v", err)
+			}
+			if !reg.Enabled() {
+				t.Fatal("test setup is wrong: the registry must persist for these bounds to be observable")
+			}
+			chat := buildThreadChat(cfg, nil, nil, log)
+			if chat == nil {
+				t.Fatal("test setup is wrong: model.chat is configured")
+			}
+			tc.check(t, reg, buildThreadResponder(cfg, reg, fakeThreadForge{}, chat, nil, log), chat)
+		})
+	}
+}
+
+// mustPut records a thread context or fails the test — a Put that errored would
+// make an eviction/expiry assertion below pass for the wrong reason.
+func mustPut(t *testing.T, reg *thread.Registry, tc thread.Context) {
+	t.Helper()
+	if err := reg.Put(tc); err != nil {
+		t.Fatalf("Registry.Put(%q): %v", tc.Root, err)
 	}
 }
