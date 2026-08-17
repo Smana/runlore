@@ -485,6 +485,18 @@ func (li *LoopInvestigator) Investigate(ctx context.Context, req Request) error 
 				li.Metrics.ModelCachedInputTokens.Add(ctx, int64(resp.Usage.CachedInputTokens), provAttr)
 			}
 		}
+		// Accumulate the provider-reported usage BEFORE any of the terminal branches
+		// below, so no exit can drop a call that was already billed. A completion that
+		// FAILED still cost whatever the provider reported before it broke: every model
+		// client returns CompletionResponse.CostOnly() alongside its error for exactly
+		// this reader ("the token counts the provider reported before the failure are
+		// real and billed"), and a total that only counts successful calls lets a
+		// flapping provider spend without the ceiling ever seeing it. That is the same
+		// discipline summarizeElided already applies to the compaction digest; this is
+		// the loop's own call finally reading the same rule. Zero usage (a failure before
+		// the provider reported anything) still counts as a model call and adds no
+		// tokens — "unknown", never a claim that the call was free.
+		addUsage(&loopTotals, resp.Usage)
 		if err != nil {
 			// The per-investigation deadline fired (or the parent ctx was cancelled):
 			// deliver a synthetic timeout result rather than bubbling a bare error the
@@ -505,10 +517,12 @@ func (li *LoopInvestigator) Investigate(ctx context.Context, req Request) error 
 		// Anchor subsequent budget estimates to reality: the provider just reported the
 		// true input size for the request we estimated as reqHeuristic. Zero usage
 		// (provider didn't report) is a no-op — the pure heuristic keeps driving the guard.
+		// Only a SUCCEEDED request calibrates: the ratio describes how a full request maps
+		// to reported input, and a stream that died mid-flight may have reported only part
+		// of it. The spend accounting above deliberately does not make that distinction —
+		// a partial figure is still money spent — but a partial figure would corrupt a
+		// ratio that is then applied to every later estimate.
 		calib.observe(reqHeuristic, resp.Usage)
-		// Accumulate the same reported usage the calibrator just read (no double
-		// count): one model call plus its tokens toward the per-investigation total.
-		addUsage(&loopTotals, resp.Usage)
 		li.Log.Debug("investigation step", "title", req.Title, "step", step, "tool_calls", len(resp.ToolCalls), "text_len", len(resp.Text))
 		// The provider declined the turn (a safety/refusal stop reason): deliver a
 		// first-class unresolved result rather than misreading the empty response as a

@@ -153,16 +153,22 @@ func (rr *Reranker) rank(ctx context.Context, req Request, cands []catalog.Score
 		rr.Metrics.ModelRequestDuration.Record(ctx, time.Since(start).Seconds(),
 			metric.WithAttributes(attribute.String("provider", "rerank")))
 	}
+	// Count the reranker's tokens toward the per-investigation total (it runs on the
+	// verify tier, so aggregateUsage prices it correctly) — BEFORE the failure branch.
+	// This one matters most of the three: a rank error does not end the run, it falls
+	// THROUGH to a full ReAct loop that then spends its whole budget on top. Tokens
+	// dropped here would stay missing from the running total the loop's ceiling reads
+	// for the entire rest of the investigation, so a flapping reranker would be free by
+	// construction. The provider reports them on the error path for this exact reason
+	// (CompletionResponse.CostOnly).
+	if totals != nil {
+		addUsage(totals, resp.Usage)
+	}
 	if err != nil {
 		if rr.Log != nil {
 			rr.Log.Warn("recall reranker failed; falling through to full investigation", "title", req.Title, "err", err)
 		}
 		return catalog.Entry{}, 0, false
-	}
-	// Count the reranker's tokens toward the per-investigation total (it runs on the
-	// verify tier, so aggregateUsage prices it correctly).
-	if totals != nil {
-		addUsage(totals, resp.Usage)
 	}
 	if rr.Metrics != nil {
 		rr.Metrics.ModelInputTokens.Add(ctx, int64(resp.Usage.InputTokens),

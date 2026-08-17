@@ -121,13 +121,17 @@ func (li *LoopInvestigator) verifyFindings(ctx context.Context, req Request, inv
 		// honesty check (no verdicts ⇒ findings pass through unreviewed).
 		ToolChoice: submitVerdictsName,
 	})
+	// Count the verify completion toward the per-investigation token/cost total —
+	// BEFORE the failure branch, not after it. A reviewer that reported its prompt
+	// cost and then died mid-stream billed for those tokens all the same (the client
+	// hands them back on the error path, see CompletionResponse.CostOnly), and a
+	// finding that reports its own cost must not report a pass it paid for as free.
+	if totals != nil {
+		addUsage(totals, resp.Usage)
+	}
 	if err != nil {
 		li.Log.Warn("verify pass failed; keeping findings as-is", "title", req.Title, "err", err)
 		return inv, false
-	}
-	// Count the verify completion toward the per-investigation token/cost total.
-	if totals != nil {
-		addUsage(totals, resp.Usage)
 	}
 	var verds []verdict
 	for _, tc := range resp.ToolCalls {
