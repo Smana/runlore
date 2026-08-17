@@ -18,6 +18,70 @@ knowledge is yours, reviewed, and in your Git.
 
 ---
 
+## Four ways knowledge gets in
+
+Knowledge reaches your catalog by four routes. They differ in who starts them and
+how much ceremony they carry — but **all four end the same way: a pull request on
+your KB repo that a human merges.** None of them writes to your catalog directly.
+
+| Route | Who starts it | Good for | Cost |
+|---|---|---|---|
+| **Investigation finding** | RunLore, automatically | The verified root cause of an incident it just worked | Part of the investigation |
+| **Thread capture** | You, in the chat thread | The context RunLore could not know — "this recurs after node rotation" | Free (`note:`), or one model call with `model.chat` |
+| **kb-steward skill** | You, in Claude Code | Post-incident write-ups, seeding a new KB, triaging a PR backlog | Your own Claude Code session |
+| **Editing the repo** | You, in Git | Bulk edits, corrections, importing existing runbooks | None |
+
+### Investigation finding
+
+The default path, and the subject of the rest of this page. RunLore investigates,
+verifies, and opens a PR labelled `runlore` + `triggered`. See
+[Learning Loop]({{< relref "learning-loop.md" >}}) for how a finding becomes an entry.
+
+### Thread capture — reply to the bot where the incident is being discussed
+
+The knowledge an incident generates usually appears in the thread, not in the
+investigation: someone says *"this always happens after a spot reclaim"* and that
+sentence is the durable fact. Thread capture is how it stops evaporating there.
+
+Reply in the investigation's own thread:
+
+```text
+@runlore note: this recurs after every spot-node reclaim, not a CNI fault
+```
+
+RunLore files it against that investigation's KB pull request, or opens a
+standalone note PR when there is none, and replies with a link to what it wrote.
+Your words are recorded verbatim, attributed to you.
+
+Optionally, with a `model.chat` block configured, plain questions in the thread are
+answered too — from the investigation's own evidence — and RunLore proposes a note
+itself when your message contained something durable. A model-drafted note is
+marked as model-drafted, never filed as your words.
+
+Setup and the full cost picture:
+[Slack]({{< relref "/docs/integrations/notifications/slack.md" >}}) ·
+[Matrix]({{< relref "/docs/integrations/notifications/matrix.md" >}}) ·
+[what conversational replies cost]({{< relref "/docs/configuration/configuration.md#conversational-replies-and-what-they-cost" >}})
+
+### kb-steward skill — the guided, interview-style route
+
+A [Claude Code skill]({{< relref "kb-steward.md" >}}) that interviews you and writes
+well-formed OKF entries from your answers. Use it when you are capturing something
+larger than a one-line note: a post-incident review, your platform's baseline
+context, or a pass over a backlog of open KB PRs. It is the writing half; RunLore is
+the diagnosing half.
+
+### Editing the repo directly
+
+Your catalog is an ordinary Git repository of Markdown files. Clone it and open a PR
+by hand — for bulk corrections, or to import runbooks you already have. The
+OKF format is what the indexer expects — [§2 below](#2-anatomy-of-a-proposed-entry)
+shows an entry field by field, and [Design]({{< relref "design.md" >}}) explains why
+that shape — and `lore validate-kb <catalog-dir>` checks a catalog against the same
+merge gate before you push.
+
+---
+
 ## 1. What you see when RunLore finds something
 
 Two things happen when an investigation produces a confident, verified finding:

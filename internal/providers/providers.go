@@ -876,12 +876,27 @@ type ToolSpec struct {
 }
 
 // CompletionResponse is the model's reply (text and/or tool calls).
+//
+// An ERROR return is not necessarily the zero value. A provider reports token
+// counts DURING the stream — Anthropic's input usage arrives on the first event
+// of all — so a completion that fails after generating (and being billed for)
+// thousands of tokens already knows what it cost. Every client in this repo
+// therefore returns that cost alongside the error: Usage carries whatever the
+// fold observed before it failed, and Attempts how many upstream requests the
+// failed exchange took. A caller charging a spend budget bills those; charging
+// zero would make a flaky endpoint look free while the bill grows.
+//
+// EVERY OTHER FIELD MUST BE TREATED AS UNUSABLE when err != nil. Text,
+// ToolCalls, StopReason, Truncated and Opaque describe a reply that did not
+// happen: the clients here zero them on an error return, and no caller may read
+// them off a failed call regardless.
 type CompletionResponse struct {
 	Text      string
 	ToolCalls []ToolCall
 	// Usage is the provider-reported token count for this completion. Zero when
 	// the provider omits it (older endpoints, or a provider that does not report
-	// it) — callers treat the zero value as "unknown", not "zero tokens".
+	// it), and zero on a failure that happened before the provider reported
+	// anything — callers treat the zero value as "unknown", not "zero tokens".
 	Usage Usage
 	// Truncated is true when the provider stopped because it hit the output-token
 	// ceiling (Anthropic stop_reason "max_tokens", OpenAI finish_reason "length",
@@ -900,6 +915,23 @@ type CompletionResponse struct {
 	// (and redacted_thinking) blocks — in order, with their signatures — into it;
 	// OpenAI/Gemini leave it empty and ignore it.
 	Opaque json.RawMessage
+	// Attempts is how many upstream HTTP requests this completion actually cost:
+	// 1 normally, more when the client retried a transient failure (a network
+	// error, 429 or 5xx) before this one succeeded. Usage describes only the
+	// attempt that returned a body, so a caller charging a spend budget needs
+	// this to bill the ones that failed — a provider bills every request it
+	// accepted. 0 when the client does not report it (see AttemptsOf on the
+	// error path): callers read 0 as "unknown", i.e. at least one.
+	Attempts int
+}
+
+// CostOnly reduces a response to what the exchange COST — its Usage and
+// Attempts — dropping every field that describes a reply. It is what a client
+// returns alongside an error: the token counts the provider reported before the
+// failure are real and billed, while a half-folded Text or an unterminated tool
+// call is not an answer and must never reach a caller. See CompletionResponse.
+func (r CompletionResponse) CostOnly() CompletionResponse {
+	return CompletionResponse{Usage: r.Usage, Attempts: r.Attempts}
 }
 
 // refusalStopReasons is the set of stop reasons (across providers, lower-cased) that
@@ -934,6 +966,48 @@ type Usage struct {
 	// CacheWriteTokens is input tokens WRITTEN to the cache this request (Anthropic
 	// cache_creation_input_tokens, billed ~1.25x). 0 for providers that don't report it.
 	CacheWriteTokens int `json:"cache_write_tokens"`
+}
+
+// Total is the billable token count for one completion: input plus output.
+// Neither cache field is added — both CachedInputTokens and CacheWriteTokens
+// are subsets of InputTokens after normalization (the Anthropic client, the
+// only one reporting a cache write, sets InputTokens to input + cache_read +
+// cache_creation), so adding either would double-count. It returns int64
+// because every consumer accumulates or reports in that width.
+//
+// A zero Usage totals 0, which callers must not read as "this call was free":
+// see CompletionResponse.Usage on the zero value meaning "unknown".
+func (u Usage) Total() int64 {
+	return int64(u.InputTokens) + int64(u.OutputTokens)
+}
+
+// EstimateTokens approximates a request's input size (~4 chars/token) over
+// everything that actually goes over the wire: the system prompt, the full tool
+// specs (name + description + JSON Schema), and the message history — including
+// the assistant tool-call JSON (m.ToolCalls[].Args). Counting only m.Content
+// systematically under-estimates a tool-heavy request. It ignores JSON envelope
+// and role overhead, so it stays a mild under-estimate of the true wire size,
+// but the right order of magnitude.
+//
+// It lives here because two callers need a request's size where Usage cannot
+// supply one, for opposite reasons: internal/investigate sizes the NEXT request
+// against its per-investigation budget, BEFORE any response exists (and
+// calibrates this heuristic against provider-reported usage afterwards), while
+// internal/thread charges its chat budget an estimate precisely when a
+// completion came back with no usage at all — CompletionResponse.Usage's zero
+// value meaning "unknown", not "zero tokens".
+func EstimateTokens(system string, msgs []Message, tools []ToolSpec) int {
+	n := len(system)
+	for _, t := range tools {
+		n += len(t.Name) + len(t.Description) + len(t.Schema)
+	}
+	for _, m := range msgs {
+		n += len(m.Content)
+		for _, tc := range m.ToolCalls {
+			n += len(tc.Args)
+		}
+	}
+	return n / 4
 }
 
 // ToolCall is a model request to invoke a tool.

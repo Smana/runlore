@@ -134,6 +134,108 @@ func TestStreamAccumulateErrorPassesThrough(t *testing.T) {
 	}
 }
 
+// TestStreamAccumulateErrorReportsWhatItCost asserts the pipeline hands back
+// what a FAILED fold already cost, not a zero value: the usage the provider
+// reported before the stream died, AND the attempt count, on the SAME response
+// the success path reports Attempts on. A caller charging a spend budget needs
+// both halves — tokens the provider generated and billed, and the requests it
+// accepted — and gets exactly one CompletionResponse to read them from.
+func TestStreamAccumulateErrorReportsWhatItCost(t *testing.T) {
+	var seen atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Retry-After-Ms", "1")
+		if seen.Add(1) == 1 { // one transient failure, so attempts > 1 is observable
+			w.WriteHeader(http.StatusInternalServerError)
+			return
+		}
+		writeStream(t, w, "data: x\n\n")
+	}))
+	defer srv.Close()
+
+	partial := providers.Usage{InputTokens: 1500, OutputTokens: 800, CachedInputTokens: 300}
+	b := baseFor(srv.URL)
+	resp, err := b.Stream(context.Background(), streamRequest(srv.URL), func(io.Reader) (providers.CompletionResponse, error) {
+		// What a provider fold salvages: the usage it folded before it failed.
+		return providers.CompletionResponse{Text: "partial", Usage: partial}, errors.New("stream ended before message_stop")
+	})
+	if err == nil {
+		t.Fatal("want the accumulate error")
+	}
+	if resp.Usage != partial {
+		t.Errorf("Usage on the error path = %+v, want %+v — the fold already knew what the provider billed", resp.Usage, partial)
+	}
+	if resp.Text != "" || len(resp.ToolCalls) != 0 || resp.StopReason != "" || resp.Truncated {
+		t.Errorf("the error path returned reply content (text=%q calls=%d stop=%q truncated=%v); only what the exchange COST may survive an error",
+			resp.Text, len(resp.ToolCalls), resp.StopReason, resp.Truncated)
+	}
+	if resp.Attempts != 2 {
+		t.Errorf("Attempts on the error path = %d, want 2 — a caller must see the partial usage AND the requests it took", resp.Attempts)
+	}
+	if got := providers.AttemptsOf(err); got != 2 {
+		t.Errorf("AttemptsOf(err) = %d, want 2 — the error keeps carrying the count too", got)
+	}
+}
+
+// TestStreamNoUsageBeforeAStreamFlows pins the other half of the contract: the
+// three error paths that fire BEFORE any 200 stream ever flowed report a ZERO
+// Usage, because nothing client-side can know what such a request cost in
+// tokens. Their cost is reported as an attempt count on the error
+// (providers.WithAttempts), never as fabricated usage — a later refactor that
+// starts filling Usage in here would bill a provider that never generated a
+// token.
+func TestStreamNoUsageBeforeAStreamFlows(t *testing.T) {
+	t.Run("marshal failure: no request was ever sent", func(t *testing.T) {
+		req := streamRequest("http://127.0.0.1:1")
+		req.Body = make(chan int) // json.Marshal cannot encode a channel
+		b := baseFor("http://127.0.0.1:1")
+		resp, err := b.Stream(context.Background(), req, textAccumulate)
+		if err == nil {
+			t.Fatal("want a marshal error")
+		}
+		if resp.Usage != (providers.Usage{}) {
+			t.Errorf("Usage = %+v, want zero — nothing reached a provider", resp.Usage)
+		}
+	})
+
+	t.Run("transport failure: no 200 stream ever flowed", func(t *testing.T) {
+		b := baseFor("http://127.0.0.1:1")
+		resp, err := b.Stream(context.Background(), streamRequest("http://127.0.0.1:1"), textAccumulate)
+		if err == nil {
+			t.Fatal("want a transport error")
+		}
+		if resp.Usage != (providers.Usage{}) {
+			t.Errorf("Usage = %+v, want zero — no attempt returned a body", resp.Usage)
+		}
+	})
+
+	// Both non-200 branches: the permanent 4xx that is never retried, and the
+	// transient status retried to exhaustion. They return from different lines
+	// and each must stay zero.
+	for _, tc := range []struct {
+		name   string
+		status int
+	}{
+		{"non-200 status, permanent: the provider refused the request", http.StatusBadRequest},
+		{"non-200 status, retried to exhaustion", http.StatusInternalServerError},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				w.Header().Set("Retry-After-Ms", "1")
+				w.WriteHeader(tc.status)
+			}))
+			defer srv.Close()
+			b := baseFor(srv.URL)
+			resp, err := b.Stream(context.Background(), streamRequest(srv.URL), textAccumulate)
+			if err == nil {
+				t.Fatalf("want an error for a %d response", tc.status)
+			}
+			if resp.Usage != (providers.Usage{}) {
+				t.Errorf("Usage = %+v, want zero — a rejected request generated nothing", resp.Usage)
+			}
+		})
+	}
+}
+
 // TestStreamMarshalFailureNeverSendsRequest asserts an unmarshalable body fails
 // fast with a "marshal request" error before any bytes hit the network.
 func TestStreamMarshalFailureNeverSendsRequest(t *testing.T) {
@@ -309,6 +411,100 @@ func TestStreamRetryThenSuccess(t *testing.T) {
 			t.Errorf("attempt %d lost its headers: api key %q", i+1, k)
 		}
 	}
+}
+
+// TestStreamReportsUpstreamAttempts pins what one Complete actually costs
+// upstream. The pipeline retries a transient failure up to retryAttempts times
+// and returns a single response — so a caller charging a budget one call per
+// Complete bills for one request where the provider accepted and billed three.
+// The count is reported on the response when a later attempt succeeded, and on
+// the error when none did, because those are the only two things the caller
+// gets back.
+func TestStreamReportsUpstreamAttempts(t *testing.T) {
+	// serveN returns a handler failing the first n requests with a 500 and
+	// streaming a body from then on. Retry-After-Ms keeps the waits near zero.
+	serveN := func(t *testing.T, failures int32) *httptest.Server {
+		var seen atomic.Int32
+		return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			w.Header().Set("Retry-After-Ms", "1")
+			if seen.Add(1) <= failures {
+				w.WriteHeader(http.StatusInternalServerError)
+				return
+			}
+			writeStream(t, w, "data: ok\n\n")
+		}))
+	}
+
+	t.Run("first attempt succeeded", func(t *testing.T) {
+		srv := serveN(t, 0)
+		defer srv.Close()
+		b := baseFor(srv.URL)
+		resp, err := b.Stream(context.Background(), streamRequest(srv.URL), textAccumulate)
+		if err != nil {
+			t.Fatalf("Stream: %v", err)
+		}
+		if resp.Attempts != 1 {
+			t.Fatalf("Attempts = %d, want 1 — one POST, one charge", resp.Attempts)
+		}
+	})
+
+	t.Run("retried then succeeded", func(t *testing.T) {
+		srv := serveN(t, retryAttempts-1)
+		defer srv.Close()
+		b := baseFor(srv.URL)
+		resp, err := b.Stream(context.Background(), streamRequest(srv.URL), textAccumulate)
+		if err != nil {
+			t.Fatalf("Stream after transient failures: %v", err)
+		}
+		if resp.Attempts != retryAttempts {
+			t.Fatalf("Attempts = %d, want %d — every POST the provider accepted is billed, not just the one that returned a body",
+				resp.Attempts, retryAttempts)
+		}
+	})
+
+	t.Run("every attempt failed", func(t *testing.T) {
+		srv := serveN(t, retryAttempts)
+		defer srv.Close()
+		b := baseFor(srv.URL)
+		_, err := b.Stream(context.Background(), streamRequest(srv.URL), textAccumulate)
+		if err == nil {
+			t.Fatal("want an error when every attempt failed")
+		}
+		if got := providers.AttemptsOf(err); got != retryAttempts {
+			t.Fatalf("AttemptsOf(err) = %d, want %d — an exhausted retry schedule cost every one of its attempts", got, retryAttempts)
+		}
+	})
+
+	t.Run("a permanent 4xx cost exactly one", func(t *testing.T) {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			w.WriteHeader(http.StatusBadRequest)
+		}))
+		defer srv.Close()
+		b := baseFor(srv.URL)
+		_, err := b.Stream(context.Background(), streamRequest(srv.URL), textAccumulate)
+		if err == nil {
+			t.Fatal("want an error for a 400 response")
+		}
+		if !providers.IsPermanent(err) {
+			t.Fatalf("a 400 must stay permanent once marked with its attempt count: %v", err)
+		}
+		if got := providers.AttemptsOf(err); got > 1 {
+			t.Fatalf("AttemptsOf(err) = %d, want at most 1 — a permanent 4xx is never retried", got)
+		}
+	})
+
+	t.Run("a marshal failure cost nothing", func(t *testing.T) {
+		req := streamRequest("http://127.0.0.1:1")
+		req.Body = make(chan int) // json.Marshal cannot encode a channel
+		b := baseFor("http://127.0.0.1:1")
+		_, err := b.Stream(context.Background(), req, textAccumulate)
+		if err == nil {
+			t.Fatal("want a marshal error")
+		}
+		if got := providers.AttemptsOf(err); got != 0 {
+			t.Fatalf("AttemptsOf(err) = %d, want 0 — nothing was ever sent", got)
+		}
+	})
 }
 
 // TestStreamContextCancelMidStream asserts cancelling the caller's context

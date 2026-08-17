@@ -8,6 +8,8 @@ import (
 	"time"
 
 	"gopkg.in/yaml.v3"
+
+	"github.com/Smana/runlore/internal/thread"
 )
 
 // sample incident fields, mirroring a critical/prod alert in namespace apps.
@@ -210,8 +212,8 @@ model:
 }
 
 // TestValidateRejectsNegativeMaxTokens verifies a negative model.max_tokens (or a
-// negative verify override) is rejected by Validate — a nonsensical value that
-// would otherwise reach a provider request.
+// negative verify or chat override) is rejected by Validate — a nonsensical value
+// that would otherwise reach a provider request.
 func TestValidateRejectsNegativeMaxTokens(t *testing.T) {
 	c := &Config{Model: Model{Provider: "anthropic", MaxTokens: -1}}
 	if err := c.Validate(); err == nil {
@@ -221,8 +223,19 @@ func TestValidateRejectsNegativeMaxTokens(t *testing.T) {
 	if err := cv.Validate(); err == nil {
 		t.Fatal("negative verify.max_tokens must be rejected by Validate")
 	}
+	// The chat override is the third sibling and used to be the exception: a
+	// negative fell straight through chatMaxTokens to the 1024 default. This field
+	// sizes BOTH the provider's output cap and the conservative charge the hourly
+	// token budget applies when a provider reports no usage, so a value that
+	// reaches neither is not something an operator should discover from a bill.
+	cc := &Config{Model: Model{Provider: "anthropic", Chat: &ModelOverride{Model: "small-cheap-model", MaxTokens: -5}}}
+	if err := cc.Validate(); err == nil {
+		t.Fatal("negative model.chat.max_tokens must be rejected by Validate, like its two siblings")
+	}
 	// Zero and positive are fine.
-	ok := &Config{Model: Model{Provider: "anthropic", MaxTokens: 0, Verify: &ModelOverride{MaxTokens: 4096}}}
+	ok := &Config{Model: Model{Provider: "anthropic", MaxTokens: 0,
+		Verify: &ModelOverride{MaxTokens: 4096},
+		Chat:   &ModelOverride{Model: "small-cheap-model", MaxTokens: 2048}}}
 	if err := ok.Validate(); err != nil {
 		t.Fatalf("non-negative max_tokens must validate clean: %v", err)
 	}
@@ -1129,5 +1142,341 @@ func TestValidateThreadCapture(t *testing.T) {
 				t.Fatalf("Validate() = %v, want it to mention %q", err, tt.wantErr)
 			}
 		})
+	}
+}
+
+// TestValidateModelChat guards the model.chat inheritance-safety decision: unlike
+// model.verify (which runs once per investigation, on a path RunLore itself
+// initiates), model.chat runs once per addressed thread message, on a path any
+// channel or room member can trigger. Silently inheriting the investigation model
+// there would make the cheapest way to enable the feature (`model.chat: {}`) the
+// most expensive way to run it, so Validate requires the model be named
+// explicitly — the one deliberate divergence from Verify's cmp.Or-everything
+// inheritance. Every other field (provider, base_url, api_key_env, effort,
+// thinking) inherits exactly as model.verify's does, so this also exercises
+// those checks against model.chat, mirroring TestValidateEffort/
+// TestValidateThinking/TestValidateCleartextKeyCoversVerifyAndEmbeddings.
+//
+// The thread-capture-off case is deliberately a warning, not an error: the
+// operator may be staging config (thread_capture next), and a coherent-but-
+// pointless block should not block startup while it settles into place.
+func TestValidateModelChat(t *testing.T) {
+	base := func() *Config {
+		c := &Config{}
+		c.Model.Provider = "anthropic"
+		c.Model.Model = "claude-big"
+		c.Model.Chat = &ModelOverride{Model: "claude-cheap"}
+		// A fully-satisfied Slack thread_capture (see TestValidateThreadCapture): the
+		// mention-listening channel model.chat needs to ever fire.
+		c.Notify.Slack = SlackNotify{
+			BotTokenEnv:      "SLACK_BOT_TOKEN",
+			Channel:          "C1",
+			SigningSecretEnv: "SLACK_SIGNING_SECRET",
+			ThreadCapture:    true,
+		}
+		c.Outcome.LedgerPath = "/var/lib/runlore/outcomes.jsonl"
+		return c
+	}
+
+	tests := []struct {
+		name     string
+		mutate   func(*Config)
+		wantErr  string // "" = must validate clean
+		wantWarn string // "" = ChatWithoutCaptureWarning must return ""; else a substring it must contain
+	}{
+		{"unset is valid, feature off", func(c *Config) { c.Model.Chat = nil }, "", ""},
+		{"valid model is valid, no warning (capture is on)", func(*Config) {}, "", ""},
+		{"empty model rejected", func(c *Config) { c.Model.Chat.Model = "" }, "model.chat.model", ""},
+		{"whitespace-only model rejected", func(c *Config) { c.Model.Chat.Model = "   " }, "model.chat.model", ""},
+		{"neither capture channel on: valid but warned", func(c *Config) {
+			c.Notify.Slack.ThreadCapture = false
+		}, "", "model.chat"},
+		{"matrix capture alone silences the warning", func(c *Config) {
+			c.Notify.Slack.ThreadCapture = false
+			c.Notify.Matrix = MatrixNotify{
+				Homeserver:     "https://matrix.example.org",
+				RoomID:         "!room:example.org",
+				AccessTokenEnv: "MATRIX_ACCESS_TOKEN",
+				ThreadCapture:  true,
+			}
+		}, "", ""},
+		{"chat inherits the parent's effort and thinking when unset", func(c *Config) {
+			c.Model.Effort = "max"        // valid for anthropic, the shared provider
+			c.Model.Thinking = "adaptive" // valid for anthropic, the shared provider
+		}, "", ""},
+		{"chat's own effort validated against its own vocabulary", func(c *Config) {
+			c.Model.Chat.Effort = "minimal" // not in the anthropic vocabulary
+		}, "model.chat.effort", ""},
+		{"inherited parent effort invalid for the override's own provider", func(c *Config) {
+			c.Model.Effort = "max" // valid for anthropic, not for openai
+			c.Model.Chat.Provider = "openai"
+		}, "model.chat.effort", ""},
+		{"chat's own thinking mode validated", func(c *Config) {
+			c.Model.Chat.Thinking = "enabled" // not a valid mode
+		}, "model.chat.thinking", ""},
+		{"inherited parent thinking invalid for the override's own provider", func(c *Config) {
+			c.Model.Thinking = "adaptive" // valid for anthropic, not for openai
+			c.Model.Chat.Provider = "openai"
+		}, "model.chat.thinking", ""},
+		{"chat cleartext key over its own public http base_url rejected", func(c *Config) {
+			c.Model.Chat.BaseURL = "http://api.public.example/v1"
+			c.Model.Chat.APIKeyEnv = "CHAT_KEY"
+		}, "model.chat.base_url", ""},
+		{"chat inherits an insecure parent base_url with its own key: rejected", func(c *Config) {
+			c.Model.BaseURL = "http://api.public.example/v1"
+			c.Model.Chat.APIKeyEnv = "CHAT_KEY"
+		}, "model.chat.base_url", ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			c := base()
+			tt.mutate(c)
+			err := c.Validate()
+			switch {
+			case tt.wantErr == "" && err != nil:
+				t.Fatalf("Validate() = %v, want nil", err)
+			case tt.wantErr != "" && err == nil:
+				t.Fatalf("Validate() = nil, want an error mentioning %q", tt.wantErr)
+			case tt.wantErr != "" && !strings.Contains(err.Error(), tt.wantErr):
+				t.Fatalf("Validate() = %v, want it to mention %q", err, tt.wantErr)
+			}
+			if tt.wantErr != "" {
+				return // an invalid config's warning text is not meaningful
+			}
+			warn := ChatWithoutCaptureWarning(c)
+			switch {
+			case tt.wantWarn == "" && warn != "":
+				t.Fatalf("ChatWithoutCaptureWarning() = %q, want \"\"", warn)
+			case tt.wantWarn != "" && !strings.Contains(warn, tt.wantWarn):
+				t.Fatalf("ChatWithoutCaptureWarning() = %q, want it to contain %q", warn, tt.wantWarn)
+			}
+		})
+	}
+}
+
+// TestNotifyThreadRoundTrip pins Gap 2: every notify.thread key must parse
+// into ThreadNotify, and an explicit value must win over its default.
+func TestNotifyThreadRoundTrip(t *testing.T) {
+	y := `
+notify:
+  thread:
+    max_notes_per_thread: 5
+    forge_writes_per_hour: 3
+    registry_ttl: 48h
+    registry_max: 100
+    max_note_bytes: 4096
+    chat_calls_per_hour: 45
+    chat_tokens_per_hour: 123456
+`
+	var c Config
+	if err := yaml.Unmarshal([]byte(y), &c); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	th := c.Notify.Thread
+	if th.MaxNotesPerThread != 5 || th.ForgeWritesPerHour != 3 || th.RegistryTTL.Std() != 48*time.Hour ||
+		th.RegistryMax != 100 || th.MaxNoteBytes != 4096 ||
+		th.ChatCallsPerHour != 45 || th.ChatTokensPerHour != 123456 {
+		t.Fatalf("notify.thread not parsed: %+v", th)
+	}
+	if got := th.EffectiveMaxNotesPerThread(); got != 5 {
+		t.Fatalf("EffectiveMaxNotesPerThread() = %d, want the explicit 5", got)
+	}
+	if got := th.EffectiveForgeWritesPerHour(); got != 3 {
+		t.Fatalf("EffectiveForgeWritesPerHour() = %d, want the explicit 3", got)
+	}
+	if got := th.EffectiveRegistryTTL(); got != 48*time.Hour {
+		t.Fatalf("EffectiveRegistryTTL() = %v, want the explicit 48h", got)
+	}
+	if got := th.EffectiveRegistryMax(); got != 100 {
+		t.Fatalf("EffectiveRegistryMax() = %d, want the explicit 100", got)
+	}
+	if got := th.EffectiveMaxNoteBytes(); got != 4096 {
+		t.Fatalf("EffectiveMaxNoteBytes() = %d, want the explicit 4096", got)
+	}
+	if got := th.EffectiveChatCallsPerHour(); got != 45 {
+		t.Fatalf("EffectiveChatCallsPerHour() = %d, want the explicit 45", got)
+	}
+	if got := th.EffectiveChatTokensPerHour(); got != 123456 {
+		t.Fatalf("EffectiveChatTokensPerHour() = %d, want the explicit 123456", got)
+	}
+}
+
+// TestNotifyThreadDefaultsWhenAbsent pins "an absent notify.thread block
+// changes nothing": every Effective* method must resolve to the exact
+// pre-existing hardcoded constant it replaces.
+func TestNotifyThreadDefaultsWhenAbsent(t *testing.T) {
+	var c Config
+	if err := yaml.Unmarshal([]byte("notify:\n  slack:\n    channel: C1\n"), &c); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	th := c.Notify.Thread
+	if got := th.EffectiveMaxNotesPerThread(); got != thread.DefaultMaxNotesPerThread {
+		t.Fatalf("EffectiveMaxNotesPerThread() = %d, want the default %d", got, thread.DefaultMaxNotesPerThread)
+	}
+	if got := th.EffectiveForgeWritesPerHour(); got != thread.DefaultForgeWritesPerHour {
+		t.Fatalf("EffectiveForgeWritesPerHour() = %d, want the default %d", got, thread.DefaultForgeWritesPerHour)
+	}
+	if got := th.EffectiveRegistryTTL(); got != thread.DefaultRegistryTTL {
+		t.Fatalf("EffectiveRegistryTTL() = %v, want the default %v", got, thread.DefaultRegistryTTL)
+	}
+	if got := th.EffectiveRegistryMax(); got != thread.DefaultRegistryMax {
+		t.Fatalf("EffectiveRegistryMax() = %d, want the default %d", got, thread.DefaultRegistryMax)
+	}
+	if got := th.EffectiveMaxNoteBytes(); got != thread.DefaultMaxNoteBytes {
+		t.Fatalf("EffectiveMaxNoteBytes() = %d, want the default %d", got, thread.DefaultMaxNoteBytes)
+	}
+	if got := th.EffectiveChatCallsPerHour(); got != thread.DefaultChatCallsPerHour {
+		t.Fatalf("EffectiveChatCallsPerHour() = %d, want the default %d", got, thread.DefaultChatCallsPerHour)
+	}
+	if got := th.EffectiveChatTokensPerHour(); got != thread.DefaultChatTokensPerHour {
+		t.Fatalf("EffectiveChatTokensPerHour() = %d, want the default %d", got, thread.DefaultChatTokensPerHour)
+	}
+}
+
+// TestNotifyThreadZeroIsAlsoTheDefault pins the explicit-zero case
+// separately from "absent": an operator who writes `max_note_bytes: 0`
+// (rather than omitting the key) must get the identical default, not a
+// distinct "unlimited" meaning — see ThreadNotify's doc comment for why
+// unlimited is not offered for any key in this block.
+func TestNotifyThreadZeroIsAlsoTheDefault(t *testing.T) {
+	var c Config
+	y := "notify:\n  thread:\n    max_notes_per_thread: 0\n    forge_writes_per_hour: 0\n" +
+		"    registry_ttl: 0h\n    registry_max: 0\n    max_note_bytes: 0\n" +
+		"    chat_calls_per_hour: 0\n    chat_tokens_per_hour: 0\n"
+	if err := yaml.Unmarshal([]byte(y), &c); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	th := c.Notify.Thread
+	if got := th.EffectiveMaxNoteBytes(); got != thread.DefaultMaxNoteBytes {
+		t.Fatalf("explicit max_note_bytes: 0 must mean the default (%d), got %d", thread.DefaultMaxNoteBytes, got)
+	}
+	if got := th.EffectiveForgeWritesPerHour(); got != thread.DefaultForgeWritesPerHour {
+		t.Fatalf("explicit forge_writes_per_hour: 0 must mean the default (%d), got %d", thread.DefaultForgeWritesPerHour, got)
+	}
+	if got := th.EffectiveChatCallsPerHour(); got != thread.DefaultChatCallsPerHour {
+		t.Fatalf("explicit chat_calls_per_hour: 0 must mean the default (%d), got %d", thread.DefaultChatCallsPerHour, got)
+	}
+	if got := th.EffectiveChatTokensPerHour(); got != thread.DefaultChatTokensPerHour {
+		t.Fatalf("explicit chat_tokens_per_hour: 0 must mean the default (%d), got %d", thread.DefaultChatTokensPerHour, got)
+	}
+	// Asserted unconditionally, and on an otherwise-valid config. The earlier
+	// version nested this inside `if err != nil` out of a worry that an unset
+	// Model.Provider would fail Validate on its own — it does not, a zero
+	// Config validates clean, so err was always nil and the whole block was
+	// dead. Provider is set anyway, matching TestNotifyThreadNegativeRejected,
+	// so a future required field cannot resurrect that ambiguity.
+	c.Model.Provider = "anthropic"
+	if err := (&c).Validate(); err != nil {
+		t.Fatalf("an all-zero notify.thread block means \"use the defaults\" and must validate clean, got: %v", err)
+	}
+}
+
+// TestThreadDefaultsHaveTheirDocumentedValues pins the NUMBERS.
+//
+// The Effective* tests above cannot: each asserts EffectiveX() == thread.DefaultX
+// while EffectiveX()'s whole body is `return thread.DefaultX`, so both sides move
+// together and the assertion holds for any value — change DefaultRegistryTTL from
+// seven days to zero and they still pass. What they genuinely catch is a fallback
+// wired to the WRONG constant, which is worth keeping; what they cannot catch is
+// a constant drifting.
+//
+// These are operator-facing: they appear in the configuration docs and they decide
+// what an unconfigured deployment spends. Changing one should be a deliberate edit
+// to this list, not a side effect of something else.
+func TestThreadDefaultsHaveTheirDocumentedValues(t *testing.T) {
+	if got, want := thread.DefaultRegistryTTL, 7*24*time.Hour; got != want {
+		t.Errorf("DefaultRegistryTTL = %v, want %v", got, want)
+	}
+	if got, want := thread.DefaultMaxNoteBytes, 8<<10; got != want {
+		t.Errorf("DefaultMaxNoteBytes = %d, want %d", got, want)
+	}
+	// The rest are bounds whose exact value is a tuning choice, but every one of
+	// them must be positive: 0 means "use the default" on this block, so a zero
+	// default is a fallback that resolves to itself, and a negative one is what
+	// Validate rejects.
+	for _, tc := range []struct {
+		name string
+		got  int
+	}{
+		{"DefaultMaxNotesPerThread", thread.DefaultMaxNotesPerThread},
+		{"DefaultForgeWritesPerHour", thread.DefaultForgeWritesPerHour},
+		{"DefaultRegistryMax", thread.DefaultRegistryMax},
+		{"DefaultChatCallsPerHour", thread.DefaultChatCallsPerHour},
+	} {
+		if tc.got <= 0 {
+			t.Errorf("%s = %d, want a positive bound", tc.name, tc.got)
+		}
+	}
+	// DefaultChatTokensPerHour is NOT in that loop, because ">0" is exactly the
+	// assertion that let it ship wrong. It is the one default nobody types: it is
+	// DERIVED (maxChatCallTokens x DefaultChatCallsPerHour x 2/3), so an unrelated
+	// edit to a byte cap in internal/thread moves it silently, and the docs — which
+	// quote it as a number an operator budgets against — do not move with it. That
+	// is not hypothetical: the shipped docs said 200000, the value from before the
+	// derivation landed, while the constant was really 107720. An operator sizing a
+	// deployment for 200000 hit the real ceiling at ~54% of the planned volume, and
+	// one who pasted `chat_tokens_per_hour: 200000` as "the default" raised the true
+	// ceiling by 1.86x.
+	//
+	// Pinning the literal makes the arithmetic visible in a diff. Changing a byte
+	// cap upstream now fails HERE, with this number in the message, and
+	// docsguard.TestThreadDefaultsMatchTheDocs fails alongside it naming every page
+	// that must be re-stated. Update both together, never one.
+	if got, want := thread.DefaultChatTokensPerHour, int64(107720); got != want {
+		t.Errorf("DefaultChatTokensPerHour = %d, want %d — if this was a deliberate retune, "+
+			"restate the new number everywhere the docs quote it (docsguard will list them)", got, want)
+	}
+}
+
+// TestNotifyThreadNegativeRejected pins the zero/negative choice documented
+// on ThreadNotify: 0 means "use the default", a negative value is a
+// misconfiguration Validate must reject — diverging deliberately from
+// ratelimit.Window's own <= 0-means-unlimited convention, since "unlimited"
+// would defeat the safety property each of these bounds exists to enforce.
+func TestNotifyThreadNegativeRejected(t *testing.T) {
+	base := func() *Config { return &Config{Model: Model{Provider: "anthropic"}} } // minimal valid config, see TestGitOpsMirrorConfig
+
+	tests := []struct {
+		name    string
+		mutate  func(*Config)
+		wantErr string
+	}{
+		{"max_notes_per_thread", func(c *Config) { c.Notify.Thread.MaxNotesPerThread = -1 }, "notify.thread.max_notes_per_thread"},
+		{"forge_writes_per_hour", func(c *Config) { c.Notify.Thread.ForgeWritesPerHour = -1 }, "notify.thread.forge_writes_per_hour"},
+		{"registry_ttl", func(c *Config) { c.Notify.Thread.RegistryTTL = -1 }, "notify.thread.registry_ttl"},
+		{"registry_max", func(c *Config) { c.Notify.Thread.RegistryMax = -1 }, "notify.thread.registry_max"},
+		{"max_note_bytes", func(c *Config) { c.Notify.Thread.MaxNoteBytes = -1 }, "notify.thread.max_note_bytes"},
+		{"chat_calls_per_hour", func(c *Config) { c.Notify.Thread.ChatCallsPerHour = -1 }, "notify.thread.chat_calls_per_hour"},
+		{"chat_tokens_per_hour", func(c *Config) { c.Notify.Thread.ChatTokensPerHour = -1 }, "notify.thread.chat_tokens_per_hour"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			c := base()
+			tt.mutate(c)
+			err := c.Validate()
+			if err == nil {
+				t.Fatalf("Validate() = nil, want an error mentioning %q", tt.wantErr)
+			}
+			if !strings.Contains(err.Error(), tt.wantErr) {
+				t.Fatalf("Validate() = %v, want it to mention %q", err, tt.wantErr)
+			}
+		})
+	}
+}
+
+// TestNotifyThreadDoesNotShadowARegisteredNotifier pins the collision guard
+// Notify.Extra's doc comment calls out: a notify.thread block must land on
+// the named Thread field, never in Extra, or it would silently shadow a
+// notifier registered under that name.
+func TestNotifyThreadDoesNotShadowARegisteredNotifier(t *testing.T) {
+	var c Config
+	if err := yaml.Unmarshal([]byte("notify:\n  thread:\n    max_notes_per_thread: 7\n"), &c); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if c.Notify.Thread.MaxNotesPerThread != 7 {
+		t.Fatalf("notify.thread must parse onto the named Thread field, got %+v", c.Notify.Thread)
+	}
+	if _, ok := c.Notify.Extra["thread"]; ok {
+		t.Fatal("notify.thread must not also land in Notify.Extra — it would shadow a notifier registered as \"thread\"")
 	}
 }

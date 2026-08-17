@@ -34,6 +34,17 @@ var ErrThreadNotTracked = errors.New("thread: root not tracked by the registry")
 // alongside it as if it were a real, persisted entry.
 var ErrThreadNotEstablishable = errors.New("thread: root cannot be established by the registry")
 
+// DefaultRegistryTTL bounds how long a thread stays answerable after its
+// investigation was delivered, when notify.thread.registry_ttl is unset. A
+// thread stays answerable for a week — long enough for a Monday follow-up on
+// a Friday incident, short enough that the live set stays small.
+const DefaultRegistryTTL = 7 * 24 * time.Hour
+
+// DefaultRegistryMax bounds how many live threads the registry holds at
+// once, when notify.thread.registry_max is unset — the real backstop for a
+// busy channel, independent of DefaultRegistryTTL.
+const DefaultRegistryMax = 2000
+
 // Registry maps a thread root to the investigation it delivered, so a later
 // reply can be attributed. It is append-only JSONL on disk, replayed on open —
 // the same durability mechanism outcome.Ledger uses, and for the same reason:
@@ -402,6 +413,13 @@ func (r *Registry) GetOrCreate(root string, fallback Context) (tc Context, creat
 // Matrix, …) can hand over the root/channel it already has, plus which transport
 // delivered it, without knowing what a registry is. Best-effort by contract: a
 // failure here must never affect delivery, so the error is dropped.
+//
+// It is also the ONLY point in the process where the investigation's reasoning
+// can be kept: RuledOut and DataGaps are persisted nowhere else — the curator's
+// KB draft never writes them, the outcome ledger has no such fields, and the
+// rendered chat message is write-only egress. Whatever evidenceFrom does not
+// take here is gone, which is why the chat layer's whole premise (answering
+// "did you check X?" without re-investigating) rests on this line.
 func (r *Registry) Register(transport, root, channel string, inv providers.Investigation) {
 	if root == "" {
 		return
@@ -416,6 +434,7 @@ func (r *Registry) Register(transport, root, channel string, inv providers.Inves
 		Verdict:       inv.Verdict,
 		CuratedURL:    inv.CuratedURL,
 		RecalledEntry: inv.RecalledEntry,
+		Evidence:      evidenceFrom(inv),
 		At:            r.now(),
 	})
 }

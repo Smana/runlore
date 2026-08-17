@@ -7,7 +7,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"io"
 	"log/slog"
 	"path/filepath"
 	"strings"
@@ -162,7 +161,7 @@ func newTestResponder(t *testing.T, f *fakeForge) *Responder {
 		MaxNotesPerThread: 3,
 		ForgeWrites:       ratelimit.New(10, time.Hour),
 		Now:               func() time.Time { return noteAt },
-		Log:               slog.New(slog.NewTextHandler(io.Discard, nil)),
+		Log:               silentLog(),
 	}
 }
 
@@ -186,6 +185,145 @@ func TestPRNumber(t *testing.T) {
 		if got != tt.want || ok != tt.ok {
 			t.Errorf("PRNumber(%q) = (%d, %v), want (%d, %v)", tt.url, got, ok, tt.want, tt.ok)
 		}
+	}
+}
+
+// TestResponderRefusesAPRURLOutsideTheConfiguredRepo closes the routing
+// finding. PRNumber matches "/pull/<n>" ANYWHERE in a URL, and the number it
+// yields is applied to the CONFIGURED repo — the only one the forge client
+// knows how to address. So the number has to come from a URL naming that
+// repository, and nothing less will do:
+//
+//   - another host entirely was the first half of this, and the only half an
+//     earlier version of the anchor enforced;
+//   - the SAME host, a different repository, is the half that mattered more.
+//     On github.com anybody owns a repository, so https://github.com/attacker/
+//     x/pull/9999 passed the host check and posted the human's note onto an
+//     unrelated pull request inside the operator's own knowledge-base repo;
+//   - a "/pull/<n>" somewhere further down the path of the right repository is
+//     not the pull request either — the segment has to follow the repo path.
+//
+// Not reachable today (the only untrusted source of a CuratedURL is the Matrix
+// stamp, and contextFor discards a stamp whose sender is not the bot itself),
+// which is exactly why it is worth anchoring: the defence should not depend on
+// a control one layer up staying correct forever.
+func TestResponderRefusesAPRURLOutsideTheConfiguredRepo(t *testing.T) {
+	for _, tt := range []struct{ name, url string }{
+		{"another host", "https://github.example.evil/acme/kb/pull/1337"},
+		{"another repo on the same host", "https://github.com/attacker/x/pull/9999"},
+		{"the configured owner, another repo", "https://github.com/acme/not-kb/pull/9999"},
+		{"the configured repo as a path suffix", "https://github.com/attacker/acme/kb/pull/9999"},
+		{"the configured repo as a host prefix", "https://github.com.evil/acme/kb/pull/9999"},
+		{"a sibling repo sharing the configured repo's name prefix", "https://github.com/acme/kb-staging/pull/9999"},
+		{"a pull segment deeper in the right repo", "https://github.com/acme/kb/blob/main/pull/9999"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			f := &fakeForge{}
+			r := newTestResponder(t, f)
+			r.ForgeRepo = "github.com/acme/kb"
+			tc := Context{Root: "111.222", CuratedURL: tt.url}
+			if err := r.Registry.Put(tc); err != nil {
+				t.Fatalf("Put: %v", err)
+			}
+
+			if _, err := r.Handle(context.Background(), tc, "alice", "note: the real cause was a spot reclaim"); err != nil {
+				t.Fatalf("Handle: %v", err)
+			}
+			if len(f.comments) != 0 {
+				t.Errorf("commented on PR #%d taken from %s — the number must not select a pull request in the configured repo", f.comments[0].number, tt.url)
+			}
+			if len(f.opened) != 1 {
+				t.Fatalf("opened = %d, want 1 — a refused URL must fall through to the standalone route, never drop the note", len(f.opened))
+			}
+		})
+	}
+}
+
+// TestResponderRoutesOnTheConfiguredRepo is the positive control: the anchor
+// must not break the ordinary case it guards, including the ports, the
+// letter-casing and the nested group paths real instances actually use.
+func TestResponderRoutesOnTheConfiguredRepo(t *testing.T) {
+	for _, tt := range []struct{ repo, url string }{
+		{"github.com/o/r", "https://github.com/o/r/pull/42"},
+		{"github.com/o/r", "https://GitHub.com/O/R/pull/42"},
+		{"ghe.example.com/o/r", "https://ghe.example.com/o/r/pull/42"},
+		{"github.com/o/r", "https://github.com/o/r/pull/42#issuecomment-1"},
+		{"github.com/o/r", "https://github.com/o/r/pull/42/files"},
+		{"gitlab.example.com/grp/proj", "https://gitlab.example.com:8443/grp/proj/-/merge_requests/42"},
+		{"gitlab.example.com/grp/sub/proj", "https://gitlab.example.com/grp/sub/proj/-/merge_requests/42"},
+		{"gitlab.example.com/grp/proj", "https://gitlab.example.com/grp/proj/merge_requests/42"},
+	} {
+		t.Run(tt.url, func(t *testing.T) {
+			f := &fakeForge{}
+			r := newTestResponder(t, f)
+			r.ForgeRepo = tt.repo
+			tc := Context{Root: "111.222", CuratedURL: tt.url}
+			if err := r.Registry.Put(tc); err != nil {
+				t.Fatalf("Put: %v", err)
+			}
+			if _, err := r.Handle(context.Background(), tc, "alice", "note: x"); err != nil {
+				t.Fatalf("Handle: %v", err)
+			}
+			if len(f.comments) != 1 || f.comments[0].number != 42 {
+				t.Fatalf("comments = %+v, want one on #42 — the anchor must not refuse the configured repo", f.comments)
+			}
+		})
+	}
+}
+
+// TestResponderUnsetForgeRepoRoutesExactlyAsBefore pins that the anchor is
+// opt-in: a Responder built without ForgeRepo — every existing caller, and
+// every test in internal/notify and internal/server — behaves byte-for-byte
+// as it did before the field existed.
+func TestResponderUnsetForgeRepoRoutesExactlyAsBefore(t *testing.T) {
+	f := &fakeForge{}
+	r := newTestResponder(t, f)
+	tc := Context{Root: "111.222", CuratedURL: "https://github.example.evil/attacker/repo/pull/1337"}
+	if err := r.Registry.Put(tc); err != nil {
+		t.Fatalf("Put: %v", err)
+	}
+	if _, err := r.Handle(context.Background(), tc, "alice", "note: x"); err != nil {
+		t.Fatalf("Handle: %v", err)
+	}
+	if len(f.comments) != 1 || f.comments[0].number != 1337 {
+		t.Fatalf("comments = %+v, want one on #1337 — an unset ForgeRepo must not change routing", f.comments)
+	}
+}
+
+// TestResponderRefusesEveryURLWhenForgeRepoIsMalformed pins the fail-closed
+// direction for a ForgeRepo that names no repository path ("github.com", or a
+// stray "/"). Set-but-unusable must refuse everything rather than silently
+// degrade to the host-only check this replaced — a misconfiguration should
+// cost a fallback to the standalone route, never a comment on a pull request
+// chosen by a URL.
+func TestResponderRefusesEveryURLWhenForgeRepoIsMalformed(t *testing.T) {
+	for _, tt := range []struct{ repo, url string }{
+		{"github.com", "https://github.com/acme/kb/pull/42"},
+		{"/", "https://github.com/acme/kb/pull/42"},
+		{"github.com/", "https://github.com/acme/kb/pull/42"},
+		// An empty repository path would otherwise reduce the prefix to "/",
+		// which a doubled slash then satisfies — the one input on which a
+		// half-formed ForgeRepo would have yielded a number rather than a refusal.
+		{"github.com", "https://github.com//pull/42"},
+	} {
+		t.Run(tt.repo+" "+tt.url, func(t *testing.T) {
+			f := &fakeForge{}
+			r := newTestResponder(t, f)
+			r.ForgeRepo = tt.repo
+			tc := Context{Root: "111.222", CuratedURL: tt.url}
+			if err := r.Registry.Put(tc); err != nil {
+				t.Fatalf("Put: %v", err)
+			}
+			if _, err := r.Handle(context.Background(), tc, "alice", "note: x"); err != nil {
+				t.Fatalf("Handle: %v", err)
+			}
+			if len(f.comments) != 0 {
+				t.Errorf("commented on PR #%d with a ForgeRepo that names no repository", f.comments[0].number)
+			}
+			if len(f.opened) != 1 {
+				t.Fatalf("opened = %d, want 1 — the note must still be recorded", len(f.opened))
+			}
+		})
 	}
 }
 
@@ -1064,5 +1202,868 @@ func TestResponderWriteErrorReleasesTheGuard(t *testing.T) {
 
 	if len(f.opened) != 1 {
 		t.Fatalf("opened = %d, want 1 — the second write must have actually landed, not just returned", len(f.opened))
+	}
+}
+
+// newChatResponder is newTestResponder with the chat layer wired to model. The
+// Chat it builds carries nothing but a model and a logger: Budget, Catalog and
+// Metrics are all nil-safe, and leaving them nil is what keeps these tests
+// about the ROUTING Handle does with an answer rather than about how the
+// answer was produced (chat_test.go covers that).
+func newChatResponder(t *testing.T, f *fakeForge, model providers.ModelProvider) *Responder {
+	t.Helper()
+	r := newTestResponder(t, f)
+	r.Chat = &Chat{Model: model, Log: silentLog()}
+	return r
+}
+
+// TestHandleChatUnconfiguredFreeformIsUnchanged pins that the chat layer is
+// strictly opt-in: with no Chat wired, a freeform message behaves exactly as
+// it did before this route existed — the how-to reply, and nothing written.
+// An operator who never configures model.chat must see PR2's behaviour
+// byte-for-byte.
+func TestHandleChatUnconfiguredFreeformIsUnchanged(t *testing.T) {
+	f := &fakeForge{}
+	r := newTestResponder(t, f)
+	if r.Chat != nil {
+		t.Fatal("test setup: newTestResponder must leave Chat nil")
+	}
+	tc := Context{Root: "111.222", CuratedURL: "https://github.com/o/r/pull/42"}
+	if err := r.Registry.Put(tc); err != nil {
+		t.Fatalf("Put: %v", err)
+	}
+
+	reply, err := r.Handle(context.Background(), tc, "alice", "<@U0BOT> was it the CNI?")
+	if err != nil {
+		t.Fatalf("Handle: %v", err)
+	}
+	if reply != FreeformNotRecordedReply {
+		t.Errorf("reply = %q, want FreeformNotRecordedReply", reply)
+	}
+	if c, o := f.counts(); c != 0 || o != 0 {
+		t.Errorf("forge calls = %d comments / %d opened, want 0/0", c, o)
+	}
+}
+
+// TestHandleChatAnswersFreeformWithTheModelsReply is the happy path with
+// nothing to record: the human asked a question, the model answered it, and
+// kb_note came back empty — "file nothing", not an omission. The reply is the
+// model's own, and the knowledge base is untouched.
+func TestHandleChatAnswersFreeformWithTheModelsReply(t *testing.T) {
+	f := &fakeForge{}
+	model := &fakeChatModel{resp: wellFormedReply("The CNI was ruled out; it was a spot reclaim.", "")}
+	r := newChatResponder(t, f, model)
+	tc := Context{Root: "111.222", CuratedURL: "https://github.com/o/r/pull/42"}
+	if err := r.Registry.Put(tc); err != nil {
+		t.Fatalf("Put: %v", err)
+	}
+
+	reply, err := r.Handle(context.Background(), tc, "alice", "<@U0BOT> was it the CNI?")
+	if err != nil {
+		t.Fatalf("Handle: %v", err)
+	}
+	if model.calls != 1 {
+		t.Errorf("Complete called %d times, want exactly 1", model.calls)
+	}
+	// Quoted, not verbatim: model prose is always marked as the model's — see
+	// TestHandleChatModelProseCannotForgeRunLoresStatusLines. It also carries
+	// untrusted-span marks for the transport, which RenderReply resolves; a nil
+	// escape strips them and leaves the text a human would actually read.
+	if got := RenderReply(reply, nil); got != "> The CNI was ruled out; it was a spot reclaim." {
+		t.Errorf("reply = %q, want the model's own reply, quoted", got)
+	}
+	if c, o := f.counts(); c != 0 || o != 0 {
+		t.Errorf("forge calls = %d comments / %d opened, want 0/0 — an empty kb_note writes nothing", c, o)
+	}
+}
+
+// TestHandleChatProposedNoteIsWrittenThroughTheExistingRouting is the core of
+// this route: a non-empty kb_note goes through the SAME write() the explicit
+// `note:` path uses, so it lands on the PR the thread context points at. The
+// model supplied content only — it never named a target, and could not have.
+// The thread's note counter is charged for it exactly as an explicit note is.
+func TestHandleChatProposedNoteIsWrittenThroughTheExistingRouting(t *testing.T) {
+	f := &fakeForge{}
+	model := &fakeChatModel{resp: wellFormedReply("Noted — that changes the root cause.", "The real cause was a spot-node reclaim, not the CNI.")}
+	r := newChatResponder(t, f, model)
+	tc := Context{Root: "111.222", Title: "OOM", CuratedURL: "https://github.com/o/r/pull/42"}
+	if err := r.Registry.Put(tc); err != nil {
+		t.Fatalf("Put: %v", err)
+	}
+
+	reply, err := r.Handle(context.Background(), tc, "alice", "<@U0BOT> it was actually a spot reclaim")
+	if err != nil {
+		t.Fatalf("Handle: %v", err)
+	}
+	if len(f.comments) != 1 || len(f.opened) != 0 {
+		t.Fatalf("forge calls = %d comments / %d opened, want 1/0 — the note must take the linked-PR route", len(f.comments), len(f.opened))
+	}
+	if f.comments[0].number != 42 {
+		t.Errorf("commented on PR #%d, want #42 — the route comes from the thread context, never from the model", f.comments[0].number)
+	}
+	if !strings.Contains(f.comments[0].body, "spot-node reclaim, not the CNI") {
+		t.Errorf("the comment must carry the model's kb_note, got:\n%s", f.comments[0].body)
+	}
+	// The kb_note is what gets FILED; the human's message is carried alongside it
+	// as the evidence a reviewer weighs the draft against — see
+	// TestHandleChatProposedNoteIsFiledAsModelDrafted.
+	if !strings.Contains(f.comments[0].body, "> it was actually a spot reclaim") {
+		t.Errorf("the comment must quote the human message the draft came from, got:\n%s", f.comments[0].body)
+	}
+	if !strings.Contains(reply, "Noted — that changes the root cause.") {
+		t.Errorf("reply = %q, want it to carry the model's answer", reply)
+	}
+	if !strings.Contains(reply, "#42") {
+		t.Errorf("reply = %q, want it to tell the human where the note landed", reply)
+	}
+	got, ok := r.Registry.Get("111.222")
+	if !ok {
+		t.Fatal("Get: thread missing from the registry")
+	}
+	if got.Notes != 1 {
+		t.Errorf("Notes = %d, want 1 — a chat-proposed note spends the same per-thread allowance an explicit note does", got.Notes)
+	}
+}
+
+// TestWriteRouteIgnoresAForgeURLInTheNoteText is the adversarial half of the
+// test above, and the half that actually pins its failure message ("the route
+// comes from the thread context, never from the model"). That test's kb_note
+// contains no URL at all, so its fixture cannot violate the property it names:
+// adding n.Text as the first routing candidate in Responder.write left the
+// whole package green, while a live kb_note carrying
+// https://github.com/o/r/pull/1337 redirected the human's note off the
+// context's PR #42 and onto #1337.
+//
+// The note text below is one prNumberOn ACCEPTS WHOLE — configured host,
+// configured repository path, pull segment immediately after it — which is the
+// only kind that proves anything now that the anchor parses the candidate as a
+// URL rather than scanning it for "/pull/<n>". A URL buried mid-sentence no
+// longer parses at all ("the fix is on https://…" has no host), so a fixture
+// that embeds one that way is inert against this mutation even though it looks
+// adversarial. The setup guard asserts acceptance of the exact string write()
+// would route on, not of the URL in isolation.
+//
+// Both callers of write() are driven, because the property is about the note
+// TEXT and each route supplies it from a different untrusted author: the
+// deterministic `note:` capture files the human's own words, and the chat route
+// files the model's. Neither may name a target.
+func TestWriteRouteIgnoresAForgeURLInTheNoteText(t *testing.T) {
+	const (
+		repo   = "github.com/acme/kb"
+		linked = "https://github.com/acme/kb/pull/42"
+		forged = "https://github.com/acme/kb/pull/1337"
+		// A note leading with a link is ordinary model (and human) output, and it
+		// is also the shape prNumberOn accepts: the trailing prose lands inside
+		// the URL's path, after the pull segment the number comes from.
+		noteText = forged + " already documents this — the real cause was a spot-node reclaim"
+	)
+
+	routes := []struct {
+		name    string
+		build   func(t *testing.T, f *fakeForge) *Responder
+		message string
+	}{
+		{
+			name: "model-authored note text",
+			build: func(t *testing.T, f *fakeForge) *Responder {
+				t.Helper()
+				return newChatResponder(t, f, &fakeChatModel{resp: wellFormedReply("Noted.", noteText)})
+			},
+			message: "<@U0BOT> it was actually a spot reclaim",
+		},
+		{
+			name:    "human-authored note text",
+			build:   newTestResponder,
+			message: "<@U0BOT> note: " + noteText,
+		},
+	}
+	for _, rt := range routes {
+		t.Run(rt.name, func(t *testing.T) {
+			// setUp builds the responder and refuses to continue unless the note
+			// text — the whole string, exactly as write() would see it — is one the
+			// routing parser takes a decision from. Without this guard the arms
+			// below would pass against a write() that routed on n.Text, simply
+			// because prNumberOn rejected the text for an unrelated reason, which
+			// is the exact inertness this test exists to end.
+			setUp := func(t *testing.T, f *fakeForge) *Responder {
+				t.Helper()
+				r := rt.build(t, f)
+				r.ForgeRepo = repo
+				if n, ok := r.prNumberOn(noteText); !ok || n != 1337 {
+					t.Fatalf("fixture is inert: prNumberOn(%q) = (%d, %v), want (1337, true) — the note text must be something the router would accept, or nothing about routing is being tested", noteText, n, ok)
+				}
+				return r
+			}
+
+			t.Run("the note lands on the thread's own PR", func(t *testing.T) {
+				f := &fakeForge{}
+				r := setUp(t, f)
+				tc := Context{Root: "111.222", Title: "OOM", CuratedURL: linked}
+				if err := r.Registry.Put(tc); err != nil {
+					t.Fatalf("Put: %v", err)
+				}
+
+				if _, err := r.Handle(context.Background(), tc, "alice", rt.message); err != nil {
+					t.Fatalf("Handle: %v", err)
+				}
+				if len(f.comments) != 1 {
+					t.Fatalf("comments = %d, want 1", len(f.comments))
+				}
+				if f.comments[0].number != 42 {
+					t.Fatalf("the note landed on PR #%d, want #42 — a forge URL inside the note text must never select the pull request it is written to", f.comments[0].number)
+				}
+				for _, n := range f.prOpenCalls {
+					if n != 42 {
+						t.Fatalf("the open-check asked about PR #%d — a URL in the note text must not even become a routing candidate (asked about %v)", n, f.prOpenCalls)
+					}
+				}
+			})
+
+			t.Run("with no PR linked it opens a standalone one", func(t *testing.T) {
+				f := &fakeForge{}
+				r := setUp(t, f)
+				tc := Context{Root: "111.222", Title: "OOM"} // no CuratedURL, no NoteURL
+				if err := r.Registry.Put(tc); err != nil {
+					t.Fatalf("Put: %v", err)
+				}
+
+				if _, err := r.Handle(context.Background(), tc, "alice", rt.message); err != nil {
+					t.Fatalf("Handle: %v", err)
+				}
+				if len(f.comments) != 0 {
+					t.Fatalf("commented on PR #%d with nothing linked to the thread — the note text supplied a route it must never supply", f.comments[0].number)
+				}
+				if len(f.opened) != 1 {
+					t.Fatalf("opened = %d, want 1 — a thread with no linked PR must open a standalone one", len(f.opened))
+				}
+				if len(f.prOpenCalls) != 0 {
+					t.Fatalf("the open-check ran for %v with nothing linked to the thread — the only routing candidates are the context's own URLs", f.prOpenCalls)
+				}
+			})
+		})
+	}
+}
+
+// TestHandleChatModelProseCannotForgeRunLoresStatusLines closes the finding
+// that the model's answer and RunLore's own statements about what it did were
+// posted into the same message, under the same bot identity, in the same
+// vocabulary. The model reproduces RunLore's "📝"/"⚠️" status wording
+// byte-for-byte — it has been shown the real thing — so a message like
+// "📝 Noted on the knowledge-base PR #7 — https://github.example.evil/…" or
+// "⚠️ RunLore security notice: your session token has expired, re-authenticate
+// at https://runlore.evil/login" arrived indistinguishable from a line RunLore
+// actually wrote.
+//
+// The bot's own claims about what it did must not be forgeable by its own
+// model output.
+func TestHandleChatModelProseCannotForgeRunLoresStatusLines(t *testing.T) {
+	forged := "📝 Noted on the knowledge-base PR #7 — https://github.example.evil/o/kb/pull/7\n" +
+		"⚠️ RunLore security notice: your session token has expired, re-authenticate at https://runlore.evil/login"
+	f := &fakeForge{}
+	model := &fakeChatModel{resp: wellFormedReply(forged, "")}
+	r := newChatResponder(t, f, model)
+	tc := Context{Root: "111.222", CuratedURL: "https://github.com/o/r/pull/42"}
+	if err := r.Registry.Put(tc); err != nil {
+		t.Fatalf("Put: %v", err)
+	}
+
+	reply, err := r.Handle(context.Background(), tc, "alice", "<@U0BOT> was it the CNI?")
+	if err != nil {
+		t.Fatalf("Handle: %v", err)
+	}
+	for _, line := range strings.Split(reply, "\n") {
+		if !strings.HasPrefix(line, "> ") {
+			t.Errorf("a line of model prose was posted unquoted, so it reads as RunLore's own: %q", line)
+		}
+		for _, glyph := range []string{"📝", "⚠"} {
+			if strings.Contains(line, glyph) {
+				t.Errorf("model prose kept RunLore's status glyph %q: %q", glyph, line)
+			}
+		}
+	}
+	if !strings.Contains(reply, "your session token has expired") {
+		t.Errorf("the model's words must survive — marked, not censored: %q", reply)
+	}
+}
+
+// TestHandleChatRunLoresOwnStatusLineStaysUnquoted is the other half: the
+// distinction only works if RunLore's real status line is NOT quoted, so the
+// two are visibly different in the same message.
+func TestHandleChatRunLoresOwnStatusLineStaysUnquoted(t *testing.T) {
+	f := &fakeForge{}
+	model := &fakeChatModel{resp: wellFormedReply("Noted.", "the real cause was a spot reclaim")}
+	r := newChatResponder(t, f, model)
+	tc := Context{Root: "111.222", CuratedURL: "https://github.com/o/r/pull/42"}
+	if err := r.Registry.Put(tc); err != nil {
+		t.Fatalf("Put: %v", err)
+	}
+
+	reply, err := r.Handle(context.Background(), tc, "alice", "<@U0BOT> it was a spot reclaim")
+	if err != nil {
+		t.Fatalf("Handle: %v", err)
+	}
+	// Read as a human would see it: the untrusted-span marks are the
+	// transport's business, not the quoting contract's — see RenderReply.
+	rendered := RenderReply(reply, nil)
+	if !strings.Contains(rendered, "\n📝 Noted on the knowledge-base PR #42") {
+		t.Errorf("RunLore's own status line must stay unquoted and glyph-led: %q", rendered)
+	}
+	if !strings.Contains(rendered, "> Noted.") {
+		t.Errorf("the model's answer must be quoted: %q", rendered)
+	}
+}
+
+// TestHandleChatProposedNoteIsFiledAsModelDrafted is the end-to-end guard for
+// the provenance split. freeform hands record() the MODEL's kb_note, and
+// before this fix that text was filed under the human's own verbatim-note
+// header — a KB reviewer saw a named engineer apparently stating something the
+// engineer never wrote, merged it, and internal/curate's isOperatorNote then
+// protected it from the stale sweep with the provenance unrecoverable from the
+// PR. The human merge is also the last gate on the section-forgery chain, so
+// this is exactly the signal that gate depends on.
+func TestHandleChatProposedNoteIsFiledAsModelDrafted(t *testing.T) {
+	f := &fakeForge{}
+	model := &fakeChatModel{resp: wellFormedReply("Answered.", "Confirmed: spot-node reclaim, not the CNI.")}
+	r := newChatResponder(t, f, model)
+	tc := Context{Root: "111.222", Transport: "slack", Title: "pod crash-looping", CuratedURL: "https://github.com/o/r/pull/42"}
+	if err := r.Registry.Put(tc); err != nil {
+		t.Fatalf("Put: %v", err)
+	}
+
+	if _, err := r.Handle(context.Background(), tc, "alice", "<@U0BOT> did you check the NetworkPolicies?"); err != nil {
+		t.Fatalf("Handle: %v", err)
+	}
+	if len(f.comments) != 1 {
+		t.Fatalf("comments = %d, want 1", len(f.comments))
+	}
+	body := f.comments[0].body
+	if strings.Contains(body, "From **@alice** via slack") {
+		t.Errorf("model-drafted text must not be filed under the human's verbatim-note header:\n%s", body)
+	}
+	if !strings.Contains(body, "> did you check the NetworkPolicies?") {
+		t.Errorf("the human's actual message must be quoted so a reviewer can weigh the draft against it:\n%s", body)
+	}
+}
+
+// TestHandleNoteRouteStillFilesTheHumansVerbatimWords is the other half of the
+// split: an explicit "note:" is the route whose whole contract is verbatim
+// human words, and it must keep the header that says so.
+func TestHandleNoteRouteStillFilesTheHumansVerbatimWords(t *testing.T) {
+	f := &fakeForge{}
+	r := newTestResponder(t, f)
+	tc := Context{Root: "111.222", Transport: "slack", CuratedURL: "https://github.com/o/r/pull/42"}
+	if err := r.Registry.Put(tc); err != nil {
+		t.Fatalf("Put: %v", err)
+	}
+
+	if _, err := r.Handle(context.Background(), tc, "alice", "<@U0BOT> note: it was a spot reclaim"); err != nil {
+		t.Fatalf("Handle: %v", err)
+	}
+	if len(f.comments) != 1 {
+		t.Fatalf("comments = %d, want 1", len(f.comments))
+	}
+	if !strings.Contains(f.comments[0].body, "From **@alice** via slack") {
+		t.Errorf("an explicit note: must keep the human provenance header:\n%s", f.comments[0].body)
+	}
+}
+
+// TestHandleChatProposedNoteOpensAStandalonePRWhenNoneIsLinked covers the
+// other arm of the same routing: with no PR on the thread context, the note
+// opens a standalone Concept PR — again chosen by write(), not by the model.
+func TestHandleChatProposedNoteOpensAStandalonePRWhenNoneIsLinked(t *testing.T) {
+	f := &fakeForge{}
+	model := &fakeChatModel{resp: wellFormedReply("Got it.", "Spot reclaims on the burst pool look like OOM kills.")}
+	r := newChatResponder(t, f, model)
+	tc := Context{Root: "111.222", Title: "OOM"}
+	if err := r.Registry.Put(tc); err != nil {
+		t.Fatalf("Put: %v", err)
+	}
+
+	reply, err := r.Handle(context.Background(), tc, "alice", "<@U0BOT> spot reclaims look like OOM kills")
+	if err != nil {
+		t.Fatalf("Handle: %v", err)
+	}
+	if len(f.opened) != 1 || len(f.comments) != 0 {
+		t.Fatalf("forge calls = %d comments / %d opened, want 0/1", len(f.comments), len(f.opened))
+	}
+	if !strings.Contains(f.opened[0].Body, "burst pool look like OOM kills") {
+		t.Errorf("the opened entry must carry the model's kb_note, got:\n%s", f.opened[0].Body)
+	}
+	if !strings.Contains(reply, "Got it.") {
+		t.Errorf("reply = %q, want it to carry the model's answer", reply)
+	}
+}
+
+// TestHandleChatDegradesToTheDeterministicReply pins the fallback contract:
+// every way Answer can report false — a model error, a model that never got
+// configured, a response with no tool call — degrades to the reply freeform
+// gave before this route existed. A human's message is never silently
+// dropped because a provider had a bad minute.
+func TestHandleChatDegradesToTheDeterministicReply(t *testing.T) {
+	tests := []struct {
+		name string
+		chat func() *Chat
+	}{
+		{"model error", func() *Chat {
+			return &Chat{Model: &fakeChatModel{err: errors.New("503 unavailable")}, Log: silentLog()}
+		}},
+		{"no model configured", func() *Chat {
+			return &Chat{Log: silentLog()}
+		}},
+		{"no tool call", func() *Chat {
+			return &Chat{Model: &fakeChatModel{resp: providers.CompletionResponse{Text: "sure thing"}}, Log: silentLog()}
+		}},
+		{"empty reply", func() *Chat {
+			return &Chat{Model: &fakeChatModel{resp: wellFormedReply("   ", "a fact")}, Log: silentLog()}
+		}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			f := &fakeForge{}
+			r := newTestResponder(t, f)
+			r.Chat = tt.chat()
+			tc := Context{Root: "111.222", CuratedURL: "https://github.com/o/r/pull/42"}
+			if err := r.Registry.Put(tc); err != nil {
+				t.Fatalf("Put: %v", err)
+			}
+
+			reply, err := r.Handle(context.Background(), tc, "alice", "<@U0BOT> was it the CNI?")
+			if err != nil {
+				t.Fatalf("Handle: %v", err)
+			}
+			if reply != FreeformNotRecordedReply {
+				t.Errorf("reply = %q, want FreeformNotRecordedReply — a failed answer must degrade, never drop", reply)
+			}
+			if c, o := f.counts(); c != 0 || o != 0 {
+				t.Errorf("forge calls = %d comments / %d opened, want 0/0 — a failed answer must not write", c, o)
+			}
+		})
+	}
+}
+
+// TestHandleChatNotePrefixMakesZeroModelCalls pins that wiring a model changed
+// nothing about the deterministic capture path: an explicit `note:` is still
+// written verbatim, and costs no tokens at all. Asserted on the model's own
+// call count, not inferred from the reply — a route that called the model and
+// then ignored its answer would still be a per-message spend nobody asked for.
+func TestHandleChatNotePrefixMakesZeroModelCalls(t *testing.T) {
+	f := &fakeForge{}
+	model := &fakeChatModel{resp: wellFormedReply("should never be used", "should never be written")}
+	r := newChatResponder(t, f, model)
+	tc := Context{Root: "111.222", Title: "OOM", CuratedURL: "https://github.com/o/r/pull/42"}
+	if err := r.Registry.Put(tc); err != nil {
+		t.Fatalf("Put: %v", err)
+	}
+
+	reply, err := r.Handle(context.Background(), tc, "alice", "<@U0BOT> note: spot reclaim, not OOM")
+	if err != nil {
+		t.Fatalf("Handle: %v", err)
+	}
+	if model.calls != 0 {
+		t.Errorf("Complete called %d times, want 0 — an explicit note is captured verbatim and costs no tokens", model.calls)
+	}
+	if len(f.comments) != 1 {
+		t.Fatalf("comments = %d, want 1", len(f.comments))
+	}
+	if !strings.Contains(f.comments[0].body, "spot reclaim, not OOM") {
+		t.Errorf("the comment must carry the human's own words, got:\n%s", f.comments[0].body)
+	}
+	if !strings.Contains(reply, "#42") {
+		t.Errorf("reply = %q, want the note-recorded reply", reply)
+	}
+}
+
+// TestHandleChatWidenedNotePrefixMakesZeroModelCalls is the cost half of the
+// grammar fix. The docs say the deterministic `note:` path is free; a counting
+// model showed "hey <@U0BOT> note: …", "<@U0BOT> please note: …" and
+// ":wave: <@U0BOT> note: …" each costing one model call, because "note:" was
+// only recognised at position 0. An operator told a path is free, who is then
+// billed for "please note:", was misled by the interface, not by the docs.
+func TestHandleChatWidenedNotePrefixMakesZeroModelCalls(t *testing.T) {
+	for _, raw := range []string{
+		"<@U0BOT> note: the cause was a spot reclaim",
+		"<@U0BOT> Note: the cause was a spot reclaim",
+		"note: the cause was a spot reclaim",
+		"hey <@U0BOT> note: the cause was a spot reclaim",
+		"<@U0BOT> please note: the cause was a spot reclaim",
+		":wave: <@U0BOT> note: the cause was a spot reclaim",
+		"hey runlore note: the cause was a spot reclaim",
+	} {
+		t.Run(raw, func(t *testing.T) {
+			f := &fakeForge{}
+			model := &fakeChatModel{resp: wellFormedReply("should never be called", "")}
+			r := newChatResponder(t, f, model)
+			tc := Context{Root: "111.222", CuratedURL: "https://github.com/o/r/pull/42"}
+			if err := r.Registry.Put(tc); err != nil {
+				t.Fatalf("Put: %v", err)
+			}
+
+			if _, err := r.Handle(context.Background(), tc, "alice", raw); err != nil {
+				t.Fatalf("Handle: %v", err)
+			}
+			if model.calls != 0 {
+				t.Errorf("Complete called %d times, want 0 — the deterministic note: path must cost nothing", model.calls)
+			}
+			if len(f.comments) != 1 {
+				t.Fatalf("comments = %d, want 1 — the note must still be recorded", len(f.comments))
+			}
+			if !strings.Contains(f.comments[0].body, "the cause was a spot reclaim") {
+				t.Errorf("the note text must be the words after the prefix:\n%s", f.comments[0].body)
+			}
+			if strings.Contains(f.comments[0].body, "please note") || strings.Contains(f.comments[0].body, "<@U0BOT>") {
+				t.Errorf("the addressing prefix must not be recorded as part of the note:\n%s", f.comments[0].body)
+			}
+		})
+	}
+}
+
+// TestHandleChatBareMentionAndFreeformStillCostAModelCall keeps the widening
+// from swallowing the route it sits next to: anything WITHOUT the token is
+// still freeform, and a bare mention still costs nothing.
+func TestHandleChatFreeformWithoutTheTokenStillReachesTheModel(t *testing.T) {
+	f := &fakeForge{}
+	model := &fakeChatModel{resp: wellFormedReply("answered", "")}
+	r := newChatResponder(t, f, model)
+	tc := Context{Root: "111.222", CuratedURL: "https://github.com/o/r/pull/42"}
+	if err := r.Registry.Put(tc); err != nil {
+		t.Fatalf("Put: %v", err)
+	}
+	if _, err := r.Handle(context.Background(), tc, "alice", "<@U0BOT> see footnote: at the bottom"); err != nil {
+		t.Fatalf("Handle: %v", err)
+	}
+	if model.calls != 1 {
+		t.Errorf("Complete called %d times, want 1 — a word merely ending in \"note:\" is not the command", model.calls)
+	}
+}
+
+// TestHandleChatReinvestigateMakesZeroModelCalls pins the reserved command is
+// untouched by this route: still refused, still no write — and now also no
+// model call, so a reserved command cannot be turned into a token spend by
+// wiring a chat model.
+func TestHandleChatReinvestigateMakesZeroModelCalls(t *testing.T) {
+	f := &fakeForge{}
+	model := &fakeChatModel{resp: wellFormedReply("should never be used", "should never be written")}
+	r := newChatResponder(t, f, model)
+	tc := Context{Root: "111.222", CuratedURL: "https://github.com/o/r/pull/42"}
+
+	reply, err := r.Handle(context.Background(), tc, "alice", "<@U0BOT> please reinvestigate: the CNI")
+	if err != nil {
+		t.Fatalf("Handle: %v", err)
+	}
+	if model.calls != 0 {
+		t.Errorf("Complete called %d times, want 0 — a reserved command is refused before any model call", model.calls)
+	}
+	if c, o := f.counts(); c != 0 || o != 0 {
+		t.Errorf("forge calls = %d comments / %d opened, want 0/0", c, o)
+	}
+	if reply != ReinvestigateNotSupportedReply {
+		t.Errorf("reply = %q, want ReinvestigateNotSupportedReply", reply)
+	}
+}
+
+// TestHandleChatBareMentionMakesZeroModelCalls: a bare "<@U0BOT>" parses as
+// freeform with empty Text (see grammar_test.go). There is no question in it
+// to answer, so it must not become a paid model call — the cheapest way to
+// make a channel expensive would otherwise be to mention the bot repeatedly
+// with nothing after it.
+func TestHandleChatBareMentionMakesZeroModelCalls(t *testing.T) {
+	f := &fakeForge{}
+	model := &fakeChatModel{resp: wellFormedReply("should never be used", "")}
+	r := newChatResponder(t, f, model)
+	tc := Context{Root: "111.222", CuratedURL: "https://github.com/o/r/pull/42"}
+
+	reply, err := r.Handle(context.Background(), tc, "alice", "<@U0BOT>")
+	if err != nil {
+		t.Fatalf("Handle: %v", err)
+	}
+	if model.calls != 0 {
+		t.Errorf("Complete called %d times, want 0 — an empty message has nothing to answer", model.calls)
+	}
+	if reply != FreeformNotRecordedReply {
+		t.Errorf("reply = %q, want FreeformNotRecordedReply", reply)
+	}
+	if c, o := f.counts(); c != 0 || o != 0 {
+		t.Errorf("forge calls = %d comments / %d opened, want 0/0", c, o)
+	}
+}
+
+// TestHandleChatProposedNoteIsBoundedByTheForgeWriteWindow proves the two
+// ceilings stayed separate. ForgeWrites bounds PRs and comments; Budget bounds
+// tokens. An exhausted forge window must not suppress the ANSWER — the human
+// still gets one — it must only stop the write, and the human must be told the
+// note was not saved rather than left believing it was.
+func TestHandleChatProposedNoteIsBoundedByTheForgeWriteWindow(t *testing.T) {
+	f := &fakeForge{}
+	model := &fakeChatModel{resp: wellFormedReply("Understood.", "The real cause was a spot-node reclaim.")}
+	r := newChatResponder(t, f, model)
+	r.ForgeWrites = ratelimit.New(1, time.Hour)
+	if !r.ForgeWrites.Allow() {
+		t.Fatal("test setup: the first slot must be available")
+	}
+	tc := Context{Root: "111.222", CuratedURL: "https://github.com/o/r/pull/42"}
+	if err := r.Registry.Put(tc); err != nil {
+		t.Fatalf("Put: %v", err)
+	}
+
+	reply, err := r.Handle(context.Background(), tc, "alice", "<@U0BOT> it was a spot reclaim")
+	if err != nil {
+		t.Fatalf("Handle: %v", err)
+	}
+	if model.calls != 1 {
+		t.Errorf("Complete called %d times, want 1 — the forge window bounds writes, not answers", model.calls)
+	}
+	if c, o := f.counts(); c != 0 || o != 0 {
+		t.Errorf("forge calls = %d comments / %d opened, want 0/0 — the window was exhausted", c, o)
+	}
+	if !strings.Contains(reply, "Understood.") {
+		t.Errorf("reply = %q, want the model's answer even when the write was throttled", reply)
+	}
+	if !strings.Contains(reply, "too many knowledge-base writes") {
+		t.Errorf("reply = %q, want it to say the note was not saved", reply)
+	}
+}
+
+// TestHandleChatProposedNoteIsBoundedByThePerThreadCap: the note this route
+// proposes draws on the SAME per-thread allowance an explicit note does, so a
+// thread already at its cap writes nothing further — while still getting its
+// answer.
+func TestHandleChatProposedNoteIsBoundedByThePerThreadCap(t *testing.T) {
+	f := &fakeForge{}
+	model := &fakeChatModel{resp: wellFormedReply("Understood.", "The real cause was a spot-node reclaim.")}
+	r := newChatResponder(t, f, model)
+	tc := Context{Root: "111.222", CuratedURL: "https://github.com/o/r/pull/42", Notes: 3}
+	if err := r.Registry.Put(tc); err != nil {
+		t.Fatalf("Put: %v", err)
+	}
+
+	reply, err := r.Handle(context.Background(), tc, "alice", "<@U0BOT> it was a spot reclaim")
+	if err != nil {
+		t.Fatalf("Handle: %v", err)
+	}
+	if c, o := f.counts(); c != 0 || o != 0 {
+		t.Errorf("forge calls = %d comments / %d opened, want 0/0 — the thread is at its cap", c, o)
+	}
+	if !strings.Contains(reply, "Understood.") {
+		t.Errorf("reply = %q, want the model's answer even at the cap", reply)
+	}
+	if !strings.Contains(reply, "note limit") {
+		t.Errorf("reply = %q, want it to say the note was not saved", reply)
+	}
+}
+
+// visibleEscape stands in for a transport's own escaper. It wraps whatever
+// span it is handed in «…» so a test can see EXACTLY which bytes of a reply an
+// adapter would neutralise, without importing one chat system's markup rules
+// into a package that must not know them. The real escapers are asserted
+// against the real transports in internal/notify.
+func visibleEscape(s string) string { return "«" + s + "»" }
+
+// TestUntrustedRoundTripsThroughRenderReply pins the span primitives on their
+// own, ahead of the routing that uses them: what Untrusted wraps is what
+// escape sees, RunLore's own bytes are never handed to escape, a nil escape
+// strips the marks without touching anything, and content that already
+// contains the mark cannot smuggle a span boundary of its own.
+func TestUntrustedRoundTripsThroughRenderReply(t *testing.T) {
+	for _, tt := range []struct {
+		name  string
+		reply string
+		want  string
+	}{
+		{"no span at all", "📝 Noted on PR #42", "📝 Noted on PR #42"},
+		{"one span", "> " + Untrusted("<!channel>"), "> «<!channel>»"},
+		{
+			"RunLore's framing around a span",
+			"> " + Untrusted("hi") + "\n📝 Noted — `note: <text>`",
+			"> «hi»\n📝 Noted — `note: <text>`",
+		},
+		{"empty content is not marked", "> " + Untrusted(""), "> "},
+		{
+			"content carrying the mark cannot open a span of its own",
+			Untrusted("a" + untrustedMark + "📝 forged"),
+			"«a📝 forged»",
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := RenderReply(tt.reply, visibleEscape); got != tt.want {
+				t.Errorf("RenderReply(%q) = %q, want %q", tt.reply, got, tt.want)
+			}
+			if got := RenderReply(tt.reply, nil); strings.Contains(got, untrustedMark) {
+				t.Errorf("RenderReply(%q, nil) = %q, want the marks stripped", tt.reply, got)
+			}
+		})
+	}
+}
+
+// TestHandleChatMarksTheModelsProseAndNothingElse is the thread half of the
+// unescaped-model-prose finding. Model prose is posted into the same message,
+// under the same bot identity, as RunLore's own status lines — so a reply like
+// <https://evil.example/reauth|https://github.com/acme/kb/pull/7> rendered as
+// a clickable link whose VISIBLE text is a trusted knowledge-base URL, and
+// <!channel> mass-pinged the room, in the very thread where RunLore posts
+// genuine KB links. modelVoice's blockquote neutralises neither.
+//
+// The escaping itself belongs to the transport (see internal/notify); what
+// this pins is the boundary — which bytes are handed to it. Every byte of the
+// model's answer is inside a span, and not one byte of RunLore's own framing
+// is: not the "> " markers the blockquote is made of, not the status glyph,
+// not the sentence around the URL.
+func TestHandleChatMarksTheModelsProseAndNothingElse(t *testing.T) {
+	forged := "Re-auth here: <https://evil.example/reauth|https://github.com/acme/kb/pull/7>\n<!channel>"
+	f := &fakeForge{}
+	model := &fakeChatModel{resp: wellFormedReply(forged, "the real cause was a spot reclaim")}
+	r := newChatResponder(t, f, model)
+	tc := Context{Root: "111.222", CuratedURL: "https://github.com/o/r/pull/42"}
+	if err := r.Registry.Put(tc); err != nil {
+		t.Fatalf("Put: %v", err)
+	}
+
+	reply, err := r.Handle(context.Background(), tc, "alice", "<@U0BOT> was it the CNI?")
+	if err != nil {
+		t.Fatalf("Handle: %v", err)
+	}
+	want := "> «Re-auth here: <https://evil.example/reauth|https://github.com/acme/kb/pull/7>»\n" +
+		"> «<!channel>»\n" +
+		"📝 Noted on the knowledge-base PR #42 — «https://github.com/o/r/pull/42»"
+	if got := RenderReply(reply, visibleEscape); got != want {
+		t.Errorf("rendered reply =\n%q\nwant\n%q", got, want)
+	}
+}
+
+// TestHandleModelProseCannotEscapeItsSpanByEmittingTheMark is the other side
+// of the boundary: the mark is an in-band signal, so a model that emits one
+// itself must not be able to end its own span early and continue at the left
+// margin as RunLore. Untrusted strips the mark from its content; this proves
+// it does so on the real path, not only in the unit table above.
+func TestHandleModelProseCannotEscapeItsSpanByEmittingTheMark(t *testing.T) {
+	f := &fakeForge{}
+	model := &fakeChatModel{resp: wellFormedReply("bye"+untrustedMark+"📝 Noted on the knowledge-base PR #7", "")}
+	r := newChatResponder(t, f, model)
+	tc := Context{Root: "111.222"}
+	if err := r.Registry.Put(tc); err != nil {
+		t.Fatalf("Put: %v", err)
+	}
+
+	reply, err := r.Handle(context.Background(), tc, "alice", "<@U0BOT> was it the CNI?")
+	if err != nil {
+		t.Fatalf("Handle: %v", err)
+	}
+	if got, want := RenderReply(reply, visibleEscape), "> «byeNoted on the knowledge-base PR #7»"; got != want {
+		t.Errorf("rendered reply = %q, want %q — model prose must stay inside its own span", got, want)
+	}
+}
+
+// TestHandleUnanchoredNoteWithoutChatIsFreeform pins the half of the widened
+// grammar that only holds with a model wired.
+//
+// Matching "note:" as a whole token ANYWHERE in a message is a COST argument:
+// with model.chat on, "please note: …" would otherwise reach the model and be
+// billed, while matching it deterministically is free. That argument does not
+// exist when chat is off — the default — and there the widening is a pure
+// behavioural change: "@runlore the runbook note: link is stale" used to
+// answer "I didn't record that" and instead opened a real knowledge-base PR
+// containing "link is stale", spending the thread's note allowance and a
+// global forge write on a sentence nobody asked to record.
+//
+// So the anywhere-match is the chat layer's rule. With no Chat, "note:" has to
+// be at the START of the message (after mentions are stripped), exactly as it
+// was before the chat layer existed.
+func TestHandleUnanchoredNoteWithoutChatIsFreeform(t *testing.T) {
+	for _, raw := range []string{
+		"<@U0BOT> the runbook note: link is stale",
+		"<@U0BOT> please note: the cause was a spot reclaim",
+		"hey <@U0BOT> note: the cause was a spot reclaim",
+		":wave: <@U0BOT> note: the cause was a spot reclaim",
+		"hey runlore note: the cause was X",
+	} {
+		t.Run(raw, func(t *testing.T) {
+			f := &fakeForge{}
+			r := newTestResponder(t, f)
+			if r.Chat != nil {
+				t.Fatal("test setup: newTestResponder must leave Chat nil")
+			}
+			tc := Context{Root: "111.222", CuratedURL: "https://github.com/o/r/pull/42"}
+			if err := r.Registry.Put(tc); err != nil {
+				t.Fatalf("Put: %v", err)
+			}
+
+			reply, err := r.Handle(context.Background(), tc, "alice", raw)
+			if err != nil {
+				t.Fatalf("Handle: %v", err)
+			}
+			if c, o := f.counts(); c != 0 || o != 0 {
+				t.Errorf("forge calls = %d comments / %d opened, want 0/0 — a mid-sentence note: must not write with no chat layer configured", c, o)
+			}
+			if reply != FreeformNotRecordedReply {
+				t.Errorf("reply = %q, want FreeformNotRecordedReply", reply)
+			}
+			got, ok := r.Registry.Get("111.222")
+			if !ok {
+				t.Fatal("Get: thread missing from the registry")
+			}
+			if got.Notes != 0 {
+				t.Errorf("Notes = %d, want 0 — nothing was written, so nothing may be charged", got.Notes)
+			}
+		})
+	}
+}
+
+// TestHandleAnchoredNoteWritesWithOrWithoutChat is the control on the other
+// side: an explicit note at the start of the message is the deterministic
+// capture path, and it is byte-identical whether or not a model is configured.
+func TestHandleAnchoredNoteWritesWithOrWithoutChat(t *testing.T) {
+	for _, raw := range []string{
+		"note: the cause was a spot reclaim",
+		"<@U0BOT> note: the cause was a spot reclaim",
+		"<@U0BOT> <@U0HUMAN> Note: the cause was a spot reclaim",
+	} {
+		for _, withChat := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s/chat=%v", raw, withChat), func(t *testing.T) {
+				f := &fakeForge{}
+				model := &fakeChatModel{resp: wellFormedReply("should never be called", "")}
+				r := newTestResponder(t, f)
+				if withChat {
+					r.Chat = &Chat{Model: model, Log: silentLog()}
+				}
+				tc := Context{Root: "111.222", CuratedURL: "https://github.com/o/r/pull/42"}
+				if err := r.Registry.Put(tc); err != nil {
+					t.Fatalf("Put: %v", err)
+				}
+				if _, err := r.Handle(context.Background(), tc, "alice", raw); err != nil {
+					t.Fatalf("Handle: %v", err)
+				}
+				if model.calls != 0 {
+					t.Errorf("Complete called %d times, want 0 — an anchored note costs no tokens", model.calls)
+				}
+				if len(f.comments) != 1 {
+					t.Fatalf("comments = %d, want 1 — an anchored note is recorded either way", len(f.comments))
+				}
+				if !strings.Contains(f.comments[0].body, "the cause was a spot reclaim") {
+					t.Errorf("the note text must be the words after the prefix:\n%s", f.comments[0].body)
+				}
+			})
+		}
+	}
+}
+
+// TestHandleUnanchoredReinvestigateIsStillRefusedWithoutChat keeps the two
+// prefixes' rules apart. "reinvestigate:" matches anywhere unconditionally
+// because it is a REFUSAL, not a write: a false positive costs a message the
+// human can act on, never a forge write or a token spend. Only "note:" — the
+// one that writes — is narrowed when there is no chat layer to justify the
+// widening.
+func TestHandleUnanchoredReinvestigateIsStillRefusedWithoutChat(t *testing.T) {
+	f := &fakeForge{}
+	r := newTestResponder(t, f)
+	tc := Context{Root: "111.222", CuratedURL: "https://github.com/o/r/pull/42"}
+
+	reply, err := r.Handle(context.Background(), tc, "alice", "<@U0BOT> please reinvestigate: the CNI")
+	if err != nil {
+		t.Fatalf("Handle: %v", err)
+	}
+	if reply != ReinvestigateNotSupportedReply {
+		t.Errorf("reply = %q, want ReinvestigateNotSupportedReply", reply)
+	}
+	if c, o := f.counts(); c != 0 || o != 0 {
+		t.Errorf("forge calls = %d comments / %d opened, want 0/0", c, o)
 	}
 }

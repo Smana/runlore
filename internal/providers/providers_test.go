@@ -3,6 +3,8 @@
 package providers_test
 
 import (
+	"encoding/json"
+	"reflect"
 	"testing"
 
 	"github.com/Smana/runlore/internal/providers"
@@ -73,6 +75,53 @@ func TestNormalizeWorkloadName(t *testing.T) {
 	}
 }
 
+// TestUsageTotal pins the one rule every consumer of a Usage needs and each was
+// previously re-deriving inline: the billable token count is InputTokens +
+// OutputTokens, with neither cache field added a second time. Both are strict
+// SUBSETS of InputTokens after normalization — the Anthropic client, the only
+// one reporting a cache write, sets InputTokens to input + cache_read +
+// cache_creation — so adding either again would double-count.
+func TestUsageTotal(t *testing.T) {
+	u := providers.Usage{InputTokens: 150, OutputTokens: 7, CachedInputTokens: 100, CacheWriteTokens: 20}
+	if got := u.Total(); got != 157 {
+		t.Fatalf("Total() = %d, want 157 — the cache fields are already inside InputTokens and must not be counted twice", got)
+	}
+	if got := (providers.Usage{}).Total(); got != 0 {
+		t.Fatalf("an unreported (zero) Usage totals %d, want 0", got)
+	}
+}
+
+// TestEstimateTokensCountsEveryWireSurface pins that EstimateTokens counts each
+// part of a request that actually travels: the system prompt, every tool spec's
+// name + description + schema, message content, and the assistant tool-call
+// JSON. Counting only m.Content is the specific under-estimate this function
+// exists to avoid, so each surface is added one at a time and the estimate must
+// grow every time.
+func TestEstimateTokensCountsEveryWireSurface(t *testing.T) {
+	if got := providers.EstimateTokens("", nil, nil); got != 0 {
+		t.Fatalf("empty request: got %d, want 0", got)
+	}
+	// 4 chars/token, exact: "sys!" (4) + "hello world!" (12) = 16 chars = 4.
+	msgs := []providers.Message{{Role: "user", Content: "hello world!"}}
+	if got := providers.EstimateTokens("sys!", msgs, nil); got != 4 {
+		t.Fatalf("system + content: got %d, want 4", got)
+	}
+
+	withToolCall := []providers.Message{
+		msgs[0],
+		{Role: "assistant", ToolCalls: []providers.ToolCall{{Name: "t", Args: `{"a":"bbbb"}`}}},
+	}
+	baseline := providers.EstimateTokens("sys!", withToolCall, nil)
+	if baseline <= 4 {
+		t.Fatalf("assistant tool-call Args go over the wire and must be counted: got %d, want more than 4", baseline)
+	}
+
+	tools := []providers.ToolSpec{{Name: "t", Description: "does a thing", Schema: `{"type":"object"}`}}
+	if got := providers.EstimateTokens("sys!", withToolCall, tools); got <= baseline {
+		t.Fatalf("tool specs are re-sent on every request and must be counted: got %d, want more than %d", got, baseline)
+	}
+}
+
 func TestFingerprintMarkerRoundTrip(t *testing.T) {
 	const fp = "abc123def456"
 	body := "Drafted by RunLore — x\n\n" + providers.FingerprintMarker(fp)
@@ -84,5 +133,66 @@ func TestFingerprintMarkerRoundTrip(t *testing.T) {
 	}
 	if got := providers.ParseFingerprintMarker("no marker here"); got != "" {
 		t.Fatalf("absent marker must parse to empty, got %q", got)
+	}
+}
+
+// costOnlyKeeps is the whitelist CostOnly's doc comment declares: the fields
+// that describe what the exchange COST, as opposed to what it answered. It is
+// stated here rather than derived from the method, so a field moving into or
+// out of the whitelist has to be a deliberate edit to this line.
+var costOnlyKeeps = map[string]bool{"Usage": true, "Attempts": true}
+
+// TestCompletionResponseCostOnlyKeepsOnlyTheCost pins the whitelist CostOnly
+// is. Every model client returns out.CostOnly() alongside an error, and that is
+// the only thing standing between a caller and a half-decoded Text or an
+// unterminated tool call from a failed stream — content that is not an answer
+// and must never be read as one, while the tokens the provider already reported
+// are real and billed.
+//
+// It reflects over the struct rather than listing the fields: a CostOnly
+// written as a whitelist is only as good as its author remembering to revisit
+// it, and a hand-written list in the test would need the same remembering. The
+// fixture-completeness check below is what makes the reflection bite — a field
+// added to CompletionResponse and left out of the fixture fails here, which
+// forces the author to classify it as cost or as reply.
+func TestCompletionResponseCostOnlyKeepsOnlyTheCost(t *testing.T) {
+	full := providers.CompletionResponse{
+		Text:      "half a sentence before the stream br",
+		ToolCalls: []providers.ToolCall{{ID: "tc-1", Name: "get_logs", Args: `{"ns":"apps"`}},
+		Usage: providers.Usage{
+			InputTokens: 1200, OutputTokens: 340,
+			CachedInputTokens: 900, CacheWriteTokens: 64,
+		},
+		Truncated:  true,
+		StopReason: "max_tokens",
+		Opaque:     json.RawMessage(`[{"type":"thinking","signature":"sig"}]`),
+		Attempts:   3,
+	}
+
+	in := reflect.ValueOf(full)
+	rt := in.Type()
+	for i := range rt.NumField() {
+		if !rt.Field(i).IsExported() {
+			t.Fatalf("%s is unexported — this test cannot read it, and CostOnly's whitelist would go unchecked", rt.Field(i).Name)
+		}
+		if in.Field(i).IsZero() {
+			t.Fatalf("fixture leaves %s at its zero value, so this test cannot tell whether CostOnly kept or dropped it — "+
+				"populate it above and decide whether it belongs in costOnlyKeeps", rt.Field(i).Name)
+		}
+	}
+
+	out := reflect.ValueOf(full.CostOnly())
+	for i := range rt.NumField() {
+		name := rt.Field(i).Name
+		got, want := out.Field(i).Interface(), in.Field(i).Interface()
+		if costOnlyKeeps[name] {
+			if !reflect.DeepEqual(got, want) {
+				t.Errorf("CostOnly() dropped %s: got %v, want %v — the provider already billed it", name, got, want)
+			}
+			continue
+		}
+		if !out.Field(i).IsZero() {
+			t.Errorf("CostOnly() kept %s = %v; it describes a reply that never arrived and must not reach a caller", name, got)
+		}
 	}
 }

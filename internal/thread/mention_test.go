@@ -6,8 +6,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"io"
-	"log/slog"
 	"strings"
 	"sync"
 	"testing"
@@ -38,7 +36,7 @@ func newTestMention(t *testing.T, f *fakeForge, rep *fakeReplier) *Mention {
 		Responder: r,
 		Registry:  r.Registry,
 		Replier:   rep,
-		Log:       slog.New(slog.NewTextHandler(io.Discard, nil)),
+		Log:       silentLog(),
 	}
 }
 
@@ -149,6 +147,101 @@ func TestMentionWithNoReplierStillWrites(t *testing.T) {
 	if len(f.comments) != 1 {
 		t.Fatal("a missing replier must not lose the note")
 	}
+}
+
+// TestMentionDrivesTheChatLayerEndToEnd is the wiring test this route did not
+// have: nothing drove HandleMention with a chat model configured, so nothing
+// proved the model's answer is actually POSTED. Every other chat test stops at
+// Responder.Handle's return value and every mention test runs with Chat nil —
+// between them, a chat layer that answered perfectly and a transport entry
+// point that dropped the answer would both look correct. That is precisely the
+// class that shipped a non-functional feature in PR2.
+//
+// It is driven through HandleMention rather than Handle so the whole path is
+// real: the registry lookup, the responder, the model call, the forge write,
+// and the reply that goes back to the Replier.
+func TestMentionDrivesTheChatLayerEndToEnd(t *testing.T) {
+	setUp := func(t *testing.T, f *fakeForge, rep *fakeReplier, model *fakeChatModel) *Mention {
+		t.Helper()
+		m := newTestMention(t, f, rep)
+		m.Responder.Chat = &Chat{Model: model, Log: silentLog()}
+		if err := m.Registry.Put(Context{
+			Root: "111.222", Channel: "C1", Title: "pod crash-looping",
+			CuratedURL: "https://github.com/o/r/pull/42",
+		}); err != nil {
+			t.Fatalf("Put: %v", err)
+		}
+		return m
+	}
+
+	t.Run("the answer is posted and the note it proposed is filed", func(t *testing.T) {
+		f, rep := &fakeForge{}, &fakeReplier{}
+		model := &fakeChatModel{resp: wellFormedReply(
+			"The CNI was ruled out — it was a spot reclaim.",
+			"The real cause was a spot-node reclaim, not the CNI.",
+		)}
+		m := setUp(t, f, rep, model)
+
+		m.HandleMention(context.Background(), "C1", "111.222", "alice", "<@U0BOT> was it the CNI?", nil)
+
+		if model.calls != 1 {
+			t.Fatalf("Complete called %d times, want exactly 1 — a freeform mention with model.chat configured must reach the model", model.calls)
+		}
+		// The model answered from the thread's own context rather than from
+		// nothing: a wiring that reached the model with an empty context would
+		// still produce a reply, and would still be broken.
+		prompt := model.lastReq.Messages[0].Content
+		for _, want := range []string{"pod crash-looping", "was it the CNI?", "alice"} {
+			if !strings.Contains(prompt, want) {
+				t.Fatalf("the assembled prompt is missing %q — the thread's context never reached the model:\n%s", want, prompt)
+			}
+		}
+
+		if len(rep.replies) != 1 {
+			t.Fatalf("replies = %d, want 1", len(rep.replies))
+		}
+		// Read as the human sees it: the untrusted-span marks are the transport's
+		// business (see RenderReply), not this contract's.
+		posted := RenderReply(rep.replies[0], nil)
+		if !strings.Contains(posted, "> The CNI was ruled out — it was a spot reclaim.") {
+			t.Fatalf("the model's answer never reached the thread: %q", posted)
+		}
+		if !strings.Contains(posted, "📝 Noted on the knowledge-base PR #42") {
+			t.Fatalf("the human was not told where their note landed: %q", posted)
+		}
+
+		if len(f.comments) != 1 || f.comments[0].number != 42 {
+			t.Fatalf("comments = %+v, want exactly one on #42 — the proposed note must be filed through the thread's own routing", f.comments)
+		}
+		if !strings.Contains(f.comments[0].body, "spot-node reclaim, not the CNI") {
+			t.Fatalf("the filed note lost the model's own text:\n%s", f.comments[0].body)
+		}
+		stored, ok := m.Registry.Get("111.222")
+		if !ok {
+			t.Fatal("the thread went missing from the registry")
+		}
+		if stored.Notes != 1 {
+			t.Fatalf("Notes = %d, want 1 — a note filed through the chat route spends the same per-thread allowance", stored.Notes)
+		}
+	})
+
+	t.Run("a question with nothing to record is still answered", func(t *testing.T) {
+		f, rep := &fakeForge{}, &fakeReplier{}
+		model := &fakeChatModel{resp: wellFormedReply("Yes — the probe timeout was raised at 09:14.", "")}
+		m := setUp(t, f, rep, model)
+
+		m.HandleMention(context.Background(), "C1", "111.222", "alice", "<@U0BOT> did anyone change the probe?", nil)
+
+		if len(rep.replies) != 1 {
+			t.Fatalf("replies = %d, want 1", len(rep.replies))
+		}
+		if got, want := RenderReply(rep.replies[0], nil), "> Yes — the probe timeout was raised at 09:14."; got != want {
+			t.Fatalf("posted %q, want %q — an empty kb_note is the model saying \"file nothing\", and the answer must still be posted", got, want)
+		}
+		if c, o := f.counts(); c != 0 || o != 0 {
+			t.Fatalf("forge calls = %d comments / %d opened, want 0/0 — an empty kb_note writes nothing", c, o)
+		}
+	})
 }
 
 // TestMentionFallbackRehydratesRegistryForNextMessage pins the fix for the

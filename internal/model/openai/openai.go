@@ -240,6 +240,11 @@ func openaiErrorDetail(body []byte) string {
 // Truncated when "length"), and the trailing usage-only chunk fills Usage. A read
 // error, or a stream that ends with no finish_reason and no [DONE] (a mid-stream
 // drop), is an error rather than a silently-truncated success.
+//
+// Every error return carries out.CostOnly() rather than a zero response: once
+// the usage chunk has been folded, the tokens the provider generated and billed
+// are known even if the stream then dies, garbles, or never terminates. Zero
+// until then, which is the honest answer. See providers.CompletionResponse.
 func accumulate(r io.Reader) (providers.CompletionResponse, error) {
 	var out providers.CompletionResponse
 	type toolAcc struct {
@@ -252,7 +257,7 @@ func accumulate(r io.Reader) (providers.CompletionResponse, error) {
 
 	for payload, err := range httpx.SSEData(r) {
 		if err != nil {
-			return providers.CompletionResponse{}, fmt.Errorf("read stream: %w", err)
+			return out.CostOnly(), fmt.Errorf("read stream: %w", err)
 		}
 		if string(bytes.TrimSpace(payload)) == "[DONE]" {
 			done = true
@@ -260,7 +265,7 @@ func accumulate(r io.Reader) (providers.CompletionResponse, error) {
 		}
 		var ck chatChunk
 		if err := json.Unmarshal(payload, &ck); err != nil {
-			return providers.CompletionResponse{}, fmt.Errorf("decode sse event: %w", err)
+			return out.CostOnly(), fmt.Errorf("decode sse event: %w", err)
 		}
 		if ck.Usage != nil {
 			u := providers.Usage{InputTokens: ck.Usage.PromptTokens, OutputTokens: ck.Usage.CompletionTokens}
@@ -296,7 +301,7 @@ func accumulate(r io.Reader) (providers.CompletionResponse, error) {
 		}
 	}
 	if !done {
-		return providers.CompletionResponse{}, fmt.Errorf("stream ended before finish_reason or [DONE] (truncated upstream)")
+		return out.CostOnly(), fmt.Errorf("stream ended before finish_reason or [DONE] (truncated upstream)")
 	}
 	for _, idx := range order {
 		acc := toolByIndex[idx]

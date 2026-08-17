@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/Smana/runlore/internal/config"
+	anthropic "github.com/Smana/runlore/internal/model/anthropic"
 )
 
 // TestEffectiveMaxTokens locks in the output-token defaulting: an unset (0)
@@ -59,6 +60,45 @@ func TestVerifyMaxTokensInherits(t *testing.T) {
 	}}
 	if got := verifyMaxTokens(cfgOverride); got != 2048 {
 		t.Fatalf("verify override: got %d, want 2048", got)
+	}
+}
+
+// TestBuildChatModel mirrors BuildVerifyModel's nil-means-off contract for
+// model.chat: an absent block returns nil (the block's presence IS the feature
+// switch), and a configured block returns a non-nil provider whose unset fields
+// (provider, base_url, api_key_env) inherit from the parent model — the same
+// cmp.Or inheritance BuildVerifyModel uses — while the chat-specific max_tokens
+// ceiling (chatMaxTokens, not the parent's) is applied.
+func TestBuildChatModel(t *testing.T) {
+	off := &config.Config{Model: config.Model{Provider: "anthropic", Model: "claude-big"}}
+	if got := BuildChatModel(off); got != nil {
+		t.Fatalf("BuildChatModel with no model.chat block = %v, want nil (feature off)", got)
+	}
+
+	t.Setenv("PARENT_KEY", "shh")
+	cfg := &config.Config{Model: config.Model{
+		Provider:  "anthropic",
+		BaseURL:   "https://parent.example/v1",
+		Model:     "claude-big",
+		APIKeyEnv: "PARENT_KEY",
+		Chat:      &config.ModelOverride{Model: "claude-cheap"}, // everything else inherited
+	}}
+	got := BuildChatModel(cfg)
+	client, ok := got.(*anthropic.Client)
+	if !ok {
+		t.Fatalf("BuildChatModel returned %T, want *anthropic.Client (provider inherited)", got)
+	}
+	if client.BaseURL != "https://parent.example/v1" {
+		t.Fatalf("base_url not inherited: got %q", client.BaseURL)
+	}
+	if client.Model != "claude-cheap" {
+		t.Fatalf("chat's own model must be used, got %q", client.Model)
+	}
+	if client.APIKey != "shh" {
+		t.Fatalf("api_key_env not inherited: got %q", client.APIKey)
+	}
+	if client.MaxTokens != chatDefaultMaxTokens {
+		t.Fatalf("max_tokens: got %d, want the chat default %d", client.MaxTokens, chatDefaultMaxTokens)
 	}
 }
 

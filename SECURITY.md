@@ -53,6 +53,63 @@ Both are opt-in, both fail closed on missing credentials, and full detail — th
 checks, the invite-only-room recommendation, and why Matrix still needs no exposed endpoint for this —
 is in the runtime [security model](https://runlore.io/docs/security/security-model/#matrix-thread-capture-notifymatrixthread_capture--a-widened-sync-filter).
 
+### `model.chat` — a paid model call any channel member can trigger
+
+A third opt-in feature, off by default, does not widen what RunLore receives but **does let people
+outside your team spend your money**. Setting a `model.chat` block turns on conversational replies:
+RunLore answers an addressed thread message that carries no recognised command prefix with a model
+call, instead of a fixed "I can only record notes" reply.
+
+Stated plainly, without softening:
+
+- **Every addressed message that is not a `note:` costs one model call.** Exactly one, structurally —
+  the model is offered a single forced tool and no search tool, so there is no agent loop. `note:`
+  itself remains deterministic and costs nothing; so does a bare mention with nothing after it.
+  `note:` is recognised as a whole word *anywhere* in the message — `note: …`, `please note: …` and
+  `hey @runlore note: …` are all the free path, so the promise above does not depend on where the
+  operator happened to put the mention. A word merely ending in it (`footnote:`) is not the command.
+- **On Matrix, "addressed" does not require a mention entity.** MSC3952 `m.mentions` counts, but so
+  does the bot's full MXID *or its bare localpart* appearing in the message body as a whole word. Any
+  member of the room can therefore trigger a paid call by typing the bot's name in a thread reply.
+  Keep the room invite-only. On Slack the trigger is a real `app_mention`, but every member of the
+  channel can send one.
+- **The reply is model-authored text that can become a knowledge-base PR.** The model may propose
+  note *content*; it never chooses where the note is filed — routing is derived from the thread's
+  investigation context alone, and the note goes through the same per-thread cap and the same global
+  forge-write window an explicit `note:` uses. Untrusted message text is fenced in the prompt with a
+  per-turn marker, and the model is instructed to treat everything inside it as data, never
+  instructions.
+
+**Capped, and the key that bounds each:** model calls per hour
+(`notify.thread.chat_calls_per_hour`, default 30) · provider-reported tokens per hour
+(`notify.thread.chat_tokens_per_hour`, default 107720) · output tokens per call
+(`model.chat.max_tokens`, default 1024, deliberately *not* inherited from `model.max_tokens`) · the
+human's message reaching the model (`notify.thread.max_note_bytes`, default 8192 bytes) · the whole
+assembled prompt (fixed at ~15 KB, ≈3.8k input tokens; only `max_note_bytes` moves it) ·
+knowledge-base PR writes per hour (`notify.thread.forge_writes_per_hour`, default 20) · notes per
+thread (`notify.thread.max_notes_per_thread`, default 20). Both hourly windows are global across
+every thread and both transports. The token default is not a round number because it is not chosen:
+it is *derived* from the most one call can cost times the hourly call budget, taken at two thirds, so
+it moves whenever `max_note_bytes` moves. Pin it explicitly if you need a fixed ceiling.
+
+**Not capped — read this before enabling it:**
+
+- **There is no ceiling in currency.** `model.pricing` remains a *reporting* table that turns token
+  counts into a dollar estimate for display. **Nothing compares a cost to a threshold and stops.**
+  The only spend ceilings are the call and token counts above; convert them to money yourself at
+  your provider's rate.
+- **The token ceiling counts *reported* usage.** When a provider returns no usage at all, RunLore
+  charges a deliberately conservative estimate rather than zero, and logs a warning saying it did.
+  The estimate can only over-charge — the safe direction — but it is an estimate, not a measurement.
+- **It is an hourly sliding window, not a monthly or absolute budget.** `chat_tokens_per_hour` at its
+  default permits 107720 tokens every hour, indefinitely. There is no cumulative cap over a day, a
+  month, or the life of the process.
+
+`model.chat.model` must be named explicitly or startup fails: it is the one field that does not
+inherit, so a member-triggerable path can never silently run on the frontier investigation model.
+Full reference, including the failure modes that degrade back to deterministic capture, is in
+[Conversational replies and what they cost](https://runlore.io/docs/configuration/configuration/#conversational-replies-and-what-they-cost).
+
 ## Supply chain
 
 Every tagged release (`v*`) ships with the following, all produced by

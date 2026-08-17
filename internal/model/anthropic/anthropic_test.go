@@ -369,6 +369,91 @@ data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text
 	}
 }
 
+// dropAfter serves a 200 stream, writes prefix, then hijacks and closes the TCP
+// connection — a provider dying mid-flight, after it already reported usage.
+func dropAfter(t *testing.T, prefix string) *httptest.Server {
+	t.Helper()
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		fl, ok := w.(http.Flusher)
+		if !ok {
+			t.Errorf("server needs http.Flusher")
+			return
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		_, _ = io.WriteString(w, prefix)
+		fl.Flush()
+		if hj, ok := w.(http.Hijacker); ok {
+			conn, _, _ := hj.Hijack()
+			_ = conn.Close()
+		}
+	}))
+}
+
+// TestErrorPreservesObservedUsage pins that a FAILED exchange still reports the
+// tokens the provider already told us it produced. Anthropic populates input
+// usage on message_start — the first event of the stream — and output usage on
+// message_delta, so by the time any of accumulate's error returns fires, the
+// cost of the exchange is known. Returning a zero CompletionResponse there
+// charges a generation the provider really billed as free: internal/thread's
+// per-hour chat budget and the per-investigation cost total both read Usage, so
+// an endpoint that dies mid-stream on every call spends real money against
+// ceilings that never move.
+func TestErrorPreservesObservedUsage(t *testing.T) {
+	const start = "event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"usage\":{\"input_tokens\":1200,\"cache_read_input_tokens\":300}}}\n\n"
+	const text = "event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"partial\"}}\n\n"
+	const outUsage = "event: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{\"output_tokens\":800}}\n\n"
+
+	cases := []struct {
+		name    string
+		srv     func(t *testing.T) *httptest.Server
+		wantIn  int
+		wantOut int
+	}{
+		{
+			// The highest-value case: thousands of tokens generated, then the
+			// stream ends without message_stop.
+			name:    "stream ended before message_stop",
+			srv:     func(t *testing.T) *httptest.Server { return sseServer(t, nil, []string{start, text, outUsage}) },
+			wantIn:  1500,
+			wantOut: 800,
+		},
+		{
+			name: "connection dropped mid-stream",
+			srv: func(t *testing.T) *httptest.Server {
+				return dropAfter(t, start+"event: content_block_delta\ndata: {\"type\":\"cont")
+			},
+			wantIn: 1500,
+		},
+		{
+			name: "provider error event mid-stream",
+			srv: func(t *testing.T) *httptest.Server {
+				return sseServer(t, nil, []string{start, "event: error\ndata: {\"type\":\"error\",\"error\":{\"type\":\"overloaded_error\",\"message\":\"overloaded\"}}\n\n"})
+			},
+			wantIn: 1500,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			srv := tc.srv(t)
+			defer srv.Close()
+			resp, err := New(srv.URL, "claude-x", "k", 0, "", "").Complete(context.Background(), providers.CompletionRequest{
+				Messages: []providers.Message{{Role: "user", Content: "hi"}},
+			})
+			if err == nil {
+				t.Fatal("want an error for a failed exchange")
+			}
+			if resp.Usage.InputTokens != tc.wantIn || resp.Usage.OutputTokens != tc.wantOut {
+				t.Fatalf("usage on the error path = %+v, want in=%d out=%d — the provider reported these before it failed, and billed them",
+					resp.Usage, tc.wantIn, tc.wantOut)
+			}
+			if resp.Usage.CachedInputTokens != 300 {
+				t.Errorf("CachedInputTokens = %d, want 300 — the cache split is part of what the exchange cost", resp.Usage.CachedInputTokens)
+			}
+		})
+	}
+}
+
 // TestMessageCoalescing verifies the OpenAI-shaped exchange (assistant tool_calls +
 // separate tool messages) maps to Anthropic's tool_use / coalesced tool_result form.
 func TestMessageCoalescing(t *testing.T) {

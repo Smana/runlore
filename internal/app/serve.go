@@ -193,14 +193,6 @@ func RunServe(version string, args []string) error {
 	if err != nil {
 		return fmt.Errorf("thread registry: %w", err)
 	}
-	// One responder, two transports: built ONCE and shared by both Slack's and
-	// Matrix's thread-capture wiring below, so the per-hour OpenPRs budget
-	// (buildThreadResponder) bounds forge writes system-wide rather than once
-	// per transport. forge may be nil (no forge.kb_repo / credentials); the
-	// responder is still built so it stays the single shared instance either
-	// way — each transport's own guard reports the missing-forge case.
-	forge := buildForge(cfg, log)
-	threadResponder := buildThreadResponder(threadRegistry, forge, metrics, log)
 	// Matrix's detached mention handlers (one forge round-trip each), bounded
 	// and drained exactly like the Slack server's eventDispatcher — see
 	// matrixMentionConcurrency/matrixMentionTimeout. matrixBusyDispatch is the
@@ -214,6 +206,25 @@ func RunServe(version string, args []string) error {
 	if err != nil {
 		return fmt.Errorf("build investigator: %w", err)
 	}
+	// One responder, two transports: built ONCE and shared by both Slack's and
+	// Matrix's thread-capture wiring below, so the per-hour forge-write budget
+	// (buildThreadResponder) bounds forge writes system-wide rather than once
+	// per transport — every write it covers, a CommentOnPR exactly like an
+	// OpenPR, since gating only OpenPR was PR2's bug — and, with model.chat
+	// configured, so the chat layer's per-hour token Budget bounds spend
+	// system-wide for the same reason.
+	// forge may be nil (no forge.kb_repo / credentials); the responder is still
+	// built so it stays the single shared instance either way — each transport's
+	// own guard reports the missing-forge case.
+	//
+	// Built here, AFTER BuildInvestigator, because the chat layer reads the same
+	// single catalog the investigation path holds: pre-fetching knowledge-base
+	// hits in Go is what keeps a conversational reply one model call instead of
+	// an agent loop, and building a second catalog to get it would start a
+	// second git-sync goroutine on the same checkout.
+	forge := buildForge(cfg, log)
+	threadChat := buildThreadChat(cfg, cat, metrics, log)
+	threadResponder := buildThreadResponder(cfg, threadRegistry, forge, threadChat, metrics, log)
 	queue := investigate.NewQueue(inv, log)
 	var rlStarts *ratelimit.Window
 	if rl := cfg.Investigation.RateLimit; rl.MaxPerWindow != nil && *rl.MaxPerWindow > 0 {

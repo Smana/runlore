@@ -111,6 +111,46 @@ for. That widening is real and worth understanding before you flip the flag: see
 Matrix thread
 capture]({{< relref "/docs/security/security-model.md#matrix-thread-capture-notifymatrixthread_capture--a-widened-sync-filter" >}}).
 
+### Conversational replies
+
+Without `model.chat`, anything you say in the thread that is not `note:` gets a fixed reply telling
+you so, and nothing is recorded. Adding a `model.chat` block changes that: RunLore answers the
+question instead, from the investigation's own evidence plus the top knowledge-base hits, and files a
+note itself when your message contained a durable fact.
+
+```yaml
+model:
+  chat:
+    model: claude-haiku-4-5      # required — never inherited from model.model
+notify:
+  matrix:
+    thread_capture: true         # the chat layer has no channel without it
+  thread:
+    chat_calls_per_hour: 30      # default 30
+    chat_tokens_per_hour: 107720 # default 107720 — derived, not round
+```
+
+**This is a paid path any member of the room can trigger, and on Matrix "addressed" is looser than
+you may expect.** RunLore treats a message as addressed to it via MSC3952 `m.mentions` — but also
+when the bot's full MXID **or its bare localpart** (`runlore` in `@runlore:example.org`) appears in
+the body **as a whole word**. **No mention entity is required.** So anyone in the room can trigger a
+model call by typing the bot's name in a reply to an investigation thread. Keep the room invite-only.
+
+With `model.chat` set, every addressed message rooted in one of RunLore's own messages that is not a
+recognised command costs **exactly one model call** — one structurally, not on average: the model is
+given a single forced tool and no search tool, so there is no agent loop.
+
+`@runlore note: …` still costs nothing — it is the same deterministic write it always was — and a
+bare mention with nothing after it costs nothing either.
+
+Spend is bounded by two global hourly ceilings (`chat_calls_per_hour`, `chat_tokens_per_hour`) shared
+across every thread and both transports. The token default is *derived* — what one maxed-out call can
+cost, times the call budget — which is why it is not a round number and why it moves when
+`max_note_bytes` moves. **It is not bounded in currency**: `model.pricing` is a reporting table, not
+a limit, and nothing compares a cost to a threshold and stops. Read
+[Conversational replies and what they cost]({{< relref "/docs/configuration/configuration.md#conversational-replies-and-what-they-cost" >}})
+before enabling it — it states the full set of bounds and, just as plainly, what has none.
+
 ## Reference
 
 - [Configuration → `notify`]({{< relref "/docs/configuration/configuration.md#notify--where-findings-go" >}})

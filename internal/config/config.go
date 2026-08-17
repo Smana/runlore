@@ -25,6 +25,7 @@ import (
 	"github.com/Smana/runlore/internal/gitrev"
 	"github.com/Smana/runlore/internal/providers"
 	"github.com/Smana/runlore/internal/sourcerepo"
+	"github.com/Smana/runlore/internal/thread"
 )
 
 // Config is the top-level RunLore configuration (loaded from YAML).
@@ -746,6 +747,18 @@ type Model struct {
 	// unset fields inherit from the parent above (so `verify: {model: <cheap>}` reuses
 	// the same provider/endpoint/key). Absent ⇒ verify runs on the main model.
 	Verify *ModelOverride `yaml:"verify"`
+	// Chat routes the thread-conversation layer to its own (cheaper) model.
+	// PRESENT ⇒ conversational replies are enabled; ABSENT ⇒ thread capture
+	// stays deterministic note-capture only. Same inherit-when-empty semantics
+	// as Verify — with one deliberate exception: `model` may not be empty.
+	//
+	// Verify inherits the investigation model harmlessly, because verify runs
+	// once per investigation on a path RunLore itself initiates. Chat runs once
+	// per addressed message, on a path any channel or room member can trigger.
+	// Silently inheriting a frontier model there makes the cheapest way to turn
+	// the feature on the most expensive way to run it, so Validate requires the
+	// model be named explicitly.
+	Chat *ModelOverride `yaml:"chat"`
 	// Embeddings optionally configures an OpenAI-compatible /embeddings endpoint used
 	// for hybrid recall (instant_recall.hybrid). Unset ⇒ BM25-only recall.
 	Embeddings *Embeddings `yaml:"embeddings"`
@@ -790,17 +803,199 @@ type ModelOverride struct {
 	// the parent's value (same vocabulary and validation as model.thinking). Note the
 	// verify pass always forces a tool_choice, so the Anthropic client drops thinking
 	// for that request anyway — this knob only affects any non-forced verify calls.
+	//
+	// On model.chat it takes effect NOWHERE, not merely usually: Chat.Answer always
+	// sets a ToolChoice (the single forced submit_thread_reply tool is what makes a
+	// reply one call instead of an agent loop), the Anthropic client gates thinking
+	// on an empty ToolChoice, and the gemini and openai clients are never handed a
+	// thinking parameter at all. So model.chat.thinking — or a model.thinking
+	// inherited onto it — is inert on every provider. Validate still rejects an
+	// invalid value: a knob that is silently dropped is bad enough without also
+	// accepting a mode that does not exist.
 	Thinking string `yaml:"thinking"`
 	// Pricing overrides the parent's token rates for the verify pass (a cheaper
 	// verify model has its own cost); nil inherits model.pricing.
+	//
+	// On model.chat NOTHING reads it: per-investigation cost reporting covers the
+	// main and verify passes only, and the chat path emits token counts
+	// (runlore_thread_chat_tokens_total) with no currency conversion anywhere. An
+	// operator therefore cannot graph what conversational replies spent in dollars
+	// — not merely "there is no cost ceiling", there is no cost REPORT. Validate
+	// still rejects a negative rate here, for the same reason it does above.
 	Pricing *Pricing `yaml:"pricing"`
 }
 
 // Notify configures where investigation findings are delivered.
 type Notify struct {
-	Slack  SlackNotify          `yaml:"slack"`
-	Matrix MatrixNotify         `yaml:"matrix"`
-	Extra  map[string]yaml.Node `yaml:",inline"` // notify.<name> blocks for registered (non-built-in) notifiers
+	Slack  SlackNotify  `yaml:"slack"`
+	Matrix MatrixNotify `yaml:"matrix"`
+	Thread ThreadNotify `yaml:"thread"` // shared Slack/Matrix thread-capture bounds — see ThreadNotify
+	// Extra catches notify.<name> blocks for registered (non-built-in)
+	// notifiers. CONSTRAINT: a drop-in notifier must never be registered
+	// under the name "slack", "matrix" or "thread" — those are named fields
+	// above, and a notify.<that-name> block would land there instead of
+	// here, silently shadowing the notifier's own config. (Slack and Matrix
+	// themselves are registered under those exact names on purpose — that
+	// pairing is the reason those two fields exist — so the constraint is on
+	// every OTHER registered notifier, not on those two.)
+	//
+	// Enforced by TestRegisteredNotifierNamesDoNotCollideWithConfigFields in
+	// internal/notify (package notify_test, so it can import both this
+	// config package and every notifier subpackage without an import
+	// cycle — internal/notify already imports internal/config, so this
+	// package cannot import internal/notify back). It reflects over every
+	// named field's yaml tag here and compares it against
+	// notify.Registered() — the SAME enumeration notify.BuildEnabled uses at
+	// runtime — so, unlike a source grep for the literal call
+	// `Register(Descriptor{...})`, it catches every registered notifier
+	// regardless of which form it registers with: the bare form used by
+	// internal/notify/slack.go and internal/notify/matrix.go, or the
+	// qualified notify.Register(notify.Descriptor{...}) form used by the
+	// internal/notify/webhook and internal/notify/templated subpackages.
+	//
+	// notify.Registered() reports only what that test binary links in, and a
+	// subpackage is linked in only by the hand-written blank-import block at
+	// the top of config_collision_test.go — so the guard is exactly as
+	// complete as that block. TestEveryNotifierSubpackageIsImportedHere
+	// (internal/notify/notifier_imports_test.go) keeps it complete by reading
+	// the internal/notify directory and requiring an import for every
+	// subpackage that calls notify.Register.
+	Extra map[string]yaml.Node `yaml:",inline"`
+}
+
+// ThreadNotify configures the bounds shared by Slack and Matrix thread
+// capture (the `@runlore note: …` reply loop, and — with model.chat set —
+// plain questions too): how many notes one thread may write, how
+// fast the shared forge-write budget refills, how long a thread stays
+// answerable, how many live threads the registry holds, the largest single
+// message accepted, and how much the chat model may spend — in calls and in
+// tokens — per hour. Before this block existed every one of these was a
+// hardcoded Go constant, so an operator who found the volume too high had
+// exactly one lever: turn thread capture off entirely.
+//
+// Every field defaults to the constant it replaces when left at its zero
+// value, so an ABSENT notify.thread block changes nothing.
+//
+// Every field follows gitops.mirror.max's convention, not
+// ratelimit.Window's: 0 means "use the default", and Validate rejects a
+// negative value. None of these bounds may mean "unlimited" — an unbounded
+// note-byte cap or an unbounded per-thread note count would defeat the exact
+// safety property each one exists to enforce, so — unlike ratelimit.Window,
+// whose own <= 0 convention IS "unlimited" — that meaning is deliberately not
+// offered here. thread.Budget, which ChatCallsPerHour/ChatTokensPerHour
+// configure, DOES support <= 0 as unlimited at the type level (it mirrors
+// ratelimit.Window directly), but the Effective* resolvers below never pass a
+// literal 0 or negative value through to it — an absent field always
+// resolves to its positive default, exactly like every sibling field here.
+type ThreadNotify struct {
+	// MaxNotesPerThread caps knowledge writes per thread; 0 uses
+	// thread.DefaultMaxNotesPerThread.
+	MaxNotesPerThread int `yaml:"max_notes_per_thread"`
+	// ForgeWritesPerHour caps every forge write thread capture makes,
+	// globally, per hour — a CommentOnPR spends it exactly like an OpenPR; 0
+	// uses thread.DefaultForgeWritesPerHour.
+	ForgeWritesPerHour int `yaml:"forge_writes_per_hour"`
+	// RegistryTTL bounds how long a thread stays answerable after its
+	// investigation was delivered; 0 uses thread.DefaultRegistryTTL.
+	RegistryTTL Duration `yaml:"registry_ttl"`
+	// RegistryMax caps how many live threads the registry holds at once — the
+	// real backstop for a busy channel; 0 uses thread.DefaultRegistryMax.
+	RegistryMax int `yaml:"registry_max"`
+	// MaxNoteBytes caps one human message, in bytes, before it is written to
+	// the knowledge base or shown to a model; 0 uses
+	// thread.DefaultMaxNoteBytes. See that constant's doc comment for why
+	// this bound exists.
+	//
+	// It is also the ONLY term of the chat layer's assembled prompt an operator
+	// can move, and it moves it exactly one-for-one: the prompt ceiling is a
+	// fixed 7,192 bytes plus this value (thread.MaxChatContextBytes is that sum
+	// at the default). Raising it therefore raises what a single call can cost
+	// in tokens by the same amount — and ChatTokensPerHour's default is derived
+	// for the DEFAULT note cap, so raise that with it.
+	MaxNoteBytes int `yaml:"max_note_bytes"`
+	// ChatCallsPerHour caps model calls the chat layer may make, globally,
+	// per hour; 0 uses thread.DefaultChatCallsPerHour. Independent of
+	// ChatTokensPerHour — see thread.Budget's doc comment for why a call cap
+	// alone cannot bound spend.
+	ChatCallsPerHour int `yaml:"chat_calls_per_hour"`
+	// ChatTokensPerHour caps what the chat layer may spend, globally, per
+	// hour, in provider-reported tokens (input + output) — plus a
+	// conservative estimate whenever the provider reports none, or reports
+	// output but no prompt cost, and one further input estimate for every
+	// retried upstream attempt, since a request a provider accepted is
+	// billed whether or not the client kept its answer. 0 uses
+	// thread.DefaultChatTokensPerHour, which is DERIVED from this layer's
+	// own prompt ceiling at the default MaxNoteBytes rather than chosen as a
+	// round number. This is the real cumulative ceiling
+	// investigation.max_tokens_per_investigation cannot provide for this
+	// path, because that field compares the size of the next request against
+	// the limit rather than a running total.
+	ChatTokensPerHour int64 `yaml:"chat_tokens_per_hour"`
+}
+
+// EffectiveMaxNotesPerThread resolves the configured cap, falling back to
+// thread.DefaultMaxNotesPerThread when unset (0). Validate rejects a negative
+// value before this is ever reached from Load; this fallback also covers a
+// *Config built outside Load (tests, a future embedder).
+func (t ThreadNotify) EffectiveMaxNotesPerThread() int {
+	if t.MaxNotesPerThread > 0 {
+		return t.MaxNotesPerThread
+	}
+	return thread.DefaultMaxNotesPerThread
+}
+
+// EffectiveForgeWritesPerHour resolves the configured global forge-write
+// budget, falling back to thread.DefaultForgeWritesPerHour when unset (0).
+func (t ThreadNotify) EffectiveForgeWritesPerHour() int {
+	if t.ForgeWritesPerHour > 0 {
+		return t.ForgeWritesPerHour
+	}
+	return thread.DefaultForgeWritesPerHour
+}
+
+// EffectiveRegistryTTL resolves the configured thread-registry TTL, falling
+// back to thread.DefaultRegistryTTL when unset (0).
+func (t ThreadNotify) EffectiveRegistryTTL() time.Duration {
+	if t.RegistryTTL > 0 {
+		return t.RegistryTTL.Std()
+	}
+	return thread.DefaultRegistryTTL
+}
+
+// EffectiveRegistryMax resolves the configured thread-registry size cap,
+// falling back to thread.DefaultRegistryMax when unset (0).
+func (t ThreadNotify) EffectiveRegistryMax() int {
+	if t.RegistryMax > 0 {
+		return t.RegistryMax
+	}
+	return thread.DefaultRegistryMax
+}
+
+// EffectiveMaxNoteBytes resolves the configured per-note byte cap, falling
+// back to thread.DefaultMaxNoteBytes when unset (0).
+func (t ThreadNotify) EffectiveMaxNoteBytes() int {
+	if t.MaxNoteBytes > 0 {
+		return t.MaxNoteBytes
+	}
+	return thread.DefaultMaxNoteBytes
+}
+
+// EffectiveChatCallsPerHour resolves the configured chat-layer call ceiling,
+// falling back to thread.DefaultChatCallsPerHour when unset (0).
+func (t ThreadNotify) EffectiveChatCallsPerHour() int {
+	if t.ChatCallsPerHour > 0 {
+		return t.ChatCallsPerHour
+	}
+	return thread.DefaultChatCallsPerHour
+}
+
+// EffectiveChatTokensPerHour resolves the configured chat-layer token
+// ceiling, falling back to thread.DefaultChatTokensPerHour when unset (0).
+func (t ThreadNotify) EffectiveChatTokensPerHour() int64 {
+	if t.ChatTokensPerHour > 0 {
+		return t.ChatTokensPerHour
+	}
+	return thread.DefaultChatTokensPerHour
 }
 
 // SlackNotify configures Slack delivery and (for rung-2 actions) interactive
@@ -1268,6 +1463,43 @@ func validateThinking(field, provider, thinking string) error {
 	return nil
 }
 
+// validateOverrideEffort validates one model override's effort and thinking
+// against the provider they will ACTUALLY be sent to, so an inherited parent
+// value that is invalid for the override's own provider fails at startup rather
+// than as a per-request 400. name is the override's config path
+// ("model.verify" / "model.chat"), which the error labels are built from.
+//
+// The inheritance is cmp.Or, which is what BuildVerifyModel and BuildChatModel
+// actually use — the two hand-rolled copies this replaces claimed to mirror
+// those builders while spelling it out as `if x == "" { x = parent }`, one copy
+// per override, so a third override would have been a third copy.
+//
+// A nil override inherits everything and is validated by the parent's own
+// checks, so it is nothing to do here.
+func (c *Config) validateOverrideEffort(name string, o *ModelOverride) error {
+	if o == nil {
+		return nil
+	}
+	prov := cmp.Or(o.Provider, c.Model.Provider)
+	if err := validateEffort(name+".effort (or inherited model.effort)", prov, cmp.Or(o.Effort, c.Model.Effort)); err != nil {
+		return err
+	}
+	return validateThinking(name+".thinking (or inherited model.thinking)", prov, cmp.Or(o.Thinking, c.Model.Thinking))
+}
+
+// validateOverrideEndpoint rejects a cleartext API key over a public endpoint
+// for one model override, resolving its EFFECTIVE base_url and key the same
+// cmp.Or way its builder does. That resolution is the point: it catches an
+// override that supplies its own key but inherits an insecure parent base_url,
+// which neither value alone reveals.
+func (c *Config) validateOverrideEndpoint(name string, o *ModelOverride) error {
+	if o == nil {
+		return nil
+	}
+	return checkSecureKeyEndpoint(name+".base_url", name+".api_key_env (or inherited model.api_key_env)",
+		cmp.Or(o.BaseURL, c.Model.BaseURL), cmp.Or(o.APIKeyEnv, c.Model.APIKeyEnv))
+}
+
 // validatePricing rejects a negative token rate (which would produce a negative
 // cost). A nil *Pricing (unconfigured) is valid.
 func validatePricing(field string, p *Pricing) error {
@@ -1279,6 +1511,32 @@ func validatePricing(field string, p *Pricing) error {
 			field, p.InputUSDPerMTok, p.OutputUSDPerMTok, p.CachedInputUSDPerMTok)
 	}
 	return nil
+}
+
+// ChatWithoutCaptureWarning reports whether model.chat is configured but neither
+// notify.slack.thread_capture nor notify.matrix.thread_capture is enabled,
+// returning "" when no warning is warranted. Thread capture is what makes
+// RunLore listen for an addressed mention at all (Slack's app_mention events,
+// Matrix's /sync long-poll) — without it on at least one transport, a
+// configured model.chat has no mention ever reaching it and can never fire.
+//
+// This is deliberately a WARNING, not a Validate error: the operator may be
+// staging config (thread_capture next), and a coherent-but-currently-pointless
+// block should not block startup while it settles into place. Compare
+// model.chat.model, which Validate DOES reject outright — that guards a
+// security property (silent inheritance of a frontier model onto a
+// member-triggerable path), not a reachability nicety.
+func ChatWithoutCaptureWarning(cfg *Config) string {
+	if cfg.Model.Chat == nil {
+		return ""
+	}
+	if cfg.Notify.Slack.ThreadCapture || cfg.Notify.Matrix.ThreadCapture {
+		return ""
+	}
+	return "model.chat is configured, but neither notify.slack.thread_capture nor " +
+		"notify.matrix.thread_capture is enabled: conversational replies have no " +
+		"mention-listening channel to trigger from and will never fire — enable " +
+		"one, or this is dead config"
 }
 
 // Validate enforces cross-field invariants after loading — fail-closed defaults
@@ -1293,38 +1551,42 @@ func (c *Config) Validate() error {
 	if c.Model.Verify != nil && c.Model.Verify.MaxTokens < 0 {
 		return fmt.Errorf("model.verify.max_tokens must be >= 0 (0 = inherit), got %d", c.Model.Verify.MaxTokens)
 	}
-	// Effort is validated against the provider it will actually be sent to. The
-	// verify override resolves its EFFECTIVE provider and effort first (inherit-
-	// when-empty, mirroring BuildVerifyModel's or() semantics), so an inherited
-	// parent effort that is invalid for the override's provider fails at startup
-	// rather than as a per-request 400.
+	// model.chat is the one deliberate divergence from Verify's cmp.Or-everything
+	// inheritance: chat runs once per addressed thread message, on a path any
+	// channel or room member can trigger (verify runs once per investigation, on a
+	// path RunLore itself initiates), so a silently-inherited investigation model
+	// would make the cheapest way to enable the feature the most expensive way to
+	// run it. Require the model be named explicitly.
+	if ch := c.Model.Chat; ch != nil {
+		if strings.TrimSpace(ch.Model) == "" {
+			return fmt.Errorf("model.chat.model must name a model explicitly: chat runs once per addressed thread message, on a path any channel member can trigger, so it must not silently inherit model.model")
+		}
+		// Rejected exactly like its two siblings above, and for a reason this path
+		// makes sharper: max_tokens sizes both the provider's output cap and the
+		// conservative charge the hourly token budget applies when a provider
+		// reports no usage. A negative silently resolves to the fixed default
+		// (chatMaxTokens), so an operator who meant to cap replies harder would
+		// get 1024 and no diagnostic. 0 is the documented "use the default" —
+		// which for chat is a FIXED small default, deliberately not model.max_tokens.
+		if ch.MaxTokens < 0 {
+			return fmt.Errorf("model.chat.max_tokens must be >= 0 (0 = use the fixed chat default, NOT model.max_tokens), got %d", ch.MaxTokens)
+		}
+	}
+	// Effort and thinking are validated against the provider they will actually be
+	// sent to. Each override resolves its EFFECTIVE provider first — see
+	// validateOverrideEffort — so an inherited parent value that is invalid for the
+	// override's own provider fails at startup rather than as a per-request 400.
 	if err := validateEffort("model.effort", c.Model.Provider, c.Model.Effort); err != nil {
 		return err
 	}
-	// Thinking is validated against the provider it will actually be sent to, mirroring
-	// effort (and BuildVerifyModel's or() inherit-when-empty semantics).
 	if err := validateThinking("model.thinking", c.Model.Provider, c.Model.Thinking); err != nil {
 		return err
 	}
-	if v := c.Model.Verify; v != nil {
-		prov := v.Provider
-		if prov == "" {
-			prov = c.Model.Provider
-		}
-		eff := v.Effort
-		if eff == "" {
-			eff = c.Model.Effort
-		}
-		if err := validateEffort("model.verify.effort (or inherited model.effort)", prov, eff); err != nil {
-			return err
-		}
-		think := v.Thinking
-		if think == "" {
-			think = c.Model.Thinking
-		}
-		if err := validateThinking("model.verify.thinking (or inherited model.thinking)", prov, think); err != nil {
-			return err
-		}
+	if err := c.validateOverrideEffort("model.verify", c.Model.Verify); err != nil {
+		return err
+	}
+	if err := c.validateOverrideEffort("model.chat", c.Model.Chat); err != nil {
+		return err
 	}
 	// Interim progress updates: a non-positive cadence while enabled is a
 	// misconfiguration (ApplyDefaults fills an unset 0 with 5, so only an explicit
@@ -1337,6 +1599,38 @@ func (c *Config) Validate() error {
 	if c.GitOps.Mirror.Max < 0 {
 		return fmt.Errorf("gitops.mirror.max must be >= 0 (0 = use the default 10), got %d", c.GitOps.Mirror.Max)
 	}
+	// notify.thread bounds thread-capture volume, cost and note size; each
+	// field's own Effective* method already resolves 0 to its documented
+	// default (see ThreadNotify), so only a negative value is ever a
+	// misconfiguration here.
+	if c.Notify.Thread.MaxNotesPerThread < 0 {
+		return fmt.Errorf("notify.thread.max_notes_per_thread must be >= 0 (0 = use the default %d), got %d",
+			thread.DefaultMaxNotesPerThread, c.Notify.Thread.MaxNotesPerThread)
+	}
+	if c.Notify.Thread.ForgeWritesPerHour < 0 {
+		return fmt.Errorf("notify.thread.forge_writes_per_hour must be >= 0 (0 = use the default %d), got %d",
+			thread.DefaultForgeWritesPerHour, c.Notify.Thread.ForgeWritesPerHour)
+	}
+	if c.Notify.Thread.RegistryTTL < 0 {
+		return fmt.Errorf("notify.thread.registry_ttl must be >= 0 (0 = use the default %s), got %s",
+			thread.DefaultRegistryTTL, c.Notify.Thread.RegistryTTL.Std())
+	}
+	if c.Notify.Thread.RegistryMax < 0 {
+		return fmt.Errorf("notify.thread.registry_max must be >= 0 (0 = use the default %d), got %d",
+			thread.DefaultRegistryMax, c.Notify.Thread.RegistryMax)
+	}
+	if c.Notify.Thread.MaxNoteBytes < 0 {
+		return fmt.Errorf("notify.thread.max_note_bytes must be >= 0 (0 = use the default %d), got %d",
+			thread.DefaultMaxNoteBytes, c.Notify.Thread.MaxNoteBytes)
+	}
+	if c.Notify.Thread.ChatCallsPerHour < 0 {
+		return fmt.Errorf("notify.thread.chat_calls_per_hour must be >= 0 (0 = use the default %d), got %d",
+			thread.DefaultChatCallsPerHour, c.Notify.Thread.ChatCallsPerHour)
+	}
+	if c.Notify.Thread.ChatTokensPerHour < 0 {
+		return fmt.Errorf("notify.thread.chat_tokens_per_hour must be >= 0 (0 = use the default %d), got %d",
+			thread.DefaultChatTokensPerHour, c.Notify.Thread.ChatTokensPerHour)
+	}
 	// source_repos.allow is compiled at startup; a bad pattern must fail config
 	// load, not silently disable the tool at wiring time.
 	if len(c.SourceRepos.Allow) > 0 {
@@ -1345,12 +1639,23 @@ func (c *Config) Validate() error {
 		}
 	}
 	// Pricing rates must be non-negative (a negative rate would report a negative
-	// cost). Cover the main model and the verify override (which carries its own).
+	// cost). Cover the main model and both overrides, each of which carries its own.
 	if err := validatePricing("model.pricing", c.Model.Pricing); err != nil {
 		return err
 	}
 	if v := c.Model.Verify; v != nil {
 		if err := validatePricing("model.verify.pricing", v.Pricing); err != nil {
+			return err
+		}
+	}
+	// model.chat.pricing is checked for the same reason, though NOTHING reads it
+	// yet: the chat path has no cost reporting at all (investigate.go costs the
+	// main and verify passes only), so this rate cannot produce a wrong number
+	// today. It is decoded and documented exactly like its siblings, which is
+	// what makes accepting an invalid one at startup the wrong answer — a rate
+	// that silently validates reads as a rate that is in use.
+	if ch := c.Model.Chat; ch != nil {
+		if err := validatePricing("model.chat.pricing", ch.Pricing); err != nil {
 			return err
 		}
 	}
@@ -1383,26 +1688,16 @@ func (c *Config) Validate() error {
 	}
 	// Reject a cleartext API key over a public endpoint (the key would be sent in the
 	// clear, and is the enabler for a redirect-based key leak). Cover the main model,
-	// a verify override that targets its own endpoint, and embeddings. Loopback /
+	// each override that targets its own endpoint, and embeddings. Loopback /
 	// in-cluster hosts are exempt.
 	if err := checkSecureKeyEndpoint("model.base_url", "model.api_key_env", c.Model.BaseURL, c.Model.APIKeyEnv); err != nil {
 		return err
 	}
-	if v := c.Model.Verify; v != nil {
-		// Resolve the effective endpoint and key mirroring BuildVerifyModel's or() semantics:
-		// use the override value if set, else fall back to the parent. This catches the case
-		// where a verify override supplies its own key but inherits an insecure parent base_url.
-		base := v.BaseURL
-		if base == "" {
-			base = c.Model.BaseURL
-		}
-		key := v.APIKeyEnv
-		if key == "" {
-			key = c.Model.APIKeyEnv
-		}
-		if err := checkSecureKeyEndpoint("model.verify.base_url", "model.verify.api_key_env (or inherited model.api_key_env)", base, key); err != nil {
-			return err
-		}
+	if err := c.validateOverrideEndpoint("model.verify", c.Model.Verify); err != nil {
+		return err
+	}
+	if err := c.validateOverrideEndpoint("model.chat", c.Model.Chat); err != nil {
+		return err
 	}
 	if e := c.Model.Embeddings; e != nil {
 		if err := checkSecureKeyEndpoint("model.embeddings.base_url", "model.embeddings.api_key_env", e.BaseURL, e.APIKeyEnv); err != nil {

@@ -3,11 +3,15 @@
 package app
 
 import (
+	"cmp"
 	"log/slog"
+	"net/url"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
+	"github.com/Smana/runlore/internal/catalog"
 	"github.com/Smana/runlore/internal/config"
 	"github.com/Smana/runlore/internal/notify"
 	"github.com/Smana/runlore/internal/outcome"
@@ -27,14 +31,6 @@ func BuildNotifier(cfg *config.Config, threads notify.ThreadSink, log *slog.Logg
 	return notify.BuildEnabled(notify.Deps{Cfg: cfg, Log: log, Threads: threads})
 }
 
-// Thread-registry bounds. A thread stays answerable for a week — long enough for
-// a Monday follow-up on a Friday incident, short enough that the live set stays
-// small — and the size cap is the real backstop for a busy channel.
-const (
-	threadRegistryTTL = 7 * 24 * time.Hour
-	threadRegistryMax = 2000
-)
-
 // BuildThreadRegistry assembles the thread-context registry backing
 // notify.slack.thread_capture AND notify.matrix.thread_capture: nil-path
 // (disabled) unless EITHER option is on AND the outcome ledger has a path.
@@ -49,13 +45,20 @@ const (
 // as answerable as one opened over Matrix, so there is exactly one durable
 // file and one in-memory set, never one per transport — see
 // buildThreadResponder for the matching invariant on the write side.
+//
+// TTL and max-live come from notify.thread.registry_ttl/registry_max
+// (config.ThreadNotify), each already resolved to thread.DefaultRegistryTTL/
+// DefaultRegistryMax when unset — an absent notify.thread block reproduces
+// the bounds this used to hardcode.
 func BuildThreadRegistry(cfg *config.Config) (*thread.Registry, error) {
+	ttl := cfg.Notify.Thread.EffectiveRegistryTTL()
+	maxLive := cfg.Notify.Thread.EffectiveRegistryMax()
 	captureWanted := cfg.Notify.Slack.ThreadCapture || cfg.Notify.Matrix.ThreadCapture
 	if !captureWanted || cfg.Outcome.LedgerPath == "" {
-		return thread.NewRegistry("", threadRegistryTTL, threadRegistryMax)
+		return thread.NewRegistry("", ttl, maxLive)
 	}
 	path := filepath.Join(filepath.Dir(cfg.Outcome.LedgerPath), "threads.jsonl")
-	return thread.NewRegistry(path, threadRegistryTTL, threadRegistryMax)
+	return thread.NewRegistry(path, ttl, maxLive)
 }
 
 // ThreadCaptureDeliverable reports whether thread capture can actually work, and
@@ -80,10 +83,10 @@ func ThreadCaptureDeliverable(cfg *config.Config, log *slog.Logger) bool {
 
 // buildThreadResponder assembles the knowledge-write responder shared by
 // every transport's thread capture. It is built exactly once (see serve.go)
-// regardless of how many transports end up using it, so OpenPRs — the global
-// per-hour cap on standalone note PRs — bounds forge writes system-wide
-// instead of once per transport: "one responder, two transports," per the
-// design.
+// regardless of how many transports end up using it, so ForgeWrites — the
+// global per-hour cap on EVERY forge write this path makes, a CommentOnPR
+// exactly like an OpenPR — bounds them system-wide instead of once per
+// transport: "one responder, two transports," per the design.
 //
 // forge may be nil (no forge.kb_repo configured, or no usable credential): the
 // responder is still constructed, always the same instance, so callers check
@@ -94,14 +97,144 @@ func ThreadCaptureDeliverable(cfg *config.Config, log *slog.Logger) bool {
 // when telemetry is disabled — see serve.go) but the parameter itself stays
 // nil-safe: thread.Responder guards it before every use, same as every other
 // optional *telemetry.Metrics field in RunLore.
-func buildThreadResponder(threadRegistry *thread.Registry, forge thread.Forge, metrics *telemetry.Metrics, log *slog.Logger) *thread.Responder {
+//
+// MaxNotesPerThread, ForgeWrites and MaxNoteBytes all come from
+// notify.thread (config.ThreadNotify), each already resolved to its
+// thread.Default* constant when unset — an absent notify.thread block
+// reproduces exactly the bounds this used to hardcode.
+//
+// ForgeRepo comes from forge.* instead, because it must name the repository
+// the FORGE CLIENT above writes to and nothing else: it is what stops a
+// pull-request URL arriving from anywhere else from selecting which PR a note
+// lands on (see thread.Responder.ForgeRepo).
+//
+// chat (nil when model.chat is not configured) is the conversational layer,
+// built once by buildThreadChat and carried on the same single responder for
+// the same reason ForgeWrites is: its per-hour Budget must bound token spend
+// system-wide, not once per transport.
+func buildThreadResponder(cfg *config.Config, threadRegistry *thread.Registry, forge thread.Forge, chat *thread.Chat, metrics *telemetry.Metrics, log *slog.Logger) *thread.Responder {
 	return &thread.Responder{
 		Forge:             forge,
 		Registry:          threadRegistry,
-		MaxNotesPerThread: thread.DefaultMaxNotesPerThread,
-		ForgeWrites:       ratelimit.New(20, time.Hour),
+		MaxNotesPerThread: cfg.Notify.Thread.EffectiveMaxNotesPerThread(),
+		ForgeWrites:       ratelimit.New(cfg.Notify.Thread.EffectiveForgeWritesPerHour(), time.Hour),
+		MaxNoteBytes:      cfg.Notify.Thread.EffectiveMaxNoteBytes(),
+		ForgeRepo:         forgeRepoRef(cfg),
+		Chat:              chat,
 		Metrics:           metrics,
 		Log:               log,
+	}
+}
+
+// forgeRepoRef is the WEB identity of the repository RunLore curates into —
+// "github.com/acme/kb", "gitlab.example.com/group/sub/proj" — the host and
+// path a pull-request / merge-request URL from that repository carries.
+//
+// Both halves come from the same config the forge client is built from, so
+// they cannot name a different repository than the one writes actually land
+// in. Empty when forge.kb_repo is unset, which is also when buildForge returns
+// no client at all: nothing is written, and thread.Responder.ForgeRepo stays
+// unanchored rather than anchored to a half-formed reference.
+func forgeRepoRef(cfg *config.Config) string {
+	repo := strings.Trim(cfg.Forge.KBRepo, "/")
+	if repo == "" {
+		return ""
+	}
+	return forgeWebHost(cfg) + "/" + repo
+}
+
+// forgeWebHost is the WEB host of the forge RunLore curates into — the host a
+// pull-request / merge-request URL from that forge carries. It follows the
+// same provider switch and the same defaults the forge client itself is built
+// from (see buildForge / config.Validate), so the two cannot name different
+// hosts: GitHub derives it from the API base, exactly as githubGitHost already
+// does for source-diff allowlisting; GitLab's base_url IS the instance root,
+// which is the host its web_url uses.
+func forgeWebHost(cfg *config.Config) string {
+	if cfg.Forge.Provider != "gitlab" {
+		return githubGitHost(cfg.Forge.GitHubAPIURL)
+	}
+	if cfg.Forge.GitLab.BaseURL == "" {
+		return "gitlab.com"
+	}
+	u, err := url.Parse(cfg.Forge.GitLab.BaseURL)
+	if err != nil || u.Hostname() == "" {
+		return "gitlab.com"
+	}
+	return strings.ToLower(u.Hostname())
+}
+
+// buildThreadChat assembles the conversational reply layer, or returns nil when
+// model.chat is absent — the presence of that block IS the feature switch (see
+// BuildChatModel), and a nil *thread.Chat is what makes Responder's freeform
+// route behave exactly as it did before this layer existed.
+//
+// Every field on thread.Chat is nil/zero-safe, which makes this function the
+// only place an omission can be caught: an unwired Budget silently removes the
+// spend ceiling entirely, an unwired Catalog silently degrades every reply, and
+// an unwired MaxOutputTokens silently under-charges the budget against the cap
+// the operator actually configured. TestBuildThreadChatWiresEveryField pins each
+// one for that reason.
+//
+// cat is the SAME *catalog.Catalog the investigation path holds — one catalog
+// per process, never a second index or a second git-sync goroutine. It is taken
+// as a concrete pointer and converted here so a nil catalog reaches Chat.Catalog
+// as a nil INTERFACE: a typed-nil would make Chat.Catalog != nil true and turn
+// catalogHits' documented no-hits branch into a nil-receiver call. Same idiom,
+// same reason, as BuildInvestigator's priorEntryFinder.
+//
+// The layer is built even when it is degraded — no catalog, an empty credential,
+// no transport listening. Chat.Answer's contract is that any failure returns
+// false and the deterministic capture path answers instead, so degrading loudly
+// beats refusing to start; each condition below warns exactly once, naming what
+// the operator has to fix.
+func buildThreadChat(cfg *config.Config, cat *catalog.Catalog, metrics *telemetry.Metrics, log *slog.Logger) *thread.Chat {
+	model := BuildChatModel(cfg)
+	if model == nil {
+		return nil
+	}
+	// model.chat configured with no transport listening for mentions is paid-for
+	// dead config. A warning rather than a Validate error: the operator may be
+	// staging thread_capture next — see config.ChatWithoutCaptureWarning.
+	if msg := config.ChatWithoutCaptureWarning(cfg); msg != "" {
+		log.Warn(msg)
+	}
+	// Configuration is not delivery: an api_key_env present but EMPTY at runtime
+	// (an unmounted secret, a blank Helm value) passes Validate and then fails
+	// every call. The same runtime gap ThreadCaptureDeliverable and
+	// SlackFeedbackDeliverable close for their transports.
+	if env := cmp.Or(cfg.Model.Chat.APIKeyEnv, cfg.Model.APIKeyEnv); env != "" && os.Getenv(env) == "" {
+		log.Warn("model.chat is configured but its credential env var is empty; every conversational reply "+
+			"will fail at call time and fall back to deterministic capture", "api_key_env", env)
+	}
+	var searcher catalog.Searcher
+	if cat != nil {
+		searcher = cat
+	} else {
+		log.Warn("model.chat is configured but no catalog is available; conversational replies are answered " +
+			"with no knowledge-base context (configure catalog.dir / catalog.repo)")
+	}
+	callsPerHour := cfg.Notify.Thread.EffectiveChatCallsPerHour()
+	tokensPerHour := cfg.Notify.Thread.EffectiveChatTokensPerHour()
+	maxOutput := chatMaxTokens(cfg)
+	log.Info("thread conversational replies enabled",
+		"model", cfg.Model.Chat.Model, "max_output_tokens", maxOutput,
+		"calls_per_hour", callsPerHour, "tokens_per_hour", tokensPerHour)
+	return &thread.Chat{
+		Model:  model,
+		Budget: thread.NewBudget(callsPerHour, tokensPerHour, time.Hour, log),
+		// MaxOutputTokens must be the value the provider client above actually
+		// runs under, not thread's own default: it sizes the conservative charge
+		// applied when a provider reports no usage, so an operator who raised
+		// model.chat.max_tokens would otherwise have that spend under-billed
+		// against their own ceiling.
+		MaxOutputTokens: maxOutput,
+		Catalog:         searcher,
+		// The same bound the Responder writes under, so one configured value
+		// covers the message on the way to the model and on the way to the KB.
+		MaxNoteBytes: cfg.Notify.Thread.EffectiveMaxNoteBytes(),
+		Metrics:      metrics,
+		Log:          log,
 	}
 }
 

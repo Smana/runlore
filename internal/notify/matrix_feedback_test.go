@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"sync"
 	"testing"
@@ -455,7 +456,7 @@ func TestMatrixContextFor(t *testing.T) {
 			if gotOK != tc.wantOK {
 				t.Errorf("contextFor ok = %v, want %v", gotOK, tc.wantOK)
 			}
-			if gotCtx != tc.wantCtx {
+			if !reflect.DeepEqual(gotCtx, tc.wantCtx) {
 				t.Errorf("contextFor = %+v, want %+v", gotCtx, tc.wantCtx)
 			}
 
@@ -544,7 +545,7 @@ func newTestMatrixHandler(t *testing.T, srv *httptest.Server, room, self string,
 	if busyDispatch == nil {
 		busyDispatch = thread.NewDispatcher(4, time.Minute, log)
 	}
-	responder := &thread.Responder{Forge: &fakeReinvestigateForge{}, Log: log}
+	responder := &thread.Responder{Forge: &fakeThreadForge{}, Log: log}
 	f := NewMatrixFeedback(srv.URL, room, "tok", nil, log, WithThreadCapture(&thread.Mention{Responder: responder, Replier: rep, Log: log}, dispatch, busyDispatch))
 	f.self = self
 	return f
@@ -692,7 +693,7 @@ func TestMatrixHandleMessageRegistryMissFallsBackToEventStamp(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewRegistry: %v", err)
 	}
-	forge := &fakeReinvestigateForge{}
+	forge := &fakeThreadForge{}
 	responder := &thread.Responder{Forge: forge, Registry: reg, Log: matrixTestLog()}
 	rep := &fakeMentionReplier{doneAt: 1, done: make(chan struct{})}
 	mention := &thread.Mention{Responder: responder, Registry: reg, Replier: rep, Log: matrixTestLog()}
@@ -723,16 +724,174 @@ func TestMatrixHandleMessageRegistryMissFallsBackToEventStamp(t *testing.T) {
 	}
 }
 
+// fakeChatModel is a scriptable providers.ModelProvider standing in for the
+// chat layer's one model call, counting invocations and keeping the request so
+// a test can assert BOTH that the model was reached exactly once and that the
+// thread's own context reached it. Guarded by a mutex because Complete runs on
+// a Dispatch worker goroutine while the test reads these fields on its own.
+type fakeChatModel struct {
+	mu      sync.Mutex
+	resp    providers.CompletionResponse
+	calls   int
+	lastReq providers.CompletionRequest
+}
+
+func (f *fakeChatModel) Complete(_ context.Context, req providers.CompletionRequest) (providers.CompletionResponse, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.calls++
+	f.lastReq = req
+	return f.resp, nil
+}
+
+func (f *fakeChatModel) stats() (calls int, req providers.CompletionRequest) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.calls, f.lastReq
+}
+
+// chatToolReply is the well-formed shape thread.Chat expects back: exactly one
+// forced submit_thread_reply tool call carrying the answer and the note the
+// model proposes. The tool name is internal/thread's own constant, unexported
+// there, so it is spelled out here — a drift between the two makes Chat.Answer
+// report failure and the deterministic capture path answer instead, which this
+// test's assertions on the posted text catch rather than wave through.
+func chatToolReply(reply, kbNote string) providers.CompletionResponse {
+	return providers.CompletionResponse{
+		ToolCalls: []providers.ToolCall{{
+			ID:   "1",
+			Name: "submit_thread_reply",
+			Args: fmt.Sprintf(`{"reply":%q,"kb_note":%q}`, reply, kbNote),
+		}},
+		Usage: providers.Usage{InputTokens: 100, OutputTokens: 20},
+	}
+}
+
+// TestMatrixFeedbackDrivesTheChatLayerEndToEnd is Matrix's half of the wiring
+// test internal/thread.TestMentionDrivesTheChatLayerEndToEnd is Slack's:
+// nothing drove the MATRIX entry point with a chat model configured, so nothing
+// proved the model's answer is actually POSTED — into the right room, in the
+// right thread — on this transport. Every other Matrix thread-capture test runs
+// with Chat nil and stops at routing; every chat test lives in internal/thread
+// and never touches handleMessage. Between them, a chat layer that answered
+// perfectly and a Matrix path that dropped the answer would both look correct,
+// which is exactly the class that shipped a non-functional feature in PR2.
+//
+// It is driven through the real handleMessage → Dispatch →
+// thread.Mention.HandleMention → Responder → Chat path, off a real m.room.message
+// event rooted in one of RunLore's own investigation messages, with a real
+// (registry-hit) thread context.
+//
+// The proposed note's own text names a DIFFERENT pull request from the one the
+// thread is anchored to. That is the point of the third assertion: Chat supplies
+// note CONTENT only, and the route stays derived from the thread context alone
+// (see Responder.write), so a note mentioning PR #999 must still land as a
+// comment on the thread's PR #42 — never wherever the model's words pointed.
+func TestMatrixFeedbackDrivesTheChatLayerEndToEnd(t *testing.T) {
+	const room = "!r:hs"
+	const self = "@runlore:hs"
+	srv := matrixThreadCaptureServer(t, self)
+	defer srv.Close()
+
+	reg, err := thread.NewRegistry(filepath.Join(t.TempDir(), "threads.jsonl"), time.Hour, 10)
+	if err != nil {
+		t.Fatalf("NewRegistry: %v", err)
+	}
+	if err := reg.Put(thread.Context{
+		Root: "$root-ours", Channel: room, Title: "pod crash-looping",
+		CuratedURL: "https://github.com/o/r/pull/42",
+	}); err != nil {
+		t.Fatalf("Put: %v", err)
+	}
+
+	model := &fakeChatModel{resp: chatToolReply(
+		"The CNI was ruled out — it was a spot reclaim.",
+		"The real cause was a spot-node reclaim, not the CNI. See https://github.com/o/r/pull/999.",
+	)}
+	forge := &fakeThreadForge{}
+	rep := &fakeMentionReplier{doneAt: 1, done: make(chan struct{})}
+	responder := &thread.Responder{
+		Forge:    forge,
+		Registry: reg,
+		Chat:     &thread.Chat{Model: model, Log: matrixTestLog()},
+		Log:      matrixTestLog(),
+	}
+	mention := &thread.Mention{Responder: responder, Registry: reg, Replier: rep, Log: matrixTestLog()}
+	f := NewMatrixFeedback(srv.URL, room, "tok", nil, matrixTestLog(), WithThreadCapture(
+		mention,
+		thread.NewDispatcher(4, time.Minute, matrixTestLog()),
+		thread.NewDispatcher(4, time.Minute, matrixTestLog()),
+	))
+	f.self = self
+
+	e := matrixEvent{Sender: "@alice:hs", EventID: "$reply-chat"}
+	e.Content.Body = "@runlore:hs was it the CNI?"
+	e.Content.Mentions.UserIDs = []string{self}
+	e.Content.RelatesTo.RelType = "m.thread"
+	e.Content.RelatesTo.EventID = "$root-ours"
+
+	f.handleMessage(context.Background(), e)
+	waitForReplies(t, rep)
+
+	calls, req := model.stats()
+	if calls != 1 {
+		t.Fatalf("Complete called %d times, want exactly 1 — an addressed freeform message with model.chat configured must reach the model exactly once", calls)
+	}
+	// The model answered from the thread's own context rather than from nothing:
+	// a wiring that reached the model with an empty context would still produce a
+	// reply, and would still be broken.
+	prompt := req.Messages[0].Content
+	for _, want := range []string{"pod crash-looping", "was it the CNI?", "@alice:hs"} {
+		if !strings.Contains(prompt, want) {
+			t.Fatalf("the assembled prompt is missing %q — the thread's context never reached the model:\n%s", want, prompt)
+		}
+	}
+
+	got := rep.snapshot()
+	if len(got) != 1 {
+		t.Fatalf("replies = %+v, want exactly one", got)
+	}
+	if got[0].root != "$root-ours" || got[0].channel != room {
+		t.Fatalf("reply posted to root %q in room %q, want root %q in room %q — the answer must go back where it was asked",
+			got[0].root, got[0].channel, "$root-ours", room)
+	}
+	// Read as the human sees it: the untrusted-span marks are the transport's
+	// business (see thread.RenderReply), not this contract's.
+	posted := thread.RenderReply(got[0].text, nil)
+	if !strings.Contains(posted, "> The CNI was ruled out — it was a spot reclaim.") {
+		t.Fatalf("the model's answer never reached the room: %q", posted)
+	}
+	if !strings.Contains(posted, "📝 Noted on the knowledge-base PR #42") {
+		t.Fatalf("the human was not told where their note landed: %q", posted)
+	}
+
+	comments := forge.commentsSnapshot()
+	if opened, _ := forge.counts(); opened != 0 || len(comments) != 1 || comments[0].number != 42 {
+		t.Fatalf("forge writes = %d opened / %+v commented, want exactly one comment on #42 — the note is routed by the thread's context, never by the model's text",
+			opened, comments)
+	}
+	if !strings.Contains(comments[0].body, "spot-node reclaim, not the CNI") {
+		t.Fatalf("the filed note lost the model's own text:\n%s", comments[0].body)
+	}
+	stored, ok := reg.Get("$root-ours")
+	if !ok {
+		t.Fatal("the thread went missing from the registry")
+	}
+	if stored.Notes != 1 {
+		t.Fatalf("Notes = %d, want 1 — a note filed through the chat route spends the same per-thread allowance", stored.Notes)
+	}
+}
+
 // TestMatrixAddressedLocalpartBoundary pins Fix 3: the localpart fallback
 // (the "runlore" in "@runlore:example.org") must only match as a whole word —
 // a plain strings.Contains treats "sre" as addressing RunLore inside
 // "misread", or "ops" inside "oops". This matters beyond cosmetics: a false
-// positive here still hands the message to thread.Responder.Handle, and any
-// ordinary prose that happens to start with "note:" — never intended for
-// RunLore at all — would then be recorded to the knowledge base exactly as
-// if it had been genuinely addressed (Responder.Handle no longer treats bare
-// IntentFreeform as a write, but it cannot tell an accidental match from a
-// deliberate one once addressed() has already said yes).
+// positive here still hands the message to thread.Responder.Handle, which
+// cannot tell an accidental match from a deliberate one once addressed() has
+// said yes. Ordinary prose carrying "note:" anywhere in it — never intended
+// for RunLore at all — is then recorded to the knowledge base exactly as if
+// it had been genuinely addressed, and prose without it spends a model call
+// instead.
 func TestMatrixAddressedLocalpartBoundary(t *testing.T) {
 	tests := []struct {
 		name string

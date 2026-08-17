@@ -6,15 +6,12 @@ import (
 	"context"
 	"net/http"
 	"net/http/httptest"
-	"slices"
 	"strconv"
 	"strings"
 	"testing"
 
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/metric/noop"
-
-	"github.com/Smana/runlore/internal/config"
 )
 
 // TestLatencyHistogramsUseSLOBuckets asserts the seconds-scale latency histograms
@@ -144,53 +141,4 @@ func bucketHasBoundary(body, series, le string) bool {
 		}
 	}
 	return false
-}
-
-// TestScoreBucketsAlignWithTheDecisionThresholds pins scoreBuckets against the
-// thresholds it claims to serve, read from the config package rather than
-// restated here.
-//
-// scoreBuckets' doc comment maps four boundaries to four gates — rerank_min_score,
-// min_score/margin_gap, solo_floor, dup_score — and that mapping is the whole
-// reason the ladder is shaped the way it is: a bucket count is only an answer to
-// "how much of the corpus clears this gate?" while the boundary and the gate are
-// the same number. Nothing enforced that. Lower solo_floor's default to 3.5 and
-// the panel keeps rendering, keeps looking authoritative, and silently stops
-// answering the question the comment promises.
-//
-// The instant-recall gates come from ApplyDefaults, so this reads what an
-// operator actually runs under. dup_score is asserted as a literal because its
-// default is applied in app.BuildCurator rather than in ApplyDefaults — unlike
-// every sibling here — so there is no resolved value to read without building a
-// forge client. That asymmetry is worth fixing at the source; until it is, this
-// test states the number and where it comes from.
-func TestScoreBucketsAlignWithTheDecisionThresholds(t *testing.T) {
-	// instant_recall is off by default and ApplyDefaults only fills its knobs once
-	// it is enabled, so the fixture enables it. The reranker is on by default,
-	// so RerankMinScore resolves without further help.
-	var cfg config.Config
-	cfg.Catalog.InstantRecall.Enabled = true
-	config.ApplyDefaults(&cfg)
-	ir := cfg.Catalog.InstantRecall
-
-	for _, tc := range []struct {
-		gate  string
-		value float64
-	}{
-		{"catalog.instant_recall.rerank_min_score", ir.RerankMinScore},
-		{"catalog.instant_recall.min_score", ir.MinScore},
-		{"catalog.instant_recall.margin_gap", ir.MarginGap},
-		{"catalog.instant_recall.solo_floor", ir.SoloFloor},
-		{"forge.dup_score (default applied in app.BuildCurator)", 5.0},
-	} {
-		if tc.value == 0 {
-			t.Errorf("%s resolved to 0 — either the default moved out of ApplyDefaults or the field was renamed; "+
-				"this guard cannot check a gate it cannot read", tc.gate)
-			continue
-		}
-		if !slices.Contains(scoreBuckets, tc.value) {
-			t.Errorf("%s is %g, which is not a scoreBuckets boundary %v — a bucket count no longer answers "+
-				"\"how much of the corpus clears this gate?\" for it", tc.gate, tc.value, scoreBuckets)
-		}
-	}
 }

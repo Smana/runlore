@@ -19,6 +19,7 @@ import (
 
 	"github.com/Smana/runlore/internal/httpx"
 	"github.com/Smana/runlore/internal/providers"
+	"github.com/Smana/runlore/internal/thread"
 )
 
 func init() {
@@ -121,8 +122,14 @@ func (m *Matrix) send(ctx context.Context, room string, content map[string]any) 
 func (m *Matrix) Deliver(ctx context.Context, inv providers.Investigation) error {
 	msg := Format(inv)
 	content := map[string]any{
-		"msgtype":        "m.notice",
-		"body":           plainFallback(msg),
+		"msgtype": "m.notice",
+		// escapeMatrixReply on the PLAIN body, not just on thread replies: this
+		// message interpolates model-authored text (the title, each root cause's
+		// rationale, the evidence), and .m.rule.roomnotif matches "@room" in
+		// content.body to notify every member of the room. The formatted_body is
+		// not the vector — the push rule reads body — but the body is, and it
+		// carries exactly the same untrusted prose a reply does.
+		"body":           escapeMatrixReply(plainFallback(msg)),
 		"format":         "org.matrix.custom.html",
 		"formatted_body": mrkdwnToHTML(msg),
 	}
@@ -151,18 +158,49 @@ func (m *Matrix) Deliver(ctx context.Context, inv providers.Investigation) error
 	return nil
 }
 
+// roomPingRe matches the room-wide mention token the .m.rule.roomnotif push
+// rule keys on. Matched case-insensitively because the rule's own
+// content-match is: "@ROOM" notifies exactly as "@room" does.
+var roomPingRe = regexp.MustCompile(`(?i)@room`)
+
+// escapeMatrixReply neutralises untrusted text for a Matrix m.notice BODY —
+// the transport-specific half of thread.RenderReply's contract, and
+// deliberately not the same job escapeMrkdwn does for Slack.
+//
+// A reply body is plain text with no format/formatted_body, so there is no
+// markup to inject: an HTML tag or a Slack "<https://evil|text>" link renders
+// literally. What a body CAN still carry is "@room", which the
+// .m.rule.roomnotif push rule turns into a notification for every member when
+// the sender holds the room notification power level — the direct analogue of
+// Slack's "<!channel>", and reachable the same way, through model prose
+// composing RunLore's outgoing message.
+//
+// A word joiner is inserted rather than any character being removed: the token
+// stops matching the push rule while the words a human reads are unchanged,
+// which is the same "mark, never censor" rule thread.modelVoice follows.
+func escapeMatrixReply(s string) string {
+	return roomPingRe.ReplaceAllStringFunc(s, func(tok string) string { return tok[:1] + "\u2060" + tok[1:] })
+}
+
 // ReplyInThread posts text as an m.notice reply into the Matrix thread rooted
 // at root (providers.ThreadNotifier), via the MSC3440 m.thread relation. Text
 // is plain — no formatted_body — because these are RunLore's own short
-// acknowledgements ("📝 Noted on…"), not investigation prose. It targets the
-// passed channel (room) when non-empty, falling back to the notifier's
-// configured room, mirroring SlackBot.ReplyInThread: a reply can only go where
-// the thread root it answers was sent.
+// acknowledgements ("📝 Noted on…") plus, when model.chat is configured, the
+// model's answer. It targets the passed channel (room) when non-empty, falling
+// back to the notifier's configured room, mirroring SlackBot.ReplyInThread: a
+// reply can only go where the thread root it answers was sent.
+//
+// The body goes through thread.RenderReply so the untrusted spans in it are
+// neutralised for THIS transport and RunLore's own framing is posted verbatim
+// — see escapeMatrixReply for what that means on a plain-text body, and
+// SlackBot.ReplyInThread for the same boundary drawn against mrkdwn. Calling
+// it is not optional even for a transport with little to escape: RenderReply
+// is also what removes the in-band span marks, which must never reach a room.
 func (m *Matrix) ReplyInThread(ctx context.Context, root, channel, text string) error {
 	room := cmp.Or(channel, m.roomID)
 	content := map[string]any{
 		"msgtype": "m.notice",
-		"body":    text,
+		"body":    thread.RenderReply(text, escapeMatrixReply),
 		"m.relates_to": map[string]any{
 			"rel_type": "m.thread",
 			"event_id": root,

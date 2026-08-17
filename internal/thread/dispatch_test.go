@@ -4,17 +4,13 @@ package thread
 
 import (
 	"context"
-	"io"
-	"log/slog"
 	"sync/atomic"
 	"testing"
 	"time"
 )
 
-func testLogger() *slog.Logger { return slog.New(slog.NewTextHandler(io.Discard, nil)) }
-
 func TestDispatcherRunsWork(t *testing.T) {
-	d := NewDispatcher(2, time.Minute, testLogger())
+	d := NewDispatcher(2, time.Minute, silentLog())
 	done := make(chan struct{})
 	if !d.Go(context.Background(), func(context.Context) { close(done) }) {
 		t.Fatal("Go returned false with free slots")
@@ -27,7 +23,7 @@ func TestDispatcherRunsWork(t *testing.T) {
 }
 
 func TestDispatcherRefusesWhenSaturated(t *testing.T) {
-	d := NewDispatcher(1, time.Minute, testLogger())
+	d := NewDispatcher(1, time.Minute, silentLog())
 	block, running := make(chan struct{}), make(chan struct{})
 	if !d.Go(context.Background(), func(context.Context) { close(running); <-block }) {
 		t.Fatal("first Go refused")
@@ -40,7 +36,7 @@ func TestDispatcherRefusesWhenSaturated(t *testing.T) {
 }
 
 func TestDispatcherSlotIsReleasedAfterWork(t *testing.T) {
-	d := NewDispatcher(1, time.Minute, testLogger())
+	d := NewDispatcher(1, time.Minute, silentLog())
 	for i := 0; i < 3; i++ {
 		done := make(chan struct{})
 		if !d.Go(context.Background(), func(context.Context) { close(done) }) {
@@ -52,7 +48,7 @@ func TestDispatcherSlotIsReleasedAfterWork(t *testing.T) {
 }
 
 func TestDispatcherSlotIsReleasedAfterPanic(t *testing.T) {
-	d := NewDispatcher(1, time.Minute, testLogger())
+	d := NewDispatcher(1, time.Minute, silentLog())
 	panicked := make(chan struct{})
 	if !d.Go(context.Background(), func(context.Context) { close(panicked); panic("boom") }) {
 		t.Fatal("first Go refused")
@@ -67,7 +63,7 @@ func TestDispatcherSlotIsReleasedAfterPanic(t *testing.T) {
 }
 
 func TestDispatcherAppliesTimeout(t *testing.T) {
-	d := NewDispatcher(1, 50*time.Millisecond, testLogger())
+	d := NewDispatcher(1, 50*time.Millisecond, silentLog())
 	var cancelled atomic.Bool
 	done := make(chan struct{})
 	d.Go(context.Background(), func(ctx context.Context) {
@@ -89,7 +85,7 @@ func TestDispatcherWorkOutlivesTheCallersContext(t *testing.T) {
 	// The caller's context is a request context that is cancelled the moment the
 	// handler returns. Work must NOT die with it — only with the dispatcher's own
 	// timeout — or every mention would be cancelled before it could be written.
-	d := NewDispatcher(1, time.Minute, testLogger())
+	d := NewDispatcher(1, time.Minute, silentLog())
 	ctx, cancel := context.WithCancel(context.Background())
 	started, result := make(chan struct{}), make(chan error, 1)
 	d.Go(ctx, func(wctx context.Context) {
@@ -105,7 +101,7 @@ func TestDispatcherWorkOutlivesTheCallersContext(t *testing.T) {
 }
 
 func TestDispatcherDrainWaitsForInFlightWork(t *testing.T) {
-	d := NewDispatcher(2, time.Minute, testLogger())
+	d := NewDispatcher(2, time.Minute, silentLog())
 	var finished atomic.Int32
 	release := make(chan struct{})
 	for i := 0; i < 2; i++ {
@@ -119,7 +115,7 @@ func TestDispatcherDrainWaitsForInFlightWork(t *testing.T) {
 }
 
 func TestDispatcherDrainIsBounded(t *testing.T) {
-	d := NewDispatcher(1, time.Minute, testLogger())
+	d := NewDispatcher(1, time.Minute, silentLog())
 	block := make(chan struct{})
 	defer close(block)
 	d.Go(context.Background(), func(context.Context) { <-block })

@@ -281,6 +281,11 @@ func anthropicErrorDetail(body []byte) string {
 // summed across message_start (input) and message_delta (output), and the
 // message_delta stop_reason maps to StopReason (and Truncated when "max_tokens").
 // A stream that ends before message_stop (a mid-stream drop) is an error.
+//
+// Every error return carries out.CostOnly() rather than a zero response: input
+// usage arrives on message_start — the FIRST event of the stream — and output
+// usage on message_delta, so a failure anywhere past that point already knows
+// what the provider generated and billed. See providers.CompletionResponse.
 func accumulate(r io.Reader) (providers.CompletionResponse, error) {
 	var out providers.CompletionResponse
 	toolArgs := map[int]*strings.Builder{} // content-block index → reassembled JSON
@@ -297,10 +302,10 @@ func accumulate(r io.Reader) (providers.CompletionResponse, error) {
 
 	for ev, err := range clientcore.SSEEvents[streamEvent](r) {
 		if err != nil {
-			return providers.CompletionResponse{}, fmt.Errorf("read stream: %w", err)
+			return out.CostOnly(), fmt.Errorf("read stream: %w", err)
 		}
 		if ev.Error != nil {
-			return providers.CompletionResponse{}, fmt.Errorf("anthropic error: %s", ev.Error.Message)
+			return out.CostOnly(), fmt.Errorf("anthropic error: %s", ev.Error.Message)
 		}
 		switch ev.Type {
 		case "message_start":
@@ -363,7 +368,7 @@ func accumulate(r io.Reader) (providers.CompletionResponse, error) {
 		}
 	}
 	if !sawStop {
-		return providers.CompletionResponse{}, fmt.Errorf("stream ended before message_stop (truncated upstream)")
+		return out.CostOnly(), fmt.Errorf("stream ended before message_stop (truncated upstream)")
 	}
 	for _, idx := range order {
 		tc := *toolMeta[idx]

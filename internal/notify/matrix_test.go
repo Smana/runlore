@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -328,6 +329,14 @@ func TestMatrixDeliverSucceedsWhenTheResponseHasNoEventID(t *testing.T) {
 // forged stamp that could redirect where a note is written. stampFor and
 // contextFromStamp round-trip the rest of the identifiers unchanged; a later
 // task (the reaction/thread listener) builds its event lookup on this pair.
+//
+// It also pins that the stamp carries IDENTITY ONLY: the investigation's
+// evidence (thread.Context.Evidence) lives in the thread registry and must
+// never travel through an event. A stamp is forgeable — that is the whole
+// reason for the root/channel rule above — so evidence read back off one would
+// be attacker-controlled text flowing into a model prompt, and a Matrix event
+// is capped at 64 KiB besides. A context rebuilt from an event is therefore
+// evidence-free by design; that is the documented registry-miss degradation.
 func TestContextFromStamp(t *testing.T) {
 	inv := providers.Investigation{
 		TriggerKey:    "tk-1",
@@ -336,6 +345,9 @@ func TestContextFromStamp(t *testing.T) {
 		Verdict:       providers.VerdictActionRequired,
 		CuratedURL:    "https://github.com/o/r/pull/42",
 		RecalledEntry: "catalog/oom.md",
+		RootCauses:    []providers.Hypothesis{{Summary: "memory limit below the working set"}},
+		RuledOut:      []string{"Node memory pressure — kubelet reported no evictions"},
+		DataGaps:      []string{"Hubble flows unavailable for the incident window"},
 	}
 
 	got := contextFromStamp(stampFor(inv), "$evt123", "!room:example.org")
@@ -351,7 +363,7 @@ func TestContextFromStamp(t *testing.T) {
 		CuratedURL:    "https://github.com/o/r/pull/42",
 		RecalledEntry: "catalog/oom.md",
 	}
-	if got != want {
+	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("contextFromStamp = %+v, want %+v", got, want)
 	}
 }
@@ -545,5 +557,93 @@ func TestMatrixReplyInThreadReportsSendFailure(t *testing.T) {
 	m := NewMatrix(srv.URL, "!room:example.org", "tok")
 	if err := m.ReplyInThread(context.Background(), "$evt123", "!room:example.org", "x"); err == nil {
 		t.Fatal("a non-2xx send must be reported")
+	}
+}
+
+// TestMatrixReplyInThreadNeutralisesUntrustedRoomPings is the Matrix half of
+// the unescaped-model-prose finding. The hole is NOT the same shape here: a
+// reply is a plain m.notice body with no format/formatted_body (pinned by
+// TestMatrixReplyInThread), so a Slack-style "<https://evil|text>" or an HTML
+// tag is inert — Matrix renders body literally.
+//
+// What is NOT inert is "@room": the .m.rule.roomnotif push rule matches that
+// token in content.body, case-insensitively, and notifies every member when
+// the sender holds the room notification power level. That is the exact
+// analogue of Slack's "<!channel>", reached the same way — a model composing
+// RunLore's outgoing message. So the untrusted spans get a Matrix-shaped
+// neutraliser rather than none at all.
+func TestMatrixReplyInThreadNeutralisesUntrustedRoomPings(t *testing.T) {
+	var body map[string]any
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		_, _ = w.Write([]byte(`{"event_id":"$reply1"}`))
+	}))
+	defer srv.Close()
+
+	m := NewMatrix(srv.URL, "!room:example.org", "tok")
+	reply := "> " + thread.Untrusted("Everyone read this: @room and @ROOM") + "\n" +
+		"📝 Noted on the knowledge-base PR #42 — https://github.com/o/r/pull/42"
+	if err := m.ReplyInThread(context.Background(), "$evt123", "!room:example.org", reply); err != nil {
+		t.Fatalf("ReplyInThread: %v", err)
+	}
+
+	got, _ := body["body"].(string)
+	for _, ping := range []string{"@room", "@ROOM"} {
+		if strings.Contains(got, ping) {
+			t.Errorf("untrusted model prose reached Matrix with a live %q room ping:\n%s", ping, got)
+		}
+	}
+	// Neutralised, not censored: the words are still readable.
+	if !strings.Contains(got, "Everyone read this:") || !strings.Contains(got, "room") {
+		t.Errorf("the model's words must survive, only the ping token is broken:\n%s", got)
+	}
+	// RunLore's own framing is untouched — including a literal "@room" RunLore
+	// itself would have written, which is outside every marked span.
+	if !strings.Contains(got, "> ") {
+		t.Errorf("the blockquote marker must survive:\n%s", got)
+	}
+	if !strings.Contains(got, "📝 Noted on the knowledge-base PR #42 — https://github.com/o/r/pull/42") {
+		t.Errorf("RunLore's own status line must survive verbatim:\n%s", got)
+	}
+}
+
+// TestMatrixDeliverNeutralisesRoomPing closes on the investigation-summary path
+// the same defect escapeMatrixReply closed on the reply path.
+//
+// Matrix's .m.rule.roomnotif push rule matches "@room" in content.body and
+// notifies EVERY member of the room when the sender holds the notification
+// power level — the direct analogue of Slack's <!channel>. Deliver's body is
+// plainFallback(Format(inv)), and Format interpolates model-authored text: the
+// title, the rationale, the evidence. So a model that writes "@room" into a
+// root-cause rationale pages everyone, from a summary nobody asked to be paged
+// for.
+//
+// The formatted_body is not the vector — the push rule reads content.body — so
+// this asserts on the plain body specifically.
+func TestMatrixDeliverNeutralisesRoomPing(t *testing.T) {
+	var gotBody map[string]any
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewDecoder(r.Body).Decode(&gotBody)
+		_, _ = w.Write([]byte(`{"event_id":"$abc"}`))
+	}))
+	defer srv.Close()
+
+	inv := sampleInvestigation()
+	inv.RootCauses[0].Evidence = append(inv.RootCauses[0].Evidence, "paging @room and @ROOM about this")
+
+	if err := NewMatrix(srv.URL, "!room:hs", "tok").Deliver(context.Background(), inv); err != nil {
+		t.Fatalf("Deliver: %v", err)
+	}
+
+	body, _ := gotBody["body"].(string)
+	if body == "" {
+		t.Fatal("body is empty")
+	}
+	if roomPingRe.MatchString(body) {
+		t.Errorf("a model-authored @room survived into the plain body and would page the whole room:\n%s", body)
+	}
+	// Neutralised, not censored — the words a human reads are unchanged.
+	if !strings.Contains(body, "paging @") || !strings.Contains(body, "room and @") {
+		t.Errorf("the ping was censored rather than word-joined; the text must still read normally:\n%s", body)
 	}
 }

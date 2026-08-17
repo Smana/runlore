@@ -627,6 +627,126 @@ Startup fails loud unless `homeserver`/`room_id`/`access_token_env` and `outcome
 — the same requirement `matrix.feedback_reactions` has above. With the option off (the default), the
 `/sync` filter is unchanged and `@runlore note: …` mentions are not read.
 
+**🧵 Thread bounds — `notify.thread` (optional).** One block, shared by both transports, holding
+every ceiling thread capture runs under. Omitting it reproduces the defaults exactly:
+`max_notes_per_thread` (default **20**), `forge_writes_per_hour` (default **20**, global across both
+transports), `max_note_bytes` (default **8192**, one human message's input), `registry_ttl` (default
+**168h**), `registry_max` (default **2000**), plus `chat_calls_per_hour` and `chat_tokens_per_hour`
+— which apply only with `model.chat` set, and are covered in full below.
+
+### Conversational replies and what they cost
+
+**Off by default.** Setting a `model.chat` block turns it on: RunLore answers an addressed thread
+message that carries no recognised command prefix — a question, or a correction stated as ordinary
+prose — with one model call, instead of the fixed "I can only record notes" reply. The presence of
+the block *is* the switch; there is no separate boolean. It needs `thread_capture` on at least one
+transport to ever fire, and startup **warns** (`… or this is dead config`) when it is set without one.
+
+    model:
+      chat:
+        model: claude-haiku-4-5      # REQUIRED — never inherited
+        max_tokens: 1024             # optional; default 1024, NOT model.max_tokens
+        # provider, base_url, api_key_env, effort, thinking, pricing all inherit
+        # from `model` when omitted
+    notify:
+      thread:
+        chat_calls_per_hour: 30      # default 30
+        chat_tokens_per_hour: 107720 # default 107720 — derived, see below
+
+> [!IMPORTANT]
+> **`model.chat.model` must be named explicitly — startup fails without it.** It is the one field
+> that does not inherit, and the exception is deliberate: `model.verify` runs once per investigation,
+> on a path RunLore itself initiates, so inheriting the frontier model there is merely expensive.
+> Chat runs once per addressed thread message, on a path **any channel or room member can trigger**,
+> so a silently-inherited investigation model would make the cheapest way to enable the feature the
+> most expensive way to run it. `max_tokens` likewise falls back to a fixed **1024**, not to
+> `model.max_tokens`: a member-triggerable path staying cheap must not depend on how generously the
+> investigation model happens to be capped.
+
+**What costs a model call, stated plainly.** With `model.chat` set, **every addressed message that is
+not a recognised command prefix costs exactly one model call** — one, structurally, not on average:
+the model is offered no tool but `submit_thread_reply`, so there is no agent loop and no second call.
+Knowledge-base context is pre-fetched in Go and pasted into the prompt rather than exposed as a
+search tool, which is what preserves that bound.
+
+What costs **nothing**:
+
+- `@runlore note: <text>` — the deterministic capture path, unchanged, zero model calls.
+- A bare mention with nothing after it — there is nothing to answer, so it is not a paid call.
+- Any message that does not address RunLore, or is not rooted in one of its own messages.
+
+**Who can trigger it.** On Slack, an `app_mention` event — a real mention of the app. **On Matrix,
+"addressed" is looser and you should know it before enabling this:** MSC3952 `m.mentions` when the
+client sends it, but *also* the bot's full MXID **or its bare localpart** (`runlore` in
+`@runlore:example.org`) appearing in the message body **as a whole word**. No mention entity is
+required. Any member of the room can therefore trigger a paid model call by typing the bot's name in
+a reply to an investigation thread. Keep the room invite-only.
+
+**What is capped — and the exact key that bounds each:**
+
+| Bound | Key | Default |
+|---|---|---|
+| Model calls per hour, globally | `notify.thread.chat_calls_per_hour` | `30` |
+| Tokens per hour, globally — reported usage, or an estimate when unreported | `notify.thread.chat_tokens_per_hour` | `107720` (derived) |
+| Output tokens per call | `model.chat.max_tokens` | `1024` |
+| The human's message reaching the model | `notify.thread.max_note_bytes` | `8192` bytes |
+| Model calls per addressed message | *structural — always exactly 1* | — |
+| Assembled prompt size | *fixed at ~15 KB (≈3.8k input tokens)*; only `max_note_bytes` moves it | — |
+| Knowledge-base PR writes per hour, globally | `notify.thread.forge_writes_per_hour` | `20` |
+| Notes recorded per thread | `notify.thread.max_notes_per_thread` | `20` |
+
+Both hourly windows are global across every transport and every thread — there is one responder and
+one budget for the process, not one per channel. Either ceiling refuses the call *before* it is made
+and the message falls back to the deterministic reply; `runlore_thread_chat_denied_total` carries a
+`ceiling` label (`calls` / `tokens`) saying which one refused.
+
+**Why the token default is not a round number.** `chat_tokens_per_hour`'s default is *derived*, not
+picked. It is the most a single call can cost — the assembled prompt's byte caps converted to
+tokens, plus `model.chat.max_tokens` of output — multiplied by `chat_calls_per_hour`, then taken at
+two thirds. That ordering is the point: a runaway of maximum-size calls trips the token ceiling
+before it exhausts the call budget, so it is stopped by **cost** rather than by count, while ordinary
+traffic (a question and a short reply) spends its calls without ever approaching it. The consequence
+for you is that **the default moves when `max_note_bytes` moves**: raising the per-message cap raises
+what one call can cost, and the derived hourly ceiling rises with it. Set `chat_tokens_per_hour`
+explicitly if you need a ceiling that stays put.
+
+> [!WARNING]
+> **What is NOT capped.** These are real edges, not caveats to reassure you past:
+>
+> - **There is no ceiling in currency.** `model.pricing` (and `model.chat.pricing`) remains a
+>   *reporting* table — it turns token counts into a dollar estimate for display and for the
+>   `investigation_cost_usd` metric. **Nothing compares a cost to a threshold and stops.** The only
+>   spend ceilings are the call and token counts above; translate them into money yourself at your
+>   provider's rate before enabling this.
+> - **The token ceiling runs partly on estimates, not only on reported usage.** Two cases. A call is
+>   charged an estimate the moment it is *admitted*, before the provider has said anything, so that
+>   calls running concurrently are visible to one another; when it returns, that reservation is
+>   replaced by the provider's real number. And when a provider reports no usage at all, the estimate
+>   stands (the request's measured input plus the full `max_tokens` output) and RunLore logs a warning
+>   saying so. Estimates can only over-charge, which is the safe direction — but a ceiling running on
+>   them is not a measurement, and you should be able to see it in the logs.
+> - **A call that dies mid-flight holds its reservation until the window slides.** If a call is
+>   admitted and then never records — a panic, a dropped context — nothing rolls the reservation back;
+>   it ages out an hour later like any other entry. A burst of those can refuse legitimate traffic for
+>   the rest of that hour.
+> - **Retries are charged, not bounded.** The reservation covers one upstream attempt. A call the
+>   provider client retried is charged for the extra attempts only once it returns, so calls already
+>   in flight when the ceiling is reached can push the window past it.
+> - **The window is per process.** Each replica enforces its own `chat_tokens_per_hour`, so N replicas
+>   permit N times the number above.
+> - **It is an hourly sliding window, not a monthly or absolute budget.** `chat_tokens_per_hour` at
+>   its default permits 107720 tokens *every* hour, indefinitely. There is no cumulative cap over a
+>   day, a month, or the life of the process.
+> - **Any room member can trigger it** (see above), so the ceiling that actually protects you is the
+>   hourly one, not the good behaviour of the person typing.
+
+Every failure degrades rather than escalating: a model error, a refusal, a truncated response, a
+malformed tool call, an exhausted budget or an empty credential all fall back to the deterministic
+capture path, so a human's message is never lost to a model outage and never answered with silence.
+The model can propose note *content* but never chooses where it is filed — routing stays derived from
+the thread's investigation context alone, and a proposed note is written through the same per-thread
+cap and the same `forge_writes_per_hour` window an explicit `note:` uses.
+
 ### Generic templated notifier (`notify.templated`)
 
 Deliver findings to **any** webhook-speaking service — Microsoft Teams, Discord,
