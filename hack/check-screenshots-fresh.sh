@@ -72,8 +72,8 @@ DIGEST_AT_SHOT="f73e6221440fceab4e2bed088ec6cb72bbb6b827bb075e643b5fcae708d810cb
 #     and this fails, so an acknowledgement cannot silently become permanent.
 #
 # Clear it (set to "") in the same commit that lands retaken screenshots.
-ACKNOWLEDGED_DIGEST="3c84e7a74cd4e1581f4ea306fc8d5d133d73994e476866663f9109a474c6f7c4"
-ACKNOWLEDGED_REASON="#475 added a 'confidence not stated' variant for a finding that carries no confidence at all. Diffing the golden across the two renderers shows that variant is the ONLY thing that moved — every other fixture is byte-identical, and the stated-confidence line both captures actually show is unchanged. So neither image is WRONG, only incomplete: they cannot show a variant that did not exist when they were taken. Retake when a live workspace is next available."
+ACKNOWLEDGED_DIGEST="9fbc8ba3a250d4f2201b80c0a4ac5ba84e0303c786508bdba09807c700dee29b"
+ACKNOWLEDGED_REASON="#510 (closing #506) adds a 'curate_failed' variant: a finding whose knowledge-base write FAILED now says so in the card footer, next to the entry link. Diffing the golden shows the change is PURELY ADDITIVE — 108 inserted lines, zero deleted — so every fixture the captures depict is byte-identical, including both cards they actually show. Neither image is WRONG, only incomplete: they cannot show a footer arm that only appears when a forge write fails, which is not a state a capture session can stage. This supersedes the #475 acknowledgement, whose 'confidence not stated' variant is still equally absent and equally harmless. Retake when a live workspace is next available."
 
 for f in "${SHOTS[@]}" "$CARD_GOLDEN"; do
   [ -f "$f" ] || { echo "::error::$f is missing — update hack/check-screenshots-fresh.sh" >&2; exit 1; }

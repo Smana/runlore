@@ -20,7 +20,65 @@ import (
 // operator which class of failure it was (auth, rate limit, validation). Deliberately
 // well under Slack's 3000-char section limit, because this line shares that budget with
 // the entire finding it is appended to.
+//
+// 300 and not the ~120 a "which class was it" pointer sounds like it needs, because
+// truncate cuts the HEAD: a wrapped Go error puts the diagnosis LAST
+// ("open PR: github GET /repos/o/r/git/ref/heads/main: status 403: Resource not
+// accessible by integration" is already 118 runes with a two-character owner/repo), so a
+// 120-rune cap would reliably keep the call site and drop the status and the message —
+// the only two things an operator can act on. The soft-wrap forgery a tighter cap would
+// have addressed is closed by the inline code span instead (see curateFailureReason).
 const curateErrorRunes = 300
+
+// curateFailureReason renders inv.CurateError into the one form every surface prints,
+// or "" when there is nothing to report. Both call sites go through it so the Slack
+// card and Format cannot drift into telling a human two different things — the drift
+// that made the first version of this fix miss the Slack card entirely, which is the
+// exact surface #506 reports.
+//
+// redact → strip backticks → flatten → cap, the same order and for the same reasons as
+// thread.chatSafe. A forge error carries a server-provided JSON body, so:
+//
+//   - redact.Secrets FIRST, because it may echo the credential it rejected, and running
+//     it before the cap means a cut can never hand it a half-token it no longer matches;
+//   - backticks become apostrophes, because every render site wraps the result in an
+//     inline code span and a backtick inside would close it early (notify's own codeRe
+//     is `([^`\n]+)`, so one backtick is all it takes). Apostrophe, not deletion, so the
+//     rune count and the reading of a quoted identifier both survive;
+//   - thread.SingleLine, not a local flattener, because a line break inside the body
+//     would put that text at the left margin where RunLore's own status lines sit — and
+//     a second copy of the mandatory-break class list is exactly the drift
+//     notify.kbUpdateAnnouncement documents having been bitten by;
+//   - cap LAST so it holds unconditionally.
+//
+// The inline code span the callers add is the fourth measure, and it is what flattening
+// alone does not buy: a reason this long soft-wraps in every client, and a continuation
+// line starts at the left margin with no quote bar (unlike thread.QuoteUntrusted, whose
+// "> " prefix survives wrapping). A padded body could otherwise put a forged
+// "📚 Knowledge base: https://evil…" at the start of a visual line. Inside a code span it
+// is <code> on Matrix and monospaced-with-a-background on Slack — visibly not RunLore's
+// own voice — and it degrades to literal backticks on the CLI, a surface with one reader
+// who ran the command themselves.
+//
+// The forge's own words are kept rather than classified into "auth / rate limit /
+// validation" deliberately. Classifying would need a parser over forge error strings —
+// a second, narrower copy of a vocabulary this package does not own, the same drift the
+// bullets above exist to avoid — and it would drop "Resource not accessible by
+// integration", the half that told the operator the fix was a GitHub App permission and
+// not a broken token. This is also not new egress: internal/thread already posts
+// err.Error() from the same forge client into the same room, uncapped and unredacted
+// (responder.go, "I could not save that to the knowledge base"), and #506 quotes that
+// message as the thing that worked. If server-supplied topology (internal DNS, RFC1918,
+// a GHE proxy banner) is judged too much for a chat room, that is a property of every
+// forge error RunLore already publishes and belongs in redact as a topology filter at
+// the single egress chokepoint — not as a special case on this one line.
+func curateFailureReason(inv providers.Investigation) string {
+	if inv.CurateError == "" {
+		return ""
+	}
+	safe := strings.ReplaceAll(redact.Secrets(inv.CurateError), "`", "'")
+	return truncate(thread.SingleLine(safe), curateErrorRunes)
+}
 
 // verdictBadge maps a model verdict to its emoji + human label. Empty/unknown
 // verdicts return ("", "") and are rendered nowhere — never invent a verdict.
@@ -219,15 +277,11 @@ func Format(inv providers.Investigation) string {
 	// deployment until an operator happened to write a thread note (that path DOES report
 	// it). The counter for alerting already exists: runlore_curations_total{result="error"}.
 	//
-	// redact → flatten → cap, the same order and for the same reasons as thread.chatSafe:
-	// a forge error carries a server-provided JSON body, so it may echo a credential, and
-	// a line break inside it would put that text at the left margin where RunLore's own
-	// status lines sit. thread.SingleLine rather than a local flattener on purpose — a
-	// second copy of the mandatory-break class list is exactly the drift
-	// notify.kbUpdateAnnouncement documents having been bitten by.
-	if inv.CurateError != "" {
-		fmt.Fprintf(&b, "⚠️ Could not save to the knowledge base: %s\n",
-			truncate(thread.SingleLine(redact.Secrets(inv.CurateError)), curateErrorRunes))
+	// The Slack card renders the same fact in its footer (slack.go, summaryBlocks step 8);
+	// both go through curateFailureReason, which is where the safety measures and the
+	// reasoning for them live.
+	if reason := curateFailureReason(inv); reason != "" {
+		fmt.Fprintf(&b, "⚠️ Could not save to the knowledge base: `%s`\n", reason)
 	}
 	if foot := usageFooter(inv.Usage); foot != "" {
 		fmt.Fprintf(&b, "%s\n", foot)

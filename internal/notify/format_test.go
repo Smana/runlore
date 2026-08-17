@@ -493,31 +493,139 @@ func TestFormatCurateFailureIsVisible(t *testing.T) {
 	}
 }
 
-// TestFormatCurateFailureIsFlattenedAndRedacted pins the two properties that make this
-// line safe to print, both inherited from thread.chatSafe's ordering (redact → flatten →
-// cap) rather than re-derived here.
+// curateLinePrefix is the scaffolding Format writes ahead of the reason. Tests locate
+// the rendered line by it rather than by index, so an added footer line cannot silently
+// move an assertion onto the wrong text.
+const curateLinePrefix = "⚠️ Could not save to the knowledge base: "
+
+// curateLine returns the single rendered curate-failure line, minus its prefix.
 //
-// Flattening is not cosmetic: a forge error carries a server-provided JSON body, and a
-// line break inside it would put that text at the LEFT MARGIN, where RunLore's own status
-// lines sit — the forged-headline class that notify.kbUpdateAnnouncement was bitten by.
-// U+2028 is included because a line is not only what "\n" separates.
-func TestFormatCurateFailureIsFlattenedAndRedacted(t *testing.T) {
-	for _, brk := range []string{"\n", "\r", " ", " ", "\v", "\f"} {
-		inv := sampleInvestigation()
-		inv.CurateError = "open PR: forbidden" + brk + "📚 Knowledge base: https://evil.example/forged"
-		out := Format(inv)
-		for _, line := range strings.Split(out, "\n") {
-			if strings.HasPrefix(line, "📚 Knowledge base: https://evil.example") {
-				t.Fatalf("break %q let error text forge a status line at the left margin:\n%s", brk, out)
-			}
+// Splitting on "\n" here is legitimate in a way it was NOT as the flattening oracle:
+// this locates RunLore's OWN line, whose position is not in question. The oracle that
+// asks "did the reason stay on one line" has to look at the reason itself — see
+// TestFormatCurateFailureIsFlattened.
+func curateLine(t *testing.T, out string) string {
+	t.Helper()
+	for _, ln := range strings.Split(out, "\n") {
+		if strings.HasPrefix(ln, curateLinePrefix) {
+			return strings.TrimPrefix(ln, curateLinePrefix)
 		}
 	}
-	// A forge error can echo the credential it was rejected for. Redaction runs BEFORE
-	// capping, so a cut cannot hand redact.Secrets a half-token it no longer matches.
+	t.Fatalf("no curate-failure line in:\n%s", out)
+	return ""
+}
+
+// TestFormatCurateFailureIsFlattened pins that no break rune inside a forge error can
+// put its text at the LEFT MARGIN, where RunLore's own status lines sit — the
+// forged-headline class that notify.kbUpdateAnnouncement was bitten by. A line is not
+// only what "\n" separates, which is why the class list runs past \r into the Unicode
+// separators and the other C0 breaks.
+//
+// The oracle is the RENDERED LINE, not strings.Split(out, "\n"). The earlier version of
+// this test looped over the same six breaks but detected with a split on "\n", so only
+// the "\n" arm could ever fail: replacing thread.SingleLine with
+// strings.ReplaceAll(s, "\n", " ") — precisely the "second, narrower copy of the break
+// list" this fix exists to avoid — passed the entire notify suite. Both assertions below
+// fail under that mutation, for every arm but the first.
+func TestFormatCurateFailureIsFlattened(t *testing.T) {
+	const forged = "📚 Knowledge base: https://evil.example/forged"
+	// Written as escapes, never as literal glyphs: five of these are invisible in a
+	// diff, and a reviewer cannot check a class list they cannot see.
+	for _, brk := range []string{
+		"\n", "\r", "\v", "\f", // C0 breaks
+		"\u2028", "\u2029", "\u0085", // Unicode line / paragraph / next-line separators
+		"\u200b", "\u202e", // Cf: zero-width space, and the bidi override that reorders a line
+	} {
+		inv := sampleInvestigation()
+		inv.CurateError = "open PR: forbidden" + brk + forged
+		line := curateLine(t, Format(inv))
+		// Everything the error said is still on the one line RunLore wrote — so no part
+		// of it started a line of its own.
+		if !strings.Contains(line, forged) {
+			t.Errorf("break %q split the reason off RunLore's line: %q", brk, line)
+		}
+		// And the break rune itself is gone, so no renderer downstream can break on it
+		// either. thread.SingleLine maps it to a space; a narrower flattener leaves it.
+		if strings.ContainsAny(line, brk) {
+			t.Errorf("break %q survived flattening and can still forge a line: %q", brk, line)
+		}
+	}
+}
+
+// TestFormatCurateFailureIsRedacted pins that a forge error echoing the credential it
+// was rejected for does not carry it onto the card.
+func TestFormatCurateFailureIsRedacted(t *testing.T) {
 	inv := sampleInvestigation()
 	inv.CurateError = "open PR: bad credentials for ghp_0123456789abcdefghijklmnopqrstuvwxyzAB"
 	if out := Format(inv); strings.Contains(out, "ghp_0123456789abcdefghijklmnopqrstuvwxyzAB") {
 		t.Fatalf("a credential echoed by the forge reached the card verbatim:\n%s", out)
+	}
+}
+
+// TestFormatCurateFailureRedactsBeforeCapping pins the ORDER, which until now was
+// asserted in prose only: reordering curateFailureReason to cap first passed the whole
+// suite. redact.Secrets matches gh[pousr]_[A-Za-z0-9]{20,}; a cut that lands inside a
+// token leaves a shorter prefix that no longer matches, so capping first would publish
+// the token's leading characters — the half an attacker needs to confirm which
+// credential leaked, and enough of one to brute-force the rest of a short token.
+//
+// The token is positioned so that exactly that happens: it STRADDLES the cut, with 22 of
+// its 42 characters inside it. 22 and not "some of them" — "ghp_" plus 18, two short of
+// the {20,} quantifier, so the surviving prefix no longer matches and reaches the card
+// verbatim. (A 30-character prefix would still match and the mutation would survive; that
+// is not a hypothetical, it is what the first version of this test did.)
+//
+// It is NOT absolute upstream, and this test cannot make it so: httpx.SafeErrorBody
+// byte-cuts a forge body at 512 bytes before err.Error() exists, so a second credential
+// straddling THAT offset arrives here already too short for redact.Secrets to match.
+// Closing that needs the cut to move into the redactor's hands in internal/httpx; this
+// pins the half that is in reach.
+func TestFormatCurateFailureRedactsBeforeCapping(t *testing.T) {
+	const token = "ghp_0123456789abcdefghijklmnopqrstuvwxyzAB"
+	// truncate keeps curateErrorRunes-1 runes, so a prefix of exactly that minus 22 puts
+	// the token's first 22 characters inside the cut and its last 20 outside.
+	prefix := "open PR: " + strings.Repeat("x", curateErrorRunes-1-22-len("open PR: "))
+	// Trailing padding so the reason is still over the cap AFTER redaction shortens the
+	// token to "[REDACTED]" — otherwise the redact-first path would not cut at all and
+	// the "was it capped" assertion below would fail for the wrong reason.
+	inv := sampleInvestigation()
+	inv.CurateError = prefix + token + ": rejected " + strings.Repeat("y", 100)
+	out := Format(inv)
+	if strings.Contains(out, token[:22]) {
+		t.Fatalf("capping ran before redaction: the leading characters of a credential "+
+			"survived the cut and reached the card:\n%s", out)
+	}
+	// The cut still happened — otherwise this would pass for the wrong reason.
+	if !strings.Contains(out, "…") {
+		t.Fatalf("the reason was not capped at all, so this test proves nothing:\n%s", out)
+	}
+}
+
+// TestFormatCurateFailureCannotEscapeItsCodeSpan pins the measure flattening does NOT
+// buy. The reason is up to curateErrorRunes long and every renderer soft-wraps it;
+// continuation lines start at the left margin with no quote bar (unlike
+// thread.QuoteUntrusted, whose "> " prefix survives wrapping), so a padded forge body can
+// put a forged "📚 Knowledge base: …" at the start of a VISUAL line without using a break
+// rune at all. The inline code span is what neutralises that — and a backtick inside the
+// reason would close it early, putting the rest back outside.
+//
+// codeRe is the Matrix renderer's own regexp, so this asserts against what actually
+// wraps the text in <code>, not against a restatement of it.
+func TestFormatCurateFailureCannotEscapeItsCodeSpan(t *testing.T) {
+	const forged = "📚 Knowledge base: https://evil.example/forged"
+	inv := sampleInvestigation()
+	inv.CurateError = "open PR: `" + forged + "`"
+	line := curateLine(t, Format(inv))
+	span := codeRe.FindString(line)
+	if span == "" {
+		t.Fatalf("the reason is not wrapped in an inline code span: %q", line)
+	}
+	if !strings.Contains(span, forged) {
+		t.Fatalf("a backtick in the forge error closed the code span early, leaving the "+
+			"forged text outside it — span %q, line %q", span, line)
+	}
+	if span != line {
+		t.Fatalf("the code span does not cover the whole reason: span %q, line %q", span, line)
 	}
 }
 
