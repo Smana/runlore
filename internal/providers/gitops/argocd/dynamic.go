@@ -6,6 +6,8 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"maps"
+	"slices"
 	"time"
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -19,6 +21,27 @@ import (
 
 // applicationGVR is the Argo CD Application resource.
 var applicationGVR = schema.GroupVersionResource{Group: "argoproj.io", Version: "v1alpha1", Resource: "applications"}
+
+// kindToGVR maps the Argo CD Kinds this provider can resolve to their GVR. Argo CD
+// models everything it deploys as one Application, so the map has a single entry —
+// but it is a map, and the accessors below derive from it, so the investigation
+// tools and the chart's RBAC track this provider instead of restating it. See
+// flux.GitOpsKinds for the drift that motivated the shape.
+var kindToGVR = map[string]schema.GroupVersionResource{"Application": applicationGVR}
+
+// GitOpsKinds returns, sorted, every Argo CD Kind this provider can resolve.
+func GitOpsKinds() []string { return slices.Sorted(maps.Keys(kindToGVR)) }
+
+// GitOpsResources returns, sorted, the API resource (plural) name of every Kind
+// GitOpsKinds advertises — what an RBAC rule has to grant for those reads to succeed.
+func GitOpsResources() []string {
+	out := make([]string, 0, len(kindToGVR))
+	for _, gvr := range kindToGVR {
+		out = append(out, gvr.Resource)
+	}
+	slices.Sort(out)
+	return out
+}
 
 // eventsGVR is the core v1 Events resource (for ListEvents).
 var eventsGVR = schema.GroupVersionResource{Group: "", Version: "v1", Resource: "events"}

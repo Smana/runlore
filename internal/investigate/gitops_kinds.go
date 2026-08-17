@@ -6,20 +6,22 @@ import (
 	"encoding/json"
 	"slices"
 	"strings"
-)
 
-// The kinds each GitOps engine can own. gitops_resource_status and gitops_tree resolve
-// GitOps objects only — they are not a generic Kubernetes resource reader.
-var (
-	argoCDGitOpsKinds = []string{"Application"}
-	fluxGitOpsKinds   = []string{
-		"Kustomization", "HelmRelease", "GitRepository",
-		"OCIRepository", "HelmRepository", "HelmChart", "Bucket",
-	}
+	"github.com/Smana/runlore/internal/providers/gitops/argocd"
+	"github.com/Smana/runlore/internal/providers/gitops/flux"
 )
 
 // GitOpsKinds returns the resource kinds the GitOps introspection tools can resolve on
-// the configured engine.
+// the configured engine. gitops_resource_status and gitops_tree resolve GitOps objects
+// only — they are not a generic Kubernetes resource reader.
+//
+// The lists are DERIVED from the providers that do the resolving (flux.GitOpsKinds,
+// argocd.GitOpsKinds) rather than restated here. The first version of this file kept
+// its own copy and it drifted immediately: it omitted ExternalArtifact, which the Flux
+// provider resolves and the chart grants RBAC for, so a model following a sourceRef to
+// one — exactly what this repo's gitops-broken-kustomization eval renders — was told
+// the kind is not a GitOps object and sent to pod_status. That is #503's defect with
+// the sign flipped, and a restated list is what made it possible.
 //
 // It is engine-scoped for the same reason clusterTools registers controller_logs ONLY
 // under Flux: a kind the configured engine cannot own is not merely unanswerable, it is
@@ -42,9 +44,9 @@ var (
 // default lives in one place rather than being restated here.
 func GitOpsKinds(engine string) []string {
 	if engine == "argocd" {
-		return slices.Clone(argoCDGitOpsKinds)
+		return argocd.GitOpsKinds()
 	}
-	return slices.Clone(fluxGitOpsKinds)
+	return flux.GitOpsKinds()
 }
 
 // gitopsKindSupported reports whether the tools can resolve kind on this engine. Matching

@@ -5,6 +5,8 @@ package flux
 import (
 	"context"
 	"fmt"
+	"maps"
+	"slices"
 	"time"
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -38,6 +40,27 @@ var kindToGVR = map[string]schema.GroupVersionResource{
 	"HelmChart":        {Group: "source.toolkit.fluxcd.io", Version: "v1", Resource: "helmcharts"},
 	"Bucket":           {Group: "source.toolkit.fluxcd.io", Version: "v1", Resource: "buckets"},
 	"ExternalArtifact": {Group: "source.toolkit.fluxcd.io", Version: "v1", Resource: "externalartifacts"},
+}
+
+// GitOpsKinds returns, sorted, every Flux Kind this provider can actually resolve.
+//
+// It exists so nothing has to restate the list. The investigation tools used to keep
+// their own copy, and it diverged on its first edit: ExternalArtifact is in kindToGVR
+// and RBAC-granted in the chart, yet gitops_resource_status answered "ExternalArtifact
+// is not a GitOps object these tools can resolve" and pointed the model at pod_status —
+// false in every clause, on a kind this repo's own eval renders as a source node.
+// Deriving the list makes that divergence unrepresentable rather than merely tested for.
+func GitOpsKinds() []string { return slices.Sorted(maps.Keys(kindToGVR)) }
+
+// GitOpsResources returns, sorted, the API resource (plural) name of every Kind
+// GitOpsKinds advertises — what an RBAC rule has to grant for those reads to succeed.
+func GitOpsResources() []string {
+	out := make([]string, 0, len(kindToGVR))
+	for _, gvr := range kindToGVR {
+		out = append(out, gvr.Resource)
+	}
+	slices.Sort(out)
+	return out
 }
 
 // dynamicReader reads Flux CRDs as unstructured objects via the dynamic client.

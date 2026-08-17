@@ -5,11 +5,49 @@ package investigate
 import (
 	"context"
 	"encoding/json"
+	"slices"
 	"strings"
 	"testing"
 
 	"github.com/Smana/runlore/internal/providers"
+	"github.com/Smana/runlore/internal/providers/gitops/argocd"
+	"github.com/Smana/runlore/internal/providers/gitops/flux"
 )
+
+// TestGitOpsKindsTrackTheProviders is the drift guard the first version of this file
+// lacked. The advertised set was typed out by hand next to a provider that resolves its
+// own, and they diverged on the very first edit: flux.kindToGVR resolves
+// ExternalArtifact (and the chart grants RBAC for it, and this repo's own eval renders
+// one as a source node), yet the tools refused it as "not a GitOps object these tools
+// can resolve" — the same defect as #503 with the sign flipped, since every clause of
+// that refusal was false.
+//
+// Both directions matter. A kind the provider resolves but the tools hide is an
+// unreachable capability plus a false refusal; a kind the tools offer but the provider
+// cannot resolve reaches an inspector that errors, or worse (see the canonicalisation
+// test) renders a fabricated node.
+func TestGitOpsKindsTrackTheProviders(t *testing.T) {
+	for engine, resolvable := range map[string][]string{
+		"flux":   flux.GitOpsKinds(),
+		"argocd": argocd.GitOpsKinds(),
+	} {
+		advertised := GitOpsKinds(engine)
+		if !slices.Equal(slices.Sorted(slices.Values(advertised)), slices.Sorted(slices.Values(resolvable))) {
+			t.Errorf("%s: advertised kinds %v != the kinds the provider resolves %v",
+				engine, advertised, resolvable)
+		}
+		for _, k := range resolvable {
+			if !gitopsKindSupported(engine, k) {
+				t.Errorf("%s: the provider resolves %s but the tools refuse it", engine, k)
+			}
+		}
+	}
+	// Named explicitly: this is the kind that was actually dropped, so a future edit
+	// that re-hand-rolls the list fails here with the incident's own name on it.
+	if !gitopsKindSupported("flux", "ExternalArtifact") {
+		t.Error("ExternalArtifact is refused on flux, yet the provider resolves it and the chart grants RBAC for it")
+	}
+}
 
 // countingInspector records what it was asked, so a test can assert the tool refused an
 // out-of-scope kind BEFORE any lookup rather than after one.
@@ -51,7 +89,9 @@ func TestGitOpsKindsAreEngineScoped(t *testing.T) {
 	}
 	// The default mirrors app.GitopsEngine's own ("" ⇒ flux) so the default lives in one
 	// place. A caller that forgets to set Engine therefore behaves as before, not worse.
-	if got, want := GitOpsKinds(""), GitOpsKinds("flux"); len(got) != len(want) {
+	// Compared element-wise: the earlier length-only check passed a seven-element list
+	// that had dropped Bucket and gained Application.
+	if got, want := GitOpsKinds(""), GitOpsKinds("flux"); !slices.Equal(got, want) {
 		t.Errorf("empty engine = %v, want the flux set %v", got, want)
 	}
 	// Case-insensitive: the model writes the kind as prose, and "helmrelease" must be
@@ -64,7 +104,12 @@ func TestGitOpsKindsAreEngineScoped(t *testing.T) {
 // TestGitOpsSchemaConstrainsKind pins the enum, which is the part that actually prevents
 // the failure: a description can be disregarded by the model, an out-of-enum value cannot
 // be sent.
+//
+// The enum is checked against what the PROVIDER resolves, not against
+// gitopsKindSupported: both of those derive from GitOpsKinds, so comparing them proves
+// nothing, and the earlier version of this test was that tautology.
 func TestGitOpsSchemaConstrainsKind(t *testing.T) {
+	resolvable := map[string][]string{"argocd": argocd.GitOpsKinds(), "flux": flux.GitOpsKinds()}
 	for _, engine := range []string{"argocd", "flux"} {
 		for name, schema := range map[string]string{
 			"gitops_resource_status": GitOpsStatusTool{Engine: engine}.Schema(),
@@ -83,10 +128,9 @@ func TestGitOpsSchemaConstrainsKind(t *testing.T) {
 			if len(got.Properties.Kind.Enum) == 0 {
 				t.Fatalf("%s/%s: kind has no enum, so any kind can be asked: %s", name, engine, schema)
 			}
-			for _, k := range got.Properties.Kind.Enum {
-				if !gitopsKindSupported(engine, k) {
-					t.Errorf("%s/%s: enum offers %q, which the engine cannot own", name, engine, k)
-				}
+			want := slices.Sorted(slices.Values(resolvable[engine]))
+			if got := slices.Sorted(slices.Values(got.Properties.Kind.Enum)); !slices.Equal(got, want) {
+				t.Errorf("%s/%s: enum offers %v, but the %s provider resolves %v", name, engine, got, engine, want)
 			}
 		}
 	}
