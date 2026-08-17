@@ -581,7 +581,20 @@ type typedNilChecker struct {
 // guarded struct, which is what makes a `func wire(acts *server.Actions)` helper
 // visible to the checker.
 func (c *typedNilChecker) seedParams(fn *ast.FuncDecl) {
-	for _, l := range []*ast.FieldList{fn.Type.Params, fn.Recv} {
+	c.seedFields(fn.Type.Params, fn.Recv)
+}
+
+// seedFields is seedParams' body, taking the field lists directly so a function
+// LITERAL's parameters are seeded too. Without it the checker walked a literal's
+// body but not its signature, so
+//
+//	func(a *server.Actions) { a.Threads = Build(...) }(&acts)
+//
+// reintroduced the bug with the guard green — the named-helper shape was caught
+// and its immediately-invoked twin was not, which is a distinction no reader
+// would predict from the doc comment above.
+func (c *typedNilChecker) seedFields(lists ...*ast.FieldList) {
+	for _, l := range lists {
 		if l == nil {
 			continue
 		}
@@ -720,6 +733,7 @@ func (c *typedNilChecker) stmt(st ast.Stmt, guarded map[string]bool) {
 	// the enclosing conditions do not dominate.
 	ast.Inspect(st, func(n ast.Node) bool {
 		if lit, ok := n.(*ast.FuncLit); ok {
+			c.seedFields(lit.Type.Params)
 			c.block(lit.Body.List, nil)
 		}
 		return true
