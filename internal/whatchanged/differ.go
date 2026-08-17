@@ -46,6 +46,22 @@ type Differ struct {
 	// preserving the original behavior. source_diff sets this because its clone
 	// URLs are model-chosen across the whole allowlist.
 	TokenHost string
+	// SSHRewriteHost names the ONE host whose SSH clone URLs may be rewritten to
+	// their HTTPS equivalent (see effectiveCloneURL). It must be the host the
+	// TokenSource credential belongs to. Empty (the default) disables the rewrite
+	// entirely — fail closed — so a Differ that does not know where its credential
+	// is valid never turns an SSH URL into a live HTTPS request.
+	//
+	// It is deliberately NOT TokenHost, and folding the two together would be a
+	// silent regression in one direction or the other. TokenHost governs which
+	// clones may CARRY the token and is empty on the what_changed differ on
+	// purpose (see above); setting it there would change auth for every HTTPS
+	// clone that works today, and it is derived from the forge API URL, which on a
+	// GitHub Enterprise install with subdomain isolation is a different host from
+	// the git remote. SSHRewriteHost governs only whether a rewrite HAPPENS, so a
+	// wrong value costs at most an unrewritten SSH URL — never a withheld
+	// credential on a clone that works today.
+	SSHRewriteHost string
 	// Mirrors, when set, backs clones with a persistent per-repo bare mirror
 	// (incremental fetch, shared across investigations). nil ⇒ full clone per
 	// call, exactly as before. Mirror errors fall back to clone-per-call.
@@ -235,21 +251,28 @@ func (d *Differ) cloneToDisk(ctx context.Context, rawURL string) (*git.Repositor
 // very same repository; the installation still scopes what may be read, so this
 // grants no access the operator had not already granted.
 //
-// The rewrite is applied ONLY when an HTTPS credential is actually in play for
-// that host. With no TokenSource (public or local repos) or with a host-confined
-// token that would not attach here, the raw SSH URL is kept so go-git's default
-// SSH-agent path remains available — rewriting it would trade a working clone
-// for an unauthenticated HTTPS 401.
+// The rewrite is applied ONLY toward SSHRewriteHost, the host the credential is
+// actually for, and only when there is a credential at all. That confinement is
+// load-bearing, not tidiness. A GitOps repoURL is cluster state, so in a shared
+// cluster anyone who can create an Application picks it; the what_changed differ
+// runs with TokenHost empty, meaning auth attaches the App token to whatever host
+// it ends up cloning. Before this rewrite existed, "invalid auth method" rejected
+// every SSH URL before a single byte left the process — the bug was inadvertently
+// acting as a CREDENTIAL BOUNDARY. Rewriting unconfined would have removed that
+// boundary and turned "repoURL: ssh://git@attacker.example/x" into the App
+// installation token being POSTed to attacker.example. Do not "simplify" this
+// host check away without replacing what it holds.
+//
+// With no TokenSource (public or local repos) the raw SSH URL is kept so go-git's
+// default SSH-agent path remains available — rewriting it would trade a working
+// clone for an unauthenticated HTTPS 401.
 func (d *Differ) effectiveCloneURL(rawURL string) string {
-	if d.TokenSource == nil {
-		return rawURL // no HTTPS credential in play; leave SSH to the SSH transport
+	if d.TokenSource == nil || d.SSHRewriteHost == "" {
+		return rawURL // no credential, or no host it is known to be valid for
 	}
 	httpsURL, ok := sshToHTTPS(rawURL)
-	if !ok {
-		return rawURL
-	}
-	if d.TokenHost != "" && hostOf(httpsURL) != d.TokenHost {
-		return rawURL // the token would not attach to this host; rewriting buys nothing
+	if !ok || hostOf(httpsURL) != d.SSHRewriteHost {
+		return rawURL // not SSH, or SSH toward a host this credential is not for
 	}
 	return httpsURL
 }

@@ -24,7 +24,10 @@ import (
 func TestRemoteClonesSSHRepoURLOverHTTPS(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	d := &Differ{TokenSource: func(context.Context) (string, error) { return "ghs_tok", nil }}
+	d := &Differ{
+		TokenSource:    func(context.Context) (string, error) { return "ghs_tok", nil },
+		SSHRewriteHost: "github.com",
+	}
 	_, err := d.Remote(ctx, "git@github.com:Aqemia/engineering.git", "a", "b", "")
 	if err == nil {
 		t.Fatal("want an error from a cancelled clone, got nil")
@@ -101,13 +104,14 @@ func TestSSHToHTTPS(t *testing.T) {
 }
 
 // TestEffectiveCloneURLGating pins WHEN the SSH→HTTPS rewrite applies: only when
-// an HTTPS credential is actually in play for that host. Rewriting when RunLore
-// has no token would trade go-git's working SSH-agent path for an
-// unauthenticated HTTPS 401.
+// there is a credential AND a host it is known to be valid for. Rewriting with no
+// token would trade go-git's working SSH-agent path for an unauthenticated HTTPS
+// 401; rewriting with no known host is the credential leak guarded below.
 func TestEffectiveCloneURLGating(t *testing.T) {
 	const ssh = "git@github.com:acme/x.git"
 	const https = "https://github.com/acme/x.git"
 	tok := func(context.Context) (string, error) { return "ghs_tok", nil }
+	armed := func(host string) *Differ { return &Differ{TokenSource: tok, SSHRewriteHost: host} }
 
 	tests := []struct {
 		name string
@@ -115,12 +119,12 @@ func TestEffectiveCloneURLGating(t *testing.T) {
 		in   string
 		want string
 	}{
-		{"no token source keeps SSH for the ssh-agent path", &Differ{}, ssh, ssh},
-		{"token source rewrites to HTTPS", &Differ{TokenSource: tok}, ssh, https},
-		{"matching TokenHost rewrites", &Differ{TokenSource: tok, TokenHost: "github.com"}, ssh, https},
-		{"foreign TokenHost keeps SSH", &Differ{TokenSource: tok, TokenHost: "ghe.example.com"}, ssh, ssh},
-		{"https is never touched", &Differ{TokenSource: tok}, https, https},
-		{"local path is never touched", &Differ{TokenSource: tok}, "/srv/fixtures/repo", "/srv/fixtures/repo"},
+		{"no token source keeps SSH for the ssh-agent path", &Differ{SSHRewriteHost: "github.com"}, ssh, ssh},
+		{"credential host matches: rewrites to HTTPS", armed("github.com"), ssh, https},
+		{"unset credential host refuses to rewrite", &Differ{TokenSource: tok}, ssh, ssh},
+		{"foreign credential host keeps SSH", armed("ghe.example.com"), ssh, ssh},
+		{"https is never touched", armed("github.com"), https, https},
+		{"local path is never touched", armed("github.com"), "/srv/fixtures/repo", "/srv/fixtures/repo"},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -129,6 +133,74 @@ func TestEffectiveCloneURLGating(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestSSHRewriteNeverReachesAForeignHost is the credential boundary the #495
+// rewrite must not dissolve.
+//
+// A GitOps repoURL is cluster state: in a shared cluster, anyone who can create
+// an Application chooses it. The what_changed differ runs with TokenHost EMPTY,
+// so auth attaches the GitHub App installation token to whatever host it clones.
+// Before the rewrite existed, "invalid auth method" killed every SSH URL before a
+// byte left the process — the bug was inadvertently acting as a credential
+// boundary. An unconfined rewrite would have turned
+// "repoURL: ssh://git@attacker.example/x" into that token being POSTed to
+// attacker.example.
+//
+// The clone runs on an already-cancelled context, which never touches the
+// network but does reveal WHICH transport was chosen: go-git names an HTTPS
+// target in the error ("Get \"https://…\"") and rejects an SSH one at
+// "invalid auth method" without forming a request at all. So the error text is
+// the proof that nothing was ever addressed to the foreign host.
+func TestSSHRewriteNeverReachesAForeignHost(t *testing.T) {
+	// Wired exactly as buildGitOpsDiffer wires what_changed: a credential for
+	// github.com, and TokenHost left empty.
+	newDiffer := func() *Differ {
+		return &Differ{
+			TokenSource:    func(context.Context) (string, error) { return "ghs_SECRET", nil },
+			SSHRewriteHost: "github.com",
+		}
+	}
+
+	foreign := []string{
+		"ssh://git@attacker.example/org/repo.git",
+		"git@attacker.example:org/repo.git",
+		"ssh://git@gitlab.com/org/repo.git",
+		"git@ghe.example.com:org/repo.git",
+		// Lookalikes: neither is the credential's host.
+		"git@github.com.attacker.example:org/repo.git",
+		"git@notgithub.com:org/repo.git",
+	}
+	for _, raw := range foreign {
+		t.Run("foreign "+raw, func(t *testing.T) {
+			d := newDiffer()
+			if got := d.effectiveCloneURL(raw); got != raw {
+				t.Fatalf("rewrote an SSH URL toward a host the credential is not for: %q → %q", raw, got)
+			}
+			ctx, cancel := context.WithCancel(context.Background())
+			cancel()
+			_, err := d.Remote(ctx, raw, "a", "b", "")
+			if err == nil {
+				t.Fatal("want an error, got nil")
+			}
+			if strings.Contains(err.Error(), "https://") {
+				t.Fatalf("an HTTPS request was addressed to a foreign host — the App token would be sent there: %v", err)
+			}
+			if !strings.Contains(err.Error(), "invalid auth method") {
+				t.Fatalf("want the SSH transport to refuse before any request is formed, got %v", err)
+			}
+		})
+	}
+
+	// The credential's own host still gets the fix — the confinement must not
+	// have simply disabled #495.
+	t.Run("credential host is still rewritten", func(t *testing.T) {
+		d := newDiffer()
+		const raw = "git@github.com:org/repo.git"
+		if got := d.effectiveCloneURL(raw); got != "https://github.com/org/repo.git" {
+			t.Fatalf("effectiveCloneURL(%q) = %q, want the HTTPS equivalent", raw, got)
+		}
+	})
 }
 
 // TestCloneRewriteCannotBypassSourceRepoAllowlist is the security guard for #495.
@@ -149,9 +221,14 @@ func TestCloneRewriteCannotBypassSourceRepoAllowlist(t *testing.T) {
 	if err != nil {
 		t.Fatalf("build allowlist: %v", err)
 	}
-	// A worst-case differ: a token source and no TokenHost, so the rewrite is
-	// unconditionally armed for every host.
-	d := &Differ{TokenSource: func(context.Context) (string, error) { return "ghs_tok", nil }}
+	// A worst-case differ for this boundary: the rewrite is armed, and armed for
+	// exactly the host the allowlist authorizes — so any drift between the string
+	// checked and the string cloned shows up here rather than being masked by the
+	// rewrite declining for an unrelated reason.
+	d := &Differ{
+		TokenSource:    func(context.Context) (string, error) { return "ghs_tok", nil },
+		SSHRewriteHost: "github.com",
+	}
 
 	tests := []struct {
 		name, repo string
