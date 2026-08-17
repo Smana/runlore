@@ -32,14 +32,39 @@ var latencyHistograms = []string{
 	"runlore_incident_resolution_seconds",
 }
 
-// sloLatencyViews builds one explicit-bucket-histogram view per latency instrument.
-func sloLatencyViews() []sdkmetric.View {
-	views := make([]sdkmetric.View, 0, len(latencyHistograms))
-	for _, name := range latencyHistograms {
+// scoreBuckets are the bucket boundaries for RunLore's BM25 retrieval-score
+// histograms. The OTel SDK defaults start at 5, so an entire real corpus lands in
+// the first bucket and the distribution is unreadable — the panels built on these
+// histograms render as a single bar. An enriched real-corpus BM25 score is
+// ~0.1–1.2 (see the InstantRecall doc comment in internal/config/config.go), so
+// the ladder resolves that dense region finely and thins out above it.
+//
+// Every boundary that is also a DECISION THRESHOLD is deliberate, so a bucket
+// count answers "how much of the corpus clears this gate?" directly:
+//
+//	0.1 → instant_recall.rerank_min_score (skip the paid rerank call below this)
+//	1.0 → instant_recall.min_score / margin_gap
+//	4.0 → instant_recall.solo_floor
+//	5.0 → forge.dup_score
+//
+// Boundaries above 5 exist for deployments that hand-tuned their thresholds to a
+// differently-scaled corpus; +Inf captures anything beyond 10.
+var scoreBuckets = []float64{0.1, 0.25, 0.5, 0.75, 1, 1.5, 2, 3, 4, 5, 7.5, 10}
+
+// scoreHistograms are the BM25-score instrument names that get the score buckets.
+var scoreHistograms = []string{
+	"runlore_recall_score",
+	"runlore_curation_dedup_score",
+}
+
+// bucketViews builds one explicit-bucket-histogram view per named instrument.
+func bucketViews(names []string, boundaries []float64) []sdkmetric.View {
+	views := make([]sdkmetric.View, 0, len(names))
+	for _, name := range names {
 		views = append(views, sdkmetric.NewView(
 			sdkmetric.Instrument{Name: name},
 			sdkmetric.Stream{Aggregation: sdkmetric.AggregationExplicitBucketHistogram{
-				Boundaries: latencyBuckets,
+				Boundaries: boundaries,
 			}},
 		))
 	}
@@ -55,9 +80,11 @@ func Setup(_ context.Context) (http.Handler, func(context.Context) error, error)
 	if err != nil {
 		return nil, nil, err
 	}
+	views := bucketViews(latencyHistograms, latencyBuckets)
+	views = append(views, bucketViews(scoreHistograms, scoreBuckets)...)
 	mp := sdkmetric.NewMeterProvider(
 		sdkmetric.WithReader(exporter),
-		sdkmetric.WithView(sloLatencyViews()...),
+		sdkmetric.WithView(views...),
 	)
 	otel.SetMeterProvider(mp)
 	handler := promhttp.HandlerFor(reg, promhttp.HandlerOpts{})
