@@ -241,7 +241,7 @@ type GitOpsInspector interface {
 	DependencyTree(ctx context.Context, w Workload) (DepNode, error)
 }
 
-// ResourceSpecOutcome distinguishes the four ways a spec read can end. They are
+// ResourceSpecOutcome distinguishes the ways a spec read can end. They are
 // SEPARATE values because conflating them is what made gitops_resource_status
 // dangerous: it answered "the object genuinely does not exist" for a kind it never
 // supported, and a model reasoned from that as evidence of absence. Only
@@ -250,11 +250,31 @@ type ResourceSpecOutcome string
 
 // The outcomes of a resource spec read.
 const (
-	ResourceFound       ResourceSpecOutcome = "found"        // the object was read
-	ResourceAbsent      ResourceSpecOutcome = "absent"       // the server says it does not exist
-	ResourceForbidden   ResourceSpecOutcome = "forbidden"    // RBAC denied the read; says NOTHING about existence
-	ResourceKindUnknown ResourceSpecOutcome = "kind_unknown" // this cluster serves no such kind; says NOTHING about existence
+	ResourceFound         ResourceSpecOutcome = "found"          // the object was read
+	ResourceAbsent        ResourceSpecOutcome = "absent"         // the server says this OBJECT does not exist
+	ResourceForbidden     ResourceSpecOutcome = "forbidden"      // RBAC denied the read; says NOTHING about existence
+	ResourceKindUnknown   ResourceSpecOutcome = "kind_unknown"   // this cluster serves no such kind; says NOTHING about existence
+	ResourceKindAmbiguous ResourceSpecOutcome = "kind_ambiguous" // several API groups serve this kind; nothing was read
+	ResourceRefused       ResourceSpecOutcome = "refused"        // this agent refuses the kind by policy (Secret)
 )
+
+// ResourceSpecQuery identifies the object to read.
+//
+// Kind is BARE ("VMServiceScrape") because that is what a model has: it reads the
+// kind off an alert or a manifest, not a fully-qualified resource. Group is the
+// optional disambiguator for the case where a bare Kind is served by more than one
+// API group — Event (core and events.k8s.io) and NetworkPolicy (networking.k8s.io
+// and crd.projectcalico.org) on any cluster running Calico. Without it, an
+// ambiguity would be a dead end: the reader refuses to guess, and the caller would
+// have no way to say which one it meant.
+type ResourceSpecQuery struct {
+	Kind      string
+	Name      string
+	Namespace string
+	// Group narrows resolution to one API group ("" means "no preference", and
+	// "core" is accepted as a spelling of the core group's empty name).
+	Group string
+}
 
 // ResourceSpec is one Kubernetes object's desired and observed state, as YAML.
 //
@@ -262,8 +282,12 @@ const (
 // ARBITRARY kinds — including CRDs the binary has never heard of — so there is no
 // Go type to unmarshal into.
 type ResourceSpec struct {
-	Workload Workload
-	Outcome  ResourceSpecOutcome
+	// Query echoes the request NORMALIZED to what was actually read: the Kind in
+	// the casing the server serves it under, the Group that answered, and NO
+	// namespace for a cluster-scoped kind. Rendering the request back verbatim
+	// would state a caller's mistake as fact — "StorageClass made-up-ns/fast".
+	Query   ResourceSpecQuery
+	Outcome ResourceSpecOutcome
 	// APIVersion the object was actually read at, so a reader can tell which of
 	// several served versions answered.
 	APIVersion string
@@ -283,10 +307,11 @@ type ResourceSpec struct {
 // from consequences — see the investigation that concluded a VMServiceScrape had been
 // deleted when its namespaceSelector simply pointed at a namespace that did not exist.
 //
-// Implementations MUST refuse Secret outright and MUST report RBAC denials as
-// ResourceForbidden rather than as absence.
+// Implementations MUST refuse Secret outright — both before AND after resolution, so a
+// kind that folds to "secret" cannot slip past the pre-check — and MUST report RBAC
+// denials as ResourceForbidden rather than as absence.
 type ResourceSpecReader interface {
-	ResourceSpec(ctx context.Context, w Workload) (ResourceSpec, error)
+	ResourceSpec(ctx context.Context, q ResourceSpecQuery) (ResourceSpec, error)
 }
 
 // MetricsProvider abstracts VictoriaMetrics/Prometheus (both speak PromQL).

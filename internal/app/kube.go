@@ -44,9 +44,9 @@ func RestConfig() (*rest.Config, error) {
 // BuildResourceSpecReader builds the read-only arbitrary-object spec reader, or nil when
 // the cluster is unreachable or discovery is unavailable.
 //
-// It needs BOTH a dynamic client and a RESTMapper: the typed clientset cannot read a CRD
-// at all, and without discovery a kind can only be resolved from a hardcoded map — which
-// is exactly the limitation that makes the Flux/ArgoCD inspectors blind to every kind they
+// It needs BOTH a dynamic client and discovery: the typed clientset cannot read a CRD at
+// all, and without discovery a kind can only be resolved from a hardcoded map — which is
+// exactly the limitation that makes the Flux/ArgoCD inspectors blind to every kind they
 // were not compiled with.
 //
 // Returning nil rather than a half-working reader is deliberate. A tool that cannot answer
@@ -72,7 +72,11 @@ func BuildResourceSpecReader(log *slog.Logger) providers.ResourceSpecReader {
 		return nil
 	}
 	// Memoised discovery: resolving a Kind costs one round trip the first time and nothing
-	// after, and Invalidate() on a miss means a CRD installed after RunLore started is
-	// still readable without a restart.
+	// after. memcache caches FAILURES as permanently as successes, so the reader drops the
+	// cache and retries once on a miss — otherwise a CRD installed after RunLore started
+	// would be "this cluster serves no such kind" for the pod's whole lifetime, and one
+	// aggregated-APIService blip would poison a group forever. That retry is behind a type
+	// assertion on Invalidate(); TestResourceSpecDiscoveryIsInvalidatable pins that the
+	// client wired here satisfies it.
 	return cluster.NewSpecReader(dc, memory.NewMemCacheClient(disco))
 }

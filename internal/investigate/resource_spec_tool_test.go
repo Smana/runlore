@@ -4,6 +4,8 @@ package investigate
 
 import (
 	"context"
+	"encoding/json"
+	"slices"
 	"strings"
 	"testing"
 
@@ -13,11 +15,11 @@ import (
 type fakeSpecReader struct {
 	out providers.ResourceSpec
 	err error
-	got providers.Workload
+	got providers.ResourceSpecQuery
 }
 
-func (f *fakeSpecReader) ResourceSpec(_ context.Context, w providers.Workload) (providers.ResourceSpec, error) {
-	f.got = w
+func (f *fakeSpecReader) ResourceSpec(_ context.Context, q providers.ResourceSpecQuery) (providers.ResourceSpec, error) {
+	f.got = q
 	return f.out, f.err
 }
 
@@ -74,20 +76,29 @@ func TestResourceSpecOutcomesAreNotConflated(t *testing.T) {
 	}
 }
 
-// TestResourceSpecRedactsSpecAndStatus pins the only line of defence for non-Secret kinds.
-// A spec can carry an inline credential — an env value, a connection string, a token in a
-// free-form field — and this output crosses the provider boundary.
+// TestResourceSpecRedactsSpecAndStatus pins the LAST pass over spec/status text on its way
+// to the provider: a credential in a free-form field, a connection string, a token quoted
+// in a status message.
+//
+// It is deliberately NOT the guard for a container's env. That shape — the sensitive word
+// in the VALUE of `name:`, the credential under the literal key `value:` — is invisible to
+// a key-name-oriented string ruleset, and this test used to "cover" it only because the
+// fixture's value happened to carry a ghp_ prefix that a token rule matched on its own.
+// The env shape is masked STRUCTURALLY, before anything is marshalled, and is pinned by
+// cluster.TestResourceSpecMasksContainerEnvValues.
 func TestResourceSpecRedactsSpecAndStatus(t *testing.T) {
 	const tok = "ghp_0123456789abcdefghijklmnopqrstuvwxyzAB"
 	r := &fakeSpecReader{out: providers.ResourceSpec{
 		Outcome:    providers.ResourceFound,
 		APIVersion: "v1",
-		Spec:       "containers:\n- env:\n  - name: TOKEN\n    value: " + tok,
+		Spec:       "database:\n  connection_string: postgres://app:hunter2supersecret@db:5432/x\n  token: " + tok,
 		Status:     "message: auth failed for " + tok,
 	}}
 	out := callSpec(t, r, `{"kind":"Pod","name":"p","namespace":"n"}`)
-	if strings.Contains(out, tok) {
-		t.Fatalf("a credential in the spec/status reached the model verbatim:\n%s", out)
+	for _, gone := range []string{tok, "hunter2supersecret"} {
+		if strings.Contains(out, gone) {
+			t.Fatalf("a credential in the spec/status reached the model verbatim:\n%s", out)
+		}
 	}
 	// A denial's detail is server-provided text and gets the same treatment.
 	r2 := &fakeSpecReader{out: providers.ResourceSpec{Outcome: providers.ResourceForbidden, Detail: "denied using " + tok}}
@@ -96,14 +107,90 @@ func TestResourceSpecRedactsSpecAndStatus(t *testing.T) {
 	}
 }
 
-// TestResourceSpecPassesTheWorkloadThrough guards the plumbing: a tool that silently drops
-// the namespace would read the wrong object and report confidently about it.
-func TestResourceSpecPassesTheWorkloadThrough(t *testing.T) {
+// TestResourceSpecPassesTheQueryThrough guards the plumbing: a tool that silently drops the
+// namespace would read the wrong object and report confidently about it. The optional group
+// argument travels the same path — without it, an ambiguous kind stays a dead end.
+//
+// It also covers the fallback identity: a reader that echoes no resolved query (as this
+// fake does) must still produce the object's id from the request rather than a blank.
+func TestResourceSpecPassesTheQueryThrough(t *testing.T) {
 	r := &fakeSpecReader{out: providers.ResourceSpec{Outcome: providers.ResourceFound, APIVersion: "v1", Spec: "k: v"}}
-	callSpec(t, r, `{"kind":"VMServiceScrape","name":"datagrok-rabbitmq","namespace":"observability"}`)
-	want := providers.Workload{Kind: "VMServiceScrape", Name: "datagrok-rabbitmq", Namespace: "observability"}
+	out := callSpec(t, r, `{"kind":"NetworkPolicy","name":"deny-all","namespace":"apps","group":"networking.k8s.io"}`)
+	want := providers.ResourceSpecQuery{Kind: "NetworkPolicy", Name: "deny-all", Namespace: "apps", Group: "networking.k8s.io"}
 	if r.got != want {
 		t.Fatalf("reader received %+v, want %+v", r.got, want)
+	}
+	if !strings.Contains(out, "NetworkPolicy apps/deny-all") {
+		t.Fatalf("the object is not identified in the output:\n%s", out)
+	}
+}
+
+// TestResourceSpecIdentifiesWhatWasREAD, not what was asked for. A cluster-scoped kind
+// called with a namespace was read anyway and the invented namespace rendered back as
+// fact — "StorageClass totally-made-up-ns/fast" — which is a fabricated detail in exactly
+// the register the model treats as evidence.
+func TestResourceSpecIdentifiesWhatWasRead(t *testing.T) {
+	r := &fakeSpecReader{out: providers.ResourceSpec{
+		Outcome:    providers.ResourceFound,
+		APIVersion: "storage.k8s.io/v1",
+		Query:      providers.ResourceSpecQuery{Kind: "StorageClass", Name: "fast", Group: "storage.k8s.io"},
+		Spec:       "provisioner: ebs.csi.aws.com",
+	}}
+	out := callSpec(t, r, `{"kind":"storageclass","name":"fast","namespace":"totally-made-up-ns"}`)
+	if strings.Contains(out, "totally-made-up-ns") {
+		t.Fatalf("a namespace the object does not have was rendered as fact:\n%s", out)
+	}
+	if !strings.Contains(out, "StorageClass fast") {
+		t.Fatalf("the resolved identity is not rendered:\n%s", out)
+	}
+}
+
+// TestResourceSpecRefusalIsNotADenial: the Secret refusal used to render as FORBIDDEN,
+// which reads to a human as an RBAC gap. The obvious fix for an RBAC gap is to widen the
+// ClusterRole — and the widest fix, resources: ["*"], grants `secrets`. A policy refusal
+// that pushes an operator toward granting the very thing it refuses is a bad ending, so it
+// says what it is.
+func TestResourceSpecRefusalIsNotADenial(t *testing.T) {
+	r := &fakeSpecReader{out: providers.ResourceSpec{
+		Outcome: providers.ResourceRefused,
+		Detail:  "Secret objects are never readable through this tool",
+	}}
+	out := callSpec(t, r, `{"kind":"Secret","name":"db","namespace":"apps"}`)
+	if !strings.Contains(out, "REFUSED") {
+		t.Fatalf("a refusal must be distinguishable from a denial:\n%s", out)
+	}
+	if strings.Contains(out, "FORBIDDEN") {
+		t.Fatalf("a policy refusal still renders as an RBAC denial:\n%s", out)
+	}
+	if !strings.Contains(out, "NOT an RBAC denial") {
+		t.Fatalf("the refusal does not steer the reader away from widening RBAC:\n%s", out)
+	}
+	if strings.Contains(out, "does not exist") {
+		t.Fatalf("a refusal claims the object does not exist:\n%s", out)
+	}
+}
+
+// TestResourceSpecAmbiguityIsActionable: an ambiguous kind is its own ending, and the
+// output must carry the way out of it — the group argument — or the model's only options
+// are to give up or to re-ask the identical question.
+func TestResourceSpecAmbiguityIsActionable(t *testing.T) {
+	r := &fakeSpecReader{out: providers.ResourceSpec{
+		Outcome: providers.ResourceKindAmbiguous,
+		Detail: `kind "NetworkPolicy" is served by more than one API group ` +
+			`(networking.k8s.io/v1, crd.projectcalico.org/v1); nothing was read. ` +
+			`Call again with the group argument set to the one you mean`,
+	}}
+	out := callSpec(t, r, `{"kind":"NetworkPolicy","name":"deny-all","namespace":"apps"}`)
+	if !strings.Contains(out, "AMBIGUOUS KIND") {
+		t.Fatalf("ambiguity is not distinguishable from an unknown kind:\n%s", out)
+	}
+	for _, want := range []string{"group", "crd.projectcalico.org/v1", "NOTHING about whether"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("output missing %q:\n%s", want, out)
+		}
+	}
+	if strings.Contains(out, "does not exist") {
+		t.Fatalf("an ambiguous kind claims the object does not exist:\n%s", out)
 	}
 }
 
@@ -129,5 +216,29 @@ func TestResourceSpecDescriptionSetsExpectations(t *testing.T) {
 		if !strings.Contains(d, want) {
 			t.Errorf("description missing %q:\n%s", want, d)
 		}
+	}
+}
+
+// TestResourceSpecSchemaDeclaresGroup: the group argument is the only escape from an
+// ambiguous kind, so the model has to be able to see it — and the schema is hand-written
+// JSON with an embedded quoted example, which is exactly the kind of string that breaks
+// silently and leaves the tool uncallable.
+func TestResourceSpecSchemaDeclaresGroup(t *testing.T) {
+	var schema struct {
+		Properties map[string]any `json:"properties"`
+		Required   []string       `json:"required"`
+	}
+	if err := json.Unmarshal([]byte(ResourceSpecTool{}.Schema()), &schema); err != nil {
+		t.Fatalf("schema is not valid JSON: %v", err)
+	}
+	for _, want := range []string{"kind", "name", "namespace", "group"} {
+		if _, ok := schema.Properties[want]; !ok {
+			t.Errorf("schema declares no %q argument", want)
+		}
+	}
+	// group must stay OPTIONAL: it is only needed for the ambiguous minority, and
+	// requiring it would force the model to guess a group for every ordinary read.
+	if slices.Contains(schema.Required, "group") {
+		t.Error("group must be optional")
 	}
 }

@@ -37,13 +37,23 @@ func (t ResourceSpecTool) Description() string {
 		"configuration matches reality — a selector that matches nothing, a namespaceSelector " +
 		"pointing at a namespace that does not exist, a missing egress rule, a metric an HPA " +
 		"references but nothing reports. Prefer this over inferring config from its consequences. " +
-		"Secret is refused. Namespaced kinds require namespace. A denial or an unknown kind is " +
+		"Secret is refused. Namespaced kinds require namespace; cluster-scoped kinds take none. " +
+		"When a kind is served by several API groups the read is refused as ambiguous — call again " +
+		"with group set to the one you mean. A denial or an unknown kind is " +
 		"reported as such and is NOT evidence that the object is absent."
 }
 
 // Schema returns the JSON schema for the arguments.
+//
+// group is optional and exists so an ambiguous kind is not a dead end: Event is served by
+// both the core group and events.k8s.io on every cluster, and NetworkPolicy by both
+// networking.k8s.io and crd.projectcalico.org on any cluster running Calico. Without it,
+// the reader's refusal to guess would leave the model no way to say which one it meant.
 func (t ResourceSpecTool) Schema() string {
-	return `{"type":"object","properties":{"kind":{"type":"string"},"name":{"type":"string"},"namespace":{"type":"string"}},"required":["kind","name"]}`
+	return `{"type":"object","properties":{"kind":{"type":"string"},"name":{"type":"string"},` +
+		`"namespace":{"type":"string"},` +
+		`"group":{"type":"string","description":"optional API group, e.g. networking.k8s.io (\"core\" for the core group) — only needed when a kind is served by more than one group"}},` +
+		`"required":["kind","name"]}`
 }
 
 // Call reads the object and renders it.
@@ -54,29 +64,47 @@ func (t ResourceSpecTool) Schema() string {
 // all the way into the text the model sees, together with an explicit statement of what
 // the answer does NOT establish.
 func (t ResourceSpecTool) Call(ctx context.Context, args string) (string, error) {
-	var in struct{ Kind, Name, Namespace string }
+	var in struct{ Kind, Name, Namespace, Group string }
 	if err := json.Unmarshal([]byte(args), &in); err != nil {
 		return "", fmt.Errorf("parse args: %w", err)
 	}
 	if t.Reader == nil {
 		return "resource_spec is not configured (no cluster access).", nil
 	}
-	rs, err := t.Reader.ResourceSpec(ctx, providers.Workload{Kind: in.Kind, Name: in.Name, Namespace: in.Namespace})
+	q := providers.ResourceSpecQuery{Kind: in.Kind, Name: in.Name, Namespace: in.Namespace, Group: in.Group}
+	rs, err := t.Reader.ResourceSpec(ctx, q)
 	if err != nil {
 		return "", err
 	}
-	id := strings.TrimSpace(fmt.Sprintf("%s %s", in.Kind, strings.TrimPrefix(in.Namespace+"/"+in.Name, "/")))
+	// Identify the object by what the reader RESOLVED, not by what was asked for: a
+	// cluster-scoped kind called with a namespace would otherwise be reported back as
+	// "StorageClass totally-made-up-ns/fast", stating the caller's mistake as fact.
+	id := specID(rs.Query)
+	if rs.Query.Name == "" {
+		id = specID(q)
+	}
 	switch rs.Outcome {
 	case providers.ResourceAbsent:
 		return id + ": ABSENT — the API server reports no such object. This IS evidence the " +
 			"object does not exist. Whether that absence explains the incident is for you to " +
 			"establish from other evidence.", nil
+	case providers.ResourceRefused:
+		// Distinct from FORBIDDEN on purpose. Rendered as an RBAC denial, the human fix
+		// looks like "widen the ClusterRole" — which is how a policy refusal turns into a
+		// grant on secrets. This one is not about permissions and cannot be configured away.
+		return id + ": REFUSED — " + redact.Secrets(rs.Detail) + "\nThis is a policy of this " +
+			"agent, NOT an RBAC denial: widening the ClusterRole will not change it, and it says " +
+			"NOTHING about whether the object exists.", nil
 	case providers.ResourceForbidden:
 		// The one the model most needs spelled out: a denial is not absence. Left
 		// unstated, "cannot read" gets reasoned about as "not there".
 		return id + ": FORBIDDEN — " + redact.Secrets(rs.Detail) + "\nThis says NOTHING about " +
 			"whether the object exists; it says this agent may not read it. Do NOT treat it as " +
 			"evidence of absence.", nil
+	case providers.ResourceKindAmbiguous:
+		return id + ": AMBIGUOUS KIND — " + redact.Secrets(rs.Detail) + "\nNothing was read, " +
+			"because reading the wrong object and describing it confidently is worse than " +
+			"answering nothing. This says NOTHING about whether any object exists.", nil
 	case providers.ResourceKindUnknown:
 		return id + ": UNKNOWN KIND — " + redact.Secrets(rs.Detail) + "\nThis says NOTHING about " +
 			"whether any object exists. Re-check the kind's spelling, or use a tool suited to it.", nil
@@ -97,6 +125,16 @@ func (t ResourceSpecTool) Call(ctx context.Context, args string) (string, error)
 		fmt.Fprintf(&b, "status:\n%s\n", indentBlock(redact.Secrets(rs.Status)))
 	}
 	return b.String(), nil
+}
+
+// specID renders the object's identity, "Kind namespace/name" — or "Kind name" for a
+// cluster-scoped object, which has no namespace to render.
+func specID(q providers.ResourceSpecQuery) string {
+	ref := q.Name
+	if q.Namespace != "" {
+		ref = q.Namespace + "/" + q.Name
+	}
+	return strings.TrimSpace(q.Kind + " " + ref)
 }
 
 // indentBlock indents a YAML block by two spaces so spec and status read as nested
