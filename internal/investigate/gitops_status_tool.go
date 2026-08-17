@@ -46,9 +46,16 @@ func (t GitOpsStatusTool) Call(ctx context.Context, args string) (string, error)
 	// Refuse an out-of-scope kind BEFORE the lookup. The schema enum should already have
 	// prevented it, but a provider that ignores enums (or an MCP client) must not reach a
 	// path whose only possible answer is a misleading negative.
-	if !gitopsKindSupported(t.Engine, in.Kind) {
+	//
+	// The guard also CANONICALISES: it matches case-insensitively (the model writes the
+	// kind as prose) while the providers resolve by exact map lookup, so forwarding the
+	// model's spelling verbatim is what let "helmrelease" pass the guard and then fail
+	// to resolve.
+	kind, ok := canonicalGitOpsKind(t.Engine, in.Kind)
+	if !ok {
 		return gitopsUnsupportedKind(t.Engine, in.Kind), nil
 	}
+	in.Kind = kind
 	rs, err := t.Inspector.ResourceStatus(ctx, providers.Workload{Kind: in.Kind, Name: in.Name, Namespace: in.Namespace})
 	if err != nil {
 		return "", err

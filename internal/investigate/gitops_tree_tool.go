@@ -46,11 +46,15 @@ func (t GitOpsTreeTool) Call(ctx context.Context, args string) (string, error) {
 		return "", fmt.Errorf("parse args: %w", err)
 	}
 	// Refuse an out-of-scope kind before the walk, for the same reason as
-	// gitops_resource_status — and more urgently, because a missing root renders as
-	// "NOT FOUND  ← root".
-	if !gitopsKindSupported(t.Engine, in.Kind) {
+	// gitops_resource_status — and canonicalise it, which matters MORE here: this tool
+	// swallows a resolution failure and renders the node anyway, so a kind that passes
+	// the case-insensitive guard and then misses the exact-match resolver comes back as
+	// "helmrelease apps/api (Ready=unknown)" — a node for an object nobody looked up.
+	kind, ok := canonicalGitOpsKind(t.Engine, in.Kind)
+	if !ok {
 		return gitopsUnsupportedKind(t.Engine, in.Kind), nil
 	}
+	in.Kind = kind
 	root, err := t.Inspector.DependencyTree(ctx, providers.Workload{Kind: in.Kind, Name: in.Name, Namespace: in.Namespace})
 	if err != nil {
 		return "", err

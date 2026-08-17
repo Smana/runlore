@@ -49,13 +49,31 @@ func GitOpsKinds(engine string) []string {
 	return flux.GitOpsKinds()
 }
 
-// gitopsKindSupported reports whether the tools can resolve kind on this engine. Matching
-// is case-insensitive: the model writes the kind as prose and "helmrelease" should be
-// refused for the same reason as "HelmRelease", not fall through to a lookup.
-func gitopsKindSupported(engine, kind string) bool {
-	return slices.ContainsFunc(GitOpsKinds(engine), func(k string) bool {
+// canonicalGitOpsKind resolves kind to the exact spelling the engine's provider uses,
+// reporting false when this engine cannot own it.
+//
+// Matching is case-insensitive because the model writes the kind as prose, so
+// "helmrelease" must be ACCEPTED rather than refused as out of scope — but the canonical
+// spelling is what the caller has to forward. The resolvers are exact-match maps
+// (flux.kindToGVR, argocd.kindToGVR), so a lowercase kind that cleared a case-insensitive
+// guard and was then passed on verbatim missed the map: gitops_tree swallows that
+// resolution failure and rendered "helmrelease apps/api (Ready=unknown)" — a node for an
+// object nobody ever looked up. Returning the canonical form is what keeps the guard and
+// the resolver talking about the same object.
+func canonicalGitOpsKind(engine, kind string) (string, bool) {
+	kinds := GitOpsKinds(engine)
+	if i := slices.IndexFunc(kinds, func(k string) bool {
 		return strings.EqualFold(k, kind)
-	})
+	}); i >= 0 {
+		return kinds[i], true
+	}
+	return "", false
+}
+
+// gitopsKindSupported reports whether the tools can resolve kind on this engine.
+func gitopsKindSupported(engine, kind string) bool {
+	_, ok := canonicalGitOpsKind(engine, kind)
+	return ok
 }
 
 // gitopsUnsupportedKind is the answer for a kind this tool cannot resolve.

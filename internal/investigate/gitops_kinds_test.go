@@ -54,16 +54,60 @@ func TestGitOpsKindsTrackTheProviders(t *testing.T) {
 type countingInspector struct {
 	calls    int
 	notFound bool
+	asked    providers.Workload // what the last call was actually given
 }
 
 func (c *countingInspector) ResourceStatus(_ context.Context, w providers.Workload) (providers.ResourceStatus, error) {
 	c.calls++
+	c.asked = w
 	return providers.ResourceStatus{Workload: w, NotFound: c.notFound, Ready: "True"}, nil
 }
 
 func (c *countingInspector) DependencyTree(_ context.Context, w providers.Workload) (providers.DepNode, error) {
 	c.calls++
+	c.asked = w
 	return providers.DepNode{Workload: w, NotFound: c.notFound, Ready: "True"}, nil
+}
+
+// TestGitOpsKindIsCanonicalisedBeforeTheLookup closes the gap between a
+// case-INSENSITIVE guard and a case-SENSITIVE resolver.
+//
+// gitopsKindSupported matched with EqualFold while Call forwarded in.Kind verbatim and
+// flux.kindToGVR is an exact-match map, so kind:"helmrelease" passed the guard and then
+// missed the map. gitops_resource_status surfaced that as an error, but gitops_tree
+// swallows a resolution failure (flux depNode: `if err != nil { return node }`) and
+// rendered
+//
+//	helmrelease apps/api (Ready=unknown)
+//
+// — a node for an object nobody looked up, asserting it exists. A fabricated node in a
+// dependency tree is the same class of false evidence as #503's false negative.
+func TestGitOpsKindIsCanonicalisedBeforeTheLookup(t *testing.T) {
+	for _, tc := range []struct {
+		tool string
+		call func(*countingInspector, string) (string, error)
+	}{
+		{"gitops_resource_status", func(i *countingInspector, kind string) (string, error) {
+			return GitOpsStatusTool{Inspector: i, Engine: "flux"}.Call(context.Background(),
+				`{"kind":"`+kind+`","name":"api","namespace":"apps"}`)
+		}},
+		{"gitops_tree", func(i *countingInspector, kind string) (string, error) {
+			return GitOpsTreeTool{Inspector: i, Engine: "flux"}.Call(context.Background(),
+				`{"kind":"`+kind+`","name":"api","namespace":"apps"}`)
+		}},
+	} {
+		for _, written := range []string{"helmrelease", "HELMRELEASE", "HelmRelease"} {
+			insp := &countingInspector{}
+			if _, err := tc.call(insp, written); err != nil {
+				t.Fatalf("%s/%s: %v", tc.tool, written, err)
+			}
+			if insp.asked.Kind != "HelmRelease" {
+				t.Errorf("%s: kind %q reached the inspector as %q — the resolver matches exactly, "+
+					"so anything but the canonical spelling silently fails to resolve",
+					tc.tool, written, insp.asked.Kind)
+			}
+		}
+	}
 }
 
 // TestGitOpsKindsAreEngineScoped pins the capability boundary. Flux objects cannot exist on
@@ -94,10 +138,19 @@ func TestGitOpsKindsAreEngineScoped(t *testing.T) {
 	if got, want := GitOpsKinds(""), GitOpsKinds("flux"); !slices.Equal(got, want) {
 		t.Errorf("empty engine = %v, want the flux set %v", got, want)
 	}
-	// Case-insensitive: the model writes the kind as prose, and "helmrelease" must be
-	// refused for the same reason as "HelmRelease" rather than falling through to a lookup.
-	if !gitopsKindSupported("flux", "helmrelease") {
-		t.Error("kind matching must be case-insensitive")
+	// Case-insensitive in BOTH directions, which the earlier version only half-asserted:
+	// the model writes the kind as prose, so "helmrelease" is accepted on flux (and
+	// canonicalised — see TestGitOpsKindIsCanonicalisedBeforeTheLookup), and refused on
+	// argocd for exactly the same reason "HelmRelease" is. A guard that folds case when
+	// accepting but not when refusing is a hole, not a convenience.
+	if got, ok := canonicalGitOpsKind("flux", "helmrelease"); !ok || got != "HelmRelease" {
+		t.Errorf(`canonicalGitOpsKind("flux","helmrelease") = %q,%v; want "HelmRelease",true`, got, ok)
+	}
+	if gitopsKindSupported("argocd", "helmrelease") {
+		t.Error("lowercase helmrelease is accepted on argocd, where the engine cannot own it")
+	}
+	if gitopsKindSupported("flux", "APPLICATION") {
+		t.Error("uppercase APPLICATION is accepted on flux, where the engine cannot own it")
 	}
 }
 
