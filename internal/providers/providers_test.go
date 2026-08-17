@@ -233,12 +233,20 @@ func TestKBUpdateNotifierIsOptional(t *testing.T) {
 // text, and an unclassified field is one nobody decided to escape.
 //
 // Untrusted: Note/Title/Author are model- or human-authored (redacted upstream,
-// still not RunLore's words); URL and Root are returned by the forge and the chat
-// transport respectively, which is why the thread reply already wraps the URL in
-// thread.Untrusted.
+// still not RunLore's words); URL, Root and Channel are returned by the forge and
+// the chat transport respectively, which is why the thread reply already wraps the
+// URL in thread.Untrusted.
+//
+// Channel is untrusted for Root's reason and needs the classification for a
+// second one: it is ADDRESSING as well as data. A sink that renders it must
+// escape it like any transport-reported string, and no announcement does today —
+// it is used to address a threaded delivery, which is not rendering.
+//
+// Delivery is trusted because RunLore sets it from its own configuration; it is
+// never reported by a chat system and never rendered at all.
 var (
-	kbUpdateUntrusted = map[string]bool{"Title": true, "Author": true, "Note": true, "URL": true, "Root": true}
-	kbUpdateTrusted   = map[string]bool{"Transport": true, "Route": true, "PR": true, "At": true}
+	kbUpdateUntrusted = map[string]bool{"Title": true, "Author": true, "Note": true, "URL": true, "Root": true, "Channel": true}
+	kbUpdateTrusted   = map[string]bool{"Transport": true, "Route": true, "PR": true, "At": true, "Delivery": true}
 )
 
 // TestKBUpdateClassifiesEveryFieldForEscaping makes the two maps above bite: a

@@ -3066,7 +3066,7 @@ func newAnnouncingResponder(t *testing.T, f *fakeForge) (*Responder, *fakeKBSink
 	t.Helper()
 	r := newTestResponder(t, f)
 	sink := &fakeKBSink{}
-	r.Announcer = NewKBAnnouncer(sink, silentLog())
+	r.Announcer = NewKBAnnouncer(sink, providers.KBDeliverChannel, silentLog())
 	return r, sink
 }
 
@@ -3210,7 +3210,7 @@ func TestAnnounceNeverPostsIntoTheThread(t *testing.T) {
 	f, rep := &fakeForge{}, &fakeReplier{}
 	m := newTestMention(t, f, rep)
 	sink := &fakeKBSink{}
-	m.Responder.Announcer = NewKBAnnouncer(sink, silentLog())
+	m.Responder.Announcer = NewKBAnnouncer(sink, providers.KBDeliverChannel, silentLog())
 	if err := m.Registry.Put(Context{Transport: "slack", Root: "111.222", Channel: "C1", CuratedURL: "https://github.com/o/r/pull/42"}); err != nil {
 		t.Fatalf("Put: %v", err)
 	}
@@ -3418,7 +3418,7 @@ func TestAnnounceWithNoSinkIsOffAndDoesNotPanic(t *testing.T) {
 	// "Off" is ONE value, not a flag beside a sink: constructing an announcer
 	// with no sink yields no announcer, so there is no half-wired state in
 	// which announcements are enabled with nowhere to go.
-	if a := NewKBAnnouncer(nil, silentLog()); a != nil {
+	if a := NewKBAnnouncer(nil, providers.KBDeliverChannel, silentLog()); a != nil {
 		t.Errorf("NewKBAnnouncer(nil) = %+v, want nil — a missing sink means announcements are off", a)
 	}
 	// And every method is safe on that nil, so a caller never needs its own
@@ -3452,7 +3452,7 @@ func TestAnnounceFailureDoesNotChangeTheReply(t *testing.T) {
 
 	loud, loudCtx := newCase(t)
 	sink := &fakeKBSink{err: errors.New("channel_not_found")}
-	loud.Announcer = NewKBAnnouncer(sink, silentLog())
+	loud.Announcer = NewKBAnnouncer(sink, providers.KBDeliverChannel, silentLog())
 	reply, err := loud.Handle(context.Background(), loudCtx, "alice", msg)
 	if err != nil {
 		t.Errorf("Handle returned %v; a failing announcement must never fail the write that already landed", err)
@@ -3478,7 +3478,7 @@ func TestAnnounceDoesNotDelayTheReply(t *testing.T) {
 	f := &fakeForge{}
 	r := newTestResponder(t, f)
 	sink := &fakeKBSink{entered: make(chan struct{}), release: make(chan struct{})}
-	r.Announcer = NewKBAnnouncer(sink, silentLog())
+	r.Announcer = NewKBAnnouncer(sink, providers.KBDeliverChannel, silentLog())
 	tc := putContext(t, r, Context{Transport: "slack", Root: "111.222", CuratedURL: "https://github.com/o/r/pull/42"})
 
 	type result struct {
@@ -3525,7 +3525,7 @@ func TestAnnounceIsDrainable(t *testing.T) {
 	f := &fakeForge{}
 	r := newTestResponder(t, f)
 	sink := &fakeKBSink{release: make(chan struct{})}
-	r.Announcer = NewKBAnnouncer(sink, silentLog())
+	r.Announcer = NewKBAnnouncer(sink, providers.KBDeliverChannel, silentLog())
 	tc := putContext(t, r, Context{Transport: "slack", Root: "111.222", CuratedURL: "https://github.com/o/r/pull/42"})
 
 	if _, err := r.Handle(context.Background(), tc, "alice", "<@U0BOT> note: x"); err != nil {

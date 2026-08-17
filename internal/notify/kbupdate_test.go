@@ -4,6 +4,7 @@ package notify
 
 import (
 	"context"
+	"encoding/json"
 	"io"
 	"log/slog"
 	"net/http"
@@ -440,30 +441,356 @@ func TestMultiFansAKBUpdateOutToTheRealChatNotifiers(t *testing.T) {
 	}
 }
 
-// TestKBUpdateAnnouncementNeverPostsIntoAThread pins the destination decision.
+// TestKBUpdateAnnouncementNeverPostsIntoAThread pins the DEFAULT destination,
+// which is also the only one `announce_kb_updates: true` has ever selected.
 // The thread reply is the acknowledgement to the person who typed; the
-// announcement is what reaches everyone who was not reading that thread. It
-// goes to each notifier's own configured channel or room, so it must carry no
-// threading relation — not Slack's thread_ts, not Matrix's m.thread.
+// announcement is what reaches everyone who was not reading that thread. At the
+// channel destination it must carry no threading relation — not Slack's
+// thread_ts, not Matrix's m.thread — even with both origin handles in hand.
+//
+// The zero-valued Delivery is asserted alongside the explicit channel value on
+// purpose: providers.KBDelivery's zero value IS the channel precisely so a
+// producer that predates routing cannot change destination by omission, and a
+// test that only ever set the field would not notice that guarantee breaking.
 func TestKBUpdateAnnouncementNeverPostsIntoAThread(t *testing.T) {
-	sinks, sent := kbUpdateSinkOnFakeTransport(t)
-	up := providers.KBUpdate{
-		Transport: "slack", Root: "111.222", Route: providers.KBRouteOpenPR, PR: 99,
-		URL: "https://github.com/o/r/pull/99", Note: "a spot reclaim",
+	for _, delivery := range []providers.KBDelivery{"", providers.KBDeliverChannel} {
+		sinks, sent := kbUpdateSinkOnFakeTransport(t)
+		up := providers.KBUpdate{
+			Transport: "slack", Root: "111.222", Channel: "C-ORIGIN", Delivery: delivery,
+			Route: providers.KBRouteOpenPR, PR: 99,
+			URL: "https://github.com/o/r/pull/99", Note: "a spot reclaim",
+		}
+		for transport, sink := range sinks {
+			t.Run(transport+"/"+string(delivery), func(t *testing.T) {
+				*sent = nil
+				if err := sink.DeliverKBUpdate(context.Background(), up); err != nil {
+					t.Fatalf("DeliverKBUpdate: %v", err)
+				}
+				if len(*sent) != 1 {
+					t.Fatalf("posted %d messages, want exactly 1 — the channel destination is one post", len(*sent))
+				}
+				for _, forbidden := range []string{"thread_ts", "m.thread", "111.222"} {
+					if strings.Contains((*sent)[0], forbidden) {
+						t.Errorf("the announcement carries %q — it must post to the configured channel, never into the originating thread:\n%s",
+							forbidden, (*sent)[0])
+					}
+				}
+			})
+		}
 	}
-	for transport, sink := range sinks {
-		t.Run(transport, func(t *testing.T) {
-			*sent = nil
-			if err := sink.DeliverKBUpdate(context.Background(), up); err != nil {
+}
+
+// kbRoutingSinks wires both chat notifiers at one httptest server, recording the
+// request PATH alongside the body.
+//
+// The path is what carries the destination on Matrix — the room id is in the
+// URL, not the payload — so a test that read only bodies could not tell an
+// announcement delivered into the originating room from one delivered into the
+// notifier's configured room, which is the entire distinction being tested.
+func kbRoutingSinks(t *testing.T) (slack, matrix providers.KBUpdateNotifier, posts *[]kbPost) {
+	t.Helper()
+	var sent []kbPost
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		sent = append(sent, kbPost{path: r.URL.Path, body: string(body)})
+		_, _ = w.Write([]byte(`{"ok":true,"ts":"1","event_id":"$1"}`))
+	}))
+	t.Cleanup(srv.Close)
+
+	bot := NewSlackBot("xoxb-test", "C-CONFIGURED")
+	bot.baseURL = srv.URL
+	return bot, NewMatrix(srv.URL, "!configured-room:example.org", "tok"), &sent
+}
+
+type kbPost struct{ path, body string }
+
+// threadedTo reports the thread root a post relates to, and the destination it
+// was addressed at, for whichever transport wrote it. "" for a root means the
+// post carries no threading relation at all.
+func (p kbPost) threadedTo(t *testing.T) (root, dest string) {
+	t.Helper()
+	var m map[string]any
+	if err := json.Unmarshal([]byte(p.body), &m); err != nil {
+		t.Fatalf("decode posted body: %v", err)
+	}
+	if ts, ok := m["thread_ts"].(string); ok { // Slack
+		ch, _ := m["channel"].(string)
+		return ts, ch
+	}
+	if rel, ok := m["m.relates_to"].(map[string]any); ok { // Matrix
+		if rel["rel_type"] == "m.thread" {
+			id, _ := rel["event_id"].(string)
+			return id, p.path
+		}
+	}
+	if ch, ok := m["channel"].(string); ok {
+		return "", ch
+	}
+	return "", p.path
+}
+
+// slackOrigin / matrixOrigin are one landed write as each transport reports it,
+// with both thread handles present.
+func slackOrigin(d providers.KBDelivery) providers.KBUpdate {
+	return providers.KBUpdate{
+		Transport: "slack", Root: "111.222", Channel: "C-ORIGIN", Delivery: d,
+		Route: providers.KBRouteOpenPR, PR: 99, URL: "https://github.com/o/r/pull/99",
+		Author: "sre-jane", Note: "a spot reclaim",
+	}
+}
+
+func matrixOrigin(d providers.KBDelivery) providers.KBUpdate {
+	up := slackOrigin(d)
+	up.Transport, up.Root, up.Channel = "matrix", "$evt-root", "!room-of-origin:example.org"
+	return up
+}
+
+// TestAnnouncementRoutesIntoTheOriginatingThread is the feature: with the thread
+// destination selected, the transport the note was typed in delivers the
+// announcement INTO that thread instead of beside it.
+//
+// The echo it removes is specific to a single-transport deployment, and so is
+// the reasoning. The channel destination is defended as a second destination —
+// "the thread reply answers the person who typed, the channel post reaches
+// everyone who was not reading that thread" — which holds only when there are
+// several sinks. With one, the thread already lives inside the channel the
+// announcement posts to, so the second destination IS the first: three notes in
+// one thread produced three channel posts restating what the thread had just
+// said, and the only remedy was turning the feature off and losing the signal.
+//
+// Both halves are asserted, and the destination half is the one that bites: a
+// Slack post carrying thread_ts but addressed at the notifier's CONFIGURED
+// channel rather than the thread's own lands nowhere useful, and on Matrix the
+// room is in the URL where a body-only assertion cannot see it at all.
+func TestAnnouncementRoutesIntoTheOriginatingThread(t *testing.T) {
+	for _, tc := range []struct {
+		name             string
+		up               providers.KBUpdate
+		sink             func(slack, matrix providers.KBUpdateNotifier) providers.KBUpdateNotifier
+		wantRoot, wantTo string
+	}{
+		{
+			name:     "slack",
+			up:       slackOrigin(providers.KBDeliverThread),
+			sink:     func(s, _ providers.KBUpdateNotifier) providers.KBUpdateNotifier { return s },
+			wantRoot: "111.222", wantTo: "C-ORIGIN",
+		},
+		{
+			name:     "matrix",
+			up:       matrixOrigin(providers.KBDeliverThread),
+			sink:     func(_, m providers.KBUpdateNotifier) providers.KBUpdateNotifier { return m },
+			wantRoot: "$evt-root", wantTo: "/_matrix/client/v3/rooms/!room-of-origin:example.org/send/m.room.message/",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			slack, matrix, posts := kbRoutingSinks(t)
+			if err := tc.sink(slack, matrix).DeliverKBUpdate(context.Background(), tc.up); err != nil {
 				t.Fatalf("DeliverKBUpdate: %v", err)
 			}
-			for _, forbidden := range []string{"thread_ts", "m.thread", "111.222"} {
-				if strings.Contains((*sent)[0], forbidden) {
-					t.Errorf("the announcement carries %q — it must post to the configured channel, never into the originating thread:\n%s",
-						forbidden, (*sent)[0])
-				}
+			if len(*posts) != 1 {
+				t.Fatalf("posted %d messages, want exactly 1 — the thread destination replaces the channel post, "+
+					"it does not accompany it; that echo is what the operator turned the feature off to escape", len(*posts))
+			}
+			root, dest := (*posts)[0].threadedTo(t)
+			if root != tc.wantRoot {
+				t.Errorf("the announcement relates to thread root %q, want %q:\n%s", root, tc.wantRoot, (*posts)[0].body)
+			}
+			if !strings.HasPrefix(dest, tc.wantTo) {
+				t.Errorf("the announcement was addressed at %q, want the thread's own channel/room %q — "+
+					"a threaded post sent to the configured channel lands in the wrong conversation", dest, tc.wantTo)
+			}
+			// It is still the announcement, not the thread reply: the provenance
+			// line is the whole reason to want it in the thread at all.
+			if text := postedThreadText(t, (*posts)[0].body); !strings.Contains(text, "sre-jane") ||
+				!strings.Contains(text, "Knowledge base updated") {
+				t.Errorf("the threaded announcement lost its own content (who wrote the note, what landed):\n%s", text)
 			}
 		})
+	}
+}
+
+// TestAnnouncementFallsBackToTheChannelForANonOriginatingSink pins the decision
+// taken for every sink that is NOT the transport the note was typed in.
+//
+// Only one sink can ever reply into a given thread. A Matrix room cannot reply
+// into a Slack thread; the choice for the others is fall back to the channel or
+// skip them, and this contract is FALL BACK. Skipping would answer "stop
+// repeating yourself in my one channel" with "stop telling the other rooms":
+// the echo exists only on the originating transport, where the thread already
+// sits inside the announcement's channel, and a room that never saw the thread
+// has no echo to remove and no other way to learn the knowledge base moved.
+func TestAnnouncementFallsBackToTheChannelForANonOriginatingSink(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		up     providers.KBUpdate
+		sink   func(slack, matrix providers.KBUpdateNotifier) providers.KBUpdateNotifier
+		wantTo string
+	}{
+		{
+			name:   "matrix sink, slack-born note",
+			up:     slackOrigin(providers.KBDeliverThread),
+			sink:   func(_, m providers.KBUpdateNotifier) providers.KBUpdateNotifier { return m },
+			wantTo: "/_matrix/client/v3/rooms/!configured-room:example.org/send/m.room.message/",
+		},
+		{
+			name:   "slack sink, matrix-born note",
+			up:     matrixOrigin(providers.KBDeliverThread),
+			sink:   func(s, _ providers.KBUpdateNotifier) providers.KBUpdateNotifier { return s },
+			wantTo: "C-CONFIGURED",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			slack, matrix, posts := kbRoutingSinks(t)
+			if err := tc.sink(slack, matrix).DeliverKBUpdate(context.Background(), tc.up); err != nil {
+				t.Fatalf("DeliverKBUpdate: %v", err)
+			}
+			if len(*posts) != 1 {
+				t.Fatalf("posted %d messages, want exactly 1 — a sink that cannot reach the thread must still "+
+					"announce to its own channel, never be skipped", len(*posts))
+			}
+			root, dest := (*posts)[0].threadedTo(t)
+			if root != "" {
+				t.Errorf("a non-originating sink threaded its announcement to %q — it cannot reach another "+
+					"transport's thread, and a relation to a root it does not own is a broken message", root)
+			}
+			if !strings.HasPrefix(dest, tc.wantTo) {
+				t.Errorf("the announcement was addressed at %q, want the sink's own configured destination %q", dest, tc.wantTo)
+			}
+		})
+	}
+}
+
+// TestThreadRoutingDoesNotSilenceAThreadlessSink is the same fallback for a sink
+// that cannot reply into ANY thread, on its own transport or another's.
+//
+// An incoming-webhook Slack posts to the channel its URL was issued for and has
+// no thread_ts to set. It reports Transport "slack" nowhere and cannot, so it
+// would be the easiest sink to lose to a routing change: nothing about it errors,
+// and an operator who moved their announcements into threads would simply stop
+// seeing them here with no signal at all.
+func TestThreadRoutingDoesNotSilenceAThreadlessSink(t *testing.T) {
+	var sent []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		sent = append(sent, string(body))
+		_, _ = w.Write([]byte(`{"ok":true}`))
+	}))
+	defer srv.Close()
+
+	hook := NewSlack(srv.URL)
+	if err := hook.DeliverKBUpdate(context.Background(), slackOrigin(providers.KBDeliverThread)); err != nil {
+		t.Fatalf("DeliverKBUpdate: %v", err)
+	}
+	if len(sent) != 1 {
+		t.Fatalf("posted %d messages, want exactly 1 — a sink with no thread to reply into must still announce", len(sent))
+	}
+	if strings.Contains(sent[0], "thread_ts") {
+		t.Errorf("an incoming webhook cannot address a thread; it must not claim to:\n%s", sent[0])
+	}
+	if !strings.Contains(postedThreadText(t, sent[0]), "https://github.com/o/r/pull/99") {
+		t.Errorf("the fallback announcement lost its content:\n%s", sent[0])
+	}
+}
+
+// TestAnnouncementFallsBackToTheChannelWithoutBothThreadHandles covers the
+// originating transport with an incomplete origin.
+//
+// A thread root alone does not address a reply: Slack's chat.postMessage needs
+// the channel and Matrix's send needs the room, and a KBUpdate can carry a root
+// without one — a thread context rebuilt from a Matrix event stamp after a
+// restart, an origin that was never a thread. The write has already landed, so
+// the fallback must ANNOUNCE it at channel level rather than drop it: losing an
+// announcement for a write that really happened is the failure this whole path
+// exists to avoid.
+func TestAnnouncementFallsBackToTheChannelWithoutBothThreadHandles(t *testing.T) {
+	for _, tc := range []struct {
+		name        string
+		root, chann string
+	}{
+		{name: "no channel", root: "111.222"},
+		{name: "no root", chann: "C-ORIGIN"},
+		{name: "neither"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			slack, _, posts := kbRoutingSinks(t)
+			up := slackOrigin(providers.KBDeliverThread)
+			up.Root, up.Channel = tc.root, tc.chann
+			if err := slack.DeliverKBUpdate(context.Background(), up); err != nil {
+				t.Fatalf("DeliverKBUpdate: %v", err)
+			}
+			if len(*posts) != 1 {
+				t.Fatalf("posted %d messages, want exactly 1 — an unaddressable thread must fall back to the "+
+					"channel, not swallow the announcement for a write that landed", len(*posts))
+			}
+			root, dest := (*posts)[0].threadedTo(t)
+			if root != "" {
+				t.Errorf("threaded to %q with an incomplete origin (root=%q channel=%q) — a half handle cannot "+
+					"address a reply", root, tc.root, tc.chann)
+			}
+			if dest != "C-CONFIGURED" {
+				t.Errorf("addressed at %q, want the configured channel C-CONFIGURED", dest)
+			}
+		})
+	}
+}
+
+// TestAnnouncementBothReachesTheThreadAndTheChannel pins the third destination:
+// the thread gets the announcement's provenance (who wrote the note, on which
+// chat system — which the thread reply does not carry) and the channel still
+// gets the broadcast.
+//
+// It is deliberately NOT what `true` maps to: `both` produces strictly more
+// messages than the shipped behaviour, so an operator has to ask for it.
+func TestAnnouncementBothReachesTheThreadAndTheChannel(t *testing.T) {
+	slack, _, posts := kbRoutingSinks(t)
+	if err := slack.DeliverKBUpdate(context.Background(), slackOrigin(providers.KBDeliverBoth)); err != nil {
+		t.Fatalf("DeliverKBUpdate: %v", err)
+	}
+	if len(*posts) != 2 {
+		t.Fatalf("posted %d messages, want 2 (the thread and the channel)", len(*posts))
+	}
+	seen := map[string]string{}
+	for _, p := range *posts {
+		root, dest := p.threadedTo(t)
+		seen[root] = dest
+	}
+	if got, ok := seen["111.222"]; !ok || got != "C-ORIGIN" {
+		t.Errorf("no announcement reached the originating thread (root→dest: %v)", seen)
+	}
+	if got, ok := seen[""]; !ok || got != "C-CONFIGURED" {
+		t.Errorf("no unthreaded announcement reached the configured channel (root→dest: %v)", seen)
+	}
+}
+
+// TestBothStillPostsToTheChannelWhenTheThreadPostFails pins that the two
+// deliveries are independent. A wedged or renamed thread must not cost the
+// broadcast a write that already landed on the forge, so the errors are joined
+// rather than short-circuited.
+func TestBothStillPostsToTheChannelWhenTheThreadPostFails(t *testing.T) {
+	var sent []kbPost
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		sent = append(sent, kbPost{path: r.URL.Path, body: string(body)})
+		if strings.Contains(string(body), "thread_ts") {
+			_, _ = w.Write([]byte(`{"ok":false,"error":"thread_not_found"}`))
+			return
+		}
+		_, _ = w.Write([]byte(`{"ok":true,"ts":"1"}`))
+	}))
+	defer srv.Close()
+
+	bot := NewSlackBot("xoxb-test", "C-CONFIGURED")
+	bot.baseURL = srv.URL
+
+	err := bot.DeliverKBUpdate(context.Background(), slackOrigin(providers.KBDeliverBoth))
+	if err == nil {
+		t.Error("a failed thread post must be reported, not swallowed here — the announcer is what decides to swallow it")
+	}
+	if len(sent) != 2 {
+		t.Fatalf("posted %d messages, want 2 — the channel half must survive the thread half failing", len(sent))
+	}
+	if root, _ := sent[1].threadedTo(t); root != "" {
+		t.Errorf("the second post is threaded (%q); the channel half never was", root)
 	}
 }
 
@@ -485,19 +812,25 @@ func TestKBUpdateFieldsAreAllRenderedOrDeliberatelyNot(t *testing.T) {
 		"Author":    "sre-jane",
 		"Note":      "a spot reclaim",
 	}
-	// Root is an opaque per-transport handle (a Slack thread_ts, a Matrix event
-	// id). It identifies the thread for a programmatic consumer; printed into a
-	// channel it is noise a human cannot act on, and the announcement already
+	// Root and Channel are opaque per-transport handles (a Slack thread_ts and
+	// channel id, a Matrix event id and room id). They identify the thread for a
+	// programmatic consumer and address a threaded delivery; printed into a
+	// channel they are noise a human cannot act on, and the announcement already
 	// names the transport it came from. At is the wall clock of a message the
-	// chat system timestamps itself.
+	// chat system timestamps itself. Delivery is an instruction to the sink about
+	// where to post, not a fact about the write, so nothing about it belongs in
+	// the message a human reads.
 	withheld := map[string]string{
-		"Root": "$evt-root",
-		"At":   "2026-08-16T09:00:00Z",
+		"Root":     "$evt-root",
+		"Channel":  "!room-of-origin:example.org",
+		"Delivery": "both",
+		"At":       "2026-08-16T09:00:00Z",
 	}
 
 	sinks, sent := kbUpdateSinkOnFakeTransport(t)
 	up := providers.KBUpdate{
-		Transport: "matrix", Root: "$evt-root", Route: providers.KBRouteOpenPR, PR: 4242,
+		Transport: "matrix", Root: "$evt-root", Channel: "!room-of-origin:example.org",
+		Delivery: providers.KBDeliverBoth, Route: providers.KBRouteOpenPR, PR: 4242,
 		URL: "https://github.com/o/r/pull/4242", Title: "Operator note: OOM",
 		Author: "sre-jane", Note: "a spot reclaim", At: time.Date(2026, 8, 16, 9, 0, 0, 0, time.UTC),
 	}

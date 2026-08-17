@@ -115,10 +115,10 @@ func ThreadCaptureDeliverable(cfg *config.Config, log *slog.Logger) bool {
 //
 // notifier is the process's fan-out sink, and it is here for the announcement
 // half: with notify.thread.announce_kb_updates on, a landed knowledge write is
-// broadcast to every configured notifier's OWN channel or room (see
-// buildKBAnnouncer), never back into the thread the reply already went to. It
-// may be nil — the log-only path builds no notifier at all — which is one of
-// the two ways announcements end up off.
+// broadcast to every configured notifier — its own channel or room by default,
+// or into the originating thread when the key selects that (see
+// buildKBAnnouncer). It may be nil — the log-only path builds no notifier at all
+// — which is one of the two ways announcements end up off.
 func buildThreadResponder(cfg *config.Config, threadRegistry *thread.Registry, forge thread.Forge, chat *thread.Chat, notifier *notify.Multi, metrics *telemetry.Metrics, log *slog.Logger) *thread.Responder {
 	return &thread.Responder{
 		Forge:             forge,
@@ -163,13 +163,14 @@ func buildKBAnnouncer(cfg *config.Config, notifier *notify.Multi, log *slog.Logg
 	if msg := KBAnnounceInertWarning(cfg, sinks); msg != "" {
 		log.Warn(msg)
 	}
-	if !cfg.Notify.Thread.AnnounceKBUpdates || sinks == 0 {
+	if !cfg.Notify.Thread.AnnounceKBUpdates.On() || sinks == 0 {
 		return nil
 	}
 	log.Info("thread knowledge-base announcements enabled",
 		"notifiers", sinks,
-		"note", "each configured notifier that implements the announcement capability receives them, in its own channel or room; the thread reply is unchanged")
-	return thread.NewKBAnnouncer(notifier, log)
+		"delivery", string(cfg.Notify.Thread.AnnounceKBUpdates),
+		"note", "each configured notifier that implements the announcement capability receives them; a thread delivery reaches the originating thread on its own transport and the channel on every other sink; the thread reply is unchanged")
+	return thread.NewKBAnnouncer(notifier, cfg.Notify.Thread.AnnounceKBUpdates.Delivery(), log)
 }
 
 // KBAnnounceInertWarning reports that notify.thread.announce_kb_updates is on
@@ -197,7 +198,7 @@ func buildKBAnnouncer(cfg *config.Config, notifier *notify.Multi, log *slog.Logg
 // still written and the human in the thread is still answered. Only the
 // broadcast is missing.
 func KBAnnounceInertWarning(cfg *config.Config, sinks int) string {
-	if !cfg.Notify.Thread.AnnounceKBUpdates {
+	if !cfg.Notify.Thread.AnnounceKBUpdates.On() {
 		return ""
 	}
 	if sinks == 0 {

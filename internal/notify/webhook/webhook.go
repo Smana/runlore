@@ -131,6 +131,12 @@ var _ providers.KBUpdateNotifier = (*Notifier)(nil)
 // It shares Deliver's endpoint, so the body carries an "event" discriminator —
 // see notify.KBUpdatePayload for why, and for why the untrusted fields go out
 // verbatim here rather than escaped.
+//
+// up.Delivery is ignored, deliberately: an HTTP endpoint has no thread to route
+// into, so a thread-routed announcement reaches it exactly as a channel-routed
+// one does. That is the fallback providers.KBDelivery documents, and this is the
+// sink it matters most for — an index or an incident tool must not stop being
+// fed because a chat destination changed.
 func (n *Notifier) DeliverKBUpdate(ctx context.Context, up providers.KBUpdate) error {
 	return n.post(ctx, notify.NewKBUpdatePayload(up))
 }

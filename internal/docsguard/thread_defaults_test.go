@@ -127,17 +127,20 @@ func TestThreadDefaultsMatchTheDocs(t *testing.T) {
 // from a literal repeated here: that is what "the default" means operationally
 // — what an operator who wrote no such key gets.
 //
-// That makes this a HALF guard, and it is worth saying so plainly rather than
-// leaving it implied. It bites in one direction only: from the DOCS. The code
-// side is structurally unfalsifiable — AnnounceKBUpdates is a plain bool with no
-// unmarshaler, so decoding "{}" can only ever yield false, and there is no edit
-// to internal/config that makes an unconfigured deployment announce. Flipping
-// the default would mean changing the field's TYPE (a *bool, or a custom
-// unmarshaler defaulting to true), which is a change nobody makes by accident
-// and which this test would then catch from the docs it disagreed with. Until
-// that day the only failure this can produce is a page stating "true", so read
-// its passing as "no page claims the wrong default", never as "the default is
-// verified false".
+// It used to be a HALF guard, biting only from the DOCS: AnnounceKBUpdates was a
+// plain bool with no unmarshaler, so decoding "{}" could only ever yield false
+// and no edit to internal/config could make an unconfigured deployment announce.
+// That is no longer true. The field is now config.AnnounceMode, which HAS a
+// custom unmarshaler and several non-boolean states, so the code side is
+// falsifiable in exactly the way the old comment said would take a type change —
+// and the type change happened. A default that resolved On() to true, by a
+// mistake in the unmarshaler or by someone deciding the empty state should
+// announce, now fails here against every page that promises otherwise.
+//
+// It reads On() rather than the raw mode for the same reason the pages state a
+// boolean: the operator-facing claim is "nothing is broadcast unless you ask",
+// which is what On() answers. Which DESTINATION a mode selects is a different
+// claim, and internal/config's own tests pin that one.
 //
 // What counts as a claim is narrower than for numbers, and deliberately so: the
 // word "default" must appear between the key (or the previous boolean in the
@@ -152,7 +155,7 @@ func TestThreadBooleanDefaultsMatchTheDocs(t *testing.T) {
 		t.Fatalf("decode an empty config: %v", err)
 	}
 	pinned := map[string]bool{
-		"announce_kb_updates": c.Notify.Thread.AnnounceKBUpdates,
+		"announce_kb_updates": c.Notify.Thread.AnnounceKBUpdates.On(),
 	}
 
 	seenIn := make(map[string]map[string]bool, len(pinned))

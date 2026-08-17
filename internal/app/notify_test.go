@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -828,21 +829,27 @@ func TestBuildThreadResponderCarriesTheChatLayer(t *testing.T) {
 func TestKBAnnounceInertWarning(t *testing.T) {
 	for _, tc := range []struct {
 		name     string
-		announce bool
+		announce config.AnnounceMode
 		capture  bool
 		sinks    int
 		wantCue  string // substring the message must carry; "" ⇒ no warning at all
 	}{
 		{name: "off, with nothing else configured either: the default warrants nothing"},
 		{name: "off, with everything else configured", sinks: 2, capture: true},
-		{name: "on, with a notifier and capture", announce: true, sinks: 1, capture: true, wantCue: ""},
-		{name: "on, with capture but no notifier", announce: true, capture: true, wantCue: "no notifier is configured"},
-		{name: "on, with a notifier but nothing capturing", announce: true, sinks: 1, wantCue: "thread_capture"},
+		{name: "explicitly off, with everything else configured", announce: config.AnnounceOff, sinks: 2, capture: true},
+		{name: "on, with a notifier and capture", announce: config.AnnounceChannel, sinks: 1, capture: true, wantCue: ""},
+		{name: "on, with capture but no notifier", announce: config.AnnounceChannel, capture: true, wantCue: "no notifier is configured"},
+		{name: "on, with a notifier but nothing capturing", announce: config.AnnounceChannel, sinks: 1, wantCue: "thread_capture"},
 		{
 			// Both ends missing: one message, and it must be the delivery one —
 			// reporting them in a fixed order keeps the line deterministic.
-			name: "on, with neither end", announce: true, wantCue: "no notifier is configured",
+			name: "on, with neither end", announce: config.AnnounceChannel, wantCue: "no notifier is configured",
 		},
+		// Routing does not change reachability: a thread-routed announcement still
+		// needs a sink and still needs a transport capturing, and an operator who
+		// wrote the new value must get the same diagnostic as one who wrote true.
+		{name: "thread-routed, with capture but no notifier", announce: config.AnnounceThread, capture: true, wantCue: "no notifier is configured"},
+		{name: "both, with a notifier but nothing capturing", announce: config.AnnounceBoth, sinks: 1, wantCue: "thread_capture"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			cfg := &config.Config{}
@@ -872,7 +879,7 @@ func TestKBAnnounceInertWarning(t *testing.T) {
 // call a working Matrix-only setup dead config.
 func TestKBAnnounceInertWarningSeesMatrixCaptureToo(t *testing.T) {
 	cfg := &config.Config{}
-	cfg.Notify.Thread.AnnounceKBUpdates = true
+	cfg.Notify.Thread.AnnounceKBUpdates = config.AnnounceChannel
 	cfg.Notify.Matrix.ThreadCapture = true
 	if got := KBAnnounceInertWarning(cfg, 1); got != "" {
 		t.Fatalf("matrix thread_capture alone must satisfy the capture end, got: %q", got)
@@ -896,7 +903,7 @@ func TestKBAnnounceInertWarningSeesMatrixCaptureToo(t *testing.T) {
 func TestBuildThreadResponderAnnouncerIsOptIn(t *testing.T) {
 	for _, tc := range []struct {
 		name     string
-		announce bool
+		announce config.AnnounceMode
 		notifier func() *notify.Multi
 		want     bool // want an announcer on the responder
 		wantWarn bool
@@ -909,19 +916,39 @@ func TestBuildThreadResponderAnnouncerIsOptIn(t *testing.T) {
 			name: "off, with no notifier at all: nothing was asked for, so nothing is said",
 		},
 		{
+			name:     "explicitly off, with a notifier configured",
+			announce: config.AnnounceOff,
+			notifier: func() *notify.Multi { return notify.NewMulti(discardLog(), &captureNotifier{}) },
+		},
+		{
 			name:     "on, with a notifier configured",
-			announce: true,
+			announce: config.AnnounceChannel,
+			notifier: func() *notify.Multi { return notify.NewMulti(discardLog(), &captureNotifier{}) },
+			want:     true,
+		},
+		{
+			// Every destination is the same switch: routing decides WHERE, never
+			// whether. A mode that built no announcer would be a key that reads as
+			// enabled and does nothing.
+			name:     "thread-routed, with a notifier configured",
+			announce: config.AnnounceThread,
+			notifier: func() *notify.Multi { return notify.NewMulti(discardLog(), &captureNotifier{}) },
+			want:     true,
+		},
+		{
+			name:     "both, with a notifier configured",
+			announce: config.AnnounceBoth,
 			notifier: func() *notify.Multi { return notify.NewMulti(discardLog(), &captureNotifier{}) },
 			want:     true,
 		},
 		{
 			name:     "on, but no notifier was built at all",
-			announce: true,
+			announce: config.AnnounceChannel,
 			wantWarn: true,
 		},
 		{
 			name:     "on, but the notifier holds no sinks",
-			announce: true,
+			announce: config.AnnounceChannel,
 			notifier: func() *notify.Multi { return notify.NewMulti(discardLog()) },
 			wantWarn: true,
 		},
@@ -952,6 +979,96 @@ func TestBuildThreadResponderAnnouncerIsOptIn(t *testing.T) {
 			if warned := strings.Contains(buf.String(), "announce_kb_updates"); warned != tc.wantWarn {
 				t.Fatalf("warned about an inert announce_kb_updates = %v, want %v; log: %s",
 					warned, tc.wantWarn, buf.String())
+			}
+		})
+	}
+}
+
+// kbSinkNotifier is a Notifier that also accepts announcements, so the fan-out
+// the builder wires actually reaches something a test can read.
+type kbSinkNotifier struct {
+	mu  sync.Mutex
+	got []providers.KBUpdate
+}
+
+func (*kbSinkNotifier) Deliver(context.Context, providers.Investigation) error { return nil }
+
+func (s *kbSinkNotifier) DeliverKBUpdate(_ context.Context, up providers.KBUpdate) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.got = append(s.got, up)
+	return nil
+}
+
+func (s *kbSinkNotifier) updates() []providers.KBUpdate {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return append([]providers.KBUpdate(nil), s.got...)
+}
+
+// TestAnnounceDestinationReachesTheSink closes the wiring gap between the key an
+// operator writes and the routing decision a notifier acts on.
+//
+// Every piece of this is unit-tested on its own: config resolves the mode to a
+// providers.KBDelivery, the announcer stamps its delivery onto the event, and
+// the notifiers route on that stamp. None of that is worth anything if the
+// builder passes a literal instead of the configured value — `thread` in the
+// file would read as enabled, log as enabled, and still post to the channel,
+// which is precisely the complaint the destination exists to answer. The only
+// thing that catches it is driving the real builder from a real config and
+// reading what arrives at the sink.
+//
+// The thread handles are asserted alongside the destination because a routing
+// instruction with no address is inert: a sink told to reply in a thread, given
+// no channel, falls back — silently, and correctly — so the destination alone
+// proves nothing about whether the announcement can ever reach a thread.
+func TestAnnounceDestinationReachesTheSink(t *testing.T) {
+	for _, tc := range []struct {
+		mode config.AnnounceMode
+		want providers.KBDelivery
+	}{
+		{mode: config.AnnounceChannel, want: providers.KBDeliverChannel},
+		{mode: config.AnnounceThread, want: providers.KBDeliverThread},
+		{mode: config.AnnounceBoth, want: providers.KBDeliverBoth},
+	} {
+		t.Run(string(tc.mode), func(t *testing.T) {
+			reg, err := thread.NewRegistry(filepath.Join(t.TempDir(), "threads.jsonl"), time.Hour, 10)
+			if err != nil {
+				t.Fatalf("NewRegistry: %v", err)
+			}
+			origin := thread.Context{Transport: "slack", Root: "111.222", Channel: "C-ORIGIN", Title: "OOM"}
+			if err := reg.Put(origin); err != nil {
+				t.Fatalf("Put: %v", err)
+			}
+
+			cfg := &config.Config{}
+			cfg.Notify.Thread.AnnounceKBUpdates = tc.mode
+			cfg.Notify.Slack.ThreadCapture = true
+			sink := &kbSinkNotifier{}
+			r := buildThreadResponder(cfg, reg, fakeThreadForge{}, nil, notify.NewMulti(discardLog(), sink), nil, discardLog())
+			if r.Announcer == nil {
+				t.Fatal("no announcer was wired; every destination is the same switch")
+			}
+
+			if _, err := r.Handle(context.Background(), origin, "alice", "<@U0BOT> note: spot reclaim, not OOM"); err != nil {
+				t.Fatalf("Handle: %v", err)
+			}
+			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			defer cancel()
+			r.Announcer.Drain(ctx)
+
+			got := sink.updates()
+			if len(got) != 1 {
+				t.Fatalf("the sink received %d announcements, want exactly 1 per landed write", len(got))
+			}
+			if got[0].Delivery != tc.want {
+				t.Errorf("announce_kb_updates: %s reached the sink as Delivery %q, want %q — the builder is not "+
+					"passing the configured destination through", tc.mode, string(got[0].Delivery), string(tc.want))
+			}
+			if got[0].Root != "111.222" || got[0].Channel != "C-ORIGIN" {
+				t.Errorf("the announcement carries root=%q channel=%q, want both handles from the thread context — "+
+					"without them every thread-routed delivery silently falls back to the channel",
+					got[0].Root, got[0].Channel)
 			}
 		})
 	}

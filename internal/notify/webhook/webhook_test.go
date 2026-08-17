@@ -295,6 +295,39 @@ func TestDeliverKBUpdatePOSTsJSON(t *testing.T) {
 	}
 }
 
+// TestDeliverKBUpdateIgnoresTheChatDestination pins that a thread-routed
+// announcement still reaches this sink, unchanged.
+//
+// An HTTP endpoint has no thread to post into, so the only two answers available
+// were "deliver it anyway" and "skip it". Skipping would mean an operator moving
+// their CHAT announcements into threads silently stopped feeding whatever this
+// URL points at — an index, a changelog, an incident tool — with nothing
+// anywhere reporting it, because delivery here is best-effort and a skipped sink
+// is indistinguishable from a quiet one. The record is not a chat message and
+// does not move with one.
+func TestDeliverKBUpdateIgnoresTheChatDestination(t *testing.T) {
+	for _, d := range []providers.KBDelivery{"", providers.KBDeliverChannel, providers.KBDeliverThread, providers.KBDeliverBoth} {
+		t.Run(string(d), func(t *testing.T) {
+			ts, body, _ := captureServer(t, http.StatusOK)
+			n := New(ts.URL)
+			if err := n.DeliverKBUpdate(context.Background(), providers.KBUpdate{
+				Transport: "slack", Root: "111.222", Channel: "C-ORIGIN", Delivery: d,
+				Route: providers.KBRouteOpenPR, PR: 99, URL: "https://github.com/o/r/pull/99",
+				Note: "a spot reclaim",
+			}); err != nil {
+				t.Fatalf("DeliverKBUpdate: %v", err)
+			}
+			var got notify.KBUpdatePayload
+			if err := json.Unmarshal(body(), &got); err != nil {
+				t.Fatalf("nothing was POSTed for delivery %q, or it did not decode: %v", string(d), err)
+			}
+			if got.Note != "a spot reclaim" || got.URL != "https://github.com/o/r/pull/99" {
+				t.Errorf("the record changed with the chat destination %q: %+v", string(d), got)
+			}
+		})
+	}
+}
+
 // TestDeliverKBUpdateIsDistinguishableFromAnInvestigation is the compatibility
 // half. Both deliveries POST to the SAME operator-configured URL, and the two
 // bodies are different shapes; a receiver written against the investigation

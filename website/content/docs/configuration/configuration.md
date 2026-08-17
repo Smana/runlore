@@ -636,11 +636,37 @@ transports), `max_note_bytes` (default **8192**, one human message's input), `re
 
 The same block holds the one key that is a switch rather than a ceiling:
 `announce_kb_updates` (default **false**). With it on, every knowledge write that lands is
-also announced to each configured notifier's own channel or room — never back into the thread
-that produced it, which already received the reply — so one write produces both a thread reply
-and a channel post. The announcement quotes the note, so a note written in one thread reaches
-every sink you have configured; that is why it is opt-in. See
-[Reviewing knowledge → Thread capture]({{< relref "/docs/concepts/reviewing-knowledge.md" >}})
+also announced to your notifiers — naming the pull request, the entry, who wrote the note and
+which chat system they typed it in, and quoting the note itself. The announcement carries note
+content, so a note written in one thread reaches every sink you have configured; that is why it
+is opt-in.
+
+It takes a boolean or a destination name, and the two spellings you may already have keep their
+meaning exactly:
+
+| Value | Where the announcement lands |
+|---|---|
+| `false` (or omitted) | nowhere — no announcement |
+| `true` | identical to `channel` |
+| `channel` | each notifier's own channel or room, never the thread |
+| `thread` | into the thread the note was typed in, on that transport; every other sink still gets its channel |
+| `both` | the originating thread **and** every sink's channel |
+
+`channel` is the right answer when people watch the channel but not every thread, and it is what
+`true` has always done. `thread` is for a **single-transport** deployment: there the thread
+already lives in the channel the announcement would post to, so a channel post restates what the
+thread just said — an echo rather than a second audience. A typo (`treads`, `chanel`) fails
+startup naming the accepted values, rather than quietly falling back.
+
+**A sink that is not the originating transport falls back to channel level.** Only one sink can
+reply into a given thread: a Matrix room cannot reply into a Slack thread, an incoming-webhook
+Slack cannot reply into any thread, and a `webhook` endpoint has no thread at all. Those sinks are
+not skipped — the echo `thread` removes exists only where the thread and the channel are the same
+place, and a room that never saw the thread has no other way to learn the knowledge base moved.
+The same fallback covers a thread RunLore can no longer address (a context rebuilt after a
+restart): the write already landed, so it is announced at channel level rather than dropped.
+
+See [Reviewing knowledge → Thread capture]({{< relref "/docs/concepts/reviewing-knowledge.md" >}})
 and the [Slack]({{< relref "/docs/integrations/notifications/slack.md" >}}) /
 [Matrix]({{< relref "/docs/integrations/notifications/matrix.md" >}}) pages.
 

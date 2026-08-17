@@ -4,6 +4,7 @@ package notify
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 
@@ -170,36 +171,90 @@ func slackKBUpdateMessage(up providers.KBUpdate) map[string]any {
 // supported delivery target that lacked the method would turn
 // notify.thread.announce_kb_updates into a switch that silently does nothing
 // for every operator on it.
+//
+// It ignores up.Delivery, and that is the documented fallback rather than an
+// omission: an incoming webhook posts to the channel the URL was issued for and
+// has no thread_ts to set, so it is one of the sinks providers.KBDelivery says
+// receives a thread-routed announcement at channel level instead of not at all.
 func (s *Slack) DeliverKBUpdate(ctx context.Context, up providers.KBUpdate) error {
 	return s.post(ctx, slackKBUpdateMessage(up))
 }
 
-// DeliverKBUpdate announces a landed knowledge-base write to the configured
-// channel (providers.KBUpdateNotifier).
+// kbAnnounceTargets decides where ONE sink delivers ONE announcement, given the
+// transport that sink speaks. It is the whole of the routing rule
+// providers.KBDelivery documents, written once so Slack and Matrix cannot answer
+// it differently.
 //
-// It posts to the CHANNEL, never into the originating thread: the thread
-// already received the direct reply to the person who typed, and the whole
-// point of the announcement is reaching the people who were not reading it. So
-// no thread_ts is set here, deliberately — see ReplyInThread for the other
-// destination.
-func (s *SlackBot) DeliverKBUpdate(ctx context.Context, up providers.KBUpdate) error {
-	_, err := s.post(ctx, slackKBUpdateMessage(up))
-	return err
+// A sink may deliver into the thread only when all three hold: the delivery asks
+// for it, the sink speaks the transport the note was typed in, and BOTH thread
+// handles arrived. A root without a channel is not a thread a reply can reach —
+// Slack's chat.postMessage needs the channel, and Matrix's send needs the room —
+// so a half-handle is treated exactly like no handle: fall back rather than post
+// a threaded message into the wrong place or none at all.
+//
+// toChannel is true whenever the thread route was not taken, which is what makes
+// the fallback total: every announcement lands somewhere. The one case where
+// both are true is KBDeliverBoth on the originating transport, which is what it
+// asks for.
+func kbAnnounceTargets(up providers.KBUpdate, transport string) (toThread, toChannel bool) {
+	toThread = up.Delivery.IntoThread() && up.Transport == transport && up.Root != "" && up.Channel != ""
+	return toThread, !toThread || up.Delivery == providers.KBDeliverBoth
 }
 
-// DeliverKBUpdate announces a landed knowledge-base write to the configured
-// room (providers.KBUpdateNotifier), as a plain m.notice with no m.thread
-// relation — see SlackBot.DeliverKBUpdate for why the destination is the room
-// rather than the thread.
+// DeliverKBUpdate announces a landed knowledge-base write
+// (providers.KBUpdateNotifier), to the channel, into the originating thread, or
+// to both — see kbAnnounceTargets.
 //
-// The body goes through thread.RenderReply with escapeMatrixReply: a plain body
-// has no markup to inject, but .m.rule.roomnotif matches "@room" in it and
+// The default destination is still the CHANNEL and still for the original
+// reason: the thread already received the direct reply to the person who typed,
+// and the point of the announcement is reaching the people who were not reading
+// it. What changed is that with ONE transport configured those are the same
+// people, because the thread lives in that very channel — so an operator can now
+// route the announcement into the thread instead of restating it beside it.
+//
+// The threaded post goes through ReplyInThread rather than a second local
+// render: that is the method that already escapes for mrkdwn, bounds at the
+// transport's ceiling and targets the passed channel, and a threaded
+// announcement must be neutralised exactly as a threaded reply is.
+//
+// Errors from the two posts are joined rather than short-circuited. A failure to
+// reach the thread must not suppress the channel half of KBDeliverBoth, and the
+// announcer swallows the result either way — the write is already on the forge.
+func (s *SlackBot) DeliverKBUpdate(ctx context.Context, up providers.KBUpdate) error {
+	toThread, toChannel := kbAnnounceTargets(up, s.Transport())
+	var errs []error
+	if toThread {
+		errs = append(errs, s.ReplyInThread(ctx, up.Root, up.Channel, kbUpdateAnnouncement(up)))
+	}
+	if toChannel {
+		_, err := s.post(ctx, slackKBUpdateMessage(up))
+		errs = append(errs, err)
+	}
+	return errors.Join(errs...)
+}
+
+// DeliverKBUpdate announces a landed knowledge-base write
+// (providers.KBUpdateNotifier), to the configured room as a plain m.notice with
+// no m.thread relation, into the originating thread via ReplyInThread's MSC3440
+// relation, or both — see SlackBot.DeliverKBUpdate and kbAnnounceTargets.
+//
+// The room body goes through thread.RenderReply with escapeMatrixReply: a plain
+// body has no markup to inject, but .m.rule.roomnotif matches "@room" in it and
 // notifies every member of the room, which model-authored note text can reach
-// the same way it reaches Slack's <!channel>.
+// the same way it reaches Slack's <!channel>. ReplyInThread applies the same
+// escaper to the threaded copy.
 func (m *Matrix) DeliverKBUpdate(ctx context.Context, up providers.KBUpdate) error {
-	_, err := m.send(ctx, m.roomID, map[string]any{
-		"msgtype": "m.notice",
-		"body":    boundPostedReply(thread.RenderReply(kbUpdateAnnouncement(up), escapeMatrixReply), matrixReplyBytes),
-	})
-	return err
+	toThread, toRoom := kbAnnounceTargets(up, m.Transport())
+	var errs []error
+	if toThread {
+		errs = append(errs, m.ReplyInThread(ctx, up.Root, up.Channel, kbUpdateAnnouncement(up)))
+	}
+	if toRoom {
+		_, err := m.send(ctx, m.roomID, map[string]any{
+			"msgtype": "m.notice",
+			"body":    boundPostedReply(thread.RenderReply(kbUpdateAnnouncement(up), escapeMatrixReply), matrixReplyBytes),
+		})
+		errs = append(errs, err)
+	}
+	return errors.Join(errs...)
 }
