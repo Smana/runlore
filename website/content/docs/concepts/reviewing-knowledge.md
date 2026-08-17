@@ -53,6 +53,14 @@ RunLore files it against that investigation's KB pull request, or opens a
 standalone note PR when there is none, and replies with a link to what it wrote.
 Your words are recorded verbatim, attributed to you.
 
+Notes accumulate. On the investigation's own KB pull request each note is a
+comment — review feedback on a draft somebody else wrote, which a human folds in
+at merge time. On a standalone note PR, where the entry is nothing but your
+notes, every note after the first is **appended to the entry itself**, so a
+conversation that refines an answer — the cause, then the proof, then the fix —
+merges as one entry holding all of it rather than only the opening statement.
+The reply tells you which of the two happened.
+
 Optionally, with a `model.chat` block configured, plain questions in the thread are
 answered too — from the investigation's own evidence — and RunLore proposes a note
 itself when your message contained something durable. A model-drafted note is
