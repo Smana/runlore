@@ -23,3 +23,11 @@ eval/fixtures/
 website/public/
 website/resources/
 website/.hugo_build.lock
+
+# Subagent-driven-development scratch (scope notes, review findings, raw diffs).
+# Session-local working notes, not a record: what survives a task is the PR body,
+# the commit message and dev/superpowers/plans/ — which IS tracked, deliberately,
+# and must keep being tracked. Ignored because it was neither tracked nor ignored,
+# so a routine `git add -A` swept seven files including a 228 KB review diff into
+# a feature branch (caught in #485 before it merged).
+/.superpowers/
