@@ -17,6 +17,11 @@ import (
 // node), not just the downstream symptom.
 type GitOpsTreeTool struct {
 	Inspector providers.GitOpsInspector
+	// Engine bounds the kinds this tool advertises and accepts, exactly as on
+	// GitOpsStatusTool. It matters MORE here: a missing root node renders as
+	// "NOT FOUND  ← root", which nominates the absence as the cause outright, so an
+	// out-of-scope kind does not merely mislead — it hands back a root cause.
+	Engine string
 }
 
 // Name returns the tool name.
@@ -27,19 +32,24 @@ func (t GitOpsTreeTool) Description() string {
 	return "Walk a GitOps resource's dependency graph (a Flux resource's dependsOn/sourceRef, or an " +
 		"Argo CD Application's managed-resource tree) and render it with each node's Ready/health state. " +
 		"Use it on a failing resource to find the ROOT cause — the first not-Ready/Degraded or NOT FOUND " +
-		"node — instead of the downstream symptom."
+		"node — instead of the downstream symptom. GitOps objects ONLY, not arbitrary Kubernetes " +
+		"resources: " + gitopsKindProse(t.Engine)
 }
 
 // Schema returns the JSON schema for the arguments.
-func (t GitOpsTreeTool) Schema() string {
-	return `{"type":"object","properties":{"kind":{"type":"string"},"name":{"type":"string"},"namespace":{"type":"string"}},"required":["kind","name","namespace"]}`
-}
+func (t GitOpsTreeTool) Schema() string { return gitopsKindSchema(t.Engine) }
 
 // Call walks the dependency tree and renders it.
 func (t GitOpsTreeTool) Call(ctx context.Context, args string) (string, error) {
 	var in struct{ Kind, Name, Namespace string }
 	if err := json.Unmarshal([]byte(args), &in); err != nil {
 		return "", fmt.Errorf("parse args: %w", err)
+	}
+	// Refuse an out-of-scope kind before the walk, for the same reason as
+	// gitops_resource_status — and more urgently, because a missing root renders as
+	// "NOT FOUND  ← root".
+	if !gitopsKindSupported(t.Engine, in.Kind) {
+		return gitopsUnsupportedKind(t.Engine, in.Kind), nil
 	}
 	root, err := t.Inspector.DependencyTree(ctx, providers.Workload{Kind: in.Kind, Name: in.Name, Namespace: in.Namespace})
 	if err != nil {

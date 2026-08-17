@@ -55,10 +55,21 @@ func BuildModelAndTools(ctx context.Context, cfg *config.Config, gp providers.Gi
 	var tools []investigate.Tool
 	if gp != nil {
 		tools = append(tools, investigate.WhatChangedTool{GitOps: gp})
-		// Deep read-only Flux introspection (status/events + dependency tree), when
-		// the GitOps provider supports it (Flux does).
+		// Deep read-only GitOps introspection (status/events + dependency tree), when
+		// the GitOps provider supports it (both Flux and Argo CD do).
+		//
+		// Engine is passed so each tool advertises ONLY the kinds the configured engine
+		// can own. Same reasoning as clusterTools gating controller_logs on Flux: a kind
+		// the engine cannot own is answerable only with a MISLEADING negative, and a model
+		// reads "HelmRelease not found" on an Argo CD cluster as "the workload is not
+		// deployed" rather than "that question has no possible answer here". See
+		// investigate.GitOpsKinds for the live case this comes from.
 		if insp, ok := gp.(providers.GitOpsInspector); ok {
-			tools = append(tools, investigate.GitOpsStatusTool{Inspector: insp}, investigate.GitOpsTreeTool{Inspector: insp})
+			engine := GitopsEngine(cfg)
+			tools = append(tools,
+				investigate.GitOpsStatusTool{Inspector: insp, Engine: engine},
+				investigate.GitOpsTreeTool{Inspector: insp, Engine: engine},
+			)
 		}
 	}
 	var recall *investigate.Recall
