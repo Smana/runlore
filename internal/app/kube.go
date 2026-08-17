@@ -5,9 +5,15 @@ package app
 import (
 	"log/slog"
 
+	"k8s.io/client-go/discovery"
+	"k8s.io/client-go/discovery/cached/memory"
+	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/clientcmd"
+
+	"github.com/Smana/runlore/internal/providers"
+	"github.com/Smana/runlore/internal/providers/cluster"
 )
 
 // KubeClientset builds a read-only clientset for pod-log access, or nil when no
@@ -33,4 +39,40 @@ func RestConfig() (*rest.Config, error) {
 	}
 	rules := clientcmd.NewDefaultClientConfigLoadingRules()
 	return clientcmd.NewNonInteractiveDeferredLoadingClientConfig(rules, &clientcmd.ConfigOverrides{}).ClientConfig()
+}
+
+// BuildResourceSpecReader builds the read-only arbitrary-object spec reader, or nil when
+// the cluster is unreachable or discovery is unavailable.
+//
+// It needs BOTH a dynamic client and a RESTMapper: the typed clientset cannot read a CRD
+// at all, and without discovery a kind can only be resolved from a hardcoded map — which
+// is exactly the limitation that makes the Flux/ArgoCD inspectors blind to every kind they
+// were not compiled with.
+//
+// Returning nil rather than a half-working reader is deliberate. A tool that cannot answer
+// should not be registered, for the same reason controller_logs is gated on the engine: an
+// unanswerable question gets answered with a misleading negative, and the model reasons
+// from it.
+//
+// Discovery is memoised and lazy: the round trip happens on first use rather than at
+// startup, so an unreachable API server delays a tool call instead of blocking boot.
+func BuildResourceSpecReader(log *slog.Logger) providers.ResourceSpecReader {
+	restCfg, err := RestConfig()
+	if err != nil {
+		return nil
+	}
+	dc, err := dynamic.NewForConfig(restCfg)
+	if err != nil {
+		log.Warn("dynamic client unavailable; resource_spec disabled", "err", err)
+		return nil
+	}
+	disco, err := discovery.NewDiscoveryClientForConfig(restCfg)
+	if err != nil {
+		log.Warn("discovery client unavailable; resource_spec disabled", "err", err)
+		return nil
+	}
+	// Memoised discovery: resolving a Kind costs one round trip the first time and nothing
+	// after, and Invalidate() on a miss means a CRD installed after RunLore started is
+	// still readable without a restart.
+	return cluster.NewSpecReader(dc, memory.NewMemCacheClient(disco))
 }

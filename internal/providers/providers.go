@@ -241,6 +241,54 @@ type GitOpsInspector interface {
 	DependencyTree(ctx context.Context, w Workload) (DepNode, error)
 }
 
+// ResourceSpecOutcome distinguishes the four ways a spec read can end. They are
+// SEPARATE values because conflating them is what made gitops_resource_status
+// dangerous: it answered "the object genuinely does not exist" for a kind it never
+// supported, and a model reasoned from that as evidence of absence. Only
+// ResourceAbsent is evidence about the cluster's contents.
+type ResourceSpecOutcome string
+
+// The outcomes of a resource spec read.
+const (
+	ResourceFound       ResourceSpecOutcome = "found"        // the object was read
+	ResourceAbsent      ResourceSpecOutcome = "absent"       // the server says it does not exist
+	ResourceForbidden   ResourceSpecOutcome = "forbidden"    // RBAC denied the read; says NOTHING about existence
+	ResourceKindUnknown ResourceSpecOutcome = "kind_unknown" // this cluster serves no such kind; says NOTHING about existence
+)
+
+// ResourceSpec is one Kubernetes object's desired and observed state, as YAML.
+//
+// Spec and Status are rendered rather than typed because the point is to read
+// ARBITRARY kinds — including CRDs the binary has never heard of — so there is no
+// Go type to unmarshal into.
+type ResourceSpec struct {
+	Workload Workload
+	Outcome  ResourceSpecOutcome
+	// APIVersion the object was actually read at, so a reader can tell which of
+	// several served versions answered.
+	APIVersion string
+	Spec       string // .spec as YAML ("" when the kind has no spec, e.g. ConfigMap)
+	Status     string // .status as YAML ("" when absent)
+	// Detail carries the server's own message for a non-found outcome, so a denial
+	// reads as a denial rather than being flattened into "not found".
+	Detail string
+}
+
+// ResourceSpecReader reads one object's spec/status by kind, name and namespace.
+//
+// It exists because every other reader here answers "what is happening" while a large
+// class of incidents is "the spec says X and reality is Y": a Service selector matching
+// no pods, a scrape CR targeting an absent namespace, a NetworkPolicy with no egress to
+// kube-dns, an HPA on a metric that never reports. Those were previously only inferable
+// from consequences — see the investigation that concluded a VMServiceScrape had been
+// deleted when its namespaceSelector simply pointed at a namespace that did not exist.
+//
+// Implementations MUST refuse Secret outright and MUST report RBAC denials as
+// ResourceForbidden rather than as absence.
+type ResourceSpecReader interface {
+	ResourceSpec(ctx context.Context, w Workload) (ResourceSpec, error)
+}
+
 // MetricsProvider abstracts VictoriaMetrics/Prometheus (both speak PromQL).
 //
 // LabelValues is metric/label discovery: it answers "what exists?" so the agent
