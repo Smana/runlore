@@ -112,7 +112,14 @@ func ThreadCaptureDeliverable(cfg *config.Config, log *slog.Logger) bool {
 // built once by buildThreadChat and carried on the same single responder for
 // the same reason ForgeWrites is: its per-hour Budget must bound token spend
 // system-wide, not once per transport.
-func buildThreadResponder(cfg *config.Config, threadRegistry *thread.Registry, forge thread.Forge, chat *thread.Chat, metrics *telemetry.Metrics, log *slog.Logger) *thread.Responder {
+//
+// notifier is the process's fan-out sink, and it is here for the announcement
+// half: with notify.thread.announce_kb_updates on, a landed knowledge write is
+// broadcast to every configured notifier's OWN channel or room (see
+// buildKBAnnouncer), never back into the thread the reply already went to. It
+// may be nil — the log-only path builds no notifier at all — which is one of
+// the two ways announcements end up off.
+func buildThreadResponder(cfg *config.Config, threadRegistry *thread.Registry, forge thread.Forge, chat *thread.Chat, notifier *notify.Multi, metrics *telemetry.Metrics, log *slog.Logger) *thread.Responder {
 	return &thread.Responder{
 		Forge:             forge,
 		Registry:          threadRegistry,
@@ -121,9 +128,90 @@ func buildThreadResponder(cfg *config.Config, threadRegistry *thread.Registry, f
 		MaxNoteBytes:      cfg.Notify.Thread.EffectiveMaxNoteBytes(),
 		ForgeRepo:         forgeRepoRef(cfg),
 		Chat:              chat,
+		Announcer:         buildKBAnnouncer(cfg, notifier, log),
 		Metrics:           metrics,
 		Log:               log,
 	}
+}
+
+// buildKBAnnouncer assembles the knowledge-base announcer, or returns nil when
+// announcements are off — either because notify.thread.announce_kb_updates was
+// not turned on (the default) or because there is no sink to deliver to.
+//
+// nil is the feature's off switch (thread.Responder.Announcer is nil-safe), and
+// the two conditions collapse into that ONE value deliberately: an announcer
+// wired to a notifier holding no sinks would hold a dispatcher, its slots and
+// its goroutines to deliver every announcement to nobody, which is a live
+// feature by every observable signal and a no-op in fact.
+//
+// The nil check on notifier before handing it over is not incidental. It is a
+// concrete *notify.Multi and thread.NewKBAnnouncer takes an interface: passing a
+// nil pointer through would produce a NON-nil providers.KBUpdateNotifier holding
+// a nil Multi, so "announcements are off" and "announcements are on, delivering
+// nowhere" would become indistinguishable — the same typed-nil trap
+// buildThreadChat documents for Chat.Catalog.
+//
+// The Info line states the capability check rather than claiming delivery:
+// notify.Multi announces only to sinks implementing providers.KBUpdateNotifier
+// and silently skips the rest, so the number of CONFIGURED notifiers is an upper
+// bound on how many will actually render an announcement, not a promise.
+func buildKBAnnouncer(cfg *config.Config, notifier *notify.Multi, log *slog.Logger) *thread.KBAnnouncer {
+	sinks := 0
+	if notifier != nil {
+		sinks = notifier.Len()
+	}
+	if msg := KBAnnounceInertWarning(cfg, sinks); msg != "" {
+		log.Warn(msg)
+	}
+	if !cfg.Notify.Thread.AnnounceKBUpdates || sinks == 0 {
+		return nil
+	}
+	log.Info("thread knowledge-base announcements enabled",
+		"notifiers", sinks,
+		"note", "each configured notifier that implements the announcement capability receives them, in its own channel or room; the thread reply is unchanged")
+	return thread.NewKBAnnouncer(notifier, log)
+}
+
+// KBAnnounceInertWarning reports that notify.thread.announce_kb_updates is on
+// while nothing can act on it, naming which end is missing; "" when the key is
+// off or the feature can actually fire.
+//
+// Every dependency on this path is nil-safe by design — a nil sink means
+// announcements are off, and nothing anywhere errors — so both failures are
+// completely silent today. Startup must not stay silent about a feature that was
+// explicitly asked for and cannot fire.
+//
+// The two ends the announcement needs are checked separately because the fix
+// differs. Delivery: no notifier was built (none configured, or the only one's
+// credential resolved empty at runtime and left Multi with nothing in it), so
+// every announcement goes to nobody. Production: no transport captures knowledge
+// from a thread, so no write ever happens to announce — the same reachability
+// gap ChatWithoutCaptureWarning reports for the chat layer, on the feature that
+// sits one hop further along the same path. One message at a time: they have
+// different remedies, and a deployment with both is a deployment where the key
+// was set before anything else was.
+//
+// A warning rather than a Validate error, for the same reason
+// ChatWithoutCaptureWarning is one: the operator may be staging the rest of the
+// configuration, and nothing else is degraded — with capture on, the note is
+// still written and the human in the thread is still answered. Only the
+// broadcast is missing.
+func KBAnnounceInertWarning(cfg *config.Config, sinks int) string {
+	if !cfg.Notify.Thread.AnnounceKBUpdates {
+		return ""
+	}
+	if sinks == 0 {
+		return "notify.thread.announce_kb_updates is enabled but no notifier is configured, so a knowledge-base " +
+			"write is announced to nobody: the note is still written and the thread still gets its reply, but " +
+			"nothing is broadcast — configure notify.slack / notify.matrix (or another registered notifier), or " +
+			"turn the key off"
+	}
+	if !cfg.Notify.Slack.ThreadCapture && !cfg.Notify.Matrix.ThreadCapture {
+		return "notify.thread.announce_kb_updates is enabled but neither notify.slack.thread_capture nor " +
+			"notify.matrix.thread_capture is: no thread can write to the knowledge base, so there is never " +
+			"anything to announce — enable capture on a transport, or this is dead config"
+	}
+	return ""
 }
 
 // forgeRepoRef is the WEB identity of the repository RunLore curates into —

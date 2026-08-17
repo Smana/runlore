@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"strings"
 	"testing"
 	"time"
 
@@ -245,5 +246,141 @@ func TestBuildRegisteredFromExtra(t *testing.T) {
 	}
 	if m2.Len() != 0 {
 		t.Errorf("expected 0 notifiers when env is unset, got %d", m2.Len())
+	}
+}
+
+// TestDeliverKBUpdatePOSTsJSON pins the webhook notifier's deliberate answer to
+// the KB-update capability: it implements it, and it sends the WHOLE record.
+//
+// This is the sink the event was shaped for. providers.KBUpdate carries the note
+// at the length it was written — up to max_note_bytes — precisely because a
+// programmatic receiver wants the record rather than a chat-sized quote, and
+// bounding what is RENDERED is a chat transport's job. So no preview ceiling
+// applies here, and the full note is asserted to arrive.
+func TestDeliverKBUpdatePOSTsJSON(t *testing.T) {
+	ts, body, ct := captureServer(t, http.StatusOK)
+
+	note := strings.Repeat("the registry PVC filled up. ", 200) // far past any chat preview
+	up := providers.KBUpdate{
+		Transport: "slack",
+		Root:      "111.222",
+		Route:     providers.KBRouteOpenPR,
+		PR:        99,
+		URL:       "https://github.com/o/r/pull/99",
+		Title:     "Operator note: HarborDown",
+		Author:    "sre-jane",
+		Note:      note,
+		At:        time.Date(2026, 8, 16, 9, 0, 0, 0, time.UTC),
+	}
+
+	n := New(ts.URL)
+	if err := n.DeliverKBUpdate(context.Background(), up); err != nil {
+		t.Fatalf("DeliverKBUpdate: %v", err)
+	}
+	if got := ct(); got != "application/json" {
+		t.Errorf("Content-Type = %q, want application/json", got)
+	}
+
+	var got notify.KBUpdatePayload
+	if err := json.Unmarshal(body(), &got); err != nil {
+		t.Fatalf("decode posted body: %v\n%s", err, body())
+	}
+	want := notify.KBUpdatePayload{
+		Event: "kb_update", Transport: "slack", Root: "111.222", Route: "open_pr",
+		PR: 99, URL: "https://github.com/o/r/pull/99", Title: "Operator note: HarborDown",
+		Author: "sre-jane", Note: note, At: "2026-08-16T09:00:00Z",
+	}
+	if got != want {
+		t.Errorf("payload =\n%+v\nwant\n%+v", got, want)
+	}
+}
+
+// TestDeliverKBUpdateIsDistinguishableFromAnInvestigation is the compatibility
+// half. Both deliveries POST to the SAME operator-configured URL, and the two
+// bodies are different shapes; a receiver written against the investigation
+// payload would otherwise decode a KB update into a zero-valued investigation
+// and report an empty finding. The "event" discriminator is what lets it tell
+// them apart — absent on the investigation payload, which keeps its original
+// wire format byte for byte.
+func TestDeliverKBUpdateIsDistinguishableFromAnInvestigation(t *testing.T) {
+	ts, body, _ := captureServer(t, http.StatusOK)
+	n := New(ts.URL)
+
+	if err := n.Deliver(context.Background(), providers.Investigation{Title: "X"}); err != nil {
+		t.Fatalf("Deliver: %v", err)
+	}
+	var inv map[string]any
+	if err := json.Unmarshal(body(), &inv); err != nil {
+		t.Fatalf("decode investigation body: %v", err)
+	}
+	if _, ok := inv["event"]; ok {
+		t.Errorf(`the investigation payload grew an "event" key — its wire format is what external consumers parse: %s`, body())
+	}
+
+	if err := n.DeliverKBUpdate(context.Background(), providers.KBUpdate{Route: providers.KBRouteComment}); err != nil {
+		t.Fatalf("DeliverKBUpdate: %v", err)
+	}
+	var upd map[string]any
+	if err := json.Unmarshal(body(), &upd); err != nil {
+		t.Fatalf("decode kb-update body: %v", err)
+	}
+	if upd["event"] != "kb_update" {
+		t.Errorf(`kb-update body must carry event="kb_update" so a receiver can tell the two apart: %s`, body())
+	}
+}
+
+// TestDeliverKBUpdateEscapesForJSONNotForChat is the escaping question this sink
+// answers differently from Slack and Matrix. The untrusted fields still leave
+// the network — that is what a webhook is for — but the hazard is a broken or
+// injected JSON body, not chat markup, so encoding/json is the whole defence
+// and the values must arrive byte-identical. Applying a chat escaper here would
+// corrupt the record the receiver is being sent.
+func TestDeliverKBUpdateEscapesForJSONNotForChat(t *testing.T) {
+	ts, body, _ := captureServer(t, http.StatusOK)
+	hostile := "\"},{\"injected\":true} <!channel> @room\nsecond line\ttab"
+
+	n := New(ts.URL)
+	if err := n.DeliverKBUpdate(context.Background(), providers.KBUpdate{
+		Route: providers.KBRouteOpenPR, Note: hostile, Title: hostile, Author: hostile,
+		URL: hostile, Root: hostile,
+	}); err != nil {
+		t.Fatalf("DeliverKBUpdate: %v", err)
+	}
+	var got struct {
+		notify.KBUpdatePayload
+		Injected bool `json:"injected"`
+	}
+	if err := json.Unmarshal(body(), &got); err != nil {
+		t.Fatalf("the posted body is not valid JSON — an untrusted field broke out of its string: %v\n%s", err, body())
+	}
+	for name, val := range map[string]string{"note": got.Note, "title": got.Title, "author": got.Author, "url": got.URL, "root": got.Root} {
+		if val != hostile {
+			t.Errorf("%s arrived as %q, want the record verbatim — a chat escaper here would corrupt what the receiver is sent", name, val)
+		}
+	}
+	if got.Injected {
+		t.Errorf("an untrusted field injected a sibling JSON key: %s", body())
+	}
+}
+
+// TestDeliverKBUpdateReportsHTTPFailure keeps the sink honest about its own
+// errors. notify.Multi is what swallows them (a broadcast must never report a
+// write that landed as failed); a sink that swallowed them itself would leave
+// nothing to log.
+func TestDeliverKBUpdateReportsHTTPFailure(t *testing.T) {
+	ts, _, _ := captureServer(t, http.StatusInternalServerError)
+	n := New(ts.URL)
+	if err := n.DeliverKBUpdate(context.Background(), providers.KBUpdate{Route: providers.KBRouteOpenPR}); err == nil {
+		t.Error("a non-2xx response must be reported, not swallowed")
+	}
+}
+
+// TestWebhookImplementsTheKBUpdateCapability states the choice this package
+// makes, so it is a decision rather than an omission: an unimplemented
+// capability is a SILENT skip in notify.Multi.
+func TestWebhookImplementsTheKBUpdateCapability(t *testing.T) {
+	var n providers.Notifier = New("https://example.invalid/hook")
+	if _, ok := n.(providers.KBUpdateNotifier); !ok {
+		t.Error("the webhook notifier must implement providers.KBUpdateNotifier — it is the sink the full-length record exists for")
 	}
 }

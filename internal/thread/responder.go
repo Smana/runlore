@@ -17,6 +17,7 @@ import (
 
 	"github.com/Smana/runlore/internal/providers"
 	"github.com/Smana/runlore/internal/ratelimit"
+	"github.com/Smana/runlore/internal/redact"
 	"github.com/Smana/runlore/internal/telemetry"
 )
 
@@ -166,7 +167,263 @@ type Responder struct {
 	// and must still be bounded on tokens; a channel whose every message
 	// proposes a note spends both.
 	Chat *Chat
+	// Announcer broadcasts a landed knowledge write to every configured
+	// notifier, so a KB update reaches people who were not reading the thread
+	// it came from. nil means announcements are off — the default, and the
+	// same nil-safe contract Metrics, Log and Chat above follow.
+	//
+	// It is a distinct DESTINATION, not a second copy of the thread reply: the
+	// reply acknowledges the person who typed, in their thread, and this goes
+	// to each notifier's own configured channel. See KBAnnouncer.
+	Announcer *KBAnnouncer
 }
+
+// Announcement bounds. Both are properties of the delivery, not of the write:
+// a KBUpdate is a small struct handed to notifiers that each make one chat or
+// HTTP round-trip, so the pool is narrow and the deadline is a network deadline.
+const (
+	// announceSlots bounds concurrent deliveries. Deliberately much smaller
+	// than the mention pools (16, see internal/server.maxConcurrentMentions):
+	// those hold a forge round-trip that a human is waiting on, and this holds
+	// an announcement nobody is. It is a concurrency bound and back-pressure,
+	// NOT the rate ceiling — see KBAnnouncer for where that comes from.
+	announceSlots = 4
+	// announceTimeout bounds one fan-out. notify.Multi delivers to every
+	// configured sink in sequence, each on its own HTTP client timeout, so this
+	// is sized for a handful of degraded sinks rather than for one call. Past
+	// it the delivery is abandoned: the entry is already on the forge and the
+	// human already has their reply, so a wedged sink must release its slot
+	// rather than hold it against the next write.
+	announceTimeout = 2 * time.Minute
+)
+
+// KBAnnouncer delivers KBUpdate announcements for writes that ALREADY LANDED
+// on the forge.
+//
+// # Detached, deliberately
+//
+// Delivery runs on a bounded Dispatcher rather than inline on the reply path,
+// and the reason is the "blocks" half of best-effort rather than the "errors"
+// half. Swallowing an error would be enough to keep a failing sink from
+// changing what the human is told; it would NOT keep a slow one from changing
+// when they are told it. A sink here is notify.Multi fanning out to Slack,
+// Matrix and any webhook in sequence, each on its own HTTP timeout — inline,
+// that latency lands squarely between the forge accepting the note and the
+// human learning it was accepted, on a path whose whole purpose is that the
+// human is never left in silence about a write that happened. Worse, the
+// mention handler that called this is itself already detached under a deadline
+// (see internal/server.mentionHandlerTimeout), so a slow fan-out does not just
+// delay the reply, it can consume the budget the reply needed and lose it.
+//
+// The Dispatcher, rather than a bare goroutine, is what makes detached
+// accountable: a fixed slot count, a per-delivery deadline, panic recovery, and
+// a Drain so shutdown waits for what is in flight instead of dropping it. It is
+// the pattern this package already uses for exactly this shape of work.
+//
+// # Rate, and why there is no second ceiling
+//
+// Verified against the code rather than assumed. Responder.write checks
+// ForgeWrites ONCE at its top, upstream of both routes; the only two *KBWrite
+// values it ever returns are constructed after that check; record() is its only
+// caller and announces only when that pointer is non-nil. So announcements are
+// 1:1 with LANDED forge writes and inherit their ceiling — 20/hour by default —
+// with no path that can announce without passing it.
+//
+// The inheritance is exact, including its limit: with ForgeWrites nil
+// (unlimited) announcements are unbounded too, because forge writes are. That
+// is the right coupling rather than a gap. A second, tighter ceiling here would
+// drop announcements for writes that DID happen, which is precisely the
+// "an operation that did not happen reporting as though it did" family this
+// feature exists to close, reflected: an operation that DID happen going
+// unreported. What a burst does hit instead is announceSlots, which refuses and
+// logs rather than queueing without bound.
+//
+// # Payload
+//
+// The event carries the note at the length it was WRITTEN (up to MaxNoteBytes),
+// not the 512-byte thread preview: a webhook sink wants the record, and only a
+// chat sink needs a chat-sized quote. Bounding what is RENDERED is the
+// transport's job, where the transport's own limit lives — the same division
+// taken for the outgoing thread reply.
+type KBAnnouncer struct {
+	sink providers.KBUpdateNotifier
+	disp *Dispatcher
+	log  *slog.Logger
+}
+
+// NewKBAnnouncer returns an announcer delivering to sink, or nil when there is
+// no sink.
+//
+// A nil sink yielding a nil announcer is what keeps "announcements are off" a
+// single value: there is no state in which a Responder holds an announcer with
+// nowhere to deliver, and no state in which it holds a sink with no bound
+// around it. Every method below is nil-safe, so a caller never needs its own
+// check before delivering or draining.
+func NewKBAnnouncer(sink providers.KBUpdateNotifier, log *slog.Logger) *KBAnnouncer {
+	if sink == nil {
+		return nil
+	}
+	if log == nil {
+		log = slog.Default()
+	}
+	return &KBAnnouncer{sink: sink, disp: NewDispatcher(announceSlots, announceTimeout, log), log: log}
+}
+
+// deliver schedules one announcement and returns immediately. Every failure is
+// a log line and nothing more: the write it describes is already on the forge,
+// the human has already been told, and there is nothing here to roll back.
+func (a *KBAnnouncer) deliver(ctx context.Context, up providers.KBUpdate) {
+	if a == nil {
+		return
+	}
+	if !a.disp.Go(ctx, func(ctx context.Context) {
+		if err := a.sink.DeliverKBUpdate(ctx, up); err != nil {
+			a.log.Warn("thread: knowledge-base announcement failed (best-effort)", "url", up.URL, "route", string(up.Route), "err", err)
+		}
+	}) {
+		// Refused, not queued: the slots are the back-pressure. Warn rather than
+		// Info because a saturated pool means announcements are being dropped for
+		// writes that really happened, which an operator must be able to see.
+		a.log.Warn("thread: announcement pool saturated; a knowledge-base write was not announced",
+			"url", up.URL, "route", string(up.Route), "root", up.Root)
+	}
+}
+
+// Drain waits for in-flight announcements, bounded by ctx, so shutdown does not
+// silently drop one for a write that already reached the forge.
+func (a *KBAnnouncer) Drain(ctx context.Context) {
+	if a == nil {
+		return
+	}
+	a.disp.Drain(ctx)
+}
+
+// kbRoute maps this package's route names onto the providers vocabulary the
+// event uses. The two spell the routes identically today, and this does not
+// rely on that: a providers.KBRoute(w.Route) conversion would keep compiling —
+// and start announcing a route name no consumer recognises — the moment either
+// side is renamed.
+//
+// write() sets Route from one of the two constants literally, so the default is
+// unreachable. It passes the value through rather than guessing at one of the
+// two, because an announcement describes a write that already landed and
+// mislabelling it is worse than reporting an unknown label honestly.
+func kbRoute(route string) providers.KBRoute {
+	switch route {
+	case RouteComment:
+		return providers.KBRouteComment
+	case RouteOpenPR:
+		return providers.KBRouteOpenPR
+	default:
+		return providers.KBRoute(route)
+	}
+}
+
+// announce broadcasts a landed write. A nil w is the whole guard against
+// announcing something that did not happen: write() returns one only when the
+// forge accepted the write (see KBWrite), so there is nothing to announce on a
+// throttle, a forge failure, or a note the model never proposed.
+//
+// n supplies the author, which is not on the KBWrite: the write is the same
+// write either way, and only the caller knows whose message produced it. It
+// goes through noteField — redacted and flattened, exactly as the entry itself
+// renders it — because this event is a NEW egress for transport-reported text.
+func (r *Responder) announce(ctx context.Context, tc Context, n Note, w *KBWrite, at time.Time) {
+	if r.Announcer == nil || w == nil {
+		return
+	}
+	r.Announcer.deliver(ctx, providers.KBUpdate{
+		Transport: tc.Transport,
+		Root:      tc.Root,
+		Route:     kbRoute(w.Route),
+		PR:        w.PR,
+		URL:       w.URL,
+		Title:     w.Title,
+		Author:    noteField(n.Author),
+		Note:      w.Note,
+		At:        at,
+	})
+}
+
+// The two routes a knowledge write can take, named once. They are both the
+// KBWrite.Route values a caller reads and the "route" attribute
+// ThreadNotesWritten is labelled with, deliberately the same strings: an
+// operator correlating a dashboard series with what a thread reported must not
+// have to know that two literals happened to agree.
+const (
+	// RouteComment: the note was added to a pull request that already exists —
+	// the curated PR this thread came from, or the standalone PR an earlier note
+	// in the same thread opened.
+	RouteComment = "comment"
+	// RouteOpenPR: the note had no open pull request to land on, so it opened a
+	// standalone Concept entry of its own (see ConceptEntry).
+	RouteOpenPR = "open_pr"
+)
+
+// KBWrite describes a knowledge-base write that LANDED. write returns one only
+// when the forge accepted the write; every other outcome — a throttle, a forge
+// failure, an unreachable forge — returns a nil *KBWrite instead.
+//
+// That it is a pointer is the point. The shape it replaced was
+// (msg string, landed bool, err error), which let a caller read landed and
+// ignore err, and let a zero-valued description sit next to a false: two values
+// that can disagree about whether anything happened. A nil pointer cannot —
+// there is no result to read unless there was a write to describe. This package
+// has shipped the disagreeing-pair bug three times (GetOrCreate reporting
+// success it could not record, the duplicate-PR race, the stale sweep), which
+// is why the shape is worth the pointer.
+type KBWrite struct {
+	// Route is RouteComment or RouteOpenPR.
+	Route string
+	// PR is the pull/merge request the note landed on or opened. Zero — and only
+	// zero — when the forge returned a URL carrying no parseable number, which
+	// is not an error: the write landed and URL still names it.
+	PR int
+	// URL is the pull request the human can open to read the note.
+	URL string
+	// Title is the entry title ConceptEntry generated, on RouteOpenPR only. It
+	// is empty on RouteComment, where the note joins an entry someone else
+	// already titled and RunLore generated no title of its own.
+	//
+	// UNTRUSTED: it is built from the thread's alert-derived title. Redacted and
+	// flattened (see noteField), but not authored by RunLore.
+	Title string
+	// Note is the note text AS WRITTEN — redacted and capped, the same single
+	// evaluation the body sent to the forge was rendered from (see
+	// noteAsWritten). Never the caller's raw input: a caller quoting this back
+	// into a chat message must not be able to unmask what the entry masked, nor
+	// republish the bytes the cap dropped.
+	//
+	// What it does NOT carry is the forge-Markdown defusal noteText applies on
+	// top (neutralizeImages, neutralizeHTML, escapeOKFSections). Those exist for
+	// GitHub's and GitLab's renderers; a chat transport is neither, and its own
+	// markup hazards are neutralised by Untrusted at the point of rendering.
+	//
+	// UNTRUSTED, and the most so of these fields: on the freeform route RunLore's
+	// own chat model wrote it, and on the "note:" route a human did.
+	Note string
+}
+
+// notePreviewBytes bounds the note text a reply quotes back into the thread
+// (see recordedBlock). It is a SECOND ceiling, deliberately independent of
+// MaxNoteBytes, because the two bound different things.
+//
+// MaxNoteBytes bounds what is WRITTEN to the knowledge base: 8 KiB by default,
+// and an operator may raise it — config.Validate rejects only a negative one.
+// This bounds what is SAID in a chat message. Sharing MaxNoteBytes' number
+// would make a note at the default cap into an 8 KiB chat post, in a thread, on
+// a path any channel member can trigger; the reply is an acknowledgement, and
+// the URL on the line above is what carries the full text.
+//
+// 512 bytes, derived rather than picked. Every transport escapes the untrusted
+// spans of a reply before posting (see RenderReply), and the widest of those
+// escapes — Slack's "&" to "&amp;" — expands 5x, so this preview reaches the
+// wire as at most ~2.5k characters. That leaves room inside Slack's ~4k message
+// text budget for the model's own answer, which shares the SAME message on the
+// freeform route (see freeform). It is also several times longer than the one
+// or two sentences a real note is, so a truncated preview is the exception
+// rather than the norm.
+const notePreviewBytes = 512
 
 // prNumberRe matches the numeric id in a GitHub pull URL or a GitLab merge-request
 // URL. Anchored on the path segment so an issue URL never matches.
@@ -325,6 +582,33 @@ func (r *Responder) maxNoteBytes() int {
 		return DefaultMaxNoteBytes
 	}
 	return r.MaxNoteBytes
+}
+
+// noteAsWritten evaluates the redact-then-cap half of the note pipeline ONCE
+// and returns both things that one evaluation is for: the note to hand to the
+// forge, its Text replaced by the result, and that same string to report as
+// KBWrite.Note.
+//
+// One evaluation, two consumers, because two evaluations drift. The reply a
+// human reads and the entry a reviewer reads have to describe the same bytes:
+// a reply built from a separately-derived string would keep agreeing with the
+// entry only for as long as nobody edits one pipeline without the other, and
+// the first thing to break that way is redaction — the reply would quote the
+// secret the entry masked.
+//
+// The forge body is therefore a FUNCTION of the reported string rather than a
+// sibling of it: NoteBody renders what this returned. Passing already-redacted,
+// already-capped text back through noteText cannot change it — redact.Secrets
+// is idempotent over already-masked text (pinned in internal/redact's own
+// tests, over its whole secret manifest), and capNoteText returns at most
+// maxBytes bytes, so a second cap at the same bound is a no-op. What noteText
+// still adds on top is the forge-Markdown defusal, which is deliberately NOT in
+// the reported string — see KBWrite.Note.
+//
+// Note is a value type, so the caller's own note is untouched.
+func (r *Responder) noteAsWritten(n Note) (Note, string) {
+	n.Text = capNoteText(redact.Secrets(n.Text), r.maxNoteBytes())
+	return n, n.Text
 }
 
 // Handle parses raw, writes the knowledge where it belongs, and returns the
@@ -494,30 +778,200 @@ const runloreStatusRunes = "📝⚠⚡📚🔍🤖✅🛠🔥❓"
 // output — that is the one thing in the message the human cannot verify
 // anywhere else.
 //
-// Three independent measures, in order of how much they carry. The blockquote
-// is load-bearing: EVERY line is prefixed, so no line of model prose can sit
-// at the left margin where RunLore's own lines sit, and there is no way to
-// escape a quote from inside it. Every line's CONTENT is also wrapped in an
-// Untrusted span, which is what stops the model composing the transport's own
-// markup — a Slack mrkdwn "<https://evil.example|https://github.com/acme/kb/
-// pull/7>" renders as a clickable link whose visible text is a trusted KB URL,
-// and "<!channel>" pings everyone; the blockquote neutralises neither, because
-// quoting is not escaping. The span ends at the newline rather than covering
-// the whole block so the "> " markers stay RunLore's own bytes and keep
-// rendering as a blockquote instead of coming back as literal "&gt; ".
-// Stripping the status glyphs is belt-and-braces against a renderer that
-// flattens quoting, so a glyph missing from the list above degrades the
-// marking rather than reopening the gap.
+// Three independent measures, stated by what each one covers. They used to be
+// ranked — the blockquote load-bearing, the glyph strip a backstop — and that
+// ranking was itself a defect: it is what justified shipping the announcement
+// path (notify.kbUpdateAnnouncement) with the blockquote alone, and the
+// blockquote is the one that turned out to fail for a whole input class.
+//
+// The blockquote keeps model prose off the left margin: EVERY line is
+// prefixed, so no line of it can sit where RunLore's own lines sit, and there
+// is no way to escape a quote from inside it. That holds exactly as far as
+// "line" means the same thing here as it does to the client rendering the
+// message, which is what mandatoryBreaks makes true and what splitting on "\n"
+// alone did not. Every line's CONTENT is also wrapped in an Untrusted span,
+// which is what stops the model composing the transport's own markup — a Slack
+// mrkdwn "<https://evil.example|https://github.com/acme/kb/pull/7>" renders as
+// a clickable link whose visible text is a trusted KB URL, and "<!channel>"
+// pings everyone; the blockquote neutralises neither, because quoting is not
+// escaping. The span ends at the newline rather than covering the whole block
+// so the "> " markers stay RunLore's own bytes and keep rendering as a
+// blockquote instead of coming back as literal "&gt; ". Stripping the status
+// glyphs is what stops a line READING as a RunLore claim when it does reach
+// the left margin — a renderer that flattens quoting, or a break the split has
+// not learned about yet. A glyph missing from the list above degrades that,
+// and a break missing from mandatoryBreaks degrades the blockquote; neither
+// covers the other's gap.
 //
 // The model's words are never censored, only marked: a human must still be
 // able to read the answer they asked for, including one that turns out to be
 // an injected instruction, which they can only judge by seeing it. Escaping
 // preserves that — an escaped "<!channel>" is still readable as "<!channel>",
 // it simply stops being a command to the chat system.
-func modelVoice(s string) string {
-	lines := strings.Split(stripStatusGlyphs(s), "\n")
+func modelVoice(s string) string { return QuoteUntrusted(s) }
+
+// mandatoryBreaks folds every character that STARTS A NEW VISUAL LINE into the
+// "\n" QuoteUntrusted splits on, so "one line" means the same thing to the
+// blockquote as it does to the client rendering it.
+//
+// The set is UAX #14's mandatory breaks — the classes BK, CR, LF and NL — and
+// nothing else, because that is exactly the set a text layout is REQUIRED to
+// break at. singleLine already made this argument for the single-line YAML
+// title (see its doc comment: U+2028 and U+2029 are line breaks "many
+// renderers and tokenizers break on", which is what made a Cc-only check a
+// real gap rather than a pedantic one); this is the same fact applied to the
+// one untrusted span that is rendered multi-line BY DESIGN and so cannot be
+// flattened the way singleLine flattens a title.
+//
+// CRLF is listed first so it folds to ONE break: strings.Replacer tries its
+// patterns in argument order at each position, so a later bare "\r" cannot
+// split a CRLF into two lines.
+//
+// It normalises breaks and nothing else, deliberately. singleLine additionally
+// maps Cf and every other Unicode space because a title must end up on one
+// line; a quoted note must end up READABLE, so a tab, a no-break space and a
+// zero-width space are carried through exactly as written. Those reorder or
+// disguise text WITHIN a line, which the blockquote and the escaping already
+// bound; they cannot move a line out of the quote.
+var mandatoryBreaks = strings.NewReplacer(
+	"\r\n", "\n", // CRLF — one break, so it is matched before the bare CR below
+	"\r", "\n", // U+000D CARRIAGE RETURN (class CR)
+	"\v", "\n", // U+000B LINE TABULATION (BK)
+	"\f", "\n", // U+000C FORM FEED (BK)
+	"\u0085", "\n", // U+0085 NEXT LINE (NL)
+	"\u2028", "\n", // U+2028 LINE SEPARATOR (BK)
+	"\u2029", "\n", // U+2029 PARAGRAPH SEPARATOR (BK)
+)
+
+// QuoteUntrusted is the rendering modelVoice's doc comment describes, factored
+// out because more than one kind of untrusted prose needs exactly the same
+// three measures: the note text a landed write quotes back into the thread
+// (see recordedBlock), and the same note quoted into the notifier's configured
+// channel (see notify.kbUpdateAnnouncement).
+//
+// That note is model-authored on the freeform route and human-authored on the
+// "note:" route, and neither may be able to pose as RunLore. A note whose
+// second line reads "📝 Noted on the knowledge-base PR #7 — <hostile URL>" is
+// the identical forgery modelVoice was written for, arriving through a
+// different door — so it gets the identical treatment rather than a second,
+// weaker one.
+//
+// It is EXPORTED for that last reason. internal/notify had its own narrower
+// copy, justified on the grounds that duplicating the glyph list across the
+// package boundary would let the two drift; they drifted anyway, in the other
+// direction — the copy never grew the glyph strip, and neither grew
+// mandatoryBreaks — and a note carrying one U+2028 posted a forged headline at
+// the left margin of the channel where investigation findings go. One
+// implementation both surfaces call is what makes "identical treatment" a fact
+// rather than an intention.
+func QuoteUntrusted(s string) string {
+	lines := strings.Split(mandatoryBreaks.Replace(stripStatusGlyphs(s)), "\n")
 	for i, ln := range lines {
 		lines[i] = strings.TrimRight("> "+Untrusted(strings.TrimRight(ln, " ")), " ")
+	}
+	return strings.Join(lines, "\n")
+}
+
+// modelDraftedNotice is the line that keeps the model-drafted route
+// distinguishable once its text is quoted into the thread.
+//
+// Quoting is what makes it necessary. Before, the reply named a pull request
+// and nothing else, so there was nothing in it to mistake for the human's own
+// words; a quote directly under "…with your note" reads as theirs unless
+// something says otherwise. ProposedNote already carries that distinction into
+// the ENTRY (see NoteBody, which attributes the text to RunLore and quotes the
+// human's real message under it) — this is the same fact, said where the human
+// actually reads it.
+//
+// It is RunLore's own bytes, so it is never marked untrusted and never
+// blockquoted: it sits at the left margin, alongside the status line, precisely
+// because it is a claim RunLore makes about what it did.
+//
+// It ends in a colon, so it is only ever emitted directly above the quote that
+// colon promises — never above the entry title, and never with nothing after it
+// (see recordedBlock).
+const modelDraftedNotice = "Drafted by RunLore from your message — not your own words, pending review:"
+
+// openedWith names the note in write()'s open_pr status line — the one place a
+// reply says WHOSE words landed.
+//
+// "your note" is that claim, and on the model-drafted route it was false. It
+// sat directly above modelDraftedNotice, so one message told the human "with
+// your note" and then "not your own words", and the line they read first was
+// the wrong one. The status line is also the half that has to stand alone: it
+// is what a reader skims and what a transport keeps when it truncates, so a
+// reader who never reaches the notice below must not be left believing RunLore
+// filed their words under their name.
+//
+// The note: route keeps "your note" verbatim. The defect is a claim RunLore
+// cannot support, not the act of naming an author — hedging both routes into
+// something neutral would tell the human LESS than the line it replaced, which
+// on a path whose whole purpose is saying what was recorded is a regression.
+//
+// The comment route deliberately gets no equivalent branch. "📝 Noted on the
+// knowledge-base PR #7" asserts only that RunLore recorded something there and
+// never says whose words it was, so it is already true on both routes; giving
+// it an authorship clause for symmetry's sake would ADD the kind of claim this
+// exists to remove.
+//
+// It reads Note rather than a second flag for the reason ProposedNote exists:
+// one field is the discriminator and the evidence (see Note.DraftedFrom), and a
+// parallel flag could disagree with it. write() reassigns n from noteAsWritten
+// before calling this, which rewrites Text only — provenance survives.
+func openedWith(n Note) string {
+	if n.modelDrafted() {
+		return "a note drafted from your message"
+	}
+	return "your note"
+}
+
+// noteTruncatedNotice is what a preview cut by notePreviewBytes says instead of
+// silently stopping. A human who cannot tell a quote was shortened would read
+// the visible part as the whole note, which is the same failure capNoteText's
+// own marker exists to prevent on the forge side.
+const noteTruncatedNotice = "(quote truncated — open the pull request for the full note)"
+
+// recordedBlock renders the "here is what I filed" half of a landed write's
+// reply: who wrote the text, what the entry is called, and the note itself.
+//
+// It is built from the KBWrite rather than from n, so what the human is shown
+// is what the forge was sent — redacted and capped once, upstream, by
+// noteAsWritten. Quoting n.Text instead would republish the secret the entry
+// masked and the bytes the cap dropped.
+//
+// n is read for provenance only (modelDrafted), which is not on the KBWrite:
+// the write is the same write either way, and only the caller knows whose words
+// it carried.
+//
+// w.Title is named on the open_pr route, where RunLore generated an entry the
+// human has no other way to see the name of. It is empty on the comment route
+// BY DESIGN — that note joined an entry someone else already titled, and the
+// pull request it landed on is named in the status line above — so an empty
+// title renders no line rather than an empty one.
+//
+// modelDraftedNotice sits between the title and the quote, not above both,
+// because its trailing colon promises the quote specifically: emitted above the
+// title it separated a colon from the thing it introduced, and the title's own
+// "Entry:" answered it instead. It is emitted only when there IS a preview, for
+// the same reason — a promise with nothing after it is the same defect with the
+// answer missing entirely rather than merely displaced.
+func recordedBlock(n Note, w *KBWrite) string {
+	var lines []string
+	if w.Title != "" {
+		// Untrusted: alert-derived, redacted and flattened but not RunLore's own
+		// (see KBWrite.Title). Not blockquoted — it is one flattened line that
+		// cannot reach the left margin on a line of its own.
+		lines = append(lines, "Entry: "+Untrusted(w.Title))
+	}
+	preview := cutToRuneBoundary(w.Note, notePreviewBytes)
+	if preview != "" {
+		if n.modelDrafted() {
+			lines = append(lines, modelDraftedNotice)
+		}
+		lines = append(lines, QuoteUntrusted(preview))
+	}
+	if len(preview) < len(w.Note) {
+		lines = append(lines, noteTruncatedNotice)
 	}
 	return strings.Join(lines, "\n")
 }
@@ -561,7 +1015,7 @@ func (r *Responder) record(ctx context.Context, tc Context, n Note) (string, err
 	}
 
 	at := r.now()
-	reply, landed, err := r.write(ctx, tc, n, at)
+	reply, w, err := r.write(ctx, tc, n, at)
 	if err != nil {
 		return reply, err
 	}
@@ -569,7 +1023,25 @@ func (r *Responder) record(ctx context.Context, tc Context, n Note) (string, err
 	// The budget is consumed only by a write that landed: a forge outage — or a
 	// global-rate-limit throttle, which also returns with no error — must not
 	// burn the thread's allowance.
-	if landed {
+	if w != nil {
+		// Announced HERE, from the same non-nil result the reply is rendered
+		// from, and for the same reason: this is the ONE place both write routes
+		// and both callers ("note:" and the note a chat answer proposed)
+		// converge, so a future route cannot be added that announces without
+		// replying or replies without announcing. It sits ahead of the reply
+		// rendering and the counter write-back below because it must not depend
+		// on either: the entry is on the forge, and neither a truncated preview
+		// nor a failed counter changes that it landed.
+		r.announce(ctx, tc, n, w, at)
+
+		// Rendered HERE rather than inside write() so the two concerns stay
+		// apart: write() reports what it DID (see KBWrite), and this is where a
+		// reply is finished — the same place the counter warning below is
+		// appended. It also keeps write()'s own status lines byte-identical to
+		// what they were, so the quote is strictly additive.
+		if block := recordedBlock(n, w); block != "" {
+			reply += "\n" + block
+		}
 		if uerr := r.Registry.Update(tc.Root, func(c *Context) { c.Notes++ }); uerr != nil {
 			// The knowledge itself is already saved on the forge — that is not in
 			// question — but the per-thread cap can no longer be trusted for this
@@ -585,17 +1057,16 @@ func (r *Responder) record(ctx context.Context, tc Context, n Note) (string, err
 }
 
 // write routes the note to the open KB PR, to the PR this thread already opened,
-// or to a new standalone Concept PR — in that order. The returned bool reports
-// whether a write actually landed in the knowledge base: it is false both on
-// error and on the (non-error) global-rate-limit throttle, so a caller can
-// distinguish "nothing happened" from "a write happened" independently of err.
+// or to a new standalone Concept PR — in that order. The returned *KBWrite
+// describes what actually landed, and is nil whenever nothing did — on error
+// and on the (non-error) global-rate-limit throttle alike.
 //
 // Reached from exactly two callers, both through record(): an explicit
 // "note:", and the note content a chat answer proposed for a freeform message
 // (see freeform). IntentReinvestigate never reaches it at all. Both callers
 // supply note CONTENT only — the route below is derived from the thread
 // context, never from the text and never from the model.
-func (r *Responder) write(ctx context.Context, tc Context, n Note, at time.Time) (string, bool, error) {
+func (r *Responder) write(ctx context.Context, tc Context, n Note, at time.Time) (string, *KBWrite, error) {
 	// Checked once, upstream of BOTH write routes below: a CommentOnPR spends
 	// this budget exactly like an OpenPR does. Gating only the OpenPR branch —
 	// as an earlier version of this method did — left the comment route bounded
@@ -621,7 +1092,7 @@ func (r *Responder) write(ctx context.Context, tc Context, n Note, at time.Time)
 		}
 		// A throttle is not a failure — no error — but nothing landed, so the
 		// caller must not charge the thread's note budget for it.
-		return "⚠️ I have made too many knowledge-base writes recently and paused. Try again shortly.", false, nil
+		return "⚠️ I have made too many knowledge-base writes recently and paused. Try again shortly.", nil, nil
 	}
 
 	// Serialize concurrent writes for THIS root — not the registry's own
@@ -647,6 +1118,10 @@ func (r *Responder) write(ctx context.Context, tc Context, n Note, at time.Time)
 		tc = fresh
 	}
 
+	// Evaluated once here, ahead of the route branch, so whichever route runs
+	// files the same bytes and reports the same bytes — see noteAsWritten.
+	n, asWritten := r.noteAsWritten(n)
+
 	// The route is derived from the thread context alone. It is never influenced
 	// by the message text, and — through prNumberOn — never by a URL that names
 	// a forge RunLore does not write to.
@@ -670,7 +1145,7 @@ func (r *Responder) write(ctx context.Context, tc Context, n Note, at time.Time)
 			// the note is not silently dropped, and success is not falsely
 			// claimed either, so the human knows to retry.
 			r.log().Warn("thread: PR open-check failed; not escalating to opening a new PR", "pr", num, "root", tc.Root, "err", err)
-			return fmt.Sprintf("⚠️ I could not reach the forge to check PR #%d — nothing was saved. Please try again.", num), false,
+			return fmt.Sprintf("⚠️ I could not reach the forge to check PR #%d — nothing was saved. Please try again.", num), nil,
 				fmt.Errorf("check PR %d open: %w", num, err)
 		}
 		if !open {
@@ -683,17 +1158,19 @@ func (r *Responder) write(ctx context.Context, tc Context, n Note, at time.Time)
 			continue
 		}
 		if err := r.Forge.CommentOnPR(ctx, num, NoteBody(tc, n, at, r.maxNoteBytes())); err != nil {
-			return fmt.Sprintf("⚠️ I could not save that to the knowledge base: %s", Untrusted(err.Error())), false,
+			return fmt.Sprintf("⚠️ I could not save that to the knowledge base: %s", Untrusted(err.Error())), nil,
 				fmt.Errorf("comment on PR %d: %w", num, err)
 		}
 		r.log().Info("thread: note recorded on KB PR", "pr", num, "root", tc.Root, "author", n.Author)
-		r.recordWrite(ctx, "comment")
-		return fmt.Sprintf("📝 Noted on the knowledge-base PR #%d — %s", num, Untrusted(candidate)), true, nil
+		r.recordWrite(ctx, RouteComment)
+		return fmt.Sprintf("📝 Noted on the knowledge-base PR #%d — %s", num, Untrusted(candidate)),
+			&KBWrite{Route: RouteComment, PR: num, URL: candidate, Note: asWritten}, nil
 	}
 
-	ref, err := r.Forge.OpenPR(ctx, ConceptEntry(tc, n, at, r.maxNoteBytes()))
+	entry := ConceptEntry(tc, n, at, r.maxNoteBytes())
+	ref, err := r.Forge.OpenPR(ctx, entry)
 	if err != nil {
-		return fmt.Sprintf("⚠️ I could not save that to the knowledge base: %s", Untrusted(err.Error())), false,
+		return fmt.Sprintf("⚠️ I could not save that to the knowledge base: %s", Untrusted(err.Error())), nil,
 			fmt.Errorf("open note PR: %w", err)
 	}
 	if uerr := r.Registry.Update(tc.Root, func(c *Context) { c.NoteURL = ref.URL }); uerr != nil {
@@ -701,9 +1178,15 @@ func (r *Responder) write(ctx context.Context, tc Context, n Note, at time.Time)
 			"root", tc.Root, "url", ref.URL, "err", uerr)
 	}
 	r.log().Info("thread: note opened a standalone KB PR", "url", ref.URL, "root", tc.Root, "author", n.Author)
-	r.recordWrite(ctx, "open_pr")
+	r.recordWrite(ctx, RouteOpenPR)
+	// PRNumber, not prNumberOn: this URL is one RunLore's own forge client just
+	// returned, which is exactly the case PRNumber documents itself as safe for.
+	// A URL it cannot parse is not a failure — the write landed, and the result
+	// reports everything else about it with PR left at zero.
+	w := &KBWrite{Route: RouteOpenPR, URL: ref.URL, Title: entry.Title, Note: asWritten}
 	if num, ok := PRNumber(ref.URL); ok {
-		return fmt.Sprintf("📝 Opened knowledge-base PR #%d with your note — %s", num, Untrusted(ref.URL)), true, nil
+		w.PR = num
+		return fmt.Sprintf("📝 Opened knowledge-base PR #%d with %s — %s", num, openedWith(n), Untrusted(ref.URL)), w, nil
 	}
-	return "📝 Opened a knowledge-base PR with your note — " + Untrusted(ref.URL), true, nil
+	return "📝 Opened a knowledge-base PR with " + openedWith(n) + " — " + Untrusted(ref.URL), w, nil
 }

@@ -132,6 +132,42 @@ it's even been tried.
 Only `app_mention` is subscribed — RunLore reads nothing in channels where it
 was not directly addressed.
 
+### Announce a knowledge write to the channel
+
+A captured note is reported into the thread it came from, and nowhere else — so
+the knowledge lands, but the channel never learns it did. `announce_kb_updates`
+changes that: every write that reaches the forge is also posted to the channel
+this notifier delivers findings to.
+
+```yaml
+notify:
+  slack:
+    bot_token_env: SLACK_BOT_TOKEN
+    channel: C0123456789
+    thread_capture: true
+  thread:
+    announce_kb_updates: true    # default false
+```
+
+The channel post names the pull request, the entry that was created, who the note
+came from and which chat system they typed it in, and quotes the note itself —
+capped at 512 bytes, with the pull request holding the full text. It carries the
+same secret-redacted, capped text that reached the forge, and everything a human
+or the model wrote in it is escaped before posting: a `<!channel>` inside a note
+renders as literal text, never as a channel-wide ping.
+
+Two things to know before turning it on:
+
+- **One write produces two messages, and that is intended.** The thread reply
+  answers the person who typed; the channel post reaches everyone who was not
+  reading that thread — which is the whole point of the feature. The announcement
+  never posts back into the thread, so it is a second destination rather than a
+  duplicate. With Slack as your only transport you will still see both.
+- **The announcement carries note content.** A note written in a thread nobody else
+  was watching is broadcast to every sink you have configured — this channel, a
+  Matrix room if you run both, any `webhook` endpoint. That is your decision to
+  take knowingly, which is why the key is off unless you set it.
+
 ### Conversational replies
 
 Without `model.chat`, anything you say in the thread that is not `note:` gets a

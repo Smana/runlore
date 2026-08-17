@@ -634,6 +634,16 @@ transports), `max_note_bytes` (default **8192**, one human message's input), `re
 **168h**), `registry_max` (default **2000**), plus `chat_calls_per_hour` and `chat_tokens_per_hour`
 — which apply only with `model.chat` set, and are covered in full below.
 
+The same block holds the one key that is a switch rather than a ceiling:
+`announce_kb_updates` (default **false**). With it on, every knowledge write that lands is
+also announced to each configured notifier's own channel or room — never back into the thread
+that produced it, which already received the reply — so one write produces both a thread reply
+and a channel post. The announcement quotes the note, so a note written in one thread reaches
+every sink you have configured; that is why it is opt-in. See
+[Reviewing knowledge → Thread capture]({{< relref "/docs/concepts/reviewing-knowledge.md" >}})
+and the [Slack]({{< relref "/docs/integrations/notifications/slack.md" >}}) /
+[Matrix]({{< relref "/docs/integrations/notifications/matrix.md" >}}) pages.
+
 ### Conversational replies and what they cost
 
 **Off by default.** Setting a `model.chat` block turns it on: RunLore answers an addressed thread

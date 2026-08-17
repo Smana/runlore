@@ -47,6 +47,19 @@ import (
 // internal/app's notify_test.go builds its own responder by hand and so cannot
 // see any of this; only the call sites in RunServe can.
 //
+// The same argument covers the two hops the announcement path adds. The sink a
+// knowledge-base announcement is delivered to is the process's ONE *notify.Multi
+// — the same fan-out that carries investigation findings — and RunServe is the
+// only place it meets the responder; buildThreadResponder's own test proves the
+// announcer is built from whatever notifier it is handed, and says nothing about
+// which value production hands it. nil there is silently "announcements off"
+// with the operator's announce_kb_updates: true still in the file. And the
+// announcer must be DRAINED at shutdown, after everything that can still hand it
+// work: an announcement is scheduled on a bounded dispatcher, so one in flight
+// when SIGTERM arrives is dropped unless something waits for it — for a write
+// that already reached the forge. Drain existing, tested and called from nowhere
+// is precisely how it shipped.
+//
 // It is a static guard because RunServe is not callable from a test: it loads a
 // config file, dials Kubernetes, elects a leader and blocks in ListenAndServe.
 // What that costs is a KNOWN, ACCEPTED FALSE POSITIVE, the same trade
@@ -78,30 +91,50 @@ func TestRunServeComposesTheChatLayer(t *testing.T) {
 func TestThreadWiringGuardCatchesADroppedLayer(t *testing.T) {
 	// The intact shape, minus every dependency: enough for the checker, and it
 	// must report nothing so the mutations below are known to be what fails.
-	// The %s slots are, in order: the catalog handed to buildThreadChat, the chat
-	// layer handed to buildThreadResponder, an extra statement (empty unless a
-	// case builds a second responder), and the responder handed to each transport.
+	// The %s slots are, in order: the statement that binds the investigation
+	// queue, the catalog handed to buildThreadChat, the chat layer and the
+	// notifier handed to buildThreadResponder, an extra statement (empty unless a
+	// case builds a second responder), the responder handed to each transport,
+	// and the shutdown drain sequence.
 	const intact = `package x
 
 func BuildInvestigator() (investigate.Investigator, *catalog.Catalog, *notify.Multi, error) { return nil, nil, nil, nil }
 func buildThreadChat(cfg *config.Config, cat *catalog.Catalog) *thread.Chat { return nil }
-func buildThreadResponder(cfg *config.Config, chat *thread.Chat) *thread.Responder { return nil }
+func buildThreadResponder(cfg *config.Config, chat *thread.Chat, notifier *notify.Multi) *thread.Responder { return nil }
 func BuildThreadMention(cfg *config.Config, responder *thread.Responder) *thread.Mention { return nil }
-func BuildMatrixFeedback(cfg *config.Config, responder *thread.Responder) *notify.MatrixFeedback { return nil }
+func BuildMatrixFeedback(cfg *config.Config, responder *thread.Responder, dispatch, busyDispatch *thread.Dispatcher) *notify.MatrixFeedback { return nil }
 
 func RunServe() {
 	inv, cat, notifier, err := BuildInvestigator()
 	_, _, _ = inv, notifier, err
-	threadChat := buildThreadChat(cfg, %s)
-	threadResponder := buildThreadResponder(cfg, %s)
 	%s
-	mfb := BuildMatrixFeedback(cfg, %s)
+	threadChat := buildThreadChat(cfg, %s)
+	threadResponder := buildThreadResponder(cfg, %s, %s)
+	%s
+	mfb := BuildMatrixFeedback(cfg, %s, matrixDispatch, matrixBusyDispatch)
 	mention := BuildThreadMention(cfg, %s)
+	srv := server.New(acts)
+	go func() {
+		%s
+	}()
 	_, _, _, _ = threadChat, threadResponder, mfb, mention
 }
 `
+	// How production binds the investigation queue — the drain the announcer's
+	// must come BEFORE, and the one the guard resolves its name from.
+	const queueDecl = `queue := investigate.NewQueue(inv, log)`
+
+	// The shutdown order production uses: the mention pools first (each can
+	// still schedule an announcement while it drains), then the announcer, then
+	// the investigation queue, which cannot.
+	const drains = `srv.Drain(dctx)
+		matrixDispatch.Drain(dctx)
+		matrixBusyDispatch.Drain(dctx)
+		threadResponder.Announcer.Drain(dctx)
+		queue.Drain(dctx)`
+
 	for _, tc := range []struct {
-		name, cat, chat, extra, matrix, slack, want string
+		name, queue, cat, chat, notifier, extra, matrix, slack, drains, want string
 	}{
 		{
 			name: "intact wiring reports nothing",
@@ -141,14 +174,61 @@ func RunServe() {
 			matrix: "nil",
 			want:   "BuildMatrixFeedback",
 		},
+		{
+			// notify.thread.announce_kb_updates: true in the operator's file,
+			// no sink on the responder, and NewKBAnnouncer's nil-sink contract
+			// turns that into "announcements are off" without a word.
+			name:     "the notifier never reaches the responder, so nothing is ever announced",
+			notifier: "nil",
+			want:     "buildThreadResponder",
+		},
+		{
+			// The Task 4 shape exactly: Drain written, tested, called nowhere.
+			name:   "the announcer is never drained at shutdown",
+			drains: "srv.Drain(dctx)\n\t\tmatrixDispatch.Drain(dctx)\n\t\tmatrixBusyDispatch.Drain(dctx)\n\t\tqueue.Drain(dctx)",
+			want:   "Announcer",
+		},
+		{
+			// Present but useless: the pools it drains ahead of are the ones
+			// still scheduling announcements, so every announcement produced
+			// during their drain is dropped — by a Drain call that is right
+			// there in the diff.
+			name:   "the announcer is drained before the handlers that can still schedule one",
+			drains: "threadResponder.Announcer.Drain(dctx)\n\t\tsrv.Drain(dctx)\n\t\tmatrixDispatch.Drain(dctx)\n\t\tmatrixBusyDispatch.Drain(dctx)",
+			want:   "Announcer",
+		},
+		{
+			// The other end of the same window, and the half serve.go's own
+			// drain-order comment calls out: all five drains share ONE deadline,
+			// the investigation queue schedules no announcements and is the slow
+			// one, so waiting on it first spends the grace period and hands the
+			// announcer a context that has already expired. Every announcement
+			// still in flight is then dropped — by a Drain called in the right
+			// place, in the wrong order.
+			name:   "the announcer is drained after the investigation queue, on the shared deadline",
+			drains: "srv.Drain(dctx)\n\t\tmatrixDispatch.Drain(dctx)\n\t\tmatrixBusyDispatch.Drain(dctx)\n\t\tqueue.Drain(dctx)\n\t\tthreadResponder.Announcer.Drain(dctx)",
+			want:   "queue",
+		},
+		{
+			// The guard's own inertness, which is the failure this whole file
+			// exists to catch: with the queue bound from something this checker
+			// does not recognise it cannot compare the two positions at all, and
+			// must say so rather than pass.
+			name:  "the queue is bound from a constructor the guard cannot resolve",
+			queue: "queue := investigate.NewWorkQueue(inv, log)",
+			want:  "inert",
+		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			src := fmt.Sprintf(intact,
+				cmp.Or(tc.queue, queueDecl),
 				cmp.Or(tc.cat, "cat"),
 				cmp.Or(tc.chat, "threadChat"),
+				cmp.Or(tc.notifier, "notifier"),
 				tc.extra,
 				cmp.Or(tc.matrix, "threadResponder"),
 				cmp.Or(tc.slack, "threadResponder"),
+				cmp.Or(tc.drains, drains),
 			)
 			got := threadWiringViolations(parseFuncDecls(t, src))
 			if tc.want == "" {
@@ -237,7 +317,157 @@ func threadWiringViolations(fns map[string]*ast.FuncDecl) []string {
 		"Matrix's thread capture no longer runs on the shared responder — nil makes buildMatrixThreadMention warn "+
 			"and drop capture from the listener while feedback reactions keep it looking healthy, and a second "+
 			"responder doubles the same two global ceilings")...)
+
+	// The announcement sink is that same single *notify.Multi: announcing to
+	// each notifier's own channel is the entire feature, and the fan-out is
+	// where the configured notifiers live.
+	notifierIdx := resultIndex(invBuilder, "*notify.Multi")
+	if notifierIdx < 0 {
+		return append(bad, "BuildInvestigator no longer returns a *notify.Multi: this guard can no longer tell "+
+			"which identifier is the shared notifier the knowledge-base announcement is delivered through")
+	}
+	if len(catNames) <= notifierIdx || catNames[notifierIdx] == "_" {
+		return append(bad, "RunServe does not bind BuildInvestigator's *notify.Multi result: a knowledge-base "+
+			"write can then be announced to nobody, whatever notify.thread.announce_kb_updates says")
+	}
+	bad = append(bad, checkArg(serve, respBuilder, "buildThreadResponder", "notifier", catNames[notifierIdx],
+		"notify.thread.announce_kb_updates is then on in the operator's config and off in the process — "+
+			"buildKBAnnouncer builds no announcer without a sink, thread.Responder.Announcer is nil-safe, and "+
+			"every landed knowledge write is announced to nobody with nothing logged")...)
+	bad = append(bad, announcerDrainViolations(serve, matrixBuilder, respNames[0])...)
 	return bad
+}
+
+// announcerDrainViolations reports whether RunServe drains the announcer at
+// shutdown, and whether it does so in the one window where draining it is worth
+// anything — after everything that can still schedule an announcement, and
+// before the one drain that can eat the shared deadline.
+//
+// Three distinct failures, one silent each. Never draining it means an
+// announcement still in flight when SIGTERM arrives is dropped, for a write that
+// is already on the forge — the KBAnnouncer's dispatcher runs its deliveries on
+// a context stripped of cancellation, so nothing else waits for them. Draining
+// it too early means the same drop with a Drain call sitting in the diff: the
+// Slack server and the Matrix mention pools are what RUN the handlers that
+// schedule announcements, so anything they deliver while THEY drain arrives
+// after an announcer drain that has already returned. Draining it too LATE is
+// the same drop again: all five drains share ONE dctx deadline (see serve.go's
+// drain-order comment), and the investigation queue — which schedules no
+// announcements at all — is the slow one, so waiting on it first hands the
+// announcer an already-expired context.
+//
+// Both ends are bounded by drains RunServe itself names, and every one of them
+// is resolved from the source rather than spelled out here — see
+// announcementSchedulers and announcementDeadlineSpenders. Either resolving to
+// nothing is reported as an inert guard, because a checker that quietly stopped
+// comparing is the failure this file exists to catch.
+func announcerDrainViolations(serve, matrixBuilder *ast.FuncDecl, respName string) []string {
+	want := respName + ".Announcer"
+	drains := drainCalls(serve)
+	at, ok := drains[want]
+	if !ok {
+		return []string{fmt.Sprintf("RunServe never calls %s.Drain: an announcement in flight at shutdown is "+
+			"dropped for a knowledge write that already reached the forge. thread.KBAnnouncer.Drain exists and "+
+			"is tested; a Drain nobody calls is the same as no Drain at all", want)}
+	}
+	var bad []string
+	schedulers := announcementSchedulers(serve, matrixBuilder)
+	if len(schedulers) == 0 {
+		bad = append(bad, "this guard is inert about draining the announcer too EARLY: it can no longer identify "+
+			"the handlers that schedule announcements (neither server.New's result nor BuildMatrixFeedback's "+
+			"dispatch arguments resolved)")
+	}
+	for _, recv := range schedulers {
+		pos, drained := drains[recv]
+		if !drained || pos < at {
+			continue
+		}
+		bad = append(bad, fmt.Sprintf("RunServe drains %s BEFORE %s: %s is still running the mention handlers "+
+			"that schedule announcements, so every announcement produced while it drains is dropped — by a "+
+			"Drain call that looks correct in review. Drain the announcer after it", want, recv, recv))
+	}
+	spenders := announcementDeadlineSpenders(serve)
+	if len(spenders) == 0 {
+		bad = append(bad, "this guard is inert about draining the announcer too LATE: nothing in RunServe is bound "+
+			"from investigate.NewQueue, so it can no longer identify the drain that must not run first")
+	}
+	for _, recv := range spenders {
+		pos, drained := drains[recv]
+		if !drained || pos > at {
+			continue
+		}
+		bad = append(bad, fmt.Sprintf("RunServe drains %s BEFORE %s: they share one dctx deadline and %s "+
+			"schedules no announcements, so a slow investigation spends the whole grace period and the announcer "+
+			"is then drained on an expired context — the same dropped announcement, from the other side. Drain "+
+			"the announcer before it", recv, want, recv))
+	}
+	return bad
+}
+
+// announcementDeadlineSpenders returns the receiver expressions of the shutdown
+// drains that must happen AFTER the announcer's: the investigation queue, whose
+// in-flight work is the slowest thing shutdown waits on and the only one of the
+// five that can hand nothing to the announcer.
+//
+// Resolved from the source like the schedulers are — by the identifier RunServe
+// binds from investigate.NewQueue — so a rename moves the guard with it, and a
+// shape it cannot resolve is reported as inert by the caller rather than
+// passing quietly. A queue that is bound but never drained is not this check's
+// business: there is then no order to get wrong.
+func announcementDeadlineSpenders(serve *ast.FuncDecl) []string {
+	var out []string
+	for _, name := range boundNames(serve, "investigate.NewQueue") {
+		if name != "_" {
+			out = append(out, name)
+		}
+	}
+	return out
+}
+
+// announcementSchedulers returns the receiver expressions of the shutdown drains
+// that must happen BEFORE the announcer's: the Slack server (its own Drain waits
+// on the detached mention handlers) and the two Matrix mention dispatchers.
+//
+// Both are resolved from the source, not spelled out: the server by the
+// identifier RunServe binds from server.New, the dispatchers by the arguments it
+// passes in BuildMatrixFeedback's own dispatch/busyDispatch parameter slots. A
+// rename moves the guard with it, and a shape it cannot resolve is reported as
+// an inert guard by the caller rather than passing quietly.
+func announcementSchedulers(serve, matrixBuilder *ast.FuncDecl) []string {
+	var out []string
+	if names := boundNames(serve, "server.New"); len(names) == 1 && names[0] != "_" {
+		out = append(out, names[0])
+	}
+	if calls := callsTo(serve, "BuildMatrixFeedback"); len(calls) == 1 {
+		for _, param := range []string{"dispatch", "busyDispatch"} {
+			idx := paramIndex(matrixBuilder, param)
+			if idx >= 0 && idx < len(calls[0].Args) {
+				out = append(out, types.ExprString(calls[0].Args[idx]))
+			}
+		}
+	}
+	return out
+}
+
+// drainCalls maps the receiver expression of every Drain call in fn to its
+// position, so the checker can compare shutdown ORDER as well as presence. A
+// receiver drained twice keeps the last position — the later call is the one
+// that decides whether the wait actually covered the work.
+func drainCalls(fn *ast.FuncDecl) map[string]token.Pos {
+	out := map[string]token.Pos{}
+	ast.Inspect(fn.Body, func(n ast.Node) bool {
+		call, ok := n.(*ast.CallExpr)
+		if !ok {
+			return true
+		}
+		sel, ok := call.Fun.(*ast.SelectorExpr)
+		if !ok || sel.Sel.Name != "Drain" {
+			return true
+		}
+		out[types.ExprString(sel.X)] = call.Pos()
+		return true
+	})
+	return out
 }
 
 // checkArg asserts RunServe calls builder exactly once, passing want in the
@@ -268,7 +498,10 @@ func checkArg(serve, builder *ast.FuncDecl, builderName, param, want, why string
 		got, builderName, param, want, why)}
 }
 
-// callsTo returns every direct call to callee inside fn's body.
+// callsTo returns every call to callee inside fn's body. callee is matched as
+// the source renders it, so both a same-package name ("BuildInvestigator") and a
+// qualified one ("server.New") work — the announcer's drain order is checked
+// against a value RunServe binds from another package's constructor.
 func callsTo(fn *ast.FuncDecl, callee string) []*ast.CallExpr {
 	var out []*ast.CallExpr
 	ast.Inspect(fn.Body, func(n ast.Node) bool {
@@ -276,7 +509,7 @@ func callsTo(fn *ast.FuncDecl, callee string) []*ast.CallExpr {
 		if !ok {
 			return true
 		}
-		if id, ok := call.Fun.(*ast.Ident); ok && id.Name == callee {
+		if types.ExprString(call.Fun) == callee {
 			out = append(out, call)
 		}
 		return true
@@ -298,7 +531,7 @@ func boundNames(fn *ast.FuncDecl, callee string) []string {
 		if !ok {
 			return true
 		}
-		if id, ok := call.Fun.(*ast.Ident); !ok || id.Name != callee {
+		if types.ExprString(call.Fun) != callee {
 			return true
 		}
 		for _, lhs := range as.Lhs {

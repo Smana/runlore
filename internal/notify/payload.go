@@ -82,3 +82,49 @@ func NewPayload(inv providers.Investigation) Payload {
 		Prior: prior, MatchedKnowledge: matched,
 	}
 }
+
+// kbUpdateEvent is the value KBUpdatePayload.Event always carries. It exists
+// because both deliveries go to the SAME operator-configured URL: an
+// investigation and a knowledge-base update are different shapes, and a
+// receiver written against Payload would otherwise decode an update into a
+// zero-valued investigation and report an empty finding. Payload itself does
+// NOT grow this key — its wire format is what external consumers already parse.
+const kbUpdateEvent = "kb_update"
+
+// KBUpdatePayload is the delivery payload for a knowledge-base write that
+// already landed on the forge — the programmatic counterpart of the chat
+// announcement notify's Slack and Matrix notifiers render.
+//
+// It carries the note at the length it was WRITTEN, with no preview ceiling: a
+// receiver here wants the record, and bounding what is RENDERED is a chat
+// transport's job (see notify's kbNotePreviewBytes). The fields providers.KBUpdate
+// documents as untrusted are untrusted here too, and they leave the network —
+// that is what a webhook is for — but the hazard on this path is a malformed or
+// injected JSON body rather than chat markup, so encoding/json is the whole
+// defence and every value goes out verbatim. A chat escaper applied here would
+// corrupt the record instead of protecting it.
+type KBUpdatePayload struct {
+	Event     string `json:"event"` // always kbUpdateEvent
+	Transport string `json:"transport,omitempty"`
+	Root      string `json:"root,omitempty"`
+	Route     string `json:"route"`
+	PR        int    `json:"pr,omitempty"`
+	URL       string `json:"url,omitempty"`
+	Title     string `json:"title,omitempty"`
+	Author    string `json:"author,omitempty"`
+	Note      string `json:"note,omitempty"`
+	At        string `json:"at,omitempty"` // RFC3339; "" when unknown
+}
+
+// NewKBUpdatePayload maps a KBUpdate to the delivery payload.
+func NewKBUpdatePayload(up providers.KBUpdate) KBUpdatePayload {
+	at := ""
+	if !up.At.IsZero() {
+		at = up.At.UTC().Format(time.RFC3339)
+	}
+	return KBUpdatePayload{
+		Event: kbUpdateEvent, Transport: up.Transport, Root: up.Root,
+		Route: string(up.Route), PR: up.PR, URL: up.URL,
+		Title: up.Title, Author: up.Author, Note: up.Note, At: at,
+	}
+}

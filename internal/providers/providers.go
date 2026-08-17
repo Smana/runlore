@@ -547,6 +547,90 @@ type ThreadNotifier interface {
 	Transport() string
 }
 
+// KBRoute names how a knowledge-base write landed on the forge. The two values
+// mirror the labels the thread responder already reports on its
+// ThreadNotesWritten counter, so an announcement and the metric describing the
+// same write cannot disagree about which route it took.
+type KBRoute string
+
+// The routes a knowledge-base write can take.
+const (
+	// KBRouteComment added the note as a comment on a KB pull request that was
+	// already open (the curator's, or one an earlier note in the same thread
+	// opened).
+	KBRouteComment KBRoute = "comment"
+	// KBRouteOpenPR opened a new standalone pull request for the note.
+	KBRouteOpenPR KBRoute = "open_pr"
+)
+
+// KBUpdate announces that a knowledge-base write ALREADY LANDED on the forge. It
+// is emitted after the fact and describes what was written — it is never a
+// request to write, and a consumer failing to deliver it changes nothing about
+// the entry, which is already on the forge.
+//
+// It names its origin (Transport + Root) so a consumer can tell which thread
+// produced it — and so the transport that already replied in that thread can
+// avoid announcing the same write to the same people twice.
+//
+// # Untrusted fields
+//
+// Note, Title and Author are UNTRUSTED. They are secret-redacted upstream
+// (redact.Secrets) and length-capped, but they remain model- or human-authored
+// text: on the model-drafted route RunLore's own chat model wrote Note, and
+// Author is whatever the chat transport reported. Every implementer MUST escape
+// them with its transport's escaper before rendering — unescaped they can inject
+// links and mass-ping a channel (Slack <!channel>, Matrix @room), the same
+// hazard ProgressUpdate.Interim carries.
+//
+// URL and Root are untrusted for the same reason at one remove: they come back
+// from the forge and from the chat transport rather than from RunLore, which is
+// why the thread reply already wraps the URL in thread.Untrusted. Transport,
+// Route, PR and At are RunLore's own values and need no escaping.
+type KBUpdate struct {
+	// Transport is the chat system the note came from ("slack", "matrix"),
+	// matching ThreadNotifier.Transport; "" when the write had no thread origin.
+	Transport string
+	// Root is the opaque thread-root handle on that transport (Slack: thread_ts).
+	Root string
+	// Route is how the write landed (comment on an open PR, or a new PR).
+	Route KBRoute
+	// PR is the forge pull/merge request number the knowledge landed in; 0 when
+	// the forge URL did not name one.
+	PR int
+	// URL is the forge URL of that pull request.
+	URL string
+	// Title is the knowledge entry's title. Set on the KBRouteOpenPR route,
+	// which generates one; empty on KBRouteComment, which adds to an entry that
+	// was already titled. UNTRUSTED.
+	Title string
+	// Author is the human whose thread message produced the note, as the chat
+	// transport reported it. Provenance, not proof of identity. UNTRUSTED.
+	Author string
+	// Note is the note text AS WRITTEN to the forge — post-redaction and
+	// post-cap, never the caller's raw input, so an announcement cannot leak
+	// what the entry itself masked. UNTRUSTED.
+	Note string
+	// At is when the write landed.
+	At time.Time
+}
+
+// KBUpdateNotifier is an OPTIONAL capability a Notifier may implement to receive
+// KBUpdate announcements, so a knowledge-base write reaches every configured
+// destination rather than only the thread that produced it.
+//
+// It is separate from Notifier — and, unlike ThreadNotifier, does not embed it —
+// for the same reason ProgressNotifier is: a KB-update announcement is not an
+// Investigation, and widening Notifier would force every existing sink to grow a
+// method it has no use for. Consumers type-assert for it (see notify.Multi) and
+// skip the sinks that do not implement it.
+//
+// Delivery is best-effort by contract: a failure is logged and swallowed, never
+// propagated. The write being announced has already landed on the forge, so a
+// broadcast must never be able to report it as failed or roll it back.
+type KBUpdateNotifier interface {
+	DeliverKBUpdate(ctx context.Context, up KBUpdate) error
+}
+
 // CurationForge is the forge surface the curator's file-time gate needs: open a
 // drafted PR, list open KB PRs (dedup), and comment to coalesce duplicates.
 type CurationForge interface {

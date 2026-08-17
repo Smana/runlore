@@ -3,6 +3,7 @@
 package providers_test
 
 import (
+	"context"
 	"encoding/json"
 	"reflect"
 	"testing"
@@ -193,6 +194,73 @@ func TestCompletionResponseCostOnlyKeepsOnlyTheCost(t *testing.T) {
 		}
 		if !out.Field(i).IsZero() {
 			t.Errorf("CostOnly() kept %s = %v; it describes a reply that never arrived and must not reach a caller", name, got)
+		}
+	}
+}
+
+// deliverOnly implements providers.Notifier and NOTHING else — the shape every
+// existing sink (webhook, templated) has. It is what the optionality of the
+// KB-update capability is measured against.
+type deliverOnly struct{}
+
+func (deliverOnly) Deliver(context.Context, providers.Investigation) error { return nil }
+
+// TestKBUpdateNotifierIsOptional pins that announcing a knowledge-base write is
+// an OPTIONAL capability, not a widening of Notifier. Folding DeliverKBUpdate
+// into Notifier would force every existing sink to grow a method it has no use
+// for, and would turn "this sink does not announce KB writes" from a capability
+// check in Multi into a compile error across the repo.
+func TestKBUpdateNotifierIsOptional(t *testing.T) {
+	var n providers.Notifier = deliverOnly{}
+	if _, ok := n.(providers.KBUpdateNotifier); ok {
+		t.Fatal("a plain Notifier must NOT satisfy KBUpdateNotifier — the capability is opt-in")
+	}
+	if got := reflect.TypeOf((*providers.Notifier)(nil)).Elem().NumMethod(); got != 1 {
+		t.Fatalf("Notifier has %d methods, want 1 (Deliver) — the KB-update capability must not widen it", got)
+	}
+	// The capability itself must be exactly the one delivery method: embedding
+	// Notifier (as ThreadNotifier does) would make it non-optional again for any
+	// sink that wants only the announcement.
+	if got := reflect.TypeOf((*providers.KBUpdateNotifier)(nil)).Elem().NumMethod(); got != 1 {
+		t.Fatalf("KBUpdateNotifier has %d methods, want exactly 1 (DeliverKBUpdate)", got)
+	}
+}
+
+// kbUpdateUntrusted / kbUpdateTrusted classify EVERY KBUpdate field by whether a
+// notifier must escape it before rendering it into a chat message. The set is
+// stated here rather than derived, so a field added to KBUpdate has to be
+// deliberately classified — the announcement is a new egress for model-authored
+// text, and an unclassified field is one nobody decided to escape.
+//
+// Untrusted: Note/Title/Author are model- or human-authored (redacted upstream,
+// still not RunLore's words); URL and Root are returned by the forge and the chat
+// transport respectively, which is why the thread reply already wraps the URL in
+// thread.Untrusted.
+var (
+	kbUpdateUntrusted = map[string]bool{"Title": true, "Author": true, "Note": true, "URL": true, "Root": true}
+	kbUpdateTrusted   = map[string]bool{"Transport": true, "Route": true, "PR": true, "At": true}
+)
+
+// TestKBUpdateClassifiesEveryFieldForEscaping makes the two maps above bite: a
+// new KBUpdate field that appears in neither (or in both) fails here, forcing
+// its author to decide whether a notifier must escape it.
+func TestKBUpdateClassifiesEveryFieldForEscaping(t *testing.T) {
+	rt := reflect.TypeOf(providers.KBUpdate{})
+	for i := range rt.NumField() {
+		f := rt.Field(i)
+		if !f.IsExported() {
+			t.Fatalf("KBUpdate.%s is unexported — a notifier cannot render it, and this classification would go unchecked", f.Name)
+		}
+		if kbUpdateUntrusted[f.Name] == kbUpdateTrusted[f.Name] {
+			t.Errorf("KBUpdate.%s is in neither or both of kbUpdateUntrusted/kbUpdateTrusted — "+
+				"decide whether a notifier must escape it before rendering it", f.Name)
+		}
+	}
+	for _, m := range []map[string]bool{kbUpdateUntrusted, kbUpdateTrusted} {
+		for name := range m {
+			if _, ok := rt.FieldByName(name); !ok {
+				t.Errorf("KBUpdate has no field %q — stale classification entry", name)
+			}
 		}
 	}
 }

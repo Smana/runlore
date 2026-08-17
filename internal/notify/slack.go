@@ -112,6 +112,7 @@ func NewSlack(webhookURL string) *Slack {
 var (
 	_ providers.Notifier         = (*Slack)(nil)
 	_ providers.ProgressNotifier = (*Slack)(nil)
+	_ providers.KBUpdateNotifier = (*Slack)(nil)
 )
 
 // Deliver posts the formatted investigation to the webhook. When an action carries
@@ -180,6 +181,7 @@ var (
 	_ providers.Notifier         = (*SlackBot)(nil)
 	_ providers.ProgressNotifier = (*SlackBot)(nil)
 	_ providers.ThreadNotifier   = (*SlackBot)(nil)
+	_ providers.KBUpdateNotifier = (*SlackBot)(nil)
 )
 
 // Deliver posts the compact summary to the channel, then the full analysis as a
@@ -233,8 +235,13 @@ func (s *SlackBot) DeliverProgress(ctx context.Context, up providers.ProgressUpd
 // RunLore's claims about what it did (see thread.modelVoice). The angle
 // brackets in FreeformNotRecordedReply's backticked "`note: <text>`" example
 // are RunLore's own too.
+//
+// The rendered result is then bounded at slackReplyBytes — AFTER escaping,
+// because escaping is what can make it overflow. Without that bound a long
+// enough model answer makes the post itself fail, and the human is told nothing
+// about a note that was already written; see boundPostedReply.
 func (s *SlackBot) ReplyInThread(ctx context.Context, root, channel, text string) error {
-	msg := map[string]any{"text": thread.RenderReply(text, escapeMrkdwn), "thread_ts": root}
+	msg := map[string]any{"text": boundPostedReply(thread.RenderReply(text, escapeMrkdwn), slackReplyBytes), "thread_ts": root}
 	if channel != "" {
 		msg["channel"] = channel
 	}
@@ -946,6 +953,7 @@ func NewMulti(log *slog.Logger, notifiers ...providers.Notifier) *Multi {
 var (
 	_ providers.Notifier         = (*Multi)(nil)
 	_ providers.ProgressNotifier = (*Multi)(nil)
+	_ providers.KBUpdateNotifier = (*Multi)(nil)
 )
 
 // Deliver fans out to every notifier (best-effort: one bad sink never blocks the
@@ -975,6 +983,36 @@ func (m *Multi) DeliverProgress(ctx context.Context, up providers.ProgressUpdate
 		}
 		if err := pn.DeliverProgress(ctx, up); err != nil {
 			m.log.Error("progress delivery failed (swallowed)", "err", err)
+		}
+	}
+	return nil
+}
+
+// DeliverKBUpdate announces a knowledge-base write to every wrapped notifier
+// that implements KBUpdateNotifier (the same type-assert capability check
+// DeliverProgress does), skipping those that don't — an announcement is not an
+// Investigation, and a sink that cannot render one is skipped rather than
+// erroring.
+//
+// It is best-effort by contract, exactly like DeliverProgress: a failing sink is
+// logged and swallowed, never propagated, and it returns nil always. The write
+// being announced has ALREADY landed on the forge before this is called, so a
+// broadcast that could fail would report a write that in fact succeeded as
+// failed — and there is nothing here to roll back.
+//
+// Nil-safe: an unwired Multi is a no-op, so the KB-write path can hold a nil
+// sink to mean "announcements are off" without a nil check at every call site.
+func (m *Multi) DeliverKBUpdate(ctx context.Context, up providers.KBUpdate) error {
+	if m == nil {
+		return nil
+	}
+	for _, n := range m.notifiers {
+		kn, ok := n.(providers.KBUpdateNotifier)
+		if !ok {
+			continue
+		}
+		if err := kn.DeliverKBUpdate(ctx, up); err != nil {
+			m.log.Error("knowledge-base update delivery failed (swallowed)", "err", err, "url", up.URL, "route", string(up.Route))
 		}
 	}
 	return nil

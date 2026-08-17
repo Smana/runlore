@@ -931,6 +931,26 @@ type ThreadNotify struct {
 	// path, because that field compares the size of the next request against
 	// the limit rather than a running total.
 	ChatTokensPerHour int64 `yaml:"chat_tokens_per_hour"`
+	// AnnounceKBUpdates broadcasts a landed knowledge write to every configured
+	// notifier — each one's own channel or room, never back into the thread — so
+	// a knowledge-base update reaches people who were not reading the thread it
+	// came from.
+	//
+	// Default FALSE. It is the one field in this block that is a switch rather
+	// than a bound, and the only one whose zero value turns something OFF rather
+	// than selecting a default, so the "0 means the default" convention above
+	// does not apply to it. Opt-in for two reasons: it adds notification volume
+	// to channels that did not ask for it, while the thread reply is already the
+	// direct acknowledgement to the person who typed; and the announcement
+	// carries the note's own text, so enabling it sends what someone wrote in
+	// one thread to every sink configured here. That is an operator's decision
+	// to take knowingly, which makes the unconfigured state the off state.
+	//
+	// With a single transport configured, one write then produces both the
+	// thread reply and a channel post. That is intended rather than duplication
+	// — the channel is how people who were not in the thread learn the knowledge
+	// base moved — and it is the whole reason the feature exists.
+	AnnounceKBUpdates bool `yaml:"announce_kb_updates"`
 }
 
 // EffectiveMaxNotesPerThread resolves the configured cap, falling back to
