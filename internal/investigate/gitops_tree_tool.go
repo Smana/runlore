@@ -12,15 +12,19 @@ import (
 )
 
 // GitOpsTreeTool walks a resource's dependency graph (Flux dependsOn/sourceRef, or an
-// Argo CD Application's managed-resource tree) and renders it, so the model can find
-// the ROOT failing resource behind a cascade (the not-Ready/Degraded or missing
-// node), not just the downstream symptom.
+// Argo CD Application's managed-resource tree) and renders it, so the model can look for
+// the ROOT failing resource behind a cascade — the not-Ready/Degraded node, or one the
+// API did not return — rather than the downstream symptom.
 type GitOpsTreeTool struct {
 	Inspector providers.GitOpsInspector
 	// Engine bounds the kinds this tool advertises and accepts, exactly as on
-	// GitOpsStatusTool. It matters MORE here: a missing root node renders as
-	// "NOT FOUND  ← root", which nominates the absence as the cause outright, so an
-	// out-of-scope kind does not merely mislead — it hands back a root cause.
+	// GitOpsStatusTool, and selects the engine-specific half of its description.
+	//
+	// It matters MORE here because a node this tool cannot read is still rendered, so
+	// an out-of-scope or unresolvable kind does not merely go unanswered — it produces a
+	// line in a dependency tree. Every such line now says what the lookup was
+	// (renderDepNode + gitopsLookupNote); it used to say "NOT FOUND  ← root", nominating
+	// the absence as the cause outright.
 	Engine string
 }
 
