@@ -171,6 +171,25 @@ func HasFrontmatter(raw []byte) bool {
 // every note after the first — the original bug wearing a different hat.
 func NoteMarker(key string) string { return "<!-- runlore-note:" + key + " -->" }
 
+// WithNoteMarker returns block carrying the marker for key, so the HasNoteMarker
+// check that runs before the NEXT append to the same entry finds it.
+//
+// It is the write half of that pair and lives beside it for the reason this
+// file's header gives: both forge clients build this block, and two copies of a
+// rule about the bundle's bytes drift. A marker written one way and looked for
+// another is not a cosmetic drift — it is the idempotency gone, silently, on
+// whichever forge fell behind.
+//
+// An empty key means "no idempotency", the same thing it means to HasNoteMarker:
+// the block is returned unmarked rather than carrying a keyless marker that
+// every later note would then match and be dropped by.
+func WithNoteMarker(block, key string) string {
+	if key == "" {
+		return block
+	}
+	return block + "\n\n" + NoteMarker(key)
+}
+
 // HasNoteMarker reports whether raw already carries the note keyed by key, so a
 // replayed delivery appends nothing a second time.
 //

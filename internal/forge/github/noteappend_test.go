@@ -3,6 +3,7 @@
 package github
 
 import (
+	"cmp"
 	"context"
 	"encoding/base64"
 	"encoding/json"
@@ -52,13 +53,6 @@ type stubPR struct {
 	puts    []recordedPut
 }
 
-func (s *stubPR) or(v, def string) string {
-	if v == "" {
-		return def
-	}
-	return v
-}
-
 // emptyEntry asks the stub to serve a ZERO-BYTE file. "" cannot say that: an
 // unset content field means "serve the default entry", so the two need
 // different spellings.
@@ -69,21 +63,21 @@ func (s *stubPR) start(t *testing.T) *Client {
 	if s.content == emptyEntry {
 		s.content = ""
 	} else {
-		s.content = s.or(s.content, noteEntry)
+		s.content = cmp.Or(s.content, noteEntry)
 	}
 	s.sha = "entrysha0"
 	if s.changed == nil {
 		s.changed = []string{"index.md", "log.md", "concepts/oom-1.md"}
 	}
-	s.entry = s.or(s.entry, "concepts/oom-1.md")
+	s.entry = cmp.Or(s.entry, "concepts/oom-1.md")
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /repos/o/r/pulls/84", func(w http.ResponseWriter, _ *http.Request) {
-		head := `"head":{"ref":"` + s.or(s.branch, "runlore/kb-oom-1") + `"`
-		if repo := s.or(s.headRepo, "o/r"); repo != "-" {
+		head := `"head":{"ref":"` + cmp.Or(s.branch, "runlore/kb-oom-1") + `"`
+		if repo := cmp.Or(s.headRepo, "o/r"); repo != "-" {
 			head += `,"repo":{"full_name":"` + repo + `"}`
 		}
-		_, _ = w.Write([]byte(`{"state":"` + s.or(s.state, "open") + `",` + head + `}}`))
+		_, _ = w.Write([]byte(`{"state":"` + cmp.Or(s.state, "open") + `",` + head + `}}`))
 	})
 	mux.HandleFunc("GET /repos/o/r/pulls/84/files", func(w http.ResponseWriter, _ *http.Request) {
 		out := make([]map[string]string, 0, len(s.changed))
@@ -95,11 +89,11 @@ func (s *stubPR) start(t *testing.T) *Client {
 	mux.HandleFunc("GET /repos/o/r/contents/{path...}", func(w http.ResponseWriter, r *http.Request) {
 		s.mu.Lock()
 		defer s.mu.Unlock()
-		if r.PathValue("path") != s.entry || r.URL.Query().Get("ref") != s.or(s.branch, "runlore/kb-oom-1") {
+		if r.PathValue("path") != s.entry || r.URL.Query().Get("ref") != cmp.Or(s.branch, "runlore/kb-oom-1") {
 			w.WriteHeader(http.StatusNotFound)
 			return
 		}
-		enc := s.or(s.encoding, "base64")
+		enc := cmp.Or(s.encoding, "base64")
 		body := map[string]string{"sha": s.sha, "encoding": enc, "content": base64.StdEncoding.EncodeToString([]byte(s.content))}
 		if enc != "base64" {
 			// What GitHub actually answers for a blob over 1 MB: 200, a real sha,

@@ -149,10 +149,7 @@ func (c *Client) AppendToEntryOnPR(ctx context.Context, number int, body, key st
 	// caller: thread.NoteBody neutralises the note TEXT but interpolates identity
 	// fields (author, thread title) around it, and on the first-draft path those
 	// are covered by renderEntry, not by NoteBody.
-	block := neutralizeImages(body)
-	if key != "" {
-		block += "\n\n" + okf.NoteMarker(key)
-	}
+	block := okf.WithNoteMarker(neutralizeImages(body), key)
 	if err := c.putFile(ctx, entry, pr.Head.Ref, sha, "runlore: append operator note to "+entry,
 		okf.AppendBlock(raw, block)); err != nil {
 		return c.appendLanded(ctx, entry, pr.Head.Ref, key, err)

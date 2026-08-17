@@ -118,10 +118,7 @@ func (c *Client) AppendToEntryOnPR(ctx context.Context, number int, body, key st
 	// neutralizeImages for the same reason renderEntry applies it to a first
 	// draft — see github.Client.AppendToEntryOnPR for the full argument; the
 	// appended block is untrusted text landing on a page a reviewer opens.
-	block := neutralizeImages(body)
-	if key != "" {
-		block += "\n\n" + okf.NoteMarker(key)
-	}
+	block := okf.WithNoteMarker(neutralizeImages(body), key)
 	if err := c.commitEntry(ctx, entry, mr.SourceBranch, lastCommit, string(okf.AppendBlock(raw, block))); err != nil {
 		return c.appendLanded(ctx, entry, mr.SourceBranch, key, err)
 	}

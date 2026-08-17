@@ -3,6 +3,7 @@
 package gitlab
 
 import (
+	"cmp"
 	"context"
 	"encoding/base64"
 	"encoding/json"
@@ -48,25 +49,18 @@ type stubMR struct {
 	commits    []map[string]any
 }
 
-func (s *stubMR) or(v, def string) string {
-	if v == "" {
-		return def
-	}
-	return v
-}
-
 func (s *stubMR) start(t *testing.T) *Client {
 	t.Helper()
 	if s.content == emptyEntry {
 		s.content = ""
 	} else {
-		s.content = s.or(s.content, noteEntry)
+		s.content = cmp.Or(s.content, noteEntry)
 	}
 	s.lastCommit = "commit0"
 	if s.changed == nil {
 		s.changed = []string{"index.md", "log.md", "concepts/oom-1.md"}
 	}
-	s.entry = s.or(s.entry, "concepts/oom-1.md")
+	s.entry = cmp.Or(s.entry, "concepts/oom-1.md")
 
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		path := r.URL.EscapedPath()
@@ -81,7 +75,7 @@ func (s *stubMR) start(t *testing.T) *Client {
 				src = 7
 			}
 			_ = json.NewEncoder(w).Encode(map[string]any{
-				"state": s.or(s.state, "opened"), "source_branch": s.or(s.branch, "runlore/kb-oom-1"),
+				"state": cmp.Or(s.state, "opened"), "source_branch": cmp.Or(s.branch, "runlore/kb-oom-1"),
 				"source_project_id": src, "target_project_id": 7, "changes": changes,
 			})
 		case strings.Contains(path, "/repository/files/"):
@@ -94,11 +88,11 @@ func (s *stubMR) start(t *testing.T) *Client {
 			// endpoint is the one carrying last_commit_id, which is why the client
 			// stopped using /raw here.
 			want := "/repository/files/" + url.PathEscape(s.entry)
-			if !strings.HasSuffix(path, want) || r.URL.Query().Get("ref") != s.or(s.branch, "runlore/kb-oom-1") {
+			if !strings.HasSuffix(path, want) || r.URL.Query().Get("ref") != cmp.Or(s.branch, "runlore/kb-oom-1") {
 				w.WriteHeader(http.StatusNotFound)
 				return
 			}
-			enc := s.or(s.encoding, "base64")
+			enc := cmp.Or(s.encoding, "base64")
 			content := base64.StdEncoding.EncodeToString([]byte(s.content))
 			if enc != "base64" {
 				content = ""

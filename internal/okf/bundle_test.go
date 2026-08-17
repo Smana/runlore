@@ -198,3 +198,30 @@ func TestNoteMarkerIsInvisibleAndKeyed(t *testing.T) {
 		t.Error("an empty key must never match")
 	}
 }
+
+// TestWithNoteMarkerRoundTripsThroughHasNoteMarker pins the two halves of the
+// idempotency pair against EACH OTHER, which is the only property that matters:
+// a block written by one forge and re-read by the append after it must be
+// recognised. Asserting the marker's bytes separately in each place is what
+// would let them drift apart while both files still passed their own tests.
+func TestWithNoteMarkerRoundTripsThroughHasNoteMarker(t *testing.T) {
+	entry := []byte("---\ntype: Concept\n---\n\nnote one\n")
+	appended := AppendBlock(entry, WithNoteMarker("### note two\n\nthe second note", "k2"))
+
+	if !HasNoteMarker(appended, "k2") {
+		t.Errorf("the marker WithNoteMarker wrote is not one HasNoteMarker finds — the next note would duplicate this one:\n%s", appended)
+	}
+	if !HasFrontmatter(appended) || !strings.Contains(string(appended), "note one") {
+		t.Errorf("appending the marked block lost what was already in the entry:\n%s", appended)
+	}
+	if n := strings.Count(string(appended), NoteMarker("k2")); n != 1 {
+		t.Errorf("marker written %d times, want exactly 1", n)
+	}
+
+	// An empty key is "no idempotency", the same thing it means to HasNoteMarker:
+	// no marker is written, rather than a keyless one every later note would then
+	// match and be dropped by.
+	if got := WithNoteMarker("### note two", ""); got != "### note two" {
+		t.Errorf("WithNoteMarker with no key = %q, want the block untouched", got)
+	}
+}
