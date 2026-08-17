@@ -36,6 +36,7 @@ import (
 	"github.com/Smana/runlore/internal/providers"
 	awscloud "github.com/Smana/runlore/internal/providers/cloud/aws"
 	"github.com/Smana/runlore/internal/providers/cluster"
+	"github.com/Smana/runlore/internal/redact"
 	"github.com/Smana/runlore/internal/sourcerepo"
 	"github.com/Smana/runlore/internal/telemetry"
 	"github.com/Smana/runlore/internal/whatchanged"
@@ -764,7 +765,23 @@ func onInvestigationComplete(ctx context.Context, found providers.Investigation,
 	// findings are still delivered.
 	if cur != nil {
 		if ref, err := cur.Curate(context.Background(), found); err != nil {
-			log.Error("curate findings", "err", err)
+			// Redacted ONCE, here, for both uses below.
+			//
+			// The egress chokepoint has already run. investigate.LoopInvestigator.deliver
+			// calls redactInvestigation and THEN OnComplete, so anything stamped onto
+			// `found` from here on has missed it — which would give CurateError the
+			// treatment of a redactionSkipField entry without being on that list, and
+			// falsify notify/templated's "the Investigation is already secret-redacted
+			// before any notifier runs". Every sink redacts again at render today, so
+			// there is no live leak; there would be one the moment curate_error is added
+			// to notify.Payload, which is the natural answer to #506's second ask.
+			// redact.Secrets is idempotent, so the render-site calls stay.
+			//
+			// The log line needs it just as much: a forge error carries a
+			// server-provided body, and this wrote it — credential and all — into
+			// whatever aggregator collects RunLore's logs.
+			reason := redact.Secrets(err.Error())
+			log.Error("curate findings", "err", reason)
 			// Carry the reason to delivery. Logging alone made this failure invisible to
 			// the human: an empty CuratedURL renders identically whether the write was
 			// skipped by design (below min_confidence, or a skip_verdicts verdict) or
@@ -772,7 +789,7 @@ func onInvestigationComplete(ctx context.Context, found providers.Investigation,
 			// — an 85%-confidence finding whose KB PR 403'd was indistinguishable from a
 			// below-threshold one, and the operator only noticed because they happened to
 			// write a thread note, which DOES report the failure.
-			found.CurateError = err.Error()
+			found.CurateError = reason
 		} else if ref.URL != "" {
 			found.CuratedURL = ref.URL
 			log.Info("curated", "url", ref.URL)

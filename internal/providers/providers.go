@@ -802,7 +802,15 @@ type Investigation struct {
 	// only when a write was ATTEMPTED and failed. It exists because an empty CuratedURL is
 	// ambiguous: it is also the normal state for a finding below curate.min_confidence or
 	// carrying a skip_verdicts verdict, so "no KB link" cannot tell a human whether the
-	// learning loop is working. Rendered by notify.Format; never written to the KB body.
+	// learning loop is working. Rendered by notify.Format AND by the Slack card's footer
+	// (notify.summaryBlocks), both through notify.curateFailureReason; never written to
+	// the KB body.
+	//
+	// The one field on this struct stamped AFTER investigate.redactInvestigation, because
+	// curation runs in the OnComplete pipeline rather than inside the loop. It is
+	// therefore redacted at its assignment (app.onInvestigationComplete) rather than by
+	// the reflection walk, and it is deliberately NOT on redactionSkipField — it is
+	// server-supplied free text, the opposite of what that list is for.
 	CurateError   string
 	Fingerprint   string      // originating alert fingerprint; for outcome-ledger attribution
 	Fingerprints  []string    // coalesced batch fingerprints; one outcome open is recorded per entry
