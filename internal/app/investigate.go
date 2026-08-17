@@ -108,16 +108,13 @@ func BuildModelAndTools(ctx context.Context, cfg *config.Config, gp providers.Gi
 			}
 			// Hybrid (cosine-gated) recall — opt-in, and only effective once the catalog
 			// actually built vectors (an embedder was configured + embedding succeeded).
+			// The cosine gates are resolved by config.ApplyDefaults (0.80 / 0.05) rather
+			// than coalesced here, so the effective thresholds are readable from the
+			// config instead of existing only on this construction path.
 			if cfg.Catalog.InstantRecall.Hybrid {
 				recall.Hybrid = cat
 				recall.HybridMinScore = cfg.Catalog.InstantRecall.HybridMinScore
 				recall.HybridMarginGap = cfg.Catalog.InstantRecall.HybridMarginGap
-				if recall.HybridMinScore == 0 {
-					recall.HybridMinScore = 0.80
-				}
-				if recall.HybridMarginGap == 0 {
-					recall.HybridMarginGap = 0.05
-				}
 				log.Info("hybrid recall enabled (EXPERIMENTAL — tune cosine thresholds via the instant-recall eval)",
 					"hybrid_min_score", recall.HybridMinScore, "hybrid_margin_gap", recall.HybridMarginGap,
 					"vectors_ready", cat.HasVectors())
