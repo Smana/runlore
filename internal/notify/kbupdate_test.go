@@ -605,13 +605,14 @@ func TestKBUpdateAnnouncementNeverPostsIntoAThread(t *testing.T) {
 }
 
 // kbRoutingSinks wires both chat notifiers at one httptest server, recording the
-// request PATH alongside the body.
+// request PATH alongside the body, and returns them keyed by transport the way
+// kbUpdateSinkOnFakeTransport does.
 //
 // The path is what carries the destination on Matrix — the room id is in the
 // URL, not the payload — so a test that read only bodies could not tell an
 // announcement delivered into the originating room from one delivered into the
 // notifier's configured room, which is the entire distinction being tested.
-func kbRoutingSinks(t *testing.T) (slack, matrix providers.KBUpdateNotifier, posts *[]kbPost) {
+func kbRoutingSinks(t *testing.T) (map[string]providers.KBUpdateNotifier, *[]kbPost) {
 	t.Helper()
 	var sent []kbPost
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -623,7 +624,8 @@ func kbRoutingSinks(t *testing.T) (slack, matrix providers.KBUpdateNotifier, pos
 
 	bot := NewSlackBot("xoxb-test", "C-CONFIGURED")
 	bot.baseURL = srv.URL
-	return bot, NewMatrix(srv.URL, "!configured-room:example.org", "tok"), &sent
+	mx := NewMatrix(srv.URL, "!configured-room:example.org", "tok")
+	return map[string]providers.KBUpdateNotifier{"slack": bot, "matrix": mx}, &sent
 }
 
 type kbPost struct{ path, body string }
@@ -688,27 +690,24 @@ func matrixOrigin(d providers.KBDelivery) providers.KBUpdate {
 // room is in the URL where a body-only assertion cannot see it at all.
 func TestAnnouncementRoutesIntoTheOriginatingThread(t *testing.T) {
 	for _, tc := range []struct {
-		name             string
+		sink             string
 		up               providers.KBUpdate
-		sink             func(slack, matrix providers.KBUpdateNotifier) providers.KBUpdateNotifier
 		wantRoot, wantTo string
 	}{
 		{
-			name:     "slack",
+			sink:     "slack",
 			up:       slackOrigin(providers.KBDeliverThread),
-			sink:     func(s, _ providers.KBUpdateNotifier) providers.KBUpdateNotifier { return s },
 			wantRoot: "111.222", wantTo: "C-ORIGIN",
 		},
 		{
-			name:     "matrix",
+			sink:     "matrix",
 			up:       matrixOrigin(providers.KBDeliverThread),
-			sink:     func(_, m providers.KBUpdateNotifier) providers.KBUpdateNotifier { return m },
 			wantRoot: "$evt-root", wantTo: "/_matrix/client/v3/rooms/!room-of-origin:example.org/send/m.room.message/",
 		},
 	} {
-		t.Run(tc.name, func(t *testing.T) {
-			slack, matrix, posts := kbRoutingSinks(t)
-			if err := tc.sink(slack, matrix).DeliverKBUpdate(context.Background(), tc.up); err != nil {
+		t.Run(tc.sink, func(t *testing.T) {
+			sinks, posts := kbRoutingSinks(t)
+			if err := sinks[tc.sink].DeliverKBUpdate(context.Background(), tc.up); err != nil {
 				t.Fatalf("DeliverKBUpdate: %v", err)
 			}
 			if len(*posts) != 1 {
@@ -761,25 +760,25 @@ func TestAnnouncementFallsBackToTheChannelForANonOriginatingSink(t *testing.T) {
 	for _, tc := range []struct {
 		name   string
 		up     providers.KBUpdate
-		sink   func(slack, matrix providers.KBUpdateNotifier) providers.KBUpdateNotifier
+		sink   string
 		wantTo string
 	}{
 		{
 			name:   "matrix sink, slack-born note",
 			up:     slackOrigin(providers.KBDeliverThread),
-			sink:   func(_, m providers.KBUpdateNotifier) providers.KBUpdateNotifier { return m },
+			sink:   "matrix",
 			wantTo: "/_matrix/client/v3/rooms/!configured-room:example.org/send/m.room.message/",
 		},
 		{
 			name:   "slack sink, matrix-born note",
 			up:     matrixOrigin(providers.KBDeliverThread),
-			sink:   func(s, _ providers.KBUpdateNotifier) providers.KBUpdateNotifier { return s },
+			sink:   "slack",
 			wantTo: "C-CONFIGURED",
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			slack, matrix, posts := kbRoutingSinks(t)
-			if err := tc.sink(slack, matrix).DeliverKBUpdate(context.Background(), tc.up); err != nil {
+			sinks, posts := kbRoutingSinks(t)
+			if err := sinks[tc.sink].DeliverKBUpdate(context.Background(), tc.up); err != nil {
 				t.Fatalf("DeliverKBUpdate: %v", err)
 			}
 			if len(*posts) != 1 {
@@ -850,10 +849,10 @@ func TestAnnouncementFallsBackToTheChannelWithoutBothThreadHandles(t *testing.T)
 		{name: "neither"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			slack, _, posts := kbRoutingSinks(t)
+			sinks, posts := kbRoutingSinks(t)
 			up := slackOrigin(providers.KBDeliverThread)
 			up.Root, up.Channel = tc.root, tc.chann
-			if err := slack.DeliverKBUpdate(context.Background(), up); err != nil {
+			if err := sinks["slack"].DeliverKBUpdate(context.Background(), up); err != nil {
 				t.Fatalf("DeliverKBUpdate: %v", err)
 			}
 			if len(*posts) != 1 {
@@ -887,32 +886,29 @@ func TestAnnouncementFallsBackToTheChannelWithoutBothThreadHandles(t *testing.T)
 // original inline m.send while Slack's is a helper call.
 func TestAnnouncementBothReachesTheThreadAndTheChannel(t *testing.T) {
 	for _, tc := range []struct {
-		name                   string
+		sink                   string
 		up                     providers.KBUpdate
-		pick                   func(slack, matrix providers.KBUpdateNotifier) providers.KBUpdateNotifier
 		wantRoot               string
 		threadDest, configured string
 	}{
 		{
-			name:       "slack",
+			sink:       "slack",
 			up:         slackOrigin(providers.KBDeliverBoth),
-			pick:       func(s, _ providers.KBUpdateNotifier) providers.KBUpdateNotifier { return s },
 			wantRoot:   "111.222",
 			threadDest: "C-ORIGIN",
 			configured: "C-CONFIGURED",
 		},
 		{
-			name:       "matrix",
+			sink:       "matrix",
 			up:         matrixOrigin(providers.KBDeliverBoth),
-			pick:       func(_, m providers.KBUpdateNotifier) providers.KBUpdateNotifier { return m },
 			wantRoot:   "$evt-root",
 			threadDest: "/_matrix/client/v3/rooms/!room-of-origin:example.org/send/m.room.message/",
 			configured: "/_matrix/client/v3/rooms/!configured-room:example.org/send/m.room.message/",
 		},
 	} {
-		t.Run(tc.name, func(t *testing.T) {
-			slack, matrix, posts := kbRoutingSinks(t)
-			if err := tc.pick(slack, matrix).DeliverKBUpdate(context.Background(), tc.up); err != nil {
+		t.Run(tc.sink, func(t *testing.T) {
+			sinks, posts := kbRoutingSinks(t)
+			if err := sinks[tc.sink].DeliverKBUpdate(context.Background(), tc.up); err != nil {
 				t.Fatalf("DeliverKBUpdate: %v", err)
 			}
 			if len(*posts) != 2 {
