@@ -152,3 +152,31 @@ func TestDeliverErrorNeverLeaksTheURL(t *testing.T) {
 		}
 	}
 }
+
+// TestTemplatedDeliberatelyDoesNotAnnounceKBUpdates states this package's
+// answer to the KB-update capability, so that answer is a decision on the
+// record rather than an omission nobody noticed.
+//
+// It does NOT implement providers.KBUpdateNotifier, and the reason is the
+// notifier's whole design: an instance is an operator-supplied text/template
+// executed over notify.Payload — a finished investigation. A knowledge-base
+// update is not one. Running the operator's finding template over it would
+// render every field as its zero value and POST that to Teams, Discord or
+// ntfy: a notification claiming an investigation with no title, no verdict and
+// no confidence, which is worse than not notifying at all.
+//
+// Doing it properly needs a SECOND template key, for a shape no operator has
+// written a template for — a config change with its own schema, validation and
+// docs, not a method. Until that key exists, being skipped by notify.Multi is
+// the honest behaviour, and an operator wanting a machine-readable KB update
+// today has notify.webhook, which sends the whole record as JSON.
+//
+// Deleting this test is the way to change the decision; it should not survive
+// an implementation.
+func TestTemplatedDeliberatelyDoesNotAnnounceKBUpdates(t *testing.T) {
+	var n providers.Notifier = &Notifier{}
+	if _, ok := n.(providers.KBUpdateNotifier); ok {
+		t.Fatal("templated implements providers.KBUpdateNotifier — if that is intended, delete this test and document the template key the announcement renders through; " +
+			"an instance's template is written against notify.Payload, and a KB update executed through it renders an investigation of zero values")
+	}
+}

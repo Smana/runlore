@@ -1630,3 +1630,68 @@ func TestThreadRepliersLeaveNoUntrustedMarksInThePostedText(t *testing.T) {
 		}
 	}
 }
+
+// captureKBUpdate is a fake KBUpdateNotifier recording every announcement (and
+// optionally failing) — the test double for the KB-update capability fan-out,
+// mirroring captureProgress above.
+type captureKBUpdate struct {
+	got  []providers.KBUpdate
+	fail bool
+}
+
+func (c *captureKBUpdate) Deliver(context.Context, providers.Investigation) error { return nil }
+func (c *captureKBUpdate) DeliverKBUpdate(_ context.Context, up providers.KBUpdate) error {
+	c.got = append(c.got, up)
+	if c.fail {
+		return errors.New("boom")
+	}
+	return nil
+}
+
+// TestMultiDeliverKBUpdateCapability proves Multi announces a knowledge-base
+// write only to notifiers implementing KBUpdateNotifier — a plain notifier is
+// SKIPPED, not called and not crashed on — and that a failing sink is attempted
+// and then swallowed. The write already landed on the forge before this call:
+// a broadcast that propagated an error would report a failure for something
+// that in fact succeeded.
+func TestMultiDeliverKBUpdateCapability(t *testing.T) {
+	plain := notifierFunc(func(context.Context, providers.Investigation) error {
+		t.Fatal("a plain (non-KB-update) notifier must not receive Deliver on a KB-update announcement")
+		return nil
+	})
+	cap1 := &captureKBUpdate{}
+	cap2 := &captureKBUpdate{fail: true} // failing sink: must be swallowed
+	m := NewMulti(slog.New(slog.NewTextHandler(io.Discard, nil)), plain, cap1, cap2)
+	up := providers.KBUpdate{
+		Transport: "slack", Root: "111.222",
+		Route: providers.KBRouteOpenPR, PR: 12,
+		URL:    "https://github.com/o/r/pull/12",
+		Title:  "Operator note: HarborDown",
+		Author: "sre-jane",
+		Note:   "the registry PVC was full",
+		At:     time.Date(2026, 8, 16, 9, 0, 0, 0, time.UTC),
+	}
+	if err := m.DeliverKBUpdate(context.Background(), up); err != nil {
+		t.Fatalf("DeliverKBUpdate must swallow sink errors, got %v", err)
+	}
+	if len(cap1.got) != 1 || cap1.got[0] != up {
+		t.Fatalf("KB-update-capable notifier got %+v, want exactly one announcement equal to %+v", cap1.got, up)
+	}
+	if len(cap2.got) != 1 {
+		t.Fatalf("a failing KB-update sink must still be attempted, got %d", len(cap2.got))
+	}
+}
+
+// TestMultiDeliverKBUpdateNilAndEmptyAreNoOps pins the nil-safe contract: the
+// announcement is opt-in, so an unwired or notifier-less Multi is a silent no-op
+// rather than a panic on the path that just wrote to the knowledge base.
+func TestMultiDeliverKBUpdateNilAndEmptyAreNoOps(t *testing.T) {
+	var nilMulti *Multi
+	if err := nilMulti.DeliverKBUpdate(context.Background(), providers.KBUpdate{}); err != nil {
+		t.Fatalf("nil Multi: got %v, want nil", err)
+	}
+	empty := NewMulti(slog.New(slog.NewTextHandler(io.Discard, nil)))
+	if err := empty.DeliverKBUpdate(context.Background(), providers.KBUpdate{}); err != nil {
+		t.Fatalf("empty Multi: got %v, want nil", err)
+	}
+}

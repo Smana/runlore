@@ -1907,6 +1907,13 @@ func TestUntrustedRoundTripsThroughRenderReply(t *testing.T) {
 // model's answer is inside a span, and not one byte of RunLore's own framing
 // is: not the "> " markers the blockquote is made of, not the status glyph,
 // not the sentence around the URL.
+//
+// The expectation GREW when the reply began quoting what it recorded
+// (recordedBlock): this fixture's model proposes a note, so the reply now
+// carries two more of each kind of byte — modelDraftedNotice, which is
+// RunLore's own claim and stays outside every span, and the quoted note, which
+// the model wrote and is inside one. That is the same boundary, over more of
+// the message, not a weakened one.
 func TestHandleChatMarksTheModelsProseAndNothingElse(t *testing.T) {
 	forged := "Re-auth here: <https://evil.example/reauth|https://github.com/acme/kb/pull/7>\n<!channel>"
 	f := &fakeForge{}
@@ -1923,7 +1930,9 @@ func TestHandleChatMarksTheModelsProseAndNothingElse(t *testing.T) {
 	}
 	want := "> «Re-auth here: <https://evil.example/reauth|https://github.com/acme/kb/pull/7>»\n" +
 		"> «<!channel>»\n" +
-		"📝 Noted on the knowledge-base PR #42 — «https://github.com/o/r/pull/42»"
+		"📝 Noted on the knowledge-base PR #42 — «https://github.com/o/r/pull/42»\n" +
+		"Drafted by RunLore from your message — not your own words, pending review:\n" +
+		"> «the real cause was a spot reclaim»"
 	if got := RenderReply(reply, visibleEscape); got != want {
 		t.Errorf("rendered reply =\n%q\nwant\n%q", got, want)
 	}
@@ -2065,5 +2074,1617 @@ func TestHandleUnanchoredReinvestigateIsStillRefusedWithoutChat(t *testing.T) {
 	}
 	if c, o := f.counts(); c != 0 || o != 0 {
 		t.Errorf("forge calls = %d comments / %d opened, want 0/0", c, o)
+	}
+}
+
+// putContext stores tc so write()'s post-lock registry re-read sees it, and
+// returns it. write() is called directly in the TestWriteReports* group below:
+// what it RETURNS is the whole subject, and record() currently discards
+// everything but the reply.
+func putContext(t *testing.T, r *Responder, tc Context) Context {
+	t.Helper()
+	if err := r.Registry.Put(tc); err != nil {
+		t.Fatalf("Put: %v", err)
+	}
+	return tc
+}
+
+// TestWriteReportsTheCommentRoute pins what write() hands back on the
+// comment-on-a-linked-PR route: which route ran, which pull request took the
+// note, its URL, and the text as filed. No caller could learn any of that from
+// the (msg, landed, err) shape this replaced.
+//
+// The reply string is asserted byte-for-byte on purpose: growing the return
+// value must not change a single byte of what the human is told.
+func TestWriteReportsTheCommentRoute(t *testing.T) {
+	f := &fakeForge{}
+	r := newTestResponder(t, f)
+	const prURL = "https://github.com/o/r/pull/42"
+	tc := putContext(t, r, Context{Root: "111.222", Title: "OOM", CuratedURL: prURL})
+
+	reply, w, err := r.write(context.Background(), tc, HumanNote("alice", "spot reclaim, not OOM"), noteAt)
+	if err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	if w == nil {
+		t.Fatal("write reported no result for a note that landed on PR #42")
+	}
+	if w.Route != RouteComment {
+		t.Errorf("Route = %q, want %q", w.Route, RouteComment)
+	}
+	if w.PR != 42 {
+		t.Errorf("PR = %d, want 42", w.PR)
+	}
+	if w.URL != prURL {
+		t.Errorf("URL = %q, want %q", w.URL, prURL)
+	}
+	if w.Note != "spot reclaim, not OOM" {
+		t.Errorf("Note = %q, want the note text as filed", w.Note)
+	}
+	// The comment route adds to an entry that already exists; it generates no
+	// title of its own, and inventing one would name something nobody wrote.
+	if w.Title != "" {
+		t.Errorf("Title = %q, want empty on the comment route — no entry was generated", w.Title)
+	}
+	if want := "📝 Noted on the knowledge-base PR #42 — " + Untrusted(prURL); reply != want {
+		t.Errorf("reply = %q, want %q — this change grows what write RETURNS, never what it says", reply, want)
+	}
+}
+
+// TestWriteReportsTheOpenPRRoute pins the standalone-PR route, including the
+// entry title ConceptEntry generated — the one value the human cannot see
+// anywhere else without opening the pull request.
+func TestWriteReportsTheOpenPRRoute(t *testing.T) {
+	t.Run("numbered URL", func(t *testing.T) {
+		f := &fakeForge{openURL: "https://github.com/o/r/pull/99"}
+		r := newTestResponder(t, f)
+		tc := putContext(t, r, Context{Root: "111.222", Title: "OOM in payments"})
+
+		reply, w, err := r.write(context.Background(), tc, HumanNote("alice", "stale since Karpenter"), noteAt)
+		if err != nil {
+			t.Fatalf("write: %v", err)
+		}
+		if w == nil {
+			t.Fatal("write reported no result for a note that opened PR #99")
+		}
+		if w.Route != RouteOpenPR {
+			t.Errorf("Route = %q, want %q", w.Route, RouteOpenPR)
+		}
+		if w.PR != 99 {
+			t.Errorf("PR = %d, want 99", w.PR)
+		}
+		if w.URL != "https://github.com/o/r/pull/99" {
+			t.Errorf("URL = %q, want the forge's own Ref URL", w.URL)
+		}
+		if len(f.opened) != 1 {
+			t.Fatalf("opened = %d, want 1", len(f.opened))
+		}
+		if w.Title != f.opened[0].Title {
+			t.Errorf("Title = %q, want %q — the title the entry was actually filed under", w.Title, f.opened[0].Title)
+		}
+		if w.Title == "" {
+			t.Error("Title is empty; the open_pr route generates one and must report it")
+		}
+		if w.Note != "stale since Karpenter" {
+			t.Errorf("Note = %q, want the note text as filed", w.Note)
+		}
+		if want := "📝 Opened knowledge-base PR #99 with your note — " + Untrusted("https://github.com/o/r/pull/99"); reply != want {
+			t.Errorf("reply = %q, want %q", reply, want)
+		}
+	})
+
+	// A Ref URL with no pull-request number in it is not an error — the write
+	// landed, and the human still gets the URL. The result must say the same:
+	// everything known, and 0 for the one thing that is not.
+	t.Run("unnumbered URL", func(t *testing.T) {
+		f := &fakeForge{openURL: "https://github.com/o/r/kb"}
+		r := newTestResponder(t, f)
+		tc := putContext(t, r, Context{Root: "111.222", Title: "OOM"})
+
+		reply, w, err := r.write(context.Background(), tc, HumanNote("alice", "note text"), noteAt)
+		if err != nil {
+			t.Fatalf("write: %v", err)
+		}
+		if w == nil {
+			t.Fatal("write reported no result for a note that opened a PR")
+		}
+		if w.PR != 0 {
+			t.Errorf("PR = %d, want 0 — the Ref URL carries no number", w.PR)
+		}
+		if w.URL != "https://github.com/o/r/kb" {
+			t.Errorf("URL = %q, want the forge's own Ref URL", w.URL)
+		}
+		if w.Route != RouteOpenPR {
+			t.Errorf("Route = %q, want %q", w.Route, RouteOpenPR)
+		}
+		if want := "📝 Opened a knowledge-base PR with your note — " + Untrusted("https://github.com/o/r/kb"); reply != want {
+			t.Errorf("reply = %q, want %q", reply, want)
+		}
+	})
+}
+
+// TestWriteReportsTheNoteAsWritten is the security-relevant assertion of the
+// group: what write() reports is the text that REACHED THE FORGE — redacted
+// and capped — not the caller's raw input. A caller that quotes it back into a
+// chat message (PR4's whole point) must not be able to unmask what the entry
+// masked, nor republish the bytes the cap dropped.
+//
+// One message carries both hazards at once, deliberately: a secret AND more
+// bytes than the cap allows. Separately they would each pass against an
+// implementation that applied only the other transform.
+func TestWriteReportsTheNoteAsWritten(t *testing.T) {
+	const secret = "ghp_" + "ABCDEFGHIJKLMNOPQRSTUVWX"
+	// No "![", no "<" and no "#": those are the FORGE-markdown defusals, which
+	// run downstream of the shared redact+cap value (see
+	// TestWriteReportsTheHumansTextNotItsForgeMarkdownDefusal). Keeping them out
+	// of this input makes noteText an identity beyond redact+cap, so the
+	// Contains check below is a byte-identity check on the whole block.
+	raw := "the deploy token " + secret + " leaked into the log; " + strings.Repeat("padding ", 60)
+
+	f := &fakeForge{}
+	r := newTestResponder(t, f)
+	r.MaxNoteBytes = 200
+	const prURL = "https://github.com/o/r/pull/42"
+	tc := putContext(t, r, Context{Root: "111.222", Title: "OOM", CuratedURL: prURL})
+
+	_, w, err := r.write(context.Background(), tc, HumanNote("alice", raw), noteAt)
+	if err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	if w == nil {
+		t.Fatal("write reported no result for a note that landed")
+	}
+	if strings.Contains(w.Note, secret) || strings.Contains(w.Note, "ghp_") {
+		t.Errorf("the reported note still carries the secret — it must be the redacted text:\n%q", w.Note)
+	}
+	if !strings.Contains(w.Note, "[REDACTED]") {
+		t.Errorf("the reported note carries no mask where the secret was:\n%q", w.Note)
+	}
+	if len(w.Note) > r.MaxNoteBytes {
+		t.Errorf("the reported note is %d bytes, want at most MaxNoteBytes (%d)", len(w.Note), r.MaxNoteBytes)
+	}
+	if !strings.Contains(w.Note, "truncated") {
+		t.Errorf("a cut note must be reported as cut, exactly as it is filed:\n%q", w.Note)
+	}
+	if len(f.comments) != 1 {
+		t.Fatalf("comments = %d, want 1", len(f.comments))
+	}
+	// Byte-identical to what reached the forge: the reported string appears
+	// verbatim inside the body that was actually written.
+	if !strings.Contains(f.comments[0].body, w.Note) {
+		t.Errorf("the reported note is not byte-identical to the text written to the forge.\nreported:\n%q\nbody:\n%s", w.Note, f.comments[0].body)
+	}
+	// And the body itself is unchanged by the sharing: evaluating redact+cap
+	// once, up front, must render exactly the body NoteBody renders from the raw
+	// note. This is the guard on the refactor, not on the feature.
+	if want := NoteBody(tc, HumanNote("alice", raw), noteAt, r.MaxNoteBytes); f.comments[0].body != want {
+		t.Errorf("the forge body changed.\ngot:\n%s\nwant:\n%s", f.comments[0].body, want)
+	}
+}
+
+// TestWriteReportsTheHumansTextNotItsForgeMarkdownDefusal draws the boundary
+// deliberately: the reported note is the redacted, capped text — NOT the
+// forge-markdown defusal applied on top of it.
+//
+// Redaction and the cap are what the entry did to the CONTENT, and a reply that
+// skipped them would leak what the entry masked. The three defusals
+// (neutralizeImages, neutralizeHTML, escapeOKFSections) are for GitHub's and
+// GitLab's Markdown renderers, which no chat transport is; repeating them in a
+// chat reply would show the human "!&#91;" where they typed "![" and would
+// protect nothing, since a chat transport's own hazards are neutralised by
+// Untrusted at the point of rendering.
+func TestWriteReportsTheHumansTextNotItsForgeMarkdownDefusal(t *testing.T) {
+	f := &fakeForge{}
+	r := newTestResponder(t, f)
+	tc := putContext(t, r, Context{Root: "111.222", CuratedURL: "https://github.com/o/r/pull/42"})
+
+	const raw = "the dashboard ![pixel](https://e.example/p.gif) is stale"
+	_, w, err := r.write(context.Background(), tc, HumanNote("alice", raw), noteAt)
+	if err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	if w == nil {
+		t.Fatal("write reported no result for a note that landed")
+	}
+	if w.Note != raw {
+		t.Errorf("Note = %q, want the human's own text %q", w.Note, raw)
+	}
+	if len(f.comments) != 1 {
+		t.Fatalf("comments = %d, want 1", len(f.comments))
+	}
+	if !strings.Contains(f.comments[0].body, "!&#91;pixel]") {
+		t.Errorf("the forge body must still be defused for Markdown:\n%s", f.comments[0].body)
+	}
+}
+
+// TestWriteReportsNothingWhenNothingLanded is the other half of the contract:
+// a nil result everywhere the knowledge base was NOT written. A caller that
+// announces a write must have nothing to announce on any of these paths, and a
+// nil pointer is what makes "nothing landed" and "here is what landed" one
+// value that cannot disagree with itself.
+func TestWriteReportsNothingWhenNothingLanded(t *testing.T) {
+	t.Run("throttled", func(t *testing.T) {
+		f := &fakeForge{}
+		r := newTestResponder(t, f)
+		// A one-event window with its one event already spent: ratelimit.New(0, …)
+		// means UNLIMITED, not "refuse everything".
+		r.ForgeWrites = ratelimit.New(1, time.Hour)
+		if !r.ForgeWrites.Allow() {
+			t.Fatal("the window refused its first event; this test cannot reach the throttled path")
+		}
+		tc := putContext(t, r, Context{Root: "111.222", CuratedURL: "https://github.com/o/r/pull/42"})
+
+		reply, w, err := r.write(context.Background(), tc, HumanNote("alice", "x"), noteAt)
+		if err != nil {
+			t.Fatalf("a throttle is not an error: %v", err)
+		}
+		if w != nil {
+			t.Errorf("throttled write reported %+v, want no result", *w)
+		}
+		if !strings.Contains(reply, "paused") {
+			t.Errorf("reply = %q, want the throttle message", reply)
+		}
+		if c, o := f.counts(); c != 0 || o != 0 {
+			t.Errorf("forge calls = %d/%d, want 0/0", c, o)
+		}
+	})
+
+	t.Run("comment failed", func(t *testing.T) {
+		f := &fakeForge{commErr: errors.New("forge down")}
+		r := newTestResponder(t, f)
+		tc := putContext(t, r, Context{Root: "111.222", CuratedURL: "https://github.com/o/r/pull/42"})
+
+		_, w, err := r.write(context.Background(), tc, HumanNote("alice", "x"), noteAt)
+		if err == nil {
+			t.Fatal("a failed comment must still be an error")
+		}
+		if w != nil {
+			t.Errorf("failed write reported %+v, want no result", *w)
+		}
+	})
+
+	t.Run("open PR failed", func(t *testing.T) {
+		f := &fakeForge{openErr: errors.New("forge down")}
+		r := newTestResponder(t, f)
+		tc := putContext(t, r, Context{Root: "111.222"})
+
+		_, w, err := r.write(context.Background(), tc, HumanNote("alice", "x"), noteAt)
+		if err == nil {
+			t.Fatal("a failed OpenPR must still be an error")
+		}
+		if w != nil {
+			t.Errorf("failed write reported %+v, want no result", *w)
+		}
+	})
+
+	t.Run("open-check failed", func(t *testing.T) {
+		f := &fakeForge{prOpenErr: errors.New("forge unreachable")}
+		r := newTestResponder(t, f)
+		tc := putContext(t, r, Context{Root: "111.222", CuratedURL: "https://github.com/o/r/pull/42"})
+
+		_, w, err := r.write(context.Background(), tc, HumanNote("alice", "x"), noteAt)
+		if err == nil {
+			t.Fatal("an unreachable forge must still be an error")
+		}
+		if w != nil {
+			t.Errorf("failed write reported %+v, want no result", *w)
+		}
+	})
+
+	// The per-thread cap is enforced in record(), UPSTREAM of write(), so a
+	// capped note produces no result for the simplest possible reason: write()
+	// never runs and the forge is never touched. Asserted here rather than
+	// assumed, because that placement is what makes the cap a real ceiling on
+	// anything a caller could later announce.
+	t.Run("capped", func(t *testing.T) {
+		f := &fakeForge{}
+		r := newTestResponder(t, f)
+		r.MaxNotesPerThread = 1
+		tc := putContext(t, r, Context{Root: "111.222", Notes: 1, CuratedURL: "https://github.com/o/r/pull/42"})
+
+		reply, err := r.record(context.Background(), tc, HumanNote("alice", "x"))
+		if err != nil {
+			t.Fatalf("record: %v", err)
+		}
+		if !strings.Contains(reply, "note limit") {
+			t.Errorf("reply = %q, want the per-thread cap message", reply)
+		}
+		if c, o := f.counts(); c != 0 || o != 0 {
+			t.Errorf("forge calls = %d/%d, want 0/0 — a capped note never reaches write()", c, o)
+		}
+	})
+}
+
+// untrustedSpans returns the CONTENT of every span Untrusted marked in reply,
+// in order — the test-side inverse of RenderReply. It is what a transport's
+// escape function is handed, and nothing else: everything RunLore wrote itself
+// falls on the even indices and is dropped here.
+func untrustedSpans(reply string) []string {
+	parts := strings.Split(reply, untrustedMark)
+	spans := make([]string, 0, len(parts)/2)
+	for i := 1; i < len(parts); i += 2 {
+		spans = append(spans, parts[i])
+	}
+	return spans
+}
+
+// TestReplyQuotesTheRecordedNote is the feature: after a note lands the human
+// is told WHAT was filed, not only where it went.
+//
+// Before this, the reply was a PR number and a URL. On the model-drafted route
+// that meant a human read "Opened knowledge-base PR #12 with your note" about
+// text RunLore's own model wrote in their name, and could not see a word of it
+// without leaving the thread. The `note:` route was barely better: a human
+// whose message was redacted or cut had no way to see that from the reply.
+//
+// Both routes are asserted, and the `note:` one with the chat layer OFF — the
+// default deployment. The whole rendered reply is pinned byte-for-byte rather
+// than probed with Contains, because the SHAPE is the property: RunLore's
+// status line at the left margin, the quote blockquoted under it, and the
+// untrusted spans exactly where they belong (see
+// TestReplyQuotesTheNoteAsUntrustedAndNothingElse).
+func TestReplyQuotesTheRecordedNote(t *testing.T) {
+	t.Run("comment route, note: with chat off", func(t *testing.T) {
+		f := &fakeForge{}
+		r := newTestResponder(t, f)
+		if r.Chat != nil {
+			t.Fatal("test setup: this case must run with the chat layer off")
+		}
+		tc := Context{Root: "111.222", Title: "OOM", CuratedURL: "https://github.com/o/r/pull/42"}
+		if err := r.Registry.Put(tc); err != nil {
+			t.Fatalf("Put: %v", err)
+		}
+
+		reply, err := r.Handle(context.Background(), tc, "alice", "<@U0BOT> note: spot reclaim, not OOM")
+		if err != nil {
+			t.Fatalf("Handle: %v", err)
+		}
+		// No "Entry:" line: the comment route adds to an entry someone else
+		// already titled, and the pull request it joined is named in the status
+		// line above. KBWrite.Title is empty here by design, not by omission.
+		want := "📝 Noted on the knowledge-base PR #42 — «https://github.com/o/r/pull/42»\n" +
+			"> «spot reclaim, not OOM»"
+		if got := RenderReply(reply, visibleEscape); got != want {
+			t.Errorf("rendered reply =\n%q\nwant\n%q", got, want)
+		}
+	})
+
+	t.Run("open_pr route names the entry it created", func(t *testing.T) {
+		f := &fakeForge{}
+		r := newTestResponder(t, f)
+		tc := Context{Root: "111.222", Title: "OOM in payments"}
+		if err := r.Registry.Put(tc); err != nil {
+			t.Fatalf("Put: %v", err)
+		}
+
+		reply, err := r.Handle(context.Background(), tc, "alice", "<@U0BOT> note: stale since Karpenter")
+		if err != nil {
+			t.Fatalf("Handle: %v", err)
+		}
+		if len(f.opened) != 1 {
+			t.Fatalf("opened = %d, want 1", len(f.opened))
+		}
+		want := "📝 Opened knowledge-base PR #99 with your note — «https://github.com/o/r/pull/99»\n" +
+			"Entry: «Operator note: OOM in payments»\n" +
+			"> «stale since Karpenter»"
+		if got := RenderReply(reply, visibleEscape); got != want {
+			t.Errorf("rendered reply =\n%q\nwant\n%q", got, want)
+		}
+		// The name in the reply is the name the entry was actually filed under,
+		// not a second rendering of the same inputs that could drift from it.
+		if !strings.Contains(reply, f.opened[0].Title) {
+			t.Errorf("the reply names %q, but the entry was filed as %q", reply, f.opened[0].Title)
+		}
+	})
+}
+
+// TestReplyQuotesWithinAPreviewCeiling pins the bound that makes quoting safe
+// to do at all: the quote is capped by notePreviewBytes, INDEPENDENTLY of
+// MaxNoteBytes.
+//
+// The two bound different things. MaxNoteBytes bounds what is written to the
+// knowledge base — 8 KiB by default, and an operator may set it higher
+// (config.Validate rejects only a negative one). Without a second ceiling here,
+// a note at that cap would be echoed back verbatim as a chat message of the
+// same size, in a thread, on a path any channel member can trigger.
+//
+// The fixture therefore sets MaxNoteBytes far ABOVE the default and files a
+// note that is comfortably under it: nothing about this bound can come from the
+// note cap, because the note cap never fires.
+func TestReplyQuotesWithinAPreviewCeiling(t *testing.T) {
+	f := &fakeForge{}
+	r := newTestResponder(t, f)
+	r.MaxNoteBytes = 64 << 10
+	// Trimmed: Parse trims the text it hands on, so a fixture ending in a space
+	// would not appear verbatim in the body the forge received.
+	note := strings.TrimSpace(strings.Repeat("spot reclaim ", 4000)) // ~52 KiB, under MaxNoteBytes
+	if len(note) >= r.MaxNoteBytes {
+		t.Fatalf("test setup: the note (%d bytes) must stay under MaxNoteBytes (%d) so the note cap never fires", len(note), r.MaxNoteBytes)
+	}
+	tc := Context{Root: "111.222", CuratedURL: "https://github.com/o/r/pull/42"}
+	if err := r.Registry.Put(tc); err != nil {
+		t.Fatalf("Put: %v", err)
+	}
+
+	reply, err := r.Handle(context.Background(), tc, "alice", "<@U0BOT> note: "+note)
+	if err != nil {
+		t.Fatalf("Handle: %v", err)
+	}
+	if len(f.comments) != 1 {
+		t.Fatalf("comments = %d, want 1", len(f.comments))
+	}
+	// The forge still got the whole note: the ceiling bounds what is SAID, never
+	// what is WRITTEN.
+	if !strings.Contains(f.comments[0].body, note) {
+		t.Error("the preview ceiling must not shorten what reaches the knowledge base")
+	}
+	for i, span := range untrustedSpans(reply) {
+		if len(span) > notePreviewBytes {
+			t.Errorf("untrusted span %d is %d bytes, want at most notePreviewBytes (%d)", i, len(span), notePreviewBytes)
+		}
+	}
+	// Framing headroom over the ceiling: a status line, a URL and the truncation
+	// notice, and nothing that scales with the note.
+	rendered := RenderReply(reply, nil)
+	if ceiling := notePreviewBytes + 256; len(rendered) > ceiling {
+		t.Errorf("reply is %d bytes, want at most %d — a %d-byte note must not become a %d-byte chat message",
+			len(rendered), ceiling, len(note), len(rendered))
+	}
+	if !strings.Contains(rendered, "truncated") {
+		t.Errorf("a cut quote must say it was cut:\n%q", rendered)
+	}
+	if !strings.Contains(rendered, "spot reclaim") {
+		t.Errorf("the preview must still carry the start of the note:\n%q", rendered)
+	}
+	// A note that FITS says nothing about truncation — the notice has to be a
+	// signal, not decoration.
+	t.Run("a short note is quoted whole", func(t *testing.T) {
+		f := &fakeForge{}
+		r := newTestResponder(t, f)
+		tc := Context{Root: "333.444", CuratedURL: "https://github.com/o/r/pull/42"}
+		if err := r.Registry.Put(tc); err != nil {
+			t.Fatalf("Put: %v", err)
+		}
+		reply, err := r.Handle(context.Background(), tc, "alice", "<@U0BOT> note: short and complete")
+		if err != nil {
+			t.Fatalf("Handle: %v", err)
+		}
+		if strings.Contains(reply, "truncated") {
+			t.Errorf("an uncut quote must not claim truncation:\n%q", reply)
+		}
+	})
+}
+
+// TestNotePreviewCeilingHasItsDocumentedValue pins the NUMBER, the way
+// config.TestThreadDefaultsHaveTheirDocumentedValues pins the thread defaults.
+//
+// The test above cannot. It asserts len(span) <= notePreviewBytes and bounds the
+// whole reply at notePreviewBytes+256, so both sides of every comparison are
+// recomputed from the constant under test and the assertion holds for ANY value:
+// raise notePreviewBytes from 512 to 8192 and it still passes, while a 650-byte
+// note that used to produce a ~700-byte reply now produces an 8,331-byte one —
+// the 8 KiB chat post that whole test exists to make impossible.
+//
+// 512 is derived rather than picked (see notePreviewBytes' doc comment): every
+// untrusted span is escaped before it goes on the wire and the widest escape,
+// Slack's "&" to "&amp;", expands 5x, so this reaches the transport as at most
+// ~2.5k characters — inside Slack's ~4k text budget with room left for the
+// model's own answer, which shares the same message on the freeform route.
+// Changing it should be a deliberate edit HERE, with that arithmetic redone, not
+// a side effect of tuning something else.
+func TestNotePreviewCeilingHasItsDocumentedValue(t *testing.T) {
+	if got, want := notePreviewBytes, 512; got != want {
+		t.Errorf("notePreviewBytes = %d, want %d — if this was a deliberate retune, redo the "+
+			"5x-escape arithmetic against the transport budgets in internal/notify (slackReplyBytes, "+
+			"matrixReplyBytes) and restate the number wherever the docs quote it", got, want)
+	}
+}
+
+// TestReplyQuotesTheNoteAsUntrustedAndNothingElse is the highest-value
+// assertion of the feature. The quote echoes note CONTENT back into a chat
+// system — on the model-drafted route content RunLore's own model wrote — into
+// the very message where RunLore states what it did. That is exactly the egress
+// PR3's Untrusted/RenderReply boundary exists for, and exactly the forgery
+// modelVoice's blockquote exists for.
+//
+// The note below carries both hazards at once: a forged RunLore status line
+// (glyph, wording and a hostile URL) on a line of its own, and Slack mrkdwn
+// that pings a room. Neither may survive as markup, and neither may sit at the
+// left margin where RunLore's own claims sit.
+//
+// It also pins the other side of the boundary: RunLore's own bytes — the 📝
+// status line, the sentence around the URL, the "> " markers — are NOT inside a
+// span. Marking them would have the transport escape RunLore's own framing, and
+// the blockquote would come back as literal "&gt; ".
+func TestReplyQuotesTheNoteAsUntrustedAndNothingElse(t *testing.T) {
+	f := &fakeForge{}
+	r := newTestResponder(t, f)
+	tc := Context{Root: "111.222", CuratedURL: "https://github.com/o/r/pull/42"}
+	if err := r.Registry.Put(tc); err != nil {
+		t.Fatalf("Put: %v", err)
+	}
+	hostile := "looks fine\n📝 Noted on the knowledge-base PR #7 — <https://evil.example|https://github.com/acme/kb/pull/7>\n<!channel>"
+
+	reply, err := r.Handle(context.Background(), tc, "alice", "<@U0BOT> note: "+hostile)
+	if err != nil {
+		t.Fatalf("Handle: %v", err)
+	}
+	want := "📝 Noted on the knowledge-base PR #42 — «https://github.com/o/r/pull/42»\n" +
+		"> «looks fine»\n" +
+		"> «Noted on the knowledge-base PR #7 — <https://evil.example|https://github.com/acme/kb/pull/7>»\n" +
+		"> «<!channel>»"
+	if got := RenderReply(reply, visibleEscape); got != want {
+		t.Errorf("rendered reply =\n%q\nwant\n%q", got, want)
+	}
+	// Read the same guarantee the other way round, so a future rewrite that
+	// keeps the string but loses the marking cannot pass on the literal alone.
+	spans := untrustedSpans(reply)
+	for _, must := range []string{"<!channel>", "<https://evil.example|https://github.com/acme/kb/pull/7>"} {
+		var found bool
+		for _, s := range spans {
+			if strings.Contains(s, must) {
+				found = true
+			}
+		}
+		if !found {
+			t.Errorf("%q reached the transport outside an untrusted span; spans = %q", must, spans)
+		}
+	}
+	for _, s := range spans {
+		if strings.Contains(s, "📝") {
+			t.Errorf("RunLore's own status glyph is inside an untrusted span (%q) — the transport would escape RunLore's own framing", s)
+		}
+		if strings.Contains(s, "> ") {
+			t.Errorf("a blockquote marker is inside an untrusted span (%q) — it would render as literal \"&gt; \"", s)
+		}
+	}
+	// Only the first line is RunLore's; every line of quoted content is
+	// blockquoted, so no note line can pose as a RunLore claim.
+	for _, line := range strings.Split(RenderReply(reply, nil), "\n")[1:] {
+		if !strings.HasPrefix(line, "> ") {
+			t.Errorf("a line of quoted note content sits at the left margin, where RunLore's own lines sit: %q", line)
+		}
+	}
+}
+
+// TestQuotedNoteCannotBreakOutOfTheBlockquote pins the measure the blockquote
+// only appeared to provide.
+//
+// QuoteUntrusted prefixes every LINE with "> ", and a line used to be whatever
+// "\n" separated. Text layout does not agree: UAX #14 gives seven characters a
+// MANDATORY break, and a client starts a new visual line at every one of them.
+// A note reading "harmless<U+2028>📝 Noted on the knowledge-base PR #7 —
+// <hostile URL>" therefore put its second half OUTSIDE the quote, at the left
+// margin, in RunLore's own vocabulary — the exact forgery modelVoice's
+// blockquote exists to stop, arriving through a rune that is not "\n".
+//
+// singleLine had already made this argument for the YAML title (see its doc
+// comment: U+2028 and U+2029 are the ones "many renderers and tokenizers break
+// on"), and noteField applies it to Author and Title. The note BODY is the one
+// untrusted span rendered multi-line BY DESIGN, so it is the one span that
+// cannot be flattened — and it was therefore the one span with no line-break
+// handling of any kind.
+//
+// Each break is asserted through the real reply, byte for byte: the forged line
+// must arrive with a "> " in front of it, nothing else may move, and CRLF must
+// count as one break rather than two.
+func TestQuotedNoteCannotBreakOutOfTheBlockquote(t *testing.T) {
+	const status = "📝 Noted on the knowledge-base PR #42 — https://github.com/o/r/pull/42"
+	const forged = "Noted on the knowledge-base PR #7 — https://evil.example/kb"
+
+	for _, br := range []struct{ name, sep string }{
+		{"LF U+000A", "\n"},
+		{"CR U+000D", "\r"},
+		{"CRLF is one break, not two", "\r\n"},
+		{"VT U+000B", "\v"},
+		{"FF U+000C", "\f"},
+		{"NEL U+0085", "\u0085"},
+		{"LS U+2028", "\u2028"},
+		{"PS U+2029", "\u2029"},
+	} {
+		t.Run(br.name, func(t *testing.T) {
+			r := newTestResponder(t, &fakeForge{})
+			tc := Context{Root: "111.222", CuratedURL: "https://github.com/o/r/pull/42"}
+			if err := r.Registry.Put(tc); err != nil {
+				t.Fatalf("Put: %v", err)
+			}
+			reply, err := r.Handle(context.Background(), tc, "alice",
+				"<@U0BOT> note: harmless"+br.sep+"📝 "+forged)
+			if err != nil {
+				t.Fatalf("Handle: %v", err)
+			}
+			want := status + "\n> harmless\n> " + forged
+			if got := RenderReply(reply, nil); got != want {
+				t.Errorf("a %s in the note escaped the blockquote.\n got %q\nwant %q", br.name, got, want)
+			}
+		})
+	}
+
+	// The other direction, and the reason the fix normalises BREAKS rather than
+	// mapping whitespace the way singleLine does: a tab, a no-break space and a
+	// blank line are not line breaks, so the quote must carry them through
+	// untouched. Flattening them would censor the note the human asked to read.
+	t.Run("everything that is not a break survives byte for byte", func(t *testing.T) {
+		r := newTestResponder(t, &fakeForge{})
+		tc := Context{Root: "333.444", CuratedURL: "https://github.com/o/r/pull/42"}
+		if err := r.Registry.Put(tc); err != nil {
+			t.Fatalf("Put: %v", err)
+		}
+		note := "one\ttabbed\n\nblank line above, no-break\u00a0space, zero\u200bwidth"
+		reply, err := r.Handle(context.Background(), tc, "alice", "<@U0BOT> note: "+note)
+		if err != nil {
+			t.Fatalf("Handle: %v", err)
+		}
+		want := status + "\n> one\ttabbed\n>\n> blank line above, no-break\u00a0space, zero\u200bwidth"
+		if got := RenderReply(reply, nil); got != want {
+			t.Errorf("ordinary note text was not quoted byte for byte.\n got %q\nwant %q", got, want)
+		}
+	})
+}
+
+// TestReplyQuotesTheModelDraftAsModelDrafted keeps the two routes apart in the
+// one place the human actually reads. ProposedNote already carries the
+// distinction into the ENTRY (see NoteBody), and quoting the text into the
+// thread is precisely what could erase it there: a human who sees their own
+// words quoted back reads them as their own, and a human who sees the MODEL's
+// words quoted back under "your note" would read those as their own too.
+//
+// So the reply says who wrote them, immediately above the quote.
+func TestReplyQuotesTheModelDraftAsModelDrafted(t *testing.T) {
+	f := &fakeForge{}
+	model := &fakeChatModel{resp: wellFormedReply("Noted — that changes the root cause.", "The real cause was a spot-node reclaim, not the CNI.")}
+	r := newChatResponder(t, f, model)
+	tc := Context{Root: "111.222", CuratedURL: "https://github.com/o/r/pull/42"}
+	if err := r.Registry.Put(tc); err != nil {
+		t.Fatalf("Put: %v", err)
+	}
+
+	reply, err := r.Handle(context.Background(), tc, "alice", "<@U0BOT> it was actually a spot reclaim")
+	if err != nil {
+		t.Fatalf("Handle: %v", err)
+	}
+	want := "> «Noted — that changes the root cause.»\n" +
+		"📝 Noted on the knowledge-base PR #42 — «https://github.com/o/r/pull/42»\n" +
+		"Drafted by RunLore from your message — not your own words, pending review:\n" +
+		"> «The real cause was a spot-node reclaim, not the CNI.»"
+	if got := RenderReply(reply, visibleEscape); got != want {
+		t.Errorf("rendered reply =\n%q\nwant\n%q", got, want)
+	}
+
+	// The `note:` route must NOT carry that line: it files the human's own
+	// words, and telling them RunLore drafted them would be a lie in the other
+	// direction.
+	t.Run("the note: route claims no such thing", func(t *testing.T) {
+		f := &fakeForge{}
+		r := newTestResponder(t, f)
+		tc := Context{Root: "555.666", CuratedURL: "https://github.com/o/r/pull/42"}
+		if err := r.Registry.Put(tc); err != nil {
+			t.Fatalf("Put: %v", err)
+		}
+		reply, err := r.Handle(context.Background(), tc, "alice", "<@U0BOT> note: it was a spot reclaim")
+		if err != nil {
+			t.Fatalf("Handle: %v", err)
+		}
+		if strings.Contains(reply, "Drafted by RunLore") {
+			t.Errorf("the human's own words were reported as RunLore's draft:\n%q", reply)
+		}
+	})
+}
+
+// TestModelDraftedNoticeIntroducesTheQuoteItPromises pins the ONE thing
+// modelDraftedNotice's trailing colon claims: that what follows it is the
+// quote.
+//
+// On the open_pr route it was not. recordedBlock emitted the notice first and
+// the "Entry:" line second, so the message read
+//
+//	Drafted by RunLore from your message — not your own words, pending review:
+//	Entry: Operator note: OOM in payments
+//	> the real cause was a spot-node reclaim
+//
+// — a colon promising a quote, answered by a title. Two colons in a row, the
+// second one introducing something the first one did not name. This whole PR
+// exists to make the feedback readable, so the notice sits immediately above
+// the block it introduces.
+//
+// The second case is the same rule read the other way: a notice whose colon
+// promises a quote that does not exist is the same defect with nothing after
+// it at all, so an empty preview renders no notice. Nothing is lost by that —
+// the status line's "a note drafted from your message" (see openedWith)
+// already carries the provenance, and it is the half that stands alone.
+func TestModelDraftedNoticeIntroducesTheQuoteItPromises(t *testing.T) {
+	t.Run("the assembled open_pr reply puts the notice against the quote", func(t *testing.T) {
+		f := &fakeForge{}
+		model := &fakeChatModel{resp: wellFormedReply("Noted — that changes the root cause.", "The real cause was a spot-node reclaim, not the CNI.")}
+		r := newChatResponder(t, f, model)
+		tc := putContext(t, r, Context{Root: "111.222", Title: "OOM in payments"})
+
+		reply, err := r.Handle(context.Background(), tc, "alice", "<@U0BOT> it was actually a spot reclaim")
+		if err != nil {
+			t.Fatalf("Handle: %v", err)
+		}
+		lines := strings.Split(RenderReply(reply, visibleEscape), "\n")
+		at := -1
+		for i, ln := range lines {
+			if ln == modelDraftedNotice {
+				at = i
+			}
+		}
+		if at < 0 {
+			t.Fatalf("the model-drafted notice is missing from the reply:\n%q", lines)
+		}
+		if at == len(lines)-1 {
+			t.Fatalf("the notice promises a quote and is the last line:\n%q", lines)
+		}
+		if next := lines[at+1]; !strings.HasPrefix(next, "> ") {
+			t.Errorf("the line under the model-drafted notice is %q, want the quote it introduces (a \"> \" line).\n"+
+				"The notice ends in a colon; whatever answers that colon is what the human reads as the drafted text.\nfull reply:\n%q",
+				next, lines)
+		}
+	})
+
+	// recordedBlock directly: the reply path always has note text, so the
+	// promise-with-nothing-after-it case is only reachable here — and this is
+	// the function that must not emit it.
+	t.Run("no quote, no notice", func(t *testing.T) {
+		block := recordedBlock(ProposedNote("alice", "was it the CNI?", "drafted"),
+			&KBWrite{Route: RouteOpenPR, PR: 99, URL: "https://github.com/o/r/pull/99", Title: "Operator note: OOM in payments"})
+		if strings.Contains(block, modelDraftedNotice) {
+			t.Errorf("the notice promises a quote, and there is none to show:\n%q", block)
+		}
+		if !strings.Contains(block, "Operator note: OOM in payments") {
+			t.Errorf("the entry title must still be named:\n%q", block)
+		}
+	})
+}
+
+// TestOpenPRStatusLineNamesWhoseNoteItOpenedWith closes a contradiction the
+// open_pr reply shipped: "📝 Opened knowledge-base PR #99 with your note" sat
+// directly above "Drafted by RunLore from your message — not your own words".
+// Two adjacent lines of one message disagreed about who wrote the thing that
+// was filed, and the human read the false one first.
+//
+// The status line is the half that has to be right on its own. It is what a
+// truncating transport keeps and what a human skims; a reader who stops after
+// it must not come away believing RunLore filed their words under their name
+// when it filed its own paraphrase.
+//
+// The `note:` route keeps "your note" unchanged, and that is asserted here too:
+// the fix is to stop claiming authorship RunLore does not have, not to stop
+// naming authorship at all. A reply that hedged both routes would be vaguer
+// than the one it replaced, which on this path is a regression.
+//
+// The comment route is deliberately absent from this table. Its status line
+// ("📝 Noted on the knowledge-base PR #42") makes no authorship claim to be
+// wrong about, so it is already true on both routes — see openedWith.
+func TestOpenPRStatusLineNamesWhoseNoteItOpenedWith(t *testing.T) {
+	draft := ProposedNote("alice", "was it the CNI?", "The real cause was a spot-node reclaim, not the CNI.")
+	typed := HumanNote("alice", "The real cause was a spot-node reclaim, not the CNI.")
+
+	// write()-level, both URL shapes: the unnumbered branch is a separate return
+	// with its own copy of the sentence, so it can drift from the numbered one.
+	t.Run("write", func(t *testing.T) {
+		for _, tt := range []struct {
+			name    string
+			note    Note
+			openURL string
+			want    string
+		}{
+			{
+				name:    "model-drafted, numbered URL",
+				note:    draft,
+				openURL: "https://github.com/o/r/pull/99",
+				want:    "📝 Opened knowledge-base PR #99 with a note drafted from your message — «https://github.com/o/r/pull/99»",
+			},
+			{
+				name:    "model-drafted, unnumbered URL",
+				note:    draft,
+				openURL: "https://github.com/o/r/kb",
+				want:    "📝 Opened a knowledge-base PR with a note drafted from your message — «https://github.com/o/r/kb»",
+			},
+			{
+				name:    "note:, numbered URL",
+				note:    typed,
+				openURL: "https://github.com/o/r/pull/99",
+				want:    "📝 Opened knowledge-base PR #99 with your note — «https://github.com/o/r/pull/99»",
+			},
+			{
+				name:    "note:, unnumbered URL",
+				note:    typed,
+				openURL: "https://github.com/o/r/kb",
+				want:    "📝 Opened a knowledge-base PR with your note — «https://github.com/o/r/kb»",
+			},
+		} {
+			t.Run(tt.name, func(t *testing.T) {
+				f := &fakeForge{openURL: tt.openURL}
+				r := newTestResponder(t, f)
+				tc := putContext(t, r, Context{Root: "111.222", Title: "OOM in payments"})
+
+				reply, w, err := r.write(context.Background(), tc, tt.note, noteAt)
+				if err != nil {
+					t.Fatalf("write: %v", err)
+				}
+				if w == nil {
+					t.Fatal("write reported no result for a note that opened a PR")
+				}
+				if got := RenderReply(reply, visibleEscape); got != tt.want {
+					t.Errorf("status line =\n%q\nwant\n%q", got, tt.want)
+				}
+			})
+		}
+	})
+
+	// End to end, because the contradiction was only visible in the assembled
+	// message: neither line was wrong in isolation, and no test read both at
+	// once. The whole rendered reply is pinned so a future edit to either line
+	// has to look at the other.
+	t.Run("the assembled model-drafted reply agrees with itself", func(t *testing.T) {
+		f := &fakeForge{}
+		model := &fakeChatModel{resp: wellFormedReply("Noted — that changes the root cause.", "The real cause was a spot-node reclaim, not the CNI.")}
+		r := newChatResponder(t, f, model)
+		tc := putContext(t, r, Context{Root: "111.222", Title: "OOM in payments"})
+
+		reply, err := r.Handle(context.Background(), tc, "alice", "<@U0BOT> it was actually a spot reclaim")
+		if err != nil {
+			t.Fatalf("Handle: %v", err)
+		}
+		// The notice sits UNDER the entry title, against the quote its colon
+		// promises — see TestModelDraftedNoticeIntroducesTheQuoteItPromises for
+		// why that order moved.
+		want := "> «Noted — that changes the root cause.»\n" +
+			"📝 Opened knowledge-base PR #99 with a note drafted from your message — «https://github.com/o/r/pull/99»\n" +
+			"Entry: «Operator note: OOM in payments»\n" +
+			"Drafted by RunLore from your message — not your own words, pending review:\n" +
+			"> «The real cause was a spot-node reclaim, not the CNI.»"
+		if got := RenderReply(reply, visibleEscape); got != want {
+			t.Errorf("rendered reply =\n%q\nwant\n%q", got, want)
+		}
+		// The new clause is RunLore's own framing, so it must reach the transport
+		// unmarked — exactly like the status line it is part of. Marked, the
+		// transport would escape RunLore's own words.
+		for _, s := range untrustedSpans(reply) {
+			if strings.Contains(s, "drafted from your message") {
+				t.Errorf("RunLore's own status wording is inside an untrusted span: %q", s)
+			}
+		}
+	})
+}
+
+// TestReplyQuotesTheTextAsWrittenNotTheRawInput is the security half of
+// quoting. What the reply shows must be the text that REACHED THE FORGE —
+// redacted and capped by noteAsWritten — never the caller's raw input.
+//
+// Quoting n.Text instead would be a strictly worse egress than the entry it
+// describes: the reply would republish, into a chat room, both the secret the
+// entry masked and the bytes the entry's cap dropped. Task 1 put that value on
+// KBWrite.Note for exactly this consumer; this pins that the consumer uses it.
+//
+// The fixture carries both hazards at once — a secret AND more bytes than
+// MaxNoteBytes — and stays well under notePreviewBytes, so nothing here can be
+// mistaken for the preview ceiling doing the work.
+func TestReplyQuotesTheTextAsWrittenNotTheRawInput(t *testing.T) {
+	const secret = "ghp_" + "ABCDEFGHIJKLMNOPQRSTUVWX"
+	// No "![", "<" or "#": those trigger the forge-Markdown defusals, which are
+	// deliberately NOT in the quoted text (see KBWrite.Note), and would make the
+	// byte-identity check below fail for the wrong reason.
+	raw := "the deploy token " + secret + " leaked into the log; " + strings.TrimSpace(strings.Repeat("padding ", 30))
+
+	f := &fakeForge{}
+	r := newTestResponder(t, f)
+	r.MaxNoteBytes = 200
+	if len(raw) <= r.MaxNoteBytes || r.MaxNoteBytes >= notePreviewBytes {
+		t.Fatalf("test setup: the note (%d bytes) must exceed MaxNoteBytes (%d), which must itself stay under notePreviewBytes (%d)",
+			len(raw), r.MaxNoteBytes, notePreviewBytes)
+	}
+	tc := Context{Root: "111.222", CuratedURL: "https://github.com/o/r/pull/42"}
+	if err := r.Registry.Put(tc); err != nil {
+		t.Fatalf("Put: %v", err)
+	}
+
+	reply, err := r.Handle(context.Background(), tc, "alice", "<@U0BOT> note: "+raw)
+	if err != nil {
+		t.Fatalf("Handle: %v", err)
+	}
+	rendered := RenderReply(reply, nil)
+	if strings.Contains(rendered, secret) || strings.Contains(rendered, "ghp_") {
+		t.Errorf("the reply quoted the secret the entry masked:\n%q", rendered)
+	}
+	if !strings.Contains(rendered, "[REDACTED]") {
+		t.Errorf("the reply carries no mask where the secret was:\n%q", rendered)
+	}
+	if !strings.Contains(rendered, "input bytes dropped") {
+		t.Errorf("the reply must carry the cap's own truncation mark, exactly as the entry does:\n%q", rendered)
+	}
+	// Byte-identical to what was written: unquoting the blockquote must yield a
+	// string that appears verbatim in the body the forge received.
+	var quoted []string
+	for _, ln := range strings.Split(rendered, "\n") {
+		if s, ok := strings.CutPrefix(ln, ">"); ok {
+			quoted = append(quoted, strings.TrimPrefix(s, " "))
+		}
+	}
+	got := strings.Join(quoted, "\n")
+	if got == "" {
+		t.Fatalf("the reply quoted nothing:\n%q", rendered)
+	}
+	if len(got) > r.MaxNoteBytes {
+		t.Errorf("the quote is %d bytes, want at most MaxNoteBytes (%d) — it must be the capped text, not the raw input", len(got), r.MaxNoteBytes)
+	}
+	if len(f.comments) != 1 {
+		t.Fatalf("comments = %d, want 1", len(f.comments))
+	}
+	if !strings.Contains(f.comments[0].body, got) {
+		t.Errorf("the quote is not byte-identical to the text written to the forge.\nquoted:\n%q\nbody:\n%s", got, f.comments[0].body)
+	}
+}
+
+// ---- announcing a landed write to every configured sink --------------------
+
+// fakeKBSink is a providers.KBUpdateNotifier that records every announcement it
+// is handed.
+//
+// mu guards got because deliveries run DETACHED from the reply (see
+// KBAnnouncer): the goroutine that asserts is never the goroutine that
+// appended, so reading the slice unguarded would be a data race the -race
+// detector catches independently of anything under test.
+type fakeKBSink struct {
+	mu  sync.Mutex
+	got []providers.KBUpdate
+	err error
+	// entered and release are optional rendezvous channels, used by the tests
+	// that must prove the reply never waits for a sink: when entered is
+	// non-nil DeliverKBUpdate announces its arrival on it, and when release is
+	// non-nil it then blocks until release is closed.
+	entered chan struct{}
+	release chan struct{}
+}
+
+func (s *fakeKBSink) DeliverKBUpdate(_ context.Context, up providers.KBUpdate) error {
+	if s.entered != nil {
+		s.entered <- struct{}{}
+	}
+	if s.release != nil {
+		<-s.release
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.got = append(s.got, up)
+	return s.err
+}
+
+// updates returns a copy of what the sink has received so far, taken under the
+// lock.
+func (s *fakeKBSink) updates() []providers.KBUpdate {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return append([]providers.KBUpdate(nil), s.got...)
+}
+
+// newAnnouncingResponder is newTestResponder with announcements wired to a
+// recording sink.
+func newAnnouncingResponder(t *testing.T, f *fakeForge) (*Responder, *fakeKBSink) {
+	t.Helper()
+	r := newTestResponder(t, f)
+	sink := &fakeKBSink{}
+	r.Announcer = NewKBAnnouncer(sink, silentLog())
+	return r, sink
+}
+
+// drainAnnouncements waits for every detached announcement to finish, so an
+// assertion never races the delivery it is about. Bounded: a wedged sink must
+// fail this test rather than hang the suite.
+func drainAnnouncements(t *testing.T, r *Responder) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	r.Announcer.Drain(ctx)
+	if ctx.Err() != nil {
+		t.Fatal("announcements did not drain within 10s")
+	}
+}
+
+// TestAnnounceALandedWrite is the feature: one KBUpdate per successful write,
+// carrying everything write() reported plus where it came from.
+//
+// Both routes are driven, and the whole event is compared as ONE value rather
+// than field by field: a missing field is the failure this is for, and a
+// per-field probe would pass over one that was never populated at all.
+func TestAnnounceALandedWrite(t *testing.T) {
+	t.Run("comment route", func(t *testing.T) {
+		f := &fakeForge{}
+		r, sink := newAnnouncingResponder(t, f)
+		const prURL = "https://github.com/o/r/pull/42"
+		tc := putContext(t, r, Context{Transport: "slack", Root: "111.222", Title: "OOM", CuratedURL: prURL})
+
+		if _, err := r.Handle(context.Background(), tc, "alice", "<@U0BOT> note: spot reclaim, not OOM"); err != nil {
+			t.Fatalf("Handle: %v", err)
+		}
+		drainAnnouncements(t, r)
+
+		got := sink.updates()
+		if len(got) != 1 {
+			t.Fatalf("announcements = %d, want exactly 1 per landed write", len(got))
+		}
+		// Title is empty on this route by design — the note joined an entry
+		// someone else already titled (see KBWrite.Title).
+		want := providers.KBUpdate{
+			Transport: "slack",
+			Root:      "111.222",
+			Route:     providers.KBRouteComment,
+			PR:        42,
+			URL:       prURL,
+			Author:    "alice",
+			Note:      "spot reclaim, not OOM",
+			At:        noteAt,
+		}
+		if got[0] != want {
+			t.Errorf("announcement =\n%+v\nwant\n%+v", got[0], want)
+		}
+	})
+
+	t.Run("open_pr route", func(t *testing.T) {
+		f := &fakeForge{}
+		r, sink := newAnnouncingResponder(t, f)
+		tc := putContext(t, r, Context{Transport: "matrix", Root: "$evt:example.org", Title: "OOM in payments"})
+
+		if _, err := r.Handle(context.Background(), tc, "alice", "<@U0BOT> note: stale since Karpenter"); err != nil {
+			t.Fatalf("Handle: %v", err)
+		}
+		drainAnnouncements(t, r)
+
+		if len(f.opened) != 1 {
+			t.Fatalf("opened = %d, want 1", len(f.opened))
+		}
+		got := sink.updates()
+		if len(got) != 1 {
+			t.Fatalf("announcements = %d, want exactly 1 per landed write", len(got))
+		}
+		want := providers.KBUpdate{
+			Transport: "matrix",
+			Root:      "$evt:example.org",
+			Route:     providers.KBRouteOpenPR,
+			PR:        99,
+			URL:       "https://github.com/o/r/pull/99",
+			// The name the entry was actually filed under, not a second
+			// rendering of the same inputs that could drift from it.
+			Title:  f.opened[0].Title,
+			Author: "alice",
+			Note:   "stale since Karpenter",
+			At:     noteAt,
+		}
+		if got[0] != want {
+			t.Errorf("announcement =\n%+v\nwant\n%+v", got[0], want)
+		}
+		if got[0].Title == "" {
+			t.Error("Title is empty; the open_pr route generates one and the announcement must name it")
+		}
+	})
+}
+
+// TestAnnounceNamesItsOriginatingTransportAndRoot pins the half of the event a
+// consumer needs to tell where a write came from — and pins it as a value READ
+// from the thread context rather than a constant.
+//
+// This is what the owner's "distinct destination, not exclusion" decision rests
+// on: the announcement goes to each notifier's configured channel and never
+// into a thread, so the origin travels with the event instead of being used to
+// suppress it. A responder that stamped "slack" unconditionally would pass the
+// test above, which runs one transport.
+func TestAnnounceNamesItsOriginatingTransportAndRoot(t *testing.T) {
+	for _, tt := range []struct{ transport, root string }{
+		{"slack", "111.222"},
+		{"matrix", "$evt:example.org"},
+	} {
+		t.Run(tt.transport, func(t *testing.T) {
+			f := &fakeForge{}
+			r, sink := newAnnouncingResponder(t, f)
+			tc := putContext(t, r, Context{Transport: tt.transport, Root: tt.root, CuratedURL: "https://github.com/o/r/pull/42"})
+
+			if _, err := r.Handle(context.Background(), tc, "alice", "<@U0BOT> note: x"); err != nil {
+				t.Fatalf("Handle: %v", err)
+			}
+			drainAnnouncements(t, r)
+
+			got := sink.updates()
+			if len(got) != 1 {
+				t.Fatalf("announcements = %d, want 1", len(got))
+			}
+			if got[0].Transport != tt.transport {
+				t.Errorf("Transport = %q, want %q — the origin is read from the thread, never assumed", got[0].Transport, tt.transport)
+			}
+			if got[0].Root != tt.root {
+				t.Errorf("Root = %q, want %q", got[0].Root, tt.root)
+			}
+		})
+	}
+}
+
+// TestAnnounceNeverPostsIntoTheThread is the other half of that decision,
+// asserted end to end through the real transport-facing entry point: an
+// announcement is a SECOND destination, not a second message in the thread.
+//
+// Driven through Mention rather than Responder because Mention is the only
+// thing in this package that can post into a thread at all. Exactly one reply
+// goes to the Replier, and the announcement reaches the sink instead.
+func TestAnnounceNeverPostsIntoTheThread(t *testing.T) {
+	f, rep := &fakeForge{}, &fakeReplier{}
+	m := newTestMention(t, f, rep)
+	sink := &fakeKBSink{}
+	m.Responder.Announcer = NewKBAnnouncer(sink, silentLog())
+	if err := m.Registry.Put(Context{Transport: "slack", Root: "111.222", Channel: "C1", CuratedURL: "https://github.com/o/r/pull/42"}); err != nil {
+		t.Fatalf("Put: %v", err)
+	}
+
+	m.HandleMention(context.Background(), "C1", "111.222", "alice", "<@U0BOT> note: spot reclaim", nil)
+	drainAnnouncements(t, m.Responder)
+
+	if len(rep.replies) != 1 {
+		t.Fatalf("replies into the thread = %d, want exactly 1 — the announcement must not post a second one", len(rep.replies))
+	}
+	if got := sink.updates(); len(got) != 1 {
+		t.Fatalf("announcements = %d, want exactly 1", len(got))
+	}
+}
+
+// TestAnnounceNothingWhenNothingLanded is the assertion this package has
+// shipped wrong three times: an operation that did not happen must not report
+// as though it did. Every path that leaves the knowledge base untouched is
+// asserted SEPARATELY — one of them silently regressing behind another's pass
+// is exactly how that class of bug survives.
+func TestAnnounceNothingWhenNothingLanded(t *testing.T) {
+	assertSilent := func(t *testing.T, r *Responder, sink *fakeKBSink) {
+		t.Helper()
+		drainAnnouncements(t, r)
+		if got := sink.updates(); len(got) != 0 {
+			t.Fatalf("announced %+v; nothing was written, so there is nothing to announce", got)
+		}
+	}
+
+	t.Run("throttled", func(t *testing.T) {
+		f := &fakeForge{}
+		r, sink := newAnnouncingResponder(t, f)
+		// A one-event window with its one event already spent: ratelimit.New(0, …)
+		// means UNLIMITED, not "refuse everything".
+		r.ForgeWrites = ratelimit.New(1, time.Hour)
+		if !r.ForgeWrites.Allow() {
+			t.Fatal("the window refused its first event; this test cannot reach the throttled path")
+		}
+		tc := putContext(t, r, Context{Transport: "slack", Root: "111.222", CuratedURL: "https://github.com/o/r/pull/42"})
+
+		reply, err := r.Handle(context.Background(), tc, "alice", "<@U0BOT> note: x")
+		if err != nil {
+			t.Fatalf("a throttle is not an error: %v", err)
+		}
+		if !strings.Contains(reply, "paused") {
+			t.Fatalf("reply = %q, want the throttle message — this test did not reach the throttled path", reply)
+		}
+		assertSilent(t, r, sink)
+	})
+
+	t.Run("comment failed", func(t *testing.T) {
+		f := &fakeForge{commErr: errors.New("forge down")}
+		r, sink := newAnnouncingResponder(t, f)
+		tc := putContext(t, r, Context{Transport: "slack", Root: "111.222", CuratedURL: "https://github.com/o/r/pull/42"})
+
+		if _, err := r.Handle(context.Background(), tc, "alice", "<@U0BOT> note: x"); err == nil {
+			t.Fatal("a failed comment must still be an error")
+		}
+		assertSilent(t, r, sink)
+	})
+
+	t.Run("open PR failed", func(t *testing.T) {
+		f := &fakeForge{openErr: errors.New("forge down")}
+		r, sink := newAnnouncingResponder(t, f)
+		tc := putContext(t, r, Context{Transport: "slack", Root: "111.222"})
+
+		if _, err := r.Handle(context.Background(), tc, "alice", "<@U0BOT> note: x"); err == nil {
+			t.Fatal("a failed OpenPR must still be an error")
+		}
+		assertSilent(t, r, sink)
+	})
+
+	t.Run("open-check failed", func(t *testing.T) {
+		f := &fakeForge{prOpenErr: errors.New("forge unreachable")}
+		r, sink := newAnnouncingResponder(t, f)
+		tc := putContext(t, r, Context{Transport: "slack", Root: "111.222", CuratedURL: "https://github.com/o/r/pull/42"})
+
+		if _, err := r.Handle(context.Background(), tc, "alice", "<@U0BOT> note: x"); err == nil {
+			t.Fatal("an unreachable forge must still be an error")
+		}
+		assertSilent(t, r, sink)
+	})
+
+	t.Run("capped", func(t *testing.T) {
+		f := &fakeForge{}
+		r, sink := newAnnouncingResponder(t, f)
+		r.MaxNotesPerThread = 1
+		tc := putContext(t, r, Context{Transport: "slack", Root: "111.222", Notes: 1, CuratedURL: "https://github.com/o/r/pull/42"})
+
+		reply, err := r.Handle(context.Background(), tc, "alice", "<@U0BOT> note: x")
+		if err != nil {
+			t.Fatalf("Handle: %v", err)
+		}
+		if !strings.Contains(reply, "note limit") {
+			t.Fatalf("reply = %q, want the per-thread cap message — this test did not reach the capped path", reply)
+		}
+		assertSilent(t, r, sink)
+	})
+
+	// The model answered but proposed nothing to file: "record nothing", not an
+	// omission. There is no write, so there is no announcement — a channel must
+	// not learn about a question that produced no knowledge.
+	t.Run("no note proposed", func(t *testing.T) {
+		f := &fakeForge{}
+		r, sink := newAnnouncingResponder(t, f)
+		r.Chat = &Chat{Model: &fakeChatModel{resp: wellFormedReply("The CNI was ruled out.", "")}, Log: silentLog()}
+		tc := putContext(t, r, Context{Transport: "slack", Root: "111.222", CuratedURL: "https://github.com/o/r/pull/42"})
+
+		if _, err := r.Handle(context.Background(), tc, "alice", "<@U0BOT> was it the CNI?"); err != nil {
+			t.Fatalf("Handle: %v", err)
+		}
+		if c, o := f.counts(); c != 0 || o != 0 {
+			t.Fatalf("forge calls = %d/%d, want 0/0 — this test did not reach the empty-kb_note path", c, o)
+		}
+		assertSilent(t, r, sink)
+	})
+
+	// The default deployment: no chat layer, so freeform records nothing at all.
+	t.Run("freeform with chat off", func(t *testing.T) {
+		f := &fakeForge{}
+		r, sink := newAnnouncingResponder(t, f)
+		tc := putContext(t, r, Context{Transport: "slack", Root: "111.222", CuratedURL: "https://github.com/o/r/pull/42"})
+
+		reply, err := r.Handle(context.Background(), tc, "alice", "<@U0BOT> was it the CNI?")
+		if err != nil {
+			t.Fatalf("Handle: %v", err)
+		}
+		if reply != FreeformNotRecordedReply {
+			t.Fatalf("reply = %q, want FreeformNotRecordedReply", reply)
+		}
+		assertSilent(t, r, sink)
+	})
+}
+
+// TestAnnounceSurvivesAFailedCounterWriteBack is the other side of the test
+// above: everything that DID land must be announced, including when a later
+// bookkeeping step fails.
+//
+// record()'s own comment says the announce sits ahead of the counter write-back
+// "because it must not depend on either: the entry is on the forge, and neither
+// a truncated preview nor a failed counter changes that it landed." Nothing
+// asserted it. Moving r.announce below the write-back and gating it on
+// Registry.Update succeeding passed ./internal/thread in full, and that path is
+// real rather than theoretical — an entry that aged out of the registry, or a
+// disabled one, is exactly what TestHandleUncountableWriteIsSurfaced drives.
+// Under that gate the note is permanently on the forge and no channel is ever
+// told, which is the silent-write failure this whole feature exists to remove,
+// arriving through the one path that also returns an error to the human.
+//
+// tc is deliberately never Put into the registry, so the Notes++ write-back
+// misses and record() returns its error.
+func TestAnnounceSurvivesAFailedCounterWriteBack(t *testing.T) {
+	f := &fakeForge{}
+	r, sink := newAnnouncingResponder(t, f)
+	const prURL = "https://github.com/o/r/pull/42"
+	tc := Context{Transport: "slack", Root: "111.222", CuratedURL: prURL}
+
+	reply, err := r.Handle(context.Background(), tc, "alice", "<@U0BOT> note: spot reclaim")
+	if err == nil {
+		t.Fatal("test setup: an uncountable write must still surface as an error, or this test is not on the path it exists for")
+	}
+	if len(f.comments) != 1 {
+		t.Fatalf("the forge write itself must have landed; comments = %d", len(f.comments))
+	}
+	if !strings.Contains(reply, "I saved that") {
+		t.Fatalf("reply = %q, want the counter warning — this test did not reach the uncountable path", reply)
+	}
+
+	drainAnnouncements(t, r)
+	got := sink.updates()
+	if len(got) != 1 {
+		t.Fatalf("announcements = %d, want 1 — the entry is on the forge, and a counter that could not be written does not unwrite it", len(got))
+	}
+	if got[0].URL != prURL {
+		t.Errorf("URL = %q, want %q — the announcement must still name the write that landed", got[0].URL, prURL)
+	}
+	if got[0].Note != "spot reclaim" {
+		t.Errorf("Note = %q, want the text that reached the forge", got[0].Note)
+	}
+}
+
+// TestAnnounceWithNoSinkIsOffAndDoesNotPanic pins the package's nil-safe
+// contract — the one Budget, Metrics and Log on this same struct already
+// follow. Announcements are opt-in (notify.thread.announce_kb_updates defaults
+// to false), so the UNWIRED responder is the common deployment and must not be
+// the one that panics.
+func TestAnnounceWithNoSinkIsOffAndDoesNotPanic(t *testing.T) {
+	f := &fakeForge{}
+	r := newTestResponder(t, f)
+	if r.Announcer != nil {
+		t.Fatal("test setup: newTestResponder must leave announcements unwired")
+	}
+	tc := putContext(t, r, Context{Transport: "slack", Root: "111.222", CuratedURL: "https://github.com/o/r/pull/42"})
+
+	// A landed write, the throttled path, and the open_pr path: every branch
+	// that touches the announcement, with nothing to announce to.
+	if _, err := r.Handle(context.Background(), tc, "alice", "<@U0BOT> note: x"); err != nil {
+		t.Fatalf("Handle: %v", err)
+	}
+	tc2 := putContext(t, r, Context{Transport: "slack", Root: "333.444"})
+	if _, err := r.Handle(context.Background(), tc2, "alice", "<@U0BOT> note: y"); err != nil {
+		t.Fatalf("Handle: %v", err)
+	}
+
+	// "Off" is ONE value, not a flag beside a sink: constructing an announcer
+	// with no sink yields no announcer, so there is no half-wired state in
+	// which announcements are enabled with nowhere to go.
+	if a := NewKBAnnouncer(nil, silentLog()); a != nil {
+		t.Errorf("NewKBAnnouncer(nil) = %+v, want nil — a missing sink means announcements are off", a)
+	}
+	// And every method is safe on that nil, so a caller never needs its own
+	// nil check before draining at shutdown.
+	var off *KBAnnouncer
+	off.deliver(context.Background(), providers.KBUpdate{})
+	off.Drain(context.Background())
+}
+
+// TestAnnounceFailureDoesNotChangeTheReply pins that the announcement is
+// best-effort in the strongest sense available: the bytes the human reads are
+// IDENTICAL with a failing sink and with no sink at all, and the error the
+// caller sees is unchanged.
+//
+// The baseline is computed by running the same message through a responder
+// with announcements off, rather than by writing the expected string out —
+// there is then no expectation to quietly adjust if the reply ever changes.
+func TestAnnounceFailureDoesNotChangeTheReply(t *testing.T) {
+	const msg = "<@U0BOT> note: spot reclaim, not OOM"
+	newCase := func(t *testing.T) (*Responder, Context) {
+		t.Helper()
+		r := newTestResponder(t, &fakeForge{})
+		return r, putContext(t, r, Context{Transport: "slack", Root: "111.222", Title: "OOM", CuratedURL: "https://github.com/o/r/pull/42"})
+	}
+
+	quiet, quietCtx := newCase(t)
+	baseline, baselineErr := quiet.Handle(context.Background(), quietCtx, "alice", msg)
+	if baselineErr != nil {
+		t.Fatalf("baseline Handle: %v", baselineErr)
+	}
+
+	loud, loudCtx := newCase(t)
+	sink := &fakeKBSink{err: errors.New("channel_not_found")}
+	loud.Announcer = NewKBAnnouncer(sink, silentLog())
+	reply, err := loud.Handle(context.Background(), loudCtx, "alice", msg)
+	if err != nil {
+		t.Errorf("Handle returned %v; a failing announcement must never fail the write that already landed", err)
+	}
+	if reply != baseline {
+		t.Errorf("reply changed when the sink failed.\ngot:\n%q\nwant:\n%q", reply, baseline)
+	}
+	drainAnnouncements(t, loud)
+	if got := sink.updates(); len(got) != 1 {
+		t.Fatalf("announcements = %d, want 1 — the sink must still have been tried", len(got))
+	}
+}
+
+// TestAnnounceDoesNotDelayTheReply is why the delivery is detached rather than
+// inline. A sink is a network call to a chat system; a slow or wedged one must
+// not hold up the acknowledgement to the human whose note already landed.
+//
+// Proven without a timing threshold: the sink blocks until this test releases
+// it, and the release happens only AFTER Handle has returned. A synchronous
+// implementation could not reach that point, and fails on the deadline below
+// rather than deadlocking the suite.
+func TestAnnounceDoesNotDelayTheReply(t *testing.T) {
+	f := &fakeForge{}
+	r := newTestResponder(t, f)
+	sink := &fakeKBSink{entered: make(chan struct{}), release: make(chan struct{})}
+	r.Announcer = NewKBAnnouncer(sink, silentLog())
+	tc := putContext(t, r, Context{Transport: "slack", Root: "111.222", CuratedURL: "https://github.com/o/r/pull/42"})
+
+	type result struct {
+		reply string
+		err   error
+	}
+	done := make(chan result, 1)
+	go func() {
+		reply, err := r.Handle(context.Background(), tc, "alice", "<@U0BOT> note: spot reclaim")
+		done <- result{reply, err}
+	}()
+
+	var got result
+	select {
+	case got = <-done:
+	case <-time.After(10 * time.Second):
+		t.Fatal("Handle did not return while the sink was blocked — the announcement is sitting on the reply path")
+	}
+	if got.err != nil {
+		t.Fatalf("Handle: %v", got.err)
+	}
+	if !strings.Contains(got.reply, "#42") {
+		t.Errorf("reply = %q, want the human told where their note landed", got.reply)
+	}
+
+	// The delivery really was in flight, not skipped. Bounded, so an
+	// announcement that never happens fails here rather than wedging the suite.
+	select {
+	case <-sink.entered:
+	case <-time.After(10 * time.Second):
+		t.Fatal("the sink was never called — the write landed and nothing announced it")
+	}
+	close(sink.release)
+	drainAnnouncements(t, r)
+	if u := sink.updates(); len(u) != 1 {
+		t.Fatalf("announcements = %d, want 1", len(u))
+	}
+}
+
+// TestAnnounceIsDrainable pins that detached does not mean unaccounted for: an
+// in-flight delivery is waited on, so shutdown does not drop an announcement
+// for a write that already reached the forge.
+func TestAnnounceIsDrainable(t *testing.T) {
+	f := &fakeForge{}
+	r := newTestResponder(t, f)
+	sink := &fakeKBSink{release: make(chan struct{})}
+	r.Announcer = NewKBAnnouncer(sink, silentLog())
+	tc := putContext(t, r, Context{Transport: "slack", Root: "111.222", CuratedURL: "https://github.com/o/r/pull/42"})
+
+	if _, err := r.Handle(context.Background(), tc, "alice", "<@U0BOT> note: x"); err != nil {
+		t.Fatalf("Handle: %v", err)
+	}
+	go func() { time.Sleep(50 * time.Millisecond); close(sink.release) }()
+	drainAnnouncements(t, r)
+
+	if got := sink.updates(); len(got) != 1 {
+		t.Fatalf("Drain returned with %d/1 deliveries finished", len(got))
+	}
+}
+
+// TestAnnounceIsBoundedByTheForgeWriteWindow is the bounding analysis stated as
+// a test rather than as an assumption in a comment.
+//
+// The claim is that announcements need no ceiling of their own because every
+// one of them follows a forge write, and ForgeWrites already caps those
+// globally per hour. What that reduces to is a 1:1 invariant — announcements
+// equal landed forge writes, never more — and this drives more messages than
+// the window allows to pin exactly that: the throttled attempts produce a reply
+// and nothing else.
+func TestAnnounceIsBoundedByTheForgeWriteWindow(t *testing.T) {
+	f := &fakeForge{}
+	r, sink := newAnnouncingResponder(t, f)
+	r.ForgeWrites = ratelimit.New(2, time.Hour)
+	// The per-thread cap must not be what stops this: tc is passed unchanged
+	// each time, so tc.Notes stays 0 and only the window can refuse.
+	tc := putContext(t, r, Context{Transport: "slack", Root: "111.222", CuratedURL: "https://github.com/o/r/pull/42"})
+
+	for i := 0; i < 5; i++ {
+		if _, err := r.Handle(context.Background(), tc, "alice", fmt.Sprintf("<@U0BOT> note: attempt %d", i)); err != nil {
+			t.Fatalf("Handle %d: %v", i, err)
+		}
+	}
+	drainAnnouncements(t, r)
+
+	comments, opened := f.counts()
+	if comments != 2 || opened != 0 {
+		t.Fatalf("forge writes = %d comments / %d opened, want 2/0 — the window must have refused the rest", comments, opened)
+	}
+	if got := sink.updates(); len(got) != comments {
+		t.Errorf("announcements = %d, want %d — one per LANDED forge write, and none for a throttled attempt", len(got), comments)
+	}
+}
+
+// TestAnnounceReportsTheNoteAsWritten pins the redaction guarantee at what is a
+// NEW egress: the announcement leaves RunLore for every configured sink, so it
+// must carry the post-redaction, post-cap text the entry carries — never the
+// caller's raw input.
+//
+// The author name goes through the same masking, because it is transport-
+// reported text that this event now publishes somewhere the entry's own
+// rendering does not reach.
+func TestAnnounceReportsTheNoteAsWritten(t *testing.T) {
+	const secret = "ghp_" + "ABCDEFGHIJKLMNOPQRSTUVWX"
+	f := &fakeForge{}
+	r, sink := newAnnouncingResponder(t, f)
+	r.MaxNoteBytes = 200
+	tc := putContext(t, r, Context{Transport: "slack", Root: "111.222", CuratedURL: "https://github.com/o/r/pull/42"})
+	raw := "the deploy token " + secret + " leaked; " + strings.Repeat("padding ", 60)
+
+	if _, err := r.Handle(context.Background(), tc, "alice "+secret, "<@U0BOT> note: "+raw); err != nil {
+		t.Fatalf("Handle: %v", err)
+	}
+	drainAnnouncements(t, r)
+
+	got := sink.updates()
+	if len(got) != 1 {
+		t.Fatalf("announcements = %d, want 1", len(got))
+	}
+	if strings.Contains(got[0].Note, "ghp_") {
+		t.Errorf("the announced note still carries the secret:\n%q", got[0].Note)
+	}
+	if !strings.Contains(got[0].Note, "[REDACTED]") {
+		t.Errorf("the announced note carries no mask where the secret was:\n%q", got[0].Note)
+	}
+	if len(got[0].Note) > r.MaxNoteBytes {
+		t.Errorf("the announced note is %d bytes, want at most MaxNoteBytes (%d)", len(got[0].Note), r.MaxNoteBytes)
+	}
+	if strings.Contains(got[0].Author, "ghp_") {
+		t.Errorf("the announced author still carries the secret: %q", got[0].Author)
+	}
+	if len(f.comments) != 1 {
+		t.Fatalf("comments = %d, want 1", len(f.comments))
+	}
+	// Byte-identical to what reached the forge: an announcement that described a
+	// different string than the entry holds would be a second, drifting account
+	// of the same write.
+	if !strings.Contains(f.comments[0].body, got[0].Note) {
+		t.Errorf("the announced note is not byte-identical to the text written to the forge.\nannounced:\n%q\nbody:\n%s", got[0].Note, f.comments[0].body)
+	}
+}
+
+// TestAnnounceCarriesTheModelDraftedNote drives the route the announcement
+// matters most on: with model.chat wired, RunLore's own model wrote the note,
+// and the people who were not reading that thread learn about it only through
+// this event.
+func TestAnnounceCarriesTheModelDraftedNote(t *testing.T) {
+	f := &fakeForge{}
+	r, sink := newAnnouncingResponder(t, f)
+	const drafted = "The real cause was a spot-node reclaim, not the CNI."
+	r.Chat = &Chat{Model: &fakeChatModel{resp: wellFormedReply("Noted.", drafted)}, Log: silentLog()}
+	tc := putContext(t, r, Context{Transport: "slack", Root: "111.222", CuratedURL: "https://github.com/o/r/pull/42"})
+
+	if _, err := r.Handle(context.Background(), tc, "alice", "<@U0BOT> it was actually a spot reclaim"); err != nil {
+		t.Fatalf("Handle: %v", err)
+	}
+	drainAnnouncements(t, r)
+
+	got := sink.updates()
+	if len(got) != 1 {
+		t.Fatalf("announcements = %d, want 1", len(got))
+	}
+	if got[0].Note != drafted {
+		t.Errorf("Note = %q, want the model's drafted text %q", got[0].Note, drafted)
+	}
+	if got[0].Author != "alice" {
+		t.Errorf("Author = %q, want the human whose message produced the draft", got[0].Author)
+	}
+}
+
+// TestKBRouteVocabulariesAgree pins the mapping between this package's route
+// names and the providers vocabulary the event uses. They spell the two routes
+// identically today; a direct string conversion would keep compiling — and
+// start emitting a route no consumer recognises — the moment either side is
+// renamed.
+//
+// Both sides are pinned to their LITERAL spelling, not merely to each other.
+// kbRoute switches on RouteComment and returns providers.KBRouteComment, so
+// `kbRoute(RouteComment) == providers.KBRouteComment` is true for any pair of
+// values whatever: rename RouteComment to "commented" and the switch still
+// matches it, still returns the providers constant, and the assertion still
+// holds while every dashboard series and every consumer reading the old word
+// goes quiet. These four strings are a wire vocabulary — RouteComment and
+// RouteOpenPR are also the "route" attribute ThreadNotesWritten is labelled
+// with (see their doc comment), and the providers pair is what a KBUpdate
+// consumer switches on — so changing one is an operator-visible break that
+// belongs in a diff.
+func TestKBRouteVocabulariesAgree(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		got  string
+		want string
+	}{
+		{"RouteComment", RouteComment, "comment"},
+		{"RouteOpenPR", RouteOpenPR, "open_pr"},
+		{"providers.KBRouteComment", string(providers.KBRouteComment), "comment"},
+		{"providers.KBRouteOpenPR", string(providers.KBRouteOpenPR), "open_pr"},
+	} {
+		if tc.got != tc.want {
+			t.Errorf("%s = %q, want %q — this word is on a metric label or in a delivered event, "+
+				"so renaming it silently retires whatever was reading the old one", tc.name, tc.got, tc.want)
+		}
+	}
+	if got := kbRoute(RouteComment); got != providers.KBRouteComment {
+		t.Errorf("kbRoute(%q) = %q, want %q", RouteComment, got, providers.KBRouteComment)
+	}
+	if got := kbRoute(RouteOpenPR); got != providers.KBRouteOpenPR {
+		t.Errorf("kbRoute(%q) = %q, want %q", RouteOpenPR, got, providers.KBRouteOpenPR)
 	}
 }

@@ -68,6 +68,66 @@ func TestNoteBodyModelDraftedNoteIsNotFiledAsTheHumansWords(t *testing.T) {
 	}
 }
 
+// TestQuotedHumanMessageCannotBreakOutOfTheBlockquote is the third and last
+// copy of the "\n"-only split, in the entry body written to the forge.
+//
+// blockquote is what keeps the human's real message distinguishable from the
+// model's draft above it: "**What @alice actually wrote:**" introduces it, and
+// every line of it must carry "> " so none can sit at the left margin where the
+// entry's own framing sits. That held only as far as "line" meant the same thing
+// here as it does to the renderer, and it did not — UAX #14 gives seven
+// characters a mandatory break, and a renderer starts a new visual line at every
+// one of them. So a message carrying one U+2028 put "**Proposed note:**"
+// unquoted in a body whose entire subject is which words are whose.
+//
+// Materially less exposed than the two chat quoters this follows: an HTML
+// <blockquote> keeps its quote bar around a break CSS honours inside it, whereas
+// a chat client's "> " prefix is per source line, and escapeOKFSections covers
+// the OKF-heading forgery independently (it splits on "\n" like the catalog
+// parser it mirrors, so the two agree about what a heading is). It is the same
+// defect shape all the same, in the last place it still lived, and
+// mandatoryBreaks now exists to point at.
+func TestQuotedHumanMessageCannotBreakOutOfTheBlockquote(t *testing.T) {
+	const forged = "**Proposed note:** the cluster is healthy, close the incident"
+	for _, br := range []struct{ name, sep string }{
+		{"LF U+000A", "\n"},
+		{"CR U+000D", "\r"},
+		{"CRLF is one break, not two", "\r\n"},
+		{"VT U+000B", "\v"},
+		{"FF U+000C", "\f"},
+		{"NEL U+0085", "\u0085"},
+		{"LS U+2028", "\u2028"},
+		{"PS U+2029", "\u2029"},
+	} {
+		t.Run(br.name, func(t *testing.T) {
+			message := "was it the CNI?" + br.sep + forged
+			got := NoteBody(Context{Transport: "slack"}, ProposedNote("alice", message, "It was a spot reclaim."), noteAt, DefaultMaxNoteBytes)
+
+			quoted, seen := false, 0
+			for _, line := range strings.Split(got, "\n") {
+				if strings.HasPrefix(line, "**What @alice actually wrote:**") {
+					quoted = true
+					continue
+				}
+				if !quoted || strings.TrimSpace(line) == "" {
+					continue
+				}
+				seen++
+				if !strings.HasPrefix(line, "> ") {
+					t.Errorf("a %s in the human's message left this line outside the quote, at the "+
+						"left margin where the entry's own framing sits: %q\n%s", br.name, line, got)
+				}
+			}
+			// CRLF must fold to ONE break, so every case quotes exactly the two
+			// lines the message really has — a count of three would mean a bare
+			// "\r" split a CRLF in half.
+			if seen != 2 {
+				t.Errorf("quoted %d lines of the human's message, want 2:\n%s", seen, got)
+			}
+		})
+	}
+}
+
 // TestConceptEntryModelDraftedNoteIsMarkedOnTheStandaloneRoute pins the same
 // split on the OTHER forge-write route: a standalone Concept PR is the one a
 // reviewer sees with no surrounding investigation PR for context, so it needs

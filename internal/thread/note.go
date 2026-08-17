@@ -204,8 +204,25 @@ func noteField(s string) string {
 // early: quoting only the first line would let a second line of the quoted
 // text render as body prose, which on the model-drafted route is exactly the
 // confusion the quote exists to prevent.
+//
+// "Line" means what it means to the renderer, which is why the split goes
+// through mandatoryBreaks rather than over "\n" alone. This was the third and
+// last copy of that "\n"-only split — the two chat quoters QuoteUntrusted
+// replaced were the others — and it is the one that reaches the ENTRY BODY on
+// the forge, where "**What @alice actually wrote:**" is the framing at stake.
+// It was materially less exposed than the chat sinks: an HTML <blockquote>
+// keeps its quote bar around a break CSS honours inside it, whereas a chat
+// client's "> " prefix is per source line. Same defect shape all the same, and
+// this package has been bitten by it four times.
+//
+// It normalises breaks only. Unlike QuoteUntrusted it neither strips status
+// glyphs nor marks the content untrusted, and neither is missing: this text has
+// already been through noteText (redaction, the cap, and the three markdown
+// defusals), the forge is not a chat system with an escaper to defer to, and
+// the entry's own framing is markdown bold rather than the status glyphs a chat
+// reply leads with.
 func blockquote(s string) string {
-	lines := strings.Split(s, "\n")
+	lines := strings.Split(mandatoryBreaks.Replace(s), "\n")
 	for i, ln := range lines {
 		lines[i] = "> " + ln
 	}

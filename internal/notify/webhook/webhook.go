@@ -49,7 +49,14 @@ type payload = notify.Payload
 
 // Deliver marshals the investigation to JSON and POSTs it to the configured URL.
 func (n *Notifier) Deliver(ctx context.Context, inv providers.Investigation) error {
-	body, err := json.Marshal(notify.NewPayload(inv))
+	return n.post(ctx, notify.NewPayload(inv))
+}
+
+// post marshals v and POSTs it to the configured URL, shared by Deliver and
+// DeliverKBUpdate so both deliveries get the same transport handling — and the
+// same error sanitizing, which is the part that must not be re-derived.
+func (n *Notifier) post(ctx context.Context, v any) error {
+	body, err := json.Marshal(v)
 	if err != nil {
 		return err
 	}
@@ -106,4 +113,24 @@ func init() {
 			return New(url), nil
 		},
 	})
+}
+
+var _ providers.KBUpdateNotifier = (*Notifier)(nil)
+
+// DeliverKBUpdate POSTs a landed knowledge-base write to the configured URL as
+// JSON (providers.KBUpdateNotifier).
+//
+// Implemented deliberately, and this is the sink the event was shaped for: a
+// programmatic receiver — an incident tool, a changelog, an index — wants the
+// whole record, which is why providers.KBUpdate carries the note at the length
+// it was written rather than a chat-sized preview. Declining the capability
+// would also be invisible: notify.Multi SKIPS a notifier that does not
+// implement it, so an operator who turned announce_kb_updates on would get
+// silence from the one sink built to receive it.
+//
+// It shares Deliver's endpoint, so the body carries an "event" discriminator —
+// see notify.KBUpdatePayload for why, and for why the untrusted fields go out
+// verbatim here rather than escaped.
+func (n *Notifier) DeliverKBUpdate(ctx context.Context, up providers.KBUpdate) error {
+	return n.post(ctx, notify.NewKBUpdatePayload(up))
 }

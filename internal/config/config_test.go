@@ -1267,6 +1267,7 @@ notify:
     max_note_bytes: 4096
     chat_calls_per_hour: 45
     chat_tokens_per_hour: 123456
+    announce_kb_updates: true
 `
 	var c Config
 	if err := yaml.Unmarshal([]byte(y), &c); err != nil {
@@ -1275,7 +1276,7 @@ notify:
 	th := c.Notify.Thread
 	if th.MaxNotesPerThread != 5 || th.ForgeWritesPerHour != 3 || th.RegistryTTL.Std() != 48*time.Hour ||
 		th.RegistryMax != 100 || th.MaxNoteBytes != 4096 ||
-		th.ChatCallsPerHour != 45 || th.ChatTokensPerHour != 123456 {
+		th.ChatCallsPerHour != 45 || th.ChatTokensPerHour != 123456 || !th.AnnounceKBUpdates {
 		t.Fatalf("notify.thread not parsed: %+v", th)
 	}
 	if got := th.EffectiveMaxNotesPerThread(); got != 5 {
@@ -1298,6 +1299,65 @@ notify:
 	}
 	if got := th.EffectiveChatTokensPerHour(); got != 123456 {
 		t.Fatalf("EffectiveChatTokensPerHour() = %d, want the explicit 123456", got)
+	}
+}
+
+// TestAnnounceKBUpdatesIsOptIn pins the DEFAULT of
+// notify.thread.announce_kb_updates, which is the whole decision recorded for
+// it: absent means off, and explicitly false means off, because the
+// announcement adds notification volume to channels nobody asked to have it in
+// — the thread reply is already the direct acknowledgement to the person who
+// typed — and, since the announcement carries note content, turning it on sends
+// a note written in one thread to every configured sink. That is an operator's
+// call to make knowingly, so the safe state is the unconfigured state.
+//
+// All three states are asserted separately rather than just "absent": a bool
+// whose zero value is the default reads as covered the moment anything asserts
+// false, and the case that would actually reveal a wrong-way default — an
+// operator writing the key out explicitly to turn it OFF — is the one a
+// zero-value-only test never exercises.
+func TestAnnounceKBUpdatesIsOptIn(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		yaml string
+		want bool
+	}{
+		{
+			name: "absent from a notify.thread block that sets other keys",
+			yaml: "notify:\n  thread:\n    max_note_bytes: 4096\n",
+		},
+		{
+			name: "no notify block at all",
+			yaml: "model:\n  provider: anthropic\n",
+		},
+		{
+			name: "explicitly false",
+			yaml: "notify:\n  thread:\n    announce_kb_updates: false\n",
+		},
+		{
+			name: "explicitly true",
+			yaml: "notify:\n  thread:\n    announce_kb_updates: true\n",
+			want: true,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var c Config
+			if err := yaml.Unmarshal([]byte(tc.yaml), &c); err != nil {
+				t.Fatalf("unmarshal: %v", err)
+			}
+			if got := c.Notify.Thread.AnnounceKBUpdates; got != tc.want {
+				t.Fatalf("notify.thread.announce_kb_updates = %v, want %v — the announcement fans a note "+
+					"written in one thread out to every configured sink, so the unconfigured state must be off",
+					got, tc.want)
+			}
+			// The key must land on the named Thread field, never in Notify.Extra,
+			// for the same reason every other notify.thread key must: an inline
+			// map entry would shadow a notifier registered under that name (see
+			// TestNotifyThreadDoesNotShadowARegisteredNotifier).
+			if _, ok := c.Notify.Extra["thread"]; ok {
+				t.Fatal("notify.thread must not also land in Notify.Extra")
+			}
+		})
 	}
 }
 

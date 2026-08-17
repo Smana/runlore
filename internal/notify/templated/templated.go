@@ -58,6 +58,16 @@ type instance struct {
 }
 
 // Notifier fans one delivery out to every configured template instance.
+//
+// It deliberately does NOT implement providers.KBUpdateNotifier: an instance's
+// template is written by the operator against notify.Payload, a finished
+// investigation, and a knowledge-base update is not one — executed through that
+// template it would render every field as a zero value and POST a finding with
+// no title, verdict or confidence. Announcing one properly needs a second,
+// separately configured template, which is a schema change rather than a
+// method. Until then notify.Multi skips this sink for KB updates, and an
+// operator wanting a machine-readable announcement has notify.webhook. See
+// TestTemplatedDeliberatelyDoesNotAnnounceKBUpdates.
 type Notifier struct {
 	instances []instance
 	client    *http.Client

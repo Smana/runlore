@@ -77,6 +77,7 @@ func NewMatrix(homeserver, roomID, token string) *Matrix {
 
 var _ providers.Notifier = (*Matrix)(nil)
 var _ providers.ThreadNotifier = (*Matrix)(nil)
+var _ providers.KBUpdateNotifier = (*Matrix)(nil)
 
 // send posts content as an m.room.message event to room via the Matrix
 // client-server send API, handling the transaction id, auth header, and status
@@ -196,11 +197,16 @@ func escapeMatrixReply(s string) string {
 // SlackBot.ReplyInThread for the same boundary drawn against mrkdwn. Calling
 // it is not optional even for a transport with little to escape: RenderReply
 // is also what removes the in-band span marks, which must never reach a room.
+//
+// The rendered body is then bounded at matrixReplyBytes. A Matrix event has a
+// hard 65,536-byte ceiling, so an oversized body is a rejected event and a
+// human left in silence about a note that was already written; see
+// boundPostedReply for why the bound sits after rendering and what it drops.
 func (m *Matrix) ReplyInThread(ctx context.Context, root, channel, text string) error {
 	room := cmp.Or(channel, m.roomID)
 	content := map[string]any{
 		"msgtype": "m.notice",
-		"body":    thread.RenderReply(text, escapeMatrixReply),
+		"body":    boundPostedReply(thread.RenderReply(text, escapeMatrixReply), matrixReplyBytes),
 		"m.relates_to": map[string]any{
 			"rel_type": "m.thread",
 			"event_id": root,

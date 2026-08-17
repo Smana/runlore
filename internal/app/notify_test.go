@@ -345,7 +345,7 @@ func TestBuildThreadMentionWiresForgeWritesAndMetrics(t *testing.T) {
 		t.Fatalf("BuildEnabled: %v", err)
 	}
 	metrics := telemetry.NewMetrics()
-	responder := buildThreadResponder(cfg, reg, fakeThreadForge{}, nil, metrics, log)
+	responder := buildThreadResponder(cfg, reg, fakeThreadForge{}, nil, nil, metrics, log)
 
 	m := BuildThreadMention(cfg, responder, notifier, log)
 	if m == nil {
@@ -398,7 +398,7 @@ func TestBuildThreadResponderWiresTheForgeRepoRef(t *testing.T) {
 			cfg := &config.Config{}
 			cfg.Forge.KBRepo = "acme/kb"
 			tt.mut(cfg)
-			if got := buildThreadResponder(cfg, reg, fakeThreadForge{}, nil, nil, log).ForgeRepo; got != tt.want {
+			if got := buildThreadResponder(cfg, reg, fakeThreadForge{}, nil, nil, nil, log).ForgeRepo; got != tt.want {
 				t.Fatalf("ForgeRepo = %q, want %q", got, tt.want)
 			}
 		})
@@ -803,21 +803,170 @@ func TestBuildThreadResponderCarriesTheChatLayer(t *testing.T) {
 		t.Fatal("test setup is wrong: model.chat is configured")
 	}
 
-	r := buildThreadResponder(cfg, reg, fakeThreadForge{}, chat, nil, log)
+	r := buildThreadResponder(cfg, reg, fakeThreadForge{}, chat, nil, nil, log)
 	if r.Chat != chat {
 		t.Fatal("Responder.Chat is not the shared chat layer — freeform stays on the PR2 deterministic path in production")
 	}
 	// And the PR2 shape survives: no model.chat means no Chat on the responder.
-	off := buildThreadResponder(chatCfg(), reg, fakeThreadForge{}, buildThreadChat(chatCfg(), nil, nil, log), nil, log)
+	off := buildThreadResponder(chatCfg(), reg, fakeThreadForge{}, buildThreadChat(chatCfg(), nil, nil, log), nil, nil, log)
 	if off.Chat != nil {
 		t.Fatalf("no model.chat must leave Responder.Chat nil, got %+v", off.Chat)
 	}
 }
 
-// threadBoundsCfg returns a config with EVERY notify.thread key set to a
+// TestKBAnnounceInertWarning covers the guard on its own: the operator asked for
+// knowledge-base announcements and one of the two ends the feature needs is
+// missing. Every dependency on this path is nil-safe — a nil *notify.Multi means
+// "announcements are off" and nothing anywhere fails — so without this the
+// startup log would be silent about a feature the operator explicitly turned on
+// and will never see fire.
+//
+// The two causes are asserted by their remedy, not merely by "something was
+// logged": an operator told to configure a notifier when what they are missing
+// is thread_capture is worse off than one told nothing, because they will go and
+// check the notifier.
+func TestKBAnnounceInertWarning(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		announce bool
+		capture  bool
+		sinks    int
+		wantCue  string // substring the message must carry; "" ⇒ no warning at all
+	}{
+		{name: "off, with nothing else configured either: the default warrants nothing"},
+		{name: "off, with everything else configured", sinks: 2, capture: true},
+		{name: "on, with a notifier and capture", announce: true, sinks: 1, capture: true, wantCue: ""},
+		{name: "on, with capture but no notifier", announce: true, capture: true, wantCue: "no notifier is configured"},
+		{name: "on, with a notifier but nothing capturing", announce: true, sinks: 1, wantCue: "thread_capture"},
+		{
+			// Both ends missing: one message, and it must be the delivery one —
+			// reporting them in a fixed order keeps the line deterministic.
+			name: "on, with neither end", announce: true, wantCue: "no notifier is configured",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := &config.Config{}
+			cfg.Notify.Thread.AnnounceKBUpdates = tc.announce
+			cfg.Notify.Slack.ThreadCapture = tc.capture
+			got := KBAnnounceInertWarning(cfg, tc.sinks)
+			if tc.wantCue == "" {
+				if got != "" {
+					t.Fatalf("KBAnnounceInertWarning = %q, want no warning", got)
+				}
+				return
+			}
+			// The message has to name the key the operator wrote, so the line is
+			// actionable from the log alone rather than requiring them to guess
+			// which of several notification options is inert.
+			if !strings.Contains(got, "announce_kb_updates") || !strings.Contains(got, tc.wantCue) {
+				t.Fatalf("the warning must name notify.thread.announce_kb_updates and the missing end %q, got: %q",
+					tc.wantCue, got)
+			}
+		})
+	}
+}
+
+// TestKBAnnounceInertWarningSeesMatrixCaptureToo pins the capture check against
+// the same Matrix-only deployment BuildThreadRegistry once got wrong: a
+// transport is a transport, and reading only notify.slack.thread_capture would
+// call a working Matrix-only setup dead config.
+func TestKBAnnounceInertWarningSeesMatrixCaptureToo(t *testing.T) {
+	cfg := &config.Config{}
+	cfg.Notify.Thread.AnnounceKBUpdates = true
+	cfg.Notify.Matrix.ThreadCapture = true
+	if got := KBAnnounceInertWarning(cfg, 1); got != "" {
+		t.Fatalf("matrix thread_capture alone must satisfy the capture end, got: %q", got)
+	}
+}
+
+// TestBuildThreadResponderAnnouncerIsOptIn pins the switch END TO END through
+// the builder RunServe actually calls, not through a hand-built Responder.
+//
+// Responder.Announcer is nil-safe by contract (nil means announcements are
+// off), so every wrong answer here is silent: an announcer built when nobody
+// asked fans note content out to channels the operator never opted in, and one
+// NOT built when they did asked leaves the feature dead with no diagnostic.
+// Neither fails anything on its own.
+//
+// The two "on but nowhere to deliver" rows are the reason the builder consults
+// the notifier at all rather than only the config bool: a *notify.Multi with no
+// sinks in it delivers every announcement to nobody, so wiring an announcer to
+// it would spend a dispatcher and its goroutines to produce nothing, while
+// startup implied the feature was live.
+func TestBuildThreadResponderAnnouncerIsOptIn(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		announce bool
+		notifier func() *notify.Multi
+		want     bool // want an announcer on the responder
+		wantWarn bool
+	}{
+		{
+			name:     "off, with a notifier configured",
+			notifier: func() *notify.Multi { return notify.NewMulti(discardLog(), &captureNotifier{}) },
+		},
+		{
+			name: "off, with no notifier at all: nothing was asked for, so nothing is said",
+		},
+		{
+			name:     "on, with a notifier configured",
+			announce: true,
+			notifier: func() *notify.Multi { return notify.NewMulti(discardLog(), &captureNotifier{}) },
+			want:     true,
+		},
+		{
+			name:     "on, but no notifier was built at all",
+			announce: true,
+			wantWarn: true,
+		},
+		{
+			name:     "on, but the notifier holds no sinks",
+			announce: true,
+			notifier: func() *notify.Multi { return notify.NewMulti(discardLog()) },
+			wantWarn: true,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			reg, err := thread.NewRegistry(filepath.Join(t.TempDir(), "threads.jsonl"), time.Hour, 10)
+			if err != nil {
+				t.Fatalf("NewRegistry: %v", err)
+			}
+			cfg := &config.Config{}
+			cfg.Notify.Thread.AnnounceKBUpdates = tc.announce
+			// Capture on, so the only thing varying across the table is the
+			// sink: with no transport capturing, KBAnnounceInertWarning would
+			// fire for a second reason and every row would look the same.
+			cfg.Notify.Slack.ThreadCapture = true
+			var buf bytes.Buffer
+			log := slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelWarn}))
+			var notifier *notify.Multi
+			if tc.notifier != nil {
+				notifier = tc.notifier()
+			}
+
+			r := buildThreadResponder(cfg, reg, fakeThreadForge{}, nil, notifier, nil, log)
+			if got := r.Announcer != nil; got != tc.want {
+				t.Fatalf("Responder.Announcer != nil = %v, want %v — announcements are opt-in and must be "+
+					"wired exactly when notify.thread.announce_kb_updates is on AND a sink exists", got, tc.want)
+			}
+			if warned := strings.Contains(buf.String(), "announce_kb_updates"); warned != tc.wantWarn {
+				t.Fatalf("warned about an inert announce_kb_updates = %v, want %v; log: %s",
+					warned, tc.wantWarn, buf.String())
+			}
+		})
+	}
+}
+
+// threadBoundsCfg returns a config with EVERY notify.thread BOUND set to a
 // distinctive non-default value, so a bound that arrives with its default
 // cannot be mistaken for one that was delivered. Chat capture and a ledger path
 // are on because BuildThreadRegistry needs both to build an enabled registry.
+//
+// announce_kb_updates is deliberately not here: it is the one key in the block
+// that is a switch rather than a bound, so "the value that arrived is not the
+// default" is not a question that can be asked of it — a bool has no third
+// state. TestBuildThreadResponderAnnouncerIsOptIn covers its delivery instead,
+// through the same builder.
 func threadBoundsCfg(t *testing.T) *config.Config {
 	t.Helper()
 	cfg := chatCfg()
@@ -968,7 +1117,7 @@ func TestNotifyThreadBoundsReachTheObjectsTheyConfigure(t *testing.T) {
 			if chat == nil {
 				t.Fatal("test setup is wrong: model.chat is configured")
 			}
-			tc.check(t, reg, buildThreadResponder(cfg, reg, fakeThreadForge{}, chat, nil, log), chat)
+			tc.check(t, reg, buildThreadResponder(cfg, reg, fakeThreadForge{}, chat, nil, nil, log), chat)
 		})
 	}
 }

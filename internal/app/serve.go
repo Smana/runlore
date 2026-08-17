@@ -224,7 +224,7 @@ func RunServe(version string, args []string) error {
 	// second git-sync goroutine on the same checkout.
 	forge := buildForge(cfg, log)
 	threadChat := buildThreadChat(cfg, cat, metrics, log)
-	threadResponder := buildThreadResponder(cfg, threadRegistry, forge, threadChat, metrics, log)
+	threadResponder := buildThreadResponder(cfg, threadRegistry, forge, threadChat, notifier, metrics, log)
 	queue := investigate.NewQueue(inv, log)
 	var rlStarts *ratelimit.Window
 	if rl := cfg.Investigation.RateLimit; rl.MaxPerWindow != nil && *rl.MaxPerWindow > 0 {
@@ -505,12 +505,28 @@ func RunServe(version string, args []string) error {
 		// survives independently of workCtx. None of these depend on
 		// workCtx/the leader lease — unlike the investigation queue — so
 		// draining them has no ordering requirement relative to stopWork()
-		// below. All four drains share dctx's single deadline rather than
+		// below. All five drains share dctx's single deadline rather than
 		// getting drainGracePeriod each, so total shutdown time stays bounded
 		// the same way it always has.
+		//
+		// The announcer is drained AFTER those three and that order is required,
+		// not cosmetic: every announcement is scheduled BY a mention handler, so
+		// the three drains above are exactly the code that can still hand it new
+		// work. Drained earlier, it would return while Slack's and Matrix's
+		// handlers were still landing knowledge writes, and each of those
+		// announcements — for a write already on the forge — would be dropped by
+		// a shutdown that looks like it waits. It sits before queue.Drain rather
+		// than last because the investigation queue schedules no announcements
+		// and can be slow: waiting on it first would spend the shared deadline
+		// and hand the announcer an already-expired context, which is the
+		// starvation server.Drain's own doc comment describes.
+		//
+		// Nil-safe: with notify.thread.announce_kb_updates off (the default)
+		// there is no announcer, and Drain on a nil one returns immediately.
 		srv.Drain(dctx)
 		matrixDispatch.Drain(dctx)
 		matrixBusyDispatch.Drain(dctx)
+		threadResponder.Announcer.Drain(dctx)
 		queue.Drain(dctx)
 		cancelDrain()
 		stopWork() // release the leader lease + stop the queue/watch/coalescer
