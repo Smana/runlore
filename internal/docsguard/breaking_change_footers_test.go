@@ -209,69 +209,99 @@ func TestBreakingFooterDetectorsFlip(t *testing.T) {
 // windowCache memoises the scan so the two rule tests do not each shell out to git.
 var windowCache []commitRecord
 
-// releaseWindow returns every commit since the last release tag — the exact set
-// release-please will parse into the next CHANGELOG entry, which is what makes this the
-// right range: a footer defect is caught while it can still be fixed on the branch,
-// before the release PR is generated from it.
-//
-// Failing loudly is the point of every branch in here. Note that "is this repository
-// shallow" is NOT the question asked: a clone can report shallow and still contain the
-// whole window (this repo's own working clones do), while a depth-1 clone that fetched
-// a tag would answer the question the wrong way round. The honest test is whether the
-// window itself is walkable, which is what merge-base --is-ancestor proves.
+// gitRunner runs a git command and returns its stdout. Injecting it is what makes every
+// refusal below testable: TestReleaseWindowRefusesToScanNothing drives each branch with
+// a fake git and asserts it returns an error, because a branch that has never been
+// exercised is exactly the kind of thing that turns out to pass quietly.
+type gitRunner func(args ...string) (string, error)
+
+// releaseWindow returns the commits release-please will parse, failing the test if the
+// window cannot be trusted.
 func releaseWindow(t *testing.T) []commitRecord {
 	t.Helper()
 	if windowCache != nil {
 		return windowCache
 	}
-	if _, err := gitTry("rev-parse", "--git-dir"); err != nil {
-		t.Fatalf("cannot read git history (%v).\nThis guard reads the commits release-please "+
-			"will parse; with no repository it can only scan nothing and pass, which is the "+
-			"inert-guard failure it exists to prevent.", err)
+	window, err := resolveWindow(gitTry)
+	if err != nil {
+		t.Fatal(err)
+	}
+	windowCache = window
+	return window
+}
+
+// resolveWindow returns every commit since the last release tag — the exact set
+// release-please will parse into the next CHANGELOG entry, which is what makes this the
+// right range: a footer defect is caught while it can still be fixed on the branch,
+// before the release PR is generated from it.
+//
+// Every failure path REFUSES to scan rather than returning a short or empty list. That
+// asymmetry is the whole design: this guard reads the environment, and a guard that
+// reads the environment passes vacuously the moment the environment is thinner than it
+// assumed. actions/checkout defaults to fetch-depth 1 — one commit, no tags — so the
+// difference between "refuse" and "return nothing" is the difference between a guard
+// and a green tick that means nothing.
+//
+// Note that "is this repository shallow" is deliberately NOT the question asked: a clone
+// can report shallow and still contain the whole window (this repo's own working clones
+// do), while a depth-1 clone that fetched a tag would answer it the wrong way round. The
+// honest test is whether the window itself is walkable, which merge-base proves.
+func resolveWindow(git gitRunner) ([]commitRecord, error) {
+	if _, err := git("rev-parse", "--git-dir"); err != nil {
+		return nil, fmt.Errorf("cannot read git history (%w).\nThis guard reads the commits "+
+			"release-please will parse; with no repository it can only scan nothing and pass, "+
+			"which is the inert-guard failure it exists to prevent", err)
 	}
 
-	base, err := gitTry("describe", "--tags", "--abbrev=0", "HEAD")
+	out, err := git("describe", "--tags", "--abbrev=0", "HEAD")
 	if err != nil {
-		t.Fatalf("no release tag is reachable from HEAD (%v).\nThe scanned range is "+
-			"<last tag>..HEAD, so without tags this guard has no window and would pass "+
+		return nil, fmt.Errorf("no release tag is reachable from HEAD (%w).\nThe scanned range "+
+			"is <last tag>..HEAD, so without tags this guard has no window and would pass "+
 			"vacuously. In CI this means the checkout is shallow: set fetch-depth: 0 "+
-			"(actions/checkout defaults to 1 commit and no tags).", err)
+			"(actions/checkout defaults to 1 commit and no tags)", err)
 	}
-	base = strings.TrimSpace(base)
+	base := strings.TrimSpace(out)
 
 	// At the release commit itself HEAD *is* the tag, so <tag>..HEAD is legitimately
 	// empty. Step back to the previous tag and re-scan the window that was just
-	// released rather than reporting an empty scan — the guard must never have nothing
-	// to look at, and the commits it would skip here are exactly the released ones.
-	if rev(t, base) == rev(t, "HEAD") {
-		prev, err := gitTry("describe", "--tags", "--abbrev=0", "HEAD~1")
+	// released rather than reporting an empty scan: the guard must never have nothing
+	// to look at, and it must not fail spuriously on every release either.
+	headSHA, err := git("rev-parse", "HEAD^{commit}")
+	if err != nil {
+		return nil, fmt.Errorf("cannot resolve HEAD: %w", err)
+	}
+	baseSHA, err := git("rev-parse", base+"^{commit}")
+	if err != nil {
+		return nil, fmt.Errorf("cannot resolve tag %s: %w", base, err)
+	}
+	if strings.TrimSpace(headSHA) == strings.TrimSpace(baseSHA) {
+		prev, err := git("describe", "--tags", "--abbrev=0", "HEAD~1")
 		if err != nil {
-			t.Fatalf("HEAD is the release tag %s and no earlier tag is reachable (%v) — "+
-				"the window cannot be established", base, err)
+			return nil, fmt.Errorf("HEAD is the release tag %s and no earlier tag is reachable "+
+				"(%w) — the window cannot be established", base, err)
 		}
 		base = strings.TrimSpace(prev)
 	}
 
-	// Proves the ENTIRE window is present in the object store. A clone truncated
-	// between base and HEAD fails here instead of silently yielding a short list.
-	if _, err := gitTry("merge-base", "--is-ancestor", base, "HEAD"); err != nil {
-		t.Fatalf("%s is not walkable from HEAD (%v).\nThe clone is truncated inside the range "+
-			"this guard claims to scan, so it would examine only part of it. Fetch full "+
-			"history (fetch-depth: 0).", base, err)
+	// Proves the ENTIRE window is present in the object store. A clone truncated between
+	// base and HEAD fails here instead of silently yielding a short list.
+	if _, err := git("merge-base", "--is-ancestor", base, "HEAD"); err != nil {
+		return nil, fmt.Errorf("%s is not walkable from HEAD (%w).\nThe clone is truncated "+
+			"inside the range this guard claims to scan, so it would examine only part of it. "+
+			"Fetch full history (fetch-depth: 0)", base, err)
 	}
 
-	out, err := gitTry("log", "--format=%H%x1f%s%x1f%b%x1e", base+"..HEAD")
+	out, err = git("log", "--format=%H%x1f%s%x1f%b%x1e", base+"..HEAD")
 	if err != nil {
-		t.Fatalf("git log %s..HEAD: %v", base, err)
+		return nil, fmt.Errorf("git log %s..HEAD: %w", base, err)
 	}
 	window := parseCommits(out)
 	if len(window) == 0 {
-		t.Fatalf("scanned 0 commits in %s..HEAD — this guard is inert.\nEither the range is "+
-			"wrong or the clone cannot see the history it claims to check; a guard that "+
-			"examines nothing must fail, not report success.", base)
+		return nil, fmt.Errorf("scanned 0 commits in %s..HEAD — this guard is inert.\nEither "+
+			"the range is wrong or the clone cannot see the history it claims to check; a "+
+			"guard that examines nothing must fail, not report success", base)
 	}
-	windowCache = window
-	return window
+	return window, nil
 }
 
 // parseCommits splits the record-separated `git log` output this file asks for.
@@ -305,16 +335,6 @@ func readCommit(t *testing.T, sha string) commitRecord {
 	return c[0]
 }
 
-// rev resolves a revision to its commit SHA.
-func rev(t *testing.T, s string) string {
-	t.Helper()
-	out, err := gitTry("rev-parse", s+"^{commit}")
-	if err != nil {
-		t.Fatalf("git rev-parse %s: %v", s, err)
-	}
-	return strings.TrimSpace(out)
-}
-
 // gitTry runs git in the repo root, returning its stdout. stderr is folded into the
 // error so a failure says what git actually complained about.
 func gitTry(args ...string) (string, error) {
@@ -343,4 +363,130 @@ func moduleDir() (string, error) {
 		return "", errors.New("not inside a git working tree")
 	}
 	return strings.TrimSpace(string(out)), nil
+}
+
+// fakeGit builds a gitRunner from a table keyed on the joined arguments. A key mapped to
+// the empty string returns empty output; a key absent from the table returns an error,
+// which models the git failures the real probes are reading for.
+func fakeGit(responses map[string]string) gitRunner {
+	return func(args ...string) (string, error) {
+		key := strings.Join(args, " ")
+		out, ok := responses[key]
+		if !ok {
+			return "", fmt.Errorf("fake git: no response for %q", key)
+		}
+		return out, nil
+	}
+}
+
+// healthy is the response table for a repository this guard can trust: a tag two commits
+// behind HEAD, the whole range walkable, two commits in the window.
+func healthy() map[string]string {
+	return map[string]string{
+		"rev-parse --git-dir":                   ".git\n",
+		"describe --tags --abbrev=0 HEAD":       "v0.14.0\n",
+		"rev-parse HEAD^{commit}":               "aaaa1111\n",
+		"rev-parse v0.14.0^{commit}":            "bbbb2222\n",
+		"merge-base --is-ancestor v0.14.0 HEAD": "",
+		"log --format=%H%x1f%s%x1f%b%x1e v0.14.0..HEAD": "aaaa1111\x1ffix: one\x1fbody one\n\x1e" +
+			"cccc3333\x1ffeat: two\x1fbody two\n\x1e",
+	}
+}
+
+// TestReleaseWindowRefusesToScanNothing drives every inertness branch and asserts each
+// REFUSES rather than returning an empty window.
+//
+// This is the failure this repo keeps being bitten by, and it is invisible by
+// construction: the guard reports success, CI is green, and nothing was examined. Two of
+// these branches were also verified against real clones (a depth-1 checkout, and one
+// where the tag object was fetched but the path to it truncated); the table below covers
+// the ones a real clone cannot easily be coerced into, so no branch goes unexercised.
+func TestReleaseWindowRefusesToScanNothing(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		mutate  func(map[string]string)
+		wantErr string
+	}{
+		{
+			name:    "no git repository at all",
+			mutate:  func(r map[string]string) { delete(r, "rev-parse --git-dir") },
+			wantErr: "cannot read git history",
+		},
+		{
+			name:    "shallow checkout: no tag reachable",
+			mutate:  func(r map[string]string) { delete(r, "describe --tags --abbrev=0 HEAD") },
+			wantErr: "set fetch-depth: 0",
+		},
+		{
+			name: "history truncated inside the window",
+			mutate: func(r map[string]string) {
+				delete(r, "merge-base --is-ancestor v0.14.0 HEAD")
+			},
+			wantErr: "is not walkable from HEAD",
+		},
+		{
+			name: "window resolves but contains no commits",
+			mutate: func(r map[string]string) {
+				r["log --format=%H%x1f%s%x1f%b%x1e v0.14.0..HEAD"] = ""
+			},
+			wantErr: "this guard is inert",
+		},
+		{
+			name: "HEAD is the release tag and there is no earlier tag",
+			mutate: func(r map[string]string) {
+				r["rev-parse v0.14.0^{commit}"] = "aaaa1111\n" // same as HEAD
+			},
+			wantErr: "no earlier tag is reachable",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			responses := healthy()
+			tc.mutate(responses)
+			window, err := resolveWindow(fakeGit(responses))
+			if err == nil {
+				t.Fatalf("resolveWindow returned %d commits and no error — this branch passes "+
+					"vacuously, which is the exact failure this guard exists to prevent", len(window))
+			}
+			if !strings.Contains(err.Error(), tc.wantErr) {
+				t.Errorf("error does not explain the failure: want it to contain %q, got: %v",
+					tc.wantErr, err)
+			}
+		})
+	}
+}
+
+// TestReleaseWindowScansTheReleasedWindowAtATag pins the one case that must NOT fail: at
+// the release commit HEAD *is* the tag, so <tag>..HEAD is legitimately empty. Failing
+// there would break CI on main at every single release, and passing on an empty scan
+// would be inert — so it steps back to the previous tag and scans the window just
+// released.
+func TestReleaseWindowScansTheReleasedWindowAtATag(t *testing.T) {
+	r := healthy()
+	r["rev-parse v0.14.0^{commit}"] = "aaaa1111\n" // HEAD is the tag
+	r["describe --tags --abbrev=0 HEAD~1"] = "v0.13.0\n"
+	r["merge-base --is-ancestor v0.13.0 HEAD"] = ""
+	r["log --format=%H%x1f%s%x1f%b%x1e v0.13.0..HEAD"] = "dddd4444\x1ffix: released\x1fbody\n\x1e"
+
+	window, err := resolveWindow(fakeGit(r))
+	if err != nil {
+		t.Fatalf("at a release tag the guard must scan the window just released, got: %v", err)
+	}
+	if len(window) != 1 || window[0].Subject != "fix: released" {
+		t.Errorf("expected the previous tag's window, got %+v", window)
+	}
+}
+
+// TestReleaseWindowParsesTheHealthyCase proves the table above is not passing merely
+// because resolveWindow rejects everything.
+func TestReleaseWindowParsesTheHealthyCase(t *testing.T) {
+	window, err := resolveWindow(fakeGit(healthy()))
+	if err != nil {
+		t.Fatalf("healthy repository must resolve: %v", err)
+	}
+	if len(window) != 2 {
+		t.Fatalf("want 2 commits, got %d (%+v)", len(window), window)
+	}
+	if window[0].SHA != "aaaa1111" || window[1].Subject != "feat: two" {
+		t.Errorf("commits parsed wrong: %+v", window)
+	}
 }
