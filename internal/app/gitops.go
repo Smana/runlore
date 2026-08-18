@@ -23,7 +23,49 @@ import (
 // on the source repo). A nil token source (no App configured) means public/local
 // repos only.
 func BuildGitOps(cfg *config.Config, dc dynamic.Interface, log *slog.Logger) providers.GitOpsProvider {
+	differ := buildGitOpsDiffer(cfg, log)
+	if GitopsEngine(cfg) == "argocd" {
+		log.Info("gitops engine", "engine", "argocd")
+		return argocd.New(argocd.NewDynamicReader(dc), differ)
+	}
+	log.Info("gitops engine", "engine", "flux")
+	return flux.New(flux.NewDynamicReader(dc), differ)
+}
+
+// buildGitOpsDiffer builds the what_changed differ. Split out of BuildGitOps so
+// the credential wiring is reachable by a test: BuildGitOps hands the differ to a
+// provider that keeps it unexported, and an unset SSHRewriteHost would silently
+// leave RunLore #495 unfixed.
+//
+// SSHRewriteHost is set — and TokenHost deliberately is not. The differ may only
+// rewrite an SSH repoURL into a live HTTPS request toward the host the App token
+// is actually for, so an attacker-chosen "repoURL: ssh://git@attacker.example/x"
+// stays SSH and dies at "invalid auth method" with nothing transmitted. Leaving
+// TokenHost unset keeps every HTTPS clone that works today byte-identical,
+// including a GitHub Enterprise install whose API host differs from its git host
+// (githubGitHost derives from the API URL, so confining auth on it could withhold
+// the credential from a repo that clones fine today). That bounds the REWRITE,
+// not the credential: a hostile HTTPS repoURL still receives the token — see
+// whatchanged.Differ.effectiveCloneURL for what is and is not closed.
+//
+// SSHRewriteHost is left EMPTY when there is no GitHub App credential, because
+// githubGitHost would otherwise name github.com for a deployment that holds no
+// github.com token — a host the rewrite must not trust on that basis. On a GitLab
+// forge BuildForgeTokenSource returns nil (it mints GitHub App tokens only), so
+// SSH repoURLs there still fail exactly as RunLore #495 reports. That gap is
+// LOGGED rather than papered over: handing the GitOps differ a GitLab credential
+// is a new credential path and belongs in its own change — the way
+// BuildKBTokenSource was split out for the identical silent failure on catalog
+// sync (see forge.go).
+func buildGitOpsDiffer(cfg *config.Config, log *slog.Logger) *whatchanged.Differ {
 	differ := &whatchanged.Differ{TokenSource: BuildForgeTokenSource(cfg, log)}
+	if differ.TokenSource != nil {
+		differ.SSHRewriteHost = githubGitHost(cfg.Forge.GitHubAPIURL)
+	} else {
+		log.Warn("what_changed: no GitHub App credential; SSH repoURLs cannot be cloned and are "+
+			"not rewritten to HTTPS — change correlation stays empty for any GitOps object "+
+			"whose source is an SSH URL", "forge_provider", cfg.Forge.Provider)
+	}
 	if cfg.GitOps.Mirror.IsEnabled() {
 		if mc, err := whatchanged.NewMirrorCache(cfg.GitOps.Mirror.Dir, cfg.GitOps.Mirror.Max); err != nil {
 			log.Warn("gitops: mirror cache unavailable; falling back to clone-per-call", "err", err)
@@ -31,12 +73,7 @@ func BuildGitOps(cfg *config.Config, dc dynamic.Interface, log *slog.Logger) pro
 			differ.Mirrors = mc
 		}
 	}
-	if GitopsEngine(cfg) == "argocd" {
-		log.Info("gitops engine", "engine", "argocd")
-		return argocd.New(argocd.NewDynamicReader(dc), differ)
-	}
-	log.Info("gitops engine", "engine", "flux")
-	return flux.New(flux.NewDynamicReader(dc), differ)
+	return differ
 }
 
 // BuildExecutor returns the rung-2/3 action executor for the configured GitOps
