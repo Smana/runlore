@@ -2,7 +2,11 @@
 
 package notify
 
-import "strings"
+import (
+	"bytes"
+	"encoding/json"
+	"strings"
+)
 
 // Bounding a POSTED message — a progress ping, a delivered finding — as opposed
 // to a thread reply, which reply_bound.go already handles.
@@ -26,14 +30,18 @@ import "strings"
 // verdict and keeps the cost line.
 
 // matrixDeliverBodyBytes bounds ONE of the two renderings Matrix.Deliver puts on
-// a single event.
+// a single event, in ENCODED bytes — what the rendering costs inside the JSON
+// string it travels in, not how long the Go string is. See jsonBodyBytes for why
+// those are different numbers and why only the first one is a bound on anything.
 //
 // It is not matrixReplyBytes and must not be derived from it. That constant is
 // the share ONE body may claim of an event — half of the spec's hard 65,536-byte
 // ceiling, with the other half left to signatures, hashes and relations. Deliver
 // carries the same message TWICE, as the plaintext body and as the HTML
 // formatted_body, and both count against the one event, so the two together get
-// that half and each gets a quarter.
+// that half and each gets a quarter. Of the half left over, the stamps take
+// 2 x matrixStampBytes and the envelope keeps the rest — Matrix.Deliver's doc
+// comment adds it up.
 const matrixDeliverBodyBytes = 16 << 10
 
 // postTruncatedNotice is what a shortened post says instead of stopping silently.
@@ -119,7 +127,7 @@ func boundPostedHead(rendered string, maxBytes int) string {
 // "&amp;" or "<br/>".
 func boundMatrixBodies(msg string) (body, formatted string) {
 	body, formatted = renderMatrixBodies(msg)
-	if len(body) <= matrixDeliverBodyBytes && len(formatted) <= matrixDeliverBodyBytes {
+	if jsonBodyBytes(body) <= matrixDeliverBodyBytes && jsonBodyBytes(formatted) <= matrixDeliverBodyBytes {
 		return body, formatted
 	}
 	return renderMatrixBodies(boundMatrixSource(msg))
@@ -142,8 +150,8 @@ func renderMatrixBodies(msg string) (body, formatted string) {
 // therefore gives the same bytes as rendering the joined prefix.
 func boundMatrixSource(msg string) string {
 	plainNotice, richNotice := renderMatrixBodies("\n" + postTruncatedNotice)
-	plainBudget := matrixDeliverBodyBytes - len(plainNotice)
-	richBudget := matrixDeliverBodyBytes - len(richNotice)
+	plainBudget := matrixDeliverBodyBytes - jsonBodyBytes(plainNotice)
+	richBudget := matrixDeliverBodyBytes - jsonBodyBytes(richNotice)
 	if plainBudget <= 0 || richBudget <= 0 {
 		return ""
 	}
@@ -152,10 +160,10 @@ func boundMatrixSource(msg string) string {
 	kept, plainSize, richSize := 0, 0, 0
 	for _, line := range lines {
 		plain, rich := renderMatrixBodies(line)
-		addPlain, addRich := len(plain), len(rich)
+		addPlain, addRich := jsonBodyBytes(plain), jsonBodyBytes(rich)
 		if kept > 0 {
-			addPlain++              // the newline this line is joined by
-			addRich += len("<br/>") // which mrkdwnToHTML renders as a break
+			addPlain += jsonBodyBytes("\n")   // the newline this line is joined by
+			addRich += jsonBodyBytes("<br/>") // which mrkdwnToHTML renders as a break
 		}
 		if plainSize+addPlain > plainBudget || richSize+addRich > richBudget {
 			break
@@ -185,9 +193,35 @@ func cutMatrixLine(line string, plainBudget, richBudget int) string {
 	for n := min(len(line), richBudget); n > 0; n = n * 3 / 4 {
 		cut := cutBytesToRuneBoundary(line, n)
 		plain, rich := renderMatrixBodies(cut)
-		if len(plain) <= plainBudget && len(rich) <= richBudget {
+		if jsonBodyBytes(plain) <= plainBudget && jsonBodyBytes(rich) <= richBudget {
 			return cut
 		}
 	}
 	return ""
+}
+
+// jsonBodyBytes is what s costs INSIDE a JSON string on the event: every escape
+// the encoder applies, and nothing for the quotes around it, so the costs of
+// consecutive lines add up exactly the way the lines themselves do.
+//
+// The bound above has to be counted in these bytes rather than in len(s),
+// because len(s) is not a bound on anything the homeserver measures. The Matrix
+// spec caps an event at 65,536 bytes "encoded as Canonical JSON", and canonical
+// JSON renders every control character below 0x20 as a six-byte \u001b-style
+// escape. A card whose evidence quotes a container log line carrying ANSI colour
+// codes — an ordinary log line, not a crafted one — therefore measured 16,384
+// bytes at the ceiling and arrived at 98,304, and the two bodies together came to
+// three times the whole event budget while each sat exactly at its documented
+// limit.
+//
+// SetEscapeHTML(false) is what makes this the homeserver's arithmetic rather
+// than Go's. encoding/json escapes "<", ">" and "&" by default and canonical
+// JSON does not; measuring with the default would count an HTML formatted_body
+// at roughly twice its real cost and cut the card for a limit nothing enforces.
+func jsonBodyBytes(s string) int {
+	var buf bytes.Buffer
+	enc := json.NewEncoder(&buf)
+	enc.SetEscapeHTML(false)
+	_ = enc.Encode(s) // a string cannot fail to encode
+	return buf.Len() - len(`""`) - len("\n")
 }

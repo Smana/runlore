@@ -121,13 +121,20 @@ func (m *Matrix) send(ctx context.Context, room string, content map[string]any) 
 // formatted_body (org.matrix.custom.html) so the message's mrkdwn renders as
 // bold/links/code instead of leaking raw *asterisks* to Matrix clients.
 //
-// Both bodies are bounded — see boundMatrixBodies. Format(inv) is model-authored
-// end to end (the title, every hypothesis, every evidence line) and
-// buildInvestigation caps none of it, so without a bound the size of this event
-// is whatever the model wrote. A Matrix event is capped at 65,536 bytes by the
-// spec, signatures and hashes included, and a homeserver rejects the whole event
-// past it: an investigation that ran, spent its model budget and reached a
+// EVERY field this function writes is bounded, and the ceilings are chosen to
+// sum: two bodies at matrixDeliverBodyBytes (boundMatrixBodies) plus two stamps
+// at matrixStampBytes (boundStamp) is 40,960 bytes, leaving 24,576 of the spec's
+// 65,536 for the federation envelope, the content hash and the signatures. That
+// arithmetic is the point. Format(inv) is model-authored end to end (the title,
+// every hypothesis, every evidence line) and buildInvestigation caps none of it,
+// so the size of this event is whatever the model wrote unless something here
+// says otherwise — and a homeserver rejects the whole event past the ceiling,
+// which is an investigation that ran, spent its model budget and reached a
 // verdict, that nobody is ever told about.
+//
+// Bounding each field on its own was not enough, and this function is where that
+// was learned: the bodies took 16 KiB each and the stamp beside them took 78, so
+// three ceilings existed and none of them was a ceiling on the EVENT.
 func (m *Matrix) Deliver(ctx context.Context, inv providers.Investigation) error {
 	body, formatted := boundMatrixBodies(Format(inv))
 	content := map[string]any{
@@ -142,16 +149,33 @@ func (m *Matrix) Deliver(ctx context.Context, inv providers.Investigation) error
 		"format":         "org.matrix.custom.html",
 		"formatted_body": formatted,
 	}
-	// Stamp the trigger identity into the event content (a custom field — legal in
-	// Matrix events, invisible in clients) so the opt-in reaction listener can join
-	// a 👍/👎 on this message back to the incident. Unconditional: the field is
-	// inert data; the LISTENER is the opt-in (notify.matrix.feedback_reactions).
-	if key := cmp.Or(inv.TriggerKey, inv.Fingerprint); key != "" {
-		content[triggerKeyContentField] = key
+	// Stamp the thread context into the event content (a custom field — legal in
+	// Matrix events, invisible in clients) so a threaded reply can be attributed
+	// back to this investigation. Unconditional: the field is inert data; the
+	// LISTENER is the opt-in (notify.matrix.thread_capture).
+	//
+	// stampFor bounds it — see boundStamp. That the bound lives inside the builder
+	// rather than out here is the fix for this defect and not a stylistic choice:
+	// the bodies were bounded on the first line of this function and the stamp
+	// assigned unbounded twenty-two lines below, so the event honoured two
+	// ceilings and blew straight through the one that actually applies to it.
+	stamp := stampFor(inv)
+	content[threadContentField] = stamp
+	// The legacy trigger field the opt-in reaction listener reads to join a 👍/👎
+	// on this message back to the incident (notify.matrix.feedback_reactions), and
+	// contextFromContent's fallback when a decoded stamp carries no trigger_key of
+	// its own.
+	//
+	// It is taken FROM the stamp rather than recomputed off inv, which does two
+	// things. It keeps the two from contradicting each other: a fallback naming an
+	// identity the stamp had just dropped would be worse than no fallback at all.
+	// And it puts this field inside the same bound, instead of leaving the event
+	// unbounded through the one field nobody was looking at. The value is
+	// byte-identical for every finding that fits — stampFor applies the same
+	// cmp.Or(TriggerKey, Fingerprint) this line used to.
+	if stamp.TriggerKey != "" {
+		content[triggerKeyContentField] = stamp.TriggerKey
 	}
-	// Stamp the thread context alongside it — additive, same rationale: inert
-	// data, unconditional, the eventual reply listener is the opt-in.
-	content[threadContentField] = stampFor(inv)
 
 	eventID, err := m.send(ctx, m.roomID, content)
 	if err != nil {
