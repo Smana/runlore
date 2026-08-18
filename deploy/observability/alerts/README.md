@@ -77,6 +77,9 @@ listed series must be present.
 | RunloreModelLatencyHigh                  | warning  | `runlore_model_request_duration_seconds_bucket`                               |
 | RunloreSlowResolution                    | info     | `runlore_incident_resolution_seconds_bucket`                                  |
 | RunloreInvestigationCostHigh             | warning  | `runlore_investigation_tokens_estimated_bucket`                               |
+| RunloreInvestigationsNudgedByCeiling     | warning  | `runlore_investigation_budget_trips_total{stage="nudge"}`, `runlore_investigations_completed_total` |
+| RunloreThreadMentionsDropped             | warning  | `runlore_mentions_dropped_on_saturation_total`                                 |
+| RunloreCurationWriteErrors               | warning  | `runlore_curations_total{result="error"}`                                      |
 
 All metrics are exposed on RunLore's Prometheus `/metrics` endpoint. Histograms
 additionally expose `_sum` and `_count` series alongside the `_bucket` series

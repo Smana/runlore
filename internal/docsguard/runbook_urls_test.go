@@ -26,7 +26,7 @@ const (
 	alertsDir       = "deploy/observability/alerts"
 	runbookDoc      = "website/content/docs/operations/observability.md"
 	runbookBase     = "https://runlore.io/docs/operations/observability/"
-	minRunbookLinks = 24 // 12 alerts x 2 manifest flavours; raise as rules are added
+	minRunbookLinks = 30 // 15 alerts x 2 manifest flavours; raise as rules are added
 )
 
 var (

@@ -277,8 +277,18 @@ The rule set covers liveness (`RunloreAgentDown`), HA (`RunloreNoActiveLeader`,
 `RunloreMultipleLeaders`), pipeline health (`RunlorePipelineStalled`,
 `RunloreInvestigationsDropped`, throttling), quality (tool/model error rates,
 investigation errors), latency (model p95, slow resolution), and cost
-(`RunloreInvestigationCostHigh`). Thresholds are starting points — tune to your
-volume. See the [alerts README](https://github.com/Smana/runlore/blob/main/deploy/observability/alerts/README.md) for the
+(`RunloreInvestigationCostHigh`).
+
+Three of them exist to catch failures that are **silent in every other series**, which
+is what makes them worth the alert slot:
+
+| Alert | What would otherwise hide it |
+|---|---|
+| `RunloreInvestigationsNudgedByCeiling` | a nudged run completes and records `result="resolved"`, so completion rate, error rate and duration all stay healthy while findings get shallower |
+| `RunloreThreadMentionsDropped` | the transport was acked before the work was queued, so a lost note leaves no retry, no error result, and no trace beyond this counter |
+| `RunloreCurationWriteErrors` | investigations keep succeeding; only the *write* fails, so the learning loop stops compounding with every upstream metric looking fine |
+
+Thresholds are starting points — tune to your volume. See the [alerts README](https://github.com/Smana/runlore/blob/main/deploy/observability/alerts/README.md) for the
 per-alert metric dependencies and operator discovery notes.
 
 ## Alert runbooks
@@ -376,6 +386,54 @@ sizes, raise the threshold rather than living with a permanently firing alert.
 p95 open-to-resolve above 1h. Informational, not a paging condition — it measures your
 incident lifecycle, not RunLore's health, since the resolve event comes from
 Alertmanager. Useful as an SLO signal; align the threshold with your own target.
+
+### RunloreInvestigationsNudgedByCeiling
+
+More than 10% of investigations in the last hour were nudged to conclude early by a
+spend ceiling. This is the one budget signal worth alerting on, for the reason given
+under [the budget-trip metric](#tools--model): a nudged investigation still delivers
+findings and records `result="resolved"`, so completion rate, error rate and duration
+all look healthy while the answers quietly get shallower. Nothing else distinguishes a
+comfortable ceiling from one that has been truncating investigations for a week.
+
+Find the binding ceiling with `sum by (reason) (rate(runlore_investigation_budget_trips_total[1h]))`.
+One run reports one `reason` — the ceiling that first engaged the ladder is latched from
+the nudge through to the kill — so the label names the knob to raise:
+`tokens_request` and `tokens_total` both point at
+`investigation.max_tokens_per_investigation`, `cost` at `max_cost_per_investigation`.
+Before raising either, check whether prompts are being filled with tool output
+(`investigation.max_tool_output_bytes`, the compaction settings) — that is the cheaper
+fix, and `RunloreInvestigationCostHigh` is the corroborating signal.
+
+### RunloreThreadMentionsDropped
+
+An `@runlore` mention arrived while the concurrent handler pool was saturated. This is
+**data loss, not backpressure**: the transport was acked before the work was queued
+(Slack got its `200`, Matrix's `/sync` position token advanced), so nothing will be
+redelivered. Whatever a human was trying to record is gone, and their only notice is a
+best-effort in-thread reply asking them to send it again.
+
+Any occurrence deserves a look, because it lands during incidents — the moment thread
+traffic peaks is exactly when someone is recording what actually fixed it. If it recurs,
+the handler pool is undersized for your channel volume. Cross-check
+`runlore_thread_writes_throttled_total`: throttled writes are refused politely and can
+be retried, dropped mentions cannot, and confusing the two leads to tuning the wrong
+limit.
+
+### RunloreCurationWriteErrors
+
+`runlore_curations_total{result="error"}` is non-zero: investigations reached findings
+and the forge write failed. The learning loop stops compounding here, and it does so
+invisibly — every upstream metric (investigations completed, recall rate, curation
+*attempts*) still looks healthy, and recall degrades only slowly as the catalog stops
+growing.
+
+Almost always a forge credential or scope problem: GitHub App permissions narrowed,
+`forge.kb_repo` pointing somewhere the installation cannot reach, or the App uninstalled
+from the KB repo. Grep `msg="curate findings"` with `err=` for the underlying error. Note
+that `result="error"` counts only genuine write failures — a finding that was chat-only
+(below `forge.min_confidence`) or deduplicated against an existing entry is a different
+`result` and is not an error.
 
 ### RunloreInvestigationCostHigh
 

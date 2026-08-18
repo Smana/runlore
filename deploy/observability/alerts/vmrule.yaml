@@ -192,3 +192,53 @@ spec:
             summary: "RunLore investigation token cost is high"
             description: "p95 estimated tokens per investigation is {{ $value | humanize }} over the last 30m (>100k) — typical investigations are ending on a request at the per-request bound; review cost, max_tool_output_bytes and compaction."
             runbook_url: "https://runlore.io/docs/operations/observability/#runloreinvestigationcosthigh"
+
+        # 13. A spend ceiling is silently truncating investigations.
+        # THE one to alert on among the budget signals. A nudged investigation is
+        # forced to conclude early but still delivers findings and records
+        # result="resolved" like any other, so it is invisible in every other series:
+        # completion rate, error rate and duration all look healthy while answers get
+        # quietly shallower. Only this counter distinguishes "the ceiling is
+        # comfortable" from "the ceiling has been truncating investigations for a
+        # week". Ratio over completions, gated on >= 5 completions in the window so it
+        # is not noise on a quiet cluster. 10% is a starting point.
+        - alert: RunloreInvestigationsNudgedByCeiling
+          expr: sum(increase(runlore_investigation_budget_trips_total{stage="nudge"}[1h])) / clamp_min(sum(increase(runlore_investigations_completed_total[1h])), 1) > 0.1 and sum(increase(runlore_investigations_completed_total[1h])) >= 5
+          for: 1h
+          labels:
+            severity: warning
+          annotations:
+            summary: "RunLore investigations are being cut short by a spend ceiling"
+            description: "{{ $value | humanizePercentage }} of investigations in the last hour were nudged to conclude early by a spend ceiling (>10%). They completed and reported findings, so nothing else shows this — but the findings are shallower than a full run would produce. Check sum by (reason) (rate(runlore_investigation_budget_trips_total[1h])) for which ceiling to raise."
+            runbook_url: "https://runlore.io/docs/operations/observability/#runloreinvestigationsnudgedbyceiling"
+
+        # 14. A human's note was accepted and then lost.
+        # The handler pool was saturated when an @runlore mention arrived. The
+        # transport was already acked (Slack 200; Matrix's /sync token advanced), so
+        # it will never be redelivered and the note is permanently gone. RunLore tells
+        # the human to retry via a best-effort in-thread reply, but that is the only
+        # trace. Any occurrence is worth surfacing — this is data loss, not backpressure.
+        - alert: RunloreThreadMentionsDropped
+          expr: sum(increase(runlore_mentions_dropped_on_saturation_total[15m])) > 0
+          for: 0m
+          labels:
+            severity: warning
+          annotations:
+            summary: "RunLore dropped a chat mention — the note is permanently lost"
+            description: "{{ $value | humanize }} chat mentions were dropped in the last 15m because the handler pool was saturated. The transport was already acked, so these are NOT retried: whatever a human tried to record is gone and they must send it again."
+            runbook_url: "https://runlore.io/docs/operations/observability/#runlorethreadmentionsdropped"
+
+        # 15. Knowledge is being produced and failing to land.
+        # A curation error means an investigation reached a finding and the forge write
+        # failed — so the learning loop stops compounding while every upstream metric
+        # (investigations completed, recall rate) still looks healthy. Usually GitHub
+        # App scopes, a wrong forge.kb_repo, or the App's installation losing access.
+        - alert: RunloreCurationWriteErrors
+          expr: sum(increase(runlore_curations_total{result="error"}[30m])) > 0
+          for: 0m
+          labels:
+            severity: warning
+          annotations:
+            summary: "RunLore is failing to write curated knowledge to the forge"
+            description: "{{ $value | humanize }} curation writes failed in the last 30m — findings were produced but never reached the knowledge base, so the learning loop is not compounding. Check the GitHub App scopes and forge.kb_repo; look for msg=\"curate findings\" with err= in the logs."
+            runbook_url: "https://runlore.io/docs/operations/observability/#runlorecurationwriteerrors"
