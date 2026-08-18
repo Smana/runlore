@@ -18,6 +18,7 @@ import (
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/metric"
 
+	"github.com/Smana/runlore/internal/okf"
 	"github.com/Smana/runlore/internal/providers"
 	"github.com/Smana/runlore/internal/ratelimit"
 	"github.com/Smana/runlore/internal/redact"
@@ -1370,6 +1371,24 @@ func (r *Responder) addToPR(ctx context.Context, tc Context, n Note, at time.Tim
 // the entry ends up saying what they said, once, and the alternative — a false
 // negative — is the permanent duplicate this is here to prevent.
 //
+// It keys BOTH sides of the entry's life: the marker stamped into the entry when
+// the open_pr route creates it (see write) and the one an append then looks for.
+// Only the second half existed at first, which left note 1 — and only note 1 —
+// duplicable by a redelivery.
+//
+// WHERE IT DOES NOT REACH: the freeform route. There n.Text is the MODEL's draft,
+// and a replayed delivery re-invokes the model, so the redelivery arrives with
+// different bytes and hashes to a different key. Nothing here can close that. The
+// only identity a replay genuinely shares is the human's original message, and
+// keying on that would collapse two deliberate follow-ups drafted from similar
+// messages into one — silently dropping a note somebody meant to file, which is
+// the worse of the two failures. What bounds it instead is upstream and already
+// present: internal/server's delivery dedup catches the common replay before a
+// model is called at all, and the per-thread cap and the ForgeWrites window bound
+// what gets through. The residue is visible duplicate prose in an entry a human
+// still has to merge, not silent catalog corruption. See
+// TestModelDraftedReplayIsNotDeduplicated.
+//
 // SHA-256 truncated to 16 hex characters. It is an identity, not a
 // authentication tag: the entry it is compared against is one RunLore wrote, and
 // note text reaching an entry has "<!" escaped out of it (see noteText), so a
@@ -1537,6 +1556,32 @@ func (r *Responder) write(ctx context.Context, tc Context, n Note, at time.Time)
 	}
 
 	entry := ConceptEntry(tc, n, at, r.maxNoteBytes())
+	// Mark note 1 with the SAME identity a later append would look for, so the
+	// entry this opens is already idempotent against its own redelivery.
+	//
+	// Without it the idempotency this package built covered every note in a
+	// thread except the first. A replayed delivery re-enters here with NoteURL
+	// already set by the write it is replaying, takes the append route, finds no
+	// marker in the entry — because nothing had ever put one there — and writes
+	// note 1 into the catalog a second time. Unlike a duplicated comment, which
+	// is visible conversation that dies at merge, that is permanent entry
+	// content: kb_search indexes it twice and recall serves it twice, with
+	// nothing saying either copy is a duplicate.
+	//
+	// Derived here rather than inside ConceptEntry because the key is a property
+	// of the DELIVERY, not of the entry: it is the same noteKey(tc, n) addToPR
+	// passes, over the same n — reassigned above by noteAsWritten, so both see the
+	// note as written rather than as typed. Two derivations that could disagree is
+	// the only way this fix fails while looking correct, so there is one, and
+	// TestOpenPRNoteMarkerIsTheKeyTheAppendPathDerives pins it.
+	//
+	// The marker survives the write: both forge clients render an entry body
+	// through neutralizeImages alone, which rewrites "![" and nothing else, and an
+	// HTML comment is not markdown a renderer shows. It cannot be forged from note
+	// text either — noteText escapes "<!" out of everything untrusted (see
+	// neutralizeHTML), which is what keeps a stranger from planting a marker that
+	// suppresses somebody else's later note.
+	entry.Body = okf.WithNoteMarker(entry.Body, noteKey(tc, n))
 	ref, err := r.Forge.OpenPR(ctx, entry)
 	if err != nil {
 		return forgeErrorReply(err), nil,

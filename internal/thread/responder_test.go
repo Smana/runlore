@@ -19,6 +19,7 @@ import (
 	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
 	"go.opentelemetry.io/otel/sdk/metric/metricdata"
 
+	"github.com/Smana/runlore/internal/okf"
 	"github.com/Smana/runlore/internal/providers"
 	"github.com/Smana/runlore/internal/ratelimit"
 	"github.com/Smana/runlore/internal/telemetry"
@@ -4349,5 +4350,118 @@ func TestConcurrentNotesCannotExceedThePerThreadCap(t *testing.T) {
 	}
 	if tc, ok := r.Registry.Get(root); !ok || tc.Notes != noteCap {
 		t.Errorf("Notes = %d (tracked %v), want %d — the counter must end at the cap, not past it or short of it", tc.Notes, ok, noteCap)
+	}
+}
+
+// TestOpenPRMarksTheFirstNoteSoAReplayCannotDuplicateIt closes the one gap in
+// the idempotency this package already built.
+//
+// noteKey and okf.NoteMarker exist because the layers above replay: internal/
+// server dedups Slack deliveries through a bounded, PER-PROCESS set that is
+// wiped wholesale at capacity, so a busy channel, a restart or a leader failover
+// all deliver the same message twice. Both APPEND paths honoured that — an entry
+// already carrying the key is left alone. The OPEN_PR path did not: it wrote
+// note 1 into a brand-new entry with no marker at all, so a redelivery found
+// nothing to match, took the append route (NoteURL is set by then) and wrote the
+// same note into the entry a second time. Permanent catalog content, indexed and
+// recalled twice, with no signal that either is a duplicate.
+//
+// The oracle is the CONTRACT between the two layers rather than a simulated
+// forge: the marker the entry carries must be the one the replay's append then
+// looks for. github.Client and gitlab.Client both implement HasNoteMarker as a
+// substring search for exactly that literal, and both have their own tests for
+// the skip; faking that here would prove only that the fake agrees with itself.
+func TestOpenPRMarksTheFirstNoteSoAReplayCannotDuplicateIt(t *testing.T) {
+	f := &fakeForge{openURL: "https://github.com/o/r/pull/7"}
+	r := newTestResponder(t, f)
+	tc := Context{Transport: "slack", Root: "root-1", Channel: "C1"}
+	if err := r.Registry.Put(tc); err != nil {
+		t.Fatalf("Put: %v", err)
+	}
+	ctx := context.Background()
+	const text = "the real cause was a spot-node reclaim"
+
+	if _, err := r.record(ctx, tc, HumanNote("alice", text)); err != nil {
+		t.Fatalf("first delivery: %v", err)
+	}
+	if len(f.opened) != 1 {
+		t.Fatalf("opened = %d, want 1", len(f.opened))
+	}
+
+	// The replay: same thread, same author, same text — everything that does not
+	// move between a delivery and its redelivery.
+	fresh, _ := r.Registry.Get("root-1")
+	if _, err := r.record(ctx, fresh, HumanNote("alice", text)); err != nil {
+		t.Fatalf("replay: %v", err)
+	}
+	if len(f.appends) != 1 {
+		t.Fatalf("appends = %d, want the replay to have taken the append route", len(f.appends))
+	}
+
+	key := f.appends[0].key
+	if key == "" {
+		t.Fatal("the replay's append carries no key, so the forge has nothing to match")
+	}
+	if marker := okf.NoteMarker(key); !strings.Contains(f.opened[0].Body, marker) {
+		t.Errorf("the entry opened for note 1 does not carry %s, so the replay's HasNoteMarker finds "+
+			"nothing and writes the same note into the catalog twice.\nentry body:\n%s", marker, f.opened[0].Body)
+	}
+}
+
+// TestOpenPRNoteMarkerIsTheKeyTheAppendPathDerives keeps the two halves of that
+// contract from drifting apart in the harmless-looking direction: an entry that
+// carries SOME marker, derived differently from the one an append looks for,
+// reads as correct and dedups nothing.
+func TestOpenPRNoteMarkerIsTheKeyTheAppendPathDerives(t *testing.T) {
+	f := &fakeForge{openURL: "https://github.com/o/r/pull/7"}
+	r := newTestResponder(t, f)
+	tc := Context{Transport: "slack", Root: "root-1"}
+	if err := r.Registry.Put(tc); err != nil {
+		t.Fatalf("Put: %v", err)
+	}
+	n := HumanNote("alice", "the real cause was a spot-node reclaim")
+	if _, err := r.record(context.Background(), tc, n); err != nil {
+		t.Fatalf("record: %v", err)
+	}
+	// noteKey is derived from the note AS WRITTEN — redacted and capped — which is
+	// what write() files, so the expectation has to go through the same step.
+	written, _ := r.noteAsWritten(n)
+	want := okf.NoteMarker(noteKey(tc, written))
+	if !strings.Contains(f.opened[0].Body, want) {
+		t.Errorf("entry carries no %s\nbody:\n%s", want, f.opened[0].Body)
+	}
+}
+
+// TestModelDraftedReplayIsNotDeduplicated states the limit of all this, because
+// a guarantee that quietly does not hold on one route is worse than one that
+// says where it stops.
+//
+// noteKey hashes the note's own TEXT, and on the freeform route that text is the
+// model's draft rather than the human's message. A replayed delivery re-invokes
+// the model, which is not deterministic, so the redelivery arrives with
+// different bytes, hashes to a different key, and appends as a genuinely new
+// note. Nothing at this layer can fix that: the only stable identity a replay
+// shares is the human's original message, and keying on THAT would collapse two
+// deliberate follow-ups drafted from similar messages into one — silently
+// dropping a note somebody meant to file, which is the worse failure of the two.
+//
+// What bounds it instead is upstream and already there: the per-thread cap (now
+// enforced under the thread's own guard), the global ForgeWrites window, and
+// internal/server's delivery dedup, which catches the common replay before a
+// model is ever called. A duplicated model draft is visible prose in an entry a
+// human still has to merge, not silent catalog corruption.
+func TestModelDraftedReplayIsNotDeduplicated(t *testing.T) {
+	tc := Context{Transport: "slack", Root: "root-1"}
+	const message = "was it the CNI?"
+	first := ProposedNote("alice", message, "It was a spot-node reclaim.")
+	replay := ProposedNote("alice", message, "The cause was a spot node being reclaimed.")
+
+	if noteKey(tc, first) == noteKey(tc, replay) {
+		t.Fatal("two different drafts hashed to one key — noteKey no longer keys on the note text")
+	}
+	// The human's own message is identical across the two, which is exactly the
+	// identity that is NOT used, and the comment above says why.
+	if first.DraftedFrom != replay.DraftedFrom {
+		t.Fatal("fixture error: the replayed delivery must carry the same human message")
 	}
 }
