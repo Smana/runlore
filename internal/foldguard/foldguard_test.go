@@ -146,20 +146,33 @@ func TestEveryCaseFoldedHostComparisonIsPinned(t *testing.T) {
 // internationalised self-hosted forge — and belongs in its own change with its
 // own tests. What the inventory buys is that the list cannot GROW in silence.
 //
-// A FIXED SITE STILL NEEDS AN ENTRY, and that is deliberate. The remediation both
-// incidents converged on refuses non-ASCII input; it does not remove the fold, so
-// the comparison is still here and this reader still sees it. Verified against
-// fix/gitops-ssh-repourl-normalise: after the ASCII guard lands, whatchanged's
-// effectiveCloneURL and sshToHTTPS still report, and the branch will have to add
-// two entries here saying so. That is the entry doing its job — the prose is where
-// "this one is protected, and by what" gets written down, which is exactly the
-// knowledge #495 was missing when it reused a fold that predated it.
+// A site whose fix refuses non-ASCII AT THE FOLD leaves this list, because the
+// reader stops seeing a fold that can disagree with IDNA. A site whose fix refuses
+// it somewhere else — in a caller, in a sibling function — stays, and its entry
+// carries where. Both kinds have happened here, and the difference is worth
+// knowing: whatchanged's auth and effectiveCloneURL left when hostOf itself began
+// refusing non-ASCII, while sshToHTTPS remains because its refusal guards the
+// input rather than the comparison.
+//
+// Writing these entries is not paperwork. The auth entry was drafted asserting
+// that TokenHost being a bare ASCII host made the comparison safe; checking that
+// claim instead of shipping it found a live leak — an https:// repoURL never
+// passes through the SSH-side refusal, so a homoglyph host folded to the
+// configured one, took the token, and was dialled at its punycode form. The prose
+// is where "this one is protected, and by what" gets written down, which is
+// exactly the knowledge #495 was missing when it reused a fold that predated it.
 var knownHostComparisons = map[string]string{
-	"whatchanged auth": "confines a GitHub App installation token to TokenHost. This is instance 1's " +
-		"package. The fold is hostOf's strings.ToLower; the ASCII refusal that closes it lands in " +
-		"sshToHTTPS on fix/gitops-ssh-repourl-normalise. Until that merges, an HTTPS clone URL with a " +
-		"non-ASCII host still reaches auth — a hole that PREDATES the SSH rewrite and is called out in " +
-		"effectiveCloneURL's own 'WHAT THIS DOES NOT DO' comment.",
+	"whatchanged sshToHTTPS": "round-trip guard: the rewritten URL must re-parse to exactly the host " +
+		"go-git resolved, compared with EqualFold. PROTECTED by the isASCII(ep.Host) refusal a few " +
+		"lines above it in the same function — both operands are ASCII by then, so simple folding and " +
+		"IDNA cannot disagree. EqualFold rather than ToLower is deliberate here: ASCII case is the only " +
+		"difference a faithful rewrite may introduce.",
+
+	"config validateForgeGitHost": "validates the operator-supplied forge.git_host. PROTECTED, and it " +
+		"is the protection the whatchanged auth entry above depends on: it refuses anything that is not " +
+		"a bare ASCII hostname, so the value every clone host is later compared against can never be " +
+		"the fold-equal half of an IDNA-different pair. Loosening this to accept an IDN would reopen " +
+		"instance 1 through the HTTPS path rather than the SSH one.",
 
 	"httpx DenyInternalRedirect": "decides whether to strip provider key headers when a redirect " +
 		"changes host. UNPROTECTED: neither hostname is ASCII-checked. The exploitable direction is " +

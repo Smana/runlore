@@ -365,21 +365,35 @@ func isASCII(s string) bool {
 // hostOf returns the lowercased host of an https/http/ssh clone URL, or "" for
 // a local path or an unparseable/hostless URL.
 //
-// Two callers, and the second is stricter than the first. auth uses it to confine
-// a host-scoped token: a "" host never equals a non-empty TokenHost, so a local
-// clone is always treated as off-host (correct — local repos need no token).
-// effectiveCloneURL uses it to AUTHORIZE turning an SSH URL into a live HTTPS
-// request, which demands that the host named here be the host that is actually
-// dialled. strings.ToLower does not guarantee that for non-ASCII input, so
-// sshToHTTPS refuses non-ASCII hosts before this is ever consulted for that
-// decision. Anything else routed through here for an authorization decision needs
-// the same precaution.
+// Both callers use it for an AUTHORIZATION decision, so a non-ASCII host is
+// refused here rather than at either call site.
+//
+// strings.ToLower is Unicode simple case mapping; net/http resolves the same host
+// through idna.Lookup.ToASCII, and the two disagree. ToLower maps U+0130 to plain
+// 'i', so "gİthub.com" reads as "github.com" here while the request is dialled at
+// the separately registrable "xn--github-qyd.com". A host that compares equal to
+// TokenHost and resolves elsewhere is precisely how an installation token reaches
+// a stranger.
+//
+// sshToHTTPS already refuses the class on the rewrite path, and that was mistaken
+// for sufficient: an https:// repoURL never passes through it, so
+// "https://gİthub.com/org/repo.git" — cluster state anyone with Application create
+// can set — folded to the configured host, collected the token and dialled the
+// punycode one. Refusing here closes both paths with one check, and a "" host
+// never equals a non-empty TokenHost, so the failure is a withheld credential
+// rather than a misdirected one.
 func hostOf(cloneURL string) string {
 	u, err := url.Parse(cloneURL)
 	if err != nil {
 		return ""
 	}
-	return strings.ToLower(u.Hostname())
+	h := u.Hostname()
+	for i := 0; i < len(h); i++ {
+		if h[i] >= 0x80 {
+			return ""
+		}
+	}
+	return strings.ToLower(h)
 }
 
 // Remote clones url to disk (auth via the installation token when set) and diffs

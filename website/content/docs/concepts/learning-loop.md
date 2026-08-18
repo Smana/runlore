@@ -815,10 +815,17 @@ Honesty is part of the design:
   So there is never a recallable entry that is *both* the operator's words and an
   evidence chain: on the primary route the note is not an entry, and on the standalone
   route the entry has neither section — only the words, under a one-line description
-  saying exactly where they came from: *"Operator knowledge captured
-  from a … thread by @…"*.
+  that names their provenance and then quotes the note's own claim:
+  *"Operator knowledge from @… via …, on the finding "…": …"*.
 
-  That description is nearly all the adversarial reviewer ever sees of it.
+  That description is nearly all the adversarial reviewer ever sees of it, and it
+  is worth being precise about what changed: it used to be pure boilerplate, naming
+  the author and transport and nothing else, so the reviewer was asked to judge a
+  claim it could not read. Since the note-identity fix it carries the operator's
+  actual words. **The four measured rejections below predate that change**, so what
+  they establish is that a note *as filed then* carried nothing admissible — not
+  that a reviewer shown the claim would still reject it. That has not been
+  re-measured.
   `renderForReview` shows each root cause's **summary** — on the recall path, the entry's
   title and description — plus its evidence bullets and the confirm step's tool
   transcript. **The entry's body never reaches the reviewer**, which is exactly why
