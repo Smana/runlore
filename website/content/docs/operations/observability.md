@@ -56,6 +56,8 @@ estimate) keep the SDK defaults and are read as heatmaps, not percentiles.
 | `runlore_alerts_suppressed_total` | counter | — | incidents dropped by cooldown |
 | `runlore_incidents_debounced_total` | counter | — | firing alerts dropped as self-resolving (a matching `resolved` webhook arrived within `triggers.incidents.debounce`) |
 | `runlore_incidents_dropped_on_shutdown_total` | counter | — | **alert LOSS** — firing alerts still held in the debounce window when the process shut down: accepted (`200` to Alertmanager) but never investigated, and not retried until Alertmanager's `repeat_interval`. Any non-zero value is worth a look; see [troubleshooting]({{< relref "troubleshooting.md" >}}) |
+| `runlore_gitops_failures_debounced_total` | counter | — | GitOps failures dropped as transient: cleared within the debounce window before investigating |
+| `runlore_mentions_dropped_on_saturation_total` | counter | — | **chat mentions LOST** — a Slack `app_mention` or addressed Matrix thread message arrived while the handler pool was saturated: accepted but never processed (Slack acked `200` and never retries; Matrix's `/sync` token has already advanced). The human gets a best-effort in-thread "retry" reply. Non-zero means humans are losing `@runlore note:` captures |
 | `runlore_investigations_started_total` | counter | — | investigations actually begun |
 | `runlore_investigations_completed_total` | counter | `result` | investigations finished (`resolved`/`unresolved`/`recall`/`timeout`/`error`/`max_steps`/`max_steps_degraded`/`budget_exceeded`/`inconclusive`/`recurrence_suppressed`) |
 | `runlore_investigation_duration_seconds` | histogram | `result` | wall-clock per investigation |
@@ -70,6 +72,14 @@ estimate) keep the SDK defaults and are read as heatmaps, not percentiles.
 | `runlore_tool_call_duration_seconds` | histogram | `tool` | per-tool latency |
 | `runlore_model_requests_total` | counter | `provider`, `result` | LLM requests (`ok`/`error`). `provider` is the wire protocol for the main model, plus the synthetic tiers `rerank` (instant recall's LLM reranker) and `embed` (the `/embeddings` endpoint on the hybrid-recall path) |
 | `runlore_model_request_duration_seconds` | histogram | `provider` | LLM request latency, same `provider` vocabulary |
+| `runlore_model_input_tokens_total` | counter | `provider` | total LLM input tokens, including cached |
+| `runlore_model_cached_input_tokens_total` | counter | `provider` | LLM input tokens served from cache |
+| `runlore_model_responses_truncated_total` | counter | `provider` | completions cut off at the output-token ceiling (the provider's stop/finish reason indicated truncation) |
+| `runlore_tool_output_truncated_bytes_total` | counter | — | bytes elided by per-call tool-output truncation (`investigation.max_tool_output_bytes`) |
+| `runlore_history_compactions_total` | counter | — | mid-loop tool-output history compaction events |
+| `runlore_history_elided_bytes_total` | counter | — | tool-output bytes elided by mid-loop compaction |
+| `runlore_history_summarizations_total` | counter | — | compactions whose elided batch was replaced by a model-produced digest (`compaction: summarize`) |
+| `runlore_history_summarize_fallbacks_total` | counter | — | summarize-mode compactions that fell back to plain elision (summarizer error, refusal or truncation). A rising share means `summarize` is paying for a digest it is not getting |
 | `runlore_investigation_tokens_estimated` | histogram | — | per-investigation token estimate (pre-request `chars/4` heuristic, investigation loop only — excludes the adversarial verify phase). This is what the `RunloreInvestigationCostHigh` alert watches |
 | `runlore_investigation_model_calls` | histogram | `result` | model completions per investigation (loop + verify) |
 | `runlore_investigation_input_tokens` | histogram | `result` | provider-reported input tokens per investigation, including cached (loop + verify) |
@@ -116,6 +126,7 @@ the full loop. That split is what makes the recall saving measurable — see bel
 | `runlore_incident_resolution_seconds` | histogram | — | open→resolve duration |
 | `runlore_curations_total` | counter | `kind`, `result` | curation outcomes (`opened`/`coalesced`/`error`) |
 | `runlore_curation_dedup_score` | histogram | — | catalog top-hit BM25 score at the dedup decision |
+| `runlore_catalog_invalid_entries_total` | counter | — | structurally-invalid entries surfaced at catalog load — they are served anyway, so this is the standing count of entries whose frontmatter a human still needs to fix |
 | `runlore_catalog_embed_degraded_total` | counter | — | catalog reloads that left hybrid recall without vectors (embed failure — recall degrades to BM25-only until the next successful sync) |
 
 ### Measuring the recall saving
@@ -149,6 +160,20 @@ reduces them to one number, `1 - recall/full-loop`, as the "Recall token savings
 > *shrink* as recall got better. Never difference `recall_tokens_spent_total` out of an
 > unfiltered per-investigation total.
 
+### Thread — chat & knowledge capture
+
+The in-thread chat layer and `@runlore note:` knowledge capture run on their own budget,
+separate from `investigation.*`. These are the series that show what that costs and when it is
+being refused.
+
+| Metric | Type | Labels | Meaning |
+|---|---|---|---|
+| `runlore_thread_chat_calls_total` | counter | — | model calls granted to the chat layer |
+| `runlore_thread_chat_tokens_total` | counter | — | tokens the chat layer spent (provider-reported, or a conservative estimate when the provider reports none) |
+| `runlore_thread_chat_denied_total` | counter | `ceiling` | chat calls refused by the thread budget — `ceiling` = `calls` or `tokens`. Sustained denials mean humans are asking questions the budget will not answer |
+| `runlore_thread_notes_written_total` | counter | `route` | knowledge writes landed from an `@runlore note:` reply — `route` distinguishes a comment on an existing PR from a newly opened one |
+| `runlore_thread_writes_throttled_total` | counter | — | note writes refused by the global per-hour forge-write window, and told to retry |
+
 ## Grafana dashboard
 
 A portable dashboard lives at [`deploy/observability/grafana/runlore.json`](../deploy/observability/grafana/runlore.json).
@@ -157,10 +182,16 @@ Prometheus **or** a VictoriaMetrics datasource with no edits. Import it via
 **Dashboards → Import → Upload JSON**, or provision it. See the
 [grafana README](https://github.com/Smana/runlore/blob/main/deploy/observability/grafana/README.md).
 
-It panels every `runlore_` series above, including the output-truncation rate
-(`tool_output_truncated_bytes_total`), the coalesced-batch-size distribution
-(`coalesce_batch_size`, heatmap), and the curation dedup-score distribution
-(`curation_dedup_score`, heatmap).
+It panels the pipeline, recall, outcome, curation, cost and fleet series above — including the
+output-truncation rate (`tool_output_truncated_bytes_total`), the coalesced-batch-size distribution
+(`coalesce_batch_size`, heatmap), the curation dedup-score distribution (`curation_dedup_score`,
+heatmap), the spend ceilings (`investigation_budget_trips_total`) and the alert-loss counter
+(`incidents_dropped_on_shutdown_total`).
+
+It is **not** exhaustive. The thread series, the history-compaction family, and the several
+`*_degraded_total` / `*_debounced_total` counters have no panel — they are documented above and
+queryable, but you will not see them by importing the dashboard alone. If you rely on one of those,
+add a panel or an alert for it rather than assuming the dashboard covers it.
 
 ## Alerting
 
@@ -174,10 +205,22 @@ kubectl apply -f deploy/observability/alerts/prometheusrule.yaml
 kubectl apply -f deploy/observability/alerts/vmrule.yaml
 ```
 
-The rule set covers liveness (`RunloreAgentDown`), HA (`RunloreNoActiveLeader`,
-`RunloreMultipleLeaders`), pipeline health (`RunlorePipelineStalled`,
-`RunloreInvestigationsDropped`, throttling), quality (tool/model error rates,
-investigation errors), latency (model p95, slow resolution), and cost
-(`RunloreInvestigationCostHigh`). Thresholds are starting points — tune to your
-volume. See the [alerts README](https://github.com/Smana/runlore/blob/main/deploy/observability/alerts/README.md) for the
+All twelve rules, named — a page names the alert, so the alert name is what you will search for:
+
+| Alert | Fires on |
+|---|---|
+| `RunloreAgentDown` | liveness — no instance is reporting |
+| `RunloreNoActiveLeader` | HA — no replica holds the lease, so nothing runs |
+| `RunloreMultipleLeaders` | HA — more than one replica believes it leads |
+| `RunlorePipelineStalled` | alerts arriving but no investigations starting |
+| `RunloreInvestigationsDropped` | investigations dropped by the rate limiter or a spend ceiling |
+| `RunloreInvestigationThrottlingSustained` | the rate limiter engaged and stayed engaged |
+| `RunloreInvestigationErrors` | investigations ending in `result="error"` |
+| `RunloreToolErrorRateHigh` | tool calls failing, **summed across every tool** |
+| `RunloreModelErrorRateHigh` | LLM requests failing |
+| `RunloreModelLatencyHigh` | LLM request p95 latency |
+| `RunloreSlowResolution` | incident open→resolve duration |
+| `RunloreInvestigationCostHigh` | per-investigation token estimate |
+
+Thresholds are starting points — tune to your volume. See the [alerts README](https://github.com/Smana/runlore/blob/main/deploy/observability/alerts/README.md) for the
 per-alert metric dependencies and operator discovery notes.
