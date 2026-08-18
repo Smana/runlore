@@ -10,10 +10,24 @@ package gitlab
 //
 // "Mirrors" is a claim about the SAFETY PROPERTIES, not only about the shape.
 // Every guard the GitHub sibling has, this has; where GitLab spells one
-// differently the difference is stated at the guard rather than left for a
-// reader to infer from its absence — see last_commit_id below, which an earlier
-// version of this file omitted while still claiming the mirror, and so shipped
-// a read-modify-write that silently reverted whoever it raced.
+// differently the difference is stated AT the guard rather than left for a
+// reader to infer from its absence.
+//
+// That sentence has been false twice, both times because the sentence was
+// cheaper to write than the guard, so it is worth naming what it now covers:
+//
+//   - last_commit_id, which an earlier version omitted outright, then sent only
+//     when the read happened to return one — so an absent value silently
+//     downgraded the Commits API to an unconditional overwrite, the very
+//     read-modify-write revert the field exists to prevent. commitEntry now
+//     refuses instead.
+//   - the truncated-listing refusal, which had no GitLab spelling at all.
+//     GitHub's is a full-page check; `/changes` is not paginated, so a full page
+//     is not a signal here and its absence was not safety. Read `overflow` and
+//     changes_count below.
+//
+// The rule this file works under: a guard the sibling has is either present
+// here, or the sentence above is edited. Not the third thing.
 
 import (
 	"context"
@@ -21,11 +35,20 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 
 	"github.com/Smana/runlore/internal/okf"
 	"github.com/Smana/runlore/internal/providers"
 )
+
+// maxChangedPaths is the ceiling on how large a merge request this will commit
+// into. Deliberately the same number as github.prFilesPerPage so the two forges
+// refuse the identically shaped request, but it is NOT the same kind of number:
+// GitHub's is a page size doing double duty, while `/changes` takes no page
+// parameter, so this one is only the sanity ceiling. A RunLore curation request
+// changes at most three files (the entry plus the reserved index.md / log.md).
+const maxChangedPaths = 100
 
 // AppendToEntryOnPR appends body to the KB entry file carried by the merge
 // request with this iid, as one further commit on that merge request's OWN
@@ -55,7 +78,12 @@ func (c *Client) AppendToEntryOnPR(ctx context.Context, number int, body, key st
 		SourceBranch    string `json:"source_branch"`
 		SourceProjectID int64  `json:"source_project_id"`
 		TargetProjectID int64  `json:"target_project_id"`
-		Changes         []struct {
+		// Overflow is GitLab's truncation signal, and ChangesCount the count it
+		// computed for itself — both read below, because a listing that was cut is
+		// not a listing to choose a file to rewrite out of.
+		Overflow     bool   `json:"overflow"`
+		ChangesCount string `json:"changes_count"`
+		Changes      []struct {
 			NewPath string `json:"new_path"`
 		} `json:"changes"`
 	}
@@ -80,9 +108,49 @@ func (c *Client) AppendToEntryOnPR(ctx context.Context, number int, body, key st
 	// main. Comparing the two project ids needs no extra lookup and no knowledge
 	// of either id: on a same-project merge request they are equal by
 	// construction.
+	// Two ids GitLab did not send compare EQUAL, which is the one input on which
+	// "the ids match" stops meaning "same-project merge request" — and the branch
+	// named would then be committed onto c.projectPath regardless of where it
+	// lives. GitHub's fork guard fails closed on its missing field for free (an
+	// absent full_name never equals the configured owner/repo); this comparison
+	// does not, so the absence is refused explicitly.
+	if mr.SourceProjectID == 0 || mr.TargetProjectID == 0 {
+		return fmt.Errorf("gitlab MR %d: response names no source/target project (source %d, target %d); refusing to commit without knowing which project the source branch is in",
+			number, mr.SourceProjectID, mr.TargetProjectID)
+	}
 	if mr.SourceProjectID != mr.TargetProjectID {
 		return fmt.Errorf("gitlab MR %d: source branch is in project %d, not the target project %d (fork); refusing to commit",
 			number, mr.SourceProjectID, mr.TargetProjectID)
+	}
+	// The GitLab spelling of GitHub's truncated-listing refusal, which is where
+	// the two most needed stating apart: GitHub reads truncation off a FULL PAGE,
+	// because its file listing is paginated. `/changes` takes no page parameter at
+	// all (only access_raw_diffs and unidiff), so there is no full page to notice
+	// and its absence is not safety. GitLab truncates on DIFF SIZE instead — max
+	// files, max lines, max patch bytes — and reports that it did in `overflow`. A
+	// merge request of five huge files can come back holding two changes, far under
+	// any count ceiling, and okf.EntryFile would resolve "the one .md" out of that
+	// fraction with no way to know it did — the outcome its own doc calls strictly
+	// worse than refusing.
+	if mr.Overflow {
+		return fmt.Errorf("gitlab MR %d: the changes listing overflowed GitLab's diff limits and is truncated; refusing to pick an entry from it", number)
+	}
+	// The half that does not depend on `overflow` being emitted. changes_count is
+	// the count GitLab computed for ITSELF, so it disagreeing with the array handed
+	// over says the array is not the whole listing. It is a string because it is
+	// capped: past the file limit GitLab answers "1000+", which does not parse.
+	// Empty does not parse either, and is GitLab's documented "the diff is still
+	// being computed" — not a statement that this listing is complete, so it is
+	// refused rather than read as agreement.
+	if n, err := strconv.Atoi(mr.ChangesCount); err != nil || n != len(mr.Changes) {
+		return fmt.Errorf("gitlab MR %d: changes_count %q does not account for the %d changed paths returned; refusing to pick an entry from a listing that may be cut",
+			number, mr.ChangesCount, len(mr.Changes))
+	}
+	// The other thing GitHub's full page refuses, independently of truncation: a
+	// merge request this large is not a RunLore curation request, so whichever file
+	// okf.EntryFile resolves is a file somebody else is changing.
+	if len(mr.Changes) >= maxChangedPaths {
+		return fmt.Errorf("gitlab MR %d: %d changed paths; not a curation merge request, refusing to pick an entry from it", number, len(mr.Changes))
 	}
 	changed := make([]string, 0, len(mr.Changes))
 	for _, ch := range mr.Changes {
@@ -168,20 +236,27 @@ func (c *Client) getEntryFile(ctx context.Context, path, ref string) (data []byt
 }
 
 // commitEntry writes content back to path on branch as one update action,
-// refusing if anything committed to that file since lastCommit.
+// refusing if anything committed to that file since lastCommit — and refusing
+// outright if there is no lastCommit to write against.
 //
 // GitLab answers a stale last_commit_id with 400 ("You are attempting to update
 // a file that has changed since you started editing it"), which is exactly the
 // outcome wanted: the racing writer keeps their commit, and this note goes down
 // the caller's comment fallback instead of overwriting them.
 func (c *Client) commitEntry(ctx context.Context, path, branch, lastCommit, content string) error {
-	action := map[string]any{
-		"action":    "update",
-		"file_path": path,
-		"content":   content,
+	// Refused rather than sent without it. An action carrying no last_commit_id is
+	// not a weaker write, it is a different one: GitLab applies it unconditionally,
+	// which turns this read-modify-write into exactly the silent revert the whole
+	// file exists to avoid. The check lives here, at the only place that builds the
+	// action, so no caller can reintroduce the downgrade by passing "".
+	if lastCommit == "" {
+		return fmt.Errorf("gitlab commit %s on %s: no last_commit_id to write against; refusing an unconditional overwrite", path, branch)
 	}
-	if lastCommit != "" {
-		action["last_commit_id"] = lastCommit
+	action := map[string]any{
+		"action":         "update",
+		"file_path":      path,
+		"content":        content,
+		"last_commit_id": lastCommit,
 	}
 	return c.do(ctx, http.MethodPost, fmt.Sprintf("/projects/%s/repository/commits", c.projectSeg()), map[string]any{
 		"branch":         branch,
