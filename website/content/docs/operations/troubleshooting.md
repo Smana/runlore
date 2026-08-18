@@ -63,7 +63,7 @@ msg=incident alert=<name> severity=<sev> namespace=<ns> investigate=<bool> reaso
 | signal | meaning | fix |
 |---|---|---|
 | `runlore_leader == 0` on all pods | no leader elected → nothing runs | check the `leases` RBAC and `leader_election` config; look for `msg="acquired leadership"` |
-| `runlore_investigations_throttled_total` rising | rate limiter engaged (`investigation.rate_limit`); `msg="investigation rate limit engaged; throttling…"` | raise `rate_limit.max_per_window` / `window`, or accept the budget |
+| `runlore_investigations_throttled_total` rising | rate limiter engaged (`investigation.rate_limit`); `msg="investigation rate limit engaged; throttling new investigations this window"` | raise `rate_limit.max_per_window` / `window`, or accept the budget |
 | `runlore_investigations_dropped_total` rising | dropped by `rate_limit.max_requeues` or the token-budget hard-stop | see the timeout/budget section below |
 | `runlore_alerts_coalesced_total` rising | folded into an existing batch (`investigation.coalesce`) | expected noise control — one investigation covers the batch |
 | `runlore_alerts_suppressed_total` rising | dropped by the coalescer **cooldown** | expected — a recently-investigated correlation is in cooldown |
@@ -122,7 +122,7 @@ for everything. Check `runlore_curations_total{kind="pr",result=…}` and the cu
 |---|---|---|
 | recalled answer (cache hit) | `msg="skipping curation of a recalled finding (cache hit, not novel)"` | expected — not novel |
 | below the quality bar | `msg="finding below the quality bar; chat-only, no KB artifact"` | expected — `confidence < forge.min_confidence` (default 0.75) |
-| duplicates a catalog entry | `msg="finding duplicates a catalog entry; not filing"` | expected — within `forge.dup_score` |
+| duplicates a catalog entry | `msg="dedup: duplicates a catalog entry; not filing"` | expected — within `forge.dup_score` |
 | coalesced onto an open PR | `msg="finding coalesced onto an open PR"` (`result="coalesced"`) | expected — added to an existing PR |
 | **opened** | `msg="curated as PR"` with the `url` | success |
 | **error** | `msg="curate findings"` with `err=` (`result="error"`) | a forge/GitHub-App problem — check App scopes & `forge.kb_repo` |
