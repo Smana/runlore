@@ -119,6 +119,12 @@ func (t QueryMetricsTool) Call(ctx context.Context, args string) (string, error)
 		return math.Abs(samples[i].Value) > math.Abs(samples[j].Value)
 	})
 	var b strings.Builder
+	// Advisory FIRST, so it survives the row cap and is read before the numbers it
+	// calls into question. Additive: the rows below are untouched and the query is
+	// never rewritten. See cadvisor_rollup.go.
+	if w := cadvisorRollupAdvisory(in.Query); w != "" {
+		b.WriteString(w + "\n")
+	}
 	renderRows(&b, len(samples), "more series", func(i int) {
 		fmt.Fprintf(&b, "%s = %g\n", formatMetric(samples[i].Metric), samples[i].Value)
 	})
@@ -185,6 +191,12 @@ func (t QueryMetricsRangeTool) Call(ctx context.Context, args string) (string, e
 		return noSeriesMatched, nil
 	}
 	var b strings.Builder
+	// Same advisory as the instant tool: a range query over an unguarded cadvisor
+	// selector double-counts identically, and this is the tool an investigation uses
+	// to establish a peak. See cadvisor_rollup.go.
+	if w := cadvisorRollupAdvisory(in.Query); w != "" {
+		b.WriteString(w + "\n")
+	}
 	if clampNote != "" {
 		b.WriteString(clampNote + "\n")
 	}
