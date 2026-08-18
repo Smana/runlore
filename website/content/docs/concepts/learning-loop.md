@@ -225,7 +225,13 @@ Why each gate exists:
   label) is unqualified and still matches an ARN-form entry in any account: an absent
   qualifier means *unknown*, not *different*, which is what keeps entries already
   filed under a full ARN reachable. So if you run one instance name in two accounts,
-  make sure the account label reaches the alert. A **workload-less**
+  make sure the account label reaches the alert.
+
+  The alert is not the only way a resource is named: the investigation names one too,
+  in its findings. That value runs the same reduction, reconciled against the alert's
+  identity — so a model that echoes back the full ARN it read in the prompt cannot
+  file the entry under a second spelling, and a model that writes the bare name cannot
+  drop an account the alert established. A **workload-less**
   incident (PagerDuty carries no Kubernetes namespace/name) agrees only with entries
   that are themselves resource-less — the weakest ("scopeless") tier: it always
   requires `solo_floor` + `min_score`, starts at reduced confidence, and

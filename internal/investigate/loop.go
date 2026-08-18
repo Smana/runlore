@@ -1497,16 +1497,34 @@ func stampMatchedKnowledge(inv *providers.Investigation, best *providers.Matched
 // preferDiscoveredResource keeps the workload the investigation identified,
 // defaulting a missing namespace to the originating alert's, and falls back to the
 // alert workload only when the model named none.
+//
+// It is also the MODEL edge of resource-identity canonicalisation, and deliberately
+// the only one. `submit_findings.affected_resource` is the second place a resource
+// identity enters RunLore — an alert is the first, canonicalised at ingestion by
+// providers.ResolveWorkloadIdentity — and the model writes that name freely, in
+// practice often as the full ARN it read off the request labels in the seed prompt.
+// Delivered verbatim it produced an identity that did not canonicalise the way an
+// ingested one does, so a finding's recurrence key and dedup fingerprint disagreed
+// with the key of the alert that produced it.
+//
+// This function is the seam rather than tools.go's parse because reconciling the
+// model's resource against the alert's is already its whole job (the namespace
+// default above is the same act), and because a canonicalisation applied at the parse
+// would have no origin to reconcile against — which is exactly what makes the
+// difference between qualifying the identity and DOWNGRADING it. The model has no
+// alert labels, so providers.ReconcileWorkloadIdentity takes the fallback scope from
+// the originating workload: an account ingestion established survives a model that
+// spells the resource without one. Kubernetes is untouched on both sides.
 func preferDiscoveredResource(discovered, origin providers.Workload) providers.Workload {
 	if discovered.Name != "" && discovered.Namespace == "" {
 		discovered.Namespace = origin.Namespace
 	}
 	if discovered.Ref() == "" {
-		return origin
+		return origin // the originating workload, already resolved by its source adapter
 	}
 	// A discovered resource with a namespace but no name (Ref()=="ns") is kept as-is —
 	// the model named a namespace-scoped resource even without a specific workload.
-	return discovered
+	return providers.ReconcileWorkloadIdentity(discovered, origin)
 }
 
 // autoExecuting reports whether a remediation this investigation proposes could be

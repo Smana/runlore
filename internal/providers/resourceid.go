@@ -129,18 +129,73 @@ var cloudRegionLabels = []string{"region", "aws_region"}
 // that stamps account labels globally WOULD be qualified. It is the one shape this
 // cannot tell apart — there is no signal left — and the cost is one restarted
 // recurrence count, not a wrong answer.
+//
+// THE OTHER EDGE. An alert is not the only way a resource identity enters RunLore:
+// the model names one too, in submit_findings' `affected_resource`. That edge runs
+// ReconcileWorkloadIdentity, which differs only in where the fallback scope is read
+// from, and shares the rule itself (resolveWorkloadIdentity) so the two cannot drift.
 func ResolveWorkloadIdentity(w Workload, labels map[string]string) Workload {
+	return resolveWorkloadIdentity(w, labelValue(labels, cloudRegionLabels), labelValue(labels, cloudAccountLabels))
+}
+
+// ReconcileWorkloadIdentity is the MODEL-side half of that same chokepoint: it
+// canonicalises the resource an investigation NAMES in submit_findings'
+// `affected_resource`, reconciling it against the workload the investigation
+// originated on.
+//
+// WHY THIS EXISTS AT ALL. A resource identity enters RunLore from two edges, not one.
+// An alert is canonicalised at ingestion (ResolveWorkloadIdentity); the model is the
+// other edge, and it writes a name freely — routinely the full ARN it just read out
+// of the seed prompt, since the ARN travels verbatim on the request's labels. Left
+// alone, that produced an identity that did NOT canonicalise the way an ingested one
+// does: the finding's recurrence key and dedup fingerprint disagreed with the key of
+// the very alert that produced it, which is the spelling-dependent split the
+// ingestion edge exists to close, reopened from the other side.
+//
+// WHY THE ORIGIN AND NOT LABELS. The model has no alert labels to hand — it names a
+// resource, not a series — so the fallback scope is whatever the ORIGINATING workload
+// carries, which ingestion has already reconciled from the ARN and the labels alike.
+// The two edges therefore differ only in where the fallback scope comes from, and
+// share the canonicalisation itself (resolveWorkloadIdentity), which is the point:
+// one rule, reachable from both edges, rather than a second normalizer to drift
+// against.
+//
+// NO DOWNGRADE. This is the regression the seam is built to prevent, and it is why
+// the origin's scope is a FALLBACK rather than being ignored: a model that spells the
+// resource without its account must not blank an account ingestion established. So a
+// value present on either side survives, exactly as at ingestion — and where both are
+// present and disagree, the ARN wins, because it names the resource itself while the
+// origin names the alert that led here. A model naming a DEEPER cloud resource in the
+// same investigation inherits the scope too: the account is a property of the
+// environment being investigated, not of the one object the alert happened to fire on.
+//
+// Kubernetes is excluded by the shared core, so a discovered Kubernetes object never
+// acquires a cloud qualifier from a cloud-scoped origin and keys byte-identically.
+func ReconcileWorkloadIdentity(w, origin Workload) Workload {
+	return resolveWorkloadIdentity(w, origin.Region, origin.Account)
+}
+
+// resolveWorkloadIdentity is the one canonicalisation both identity edges run: the
+// name is reduced to its bare resource identifier and the cloud scope is recorded on
+// its own fields, taken from the ARN first and from the caller's fallback scope
+// otherwise. A scope already set on w is authoritative and is never overwritten.
+//
+// It is unexported and takes the fallback as two plain strings on purpose: the two
+// edges disagree only about where that scope is READ from (alert labels at ingestion,
+// the originating workload for a model-written resource), and nothing else about the
+// rule may differ between them.
+func resolveWorkloadIdentity(w Workload, region, account string) Workload {
 	if w.Name == "" {
 		return w // nothing to qualify: there is no resource
 	}
-	bare, region, account, isARN := parseARN(w.Name)
+	bare, arnRegion, arnAccount, isARN := parseARN(w.Name)
 	if isARN {
 		w.Name = bare
 	} else if w.Kind != "" {
 		return w // a Kubernetes object: namespace/name is the whole identity
 	}
-	w.Region = cmp.Or(w.Region, region, labelValue(labels, cloudRegionLabels))
-	w.Account = cmp.Or(w.Account, account, labelValue(labels, cloudAccountLabels))
+	w.Region = cmp.Or(w.Region, arnRegion, region)
+	w.Account = cmp.Or(w.Account, arnAccount, account)
 	return w
 }
 
