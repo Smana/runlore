@@ -209,7 +209,14 @@ Why each gate exists:
   symptoms → one cause": a `CrashLoopBackOff` in `apps/web` should not recall an OOM
   runbook for `apps/worker`. It's a **pre-filter** over a wide candidate set (k=20),
   not a check of only the top lexical hit, so the structurally-correct entry can win
-  even when a wrong-workload entry scores higher on symptom words. A **workload-less**
+  even when a wrong-workload entry scores higher on symptom words. Agreement is by
+  **identity, not spelling**: a per-pod name reduces to its controller family
+  (`tooling/harbor-registry-59598dbd57-ltkzw` → `tooling/harbor-registry`), and a
+  **cloud** resource is matched through its ARN — a CloudWatch alert names one RDS
+  instance by its `DBInstanceIdentifier` on one firing and by its full ARN on the
+  next, and both reach the same entry. An ARN's account and region still have to
+  agree when both sides carry them, so the same instance name in two AWS accounts
+  stays two resources. A **workload-less**
   incident (PagerDuty carries no Kubernetes namespace/name) agrees only with entries
   that are themselves resource-less — the weakest ("scopeless") tier: it always
   requires `solo_floor` + `min_score`, starts at reduced confidence, and

@@ -38,13 +38,20 @@ func normalizeText(s string) string {
 	return strings.Join(strings.Fields(s), " ")
 }
 
-// normalizeWorkloadName strips a trailing pod-name hash so a per-pod name reduces to
-// its controller family. The implementation is shared with the instant-recall
-// structural gate — it lives in providers.NormalizeWorkloadName (the single source
-// of truth, see CORE-681) so the dedup and recall paths can never drift. This thin
-// alias keeps the curator's internal call sites (and their tests) unchanged.
+// normalizeWorkloadName reduces a resource name to the identity the curator's keys
+// group by: an AWS ARN collapses to the resource identifier its CloudWatch dimension
+// carries, and a trailing pod-name hash is stripped so a per-pod name reduces to its
+// controller family. The implementation is shared with the instant-recall structural
+// gate — it lives in providers (the single source of truth, see CORE-681) so the
+// dedup and recall paths can never drift. This thin alias keeps the curator's
+// internal call sites (and their tests) unchanged.
+//
+// The ARN collapse is what lets one recurring cloud resource key alike when the
+// alert spells it two ways; providers.NormalizeResourceName documents the accepted
+// consequence (the account and region are dropped) and why the fields the callers
+// wrap around this name make it safe here.
 func normalizeWorkloadName(name string) string {
-	return providers.NormalizeWorkloadName(name)
+	return providers.NormalizeResourceName(name)
 }
 
 // IncidentKey builds a host-invariant, per-class dedup key for an alert: the alert

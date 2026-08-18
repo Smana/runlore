@@ -633,18 +633,7 @@ func resourceAgrees(reqW providers.Workload, entryResource string, requireWorklo
 	if entryResource == "" || reqW.Namespace == "" {
 		return matchNone
 	}
-	// Strip the volatile pod-hash suffix off the NAME segment on BOTH sides before
-	// the structural comparison. A pod-scoped alert (KubePodNotReady carries only a
-	// `pod` label — no deployment/workload label) arrives with the full pod name,
-	// e.g. tooling/harbor-registry-59598dbd57-ltkzw, while the KB entry stores the
-	// normalized controller family tooling/harbor-registry. Without normalization the
-	// two never agree → the recall is rejected (no_resource_match) and a full paid
-	// investigation runs despite a perfect KB entry (live-found). Normalizing BOTH
-	// sides also matches an entry written before the curator-side CORE-681 fix, which
-	// may itself still carry a pod hash. Only the name is normalized — never the
-	// namespace — and the normalization is the same idempotent one the dedup path
-	// uses, so two distinct workloads never collapse together.
-	if normalizeResourceRef(reqW.Ref()) == normalizeResourceRef(entryResource) {
+	if refsAgree(reqW.Ref(), entryResource) {
 		return matchExact
 	}
 	if requireWorkload {
@@ -661,18 +650,42 @@ func resourceAgrees(reqW providers.Workload, entryResource string, requireWorklo
 	return matchNone
 }
 
-// normalizeResourceRef strips the volatile pod-hash suffix from the NAME segment of
-// a "namespace/name" resource ref, leaving a bare "namespace" (or "") untouched. It
-// splits on the first "/" only — Kubernetes namespaces and names never contain a
-// slash — so the namespace is never normalized, only the name. It delegates to the
-// shared providers.NormalizeWorkloadName so the recall gate and the curator dedup
-// path strip identically (and idempotently).
-func normalizeResourceRef(ref string) string {
-	ns, name, ok := strings.Cut(ref, "/")
-	if !ok {
-		return ref // bare namespace (or empty): no name segment to normalize
+// refsAgree reports whether two rendered "namespace/name" resource refs name the
+// same resource. Every way one resource can be SPELLED two ways is forgiven here,
+// because each of them otherwise costs a full paid investigation beside a catalog
+// that already holds the answer:
+//
+//   - The volatile pod-hash suffix. A pod-scoped alert (KubePodNotReady carries only
+//     a `pod` label — no deployment/workload label) arrives with the full pod name,
+//     e.g. tooling/harbor-registry-59598dbd57-ltkzw, while the KB entry stores the
+//     controller family tooling/harbor-registry. Normalizing BOTH sides also matches
+//     an entry written before the curator-side CORE-681 fix, which may itself still
+//     carry a hash.
+//   - The two spellings of a cloud resource, which is what this replaced a plain
+//     string comparison for. A CloudWatch alert identifies one RDS instance by its
+//     DBInstanceIdentifier dimension on one firing and by its full ARN on the next,
+//     and the live catalog holds entries in both forms
+//     ("observability/arn:aws:rds:…:db:compute-stages" beside short names).
+//     Canonicalising new alerts at ingestion cannot reach those already-written
+//     entries, so the gate itself compares names as cloud resource identities — which
+//     also keeps two accounts or two regions hosting the same instance name apart
+//     (see providers.ResourceID).
+//
+// Only the NAME half is normalized, never the namespace: the ref is cut on the FIRST
+// "/" and Kubernetes namespaces never contain one, so a slash-style ARN in the name
+// half survives whole. Both sides must be scoped the same way — a bare namespace and
+// a named workload inside it are not an exact match; the caller decides that pair on
+// its weaker namespace tier.
+func refsAgree(a, b string) bool {
+	ans, aname, aScoped := strings.Cut(a, "/")
+	bns, bname, bScoped := strings.Cut(b, "/")
+	if ans != bns || aScoped != bScoped {
+		return false
 	}
-	return ns + "/" + providers.NormalizeWorkloadName(name)
+	if !aScoped {
+		return true // two bare namespaces (or two empties), already found equal
+	}
+	return providers.ParseResourceID(aname).Agrees(providers.ParseResourceID(bname))
 }
 
 func clampF(v, lo, hi float64) float64 {

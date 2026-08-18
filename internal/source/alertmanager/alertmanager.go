@@ -47,7 +47,20 @@ type amAlert struct {
 // k8s-stack" for a Deployment, which was reported as `Job observability/vmagent-…`.
 // kube-state-metrics has exposed the Job name as job_name since it began setting
 // job="kube-state-metrics" on its own series, so job_name is the only correct source.
+//
+// The name is finally canonicalised through providers.ARNResourceName: a
+// CloudWatch-derived rule templates whichever dimension it has to hand into these
+// labels, so one RDS instance arrives as `datagrok-aqemia-shared` on one firing and
+// as `arn:aws:rds:us-east-1:142655614335:db:datagrok-aqemia-shared` on the next —
+// two spellings that then key, render and index as two unrelated resources. Only an
+// ARN is rewritten; a Kubernetes name (pod hash and all) passes through untouched.
 func workloadFromLabels(labels map[string]string) (kind, name string) {
+	kind, name = workloadLabel(labels)
+	return kind, providers.ARNResourceName(name)
+}
+
+// workloadLabel picks the workload label to trust, in precedence order.
+func workloadLabel(labels map[string]string) (kind, name string) {
 	for _, c := range []struct{ label, kind string }{
 		{"deployment", "Deployment"},
 		{"statefulset", "StatefulSet"},

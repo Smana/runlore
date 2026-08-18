@@ -104,6 +104,14 @@ func (s *Source) Decode(body []byte, h http.Header) (source.DecodeResult, error)
 			}
 		}
 		ns, kind, wname := get("namespace"), get("workload_kind"), get("workload_name")
+		// One cloud resource must have ONE spelling downstream. A vendor rule
+		// templates whichever identifier it has to hand, so the same RDS instance
+		// arrives as its bare DBInstanceIdentifier on one firing and as its full ARN
+		// on the next — and Workload.Name is what the notification renders, what a
+		// curated entry is indexed under, and what the recurrence key is built from.
+		// Only an ARN is rewritten; a Kubernetes name passes through untouched, and
+		// the raw value still travels on Labels.
+		wname = providers.ARNResourceName(wname)
 		var fps []string
 		if fingerprint != "" {
 			fps = []string{fingerprint}
