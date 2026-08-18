@@ -8,6 +8,7 @@ import (
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/metric"
 
+	"github.com/Smana/runlore/internal/embed"
 	"github.com/Smana/runlore/internal/providers"
 )
 
@@ -46,16 +47,37 @@ func addUsage(t *providers.UsageTotals, u providers.Usage) {
 	t.CachedInputTokens += u.CachedInputTokens
 }
 
-// aggregateUsage combines the loop's model usage with the verify pass's into one
-// per-investigation total and, when pricing is configured, estimates cost. The
-// loop tokens are priced at the main model's rate and the verify tokens at the
-// verify override's rate (which inherits the main rate when unset) — so a cheaper
-// verify model is costed correctly even though the token totals are reported
-// combined.
-func (li *LoopInvestigator) aggregateUsage(loop, verify providers.UsageTotals) providers.UsageTotals {
+// aggregateUsage combines the loop's model usage with the verify pass's and the
+// hybrid-recall query embeddings' into one per-investigation total and, when pricing
+// is configured, estimates cost. The loop tokens are priced at the main model's rate
+// and the verify tokens at the verify override's rate (which inherits the main rate
+// when unset) — so a cheaper verify model is costed correctly even though the token
+// totals are reported combined.
+//
+// EMBEDDINGS ARE COUNTED BUT NOT PRICED, deliberately, and the asymmetry is the honest
+// answer rather than an oversight:
+//
+//   - Their TOKENS are real and provider-reported (the OpenAI-compatible /embeddings
+//     wire format returns a usage block, which internal/embed reads), so they belong in
+//     the token total and under max_tokens_per_investigation. Leaving them out made an
+//     embed-heavy recall free by construction.
+//   - Their COST is not derivable. There is no model.embeddings.pricing, so the only
+//     rates in hand are the completion models', both wrong for an embeddings endpoint
+//     by an order of magnitude. Pricing embeddings at a completion rate would put a
+//     fabricated figure on the notification footer and in
+//     runlore_investigation_cost_usd — precisely the "looks instrumented for spend when
+//     it is not" failure that model.pricing's all-zero-rates warning exists to refuse.
+//     So max_cost_per_investigation errs LOW here: the same direction projectSpend
+//     already errs, written down on the configuration page rather than papered over.
+//
+// ModelCalls likewise stays a count of COMPLETIONS. An embedding is not a turn, and
+// this is the number an operator reads as how far the ReAct loop got; the embeddings
+// endpoint's own call volume is separately visible as
+// runlore_model_requests_total{provider="embed"}.
+func (li *LoopInvestigator) aggregateUsage(loop, verify, embedded providers.UsageTotals) providers.UsageTotals {
 	total := providers.UsageTotals{
 		ModelCalls:        loop.ModelCalls + verify.ModelCalls,
-		InputTokens:       loop.InputTokens + verify.InputTokens,
+		InputTokens:       loop.InputTokens + verify.InputTokens + embedded.InputTokens,
 		OutputTokens:      loop.OutputTokens + verify.OutputTokens,
 		CachedInputTokens: loop.CachedInputTokens + verify.CachedInputTokens,
 	}
@@ -68,6 +90,16 @@ func (li *LoopInvestigator) aggregateUsage(loop, verify providers.UsageTotals) p
 		total.CostUSD = li.Pricing.cost(loop) + verifyPricing.cost(verify)
 	}
 	return total
+}
+
+// embedSpend snapshots what THIS investigation has spent on hybrid-recall query
+// embeddings so far, read from the context-scoped sink Investigate installs. It is the
+// only reader of that sink, so every ceiling check and every delivered figure sees the
+// same number rather than re-deriving one. A context with no sink — every caller
+// outside Investigate — totals zero, so nothing else changes shape.
+func embedSpend(ctx context.Context) providers.UsageTotals {
+	_, tokens := embed.UsageSinkFrom(ctx).Totals()
+	return providers.UsageTotals{InputTokens: tokens}
 }
 
 // recordUsageMetrics emits the per-investigation token totals (and estimated cost

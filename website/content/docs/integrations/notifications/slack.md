@@ -115,12 +115,80 @@ for the full breakdown. Without that combination, a restart or failover empties
 the registry: a reply to a thread delivered before it gets "I don't have
 context for this thread," even though the finding is still on screen.
 
-In your Slack app:
+#### Pre-flight: prove the endpoint answers
 
 `POST /slack/events` 404s until `thread_capture: true` is actually deployed and
 running, so configure the Event Subscription only once that rollout is live —
 otherwise Slack's URL verification fails and the feature looks broken before
-it's even been tried.
+it's even been tried. Send one unsigned POST from outside the cluster, against
+the hostname Slack will use, and **read the body, not just the code** — the body
+is what tells you whether RunLore answered or something in front of it did:
+
+```console
+$ curl -sS -w '\n%{http_code}\n' -X POST https://<your-runlore>/slack/events
+unauthorized
+401
+```
+
+| code | body | what it means | do next |
+|---|---|---|---|
+| **401** | `unauthorized` | the request reached RunLore and failed signature verification: the path routes and the HMAC is enforced | configure Slack |
+| **404** | `slack events not enabled` | **RunLore answered** — the path routes, but the handler is not wired | see *not wired* below |
+| **404** | anything else (HTML, `default backend`) | your ingress answered — the path is **not routed** to RunLore | see *not routed* below |
+| **200** | anything | nothing is verifying signatures on that URL | stop — do not point Slack at it |
+| **405** | `Method Not Allowed` | you sent a `GET`; the route is `POST`-only | resend with `-X POST` |
+| **503** | `no leader known; retry` / `leader unreachable; retry` | leader-forwarded, and no leader is routable right now | retry once leader election settles |
+| **421** | `not the leader (request already forwarded once)` | mid-failover, on a stale holder view | retry against the Service |
+| anything else | — | the ingress or a proxy answered, not RunLore (`502`, `504`, a redirect to an SSO page…) | read the body; fix routing first |
+
+**Not wired.** A handler that is actually serving announces itself at startup:
+
+```
+msg="slack thread capture enabled" endpoint=/slack/events
+```
+
+No such line ⇒ grep the warning beside it, which names the reason: `no forge is
+configured`, `no bot-token delivery target resolved`, or `no thread-capable
+notifier resolved`. **The endpoint is also unserved when `signing_secret_env`
+names a variable that is present but empty** (an unmounted secret, a blank Helm
+value) — an endpoint that cannot verify a signature is not exposed at all. That
+one is the trap: the startup line still prints, and nothing warns. So treat the
+pre-flight as authoritative for *routing*, and the startup log as authoritative
+for *wiring*; check both.
+
+**Not routed.** `/slack/events` is a **separate route** from
+`/slack/interactions`. On an ingress that lists paths individually rather than
+forwarding the whole service, that is the failure this check exists to catch:
+Approve/Reject and the feedback buttons keep working, so the Slack integration
+looks healthy, while every mention silently never arrives. Route both.
+
+#### Configure the Slack app
+
+> [!WARNING]
+> **Reinstalling can issue a new bot token — verify, don't assume.** If it does
+> and your secret store still holds the previous value, finding delivery stops
+> outright, which is loud. The quiet half is threads posted *before* the
+> rotation: a note against one still reaches the knowledge base and only the
+> acknowledgement fails, which reads as broken capture. Verify against the value
+> the cluster actually holds, not whatever is in your shell:
+>
+> ```console
+> $ TOKEN=$(kubectl -n runlore get secret runlore-secrets \
+>     -o jsonpath='{.data.SLACK_BOT_TOKEN}' | base64 -d)
+> $ curl -sS -X POST -H "Authorization: Bearer $TOKEN" https://slack.com/api/auth.test
+> {"ok":true,…}
+> ```
+>
+> `{"ok":false,"error":"not_authed"}` means the token was empty, not that it was
+> rejected. `invalid_auth`, `token_revoked`, `token_expired` and
+> `account_inactive` all mean the same remedy: copy the current **Bot User OAuth
+> Token** from **OAuth & Permissions** into the secret store, then **restart the
+> pod** — the token is read from the environment once, at startup, so until you
+> restart, the pod is still using whatever the Secret held when it started.
+>
+> The **signing secret is per-app, not per-install**, so a reinstall never
+> touches it: mentions keep arriving, and `/slack/events` keeps answering `401`
+> to the pre-flight, while replies fail.
 
 1. **OAuth & Permissions** → add the `app_mentions:read` bot scope (`chat:write`
    is already required for delivery), then reinstall the app.
@@ -128,6 +196,17 @@ it's even been tried.
    `https://<your-runlore>/slack/events`, and subscribe to the bot event
    `app_mention`. Slack verifies the URL with a signed challenge, so the endpoint
    must be reachable before you save.
+
+The bot must be **a member of the channel**: Slack only sends `app_mention` from
+conversations the app is in. Delivery already requires this, so if findings are
+arriving, it is satisfied.
+
+Saving the Request URL **is** the live test of `signing_secret_env`: Slack signs
+the `url_verification` challenge like every other delivery, and RunLore verifies
+it before echoing it back. **Success is silence** — an accepted challenge logs
+nothing. A mismatched secret logs
+`msg="rejected slack event: bad signature"` and Slack reports the URL as
+unverified.
 
 Only `app_mention` is subscribed — RunLore reads nothing in channels where it
 was not directly addressed.
@@ -222,3 +301,5 @@ has none.
 - [Security model → the feedback channels]({{< relref "/docs/security/security-model.md#the-feedback-channels---exposure--trust-model" >}})
   for the exposure and vote trust model.
 - [Learning loop]({{< relref "/docs/concepts/learning-loop.md" >}}) — how feedback weighs recall.
+- [Troubleshooting → A Slack mention in a thread does nothing]({{< relref "/docs/operations/troubleshooting.md#a-slack-mention-in-a-thread-does-nothing" >}})
+  — the log lines to grep once it is deployed and a mention lands nowhere.

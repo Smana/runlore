@@ -408,8 +408,21 @@ func slackDate(t time.Time) string {
 // the escaped shared FormatProgress output (parsed as mrkdwn by block-less
 // clients); the blocks escape each untrusted field the same way delivery does, so
 // a hostile interim line like <https://evil|x> renders inert, never a live link.
+//
+// The fallback text is then bounded, which the blocks beside it already were (150
+// runes for the header, 2900 for the section) and it was not. FormatProgress
+// splices in ProgressUpdate.Interim — the model's raw completion text, capped by
+// nothing between the loop and here — and escapeMrkdwn expands "&" fivefold on
+// top of that, so past Slack's ~40,000-character limit the whole POST is
+// rejected. An operator turns progress pings on precisely so a long
+// investigation is not silent; unbounded, the longest investigations are the
+// ones it silences. See boundPostedHead for why the HEAD is what survives:
+// FormatProgress leads with the status line, and that IS the ping.
 func slackProgressMessage(up providers.ProgressUpdate) map[string]any {
-	return map[string]any{"text": escapeMrkdwn(FormatProgress(up)), "blocks": slackProgressBlocks(up)}
+	return map[string]any{
+		"text":   boundPostedHead(escapeMrkdwn(FormatProgress(up)), slackReplyBytes),
+		"blocks": slackProgressBlocks(up),
+	}
 }
 
 // slackProgressBlocks renders an interim progress update as Block Kit.
@@ -648,19 +661,40 @@ func summaryBlocks(inv providers.Investigation) []map[string]any {
 		blocks = append(blocks, map[string]any{"type": "section", "fields": fields})
 	}
 
-	// 8. Footer — provenance only: verified, model calls/cost, and the single
-	// link to view the entry (this investigation's own curated entry, or — on
-	// a recall/seen-before card with nothing freshly curated — the prior/
-	// recalled/matched entry; see entryLink). Confidence and the agent identity
-	// are NOT repeated here: confidence already owns the header (2b), and the
-	// Slack app's own identity already says who posted this — showing either
-	// twice reads as the card disagreeing with itself, not reinforcing it.
+	// 8. Footer — provenance only: verified, the single link to view the entry
+	// (this investigation's own curated entry, or — on a recall/seen-before card
+	// with nothing freshly curated — the prior/recalled/matched entry; see
+	// entryLink), why that link is missing when a write failed, and model
+	// calls/cost. Confidence and the agent identity are NOT repeated here:
+	// confidence already owns the header (2b), and the Slack app's own identity
+	// already says who posted this — showing either twice reads as the card
+	// disagreeing with itself, not reinforcing it.
 	var foot []string
 	if inv.Verified {
 		foot = append(foot, "✓ verified")
 	}
 	if link := entryLink(inv); link != "" {
 		foot = append(foot, link)
+	}
+	// Beside the entry link, because it is the same fact's other arm: this is what
+	// there is to say when the write that would have produced that link failed. An
+	// empty CuratedURL is ambiguous — it is also the normal state for a finding
+	// below curate.min_confidence or carrying a skip_verdicts verdict — so without
+	// this the card renders a broken learning loop exactly like a deliberately
+	// skipped one (#506, observed live: a 403 ran unnoticed until an operator
+	// happened to write a thread note, the one path that already reported it). On a
+	// recurring incident entryLink still resolves the PRIOR entry, so the two
+	// genuinely coexist, and the warning is what stops that stale link from reading
+	// as this run's.
+	//
+	// escapeMrkdwn is MANDATORY here, not defensive: the reason is forge-supplied
+	// text, so without it this would be the only unescaped untrusted span on the
+	// card and a body echoing <https://evil.example|click here> would render as a
+	// live phishing link in the incident channel. The inline code span is
+	// curateFailureReason's contract — backticks are already stripped from the
+	// reason, so it cannot close early.
+	if reason := curateFailureReason(inv); reason != "" {
+		foot = append(foot, "⚠️ could not save to the knowledge base: `"+escapeMrkdwn(reason)+"`")
 	}
 	if u := usageFooter(inv.Usage); u != "" {
 		foot = append(foot, u) // trusted scaffolding — digits/labels only, no mrkdwn meta

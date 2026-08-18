@@ -159,6 +159,12 @@ func RunServe(version string, args []string) error {
 	if msg := CostCeilingWithoutPricingWarning(cfg); msg != "" {
 		log.Warn(msg)
 	}
+	// An unrecognised gitops.engine resolves to flux without a word, so an Argo CD
+	// deployment that typed "argo" gets the whole Flux path — including GitOps tools
+	// scoped to kinds its cluster cannot own, which is runlore#503 reached by a typo.
+	if msg := UnknownGitopsEngineWarning(cfg.GitOps.Engine); msg != "" {
+		log.Warn(msg)
+	}
 
 	// Set up the single shared OTel metrics instance before building the investigator
 	// so recall + the investigation loop can record to it from the first request.
@@ -458,7 +464,14 @@ func RunServe(version string, args []string) error {
 	// nowhere to write it — would be worse than not having one. See
 	// BuildThreadMention for why deliverability is checked before the notifier.
 	if cfg.Notify.Slack.ThreadCapture && threadRegistry.Enabled() {
-		acts.Threads = BuildThreadMention(cfg, threadResponder, notifier, log)
+		// Assigned through a nil-checked variable, never straight from the call:
+		// acts.Threads is an INTERFACE and BuildThreadMention returns a CONCRETE
+		// *thread.Mention that is nil on each of its three failure paths, so a raw
+		// assignment stores a typed-nil the server's `threads == nil` guard cannot
+		// see. Same shape, same reason, as acts.Pauser above.
+		if mention := BuildThreadMention(cfg, threadResponder, notifier, log); mention != nil {
+			acts.Threads = mention
+		}
 	}
 	// /readyz is process + catalog health, NOT leadership (#264): every warm
 	// replica reports Ready (so `helm upgrade --wait` / Flux kstatus succeeds

@@ -15,6 +15,7 @@ package providers
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"regexp"
 	"strings"
@@ -66,6 +67,58 @@ func (w Workload) Ref() string {
 		return w.Namespace
 	}
 	return w.Namespace + "/" + w.Name
+}
+
+// EntryResourceRef narrows a rendered workload ref to the single, whitespace-free
+// value RunLore's own merge gate accepts in a knowledge-base entry's `resource:`
+// frontmatter — kbvalidate rejects any resource containing " \t\r\n" outright.
+//
+// It exists because Ref() renders whatever is in Workload.Name, and on a curated
+// or captured finding that is MODEL-WRITTEN free text: submit_findings fills
+// affected_resource (internal/investigate/tools.go), and a finding covering
+// several objects routinely arrives as a list — "essentials, monitoring,
+// argocd-app-of-apps" — which Ref() renders as "argocd/essentials, monitoring,
+// argocd-app-of-apps". Written verbatim, that value fails the gate, so the entry's
+// pull request can never be merged. On the thread-capture path that is the worst
+// possible shape of failure: the human is told the write succeeded and the
+// announcement fires, because both are 1:1 with the LANDED FORGE WRITE, which did
+// land — only the merge is impossible, and nothing surfaces it.
+//
+// Narrowing, not dropping: `resource` is the structural-recall index (see
+// investigate's resourceAgrees), so an entry with no resource is reachable
+// lexically only. The first listed object is the one the namespace was rendered
+// against and is a real object, so keeping it preserves the index. Nothing is
+// lost — the full list still reaches the entry BODY verbatim.
+//
+// Whitespace-free input is returned EXACTLY as given — the single-field early
+// return below exists for that promise alone. It is what lets every caller say
+// that no entry which merges today is written differently, and it is why the
+// punctuation trim is guarded rather than unconditional: an unguarded trim also
+// rewrites "argocd/app," and "a;b;", which are whitespace-free, clear the gate
+// today, and are none of this function's business.
+//
+// So it deliberately does NOT split a comma-joined list that carries no
+// whitespace ("a,b,c"): that value merges today, and quietly rewriting what an
+// existing entry is indexed under is a bigger change than closing a gate defect.
+//
+// KNOWN CONSEQUENCE: two different multi-object findings that happen to lead with
+// the same object now write the SAME `resource`, while curator.DupFingerprint
+// keeps them distinct (it hashes the full, un-narrowed Ref()). So the frontmatter
+// index can collide where the dedup identity does not — a new class, and stated
+// here rather than left to be discovered. It is strictly better than what it
+// replaces, where neither entry could be merged at all, and the entry body still
+// distinguishes them for a reader.
+func EntryResourceRef(ref string) string {
+	fields := strings.Fields(ref)
+	if len(fields) == 0 {
+		return ""
+	}
+	if len(fields) == 1 {
+		return fields[0]
+	}
+	// Trailing list punctuation is what the split left behind ("argocd/essentials,"),
+	// not part of the name; a trailing "/" would leave a ref with an empty name half.
+	return strings.TrimRight(fields[0], ",;/")
 }
 
 // reDeployPod matches a volatile pod-name suffix: a Deployment pod is
@@ -209,11 +262,83 @@ type GitOpsProvider interface {
 	WatchFailures(ctx context.Context) (<-chan FailureEvent, error)
 }
 
+// LookupReason says what a read that returned no object actually ESTABLISHED, which is
+// not always "the object is absent".
+//
+// The dynamic client reports a 404 identically whether a served kind has no object of
+// that name or the API serves no such kind at all; an RBAC-refused cluster-wide search
+// never ran; and a kind the provider has no mapping for never reached the API at all.
+// Collapsing those into one "not found" is how runlore#503 turned a limit of the tool
+// into a claim about the cluster. A provider knows which case it hit, so it says so.
+type LookupReason string
+
+const (
+	// LookupAbsent — the kind is served, the search ran, and no object of that name came
+	// back from any scope searched. The only reason that is genuinely about the object.
+	LookupAbsent LookupReason = "absent"
+	// LookupKindNotServed — the API serves no such resource type, so no object of that
+	// kind could have been returned. Says nothing about the named object.
+	LookupKindNotServed LookupReason = "kind-not-served"
+	// LookupDenied — a search the answer would otherwise claim to have made was refused
+	// by RBAC and never ran. The object may sit in a scope this agent cannot read.
+	LookupDenied LookupReason = "denied"
+	// LookupUnresolvable — this provider has no mapping for the kind, so no request was
+	// ever issued. A statement about the provider's scope, not about the cluster.
+	LookupUnresolvable LookupReason = "unresolvable"
+	// LookupFailed — the read errored for some other reason, so nothing was established.
+	LookupFailed LookupReason = "failed"
+)
+
+// AllNamespaces is the Lookup scope name for a completed cluster-wide search by name.
+const AllNamespaces = "all namespaces"
+
+// Lookup records what a name lookup DID, so a tool can report the lookup instead of
+// asserting a conclusion the lookup does not support.
+type Lookup struct {
+	Reason LookupReason
+	// Scopes are the search scopes the provider actually COMPLETED, in order: a
+	// namespace name, or AllNamespaces. A scope that was skipped or refused is not
+	// listed — naming a search that never ran is the false half of #503's message,
+	// which claimed the namespace, flux-system and all namespaces unconditionally.
+	Scopes []string
+}
+
+// LookupError is a failed read that knows what it established. Providers return it so a
+// caller can report the lookup rather than infer a verdict from a bare 404; the
+// underlying API error is wrapped, so apierrors.IsNotFound and friends still work.
+type LookupError struct {
+	Lookup Lookup
+	Err    error
+}
+
+func (e *LookupError) Error() string {
+	if e.Err == nil {
+		return string(e.Lookup.Reason)
+	}
+	return string(e.Lookup.Reason) + ": " + e.Err.Error()
+}
+
+func (e *LookupError) Unwrap() error { return e.Err }
+
+// LookupOf recovers the Lookup a provider attached to a failed read, reporting false
+// for a nil error or one that carries no such record.
+func LookupOf(err error) (Lookup, bool) {
+	var le *LookupError
+	if errors.As(err, &le) {
+		return le.Lookup, true
+	}
+	return Lookup{}, false
+}
+
 // ResourceStatus is a read-only snapshot of a GitOps/Kubernetes object's health,
 // used to investigate WHY a resource is failing (not just that it is).
 type ResourceStatus struct {
 	Workload Workload
-	NotFound bool              // the object does not exist (often the cascade root)
+	// NotFound reports that the read returned no object. Lookup says what that
+	// ESTABLISHED — read them together, because "not found" on its own does not
+	// distinguish an absent object from an unserved kind or a denied search.
+	NotFound bool
+	Lookup   Lookup
 	Ready    string            // Ready condition status: "True"/"False"/"Unknown"/""
 	Reason   string            // Ready condition reason
 	Message  string            // Ready condition message
@@ -226,9 +351,26 @@ type ResourceStatus struct {
 type DepNode struct {
 	Workload Workload
 	NotFound bool
+	// Lookup is set whenever this node's own read returned no object — absent, unserved
+	// kind, denied, unresolvable kind, or a failed read. A zero Lookup means the object
+	// WAS read, so a renderer has to consult it before printing a Ready state: a node
+	// whose read failed used to render as "(Ready=unknown)", which asserts it exists.
+	Lookup   Lookup
 	Ready    string // Ready condition status
 	Reason   string
 	Children []DepNode
+}
+
+// GitOpsEngineReporter is an optional capability: a GitOps provider naming the engine it
+// speaks. Consumers type-assert for it exactly like GitOpsInspector.
+//
+// It exists so a consumer can source the engine from the provider it was actually handed
+// rather than from gitops.engine, which nothing validates — "argo" and "ArgoCD" both fall
+// through to flux — and which therefore cannot support a statement about the deployment.
+// Both providers already tag every Change they emit with their Engine; this exposes the
+// same fact before there is a Change to read.
+type GitOpsEngineReporter interface {
+	GitOpsEngine() Engine
 }
 
 // GitOpsInspector is optional read-only deep introspection for an investigation:
@@ -239,6 +381,79 @@ type GitOpsInspector interface {
 	ResourceStatus(ctx context.Context, w Workload) (ResourceStatus, error)
 	// DependencyTree walks dependsOn/sourceRef edges to surface the root failure.
 	DependencyTree(ctx context.Context, w Workload) (DepNode, error)
+}
+
+// ResourceSpecOutcome distinguishes the ways a spec read can end. They are
+// SEPARATE values because conflating them is what made gitops_resource_status
+// dangerous: it answered "the object genuinely does not exist" for a kind it never
+// supported, and a model reasoned from that as evidence of absence. Only
+// ResourceAbsent is evidence about the cluster's contents.
+type ResourceSpecOutcome string
+
+// The outcomes of a resource spec read.
+const (
+	ResourceFound         ResourceSpecOutcome = "found"          // the object was read
+	ResourceAbsent        ResourceSpecOutcome = "absent"         // the server says this OBJECT does not exist
+	ResourceForbidden     ResourceSpecOutcome = "forbidden"      // RBAC denied the read; says NOTHING about existence
+	ResourceKindUnknown   ResourceSpecOutcome = "kind_unknown"   // this cluster serves no such kind; says NOTHING about existence
+	ResourceKindAmbiguous ResourceSpecOutcome = "kind_ambiguous" // several API groups serve this kind; nothing was read
+	ResourceRefused       ResourceSpecOutcome = "refused"        // this agent refuses the kind by policy (Secret)
+)
+
+// ResourceSpecQuery identifies the object to read.
+//
+// Kind is BARE ("VMServiceScrape") because that is what a model has: it reads the
+// kind off an alert or a manifest, not a fully-qualified resource. Group is the
+// optional disambiguator for the case where a bare Kind is served by more than one
+// API group — Event (core and events.k8s.io) and NetworkPolicy (networking.k8s.io
+// and crd.projectcalico.org) on any cluster running Calico. Without it, an
+// ambiguity would be a dead end: the reader refuses to guess, and the caller would
+// have no way to say which one it meant.
+type ResourceSpecQuery struct {
+	Kind      string
+	Name      string
+	Namespace string
+	// Group narrows resolution to one API group ("" means "no preference", and
+	// "core" is accepted as a spelling of the core group's empty name).
+	Group string
+}
+
+// ResourceSpec is one Kubernetes object's desired and observed state, as YAML.
+//
+// Spec and Status are rendered rather than typed because the point is to read
+// ARBITRARY kinds — including CRDs the binary has never heard of — so there is no
+// Go type to unmarshal into.
+type ResourceSpec struct {
+	// Query echoes the request NORMALIZED to what was actually read: the Kind in
+	// the casing the server serves it under, the Group that answered, and NO
+	// namespace for a cluster-scoped kind. Rendering the request back verbatim
+	// would state a caller's mistake as fact — "StorageClass made-up-ns/fast".
+	Query   ResourceSpecQuery
+	Outcome ResourceSpecOutcome
+	// APIVersion the object was actually read at, so a reader can tell which of
+	// several served versions answered.
+	APIVersion string
+	Spec       string // .spec as YAML ("" when the kind has no spec, e.g. ConfigMap)
+	Status     string // .status as YAML ("" when absent)
+	// Detail carries the server's own message for a non-found outcome, so a denial
+	// reads as a denial rather than being flattened into "not found".
+	Detail string
+}
+
+// ResourceSpecReader reads one object's spec/status by kind, name and namespace.
+//
+// It exists because every other reader here answers "what is happening" while a large
+// class of incidents is "the spec says X and reality is Y": a Service selector matching
+// no pods, a scrape CR targeting an absent namespace, a NetworkPolicy with no egress to
+// kube-dns, an HPA on a metric that never reports. Those were previously only inferable
+// from consequences — see the investigation that concluded a VMServiceScrape had been
+// deleted when its namespaceSelector simply pointed at a namespace that did not exist.
+//
+// Implementations MUST refuse Secret outright — both before AND after resolution, so a
+// kind that folds to "secret" cannot slip past the pre-check — and MUST report RBAC
+// denials as ResourceForbidden rather than as absence.
+type ResourceSpecReader interface {
+	ResourceSpec(ctx context.Context, q ResourceSpecQuery) (ResourceSpec, error)
 }
 
 // MetricsProvider abstracts VictoriaMetrics/Prometheus (both speak PromQL).
@@ -859,14 +1074,28 @@ type Investigation struct {
 	// the exact bound on resolve-before-open pairing (see outcome.resolvesSince) — the open
 	// itself is stamped at COMPLETION, so without this the pairing window is unknowable.
 	InvestigationStartedAt time.Time
-	Actions                []Action    // proposed remediations (autonomy ladder; never executed at rung "suggest")
-	CuratedURL             string      // runtime: KB issue/PR the curator opened, linked in delivery (set after curation)
-	Fingerprint            string      // originating alert fingerprint; for outcome-ledger attribution
-	Fingerprints           []string    // coalesced batch fingerprints; one outcome open is recorded per entry
-	TriggerKey             string      // deterministic incident identity set at trigger time (alerts: host-invariant per-class key from curator.IncidentKey; GitOps: failing resource+condition). curator.DupFingerprint prefers it so reworded re-investigations (#137) AND the same alert on a different pod/node (CORE-681) still dedupe
-	RecalledEntry          string      // when Recalled: the catalog entry Path that was matched
-	Verified               bool        // true when the adversarial verify pass ran and a root cause survived it
-	Usage                  UsageTotals // per-investigation model token/cost accounting (loop + verify); surfaced to humans + metrics, never written to the curated KB body
+	Actions                []Action // proposed remediations (autonomy ladder; never executed at rung "suggest")
+	CuratedURL             string   // runtime: KB issue/PR the curator opened, linked in delivery (set after curation)
+	// CurateError is the reason the curator could not write this finding to the KB, set
+	// only when a write was ATTEMPTED and failed. It exists because an empty CuratedURL is
+	// ambiguous: it is also the normal state for a finding below curate.min_confidence or
+	// carrying a skip_verdicts verdict, so "no KB link" cannot tell a human whether the
+	// learning loop is working. Rendered by notify.Format AND by the Slack card's footer
+	// (notify.summaryBlocks), both through notify.curateFailureReason; never written to
+	// the KB body.
+	//
+	// The one field on this struct stamped AFTER investigate.redactInvestigation, because
+	// curation runs in the OnComplete pipeline rather than inside the loop. It is
+	// therefore redacted at its assignment (app.onInvestigationComplete) rather than by
+	// the reflection walk, and it is deliberately NOT on redactionSkipField — it is
+	// server-supplied free text, the opposite of what that list is for.
+	CurateError   string
+	Fingerprint   string      // originating alert fingerprint; for outcome-ledger attribution
+	Fingerprints  []string    // coalesced batch fingerprints; one outcome open is recorded per entry
+	TriggerKey    string      // deterministic incident identity set at trigger time (alerts: host-invariant per-class key from curator.IncidentKey; GitOps: failing resource+condition). curator.DupFingerprint prefers it so reworded re-investigations (#137) AND the same alert on a different pod/node (CORE-681) still dedupe
+	RecalledEntry string      // when Recalled: the catalog entry Path that was matched
+	Verified      bool        // true when the adversarial verify pass ran and a root cause survived it
+	Usage         UsageTotals // per-investigation model token/cost accounting (loop + verify); surfaced to humans + metrics, never written to the curated KB body
 	// Recurrence facts stamped at completion from the outcome ledger's per-TriggerKey
 	// index (never seen by the model). They describe PRIOR investigations of the same
 	// TriggerKey; this run's own open is recorded after they are read.

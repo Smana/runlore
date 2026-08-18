@@ -727,6 +727,54 @@ func TestEntryLinkEscapesURL(t *testing.T) {
 	}
 }
 
+// TestSlackCardShowsCurateFailure pins the SLACK surface of #506 — the one the
+// issue actually reports ("The delivered Slack card carried no indication of
+// this"). It is a separate test from the notify.Format one on purpose: nothing on
+// the Slack path calls Format. Slack.Deliver and SlackBot.Deliver both go through
+// slackMessageWith → summaryBlocks + detailBlocks + fallbackText, so a curate
+// failure rendered only by Format is rendered nowhere a Slack reader can see it.
+//
+// The failure line and the "view entry" link are asserted TOGETHER: on a recurring
+// incident entryLink still resolves the PRIOR entry, so the two coexist, and a card
+// showing a stale link with no warning is the exact ambiguity #506 is about.
+func TestSlackCardShowsCurateFailure(t *testing.T) {
+	inv := sampleInvestigation()
+	inv.CurateError = "open PR: github GET /repos/o/r/git/ref/heads/main: status 403: Resource not accessible by integration"
+	joined := strings.Join(mrkdwnTexts(summaryBlocks(inv)), "\n")
+	if !strings.Contains(joined, "could not save to the knowledge base") {
+		t.Fatalf("a failed knowledge write is invisible on the Slack card:\n%s", joined)
+	}
+	if !strings.Contains(joined, "403") {
+		t.Fatalf("the reason must say WHICH failure it was, so an operator can act:\n%s", joined)
+	}
+	if !strings.Contains(joined, "view entry") {
+		t.Fatalf("the prior entry link must survive alongside the warning:\n%s", joined)
+	}
+	// The line is provenance, so it belongs in the footer context block beside
+	// entryLink — not in the answer, which the woken-up on-call reads first.
+	if !strings.Contains(joined, "view entry>  ·  ⚠️ could not save to the knowledge base") {
+		t.Fatalf("the warning is not on the footer line beside the entry link:\n%s", joined)
+	}
+}
+
+// TestSlackCurateFailureIsEscaped is mandatory rather than defensive: the curate
+// reason is forge-supplied text, and without escapeMrkdwn it would be the ONLY
+// unescaped untrusted span on the card — a 403 body echoing
+// <https://evil.example|click here> would render as a live link in the incident
+// channel, which is a phishing vector wearing RunLore's own warning glyph.
+func TestSlackCurateFailureIsEscaped(t *testing.T) {
+	const hostile = "<https://evil.example|click here to fix it>"
+	inv := sampleInvestigation()
+	inv.CurateError = "open PR: " + hostile
+	joined := strings.Join(mrkdwnTexts(summaryBlocks(inv)), "\n")
+	if strings.Contains(joined, hostile) {
+		t.Fatalf("forge error text rendered as a LIVE mrkdwn link on the card:\n%s", joined)
+	}
+	if !strings.Contains(joined, "&lt;https://evil.example|click here to fix it&gt;") {
+		t.Fatalf("curate reason neither escaped nor present:\n%s", joined)
+	}
+}
+
 // TestSlackMessageFallbackEscaped proves the one-line fallback (Slack parses it
 // as mrkdwn for notifications) escapes its one untrusted field — the model title
 // — so a hostile title cannot inject a clickable phishing link, while the

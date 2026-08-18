@@ -206,7 +206,7 @@ func kbProvenanceLine(up providers.KBUpdate) string {
 // Flattening runs BEFORE the cap so a break cannot survive by sitting past the
 // ceiling, and it never changes the rune count, so it cannot push a field over.
 func kbField(s string, maxBytes int) string {
-	s = strings.TrimSpace(thread.FlattenLine(s))
+	s = strings.TrimSpace(thread.SingleLine(s))
 	if len(s) <= maxBytes {
 		return s
 	}

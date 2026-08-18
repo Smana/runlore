@@ -45,6 +45,14 @@ rules:
   # NOTE: execution rights (patch) are intentionally NOT granted cluster-wide here.
   # They are scoped to rbac.actionNamespaces as namespaced Roles below, so a
   # confused/compromised agent cannot mutate flux-system or another team's workloads.
+  # resource_spec (read an arbitrary object's .spec/.status): an operator-owned, read-only
+  # allowlist of spec-bearing kinds — see rbac.resourceSpecRules in values.yaml, which also
+  # explains why a `resources: ["*"]` wildcard must never include secrets. A kind missing
+  # from the list is reported to the agent as a DENIAL, never as a missing object, so a gap
+  # here degrades the tool rather than fabricating evidence.
+  {{- with .Values.rbac.resourceSpecRules }}
+  {{- toYaml . | nindent 2 }}
+  {{- end }}
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding

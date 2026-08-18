@@ -2464,8 +2464,10 @@ func TestReplyQuotesTheRecordedNote(t *testing.T) {
 		if len(f.opened) != 1 {
 			t.Fatalf("opened = %d, want 1", len(f.opened))
 		}
+		// The entry is named after the NOTE, not after the finding the thread was
+		// about ("OOM in payments") — see noteEntryTitle.
 		want := "📝 Opened knowledge-base PR #99 with your note — «https://github.com/o/r/pull/99»\n" +
-			"Entry: «Operator note: OOM in payments»\n" +
+			"Entry: «Operator note: stale since Karpenter»\n" +
 			"> «stale since Karpenter»"
 		if got := RenderReply(reply, visibleEscape); got != want {
 			t.Errorf("rendered reply =\n%q\nwant\n%q", got, want)
@@ -2658,7 +2660,7 @@ func TestReplyQuotesTheNoteAsUntrustedAndNothingElse(t *testing.T) {
 // margin, in RunLore's own vocabulary — the exact forgery modelVoice's
 // blockquote exists to stop, arriving through a rune that is not "\n".
 //
-// singleLine had already made this argument for the YAML title (see its doc
+// SingleLine had already made this argument for the YAML title (see its doc
 // comment: U+2028 and U+2029 are the ones "many renderers and tokenizers break
 // on"), and noteField applies it to Author and Title. The note BODY is the one
 // untrusted span rendered multi-line BY DESIGN, so it is the one span that
@@ -2701,7 +2703,7 @@ func TestQuotedNoteCannotBreakOutOfTheBlockquote(t *testing.T) {
 	}
 
 	// The other direction, and the reason the fix normalises BREAKS rather than
-	// mapping whitespace the way singleLine does: a tab, a no-break space and a
+	// mapping whitespace the way SingleLine does: a tab, a no-break space and a
 	// blank line are not line breaks, so the quote must carry them through
 	// untouched. Flattening them would censor the note the human asked to read.
 	t.Run("everything that is not a break survives byte for byte", func(t *testing.T) {
@@ -2779,7 +2781,7 @@ func TestReplyQuotesTheModelDraftAsModelDrafted(t *testing.T) {
 // the "Entry:" line second, so the message read
 //
 //	Drafted by RunLore from your message — not your own words, pending review:
-//	Entry: Operator note: OOM in payments
+//	Entry: Operator note: the real cause was a spot-node reclaim
 //	> the real cause was a spot-node reclaim
 //
 // — a colon promising a quote, answered by a title. Two colons in a row, the
@@ -2933,7 +2935,7 @@ func TestOpenPRStatusLineNamesWhoseNoteItOpenedWith(t *testing.T) {
 		// why that order moved.
 		want := "> «Noted — that changes the root cause.»\n" +
 			"📝 Opened knowledge-base PR #99 with a note drafted from your message — «https://github.com/o/r/pull/99»\n" +
-			"Entry: «Operator note: OOM in payments»\n" +
+			"Entry: «Operator note: The real cause was a spot-node reclaim, not the CNI.»\n" +
 			"Drafted by RunLore from your message — not your own words, pending review:\n" +
 			"> «The real cause was a spot-node reclaim, not the CNI.»"
 		if got := RenderReply(reply, visibleEscape); got != want {

@@ -493,6 +493,58 @@ rbac:
   # Role is skipped. If you render client-side (e.g. deploy via Argo CD) and guarantee
   # the namespace exists, set this false to keep the RBAC deterministic.
   skipMissingControllerLogNamespaces: true
+  # resource_spec reads an arbitrary object's .spec/.status: a Service selector matching no
+  # pods, a scrape CR pointing at an absent namespace, a NetworkPolicy with no egress to
+  # kube-dns, an HPA on a metric nothing reports. Resolution is discovery-driven, so the
+  # tool handles any kind — but only what RBAC actually grants, and the rules above cover
+  # Flux, Argo CD, events and pods and nothing else. Without this list every one of those
+  # questions comes back "forbidden".
+  #
+  # A read-only (get) allowlist of SPEC-BEARING kinds. Add your operators' CRDs here; a
+  # kind that is absent is reported to the agent as a denial, never as a missing object.
+  #
+  # DO NOT replace this with `resources: ["*"]`. A wildcard includes `secrets`, and the
+  # ServiceAccount's token then reads every Secret in the cluster. The tool itself refuses
+  # the Secret kind — before AND after resolution — but that refusal is an application-layer
+  # policy, not a boundary: RBAC is the boundary. If you must use a wildcard, keep secrets
+  # out of the grant.
+  resourceSpecRules:
+    - apiGroups: [""]
+      resources: ["services", "persistentvolumeclaims", "persistentvolumes", "nodes", "namespaces", "serviceaccounts"]
+      verbs: ["get"]
+    - apiGroups: ["apps"]
+      resources: ["deployments", "statefulsets", "daemonsets", "replicasets"]
+      verbs: ["get"]
+    - apiGroups: ["batch"]
+      resources: ["jobs", "cronjobs"]
+      verbs: ["get"]
+    - apiGroups: ["networking.k8s.io"]
+      resources: ["ingresses", "networkpolicies", "ingressclasses"]
+      verbs: ["get"]
+    - apiGroups: ["autoscaling"]
+      resources: ["horizontalpodautoscalers"]
+      verbs: ["get"]
+    - apiGroups: ["policy"]
+      resources: ["poddisruptionbudgets"]
+      verbs: ["get"]
+    - apiGroups: ["storage.k8s.io"]
+      resources: ["storageclasses", "volumeattachments"]
+      verbs: ["get"]
+    - apiGroups: ["discovery.k8s.io"]
+      resources: ["endpointslices"]
+      verbs: ["get"]
+    - apiGroups: ["apiextensions.k8s.io"]
+      resources: ["customresourcedefinitions"]
+      verbs: ["get"]
+    # Scrape/alert CRs: the case this tool was built for was a VMServiceScrape whose
+    # namespaceSelector named a namespace that did not exist. A rule naming an API group
+    # the cluster does not serve is inert, so both operators are listed by default.
+    - apiGroups: ["operator.victoriametrics.com"]
+      resources: ["vmservicescrapes", "vmpodscrapes", "vmscrapeconfigs", "vmrules", "vmagents", "vmalerts"]
+      verbs: ["get"]
+    - apiGroups: ["monitoring.coreos.com"]
+      resources: ["servicemonitors", "podmonitors", "prometheusrules", "probes"]
+      verbs: ["get"]
 
 # Default-deny NetworkPolicy: restrict ingress to the webhook/health port and egress
 # to DNS + HTTPS + the Kubernetes API. Tighten egress to your model/git/observability

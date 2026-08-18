@@ -1485,6 +1485,85 @@ func validGitLabProjectPath(s string) bool {
 	return gitlabProjectPathRE.MatchString(s)
 }
 
+// validateForgeGitHost checks that RunLore can name — unambiguously — the ONE
+// git host its forge credential may be sent to.
+//
+// Every clone RunLore makes (what_changed's GitOps source repos, source_diff's
+// allowlisted repos) attaches the forge credential only when the clone URL's
+// host matches that host, because a GitOps spec.source.repoURL is cluster state:
+// in a shared cluster, whoever can create an Argo CD Application or a Flux
+// GitRepository chooses where an unconfined credential would be POSTed.
+//
+// Confining is only safe when the host is KNOWN, and there is exactly one shape
+// where it is not. GitHub Enterprise with subdomain isolation serves the API from
+// api.HOSTNAME while git and web stay on HOSTNAME, so "https://api.ghe.example.com"
+// is consistent with both "git lives at ghe.example.com" (isolation) and "git
+// lives at api.ghe.example.com" (an instance that happens to be named api.*).
+// Both guesses fail badly and one of them fails SILENTLY: withholding the
+// credential from the operator's own GitOps repo empties what_changed on every
+// investigation, surfacing only as a data-gaps line at the foot of a finding
+// (RunLore #495). So the ambiguity is refused at config load and the operator
+// names the host — loud once, at startup, instead of quiet forever.
+func validateForgeGitHost(f Forge) error {
+	if f.GitHost != "" {
+		if !bareHost(f.GitHost) {
+			return fmt.Errorf("forge.git_host %q is not a bare host: want just the hostname your git "+
+				"remotes use (e.g. \"ghe.example.com\"), with no scheme, path, port, userinfo or "+
+				"non-ASCII characters. It is compared against the host of every clone URL, so any "+
+				"other spelling matches nothing and silently withholds the forge credential from "+
+				"every repository", f.GitHost)
+		}
+		return nil
+	}
+	if f.Provider == "gitlab" {
+		return nil // gitlab.base_url IS the instance root: git, web and API share that host
+	}
+	u, err := url.Parse(f.GitHubAPIURL)
+	if err != nil {
+		return nil // unparseable ⇒ the github.com default; nothing ambiguous to resolve
+	}
+	h := strings.ToLower(u.Hostname())
+	if h == "" || h == "api.github.com" || !strings.HasPrefix(h, "api.") {
+		return nil
+	}
+	return fmt.Errorf("forge.github_api_url %q serves the API from an \"api.\" subdomain, so RunLore "+
+		"cannot tell which host serves your git remotes: set forge.git_host to %q if this is GitHub "+
+		"Enterprise with subdomain isolation (API on api.HOSTNAME, git on HOSTNAME), or to %q if git "+
+		"really is served from the API host. Guessing would either send the installation token to a "+
+		"host it is not valid for, or withhold it from every GitOps repository — which shows up only "+
+		"as an empty what_changed",
+		f.GitHubAPIURL, strings.TrimPrefix(h, "api."), h)
+}
+
+// bareHost reports whether s is a hostname and nothing else: ASCII letters,
+// digits, '-' and '.', starting and ending alphanumeric. It is deliberately
+// narrower than "what net/url would parse" — a scheme, a path, a port, userinfo
+// or a non-ASCII label all mean the operator wrote something that can never
+// equal a clone URL's parsed host.
+//
+// ASCII-only is the same guard internal/whatchanged applies to a rewrite host
+// and internal/sourcerepo applies to an allowlist entry: host comparison
+// lowercases with strings.ToLower (Unicode simple case mapping) while net/http
+// resolves through idna.Lookup.ToASCII, and the two disagree on non-ASCII input
+// — "gİthub.com" compares equal to "github.com" while the connection goes to the
+// separately registrable "xn--github-qyd.com".
+func bareHost(s string) bool {
+	if s == "" || len(s) > 253 {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		alnum := c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c >= '0' && c <= '9'
+		if !alnum && c != '-' && c != '.' {
+			return false
+		}
+		if !alnum && (i == 0 || i == len(s)-1) {
+			return false
+		}
+	}
+	return true
+}
+
 // checkSecureKeyEndpoint rejects a base_url that would send an API key in cleartext.
 // A key is "present" when apiKeyEnv is non-empty; an empty base_url uses the provider's
 // built-in (https) default and is always fine. http is allowed only to a private host.
@@ -1893,6 +1972,9 @@ func (c *Config) Validate() error {
 	default:
 		return fmt.Errorf("forge.provider %q is invalid (want \"github\" or \"gitlab\")", c.Forge.Provider)
 	}
+	if err := validateForgeGitHost(c.Forge); err != nil {
+		return err
+	}
 	// The recurrence cooldown reads the outcome ledger's trigger index; without a
 	// ledger it would silently never suppress — fail loud instead. A negative
 	// duration is always a misconfiguration (mirrors tool_timeout).
@@ -2268,6 +2350,25 @@ type Forge struct {
 	// inconclusive). Empty (default) draws no distinction: every verdict is eligible,
 	// preserving pre-gate behaviour. Recommended production value: ["no_action"].
 	SkipVerdicts []string `yaml:"skip_verdicts"`
+	// GitHost names the host the forge serves GIT REMOTES from — the ONE host
+	// RunLore's forge credential may be sent to when it clones (what_changed's
+	// GitOps repos, source_diff's allowlisted repos). Empty (the default) derives
+	// it: github_api_url's host for GitHub (api.github.com ⇒ github.com),
+	// gitlab.base_url's host for GitLab.
+	//
+	// It exists for GitHub Enterprise with SUBDOMAIN ISOLATION, the one shape the
+	// derivation cannot resolve: the API is served from api.HOSTNAME while git and
+	// web stay on HOSTNAME, so an API URL of "https://api.ghe.example.com" says
+	// nothing about which of the two hosts a clone should authenticate to.
+	// Guessing is not an option in either direction — guess api.HOSTNAME and the
+	// credential is withheld from every GitOps repo (an empty what_changed on
+	// every investigation, visible only as a data-gaps line, RunLore #495); guess
+	// HOSTNAME and a deployment that really does serve git from api.HOSTNAME sends
+	// its token to a host it is not valid for. Validate therefore REFUSES an
+	// "api."-prefixed API host (other than api.github.com) unless this names the
+	// git host, so the misconfiguration is loud at startup instead of silent
+	// forever. A bare host: no scheme, path, port, userinfo, and ASCII only.
+	GitHost string `yaml:"git_host"`
 }
 
 // GitLab holds GitLab forge credentials. Unlike GitHubApp (a short-lived,

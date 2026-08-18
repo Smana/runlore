@@ -83,14 +83,13 @@ func BuildCurator(cfg *config.Config, cat *catalog.Catalog, metrics *telemetry.M
 	if client == nil {
 		return nil
 	}
-	dup := cfg.Forge.DupScore
-	if dup == 0 {
-		dup = 5.0
-	}
-	minConf := cfg.Forge.MinConfidence
-	if minConf == 0 {
-		minConf = 0.75
-	}
+	// dup_score / min_confidence are resolved by config.ApplyDefaults (5.0 / 0.75),
+	// not coalesced here. They used to be defaulted in this function, which made the
+	// effective threshold visible on this construction path and nowhere else — the
+	// same numbers were 0 to `lore config show` and to every guard reading the
+	// config. Read them straight, so what the curator runs under is what the
+	// resolved config says.
+	dup, minConf := cfg.Forge.DupScore, cfg.Forge.MinConfidence
 	// Verdicts the operator has configured to stay out of the KB review queue (e.g.
 	// no_action). nil when unset ⇒ every verdict is eligible to draft a PR. Validated
 	// against the verdict enum in Config.Validate, so entries here are already known.

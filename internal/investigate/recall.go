@@ -146,20 +146,21 @@ func buildRecallQuery(req Request) string {
 // lookup returns the matched entry and a DERIVED confidence when a recall is
 // trustworthy enough to short-circuit, else (nil, 0). The BM25 score is always
 // recorded (even on rejection) so the thresholds can be tuned from live data. It is a
-// thin wrapper over lookupWithUsage with no usage sink — kept for callers (and tests)
-// that don't thread the per-investigation token total.
+// thin wrapper over lookupWithUsage with no spend channel — kept for callers (and
+// tests) that neither bound nor account for the per-investigation total.
 func (r *Recall) lookup(ctx context.Context, req Request) (*catalog.Entry, float64) {
 	e, conf, _ := r.lookupWithUsage(ctx, req, nil)
 	return e, conf
 }
 
-// lookupWithUsage is lookup plus an optional usage sink: when a Reranker runs, its
-// completion's token usage is accumulated into totals (nil ⇒ ignored) so the loop can
-// fold the reranker's cost into the per-investigation total. The gate logic is
-// identical to lookup — totals is a side channel, never a decision input. The third
-// return lists the entry paths the outcome gate (Gate 3) rejected this lookup (nil
-// when none) so the caller's near-miss lead can exclude them.
-func (r *Recall) lookupWithUsage(ctx context.Context, req Request, totals *providers.UsageTotals) (*catalog.Entry, float64, []string) {
+// lookupWithUsage is lookup plus an optional spend channel: when a Reranker would run,
+// the channel's ceiling is consulted BEFORE its paid completion and that completion's
+// usage is accumulated into the channel's totals after it (nil ⇒ neither, which is
+// exactly the old behaviour). The retrieval gate logic is identical to lookup — spend
+// never changes WHICH entry wins, only whether the paid ranking step is affordable at
+// all. The third return lists the entry paths the outcome gate (Gate 3) rejected this
+// lookup (nil when none) so the caller's near-miss lead can exclude them.
+func (r *Recall) lookupWithUsage(ctx context.Context, req Request, spend *recallSpend) (*catalog.Entry, float64, []string) {
 	if r == nil || r.Catalog == nil {
 		return nil, 0, nil
 	}
@@ -250,7 +251,13 @@ func (r *Recall) lookupWithUsage(ctx context.Context, req Request, totals *provi
 		if k <= 0 || k > len(agreeing) {
 			k = len(agreeing)
 		}
-		matched, mconf, ok := r.Rerank.rank(ctx, req, agreeing[:k], totals)
+		// Cost guard 2 — the SPEND ceiling, consulted BEFORE the call rather than after
+		// it. The MinScore guard above asks "is this call worth making"; this one asks
+		// "can this investigation pay for it". Both fall through the same way.
+		if !r.affordRerank(ctx, req, agreeing[:k], spend) {
+			return nil, 0, nil
+		}
+		matched, mconf, ok := r.Rerank.rank(ctx, req, agreeing[:k], spend)
 		// Fire ONLY on a calibrated confidence at or above the (corpus-independent)
 		// threshold. A no-match / low-confidence / hallucinated-id verdict falls through —
 		// the false-recall guard (a wrong or absent match is worse than no recall).
@@ -304,7 +311,7 @@ func (r *Recall) lookupWithUsage(ctx context.Context, req Request, totals *provi
 			f, ok := r.outcomeGate(counts, e.Path)
 			if !ok {
 				r.reject(ctx, "low_outcome")
-				return r.outcomeFallback(ctx, req, agreeing, counts, minScore, soloFloor, totals, []string{e.Path})
+				return r.outcomeFallback(ctx, req, agreeing, counts, minScore, soloFloor, spend, []string{e.Path})
 			}
 			conf = clampF(conf*f, 0, 0.90)
 		}
@@ -348,7 +355,7 @@ func (r *Recall) lookupWithUsage(ctx context.Context, req Request, totals *provi
 // argument justified only the original winner, so a skipped-winner candidate gets
 // the same bar as a lone hit. Candidates arrive in lexical order, so the first one
 // below the bar ends the walk.
-func (r *Recall) outcomeFallback(ctx context.Context, req Request, agreeing []catalog.ScoredEntry, counts map[string]outcome.Aggregate, minScore, soloFloor float64, totals *providers.UsageTotals, rejected []string) (*catalog.Entry, float64, []string) {
+func (r *Recall) outcomeFallback(ctx context.Context, req Request, agreeing []catalog.ScoredEntry, counts map[string]outcome.Aggregate, minScore, soloFloor float64, spend *recallSpend, rejected []string) (*catalog.Entry, float64, []string) {
 	if r.Rerank != nil {
 		// The rank verdict names ONE candidate, so a fallback needs a second — and
 		// FINAL — rank call over the remaining candidates. Bounded by construction:
@@ -367,7 +374,13 @@ func (r *Recall) outcomeFallback(ctx context.Context, req Request, agreeing []ca
 		if k <= 0 || k > len(remaining) {
 			k = len(remaining)
 		}
-		matched, mconf, ok := r.Rerank.rank(ctx, req, remaining[:k], totals)
+		// The SECOND rank call of this investigation, so unlike the first it has real
+		// prior spend to be measured against — the first call's tokens are already in the
+		// running total by now.
+		if !r.affordRerank(ctx, req, remaining[:k], spend) {
+			return nil, 0, rejected
+		}
+		matched, mconf, ok := r.Rerank.rank(ctx, req, remaining[:k], spend)
 		if !ok || mconf < r.Rerank.Threshold {
 			r.reject(ctx, "rerank_low_confidence")
 			return nil, 0, rejected
@@ -530,6 +543,33 @@ func nearMissAgrees(reqW providers.Workload, entryResource string, requireWorklo
 		return matchNamespace
 	}
 	return matchNone
+}
+
+// affordRerank reports whether this investigation may pay for a rank call over cands,
+// consulting the spend ceiling BEFORE the completion is sent. It is the checking half
+// of the rule Reranker.rank spends under; the two used to be one-sided, so the ceiling
+// was first read on the way back out with the money already gone.
+//
+// A refusal falls through exactly as a no-match does, which is deliberate and is what
+// keeps this inside the EXISTING ladder rather than beside it: declining the rerank
+// does not stop the run, it hands the run to the full loop, whose first enforceBudget
+// step sees the same crossed ceiling and fires the same nudge→kill rungs with the same
+// reason. Firing a rung here as well would report one stop twice on
+// runlore_investigation_budget_trips_total and inflate the nudge rate; recording it as
+// a recall REJECTION instead puts it beside rerank_no_signal and rerank_low_confidence,
+// where an operator already looks to learn why a rerank did not happen.
+func (r *Recall) affordRerank(ctx context.Context, req Request, cands []catalog.ScoredEntry, spend *recallSpend) bool {
+	reason := spend.refuses(r.Rerank.requestEstimate(req, cands))
+	if reason == "" {
+		return true
+	}
+	r.reject(ctx, "rerank_over_budget")
+	if r.Log != nil {
+		r.Log.Warn("recall reranker skipped: the investigation's spend ceiling is already crossed; "+
+			"falling through to a full investigation (which the budget ladder will stop)",
+			"title", req.Title, "ceiling", reason, "candidates", len(cands))
+	}
+	return false
 }
 
 // reject records a rejection reason (nil-safe).

@@ -134,13 +134,14 @@ func TestEntryEditProposalDetectionIsLabelExact(t *testing.T) {
 // housekeeping is indistinguishable from a human veto — for a stronger reason:
 // ConceptEntry deliberately leaves Fingerprint unset, so every note PR falls
 // through dedup's title-Jaccard fallback, and every note PR shares the title
-// prefix "KB: Operator note: <finding title>". Two notes on the SAME recurring
-// incident therefore score a Jaccard of 1.0 — the strongest possible match —
-// with no label protection at all.
+// prefix "KB: Operator note: ". Two humans correcting the SAME recurring
+// incident write about the same thing in much the same words, so their titles
+// score at or near a Jaccard of 1.0 — the strongest possible match — with no
+// label protection at all.
 
 // operatorNoteTitle is the shared, colliding title two notes on the same
 // recurring incident would carry — arming the hazard these tests pin.
-const operatorNoteTitle = "KB: Operator note: Kustomization DependencyNotReady"
+const operatorNoteTitle = "KB: Operator note: Kustomization DependencyNotReady is stuck on a missing GitRepository"
 
 func TestDedupNeverClosesAnOperatorNote(t *testing.T) {
 	// Arm the hazard: identical titles score the maximum possible Jaccard.
