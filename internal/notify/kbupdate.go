@@ -146,18 +146,42 @@ func kbThreadAnnouncement(up providers.KBUpdate) string {
 // route in the words a human uses rather than the enum value a metric label
 // uses, and drops the "#n" when the forge returned a URL carrying no parseable
 // number — which is not an error, and must not suppress the announcement.
+//
+// The routes are partitioned by WHETHER THE CATALOG GAINS ANYTHING, and only the
+// side that does may say the knowledge base was updated. That is the same line
+// KBRouteAppend's own doc draws — it is a route separate from KBRouteComment
+// precisely because "what this route writes is inside the entry the catalog
+// gains when the PR merges, and what a comment writes is not".
+//
+// This used to prefix all three identically and differentiate only the verb, so
+// the comment route announced "📚 Knowledge base updated — noted on PR #7" for a
+// write that changed no entry at all: that note went onto the CURATOR's draft,
+// where it is review feedback a human reconciles at merge time, and the file the
+// catalog gains is the curator's, not the note. The verb carried the whole
+// distinction and the prefix contradicted it — and the prefix is the half a
+// reader skims, the half a transport keeps when it truncates, and on the
+// in-thread form one of only two lines in the message.
+//
+// The COMMENT wording is the default rather than a case, so an unknown route
+// inherits it. kbRoute deliberately passes an unrecognised value straight
+// through rather than guessing at a known one (mislabelling a landed write is
+// worse than reporting an unknown label honestly), which is only safe if the
+// fallback here is the weaker claim. A route this renderer has not learned about
+// must not assert that the catalog gained something.
 func kbHeadline(up providers.KBUpdate) string {
-	what := "noted on"
+	// "for review", and no "updated" claim: the note is beside the entry, not in
+	// it, until a human folds it in. The 📝 lead keeps it inside thread's status-
+	// glyph strip, the same protection the 📚 form has.
+	head := "📝 Note left for review on knowledge-base PR"
 	switch up.Route {
 	case providers.KBRouteOpenPR:
-		what = "opened"
+		head = "📚 Knowledge base updated — opened PR"
 	case providers.KBRouteAppend:
-		// "added to the entry on", not "noted on": this route wrote INTO the entry
-		// the catalog gains on merge, and a comment does not. A reader deciding
-		// whether the knowledge is safely captured is deciding exactly that.
-		what = "added to the entry on"
+		// "added to the entry on": this route wrote INTO the entry the catalog
+		// gains on merge, and a comment does not. A reader deciding whether the
+		// knowledge is safely captured is deciding exactly that.
+		head = "📚 Knowledge base updated — added to the entry on PR"
 	}
-	head := "📚 Knowledge base updated — " + what + " PR"
 	if up.PR > 0 {
 		head = fmt.Sprintf("%s #%d", head, up.PR)
 	}

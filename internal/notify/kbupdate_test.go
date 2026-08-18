@@ -450,6 +450,12 @@ func longestRun(s string, c byte) int {
 // opened when the note was in fact appended as a comment to one someone else
 // owns. Denying the opposite wording is what stops a fix from over-correcting
 // into the mirror-image defect.
+//
+// The comment case additionally denies the "Knowledge base updated" claim, which
+// it used to make: that note went onto the curator's draft, so the file the
+// catalog gains is theirs and nothing of the note is in it until a human folds it
+// in. See TestKBHeadlineClaimsTheCatalogGainedOnlyWhenItDid for the property; this
+// pins it on the assembled channel message, which is what a reader actually sees.
 func TestKBUpdateAnnouncementNamesWhatLanded(t *testing.T) {
 	sinks, sent := kbUpdateSinkOnFakeTransport(t)
 	for _, tc := range []struct {
@@ -465,9 +471,9 @@ func TestKBUpdateAnnouncementNamesWhatLanded(t *testing.T) {
 				URL: "https://github.com/o/r/pull/99", Title: "Operator note: OOM in payments",
 				Author: "sre-jane", Note: "the real cause was a spot reclaim",
 			},
-			want: []string{"opened PR #99", "https://github.com/o/r/pull/99", "Operator note: OOM in payments",
-				"sre-jane", "> the real cause was a spot reclaim", "slack"},
-			deny: []string{"noted on"},
+			want: []string{"Knowledge base updated", "opened PR #99", "https://github.com/o/r/pull/99",
+				"Operator note: OOM in payments", "sre-jane", "> the real cause was a spot reclaim", "slack"},
+			deny: []string{"for review"},
 		},
 		{
 			name: "comment names the pull request it joined",
@@ -475,9 +481,9 @@ func TestKBUpdateAnnouncementNamesWhatLanded(t *testing.T) {
 				Transport: "matrix", Root: "$evt", Route: providers.KBRouteComment, PR: 42,
 				URL: "https://github.com/o/r/pull/42", Author: "sre-jane", Note: "it recurs after node rotation",
 			},
-			want: []string{"noted on PR #42", "https://github.com/o/r/pull/42", "sre-jane",
+			want: []string{"for review on knowledge-base PR #42", "https://github.com/o/r/pull/42", "sre-jane",
 				"> it recurs after node rotation", "matrix"},
-			deny: []string{"opened"},
+			deny: []string{"opened", "Knowledge base updated"},
 		},
 		{
 			name: "an unnumbered forge URL still announces the write",
@@ -485,8 +491,8 @@ func TestKBUpdateAnnouncementNamesWhatLanded(t *testing.T) {
 				Transport: "slack", Route: providers.KBRouteOpenPR,
 				URL: "https://github.com/o/r/kb", Note: "capture this",
 			},
-			want: []string{"opened PR", "https://github.com/o/r/kb", "> capture this"},
-			deny: []string{"noted on", "#0"},
+			want: []string{"Knowledge base updated", "opened PR", "https://github.com/o/r/kb", "> capture this"},
+			deny: []string{"for review", "#0"},
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -1113,7 +1119,7 @@ func TestKBUpdateFieldsAreAllRenderedOrDeliberatelyNot(t *testing.T) {
 // three would answer that question wrongly for two of them.
 func TestKBHeadlineNamesEachRouteDistinctly(t *testing.T) {
 	want := map[providers.KBRoute]string{
-		providers.KBRouteComment: "📚 Knowledge base updated — noted on PR #7",
+		providers.KBRouteComment: "📝 Note left for review on knowledge-base PR #7",
 		providers.KBRouteOpenPR:  "📚 Knowledge base updated — opened PR #7",
 		providers.KBRouteAppend:  "📚 Knowledge base updated — added to the entry on PR #7",
 	}
@@ -1127,5 +1133,65 @@ func TestKBHeadlineNamesEachRouteDistinctly(t *testing.T) {
 			t.Errorf("routes %q and %q announce identically (%q) — a reader cannot tell them apart", route, other, got)
 		}
 		seen[got] = route
+	}
+}
+
+// TestKBHeadlineClaimsTheCatalogGainedOnlyWhenItDid is the honesty half, and it
+// is a property rather than a fixture: the routes are partitioned by whether
+// what they wrote is INSIDE the entry the catalog gains on merge, and only that
+// side may assert the knowledge base was updated.
+//
+// KBRouteAppend's own doc draws exactly that line — it exists as a route
+// separate from KBRouteComment because "what this route writes is inside the
+// entry the catalog gains when the PR merges, and what a comment writes is not".
+// kbHeadline nonetheless prefixed all three identically and differentiated only
+// the verb, so the comment route announced "📚 Knowledge base updated — noted on
+// PR #7" for a write that changed no entry at all: the merged file is the
+// curator's draft, and the note is feedback a human still has to fold in. It
+// matters most on the in-thread form, which is the headline and one other line.
+func TestKBHeadlineClaimsTheCatalogGainedOnlyWhenItDid(t *testing.T) {
+	const claim = "Knowledge base updated"
+	for _, tt := range []struct {
+		route     providers.KBRoute
+		inTheFile bool
+	}{
+		{providers.KBRouteOpenPR, true},
+		{providers.KBRouteAppend, true},
+		{providers.KBRouteComment, false},
+		// An unknown route is a route this renderer has not learned about, so it
+		// must not assert anything about the catalog. kbRoute passes an unrecognised
+		// value straight through rather than guessing, which is only safe if the
+		// default here fails toward the weaker claim.
+		{providers.KBRoute("some-future-route"), false},
+	} {
+		t.Run(string(tt.route), func(t *testing.T) {
+			got := kbHeadline(providers.KBUpdate{Route: tt.route, PR: 7})
+			if asserts := strings.Contains(got, claim); asserts != tt.inTheFile {
+				t.Errorf("kbHeadline(%q) = %q; claims %q = %v, want %v — "+
+					"only a route that writes inside the entry the catalog gains may say so",
+					tt.route, got, claim, asserts, tt.inTheFile)
+			}
+			if !strings.Contains(got, "#7") {
+				t.Errorf("kbHeadline(%q) = %q, want it to name the pull request", tt.route, got)
+			}
+		})
+	}
+}
+
+// TestKBHeadlineLeadsWithARunLoreStatusGlyph keeps the comment route's new
+// wording inside the protection the old one had for free. Every headline is
+// RunLore's own claim and sits at the left margin, and the defence against
+// untrusted text posing as one of those lines is thread.QuoteUntrusted stripping
+// these glyphs out of quoted note text — which only works for glyphs the strip
+// list knows.
+func TestKBHeadlineLeadsWithARunLoreStatusGlyph(t *testing.T) {
+	for _, route := range []providers.KBRoute{
+		providers.KBRouteOpenPR, providers.KBRouteAppend, providers.KBRouteComment, providers.KBRoute("unknown"),
+	} {
+		head := kbHeadline(providers.KBUpdate{Route: route, PR: 7})
+		if stripped := thread.QuoteUntrusted(head); strings.Contains(stripped, strings.TrimSpace(head[:4])) {
+			t.Errorf("kbHeadline(%q) = %q leads with a glyph thread.QuoteUntrusted does not strip, so a "+
+				"note quoting this line back would forge a RunLore claim", route, head)
+		}
 	}
 }
