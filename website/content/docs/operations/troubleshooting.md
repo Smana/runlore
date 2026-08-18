@@ -179,6 +179,51 @@ with `count=` confirms how many sinks were wired — `count=0` means none are co
 
 ---
 
+## A Slack mention in a thread does nothing
+
+`@runlore note: …` fails silently in both directions, so first establish that Slack can reach the
+endpoint at all: run the
+[`/slack/events` pre-flight]({{< relref "/docs/integrations/notifications/slack.md#pre-flight-prove-the-endpoint-answers" >}})
+(one unsigned `curl`; `401` is the healthy answer). Everything below assumes it passes.
+
+*(Matrix thread capture has the same symptom and no HTTP endpoint — skip the pre-flight, the log
+lines here are shared.)*
+
+| symptom | log line | this is… |
+|---|---|---|
+| nothing happens, and **no log line at all** | — | the event was never delivered, or was dropped before anything logs it. In rough order of likelihood: the bot is **not a member of the channel**; `app_mentions:read` was added but the app was **not reinstalled**; the mention was **not inside a thread** (a top-level `@runlore` has no root to attribute knowledge to); it was a bot's own message (loop guard); or the payload was not an `app_mention`. Confirm delivery from Slack's side first — **Event Subscriptions → Recent Deliveries** |
+| the thread answers *"I don't have context for this thread"* | `msg="thread: mention in an unrecognised thread"` | the registry has no entry for that root: past `registry_ttl` (default **168h**), evicted past `registry_max` (default **2000** live threads), or orphaned by a restart / leader failover onto a replica that never saw it. Slack has no per-event fallback, so this is unrecoverable — see [Configuration → `notify`]({{< relref "/docs/configuration/configuration.md#notify--where-findings-go" >}}) for the persistence shape that prevents the third case |
+| *"I'm handling too many messages right now"* | `msg="slack event: mention dropped, handler pool saturated"` (**ERROR**) + `runlore_mentions_dropped_on_saturation_total` | the note is **permanently lost** — Slack was already acked, so it will not retry. Send it again |
+| a duplicate mention was ignored | `msg="slack event: duplicate delivery ignored"` (debug) | expected — Slack retried a delivery RunLore had already handled |
+| the note reached the KB but the thread stayed quiet | `msg="thread: note recorded on KB PR"` / `msg="thread: note opened a standalone KB PR"` **and** `msg="thread: reply failed (best-effort)"` | the write succeeded and only the acknowledgement failed — see the bot-token note below |
+| the announcement never reached the channel | `msg="knowledge-base update delivery failed (swallowed)"` (**ERROR**), or `msg="thread: announcement pool saturated; a knowledge-base write was not announced"` | `notify.thread.announce_kb_updates` only: the write landed and the broadcast did not. Per-sink, so other transports may still have received it |
+| the write itself failed | `msg="thread: knowledge write failed"` with `err=` | a forge problem — same causes as the curator section above |
+
+> [!NOTE]
+> **A stale bot token is a narrow cause, not the usual one.** One token serves finding delivery,
+> progress updates and thread replies alike, so a token that has been rotated out from under the pod
+> stops *everything* — which shows up loudly as
+> [findings never delivered](#findings-were-investigated-but-never-delivered-to-chat), not as a quiet
+> thread. It explains the pattern above only for threads posted **before** the rotation: those
+> messages exist, so a note against them still writes, and only the reply fails —
+> `err="slack chat.postMessage: invalid_auth"` (or `token_revoked` / `token_expired`).
+>
+> Reinstalling the Slack app can rotate the bot token. Verify against the value the cluster holds
+> rather than whatever is in your shell, and note that the pod read it **once, at startup** — so a
+> Secret you have already corrected still needs a restart:
+>
+> ```console
+> $ TOKEN=$(kubectl -n runlore get secret runlore-secrets \
+>     -o jsonpath='{.data.SLACK_BOT_TOKEN}' | base64 -d)
+> $ curl -sS -X POST -H "Authorization: Bearer $TOKEN" https://slack.com/api/auth.test
+> {"ok":true,…}
+> ```
+>
+> `not_authed` means the token was empty. The **signing secret is per-app, not per-install**, so a
+> reinstall never affects it — which is why the pre-flight still answers `401` while replies fail.
+
+---
+
 ## `/readyz` never goes green
 
 `/readyz` is gated by **catalog warmth** (`internal/app/runtime.go`) — deliberately **not** by

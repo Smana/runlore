@@ -10,18 +10,20 @@ import (
 	"github.com/Smana/runlore/internal/sourcerepo"
 )
 
-// armedDiffer returns a Differ with a forge credential and the SSH→HTTPS rewrite
-// armed for host — and TokenHost deliberately left EMPTY, so auth would attach
-// the credential to whatever host the differ ends up cloning.
+// armedDiffer returns a Differ with a GitHub App credential, the SSH→HTTPS
+// rewrite armed for host, and TokenHost deliberately left EMPTY — so auth
+// attaches the token to whatever host the differ ends up cloning.
 //
-// That is STRICTER than production and deliberately so. buildGitOpsDiffer now
-// also sets TokenHost to the same host, but layering the two here would let the
-// rewrite's own host check rot unnoticed: with TokenHost empty, that check is the
-// only thing standing between a hostile repoURL and the credential, so every leak
-// these tests hunt for stays reachable. Do NOT set TokenHost here — it would mask
-// the exact leak TestSSHRewriteNeverReachesAForeignHost exists to catch. The
-// wiring that pairs the two lives in internal/app
-// (TestBuildGitOpsDifferConfinesTheForgeCredential).
+// That is STRICTER than production and deliberately so: buildGitOpsDiffer now
+// sets TokenHost to the same host, so a leak past the rewrite's own check would
+// be caught there too. Layering both here would let this one rot unnoticed.
+// With TokenHost empty, the host check in effectiveCloneURL is the only thing
+// standing between a hostile repoURL and the credential, so every leak these
+// tests hunt for stays reachable. Do NOT set TokenHost here: it would mask the
+// exact leak TestSSHRewriteNeverReachesAForeignHost exists to catch.
+//
+// The wiring that pairs the two lives in internal/app —
+// TestBuildGitOpsDifferConfinesTheForgeCredential.
 func armedDiffer(host string) *Differ {
 	return &Differ{
 		TokenSource:    func(context.Context) (string, error) { return "ghs_SECRET", nil },
@@ -178,13 +180,13 @@ func TestEffectiveCloneURLGating(t *testing.T) {
 // rewrite must not dissolve.
 //
 // A GitOps repoURL is cluster state: in a shared cluster, anyone who can create
-// an Application chooses it. The differ under test runs with TokenHost EMPTY, so
-// auth would attach the forge credential to whatever host it clones (see
-// armedDiffer for why the fixture is weaker than production). Before the rewrite
-// existed, "invalid auth method" killed every SSH URL before a byte left the
-// process — the bug was inadvertently acting as a credential boundary. An
-// unconfined rewrite would have turned "repoURL: ssh://git@attacker.example/x"
-// into that token being POSTed to attacker.example.
+// an Application chooses it. The what_changed differ runs with TokenHost EMPTY,
+// so auth attaches the GitHub App installation token to whatever host it clones.
+// Before the rewrite existed, "invalid auth method" killed every SSH URL before a
+// byte left the process — the bug was inadvertently acting as a credential
+// boundary. An unconfined rewrite would have turned
+// "repoURL: ssh://git@attacker.example/x" into that token being POSTed to
+// attacker.example.
 //
 // The clone runs on an already-cancelled context, which never touches the
 // network but does reveal WHICH transport was chosen: go-git names an HTTPS
@@ -192,8 +194,9 @@ func TestEffectiveCloneURLGating(t *testing.T) {
 // "invalid auth method" without forming a request at all. So the error text is
 // the proof that nothing was ever addressed to the foreign host.
 func TestSSHRewriteNeverReachesAForeignHost(t *testing.T) {
-	// A credential for github.com, and TokenHost left empty. Shared across the
-	// subtests below — effectiveCloneURL and Remote never mutate a Differ.
+	// Wired exactly as buildGitOpsDiffer wires what_changed: a credential for
+	// github.com, and TokenHost left empty. Shared across the subtests below —
+	// effectiveCloneURL and Remote never mutate a Differ.
 	d := armedDiffer("github.com")
 
 	foreign := []string{
@@ -228,7 +231,7 @@ func TestSSHRewriteNeverReachesAForeignHost(t *testing.T) {
 				t.Fatal("want an error, got nil")
 			}
 			if strings.Contains(err.Error(), "https://") {
-				t.Fatalf("an HTTPS request was addressed to a foreign host — the forge credential would be sent there: %v", err)
+				t.Fatalf("an HTTPS request was addressed to a foreign host — the App token would be sent there: %v", err)
 			}
 			if !strings.Contains(err.Error(), "invalid auth method") {
 				t.Fatalf("want the SSH transport to refuse before any request is formed, got %v", err)
