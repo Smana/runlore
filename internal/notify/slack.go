@@ -408,8 +408,21 @@ func slackDate(t time.Time) string {
 // the escaped shared FormatProgress output (parsed as mrkdwn by block-less
 // clients); the blocks escape each untrusted field the same way delivery does, so
 // a hostile interim line like <https://evil|x> renders inert, never a live link.
+//
+// The fallback text is then bounded, which the blocks beside it already were (150
+// runes for the header, 2900 for the section) and it was not. FormatProgress
+// splices in ProgressUpdate.Interim — the model's raw completion text, capped by
+// nothing between the loop and here — and escapeMrkdwn expands "&" fivefold on
+// top of that, so past Slack's ~40,000-character limit the whole POST is
+// rejected. An operator turns progress pings on precisely so a long
+// investigation is not silent; unbounded, the longest investigations are the
+// ones it silences. See boundPostedHead for why the HEAD is what survives:
+// FormatProgress leads with the status line, and that IS the ping.
 func slackProgressMessage(up providers.ProgressUpdate) map[string]any {
-	return map[string]any{"text": escapeMrkdwn(FormatProgress(up)), "blocks": slackProgressBlocks(up)}
+	return map[string]any{
+		"text":   boundPostedHead(escapeMrkdwn(FormatProgress(up)), slackReplyBytes),
+		"blocks": slackProgressBlocks(up),
+	}
 }
 
 // slackProgressBlocks renders an interim progress update as Block Kit.
