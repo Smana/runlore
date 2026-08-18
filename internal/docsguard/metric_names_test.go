@@ -23,13 +23,24 @@ import (
 	"github.com/Smana/runlore/internal/telemetry"
 )
 
-// dashboardPath and observabilityDoc are the two published surfaces that quote
-// RunLore metric names back at operators. Both are hand-maintained; neither is
-// compiled, imported, or executed by anything, so a rename in internal/telemetry
+// dashboardPath, observabilityDoc and the two alert manifests are the published
+// surfaces that quote RunLore metric names back at operators. All are hand-maintained;
+// none is compiled, imported, or executed by anything, so a rename in internal/telemetry
 // leaves them silently pointing at series the agent no longer emits.
+//
+// The alert manifests were added to this list last, and they are the surface where a
+// dead series costs most. A panel querying a retired name renders empty, which at least
+// looks wrong. An ALERT on one is indistinguishable from an alert that is simply not
+// firing — the failure mode is silence, which is exactly what a healthy system looks
+// like. A rule for runlore_resource_scope_lookups_total was proposed on the strength of
+// a commit message saying the counter shipped on another branch; that branch merged
+// carrying the ResourceScope type and no counter at all, and nothing here would have
+// noticed.
 const (
 	dashboardPath      = "deploy/observability/grafana/runlore.json"
 	observabilityDoc   = "website/content/docs/operations/observability.md"
+	prometheusRulePath = "deploy/observability/alerts/prometheusrule.yaml"
+	vmRulePath         = "deploy/observability/alerts/vmrule.yaml"
 	metricNamePattern  = `runlore_[a-z0-9_]+`
 	histogramSuffixBkt = "_bucket"
 )
@@ -68,6 +79,8 @@ func TestPublishedMetricNamesExist(t *testing.T) {
 	}{
 		{name: "grafana_dashboard", path: dashboardPath, found: dashboardMetricRefs},
 		{name: "observability_docs", path: observabilityDoc, found: markdownMetricRefs},
+		{name: "prometheus_rules", path: prometheusRulePath, found: alertRuleMetricRefs},
+		{name: "victoriametrics_rules", path: vmRulePath, found: alertRuleMetricRefs},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			body, err := os.ReadFile(filepath.Join(repoRoot(t), tc.path))
@@ -328,4 +341,33 @@ func TestEveryInstrumentIsDocumented(t *testing.T) {
 			"on an operator scraping /metrics and noticing a name they have never seen.",
 			observabilityDoc, name)
 	}
+}
+
+// alertRuleMetricRefs returns every runlore_* series named in an alert manifest's
+// PromQL, mapped to the alert names that reference it.
+//
+// Keyed by ALERT NAME rather than by line, because that is what the failure needs to
+// say: "RunloreResourceScopeDiscoveryFailing queries a series nothing emits" names the
+// rule to delete, where a line number only names where to look. Only `expr:` is read —
+// a metric named in a description or a runbook_url is prose about the alert, not a
+// query that has to resolve.
+func alertRuleMetricRefs(t *testing.T, body []byte) map[string][]string {
+	t.Helper()
+	refs := map[string][]string{}
+	alert := ""
+	for _, line := range strings.Split(string(body), "\n") {
+		trimmed := strings.TrimSpace(line)
+		if name, ok := strings.CutPrefix(trimmed, "- alert:"); ok {
+			alert = strings.TrimSpace(name)
+			continue
+		}
+		expr, ok := strings.CutPrefix(trimmed, "expr:")
+		if !ok {
+			continue
+		}
+		for _, m := range metricNameRE.FindAllString(expr, -1) {
+			refs[m] = append(refs[m], alert)
+		}
+	}
+	return refs
 }
