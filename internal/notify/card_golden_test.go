@@ -270,11 +270,20 @@ func cardGoldenFixtures() []struct {
 			},
 		}},
 
-		// A legitimate inconclusive, synthesised by investigate.budgetKillResult: the
-		// ceiling that ended the run is the only thing the card can honestly say, and
-		// it now says it in the channel rather than only in the thread reply. Title is
-		// the bare alert name, exactly as every synthesised stop sets it, so the
-		// verdict line does not restate the header.
+		// A legitimate inconclusive: the ceiling that ended the run is the only thing
+		// the card can honestly say, and it now says it in the channel rather than only
+		// in the thread reply. Title is the bare alert name, exactly as every synthesised
+		// stop sets it, so the verdict line does not restate the header.
+		//
+		// The Unresolved sentence is investigate.budgetKillResult's verbatim, but the
+		// trigger metadata below it is NOT: budgetKillResult sets only Title/Resource/
+		// Fingerprint/Verdict/Unresolved, and loop.finish does not stamp request facts,
+		// so a real budget-kill card today reaches Slack with no alert name, severity,
+		// cluster or start time and renders no metadata section at all. (nonConvergence-
+		// Result is the one synthesised stop that calls stampRequestFacts.) That gap is
+		// pre-existing and out of this fixture's scope; the fields are set here so this
+		// arm is exercised against a fully-populated card rather than silently doubling
+		// as a test of the gap. Drop them here if the gap is ever closed the other way.
 		{"stopped_by_budget", providers.Investigation{
 			Title:     "KubeNodeNotReady",
 			AlertName: "KubeNodeNotReady",

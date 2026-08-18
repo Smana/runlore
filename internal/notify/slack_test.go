@@ -344,6 +344,15 @@ func TestSlackSummaryLayout(t *testing.T) {
 // NEITHER list in the summary card (both are already carried in full in the
 // threaded detail — see TestSlackDetailBlocksCarriesRuledOutAndDataGaps) — the
 // summary's fold space goes to Why and Suggested next steps instead.
+//
+// The rule is "the summary's fold space goes to the ANSWER", so it holds exactly
+// while there IS an answer — which is why this fixture carries a root cause and is
+// not merely an incidental detail of it. On an `inconclusive` card with no cause,
+// block 5b promotes the data gaps (and, failing those, the ruled-out list) into the
+// summary precisely because nothing is being pushed below the fold; that arm is
+// pinned by TestInconclusiveSummaryCardAccountsForItself in
+// inconclusive_account_test.go. Keep the root cause here when editing this fixture,
+// or this test stops proving anything.
 func TestSlackSummaryOmitsRuledOutAndDataGaps(t *testing.T) {
 	inv := providers.Investigation{
 		Title:      "t",

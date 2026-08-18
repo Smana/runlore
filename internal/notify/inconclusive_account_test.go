@@ -77,6 +77,36 @@ func TestInconclusiveSummaryCardAccountsForItself(t *testing.T) {
 			absent: []string{"No account given", "Why this is inconclusive"},
 		},
 		{
+			// The verify pass is the path that reaches this shape: applyVerdicts moves
+			// every rejected hypothesis into RuledOut, empties RootCauses and forces
+			// `inconclusive`, without writing Unresolved or DataGaps. That run DID
+			// account for itself, so calling it an incomplete run is a lie the reader
+			// can check — the refutations are in the thread reply.
+			name: "a verify pass that refuted everything is accounted for, not unaccounted",
+			inv: providers.Investigation{
+				Title: "KubeNodeNotReady", AlertName: "KubeNodeNotReady", Verdict: inconclusive,
+				RuledOut: []string{
+					"the kubelet OOMed — disproven: no oom_kill in the node's kernel log",
+					"a bad CNI rollout — disproven: the DaemonSet generation predates the alert by 6d",
+				},
+			},
+			want:   []string{"Why this is inconclusive", "no oom_kill in the node's kernel log"},
+			absent: []string{"No account given"},
+		},
+		{
+			// …but open questions and data gaps still outrank it: RuledOut is what the
+			// cause is NOT, and it earns summary fold space only when nothing answers
+			// "why don't you know?".
+			name: "an open question outranks the ruled-out list for the summary slot",
+			inv: providers.Investigation{
+				Title: "KubeNodeNotReady", AlertName: "KubeNodeNotReady", Verdict: inconclusive,
+				Unresolved: []string{"why the kubelet never re-registered"},
+				RuledOut:   []string{"the kubelet OOMed — disproven: no oom_kill in the kernel log"},
+			},
+			want:   []string{"Why this is inconclusive", "why the kubelet never re-registered"},
+			absent: []string{"No account given", "disproven"},
+		},
+		{
 			name: "the live card: a conclusion in the title, nothing behind it",
 			inv: providers.Investigation{
 				Title:     "KubeNodeNotReady on ip-10-20-24-144.ec2.internal (tmem175-0): transient, self-healed Karpenter node churn — no application impact",
@@ -136,5 +166,19 @@ func TestFormatSaysWhenNothingAccountsForInconclusive(t *testing.T) {
 	})
 	if strings.Contains(out, "No account given") {
 		t.Errorf("an accounted-for inconclusive must not carry the notice\n%s", out)
+	}
+	// The verify-pass shape: Format prints *Ruled out:* a few lines below, so the
+	// notice here would deny, in the same message, the reasons that message goes on
+	// to list. Verify is on by default, so this is the common path, not a corner.
+	out = Format(providers.Investigation{
+		Title:    "KubeNodeNotReady",
+		Verdict:  providers.VerdictInconclusive,
+		RuledOut: []string{"the kubelet OOMed — disproven: no oom_kill in the kernel log"},
+	})
+	if strings.Contains(out, "No account given") {
+		t.Errorf("a run whose reviewer refuted every hypothesis is accounted for by its Ruled out list\n%s", out)
+	}
+	if !strings.Contains(out, "Ruled out") {
+		t.Errorf("Format must still print the ruled-out list\n%s", out)
 	}
 }

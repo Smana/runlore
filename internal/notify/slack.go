@@ -315,8 +315,11 @@ const (
 // provenance only — verified, model calls, cost, the one view-entry link →
 // approval buttons) followed by an optional detail section (full evidence + the
 // complete open-questions / ruled-out / data-gap lists — ruled-out and
-// data-gaps render ONLY here, never in the summary, so a phone reader hits the
-// answer before any "Show more"). This is the single-message composition used
+// data-gaps render only here, so a phone reader hits the answer before any
+// "Show more", with ONE carve-out: an `inconclusive` card with no root cause has
+// no answer to push below the fold, so block 5b promotes the blocker into the
+// summary instead of leaving the card empty — see inconclusiveAccount). This is
+// the single-message composition used
 // by the webhook path; threading is a later concern. The "text" field is
 // fallbackText — the one-line notification/accessibility summary.
 //
@@ -619,13 +622,7 @@ func summaryBlocks(inv providers.Investigation) []map[string]any {
 		rc := inv.RootCauses[0]
 		var s strings.Builder
 		fmt.Fprintf(&s, "*Why:* %s", escapeMrkdwn(rc.Summary))
-		for j, e := range rc.Evidence {
-			if j >= 3 {
-				fmt.Fprintf(&s, "\n• _…%d more_", len(rc.Evidence)-j)
-				break
-			}
-			fmt.Fprintf(&s, "\n• %s", escapeMrkdwn(e))
-		}
+		appendCappedBullets(&s, rc.Evidence)
 		blocks = append(blocks, map[string]any{"type": "section", "text": map[string]any{"type": "mrkdwn", "text": truncate(s.String(), 2900)}})
 		if n := len(inv.RootCauses) - 1; n > 0 {
 			word := "hypotheses"
@@ -649,20 +646,21 @@ func summaryBlocks(inv providers.Investigation) []map[string]any {
 	// only the threaded detail reply, where the channel reader never sees it; when the
 	// model supplied no blocker at all, nothing anywhere said so.
 	//
-	// Untrusted model output, escaped, and capped at three bullets like the evidence
-	// and next-step lists above it — a run stopped by a ceiling names one blocker, and
-	// a card that spends its fold space enumerating gaps is the failure mode the
-	// summary/detail split exists to prevent.
-	if header, lines := inconclusiveAccount(inv); header != "" {
+	// Untrusted model output, escaped, and capped at summaryBullets like the evidence
+	// list above it — a run stopped by a ceiling names one blocker, and a card that
+	// spends its fold space enumerating gaps is the failure mode the summary/detail
+	// split exists to prevent.
+	//
+	// This PROMOTES the blocker rather than moving it: detailBlocks still renders the
+	// same list in full below. On the bot path those are two messages (channel card,
+	// thread reply) and the reader sees each once; on the single-message webhook path
+	// they are adjacent, which is the pre-existing shape of this pair — block 5 and
+	// detailBlocks already double-render the top root cause and its evidence the same
+	// way, because the detail section has to stand alone when it is posted alone.
+	if lead, bullets := inconclusiveAccount(inv); lead != "" {
 		var s strings.Builder
-		s.WriteString(header)
-		for i, l := range lines {
-			if i >= 3 {
-				fmt.Fprintf(&s, "\n• _…%d more_", len(lines)-i)
-				break
-			}
-			fmt.Fprintf(&s, "\n• %s", escapeMrkdwn(l))
-		}
+		s.WriteString(lead)
+		appendCappedBullets(&s, bullets)
 		blocks = append(blocks, map[string]any{"type": "section", "text": map[string]any{"type": "mrkdwn", "text": truncate(s.String(), 2900)}})
 	}
 
@@ -671,8 +669,11 @@ func summaryBlocks(inv providers.Investigation) []map[string]any {
 	if steps := nextSteps(inv); len(steps) > 0 {
 		var s strings.Builder
 		s.WriteString("*🛠 Suggested next steps*  _(read-only — RunLore won't apply these)_")
+		// Own loop, not appendCappedBullets: nextSteps has already escaped these
+		// (it de-duplicates on the raw string first) and mrkdwnEscaper is not
+		// idempotent. Only the cap is shared.
 		for i, st := range steps {
-			if i >= 3 {
+			if i >= summaryBullets {
 				fmt.Fprintf(&s, "\n• _…%d more_", len(steps)-i)
 				break
 			}
@@ -845,6 +846,35 @@ func detailBlocks(inv providers.Investigation) []map[string]any {
 	blocks = appendListSection(blocks, "*⚠️ Data gaps:*", inv.DataGaps)
 	blocks = appendListSection(blocks, "*❌ Ruled out:*", inv.RuledOut)
 	return blocks
+}
+
+// summaryBullets is how many bullets any one SUMMARY section spends before it
+// hands off to a "…N more" pointer. One named constant because the cap is a
+// fold-space policy, not a per-section taste: three sections apply it, and the
+// failure mode is them disagreeing so one list quietly pushes the next below
+// "Show more". The detail section is deliberately uncapped (appendListSection).
+const summaryBullets = 3
+
+// appendCappedBullets writes items to s as escaped mrkdwn bullets, at most
+// summaryBullets of them, replacing the tail with a "…N more" pointer. Shared by the
+// summary's evidence and inconclusive-account lists so the glyph, the wording and
+// the cap cannot drift between two sections of the same card.
+//
+// The cap is not a parameter on purpose: a per-caller cap is exactly the drift
+// summaryBullets exists to prevent, and there is no section that wants a different
+// one.
+//
+// It escapes each item, so callers must pass RAW model output: mrkdwnEscaper is not
+// idempotent (it would turn an escaped &amp; into &amp;amp;). That is why nextSteps,
+// which pre-escapes while de-duplicating, keeps its own loop.
+func appendCappedBullets(s *strings.Builder, items []string) {
+	for i, it := range items {
+		if i >= summaryBullets {
+			fmt.Fprintf(s, "\n• _…%d more_", len(items)-i)
+			return
+		}
+		fmt.Fprintf(s, "\n• %s", escapeMrkdwn(it))
+	}
 }
 
 // appendListSection appends one mrkdwn section listing every item as an escaped

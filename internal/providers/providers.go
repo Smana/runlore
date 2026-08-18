@@ -1169,6 +1169,14 @@ type Investigation struct {
 // the on-call actually has to read. Same reasoning as Verdict.Conclusive — one
 // definition, so the writer and the reader cannot drift apart.
 //
+// One definition, but deliberately NOT one snapshot: the loop evaluates this before
+// verifyFindings runs (it is judging the model's own payload) and the notifier
+// evaluates it on the post-verify result, so the two legitimately disagree on a run
+// whose reviewer rejected every hypothesis. Sharing the definition keeps the QUESTION
+// identical; it was never meant to make the answers identical. The notifier does not
+// render straight off this predicate for exactly that reason — see
+// notify.unaccountedForReader, which additionally requires RuledOut to be empty.
+//
 // RuledOut is deliberately not one of the three: eliminating hypotheses says what
 // the cause is NOT, which is neither a finding nor a reason the run could not reach
 // one. The three channels here are the ones that answer "so what happened?" or

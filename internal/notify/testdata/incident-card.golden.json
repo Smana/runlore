@@ -886,7 +886,7 @@
         },
         {
           "text": {
-            "text": "⚠️ *No account given* — the investigation reported no cause, no open question and no data gap, so this card carries neither an answer nor a reason it could not reach one. Treat it as an incomplete run, not a finding.",
+            "text": "⚠️ *No account given* — the investigation reported no cause, no open question and no data gap, so this run produced neither an answer nor a reason it could not reach one. Treat it as an incomplete run, not a finding.",
             "type": "mrkdwn"
           },
           "type": "section"
