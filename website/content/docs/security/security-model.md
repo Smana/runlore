@@ -141,13 +141,24 @@ The chart's RBAC is scoped tightly (`deploy/helm/runlore/templates/rbac.yaml`):
 - **Scope the App to the KB repo** (Contents/PRs/Issues read-write), plus optional read-only on your
   GitOps source repos for the what-changed diff. Disable the App's webhook. See
   [Getting started → GitHub App]({{< relref "getting-started.md" >}}).
-- **The clone credential is confined to one host.** RunLore attaches the forge token only to clones of
-  `forge.git_host` (derived from `github_api_url` / `gitlab.base_url` unless you set it); any other
-  host clones anonymously. This matters because a GitOps `spec.source.repoURL` is *cluster state* — a
-  namespace admin who can create an Argo CD `Application` or a Flux `GitRepository` would otherwise
-  choose where the token is sent. A GitHub Enterprise install with subdomain isolation must name
-  `forge.git_host`, and **fails config load** until it does, so the credential is never quietly
-  withheld from your own GitOps repo either.
+- **The clone credential is confined to one host — on the paths that read a repo URL from the
+  cluster.** RunLore attaches the forge token only to clones of `forge.git_host` (derived from
+  `github_api_url` / `gitlab.base_url` unless you set it); any other host clones anonymously. This
+  matters because a GitOps `spec.source.repoURL` is *cluster state* — a namespace admin who can
+  create an Argo CD `Application` or a Flux `GitRepository` would otherwise choose where the token is
+  sent. A GitHub Enterprise install with subdomain isolation must name `forge.git_host`, and **fails
+  config load** until it does, so the credential is never quietly withheld from your own GitOps repo
+  either. The confinement is implemented as the `TokenHost` field on the differ that `what_changed`
+  and `source_diff` share.
+- **The catalog git-sync is outside that confinement, and rests on a different argument.** The
+  catalog syncer has no host field, so it sends its credential — `catalog.git.token_env`, or the
+  shared forge GitHub App identity when that is unset — to whatever `catalog.git.url` names, on any
+  host. `forge.git_host` does not gate this path and setting it changes nothing here. The reason
+  this is not the same exposure as the GitOps case is that `catalog.git.url` is **operator config,
+  not cluster state**: changing it means changing `runlore.yaml`, which no namespace admin can do.
+  Treat it accordingly — point it at a host you would hand the forge credential to, and give it a
+  dedicated read-scoped `catalog.git.token_env` when the catalog lives somewhere the forge App
+  identity should not reach.
 - **Secrets by indirection.** Every credential is referenced by the *name* of an env var / Secret key,
   never inlined in config — so config can't leak a secret (see [Configuration]({{< relref "/docs/configuration/configuration.md" >}})).
 - **Webhook auth.** The incident webhook accepts a bearer token (`server.webhook_token_env`). It is
