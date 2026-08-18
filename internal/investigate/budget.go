@@ -12,6 +12,21 @@ import (
 // with a forced submit_findings, then hard-kill with result="budget_exceeded"), so
 // the reason is what tells an operator WHICH ceiling stopped a run — on the metric
 // label, the log line and the delivered unresolved entry.
+//
+// The set is deliberately closed at these three, and stays closed as new spend is
+// brought under the ceilings. A reason names the KNOB TO RAISE, not the call site that
+// happened to cross it: hybrid-recall query embeddings and the tokens of a completion
+// that failed mid-flight are both counted into the running total now (see
+// aggregateUsage), and an overrun driven by either is still answered by raising
+// max_tokens_per_investigation — so both report tokens_total. An "embed" or
+// "failed_call" reason would split one ceiling across several metric series and point
+// an operator at knobs that do not exist.
+//
+// Nor is there a third STAGE. The recall reranker's pre-call check (Recall.affordRerank)
+// declines to spend but does not stop the run — the loop's own ladder stops it one step
+// later, with these same two rungs. Recording a rung there as well would report one
+// stop twice; a declined rerank is a recall REJECTION (rerank_over_budget), which is
+// where an operator already looks to learn why a rerank did not happen.
 const (
 	// budgetReasonRequestTokens: the next request on its own would exceed
 	// requestBudget(MaxTokensPerInvestigation) — a quarter of the run's budget.

@@ -72,6 +72,66 @@ type Reranker struct {
 // prose reply is never a decision, so the request forces this tool (ToolChoice).
 const rerankToolName = "rerank_match"
 
+// recallSpend is the per-investigation spend channel the recall path carries on the
+// loop's behalf. It holds BOTH halves of one rule, which is why they are one type
+// rather than two parameters: the ceiling that must clear BEFORE a paid reranker
+// completion (afford), and the totals its usage is accumulated into AFTER it (totals).
+//
+// Splitting them is precisely how the reranker came to account for a call it had never
+// been allowed to make — the accounting half was threaded down here and the checking
+// half was not, so the ceiling was first consulted with the money already gone. A
+// caller holding one now necessarily holds the other.
+//
+// Nil, or either field nil, is the unbounded/unaccounted case: the bare Recall.lookup
+// used by the CLI and by tests behaves byte-for-byte as before, and an operator who
+// opted out with max_tokens_per_investigation: -1 is not handed a derived bound they
+// never asked for.
+//
+// SCOPE, stated plainly because a partial guarantee that reads as a total one is the
+// whole failure mode here: it gates paid COMPLETIONS on the recall path. The query
+// EMBEDDING retrieval performs before ranking is charged (see embedSpend) but is not
+// itself gated — it is one small request, it runs before there is any spend to compare
+// it against, and the loop's own ladder fires on the very next step.
+type recallSpend struct {
+	totals *providers.UsageTotals
+	// afford reports the ceiling reason refusing a request of estTokens, or "" to
+	// proceed. It is li.budgetTrip over li.aggregateUsage — the same predicate against
+	// the same running total the loop's own guard uses, never a second opinion.
+	afford func(estTokens int) string
+}
+
+// refuses reports which ceiling, if any, forbids a request of estTokens. Nil-safe: no
+// channel, or no ceiling, refuses nothing.
+func (s *recallSpend) refuses(estTokens int) string {
+	if s == nil || s.afford == nil {
+		return ""
+	}
+	return s.afford(estTokens)
+}
+
+// add accumulates one completion's usage into the investigation's totals. Nil-safe.
+func (s *recallSpend) add(u providers.Usage) {
+	if s == nil || s.totals == nil {
+		return
+	}
+	addUsage(s.totals, u)
+}
+
+// requestEstimate is the pre-call size of the rerank completion this candidate set
+// would send, measured with providers.EstimateTokens over exactly what rank puts on
+// the wire — the same heuristic, over the same three parts, that the loop's budget
+// guard measures its own requests with, so the ceiling compares like with like.
+//
+// It renders the candidates a second time (rank renders them again for the call
+// itself). That is a few hundred bytes of string building, once per investigation, to
+// avoid restructuring rank's signature around a pre-rendered prompt — and the guard
+// has to measure what will ACTUALLY be sent, not an approximation of it.
+func (rr *Reranker) requestEstimate(req Request, cands []catalog.ScoredEntry) int {
+	return providers.EstimateTokens(rerankPrompt,
+		[]providers.Message{{Role: "user", Content: renderRerankCandidates(req, cands)}},
+		[]providers.ToolSpec{rerankSpec()})
+}
+
 // rerankPrompt drives the reranker. It gates on TOPICAL fit — "is this the canonical
 // runbook for this resource failing this way?" — not on proving the runbook's root
 // cause from the alert (alerts are generic; the cause is re-confirmed against live state
@@ -131,9 +191,13 @@ type rerankVerdict struct {
 // investigation — whenever the model finds no match, errors, returns no/garbled tool
 // call, or names an id outside the candidate set. It is best-effort by construction:
 // every failure path is a fall-through, never a wrong recall. The completion's token
-// usage is accumulated into totals (when non-nil) so the reranker's cost counts toward
+// usage is accumulated into spend (when non-nil) so the reranker's cost counts toward
 // the per-investigation total (priced at the verify tier, where it runs).
-func (rr *Reranker) rank(ctx context.Context, req Request, cands []catalog.ScoredEntry, totals *providers.UsageTotals) (catalog.Entry, float64, bool) {
+//
+// The caller MUST have cleared spend.refuses first — see Recall.affordRerank. This
+// function is the spending side of the rule, not the checking side: by the time it is
+// entered the decision to pay has already been made.
+func (rr *Reranker) rank(ctx context.Context, req Request, cands []catalog.ScoredEntry, spend *recallSpend) (catalog.Entry, float64, bool) {
 	start := time.Now()
 	resp, err := rr.Model.Complete(ctx, providers.CompletionRequest{
 		System:     rerankPrompt,
@@ -161,9 +225,7 @@ func (rr *Reranker) rank(ctx context.Context, req Request, cands []catalog.Score
 	// for the entire rest of the investigation, so a flapping reranker would be free by
 	// construction. The provider reports them on the error path for this exact reason
 	// (CompletionResponse.CostOnly).
-	if totals != nil {
-		addUsage(totals, resp.Usage)
-	}
+	spend.add(resp.Usage)
 	if err != nil {
 		if rr.Log != nil {
 			rr.Log.Warn("recall reranker failed; falling through to full investigation", "title", req.Title, "err", err)

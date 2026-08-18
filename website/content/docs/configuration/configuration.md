@@ -317,7 +317,13 @@ incident webhook. Known keys: `alertmanager`, `gitops`, `pagerduty`, `custom`.
   rejection, which is decided *after* the ranking. A candidate that fails retrieval or the structural
   filter never reaches the reranker at all; past that point the last guard is `rerank_min_score`, and
   its default **0.1** sits at the *bottom* of the ~0.1–1.2 band real enriched BM25 scores occupy, so
-  it skips the call only when retrieval surfaced essentially nothing.
+  it skips the call only when retrieval surfaced essentially nothing. A second guard sits beside it:
+  the **spend ceiling is consulted before the ranking call, not after it**, so an investigation that
+  has already crossed `max_tokens_per_investigation` (or `max_cost_per_investigation`) declines to
+  rank rather than spending past a limit it has demonstrably hit. That is a fall-through like any
+  other — the run continues into a full investigation, where the ordinary nudge→kill ladder stops it
+  — and it is counted as `runlore_recall_rejections_total{reason="rerank_over_budget"}`, not as a
+  third rung on that ladder.
   In practice, then, enabling instant recall adds **one model call to the floor
   cost of nearly every investigation that has a structurally-agreeing candidate**, and buys back a
   full investigation on the subset that fires. A fired recall is consequently **two** model calls —

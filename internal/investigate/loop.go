@@ -389,12 +389,14 @@ func (li *LoopInvestigator) Investigate(ctx context.Context, req Request) error 
 	// tryRecall runs the instant-recall short-circuit + near-miss block: it delivers
 	// (finish) and reports done==true when a recalled answer survives verify, and
 	// otherwise returns the near-miss lead (if any) to fold into the seed. It threads
-	// `result` (for the deferred completion metric) and `verifyTotals` (for the
-	// reranker/verify tokens) by pointer so a short-circuit records the same labels the
-	// inline block did. nearMiss is the top structurally-agreeing catalog candidate
+	// `result` (for the deferred completion metric) and BOTH totals by pointer:
+	// `verifyTotals` is where the reranker/verify tokens land, and `loopTotals` is read
+	// (with the query embeddings) to answer whether the reranker's paid call is
+	// affordable at all — the running total has to be the loop's own, not a
+	// reconstruction of it. nearMiss is the top structurally-agreeing catalog candidate
 	// surfaced when recall is consulted but does NOT fire — folded into the seed prompt
 	// as an UNVERIFIED lead (C2).
-	nearMiss, done := li.tryRecall(ctx, req, &result, &verifyTotals, finish)
+	nearMiss, done := li.tryRecall(ctx, req, &result, &loopTotals, &verifyTotals, finish)
 	if done {
 		return nil
 	}
@@ -722,23 +724,37 @@ func (li *LoopInvestigator) Investigate(ctx context.Context, req Request) error 
 // returns immediately, skipping the full ReAct loop. Otherwise it returns the C2
 // near-miss lead (or nil) for the caller to fold into the seed prompt.
 //
-// It threads two pieces of Investigate's state by pointer, mirroring the inline block
-// exactly: `result` (the deferred completion-metric label — "recall" on a short
-// circuit) and `verifyTotals` (so the reranker + the recall verify pass price
-// their tokens into the per-investigation cost; both run on the verify tier).
+// It threads Investigate's state by pointer, mirroring the inline block exactly:
+// `result` (the deferred completion-metric label — "recall" on a short circuit) and
+// `verifyTotals` (so the reranker + the recall verify pass price their tokens into the
+// per-investigation cost; both run on the verify tier). `loopTotals` is read-only here
+// — the loop has not run yet, so it is zero on every real call — and is threaded
+// anyway rather than assumed zero: the affordability check below must read the same
+// aggregateUsage the loop's own ceiling does, and an assumption that happens to hold
+// today is how a guard quietly stops guarding.
 //
 // Instant recall is disabled under auto-execution: a poisoned catalog entry must not
 // short-circuit a real investigation straight into an auto-executed action. The
 // near-miss it may return shares that same `!IsAuto()` gate — it is only ever set
 // inside this block — so a poisoned KB entry can shape neither an auto-executed action
 // (instant recall) nor even the prompt under auto.
-func (li *LoopInvestigator) tryRecall(ctx context.Context, req Request, result *string, verifyTotals *providers.UsageTotals, finish func(providers.Investigation)) (nearMiss *catalog.Entry, done bool) {
+func (li *LoopInvestigator) tryRecall(ctx context.Context, req Request, result *string, loopTotals, verifyTotals *providers.UsageTotals, finish func(providers.Investigation)) (nearMiss *catalog.Entry, done bool) {
 	if li.Recall == nil || li.autoExecuting() {
 		return nil, false
 	}
-	// Thread verifyTotals so the reranker's tokens fold into the
-	// per-investigation cost — it runs on the verify tier, so it prices there.
-	entry, conf, outcomeRejected := li.Recall.lookupWithUsage(ctx, req, verifyTotals)
+	// The recall path's spend channel: BOTH halves of check-then-spend-then-account in
+	// one value. `totals` is verifyTotals so the reranker's tokens fold into the
+	// per-investigation cost at the tier it actually runs on; `afford` is the loop's own
+	// budgetTrip over its own aggregateUsage, so the ceiling the reranker is measured
+	// against is the same number, computed the same way, that stops the loop one step
+	// later — not a second opinion that could disagree with it.
+	spend := &recallSpend{
+		totals: verifyTotals,
+		afford: func(est int) string {
+			return li.budgetTrip(est, li.aggregateUsage(*loopTotals, *verifyTotals, embedSpend(ctx)))
+		},
+	}
+	entry, conf, outcomeRejected := li.Recall.lookupWithUsage(ctx, req, spend)
 	if entry == nil {
 		// Recall was consulted but no gate cleared: report the non-fire so a caller
 		// can distinguish it from a recall that fired and was later withdrawn.
