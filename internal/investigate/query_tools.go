@@ -56,6 +56,27 @@ func renderRows(b *strings.Builder, n int, noun string, row func(i int)) {
 	}
 }
 
+// exampleAggregation and exampleCadvisorAggregation are the two query shapes
+// seriesCapGuidance recommends. They are constants rather than prose so that
+// TestQueryMetricsDescriptionSteersAggregation can feed them straight back through
+// cadvisorRollupAdvisory: a description that steers the model into the very shape the
+// advisory then warns about would teach it to ignore advisories.
+const (
+	exampleAggregation         = `topk(10, sum by(pod)(rate(http_requests_total[5m])))`
+	exampleCadvisorAggregation = `topk(10, sum by(pod)(container_memory_working_set_bytes{container!=""}))`
+)
+
+// seriesCapGuidance is the closing sentence shared by both metrics tool Descriptions:
+// aggregate rather than send a raw selector, because the 50-series cap would otherwise
+// hide the signal — and, on the cadvisor container_* families, exclude the pod rollup
+// while aggregating. `sum by(pod)` is right for an ordinary counter and stays the
+// headline advice; the second clause is the cadvisor-only correction, so the guidance
+// is neither wrong for the common case nor self-contradictory for cadvisor.
+const seriesCapGuidance = "Results cap at 50 series (largest |value| kept); aggregate instead of sending a raw selector, " +
+	"so the cap can't hide the signal — e.g. " + exampleAggregation + ". " +
+	`On cadvisor container_* metrics also exclude the container="" pod rollup, or the sum counts each pod twice: ` +
+	exampleCadvisorAggregation + "."
+
 // metricsQLGuidance is the MetricsQL sentence appended to the query_metrics /
 // query_metrics_range Descriptions ONLY when the backend flavor is VictoriaMetrics.
 // MetricsQL is a PromQL superset, so these helpers would be invalid against real
@@ -84,7 +105,7 @@ func (t QueryMetricsTool) Name() string { return "query_metrics" }
 
 // Description returns the tool description.
 func (t QueryMetricsTool) Description() string {
-	d := "Run a PromQL instant query against the metrics backend (VictoriaMetrics/Prometheus) — check saturation, error rates, restarts, resource usage. This returns the value NOW only; to see when a metric started rising/spiking around the incident, use query_metrics_range instead. Results cap at 50 series (largest |value| kept); prefer topk(10, sum by(pod)(rate(...))) over a raw selector so the cap doesn't hide the signal."
+	d := "Run a PromQL instant query against the metrics backend (VictoriaMetrics/Prometheus) — check saturation, error rates, restarts, resource usage. This returns the value NOW only; to see when a metric started rising/spiking around the incident, use query_metrics_range instead. " + seriesCapGuidance
 	if t.MetricsQL {
 		d += metricsQLGuidance
 	}
@@ -119,6 +140,12 @@ func (t QueryMetricsTool) Call(ctx context.Context, args string) (string, error)
 		return math.Abs(samples[i].Value) > math.Abs(samples[j].Value)
 	})
 	var b strings.Builder
+	// Advisory FIRST, so it survives the row cap and is read before the numbers it
+	// calls into question. Additive: the rows below are untouched and the query is
+	// never rewritten. See cadvisor_rollup.go.
+	if w := cadvisorRollupAdvisory(in.Query); w != "" {
+		b.WriteString(w + "\n")
+	}
 	renderRows(&b, len(samples), "more series", func(i int) {
 		fmt.Fprintf(&b, "%s = %g\n", formatMetric(samples[i].Metric), samples[i].Value)
 	})
@@ -153,7 +180,7 @@ func (t QueryMetricsRangeTool) Name() string { return "query_metrics_range" }
 
 // Description returns the tool description.
 func (t QueryMetricsRangeTool) Description() string {
-	d := "Run a PromQL RANGE query over a recent window (default 60m, 60s step) to see how a metric TRENDS — rising, spiking, or recovering around the incident — not just its value right now. Use rate()/error-rate/saturation expressions; returns per-series first→last with min/max, a compact downsampled trend, and the biggest adjacent jump so you can tell WHEN a problem started and whether it was a step-change or a ramp. since_minutes bounds the window; step_seconds the resolution (auto-derived/coarsened if it would exceed the backend point cap). Results cap at 50 series (largest |value| kept); prefer topk(10, sum by(pod)(rate(...))) over a raw selector so the cap doesn't hide the signal."
+	d := "Run a PromQL RANGE query over a recent window (default 60m, 60s step) to see how a metric TRENDS — rising, spiking, or recovering around the incident — not just its value right now. Use rate()/error-rate/saturation expressions; returns per-series first→last with min/max, a compact downsampled trend, and the biggest adjacent jump so you can tell WHEN a problem started and whether it was a step-change or a ramp. since_minutes bounds the window; step_seconds the resolution (auto-derived/coarsened if it would exceed the backend point cap). " + seriesCapGuidance
 	if t.MetricsQL {
 		d += metricsQLGuidance
 	}
@@ -185,6 +212,12 @@ func (t QueryMetricsRangeTool) Call(ctx context.Context, args string) (string, e
 		return noSeriesMatched, nil
 	}
 	var b strings.Builder
+	// Same advisory as the instant tool: a range query over an unguarded cadvisor
+	// selector double-counts identically, and this is the tool an investigation uses
+	// to establish a peak. See cadvisor_rollup.go.
+	if w := cadvisorRollupAdvisory(in.Query); w != "" {
+		b.WriteString(w + "\n")
+	}
 	if clampNote != "" {
 		b.WriteString(clampNote + "\n")
 	}

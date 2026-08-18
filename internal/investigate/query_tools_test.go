@@ -399,14 +399,45 @@ func TestQueryMetricsToolTruncateKeepsExtremes(t *testing.T) {
 	}
 }
 
+// TestQueryMetricsDescriptionSteersAggregation pins the PROPERTY, not the wording:
+// both metrics tools tell the model to aggregate rather than send a raw selector
+// (naming the 50-series cap that motivates it), and every query shape they recommend
+// is one cadvisorRollupAdvisory stays SILENT on. The two used to contradict each
+// other — the description recommended `sum by(pod)` on a bare selector, which is
+// exactly the double-counting shape the advisory then warned about — and an advisory
+// that fires on the shape the tool description recommends teaches the model to ignore
+// advisories. Deriving the shapes from the description's own constants is what makes
+// that contradiction impossible to reintroduce silently.
 func TestQueryMetricsDescriptionSteersAggregation(t *testing.T) {
 	for _, d := range []string{QueryMetricsTool{}.Description(), QueryMetricsRangeTool{}.Description()} {
-		if !strings.Contains(d, "topk") {
-			t.Fatalf("description must steer toward topk aggregation:\n%s", d)
+		if !strings.Contains(d, seriesCapGuidance) {
+			t.Fatalf("description must carry the shared series-cap guidance:\n%s", d)
 		}
 		if !strings.Contains(d, "50") {
 			t.Fatalf("description must mention the 50-series cap:\n%s", d)
 		}
+		if !strings.Contains(d, "topk") {
+			t.Fatalf("description must steer toward topk aggregation:\n%s", d)
+		}
+	}
+	for _, q := range []string{exampleAggregation, exampleCadvisorAggregation} {
+		if !strings.Contains(seriesCapGuidance, q) {
+			t.Fatalf("guidance must actually show the shape under test: %s", q)
+		}
+		if w := cadvisorRollupAdvisory(q); w != "" {
+			t.Fatalf("recommended shape %s trips the rollup advisory:\n%s", q, w)
+		}
+	}
+	// Guard the guard. The cadvisor example's silence must mean "this selector
+	// excludes the rollup", not "the advisory never looks at queries like this" —
+	// otherwise the check above would pass for a shape that still double-counts.
+	// Strip the rollup guard and the same query must trip it.
+	unguarded := strings.ReplaceAll(exampleCadvisorAggregation, `{container!=""}`, "")
+	if unguarded == exampleCadvisorAggregation {
+		t.Fatalf("cadvisor example no longer carries the container!=\"\" guard: %s", exampleCadvisorAggregation)
+	}
+	if cadvisorRollupAdvisory(unguarded) == "" {
+		t.Fatalf("vacuous check: the advisory is silent on the UNGUARDED cadvisor example too: %s", unguarded)
 	}
 }
 
