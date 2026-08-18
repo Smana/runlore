@@ -69,9 +69,10 @@ func (w Workload) Ref() string {
 	return w.Namespace + "/" + w.Name
 }
 
-// EntryResourceRef narrows a rendered workload ref to the single, whitespace-free
-// value RunLore's own merge gate accepts in a knowledge-base entry's `resource:`
-// frontmatter — kbvalidate rejects any resource containing " \t\r\n" outright.
+// EntryResourceRef narrows a rendered workload ref to a single, whitespace-free
+// value that RunLore's own merge gate accepts in a knowledge-base entry's
+// `resource:` frontmatter — kbvalidate rejects any resource containing " \t\r\n"
+// outright — and that recall's structural filter can actually match.
 //
 // It exists because Ref() renders whatever is in Workload.Name, and on a curated
 // or captured finding that is MODEL-WRITTEN free text: submit_findings fills
@@ -90,35 +91,62 @@ func (w Workload) Ref() string {
 // against and is a real object, so keeping it preserves the index. Nothing is
 // lost — the full list still reaches the entry BODY verbatim.
 //
-// Whitespace-free input is returned EXACTLY as given — the single-field early
-// return below exists for that promise alone. It is what lets every caller say
-// that no entry which merges today is written differently, and it is why the
-// punctuation trim is guarded rather than unconditional: an unguarded trim also
-// rewrites "argocd/app," and "a;b;", which are whitespace-free, clear the gate
-// today, and are none of this function's business.
+// It used to promise that whitespace-free input was returned EXACTLY as given, so
+// that no entry which merges today would be written differently. #518 retired that
+// promise, because clearing the merge gate is not the bar that matters:
 //
-// So it deliberately does NOT split a comma-joined list that carries no
-// whitespace ("a,b,c"): that value merges today, and quietly rewriting what an
-// existing entry is indexed under is a bigger change than closing a gate defect.
+//	resource: argocd/essentials,monitoring,argocd-app-of-apps
+//
+// That live draft carries no whitespace, so it PASSED the gate and merged — and
+// recall compares `resource` by STRING EQUALITY (investigate.resourceAgrees,
+// forgiving only a pod-hash suffix), so no incident's workload ref is ever that
+// string. The entry was unrecallable the moment it landed, with nothing to surface
+// it: a silent death, strictly worse than the loud CI rejection a whitespace-bearing
+// sibling got. Passing the gate while being permanently unmatchable is the failure
+// this function now exists to prevent, not just the reverse.
+//
+// The rewrite is therefore keyed on what a MATCH could ever have used. A Kubernetes
+// namespace and name are RFC 1123 labels/subdomains: lowercase alphanumerics, "-"
+// and "." only. So "," ";" "(" "[" "{" cannot appear in either half of a ref that
+// matches anything, and a trailing "/" leaves an empty name half that Ref() can
+// never render. Cutting at the first of those, and trimming that slash, can only
+// turn a value that could never match into one that can. Anything a match could
+// have used is still returned untouched — dots, digits and pod-hash suffixes
+// included.
+//
+// Narrowing, not dropping: `resource` is the structural-recall index, and a
+// NON-EMPTY resource also disables recall's scopeless tier, so a wrong value is
+// worse than none. The first listed object is the one the namespace was rendered
+// against and is a real object, so keeping it preserves the index. Nothing is
+// lost — the full list still reaches the entry BODY verbatim (draftKBEntry's
+// "Affected resource" line and thread.ConceptEntry's Context section both render
+// the un-narrowed ref).
+//
+// It is idempotent, which is what lets the draft path re-inspect an
+// already-narrowed value to decide whether to warn about it.
 //
 // KNOWN CONSEQUENCE: two different multi-object findings that happen to lead with
 // the same object now write the SAME `resource`, while curator.DupFingerprint
 // keeps them distinct (it hashes the full, un-narrowed Ref()). So the frontmatter
 // index can collide where the dedup identity does not — a new class, and stated
 // here rather than left to be discovered. It is strictly better than what it
-// replaces, where neither entry could be merged at all, and the entry body still
-// distinguishes them for a reader.
+// replaces, where the entry either could not be merged at all or could never be
+// recalled, and the entry body still distinguishes them for a reader.
 func EntryResourceRef(ref string) string {
 	fields := strings.Fields(ref)
 	if len(fields) == 0 {
 		return ""
 	}
-	if len(fields) == 1 {
-		return fields[0]
+	// The leading field only: qualifying detail the model appended as prose
+	// ("… (cluster=shared, instance i-0fd8…)") belongs in the body, not in an index key.
+	tok := fields[0]
+	// Then cut at the first character no matching ref can contain — a list separator
+	// or an opening bracket glued to the name without a space.
+	if i := strings.IndexAny(tok, ",;([{"); i >= 0 {
+		tok = tok[:i]
 	}
-	// Trailing list punctuation is what the split left behind ("argocd/essentials,"),
-	// not part of the name; a trailing "/" would leave a ref with an empty name half.
-	return strings.TrimRight(fields[0], ",;/")
+	// A trailing "/" would leave a ref with an empty name half.
+	return strings.TrimRight(tok, "/")
 }
 
 // reDeployPod matches a volatile pod-name suffix: a Deployment pod is

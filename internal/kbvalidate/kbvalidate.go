@@ -3,8 +3,14 @@
 // Package kbvalidate provides deterministic structural validation of OKF
 // knowledge-base entries (the merge gate) and an LLM-assisted semantic advisory.
 // The structural checks mirror what curator.draftKBEntry emits and what
-// catalog.parseEntry consumes, so a RunLore-authored entry that passes meetsBar
-// also passes ValidateStructural by construction.
+// catalog.parseEntry consumes.
+//
+// That correspondence used to be asserted here as holding "by construction", with
+// nothing checking it: a drafted entry first met this validator in the catalog
+// repo's CI, days later, by which point its pull request was already open and
+// unmergeable. curator.warnDraft now runs ValidateStructural on every entry the
+// curator drafts, before the PR is opened, and logs what fails. It deliberately
+// does not BLOCK — an entry a human has to fix beats an investigation thrown away.
 package kbvalidate
 
 import (

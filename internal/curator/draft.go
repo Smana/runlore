@@ -156,17 +156,60 @@ func alertResourceIfDistinct(inv providers.Investigation) string {
 // bare-namespace cases pass through unchanged; w is a value copy, so mutating its
 // Name is local. Idempotent (NormalizeWorkloadName is).
 //
-// The Ref() is then narrowed by providers.EntryResourceRef, because Workload.Name
-// on a curated finding is MODEL-WRITTEN free text and a whitespace-bearing one
-// ("essentials, monitoring, argocd-app-of-apps") fails RunLore's own merge gate —
-// the curator would draft an entry its own `validate` job rejects. That was
-// reported against thread capture (#491), which shares this exact source; only
-// the value the model happened to produce differed, so fixing one path and not
-// the other would leave the same defect armed here. Whitespace-free refs are
-// returned unchanged, so no entry that merges today is written differently.
+// The Ref() is then narrowed by draftResource → providers.EntryResourceRef, because
+// Workload.Name on a curated finding is MODEL-WRITTEN free text and a
+// whitespace-bearing one ("essentials, monitoring, argocd-app-of-apps") fails
+// RunLore's own merge gate — the curator would draft an entry its own `validate`
+// job rejects. That was reported against thread capture (#491), which shares this
+// exact source; only the value the model happened to produce differed, so fixing
+// one path and not the other would leave the same defect armed here.
 func normalizeResource(w providers.Workload) string {
 	w.Name = normalizeWorkloadName(w.Name)
-	return providers.EntryResourceRef(w.Ref())
+	ref, _ := draftResource(w.Ref())
+	return ref
+}
+
+// draftResource is the draft path's decision about the `resource:` frontmatter
+// field: it returns the value to WRITE, plus the reason that value still cannot
+// serve as recall's structural index ("" when it can).
+//
+// The write side is providers.EntryResourceRef — see it for why a value that
+// merely clears the merge gate is not good enough, and for what it repairs.
+//
+// The reason exists because repair has a hard limit. `resource` is matched by
+// string equality against a live workload's "namespace/name" ref, so anything
+// else is at best a weaker index and at worst unmatchable — but the draft path
+// cannot invent the missing half, and MUST NOT drop the finding over it. So it
+// reports, and the caller logs; #518's requirement in one line: an unrecallable
+// entry is still better than a lost investigation, as long as it is not silent.
+//
+// A bare token is deliberately only a warning, not a repair. It is genuinely
+// ambiguous: Workload.Ref() renders a bare NAMESPACE when the name is unknown
+// (routine on alert-triggered investigations, and recall's matchNamespace tier
+// serves it), while a model that wrote a workload name with no namespace produces
+// the same shape and will match nothing. Guessing which would either mangle a
+// working index or fabricate a namespace.
+//
+// An empty resource is NOT a defect: it is the honest scopeless entry, and recall
+// has a matchScopeless tier for exactly it. Since a NON-EMPTY resource disables
+// that tier, a wrong value is strictly worse than none.
+//
+// Idempotent — draftResource(v) for a v it already produced returns v and the same
+// reason, which is what lets the curator re-derive the warning from the finished
+// entry instead of re-plumbing the raw ref.
+func draftResource(ref string) (resource, reason string) {
+	resource = providers.EntryResourceRef(ref)
+	if resource == "" {
+		return "", "" // legitimately scopeless
+	}
+	ns, name, ok := strings.Cut(resource, "/")
+	switch {
+	case !ok:
+		return resource, "reads as a bare namespace, so it matches every workload in it rather than one object"
+	case ns == "" || name == "" || strings.Contains(name, "/"):
+		return resource, "is not shaped namespace/name, so recall's structural match can never agree with it"
+	}
+	return resource, ""
 }
 
 // entryType derives the OKF type for a drafted entry. The default is Incident: a
