@@ -298,7 +298,7 @@ type LoopInvestigator struct {
 
 // system returns the system prompt, extended with action proposals when the policy is
 // enabled, with an MCP-tools note when external MCP tools (name contains "__") are
-// present, and with the tool-gated source_diff / alert_rule instructions.
+// present, and with each tool-gated instruction fragment whose tool is registered.
 func (li *LoopInvestigator) system() string {
 	s := systemPrompt(engineFromTools(li.Tools))
 	if li.Actions != nil && li.Actions.Enabled() {

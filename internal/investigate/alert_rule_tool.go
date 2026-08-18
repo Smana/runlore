@@ -6,7 +6,8 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"sort"
+	"maps"
+	"slices"
 	"strings"
 
 	"github.com/Smana/runlore/internal/providers"
@@ -93,8 +94,18 @@ func (t AlertRuleTool) Call(ctx context.Context, args string) (string, error) {
 	}
 	rules, err := reader.AlertRules(ctx)
 	if err != nil {
-		// A rules lookup is context, never the finding: report the failure as missing
-		// data instead of returning an error, so it cannot be read as a fault signal.
+		// A cancelled/expired context is not "this backend has no rules" — it is the
+		// loop's own deadline firing. Return it, because runTool only consults
+		// tctx.Err() when Call returns an error: swallowing it here would record
+		// result="ok" for a call that never completed and hide a per-tool timeout.
+		// runTool still turns the error into an "error: …" tool result, so the
+		// investigation continues either way.
+		if ctx.Err() != nil {
+			return "", err
+		}
+		// Any OTHER failure (404, 500, an unparseable body) is context, never the
+		// finding: report it as missing data instead of an error, so it cannot be read
+		// as a fault signal about the incident.
 		return fmt.Sprintf("%s — reading the alerting rules failed: %v. Treat the rule expression as "+
 			"missing data (note it in data_gaps); it is NOT evidence about the incident.", alertRuleUnavailable, err), nil
 	}
@@ -132,11 +143,12 @@ func (t AlertRuleTool) Call(ctx context.Context, args string) (string, error) {
 // defines two rules differing only in case is never conflated.
 func matchAlertRules(rules []providers.AlertRule, name string) []providers.AlertRule {
 	var exact, fold []providers.AlertRule
+	folded := foldAlertName(name)
 	for _, r := range rules {
 		switch {
 		case r.Name == name:
 			exact = append(exact, r)
-		case strings.EqualFold(r.Name, name):
+		case foldAlertName(r.Name) == folded:
 			fold = append(fold, r)
 		}
 	}
@@ -145,6 +157,17 @@ func matchAlertRules(rules []providers.AlertRule, name string) []providers.Alert
 	}
 	return fold
 }
+
+// foldAlertName is the ONE case normaliser for alertnames in this package.
+//
+// It is a function rather than an inline strings.EqualFold / strings.ToLower
+// because internal/foldguard forbids normalising the same value two different ways
+// in one package: EqualFold and ToLower disagree (EqualFold folds U+017F to 's',
+// ToLower does not), so a value that one of them matches the other can miss. Here
+// that would mean the exact-vs-fold matcher and the near-miss ranking below
+// disagreeing about which names are "the same name" — routing a rule the matcher
+// rejected into the list of names to correct to, or vice versa.
+func foldAlertName(s string) string { return strings.ToLower(s) }
 
 // writeAlertRule renders one rule: the expression first (it is the reason the tool
 // exists), then the metadata that qualifies how it fires.
@@ -174,46 +197,48 @@ func writeAlertRule(b *strings.Builder, r providers.AlertRule) {
 	if r.LastError != "" {
 		fmt.Fprintf(b, "rule evaluation error: %s (this rule is NOT evaluating cleanly)\n", r.LastError)
 	}
-	if s := formatKV(r.Labels); s != "" {
+	// renderKV is the seed prompt's own label/annotation renderer: sorted k="v", and
+	// values clipped, so one pathological annotation cannot dominate the context.
+	if s := renderKV(r.Labels, ""); s != "" {
 		fmt.Fprintf(b, "labels: %s\n", s)
 	}
-	if s := formatKV(r.Annotations); s != "" {
+	if s := renderKV(r.Annotations, ""); s != "" {
 		fmt.Fprintf(b, "annotations: %s\n", s)
 	}
-}
-
-// formatKV renders a label/annotation map as sorted `k="v"` pairs, so the output is
-// deterministic across calls (Go map order is not).
-func formatKV(m map[string]string) string {
-	if len(m) == 0 {
-		return ""
-	}
-	pairs := make([]string, 0, len(m))
-	for k, v := range m {
-		pairs = append(pairs, fmt.Sprintf("%s=%q", k, v))
-	}
-	sort.Strings(pairs)
-	return strings.Join(pairs, " ")
 }
 
 // renderUnmatchedAlert reports a name that matched no rule AND lists the alertnames
 // the backend does define, so the model can correct the name instead of dead-ending
 // — the same recover-don't-guess shape as noSeriesMatched.
+//
+// The list is capped at maxToolRows, so plain alphabetical order would bury the one
+// name the model needs: a real backend here defines 254 alertnames and sorts
+// "RDSCriticalLatency" at index 161, which the 50-row cap can never reach. Names
+// that look like the requested one are therefore hoisted first, which is what makes
+// the cap harmless on the path that exists to recover from a wrong name.
 func renderUnmatchedAlert(name string, rules []providers.AlertRule) string {
 	seen := make(map[string]bool, len(rules))
-	names := make([]string, 0, len(rules))
 	for _, r := range rules {
-		if r.Name == "" || seen[r.Name] {
-			continue
+		if r.Name != "" {
+			seen[r.Name] = true
 		}
-		seen[r.Name] = true
-		names = append(names, r.Name)
 	}
-	sort.Strings(names)
+	folded := foldAlertName(name)
+	var near, rest []string
+	for _, n := range slices.Sorted(maps.Keys(seen)) {
+		// Either direction of containment: the model may have dropped a suffix
+		// ("RDSCriticalLatency" for "RDSCriticalLatencyProd") or added one.
+		if f := foldAlertName(n); strings.Contains(f, folded) || strings.Contains(folded, f) {
+			near = append(near, n)
+		} else {
+			rest = append(rest, n)
+		}
+	}
+	names := slices.Concat(near, rest)
 	var b strings.Builder
 	fmt.Fprintf(&b, "no alerting rule named %q on this backend — the alert may be evaluated elsewhere, or the "+
 		"name may differ. Do NOT read this as the alert being bogus; note it in data_gaps if it stays unresolved.\n"+
-		"%d alertname(s) this backend does define:\n", name, len(names))
+		"%d alertname(s) this backend does define (closest first):\n", name, len(names))
 	renderRows(&b, len(names), "more", func(i int) {
 		fmt.Fprintf(&b, "%s\n", names[i])
 	})

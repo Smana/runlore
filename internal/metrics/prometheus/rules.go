@@ -17,42 +17,87 @@ import (
 // mixed list of alerting and recording rules.
 type rulesResponse struct {
 	Groups []struct {
-		Name  string `json:"name"`
-		File  string `json:"file"`
-		Rules []struct {
-			Type string `json:"type"` // "alerting" | "recording"; omitted by some vmalert builds
-			Name string `json:"name"`
-			// Query is the thresholded expression — the field the whole capability
-			// exists to deliver.
-			Query string `json:"query"`
-			// Duration is the `for:` hold-down IN SECONDS (both backends render it as a
-			// number, not a duration string), absent for a fires-immediately rule.
-			Duration    float64           `json:"duration"`
-			State       string            `json:"state"`
-			Health      string            `json:"health"`
-			LastError   string            `json:"lastError"`
-			Labels      map[string]string `json:"labels"`
-			Annotations map[string]string `json:"annotations"`
-		} `json:"rules"`
+		Name  string    `json:"name"`
+		File  string    `json:"file"`
+		Rules []apiRule `json:"rules"`
 	} `json:"groups"`
+}
+
+// apiRule is one rule inside a group. Alerting and recording rules share this one
+// shape on BOTH backends — neither emits a distinct `record` key, both report the
+// output series and the alertname in the same "name" field — so "type", and
+// failing that isAlerting's shape test, is the only discriminator available.
+type apiRule struct {
+	Type string `json:"type"` // "alerting" | "recording"; omitted by some vmalert builds
+	Name string `json:"name"`
+	// Query is the thresholded expression — the field the whole capability
+	// exists to deliver.
+	Query string `json:"query"`
+	// Duration is the `for:` hold-down IN SECONDS (both backends render it as a
+	// number, not a duration string), absent for a fires-immediately rule.
+	Duration    float64           `json:"duration"`
+	State       string            `json:"state"`
+	Health      string            `json:"health"`
+	LastError   string            `json:"lastError"`
+	Labels      map[string]string `json:"labels"`
+	Annotations map[string]string `json:"annotations"`
+}
+
+// isAlerting reports whether this rule is an ALERTING rule.
+//
+// "type" is authoritative when present, and both currently supported backends set
+// it. It is absent only on older vmalert builds, and dropping those outright would
+// return an empty ruleset on exactly the backend this was built for — so an untyped
+// rule is judged by SHAPE instead, using fields only an alerting rule can carry
+// under the /api/v1/rules contract: a `for:` hold-down, alert annotations, or one
+// of the alert-only states (a recording rule reports "ok", never firing/pending/
+// inactive).
+//
+// Defaulting an untyped, alert-shaped-in-no-way rule to "alerting" is NOT a
+// harmless over-inclusion, which is why the shape test has to be positive: a
+// recording rule that leaks through is rendered to the model with `expr:` as
+// though it were a threshold, and its name is offered by renderUnmatchedAlert as
+// an alertname to "correct" to — reintroducing, through the degraded path, exactly
+// the wrong-expression misdiagnosis this capability exists to remove. Dropping a
+// genuine alerting rule instead costs a "no rule found" note, which is safe.
+func (r apiRule) isAlerting() bool {
+	switch r.Type {
+	case "alerting":
+		return true
+	case "":
+		// Untyped: fall through to the shape test below.
+	default: // "recording", or any type a future backend invents
+		return false
+	}
+	return r.Duration > 0 || len(r.Annotations) > 0 ||
+		r.State == "firing" || r.State == "pending" || r.State == "inactive"
 }
 
 // AlertRules reads the backend's ALERTING rule definitions, implementing the
 // optional providers.AlertRuleReader capability via GET /api/v1/rules?type=alert.
 //
 // It is strictly read-only. `type=alert` keeps recording rules off the wire on a
-// large ruleset, and the response is filtered again in Go because a backend that
-// does not honour the parameter would otherwise return them anyway. A rule with no
-// explicit "type" is KEPT as alerting: some vmalert builds omit the field, and
-// dropping those would silently return an empty ruleset on exactly the backend
-// this was built for.
+// large ruleset, and `exclude_alerts=true` drops the per-rule `alerts[]` array of
+// ACTIVE INSTANCES, which nothing below decodes. On a real 278-rule backend that
+// array is ~160 KB of a ~509 KB response, and it grows with how broken the cluster
+// is — i.e. exactly when this tool is called. Without it, a large enough incident
+// pushes the body past httpx.MaxResponseBytes (a hard error, not a truncation) and
+// the tool degrades to "unavailable" during the outage it exists for. Prometheus
+// and vmalert both honour the parameter; a backend that does not simply sends the
+// array and it is ignored.
+//
+// `type=alert` is the primary recording-rule guard and both supported backends
+// honour it; isAlerting re-filters in Go so a backend that ignores the parameter
+// cannot feed a recording rule to the model as though it were a threshold.
 //
 // A backend that does not serve the endpoint yields the usual non-200 error (e.g.
 // "metrics status 404: …"), which the caller degrades on — the error is returned
 // rather than swallowed so "the endpoint is absent" never reads as "there are no
 // rules".
 func (c *Client) AlertRules(ctx context.Context) ([]providers.AlertRule, error) {
-	raw, err := c.getRaw(ctx, "/api/v1/rules", url.Values{"type": {"alert"}})
+	raw, err := c.getRaw(ctx, "/api/v1/rules", url.Values{
+		"type": {"alert"}, "exclude_alerts": {"true"},
+	})
 	if err != nil {
 		return nil, err
 	}
@@ -63,7 +108,7 @@ func (c *Client) AlertRules(ctx context.Context) ([]providers.AlertRule, error) 
 	var out []providers.AlertRule
 	for _, g := range resp.Groups {
 		for _, r := range g.Rules {
-			if r.Type != "" && r.Type != "alerting" {
+			if !r.isAlerting() {
 				continue
 			}
 			out = append(out, providers.AlertRule{

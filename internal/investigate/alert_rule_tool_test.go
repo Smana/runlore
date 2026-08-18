@@ -5,6 +5,7 @@ package investigate
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -12,46 +13,18 @@ import (
 	"github.com/Smana/runlore/internal/providers"
 )
 
-// fakeRuleMetrics implements providers.MetricsProvider plus the OPTIONAL
-// providers.AlertRuleReader capability, so the tool's happy path and its error
-// path are both exercised against a real type assertion.
+// fakeRuleMetrics embeds the package's plain MetricsProvider double and adds the
+// OPTIONAL providers.AlertRuleReader capability, so the tool's happy path and its
+// error path are both exercised against a real type assertion. A bare fakeMetrics
+// (no AlertRules method) is the backend that lacks the capability entirely.
 type fakeRuleMetrics struct {
+	fakeMetrics
 	rules []providers.AlertRule
 	err   error
-	calls int
-}
-
-func (f *fakeRuleMetrics) Query(context.Context, string, time.Time) (providers.Samples, error) {
-	return nil, nil
-}
-
-func (f *fakeRuleMetrics) QueryRange(context.Context, string, providers.TimeWindow, time.Duration) (providers.Matrix, error) {
-	return nil, nil
-}
-
-func (f *fakeRuleMetrics) LabelValues(context.Context, string, []string, providers.TimeWindow) ([]string, error) {
-	return nil, nil
 }
 
 func (f *fakeRuleMetrics) AlertRules(context.Context) ([]providers.AlertRule, error) {
-	f.calls++
 	return f.rules, f.err
-}
-
-// plainMetrics implements ONLY providers.MetricsProvider — a backend with no rules
-// endpoint (e.g. a bare remote-read gateway).
-type plainMetrics struct{}
-
-func (plainMetrics) Query(context.Context, string, time.Time) (providers.Samples, error) {
-	return nil, nil
-}
-
-func (plainMetrics) QueryRange(context.Context, string, providers.TimeWindow, time.Duration) (providers.Matrix, error) {
-	return nil, nil
-}
-
-func (plainMetrics) LabelValues(context.Context, string, []string, providers.TimeWindow) ([]string, error) {
-	return nil, nil
 }
 
 // rdsRule is the real RDSCriticalLatency rule that was misdiagnosed twice: its
@@ -140,8 +113,10 @@ func TestAlertRuleToolCall(t *testing.T) {
 			},
 		},
 		{
+			// fakeMetrics implements ONLY providers.MetricsProvider — a backend with no
+			// rules endpoint at all (e.g. a bare remote-read gateway).
 			name:     "backend with no rules endpoint degrades to unavailable",
-			provider: plainMetrics{},
+			provider: fakeMetrics{},
 			args:     `{"alert":"RDSCriticalLatency"}`,
 			want:     []string{"alert_rule is unavailable"},
 		},
@@ -214,15 +189,65 @@ func TestAlertRuleToolResultCarriesTheStatisticWarning(t *testing.T) {
 // The system prompt must direct the model at alert_rule when it is registered —
 // a tool the model never calls fixes nothing. Mirrors the source_diff gating.
 func TestSystemPromptMentionsAlertRuleOnlyWhenRegistered(t *testing.T) {
-	without := (&LoopInvestigator{Tools: []Tool{QueryMetricsTool{Metrics: plainMetrics{}}}}).system()
+	without := (&LoopInvestigator{Tools: []Tool{QueryMetricsTool{Metrics: fakeMetrics{}}}}).system()
 	if strings.Contains(without, "alert_rule") {
 		t.Fatalf("prompt must not mention alert_rule when the tool is absent:\n%s", without)
 	}
 	with := (&LoopInvestigator{Tools: []Tool{
-		QueryMetricsTool{Metrics: plainMetrics{}},
+		QueryMetricsTool{Metrics: fakeMetrics{}},
 		AlertRuleTool{Metrics: &fakeRuleMetrics{}},
 	}}).system()
 	if !strings.Contains(with, "alert_rule") {
 		t.Fatalf("prompt must direct the model at alert_rule when registered:\n%s", with)
+	}
+}
+
+// A cancelled/expired context must surface as an ERROR, not as a cheerful
+// "unavailable" string: runTool only classifies a per-tool timeout when Call
+// returns an error, so swallowing it would record result="ok" for a call that
+// never completed. The investigation still continues — runTool renders the error
+// as this tool's result — so this does not weaken graceful degradation.
+func TestAlertRuleToolPropagatesContextErrors(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	_, err := AlertRuleTool{Metrics: &fakeRuleMetrics{err: context.Canceled}}.
+		Call(ctx, `{"alert":"RDSCriticalLatency"}`)
+	if err == nil {
+		t.Fatal("a cancelled context must be returned as an error, not swallowed into an 'unavailable' result")
+	}
+	// A plain backend failure on a LIVE context still degrades to a string, so a 404
+	// rules endpoint can never abort an investigation.
+	out, err := AlertRuleTool{Metrics: &fakeRuleMetrics{err: errors.New("metrics status 404: nope")}}.
+		Call(context.Background(), `{"alert":"RDSCriticalLatency"}`)
+	if err != nil {
+		t.Fatalf("a non-context backend error must still degrade: %v", err)
+	}
+	if !strings.Contains(out, alertRuleUnavailable) {
+		t.Fatalf("want the unavailable degrade, got %q", out)
+	}
+}
+
+// The unmatched-name list is capped at maxToolRows. When the backend defines more
+// alertnames than the cap, the near-miss the model must correct against has to
+// survive the cut — alphabetically it would not. This is the real shape of the
+// failure: 254 alertnames, with the wanted one sorting past index 160.
+func TestAlertRuleUnmatchedListHoistsTheNearMissAboveTheRowCap(t *testing.T) {
+	rules := make([]providers.AlertRule, 0, 260)
+	for i := 0; i < 260; i++ {
+		rules = append(rules, providers.AlertRule{Name: fmt.Sprintf("AAA%03dAlert", i), Query: "up == 0"})
+	}
+	// Sorts far past the 50-row cap among the AAA* names.
+	rules = append(rules, providers.AlertRule{Name: "RDSCriticalLatencyProd", Query: "x > 1"})
+
+	out, err := AlertRuleTool{Metrics: &fakeRuleMetrics{rules: rules}}.
+		Call(context.Background(), `{"alert":"RDSCriticalLatency"}`)
+	if err != nil {
+		t.Fatalf("Call: %v", err)
+	}
+	if !strings.Contains(out, "RDSCriticalLatencyProd") {
+		t.Fatalf("the near-miss name must survive the row cap:\n%s", out)
+	}
+	if strings.Count(out, "\n") > maxToolRows+6 {
+		t.Fatalf("output must still be capped at ~maxToolRows rows:\n%s", out)
 	}
 }
