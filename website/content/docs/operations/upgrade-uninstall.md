@@ -5,6 +5,71 @@ weight: 30
 
 How to upgrade RunLore in place, what survives a restart, and how to remove it cleanly.
 
+## Breaking changes in 0.15.0
+
+RunLore is **pre-1.0**, and a breaking change bumps the **minor** version — so a `0.x` upgrade can
+still require migration. Read this section before upgrading onto `0.15.0`.
+
+### `investigation.max_tokens_per_investigation` is now a whole-run budget, and its default is raised
+
+The key used to bound the estimated size of the **next request**. It is now a **cumulative** ceiling
+on one investigation's model tokens (provider-reported input + output, loop **and** verify), so
+twenty steps of 99k each — which previously passed cleanly against a `100000` "budget" — now stop
+after the fourth. Read as a run budget that old value funds only four or five steps, so **the default
+is raised from `100000` to `400000`** to suit the new meaning. It is *not* unchanged.
+
+A quarter of it (**100 000** at the default) additionally bounds the estimated size of any single
+request, and mid-loop compaction triggers at 70 % of that quarter (**70 000**). Those are exactly the
+values in force before the ceiling became cumulative, so what one request may cost changes for nobody.
+
+**What you have to do**
+
+- **If you never set the key** — nothing. The raised default is applied for you, and investigations
+  that a `100000` run budget would have cut short with `result="budget_exceeded"` now run to
+  completion.
+- **If you set it explicitly** — your value is **left untouched** and is now read as a whole-run
+  budget: a config pinned to `100000` still says `100000`, and now funds roughly four steps rather
+  than twenty. Set it to the total you are willing to pay per incident (summed across all turns, not
+  the size of one), or `-1` for the previous unbounded behaviour.
+- **`0` does not disable it.** `0` applies the bounded default and `-1` is the opt-out, so a config
+  written to remove the cap with `0` gets the default instead — the opposite of what it asked for.
+
+Budget for the ceiling **plus one request**: the check compares the *projected* total — already spent
+plus the request about to be sent — so a run stops on the first request that would cross, but that
+request is still sent: the nudge exists to give the model one turn to conclude. That conceded
+request is itself capped at the quarter, so budget **≈1.25×** the number you set. Measured at the
+shipped defaults: **≈467 000 tokens delivered against a 400 000 ceiling** (≈1.17×).
+
+Runs stopped by the running total report `reason="tokens_total"`; runs stopped by the per-request
+bound report `reason="tokens_request"`, and are fixed by lowering `max_tool_output_bytes` or enabling
+`compaction`, not by raising the run budget. Watch
+`runlore_investigation_budget_trips_total{reason,stage}` after upgrading. Full reference:
+[Configuration → `investigation`]({{< relref "/docs/configuration/configuration.md#investigation--loop-bounds--noise-control" >}}).
+
+### GitHub Enterprise with subdomain isolation must set `forge.git_host`
+
+A GitHub Enterprise install whose `forge.github_api_url` is an **`api.` subdomain** (subdomain
+isolation: the API on `api.HOSTNAME`, git and web on `HOSTNAME`) must now set **`forge.git_host`** to
+the bare hostname serving its git remotes. `serve` **refuses to start** until it does, rather than
+guessing and silently withholding the forge credential from every GitOps repository.
+
+```yaml
+forge:
+  github_api_url: https://api.ghe.example.com
+  git_host: ghe.example.com   # the host your git remotes use — no scheme, path or port
+```
+
+The credential is confined to that host because a GitOps `spec.source.repoURL` is cluster state:
+whoever can create an Argo CD `Application` or a Flux `GitRepository` chooses where an unconfined
+token would be sent. Guessing wrong fails either loudly (the token goes to a host it is not valid
+for) or **silently** — withholding it from your own GitOps repo empties `what_changed` on every
+investigation, surfacing only as a data-gaps line at the foot of a finding. Loud once at startup
+beats quiet forever.
+
+**Every other configuration is untouched and needs no new key**: `github.com`, GitHub Enterprise
+serving its API at `HOSTNAME/api/v3`, and GitLab (whose `base_url` is already the instance root that
+git, web and API share).
+
 ## Upgrading
 
 RunLore is a Helm release — upgrade like any other chart (the chart is an OCI artifact on GHCR;

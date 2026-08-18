@@ -766,6 +766,13 @@ func TestShippedTokenCeilingFundsARealInvestigation(t *testing.T) {
 const (
 	spendDocPath   = "../../website/content/docs/configuration/configuration.md"
 	spendChartPath = "../../deploy/helm/runlore/values.yaml"
+	// spendUpgradePath carries the MIGRATION note — the one an operator reads once,
+	// while upgrading, and the only place these derived figures are stated as a
+	// before/after. It is pinned here for the same reason as the other two, and for
+	// one more: the 0.15.0 changelog shipped this migration claiming "the default is
+	// unchanged at 100000" when it had in fact been raised to 400000, so the numbers
+	// on this page are the corrected record and must not be allowed to rot back.
+	spendUpgradePath = "../../website/content/docs/operations/upgrade-uninstall.md"
 )
 
 // ungroupDigits removes the spaces a prose page puts inside long numbers ("100 000"),
@@ -825,6 +832,12 @@ func TestSpendCeilingDocsStateTheDerivedThresholds(t *testing.T) {
 			"A QUARTER of this (" + perRequest + " here) additionally bounds",
 			"compaction triggers at 70% of that quarter (" + compaction + ")",
 			"budget ~" + overshoot + "x",
+		}},
+		{spendUpgradePath, []string{
+			"A quarter of it (**" + perRequest + "** at the default) additionally bounds",
+			"compaction triggers at 70 % of that quarter (**" + compaction + "**)",
+			"budget **≈" + overshoot + "×** the number you set",
+			"against a " + strconv.Itoa(ceiling) + " ceiling",
 		}},
 	} {
 		raw, err := os.ReadFile(tc.path)
