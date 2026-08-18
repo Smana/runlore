@@ -443,13 +443,25 @@ model or tier, or the ceiling drifts away from the bill it is meant to bound.
 ### `forge` — the Git host for curation
 `provider` (`github` — the default — or `gitlab`), `kb_repo` (GitHub: `owner/name`; GitLab: the
 project path, e.g. `group/project`, nested groups allowed), `base_branch` (default `main`),
-`github_api_url` (default `https://api.github.com`), `dup_score` (default **5.0**), `min_confidence`
+`github_api_url` (default `https://api.github.com`), `git_host` (default **derived**, see below),
+`dup_score` (default **5.0**), `min_confidence`
 (default **0.75**, the quality bar below which a finding is chat-only), `skip_verdicts` (default
 **empty** — draft every verdict). `github_app` — `app_id`, `installation_id`, and `private_key_ref`
 **or** `private_key_env`. `gitlab` — `base_url` (self-managed instance root; omit for gitlab.com) and
 `token_env` (a project/group access token, scope `api`); see
 [Integrations → GitLab]({{< relref "/docs/integrations/forge/gitlab.md" >}}). `provider: gitlab` with no
 `gitlab.token_env`, or a `kb_repo` that isn't a valid GitLab project path, fails config load closed.
+
+`git_host` is the **one host the forge credential may be sent to** when RunLore clones — `what_changed`
+against your GitOps repo, `source_diff` against an allowlisted source repo, the catalog git-sync
+against the KB repo. A clone of any other host proceeds anonymously, because a GitOps
+`spec.source.repoURL` is cluster state: anyone who can create an Argo CD `Application` picks it, and
+it must not be able to pick where your token goes. Leave it empty and it is derived — `github.com`
+from `api.github.com`, the API host for GitHub Enterprise, `gitlab.base_url`'s host for GitLab. Set it
+only for **GitHub Enterprise with subdomain isolation** (API on `api.HOSTNAME`, git on `HOSTNAME`),
+which is the one shape the derivation cannot resolve; that config **fails load** until `git_host`
+names the git host, rather than guessing and silently withholding the credential from every repo.
+The value is a bare hostname — no scheme, path, port or userinfo.
 
 `skip_verdicts` is a list of investigation verdicts that must **not** draft a KB PR — the finding
 still reaches chat, but no repo artifact is created. Values are validated at startup against the

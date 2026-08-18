@@ -121,6 +121,13 @@ The chart's RBAC is scoped tightly (`deploy/helm/runlore/templates/rbac.yaml`):
 - **Scope the App to the KB repo** (Contents/PRs/Issues read-write), plus optional read-only on your
   GitOps source repos for the what-changed diff. Disable the App's webhook. See
   [Getting started → GitHub App]({{< relref "getting-started.md" >}}).
+- **The clone credential is confined to one host.** RunLore attaches the forge token only to clones of
+  `forge.git_host` (derived from `github_api_url` / `gitlab.base_url` unless you set it); any other
+  host clones anonymously. This matters because a GitOps `spec.source.repoURL` is *cluster state* — a
+  namespace admin who can create an Argo CD `Application` or a Flux `GitRepository` would otherwise
+  choose where the token is sent. A GitHub Enterprise install with subdomain isolation must name
+  `forge.git_host`, and **fails config load** until it does, so the credential is never quietly
+  withheld from your own GitOps repo either.
 - **Secrets by indirection.** Every credential is referenced by the *name* of an env var / Secret key,
   never inlined in config — so config can't leak a secret (see [Configuration]({{< relref "/docs/configuration/configuration.md" >}})).
 - **Webhook auth.** The incident webhook accepts a bearer token (`server.webhook_token_env`). It is

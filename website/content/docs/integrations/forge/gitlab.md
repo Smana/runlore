@@ -80,6 +80,15 @@ curl --header "PRIVATE-TOKEN: $GITLAB_TOKEN" \
 - `provider: gitlab` with no `forge.gitlab.token_env`, or a `kb_repo` that isn't a valid GitLab
   project path, both **fail config load closed** — `serve` refuses to start rather than coming up
   with curation silently disabled.
+- The **same token clones private repos**: `what_changed` fetching your GitOps repo, `source_diff`
+  fetching an allowlisted source repo, and the catalog git-sync reading the KB project all
+  authenticate with it over HTTPS. It was GitHub-App-only before, which meant a GitLab deployment
+  cloned a private GitOps repo **anonymously** and `what_changed` silently produced nothing. Give the
+  token `read_repository` reach over the projects you want diffed (the `api` scope already covers
+  it), or those clones 404.
+- The token is sent **only to the host in `base_url`** (`gitlab.com` when it is omitted). A GitOps
+  `spec.source.repoURL` pointing anywhere else clones anonymously — a repoURL is cluster state, so it
+  must never be able to choose where RunLore's credential goes.
 - TLS verification is always on; there is no `insecure_skip_verify` escape hatch. A self-signed
   instance needs a certificate your cluster's trust store already accepts.
 - **Not yet verified against a live GitLab instance.** The provider is built against the GitLab v4
@@ -103,7 +112,6 @@ investigation and posts the findings back, and `index.md`/`log.md` stay in step 
 |------|--------------------|
 | `lore curate` (the backlog-grooming CLI: dedup, lifecycle, queue, recurrence, contested, retirement passes) | **Fails to start**, with a message naming a GitHub App — it has no GitLab code path |
 | In-server sweeps (`curate.sweeps.mode: apply`) | **Disabled, and it says so.** No sweeper is built, and startup logs `curate sweeps disabled: no usable KB forge — Phase-2 grooming is GitHub-only` |
-| Source-repo diff cloning for private repos (`gitops` source cloning) | GitHub-App auth only — unrelated to which forge hosts the KB, but it bites the same operator |
 
 Concretely: nothing prunes the KB backlog, stale merge requests are never closed, and entries are
 never promoted to `ready-to-merge` when the underlying incident resolves. Review and merge KB merge
