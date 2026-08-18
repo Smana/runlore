@@ -5,6 +5,7 @@ package notify
 
 import (
 	"fmt"
+	"slices"
 	"sort"
 	"strings"
 	"time"
@@ -73,6 +74,106 @@ func curateFailureReason(inv providers.Investigation) string {
 		return ""
 	}
 	return truncate(thread.SafeErrorText(inv.CurateError), curateErrorRunes)
+}
+
+// inconclusiveAccountHeader labels the account an `inconclusive` verdict owes its
+// reader when the card has no Why to be the answer instead: what stopped the
+// investigation. It reuses the verdict's own ❓ deliberately — the reader is being
+// told what that badge MEANS on this card, not shown a second, unrelated section.
+const inconclusiveAccountHeader = "*❓ Why this is inconclusive*"
+
+// unaccountedInconclusiveNotice is what a card says in place of that account when
+// the payload supplies none — providers.Investigation.UnaccountedInconclusive.
+//
+// It exists because the alternative shipped live on 2026-08-18: a card whose entire
+// body was "❓ Inconclusive — <a definite conclusion about self-healed node churn>"
+// and "⚪ confidence not stated". No Why, no evidence, no next steps, and nothing in
+// the thread either, because there was nothing to put there. The verdict says "I
+// could not determine the cause"; the title states a cause. A reader has no way to
+// tell which half to believe, and the honest answer — neither — was the one thing
+// the card did not say.
+//
+// So it says it. Not a guess at what the model meant, and not a suppression of the
+// title (the conclusion may well be right; the sibling KubeNodeUnreachable
+// investigation reached the same one at 75% with full evidence): a plain statement
+// that nothing on this card backs it, which is exactly what makes an incomplete run
+// distinguishable from a finding.
+//
+// It says "this RUN produced", not "this card carries", and the difference is
+// load-bearing: the card may well carry an answer this run did not reach. A
+// recurring incident stamps Prior (block 3, "Seen before ×N" with the merged
+// entry's cause and human-reviewed resolution) and a kb_search hit stamps
+// MatchedKnowledge (block 4) regardless of what the fresh run concluded, so a bare
+// `inconclusive` on a recurrence renders a prior cause three blocks above this
+// notice. Claiming the card carries nothing would tell the on-call to disregard an
+// answer that is on screen. The claim scoped to the run is true in every case.
+const unaccountedInconclusiveNotice = "⚠️ *No account given* — the investigation reported no cause, " +
+	"no open question and no data gap, so this run produced neither an answer nor a reason it could not " +
+	"reach one. Treat it as an incomplete run, not a finding."
+
+// inconclusiveAccount returns the lead line and the bullets a card renders to
+// account for an `inconclusive` verdict, or ("", nil) when it owes none.
+//
+// `lead` is the section's FIRST LINE, and it has two shapes: normally the header
+// the bullets sit under, but on the unaccounted arm the standalone notice, with no
+// bullets to follow it. Callers must render lead first and the bullets (possibly
+// none) under it — which is what makes the two arms one code path.
+//
+// It owes one exactly when the verdict is inconclusive AND no root cause will
+// render: with a cause on the card the reader has the answer whatever the label says
+// (the mislabel #471 documents — "a recurrence of a fault you DID identify is NOT
+// inconclusive"), and a conclusive verdict has nothing to account for. What is owed
+// is the model's own open questions and data gaps, in that order — the channels
+// every synthesised stop in internal/investigate (budget kill, timeout, refusal,
+// non-convergence) writes its blocker into — falling back to the notice above when
+// it gave neither.
+//
+// This is the one place the Slack SUMMARY renders data gaps, against the rule that
+// they belong only in the threaded detail. That rule is about fold space: gaps must
+// not push the answer below "Show more". On this card there IS no answer to push
+// down, and the gap is the closest thing to one the run produced — a reader who has
+// to open a thread to learn that RBAC blocked the pod logs is reading a card that
+// told them nothing.
+func inconclusiveAccount(inv providers.Investigation) (lead string, bullets []string) {
+	if inv.Verdict != providers.VerdictInconclusive || len(inv.RootCauses) > 0 {
+		return "", nil
+	}
+	// slices.Concat rather than append(inv.Unresolved, inv.DataGaps...): the latter
+	// would stomp the caller's backing array when Unresolved has spare capacity.
+	bullets = slices.Concat(inv.Unresolved, inv.DataGaps)
+	if len(bullets) == 0 {
+		// The RuledOut fallback. The verify pass is the reason this is not simply the
+		// notice: applyVerdicts (internal/investigate/verify.go) moves every REJECTED
+		// hypothesis into RuledOut with its disproving reason, empties RootCauses and
+		// forces the verdict to `inconclusive` — without touching Unresolved or DataGaps.
+		// Verify is on by default at every call site, so a run whose reviewer refuted all
+		// of the model's hypotheses arrives here having accounted for itself perfectly
+		// well, and the notice would call it an incomplete run while the thread reply
+		// listed the refutations. What is ruled out IS the reason this run reached no
+		// answer, so it is the account when it is the only one — and it stays a fallback,
+		// never merged into the list above, because "what it is not" is worth fold space
+		// only when there is no "why don't you know" to spend it on.
+		//
+		// The predicate on the contract deliberately excludes RuledOut (see
+		// providers.Investigation.UnaccountedInconclusive): it answers "did the MODEL
+		// contradict itself", which is what the loop logs at submit time, before verify
+		// can rewrite anything. This answers the later, different question "is there
+		// anything the READER can use", so the two must not be the same test.
+		if len(inv.RuledOut) == 0 {
+			return unaccountedInconclusiveNotice, nil
+		}
+		bullets = slices.Clone(inv.RuledOut)
+	}
+	return inconclusiveAccountHeader, bullets
+}
+
+// unaccountedForReader reports whether nothing the delivered notification can show
+// accounts for an `inconclusive` verdict — the contract predicate AND no ruled-out
+// hypotheses, for the reason spelled out in inconclusiveAccount. Format consults it
+// directly because that message has no fold and prints the honest-limit lists in
+// full below, so it needs the notice decision without the rendering.
+func unaccountedForReader(inv providers.Investigation) bool {
+	return inv.UnaccountedInconclusive() && len(inv.RuledOut) == 0
 }
 
 // verdictBadge maps a model verdict to its emoji + human label. Empty/unknown
@@ -210,6 +311,17 @@ func Format(inv providers.Investigation) string {
 			}
 			fmt.Fprintf(&b, "   → suggested: %s%s\n", rc.SuggestedAction, rev)
 		}
+	}
+	// This flat message already prints the open questions, ruled-out hypotheses and
+	// data gaps below, so a genuine inconclusive accounts for itself here without
+	// help. Only the self-contradicting shape needs saying out loud — otherwise this
+	// message, like the Slack card the notice was written for, is a verdict label with
+	// nothing behind it. Placed above the honest-limit sections it stands in for, and
+	// gated on unaccountedForReader rather than the raw contract predicate so it can
+	// never print immediately above a *Ruled out:* section enumerating the very
+	// reasons it just claimed do not exist.
+	if unaccountedForReader(inv) {
+		b.WriteString(unaccountedInconclusiveNotice + "\n")
 	}
 	if len(inv.Unresolved) > 0 {
 		b.WriteString("*Unresolved:*\n")
