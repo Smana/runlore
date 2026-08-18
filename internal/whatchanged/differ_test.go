@@ -479,3 +479,20 @@ func TestRevisionsInWindowZeroWindow(t *testing.T) {
 		t.Fatalf("want 2 in-window revisions via clone, got %d: %+v", len(revs), revs)
 	}
 }
+
+// TestHostOfRefusesANonASCIIHost pins the fold that instance 1 was exploited
+// through, on the HTTPS path that the SSH-side refusal does not cover.
+//
+// strings.ToLower maps U+0130 to 'i' while idna.Lookup.ToASCII maps it to
+// i+U+0307, so "gİthub.com" compares equal to "github.com" here and resolves to
+// "xn--github-qyd.com" on the wire. Returning "" makes it unequal to any
+// configured TokenHost, so the token is withheld rather than misdirected.
+func TestHostOfRefusesANonASCIIHost(t *testing.T) {
+	if got := hostOf("https://g\u0130thub.com/o/r.git"); got != "" {
+		t.Errorf("hostOf = %q, want \"\" — a host that folds to the credential's host but "+
+			"resolves elsewhere is how an installation token reaches a stranger", got)
+	}
+	if got := hostOf("https://GitHub.com/o/r.git"); got != "github.com" {
+		t.Errorf("hostOf = %q, want github.com — ASCII case folding must still work", got)
+	}
+}

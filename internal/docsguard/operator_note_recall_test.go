@@ -44,7 +44,7 @@ func filedOperatorNote(t *testing.T) (description, body string) {
 // reviewer is asked to accept as a causal chain, so if the filer stops saying it — or
 // starts saying something that reads as evidence — the quotation is stale and the
 // paragraph's whole argument has to be re-derived.
-var noteDescriptionRE = regexp.MustCompile(`^Operator knowledge captured from a \w+ thread by @\S+\.$`)
+var noteDescriptionRE = regexp.MustCompile(`^Operator knowledge from @\S+ via \w+(, on the finding ".*")?(: .+|\.)$`)
 
 // TestOperatorNoteFilesNoCausalEvidence derives the two facts learning-loop.md §10
 // rests on, from the code that decides them:
@@ -77,7 +77,7 @@ func TestOperatorNoteFilesNoCausalEvidence(t *testing.T) {
 	// The page quotes the same sentence, elided the way prose elides it (and wrapped,
 	// so the line break is part of the match). Anchored on both ends of the real
 	// sentence, so a rewritten description leaves a quotation that no longer exists.
-	if doc := readDoc(t, operatorNotePage); !strings.Contains(doc, "Operator knowledge captured\n  from a … thread by @…") {
+	if doc := readDoc(t, operatorNotePage); !strings.Contains(doc, "Operator knowledge from @… via …, on the finding \"…\": …") {
 		t.Errorf("learning-loop.md §10 no longer quotes the description an operator note actually files (%q) — "+
 			"without it the paragraph asserts a rejection reason the reader cannot check", description)
 	}
