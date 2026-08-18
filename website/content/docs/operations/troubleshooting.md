@@ -150,6 +150,14 @@ Both carry `field=`, `issue=` and `title=` so you can find the entry. If an alre
 never matches anything, this is the first thing to check — it shows up in the recall section below
 as `no_resource_match`.
 
+Both are also **counted**, so you do not have to be watching the log to find out:
+`runlore_kb_draft_defects_total{defect="unrecallable_resource"}` for the first row and
+`{defect="merge_gate"}` for the second, from both entry writers (the curator and the
+`@runlore note:` route). Nothing else would tell you — `runlore_curations_total{kind="pr",result="opened"}`
+counts the pull request as a success whichever line fired. Alert on `unrecallable_resource`: it is
+the half that merges cleanly and stays silent. See
+[Observability]({{< relref "observability.md#recall-learning-loop--curation" >}}).
+
 ---
 
 ## Recall never fires (every incident runs the full loop)

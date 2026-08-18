@@ -70,3 +70,18 @@ func TestNewMetricsInvestigationUsageInstruments(t *testing.T) {
 		t.Fatal("NewMetrics must construct the per-investigation usage/cost instruments")
 	}
 }
+
+// TestKBDraftDefectsCounterConstructed pins the draft-time defect counter.
+//
+// It is the number that separates a healthy catalog from one silently filling
+// with entries recall can never match: runlore_curations_total{result="opened"}
+// counts a doomed entry as a success, so without this the two deployments are
+// metrically identical. With no provider configured the global meter is a no-op;
+// the instrument must still construct and be safe to record.
+func TestKBDraftDefectsCounterConstructed(t *testing.T) {
+	m := NewMetrics()
+	if m.KBDraftDefects == nil {
+		t.Fatal("NewMetrics must construct KBDraftDefects")
+	}
+	m.KBDraftDefects.Add(context.Background(), 1)
+}

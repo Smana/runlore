@@ -3,11 +3,30 @@
 package kbvalidate
 
 import (
+	"context"
 	"log/slog"
 	"strings"
 
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/metric"
+
 	"github.com/Smana/runlore/internal/okf"
 	"github.com/Smana/runlore/internal/providers"
+	"github.com/Smana/runlore/internal/telemetry"
+)
+
+// The `defect` label vocabulary of runlore_kb_draft_defects_total. The two are
+// kept apart because they want opposite responses, and folding them would lose
+// the only distinction that matters here: an unusable recall index is silent
+// forever, while a draft that fails the merge gate blocks its own pull request
+// and a human meets it at review time regardless.
+//
+// Both name the ENTRY's defect and nothing about the writer that drafted it —
+// deliberately, because a thread capture is not a curation and would otherwise
+// have no honest value to record under.
+const (
+	defectUnrecallableResource = "unrecallable_resource"
+	defectMergeGate            = "merge_gate"
 )
 
 // WarnDraft makes a drafted entry's own defects visible BEFORE the pull request
@@ -39,21 +58,45 @@ import (
 // ValidateStructural requires one for Incident only), so both writers are judged
 // by what they each claim to be.
 //
+// It also COUNTS what it reports, under runlore_kb_draft_defects_total, and the
+// counter is the half that can be alerted on. A log line is read by whoever is
+// already looking; nothing was looking, and runlore_curations_total{result=
+// "opened"} scores the pull request a success whether or not the entry inside it
+// can ever be recalled — so a deployment steadily filling its catalog with dead
+// weight is metrically indistinguishable from a healthy one, which is the worst
+// shape this failure can take. The counter is labelled per condition (see the
+// defect constants), because the two want different responses.
+//
+// It stays a REPORT. Nothing here reads back into control flow: the caller opens
+// its pull request next either way, and both the counter and the metric set are
+// nil-safe, so an unwired telemetry stack costs the report nothing.
+//
 // log must not be nil in normal use; a nil one falls back to slog.Default()
 // rather than panicking on a path whose whole purpose is to not lose an entry.
-func WarnDraft(log *slog.Logger, e providers.KBEntry) {
+// m may be nil — the same optional-telemetry contract every other
+// *telemetry.Metrics holder in RunLore follows.
+func WarnDraft(ctx context.Context, log *slog.Logger, m *telemetry.Metrics, e providers.KBEntry) {
 	if log == nil {
 		log = slog.Default()
 	}
+	var mergeGate, unrecallable bool
 	// okf.AsEntry, not a projection of our own: the entry is judged as the file
 	// that will actually be committed, by the same adapter okf.Render's output
 	// parses back into.
 	for _, iss := range ValidateStructural(okf.AsEntry(e, okf.Meta{}, "")) {
-		msg := "drafted KB entry: advisory validation warning"
+		// The two messages are separate literals at their own call sites, not one
+		// variable logged once. docsguard's troubleshooting guard maps every msg="…"
+		// the operations page quotes to a literal at a log call, and a message
+		// assembled into a variable is invisible to it — so the page would go on
+		// telling operators to grep a string nothing could prove RunLore emits.
 		if iss.Severity == SeverityError {
-			msg = "drafted KB entry fails RunLore's own merge gate; filing it anyway, but the frontmatter needs a human fix before it can merge"
+			mergeGate = true
+			log.Warn("drafted KB entry fails RunLore's own merge gate; filing it anyway, but the frontmatter needs a human fix before it can merge",
+				"field", iss.Field, "issue", iss.Message, "title", e.Title)
+			continue
 		}
-		log.Warn(msg, "field", iss.Field, "issue", iss.Message, "title", e.Title)
+		log.Warn("drafted KB entry: advisory validation warning",
+			"field", iss.Field, "issue", iss.Message, "title", e.Title)
 	}
 	// alert_resource is a SECOND, independent match key (the resource the alert fired
 	// on, when the fault sat deeper), so it is held to the same shape as the first.
@@ -62,8 +105,28 @@ func WarnDraft(log *slog.Logger, e providers.KBEntry) {
 		{"alert_resource", e.AlertResource},
 	} {
 		if _, reason := DraftResource(k.value); reason != "" {
+			unrecallable = true
 			log.Warn("drafted KB entry carries a recall index that recall cannot use; filing it anyway",
 				"field", k.field, "value", k.value, "reason", reason, "title", e.Title)
+		}
+	}
+	if m == nil {
+		return
+	}
+	// One increment per defect per DRAFT, not per log line: an entry whose two index
+	// keys are both unusable is one unusable entry, and an entry that trips four gate
+	// rules is one entry that cannot merge. Counting lines would make the number
+	// depend on how wrong a draft happened to be, and it could no longer be read
+	// against the count of entries filed.
+	for _, d := range []struct {
+		label   string
+		tripped bool
+	}{
+		{defectUnrecallableResource, unrecallable},
+		{defectMergeGate, mergeGate},
+	} {
+		if d.tripped {
+			m.KBDraftDefects.Add(ctx, 1, metric.WithAttributes(attribute.String("defect", d.label)))
 		}
 	}
 }

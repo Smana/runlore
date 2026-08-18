@@ -6,10 +6,16 @@ import (
 	"bytes"
 	"context"
 	"log/slog"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/metric/noop"
+
 	"github.com/Smana/runlore/internal/providers"
+	"github.com/Smana/runlore/internal/telemetry"
 )
 
 // TestDraftKBEntryWritesTheNarrowedResource pins that the draft path actually
@@ -101,5 +107,67 @@ func TestCurateDoesNotWarnOnACleanDraft(t *testing.T) {
 	}
 	if out := logs.String(); strings.Contains(out, "level=WARN") {
 		t.Errorf("a clean draft must warn about nothing, got:\n%s", out)
+	}
+}
+
+// TestCurateCountsADefectiveDraftUnderItsDefect is the curator half of "both
+// entry writers are counted". kbvalidate.WarnDraft records, so the counting is
+// correct by construction — but only if the curator actually hands it the
+// instrument set it holds. Nothing else would notice a nil passed there: the
+// warnings would still be logged, the PR would still open, and the series would
+// simply never appear, which reads as "no defective drafts".
+//
+// It asserts against the real Prometheus exposition rather than the SDK, because
+// the label is what an operator selects on — `{defect="merge_gate"}` is the
+// alert they write, not a Go attribute.Set.
+func TestCurateCountsADefectiveDraftUnderItsDefect(t *testing.T) {
+	for _, tt := range []struct {
+		name     string
+		resource providers.Workload
+		want     string
+	}{{
+		// A model-written name with no namespace: Ref() renders the namespace alone,
+		// so what ships is a bare token recall can only read as a namespace.
+		name:     "a resource recall can never match",
+		resource: providers.Workload{Kind: "Pod", Namespace: "harbor-registry"},
+		want:     `defect="unrecallable_resource"`,
+	}, {
+		// No resource at all, and goodFinding's ChangeRef keeps the entry an
+		// Incident — for which kbvalidate requires one.
+		name: "a draft that cannot merge",
+		want: `defect="merge_gate"`,
+	}} {
+		t.Run(tt.name, func(t *testing.T) {
+			h, shutdown, err := telemetry.Setup(context.Background())
+			if err != nil {
+				t.Fatalf("telemetry setup: %v", err)
+			}
+			defer func() { _ = shutdown(context.Background()) }()
+			t.Cleanup(func() { otel.SetMeterProvider(noop.NewMeterProvider()) })
+
+			f := &fakeForge{}
+			c := newCurator(f, fakeScored{})
+			c.Metrics = telemetry.NewMetrics()
+
+			inv := goodFinding()
+			inv.Resource = tt.resource
+			ref, err := c.Curate(context.Background(), inv)
+			if err != nil {
+				t.Fatal(err)
+			}
+			// The counter must not have become a gate: the PR still opens.
+			if f.openedPR == nil || ref.URL == "" {
+				t.Fatalf("counting a defect must not cost the investigation: pr=%+v ref=%q", f.openedPR, ref.URL)
+			}
+
+			rec := httptest.NewRecorder()
+			h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/metrics", nil))
+			body := rec.Body.String()
+			for _, want := range []string{"runlore_kb_draft_defects_total", tt.want} {
+				if !strings.Contains(body, want) {
+					t.Errorf("scrape does not contain %q; got:\n%s", want, body)
+				}
+			}
+		})
 	}
 }

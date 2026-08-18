@@ -9,8 +9,10 @@
 // nothing checking it: a drafted entry first met this validator in the catalog
 // repo's CI, days later, by which point its pull request was already open and
 // unmergeable. WarnDraft (see draft.go) now runs ValidateStructural on every entry
-// RunLore drafts, before the PR is opened, and logs what fails. It deliberately
-// does not BLOCK — an entry a human has to fix beats an investigation thrown away.
+// RunLore drafts, before the PR is opened, logs what fails and COUNTS it
+// (runlore_kb_draft_defects_total, labelled per condition — a log line is only
+// read by someone already looking, and nothing was looking). It deliberately does
+// not BLOCK — an entry a human has to fix beats an investigation thrown away.
 //
 // SCOPE, stated rather than implied: EVERY entry writer runs that guard, not just
 // the one that first needed it. RunLore has two — curator.Curate, drafting a

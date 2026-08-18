@@ -4,12 +4,20 @@ package kbvalidate
 
 import (
 	"bytes"
+	"context"
 	"io"
 	"log/slog"
+	"reflect"
 	"strings"
 	"testing"
 
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/metric/noop"
+	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
+	"go.opentelemetry.io/otel/sdk/metric/metricdata"
+
 	"github.com/Smana/runlore/internal/providers"
+	"github.com/Smana/runlore/internal/telemetry"
 )
 
 // TestDraftResourceShape is the draft-time gate on the one frontmatter field
@@ -127,7 +135,7 @@ func TestDraftResourceShape(t *testing.T) {
 // that only ever ran one of the two loops would pass a test that carried only one.
 func TestWarnDraftReportsBothHalvesOfADefectiveDraft(t *testing.T) {
 	var logs bytes.Buffer
-	WarnDraft(slog.New(slog.NewTextHandler(&logs, nil)), providers.KBEntry{
+	WarnDraft(context.Background(), slog.New(slog.NewTextHandler(&logs, nil)), nil, providers.KBEntry{
 		// An Incident with no resource fails the gate; the alert-side index clears
 		// it (no whitespace) yet can never equal a Workload.Ref().
 		Type: "Incident", Title: "Core Argo CD Applications stuck OutOfSync",
@@ -155,7 +163,7 @@ func TestWarnDraftReportsBothHalvesOfADefectiveDraft(t *testing.T) {
 // indistinguishable from not warning.
 func TestWarnDraftIsSilentOnACleanConcept(t *testing.T) {
 	var logs bytes.Buffer
-	WarnDraft(slog.New(slog.NewTextHandler(&logs, nil)), providers.KBEntry{
+	WarnDraft(context.Background(), slog.New(slog.NewTextHandler(&logs, nil)), nil, providers.KBEntry{
 		Type: "Concept", Title: "Operator note: this recurs after every spot reclaim",
 		Description: "Operator knowledge from @alice via slack",
 		Tags:        []string{"operator-note", "slack"},
@@ -178,5 +186,164 @@ func TestWarnDraftSurvivesANilLogger(t *testing.T) {
 	// An entry with something to report, so the fallback logger is actually
 	// WRITTEN to: a clean one would never reach a log call and would pass with or
 	// without the guard.
-	WarnDraft(nil, providers.KBEntry{Type: "Incident", Title: "t", AlertResource: "argocd/a|b"})
+	WarnDraft(context.Background(), nil, nil, providers.KBEntry{Type: "Incident", Title: "t", AlertResource: "argocd/a|b"})
+}
+
+// draftDefectsSeries is the exported name of the counter WarnDraft writes. It is
+// spelled out rather than derived, because the series name is the operator's
+// interface: a rename that nothing here notices is a dashboard and an alert rule
+// pointed at nothing.
+const draftDefectsSeries = "runlore_kb_draft_defects_total"
+
+// meteredDefects installs a REAL SDK meter provider backed by a manual reader and
+// returns the instrument set bound to it, plus a reader that totals
+// draftDefectsSeries BY ITS `defect` LABEL.
+//
+// By label, not in aggregate, deliberately: the two conditions want different
+// responses from an operator — an unusable recall index is silent forever, while
+// a merge-gate failure blocks the PR and a human will see it — so a test that
+// summed the series whole would pass with the labels folded together, which is
+// the one thing this metric must not do. The provider is global, so a test using
+// this must not run in parallel with another that does; the cleanup restores the
+// no-op provider. Mirrors internal/thread's meteredInstruments.
+func meteredDefects(t *testing.T) (*telemetry.Metrics, func() map[string]int64) {
+	t.Helper()
+	reader := sdkmetric.NewManualReader()
+	otel.SetMeterProvider(sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader)))
+	t.Cleanup(func() { otel.SetMeterProvider(noop.NewMeterProvider()) })
+	return telemetry.NewMetrics(), func() map[string]int64 {
+		var rm metricdata.ResourceMetrics
+		if err := reader.Collect(context.Background(), &rm); err != nil {
+			t.Fatalf("collect metrics: %v", err)
+		}
+		byDefect := map[string]int64{}
+		for _, sm := range rm.ScopeMetrics {
+			for _, md := range sm.Metrics {
+				if md.Name != draftDefectsSeries {
+					continue
+				}
+				sum, ok := md.Data.(metricdata.Sum[int64])
+				if !ok {
+					t.Fatalf("%s is not an int64 sum (%T)", draftDefectsSeries, md.Data)
+				}
+				for _, dp := range sum.DataPoints {
+					v, found := dp.Attributes.Value("defect")
+					if !found {
+						t.Fatalf("%s carries a data point with no `defect` label — an unlabelled "+
+							"series folds the two conditions back together, which is what the label is for", draftDefectsSeries)
+					}
+					byDefect[v.AsString()] += dp.Value
+				}
+			}
+		}
+		return byDefect
+	}
+}
+
+// TestWarnDraftCountsEachConditionUnderItsOwnLabel is the whole point of the
+// counter. WarnDraft already logs both conditions, and a log line is not a number:
+// runlore_curations_total{kind="pr",result="opened"} counts the pull request as a
+// success whether the entry it carries is recallable or not, so a deployment
+// steadily filling its catalog with unmatchable entries looks exactly like a
+// healthy one. The damage compounds — every unusable entry is permanent catalog
+// weight that never repays its cost — which is why it has to be alertable, and
+// alertable per condition: an unusable recall index is silent forever, while a
+// merge-gate failure blocks at PR time where a human meets it anyway.
+func TestWarnDraftCountsEachConditionUnderItsOwnLabel(t *testing.T) {
+	m, defects := meteredDefects(t)
+	var logs bytes.Buffer
+
+	// One entry with a defect of each kind — an Incident with no `resource` fails
+	// the gate, while its alert-side index clears the gate (no whitespace) and can
+	// never equal a Workload.Ref().
+	WarnDraft(context.Background(), slog.New(slog.NewTextHandler(&logs, nil)), m, providers.KBEntry{
+		Type: "Incident", Title: "Core Argo CD Applications stuck OutOfSync",
+		Description:   "the ApplicationSet lost syncPolicy.automated",
+		AlertResource: "argocd/essentials|monitoring", Tags: []string{"runlore", "incident"},
+		Body: "## Symptom\n\ns\n\n## Cause\n\nc\n\n## Resolution\n\nr\n",
+	})
+
+	want := map[string]int64{"unrecallable_resource": 1, "merge_gate": 1}
+	if got := defects(); !reflect.DeepEqual(got, want) {
+		t.Errorf("%s by defect = %v, want %v", draftDefectsSeries, got, want)
+	}
+	// Counting is ADDED to the report, never substituted for it: the log lines are
+	// what the troubleshooting page tells an operator to grep once the metric has
+	// told them to go looking.
+	if !strings.Contains(logs.String(), "merge gate") || !strings.Contains(logs.String(), "recall index") {
+		t.Errorf("the counter must not replace the log lines an operator greps; got:\n%s", logs.String())
+	}
+}
+
+// TestWarnDraftCountsOnePerDraftNotOnePerDefectiveField pins the counter's unit:
+// one DRAFT, per condition. An entry with two unusable index keys is still one
+// unusable entry, and an entry that trips four gate rules is still one entry that
+// cannot merge — so counting log lines instead would make the number depend on how
+// wrong a draft happens to be, and it could no longer be read against the count of
+// entries filed.
+func TestWarnDraftCountsOnePerDraftNotOnePerDefectiveField(t *testing.T) {
+	for _, tt := range []struct {
+		name  string
+		entry providers.KBEntry
+		want  map[string]int64
+	}{{
+		name: "both recall index keys are unusable, and both clear the merge gate",
+		entry: providers.KBEntry{
+			Type: "Incident", Title: "Core Argo CD Applications stuck OutOfSync",
+			Description: "the ApplicationSet lost syncPolicy.automated",
+			// Neither carries whitespace, so ValidateStructural passes both; neither is
+			// shaped namespace/name, so recall can never match either.
+			Resource: "argocd/essentials|monitoring", AlertResource: "tooling/Harbor|Registry",
+			Tags: []string{"runlore", "incident"},
+			Body: "## Symptom\n\ns\n\n## Cause\n\nc\n\n## Resolution\n\nr\n",
+		},
+		want: map[string]int64{"unrecallable_resource": 1},
+	}, {
+		name: "several merge-gate rules fail on one entry with a clean index",
+		entry: providers.KBEntry{
+			// No type, no title and no description: three separate gate errors.
+			Resource: "tooling/harbor-registry", Tags: []string{"runlore"},
+			Body: "## Symptom\n\ns\n\n## Cause\n\nc\n\n## Resolution\n\nr\n",
+		},
+		want: map[string]int64{"merge_gate": 1},
+	}} {
+		t.Run(tt.name, func(t *testing.T) {
+			m, defects := meteredDefects(t)
+			WarnDraft(context.Background(), slog.New(slog.NewTextHandler(io.Discard, nil)), m, tt.entry)
+			if got := defects(); !reflect.DeepEqual(got, tt.want) {
+				t.Errorf("%s by defect = %v, want %v", draftDefectsSeries, got, tt.want)
+			}
+		})
+	}
+}
+
+// TestWarnDraftCountsNothingForACleanDraft keeps the counter honest in the same
+// way TestWarnDraftIsSilentOnACleanConcept keeps the log honest. A metric that
+// ticks on every entry ever filed cannot be alerted on, and an operator note is
+// legitimately a Concept with no `resource` at all.
+func TestWarnDraftCountsNothingForACleanDraft(t *testing.T) {
+	m, defects := meteredDefects(t)
+	WarnDraft(context.Background(), slog.New(slog.NewTextHandler(io.Discard, nil)), m, providers.KBEntry{
+		Type: "Concept", Title: "Operator note: this recurs after every spot reclaim",
+		Description: "Operator knowledge from @alice via slack",
+		Tags:        []string{"operator-note", "slack"},
+		Body:        "alice: this recurs after every spot reclaim\n",
+	})
+	if got := defects(); len(got) != 0 {
+		t.Errorf("a clean draft must record nothing at all; got %v", got)
+	}
+}
+
+// TestWarnDraftWithoutMetricsStillReports is the nil-safety contract every other
+// optional *telemetry.Metrics in RunLore follows, on the one path that must never
+// cost the caller its entry. Telemetry not being wired is an ordinary
+// configuration, and it must leave the report — and the filing — untouched.
+func TestWarnDraftWithoutMetricsStillReports(t *testing.T) {
+	var logs bytes.Buffer
+	WarnDraft(context.Background(), slog.New(slog.NewTextHandler(&logs, nil)), nil, providers.KBEntry{
+		Type: "Incident", Title: "t", AlertResource: "argocd/a|b",
+	})
+	if !strings.Contains(logs.String(), "recall index") {
+		t.Errorf("a nil metric set must not cost the report; got:\n%s", logs.String())
+	}
 }

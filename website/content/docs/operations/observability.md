@@ -205,7 +205,25 @@ sum by (route) (rate(runlore_thread_notes_written_total[24h]))
 | `runlore_curations_total` | counter | `kind`, `result` | curation outcomes (`opened`/`coalesced`/`error`) |
 | `runlore_curation_dedup_score` | histogram | — | catalog top-hit BM25 score at the dedup decision |
 | `runlore_catalog_invalid_entries_total` | counter | — | structurally-invalid (but parseable) entries surfaced at catalog load. The entry is still indexed and served — one bad entry never empties the catalog — so this is the only signal that the CI merge gate let something through |
+| `runlore_kb_draft_defects_total` | counter | `defect` | KB entries filed with a defect found **before** the PR was opened: `unrecallable_resource` (the `resource`/`alert_resource` recall indexes on is not shaped `namespace/name`, so recall's structural match can never agree with it) or `merge_gate` (the draft fails `lore validate-kb`, so its PR cannot merge). Counted once per entry per defect, for **both** entry writers — the curator and the `@runlore note:` standalone-note route |
 | `runlore_catalog_embed_degraded_total` | counter | — | catalog reloads that left hybrid recall without vectors (embed failure — recall degrades to BM25-only until the next successful sync) |
+
+`runlore_kb_draft_defects_total` is the one series that separates a healthy catalog from one
+silently filling with dead weight. `runlore_curations_total{kind="pr",result="opened"}` scores
+the pull request a success whether or not the entry inside it can ever be recalled, so without
+this the two deployments look identical:
+
+```promql
+# share of filed entries recall will never be able to match — alert on this one
+sum(increase(runlore_kb_draft_defects_total{defect="unrecallable_resource"}[$__range]))
+  / sum(increase(runlore_curations_total{kind="pr",result="opened"}[$__range]))
+```
+
+Keep the two `defect` values apart rather than summing them. `merge_gate` blocks its own pull
+request, so a human meets it at review time regardless; `unrecallable_resource` merges cleanly and
+is silent forever, and every such entry is permanent catalog weight that never repays its cost.
+The log lines behind both, and what to do about them, are in
+[The PR opened, but the entry will never be recalled]({{< relref "troubleshooting.md#the-pr-opened-but-the-entry-will-never-be-recalled" >}}).
 
 ### Measuring the recall saving
 

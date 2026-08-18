@@ -89,8 +89,29 @@ type Metrics struct {
 	ModelInputTokens        metric.Int64Counter     // total input tokens across LLM requests (label: provider)
 	ModelCachedInputTokens  metric.Int64Counter     // input tokens served from cache (label: provider)
 	Curations               metric.Int64Counter     // curation outcomes (label: kind, result)
-	CatalogInvalidEntries   metric.Int64Counter     // structurally-invalid entries found at catalog load
-	CatalogEmbedDegraded    metric.Int64Counter     // catalog reloads that left hybrid recall without vectors (embed failure — recall silently BM25-only until it clears)
+	// KBDraftDefects counts KB entries RunLore's own draft-time report found a
+	// defect in and FILED ANYWAY (label: defect). It is the only number that tells
+	// a healthy catalog apart from one silently filling with entries recall can
+	// never match: Curations{kind="pr",result="opened"} counts the pull request as
+	// a success either way, and the damage compounds — every unusable entry is
+	// permanent catalog weight that never repays its cost.
+	//
+	// The two `defect` values are never folded together, because they want opposite
+	// responses. `unrecallable_resource` is silent forever: the entry merges, and
+	// recall's structural match can never agree with its index. `merge_gate` is
+	// loud: the draft fails `lore validate-kb`, so its pull request cannot merge and
+	// a human meets it at review time regardless.
+	//
+	// Written by kbvalidate.WarnDraft, which is what covers BOTH entry writers by
+	// construction — curator.Curate and thread.Responder's standalone-note route —
+	// and why the vocabulary names the ENTRY's defect rather than anything about the
+	// path that drafted it. At most one increment per drafted entry per defect,
+	// however many fields or gate rules that one entry trips: an entry with two
+	// unusable index keys is still one unusable entry, and a count of entries is
+	// what reads against the count of entries filed.
+	KBDraftDefects        metric.Int64Counter
+	CatalogInvalidEntries metric.Int64Counter // structurally-invalid entries found at catalog load
+	CatalogEmbedDegraded  metric.Int64Counter // catalog reloads that left hybrid recall without vectors (embed failure — recall silently BM25-only until it clears)
 }
 
 // NewMetrics builds the instrument set from the global meter provider.
@@ -159,8 +180,11 @@ func NewMetrics() *Metrics {
 		ModelInputTokens:        ctr("model_input_tokens_total", "total LLM input tokens, including cached (label: provider)"),
 		ModelCachedInputTokens:  ctr("model_cached_input_tokens_total", "LLM input tokens served from cache (label: provider)"),
 		Curations:               ctr("curations_total", "curation outcomes written to the forge (label: kind, result)"),
-		CatalogInvalidEntries:   ctr("catalog_invalid_entries_total", "structurally-invalid entries surfaced at catalog load"),
-		CatalogEmbedDegraded:    ctr("catalog_embed_degraded_total", "catalog reloads that left hybrid recall without vectors (embed failure)"),
+		KBDraftDefects: ctr("kb_draft_defects_total", "KB entries filed with a defect found at draft time, from either entry writer — "+
+			"counted once per entry per defect (label: defect — \"unrecallable_resource\": the recall index is not shaped namespace/name, "+
+			"so recall can never match the entry; \"merge_gate\": the draft fails `lore validate-kb`, so its PR cannot merge)"),
+		CatalogInvalidEntries: ctr("catalog_invalid_entries_total", "structurally-invalid entries surfaced at catalog load"),
+		CatalogEmbedDegraded:  ctr("catalog_embed_degraded_total", "catalog reloads that left hybrid recall without vectors (embed failure)"),
 	}
 }
 

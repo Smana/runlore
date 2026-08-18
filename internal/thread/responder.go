@@ -1619,7 +1619,14 @@ func (r *Responder) write(ctx context.Context, tc Context, n Note, at time.Time)
 	// announcement fired, and only the merge is impossible. Nothing else surfaces
 	// that. The entry's own type selects the rules, so a Concept is not asked for
 	// the `resource` an Incident must have.
-	kbvalidate.WarnDraft(r.log(), entry)
+	//
+	// r.Metrics goes with it (nil-safe) so this route lands in the SAME
+	// runlore_kb_draft_defects_total the curator writes. A counter only the curator
+	// fed would answer "how much dead weight is the catalog taking on?" with the
+	// curator's share of it, and read as the whole — which is the class of silence
+	// the metric exists to end. recordWrite below counts this note as landed no
+	// matter what shape the entry it landed is in.
+	kbvalidate.WarnDraft(ctx, r.log(), r.Metrics, entry)
 	ref, err := r.Forge.OpenPR(ctx, entry)
 	if err != nil {
 		return forgeErrorReply(err), nil,

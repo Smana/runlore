@@ -8,6 +8,8 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net/http"
+	"net/http/httptest"
 	"path/filepath"
 	"reflect"
 	"strings"
@@ -4644,5 +4646,47 @@ func TestOpenPRRouteDoesNotWarnAboutAConceptsAbsentResource(t *testing.T) {
 	}
 	if out := logs.String(); strings.Contains(out, "level=WARN") {
 		t.Errorf("a clean operator note must warn about nothing, or the signal is worthless; got:\n%s", out)
+	}
+}
+
+// TestOpenPRRouteCountsADefectiveDraftUnderItsDefect is the thread half of "both
+// entry writers are counted", and the reason the label vocabulary is written in
+// terms of the ENTRY rather than the curator: this route has no investigation, no
+// verdict and no confidence — it files a human's correction — yet it opens a KB
+// pull request exactly as the curator does, and an entry filed here with an
+// unusable recall index dies exactly as silently. The one metric an operator
+// alerts on has to cover it, under the same label.
+func TestOpenPRRouteCountsADefectiveDraftUnderItsDefect(t *testing.T) {
+	h, shutdown, err := telemetry.Setup(context.Background())
+	if err != nil {
+		t.Fatalf("telemetry setup: %v", err)
+	}
+	defer func() { _ = shutdown(context.Background()) }()
+	t.Cleanup(func() { otel.SetMeterProvider(noop.NewMeterProvider()) })
+
+	f := &fakeForge{}
+	r := newTestResponder(t, f)
+	r.Metrics = telemetry.NewMetrics()
+	// No whitespace, so the merge gate passes it; not shaped namespace/name, so
+	// recall can never match it — #518's silent half.
+	tc := putContext(t, r, Context{
+		Root: "111.222", Transport: "slack",
+		Title: "Core Argo CD Applications stuck OutOfSync", Resource: "argocd/essentials|monitoring",
+	})
+
+	if _, _, err := r.write(context.Background(), tc, HumanNote("alice", "the poisoned chart cache theory is wrong"), noteAt); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	if len(f.opened) != 1 {
+		t.Fatalf("counting a defect must never cost the note: opened = %d, want 1", len(f.opened))
+	}
+
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/metrics", nil))
+	body := rec.Body.String()
+	for _, want := range []string{"runlore_kb_draft_defects_total", `defect="unrecallable_resource"`} {
+		if !strings.Contains(body, want) {
+			t.Errorf("scrape does not contain %q; got:\n%s", want, body)
+		}
 	}
 }
