@@ -124,8 +124,18 @@ type KBUpdatePayload struct {
 	URL     string `json:"url,omitempty"`
 	Title   string `json:"title,omitempty"`
 	Author  string `json:"author,omitempty"`
-	Note    string `json:"note,omitempty"`
-	At      string `json:"at,omitempty"` // RFC3339; "" when unknown
+	// ModelDrafted says RunLore's chat model wrote "note" from "author"'s
+	// message, rather than "author" having typed it.
+	//
+	// Sent WITHOUT omitempty, unlike every other optional field here, and that is
+	// the point: a receiver storing this as a record has to be able to tell "a
+	// human wrote it" from "this producer does not report provenance". With
+	// omitempty the two are the same absent key, and the safe reading of an absent
+	// key — assume a human wrote it — is exactly the wrong one. The record is
+	// three bytes larger and unambiguous.
+	ModelDrafted bool   `json:"model_drafted"`
+	Note         string `json:"note,omitempty"`
+	At           string `json:"at,omitempty"` // RFC3339; "" when unknown
 }
 
 // NewKBUpdatePayload maps a KBUpdate to the delivery payload.
@@ -137,6 +147,6 @@ func NewKBUpdatePayload(up providers.KBUpdate) KBUpdatePayload {
 	return KBUpdatePayload{
 		Event: kbUpdateEvent, Transport: up.Transport, Root: up.Root, Channel: up.Channel,
 		Route: string(up.Route), PR: up.PR, URL: up.URL,
-		Title: up.Title, Author: up.Author, Note: up.Note, At: at,
+		Title: up.Title, Author: up.Author, ModelDrafted: up.ModelDrafted, Note: up.Note, At: at,
 	}
 }

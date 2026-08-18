@@ -385,10 +385,18 @@ func kbRoute(route string) providers.KBRoute {
 // forge accepted the write (see KBWrite), so there is nothing to announce on a
 // throttle, a forge failure, or a note the model never proposed.
 //
-// n supplies the author, which is not on the KBWrite: the write is the same
-// write either way, and only the caller knows whose message produced it. It
-// goes through noteField — redacted and flattened, exactly as the entry itself
-// renders it — because this event is a NEW egress for transport-reported text.
+// n supplies the author AND the provenance, neither of which is on the KBWrite:
+// the write is the same write either way, and only the caller knows whose
+// message produced it and whether they wrote the words. The author goes through
+// noteField — redacted and flattened, exactly as the entry itself renders it —
+// because this event is a NEW egress for transport-reported text; the provenance
+// is RunLore's own boolean and needs neither.
+//
+// Carrying the provenance is not optional decoration. Without it the event said
+// {author: "alice", note: "<the model's text>"} and every sink rendered it as
+// alice's own words — the same claim openedWith exists to keep out of the thread
+// reply, and NoteBody's "@alice did not write it" out of the entry, arriving
+// through the one surface that had no such guard.
 //
 // tc supplies BOTH thread handles, Root and Channel. Root alone names a thread
 // only to the transport that already knows which channel it is in; a sink asked
@@ -400,7 +408,20 @@ func (r *Responder) announce(ctx context.Context, tc Context, n Note, w *KBWrite
 	if r.Announcer == nil || w == nil {
 		return
 	}
-	r.Announcer.deliver(ctx, providers.KBUpdate{
+	r.Announcer.deliver(ctx, r.kbUpdateFor(tc, n, w, at))
+}
+
+// kbUpdateFor composes the event announce delivers. Split out from announce so
+// the composition can be exercised without a sink and a dispatcher — the two
+// things that made the missing provenance field hard to see, since every
+// announcement test asserted on what a sink RECEIVED and none of them had a
+// reason to compare two notes that differed only in who wrote them.
+//
+// It is the ONE place a KBUpdate is built from a write, which is what lets
+// TestKBUpdateCarriesEveryNoteFact assert a property over the whole mapping
+// rather than over one fixture.
+func (r *Responder) kbUpdateFor(tc Context, n Note, w *KBWrite, at time.Time) providers.KBUpdate {
+	return providers.KBUpdate{
 		Transport: tc.Transport,
 		Root:      tc.Root,
 		Channel:   tc.Channel,
@@ -409,9 +430,15 @@ func (r *Responder) announce(ctx context.Context, tc Context, n Note, w *KBWrite
 		URL:       w.URL,
 		Title:     w.Title,
 		Author:    noteField(n.Author),
-		Note:      w.Note,
-		At:        at,
-	})
+		// Author names whose MESSAGE produced the note; this names whether they
+		// wrote its words. Read from the note's own provenance rather than from a
+		// parallel flag, for the reason Note.DraftedFrom is one field: two values
+		// that can disagree let model prose ship under a human's name through
+		// nothing worse than a forgotten assignment.
+		ModelDrafted: n.modelDrafted(),
+		Note:         w.Note,
+		At:           at,
+	}
 }
 
 // The routes a knowledge write can take, named once. They are both the

@@ -3,7 +3,9 @@
 package notify
 
 import (
+	"encoding/json"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 
@@ -110,7 +112,7 @@ func TestNewKBUpdatePayloadPopulatesEveryFieldItDeclares(t *testing.T) {
 	got := NewKBUpdatePayload(providers.KBUpdate{
 		Transport: "slack", Root: "111.222", Channel: "C-ORIGIN",
 		Route: providers.KBRouteOpenPR, PR: 99, URL: "https://github.com/o/r/pull/99",
-		Title: "Operator note: OOM", Author: "sre-jane", Note: "a spot reclaim",
+		Title: "Operator note: OOM", Author: "sre-jane", ModelDrafted: true, Note: "a spot reclaim",
 		At: time.Date(2026, 8, 16, 9, 0, 0, 0, time.UTC),
 	})
 
@@ -124,5 +126,15 @@ func TestNewKBUpdatePayloadPopulatesEveryFieldItDeclares(t *testing.T) {
 	if got.Channel != "C-ORIGIN" {
 		t.Errorf("channel = %q, want the originating channel — root alone does not identify a "+
 			"conversation, so a receiver cannot build a permalink without it", got.Channel)
+	}
+	// A record that says who wrote the note has to say it explicitly. With
+	// omitempty, "a human wrote it" and "this producer does not report provenance"
+	// are the same absent key, and the safe reading of an absent key is the wrong
+	// one — so the field ships even when false.
+	if b, err := json.Marshal(NewKBUpdatePayload(providers.KBUpdate{Author: "sre-jane"})); err != nil {
+		t.Fatalf("marshal: %v", err)
+	} else if !strings.Contains(string(b), `"model_drafted":false`) {
+		t.Errorf("a human-authored note's payload omits model_drafted, so a receiver cannot tell it "+
+			"from a producer that never reports provenance: %s", b)
 	}
 }

@@ -1024,7 +1024,8 @@ func TestKBUpdateFieldsAreAllRenderedOrDeliberatelyNot(t *testing.T) {
 		Transport: "matrix", Root: "$evt-root", Channel: "!room-of-origin:example.org",
 		Delivery: providers.KBDeliverBoth, Route: providers.KBRouteOpenPR, PR: 4242,
 		URL: "https://github.com/o/r/pull/4242", Title: "Operator note: OOM",
-		Author: "sre-jane", Note: "a spot reclaim", At: time.Date(2026, 8, 16, 9, 0, 0, 0, time.UTC),
+		Author: "sre-jane", ModelDrafted: true, Note: "a spot reclaim",
+		At: time.Date(2026, 8, 16, 9, 0, 0, 0, time.UTC),
 	}
 	// Values a list may search for, one per field, so an entry cannot be written
 	// against a value the fixture does not carry.
@@ -1035,11 +1036,16 @@ func TestKBUpdateFieldsAreAllRenderedOrDeliberatelyNot(t *testing.T) {
 		"URL":       "https://github.com/o/r/pull/4242",
 		"Title":     "Operator note: OOM",
 		"Author":    "sre-jane",
-		"Note":      "a spot reclaim",
-		"Root":      "$evt-root",
-		"Channel":   "!room-of-origin:example.org",
-		"Delivery":  "both",
-		"At":        "2026-08-16T09:00:00Z",
+		// Set true on the fixture so there is a string to search for. A boolean
+		// field renders as WORDING rather than as its own value, which is exactly
+		// why it needs to be in this guard: a renderer can drop it without dropping
+		// anything a reader would notice was missing.
+		"ModelDrafted": "Drafted by RunLore",
+		"Note":         "a spot reclaim",
+		"Root":         "$evt-root",
+		"Channel":      "!room-of-origin:example.org",
+		"Delivery":     "both",
+		"At":           "2026-08-16T09:00:00Z",
 	}
 
 	for _, form := range []struct {
@@ -1051,14 +1057,18 @@ func TestKBUpdateFieldsAreAllRenderedOrDeliberatelyNot(t *testing.T) {
 			// The CHANNEL form is the only thing anyone in that channel sees about
 			// the write, so it carries the entry name and quotes the note.
 			name: "channel", render: kbUpdateAnnouncement,
-			shows: []string{"Transport", "Route", "PR", "URL", "Title", "Author", "Note"},
+			shows: []string{"Transport", "Route", "PR", "URL", "Title", "Author", "ModelDrafted", "Note"},
 		},
 		{
 			// The IN-THREAD form drops Title and Note: the reply above it already
 			// carries the same entry name and the same quote of the same note.
 			// What is left is exactly the delta the reply lacks.
+			// ModelDrafted is shown HERE too, unlike Title and Note: the reply above
+			// does say the note was drafted, but this message can arrive first (the
+			// announcement is scheduled before the reply is posted) and can be the
+			// only one in the thread if the best-effort reply fails.
 			name: "thread", render: kbThreadAnnouncement,
-			shows: []string{"Transport", "Route", "PR", "URL", "Author"},
+			shows: []string{"Transport", "Route", "PR", "URL", "Author", "ModelDrafted"},
 		},
 	} {
 		t.Run(form.name, func(t *testing.T) {
@@ -1193,5 +1203,92 @@ func TestKBHeadlineLeadsWithARunLoreStatusGlyph(t *testing.T) {
 			t.Errorf("kbHeadline(%q) = %q leads with a glyph thread.QuoteUntrusted does not strip, so a "+
 				"note quoting this line back would forge a RunLore claim", route, head)
 		}
+	}
+}
+
+// TestKBProvenanceLineNeverFilesModelProseUnderAHumansName is the announcement's
+// half of a distinction every other surface already made.
+//
+// "By sre-jane in a slack thread" is a claim about who wrote the note, and on
+// the freeform route it was false: RunLore's chat model wrote that text from
+// sre-jane's message, which is precisely why the thread reply has openedWith,
+// the entry body says "@sre-jane did not write it", and the entry description
+// leads with the provenance clause so a clipped listing cannot lose it. This
+// line said the opposite of all three.
+//
+// It matters most in the reduced in-thread form, where the message is the
+// headline and this line and nothing else — and where, if the best-effort reply
+// fails, this is the only thing in the thread.
+func TestKBProvenanceLineNeverFilesModelProseUnderAHumansName(t *testing.T) {
+	for _, tt := range []struct {
+		name string
+		up   providers.KBUpdate
+		deny []string
+		want []string
+	}{
+		{
+			name: "the human typed it",
+			up:   providers.KBUpdate{Transport: "slack", Author: "sre-jane"},
+			want: []string{"By ", "sre-jane", "slack"},
+			deny: []string{"RunLore"},
+		},
+		{
+			name: "RunLore's model drafted it",
+			up:   providers.KBUpdate{Transport: "slack", Author: "sre-jane", ModelDrafted: true},
+			// Still names the human — they are whose message produced it, and a
+			// reader needs that to follow it up — but never as the author.
+			want: []string{"sre-jane", "slack", "RunLore", "not their own words"},
+			deny: []string{"By "},
+		},
+		{
+			name: "drafted, with no author reported",
+			up:   providers.KBUpdate{Transport: "slack", ModelDrafted: true},
+			want: []string{"RunLore", "slack"},
+		},
+		{
+			name: "drafted, with nothing else known",
+			up:   providers.KBUpdate{ModelDrafted: true},
+			// The provenance line is optional when there is nothing to say; it is
+			// NOT optional when what there is to say is that a human did not write
+			// this. An empty line here would drop the one fact that must travel.
+			want: []string{"RunLore"},
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			got := kbProvenanceLine(tt.up)
+			for _, w := range tt.want {
+				if !strings.Contains(got, w) {
+					t.Errorf("kbProvenanceLine = %q, want it to contain %q", got, w)
+				}
+			}
+			for _, d := range tt.deny {
+				if strings.Contains(got, d) {
+					t.Errorf("kbProvenanceLine = %q, must not contain %q", got, d)
+				}
+			}
+		})
+	}
+}
+
+// TestAnnouncementFormsBothCarryTheDraftedProvenance pins it on the assembled
+// messages, in both destinations, because the field being set is worth nothing
+// if a renderer drops it — and the two forms are separate functions, so the one
+// that gets fixed alone is the one that stops being tested.
+func TestAnnouncementFormsBothCarryTheDraftedProvenance(t *testing.T) {
+	up := providers.KBUpdate{
+		Transport: "slack", Root: "111.222", Channel: "C1", Route: providers.KBRouteOpenPR, PR: 7,
+		URL: "https://github.com/o/r/pull/7", Title: "Operator note: OOM",
+		Author: "sre-jane", Note: "It was a spot reclaim.", ModelDrafted: true,
+	}
+	for name, render := range map[string]func(providers.KBUpdate) string{
+		"channel": kbUpdateAnnouncement,
+		"thread":  kbThreadAnnouncement,
+	} {
+		t.Run(name, func(t *testing.T) {
+			text := thread.RenderReply(render(up), escapeMrkdwn)
+			if !strings.Contains(text, "RunLore") || !strings.Contains(text, "not their own words") {
+				t.Errorf("the %s announcement presents model-drafted prose as sre-jane's own words:\n%s", name, text)
+			}
+		})
 	}
 }

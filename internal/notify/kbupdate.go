@@ -191,12 +191,44 @@ func kbHeadline(up providers.KBUpdate) string {
 	return head
 }
 
-// kbProvenanceLine names who the note came from and which chat system it was
-// typed in. Transport is RunLore's own value (it is the notifier's Transport(),
-// not anything a message carried), so it is never marked; Author is whatever
-// the chat transport reported and always is.
+// kbProvenanceLine names who the note came from, whether they WROTE it, and
+// which chat system it was typed in. Transport is RunLore's own value (it is the
+// notifier's Transport(), not anything a message carried), so it is never
+// marked; Author is whatever the chat transport reported and always is.
+//
+// "By <author>" is a claim about authorship, and on the freeform route it was
+// false: RunLore's chat model wrote that text from the human's message. Every
+// other surface already said so — the thread reply through openedWith, the entry
+// body through its "@alice did not write it" heading, the entry description
+// through a provenance clause deliberately placed first so a clipped listing
+// cannot lose it — and this line said the opposite of all three, to sinks that
+// never saw the thread. See providers.KBUpdate.ModelDrafted.
+//
+// The drafted wording still NAMES the human. They are whose message produced the
+// note, which is what a reader needs to follow it up, and dropping the name
+// would tell a channel less than the false line did; what changes is that they
+// are named as the prompt rather than as the author.
+//
+// On the drafted route the line is emitted even when nothing else is known. An
+// empty provenance line is fine when there is merely nothing to add, and never
+// fine when what there is to add is that a human did not write this — the
+// reduced in-thread form is the headline and this line, so an omission here is
+// the whole distinction gone.
 func kbProvenanceLine(up providers.KBUpdate) string {
 	author := kbField(up.Author, kbAuthorBytes)
+	if up.ModelDrafted {
+		switch {
+		case author != "" && up.Transport != "":
+			return "Drafted by RunLore from " + thread.Untrusted(author) + "'s " + up.Transport +
+				" thread message — not their own words, pending review"
+		case author != "":
+			return "Drafted by RunLore from " + thread.Untrusted(author) +
+				"'s thread message — not their own words, pending review"
+		case up.Transport != "":
+			return "Drafted by RunLore from a " + up.Transport + " thread message, pending review"
+		}
+		return "Drafted by RunLore from a thread message, pending review"
+	}
 	switch {
 	case author != "" && up.Transport != "":
 		return "By " + thread.Untrusted(author) + " in a " + up.Transport + " thread"

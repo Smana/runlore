@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"log/slog"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"sync"
 	"testing"
@@ -4463,5 +4464,124 @@ func TestModelDraftedReplayIsNotDeduplicated(t *testing.T) {
 	// identity that is NOT used, and the comment above says why.
 	if first.DraftedFrom != replay.DraftedFrom {
 		t.Fatal("fixture error: the replayed delivery must carry the same human message")
+	}
+}
+
+// TestAnnouncementCarriesWhoActuallyWroteTheNote closes the last surface on
+// which model-authored prose was filed under a named human.
+//
+// Every other surface already made the distinction. NoteBody heads a drafted
+// entry "🤖 Proposed operator note — drafted by RunLore" and states "@alice did
+// not write it"; conceptDescription leads with the provenance clause so a
+// listing that clips the line cannot clip it; openedWith exists ONLY to stop the
+// thread reply saying "with your note" for text the human did not type. The
+// announcement had no provenance field at all, so it published
+// {author: "alice", note: "<the model's text>"} to every configured sink and
+// rendered "By alice in a slack thread" — the exact claim openedWith exists to
+// prevent, arriving through the one door nobody had checked.
+//
+// It is worst under announce_kb_updates: thread, where the reduced form is two
+// lines and one of them IS the attribution — and where, if the best-effort reply
+// fails, it is the only thing in the thread.
+func TestAnnouncementCarriesWhoActuallyWroteTheNote(t *testing.T) {
+	for _, tt := range []struct {
+		name string
+		note Note
+		want bool
+	}{
+		{"an explicit note: is the human's own words", HumanNote("alice", "the real cause was a spot reclaim"), false},
+		{"a freeform answer's note is the model's", ProposedNote("alice", "was it the CNI?", "It was a spot reclaim."), true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			f := &fakeForge{openURL: "https://github.com/o/r/pull/7"}
+			r, sink := newAnnouncingResponder(t, f)
+			tc := Context{Transport: "slack", Root: "root-1", Channel: "C1"}
+			if err := r.Registry.Put(tc); err != nil {
+				t.Fatalf("Put: %v", err)
+			}
+			if _, err := r.record(context.Background(), tc, tt.note); err != nil {
+				t.Fatalf("record: %v", err)
+			}
+			drainAnnouncements(t, r)
+
+			ups := sink.updates()
+			if len(ups) != 1 {
+				t.Fatalf("announced %d writes, want 1", len(ups))
+			}
+			if got := ups[0].ModelDrafted; got != tt.want {
+				t.Errorf("KBUpdate.ModelDrafted = %v, want %v — the announcement reports %q as the note's "+
+					"provenance and carries %q as its text", got, tt.want, ups[0].Author, ups[0].Note)
+			}
+			// Author stays the human either way: they are still whose message
+			// produced the note, which is what a reader needs to follow it up. What
+			// changes is whether the announcement may present the TEXT as theirs.
+			if ups[0].Author != "alice" {
+				t.Errorf("Author = %q, want the human whose message produced the note", ups[0].Author)
+			}
+		})
+	}
+}
+
+// noteFactsOnTheAnnouncement names, for every field of Note, the KBUpdate field
+// that carries it to a sink. Stated here rather than derived, so a fact added to
+// Note has to be deliberately routed or deliberately withheld.
+//
+// It exists because the two field-classification guards that already cover
+// KBUpdate — the untrusted/trusted split in internal/providers and the webhook
+// payload's coverage check — both WALK KBUPDATE. A fact that was never put on
+// the struct is invisible to both: they can only ask whether an existing field
+// is handled, never whether a field is missing. Note.DraftedFrom was exactly
+// that for as long as the announcement existed, and every one of those guards
+// passed the whole time.
+//
+// This walks the SOURCE type instead, which is the direction that bites.
+var noteFactsOnTheAnnouncement = map[string]string{
+	"Author": "Author",
+	"Text":   "Note",
+	// The FACT, not the text. The human's original message is already in the
+	// entry, where a reviewer weighs the draft against it (see NoteBody); an
+	// announcement is a short chat post to sinks the thread never reached, and
+	// republishing someone's raw message into all of them widens egress for no
+	// reader who needs it. What must travel is that the note is not their words.
+	"DraftedFrom": "ModelDrafted",
+}
+
+// TestKBUpdateCarriesEveryNoteFact makes the map above bite in both directions,
+// and adds the behavioural half a name-matching test cannot give: two notes that
+// differ ONLY in provenance must not produce indistinguishable announcements.
+func TestKBUpdateCarriesEveryNoteFact(t *testing.T) {
+	note := reflect.TypeOf(Note{})
+	update := reflect.TypeOf(providers.KBUpdate{})
+
+	for i := range note.NumField() {
+		name := note.Field(i).Name
+		carrier, ok := noteFactsOnTheAnnouncement[name]
+		if !ok {
+			t.Errorf("thread.Note.%s reaches no announcement and is not classified. Route it to a "+
+				"providers.KBUpdate field, or record why a sink does not need it — a fact never put on "+
+				"the struct is one neither KBUpdate guard can see is missing.", name)
+			continue
+		}
+		if _, found := update.FieldByName(carrier); !found {
+			t.Errorf("thread.Note.%s is classified as reaching providers.KBUpdate.%s, which does not exist — "+
+				"stale entry, so nothing is checking whatever replaced it", name, carrier)
+		}
+	}
+	for name := range noteFactsOnTheAnnouncement {
+		if _, ok := note.FieldByName(name); !ok {
+			t.Errorf("noteFactsOnTheAnnouncement names %q, which thread.Note no longer has — stale entry", name)
+		}
+	}
+
+	// The behavioural half. Same author, same filed text, same thread: the only
+	// difference is who wrote it, and the two events must not be equal.
+	r := &Responder{Now: func() time.Time { return noteAt }}
+	human := r.kbUpdateFor(Context{Transport: "slack", Root: "r"}, HumanNote("alice", "a spot reclaim"),
+		&KBWrite{Route: RouteOpenPR, PR: 7, Note: "a spot reclaim"}, noteAt)
+	drafted := r.kbUpdateFor(Context{Transport: "slack", Root: "r"}, ProposedNote("alice", "was it the CNI?", "a spot reclaim"),
+		&KBWrite{Route: RouteOpenPR, PR: 7, Note: "a spot reclaim"}, noteAt)
+	if human == drafted {
+		t.Error("a note the human typed and a note RunLore's model drafted announce identically — " +
+			"the classification above is satisfied by a field nothing actually sets")
 	}
 }
