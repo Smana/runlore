@@ -4,8 +4,9 @@ weight: 306
 integration: {kind: kubernetes, id: kubernetes}
 ---
 
-**What it gives you** — `pod_status`, `kube_events`, `controller_logs` and `pod_logs`: the baseline
-cluster-introspection tools every investigation can reach for, via client-go.
+**What it gives you** — `pod_status`, `kube_events`, `controller_logs`, `pod_logs` and
+`resource_spec`: the baseline cluster-introspection tools every investigation can reach for, via
+client-go.
 
 ## How it's enabled
 
@@ -16,6 +17,10 @@ local run with no kubeconfig) simply leaves them unregistered; nothing else chan
 
 `controller_logs` is additionally gated on `gitops.engine: flux` — it exists to surface why a Flux
 controller failed to reconcile, so it isn't registered under `argocd`.
+
+`resource_spec` needs a **dynamic** client plus **discovery** (the typed clientset cannot read a
+CRD), and is left unregistered when either is unavailable — a tool that cannot answer must not
+exist, or its unanswerable questions get answered with a misleading negative.
 
 ## Verify it locally
 
@@ -42,6 +47,21 @@ kubectl -n runlore logs deploy/runlore | grep 'clientset unavailable'
   request for any other namespace is rejected at the app layer, not just denied by RBAC. The chart
   auto-defaults the app-layer allowlist to the RBAC namespace list, so the two stay in sync unless you
   override one.
+- **`resource_spec` reads one object's `.spec`/`.status` for any kind the cluster serves**, CRDs
+  included, resolving a bare `Kind` through discovery rather than a compiled-in table. Its four
+  endings are kept apart deliberately — `found`, `absent`, `forbidden`, `kind_unknown` — plus
+  `refused` and `kind_ambiguous`; **only `absent` is evidence that an object does not exist**. A
+  kind served by several API groups (`Event` everywhere, `NetworkPolicy` on a Calico cluster) reads
+  nothing and names the candidates; pass `group` to pick one.
+- **`resource_spec` is bounded by an RBAC allowlist, not by a wildcard.** `rbac.resourceSpecRules`
+  (chart values) grants `get` on the spec-bearing kinds it reads. `Secret` is refused by the tool
+  outright — before and after kind resolution — but the ClusterRole is the real boundary, so
+  **never** widen the list to `resources: ["*"]`: that includes `secrets`. A kind you have not
+  granted comes back as a *denial*, never as a missing object.
+- **A container's env values are masked structurally** on the way out (`name: POSTGRES_PASSWORD` /
+  `value: …`), because the secret-shaped-key ruleset cannot see a shape that puts the sensitive word
+  in the *value* of `name:`. `valueFrom` references are kept — the model still needs to see which
+  Secret a workload consumes.
 - Every pod's log fetch is bounded: up to 5 matching pods, 300 tail lines each, and every container is
   read explicitly (a pod with 2+ containers — an istio/linkerd/cloudsql sidecar, say — rejects a log
   request with no container named, so RunLore always names one).

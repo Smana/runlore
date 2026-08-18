@@ -4,6 +4,7 @@ package redact
 
 import (
 	"encoding/base64"
+	"fmt"
 	"strings"
 	"testing"
 )
@@ -217,5 +218,76 @@ func TestApiKeyRedactionRequiresCredentialShape(t *testing.T) {
 		if got := Secrets(s); got != s {
 			t.Errorf("prose was over-redacted:\n  in:  %q\n  out: %q", s, got)
 		}
+	}
+}
+
+// TestSensitiveNameValuesMasksTheEnvVarShape closes the hole S1 reproduced: the
+// string ruleset is KEY-NAME oriented — it masks `password: hunter2` — while
+// Kubernetes' EnvVar inverts the shape. The sensitive word is the VALUE of `name`
+// and the credential sits under the literal key `value`, which is in no keyword
+// vocabulary, so `Secrets` walks straight past it.
+//
+// Before this walker, a Pod's `.spec.containers[].env[].value` reached the model
+// verbatim.
+func TestSensitiveNameValuesMasksTheEnvVarShape(t *testing.T) {
+	// The exact shape reproduced against the real redactor, with a value carrying
+	// NO recognizable prefix — a `ghp_`-shaped token would be masked by the string
+	// rules and prove nothing about this walker.
+	obj := map[string]any{"spec": map[string]any{"containers": []any{
+		map[string]any{"name": "app", "env": []any{
+			map[string]any{"name": "POSTGRES_PASSWORD", "value": "pr0d-Pa55w0rd-x9"},
+			map[string]any{"name": "REDIS_AUTH", "value": "hunter2hunter2"},
+			map[string]any{"name": "DB_PASSWORD", "value": "hunter2supersecret"},
+			// A reference is not a credential: valueFrom names a Secret key, it
+			// does not carry it, and masking it would blind the model to WHICH
+			// secret a workload consumes.
+			map[string]any{"name": "API_TOKEN", "valueFrom": map[string]any{
+				"secretKeyRef": map[string]any{"name": "api", "key": "token"}}},
+			// Benign env survives: over-redaction destroys otherwise-correct
+			// evidence, and the model needs to see ordinary configuration.
+			map[string]any{"name": "LOG_LEVEL", "value": "debug"},
+			map[string]any{"name": "GIT_AUTHOR_NAME", "value": "runlore"},
+			map[string]any{"name": "TOKENIZER_MODE", "value": "fast"},
+		}},
+	}}}
+	SensitiveNameValues(obj)
+
+	env := obj["spec"].(map[string]any)["containers"].([]any)[0].(map[string]any)["env"].([]any)
+	for i, want := range []string{mask, mask, mask, "", "debug", "runlore", "fast"} {
+		e := env[i].(map[string]any)
+		got, _ := e["value"].(string)
+		if got != want {
+			t.Errorf("env[%d] (%v): value = %q, want %q", i, e["name"], got, want)
+		}
+	}
+	// The reference itself is untouched, keys and all.
+	if ref := env[3].(map[string]any)["valueFrom"]; ref == nil {
+		t.Error("valueFrom reference was dropped; the model can no longer see which Secret is consumed")
+	}
+	// Idempotent, like every other pass here.
+	SensitiveNameValues(obj)
+	if got := env[0].(map[string]any)["value"]; got != mask {
+		t.Errorf("second pass changed a masked value: %q", got)
+	}
+}
+
+// TestSensitiveNameValuesReachesEveryEmbeddedPodSpec: the shape is not only a bare
+// Pod. A Deployment nests it under spec.template.spec, a CronJob two levels deeper,
+// and any operator CRD may embed a PodSpec wholesale — so the walk is over the
+// whole tree rather than a fixed list of paths.
+func TestSensitiveNameValuesReachesEveryEmbeddedPodSpec(t *testing.T) {
+	env := func() []any {
+		return []any{map[string]any{"name": "APP_SECRET", "value": "leakme-please-1234"}}
+	}
+	obj := map[string]any{"spec": map[string]any{
+		"template": map[string]any{"spec": map[string]any{
+			"initContainers":      []any{map[string]any{"name": "init", "env": env()}},
+			"containers":          []any{map[string]any{"name": "app", "env": env()}},
+			"ephemeralContainers": []any{map[string]any{"name": "dbg", "env": env()}},
+		}},
+	}}
+	SensitiveNameValues(obj)
+	if s := fmt.Sprint(obj); strings.Contains(s, "leakme-please-1234") {
+		t.Fatalf("a nested container env value survived:\n%s", s)
 	}
 }

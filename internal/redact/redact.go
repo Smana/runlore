@@ -96,7 +96,72 @@ var rules = []rule{
 	{regexp.MustCompile(`(?i)(\bapikey\s+)[A-Za-z0-9+/]{20,}={0,2}`), `${1}[REDACTED]`},
 	// Sensitive key = value / key: value (the value is masked, the key kept). An
 	// env-var-style prefix (DB_SECRET, OPENAI_API_KEY) is allowed before the keyword.
-	{regexp.MustCompile(`(?i)([\w.\-]*(?:password|passwd|secret|api[_-]?key|access[_-]?key|secret[_-]?key|private[_-]?key|client[_-]?secret|token|credentials?|dsn|connection[_-]?string)"?\s*[:=]\s*"?)([^\s"',}]+)`), `${1}[REDACTED]`},
+	{regexp.MustCompile(`(?i)([\w.\-]*(?:` + sensitiveKeywords + `)"?\s*[:=]\s*"?)([^\s"',}]+)`), `${1}[REDACTED]`},
+}
+
+// sensitiveKeywords is the vocabulary of key names whose VALUE is treated as a
+// credential. It is shared by the generic key=value rule above and by
+// SensitiveNameValues below, so the two cannot drift into disagreeing about what
+// counts as sensitive.
+const sensitiveKeywords = `password|passwd|secret|api[_-]?key|access[_-]?key|secret[_-]?key|` +
+	`private[_-]?key|client[_-]?secret|token|credentials?|dsn|connection[_-]?string`
+
+// sensitiveNameRE matches a NAME — not a key — that identifies a credential, for
+// the {name, value} shape SensitiveNameValues handles.
+//
+// It requires the keyword to be a whole SEGMENT of the name (delimited by a
+// non-alphanumeric character or an end of string) rather than any substring:
+// POSTGRES_PASSWORD and REDIS_AUTH match, while GIT_AUTHOR_NAME ("auth" + "or")
+// and TOKENIZER_MODE ("token" + "izer") do not. Masking those would plant a
+// spurious [REDACTED] in otherwise-correct evidence, which is not a safe failure.
+//
+// The vocabulary is the shared one plus three names that only ever appear as an
+// identifier and would be too broad as a free-text key: `auth` (REDIS_AUTH), `pwd`
+// and `passphrase`.
+var sensitiveNameRE = regexp.MustCompile(`(?i)(?:^|[^a-z0-9])(?:` + sensitiveKeywords + `|auth|pwd|passphrase)(?:$|[^a-z0-9])`)
+
+// SensitiveNameValues masks, IN PLACE, the `value` of every {name: …, value: …}
+// pair in a decoded object tree (map[string]any / []any, as unmarshalled from
+// YAML or JSON) whose `name` is credential-shaped.
+//
+// It exists because the string ruleset structurally cannot see this shape.
+// Secrets is KEY-NAME oriented: it masks `password: hunter2` because "password"
+// is the key. Kubernetes' EnvVar inverts that — the sensitive word is the VALUE
+// of `name`, and the credential sits under the literal key `value`, which is in
+// no keyword vocabulary:
+//
+//   - name: POSTGRES_PASSWORD
+//     value: pr0d-Pa55w0rd-x9      # untouched by Secrets
+//
+// The walk is over the whole tree rather than a fixed list of paths, because the
+// shape appears at spec.containers[] on a Pod, spec.template.spec.containers[] on
+// a Deployment, one level deeper again on a CronJob, and anywhere at all in an
+// operator CRD that embeds a PodSpec. It is deliberately NOT limited to `env`:
+// {name, value} with a credential name means the same thing wherever it appears.
+//
+// `valueFrom` (a secretKeyRef) is left alone: it names a Secret key rather than
+// carrying it, and the model needs to see WHICH secret a workload consumes.
+//
+// Idempotent: a value that is already the mask is left as it is.
+func SensitiveNameValues(v any) {
+	switch t := v.(type) {
+	case map[string]any:
+		if name, ok := t["name"].(string); ok && sensitiveNameRE.MatchString(name) {
+			// Any type of value, not just a string: a CRD may carry {name, value}
+			// with a non-string value, and masking must not depend on the shape of
+			// what is being masked.
+			if cur, has := t["value"]; has && cur != nil && cur != mask {
+				t["value"] = mask
+			}
+		}
+		for _, child := range t {
+			SensitiveNameValues(child)
+		}
+	case []any:
+		for _, child := range t {
+			SensitiveNameValues(child)
+		}
+	}
 }
 
 // Secrets masks secret-shaped substrings in s, returning the redacted text.

@@ -259,6 +259,14 @@ func BuildModelAndTools(ctx context.Context, cfg *config.Config, gp providers.Gi
 		kubeReader = cr
 		tools = append(tools, clusterTools(cr, cfg)...)
 	}
+	// resource_spec: read an arbitrary object's .spec/.status. Registered separately from
+	// clusterTools because it needs a DYNAMIC client plus discovery (the typed clientset
+	// cannot read a CRD), and it is absent rather than broken when either is unavailable —
+	// a tool that cannot answer must not exist, per the same reasoning that gates
+	// controller_logs on the engine.
+	if sr := BuildResourceSpecReader(log); sr != nil {
+		tools = append(tools, investigate.ResourceSpecTool{Reader: sr})
+	}
 	// Cloud context (AWS): CloudTrail "what changed" + EC2/ASG/EKS health. Opt-in.
 	var cloudProvider providers.CloudProvider
 	if cfg.Cloud.Provider == "aws" {
