@@ -54,7 +54,9 @@ kubectl -n runlore logs deploy/runlore | grep 'clientset unavailable'
   kind served by several API groups (`Event` everywhere, `NetworkPolicy` on a Calico cluster) reads
   nothing and names the candidates; pass `group` to pick one.
 - **`resource_spec` is bounded by an RBAC allowlist, not by a wildcard.** `rbac.resourceSpecRules`
-  (chart values) grants `get` on the spec-bearing kinds it reads. `Secret` is refused by the tool
+  (chart values) grants `get` on the spec-bearing kinds it reads. **It ships populated**, so a stock
+  `helm install` already grants those kinds cluster-wide; `rbac.resourceSpecRules: []` declines the
+  whole grant and costs you this tool alone. `Secret` is refused by the tool
   outright — before and after kind resolution — but the ClusterRole is the real boundary, so
   **never** widen the list to `resources: ["*"]`: that includes `secrets`. A kind you have not
   granted comes back as a *denial*, never as a missing object.

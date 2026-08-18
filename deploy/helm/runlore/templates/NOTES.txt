@@ -40,14 +40,19 @@ Enable persistence (a ReadWriteMany volume) and keep outcome.ledger_path under
 catalog.mountPath ({{ .Values.catalog.mountPath }}) so both pods share the ledger.
 {{- end }}
 
-{{- if and (dig "notify" "slack" "thread_capture" false .Values.config) (not (and .Values.persistence.enabled (eq .Values.workloadKind "Deployment") (has "ReadWriteMany" .Values.persistence.accessModes))) }}
+{{- if and (or (dig "notify" "slack" "thread_capture" false .Values.config) (dig "notify" "matrix" "thread_capture" false .Values.config)) (not (and .Values.persistence.enabled (eq .Values.workloadKind "Deployment") (has "ReadWriteMany" .Values.persistence.accessModes))) }}
 
-WARNING: notify.slack.thread_capture is enabled, but this deployment shape does
-not durably persist the thread registry that maps a live Slack thread to its
-investigation. POST /slack/events is leader-forwarded, so a pod restart,
-upgrade, or leader failover empties it: a human replying `@runlore note: ...`
-to a thread delivered before that is told RunLore has no context for it, and
-the knowledge is lost right where this feature exists to capture it.
+WARNING: thread_capture is enabled ({{ if dig "notify" "slack" "thread_capture" false .Values.config }}notify.slack.thread_capture{{ end }}{{ if and (dig "notify" "slack" "thread_capture" false .Values.config) (dig "notify" "matrix" "thread_capture" false .Values.config) }} + {{ end }}{{ if dig "notify" "matrix" "thread_capture" false .Values.config }}notify.matrix.thread_capture{{ end }}), but this
+deployment shape does not durably persist the thread registry that maps a live
+chat thread to its investigation. The registry is held by the leader — Slack
+replies arrive on the leader-forwarded POST /slack/events, Matrix replies on the
+leader's outbound /sync long-poll — so a pod restart, upgrade, or leader
+failover empties it: a human replying `@runlore note: ...` to a thread delivered
+before that is told RunLore has no context for it, and the knowledge is lost
+right where this feature exists to capture it. Both transports require
+outcome.ledger_path at config load for exactly this durability, and that check
+cannot see the volume underneath it — this warning is the half Validate cannot
+make.
 Set persistence.enabled=true, workloadKind=Deployment and a ReadWriteMany
 accessMode so every replica shares the same registry across a failover — a
 StatefulSet + ReadWriteOnce volume still gives each replica its OWN copy and
