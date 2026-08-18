@@ -167,7 +167,8 @@ incident webhook. Known keys: `alertmanager`, `gitops`, `pagerduty`, `custom`.
   by `runlore_investigation_budget_trips_total{reason,stage}`.
 - `max_tokens_per_investigation` (**default 400000**; `-1` = unlimited) — a **cumulative** ceiling on
   one investigation's model tokens (provider-reported input + output, loop **and** verify, including
-  a recall short-circuit's reranker/verify calls).
+  a recall short-circuit's reranker/verify calls, the hybrid-recall **query embeddings**, and any call
+  that **failed** after the provider had already billed for it).
 
   **One number, two thresholds.** A quarter of it — **100 000** at the default — additionally bounds
   the estimated size of any **single request**, so one oversized request is caught before it is
@@ -237,9 +238,10 @@ incident webhook. Known keys: `alertmanager`, `gitops`, `pagerduty`, `custom`.
   | Outside the ceilings | Why, and what does bound it |
   |---|---|
   | Anything above one investigation | There is no daily, monthly or global budget. Total exposure is `investigation.rate_limit.max_per_window` (default 30 starts/hour) × the per-investigation ceiling — a product of two knobs, not a budget |
-  | The `/embeddings` endpoint | On the hybrid-recall path (`catalog.instant_recall.hybrid` + `model.embeddings`) it is called once per recall query — **inside** an investigation — and in bulk on every catalog reload. Its tokens are not in the investigation's totals and it is not gated by either ceiling. It IS visible: `runlore_model_requests_total{provider="embed"}` and `runlore_model_input_tokens_total{provider="embed"}` |
+  | The **bulk corpus embed** on catalog reload | It runs on the catalog-sync goroutine with no investigation to charge, so no investigation-scoped ceiling can reach it, and RunLore ships none of its own. What bounds it is the corpus, which is your input, not the model's: embeddings are content-hash cached and the cache is persisted across restarts (`instant_recall.vector_cache`), so steady-state cost tracks *changed* entries rather than corpus size, and there is no feedback loop to run away. A ceiling here could only fail all-or-nothing — partial vector sets are refused by design — so its one effect would be silently dropping to BM25 recall, which `catalog_embed_degraded_total` already reports. Visible as `runlore_model_requests_total{provider="embed"}` |
+  | The **dollar** cost of embeddings | The hybrid-recall query embed's *tokens* now count against `max_tokens_per_investigation`, but there is no `model.embeddings.pricing`, so RunLore has no rate to price them with and refuses to borrow a completion model's — that would put a fabricated figure on the notification footer and in `runlore_investigation_cost_usd`. `max_cost_per_investigation` therefore errs **low** by the embedding spend rather than quoting a number it cannot stand behind |
   | The adversarial verify pass's own cost | It runs after the last budget check, unconditionally, because verify is the honesty guarantee. A successful run can therefore deliver a `CostUSD` slightly above `max_cost_per_investigation` with no trip recorded |
-  | `lore eval` | Builds its investigators with no ceilings and no pricing at all. Bounded only by the step budget |
+  | A `lore eval` **campaign** as a whole | Each investigation it replays runs under the operator's configured `investigation.*` ceilings and `model.pricing` — the same limits production has — but a campaign is cases × n of them, so those ceilings multiply by the corpus size instead of capping the run. `--max-total-tokens` is the run-level ceiling; **unset, a campaign has none** |
   | CLI-only model calls | `lore validate --semantic`, `lore kb import --model`, and the eval judge each make completions outside any investigation. None runs under `serve` |
   | Non-model spend | Cloud API calls, git clones, metrics and logs queries are unpriced everywhere |
 - `compaction` — how mid-loop history compaction treats the older tool outputs it elides once the
@@ -315,7 +317,13 @@ incident webhook. Known keys: `alertmanager`, `gitops`, `pagerduty`, `custom`.
   rejection, which is decided *after* the ranking. A candidate that fails retrieval or the structural
   filter never reaches the reranker at all; past that point the last guard is `rerank_min_score`, and
   its default **0.1** sits at the *bottom* of the ~0.1–1.2 band real enriched BM25 scores occupy, so
-  it skips the call only when retrieval surfaced essentially nothing.
+  it skips the call only when retrieval surfaced essentially nothing. A second guard sits beside it:
+  the **spend ceiling is consulted before the ranking call, not after it**, so an investigation that
+  has already crossed `max_tokens_per_investigation` (or `max_cost_per_investigation`) declines to
+  rank rather than spending past a limit it has demonstrably hit. That is a fall-through like any
+  other — the run continues into a full investigation, where the ordinary nudge→kill ladder stops it
+  — and it is counted as `runlore_recall_rejections_total{reason="rerank_over_budget"}`, not as a
+  third rung on that ladder.
   In practice, then, enabling instant recall adds **one model call to the floor
   cost of nearly every investigation that has a structurally-agreeing candidate**, and buys back a
   full investigation on the subset that fires. A fired recall is consequently **two** model calls —

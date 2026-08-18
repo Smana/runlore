@@ -1866,11 +1866,11 @@ func TestTryRecallNearMissOnNonFire(t *testing.T) {
 	}
 	req := Request{Title: "HarborProbeFailure", Workload: providers.Workload{Namespace: "tooling", Name: "harbor"}}
 	result := "unresolved"
-	var totals providers.UsageTotals
+	var loopTotals, totals providers.UsageTotals
 	delivered := 0
 	finish := func(providers.Investigation) { delivered++ }
 
-	nearMiss, done := li.tryRecall(context.Background(), req, &result, &totals, finish)
+	nearMiss, done := li.tryRecall(context.Background(), req, &result, &loopTotals, &totals, finish)
 	if done {
 		t.Fatal("a non-firing recall must report done==false so the loop runs")
 	}
@@ -1903,9 +1903,9 @@ func TestTryRecallDisabledUnderAuto(t *testing.T) {
 	}
 	req := Request{Title: "HarborProbeFailure", Workload: providers.Workload{Namespace: "tooling", Name: "harbor"}}
 	result := "unresolved"
-	var totals providers.UsageTotals
+	var loopTotals, totals providers.UsageTotals
 	delivered := 0
-	nearMiss, done := li.tryRecall(context.Background(), req, &result, &totals, func(providers.Investigation) { delivered++ })
+	nearMiss, done := li.tryRecall(context.Background(), req, &result, &loopTotals, &totals, func(providers.Investigation) { delivered++ })
 	if done || delivered != 0 || nearMiss != nil {
 		t.Fatalf("instant recall must be disabled under auto: done=%v delivered=%d nearMiss=%+v", done, delivered, nearMiss)
 	}
