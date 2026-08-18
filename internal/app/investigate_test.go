@@ -82,9 +82,9 @@ func toolNames(tools []investigate.Tool) map[string]bool {
 	return names
 }
 
-// TestDiscoveryToolsGatedByProvider asserts the three new investigation tools appear
-// EXACTLY when their backing provider is configured: discover_metrics with the metrics
-// backend, and logs_error_summary + discover_log_fields with the logs backend. With
+// TestDiscoveryToolsGatedByProvider asserts the new investigation tools appear
+// EXACTLY when their backing provider is configured: discover_metrics + alert_rule with
+// the metrics backend, and logs_error_summary + discover_log_fields with the logs backend. With
 // neither configured they must be absent; wiring only one backend must not enable the
 // other's tools. KUBECONFIG is pointed at a nonexistent file so cluster-backed tools are
 // deterministically omitted and don't perturb the assertions.
@@ -102,25 +102,25 @@ func TestDiscoveryToolsGatedByProvider(t *testing.T) {
 	}{
 		{
 			name:       "no backends -> no discovery tools",
-			wantAbsent: []string{"discover_metrics", "logs_error_summary", "discover_log_fields"},
+			wantAbsent: []string{"discover_metrics", "alert_rule", "logs_error_summary", "discover_log_fields"},
 		},
 		{
 			name:        "metrics only -> discover_metrics present, log tools absent",
 			metricsURL:  "http://metrics:9090",
-			wantPresent: []string{"discover_metrics", "query_metrics"},
+			wantPresent: []string{"discover_metrics", "query_metrics", "alert_rule"},
 			wantAbsent:  []string{"logs_error_summary", "discover_log_fields"},
 		},
 		{
 			name:        "logs only -> log discovery tools present, discover_metrics absent",
 			logsURL:     "http://logs:9428",
 			wantPresent: []string{"logs_error_summary", "discover_log_fields", "query_logs"},
-			wantAbsent:  []string{"discover_metrics"},
+			wantAbsent:  []string{"discover_metrics", "alert_rule"},
 		},
 		{
 			name:        "both -> all discovery tools present",
 			metricsURL:  "http://metrics:9090",
 			logsURL:     "http://logs:9428",
-			wantPresent: []string{"discover_metrics", "logs_error_summary", "discover_log_fields"},
+			wantPresent: []string{"discover_metrics", "alert_rule", "logs_error_summary", "discover_log_fields"},
 		},
 	}
 	for _, tc := range tests {

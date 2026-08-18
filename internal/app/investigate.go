@@ -155,6 +155,12 @@ func BuildModelAndTools(ctx context.Context, cfg *config.Config, gp providers.Gi
 			// discover_metrics turns a "no series matched" into a recoverable step by
 			// listing the metric names / label values that actually exist for a selector.
 			investigate.DiscoverMetricsTool{Metrics: m},
+			// alert_rule reads the firing rule's own expression, so a threshold alert is
+			// judged against the series it actually thresholds (_maximum vs _average) rather
+			// than a plausible neighbour. It degrades to "unavailable" when the backend
+			// serves no /api/v1/rules, so it is safe to always register with the metrics
+			// backend.
+			investigate.AlertRuleTool{Metrics: m},
 		)
 	}
 	if cfg.Logs.URL != "" {
