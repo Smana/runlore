@@ -266,6 +266,15 @@ config:
       app_id: 123456
       installation_id: 7654321
       private_key_env: GITHUB_APP_PRIVATE_KEY
+    # GitHub Enterprise Server only — both keys are absent on github.com.
+    # github_api_url: https://ghe.example.com/api/v3
+    # git_host names the one host RunLore may send the forge credential to when it
+    # clones; it is derived from github_api_url and needed ONLY under subdomain
+    # isolation (API on api.HOSTNAME, git on HOSTNAME), which RunLore refuses to guess:
+    # the pod CrashLoopBackOffs at config load until you set it. Under
+    # networkPolicy.strict above, remember to add BOTH hosts to egress.allowedCIDRs.
+    #   github_api_url: https://api.ghe.example.com
+    #   git_host: ghe.example.com
 
   # Phase-2 grooming. The chart's values.yaml already ships stale_after,
   # recurrence_threshold and the in-server sweeps (DRY-RUN by default — nothing below

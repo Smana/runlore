@@ -341,6 +341,19 @@ config:
   #   kb_repo: owner/name
   #   base_branch: main
   #   github_app: { app_id: 0, installation_id: 0, private_key_env: GITHUB_APP_PRIVATE_KEY }
+  #   # GitHub Enterprise Server ONLY — omit both for github.com.
+  #   github_api_url: https://ghe.example.com/api/v3
+  #   # git_host is the ONE host the forge credential may be sent to when RunLore clones
+  #   # (what_changed's GitOps repo, source_diff, the catalog git-sync); every other host
+  #   # clones anonymously, because a GitOps spec.source.repoURL is cluster state. It is
+  #   # DERIVED from github_api_url (or gitlab.base_url) and needs no value here — except
+  #   # on GitHub Enterprise with SUBDOMAIN ISOLATION, where the API is served from
+  #   # api.HOSTNAME while git stays on HOSTNAME. That one shape is unresolvable, so
+  #   # RunLore REFUSES TO START until you name the git host — a Helm-only install meets
+  #   # it as a CrashLoopBackOff, not as a warning:
+  #   #   github_api_url: https://api.ghe.example.com   # API (subdomain isolation)
+  #   #   git_host: ghe.example.com                     # git remotes / clone auth
+  #   # Bare hostname only: no scheme, path, port or userinfo.
   # Investigate signals (optional). metrics/logs enable query_metrics/query_logs.
   # metrics: { url: http://vmsingle.observability.svc:8429 }   # PromQL (VictoriaMetrics/Prometheus)
   # Logs backend (query_logs / logs_error_summary / discover_log_fields). The provider is
@@ -503,14 +516,40 @@ rbac:
   # A read-only (get) allowlist of SPEC-BEARING kinds. Add your operators' CRDs here; a
   # kind that is absent is reported to the agent as a denial, never as a missing object.
   #
+  # THIS IS A DEFAULT GRANT, NOT AN OPT-IN MENU. The list below ships POPULATED and is
+  # rendered into the ClusterRole, so a `helm upgrade` that changes no values adds these
+  # 10 rules — 28 resource types, 23 of them granted nowhere else — as cluster-wide `get`
+  # on the ServiceAccount. Read it as "what you are about to grant", not as "examples you
+  # may enable".
+  #
+  # TO DECLINE THE WHOLE GRANT:
+  #
+  #   rbac:
+  #     resourceSpecRules: []      # ClusterRole drops back to its 9 base rules
+  #
+  # An empty list renders cleanly (the template guards the block) and costs you exactly
+  # one tool: resource_spec answers "forbidden" for every kind not already granted above.
+  # It does NOT break workload_ownership — the owner-chain kinds are granted separately
+  # and unconditionally in templates/rbac.yaml, precisely so narrowing this list cannot
+  # silently truncate an owner chain. Narrow the list freely; it is yours to scope.
+  #
   # DO NOT replace this with `resources: ["*"]`. A wildcard includes `secrets`, and the
   # ServiceAccount's token then reads every Secret in the cluster. The tool itself refuses
   # the Secret kind — before AND after resolution — but that refusal is an application-layer
   # policy, not a boundary: RBAC is the boundary. If you must use a wildcard, keep secrets
   # out of the grant.
+  #
+  # Kinds with NEITHER .spec NOR .status are deliberately absent (ServiceAccount,
+  # EndpointSlice, StorageClass, ConfigMap …): the tool renders only those two sections,
+  # so the read returns "spec: (none — this kind has no spec)" while the grant stays
+  # entirely real. serviceaccounts in particular was granted and removed — a cluster-wide
+  # read of every ServiceAccount exposes the IRSA / Workload-Identity role ARNs in its
+  # annotations and names every Secret in its `secrets`/`imagePullSecrets`, and returns
+  # nothing to the tool in exchange. Do not re-add a kind here without checking it has a
+  # spec or a status to read.
   resourceSpecRules:
     - apiGroups: [""]
-      resources: ["services", "persistentvolumeclaims", "persistentvolumes", "nodes", "namespaces", "serviceaccounts"]
+      resources: ["services", "persistentvolumeclaims", "persistentvolumes", "nodes", "namespaces"]
       verbs: ["get"]
     - apiGroups: ["apps"]
       resources: ["deployments", "statefulsets", "daemonsets", "replicasets"]
@@ -527,11 +566,11 @@ rbac:
     - apiGroups: ["policy"]
       resources: ["poddisruptionbudgets"]
       verbs: ["get"]
+    # storageclasses is NOT here on purpose: it has no .spec and no .status, so the read
+    # comes back empty. "A PVC bound to a vanished storage class" is answered from the
+    # PVC's own spec/status, which IS granted above.
     - apiGroups: ["storage.k8s.io"]
-      resources: ["storageclasses", "volumeattachments"]
-      verbs: ["get"]
-    - apiGroups: ["discovery.k8s.io"]
-      resources: ["endpointslices"]
+      resources: ["volumeattachments"]
       verbs: ["get"]
     - apiGroups: ["apiextensions.k8s.io"]
       resources: ["customresourcedefinitions"]

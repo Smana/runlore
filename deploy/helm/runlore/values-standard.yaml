@@ -166,6 +166,14 @@ config:
       app_id: 123456 # from the GitHub App you created
       installation_id: 7654321
       private_key_env: GITHUB_APP_PRIVATE_KEY
+    # GitHub Enterprise Server only — both keys are absent on github.com.
+    # github_api_url: https://ghe.example.com/api/v3
+    # git_host names the one host RunLore may send the forge credential to when it
+    # clones; it is derived from github_api_url and needed ONLY under subdomain
+    # isolation (API on api.HOSTNAME, git on HOSTNAME), which RunLore refuses to guess:
+    # the pod CrashLoopBackOffs at config load until you set it.
+    #   github_api_url: https://api.ghe.example.com
+    #   git_host: ghe.example.com
 
   # Evidence backends: each URL registers the tool it unlocks (query_metrics,
   # query_logs). Leave one out and the agent simply investigates without it.

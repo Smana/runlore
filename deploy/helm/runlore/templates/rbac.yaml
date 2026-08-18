@@ -45,11 +45,33 @@ rules:
   # NOTE: execution rights (patch) are intentionally NOT granted cluster-wide here.
   # They are scoped to rbac.actionNamespaces as namespaced Roles below, so a
   # confused/compromised agent cannot mutate flux-system or another team's workloads.
+  # workload_ownership (G4) walks a failing pod's ownerReferences to its TOP controller
+  # (Pod → ReplicaSet → Deployment/StatefulSet/DaemonSet/Job) and reads the GitOps
+  # tracking labels off it. These are the only controller kinds the walk can follow
+  # (internal/providers/cluster/ownership.go, fetchOwner), and the tool is registered
+  # unconditionally whenever the cluster reader is.
+  #
+  # Granted HERE, statically, and NOT left to rbac.resourceSpecRules — even though that
+  # list happens to name the same kinds. They belong to a different consumer, and a
+  # denial on one of them does not surface as an error: it STOPS the walk, and the last
+  # resolvable hop is reported as the top controller. An operator narrowing an allowlist
+  # documented as belonging to resource_spec would otherwise turn every "Deployment X,
+  # owned by Kustomization Y" into a bare "ReplicaSet X" — quietly, suite green.
+  - apiGroups: ["apps"]
+    resources: ["replicasets", "deployments", "statefulsets", "daemonsets"]
+    verbs: ["get"]
+  - apiGroups: ["batch"]
+    resources: ["jobs"]
+    verbs: ["get"]
   # resource_spec (read an arbitrary object's .spec/.status): an operator-owned, read-only
   # allowlist of spec-bearing kinds — see rbac.resourceSpecRules in values.yaml, which also
   # explains why a `resources: ["*"]` wildcard must never include secrets. A kind missing
   # from the list is reported to the agent as a DENIAL, never as a missing object, so a gap
   # here degrades the tool rather than fabricating evidence.
+  #
+  # It ships POPULATED — a default grant, not an opt-in menu. `rbac.resourceSpecRules: []`
+  # declines it in full and still renders valid YAML (that is what the guard below is
+  # for), leaving every rule above intact.
   {{- with .Values.rbac.resourceSpecRules }}
   {{- toYaml . | nindent 2 }}
   {{- end }}

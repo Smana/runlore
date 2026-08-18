@@ -113,8 +113,17 @@ The chart's RBAC is scoped tightly (`deploy/helm/runlore/templates/rbac.yaml`):
   `flux-system`. The app guard must stay a superset of the RBAC namespaces, or `pod_logs` is blocked at
   the app layer for namespaces RBAC would otherwise permit.
 - **`resource_spec`'s read-only kind allowlist:** `rbac.resourceSpecRules` grants `get` on the
-  spec-bearing kinds the tool reads (Services, workloads, NetworkPolicies, HPAs, PVCs, StorageClasses,
-  scrape CRs …). It is an **allowlist, never a wildcard**, on purpose: `resources: ["*"]` includes
+  spec-bearing kinds the tool reads (Services, workloads, NetworkPolicies, HPAs, PVCs, PVs, Nodes,
+  scrape CRs …). **It ships populated — this is a default grant, not an opt-in menu**: a stock
+  install adds 10 rules — 28 resource types, 23 of them granted nowhere else — of cluster-wide
+  `get`, on top of the ClusterRole's 9 base rules. Set
+  `rbac.resourceSpecRules: []` to decline it in full (that costs you `resource_spec` and nothing
+  else — `workload_ownership`'s owner-chain kinds are granted separately and unconditionally, so
+  narrowing this list can never silently truncate an owner chain). Kinds with **neither `.spec` nor
+  `.status`** — ServiceAccount, EndpointSlice, StorageClass, ConfigMap — are deliberately absent:
+  the read would return nothing while the grant stayed entirely real, and a cluster-wide
+  ServiceAccount read in particular exposes the IRSA / Workload-Identity role ARNs in its
+  annotations. It is an **allowlist, never a wildcard**, on purpose: `resources: ["*"]` includes
   `secrets`. The tool refuses the `Secret` kind before *and* after resolution — a spelling that
   case-folds to "secret", and any resource literally named `secrets` in any API group, is refused —
   but that is an application-layer policy. **RBAC is the boundary.** A kind missing from the list is
