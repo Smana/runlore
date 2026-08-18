@@ -137,6 +137,100 @@ func TestEveryCaseFoldedHostComparisonIsPinned(t *testing.T) {
 	}
 }
 
+// TestEveryHostCredentialBoundaryIsPinned is the arm for instance 3, and it
+// exists because the two arms above BOTH looked straight past it.
+//
+// Instance 3 was a fold in package app (forgeGitHost -> forgeWebHost) whose
+// result was stored into whatchanged.Differ.TokenHost and compared in package
+// whatchanged. Neither arm could see it:
+//
+//   - the divergence arm groups folds BY PACKAGE, and there is only one fold on
+//     each side of the boundary;
+//   - the comparison arm is keyed by the function that COMPARES, and the
+//     comparing function (whatchanged auth) was already pinned as protected —
+//     protected against a bad clone URL, which is a different operand from the
+//     one that went bad;
+//   - and valueKey keys cfg.Forge.GitHost as "githost", not as a host, so the
+//     deriving function was not recognised as touching a host at all.
+//
+// So this arm changes what it keys on. Not the fold and not the comparison, but
+// the WRITE: a value stored into a field whose name ends in "host" is a host that
+// outlives the function that computed it, and every such field in this repo is
+// something a credential is later confined to (Differ.TokenHost,
+// Differ.SSHRewriteHost) or a request is later aimed at (url.URL.Host). Where the
+// value came from does not matter, which is exactly the property the other two
+// arms lacked: a boundary assembled across a package edge is still one assignment.
+//
+// It pins rather than proves, like the comparison arm, and for the same reason —
+// whether a given write is safe depends on what produced the value, which may be
+// three packages away. What it buys is that the population cannot grow in
+// silence, and that a new sink for a derived host has to be argued for in prose
+// by whoever adds it.
+//
+// Deliberately NOT flagged: a local variable named host. Every host derivation
+// writes one, so keying on locals would pin eight functions that merely compute
+// and report nothing about where the value ends up. Fields are the edge that
+// matters.
+func TestEveryHostCredentialBoundaryIsPinned(t *testing.T) {
+	pkgs, _ := internalPackages(t)
+
+	found := map[string]bool{}
+	for _, p := range pkgs {
+		for _, site := range hostBoundaryWrites(p.name, p.files) {
+			found[site] = true
+		}
+	}
+	if len(found) == 0 {
+		t.Fatal("found no write into a host-named field anywhere under internal/, but " +
+			"knownHostBoundaries names several — the reader has gone inert")
+	}
+
+	for site := range found {
+		if _, ok := knownHostBoundaries[site]; !ok {
+			t.Errorf("%s WRITES A HOST INTO A CREDENTIAL BOUNDARY.\n"+
+				"A host stored in a field outlives the function that derived it: whatchanged.Differ "+
+				"confines the forge token to TokenHost and aims its SSH rewrite at SSHRewriteHost, so "+
+				"whatever fold produced the value decides who receives the credential — in a DIFFERENT "+
+				"package from the one that compares it, which is why neither other arm sees this.\n"+
+				"Derive the value through a fold that refuses non-ASCII (internal/app asciiLowerHost is "+
+				"the pattern) and refuse it loudly at config load, then add %q to knownHostBoundaries "+
+				"naming what protects it.", site, site)
+		}
+	}
+	for site, why := range knownHostBoundaries {
+		if !found[site] {
+			t.Errorf("knownHostBoundaries pins %q, which no longer writes a host into a field "+
+				"(%s). Delete the entry: a pin that has stopped matching is an acknowledgement that has "+
+				"silently become permanent.", site, why)
+		}
+	}
+}
+
+// knownHostBoundaries is every function under internal/ that stores a host into a
+// field, with what keeps the stored value honest.
+var knownHostBoundaries = map[string]string{
+	"app buildGitOpsDiffer": "sets Differ.TokenHost and Differ.SSHRewriteHost from forgeGitHost — the " +
+		"what_changed credential boundary, and the site instance 3 shipped through. PROTECTED on both " +
+		"halves: forgeGitHost folds through asciiLowerHost so the stored host is never the fold-equal " +
+		"twin of an ASCII name, and config.validateForgeGitHost refuses a non-ASCII forge host at load " +
+		"on every key that can produce one (forge.git_host, forge.github_api_url, " +
+		"forge.gitlab.base_url). Both are needed: the fold alone fails CLOSED, which withholds the " +
+		"credential from the operator's own repo and shows up only as an empty what_changed.",
+
+	"app appendSourceDiffTool": "sets Differ.TokenHost for source_diff from the same forgeGitHost. " +
+		"Same protection, and the exposure is wider rather than narrower: source_diff clone URLs are " +
+		"model-chosen across the whole source_repos.allow list, so an off-by-one-rune boundary hands " +
+		"the forge token to any allowlisted host that happens to match the fold.",
+
+	"server proxy": "sets url.URL.Host to the leader address before relaying an authenticated request " +
+		"(bearer token, Slack/PagerDuty HMAC) to it. PROTECTED, and not by a fold at all: addr comes " +
+		"from the leader-election Lease — a net.ParseIP-validated pod IP written through authenticated " +
+		"API-server access — plus this replica's own serve port, so it is never request-controlled and " +
+		"never case-normalised. Listed because it is a host aimed at with credentials attached, which " +
+		"is the shape this arm watches; if addr ever became operator- or request-supplied, this entry " +
+		"is where that has to be argued.",
+}
+
 // knownHostComparisons is every function under internal/ that compares a
 // case-folded host, with the reason it is (or is not yet) safe.
 //
@@ -168,11 +262,19 @@ var knownHostComparisons = map[string]string{
 		"IDNA cannot disagree. EqualFold rather than ToLower is deliberate here: ASCII case is the only " +
 		"difference a faithful rewrite may introduce.",
 
-	"config validateForgeGitHost": "validates the operator-supplied forge.git_host. PROTECTED, and it " +
-		"is the protection the whatchanged auth entry above depends on: it refuses anything that is not " +
-		"a bare ASCII hostname, so the value every clone host is later compared against can never be " +
-		"the fold-equal half of an IDNA-different pair. Loosening this to accept an IDN would reopen " +
-		"instance 1 through the HTTPS path rather than the SSH one.",
+	"config validateForgeGitHost": "validates the forge git host on EVERY key that can produce it, " +
+		"which is what this entry used to claim without it being true. It said the function refused " +
+		"anything that was not a bare ASCII hostname, 'so the value every clone host is later compared " +
+		"against can never be the fold-equal half of an IDNA-different pair' — false on both providers " +
+		"as written: bareHost was applied ONLY to an explicit forge.git_host, and the DERIVED path most " +
+		"deployments actually use (forge.github_api_url, forge.gitlab.base_url) returned nil unchecked, " +
+		"so gitlab.base_url \"https://g\\u0130tlab.example.com\" loaded clean and became the boundary " +
+		"\"gitlab.example.com\". PROTECTED now, and only now: forge.git_host still gets bareHost, and " +
+		"the two derived keys get asciiForgeHost, which refuses a non-ASCII url.Hostname() at load " +
+		"naming the key. That refusal also guards this function's OWN ToLower(u.Hostname()), which runs " +
+		"after it on the same URL. What it is NOT is a bareHost check on the derived keys: an IPv6 " +
+		"literal or an underscore label still passes, because those fold identically and refusing them " +
+		"would break real self-hosted spellings.",
 
 	"httpx DenyInternalRedirect": "decides whether to strip provider key headers when a redirect " +
 		"changes host. UNPROTECTED: neither hostname is ASCII-checked. The exploitable direction is " +
@@ -187,9 +289,21 @@ var knownHostComparisons = map[string]string{
 		"classified — the disagreement has no second half here.",
 
 	"app githubGitHost": "derives the git host from the configured GitHub API URL and compares it to " +
-		"api.github.com. Operator-supplied config rather than cluster state, so it is not the same " +
-		"threat as a repoURL anyone with Application create can set; still folded, still compared, " +
-		"still worth failing on if a second comparison is added here.",
+		"api.github.com. PROTECTED at the fold: it folds through asciiLowerHost, which returns a " +
+		"non-ASCII host UNCHANGED, so the operand compared here is either ASCII or a value no ASCII " +
+		"host can equal. Operator config rather than cluster state, but it feeds forgeGitHost and " +
+		"therefore Differ.TokenHost, which is why the fold is not merely cosmetic.",
+
+	"app forgeGitHost": "derives the ONE host the forge clone credential may be sent to — " +
+		"Differ.TokenHost and Differ.SSHRewriteHost both come from here — and compares the folded " +
+		"result against \"\" to choose between the explicit forge.git_host and the host derived from " +
+		"the provider URL. It became VISIBLE to this reader only when the fold moved to asciiLowerHost: " +
+		"before that it folded cfg.Forge.GitHost, which valueKey keys as \"githost\" rather than as a " +
+		"host, so the credential boundary of the whole repo was derived in a function this guard could " +
+		"not see. PROTECTED at the fold by asciiLowerHost; the LOUD half is config.validateForgeGitHost, " +
+		"which refuses a non-ASCII forge host at startup naming the key, because a boundary that merely " +
+		"fails closed here withholds the credential from the operator's own forge and empties " +
+		"what_changed (#495) instead of saying so.",
 
 	"thread prNumberInRepo": "matches a link's host against the configured forge repo before " +
 		"reading a PR number out of it. Both sides are operator config, and the function's own comment " +
@@ -219,7 +333,7 @@ const minFoldSites = 40
 // makes about itself and then watched come true.
 func TestFoldGuardCatchesTheShapesItClaimsTo(t *testing.T) {
 	for _, tc := range []struct {
-		name, src, wantDiverge, wantHost string
+		name, src, wantDiverge, wantHost, wantBoundary string
 		// noFolds marks the one fixture that deliberately contains no case
 		// normalisation at all, so the emptiness check below stays an assertion
 		// everywhere else.
@@ -391,7 +505,79 @@ func hostOf(s string) string { return strings.ToLower(u.Hostname()) }
 			wantHost: "forge pick",
 		},
 
+		// ---- instance 3: a host derived in one package, confined in another ----
+		{
+			// Exactly as it shipped. wantHost is EMPTY on purpose and is the
+			// whole point of the fixture: no function here compares a folded
+			// host, because forgeGitHost folds cfg.Forge.GitHost (keyed
+			// "githost", not a host) and buildGitOpsDiffer only STORES the
+			// result. The comparison that consumes it lives in package
+			// whatchanged, whose own entry was already pinned as protected —
+			// against a hostile clone URL, not against a folded TokenHost.
+			name: "INSTANCE 3: the credential boundary is derived here and compared a package away",
+			src: `package app
+
+func forgeWebHost(cfg *config.Config) string {
+	u, err := url.Parse(cfg.Forge.GitLab.BaseURL)
+	if err != nil || u.Hostname() == "" {
+		return "gitlab.com"
+	}
+	return strings.ToLower(u.Hostname())
+}
+
+func forgeGitHost(cfg *config.Config) string {
+	if h := strings.ToLower(strings.TrimSpace(cfg.Forge.GitHost)); h != "" {
+		return h
+	}
+	return forgeWebHost(cfg)
+}
+
+func buildGitOpsDiffer(cfg *config.Config) *whatchanged.Differ {
+	differ := &whatchanged.Differ{TokenSource: BuildCloneTokenSource(cfg)}
+	if differ.TokenSource != nil {
+		host := forgeGitHost(cfg)
+		differ.TokenHost, differ.SSHRewriteHost = host, host
+	}
+	return differ
+}
+`,
+			wantBoundary: "app buildGitOpsDiffer",
+		},
+		{
+			name: "INSTANCE 3 written as a composite literal, which is the same boundary",
+			src: `package app
+
+func appendSourceDiffTool(cfg *config.Config) {
+	sd := &whatchanged.Differ{
+		TokenSource: BuildCloneTokenSource(cfg),
+		TokenHost:   forgeGitHost(cfg),
+	}
+	register(sd)
+}
+
+func forgeGitHost(cfg *config.Config) string { return strings.ToLower(cfg.Forge.GitHost) }
+`,
+			wantBoundary: "app appendSourceDiffTool",
+		},
+
 		// ---- shapes the guard MUST stay silent on ----
+		{
+			// A local named host is a derivation, not a boundary: it dies with
+			// the function. Keying on locals would pin every host-deriving
+			// function in the repo while saying nothing about who receives the
+			// value. The comparison arm still fires here, which is what keeps
+			// the two arms independent rather than one being a rename of the
+			// other.
+			name: "a folded host in a LOCAL is compared, but crosses no boundary",
+			src: `package httpx
+
+func trustedHost(req *http.Request) bool {
+	host := strings.ToLower(req.URL.Hostname())
+	return trusted[host]
+}
+`,
+			wantHost: "httpx trustedHost",
+		},
 		{
 			name: "one normaliser used many times on one value is fine",
 			src: `package kbimport
@@ -530,6 +716,14 @@ func (d *Differ) auth(cloneURL string) error {
 			case tc.wantHost != "" && !slices.Contains(hosts, tc.wantHost):
 				t.Errorf("want the host comparison %q reported, got %v", tc.wantHost, hosts)
 			}
+
+			bounds := hostBoundaryWrites(pkg, files)
+			switch {
+			case tc.wantBoundary == "" && len(bounds) != 0:
+				t.Errorf("want no host credential boundary reported, got %v", bounds)
+			case tc.wantBoundary != "" && !slices.Contains(bounds, tc.wantBoundary):
+				t.Errorf("want the host boundary %q reported, got %v", tc.wantBoundary, bounds)
+			}
 		})
 	}
 }
@@ -637,6 +831,12 @@ func TestTheNormalisersReallyDisagreeAndOnlyOnNonASCII(t *testing.T) {
 //     this guard against a820c95. Had it instead widened what the already-pinned
 //     auth accepts, nothing here would have moved. Two same-named methods on
 //     different types in one package also collide into one key.
+//   - THE BOUNDARY ARM IS KEYED BY FIELD NAME, so it finds a host stored in
+//     TokenHost or url.URL.Host and misses one stored in a field called Endpoint,
+//     Remote or Target. It also says nothing about whether the stored value is
+//     safe — that judgement is prose in knownHostBoundaries, and the prose in the
+//     entry it replaced was WRONG for a whole release, which is the standing
+//     argument for checking these claims by running them rather than reading them.
 // ---------------------------------------------------------------------------
 
 // normalisers maps a fully-qualified callee to the case normalisation it applies.
@@ -771,6 +971,56 @@ func hostComparisons(pkg string, files []*ast.File) []string {
 	}
 	sort.Strings(out)
 	return slices.Compact(out)
+}
+
+// hostBoundaryWrites returns "<pkg> <func>" for every function that STORES a host
+// into a field — the invisible half of instance 3.
+//
+// A write counts when the target is a field (x.TokenHost = v) or a composite
+// literal key (Differ{TokenHost: v}) whose name ends in "host". Locals do not
+// count: see the test's comment for why. The value's provenance is not inspected
+// at all — that is the point, since the fold that produced it may be in another
+// package, which is precisely what hid this instance from the other two arms.
+func hostBoundaryWrites(pkg string, files []*ast.File) []string {
+	var out []string
+	for _, f := range files {
+		eachScope(f, func(fn string, n ast.Node) {
+			if writesHostField(n) {
+				out = append(out, pkg+" "+fn)
+			}
+		})
+	}
+	sort.Strings(out)
+	return slices.Compact(out)
+}
+
+// writesHostField reports whether the scope assigns into a host-named field.
+func writesHostField(n ast.Node) bool {
+	found := false
+	ast.Inspect(n, func(n ast.Node) bool {
+		switch e := n.(type) {
+		case *ast.AssignStmt:
+			for _, lhs := range e.Lhs {
+				if sel, ok := lhs.(*ast.SelectorExpr); ok && isHostField(sel.Sel.Name) {
+					found = true
+				}
+			}
+		case *ast.KeyValueExpr:
+			if id, ok := e.Key.(*ast.Ident); ok && isHostField(id.Name) {
+				found = true
+			}
+		}
+		return true
+	})
+	return found
+}
+
+// isHostField reports whether a field name names a host. "Host", "Hostname",
+// "TokenHost" and "SSHRewriteHost" all qualify; the suffix rule is what catches a
+// boundary field nobody has invented yet.
+func isHostField(name string) bool {
+	n := strings.ToLower(name)
+	return n == "hostname" || strings.HasSuffix(n, "host")
 }
 
 // hostReturningFuncs finds the same-package functions whose body case-normalises

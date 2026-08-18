@@ -1509,6 +1509,13 @@ func validGitLabProjectPath(s string) bool {
 // investigation, surfacing only as a data-gaps line at the foot of a finding
 // (RunLore #495). So the ambiguity is refused at config load and the operator
 // names the host — loud once, at startup, instead of quiet forever.
+//
+// forge.git_host NAMES that host, but most deployments never set it: the host is
+// DERIVED from forge.github_api_url or from forge.gitlab.base_url instead. A
+// check that only looked at the explicit key therefore guarded the path almost
+// nobody takes, which is how a non-ASCII forge host reached the credential
+// boundary twice over (once per provider). Every key that can produce the
+// boundary is checked here — see asciiForgeHost.
 func validateForgeGitHost(f Forge) error {
 	if f.GitHost != "" {
 		if !bareHost(f.GitHost) {
@@ -1521,7 +1528,12 @@ func validateForgeGitHost(f Forge) error {
 		return nil
 	}
 	if f.Provider == "gitlab" {
-		return nil // gitlab.base_url IS the instance root: git, web and API share that host
+		// gitlab.base_url IS the instance root: git, web and API share that host,
+		// so this key alone decides the credential boundary.
+		return asciiForgeHost("forge.gitlab.base_url", f.GitLab.BaseURL)
+	}
+	if err := asciiForgeHost("forge.github_api_url", f.GitHubAPIURL); err != nil {
+		return err
 	}
 	u, err := url.Parse(f.GitHubAPIURL)
 	if err != nil {
@@ -1538,6 +1550,59 @@ func validateForgeGitHost(f Forge) error {
 		"host it is not valid for, or withhold it from every GitOps repository — which shows up only "+
 		"as an empty what_changed",
 		f.GitHubAPIURL, strings.TrimPrefix(h, "api."), h)
+}
+
+// asciiForgeHost refuses a forge URL whose HOST carries a byte above 7-bit
+// ASCII, naming the key that carries it.
+//
+// RunLore derives from this URL the one host its forge credential may be sent
+// to, and compares that host against every clone URL after strings.ToLower. On a
+// non-ASCII host that fold and the IDNA mapping the dialler applies disagree:
+// ToLower maps U+0130 to plain 'i', so a base_url of "https://gİtlab.example.com"
+// yields the boundary "gitlab.example.com" — a SEPARATELY REGISTRABLE host that
+// now collects the token — while the operator's real instance resolves to
+// "xn--gtlab-56a.example.com" and is refused the credential it owns, emptying
+// what_changed with nothing but a data-gaps line to show for it (RunLore #495).
+// Both halves of that are silent, so this is a startup failure rather than a
+// normalisation.
+//
+// The check is ASCII, not the full bareHost shape the explicit forge.git_host
+// gets: url.Hostname() has already stripped the scheme, port, userinfo and path
+// that bareHost exists to reject, and an IPv6 literal or an underscore label
+// reaching it is a legitimate self-hosted spelling that folds identically either
+// way. ASCII is the whole of what makes the normalisers agree.
+func asciiForgeHost(key, rawURL string) error {
+	if rawURL == "" {
+		return nil // the provider's built-in default host, which is ASCII
+	}
+	u, err := url.Parse(rawURL)
+	if err != nil || u.Hostname() == "" {
+		return nil // no host to derive from: the built-in default is used instead
+	}
+	if h := u.Hostname(); !asciiHost(h) {
+		return fmt.Errorf("%s %q has the non-ASCII host %q, which RunLore cannot use as a credential "+
+			"boundary: it lowercases that host to compare it against every clone URL, and the "+
+			"lowercased spelling is a DIFFERENT registrable name from the one your git client "+
+			"resolves through IDNA. Accepting it would attach the forge token to whichever host the "+
+			"fold names and withhold it from yours, which surfaces only as an empty what_changed. "+
+			"Write the host in its ASCII (punycode, \"xn--\") form, or set forge.git_host to that "+
+			"form explicitly", key, rawURL, h)
+	}
+	return nil
+}
+
+// asciiHost reports whether s is free of bytes above 7-bit ASCII — the one
+// property that makes strings.ToLower, strings.EqualFold and idna.Lookup.ToASCII
+// agree about which host is being named. Same guard as whatchanged.isASCII and
+// sourcerepo's allowlist character check, applied where a host is DERIVED rather
+// than where one arrives.
+func asciiHost(s string) bool {
+	for i := 0; i < len(s); i++ {
+		if s[i] >= 0x80 {
+			return false
+		}
+	}
+	return true
 }
 
 // bareHost reports whether s is a hostname and nothing else: ASCII letters,
