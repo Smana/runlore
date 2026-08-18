@@ -728,7 +728,7 @@ transport to ever fire, and startup **warns** (`… or this is dead config`) whe
     notify:
       thread:
         chat_calls_per_hour: 30      # default 30
-        chat_tokens_per_hour: 107720 # default 107720 — derived, see below
+        chat_tokens_per_hour: 109320 # default 109320 — derived, see below
 
 > [!IMPORTANT]
 > **`model.chat.model` must be named explicitly — startup fails without it.** It is the one field
@@ -780,7 +780,7 @@ a reply to an investigation thread. Keep the room invite-only.
 | Bound | Key | Default |
 |---|---|---|
 | Model calls per hour, globally | `notify.thread.chat_calls_per_hour` | `30` |
-| Tokens per hour, globally — reported usage, or an estimate when unreported | `notify.thread.chat_tokens_per_hour` | `107720` (derived) |
+| Tokens per hour, globally — reported usage, or an estimate when unreported | `notify.thread.chat_tokens_per_hour` | `109320` (derived) |
 | Output tokens per call | `model.chat.max_tokens` | `1024` |
 | The human's message reaching the model | `notify.thread.max_note_bytes` | `8192` bytes |
 | Model calls per addressed message | *structural — always exactly 1* | — |
@@ -832,7 +832,7 @@ explicitly if you need a ceiling that stays put.
 > - **The window is per process.** Each replica enforces its own `chat_tokens_per_hour`, so N replicas
 >   permit N times the number above.
 > - **It is an hourly sliding window, not a monthly or absolute budget.** `chat_tokens_per_hour` at
->   its default permits 107720 tokens *every* hour, indefinitely. There is no cumulative cap over a
+>   its default permits 109320 tokens *every* hour, indefinitely. There is no cumulative cap over a
 >   day, a month, or the life of the process.
 > - **Any room member can trigger it** (see above), so the ceiling that actually protects you is the
 >   hourly one, not the good behaviour of the person typing.

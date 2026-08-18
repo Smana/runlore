@@ -1952,3 +1952,51 @@ func TestChatContextEvidenceCannotForgeAFramingLine(t *testing.T) {
 		t.Fatalf("the evidence item was dropped instead of flattened:\n%s", body)
 	}
 }
+
+// TestChatPromptForbidsProductScopedCapabilityDenials pins the distinction between what
+// this TURN can do and what RunLore can do.
+//
+// The chat layer is deliberately given no tool but submit_thread_reply — that is what makes
+// one message exactly one model call. The prompt has to say so, and the old wording said it
+// as "you have no tools on this turn and cannot look anything up". The model then reported
+// that to an operator as a fact about the product:
+//
+//	"I don't have access to GitHub to check its current status..."
+//
+// …in the same reply that linked a pull request it had just CREATED on GitHub. The operator
+// reasonably concluded the GitHub App was missing a permission and went to check the
+// installation. The referenced PR had in fact already merged, so the question was
+// answerable and the answer was wrong twice over.
+//
+// Same failure as the GitOps tools reporting a scope limit as an absent object: a limit of
+// the caller stated as a fact about the world. This pins the prompt's side of it.
+func TestChatPromptForbidsProductScopedCapabilityDenials(t *testing.T) {
+	// The turn-scoped limit must still be stated — removing it would invite the model to
+	// invent lookups it cannot perform.
+	for _, want := range []string{"THIS TURN", "cannot look anything up"} {
+		if !strings.Contains(chatSystemPrompt, want) {
+			t.Errorf("prompt no longer states the turn-scoped limit: missing %q", want)
+		}
+	}
+	// …and it must be explicitly scoped to the reply, not to RunLore.
+	for _, want := range []string{
+		"about this reply, NOT about RunLore",
+		"never tell a human that RunLore",
+		"a fresh investigation can",
+	} {
+		if !strings.Contains(chatSystemPrompt, want) {
+			t.Errorf("prompt does not forbid product-scoped capability denials: missing %q", want)
+		}
+	}
+	// The phrases an operator would act on. Each must appear only inside the prohibition
+	// that names it, never as a bare instruction the model could copy.
+	for _, phrase := range []string{"has no access to", "is unable to reach"} {
+		if !strings.Contains(chatSystemPrompt, "never tell a human that RunLore") {
+			t.Fatal("the prohibition itself is gone")
+		}
+		if strings.Count(chatSystemPrompt, phrase) != 1 {
+			t.Errorf("%q appears %d times; it should appear once, inside the prohibition",
+				phrase, strings.Count(chatSystemPrompt, phrase))
+		}
+	}
+}

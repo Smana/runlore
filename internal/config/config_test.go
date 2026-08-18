@@ -1835,7 +1835,7 @@ func TestThreadDefaultsHaveTheirDocumentedValues(t *testing.T) {
 	// cap upstream now fails HERE, with this number in the message, and
 	// docsguard.TestThreadDefaultsMatchTheDocs fails alongside it naming every page
 	// that must be re-stated. Update both together, never one.
-	if got, want := thread.DefaultChatTokensPerHour, int64(107720); got != want {
+	if got, want := thread.DefaultChatTokensPerHour, int64(109320); got != want {
 		t.Errorf("DefaultChatTokensPerHour = %d, want %d — if this was a deliberate retune, "+
 			"restate the new number everywhere the docs quote it (docsguard will list them)", got, want)
 	}

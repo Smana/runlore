@@ -82,7 +82,7 @@ Stated plainly, without softening:
 
 **Capped, and the key that bounds each:** model calls per hour
 (`notify.thread.chat_calls_per_hour`, default 30) · provider-reported tokens per hour
-(`notify.thread.chat_tokens_per_hour`, default 107720) · output tokens per call
+(`notify.thread.chat_tokens_per_hour`, default 109320) · output tokens per call
 (`model.chat.max_tokens`, default 1024, deliberately *not* inherited from `model.max_tokens`) · the
 human's message reaching the model (`notify.thread.max_note_bytes`, default 8192 bytes) · the whole
 assembled prompt (fixed at ~15 KB, ≈3.8k input tokens; only `max_note_bytes` moves it) ·
@@ -102,7 +102,7 @@ it moves whenever `max_note_bytes` moves. Pin it explicitly if you need a fixed 
   charges a deliberately conservative estimate rather than zero, and logs a warning saying it did.
   The estimate can only over-charge — the safe direction — but it is an estimate, not a measurement.
 - **It is an hourly sliding window, not a monthly or absolute budget.** `chat_tokens_per_hour` at its
-  default permits 107720 tokens every hour, indefinitely. There is no cumulative cap over a day, a
+  default permits 109320 tokens every hour, indefinitely. There is no cumulative cap over a day, a
   month, or the life of the process.
 
 `model.chat.model` must be named explicitly or startup fails: it is the one field that does not

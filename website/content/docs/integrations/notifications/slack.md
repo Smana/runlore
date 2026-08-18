@@ -272,7 +272,7 @@ notify:
     thread_capture: true         # the chat layer has no channel without it
   thread:
     chat_calls_per_hour: 30      # default 30
-    chat_tokens_per_hour: 107720 # default 107720 — derived, not round
+    chat_tokens_per_hour: 109320 # default 109320 — derived, not round
 ```
 
 **This is a paid path anyone in the channel can trigger.** With `model.chat` set,
