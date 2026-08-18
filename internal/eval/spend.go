@@ -42,5 +42,12 @@ type Spend struct {
 	// verify tokens at a cheaper model's rates and reported $0.198 for a run that cost
 	// $0.825. VerifyOn cannot carry rates without a model, so the halves cannot drift
 	// apart again.
+	//
+	// It reaches only two of the three runners in practice: ComparisonRunner's
+	// LoopInvestigator names no Verify at all, so the --compare arm never runs the
+	// adversarial pass and has no verify tokens to route or price. That asymmetry is
+	// its own question (every production site and both other arms DO verify, so the
+	// benchmark scores a loop no deployment runs) and is deliberately not settled
+	// here — turning it on changes what --compare measures and what it costs.
 	Verifier investigate.VerifyTier
 }
