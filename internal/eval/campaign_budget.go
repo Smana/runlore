@@ -112,7 +112,8 @@ func (b *CampaignBudget) observe(u providers.Usage) (crossed bool) {
 }
 
 // budgetedModel is the chokepoint: it refuses a completion once the campaign ceiling
-// has been crossed, and accumulates the ones it lets through.
+// has been crossed, and accumulates every one it lets through — including the ones
+// that then failed.
 type budgetedModel struct {
 	budget *CampaignBudget
 	inner  providers.ModelProvider
@@ -120,14 +121,25 @@ type budgetedModel struct {
 
 func (m *budgetedModel) Complete(ctx context.Context, req providers.CompletionRequest) (providers.CompletionResponse, error) {
 	if m.budget.Exceeded() {
+		// Refused here, so it never reached the provider and was never billed: nothing
+		// to account, and observe is deliberately not called.
 		return providers.CompletionResponse{}, ErrCampaignBudgetExceeded
 	}
 	resp, err := m.inner.Complete(ctx, req)
-	if err != nil {
-		return resp, err // a failed call billed nothing we can account for
-	}
+	// Account BEFORE returning, on the error path too. A completion that FAILED still
+	// cost whatever the provider reported before it broke: every model client hands
+	// those counts back as providers.CompletionResponse.CostOnly() alongside its error
+	// for exactly this reader, and internal/investigate's loop accumulates usage ahead
+	// of its own failure branch on the same rule. A ceiling that skipped failures let a
+	// flapping provider spend without limit — 30 cases against a provider dying at
+	// 126k tokens a call billed 3.78M tokens under a 50k ceiling, ran every case,
+	// reported Exceeded=false and never fired the halt. The refusal above is what stops
+	// the spend; this is what lets it know there is spend to stop.
+	//
+	// Zero usage (a failure before the provider reported anything) adds nothing —
+	// "unknown", not a claim that the call was free, and not a guess the other way.
 	if m.budget.observe(resp.Usage) && m.budget.OnExceeded != nil {
 		m.budget.OnExceeded()
 	}
-	return resp, nil
+	return resp, err
 }
