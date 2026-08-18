@@ -17,6 +17,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/url"
+	"reflect"
 	"runtime/debug"
 	"strconv"
 	"strings"
@@ -123,6 +124,50 @@ type ThreadHandler interface {
 	Busy(ctx context.Context, channel, root string)
 }
 
+// nilableKinds are the reflect kinds for which Value.IsNil is defined. Value.IsNil
+// PANICS on any other kind, so it must never be called without this check.
+var nilableKinds = map[reflect.Kind]bool{
+	reflect.Chan: true, reflect.Func: true, reflect.Interface: true, reflect.Map: true,
+	reflect.Pointer: true, reflect.Slice: true, reflect.UnsafePointer: true,
+}
+
+// liveIface normalises a TYPED-NIL interface value to a true nil interface, so
+// that "not wired" is representable in exactly one way.
+//
+// Every optional field of Actions is an INTERFACE, but the builders that fill
+// them in production return CONCRETE POINTERS and return nil to mean "not
+// configured" — app.BuildThreadMention alone does so for three separate
+// misconfigurations: no forge configured, no bot-token delivery target resolved,
+// no thread-capable notifier resolved. A nil concrete pointer stored in an
+// interface is a NON-NIL interface value, so handleSlackEvent's `s.threads ==
+// nil` test read "wired" in all three states. The endpoint then answered 401
+// rather than 404 to an operator's pre-flight probe — reading as "live, you just
+// signed it wrong" — and acked a real signed app_mention 200 before
+// dereferencing the nil receiver, losing the human's note to a recovered panic
+// in a detached goroutine.
+//
+// Normalising HERE rather than at the call site is deliberate, and it is applied
+// to ALL THREE optional fields rather than only the one that was reported.
+// `s.threads == nil`, `s.pauser == nil` and `s.feedback == nil` each decide
+// whether an internet-facing endpoint exists or an action can be vetoed; a
+// safety guard whose correctness depends on every present and future caller
+// remembering to nil-check before filling an exported struct field is not a
+// safety guard, and that argument is not specific to Threads. The call sites are
+// still expected to assign guarded — see RunServe, and the
+// TestActionsInterfaceFieldsAreNeverAssignedRawBuilderResults guard in
+// internal/app that enforces it for the whole class — but the invariant no
+// longer depends on them.
+//
+// Cost is one reflect call per field per process, in New.
+func liveIface[T any](v T) T {
+	rv := reflect.ValueOf(v)
+	if nilableKinds[rv.Kind()] && rv.IsNil() {
+		var zero T
+		return zero
+	}
+	return v
+}
+
 // Actions bundles the optional rung-2/rung-3 wiring: the approval queue, the auto
 // kill-switch, the shared control token, the Slack signing secret, and the opt-in
 // feedback recorder.
@@ -158,11 +203,11 @@ func New(ready func() bool, acts Actions, built []source.Built, pipe *source.Pip
 	}
 	s := &Server{
 		ready:     ready,
-		approvals: acts.Approvals, pauser: acts.Pauser, feedback: acts.Feedback,
+		approvals: acts.Approvals, pauser: liveIface(acts.Pauser), feedback: liveIface(acts.Feedback),
 		token: acts.Token, slackSecret: acts.SlackSecret,
 		webhookToken: acts.WebhookToken, approvers: approvers, metrics: metricsHandler, log: log,
 		guard:            newAuthGuard(),
-		threads:          acts.Threads,
+		threads:          liveIface(acts.Threads),
 		seenEvents:       newSeenSet(1024),
 		telemetryMetrics: acts.Metrics,
 		eventDispatcher:  thread.NewDispatcher(maxConcurrentMentions, mentionHandlerTimeout, log),
