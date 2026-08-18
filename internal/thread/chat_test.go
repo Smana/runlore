@@ -1900,7 +1900,7 @@ func TestChatAnswerNilModelSpendsNothing(t *testing.T) {
 // unfenced region safe is that no evidence item can become a LINE of its own:
 // a bullet's content may be a stranger's, but its framing may not be.
 //
-// This pins the mitigation (chatSafe's singleLine), not the prose. It passed
+// This pins the mitigation (chatSafe's SingleLine), not the prose. It passed
 // when written — it is a regression pin on an invariant the code already holds,
 // added because nothing else asserted it.
 func TestChatContextEvidenceCannotForgeAFramingLine(t *testing.T) {

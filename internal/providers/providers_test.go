@@ -6,6 +6,7 @@ import (
 	"context"
 	"encoding/json"
 	"reflect"
+	"strings"
 	"testing"
 
 	"github.com/Smana/runlore/internal/providers"
@@ -262,5 +263,51 @@ func TestKBUpdateClassifiesEveryFieldForEscaping(t *testing.T) {
 				t.Errorf("KBUpdate has no field %q — stale classification entry", name)
 			}
 		}
+	}
+}
+
+// TestEntryResourceRefNarrowsToTheMergeGatesShape pins the one property the
+// knowledge base's merge gate cares about — kbvalidate rejects any `resource:`
+// containing whitespace — and the one property recall cares about: the value
+// that survives is still a usable structural index, not an empty string.
+//
+// The whitespace-bearing fixtures are the live one from #491: a finding covering
+// three Argo CD Applications reached Workload.Name as the model's own
+// comma-and-space list, so Ref() rendered "argocd/essentials, monitoring,
+// argocd-app-of-apps" and the entry's own validate job rejected it.
+func TestEntryResourceRefNarrowsToTheMergeGatesShape(t *testing.T) {
+	tests := []struct {
+		name string
+		ref  string
+		want string
+	}{
+		{"model listed several objects, comma-and-space", "argocd/essentials, monitoring, argocd-app-of-apps", "argocd/essentials"},
+		{"a plain ref is untouched", "tooling/harbor-registry", "tooling/harbor-registry"},
+		{"a bare namespace is untouched", "tooling", "tooling"},
+		{"empty stays empty", "", ""},
+		{"whitespace-only yields empty rather than a blank resource", "   \t ", ""},
+		{"a comma-joined list WITHOUT whitespace clears the gate already and is left alone", "argocd/a,b,c", "argocd/a,b,c"},
+		// The "whitespace-free input is returned exactly as given" promise is what
+		// lets every caller say no entry that merges today is written differently,
+		// so it has to hold for input the punctuation trim would otherwise rewrite.
+		// These three end IN that trim's cutset, which the case above does not —
+		// and an unguarded TrimRight silently changed all three.
+		{"a trailing comma is left alone when there was nothing to split", "argocd/a,b,c,", "argocd/a,b,c,"},
+		{"a trailing semicolon likewise", "a;b;", "a;b;"},
+		{"a trailing slash likewise", "argocd/app/", "argocd/app/"},
+		{"surrounding whitespace is trimmed", "  tooling/harbor  ", "tooling/harbor"},
+		{"a tab separator counts as whitespace too", "tooling/harbor\tregistry", "tooling/harbor"},
+		{"a dangling slash would leave an empty name half", "tooling/ harbor", "tooling"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := providers.EntryResourceRef(tt.ref)
+			if got != tt.want {
+				t.Errorf("EntryResourceRef(%q) = %q, want %q", tt.ref, got, tt.want)
+			}
+			if strings.ContainsAny(got, " \t\r\n") {
+				t.Errorf("EntryResourceRef(%q) = %q — still contains whitespace, which the merge gate rejects outright", tt.ref, got)
+			}
+		})
 	}
 }

@@ -78,7 +78,10 @@ generic `*(password|secret|api_key|token|…): <value>` pairs, and the values un
 manifest's `data:`/`stringData:` block — including one surfaced inside a git diff. A masked
 Secret value is also **learned**: its base64 blob is decoded and both forms are scrubbed from the
 **whole payload**, so the same secret quoted decoded in a log line or encoded in an event does not
-outlive the manifest that names it.
+outlive the manifest that names it. One shape is masked **structurally** rather than textually: a
+container's `env` puts the sensitive word in the *value* of `name:` and the credential under the
+literal key `value:`, which no key-name rule can see, so `resource_spec` walks the decoded object
+and masks it before anything is rendered.
 
 > [!WARNING]
 > **Redaction is a mitigation, not a guarantee**
@@ -109,6 +112,14 @@ The chart's RBAC is scoped tightly (`deploy/helm/runlore/templates/rbac.yaml`):
   silent drift); leaving both at the defaults limits raw-log reads to the incident namespace plus
   `flux-system`. The app guard must stay a superset of the RBAC namespaces, or `pod_logs` is blocked at
   the app layer for namespaces RBAC would otherwise permit.
+- **`resource_spec`'s read-only kind allowlist:** `rbac.resourceSpecRules` grants `get` on the
+  spec-bearing kinds the tool reads (Services, workloads, NetworkPolicies, HPAs, PVCs, StorageClasses,
+  scrape CRs …). It is an **allowlist, never a wildcard**, on purpose: `resources: ["*"]` includes
+  `secrets`. The tool refuses the `Secret` kind before *and* after resolution — a spelling that
+  case-folds to "secret", and any resource literally named `secrets` in any API group, is refused —
+  but that is an application-layer policy. **RBAC is the boundary.** A kind missing from the list is
+  reported to the model as a *denial*, never as a missing object, so a gap degrades the tool instead
+  of fabricating evidence.
 - **Namespaced Role for actions:** only when `rbac.allowActions` is set, `get/patch` on
   `kustomizations`/`helmreleases` over `rbac.actionNamespaces` — a bounded, opt-in blast radius that
   must mirror `config.actions.allow.namespaces`.
@@ -121,6 +132,13 @@ The chart's RBAC is scoped tightly (`deploy/helm/runlore/templates/rbac.yaml`):
 - **Scope the App to the KB repo** (Contents/PRs/Issues read-write), plus optional read-only on your
   GitOps source repos for the what-changed diff. Disable the App's webhook. See
   [Getting started → GitHub App]({{< relref "getting-started.md" >}}).
+- **The clone credential is confined to one host.** RunLore attaches the forge token only to clones of
+  `forge.git_host` (derived from `github_api_url` / `gitlab.base_url` unless you set it); any other
+  host clones anonymously. This matters because a GitOps `spec.source.repoURL` is *cluster state* — a
+  namespace admin who can create an Argo CD `Application` or a Flux `GitRepository` would otherwise
+  choose where the token is sent. A GitHub Enterprise install with subdomain isolation must name
+  `forge.git_host`, and **fails config load** until it does, so the credential is never quietly
+  withheld from your own GitOps repo either.
 - **Secrets by indirection.** Every credential is referenced by the *name* of an env var / Secret key,
   never inlined in config — so config can't leak a secret (see [Configuration]({{< relref "/docs/configuration/configuration.md" >}})).
 - **Webhook auth.** The incident webhook accepts a bearer token (`server.webhook_token_env`). It is

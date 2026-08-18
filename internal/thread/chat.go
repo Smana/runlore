@@ -474,7 +474,7 @@ func (c *Chat) renderContext(tc Context, author, text string) string {
 // and bounded to maxBytes. Redaction runs first for the same reason as in
 // renderContext, and the cap runs last so it holds unconditionally.
 func chatSafe(s string, maxBytes int) string {
-	return truncate(singleLine(strings.TrimSpace(redact.Secrets(s))), maxBytes)
+	return truncate(SingleLine(strings.TrimSpace(redact.Secrets(s))), maxBytes)
 }
 
 // writeEvidence renders what the investigation found. Only populated lists get

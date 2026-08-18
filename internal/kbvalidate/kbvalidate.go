@@ -205,6 +205,18 @@ func ValidateStructural(e catalog.Entry) []Issue {
 // Sections maps each "## Heading" (lowercased) to its trimmed content. Exported
 // so `lore kb import` can infer Incident-vs-Playbook from a source document's
 // OKF sections using the same heading parser the validator gates on.
+//
+// A heading inside a fenced code block is CODE, not a heading — the same answer
+// catalog.Entry.Section gives, from the same scanner (catalog.FencedLines), so
+// the merge gate and the read path cannot disagree about what a section is. See
+// FencedLines for what the two cost while they did.
+//
+// Fence CONTENT is still part of the section, and that is where this parser and
+// catalog.Entry.Section legitimately differ: that one builds a quotable prose
+// excerpt for a chat notification and drops code, while this one only asks
+// whether a section is present and non-empty — and a resolution's command block
+// is part of the resolution. They must agree on headings; they need not agree on
+// what is worth quoting.
 func Sections(body string) map[string]string {
 	out := map[string]string{}
 	cur := ""
@@ -215,11 +227,15 @@ func Sections(body string) map[string]string {
 		}
 		buf = nil
 	}
-	for _, line := range strings.Split(body, "\n") {
-		if label, ok := heading(line); ok {
-			flush()
-			cur = label
-			continue
+	lines := strings.Split(body, "\n")
+	fenced := catalog.FencedLines(lines)
+	for i, line := range lines {
+		if !fenced[i] {
+			if label, ok := heading(line); ok {
+				flush()
+				cur = label
+				continue
+			}
 		}
 		if cur != "" {
 			buf = append(buf, line)

@@ -18,13 +18,71 @@ import (
 
 	"github.com/Smana/runlore/internal/action"
 	"github.com/Smana/runlore/internal/catalog"
+	"github.com/Smana/runlore/internal/embed"
 	"github.com/Smana/runlore/internal/outcome"
 	"github.com/Smana/runlore/internal/providers"
 	"github.com/Smana/runlore/internal/redact"
 	"github.com/Smana/runlore/internal/telemetry"
 )
 
-const systemPrompt = `You are an SRE incident investigator. The cause is unknown — investigate by
+// systemPrompt assembles the system prompt for the GitOps engine this deployment runs.
+//
+// It is engine-conditional because the tool SCHEMAS are: gitops_resource_status refuses
+// Flux kinds under argocd, and controller_logs is not registered there at all, yet the
+// prompt told the model to follow a Kustomization's sourceRef and read
+// kustomize-controller's logs. A prompt that instructs what the schema forbids is how the
+// original bug (#503) reached the model — three HelmRelease/Kustomization lookups on a
+// cluster with no Flux CRDs, all answered "NOT FOUND", all cited as evidence.
+func systemPrompt(engine string) string {
+	return systemPromptIntro +
+		"\n\n" + gitopsDrillPrompt(engine) +
+		"\n\n" + workloadPrompt(engine) +
+		"\n\n" + systemPromptRigor
+}
+
+// gitopsDrillPrompt is the symptom-to-root drill, in the vocabulary of the engine that is
+// actually wired — including which controller logs are reachable: controller_logs is
+// registered under Flux ONLY (see app.clusterTools), so naming it under argocd sends the
+// model at a tool that is not in its list.
+func gitopsDrillPrompt(engine string) string {
+	if engine == "argocd" {
+		return `Drill from symptom to ROOT cause — don't stop at the first failing resource. When an Argo CD
+Application is failing, call gitops_resource_status on it; read its sync/health status, conditions and
+source refs; use gitops_tree to walk its managed resources (and app-of-apps children) down to the
+failing one; and use query_logs on the responsible controller (argocd-application-controller,
+argocd-repo-server) to learn WHY it failed. Confirm hypotheses with metrics and, where relevant,
+network drops.`
+	}
+	return `Drill from symptom to ROOT cause — don't stop at the first failing resource. When a Flux
+resource is failing, call gitops_resource_status on it; follow its sourceRef/dependsOn; use gitops_tree
+to find the root (a not-Ready node, or one the API did not return); and use controller_logs /
+query_logs on the relevant controller (e.g. kustomize-controller, source-controller, helm-controller)
+to learn WHY it failed. Confirm hypotheses with metrics and, where relevant, network drops.`
+}
+
+// workloadPrompt is the pod-level triage paragraph. Only the two engine-specific tokens
+// vary — the symptom shape it opens with, and where the owning GitOps object lives —
+// so the paragraph itself stays single-sourced.
+func workloadPrompt(engine string) string {
+	stuck, where := "a HelmRelease install timing out", `remember the Flux Kustomization/HelmRelease
+usually lives in flux-system, not the workload's namespace; but you do NOT need to hunt for it —
+what_changed takes the FAILING WORKLOAD'S namespace and resolves the owning Kustomization for you.`
+	if engine == "argocd" {
+		stuck, where = "an Application stuck Progressing or Degraded", `remember the Argo CD Application
+usually lives in the argocd namespace, not the workload's; but you do NOT need to hunt for it —
+what_changed takes the FAILING WORKLOAD'S namespace and resolves the owning Application for you.`
+	}
+	return `When a WORKLOAD won't run (pods not Ready, ` + stuck + `), the cause is usually at
+the pod level — call pod_status on the namespace FIRST: it names container failures verbatim
+(CreateContainerConfigError → the exact missing Secret/ConfigMap key; ImagePullBackOff; CrashLoopBackOff;
+RunContainerError). Then call kube_events for causes that live only in the event stream
+(FailedScheduling "Insufficient cpu/memory", FailedMount, FailedAttachVolume, failing probes). These two
+tools see pod-level failures that logs and GitOps status cannot — a container that never started has no
+logs, and "Insufficient cpu" is an Event, not a log line. When you inspect a GitOps object directly
+(gitops_resource_status/gitops_tree), ` + where
+}
+
+const systemPromptIntro = `You are an SRE incident investigator. The cause is unknown — investigate by
 calling the available tools to gather evidence (start with what_changed), reason about both
 change-caused and no-change causes, then call submit_findings exactly once with ranked root causes,
 evidence, and anything you could not determine. Be honest about uncertainty.
@@ -43,32 +101,16 @@ root cause and the fix directly; use it to guide the rest of the investigation.
 A tool ERROR or "unavailable" backend means MISSING DATA — it is NEVER evidence of a problem. If
 network_drops errors, that does NOT mean there is a network issue; if query_logs errors, that does
 NOT mean logging is the cause. Note the missing signal as unresolved and base your conclusion on the
-tools that DID return data. Do not blame the subsystem whose tool failed.
+tools that DID return data. Do not blame the subsystem whose tool failed.`
 
-Drill from symptom to ROOT cause — don't stop at the first failing resource. When a Flux/GitOps
-resource is failing, call gitops_resource_status on it; follow its sourceRef/dependsOn; use gitops_tree
-to find the root (a not-Ready or NOT FOUND node); and use controller_logs / query_logs on the
-relevant controller (e.g. kustomize-controller, source-controller, helm-controller) to learn WHY it
-failed. Confirm hypotheses with metrics and, where relevant, network drops.
-
-When a WORKLOAD won't run (pods not Ready, a HelmRelease install timing out), the cause is usually at
-the pod level — call pod_status on the namespace FIRST: it names container failures verbatim
-(CreateContainerConfigError → the exact missing Secret/ConfigMap key; ImagePullBackOff; CrashLoopBackOff;
-RunContainerError). Then call kube_events for causes that live only in the event stream
-(FailedScheduling "Insufficient cpu/memory", FailedMount, FailedAttachVolume, failing probes). These two
-tools see pod-level failures that logs and Flux status cannot — a container that never started has no
-logs, and "Insufficient cpu" is an Event, not a log line. When you inspect a GitOps object directly
-(gitops_resource_status/gitops_tree), remember the Flux Kustomization/HelmRelease usually lives in
-flux-system, not the workload's namespace; but you do NOT need to hunt for it — what_changed takes the
-FAILING WORKLOAD'S namespace and resolves the owning Kustomization/Application for you.
-
-RIGOR — correctness over plausibility. A wrong-but-confident root cause is worse than an honest
+const systemPromptRigor = `RIGOR — correctness over plausibility. A wrong-but-confident root cause is worse than an honest
 "unresolved":
 - Correlation is NOT causation. "The incident started after change X" does not prove X caused it.
   Before naming a change as a root cause you MUST read its actual diff and confirm it plausibly
   affects THIS failing workload (its namespace, or a resource it depends on). Call what_changed with
-  the failing workload's namespace and let it resolve the owning GitOps object — do not query
-  flux-system directly for it, and do not pin the incident on an unrelated cluster-wide change.
+  the failing workload's namespace and let it resolve the owning GitOps object — do not query the
+  GitOps controller's own namespace directly for it, and do not pin the incident on an unrelated
+  cluster-wide change.
 - Never propose reverting or modifying something you have not inspected. If you couldn't read a
   change's diff, you cannot claim it's the cause — say so in unresolved.
 - Calibrate confidence to the evidence: a verified causal chain (read the change, saw the matching
@@ -250,7 +292,7 @@ type LoopInvestigator struct {
 // system returns the system prompt, extended with action proposals when the policy is
 // enabled, and with an MCP-tools note when external MCP tools (name contains "__") are present.
 func (li *LoopInvestigator) system() string {
-	s := systemPrompt
+	s := systemPrompt(engineFromTools(li.Tools))
 	if li.Actions != nil && li.Actions.Enabled() {
 		s += "\n\n" + actionsPrompt
 	}
@@ -284,16 +326,28 @@ func (li *LoopInvestigator) Investigate(ctx context.Context, req Request) error 
 	// target), augmented by what_changed and the gitops inspector tools. reviewActions
 	// consults the set to guard executable targets (see guardUnobservedTargets).
 	ctx = WithObservedResources(ctx, req.Workload)
+	// Charge this investigation for the embeddings it causes. The hybrid-recall path
+	// embeds the query against a PAID endpoint — once for the recall lookup, again for
+	// the near-miss lookup that follows a non-fire — from inside a run that has spend
+	// ceilings; but the call goes out through catalog.Embedder, which returns vectors
+	// and nothing else, so those tokens never reached the totals the ceilings compare
+	// against and an embed-heavy recall was free by construction. A context-scoped sink
+	// carries the spend to its payer without widening two interfaces (HybridSearcher,
+	// Embedder) that have no other reason to know what an embedding costs. Installed
+	// before tryRecall, which is where the embedding happens; embedSpend is its only
+	// reader.
+	ctx = embed.WithUsageSink(ctx, &embed.UsageSink{})
 	// Record wall-clock duration + a completion-result label at whichever exit we take.
 	start := time.Now()
 	result := "unresolved"
 	// Per-investigation token/cost accounting. loopTotals accumulates the ReAct
 	// loop's model calls; verifyTotals the adversarial verify pass's (main loop or
-	// recall). setUsage stamps the combined, priced totals onto whatever result we
-	// deliver, so cost is surfaced no matter which exit we take.
+	// recall); the query embeddings live on the context sink installed above. setUsage
+	// stamps the combined, priced totals onto whatever result we deliver, so cost is
+	// surfaced no matter which exit we take.
 	var loopTotals, verifyTotals providers.UsageTotals
 	setUsage := func(inv *providers.Investigation) {
-		inv.Usage = li.aggregateUsage(loopTotals, verifyTotals)
+		inv.Usage = li.aggregateUsage(loopTotals, verifyTotals, embedSpend(ctx))
 	}
 	// finish is the SINGLE terminal-delivery chokepoint (#234 follow-up): every exit
 	// that accepts an investigation — the happy submit_findings turn, the recall
@@ -376,12 +430,14 @@ func (li *LoopInvestigator) Investigate(ctx context.Context, req Request) error 
 	// tryRecall runs the instant-recall short-circuit + near-miss block: it delivers
 	// (finish) and reports done==true when a recalled answer survives verify, and
 	// otherwise returns the near-miss lead (if any) to fold into the seed. It threads
-	// `result` (for the deferred completion metric) and `verifyTotals` (for the
-	// reranker/verify tokens) by pointer so a short-circuit records the same labels the
-	// inline block did. nearMiss is the top structurally-agreeing catalog candidate
+	// `result` (for the deferred completion metric) and BOTH totals by pointer:
+	// `verifyTotals` is where the reranker/verify tokens land, and `loopTotals` is read
+	// (with the query embeddings) to answer whether the reranker's paid call is
+	// affordable at all — the running total has to be the loop's own, not a
+	// reconstruction of it. nearMiss is the top structurally-agreeing catalog candidate
 	// surfaced when recall is consulted but does NOT fire — folded into the seed prompt
 	// as an UNVERIFIED lead (C2).
-	nearMiss, done := li.tryRecall(ctx, req, &result, &verifyTotals, finish)
+	nearMiss, done := li.tryRecall(ctx, req, &result, &loopTotals, &verifyTotals, finish)
 	if done {
 		return nil
 	}
@@ -485,6 +541,18 @@ func (li *LoopInvestigator) Investigate(ctx context.Context, req Request) error 
 				li.Metrics.ModelCachedInputTokens.Add(ctx, int64(resp.Usage.CachedInputTokens), provAttr)
 			}
 		}
+		// Accumulate the provider-reported usage BEFORE any of the terminal branches
+		// below, so no exit can drop a call that was already billed. A completion that
+		// FAILED still cost whatever the provider reported before it broke: every model
+		// client returns CompletionResponse.CostOnly() alongside its error for exactly
+		// this reader ("the token counts the provider reported before the failure are
+		// real and billed"), and a total that only counts successful calls lets a
+		// flapping provider spend without the ceiling ever seeing it. That is the same
+		// discipline summarizeElided already applies to the compaction digest; this is
+		// the loop's own call finally reading the same rule. Zero usage (a failure before
+		// the provider reported anything) still counts as a model call and adds no
+		// tokens — "unknown", never a claim that the call was free.
+		addUsage(&loopTotals, resp.Usage)
 		if err != nil {
 			// The per-investigation deadline fired (or the parent ctx was cancelled):
 			// deliver a synthetic timeout result rather than bubbling a bare error the
@@ -505,10 +573,12 @@ func (li *LoopInvestigator) Investigate(ctx context.Context, req Request) error 
 		// Anchor subsequent budget estimates to reality: the provider just reported the
 		// true input size for the request we estimated as reqHeuristic. Zero usage
 		// (provider didn't report) is a no-op — the pure heuristic keeps driving the guard.
+		// Only a SUCCEEDED request calibrates: the ratio describes how a full request maps
+		// to reported input, and a stream that died mid-flight may have reported only part
+		// of it. The spend accounting above deliberately does not make that distinction —
+		// a partial figure is still money spent — but a partial figure would corrupt a
+		// ratio that is then applied to every later estimate.
 		calib.observe(reqHeuristic, resp.Usage)
-		// Accumulate the same reported usage the calibrator just read (no double
-		// count): one model call plus its tokens toward the per-investigation total.
-		addUsage(&loopTotals, resp.Usage)
 		li.Log.Debug("investigation step", "title", req.Title, "step", step, "tool_calls", len(resp.ToolCalls), "text_len", len(resp.Text))
 		// The provider declined the turn (a safety/refusal stop reason): deliver a
 		// first-class unresolved result rather than misreading the empty response as a
@@ -695,23 +765,37 @@ func (li *LoopInvestigator) Investigate(ctx context.Context, req Request) error 
 // returns immediately, skipping the full ReAct loop. Otherwise it returns the C2
 // near-miss lead (or nil) for the caller to fold into the seed prompt.
 //
-// It threads two pieces of Investigate's state by pointer, mirroring the inline block
-// exactly: `result` (the deferred completion-metric label — "recall" on a short
-// circuit) and `verifyTotals` (so the reranker + the recall verify pass price
-// their tokens into the per-investigation cost; both run on the verify tier).
+// It threads Investigate's state by pointer, mirroring the inline block exactly:
+// `result` (the deferred completion-metric label — "recall" on a short circuit) and
+// `verifyTotals` (so the reranker + the recall verify pass price their tokens into the
+// per-investigation cost; both run on the verify tier). `loopTotals` is read-only here
+// — the loop has not run yet, so it is zero on every real call — and is threaded
+// anyway rather than assumed zero: the affordability check below must read the same
+// aggregateUsage the loop's own ceiling does, and an assumption that happens to hold
+// today is how a guard quietly stops guarding.
 //
 // Instant recall is disabled under auto-execution: a poisoned catalog entry must not
 // short-circuit a real investigation straight into an auto-executed action. The
 // near-miss it may return shares that same `!IsAuto()` gate — it is only ever set
 // inside this block — so a poisoned KB entry can shape neither an auto-executed action
 // (instant recall) nor even the prompt under auto.
-func (li *LoopInvestigator) tryRecall(ctx context.Context, req Request, result *string, verifyTotals *providers.UsageTotals, finish func(providers.Investigation)) (nearMiss *catalog.Entry, done bool) {
+func (li *LoopInvestigator) tryRecall(ctx context.Context, req Request, result *string, loopTotals, verifyTotals *providers.UsageTotals, finish func(providers.Investigation)) (nearMiss *catalog.Entry, done bool) {
 	if li.Recall == nil || li.autoExecuting() {
 		return nil, false
 	}
-	// Thread verifyTotals so the reranker's tokens fold into the
-	// per-investigation cost — it runs on the verify tier, so it prices there.
-	entry, conf, outcomeRejected := li.Recall.lookupWithUsage(ctx, req, verifyTotals)
+	// The recall path's spend channel: BOTH halves of check-then-spend-then-account in
+	// one value. `totals` is verifyTotals so the reranker's tokens fold into the
+	// per-investigation cost at the tier it actually runs on; `afford` is the loop's own
+	// budgetTrip over its own aggregateUsage, so the ceiling the reranker is measured
+	// against is the same number, computed the same way, that stops the loop one step
+	// later — not a second opinion that could disagree with it.
+	spend := &recallSpend{
+		totals: verifyTotals,
+		afford: func(est int) string {
+			return li.budgetTrip(est, li.aggregateUsage(*loopTotals, *verifyTotals, embedSpend(ctx)))
+		},
+	}
+	entry, conf, outcomeRejected := li.Recall.lookupWithUsage(ctx, req, spend)
 	if entry == nil {
 		// Recall was consulted but no gate cleared: report the non-fire so a caller
 		// can distinguish it from a recall that fired and was later withdrawn.
@@ -805,16 +889,20 @@ func (li *LoopInvestigator) tryRecall(ctx context.Context, req Request, result *
 		m.RecallHits.Add(ctx, 1, metric.WithAttributes(attribute.String("result", recallResult)))
 		if len(rec.RootCauses) > 0 {
 			// What this short-circuit COST, measured — not a guess at what it saved. By
-			// here verifyTotals holds every model call the recall path made (the opt-in
-			// reranker plus the adversarial verify pass), so the real number is already in
-			// hand: a dashboard differences it against the per-investigation token
-			// histograms recordUsageMetrics emits to size what recall avoided. Cached input
-			// is included (providers.Usage.InputTokens already counts it), matching those
-			// histograms.
+			// here verifyTotals holds the recall path's completions (the opt-in reranker
+			// plus the adversarial verify pass) and the context sink holds the query
+			// embeddings it caused, so the real number is already in hand: a dashboard
+			// differences it against the per-investigation token histograms
+			// recordUsageMetrics emits to size what recall avoided. Cached input is
+			// included (providers.Usage.InputTokens already counts it), matching those
+			// histograms — as are the embeddings, for the same reason: they are on the
+			// other side of the subtraction too, so omitting them here would overstate the
+			// saving by exactly the amount recall itself spent on retrieval.
 			//
 			// Delivered short-circuits only: a recall the verify pass refutes falls through
 			// to a full investigation, which reports these tokens in its own totals.
-			m.RecallTokensSpent.Add(ctx, int64(verifyTotals.InputTokens+verifyTotals.OutputTokens))
+			m.RecallTokensSpent.Add(ctx, int64(verifyTotals.InputTokens+verifyTotals.OutputTokens+
+				embedSpend(ctx).InputTokens))
 		}
 	}
 	if len(rec.RootCauses) > 0 {
@@ -967,8 +1055,9 @@ func (li *LoopInvestigator) enforceBudget(ctx context.Context, req Request, sys 
 	// Priced the same way the delivered finding is (loop tokens at Pricing, verify
 	// tokens at VerifyPricing). Read AFTER compaction so a summarize-mode digest call
 	// counts against the ceiling on the very step that paid for it, and after tryRecall
-	// so a recall fall-through's reranker + verify calls are already in it.
-	spent := li.aggregateUsage(*loopTotals, *verifyTotals)
+	// so a recall fall-through's reranker + verify calls — and its query embeddings —
+	// are already in it.
+	spent := li.aggregateUsage(*loopTotals, *verifyTotals, embedSpend(ctx))
 	crossed := li.budgetTrip(est, spent)
 	if crossed == "" {
 		return false

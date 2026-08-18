@@ -93,9 +93,9 @@ func TestVerifyPricingInherits(t *testing.T) {
 	verify := providers.UsageTotals{ModelCalls: 1, InputTokens: 500, OutputTokens: 40}
 	li := &LoopInvestigator{Pricing: &Pricing{InputUSDPerMTok: 10, OutputUSDPerMTok: 30}}
 	// Inherit: verify tokens priced at the main rate.
-	inherited := li.aggregateUsage(loop, verify)
+	inherited := li.aggregateUsage(loop, verify, providers.UsageTotals{})
 	li.VerifyPricing = &Pricing{InputUSDPerMTok: 1, OutputUSDPerMTok: 3} // cheaper verify model
-	overridden := li.aggregateUsage(loop, verify)
+	overridden := li.aggregateUsage(loop, verify, providers.UsageTotals{})
 	if !(overridden.CostUSD < inherited.CostUSD) {
 		t.Fatalf("a cheaper verify pricing must lower the cost: inherited=%.8f overridden=%.8f",
 			inherited.CostUSD, overridden.CostUSD)

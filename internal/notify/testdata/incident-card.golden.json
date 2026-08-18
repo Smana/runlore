@@ -640,5 +640,113 @@
       ],
       "text": "🔍 harbor-db migration lock (Medium confidence · 55%)"
     }
+  },
+  {
+    "fixture": "curate_failed",
+    "card": {
+      "blocks": [
+        {
+          "text": {
+            "emoji": true,
+            "text": "🔍 ArgoCDRepoServerDown — eu-west-1/argocd/argocd-repo-server",
+            "type": "plain_text"
+          },
+          "type": "header"
+        },
+        {
+          "text": {
+            "text": "🛠 *Action suggested* — argocd-repo-server OOMKilled after the 2.11 bump",
+            "type": "mrkdwn"
+          },
+          "type": "section"
+        },
+        {
+          "elements": [
+            {
+              "text": "🟢 *High confidence* · 85%",
+              "type": "mrkdwn"
+            }
+          ],
+          "type": "context"
+        },
+        {
+          "text": {
+            "text": "*Why:* 2.11 raised the manifest cache footprint past the 512Mi limit\n• container exit code 137 at 14:17",
+            "type": "mrkdwn"
+          },
+          "type": "section"
+        },
+        {
+          "type": "divider"
+        },
+        {
+          "text": {
+            "text": "*🛠 Suggested next steps*  _(read-only — RunLore won't apply these)_\n• raise the repo-server memory limit to 1Gi  _(reversible)_",
+            "type": "mrkdwn"
+          },
+          "type": "section"
+        },
+        {
+          "fields": [
+            {
+              "text": "*Alert:*\nArgoCDRepoServerDown (warning)",
+              "type": "mrkdwn"
+            },
+            {
+              "text": "*Cluster:*\neu-west-1",
+              "type": "mrkdwn"
+            },
+            {
+              "text": "*Resource:*\nDeployment argocd/argocd-repo-server",
+              "type": "mrkdwn"
+            },
+            {
+              "text": "*Started:*\n<!date^1783072800^{date_short_pretty} {time}|2026-07-03T10:00:00Z>",
+              "type": "mrkdwn"
+            },
+            {
+              "text": "*Recurrence:*\n🔁 #2 · last <!date^1780304400^{date_short_pretty} {time}|2026-06-01T09:00:00Z>",
+              "type": "mrkdwn"
+            }
+          ],
+          "type": "section"
+        },
+        {
+          "elements": [
+            {
+              "text": "📚 <https://github.com/o/kb/pull/271|view entry>  ·  ⚠️ could not save to the knowledge base: `open PR: github GET /repos/o/kb/git/ref/heads/main: status 403: {\"message\":\"Resource not accessible by integration\"}`  ·  5 model calls · 51204 in / 3117 out tokens (0% cached)",
+              "type": "mrkdwn"
+            }
+          ],
+          "type": "context"
+        },
+        {
+          "elements": [
+            {
+              "action_id": "runlore_feedback_up",
+              "text": {
+                "emoji": true,
+                "text": "👍 Accurate",
+                "type": "plain_text"
+              },
+              "type": "button",
+              "value": "ArgoCDRepoServerDown/argocd/argocd-repo-server"
+            },
+            {
+              "action_id": "runlore_feedback_down",
+              "text": {
+                "emoji": true,
+                "text": "👎 Off-base",
+                "type": "plain_text"
+              },
+              "type": "button",
+              "value": "ArgoCDRepoServerDown/argocd/argocd-repo-server"
+            }
+          ],
+          "type": "actions"
+        }
+      ],
+      "text": "🔍 argocd-repo-server OOMKilled after the 2.11 bump — Action suggested (High confidence · 85%)"
+    }
   }
 ]

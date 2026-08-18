@@ -82,6 +82,25 @@ gh api /installation/repositories
   repos need no grant.
 - `github_api_url` is only needed for **GitHub Enterprise Server** (e.g.
   `https://ghe.example.com/api/v3`); omit it for github.com.
+- **The installation token is only ever sent to your forge's git host.** `what_changed` clones the
+  repo a GitOps `spec.source.repoURL` names, and that field is cluster state — anyone who can create
+  an Argo CD `Application` or a Flux `GitRepository` writes it. A repoURL on any other host therefore
+  clones **anonymously** (public repos still work; a private one produces no diff). Nothing is lost by
+  this: an installation token authenticates only on the instance the App is installed on.
+- **GitHub Enterprise with [subdomain isolation](https://docs.github.com/en/enterprise-server/admin/configuring-settings/hardening-security-for-your-instance/enabling-subdomain-isolation)
+  needs `forge.git_host`.** With isolation on, the API is served from `api.HOSTNAME` while git and web
+  stay on `HOSTNAME`, so `github_api_url` alone cannot say which host to authenticate a clone to.
+  RunLore refuses to start on that config rather than guess — guessing wrong would withhold the token
+  from *every* GitOps repo and show up only as an empty `what_changed`:
+
+  ```yaml
+  forge:
+    github_api_url: https://api.ghe.example.com   # API (subdomain isolation)
+    git_host: ghe.example.com                     # git remotes / clone auth
+  ```
+
+  Without isolation (`https://ghe.example.com/api/v3`), the host is unambiguous and `git_host` is not
+  needed.
 - RunLore's writes are confined to the forge — it has **no cluster-mutating permissions**.
 
 ## Reference

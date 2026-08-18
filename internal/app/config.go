@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"github.com/Smana/runlore/internal/config"
+	"github.com/Smana/runlore/internal/providers"
 	"github.com/Smana/runlore/internal/source"
 )
 
@@ -226,12 +227,49 @@ func OutcomeKind(recalled bool) string {
 	return "fresh"
 }
 
-// GitopsEngine returns the configured GitOps engine, defaulting to flux.
+// GitopsEngine returns the configured GitOps engine, defaulting to flux. Anything it
+// does not recognise resolves to flux SILENTLY, which is why nothing may state a fact
+// about the cluster from it — see UnknownGitopsEngineWarning and WiredGitopsEngine.
 func GitopsEngine(cfg *config.Config) string {
 	if cfg.GitOps.Engine == "argocd" {
 		return "argocd"
 	}
 	return "flux"
+}
+
+// WiredGitopsEngine returns the engine of the GitOps provider actually built, falling
+// back to the configured value when the provider does not report one (a nil provider, or
+// a fake in a test).
+//
+// The distinction matters because the tool descriptions are read by the model on every
+// turn: sourcing the engine from a config string nothing validates means "argo" or
+// "ArgoCD" silently describes an Argo CD deployment as running Flux. The provider was
+// selected by the same config, so this usually agrees — but when it does not, the
+// provider is the one that will answer the calls.
+func WiredGitopsEngine(gp providers.GitOpsProvider, cfg *config.Config) string {
+	if r, ok := gp.(providers.GitOpsEngineReporter); ok {
+		return string(r.GitOpsEngine())
+	}
+	return GitopsEngine(cfg)
+}
+
+// UnknownGitopsEngineWarning decides the startup warning for a gitops.engine value
+// nothing recognises, returning "" when the value is valid or absent.
+//
+// GitopsEngine folds every unrecognised value into flux without a word, so a deployment
+// that wrote "argo", "ArgoCD" or "argo-cd" runs the whole Flux path: the Flux provider,
+// controller_logs registered, and the GitOps tools advertising Kustomization/HelmRelease
+// on a cluster that has no Flux CRDs. That is runlore#503's exact setup, reached by a
+// typo, and it is silent in every log. Config validation does not reject it (the field is
+// free-form and the default is meaningful), so the operator gets told instead.
+func UnknownGitopsEngineWarning(engine string) string {
+	if engine == "" || engine == "flux" || engine == "argocd" {
+		return ""
+	}
+	return fmt.Sprintf("gitops.engine=%q is not a recognised engine (want %q or %q) — falling back to "+
+		"flux. If this cluster runs Argo CD, every GitOps tool is now scoped to Flux kinds it can "+
+		"never find, and controller_logs is registered against controllers that do not exist.",
+		engine, "flux", "argocd")
 }
 
 // CostCeilingWithoutPricingWarning decides the startup warning for a cost ceiling

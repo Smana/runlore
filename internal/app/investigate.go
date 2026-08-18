@@ -36,6 +36,7 @@ import (
 	"github.com/Smana/runlore/internal/providers"
 	awscloud "github.com/Smana/runlore/internal/providers/cloud/aws"
 	"github.com/Smana/runlore/internal/providers/cluster"
+	"github.com/Smana/runlore/internal/redact"
 	"github.com/Smana/runlore/internal/sourcerepo"
 	"github.com/Smana/runlore/internal/telemetry"
 	"github.com/Smana/runlore/internal/whatchanged"
@@ -50,15 +51,28 @@ func BuildModelAndTools(ctx context.Context, cfg *config.Config, gp providers.Gi
 	}
 	model := BuildModel(cfg, apiKey)
 	// Catalog sync reads the KB repo, so it follows forge.provider — not the
-	// GitHub-App-only source used by the curate/sweep/differ paths.
-	forgeTok := BuildKBTokenSource(cfg, log)
+	// GitHub-App-only source the curate/sweep paths talk to the API with.
+	forgeTok := BuildCloneTokenSource(cfg, log)
 	var tools []investigate.Tool
 	if gp != nil {
 		tools = append(tools, investigate.WhatChangedTool{GitOps: gp})
-		// Deep read-only Flux introspection (status/events + dependency tree), when
-		// the GitOps provider supports it (Flux does).
+		// Deep read-only GitOps introspection (status/events + dependency tree), when
+		// the GitOps provider supports it (both Flux and Argo CD do).
+		//
+		// Engine is passed so each tool advertises ONLY the kinds that engine can own.
+		// Same reasoning as clusterTools gating controller_logs on Flux: a kind the engine
+		// cannot own is answerable only with a MISLEADING negative, and a model reads
+		// "HelmRelease not found" on an Argo CD cluster as "the workload is not deployed"
+		// rather than "that question has no possible answer here". See
+		// investigate.GitOpsKinds for the live case this comes from.
+		//
+		// It comes from the PROVIDER, not the config — see WiredGitopsEngine.
 		if insp, ok := gp.(providers.GitOpsInspector); ok {
-			tools = append(tools, investigate.GitOpsStatusTool{Inspector: insp}, investigate.GitOpsTreeTool{Inspector: insp})
+			engine := WiredGitopsEngine(gp, cfg)
+			tools = append(tools,
+				investigate.GitOpsStatusTool{Inspector: insp, Engine: engine},
+				investigate.GitOpsTreeTool{Inspector: insp, Engine: engine},
+			)
 		}
 	}
 	var recall *investigate.Recall
@@ -108,16 +122,13 @@ func BuildModelAndTools(ctx context.Context, cfg *config.Config, gp providers.Gi
 			}
 			// Hybrid (cosine-gated) recall — opt-in, and only effective once the catalog
 			// actually built vectors (an embedder was configured + embedding succeeded).
+			// The cosine gates are resolved by config.ApplyDefaults (0.80 / 0.05) rather
+			// than coalesced here, so the effective thresholds are readable from the
+			// config instead of existing only on this construction path.
 			if cfg.Catalog.InstantRecall.Hybrid {
 				recall.Hybrid = cat
 				recall.HybridMinScore = cfg.Catalog.InstantRecall.HybridMinScore
 				recall.HybridMarginGap = cfg.Catalog.InstantRecall.HybridMarginGap
-				if recall.HybridMinScore == 0 {
-					recall.HybridMinScore = 0.80
-				}
-				if recall.HybridMarginGap == 0 {
-					recall.HybridMarginGap = 0.05
-				}
 				log.Info("hybrid recall enabled (EXPERIMENTAL — tune cosine thresholds via the instant-recall eval)",
 					"hybrid_min_score", recall.HybridMinScore, "hybrid_margin_gap", recall.HybridMarginGap,
 					"vectors_ready", cat.HasVectors())
@@ -245,6 +256,14 @@ func BuildModelAndTools(ctx context.Context, cfg *config.Config, gp providers.Gi
 		kubeReader = cr
 		tools = append(tools, clusterTools(cr, cfg)...)
 	}
+	// resource_spec: read an arbitrary object's .spec/.status. Registered separately from
+	// clusterTools because it needs a DYNAMIC client plus discovery (the typed clientset
+	// cannot read a CRD), and it is absent rather than broken when either is unavailable —
+	// a tool that cannot answer must not exist, per the same reasoning that gates
+	// controller_logs on the engine.
+	if sr := BuildResourceSpecReader(log); sr != nil {
+		tools = append(tools, investigate.ResourceSpecTool{Reader: sr})
+	}
 	// Cloud context (AWS): CloudTrail "what changed" + EC2/ASG/EKS health. Opt-in.
 	var cloudProvider providers.CloudProvider
 	if cfg.Cloud.Provider == "aws" {
@@ -334,13 +353,16 @@ func appendSourceDiffTool(cfg *config.Config, tools []investigate.Tool, log *slo
 		log.Warn("source_repos: invalid allowlist; source_diff disabled", "err", err)
 		return tools
 	}
-	// Confine the GitHub App token to the forge's own host: source_diff clone
-	// URLs are model-chosen across the whole allowlist, so without this a
-	// github.com token would be transmitted to any other allowlisted host (e.g.
-	// a gitlab.com repo). Off-host repos clone anonymously.
+	// Confine the forge credential to the forge's own git host: source_diff clone
+	// URLs are model-chosen across the whole allowlist, so without this the token
+	// would be transmitted to any other allowlisted host (e.g. a gitlab.com repo
+	// on a GitHub forge). Off-host repos clone anonymously. The credential and the
+	// host it is confined to come from the same provider switch that what_changed
+	// uses, so a GitLab forge confines a GitLab token to the GitLab host rather
+	// than pinning it to github.com — a mismatch there withholds silently.
 	sd := &whatchanged.Differ{
-		TokenSource: BuildForgeTokenSource(cfg, log),
-		TokenHost:   githubGitHost(cfg.Forge.GitHubAPIURL),
+		TokenSource: BuildCloneTokenSource(cfg, log),
+		TokenHost:   forgeGitHost(cfg),
 	}
 	if cfg.GitOps.Mirror.IsEnabled() {
 		base := cfg.GitOps.Mirror.Dir
@@ -764,7 +786,31 @@ func onInvestigationComplete(ctx context.Context, found providers.Investigation,
 	// findings are still delivered.
 	if cur != nil {
 		if ref, err := cur.Curate(context.Background(), found); err != nil {
-			log.Error("curate findings", "err", err)
+			// Redacted ONCE, here, for both uses below.
+			//
+			// The egress chokepoint has already run. investigate.LoopInvestigator.deliver
+			// calls redactInvestigation and THEN OnComplete, so anything stamped onto
+			// `found` from here on has missed it — which would give CurateError the
+			// treatment of a redactionSkipField entry without being on that list, and
+			// falsify notify/templated's "the Investigation is already secret-redacted
+			// before any notifier runs". Every sink redacts again at render today, so
+			// there is no live leak; there would be one the moment curate_error is added
+			// to notify.Payload, which is the natural answer to #506's second ask.
+			// redact.Secrets is idempotent, so the render-site calls stay.
+			//
+			// The log line needs it just as much: a forge error carries a
+			// server-provided body, and this wrote it — credential and all — into
+			// whatever aggregator collects RunLore's logs.
+			reason := redact.Secrets(err.Error())
+			log.Error("curate findings", "err", reason)
+			// Carry the reason to delivery. Logging alone made this failure invisible to
+			// the human: an empty CuratedURL renders identically whether the write was
+			// skipped by design (below min_confidence, or a skip_verdicts verdict) or
+			// attempted and failed, and skipping is by far the common case. Observed live
+			// — an 85%-confidence finding whose KB PR 403'd was indistinguishable from a
+			// below-threshold one, and the operator only noticed because they happened to
+			// write a thread note, which DOES report the failure.
+			found.CurateError = reason
 		} else if ref.URL != "" {
 			found.CuratedURL = ref.URL
 			log.Info("curated", "url", ref.URL)

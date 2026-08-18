@@ -864,18 +864,18 @@ func modelVoice(s string) string { return QuoteUntrusted(s) }
 //
 // The set is UAX #14's mandatory breaks — the classes BK, CR, LF and NL — and
 // nothing else, because that is exactly the set a text layout is REQUIRED to
-// break at. singleLine already made this argument for the single-line YAML
+// break at. SingleLine already made this argument for the single-line YAML
 // title (see its doc comment: U+2028 and U+2029 are line breaks "many
 // renderers and tokenizers break on", which is what made a Cc-only check a
 // real gap rather than a pedantic one); this is the same fact applied to the
 // one untrusted span that is rendered multi-line BY DESIGN and so cannot be
-// flattened the way singleLine flattens a title.
+// flattened the way SingleLine flattens a title.
 //
 // CRLF is listed first so it folds to ONE break: strings.Replacer tries its
 // patterns in argument order at each position, so a later bare "\r" cannot
 // split a CRLF into two lines.
 //
-// It normalises breaks and nothing else, deliberately. singleLine additionally
+// It normalises breaks and nothing else, deliberately. SingleLine additionally
 // maps Cf and every other Unicode space because a title must end up on one
 // line; a quoted note must end up READABLE, so a tab, a no-break space and a
 // zero-width space are carried through exactly as written. Those reorder or

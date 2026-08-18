@@ -942,6 +942,90 @@ func TestValidateForgeProviderGitLab(t *testing.T) {
 	}
 }
 
+// TestValidateForgeGitHost pins the startup contract for the host RunLore's
+// forge credential may be cloned with.
+//
+// The credential is confined to that ONE host (a GitOps repoURL is cluster
+// state, so anyone who can create an Argo CD Application would otherwise pick
+// where the token goes). Confining is only safe if the host is KNOWN, and there
+// is exactly one shape where it is not: GitHub Enterprise with subdomain
+// isolation serves the API from api.HOSTNAME and git from HOSTNAME, so the API
+// URL cannot answer the question. Guessing api.HOSTNAME would withhold the
+// credential from every GitOps repo — the silent data gap of RunLore #495,
+// traded for a leak. So that shape is refused at config load, loudly, until the
+// operator names the git host.
+func TestValidateForgeGitHost(t *testing.T) {
+	t.Run("api-subdomain forge api url is refused without git_host", func(t *testing.T) {
+		c := &Config{}
+		c.Forge.GitHubAPIURL = "https://api.ghe.example.com"
+		err := c.Validate()
+		if err == nil || !strings.Contains(err.Error(), "forge.git_host") {
+			t.Fatalf("a subdomain-isolated GHE api url must fail load naming forge.git_host, got: %v", err)
+		}
+	})
+
+	t.Run("naming the git host resolves it", func(t *testing.T) {
+		c := &Config{}
+		c.Forge.GitHubAPIURL = "https://api.ghe.example.com"
+		c.Forge.GitHost = "ghe.example.com"
+		if err := c.Validate(); err != nil {
+			t.Fatalf("an explicit git host must validate clean, got: %v", err)
+		}
+	})
+
+	// Every unambiguous shape keeps working with no new config: this must not
+	// become a key every operator has to learn.
+	for _, apiURL := range []string{
+		"",                                // github.com
+		"https://api.github.com",          // github.com, spelled out
+		"https://ghe.example.com/api/v3",  // GHE without subdomain isolation
+		"https://api-gateway.example.com", // "api" is a label PREFIX here, not a label
+		"not a url",
+	} {
+		t.Run("unambiguous api url "+apiURL, func(t *testing.T) {
+			c := &Config{}
+			c.Forge.GitHubAPIURL = apiURL
+			if err := c.Validate(); err != nil {
+				t.Fatalf("github_api_url %q must validate clean without forge.git_host, got: %v", apiURL, err)
+			}
+		})
+	}
+
+	// git_host is compared against a clone URL's host, which arrives already
+	// reduced to a bare hostname. Anything that is not one would never match, so
+	// it would withhold the credential from every clone in silence.
+	for _, bad := range []string{
+		"https://ghe.example.com", // a URL, not a host
+		"ghe.example.com/api/v3",  // a path
+		"ghe.example.com:8443",    // a port (a clone URL's host is compared portless)
+		"git@ghe.example.com",     // userinfo
+		"ghe example.com",         // whitespace
+		"   ",                     // blank
+		"gİthub.com",              // non-ASCII: ToLower and IDNA disagree about which host this is
+	} {
+		t.Run("rejected git_host "+bad, func(t *testing.T) {
+			c := &Config{}
+			c.Forge.GitHost = bad
+			err := c.Validate()
+			if err == nil || !strings.Contains(err.Error(), "forge.git_host") {
+				t.Fatalf("forge.git_host %q must be refused at load, got: %v", bad, err)
+			}
+		})
+	}
+
+	// A GitLab forge derives its git host from base_url and needs no override,
+	// but may still set one.
+	t.Run("gitlab needs no git_host", func(t *testing.T) {
+		c := &Config{}
+		c.Forge.Provider = "gitlab"
+		c.Forge.GitLab.TokenEnv = "GITLAB_TOKEN"
+		c.Forge.GitLab.BaseURL = "https://gitlab.example.com"
+		if err := c.Validate(); err != nil {
+			t.Fatalf("a gitlab forge must validate clean without forge.git_host, got: %v", err)
+		}
+	})
+}
+
 // TestLogsIndexValidate: logs.index is interpolated into the Elasticsearch
 // request PATH. The client escapes it so a malformed value can no longer change
 // the request's SHAPE, but escaping alone turns a typo into a puzzling 4xx from

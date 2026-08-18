@@ -46,11 +46,17 @@ type Client struct {
 	// under provider="embed" on the shared model instruments keeps it separable by
 	// label instead of inventing a metric name, matching the reranker's precedent.
 	//
-	// This makes the spend VISIBLE, not bounded: the query embed is not folded into
-	// the per-investigation totals (it does not flow through the Embedder interface,
-	// which returns vectors only) and the corpus embed runs on the git-sync goroutine
-	// with no investigation to charge. See the spend inventory in
-	// docs/configuration/configuration.md.
+	// Metrics makes that spend VISIBLE for every caller; UsageSink is what makes it
+	// ATTRIBUTABLE to one, and only an attributable figure can be bounded. A caller
+	// that installs a sink on the context — internal/investigate does, for the duration
+	// of one investigation — folds these tokens into the totals its spend ceilings
+	// compare against, which is how the cost reaches its payer despite the Embedder
+	// interface returning vectors only.
+	//
+	// The BULK corpus embed has no such payer: it runs on the git-sync goroutine with
+	// no investigation to charge, so it stays visible but UNBOUNDED, deliberately — see
+	// the spend inventory in docs/configuration/configuration.md for why a ceiling
+	// there would be a knob with nothing to bound.
 	Metrics *telemetry.Metrics
 }
 
@@ -115,6 +121,17 @@ func (c *Client) embedBatch(ctx context.Context, texts []string) ([][]float32, e
 	if err != nil {
 		return nil, fmt.Errorf("marshal request: %w", err)
 	}
+	// Charge this round trip to whoever is accounting for it. Deferred, and placed
+	// after the marshal (which sends nothing), so EVERY path that reaches the wire is
+	// charged — including the ones that return an error: a request the endpoint
+	// accepted is billed whether or not we could read its answer, the same rule the
+	// investigation loop's own completions follow. promptTokens is filled in below
+	// when the endpoint reports it and stays 0 otherwise, meaning unknown rather than
+	// free.
+	promptTokens := 0
+	if sink := UsageSinkFrom(ctx); sink != nil {
+		defer func() { sink.record(promptTokens) }()
+	}
 	newReq := func() (*http.Request, error) {
 		r, err := http.NewRequestWithContext(ctx, http.MethodPost, c.baseURL+"/embeddings", bytes.NewReader(body))
 		if err != nil {
@@ -146,6 +163,7 @@ func (c *Client) embedBatch(ctx context.Context, texts []string) ([][]float32, e
 	if err := json.Unmarshal(data, &er); err != nil {
 		return nil, fmt.Errorf("parse response: %w", err)
 	}
+	promptTokens = er.Usage.PromptTokens
 	if c.Metrics != nil && er.Usage.PromptTokens > 0 {
 		c.Metrics.ModelInputTokens.Add(ctx, int64(er.Usage.PromptTokens), embedAttrs)
 	}

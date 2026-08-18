@@ -5,6 +5,8 @@ package flux
 import (
 	"context"
 	"fmt"
+	"maps"
+	"slices"
 	"time"
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -14,6 +16,8 @@ import (
 	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/dynamic/dynamicinformer"
 	"k8s.io/client-go/tools/cache"
+
+	"github.com/Smana/runlore/internal/providers"
 )
 
 // fluxSystemNamespace is where Flux objects conventionally live, regardless of the
@@ -38,6 +42,27 @@ var kindToGVR = map[string]schema.GroupVersionResource{
 	"HelmChart":        {Group: "source.toolkit.fluxcd.io", Version: "v1", Resource: "helmcharts"},
 	"Bucket":           {Group: "source.toolkit.fluxcd.io", Version: "v1", Resource: "buckets"},
 	"ExternalArtifact": {Group: "source.toolkit.fluxcd.io", Version: "v1", Resource: "externalartifacts"},
+}
+
+// GitOpsKinds returns, sorted, every Flux Kind this provider can actually resolve.
+//
+// It exists so nothing has to restate the list. The investigation tools used to keep
+// their own copy, and it diverged on its first edit: ExternalArtifact is in kindToGVR
+// and RBAC-granted in the chart, yet gitops_resource_status answered "ExternalArtifact
+// is not a GitOps object these tools can resolve" and pointed the model at pod_status —
+// false in every clause, on a kind this repo's own eval renders as a source node.
+// Deriving the list makes that divergence unrepresentable rather than merely tested for.
+func GitOpsKinds() []string { return slices.Sorted(maps.Keys(kindToGVR)) }
+
+// GitOpsResources returns, sorted, the API resource (plural) name of every Kind
+// GitOpsKinds advertises — what an RBAC rule has to grant for those reads to succeed.
+func GitOpsResources() []string {
+	out := make([]string, 0, len(kindToGVR))
+	for _, gvr := range kindToGVR {
+		out = append(out, gvr.Resource)
+	}
+	slices.Sort(out)
+	return out
 }
 
 // dynamicReader reads Flux CRDs as unstructured objects via the dynamic client.
@@ -95,13 +120,24 @@ func (r *dynamicReader) SourceRevision(ctx context.Context, kind, namespace, nam
 }
 
 // GetResource fetches one object by kind/namespace/name. The kind must be one the
-// inspector knows (see kindToGVR). A NotFound error is returned verbatim so callers
-// can distinguish "missing" from other failures.
+// inspector knows (see kindToGVR).
+//
+// A read that returns no object comes back as a providers.LookupError wrapping the
+// original API error (so apierrors.IsNotFound still works) and carrying the scopes this
+// call actually completed plus what the negative established. That distinction is the
+// point: the dynamic client 404s identically for "no object of that name" and "the API
+// serves no such kind", and a cluster-wide List refused by RBAC never ran at all, so
+// reporting all three as one NotFound is how a limit of the tool became a claim about
+// the cluster (runlore#503).
 func (r *dynamicReader) GetResource(ctx context.Context, kind, namespace, name string) (*unstructured.Unstructured, error) {
 	gvr, ok := kindToGVR[kind]
 	if !ok {
-		return nil, fmt.Errorf("unsupported kind %q", kind)
+		return nil, &providers.LookupError{
+			Lookup: providers.Lookup{Reason: providers.LookupUnresolvable},
+			Err:    fmt.Errorf("unsupported kind %q", kind),
+		}
 	}
+	lk := providers.Lookup{Reason: providers.LookupAbsent, Scopes: []string{namespace}}
 	u, err := r.client.Resource(gvr).Namespace(namespace).Get(ctx, name, metav1.GetOptions{})
 	if err == nil {
 		return u, nil
@@ -115,18 +151,33 @@ func (r *dynamicReader) GetResource(ctx context.Context, kind, namespace, name s
 	// that reads as "the resource doesn't exist". Retry in flux-system, then search
 	// all namespaces by name, before trusting the NotFound.
 	if namespace != fluxSystemNamespace {
+		lk.Scopes = append(lk.Scopes, fluxSystemNamespace)
 		if u2, err2 := r.client.Resource(gvr).Namespace(fluxSystemNamespace).Get(ctx, name, metav1.GetOptions{}); err2 == nil {
 			return u2, nil
 		}
 	}
-	if list, lerr := r.client.Resource(gvr).Namespace(metav1.NamespaceAll).List(ctx, metav1.ListOptions{}); lerr == nil {
+	list, lerr := r.client.Resource(gvr).Namespace(metav1.NamespaceAll).List(ctx, metav1.ListOptions{})
+	switch {
+	case lerr == nil:
+		lk.Scopes = append(lk.Scopes, providers.AllNamespaces)
 		for i := range list.Items {
 			if list.Items[i].GetName() == name {
 				return &list.Items[i], nil
 			}
 		}
+	case apierrors.IsForbidden(lerr):
+		// The cluster-wide search never ran. Swallowing this (the old `if lerr == nil`)
+		// is what let the answer claim a search of all namespaces that RBAC refused.
+		lk.Reason = providers.LookupDenied
+	case apierrors.IsNotFound(lerr):
+		// A List against a SERVED resource returns an empty list, never a 404 — so a
+		// 404 here means the API serves no such resource type. That is the one signal
+		// separating "kind not served" from "object absent": both make the Get above
+		// return a 404 that apierrors.IsNotFound reports identically, which is #503's
+		// mechanism surviving on the SUPPORTED path.
+		lk.Reason = providers.LookupKindNotServed
 	}
-	return nil, err // genuinely absent in every namespace: return the original NotFound
+	return nil, &providers.LookupError{Lookup: lk, Err: err}
 }
 
 // ListEvents returns recent Event lines for an object, filtered client-side by the

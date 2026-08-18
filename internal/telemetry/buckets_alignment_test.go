@@ -26,12 +26,12 @@ import (
 // the panel keeps rendering, keeps looking authoritative, and silently stops
 // answering the question the comment promises.
 //
-// The instant-recall gates come from ApplyDefaults, so this reads what an
-// operator actually runs under. dup_score is asserted as a literal because its
-// default is applied in app.BuildCurator rather than in ApplyDefaults — unlike
-// every sibling here — so there is no resolved value to read without building a
-// forge client. That asymmetry is worth fixing at the source; until it is, this
-// test states the number and where it comes from.
+// Every gate here comes from ApplyDefaults, so this reads what an operator
+// actually runs under — dup_score included. It used to be asserted as a bare
+// 5.0 literal, because its default was applied in app.BuildCurator instead and
+// there was no resolved value to read without building a forge client; a guard
+// checking the ladder against its own copy of a number is a guard that cannot
+// notice the number moving.
 func TestScoreBucketsAlignWithTheDecisionThresholds(t *testing.T) {
 	// instant_recall is off by default and ApplyDefaults only fills its knobs once
 	// it is enabled, so the fixture enables it. The reranker is on by default,
@@ -49,7 +49,7 @@ func TestScoreBucketsAlignWithTheDecisionThresholds(t *testing.T) {
 		{"catalog.instant_recall.min_score", ir.MinScore},
 		{"catalog.instant_recall.margin_gap", ir.MarginGap},
 		{"catalog.instant_recall.solo_floor", ir.SoloFloor},
-		{"forge.dup_score (default applied in app.BuildCurator)", 5.0},
+		{"forge.dup_score", cfg.Forge.DupScore},
 	} {
 		if tc.value == 0 {
 			t.Errorf("%s resolved to 0 — either the default moved out of ApplyDefaults or the field was renamed; "+

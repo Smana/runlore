@@ -167,106 +167,20 @@ func TestRecallDecayWarningIsEmittedOnceAtStartup(t *testing.T) {
 	}
 }
 
-// TestEveryStartupWarningIsRaised generalises the pin above to the whole convention:
-// a `*Warning` function in this package returns a message that MUST reach a logger on
-// the startup path, or the config problem it describes is neither enforced nor
-// signalled — the worst of both worlds, and precisely the failure mode several of
-// these warnings exist to prevent.
+// TestEveryStartupWarningIsRaised, which generalised the pin above to every
+// *Warning in package app, has been folded into
+// TestEveryStartupWarningIsRaisedExactlyOnce (warnings_wired_test.go). That
+// guard keeps this one's whole contract — exactly one non-test call site, result
+// bound to a real variable, that variable passed to a .Warn(...) in the SAME
+// statement — and adds the reach the older warnings_wired guard had and this one
+// did not: internal/ and cmd/ rather than package app alone, and qualified calls
+// (config.ChatWithoutCaptureWarning) rather than bare identifiers alone.
 //
-// The set is DISCOVERED, not listed: every exported top-level func in package app
-// whose name ends in "Warning" and returns a string is covered the day it is written.
-// A hand-maintained list would rot in exactly the direction this guard exists to
-// catch — a new warning added, never listed, never raised, and nothing failing.
-//
-// The contract per warning is the same one assertWarningIsRaised checks: exactly one
-// non-test call site, its result bound to a real variable (not `_`), and that variable
-// passed to a `.Warn(...)` in the same statement. It deliberately does NOT require the
-// caller to be RunServe — WebhookAuthWarning and RecallDecayWarning both live there
-// today, but a future warning belonging on `lore curate`'s startup is legitimate. The
-// stricter "once, at startup, outside any closure" pin stays specific to
-// RecallDecayWarning above, whose paragraph would be intolerable per alert.
-func TestEveryStartupWarningIsRaised(t *testing.T) {
-	files, err := filepath.Glob(filepath.Join(".", "*.go"))
-	if err != nil {
-		t.Fatalf("glob: %v", err)
-	}
-	fset := token.NewFileSet()
-	type site struct {
-		file string
-		stmt ast.Stmt
-	}
-	declared := map[string]bool{}
-	calls := map[string][]site{}
-
-	for _, path := range files {
-		if strings.HasSuffix(path, "_test.go") {
-			continue
-		}
-		src, err := os.ReadFile(path) //nolint:gosec // test-owned path in this package
-		if err != nil {
-			t.Fatalf("read %s: %v", path, err)
-		}
-		f, err := parser.ParseFile(fset, path, src, 0)
-		if err != nil {
-			t.Fatalf("parse %s: %v", path, err)
-		}
-		for _, decl := range f.Decls {
-			fn, ok := decl.(*ast.FuncDecl)
-			if !ok || fn.Body == nil {
-				continue
-			}
-			if fn.Recv == nil && isWarningFunc(fn) {
-				declared[fn.Name.Name] = true
-			}
-			var stack []ast.Node
-			ast.Inspect(fn.Body, func(n ast.Node) bool {
-				if n == nil {
-					stack = stack[:len(stack)-1]
-					return false
-				}
-				stack = append(stack, n)
-				call, ok := n.(*ast.CallExpr)
-				if !ok {
-					return true
-				}
-				id, ok := call.Fun.(*ast.Ident)
-				if !ok || !strings.HasSuffix(id.Name, "Warning") || id.Name == fn.Name.Name {
-					return true
-				}
-				calls[id.Name] = append(calls[id.Name], site{filepath.Base(path), outermostStmt(stack)})
-				return true
-			})
-		}
-	}
-
-	if len(declared) == 0 {
-		t.Fatal("no *Warning functions found in package app — this guard is inert")
-	}
-	for name := range declared {
-		sites := calls[name]
-		if len(sites) != 1 {
-			t.Errorf("%s has %d non-test call sites, want exactly 1 — a warning nobody raises "+
-				"leaves the condition it describes neither enforced nor signalled, and two raisers "+
-				"print it twice", name, len(sites))
-			continue
-		}
-		assertWarningIsRaised(t, sites[0].file, sites[0].stmt, name, "Warn")
-	}
-}
-
-// isWarningFunc reports whether fn is one of the package's startup-warning
-// functions: named *Warning and returning a message string.
-func isWarningFunc(fn *ast.FuncDecl) bool {
-	if !strings.HasSuffix(fn.Name.Name, "Warning") {
-		return false
-	}
-	res := fn.Type.Results
-	if res == nil || len(res.List) != 1 {
-		return false
-	}
-	id, ok := res.List[0].Type.(*ast.Ident)
-	return ok && id.Name == "string"
-}
+// assertWarningIsRaised and outermostStmt below stay here, shared: the
+// RecallDecayWarning pin above still needs them for its stricter
+// "once, at startup, outside any closure" property, which is specific to a
+// warning whose paragraph would be intolerable per alert and does not
+// generalise.
 
 // outermostStmt returns the top-level statement of the enclosing function body that
 // contains the visited node — stack[0] is the *ast.BlockStmt body itself, so the next
@@ -286,6 +200,11 @@ func outermostStmt(stack []ast.Node) ast.Stmt {
 // i.e. the warning is emitted, not computed and dropped. Go rejects an unused local,
 // so `_ = f()` and a bare `f()` are the only ways to discard the result, and both are
 // caught here.
+//
+// The call is matched through warningCallName, so BOTH spellings count: a
+// same-package identifier (WebhookAuthWarning) and a qualified selector
+// (config.ChatWithoutCaptureWarning). Matching only the first is what let the
+// package-app guard this replaced miss every cross-package warning.
 func assertWarningIsRaised(t *testing.T, file string, stmt ast.Stmt, guarded, raiser string) {
 	t.Helper()
 	if stmt == nil {
@@ -299,11 +218,7 @@ func assertWarningIsRaised(t *testing.T, file string, stmt ast.Stmt, guarded, ra
 			return true
 		}
 		for i, rhs := range as.Rhs {
-			call, isCall := rhs.(*ast.CallExpr)
-			if !isCall {
-				continue
-			}
-			if id, isIdent := call.Fun.(*ast.Ident); !isIdent || id.Name != guarded {
+			if warningCallName(rhs) != guarded {
 				continue
 			}
 			if i < len(as.Lhs) {

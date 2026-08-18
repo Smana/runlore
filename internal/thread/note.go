@@ -18,6 +18,30 @@ import (
 // characters.
 const maxNoteTitle = 90
 
+// noteTitlePrefix leads every generated entry title. What follows it is the
+// NOTE's own claim, not the finding's headline — see noteEntryTitle.
+const noteTitlePrefix = "Operator note: "
+
+// The description's parts are each bounded on their own, so the line as a whole
+// is bounded without a final truncation — which would cut the provenance clause,
+// the one part that must never be lost (see conceptDescription).
+const (
+	// maxNoteDescriptionClaim gives the note's own words room for roughly two
+	// sentences. Bigger than the title's share deliberately: the description is
+	// the half of instant recall's root-cause claim that can afford to be
+	// complete, and the merge gate puts no limit on it (only `title` is capped).
+	maxNoteDescriptionClaim = 200
+	// maxNoteDescriptionContext bounds the finding title carried as context. 120
+	// is the merge gate's own title limit, which curator.CapTitle already caps
+	// every curated title to — so an ordinary finding arrives here WHOLE, and the
+	// alert's distinguishing words (the ones that make the note reachable from
+	// the alert again) are not the ones a cut takes off the end.
+	maxNoteDescriptionContext = 120
+	// maxNoteAuthor bounds a chat handle. Defensive: an author string comes from
+	// the transport, and nothing else here caps it.
+	maxNoteAuthor = 40
+)
+
 // DefaultMaxNoteBytes bounds one human message's INPUT, in bytes, before it
 // is written to the knowledge base or shown to a model.
 //
@@ -197,7 +221,7 @@ func noteText(s string, maxBytes int) string {
 // longer tracks fences, because kbvalidate's parser does not either — but the
 // flattening still matters for the plain-heading case above.
 func noteField(s string) string {
-	return singleLine(redact.Secrets(s))
+	return SingleLine(redact.Secrets(s))
 }
 
 // blockquote prefixes EVERY line of s with "> ", so a quoted block cannot end
@@ -309,11 +333,11 @@ func cutToRuneBoundary(s string, n int) string {
 // It matters because ConceptEntry deliberately leaves Fingerprint unset (a
 // note is not a curated finding — see the comment below), so two notes are
 // ALWAYS compared by dedup's title-Jaccard fallback. Every note PR shares the
-// title prefix "KB: Operator note: <finding title>", so two notes on the same
-// recurring incident score a Jaccard of 1.0 — the strongest possible dedup
-// match. Without this label RunLore would silently close a human's
-// correction as a "duplicate" of another human's correction, which defeats
-// the entire premise of thread capture.
+// title prefix "KB: Operator note: ", and two humans correcting the same
+// recurring incident write about the same thing in much the same words, so
+// their titles score near the top of that fallback. Without this label RunLore
+// would silently close a human's correction as a "duplicate" of another
+// human's correction, which defeats the entire premise of thread capture.
 //
 // internal/thread depends only on providers and internal/catalog by design,
 // so this literal is duplicated — not imported — in internal/curate. Kept in
@@ -339,12 +363,6 @@ const noteForgeLabel = "runlore-operator-note"
 // outlives the pull request it arrived on. Redaction is idempotent, so a field
 // NoteBody already masked costs nothing here.
 func ConceptEntry(tc Context, n Note, at time.Time, maxBytes int) providers.KBEntry {
-	title := "Operator note"
-	if tc.Title != "" {
-		title = "Operator note: " + noteField(tc.Title)
-	}
-	title = truncate(title, maxNoteTitle)
-
 	var body strings.Builder
 	body.WriteString(NoteBody(tc, n, at, maxBytes))
 	if tc.RecalledEntry != "" || tc.TriggerKey != "" || tc.Resource != "" {
@@ -363,11 +381,18 @@ func ConceptEntry(tc Context, n Note, at time.Time, maxBytes int) providers.KBEn
 		}
 	}
 
+	// Derived ONCE, from the same bounded text the body above files, and shared by
+	// both identity fields — see noteClaim and noteClaimSource.
+	claim := noteClaim(n.Text, maxBytes)
 	return providers.KBEntry{
 		Type:        "Concept",
-		Title:       title,
-		Description: truncate(conceptDescription(tc, n), maxNoteTitle*2),
-		Resource:    tc.Resource,
+		Title:       noteEntryTitle(tc, claim),
+		Description: conceptDescription(tc, n, claim),
+		// Narrowed to the one whitespace-free value the merge gate accepts — the
+		// body's Context section above still carries tc.Resource in full. See
+		// providers.EntryResourceRef for what this closes and why it narrows
+		// rather than drops.
+		Resource:    providers.EntryResourceRef(tc.Resource),
 		Tags:        []string{"operator-note", transportName(tc.Transport)},
 		ExtraLabels: []string{noteForgeLabel},
 		Body:        body.String(),
@@ -377,16 +402,254 @@ func ConceptEntry(tc Context, n Note, at time.Time, maxBytes int) providers.KBEn
 	}
 }
 
-// conceptDescription renders the entry's one-line description, which is the
-// only provenance a catalog listing or a search hit shows — the body's
-// heading never reaches either. It therefore has to make the same
-// human-wrote-it / model-drafted-it distinction NoteBody's header does,
-// otherwise the distinction survives only for a reader who opens the entry.
-func conceptDescription(tc Context, n Note) string {
-	if n.modelDrafted() {
-		return fmt.Sprintf("Note drafted by RunLore from @%s's %s thread message, pending review.", noteField(n.Author), transportName(tc.Transport))
+// noteEntryTitle names the entry after the NOTE, not after the finding the note
+// was written in reply to.
+//
+// The finding's title used to BE the identity ("Operator note: <finding
+// title>"), and that is wrong twice over.
+//
+// It files a note that CORRECTS a finding under the headline of the very thing
+// it corrects. Live, the reranker then matched such an entry and quoted the
+// refuted hypothesis back as its grounds for matching.
+//
+// And it truncated on a byte boundary, so the title routinely ended mid-word
+// ("… stu…"). That is not cosmetic: instant recall builds its whole root-cause
+// claim as `title + " — " + description` (investigate.recalledInvestigation),
+// and a Concept note has no Cause/Resolution sections to add to it — by
+// construction, since escapeOKFSections exists to stop a note forging them. So
+// those two fields ARE the claim verify judges, verify correctly rejected an
+// unintelligible one every time, and a corrected entry could never take the
+// cheap instant-recall path it exists to earn.
+//
+// The finding is not dropped, it is demoted from identity to CONTEXT:
+// conceptDescription names it, and the body's "Thread:" line and Context section
+// carry it in full.
+// claim is the note's own words, already bounded and defused by noteClaim; the
+// title re-cuts it to its own smaller budget.
+func noteEntryTitle(tc Context, claim string) string {
+	if claim != "" {
+		return noteTitlePrefix + truncateWords(claim, maxNoteTitle-len(noteTitlePrefix))
 	}
-	return fmt.Sprintf("Operator knowledge captured from a %s thread by @%s.", transportName(tc.Transport), noteField(n.Author))
+	// Only reachable when the note is empty or is nothing but markup:
+	// Responder.Handle answers an empty "note:" without writing, and freeform
+	// files nothing for an empty draft. Naming the finding still beats a bare
+	// "Operator note", and "on" reads as ABOUT the finding rather than as a claim
+	// the note makes about it.
+	if s := noteLine(tc.Title); s != "" {
+		return truncateWords("Operator note on "+s, maxNoteTitle)
+	}
+	return "Operator note"
+}
+
+// noteClaim renders the note's own leading words as one bounded, single-line
+// claim: drawn from at most maxBytes of the message (noteClaimSource), redacted,
+// squeezed and defused (noteLine), stripped of the Markdown a chat reply opens
+// with, and cut on a WORD boundary.
+//
+// It is bounded to maxNoteDescriptionClaim — the largest budget any caller has —
+// and callers needing less re-cut the result, so this runs ONCE per entry rather
+// than once per field. Two calls over a 1 MiB message cost ~1 s and ~86 MB
+// between them; see noteClaimSource for the rest of that story.
+//
+// It returns "" for a note that has no word in it at all — a lone bullet, a row
+// of punctuation. "Operator note: -" is not an identity, and the caller has a
+// better fallback than a title that says nothing.
+func noteClaim(text string, maxBytes int) string {
+	s := stripLeadingMarkup(noteLine(noteClaimSource(text, maxBytes)))
+	if !strings.ContainsFunc(s, func(r rune) bool { return unicode.IsLetter(r) || unicode.IsDigit(r) }) {
+		return ""
+	}
+	return truncateWords(s, maxNoteDescriptionClaim)
+}
+
+// noteClaimSource bounds the raw message a claim is drawn from to maxBytes — the
+// operator's own notify.thread.max_note_bytes, the same cap the BODY is filed
+// under.
+//
+// Two reasons, and the second is the one that makes maxBytes the right number
+// rather than merely a small one.
+//
+// Cost. Nothing upstream bounds Note.Text: DefaultMaxNoteBytes is applied inside
+// NoteBody -> noteText -> capNoteText, which is downstream of here, while a
+// Matrix event carries up to 64 KiB and a Slack request body up to 1 MiB. Run
+// unbounded, one claim over a 1 MiB message costs ~500 ms and ~43 MB in
+// redact.Secrets and strings.Fields alone — roughly what the whole entry cost
+// before claims existed — on a path any channel member can trigger. Bounded, the
+// same claim costs ~3.7 ms and ~0.35 MB.
+//
+// Coherence. The title and description must never quote words the entry BODY
+// does not contain, and the body holds maxBytes of the message. Drawing the
+// claim from more text than the body kept would let an entry be titled after a
+// sentence a reviewer cannot find anywhere in it.
+//
+// The trailing partial token is dropped whenever the cut actually bites, and
+// that is a REDACTION guarantee, not tidiness. noteText redacts BEFORE it caps,
+// precisely because redact.Secrets needs a whole token to recognise one — the
+// GitHub rule wants 20+ suffix characters, the JWT rule three segments — so a
+// half-cut secret is one it no longer matches, and the surviving prefix would
+// ship verbatim into a title. Here the cut necessarily comes first (redacting
+// first is the cost this function exists to avoid), so the cut is made harmless
+// instead: a secret can only ever be severed AT the cut, and the severed piece
+// is exactly the last token. Dropping it means no fragment of a secret can reach
+// a claim, whatever maxBytes an operator configures — which a "maxBytes is much
+// larger than the claim budget" argument would NOT give, since config.Validate
+// rejects only a negative one.
+//
+// A message with no whitespace at all in its first maxBytes is one unbroken
+// token — a base64 blob, not a sentence — and yields no claim rather than a
+// possibly-severed one. The title then falls back to naming the finding.
+func noteClaimSource(text string, maxBytes int) string {
+	if maxBytes <= 0 {
+		maxBytes = DefaultMaxNoteBytes
+	}
+	if len(text) <= maxBytes {
+		return text
+	}
+	cut := cutToRuneBoundary(text, maxBytes)
+	i := strings.LastIndexFunc(cut, unicode.IsSpace)
+	if i < 0 {
+		return ""
+	}
+	return cut[:i]
+}
+
+// conceptDescription renders the entry's one-line description.
+//
+// It is the only provenance a catalog listing or a search hit shows — the body's
+// heading never reaches either — so it has to make the same human-wrote-it /
+// model-drafted-it distinction NoteBody's header does, otherwise the distinction
+// survives only for a reader who opens the entry.
+//
+// It also has to carry SIGNAL, which it used to carry none of: a fixed sentence
+// naming the author and the transport, byte-identical across every operator
+// note, on the field with three consumers that all read it as content. It is
+// half of what instant recall hands verify as the root-cause claim (see
+// noteEntryTitle), it is what the reranker is shown for each candidate
+// (investigate.renderRerankCandidates), and it is indexed for lexical search
+// (catalog.Entry's search text).
+//
+// So it renders three things in this order:
+//
+//   - the provenance clause FIRST, because a listing that clips the line must
+//     never clip the fact that RunLore, not the human, wrote the text;
+//   - the finding the note annotates, as context — it is what keeps the note
+//     reachable from the alert that produced it, and it must not be the note's
+//     identity (see noteEntryTitle);
+//   - the note's own claim, at greater length than the title had room for.
+//
+// Every part is bounded on its own rather than the whole line truncated at the
+// end, so the provenance clause can never be the part that gets cut.
+// claim is the note's own words, already bounded and defused by noteClaim.
+func conceptDescription(tc Context, n Note, claim string) string {
+	who := truncateWords(noteLine(n.Author), maxNoteAuthor)
+	var b strings.Builder
+	if n.modelDrafted() {
+		fmt.Fprintf(&b, "Note drafted by RunLore from @%s's %s thread message, pending review", who, transportName(tc.Transport))
+	} else {
+		fmt.Fprintf(&b, "Operator knowledge from @%s via %s", who, transportName(tc.Transport))
+	}
+	if s := truncateWords(noteLine(tc.Title), maxNoteDescriptionContext); s != "" {
+		fmt.Fprintf(&b, ", on the finding %q", s)
+	}
+	if claim != "" {
+		fmt.Fprintf(&b, ": %s", claim)
+	} else {
+		b.WriteString(".")
+	}
+	return b.String()
+}
+
+// noteLine prepares one identity field — an author, an alert-derived title, the
+// note text — for a single-line YAML title or description: noteField redacts it
+// and maps line breaks (and the control/format runes that render as one) to
+// spaces, then strings.Fields squeezes the runs they leave behind and trims the
+// ends.
+//
+// One function rather than three composed at each call site, because no caller
+// wants any part alone: a squeezed but unredacted field would put a secret in an
+// entry's title, which outlives the pull request it arrived on (see
+// ConceptEntry), and an undefused one is the hole below.
+//
+// The defusal is what makes this safe to put in FRONTMATTER, and it is the half
+// noteField does not do. A title and a description are not read only out of the
+// YAML: okf.UpdateIndex interpolates both into index.md as `- [%s](%s) — %s`,
+// okf.UpdateLog interpolates the title into log.md, and github.prBody puts the
+// description in the pull-request body — three markdown renderers, none of which
+// defuses anything (prBody applies the image regex alone, and that copy still
+// carries the raw-HTML gap its own comment admits). All three write a PERMANENT,
+// merged repository file.
+//
+// Two concrete failures, both measured before this was added: a note reading
+// `<img src="https://evil.example/px.gif">` put a live tracking pixel into
+// index.md and log.md, firing from every reader's browser; and a note reading
+// `boom](evil)` produced `- [Operator note: boom](evil) ## Incidents](path.md)`,
+// so the index's own link FOR THAT ENTRY pointed at the attacker's URL.
+//
+// It runs BEFORE every caller's truncation, not after, because the defusals
+// EXPAND — up to 3x for neutralizeImages, 2.5x for neutralizeHTML — and each
+// caller then bounds the result to a budget it states. Defusing afterwards would
+// make every one of those budgets a lie by the same factor: maxNoteAuthor and
+// maxNoteDescriptionContext are applied here and never re-cut, and the
+// finding-fallback title in noteEntryTitle is capped once at maxNoteTitle, which
+// is what keeps it inside the merge gate's 120 bytes.
+//
+// The note's own claim is the one field that would survive the wrong order, and
+// only by accident: noteClaim bounds it and noteEntryTitle re-cuts it, so the
+// title comes out short either way while the DESCRIPTION carries the whole
+// expansion. Ordering it here means no field depends on that accident.
+//
+// A cut landing inside an escape ("&lt;" cut to "&l") is cosmetic and cannot
+// re-expose markup: neither defusal's output contains a "<" or a "![" for a
+// later cut to uncover.
+//
+// escapeOKFSections is deliberately NOT applied. It defuses ATX headings, which
+// are a BODY concern: a heading has to start a line, and this is a single line
+// interpolated mid-line into every one of those sinks. Frontmatter is never
+// parsed for OKF sections at all.
+func noteLine(s string) string {
+	return defuseMarkup(strings.Join(strings.Fields(noteField(s)), " "))
+}
+
+// defuseMarkup neutralises the two markup shapes an identity field can smuggle
+// into a renderer: image syntax and raw HTML. It is the pair noteText applies to
+// the note BODY, minus the heading escape — see noteLine for why.
+func defuseMarkup(s string) string { return neutralizeImages(neutralizeHTML(s)) }
+
+// leadingMarkupMarkers are the one-character Markdown markers a chat reply
+// opens a line with. Only a marker followed by a SPACE counts, so "-1 replica"
+// keeps its minus sign.
+const leadingMarkupMarkers = ">-*+"
+
+// stripLeadingMarkup removes the Markdown a chat reply routinely opens with — a
+// bullet, a blockquote marker, an ATX heading — so a note's title reads as its
+// claim rather than as "- the cause was …".
+//
+// Heading detection goes through atxHeadingText, the same parse the read path
+// performs, rather than a second spelling of it.
+//
+// Bounded rather than looped to a fixed point: nesting deeper than a few levels
+// is not something a chat reply does, and a bound is one less way for untrusted
+// text to control how long this runs.
+//
+// So it strips up to four levels, not all of them: "- - - - - - - - the cause"
+// keeps the markers the bound did not reach. That is the deliberate trade and
+// not a case worth chasing — the cost is a slightly uglier title on input nobody
+// writes by accident, while the alternative hands an unbounded loop to text
+// anyone in the channel can send.
+func stripLeadingMarkup(s string) string {
+	s = strings.TrimSpace(s)
+	for range 4 {
+		if h := atxHeadingText(s); h != "" {
+			s = h
+			continue
+		}
+		if len(s) >= 2 && strings.IndexByte(leadingMarkupMarkers, s[0]) >= 0 && s[1] == ' ' {
+			s = strings.TrimSpace(s[2:])
+			continue
+		}
+		break
+	}
+	return s
 }
 
 // transportName normalises an empty transport so rendering never emits "via ".
@@ -471,27 +734,30 @@ var okfSectionNames = []string{"Symptom", "Cause", "Resolution"}
 // is just as much a section as "## Cause".
 //
 // Fenced headings are escaped TOO, and deliberately so, even though a heading
-// inside a code fence is not a heading to a Markdown renderer.
+// inside a code fence is not a heading to a Markdown renderer — nor, any longer,
+// to either of RunLore's section parsers.
 //
-// The reason is that RunLore has TWO section parsers and they disagree.
-// catalog.Entry.Section (catalog/section.go:25) tracks fences and skips what is
-// inside them. kbvalidate.Sections (kbvalidate/kbvalidate.go:208) does not: it
-// walks every line and calls heading(line) with no fence state at all, and
-// HasIncidentSections is built on it. This function used to mirror the first
-// one exactly — which read as careful, and was the hole. A note that wrapped
+// It started that way because the two parsers disagreed. catalog.Entry.Section
+// tracked fences; kbvalidate.Sections walked every line with no fence state at
+// all, and HasIncidentSections is built on it. This function once mirrored the
+// first parser exactly — which read as careful, and was the hole. A note that
+// wrapped
 //
 //	## Symptom / ## Cause / ## Resolution
 //
 // in a ``` fence was escaped NOWHERE and parsed EVERYWHERE the fence-blind
-// parser looks, so HasIncidentSections returned true for a body a stranger
-// typed into a chat thread.
+// parser looks, so HasIncidentSections returned true for a body a stranger typed
+// into a chat thread.
 //
-// So the rule is the UNION, not either parser: escape every shape ANY reader
-// accepts as a section. Over-escaping costs a visible backslash inside a pasted
-// code block; under-escaping costs a forged entry. Aligning the two parsers is
-// the better long-term fix, but kbvalidate is the merge gate and changing what
-// it accepts reaches every existing entry, so that is not this function's call
-// to make.
+// That disagreement is now closed at the source: both parsers take their answer
+// from catalog.FencedLines, so a fenced heading is a heading to neither. The
+// UNION rule stays anyway, which makes the escaping here the SECOND of two
+// independent defences rather than the only one. Keeping it costs a visible
+// backslash inside a pasted code block. Dropping it would put a THIRD markdown
+// parser on the write path — this function would have to track fences itself to
+// know which headings to skip — and would stake the whole property on the read
+// path never regressing. TestSectionsAndCatalogSectionAgreeOnHeadings pins the
+// two parsers to each other; this keeps a note safe even if that pin is relaxed.
 //
 // Callers must still flatten anything they interpolate around this text (see
 // NoteBody): identity fields are single-lined before they reach here.
@@ -533,7 +799,7 @@ func atxHeadingText(line string) string {
 	return strings.TrimSpace(line[i:])
 }
 
-// singleLine collapses every rune that can break or reorder a line — any
+// SingleLine collapses every rune that can break or reorder a line — any
 // Unicode whitespace other than the plain space, every control character (Cc)
 // and every format character (Cf) — to a space, so text pulled from untrusted
 // sources (an alert title, in particular) can never break a single-line YAML
@@ -558,7 +824,7 @@ func atxHeadingText(line string) string {
 // The plain space is excluded so ordinary text is left exactly as written;
 // everything else in those categories becomes one, which keeps the result the
 // same length in runes and never joins two words.
-func singleLine(s string) string {
+func SingleLine(s string) string {
 	return strings.Map(func(r rune) rune {
 		if r == ' ' {
 			return r
@@ -570,11 +836,58 @@ func singleLine(s string) string {
 	}, s)
 }
 
+// truncateWords shortens s to around n bytes like truncate, but cuts on a WORD
+// boundary wherever one is available.
+//
+// truncate's rune-boundary cut is right for a machine-generated field nobody
+// reads as a sentence, and wrong for anything a model then has to UNDERSTAND: it
+// produced entry titles ending "… stu…", which verify rejected as
+// unintelligible rather than as false — see noteEntryTitle for the whole path.
+//
+// The word boundary is only taken when it keeps at least half of what was cut
+// to. A single unbroken token longer than the budget — a URL, a hash, one very
+// long word — has no boundary to cut on, and backing off to an early space would
+// throw away nearly everything the field had room for; there, the rune boundary
+// is the honest cut. Trailing punctuation left dangling by the cut is dropped so
+// the mark reads as a continuation, not as a comma followed by an ellipsis.
+//
+// Like truncate, the result can exceed n by the ellipsis' 2 extra bytes — but
+// only for a positive n. A budget of zero or less leaves no room even for the
+// mark, so it yields "" rather than a bare "…" that would break the bound this
+// comment states; unlike truncate, which panics outright at n == 0.
+//
+// It assumes valid UTF-8, which every call site guarantees by piping through
+// noteLine (strings.Map replaces each invalid byte with U+FFFD). Called directly
+// on invalid UTF-8 it can emit invalid UTF-8: cutToRuneBoundary walks back over
+// continuation bytes, and a lone continuation byte is not one.
+func truncateWords(s string, n int) string {
+	if n <= 0 {
+		return ""
+	}
+	if len(s) <= n {
+		return s
+	}
+	kept := cutToRuneBoundary(s, n-1)
+	if i := strings.LastIndexByte(kept, ' '); i > 0 && 2*i >= len(kept) {
+		kept = kept[:i]
+	}
+	return strings.TrimRight(kept, " ,;:—-") + "…"
+}
+
 // truncate shortens s to around n bytes: it cuts at or before byte index n-1
 // (walking back to a rune boundary) and appends a 3-byte "…", so the result
 // can be up to n+2 bytes in the worst case. Bytes, because that is what the
 // validator's limit counts.
+//
+// A budget of n <= 0 yields "", matching cutToRuneBoundary's guard rather than
+// diverging from it. Without it `cut := n - 1` is -1, the walk-back's `cut > 0`
+// condition keeps it there, and s[:-1] panics on any non-empty s. No shipped
+// caller passes a non-positive n today — they all pass a positive constant — so
+// this is defence against a future one, not a live fix.
 func truncate(s string, n int) string {
+	if n <= 0 {
+		return ""
+	}
 	if len(s) <= n {
 		return s
 	}

@@ -120,8 +120,16 @@ func (m *Matrix) send(ctx context.Context, room string, content map[string]any) 
 // both a plaintext body (the fallback Matrix renders literally) and a rich
 // formatted_body (org.matrix.custom.html) so the message's mrkdwn renders as
 // bold/links/code instead of leaking raw *asterisks* to Matrix clients.
+//
+// Both bodies are bounded — see boundMatrixBodies. Format(inv) is model-authored
+// end to end (the title, every hypothesis, every evidence line) and
+// buildInvestigation caps none of it, so without a bound the size of this event
+// is whatever the model wrote. A Matrix event is capped at 65,536 bytes by the
+// spec, signatures and hashes included, and a homeserver rejects the whole event
+// past it: an investigation that ran, spent its model budget and reached a
+// verdict, that nobody is ever told about.
 func (m *Matrix) Deliver(ctx context.Context, inv providers.Investigation) error {
-	msg := Format(inv)
+	body, formatted := boundMatrixBodies(Format(inv))
 	content := map[string]any{
 		"msgtype": "m.notice",
 		// escapeMatrixReply on the PLAIN body, not just on thread replies: this
@@ -130,9 +138,9 @@ func (m *Matrix) Deliver(ctx context.Context, inv providers.Investigation) error
 		// content.body to notify every member of the room. The formatted_body is
 		// not the vector — the push rule reads body — but the body is, and it
 		// carries exactly the same untrusted prose a reply does.
-		"body":           escapeMatrixReply(plainFallback(msg)),
+		"body":           body,
 		"format":         "org.matrix.custom.html",
-		"formatted_body": mrkdwnToHTML(msg),
+		"formatted_body": formatted,
 	}
 	// Stamp the trigger identity into the event content (a custom field — legal in
 	// Matrix events, invisible in clients) so the opt-in reaction listener can join

@@ -218,6 +218,32 @@ func ApplyDefaults(c *Config) {
 				ir.RerankMinScore = 0.1
 			}
 		}
+		// Hybrid (cosine-gated) recall defaults, filled only once hybrid is on so a
+		// disabled block stays at its zero value — the same rule the reranker above
+		// follows. These were previously applied in app.BuildInvestigator, so nothing
+		// but that one construction path could see them.
+		if ir.Hybrid {
+			if ir.HybridMinScore == 0 {
+				ir.HybridMinScore = 0.80
+			}
+			if ir.HybridMarginGap == 0 {
+				ir.HybridMarginGap = 0.05
+			}
+		}
+	}
+	// Curation gates: the file-time dedup threshold and quality bar. Applied
+	// UNCONDITIONALLY — unlike the opt-in blocks above — because the point is that
+	// the resolved value is readable from the config alone, by `lore config show`,
+	// by the Helm/telemetry guards, by anything that wants to know what the curator
+	// would do without constructing one. They were previously filled inside
+	// app.BuildCurator, so every other path saw 0: a threshold of 0 makes the dedup
+	// gate fire on any hit at all, and a quality bar of 0 admits every finding.
+	// Filling them here is inert when no forge is configured (no curator is built).
+	if c.Forge.DupScore == 0 {
+		c.Forge.DupScore = 5.0
+	}
+	if c.Forge.MinConfidence == 0 {
+		c.Forge.MinConfidence = 0.75
 	}
 	// Retirement pass defaults (opt-in): only fill the tuning knobs once the pass is
 	// enabled, so a disabled block stays at its zero value and never wires the pass

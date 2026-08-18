@@ -463,3 +463,49 @@ func TestCapTitleExported(t *testing.T) {
 		t.Fatalf("must cap at 120 bytes, got %d", len(capped))
 	}
 }
+
+// TestDraftKBEntryResourceClearsTheMergeGate pins the curator half of #491.
+//
+// The issue was reported against thread capture, and attributed the defect to
+// that path alone — the curator "does not have this bug" — on the evidence of
+// one PR, minutes apart, whose resource happened to carry no whitespace. It is
+// the same source: Workload.Name on a curated finding is MODEL-WRITTEN free text
+// (submit_findings' affected_resource), so a finding covering several objects
+// reaches Ref() as the model's own list. Written verbatim, the curator drafts an
+// entry that its OWN validate job rejects — kbvalidate errors on any `resource`
+// containing whitespace — so the KB PR can never be merged.
+func TestDraftKBEntryResourceClearsTheMergeGate(t *testing.T) {
+	inv := providers.Investigation{
+		Title:      "Core Argo CD Applications stuck OutOfSync",
+		Confidence: 0.9,
+		Resource:   providers.Workload{Namespace: "argocd", Name: "essentials, monitoring, argocd-app-of-apps"},
+		RootCauses: []providers.Hypothesis{{Summary: `"system" ApplicationSet lost syncPolicy.automated`, Confidence: 0.9}},
+	}
+
+	// Positive control: the unnarrowed ref really does fail the gate.
+	if !kbvalidate.HasErrors(kbvalidate.ValidateStructural(catalog.Entry{
+		Type: "Incident", Title: inv.Title, Description: "d", Resource: inv.Resource.Ref(),
+		Tags: []string{"t"}, Body: "## Symptom\n\ns\n\n## Cause\n\nc\n\n## Resolution\n\nr\n",
+	})) {
+		t.Fatalf("fixture is inert: %q already clears the merge gate", inv.Resource.Ref())
+	}
+
+	e := draftKBEntry(inv)
+	if e.Resource != "argocd/essentials" {
+		t.Errorf("KBEntry.Resource = %q, want %q", e.Resource, "argocd/essentials")
+	}
+	for _, is := range kbvalidate.ValidateStructural(catalog.Entry{
+		Type: e.Type, Title: e.Title, Description: e.Description,
+		Resource: e.Resource, Tags: e.Tags, Body: e.Body,
+	}) {
+		if is.Severity == kbvalidate.SeverityError {
+			t.Errorf("the curator drafted an entry that fails its own merge gate: %s: %s", is.Field, is.Message)
+		}
+	}
+	// The alert-side index gets the same treatment: it is written to frontmatter
+	// too, and recall matches an incoming alert against it.
+	inv.AlertResource = providers.Workload{Namespace: "argocd", Name: "essentials, monitoring"}
+	if got := draftKBEntry(inv).AlertResource; strings.ContainsAny(got, " \t\r\n") {
+		t.Errorf("KBEntry.AlertResource = %q still carries whitespace", got)
+	}
+}

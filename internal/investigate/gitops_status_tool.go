@@ -17,24 +17,31 @@ import (
 // Events — so the model can learn WHY a resource is failing, not just that it is.
 type GitOpsStatusTool struct {
 	Inspector providers.GitOpsInspector
+	// Engine is the configured GitOps engine ("argocd"/"flux"), which bounds the kinds
+	// this tool advertises and accepts. See GitOpsKinds for why that bound matters:
+	// a kind the engine cannot own is answerable only with a misleading negative.
+	Engine string
 }
 
 // Name returns the tool name.
 func (t GitOpsStatusTool) Name() string { return "gitops_resource_status" }
 
-// Description returns the tool description.
+// Description returns the tool description, describing only the engine this deployment
+// actually runs: naming the other one's concepts alongside an enum that refuses them is
+// the same dead end as advertising its kinds.
 func (t GitOpsStatusTool) Description() string {
-	return "Get a GitOps/Kubernetes resource's status (a Flux Ready condition or an Argo CD " +
-		"Application's health/sync: status, reason, message), key spec refs, and recent Events. Use " +
-		"this to learn WHY a resource is failing — follow its refs to the root. kind is one of: " +
-		"Application (Argo CD); Kustomization, HelmRelease, GitRepository, OCIRepository, " +
-		"HelmRepository, HelmChart, Bucket (Flux)."
+	lens := "its Flux Ready condition"
+	if t.Engine == "argocd" {
+		lens = "the Argo CD Application's health/sync"
+	}
+	return "Get a GitOps resource's status (" + lens + ": status, reason, message), key spec " +
+		"refs, and recent Events. Use this to learn WHY a resource is failing — follow its refs " +
+		"to the root. This reads GitOps objects ONLY, not arbitrary Kubernetes resources: " +
+		gitopsKindProse(t.Engine)
 }
 
 // Schema returns the JSON schema for the arguments.
-func (t GitOpsStatusTool) Schema() string {
-	return `{"type":"object","properties":{"kind":{"type":"string"},"name":{"type":"string"},"namespace":{"type":"string"}},"required":["kind","name","namespace"]}`
-}
+func (t GitOpsStatusTool) Schema() string { return gitopsKindSchema(t.Engine) }
 
 // Call fetches the resource status and renders it.
 func (t GitOpsStatusTool) Call(ctx context.Context, args string) (string, error) {
@@ -42,15 +49,30 @@ func (t GitOpsStatusTool) Call(ctx context.Context, args string) (string, error)
 	if err := json.Unmarshal([]byte(args), &in); err != nil {
 		return "", fmt.Errorf("parse args: %w", err)
 	}
+	// Refuse an out-of-scope kind BEFORE the lookup. The schema enum should already have
+	// prevented it, but a provider that ignores enums (or an MCP client) must not reach a
+	// path whose only possible answer is a misleading negative.
+	//
+	// The guard also CANONICALISES: it matches case-insensitively (the model writes the
+	// kind as prose) while the providers resolve by exact map lookup, so forwarding the
+	// model's spelling verbatim is what let "helmrelease" pass the guard and then fail
+	// to resolve.
+	kind, ok := canonicalGitOpsKind(t.Engine, in.Kind)
+	if !ok {
+		return gitopsUnsupportedKind(t.Engine, in.Kind), nil
+	}
+	in.Kind = kind
 	rs, err := t.Inspector.ResourceStatus(ctx, providers.Workload{Kind: in.Kind, Name: in.Name, Namespace: in.Namespace})
 	if err != nil {
 		return "", err
 	}
 	id := fmt.Sprintf("%s %s/%s", in.Kind, in.Namespace, in.Name)
 	if rs.NotFound {
-		return id + ": NOT FOUND — searched the given namespace, flux-system, and all namespaces by " +
-			"name; the object genuinely does not exist (likely the cascade root). If you expected it to " +
-			"exist, re-check the kind/name rather than concluding it was deleted.", nil
+		// Reports the lookup, not a verdict — and reports WHICH lookup, from the scopes
+		// the provider actually completed. The first version of this fix still asserted
+		// "no such object exists" over a fixed scope list that named flux-system even on
+		// Argo CD, where nothing ever searches it. See gitopsLookupAnswer.
+		return gitopsLookupAnswer(id, rs.Lookup), nil
 	}
 	// F2: the inspector confirmed this resource exists server-side — record it observed.
 	recordObserved(ctx, providers.Workload{Kind: in.Kind, Name: in.Name, Namespace: in.Namespace})

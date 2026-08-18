@@ -144,6 +144,15 @@ Slack / Stripe / Google / OpenAI-style / AWS key formats, `user:password@host` U
 **values under `data:`/`stringData:` of a `kind: Secret` manifest**, including one surfaced inside
 a `what_changed` git diff.
 
+One shape is **structural rather than textual**. The ruleset is key-name oriented — it masks
+`password: <value>` because the sensitive word is the *key*. A Kubernetes container's env inverts
+that: the sensitive word is the *value* of `name:`, and the credential sits under the literal key
+`value:`, which is in no keyword vocabulary. `redact.SensitiveNameValues` therefore walks the
+decoded object — every `{name, value}` pair, at any depth, so an embedded PodSpec in a CRD is
+covered too — and masks the value when the name is credential-shaped, **before** anything is
+marshalled to YAML. `resource_spec` applies it to every object it reads. A `valueFrom` reference is
+left intact: it names a Secret key rather than carrying it.
+
 > [!WARNING]
 > **Redaction is a mitigation, not a guarantee**
 >

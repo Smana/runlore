@@ -29,9 +29,12 @@ import (
 //
 // Callers apply this ONLY to a bundle that already has an index.md: an index's
 // structure is the owner's choice, so RunLore never invents one.
+//
+// The title goes through linkText: it is the LABEL of a markdown link, and a "]"
+// in it closes the link early — see that function.
 func UpdateIndex(existing []byte, e providers.KBEntry, entryPath string) []byte {
 	section := "## " + e.Type + "s"
-	line := fmt.Sprintf("- [%s](%s) — %s", e.Title, entryPath, e.Description)
+	line := fmt.Sprintf("- [%s](%s) — %s", linkText(e.Title), entryPath, e.Description)
 
 	lines := strings.Split(strings.TrimRight(string(existing), "\n"), "\n")
 	start := -1
@@ -213,7 +216,7 @@ func HasNoteMarker(raw []byte, key string) bool {
 // is fully specified by the spec, so there is nothing to impose.
 func UpdateLog(existing []byte, e providers.KBEntry, entryPath, date string) []byte {
 	heading := "## " + date
-	line := fmt.Sprintf("* **Creation**: Added [%s](%s).", e.Title, entryPath)
+	line := fmt.Sprintf("* **Creation**: Added [%s](%s).", linkText(e.Title), entryPath)
 
 	cur := strings.TrimRight(string(existing), "\n")
 	if strings.TrimSpace(cur) == "" {
@@ -238,3 +241,29 @@ func UpdateLog(existing []byte, e providers.KBEntry, entryPath, date string) []b
 	}
 	return []byte(strings.Join(slices.Insert(lines, at, heading, "", line, ""), "\n") + "\n")
 }
+
+// linkTextEscaper escapes the three characters that let an entry TITLE break out
+// of the markdown link label it is rendered as. Backslash first, so the escapes
+// this adds are not themselves re-escaped.
+var linkTextEscaper = strings.NewReplacer(`\`, `\\`, `[`, `\[`, `]`, `\]`)
+
+// linkText prepares a title for use as the LABEL of a markdown link — the "%s"
+// in "[%s](path)".
+//
+// A "]" in the label closes the link early, so everything after it re-parses:
+// a title of `boom](https://evil.example) x` rendered `[boom](https://evil.example) x](path.md)`,
+// a working link to the attacker's URL where the index's own link to the entry
+// should be. Backslash escapes are the CommonMark answer — `\]` is a literal
+// "]" and does not close the label — so the title still reads as written.
+//
+// It escapes rather than strips because these lines are the catalog's human
+// index: a title is the one string a reader scans the file for, and silently
+// dropping characters from it would make the index disagree with the entry.
+//
+// It is applied HERE, at the point the structural assumption is made, rather
+// than at each producer. Both producers are exposed: internal/curator titles an
+// entry from model-written text, and internal/thread titles an operator note
+// from a chat message any channel member can send. A defusal in one of them
+// would leave the other open, and neither is the place that decided a title
+// would be a link label.
+func linkText(s string) string { return linkTextEscaper.Replace(s) }
