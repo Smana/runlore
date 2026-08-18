@@ -109,8 +109,17 @@ func (s *Source) Decode(body []byte, h http.Header) (source.DecodeResult, error)
 		// arrives as its bare DBInstanceIdentifier on one firing and as its full ARN
 		// on the next — and Workload.Name is what the notification renders, what a
 		// curated entry is indexed under, and what the recurrence key is built from.
-		// Only an ARN is rewritten; a Kubernetes name passes through untouched, and
-		// the raw value still travels on Labels.
+		// Only an ARN is rewritten; a Kubernetes name passes through untouched.
+		//
+		// Unlike the Alertmanager adapter, this path does NOT keep the raw value: the
+		// labels map above is built from the instance name plus the operator's own
+		// `labels:` mapping, and workload_name is not copied into it. So unless that
+		// mapping happens to carry the ARN, the account and region are gone from the
+		// Request entirely and never reach the seed prompt. That is a real loss of
+		// context for a vendor webhook, and the reason it is tolerated is only that
+		// the alternative — inventing a label key here — would collide with whatever
+		// the operator already maps. Restoring it belongs with the ingestion
+		// canonicalisation moving to the source.Pipeline chokepoint.
 		wname = providers.ARNResourceName(wname)
 		var fps []string
 		if fingerprint != "" {

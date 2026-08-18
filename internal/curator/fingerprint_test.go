@@ -187,7 +187,7 @@ func TestDupFingerprintDiffersByTriggerKey(t *testing.T) {
 	}
 }
 
-func TestNormalizeWorkloadName(t *testing.T) {
+func TestNormalizeResourceNameAlias(t *testing.T) {
 	cases := map[string]string{
 		"node-exporter-prometheus-node-exporter-km6ld": "node-exporter-prometheus-node-exporter", // DaemonSet pod hash
 		"node-exporter-prometheus-node-exporter-n5zld": "node-exporter-prometheus-node-exporter", // different pod, same family
@@ -198,8 +198,8 @@ func TestNormalizeWorkloadName(t *testing.T) {
 		"":                                             "",
 	}
 	for in, want := range cases {
-		if got := normalizeWorkloadName(in); got != want {
-			t.Errorf("normalizeWorkloadName(%q) = %q, want %q", in, got, want)
+		if got := normalizeResourceName(in); got != want {
+			t.Errorf("normalizeResourceName(%q) = %q, want %q", in, got, want)
 		}
 	}
 }

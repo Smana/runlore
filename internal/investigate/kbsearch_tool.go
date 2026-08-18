@@ -126,9 +126,12 @@ func (t KBSearchTool) withEnrichment(s string) KBSearchTool {
 // identifies the incident (namespace/name) lives only in the labels, so the model's
 // symptom-text kb_search re-suffers the vocabulary mismatch recall already measured
 // and solved (0.096 BM25 vs a perfect runbook → rank #1 once the ref is folded in;
-// see buildRecallQuery). The name is normalized (pod-hash stripped) so a per-pod
-// alert reaches the controller-family runbook; empty parts are dropped so the suffix
-// never carries stray whitespace. It is ADDITIVE — appended to the model's own
+// see buildRecallQuery). The name is normalized to its resource identity — pod-hash
+// stripped so a per-pod alert reaches the controller-family runbook, ARN collapsed so
+// the two spellings of one cloud resource query alike — by the same
+// providers.NormalizeResourceName buildRecallQuery uses, because this expansion and
+// that one must never disagree about what names a resource; empty parts are dropped
+// so the suffix never carries stray whitespace. It is ADDITIVE — appended to the model's own
 // query, never replacing it — so a query that already names the workload is at worst
 // neutral.
 func kbSearchEnrichment(req Request) string {
@@ -139,7 +142,7 @@ func kbSearchEnrichment(req Request) string {
 		}
 	}
 	add(req.Workload.Namespace)
-	add(providers.NormalizeWorkloadName(req.Workload.Name))
+	add(providers.NormalizeResourceName(req.Workload.Name))
 	add(req.Labels["alertname"])
 	return strings.Join(parts, " ")
 }

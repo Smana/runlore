@@ -44,6 +44,16 @@ func TestResourceIDAgreement(t *testing.T) {
 			"arnica-exporter", "exporter", false},
 		{"a truncated arn-looking value is not an arn either",
 			"arn:aws:rds", "rds", false},
+		// An S3 ARN's resource field has NO resource-type segment: it is
+		// "bucket[/key]". Stripping its first segment would leave both of these as
+		// "exports", and an S3 ARN carries neither region nor account, so no
+		// qualifier would be left to tell the two buckets apart.
+		{"two S3 prefixes under different buckets are two resources",
+			"arn:aws:s3:::prod-logs/exports", "arn:aws:s3:::staging-logs/exports", false},
+		{"an S3 prefix agrees with its own bucket-qualified spelling",
+			"arn:aws:s3:::prod-logs/exports", "prod-logs/exports", true},
+		{"an S3 bucket arn still agrees with its bare bucket name",
+			"arn:aws:s3:::prod-logs", "prod-logs", true},
 		{"empty agrees with empty",
 			"", "", true},
 		{"empty never agrees with a named resource",
@@ -78,8 +88,13 @@ func TestARNResourceName(t *testing.T) {
 		"arn:aws:rds:us-east-1:142655614335:db:datagrok-aqemia-shared":               "datagrok-aqemia-shared",
 		"arn:aws:ec2:us-east-1:142655614335:instance/i-0abc123def4567890":            "i-0abc123def4567890",
 		"arn:aws:elasticloadbalancing:us-east-1:1:loadbalancer/app/my-lb/50dc6c4951": "app/my-lb/50dc6c4951",
-		"arn:aws:s3:::my-bucket":                  "my-bucket", // no region, no account
-		"arn:aws-cn:rds:cn-north-1:1:db:datagrok": "datagrok",  // non-default partition
+		"arn:aws:s3:::my-bucket": "my-bucket", // no region, no account
+		// S3 has no resource-TYPE segment, so the bucket is part of the identifier
+		// and must survive: reducing this to "exports" would fuse every bucket that
+		// happens to use the same prefix name.
+		"arn:aws:s3:::prod-logs/exports":          "prod-logs/exports",
+		"arn:aws:ec2:us-east-1:1:instance/i-0abc": "i-0abc",   // a real type segment still goes
+		"arn:aws-cn:rds:cn-north-1:1:db:datagrok": "datagrok", // non-default partition
 		"harbor-registry-59598dbd57-ltkzw":        "harbor-registry-59598dbd57-ltkzw",
 		"observability/datagrok-aqemia-shared":    "observability/datagrok-aqemia-shared",
 		"arnica-exporter":                         "arnica-exporter",

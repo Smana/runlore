@@ -119,8 +119,13 @@ const staleFactor = 0.75
 // actually shares ("tooling", "harbor-registry"), lifting those cases from zero-hit
 // to rank #1.
 //
-// Deliberate boundaries: the name is NORMALIZED (pod-hash stripped, same function
-// as the structural gate) so a per-pod alert matches the controller-family runbook;
+// Deliberate boundaries: the name is NORMALIZED to its resource IDENTITY — the pod
+// hash stripped so a per-pod alert matches the controller-family runbook, and an ARN
+// collapsed to the identifier its CloudWatch dimension carries so the retrieval that
+// FEEDS the structural gate can no longer disagree with it about which spellings name
+// one resource. Ingestion already does the ARN half for alert-derived requests; this
+// covers the ones that never went through it (the CLI path) and keeps this query
+// builder identical to curator.Fingerprint, which normalizes the same way;
 // the alertname is appended only when it is NOT already the title, so a label alert
 // (title == alertname) is not double-counted; and the ref is additive, so the
 // GitOps-failure source — whose title already carries "Kind/Name" — is not harmed
@@ -136,7 +141,7 @@ func buildRecallQuery(req Request) string {
 	add(req.Title)
 	add(req.Message)
 	add(req.Workload.Namespace)
-	add(providers.NormalizeWorkloadName(req.Workload.Name))
+	add(providers.NormalizeResourceName(req.Workload.Name))
 	if an := req.Labels["alertname"]; an != req.Title {
 		add(an)
 	}
@@ -667,9 +672,13 @@ func resourceAgrees(reqW providers.Workload, entryResource string, requireWorklo
 //     and the live catalog holds entries in both forms
 //     ("observability/arn:aws:rds:…:db:compute-stages" beside short names).
 //     Canonicalising new alerts at ingestion cannot reach those already-written
-//     entries, so the gate itself compares names as cloud resource identities — which
-//     also keeps two accounts or two regions hosting the same instance name apart
-//     (see providers.ResourceID).
+//     entries, so the gate itself compares names as cloud resource identities (see
+//     providers.ResourceID). Note what that does NOT buy: ingestion has already
+//     stripped the ARN off the request side, so the alert is unqualified and agrees
+//     with an entry's ARN in ANY account. The account/region check separates two
+//     QUALIFIED values only — it is what keeps two legacy ARN-form entries apart, not
+//     a guarantee that this gate is account-safe. See providers.NormalizeResourceName
+//     for the exposure that buys the collapse.
 //
 // Only the NAME half is normalized, never the namespace: the ref is cut on the FIRST
 // "/" and Kubernetes namespaces never contain one, so a slash-style ARN in the name
@@ -683,7 +692,11 @@ func refsAgree(a, b string) bool {
 		return false
 	}
 	if !aScoped {
-		return true // two bare namespaces (or two empties), already found equal
+		// Two bare namespaces (or two empties): ans == bns has already decided it.
+		// Falling through would reach the same answer via two empty names, so this is
+		// an intent marker and a short-circuit, not a case the comparison below would
+		// get wrong.
+		return true
 	}
 	return providers.ParseResourceID(aname).Agrees(providers.ParseResourceID(bname))
 }

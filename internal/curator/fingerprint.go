@@ -38,19 +38,20 @@ func normalizeText(s string) string {
 	return strings.Join(strings.Fields(s), " ")
 }
 
-// normalizeWorkloadName reduces a resource name to the identity the curator's keys
-// group by: an AWS ARN collapses to the resource identifier its CloudWatch dimension
+// normalizeResourceName reduces a resource name to the identity the curator groups
+// by: an AWS ARN collapses to the resource identifier its CloudWatch dimension
 // carries, and a trailing pod-name hash is stripped so a per-pod name reduces to its
-// controller family. The implementation is shared with the instant-recall structural
-// gate — it lives in providers (the single source of truth, see CORE-681) so the
-// dedup and recall paths can never drift. This thin alias keeps the curator's
-// internal call sites (and their tests) unchanged.
+// controller family. It is a thin alias for providers.NormalizeResourceName, the
+// single source of truth shared with the instant-recall path (CORE-681) so the two
+// can never drift.
 //
-// The ARN collapse is what lets one recurring cloud resource key alike when the
-// alert spells it two ways; providers.NormalizeResourceName documents the accepted
-// consequence (the account and region are dropped) and why the fields the callers
-// wrap around this name make it safe here.
-func normalizeWorkloadName(name string) string {
+// It is deliberately NOT named normalizeWorkloadName any more: providers still
+// exports a NormalizeWorkloadName that does only the pod-hash half, and a local alias
+// wearing that exact name would read as a pass-through to it while meaning something
+// wider. Read providers.NormalizeResourceName for the accepted consequence of the ARN
+// collapse — the account and region are dropped, and the surrounding key fields do
+// not reliably put them back.
+func normalizeResourceName(name string) string {
 	return providers.NormalizeResourceName(name)
 }
 
@@ -64,7 +65,7 @@ func IncidentKey(alertname, namespace, kind, name, cluster string) string {
 		strings.TrimSpace(alertname),
 		strings.TrimSpace(namespace),
 		strings.TrimSpace(kind),
-		normalizeWorkloadName(strings.TrimSpace(name)),
+		normalizeResourceName(strings.TrimSpace(name)),
 		strings.TrimSpace(cluster),
 	}
 	for _, p := range parts {
@@ -91,7 +92,7 @@ func Fingerprint(inv providers.Investigation) string {
 	}
 	if len(inv.Changes) > 0 {
 		w := inv.Changes[0].Workload
-		b.WriteString(" " + w.Namespace + " " + normalizeWorkloadName(w.Name))
+		b.WriteString(" " + w.Namespace + " " + normalizeResourceName(w.Name))
 	}
 	return strings.TrimSpace(b.String())
 }
@@ -142,7 +143,7 @@ func DupFingerprint(inv providers.Investigation) string {
 	// incident on a different pod/node keys alike (CORE-681). The TriggerKey is
 	// already a host-invariant per-class key for alert sources (see IncidentKey).
 	res := inv.Resource
-	res.Name = normalizeWorkloadName(res.Name)
+	res.Name = normalizeResourceName(res.Name)
 	ref := strings.ToLower(res.Ref())
 	if tk := strings.ToLower(strings.TrimSpace(inv.TriggerKey)); tk != "" {
 		// "trigger:" namespaces the key so a trigger value can never collide with a

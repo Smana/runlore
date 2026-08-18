@@ -214,9 +214,16 @@ Why each gate exists:
   (`tooling/harbor-registry-59598dbd57-ltkzw` → `tooling/harbor-registry`), and a
   **cloud** resource is matched through its ARN — a CloudWatch alert names one RDS
   instance by its `DBInstanceIdentifier` on one firing and by its full ARN on the
-  next, and both reach the same entry. An ARN's account and region still have to
-  agree when both sides carry them, so the same instance name in two AWS accounts
-  stays two resources. A **workload-less**
+  next, and both reach the same entry.
+
+  Be aware of the limit of that last one. Alerts are canonicalised to the bare
+  identifier when they are ingested, so the incoming side carries no account or
+  region and agrees with an ARN-form entry from **any** account; the account/region
+  check only separates two values that both still carry them (two legacy ARN-form
+  entries). The same collapse keys the recurrence ledger, so if you run one instance
+  name in two AWS accounts and alert on both through a single Prometheus, treat them
+  as one identity for recall and recurrence — or give the two alerts different
+  `alertname`s. A **workload-less**
   incident (PagerDuty carries no Kubernetes namespace/name) agrees only with entries
   that are themselves resource-less — the weakest ("scopeless") tier: it always
   requires `solo_floor` + `min_score`, starts at reduced confidence, and

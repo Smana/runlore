@@ -55,12 +55,15 @@ type amAlert struct {
 // two spellings that then key, render and index as two unrelated resources. Only an
 // ARN is rewritten; a Kubernetes name (pod hash and all) passes through untouched.
 func workloadFromLabels(labels map[string]string) (kind, name string) {
-	kind, name = workloadLabel(labels)
+	kind, name = rawWorkloadFromLabels(labels)
 	return kind, providers.ARNResourceName(name)
 }
 
-// workloadLabel picks the workload label to trust, in precedence order.
-func workloadLabel(labels map[string]string) (kind, name string) {
+// rawWorkloadFromLabels picks the workload label to trust, in precedence order, and
+// returns it verbatim. The split from workloadFromLabels exists so the ARN
+// canonicalisation is applied once instead of at each of the three returns below —
+// so the name says "raw", which is the only thing that distinguishes the two.
+func rawWorkloadFromLabels(labels map[string]string) (kind, name string) {
 	for _, c := range []struct{ label, kind string }{
 		{"deployment", "Deployment"},
 		{"statefulset", "StatefulSet"},
