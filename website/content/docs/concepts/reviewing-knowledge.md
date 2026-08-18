@@ -77,19 +77,24 @@ marked as model-drafted, never filed as your words.
 
 **Announcing a write to everyone else.** By default a captured note is reported only
 into the thread it came from, so the knowledge lands but nobody outside that thread
-learns that it did. Setting `notify.thread.announce_kb_updates: true` (default
-**false**) also posts every landed write to each configured notifier's own channel or
-room — the same place investigation findings go — naming the pull request, the entry,
-who wrote it, and quoting the note. Two consequences to know before turning it on:
+learns that it did. Setting `notify.thread.announce_kb_updates` (default **false**)
+announces every landed write, naming the pull request, the entry, who wrote it and
+which chat system they typed it in, and quoting the note. The value says where it
+lands — `true` and `channel` both mean each notifier's own channel or room, `thread`
+means the thread the note was typed in, `both` means both. Two consequences to know
+before turning it on:
 
-- **With one transport configured you see two messages for one write**: the thread
-  reply, which answers the person who typed, and the channel post, which reaches
-  everyone who was not reading that thread. That is the feature rather than
-  duplication — the announcement never posts back into the thread.
+- **`channel` gives you two messages for one write**: the thread reply, which answers
+  the person who typed, and the channel post, which reaches everyone who was not
+  reading that thread. With several sinks that is the feature rather than duplication.
+  With **one** transport it is an echo — the thread already lives in that channel —
+  and `thread` is the answer: the announcement goes into the thread instead, and any
+  sink that cannot reach it still gets its own channel.
 - **The announcement carries note content.** A note written in a thread nobody else
   was watching is broadcast to every sink you have configured — the other chat
   system, any webhook endpoint. That is an operator's call to make knowingly, which
-  is why the key is off unless you set it.
+  is why the key is off unless you set it. Routing it into a thread narrows who sees
+  it on the originating transport; it does not stop the other sinks receiving it.
 
 Setup and the full cost picture:
 [Slack]({{< relref "/docs/integrations/notifications/slack.md" >}}) ·

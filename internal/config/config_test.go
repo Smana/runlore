@@ -9,6 +9,7 @@ import (
 
 	"gopkg.in/yaml.v3"
 
+	"github.com/Smana/runlore/internal/providers"
 	"github.com/Smana/runlore/internal/thread"
 )
 
@@ -1360,7 +1361,7 @@ notify:
 	th := c.Notify.Thread
 	if th.MaxNotesPerThread != 5 || th.ForgeWritesPerHour != 3 || th.RegistryTTL.Std() != 48*time.Hour ||
 		th.RegistryMax != 100 || th.MaxNoteBytes != 4096 ||
-		th.ChatCallsPerHour != 45 || th.ChatTokensPerHour != 123456 || !th.AnnounceKBUpdates {
+		th.ChatCallsPerHour != 45 || th.ChatTokensPerHour != 123456 || !th.AnnounceKBUpdates.On() {
 		t.Fatalf("notify.thread not parsed: %+v", th)
 	}
 	if got := th.EffectiveMaxNotesPerThread(); got != 5 {
@@ -1395,11 +1396,16 @@ notify:
 // a note written in one thread to every configured sink. That is an operator's
 // call to make knowingly, so the safe state is the unconfigured state.
 //
-// All three states are asserted separately rather than just "absent": a bool
+// All three states are asserted separately rather than just "absent": a switch
 // whose zero value is the default reads as covered the moment anything asserts
-// false, and the case that would actually reveal a wrong-way default — an
+// off, and the case that would actually reveal a wrong-way default — an
 // operator writing the key out explicitly to turn it OFF — is the one a
 // zero-value-only test never exercises.
+//
+// It asserts On() rather than the raw value on purpose: On() is what every
+// consumer branches on, and it is the property "the unconfigured state does not
+// broadcast" is a claim about. The exact mode each spelling resolves to is
+// TestAnnounceModeAcceptsBooleansAndNames' job.
 func TestAnnounceKBUpdatesIsOptIn(t *testing.T) {
 	for _, tc := range []struct {
 		name string
@@ -1419,8 +1425,17 @@ func TestAnnounceKBUpdatesIsOptIn(t *testing.T) {
 			yaml: "notify:\n  thread:\n    announce_kb_updates: false\n",
 		},
 		{
+			name: "explicitly off",
+			yaml: "notify:\n  thread:\n    announce_kb_updates: \"off\"\n",
+		},
+		{
 			name: "explicitly true",
 			yaml: "notify:\n  thread:\n    announce_kb_updates: true\n",
+			want: true,
+		},
+		{
+			name: "explicitly thread-routed",
+			yaml: "notify:\n  thread:\n    announce_kb_updates: thread\n",
 			want: true,
 		},
 	} {
@@ -1429,10 +1444,10 @@ func TestAnnounceKBUpdatesIsOptIn(t *testing.T) {
 			if err := yaml.Unmarshal([]byte(tc.yaml), &c); err != nil {
 				t.Fatalf("unmarshal: %v", err)
 			}
-			if got := c.Notify.Thread.AnnounceKBUpdates; got != tc.want {
-				t.Fatalf("notify.thread.announce_kb_updates = %v, want %v — the announcement fans a note "+
+			if got := c.Notify.Thread.AnnounceKBUpdates.On(); got != tc.want {
+				t.Fatalf("notify.thread.announce_kb_updates = %q, On() = %v, want %v — the announcement fans a note "+
 					"written in one thread out to every configured sink, so the unconfigured state must be off",
-					got, tc.want)
+					string(c.Notify.Thread.AnnounceKBUpdates), got, tc.want)
 			}
 			// The key must land on the named Thread field, never in Notify.Extra,
 			// for the same reason every other notify.thread key must: an inline
@@ -1440,6 +1455,145 @@ func TestAnnounceKBUpdatesIsOptIn(t *testing.T) {
 			// TestNotifyThreadDoesNotShadowARegisteredNotifier).
 			if _, ok := c.Notify.Extra["thread"]; ok {
 				t.Fatal("notify.thread must not also land in Notify.Extra")
+			}
+		})
+	}
+}
+
+// TestAnnounceModeAcceptsBooleansAndNames is the BACKWARD-COMPATIBILITY pin for
+// notify.thread.announce_kb_updates.
+//
+// The key shipped and was documented as a plain YAML boolean before it grew
+// destinations, so every file already in an operator's repository must keep
+// meaning exactly what it meant. That is a stronger claim than "true still
+// parses": `true` must still resolve to the CHANNEL destination — the message,
+// the sink set and the place it lands, all unchanged — because an operator who
+// upgrades and finds their announcements silently moved into threads has had
+// their configuration reinterpreted under them.
+//
+// YAML 1.1's `on`/`off`/`yes`/`no` are covered too, and not as a courtesy: this
+// field was a Go bool, and yaml.v3 resolves all of those into a bool target, so
+// they are values that WORK today whether or not any page documents them. A
+// string-first unmarshaler would silently turn `off` into an unknown mode and
+// fail an operator's existing file at startup.
+func TestAnnounceModeAcceptsBooleansAndNames(t *testing.T) {
+	for _, tc := range []struct {
+		val  string
+		want AnnounceMode
+	}{
+		// The two shipped spellings. These are the compatibility contract.
+		{val: "true", want: AnnounceChannel},
+		{val: "false", want: AnnounceOff},
+		// YAML 1.1 booleans, which the bool field accepted before this type existed.
+		{val: "on", want: AnnounceChannel},
+		{val: "off", want: AnnounceOff},
+		{val: "yes", want: AnnounceChannel},
+		{val: "no", want: AnnounceOff},
+		{val: "TRUE", want: AnnounceChannel},
+		// An empty value is a null node. yaml.v3 short-circuits null BEFORE it
+		// looks for an Unmarshaler, so UnmarshalYAML is never called and the
+		// field keeps its zero value — which is why "" has to be off in its own
+		// right rather than by being normalised to AnnounceOff on the way in.
+		// The bool field it replaces resolved a null to false, so this is the
+		// same answer by a different route.
+		{val: "", want: ""},
+		{val: "~", want: ""},
+		{val: "null", want: ""},
+		// The names.
+		{val: "channel", want: AnnounceChannel},
+		{val: "thread", want: AnnounceThread},
+		{val: "both", want: AnnounceBoth},
+		{val: `"off"`, want: AnnounceOff},
+		{val: "Thread", want: AnnounceThread},
+		{val: `"  both  "`, want: AnnounceBoth},
+	} {
+		t.Run(tc.val, func(t *testing.T) {
+			var c Config
+			y := "notify:\n  thread:\n    announce_kb_updates: " + tc.val + "\n"
+			if err := yaml.Unmarshal([]byte(y), &c); err != nil {
+				t.Fatalf("unmarshal %q: %v", tc.val, err)
+			}
+			if got := c.Notify.Thread.AnnounceKBUpdates; got != tc.want {
+				t.Fatalf("announce_kb_updates: %s parsed as %q, want %q", tc.val, string(got), string(tc.want))
+			}
+			if err := c.Validate(); err != nil {
+				t.Fatalf("announce_kb_updates: %s must validate clean: %v", tc.val, err)
+			}
+			// On() is the property every consumer branches on, so both spellings
+			// of off must answer it the same way. "" reaches here only via the
+			// null path above, where no unmarshaler ran to normalise it.
+			if want := tc.want != AnnounceOff && tc.want != ""; c.Notify.Thread.AnnounceKBUpdates.On() != want {
+				t.Fatalf("announce_kb_updates: %s parsed as %q, On() = %v, want %v",
+					tc.val, string(tc.want), !want, want)
+			}
+		})
+	}
+}
+
+// TestAnnounceModeDeliveryIsTotal pins the mapping from the operator's word onto
+// the destination the notifiers act on (providers.KBDelivery).
+//
+// The two enums are separate because only config has an OFF state — On() is what
+// decides an announcer exists at all — and a mapping that is written once and
+// read nowhere else is exactly the kind that quietly loses a case. A mode added
+// here without a Delivery arm would fall through to the channel and turn a new
+// destination into a silent no-op, which is the failure the default arm of a
+// switch is very good at hiding.
+func TestAnnounceModeDeliveryIsTotal(t *testing.T) {
+	for mode, want := range map[AnnounceMode]providers.KBDelivery{
+		AnnounceChannel: providers.KBDeliverChannel,
+		AnnounceThread:  providers.KBDeliverThread,
+		AnnounceBoth:    providers.KBDeliverBoth,
+		// Off has no delivery; it must resolve to the harmless zero value rather
+		// than to a route.
+		AnnounceOff: providers.KBDeliverChannel,
+		"":          providers.KBDeliverChannel,
+	} {
+		if got := mode.Delivery(); got != want {
+			t.Errorf("AnnounceMode(%q).Delivery() = %q, want %q", string(mode), string(got), string(want))
+		}
+	}
+	// The routing modes must be distinguishable from the shipped one, or the
+	// mapping above is satisfied by a function that returns the zero value.
+	if AnnounceThread.Delivery() == AnnounceChannel.Delivery() {
+		t.Error("thread and channel resolve to the same delivery — routing would be inert")
+	}
+	if !AnnounceThread.Delivery().IntoThread() || !AnnounceBoth.Delivery().IntoThread() {
+		t.Error("thread/both must resolve to a delivery that asks for the originating thread")
+	}
+	if AnnounceChannel.Delivery().IntoThread() {
+		t.Error("channel must not ask for the originating thread — that is the shipped behaviour of `true`")
+	}
+}
+
+// TestAnnounceModeRejectsAnUnknownName pins that a typo fails LOAD rather than
+// falling back.
+//
+// Silently reading "treads" as the channel would leave an operator believing the
+// echo they configured away is gone while every write still restates itself in
+// the channel — the exact complaint the routing exists to answer, now invisible.
+// The message must name the accepted values, because the operator who typed a
+// wrong one has no other way to learn what the right ones are.
+func TestAnnounceModeRejectsAnUnknownName(t *testing.T) {
+	for _, val := range []string{"treads", "chanel", "room", `"true"`, "thread,channel"} {
+		t.Run(val, func(t *testing.T) {
+			var c Config
+			y := "notify:\n  thread:\n    announce_kb_updates: " + val + "\n"
+			if err := yaml.Unmarshal([]byte(y), &c); err != nil {
+				t.Fatalf("unmarshal %q must not fail — Validate is what reports it: %v", val, err)
+			}
+			err := c.Validate()
+			if err == nil {
+				t.Fatalf("announce_kb_updates: %s validated clean; an unknown destination must fail at load", val)
+			}
+			msg := err.Error()
+			if !strings.Contains(msg, "announce_kb_updates") {
+				t.Errorf("the error must name the key, got: %v", err)
+			}
+			for _, want := range []string{"off", "channel", "thread", "both"} {
+				if !strings.Contains(msg, want) {
+					t.Errorf("the error must name the valid value %q so the operator can fix it, got: %v", want, err)
+				}
 			}
 		})
 	}

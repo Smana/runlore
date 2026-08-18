@@ -785,14 +785,67 @@ const (
 	KBRouteAppend KBRoute = "append"
 )
 
+// KBDelivery says WHERE a KBUpdate announcement is to be delivered. It is set
+// once from configuration (config.AnnounceMode) and read by every sink.
+//
+// # A sink that is not the originating transport falls back to the channel
+//
+// Only ONE sink can ever deliver into the thread a note was typed in: the
+// transport that thread lives on. A Matrix room cannot reply into a Slack
+// thread, an incoming-webhook Slack cannot reply into any thread, and an HTTP
+// webhook has no thread at all. The choice for those sinks is fall back to the
+// channel, or skip them; this contract is FALL BACK, and the sinks that cannot
+// thread-route are the reason.
+//
+// Skipping would make thread-routing silently un-configure an operator's other
+// sinks. The echo KBDeliverThread exists to remove is specific to the
+// originating transport, where the thread already lives inside the channel the
+// announcement would post to; a Matrix room that never saw the Slack thread has
+// no echo to remove, and the announcement is the only way it learns anything at
+// all. Dropping it there would answer "stop repeating yourself in one channel"
+// with "stop telling the other rooms", which is a different feature and a worse
+// one. The same argument holds harder for a webhook sink feeding an index or an
+// incident tool: it wants the record either way.
+//
+// The fallback is also what makes a missing handle safe. A KBUpdate whose Root
+// or Channel is empty — a thread context rebuilt after a restart, an origin that
+// was never a thread — cannot be replied into by anyone, and the write it
+// describes has already landed. Falling back to the channel reports it; skipping
+// would lose an announcement for a write that really happened, which is the
+// failure this whole path is built to avoid.
+type KBDelivery string
+
+// Where an announcement lands.
+const (
+	// KBDeliverChannel posts to each sink's own configured channel or room and
+	// nowhere else.
+	//
+	// It is the ZERO VALUE deliberately: a KBUpdate built without deciding
+	// behaves exactly as every announcement did before routing existed, so no
+	// producer that predates this field can change destination by omission.
+	KBDeliverChannel KBDelivery = ""
+	// KBDeliverThread delivers into the originating thread where the sink can
+	// (see above), and to the sink's channel where it cannot.
+	KBDeliverThread KBDelivery = "thread"
+	// KBDeliverBoth delivers into the originating thread AND to every sink's
+	// channel.
+	KBDeliverBoth KBDelivery = "both"
+)
+
+// IntoThread reports whether this delivery wants the originating thread. It does
+// NOT report that a given sink can honour that — only the sink knows whether it
+// is the originating transport and holds both handles.
+func (d KBDelivery) IntoThread() bool { return d == KBDeliverThread || d == KBDeliverBoth }
+
 // KBUpdate announces that a knowledge-base write ALREADY LANDED on the forge. It
 // is emitted after the fact and describes what was written — it is never a
 // request to write, and a consumer failing to deliver it changes nothing about
 // the entry, which is already on the forge.
 //
-// It names its origin (Transport + Root) so a consumer can tell which thread
-// produced it — and so the transport that already replied in that thread can
-// avoid announcing the same write to the same people twice.
+// It names its origin (Transport + Root + Channel) so a consumer can tell which
+// thread produced it — and so the transport that already replied in that thread
+// can avoid announcing the same write to the same people twice, or deliver into
+// that thread rather than beside it (see Delivery).
 //
 // # Untrusted fields
 //
@@ -804,16 +857,26 @@ const (
 // links and mass-ping a channel (Slack <!channel>, Matrix @room), the same
 // hazard ProgressUpdate.Interim carries.
 //
-// URL and Root are untrusted for the same reason at one remove: they come back
-// from the forge and from the chat transport rather than from RunLore, which is
-// why the thread reply already wraps the URL in thread.Untrusted. Transport,
-// Route, PR and At are RunLore's own values and need no escaping.
+// URL, Root and Channel are untrusted for the same reason at one remove: they
+// come back from the forge and from the chat transport rather than from RunLore,
+// which is why the thread reply already wraps the URL in thread.Untrusted.
+// Transport, Route, PR, At and Delivery are RunLore's own values and need no
+// escaping.
 type KBUpdate struct {
 	// Transport is the chat system the note came from ("slack", "matrix"),
 	// matching ThreadNotifier.Transport; "" when the write had no thread origin.
 	Transport string
 	// Root is the opaque thread-root handle on that transport (Slack: thread_ts).
 	Root string
+	// Channel is where that thread lives (Slack: channel id; Matrix: room id) —
+	// the second half of the handle ReplyInThread needs, since a thread root
+	// alone does not say which channel to post it in. "" when the write had no
+	// thread origin, or when the origin was rebuilt without one.
+	Channel string
+	// Delivery says where this announcement is to be delivered. It is a routing
+	// instruction rather than a fact about the write, and the only field here
+	// that is: everything else describes what landed on the forge.
+	Delivery KBDelivery
 	// Route is how the write landed (comment on an open PR, or a new PR).
 	Route KBRoute
 	// PR is the forge pull/merge request number the knowledge landed in; 0 when

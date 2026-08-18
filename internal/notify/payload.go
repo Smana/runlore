@@ -107,13 +107,25 @@ type KBUpdatePayload struct {
 	Event     string `json:"event"` // always kbUpdateEvent
 	Transport string `json:"transport,omitempty"`
 	Root      string `json:"root,omitempty"`
-	Route     string `json:"route"`
-	PR        int    `json:"pr,omitempty"`
-	URL       string `json:"url,omitempty"`
-	Title     string `json:"title,omitempty"`
-	Author    string `json:"author,omitempty"`
-	Note      string `json:"note,omitempty"`
-	At        string `json:"at,omitempty"` // RFC3339; "" when unknown
+	// Channel is the other half of the thread handle, and it ships because
+	// "root" alone does not identify a conversation to anything outside this
+	// process: a Slack thread_ts is scoped to its channel and a Matrix event id
+	// to its room, so a receiver building a permalink back to where the note was
+	// typed — which is the use "root" exists for — cannot do it without this.
+	// Sending one and not the other made the pair useless while looking complete.
+	//
+	// providers.KBUpdate.Delivery is deliberately NOT here: it is a routing
+	// instruction for the chat sinks, not a fact about the write, and this
+	// payload is the record. See TestKBUpdatePayloadCarriesEveryRecordedField for
+	// where that decision is written down and enforced.
+	Channel string `json:"channel,omitempty"`
+	Route   string `json:"route"`
+	PR      int    `json:"pr,omitempty"`
+	URL     string `json:"url,omitempty"`
+	Title   string `json:"title,omitempty"`
+	Author  string `json:"author,omitempty"`
+	Note    string `json:"note,omitempty"`
+	At      string `json:"at,omitempty"` // RFC3339; "" when unknown
 }
 
 // NewKBUpdatePayload maps a KBUpdate to the delivery payload.
@@ -123,7 +135,7 @@ func NewKBUpdatePayload(up providers.KBUpdate) KBUpdatePayload {
 		at = up.At.UTC().Format(time.RFC3339)
 	}
 	return KBUpdatePayload{
-		Event: kbUpdateEvent, Transport: up.Transport, Root: up.Root,
+		Event: kbUpdateEvent, Transport: up.Transport, Root: up.Root, Channel: up.Channel,
 		Route: string(up.Route), PR: up.PR, URL: up.URL,
 		Title: up.Title, Author: up.Author, Note: up.Note, At: at,
 	}

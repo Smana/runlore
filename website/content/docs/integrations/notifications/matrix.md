@@ -111,12 +111,12 @@ for. That widening is real and worth understanding before you flip the flag: see
 Matrix thread
 capture]({{< relref "/docs/security/security-model.md#matrix-thread-capture-notifymatrixthread_capture--a-widened-sync-filter" >}}).
 
-### Announce a knowledge write to the room
+### Announce a knowledge write
 
 A captured note is reported into the thread it came from, and nowhere else — so the
-knowledge lands, but the room never learns it did. `announce_kb_updates` changes that:
-every write that reaches the forge is also posted to the room this notifier delivers
-findings to.
+knowledge lands, but nobody outside that thread learns it did. `announce_kb_updates`
+changes that: every write that reaches the forge is also announced, with its own
+message naming who wrote the note and where.
 
 ```yaml
 notify:
@@ -126,24 +126,32 @@ notify:
     access_token_env: MATRIX_TOKEN
     thread_capture: true
   thread:
-    announce_kb_updates: true    # default false
+    announce_kb_updates: channel  # default false; also true (= channel), thread, both
 ```
 
-The room post names the pull request, the entry that was created, who the note came
-from and which chat system they typed it in, and quotes the note itself — capped at
-512 bytes, with the pull request holding the full text. It is a plain `m.notice` with
-no `m.thread` relation, carrying the same secret-redacted, capped text that reached
-the forge, and everything a human or the model wrote in it is neutralised before
-sending: an `@room` inside a note is rendered readable but inert, never a room-wide
-notification.
+The post names the pull request, the entry that was created, who the note came from
+and which chat system they typed it in, and quotes the note itself — capped at
+512 bytes, with the pull request holding the full text. It carries the same
+secret-redacted, capped text that reached the forge, and everything a human or the
+model wrote in it is neutralised before sending: an `@room` inside a note is rendered
+readable but inert, never a room-wide notification. That holds wherever it lands.
 
-Two things to know before turning it on:
+**Where it lands is yours to pick.** `channel` (what `true` has always meant) sends a
+plain `m.notice` with no `m.thread` relation to the room this notifier delivers
+findings to. `thread` sends it into the thread the note was typed in, as an
+`m.notice` carrying the MSC3440 `m.thread` relation. `both` does each.
 
-- **One write produces two messages, and that is intended.** The thread reply answers
-  the person who typed; the room post reaches everyone who was not reading that thread
-  — which is the whole point of the feature. The announcement never posts back into the
-  thread, so it is a second destination rather than a duplicate. With Matrix as your
-  only transport you will still see both.
+- **`channel` produces two messages for one write, and with several sinks that is the
+  point.** The thread reply answers the person who typed; the room post reaches
+  everyone who was not reading that thread. But **with Matrix as your only transport
+  those are the same people** — the thread lives in that very room — so each write
+  restates in the room what the thread just said. That is what `thread` is for: the
+  announcement goes into the thread instead, keeping the provenance line the reply
+  does not carry, without the echo.
+- **`thread` never silences your other sinks.** A Slack channel, a `webhook`
+  endpoint — neither can post into a Matrix thread, so they each receive the
+  announcement in their own channel exactly as before. The echo only exists where the
+  thread and the room are the same place.
 - **The announcement carries note content.** A note written in a thread nobody else was
   watching is broadcast to every sink you have configured — this room, a Slack channel
   if you run both, any `webhook` endpoint. That is your decision to take knowingly,

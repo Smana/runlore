@@ -824,6 +824,18 @@ func atxHeadingText(line string) string {
 // The plain space is excluded so ordinary text is left exactly as written;
 // everything else in those categories becomes one, which keeps the result the
 // same length in runes and never joins two words.
+//
+// EXPORTED, and reimplementing it elsewhere is the mistake to avoid. The chat
+// notifiers need exactly this for their one-line announcement fields — an author,
+// an entry title, a forge URL — which are interpolated at the left margin rather
+// than blockquoted, so unlike the note text no later escape and no "> " prefix
+// stands between them and a forged line. internal/notify has already been bitten
+// by a private copy of a break list: kbUpdateAnnouncement's own doc records a
+// local quoter that never learned a line is not only what "\n" separates, and put
+// a forged "📚 Knowledge base updated — …" at the left margin of the channel
+// findings are posted to. The list of what breaks a line belongs in one place;
+// this is that place, and QuoteUntrusted's mandatoryBreaks is its sibling for
+// multi-line text.
 func SingleLine(s string) string {
 	return strings.Map(func(r rune) rune {
 		if r == ' ' {

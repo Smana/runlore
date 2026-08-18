@@ -931,12 +931,12 @@ type ThreadNotify struct {
 	// path, because that field compares the size of the next request against
 	// the limit rather than a running total.
 	ChatTokensPerHour int64 `yaml:"chat_tokens_per_hour"`
-	// AnnounceKBUpdates broadcasts a landed knowledge write to every configured
-	// notifier — each one's own channel or room, never back into the thread — so
-	// a knowledge-base update reaches people who were not reading the thread it
-	// came from.
+	// AnnounceKBUpdates broadcasts a landed knowledge write to the configured
+	// notifiers, so a knowledge-base update reaches people who were not reading
+	// the thread it came from — and says WHERE. See AnnounceMode for the
+	// accepted spellings and what each one delivers.
 	//
-	// Default FALSE. It is the one field in this block that is a switch rather
+	// Default OFF. It is the one field in this block that is a switch rather
 	// than a bound, and the only one whose zero value turns something OFF rather
 	// than selecting a default, so the "0 means the default" convention above
 	// does not apply to it. Opt-in for two reasons: it adds notification volume
@@ -945,12 +945,110 @@ type ThreadNotify struct {
 	// carries the note's own text, so enabling it sends what someone wrote in
 	// one thread to every sink configured here. That is an operator's decision
 	// to take knowingly, which makes the unconfigured state the off state.
-	//
-	// With a single transport configured, one write then produces both the
-	// thread reply and a channel post. That is intended rather than duplication
-	// — the channel is how people who were not in the thread learn the knowledge
-	// base moved — and it is the whole reason the feature exists.
-	AnnounceKBUpdates bool `yaml:"announce_kb_updates"`
+	AnnounceKBUpdates AnnounceMode `yaml:"announce_kb_updates"`
+}
+
+// AnnounceMode says whether a landed knowledge write is announced, and to which
+// destination. It accepts a YAML BOOLEAN as well as its own names, because
+// `false` and `true` shipped first and an operator's existing file must keep
+// meaning exactly what it meant: false is off, true is channel — today's
+// behaviour, unchanged, down to the message and the destination.
+//
+// The routing values exist because "a second destination" is only a second
+// destination when there are several sinks. The channel post reaches people who
+// were not reading the thread, which is the whole point — but with a SINGLE
+// transport the thread already lives in the channel the announcement posts to,
+// so every write restated in the channel what the thread had just said. An
+// operator's only remedy was turning the feature off, losing the signal along
+// with the echo.
+type AnnounceMode string
+
+// The announcement destinations. "" (the absent key) is off, as is the explicit
+// "off" — the same empty-plus-explicit pair Curate.Sweeps.Mode uses.
+const (
+	// AnnounceOff makes no announcement at all. The default: an unconfigured
+	// deployment never broadcasts what someone typed in a thread.
+	AnnounceOff AnnounceMode = "off"
+	// AnnounceChannel posts to each configured notifier's own channel or room
+	// and nowhere else. What `true` has always meant.
+	AnnounceChannel AnnounceMode = "channel"
+	// AnnounceThread delivers into the ORIGINATING thread on the transport the
+	// note was typed in, instead of that transport's channel. Sinks on any other
+	// transport — a Matrix room when the note came from Slack, a webhook, an
+	// incoming-webhook Slack that cannot reply in a thread — still receive it at
+	// channel level: see providers.KBDelivery for why that fallback rather than
+	// a skip.
+	AnnounceThread AnnounceMode = "thread"
+	// AnnounceBoth delivers into the originating thread AND to every sink's
+	// channel. For a deployment that wants the announcement's provenance line
+	// (who wrote the note, on which chat system — which the thread reply does
+	// not carry) in the thread, and the broadcast as well.
+	AnnounceBoth AnnounceMode = "both"
+)
+
+// UnmarshalYAML accepts either a boolean or one of the mode names.
+//
+// The boolean is tried FIRST, and that ordering is the compatibility guarantee:
+// every value that decodes into a Go bool today still decodes into one here, so
+// `true`, `false` and YAML 1.1's `on`/`off`/`yes`/`no` — all of which yaml.v3
+// resolves when the target is a bool — resolve exactly as they did when this
+// field was a plain bool. Only a value that is NOT a boolean reaches the string
+// branch, which is where the new names live.
+//
+// A null (`announce_kb_updates:` with nothing after it) never reaches this
+// method at all: yaml.v3 short-circuits a null node before it looks for an
+// Unmarshaler, leaving the field at its ZERO VALUE. That is why "" is a valid
+// off state in its own right in Validate and On() rather than being normalised
+// to AnnounceOff here — the normalisation would never run. The bool field this
+// replaces resolved a null to false, so the answer is unchanged either way.
+//
+// An unrecognised name is stored rather than rejected here, so Validate reports
+// it with the file's own spelling and the list of what is accepted — a decode
+// error would name the Go type instead.
+func (m *AnnounceMode) UnmarshalYAML(value *yaml.Node) error {
+	var b bool
+	if err := value.Decode(&b); err == nil {
+		if b {
+			*m = AnnounceChannel
+		} else {
+			*m = AnnounceOff
+		}
+		return nil
+	}
+	// Named for what it is rather than "s": internal/foldguard groups
+	// case-normalised values per package BY NAME, and an unrelated `s` folded with
+	// EqualFold elsewhere in this file made the two look like one value reached by
+	// two normalisers — the exact defect that guard exists to catch. A distinct
+	// name is the honest fix; an allowlist entry would have hidden a real one later.
+	var raw string
+	if err := value.Decode(&raw); err != nil {
+		return fmt.Errorf("notify.thread.announce_kb_updates must be a boolean or one of %s: %w", announceModeList, err)
+	}
+	*m = AnnounceMode(strings.ToLower(strings.TrimSpace(raw)))
+	return nil
+}
+
+// announceModeList is the accepted-values list, written once so the decode
+// error and the validation error cannot drift apart.
+const announceModeList = "off|channel|thread|both"
+
+// On reports whether anything is announced at all. Both spellings of off — the
+// absent key and the explicit "off" — answer false.
+func (m AnnounceMode) On() bool { return m != "" && m != AnnounceOff }
+
+// Delivery maps the configured mode onto the destination the notifiers act on
+// (providers.KBDelivery). Off has no delivery and resolves to the channel value
+// like any other unset enum; On is what decides whether an announcer exists at
+// all, so this is never reached for an off deployment.
+func (m AnnounceMode) Delivery() providers.KBDelivery {
+	switch m {
+	case AnnounceThread:
+		return providers.KBDeliverThread
+	case AnnounceBoth:
+		return providers.KBDeliverBoth
+	default:
+		return providers.KBDeliverChannel
+	}
 }
 
 // EffectiveMaxNotesPerThread resolves the configured cap, falling back to
@@ -1729,6 +1827,16 @@ func (c *Config) Validate() error {
 	if c.Notify.Thread.ChatTokensPerHour < 0 {
 		return fmt.Errorf("notify.thread.chat_tokens_per_hour must be >= 0 (0 = use the default %d), got %d",
 			thread.DefaultChatTokensPerHour, c.Notify.Thread.ChatTokensPerHour)
+	}
+	// announce_kb_updates is the one key here that is an enum, and a typo in it
+	// must fail loud: "treads" or "chanel" silently falling back to channel would
+	// leave an operator believing the echo they configured away is gone while
+	// every write still restates itself in the channel.
+	switch c.Notify.Thread.AnnounceKBUpdates {
+	case "", AnnounceOff, AnnounceChannel, AnnounceThread, AnnounceBoth:
+	default:
+		return fmt.Errorf("unknown notify.thread.announce_kb_updates %q (want a boolean or %s; false = off, true = channel, empty = off)",
+			string(c.Notify.Thread.AnnounceKBUpdates), announceModeList)
 	}
 	// source_repos.allow is compiled at startup; a bad pattern must fail config
 	// load, not silently disable the tool at wiring time.

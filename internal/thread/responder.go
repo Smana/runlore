@@ -207,9 +207,11 @@ type Responder struct {
 	// it came from. nil means announcements are off — the default, and the
 	// same nil-safe contract Metrics, Log and Chat above follow.
 	//
-	// It is a distinct DESTINATION, not a second copy of the thread reply: the
-	// reply acknowledges the person who typed, in their thread, and this goes
-	// to each notifier's own configured channel. See KBAnnouncer.
+	// It is a distinct MESSAGE, not a second copy of the thread reply: the reply
+	// acknowledges the person who typed, and this names who wrote the note and
+	// which chat system it came from, for readers who have neither. Where it
+	// goes — each notifier's own channel, or back into the originating thread —
+	// is the announcer's own setting; see KBAnnouncer and providers.KBDelivery.
 	Announcer *KBAnnouncer
 }
 
@@ -281,9 +283,10 @@ const (
 // transport's job, where the transport's own limit lives — the same division
 // taken for the outgoing thread reply.
 type KBAnnouncer struct {
-	sink providers.KBUpdateNotifier
-	disp *Dispatcher
-	log  *slog.Logger
+	sink     providers.KBUpdateNotifier
+	delivery providers.KBDelivery
+	disp     *Dispatcher
+	log      *slog.Logger
 }
 
 // NewKBAnnouncer returns an announcer delivering to sink, or nil when there is
@@ -294,23 +297,37 @@ type KBAnnouncer struct {
 // nowhere to deliver, and no state in which it holds a sink with no bound
 // around it. Every method below is nil-safe, so a caller never needs its own
 // check before delivering or draining.
-func NewKBAnnouncer(sink providers.KBUpdateNotifier, log *slog.Logger) *KBAnnouncer {
+//
+// delivery is where announcements go (providers.KBDelivery), held here rather
+// than passed per write because it is one deployment-wide setting and an
+// announcer that could route two writes from the same deployment differently
+// would be a setting nobody configured. Its zero value is the channel, so an
+// announcer built without a decision behaves as every announcer did before
+// routing existed.
+func NewKBAnnouncer(sink providers.KBUpdateNotifier, delivery providers.KBDelivery, log *slog.Logger) *KBAnnouncer {
 	if sink == nil {
 		return nil
 	}
 	if log == nil {
 		log = slog.Default()
 	}
-	return &KBAnnouncer{sink: sink, disp: NewDispatcher(announceSlots, announceTimeout, log), log: log}
+	return &KBAnnouncer{sink: sink, delivery: delivery, disp: NewDispatcher(announceSlots, announceTimeout, log), log: log}
 }
 
 // deliver schedules one announcement and returns immediately. Every failure is
 // a log line and nothing more: the write it describes is already on the forge,
 // the human has already been told, and there is nothing here to roll back.
+//
+// The destination is stamped here, on the announcer's own copy of the event,
+// rather than by the caller that describes the write: announce() knows what
+// landed and where it came from, and this knows where the operator asked for it
+// to go. That keeps a caller from being able to compose a KBUpdate that routes
+// somewhere the configuration never selected.
 func (a *KBAnnouncer) deliver(ctx context.Context, up providers.KBUpdate) {
 	if a == nil {
 		return
 	}
+	up.Delivery = a.delivery
 	if !a.disp.Go(ctx, func(ctx context.Context) {
 		if err := a.sink.DeliverKBUpdate(ctx, up); err != nil {
 			a.log.Warn("thread: knowledge-base announcement failed (best-effort)", "url", up.URL, "route", string(up.Route), "err", err)
@@ -365,6 +382,13 @@ func kbRoute(route string) providers.KBRoute {
 // write either way, and only the caller knows whose message produced it. It
 // goes through noteField — redacted and flattened, exactly as the entry itself
 // renders it — because this event is a NEW egress for transport-reported text.
+//
+// tc supplies BOTH thread handles, Root and Channel. Root alone names a thread
+// only to the transport that already knows which channel it is in; a sink asked
+// to reply into it needs the channel too, and one arriving without the other is
+// what makes a delivery fall back to the channel (see providers.KBDelivery).
+// Neither is escaped here — they are marked untrusted on the event, and the
+// transport that renders them is the one that knows how.
 func (r *Responder) announce(ctx context.Context, tc Context, n Note, w *KBWrite, at time.Time) {
 	if r.Announcer == nil || w == nil {
 		return
@@ -372,6 +396,7 @@ func (r *Responder) announce(ctx context.Context, tc Context, n Note, w *KBWrite
 	r.Announcer.deliver(ctx, providers.KBUpdate{
 		Transport: tc.Transport,
 		Root:      tc.Root,
+		Channel:   tc.Channel,
 		Route:     kbRoute(w.Route),
 		PR:        w.PR,
 		URL:       w.URL,

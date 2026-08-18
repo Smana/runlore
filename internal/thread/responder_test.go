@@ -3356,7 +3356,7 @@ func newAnnouncingResponder(t *testing.T, f *fakeForge) (*Responder, *fakeKBSink
 	t.Helper()
 	r := newTestResponder(t, f)
 	sink := &fakeKBSink{}
-	r.Announcer = NewKBAnnouncer(sink, silentLog())
+	r.Announcer = NewKBAnnouncer(sink, providers.KBDeliverChannel, silentLog())
 	return r, sink
 }
 
@@ -3384,7 +3384,7 @@ func TestAnnounceALandedWrite(t *testing.T) {
 		f := &fakeForge{}
 		r, sink := newAnnouncingResponder(t, f)
 		const prURL = "https://github.com/o/r/pull/42"
-		tc := putContext(t, r, Context{Transport: "slack", Root: "111.222", Title: "OOM", CuratedURL: prURL})
+		tc := putContext(t, r, Context{Transport: "slack", Root: "111.222", Channel: "C-ORIGIN", Title: "OOM", CuratedURL: prURL})
 
 		if _, err := r.Handle(context.Background(), tc, "alice", "<@U0BOT> note: spot reclaim, not OOM"); err != nil {
 			t.Fatalf("Handle: %v", err)
@@ -3400,12 +3400,18 @@ func TestAnnounceALandedWrite(t *testing.T) {
 		want := providers.KBUpdate{
 			Transport: "slack",
 			Root:      "111.222",
-			Route:     providers.KBRouteComment,
-			PR:        42,
-			URL:       prURL,
-			Author:    "alice",
-			Note:      "spot reclaim, not OOM",
-			At:        noteAt,
+			// Channel travels with Root, and the comparison below is the only
+			// thing checking it does: a KBUpdate carrying a thread root with no
+			// channel cannot be replied into, so every thread-routed delivery
+			// would silently fall back to the channel — the destination an
+			// operator configured away, restored without a word.
+			Channel: "C-ORIGIN",
+			Route:   providers.KBRouteComment,
+			PR:      42,
+			URL:     prURL,
+			Author:  "alice",
+			Note:    "spot reclaim, not OOM",
+			At:      noteAt,
 		}
 		if got[0] != want {
 			t.Errorf("announcement =\n%+v\nwant\n%+v", got[0], want)
@@ -3415,7 +3421,7 @@ func TestAnnounceALandedWrite(t *testing.T) {
 	t.Run("open_pr route", func(t *testing.T) {
 		f := &fakeForge{}
 		r, sink := newAnnouncingResponder(t, f)
-		tc := putContext(t, r, Context{Transport: "matrix", Root: "$evt:example.org", Title: "OOM in payments"})
+		tc := putContext(t, r, Context{Transport: "matrix", Root: "$evt:example.org", Channel: "!room:example.org", Title: "OOM in payments"})
 
 		if _, err := r.Handle(context.Background(), tc, "alice", "<@U0BOT> note: stale since Karpenter"); err != nil {
 			t.Fatalf("Handle: %v", err)
@@ -3432,6 +3438,7 @@ func TestAnnounceALandedWrite(t *testing.T) {
 		want := providers.KBUpdate{
 			Transport: "matrix",
 			Root:      "$evt:example.org",
+			Channel:   "!room:example.org",
 			Route:     providers.KBRouteOpenPR,
 			PR:        99,
 			URL:       "https://github.com/o/r/pull/99",
@@ -3484,6 +3491,49 @@ func TestAnnounceALandedWrite(t *testing.T) {
 	})
 }
 
+// TestAnnouncerStampsItsOwnDestinationUnconditionally pins deliver()'s claim
+// that a caller cannot compose a KBUpdate routed somewhere the configuration
+// never selected.
+//
+// The stamp is what makes that true, and only if it is UNCONDITIONAL. Written as
+// `if up.Delivery == "" { up.Delivery = a.delivery }` — the shape that reads as
+// a harmless default — it becomes the opposite: a caller that sets the field
+// wins, and the announcer's own configuration is what gets defaulted. Nothing
+// else in either package notices, because every production caller leaves the
+// field zero and every other test sets it on the announcer.
+//
+// It matters because the field is a DESTINATION. A caller able to set it can
+// route an announcement into a thread on a deployment whose operator asked for
+// channel-level delivery only, or the reverse — and the announcer is the only
+// place that knows which was asked for.
+func TestAnnouncerStampsItsOwnDestinationUnconditionally(t *testing.T) {
+	for _, caller := range []providers.KBDelivery{
+		"", providers.KBDeliverChannel, providers.KBDeliverThread, providers.KBDeliverBoth,
+	} {
+		t.Run("caller sets "+string(caller), func(t *testing.T) {
+			sink := &fakeKBSink{}
+			a := NewKBAnnouncer(sink, providers.KBDeliverThread, silentLog())
+			a.deliver(context.Background(), providers.KBUpdate{
+				Transport: "slack", Root: "111.222", Channel: "C-ORIGIN",
+				Delivery: caller, Route: providers.KBRouteComment, URL: "https://github.com/o/r/pull/1",
+			})
+			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			defer cancel()
+			a.Drain(ctx)
+
+			got := sink.updates()
+			if len(got) != 1 {
+				t.Fatalf("announcements = %d, want 1", len(got))
+			}
+			if got[0].Delivery != providers.KBDeliverThread {
+				t.Errorf("a caller-set Delivery %q survived to the sink as %q — the announcer's own "+
+					"destination must overwrite it, or a caller can route an announcement somewhere the "+
+					"operator never configured", string(caller), string(got[0].Delivery))
+			}
+		})
+	}
+}
+
 // TestAnnounceNamesItsOriginatingTransportAndRoot pins the half of the event a
 // consumer needs to tell where a write came from — and pins it as a value READ
 // from the thread context rather than a constant.
@@ -3533,7 +3583,7 @@ func TestAnnounceNeverPostsIntoTheThread(t *testing.T) {
 	f, rep := &fakeForge{}, &fakeReplier{}
 	m := newTestMention(t, f, rep)
 	sink := &fakeKBSink{}
-	m.Responder.Announcer = NewKBAnnouncer(sink, silentLog())
+	m.Responder.Announcer = NewKBAnnouncer(sink, providers.KBDeliverChannel, silentLog())
 	if err := m.Registry.Put(Context{Transport: "slack", Root: "111.222", Channel: "C1", CuratedURL: "https://github.com/o/r/pull/42"}); err != nil {
 		t.Fatalf("Put: %v", err)
 	}
@@ -3741,7 +3791,7 @@ func TestAnnounceWithNoSinkIsOffAndDoesNotPanic(t *testing.T) {
 	// "Off" is ONE value, not a flag beside a sink: constructing an announcer
 	// with no sink yields no announcer, so there is no half-wired state in
 	// which announcements are enabled with nowhere to go.
-	if a := NewKBAnnouncer(nil, silentLog()); a != nil {
+	if a := NewKBAnnouncer(nil, providers.KBDeliverChannel, silentLog()); a != nil {
 		t.Errorf("NewKBAnnouncer(nil) = %+v, want nil — a missing sink means announcements are off", a)
 	}
 	// And every method is safe on that nil, so a caller never needs its own
@@ -3775,7 +3825,7 @@ func TestAnnounceFailureDoesNotChangeTheReply(t *testing.T) {
 
 	loud, loudCtx := newCase(t)
 	sink := &fakeKBSink{err: errors.New("channel_not_found")}
-	loud.Announcer = NewKBAnnouncer(sink, silentLog())
+	loud.Announcer = NewKBAnnouncer(sink, providers.KBDeliverChannel, silentLog())
 	reply, err := loud.Handle(context.Background(), loudCtx, "alice", msg)
 	if err != nil {
 		t.Errorf("Handle returned %v; a failing announcement must never fail the write that already landed", err)
@@ -3801,7 +3851,7 @@ func TestAnnounceDoesNotDelayTheReply(t *testing.T) {
 	f := &fakeForge{}
 	r := newTestResponder(t, f)
 	sink := &fakeKBSink{entered: make(chan struct{}), release: make(chan struct{})}
-	r.Announcer = NewKBAnnouncer(sink, silentLog())
+	r.Announcer = NewKBAnnouncer(sink, providers.KBDeliverChannel, silentLog())
 	tc := putContext(t, r, Context{Transport: "slack", Root: "111.222", CuratedURL: "https://github.com/o/r/pull/42"})
 
 	type result struct {
@@ -3848,7 +3898,7 @@ func TestAnnounceIsDrainable(t *testing.T) {
 	f := &fakeForge{}
 	r := newTestResponder(t, f)
 	sink := &fakeKBSink{release: make(chan struct{})}
-	r.Announcer = NewKBAnnouncer(sink, silentLog())
+	r.Announcer = NewKBAnnouncer(sink, providers.KBDeliverChannel, silentLog())
 	tc := putContext(t, r, Context{Transport: "slack", Root: "111.222", CuratedURL: "https://github.com/o/r/pull/42"})
 
 	if _, err := r.Handle(context.Background(), tc, "alice", "<@U0BOT> note: x"); err != nil {
