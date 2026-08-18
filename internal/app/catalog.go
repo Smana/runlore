@@ -97,8 +97,11 @@ func BuildCatalog(ctx context.Context, cfg *config.Config, forgeTok ForgeToken, 
 		// The embeddings endpoint bills like any other model call — once per
 		// hybrid-recall query, and in bulk on every catalog reload — so give it the
 		// shared metrics instance. It reports under provider="embed" on the same
-		// instruments as the main/verify/rerank tiers. That makes the spend visible,
-		// not bounded; see the inventory in docs/configuration/configuration.md.
+		// instruments as the main/verify/rerank tiers. The QUERY embed is additionally
+		// bounded: an investigation installs an embed.UsageSink on its context, so those
+		// tokens land in the totals its spend ceilings read. The BULK reload below has no
+		// investigation to charge and stays visible-but-unbounded; see the inventory in
+		// docs/configuration/configuration.md.
 		ec.Metrics = metrics
 		embedder = ec
 		log.Info("hybrid recall: embeddings endpoint configured", "base_url", e.BaseURL, "model", e.Model)

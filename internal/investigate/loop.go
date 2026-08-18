@@ -18,6 +18,7 @@ import (
 
 	"github.com/Smana/runlore/internal/action"
 	"github.com/Smana/runlore/internal/catalog"
+	"github.com/Smana/runlore/internal/embed"
 	"github.com/Smana/runlore/internal/outcome"
 	"github.com/Smana/runlore/internal/providers"
 	"github.com/Smana/runlore/internal/redact"
@@ -284,16 +285,28 @@ func (li *LoopInvestigator) Investigate(ctx context.Context, req Request) error 
 	// target), augmented by what_changed and the gitops inspector tools. reviewActions
 	// consults the set to guard executable targets (see guardUnobservedTargets).
 	ctx = WithObservedResources(ctx, req.Workload)
+	// Charge this investigation for the embeddings it causes. The hybrid-recall path
+	// embeds the query against a PAID endpoint — once for the recall lookup, again for
+	// the near-miss lookup that follows a non-fire — from inside a run that has spend
+	// ceilings; but the call goes out through catalog.Embedder, which returns vectors
+	// and nothing else, so those tokens never reached the totals the ceilings compare
+	// against and an embed-heavy recall was free by construction. A context-scoped sink
+	// carries the spend to its payer without widening two interfaces (HybridSearcher,
+	// Embedder) that have no other reason to know what an embedding costs. Installed
+	// before tryRecall, which is where the embedding happens; embedSpend is its only
+	// reader.
+	ctx = embed.WithUsageSink(ctx, &embed.UsageSink{})
 	// Record wall-clock duration + a completion-result label at whichever exit we take.
 	start := time.Now()
 	result := "unresolved"
 	// Per-investigation token/cost accounting. loopTotals accumulates the ReAct
 	// loop's model calls; verifyTotals the adversarial verify pass's (main loop or
-	// recall). setUsage stamps the combined, priced totals onto whatever result we
-	// deliver, so cost is surfaced no matter which exit we take.
+	// recall); the query embeddings live on the context sink installed above. setUsage
+	// stamps the combined, priced totals onto whatever result we deliver, so cost is
+	// surfaced no matter which exit we take.
 	var loopTotals, verifyTotals providers.UsageTotals
 	setUsage := func(inv *providers.Investigation) {
-		inv.Usage = li.aggregateUsage(loopTotals, verifyTotals)
+		inv.Usage = li.aggregateUsage(loopTotals, verifyTotals, embedSpend(ctx))
 	}
 	// finish is the SINGLE terminal-delivery chokepoint (#234 follow-up): every exit
 	// that accepts an investigation — the happy submit_findings turn, the recall
@@ -819,16 +832,20 @@ func (li *LoopInvestigator) tryRecall(ctx context.Context, req Request, result *
 		m.RecallHits.Add(ctx, 1, metric.WithAttributes(attribute.String("result", recallResult)))
 		if len(rec.RootCauses) > 0 {
 			// What this short-circuit COST, measured — not a guess at what it saved. By
-			// here verifyTotals holds every model call the recall path made (the opt-in
-			// reranker plus the adversarial verify pass), so the real number is already in
-			// hand: a dashboard differences it against the per-investigation token
-			// histograms recordUsageMetrics emits to size what recall avoided. Cached input
-			// is included (providers.Usage.InputTokens already counts it), matching those
-			// histograms.
+			// here verifyTotals holds the recall path's completions (the opt-in reranker
+			// plus the adversarial verify pass) and the context sink holds the query
+			// embeddings it caused, so the real number is already in hand: a dashboard
+			// differences it against the per-investigation token histograms
+			// recordUsageMetrics emits to size what recall avoided. Cached input is
+			// included (providers.Usage.InputTokens already counts it), matching those
+			// histograms — as are the embeddings, for the same reason: they are on the
+			// other side of the subtraction too, so omitting them here would overstate the
+			// saving by exactly the amount recall itself spent on retrieval.
 			//
 			// Delivered short-circuits only: a recall the verify pass refutes falls through
 			// to a full investigation, which reports these tokens in its own totals.
-			m.RecallTokensSpent.Add(ctx, int64(verifyTotals.InputTokens+verifyTotals.OutputTokens))
+			m.RecallTokensSpent.Add(ctx, int64(verifyTotals.InputTokens+verifyTotals.OutputTokens+
+				embedSpend(ctx).InputTokens))
 		}
 	}
 	if len(rec.RootCauses) > 0 {
@@ -981,8 +998,9 @@ func (li *LoopInvestigator) enforceBudget(ctx context.Context, req Request, sys 
 	// Priced the same way the delivered finding is (loop tokens at Pricing, verify
 	// tokens at VerifyPricing). Read AFTER compaction so a summarize-mode digest call
 	// counts against the ceiling on the very step that paid for it, and after tryRecall
-	// so a recall fall-through's reranker + verify calls are already in it.
-	spent := li.aggregateUsage(*loopTotals, *verifyTotals)
+	// so a recall fall-through's reranker + verify calls — and its query embeddings —
+	// are already in it.
+	spent := li.aggregateUsage(*loopTotals, *verifyTotals, embedSpend(ctx))
 	crossed := li.budgetTrip(est, spent)
 	if crossed == "" {
 		return false
