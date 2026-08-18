@@ -648,15 +648,14 @@ func BuildInvestigator(ctx context.Context, cfg *config.Config, deps *Deps, appr
 		prior = cat
 	}
 	return &investigate.LoopInvestigator{
-		Model:         model,
-		VerifyModel:   BuildVerifyModel(cfg),
-		Pricing:       mainPricing,
-		VerifyPricing: verifyPricing,
-		Tools:         tools,
-		Log:           log,
-		Actions:       actions,
-		Recall:        recall,
-		Recurrence:    recurrence,
+		Model:      model,
+		Pricing:    mainPricing,
+		Verifier:   investigate.VerifyOn(BuildVerifyModel(cfg), verifyPricing),
+		Tools:      tools,
+		Log:        log,
+		Actions:    actions,
+		Recall:     recall,
+		Recurrence: recurrence,
 		// Unconditional, unlike the opt-in cooldown above: the seed's known-recurrence
 		// block needs a trigger's history whether or not suppression is on. A disabled
 		// ledger answers with zero values (as with cur.Confirmations).

@@ -95,7 +95,7 @@ func (r *Runner) runOne(ctx context.Context, c Case) Result {
 		MaxTokensPerInvestigation: r.Spend.MaxTokensPerInvestigation,
 		MaxCostPerInvestigation:   r.Spend.MaxCostPerInvestigation,
 		Pricing:                   r.Spend.Pricing,
-		VerifyPricing:             r.Spend.VerifyPricing,
+		Verifier:                  r.Spend.Verifier,
 		OnComplete: func(inv providers.Investigation) {
 			got, done = inv, true
 		},

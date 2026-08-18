@@ -295,8 +295,8 @@ func TestVerifyDowngradesUnproven(t *testing.T) {
 	}
 }
 
-// TestVerifyUsesVerifyModel routes the adversarial pass to the (cheaper) VerifyModel
-// when one is set, leaving the main investigation model for the loop itself. The
+// TestVerifyUsesVerifyModel routes the adversarial pass to the (cheaper) verify tier's
+// model when one is set, leaving the main investigation model for the loop itself. The
 // scriptModel stubs panic if called more than scripted, so wrong routing fails loudly.
 func TestVerifyUsesVerifyModel(t *testing.T) {
 	mainM := &scriptModel{responses: []providers.CompletionResponse{
@@ -307,11 +307,11 @@ func TestVerifyUsesVerifyModel(t *testing.T) {
 	}}
 	var got *providers.Investigation
 	li := &LoopInvestigator{
-		Model:       mainM,
-		VerifyModel: verifyM,
-		Log:         slog.New(slog.NewTextHandler(io.Discard, nil)),
-		Verify:      true,
-		OnComplete:  func(inv providers.Investigation) { got = &inv },
+		Model:      mainM,
+		Verifier:   VerifyOn(verifyM, nil),
+		Log:        slog.New(slog.NewTextHandler(io.Discard, nil)),
+		Verify:     true,
+		OnComplete: func(inv providers.Investigation) { got = &inv },
 	}
 	if err := li.Investigate(context.Background(), Request{Title: "x"}); err != nil {
 		t.Fatalf("Investigate: %v", err)
@@ -320,7 +320,7 @@ func TestVerifyUsesVerifyModel(t *testing.T) {
 		t.Fatalf("main model should serve only the loop (1 call), got %d", mainM.i)
 	}
 	if verifyM.i != 1 {
-		t.Fatalf("verify pass should route to VerifyModel (1 call), got %d", verifyM.i)
+		t.Fatalf("verify pass should route to the verify tier's model (1 call), got %d", verifyM.i)
 	}
 	if got == nil || len(got.RootCauses) != 1 || got.RootCauses[0].Confidence != 0.7 {
 		t.Fatalf("expected kept cause at verify confidence 0.7, got %+v", got)

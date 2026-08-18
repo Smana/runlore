@@ -53,7 +53,7 @@ func (f *fakeSummarizer) count() int {
 
 // summarizeLoop builds a loop that calls a big-output tool six times under a low
 // token budget (so compaction fires) then submits findings, with summarize mode and
-// the given summarizer wired as VerifyModel.
+// the given summarizer wired as the verify tier's model.
 func summarizeLoop(t *testing.T, sm providers.ModelProvider, m *telemetry.Metrics) (*LoopInvestigator, *providers.Investigation) {
 	t.Helper()
 	var resp []providers.CompletionResponse
@@ -67,11 +67,11 @@ func summarizeLoop(t *testing.T, sm providers.ModelProvider, m *telemetry.Metric
 	}})
 	got := new(providers.Investigation)
 	li := &LoopInvestigator{
-		Model:       &scriptModel{responses: resp},
-		VerifyModel: sm,
-		Tools:       []Tool{bigTool{size: 4000}},
-		Log:         slog.New(slog.NewTextHandler(io.Discard, nil)),
-		MaxSteps:    10,
+		Model:    &scriptModel{responses: resp},
+		Verifier: VerifyOn(sm, nil),
+		Tools:    []Tool{bigTool{size: 4000}},
+		Log:      slog.New(slog.NewTextHandler(io.Discard, nil)),
+		MaxSteps: 10,
 		// The run budget whose derived PER-REQUEST bound is 6000, and whose compaction
 		// trigger is therefore 4200 — the two thresholds this fixture was authored
 		// against, back when one number served as both. Stated as the run budget it

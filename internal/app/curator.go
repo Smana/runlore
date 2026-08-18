@@ -150,11 +150,11 @@ func BuildReinvestigator(cfg *config.Config, deps *Deps, metrics *telemetry.Metr
 		// investigate.replayableStandingAnswer, which withholds a contested answer from
 		// the prompt.
 		li := &investigate.LoopInvestigator{
-			Model: model, VerifyModel: BuildVerifyModel(cfg), Tools: tools, Recall: recall, Verify: true, Log: log,
+			Model: model, Tools: tools, Recall: recall, Verify: true, Log: log,
 			Metrics:                   metrics,
 			ModelProvider:             cfg.Model.Provider,
 			Pricing:                   loopPricing,
-			VerifyPricing:             verifyPricing,
+			Verifier:                  investigate.VerifyOn(BuildVerifyModel(cfg), verifyPricing),
 			MaxSteps:                  cfg.Investigation.MaxSteps,
 			MaxToolOutputBytes:        cfg.Investigation.MaxToolOutputBytes,
 			MaxTokensPerInvestigation: cfg.Investigation.MaxTokensPerInvestigation,

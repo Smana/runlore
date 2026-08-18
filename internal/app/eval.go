@@ -44,12 +44,29 @@ func evalCostUSD(cfg *config.Config, u providers.Usage) *float64 {
 // multiply by the corpus size and bound nothing about the run as a whole — that is
 // what --max-total-tokens (eval.CampaignBudget) is for.
 func evalSpend(cfg *config.Config) eval.Spend {
-	loopPricing, verifyPricing := investigationPricing(cfg)
+	loopPricing, _ := investigationPricing(cfg)
 	return eval.Spend{
 		MaxTokensPerInvestigation: cfg.Investigation.MaxTokensPerInvestigation,
 		MaxCostPerInvestigation:   cfg.Investigation.MaxCostPerInvestigation,
 		Pricing:                   loopPricing,
-		VerifyPricing:             verifyPricing,
+		// Verifier stays at its zero value, and model.verify.pricing is dropped on the
+		// floor above, DELIBERATELY: an eval runner is handed exactly ONE model — the
+		// config's for replay and --live, the comparison spec's entry for --compare —
+		// and no verify override, so the adversarial pass runs on that model and its
+		// tokens are priced at Pricing, the rates that actually generated them.
+		//
+		// Carrying model.verify.pricing here anyway is the bug this replaced: a --live
+		// run that cost $0.825 reported $0.198, 76% under, and max_cost_per_investigation
+		// was 76% too loose with it. eval.Spend.Verifier is one value rather than a model
+		// field and a rates field precisely so the two cannot drift apart again.
+		//
+		// Handing eval a cfg-built verify model instead would be wrong twice over. Under
+		// --compare every benchmarked entry's verify pass would be silently routed to the
+		// CONFIG's model — benchmarking a hybrid, on a path whose whole point is that the
+		// spec carries its own per-entry models, and where configForAbsentFile has no
+		// model at all. And its tokens would fall outside both the CampaignBudget and the
+		// CountingModel, which wrap the one model each runner is given: the campaign
+		// ceiling would stop seeing a model it is paying for.
 	}
 }
 

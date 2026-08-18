@@ -40,7 +40,7 @@ Do NOT speculate, diagnose, rank causes, or add anything not present in the inpu
 // egress seam; the delivery-time egress redaction still covers anything human-facing.
 // totals accumulates this call's provider-reported usage into the investigation's
 // running spend. It is the VERIFY totals, because the digest call routes to
-// VerifyModel when one is configured — so aggregateUsage's existing loop/verify split
+// the verify tier's model when one is configured — so aggregateUsage's loop/verify split
 // prices it at the rate that was actually billed. Counting it is not optional
 // bookkeeping: the spend ceilings compare against these totals, and a model call they
 // cannot see makes every summarize-mode investigation under-count its own spend.
@@ -50,10 +50,7 @@ func (li *LoopInvestigator) summarizeElided(ctx context.Context, out []providers
 	}
 	// Route to the verify-tier model when configured (cheaper/faster — same choice as
 	// the adversarial verify pass); otherwise reuse the main investigation model.
-	m := li.Model
-	if li.VerifyModel != nil {
-		m = li.VerifyModel
-	}
+	m := li.Verifier.modelOr(li.Model)
 
 	var b strings.Builder
 	b.WriteString("Summarize the following tool outputs. Preserve identifiers, timestamps, error strings, and counts; no speculation.\n\n")

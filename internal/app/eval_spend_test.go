@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"github.com/Smana/runlore/internal/config"
+	"github.com/Smana/runlore/internal/investigate"
 )
 
 // TestEvalSpendCarriesTheConfiguredCeilings pins that `lore eval` runs each case
@@ -40,10 +41,42 @@ func TestEvalSpendCarriesTheConfiguredCeilings(t *testing.T) {
 	if spend.Pricing.InputUSDPerMTok != 3 {
 		t.Errorf("loop pricing: got %v, want model.pricing's 3", spend.Pricing.InputUSDPerMTok)
 	}
-	// The verify pass runs on its own tier when configured; pricing it at the main
-	// model's rate would over-report the cost of every recall-exercising case.
-	if spend.VerifyPricing == nil || spend.VerifyPricing.InputUSDPerMTok != 1 {
-		t.Errorf("verify pricing: got %+v, want model.verify.pricing's 1", spend.VerifyPricing)
+	// An eval runner is handed exactly ONE model and no verify override, so the
+	// adversarial pass runs on that model and its tokens must be priced at Pricing.
+	// This config has a model.verify.pricing that is 5x cheaper; carrying it into the
+	// campaign was how `lore eval --live` reported $0.198 for a run that cost $0.825.
+	// eval.Spend.Verifier is one value (model AND its rates) so an empty tier cannot
+	// smuggle a rate card in on its own.
+	if spend.Verifier != (investigate.VerifyTier{}) {
+		t.Errorf("evalSpend built a verify tier (%+v) though no eval runner is given a verify "+
+			"model: whatever rates it carries would be applied to tokens the runner's ONE "+
+			"model generated", spend.Verifier)
+	}
+}
+
+// TestEvalSpendCannotPriceVerifyAtAModelItNeverCalls is the end-to-end statement of
+// the same thing, through the runner rather than the builder: a `lore eval` case run
+// under evalSpend's ceilings must report the cost of the tokens its single model
+// actually generated. A 5x-cheaper model.verify.pricing in the config must not move
+// that figure, because no call was ever made to the model it describes.
+func TestEvalSpendCannotPriceVerifyAtAModelItNeverCalls(t *testing.T) {
+	base := &config.Config{}
+	base.Model.Pricing = &config.Pricing{InputUSDPerMTok: 15, OutputUSDPerMTok: 75}
+
+	withCheapVerify := &config.Config{}
+	withCheapVerify.Model.Pricing = base.Model.Pricing
+	withCheapVerify.Model.Verify = &config.ModelOverride{
+		Pricing: &config.Pricing{InputUSDPerMTok: 3, OutputUSDPerMTok: 15},
+	}
+
+	plain, tiered := evalSpend(base), evalSpend(withCheapVerify)
+	if plain.Verifier != tiered.Verifier {
+		t.Errorf("model.verify.pricing changed the eval verify tier (%+v vs %+v) without "+
+			"changing which model the eval calls — that difference can only show up as a "+
+			"wrong dollar figure", plain.Verifier, tiered.Verifier)
+	}
+	if *plain.Pricing != *tiered.Pricing {
+		t.Errorf("loop pricing drifted: %+v vs %+v", plain.Pricing, tiered.Pricing)
 	}
 }
 
@@ -53,8 +86,9 @@ func TestEvalSpendCarriesTheConfiguredCeilings(t *testing.T) {
 // claim a $0.00 spend and make the cost ceiling look armed when it is not.
 func TestEvalSpendIsUnpricedWithoutModelPricing(t *testing.T) {
 	spend := evalSpend(&config.Config{})
-	if spend.Pricing != nil || spend.VerifyPricing != nil {
-		t.Fatalf("unpriced config must leave both pricings nil, got %+v / %+v", spend.Pricing, spend.VerifyPricing)
+	if spend.Pricing != nil || spend.Verifier != (investigate.VerifyTier{}) {
+		t.Fatalf("unpriced config must leave the loop rate card nil and the verify tier empty, "+
+			"got %+v / %+v", spend.Pricing, spend.Verifier)
 	}
 }
 
