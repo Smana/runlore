@@ -63,6 +63,10 @@ var updateCardGolden = flag.Bool("update-card-golden", false,
 //	                       at all, which bolds the whole phrase instead of a level
 //	bare_recall            a recall with no Prior and no alert name: the header falls
 //	                       back to the title and the whole card collapses to its minimum
+//	curate_failed          #506's card: a finding well above the curation bar whose KB
+//	                       write FAILED, so the footer carries the ⚠️ reason next to the
+//	                       prior entry's link — the arm that distinguishes a broken
+//	                       learning loop from a deliberately skipped write
 //
 // Times are fixed constants: slackDate emits a <!date^…> token built from a Unix
 // timestamp, so a time.Now() anywhere here would rewrite the golden on every run.
@@ -226,6 +230,37 @@ func cardGoldenFixtures() []struct {
 			Recalled:   true,
 			RootCauses: []providers.Hypothesis{{Summary: "the migration lock again"}},
 		}},
+
+		// The live #506 card: 85% confidence, action_suggested — comfortably above
+		// curate.min_confidence and not in skip_verdicts — whose KB PR got a 403. It
+		// carries PrevCuratedURL so the footer holds BOTH arms open at once: the prior
+		// entry's link, which on its own would read as this run's, and the ⚠️ reason
+		// that says it is not.
+		{"curate_failed", providers.Investigation{
+			Title:      "argocd-repo-server OOMKilled after the 2.11 bump",
+			AlertName:  "ArgoCDRepoServerDown",
+			Verdict:    providers.VerdictActionSuggested,
+			Confidence: 0.85,
+			Severity:   "warning",
+			Cluster:    "eu-west-1",
+			Resource:   providers.Workload{Kind: "Deployment", Namespace: "argocd", Name: "argocd-repo-server"},
+			StartedAt:  started,
+			RootCauses: []providers.Hypothesis{{
+				Summary:         "2.11 raised the manifest cache footprint past the 512Mi limit",
+				Confidence:      0.85,
+				Evidence:        []string{"container exit code 137 at 14:17"},
+				SuggestedAction: "raise the repo-server memory limit to 1Gi",
+				Reversible:      true,
+			}},
+			CurateError:    `open PR: github GET /repos/o/kb/git/ref/heads/main: status 403: {"message":"Resource not accessible by integration"}`,
+			PrevCuratedURL: "https://github.com/o/kb/pull/271",
+			TriggerKey:     "ArgoCDRepoServerDown/argocd/argocd-repo-server",
+			Occurrences:    2,
+			LastOccurrence: lastSeen,
+			Usage: providers.UsageTotals{
+				ModelCalls: 5, InputTokens: 51204, OutputTokens: 3117,
+			},
+		}},
 	}
 }
 
@@ -306,32 +341,33 @@ func TestSlackCardMatchesTheShippedGolden(t *testing.T) {
 func TestCardGoldenCoversEveryRenderedBranch(t *testing.T) {
 	rendered := string(renderCardGolden(t))
 	for _, want := range []string{
-		"Action required",       // verdictBadge, conclusive
-		"Inconclusive",          // verdictBadge, inconclusive arm
-		"confidence not stated", // the #475 unstated variant
-		"confidence*",           // the ordinary stated variant (level bolded, pct outside)
-		"Instant recall",        // Prior + Recalled
-		"Known cause",           // the recall labels
-		"Validated resolution",  //
-		"Seen before",           // Prior without Recalled
-		"Prior cause",           // the recurrence labels
-		"resolve rate",          // PriorKnowledge.Recalls
-		"Matches known runbook", // MatchedKnowledge with Prior nil
-		"Why:",                  // top root cause
-		"more hypothesis below", // the deeper-hypotheses pointer
-		"Suggested next steps",  // nextSteps
-		"Full analysis",         // detailBlocks
-		"What changed:",         // Hypothesis.ChangeRef
-		"Open questions",        // Unresolved
-		"Data gaps",             // DataGaps
-		"Ruled out",             // RuledOut
-		"verified",              // the footer's verify marker
-		"model calls",           // usageFooter
-		"Proposed action",       // an action awaiting approval
-		"Approve",               //
-		"👍 Accurate",            // feedbackBlocks
-		"…1 more",               // evidence / next-step overflow
-		"<!date^",               // slackDate, which is why the fixtures fix their times
+		"Action required",                      // verdictBadge, conclusive
+		"Inconclusive",                         // verdictBadge, inconclusive arm
+		"confidence not stated",                // the #475 unstated variant
+		"confidence*",                          // the ordinary stated variant (level bolded, pct outside)
+		"Instant recall",                       // Prior + Recalled
+		"Known cause",                          // the recall labels
+		"Validated resolution",                 //
+		"Seen before",                          // Prior without Recalled
+		"Prior cause",                          // the recurrence labels
+		"resolve rate",                         // PriorKnowledge.Recalls
+		"Matches known runbook",                // MatchedKnowledge with Prior nil
+		"Why:",                                 // top root cause
+		"more hypothesis below",                // the deeper-hypotheses pointer
+		"Suggested next steps",                 // nextSteps
+		"Full analysis",                        // detailBlocks
+		"What changed:",                        // Hypothesis.ChangeRef
+		"Open questions",                       // Unresolved
+		"Data gaps",                            // DataGaps
+		"Ruled out",                            // RuledOut
+		"verified",                             // the footer's verify marker
+		"could not save to the knowledge base", // the failed-curate footer arm (#506)
+		"model calls",                          // usageFooter
+		"Proposed action",                      // an action awaiting approval
+		"Approve",                              //
+		"👍 Accurate",                           // feedbackBlocks
+		"…1 more",                              // evidence / next-step overflow
+		"<!date^",                              // slackDate, which is why the fixtures fix their times
 	} {
 		if !contains(rendered, want) {
 			t.Errorf("no fixture reaches the branch that renders %q — the golden's digest "+

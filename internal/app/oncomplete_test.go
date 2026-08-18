@@ -6,8 +6,12 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
+	"log/slog"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -33,6 +37,16 @@ type stubCurator struct{ url string }
 
 func (s stubCurator) Curate(context.Context, providers.Investigation) (providers.Ref, error) {
 	return providers.Ref{URL: s.url}, nil
+}
+
+// failingCurator stands in for a curator whose forge write was ATTEMPTED and failed —
+// the branch stubCurator can never reach. Both are needed: the fix for #506 turns on
+// telling a failed write apart from a skipped one, and a stub that only ever succeeds
+// leaves the whole distinction untested.
+type failingCurator struct{ err error }
+
+func (c failingCurator) Curate(context.Context, providers.Investigation) (providers.Ref, error) {
+	return providers.Ref{}, c.err
 }
 
 // openLine is the subset of a ledger open event the recurrence pointers read back.
@@ -130,6 +144,100 @@ func TestOnCompleteStampsRecurrenceAndPersistsOpen(t *testing.T) {
 	}
 	if last.Verdict != string(providers.VerdictActionRequired) {
 		t.Errorf("last open Verdict = %q, want %q", last.Verdict, providers.VerdictActionRequired)
+	}
+}
+
+// TestOnCompleteCarriesCurateFailureToDelivery pins the WIRING #506's fix depends on,
+// which nothing asserted: that the error branch stamps the reason onto the delivered
+// investigation, and — the half that gives the field its meaning — that the success
+// branch leaves it empty.
+//
+// Without the second assertion the field could be set unconditionally and every card
+// would warn about a write that in fact landed, which is a worse failure than the
+// silence it replaces: an operator who learns to ignore the warning has lost the signal
+// permanently.
+func TestOnCompleteCarriesCurateFailureToDelivery(t *testing.T) {
+	newLedger := func(t *testing.T) *outcome.Ledger {
+		t.Helper()
+		l, err := outcome.New(filepath.Join(t.TempDir(), "outcomes.jsonl"))
+		if err != nil {
+			t.Fatalf("new ledger: %v", err)
+		}
+		return l
+	}
+	found := providers.Investigation{Title: "disk pressure", Fingerprint: "fp1", TriggerKey: "k"}
+
+	t.Run("failed write is carried to the sink", func(t *testing.T) {
+		sink := &captureNotifier{}
+		cur := failingCurator{err: errors.New(
+			"open PR: github GET /repos/o/kb/git/ref/heads/main: status 403: Resource not accessible by integration")}
+		onInvestigationComplete(context.Background(), found, newLedger(t), nil, cur,
+			notify.NewMulti(discardLog(), sink), nil, nil, nil, discardLog())
+
+		if sink.got.CurateError == "" {
+			t.Fatal("a failed curate write reached delivery with no reason: the card cannot " +
+				"tell it apart from a write that was never attempted")
+		}
+		if !strings.Contains(sink.got.CurateError, "403") {
+			t.Errorf("delivered CurateError = %q, want the forge's own reason", sink.got.CurateError)
+		}
+		// A failure must never also claim a link — the two are mutually exclusive states.
+		if sink.got.CuratedURL != "" {
+			t.Errorf("delivered CuratedURL = %q after a failed write, want empty", sink.got.CuratedURL)
+		}
+	})
+
+	t.Run("successful write leaves it empty", func(t *testing.T) {
+		sink := &captureNotifier{}
+		onInvestigationComplete(context.Background(), found, newLedger(t), nil,
+			stubCurator{url: "https://kb/new"}, notify.NewMulti(discardLog(), sink),
+			nil, nil, nil, discardLog())
+
+		if sink.got.CurateError != "" {
+			t.Errorf("delivered CurateError = %q after a SUCCESSFUL write: the card would warn "+
+				"about a write that landed", sink.got.CurateError)
+		}
+		if sink.got.CuratedURL != "https://kb/new" {
+			t.Errorf("delivered CuratedURL = %q, want the link curate produced", sink.got.CuratedURL)
+		}
+	})
+}
+
+// TestOnCompleteRedactsTheCurateError pins the one thing this assignment does that no
+// other field on the delivered Investigation does: it runs AFTER the single egress
+// chokepoint.
+//
+// investigate.LoopInvestigator.deliver calls redactInvestigation and THEN OnComplete, so
+// a string stamped on here has already missed it — silently giving CurateError the
+// treatment of a redactionSkipField entry without being on that list, and falsifying
+// notify/templated's "the Investigation is already secret-redacted before any notifier
+// runs". No sink leaks it today only because each one redacts again at render; the leak
+// arrives the moment anyone adds curate_error to notify.Payload, which is the natural
+// answer to #506's second ask.
+//
+// The same redaction covers the log line, which until now wrote the raw forge body —
+// credential included — into whatever aggregator collects RunLore's logs.
+func TestOnCompleteRedactsTheCurateError(t *testing.T) {
+	const token = "ghp_0123456789abcdefghijklmnopqrstuvwxyzAB"
+	ledger, err := outcome.New(filepath.Join(t.TempDir(), "outcomes.jsonl"))
+	if err != nil {
+		t.Fatalf("new ledger: %v", err)
+	}
+	var logs strings.Builder
+	log := slog.New(slog.NewTextHandler(&logs, nil))
+
+	sink := &captureNotifier{}
+	cur := failingCurator{err: fmt.Errorf("open PR: bad credentials %s", token)}
+	onInvestigationComplete(context.Background(),
+		providers.Investigation{Title: "t", Fingerprint: "fp1", TriggerKey: "k"},
+		ledger, nil, cur, notify.NewMulti(discardLog(), sink), nil, nil, nil, log)
+
+	if strings.Contains(sink.got.CurateError, token) {
+		t.Errorf("CurateError reached the notifier unredacted — it is stamped AFTER "+
+			"redactInvestigation, so nothing else will scrub it: %q", sink.got.CurateError)
+	}
+	if strings.Contains(logs.String(), token) {
+		t.Errorf("the raw forge body, credential and all, was written to the log store:\n%s", logs.String())
 	}
 }
 

@@ -94,6 +94,19 @@ const maxErrorBody = 512
 // Stripping happens BEFORE the cap so a credential straddling the cut cannot
 // leave a fragment behind. Empty secrets are ignored, so a caller can pass an
 // optional token unguarded.
+//
+// KNOWN GAP, and it is the reason this ordering is only half the guarantee: the
+// strip is exact-string replacement of the credentials the CALLER knew about.
+// A secret the caller did not pass — another tenant's token quoted back by a
+// proxy, a bearer header echoed by a debug endpoint — is only findable by
+// pattern, and the only pattern matcher is redact.Secrets, which runs much
+// later on err.Error() at each egress site. By then this byte-cut has already
+// happened, so such a credential straddling offset 512 arrives there as a
+// fragment shorter than redact.Secrets's {20,} quantifiers and passes through
+// unmasked. Closing it means running redact.Secrets here, before the cut,
+// rather than relying on the callers' secret lists; the cap is a per-line
+// budget, and moving the redaction under it is a change to every caller's error
+// text, so it is recorded rather than made in passing.
 func SafeErrorBody(body []byte, secrets ...string) string {
 	s := string(body)
 	for _, sec := range secrets {
