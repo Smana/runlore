@@ -5,6 +5,8 @@ package thread
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
@@ -1950,5 +1952,92 @@ func TestChatContextEvidenceCannotForgeAFramingLine(t *testing.T) {
 	// Flattened, not dropped: the finding is still what the model must answer from.
 	if !strings.Contains(body, "dns timeouts") {
 		t.Fatalf("the evidence item was dropped instead of flattened:\n%s", body)
+	}
+}
+
+// TestChatSystemPromptScopesItsLimitToTheTurn pins the required half of a fix that got
+// this wrong once in each direction.
+//
+// The reported bug: the prompt said "you have no tools on this turn and cannot look
+// anything up", and the model reported that to an operator as "I don't have access to
+// GitHub" — in the same reply that linked a pull request it had just CREATED on GitHub.
+// The operator went hunting a missing App permission that did not exist.
+//
+// The first fix overcorrected into asserting capabilities. See
+// TestChatSystemPromptIsPinned for why the prompt now claims nothing at all.
+func TestChatSystemPromptScopesItsLimitToTheTurn(t *testing.T) {
+	for _, c := range []struct{ want, why string }{
+		{"THIS TURN", "the turn-scoped limit must still be stated, or the model invents lookups"},
+		{"cannot look anything up", "same"},
+		{"limit of THIS REPLY", "the limit must be attributed to the reply, not the product"},
+		{"not as a statement about what RunLore can reach", "same"},
+		{"recorded in the context below", "an evidence-backed gap is operator-actionable and must survive the rule above"},
+	} {
+		if !strings.Contains(chatSystemPrompt, c.want) {
+			t.Errorf("prompt is missing %q — %s", c.want, c.why)
+		}
+	}
+}
+
+// TestChatSystemPromptIsPinned is the real gate on this constant, and it is a golden pin
+// rather than a list of forbidden phrases on purpose.
+//
+// A blocklist here would repeat a mistake this repo has already made and written down.
+// internal/investigate/gitops_kinds.go records it: "the earlier forbidden-word list
+// contained that exact phrase and 'no such object exists' slipped past it, which is why
+// the wording is checked against the SHAPE of the claim below rather than a blocklist."
+// The first version of this test pinned the four sentences from a rejected draft and
+// called itself a guard against capability claims — but "RunLore can query your metrics
+// backend" would have passed it green. A test that reports a class guarantee while
+// checking four instances is worse than no test, because it is believed.
+//
+// The invariant cannot be expressed as a string match, so this asserts the honest thing
+// instead: the constant has not changed. Any edit fails here and the message says what to
+// re-verify. That also guards the SECOND property, which has no other guard at all —
+// len(chatSystemPrompt) feeds maxChatCallTokens, so four bytes of prose move the shipped
+// hourly spend ceiling by twenty tokens for every deployment that did not pin it.
+func TestChatSystemPromptIsPinned(t *testing.T) {
+	const (
+		wantLen  = 1938
+		wantHash = "64782521a1485a82"
+	)
+	sum := sha256.Sum256([]byte(chatSystemPrompt))
+	got := hex.EncodeToString(sum[:])[:16]
+	if len(chatSystemPrompt) == wantLen && got == wantHash {
+		return
+	}
+	t.Errorf(`the chat system prompt changed (len %d->%d, hash %s->%s).
+
+This is not a failure to silence by updating the constants. Before you do, check three things:
+
+ 1. CLAIMS NOTHING. The prompt must not assert what RunLore can reach. There is no forge
+    tool in internal/investigate at all, and every other backend is registered
+    conditionally by app.BuildModelAndTools — so any capability sentence is false on some
+    deployment. Denying a capability and promising one are the same defect.
+ 2. THE SPEND CEILING MOVED. DefaultChatTokensPerHour = 20 * maxChatCallTokens, and
+    maxChatCallTokens counts len(chatSystemPrompt)/4. Re-read it and decide whether the
+    new ceiling is wanted, rather than absorbing it.
+ 3. RESTATE IT. internal/config/config_test.go pins the literal; internal/thread/budget.go
+    carries the derivation in a comment no guard reads; SECURITY.md, configuration.md,
+    slack.md and matrix.md quote the number (docsguard will name those four for you).`,
+		wantLen, len(chatSystemPrompt), wantHash, got)
+}
+
+// TestChatSystemPromptMakesNoKnownCapabilityClaim is a fast smoke check on the exact
+// sentences a previous draft shipped. It is deliberately NON-EXHAUSTIVE and is not the
+// guard — TestChatSystemPromptIsPinned is. It exists only so a reviewer who reintroduces
+// one of these verbatim gets a pointed message instead of a hash mismatch.
+func TestChatSystemPromptMakesNoKnownCapabilityClaim(t *testing.T) {
+	claims := []string{
+		"does have cluster",         // asserted backends that are config-gated
+		"a fresh investigation can", // promised a re-run that answers nothing
+		// From its canonical source, so renaming the intent breaks this guard loudly
+		// instead of leaving it checking for a word the prompt could never contain.
+		IntentReinvestigate.String(),
+	}
+	for _, claim := range claims {
+		if strings.Contains(chatSystemPrompt, claim) {
+			t.Errorf("prompt contains %q, a capability claim from the rejected draft", claim)
+		}
 	}
 }

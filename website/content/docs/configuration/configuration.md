@@ -728,7 +728,7 @@ transport to ever fire, and startup **warns** (`… or this is dead config`) whe
     notify:
       thread:
         chat_calls_per_hour: 30      # default 30
-        chat_tokens_per_hour: 107720 # default 107720 — derived, see below
+        chat_tokens_per_hour: 109480 # default 109480 — derived, see below
 
 > [!IMPORTANT]
 > **`model.chat.model` must be named explicitly — startup fails without it.** It is the one field
@@ -780,11 +780,11 @@ a reply to an investigation thread. Keep the room invite-only.
 | Bound | Key | Default |
 |---|---|---|
 | Model calls per hour, globally | `notify.thread.chat_calls_per_hour` | `30` |
-| Tokens per hour, globally — reported usage, or an estimate when unreported | `notify.thread.chat_tokens_per_hour` | `107720` (derived) |
+| Tokens per hour, globally — reported usage, or an estimate when unreported | `notify.thread.chat_tokens_per_hour` | `109480` (derived) |
 | Output tokens per call | `model.chat.max_tokens` | `1024` |
 | The human's message reaching the model | `notify.thread.max_note_bytes` | `8192` bytes |
 | Model calls per addressed message | *structural — always exactly 1* | — |
-| Assembled prompt size | *fixed at ~15 KB (≈3.8k input tokens)*; only `max_note_bytes` moves it | — |
+| Assembled prompt size | *~15 KB (≈3.8k input tokens)*; `max_note_bytes` moves it, as does any edit to the system prompt or tool spec it | — |
 | Knowledge-base PR writes per hour, globally | `notify.thread.forge_writes_per_hour` | `20` |
 | Notes recorded per thread | `notify.thread.max_notes_per_thread` | `20` |
 
@@ -794,12 +794,14 @@ and the message falls back to the deterministic reply; `runlore_thread_chat_deni
 `ceiling` label (`calls` / `tokens`) saying which one refused.
 
 **Why the token default is not a round number.** `chat_tokens_per_hour`'s default is *derived*, not
-picked. It is the most a single call can cost — the assembled prompt's byte caps converted to
-tokens, plus `model.chat.max_tokens` of output — multiplied by `chat_calls_per_hour`, then taken at
-two thirds. That ordering is the point: a runaway of maximum-size calls trips the token ceiling
+picked. It is the most a single call can cost — the assembled context's byte caps, the system prompt and
+the tool spec, all converted to tokens at roughly four bytes per token, plus `model.chat.max_tokens` of output —
+multiplied by `chat_calls_per_hour`, then taken at two thirds. That ordering is the point: a runaway of maximum-size calls trips the token ceiling
 before it exhausts the call budget, so it is stopped by **cost** rather than by count, while ordinary
 traffic (a question and a short reply) spends its calls without ever approaching it. The consequence
-for you is that **the default moves when `max_note_bytes` moves**: raising the per-message cap raises
+for you is that **the default moves when any term of the derivation moves** — including the
+system prompt's wording, which is counted by length, so a release that only rewords it raises this
+ceiling. Most visibly, raising the per-message cap raises
 what one call can cost, and the derived hourly ceiling rises with it. Set `chat_tokens_per_hour`
 explicitly if you need a ceiling that stays put.
 
@@ -832,7 +834,7 @@ explicitly if you need a ceiling that stays put.
 > - **The window is per process.** Each replica enforces its own `chat_tokens_per_hour`, so N replicas
 >   permit N times the number above.
 > - **It is an hourly sliding window, not a monthly or absolute budget.** `chat_tokens_per_hour` at
->   its default permits 107720 tokens *every* hour, indefinitely. There is no cumulative cap over a
+>   its default permits 109480 tokens *every* hour, indefinitely. There is no cumulative cap over a
 >   day, a month, or the life of the process.
 > - **Any room member can trigger it** (see above), so the ceiling that actually protects you is the
 >   hourly one, not the good behaviour of the person typing.

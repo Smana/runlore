@@ -340,7 +340,7 @@ func TestDefaultTokenCeilingCanBind(t *testing.T) {
 // provider. If Allow charged nothing until Record ran, spend in flight would be
 // invisible to the check, every one of the hourly calls would pass the token
 // test, and the true bound would be DefaultChatCallsPerHour x maxChatCallTokens
-// (161,580 tokens) against a 107,720 ceiling — a runaway stopped by COUNT, the
+// against the ceiling — a runaway stopped by COUNT, the
 // exact inverse of the ordering DefaultChatTokensPerHour is derived to have.
 //
 // Deterministic rather than timing-dependent: grants continue while charged
