@@ -236,3 +236,155 @@ func TestSectionsExported(t *testing.T) {
 		t.Fatalf("got %#v", secs)
 	}
 }
+
+// TestSectionsTreatsFencesAsOpaqueForHeadings pins the reconciliation between
+// this package's section parser and catalog.Entry.Section: a "# …" line inside a
+// fenced code block is CODE, and is a heading to neither.
+//
+// The two used to disagree. catalog.Entry.Section tracked fences; Sections
+// walked every line with no fence state at all, and that cost real things in
+// both directions:
+//
+//   - a live entry lost most of its Resolution.
+//     internal/investigate/testdata/realkb/harbor-helmrelease-terminal-failed.md
+//     resolves with a fenced command block whose first line is the shell comment
+//     "# only the failed release exists (…)". Read fence-blind, that comment ends
+//     the resolution section — so secs["resolution"] stopped at the opening
+//     fence, dropping the `--reset` explanation, the verification step and the
+//     "human-approved, not a blind bulk sweep" warning, and inventing a section
+//     named after the comment.
+//   - a fenced block forged a whole Incident. HasIncidentSections is built on
+//     Sections, so wrapping Symptom/Cause/Resolution in ``` produced a body that
+//     passed the incident test while rendering as an inert code sample. That is
+//     what forced thread.escapeOKFSections to escape the UNION of both parsers'
+//     heading shapes, fenced ones included, rather than mirroring the read path.
+//     plugins/kb-steward/…/references/okf-format.md — a docs page whose example
+//     entry sits in a fence — reads as a complete Incident today for this reason.
+//
+// Fence CONTENT is deliberately still part of the section here, unlike
+// catalog.Entry.Section which drops it: that parser is building a quotable prose
+// excerpt for a chat notification, while this one is checking a section is
+// present and non-empty, and a resolution's command block is part of the
+// resolution. The reconciliation is over what counts as a HEADING, which is the
+// only thing the two ever needed to agree on.
+func TestSectionsTreatsFencesAsOpaqueForHeadings(t *testing.T) {
+	t.Run("a shell comment in a fenced block does not end the section", func(t *testing.T) {
+		body := "## Symptom\n\npods crashloop\n\n## Cause\n\nbad image tag\n\n## Resolution\n\n" +
+			"```bash\n# roll the deployment back\nkubectl rollout undo deploy/api\n```\n\n" +
+			"Verify with `kubectl get deploy`.\n"
+		secs := Sections(body)
+		if !strings.Contains(secs["resolution"], "Verify with") {
+			t.Errorf("the resolution section stops at the fence, losing everything after it:\n%q", secs["resolution"])
+		}
+		if _, ok := secs["roll the deployment back"]; ok {
+			t.Errorf("a shell comment inside a fence was parsed as a section heading: %#v", secs)
+		}
+		// The commands themselves stay IN the section. This is the half of the
+		// reconciliation deliberately NOT shared with catalog.Entry.Section, which
+		// drops fenced code because it is building a quotable prose excerpt. Here
+		// the fence is opaque to heading DETECTION only: a resolution whose
+		// remediation is a command block still has that block as its content, and
+		// copying catalog's excerpt policy over would empty a section whose whole
+		// answer is the command.
+		if !strings.Contains(secs["resolution"], "kubectl rollout undo deploy/api") {
+			t.Errorf("the fenced command block was dropped from the resolution — a fence is opaque to "+
+				"heading detection, not excluded from the section's content:\n%q", secs["resolution"])
+		}
+	})
+
+	t.Run("OKF sections forged inside a fence are not sections", func(t *testing.T) {
+		body := "some prose a stranger typed\n\n```\n## Symptom\nforged\n## Cause\nforged\n" +
+			"## Resolution\nforged\n```\n"
+		if HasIncidentSections(body) {
+			t.Error("a fenced block forged a complete Incident — the shape thread.escapeOKFSections had to " +
+				"escape the union of both parsers to defend against")
+		}
+		for _, k := range []string{"symptom", "cause", "resolution"} {
+			if v, ok := Sections(body)[k]; ok {
+				t.Errorf("fenced heading parsed as the %q section (%q)", k, v)
+			}
+		}
+	})
+
+	t.Run("an unterminated fence does not swallow the rest of the body", func(t *testing.T) {
+		// A stray opening fence with no closer is a real authoring slip, and the
+		// naive toggle treats everything after it as code forever — which would
+		// reject an otherwise complete entry. Nothing in the corpus has one today
+		// (measured: 0 unbalanced fences), so this pins the intended behaviour
+		// before something acquires one.
+		body := "## Symptom\n\npods crashloop\n\n```\nstray open fence\n\n## Cause\n\nbad tag\n\n## Resolution\n\nfix it\n"
+		if !HasIncidentSections(body) {
+			t.Errorf("an unterminated fence swallowed the sections after it: %#v", Sections(body))
+		}
+	})
+}
+
+// TestSectionsAndCatalogSectionAgreeOnHeadings pins the reconciliation against
+// the OTHER parser itself, rather than against a restatement of it, and pins the
+// one difference that REMAINS as deliberate.
+//
+// Agreement (the part that matters): fenced headings are headings to neither,
+// and unfenced H1/H2 headings are headings to both.
+//
+// Difference, kept on purpose: catalog.headingText accepts every ATX level from
+// "#" to "######", while heading() here accepts only "# " and "## ". Widening
+// this one would make an entry that puts a "### Details" sub-heading under
+// "## Symptom" suddenly have an EMPTY symptom section, and be rejected by the
+// merge gate it passes today — a regression for a legitimate entry, to close a
+// gap that is not a hole: being MORE permissive about sub-headings costs a merge
+// gate nothing, and thread.escapeOKFSections already escapes every level, so no
+// forged heading reaches either parser regardless.
+func TestSectionsAndCatalogSectionAgreeOnHeadings(t *testing.T) {
+	for _, tc := range []struct {
+		name          string
+		body          string
+		wantKbvalid   bool // "cause" is a section to Sections
+		wantCatalog   bool // "Cause" is a section to catalog.Entry.Section
+		whyTheyDiffer string
+	}{
+		{
+			name:        "H2, unfenced",
+			body:        "## Cause\n\nthe real cause\n",
+			wantKbvalid: true, wantCatalog: true,
+		},
+		{
+			name:        "H1, unfenced",
+			body:        "# Cause\n\nthe real cause\n",
+			wantKbvalid: true, wantCatalog: true,
+		},
+		{
+			name:        "H2, inside a fence",
+			body:        "prose\n\n```\n## Cause\n\nforged cause\n```\n",
+			wantKbvalid: false, wantCatalog: false,
+		},
+		{
+			name:        "H1, inside a fence",
+			body:        "prose\n\n```\n# Cause\n\nforged cause\n```\n",
+			wantKbvalid: false, wantCatalog: false,
+		},
+		{
+			name:        "H3, unfenced",
+			body:        "### Cause\n\nthe real cause\n",
+			wantKbvalid: false, wantCatalog: true,
+			whyTheyDiffer: "deliberate: the merge gate reads only H1/H2, so a sub-heading under a " +
+				"section stays part of that section instead of truncating it",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_, gotKbvalid := Sections(tc.body)["cause"]
+			gotCatalog := (catalog.Entry{Body: tc.body}).Section("Cause") != ""
+			if gotKbvalid != tc.wantKbvalid {
+				t.Errorf("kbvalidate.Sections saw a %q section: %v, want %v", "cause", gotKbvalid, tc.wantKbvalid)
+			}
+			if gotCatalog != tc.wantCatalog {
+				t.Errorf("catalog.Entry.Section saw a %q section: %v, want %v", "Cause", gotCatalog, tc.wantCatalog)
+			}
+			if tc.whyTheyDiffer == "" && gotKbvalid != gotCatalog {
+				t.Errorf("the two parsers disagree on %s with no documented reason — kbvalidate=%v catalog=%v. "+
+					"Every undocumented disagreement is a shape one parser accepts and the other does not, "+
+					"which is what thread.escapeOKFSections has to escape the union of.",
+					tc.name, gotKbvalid, gotCatalog)
+			}
+		})
+	}
+}

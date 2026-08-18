@@ -788,17 +788,18 @@ func TestNoteInputCapNeverOvershoots(t *testing.T) {
 // tracking in escapeOKFSections opened.
 //
 // escapeOKFSections skipped any line between ``` markers, modelling a Markdown
-// semantic the READ path does not implement: kbvalidate.Sections
-// (kbvalidate.go:218) iterates every line and calls heading(line) with no fence
-// awareness at all, and internal/catalog has none either. So a note that wrapped
-// its forged headings in a code fence was escaped NOWHERE and parsed EVERYWHERE
-// — HasIncidentSections returned true on a body a human typed into a chat
-// thread, which is exactly what escaping exists to prevent.
+// semantic the READ path did not implement: kbvalidate.Sections iterated every
+// line and called heading(line) with no fence awareness at all. So a note that
+// wrapped its forged headings in a code fence was escaped NOWHERE and parsed
+// EVERYWHERE — HasIncidentSections returned true on a body a human typed into a
+// chat thread, which is exactly what escaping exists to prevent.
 //
-// atxHeadingText's own doc comment already states the rule this violated: "a
-// shape Section accepts and this does not is a hole." A backslash rendering
-// inside a pasted code block is the price of matching the parser that actually
-// runs.
+// The read path has since been reconciled (both parsers share
+// catalog.FencedLines, so a fenced heading is a heading to neither), which means
+// this property now holds for TWO independent reasons. The test is deliberately
+// end-to-end for that: it asserts what a human's note can do to the merge gate,
+// so it keeps failing if EITHER defence is removed, and it does not care which
+// one is currently carrying it.
 func TestNoteBodyCannotForgeOKFSectionsInsideACodeFence(t *testing.T) {
 	msg := "here is my note\n\n```\n## Symptom\nforged symptom\n## Cause\nforged cause\n" +
 		"## Resolution\nforged resolution\n```\n"

@@ -471,27 +471,30 @@ var okfSectionNames = []string{"Symptom", "Cause", "Resolution"}
 // is just as much a section as "## Cause".
 //
 // Fenced headings are escaped TOO, and deliberately so, even though a heading
-// inside a code fence is not a heading to a Markdown renderer.
+// inside a code fence is not a heading to a Markdown renderer — nor, any longer,
+// to either of RunLore's section parsers.
 //
-// The reason is that RunLore has TWO section parsers and they disagree.
-// catalog.Entry.Section (catalog/section.go:25) tracks fences and skips what is
-// inside them. kbvalidate.Sections (kbvalidate/kbvalidate.go:208) does not: it
-// walks every line and calls heading(line) with no fence state at all, and
-// HasIncidentSections is built on it. This function used to mirror the first
-// one exactly — which read as careful, and was the hole. A note that wrapped
+// It started that way because the two parsers disagreed. catalog.Entry.Section
+// tracked fences; kbvalidate.Sections walked every line with no fence state at
+// all, and HasIncidentSections is built on it. This function once mirrored the
+// first parser exactly — which read as careful, and was the hole. A note that
+// wrapped
 //
 //	## Symptom / ## Cause / ## Resolution
 //
 // in a ``` fence was escaped NOWHERE and parsed EVERYWHERE the fence-blind
-// parser looks, so HasIncidentSections returned true for a body a stranger
-// typed into a chat thread.
+// parser looks, so HasIncidentSections returned true for a body a stranger typed
+// into a chat thread.
 //
-// So the rule is the UNION, not either parser: escape every shape ANY reader
-// accepts as a section. Over-escaping costs a visible backslash inside a pasted
-// code block; under-escaping costs a forged entry. Aligning the two parsers is
-// the better long-term fix, but kbvalidate is the merge gate and changing what
-// it accepts reaches every existing entry, so that is not this function's call
-// to make.
+// That disagreement is now closed at the source: both parsers take their answer
+// from catalog.FencedLines, so a fenced heading is a heading to neither. The
+// UNION rule stays anyway, which makes the escaping here the SECOND of two
+// independent defences rather than the only one. Keeping it costs a visible
+// backslash inside a pasted code block. Dropping it would put a THIRD markdown
+// parser on the write path — this function would have to track fences itself to
+// know which headings to skip — and would stake the whole property on the read
+// path never regressing. TestSectionsAndCatalogSectionAgreeOnHeadings pins the
+// two parsers to each other; this keeps a note safe even if that pin is relaxed.
 //
 // Callers must still flatten anything they interpolate around this text (see
 // NoteBody): identity fields are single-lined before they reach here.
