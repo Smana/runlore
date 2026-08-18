@@ -14,6 +14,14 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # Full history AND tags. internal/docsguard's breaking-change-footer guard
+          # scans <last release tag>..HEAD — the exact set release-please will parse
+          # into the next CHANGELOG entry — so it needs the tag and every commit back
+          # to it. actions/checkout defaults to depth 1 with no tags, which leaves that
+          # guard no window at all; it fails loudly rather than passing vacuously, so
+          # this is load-bearing, not an optimisation.
+          fetch-depth: 0
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: go.mod
