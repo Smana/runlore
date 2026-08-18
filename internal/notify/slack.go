@@ -492,7 +492,10 @@ func summaryBlocks(inv providers.Investigation) []map[string]any {
 		if scope != "" {
 			loc = append(loc, scope)
 		}
-		if ref := inv.Resource.Ref(); ref != "" {
+		// resourceRef, not Resource.Ref(): the header is the most-read line on the
+		// card, so it is the last place to print a namespace a cluster-scoped or
+		// cloud object was never in. See resourceRef.
+		if ref := resourceRef(inv.Resource); ref != "" {
 			loc = append(loc, ref)
 		}
 		if len(loc) > 0 {
@@ -743,16 +746,22 @@ func metadataFields(inv providers.Investigation) []map[string]any {
 		}
 		add("Alert", name)
 	}
+	// One name, not the same name twice: scopeIdentity blanks the tenant when it only
+	// repeats the cluster ("shared · shared") and keeps both when they genuinely
+	// differ ("tmem175 · tmem175-0"). Format's metadata line shares the decision.
+	cluster, tenant := scopeIdentity(inv.Cluster, inv.Tenant)
 	scope := make([]string, 0, 2)
-	if inv.Tenant != "" {
-		scope = append(scope, escapeMrkdwn(inv.Tenant))
+	if tenant != "" {
+		scope = append(scope, escapeMrkdwn(tenant))
 	}
-	if inv.Cluster != "" {
-		scope = append(scope, escapeMrkdwn(inv.Cluster))
+	if cluster != "" {
+		scope = append(scope, escapeMrkdwn(cluster))
 	}
 	add("Cluster", strings.Join(scope, " · "))
-	if ref := inv.Resource.Ref(); ref != "" {
-		add("Resource", escapeMrkdwn(strings.TrimSpace(inv.Resource.Kind+" "+ref)))
+	// resourceLine, not Resource.Ref(): a cluster-scoped or cloud object has no
+	// namespace to qualify. See resourceRef.
+	if line := resourceLine(inv.Resource); line != "" {
+		add("Resource", escapeMrkdwn(line))
 	}
 	add("Started", slackDate(inv.StartedAt))
 	// Only rendered when the investigation actually established a change. change_ref
