@@ -480,6 +480,39 @@ that `result="error"` counts only genuine write failures — a finding that was 
 (below `forge.min_confidence`) or deduplicated against an existing entry is a different
 `result` and is not an error.
 
+### RunloreAlertRuleUnavailable
+
+`runlore_alert_rule_degraded_total{class="systemic"}` is non-zero: the `alert_rule` tool
+cannot read the firing alert's own rule definition, for every investigation, until the
+backend or the config changes.
+
+This is the one alert on this page for a tool that is *working as designed* when it
+fails. `alert_rule` degrades to a plain string rather than an error, because a rule
+definition is corroborating context and must never fail an investigation — which means
+`runlore_tool_calls_total` records every degradation as `result="ok"`. A deployment whose
+backend serves no rules endpoint is therefore metrically identical to one where the tool
+works, and this counter is the only series that separates them.
+
+`class="routine"` (`unmatched_alert`) is excluded on purpose: an alert with no matching
+rule is normal and must never page. Check the backend serves `/api/v1/rules` and that
+your metrics provider implements it.
+
+### RunloreUnrecallableKBDrafts
+
+`runlore_kb_draft_defects_total{defect="unrecallable_resource"}` is non-zero: entries are
+being filed with a `resource` recall's structural match can never agree with.
+
+These merge cleanly and then never fire — worse than an entry with no `resource` at all,
+because a non-empty one also disables the scopeless fallback. Every such entry is
+permanent catalog weight that never repays its cost, and nothing else surfaces it:
+`runlore_curations_total{kind="pr",result="opened"}` scores the pull request a success
+either way.
+
+`defect="merge_gate"` is excluded deliberately — that draft fails `lore validate-kb`, so
+its pull request cannot merge and a human meets it at review time regardless. Fix the
+frontmatter on the open PRs; the two log lines that name the entry are on the
+[troubleshooting page]({{< relref "troubleshooting.md#the-pr-opened-but-the-entry-will-never-be-recalled" >}}).
+
 ### RunloreInvestigationCostHigh
 
 p95 of `runlore_investigation_tokens_estimated` above 100000 over 30m. Read the metric

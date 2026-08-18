@@ -246,3 +246,32 @@ spec:
             summary: "RunLore is failing to write curated knowledge to the forge"
             description: "{{ $value | humanize }} curation writes failed in the last 30m — findings were produced but never reached the knowledge base, so the learning loop is not compounding. Check the GitHub App scopes and forge.kb_repo; look for msg=\"curate findings\" with err= in the logs."
             runbook_url: "https://runlore.io/docs/operations/observability/#runlorecurationwriteerrors"
+
+        # 16. The alert_rule tool is systemically unavailable.
+        # class="systemic" means no_capability / backend_error / no_rules: the tool is
+        # dead for EVERY investigation until the backend or config changes, so threshold
+        # levers do not apply. class="routine" (unmatched_alert) is deliberately excluded
+        # — an alert with no matching rule is normal and must never page.
+        - alert: RunloreAlertRuleUnavailable
+          expr: sum(rate(runlore_alert_rule_degraded_total{class="systemic"}[15m])) > 0
+          for: 30m
+          labels:
+            severity: warning
+          annotations:
+            summary: "RunLore cannot read alerting rules from its metrics backend"
+            description: "alert_rule has been degrading systemically for 30m — every investigation is judging threshold alerts without the rule's own expression, which is the guessing this tool exists to stop. Check the backend serves /api/v1/rules and that the metrics provider implements it."
+            runbook_url: "https://runlore.io/docs/operations/observability/#runlorealertruleunavailable"
+
+        # 17. Knowledge is being filed that recall can never match.
+        # defect="unrecallable_resource" is the silent-forever case: the PR merges and the
+        # entry is never recalled. defect="merge_gate" is excluded deliberately — it blocks
+        # its own pull request, so a human meets it at review time regardless.
+        - alert: RunloreUnrecallableKBDrafts
+          expr: sum(rate(runlore_kb_draft_defects_total{defect="unrecallable_resource"}[6h])) > 0
+          for: 1h
+          labels:
+            severity: warning
+          annotations:
+            summary: "RunLore is drafting knowledge entries recall cannot match"
+            description: "Knowledge PRs are being filed with a resource recall can never agree with — they merge and then never fire. Fix the frontmatter on the open PRs; see the troubleshooting page for the two log lines that name the entry."
+            runbook_url: "https://runlore.io/docs/operations/observability/#runloreunrecallablekbdrafts"

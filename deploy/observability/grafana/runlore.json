@@ -2979,12 +2979,108 @@
       "type": "heatmap"
     },
     {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "description": "Alerts that were still inside their debounce window when the process shut down. Alertmanager already got a 200, so it will not resend until its repeat_interval (often hours) — these alerts are simply never investigated. Expected to be rare, but it rises once per held alert on every restart or helm upgrade that lands mid-hold. Any sustained non-zero value is real alert loss: shorten triggers.incidents.debounce or set it to 0s.",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "axisBorderShow": false,
+            "axisCenteredZero": false,
+            "axisColorMode": "text",
+            "axisLabel": "",
+            "axisPlacement": "auto",
+            "barAlignment": 0,
+            "drawStyle": "line",
+            "fillOpacity": 15,
+            "gradientMode": "none",
+            "hideFrom": {
+              "legend": false,
+              "tooltip": false,
+              "viz": false
+            },
+            "insertNulls": false,
+            "lineInterpolation": "linear",
+            "lineWidth": 1,
+            "pointSize": 5,
+            "scaleDistribution": {
+              "type": "linear"
+            },
+            "showPoints": "auto",
+            "spanNulls": false,
+            "stacking": {
+              "group": "A",
+              "mode": "none"
+            },
+            "thresholdsStyle": {
+              "mode": "off"
+            }
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          },
+          "unit": "none"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 109
+      },
+      "id": 137,
+      "options": {
+        "legend": {
+          "calcs": [
+            "mean",
+            "lastNotNull"
+          ],
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "pluginVersion": "11.0.0",
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "editorMode": "code",
+          "expr": "sum(increase(runlore_incidents_dropped_on_shutdown_total[$__rate_interval]))",
+          "legendFormat": "dropped",
+          "refId": "A",
+          "instant": false
+        }
+      ],
+      "title": "Alerts LOST on shutdown (should be zero)",
+      "type": "timeseries"
+    },
+    {
       "collapsed": false,
       "gridPos": {
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 109
+        "y": 117
       },
       "id": 132,
       "panels": [],
@@ -3052,7 +3148,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 110
+        "y": 118
       },
       "id": 133,
       "options": {
@@ -3148,7 +3244,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 110
+        "y": 118
       },
       "id": 134,
       "options": {
@@ -3244,7 +3340,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 118
+        "y": 126
       },
       "id": 135,
       "options": {
@@ -3351,7 +3447,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 118
+        "y": 126
       },
       "id": 136,
       "options": {
@@ -3403,7 +3499,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 126
+        "y": 134
       },
       "id": 122,
       "panels": [],
@@ -3439,7 +3535,7 @@
         "h": 5,
         "w": 8,
         "x": 0,
-        "y": 127
+        "y": 135
       },
       "id": 111,
       "options": {
@@ -3510,7 +3606,7 @@
         "h": 5,
         "w": 8,
         "x": 8,
-        "y": 127
+        "y": 135
       },
       "id": 112,
       "options": {
@@ -3577,7 +3673,7 @@
         "h": 5,
         "w": 8,
         "x": 16,
-        "y": 127
+        "y": 135
       },
       "id": 113,
       "options": {
