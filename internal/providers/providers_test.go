@@ -290,6 +290,11 @@ func TestKBUpdateClassifiesEveryFieldForEscaping(t *testing.T) {
 // three Argo CD Applications reached Workload.Name as the model's own
 // comma-and-space list, so Ref() rendered "argocd/essentials, monitoring,
 // argocd-app-of-apps" and the entry's own validate job rejected it.
+//
+// The list and bracket fixtures are the two live drafts from #518. Recall matches
+// `resource` by STRING EQUALITY (investigate.resourceAgrees), so a value carrying
+// a character a Kubernetes namespace or name cannot contain is not merely untidy —
+// it can never match anything, and the entry ships dead.
 func TestEntryResourceRefNarrowsToTheMergeGatesShape(t *testing.T) {
 	tests := []struct {
 		name string
@@ -299,20 +304,27 @@ func TestEntryResourceRefNarrowsToTheMergeGatesShape(t *testing.T) {
 		{"model listed several objects, comma-and-space", "argocd/essentials, monitoring, argocd-app-of-apps", "argocd/essentials"},
 		{"a plain ref is untouched", "tooling/harbor-registry", "tooling/harbor-registry"},
 		{"a bare namespace is untouched", "tooling", "tooling"},
+		{"a dotted node name keeps every dot", "observability/ip-10-11-189-250.ec2.internal", "observability/ip-10-11-189-250.ec2.internal"},
+		{"a pod-hash suffix is not this function's business", "tooling/harbor-registry-59598dbd57-ltkzw", "tooling/harbor-registry-59598dbd57-ltkzw"},
 		{"empty stays empty", "", ""},
 		{"whitespace-only yields empty rather than a blank resource", "   \t ", ""},
-		{"a comma-joined list WITHOUT whitespace clears the gate already and is left alone", "argocd/a,b,c", "argocd/a,b,c"},
-		// The "whitespace-free input is returned exactly as given" promise is what
-		// lets every caller say no entry that merges today is written differently,
-		// so it has to hold for input the punctuation trim would otherwise rewrite.
-		// These three end IN that trim's cutset, which the case above does not —
-		// and an unguarded TrimRight silently changed all three.
-		{"a trailing comma is left alone when there was nothing to split", "argocd/a,b,c,", "argocd/a,b,c,"},
-		{"a trailing semicolon likewise", "a;b;", "a;b;"},
-		{"a trailing slash likewise", "argocd/app/", "argocd/app/"},
+		// A comma-joined list clears the whitespace gate, which is exactly why it is
+		// the worse of the two live failures: the PR merged and the entry can never
+		// match. No Kubernetes namespace or name contains a comma or a semicolon, so
+		// cutting at the first one loses nothing a match could have used.
+		{"a comma-joined list without whitespace is cut to its first object", "argocd/a,b,c", "argocd/a"},
+		{"a trailing comma goes with the list separator", "argocd/a,b,c,", "argocd/a"},
+		{"a semicolon separates a list too", "a;b;", "a"},
+		// A parenthetical qualifier appended WITHOUT a space survives the field split,
+		// so it needs its own cut: "(", "[" and "{" are all invalid in a k8s name.
+		{"a parenthetical glued to the name is dropped", "observability/ip-10-11-189-250.ec2.internal(cluster=shared, instance i-0fd8c3c351590a3a0)", "observability/ip-10-11-189-250.ec2.internal"},
+		{"a bracketed qualifier likewise", "argocd/app[prod]", "argocd/app"},
+		{"a braced qualifier likewise", "argocd/app{prod}", "argocd/app"},
+		{"a trailing slash leaves an empty name half, so it goes", "argocd/app/", "argocd/app"},
 		{"surrounding whitespace is trimmed", "  tooling/harbor  ", "tooling/harbor"},
 		{"a tab separator counts as whitespace too", "tooling/harbor\tregistry", "tooling/harbor"},
 		{"a dangling slash would leave an empty name half", "tooling/ harbor", "tooling"},
+		{"a value that is nothing but a qualifier yields empty, not garbage", "(cluster=shared)", ""},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -322,6 +334,9 @@ func TestEntryResourceRefNarrowsToTheMergeGatesShape(t *testing.T) {
 			}
 			if strings.ContainsAny(got, " \t\r\n") {
 				t.Errorf("EntryResourceRef(%q) = %q — still contains whitespace, which the merge gate rejects outright", tt.ref, got)
+			}
+			if again := providers.EntryResourceRef(got); again != got {
+				t.Errorf("EntryResourceRef is not idempotent: %q → %q → %q", tt.ref, got, again)
 			}
 		})
 	}

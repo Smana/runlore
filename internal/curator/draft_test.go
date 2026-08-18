@@ -9,6 +9,7 @@ import (
 
 	"github.com/Smana/runlore/internal/catalog"
 	"github.com/Smana/runlore/internal/kbvalidate"
+	"github.com/Smana/runlore/internal/okf"
 	"github.com/Smana/runlore/internal/providers"
 )
 
@@ -331,7 +332,7 @@ func TestDraftKBEntryCapsLongTitle(t *testing.T) {
 		t.Fatalf("capped title must remain valid UTF-8: %q", e.Title)
 	}
 	// The drafted entry must clear the title field of the structural merge gate.
-	for _, iss := range kbvalidate.ValidateStructural(toCatalogEntry(e)) {
+	for _, iss := range kbvalidate.ValidateStructural(okf.AsEntry(e, okf.Meta{}, "")) {
 		if iss.Field == "title" && iss.Severity == kbvalidate.SeverityError {
 			t.Fatalf("drafted title failed the merge gate: %s", iss.Message)
 		}
@@ -416,23 +417,10 @@ func TestDraftKBEntryNoSuggestedActionPassesResolutionGate(t *testing.T) {
 		}},
 	}
 	e := draftKBEntry(inv)
-	for _, iss := range kbvalidate.ValidateStructural(toCatalogEntry(e)) {
+	for _, iss := range kbvalidate.ValidateStructural(okf.AsEntry(e, okf.Meta{}, "")) {
 		if iss.Field == "resolution" && iss.Severity == kbvalidate.SeverityError {
 			t.Fatalf("drafted entry fails its own merge gate (%s):\n%s", iss.Message, e.Body)
 		}
-	}
-}
-
-// toCatalogEntry mirrors a drafted KBEntry into the catalog.Entry shape that
-// kbvalidate.ValidateStructural consumes, so tests can run the real merge gate.
-func toCatalogEntry(e providers.KBEntry) catalog.Entry {
-	return catalog.Entry{
-		Type:        e.Type,
-		Title:       e.Title,
-		Description: e.Description,
-		Resource:    e.Resource,
-		Tags:        e.Tags,
-		Body:        e.Body,
 	}
 }
 

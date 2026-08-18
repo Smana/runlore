@@ -177,9 +177,17 @@ func TestTroubleshootingLogGuardDetectsDrift(t *testing.T) {
 // direction the guard exists to catch. Non-test files only — a message that only
 // a test emits is not one an operator can grep for.
 //
-// Non-literal messages (a fmt.Sprintf, a variable) are skipped rather than
-// approximated. They cannot be quoted verbatim on the page either, so a doc line
-// claiming one is a doc line that was already wrong.
+// A message COMPUTED at runtime (a fmt.Sprintf, a concatenation) is skipped
+// rather than approximated: it cannot be quoted verbatim on the page either, so a
+// doc line claiming one is a doc line that was already wrong.
+//
+// A message held in a VARIABLE is not that case, and is resolved. `msg := "…"`
+// followed by `log.Warn(msg, …)` puts the literal in the source exactly as an
+// operator would grep it, and kbvalidate.WarnDraft picks its message that way to
+// keep one set of attributes across two severities. Treating those as unemittable
+// failed a page that quoted them correctly. Resolution is scoped to the literals
+// assigned to that identifier inside the enclosing function, plus file-level
+// consts, so it never invents a message no call site can reach.
 func emittedLogMessages(t *testing.T, root string) map[string]string {
 	t.Helper()
 	out := map[string]string{}
@@ -197,32 +205,32 @@ func emittedLogMessages(t *testing.T, root string) map[string]string {
 			if perr != nil {
 				return perr
 			}
-			ast.Inspect(f, func(n ast.Node) bool {
-				call, ok := n.(*ast.CallExpr)
-				if !ok {
+			for _, decl := range f.Decls {
+				fn, isFn := decl.(*ast.FuncDecl)
+				if !isFn {
+					continue
+				}
+				ast.Inspect(fn, func(n ast.Node) bool {
+					call, ok := n.(*ast.CallExpr)
+					if !ok {
+						return true
+					}
+					sel, ok := call.Fun.(*ast.SelectorExpr)
+					if !ok {
+						return true
+					}
+					at, ok := logMethods[sel.Sel.Name]
+					if !ok || at >= len(call.Args) {
+						return true
+					}
+					for _, msg := range messageLiterals(call.Args[at], fn, f) {
+						if _, seen := out[msg]; !seen {
+							out[msg] = path
+						}
+					}
 					return true
-				}
-				sel, ok := call.Fun.(*ast.SelectorExpr)
-				if !ok {
-					return true
-				}
-				at, ok := logMethods[sel.Sel.Name]
-				if !ok || at >= len(call.Args) {
-					return true
-				}
-				lit, ok := call.Args[at].(*ast.BasicLit)
-				if !ok || lit.Kind != token.STRING {
-					return true
-				}
-				msg, uerr := strconv.Unquote(lit.Value)
-				if uerr != nil {
-					return true
-				}
-				if _, seen := out[msg]; !seen {
-					out[msg] = path
-				}
-				return true
-			})
+				})
+			}
 			return nil
 		})
 		if err != nil {
@@ -257,4 +265,77 @@ func nearestHint(msg string, emitted map[string]string) string {
 		return ""
 	}
 	return "\n    closest emitted message: " + strconv.Quote(best) + " (" + emitted[best] + ")"
+}
+
+// messageLiterals yields the string literals an slog message argument can be at
+// run time: the literal itself, or — when the argument is a plain identifier —
+// every literal assigned to that name inside fn, plus any file-level const of
+// that name. Anything else (a call, a concatenation, a field) yields nothing,
+// because nothing greppable reaches the log line.
+func messageLiterals(arg ast.Expr, fn *ast.FuncDecl, file *ast.File) []string {
+	if lit, ok := arg.(*ast.BasicLit); ok {
+		if lit.Kind != token.STRING {
+			return nil
+		}
+		s, err := strconv.Unquote(lit.Value)
+		if err != nil {
+			return nil
+		}
+		return []string{s}
+	}
+	ident, ok := arg.(*ast.Ident)
+	if !ok {
+		return nil
+	}
+
+	var out []string
+	add := func(e ast.Expr) {
+		lit, ok := e.(*ast.BasicLit)
+		if !ok || lit.Kind != token.STRING {
+			return
+		}
+		if s, err := strconv.Unquote(lit.Value); err == nil {
+			out = append(out, s)
+		}
+	}
+	bindings := func(names []ast.Expr, values []ast.Expr) {
+		for i, n := range names {
+			if id, ok := n.(*ast.Ident); ok && id.Name == ident.Name && i < len(values) {
+				add(values[i])
+			}
+		}
+	}
+
+	ast.Inspect(fn, func(n ast.Node) bool {
+		switch v := n.(type) {
+		case *ast.AssignStmt:
+			bindings(v.Lhs, v.Rhs)
+		case *ast.ValueSpec:
+			for i, name := range v.Names {
+				if name.Name == ident.Name && i < len(v.Values) {
+					add(v.Values[i])
+				}
+			}
+		}
+		return true
+	})
+
+	for _, decl := range file.Decls {
+		gen, ok := decl.(*ast.GenDecl)
+		if !ok || (gen.Tok != token.CONST && gen.Tok != token.VAR) {
+			continue
+		}
+		for _, spec := range gen.Specs {
+			vs, ok := spec.(*ast.ValueSpec)
+			if !ok {
+				continue
+			}
+			for i, name := range vs.Names {
+				if name.Name == ident.Name && i < len(vs.Values) {
+					add(vs.Values[i])
+				}
+			}
+		}
+	}
+	return out
 }

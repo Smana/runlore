@@ -3,8 +3,26 @@
 // Package kbvalidate provides deterministic structural validation of OKF
 // knowledge-base entries (the merge gate) and an LLM-assisted semantic advisory.
 // The structural checks mirror what curator.draftKBEntry emits and what
-// catalog.parseEntry consumes, so a RunLore-authored entry that passes meetsBar
-// also passes ValidateStructural by construction.
+// catalog.parseEntry consumes.
+//
+// That correspondence used to be asserted here as holding "by construction", with
+// nothing checking it: a drafted entry first met this validator in the catalog
+// repo's CI, days later, by which point its pull request was already open and
+// unmergeable. WarnDraft (see draft.go) now runs ValidateStructural on every entry
+// RunLore drafts, before the PR is opened, logs what fails and COUNTS it
+// (runlore_kb_draft_defects_total, labelled per condition — a log line is only
+// read by someone already looking, and nothing was looking). It deliberately does
+// not BLOCK — an entry a human has to fix beats an investigation thrown away.
+//
+// SCOPE, stated rather than implied: EVERY entry writer runs that guard, not just
+// the one that first needed it. RunLore has two — curator.Curate, drafting a
+// finding, and thread.ConceptEntry, opened by thread.Responder's standalone-note
+// route — and each calls WarnDraft before opening its pull request. The report
+// takes an entry's own type as given, which is what lets one guard serve both: a
+// thread note is deliberately typed Concept, so the Incident-only resource and
+// section rules do not apply to it, while the rules that DO apply (a description,
+// a single-line title, a matchable recall index) are now checked at draft time on
+// both paths instead of in the catalog repo's CI, days downstream.
 package kbvalidate
 
 import (

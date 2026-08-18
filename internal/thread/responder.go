@@ -18,6 +18,7 @@ import (
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/metric"
 
+	"github.com/Smana/runlore/internal/kbvalidate"
 	"github.com/Smana/runlore/internal/okf"
 	"github.com/Smana/runlore/internal/providers"
 	"github.com/Smana/runlore/internal/ratelimit"
@@ -1609,6 +1610,23 @@ func (r *Responder) write(ctx context.Context, tc Context, n Note, at time.Time)
 	// neutralizeHTML), which is what keeps a stranger from planting a marker that
 	// suppresses somebody else's later note.
 	entry.Body = okf.WithNoteMarker(entry.Body, noteKey(tc, n))
+	// The same draft-time report the curator's PR path runs, for the same reason
+	// and with the same refusal to block on it: this route opens a KB pull request
+	// too, so an entry that cannot merge — or that carries a `resource` recall can
+	// never match — must be visible NOW, not in the catalog repo's CI days later.
+	// It matters more here than there. The human is told, in their own thread, that
+	// their correction was saved, and it WAS: the forge write landed, the
+	// announcement fired, and only the merge is impossible. Nothing else surfaces
+	// that. The entry's own type selects the rules, so a Concept is not asked for
+	// the `resource` an Incident must have.
+	//
+	// r.Metrics goes with it (nil-safe) so this route lands in the SAME
+	// runlore_kb_draft_defects_total the curator writes. A counter only the curator
+	// fed would answer "how much dead weight is the catalog taking on?" with the
+	// curator's share of it, and read as the whole — which is the class of silence
+	// the metric exists to end. recordWrite below counts this note as landed no
+	// matter what shape the entry it landed is in.
+	kbvalidate.WarnDraft(ctx, r.log(), r.Metrics, entry)
 	ref, err := r.Forge.OpenPR(ctx, entry)
 	if err != nil {
 		return forgeErrorReply(err), nil,

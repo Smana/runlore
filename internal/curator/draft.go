@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/Smana/runlore/internal/kbvalidate"
 	"github.com/Smana/runlore/internal/providers"
 )
 
@@ -156,17 +157,17 @@ func alertResourceIfDistinct(inv providers.Investigation) string {
 // bare-namespace cases pass through unchanged; w is a value copy, so mutating its
 // Name is local. Idempotent (NormalizeWorkloadName is).
 //
-// The Ref() is then narrowed by providers.EntryResourceRef, because Workload.Name
-// on a curated finding is MODEL-WRITTEN free text and a whitespace-bearing one
-// ("essentials, monitoring, argocd-app-of-apps") fails RunLore's own merge gate —
-// the curator would draft an entry its own `validate` job rejects. That was
-// reported against thread capture (#491), which shares this exact source; only
-// the value the model happened to produce differed, so fixing one path and not
-// the other would leave the same defect armed here. Whitespace-free refs are
-// returned unchanged, so no entry that merges today is written differently.
+// The Ref() is then narrowed by kbvalidate.DraftResource → providers.EntryResourceRef, because
+// Workload.Name on a curated finding is MODEL-WRITTEN free text and a
+// whitespace-bearing one ("essentials, monitoring, argocd-app-of-apps") fails
+// RunLore's own merge gate — the curator would draft an entry its own `validate`
+// job rejects. That was reported against thread capture (#491), which shares this
+// exact source; only the value the model happened to produce differed, so fixing
+// one path and not the other would leave the same defect armed here.
 func normalizeResource(w providers.Workload) string {
 	w.Name = normalizeWorkloadName(w.Name)
-	return providers.EntryResourceRef(w.Ref())
+	ref, _ := kbvalidate.DraftResource(w.Ref())
+	return ref
 }
 
 // entryType derives the OKF type for a drafted entry. The default is Incident: a

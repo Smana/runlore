@@ -17,6 +17,7 @@ import (
 	"go.opentelemetry.io/otel/metric"
 
 	"github.com/Smana/runlore/internal/catalog"
+	"github.com/Smana/runlore/internal/kbvalidate"
 	"github.com/Smana/runlore/internal/providers"
 	"github.com/Smana/runlore/internal/telemetry"
 )
@@ -162,6 +163,12 @@ func (c *Curator) Curate(ctx context.Context, inv providers.Investigation) (prov
 	// Reviewer context: the finding is novel, so its BM25 neighborhood is
 	// precisely what the reviewer needs to double-check that call.
 	entry.Related = relatedEntries(hits)
+	// The draft-time report the thread path also runs (kbvalidate.WarnDraft): it
+	// never blocks the PR, so it sits before OpenPR rather than gating it. Metrics
+	// travels with it (nil-safe) because the counter is what makes a defect
+	// alertable, and recordCuration below scores this very PR "opened" whether or
+	// not the entry inside it can ever be recalled.
+	kbvalidate.WarnDraft(ctx, c.Log, c.Metrics, entry)
 	ref, err := c.Forge.OpenPR(ctx, entry)
 	if err != nil {
 		c.recordCuration(ctx, "pr", "error")

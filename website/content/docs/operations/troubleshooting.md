@@ -133,6 +133,31 @@ enough — tune `forge.min_confidence` / `forge.dup_score` if the thresholds are
 > Knowledge-gap **issues** (opened by the separate `lore curate` recurrence agent, not the live
 > curator) are **not** counted by any metric — they only log `msg="opened knowledge-gap issue"`.
 
+### The PR opened, but the entry will never be recalled
+
+A KB pull request can merge cleanly and still be dead on arrival: recall matches an entry to an
+incident through its `resource:` frontmatter, so a `resource` that no workload can ever equal makes
+the entry unreachable — worse than omitting it, because a non-empty `resource` also disables the
+scopeless fallback. RunLore checks each draft **before** filing and warns rather than blocking, so
+the PR still opens and a human can fix the frontmatter:
+
+| log line | meaning | fix |
+|---|---|---|
+| `msg="drafted KB entry carries a recall index that recall cannot use; filing it anyway"` | `resource` (or `alert_resource`) is not shaped `namespace/name`, or reads as a bare namespace so it matches every workload in it | edit the frontmatter on the PR before merging |
+| `msg="drafted KB entry fails RunLore's own merge gate; filing it anyway, but the frontmatter needs a human fix before it can merge"` | the draft would be rejected by `lore validate-kb` — the same gate the catalog repo runs in CI | fix what `field=`/`issue=` name; otherwise the PR sits unmergeable |
+
+Both carry `field=`, `issue=` and `title=` so you can find the entry. If an already-merged entry
+never matches anything, this is the first thing to check — it shows up in the recall section below
+as `no_resource_match`.
+
+Both are also **counted**, so you do not have to be watching the log to find out:
+`runlore_kb_draft_defects_total{defect="unrecallable_resource"}` for the first row and
+`{defect="merge_gate"}` for the second, from both entry writers (the curator and the
+`@runlore note:` route). Nothing else would tell you — `runlore_curations_total{kind="pr",result="opened"}`
+counts the pull request as a success whichever line fired. Alert on `unrecallable_resource`: it is
+the half that merges cleanly and stays silent. See
+[Observability]({{< relref "observability.md#recall-learning-loop--curation" >}}).
+
 ---
 
 ## Recall never fires (every incident runs the full loop)
