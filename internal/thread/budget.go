@@ -38,16 +38,16 @@ const DefaultChatCallsPerHour = 30
 // assumptions, and the result was that DenyTokens could never fire at the
 // defaults: only chat_calls_per_hour was live.
 //
-//	    5,497  maxChatCallTokens — one call with every byte cap maxed at once
+//	    5,474  maxChatCallTokens — one call with every byte cap maxed at once
 //	x      30  DefaultChatCallsPerHour — a full hour of them
 //	  -------
-//	  164,910  what a sustained runaway costs before the call ceiling stops it
+//	  164,220  what a sustained runaway costs before the call ceiling stops it
 //	x     2/3
 //	  -------
-//	  109,940  this ceiling
+//	  109,480  this ceiling
 //
-// The 2/3 is the ordering the two limits are meant to have: 109,940 / 5,497 is
-// 20, so the twentieth maximum-size call of the hour exhausts this ceiling and
+// The 2/3 is the ordering the two limits are meant to have: this ceiling divided by
+// maxChatCallTokens is 20, so the twentieth maximum-size call of the hour exhausts it and
 // the twenty-first is refused with DenyTokens while ten call slots are still
 // free — stopped by cost, ten calls before count would have stopped it.
 //
@@ -57,7 +57,7 @@ const DefaultChatCallsPerHour = 30
 // concurrent mention handlers per transport mean the twenty-first call is
 // checked while the first twenty are still on the wire and have recorded
 // nothing, so every one of the 30 hourly calls passed the token test and the
-// real bound was 164,910 tokens against this 109,940 ceiling — a runaway
+// real bound was the call-ceiling product above against this ceiling — a runaway
 // stopped by count, the inverse of what is written above.
 //
 // Ordinary traffic is unaffected because the estimate a call reserves is its
@@ -65,7 +65,8 @@ const DefaultChatCallsPerHour = 30
 // worst case) and is replaced by the provider's own number as soon as the call
 // returns: a question and a two-sentence reply, well under 2k tokens, spends
 // its 30 calls without approaching this. Averaged over the hour, this ceiling
-// binds first for anything above ~3.6k tokens a call (109,940 / 30), which only
+// binds first for anything above ~3.6k tokens a call (the ceiling over
+// DefaultChatCallsPerHour), which only
 // a message near the full notify.thread.max_note_bytes cap reaches.
 //
 // Two things this ceiling does NOT bound, both of them real:
@@ -78,7 +79,7 @@ const DefaultChatCallsPerHour = 30
 //     Allow sees the reconciled total. The ceiling bounds what is ADMITTED, and
 //     a retried request is spend that was admitted once.
 //   - The window is per process. Two replicas answering the same room each
-//     enforce their own 109,940, so the ceiling an operator gets is this number
+//     enforce their own copy of it, so the ceiling an operator gets is this number
 //     times the number of running instances.
 const DefaultChatTokensPerHour int64 = int64(2 * DefaultChatCallsPerHour * maxChatCallTokens / 3)
 
