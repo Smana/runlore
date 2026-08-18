@@ -280,3 +280,110 @@ investigation errors), latency (model p95, slow resolution), and cost
 (`RunloreInvestigationCostHigh`). Thresholds are starting points — tune to your
 volume. See the [alerts README](https://github.com/Smana/runlore/blob/main/deploy/observability/alerts/README.md) for the
 per-alert metric dependencies and operator discovery notes.
+
+## Alert runbooks
+
+Every shipped rule's `runbook_url` points at its heading below. Each says what the
+alert means, what to look at first, and what actually fixes it — thresholds are
+starting points, so "the threshold is wrong for us" is a legitimate outcome for most
+of them.
+
+### RunloreAgentDown
+
+`absent(runlore_build_info)` for 5m: the series vanished from the TSDB entirely. Either
+the process is gone or the scrape broke — those need different fixes, so tell them
+apart first. Check the pod (`kubectl get pods -l app.kubernetes.io/name=runlore`) and
+then the scrape target's health in Prometheus/VMAgent. A `VMServiceScrape`/`ServiceMonitor`
+that stopped matching the Service produces this with a perfectly healthy agent.
+
+### RunloreNoActiveLeader
+
+`max(runlore_leader) == 0` for 10m: no replica holds the lease, so nothing is
+investigating and incoming alerts are accumulating or being dropped. Check the lease
+(`kubectl get lease -n <ns>`) and the logs of every replica for lease-renewal failures —
+usually RBAC on `coordination.k8s.io/leases`, or API-server latency causing repeated
+lease loss. Standbys are warm, so recovery is fast once one can acquire.
+
+### RunloreMultipleLeaders
+
+`sum(runlore_leader) > 1` for 5m: two replicas both believe they lead, so incidents can
+be investigated twice — double model spend and duplicate curation PRs. Brief overlap
+during failover is normal; five minutes is not. Check for clock skew and for a lease
+duration tuned shorter than your API-server latency.
+
+### RunloreInvestigationsDropped
+
+`runlore_investigations_dropped_total` increased: an incident was discarded without
+being investigated — the rate limiter exhausted its requeues, or a spend ceiling
+hard-killed the run. Split the two before reacting: a token-budget kill also shows on
+`runlore_investigation_budget_trips_total{stage="kill"}` and on
+`runlore_investigations_completed_total{result="budget_exceeded"}`. Rate-limiter drops
+mean `investigation.rate_limit` is too tight for your alert volume; budget kills mean
+`max_tokens_per_investigation` is.
+
+### RunloreInvestigationThrottlingSustained
+
+Throttling continuously for 30m. Brief throttling under a burst is the rate limiter
+working; half an hour of it means RunLore is structurally under-provisioned for its
+load. Either raise `investigation.rate_limit.max_per_window` and accept the spend, or
+reduce intake at the trigger gate. Check `RunloreInvestigationsDropped` alongside — a
+throttle that never becomes a drop is only latency.
+
+### RunlorePipelineStalled
+
+Alerts are arriving and zero investigations are starting: the intake-to-investigation
+handoff is broken, which no amount of alert volume will fix. Check leadership first
+(this fires whenever there is no leader, so rule that out via `RunloreNoActiveLeader`),
+then the coalescer — incidents sitting in a debounce or cooldown window that never
+flushes look exactly like this. `runlore_alerts_suppressed_total` and
+`runlore_incidents_debounced_total` tell you if intake is being filtered rather than
+stalled.
+
+### RunloreInvestigationErrors
+
+Investigations finishing with `result="error"` — the loop is failing mid-run rather than
+concluding. Read the investigation logs for the failing incidents; the common causes are
+a tool integration that is down (cross-check `RunloreToolErrorRateHigh` and
+`runlore_tool_calls_total{result="error"}` by `tool`) and provider errors
+(`RunloreModelErrorRateHigh`). A low background rate can be normal; a step change is
+not.
+
+### RunloreToolErrorRateHigh
+
+More than 20% of tool calls are failing over 15m, gated on a minimum call rate so the
+ratio is not noise at idle. Break down by tool: `sum by (tool) (rate(runlore_tool_calls_total{result="error"}[15m]))`.
+This is almost always one integration — expired credentials, a datasource that moved, or
+RBAC narrowed on the cluster reader — not a general fault.
+
+### RunloreModelErrorRateHigh
+
+More than 10% of model requests are failing. Model errors stop investigations cold,
+hence critical. Break down by `provider`, which distinguishes the main model from the
+synthetic `rerank` and `embed` tiers — an `embed` failure degrades recall to BM25-only
+(also visible as `runlore_catalog_embed_degraded_total`) but leaves investigations
+working, which is a much smaller problem than the main tier failing. Check quota,
+credentials, and provider status.
+
+### RunloreModelLatencyHigh
+
+p95 model latency above 30s over 15m. Every investigation is dragged out by this, and
+slow calls interact badly with `investigation.timeout`. Confirm against your provider's
+status and the `provider` label; if this is your model's genuine profile at your prompt
+sizes, raise the threshold rather than living with a permanently firing alert.
+
+### RunloreSlowResolution
+
+p95 open-to-resolve above 1h. Informational, not a paging condition — it measures your
+incident lifecycle, not RunLore's health, since the resolve event comes from
+Alertmanager. Useful as an SLO signal; align the threshold with your own target.
+
+### RunloreInvestigationCostHigh
+
+p95 of `runlore_investigation_tokens_estimated` above 100000 over 30m. Read the metric
+carefully: it records the size of the **last request** an investigation made, not its
+cumulative spend, and 100000 is the per-request bound the agent itself enforces (a
+quarter of the 400000 `max_tokens_per_investigation` default). p95 at that bound means
+typical runs are ending on a maximum-size request — evidence that prompts are being
+filled with tool output. Look at `investigation.max_tool_output_bytes` and the
+compaction settings before raising any ceiling, and scale this threshold if you retune
+`max_tokens_per_investigation`.
