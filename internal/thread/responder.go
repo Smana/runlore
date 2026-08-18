@@ -1172,7 +1172,51 @@ func stripStatusGlyphs(s string) string {
 // What the two routes do NOT share is provenance: n carries which one it came
 // from (see Note), so the shared path can render each honestly instead of
 // filing model prose under the human's name.
+//
+// # The per-thread cap is decided inside this thread's own guard
+//
+// Reading the cap, writing to the forge and incrementing the counter are ONE
+// critical section, and they have to be: they are three steps of a single
+// read-modify-write over one number that concurrent deliveries share.
+//
+// They used to be three. The cap was read from the caller's own snapshot of the
+// context — captured before any guard was held — write() then took lockRoot for
+// its own reasons, and the increment ran after that guard had been released. So
+// eight concurrent notes on a thread two writes into a cap of three all observed
+// Notes == 2, all decided they were within budget, and produced TEN forge writes
+// with nothing refused, under -race. The guard this needs already existed for
+// the sibling duplicate-PR race one layer down; the cap was simply being decided
+// outside it.
+//
+// The guard is acquired HERE rather than in write() because this is the widest
+// span that has to be atomic — a lock taken inside write() cannot cover a
+// decision its caller already took. write() therefore documents this as its
+// precondition rather than acquiring anything itself; it has exactly one
+// production caller, which is this one.
+//
+// Everything under the guard is either local or a registry call. r.announce
+// schedules onto a bounded dispatcher and returns immediately (Dispatcher.Go
+// never blocks), so the one thing here that talks to the network does not hold
+// the thread's writers behind it.
 func (r *Responder) record(ctx context.Context, tc Context, n Note) (string, error) {
+	// Deferred immediately after acquiring, so every return below — a refusal, a
+	// forge error, a panic — releases it; a write that never released this would
+	// wedge every later note in the thread behind it forever. An untracked root
+	// ("" or a registry that has lost it) gets a no-op guard, exactly as before:
+	// there is nowhere durable to count, which is the separate degradation
+	// ErrThreadNotTracked reports.
+	release := r.Registry.lockRoot(tc.Root)
+	defer release()
+
+	// Re-read under the guard. The caller's tc is a snapshot taken before the
+	// wait — the mention handler reads the registry and then hands it here — so
+	// the count it carries may be several writes stale by the time this call owns
+	// the thread. A miss (disabled registry, or the entry aged out mid-request)
+	// leaves tc exactly as the caller passed it, same as before this existed.
+	if fresh, ok := r.Registry.Get(tc.Root); ok {
+		tc = fresh
+	}
+
 	if tc.Notes >= r.maxNotes() {
 		return fmt.Sprintf("This thread has hit its note limit (%d). Add anything further directly on the pull request.", r.maxNotes()), nil
 	}
@@ -1363,6 +1407,15 @@ func recordedOn(route string, num int, prURL string) string {
 // (see freeform). IntentReinvestigate never reaches it at all. Both callers
 // supply note CONTENT only — the route below is derived from the thread
 // context, never from the text and never from the model.
+//
+// PRECONDITION: the caller holds this root's write guard (Registry.lockRoot) and
+// has re-read tc under it. This method used to acquire that guard itself, which
+// serialised the forge round-trip correctly and still left the per-thread cap
+// being decided outside it by the caller — see record(), which now owns both.
+// The guard is what makes the routing below correct as well as the cap: it is
+// how "two callers both observe NoteURL == ” and both open a PR" (the residual
+// race GetOrCreate's doc comment describes) becomes "the second caller sees the
+// first caller's PR and appends to it instead".
 func (r *Responder) write(ctx context.Context, tc Context, n Note, at time.Time) (string, *KBWrite, error) {
 	// Checked once, upstream of BOTH write routes below: a CommentOnPR spends
 	// this budget exactly like an OpenPR does. Gating only the OpenPR branch —
@@ -1417,29 +1470,6 @@ func (r *Responder) write(ctx context.Context, tc Context, n Note, at time.Time)
 				r.ForgeWrites.Refund()
 			}
 		}()
-	}
-
-	// Serialize concurrent writes for THIS root — not the registry's own
-	// mutex, which is never held across the forge round-trip below, so this
-	// only blocks another write for the SAME thread, never Get/Put/Update or
-	// a write for a different thread. Deferred immediately after acquiring,
-	// so any return path below — success, a forge error, or a panic — always
-	// releases it; a write that never released this would wedge every later
-	// note in the thread behind it forever.
-	release := r.Registry.lockRoot(tc.Root)
-	defer release()
-
-	// Re-read the registry now that the guard is held: another write for
-	// this same root may have landed and updated NoteURL while this call was
-	// waiting for the lock, and the routing decision below must see THAT,
-	// not the possibly-stale tc captured before the wait. This is what turns
-	// "two callers can both observe NoteURL == '' and both open a PR" (the
-	// residual race GetOrCreate's doc comment describes) into "the second
-	// caller sees the first caller's PR and comments on it instead." A miss
-	// here (disabled registry, or the entry aged out mid-request) leaves tc
-	// exactly as the caller passed it, same as before this guard existed.
-	if fresh, ok := r.Registry.Get(tc.Root); ok {
-		tc = fresh
 	}
 
 	// Evaluated once here, ahead of the route branch, so whichever route runs

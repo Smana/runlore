@@ -4278,3 +4278,76 @@ func TestGlobalWriteBudgetStillChargesEveryLandedWrite(t *testing.T) {
 		})
 	}
 }
+
+// TestConcurrentNotesCannotExceedThePerThreadCap closes the gap between the cap
+// and the lock that was already there for the sibling race.
+//
+// The cap used to be read in record() from the caller's OWN snapshot of the
+// thread context — taken before write() acquired lockRoot — and the counter was
+// incremented after that guard had already been released. So the check, the
+// write and the increment sat in three different critical sections, none of
+// which was the one protecting the thread: eight concurrent notes on a thread
+// two writes into a cap of three produced TEN forge writes and refused none,
+// under -race.
+//
+// The guard needed for this is the same guard write() already takes for the
+// duplicate-PR race — one thread's writes were already serialised, the cap was
+// simply being decided outside that. So the assertion is exact rather than
+// "fewer than before": with one write of headroom, exactly one caller may write
+// and every other must be refused, whatever order they arrive in.
+func TestConcurrentNotesCannotExceedThePerThreadCap(t *testing.T) {
+	const (
+		noteCap  = 3 // not `cap`: revive rejects an identifier that shadows a builtin
+		already  = 2
+		writers  = 8
+		headroom = noteCap - already
+	)
+	f := &fakeForge{openURL: "https://github.com/o/r/pull/7"}
+	r := newTestResponder(t, f)
+	r.MaxNotesPerThread = noteCap
+	r.ForgeWrites = ratelimit.New(0, time.Hour) // unlimited; the global budget is not what this pins
+	root := "root-1"
+	if err := r.Registry.Put(Context{Transport: "slack", Root: root, Notes: already}); err != nil {
+		t.Fatalf("Put: %v", err)
+	}
+
+	var wg sync.WaitGroup
+	var mu sync.Mutex
+	refused := 0
+	for i := range writers {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			// A stale snapshot, exactly as the mention handler takes one: every
+			// writer reads the registry before any of them has written, so all eight
+			// observe Notes == already. Nothing but the guard can separate them.
+			tc, ok := r.Registry.Get(root)
+			if !ok {
+				t.Errorf("Get[%d]: registry lost the root mid-test", i)
+				return
+			}
+			reply, err := r.Handle(context.Background(), tc, "alice", fmt.Sprintf("note: concurrent %d", i))
+			if err != nil {
+				t.Errorf("Handle[%d]: %v", i, err)
+				return
+			}
+			if strings.Contains(reply, "note limit") {
+				mu.Lock()
+				refused++
+				mu.Unlock()
+			}
+		}(i)
+	}
+	wg.Wait()
+
+	comments, opened := f.counts()
+	if got := comments + opened; got != headroom {
+		t.Errorf("%d forge writes with %d of headroom left — the cap was decided outside the guard that serialises this thread", got, headroom)
+	}
+	if refused != writers-headroom {
+		t.Errorf("refused = %d, want %d — every writer past the cap must be told so, not silently written", refused, writers-headroom)
+	}
+	if tc, ok := r.Registry.Get(root); !ok || tc.Notes != noteCap {
+		t.Errorf("Notes = %d (tracked %v), want %d — the counter must end at the cap, not past it or short of it", tc.Notes, ok, noteCap)
+	}
+}
