@@ -53,6 +53,14 @@ RunLore files it against that investigation's KB pull request, or opens a
 standalone note PR when there is none, and replies with a link to what it wrote.
 Your words are recorded verbatim, attributed to you.
 
+Notes accumulate. On the investigation's own KB pull request each note is a
+comment — review feedback on a draft somebody else wrote, which a human folds in
+at merge time. On a standalone note PR, where the entry is nothing but your
+notes, every note after the first is **appended to the entry itself**, so a
+conversation that refines an answer — the cause, then the proof, then the fix —
+merges as one entry holding all of it rather than only the opening statement.
+The reply tells you which of the two happened.
+
 **Where a captured note pays off.** The four routes above all end in a merged pull
 request, but they do not all produce the same kind of entry. A captured note carries
 no symptom → cause → resolution chain, so once merged it widens what `kb_search` finds
@@ -60,6 +68,7 @@ no symptom → cause → resolution chain, so once merged it widens what `kb_sea
 so far rejected every recalled operator note rather than letting it answer an incident
 outright. [Learning Loop §10]({{< relref "learning-loop.md" >}}) has the measurement
 and why that is currently the safe behaviour.
+
 
 Optionally, with a `model.chat` block configured, plain questions in the thread are
 answered too — from the investigation's own evidence — and RunLore proposes a note

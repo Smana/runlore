@@ -4,6 +4,9 @@ package thread
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net/url"
@@ -21,18 +24,50 @@ import (
 	"github.com/Smana/runlore/internal/telemetry"
 )
 
-// Forge is the write surface a thread note needs. It is a subset of
-// providers.CurationForge, which satisfies it — narrowed here so the responder
-// declares exactly the two calls it makes and can be faked in one struct.
+// Forge is the write surface a thread note needs. It is providers.CurationForge
+// plus two calls the curator has no use for — narrowed and restated here so the
+// responder declares exactly the calls it makes and can be faked in one struct.
 type Forge interface {
 	CommentOnPR(ctx context.Context, number int, body string) error
 	OpenPR(ctx context.Context, e providers.KBEntry) (providers.Ref, error)
 	// IsPROpen reports whether the pull/merge request numbered `number` is
-	// still open. write() calls this before commenting on a linked PR: a
-	// comment on a MERGED pull request is never indexed by the catalog, so
-	// commenting there would silently lose the human's knowledge while telling
+	// still open. write() calls this before recording a note on a linked PR: a
+	// comment on a MERGED pull request is never indexed by the catalog, and a
+	// commit on a merged PR's branch never reaches the base branch either, so
+	// writing there would silently lose the human's knowledge while telling
 	// them it was saved. github.Client and gitlab.Client both implement it.
 	IsPROpen(ctx context.Context, number int) (bool, error)
+	// AppendToEntryOnPR appends body to the knowledge-base ENTRY FILE the pull/
+	// merge request numbered `number` carries, as a further commit on that pull
+	// request's own branch. It never merges and never touches the base branch:
+	// the pull request stays the proposal and a human stays the gate.
+	//
+	// It is on this interface — rather than left to CommentOnPR, which the
+	// responder already has — because a comment and an entry are not two ways of
+	// writing the same thing. Only the entry is what the catalog gains when the
+	// pull request merges, so on the ONE pull request whose entry is RunLore's
+	// own note (Context.NoteURL), every note after the first has to go here or
+	// it never becomes knowledge at all. See write() for which pull request gets
+	// which treatment, and why the curator's PR deliberately still gets a
+	// comment.
+	//
+	// The forge locates the entry file from the pull request itself, so no path
+	// is persisted here to go stale and misroute a commit later.
+	//
+	// key identifies this note so the write is IDEMPOTENT: an entry already
+	// carrying that key is left alone and success is reported. Unlike a comment,
+	// which is visibly duplicated conversation that dies at merge, a duplicated
+	// append is permanent catalog content that recall then serves twice — and the
+	// deliveries above this layer really do replay (see noteKey). The key is
+	// passed rather than derived from body inside the forge because body carries
+	// the provenance TIMESTAMP, so a retry renders different bytes; only this
+	// layer knows which inputs are stable.
+	//
+	// It may report providers.ErrPRNotOpen, which write() treats as the same case
+	// its own open-check does rather than as a failure to degrade around:
+	// commenting on a finished pull request is the silent loss that check exists
+	// to prevent.
+	AppendToEntryOnPR(ctx context.Context, number int, body, key string) error
 }
 
 // DefaultMaxNotesPerThread bounds how many knowledge writes one thread can make.
@@ -304,16 +339,18 @@ func (a *KBAnnouncer) Drain(ctx context.Context) {
 // and start announcing a route name no consumer recognises — the moment either
 // side is renamed.
 //
-// write() sets Route from one of the two constants literally, so the default is
+// write() sets Route from one of the constants literally, so the default is
 // unreachable. It passes the value through rather than guessing at one of the
-// two, because an announcement describes a write that already landed and
-// mislabelling it is worse than reporting an unknown label honestly.
+// known routes, because an announcement describes a write that already landed
+// and mislabelling it is worse than reporting an unknown label honestly.
 func kbRoute(route string) providers.KBRoute {
 	switch route {
 	case RouteComment:
 		return providers.KBRouteComment
 	case RouteOpenPR:
 		return providers.KBRouteOpenPR
+	case RouteAppend:
+		return providers.KBRouteAppend
 	default:
 		return providers.KBRoute(route)
 	}
@@ -345,19 +382,28 @@ func (r *Responder) announce(ctx context.Context, tc Context, n Note, w *KBWrite
 	})
 }
 
-// The two routes a knowledge write can take, named once. They are both the
+// The routes a knowledge write can take, named once. They are both the
 // KBWrite.Route values a caller reads and the "route" attribute
 // ThreadNotesWritten is labelled with, deliberately the same strings: an
 // operator correlating a dashboard series with what a thread reported must not
 // have to know that two literals happened to agree.
 const (
-	// RouteComment: the note was added to a pull request that already exists —
-	// the curated PR this thread came from, or the standalone PR an earlier note
-	// in the same thread opened.
+	// RouteComment: the note was added as a comment on the CURATED pull request
+	// this thread came from — a draft somebody else wrote, on which the note is
+	// review feedback for a human to reconcile at merge time.
 	RouteComment = "comment"
 	// RouteOpenPR: the note had no open pull request to land on, so it opened a
 	// standalone Concept entry of its own (see ConceptEntry).
 	RouteOpenPR = "open_pr"
+	// RouteAppend: the note was appended to the entry file of the standalone PR
+	// an EARLIER note in this same thread opened — so the entry the catalog
+	// gains on merge carries every note in the thread, not only the first.
+	//
+	// It is separated from RouteComment on the metric for the reason the bug it
+	// closes was invisible for as long as it was: with both routes labelled
+	// "comment", nothing an operator could graph distinguished a note that
+	// becomes knowledge from one that is discarded when its pull request merges.
+	RouteAppend = "append"
 )
 
 // KBWrite describes a knowledge-base write that LANDED. write returns one only
@@ -373,7 +419,7 @@ const (
 // success it could not record, the duplicate-PR race, the stale sweep), which
 // is why the shape is worth the pointer.
 type KBWrite struct {
-	// Route is RouteComment or RouteOpenPR.
+	// Route is RouteComment, RouteAppend or RouteOpenPR.
 	Route string
 	// PR is the pull/merge request the note landed on or opened. Zero — and only
 	// zero — when the forge returned a URL carrying no parseable number, which
@@ -382,8 +428,10 @@ type KBWrite struct {
 	// URL is the pull request the human can open to read the note.
 	URL string
 	// Title is the entry title ConceptEntry generated, on RouteOpenPR only. It
-	// is empty on RouteComment, where the note joins an entry someone else
-	// already titled and RunLore generated no title of its own.
+	// is empty on RouteComment and RouteAppend, where the note joins an entry
+	// that already has a title — someone else's on the comment route, and one an
+	// earlier note in this same thread was already told about on the append
+	// route — so RunLore generated no title for THIS write.
 	//
 	// UNTRUSTED: it is built from the thread's alert-derived title. Redacted and
 	// flattened (see noteField), but not authored by RunLore.
@@ -1056,10 +1104,144 @@ func (r *Responder) record(ctx context.Context, tc Context, n Note) (string, err
 	return reply, nil
 }
 
+// noteTarget is one pull request write() may record a note on, plus the single
+// fact that decides HOW it records it: whether RunLore's own thread capture is
+// what opened that pull request.
+//
+// The distinction is the whole of issue #493. Both URLs used to be iterated as
+// a bare []string, and both got a comment — which is right for exactly one of
+// them and quietly lossy for the other:
+//
+//   - CuratedURL is the curator's draft. It has an author who is not RunLore, a
+//     body they wrote, and a review in progress. A note there is FEEDBACK, and a
+//     human decides at merge time what of it belongs in the entry. Rewriting
+//     their file from under them would be the wrong shape entirely.
+//
+//   - NoteURL is the standalone PR an earlier note in THIS thread opened. Its
+//     entry has no author but the operator and there is no draft to comment on,
+//     so a comment there is not feedback on anything — it is knowledge parked
+//     next to the entry instead of in it. Merge the PR and the catalog gains one
+//     entry holding the FIRST note; every later one stays behind as pull-request
+//     conversation the catalog never indexes, so kb_search and recall never see
+//     it. Four notes in, one out.
+//
+// Order is unchanged: the curated PR still wins when both are set and open.
+type noteTarget struct {
+	url string
+	// ours is true for the pull request thread capture itself opened, and is
+	// what selects the append route in addToPR. It is derived from WHICH context
+	// field the URL came from rather than from a label lookup on the forge: the
+	// registry already knows which PR it opened (Context.NoteURL), so asking the
+	// forge would be a round trip to re-learn a fact RunLore recorded itself —
+	// and one that fails open, on a network blip, straight back into the lossy
+	// route.
+	ours bool
+}
+
+// noteTargets lists the pull requests a note may land on, in priority order.
+func noteTargets(tc Context) []noteTarget {
+	return []noteTarget{{url: tc.CuratedURL}, {url: tc.NoteURL, ours: true}}
+}
+
+// addToPR records n on the already-open pull request numbered num and reports
+// which route landed it.
+//
+// On OUR OWN note PR the entry file is the destination, because that file is
+// the only part of the pull request the catalog gains on merge. On anyone
+// else's, a comment is — see noteTarget.
+//
+// The comment is also the FALLBACK when the append fails, and that ordering is
+// deliberate. An append is several forge calls against a branch (locate the
+// entry, read it, commit) and can fail for reasons that have nothing to do with
+// the human — a push race with another writer, a transient 5xx, a pull request
+// whose entry file has been renamed by a reviewer. Losing their words to any of
+// those would be a worse outcome than the bug this fixes: a comment is a
+// degraded record, not a missing one. It is logged at Warn because a note that
+// keeps degrading is exactly what nobody noticed the first time.
+//
+// Both routes send the SAME body — one NoteBody rendering, evaluated once — so
+// what a reviewer reads in the entry and what they would have read in a comment
+// can never drift.
+func (r *Responder) addToPR(ctx context.Context, tc Context, n Note, at time.Time, num int, ours bool) (string, error) {
+	body := NoteBody(tc, n, at, r.maxNoteBytes())
+	if ours {
+		err := r.Forge.AppendToEntryOnPR(ctx, num, body, noteKey(tc, n))
+		if err == nil {
+			return RouteAppend, nil
+		}
+		// The one failure that is NOT a reason to comment: the pull request
+		// finished between the open-check above and this write. A comment there is
+		// never indexed by the catalog, so falling back would be the silent loss
+		// the open-check exists to prevent, arriving through the window the check
+		// cannot cover. Passed up for write() to treat exactly as it treats its own
+		// closed-PR case — open a standalone entry instead.
+		if errors.Is(err, providers.ErrPRNotOpen) {
+			return "", err
+		}
+		r.log().Warn("thread: could not append the note to its entry; falling back to a comment, which the catalog will NOT index on merge",
+			"pr", num, "root", tc.Root, "err", err)
+	}
+	if err := r.Forge.CommentOnPR(ctx, num, body); err != nil {
+		return "", err
+	}
+	return RouteComment, nil
+}
+
+// noteKey is the stable identity of one note, used to make the entry append
+// idempotent (see okf.NoteMarker and Forge.AppendToEntryOnPR).
+//
+// It is needed because the layers above this one replay. internal/server dedups
+// Slack deliveries through a bounded, PER-PROCESS set that is wiped wholesale at
+// capacity (see seenSet), so a busy channel, a restart or a leader failover all
+// deliver the same message twice — and thread capture is detached from the ack,
+// so nothing downstream notices. As comments a replay was self-limiting: two
+// visibly identical comments on one pull request, both discarded at merge. As
+// appends it is two copies of the same knowledge in the catalog, indexed twice
+// and recalled twice, with no signal that either is a duplicate.
+//
+// The inputs are the ones that DO NOT move between a delivery and its replay:
+// the thread, the author, and the note's own text as written. Deliberately not
+// the rendered body, which carries the timestamp of the attempt — hashing that
+// yields a different key for the replay of the same note, which is the one case
+// this exists for. Deliberately not the thread's note counter either: a replay
+// re-enters write() at whatever count the registry has reached.
+//
+// Two genuinely identical notes from the same person in the same thread
+// therefore collapse into one. That is the right trade rather than a limitation:
+// the entry ends up saying what they said, once, and the alternative — a false
+// negative — is the permanent duplicate this is here to prevent.
+//
+// SHA-256 truncated to 16 hex characters. It is an identity, not a
+// authentication tag: the entry it is compared against is one RunLore wrote, and
+// note text reaching an entry has "<!" escaped out of it (see noteText), so a
+// marker cannot be forged into an entry to suppress a later note — which would
+// in any case require knowing that note's exact bytes in advance.
+func noteKey(tc Context, n Note) string {
+	sum := sha256.Sum256([]byte(tc.Root + "\x00" + n.Author + "\x00" + n.Text))
+	return hex.EncodeToString(sum[:])[:16]
+}
+
+// recordedOn renders the status line for a note that landed on a pull request
+// that already existed. The two routes get different words because they made
+// different promises: an appended note IS the entry the catalog will gain, and
+// a comment is a remark beside it that a human still has to fold in. A human
+// reading their own acknowledgement is the only one who can tell RunLore it
+// picked wrong, and they can only do that if the line says which it picked.
+func recordedOn(route string, num int, prURL string) string {
+	if route == RouteAppend {
+		return fmt.Sprintf("📝 Added to the knowledge-base entry on PR #%d — %s", num, Untrusted(prURL))
+	}
+	return fmt.Sprintf("📝 Noted on the knowledge-base PR #%d — %s", num, Untrusted(prURL))
+}
+
 // write routes the note to the open KB PR, to the PR this thread already opened,
 // or to a new standalone Concept PR — in that order. The returned *KBWrite
 // describes what actually landed, and is nil whenever nothing did — on error
 // and on the (non-error) global-rate-limit throttle alike.
+//
+// The first two destinations are not treated alike: a note on the curator's
+// draft is a comment, and a note on the standalone PR thread capture itself
+// opened is appended to that PR's entry file. See noteTarget.
 //
 // Reached from exactly two callers, both through record(): an explicit
 // "note:", and the note content a chat answer proposed for a freeform message
@@ -1125,8 +1307,8 @@ func (r *Responder) write(ctx context.Context, tc Context, n Note, at time.Time)
 	// The route is derived from the thread context alone. It is never influenced
 	// by the message text, and — through prNumberOn — never by a URL that names
 	// a forge RunLore does not write to.
-	for _, candidate := range []string{tc.CuratedURL, tc.NoteURL} {
-		num, ok := r.prNumberOn(candidate)
+	for _, candidate := range noteTargets(tc) {
+		num, ok := r.prNumberOn(candidate.url)
 		if !ok {
 			continue
 		}
@@ -1151,20 +1333,34 @@ func (r *Responder) write(ctx context.Context, tc Context, n Note, at time.Time)
 		if !open {
 			// A merged/closed PR is never indexed by the catalog, so a comment
 			// there would be silently lost while the human is told it was saved.
-			// Fall through to the standalone-Concept path instead — the same
-			// path the design doc's non-goal on amending a merged entry
+			// A commit appending to its entry is lost the same way: a merged PR's
+			// branch no longer reaches the base branch, and a closed one never
+			// will. Fall through to the standalone-Concept path instead — the
+			// same path the design doc's non-goal on amending a merged entry
 			// prescribes: "v1 opens a new entry that links the one it corrects."
 			r.log().Info("thread: linked PR is no longer open; opening a standalone note instead", "pr", num, "root", tc.Root)
 			continue
 		}
-		if err := r.Forge.CommentOnPR(ctx, num, NoteBody(tc, n, at, r.maxNoteBytes())); err != nil {
+		route, err := r.addToPR(ctx, tc, n, at, num, candidate.ours)
+		// The PR was open a moment ago and is not any more — a reviewer merged it
+		// while this note was being written. Identical handling to the !open branch
+		// above, because it is the identical situation observed one round trip
+		// later: fall through and open a standalone entry. The two must not
+		// diverge, or a note that arrives a second too late is lost by a route the
+		// same note a second earlier survives.
+		if errors.Is(err, providers.ErrPRNotOpen) {
+			r.log().Info("thread: linked PR closed while the note was being written; opening a standalone note instead",
+				"pr", num, "root", tc.Root, "err", err)
+			continue
+		}
+		if err != nil {
 			return fmt.Sprintf("⚠️ I could not save that to the knowledge base: %s", Untrusted(err.Error())), nil,
 				fmt.Errorf("comment on PR %d: %w", num, err)
 		}
-		r.log().Info("thread: note recorded on KB PR", "pr", num, "root", tc.Root, "author", n.Author)
-		r.recordWrite(ctx, RouteComment)
-		return fmt.Sprintf("📝 Noted on the knowledge-base PR #%d — %s", num, Untrusted(candidate)),
-			&KBWrite{Route: RouteComment, PR: num, URL: candidate, Note: asWritten}, nil
+		r.log().Info("thread: note recorded on KB PR", "pr", num, "root", tc.Root, "route", route, "author", n.Author)
+		r.recordWrite(ctx, route)
+		return recordedOn(route, num, candidate.url),
+			&KBWrite{Route: route, PR: num, URL: candidate.url, Note: asWritten}, nil
 	}
 
 	entry := ConceptEntry(tc, n, at, r.maxNoteBytes())

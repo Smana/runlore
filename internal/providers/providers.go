@@ -762,7 +762,7 @@ type ThreadNotifier interface {
 	Transport() string
 }
 
-// KBRoute names how a knowledge-base write landed on the forge. The two values
+// KBRoute names how a knowledge-base write landed on the forge. The values
 // mirror the labels the thread responder already reports on its
 // ThreadNotesWritten counter, so an announcement and the metric describing the
 // same write cannot disagree about which route it took.
@@ -770,12 +770,19 @@ type KBRoute string
 
 // The routes a knowledge-base write can take.
 const (
-	// KBRouteComment added the note as a comment on a KB pull request that was
-	// already open (the curator's, or one an earlier note in the same thread
-	// opened).
+	// KBRouteComment added the note as a comment on a KB pull request SOMEONE
+	// ELSE drafted — the curator's. There the note is review feedback on another
+	// author's draft: a human reconciles it at merge time, and until they do it
+	// is deliberately not part of the entry.
 	KBRouteComment KBRoute = "comment"
 	// KBRouteOpenPR opened a new standalone pull request for the note.
 	KBRouteOpenPR KBRoute = "open_pr"
+	// KBRouteAppend appended the note to the ENTRY FILE of a standalone note PR
+	// RunLore itself opened earlier in the same thread. It is a route of its own
+	// rather than a second spelling of KBRouteComment because the two land
+	// somewhere materially different: what this route writes is inside the entry
+	// the catalog gains when the PR merges, and what a comment writes is not.
+	KBRouteAppend KBRoute = "append"
 )
 
 // KBUpdate announces that a knowledge-base write ALREADY LANDED on the forge. It

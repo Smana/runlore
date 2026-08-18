@@ -539,3 +539,28 @@ func TestKBUpdateFieldsAreAllRenderedOrDeliberatelyNot(t *testing.T) {
 		}
 	}
 }
+
+// TestKBHeadlineNamesEachRouteDistinctly: the headline is RunLore's own claim
+// about what it did, and the three routes did materially different things. A
+// reader in the notifier's channel is deciding whether the knowledge is safely
+// captured, and only the append and open_pr routes put it in an entry — a
+// comment is a remark a human still has to fold in. Reusing one word for all
+// three would answer that question wrongly for two of them.
+func TestKBHeadlineNamesEachRouteDistinctly(t *testing.T) {
+	want := map[providers.KBRoute]string{
+		providers.KBRouteComment: "📚 Knowledge base updated — noted on PR #7",
+		providers.KBRouteOpenPR:  "📚 Knowledge base updated — opened PR #7",
+		providers.KBRouteAppend:  "📚 Knowledge base updated — added to the entry on PR #7",
+	}
+	seen := map[string]providers.KBRoute{}
+	for route, head := range want {
+		got := kbHeadline(providers.KBUpdate{Route: route, PR: 7})
+		if got != head {
+			t.Errorf("kbHeadline(%q) = %q, want %q", route, got, head)
+		}
+		if other, dup := seen[got]; dup {
+			t.Errorf("routes %q and %q announce identically (%q) — a reader cannot tell them apart", route, other, got)
+		}
+		seen[got] = route
+	}
+}

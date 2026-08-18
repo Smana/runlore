@@ -72,10 +72,30 @@ type fakeForge struct {
 		number int
 		body   string
 	}
+	// appends records every AppendToEntryOnPR call — the route a note takes onto
+	// the standalone PR thread capture itself opened, where the note has to reach
+	// the ENTRY FILE rather than the PR conversation the catalog never indexes.
+	//
+	// Recorded BEFORE appendErr is consulted, deliberately. A fake that returned
+	// the error without recording the call could not represent the failure that
+	// matters most here — the write LANDED and its response was lost — so a test
+	// named for the fallback could never observe the double-write that fallback
+	// then causes. The forge clients close that case by re-reading the entry
+	// (appendLanded); a fake unable to express it would pass either way.
+	appends []struct {
+		number int
+		body   string
+		key    string
+	}
 	opened  []providers.KBEntry
 	openURL string
 	openErr error
 	commErr error
+	// appendErr, when set, fails every AppendToEntryOnPR — used to pin the
+	// degrade-to-a-comment fallback, so a forge that cannot rewrite the entry
+	// still keeps the human's words somewhere. The call is still recorded, so a
+	// test can tell "it never ran" from "it ran and reported failure".
+	appendErr error
 	// prOpen reports the open state IsPROpen returns for a given PR number.
 	// A number absent from the map defaults to true (open) so every existing
 	// test — none of which sets prOpen — keeps exercising the "comment on the
@@ -123,6 +143,17 @@ func (f *fakeForge) CommentOnPR(_ context.Context, number int, body string) erro
 	return nil
 }
 
+func (f *fakeForge) AppendToEntryOnPR(_ context.Context, number int, body, key string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.appends = append(f.appends, struct {
+		number int
+		body   string
+		key    string
+	}{number, body, key})
+	return f.appendErr
+}
+
 func (f *fakeForge) OpenPR(_ context.Context, e providers.KBEntry) (providers.Ref, error) {
 	if f.entered != nil {
 		f.entered <- struct{}{}
@@ -141,12 +172,18 @@ func (f *fakeForge) OpenPR(_ context.Context, e providers.KBEntry) (providers.Re
 	return providers.Ref{URL: url}, nil
 }
 
-// counts returns the number of comments and PRs opened so far, taken under
-// the lock so a concurrency test can read them safely.
+// counts returns the number of writes onto an EXISTING pull request (comments
+// plus entry appends) and the number of PRs opened so far, taken under the lock
+// so a concurrency test can read them safely.
+//
+// The two existing-PR routes are summed rather than reported separately because
+// every caller of this asks the same question — "did the second writer reuse
+// the first writer's PR instead of opening another one?" — and the answer must
+// not depend on which of the two ways it recorded the note.
 func (f *fakeForge) counts() (comments, opened int) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	return len(f.comments), len(f.opened)
+	return len(f.comments) + len(f.appends), len(f.opened)
 }
 
 func newTestResponder(t *testing.T, f *fakeForge) *Responder {
@@ -386,9 +423,25 @@ func TestHandleNoteOpensStandalonePRWhenNoneLinked(t *testing.T) {
 	}
 }
 
-func TestHandleSecondNoteCommentsOnTheFirstNotesPR(t *testing.T) {
+// TestHandleEveryNoteAfterTheFirstReachesTheEntry closes issue #493, and it is
+// the whole point of the append route.
+//
+// The behaviour it replaced: the first note opened a standalone Concept PR and
+// every later note was a COMMENT on it. Only the first note was ever in the
+// entry file, so merging the PR gave the catalog one entry holding one note
+// while the rest stayed behind as pull-request conversation — never indexed,
+// never returned by kb_search, never recalled. Four notes went in and one came
+// out, and the field report that produced this issue was exactly that: three
+// notes lost on one thread.
+//
+// So the assertion is not "the second note reused the first note's PR" (the old
+// test asserted that much and passed throughout the bug). It is that the note
+// reached the ENTRY, which is the only part of that pull request the catalog
+// gains on merge — hence the body check, not merely a call count.
+func TestHandleEveryNoteAfterTheFirstReachesTheEntry(t *testing.T) {
 	f := &fakeForge{}
 	r := newTestResponder(t, f)
+	r.MaxNotesPerThread = 4 // the four notes of the field report this issue came from
 	tc := Context{Root: "111.222", Title: "OOM"}
 	if err := r.Registry.Put(tc); err != nil {
 		t.Fatalf("Put: %v", err)
@@ -397,20 +450,200 @@ func TestHandleSecondNoteCommentsOnTheFirstNotesPR(t *testing.T) {
 	if _, err := r.Handle(context.Background(), tc, "alice", "note: first"); err != nil {
 		t.Fatalf("first Handle: %v", err)
 	}
-	refreshed, _ := r.Registry.Get("111.222")
-	if _, err := r.Handle(context.Background(), refreshed, "bob", "note: second"); err != nil {
-		t.Fatalf("second Handle: %v", err)
+	notes := []string{"second", "third", "fourth"}
+	for _, text := range notes {
+		refreshed, _ := r.Registry.Get("111.222")
+		reply, err := r.Handle(context.Background(), refreshed, "bob", "note: "+text)
+		if err != nil {
+			t.Fatalf("Handle %q: %v", text, err)
+		}
+		// The acknowledgement has to say which of the two it did: "noted ON the
+		// PR" and "added to the ENTRY" are different promises about whether the
+		// knowledge survives the merge, and the human reading it is the only one
+		// who can tell RunLore it picked wrong.
+		if !strings.Contains(reply, "Added to the knowledge-base entry on PR #99") {
+			t.Errorf("the reply for %q must say the note went into the entry: %q", text, reply)
+		}
 	}
 
 	if len(f.opened) != 1 {
 		t.Fatalf("opened = %d, want exactly 1 — a thread opens at most one standalone PR", len(f.opened))
 	}
-	if len(f.comments) != 1 {
-		t.Fatalf("comments = %d, want 1 (the second note)", len(f.comments))
+	if len(f.comments) != 0 {
+		t.Fatalf("comments = %d, want 0 — a note on RunLore's OWN note PR belongs in the entry, "+
+			"not in a conversation the catalog never indexes: %+v", len(f.comments), f.comments)
 	}
-	if f.comments[0].number != 99 {
-		t.Errorf("second note went to PR %d, want 99 (the first note's PR)", f.comments[0].number)
+	if len(f.appends) != len(notes) {
+		t.Fatalf("appends = %d, want %d — every note after the first must reach the entry", len(f.appends), len(notes))
 	}
+	for i, text := range notes {
+		if f.appends[i].number != 99 {
+			t.Errorf("note %q appended to PR %d, want 99 (the first note's PR)", text, f.appends[i].number)
+		}
+		if !strings.Contains(f.appends[i].body, text) {
+			t.Errorf("the entry append for note %q lost its text: %s", text, f.appends[i].body)
+		}
+	}
+}
+
+// TestHandleAppendFailureFallsBackToCommenting pins the degradation. An append
+// is several forge calls against a branch and can fail for reasons that have
+// nothing to do with the human — a push race, a transient 5xx, a reviewer who
+// renamed the entry file. Losing their words to any of those would be worse
+// than the bug #493 fixed, so the note still lands, as a comment, and the reply
+// still tells them where.
+func TestHandleAppendFailureFallsBackToCommenting(t *testing.T) {
+	f := &fakeForge{appendErr: errors.New("409 conflict")}
+	r := newTestResponder(t, f)
+	tc := Context{Root: "111.222", Title: "OOM", NoteURL: "https://github.com/o/r/pull/77"}
+	if err := r.Registry.Put(tc); err != nil {
+		t.Fatalf("Put: %v", err)
+	}
+
+	reply, err := r.Handle(context.Background(), tc, "alice", "note: spot reclaim")
+	if err != nil {
+		t.Fatalf("a failed append must degrade to a comment, not to an error: %v", err)
+	}
+	// The append must have been ATTEMPTED. Without this the test passes just as
+	// well against a responder that never tries the entry at all — which is the
+	// bug #493 fixed, reintroduced and reported as a fallback.
+	if len(f.appends) != 1 {
+		t.Fatalf("appends = %d, want 1 — the comment is a FALLBACK, reached only after trying the entry", len(f.appends))
+	}
+	if len(f.comments) != 1 || f.comments[0].number != 77 {
+		t.Fatalf("the note must still land as a comment; comments = %+v", f.comments)
+	}
+	if len(f.opened) != 0 {
+		t.Fatalf("a failed append must not escalate to opening another PR; opened = %d", len(f.opened))
+	}
+	if !strings.Contains(reply, "77") {
+		t.Errorf("the reply must still name where the note landed: %q", reply)
+	}
+}
+
+// TestHandleAppendOntoAClosedPRDoesNotFallBackToCommenting is the ONE append
+// failure that must not degrade to a comment.
+//
+// The open-check and the write are two round trips, and a reviewer merging a
+// note PR while an on-call is typing the next note falls between them. Past that
+// merge both remaining options are silent losses — a commit onto a merged
+// branch never reaches base, and a comment on a merged PR is never indexed by
+// the catalog — so the forge reports providers.ErrPRNotOpen and this must be
+// handled exactly like the open-check's own closed-PR case: open a standalone
+// entry. A note arriving a second too late must not be lost by a route the same
+// note a second earlier survives.
+func TestHandleAppendOntoAClosedPRDoesNotFallBackToCommenting(t *testing.T) {
+	f := &fakeForge{appendErr: fmt.Errorf("github PR 77 is %q: %w", "merged", providers.ErrPRNotOpen)}
+	r := newTestResponder(t, f)
+	tc := Context{Root: "111.222", Title: "OOM", NoteURL: "https://github.com/o/r/pull/77"}
+	if err := r.Registry.Put(tc); err != nil {
+		t.Fatalf("Put: %v", err)
+	}
+
+	reply, err := r.Handle(context.Background(), tc, "alice", "note: spot reclaim")
+	if err != nil {
+		t.Fatalf("Handle: %v", err)
+	}
+	if len(f.comments) != 0 {
+		t.Fatalf("must never comment onto a PR that closed under the write; comments = %+v", f.comments)
+	}
+	if len(f.opened) != 1 {
+		t.Fatalf("opened = %d, want 1 — a finished PR means a standalone entry, the same answer the open-check gives", len(f.opened))
+	}
+	if !strings.Contains(reply, "99") {
+		t.Errorf("the reply must name the standalone PR it opened: %q", reply)
+	}
+}
+
+// TestNoteKeyIsStableAcrossARetryAndUniquePerNote pins the idempotency key the
+// entry append is made safe with.
+//
+// Stable, because the deliveries above this layer replay and a replayed APPEND
+// is permanent duplicate catalog content (a replayed comment merely looked
+// silly). The obvious key — a hash of the rendered body — does NOT have this
+// property, which is the whole reason the key is computed here: the body carries
+// the provenance timestamp, so the replay of one note renders different bytes
+// and would sail straight past its own marker.
+//
+// Unique, because a key that collided would suppress a genuinely different note
+// while telling its author it was saved.
+func TestNoteKeyIsStableAcrossARetryAndUniquePerNote(t *testing.T) {
+	tc := Context{Root: "111.222"}
+	base := HumanNote("alice", "it was a spot reclaim")
+
+	if got, want := noteKey(tc, base), noteKey(tc, base); got != want {
+		t.Fatalf("noteKey is not deterministic: %q vs %q", got, want)
+	}
+	// The retry: same thread, same author, same words, a later attempt. The KEY
+	// must not move even though the rendered body does.
+	early := NoteBody(tc, base, noteAt, DefaultMaxNoteBytes)
+	late := NoteBody(tc, base, noteAt.Add(9*time.Minute), DefaultMaxNoteBytes)
+	if early == late {
+		t.Fatal("test is not exercising the case — the rendered body must differ between attempts")
+	}
+	// The key is computed from tc and n alone, neither of which the timestamp
+	// touches, so the determinism check above IS the survival property: a key
+	// derived from `early` and one derived from `late` could not both equal it.
+	if strings.Contains(early, noteKey(tc, base)) || strings.Contains(late, noteKey(tc, base)) {
+		t.Error("the key must not be a function of the rendered body — that is what breaks across a retry")
+	}
+
+	seen := map[string]string{}
+	for name, n := range map[string]struct {
+		tc Context
+		n  Note
+	}{
+		"the note":         {tc, base},
+		"different text":   {tc, HumanNote("alice", "it was the CNI")},
+		"different author": {tc, HumanNote("bob", "it was a spot reclaim")},
+		"different thread": {Context{Root: "333.444"}, base},
+	} {
+		k := noteKey(n.tc, n.n)
+		if other, dup := seen[k]; dup {
+			t.Errorf("%q and %q share a key — one of them would be silently dropped", name, other)
+		}
+		seen[k] = name
+	}
+	// The model-drafted note carries the same TEXT as the human one, so it shares
+	// the key deliberately: it is the same sentence landing in the same entry, and
+	// filing it twice is exactly what the marker exists to prevent.
+	if noteKey(tc, base) != noteKey(tc, ProposedNote("alice", "what happened?", "it was a spot reclaim")) {
+		t.Error("identical filed text in one thread must share a key regardless of which route proposed it")
+	}
+}
+
+// TestHandlePassesAStableKeyToTheForge is the wiring half: the key the forge is
+// given must be the one noteKey computes, and it must repeat across a replayed
+// delivery. A responder that passed "" (or a fresh value per call) would compile,
+// pass every other test here, and leave the append with no idempotency at all.
+func TestHandlePassesAStableKeyToTheForge(t *testing.T) {
+	f := &fakeForge{}
+	r := newTestResponder(t, f)
+	tc := Context{Root: "111.222", Title: "OOM", NoteURL: "https://github.com/o/r/pull/77"}
+	if err := r.Registry.Put(tc); err != nil {
+		t.Fatalf("Put: %v", err)
+	}
+
+	// The same message delivered twice — what a restart or a wiped dedup set
+	// produces upstream.
+	for i := range 2 {
+		cur, _ := r.Registry.Get("111.222")
+		if _, err := r.Handle(context.Background(), cur, "alice", "note: spot reclaim"); err != nil {
+			t.Fatalf("Handle %d: %v", i, err)
+		}
+	}
+	if len(f.appends) != 2 {
+		t.Fatalf("appends = %d, want 2 — this test needs both deliveries to reach the forge", len(f.appends))
+	}
+	want := noteKey(tc, HumanNote("alice", "spot reclaim"))
+	if f.appends[0].key != want {
+		t.Errorf("key = %q, want %q — the forge cannot dedup a key this layer never sends", f.appends[0].key, want)
+	}
+	if f.appends[0].key != f.appends[1].key {
+		t.Errorf("a replayed delivery sent a different key (%q then %q); the forge would append the note twice",
+			f.appends[0].key, f.appends[1].key)
+	}
+
 }
 
 func TestHandlePerThreadCap(t *testing.T) {
@@ -918,8 +1151,11 @@ func TestHandleFallsBackToNoteURLWhenCuratedURLIsMerged(t *testing.T) {
 	if len(f.opened) != 0 {
 		t.Fatalf("must not open a third PR when NoteURL is still open; opened = %d", len(f.opened))
 	}
-	if len(f.comments) != 1 || f.comments[0].number != 77 {
-		t.Fatalf("must fall back to the still-open NoteURL; comments = %+v", f.comments)
+	// Appended, not commented: NoteURL is RunLore's own note PR whichever way the
+	// routing reached it, so falling back to it must not fall back to the lossy
+	// route as well.
+	if len(f.appends) != 1 || f.appends[0].number != 77 {
+		t.Fatalf("must fall back to the still-open NoteURL's entry; appends = %+v, comments = %+v", f.appends, f.comments)
 	}
 }
 
@@ -991,6 +1227,45 @@ func TestHandlePrefersCuratedURLOverNoteURL(t *testing.T) {
 	}
 }
 
+// TestHandleNeverRewritesTheCuratorsEntry is the half of issue #493 that must
+// NOT change, and it is the one with a real cost if it ever does.
+//
+// A curated PR has an author who is not RunLore, a body they wrote, and a review
+// in progress. A note there is FEEDBACK on their draft — a human decides at
+// merge time what of it belongs in the entry — so commenting is correct, and it
+// stays correct however many notes a thread produces. Appending would have
+// RunLore silently rewriting a human's file under them, mid-review, on the word
+// of anyone who can type in a chat channel.
+//
+// Every note in the thread is checked, not only the first: the routing decision
+// is taken per write, so a rule that held once and drifted on the second note
+// would be exactly as damaging.
+func TestHandleNeverRewritesTheCuratorsEntry(t *testing.T) {
+	f := &fakeForge{}
+	r := newTestResponder(t, f)
+	tc := Context{Root: "111.222", CuratedURL: "https://github.com/o/r/pull/42"}
+	if err := r.Registry.Put(tc); err != nil {
+		t.Fatalf("Put: %v", err)
+	}
+
+	for _, text := range []string{"first", "second", "third"} {
+		cur, _ := r.Registry.Get("111.222")
+		reply, err := r.Handle(context.Background(), cur, "alice", "note: "+text)
+		if err != nil {
+			t.Fatalf("Handle %q: %v", text, err)
+		}
+		if !strings.Contains(reply, "Noted on the knowledge-base PR #42") {
+			t.Errorf("the reply for %q must say the note was recorded ON the PR, not written into it: %q", text, reply)
+		}
+	}
+	if len(f.appends) != 0 {
+		t.Fatalf("RunLore must never rewrite an entry somebody else drafted; appends = %+v", f.appends)
+	}
+	if len(f.comments) != 3 {
+		t.Fatalf("comments = %d, want 3 — every note on a curated PR is review feedback", len(f.comments))
+	}
+}
+
 // TestHandleThrottlePathLogsAndIncrementsCounter pins the fix for the defect
 // where a global-window throttle returned a reply string with no log line and
 // no metric: an operator had no way to tell the feature was throttling at
@@ -1048,8 +1323,10 @@ func TestHandleThrottlePathWithNilMetricsDoesNotPanic(t *testing.T) {
 
 // TestHandleSuccessfulWritesIncrementCounterByRoute pins the sibling fix: the
 // audit noted notes-written was slog.Info only, with no metric, so an
-// operator could see throttling but not volume. Both landing routes must
-// increment ThreadNotesWritten, distinguished by the route label.
+// operator could see throttling but not volume. EVERY landing route must
+// increment ThreadNotesWritten, distinguished by the route label — including
+// the append route, which was added precisely because nothing an operator could
+// graph distinguished a note that becomes knowledge from one that does not.
 func TestHandleSuccessfulWritesIncrementCounterByRoute(t *testing.T) {
 	f := &fakeForge{}
 	r := newTestResponder(t, f)
@@ -1072,9 +1349,20 @@ func TestHandleSuccessfulWritesIncrementCounterByRoute(t *testing.T) {
 		t.Fatalf("Handle: %v", err)
 	}
 
+	appendTC := Context{Root: "c", NoteURL: "https://github.com/o/r/pull/77"}
+	if err := r.Registry.Put(appendTC); err != nil {
+		t.Fatalf("Put: %v", err)
+	}
+	if _, err := r.Handle(context.Background(), appendTC, "carol", "note: via entry append"); err != nil {
+		t.Fatalf("Handle: %v", err)
+	}
+	if len(f.appends) != 1 {
+		t.Fatalf("appends = %d, want 1 — this case is only meaningful if it took the append route", len(f.appends))
+	}
+
 	got, ok := read("runlore_thread_notes_written_total")
-	if !ok || got != 2 {
-		t.Errorf("runlore_thread_notes_written_total = %d (ok=%v), want 2 (one per landed route)", got, ok)
+	if !ok || got != 3 {
+		t.Errorf("runlore_thread_notes_written_total = %d (ok=%v), want 3 (one per landed route)", got, ok)
 	}
 }
 
@@ -3161,6 +3449,39 @@ func TestAnnounceALandedWrite(t *testing.T) {
 			t.Error("Title is empty; the open_pr route generates one and the announcement must name it")
 		}
 	})
+
+	t.Run("append route", func(t *testing.T) {
+		f := &fakeForge{}
+		r, sink := newAnnouncingResponder(t, f)
+		const prURL = "https://github.com/o/r/pull/77"
+		tc := putContext(t, r, Context{Transport: "slack", Root: "111.222", Title: "OOM", NoteURL: prURL})
+
+		if _, err := r.Handle(context.Background(), tc, "bob", "<@U0BOT> note: and the fix was a taint"); err != nil {
+			t.Fatalf("Handle: %v", err)
+		}
+		drainAnnouncements(t, r)
+
+		got := sink.updates()
+		if len(got) != 1 {
+			t.Fatalf("announcements = %d, want exactly 1 per landed write", len(got))
+		}
+		// Title is empty here for the same reason as on the comment route: the
+		// entry already had a title, generated when the FIRST note in this thread
+		// opened the PR, and this write generated none of its own.
+		want := providers.KBUpdate{
+			Transport: "slack",
+			Root:      "111.222",
+			Route:     providers.KBRouteAppend,
+			PR:        77,
+			URL:       prURL,
+			Author:    "bob",
+			Note:      "and the fix was a taint",
+			At:        noteAt,
+		}
+		if got[0] != want {
+			t.Errorf("announcement =\n%+v\nwant\n%+v", got[0], want)
+		}
+	})
 }
 
 // TestAnnounceNamesItsOriginatingTransportAndRoot pins the half of the event a
@@ -3651,7 +3972,7 @@ func TestAnnounceCarriesTheModelDraftedNote(t *testing.T) {
 }
 
 // TestKBRouteVocabulariesAgree pins the mapping between this package's route
-// names and the providers vocabulary the event uses. They spell the two routes
+// names and the providers vocabulary the event uses. They spell the routes
 // identically today; a direct string conversion would keep compiling — and
 // start emitting a route no consumer recognises — the moment either side is
 // renamed.
@@ -3662,9 +3983,9 @@ func TestAnnounceCarriesTheModelDraftedNote(t *testing.T) {
 // values whatever: rename RouteComment to "commented" and the switch still
 // matches it, still returns the providers constant, and the assertion still
 // holds while every dashboard series and every consumer reading the old word
-// goes quiet. These four strings are a wire vocabulary — RouteComment and
-// RouteOpenPR are also the "route" attribute ThreadNotesWritten is labelled
-// with (see their doc comment), and the providers pair is what a KBUpdate
+// goes quiet. These strings are a wire vocabulary — RouteComment, RouteOpenPR
+// and RouteAppend are also the "route" attribute ThreadNotesWritten is labelled
+// with (see their doc comment), and the providers trio is what a KBUpdate
 // consumer switches on — so changing one is an operator-visible break that
 // belongs in a diff.
 func TestKBRouteVocabulariesAgree(t *testing.T) {
@@ -3675,8 +3996,10 @@ func TestKBRouteVocabulariesAgree(t *testing.T) {
 	}{
 		{"RouteComment", RouteComment, "comment"},
 		{"RouteOpenPR", RouteOpenPR, "open_pr"},
+		{"RouteAppend", RouteAppend, "append"},
 		{"providers.KBRouteComment", string(providers.KBRouteComment), "comment"},
 		{"providers.KBRouteOpenPR", string(providers.KBRouteOpenPR), "open_pr"},
+		{"providers.KBRouteAppend", string(providers.KBRouteAppend), "append"},
 	} {
 		if tc.got != tc.want {
 			t.Errorf("%s = %q, want %q — this word is on a metric label or in a delivered event, "+
@@ -3688,5 +4011,8 @@ func TestKBRouteVocabulariesAgree(t *testing.T) {
 	}
 	if got := kbRoute(RouteOpenPR); got != providers.KBRouteOpenPR {
 		t.Errorf("kbRoute(%q) = %q, want %q", RouteOpenPR, got, providers.KBRouteOpenPR)
+	}
+	if got := kbRoute(RouteAppend); got != providers.KBRouteAppend {
+		t.Errorf("kbRoute(%q) = %q, want %q", RouteAppend, got, providers.KBRouteAppend)
 	}
 }

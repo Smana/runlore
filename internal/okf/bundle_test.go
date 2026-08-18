@@ -85,3 +85,143 @@ func TestUpdateLogCreatesAndPrepends(t *testing.T) {
 		t.Fatalf("second same-day entry missing:\n%s", got)
 	}
 }
+
+// TestEntryFilePicksTheEntryNotTheBundleUpkeep: a RunLore curation request
+// changes the entry plus, at most, index.md and log.md. Only the entry is what
+// a later commit (an appended operator note) must edit — writing into log.md
+// instead would corrupt the bundle and lose the note in one move.
+func TestEntryFilePicksTheEntryNotTheBundleUpkeep(t *testing.T) {
+	got, err := EntryFile([]string{"index.md", "concepts/oom-1755.md", "log.md"})
+	if err != nil {
+		t.Fatalf("EntryFile: %v", err)
+	}
+	if got != "concepts/oom-1755.md" {
+		t.Errorf("EntryFile = %q, want the entry", got)
+	}
+}
+
+// TestEntryFileRefusesToGuess: the caller's next move is a commit into a pull
+// request a human is reviewing. Anything other than exactly one candidate must
+// be an error — a refusal degrades to a comment, while a wrong write silently
+// rewrites somebody else's change.
+func TestEntryFileRefusesToGuess(t *testing.T) {
+	for name, changed := range map[string][]string{
+		"nothing at all":     nil,
+		"upkeep only":        {"index.md", "log.md"},
+		"two entries":        {"concepts/a.md", "incidents/b.md"},
+		"no markdown at all": {"Makefile", "go.mod"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			if got, err := EntryFile(changed); err == nil {
+				t.Errorf("EntryFile(%v) = %q, want an error rather than a guess", changed, got)
+			}
+		})
+	}
+}
+
+func TestAppendBlockKeepsWhatIsAlreadyThere(t *testing.T) {
+	got := string(AppendBlock([]byte("---\ntype: Concept\n---\n\nfirst note\n"), "second note"))
+	want := "---\ntype: Concept\n---\n\nfirst note\n\nsecond note\n"
+	if got != want {
+		t.Errorf("AppendBlock =\n%q\nwant\n%q", got, want)
+	}
+}
+
+// TestAppendBlockEmptyBlockChangesNothing: the caller's next move is a real
+// commit in a human's pull request, so appending nothing must not rewrite the
+// file — an empty-diff commit is noise a reviewer has to read.
+func TestAppendBlockEmptyBlockChangesNothing(t *testing.T) {
+	existing := []byte("body\n")
+	if got := string(AppendBlock(existing, "\n\n")); got != "body\n" {
+		t.Errorf("AppendBlock with an empty block = %q, want the file untouched", got)
+	}
+}
+
+// TestAppendBlockNormalisesSpacing pins the separation to exactly one blank
+// line however ragged either side is, so a note appended after a file that
+// already ends in three newlines does not drift further from one that does not.
+func TestAppendBlockNormalisesSpacing(t *testing.T) {
+	if got := string(AppendBlock([]byte("body\n\n\n"), "\n\nnote\n\n")); got != "body\n\nnote\n" {
+		t.Errorf("AppendBlock = %q, want exactly one blank line between the blocks", got)
+	}
+	if got := string(AppendBlock(nil, "note")); got != "note\n" {
+		t.Errorf("AppendBlock onto an empty file = %q, want no leading blank line", got)
+	}
+}
+
+// TestHasFrontmatterRefusesWhatWouldReplaceAnEntry is the guard that stands
+// between a read returning nothing and AppendBlock returning the note ALONE.
+// The two together are how an entry gets replaced by the newest note appended
+// to it, so the empty case is the one that matters most here.
+func TestHasFrontmatterRefusesWhatWouldReplaceAnEntry(t *testing.T) {
+	for name, tc := range map[string]struct {
+		content string
+		want    bool
+	}{
+		"a real entry":     {"---\ntype: Concept\n---\n\nbody\n", true},
+		"empty":            {"", false},
+		"plain markdown":   {"# Notes\n\nnot an entry\n", false},
+		"fence not first":  {"\n---\ntype: Concept\n---\n", false},
+		"fence unfinished": {"---", false},
+		"html then fence":  {"<!-- draft -->\n---\ntype: Concept\n---\n", false},
+	} {
+		t.Run(name, func(t *testing.T) {
+			if got := HasFrontmatter([]byte(tc.content)); got != tc.want {
+				t.Errorf("HasFrontmatter(%q) = %v, want %v", tc.content, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestNoteMarkerIsInvisibleAndKeyed: the marker must not render in the entry a
+// human or the catalog reads, and it must identify ONE note — a marker that
+// matched any note would suppress every note after the first, which is the
+// original bug wearing a different hat.
+func TestNoteMarkerIsInvisibleAndKeyed(t *testing.T) {
+	m := NoteMarker("abc123")
+	if !strings.HasPrefix(m, "<!--") || !strings.HasSuffix(m, "-->") {
+		t.Errorf("NoteMarker = %q, want an HTML comment so it never renders", m)
+	}
+	if !strings.Contains(m, "abc123") {
+		t.Errorf("NoteMarker = %q, want it to carry the key", m)
+	}
+	entry := []byte("---\ntype: Concept\n---\n\nnote one\n\n" + m + "\n")
+	if !HasNoteMarker(entry, "abc123") {
+		t.Error("HasNoteMarker must find the marker it wrote — otherwise a replay appends the note twice")
+	}
+	if HasNoteMarker(entry, "def456") {
+		t.Error("HasNoteMarker matched a DIFFERENT key — every later note in the thread would be silently dropped")
+	}
+	// An empty key means "no idempotency", never "matches everything": the latter
+	// would drop every note on any caller that omitted a key.
+	if HasNoteMarker(entry, "") {
+		t.Error("an empty key must never match")
+	}
+}
+
+// TestWithNoteMarkerRoundTripsThroughHasNoteMarker pins the two halves of the
+// idempotency pair against EACH OTHER, which is the only property that matters:
+// a block written by one forge and re-read by the append after it must be
+// recognised. Asserting the marker's bytes separately in each place is what
+// would let them drift apart while both files still passed their own tests.
+func TestWithNoteMarkerRoundTripsThroughHasNoteMarker(t *testing.T) {
+	entry := []byte("---\ntype: Concept\n---\n\nnote one\n")
+	appended := AppendBlock(entry, WithNoteMarker("### note two\n\nthe second note", "k2"))
+
+	if !HasNoteMarker(appended, "k2") {
+		t.Errorf("the marker WithNoteMarker wrote is not one HasNoteMarker finds — the next note would duplicate this one:\n%s", appended)
+	}
+	if !HasFrontmatter(appended) || !strings.Contains(string(appended), "note one") {
+		t.Errorf("appending the marked block lost what was already in the entry:\n%s", appended)
+	}
+	if n := strings.Count(string(appended), NoteMarker("k2")); n != 1 {
+		t.Errorf("marker written %d times, want exactly 1", n)
+	}
+
+	// An empty key is "no idempotency", the same thing it means to HasNoteMarker:
+	// no marker is written, rather than a keyless one every later note would then
+	// match and be dropped by.
+	if got := WithNoteMarker("### note two", ""); got != "### note two" {
+		t.Errorf("WithNoteMarker with no key = %q, want the block untouched", got)
+	}
+}

@@ -873,6 +873,13 @@ func TestMatrixFeedbackDrivesTheChatLayerEndToEnd(t *testing.T) {
 	if !strings.Contains(comments[0].body, "spot-node reclaim, not the CNI") {
 		t.Fatalf("the filed note lost the model's own text:\n%s", comments[0].body)
 	}
+	// A CURATED PR: someone else's draft, under review. A note on it is feedback
+	// a human reconciles at merge time, never a rewrite of their entry file —
+	// see thread.noteTarget for why the two destinations are not interchangeable,
+	// and why only the PR thread capture itself opened gets the append route.
+	if n := forge.appends(); n != 0 {
+		t.Fatalf("appends = %d, want 0 — RunLore must never rewrite an entry a human drafted", n)
+	}
 	stored, ok := reg.Get("$root-ours")
 	if !ok {
 		t.Fatal("the thread went missing from the registry")

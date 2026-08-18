@@ -110,8 +110,14 @@ func kbUpdateAnnouncement(up providers.KBUpdate) string {
 // number — which is not an error, and must not suppress the announcement.
 func kbHeadline(up providers.KBUpdate) string {
 	what := "noted on"
-	if up.Route == providers.KBRouteOpenPR {
+	switch up.Route {
+	case providers.KBRouteOpenPR:
 		what = "opened"
+	case providers.KBRouteAppend:
+		// "added to the entry on", not "noted on": this route wrote INTO the entry
+		// the catalog gains on merge, and a comment does not. A reader deciding
+		// whether the knowledge is safely captured is deciding exactly that.
+		what = "added to the entry on"
 	}
 	head := "📚 Knowledge base updated — " + what + " PR"
 	if up.PR > 0 {

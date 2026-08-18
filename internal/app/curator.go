@@ -25,14 +25,17 @@ import (
 // (providers.ReinvestForge) need a client satisfying BOTH, so buildForge
 // returns one concrete type wired for whichever provider is configured.
 //
-// IsPROpen is included too (rather than left to a narrower cast at the thread
-// call site) because it is the same concrete client either way: serve.go hands
-// this exact value to thread.Responder, which needs it to refuse to comment on
-// a merged KB PR — see thread.Forge.
+// IsPROpen and AppendToEntryOnPR are included too (rather than left to a
+// narrower cast at the thread call site) because it is the same concrete client
+// either way: serve.go hands this exact value to thread.Responder, which needs
+// IsPROpen to refuse to write onto a merged KB PR and AppendToEntryOnPR to put
+// a thread's later notes INSIDE the entry its first note opened rather than
+// beside it — see thread.Forge.
 type forgeClient interface {
 	providers.CurationForge
 	providers.ReinvestForge
 	IsPROpen(ctx context.Context, number int) (bool, error)
+	AppendToEntryOnPR(ctx context.Context, number int, body, key string) error
 }
 
 // buildForge constructs the curation/reinvestigation forge client selected by

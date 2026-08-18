@@ -246,6 +246,12 @@ type fakeThreadForge struct {
 	opened    int
 	commented int
 	comments  []forgeComment
+	// appended counts AppendToEntryOnPR calls. This package's tests all route
+	// through a CuratedURL — someone else's draft, where a comment is still the
+	// right answer — so it stays at zero and is here to PROVE that, not merely
+	// to satisfy the interface: an append onto a curator's entry file would be
+	// RunLore rewriting a human's PR from under them.
+	appended int
 }
 
 // forgeComment is one recorded CommentOnPR call.
@@ -271,10 +277,24 @@ func (f *fakeThreadForge) CommentOnPR(_ context.Context, number int, body string
 
 func (f *fakeThreadForge) IsPROpen(context.Context, int) (bool, error) { return true, nil }
 
+func (f *fakeThreadForge) AppendToEntryOnPR(_ context.Context, _ int, _, _ string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.appended++
+	return nil
+}
+
 func (f *fakeThreadForge) counts() (opened, commented int) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return f.opened, f.commented
+}
+
+// appends returns the AppendToEntryOnPR call count under the lock.
+func (f *fakeThreadForge) appends() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.appended
 }
 
 func (f *fakeThreadForge) commentsSnapshot() []forgeComment {

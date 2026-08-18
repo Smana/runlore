@@ -70,3 +70,22 @@ func AttemptsOf(err error) int {
 	}
 	return 0
 }
+
+// ErrPRNotOpen reports that a pull/merge request a write was aimed at is no
+// longer open — merged, closed, or locked.
+//
+// It is a SENTINEL rather than a plain error because the caller's recovery
+// differs in kind. A transient forge failure means "try the other way of
+// recording this" — the thread responder degrades an entry append to a PR
+// comment. This means the opposite: the pull request is finished, so a comment
+// there is exactly the silent loss the open-check exists to prevent (a comment
+// on a merged request is never indexed by the catalog), and the note has to go
+// somewhere else entirely — a standalone entry of its own.
+//
+// It exists because the open-check and the write are two round trips with a
+// window between them, and the window is real: a reviewer merging a note PR
+// while an on-call is typing the next note into the thread is an ordinary
+// Tuesday, not a race that needs contriving. The write call already learns the
+// current state from the response it is reading anyway, so reporting it costs
+// nothing and closes the window at the only place it can be closed.
+var ErrPRNotOpen = errors.New("pull request is not open")
