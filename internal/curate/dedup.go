@@ -47,10 +47,11 @@ func (d Dedup) Run(ctx context.Context) error {
 	//
 	// Operator notes: ConceptEntry deliberately leaves Fingerprint unset (a note is
 	// not a curated finding), so two notes ALWAYS fall through to title-Jaccard —
-	// and every note PR shares the title prefix "KB: Operator note: <finding
-	// title>", so two notes filed on the same recurring incident score 1.0. Pairing
-	// them here would let RunLore silently close a human's correction, which
-	// defeats the entire premise of thread capture (see operatorNoteLabel).
+	// and every note PR shares the title prefix "KB: Operator note: ", on top of
+	// which two humans correcting the same recurring incident write about the same
+	// thing in much the same words. Pairing them here would let RunLore silently
+	// close a human's correction, which defeats the entire premise of thread
+	// capture (see operatorNoteLabel).
 	prs = slices.DeleteFunc(prs, func(pr providers.CuratedIssue) bool { return isAutoCloseExempt(pr.Labels) })
 	sort.Slice(prs, func(i, j int) bool { return prs[i].Number < prs[j].Number })
 	canonicalOf := map[int]int{} // dup PR number -> canonical PR number

@@ -68,6 +68,58 @@ func (w Workload) Ref() string {
 	return w.Namespace + "/" + w.Name
 }
 
+// EntryResourceRef narrows a rendered workload ref to the single, whitespace-free
+// value RunLore's own merge gate accepts in a knowledge-base entry's `resource:`
+// frontmatter — kbvalidate rejects any resource containing " \t\r\n" outright.
+//
+// It exists because Ref() renders whatever is in Workload.Name, and on a curated
+// or captured finding that is MODEL-WRITTEN free text: submit_findings fills
+// affected_resource (internal/investigate/tools.go), and a finding covering
+// several objects routinely arrives as a list — "essentials, monitoring,
+// argocd-app-of-apps" — which Ref() renders as "argocd/essentials, monitoring,
+// argocd-app-of-apps". Written verbatim, that value fails the gate, so the entry's
+// pull request can never be merged. On the thread-capture path that is the worst
+// possible shape of failure: the human is told the write succeeded and the
+// announcement fires, because both are 1:1 with the LANDED FORGE WRITE, which did
+// land — only the merge is impossible, and nothing surfaces it.
+//
+// Narrowing, not dropping: `resource` is the structural-recall index (see
+// investigate's resourceAgrees), so an entry with no resource is reachable
+// lexically only. The first listed object is the one the namespace was rendered
+// against and is a real object, so keeping it preserves the index. Nothing is
+// lost — the full list still reaches the entry BODY verbatim.
+//
+// Whitespace-free input is returned EXACTLY as given — the single-field early
+// return below exists for that promise alone. It is what lets every caller say
+// that no entry which merges today is written differently, and it is why the
+// punctuation trim is guarded rather than unconditional: an unguarded trim also
+// rewrites "argocd/app," and "a;b;", which are whitespace-free, clear the gate
+// today, and are none of this function's business.
+//
+// So it deliberately does NOT split a comma-joined list that carries no
+// whitespace ("a,b,c"): that value merges today, and quietly rewriting what an
+// existing entry is indexed under is a bigger change than closing a gate defect.
+//
+// KNOWN CONSEQUENCE: two different multi-object findings that happen to lead with
+// the same object now write the SAME `resource`, while curator.DupFingerprint
+// keeps them distinct (it hashes the full, un-narrowed Ref()). So the frontmatter
+// index can collide where the dedup identity does not — a new class, and stated
+// here rather than left to be discovered. It is strictly better than what it
+// replaces, where neither entry could be merged at all, and the entry body still
+// distinguishes them for a reader.
+func EntryResourceRef(ref string) string {
+	fields := strings.Fields(ref)
+	if len(fields) == 0 {
+		return ""
+	}
+	if len(fields) == 1 {
+		return fields[0]
+	}
+	// Trailing list punctuation is what the split left behind ("argocd/essentials,"),
+	// not part of the name; a trailing "/" would leave a ref with an empty name half.
+	return strings.TrimRight(fields[0], ",;/")
+}
+
 // reDeployPod matches a volatile pod-name suffix: a Deployment pod is
 // <name>-<rs-hash>-<pod-hash>, e.g. "harbor-registry-59598dbd57-ltkzw". The suffix
 // names one ephemeral pod, not the controller family it belongs to.

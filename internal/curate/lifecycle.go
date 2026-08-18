@@ -81,9 +81,10 @@ func isOperatorNote(labels []string) bool {
 //     auto-closed note is never suppressed, never escalated, never read back
 //     as a veto by anything in this codebase. Operator notes stay exempt from
 //     DEDUP for a narrower, genuine reason instead: ConceptEntry always
-//     titles a note "KB: Operator note: <finding title>", so two notes on the
-//     same recurring incident score ~1.0 on the title-Jaccard fallback (see
-//     TestDedupNeverClosesAnOperatorNote) — closing one as a "duplicate" of
+//     titles a note "KB: Operator note: <the note's own claim>", so two humans
+//     correcting the same recurring incident score high on the title-Jaccard
+//     fallback — up to 1.0 when they say the same thing (see
+//     TestDedupNeverClosesAnOperatorNote) — and closing one as a "duplicate" of
 //     the other would discard a human's contribution outright. They are NOT
 //     exempt from the stale sweep: closing an untouched note is ordinary
 //     housekeeping, not discarding one, provided the close comment says so

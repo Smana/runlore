@@ -155,9 +155,18 @@ func alertResourceIfDistinct(inv providers.Investigation) string {
 // It reuses Workload.Ref(), so the namespace is never touched and the empty /
 // bare-namespace cases pass through unchanged; w is a value copy, so mutating its
 // Name is local. Idempotent (NormalizeWorkloadName is).
+//
+// The Ref() is then narrowed by providers.EntryResourceRef, because Workload.Name
+// on a curated finding is MODEL-WRITTEN free text and a whitespace-bearing one
+// ("essentials, monitoring, argocd-app-of-apps") fails RunLore's own merge gate —
+// the curator would draft an entry its own `validate` job rejects. That was
+// reported against thread capture (#491), which shares this exact source; only
+// the value the model happened to produce differed, so fixing one path and not
+// the other would leave the same defect armed here. Whitespace-free refs are
+// returned unchanged, so no entry that merges today is written differently.
 func normalizeResource(w providers.Workload) string {
 	w.Name = normalizeWorkloadName(w.Name)
-	return w.Ref()
+	return providers.EntryResourceRef(w.Ref())
 }
 
 // entryType derives the OKF type for a drafted entry. The default is Incident: a

@@ -396,6 +396,10 @@ func TestConceptEntryPassesTheMergeGate(t *testing.T) {
 		// carrying an embedded newline must still clear the merge gate: nothing
 		// upstream of ConceptEntry guarantees a single-line title.
 		{"title with embedded newline", Context{Title: "ImageGalleryUnavailable\r\nX-Injected: header"}},
+		// #491: every fixture above names ONE resource, which is exactly why this
+		// table stayed green while a live multi-object finding produced a note PR
+		// that could never be merged.
+		{"multi-object resource", multiObjectContext()},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -808,5 +812,342 @@ func TestBlockquoteCoversEveryLine(t *testing.T) {
 	// line terminates a Markdown blockquote, so everything after it escapes.
 	if !strings.Contains(got, "> \n") && !strings.Contains(got, ">\n") {
 		t.Errorf("the blank line inside the quoted message was left unquoted, which ends the blockquote early:\n%s", got)
+	}
+}
+
+// The live #491/#492 fixture, kept in one place so both bugs are pinned against
+// the SAME thread context they were reported from: a finding covering three Argo
+// CD Applications, whose title runs past the entry-title budget and whose
+// resource carries the model's own comma-and-space list.
+const (
+	multiObjectFinding  = "Core Argo CD Applications (essentials, monitoring, argocd-app-of-apps) stuck OutOfSync"
+	multiObjectResource = "argocd/essentials, monitoring, argocd-app-of-apps"
+)
+
+// multiObjectContext is that finding as thread capture sees it.
+func multiObjectContext() Context {
+	return Context{Transport: "slack", Title: multiObjectFinding, Resource: multiObjectResource, TriggerKey: "tk-1"}
+}
+
+// TestConceptEntryResourceClearsTheMergeGateForAMultiObjectFinding closes #491.
+//
+// tc.Resource is the finding's rendered ref, and Workload.Name on a finding is
+// model-written free text: a finding covering several objects arrives as a list,
+// so the ref carries ", " and kbvalidate rejects a `resource` containing
+// whitespace. The write path was emitting a value its own merge gate rejects —
+// the note PR could never be merged, while the thread reply said the write
+// succeeded and the channel announcement fired, because both are 1:1 with the
+// landed forge write, which did land.
+//
+// The full list is not lost: it still reaches the entry body verbatim, which is
+// what makes narrowing the frontmatter safe rather than lossy.
+func TestConceptEntryResourceClearsTheMergeGateForAMultiObjectFinding(t *testing.T) {
+	e := ConceptEntry(multiObjectContext(), HumanNote("alice", "the poisoned chart cache theory is wrong"), noteAt, DefaultMaxNoteBytes)
+
+	// Positive control: the raw ref really does fail the gate, so this test
+	// cannot pass by accident on a fixture the gate never objected to.
+	raw := kbvalidate.ValidateStructural(catalog.Entry{
+		Type: e.Type, Title: e.Title, Description: e.Description,
+		Resource: multiObjectResource, Tags: e.Tags, Body: e.Body,
+	})
+	if !kbvalidate.HasErrors(raw) {
+		t.Fatalf("fixture is inert: %q already clears the merge gate, so this test pins nothing", multiObjectResource)
+	}
+
+	if e.Resource != "argocd/essentials" {
+		t.Errorf("Resource = %q, want %q", e.Resource, "argocd/essentials")
+	}
+	for _, is := range kbvalidate.ValidateStructural(catalog.Entry{
+		Type: e.Type, Title: e.Title, Description: e.Description,
+		Resource: e.Resource, Tags: e.Tags, Body: e.Body,
+	}) {
+		if is.Severity == kbvalidate.SeverityError {
+			t.Errorf("the entry the note path writes fails its own merge gate: %s: %s", is.Field, is.Message)
+		}
+	}
+	if !strings.Contains(e.Body, multiObjectResource) {
+		t.Errorf("the body must still carry every object the finding named, verbatim:\n%s", e.Body)
+	}
+}
+
+// TestConceptEntryIsTitledAfterTheNoteNotTheFinding closes the first half of
+// #492. A note that CORRECTS a finding was filed under the headline of the very
+// thing it corrects, so the entry claimed the opposite of what the human wrote —
+// and the reranker matched it while quoting the refuted hypothesis as its
+// grounds.
+func TestConceptEntryIsTitledAfterTheNoteNotTheFinding(t *testing.T) {
+	e := ConceptEntry(multiObjectContext(), HumanNote("alice", "the poisoned chart cache theory is wrong"), noteAt, DefaultMaxNoteBytes)
+
+	if want := "Operator note: the poisoned chart cache theory is wrong"; e.Title != want {
+		t.Errorf("Title = %q, want %q", e.Title, want)
+	}
+	// The finding's own distinctive words must not be the entry's identity. They
+	// are still carried as CONTEXT, in the description and the body.
+	//
+	// "Core Argo CD" comes from the START of the finding title, deliberately, not
+	// "OutOfSync" from its end: the old code cut the title at 90 bytes and lost
+	// "OutOfSync" anyway, so a guard naming the tail passes against the very code
+	// this test exists to reject. Only a word the broken title really carried
+	// discriminates between fixed and unfixed.
+	if strings.Contains(e.Title, "Core Argo CD") {
+		t.Errorf("the title is still the finding's headline, which is what the note contradicts: %q", e.Title)
+	}
+	if !strings.Contains(e.Description, "OutOfSync") || !strings.Contains(e.Body, "OutOfSync") {
+		t.Errorf("the finding must survive as context in the description and body:\ndescription=%q\nbody=%s", e.Description, e.Body)
+	}
+}
+
+// TestConceptEntryTitleNeverCutsMidWord closes the second half of #492. Instant
+// recall builds its whole root-cause claim as `title + " — " + description`
+// (investigate.recalledInvestigation) and a Concept note carries no
+// Cause/Resolution sections to add to it, so a title ending "… stu…" is the
+// entire claim verify is asked to judge — and verify correctly rejected it as
+// unintelligible every time, which is why a corrected entry never survived to
+// short-circuit an investigation.
+func TestConceptEntryTitleNeverCutsMidWord(t *testing.T) {
+	const note = "the poisoned Helm chart cache theory is wrong: syncPolicy.automated was removed from the system ApplicationSet by a manual edit in the UI"
+	e := ConceptEntry(multiObjectContext(), HumanNote("alice", note), noteAt, DefaultMaxNoteBytes)
+
+	// Positive control: this note MUST be long enough to force a cut, otherwise
+	// the assertion below is vacuous.
+	if !strings.HasSuffix(e.Title, "…") {
+		t.Fatalf("fixture is inert: %q was not truncated, so no word boundary was under test", e.Title)
+	}
+	kept := strings.TrimSuffix(e.Title, "…")
+	body := strings.TrimPrefix(kept, "Operator note: ")
+	if body == kept {
+		t.Fatalf("Title = %q, want it to start with %q", e.Title, "Operator note: ")
+	}
+	// The kept text must end where a word ends in the source: either at the end
+	// of the note, or immediately before a space.
+	if note != body && !strings.HasPrefix(note, body+" ") {
+		t.Errorf("Title = %q cuts mid-word — %q is not a whole-word prefix of the note", e.Title, body)
+	}
+	if len(e.Title) > 120 {
+		t.Errorf("Title is %d bytes, over the merge gate's 120-byte limit: %q", len(e.Title), e.Title)
+	}
+}
+
+// TestConceptEntryDescriptionCarriesTheNote closes the third part of #492: the
+// description was a fixed sentence naming only the author and the transport,
+// BYTE-IDENTICAL across every operator note, on a field with three consumers
+// that all read it as content — instant recall's claim, the reranker's candidate
+// line, and the catalog's lexical search text.
+func TestConceptEntryDescriptionCarriesTheNote(t *testing.T) {
+	tc := multiObjectContext()
+	first := ConceptEntry(tc, HumanNote("alice", "the poisoned chart cache theory is wrong"), noteAt, DefaultMaxNoteBytes)
+	second := ConceptEntry(tc, HumanNote("alice", "the ApplicationSet lost syncPolicy.automated"), noteAt, DefaultMaxNoteBytes)
+
+	if first.Description == second.Description {
+		t.Errorf("two different notes on the same finding produced a byte-identical description, which carries no signal at all: %q", first.Description)
+	}
+	if !strings.Contains(first.Description, "the poisoned chart cache theory is wrong") {
+		t.Errorf("the description must carry the note's own claim: %q", first.Description)
+	}
+	if !strings.Contains(first.Description, "alice") || !strings.Contains(first.Description, "slack") {
+		t.Errorf("the description must keep the provenance a catalog listing shows: %q", first.Description)
+	}
+	// The provenance clause leads, so a listing that clips the line cannot clip
+	// the fact that a human, not RunLore's model, wrote the text.
+	drafted := ConceptEntry(tc, ProposedNote("alice", "was it the chart cache?", "the poisoned chart cache theory is wrong"), noteAt, DefaultMaxNoteBytes)
+	if !strings.HasPrefix(drafted.Description, "Note drafted by RunLore") {
+		t.Errorf("a model-drafted note must say so before anything else: %q", drafted.Description)
+	}
+	if strings.HasPrefix(first.Description, "Note drafted by RunLore") {
+		t.Errorf("a human's own words were described as RunLore's draft: %q", first.Description)
+	}
+}
+
+// TestConceptEntryRecallClaimIsIntelligible pins the assembled string that
+// actually failed in production. instant recall builds one root-cause summary as
+// `Title + " — " + Description` (investigate/recall.go, recalledInvestigation)
+// and hands it to verify, which sees nothing else: a Concept note has no
+// Cause/Resolution sections, by construction — escapeOKFSections exists to stop
+// a note forging them. Neither field is wrong on its own; the defect was only
+// visible in the pair, which is why this reads both at once.
+func TestConceptEntryRecallClaimIsIntelligible(t *testing.T) {
+	const note = "the poisoned chart cache theory is wrong: a manual UI edit removed syncPolicy.automated"
+	e := ConceptEntry(multiObjectContext(), HumanNote("alice", note), noteAt, DefaultMaxNoteBytes)
+	claim := e.Title + " — " + e.Description
+
+	if !strings.Contains(claim, note) {
+		t.Errorf("the claim verify is handed does not contain the note it is supposed to state:\n%s", claim)
+	}
+	// The old failure shape, exactly: the finding's headline as the claim, cut
+	// mid-word. Both halves are asserted because either one alone made verify
+	// reject the entry.
+	if strings.Contains(claim, "stu…") {
+		t.Errorf("the claim still ends a word mid-way, which verify rejects as unintelligible:\n%s", claim)
+	}
+	if strings.HasPrefix(e.Title, "Operator note: Core Argo CD Applications") {
+		t.Errorf("the claim still leads with the finding the note refutes:\n%s", claim)
+	}
+}
+
+// TestNoteClaimStripsTheMarkupAChatReplyOpensWith keeps the title readable as a
+// claim: an on-call routinely writes a note as a bullet or a quote, and
+// "Operator note: - the cause was …" reads as neither.
+func TestNoteClaimStripsTheMarkupAChatReplyOpensWith(t *testing.T) {
+	tests := []struct {
+		name string
+		note string
+		want string
+	}{
+		{"bullet", "- the cause was a spot reclaim", "Operator note: the cause was a spot reclaim"},
+		{"blockquote", "> the cause was a spot reclaim", "Operator note: the cause was a spot reclaim"},
+		{"heading", "## the cause was a spot reclaim", "Operator note: the cause was a spot reclaim"},
+		{"nested", "> - the cause was a spot reclaim", "Operator note: the cause was a spot reclaim"},
+		{"a negative number keeps its sign", "-1 replicas is the cause", "Operator note: -1 replicas is the cause"},
+		{"a hashtag is not a heading", "#oncall the cause was a spot reclaim", "Operator note: #oncall the cause was a spot reclaim"},
+		{"line breaks collapse to one space", "the cause\n\nwas a spot reclaim", "Operator note: the cause was a spot reclaim"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := ConceptEntry(Context{Title: "OOM"}, HumanNote("alice", tt.note), noteAt, DefaultMaxNoteBytes).Title; got != tt.want {
+				t.Errorf("Title = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
+// TestConceptEntryFallsBackToTheFindingWhenTheNoteHasNoWords covers the note
+// that is nothing but markup. Responder.Handle answers an empty "note:" without
+// writing, so this is reachable only defensively — but ConceptEntry must be
+// total, and naming the finding still beats an unqualified "Operator note".
+// "on" reads as ABOUT the finding rather than as a claim the note makes.
+func TestConceptEntryFallsBackToTheFindingWhenTheNoteHasNoWords(t *testing.T) {
+	e := ConceptEntry(Context{Title: "OOM in payments"}, HumanNote("alice", "- "), noteAt, DefaultMaxNoteBytes)
+	if want := "Operator note on OOM in payments"; e.Title != want {
+		t.Errorf("Title = %q, want %q", e.Title, want)
+	}
+	bare := ConceptEntry(Context{}, HumanNote("alice", " "), noteAt, DefaultMaxNoteBytes)
+	if bare.Title != "Operator note" {
+		t.Errorf("Title = %q, want %q", bare.Title, "Operator note")
+	}
+	if strings.TrimSpace(bare.Description) == "" {
+		t.Error("description is required by the merge gate and must never render empty")
+	}
+}
+
+// TestTruncateWordsCutsOnAWordBoundary pins the truncator directly, including
+// the case where there is no boundary to cut on: one unbroken token longer than
+// the budget (a URL, a hash) has none, and backing off to an early space would
+// throw away nearly everything the field had room for.
+func TestTruncateWordsCutsOnAWordBoundary(t *testing.T) {
+	tests := []struct {
+		name string
+		s    string
+		n    int
+		want string
+	}{
+		{"short enough is untouched", "the cause was a spot reclaim", 90, "the cause was a spot reclaim"},
+		{"cuts back to the last whole word", "the cause was a spot reclaim on a node", 20, "the cause was a…"},
+		{"trailing punctuation left by the cut is dropped", "the cause, the effect, the fix", 13, "the cause…"},
+		{"one unbroken token has no boundary, so the rune cut stands", "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", 10, "aaaaaaaaa…"},
+		{"an early space is not worth backing off to", "a bbbbbbbbbbbbbbbbbbbbbbbbbbbb", 10, "a bbbbbbb…"},
+		{"never splits a multibyte rune", "éééééééééééé", 9, "éééé…"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := truncateWords(tt.s, tt.n)
+			if got != tt.want {
+				t.Errorf("truncateWords(%q, %d) = %q, want %q", tt.s, tt.n, got, tt.want)
+			}
+			if !utf8.ValidString(got) {
+				t.Errorf("truncateWords(%q, %d) = %q — split a rune", tt.s, tt.n, got)
+			}
+			if len(got) > tt.n+2 {
+				t.Errorf("truncateWords(%q, %d) = %q is %d bytes, over the documented n+2 worst case", tt.s, tt.n, got, len(got))
+			}
+		})
+	}
+}
+
+// TestNoteClaimIsDrawnOnlyFromTheTextTheBodyFiles pins the bound on the claim's
+// INPUT. Nothing upstream caps Note.Text — DefaultMaxNoteBytes is applied inside
+// NoteBody, downstream of the claim — while a Matrix event carries up to 64 KiB
+// and a Slack body up to 1 MiB.
+//
+// The assertion is the COHERENCE one rather than a timing one, because it is the
+// property a reader can check: an entry must never be titled after words its own
+// body does not contain.
+func TestNoteClaimIsDrawnOnlyFromTheTextTheBodyFiles(t *testing.T) {
+	// The cap must be SMALLER than maxNoteDescriptionClaim, or the fixture proves
+	// nothing: with a cap of 300 the claim's own 200-byte budget stops short of
+	// the sentinel anyway, and an entirely unbounded claim passes the test.
+	const maxBytes = 60
+	if maxBytes >= maxNoteDescriptionClaim {
+		t.Fatalf("fixture is inert: a cap of %d is past the claim's own %d-byte budget", maxBytes, maxNoteDescriptionClaim)
+	}
+	// "beyond" sits past the cap but well inside the claim's budget.
+	note := "opening words " + strings.Repeat("x ", 30) + "beyond-the-cap-sentinel"
+	if len(note) <= maxBytes {
+		t.Fatalf("fixture is inert: the note is %d bytes, inside the %d-byte cap", len(note), maxBytes)
+	}
+	e := ConceptEntry(Context{Title: "OOM"}, HumanNote("alice", note), noteAt, maxBytes)
+
+	for name, field := range map[string]string{"title": e.Title, "description": e.Description, "body": e.Body} {
+		if strings.Contains(field, "beyond-the-cap-sentinel") {
+			t.Errorf("%s quotes text from past the note cap, which the body never filed: %q", name, field)
+		}
+	}
+	if !strings.Contains(e.Title, "opening words") {
+		t.Errorf("the claim must still come from the start of the note: %q", e.Title)
+	}
+}
+
+// TestNoteClaimCannotLeakASecretSeveredByItsOwnCut is the redaction half of that
+// bound, and the reason noteClaimSource drops the trailing partial token.
+//
+// noteText redacts BEFORE it caps, because redact.Secrets needs a whole token to
+// match one. The claim path cuts FIRST (redacting a 1 MiB message is the cost the
+// cut exists to avoid), so a secret straddling the cut would be handed to
+// redaction already severed — unrecognised, and its surviving prefix would ship
+// verbatim into a title that outlives the pull request.
+//
+// The cap here is small on purpose. It makes the cut land inside the secret with
+// the claim budget still spanning it, which is exactly the case a "maxBytes is
+// far larger than the claim" argument would wave away — config.Validate rejects
+// only a NEGATIVE max_note_bytes, so nothing stops an operator configuring this.
+func TestNoteClaimCannotLeakASecretSeveredByItsOwnCut(t *testing.T) {
+	const secret = "ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZ012345"
+	const maxBytes = 120
+	// Pad so the cut falls 12 bytes into the secret, leaving a long prefix.
+	lead := "note " + strings.Repeat(" ", maxBytes-12-len("note "))
+	note := lead + secret
+	severed := secret[:12]
+
+	if len(lead) >= maxBytes || len(note) <= maxBytes {
+		t.Fatalf("fixture is inert: the cut at %d does not fall inside the secret (lead=%d, note=%d)", maxBytes, len(lead), len(note))
+	}
+	e := ConceptEntry(Context{Title: "OOM"}, HumanNote("alice", note), noteAt, maxBytes)
+
+	for name, field := range map[string]string{"title": e.Title, "description": e.Description} {
+		if strings.Contains(field, severed) {
+			t.Errorf("%s carries %q, a fragment of a secret that the claim's own cut severed past recognition: %q", name, severed, field)
+		}
+	}
+}
+
+// TestNoteClaimYieldsNothingForOneUnbrokenToken covers what dropping the partial
+// token costs: a message with no whitespace at all inside the cap is one token —
+// a base64 blob, not a sentence — and there is no safe piece of it to keep.
+func TestNoteClaimYieldsNothingForOneUnbrokenToken(t *testing.T) {
+	e := ConceptEntry(Context{Title: "OOM in payments"}, HumanNote("alice", strings.Repeat("a", 500)), noteAt, 100)
+	if want := "Operator note on OOM in payments"; e.Title != want {
+		t.Errorf("Title = %q, want the finding fallback %q", e.Title, want)
+	}
+}
+
+// TestTruncateWordsHoldsItsBoundAtAZeroBudget pins the edge its doc comment
+// states. It used to return a bare "…" — 3 bytes for a 0-byte budget, breaking
+// the "n+2 worst case" the comment promises. Unreachable today (every budget is
+// a positive constant), which is exactly why it needs a test rather than a
+// reader's attention.
+func TestTruncateWordsHoldsItsBoundAtAZeroBudget(t *testing.T) {
+	for _, n := range []int{0, -1, -100} {
+		if got := truncateWords("the cause was a spot reclaim", n); got != "" {
+			t.Errorf("truncateWords(_, %d) = %q, want %q", n, got, "")
+		}
 	}
 }
