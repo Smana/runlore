@@ -755,9 +755,23 @@ func onInvestigationComplete(ctx context.Context, found providers.Investigation,
 	// recalled entry IS the answer being delivered. Best-effort by construction:
 	// no merged entry, empty sections, or a ledger error leave Prior nil and the
 	// notification falls back to the counter+link it already carries.
+	//
+	// The excerpts are redacted HERE, at the assignment, for the same reason
+	// CurateError is below: the egress chokepoint has already run. These two are the
+	// only fields on the delivered Investigation stamped past it, and both carry free
+	// text of external origin — a KB entry's Cause/Resolution is whatever the
+	// investigation wrote plus whatever a human edited in during review, so a pasted
+	// controller log or kubectl transcript carries what it carried. EntryPath is a
+	// catalog path (the loop's redactionSkipField treats it as server-derived) and
+	// stays verbatim. The chat path already scrubs the SAME excerpt
+	// (thread.chatSafe over catalog.Entry.Section), so leaving it raw here made the
+	// two egress paths disagree — and notify.NewPayload copies Cause/Resolution
+	// straight into the webhook JSON under a comment promising an "(already-redacted)"
+	// Investigation, with no second pass at render to save it. redact.Secrets is
+	// idempotent, so scrubbing here costs the render sites nothing.
 	if found.Occurrences > 1 && !found.Recalled && prior != nil {
 		if e, ok := prior.FindFingerprint(dupFP); ok {
-			cause, resolution := e.Section("Cause"), e.Section("Resolution")
+			cause, resolution := redact.Secrets(e.Section("Cause")), redact.Secrets(e.Section("Resolution"))
 			if cause != "" || resolution != "" {
 				pk := &providers.PriorKnowledge{Cause: cause, Resolution: resolution, EntryPath: e.Path}
 				if counts, err := ledger.OpenCounts(); err == nil {

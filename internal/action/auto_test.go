@@ -4,6 +4,7 @@ package action
 
 import (
 	"context"
+	"fmt"
 	"io"
 	"log/slog"
 	"strings"
@@ -139,5 +140,38 @@ func TestAutoDeniesProtectedNamespace(t *testing.T) {
 	}
 	if !strings.Contains(out[0].Description, "denied") {
 		t.Fatalf("expected denied annotation: %q", out[0].Description)
+	}
+}
+
+// TestAutoRedactsTheExecutorError closes the third field written PAST the single
+// egress chokepoint (after Prior and CurateError).
+//
+// investigate.LoopInvestigator.deliver redacts and THEN calls OnComplete;
+// app.onInvestigationComplete then replaces found.Actions with Auto.Run's output, so
+// this annotation lands on an Investigation that will never be scrubbed again. The
+// spliced text is a live executor error — a Kubernetes API response body, whatever
+// the apiserver chose to put in it — and notify.Format renders Action.Description
+// verbatim into the webhook payload's text with no second redaction pass.
+func TestAutoRedactsTheExecutorError(t *testing.T) {
+	const token = "ghp_0123456789abcdefghijklmnopqrstuvwxyzAB"
+	exec := &fakeExec{err: fmt.Errorf("apiserver rejected the patch: bearer %s", token)}
+	a := NewAuto(exec, config.AutoPolicy{MinConfidence: 0.5}, autoPolicy(), nil, discardLog())
+	a.Resume() // NewAuto starts paused (fail closed); opt in to execution
+
+	out := a.Run(context.Background(), autoInv(0.9, revAction))
+
+	if len(out) != 1 {
+		t.Fatalf("expected one annotated action, got %d", len(out))
+	}
+	if !strings.Contains(out[0].Description, "auto: FAILED") {
+		t.Fatalf("a failed execution must still be reported to the human: %q", out[0].Description)
+	}
+	if strings.Contains(out[0].Description, token) {
+		t.Errorf("the executor's error reached a delivered field verbatim — it is annotated "+
+			"AFTER redactInvestigation, so nothing downstream will scrub it: %q", out[0].Description)
+	}
+	// Masking the credential must not cost the operator the diagnosis.
+	if !strings.Contains(out[0].Description, "apiserver rejected the patch") {
+		t.Errorf("redaction ate the non-secret part of the reason: %q", out[0].Description)
 	}
 }

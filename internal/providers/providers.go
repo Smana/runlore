@@ -1091,11 +1091,14 @@ type Investigation struct {
 	// (notify.summaryBlocks), both through notify.curateFailureReason; never written to
 	// the KB body.
 	//
-	// The one field on this struct stamped AFTER investigate.redactInvestigation, because
-	// curation runs in the OnComplete pipeline rather than inside the loop. It is
+	// One of exactly two free-text fields on this struct stamped AFTER
+	// investigate.redactInvestigation — the other is Prior (Cause/Resolution) — because
+	// both are produced by the OnComplete pipeline rather than inside the loop. Each is
 	// therefore redacted at its assignment (app.onInvestigationComplete) rather than by
-	// the reflection walk, and it is deliberately NOT on redactionSkipField — it is
-	// server-supplied free text, the opposite of what that list is for.
+	// the reflection walk, and neither is on redactionSkipField: both are untrusted free
+	// text, the opposite of what that list is for. Everything else the pipeline stamps
+	// past the chokepoint is a number, a time, or a server-derived identifier already on
+	// that list (CuratedURL, PrevCuratedURL, Action.ApprovalID).
 	CurateError   string
 	Fingerprint   string      // originating alert fingerprint; for outcome-ledger attribution
 	Fingerprints  []string    // coalesced batch fingerprints; one outcome open is recorded per entry
@@ -1144,6 +1147,11 @@ type MatchedEntry struct {
 // ledger. Stamped at completion — never seen by the model — and only on FRESH
 // investigations of a recurring TriggerKey whose merged entry is findable by
 // dup-fingerprint; nil otherwise, so notifiers fall back to the counter+link.
+//
+// Cause and Resolution are KB body text of external origin (whatever a human wrote
+// during review, verbatim), and they are stamped PAST investigate.redactInvestigation
+// — so app.onInvestigationComplete secret-redacts them at the assignment. EntryPath
+// is a catalog path and stays verbatim.
 type PriorKnowledge struct {
 	Cause      string // excerpt of the merged entry's "## Cause" section
 	Resolution string // excerpt of "## Resolution" — carries the human's review edits, the payoff of curation

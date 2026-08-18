@@ -12,6 +12,7 @@ import (
 	"github.com/Smana/runlore/internal/audit"
 	"github.com/Smana/runlore/internal/config"
 	"github.com/Smana/runlore/internal/providers"
+	"github.com/Smana/runlore/internal/redact"
 )
 
 // Auto executes remediations without human approval (mode "auto"), under layered
@@ -129,8 +130,19 @@ func (a *Auto) runOne(ctx context.Context, inv providers.Investigation, act prov
 		}
 		// executed/failed are audited at the executor seam (NewAuditedExecutor).
 		if err := a.exec.Execute(ContextWithActor(ctx, "auto"), act); err != nil {
-			a.log.Error("auto-execute failed", "op", act.Op, "target", target(act), "err", err)
-			return annotate("[auto: FAILED — " + err.Error() + "]")
+			// Redacted because this string is DELIVERED and the egress chokepoint has
+			// already run: Auto.Run is called from app.onInvestigationComplete, which
+			// investigate.LoopInvestigator.deliver invokes only AFTER
+			// redactInvestigation — and notify.Format renders Action.Description
+			// verbatim into the webhook payload with no second pass. The reason is a
+			// live apiserver response body, so it carries whatever the apiserver put
+			// in it. Every other annotation on this path is server-derived (the op
+			// enum, the target workload, policy/config values), which is why this is
+			// the only one that needs scrubbing. The log line needs it for the same
+			// reason the curate-failure log does — it lands in the log aggregator.
+			reason := redact.Secrets(err.Error())
+			a.log.Error("auto-execute failed", "op", act.Op, "target", target(act), "err", reason)
+			return annotate("[auto: FAILED — " + reason + "]")
 		}
 		a.log.Info("auto-executed", "op", act.Op, "target", target(act))
 		return annotate("[auto-executed]")

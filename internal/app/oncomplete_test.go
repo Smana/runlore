@@ -11,11 +11,14 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/Smana/runlore/internal/action"
 	"github.com/Smana/runlore/internal/catalog"
+	"github.com/Smana/runlore/internal/config"
 	"github.com/Smana/runlore/internal/notify"
 	"github.com/Smana/runlore/internal/outcome"
 	"github.com/Smana/runlore/internal/providers"
@@ -529,4 +532,234 @@ func TestOnCompleteRecordsInvestigationStartTime(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestOnCompleteRedactsPriorKnowledge pins the second field stamped past the single
+// egress chokepoint, alongside CurateError above.
+//
+// investigate.LoopInvestigator.deliver calls redactInvestigation and THEN OnComplete,
+// so found.Prior — built here from a merged KB entry's Cause/Resolution sections —
+// has already missed it. Those sections are a KB body: whatever the investigation
+// wrote plus whatever a human edited in during review, and a pasted controller log
+// or a kubectl transcript in either one carries whatever it carried. Chat scrubs the
+// SAME excerpt (thread.chatSafe on catalog.Entry.Section), so the two egress paths
+// disagreed; the webhook is the one that lost, since notify.NewPayload copies Cause
+// and Resolution straight into PriorPayload's JSON under a comment promising an
+// "(already-redacted) Investigation".
+func TestOnCompleteRedactsPriorKnowledge(t *testing.T) {
+	const token = "ghp_0123456789abcdefghijklmnopqrstuvwxyzAB"
+	path := filepath.Join(t.TempDir(), "outcomes.jsonl")
+	ledger, err := outcome.New(path)
+	if err != nil {
+		t.Fatalf("new ledger: %v", err)
+	}
+	// A prior open for the same trigger key makes this run occurrence #2, which is
+	// the only condition under which Prior is stamped from the catalog.
+	if err := ledger.Open(outcome.Event{
+		Fingerprint: "fp0", TriggerKey: "k", At: time.Now().Add(-4 * time.Hour),
+	}); err != nil {
+		t.Fatalf("seed open: %v", err)
+	}
+
+	entry := catalog.Entry{
+		Path: "incidents/e.md",
+		Body: "## Cause\n\nregistry auth failed with token " + token +
+			"\n\n## Resolution\n\nrotate it and re-apply with password=hunter2horse\n",
+	}
+	sink := &captureNotifier{}
+	onInvestigationComplete(context.Background(),
+		providers.Investigation{Title: "t", Fingerprint: "fp1", TriggerKey: "k"},
+		ledger, fakePrior{e: entry, ok: true}, nil, notify.NewMulti(discardLog(), sink),
+		nil, nil, nil, discardLog())
+
+	p := sink.got.Prior
+	if p == nil {
+		t.Fatal("Prior not stamped on a recurring fresh investigation")
+	}
+	if strings.Contains(p.Cause, token) {
+		t.Errorf("Prior.Cause reached the notifier unredacted — it is stamped AFTER "+
+			"redactInvestigation, so nothing else will scrub it: %q", p.Cause)
+	}
+	if strings.Contains(p.Resolution, "hunter2horse") {
+		t.Errorf("Prior.Resolution reached the notifier unredacted — it is stamped AFTER "+
+			"redactInvestigation, so nothing else will scrub it: %q", p.Resolution)
+	}
+	// The excerpt must still be an excerpt: masking the secret is not licence to drop
+	// the sentence the on-call reads instead of clicking through to the forge.
+	if !strings.Contains(p.Cause, "registry auth failed") {
+		t.Errorf("Prior.Cause lost its non-secret text: %q", p.Cause)
+	}
+	if !strings.Contains(p.Resolution, "rotate it and re-apply") {
+		t.Errorf("Prior.Resolution lost its non-secret text: %q", p.Resolution)
+	}
+	// EntryPath is a catalog path (a redactionSkipField entry inside the loop) and must
+	// stay verbatim, or the notification's link to the merged entry breaks.
+	if p.EntryPath != "incidents/e.md" {
+		t.Errorf("Prior.EntryPath = %q, want the catalog path verbatim", p.EntryPath)
+	}
+}
+
+// TestPriorPayloadCarriesNoSecret is the same fact asserted at the sink that actually
+// serialises it. notify.NewPayload's doc calls its input an "(already-redacted)
+// Investigation" and copies Prior.Cause/Resolution verbatim into JSON: unlike the
+// Slack and Matrix renderers there is no second redaction pass at render, so the
+// webhook body is the exact place an unscrubbed Prior escapes the process.
+func TestPriorPayloadCarriesNoSecret(t *testing.T) {
+	const token = "ghp_0123456789abcdefghijklmnopqrstuvwxyzAB"
+	path := filepath.Join(t.TempDir(), "outcomes.jsonl")
+	ledger, err := outcome.New(path)
+	if err != nil {
+		t.Fatalf("new ledger: %v", err)
+	}
+	if err := ledger.Open(outcome.Event{
+		Fingerprint: "fp0", TriggerKey: "k", At: time.Now().Add(-4 * time.Hour),
+	}); err != nil {
+		t.Fatalf("seed open: %v", err)
+	}
+	entry := catalog.Entry{
+		Path: "incidents/e.md",
+		Body: "## Cause\n\ntoken " + token + " expired\n\n## Resolution\n\nrotate\n",
+	}
+	sink := &captureNotifier{}
+	onInvestigationComplete(context.Background(),
+		providers.Investigation{Title: "t", Fingerprint: "fp1", TriggerKey: "k"},
+		ledger, fakePrior{e: entry, ok: true}, nil, notify.NewMulti(discardLog(), sink),
+		nil, nil, nil, discardLog())
+
+	body, err := json.Marshal(notify.NewPayload(sink.got))
+	if err != nil {
+		t.Fatalf("marshal payload: %v", err)
+	}
+	if strings.Contains(string(body), token) {
+		t.Errorf("the webhook JSON carries a credential verbatim:\n%s", body)
+	}
+}
+
+// failingExec stands in for a cluster executor whose write was rejected by the
+// apiserver, so the test can reach Auto's FAILED annotation — the only branch that
+// splices an externally-supplied string into a delivered Action.Description.
+type failingExec struct{ err error }
+
+func (f failingExec) Execute(context.Context, providers.Action) error { return f.err }
+
+// TestOnCompleteDeliversNothingUnredacted is the guard that the post-chokepoint leaks
+// have so far each lacked.
+//
+// investigate.redactInvestigation is called by LoopInvestigator.deliver BEFORE
+// OnComplete, so every string this pipeline stamps afterwards is past the single
+// egress chokepoint and will never be scrubbed by it. investigate's own reflection
+// guard cannot see any of this: it tests the redactor, which has already run by the
+// time this function starts. So both known leaks (CurateError, then Prior) were found
+// by a human reading the ordering — which is not a control.
+//
+// This closes that: it feeds a secret in at EVERY external seam the pipeline reads
+// from — the curator's error, the merged KB entry's body, the executor's error — then
+// reflectively walks the Investigation actually handed to the notifier and fails if
+// the secret is anywhere in it. A future field stamped here from an external source
+// fails this test on the day it is added, without anyone re-deriving the ordering.
+func TestOnCompleteDeliversNothingUnredacted(t *testing.T) {
+	const marker = "hunter2horse"
+	secret := "password=" + marker
+
+	dir := t.TempDir()
+	ledger, err := outcome.New(filepath.Join(dir, "outcomes.jsonl"))
+	if err != nil {
+		t.Fatalf("new ledger: %v", err)
+	}
+	// A prior open makes this occurrence #2, the only state in which Prior is stamped.
+	if err := ledger.Open(outcome.Event{
+		Fingerprint: "fp0", TriggerKey: "k", CuratedURL: "https://kb/prev",
+		At: time.Now().Add(-4 * time.Hour),
+	}); err != nil {
+		t.Fatalf("seed open: %v", err)
+	}
+
+	// Seam 1: the merged KB entry's body — free text a human edited during review.
+	entry := catalog.Entry{
+		Path: "incidents/e.md",
+		Body: "## Cause\n\ncause " + secret + "\n\n## Resolution\n\nresolution " + secret + "\n",
+	}
+	// Seam 2: the forge's own error body, which carries whatever it carries.
+	cur := failingCurator{err: fmt.Errorf("open PR: %s", secret)}
+	// Seam 3: the apiserver's rejection of an auto-executed remediation.
+	auto := action.NewAuto(
+		failingExec{err: fmt.Errorf("patch rejected: %s", secret)},
+		config.AutoPolicy{MinConfidence: 0.5},
+		action.New(config.ActionPolicy{
+			Mode:  config.ActionAuto,
+			Allow: config.ActionAllow{ReversibleOnly: true, Namespaces: []string{"apps"}},
+		}),
+		nil, discardLog(),
+	)
+	auto.Resume() // NewAuto starts paused (fail closed)
+
+	// The investigation itself arrives CLEAN: it has been through the chokepoint, so
+	// anything secret-shaped in the delivered result came from a seam above.
+	found := providers.Investigation{
+		Title: "disk pressure", Fingerprint: "fp1", TriggerKey: "k", Confidence: 0.9,
+		Actions: []providers.Action{{
+			Name: "suspend web", Description: "suspend the Kustomization", Op: "suspend",
+			Reversible: true,
+			Target:     providers.Workload{Kind: "Kustomization", Name: "web", Namespace: "apps"},
+		}},
+	}
+	sink := &captureNotifier{}
+	onInvestigationComplete(context.Background(), found, ledger, fakePrior{e: entry, ok: true},
+		cur, notify.NewMulti(discardLog(), sink), auto, nil, nil, discardLog())
+
+	// Every seam must actually have fired, or the walk below proves nothing.
+	if sink.got.Prior == nil {
+		t.Fatal("Prior was not stamped — the KB seam never fired, so this guard is vacuous")
+	}
+	if sink.got.CurateError == "" {
+		t.Fatal("CurateError was not stamped — the curator seam never fired, so this guard is vacuous")
+	}
+	if len(sink.got.Actions) != 1 || !strings.Contains(sink.got.Actions[0].Description, "auto: FAILED") {
+		t.Fatalf("the executor seam never fired, so this guard is vacuous: %+v", sink.got.Actions)
+	}
+
+	for path, val := range reachableStrings(sink.got) {
+		if strings.Contains(val, marker) {
+			t.Errorf("%s reached the notifier with a secret the egress chokepoint never saw: %q\n"+
+				"It is stamped by onInvestigationComplete, which runs AFTER "+
+				"investigate.redactInvestigation — redact it at its assignment, as CurateError "+
+				"and Prior are.", path, val)
+		}
+	}
+}
+
+// reachableStrings collects every exported string reachable from inv, keyed by its
+// full field path. Deliberately total: this pipeline's whole failure mode is a field
+// nobody thought to check, so the walk prunes nothing.
+func reachableStrings(inv providers.Investigation) map[string]string {
+	out := map[string]string{}
+	var walk func(path string, v reflect.Value)
+	walk = func(path string, v reflect.Value) {
+		switch v.Kind() {
+		case reflect.String:
+			out[path] = v.String()
+		case reflect.Pointer, reflect.Interface:
+			if !v.IsNil() {
+				walk(path, v.Elem())
+			}
+		case reflect.Struct:
+			tp := v.Type()
+			for i := 0; i < v.NumField(); i++ {
+				if tp.Field(i).PkgPath != "" {
+					continue
+				}
+				walk(path+"."+tp.Field(i).Name, v.Field(i))
+			}
+		case reflect.Slice, reflect.Array:
+			for i := 0; i < v.Len(); i++ {
+				walk(path, v.Index(i))
+			}
+		case reflect.Map:
+			for _, k := range v.MapKeys() {
+				walk(path, v.MapIndex(k))
+			}
+		}
+	}
+	walk("Investigation", reflect.ValueOf(inv))
+	return out
 }
