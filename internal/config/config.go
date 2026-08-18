@@ -1015,11 +1015,16 @@ func (m *AnnounceMode) UnmarshalYAML(value *yaml.Node) error {
 		}
 		return nil
 	}
-	var s string
-	if err := value.Decode(&s); err != nil {
+	// Named for what it is rather than "s": internal/foldguard groups
+	// case-normalised values per package BY NAME, and an unrelated `s` folded with
+	// EqualFold elsewhere in this file made the two look like one value reached by
+	// two normalisers — the exact defect that guard exists to catch. A distinct
+	// name is the honest fix; an allowlist entry would have hidden a real one later.
+	var raw string
+	if err := value.Decode(&raw); err != nil {
 		return fmt.Errorf("notify.thread.announce_kb_updates must be a boolean or one of %s: %w", announceModeList, err)
 	}
-	*m = AnnounceMode(strings.ToLower(strings.TrimSpace(s)))
+	*m = AnnounceMode(strings.ToLower(strings.TrimSpace(raw)))
 	return nil
 }
 
