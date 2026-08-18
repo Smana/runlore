@@ -8,9 +8,11 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -36,6 +38,21 @@ type stubMR struct {
 	entry    string
 	encoding string // "base64" unless set
 
+	// overflow is GitLab's truncation signal on /changes: true when the diff
+	// limits (max files, lines, patch bytes) cut the listing being returned.
+	overflow bool
+	// changesCount overrides changes_count, which defaults to agreeing with the
+	// changes array. "-" serves it EMPTY, which is what GitLab answers while a
+	// freshly created merge request's diff is still being computed.
+	changesCount string
+	// noProjects omits source_project_id / target_project_id entirely, the shape
+	// in which a zero-value id can reach the fork guard.
+	noProjects bool
+	// noLastCommitID serves the entry with an empty last_commit_id, which is the
+	// only input that can turn the Commits API write into an unconditional
+	// overwrite.
+	noLastCommitID bool
+
 	// commitStatus, when non-zero, is the status the Commits API answers with —
 	// 400 is what a stale last_commit_id gets.
 	commitStatus int
@@ -56,7 +73,9 @@ func (s *stubMR) start(t *testing.T) *Client {
 	} else {
 		s.content = cmp.Or(s.content, noteEntry)
 	}
-	s.lastCommit = "commit0"
+	if !s.noLastCommitID {
+		s.lastCommit = "commit0"
+	}
 	if s.changed == nil {
 		s.changed = []string{"index.md", "log.md", "concepts/oom-1.md"}
 	}
@@ -74,10 +93,20 @@ func (s *stubMR) start(t *testing.T) *Client {
 			if src == 0 {
 				src = 7
 			}
-			_ = json.NewEncoder(w).Encode(map[string]any{
+			count := cmp.Or(s.changesCount, strconv.Itoa(len(s.changed)))
+			if count == "-" {
+				count = ""
+			}
+			payload := map[string]any{
 				"state": cmp.Or(s.state, "opened"), "source_branch": cmp.Or(s.branch, "runlore/kb-oom-1"),
 				"source_project_id": src, "target_project_id": 7, "changes": changes,
-			})
+				"changes_count": count, "overflow": s.overflow,
+			}
+			if s.noProjects {
+				delete(payload, "source_project_id")
+				delete(payload, "target_project_id")
+			}
+			_ = json.NewEncoder(w).Encode(payload)
 		case strings.Contains(path, "/repository/files/"):
 			s.mu.Lock()
 			defer s.mu.Unlock()
@@ -230,8 +259,16 @@ func TestAppendToEntryOnPRPropagatesAConflict(t *testing.T) {
 func TestAppendToEntryOnPRRefusesAnUnreadableEntry(t *testing.T) {
 	s := &stubMR{encoding: "none"}
 	c := s.start(t)
-	if err := c.AppendToEntryOnPR(context.Background(), 84, "the second note", "k1"); err == nil {
+	err := c.AppendToEntryOnPR(context.Background(), 84, "the second note", "k1")
+	if err == nil {
 		t.Fatal("want an error: a read that returns nothing must never be treated as an empty entry")
+	}
+	// Named, not merely non-nil. An unreadable body decodes to zero bytes, which
+	// the frontmatter guard behind this one also refuses — so without naming the
+	// encoding this test scores that guard and would keep passing with the read's
+	// own check deleted.
+	if !strings.Contains(err.Error(), "encoding") {
+		t.Errorf("err = %v, want the read to refuse the encoding rather than lean on the guard behind it", err)
 	}
 	if commits := s.writes(); len(commits) != 0 {
 		t.Fatalf("the entry was rewritten from an unreadable read: %+v", commits)
@@ -391,10 +428,18 @@ func TestAppendToEntryOnPRRefusesWhenTheEntryIsAmbiguous(t *testing.T) {
 // TestAppendToEntryOnPRRefusesWithoutASourceBranch: an MR payload with no
 // source_branch must not become a commit onto the empty branch name, which
 // GitLab would resolve to the project default.
+//
+// The payload is healthy in every OTHER respect — three changed paths naming one
+// entry, matching changes_count, same-project ids — deliberately. An earlier
+// version served no changes at all, so deleting the guard under test still
+// produced an error (from okf.EntryFile, one line further down) and the test went
+// on passing while pinning nothing.
 func TestAppendToEntryOnPRRefusesWithoutASourceBranch(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if strings.HasSuffix(r.URL.EscapedPath(), "/merge_requests/84/changes") {
-			_, _ = w.Write([]byte(`{"state":"opened","source_project_id":7,"target_project_id":7,"changes":[]}`))
+			_, _ = w.Write([]byte(`{"state":"opened","source_project_id":7,"target_project_id":7,` +
+				`"changes_count":"3","overflow":false,"changes":[{"new_path":"index.md"},` +
+				`{"new_path":"log.md"},{"new_path":"concepts/oom-1.md"}]}`))
 			return
 		}
 		t.Errorf("reached %s %s past the source-branch guard", r.Method, r.URL.EscapedPath())
@@ -403,7 +448,100 @@ func TestAppendToEntryOnPRRefusesWithoutASourceBranch(t *testing.T) {
 	defer srv.Close()
 
 	c := New(srv.URL, "o/r", "main", staticToken("tok"))
-	if err := c.AppendToEntryOnPR(context.Background(), 84, "note", "k1"); err == nil {
+	err := c.AppendToEntryOnPR(context.Background(), 84, "note", "k1")
+	if err == nil {
 		t.Fatal("want an error when the merge request names no source branch")
+	}
+	if !strings.Contains(err.Error(), "source branch") {
+		t.Errorf("err = %v, want the source-branch refusal rather than whatever a later guard happened to catch", err)
+	}
+}
+
+// TestAppendToEntryOnPRRefusesATruncatedChangesListing is the GitLab spelling of
+// github's full-page refusal, and the guard whose absence made this client's
+// "every guard the sibling has" claim false.
+//
+// `/changes` takes no page parameter, so there is no full page to notice. GitLab
+// truncates on DIFF SIZE instead and says so in `overflow`; changes_count is the
+// count it computed for itself, capped to the string "1000+" past the file
+// limit. Each of those is a listing okf.EntryFile would resolve just as cleanly
+// to the wrong file — the changed paths here are the healthy three, so nothing
+// but the truncation signal can produce the refusal.
+func TestAppendToEntryOnPRRefusesATruncatedChangesListing(t *testing.T) {
+	for name, s := range map[string]*stubMR{
+		"overflow":               {overflow: true},
+		"count past the cap":     {changesCount: "1000+"},
+		"count exceeds listing":  {changesCount: "40"},
+		"count not yet computed": {changesCount: "-"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			c := s.start(t)
+			if err := c.AppendToEntryOnPR(context.Background(), 84, "note", "k1"); err == nil {
+				t.Fatal("want a refusal: a truncated listing cannot be told from a complete one")
+			}
+			if commits := s.writes(); len(commits) != 0 {
+				t.Errorf("committed from a truncated listing: %+v", commits)
+			}
+		})
+	}
+}
+
+// TestAppendToEntryOnPRRefusesAnOversizedChangesListing is the other half of what
+// github's full-page check refuses: a merge request this large is not a RunLore
+// curation request (entry plus, at most, the reserved index.md and log.md),
+// whatever GitLab reports about truncation.
+//
+// Reproduces the divergence directly: a hundred changed paths of which exactly
+// one is a non-reserved .md is a listing okf.EntryFile resolves without
+// complaint, so before this guard GitLab answered nil and committed into
+// someone else's file inside a human's open merge request, while GitHub refused
+// the identically shaped pull request.
+func TestAppendToEntryOnPRRefusesAnOversizedChangesListing(t *testing.T) {
+	changed := []string{"concepts/oom-1.md"}
+	for i := range maxChangedPaths - 1 {
+		changed = append(changed, fmt.Sprintf("chart/values-%d.yaml", i))
+	}
+	s := &stubMR{changed: changed}
+	c := s.start(t)
+	if err := c.AppendToEntryOnPR(context.Background(), 84, "note", "k1"); err == nil {
+		t.Fatal("want a refusal: a merge request this size is not a curation merge request")
+	}
+	if commits := s.writes(); len(commits) != 0 {
+		t.Errorf("committed from an oversized listing: %+v", commits)
+	}
+}
+
+// TestAppendToEntryOnPRRefusesWithoutALastCommitID: the Commits API treats a
+// missing last_commit_id as "overwrite unconditionally", so sending the action
+// without it is not a weaker write, it is the read-modify-write this file exists
+// to avoid — a reviewer's Web IDE edit reverted with nothing reporting it.
+//
+// GitHub's counterpart cannot reach that state: its contents API rejects a PUT
+// over an existing file with no sha. GitLab's accepts it, so the refusal has to
+// be spelled here.
+func TestAppendToEntryOnPRRefusesWithoutALastCommitID(t *testing.T) {
+	s := &stubMR{noLastCommitID: true}
+	c := s.start(t)
+	if err := c.AppendToEntryOnPR(context.Background(), 84, "the second note", "k1"); err == nil {
+		t.Fatal("want an error: an absent last_commit_id must not downgrade the write to an unconditional overwrite")
+	}
+	if commits := s.writes(); len(commits) != 0 {
+		t.Fatalf("sent an unconditional overwrite: %+v", commits)
+	}
+}
+
+// TestAppendToEntryOnPRRefusesAnMRWithoutProjectIDs: the fork guard compares two
+// ids, so a response carrying NEITHER compares 0 against 0 and passes — the one
+// input on which "equal ids" stops meaning "same-project merge request". GitHub's
+// fork guard fails closed on its missing field (an empty full_name never equals
+// the configured repo), so this one has to as well.
+func TestAppendToEntryOnPRRefusesAnMRWithoutProjectIDs(t *testing.T) {
+	s := &stubMR{noProjects: true, branch: "main"}
+	c := s.start(t)
+	if err := c.AppendToEntryOnPR(context.Background(), 84, "note", "k1"); err == nil {
+		t.Fatal("want a refusal rather than reading two absent ids as a same-project merge request")
+	}
+	if commits := s.writes(); len(commits) != 0 {
+		t.Errorf("committed onto %v without knowing which project the branch is in", commits)
 	}
 }
