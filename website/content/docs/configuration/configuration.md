@@ -520,6 +520,17 @@ limitations, kept distinct from human-only open questions):
 and `data_gaps` alongside the existing `title`/`confidence`/`curated_url`/`text` fields (all
 `omitempty`).
 
+**Resource scope in the payload** (`notify.webhook` JSON and `notify.templated` templates alike).
+`resource` is the object's name, verbatim. `namespace` is the namespace the finding is **scoped to** —
+the one the object is in, or the namespace itself when the finding is *about* a namespace — and is
+**omitted when the object is in no namespace at all**: a `Node` is cluster-scoped and an RDS instance
+is not a Kubernetes object, so the alert's `namespace` label on either names whatever exported the
+series (kube-state-metrics, the alerting rule), not the resource. `resource_ref` (template
+`.ResourceRef`) is the whole scoped identity — `namespace/name`, or the bare name when there is
+nothing to qualify it — and is the same string the Slack card prints. A template that joined
+`.Namespace` and `.Resource` by hand keeps working, but should render `.ResourceRef` instead: it is
+correct for every kind, where the hand-join is merely no longer wrong.
+
 **👍/👎 feedback buttons — `feedback_buttons` (opt-in, default `false`).** When enabled, Slack
 investigation messages carry two buttons ("👍 Accurate" / "👎 Off-base") so the on-call can rate the
 diagnosis in one click. Ratings land in the **outcome ledger** and weigh the recalled entry's trust

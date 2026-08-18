@@ -41,6 +41,11 @@ locally]({{< relref "webhook.md#verify-it-locally" >}})) and inspect the rendere
 
 - Each instance renders a Go `text/template` over the delivery payload — the same fields the
   `notify.webhook` JSON carries — and POSTs the result.
+- **Render the affected resource with `{{ .ResourceRef }}`**, not `{{ .Namespace }}/{{ .Resource }}`:
+  it is the whole scoped identity (`namespace/name`, or the bare name for a `Node`, an RDS instance
+  or any other object that has no namespace), and it is the same string the Slack card prints.
+  `.Namespace` is empty for an object that is in no namespace, so a hand-join renders a stray leading
+  slash there instead of the namespace it used to invent.
 - **Two template functions**: `toJSON` (escaping-correct JSON splicing — always use it for values
   inside JSON bodies) and `mulPct` (×100 for percent display).
 - Findings are secret-redacted **before** any notifier runs, so templates only ever see redacted data.
