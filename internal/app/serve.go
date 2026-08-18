@@ -159,6 +159,12 @@ func RunServe(version string, args []string) error {
 	if msg := CostCeilingWithoutPricingWarning(cfg); msg != "" {
 		log.Warn(msg)
 	}
+	// An unrecognised gitops.engine resolves to flux without a word, so an Argo CD
+	// deployment that typed "argo" gets the whole Flux path — including GitOps tools
+	// scoped to kinds its cluster cannot own, which is runlore#503 reached by a typo.
+	if msg := UnknownGitopsEngineWarning(cfg.GitOps.Engine); msg != "" {
+		log.Warn(msg)
+	}
 
 	// Set up the single shared OTel metrics instance before building the investigator
 	// so recall + the investigation loop can record to it from the first request.

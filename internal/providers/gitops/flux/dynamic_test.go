@@ -4,14 +4,18 @@ package flux
 
 import (
 	"context"
+	"errors"
+	"slices"
 	"strings"
 	"testing"
 	"time"
 
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	dynamicfake "k8s.io/client-go/dynamic/fake"
+	k8stesting "k8s.io/client-go/testing"
 
 	"github.com/Smana/runlore/internal/providers"
 )
@@ -316,5 +320,93 @@ func TestDynamicReaderWatch(t *testing.T) {
 		}
 	case <-time.After(5 * time.Second):
 		t.Fatal("timed out waiting for informer event")
+	}
+}
+
+// TestGetResourceReportsWhatTheLookupEstablished pins the three outcomes a bare 404
+// used to collapse into one.
+//
+// The dynamic client reports "no object of that name" and "the API serves no such kind"
+// as the same NotFound, and the cluster-wide List's error was discarded outright
+// (`if lerr == nil`), so a search RBAC refused was reported as a search that found
+// nothing. Those are the states in which "and no such object exists" was false —
+// runlore#503's mechanism, alive on the SUPPORTED-kind path that engine scoping never
+// touched.
+//
+// The discriminator for an unserved kind is the List: against a served resource it
+// returns an empty list, never a 404.
+func TestGetResourceReportsWhatTheLookupEstablished(t *testing.T) {
+	gvrToListKind := map[schema.GroupVersionResource]string{helmReleaseGVR: "HelmReleaseList"}
+	forbidden := apierrors.NewForbidden(schema.GroupResource{Group: "helm.toolkit.fluxcd.io", Resource: "helmreleases"},
+		"", errors.New("no permission"))
+	unserved := apierrors.NewNotFound(schema.GroupResource{Group: "helm.toolkit.fluxcd.io", Resource: "helmreleases"}, "")
+
+	for _, tc := range []struct {
+		name       string
+		listErr    error
+		wantReason providers.LookupReason
+		wantScopes []string
+	}{
+		{
+			name:       "served kind, nothing by that name anywhere",
+			wantReason: providers.LookupAbsent,
+			wantScopes: []string{"apps", "flux-system", providers.AllNamespaces},
+		},
+		{
+			name:       "cluster-wide search refused by RBAC",
+			listErr:    forbidden,
+			wantReason: providers.LookupDenied,
+			// "all namespaces" must NOT appear: it never ran, and claiming it did is the
+			// half of the old message that was simply untrue.
+			wantScopes: []string{"apps", "flux-system"},
+		},
+		{
+			name:       "CRD not served by this API server",
+			listErr:    unserved,
+			wantReason: providers.LookupKindNotServed,
+			wantScopes: []string{"apps", "flux-system"},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			client := dynamicfake.NewSimpleDynamicClientWithCustomListKinds(runtime.NewScheme(), gvrToListKind)
+			if tc.listErr != nil {
+				client.PrependReactor("list", "helmreleases", func(k8stesting.Action) (bool, runtime.Object, error) {
+					return true, nil, tc.listErr
+				})
+			}
+			_, err := NewDynamicReader(client).GetResource(context.Background(), "HelmRelease", "apps", "api")
+			if err == nil {
+				t.Fatal("want an error for a missing object")
+			}
+			if !apierrors.IsNotFound(err) {
+				t.Errorf("the API's NotFound must stay recoverable through the wrapper: %v", err)
+			}
+			lk, ok := providers.LookupOf(err)
+			if !ok {
+				t.Fatalf("no Lookup attached, so the caller can only guess at a verdict: %v", err)
+			}
+			if lk.Reason != tc.wantReason {
+				t.Errorf("Reason = %q, want %q", lk.Reason, tc.wantReason)
+			}
+			if !slices.Equal(lk.Scopes, tc.wantScopes) {
+				t.Errorf("Scopes = %v, want %v — a reply may only name searches that ran", lk.Scopes, tc.wantScopes)
+			}
+		})
+	}
+}
+
+// TestGetResourceUnresolvableKindIsNotANegative pins that a kind this provider has no
+// mapping for is reported as a scope limit, not as a lookup that found nothing — no
+// request is ever issued, so there is nothing to report about the object.
+func TestGetResourceUnresolvableKindIsNotANegative(t *testing.T) {
+	client := dynamicfake.NewSimpleDynamicClientWithCustomListKinds(runtime.NewScheme(),
+		map[schema.GroupVersionResource]string{helmReleaseGVR: "HelmReleaseList"})
+	_, err := NewDynamicReader(client).GetResource(context.Background(), "ArtifactGenerator", "flux-system", "monorepo-split")
+	lk, ok := providers.LookupOf(err)
+	if !ok || lk.Reason != providers.LookupUnresolvable {
+		t.Fatalf("Lookup = %+v (ok=%v), want reason %q", lk, ok, providers.LookupUnresolvable)
+	}
+	if apierrors.IsNotFound(err) {
+		t.Error("an unresolvable kind must not masquerade as a NotFound: nothing was looked up")
 	}
 }

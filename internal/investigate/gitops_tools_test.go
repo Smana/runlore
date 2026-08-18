@@ -65,8 +65,14 @@ func TestGitOpsTreeTool(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Call: %v", err)
 	}
-	if !strings.Contains(out, "NOT FOUND  ← root") || !strings.Contains(out, "infra-artifact") {
-		t.Fatalf("tree output missing the root marker:\n%s", out)
+	// The node the API did not return is reported as a lookup result, NOT nominated as
+	// the cause: "← root" hands back a root cause outright, which is the very reason
+	// this branch gives for refusing an out-of-scope kind in this tool.
+	if !strings.Contains(out, "not found by name") || !strings.Contains(out, "infra-artifact") {
+		t.Fatalf("tree output does not report the missing node:\n%s", out)
+	}
+	if strings.Contains(out, "← root") {
+		t.Fatalf("tree output still nominates a root cause from one name lookup:\n%s", out)
 	}
 	// The root should be indented deeper than the top node.
 	if !strings.Contains(out, "    GitRepository flux-system/infra-artifact") {

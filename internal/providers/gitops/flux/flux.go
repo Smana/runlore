@@ -393,14 +393,29 @@ func parseRevision(rev string) string {
 	return rev
 }
 
+// GitOpsEngine reports the engine this provider speaks, so a consumer can describe the
+// deployment from the provider it was handed instead of from the unvalidated
+// gitops.engine string. It is the same fact every Change already carries.
+func (p *Provider) GitOpsEngine() providers.Engine { return providers.EngineFlux }
+
 // ResourceStatus returns a Flux/K8s object's Ready condition, key spec refs
 // (sourceRef, dependsOn, url) and recent Events — the "why is it failing" lens.
-// A missing object is reported via NotFound (often the cascade root), not an error.
+// A read that returns no object is reported via NotFound + Lookup, not an error, so the
+// caller can say what the negative established rather than assert the object is absent.
 func (p *Provider) ResourceStatus(ctx context.Context, w providers.Workload) (providers.ResourceStatus, error) {
 	rs := providers.ResourceStatus{Workload: w, Refs: map[string]string{}}
 	u, err := p.reader.GetResource(ctx, w.Kind, w.Namespace, w.Name)
+	if lk, ok := providers.LookupOf(err); ok {
+		// A kind this provider cannot resolve is a scope limit, not a negative about the
+		// cluster, so it stays an ERROR — which the loop already reads as missing data.
+		if lk.Reason == providers.LookupUnresolvable {
+			return rs, err
+		}
+		rs.NotFound, rs.Lookup = true, lk
+		return rs, nil
+	}
 	if apierrors.IsNotFound(err) {
-		rs.NotFound = true
+		rs.NotFound, rs.Lookup = true, providers.Lookup{Reason: providers.LookupAbsent}
 		return rs, nil
 	}
 	if err != nil {
@@ -439,12 +454,24 @@ func (p *Provider) depNode(ctx context.Context, w providers.Workload, seen map[s
 	}
 	seen[key] = true
 	u, err := p.reader.GetResource(ctx, w.Kind, w.Namespace, w.Name)
+	if lk, ok := providers.LookupOf(err); ok {
+		// Every negative is recorded, including the ones that are NOT about the object:
+		// an unresolvable kind (a sourceRef into a kind this provider has no mapping for
+		// — this repo's own eval walks into an ArtifactGenerator) used to fall through to
+		// "leave Ready empty", which renders as "(Ready=unknown)" and asserts a node
+		// nobody looked up.
+		node.NotFound = lk.Reason == providers.LookupAbsent
+		node.Lookup = lk
+		return node
+	}
 	if apierrors.IsNotFound(err) {
 		node.NotFound = true
+		node.Lookup = providers.Lookup{Reason: providers.LookupAbsent}
 		return node
 	}
 	if err != nil {
-		return node // unknown kind / transient — leave Ready empty, keep walking siblings
+		node.Lookup = providers.Lookup{Reason: providers.LookupFailed}
+		return node // transient — keep walking siblings, but do not claim the node exists
 	}
 	node.Ready, node.Reason, _ = readyCondition(u)
 	for _, dep := range dependsOn(u, w.Kind, w.Namespace) {
