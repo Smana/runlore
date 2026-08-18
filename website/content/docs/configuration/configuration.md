@@ -654,10 +654,17 @@ transports), `max_note_bytes` (default **8192**, one human message's input), `re
 **168h**), `registry_max` (default **2000**), plus `chat_calls_per_hour` and `chat_tokens_per_hour`
 — which apply only with `model.chat` set, and are covered in full below.
 
+One of those has a floor as well as a default: a positive `max_note_bytes` under 128 bytes is
+refused at load. Below that the truncation marker — the visible mark saying a note was cut —
+fills the whole budget on its own, so nothing of what the human typed is written while every
+surface still reports the write as saved. Leave it at 0 to use the default.
+
 The same block holds the one key that is a switch rather than a ceiling:
 `announce_kb_updates` (default **false**). With it on, every knowledge write that lands is
-also announced to your notifiers — naming the pull request, the entry, who wrote the note and
-which chat system they typed it in, and quoting the note itself. The announcement carries note
+also announced to your notifiers — naming the pull request, the entry, whose message produced the
+note and which chat system they typed it in, and quoting the note itself. Where the note was
+drafted by RunLore's chat model rather than typed after an explicit `note:`, the announcement
+says so instead of attributing the words to the person who prompted it. The announcement carries note
 content, so a note written in one thread reaches every sink you have configured; that is why it
 is opt-in.
 
