@@ -487,15 +487,19 @@ func summaryBlocks(inv providers.Investigation) []map[string]any {
 	head := "🔍 "
 	if inv.AlertName != "" {
 		head += inv.AlertName
-		scope := inv.Tenant
-		if scope == "" {
-			scope = inv.Cluster
-		}
+		// scopeIdentity here too, so the header collapses a tenant that only repeats
+		// the cluster exactly as the Cluster field does. cmp.Or then prefers the
+		// tenant, which is the narrower of the two names when both survive.
+		cluster, tenant := scopeIdentity(inv.Cluster, inv.Tenant)
+		scope := cmp.Or(tenant, cluster)
 		loc := make([]string, 0, 2)
 		if scope != "" {
 			loc = append(loc, scope)
 		}
-		if ref := inv.Resource.Ref(); ref != "" {
+		// resourceRef, not Resource.Ref() — see resourceRef. The header is the
+		// most-read line, so it is the last place to print a namespace an object
+		// was never in.
+		if ref := resourceRef(inv.Resource); ref != "" {
 			loc = append(loc, ref)
 		}
 		if len(loc) > 0 {
@@ -773,16 +777,20 @@ func metadataFields(inv providers.Investigation) []map[string]any {
 		}
 		add("Alert", name)
 	}
+	// One name, not the same name twice — see scopeIdentity, which the header and
+	// Format's metadata line also go through.
+	cluster, tenant := scopeIdentity(inv.Cluster, inv.Tenant)
 	scope := make([]string, 0, 2)
-	if inv.Tenant != "" {
-		scope = append(scope, escapeMrkdwn(inv.Tenant))
+	if tenant != "" {
+		scope = append(scope, escapeMrkdwn(tenant))
 	}
-	if inv.Cluster != "" {
-		scope = append(scope, escapeMrkdwn(inv.Cluster))
+	if cluster != "" {
+		scope = append(scope, escapeMrkdwn(cluster))
 	}
 	add("Cluster", strings.Join(scope, " · "))
-	if ref := inv.Resource.Ref(); ref != "" {
-		add("Resource", escapeMrkdwn(strings.TrimSpace(inv.Resource.Kind+" "+ref)))
+	// resourceLine, not Resource.Ref() — see resourceRef.
+	if line := resourceLine(inv.Resource); line != "" {
+		add("Resource", escapeMrkdwn(line))
 	}
 	add("Started", slackDate(inv.StartedAt))
 	// Only rendered when the investigation actually established a change. change_ref

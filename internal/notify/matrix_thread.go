@@ -219,8 +219,14 @@ func stampEncodedBytes(s threadStamp) int {
 // every re-investigation.
 func stampFor(inv providers.Investigation) threadStamp {
 	return boundStamp(threadStamp{
-		TriggerKey:    cmp.Or(inv.TriggerKey, inv.Fingerprint),
-		Title:         inv.Title,
+		TriggerKey: cmp.Or(inv.TriggerKey, inv.Fingerprint),
+		Title:      inv.Title,
+		// Ref(), NOT resourceRef, and deliberately so: this is the stamp's identity
+		// key, not card text. internal/thread/registry.go builds thread.Context.Resource
+		// from the same Ref(), and note.go derives the KB entry's `resource:` frontmatter
+		// from it — narrowing it here alone would desync the two stamp builders and
+		// orphan every thread already stamped. The namespace this carries can still be
+		// the alert exporter's; fixing that belongs where the workload is assembled.
 		Resource:      inv.Resource.Ref(),
 		Verdict:       string(inv.Verdict),
 		CuratedURL:    inv.CuratedURL,
