@@ -57,7 +57,11 @@ kubectl -n runlore logs deploy/runlore | grep 'tool=query_metrics'
   or an alertname with no matching rule all return an "unavailable" string rather than an error, so
   a missing rules API can never abort an investigation or be misread as "this alert has no rule".
   When the name does not match, the reply lists the alertnames the backend *does* define, with the
-  closest matches first.
+  closest matches first. Because a string is a *successful* tool call, each degraded outcome is
+  counted in `runlore_alert_rule_degraded_total` — labelled `systemic` (no rules endpoint, a failing
+  read, an empty ruleset: this deployment has lost the tool entirely) or `routine` (this alertname
+  has no rule here). See
+  [Observability]({{< relref "/docs/operations/observability.md" >}}) for the alert recipe.
 - `token_env` (bearer auth) and `headers` (e.g. `X-Scope-OrgID` for a multi-tenant backend) are
   available like every other data-source endpoint. `headers` values are **not secret-safe over plain
   HTTP** — use `https://` for a public host, or keep secrets in `token_env` only.

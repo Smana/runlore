@@ -160,7 +160,10 @@ func BuildModelAndTools(ctx context.Context, cfg *config.Config, gp providers.Gi
 			// than a plausible neighbour. It degrades to "unavailable" when the backend
 			// serves no /api/v1/rules, so it is safe to always register with the metrics
 			// backend.
-			investigate.AlertRuleTool{Metrics: m},
+			// Telemetry counts its DEGRADED outcomes: they are strings, so the loop books
+			// them as tool_calls_total{result="ok"} and a backend with no rules endpoint
+			// otherwise looks identical to a working one.
+			investigate.AlertRuleTool{Metrics: m, Telemetry: metrics},
 		)
 	}
 	if cfg.Logs.URL != "" {

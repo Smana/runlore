@@ -6,12 +6,19 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"maps"
 	"slices"
 	"strings"
 	"testing"
 	"time"
 
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/metric/noop"
+	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
+	"go.opentelemetry.io/otel/sdk/metric/metricdata"
+
 	"github.com/Smana/runlore/internal/providers"
+	"github.com/Smana/runlore/internal/telemetry"
 )
 
 // ruleScoping is how the fake backend treats the `rule_name[]` scoping the tool
@@ -405,4 +412,144 @@ func TestAlertRuleToolDoesNotConcludeAbsenceWhenTheContextExpires(t *testing.T) 
 		t.Fatalf("an expired context must not be reported as a resolved lookup: %q", out)
 	}
 	wantCalls(t, f, [][]string{{"RDSCriticalLatency"}})
+}
+
+// alertRuleDegradedSeries is the exported Prometheus series name, spelled out here so
+// a rename in internal/telemetry breaks this test rather than silently emptying the
+// panel an operator alerts on.
+const alertRuleDegradedSeries = "runlore_alert_rule_degraded_total"
+
+// meteredDegradations installs a REAL SDK meter provider backed by a manual reader and
+// returns the instrument set bound to it, plus a reader that sums the degradation
+// counter BY its reason/class attribute pair. meteredInstruments sums a whole series
+// and cannot answer the question this metric exists for — which path degraded — so the
+// per-attribute read is the point rather than duplicated convenience. The provider is
+// global, so callers must not run in parallel; cleanup restores the no-op provider.
+func meteredDegradations(t *testing.T) (*telemetry.Metrics, func() map[string]int64) {
+	t.Helper()
+	reader := sdkmetric.NewManualReader()
+	otel.SetMeterProvider(sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader)))
+	t.Cleanup(func() { otel.SetMeterProvider(noop.NewMeterProvider()) })
+	return telemetry.NewMetrics(), func() map[string]int64 {
+		var rm metricdata.ResourceMetrics
+		if err := reader.Collect(context.Background(), &rm); err != nil {
+			t.Fatalf("collect metrics: %v", err)
+		}
+		got := map[string]int64{}
+		for _, sm := range rm.ScopeMetrics {
+			for _, md := range sm.Metrics {
+				if md.Name != alertRuleDegradedSeries {
+					continue
+				}
+				sum, ok := md.Data.(metricdata.Sum[int64])
+				if !ok {
+					t.Fatalf("series %q is not an int64 sum (%T)", md.Name, md.Data)
+				}
+				for _, dp := range sum.DataPoints {
+					reason, _ := dp.Attributes.Value("reason")
+					class, _ := dp.Attributes.Value("class")
+					got[reason.AsString()+"/"+class.AsString()] += dp.Value
+				}
+			}
+		}
+		return got
+	}
+}
+
+// Every graceful degradation must be COUNTED, because none of them is visible anywhere
+// else: each returns a string, so the loop records tool_calls_total{result="ok"} and a
+// backend with no rules endpoint reads exactly like one where the tool works. The
+// class label is what makes the series alertable — systemic (the tool is dead for every
+// investigation on this deployment) versus routine (this one alertname has no rule,
+// which is normal and must not page anyone).
+func TestAlertRuleToolCountsDegradedOutcomes(t *testing.T) {
+	tests := []struct {
+		name     string
+		provider providers.MetricsProvider
+		want     map[string]int64
+	}{
+		{
+			// fakeMetrics implements ONLY providers.MetricsProvider: the capability is
+			// absent, so EVERY investigation on this deployment loses the tool. That is a
+			// config/deployment fact an operator can fix, and the one this counter exists for.
+			name:     "no rules capability is a systemic degradation",
+			provider: fakeMetrics{},
+			want:     map[string]int64{"no_capability/systemic": 1},
+		},
+		{
+			name:     "a backend that cannot serve the rules is systemic",
+			provider: &fakeRuleMetrics{err: errors.New("metrics status 404: unsupported path")},
+			want:     map[string]int64{"backend_error/systemic": 1},
+		},
+		{
+			// The endpoint answers, but the rules live elsewhere (a separate vmalert/Ruler):
+			// still a total loss of the tool for this deployment, still systemic.
+			name:     "an empty ruleset is systemic",
+			provider: &fakeRuleMetrics{},
+			want:     map[string]int64{"no_rules/systemic": 1},
+		},
+		{
+			// The tool WORKED — the backend answered with its rules and this incident's
+			// alertname is simply not among them. Per-incident and normal: folded in with
+			// the systemic paths it would drown the signal an operator must act on.
+			name: "an unmatched alertname is routine",
+			provider: &fakeRuleMetrics{scoping: scopingHonoured, rules: []providers.AlertRule{
+				{Name: "KubePodCrashLooping", Query: "x > 1"},
+			}},
+			want: map[string]int64{"unmatched_alert/routine": 1},
+		},
+		{
+			name:     "a resolved rule is not a degradation",
+			provider: &fakeRuleMetrics{rules: []providers.AlertRule{rdsRule}},
+			want:     map[string]int64{},
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			m, degradations := meteredDegradations(t)
+			out, err := AlertRuleTool{Metrics: tc.provider, Telemetry: m}.
+				Call(context.Background(), `{"alert":"RDSCriticalLatency"}`)
+			// Counting a degradation must never turn it INTO one: the investigation
+			// continues on every path here, which is the property the counter observes.
+			if err != nil {
+				t.Fatalf("a degraded lookup must never fail the investigation: %v", err)
+			}
+			if out == "" {
+				t.Fatal("a degraded lookup must still answer the model")
+			}
+			if got := degradations(); !maps.Equal(got, tc.want) {
+				t.Fatalf("%s = %v, want %v\ntool result:\n%s", alertRuleDegradedSeries, got, tc.want, out)
+			}
+		})
+	}
+}
+
+// A context error is NOT a degradation: it is returned as an error, so runTool already
+// records it as result="timeout"/"error" on tool_calls_total. Counting it here too
+// would inflate the systemic series with the loop's own deadline and send an operator
+// looking for a rules endpoint that is working fine.
+func TestAlertRuleToolDoesNotCountContextErrorsAsDegradations(t *testing.T) {
+	m, degradations := meteredDegradations(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, err := (AlertRuleTool{Metrics: &fakeRuleMetrics{err: context.Canceled}, Telemetry: m}).
+		Call(ctx, `{"alert":"RDSCriticalLatency"}`); err == nil {
+		t.Fatal("a cancelled context must still be returned as an error")
+	}
+	if got := degradations(); len(got) != 0 {
+		t.Fatalf("a context error must not be counted as a degradation, got %v", got)
+	}
+}
+
+// Telemetry is optional everywhere else in RunLore, and the tool is constructed without
+// it in every test above this one. A nil instrument set must be a no-op, never a panic
+// on the very path that exists to keep an investigation alive.
+func TestAlertRuleToolDegradesWithoutTelemetry(t *testing.T) {
+	out, err := AlertRuleTool{Metrics: fakeMetrics{}}.Call(context.Background(), `{"alert":"RDSCriticalLatency"}`)
+	if err != nil {
+		t.Fatalf("Call: %v", err)
+	}
+	if !strings.Contains(out, alertRuleUnavailable) {
+		t.Fatalf("want the unavailable degrade, got %q", out)
+	}
 }

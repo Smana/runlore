@@ -112,6 +112,22 @@ type Metrics struct {
 	KBDraftDefects        metric.Int64Counter
 	CatalogInvalidEntries metric.Int64Counter // structurally-invalid entries found at catalog load
 	CatalogEmbedDegraded  metric.Int64Counter // catalog reloads that left hybrid recall without vectors (embed failure — recall silently BM25-only until it clears)
+
+	// AlertRuleDegraded counts alert_rule calls that answered with an "unavailable"
+	// note instead of the firing rule's expression (label: reason, class).
+	// The tool degrades gracefully by design — a rule definition is corroborating
+	// context, never the primary evidence, so it must never fail an investigation —
+	// but that makes every degradation a STRING, which ToolCalls records as
+	// result="ok". A deployment whose backend serves no rules endpoint is therefore
+	// metrically identical to one where the tool works, while every investigation on
+	// it silently loses the feature: this counter is the only series that separates
+	// them.
+	// `reason` names the path that fired; `class` says what to do about it — systemic
+	// (no_capability, backend_error, no_rules: the tool is dead for EVERY
+	// investigation until config or the backend changes — alert on it) versus routine
+	// (unmatched_alert: this one incident's alertname has no rule here, which is
+	// normal and must never page).
+	AlertRuleDegraded metric.Int64Counter
 }
 
 // NewMetrics builds the instrument set from the global meter provider.
@@ -185,6 +201,7 @@ func NewMetrics() *Metrics {
 			"so recall can never match the entry; \"merge_gate\": the draft fails `lore validate-kb`, so its PR cannot merge)"),
 		CatalogInvalidEntries: ctr("catalog_invalid_entries_total", "structurally-invalid entries surfaced at catalog load"),
 		CatalogEmbedDegraded:  ctr("catalog_embed_degraded_total", "catalog reloads that left hybrid recall without vectors (embed failure)"),
+		AlertRuleDegraded:     ctr("alert_rule_degraded_total", "alert_rule tool calls that answered with an \"unavailable\" note instead of the firing rule's expression (label: reason=no_capability|backend_error|no_rules|unmatched_alert, class=systemic|routine)"),
 	}
 }
 

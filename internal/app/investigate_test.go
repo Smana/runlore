@@ -21,6 +21,7 @@ import (
 	"github.com/Smana/runlore/internal/config"
 	"github.com/Smana/runlore/internal/investigate"
 	"github.com/Smana/runlore/internal/providers"
+	"github.com/Smana/runlore/internal/telemetry"
 )
 
 // fakeExecutor is a no-op action.Executor for wiring tests that need a non-nil
@@ -141,6 +142,34 @@ func TestDiscoveryToolsGatedByProvider(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// The alert_rule tool must be handed the instrument set, or its degradation counter
+// is dead code: the series would read zero forever, which on a dashboard is
+// indistinguishable from "this deployment never degrades" — the exact silent-loss
+// failure the counter was added to end. Nothing else can catch a missed wiring here,
+// because a nil instrument set is legal (telemetry is optional) and silent by design.
+func TestAlertRuleToolWiredToTelemetry(t *testing.T) {
+	t.Setenv("KUBECONFIG", filepath.Join(t.TempDir(), "nonexistent-kubeconfig"))
+	cfg := &config.Config{Model: config.Model{Provider: "openai", BaseURL: "http://vllm:8000/v1", Model: "test-model"}}
+	cfg.Metrics.URL = "http://metrics:9090"
+	metrics := telemetry.NewMetrics()
+
+	_, tools, _, _ := BuildModelAndTools(context.Background(), cfg, nil, metrics, discardLog())
+	var found bool
+	for _, tl := range tools {
+		art, ok := tl.(investigate.AlertRuleTool)
+		if !ok {
+			continue
+		}
+		found = true
+		if art.Telemetry != metrics {
+			t.Fatalf("alert_rule must carry the instrument set, got %v", art.Telemetry)
+		}
+	}
+	if !found {
+		t.Fatal("alert_rule must be registered when the metrics backend is configured")
 	}
 }
 

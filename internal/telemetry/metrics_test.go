@@ -85,3 +85,16 @@ func TestKBDraftDefectsCounterConstructed(t *testing.T) {
 	}
 	m.KBDraftDefects.Add(context.Background(), 1)
 }
+
+// The alert_rule tool degrades to an "unavailable" STRING on four paths, and a string
+// is a successful tool call — so runlore_tool_calls_total records every one of them as
+// result="ok". A backend serving no rules endpoint is therefore metrically identical to
+// one where the tool works. This counter is the only series that separates them, so it
+// must construct and be safe to record like every other instrument.
+func TestAlertRuleDegradedCounterConstructed(t *testing.T) {
+	m := NewMetrics()
+	if m.AlertRuleDegraded == nil {
+		t.Fatal("NewMetrics must construct AlertRuleDegraded")
+	}
+	m.AlertRuleDegraded.Add(context.Background(), 1)
+}

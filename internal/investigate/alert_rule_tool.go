@@ -10,7 +10,11 @@ import (
 	"slices"
 	"strings"
 
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/metric"
+
 	"github.com/Smana/runlore/internal/providers"
+	"github.com/Smana/runlore/internal/telemetry"
 )
 
 // AlertRuleTool lets the model read the DEFINITION of the alerting rule that
@@ -42,6 +46,10 @@ import (
 // registered in internal/app/investigate.go (alongside the query_metrics tools).
 type AlertRuleTool struct {
 	Metrics providers.MetricsProvider
+	// Telemetry is optional and nil-safe, like every other *telemetry.Metrics in
+	// RunLore. It carries the degradation counter: the graceful degradations below are
+	// invisible in runlore_tool_calls_total, because a string IS a successful call.
+	Telemetry *telemetry.Metrics
 }
 
 // Name returns the tool name.
@@ -81,6 +89,43 @@ const statisticWarning = "→ query the exact metric AND statistic this expressi
 	"a _maximum is not its _average (a spiky maximum reads calm in the average), " +
 	"a read_* series is not a write_* one, and an absolute threshold is not a capacity-relative one."
 
+// alertRuleDegradation is one path on which this tool answers with an "unavailable"
+// note instead of a rule expression. reason and class are defined as a PAIR, in one
+// place, so a path can never be counted under a reason without the class an operator
+// alerts on — the two cannot drift apart.
+type alertRuleDegradation struct{ reason, class string }
+
+// The four degraded outcomes, split by what an operator should do about them.
+//
+// SYSTEMIC — the tool is dead for EVERY investigation on this deployment until
+// someone changes the configuration or fixes the backend. This is the one to alert on:
+// the tool exists to stop investigations reasoning about the wrong series, so losing
+// it silently reinstates the false negative it was built to remove.
+//
+// ROUTINE — the backend answered with its rules and this incident's alertname is
+// simply not among them (evaluated elsewhere, or renamed). Per-incident and expected;
+// paging on it would page on normal traffic. Folding the two classes into one number
+// buries the actionable signal under the noise, which is why `class` is a label rather
+// than a note in the docs.
+var (
+	degradeNoCapability = alertRuleDegradation{reason: "no_capability", class: "systemic"}
+	degradeBackendError = alertRuleDegradation{reason: "backend_error", class: "systemic"}
+	degradeNoRules      = alertRuleDegradation{reason: "no_rules", class: "systemic"}
+	degradeUnmatched    = alertRuleDegradation{reason: "unmatched_alert", class: "routine"}
+)
+
+// degraded counts one degraded outcome and returns its note unchanged, so recording
+// and answering are a single expression at every degradation site — a new path cannot
+// return "unavailable" prose without passing through the counter. It deliberately does
+// NOT make the outcome an error: the tool must never be able to fail an investigation.
+func (t AlertRuleTool) degraded(ctx context.Context, d alertRuleDegradation, note string) string {
+	if t.Telemetry != nil {
+		t.Telemetry.AlertRuleDegraded.Add(ctx, 1, metric.WithAttributes(
+			attribute.String("reason", d.reason), attribute.String("class", d.class)))
+	}
+	return note
+}
+
 // Call reads the rule definition for an alert name, or degrades gracefully.
 func (t AlertRuleTool) Call(ctx context.Context, args string) (string, error) {
 	var in struct {
@@ -95,9 +140,10 @@ func (t AlertRuleTool) Call(ctx context.Context, args string) (string, error) {
 	}
 	reader, ok := t.Metrics.(providers.AlertRuleReader)
 	if !ok {
-		return alertRuleUnavailable + " — the configured metrics backend serves no alerting-rule endpoint. " +
-			"Infer the thresholded series from the alert name and annotations, and say in data_gaps that the " +
-			"rule expression could not be read.", nil
+		return t.degraded(ctx, degradeNoCapability, alertRuleUnavailable+
+			" — the configured metrics backend serves no alerting-rule endpoint. "+
+			"Infer the thresholded series from the alert name and annotations, and say in data_gaps that the "+
+			"rule expression could not be read."), nil
 	}
 	// Step 1 — the SCOPED read: the backend is asked for this one rule by name. On the
 	// real backend that is a 25,531 B answer instead of the 348,429 B whole ruleset
@@ -141,16 +187,18 @@ func (t AlertRuleTool) Call(ctx context.Context, args string) (string, error) {
 		// Any OTHER failure (404, 500, an unparseable body) is context, never the
 		// finding: report it as missing data instead of an error, so it cannot be read
 		// as a fault signal about the incident.
-		return fmt.Sprintf("%s — reading the alerting rules failed: %v. Treat the rule expression as "+
-			"missing data (note it in data_gaps); it is NOT evidence about the incident.", alertRuleUnavailable, err), nil
+		return t.degraded(ctx, degradeBackendError, fmt.Sprintf(
+			"%s — reading the alerting rules failed: %v. Treat the rule expression as "+
+				"missing data (note it in data_gaps); it is NOT evidence about the incident.", alertRuleUnavailable, err)), nil
 	}
 	if len(rules) == 0 {
-		return alertRuleUnavailable + " — the metrics backend returned no alerting rules (it may evaluate " +
-			"them elsewhere, e.g. a separate vmalert/Ruler). Note it in data_gaps.", nil
+		return t.degraded(ctx, degradeNoRules, alertRuleUnavailable+
+			" — the metrics backend returned no alerting rules (it may evaluate "+
+			"them elsewhere, e.g. a separate vmalert/Ruler). Note it in data_gaps."), nil
 	}
 	matched := matchAlertRules(rules, name)
 	if len(matched) == 0 {
-		return renderUnmatchedAlert(name, rules), nil
+		return t.degraded(ctx, degradeUnmatched, renderUnmatchedAlert(name, rules)), nil
 	}
 	return renderMatchedRules(matched), nil
 }
