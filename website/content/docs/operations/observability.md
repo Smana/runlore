@@ -109,6 +109,7 @@ distributions — keep the SDK defaults and are read as heatmaps, not percentile
 |---|---|---|---|
 | `runlore_tool_calls_total` | counter | `tool`, `result` | investigation tool calls (`ok`/`error`) |
 | `runlore_tool_call_duration_seconds` | histogram | `tool` | per-tool latency |
+| `runlore_alert_rule_degraded_total` | counter | `reason`, `class` | `alert_rule` calls that answered with an "unavailable" note instead of the firing rule's expression. `reason` = `no_capability` (the metrics backend serves no alerting-rule endpoint), `backend_error` (the read failed — 404/500/unparseable body), `no_rules` (the endpoint answered, with an empty ruleset), `unmatched_alert` (the ruleset defines no rule under this alertname). `class` = `systemic` (the first three) or `routine` (`unmatched_alert`) |
 | `runlore_model_requests_total` | counter | `provider`, `result` | LLM requests (`ok`/`error`). `provider` is the wire protocol for the main model, plus the synthetic tiers `rerank` (instant recall's LLM reranker) and `embed` (the `/embeddings` endpoint on the hybrid-recall path) |
 | `runlore_model_request_duration_seconds` | histogram | `provider` | LLM request latency, same `provider` vocabulary |
 | `runlore_investigation_tokens_estimated` | histogram | — | per-investigation token estimate (pre-request `chars/4` heuristic, investigation loop only — excludes the adversarial verify phase). This is what the `RunloreInvestigationCostHigh` alert watches |
@@ -190,6 +191,32 @@ sum by (ceiling) (rate(runlore_thread_chat_denied_total[1h]))
 # notes that became durable knowledge vs. notes that will vanish at merge
 sum by (route) (rate(runlore_thread_notes_written_total[24h]))
 ```
+
+**`class="systemic"` is the one to alert on.** `alert_rule` degrades gracefully by design — a
+rule definition is corroborating context, never the primary evidence, so it must never fail an
+investigation — and every degraded outcome is therefore a plain string, which the loop records as
+`tool_calls_total{tool="alert_rule",result="ok"}`. A backend serving no alerting-rule endpoint is
+metrically identical to one where the tool works, while every investigation on it silently loses
+the feature that keeps a threshold alert from being judged against the wrong series. This counter
+is the only series that separates them:
+
+```promql
+# the tool is delivering NO rule expressions on this deployment — a config or backend fact
+sum(rate(runlore_alert_rule_degraded_total{class="systemic"}[1h]))
+
+# which path fired: a missing capability, a failing read, or an empty ruleset
+sum by (reason) (rate(runlore_alert_rule_degraded_total{class="systemic"}[1h]))
+
+# share of alert_rule calls that came back without an expression
+sum(rate(runlore_alert_rule_degraded_total{class="systemic"}[1h]))
+  / sum(rate(runlore_tool_calls_total{tool="alert_rule"}[1h]))
+```
+
+`class="routine"` (`unmatched_alert`) is deliberately excluded from all three: the backend answered
+with its rules and this incident's alertname simply is not among them — evaluated elsewhere, or
+renamed. That is per-incident and normal, and folding it in with the systemic paths would bury the
+signal an operator must act on under traffic nobody should be paged for. Watch it as a rate if it
+climbs, though: a sudden step change means alertnames and rules have drifted apart.
 
 ### Recall, learning loop & curation
 | Metric | Type | Labels | Meaning |

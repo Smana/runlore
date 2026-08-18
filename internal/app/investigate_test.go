@@ -21,6 +21,7 @@ import (
 	"github.com/Smana/runlore/internal/config"
 	"github.com/Smana/runlore/internal/investigate"
 	"github.com/Smana/runlore/internal/providers"
+	"github.com/Smana/runlore/internal/telemetry"
 )
 
 // fakeExecutor is a no-op action.Executor for wiring tests that need a non-nil
@@ -82,9 +83,9 @@ func toolNames(tools []investigate.Tool) map[string]bool {
 	return names
 }
 
-// TestDiscoveryToolsGatedByProvider asserts the three new investigation tools appear
-// EXACTLY when their backing provider is configured: discover_metrics with the metrics
-// backend, and logs_error_summary + discover_log_fields with the logs backend. With
+// TestDiscoveryToolsGatedByProvider asserts the new investigation tools appear
+// EXACTLY when their backing provider is configured: discover_metrics + alert_rule with
+// the metrics backend, and logs_error_summary + discover_log_fields with the logs backend. With
 // neither configured they must be absent; wiring only one backend must not enable the
 // other's tools. KUBECONFIG is pointed at a nonexistent file so cluster-backed tools are
 // deterministically omitted and don't perturb the assertions.
@@ -102,25 +103,25 @@ func TestDiscoveryToolsGatedByProvider(t *testing.T) {
 	}{
 		{
 			name:       "no backends -> no discovery tools",
-			wantAbsent: []string{"discover_metrics", "logs_error_summary", "discover_log_fields"},
+			wantAbsent: []string{"discover_metrics", "alert_rule", "logs_error_summary", "discover_log_fields"},
 		},
 		{
 			name:        "metrics only -> discover_metrics present, log tools absent",
 			metricsURL:  "http://metrics:9090",
-			wantPresent: []string{"discover_metrics", "query_metrics"},
+			wantPresent: []string{"discover_metrics", "query_metrics", "alert_rule"},
 			wantAbsent:  []string{"logs_error_summary", "discover_log_fields"},
 		},
 		{
 			name:        "logs only -> log discovery tools present, discover_metrics absent",
 			logsURL:     "http://logs:9428",
 			wantPresent: []string{"logs_error_summary", "discover_log_fields", "query_logs"},
-			wantAbsent:  []string{"discover_metrics"},
+			wantAbsent:  []string{"discover_metrics", "alert_rule"},
 		},
 		{
 			name:        "both -> all discovery tools present",
 			metricsURL:  "http://metrics:9090",
 			logsURL:     "http://logs:9428",
-			wantPresent: []string{"discover_metrics", "logs_error_summary", "discover_log_fields"},
+			wantPresent: []string{"discover_metrics", "alert_rule", "logs_error_summary", "discover_log_fields"},
 		},
 	}
 	for _, tc := range tests {
@@ -141,6 +142,34 @@ func TestDiscoveryToolsGatedByProvider(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// The alert_rule tool must be handed the instrument set, or its degradation counter
+// is dead code: the series would read zero forever, which on a dashboard is
+// indistinguishable from "this deployment never degrades" — the exact silent-loss
+// failure the counter was added to end. Nothing else can catch a missed wiring here,
+// because a nil instrument set is legal (telemetry is optional) and silent by design.
+func TestAlertRuleToolWiredToTelemetry(t *testing.T) {
+	t.Setenv("KUBECONFIG", filepath.Join(t.TempDir(), "nonexistent-kubeconfig"))
+	cfg := &config.Config{Model: config.Model{Provider: "openai", BaseURL: "http://vllm:8000/v1", Model: "test-model"}}
+	cfg.Metrics.URL = "http://metrics:9090"
+	metrics := telemetry.NewMetrics()
+
+	_, tools, _, _ := BuildModelAndTools(context.Background(), cfg, nil, metrics, discardLog())
+	var found bool
+	for _, tl := range tools {
+		art, ok := tl.(investigate.AlertRuleTool)
+		if !ok {
+			continue
+		}
+		found = true
+		if art.Telemetry != metrics {
+			t.Fatalf("alert_rule must carry the instrument set, got %v", art.Telemetry)
+		}
+	}
+	if !found {
+		t.Fatal("alert_rule must be registered when the metrics backend is configured")
 	}
 }
 

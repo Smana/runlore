@@ -513,6 +513,70 @@ type MetricsProvider interface {
 	LabelValues(ctx context.Context, label string, matchers []string, w TimeWindow) ([]string, error)
 }
 
+// AlertRule is one ALERTING rule as the rules backend defines it: the expression
+// that is actually thresholded, plus the metadata that says how it fires.
+//
+// Query is the load-bearing field. A threshold alert names a specific metric AND a
+// specific statistic, and the two are not interchangeable — an alert on
+// aws_rds_write_latency_maximum is not corroborated (or refuted) by
+// aws_rds_write_latency_average, nor by the read-latency series that happens to
+// share its prefix. See AlertRuleReader for the misdiagnoses that motivated this.
+type AlertRule struct {
+	Name  string        // the alertname the rule fires under
+	Query string        // the PromQL/MetricsQL expression the rule thresholds
+	For   time.Duration // the `for:` hold-down; 0 means "fires on the first evaluation"
+	// State is the rule's current evaluation state as the backend reports it
+	// ("firing"/"pending"/"inactive"), or "" when it reports none. It makes a
+	// "stale alert" claim checkable instead of assumed.
+	State string
+	// Health and LastError report whether the rule is EVALUATING at all
+	// ("ok"/"err"/"unknown"). A rule in "err" health produces no data, which looks
+	// identical to a healthy metric sitting at zero.
+	Health    string
+	LastError string
+	// Group and File locate the rule's definition, so a noisy threshold can be
+	// fixed where it lives rather than merely reported.
+	Group       string
+	File        string
+	Labels      map[string]string // rule labels (severity, environment, …)
+	Annotations map[string]string // rule annotations (summary, runbook_url, …)
+}
+
+// AlertRuleReader is an OPTIONAL capability a MetricsProvider may implement: read
+// the ALERTING RULE DEFINITIONS the backend serves. Consumers type-assert for it
+// exactly like LogFields/LogStats, so a backend with no rules endpoint (a bare
+// remote-read gateway, a query-only proxy) simply omits it and the caller degrades.
+// Prometheus and VictoriaMetrics/vmalert both implement it via GET /api/v1/rules.
+//
+// It exists because an alert-triggered investigation otherwise has to GUESS which
+// series the alert thresholded, and guessing wrong inverts the conclusion. Two real
+// RDSCriticalLatency investigations did exactly that: the rule thresholds
+// aws_rds_*_latency_MAXIMUM, but one read only read_latency_maximum (0-1ms) and
+// concluded "false positive", while write_latency_maximum was in fact spiking to
+// 63.7ms; the other quoted write_latency_AVERAGE and claimed it "matches the alert
+// exactly". The rule text was one request away in both cases.
+//
+// Implementations return ALERTING rules only (recording rules are not thresholds)
+// and MUST be read-only — nothing here creates, edits or silences a rule.
+//
+// names, when given, is a HINT to scope the read to those alertnames (Prometheus
+// and vmalert both scope /api/v1/rules on repeated `rule_name[]` parameters, which
+// turns a ~509 KB / 278-rule download into the one rule the caller wants). It is
+// best effort in BOTH directions, and callers must treat it as such:
+//
+//   - the result may contain MORE than names — a backend that does not support the
+//     hint simply returns everything, so callers still filter what they got;
+//   - the result may contain LESS, up to nothing at all. An EMPTY result from a
+//     scoped read is therefore NOT evidence that those alertnames have no rule; it
+//     is indistinguishable from a backend that mishandled the hint. A caller that
+//     needs to establish absence — or that needs the other alertnames, e.g. to
+//     offer a corrected name — MUST re-read with no names before concluding.
+//
+// An unscoped read (no names) is always authoritative for what the backend serves.
+type AlertRuleReader interface {
+	AlertRules(ctx context.Context, names ...string) ([]AlertRule, error)
+}
+
 // LogsProvider abstracts the logs backend (VictoriaLogs now; Loki etc. later).
 type LogsProvider interface {
 	Query(ctx context.Context, query string, w TimeWindow) (LogResult, error)
