@@ -21,6 +21,13 @@ const gapTitlePrefix = "knowledge-gap: "
 // from the outcome ledger every run and opens an issue only when no knowledge-gap
 // issue for that pattern already exists — so re-running never double-opens (no mutable
 // store or watermark).
+//
+// ONE-OFF MIGRATION: patterns are grouped (and titled) by resource IDENTITY rather
+// than by the raw persisted string — see recurrencePattern. A gap issue already open
+// under a pod-scoped or ARN-spelled title no longer matches the pattern it guarded,
+// so at most one duplicate issue can be opened per affected pattern on the first run
+// after the upgrade; thereafter the new title guards it. Titles for a plain
+// namespace/name are byte-identical and are unaffected.
 type Recurrence struct {
 	Forge  Forge
 	Ledger interface {
@@ -168,9 +175,69 @@ func reasonSuffix(reason string) string {
 
 // recurrencePattern groups unresolved incidents by the affected resource, falling
 // back to the incident title when no resource was identified.
+//
+// The resource is grouped by its IDENTITY, not by the string it was persisted as —
+// the same rule the rest of the system keys and matches on. Two of the ways one
+// resource is spelled two ways used to open two buckets here, so one recurring fault
+// looked like two or three first sightings, each short of the threshold, and the
+// knowledge gap was never reported:
+//
+//   - The volatile pod-hash suffix (CORE-681). A pod-scoped alert carries the full
+//     pod name (KubePodNotReady has only a `pod` label), so three pods of one
+//     Deployment counted as three resources. resourceAgrees and curator.IncidentKey
+//     have forgiven this since CORE-681; this pass did not.
+//   - The ARN and the short spelling of a cloud resource. inv.Resource is
+//     model-written free text, so whichever spelling the model echoed back from the
+//     seed prompt is what the ledger holds.
+//
+// The pattern is also the issue TITLE, and the title is this pass's idempotency key
+// against already-open issues, so the grouping key and the rendered key are
+// deliberately the same value.
 func recurrencePattern(e outcome.Episode) string {
 	if e.Resource != "" {
-		return e.Resource
+		return resourceIdentityRef(e.Resource)
 	}
 	return e.Title
+}
+
+// resourceIdentityRef rewrites a rendered "namespace/name" resource ref to the
+// identity it should be GROUPED by, reusing providers.ParseResourceID — the single
+// source of truth the recall gate (investigate.refsAgree) and the curator keys
+// (curator.IncidentKey, DupFingerprint) already read. It restates none of it: a
+// private fourth copy of resource normalisation is exactly the drift this programme
+// has twice found in the BM25 query builders.
+//
+// Only the NAME half is rewritten, and the ref is cut on the FIRST "/" for the same
+// reason refsAgree is: a Kubernetes namespace never contains one, so a slash-style
+// ARN ("…:instance/i-0abc") survives whole in the name half. A ref with no "/" is a
+// bare namespace and is returned untouched, as refsAgree also treats it.
+//
+// THE ACCOUNT IS APPENDED WHEN THE NAME CARRIED ONE, with "@" and only when present
+// — the same shape DupFingerprint qualifies its ref with, so this is not a third
+// rule. It is what stops two AWS accounts hosting an instance of the same name from
+// grooming as one recurrence, which matters because collapsing an ARN to its bare
+// identifier is precisely what forces the two accounts equal (see
+// providers.NormalizeResourceName). A Kubernetes ref never has an account, so its
+// pattern grows no suffix and its bytes are unchanged.
+//
+// KNOWN RESIDUAL. IncidentKey and DupFingerprint read the account off the Workload
+// FIELD, which ingestion fills under EITHER spelling, so they qualify without
+// re-splitting the spellings. Nothing of the sort is available here: outcome.Episode
+// carries the resource as a rendered ref and Workload.Ref() renders namespace/name
+// only, so the account exists only where the persisted spelling was an ARN. An
+// ARN-spelled episode therefore knows its account and a short-spelled one does not,
+// and the two group apart — the same residual the base change pinned, resolved the
+// same way. Splitting costs a duplicate gap issue; collapsing would groom one
+// account's production incident under another account's.
+func resourceIdentityRef(ref string) string {
+	namespace, name, scoped := strings.Cut(ref, "/")
+	if !scoped {
+		return ref // a bare namespace: no name half to resolve
+	}
+	id := providers.ParseResourceID(name)
+	out := namespace + "/" + id.Name
+	if id.Account != "" {
+		out += "@" + id.Account
+	}
+	return out
 }
