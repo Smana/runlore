@@ -12,6 +12,7 @@ import (
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/clientcmd"
 
+	"github.com/Smana/runlore/internal/investigate"
 	"github.com/Smana/runlore/internal/providers"
 	"github.com/Smana/runlore/internal/providers/cluster"
 )
@@ -79,4 +80,42 @@ func BuildResourceSpecReader(log *slog.Logger) providers.ResourceSpecReader {
 	// assertion on Invalidate(); TestResourceSpecDiscoveryIsInvalidatable pins that the
 	// client wired here satisfies it.
 	return cluster.NewSpecReader(dc, memory.NewMemCacheClient(disco))
+}
+
+// kindScoperFor exposes the discovery-backed scope resolver a spec reader also
+// provides, or nil when it provides none.
+//
+// The assertion is what lets Workload.Scope be populated from the API server's own
+// discovery instead of guessed downstream from a kind's NAME — and it is silent when it
+// stops holding: nothing fails to compile, delivered resources simply carry
+// ScopeUnknown again and every consumer falls back to its old behaviour. That is safe,
+// which is exactly why it takes a test to notice — see kind_scope_wiring_test.go.
+//
+// Nil in, nil out — a nil reader must not become a non-nil interface holding nothing.
+func kindScoperFor(sr providers.ResourceSpecReader) providers.KindScoper {
+	if sr == nil {
+		return nil
+	}
+	ks, ok := sr.(providers.KindScoper)
+	if !ok {
+		return nil
+	}
+	return ks
+}
+
+// kindScoperFromTools takes the scope resolver from the resource_spec tool already
+// registered, or nil when none was (no cluster, no discovery — an eval replay, the
+// demo, a local run without a kubeconfig).
+//
+// Reading it back off the built tool rather than calling BuildResourceSpecReader again
+// keeps ONE memoised discovery client in the process. A second one would mean a second
+// full discovery fan-out and two caches going stale independently — the same
+// build-it-twice defect Deps was introduced to fix for the catalog.
+func kindScoperFromTools(tools []investigate.Tool) providers.KindScoper {
+	for _, t := range tools {
+		if rst, ok := t.(investigate.ResourceSpecTool); ok {
+			return kindScoperFor(rst.Reader)
+		}
+	}
+	return nil
 }

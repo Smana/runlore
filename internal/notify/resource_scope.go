@@ -12,6 +12,13 @@ import (
 // qualifier on one is never a fact about the object — it is whatever namespace
 // happened to be in scope when the workload was assembled (see resourceRef).
 //
+// THIS LIST IS THE FALLBACK, not the answer. The answer is providers.Workload.Scope,
+// stamped from the cluster's own discovery (providers.KindScoper), which is right for
+// every kind the API server serves and needs no list at all. unnamespacedWorkload reads
+// the carried scope first and only reaches these maps when the workload arrived without
+// one: a cached or replayed alert, a run with no cluster access, a kind no served
+// resource matches. So what is written here is what RunLore does when it could not ask.
+//
 // Keys are lowercased; lookups go through kindKey.
 //
 // Well-known built-ins first, then the third-party CRDs whose objects show up in
@@ -74,10 +81,21 @@ var clusterScopedKinds = map[string]struct{}{
 // Kubernetes (ACK) ships NAMESPACED CRDs spelled exactly like most of these —
 // DBInstance, DBCluster, DBSubnetGroup, DBParameterGroup, CacheCluster, Nodegroup,
 // LoadBalancer, TargetGroup, LaunchTemplate — and Crossplane v2 made its managed
-// resources namespaced too. Workload carries only Kind/Name/Namespace, no group and
-// no apiVersion, so nothing here can tell an ACK DBInstance from the RDS instance the
-// delivered card misnamed. On a cluster running ACK or Crossplane v2 these entries
-// WOULD strip a true namespace; revisit the list before pointing RunLore at one.
+// resources namespaced too. A name cannot tell an ACK DBInstance from the RDS instance
+// the delivered card misnamed, because they are spelled identically.
+//
+// Discovery can, and now does: on a cluster running ACK the kind resolves to a
+// namespaced resource, Workload.Scope says ScopeNamespaced, and unnamespacedWorkload
+// answers from that before ever reading this map. What is left here is the case with no
+// discovery answer — no cluster access, a replayed alert, or a kind the API server does
+// not serve, which is precisely the RDS instance. So these entries are read when the
+// resource is MOST LIKELY to be the cloud one, and the ACK collision they cannot
+// resolve is the one case where something else already resolved it.
+//
+// The residual gap is narrow but real, and is the thing to check before adding an
+// entry: an ACK/Crossplane object whose workload reached the renderer WITHOUT a scope
+// (a cached alert, an investigation run with no cluster reachable) still falls back to
+// this map and still loses a true namespace.
 //
 // Kinds spelled as a cloud identifier rather than a Kubernetes kind — CloudTrail's
 // "AWS::RDS::DBInstance", an ARN — need no entry here: notKubernetesShaped rejects
@@ -131,14 +149,19 @@ func notKubernetesShaped(kind string) bool {
 // about the object: a cluster-scoped Kubernetes kind, or something that is not a
 // Kubernetes object at all.
 //
+// It answers from the kind's NAME alone and is therefore the FALLBACK layer:
+// unnamespacedWorkload consults the workload's carried scope first and only calls this
+// when none travelled with it. Nothing here is consulted for a workload the cluster
+// itself answered for.
+//
 // Fail-safe by construction — it answers false for an empty kind and for every kind
 // it does not recognize, so the renderer keeps doing exactly what it does today
 // unless the namespace is known to be wrong.
 //
-// "Known" is as strong as this layer can be, not a guarantee: Workload carries no
-// group or apiVersion, so the nonKubernetesKinds caveat above (ACK and Crossplane v2
-// ship NAMESPACED CRDs under several of those names) is a limit on this function too.
-// Read it before adding an entry.
+// "Known" is as strong as a NAME can be, not a guarantee: this function sees no group
+// and no apiVersion, so the nonKubernetesKinds caveat above (ACK and Crossplane v2 ship
+// NAMESPACED CRDs under several of those names) is a limit on it too, for the workloads
+// that reach it. Read it before adding an entry.
 func unnamespacedKind(kind string) bool {
 	k := kindKey(kind)
 	if k == "" {
@@ -151,6 +174,32 @@ func unnamespacedKind(kind string) bool {
 		return true
 	}
 	return notKubernetesShaped(k)
+}
+
+// unnamespacedWorkload reports whether a namespace qualifier on this workload is not
+// a fact about the object — the same question unnamespacedKind answers from the kind's
+// NAME, asked first of the workload's own carried scope.
+//
+// The carried scope wins because it is knowledge and the lists are a guess. Workload.
+// Scope is set from the cluster's own discovery (providers.KindScoper), which is right
+// for every kind the API server serves, CRDs included, and is the only thing that can
+// tell an ACK DBInstance (namespaced, in a real namespace) from the RDS instance that
+// produced the misnamed card — the two are spelled identically and nonKubernetesKinds
+// cannot distinguish them.
+//
+// ScopeUnknown is NOT "cluster-scoped". A workload assembled from a cached alert, from
+// a cloud event, or on a run with no cluster access carries no answer, and there the
+// kind lists still decide exactly as they did before — which is what keeps the RDS
+// DBInstance, the CloudTrail resource type and every unlisted kind rendering as they
+// do today.
+func unnamespacedWorkload(w providers.Workload) bool {
+	switch w.Scope {
+	case providers.ScopeNamespaced:
+		return false
+	case providers.ScopeClusterScoped:
+		return true
+	}
+	return unnamespacedKind(w.Kind)
 }
 
 // resourceRef renders the affected resource's identity for a card: "namespace/name"
@@ -170,9 +219,10 @@ func unnamespacedKind(kind string) bool {
 // This is the RENDERING half of the fix only. The conflation upstream is real — the
 // same wrong namespace still reaches recall matching, the curated entry's
 // `resource:` frontmatter and the outcome ledger — and belongs where the workload is
-// assembled, not here.
+// assembled, not here. Workload.Scope is carried alongside those, so a later fix has
+// the cluster's answer available where the namespace is actually chosen.
 func resourceRef(w providers.Workload) string {
-	if !unnamespacedKind(w.Kind) {
+	if !unnamespacedWorkload(w) {
 		return w.Ref()
 	}
 	if name := strings.TrimSpace(w.Name); name != "" {

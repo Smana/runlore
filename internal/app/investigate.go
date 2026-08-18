@@ -668,6 +668,11 @@ func BuildInvestigator(ctx context.Context, cfg *config.Config, deps *Deps, appr
 		Actions:    actions,
 		Recall:     recall,
 		Recurrence: recurrence,
+		// The cluster's own answer for the delivered resource's kind, taken from the
+		// resource_spec tool's reader so the process keeps one memoised discovery
+		// client. nil when no cluster is reachable, which leaves every workload at
+		// ScopeUnknown and every consumer on its prior behaviour.
+		KindScope: kindScoperFromTools(tools),
 		// Unconditional, unlike the opt-in cooldown above: the seed's known-recurrence
 		// block needs a trigger's history whether or not suppression is on. A disabled
 		// ledger answers with zero values (as with cur.Confirmations).

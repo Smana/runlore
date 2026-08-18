@@ -83,7 +83,8 @@ func RunInvestigate(args []string) error {
 		MaxTokensPerInvestigation: cfg.Investigation.MaxTokensPerInvestigation,
 		MaxCostPerInvestigation:   cfg.Investigation.MaxCostPerInvestigation,
 		Timeout:                   cfg.Investigation.Timeout.Std(),
-		KBMatchScore:              kbMatchScore(recall), // visibility bar tracks the configured recall floor
+		KBMatchScore:              kbMatchScore(recall),       // visibility bar tracks the configured recall floor
+		KindScope:                 kindScoperFromTools(tools), // discovery decides namespaced-ness, not a kind list
 		OnComplete:                func(inv providers.Investigation) { result = &inv },
 	}
 	title := *alert
