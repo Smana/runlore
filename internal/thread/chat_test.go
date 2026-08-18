@@ -1953,50 +1953,70 @@ func TestChatContextEvidenceCannotForgeAFramingLine(t *testing.T) {
 	}
 }
 
-// TestChatPromptForbidsProductScopedCapabilityDenials pins the distinction between what
-// this TURN can do and what RunLore can do.
+// TestChatPromptScopesItsLimitToTheTurn pins both halves of a fix that got this wrong
+// once in each direction.
 //
-// The chat layer is deliberately given no tool but submit_thread_reply — that is what makes
-// one message exactly one model call. The prompt has to say so, and the old wording said it
-// as "you have no tools on this turn and cannot look anything up". The model then reported
-// that to an operator as a fact about the product:
+// The reported bug: the prompt said "you have no tools on this turn and cannot look
+// anything up", and the model reported that to an operator as "I don't have access to
+// GitHub" — in the same reply that linked a pull request it had just CREATED on GitHub.
+// The operator went looking for a missing App permission that did not exist.
 //
-//	"I don't have access to GitHub to check its current status..."
+// The first fix OVERCORRECTED: it asserted the investigation loop "does have cluster,
+// metrics, logs, git and forge access" and told the model to say a fresh investigation
+// could check. Both are false. There is no forge tool in internal/investigate at all, so
+// no investigation can answer "is this PR merged?"; and every other backend is
+// config-gated (internal/app.BuildModelAndTools registers each behind an `if`), so a
+// metrics-only deployment would have been told it has logs. Promising a capability is the
+// same defect as denying one — it just sends the operator somewhere else.
 //
-// …in the same reply that linked a pull request it had just CREATED on GitHub. The operator
-// reasonably concluded the GitHub App was missing a permission and went to check the
-// installation. The referenced PR had in fact already merged, so the question was
-// answerable and the answer was wrong twice over.
-//
-// Same failure as the GitOps tools reporting a scope limit as an absent object: a limit of
-// the caller stated as a fact about the world. This pins the prompt's side of it.
-func TestChatPromptForbidsProductScopedCapabilityDenials(t *testing.T) {
-	// The turn-scoped limit must still be stated — removing it would invite the model to
-	// invent lookups it cannot perform.
+// So the prompt must claim NOTHING about what RunLore can reach. It scopes the limit to
+// the reply and stops there.
+func TestChatPromptScopesItsLimitToTheTurn(t *testing.T) {
+	// The turn-scoped limit must still be stated; without it the model invents lookups.
 	for _, want := range []string{"THIS TURN", "cannot look anything up"} {
 		if !strings.Contains(chatSystemPrompt, want) {
 			t.Errorf("prompt no longer states the turn-scoped limit: missing %q", want)
 		}
 	}
-	// …and it must be explicitly scoped to the reply, not to RunLore.
-	for _, want := range []string{
-		"about this reply, NOT about RunLore",
-		"never tell a human that RunLore",
-		"a fresh investigation can",
-	} {
+	// …and must be attributed to the reply rather than to the product.
+	for _, want := range []string{"limit of THIS REPLY", "not as a statement about what RunLore can reach"} {
 		if !strings.Contains(chatSystemPrompt, want) {
-			t.Errorf("prompt does not forbid product-scoped capability denials: missing %q", want)
+			t.Errorf("prompt does not scope the limit to this reply: missing %q", want)
 		}
 	}
-	// The phrases an operator would act on. Each must appear only inside the prohibition
-	// that names it, never as a bare instruction the model could copy.
-	for _, phrase := range []string{"has no access to", "is unable to reach"} {
-		if !strings.Contains(chatSystemPrompt, "never tell a human that RunLore") {
-			t.Fatal("the prohibition itself is gone")
+	// An evidence-backed gap is operator-actionable and must survive the rule above: a
+	// recorded 403 is a fact the human can fix, not a turn-scoped limit to soften.
+	if !strings.Contains(chatSystemPrompt, "recorded in the context below") {
+		t.Error("prompt suppresses genuine, evidence-backed capability gaps")
+	}
+}
+
+// TestChatPromptClaimsNoCapabilities is the guard against the overcorrection, and it is
+// the one that would have caught the first attempt.
+//
+// A capability claim baked into a compile-time constant cannot be true for every
+// deployment, because every backend is registered conditionally. internal/investigate's
+// own precedent is explicit that prose and schemas must not be able to disagree — the
+// system prompt there is BUILT from the registered tools for exactly this reason.
+func TestChatPromptClaimsNoCapabilities(t *testing.T) {
+	lower := strings.ToLower(chatSystemPrompt)
+	// Phrasings that assert RunLore holds a capability. Each was present in the first
+	// attempt at this fix.
+	for _, claim := range []string{
+		"does have cluster",
+		"forge access",
+		"a fresh investigation can",
+		"investigation loop does have",
+	} {
+		if strings.Contains(lower, strings.ToLower(claim)) {
+			t.Errorf("prompt claims a capability (%q). Every backend is config-gated and there is "+
+				"no forge tool at all, so this is false on some deployment and on the exact "+
+				"question that prompted the fix.", claim)
 		}
-		if strings.Count(chatSystemPrompt, phrase) != 1 {
-			t.Errorf("%q appears %d times; it should appear once, inside the prohibition",
-				phrase, strings.Count(chatSystemPrompt, phrase))
-		}
+	}
+	// It must also not promise the reserved re-run path, which responder.go answers with
+	// ReinvestigateNotSupportedReply — pointing a human at it is pointing them at a refusal.
+	if strings.Contains(lower, "reinvestigate") {
+		t.Error("prompt points at the reserved reinvestigate path, which is not implemented")
 	}
 }

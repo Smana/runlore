@@ -174,7 +174,7 @@ notify:
     thread_capture: true         # the chat layer has no channel without it
   thread:
     chat_calls_per_hour: 30      # default 30
-    chat_tokens_per_hour: 109320 # default 109320 — derived, not round
+    chat_tokens_per_hour: 109940 # default 109940 — derived, not round
 ```
 
 **This is a paid path any member of the room can trigger, and on Matrix "addressed" is looser than
