@@ -37,6 +37,14 @@ watch the echoed JSON body land in terminal 1.
 - The JSON payload carries `verdict`, `severity`, `environment`, `cluster`, `tenant`, `alert_name`,
   `started_at` (RFC3339, empty when unknown), `occurrences`, `prev_curated_url`, `ruled_out` and
   `data_gaps`, alongside `title`/`confidence`/`curated_url`/`text` (all `omitempty`).
+- **The three resource fields say three different things.** `resource` is the object's name,
+  verbatim. `namespace` is the namespace the finding is **scoped to** — the one the object is in, or
+  the namespace itself when the finding is *about* a namespace — and is **omitted when the object is
+  in no namespace at all**: a `Node` is cluster-scoped and an RDS instance is not a Kubernetes object,
+  so an alert's `namespace` label on either names whatever exported the series (kube-state-metrics,
+  the alerting rule), not the resource. `resource_ref` is the whole scoped identity —
+  `namespace/name`, or the bare name when there is nothing to qualify it — and is the field to read
+  when you want one string: it is the same one the Slack card prints.
 - Findings are secret-redacted **before** any notifier runs, so the webhook only ever sees redacted
   data.
 - This notifier exists as much to prove RunLore's notifier extensibility (drop one self-registering

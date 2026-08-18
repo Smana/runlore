@@ -13,11 +13,36 @@ import (
 // templated notifier exposes it as the template dot. Field set and json tags
 // are the webhook notifier's original wire format — do not change tags without
 // a compatibility note, external consumers parse them.
+//
+// The three resource fields say three different things, and only one of them is
+// the resource's identity:
+//
+//   - namespace — the namespace this finding is scoped to: the one the resource is
+//     IN, or, for a Namespace object named with no workload inside it, that
+//     namespace itself (the one kind whose own identity arrives in this field).
+//     Absent when the resource is in no namespace at all — a Node, an RDS
+//     instance — where the alert's `namespace` label names whatever exported the
+//     series rather than the object. See scopedNamespace.
+//   - resource — the resource's name, verbatim, never rewritten.
+//   - resource_ref — the whole scoped identity: "namespace/name", or the bare name
+//     when there is no namespace to qualify it. The same string the Slack card
+//     prints, from the same function (resourceRef), so the two cannot disagree.
+//
+// Compatibility note (2026-08-18): `namespace` narrowed to the above and
+// `resource_ref` was added. Nothing was removed or renamed, so every operator
+// template still executes and every JSON consumer still parses — `namespace` is
+// `omitempty` and has always been absent on findings that carry no namespace
+// (PagerDuty incidents carry none at all). What changed is that it is now absent
+// instead of wrong: a template doing "{{.Namespace}}/{{.Resource}}" no longer
+// renders "observability/ip-10-11-132-8.ec2.internal" for a Node. Such a template
+// should move to "{{.ResourceRef}}", which renders the scope correctly for every
+// kind rather than merely stopping short of a false one.
 type Payload struct {
 	Title            string          `json:"title"`
 	Confidence       float64         `json:"confidence"`
 	Namespace        string          `json:"namespace,omitempty"`
 	Resource         string          `json:"resource,omitempty"`
+	ResourceRef      string          `json:"resource_ref,omitempty"`
 	CuratedURL       string          `json:"curated_url,omitempty"`
 	Text             string          `json:"text"`
 	Verdict          string          `json:"verdict,omitempty"`
@@ -73,21 +98,46 @@ func NewPayload(inv providers.Investigation) Payload {
 	}
 	return Payload{
 		Title: inv.Title, Confidence: inv.Confidence,
-		// Namespace is the RAW field, not the card's rendered scope: Payload is a
-		// declared external wire format, so blanking a known-wrong namespace here is
-		// observable to every existing consumer and needs its own change, not a
-		// side effect of a card-rendering fix. Known gap, stated so it is not read as
-		// an oversight: Text above is already the corrected render, and an operator
-		// template (internal/notify/templated) doing "{{.Namespace}}/{{.Resource}}"
-		// still reproduces "observability/ip-10-11-132-8.ec2.internal" for a Node.
-		Namespace: inv.Resource.Namespace, Resource: inv.Resource.Name,
-		CuratedURL: inv.CuratedURL, Text: Format(inv), Verdict: string(inv.Verdict),
+		Namespace: scopedNamespace(inv.Resource), Resource: inv.Resource.Name,
+		ResourceRef: resourceRef(inv.Resource),
+		CuratedURL:  inv.CuratedURL, Text: Format(inv), Verdict: string(inv.Verdict),
 		Severity: inv.Severity, Cluster: inv.Cluster, Environment: inv.Environment,
 		Tenant: inv.Tenant, AlertName: inv.AlertName, StartedAt: startedAt,
 		Occurrences: inv.Occurrences, PrevCuratedURL: inv.PrevCuratedURL,
 		RuledOut: inv.RuledOut, DataGaps: inv.DataGaps,
 		Prior: prior, MatchedKnowledge: matched,
 	}
+}
+
+// scopedNamespace returns the namespace to publish for w: a namespace w is actually
+// scoped to, or nothing. Payload.Namespace used to carry providers.Workload.Namespace
+// raw, and on an alert-driven investigation that field is the namespace of whatever
+// EXPORTED the series — kube-state-metrics, the alerting rule — not the object's. A
+// Node is cluster-scoped and an RDS instance is not a Kubernetes object, so
+// "namespace": "observability" on either is a place the reader can go and not find
+// the resource. Same conflation the Slack card shipped; see resourceRef.
+//
+// It decides by ASKING resourceRef whether the namespace still contributes to the
+// rendered identity — rendering w a second time with the namespace removed and
+// comparing — rather than testing the kind itself. That is the whole point of the
+// shape: the kind decision (which kinds are cluster-scoped, which are cloud, which
+// spellings are not Kubernetes at all, and the one kind whose OWN name arrives in
+// the namespace field) lives in resource_scope.go and exists once. A second copy
+// here would answer differently the day either list moves, and the card and the
+// wire format would disagree about the same investigation.
+//
+// Asking that way is also what keeps a Namespace object's name — which arrives in
+// this very field — from being discarded as a foreign qualifier: resourceRef renders
+// it, so it contributes, so it is published. Nothing here knows that kind by name.
+//
+// Consequently it is fail-safe for exactly the same reason resourceRef is: an
+// unknown, unlisted or empty kind still contributes its namespace, so the field is
+// unchanged for every resource whose namespace is not KNOWN to be foreign.
+func scopedNamespace(w providers.Workload) string {
+	if resourceRef(w) == resourceRef(providers.Workload{Kind: w.Kind, Name: w.Name}) {
+		return "" // the namespace changed nothing about the identity: it is not w's own
+	}
+	return w.Namespace
 }
 
 // kbUpdateEvent is the value KBUpdatePayload.Event always carries. It exists

@@ -138,3 +138,134 @@ func TestNewKBUpdatePayloadPopulatesEveryFieldItDeclares(t *testing.T) {
 			"from a producer that never reports provenance: %s", b)
 	}
 }
+
+// TestNewPayloadNamespaceIsTheResourcesOwn pins the templated/webhook half of the
+// resource-scope fix: Payload.Namespace must never carry a namespace that is not the
+// resource's own, and ResourceRef must carry the same scoped identity the Slack card
+// renders — so an operator template has one field to print instead of hand-joining
+// two, and a template that DOES hand-join stops reproducing
+// "observability/ip-10-11-132-8.ec2.internal".
+//
+// The cases mirror resource_scope_test.go's, because the two must agree by
+// construction: the payload asks resourceRef rather than re-deciding the kind.
+func TestNewPayloadNamespaceIsTheResourcesOwn(t *testing.T) {
+	for name, tc := range map[string]struct {
+		w       providers.Workload
+		wantNS  string
+		wantRef string
+	}{
+		"cluster-scoped kind drops the exporter's namespace": {
+			w:       providers.Workload{Kind: "Node", Namespace: "observability", Name: "ip-10-11-132-8.ec2.internal"},
+			wantNS:  "",
+			wantRef: "ip-10-11-132-8.ec2.internal",
+		},
+		"cloud kind drops the exporter's namespace": {
+			w:       providers.Workload{Kind: "DBInstance", Namespace: "observability", Name: "datagrok-aqemia-shared"},
+			wantNS:  "",
+			wantRef: "datagrok-aqemia-shared",
+		},
+		"non-kubernetes spelling drops it too": {
+			w:       providers.Workload{Kind: "AWS::RDS::DBInstance", Namespace: "observability", Name: "datagrok"},
+			wantNS:  "",
+			wantRef: "datagrok",
+		},
+		"namespace object keeps its own name": {
+			w:       providers.Workload{Kind: "Namespace", Namespace: "coder-engineering"},
+			wantNS:  "coder-engineering",
+			wantRef: "coder-engineering",
+		},
+		"namespace object with a name is not in the qualifier": {
+			w:       providers.Workload{Kind: "Namespace", Namespace: "observability", Name: "coder-engineering"},
+			wantNS:  "",
+			wantRef: "coder-engineering",
+		},
+		"namespaced kind is unchanged": {
+			w:       providers.Workload{Kind: "Pod", Namespace: "payments", Name: "api-7f9c"},
+			wantNS:  "payments",
+			wantRef: "payments/api-7f9c",
+		},
+		"unknown kind is unchanged": {
+			w:       providers.Workload{Kind: "HelmRelease", Namespace: "flux-system", Name: "harbor"},
+			wantNS:  "flux-system",
+			wantRef: "flux-system/harbor",
+		},
+		"empty kind is unchanged": {
+			w:       providers.Workload{Namespace: "payments", Name: "api-7f9c"},
+			wantNS:  "payments",
+			wantRef: "payments/api-7f9c",
+		},
+		"cluster-scoped kind with no name names nothing": {
+			w:       providers.Workload{Kind: "Node", Namespace: "observability"},
+			wantNS:  "",
+			wantRef: "",
+		},
+	} {
+		p := NewPayload(providers.Investigation{Resource: tc.w})
+		if p.Namespace != tc.wantNS {
+			t.Errorf("%s: Namespace = %q, want %q", name, p.Namespace, tc.wantNS)
+		}
+		if p.ResourceRef != tc.wantRef {
+			t.Errorf("%s: ResourceRef = %q, want %q", name, p.ResourceRef, tc.wantRef)
+		}
+		// Name is reported verbatim: the payload narrows SCOPE, never identity.
+		if p.Resource != tc.w.Name {
+			t.Errorf("%s: Resource = %q, want %q", name, p.Resource, tc.w.Name)
+		}
+	}
+}
+
+// TestPayloadResourceRefMatchesTheCard pins the no-drift property that made this fix
+// safe to write: the payload's scoped identity is resource_scope.go's answer, not a
+// second copy of the kind decision.
+func TestPayloadResourceRefMatchesTheCard(t *testing.T) {
+	for _, w := range []providers.Workload{
+		{Kind: "Node", Namespace: "observability", Name: "ip-10-11-132-8.ec2.internal"},
+		{Kind: "Namespace", Namespace: "coder-engineering"},
+		{Kind: "Pod", Namespace: "payments", Name: "api-7f9c"},
+		{Kind: "ClusterIssuer", Namespace: "cert-manager", Name: "letsencrypt"},
+	} {
+		if got, want := NewPayload(providers.Investigation{Resource: w}).ResourceRef, resourceRef(w); got != want {
+			t.Errorf("%+v: ResourceRef = %q, card renders %q", w, got, want)
+		}
+	}
+}
+
+// TestPayloadJSONWireKeys pins the JSON half of the contract, which is the part
+// external consumers actually parse: `resource_ref` is the tag the new field ships
+// under, and `namespace` is omitted — not emitted empty — for a resource that has
+// none, so a consumer reading the key gets "absent" (a shape it already had to
+// handle: the field is omitempty, and a PagerDuty incident carries no namespace at
+// all) rather than a namespace the object was never in.
+func TestPayloadJSONWireKeys(t *testing.T) {
+	node := providers.Workload{Kind: "Node", Namespace: "observability", Name: "ip-10-11-132-8.ec2.internal"}
+	b, err := json.Marshal(NewPayload(providers.Investigation{Resource: node}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got map[string]any
+	if err := json.Unmarshal(b, &got); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := got["namespace"]; ok {
+		t.Errorf("namespace must be absent for a cluster-scoped resource, got %v", got["namespace"])
+	}
+	if got["resource_ref"] != "ip-10-11-132-8.ec2.internal" {
+		t.Errorf("resource_ref = %v", got["resource_ref"])
+	}
+	if got["resource"] != "ip-10-11-132-8.ec2.internal" {
+		t.Errorf("resource = %v", got["resource"])
+	}
+
+	pod := providers.Workload{Kind: "Pod", Namespace: "payments", Name: "api-7f9c"}
+	b, err = json.Marshal(NewPayload(providers.Investigation{Resource: pod}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	got = nil
+	if err := json.Unmarshal(b, &got); err != nil {
+		t.Fatal(err)
+	}
+	if got["namespace"] != "payments" || got["resource_ref"] != "payments/api-7f9c" {
+		t.Errorf("namespaced resource: namespace=%v resource_ref=%v", got["namespace"], got["resource_ref"])
+	}
+}

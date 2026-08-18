@@ -180,3 +180,51 @@ func TestTemplatedDeliberatelyDoesNotAnnounceKBUpdates(t *testing.T) {
 			"an instance's template is written against notify.Payload, and a KB update executed through it renders an investigation of zero values")
 	}
 }
+
+// TestDeliverRendersTheResourceScope is the end-to-end half of the resource-scope
+// fix, on the surface that actually shipped the bug: an OPERATOR-written template
+// over notify.Payload. Delivered Slack cards on 2026-08-17/18 read "Node
+// observability/ip-10-11-132-8.ec2.internal"; the card was fixed, and this pins that
+// a template cannot reproduce it from the payload's own fields.
+//
+// Both fields are asserted from ONE rendered body: .ResourceRef must carry the
+// scoped identity, and the hand-join .Namespace/.Resource that a real template
+// writes must no longer name a namespace the Node was never in.
+func TestDeliverRendersTheResourceScope(t *testing.T) {
+	for name, tc := range map[string]struct {
+		w    providers.Workload
+		want string
+	}{
+		"cluster-scoped kind": {
+			w:    providers.Workload{Kind: "Node", Namespace: "observability", Name: "ip-10-11-132-8.ec2.internal"},
+			want: "ref=ip-10-11-132-8.ec2.internal join=/ip-10-11-132-8.ec2.internal",
+		},
+		"cloud kind": {
+			w:    providers.Workload{Kind: "DBInstance", Namespace: "observability", Name: "datagrok-aqemia-shared"},
+			want: "ref=datagrok-aqemia-shared join=/datagrok-aqemia-shared",
+		},
+		"namespace object with no name": {
+			w:    providers.Workload{Kind: "Namespace", Namespace: "coder-engineering"},
+			want: "ref=coder-engineering join=coder-engineering/",
+		},
+		"namespaced kind renders unchanged": {
+			w:    providers.Workload{Kind: "Pod", Namespace: "payments", Name: "api-7f9c"},
+			want: "ref=payments/api-7f9c join=payments/api-7f9c",
+		},
+	} {
+		var gotBody string
+		srv := httptest.NewServer(http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
+			b, _ := io.ReadAll(r.Body)
+			gotBody = string(b)
+		}))
+		n := testNotifier(t, `ref={{ .ResourceRef }} join={{ .Namespace }}/{{ .Resource }}`, srv.URL)
+		err := n.Deliver(context.Background(), providers.Investigation{Resource: tc.w})
+		srv.Close()
+		if err != nil {
+			t.Fatalf("%s: %v", name, err)
+		}
+		if gotBody != tc.want {
+			t.Errorf("%s: body = %q, want %q", name, gotBody, tc.want)
+		}
+	}
+}
