@@ -114,13 +114,13 @@ func (s *Source) Decode(body []byte, h http.Header) (source.DecodeResult, error)
 		// Unlike the Alertmanager adapter, this path does NOT keep the raw value: the
 		// labels map above is built from the instance name plus the operator's own
 		// `labels:` mapping, and workload_name is not copied into it. So unless that
-		// mapping happens to carry the ARN, the account and region are gone from the
-		// Request entirely and never reach the seed prompt. That is a real loss of
-		// context for a vendor webhook, and the reason it is tolerated is only that
-		// the alternative — inventing a label key here — would collide with whatever
-		// the operator already maps. Restoring it belongs with the ingestion
-		// canonicalisation moving to the source.Pipeline chokepoint.
-		wname = providers.ARNResourceName(wname)
+		// mapping happens to carry the ARN, the raw spelling is gone from the Request
+		// entirely and never reaches the seed prompt. What is no longer lost is the
+		// cloud SCOPE: ResolveWorkloadIdentity lifts the ARN's account and region onto
+		// the Workload (and reads them from the operator's mapped labels when the name
+		// is short), so a vendor webhook keys per account like an Alertmanager one.
+		w := providers.ResolveWorkloadIdentity(
+			providers.Workload{Kind: kind, Name: wname, Namespace: ns}, labels)
 		var fps []string
 		if fingerprint != "" {
 			fps = []string{fingerprint}
@@ -133,7 +133,7 @@ func (s *Source) Decode(body []byte, h http.Header) (source.DecodeResult, error)
 			Title:        title,
 			Severity:     severity,
 			Environment:  get("environment"),
-			Workload:     providers.Workload{Namespace: ns, Kind: kind, Name: wname},
+			Workload:     w,
 			Reason:       severity,
 			Message:      get("message"),
 			Labels:       labels,
@@ -142,7 +142,7 @@ func (s *Source) Decode(body []byte, h http.Header) (source.DecodeResult, error)
 			Fingerprints: fps,
 			// Instance takes the cluster slot (PagerDuty precedent: its service
 			// does) so two vendors reporting the same workload stay distinct.
-			TriggerKey: curator.IncidentKey(title, ns, kind, wname, name),
+			TriggerKey: curator.IncidentKey(title, w, name),
 		})
 	}
 	return out, nil

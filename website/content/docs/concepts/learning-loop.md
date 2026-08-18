@@ -216,14 +216,16 @@ Why each gate exists:
   instance by its `DBInstanceIdentifier` on one firing and by its full ARN on the
   next, and both reach the same entry.
 
-  Be aware of the limit of that last one. Alerts are canonicalised to the bare
-  identifier when they are ingested, so the incoming side carries no account or
-  region and agrees with an ARN-form entry from **any** account; the account/region
-  check only separates two values that both still carry them (two legacy ARN-form
-  entries). The same collapse keys the recurrence ledger, so if you run one instance
-  name in two AWS accounts and alert on both through a single Prometheus, treat them
-  as one identity for recall and recurrence — or give the two alerts different
-  `alertname`s. A **workload-less**
+  What is forgiven is the spelling, never the **scope**. Ingestion reduces the name
+  to its bare identifier but keeps the AWS account and region beside it, read from
+  the alert's `account_id`/`region` labels *and* from an ARN-spelled name — so one
+  instance name in two accounts is two identities for recall and two buckets in the
+  recurrence ledger, while the two spellings of one instance stay one. An alert that
+  carries no account at all (every Kubernetes workload, and any rule that omits the
+  label) is unqualified and still matches an ARN-form entry in any account: an absent
+  qualifier means *unknown*, not *different*, which is what keeps entries already
+  filed under a full ARN reachable. So if you run one instance name in two accounts,
+  make sure the account label reaches the alert. A **workload-less**
   incident (PagerDuty carries no Kubernetes namespace/name) agrees only with entries
   that are themselves resource-less — the weakest ("scopeless") tier: it always
   requires `solo_floor` + `min_score`, starts at reduced confidence, and

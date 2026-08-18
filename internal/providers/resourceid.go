@@ -2,7 +2,10 @@
 
 package providers
 
-import "strings"
+import (
+	"cmp"
+	"strings"
+)
 
 // arnFields is the field count of a well-formed AWS ARN:
 // arn:partition:service:region:account-id:resource. The resource field is last and
@@ -55,19 +58,22 @@ func ParseResourceID(name string) ResourceID {
 //
 // The relation is symmetric and reflexive but NOT transitive — a short name agrees
 // with two ARNs that do not agree with each other. That is why callers needing a
-// map key use NormalizeResourceName instead (see its doc for the tradeoff), and why
-// this is a predicate rather than a comparable canonical value.
+// map key cannot use it: a key is compared by equality, so it reads the account off
+// Workload.Account instead (see curator.IncidentKey).
 //
-// REACHABILITY, stated because the qualifier check reads stronger than it acts:
-// ingestion rewrites an ARN to its bare identifier (ARNResourceName) before a
-// Workload is built, so a resource name derived from an ALERT carries no qualifiers
-// and both qualifierAgrees calls are vacuously true for it. The check therefore
-// bites only where a qualified value actually survives — a model-written entry
-// resource compared against another qualified value, or a caller that never went
-// through ingestion. It does NOT make the recall gate account-safe for alert
-// traffic: an unqualified short name still agrees with an ARN in ANY account. That
-// is the behaviour the fix requires (it is how the live ARN-spelled catalog entries
-// stay reachable) and the exposure it accepts, not a guarantee this provides.
+// REACHABILITY. The qualifier check used to be vacuous for alert traffic, and is no
+// longer. Ingestion rewrites an ARN to its bare identifier before a Workload is
+// built, so a name derived from an ALERT carries no qualifiers of its own; what
+// makes the check bite is that ingestion now also LIFTS the account and region onto
+// the workload (ResolveWorkloadIdentity), and Workload.ResourceID feeds them back in
+// here. An alert from one AWS account therefore no longer agrees with a catalog
+// entry filed under a full ARN in another.
+//
+// What remains, by design: an alert that carries NO account — every Kubernetes
+// workload, and any stack whose alert rules omit the account label — is unqualified
+// and still agrees with an ARN in any account. That is required, not tolerated: it
+// is how the live ARN-spelled catalog entries stay reachable at all, and treating
+// unknown as different would silently un-index them.
 func (r ResourceID) Agrees(o ResourceID) bool {
 	return r.Name == o.Name && qualifierAgrees(r.Region, o.Region) && qualifierAgrees(r.Account, o.Account)
 }
@@ -76,11 +82,109 @@ func (r ResourceID) Agrees(o ResourceID) bool {
 // value on either side is unknown rather than different.
 func qualifierAgrees(a, b string) bool { return a == "" || b == "" || a == b }
 
+// cloudAccountLabels are the alert-label spellings an AWS account id arrives under,
+// in precedence order: `account_id` is what yace (the CloudWatch exporter this was
+// written against) stamps on every series it emits, and `aws_account_id` is the
+// cloudwatch_exporter / relabel spelling. A bare `account` is deliberately NOT read:
+// it is a plausible APPLICATION label (a customer account, a billing account) and
+// reading it would qualify a resource by something that is not a cloud scope.
+var cloudAccountLabels = []string{"account_id", "aws_account_id"}
+
+// cloudRegionLabels are the alert-label spellings an AWS region arrives under.
+var cloudRegionLabels = []string{"region", "aws_region"}
+
+// ResolveWorkloadIdentity is the ingestion-side chokepoint that turns a workload as
+// an alert SPELLED it into the identity RunLore keys and matches by: the name is
+// reduced to its bare resource identifier (an ARN loses its scaffolding), and the
+// cloud scope that identifier lives in is recorded on Account/Region.
+//
+// WHY THE SCOPE HAS TO BE LIFTED OFF THE NAME. Reducing an ARN to its identifier is
+// what makes one resource have ONE spelling downstream, and that is load-bearing: a
+// CloudWatch-derived rule templates whichever dimension it has to hand, so one RDS
+// instance arrives as "datagrok" on one firing and as
+// "arn:aws:rds:us-east-1:111111111111:db:datagrok" on the next. But the reduction
+// also DELETED the account, and the surrounding key fields do not put it back — a
+// CloudWatch rule authors `namespace` as the exporter's, one Prometheus stamps one
+// `cluster` label across every account it scrapes, and Kind is empty for a cloud
+// resource. So "datagrok" in two accounts became one identity. Recording the account
+// as its own field is what separates them WITHOUT re-splitting the two spellings,
+// because the field is filled on both paths.
+//
+// RECONCILIATION. The account and region are taken from the ARN when the name is one
+// and from the alert labels otherwise, so a value present on EITHER side survives:
+// an ARN names its account even where the rule drops the label, and a short-spelled
+// firing has only the label. Where both are present and disagree, the ARN wins — it
+// names the resource itself, while a label describes the series that observed it. A
+// value already set on w is never overwritten.
+//
+// KUBERNETES IS EXCLUDED, and that exclusion is the point of the Kind check rather
+// than an optimisation: a Kubernetes object's identity is namespace/name and nothing
+// else, so a cluster whose Prometheus stamps `account_id` as an external label must
+// not acquire a qualifier and must keep byte-identical keys. An ARN-spelled name
+// overrides the check — a name that IS an ARN is a cloud resource whatever label
+// carried it.
+//
+// KNOWN RESIDUAL: a workload that arrives on the `workload` label with no
+// `workload_type` has no Kind, so a Kubernetes object spelled that way on a stack
+// that stamps account labels globally WOULD be qualified. It is the one shape this
+// cannot tell apart — there is no signal left — and the cost is one restarted
+// recurrence count, not a wrong answer.
+func ResolveWorkloadIdentity(w Workload, labels map[string]string) Workload {
+	if w.Name == "" {
+		return w // nothing to qualify: there is no resource
+	}
+	bare, region, account, isARN := parseARN(w.Name)
+	if isARN {
+		w.Name = bare
+	} else if w.Kind != "" {
+		return w // a Kubernetes object: namespace/name is the whole identity
+	}
+	w.Region = cmp.Or(w.Region, region, labelValue(labels, cloudRegionLabels))
+	w.Account = cmp.Or(w.Account, account, labelValue(labels, cloudAccountLabels))
+	return w
+}
+
+// labelValue returns the first non-empty label among keys.
+func labelValue(labels map[string]string, keys []string) string {
+	for _, k := range keys {
+		if v := strings.TrimSpace(labels[k]); v != "" {
+			return v
+		}
+	}
+	return ""
+}
+
+// ResourceID is the identity this workload should be COMPARED by: its name resolved
+// as a cloud identifier, qualified by the scope the name carries or, failing that,
+// by the scope stamped on the workload at ingestion.
+//
+// It unions the two sources on purpose, and that is why it is not what the identity
+// KEYS use. A key must be spelling-invariant — an ARN-spelled and a short-spelled
+// firing of one resource must produce the same bytes — and only the Account field
+// is, because ingestion fills it on both paths while an ARN inside a name is present
+// on one. Comparison has no such constraint: ResourceID.Agrees treats an absent
+// qualifier as compatible rather than different, so reading MORE evidence can only
+// split resources that really are distinct, never fuse two that are not. That
+// asymmetry is what lets a bare alert be told apart from a catalog entry still
+// filed under a full ARN in another account.
+func (w Workload) ResourceID() ResourceID {
+	id := ParseResourceID(w.Name)
+	return ResourceID{
+		Name:    id.Name,
+		Region:  cmp.Or(id.Region, w.Region),
+		Account: cmp.Or(id.Account, w.Account),
+	}
+}
+
 // ARNResourceName reduces an AWS ARN to the resource identifier that the matching
-// CloudWatch dimension carries, and returns any other value byte-for-byte. It is
-// the ingestion-side canonicalisation: applied where a Workload name is derived
-// from alert labels, so only one spelling of a resource is ever stored in a
-// notification, a curated entry's `resource:` frontmatter, or a ledger key.
+// CloudWatch dimension carries, and returns any other value byte-for-byte. It is the
+// name half of the ingestion-side canonicalisation, so only one spelling of a
+// resource is ever stored in a notification, a curated entry's `resource:`
+// frontmatter, or a ledger key.
+//
+// Ingestion itself goes through ResolveWorkloadIdentity, which applies this AND
+// keeps the cloud scope the ARN named; call this directly only where there is no
+// workload to qualify.
 //
 // It deliberately does NOT normalize the pod-template hash. Ingestion records the
 // workload an alert actually fired on — a pod-scoped alert must keep its full pod
@@ -98,42 +202,24 @@ func ARNResourceName(name string) string {
 	return name
 }
 
-// NormalizeResourceName is the canonical single-string form of a resource name: the
-// ARN scaffolding removed, then the pod-hash suffix stripped. It is what the
-// identity keys use — curator.IncidentKey (hence the recurrence ledger's TriggerKey)
+// NormalizeResourceName is the canonical single-string form of a resource NAME: the
+// ARN scaffolding removed, then the pod-hash suffix stripped. It is the name half of
+// the identity keys — curator.IncidentKey (hence the recurrence ledger's TriggerKey)
 // and DupFingerprint — because a map key can only be compared by equality, and a
 // predicate like ResourceID.Agrees cannot be one.
 //
-// KNOWN CONSEQUENCE: collapsing to the bare identifier drops the account and region,
-// so one instance name in two AWS accounts produces ONE key. This is a real accepted
-// exposure, not a neutralised one, and it is worth stating precisely because the
-// fields wrapped around this name look like they close it and do not.
+// It deliberately yields the bare identifier and NOTHING ELSE, dropping the account
+// and region an ARN carried. That is forced: canon(ARN in account A) == canon(short)
+// == canon(ARN in account B) is exactly what fuses the two spellings of one resource,
+// and it equally forces the two accounts equal. No single canonical string can do
+// both.
 //
-// IncidentKey adds alertname, namespace, kind and cluster; DupFingerprint adds the
-// namespace and the cause. For the alert class this function exists for, none of
-// those separates two AWS accounts: a CloudWatch-derived rule authors `namespace` as
-// a literal, one scraping Prometheus stamps a single `cluster` external label across
-// every account it watches, and `kind` is empty for a cloud resource. So two accounts
-// hosting the same instance name and alerting through one stack DO share a key. Via
-// TriggerKey that key reaches outcome.Ledger's byTrigger index, and inside a
-// configured RecurrenceGate cooldown the second account's firing can be suppressed on
-// the first account's conclusion — investigate's loop then returns with no model call
-// and no notification.
-//
-// It is accepted because the collapse is FORCED rather than chosen. A map key is
-// compared by equality, and canon(ARN_A) == canon(short) == canon(ARN_B) would force
-// the two ARNs equal, so no single canonical string can both fuse the two spellings
-// of one resource and split two accounts; adding the account to the key instead
-// re-splits the ARN spelling from the short one, which is the bug being fixed. Nor
-// did the exposure arrive with this function — two SHORT-spelled alerts from two
-// accounts already collided before it existed. What changed is that the ARN spelling
-// no longer accidentally keeps them apart, in exchange for the split being closed on
-// every ARN-shaped alert rather than in a naming coincidence.
-//
-// Closing it properly needs an account discriminator the SHORT spelling also carries
-// — an alert label plumbed into the key — which is a larger change than this one.
-// The matching path uses Agrees, which keeps two QUALIFIED values apart; see its doc
-// for why that does not extend to an ingested alert either.
+// The account is therefore not recovered from the name — it travels BESIDE it, on
+// Workload.Account, stamped at ingestion from the alert labels and from an ARN alike
+// (ResolveWorkloadIdentity) so that it is present under either spelling. IncidentKey
+// appends it as a segment of its own, which is what splits two accounts without
+// re-splitting the two spellings. Read Workload's doc for why the field, and not the
+// name, is the only thing a key can honestly qualify on.
 func NormalizeResourceName(name string) string {
 	return ParseResourceID(name).Name
 }

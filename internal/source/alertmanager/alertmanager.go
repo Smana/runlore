@@ -48,15 +48,21 @@ type amAlert struct {
 // kube-state-metrics has exposed the Job name as job_name since it began setting
 // job="kube-state-metrics" on its own series, so job_name is the only correct source.
 //
-// The name is finally canonicalised through providers.ARNResourceName: a
-// CloudWatch-derived rule templates whichever dimension it has to hand into these
-// labels, so one RDS instance arrives as `datagrok-aqemia-shared` on one firing and
-// as `arn:aws:rds:us-east-1:142655614335:db:datagrok-aqemia-shared` on the next —
-// two spellings that then key, render and index as two unrelated resources. Only an
-// ARN is rewritten; a Kubernetes name (pod hash and all) passes through untouched.
-func workloadFromLabels(labels map[string]string) (kind, name string) {
-	kind, name = rawWorkloadFromLabels(labels)
-	return kind, providers.ARNResourceName(name)
+// The workload is finally resolved through providers.ResolveWorkloadIdentity, which
+// does two things with these labels. It canonicalises the NAME: a CloudWatch-derived
+// rule templates whichever dimension it has to hand, so one RDS instance arrives as
+// `datagrok-aqemia-shared` on one firing and as
+// `arn:aws:rds:us-east-1:142655614335:db:datagrok-aqemia-shared` on the next — two
+// spellings that then key, render and index as two unrelated resources. And it lifts
+// the cloud SCOPE the ARN would otherwise have taken with it onto Account/Region,
+// reading the `account_id`/`region` labels the exporter stamps so the scope is
+// present under either spelling. Only an ARN is rewritten and only a cloud resource
+// is qualified; a Kubernetes name (pod hash and all) passes through untouched and
+// unqualified.
+func workloadFromLabels(labels map[string]string) providers.Workload {
+	kind, name := rawWorkloadFromLabels(labels)
+	return providers.ResolveWorkloadIdentity(
+		providers.Workload{Kind: kind, Name: name, Namespace: labels["namespace"]}, labels)
 }
 
 // rawWorkloadFromLabels picks the workload label to trust, in precedence order, and
@@ -100,7 +106,7 @@ func (Source) Decode(body []byte, _ http.Header) (source.DecodeResult, error) {
 			continue
 		}
 		startsAt, _ := time.Parse(time.RFC3339, a.StartsAt)
-		kind, name := workloadFromLabels(a.Labels)
+		w := workloadFromLabels(a.Labels)
 		var fps []string
 		if a.Fingerprint != "" {
 			fps = []string{a.Fingerprint}
@@ -110,7 +116,7 @@ func (Source) Decode(body []byte, _ http.Header) (source.DecodeResult, error) {
 			Title:       a.Labels["alertname"],
 			Severity:    a.Labels["severity"],
 			Environment: cmp.Or(a.Labels["environment"], a.Labels["env"]),
-			Workload:    providers.Workload{Namespace: a.Labels["namespace"], Kind: kind, Name: name},
+			Workload:    w,
 			Reason:      a.Labels["severity"],
 			// The description/summary annotation is the alert's most informative human
 			// text (the templated "what is wrong") — without it the seed prompt carried
@@ -124,10 +130,11 @@ func (Source) Decode(body []byte, _ http.Header) (source.DecodeResult, error) {
 			Fingerprints: fps,
 			GroupKey:     p.GroupKey,
 			// Host-invariant per-class dedup key (alertname + workload family +
-			// cluster, pod-hash suffix stripped): dedupes re-fires of one series
-			// (#137) AND the same alert on a different pod/node (CORE-681). Attribution
+			// cluster + AWS account, pod-hash suffix stripped): dedupes re-fires of one
+			// series (#137) AND the same alert on a different pod/node (CORE-681), while
+			// keeping two AWS accounts that share an instance name apart. Attribution
 			// still uses the per-series Alertmanager Fingerprint above.
-			TriggerKey: curator.IncidentKey(a.Labels["alertname"], a.Labels["namespace"], kind, name, a.Labels["cluster"]),
+			TriggerKey: curator.IncidentKey(a.Labels["alertname"], w, a.Labels["cluster"]),
 		})
 	}
 	return out, nil

@@ -638,7 +638,7 @@ func resourceAgrees(reqW providers.Workload, entryResource string, requireWorklo
 	if entryResource == "" || reqW.Namespace == "" {
 		return matchNone
 	}
-	if refsAgree(reqW.Ref(), entryResource) {
+	if refsAgree(reqW, entryResource) {
 		return matchExact
 	}
 	if requireWorkload {
@@ -673,20 +673,27 @@ func resourceAgrees(reqW providers.Workload, entryResource string, requireWorklo
 //     ("observability/arn:aws:rds:…:db:compute-stages" beside short names).
 //     Canonicalising new alerts at ingestion cannot reach those already-written
 //     entries, so the gate itself compares names as cloud resource identities (see
-//     providers.ResourceID). Note what that does NOT buy: ingestion has already
-//     stripped the ARN off the request side, so the alert is unqualified and agrees
-//     with an entry's ARN in ANY account. The account/region check separates two
-//     QUALIFIED values only — it is what keeps two legacy ARN-form entries apart, not
-//     a guarantee that this gate is account-safe. See providers.NormalizeResourceName
-//     for the exposure that buys the collapse.
+//     providers.ResourceID).
+//
+// What is forgiven is the SPELLING, never the SCOPE. The request is compared as
+// providers.Workload.ResourceID — the name resolved as a cloud identifier, qualified
+// by the account and region ingestion stamped on the workload — so an alert from one
+// AWS account no longer agrees with a catalog entry still filed under a full ARN in
+// another. That comparison only became possible when the account stopped being
+// carried inside the name: ingestion reduces the name to its bare identifier, so
+// before it had a field of its own the request side was ALWAYS unqualified here and
+// the qualifier check was vacuous for alert traffic. An absent qualifier still means
+// unknown rather than different, so an alert that carries no account (every
+// Kubernetes workload, and any stack whose rules omit the label) matches exactly as
+// it did.
 //
 // Only the NAME half is normalized, never the namespace: the ref is cut on the FIRST
 // "/" and Kubernetes namespaces never contain one, so a slash-style ARN in the name
 // half survives whole. Both sides must be scoped the same way — a bare namespace and
 // a named workload inside it are not an exact match; the caller decides that pair on
 // its weaker namespace tier.
-func refsAgree(a, b string) bool {
-	ans, aname, aScoped := strings.Cut(a, "/")
+func refsAgree(reqW providers.Workload, b string) bool {
+	ans, _, aScoped := strings.Cut(reqW.Ref(), "/")
 	bns, bname, bScoped := strings.Cut(b, "/")
 	if ans != bns || aScoped != bScoped {
 		return false
@@ -698,7 +705,9 @@ func refsAgree(a, b string) bool {
 		// get wrong.
 		return true
 	}
-	return providers.ParseResourceID(aname).Agrees(providers.ParseResourceID(bname))
+	// The request's name half is not re-cut out of the ref: reqW.ResourceID already
+	// holds it, resolved and qualified, and a namespace never contains a "/".
+	return reqW.ResourceID().Agrees(providers.ParseResourceID(bname))
 }
 
 func clampF(v, lo, hi float64) float64 {

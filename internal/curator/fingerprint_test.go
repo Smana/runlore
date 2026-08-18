@@ -218,19 +218,24 @@ func TestNormalizeTextMasksVolatile(t *testing.T) {
 	}
 }
 
+// pod builds the observability/Pod workload the per-class key cases share.
+func pod(name string) providers.Workload {
+	return providers.Workload{Kind: "Pod", Namespace: "observability", Name: name}
+}
+
 func TestIncidentKeyPerClassKeepsCluster(t *testing.T) {
-	k1 := IncidentKey("KubePodNotReady", "observability", "Pod", "node-exporter-prometheus-node-exporter-km6ld", "shared")
-	k2 := IncidentKey("KubePodNotReady", "observability", "Pod", "node-exporter-prometheus-node-exporter-n5zld", "shared")
+	k1 := IncidentKey("KubePodNotReady", pod("node-exporter-prometheus-node-exporter-km6ld"), "shared")
+	k2 := IncidentKey("KubePodNotReady", pod("node-exporter-prometheus-node-exporter-n5zld"), "shared")
 	if k1 == "" || k1 != k2 {
 		t.Fatalf("same alert on different pods must share a key: %q vs %q", k1, k2)
 	}
-	if IncidentKey("KubePodNotReady", "observability", "Pod", "node-exporter-prometheus-node-exporter-km6ld", "dev-0") == k1 {
+	if IncidentKey("KubePodNotReady", pod("node-exporter-prometheus-node-exporter-km6ld"), "dev-0") == k1 {
 		t.Fatal("different cluster must change the key")
 	}
-	if IncidentKey("KubeDaemonSetRolloutStuck", "observability", "Pod", "node-exporter-prometheus-node-exporter-km6ld", "shared") == k1 {
+	if IncidentKey("KubeDaemonSetRolloutStuck", pod("node-exporter-prometheus-node-exporter-km6ld"), "shared") == k1 {
 		t.Fatal("different alertname must change the key")
 	}
-	if IncidentKey("", "", "", "", "") != "" {
+	if IncidentKey("", providers.Workload{}, "") != "" {
 		t.Fatal("no signal must yield an empty key")
 	}
 }
@@ -241,11 +246,11 @@ func TestIncidentKeyPerClassKeepsCluster(t *testing.T) {
 func TestDupFingerprintStableAcrossPodSuffix(t *testing.T) {
 	a := providers.Investigation{
 		Resource:   providers.Workload{Kind: "Pod", Namespace: "observability", Name: "node-exporter-prometheus-node-exporter-km6ld"},
-		TriggerKey: IncidentKey("KubePodNotReady", "observability", "Pod", "node-exporter-prometheus-node-exporter-km6ld", "shared"),
+		TriggerKey: IncidentKey("KubePodNotReady", pod("node-exporter-prometheus-node-exporter-km6ld"), "shared"),
 	}
 	b := providers.Investigation{
 		Resource:   providers.Workload{Kind: "Pod", Namespace: "observability", Name: "node-exporter-prometheus-node-exporter-n5zld"},
-		TriggerKey: IncidentKey("KubePodNotReady", "observability", "Pod", "node-exporter-prometheus-node-exporter-n5zld", "shared"),
+		TriggerKey: IncidentKey("KubePodNotReady", pod("node-exporter-prometheus-node-exporter-n5zld"), "shared"),
 	}
 	fa, fb := DupFingerprint(a), DupFingerprint(b)
 	if fa == "" || fa != fb {

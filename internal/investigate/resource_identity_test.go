@@ -85,3 +85,50 @@ func TestEntryAgreesMatchesARNOnEitherStoredResource(t *testing.T) {
 		t.Fatalf("entryAgrees = %v, want matchExact — the entry's AlertResource is the same DB instance spelled as an ARN", got)
 	}
 }
+
+// TestResourceAgreesUsesTheAccountThatSurvivedIngestion closes the recall half of the
+// cross-account collision. The live catalog holds an entry indexed as
+// "observability/arn:aws:rds:us-east-1:195275669196:db:compute-stages", and ingestion
+// reduces an incoming alert to the bare identifier — so the request side used to be
+// unqualified and agreed with that ARN from ANY account. Instant recall then presents
+// one account's runbook as the answer for another account's database, short-circuiting
+// the loop with no investigation at all.
+//
+// Ingestion now carries the account as its own field (providers.ResolveWorkloadIdentity),
+// so the qualifier the ARN names has something real to be compared against.
+func TestResourceAgreesUsesTheAccountThatSurvivedIngestion(t *testing.T) {
+	const (
+		theirs = "observability/arn:aws:rds:us-east-1:195275669196:db:compute-stages"
+		ours   = "195275669196"
+	)
+	w := func(account string) providers.Workload {
+		return providers.Workload{Namespace: "observability", Name: "compute-stages", Account: account}
+	}
+	cases := []struct {
+		name  string
+		reqW  providers.Workload
+		entry string
+		want  matchStrength
+	}{
+		{"another account's alert must not reach this account's entry",
+			w("999999999999"), theirs, matchNone},
+		{"the owning account still reaches it",
+			w(ours), theirs, matchExact},
+		{"an unqualified alert still reaches it — an absent qualifier is unknown, not different",
+			w(""), theirs, matchExact},
+		{"a qualified alert still reaches an unqualified entry",
+			w("999999999999"), "observability/compute-stages", matchExact},
+		{"the region qualifies too, when both sides carry one",
+			providers.Workload{Namespace: "observability", Name: "compute-stages", Region: "eu-west-1"},
+			theirs, matchNone},
+		{"a Kubernetes workload is unqualified and matches exactly as before",
+			providers.Workload{Namespace: "apps", Name: "payment-api"}, "apps/payment-api", matchExact},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := resourceAgrees(c.reqW, c.entry, false); got != c.want {
+				t.Errorf("resourceAgrees(%+v, %q) = %v, want %v", c.reqW, c.entry, got, c.want)
+			}
+		})
+	}
+}

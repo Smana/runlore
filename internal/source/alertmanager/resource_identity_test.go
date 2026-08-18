@@ -30,6 +30,11 @@ func TestDecodeCanonicalisesAnARNWorkloadLabel(t *testing.T) {
 			"labels": map[string]string{
 				"alertname": "RDSHighCPU", "namespace": "observability",
 				"workload": workload, "cluster": "aqemia-shared", "severity": "warning",
+				// The exporter stamps the account on every series, so it reaches the key
+				// under BOTH spellings — see TestARNAndShortSpellingsStillFuse, and
+				// TestAnARNOnlyAccountDoesNotFuseWithAnUnqualifiedFiring for what happens
+				// on a stack that omits it.
+				"account_id": "142655614335",
 			},
 		}}})
 		if err != nil {
@@ -90,9 +95,9 @@ func TestWorkloadFromLabelsLeavesKubernetesNamesAlone(t *testing.T) {
 		{map[string]string{"alertname": "X"}, "", ""},
 	}
 	for _, c := range cases {
-		kind, name := workloadFromLabels(c.labels)
-		if kind != c.kind || name != c.name {
-			t.Errorf("workloadFromLabels(%v) = (%q, %q), want (%q, %q)", c.labels, kind, name, c.kind, c.name)
+		w := workloadFromLabels(c.labels)
+		if w.Kind != c.kind || w.Name != c.name {
+			t.Errorf("workloadFromLabels(%v) = (%q, %q), want (%q, %q)", c.labels, w.Kind, w.Name, c.kind, c.name)
 		}
 	}
 }
