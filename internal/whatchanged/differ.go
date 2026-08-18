@@ -32,37 +32,40 @@ type providersFileDiff = providers.FileDiff
 
 // Differ computes path-scoped diffs between Git revisions.
 type Differ struct {
-	// TokenSource mints a GitHub App installation token for HTTPS clone auth in
-	// Remote/RemoteFromParent. It is called once per clone so a short-lived
-	// (~1h) installation token stays fresh across a long-running agent. nil
-	// disables auth (e.g. public or local repos).
+	// TokenSource yields the forge credential for HTTPS clone auth in
+	// Remote/RemoteFromParent — a minted GitHub App installation token, a GitLab
+	// access token. It is called once per clone so a short-lived (~1h)
+	// installation token stays fresh across a long-running agent. nil disables
+	// auth (e.g. public or local repos).
 	TokenSource func(context.Context) (string, error)
 	// TokenHost, when non-empty, confines the TokenSource credential to clones of
-	// that exact host — the GitHub App installation token is only valid for (and
-	// must only be sent to) the GitHub instance the App is installed on. A clone
-	// of any other host proceeds unauthenticated so a github.com token can never
-	// leak to, say, gitlab.com. Empty (the default, used by what_changed on the
-	// operator's own single-host GitOps repo) attaches the token to every clone,
-	// preserving the original behavior. source_diff sets this because its clone
-	// URLs are model-chosen across the whole allowlist.
+	// that exact host — a forge credential is only valid for (and must only be
+	// sent to) the forge it came from. A clone of any other host proceeds
+	// unauthenticated, so a github.com token can never leak to, say,
+	// attacker.example. Both callers set it: source_diff because its clone URLs
+	// are model-chosen across the whole allowlist, what_changed because a GitOps
+	// repoURL is cluster state and names any host its author likes.
+	//
+	// Empty attaches the credential to EVERY clone. That is the correct default
+	// only for a Differ with no credential at all; a caller that sets TokenSource
+	// and leaves this empty has an unconfined credential.
 	TokenHost string
 	// SSHRewriteHost names the ONE host whose SSH clone URLs may be rewritten to
 	// their HTTPS equivalent (see effectiveCloneURL). It must be the host the
 	// TokenSource credential belongs to. Empty (the default) disables the rewrite
 	// entirely — fail closed — so a Differ that does not know where its credential
-	// is valid never turns an SSH URL into a live HTTPS request. It bounds the
-	// rewrite only; it is not a general credential boundary, and an HTTPS clone
-	// URL is unaffected by it (see effectiveCloneURL).
+	// is valid never turns an SSH URL into a live HTTPS request.
 	//
-	// It is deliberately NOT TokenHost, and folding the two together would be a
-	// silent regression in one direction or the other. TokenHost governs which
-	// clones may CARRY the token and is empty on the what_changed differ on
-	// purpose (see above); setting it there would change auth for every HTTPS
-	// clone that works today, and it is derived from the forge API URL, which on a
-	// GitHub Enterprise install with subdomain isolation is a different host from
-	// the git remote. SSHRewriteHost governs only whether a rewrite HAPPENS, so a
-	// wrong value costs at most an unrewritten SSH URL — never a withheld
-	// credential on a clone that works today.
+	// It is a separate field from TokenHost because it answers a different
+	// question — whether a rewrite HAPPENS, not whether the credential may be
+	// carried — and the two have different defaults: source_diff confines its
+	// credential but arms no rewrite, because sourcerepo.Allowlist.Match already
+	// emits HTTPS. what_changed sets both, to the same host. Keeping them apart
+	// also keeps the rewrite's own check honest: it must refuse a foreign host on
+	// its own terms, so that an SSH repoURL toward attacker.example dies at
+	// go-git's "invalid auth method" without a request ever being formed, rather
+	// than becoming an anonymous HTTPS request that TokenHost merely declined to
+	// authenticate.
 	SSHRewriteHost string
 	// Mirrors, when set, backs clones with a persistent per-repo bare mirror
 	// (incremental fetch, shared across investigations). nil ⇒ full clone per
@@ -154,13 +157,18 @@ type singleFilePatch struct{ fp diff.FilePatch }
 func (p singleFilePatch) FilePatches() []diff.FilePatch { return []diff.FilePatch{p.fp} }
 func (p singleFilePatch) Message() string               { return "" }
 
-// auth builds the clone auth method for cloneURL from a freshly-minted
-// installation token. Returns (nil, nil) when no token source is configured, it
-// yields an empty token (public/local repos), or TokenHost is set and cloneURL's
-// host does not match it — in which case the clone proceeds unauthenticated so
-// the GitHub App token is never transmitted to a foreign host. A token-source
+// auth builds the clone auth method for cloneURL from a freshly-minted forge
+// credential. Returns (nil, nil) when no token source is configured, it yields
+// an empty token (public/local repos), or TokenHost is set and cloneURL's host
+// does not match it — in which case the clone proceeds unauthenticated so the
+// credential is never transmitted to a host it is not valid for. A token-source
 // error is surfaced so a private same-host clone fails loudly instead of
 // silently attempting unauthenticated access.
+//
+// The off-host branch returns BEFORE calling TokenSource, so a foreign clone URL
+// does not even cause a credential to be minted. cloneToDisk passes the
+// EFFECTIVE clone URL (see effectiveCloneURL), so the host authorized here is
+// always the host dialled.
 func (d *Differ) auth(ctx context.Context, cloneURL string) (transport.AuthMethod, error) {
 	if d.TokenSource == nil {
 		return nil, nil
@@ -247,31 +255,24 @@ func (d *Differ) cloneToDisk(ctx context.Context, rawURL string) (*git.Repositor
 // A GitOps engine's spec.source.repoURL is very often an SSH URL
 // ("git@github.com:org/repo.git") because the engine itself authenticates with a
 // deploy key. RunLore holds no SSH credential at all — auth only ever produces
-// HTTP basic auth from a GitHub App installation token — so go-git's SSH
-// transport rejected every one of those clones with "invalid auth method", and
-// what_changed / source_diff silently produced no change correlation for ANY
-// object (RunLore #495). Rewriting to HTTPS lets the App token authenticate the
-// very same repository; the installation still scopes what may be read, so this
-// grants no access the operator had not already granted.
+// HTTP basic auth from a forge token — so go-git's SSH transport rejected every
+// one of those clones with "invalid auth method", and what_changed / source_diff
+// silently produced no change correlation for ANY object (RunLore #495).
+// Rewriting to HTTPS lets the forge token authenticate the very same repository;
+// the installation/token still scopes what may be read, so this grants no access
+// the operator had not already granted.
 //
 // The rewrite fires only toward SSHRewriteHost — the host the credential is for,
 // compared on an ASCII-only host so the comparison cannot disagree with the host
 // net/http will dial (see sshToHTTPS) — and only when there is a credential at
-// all. That confinement is load-bearing. A GitOps repoURL is cluster state, so in
-// a shared cluster anyone who can create an Application picks it, and this differ
-// runs with TokenHost empty, meaning auth attaches the App token to whatever host
-// it clones. Unconfined, the rewrite would turn
-// "repoURL: ssh://git@attacker.example/x" into that token being POSTed to
-// attacker.example. Do not "simplify" the host check away.
-//
-// WHAT THIS DOES NOT DO. It narrows the SSH path only. A hostile HTTPS repoURL —
-// "repoURL: https://attacker.example/x" — still receives the token today: auth is
-// unconfined on this differ and the rewrite never sees an HTTPS URL. That hole
-// predates the rewrite and is not closed here. Closing it means confining
-// TokenHost on this differ, which needs an operator override for a GitHub
-// Enterprise install whose API host differs from its git host, and is its own
-// change. Read this check as "the rewrite cannot introduce a new leak", not as a
-// credential boundary — it is not one.
+// all. That confinement is load-bearing and is NOT made redundant by TokenHost.
+// TokenHost decides whether a request carries the credential; this decides
+// whether the request is made at all. Without this check,
+// "repoURL: ssh://git@attacker.example/x" — cluster state, chosen by anyone who
+// can create an Application — would become a live HTTPS request to
+// attacker.example that merely happened to be unauthenticated, instead of dying
+// at "invalid auth method" with nothing transmitted. Do not "simplify" the host
+// check away on the grounds that the token is confined elsewhere.
 //
 // With no TokenSource (public or local repos) the raw SSH URL is kept so go-git's
 // default SSH-agent path remains available — rewriting it would trade a working
@@ -325,10 +326,10 @@ func (d *Differ) effectiveCloneURL(rawURL string) string {
 // go-git's scp syntax (which takes the FIRST '@' as userinfo, then fails) and a
 // different one to RFC 3986 (which takes the LAST), so an unchecked rewrite would
 // turn a URL that could not clone at all into a working clone of evil.example
-// with "github.com" demoted to userinfo — and what_changed, which attaches its
-// App token to every host it clones, would hand the token over. Because the
-// authority is built as exactly ep.Host, userinfo can only appear in the result
-// when ep.Host itself holds an '@', which this same check rejects.
+// with "github.com" demoted to userinfo — and the caller's host check, reading
+// the host as "github.com", would authorize the rewrite AND the credential.
+// Because the authority is built as exactly ep.Host, userinfo can only appear in
+// the result when ep.Host itself holds an '@', which this same check rejects.
 //
 // Refusal costs nothing — the caller simply keeps the raw URL.
 func sshToHTTPS(rawURL string) (string, bool) {

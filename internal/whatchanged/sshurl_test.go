@@ -10,16 +10,20 @@ import (
 	"github.com/Smana/runlore/internal/sourcerepo"
 )
 
-// armedDiffer returns a Differ wired exactly as buildGitOpsDiffer wires
-// what_changed: a GitHub App credential, the SSH→HTTPS rewrite armed for host,
-// and TokenHost deliberately left EMPTY — so auth attaches the token to whatever
-// host the differ ends up cloning.
+// armedDiffer returns a Differ with a GitHub App credential, the SSH→HTTPS
+// rewrite armed for host, and TokenHost deliberately left EMPTY — so auth
+// attaches the token to whatever host the differ ends up cloning.
 //
-// That is the worst case on purpose. With TokenHost empty, the host check in
-// effectiveCloneURL is the only thing standing between a hostile repoURL and the
-// credential, so every leak these tests hunt for is reachable. Do NOT set
-// TokenHost here: it would mask the exact leak
-// TestSSHRewriteNeverReachesAForeignHost exists to catch.
+// That is STRICTER than production and deliberately so: buildGitOpsDiffer now
+// sets TokenHost to the same host, so a leak past the rewrite's own check would
+// be caught there too. Layering both here would let this one rot unnoticed.
+// With TokenHost empty, the host check in effectiveCloneURL is the only thing
+// standing between a hostile repoURL and the credential, so every leak these
+// tests hunt for stays reachable. Do NOT set TokenHost here: it would mask the
+// exact leak TestSSHRewriteNeverReachesAForeignHost exists to catch.
+//
+// The wiring that pairs the two lives in internal/app —
+// TestBuildGitOpsDifferConfinesTheForgeCredential.
 func armedDiffer(host string) *Differ {
 	return &Differ{
 		TokenSource:    func(context.Context) (string, error) { return "ghs_SECRET", nil },
@@ -90,8 +94,8 @@ func TestSSHToHTTPS(t *testing.T) {
 		// '@' as userinfo, so it reads the host as the whole "github.com@evil.example"
 		// and fails; net/url takes the LAST, so an unguarded rewrite would emit a
 		// perfectly valid clone of evil.example with "github.com" demoted to
-		// userinfo — and what_changed, which attaches its App token to every host,
-		// would post the token there. Refused.
+		// userinfo — and both host checks (the rewrite's and TokenHost's) would
+		// read that host as "github.com" and post the token there. Refused.
 		{"double-@ host is refused, never demoted to userinfo", "git@github.com@evil.example:acme/x.git", "", false},
 		{"double-@ host is refused (short form)", "git@a@b.example:acme/x.git", "", false},
 		{"hostless scp form is refused", "git@:acme/x.git", "", false},

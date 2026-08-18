@@ -50,8 +50,8 @@ func BuildModelAndTools(ctx context.Context, cfg *config.Config, gp providers.Gi
 	}
 	model := BuildModel(cfg, apiKey)
 	// Catalog sync reads the KB repo, so it follows forge.provider — not the
-	// GitHub-App-only source used by the curate/sweep/differ paths.
-	forgeTok := BuildKBTokenSource(cfg, log)
+	// GitHub-App-only source the curate/sweep paths talk to the API with.
+	forgeTok := BuildCloneTokenSource(cfg, log)
 	var tools []investigate.Tool
 	if gp != nil {
 		tools = append(tools, investigate.WhatChangedTool{GitOps: gp})
@@ -334,13 +334,16 @@ func appendSourceDiffTool(cfg *config.Config, tools []investigate.Tool, log *slo
 		log.Warn("source_repos: invalid allowlist; source_diff disabled", "err", err)
 		return tools
 	}
-	// Confine the GitHub App token to the forge's own host: source_diff clone
-	// URLs are model-chosen across the whole allowlist, so without this a
-	// github.com token would be transmitted to any other allowlisted host (e.g.
-	// a gitlab.com repo). Off-host repos clone anonymously.
+	// Confine the forge credential to the forge's own git host: source_diff clone
+	// URLs are model-chosen across the whole allowlist, so without this the token
+	// would be transmitted to any other allowlisted host (e.g. a gitlab.com repo
+	// on a GitHub forge). Off-host repos clone anonymously. The credential and the
+	// host it is confined to come from the same provider switch that what_changed
+	// uses, so a GitLab forge confines a GitLab token to the GitLab host rather
+	// than pinning it to github.com — a mismatch there withholds silently.
 	sd := &whatchanged.Differ{
-		TokenSource: BuildForgeTokenSource(cfg, log),
-		TokenHost:   githubGitHost(cfg.Forge.GitHubAPIURL),
+		TokenSource: BuildCloneTokenSource(cfg, log),
+		TokenHost:   forgeGitHost(cfg),
 	}
 	if cfg.GitOps.Mirror.IsEnabled() {
 		base := cfg.GitOps.Mirror.Dir

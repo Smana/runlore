@@ -6,6 +6,7 @@ import (
 	"context"
 	"log/slog"
 	"os"
+	"strings"
 
 	"github.com/Smana/runlore/internal/config"
 
@@ -59,25 +60,56 @@ func BuildGitLabTokenSource(cfg *config.Config, log *slog.Logger) ForgeToken {
 	return func(context.Context) (string, error) { return tok, nil }
 }
 
-// BuildKBTokenSource picks the credential for reading the KNOWLEDGE-BASE repo —
-// the catalog git-sync — by forge provider.
+// BuildCloneTokenSource picks the credential for CLONING a git repository over
+// HTTPS, by forge provider. Every clone path uses it: the catalog git-sync that
+// reads the KB repo, the what_changed differ that clones GitOps source repos,
+// and source_diff.
 //
-// This is deliberately separate from BuildForgeTokenSource, which mints GitHub App
-// installation tokens and is correct for the GitHub-only paths (curate, sweeps, the
-// what-changed differ that clones source repos). Catalog sync is different: it reads
-// the same repo the curator writes to, so it must follow forge.provider.
+// It is deliberately separate from BuildForgeTokenSource, which mints GitHub App
+// installation tokens and is correct only for the paths that talk to the GitHub
+// API itself (curate, sweeps). A clone is not one of those: it authenticates to
+// whichever forge the operator configured.
 //
-// Before this existed, catalog sync fell back to the GitHub App identity on every
-// deployment. On GitLab that source is nil, so the syncer cloned ANONYMOUSLY: with a
-// private KB project, RunLore opened the merge request, a human merged it, and the
-// merged knowledge never came back into the catalog. The learning loop was severed at
-// the seam, silently — the log line explaining the fallback did not even fire, because
-// the token source was nil rather than wrong.
+// Getting that wrong fails SILENTLY, which is why this exists at all. Catalog
+// sync used to fall back to the GitHub App identity on every deployment; on
+// GitLab that source is nil, so the syncer cloned ANONYMOUSLY — with a private KB
+// project, RunLore opened the merge request, a human merged it, and the merged
+// knowledge never came back into the catalog. The learning loop was severed at
+// the seam, silently: the log line explaining the fallback did not even fire,
+// because the token source was nil rather than wrong. The what_changed differ
+// held the identical bug against a private GitOps repo — the differ cloned
+// anonymously and what_changed produced nothing for EVERY object — until it was
+// moved onto this same rule.
 //
-// catalog.git.token_env still wins over this; it is the explicit escape hatch.
-func BuildKBTokenSource(cfg *config.Config, log *slog.Logger) ForgeToken {
+// One username serves both forges: the token is the basic-auth PASSWORD, and
+// GitLab accepts any non-blank username alongside a project/group access token
+// (see catalog.Syncer.auth and whatchanged.Differ.auth, both "x-access-token").
+//
+// catalog.git.token_env still wins over this for the KB repo; it is the explicit
+// escape hatch.
+func BuildCloneTokenSource(cfg *config.Config, log *slog.Logger) ForgeToken {
 	if cfg.Forge.Provider == "gitlab" {
 		return BuildGitLabTokenSource(cfg, log)
 	}
 	return BuildForgeTokenSource(cfg, log)
+}
+
+// forgeGitHost names the ONE host a clone credential from BuildCloneTokenSource
+// may be sent to — the host the configured forge serves GIT REMOTES from.
+//
+// It is the credential boundary for what_changed and source_diff, so it is TOTAL
+// on purpose: it always names a host, and never returns "" (which a Differ reads
+// as "attach the token everywhere"). An operator override wins; otherwise the
+// host is derived, and it is derived from forgeWebHost because git and web share
+// a host on both forges — only GitHub's API can be split onto an api.* subdomain,
+// which is precisely the case config.Validate refuses without forge.git_host.
+//
+// A wrong value here does not leak the credential — it withholds it, which shows
+// up as an empty what_changed. That is why the ambiguous case is a startup
+// failure rather than a default.
+func forgeGitHost(cfg *config.Config) string {
+	if h := strings.ToLower(strings.TrimSpace(cfg.Forge.GitHost)); h != "" {
+		return h
+	}
+	return forgeWebHost(cfg)
 }
