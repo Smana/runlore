@@ -5,8 +5,11 @@ All notable changes to RunLore are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-RunLore is **pre-1.0 and under active development** — there are no tagged releases
-yet, so everything currently lives under `[Unreleased]`.
+RunLore is **pre-1.0 and under active development**: a breaking change bumps the
+**minor** version, not the major, so a `0.x` upgrade can still require migration.
+Read the ⚠ BREAKING CHANGES section of every release you cross; the migration steps
+are spelled out under
+[Upgrade & Uninstall](https://runlore.io/docs/operations/upgrade-uninstall/).
 
 ## [0.14.0](https://github.com/Smana/runlore/compare/v0.13.0...v0.14.0) (2026-08-14)
 
