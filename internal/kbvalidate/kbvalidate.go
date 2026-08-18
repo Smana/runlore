@@ -8,19 +8,19 @@
 // That correspondence used to be asserted here as holding "by construction", with
 // nothing checking it: a drafted entry first met this validator in the catalog
 // repo's CI, days later, by which point its pull request was already open and
-// unmergeable. curator.warnDraft now runs ValidateStructural on every entry the
-// curator drafts, before the PR is opened, and logs what fails. It deliberately
+// unmergeable. WarnDraft (see draft.go) now runs ValidateStructural on every entry
+// RunLore drafts, before the PR is opened, and logs what fails. It deliberately
 // does not BLOCK — an entry a human has to fix beats an investigation thrown away.
 //
-// SCOPE, stated rather than implied: that guard is the CURATOR's alone. RunLore has
-// a second entry writer — thread.ConceptEntry, opened by thread.Responder's
-// standalone-note route — and it is NOT validated here. The two halves of the #518
-// fix land differently on it: it DOES get the write-side repair, because it narrows
-// through the shared providers.EntryResourceRef, and it is deliberately typed
-// Concept so the Incident-only resource and section rules do not apply. What it
-// lacks is the draft-time REPORT, so a note that fails a rule which does apply to
-// it (an empty description, say) still meets this validator for the first time in
-// the catalog repo's CI. Closing that is a follow-up, not an oversight.
+// SCOPE, stated rather than implied: EVERY entry writer runs that guard, not just
+// the one that first needed it. RunLore has two — curator.Curate, drafting a
+// finding, and thread.ConceptEntry, opened by thread.Responder's standalone-note
+// route — and each calls WarnDraft before opening its pull request. The report
+// takes an entry's own type as given, which is what lets one guard serve both: a
+// thread note is deliberately typed Concept, so the Incident-only resource and
+// section rules do not apply to it, while the rules that DO apply (a description,
+// a single-line title, a matchable recall index) are now checked at draft time on
+// both paths instead of in the catalog repo's CI, days downstream.
 package kbvalidate
 
 import (

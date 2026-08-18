@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/Smana/runlore/internal/kbvalidate"
 	"github.com/Smana/runlore/internal/providers"
 )
 
@@ -156,7 +157,7 @@ func alertResourceIfDistinct(inv providers.Investigation) string {
 // bare-namespace cases pass through unchanged; w is a value copy, so mutating its
 // Name is local. Idempotent (NormalizeWorkloadName is).
 //
-// The Ref() is then narrowed by draftResource → providers.EntryResourceRef, because
+// The Ref() is then narrowed by kbvalidate.DraftResource → providers.EntryResourceRef, because
 // Workload.Name on a curated finding is MODEL-WRITTEN free text and a
 // whitespace-bearing one ("essentials, monitoring, argocd-app-of-apps") fails
 // RunLore's own merge gate — the curator would draft an entry its own `validate`
@@ -165,89 +166,8 @@ func alertResourceIfDistinct(inv providers.Investigation) string {
 // one path and not the other would leave the same defect armed here.
 func normalizeResource(w providers.Workload) string {
 	w.Name = normalizeWorkloadName(w.Name)
-	ref, _ := draftResource(w.Ref())
+	ref, _ := kbvalidate.DraftResource(w.Ref())
 	return ref
-}
-
-// draftResource is the draft path's decision about the `resource:` frontmatter
-// field: it returns the value to WRITE, plus the reason that value still cannot
-// serve as recall's structural index ("" when it can).
-//
-// The write side is providers.EntryResourceRef — see it for why a value that
-// merely clears the merge gate is not good enough, and for what it repairs.
-//
-// The reason exists because repair has a hard limit. `resource` is matched by
-// string equality against a live workload's "namespace/name" ref, so anything
-// else is at best a weaker index and at worst unmatchable — but the draft path
-// cannot invent the missing half, and MUST NOT drop the finding over it. So it
-// reports, and the caller logs; #518's requirement in one line: an unrecallable
-// entry is still better than a lost investigation, as long as it is not silent.
-//
-// A bare token is deliberately only a warning, not a repair. It is genuinely
-// ambiguous: Workload.Ref() renders a bare NAMESPACE when the name is unknown
-// (routine on alert-triggered investigations, and recall's matchNamespace tier
-// serves it), while a model that wrote a workload name with no namespace produces
-// the same shape and will match nothing. Guessing which would either mangle a
-// working index or fabricate a namespace.
-//
-// An empty resource is NOT a defect: it is the honest scopeless entry, and recall
-// has a matchScopeless tier for exactly it. Since a NON-EMPTY resource disables
-// that tier, a wrong value is strictly worse than none.
-//
-// Idempotent — draftResource(v) for a v it already produced returns v and the same
-// reason, which is what lets the curator re-derive the warning from the finished
-// entry instead of re-plumbing the raw ref.
-func draftResource(ref string) (resource, reason string) {
-	resource = providers.EntryResourceRef(ref)
-	if resource == "" {
-		return "", "" // legitimately scopeless
-	}
-	ns, name, ok := strings.Cut(resource, "/")
-	switch {
-	case !ok:
-		return resource, "reads as a bare namespace, so it matches every workload in it rather than one object"
-	case !isDNSLabel(ns) || !isDNSSubdomain(name):
-		return resource, "is not shaped namespace/name (RFC 1123), so recall's exact match can never agree with it"
-	}
-	return resource, ""
-}
-
-// isDNSLabel and isDNSSubdomain report whether a ref's halves could name a real
-// Kubernetes object: a namespace is an RFC 1123 LABEL (lowercase alphanumerics and
-// "-"), a name an RFC 1123 SUBDOMAIN (the same, plus "."). Both must start and end
-// alphanumeric, and neither may be empty.
-//
-// The warning is keyed on this ALLOWLIST while EntryResourceRef's repair stays a
-// denylist of five observed separators, and the asymmetry is deliberate. Repair is
-// destructive, so it only cuts at characters proven impossible; diagnosis is free,
-// so it reports everything the charset rules out. Keyed the other way — reporting
-// only the five — each new separator a model invented would ship silently until
-// someone appended another byte to a string literal, which is the very failure #518
-// is about: "argocd/essentials|monitoring" and "tooling/Harbor Registry" both clear
-// the merge gate, can never equal a Workload.Ref(), and said nothing.
-func isDNSLabel(s string) bool { return isDNS(s, false) }
-
-func isDNSSubdomain(s string) bool { return isDNS(s, true) }
-
-func isDNS(s string, dots bool) bool {
-	if s == "" {
-		return false
-	}
-	for i := 0; i < len(s); i++ {
-		switch c := s[i]; {
-		case c >= 'a' && c <= 'z', c >= '0' && c <= '9':
-		case c == '-', c == '.' && dots:
-			// Interior punctuation only: the first/last-byte check below rejects a
-			// leading or trailing one, which no Kubernetes object may carry either.
-		default:
-			return false
-		}
-	}
-	return isAlnum(s[0]) && isAlnum(s[len(s)-1])
-}
-
-func isAlnum(c byte) bool {
-	return c >= 'a' && c <= 'z' || c >= '0' && c <= '9'
 }
 
 // entryType derives the OKF type for a drafted entry. The default is Incident: a

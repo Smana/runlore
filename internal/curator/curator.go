@@ -163,7 +163,9 @@ func (c *Curator) Curate(ctx context.Context, inv providers.Investigation) (prov
 	// Reviewer context: the finding is novel, so its BM25 neighborhood is
 	// precisely what the reviewer needs to double-check that call.
 	entry.Related = relatedEntries(hits)
-	c.warnDraft(entry)
+	// The draft-time report the thread path also runs (kbvalidate.WarnDraft): it
+	// never blocks the PR, so it sits before OpenPR rather than gating it.
+	kbvalidate.WarnDraft(c.Log, entry)
 	ref, err := c.Forge.OpenPR(ctx, entry)
 	if err != nil {
 		c.recordCuration(ctx, "pr", "error")
@@ -172,57 +174,6 @@ func (c *Curator) Curate(ctx context.Context, inv providers.Investigation) (prov
 	c.Log.Info("curated as PR", "url", ref.URL, "confidence", inv.Confidence)
 	c.recordCuration(ctx, "pr", "opened")
 	return ref, nil
-}
-
-// warnDraft makes a drafted entry's own defects visible BEFORE the pull request
-// exists, and never blocks it: a drafted entry that cannot merge, or cannot be
-// recalled, is still a finding a human can fix — losing the investigation over it
-// would be the worse trade (#518).
-//
-// It runs the SAME validator the catalog's CI gate runs (`lore validate-kb` →
-// kbvalidate.ValidateStructural) rather than restating its rules, which is also
-// what makes kbvalidate's standing claim — that a RunLore-authored entry passes
-// "by construction" — checked instead of merely asserted. Two live drafts proved
-// it was not: one carried whitespace in `resource` and sat unmergeable for four
-// days before a human noticed, and it is the CI job, four days downstream, that
-// had been RunLore's only reader of its own gate.
-//
-// Then it checks the two recall index keys for a shape the gate does not police at
-// all. That is the half that matters more: `resource: argocd/essentials,monitoring,
-// argocd-app-of-apps` cleared the gate and merged, and could never match anything.
-// providers.EntryResourceRef now repairs that class; this reports what repair
-// cannot reach (see draftResource).
-func (c *Curator) warnDraft(e providers.KBEntry) {
-	for _, iss := range kbvalidate.ValidateStructural(draftedEntry(e)) {
-		msg := "drafted KB entry: advisory validation warning"
-		if iss.Severity == kbvalidate.SeverityError {
-			msg = "drafted KB entry fails RunLore's own merge gate; filing it anyway, but the frontmatter needs a human fix before it can merge"
-		}
-		c.Log.Warn(msg, "field", iss.Field, "issue", iss.Message, "title", e.Title)
-	}
-	// alert_resource is a SECOND, independent match key (the resource the alert fired
-	// on, when the fault sat deeper), so it is held to the same shape as the first.
-	for _, k := range []struct{ field, value string }{
-		{"resource", e.Resource},
-		{"alert_resource", e.AlertResource},
-	} {
-		if _, reason := draftResource(k.value); reason != "" {
-			c.Log.Warn("drafted KB entry carries a recall index that recall cannot use; filing it anyway",
-				"field", k.field, "value", k.value, "reason", reason, "title", e.Title)
-		}
-	}
-}
-
-// draftedEntry views a drafted KBEntry as the catalog.Entry the validator reads,
-// so the draft is judged by the entry that will actually be committed. Only the
-// fields okf.Render writes into the file are carried across; Path is the entry's
-// identity in the catalog and does not exist yet at draft time.
-func draftedEntry(e providers.KBEntry) catalog.Entry {
-	return catalog.Entry{
-		Type: e.Type, Title: e.Title, Description: e.Description,
-		Resource: e.Resource, AlertResource: e.AlertResource,
-		Tags: e.Tags, Fingerprint: e.Fingerprint, Body: e.Body,
-	}
 }
 
 // fingerprintFinder is the optional exact-identity dedup surface of the catalog

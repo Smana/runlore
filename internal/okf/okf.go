@@ -11,6 +11,7 @@ import (
 
 	"gopkg.in/yaml.v3"
 
+	"github.com/Smana/runlore/internal/catalog"
 	"github.com/Smana/runlore/internal/providers"
 )
 
@@ -59,6 +60,32 @@ func Render(e providers.KBEntry, m Meta) string {
 	b.WriteString(e.Body)
 	b.WriteString("\n")
 	return b.String()
+}
+
+// AsEntry adapts a KBEntry to the catalog.Entry the loader produces — the
+// read-side twin of Render, and the ONE projection every caller that must judge
+// an entry it has not yet written shares.
+//
+// It exists because that projection kept being written out by hand. Each copy
+// carried a slightly different subset of the fields Render actually writes, so
+// each answered a slightly different question than the merge gate would: the
+// curator's copy dropped the file-level metadata, `lore kb import`'s dropped
+// alert_resource and fingerprint, and nothing made either of them wrong until an
+// entry that turned on a dropped field reached the catalog repo's CI days later.
+// Rendering and reading are one field list, so they get one adapter;
+// TestAsEntryIsWhatTheLoaderWouldProduce holds it to the real loader's output
+// rather than to a restated list.
+//
+// path is the entry's bundle-relative destination, and is the entry's identity in
+// the catalog. A draft that does not have one yet passes "" — the validator does
+// not read Path, and inventing one would be a claim about where the entry landed.
+func AsEntry(e providers.KBEntry, m Meta, path string) catalog.Entry {
+	return catalog.Entry{
+		Type: e.Type, Title: e.Title, Description: e.Description,
+		Resource: e.Resource, AlertResource: e.AlertResource, Tags: e.Tags,
+		Timestamp: m.Timestamp, Status: m.Status, LastValidated: m.LastValidated,
+		Fingerprint: e.Fingerprint, Body: e.Body, Path: path,
+	}
 }
 
 // Slugify lowercases s and collapses every non-[a-z0-9] run into one dash.

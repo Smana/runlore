@@ -4585,3 +4585,64 @@ func TestKBUpdateCarriesEveryNoteFact(t *testing.T) {
 			"the classification above is satisfied by a field nothing actually sets")
 	}
 }
+
+// TestOpenPRRouteReportsWhatTheDraftedEntryGetsWrong closes the thread half of
+// #518. The curator's PR path runs a draft-time diagnostic before the pull
+// request exists; the standalone-note route opened one with nothing in the log
+// at all. So a note filed under a `resource` recall can never match died exactly
+// as silently as the curated entry that started #518 — except that here the
+// human was told, in their own thread, that it was saved.
+//
+// It is a report, never a gate: the entry is filed either way, because losing a
+// human's correction over a frontmatter defect is the worse trade.
+func TestOpenPRRouteReportsWhatTheDraftedEntryGetsWrong(t *testing.T) {
+	var logs bytes.Buffer
+	f := &fakeForge{}
+	r := newTestResponder(t, f)
+	r.Log = slog.New(slog.NewTextHandler(&logs, nil))
+	// A separator EntryResourceRef does not cut at, so the value ships whole: it
+	// carries no whitespace (the merge gate passes it) and can never equal a
+	// Workload.Ref() (recall can never match it) — #518's silent half.
+	tc := putContext(t, r, Context{
+		Root: "111.222", Transport: "slack",
+		Title: "Core Argo CD Applications stuck OutOfSync", Resource: "argocd/essentials|monitoring",
+	})
+
+	if _, _, err := r.write(context.Background(), tc, HumanNote("alice", "the poisoned chart cache theory is wrong"), noteAt); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	if len(f.opened) != 1 {
+		t.Fatalf("the report must never cost the note: opened = %d, want 1", len(f.opened))
+	}
+	out := logs.String()
+	if !strings.Contains(out, "argocd/essentials|monitoring") {
+		t.Errorf("expected a visible warning naming the unusable recall index, got logs:\n%s", out)
+	}
+	if strings.Contains(out, "level=ERROR") {
+		t.Errorf("the draft-time report must warn, never fail the write, got logs:\n%s", out)
+	}
+}
+
+// TestOpenPRRouteDoesNotWarnAboutAConceptsAbsentResource keeps that report
+// honest about the type distinction it inherits from the validator.
+// ConceptEntry types its entry Concept precisely so the Incident-only rules do
+// not apply: OKF omits `resource` for abstract knowledge, kbvalidate requires it
+// for Incident only, and an ordinary operator note has none. Warning about it
+// would fire on every note ever captured, which is the same as not warning at all.
+func TestOpenPRRouteDoesNotWarnAboutAConceptsAbsentResource(t *testing.T) {
+	var logs bytes.Buffer
+	f := &fakeForge{}
+	r := newTestResponder(t, f)
+	r.Log = slog.New(slog.NewTextHandler(&logs, nil))
+	tc := putContext(t, r, Context{Root: "111.222", Transport: "slack", Title: "OOM in payments"})
+
+	if _, _, err := r.write(context.Background(), tc, HumanNote("alice", "this recurs after every spot-node reclaim"), noteAt); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	if len(f.opened) != 1 {
+		t.Fatalf("opened = %d, want 1", len(f.opened))
+	}
+	if out := logs.String(); strings.Contains(out, "level=WARN") {
+		t.Errorf("a clean operator note must warn about nothing, or the signal is worthless; got:\n%s", out)
+	}
+}

@@ -129,8 +129,14 @@ func runKBImport(args []string, w io.Writer) error {
 		if actions[i].Skip {
 			continue
 		}
+		// The validator's input is the SAME struct the loader produces, built by the
+		// projection every other pre-write caller uses (okf.AsEntry, Render's read-side
+		// twin), so "valid at import" and "valid at merge" are one predicate. It used
+		// to be restated here as a hand-written field list, with alert_resource and
+		// fingerprint missing from the restatement.
+		res := actions[i].Result
 		var firstErr *kbvalidate.Issue
-		for _, iss := range kbvalidate.ValidateStructural(toCatalogEntry(actions[i].Result)) {
+		for _, iss := range kbvalidate.ValidateStructural(okf.AsEntry(res.Entry, res.Meta, res.DestPath)) {
 			switch {
 			case iss.Severity == kbvalidate.SeverityWarning:
 				actions[i].Warnings = append(actions[i].Warnings, fmt.Sprintf("%s: %s", iss.Field, iss.Message))
@@ -212,16 +218,4 @@ func collectSources(src string) ([]string, error) {
 		return nil
 	})
 	return out, err
-}
-
-// toCatalogEntry adapts an import result to the validator's input type —
-// the SAME struct the loader produces, so "valid at import" and "valid at
-// merge" are one predicate.
-func toCatalogEntry(r kbimport.Result) catalog.Entry {
-	return catalog.Entry{
-		Type: r.Entry.Type, Title: r.Entry.Title, Description: r.Entry.Description,
-		Resource: r.Entry.Resource, Tags: r.Entry.Tags, Body: r.Entry.Body,
-		Timestamp: r.Meta.Timestamp, Status: r.Meta.Status, LastValidated: r.Meta.LastValidated,
-		Path: r.DestPath,
-	}
 }

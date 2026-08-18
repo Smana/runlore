@@ -372,9 +372,11 @@ func cutToRuneBoundary(s string, n int) string {
 // would silently close a human's correction as a "duplicate" of another
 // human's correction, which defeats the entire premise of thread capture.
 //
-// internal/thread depends only on providers and internal/catalog by design,
-// so this literal is duplicated — not imported — in internal/curate. Kept in
-// sync by hand, the same tradeoff already made for neutralizeImages below.
+// internal/thread deliberately does not import internal/curate — its knowledge-
+// side dependencies are the contracts, the catalog and the shared merge-gate
+// validator, none of which reach the curate agent's forge client — so this
+// literal is duplicated, not imported, in internal/curate. Kept in sync by hand,
+// the same tradeoff already made for neutralizeImages below.
 const noteForgeLabel = "runlore-operator-note"
 
 // ConceptEntry builds the standalone KB entry for a note that has no open PR to
