@@ -20,6 +20,7 @@ import (
 	"github.com/Smana/runlore/internal/config"
 	"github.com/Smana/runlore/internal/curator"
 	"github.com/Smana/runlore/internal/investigate"
+	"github.com/Smana/runlore/internal/providers"
 	"github.com/Smana/runlore/internal/source"
 )
 
@@ -137,9 +138,10 @@ func toRequest(ev pdEvent) investigate.Request {
 		Fingerprint:  inc.ID,
 		Fingerprints: fps,
 		// Host-invariant per-class dedup key. PagerDuty's only scoping dimension is
-		// the service, so it takes the cluster slot; namespace/kind/name stay empty.
+		// the service, so it takes the cluster slot; the workload is empty (a PagerDuty
+		// incident names no object, hence no namespace/kind/name and no cloud account).
 		// Re-fires of the same incident title on the same service dedupe to one PR (#137).
-		TriggerKey: curator.IncidentKey(inc.Title, "", "", "", inc.Service.Summary),
+		TriggerKey: curator.IncidentKey(inc.Title, providers.Workload{}, inc.Service.Summary),
 	}
 }
 

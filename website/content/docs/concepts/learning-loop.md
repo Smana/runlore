@@ -209,7 +209,23 @@ Why each gate exists:
   symptoms → one cause": a `CrashLoopBackOff` in `apps/web` should not recall an OOM
   runbook for `apps/worker`. It's a **pre-filter** over a wide candidate set (k=20),
   not a check of only the top lexical hit, so the structurally-correct entry can win
-  even when a wrong-workload entry scores higher on symptom words. A **workload-less**
+  even when a wrong-workload entry scores higher on symptom words. Agreement is by
+  **identity, not spelling**: a per-pod name reduces to its controller family
+  (`tooling/harbor-registry-59598dbd57-ltkzw` → `tooling/harbor-registry`), and a
+  **cloud** resource is matched through its ARN — a CloudWatch alert names one RDS
+  instance by its `DBInstanceIdentifier` on one firing and by its full ARN on the
+  next, and both reach the same entry.
+
+  What is forgiven is the spelling, never the **scope**. Ingestion reduces the name
+  to its bare identifier but keeps the AWS account and region beside it, read from
+  the alert's `account_id`/`region` labels *and* from an ARN-spelled name — so one
+  instance name in two accounts is two identities for recall and two buckets in the
+  recurrence ledger, while the two spellings of one instance stay one. An alert that
+  carries no account at all (every Kubernetes workload, and any rule that omits the
+  label) is unqualified and still matches an ARN-form entry in any account: an absent
+  qualifier means *unknown*, not *different*, which is what keeps entries already
+  filed under a full ARN reachable. So if you run one instance name in two accounts,
+  make sure the account label reaches the alert. A **workload-less**
   incident (PagerDuty carries no Kubernetes namespace/name) agrees only with entries
   that are themselves resource-less — the weakest ("scopeless") tier: it always
   requires `solo_floor` + `min_score`, starts at reduced confidence, and

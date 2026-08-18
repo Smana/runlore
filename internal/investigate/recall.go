@@ -119,8 +119,13 @@ const staleFactor = 0.75
 // actually shares ("tooling", "harbor-registry"), lifting those cases from zero-hit
 // to rank #1.
 //
-// Deliberate boundaries: the name is NORMALIZED (pod-hash stripped, same function
-// as the structural gate) so a per-pod alert matches the controller-family runbook;
+// Deliberate boundaries: the name is NORMALIZED to its resource IDENTITY — the pod
+// hash stripped so a per-pod alert matches the controller-family runbook, and an ARN
+// collapsed to the identifier its CloudWatch dimension carries so the retrieval that
+// FEEDS the structural gate can no longer disagree with it about which spellings name
+// one resource. Ingestion already does the ARN half for alert-derived requests; this
+// covers the ones that never went through it (the CLI path) and keeps this query
+// builder identical to curator.Fingerprint, which normalizes the same way;
 // the alertname is appended only when it is NOT already the title, so a label alert
 // (title == alertname) is not double-counted; and the ref is additive, so the
 // GitOps-failure source — whose title already carries "Kind/Name" — is not harmed
@@ -136,7 +141,7 @@ func buildRecallQuery(req Request) string {
 	add(req.Title)
 	add(req.Message)
 	add(req.Workload.Namespace)
-	add(providers.NormalizeWorkloadName(req.Workload.Name))
+	add(providers.NormalizeResourceName(req.Workload.Name))
 	if an := req.Labels["alertname"]; an != req.Title {
 		add(an)
 	}
@@ -633,18 +638,7 @@ func resourceAgrees(reqW providers.Workload, entryResource string, requireWorklo
 	if entryResource == "" || reqW.Namespace == "" {
 		return matchNone
 	}
-	// Strip the volatile pod-hash suffix off the NAME segment on BOTH sides before
-	// the structural comparison. A pod-scoped alert (KubePodNotReady carries only a
-	// `pod` label — no deployment/workload label) arrives with the full pod name,
-	// e.g. tooling/harbor-registry-59598dbd57-ltkzw, while the KB entry stores the
-	// normalized controller family tooling/harbor-registry. Without normalization the
-	// two never agree → the recall is rejected (no_resource_match) and a full paid
-	// investigation runs despite a perfect KB entry (live-found). Normalizing BOTH
-	// sides also matches an entry written before the curator-side CORE-681 fix, which
-	// may itself still carry a pod hash. Only the name is normalized — never the
-	// namespace — and the normalization is the same idempotent one the dedup path
-	// uses, so two distinct workloads never collapse together.
-	if normalizeResourceRef(reqW.Ref()) == normalizeResourceRef(entryResource) {
+	if refsAgree(reqW, entryResource) {
 		return matchExact
 	}
 	if requireWorkload {
@@ -661,18 +655,59 @@ func resourceAgrees(reqW providers.Workload, entryResource string, requireWorklo
 	return matchNone
 }
 
-// normalizeResourceRef strips the volatile pod-hash suffix from the NAME segment of
-// a "namespace/name" resource ref, leaving a bare "namespace" (or "") untouched. It
-// splits on the first "/" only — Kubernetes namespaces and names never contain a
-// slash — so the namespace is never normalized, only the name. It delegates to the
-// shared providers.NormalizeWorkloadName so the recall gate and the curator dedup
-// path strip identically (and idempotently).
-func normalizeResourceRef(ref string) string {
-	ns, name, ok := strings.Cut(ref, "/")
-	if !ok {
-		return ref // bare namespace (or empty): no name segment to normalize
+// refsAgree reports whether two rendered "namespace/name" resource refs name the
+// same resource. Every way one resource can be SPELLED two ways is forgiven here,
+// because each of them otherwise costs a full paid investigation beside a catalog
+// that already holds the answer:
+//
+//   - The volatile pod-hash suffix. A pod-scoped alert (KubePodNotReady carries only
+//     a `pod` label — no deployment/workload label) arrives with the full pod name,
+//     e.g. tooling/harbor-registry-59598dbd57-ltkzw, while the KB entry stores the
+//     controller family tooling/harbor-registry. Normalizing BOTH sides also matches
+//     an entry written before the curator-side CORE-681 fix, which may itself still
+//     carry a hash.
+//   - The two spellings of a cloud resource, which is what this replaced a plain
+//     string comparison for. A CloudWatch alert identifies one RDS instance by its
+//     DBInstanceIdentifier dimension on one firing and by its full ARN on the next,
+//     and the live catalog holds entries in both forms
+//     ("observability/arn:aws:rds:…:db:compute-stages" beside short names).
+//     Canonicalising new alerts at ingestion cannot reach those already-written
+//     entries, so the gate itself compares names as cloud resource identities (see
+//     providers.ResourceID).
+//
+// What is forgiven is the SPELLING, never the SCOPE. The request is compared as
+// providers.Workload.ResourceID — the name resolved as a cloud identifier, qualified
+// by the account and region ingestion stamped on the workload — so an alert from one
+// AWS account no longer agrees with a catalog entry still filed under a full ARN in
+// another. That comparison only became possible when the account stopped being
+// carried inside the name: ingestion reduces the name to its bare identifier, so
+// before it had a field of its own the request side was ALWAYS unqualified here and
+// the qualifier check was vacuous for alert traffic. An absent qualifier still means
+// unknown rather than different, so an alert that carries no account (every
+// Kubernetes workload, and any stack whose rules omit the label) matches exactly as
+// it did.
+//
+// Only the NAME half is normalized, never the namespace: the ref is cut on the FIRST
+// "/" and Kubernetes namespaces never contain one, so a slash-style ARN in the name
+// half survives whole. Both sides must be scoped the same way — a bare namespace and
+// a named workload inside it are not an exact match; the caller decides that pair on
+// its weaker namespace tier.
+func refsAgree(reqW providers.Workload, b string) bool {
+	ans, _, aScoped := strings.Cut(reqW.Ref(), "/")
+	bns, bname, bScoped := strings.Cut(b, "/")
+	if ans != bns || aScoped != bScoped {
+		return false
 	}
-	return ns + "/" + providers.NormalizeWorkloadName(name)
+	if !aScoped {
+		// Two bare namespaces (or two empties): ans == bns has already decided it.
+		// Falling through would reach the same answer via two empty names, so this is
+		// an intent marker and a short-circuit, not a case the comparison below would
+		// get wrong.
+		return true
+	}
+	// The request's name half is not re-cut out of the ref: reqW.ResourceID already
+	// holds it, resolved and qualified, and a namespace never contains a "/".
+	return reqW.ResourceID().Agrees(providers.ParseResourceID(bname))
 }
 
 func clampF(v, lo, hi float64) float64 {

@@ -192,9 +192,9 @@ func TestWorkloadFromLabels(t *testing.T) {
 		},
 	}
 	for _, c := range cases {
-		k, n := workloadFromLabels(c.labels)
-		if k != c.wantKind || n != c.wantNm {
-			t.Errorf("%s: got (%q,%q), want (%q,%q)", c.name, k, n, c.wantKind, c.wantNm)
+		w := workloadFromLabels(c.labels)
+		if w.Kind != c.wantKind || w.Name != c.wantNm {
+			t.Errorf("%s: got (%q,%q), want (%q,%q)", c.name, w.Kind, w.Name, c.wantKind, c.wantNm)
 		}
 	}
 }

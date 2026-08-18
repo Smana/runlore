@@ -48,11 +48,29 @@ const (
 	ChangeCloudAPI  ChangeType = "cloud-api"  // a mutating cloud control-plane call (CloudTrail)
 )
 
-// Workload identifies a Kubernetes object.
+// Workload identifies a Kubernetes object, or — when it names a cloud resource —
+// that resource plus the cloud scope it lives in.
+//
+// Account and Region are that scope. They exist because Kind/Name/Namespace do not
+// separate two AWS accounts: a CloudWatch-derived alert rule authors `namespace` as
+// a literal (the exporter's), one Prometheus stamps a single `cluster` external
+// label across every account it scrapes, and Kind is empty for a cloud resource. So
+// an RDS instance named "datagrok" in two accounts was ONE identity everywhere a key
+// is built from these fields. They are stamped at ingestion (ResolveWorkloadIdentity)
+// from the alert's account/region labels AND from an ARN-spelled name, so they are
+// present regardless of which spelling the alert used — which is what lets an
+// identity key both fuse the two spellings and split the two accounts.
+//
+// Both are EMPTY for a Kubernetes object, whose identity is namespace/name and
+// nothing else. Nothing renders them: Ref() is unchanged, so a K8s workload's ref,
+// its entry frontmatter and its keys are byte-identical to what they were before
+// these fields existed.
 type Workload struct {
 	Kind      string
 	Name      string
 	Namespace string
+	Region    string // AWS region; "" for a Kubernetes object and for an unqualified resource
+	Account   string // AWS account id; "" for a Kubernetes object and for an unqualified resource
 }
 
 // Ref renders the workload as "namespace/name", or just "namespace" when the

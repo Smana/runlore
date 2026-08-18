@@ -114,6 +114,24 @@ var egressVerbatim = map[string]bool{
 	"Investigation.Changes.BlastRadius.Kind":      true,
 	"Investigation.Changes.BlastRadius.Name":      true,
 	"Investigation.Changes.BlastRadius.Namespace": true,
+	// Account and Region are the cloud half of that same identifier, added when
+	// resource identity stopped being a bare name: a cloud resource is keyed by the
+	// account it lives in, so two accounts' "prod-db" are no longer one resource.
+	// Same provenance and same trust level as Kind/Name/Namespace above — an AWS
+	// account id and a region code, matched on rather than read as prose — and they
+	// are listed here per occurrence for the reason the block above gives: they
+	// inherit redactionSkipTypes' Workload exemption, so without an explicit claim
+	// they would have been waved through by a type rule nobody re-examined.
+	"Investigation.Resource.Account":            true,
+	"Investigation.Resource.Region":             true,
+	"Investigation.AlertResource.Account":       true,
+	"Investigation.AlertResource.Region":        true,
+	"Investigation.Actions.Target.Account":      true,
+	"Investigation.Actions.Target.Region":       true,
+	"Investigation.Changes.Workload.Account":    true,
+	"Investigation.Changes.Workload.Region":     true,
+	"Investigation.Changes.BlastRadius.Account": true,
+	"Investigation.Changes.BlastRadius.Region":  true,
 }
 
 // TestRedactInvestigationCoversEveryReachableString is the #197 guard, rebuilt so it

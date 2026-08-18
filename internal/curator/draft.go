@@ -138,9 +138,12 @@ func alertResourceIfDistinct(inv providers.Investigation) string {
 }
 
 // normalizeResource renders the affected workload as its canonical namespace/name
-// ref with the volatile pod-hash suffix stripped from the NAME segment only (via
-// the curator-local normalizeWorkloadName → providers.NormalizeWorkloadName, the
-// single source of truth for CORE-681).
+// ref with the NAME segment only reduced to its resource identity (via the
+// curator-local normalizeResourceName → providers.NormalizeResourceName): the
+// volatile pod-hash suffix stripped, and an AWS ARN collapsed to the identifier its
+// CloudWatch dimension carries, so a model that echoes back the full ARN from the
+// seed prompt does not file an entry under a second spelling of a resource the
+// catalog already holds.
 //
 // WHY: a pod-scoped alert (KubePodNotReady carries only a `pod` label) resolves to
 // the FULL pod name INCLUDING the ReplicaSet/pod-hash suffix, e.g.
@@ -155,7 +158,7 @@ func alertResourceIfDistinct(inv providers.Investigation) string {
 //
 // It reuses Workload.Ref(), so the namespace is never touched and the empty /
 // bare-namespace cases pass through unchanged; w is a value copy, so mutating its
-// Name is local. Idempotent (NormalizeWorkloadName is).
+// Name is local. Idempotent (NormalizeResourceName is).
 //
 // The Ref() is then narrowed by kbvalidate.DraftResource → providers.EntryResourceRef, because
 // Workload.Name on a curated finding is MODEL-WRITTEN free text and a
@@ -165,7 +168,7 @@ func alertResourceIfDistinct(inv providers.Investigation) string {
 // exact source; only the value the model happened to produce differed, so fixing
 // one path and not the other would leave the same defect armed here.
 func normalizeResource(w providers.Workload) string {
-	w.Name = normalizeWorkloadName(w.Name)
+	w.Name = normalizeResourceName(w.Name)
 	ref, _ := kbvalidate.DraftResource(w.Ref())
 	return ref
 }

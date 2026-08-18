@@ -104,6 +104,23 @@ func (s *Source) Decode(body []byte, h http.Header) (source.DecodeResult, error)
 			}
 		}
 		ns, kind, wname := get("namespace"), get("workload_kind"), get("workload_name")
+		// One cloud resource must have ONE spelling downstream. A vendor rule
+		// templates whichever identifier it has to hand, so the same RDS instance
+		// arrives as its bare DBInstanceIdentifier on one firing and as its full ARN
+		// on the next — and Workload.Name is what the notification renders, what a
+		// curated entry is indexed under, and what the recurrence key is built from.
+		// Only an ARN is rewritten; a Kubernetes name passes through untouched.
+		//
+		// Unlike the Alertmanager adapter, this path does NOT keep the raw value: the
+		// labels map above is built from the instance name plus the operator's own
+		// `labels:` mapping, and workload_name is not copied into it. So unless that
+		// mapping happens to carry the ARN, the raw spelling is gone from the Request
+		// entirely and never reaches the seed prompt. What is no longer lost is the
+		// cloud SCOPE: ResolveWorkloadIdentity lifts the ARN's account and region onto
+		// the Workload (and reads them from the operator's mapped labels when the name
+		// is short), so a vendor webhook keys per account like an Alertmanager one.
+		w := providers.ResolveWorkloadIdentity(
+			providers.Workload{Kind: kind, Name: wname, Namespace: ns}, labels)
 		var fps []string
 		if fingerprint != "" {
 			fps = []string{fingerprint}
@@ -116,7 +133,7 @@ func (s *Source) Decode(body []byte, h http.Header) (source.DecodeResult, error)
 			Title:        title,
 			Severity:     severity,
 			Environment:  get("environment"),
-			Workload:     providers.Workload{Namespace: ns, Kind: kind, Name: wname},
+			Workload:     w,
 			Reason:       severity,
 			Message:      get("message"),
 			Labels:       labels,
@@ -125,7 +142,7 @@ func (s *Source) Decode(body []byte, h http.Header) (source.DecodeResult, error)
 			Fingerprints: fps,
 			// Instance takes the cluster slot (PagerDuty precedent: its service
 			// does) so two vendors reporting the same workload stay distinct.
-			TriggerKey: curator.IncidentKey(title, ns, kind, wname, name),
+			TriggerKey: curator.IncidentKey(title, w, name),
 		})
 	}
 	return out, nil
