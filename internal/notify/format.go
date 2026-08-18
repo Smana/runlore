@@ -245,9 +245,8 @@ func Format(inv providers.Investigation) string {
 	// detail, not the thing to lead with, so it sits below the answer (root
 	// causes) and the action (suggested steps) rather than above them, mirroring
 	// the Slack card's move.
-	// resourceLine, not Resource.Ref(): a cluster-scoped or cloud object has no
-	// namespace to qualify, and the namespace an alert-driven investigation carries
-	// is the exporter's, not the object's. See resourceRef.
+	// resourceLine, not Resource.Ref(): the namespace an alert-driven investigation
+	// carries is the exporter's, not the object's. See resourceRef.
 	if line := resourceLine(inv.Resource); line != "" {
 		fmt.Fprintf(&b, "Resource: %s\n", line)
 	}
@@ -303,9 +302,8 @@ func metadataLine(inv providers.Investigation) string {
 	if inv.Environment != "" {
 		parts = append(parts, "env "+inv.Environment)
 	}
-	// The tenant is dropped when it only repeats the cluster's name — "cluster shared
-	// · tenant shared" states one fact twice. Same decision function as the Slack
-	// card's Cluster field, so the two cannot collapse differently.
+	// The tenant is dropped when it only repeats the cluster — see scopeIdentity,
+	// which the Slack card's header and Cluster field also go through.
 	cluster, tenant := scopeIdentity(inv.Cluster, inv.Tenant)
 	if cluster != "" {
 		parts = append(parts, "cluster "+cluster)

@@ -73,6 +73,13 @@ func NewPayload(inv providers.Investigation) Payload {
 	}
 	return Payload{
 		Title: inv.Title, Confidence: inv.Confidence,
+		// Namespace is the RAW field, not the card's rendered scope: Payload is a
+		// declared external wire format, so blanking a known-wrong namespace here is
+		// observable to every existing consumer and needs its own change, not a
+		// side effect of a card-rendering fix. Known gap, stated so it is not read as
+		// an oversight: Text above is already the corrected render, and an operator
+		// template (internal/notify/templated) doing "{{.Namespace}}/{{.Resource}}"
+		// still reproduces "observability/ip-10-11-132-8.ec2.internal" for a Node.
 		Namespace: inv.Resource.Namespace, Resource: inv.Resource.Name,
 		CuratedURL: inv.CuratedURL, Text: Format(inv), Verdict: string(inv.Verdict),
 		Severity: inv.Severity, Cluster: inv.Cluster, Environment: inv.Environment,

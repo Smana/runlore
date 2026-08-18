@@ -53,7 +53,7 @@ var clusterScopedKinds = map[string]struct{}{
 	"gatewayclass":  {}, // gateway.networking.k8s.io
 	"clusterissuer": {}, // cert-manager.io
 	"clusterpolicy": {}, // kyverno.io
-	"nodepool":      {}, // karpenter.sh
+	"nodepool":      {}, // karpenter.sh — NOT hypershift.openshift.io's, which is namespaced
 	"nodeclaim":     {}, // karpenter.sh
 	"ec2nodeclass":  {}, // karpenter.k8s.aws
 }
@@ -63,13 +63,25 @@ var clusterScopedKinds = map[string]struct{}{
 // "DBInstance observability/datagrok-aqemia-shared" names a namespace that does not
 // exist anywhere in the world the reader can go and look at.
 //
-// Only names with no namespaced Kubernetes homonym are listed. "Queue", "Function"
-// and "Volume" are pointedly ABSENT even though AWS has all three: each is also a
-// namespaced CRD kind in a widely-deployed operator (RabbitMQ, OpenFaaS, Longhorn),
-// and stripping a real namespace off a real object is the failure this whole file
-// exists to avoid. Kinds spelled as a cloud identifier rather than a Kubernetes kind
-// — CloudTrail's "AWS::RDS::DBInstance", an ARN — need no entry here:
-// notKubernetesShaped rejects them structurally.
+// The bar for an entry is that the name is unambiguous ON THE PLATFORM RunLore runs
+// against. "Queue", "Function" and "Volume" are pointedly ABSENT even though AWS has
+// all three: each is also a namespaced CRD kind in a widely-deployed operator
+// (RabbitMQ, OpenFaaS, Longhorn), and stripping a real namespace off a real object is
+// the failure this whole file exists to avoid.
+//
+// That bar is NOT the stronger "no namespaced homonym exists anywhere", and the gap
+// is the first thing whoever edits this list next needs to know. AWS Controllers for
+// Kubernetes (ACK) ships NAMESPACED CRDs spelled exactly like most of these —
+// DBInstance, DBCluster, DBSubnetGroup, DBParameterGroup, CacheCluster, Nodegroup,
+// LoadBalancer, TargetGroup, LaunchTemplate — and Crossplane v2 made its managed
+// resources namespaced too. Workload carries only Kind/Name/Namespace, no group and
+// no apiVersion, so nothing here can tell an ACK DBInstance from the RDS instance the
+// delivered card misnamed. On a cluster running ACK or Crossplane v2 these entries
+// WOULD strip a true namespace; revisit the list before pointing RunLore at one.
+//
+// Kinds spelled as a cloud identifier rather than a Kubernetes kind — CloudTrail's
+// "AWS::RDS::DBInstance", an ARN — need no entry here: notKubernetesShaped rejects
+// them structurally.
 var nonKubernetesKinds = map[string]struct{}{
 	// RDS — the family the delivered "DBInstance observability/…" card came from.
 	"dbinstance":        {},
@@ -94,28 +106,39 @@ func kindKey(kind string) string {
 	return strings.ToLower(strings.TrimSpace(kind))
 }
 
-// notKubernetesShaped reports whether kind holds a character no Kubernetes kind can
-// contain — ':', '/' or whitespace — so it names something outside Kubernetes
-// entirely: a CloudTrail resource type ("AWS::RDS::DBInstance"), an ARN, a phrase.
+// notKubernetesShaped reports whether kind holds a colon — a character no Kubernetes
+// kind can contain — so it names something outside Kubernetes entirely: a CloudTrail
+// resource type ("AWS::RDS::DBInstance"), an ARN ("arn:aws:rds:eu-west-1:…:db/x").
 // Enumerating every cloud type would be endless, so the shape answers for them.
 //
-// Deliberately narrow, and narrower than "is this a well-formed Kubernetes kind":
-// a dotted or hyphenated spelling ("helmreleases.helm.toolkit.fluxcd.io",
-// "helm-release") is not a well-formed kind either, but it is how a model spells a
-// REAL CRD whose objects are namespaced. Those keep their namespace and render
-// exactly as they do today, because stripping a true namespace off a real object is
-// the one new failure this file must not introduce.
+// ':' ALONE, deliberately, and narrower than "is this a well-formed Kubernetes kind".
+// The field is model-written free text — submit_findings declares it as a bare
+// {"kind":{"type":"string"}} with no enum — and every OTHER malformed spelling a
+// model reaches for is a real, NAMESPACED object wearing a bad name:
+//
+//   - dotted or hyphenated: "helmreleases.helm.toolkit.fluxcd.io", "helm-release"
+//   - slash-qualified:      "apps/Deployment", "v1/Pod", "Deployment/checkout-api"
+//   - spaced:               "Stateful Set", "Persistent Volume Claim", "Cron Job"
+//
+// Reading '/' or whitespace as "not Kubernetes" would strip a true namespace off
+// every one of those — the one new failure this file must not introduce — and would
+// buy nothing, because both motivating examples above carry a ':' anyway.
 func notKubernetesShaped(kind string) bool {
-	return strings.ContainsAny(strings.TrimSpace(kind), ":/ \t\n")
+	return strings.Contains(kind, ":")
 }
 
-// unnamespacedKind reports whether a namespace qualifier on this kind is certainly
-// not a fact about the object: a cluster-scoped Kubernetes kind, or something that
-// is not a Kubernetes object at all.
+// unnamespacedKind reports whether a namespace qualifier on this kind is not a fact
+// about the object: a cluster-scoped Kubernetes kind, or something that is not a
+// Kubernetes object at all.
 //
 // Fail-safe by construction — it answers false for an empty kind and for every kind
 // it does not recognize, so the renderer keeps doing exactly what it does today
-// unless the namespace is KNOWN to be wrong.
+// unless the namespace is known to be wrong.
+//
+// "Known" is as strong as this layer can be, not a guarantee: Workload carries no
+// group or apiVersion, so the nonKubernetesKinds caveat above (ACK and Crossplane v2
+// ship NAMESPACED CRDs under several of those names) is a limit on this function too.
+// Read it before adding an entry.
 func unnamespacedKind(kind string) bool {
 	k := kindKey(kind)
 	if k == "" {
@@ -127,7 +150,7 @@ func unnamespacedKind(kind string) bool {
 	if _, ok := nonKubernetesKinds[k]; ok {
 		return true
 	}
-	return notKubernetesShaped(kind)
+	return notKubernetesShaped(k)
 }
 
 // resourceRef renders the affected resource's identity for a card: "namespace/name"
@@ -149,10 +172,21 @@ func unnamespacedKind(kind string) bool {
 // `resource:` frontmatter and the outcome ledger — and belongs where the workload is
 // assembled, not here.
 func resourceRef(w providers.Workload) string {
-	if unnamespacedKind(w.Kind) {
-		return strings.TrimSpace(w.Name)
+	if !unnamespacedKind(w.Kind) {
+		return w.Ref()
 	}
-	return w.Ref()
+	if name := strings.TrimSpace(w.Name); name != "" {
+		return name
+	}
+	// A Namespace object is the one cluster-scoped kind whose OWN identity can arrive
+	// in the namespace field: "the coder-engineering namespace" is a resource a model
+	// names with no workload inside it, and preferDiscoveredResource deliberately keeps
+	// that shape (a namespace, no name). Here alone the qualifier is not foreign, so
+	// reading it as one and dropping it would discard the object's actual name.
+	if kindKey(w.Kind) == "namespace" {
+		return strings.TrimSpace(w.Namespace)
+	}
+	return ""
 }
 
 // resourceLine renders the whole "Kind namespace/name" value every surface prints
@@ -164,16 +198,24 @@ func resourceRef(w providers.Workload) string {
 // two different things about one investigation on two surfaces is the drift Format's
 // own doc comment is written against.
 func resourceLine(w providers.Workload) string {
-	ref := resourceRef(w)
-	// Nothing to name AND nothing to scope it to: the line would carry no fact
-	// beyond the kind, which is what the renderer already omitted. A cluster-scoped
-	// kind whose name is unknown but whose namespace was stamped lands here with
-	// ref == "" and a namespace — it renders as the kind alone, because the one
-	// thing that must never happen is printing that namespace as the object's own.
-	if ref == "" && strings.TrimSpace(w.Namespace) == "" {
+	// The kind is trimmed BEFORE it is joined, not after: the field is model-written
+	// free text, and trimming the joined string leaves a padded " Node " rendering as
+	// "Node␣␣ip-10-11-132-8.ec2.internal" — the ends are clean, the seam is not.
+	kind, ref := strings.TrimSpace(w.Kind), resourceRef(w)
+	switch {
+	case ref == "" && strings.TrimSpace(w.Namespace) == "":
+		// Nothing to name and nothing to scope it to: no fact beyond the kind, which
+		// is what the renderer already omitted.
 		return ""
+	case ref == "":
+		// A cluster-scoped kind whose name is unknown but whose namespace was stamped:
+		// the kind alone, because printing that namespace as the object's own is the
+		// one thing that must never happen.
+		return kind
+	case kind == "":
+		return ref
 	}
-	return strings.TrimSpace(w.Kind + " " + ref)
+	return kind + " " + ref
 }
 
 // scopeIdentity returns the cluster and tenant a card should render, blanking the
@@ -185,12 +227,15 @@ func resourceLine(w providers.Workload) string {
 // ("tmem175 · tmem175-0" — the tenant and the cluster it lives on) the pair is the
 // point, so only the equal case collapses; the tenant is never simply dropped.
 //
-// Compared trimmed, and the surviving value is the trimmed one: when the two agree
-// modulo whitespace they name the same thing, so the canonical spelling is the one
-// to print.
+// Compared trimmed AND returned trimmed, in both branches: when the two agree modulo
+// whitespace they name the same thing, so the canonical spelling is the one to print
+// — and when they differ, padding is no more worth rendering than it was in the case
+// that collapses. Trimming only the collapse branch left "  shared · shared-0" on the
+// card, which is the same rendering fault this function exists to remove.
 func scopeIdentity(cluster, tenant string) (outCluster, outTenant string) {
-	if strings.TrimSpace(cluster) == strings.TrimSpace(tenant) {
-		return strings.TrimSpace(cluster), ""
+	cluster, tenant = strings.TrimSpace(cluster), strings.TrimSpace(tenant)
+	if cluster == tenant {
+		tenant = ""
 	}
 	return cluster, tenant
 }

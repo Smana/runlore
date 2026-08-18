@@ -484,17 +484,18 @@ func summaryBlocks(inv providers.Investigation) []map[string]any {
 	head := "🔍 "
 	if inv.AlertName != "" {
 		head += inv.AlertName
-		scope := inv.Tenant
-		if scope == "" {
-			scope = inv.Cluster
-		}
+		// scopeIdentity here too, so the header collapses a tenant that only repeats
+		// the cluster exactly as the Cluster field does. cmp.Or then prefers the
+		// tenant, which is the narrower of the two names when both survive.
+		cluster, tenant := scopeIdentity(inv.Cluster, inv.Tenant)
+		scope := cmp.Or(tenant, cluster)
 		loc := make([]string, 0, 2)
 		if scope != "" {
 			loc = append(loc, scope)
 		}
-		// resourceRef, not Resource.Ref(): the header is the most-read line on the
-		// card, so it is the last place to print a namespace a cluster-scoped or
-		// cloud object was never in. See resourceRef.
+		// resourceRef, not Resource.Ref() — see resourceRef. The header is the
+		// most-read line, so it is the last place to print a namespace an object
+		// was never in.
 		if ref := resourceRef(inv.Resource); ref != "" {
 			loc = append(loc, ref)
 		}
@@ -746,9 +747,8 @@ func metadataFields(inv providers.Investigation) []map[string]any {
 		}
 		add("Alert", name)
 	}
-	// One name, not the same name twice: scopeIdentity blanks the tenant when it only
-	// repeats the cluster ("shared · shared") and keeps both when they genuinely
-	// differ ("tmem175 · tmem175-0"). Format's metadata line shares the decision.
+	// One name, not the same name twice — see scopeIdentity, which the header and
+	// Format's metadata line also go through.
 	cluster, tenant := scopeIdentity(inv.Cluster, inv.Tenant)
 	scope := make([]string, 0, 2)
 	if tenant != "" {
@@ -758,8 +758,7 @@ func metadataFields(inv providers.Investigation) []map[string]any {
 		scope = append(scope, escapeMrkdwn(cluster))
 	}
 	add("Cluster", strings.Join(scope, " · "))
-	// resourceLine, not Resource.Ref(): a cluster-scoped or cloud object has no
-	// namespace to qualify. See resourceRef.
+	// resourceLine, not Resource.Ref() — see resourceRef.
 	if line := resourceLine(inv.Resource); line != "" {
 		add("Resource", escapeMrkdwn(line))
 	}
