@@ -185,8 +185,8 @@ Prometheus **or** a VictoriaMetrics datasource with no edits. Import it via
 It panels the pipeline, recall, outcome, curation, cost and fleet series above — including the
 output-truncation rate (`tool_output_truncated_bytes_total`), the coalesced-batch-size distribution
 (`coalesce_batch_size`, heatmap), the curation dedup-score distribution (`curation_dedup_score`,
-heatmap), the spend ceilings (`investigation_budget_trips_total`) and the alert-loss counter
-(`incidents_dropped_on_shutdown_total`).
+heatmap), the spend ceilings (`investigation_budget_trips_total`) and both loss counters
+(`incidents_dropped_on_shutdown_total`, `mentions_dropped_on_saturation_total`).
 
 It is **not** exhaustive. The thread series, the history-compaction family, and the several
 `*_degraded_total` / `*_debounced_total` counters have no panel — they are documented above and
@@ -205,7 +205,7 @@ kubectl apply -f deploy/observability/alerts/prometheusrule.yaml
 kubectl apply -f deploy/observability/alerts/vmrule.yaml
 ```
 
-All fifteen rules, named — a page names the alert, so the alert name is what you will search for:
+All seventeen rules, named — a page names the alert, so the alert name is what you will search for:
 
 | Alert | Fires on |
 |---|---|
@@ -224,6 +224,8 @@ All fifteen rules, named — a page names the alert, so the alert name is what y
 | `RunloreAlertRuleUnavailable` | `alert_rule` degrading **systemically** — the tool is dead for every investigation |
 | `RunloreUnrecallableKBDrafts` | knowledge filed with a `resource` recall can never match |
 | `RunloreResourceScopeDiscoveryFailing` | Kubernetes discovery failing, so card scope falls back to the kind list |
+| `RunloreChatMentionsLost` | an `@runlore note:` was dropped to handler saturation and will not be retried |
+| `RunloreIncidentsLostOnShutdown` | firing alerts dropped in their debounce window, beyond ordinary deploy churn |
 
 Thresholds are starting points — tune to your volume.
 

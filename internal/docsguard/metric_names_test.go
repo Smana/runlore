@@ -252,3 +252,68 @@ func sortedKeys(m map[string][]string) []string {
 	sort.Strings(out)
 	return out
 }
+
+// documentedExempt lists emitted series deliberately left out of the operator docs.
+//
+// It is empty, and that is the point: every metric RunLore emits is currently written
+// down. Add a name here only for a series an operator genuinely cannot act on, and say
+// why on the entry — an undocumented metric is not free, because the operator who finds
+// it in a scrape has no way to learn what it means or whether it is worth alerting on.
+var documentedExempt = map[string]string{}
+
+// TestEmittedMetricsAreDocumented is the reverse of TestPublishedMetricNamesExist, and
+// the direction nothing guarded.
+//
+// The existing guard fails the build when the docs name a series the agent does not
+// emit, which is why there are no dead references. Nothing checked the other way, so a
+// new instrument could ship indefinitely without ever being written down — and fifteen
+// had, including the whole thread subsystem (in-thread chat and `@runlore note:`
+// capture), whose cost and refusals an operator had no documented way to watch.
+//
+// That asymmetry is easy to miss because it is invisible in both directions a reviewer
+// looks: the code compiles, and the docs are accurate about everything they mention.
+//
+// Bare (unprefixed) mentions count. The page legitimately writes some series without the
+// `runlore_` prefix in prose — "the output-truncation rate (`tool_output_truncated_bytes_total`)"
+// — and a guard that rejected those would push the docs toward a stilted house style
+// rather than toward being correct.
+func TestEmittedMetricsAreDocumented(t *testing.T) {
+	emitted := emittedSeries(t)
+
+	families := map[string]bool{}
+	for name := range emitted {
+		if !strings.HasPrefix(name, "runlore_") {
+			continue
+		}
+		base := strings.TrimSuffix(strings.TrimSuffix(strings.TrimSuffix(name, "_bucket"), "_sum"), "_count")
+		families[base] = true
+	}
+
+	body, err := os.ReadFile(filepath.Join(repoRoot(t), observabilityDoc))
+	if err != nil {
+		t.Fatalf("read %s: %v", observabilityDoc, err)
+	}
+	doc := string(body)
+
+	var missing []string
+	for name := range families {
+		if why, ok := documentedExempt[name]; ok {
+			t.Logf("%s is exempt from the docs: %s", name, why)
+			continue
+		}
+		if strings.Contains(doc, name) || strings.Contains(doc, "`"+strings.TrimPrefix(name, "runlore_")+"`") {
+			continue
+		}
+		missing = append(missing, name)
+	}
+	sort.Strings(missing)
+
+	if len(missing) > 0 {
+		t.Errorf("%d emitted series are absent from %s: %v\n"+
+			"An operator who finds one of these in a scrape has no way to learn what it means, "+
+			"whether a non-zero value is normal, or whether it is worth alerting on. Add a row to "+
+			"the table it belongs to — or, if it is genuinely not actionable, add it to "+
+			"documentedExempt with a reason.",
+			len(missing), observabilityDoc, missing)
+	}
+}

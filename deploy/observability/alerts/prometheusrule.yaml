@@ -245,3 +245,35 @@ spec:
             summary: "RunLore cannot resolve resource scope from Kubernetes discovery"
             description: "{{ $value | humanizePercentage }} of scope lookups failed discovery over 30m — cards fall back to a hardcoded kind list, so a namespaced CRD can be rendered without its namespace. Check the API server's discovery endpoints and RBAC."
             runbook_url: "https://runlore.io/docs/operations/observability/#alerting"
+
+        # 16. Chat mentions are being LOST to handler saturation.
+        # A Slack app_mention or addressed Matrix message arrived while the concurrent
+        # handler pool was full: accepted and never processed. Neither platform retries —
+        # Slack was acked 200, Matrix's /sync token has already advanced — so the human's
+        # `@runlore note:` is gone. They get a best-effort in-thread "retry" reply, which
+        # is exactly as reliable as the saturated path that would have to deliver it.
+        # Any occurrence is a human losing work, so this is > 0 rather than a rate.
+        - alert: RunloreChatMentionsLost
+          expr: increase(runlore_mentions_dropped_on_saturation_total[1h]) > 0
+          for: 0m
+          labels:
+            severity: warning
+          annotations:
+            summary: "RunLore dropped a chat mention — a human's capture was lost"
+            description: "{{ $value | humanize }} chat mentions were dropped on handler saturation in the last hour and will not be retried by Slack or Matrix. Raise the thread handler concurrency, or find what is holding handlers open."
+            runbook_url: "https://runlore.io/docs/operations/observability/#alerting"
+
+        # 17. Firing alerts are being LOST on shutdown, beyond ordinary churn.
+        # Deliberately NOT `> 0`. This counter rises once per held alert on every restart
+        # or helm upgrade that lands mid-hold, so a zero threshold would page on routine
+        # deploys and be silenced within a week. 3 over 6h is "more than a deploy's worth"
+        # — tune it to your release cadence. The panel shows every occurrence regardless.
+        - alert: RunloreIncidentsLostOnShutdown
+          expr: increase(runlore_incidents_dropped_on_shutdown_total[6h]) > 3
+          for: 0m
+          labels:
+            severity: warning
+          annotations:
+            summary: "RunLore is losing firing alerts on shutdown"
+            description: "{{ $value | humanize }} firing alerts were dropped inside their debounce window over 6h. Alertmanager already got a 200, so none will be resent until its repeat_interval — they are simply never investigated. Shorten triggers.incidents.debounce or set it to 0s."
+            runbook_url: "https://runlore.io/docs/operations/observability/#alerting"
