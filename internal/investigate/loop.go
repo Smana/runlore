@@ -197,6 +197,19 @@ type LoopInvestigator struct {
 	Recurrence *RecurrenceGate               // optional: suppress re-investigating a just-answered trigger
 	Verify     bool                          // run an adversarial review of root causes before delivery
 
+	// KindScope asks the cluster's own discovery whether the delivered resource's kind
+	// is namespaced, so the answer travels with the workload (providers.Workload.Scope)
+	// instead of being re-guessed from the kind's NAME by whoever renders it. No list of
+	// names can be right for arbitrary CRDs — ACK and Crossplane v2 ship namespaced CRDs
+	// spelled like cluster-scoped and cloud things — and this process already reads the
+	// discovery that settles it.
+	//
+	// Optional, and its absence is ordinary rather than exceptional: no cluster access,
+	// an eval replay, the demo. nil (and any lookup that fails or does not resolve)
+	// leaves Scope at ScopeUnknown, which every consumer reads as "keep doing what you
+	// did before" — never as "cluster-scoped".
+	KindScope providers.KindScoper
+
 	// TriggerHistory reads the outcome ledger's per-TriggerKey index: how often this
 	// incident has been investigated and what the last CONCLUSIVE run concluded. Read
 	// once per investigation and shared by its two consumers — the Recurrence gate's
@@ -395,6 +408,12 @@ func (li *LoopInvestigator) Investigate(ctx context.Context, req Request) error 
 		// chokepoint — every exit (happy path, recall short-circuit, timeout, refusal, budget
 		// kill, max-steps) routes through it, so no delivered investigation can miss it.
 		inv.InvestigationStartedAt = start
+		// Stamp what the cluster itself says about the delivered resource's kind, here
+		// for the same reason as the line above: finish is the single terminal-delivery
+		// chokepoint, so the recall short-circuit and every synthetic result carry the
+		// fact too — and a card rendered from a recalled answer would otherwise be the
+		// one place still guessing.
+		inv.Resource = li.scopeResource(ctx, inv.Resource)
 		// Every caller sets `result` BEFORE calling finish, so the usage histograms carry
 		// the same completion label the deferred completion metric records — which is what
 		// lets a dashboard read a recall's cost and a full loop's off the same instrument
@@ -1492,6 +1511,40 @@ func stampMatchedKnowledge(inv *providers.Investigation, best *providers.Matched
 		return
 	}
 	inv.MatchedKnowledge = best
+}
+
+// scopeResource stamps the cluster's own answer for w's kind onto w, so the fact
+// travels with the workload instead of being inferred downstream from the kind's name.
+//
+// Every way of not knowing lands on the same conservative outcome — Scope untouched,
+// i.e. ScopeUnknown — and they are all ordinary: no scoper wired (no cluster access, an
+// eval run, the demo), a finding that named no kind, discovery unreachable, or a kind
+// this cluster does not serve (every non-Kubernetes resource RunLore reasons about, and
+// that is the case the renderer's cloud-kind list still exists to cover). None of them
+// may fail the investigation, and none may put a guess on the workload: reading unknown
+// as cluster-scoped would strip a namespace that was a fact about the object, which is
+// the regression the whole area exists to prevent.
+//
+// The kind is TRIMMED before it is asked about, because it is model-written free text
+// and arrives padded — " Node " must resolve like "Node". The workload's own Kind is
+// left exactly as written: it is what the card prints, and rewriting it here would be a
+// silent second change riding along with this one.
+func (li *LoopInvestigator) scopeResource(ctx context.Context, w providers.Workload) providers.Workload {
+	kind := strings.TrimSpace(w.Kind)
+	if li.KindScope == nil || kind == "" {
+		return w
+	}
+	scope, err := li.KindScope.KindScope(ctx, kind)
+	if err != nil {
+		// Debug, not Warn: on a cluster RunLore cannot reach this fires on every
+		// investigation, and the consequence is that a card renders exactly as it did
+		// before the field existed.
+		li.Log.Debug("resource scope unavailable; the card falls back to its kind lists",
+			"kind", kind, "err", err)
+		return w
+	}
+	w.Scope = scope
+	return w
 }
 
 // preferDiscoveredResource keeps the workload the investigation identified,

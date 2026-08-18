@@ -48,6 +48,33 @@ const (
 	ChangeCloudAPI  ChangeType = "cloud-api"  // a mutating cloud control-plane call (CloudTrail)
 )
 
+// ResourceScope records whether a resource's KIND is namespaced, as a fact CARRIED
+// with the resource rather than guessed from the kind's name.
+//
+// It is three-valued, and the third value is the load-bearing one. "Namespaced" and
+// "cluster-scoped" are different answers, but "nobody established which" is different
+// again — and a bool conflates it with one of them, silently. A Workload assembled
+// from a cached alert, from a non-Kubernetes cloud event, or on a run with no cluster
+// access has no discovery answer, and reading its zero value as "cluster-scoped" would
+// strip a namespace that was a fact about the object. So the zero value is Unknown,
+// every consumer must fall back to whatever it did before, and no existing
+// construction site changes meaning by not setting the field.
+type ResourceScope uint8
+
+// The scopes a resource can be known to have.
+const (
+	// ScopeUnknown means nothing established this kind's scope: no cluster access, no
+	// discovery answer, or not a Kubernetes object at all. Consumers must degrade to
+	// their prior behaviour rather than assume either answer.
+	ScopeUnknown ResourceScope = iota
+	// ScopeNamespaced means the API server reports this kind as namespaced, so a
+	// namespace qualifier on it is a fact about the object.
+	ScopeNamespaced
+	// ScopeClusterScoped means the API server reports this kind as cluster-scoped, so
+	// the object HAS no namespace and any qualifier on it came from somewhere else.
+	ScopeClusterScoped
+)
+
 // Workload identifies a Kubernetes object, or — when it names a cloud resource —
 // that resource plus the cloud scope it lives in.
 //
@@ -71,6 +98,16 @@ type Workload struct {
 	Namespace string
 	Region    string // AWS region; "" for a Kubernetes object and for an unqualified resource
 	Account   string // AWS account id; "" for a Kubernetes object and for an unqualified resource
+
+	// Scope is what the cluster's own discovery said about Kind, when anything did.
+	// Populated where a discovery answer is reachable (see KindScoper) and left
+	// ScopeUnknown everywhere else, which is every consumer's cue to keep doing what
+	// it did before rather than to assume cluster-scoped.
+	//
+	// Deliberately NOT part of the workload's identity: Ref(), the recall index and
+	// the dedup fingerprint all read Kind/Name/Namespace only, so the same object
+	// scoped and unscoped is still one object.
+	Scope ResourceScope
 }
 
 // Ref renders the workload as "namespace/name", or just "namespace" when the
@@ -494,6 +531,26 @@ type ResourceSpec struct {
 // denials as ResourceForbidden rather than as absence.
 type ResourceSpecReader interface {
 	ResourceSpec(ctx context.Context, q ResourceSpecQuery) (ResourceSpec, error)
+}
+
+// KindScoper answers whether a bare Kubernetes Kind is namespaced ON THIS CLUSTER.
+//
+// It exists so namespaced-ness can be carried as DATA (Workload.Scope) instead of
+// guessed downstream from the kind's name. The guess cannot be made correct: any
+// operator may ship a CRD under any Kind, and several ship namespaced CRDs spelled
+// exactly like cluster-scoped or non-Kubernetes things — ACK's DBInstance, DBCluster,
+// CacheCluster, Nodegroup, TargetGroup, LaunchTemplate and LoadBalancer, Crossplane
+// v2's namespaced managed resources, HyperShift's NodePool against Karpenter's. The
+// API server's own discovery already knows, and the process already reads it.
+//
+// The contract's three-valued answer is the load-bearing part. An implementation MUST
+// return ScopeUnknown — never a guess and never an error — when the cluster serves no
+// such kind, when two API groups serve it and disagree, or when the kind is empty:
+// callers degrade to their prior behaviour on unknown, and any other answer would turn
+// "nobody knows" into a fact. An error is reserved for "discovery itself failed", and
+// carries ScopeUnknown with it.
+type KindScoper interface {
+	KindScope(ctx context.Context, kind string) (ResourceScope, error)
 }
 
 // MetricsProvider abstracts VictoriaMetrics/Prometheus (both speak PromQL).
