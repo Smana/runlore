@@ -148,6 +148,12 @@ Instant recall requires `catalog.instant_recall.enabled: true` **and** a confide
   | `rerank_low_confidence` | the reranker returned no match, a confidence under the bar, or an error | `instant_recall.rerank_threshold` (default 0.7) |
   | `low_margin` | **legacy gate only** (`rerank: false`) — top hit too close to the runner-up | `instant_recall.margin_gap` (default 1.0) |
   | `low_outcome` | the entry's real-world resolve-rate decayed below the floor | `instant_recall.outcome_floor` (default 0.5) |
+  | `rerank_over_budget` | the investigation's spend ceiling was **already crossed**, so the paid rerank call was declined before it was made — recall falls through to the full loop, which the budget ladder then stops with the same reason | `investigation.max_tokens_per_investigation` / `max_cost_per_investigation` |
+- **`rerank_over_budget` is not a recall problem** — no `instant_recall.*` knob fixes it. It means
+  the investigation had already crossed a spend ceiling before recall got to the reranker, so the
+  call was declined rather than paid for. The run then falls through to the full loop, whose first
+  budget check stops it with the same ceiling. If you see this alongside
+  `runlore_investigation_budget_trips_total`, raise the ceiling; recall is behaving correctly.
 - **Check which gate is live before tuning anything.** The LLM reranker is **on by default** once
   instant recall is enabled, and it *replaces* the BM25-magnitude gate — so on a default install
   `min_score`, `margin_gap` and `solo_floor` play no part in the fire decision and tuning them

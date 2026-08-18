@@ -36,6 +36,11 @@ const (
 
 var metricNameRE = regexp.MustCompile(metricNamePattern)
 
+// metricTableRowRE matches a metric-table row: the metric name, backticked, as the
+// row's first cell. Anchored at the row start so a name appearing in a later cell (a
+// "see also" in the Meaning column) does not count as documenting it.
+var metricTableRowRE = regexp.MustCompile("^\\|\\s*`(" + metricNamePattern + ")`\\s*\\|")
+
 // TestPublishedMetricNamesExist pins every `runlore_*` series the Grafana dashboard
 // queries and the observability docs tabulate to a name the agent can actually emit.
 //
@@ -235,6 +240,24 @@ func markdownMetricRefs(_ *testing.T, body []byte) map[string][]string {
 	return refs
 }
 
+// markdownMetricTableRows pulls the metric named in the FIRST cell of each table row —
+// `| ` + "`runlore_x`" + ` | counter | … |` — and nothing else. This is deliberately stricter than
+// markdownMetricRefs, which scans the whole page: a series that appears only inside a
+// PromQL recipe is being *used*, not documented, and an operator scanning the tables to
+// learn what exists would still never find it. Requiring a row is what makes
+// TestEveryInstrumentIsDocumented mean what its name says.
+func markdownMetricTableRows(body []byte) map[string][]string {
+	refs := map[string][]string{}
+	for i, line := range strings.Split(string(body), "\n") {
+		m := metricTableRowRE.FindStringSubmatch(line)
+		if m == nil {
+			continue
+		}
+		refs[m[1]] = appendUnique(refs[m[1]], "line "+strconv.Itoa(i+1))
+	}
+	return refs
+}
+
 func appendUnique(in []string, s string) []string {
 	for _, existing := range in {
 		if existing == s {
@@ -251,4 +274,58 @@ func sortedKeys(m map[string][]string) []string {
 	}
 	sort.Strings(out)
 	return out
+}
+
+// TestEveryInstrumentIsDocumented is the other direction, and the one that was
+// missing. TestPublishedMetricNamesExist walks docs -> instruments: it catches a doc
+// naming a series nothing emits (a rename, a typo). It cannot catch the opposite, which
+// is the far likelier drift: an instrument added and simply never written down. Nothing
+// referenced it, so nothing checked it, and it passed forever.
+//
+// That is not hypothetical — it is how this release shipped. Seven instruments were
+// added and four of them (thread_notes_written_total, thread_writes_throttled_total,
+// thread_chat_calls_total, thread_chat_tokens_total) appeared in no doc, no dashboard
+// and no alert. An operator watching the thread path had no way to learn the series
+// existed short of reading metrics.go or scraping /metrics and diffing by eye. Two
+// older ones (history_compactions_total, history_elided_bytes_total) had been
+// undocumented for far longer, for exactly the same reason.
+//
+// The bar is deliberately the metric TABLE, not "mentioned anywhere": an operator
+// looking for what RunLore exposes reads that page, and a series named only inside a
+// PromQL recipe is not documented, it is used. The source of truth is the real scrape,
+// same as above, so a new instrument is covered the day it is added rather than the day
+// someone remembers to list it here.
+func TestEveryInstrumentIsDocumented(t *testing.T) {
+	emitted := emittedSeries(t)
+
+	families := map[string]bool{}
+	for name := range emitted {
+		if !strings.HasPrefix(name, "runlore_") {
+			continue
+		}
+		families[strings.TrimSuffix(strings.TrimSuffix(strings.TrimSuffix(name, "_bucket"), "_sum"), "_count")] = true
+	}
+	if len(families) == 0 {
+		t.Fatal("no runlore_* families in the scrape — the exporter changed shape and this guard is inert")
+	}
+
+	body, err := os.ReadFile(filepath.Join(repoRoot(t), observabilityDoc))
+	if err != nil {
+		t.Fatalf("read %s: %v", observabilityDoc, err)
+	}
+	documented := markdownMetricTableRows(body)
+
+	for _, name := range sortedSet(families) {
+		if _, ok := documented[name]; ok {
+			continue
+		}
+		t.Errorf("%s has no metric-table row for %q, which the agent emits.\n"+
+			"  Add one — name, type, labels, and what a non-zero value means for an operator.\n"+
+			"  A mention in prose or inside a PromQL recipe does NOT count: that is the series "+
+			"being used, not documented, and someone scanning the tables to learn what RunLore "+
+			"exposes would still never find it.\n"+
+			"  An instrument nobody documented is one nobody can alert on — its existence depends "+
+			"on an operator scraping /metrics and noticing a name they have never seen.",
+			observabilityDoc, name)
+	}
 }

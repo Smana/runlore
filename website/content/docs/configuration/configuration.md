@@ -242,7 +242,7 @@ incident webhook. Known keys: `alertmanager`, `gitops`, `pagerduty`, `custom`.
   | The **dollar** cost of embeddings | The hybrid-recall query embed's *tokens* now count against `max_tokens_per_investigation`, but there is no `model.embeddings.pricing`, so RunLore has no rate to price them with and refuses to borrow a completion model's — that would put a fabricated figure on the notification footer and in `runlore_investigation_cost_usd`. `max_cost_per_investigation` therefore errs **low** by the embedding spend rather than quoting a number it cannot stand behind |
   | The adversarial verify pass's own cost | It runs after the last budget check, unconditionally, because verify is the honesty guarantee. A successful run can therefore deliver a `CostUSD` slightly above `max_cost_per_investigation` with no trip recorded |
   | A `lore eval` **campaign** as a whole | Each investigation it replays runs under the operator's configured `investigation.*` ceilings and `model.pricing` — the same limits production has — but a campaign is cases × n of them, so those ceilings multiply by the corpus size instead of capping the run. `--max-total-tokens` is the run-level ceiling; **unset, a campaign has none** |
-  | CLI-only model calls | `lore validate --semantic`, `lore kb import --model`, and the eval judge each make completions outside any investigation. None runs under `serve` |
+  | CLI-only model calls | `lore validate-kb --semantic`, `lore kb import --model`, and the eval judge each make completions outside any investigation. None runs under `serve` |
   | Non-model spend | Cloud API calls, git clones, metrics and logs queries are unpriced everywhere |
 - `compaction` — how mid-loop history compaction treats the older tool outputs it elides once the
   estimate crosses the compaction target — 0.7× the **per-request** budget, itself a quarter of
@@ -460,11 +460,25 @@ project path, e.g. `group/project`, nested groups allowed), `base_branch` (defau
 [Integrations → GitLab]({{< relref "/docs/integrations/forge/gitlab.md" >}}). `provider: gitlab` with no
 `gitlab.token_env`, or a `kb_repo` that isn't a valid GitLab project path, fails config load closed.
 
-`git_host` is the **one host the forge credential may be sent to** when RunLore clones — `what_changed`
-against your GitOps repo, `source_diff` against an allowlisted source repo, the catalog git-sync
-against the KB repo. A clone of any other host proceeds anonymously, because a GitOps
+`git_host` is the **one host the forge credential may be sent to** on the two clone paths whose repo
+URL comes from **cluster state** — `what_changed` against your GitOps repo, and `source_diff` against
+an allowlisted source repo. A clone of any other host proceeds anonymously, because a GitOps
 `spec.source.repoURL` is cluster state: anyone who can create an Argo CD `Application` picks it, and
-it must not be able to pick where your token goes. Leave it empty and it is derived — `github.com`
+it must not be able to pick where your token goes.
+
+> [!NOTE]
+> **The catalog git-sync is not confined by `git_host`.** `catalog.Syncer` has no host field at all
+> (`internal/catalog/sync.go`), so it attaches its credential to whatever `catalog.git.url` names —
+> the explicit `catalog.git.token_env` if you set one, otherwise the shared forge GitHub App
+> identity. Setting `git_host` does not change that; there is no mechanism on this path to change.
+>
+> The reason that is acceptable is a **different** reason from the one above, and it is worth knowing
+> which one you are relying on: `catalog.git.url` is *operator config*, not cluster state. It is a
+> value you write in `runlore.yaml`, so redirecting the token requires the ability to change your
+> config — which is already game over — rather than the ability to create an `Application` in some
+> namespace. What follows for you is practical: point `catalog.git.url` at a host you would hand the
+> forge credential to, and give it its own read-scoped `catalog.git.token_env` when the catalog lives
+> somewhere the forge App identity should not reach. Leave it empty and it is derived — `github.com`
 from `api.github.com`, the API host for GitHub Enterprise, `gitlab.base_url`'s host for GitLab. Set it
 only for **GitHub Enterprise with subdomain isolation** (API on `api.HOSTNAME`, git on `HOSTNAME`),
 which is the one shape the derivation cannot resolve; that config **fails load** until `git_host`
@@ -702,8 +716,8 @@ transport to ever fire, and startup **warns** (`… or this is dead config`) whe
       chat:
         model: claude-haiku-4-5      # REQUIRED — never inherited
         max_tokens: 1024             # optional; default 1024, NOT model.max_tokens
-        # provider, base_url, api_key_env, effort, thinking, pricing all inherit
-        # from `model` when omitted
+        # provider, base_url, api_key_env, effort inherit from `model` when omitted.
+        # thinking and pricing are accepted here but are INERT — see below.
     notify:
       thread:
         chat_calls_per_hour: 30      # default 30
@@ -718,6 +732,22 @@ transport to ever fire, and startup **warns** (`… or this is dead config`) whe
 > most expensive way to run it. `max_tokens` likewise falls back to a fixed **1024**, not to
 > `model.max_tokens`: a member-triggerable path staying cheap must not depend on how generously the
 > investigation model happens to be capped.
+
+> [!WARNING]
+> **`thinking` and `pricing` are accepted on `model.chat` and do nothing.** Config load validates
+> both — an invalid `thinking` mode or a negative rate is still rejected — so it is easy to read
+> their acceptance as them taking effect. They do not:
+>
+> - **`model.chat.thinking`** (or a `model.thinking` inherited onto it) takes effect on **no
+>   provider**. A chat reply is one call with a forced `submit_thread_reply` tool choice, which is
+>   what makes it a single call instead of an agent loop; the Anthropic client gates thinking on an
+>   *empty* tool choice, and the Gemini and OpenAI clients are never handed a thinking parameter at
+>   all.
+> - **`model.chat.pricing`** is read by **nothing**. Cost reporting — the notification footer and
+>   `runlore_investigation_cost_usd` — covers the investigation and verify passes only. The chat path
+>   emits `runlore_thread_chat_tokens_total` and stops there, so this is not merely "no cost ceiling":
+>   there is **no cost report**. You cannot graph what conversational replies spent in dollars; do
+>   that conversion yourself from the token counter.
 
 **What costs a model call, stated plainly.** With `model.chat` set, **every addressed message that is
 not a recognised command prefix costs exactly one model call** — one, structurally, not on average:
@@ -769,11 +799,15 @@ explicitly if you need a ceiling that stays put.
 > [!WARNING]
 > **What is NOT capped.** These are real edges, not caveats to reassure you past:
 >
-> - **There is no ceiling in currency.** `model.pricing` (and `model.chat.pricing`) remains a
->   *reporting* table — it turns token counts into a dollar estimate for display and for the
->   `investigation_cost_usd` metric. **Nothing compares a cost to a threshold and stops.** The only
->   spend ceilings are the call and token counts above; translate them into money yourself at your
->   provider's rate before enabling this.
+> - **There is no ceiling in currency *on this path*.** Note the scope — it narrowed this release.
+>   `investigation.max_cost_per_investigation` **is** a real ceiling now: RunLore compares an
+>   investigation's accumulated estimated cost against it and stops the run (`reason="cost"` on
+>   `runlore_investigation_budget_trips_total`), which is exactly what `model.pricing` makes
+>   enforceable. None of that reaches the **chat** layer. `model.chat.pricing` is read by nothing at
+>   all — there is no cost ceiling *and* no cost report for conversational replies, only the token
+>   counter `runlore_thread_chat_tokens_total`. The chat layer's only spend ceilings are the call and
+>   token counts above; translate them into money yourself at your provider's rate before enabling
+>   this.
 > - **The token ceiling runs partly on estimates, not only on reported usage.** Two cases. A call is
 >   charged an estimate the moment it is *admitted*, before the provider has said anything, so that
 >   calls running concurrently are visible to one another; when it returns, that reservation is

@@ -67,7 +67,8 @@ knowledge base:
 
 RunLore recognises being addressed via MSC3952 `m.mentions` when your client sends it, or — as a
 fallback — the bot's full Matrix ID or its localpart (`runlore` in `@runlore:example.org`)
-appearing anywhere in the message body. A reply is attributed to its thread via the MSC3440
+appearing in the message body **as a whole word**. The word boundary is not decoration: a plain
+substring match would read the localpart `sre` inside "misread" as addressing the bot. A reply is attributed to its thread via the MSC3440
 `m.thread` relation, falling back to `m.in_reply_to` for clients that only send the legacy
 non-threaded reply fallback.
 

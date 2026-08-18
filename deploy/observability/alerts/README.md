@@ -77,6 +77,9 @@ listed series must be present.
 | RunloreModelLatencyHigh                  | warning  | `runlore_model_request_duration_seconds_bucket`                               |
 | RunloreSlowResolution                    | info     | `runlore_incident_resolution_seconds_bucket`                                  |
 | RunloreInvestigationCostHigh             | warning  | `runlore_investigation_tokens_estimated_bucket`                               |
+| RunloreInvestigationsNudgedByCeiling     | warning  | `runlore_investigation_budget_trips_total{stage="nudge"}`, `runlore_investigations_completed_total` |
+| RunloreThreadMentionsDropped             | warning  | `runlore_mentions_dropped_on_saturation_total`                                 |
+| RunloreCurationWriteErrors               | warning  | `runlore_curations_total{result="error"}`                                      |
 
 All metrics are exposed on RunLore's Prometheus `/metrics` endpoint. Histograms
 additionally expose `_sum` and `_count` series alongside the `_bucket` series
@@ -84,6 +87,13 @@ used by the quantile rules.
 
 ## Runbooks
 
-Each rule's `runbook_url` annotation points at
-`https://github.com/Smana/runlore/blob/main/docs/observability.md#<anchor>`
-(placeholders — the per-alert anchors live in that doc).
+Each rule's `runbook_url` annotation points at its own section under
+[Observability → Alert runbooks](https://runlore.io/docs/operations/observability/#alert-runbooks):
+`https://runlore.io/docs/operations/observability/#<lowercased-alert-name>`.
+
+These are not placeholders — every anchor is pinned by
+`TestRunbookURLsResolveToARealHeading` and `TestEveryAlertHasARunbookSection` in
+`internal/docsguard`, which fail CI if a rule is added without a runbook section, if an
+anchor stops resolving, or if a rule lands in only one of the two manifest flavours.
+Adding a rule therefore means adding a `### <AlertName>` section to that page in the
+same change.

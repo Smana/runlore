@@ -48,9 +48,9 @@ kubectl -n runlore logs deploy/runlore | grep 'clientset unavailable'
   auto-defaults the app-layer allowlist to the RBAC namespace list, so the two stay in sync unless you
   override one.
 - **`resource_spec` reads one object's `.spec`/`.status` for any kind the cluster serves**, CRDs
-  included, resolving a bare `Kind` through discovery rather than a compiled-in table. Its four
-  endings are kept apart deliberately — `found`, `absent`, `forbidden`, `kind_unknown` — plus
-  `refused` and `kind_ambiguous`; **only `absent` is evidence that an object does not exist**. A
+  included, resolving a bare `Kind` through discovery rather than a compiled-in table. Its **six**
+  endings are kept apart deliberately — `found`, `absent`, `forbidden`, `kind_unknown`, `refused`
+  and `kind_ambiguous`; **only `absent` is evidence that an object does not exist**. A
   kind served by several API groups (`Event` everywhere, `NetworkPolicy` on a Calico cluster) reads
   nothing and names the candidates; pass `group` to pick one.
 - **`resource_spec` is bounded by an RBAC allowlist, not by a wildcard.** `rbac.resourceSpecRules`

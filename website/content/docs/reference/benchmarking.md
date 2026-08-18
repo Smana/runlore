@@ -126,8 +126,8 @@ describes a loop no deployment ever runs. A `--compare` run with no `runlore.yam
 still gets the shipped default per case.
 
 `--max-total-tokens` is the run-level ceiling those cannot express: a 30-case corpus
-at `-n 10` under a 100k per-case ceiling authorises 30 million tokens, and nothing
-about "per case" says otherwise. It is denominated in **tokens, not dollars**,
+at `-n 10` under the **default 400000** per-case ceiling authorises 120 million tokens,
+and nothing about "per case" says otherwise. It is denominated in **tokens, not dollars**,
 because a campaign routinely drives several different models at once (the entries
 under test plus the judge) and a single USD ceiling would have to price all of them
 from one rate card — misreporting exactly the multi-model run it most needs to bound.

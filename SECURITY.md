@@ -7,8 +7,8 @@ not in a public issue.
 
 For the technical architecture behind RunLore's defenses — the prompt-injection design,
 secret-redaction boundaries, and network guards — see
-[`docs/security-architecture.md`](docs/security-architecture.md) and the runtime
-[`docs/security-model.md`](docs/security-model.md).
+[LLM security architecture](https://runlore.io/docs/security/security-architecture/) and the runtime
+[security model](https://runlore.io/docs/security/security-model/).
 
 ## Reporting a vulnerability
 
