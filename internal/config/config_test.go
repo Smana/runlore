@@ -1778,3 +1778,50 @@ func TestNotifyThreadDoesNotShadowARegisteredNotifier(t *testing.T) {
 		t.Fatal("notify.thread must not also land in Notify.Extra — it would shadow a notifier registered as \"thread\"")
 	}
 }
+
+// TestMaxNoteBytesTooSmallToKeepAnyNoteIsRejected closes a misconfiguration that
+// degraded silently in the one direction this whole feature exists to prevent:
+// the human being told their words were saved when nothing of them was.
+//
+// capNoteText reserves the truncation marker INSIDE the budget, because a cap
+// that the act of marking the cut then breaks is not a cap. Below the marker's
+// own width there is no room for both, and the cap wins: the entry body, the
+// generated title and the quote in the reply all become fragments of
+// "…_(truncated —" and nothing else. The reply still said "📝 Opened
+// knowledge-base PR #7 with your note" (reproduced at max_note_bytes: 20).
+//
+// Refused at LOAD rather than degraded more honestly at write time, because
+// there is no honest degradation available: every byte of the note is gone
+// either way, and the only question left is whether an operator finds out at
+// startup or a stranger in a chat thread finds out after losing their words.
+func TestMaxNoteBytesTooSmallToKeepAnyNoteIsRejected(t *testing.T) {
+	base := func() *Config { return &Config{Model: Model{Provider: "anthropic"}} }
+
+	for _, tt := range []struct {
+		name  string
+		value int
+		want  bool // want an error
+	}{
+		{"zero still means the default", 0, false},
+		{"negative, as before", -1, true},
+		{"the width of the marker alone", 45, true},
+		{"one below the floor", thread.MinMaxNoteBytes - 1, true},
+		{"the floor itself is accepted", thread.MinMaxNoteBytes, false},
+		{"a realistic operator value", 4096, false},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			c := base()
+			c.Notify.Thread.MaxNoteBytes = tt.value
+			err := c.Validate()
+			if tt.want && err == nil {
+				t.Fatalf("max_note_bytes: %d was accepted; nothing of a note survives it", tt.value)
+			}
+			if !tt.want && err != nil {
+				t.Fatalf("max_note_bytes: %d was rejected: %v", tt.value, err)
+			}
+			if tt.want && !strings.Contains(err.Error(), "notify.thread.max_note_bytes") {
+				t.Fatalf("Validate() = %v, want it to name notify.thread.max_note_bytes", err)
+			}
+		})
+	}
+}

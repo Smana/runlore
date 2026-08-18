@@ -906,6 +906,10 @@ type ThreadNotify struct {
 	// thread.DefaultMaxNoteBytes. See that constant's doc comment for why
 	// this bound exists.
 	//
+	// A positive value must be at least thread.MinMaxNoteBytes: below that the
+	// truncation marker fills the whole budget and NOTHING of the note is
+	// written, while the reply still reports it saved. Validate refuses it.
+	//
 	// It is also the ONLY term of the chat layer's assembled prompt an operator
 	// can move, and it moves it exactly one-for-one: the prompt ceiling is a
 	// fixed 7,192 bytes plus this value (thread.MaxChatContextBytes is that sum
@@ -1816,9 +1820,16 @@ func (c *Config) Validate() error {
 		return fmt.Errorf("notify.thread.registry_max must be >= 0 (0 = use the default %d), got %d",
 			thread.DefaultRegistryMax, c.Notify.Thread.RegistryMax)
 	}
-	if c.Notify.Thread.MaxNoteBytes < 0 {
-		return fmt.Errorf("notify.thread.max_note_bytes must be >= 0 (0 = use the default %d), got %d",
-			thread.DefaultMaxNoteBytes, c.Notify.Thread.MaxNoteBytes)
+	// Not merely >= 0. A positive value below thread.MinMaxNoteBytes leaves no
+	// room for both the human's words and the mark saying they were cut, so
+	// capNoteText keeps the mark and drops the note — and every surface goes on
+	// reporting the write as a success. There is no honest degradation available
+	// once the note is gone, so it is refused here instead; see MinMaxNoteBytes
+	// for the derivation of the floor.
+	if c.Notify.Thread.MaxNoteBytes < 0 || (c.Notify.Thread.MaxNoteBytes > 0 && c.Notify.Thread.MaxNoteBytes < thread.MinMaxNoteBytes) {
+		return fmt.Errorf("notify.thread.max_note_bytes must be 0 (= use the default %d) or at least %d, got %d — "+
+			"below %d the truncation marker fills the whole budget and nothing of the note is written",
+			thread.DefaultMaxNoteBytes, thread.MinMaxNoteBytes, c.Notify.Thread.MaxNoteBytes, thread.MinMaxNoteBytes)
 	}
 	if c.Notify.Thread.ChatCallsPerHour < 0 {
 		return fmt.Errorf("notify.thread.chat_calls_per_hour must be >= 0 (0 = use the default %d), got %d",

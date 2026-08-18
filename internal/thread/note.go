@@ -75,6 +75,33 @@ const (
 // constant is a close, not exact, bound on the rendered body.
 const DefaultMaxNoteBytes = 8 << 10
 
+// MinMaxNoteBytes is the smallest per-note cap an operator may configure.
+// config.Validate refuses anything between 1 and this, so no deployment can
+// reach the pathological branch in capNoteText below.
+//
+// It exists because a cap smaller than the truncation MARKER destroys the note
+// outright while every surface goes on reporting success. capNoteText reserves
+// the marker inside the budget — a cap that the act of marking the cut then
+// breaks is not a cap — so below the marker's own width there is no room for
+// both, the cap wins, and the entry body, the generated title and the quote in
+// the reply all become fragments of "…_(truncated —". Measured at
+// max_note_bytes: 20, the human still got "📝 Opened knowledge-base PR #7 with
+// your note".
+//
+// 128 is derived, not round. The marker's own width GROWS with the decimal
+// digits of the dropped byte count: 44 bytes when nothing was dropped, 47 at the
+// 8 KiB default, 50 at a 1 MiB Slack request body, 53 at a gigabyte. The floor
+// has to clear the WIDEST of those, not the narrowest — pinned by
+// TestMinMaxNoteBytesClearsTheWidestTruncationMarker — and still leave enough
+// behind to be worth accepting: at 128 a truncated note keeps ~75 bytes of what
+// the human actually typed, a short sentence rather than a fragment.
+//
+// Refused at load rather than degraded more honestly at write time, because
+// there is no honest degradation left to offer: every byte of the note is gone
+// either way, and the only question is whether an operator finds out at startup
+// or a stranger in a chat thread finds out after losing their words.
+const MinMaxNoteBytes = 128
+
 // Note is one knowledge-base-bound note: the text to file, the human it came
 // from, and — when RunLore's own model wrote that text rather than the human
 // typing it — the message it was drafted from.
@@ -285,14 +312,20 @@ func noteTruncationMarker(dropped int) string {
 // would be circular — the count depends on where the cut lands, which depends
 // on the reservation.
 //
-// PATHOLOGICAL CASE: a maxBytes smaller than the marker itself (roughly 45
-// bytes) leaves no room for both the human's words and the mark saying they
-// were cut. The cap wins: the result is the marker alone, itself cut to
-// maxBytes on a rune boundary, so the bound holds unconditionally and nothing
-// underflows or panics. Every shipped path passes DefaultMaxNoteBytes or an
-// operator's notify.thread.max_note_bytes, and config.Validate already rejects
-// a negative one, so a cap that small is a misconfiguration this degrades
-// predictably under rather than a case any real deployment reaches.
+// PATHOLOGICAL CASE: a maxBytes smaller than the marker itself (44 to 53 bytes,
+// depending on the digits of the dropped count) leaves no room for both the
+// human's words and the mark saying they were cut. The cap wins: the result is
+// the marker alone, itself cut to maxBytes on a rune boundary, so the bound
+// holds unconditionally and nothing underflows or panics.
+//
+// It is NO LONGER REACHABLE from configuration. That branch used to be defended
+// only by "config.Validate already rejects a negative one", which was true and
+// insufficient — max_note_bytes: 20 loaded fine and destroyed every note in the
+// deployment while the reply went on saying "Opened knowledge-base PR #7 with
+// your note". Validate now refuses anything between 1 and MinMaxNoteBytes; see
+// that constant for why refusing beats degrading. The branch stays as the
+// terminus for a direct in-process caller passing an arbitrary bound, which is
+// the only way left to get here.
 func capNoteText(text string, maxBytes int) string {
 	if maxBytes <= 0 {
 		maxBytes = DefaultMaxNoteBytes

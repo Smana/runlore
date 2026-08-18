@@ -1218,3 +1218,50 @@ func TestSingleLineFlattensThePrivateUseArea(t *testing.T) {
 		t.Errorf("SingleLine left the span mark in place: %q", got)
 	}
 }
+
+// TestCapNoteTextAtTheFloorStillKeepsTheHumansWords is what makes
+// MinMaxNoteBytes a derived number rather than a round one: at the smallest cap
+// an operator may configure, a truncated note must still carry a readable piece
+// of what the human actually wrote, not just the mark saying it was cut.
+//
+// The inputs run past what any chat transport can deliver (a Slack request body
+// is ~1 MiB), because the marker's own width GROWS with the decimal digits of
+// the dropped count — 44 bytes at nothing dropped, 53 at a gigabyte — and the
+// floor has to hold at the widest marker, not the narrowest.
+func TestCapNoteTextAtTheFloorStillKeepsTheHumansWords(t *testing.T) {
+	const sentence = "the real cause was a spot-node reclaim during the Karpenter consolidation window"
+	for _, size := range []int{1 << 10, 1 << 20, 1 << 30} {
+		text := sentence + strings.Repeat("x", size)
+		got := capNoteText(text, MinMaxNoteBytes)
+		if len(got) > MinMaxNoteBytes {
+			t.Errorf("size %d: capNoteText returned %d bytes, past the %d-byte cap", size, len(got), MinMaxNoteBytes)
+		}
+		kept, marker, found := strings.Cut(got, "…\n\n")
+		if !found || !strings.Contains(marker, "_(truncated —") {
+			t.Errorf("size %d: the cut is unmarked, so a reviewer reads a shortened note as complete: %q", size, got)
+			continue
+		}
+		if len(kept) < MinMaxNoteBytes/2 {
+			t.Errorf("size %d: only %d bytes of the human's own words survived a %d-byte cap (%q) — "+
+				"the floor is too low to be worth accepting", size, len(kept), MinMaxNoteBytes, got)
+		}
+		if !strings.HasPrefix(text, kept) {
+			t.Errorf("size %d: what survived is not a prefix of what was written: %q", size, kept)
+		}
+		// And enough of it to be a sentence rather than a fragment: the floor is
+		// only worth accepting if a reader can tell what the note was about.
+		if !strings.HasPrefix(got, "the real cause was a spot-node reclaim") {
+			t.Errorf("size %d: the surviving words do not carry the note's claim: %q", size, got)
+		}
+	}
+}
+
+// TestMinMaxNoteBytesClearsTheWidestTruncationMarker pins the derivation itself,
+// so the floor cannot silently stop being a floor if the marker's wording grows.
+func TestMinMaxNoteBytesClearsTheWidestTruncationMarker(t *testing.T) {
+	widest := len(noteTruncationMarker(1 << 30))
+	if MinMaxNoteBytes <= widest {
+		t.Fatalf("MinMaxNoteBytes = %d, but the truncation marker alone is %d bytes — "+
+			"at that cap nothing of the note survives, which is what the floor exists to refuse", MinMaxNoteBytes, widest)
+	}
+}
