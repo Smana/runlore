@@ -246,10 +246,20 @@ Prometheus **or** a VictoriaMetrics datasource with no edits. Import it via
 **Dashboards → Import → Upload JSON**, or provision it. See the
 [grafana README](https://github.com/Smana/runlore/blob/main/deploy/observability/grafana/README.md).
 
-It panels every `runlore_` series above, including the output-truncation rate
+It panels most of the `runlore_` series above — the learning loop, recall, curation,
+investigations, tools and model, cost, thread capture and fleet health. Notably it
+includes the spend-ceiling trips broken out **by `stage`** (a nudged investigation
+completes and records `result="resolved"`, so no other panel shows it) and **by
+`reason`** (which ceiling to raise), the thread knowledge-write routes and the
+throttle/denial counters, the output-truncation rate
 (`tool_output_truncated_bytes_total`), the coalesced-batch-size distribution
 (`coalesce_batch_size`, heatmap), and the curation dedup-score distribution
 (`curation_dedup_score`, heatmap).
+
+It is not exhaustive: the debounce counters, the history-compaction family and a few
+per-investigation usage histograms are documented above but have no panel. Query them
+ad hoc, or add a panel — the metric table is the authority on what exists, the
+dashboard on what is worth a glance.
 
 ## Alerting
 
