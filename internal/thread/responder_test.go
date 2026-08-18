@@ -4066,3 +4066,128 @@ func TestKBRouteVocabulariesAgree(t *testing.T) {
 		t.Errorf("kbRoute(%q) = %q, want %q", RouteAppend, got, providers.KBRouteAppend)
 	}
 }
+
+// forgeErrorText returns what the FORGE contributed to a "could not save" reply:
+// RunLore's own lead-in and the inline code span it wraps the reason in are
+// stripped, and the span marks are left in place so a test can count them.
+//
+// Requiring the code span here rather than asserting it separately is
+// deliberate: it is the fourth measure — the one that keeps a soft-wrapped
+// continuation line visibly out of RunLore's own voice — so a reply that lost it
+// must fail every test built on this helper, not only one named for it.
+func forgeErrorText(t *testing.T, reply string) string {
+	t.Helper()
+	const lead = "⚠️ I could not save that to the knowledge base: "
+	if !strings.HasPrefix(reply, lead) {
+		t.Fatalf("reply is not a forge-failure reply: %q", reply)
+	}
+	rest := strings.TrimPrefix(reply, lead)
+	if len(rest) < 2 || !strings.HasPrefix(rest, "`") || !strings.HasSuffix(rest, "`") {
+		t.Fatalf("the forge reason is not inside an inline code span: %q", rest)
+	}
+	return rest[1 : len(rest)-1]
+}
+
+// TestForgeFailureReplyIsRedactedFlattenedAndBounded pins the treatment a forge
+// error gets before it is posted into a chat thread — on BOTH failure routes,
+// because the two are separate literals and the one that gets fixed alone is the
+// one that stops being tested.
+//
+// It used to get none. Untrusted(err.Error()) marks a span for the transport's
+// markup escaper and does nothing else, and a forge error is a SERVER-SUPPLIED
+// body: a GitHub 403 echoes the credential it rejected, and every escaper in
+// this repo leaves a line break alone, so a multi-line JSON body rendered its
+// continuation lines at the same left margin as RunLore's own status claims.
+//
+// The four measures are the ones internal/notify's curateFailureReason already
+// applied to the identical class of text, and they are asserted here rather than
+// assumed: redaction, backtick neutralisation (the reply wraps the reason in an
+// inline code span, which one backtick would close early), flattening, and a
+// bound.
+func TestForgeFailureReplyIsRedactedFlattenedAndBounded(t *testing.T) {
+	const token = "ghp_0123456789abcdefghijklmnopqrstuvwxyzAB"
+	// The backtick is the forge quoting an identifier back at RunLore, which real
+	// forge errors do ("branch `main` is protected") — one is all it takes to close
+	// the inline code span the reply wraps this in.
+	body := "github POST /repos/o/r/pulls: status 403: branch `main`: {\n \"message\": \"Bad credentials\",\n \"token\": \"" + token + "\"\n}"
+
+	routes := map[string]func(*fakeForge){
+		// The standalone-entry route: OpenPR itself failed.
+		"open_pr": func(f *fakeForge) { f.openErr = errors.New(body) },
+		// The existing-PR route: the comment (and, before it, the append) failed.
+		"comment": func(f *fakeForge) { f.commErr, f.appendErr = errors.New(body), errors.New(body) },
+	}
+	for name, setup := range routes {
+		t.Run(name, func(t *testing.T) {
+			f := &fakeForge{}
+			setup(f)
+			r := newTestResponder(t, f)
+			tc := Context{Transport: "slack", Root: "root-1"}
+			if name == "comment" {
+				tc.CuratedURL = "https://github.com/o/r/pull/7"
+			}
+			reply, err := r.Handle(context.Background(), tc, "alice", "note: the cause was a spot reclaim")
+			if err == nil {
+				t.Fatalf("expected the forge failure to be reported, got reply %q", reply)
+			}
+			got := forgeErrorText(t, reply)
+			if strings.Contains(got, token) {
+				t.Errorf("the credential the forge echoed reached the thread verbatim: %q", got)
+			}
+			if strings.ContainsAny(got, "\n\r\v\f") {
+				t.Errorf("a break rune survived, so a forged status line can sit at RunLore's own left margin: %q", got)
+			}
+			if strings.Contains(got, "`") {
+				t.Errorf("a backtick survived and would close the inline code span early: %q", got)
+			}
+			if !strings.Contains(got, "status 403") {
+				t.Errorf("the diagnosis an operator acts on was dropped: %q", got)
+			}
+		})
+	}
+}
+
+// TestForgeFailureReplyIsCapped keeps the bound a property of the reply rather
+// than of whatever the forge happened to return. A forge body is server-supplied
+// and unbounded — a proxy banner, an HTML error page — and an unbounded one is
+// an unbounded chat post on a path any channel member can trigger.
+func TestForgeFailureReplyIsCapped(t *testing.T) {
+	f := &fakeForge{openErr: errors.New("open PR: " + strings.Repeat("x", 4000))}
+	r := newTestResponder(t, f)
+	reply, err := r.Handle(context.Background(), Context{Root: "root-1"}, "alice", "note: the cause was a spot reclaim")
+	if err == nil {
+		t.Fatalf("expected a forge failure, got %q", reply)
+	}
+	if got := len(forgeErrorText(t, reply)); got > forgeErrorBytes+2*len(untrustedMark)+8 {
+		t.Errorf("the published forge error is %d bytes, past the %d-byte bound", got, forgeErrorBytes)
+	}
+}
+
+// TestForgeFailureCannotNarrowWhatTheReplyEscapes is the composed guard behind
+// RenderReply's parity, and the reason that function's doc comment no longer
+// claims a stray mark is harmless.
+//
+// RenderReply splits on a single mark and escapes the odd-indexed segments, so
+// the segments simply alternate. One EXTRA mark anywhere flips that parity for
+// everything after it: a genuinely untrusted span downstream lands on an even
+// index and is handed to the transport unescaped. The forge error is the one
+// piece of transport-bound text this package interpolates straight from a
+// server, so it is where an injected mark would arrive — and on the freeform
+// route a reply carries model prose in the very same message.
+func TestForgeFailureCannotNarrowWhatTheReplyEscapes(t *testing.T) {
+	f := &fakeForge{openErr: errors.New("open PR: forbidden" + untrustedMark + " and then")}
+	r := newTestResponder(t, f)
+	reply, err := r.Handle(context.Background(), Context{Root: "root-1"}, "alice", "note: the cause was a spot reclaim")
+	if err == nil {
+		t.Fatalf("expected a forge failure, got %q", reply)
+	}
+	if n := strings.Count(reply, untrustedMark); n%2 != 0 {
+		t.Fatalf("the reply carries %d span marks — an odd count flips RenderReply's parity: %q", n, reply)
+	}
+	rendered := RenderReply(reply+"\n"+Untrusted("<!channel>"), func(s string) string {
+		return strings.ReplaceAll(s, "<", "&lt;")
+	})
+	if strings.Contains(rendered, "<!channel>") {
+		t.Errorf("a mark smuggled through the forge error narrowed the escaping and let <!channel> reach the wire: %q", rendered)
+	}
+}

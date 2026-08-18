@@ -799,13 +799,14 @@ func atxHeadingText(line string) string {
 	return strings.TrimSpace(line[i:])
 }
 
-// SingleLine collapses every rune that can break or reorder a line — any
-// Unicode whitespace other than the plain space, every control character (Cc)
-// and every format character (Cf) — to a space, so text pulled from untrusted
-// sources (an alert title, in particular) can never break a single-line YAML
-// title. kbvalidate rejects any title containing \r or \n outright.
+// SingleLine collapses every rune that can break or reorder a line, or change
+// how a reply is escaped — any Unicode whitespace other than the plain space,
+// every control character (Cc), every format character (Cf) and every
+// private-use character (Co) — to a space, so text pulled from untrusted sources
+// (an alert title, in particular) can never break a single-line YAML title.
+// kbvalidate rejects any title containing \r or \n outright.
 //
-// The three categories, and why each is here rather than just \r and \n:
+// The four categories, and why each is here rather than just \r and \n:
 //
 //   - unicode.IsSpace covers U+2028 LINE SEPARATOR and U+2029 PARAGRAPH
 //     SEPARATOR, which YAML 1.1 counts as line breaks and which many
@@ -820,6 +821,17 @@ func atxHeadingText(line string) string {
 //     the bidi controls U+202E / U+061C, which reorder how a line RENDERS
 //     without changing a byte of what it says — a title that reads one way to
 //     a reviewer and another to the parser.
+//   - unicode.Co is the private-use category, and it is here for exactly ONE of
+//     its code points: U+E000 is untrustedMark, the delimiter RenderReply splits
+//     a reply on. That split is a PARITY — one stray mark flips it and hands a
+//     genuinely untrusted span to the transport unescaped, NARROWING what gets
+//     escaped rather than widening it. Untrusted() strips the mark from the
+//     content it wraps, which covers every marked span; this covers the
+//     single-line fields that reach a reply OUTSIDE one — an author, an entry
+//     title, a forge error (see SafeErrorText). The whole category goes rather
+//     than that one rune, because a private-use code point has no agreed meaning
+//     outside one font's private arrangement: there is nothing to preserve, and
+//     a one-rune exception is a list that drifts the moment the mark moves.
 //
 // The plain space is excluded so ordinary text is left exactly as written;
 // everything else in those categories becomes one, which keeps the result the
@@ -841,7 +853,7 @@ func SingleLine(s string) string {
 		if r == ' ' {
 			return r
 		}
-		if unicode.IsSpace(r) || unicode.IsControl(r) || unicode.Is(unicode.Cf, r) {
+		if unicode.IsSpace(r) || unicode.IsControl(r) || unicode.Is(unicode.Cf, r) || unicode.Is(unicode.Co, r) {
 			return ' '
 		}
 		return r

@@ -805,6 +805,74 @@ func Untrusted(s string) string {
 	return untrustedMark + strings.ReplaceAll(s, untrustedMark, "") + untrustedMark
 }
 
+// SafeErrorText prepares a SERVER-SUPPLIED error string for a chat message:
+// redacted, backticks neutralised, flattened to one line. It is what a forge
+// error must go through before any surface publishes it.
+//
+// It is EXPORTED and shared rather than reimplemented per surface, because the
+// two surfaces that publish this class of text have already been shown to drift:
+// internal/notify's curateFailureReason arrived at exactly this pipeline for the
+// curate-failure line on an investigation card, while this package went on
+// posting `Untrusted(err.Error())` into a thread — which its own doc comment
+// cited as precedent for publishing forge errors at all. One implementation is
+// what makes "the same treatment" a fact rather than an intention, the same
+// argument QuoteUntrusted's own doc makes one function down.
+//
+// Three measures, in this order, each answering something the others do not:
+//
+//   - redact.Secrets FIRST, because a forge error may echo the credential it
+//     rejected — a GitHub 403 body carrying the bearer token was the live case —
+//     and running it before any cut means a truncation can never hand it a
+//     half-token it no longer matches;
+//   - backticks become apostrophes, because every caller wraps the result in an
+//     inline code span and ONE backtick inside would close it early. Apostrophe
+//     rather than deletion, so a quoted identifier still reads;
+//   - SingleLine LAST of the three, because no escaper in this repo touches a
+//     line break: a multi-line JSON body renders its continuation lines at the
+//     same left margin as RunLore's own status claims, which is the forged-
+//     headline class internal/notify was already bitten by. Flattening also maps
+//     the private-use area, which is what stops a mark in a server's body from
+//     flipping RenderReply's parity (see RenderReply).
+//
+// The CAP is deliberately left to the caller. Both surfaces bound this, in
+// different units for different reasons — notify counts runes against a Slack
+// section limit, this package counts bytes against a message budget it shares —
+// and folding one of those numbers in here would make the other a lie.
+func SafeErrorText(s string) string {
+	return SingleLine(strings.ReplaceAll(redact.Secrets(s), "`", "'"))
+}
+
+// forgeErrorBytes bounds the forge error one thread reply publishes.
+//
+// It is the byte counterpart of internal/notify's curateErrorRunes, and it is
+// that size for that comment's reason rather than a coincidentally similar one:
+// truncate cuts the HEAD, and a wrapped Go error puts the diagnosis LAST
+// ("open PR: github POST /repos/o/r/pulls: status 403: Resource not accessible
+// by integration"), so a tighter cap reliably keeps the call site and drops the
+// status and the message — the only two things an operator can act on.
+//
+// Bytes, not runes, because every other bound in this package counts bytes
+// (notePreviewBytes, MaxNoteBytes) and a second unit here would be one more
+// thing to get wrong. A forge error is overwhelmingly ASCII, so the two agree in
+// practice and the byte count is the conservative one where they do not.
+const forgeErrorBytes = 300
+
+// forgeErrorReply renders the one reply a failed knowledge-base write gets, from
+// both routes that can fail, so the two cannot drift into telling a human two
+// different things — which is exactly how the unredacted one survived: the fix
+// that would have covered it had two literals to find.
+//
+// The inline code span is the fourth measure, the one SafeErrorText cannot
+// provide: a reason this long soft-wraps in every client, and a continuation
+// line starts at the left margin with no quote bar of its own. Inside a span it
+// is monospaced-with-a-background on Slack and <code> on Matrix — visibly not
+// RunLore's own voice. The backticks are RunLore's OWN bytes, outside the marked
+// span, so no escaper rewrites them and nothing inside can close them early.
+func forgeErrorReply(err error) string {
+	return "⚠️ I could not save that to the knowledge base: `" +
+		Untrusted(truncate(SafeErrorText(err.Error()), forgeErrorBytes)) + "`"
+}
+
 // RenderReply resolves the untrusted spans a reply carries: escape is applied
 // to every span Untrusted marked, everything RunLore wrote itself is left
 // exactly as it is, and the marks themselves are removed either way. Every
@@ -818,8 +886,24 @@ func Untrusted(s string) string {
 // Splitting on a single mark rather than on an open/close pair is deliberate:
 // spans cannot nest (Untrusted strips the mark from its own content), so the
 // segments simply alternate — even indices are RunLore's, odd indices are not.
-// A stray unpaired mark could therefore only widen what gets escaped, never
-// narrow it, which is the safe direction to fail in.
+//
+// That alternation is the whole contract, and it is a PARITY: one stray mark
+// anywhere flips it for everything after that point, so a span downstream that
+// really is untrusted lands on an even index and is handed to the transport
+// UNESCAPED. This comment used to claim the opposite — that a stray mark "could
+// only widen what gets escaped, never narrow it" — and that was simply false;
+// measured, a raw U+E000 interpolated ahead of a marked span let "<!channel>"
+// through verbatim. The false rationale mattered more than the bug: it is what
+// would license a future caller to interpolate untrusted text without wrapping
+// it, on the grounds that the failure was safe.
+//
+// What actually holds the parity is that every untrusted span goes through
+// Untrusted(), which strips the mark from its own content, and that every
+// single-line field reaching a reply outside a span goes through SingleLine,
+// which maps the private-use area — U+E000 included — to a space (see
+// forgeErrorReply, and TestForgeFailureCannotNarrowWhatTheReplyEscapes). Neither
+// is optional, and neither is checked here: this function cannot tell a mark it
+// wrote from one it was handed.
 func RenderReply(reply string, escape func(string) string) string {
 	parts := strings.Split(reply, untrustedMark)
 	if len(parts) == 1 {
@@ -1379,7 +1463,7 @@ func (r *Responder) write(ctx context.Context, tc Context, n Note, at time.Time)
 			continue
 		}
 		if err != nil {
-			return fmt.Sprintf("⚠️ I could not save that to the knowledge base: %s", Untrusted(err.Error())), nil,
+			return forgeErrorReply(err), nil,
 				fmt.Errorf("comment on PR %d: %w", num, err)
 		}
 		r.log().Info("thread: note recorded on KB PR", "pr", num, "root", tc.Root, "route", route, "author", n.Author)
@@ -1391,7 +1475,7 @@ func (r *Responder) write(ctx context.Context, tc Context, n Note, at time.Time)
 	entry := ConceptEntry(tc, n, at, r.maxNoteBytes())
 	ref, err := r.Forge.OpenPR(ctx, entry)
 	if err != nil {
-		return fmt.Sprintf("⚠️ I could not save that to the knowledge base: %s", Untrusted(err.Error())), nil,
+		return forgeErrorReply(err), nil,
 			fmt.Errorf("open note PR: %w", err)
 	}
 	if uerr := r.Registry.Update(tc.Root, func(c *Context) { c.NoteURL = ref.URL }); uerr != nil {

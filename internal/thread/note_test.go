@@ -1184,3 +1184,37 @@ func TestTruncateWordsHoldsItsBoundAtAZeroBudget(t *testing.T) {
 		}
 	}
 }
+
+// TestSingleLineFlattensThePrivateUseArea extends the rune set above to Co, the
+// private-use category, for one concrete reason rather than for completeness:
+// untrustedMark is U+E000, and it is the ONE rune whose survival changes how a
+// reply is ESCAPED rather than merely how it looks.
+//
+// RenderReply splits a reply on that mark and escapes alternate segments, so a
+// single extra one anywhere flips the parity of everything after it and hands a
+// genuinely untrusted span to the transport unescaped (see
+// TestForgeFailureCannotNarrowWhatTheReplyEscapes). Untrusted() strips the mark
+// from the content it wraps, which is what holds the property for every span
+// that goes through it; this is what holds it for the single-line fields that do
+// not — an author, an entry title, a forge error — all of which reach a reply
+// through SingleLine.
+//
+// A private-use code point has no agreed meaning outside one font's private
+// arrangement, so nothing legitimate is lost by mapping the whole category to a
+// space. Written as escapes, never as literal glyphs: they are invisible in a
+// diff, and ST1018 rejects them in source anyway.
+func TestSingleLineFlattensThePrivateUseArea(t *testing.T) {
+	for _, r := range []rune{
+		'\ue000',     // untrustedMark itself — the parity hazard this arm exists for
+		'\uf8ff',     // the far end of the Basic Multilingual Plane's private-use area
+		'\U000f0000', // Plane 15, Supplementary Private Use Area-A
+		'\U00100000', // Plane 16, Supplementary Private Use Area-B
+	} {
+		if got, want := SingleLine("before"+string(r)+"after"), "before after"; got != want {
+			t.Errorf("SingleLine(U+%04X) = %q, want %q", r, got, want)
+		}
+	}
+	if got := SingleLine(untrustedMark); strings.Contains(got, untrustedMark) {
+		t.Errorf("SingleLine left the span mark in place: %q", got)
+	}
+}
