@@ -107,7 +107,7 @@ func (lr *LiveRunner) runOnce(ctx context.Context, scn Scenario) RunOutcome {
 		MaxTokensPerInvestigation: lr.Spend.MaxTokensPerInvestigation,
 		MaxCostPerInvestigation:   lr.Spend.MaxCostPerInvestigation,
 		Pricing:                   lr.Spend.Pricing,
-		VerifyPricing:             lr.Spend.VerifyPricing,
+		Verifier:                  lr.Spend.Verifier,
 		OnComplete:                func(got providers.Investigation) { inv = got },
 	}
 	req := investigate.Request{

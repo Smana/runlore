@@ -96,7 +96,7 @@ func (cr *ComparisonRunner) runOnce(ctx context.Context, c Case) ComparedRun {
 		MaxTokensPerInvestigation: cr.Spend.MaxTokensPerInvestigation,
 		MaxCostPerInvestigation:   cr.Spend.MaxCostPerInvestigation,
 		Pricing:                   cr.Spend.Pricing,
-		VerifyPricing:             cr.Spend.VerifyPricing,
+		Verifier:                  cr.Spend.Verifier,
 		OnComplete: func(inv providers.Investigation) {
 			got, done = inv, true
 		},

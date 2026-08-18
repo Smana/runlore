@@ -86,18 +86,42 @@ func TestInvestigationUsageUnpriced(t *testing.T) {
 	}
 }
 
-// TestVerifyPricingInherits proves the verify pass's tokens are priced at the
-// verify override rate, and that a nil VerifyPricing inherits the main rate.
+// TestVerifyPricingInherits proves the verify pass's tokens are priced at the rates
+// of the model that actually generated them: the tier's own when the tier has a model
+// of its own, the main model's otherwise — including when a rate card is offered with
+// NO model, which VerifyOn drops on the floor rather than applying to someone else's
+// tokens. That middle case is the whole eval defect, checked here at the type level.
 func TestVerifyPricingInherits(t *testing.T) {
 	loop := providers.UsageTotals{ModelCalls: 1, InputTokens: 1000, OutputTokens: 100}
 	verify := providers.UsageTotals{ModelCalls: 1, InputTokens: 500, OutputTokens: 40}
+	cheap := &Pricing{InputUSDPerMTok: 1, OutputUSDPerMTok: 3}
 	li := &LoopInvestigator{Pricing: &Pricing{InputUSDPerMTok: 10, OutputUSDPerMTok: 30}}
-	// Inherit: verify tokens priced at the main rate.
+
+	// No tier at all: loop 1000@10 + 100@30 = $0.013, verify 500@10 + 40@30 = $0.0062.
+	const bothAtMainRates = 0.0192
 	inherited := li.aggregateUsage(loop, verify, providers.UsageTotals{})
-	li.VerifyPricing = &Pricing{InputUSDPerMTok: 1, OutputUSDPerMTok: 3} // cheaper verify model
+	if math.Abs(inherited.CostUSD-bothAtMainRates) > 1e-9 {
+		t.Fatalf("with no verify tier every token is the main model's: got $%.8f, want $%.8f",
+			inherited.CostUSD, bothAtMainRates)
+	}
+
+	// A rate card with no model to spend it must not price tokens the MAIN model
+	// generated. VerifyOn drops it, so the total is unchanged.
+	li.Verifier = VerifyOn(nil, cheap)
+	orphaned := li.aggregateUsage(loop, verify, providers.UsageTotals{})
+	if math.Abs(orphaned.CostUSD-bothAtMainRates) > 1e-9 {
+		t.Errorf("a verify rate card with no verify model priced the run at $%.8f instead of "+
+			"$%.8f: the verify pass ran on Model, and billing its tokens at some other model's "+
+			"card is a figure no call incurred", orphaned.CostUSD, bothAtMainRates)
+	}
+
+	// With a model of its own the tier's rate applies: verify 500@1 + 40@3 = $0.00062.
+	const loopMainVerifyCheap = 0.013 + 0.00062
+	li.Verifier = VerifyOn(&scriptModel{}, cheap)
 	overridden := li.aggregateUsage(loop, verify, providers.UsageTotals{})
-	if !(overridden.CostUSD < inherited.CostUSD) {
-		t.Fatalf("a cheaper verify pricing must lower the cost: inherited=%.8f overridden=%.8f",
-			inherited.CostUSD, overridden.CostUSD)
+	if math.Abs(overridden.CostUSD-loopMainVerifyCheap) > 1e-9 {
+		t.Errorf("a verify pass on its own cheaper model was priced at $%.8f, want $%.8f — "+
+			"pricing it at the main rate over-reports every deployment that configures "+
+			"model.verify", overridden.CostUSD, loopMainVerifyCheap)
 	}
 }

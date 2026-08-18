@@ -165,3 +165,117 @@ func TestNilCampaignBudgetWrapsToThePlainModel(t *testing.T) {
 		t.Errorf("a nil budget must return the model unchanged, got %T", got)
 	}
 }
+
+// flappingModel fails every completion but reports the usage the provider billed
+// before it broke — exactly the shape every model client returns on its error path
+// (providers.CompletionResponse.CostOnly). A provider that 500s after reading a
+// 120k-token prompt bills for that prompt; the response body is what is missing, not
+// the invoice.
+type flappingModel struct {
+	usage providers.Usage
+	calls int
+}
+
+func (m *flappingModel) Complete(context.Context, providers.CompletionRequest) (providers.CompletionResponse, error) {
+	m.calls++
+	return providers.CompletionResponse{Usage: m.usage, Text: "half a"}.CostOnly(),
+		errors.New("upstream 500 mid-stream")
+}
+
+// campaignCases is the corpus size the reproduction below walks, and perCaseTokens
+// what one case costs a flapping provider. 30 x 126_000 = 3_780_000 tokens against a
+// 50_000-token ceiling.
+const (
+	campaignCases  = 30
+	perCaseTokens  = 126_000
+	reproCeiling   = 50_000
+	reproUncounted = campaignCases * perCaseTokens
+)
+
+// TestCampaignBudgetCountsAFailedCallThatWasStillBilled pins the house rule the
+// campaign ceiling was the last place in the repo not to follow: a completion that
+// FAILED still cost whatever the provider reported before it broke.
+//
+// internal/investigate/loop.go accumulates resp.Usage BEFORE its failure branch for
+// exactly this reason, and providers.CompletionResponse.CostOnly exists solely to
+// carry a failed call's usage back to a caller. The budget returned early on error
+// instead — so against a provider flapping at 126_000 tokens a call, a 30-case
+// campaign under a 50_000-token ceiling billed 3_780_000 tokens, ran every case,
+// never tripped, and never fired the halt.
+func TestCampaignBudgetCountsAFailedCallThatWasStillBilled(t *testing.T) {
+	m := &flappingModel{usage: providers.Usage{InputTokens: 120_000, OutputTokens: 6_000}}
+	fired := 0
+	b := &CampaignBudget{MaxTokens: reproCeiling, OnExceeded: func() { fired++ }}
+	wrapped := b.Wrap(m)
+
+	ran := 0
+	for i := 0; i < campaignCases; i++ {
+		_, err := wrapped.Complete(context.Background(), providers.CompletionRequest{})
+		if errors.Is(err, ErrCampaignBudgetExceeded) {
+			break // the campaign stopped paying, which is the whole point
+		}
+		ran++
+	}
+
+	if !b.Exceeded() {
+		t.Errorf("after %d failed-but-billed calls of %d tokens the budget reports spent=%d and "+
+			"Exceeded=false against a %d-token ceiling: a flapping provider can bill %d tokens "+
+			"without the campaign ceiling ever seeing one of them",
+			ran, perCaseTokens, b.SpentTokens(), b.MaxTokens, reproUncounted)
+	}
+	if fired != 1 {
+		t.Errorf("OnExceeded fired %d times, want exactly 1 — `lore eval` hangs the campaign's "+
+			"early stop on it, so a ceiling crossed by failures halts nothing", fired)
+	}
+	if ran >= campaignCases {
+		t.Errorf("all %d cases ran under a %d-token ceiling; the crossing call is the last one "+
+			"allowed, so the run must stop within a couple of calls", campaignCases, reproCeiling)
+	}
+	if got := b.SpentTokens(); got != ran*perCaseTokens {
+		t.Errorf("spend accounting: got %d tokens over %d billed calls, want %d",
+			got, ran, ran*perCaseTokens)
+	}
+}
+
+// TestCampaignBudgetDoesNotInventSpendItCannotSee is the other direction: accounting
+// a failed call must not become accounting things that were never billed.
+//
+//   - A completion refused by the budget itself never reached the provider, so it adds
+//     nothing — the total must not grow after the ceiling trips.
+//   - A failure BEFORE the provider reported anything (dial error, context cancelled)
+//     carries zero usage. That is "unknown", not a licence to charge a guess: it adds
+//     no tokens, exactly as investigate.addUsage treats it.
+func TestCampaignBudgetDoesNotInventSpendItCannotSee(t *testing.T) {
+	m := &flappingModel{usage: providers.Usage{InputTokens: 60_000}}
+	b := &CampaignBudget{MaxTokens: reproCeiling}
+	wrapped := b.Wrap(m)
+
+	if _, err := wrapped.Complete(context.Background(), providers.CompletionRequest{}); err == nil {
+		t.Fatal("the fixture must fail; it is the failure path under test")
+	}
+	crossedAt, callsAt := b.SpentTokens(), m.calls
+	for i := 0; i < 5; i++ {
+		if _, err := wrapped.Complete(context.Background(), providers.CompletionRequest{}); !errors.Is(err, ErrCampaignBudgetExceeded) {
+			t.Fatalf("call %d after the crossing: want ErrCampaignBudgetExceeded, got %v", i, err)
+		}
+	}
+	if got := b.SpentTokens(); got != crossedAt {
+		t.Errorf("spend grew %d → %d across 5 REFUSED completions: a call the budget itself "+
+			"turned back never reached the provider and was never billed", crossedAt, got)
+	}
+	if m.calls != callsAt {
+		t.Errorf("a refused completion reached the provider (%d → %d calls)", callsAt, m.calls)
+	}
+
+	// A failure that reported no usage at all: counted as an attempt, charged nothing.
+	silent := &flappingModel{}
+	nb := &CampaignBudget{}
+	sw := nb.Wrap(silent)
+	if _, err := sw.Complete(context.Background(), providers.CompletionRequest{}); err == nil {
+		t.Fatal("the silent fixture must fail too")
+	}
+	if got := nb.SpentTokens(); got != 0 {
+		t.Errorf("a failure that reported no usage added %d tokens: zero usage is UNKNOWN, "+
+			"and a ceiling that invents a figure for it is no more honest than one that drops it", got)
+	}
+}

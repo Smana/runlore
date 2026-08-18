@@ -254,15 +254,18 @@ func runDemoInvestigateWithModel(args []string, out, errOut io.Writer, model pro
 	loopPricing, verifyPricing := investigationPricing(cfg)
 	var result *providers.Investigation
 	li := &investigate.LoopInvestigator{
-		Model:                     model,
-		VerifyModel:               verifyModel,
-		Tools:                     tools,
-		Recall:                    recall,
-		Log:                       log,
-		Verify:                    true,
-		ModelProvider:             cfg.Model.Provider,
-		Pricing:                   loopPricing,
-		VerifyPricing:             verifyPricing,
+		Model:         model,
+		Tools:         tools,
+		Recall:        recall,
+		Log:           log,
+		Verify:        true,
+		ModelProvider: cfg.Model.Provider,
+		Pricing:       loopPricing,
+		// verifyModel is nil on the injected-model and --offline paths (one ordered
+		// transcript answers the verify turns too), and VerifyOn is what stops
+		// model.verify.pricing from being applied to tokens the MAIN model generated
+		// there — the same mispricing the eval runners had.
+		Verifier:                  investigate.VerifyOn(verifyModel, verifyPricing),
 		MaxSteps:                  cfg.Investigation.MaxSteps,
 		MaxToolOutputBytes:        cfg.Investigation.MaxToolOutputBytes,
 		MaxTokensPerInvestigation: cfg.Investigation.MaxTokensPerInvestigation,

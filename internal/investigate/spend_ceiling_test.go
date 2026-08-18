@@ -212,8 +212,8 @@ func TestCostCeilingIsInertWithoutPricing(t *testing.T) {
 // became running totals — from both ceilings. A ceiling with a hole in it is worse
 // than none, because it reports a number the operator believes.
 //
-// It is folded into the VERIFY totals, not the loop's: the digest call routes to
-// VerifyModel when one is configured, so aggregateUsage's existing split prices it at
+// It is folded into the VERIFY totals, not the loop's: the digest call routes to the
+// verify tier's model when one is configured, so aggregateUsage's existing split prices it at
 // the verify rate, which is the rate that was actually billed.
 func TestCompactionDigestCountsTowardTheRunningTotal(t *testing.T) {
 	// Small enough that the digests fit summarizeLoop's 6000-token ceiling: this test

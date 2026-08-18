@@ -50,9 +50,11 @@ func addUsage(t *providers.UsageTotals, u providers.Usage) {
 // aggregateUsage combines the loop's model usage with the verify pass's and the
 // hybrid-recall query embeddings' into one per-investigation total and, when pricing
 // is configured, estimates cost. The loop tokens are priced at the main model's rate
-// and the verify tokens at the verify override's rate (which inherits the main rate
-// when unset) — so a cheaper verify model is costed correctly even though the token
-// totals are reported combined.
+// and the verify tokens at the verify tier's rate, which inherits the main rate unless
+// the tier has a model of its own (VerifyTier makes that pairing the only expressible
+// one) — so a cheaper verify model is costed correctly even though the token totals
+// are reported combined, and a verify pass that ran on the MAIN model is never billed
+// at some other model's card.
 //
 // EMBEDDINGS ARE COUNTED BUT NOT PRICED, deliberately, and the asymmetry is the honest
 // answer rather than an oversight:
@@ -83,11 +85,7 @@ func (li *LoopInvestigator) aggregateUsage(loop, verify, embedded providers.Usag
 	}
 	if li.Pricing != nil {
 		total.Priced = true
-		verifyPricing := li.Pricing
-		if li.VerifyPricing != nil {
-			verifyPricing = li.VerifyPricing
-		}
-		total.CostUSD = li.Pricing.cost(loop) + verifyPricing.cost(verify)
+		total.CostUSD = li.Pricing.cost(loop) + li.Verifier.pricingOr(li.Pricing).cost(verify)
 	}
 	return total
 }

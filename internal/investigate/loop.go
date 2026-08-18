@@ -214,9 +214,11 @@ type LoopInvestigator struct {
 	// mechanically rather than inferring it from the final finding.
 	OnRecall func(RecallDecision)
 
-	// VerifyModel optionally routes the adversarial verify pass to a cheaper/faster
-	// model. nil ⇒ the verify pass reuses Model. Verify itself always runs.
-	VerifyModel providers.ModelProvider
+	// Verifier optionally routes the adversarial verify pass to a cheaper/faster model
+	// AND carries the rate card that prices that model's tokens — one value, built by
+	// VerifyOn, so a rate card can never outlive the model it prices. The zero value
+	// reuses Model at Pricing. Verify itself always runs either way.
+	Verifier VerifyTier
 
 	// Timeout bounds a single investigation end-to-end (recall + every model/tool
 	// call, including a hung git clone/patch). 0 disables it. On expiry the loop
@@ -239,8 +241,8 @@ type LoopInvestigator struct {
 	MaxTokensPerInvestigation int
 
 	// MaxCostPerInvestigation is the ceiling, in USD, on this investigation's
-	// accumulated estimated spend (loop tokens priced at Pricing, verify tokens at
-	// VerifyPricing — the same arithmetic aggregateUsage reports on the finding).
+	// accumulated estimated spend (loop tokens priced at Pricing, verify tokens at the
+	// Verifier's rates — the same arithmetic aggregateUsage reports on the finding).
 	// 0 ⇒ no cost ceiling.
 	//
 	// It is INERT without Pricing: an unpriced investigation has no dollar figure to
@@ -253,7 +255,7 @@ type LoopInvestigator struct {
 	// elides: "" / "elide" (default) drops their bodies for markers; "summarize" first
 	// asks a model for one compact factual digest of the batch and keeps that in place
 	// of the markers, falling back to plain elision on any summarizer failure. When
-	// "summarize", the digest call is routed to VerifyModel if set, else Model.
+	// "summarize", the digest call is routed to the Verifier's model if set, else Model.
 	Compaction string
 
 	// Observability — nil-safe; no-op when telemetry is disabled.
@@ -271,12 +273,11 @@ type LoopInvestigator struct {
 	// pings even when OnProgress is set.
 	ProgressEverySteps int
 
-	// Pricing (optional) estimates a per-investigation cost from the accumulated
-	// token totals. nil ⇒ token totals are still reported but no cost is shown.
-	// VerifyPricing prices the adversarial verify pass's tokens; nil ⇒ it inherits
-	// Pricing (so a cheaper verify model is costed correctly when configured).
-	Pricing       *Pricing
-	VerifyPricing *Pricing
+	// Pricing (optional) estimates a per-investigation cost from the accumulated token
+	// totals. nil ⇒ token totals are still reported but no cost is shown. The verify
+	// pass's tokens are priced at Verifier's own rates when it has a model of its own,
+	// and at Pricing otherwise — see VerifyTier.
+	Pricing *Pricing
 
 	// KBMatchScore is the BM25 bar the per-investigation kb_search hit tracker uses to
 	// decide a hit is a "clear match" worth surfacing on the notification
@@ -1053,7 +1054,7 @@ func (li *LoopInvestigator) enforceBudget(ctx context.Context, req Request, sys 
 		}
 	}
 	// Priced the same way the delivered finding is (loop tokens at Pricing, verify
-	// tokens at VerifyPricing). Read AFTER compaction so a summarize-mode digest call
+	// tokens at the Verifier's rates). Read AFTER compaction so a summarize-mode digest call
 	// counts against the ceiling on the very step that paid for it, and after tryRecall
 	// so a recall fall-through's reranker + verify calls — and its query embeddings —
 	// are already in it.

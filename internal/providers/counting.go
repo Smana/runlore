@@ -26,17 +26,29 @@ type CountingModel struct {
 	total Usage
 }
 
-// Complete delegates to Inner and accumulates the response usage on success.
+// Complete delegates to Inner and accumulates the response usage — on the error path
+// too, not only on success.
+//
+// A completion that FAILED still cost whatever the provider reported before it broke:
+// every client in this package hands those counts back alongside its error (see
+// CompletionResponse.CostOnly, which exists for no other reader), because a provider
+// bills for the prompt it accepted whether or not it finished the reply. Counting
+// only successes made a flapping provider free by construction, and the figure this
+// wrapper prints is the ONLY place a one-shot command's spend is visible — so the
+// error was not imprecision, it was an under-report in the direction of the operator's
+// bill. It is the same rule internal/investigate's loop applies to its own totals.
+//
+// Zero usage — a failure before the provider reported anything, e.g. a dial error —
+// adds nothing. That is "unknown", never a claim that the call was free, and never a
+// guess in the other direction either.
 func (c *CountingModel) Complete(ctx context.Context, req CompletionRequest) (CompletionResponse, error) {
 	resp, err := c.Inner.Complete(ctx, req)
-	if err == nil {
-		c.mu.Lock()
-		c.total.InputTokens += resp.Usage.InputTokens
-		c.total.OutputTokens += resp.Usage.OutputTokens
-		c.total.CachedInputTokens += resp.Usage.CachedInputTokens
-		c.total.CacheWriteTokens += resp.Usage.CacheWriteTokens
-		c.mu.Unlock()
-	}
+	c.mu.Lock()
+	c.total.InputTokens += resp.Usage.InputTokens
+	c.total.OutputTokens += resp.Usage.OutputTokens
+	c.total.CachedInputTokens += resp.Usage.CachedInputTokens
+	c.total.CacheWriteTokens += resp.Usage.CacheWriteTokens
+	c.mu.Unlock()
 	return resp, err
 }
 

@@ -74,10 +74,10 @@ func RunInvestigate(args []string) error {
 	loopPricing, verifyPricing := investigationPricing(cfg)
 	var result *providers.Investigation
 	li := &investigate.LoopInvestigator{
-		Model: model, VerifyModel: BuildVerifyModel(cfg), Tools: tools, Recall: recall, Actions: action.New(cfg.Actions), Log: log, Verify: true,
+		Model: model, Tools: tools, Recall: recall, Actions: action.New(cfg.Actions), Log: log, Verify: true,
 		ModelProvider:             cfg.Model.Provider,
 		Pricing:                   loopPricing,
-		VerifyPricing:             verifyPricing,
+		Verifier:                  investigate.VerifyOn(BuildVerifyModel(cfg), verifyPricing),
 		MaxSteps:                  cfg.Investigation.MaxSteps,
 		MaxToolOutputBytes:        cfg.Investigation.MaxToolOutputBytes,
 		MaxTokensPerInvestigation: cfg.Investigation.MaxTokensPerInvestigation,
