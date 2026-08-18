@@ -41,10 +41,49 @@ The seconds-scale latency histograms (`*_duration_seconds`,
 `incident_resolution_seconds`) carry explicit **SLO-aligned bucket boundaries**
 (seconds): `0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10, 30, 60, 120, 300`. The OTel SDK
 defaults are millisecond-scale and would collapse most calls into the first bucket,
-breaking `histogram_quantile`. The boundaries are defined in
-[`internal/telemetry/setup.go`](../internal/telemetry/setup.go) via an
-explicit-bucket-histogram view. Other histograms (scores, batch size, token
-estimate) keep the SDK defaults and are read as heatmaps, not percentiles.
+breaking `histogram_quantile`.
+
+### Score histogram buckets are the decision thresholds
+
+The two BM25-score histograms — `runlore_recall_score` and
+`runlore_curation_dedup_score` — carry their own explicit boundaries:
+`0.1, 0.25, 0.5, 0.75, 1, 1.5, 2, 3, 4, 5, 7.5, 10`. The SDK defaults start at 5, so
+an entire real corpus (an enriched BM25 score is roughly 0.1–1.2) lands in the first
+bucket and the panel renders as a single bar.
+
+The rescale is not the interesting part. **Every boundary that is also a decision
+threshold is one deliberately**, so a bucket count answers "how much of the corpus
+clears this gate?" with no arithmetic:
+
+| boundary | the gate it is | reading `le` at that boundary tells you |
+|---|---|---|
+| `0.1` | `instant_recall.rerank_min_score` | share of recall attempts too weak to spend a rerank call on — they reject as `rerank_no_signal` |
+| `1` | `instant_recall.min_score` / `margin_gap` | share below the legacy BM25 magnitude gate (live only under `instant_recall.rerank: false`) |
+| `4` | `instant_recall.solo_floor` | share below the confident bar for a single-hit recall |
+| `5` | `forge.dup_score` | on `curation_dedup_score`, the share **below** the dedup bar — i.e. the findings novel enough to file. At or above it, the finding is dropped as duplicating a catalog entry |
+
+So `runlore_recall_score_bucket{le="0.1"}` over `_count` is precisely the fraction of
+recall attempts that never reached the reranker, and
+`runlore_curation_dedup_score_bucket{le="5"}` over `_count` the fraction of findings
+that were novel. Boundaries above 5 exist for deployments that hand-tuned their
+thresholds to a differently-scaled corpus; `+Inf` captures anything past 10.
+
+> [!WARNING]
+> **Existing panels over these two `*_bucket` series change shape on upgrade.**
+> Histogram boundaries are not versioned and the rename-free change is invisible: the
+> series keep their names and simply begin reporting a different set of `le` values.
+> A panel, recording rule or `histogram_quantile` written against the old SDK ladder
+> (which began at 5, so nearly everything sat in one bucket) will re-bucket silently
+> and change value across the upgrade — no error, no missing series, just a different
+> number. Re-check anything reading `runlore_recall_score_bucket` or
+> `runlore_curation_dedup_score_bucket`, and treat comparisons spanning the upgrade as
+> meaningless rather than as a real shift in corpus quality.
+
+Both ladders are defined in
+[`internal/telemetry/setup.go`](../internal/telemetry/setup.go) via
+explicit-bucket-histogram views. The remaining histograms — `coalesce_batch_size`,
+`investigation_tokens_estimated` and the per-investigation call/token/cost
+distributions — keep the SDK defaults and are read as heatmaps, not percentiles.
 
 ### Pipeline & investigations
 | Metric | Type | Labels | Meaning |
@@ -62,6 +101,8 @@ estimate) keep the SDK defaults and are read as heatmaps, not percentiles.
 | `runlore_investigations_throttled_total` | counter | — | starts requeued by the rate limiter |
 | `runlore_investigations_dropped_total` | counter | — | dropped (rate-limiter max-requeues or token-budget kill) |
 | `runlore_investigations_cancelled_total` | counter | — | queued (not yet started) investigations cancelled because the incident resolved first (`triggers.incidents.cancel_queued_on_resolve`) |
+| `runlore_gitops_failures_debounced_total` | counter | — | GitOps failures dropped as transient: the failure cleared within the debounce window before an investigation started |
+| `runlore_coalesce_batch_size` | histogram | — | incidents per flushed batch (heatmap; SDK default buckets) |
 
 ### Tools & model
 | Metric | Type | Labels | Meaning |
@@ -76,6 +117,14 @@ estimate) keep the SDK defaults and are read as heatmaps, not percentiles.
 | `runlore_investigation_output_tokens` | histogram | `result` | provider-reported output tokens per investigation (loop + verify) |
 | `runlore_investigation_cached_input_tokens` | histogram | `result` | input tokens served from cache per investigation (loop + verify) |
 | `runlore_investigation_cost_usd` | histogram | `result` | estimated per-investigation cost in USD (only when `model.pricing` is configured) |
+| `runlore_model_responses_truncated_total` | counter | `provider` | completions cut off at the output-token ceiling (the provider's stop/finish reason indicated truncation) — a truncated answer is a degraded one, so a rising rate means `model.max_tokens` is too tight |
+| `runlore_model_input_tokens_total` | counter | `provider` | total LLM input tokens, including cached. Fleet-wide spend, as opposed to the per-investigation `investigation_input_tokens` distribution |
+| `runlore_model_cached_input_tokens_total` | counter | `provider` | LLM input tokens served from cache. Over `model_input_tokens_total` this is the cache hit rate, which is the single biggest lever on the bill |
+| `runlore_tool_output_truncated_bytes_total` | counter | — | bytes elided by per-call tool-output truncation (`investigation.max_tool_output_bytes`) |
+| `runlore_history_compactions_total` | counter | — | mid-loop tool-output history compaction events |
+| `runlore_history_elided_bytes_total` | counter | — | tool-output bytes elided by mid-loop compaction |
+| `runlore_history_summarizations_total` | counter | — | compaction events whose elided batch was replaced by a model-produced digest (`compaction: summarize`) |
+| `runlore_history_summarize_fallbacks_total` | counter | — | summarize-mode compactions that fell back to plain elision after a summariser error, refusal or truncation — the digest was not produced and the bodies were dropped instead |
 | `runlore_investigation_budget_trips_total` | counter | `reason`, `stage` | spend ceilings crossed during an investigation. `reason` = `tokens_request` (the next request alone exceeded `max_tokens_per_investigation`), `tokens_total` (the run's projected cumulative tokens did), or `cost` (`max_cost_per_investigation`). `stage` = `nudge` (forced to conclude early; findings still delivered) or `kill` (hard-stopped, `result="budget_exceeded"`) |
 
 **One run reports one `reason`.** The ceiling that first engaged the ladder is latched at the nudge
@@ -103,6 +152,45 @@ The five usage histograms carry the same `result` values as
 investigations a recall short-circuited and `{result!="recall"}` exactly those that ran
 the full loop. That split is what makes the recall saving measurable — see below.
 
+### Thread capture & conversational replies
+
+Emitted by the `@runlore …` thread path (`notify.*.thread_capture`, plus `model.chat`
+for the conversational half). Both halves are **member-triggerable** — anyone in the
+channel or room can cause a forge write or a model call — so these are the series that
+say what that path is costing and where it is being refused.
+
+| Metric | Type | Labels | Meaning |
+|---|---|---|---|
+| `runlore_mentions_dropped_on_saturation_total` | counter | — | **note LOSS** — a Slack `app_mention` or an addressed Matrix thread message that arrived when the handler pool was saturated. Accepted and never processed (Slack was already acked and will not retry; Matrix's `/sync` token has advanced), so the human's note is gone. RunLore tells them to retry with a best-effort in-thread reply |
+| `runlore_thread_notes_written_total` | counter | `route` | knowledge writes that **landed** from an `@runlore note:` reply. `route` = `comment` (added to the curated PR this thread came from), `open_pr` (no PR to land on, so a standalone `Concept` entry PR was opened), or `append` (appended to the entry file of the standalone PR an earlier note in this same thread opened). `comment` and `append` are split deliberately: a comment is discarded when its PR merges, an appended entry becomes catalog knowledge, and with both labelled the same nothing distinguished them |
+| `runlore_thread_writes_throttled_total` | counter | — | note writes **denied** by the global per-hour forge-write window and told to retry. This is the feature's one global cap and is otherwise invisible to an operator — nothing else reports it |
+| `runlore_thread_chat_calls_total` | counter | — | model calls the chat layer made (granted by the per-hour budget) |
+| `runlore_thread_chat_tokens_total` | counter | — | tokens the chat layer spent, from provider-reported usage — or a conservative estimate when the provider reported none |
+| `runlore_thread_chat_denied_total` | counter | `ceiling` | chat calls the budget refused. `ceiling` = `calls` (`notify.thread.chat_calls_per_hour`) or `tokens` (`chat_tokens_per_hour`). The message falls back to the deterministic reply |
+
+> [!IMPORTANT]
+> **There is no cost report for the chat path.** `thread_chat_tokens_total` is a token
+> count and nothing anywhere converts it to currency: per-investigation cost reporting
+> (`runlore_investigation_cost_usd`, the notification footer) covers the main and verify
+> passes only, and `model.chat.pricing` is read by nothing at all. To know what
+> conversational replies cost, multiply this counter by your provider's rate yourself.
+
+`thread_chat_denied_total{ceiling="tokens"}` firing while call slots remain is the
+budget working as designed — the token ceiling is derived so that a runaway of
+maximum-size calls is stopped by **cost** before it exhausts the call count. Sustained
+denials mean the ceiling is genuinely too low for your traffic, not that something
+broke:
+
+```promql
+# share of chat attempts refused, by which ceiling bound first
+sum by (ceiling) (rate(runlore_thread_chat_denied_total[1h]))
+  / scalar(sum(rate(runlore_thread_chat_calls_total[1h]))
+         + sum(rate(runlore_thread_chat_denied_total[1h])))
+
+# notes that became durable knowledge vs. notes that will vanish at merge
+sum by (route) (rate(runlore_thread_notes_written_total[24h]))
+```
+
 ### Recall, learning loop & curation
 | Metric | Type | Labels | Meaning |
 |---|---|---|---|
@@ -116,6 +204,7 @@ the full loop. That split is what makes the recall saving measurable — see bel
 | `runlore_incident_resolution_seconds` | histogram | — | open→resolve duration |
 | `runlore_curations_total` | counter | `kind`, `result` | curation outcomes (`opened`/`coalesced`/`error`) |
 | `runlore_curation_dedup_score` | histogram | — | catalog top-hit BM25 score at the dedup decision |
+| `runlore_catalog_invalid_entries_total` | counter | — | structurally-invalid (but parseable) entries surfaced at catalog load. The entry is still indexed and served — one bad entry never empties the catalog — so this is the only signal that the CI merge gate let something through |
 | `runlore_catalog_embed_degraded_total` | counter | — | catalog reloads that left hybrid recall without vectors (embed failure — recall degrades to BM25-only until the next successful sync) |
 
 ### Measuring the recall saving
