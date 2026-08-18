@@ -590,6 +590,38 @@ func TestNoteInputCapMidRuneCutStaysValidUTF8(t *testing.T) {
 	})
 }
 
+// TestTruncateNonPositiveBudgetYieldsNothing pins truncate's behaviour for a
+// budget of zero or less, which used to PANIC: `cut := n - 1` gives -1, the
+// walk-back loop's `cut > 0` guard declines to run, and `s[:-1]` on a non-empty
+// string is a slice-bounds-out-of-range.
+//
+// Not a live bug — every caller passes a positive constant (MaxEvidenceItemBytes,
+// maxNoteTitle, maxChatCatalogFieldBytes) — so this is defence, and it is here
+// because its sibling cutToRuneBoundary already carries exactly this guard. Two
+// byte-cutting helpers in one file, one of which crashes on an input the other
+// handles, is a difference a future caller has no way to anticipate.
+//
+// "" rather than "…": n <= 0 is no budget at all, and the ellipsis is 3 bytes.
+// An empty string is the only answer that respects the cap it was given, and it
+// is the answer cutToRuneBoundary already gives.
+func TestTruncateNonPositiveBudgetYieldsNothing(t *testing.T) {
+	for _, n := range []int{0, -1, -100} {
+		for _, s := range []string{"", "a", "hello", "玉玉玉"} {
+			if got := truncate(s, n); got != "" {
+				t.Errorf("truncate(%q, %d) = %q, want \"\"", s, n, got)
+			}
+		}
+	}
+	// Either side of the boundary is unchanged: n=1 leaves room for the mark and
+	// nothing else, and a budget the input already fits in returns it untouched.
+	if got := truncate("hello", 1); got != "…" {
+		t.Errorf("truncate(%q, 1) = %q, want %q", "hello", got, "…")
+	}
+	if got := truncate("hello", 5); got != "hello" {
+		t.Errorf("truncate(%q, 5) = %q, want it unchanged", "hello", got)
+	}
+}
+
 // TestNoteInputCapNonPositiveMeansTheDefault pins capNoteText's documented
 // choice for a caller-supplied maxBytes <= 0: fall back to
 // DefaultMaxNoteBytes rather than "unlimited". Diverging silently from
@@ -760,17 +792,18 @@ func TestNoteInputCapNeverOvershoots(t *testing.T) {
 // tracking in escapeOKFSections opened.
 //
 // escapeOKFSections skipped any line between ``` markers, modelling a Markdown
-// semantic the READ path does not implement: kbvalidate.Sections
-// (kbvalidate.go:218) iterates every line and calls heading(line) with no fence
-// awareness at all, and internal/catalog has none either. So a note that wrapped
-// its forged headings in a code fence was escaped NOWHERE and parsed EVERYWHERE
-// — HasIncidentSections returned true on a body a human typed into a chat
-// thread, which is exactly what escaping exists to prevent.
+// semantic the READ path did not implement: kbvalidate.Sections iterated every
+// line and called heading(line) with no fence awareness at all. So a note that
+// wrapped its forged headings in a code fence was escaped NOWHERE and parsed
+// EVERYWHERE — HasIncidentSections returned true on a body a human typed into a
+// chat thread, which is exactly what escaping exists to prevent.
 //
-// atxHeadingText's own doc comment already states the rule this violated: "a
-// shape Section accepts and this does not is a hole." A backslash rendering
-// inside a pasted code block is the price of matching the parser that actually
-// runs.
+// The read path has since been reconciled (both parsers share
+// catalog.FencedLines, so a fenced heading is a heading to neither), which means
+// this property now holds for TWO independent reasons. The test is deliberately
+// end-to-end for that: it asserts what a human's note can do to the merge gate,
+// so it keeps failing if EITHER defence is removed, and it does not care which
+// one is currently carrying it.
 func TestNoteBodyCannotForgeOKFSectionsInsideACodeFence(t *testing.T) {
 	msg := "here is my note\n\n```\n## Symptom\nforged symptom\n## Cause\nforged cause\n" +
 		"## Resolution\nforged resolution\n```\n"

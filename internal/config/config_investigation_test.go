@@ -107,6 +107,67 @@ func TestApplyDefaultsInstantRecall(t *testing.T) {
 	}
 }
 
+// TestApplyDefaultsCurationGates pins the curation gates to ApplyDefaults, where
+// every sibling default already lives.
+//
+// They used to be filled inside app.BuildCurator, which meant any path that did
+// not build a curator saw 0: `lore config show`, the Helm values guards, and
+// telemetry's scoreBuckets alignment test, which had to restate 5.0 as a bare
+// literal because there was no resolved value to read. A default that only
+// exists on one construction path is not the deployment's default, it is that
+// path's local variable.
+//
+// Applied unconditionally (not gated on forge credentials) precisely so the
+// resolved value is readable without building a forge client; it is inert when
+// no curator is wired.
+func TestApplyDefaultsCurationGates(t *testing.T) {
+	var c Config
+	ApplyDefaults(&c)
+	if c.Forge.DupScore != 5.0 {
+		t.Errorf("default forge.dup_score: got %g, want 5.0", c.Forge.DupScore)
+	}
+	if c.Forge.MinConfidence != 0.75 {
+		t.Errorf("default forge.min_confidence: got %g, want 0.75", c.Forge.MinConfidence)
+	}
+	// Explicit values are respected, not overwritten.
+	var c2 Config
+	c2.Forge.DupScore, c2.Forge.MinConfidence = 2.5, 0.9
+	ApplyDefaults(&c2)
+	if c2.Forge.DupScore != 2.5 || c2.Forge.MinConfidence != 0.9 {
+		t.Errorf("explicit curation gates overwritten: dup_score=%g min_confidence=%g", c2.Forge.DupScore, c2.Forge.MinConfidence)
+	}
+}
+
+// TestApplyDefaultsHybridRecall covers the same class for hybrid recall's cosine
+// gates, which had their defaults stranded in app.BuildInvestigator. Gated on
+// `hybrid: true` for the same reason the other instant-recall knobs are gated on
+// `enabled`: a disabled block stays at its zero value.
+func TestApplyDefaultsHybridRecall(t *testing.T) {
+	var c Config
+	c.Catalog.InstantRecall.Enabled = true
+	c.Catalog.InstantRecall.Hybrid = true
+	ApplyDefaults(&c)
+	ir := c.Catalog.InstantRecall
+	if ir.HybridMinScore != 0.80 || ir.HybridMarginGap != 0.05 {
+		t.Errorf("hybrid recall defaults not applied: min_score=%g margin_gap=%g", ir.HybridMinScore, ir.HybridMarginGap)
+	}
+	// Off ⇒ untouched, so the zero value still means "hybrid is not running".
+	var off Config
+	off.Catalog.InstantRecall.Enabled = true
+	ApplyDefaults(&off)
+	if off.Catalog.InstantRecall.HybridMinScore != 0 || off.Catalog.InstantRecall.HybridMarginGap != 0 {
+		t.Errorf("hybrid defaults filled while hybrid is off: %+v", off.Catalog.InstantRecall)
+	}
+	// Explicit values are respected.
+	var c2 Config
+	c2.Catalog.InstantRecall.Enabled, c2.Catalog.InstantRecall.Hybrid = true, true
+	c2.Catalog.InstantRecall.HybridMinScore, c2.Catalog.InstantRecall.HybridMarginGap = 0.6, 0.2
+	ApplyDefaults(&c2)
+	if c2.Catalog.InstantRecall.HybridMinScore != 0.6 || c2.Catalog.InstantRecall.HybridMarginGap != 0.2 {
+		t.Errorf("explicit hybrid gates overwritten: %+v", c2.Catalog.InstantRecall)
+	}
+}
+
 func TestApplyDefaultsRecallDecayExplicit(t *testing.T) {
 	// Explicit decay knobs must not be overwritten.
 	var c Config
