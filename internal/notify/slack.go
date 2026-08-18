@@ -637,6 +637,35 @@ func summaryBlocks(inv providers.Investigation) []map[string]any {
 		}
 	}
 
+	// 5b. What blocked the investigation — the account an `inconclusive` verdict owes
+	// the reader when block 5 rendered nothing to be the answer instead. It stands in
+	// the same slot as the Why, because that is what it is for this card, and it
+	// renders for no other verdict (see inconclusiveAccount).
+	//
+	// Without it an inconclusive-with-no-cause card was a verdict badge, a confidence
+	// line and metadata — which is what shipped live on 2026-08-18. The blocker text
+	// existed for every stop RunLore synthesises itself (budget kill, timeout,
+	// refusal, non-convergence all write one into Unresolved/DataGaps) and reached
+	// only the threaded detail reply, where the channel reader never sees it; when the
+	// model supplied no blocker at all, nothing anywhere said so.
+	//
+	// Untrusted model output, escaped, and capped at three bullets like the evidence
+	// and next-step lists above it — a run stopped by a ceiling names one blocker, and
+	// a card that spends its fold space enumerating gaps is the failure mode the
+	// summary/detail split exists to prevent.
+	if header, lines := inconclusiveAccount(inv); header != "" {
+		var s strings.Builder
+		s.WriteString(header)
+		for i, l := range lines {
+			if i >= 3 {
+				fmt.Fprintf(&s, "\n• _…%d more_", len(lines)-i)
+				break
+			}
+			fmt.Fprintf(&s, "\n• %s", escapeMrkdwn(l))
+		}
+		blocks = append(blocks, map[string]any{"type": "section", "text": map[string]any{"type": "mrkdwn", "text": truncate(s.String(), 2900)}})
+	}
+
 	// 6. Suggested next steps — the resolution guide (per-root-cause suggestions +
 	// policy actions, de-duplicated, reversibility-flagged), capped at three.
 	if steps := nextSteps(inv); len(steps) > 0 {

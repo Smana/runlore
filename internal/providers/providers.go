@@ -1155,6 +1155,29 @@ type Investigation struct {
 	MatchedKnowledge *MatchedEntry
 }
 
+// UnaccountedInconclusive reports whether inv claims it could not determine the
+// cause while giving no account of what blocked it: no root cause, no question for
+// a human, no data gap. That payload contradicts itself — an honest "I could not
+// determine" always has something in one of those three channels — and it is what
+// the model produces when it reaches for `inconclusive` to mean "this is already
+// known" (#471, and again live on 2026-08-18).
+//
+// It lives HERE, on the contract, because two sides consult it and must not
+// disagree: the loop says it out loud at the source, where the payload is still
+// attributable to the model call that made it, and the notifier acts on it at
+// delivery, where a card that neither explains itself nor shows evidence is what
+// the on-call actually has to read. Same reasoning as Verdict.Conclusive — one
+// definition, so the writer and the reader cannot drift apart.
+//
+// RuledOut is deliberately not one of the three: eliminating hypotheses says what
+// the cause is NOT, which is neither a finding nor a reason the run could not reach
+// one. The three channels here are the ones that answer "so what happened?" or
+// "why don't you know?".
+func (inv Investigation) UnaccountedInconclusive() bool {
+	return inv.Verdict == VerdictInconclusive &&
+		len(inv.RootCauses) == 0 && len(inv.Unresolved) == 0 && len(inv.DataGaps) == 0
+}
+
 // MatchedEntry is the strongest pre-existing catalog entry an investigation's
 // kb_search calls matched at clear-match strength. It closes a live visibility gap:
 // when a full investigation's kb_search found a known runbook and used it, the

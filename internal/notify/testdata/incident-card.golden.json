@@ -748,5 +748,202 @@
       ],
       "text": "🔍 argocd-repo-server OOMKilled after the 2.11 bump — Action suggested (High confidence · 85%)"
     }
+  },
+  {
+    "fixture": "stopped_by_budget",
+    "card": {
+      "blocks": [
+        {
+          "text": {
+            "emoji": true,
+            "text": "🔍 KubeNodeNotReady — eu-west-1",
+            "type": "plain_text"
+          },
+          "type": "header"
+        },
+        {
+          "text": {
+            "text": "❓ *Inconclusive*",
+            "type": "mrkdwn"
+          },
+          "type": "section"
+        },
+        {
+          "elements": [
+            {
+              "text": "⚪ *confidence not stated*",
+              "type": "mrkdwn"
+            }
+          ],
+          "type": "context"
+        },
+        {
+          "text": {
+            "text": "*❓ Why this is inconclusive*\n• investigation stopped: cumulative token budget (investigation.max_tokens_per_investigation) exceeded after nudge (model did not submit findings in time)",
+            "type": "mrkdwn"
+          },
+          "type": "section"
+        },
+        {
+          "fields": [
+            {
+              "text": "*Alert:*\nKubeNodeNotReady (warning)",
+              "type": "mrkdwn"
+            },
+            {
+              "text": "*Cluster:*\neu-west-1",
+              "type": "mrkdwn"
+            },
+            {
+              "text": "*Started:*\n<!date^1783072800^{date_short_pretty} {time}|2026-07-03T10:00:00Z>",
+              "type": "mrkdwn"
+            }
+          ],
+          "type": "section"
+        },
+        {
+          "elements": [
+            {
+              "text": "9 model calls · 198340 in / 12055 out tokens (0% cached)",
+              "type": "mrkdwn"
+            }
+          ],
+          "type": "context"
+        },
+        {
+          "type": "divider"
+        },
+        {
+          "text": {
+            "text": "*Full analysis*",
+            "type": "mrkdwn"
+          },
+          "type": "section"
+        },
+        {
+          "text": {
+            "text": "*❓ Open questions* _(needs a human)_\n• investigation stopped: cumulative token budget (investigation.max_tokens_per_investigation) exceeded after nudge (model did not submit findings in time)",
+            "type": "mrkdwn"
+          },
+          "type": "section"
+        },
+        {
+          "elements": [
+            {
+              "action_id": "runlore_feedback_up",
+              "text": {
+                "emoji": true,
+                "text": "👍 Accurate",
+                "type": "plain_text"
+              },
+              "type": "button",
+              "value": "fp-9a3"
+            },
+            {
+              "action_id": "runlore_feedback_down",
+              "text": {
+                "emoji": true,
+                "text": "👎 Off-base",
+                "type": "plain_text"
+              },
+              "type": "button",
+              "value": "fp-9a3"
+            }
+          ],
+          "type": "actions"
+        }
+      ],
+      "text": "🔍 KubeNodeNotReady — Inconclusive (confidence not stated)"
+    }
+  },
+  {
+    "fixture": "inconclusive_unaccounted",
+    "card": {
+      "blocks": [
+        {
+          "text": {
+            "emoji": true,
+            "text": "🔍 KubeNodeNotReady — tmem175",
+            "type": "plain_text"
+          },
+          "type": "header"
+        },
+        {
+          "text": {
+            "text": "❓ *Inconclusive* — KubeNodeNotReady on ip-10-20-24-144.ec2.internal (tmem175-0): transient, self-healed Karpenter node churn — no application impact",
+            "type": "mrkdwn"
+          },
+          "type": "section"
+        },
+        {
+          "elements": [
+            {
+              "text": "⚪ *confidence not stated*",
+              "type": "mrkdwn"
+            }
+          ],
+          "type": "context"
+        },
+        {
+          "text": {
+            "text": "⚠️ *No account given* — the investigation reported no cause, no open question and no data gap, so this card carries neither an answer nor a reason it could not reach one. Treat it as an incomplete run, not a finding.",
+            "type": "mrkdwn"
+          },
+          "type": "section"
+        },
+        {
+          "fields": [
+            {
+              "text": "*Alert:*\nKubeNodeNotReady (warning)",
+              "type": "mrkdwn"
+            },
+            {
+              "text": "*Cluster:*\ntmem175 · tmem175-0",
+              "type": "mrkdwn"
+            },
+            {
+              "text": "*Started:*\n<!date^1783072800^{date_short_pretty} {time}|2026-07-03T10:00:00Z>",
+              "type": "mrkdwn"
+            }
+          ],
+          "type": "section"
+        },
+        {
+          "elements": [
+            {
+              "text": "7 model calls · 164082 in / 10628 out tokens (0% cached)",
+              "type": "mrkdwn"
+            }
+          ],
+          "type": "context"
+        },
+        {
+          "elements": [
+            {
+              "action_id": "runlore_feedback_up",
+              "text": {
+                "emoji": true,
+                "text": "👍 Accurate",
+                "type": "plain_text"
+              },
+              "type": "button",
+              "value": "fp-9a4"
+            },
+            {
+              "action_id": "runlore_feedback_down",
+              "text": {
+                "emoji": true,
+                "text": "👎 Off-base",
+                "type": "plain_text"
+              },
+              "type": "button",
+              "value": "fp-9a4"
+            }
+          ],
+          "type": "actions"
+        }
+      ],
+      "text": "🔍 KubeNodeNotReady on ip-10-20-24-144.ec2.internal (tmem175-0): transient, self-healed Karpenter node churn — no application impact — Inconclusive (confidence not stated)"
+    }
   }
 ]

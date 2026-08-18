@@ -197,12 +197,17 @@ func parseFindings(args string) (providers.Investigation, error) {
 // and nothing for the verify pass to check. Cheap and pure, so the loop can say so
 // at the source, where the payload is still attributable to the call that made it.
 //
+// The predicate itself lives on providers.Investigation, because the CARD acts on
+// the same shape now (an inconclusive verdict that explains nothing says so in the
+// notification instead of shipping blank) and a second copy here is how the writer's
+// idea of "unaccounted" and the reader's drift apart. This name stays because it is
+// the loop's own vocabulary, and its call site reads as a sentence.
+//
 // Deliberately NOT an error: the finding is still delivered. Rejecting it would
 // spend another model call to re-ask a question the model just answered badly, and a
 // thin answer beats no answer for the human reading the card.
 func unaccountedInconclusive(inv providers.Investigation) bool {
-	return inv.Verdict == providers.VerdictInconclusive &&
-		len(inv.RootCauses) == 0 && len(inv.Unresolved) == 0 && len(inv.DataGaps) == 0
+	return inv.UnaccountedInconclusive()
 }
 
 // buildInvestigation maps the parsed findings shape onto a providers.Investigation,

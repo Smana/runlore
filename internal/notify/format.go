@@ -75,6 +75,65 @@ func curateFailureReason(inv providers.Investigation) string {
 	return truncate(thread.SafeErrorText(inv.CurateError), curateErrorRunes)
 }
 
+// inconclusiveAccountHeader labels the account an `inconclusive` verdict owes its
+// reader when the card has no Why to be the answer instead: what stopped the
+// investigation. It reuses the verdict's own ❓ deliberately — the reader is being
+// told what that badge MEANS on this card, not shown a second, unrelated section.
+const inconclusiveAccountHeader = "*❓ Why this is inconclusive*"
+
+// unaccountedInconclusiveNotice is what a card says in place of that account when
+// the payload supplies none — providers.Investigation.UnaccountedInconclusive.
+//
+// It exists because the alternative shipped live on 2026-08-18: a card whose entire
+// body was "❓ Inconclusive — <a definite conclusion about self-healed node churn>"
+// and "⚪ confidence not stated". No Why, no evidence, no next steps, and nothing in
+// the thread either, because there was nothing to put there. The verdict says "I
+// could not determine the cause"; the title states a cause. A reader has no way to
+// tell which half to believe, and the honest answer — neither — was the one thing
+// the card did not say.
+//
+// So it says it. Not a guess at what the model meant, and not a suppression of the
+// title (the conclusion may well be right; the sibling KubeNodeUnreachable
+// investigation reached the same one at 75% with full evidence): a plain statement
+// that nothing on this card backs it, which is exactly what makes an incomplete run
+// distinguishable from a finding. The wording claims only what the three channels
+// prove — RuledOut is not one of them, so "no cause, no open question and no data
+// gap" stays true even when the verify pass rejected every hypothesis into it.
+const unaccountedInconclusiveNotice = "⚠️ *No account given* — the investigation reported no cause, " +
+	"no open question and no data gap, so this card carries neither an answer nor a reason it could not " +
+	"reach one. Treat it as an incomplete run, not a finding."
+
+// inconclusiveAccount returns the header and bullet lines a card renders to account
+// for an `inconclusive` verdict, or ("", nil) when it owes none.
+//
+// It owes one exactly when the verdict is inconclusive AND no root cause will
+// render: with a cause on the card the reader has the answer whatever the label says
+// (the mislabel #471 documents — "a recurrence of a fault you DID identify is NOT
+// inconclusive"), and a conclusive verdict has nothing to account for. What is owed
+// is the model's own open questions and data gaps, in that order — the channels
+// every synthesised stop in internal/investigate (budget kill, timeout, refusal,
+// non-convergence) writes its blocker into — falling back to the notice above when
+// it gave neither.
+//
+// This is the one place the Slack SUMMARY renders data gaps, against the rule that
+// they belong only in the threaded detail. That rule is about fold space: gaps must
+// not push the answer below "Show more". On this card there IS no answer to push
+// down, and the gap is the closest thing to one the run produced — a reader who has
+// to open a thread to learn that RBAC blocked the pod logs is reading a card that
+// told them nothing.
+func inconclusiveAccount(inv providers.Investigation) (header string, lines []string) {
+	if inv.Verdict != providers.VerdictInconclusive || len(inv.RootCauses) > 0 {
+		return "", nil
+	}
+	if inv.UnaccountedInconclusive() {
+		return unaccountedInconclusiveNotice, nil
+	}
+	lines = make([]string, 0, len(inv.Unresolved)+len(inv.DataGaps))
+	lines = append(lines, inv.Unresolved...)
+	lines = append(lines, inv.DataGaps...)
+	return inconclusiveAccountHeader, lines
+}
+
 // verdictBadge maps a model verdict to its emoji + human label. Empty/unknown
 // verdicts return ("", "") and are rendered nowhere — never invent a verdict.
 func verdictBadge(v providers.Verdict) (emoji, label string) {
@@ -210,6 +269,14 @@ func Format(inv providers.Investigation) string {
 			}
 			fmt.Fprintf(&b, "   → suggested: %s%s\n", rc.SuggestedAction, rev)
 		}
+	}
+	// This flat message already prints the open questions and data gaps below, so a
+	// genuine inconclusive accounts for itself here without help. Only the
+	// self-contradicting shape needs saying out loud — otherwise this message, like
+	// the Slack card the notice was written for, is a verdict label with nothing
+	// behind it. Placed above the honest-limit sections it stands in for.
+	if inv.UnaccountedInconclusive() {
+		fmt.Fprintf(&b, "%s\n", unaccountedInconclusiveNotice)
 	}
 	if len(inv.Unresolved) > 0 {
 		b.WriteString("*Unresolved:*\n")

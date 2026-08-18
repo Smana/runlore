@@ -67,6 +67,14 @@ var updateCardGolden = flag.Bool("update-card-golden", false,
 //	                       write FAILED, so the footer carries the ⚠️ reason next to the
 //	                       prior entry's link — the arm that distinguishes a broken
 //	                       learning loop from a deliberately skipped write
+//	stopped_by_budget      a GENUINE inconclusive: a spend ceiling ended the run, so the
+//	                       summary carries the "Why this is inconclusive" account naming
+//	                       the ceiling — the arm that used to reach only the thread reply
+//	inconclusive_unaccounted
+//	                       the 2026-08-18 card: verdict inconclusive, a definite
+//	                       conclusion in the title, and nothing behind it — the ⚠️ "No
+//	                       account given" arm that keeps an incomplete run from reading
+//	                       as a finding
 //
 // Times are fixed constants: slackDate emits a <!date^…> token built from a Unix
 // timestamp, so a time.Now() anywhere here would rewrite the golden on every run.
@@ -261,6 +269,46 @@ func cardGoldenFixtures() []struct {
 				ModelCalls: 5, InputTokens: 51204, OutputTokens: 3117,
 			},
 		}},
+
+		// A legitimate inconclusive, synthesised by investigate.budgetKillResult: the
+		// ceiling that ended the run is the only thing the card can honestly say, and
+		// it now says it in the channel rather than only in the thread reply. Title is
+		// the bare alert name, exactly as every synthesised stop sets it, so the
+		// verdict line does not restate the header.
+		{"stopped_by_budget", providers.Investigation{
+			Title:     "KubeNodeNotReady",
+			AlertName: "KubeNodeNotReady",
+			Verdict:   providers.VerdictInconclusive,
+			Severity:  "warning",
+			Cluster:   "eu-west-1",
+			Resource:  providers.Workload{Kind: "Node", Name: "ip-10-20-24-144.ec2.internal"},
+			StartedAt: started,
+			Unresolved: []string{
+				"investigation stopped: cumulative token budget (investigation.max_tokens_per_investigation) exceeded after nudge (model did not submit findings in time)",
+			},
+			Fingerprint: "fp-9a3",
+			Usage: providers.UsageTotals{
+				ModelCalls: 9, InputTokens: 198340, OutputTokens: 12055,
+			},
+		}},
+
+		// The card observed live on 2026-08-18: verdict inconclusive, a definite
+		// conclusion in the title, no cause, no open question, no data gap and no
+		// confidence. Everything the reader can use is the notice.
+		{"inconclusive_unaccounted", providers.Investigation{
+			Title:       "KubeNodeNotReady on ip-10-20-24-144.ec2.internal (tmem175-0): transient, self-healed Karpenter node churn — no application impact",
+			AlertName:   "KubeNodeNotReady",
+			Verdict:     providers.VerdictInconclusive,
+			Severity:    "warning",
+			Cluster:     "tmem175-0",
+			Tenant:      "tmem175",
+			Resource:    providers.Workload{Kind: "Node", Name: "ip-10-20-24-144.ec2.internal"},
+			StartedAt:   started,
+			Fingerprint: "fp-9a4",
+			Usage: providers.UsageTotals{
+				ModelCalls: 7, InputTokens: 164082, OutputTokens: 10628,
+			},
+		}},
 	}
 }
 
@@ -353,6 +401,8 @@ func TestCardGoldenCoversEveryRenderedBranch(t *testing.T) {
 		"resolve rate",                         // PriorKnowledge.Recalls
 		"Matches known runbook",                // MatchedKnowledge with Prior nil
 		"Why:",                                 // top root cause
+		"Why this is inconclusive",             // an inconclusive whose blocker IS the answer
+		"No account given",                     // …and one whose payload supplies none
 		"more hypothesis below",                // the deeper-hypotheses pointer
 		"Suggested next steps",                 // nextSteps
 		"Full analysis",                        // detailBlocks
