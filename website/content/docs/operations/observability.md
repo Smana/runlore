@@ -205,7 +205,7 @@ kubectl apply -f deploy/observability/alerts/prometheusrule.yaml
 kubectl apply -f deploy/observability/alerts/vmrule.yaml
 ```
 
-All twelve rules, named — a page names the alert, so the alert name is what you will search for:
+All fifteen rules, named — a page names the alert, so the alert name is what you will search for:
 
 | Alert | Fires on |
 |---|---|
@@ -221,6 +221,14 @@ All twelve rules, named — a page names the alert, so the alert name is what yo
 | `RunloreModelLatencyHigh` | LLM request p95 latency |
 | `RunloreSlowResolution` | incident open→resolve duration |
 | `RunloreInvestigationCostHigh` | per-investigation token estimate |
+| `RunloreAlertRuleUnavailable` | `alert_rule` degrading **systemically** — the tool is dead for every investigation |
+| `RunloreUnrecallableKBDrafts` | knowledge filed with a `resource` recall can never match |
+| `RunloreResourceScopeDiscoveryFailing` | Kubernetes discovery failing, so card scope falls back to the kind list |
 
-Thresholds are starting points — tune to your volume. See the [alerts README](https://github.com/Smana/runlore/blob/main/deploy/observability/alerts/README.md) for the
+Thresholds are starting points — tune to your volume.
+
+The last three watch the degradation paths rather than outright failures — each of those
+subsystems is designed to fail *soft*, which means nothing breaks and nobody finds out. They alert
+only on the systemic half of each counter: a routine unmatched alertname, a draft that fails its
+own merge gate, or a cloud kind Kubernetes does not serve are all normal and must never page. See the [alerts README](https://github.com/Smana/runlore/blob/main/deploy/observability/alerts/README.md) for the
 per-alert metric dependencies and operator discovery notes.

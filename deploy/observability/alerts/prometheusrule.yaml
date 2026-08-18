@@ -41,7 +41,7 @@ spec:
           annotations:
             summary: "RunLore agent is down or not scraped"
             description: "No runlore_build_info series for 5m — the RunLore agent is down or its /metrics endpoint is not being scraped."
-            runbook_url: "https://github.com/Smana/runlore/blob/main/docs/observability.md#runloreagentdown"
+            runbook_url: "https://runlore.io/docs/operations/observability/#alerting"
 
         # 2. No active leader (HA): nobody is investigating.
         # In a multi-replica HA deployment exactly one replica should hold the
@@ -55,7 +55,7 @@ spec:
           annotations:
             summary: "RunLore has no active leader"
             description: "No RunLore replica holds leadership for 10m (max(runlore_leader) == 0) — no investigations are being processed."
-            runbook_url: "https://github.com/Smana/runlore/blob/main/docs/observability.md#runlorenoactiveleader"
+            runbook_url: "https://runlore.io/docs/operations/observability/#alerting"
 
         # 3. Split-brain: more than one leader at once.
         # Two replicas both believing they are leader can double-process and
@@ -68,7 +68,7 @@ spec:
           annotations:
             summary: "RunLore has multiple leaders (split-brain)"
             description: "{{ $value | humanize }} RunLore replicas report leadership simultaneously — possible split-brain; investigations may be duplicated."
-            runbook_url: "https://github.com/Smana/runlore/blob/main/docs/observability.md#runloremultipleleaders"
+            runbook_url: "https://runlore.io/docs/operations/observability/#alerting"
 
         # 4. Investigations are being dropped.
         # Dropped means an alert was discarded without investigation (e.g. queue
@@ -82,7 +82,7 @@ spec:
           annotations:
             summary: "RunLore is dropping investigations"
             description: "{{ $value | humanize }} investigations dropped in the last 15m — alerts are being discarded without investigation (likely queue overflow or backpressure)."
-            runbook_url: "https://github.com/Smana/runlore/blob/main/docs/observability.md#runloreinvestigationsdropped"
+            runbook_url: "https://runlore.io/docs/operations/observability/#alerting"
 
         # 5. Sustained throttling.
         # Brief throttling under a burst is normal; 30m of continuous throttling
@@ -96,7 +96,7 @@ spec:
           annotations:
             summary: "RunLore investigations throttled for a sustained period"
             description: "RunLore has been throttling investigations continuously for 30m (rate {{ $value | humanize }}/s) — capacity may be insufficient for the incoming alert volume."
-            runbook_url: "https://github.com/Smana/runlore/blob/main/docs/observability.md#runloreinvestigationthrottlingsustained"
+            runbook_url: "https://runlore.io/docs/operations/observability/#alerting"
 
         # 6. Pipeline stalled: alerts arrive but nothing starts.
         # Alerts are landing (received increases) yet zero investigations start —
@@ -109,7 +109,7 @@ spec:
           annotations:
             summary: "RunLore pipeline stalled — alerts received but no investigations started"
             description: "{{ $value | humanize }} alerts received in the last 15m but zero investigations were started — the intake-to-investigation pipeline appears stalled."
-            runbook_url: "https://github.com/Smana/runlore/blob/main/docs/observability.md#runlorepipelinestalled"
+            runbook_url: "https://runlore.io/docs/operations/observability/#alerting"
 
         # 7. Investigations completing with an error result.
         # Investigations that finish in `result="error"` indicate the agent loop
@@ -123,7 +123,7 @@ spec:
           annotations:
             summary: "RunLore investigations are completing with errors"
             description: "{{ $value | humanize }} investigations completed with result=error in the last 15m — the investigation loop is failing for some incidents."
-            runbook_url: "https://github.com/Smana/runlore/blob/main/docs/observability.md#runloreinvestigationerrors"
+            runbook_url: "https://runlore.io/docs/operations/observability/#alerting"
 
         # 8. Tool-call error rate is high.
         # Error fraction across all tool calls > 20%, gated on a minimum call
@@ -137,7 +137,7 @@ spec:
           annotations:
             summary: "RunLore tool-call error rate is high"
             description: "Tool-call error fraction is {{ $value | humanizePercentage }} over the last 15m (>20%) — investigation tools are failing frequently; check {{ $labels.tool }} integrations."
-            runbook_url: "https://github.com/Smana/runlore/blob/main/docs/observability.md#runloretoolerrorratehigh"
+            runbook_url: "https://runlore.io/docs/operations/observability/#alerting"
 
         # 9. Model-request error rate is high.
         # Same shape as the tool-error rule but for the LLM provider, with a
@@ -151,7 +151,7 @@ spec:
           annotations:
             summary: "RunLore model-request error rate is high"
             description: "Model-request error fraction is {{ $value | humanizePercentage }} over the last 15m (>10%) — the LLM provider {{ $labels.provider }} is failing; investigations cannot complete."
-            runbook_url: "https://github.com/Smana/runlore/blob/main/docs/observability.md#runloremodelerrorratehigh"
+            runbook_url: "https://runlore.io/docs/operations/observability/#alerting"
 
         # 10. Model p95 latency high.
         # p95 of model_request_duration over 15m exceeds 30s. Slow model calls
@@ -165,7 +165,7 @@ spec:
           annotations:
             summary: "RunLore model p95 latency is high"
             description: "p95 model-request latency is {{ $value | humanizeDuration }} over the last 15m (>30s) — investigations are slowed by model response time."
-            runbook_url: "https://github.com/Smana/runlore/blob/main/docs/observability.md#runloremodellatencyhigh"
+            runbook_url: "https://runlore.io/docs/operations/observability/#alerting"
 
         # 11. Slow incident resolution.
         # p95 open->resolve time over 1h exceeds 1h. Informational SLO signal,
@@ -179,7 +179,7 @@ spec:
           annotations:
             summary: "RunLore incident resolution is slow"
             description: "p95 incident resolution time (open -> resolved) is {{ $value | humanizeDuration }} over the last hour (>1h) — incidents are taking long to resolve."
-            runbook_url: "https://github.com/Smana/runlore/blob/main/docs/observability.md#runloreslowresolution"
+            runbook_url: "https://runlore.io/docs/operations/observability/#alerting"
 
         # 12. Investigation token cost is high.
         # runlore_investigation_tokens_estimated records the size of the LAST request an
@@ -195,4 +195,53 @@ spec:
           annotations:
             summary: "RunLore investigation token cost is high"
             description: "p95 estimated tokens per investigation is {{ $value | humanize }} over the last 30m (>100k) — typical investigations are ending on a request at the per-request bound; review cost, max_tool_output_bytes and compaction."
-            runbook_url: "https://github.com/Smana/runlore/blob/main/docs/observability.md#runloreinvestigationcosthigh"
+            runbook_url: "https://runlore.io/docs/operations/observability/#alerting"
+
+        # 13. The alert_rule tool is systemically unavailable.
+        # class="systemic" means no_capability / backend_error / no_rules: the tool is
+        # dead for EVERY investigation until the backend or config changes, so threshold
+        # levers do not apply. class="routine" (unmatched_alert) is deliberately excluded
+        # — an alert with no matching rule is normal and must never page.
+        # Metric ships with feat/alert-rule-expression-context.
+        - alert: RunloreAlertRuleUnavailable
+          expr: sum(rate(runlore_alert_rule_degraded_total{class="systemic"}[15m])) > 0
+          for: 30m
+          labels:
+            severity: warning
+          annotations:
+            summary: "RunLore cannot read alerting rules from its metrics backend"
+            description: "alert_rule has been degrading systemically for 30m — every investigation is judging threshold alerts without the rule's own expression, which is the guessing this tool exists to stop. Check the backend serves /api/v1/rules and that the metrics provider implements it."
+            runbook_url: "https://runlore.io/docs/operations/observability/#alerting"
+
+        # 14. RunLore is filing knowledge it will never be able to recall.
+        # defect="unrecallable_resource" is the silent-forever case: the PR merges and
+        # recall's structural match can never agree with the entry. defect="merge_gate"
+        # is excluded — it blocks its own PR, so a human meets it at review anyway.
+        # Rated over 6h because curation is low-volume; any sustained rate is wrong.
+        # Metric ships with fix/validate-draft-resource-shape.
+        - alert: RunloreUnrecallableKBDrafts
+          expr: sum(rate(runlore_kb_draft_defects_total{defect="unrecallable_resource"}[6h])) > 0
+          for: 1h
+          labels:
+            severity: warning
+          annotations:
+            summary: "RunLore is drafting knowledge entries recall cannot match"
+            description: "Knowledge PRs are being filed with a resource recall can never agree with — they merge and then never fire. Fix the frontmatter on the open PRs; see the troubleshooting page for the two log lines that name the entry."
+            runbook_url: "https://runlore.io/docs/operations/observability/#alerting"
+
+        # 15. Kubernetes discovery is failing, so resource scope silently degrades.
+        # A SHARE, not a bare count: an unknown-scope count cannot distinguish "discovery
+        # is down" from "investigation volume doubled". Gated on a minimum lookup rate so
+        # the ratio is not noisy at near-zero traffic, same shape as rule 8.
+        # Only result="discovery_error" alerts — no_scoper is a constant deployment fact
+        # and unresolved is routine for cloud kinds.
+        # Metric ships with feat/workload-namespaced-from-discovery.
+        - alert: RunloreResourceScopeDiscoveryFailing
+          expr: sum(rate(runlore_resource_scope_lookups_total{result="discovery_error"}[30m])) / clamp_min(sum(rate(runlore_resource_scope_lookups_total[30m])), 0.001) > 0.1 and sum(rate(runlore_resource_scope_lookups_total[30m])) > 0.01
+          for: 30m
+          labels:
+            severity: warning
+          annotations:
+            summary: "RunLore cannot resolve resource scope from Kubernetes discovery"
+            description: "{{ $value | humanizePercentage }} of scope lookups failed discovery over 30m — cards fall back to a hardcoded kind list, so a namespaced CRD can be rendered without its namespace. Check the API server's discovery endpoints and RBAC."
+            runbook_url: "https://runlore.io/docs/operations/observability/#alerting"
