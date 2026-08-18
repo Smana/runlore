@@ -4191,3 +4191,90 @@ func TestForgeFailureCannotNarrowWhatTheReplyEscapes(t *testing.T) {
 		t.Errorf("a mark smuggled through the forge error narrowed the escaping and let <!channel> reach the wire: %q", rendered)
 	}
 }
+
+// TestForgeOutageDoesNotBurnTheGlobalWriteBudget closes the disagreement between
+// this feature's two budgets about what a FAILURE costs.
+//
+// ForgeWrites is consumed at the top of write(), upstream of the route branch,
+// which is right: a comment must spend it exactly as an OpenPR does. But no
+// failure path handed the token back, so a forge outage spent the whole hour on
+// writes that never happened — 20 failed attempts, zero entries, and the 21st
+// caller told "I have made too many knowledge-base writes recently" (reproduced).
+// The per-thread count is deliberately NOT charged for a failure (see record),
+// so the two ceilings were answering the same question differently.
+//
+// The 21st write here is the assertion: the forge is healthy again, and the only
+// thing that could still refuse it is a budget spent on nothing.
+func TestForgeOutageDoesNotBurnTheGlobalWriteBudget(t *testing.T) {
+	f := &fakeForge{openErr: errors.New("503 service unavailable")}
+	r := newTestResponder(t, f)
+	r.ForgeWrites = ratelimit.New(20, time.Hour)
+	r.MaxNotesPerThread = 1000
+	tc := Context{Transport: "slack", Root: "root-1"}
+	if err := r.Registry.Put(tc); err != nil {
+		t.Fatalf("put: %v", err)
+	}
+	ctx := context.Background()
+	for i := range 20 {
+		if _, err := r.Handle(ctx, tc, "alice", "note: attempt during the outage"); err == nil {
+			t.Fatalf("attempt %d: expected the forge failure to be reported", i)
+		}
+	}
+	if got := r.ForgeWrites.Count(); got != 0 {
+		t.Errorf("%d tokens still spent after 20 writes that never landed", got)
+	}
+
+	f.openErr = nil
+	f.openURL = "https://github.com/o/r/pull/7"
+	fresh, _ := r.Registry.Get("root-1")
+	reply, err := r.Handle(ctx, fresh, "alice", "note: the forge is healthy again")
+	if err != nil {
+		t.Fatalf("handle: %v", err)
+	}
+	if strings.Contains(reply, "too many knowledge-base writes") {
+		t.Fatalf("throttled on a healthy forge, having landed nothing: %q", reply)
+	}
+	if len(f.opened) != 1 {
+		t.Errorf("opened %d PRs, want the one that succeeded", len(f.opened))
+	}
+}
+
+// TestGlobalWriteBudgetStillChargesEveryLandedWrite is the other direction, and
+// it is why the refund is placed on the failure paths rather than on the whole
+// call: a write that LANDED must still cost a token, on either route, or the
+// refund would quietly turn the one global ceiling this feature has into no
+// ceiling at all.
+func TestGlobalWriteBudgetStillChargesEveryLandedWrite(t *testing.T) {
+	for _, tt := range []struct {
+		name string
+		tc   Context
+	}{
+		{"open_pr", Context{Transport: "slack", Root: "root-1"}},
+		{"comment", Context{Transport: "slack", Root: "root-1", CuratedURL: "https://github.com/o/r/pull/7"}},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			f := &fakeForge{openURL: "https://github.com/o/r/pull/9"}
+			r := newTestResponder(t, f)
+			r.ForgeWrites = ratelimit.New(2, time.Hour)
+			r.MaxNotesPerThread = 1000
+			if err := r.Registry.Put(tt.tc); err != nil {
+				t.Fatalf("put: %v", err)
+			}
+			ctx := context.Background()
+			for i := range 2 {
+				fresh, _ := r.Registry.Get("root-1")
+				if _, err := r.Handle(ctx, fresh, "alice", fmt.Sprintf("note: landed write %d", i)); err != nil {
+					t.Fatalf("write %d: %v", i, err)
+				}
+			}
+			fresh, _ := r.Registry.Get("root-1")
+			reply, err := r.Handle(ctx, fresh, "alice", "note: one past the budget")
+			if err != nil {
+				t.Fatalf("handle: %v", err)
+			}
+			if !strings.Contains(reply, "too many knowledge-base writes") {
+				t.Errorf("the third write was not throttled: %q", reply)
+			}
+		})
+	}
+}

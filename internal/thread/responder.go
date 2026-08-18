@@ -150,6 +150,12 @@ type Responder struct {
 	// forge incident regardless of which route its notes happen to take. The
 	// token spend a model now makes ahead of this check is bounded separately,
 	// by Chat.Budget — see Chat below. nil means unlimited.
+	//
+	// It bounds writes that LANDED. The check reserves a token before the forge
+	// call, because it has to, and every path that then returns without a write
+	// refunds it — so this ceiling and the per-thread cap agree that a failure
+	// costs nothing, which is the whole reason a failed write must not be able to
+	// throttle the next healthy one.
 	ForgeWrites *ratelimit.Window
 	// MaxNoteBytes caps one human message, in bytes, before it is written to
 	// the knowledge base — see NoteBody / DefaultMaxNoteBytes for why. <= 0
@@ -1386,6 +1392,33 @@ func (r *Responder) write(ctx context.Context, tc Context, n Note, at time.Time)
 		return "⚠️ I have made too many knowledge-base writes recently and paused. Try again shortly.", nil, nil
 	}
 
+	// The token above is a RESERVATION, and every path below that returns without
+	// a landed write hands it back.
+	//
+	// Allow() has to be optimistic — a caller that checked the budget only after
+	// succeeding would let two callers race past the same last token — so the
+	// charge necessarily precedes the outcome. Leaving it charged on failure made
+	// this feature's two budgets disagree about what a failure costs: record()
+	// deliberately does NOT charge the per-thread count for a write that did not
+	// land, while a forge outage spent this hour's whole allowance on nothing and
+	// then told the next human "I have made too many knowledge-base writes
+	// recently" with zero writes behind it (see
+	// TestForgeOutageDoesNotBurnTheGlobalWriteBudget).
+	//
+	// Keyed on `landed` rather than on the returned error, because the two are not
+	// the same question: the ErrPRNotOpen paths below return no error and no
+	// result — they fall THROUGH to open a standalone entry, and the token they
+	// are still holding is the one that write pays with. So the flag is set at the
+	// two returns that carry a *KBWrite, and nowhere else.
+	landed := false
+	if r.ForgeWrites != nil {
+		defer func() {
+			if !landed {
+				r.ForgeWrites.Refund()
+			}
+		}()
+	}
+
 	// Serialize concurrent writes for THIS root — not the registry's own
 	// mutex, which is never held across the forge round-trip below, so this
 	// only blocks another write for the SAME thread, never Get/Put/Update or
@@ -1468,6 +1501,7 @@ func (r *Responder) write(ctx context.Context, tc Context, n Note, at time.Time)
 		}
 		r.log().Info("thread: note recorded on KB PR", "pr", num, "root", tc.Root, "route", route, "author", n.Author)
 		r.recordWrite(ctx, route)
+		landed = true
 		return recordedOn(route, num, candidate.url),
 			&KBWrite{Route: route, PR: num, URL: candidate.url, Note: asWritten}, nil
 	}
@@ -1484,6 +1518,7 @@ func (r *Responder) write(ctx context.Context, tc Context, n Note, at time.Time)
 	}
 	r.log().Info("thread: note opened a standalone KB PR", "url", ref.URL, "root", tc.Root, "author", n.Author)
 	r.recordWrite(ctx, RouteOpenPR)
+	landed = true
 	// PRNumber, not prNumberOn: this URL is one RunLore's own forge client just
 	// returned, which is exactly the case PRNumber documents itself as safe for.
 	// A URL it cannot parse is not a failure — the write landed, and the result
