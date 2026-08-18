@@ -1324,26 +1324,34 @@ var redactionSkipTypes = map[reflect.Type]bool{
 	reflect.TypeOf(providers.Workload{}): true,
 }
 
-// redactionSkipField is the allowlist of exported STRING fields (by name) that are
+// redactionSkipField is the allowlist of exported STRING fields that are
 // server-derived and must NOT be scrubbed: dedup identity, curator-set links, the
 // catalog paths of matched/recalled entries, and the server-controlled action/
 // verdict vocabularies. Kept deliberately short (a skip-list, not an include-list —
-// #197): everything not named here is treated as potentially untrusted free text
-// and scrubbed. Matched by field name because these names are distinctive across
-// the Investigation's nested shape (EntryPath/CuratedURL/ApprovalID/etc.).
+// #197): everything not listed here is treated as potentially untrusted free text
+// and scrubbed.
+//
+// Keys are TYPE-QUALIFIED ("StructName.FieldName"), not bare field names. The bare
+// form exempted by NAME GLOBALLY, so an entry justified for one struct silently
+// spared every same-named field anywhere in the Investigation's nested shape: "Path"
+// was added for MatchedEntry.Path (a catalog path) and, without anyone deciding it,
+// also spared Change.Source.Path — which internal/providers/cloud/aws/cloudtrail.go
+// packs a verbatim CloudTrail ErrorMessage into. Qualifying the key makes each entry
+// a statement about one field of one struct, so a collision cannot happen by
+// accident; a same-named field on a new struct now has to be exempted deliberately.
 var redactionSkipField = map[string]bool{
-	"Verdict":        true, // server-controlled classification enum
-	"Op":             true, // Action.Op — server-controlled executable-operation enum
-	"ApprovalID":     true, // Action.ApprovalID — server-generated approval token
-	"CuratedURL":     true, // curator-set KB link
-	"PrevCuratedURL": true, // curator-set KB link (prior occurrence)
-	"RecalledEntry":  true, // catalog path the answer was recalled from
-	"EntryPath":      true, // PriorKnowledge.EntryPath — catalog path
-	"Path":           true, // MatchedEntry.Path — catalog path
-	"URL":            true, // MatchedEntry.URL — server-derived web link
-	"Fingerprint":    true, // deterministic alert dedup id
-	"Fingerprints":   true, // coalesced batch dedup ids
-	"TriggerKey":     true, // deterministic incident-identity dedup key
+	"Investigation.Verdict":        true, // server-controlled classification enum
+	"Action.Op":                    true, // server-controlled executable-operation enum
+	"Action.ApprovalID":            true, // server-generated approval token
+	"Investigation.CuratedURL":     true, // curator-set KB link
+	"Investigation.PrevCuratedURL": true, // curator-set KB link (prior occurrence)
+	"Investigation.RecalledEntry":  true, // catalog path the answer was recalled from
+	"PriorKnowledge.EntryPath":     true, // catalog path of the merged entry
+	"MatchedEntry.Path":            true, // catalog path of the matched entry
+	"MatchedEntry.URL":             true, // server-derived web link to that entry
+	"Investigation.Fingerprint":    true, // deterministic alert dedup id
+	"Investigation.Fingerprints":   true, // coalesced batch dedup ids
+	"Investigation.TriggerKey":     true, // deterministic incident-identity dedup key
 }
 
 // redactStrings recursively walks v and applies redact.Secrets to every settable
@@ -1370,7 +1378,9 @@ func redactStrings(v reflect.Value) {
 			if t.Field(i).PkgPath != "" { // unexported: not settable, skip
 				continue
 			}
-			if redactionSkipField[t.Field(i).Name] {
+			// Type-qualified, so a skip-list entry can only ever spare the one field it
+			// names — see redactionSkipField.
+			if redactionSkipField[t.Name()+"."+t.Field(i).Name] {
 				continue
 			}
 			redactStrings(v.Field(i))
