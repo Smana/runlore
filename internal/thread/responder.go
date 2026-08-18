@@ -18,6 +18,7 @@ import (
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/metric"
 
+	"github.com/Smana/runlore/internal/okf"
 	"github.com/Smana/runlore/internal/providers"
 	"github.com/Smana/runlore/internal/ratelimit"
 	"github.com/Smana/runlore/internal/redact"
@@ -150,6 +151,12 @@ type Responder struct {
 	// forge incident regardless of which route its notes happen to take. The
 	// token spend a model now makes ahead of this check is bounded separately,
 	// by Chat.Budget — see Chat below. nil means unlimited.
+	//
+	// It bounds writes that LANDED. The check reserves a token before the forge
+	// call, because it has to, and every path that then returns without a write
+	// refunds it — so this ceiling and the per-thread cap agree that a failure
+	// costs nothing, which is the whole reason a failed write must not be able to
+	// throttle the next healthy one.
 	ForgeWrites *ratelimit.Window
 	// MaxNoteBytes caps one human message, in bytes, before it is written to
 	// the knowledge base — see NoteBody / DefaultMaxNoteBytes for why. <= 0
@@ -378,10 +385,18 @@ func kbRoute(route string) providers.KBRoute {
 // forge accepted the write (see KBWrite), so there is nothing to announce on a
 // throttle, a forge failure, or a note the model never proposed.
 //
-// n supplies the author, which is not on the KBWrite: the write is the same
-// write either way, and only the caller knows whose message produced it. It
-// goes through noteField — redacted and flattened, exactly as the entry itself
-// renders it — because this event is a NEW egress for transport-reported text.
+// n supplies the author AND the provenance, neither of which is on the KBWrite:
+// the write is the same write either way, and only the caller knows whose
+// message produced it and whether they wrote the words. The author goes through
+// noteField — redacted and flattened, exactly as the entry itself renders it —
+// because this event is a NEW egress for transport-reported text; the provenance
+// is RunLore's own boolean and needs neither.
+//
+// Carrying the provenance is not optional decoration. Without it the event said
+// {author: "alice", note: "<the model's text>"} and every sink rendered it as
+// alice's own words — the same claim openedWith exists to keep out of the thread
+// reply, and NoteBody's "@alice did not write it" out of the entry, arriving
+// through the one surface that had no such guard.
 //
 // tc supplies BOTH thread handles, Root and Channel. Root alone names a thread
 // only to the transport that already knows which channel it is in; a sink asked
@@ -393,7 +408,20 @@ func (r *Responder) announce(ctx context.Context, tc Context, n Note, w *KBWrite
 	if r.Announcer == nil || w == nil {
 		return
 	}
-	r.Announcer.deliver(ctx, providers.KBUpdate{
+	r.Announcer.deliver(ctx, r.kbUpdateFor(tc, n, w, at))
+}
+
+// kbUpdateFor composes the event announce delivers. Split out from announce so
+// the composition can be exercised without a sink and a dispatcher — the two
+// things that made the missing provenance field hard to see, since every
+// announcement test asserted on what a sink RECEIVED and none of them had a
+// reason to compare two notes that differed only in who wrote them.
+//
+// It is the ONE place a KBUpdate is built from a write, which is what lets
+// TestKBUpdateCarriesEveryNoteFact assert a property over the whole mapping
+// rather than over one fixture.
+func (r *Responder) kbUpdateFor(tc Context, n Note, w *KBWrite, at time.Time) providers.KBUpdate {
+	return providers.KBUpdate{
 		Transport: tc.Transport,
 		Root:      tc.Root,
 		Channel:   tc.Channel,
@@ -402,9 +430,15 @@ func (r *Responder) announce(ctx context.Context, tc Context, n Note, w *KBWrite
 		URL:       w.URL,
 		Title:     w.Title,
 		Author:    noteField(n.Author),
-		Note:      w.Note,
-		At:        at,
-	})
+		// Author names whose MESSAGE produced the note; this names whether they
+		// wrote its words. Read from the note's own provenance rather than from a
+		// parallel flag, for the reason Note.DraftedFrom is one field: two values
+		// that can disagree let model prose ship under a human's name through
+		// nothing worse than a forgotten assignment.
+		ModelDrafted: n.modelDrafted(),
+		Note:         w.Note,
+		At:           at,
+	}
 }
 
 // The routes a knowledge write can take, named once. They are both the
@@ -805,6 +839,74 @@ func Untrusted(s string) string {
 	return untrustedMark + strings.ReplaceAll(s, untrustedMark, "") + untrustedMark
 }
 
+// SafeErrorText prepares a SERVER-SUPPLIED error string for a chat message:
+// redacted, backticks neutralised, flattened to one line. It is what a forge
+// error must go through before any surface publishes it.
+//
+// It is EXPORTED and shared rather than reimplemented per surface, because the
+// two surfaces that publish this class of text have already been shown to drift:
+// internal/notify's curateFailureReason arrived at exactly this pipeline for the
+// curate-failure line on an investigation card, while this package went on
+// posting `Untrusted(err.Error())` into a thread — which its own doc comment
+// cited as precedent for publishing forge errors at all. One implementation is
+// what makes "the same treatment" a fact rather than an intention, the same
+// argument QuoteUntrusted's own doc makes one function down.
+//
+// Three measures, in this order, each answering something the others do not:
+//
+//   - redact.Secrets FIRST, because a forge error may echo the credential it
+//     rejected — a GitHub 403 body carrying the bearer token was the live case —
+//     and running it before any cut means a truncation can never hand it a
+//     half-token it no longer matches;
+//   - backticks become apostrophes, because every caller wraps the result in an
+//     inline code span and ONE backtick inside would close it early. Apostrophe
+//     rather than deletion, so a quoted identifier still reads;
+//   - SingleLine LAST of the three, because no escaper in this repo touches a
+//     line break: a multi-line JSON body renders its continuation lines at the
+//     same left margin as RunLore's own status claims, which is the forged-
+//     headline class internal/notify was already bitten by. Flattening also maps
+//     the private-use area, which is what stops a mark in a server's body from
+//     flipping RenderReply's parity (see RenderReply).
+//
+// The CAP is deliberately left to the caller. Both surfaces bound this, in
+// different units for different reasons — notify counts runes against a Slack
+// section limit, this package counts bytes against a message budget it shares —
+// and folding one of those numbers in here would make the other a lie.
+func SafeErrorText(s string) string {
+	return SingleLine(strings.ReplaceAll(redact.Secrets(s), "`", "'"))
+}
+
+// forgeErrorBytes bounds the forge error one thread reply publishes.
+//
+// It is the byte counterpart of internal/notify's curateErrorRunes, and it is
+// that size for that comment's reason rather than a coincidentally similar one:
+// truncate cuts the HEAD, and a wrapped Go error puts the diagnosis LAST
+// ("open PR: github POST /repos/o/r/pulls: status 403: Resource not accessible
+// by integration"), so a tighter cap reliably keeps the call site and drops the
+// status and the message — the only two things an operator can act on.
+//
+// Bytes, not runes, because every other bound in this package counts bytes
+// (notePreviewBytes, MaxNoteBytes) and a second unit here would be one more
+// thing to get wrong. A forge error is overwhelmingly ASCII, so the two agree in
+// practice and the byte count is the conservative one where they do not.
+const forgeErrorBytes = 300
+
+// forgeErrorReply renders the one reply a failed knowledge-base write gets, from
+// both routes that can fail, so the two cannot drift into telling a human two
+// different things — which is exactly how the unredacted one survived: the fix
+// that would have covered it had two literals to find.
+//
+// The inline code span is the fourth measure, the one SafeErrorText cannot
+// provide: a reason this long soft-wraps in every client, and a continuation
+// line starts at the left margin with no quote bar of its own. Inside a span it
+// is monospaced-with-a-background on Slack and <code> on Matrix — visibly not
+// RunLore's own voice. The backticks are RunLore's OWN bytes, outside the marked
+// span, so no escaper rewrites them and nothing inside can close them early.
+func forgeErrorReply(err error) string {
+	return "⚠️ I could not save that to the knowledge base: `" +
+		Untrusted(truncate(SafeErrorText(err.Error()), forgeErrorBytes)) + "`"
+}
+
 // RenderReply resolves the untrusted spans a reply carries: escape is applied
 // to every span Untrusted marked, everything RunLore wrote itself is left
 // exactly as it is, and the marks themselves are removed either way. Every
@@ -818,8 +920,24 @@ func Untrusted(s string) string {
 // Splitting on a single mark rather than on an open/close pair is deliberate:
 // spans cannot nest (Untrusted strips the mark from its own content), so the
 // segments simply alternate — even indices are RunLore's, odd indices are not.
-// A stray unpaired mark could therefore only widen what gets escaped, never
-// narrow it, which is the safe direction to fail in.
+//
+// That alternation is the whole contract, and it is a PARITY: one stray mark
+// anywhere flips it for everything after that point, so a span downstream that
+// really is untrusted lands on an even index and is handed to the transport
+// UNESCAPED. This comment used to claim the opposite — that a stray mark "could
+// only widen what gets escaped, never narrow it" — and that was simply false;
+// measured, a raw U+E000 interpolated ahead of a marked span let "<!channel>"
+// through verbatim. The false rationale mattered more than the bug: it is what
+// would license a future caller to interpolate untrusted text without wrapping
+// it, on the grounds that the failure was safe.
+//
+// What actually holds the parity is that every untrusted span goes through
+// Untrusted(), which strips the mark from its own content, and that every
+// single-line field reaching a reply outside a span goes through SingleLine,
+// which maps the private-use area — U+E000 included — to a space (see
+// forgeErrorReply, and TestForgeFailureCannotNarrowWhatTheReplyEscapes). Neither
+// is optional, and neither is checked here: this function cannot tell a mark it
+// wrote from one it was handed.
 func RenderReply(reply string, escape func(string) string) string {
 	parts := strings.Split(reply, untrustedMark)
 	if len(parts) == 1 {
@@ -1082,7 +1200,51 @@ func stripStatusGlyphs(s string) string {
 // What the two routes do NOT share is provenance: n carries which one it came
 // from (see Note), so the shared path can render each honestly instead of
 // filing model prose under the human's name.
+//
+// # The per-thread cap is decided inside this thread's own guard
+//
+// Reading the cap, writing to the forge and incrementing the counter are ONE
+// critical section, and they have to be: they are three steps of a single
+// read-modify-write over one number that concurrent deliveries share.
+//
+// They used to be three. The cap was read from the caller's own snapshot of the
+// context — captured before any guard was held — write() then took lockRoot for
+// its own reasons, and the increment ran after that guard had been released. So
+// eight concurrent notes on a thread two writes into a cap of three all observed
+// Notes == 2, all decided they were within budget, and produced TEN forge writes
+// with nothing refused, under -race. The guard this needs already existed for
+// the sibling duplicate-PR race one layer down; the cap was simply being decided
+// outside it.
+//
+// The guard is acquired HERE rather than in write() because this is the widest
+// span that has to be atomic — a lock taken inside write() cannot cover a
+// decision its caller already took. write() therefore documents this as its
+// precondition rather than acquiring anything itself; it has exactly one
+// production caller, which is this one.
+//
+// Everything under the guard is either local or a registry call. r.announce
+// schedules onto a bounded dispatcher and returns immediately (Dispatcher.Go
+// never blocks), so the one thing here that talks to the network does not hold
+// the thread's writers behind it.
 func (r *Responder) record(ctx context.Context, tc Context, n Note) (string, error) {
+	// Deferred immediately after acquiring, so every return below — a refusal, a
+	// forge error, a panic — releases it; a write that never released this would
+	// wedge every later note in the thread behind it forever. An untracked root
+	// ("" or a registry that has lost it) gets a no-op guard, exactly as before:
+	// there is nowhere durable to count, which is the separate degradation
+	// ErrThreadNotTracked reports.
+	release := r.Registry.lockRoot(tc.Root)
+	defer release()
+
+	// Re-read under the guard. The caller's tc is a snapshot taken before the
+	// wait — the mention handler reads the registry and then hands it here — so
+	// the count it carries may be several writes stale by the time this call owns
+	// the thread. A miss (disabled registry, or the entry aged out mid-request)
+	// leaves tc exactly as the caller passed it, same as before this existed.
+	if fresh, ok := r.Registry.Get(tc.Root); ok {
+		tc = fresh
+	}
+
 	if tc.Notes >= r.maxNotes() {
 		return fmt.Sprintf("This thread has hit its note limit (%d). Add anything further directly on the pull request.", r.maxNotes()), nil
 	}
@@ -1236,6 +1398,24 @@ func (r *Responder) addToPR(ctx context.Context, tc Context, n Note, at time.Tim
 // the entry ends up saying what they said, once, and the alternative — a false
 // negative — is the permanent duplicate this is here to prevent.
 //
+// It keys BOTH sides of the entry's life: the marker stamped into the entry when
+// the open_pr route creates it (see write) and the one an append then looks for.
+// Only the second half existed at first, which left note 1 — and only note 1 —
+// duplicable by a redelivery.
+//
+// WHERE IT DOES NOT REACH: the freeform route. There n.Text is the MODEL's draft,
+// and a replayed delivery re-invokes the model, so the redelivery arrives with
+// different bytes and hashes to a different key. Nothing here can close that. The
+// only identity a replay genuinely shares is the human's original message, and
+// keying on that would collapse two deliberate follow-ups drafted from similar
+// messages into one — silently dropping a note somebody meant to file, which is
+// the worse of the two failures. What bounds it instead is upstream and already
+// present: internal/server's delivery dedup catches the common replay before a
+// model is called at all, and the per-thread cap and the ForgeWrites window bound
+// what gets through. The residue is visible duplicate prose in an entry a human
+// still has to merge, not silent catalog corruption. See
+// TestModelDraftedReplayIsNotDeduplicated.
+//
 // SHA-256 truncated to 16 hex characters. It is an identity, not a
 // authentication tag: the entry it is compared against is one RunLore wrote, and
 // note text reaching an entry has "<!" escaped out of it (see noteText), so a
@@ -1273,6 +1453,15 @@ func recordedOn(route string, num int, prURL string) string {
 // (see freeform). IntentReinvestigate never reaches it at all. Both callers
 // supply note CONTENT only — the route below is derived from the thread
 // context, never from the text and never from the model.
+//
+// PRECONDITION: the caller holds this root's write guard (Registry.lockRoot) and
+// has re-read tc under it. This method used to acquire that guard itself, which
+// serialised the forge round-trip correctly and still left the per-thread cap
+// being decided outside it by the caller — see record(), which now owns both.
+// The guard is what makes the routing below correct as well as the cap: it is
+// how "two callers both observe NoteURL == ” and both open a PR" (the residual
+// race GetOrCreate's doc comment describes) becomes "the second caller sees the
+// first caller's PR and appends to it instead".
 func (r *Responder) write(ctx context.Context, tc Context, n Note, at time.Time) (string, *KBWrite, error) {
 	// Checked once, upstream of BOTH write routes below: a CommentOnPR spends
 	// this budget exactly like an OpenPR does. Gating only the OpenPR branch —
@@ -1302,27 +1491,31 @@ func (r *Responder) write(ctx context.Context, tc Context, n Note, at time.Time)
 		return "⚠️ I have made too many knowledge-base writes recently and paused. Try again shortly.", nil, nil
 	}
 
-	// Serialize concurrent writes for THIS root — not the registry's own
-	// mutex, which is never held across the forge round-trip below, so this
-	// only blocks another write for the SAME thread, never Get/Put/Update or
-	// a write for a different thread. Deferred immediately after acquiring,
-	// so any return path below — success, a forge error, or a panic — always
-	// releases it; a write that never released this would wedge every later
-	// note in the thread behind it forever.
-	release := r.Registry.lockRoot(tc.Root)
-	defer release()
-
-	// Re-read the registry now that the guard is held: another write for
-	// this same root may have landed and updated NoteURL while this call was
-	// waiting for the lock, and the routing decision below must see THAT,
-	// not the possibly-stale tc captured before the wait. This is what turns
-	// "two callers can both observe NoteURL == '' and both open a PR" (the
-	// residual race GetOrCreate's doc comment describes) into "the second
-	// caller sees the first caller's PR and comments on it instead." A miss
-	// here (disabled registry, or the entry aged out mid-request) leaves tc
-	// exactly as the caller passed it, same as before this guard existed.
-	if fresh, ok := r.Registry.Get(tc.Root); ok {
-		tc = fresh
+	// The token above is a RESERVATION, and every path below that returns without
+	// a landed write hands it back.
+	//
+	// Allow() has to be optimistic — a caller that checked the budget only after
+	// succeeding would let two callers race past the same last token — so the
+	// charge necessarily precedes the outcome. Leaving it charged on failure made
+	// this feature's two budgets disagree about what a failure costs: record()
+	// deliberately does NOT charge the per-thread count for a write that did not
+	// land, while a forge outage spent this hour's whole allowance on nothing and
+	// then told the next human "I have made too many knowledge-base writes
+	// recently" with zero writes behind it (see
+	// TestForgeOutageDoesNotBurnTheGlobalWriteBudget).
+	//
+	// Keyed on `landed` rather than on the returned error, because the two are not
+	// the same question: the ErrPRNotOpen paths below return no error and no
+	// result — they fall THROUGH to open a standalone entry, and the token they
+	// are still holding is the one that write pays with. So the flag is set at the
+	// two returns that carry a *KBWrite, and nowhere else.
+	landed := false
+	if r.ForgeWrites != nil {
+		defer func() {
+			if !landed {
+				r.ForgeWrites.Refund()
+			}
+		}()
 	}
 
 	// Evaluated once here, ahead of the route branch, so whichever route runs
@@ -1379,19 +1572,46 @@ func (r *Responder) write(ctx context.Context, tc Context, n Note, at time.Time)
 			continue
 		}
 		if err != nil {
-			return fmt.Sprintf("⚠️ I could not save that to the knowledge base: %s", Untrusted(err.Error())), nil,
+			return forgeErrorReply(err), nil,
 				fmt.Errorf("comment on PR %d: %w", num, err)
 		}
 		r.log().Info("thread: note recorded on KB PR", "pr", num, "root", tc.Root, "route", route, "author", n.Author)
 		r.recordWrite(ctx, route)
+		landed = true
 		return recordedOn(route, num, candidate.url),
 			&KBWrite{Route: route, PR: num, URL: candidate.url, Note: asWritten}, nil
 	}
 
 	entry := ConceptEntry(tc, n, at, r.maxNoteBytes())
+	// Mark note 1 with the SAME identity a later append would look for, so the
+	// entry this opens is already idempotent against its own redelivery.
+	//
+	// Without it the idempotency this package built covered every note in a
+	// thread except the first. A replayed delivery re-enters here with NoteURL
+	// already set by the write it is replaying, takes the append route, finds no
+	// marker in the entry — because nothing had ever put one there — and writes
+	// note 1 into the catalog a second time. Unlike a duplicated comment, which
+	// is visible conversation that dies at merge, that is permanent entry
+	// content: kb_search indexes it twice and recall serves it twice, with
+	// nothing saying either copy is a duplicate.
+	//
+	// Derived here rather than inside ConceptEntry because the key is a property
+	// of the DELIVERY, not of the entry: it is the same noteKey(tc, n) addToPR
+	// passes, over the same n — reassigned above by noteAsWritten, so both see the
+	// note as written rather than as typed. Two derivations that could disagree is
+	// the only way this fix fails while looking correct, so there is one, and
+	// TestOpenPRNoteMarkerIsTheKeyTheAppendPathDerives pins it.
+	//
+	// The marker survives the write: both forge clients render an entry body
+	// through neutralizeImages alone, which rewrites "![" and nothing else, and an
+	// HTML comment is not markdown a renderer shows. It cannot be forged from note
+	// text either — noteText escapes "<!" out of everything untrusted (see
+	// neutralizeHTML), which is what keeps a stranger from planting a marker that
+	// suppresses somebody else's later note.
+	entry.Body = okf.WithNoteMarker(entry.Body, noteKey(tc, n))
 	ref, err := r.Forge.OpenPR(ctx, entry)
 	if err != nil {
-		return fmt.Sprintf("⚠️ I could not save that to the knowledge base: %s", Untrusted(err.Error())), nil,
+		return forgeErrorReply(err), nil,
 			fmt.Errorf("open note PR: %w", err)
 	}
 	if uerr := r.Registry.Update(tc.Root, func(c *Context) { c.NoteURL = ref.URL }); uerr != nil {
@@ -1400,6 +1620,7 @@ func (r *Responder) write(ctx context.Context, tc Context, n Note, at time.Time)
 	}
 	r.log().Info("thread: note opened a standalone KB PR", "url", ref.URL, "root", tc.Root, "author", n.Author)
 	r.recordWrite(ctx, RouteOpenPR)
+	landed = true
 	// PRNumber, not prNumberOn: this URL is one RunLore's own forge client just
 	// returned, which is exactly the case PRNumber documents itself as safe for.
 	// A URL it cannot parse is not a failure — the write landed, and the result

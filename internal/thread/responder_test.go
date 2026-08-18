@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"log/slog"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"sync"
 	"testing"
@@ -19,6 +20,7 @@ import (
 	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
 	"go.opentelemetry.io/otel/sdk/metric/metricdata"
 
+	"github.com/Smana/runlore/internal/okf"
 	"github.com/Smana/runlore/internal/providers"
 	"github.com/Smana/runlore/internal/ratelimit"
 	"github.com/Smana/runlore/internal/telemetry"
@@ -4064,5 +4066,522 @@ func TestKBRouteVocabulariesAgree(t *testing.T) {
 	}
 	if got := kbRoute(RouteAppend); got != providers.KBRouteAppend {
 		t.Errorf("kbRoute(%q) = %q, want %q", RouteAppend, got, providers.KBRouteAppend)
+	}
+}
+
+// forgeErrorText returns what the FORGE contributed to a "could not save" reply:
+// RunLore's own lead-in and the inline code span it wraps the reason in are
+// stripped, and the span marks are left in place so a test can count them.
+//
+// Requiring the code span here rather than asserting it separately is
+// deliberate: it is the fourth measure — the one that keeps a soft-wrapped
+// continuation line visibly out of RunLore's own voice — so a reply that lost it
+// must fail every test built on this helper, not only one named for it.
+func forgeErrorText(t *testing.T, reply string) string {
+	t.Helper()
+	const lead = "⚠️ I could not save that to the knowledge base: "
+	if !strings.HasPrefix(reply, lead) {
+		t.Fatalf("reply is not a forge-failure reply: %q", reply)
+	}
+	rest := strings.TrimPrefix(reply, lead)
+	if len(rest) < 2 || !strings.HasPrefix(rest, "`") || !strings.HasSuffix(rest, "`") {
+		t.Fatalf("the forge reason is not inside an inline code span: %q", rest)
+	}
+	return rest[1 : len(rest)-1]
+}
+
+// TestForgeFailureReplyIsRedactedFlattenedAndBounded pins the treatment a forge
+// error gets before it is posted into a chat thread — on BOTH failure routes,
+// because the two are separate literals and the one that gets fixed alone is the
+// one that stops being tested.
+//
+// It used to get none. Untrusted(err.Error()) marks a span for the transport's
+// markup escaper and does nothing else, and a forge error is a SERVER-SUPPLIED
+// body: a GitHub 403 echoes the credential it rejected, and every escaper in
+// this repo leaves a line break alone, so a multi-line JSON body rendered its
+// continuation lines at the same left margin as RunLore's own status claims.
+//
+// The four measures are the ones internal/notify's curateFailureReason already
+// applied to the identical class of text, and they are asserted here rather than
+// assumed: redaction, backtick neutralisation (the reply wraps the reason in an
+// inline code span, which one backtick would close early), flattening, and a
+// bound.
+func TestForgeFailureReplyIsRedactedFlattenedAndBounded(t *testing.T) {
+	const token = "ghp_0123456789abcdefghijklmnopqrstuvwxyzAB"
+	// The backtick is the forge quoting an identifier back at RunLore, which real
+	// forge errors do ("branch `main` is protected") — one is all it takes to close
+	// the inline code span the reply wraps this in.
+	body := "github POST /repos/o/r/pulls: status 403: branch `main`: {\n \"message\": \"Bad credentials\",\n \"token\": \"" + token + "\"\n}"
+
+	routes := map[string]func(*fakeForge){
+		// The standalone-entry route: OpenPR itself failed.
+		"open_pr": func(f *fakeForge) { f.openErr = errors.New(body) },
+		// The existing-PR route: the comment (and, before it, the append) failed.
+		"comment": func(f *fakeForge) { f.commErr, f.appendErr = errors.New(body), errors.New(body) },
+	}
+	for name, setup := range routes {
+		t.Run(name, func(t *testing.T) {
+			f := &fakeForge{}
+			setup(f)
+			r := newTestResponder(t, f)
+			tc := Context{Transport: "slack", Root: "root-1"}
+			if name == "comment" {
+				tc.CuratedURL = "https://github.com/o/r/pull/7"
+			}
+			reply, err := r.Handle(context.Background(), tc, "alice", "note: the cause was a spot reclaim")
+			if err == nil {
+				t.Fatalf("expected the forge failure to be reported, got reply %q", reply)
+			}
+			got := forgeErrorText(t, reply)
+			if strings.Contains(got, token) {
+				t.Errorf("the credential the forge echoed reached the thread verbatim: %q", got)
+			}
+			if strings.ContainsAny(got, "\n\r\v\f") {
+				t.Errorf("a break rune survived, so a forged status line can sit at RunLore's own left margin: %q", got)
+			}
+			if strings.Contains(got, "`") {
+				t.Errorf("a backtick survived and would close the inline code span early: %q", got)
+			}
+			if !strings.Contains(got, "status 403") {
+				t.Errorf("the diagnosis an operator acts on was dropped: %q", got)
+			}
+		})
+	}
+}
+
+// TestForgeFailureReplyIsCapped keeps the bound a property of the reply rather
+// than of whatever the forge happened to return. A forge body is server-supplied
+// and unbounded — a proxy banner, an HTML error page — and an unbounded one is
+// an unbounded chat post on a path any channel member can trigger.
+func TestForgeFailureReplyIsCapped(t *testing.T) {
+	f := &fakeForge{openErr: errors.New("open PR: " + strings.Repeat("x", 4000))}
+	r := newTestResponder(t, f)
+	reply, err := r.Handle(context.Background(), Context{Root: "root-1"}, "alice", "note: the cause was a spot reclaim")
+	if err == nil {
+		t.Fatalf("expected a forge failure, got %q", reply)
+	}
+	if got := len(forgeErrorText(t, reply)); got > forgeErrorBytes+2*len(untrustedMark)+8 {
+		t.Errorf("the published forge error is %d bytes, past the %d-byte bound", got, forgeErrorBytes)
+	}
+}
+
+// TestForgeFailureCannotNarrowWhatTheReplyEscapes is the composed guard behind
+// RenderReply's parity, and the reason that function's doc comment no longer
+// claims a stray mark is harmless.
+//
+// RenderReply splits on a single mark and escapes the odd-indexed segments, so
+// the segments simply alternate. One EXTRA mark anywhere flips that parity for
+// everything after it: a genuinely untrusted span downstream lands on an even
+// index and is handed to the transport unescaped. The forge error is the one
+// piece of transport-bound text this package interpolates straight from a
+// server, so it is where an injected mark would arrive — and on the freeform
+// route a reply carries model prose in the very same message.
+func TestForgeFailureCannotNarrowWhatTheReplyEscapes(t *testing.T) {
+	f := &fakeForge{openErr: errors.New("open PR: forbidden" + untrustedMark + " and then")}
+	r := newTestResponder(t, f)
+	reply, err := r.Handle(context.Background(), Context{Root: "root-1"}, "alice", "note: the cause was a spot reclaim")
+	if err == nil {
+		t.Fatalf("expected a forge failure, got %q", reply)
+	}
+	if n := strings.Count(reply, untrustedMark); n%2 != 0 {
+		t.Fatalf("the reply carries %d span marks — an odd count flips RenderReply's parity: %q", n, reply)
+	}
+	rendered := RenderReply(reply+"\n"+Untrusted("<!channel>"), func(s string) string {
+		return strings.ReplaceAll(s, "<", "&lt;")
+	})
+	if strings.Contains(rendered, "<!channel>") {
+		t.Errorf("a mark smuggled through the forge error narrowed the escaping and let <!channel> reach the wire: %q", rendered)
+	}
+}
+
+// TestForgeOutageDoesNotBurnTheGlobalWriteBudget closes the disagreement between
+// this feature's two budgets about what a FAILURE costs.
+//
+// ForgeWrites is consumed at the top of write(), upstream of the route branch,
+// which is right: a comment must spend it exactly as an OpenPR does. But no
+// failure path handed the token back, so a forge outage spent the whole hour on
+// writes that never happened — 20 failed attempts, zero entries, and the 21st
+// caller told "I have made too many knowledge-base writes recently" (reproduced).
+// The per-thread count is deliberately NOT charged for a failure (see record),
+// so the two ceilings were answering the same question differently.
+//
+// The 21st write here is the assertion: the forge is healthy again, and the only
+// thing that could still refuse it is a budget spent on nothing.
+func TestForgeOutageDoesNotBurnTheGlobalWriteBudget(t *testing.T) {
+	f := &fakeForge{openErr: errors.New("503 service unavailable")}
+	r := newTestResponder(t, f)
+	r.ForgeWrites = ratelimit.New(20, time.Hour)
+	r.MaxNotesPerThread = 1000
+	tc := Context{Transport: "slack", Root: "root-1"}
+	if err := r.Registry.Put(tc); err != nil {
+		t.Fatalf("put: %v", err)
+	}
+	ctx := context.Background()
+	for i := range 20 {
+		if _, err := r.Handle(ctx, tc, "alice", "note: attempt during the outage"); err == nil {
+			t.Fatalf("attempt %d: expected the forge failure to be reported", i)
+		}
+	}
+	if got := r.ForgeWrites.Count(); got != 0 {
+		t.Errorf("%d tokens still spent after 20 writes that never landed", got)
+	}
+
+	f.openErr = nil
+	f.openURL = "https://github.com/o/r/pull/7"
+	fresh, _ := r.Registry.Get("root-1")
+	reply, err := r.Handle(ctx, fresh, "alice", "note: the forge is healthy again")
+	if err != nil {
+		t.Fatalf("handle: %v", err)
+	}
+	if strings.Contains(reply, "too many knowledge-base writes") {
+		t.Fatalf("throttled on a healthy forge, having landed nothing: %q", reply)
+	}
+	if len(f.opened) != 1 {
+		t.Errorf("opened %d PRs, want the one that succeeded", len(f.opened))
+	}
+}
+
+// TestGlobalWriteBudgetStillChargesEveryLandedWrite is the other direction, and
+// it is why the refund is placed on the failure paths rather than on the whole
+// call: a write that LANDED must still cost a token, on either route, or the
+// refund would quietly turn the one global ceiling this feature has into no
+// ceiling at all.
+func TestGlobalWriteBudgetStillChargesEveryLandedWrite(t *testing.T) {
+	for _, tt := range []struct {
+		name string
+		tc   Context
+	}{
+		{"open_pr", Context{Transport: "slack", Root: "root-1"}},
+		{"comment", Context{Transport: "slack", Root: "root-1", CuratedURL: "https://github.com/o/r/pull/7"}},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			f := &fakeForge{openURL: "https://github.com/o/r/pull/9"}
+			r := newTestResponder(t, f)
+			r.ForgeWrites = ratelimit.New(2, time.Hour)
+			r.MaxNotesPerThread = 1000
+			if err := r.Registry.Put(tt.tc); err != nil {
+				t.Fatalf("put: %v", err)
+			}
+			ctx := context.Background()
+			for i := range 2 {
+				fresh, _ := r.Registry.Get("root-1")
+				if _, err := r.Handle(ctx, fresh, "alice", fmt.Sprintf("note: landed write %d", i)); err != nil {
+					t.Fatalf("write %d: %v", i, err)
+				}
+			}
+			fresh, _ := r.Registry.Get("root-1")
+			reply, err := r.Handle(ctx, fresh, "alice", "note: one past the budget")
+			if err != nil {
+				t.Fatalf("handle: %v", err)
+			}
+			if !strings.Contains(reply, "too many knowledge-base writes") {
+				t.Errorf("the third write was not throttled: %q", reply)
+			}
+		})
+	}
+}
+
+// TestConcurrentNotesCannotExceedThePerThreadCap closes the gap between the cap
+// and the lock that was already there for the sibling race.
+//
+// The cap used to be read in record() from the caller's OWN snapshot of the
+// thread context — taken before write() acquired lockRoot — and the counter was
+// incremented after that guard had already been released. So the check, the
+// write and the increment sat in three different critical sections, none of
+// which was the one protecting the thread: eight concurrent notes on a thread
+// two writes into a cap of three produced TEN forge writes and refused none,
+// under -race.
+//
+// The guard needed for this is the same guard write() already takes for the
+// duplicate-PR race — one thread's writes were already serialised, the cap was
+// simply being decided outside that. So the assertion is exact rather than
+// "fewer than before": with one write of headroom, exactly one caller may write
+// and every other must be refused, whatever order they arrive in.
+func TestConcurrentNotesCannotExceedThePerThreadCap(t *testing.T) {
+	const (
+		noteCap  = 3 // not `cap`: revive rejects an identifier that shadows a builtin
+		already  = 2
+		writers  = 8
+		headroom = noteCap - already
+	)
+	f := &fakeForge{openURL: "https://github.com/o/r/pull/7"}
+	r := newTestResponder(t, f)
+	r.MaxNotesPerThread = noteCap
+	r.ForgeWrites = ratelimit.New(0, time.Hour) // unlimited; the global budget is not what this pins
+	root := "root-1"
+	if err := r.Registry.Put(Context{Transport: "slack", Root: root, Notes: already}); err != nil {
+		t.Fatalf("Put: %v", err)
+	}
+
+	var wg sync.WaitGroup
+	var mu sync.Mutex
+	refused := 0
+	for i := range writers {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			// A stale snapshot, exactly as the mention handler takes one: every
+			// writer reads the registry before any of them has written, so all eight
+			// observe Notes == already. Nothing but the guard can separate them.
+			tc, ok := r.Registry.Get(root)
+			if !ok {
+				t.Errorf("Get[%d]: registry lost the root mid-test", i)
+				return
+			}
+			reply, err := r.Handle(context.Background(), tc, "alice", fmt.Sprintf("note: concurrent %d", i))
+			if err != nil {
+				t.Errorf("Handle[%d]: %v", i, err)
+				return
+			}
+			if strings.Contains(reply, "note limit") {
+				mu.Lock()
+				refused++
+				mu.Unlock()
+			}
+		}(i)
+	}
+	wg.Wait()
+
+	comments, opened := f.counts()
+	if got := comments + opened; got != headroom {
+		t.Errorf("%d forge writes with %d of headroom left — the cap was decided outside the guard that serialises this thread", got, headroom)
+	}
+	if refused != writers-headroom {
+		t.Errorf("refused = %d, want %d — every writer past the cap must be told so, not silently written", refused, writers-headroom)
+	}
+	if tc, ok := r.Registry.Get(root); !ok || tc.Notes != noteCap {
+		t.Errorf("Notes = %d (tracked %v), want %d — the counter must end at the cap, not past it or short of it", tc.Notes, ok, noteCap)
+	}
+}
+
+// TestOpenPRMarksTheFirstNoteSoAReplayCannotDuplicateIt closes the one gap in
+// the idempotency this package already built.
+//
+// noteKey and okf.NoteMarker exist because the layers above replay: internal/
+// server dedups Slack deliveries through a bounded, PER-PROCESS set that is
+// wiped wholesale at capacity, so a busy channel, a restart or a leader failover
+// all deliver the same message twice. Both APPEND paths honoured that — an entry
+// already carrying the key is left alone. The OPEN_PR path did not: it wrote
+// note 1 into a brand-new entry with no marker at all, so a redelivery found
+// nothing to match, took the append route (NoteURL is set by then) and wrote the
+// same note into the entry a second time. Permanent catalog content, indexed and
+// recalled twice, with no signal that either is a duplicate.
+//
+// The oracle is the CONTRACT between the two layers rather than a simulated
+// forge: the marker the entry carries must be the one the replay's append then
+// looks for. github.Client and gitlab.Client both implement HasNoteMarker as a
+// substring search for exactly that literal, and both have their own tests for
+// the skip; faking that here would prove only that the fake agrees with itself.
+func TestOpenPRMarksTheFirstNoteSoAReplayCannotDuplicateIt(t *testing.T) {
+	f := &fakeForge{openURL: "https://github.com/o/r/pull/7"}
+	r := newTestResponder(t, f)
+	tc := Context{Transport: "slack", Root: "root-1", Channel: "C1"}
+	if err := r.Registry.Put(tc); err != nil {
+		t.Fatalf("Put: %v", err)
+	}
+	ctx := context.Background()
+	const text = "the real cause was a spot-node reclaim"
+
+	if _, err := r.record(ctx, tc, HumanNote("alice", text)); err != nil {
+		t.Fatalf("first delivery: %v", err)
+	}
+	if len(f.opened) != 1 {
+		t.Fatalf("opened = %d, want 1", len(f.opened))
+	}
+
+	// The replay: same thread, same author, same text — everything that does not
+	// move between a delivery and its redelivery.
+	fresh, _ := r.Registry.Get("root-1")
+	if _, err := r.record(ctx, fresh, HumanNote("alice", text)); err != nil {
+		t.Fatalf("replay: %v", err)
+	}
+	if len(f.appends) != 1 {
+		t.Fatalf("appends = %d, want the replay to have taken the append route", len(f.appends))
+	}
+
+	key := f.appends[0].key
+	if key == "" {
+		t.Fatal("the replay's append carries no key, so the forge has nothing to match")
+	}
+	if marker := okf.NoteMarker(key); !strings.Contains(f.opened[0].Body, marker) {
+		t.Errorf("the entry opened for note 1 does not carry %s, so the replay's HasNoteMarker finds "+
+			"nothing and writes the same note into the catalog twice.\nentry body:\n%s", marker, f.opened[0].Body)
+	}
+}
+
+// TestOpenPRNoteMarkerIsTheKeyTheAppendPathDerives keeps the two halves of that
+// contract from drifting apart in the harmless-looking direction: an entry that
+// carries SOME marker, derived differently from the one an append looks for,
+// reads as correct and dedups nothing.
+func TestOpenPRNoteMarkerIsTheKeyTheAppendPathDerives(t *testing.T) {
+	f := &fakeForge{openURL: "https://github.com/o/r/pull/7"}
+	r := newTestResponder(t, f)
+	tc := Context{Transport: "slack", Root: "root-1"}
+	if err := r.Registry.Put(tc); err != nil {
+		t.Fatalf("Put: %v", err)
+	}
+	n := HumanNote("alice", "the real cause was a spot-node reclaim")
+	if _, err := r.record(context.Background(), tc, n); err != nil {
+		t.Fatalf("record: %v", err)
+	}
+	// noteKey is derived from the note AS WRITTEN — redacted and capped — which is
+	// what write() files, so the expectation has to go through the same step.
+	written, _ := r.noteAsWritten(n)
+	want := okf.NoteMarker(noteKey(tc, written))
+	if !strings.Contains(f.opened[0].Body, want) {
+		t.Errorf("entry carries no %s\nbody:\n%s", want, f.opened[0].Body)
+	}
+}
+
+// TestModelDraftedReplayIsNotDeduplicated states the limit of all this, because
+// a guarantee that quietly does not hold on one route is worse than one that
+// says where it stops.
+//
+// noteKey hashes the note's own TEXT, and on the freeform route that text is the
+// model's draft rather than the human's message. A replayed delivery re-invokes
+// the model, which is not deterministic, so the redelivery arrives with
+// different bytes, hashes to a different key, and appends as a genuinely new
+// note. Nothing at this layer can fix that: the only stable identity a replay
+// shares is the human's original message, and keying on THAT would collapse two
+// deliberate follow-ups drafted from similar messages into one — silently
+// dropping a note somebody meant to file, which is the worse failure of the two.
+//
+// What bounds it instead is upstream and already there: the per-thread cap (now
+// enforced under the thread's own guard), the global ForgeWrites window, and
+// internal/server's delivery dedup, which catches the common replay before a
+// model is ever called. A duplicated model draft is visible prose in an entry a
+// human still has to merge, not silent catalog corruption.
+func TestModelDraftedReplayIsNotDeduplicated(t *testing.T) {
+	tc := Context{Transport: "slack", Root: "root-1"}
+	const message = "was it the CNI?"
+	first := ProposedNote("alice", message, "It was a spot-node reclaim.")
+	replay := ProposedNote("alice", message, "The cause was a spot node being reclaimed.")
+
+	if noteKey(tc, first) == noteKey(tc, replay) {
+		t.Fatal("two different drafts hashed to one key — noteKey no longer keys on the note text")
+	}
+	// The human's own message is identical across the two, which is exactly the
+	// identity that is NOT used, and the comment above says why.
+	if first.DraftedFrom != replay.DraftedFrom {
+		t.Fatal("fixture error: the replayed delivery must carry the same human message")
+	}
+}
+
+// TestAnnouncementCarriesWhoActuallyWroteTheNote closes the last surface on
+// which model-authored prose was filed under a named human.
+//
+// Every other surface already made the distinction. NoteBody heads a drafted
+// entry "🤖 Proposed operator note — drafted by RunLore" and states "@alice did
+// not write it"; conceptDescription leads with the provenance clause so a
+// listing that clips the line cannot clip it; openedWith exists ONLY to stop the
+// thread reply saying "with your note" for text the human did not type. The
+// announcement had no provenance field at all, so it published
+// {author: "alice", note: "<the model's text>"} to every configured sink and
+// rendered "By alice in a slack thread" — the exact claim openedWith exists to
+// prevent, arriving through the one door nobody had checked.
+//
+// It is worst under announce_kb_updates: thread, where the reduced form is two
+// lines and one of them IS the attribution — and where, if the best-effort reply
+// fails, it is the only thing in the thread.
+func TestAnnouncementCarriesWhoActuallyWroteTheNote(t *testing.T) {
+	for _, tt := range []struct {
+		name string
+		note Note
+		want bool
+	}{
+		{"an explicit note: is the human's own words", HumanNote("alice", "the real cause was a spot reclaim"), false},
+		{"a freeform answer's note is the model's", ProposedNote("alice", "was it the CNI?", "It was a spot reclaim."), true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			f := &fakeForge{openURL: "https://github.com/o/r/pull/7"}
+			r, sink := newAnnouncingResponder(t, f)
+			tc := Context{Transport: "slack", Root: "root-1", Channel: "C1"}
+			if err := r.Registry.Put(tc); err != nil {
+				t.Fatalf("Put: %v", err)
+			}
+			if _, err := r.record(context.Background(), tc, tt.note); err != nil {
+				t.Fatalf("record: %v", err)
+			}
+			drainAnnouncements(t, r)
+
+			ups := sink.updates()
+			if len(ups) != 1 {
+				t.Fatalf("announced %d writes, want 1", len(ups))
+			}
+			if got := ups[0].ModelDrafted; got != tt.want {
+				t.Errorf("KBUpdate.ModelDrafted = %v, want %v — the announcement reports %q as the note's "+
+					"provenance and carries %q as its text", got, tt.want, ups[0].Author, ups[0].Note)
+			}
+			// Author stays the human either way: they are still whose message
+			// produced the note, which is what a reader needs to follow it up. What
+			// changes is whether the announcement may present the TEXT as theirs.
+			if ups[0].Author != "alice" {
+				t.Errorf("Author = %q, want the human whose message produced the note", ups[0].Author)
+			}
+		})
+	}
+}
+
+// noteFactsOnTheAnnouncement names, for every field of Note, the KBUpdate field
+// that carries it to a sink. Stated here rather than derived, so a fact added to
+// Note has to be deliberately routed or deliberately withheld.
+//
+// It exists because the two field-classification guards that already cover
+// KBUpdate — the untrusted/trusted split in internal/providers and the webhook
+// payload's coverage check — both WALK KBUPDATE. A fact that was never put on
+// the struct is invisible to both: they can only ask whether an existing field
+// is handled, never whether a field is missing. Note.DraftedFrom was exactly
+// that for as long as the announcement existed, and every one of those guards
+// passed the whole time.
+//
+// This walks the SOURCE type instead, which is the direction that bites.
+var noteFactsOnTheAnnouncement = map[string]string{
+	"Author": "Author",
+	"Text":   "Note",
+	// The FACT, not the text. The human's original message is already in the
+	// entry, where a reviewer weighs the draft against it (see NoteBody); an
+	// announcement is a short chat post to sinks the thread never reached, and
+	// republishing someone's raw message into all of them widens egress for no
+	// reader who needs it. What must travel is that the note is not their words.
+	"DraftedFrom": "ModelDrafted",
+}
+
+// TestKBUpdateCarriesEveryNoteFact makes the map above bite in both directions,
+// and adds the behavioural half a name-matching test cannot give: two notes that
+// differ ONLY in provenance must not produce indistinguishable announcements.
+func TestKBUpdateCarriesEveryNoteFact(t *testing.T) {
+	note := reflect.TypeOf(Note{})
+	update := reflect.TypeOf(providers.KBUpdate{})
+
+	for i := range note.NumField() {
+		name := note.Field(i).Name
+		carrier, ok := noteFactsOnTheAnnouncement[name]
+		if !ok {
+			t.Errorf("thread.Note.%s reaches no announcement and is not classified. Route it to a "+
+				"providers.KBUpdate field, or record why a sink does not need it — a fact never put on "+
+				"the struct is one neither KBUpdate guard can see is missing.", name)
+			continue
+		}
+		if _, found := update.FieldByName(carrier); !found {
+			t.Errorf("thread.Note.%s is classified as reaching providers.KBUpdate.%s, which does not exist — "+
+				"stale entry, so nothing is checking whatever replaced it", name, carrier)
+		}
+	}
+	for name := range noteFactsOnTheAnnouncement {
+		if _, ok := note.FieldByName(name); !ok {
+			t.Errorf("noteFactsOnTheAnnouncement names %q, which thread.Note no longer has — stale entry", name)
+		}
+	}
+
+	// The behavioural half. Same author, same filed text, same thread: the only
+	// difference is who wrote it, and the two events must not be equal.
+	r := &Responder{Now: func() time.Time { return noteAt }}
+	human := r.kbUpdateFor(Context{Transport: "slack", Root: "r"}, HumanNote("alice", "a spot reclaim"),
+		&KBWrite{Route: RouteOpenPR, PR: 7, Note: "a spot reclaim"}, noteAt)
+	drafted := r.kbUpdateFor(Context{Transport: "slack", Root: "r"}, ProposedNote("alice", "was it the CNI?", "a spot reclaim"),
+		&KBWrite{Route: RouteOpenPR, PR: 7, Note: "a spot reclaim"}, noteAt)
+	if human == drafted {
+		t.Error("a note the human typed and a note RunLore's model drafted announce identically — " +
+			"the classification above is satisfied by a field nothing actually sets")
 	}
 }

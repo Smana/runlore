@@ -10,7 +10,6 @@ import (
 	"time"
 
 	"github.com/Smana/runlore/internal/providers"
-	"github.com/Smana/runlore/internal/redact"
 	"github.com/Smana/runlore/internal/thread"
 )
 
@@ -36,20 +35,20 @@ const curateErrorRunes = 300
 // that made the first version of this fix miss the Slack card entirely, which is the
 // exact surface #506 reports.
 //
-// redact → strip backticks → flatten → cap, the same order and for the same reasons as
-// thread.chatSafe. A forge error carries a server-provided JSON body, so:
+// redact → strip backticks → flatten → cap. The first three are thread.SafeErrorText,
+// which is where that pipeline now lives; see its doc comment for what each one answers
+// and why the order is not free. The cap stays HERE because the two surfaces that
+// publish a forge error bound it in different units for different reasons: this counts
+// runes against a Slack section limit, and internal/thread counts bytes against a chat
+// message budget it shares with a note quote.
 //
-//   - redact.Secrets FIRST, because it may echo the credential it rejected, and running
-//     it before the cap means a cut can never hand it a half-token it no longer matches;
-//   - backticks become apostrophes, because every render site wraps the result in an
-//     inline code span and a backtick inside would close it early (notify's own codeRe
-//     is `([^`\n]+)`, so one backtick is all it takes). Apostrophe, not deletion, so the
-//     rune count and the reading of a quoted identifier both survive;
-//   - thread.SingleLine, not a local flattener, because a line break inside the body
-//     would put that text at the left margin where RunLore's own status lines sit — and
-//     a second copy of the mandatory-break class list is exactly the drift
-//     notify.kbUpdateAnnouncement documents having been bitten by;
-//   - cap LAST so it holds unconditionally.
+// It calls that helper rather than keeping this pipeline local, and the reason is the
+// drift this comment used to document from the wrong side. The paragraph below argued
+// that publishing a forge error was already precedented because "internal/thread already
+// posts err.Error() from the same forge client into the same room, uncapped and
+// unredacted" — which was true, and was a defect there rather than a licence here. Both
+// surfaces now go through one function, so the next measure added to either reaches
+// both.
 //
 // The inline code span the callers add is the fourth measure, and it is what flattening
 // alone does not buy: a reason this long soft-wraps in every client, and a continuation
@@ -63,21 +62,17 @@ const curateErrorRunes = 300
 // The forge's own words are kept rather than classified into "auth / rate limit /
 // validation" deliberately. Classifying would need a parser over forge error strings —
 // a second, narrower copy of a vocabulary this package does not own, the same drift the
-// bullets above exist to avoid — and it would drop "Resource not accessible by
+// paragraph above exists to avoid — and it would drop "Resource not accessible by
 // integration", the half that told the operator the fix was a GitHub App permission and
-// not a broken token. This is also not new egress: internal/thread already posts
-// err.Error() from the same forge client into the same room, uncapped and unredacted
-// (responder.go, "I could not save that to the knowledge base"), and #506 quotes that
-// message as the thing that worked. If server-supplied topology (internal DNS, RFC1918,
-// a GHE proxy banner) is judged too much for a chat room, that is a property of every
-// forge error RunLore already publishes and belongs in redact as a topology filter at
-// the single egress chokepoint — not as a special case on this one line.
+// not a broken token. If server-supplied topology (internal DNS, RFC1918, a GHE proxy
+// banner) is judged too much for a chat room, that is a property of every forge error
+// RunLore publishes anywhere and belongs in redact as a topology filter at the single
+// egress chokepoint — not as a special case on this one line.
 func curateFailureReason(inv providers.Investigation) string {
 	if inv.CurateError == "" {
 		return ""
 	}
-	safe := strings.ReplaceAll(redact.Secrets(inv.CurateError), "`", "'")
-	return truncate(thread.SingleLine(safe), curateErrorRunes)
+	return truncate(thread.SafeErrorText(inv.CurateError), curateErrorRunes)
 }
 
 // verdictBadge maps a model verdict to its emoji + human label. Empty/unknown

@@ -847,6 +847,11 @@ func (d KBDelivery) IntoThread() bool { return d == KBDeliverThread || d == KBDe
 // can avoid announcing the same write to the same people twice, or deliver into
 // that thread rather than beside it (see Delivery).
 //
+// It also names WHO WROTE the note as distinct from whose message produced it:
+// on the freeform route RunLore's own chat model drafted the text and the human
+// only prompted it. See ModelDrafted — a consumer that renders Author without
+// consulting it will attribute model prose to a named engineer.
+//
 // # Untrusted fields
 //
 // Note, Title and Author are UNTRUSTED. They are secret-redacted upstream
@@ -890,7 +895,32 @@ type KBUpdate struct {
 	Title string
 	// Author is the human whose thread message produced the note, as the chat
 	// transport reported it. Provenance, not proof of identity. UNTRUSTED.
+	//
+	// It names whose message PRODUCED the note, which is not the same as who
+	// wrote its words — see ModelDrafted, which every renderer must consult
+	// before presenting Note as this person's own.
 	Author string
+	// ModelDrafted reports that RunLore's own chat model wrote Note from Author's
+	// message, rather than Author having typed it after an explicit "note:".
+	//
+	// It is the announcement's half of a distinction every other surface already
+	// makes, and the reason it has to exist HERE rather than be inferred: a sink
+	// receives this struct and nothing else. Without it the event carried
+	// {author: "alice", note: "<the model's text>"} with no way to tell the two
+	// routes apart, so a chat sink rendered "By alice in a slack thread" over
+	// prose alice never wrote and a webhook receiver stored it as her statement.
+	// The knowledge base's merge gate reads exactly that signal — a human
+	// attestation is what a reviewer weighs a note by — so filing model prose
+	// under a named engineer is the specific failure the thread reply's
+	// openedWith, NoteBody's "@alice did not write it" heading and
+	// conceptDescription's leading provenance clause were each written to close.
+	//
+	// TRUSTED: RunLore sets it from the note's own provenance (thread.Note.
+	// DraftedFrom), it is never reported by a chat system, and it is a boolean
+	// rather than text, so no renderer escapes it. It is nonetheless the field
+	// most likely to be forgotten by a renderer, which is why the announcement
+	// surfaces have tests asserting the two routes cannot render identically.
+	ModelDrafted bool
 	// Note is the note text AS WRITTEN to the forge — post-redaction and
 	// post-cap, never the caller's raw input, so an announcement cannot leak
 	// what the entry itself masked. UNTRUSTED.

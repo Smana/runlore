@@ -1184,3 +1184,84 @@ func TestTruncateWordsHoldsItsBoundAtAZeroBudget(t *testing.T) {
 		}
 	}
 }
+
+// TestSingleLineFlattensThePrivateUseArea extends the rune set above to Co, the
+// private-use category, for one concrete reason rather than for completeness:
+// untrustedMark is U+E000, and it is the ONE rune whose survival changes how a
+// reply is ESCAPED rather than merely how it looks.
+//
+// RenderReply splits a reply on that mark and escapes alternate segments, so a
+// single extra one anywhere flips the parity of everything after it and hands a
+// genuinely untrusted span to the transport unescaped (see
+// TestForgeFailureCannotNarrowWhatTheReplyEscapes). Untrusted() strips the mark
+// from the content it wraps, which is what holds the property for every span
+// that goes through it; this is what holds it for the single-line fields that do
+// not — an author, an entry title, a forge error — all of which reach a reply
+// through SingleLine.
+//
+// A private-use code point has no agreed meaning outside one font's private
+// arrangement, so nothing legitimate is lost by mapping the whole category to a
+// space. Written as escapes, never as literal glyphs: they are invisible in a
+// diff, and ST1018 rejects them in source anyway.
+func TestSingleLineFlattensThePrivateUseArea(t *testing.T) {
+	for _, r := range []rune{
+		'\ue000',     // untrustedMark itself — the parity hazard this arm exists for
+		'\uf8ff',     // the far end of the Basic Multilingual Plane's private-use area
+		'\U000f0000', // Plane 15, Supplementary Private Use Area-A
+		'\U00100000', // Plane 16, Supplementary Private Use Area-B
+	} {
+		if got, want := SingleLine("before"+string(r)+"after"), "before after"; got != want {
+			t.Errorf("SingleLine(U+%04X) = %q, want %q", r, got, want)
+		}
+	}
+	if got := SingleLine(untrustedMark); strings.Contains(got, untrustedMark) {
+		t.Errorf("SingleLine left the span mark in place: %q", got)
+	}
+}
+
+// TestCapNoteTextAtTheFloorStillKeepsTheHumansWords is what makes
+// MinMaxNoteBytes a derived number rather than a round one: at the smallest cap
+// an operator may configure, a truncated note must still carry a readable piece
+// of what the human actually wrote, not just the mark saying it was cut.
+//
+// The inputs run past what any chat transport can deliver (a Slack request body
+// is ~1 MiB), because the marker's own width GROWS with the decimal digits of
+// the dropped count — 44 bytes at nothing dropped, 53 at a gigabyte — and the
+// floor has to hold at the widest marker, not the narrowest.
+func TestCapNoteTextAtTheFloorStillKeepsTheHumansWords(t *testing.T) {
+	const sentence = "the real cause was a spot-node reclaim during the Karpenter consolidation window"
+	for _, size := range []int{1 << 10, 1 << 20, 1 << 30} {
+		text := sentence + strings.Repeat("x", size)
+		got := capNoteText(text, MinMaxNoteBytes)
+		if len(got) > MinMaxNoteBytes {
+			t.Errorf("size %d: capNoteText returned %d bytes, past the %d-byte cap", size, len(got), MinMaxNoteBytes)
+		}
+		kept, marker, found := strings.Cut(got, "…\n\n")
+		if !found || !strings.Contains(marker, "_(truncated —") {
+			t.Errorf("size %d: the cut is unmarked, so a reviewer reads a shortened note as complete: %q", size, got)
+			continue
+		}
+		if len(kept) < MinMaxNoteBytes/2 {
+			t.Errorf("size %d: only %d bytes of the human's own words survived a %d-byte cap (%q) — "+
+				"the floor is too low to be worth accepting", size, len(kept), MinMaxNoteBytes, got)
+		}
+		if !strings.HasPrefix(text, kept) {
+			t.Errorf("size %d: what survived is not a prefix of what was written: %q", size, kept)
+		}
+		// And enough of it to be a sentence rather than a fragment: the floor is
+		// only worth accepting if a reader can tell what the note was about.
+		if !strings.HasPrefix(got, "the real cause was a spot-node reclaim") {
+			t.Errorf("size %d: the surviving words do not carry the note's claim: %q", size, got)
+		}
+	}
+}
+
+// TestMinMaxNoteBytesClearsTheWidestTruncationMarker pins the derivation itself,
+// so the floor cannot silently stop being a floor if the marker's wording grows.
+func TestMinMaxNoteBytesClearsTheWidestTruncationMarker(t *testing.T) {
+	widest := len(noteTruncationMarker(1 << 30))
+	if MinMaxNoteBytes <= widest {
+		t.Fatalf("MinMaxNoteBytes = %d, but the truncation marker alone is %d bytes — "+
+			"at that cap nothing of the note survives, which is what the floor exists to refuse", MinMaxNoteBytes, widest)
+	}
+}

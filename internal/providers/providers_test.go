@@ -245,9 +245,16 @@ func TestKBUpdateNotifierIsOptional(t *testing.T) {
 //
 // Delivery is trusted because RunLore sets it from its own configuration; it is
 // never reported by a chat system and never rendered at all.
+//
+// ModelDrafted is trusted for the same reason and one more: it is a boolean, so
+// there is nothing in it to escape. Being unescapable is NOT the same as being
+// safe to ignore — a renderer that drops it attributes model prose to a named
+// human — which is why the announcement surfaces carry their own tests that the
+// two provenance routes cannot render identically. This classification answers
+// only "must a notifier escape it", and the honest answer is no.
 var (
 	kbUpdateUntrusted = map[string]bool{"Title": true, "Author": true, "Note": true, "URL": true, "Root": true, "Channel": true}
-	kbUpdateTrusted   = map[string]bool{"Transport": true, "Route": true, "PR": true, "At": true, "Delivery": true}
+	kbUpdateTrusted   = map[string]bool{"Transport": true, "Route": true, "PR": true, "At": true, "Delivery": true, "ModelDrafted": true}
 )
 
 // TestKBUpdateClassifiesEveryFieldForEscaping makes the two maps above bite: a

@@ -146,18 +146,42 @@ func kbThreadAnnouncement(up providers.KBUpdate) string {
 // route in the words a human uses rather than the enum value a metric label
 // uses, and drops the "#n" when the forge returned a URL carrying no parseable
 // number — which is not an error, and must not suppress the announcement.
+//
+// The routes are partitioned by WHETHER THE CATALOG GAINS ANYTHING, and only the
+// side that does may say the knowledge base was updated. That is the same line
+// KBRouteAppend's own doc draws — it is a route separate from KBRouteComment
+// precisely because "what this route writes is inside the entry the catalog
+// gains when the PR merges, and what a comment writes is not".
+//
+// This used to prefix all three identically and differentiate only the verb, so
+// the comment route announced "📚 Knowledge base updated — noted on PR #7" for a
+// write that changed no entry at all: that note went onto the CURATOR's draft,
+// where it is review feedback a human reconciles at merge time, and the file the
+// catalog gains is the curator's, not the note. The verb carried the whole
+// distinction and the prefix contradicted it — and the prefix is the half a
+// reader skims, the half a transport keeps when it truncates, and on the
+// in-thread form one of only two lines in the message.
+//
+// The COMMENT wording is the default rather than a case, so an unknown route
+// inherits it. kbRoute deliberately passes an unrecognised value straight
+// through rather than guessing at a known one (mislabelling a landed write is
+// worse than reporting an unknown label honestly), which is only safe if the
+// fallback here is the weaker claim. A route this renderer has not learned about
+// must not assert that the catalog gained something.
 func kbHeadline(up providers.KBUpdate) string {
-	what := "noted on"
+	// "for review", and no "updated" claim: the note is beside the entry, not in
+	// it, until a human folds it in. The 📝 lead keeps it inside thread's status-
+	// glyph strip, the same protection the 📚 form has.
+	head := "📝 Note left for review on knowledge-base PR"
 	switch up.Route {
 	case providers.KBRouteOpenPR:
-		what = "opened"
+		head = "📚 Knowledge base updated — opened PR"
 	case providers.KBRouteAppend:
-		// "added to the entry on", not "noted on": this route wrote INTO the entry
-		// the catalog gains on merge, and a comment does not. A reader deciding
-		// whether the knowledge is safely captured is deciding exactly that.
-		what = "added to the entry on"
+		// "added to the entry on": this route wrote INTO the entry the catalog
+		// gains on merge, and a comment does not. A reader deciding whether the
+		// knowledge is safely captured is deciding exactly that.
+		head = "📚 Knowledge base updated — added to the entry on PR"
 	}
-	head := "📚 Knowledge base updated — " + what + " PR"
 	if up.PR > 0 {
 		head = fmt.Sprintf("%s #%d", head, up.PR)
 	}
@@ -167,12 +191,44 @@ func kbHeadline(up providers.KBUpdate) string {
 	return head
 }
 
-// kbProvenanceLine names who the note came from and which chat system it was
-// typed in. Transport is RunLore's own value (it is the notifier's Transport(),
-// not anything a message carried), so it is never marked; Author is whatever
-// the chat transport reported and always is.
+// kbProvenanceLine names who the note came from, whether they WROTE it, and
+// which chat system it was typed in. Transport is RunLore's own value (it is the
+// notifier's Transport(), not anything a message carried), so it is never
+// marked; Author is whatever the chat transport reported and always is.
+//
+// "By <author>" is a claim about authorship, and on the freeform route it was
+// false: RunLore's chat model wrote that text from the human's message. Every
+// other surface already said so — the thread reply through openedWith, the entry
+// body through its "@alice did not write it" heading, the entry description
+// through a provenance clause deliberately placed first so a clipped listing
+// cannot lose it — and this line said the opposite of all three, to sinks that
+// never saw the thread. See providers.KBUpdate.ModelDrafted.
+//
+// The drafted wording still NAMES the human. They are whose message produced the
+// note, which is what a reader needs to follow it up, and dropping the name
+// would tell a channel less than the false line did; what changes is that they
+// are named as the prompt rather than as the author.
+//
+// On the drafted route the line is emitted even when nothing else is known. An
+// empty provenance line is fine when there is merely nothing to add, and never
+// fine when what there is to add is that a human did not write this — the
+// reduced in-thread form is the headline and this line, so an omission here is
+// the whole distinction gone.
 func kbProvenanceLine(up providers.KBUpdate) string {
 	author := kbField(up.Author, kbAuthorBytes)
+	if up.ModelDrafted {
+		switch {
+		case author != "" && up.Transport != "":
+			return "Drafted by RunLore from " + thread.Untrusted(author) + "'s " + up.Transport +
+				" thread message — not their own words, pending review"
+		case author != "":
+			return "Drafted by RunLore from " + thread.Untrusted(author) +
+				"'s thread message — not their own words, pending review"
+		case up.Transport != "":
+			return "Drafted by RunLore from a " + up.Transport + " thread message, pending review"
+		}
+		return "Drafted by RunLore from a thread message, pending review"
+	}
 	switch {
 	case author != "" && up.Transport != "":
 		return "By " + thread.Untrusted(author) + " in a " + up.Transport + " thread"

@@ -633,3 +633,51 @@ func sortedStrings[V any](m map[string]V) []string {
 	sort.Strings(out)
 	return out
 }
+
+// TestMaxNoteBytesFloorMatchesTheDocs pins the one notify.thread number the
+// defaults guard above cannot see.
+//
+// That guard reads DEFAULTS — a number counts as a claim only when the text
+// between the key and the number says "default" — and this is a FLOOR: the
+// smallest positive max_note_bytes config.Validate accepts. It is a number an
+// operator acts on (a config below it fails to load) and one nothing else
+// checks, which is exactly the shape that rots: thread.MinMaxNoteBytes is
+// derived from the truncation marker's own width, so it moves when that wording
+// moves, and nobody editing a marker string thinks of a configuration page.
+//
+// The oracle is the constant, and the search is for the number as the page
+// actually writes it. It refuses to pass on finding nothing, for the reason the
+// guard above states about inertness: a page that stopped mentioning the floor
+// leaves an operator with no warning that their config will be rejected, and a
+// test that silently passes on an absent claim is how that happens quietly.
+func TestMaxNoteBytesFloorMatchesTheDocs(t *testing.T) {
+	page := filepath.Join(repoRoot(t), "website", "content", "docs", "configuration", "configuration.md")
+	src, err := os.ReadFile(page) //nolint:gosec // G304: a fixed path under the repo root
+	if err != nil {
+		t.Fatalf("read %s: %v", page, err)
+	}
+	text := string(src)
+
+	// The sentence that states the floor, located by its subject rather than by
+	// its number, so a WRONG number is found and reported rather than missed.
+	const marker = "a positive `max_note_bytes` under "
+	i := strings.Index(text, marker)
+	if i < 0 {
+		t.Fatalf("%s no longer states the max_note_bytes floor. An operator whose value is refused at "+
+			"load has nothing to read; restore the sentence or delete this guard deliberately.", page)
+	}
+	rest := text[i+len(marker):]
+	end := strings.IndexFunc(rest, func(r rune) bool { return r < '0' || r > '9' })
+	if end <= 0 {
+		t.Fatalf("the floor sentence in %s names no number: %.80q", page, rest)
+	}
+	got, err := strconv.Atoi(rest[:end])
+	if err != nil {
+		t.Fatalf("parse the floor from %s: %v", page, err)
+	}
+	if got != thread.MinMaxNoteBytes {
+		t.Errorf("%s says a positive max_note_bytes under %d is refused; config.Validate refuses under %d. "+
+			"An operator sizing to the documented figure gets a config that will not load.",
+			page, got, thread.MinMaxNoteBytes)
+	}
+}
