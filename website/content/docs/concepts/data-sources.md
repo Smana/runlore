@@ -12,7 +12,7 @@ assumed).
 | Signal | Tool(s) | Interface | Providers (v1) | Config key |
 |---|---|---|---|---|
 | GitOps "what changed" | `what_changed`, `gitops_*` | `GitOpsProvider` | Flux, ArgoCD | `gitops.engine` |
-| Metrics | `query_metrics`, `query_metrics_range` | `MetricsProvider` | VictoriaMetrics, Prometheus (PromQL) | `metrics.url` |
+| Metrics | `query_metrics`, `query_metrics_range`, `alert_rule` | `MetricsProvider` (+ optional `AlertRuleReader`) | VictoriaMetrics, Prometheus (PromQL) | `metrics.url` |
 | Logs | `query_logs`, `logs_error_summary`, `discover_log_fields` | `LogsProvider` | VictoriaLogs (LogsQL) · Grafana Loki (LogQL) · Elasticsearch/OpenSearch (`_search` DSL) | `logs.url` (+ optional `logs.provider`) |
 | Network flows | `network_drops` | `NetworkProvider` | Cilium Hubble · AWS VPC Flow Logs · GCP Firewall Logs | `network.provider` |
 | Cloud control plane | `cloud_*` | `CloudProvider` | AWS (CloudTrail + EC2/ASG/EKS) | `cloud.provider` |
