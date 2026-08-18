@@ -756,7 +756,7 @@
         {
           "text": {
             "emoji": true,
-            "text": "🔍 KubeNodeNotReady — eu-west-1",
+            "text": "🔍 KubeNodeNotReady — eu-west-1/ip-10-20-24-144.ec2.internal",
             "type": "plain_text"
           },
           "type": "header"
@@ -792,6 +792,10 @@
             },
             {
               "text": "*Cluster:*\neu-west-1",
+              "type": "mrkdwn"
+            },
+            {
+              "text": "*Resource:*\nNode ip-10-20-24-144.ec2.internal",
               "type": "mrkdwn"
             },
             {
@@ -863,7 +867,7 @@
         {
           "text": {
             "emoji": true,
-            "text": "🔍 KubeNodeNotReady — tmem175",
+            "text": "🔍 KubeNodeNotReady — tmem175/ip-10-20-24-144.ec2.internal",
             "type": "plain_text"
           },
           "type": "header"
@@ -899,6 +903,10 @@
             },
             {
               "text": "*Cluster:*\ntmem175 · tmem175-0",
+              "type": "mrkdwn"
+            },
+            {
+              "text": "*Resource:*\nNode ip-10-20-24-144.ec2.internal",
               "type": "mrkdwn"
             },
             {
