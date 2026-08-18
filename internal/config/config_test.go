@@ -1027,6 +1027,121 @@ func TestValidateForgeGitHost(t *testing.T) {
 	})
 }
 
+// TestValidateRefusesANonASCIIDerivedForgeHost is the contract the rejected
+// git_host cases above already had, applied to the keys that ACTUALLY produce
+// the host in most deployments.
+//
+// forge.git_host has been refused for non-ASCII since the confinement shipped.
+// But it is an OVERRIDE: leave it unset — as nearly every install does — and the
+// boundary is derived from forge.github_api_url or forge.gitlab.base_url, and
+// neither was checked. A base_url of "https://gİtlab.example.com" loaded
+// clean, and RunLore lowercased it into the credential boundary
+// "gitlab.example.com" — a SEPARATELY REGISTRABLE name that now collects the
+// forge token, while the operator's own instance (which resolves through IDNA to
+// xn--gtlab-56a.example.com) is refused the credential it owns and produces the
+// empty what_changed of RunLore #495. Both halves silent, on both providers.
+//
+// The remedy has to be LOUD. Quietly withholding IS the #495 failure mode, so
+// this fails config load naming the key the operator has to edit.
+func TestValidateRefusesANonASCIIDerivedForgeHost(t *testing.T) {
+	// U+0130 LATIN CAPITAL LETTER I WITH DOT ABOVE: strings.ToLower maps it to a
+	// plain ASCII 'i', idna.Lookup.ToASCII does not. Written as an escape so this
+	// test does not itself contain the confusable it is about.
+	const dottedCapitalI = "\u0130"
+
+	for _, tc := range []struct {
+		name, key string
+		apply     func(c *Config)
+	}{
+		{
+			name: "gitlab base_url",
+			key:  "forge.gitlab.base_url",
+			apply: func(c *Config) {
+				c.Forge.Provider = "gitlab"
+				c.Forge.GitLab.TokenEnv = "GITLAB_TOKEN"
+				c.Forge.GitLab.BaseURL = "https://g" + dottedCapitalI + "tlab.example.com"
+			},
+		},
+		{
+			name: "github api url",
+			key:  "forge.github_api_url",
+			apply: func(c *Config) {
+				c.Forge.GitHubAPIURL = "https://g" + dottedCapitalI + "he.example.com/api/v3"
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			c := &Config{}
+			tc.apply(c)
+			err := c.Validate()
+			if err == nil {
+				t.Fatalf("a non-ASCII host in %s loaded clean; RunLore lowercases it into the "+
+					"credential boundary, so the forge token goes to the ASCII name that fold "+
+					"produces and is withheld from the operator's own forge", tc.key)
+			}
+			if !strings.Contains(err.Error(), tc.key) {
+				t.Fatalf("the refusal must name the key the operator has to edit (%s), got: %v",
+					tc.key, err)
+			}
+		})
+	}
+
+	// The other direction, and the one this refusal must not cost: every ASCII
+	// forge spelling an operator legitimately runs still loads. Over-refusing
+	// here would be #495 again, arriving as a startup crash instead of an empty
+	// result.
+	for _, tc := range []struct {
+		name  string
+		apply func(c *Config)
+	}{
+		{"github.com default", func(*Config) {}},
+		{"github.com spelled out", func(c *Config) { c.Forge.GitHubAPIURL = "https://api.github.com" }},
+		{"github enterprise", func(c *Config) { c.Forge.GitHubAPIURL = "https://ghe.example.com/api/v3" }},
+		{"github enterprise on a port", func(c *Config) {
+			c.Forge.GitHubAPIURL = "https://ghe.example.com:8443/api/v3"
+		}},
+		{"gitlab.com", func(c *Config) {
+			c.Forge.Provider = "gitlab"
+			c.Forge.GitLab.TokenEnv = "GITLAB_TOKEN"
+		}},
+		{"self-hosted gitlab", func(c *Config) {
+			c.Forge.Provider = "gitlab"
+			c.Forge.GitLab.TokenEnv = "GITLAB_TOKEN"
+			c.Forge.GitLab.BaseURL = "https://gitlab.example.com"
+		}},
+		// The derived keys get an ASCII refusal, NOT the full bareHost shape the
+		// explicit git_host gets: url.Hostname() has already stripped what
+		// bareHost exists to reject, and these two spellings fold identically
+		// under every normaliser, so refusing them would break real deployments
+		// for no security gain.
+		{"self-hosted gitlab with an underscore label", func(c *Config) {
+			c.Forge.Provider = "gitlab"
+			c.Forge.GitLab.TokenEnv = "GITLAB_TOKEN"
+			c.Forge.GitLab.BaseURL = "https://git_lab.internal"
+		}},
+		{"self-hosted gitlab on an IPv6 literal", func(c *Config) {
+			c.Forge.Provider = "gitlab"
+			c.Forge.GitLab.TokenEnv = "GITLAB_TOKEN"
+			c.Forge.GitLab.BaseURL = "https://[2001:db8::1]:8443"
+		}},
+		// Punycode IS the ASCII spelling of an internationalised forge, so an
+		// operator who runs one has a way through that does not need git_host.
+		{"punycode idn forge", func(c *Config) {
+			c.Forge.Provider = "gitlab"
+			c.Forge.GitLab.TokenEnv = "GITLAB_TOKEN"
+			c.Forge.GitLab.BaseURL = "https://xn--gtlab-56a.example.com"
+		}},
+	} {
+		t.Run("accepted "+tc.name, func(t *testing.T) {
+			c := &Config{}
+			tc.apply(c)
+			if err := c.Validate(); err != nil {
+				t.Fatalf("a legitimate ASCII forge must still load, got: %v", err)
+			}
+		})
+	}
+}
+
 // TestLogsIndexValidate: logs.index is interpolated into the Elasticsearch
 // request PATH. The client escapes it so a malformed value can no longer change
 // the request's SHAPE, but escaping alone turns a typo into a puzzling 4xx from

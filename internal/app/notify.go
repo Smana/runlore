@@ -239,6 +239,11 @@ func forgeRepoRef(cfg *config.Config) string {
 // hosts: GitHub derives it from the API base, exactly as githubGitHost already
 // does for source-diff allowlisting; GitLab's base_url IS the instance root,
 // which is the host its web_url uses.
+//
+// forgeGitHost derives the CREDENTIAL BOUNDARY from this function, so the fold
+// here is a security decision and not presentation: it goes through
+// asciiLowerHost, which refuses to fold a host that Go and IDNA would normalise
+// to different names. See asciiLowerHost.
 func forgeWebHost(cfg *config.Config) string {
 	if cfg.Forge.Provider != "gitlab" {
 		return githubGitHost(cfg.Forge.GitHubAPIURL)
@@ -250,7 +255,7 @@ func forgeWebHost(cfg *config.Config) string {
 	if err != nil || u.Hostname() == "" {
 		return "gitlab.com"
 	}
-	return strings.ToLower(u.Hostname())
+	return asciiLowerHost(u.Hostname())
 }
 
 // buildThreadChat assembles the conversational reply layer, or returns nil when

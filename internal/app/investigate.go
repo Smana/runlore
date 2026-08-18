@@ -10,7 +10,6 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
-	"strings"
 	"time"
 
 	"go.opentelemetry.io/otel/attribute"
@@ -383,6 +382,10 @@ func appendSourceDiffTool(cfg *config.Config, tools []investigate.Tool, log *slo
 // configured GitHub API URL. Default/empty ⇒ github.com. A GitHub Enterprise
 // API URL (https://ghe.example.com/api/v3) shares its host with the git remote,
 // so the host is returned as-is; the public api.github.com maps to github.com.
+//
+// The fold goes through asciiLowerHost because this result reaches TokenHost via
+// forgeGitHost: a non-ASCII API host must not be folded into an ASCII name it is
+// not. See asciiLowerHost.
 func githubGitHost(apiURL string) string {
 	if apiURL == "" {
 		return "github.com"
@@ -391,7 +394,7 @@ func githubGitHost(apiURL string) string {
 	if err != nil || u.Hostname() == "" {
 		return "github.com"
 	}
-	if h := strings.ToLower(u.Hostname()); h != "api.github.com" {
+	if h := asciiLowerHost(u.Hostname()); h != "api.github.com" {
 		return h
 	}
 	return "github.com"

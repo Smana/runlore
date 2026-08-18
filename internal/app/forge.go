@@ -107,9 +107,43 @@ func BuildCloneTokenSource(cfg *config.Config, log *slog.Logger) ForgeToken {
 // A wrong value here does not leak the credential — it withholds it, which shows
 // up as an empty what_changed. That is why the ambiguous case is a startup
 // failure rather than a default.
+//
+// Every branch folds through asciiLowerHost, so no input reaching this function
+// can produce a boundary that is fold-equal to an ASCII host it is not. The loud
+// remedy lives in config.Validate (validateForgeGitHost / asciiForgeHost), which
+// refuses a non-ASCII forge host at startup naming the key it came from; this is
+// the backstop for a *config.Config assembled without Load.
 func forgeGitHost(cfg *config.Config) string {
-	if h := strings.ToLower(strings.TrimSpace(cfg.Forge.GitHost)); h != "" {
+	if h := asciiLowerHost(strings.TrimSpace(cfg.Forge.GitHost)); h != "" {
 		return h
 	}
 	return forgeWebHost(cfg)
+}
+
+// asciiLowerHost lowercases host when it is 7-bit ASCII and returns it UNCHANGED
+// otherwise. It is the single fold every forge host derivation goes through —
+// forgeGitHost, forgeWebHost and githubGitHost — because each of their results
+// becomes a credential boundary somewhere: Differ.TokenHost, Differ.SSHRewriteHost,
+// the source_diff token host, the forge repo reference a thread link is matched
+// against.
+//
+// Folding a non-ASCII host is the bug, not the input. strings.ToLower applies
+// Unicode simple case mapping and maps U+0130 to plain 'i'; whatever dials the
+// host resolves it through idna.Lookup.ToASCII, which does not. So a forge at
+// "gİtlab.example.com" folded to the boundary "gitlab.example.com" — handing the
+// token to anyone who registers that ASCII name, and withholding it from the
+// operator's own instance, which is the silent what_changed gap of #495.
+//
+// Returning the host UNFOLDED (rather than "") is deliberate on both counts: ""
+// reads as "attach the token everywhere" in whatchanged.Differ, while a retained
+// non-ASCII host equals no clone URL's host at all — whatchanged.hostOf refuses
+// non-ASCII and returns "" — so the credential is confined to nothing until the
+// operator fixes the config that config.Validate already refused to load.
+func asciiLowerHost(host string) string {
+	for i := 0; i < len(host); i++ {
+		if host[i] >= 0x80 {
+			return host
+		}
+	}
+	return strings.ToLower(host)
 }

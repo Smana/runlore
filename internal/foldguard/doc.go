@@ -19,6 +19,17 @@
 //     not, so kind "ſecret" (U+017F) skipped the refusal and still resolved to
 //     v1/secrets.
 //
+// A third instance shipped after the guard did, and is why it has three arms
+// rather than two: internal/app derived the forge git host from
+// forge.gitlab.base_url / forge.github_api_url with a bare strings.ToLower and
+// stored the result in whatchanged.Differ.TokenHost. A GitLab base_url of
+// "https://g\u0130tlab.example.com" became the credential boundary
+// "gitlab.example.com" — a separately registrable host that then collected the
+// forge token, while the operator's own instance was refused it and what_changed
+// went silently empty. The fold and the comparison sat in DIFFERENT PACKAGES,
+// which is exactly what the first two arms cannot see, so the third arm keys on
+// the assignment that carries a host across that edge.
+//
 // The guard itself lives entirely in foldguard_test.go, which states what it
 // does and does not cover.
 package foldguard
