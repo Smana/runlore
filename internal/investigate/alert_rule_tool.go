@@ -32,6 +32,13 @@ import (
 // an unmatched name. A rule definition is corroborating context, never the primary
 // evidence, so it must never be able to fail an investigation.
 //
+// The read is TWO-STEP: scoped by alertname first (one rule instead of the
+// backend's whole ruleset), then unscoped ONLY if that resolved nothing. Both
+// halves are load-bearing. The scoped read is the payload win; the unscoped re-read
+// is what stops a backend that mishandles the scoping from turning "your hint
+// confused me" into "that alert has no rule", and is also what supplies the other
+// alertnames the unmatched-name recovery list is made of.
+//
 // registered in internal/app/investigate.go (alongside the query_metrics tools).
 type AlertRuleTool struct {
 	Metrics providers.MetricsProvider
@@ -92,14 +99,42 @@ func (t AlertRuleTool) Call(ctx context.Context, args string) (string, error) {
 			"Infer the thresholded series from the alert name and annotations, and say in data_gaps that the " +
 			"rule expression could not be read.", nil
 	}
+	// Step 1 — the SCOPED read: the backend is asked for this one rule by name. On the
+	// real backend that is a 25,531 B answer instead of the 348,429 B whole ruleset
+	// (278 rules across 74 groups) it would otherwise serve, transfer and decode to
+	// answer one question.
+	//
+	// A hit here is authoritative and ends the call in one request. A MISS is not:
+	// per the AlertRuleReader contract the scoping is a hint, and a backend that
+	// mishandles it answers with nothing — which is byte-for-byte what "this
+	// alertname has no rule" looks like. Concluding absence from it would rebuild,
+	// inside the optimisation, exactly the false negative this tool exists to remove.
+	scoped, err := reader.AlertRules(ctx, name)
+	if err == nil {
+		if matched := matchAlertRules(scoped, name); len(matched) > 0 {
+			return renderMatchedRules(matched), nil
+		}
+	}
+	// A cancelled/expired context is not "this backend has no rules" — it is the
+	// loop's own deadline firing, and it must not be answered with a conclusion the
+	// second read never got to confirm. Return it, because runTool only consults
+	// tctx.Err() when Call returns an error: swallowing it here would record
+	// result="ok" for a call that never completed and hide a per-tool timeout.
+	// runTool still turns the error into an "error: …" tool result, so the
+	// investigation continues either way.
+	if cerr := ctx.Err(); cerr != nil {
+		if err != nil {
+			return "", err
+		}
+		return "", cerr
+	}
+	// Step 2 — the UNSCOPED read, on a scoped miss or a scoped failure (a strict
+	// backend may reject `rule_name[]` outright; the optimisation must not cost the
+	// capability). It is also what keeps the recovery path alive: a scoped response
+	// cannot carry the OTHER alertnames, and those are the whole content of the
+	// "did you mean" list below.
 	rules, err := reader.AlertRules(ctx)
 	if err != nil {
-		// A cancelled/expired context is not "this backend has no rules" — it is the
-		// loop's own deadline firing. Return it, because runTool only consults
-		// tctx.Err() when Call returns an error: swallowing it here would record
-		// result="ok" for a call that never completed and hide a per-tool timeout.
-		// runTool still turns the error into an "error: …" tool result, so the
-		// investigation continues either way.
 		if ctx.Err() != nil {
 			return "", err
 		}
@@ -117,6 +152,12 @@ func (t AlertRuleTool) Call(ctx context.Context, args string) (string, error) {
 	if len(matched) == 0 {
 		return renderUnmatchedAlert(name, rules), nil
 	}
+	return renderMatchedRules(matched), nil
+}
+
+// renderMatchedRules renders the rules found under one alertname, from whichever of
+// the two reads produced them.
+func renderMatchedRules(matched []providers.AlertRule) string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "%d rule(s) named %q:\n", len(matched), matched[0].Name)
 	for i, r := range matched {
@@ -132,7 +173,7 @@ func (t AlertRuleTool) Call(ctx context.Context, args string) (string, error) {
 			"match the incident's own labels to the right one before using its threshold.\n")
 	}
 	b.WriteString(statisticWarning + "\n")
-	return b.String(), nil
+	return b.String()
 }
 
 // matchAlertRules selects the rules firing under name: exact matches when there are

@@ -6,6 +6,8 @@ import (
 	"context"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -191,5 +193,50 @@ func TestAlertRulesParsing(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// A SCOPED read must make the backend do the filtering instead of pulling the whole
+// ruleset over the wire to filter in Go: the real backend serves 278 rules / ~509 KB
+// per call to deliver the one rule the alert_rule tool wants. Prometheus and vmalert
+// both scope on repeated `rule_name[]` parameters.
+func TestAlertRulesScopesByRuleName(t *testing.T) {
+	var got url.Values
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		got = r.URL.Query()
+		_, _ = w.Write([]byte(rulesPayload))
+	}))
+	defer srv.Close()
+	c := New(srv.URL)
+
+	if _, err := c.AlertRules(context.Background(), "RDSCriticalLatency", "KubePodCrashLooping"); err != nil {
+		t.Fatalf("AlertRules: %v", err)
+	}
+	want := []string{"RDSCriticalLatency", "KubePodCrashLooping"}
+	if names := got["rule_name[]"]; !slices.Equal(names, want) {
+		t.Fatalf("rule_name[]=%v, want %v", names, want)
+	}
+	// Scoping must not cost the recording-rule guard or the active-instances trim.
+	if got.Get("type") != "alert" || got.Get("exclude_alerts") != "true" {
+		t.Fatalf("the scoped read dropped an existing parameter: %v", got)
+	}
+
+	// An UNSCOPED read must send no rule_name[] at all: it is what feeds the
+	// unmatched-name recovery list, which needs every alertname the backend defines.
+	if _, err := c.AlertRules(context.Background()); err != nil {
+		t.Fatalf("AlertRules: %v", err)
+	}
+	if names := got["rule_name[]"]; len(names) != 0 {
+		t.Fatalf("unscoped read sent rule_name[]=%v, want none", names)
+	}
+
+	// A blank name must never go on the wire. On a backend that honours the
+	// parameter, `rule_name[]=` matches nothing — manufacturing exactly the "no such
+	// rule" false negative this capability exists to remove.
+	if _, err := c.AlertRules(context.Background(), "   ", ""); err != nil {
+		t.Fatalf("AlertRules: %v", err)
+	}
+	if names := got["rule_name[]"]; len(names) != 0 {
+		t.Fatalf("blank name sent as rule_name[]=%v, want none", names)
 	}
 }

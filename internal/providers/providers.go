@@ -540,8 +540,23 @@ type AlertRule struct {
 //
 // Implementations return ALERTING rules only (recording rules are not thresholds)
 // and MUST be read-only — nothing here creates, edits or silences a rule.
+//
+// names, when given, is a HINT to scope the read to those alertnames (Prometheus
+// and vmalert both scope /api/v1/rules on repeated `rule_name[]` parameters, which
+// turns a ~509 KB / 278-rule download into the one rule the caller wants). It is
+// best effort in BOTH directions, and callers must treat it as such:
+//
+//   - the result may contain MORE than names — a backend that does not support the
+//     hint simply returns everything, so callers still filter what they got;
+//   - the result may contain LESS, up to nothing at all. An EMPTY result from a
+//     scoped read is therefore NOT evidence that those alertnames have no rule; it
+//     is indistinguishable from a backend that mishandled the hint. A caller that
+//     needs to establish absence — or that needs the other alertnames, e.g. to
+//     offer a corrected name — MUST re-read with no names before concluding.
+//
+// An unscoped read (no names) is always authoritative for what the backend serves.
 type AlertRuleReader interface {
-	AlertRules(ctx context.Context) ([]AlertRule, error)
+	AlertRules(ctx context.Context, names ...string) ([]AlertRule, error)
 }
 
 // LogsProvider abstracts the logs backend (VictoriaLogs now; Loki etc. later).

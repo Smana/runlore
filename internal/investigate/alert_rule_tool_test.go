@@ -6,6 +6,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -13,18 +14,77 @@ import (
 	"github.com/Smana/runlore/internal/providers"
 )
 
+// ruleScoping is how the fake backend treats the `rule_name[]` scoping the tool
+// asks for. It is the axis the two-step read exists to survive: the tool cannot
+// know which of these it is talking to, and one of them answers a scoped read the
+// same way a backend answers a name that has no rule at all.
+type ruleScoping int
+
+const (
+	// scopingIgnored serves the whole ruleset whatever is asked — a backend
+	// predating rule_name[]. Harmless: the client-side match still finds the rule.
+	scopingIgnored ruleScoping = iota
+	// scopingHonoured filters by exact name, as Prometheus and vmalert do.
+	scopingHonoured
+	// scopingBroken mishandles the parameter and answers EMPTY. Indistinguishable
+	// from "this alertname has no rule" — the false negative the fallback removes.
+	scopingBroken
+	// scopingRejected refuses the parameter outright (a strict proxy, a 400) while
+	// still serving the unscoped read.
+	scopingRejected
+)
+
 // fakeRuleMetrics embeds the package's plain MetricsProvider double and adds the
 // OPTIONAL providers.AlertRuleReader capability, so the tool's happy path and its
 // error path are both exercised against a real type assertion. A bare fakeMetrics
 // (no AlertRules method) is the backend that lacks the capability entirely.
+//
+// It behaves like a backend rather than a mock: `rules` is everything it defines,
+// and `scoping` decides what a scoped read gets back. `calls` records the names
+// each read asked for, which is how the tests pin the request COUNT — the payload
+// win is worth nothing if the tool still reads the full ruleset on the happy path.
 type fakeRuleMetrics struct {
 	fakeMetrics
-	rules []providers.AlertRule
-	err   error
+	rules   []providers.AlertRule
+	err     error
+	scoping ruleScoping
+	calls   [][]string
 }
 
-func (f *fakeRuleMetrics) AlertRules(context.Context) ([]providers.AlertRule, error) {
-	return f.rules, f.err
+func (f *fakeRuleMetrics) AlertRules(_ context.Context, names ...string) ([]providers.AlertRule, error) {
+	f.calls = append(f.calls, names)
+	if f.err != nil {
+		return nil, f.err
+	}
+	if len(names) == 0 {
+		return f.rules, nil
+	}
+	switch f.scoping {
+	case scopingIgnored:
+		// A backend predating rule_name[]: the parameter is simply not read.
+	case scopingHonoured:
+		var out []providers.AlertRule
+		for _, r := range f.rules {
+			if slices.Contains(names, r.Name) {
+				out = append(out, r)
+			}
+		}
+		return out, nil
+	case scopingBroken:
+		return nil, nil
+	case scopingRejected:
+		return nil, errors.New("metrics status 400: unsupported parameter \"rule_name[]\"")
+	}
+	return f.rules, nil
+}
+
+// wantCalls pins the exact sequence of reads: each element is one call\'s names,
+// with nil meaning an UNSCOPED read.
+func wantCalls(t *testing.T, f *fakeRuleMetrics, want [][]string) {
+	t.Helper()
+	if !slices.EqualFunc(f.calls, want, slices.Equal) {
+		t.Fatalf("AlertRules reads = %v, want %v", f.calls, want)
+	}
 }
 
 // rdsRule is the real RDSCriticalLatency rule that was misdiagnosed twice: its
@@ -78,8 +138,11 @@ func TestAlertRuleToolCall(t *testing.T) {
 			},
 		},
 		{
+			// scopingHonoured is the real trap: `rule_name[]=rdscriticallatency` is an
+			// EXACT match on the backend, so the scoped read comes back empty and only
+			// the unscoped re-read can still fold-match the name.
 			name: "name match is case-insensitive so a reworded alertname still resolves",
-			provider: &fakeRuleMetrics{rules: []providers.AlertRule{rdsRule,
+			provider: &fakeRuleMetrics{scoping: scopingHonoured, rules: []providers.AlertRule{rdsRule,
 				{Name: "KubePodCrashLooping", Query: "rate(kube_pod_container_status_restarts_total[5m]) > 0"}}},
 			args: `{"alert":"rdscriticallatency"}`,
 			want: []string{"aws_rds_write_latency_maximum"},
@@ -102,7 +165,7 @@ func TestAlertRuleToolCall(t *testing.T) {
 		},
 		{
 			name: "no matching rule names the alerts that DO exist instead of dead-ending",
-			provider: &fakeRuleMetrics{rules: []providers.AlertRule{
+			provider: &fakeRuleMetrics{scoping: scopingHonoured, rules: []providers.AlertRule{
 				{Name: "KubePodCrashLooping", Query: "x > 1"},
 				{Name: "NodeFilesystemAlmostOutOfSpace", Query: "y > 1"},
 			}},
@@ -239,7 +302,7 @@ func TestAlertRuleUnmatchedListHoistsTheNearMissAboveTheRowCap(t *testing.T) {
 	// Sorts far past the 50-row cap among the AAA* names.
 	rules = append(rules, providers.AlertRule{Name: "RDSCriticalLatencyProd", Query: "x > 1"})
 
-	out, err := AlertRuleTool{Metrics: &fakeRuleMetrics{rules: rules}}.
+	out, err := AlertRuleTool{Metrics: &fakeRuleMetrics{scoping: scopingHonoured, rules: rules}}.
 		Call(context.Background(), `{"alert":"RDSCriticalLatency"}`)
 	if err != nil {
 		t.Fatalf("Call: %v", err)
@@ -250,4 +313,96 @@ func TestAlertRuleUnmatchedListHoistsTheNearMissAboveTheRowCap(t *testing.T) {
 	if strings.Count(out, "\n") > maxToolRows+6 {
 		t.Fatalf("output must still be capped at ~maxToolRows rows:\n%s", out)
 	}
+}
+
+// The happy path must cost ONE scoped read, not a full-ruleset download. The real
+// backend serves 278 rules / ~509 KB unscoped; scoped it returns the one rule the
+// tool asked for. Pinning the call sequence is what keeps that win from silently
+// regressing into "scoped read, then read everything anyway".
+func TestAlertRuleToolReadsOnlyTheRequestedRuleOnAHit(t *testing.T) {
+	f := &fakeRuleMetrics{scoping: scopingHonoured, rules: []providers.AlertRule{rdsRule,
+		{Name: "KubePodCrashLooping", Query: "rate(kube_pod_container_status_restarts_total[5m]) > 0"}}}
+	out, err := AlertRuleTool{Metrics: f}.Call(context.Background(), `{"alert":"RDSCriticalLatency"}`)
+	if err != nil {
+		t.Fatalf("Call: %v", err)
+	}
+	if !strings.Contains(out, "aws_rds_write_latency_maximum") {
+		t.Fatalf("the scoped read must still render the rule:\n%s", out)
+	}
+	wantCalls(t, f, [][]string{{"RDSCriticalLatency"}})
+}
+
+// THE CRUX of the two-step read. A backend that MIS-handles rule_name[] answers a
+// scoped read with an empty set — which is byte-for-byte what "this alertname has
+// no rule" looks like. Concluding "no rule found" from it would reintroduce, through
+// the optimisation, the exact false negative this capability exists to remove. An
+// empty scoped read must therefore be re-read UNSCOPED before the tool concludes
+// anything.
+func TestAlertRuleToolRereadsUnscopedWhenScopingReturnsNothing(t *testing.T) {
+	f := &fakeRuleMetrics{scoping: scopingBroken, rules: []providers.AlertRule{rdsRule}}
+	out, err := AlertRuleTool{Metrics: f}.Call(context.Background(), `{"alert":"RDSCriticalLatency"}`)
+	if err != nil {
+		t.Fatalf("Call: %v", err)
+	}
+	if !strings.Contains(out, "aws_rds_write_latency_maximum") {
+		t.Fatalf("the rule must survive a backend that mishandles rule_name[]:\n%s", out)
+	}
+	for _, bad := range []string{alertRuleUnavailable, "no alerting rule named"} {
+		if strings.Contains(out, bad) {
+			t.Fatalf("a mishandled scoping parameter must not read as %q:\n%s", bad, out)
+		}
+	}
+	wantCalls(t, f, [][]string{{"RDSCriticalLatency"}, nil})
+}
+
+// A backend that REJECTS rule_name[] outright (a strict proxy answering 400) must
+// not turn a previously working lookup into "unavailable" — the scoped read is an
+// optimisation, and no optimisation may cost the capability.
+func TestAlertRuleToolRereadsUnscopedWhenTheBackendRejectsScoping(t *testing.T) {
+	f := &fakeRuleMetrics{scoping: scopingRejected, rules: []providers.AlertRule{rdsRule}}
+	out, err := AlertRuleTool{Metrics: f}.Call(context.Background(), `{"alert":"RDSCriticalLatency"}`)
+	if err != nil {
+		t.Fatalf("Call: %v", err)
+	}
+	if !strings.Contains(out, "aws_rds_write_latency_maximum") {
+		t.Fatalf("a backend that refuses rule_name[] must still resolve the rule:\n%s", out)
+	}
+	wantCalls(t, f, [][]string{{"RDSCriticalLatency"}, nil})
+}
+
+// The tension scoping creates: a scoped response cannot contain the OTHER
+// alertnames, which is exactly what the unmatched-name recovery list is built from.
+// The unscoped second read is what resolves it — a genuinely absent name must still
+// be answered with the names the backend does define, not with a bare dead end.
+func TestAlertRuleToolRecoveryListSurvivesScoping(t *testing.T) {
+	f := &fakeRuleMetrics{scoping: scopingHonoured, rules: []providers.AlertRule{
+		{Name: "KubePodCrashLooping", Query: "x > 1"},
+		{Name: "NodeFilesystemAlmostOutOfSpace", Query: "y > 1"},
+	}}
+	out, err := AlertRuleTool{Metrics: f}.Call(context.Background(), `{"alert":"RDSCriticalLatency"}`)
+	if err != nil {
+		t.Fatalf("Call: %v", err)
+	}
+	for _, want := range []string{"no alerting rule named", "KubePodCrashLooping", "NodeFilesystemAlmostOutOfSpace"} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("the recovery list must contain %q:\n%s", want, out)
+		}
+	}
+	wantCalls(t, f, [][]string{{"RDSCriticalLatency"}, nil})
+}
+
+// A deadline that expires between the two reads must NOT be reported as "no rule
+// found": the unscoped confirmation never happened, so the absence was never
+// established. It surfaces as an error, which runTool classifies as the per-tool
+// timeout it is (and still renders as this tool's result, so the investigation
+// continues).
+func TestAlertRuleToolDoesNotConcludeAbsenceWhenTheContextExpires(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	f := &fakeRuleMetrics{scoping: scopingBroken, rules: []providers.AlertRule{rdsRule}}
+	cancel()
+	out, err := AlertRuleTool{Metrics: f}.Call(ctx, `{"alert":"RDSCriticalLatency"}`)
+	if err == nil {
+		t.Fatalf("an expired context must not be reported as a resolved lookup: %q", out)
+	}
+	wantCalls(t, f, [][]string{{"RDSCriticalLatency"}})
 }

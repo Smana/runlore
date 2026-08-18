@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/url"
+	"strings"
 	"time"
 
 	"github.com/Smana/runlore/internal/providers"
@@ -76,6 +77,27 @@ func (r apiRule) isAlerting() bool {
 // AlertRules reads the backend's ALERTING rule definitions, implementing the
 // optional providers.AlertRuleReader capability via GET /api/v1/rules?type=alert.
 //
+// names scopes the read server-side through repeated `rule_name[]` parameters,
+// which Prometheus and vmalert both honour. Measured against the real backend
+// (74 groups / 278 alerting rules / 254 alertnames), the unscoped alerting ruleset
+// is 348,429 B and the same request scoped to one alertname is 25,531 B — 93% less
+// to serve, transfer, decode and hold, to answer the one question the caller has.
+//
+// Do not expect better than that: vmalert still emits ALL 74 group envelopes,
+// carrying `rules: []` for the groups that matched nothing, so ~24 KB of envelope
+// is the floor here regardless of how narrow the scope is.
+//
+// The scoping stays a HINT, per the capability contract. A backend that ignores the
+// parameter returns the full set (harmless — the caller filters anyway), and one
+// that mishandles it may return nothing. That second case is not hypothetical
+// bookkeeping: on this very backend a scoped read for an alertname that does not
+// exist returns 74 groups and ZERO rules, which is byte-for-byte what a mishandled
+// parameter would produce. An empty scoped result therefore proves nothing, and the
+// caller must re-read unscoped before concluding "that alertname has no rule".
+//
+// Blank names are dropped rather than sent: `rule_name[]=` on a backend that DOES
+// scope matches nothing, manufacturing exactly that false negative.
+//
 // It is strictly read-only. `type=alert` keeps recording rules off the wire on a
 // large ruleset, and `exclude_alerts=true` drops the per-rule `alerts[]` array of
 // ACTIVE INSTANCES, which nothing below decodes. On a real 278-rule backend that
@@ -94,10 +116,14 @@ func (r apiRule) isAlerting() bool {
 // "metrics status 404: …"), which the caller degrades on — the error is returned
 // rather than swallowed so "the endpoint is absent" never reads as "there are no
 // rules".
-func (c *Client) AlertRules(ctx context.Context) ([]providers.AlertRule, error) {
-	raw, err := c.getRaw(ctx, "/api/v1/rules", url.Values{
-		"type": {"alert"}, "exclude_alerts": {"true"},
-	})
+func (c *Client) AlertRules(ctx context.Context, names ...string) ([]providers.AlertRule, error) {
+	v := url.Values{"type": {"alert"}, "exclude_alerts": {"true"}}
+	for _, n := range names {
+		if n = strings.TrimSpace(n); n != "" {
+			v.Add("rule_name[]", n)
+		}
+	}
+	raw, err := c.getRaw(ctx, "/api/v1/rules", v)
 	if err != nil {
 		return nil, err
 	}
