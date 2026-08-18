@@ -206,10 +206,48 @@ func draftResource(ref string) (resource, reason string) {
 	switch {
 	case !ok:
 		return resource, "reads as a bare namespace, so it matches every workload in it rather than one object"
-	case ns == "" || name == "" || strings.Contains(name, "/"):
-		return resource, "is not shaped namespace/name, so recall's structural match can never agree with it"
+	case !isDNSLabel(ns) || !isDNSSubdomain(name):
+		return resource, "is not shaped namespace/name (RFC 1123), so recall's exact match can never agree with it"
 	}
 	return resource, ""
+}
+
+// isDNSLabel and isDNSSubdomain report whether a ref's halves could name a real
+// Kubernetes object: a namespace is an RFC 1123 LABEL (lowercase alphanumerics and
+// "-"), a name an RFC 1123 SUBDOMAIN (the same, plus "."). Both must start and end
+// alphanumeric, and neither may be empty.
+//
+// The warning is keyed on this ALLOWLIST while EntryResourceRef's repair stays a
+// denylist of five observed separators, and the asymmetry is deliberate. Repair is
+// destructive, so it only cuts at characters proven impossible; diagnosis is free,
+// so it reports everything the charset rules out. Keyed the other way — reporting
+// only the five — each new separator a model invented would ship silently until
+// someone appended another byte to a string literal, which is the very failure #518
+// is about: "argocd/essentials|monitoring" and "tooling/Harbor Registry" both clear
+// the merge gate, can never equal a Workload.Ref(), and said nothing.
+func isDNSLabel(s string) bool { return isDNS(s, false) }
+
+func isDNSSubdomain(s string) bool { return isDNS(s, true) }
+
+func isDNS(s string, dots bool) bool {
+	if s == "" {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		switch c := s[i]; {
+		case c >= 'a' && c <= 'z', c >= '0' && c <= '9':
+		case c == '-', c == '.' && dots:
+			// Interior punctuation only: the first/last-byte check below rejects a
+			// leading or trailing one, which no Kubernetes object may carry either.
+		default:
+			return false
+		}
+	}
+	return isAlnum(s[0]) && isAlnum(s[len(s)-1])
+}
+
+func isAlnum(c byte) bool {
+	return c >= 'a' && c <= 'z' || c >= '0' && c <= '9'
 }
 
 // entryType derives the OKF type for a drafted entry. The default is Incident: a

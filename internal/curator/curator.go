@@ -194,13 +194,11 @@ func (c *Curator) Curate(ctx context.Context, inv providers.Investigation) (prov
 // cannot reach (see draftResource).
 func (c *Curator) warnDraft(e providers.KBEntry) {
 	for _, iss := range kbvalidate.ValidateStructural(draftedEntry(e)) {
+		msg := "drafted KB entry: advisory validation warning"
 		if iss.Severity == kbvalidate.SeverityError {
-			c.Log.Warn("drafted KB entry fails RunLore's own merge gate; filing it anyway, but the frontmatter needs a human fix before it can merge",
-				"field", iss.Field, "issue", iss.Message, "title", e.Title)
-			continue
+			msg = "drafted KB entry fails RunLore's own merge gate; filing it anyway, but the frontmatter needs a human fix before it can merge"
 		}
-		c.Log.Warn("drafted KB entry: advisory validation warning",
-			"field", iss.Field, "issue", iss.Message, "title", e.Title)
+		c.Log.Warn(msg, "field", iss.Field, "issue", iss.Message, "title", e.Title)
 	}
 	// alert_resource is a SECOND, independent match key (the resource the alert fired
 	// on, when the fault sat deeper), so it is held to the same shape as the first.
@@ -209,7 +207,7 @@ func (c *Curator) warnDraft(e providers.KBEntry) {
 		{"alert_resource", e.AlertResource},
 	} {
 		if _, reason := draftResource(k.value); reason != "" {
-			c.Log.Warn("drafted KB entry carries a recall index recall cannot use; filing it anyway",
+			c.Log.Warn("drafted KB entry carries a recall index that recall cannot use; filing it anyway",
 				"field", k.field, "value", k.value, "reason", reason, "title", e.Title)
 		}
 	}

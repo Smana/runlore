@@ -85,12 +85,6 @@ func (w Workload) Ref() string {
 // announcement fires, because both are 1:1 with the LANDED FORGE WRITE, which did
 // land — only the merge is impossible, and nothing surfaces it.
 //
-// Narrowing, not dropping: `resource` is the structural-recall index (see
-// investigate's resourceAgrees), so an entry with no resource is reachable
-// lexically only. The first listed object is the one the namespace was rendered
-// against and is a real object, so keeping it preserves the index. Nothing is
-// lost — the full list still reaches the entry BODY verbatim.
-//
 // It used to promise that whitespace-free input was returned EXACTLY as given, so
 // that no entry which merges today would be written differently. #518 retired that
 // promise, because clearing the merge gate is not the bar that matters:

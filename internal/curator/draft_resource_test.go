@@ -72,6 +72,30 @@ func TestDraftResourceShape(t *testing.T) {
 		ref:          "/harbor-registry",
 		wantResource: "/harbor-registry",
 		wantReason:   "namespace/name",
+	}, {
+		// The class the shape check missed while it only counted slashes: each of the
+		// four below clears the merge gate (no whitespace) and carries no character
+		// EntryResourceRef cuts at, yet none can ever equal a Workload.Ref(). Before
+		// the charset rule they shipped with no warning at all — #518's own worse half.
+		name:         "an uppercase name can never name a Kubernetes object",
+		ref:          "tooling/Harbor",
+		wantResource: "tooling/Harbor",
+		wantReason:   "namespace/name",
+	}, {
+		name:         "an underscore is not legal in a Kubernetes name",
+		ref:          "tooling/harbor_registry",
+		wantResource: "tooling/harbor_registry",
+		wantReason:   "namespace/name",
+	}, {
+		name:         "a separator the cut does not know about is still reported",
+		ref:          "argocd/essentials|monitoring",
+		wantResource: "argocd/essentials|monitoring",
+		wantReason:   "namespace/name",
+	}, {
+		name:         "a trailing dot is not a legal name either",
+		ref:          "tooling/harbor.",
+		wantResource: "tooling/harbor.",
+		wantReason:   "namespace/name",
 	}}
 
 	for _, tt := range tests {

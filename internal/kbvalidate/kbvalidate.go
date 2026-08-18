@@ -11,6 +11,16 @@
 // unmergeable. curator.warnDraft now runs ValidateStructural on every entry the
 // curator drafts, before the PR is opened, and logs what fails. It deliberately
 // does not BLOCK — an entry a human has to fix beats an investigation thrown away.
+//
+// SCOPE, stated rather than implied: that guard is the CURATOR's alone. RunLore has
+// a second entry writer — thread.ConceptEntry, opened by thread.Responder's
+// standalone-note route — and it is NOT validated here. The two halves of the #518
+// fix land differently on it: it DOES get the write-side repair, because it narrows
+// through the shared providers.EntryResourceRef, and it is deliberately typed
+// Concept so the Incident-only resource and section rules do not apply. What it
+// lacks is the draft-time REPORT, so a note that fails a rule which does apply to
+// it (an empty description, say) still meets this validator for the first time in
+// the catalog repo's CI. Closing that is a follow-up, not an oversight.
 package kbvalidate
 
 import (
