@@ -364,6 +364,12 @@ const (
 	LookupUnresolvable LookupReason = "unresolvable"
 	// LookupFailed — the read errored for some other reason, so nothing was established.
 	LookupFailed LookupReason = "failed"
+	// LookupUndiffable — objects matching the request WERE found, but none carries enough
+	// to locate a source (no applied revision, no sourceRef, or a source that did not
+	// resolve), so no repository could be searched. Distinct from LookupAbsent because the
+	// object exists: a Kustomization that has never reconciled is a prime suspect, and
+	// reporting it as absent hides the very thing the caller is looking for.
+	LookupUndiffable LookupReason = "undiffable"
 )
 
 // AllNamespaces is the Lookup scope name for a completed cluster-wide search by name.
@@ -436,6 +442,27 @@ type DepNode struct {
 	Ready    string // Ready condition status
 	Reason   string
 	Children []DepNode
+}
+
+// ChangesLookupReporter is an optional capability: a GitOps provider that says what an
+// EMPTY Changes result established. Consumers type-assert for it exactly like
+// GitOpsInspector.
+//
+// It exists because an empty change list has several causes and only the provider can tell
+// them apart — it is the code doing the skipping. Nothing matched the selector, objects
+// matched but none was diffable, or a source read was refused by RBAC and never ran: the
+// first is about the request, the second is about an object that EXISTS, and the third is
+// not about the cluster at all. Collapsing them is how runlore#503 turned a limit of a tool
+// into a claim about the world, and what_changed reproduced it one layer down by answering
+// "no changes found for the given selector" to all of them.
+//
+// Changes() stays on the interface and delegates here, so a provider that does not
+// implement this keeps working and every existing caller and test double is unaffected.
+type ChangesLookupReporter interface {
+	// ChangesLookup returns the same changes as Changes plus, when that list is EMPTY, a
+	// Lookup recording what the enumeration established. The Lookup is meaningless when
+	// changes is non-empty — the caller has data and needs no explanation of it.
+	ChangesLookup(ctx context.Context, w TimeWindow, sel Selector) ([]Change, Lookup, error)
 }
 
 // GitOpsEngineReporter is an optional capability: a GitOps provider naming the engine it

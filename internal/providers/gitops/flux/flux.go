@@ -116,34 +116,64 @@ func New(reader Reader, differ *whatchanged.Differ) *Provider {
 // window falls back to the single-latest-revision behavior. The enumeration is bounded
 // (cap + committer-time short-circuit) so a wide window can't explode the output.
 func (p *Provider) Changes(ctx context.Context, w providers.TimeWindow, sel providers.Selector) ([]providers.Change, error) {
+	changes, _, err := p.ChangesLookup(ctx, w, sel)
+	return changes, err
+}
+
+// ChangesLookup implements providers.ChangesLookupReporter: the same enumeration as
+// Changes, plus what an empty result established. Four of the five `continue`s in
+// changesFor below already know which case they hit; this stops throwing that away.
+func (p *Provider) ChangesLookup(ctx context.Context, w providers.TimeWindow, sel providers.Selector) ([]providers.Change, providers.Lookup, error) {
 	ks, err := p.reader.ListKustomizations(ctx)
 	if err != nil {
-		return nil, err
+		return nil, providers.Lookup{Reason: providers.LookupFailed}, err
 	}
-	changes := p.changesFor(ctx, w, ks, func(k kustomization) bool {
+	scope := sel.Namespace
+	if scope == "" {
+		scope = providers.AllNamespaces
+	}
+	changes, lk := p.changesFor(ctx, w, ks, func(k kustomization) bool {
 		return matchesNamespace(k, sel.Namespace) && (sel.Name == "" || k.Name == sel.Name)
 	})
+	lk.Scopes = []string{scope}
 	// B2 fallback: the namespace filter found nothing, but a named object might live
 	// in another namespace (the flux-system bootstrap layout). Retry by name across
 	// every namespace rather than returning a false-negative "no changes".
 	if len(changes) == 0 && sel.Name != "" {
-		changes = p.changesFor(ctx, w, ks, func(k kustomization) bool { return k.Name == sel.Name })
+		changes, lk = p.changesFor(ctx, w, ks, func(k kustomization) bool { return k.Name == sel.Name })
+		lk.Scopes = []string{scope, providers.AllNamespaces}
+		if scope == providers.AllNamespaces {
+			lk.Scopes = []string{providers.AllNamespaces}
+		}
 	}
-	return changes, nil
+	return changes, lk, nil
 }
 
 // changesFor maps the Kustomizations accepted by keep into engine-agnostic Changes,
 // resolving each source URL (cached per source) and populating When. With a non-zero
 // window it expands each diffable-Git Kustomization into one Change per in-window
 // source revision (G3); otherwise it emits the single current-revision Change.
-func (p *Provider) changesFor(ctx context.Context, w providers.TimeWindow, ks []kustomization, keep func(kustomization) bool) []providers.Change {
+func (p *Provider) changesFor(ctx context.Context, w providers.TimeWindow, ks []kustomization, keep func(kustomization) bool) ([]providers.Change, providers.Lookup) {
 	urlCache := map[string]string{}
 	var changes []providers.Change
+	// LookupAbsent until a Kustomization matches; a match then skipped for being
+	// undiffable escalates to LookupUndiffable (the object exists — a Kustomization with
+	// no applied revision is often the answer); a source read REFUSED by RBAC escalates
+	// further to LookupDenied and is never downgraded, because a search that never ran
+	// must not be reported as one that came back empty. That precedence is the whole
+	// point: #503 was a denial rendered as an absence.
+	lk := providers.Lookup{Reason: providers.LookupAbsent}
+	undiffable := func() {
+		if lk.Reason != providers.LookupDenied {
+			lk.Reason = providers.LookupUndiffable
+		}
+	}
 	for _, k := range ks {
 		if !keep(k) {
 			continue
 		}
 		if k.Revision == "" || k.SourceName == "" {
+			undiffable()
 			continue // nothing applied yet / no source to attribute the change to
 		}
 		isGit := k.SourceKind == "" || k.SourceKind == "GitRepository"
@@ -155,6 +185,7 @@ func (p *Provider) changesFor(ctx context.Context, w providers.TimeWindow, ks []
 		url := ""
 		if isGit {
 			if k.Path == "" {
+				undiffable()
 				continue // a GitRepository change with no path can't be located for a diff
 			}
 			key := k.SourceNamespace + "/" + k.SourceName
@@ -162,12 +193,22 @@ func (p *Provider) changesFor(ctx context.Context, w providers.TimeWindow, ks []
 			if !ok {
 				gr, err := p.reader.GetGitRepository(ctx, k.SourceNamespace, k.SourceName)
 				if err != nil {
-					continue // source not resolvable (missing/transient) — skip, don't abort
+					// A Forbidden here is NOT a missing source: the read never happened, so
+					// reporting it as "nothing with a resolvable source" is #503's mechanism
+					// (a denial collapsed into an absence) reappearing on this path. It was a
+					// bare `continue` before, which is exactly how that bug shipped last time.
+					if apierrors.IsForbidden(err) {
+						lk.Reason = providers.LookupDenied
+					} else {
+						undiffable()
+					}
+					continue // source not resolvable (missing/transient/refused) — skip, don't abort
 				}
 				cached = gr.URL
 				urlCache[key] = cached
 			}
 			if cached == "" {
+				undiffable()
 				continue
 			}
 			url = cached
@@ -185,7 +226,7 @@ func (p *Provider) changesFor(ctx context.Context, w providers.TimeWindow, ks []
 		c.When = p.changeTime(ctx, url, toRev, k.ReadyTime)
 		changes = append(changes, c)
 	}
-	return changes
+	return changes, lk
 }
 
 // windowChanges expands a diffable-Git Kustomization into one Change per source

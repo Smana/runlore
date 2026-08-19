@@ -3,6 +3,7 @@
 package investigate
 
 import (
+	"context"
 	"encoding/json"
 	"slices"
 	"strings"
@@ -138,6 +139,44 @@ func gitopsLookupAnswer(id string, lk providers.Lookup) string {
 	}
 }
 
+// gitopsChangesAnswer renders an EMPTY change enumeration as what the lookup established,
+// the Changes-path sibling of gitopsLookupAnswer above. Same rule: name the scopes that
+// actually completed, give each reason its own answer, and never assert a fact about Git
+// that the enumeration did not establish.
+//
+// It replaces "no changes found for the given selector", which answered all of these
+// identically. An investigation quoted that for a resource on a cluster the engine does not
+// manage, ruled out a config cause on it, and recorded it as the finding's provenance and
+// only citation — #503's mechanism one layer down from where #503 was fixed.
+//
+// Every branch carries notAConfigChange, so the disclaimer cannot drift per reason, and the
+// LookupDenied branch is the reason this function exists at all: only the provider can know
+// a source read was refused, and a refusal reported as an absence is the original bug.
+func gitopsChangesAnswer(sel string, lk providers.Lookup) string {
+	const notAConfigChange = " No repository was searched, so this says NOTHING about whether " +
+		"the configuration changed — do not cite it as evidence against a config cause."
+	const nextStep = " Re-call with the namespace alone to list what this engine does manage, " +
+		"or confirm the resource is managed by a GitOps engine this deployment can see."
+	switch lk.Reason {
+	case providers.LookupDenied:
+		return "no diffable GitOps object for " + sel + ": " + searchedClause(lk.Scopes) +
+			" matched an object whose SOURCE READ WAS DENIED by RBAC, so it never ran and no " +
+			"revision could be resolved." + notAConfigChange + " The change may well exist in a " +
+			"repository this agent was refused; fix the grant rather than concluding anything."
+	case providers.LookupUndiffable:
+		return "no diffable GitOps object for " + sel + ": " + searchedClause(lk.Scopes) +
+			" DID match a GitOps object, but it carries no applied revision and resolvable " +
+			"source, so no repository could be located." + notAConfigChange + " An object that " +
+			"has never reconciled is a strong lead in its own right — inspect it with " +
+			"gitops_resource_status rather than treating it as absent."
+	default:
+		return "no GitOps object matched " + sel + ": " + searchedClause(lk.Scopes) +
+			" returned no object carrying that name/namespace, so nothing resolved to a " +
+			"repository." + notAConfigChange + " A resource on a cluster this engine does not " +
+			"manage reads exactly like this." + nextStep
+	}
+}
+
 // searchedClause names the scopes a provider actually completed. With none recorded it
 // stays silent about scope rather than inventing one — the failure being fixed here is a
 // message that named searches that never happened.
@@ -224,4 +263,18 @@ func engineDisplayName(engine string) string {
 		return "Argo CD"
 	}
 	return "Flux"
+}
+
+// changesWithLookup runs a change enumeration and recovers what it established, via the
+// optional providers.ChangesLookupReporter capability. A provider without it yields a zero
+// Lookup, whose rendering claims no reason — which is correct, because none was established.
+//
+// Both Changes consumers need this (what_changed and incident_timeline), and both used to
+// render an empty list as a statement about Git.
+func changesWithLookup(ctx context.Context, gp providers.GitOpsProvider, w providers.TimeWindow, sel providers.Selector) ([]providers.Change, providers.Lookup, error) {
+	if r, ok := gp.(providers.ChangesLookupReporter); ok {
+		return r.ChangesLookup(ctx, w, sel)
+	}
+	changes, err := gp.Changes(ctx, w, sel)
+	return changes, providers.Lookup{}, err
 }
