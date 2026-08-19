@@ -6,6 +6,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"sort"
 	"strings"
 	"time"
 
@@ -23,8 +24,18 @@ type WhatChangedTool struct {
 func (t WhatChangedTool) Name() string { return "what_changed" }
 
 // Description returns the human-readable tool description advertised to the model.
+//
+// "optionally a named workload" is what shipped, and it invited the call that cannot
+// work: `name` is matched against the GitOps OBJECT's name — an Argo CD Application or
+// a Flux Kustomization — and those are named after apps, never after the pod or
+// Deployment they render. A model reading "named workload" passes the failing pod's
+// name, gets an empty result, and the empty result used to read as "Git shows no
+// change". Naming the argument correctly removes the first half of that.
 func (t WhatChangedTool) Description() string {
-	return "List what changed (GitOps revision history + the actual Git diff) for a namespace, optionally a named workload."
+	return "List what changed (GitOps revision history + the actual Git diff) for a namespace, " +
+		"optionally narrowed to one GitOps object by name. name is the Argo CD Application or " +
+		"Flux Kustomization name, NOT a pod, Deployment or container name — those never match. " +
+		"Prefer the namespace alone; an unmatched name lists the objects that do exist there."
 }
 
 // Schema returns the JSON Schema for the tool's arguments.
@@ -53,7 +64,7 @@ func (t WhatChangedTool) Call(ctx context.Context, args string) (string, error) 
 		return "", err
 	}
 	if len(changes) == 0 {
-		return "no changes found for the given selector", nil
+		return t.unresolvedSelector(ctx, in.Namespace, in.Name), nil
 	}
 	var b strings.Builder
 	// B2: the provider resolves a workload namespace to its OWNING GitOps object,
@@ -91,6 +102,110 @@ func (t WhatChangedTool) Call(ctx context.Context, args string) (string, error) 
 		renderDiff(&b, d)
 	}
 	return b.String(), nil
+}
+
+// unresolvedSelector reports what the lookup ESTABLISHED when the engine yielded no
+// change, rather than asserting what Git does or does not contain.
+//
+// The shipped wording was "no changes found for the given selector" — a claim about
+// Git history in answer to a question this tool may never have asked. Observed live:
+// asked about a pod running on a cluster this Argo CD does not manage, the tool
+// returned that string, and the model put it in the finding's `provenance`, made it
+// the entry's ONLY citation, and ruled out a config change on it. The same finding's
+// data-gaps section stated correctly that the cluster was invisible to the cluster
+// tools — the investigation contradicted itself, and this sentence is what let it.
+//
+// An empty result has three causes and none of them is "the repository shows no change":
+//
+//  1. Nothing matched the selector. No GitOps object carries that name/namespace, so no
+//     repoURL was ever resolved and no clone happened. This is the ORDINARY case for a
+//     workload-level name: Applications and Kustomizations are named after apps, not
+//     after pods, so `name: vmagent-vmagent-0` cannot match one.
+//  2. Objects matched but none was diffable — no applied revision, no sourceRef, or an
+//     unresolvable source. Both providers `continue` past those.
+//  3. Matched, diffable, and genuinely nothing in the window. Unreachable from here: a
+//     zero TimeWindow makes both providers fall back to emitting the current revision
+//     for every object they keep, so a match always produces at least one Change.
+//
+// Cases 1 and 2 are not separable from outside the provider, and picking one would be
+// the same over-claim in a new direction. What IS establishable is that the engine
+// produced no diffable object, so no repository was searched for that selector.
+//
+// When a name narrowed the lookup, one namespace-only probe separates "this engine
+// manages nothing in that namespace" from "it does, and your name is not one of its
+// objects" — and the second can then list the names that do exist, the same
+// recover-don't-guess shape alert_rule uses for an unmatched alertname. The probe runs
+// only on this path and only when a name was given; the clone cache the caller opened
+// is still active, so any source resolution it triggers is shared rather than repeated.
+func (t WhatChangedTool) unresolvedSelector(ctx context.Context, namespace, name string) string {
+	sel := fmt.Sprintf("namespace %q", namespace)
+	if name != "" {
+		sel += fmt.Sprintf(", name %q", name)
+	}
+	// No name means the original lookup was ALREADY namespace-only, so the probe would
+	// re-ask the identical question for nothing.
+	if name == "" {
+		return fmt.Sprintf("no GitOps object resolved for %s: this engine reports no diffable "+
+			"object there (nothing managed in that namespace, or nothing with an applied "+
+			"revision and a resolvable source), so no repository was searched. That is a scope "+
+			"result about this tool, NOT a statement that the configuration is unchanged — do "+
+			"not cite it as evidence against a config cause. To establish that, name a GitOps "+
+			"object with gitops_resource_status, or check whether the resource is managed by a "+
+			"GitOps engine this deployment can see at all.", sel)
+	}
+	peers, err := t.GitOps.Changes(ctx, providers.TimeWindow{}, providers.Selector{Namespace: namespace})
+	if err != nil {
+		// The probe is an aid, never a gate: its failure must not fail the investigation,
+		// and must not fall back to the absence claim this function exists to remove. Say
+		// which half is unestablished instead of guessing at it.
+		return fmt.Sprintf("no GitOps object resolved for %s, and no repository was searched. "+
+			"The follow-up namespace-only probe FAILED (%v), so whether this engine manages "+
+			"anything in %q is unestablished. Nothing here bears on whether the configuration "+
+			"changed — do not cite it as evidence against a config cause.", sel, err, namespace)
+	}
+	if len(peers) == 0 {
+		return fmt.Sprintf("no GitOps object resolved for %s, and a namespace-only retry found "+
+			"none either: this engine reports no diffable object in %q, so no repository was "+
+			"searched. Either nothing there is managed by this engine — a resource on another "+
+			"cluster reads exactly like this — or what is managed has no applied revision and "+
+			"resolvable source. That is a scope result about this tool, NOT a statement that "+
+			"the configuration is unchanged; do not cite it as evidence against a config cause.",
+			sel, namespace)
+	}
+	var b strings.Builder
+	fmt.Fprintf(&b, "the name %q did not resolve to a GitOps object, so no repository was "+
+		"searched for it — but %q IS managed by this engine. A workload or pod name is not a "+
+		"GitOps object name; re-call with the namespace alone, or with one of the objects below. "+
+		"Nothing here bears on whether the configuration changed.\n", name, namespace)
+	fmt.Fprintf(&b, "GitOps objects resolving for namespace %q:\n", namespace)
+	names := peerNames(peers)
+	for i, n := range names {
+		if i >= maxToolRows {
+			fmt.Fprintf(&b, "  … (%d more)\n", len(names)-i)
+			break
+		}
+		fmt.Fprintf(&b, "  %s\n", n)
+	}
+	return b.String()
+}
+
+// peerNames renders each change's owning object as "engine Kind namespace/name",
+// deduplicated and sorted so the list is stable across calls: several in-window
+// revisions of one object arrive as several Changes, and the model is being offered
+// names to re-call with, not a change count.
+func peerNames(changes []providers.Change) []string {
+	seen := make(map[string]struct{}, len(changes))
+	out := make([]string, 0, len(changes))
+	for _, c := range changes {
+		n := fmt.Sprintf("%s %s %s/%s", c.Engine, c.Workload.Kind, c.Workload.Namespace, c.Workload.Name)
+		if _, dup := seen[n]; dup {
+			continue
+		}
+		seen[n] = struct{}{}
+		out = append(out, n)
+	}
+	sort.Strings(out)
+	return out
 }
 
 const (
