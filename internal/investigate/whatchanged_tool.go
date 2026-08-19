@@ -6,7 +6,8 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"sort"
+	"maps"
+	"slices"
 	"strings"
 	"time"
 
@@ -26,16 +27,23 @@ func (t WhatChangedTool) Name() string { return "what_changed" }
 // Description returns the human-readable tool description advertised to the model.
 //
 // "optionally a named workload" is what shipped, and it invited the call that cannot
-// work: `name` is matched against the GitOps OBJECT's name — an Argo CD Application or
-// a Flux Kustomization — and those are named after apps, never after the pod or
-// Deployment they render. A model reading "named workload" passes the failing pod's
-// name, gets an empty result, and the empty result used to read as "Git shows no
-// change". Naming the argument correctly removes the first half of that.
+// work: `name` is matched against the GitOps OBJECT's name, so the failing pod's name —
+// which carries a ReplicaSet hash or a StatefulSet ordinal — can never match. A model
+// reading "named workload" passes exactly that, gets an empty result, and the empty
+// result used to read as "Git shows no change".
+//
+// The correction has a floor, though: a BARE workload name frequently DOES match, because
+// Kustomizations and Applications are routinely named after the app they render, and both
+// providers deliberately retry a name across all namespaces for that case. Telling the
+// model a Deployment name never matches would lose that narrowing — the accurate claim is
+// about the suffix, not about workload names.
 func (t WhatChangedTool) Description() string {
 	return "List what changed (GitOps revision history + the actual Git diff) for a namespace, " +
-		"optionally narrowed to one GitOps object by name. name is the Argo CD Application or " +
-		"Flux Kustomization name, NOT a pod, Deployment or container name — those never match. " +
-		"Prefer the namespace alone; an unmatched name lists the objects that do exist there."
+		"optionally narrowed to one GitOps object by name. name is matched against the Argo CD " +
+		"Application / Flux Kustomization name — often the bare app name (e.g. \"vmagent\"), but " +
+		"NEVER a pod or replicaset name carrying a hash or ordinal suffix (e.g. " +
+		"\"vmagent-vmagent-0\"), which cannot match. Prefer the namespace alone; an unmatched " +
+		"name lists the objects that do exist there."
 }
 
 // Schema returns the JSON Schema for the tool's arguments.
@@ -70,7 +78,8 @@ func (t WhatChangedTool) Call(ctx context.Context, args string) (string, error) 
 	// B2: the provider resolves a workload namespace to its OWNING GitOps object,
 	// which commonly lives elsewhere (Flux Kustomizations in flux-system, Argo
 	// Applications in argocd). Flag that so a match in another namespace is never
-	// misread as "the tool ignored my namespace" — and "no changes" stays honest.
+	// misread as "the tool ignored my namespace". (This used to end "and 'no changes' stays
+	// honest", naming a return string unresolvedSelector below has since replaced.)
 	if in.Namespace != "" && !anyInNamespace(changes, in.Namespace) {
 		fmt.Fprintf(&b, "note: no GitOps object in namespace %q; matched by name across namespaces (the owning object lives elsewhere, e.g. flux-system/argocd)\n", in.Namespace)
 	}
@@ -134,78 +143,96 @@ func (t WhatChangedTool) Call(ctx context.Context, args string) (string, error) 
 // When a name narrowed the lookup, one namespace-only probe separates "this engine
 // manages nothing in that namespace" from "it does, and your name is not one of its
 // objects" — and the second can then list the names that do exist, the same
-// recover-don't-guess shape alert_rule uses for an unmatched alertname. The probe runs
-// only on this path and only when a name was given; the clone cache the caller opened
-// is still active, so any source resolution it triggers is shared rather than repeated.
+// recover-don't-guess shape alert_rule uses for an unmatched alertname.
+//
+// THE PROBE IS NOT FREE, and an earlier version of this comment claimed the opposite. It
+// said the caller's clone cache made any source resolution shared — but flux's changesFor
+// sets `c.When = changeTime(...)` immediately before appending, with no `continue` between
+// them, so an empty result PROVES changeTime never ran and the cache is cold. Every clone
+// the probe triggers is therefore a fresh one, against the 60s ToolTimeout, and on flux it
+// costs a cluster-wide List plus a GetGitRepository and a CommitTime clone per source repo
+// — to render names only. On Argo CD it is a duplicate List and no git I/O at all, so the
+// cost is asymmetric between the two engines. The durable fix is for the provider to report
+// what it established, which removes this call entirely.
 func (t WhatChangedTool) unresolvedSelector(ctx context.Context, namespace, name string) string {
-	sel := fmt.Sprintf("namespace %q", namespace)
-	if name != "" {
-		sel += fmt.Sprintf(", name %q", name)
-	}
-	// No name means the original lookup was ALREADY namespace-only, so the probe would
-	// re-ask the identical question for nothing.
+	// Hoisted before sel is built: with no name the original lookup was ALREADY
+	// namespace-only, so the probe would re-ask the identical question for nothing, and
+	// sel's name half can never apply.
 	if name == "" {
-		return fmt.Sprintf("no GitOps object resolved for %s: this engine reports no diffable "+
-			"object there (nothing managed in that namespace, or nothing with an applied "+
-			"revision and a resolvable source), so no repository was searched. That is a scope "+
-			"result about this tool, NOT a statement that the configuration is unchanged — do "+
-			"not cite it as evidence against a config cause. To establish that, name a GitOps "+
-			"object with gitops_resource_status, or check whether the resource is managed by a "+
-			"GitOps engine this deployment can see at all.", sel)
+		return fmt.Sprintf("no GitOps object resolved for namespace %q: this engine reports no "+
+			"diffable object there%s", namespace, unresolvedCauses+notAConfigStatement+gitopsNextStep)
 	}
+	sel := fmt.Sprintf("namespace %q, name %q", namespace, name)
 	peers, err := t.GitOps.Changes(ctx, providers.TimeWindow{}, providers.Selector{Namespace: namespace})
-	if err != nil {
+	switch {
+	case err != nil:
 		// The probe is an aid, never a gate: its failure must not fail the investigation,
 		// and must not fall back to the absence claim this function exists to remove. Say
-		// which half is unestablished instead of guessing at it.
+		// which half is unestablished instead of guessing at it — so this branch alone does
+		// NOT carry unresolvedCauses, because whether the namespace is managed is unknown.
 		return fmt.Sprintf("no GitOps object resolved for %s, and no repository was searched. "+
 			"The follow-up namespace-only probe FAILED (%v), so whether this engine manages "+
-			"anything in %q is unestablished. Nothing here bears on whether the configuration "+
-			"changed — do not cite it as evidence against a config cause.", sel, err, namespace)
-	}
-	if len(peers) == 0 {
+			"anything there is unestablished.%s%s", sel, err, notAConfigStatement, gitopsNextStep)
+	case len(peers) == 0:
 		return fmt.Sprintf("no GitOps object resolved for %s, and a namespace-only retry found "+
-			"none either: this engine reports no diffable object in %q, so no repository was "+
-			"searched. Either nothing there is managed by this engine — a resource on another "+
-			"cluster reads exactly like this — or what is managed has no applied revision and "+
-			"resolvable source. That is a scope result about this tool, NOT a statement that "+
-			"the configuration is unchanged; do not cite it as evidence against a config cause.",
-			sel, namespace)
+			"none either: this engine reports no diffable object there%s", sel,
+			unresolvedCauses+notAConfigStatement+gitopsNextStep)
 	}
 	var b strings.Builder
 	fmt.Fprintf(&b, "the name %q did not resolve to a GitOps object, so no repository was "+
-		"searched for it — but %q IS managed by this engine. A workload or pod name is not a "+
-		"GitOps object name; re-call with the namespace alone, or with one of the objects below. "+
-		"Nothing here bears on whether the configuration changed.\n", name, namespace)
-	fmt.Fprintf(&b, "GitOps objects resolving for namespace %q:\n", namespace)
+		"searched for it — but namespace %q IS managed by this engine, so re-call with the "+
+		"namespace alone, or with one of the bare object names below.%s\n",
+		name, namespace, notAConfigStatement)
 	names := peerNames(peers)
-	for i, n := range names {
-		if i >= maxToolRows {
-			fmt.Fprintf(&b, "  … (%d more)\n", len(names)-i)
-			break
-		}
-		fmt.Fprintf(&b, "  %s\n", n)
-	}
+	renderRows(&b, len(names), "more", func(i int) { fmt.Fprintf(&b, "  %s\n", names[i]) })
 	return b.String()
 }
 
-// peerNames renders each change's owning object as "engine Kind namespace/name",
-// deduplicated and sorted so the list is stable across calls: several in-window
-// revisions of one object arrive as several Changes, and the model is being offered
-// names to re-call with, not a change count.
+// The three fragments every unresolved-selector answer is composed from. They were four
+// hand-written variants of the same sentences, which had already drifted before review —
+// one pair differed only in "unchanged — do not cite" versus "unchanged; do not cite", and
+// two of the four silently dropped the recovery advice entirely, on exactly the branches
+// reached when a name was given and the model most needs a next step.
+const (
+	// unresolvedCauses names the causes an empty result CAN have, as possibilities. It is
+	// omitted on the probe-error branch, where the namespace question is unestablished.
+	//
+	// It is deliberately not exhaustive in one respect worth knowing: flux's changesFor
+	// swallows a GetGitRepository error with a bare `continue`, so an RBAC Forbidden on the
+	// source reaches here indistinguishable from a benign skip and is filed under "no
+	// applied revision or resolvable source". That is #503's mechanism — a denial collapsed
+	// into an absence — surviving one layer down, and it cannot be fixed from the tool:
+	// providers.LookupDenied exists for it and only the provider can set it.
+	unresolvedCauses = " — nothing managed there, nothing with an applied revision and a " +
+		"resolvable source, or a source read this engine was refused and skipped. A resource " +
+		"on a cluster this engine does not manage reads exactly like this too."
+
+	// notAConfigStatement is the load-bearing caveat, in the package's established shape:
+	// "says NOTHING about whether X" (gitops_kinds.go, resource_spec_tool.go), which the
+	// guard tests assert the PRESENCE of. A blocklist of forbidden phrasings is the retired
+	// style — gitops_kinds.go records that "no such object exists" slipped straight past one.
+	notAConfigStatement = " No repository was searched, so this says NOTHING about whether " +
+		"the configuration changed — do not cite it as evidence against a config cause."
+
+	// gitopsNextStep is the recovery half. It names a LISTING call rather than asking the
+	// model to invent an object name: gitops_resource_status needs kind+name+namespace, so
+	// pointing at it here would invite a guess, and a guessed resource that later shows up
+	// as an action target is what observedresources.go flags as possibly hallucinated.
+	gitopsNextStep = " To establish anything about the config, re-call with the namespace " +
+		"alone to list what this engine does manage, or confirm the resource is managed by a " +
+		"GitOps engine this deployment can see at all."
+)
+
+// peerNames renders each change's owning object as "engine Kind namespace/name" via
+// Workload.Ref, the canonical identity form, deduplicated and sorted so the list is stable
+// across calls: several in-window revisions of one object arrive as several Changes, and
+// the model is being offered names to re-call with, not a change count.
 func peerNames(changes []providers.Change) []string {
 	seen := make(map[string]struct{}, len(changes))
-	out := make([]string, 0, len(changes))
 	for _, c := range changes {
-		n := fmt.Sprintf("%s %s %s/%s", c.Engine, c.Workload.Kind, c.Workload.Namespace, c.Workload.Name)
-		if _, dup := seen[n]; dup {
-			continue
-		}
-		seen[n] = struct{}{}
-		out = append(out, n)
+		seen[fmt.Sprintf("%s %s %s", c.Engine, c.Workload.Kind, c.Workload.Ref())] = struct{}{}
 	}
-	sort.Strings(out)
-	return out
+	return slices.Sorted(maps.Keys(seen))
 }
 
 const (

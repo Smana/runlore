@@ -33,7 +33,13 @@ tools:
   query_logs: no log lines matched — if logs were expected, the collector field names may differ from
     the assumed schema (try discover_log_fields to see the real fields), or narrow/loosen the query; consider
     pod_logs for a specific pod
-  what_changed: no changes found for the given selector
+  what_changed: 'no GitOps object resolved for namespace "eval": this engine reports no diffable
+    object there — nothing managed there, nothing with an applied revision and a resolvable source,
+    or a source read this engine was refused and skipped. A resource on a cluster this engine does
+    not manage reads exactly like this too. No repository was searched, so this says NOTHING about
+    whether the configuration changed — do not cite it as evidence against a config cause. To establish
+    anything about the config, re-call with the namespace alone to list what this engine does manage,
+    or confirm the resource is managed by a GitOps engine this deployment can see at all.'
   workload_ownership: 'Pod/eval-victim-789dff8486-n5wxf → ReplicaSet/eval-victim-789dff8486 → Deployment/eval-victim
     (no GitOps tracking label on the top controller — owner unresolved)
 

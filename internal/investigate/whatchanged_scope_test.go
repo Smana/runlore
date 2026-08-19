@@ -17,7 +17,7 @@ import (
 // because the number of provider calls is part of the contract here — the probe must
 // not fire when there is nothing to probe.
 type scopedGitOps struct {
-	byName      []providers.Change // returned when sel.Name != ""
+	fakeGitOps                     // Diff + WatchFailures; its `changes` is the by-name answer
 	byNamespace []providers.Change // returned when sel.Name == ""
 	nsErr       error              // returned instead of byNamespace
 	seen        []providers.Selector
@@ -26,7 +26,7 @@ type scopedGitOps struct {
 func (f *scopedGitOps) Changes(_ context.Context, _ providers.TimeWindow, sel providers.Selector) ([]providers.Change, error) {
 	f.seen = append(f.seen, sel)
 	if sel.Name != "" {
-		return f.byName, nil
+		return f.changes, nil
 	}
 	if f.nsErr != nil {
 		return nil, f.nsErr
@@ -34,32 +34,19 @@ func (f *scopedGitOps) Changes(_ context.Context, _ providers.TimeWindow, sel pr
 	return f.byNamespace, nil
 }
 
-func (f *scopedGitOps) Diff(context.Context, providers.Change) (providers.Diff, error) {
-	return providers.Diff{}, nil
-}
-
-func (f *scopedGitOps) WatchFailures(context.Context) (<-chan providers.FailureEvent, error) {
-	ch := make(chan providers.FailureEvent)
-	close(ch)
-	return ch, nil
-}
-
-// absenceClaims are phrasings a model can quote as "Git shows no change". The first
-// is the exact string that shipped: an investigation into a pod on a cluster this
-// Argo CD does not manage read it as evidence, put it in the finding's provenance and
-// its only citation, and ruled out a config change on it.
-var absenceClaims = []string{
-	"no changes found",
-	"no Git changes",
-	"the config did not change",
-}
-
-func assertNoAbsenceClaim(t *testing.T, out string) {
+// assertRefusesAbsence checks the SHAPE of the claim rather than blocklisting phrasings.
+// gitops_kinds.go records why: a forbidden-word list shipped here once and "no such object
+// exists" slipped straight past it, so the package standardised on asserting that the
+// disclaimer marker is PRESENT. Every unresolved answer must carry notAConfigStatement, and
+// none may still carry the exact sentence that caused the incident.
+func assertRefusesAbsence(t *testing.T, out string) {
 	t.Helper()
-	for _, c := range absenceClaims {
-		if strings.Contains(strings.ToLower(out), strings.ToLower(c)) {
-			t.Errorf("output claims absence with %q; an unresolved selector establishes nothing about Git history:\n%s", c, out)
-		}
+	if !strings.Contains(out, notAConfigStatement) {
+		t.Errorf("output does not carry the not-a-config-statement disclaimer:\n%s", out)
+	}
+	// The one literal worth pinning: this exact string is what the model quoted as evidence.
+	if strings.Contains(out, "no changes found") {
+		t.Errorf("output still carries the shipped absence claim:\n%s", out)
 	}
 }
 
@@ -74,9 +61,11 @@ func TestWhatChangedUnresolvedSelectorDoesNotClaimAbsence(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Call: %v", err)
 	}
-	assertNoAbsenceClaim(t, out)
+	assertRefusesAbsence(t, out)
 	// It must state the scope outcome: nothing resolved, so nothing was searched.
-	for _, want := range []string{"no GitOps object", "no repository was searched"} {
+	// "repository was searched" without the leading article: notAConfigStatement opens a
+	// sentence with it, so pinning the lowercase form would break on capitalisation alone.
+	for _, want := range []string{"no GitOps object", "repository was searched"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("output missing %q:\n%s", want, out)
 		}
@@ -101,7 +90,7 @@ func TestWhatChangedUnresolvedNameListsWhatTheNamespaceDoesHave(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Call: %v", err)
 	}
-	assertNoAbsenceClaim(t, out)
+	assertRefusesAbsence(t, out)
 	for _, want := range []string{"monitoring", "essentials", "vmagent-vmagent-0"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("output missing %q:\n%s", want, out)
@@ -122,7 +111,7 @@ func TestWhatChangedNamespaceOnlySelectorDoesNotReprobe(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Call: %v", err)
 	}
-	assertNoAbsenceClaim(t, out)
+	assertRefusesAbsence(t, out)
 	if len(gp.seen) != 1 {
 		t.Errorf("namespace-only selector made %d provider calls, want 1: %+v", len(gp.seen), gp.seen)
 	}
@@ -138,26 +127,35 @@ func TestWhatChangedProbeFailureStillRefusesAbsence(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Call must not fail the investigation on a probe error: %v", err)
 	}
-	assertNoAbsenceClaim(t, out)
+	assertRefusesAbsence(t, out)
 	if !strings.Contains(out, "no GitOps object") {
 		t.Errorf("output missing the scope statement:\n%s", out)
+	}
+	// The probe-error branch alone must NOT assert a cause: whether the namespace is
+	// managed is exactly what the failed probe left unestablished.
+	if strings.Contains(out, unresolvedCauses) {
+		t.Errorf("probe-error branch names causes it did not establish:\n%s", out)
 	}
 }
 
 // TestWhatChangedResolvedSelectorIsUnaffected guards the happy path: when the
 // selector does resolve, none of the above wording appears and no probe is issued.
 func TestWhatChangedResolvedSelectorIsUnaffected(t *testing.T) {
-	gp := &scopedGitOps{byName: []providers.Change{{
+	gp := &scopedGitOps{fakeGitOps: fakeGitOps{changes: []providers.Change{{
 		Workload: providers.Workload{Kind: "Kustomization", Name: "apps", Namespace: "flux-system"},
 		Engine:   providers.EngineFlux, Type: providers.ChangeSync, FromRev: "aaa", ToRev: "bbb",
-	}}}
+	}}}}
 	out, err := WhatChangedTool{GitOps: gp}.Call(context.Background(),
 		`{"namespace":"flux-system","name":"apps"}`)
 	if err != nil {
 		t.Fatalf("Call: %v", err)
 	}
-	if strings.Contains(out, "no GitOps object") || strings.Contains(out, "no repository was searched") {
-		t.Errorf("resolved selector must not carry the scope statement:\n%s", out)
+	// NOT "must not contain 'no GitOps object'" — the pre-existing B2 note prints exactly
+	// that ("note: no GitOps object in namespace %q; matched by name across namespaces")
+	// whenever a name resolves in another namespace, which is the standard Flux bootstrap
+	// shape. Pin the sentences this change introduced instead.
+	if strings.Contains(out, notAConfigStatement) || strings.Contains(out, "repository was searched") {
+		t.Errorf("resolved selector must not carry the unresolved-selector answer:\n%s", out)
 	}
 	if len(gp.seen) != 1 {
 		t.Errorf("resolved selector made %d provider calls, want 1", len(gp.seen))
@@ -175,7 +173,12 @@ func TestWhatChangedDescriptionDoesNotInviteAWorkloadName(t *testing.T) {
 		t.Errorf("description invites a workload name for `name`, which cannot match:\n%s", d)
 	}
 	// It must say what the argument IS, and that a pod name is not it.
-	for _, want := range []string{"Application", "Kustomization", "NOT a pod"} {
+	// And it must not over-correct the other way: a BARE workload name often does match,
+	// so the claim has to be about the suffix, not about workload names.
+	if strings.Contains(d, "never match") && !strings.Contains(d, "suffix") {
+		t.Errorf("description claims workload names never match, losing the bare-name retry:\n%s", d)
+	}
+	for _, want := range []string{"Application", "Kustomization", "NEVER a pod", "suffix"} {
 		if !strings.Contains(d, want) {
 			t.Errorf("description missing %q:\n%s", want, d)
 		}
