@@ -123,16 +123,35 @@ func (t IncidentTimelineTool) Call(ctx context.Context, args string) (string, er
 	// tag (flux/argocd) and, when present, the from→to revision so a row reads like a
 	// deploy. A change with no When is dropped — a timeline needs a wall-clock anchor.
 	if t.GitOps != nil {
-		changes, err := t.GitOps.Changes(ctx, window, providers.Selector{Namespace: in.Namespace})
-		if err != nil {
+		sel := providers.Selector{Namespace: in.Namespace}
+		changes, lk, err := changesWithLookup(ctx, t.GitOps, window, sel)
+		switch {
+		case err != nil:
 			notes = append(notes, fmt.Sprintf("(gitops changes error: %v)", err))
-		} else {
+		case len(changes) == 0:
+			// The empty message below says "no dated GitOps changes", which is a claim about
+			// the world. It is only true if the enumeration actually resolved something; when
+			// it did not — nothing managed here, an undiffable object, a REFUSED source read —
+			// say what was established instead. Same defect what_changed carried, and this is
+			// the other Changes consumer.
+			notes = append(notes, "("+gitopsChangesAnswer(fmt.Sprintf("namespace %q", in.Namespace), lk)+")")
+		default:
+			undated := 0
 			for _, c := range changes {
 				if c.When.IsZero() {
+					undated++
 					continue
 				}
 				recordObserved(ctx, c.Workload)
 				rows = append(rows, timelineRow{when: c.When, tag: changeTag(c.Engine), text: renderChangeRow(c)})
+			}
+			// Dropping these silently is how "no dated GitOps changes" can be printed while
+			// the provider returned changes: the timeline needs a wall-clock anchor, but their
+			// absence is a gap in THIS tool, not evidence that nothing was deployed.
+			if undated > 0 {
+				notes = append(notes, fmt.Sprintf("(%d GitOps change(s) matched but carry no "+
+					"timestamp, so they are not on the timeline — this tool needs a wall-clock "+
+					"anchor; query what_changed for them)", undated))
 			}
 		}
 	}

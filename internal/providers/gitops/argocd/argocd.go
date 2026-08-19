@@ -85,24 +85,50 @@ func New(reader Reader, differ *whatchanged.Differ) *Provider {
 // zero/unset window falls back to the single current-revision behavior. The
 // enumeration is bounded so a wide window can't explode the output.
 func (p *Provider) Changes(ctx context.Context, w providers.TimeWindow, sel providers.Selector) ([]providers.Change, error) {
+	changes, _, err := p.ChangesLookup(ctx, w, sel)
+	return changes, err
+}
+
+// ChangesLookup implements providers.ChangesLookupReporter: the same enumeration as
+// Changes, plus what an empty result established. The distinction is free here — the
+// skip that produces an empty list is right below, and it used to be dropped into a
+// slog.Debug.
+func (p *Provider) ChangesLookup(ctx context.Context, w providers.TimeWindow, sel providers.Selector) ([]providers.Change, providers.Lookup, error) {
 	apps, err := p.reader.ListApplications(ctx)
 	if err != nil {
-		return nil, err
+		return nil, providers.Lookup{Reason: providers.LookupFailed}, err
 	}
-	changes := p.changesFor(ctx, w, apps, func(a application) bool {
+	scope := sel.Namespace
+	if scope == "" {
+		scope = providers.AllNamespaces
+	}
+	changes, lk := p.changesFor(ctx, w, apps, func(a application) bool {
 		return matchesNamespace(a, sel.Namespace) && (sel.Name == "" || a.Name == sel.Name)
 	})
+	lk.Scopes = []string{scope}
 	if len(changes) == 0 && sel.Name != "" {
-		changes = p.changesFor(ctx, w, apps, func(a application) bool { return a.Name == sel.Name })
+		// B2 fallback: the named object may live in another namespace. The second pass
+		// genuinely searches cluster-wide, so record that scope — and take its reason,
+		// which is the more informed one for the object actually found by name.
+		changes, lk = p.changesFor(ctx, w, apps, func(a application) bool { return a.Name == sel.Name })
+		lk.Scopes = []string{scope, providers.AllNamespaces}
+		if scope == providers.AllNamespaces {
+			lk.Scopes = []string{providers.AllNamespaces}
+		}
 	}
-	return changes, nil
+	return changes, lk, nil
 }
 
 // changesFor maps the Applications accepted by keep into engine-agnostic Changes.
 // With a non-zero window it expands each app into one Change per in-window source
 // revision (G3); otherwise it emits the single current-revision Change.
-func (p *Provider) changesFor(ctx context.Context, w providers.TimeWindow, apps []application, keep func(application) bool) []providers.Change {
+func (p *Provider) changesFor(ctx context.Context, w providers.TimeWindow, apps []application, keep func(application) bool) ([]providers.Change, providers.Lookup) {
 	var changes []providers.Change
+	// LookupAbsent until an Application actually matches: the list WAS searched and
+	// nothing carried that name/namespace. A match that is then skipped for having no
+	// diffable source escalates to LookupUndiffable, because that object EXISTS and is
+	// often the answer (an Application that has never synced has no revision).
+	lk := providers.Lookup{Reason: providers.LookupAbsent}
 	for _, a := range apps {
 		if !keep(a) {
 			continue
@@ -111,6 +137,7 @@ func (p *Provider) changesFor(ctx context.Context, w providers.TimeWindow, apps 
 			slog.Debug("argocd: skipping application with no diffable source",
 				"application", a.Namespace+"/"+a.Name,
 				"hasRepoURL", a.RepoURL != "", "hasRevision", a.Revision != "")
+			lk.Reason = providers.LookupUndiffable
 			continue // not enough to locate a source diff
 		}
 		if wchanges := p.windowChanges(ctx, w, a); len(wchanges) > 0 {
@@ -119,7 +146,7 @@ func (p *Provider) changesFor(ctx context.Context, w providers.TimeWindow, apps 
 		}
 		changes = append(changes, mapApplication(a))
 	}
-	return changes
+	return changes, lk
 }
 
 // windowChanges expands an Application into one Change per source revision that landed
