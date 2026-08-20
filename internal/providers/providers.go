@@ -560,6 +560,84 @@ type ResourceSpecReader interface {
 	ResourceSpec(ctx context.Context, q ResourceSpecQuery) (ResourceSpec, error)
 }
 
+// ResourceListQuery identifies the objects to enumerate.
+//
+// It is deliberately the same shape as ResourceSpecQuery minus Name: the caller knows a
+// Kind and a place to look, and that is exactly the situation Name cannot be supplied in.
+type ResourceListQuery struct {
+	Kind      string
+	Namespace string
+	// Group narrows resolution to one API group ("" means "no preference", and "core"
+	// is accepted as a spelling of the core group's empty name).
+	Group string
+	// LabelSelector optionally narrows the listing, in the standard
+	// "key=value,key2=value2" form. Empty lists everything of the kind.
+	LabelSelector string
+}
+
+// ResourceListItem is one object's identity in a listing.
+//
+// Identity ONLY — no spec, no status. The listing answers "what exists here"; reading any
+// one of them is resource_spec's job, and returning specs here would blow the tool-output
+// budget on objects the caller has not asked about yet.
+type ResourceListItem struct {
+	Name      string
+	Namespace string // empty for a cluster-scoped kind
+}
+
+// ResourceList is the set of objects of one kind in one place.
+//
+// Outcome reuses ResourceSpecOutcome because the taxonomy is the same and the distinctions
+// are the same ones that matter: a FORBIDDEN listing is not an empty namespace, and an
+// unknown kind is not an absent object.
+//
+// The load-bearing difference from ResourceSpec: ResourceFound with zero Items IS
+// meaningful evidence — "this cluster serves the kind, this agent may read it, and there
+// are none here". That is the answer resource_spec structurally cannot give, because it
+// can only ask about names somebody already guessed.
+type ResourceList struct {
+	// Query echoes the request NORMALIZED to what was actually listed — the Kind in the
+	// casing the server serves it under, and no namespace for a cluster-scoped kind.
+	Query      ResourceListQuery
+	Outcome    ResourceSpecOutcome
+	APIVersion string
+	Items      []ResourceListItem
+	// Truncated reports that the server had more objects than were returned, so an
+	// absent name in Items is not evidence the object does not exist.
+	Truncated bool
+	// Detail carries the server's own message for a non-found outcome.
+	Detail string
+}
+
+// ResourceLister enumerates the objects of one kind in one namespace.
+//
+// It exists because resource_spec can only read a name somebody already knows, and a large
+// class of incidents is "which object is doing this to me" — which NetworkPolicy denies
+// this flow, which ValidatingWebhookConfiguration rejects this apply, which ScaledObject
+// governs this Deployment. Without enumeration a model can only guess names: a real
+// investigation spent 32 of its 58 tool calls guessing CiliumNetworkPolicy names, never
+// found the object, and published a card whose own Data gaps section said "resource_spec
+// reads named objects only (not lists)". It had confirmed the denial and still could not
+// name the policy.
+//
+// Implementations MUST apply the same refusals as ResourceSpecReader (Secret by kind AND
+// by resolved resource name) and MUST report RBAC denials as ResourceForbidden rather than
+// as an empty listing — an empty listing is evidence of absence and a denial is not.
+type ResourceLister interface {
+	ResourceList(ctx context.Context, q ResourceListQuery) (ResourceList, error)
+}
+
+// ResourceReader is the pair of reads one dynamic client plus discovery can serve:
+// enumerate a kind, then read one of the objects by name.
+//
+// They are one interface because they are one capability with one set of prerequisites,
+// and because registering the by-name half alone is the failure mode this pairing exists
+// to prevent — a model with resource_spec and no lister guesses names, and guesses wrong.
+type ResourceReader interface {
+	ResourceSpecReader
+	ResourceLister
+}
+
 // KindScoper answers whether a bare Kubernetes Kind is namespaced ON THIS CLUSTER.
 //
 // It exists so namespaced-ness can be carried as DATA (Workload.Scope) instead of

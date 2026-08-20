@@ -57,19 +57,19 @@ func RestConfig() (*rest.Config, error) {
 //
 // Discovery is memoised and lazy: the round trip happens on first use rather than at
 // startup, so an unreachable API server delays a tool call instead of blocking boot.
-func BuildResourceSpecReader(log *slog.Logger) providers.ResourceSpecReader {
+func BuildResourceSpecReader(log *slog.Logger) providers.ResourceReader {
 	restCfg, err := RestConfig()
 	if err != nil {
 		return nil
 	}
 	dc, err := dynamic.NewForConfig(restCfg)
 	if err != nil {
-		log.Warn("dynamic client unavailable; resource_spec disabled", "err", err)
+		log.Warn("dynamic client unavailable; resource_spec and list_resources disabled", "err", err)
 		return nil
 	}
 	disco, err := discovery.NewDiscoveryClientForConfig(restCfg)
 	if err != nil {
-		log.Warn("discovery client unavailable; resource_spec disabled", "err", err)
+		log.Warn("discovery client unavailable; resource_spec and list_resources disabled", "err", err)
 		return nil
 	}
 	// Memoised discovery: resolving a Kind costs one round trip the first time and nothing

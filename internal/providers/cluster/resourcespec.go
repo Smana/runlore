@@ -206,63 +206,15 @@ func (r *SpecReader) ResourceSpec(ctx context.Context, q providers.ResourceSpecQ
 	if q.Kind == "" || q.Name == "" {
 		return out, fmt.Errorf("kind and name are required")
 	}
-	if why, refused := refusalFor(q.Kind); refused {
-		out.Outcome = providers.ResourceRefused
-		out.Detail = why
-		return out, nil
-	}
-	matches, err := r.resolveKind(q.Kind)
+	res, err := r.resolveOne(q.Kind, q.Group)
 	if err != nil {
 		return out, err
 	}
-	if q.Group != "" {
-		kept := matches[:0]
-		for _, m := range matches {
-			if matchGroup(m, q.Group) {
-				kept = append(kept, m)
-			}
-		}
-		matches = kept
-	}
-	switch len(matches) {
-	case 0:
-		out.Outcome = providers.ResourceKindUnknown
-		out.Detail = fmt.Sprintf("this cluster serves no kind %q", q.Kind)
-		if q.Group != "" {
-			out.Detail += fmt.Sprintf(" in API group %q", q.Group)
-		}
-		return out, nil
-	case 1:
-	default:
-		// Ambiguous: several API groups serve this Kind. Reporting it beats guessing —
-		// reading the wrong object and describing it confidently is the failure this tool
-		// exists to prevent, so the ambiguity is handed back with the candidates named
-		// AND with the argument that resolves it, so it is not a dead end.
-		groups := make([]string, 0, len(matches))
-		for _, m := range matches {
-			groups = append(groups, m.gvr.GroupVersion().String())
-		}
-		out.Outcome = providers.ResourceKindAmbiguous
-		out.Detail = fmt.Sprintf("kind %q is served by more than one API group (%s); "+
-			"nothing was read. Call again with the group argument set to the one you mean",
-			q.Kind, strings.Join(groups, ", "))
+	if res.outcome != "" {
+		out.Outcome, out.Detail = res.outcome, res.detail
 		return out, nil
 	}
-	match := matches[0]
-	// Refuse AGAIN, on what resolution actually produced. The pre-check only ever sees the
-	// caller's spelling of the KIND, so it cannot refuse a Secret reached under a Kind of
-	// somebody else's choosing — which is what an aggregated API server or a CRD serving a
-	// `secrets` resource does.
-	//
-	// Re-checking the resolved KIND as well would be a no-op: resolution matches Kind with
-	// the same EqualFold the refusal uses, so the two cover exactly the same spellings.
-	// TestRefusalAndResolutionAgreeOnFolding pins that equivalence, so a change to either
-	// matcher fails loudly instead of quietly opening a bypass.
-	if why, refused := refusedResources[match.gvr.Resource]; refused {
-		out.Outcome = providers.ResourceRefused
-		out.Detail = why
-		return out, nil
-	}
+	match := res.match
 	// Echo the identity that was actually resolved: the server's spelling of the Kind,
 	// the group that answered, and NO namespace for a cluster-scoped kind. Repeating the
 	// request verbatim would render a caller's mistake as fact — "StorageClass
