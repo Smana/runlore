@@ -269,8 +269,14 @@ func BuildModelAndTools(ctx context.Context, cfg *config.Config, gp providers.Gi
 	// cannot read a CRD), and it is absent rather than broken when either is unavailable —
 	// a tool that cannot answer must not exist, per the same reasoning that gates
 	// controller_logs on the engine.
+	// list_resources rides the SAME reader: enumerating a kind needs exactly the dynamic
+	// client and discovery that resource_spec needs, and pairing them is deliberate —
+	// registering the by-name reader without the lister is what forces a model to guess
+	// names, which it does badly and expensively (32 wasted calls in one real
+	// investigation, and a card that could not name the policy it had proven was denying
+	// traffic).
 	if sr := BuildResourceSpecReader(log); sr != nil {
-		tools = append(tools, investigate.ResourceSpecTool{Reader: sr})
+		tools = append(tools, investigate.ResourceSpecTool{Reader: sr}, investigate.ResourceListTool{Lister: sr})
 	}
 	// Cloud context (AWS): CloudTrail "what changed" + EC2/ASG/EKS health. Opt-in.
 	var cloudProvider providers.CloudProvider
