@@ -14,6 +14,74 @@ Read the ⚠ BREAKING CHANGES section of every release you cross; the migration 
 are spelled out under
 [Upgrade & Uninstall](https://runlore.io/docs/operations/upgrade-uninstall/).
 
+## [0.15.0](https://github.com/Smana/runlore/compare/v0.14.0...v0.15.0) (2026-08-20)
+
+
+### ⚠ BREAKING CHANGES
+
+* **gitops:** a GitHub Enterprise install whose forge.github_api_url is an "api." subdomain (subdomain isolation) must now set forge.git_host to the host serving its git remotes. `serve` refuses to start until it does, rather than guessing and silently withholding the credential from every GitOps repository. Every other configuration — github.com, GHE at HOSTNAME/api/v3, GitLab — is untouched and needs no new key.
+* **eval:** investigation.max_tokens_per_investigation is now a CUMULATIVE ceiling over one investigation's model tokens (loop + verify, provider-reported), not a check on the next request's estimated size. The default is unchanged at 100000, so the same number binds far earlier than it used to: a tool-heavy investigation that resends a growing history every step can now stop after a handful of turns where it previously ran to max_steps. Runs that hit it report result="budget_exceeded" and deliver an unresolved stub naming the ceiling.
+* **investigate:** investigation.max_tokens_per_investigation is now a CUMULATIVE ceiling over one investigation's model tokens (loop + verify, provider-reported), not a check on the next request's estimated size. The default is unchanged at 100000, so the same number binds far earlier than it used to: a tool-heavy investigation that resends a growing history every step can now stop after a handful of turns where it previously ran to max_steps. Runs that hit it report result="budget_exceeded" and deliver an unresolved stub naming the ceiling.
+
+### Features
+
+* **investigate:** add list_resources so the model stops guessing object names ([#544](https://github.com/Smana/runlore/issues/544)) ([f8f01ea](https://github.com/Smana/runlore/commit/f8f01eaf52a81acc2309ddcf87f6a0994f90fcf9))
+* **investigate:** cap what one investigation may spend, in tokens and in dollars ([#486](https://github.com/Smana/runlore/issues/486)) ([8d26929](https://github.com/Smana/runlore/commit/8d26929403971aac24b4f5b71cdd2bb82f50bc4c))
+* **investigate:** read an object's spec, so config faults stop being inferred ([#509](https://github.com/Smana/runlore/issues/509)) ([967d462](https://github.com/Smana/runlore/commit/967d4624671fcbf579f23a487d527a2d329fbb54))
+* **investigate:** read the firing alert's own rule expression ([#534](https://github.com/Smana/runlore/issues/534)) ([a21b12c](https://github.com/Smana/runlore/commit/a21b12cda973a5543f15fde772242918bcba5eb2))
+* **observability:** panel the shutdown loss counter, and alert on two silent degradations ([#542](https://github.com/Smana/runlore/issues/542)) ([ee7e141](https://github.com/Smana/runlore/commit/ee7e141542fd9101856820fdb02177b3cbcfe0f6))
+* **providers:** carry namespaced-ness from discovery, not a kind list ([#540](https://github.com/Smana/runlore/issues/540)) ([90a2ccc](https://github.com/Smana/runlore/commit/90a2ccc531c87644b3a4b46118899ae87a2c8312))
+* **thread:** answer questions in an investigation thread, with a cheap model ([#484](https://github.com/Smana/runlore/issues/484)) ([b65c2d9](https://github.com/Smana/runlore/commit/b65c2d9c9381d1a732c5969103e5330b919a11fe))
+* **thread:** route a knowledge-base announcement into the thread it came from ([#502](https://github.com/Smana/runlore/issues/502)) ([6496fa2](https://github.com/Smana/runlore/commit/6496fa2ce7199705c3b41356b6bd110824618f13))
+* **thread:** show what landed in the KB, and announce it to every sink ([#485](https://github.com/Smana/runlore/issues/485)) ([6e50f57](https://github.com/Smana/runlore/commit/6e50f57935711a42cbecb41a8cde2a36c943514d))
+* **thread:** write knowledge back to the KB from a Matrix thread ([#483](https://github.com/Smana/runlore/issues/483)) ([6819083](https://github.com/Smana/runlore/commit/6819083b4654d2157c889daffb92ab0f608c0347))
+* **thread:** write knowledge back to the KB from a Slack thread ([#482](https://github.com/Smana/runlore/issues/482)) ([98bda12](https://github.com/Smana/runlore/commit/98bda12f2894b226467f486fe7f7e922ff89a48e))
+
+
+### Bug Fixes
+
+* **chart:** make the ClusterRole honest about what it grants ([#521](https://github.com/Smana/runlore/issues/521)) ([306d18c](https://github.com/Smana/runlore/commit/306d18c17811e397b07ccf02f08e4ecec3560dc8))
+* **ci:** pin the screenshot guard to the rendered card, not slack.go's history ([#489](https://github.com/Smana/runlore/issues/489)) ([54cf87d](https://github.com/Smana/runlore/commit/54cf87d82c7741d33331540885396c2c09bcacc4))
+* **curate:** group a recurrence by resource identity, not by its spelling ([#539](https://github.com/Smana/runlore/issues/539)) ([d50704a](https://github.com/Smana/runlore/commit/d50704a3169a6dc1f9f119b073261796a21bd365))
+* **curator:** stop drafting a resource recall can never match ([#533](https://github.com/Smana/runlore/issues/533)) ([484e4c3](https://github.com/Smana/runlore/commit/484e4c3f0d3c95bb86dc492c444f1b1c4df6f4ec))
+* **eval:** account a failed call that was billed, and price verify at the model it calls ([#525](https://github.com/Smana/runlore/issues/525)) ([c5c516c](https://github.com/Smana/runlore/commit/c5c516c3c68757953dc7f0c09e0447348f00c224))
+* **eval:** bound lore eval, and report what the CLI's model calls spend ([#487](https://github.com/Smana/runlore/issues/487)) ([0ef4507](https://github.com/Smana/runlore/commit/0ef4507090d6859e93532fcf5d88087310465e40))
+* five correctness findings from the review programme ([#517](https://github.com/Smana/runlore/issues/517)) ([87682a7](https://github.com/Smana/runlore/commit/87682a77a9d0fe3cd1fc3c6956f974f874df24db))
+* **forge:** ASCII-refuse the DERIVED forge git host, on both providers ([#523](https://github.com/Smana/runlore/issues/523)) ([bfe860e](https://github.com/Smana/runlore/commit/bfe860e142adfb92c1034a3bdbdfdfb9d8d0dc5d))
+* **gitlab:** give the note-append the guards its own doc claimed ([#520](https://github.com/Smana/runlore/issues/520)) ([92cb9ff](https://github.com/Smana/runlore/commit/92cb9ff9588c7ad3e45eaac2ab96c47d5d26d112))
+* **gitops:** confine the forge credential to the forge's own git host ([#515](https://github.com/Smana/runlore/issues/515)) ([3fa30db](https://github.com/Smana/runlore/commit/3fa30db03bb4997061e7f97ddb7538dc2f316b7e))
+* **investigate:** canonicalise the resource the MODEL names, not only the alert's ([#538](https://github.com/Smana/runlore/issues/538)) ([7609037](https://github.com/Smana/runlore/commit/7609037444bf5edc33681e1fab6fc503cc430d82))
+* **investigate:** charge failed calls and recall embeddings to the run's ceiling ([#516](https://github.com/Smana/runlore/issues/516)) ([658adb7](https://github.com/Smana/runlore/commit/658adb760d93a08ab6a8b2bd002ef373aa16e6da))
+* **investigate:** close three escapes past the egress redaction chokepoint ([#522](https://github.com/Smana/runlore/issues/522)) ([ffa9aac](https://github.com/Smana/runlore/commit/ffa9aac55f2d0d933756b3ba7ddd69024fc0169b))
+* **investigate:** match a cloud resource by identity, not by spelling ([#535](https://github.com/Smana/runlore/issues/535)) ([4dc27ce](https://github.com/Smana/runlore/commit/4dc27ce0f12f00398e25fbb04cd4b36518bc45a5))
+* **investigate:** stop the GitOps tools reporting a scope limit as an absent object ([#508](https://github.com/Smana/runlore/issues/508)) ([eb33fb5](https://github.com/Smana/runlore/commit/eb33fb516fd7b19fade888e99c58e0190f2ca243))
+* **investigate:** stop what_changed reporting a scope limit as an absent change ([#543](https://github.com/Smana/runlore/issues/543)) ([0ed7806](https://github.com/Smana/runlore/commit/0ed78066d98997476e6bd34a45d6bb3fa05fe989))
+* **notify:** bound the Matrix thread stamp, and the whole event with it ([#526](https://github.com/Smana/runlore/issues/526)) ([26e46e4](https://github.com/Smana/runlore/commit/26e46e4360c6cf30c99de4b69f5c3ba80eb45bd3))
+* **notify:** bound the progress ping and the delivered Matrix card ([#514](https://github.com/Smana/runlore/issues/514)) ([013fd34](https://github.com/Smana/runlore/commit/013fd34c2c0c4ebc738fdcca619e7d71f9711956))
+* **notify:** don't render the alert's namespace as the resource's own ([#536](https://github.com/Smana/runlore/issues/536)) ([9938c50](https://github.com/Smana/runlore/commit/9938c501ac00356996c610514c48f8465f03edee))
+* **notify:** make an inconclusive card explain itself ([#530](https://github.com/Smana/runlore/issues/530)) ([4b0cc1b](https://github.com/Smana/runlore/commit/4b0cc1ba8b50245b4734dc150c80b0fbe477cd7d))
+* **notify:** regenerate the card golden for the combination that broke main ([#537](https://github.com/Smana/runlore/issues/537)) ([b87ca8f](https://github.com/Smana/runlore/commit/b87ca8fd49c75963184f2baf7a57ea8e9222b28a))
+* **notify:** stop the delivery payload naming a namespace the resource is not in ([#541](https://github.com/Smana/runlore/issues/541)) ([813f3c0](https://github.com/Smana/runlore/commit/813f3c06181c51a4b26e5b36bb66ce9ca8a9ce58))
+* **notify:** tell the human when a knowledge write failed ([#510](https://github.com/Smana/runlore/issues/510)) ([9131d29](https://github.com/Smana/runlore/commit/9131d299eb655f2e9e895ae43256cd769c4b0707))
+* **server:** stop a typed-nil thread handler from faking a live /slack/events ([#500](https://github.com/Smana/runlore/issues/500)) ([0dfb612](https://github.com/Smana/runlore/commit/0dfb61296612d7066d4d46d54c362743abe22af9))
+* **telemetry:** bucket the BM25 score histograms for a real corpus ([#481](https://github.com/Smana/runlore/issues/481)) ([d1cbc0b](https://github.com/Smana/runlore/commit/d1cbc0b486e45008a329d5c576a5093ee3b82313))
+* **thread:** close seven gaps between what a thread reports and what happened ([#528](https://github.com/Smana/runlore/issues/528)) ([fffb1a7](https://github.com/Smana/runlore/commit/fffb1a74ee366ebd92f118df6f04e4f8cd109277))
+* **thread:** derive a note entry's identity from the note, not the finding ([#499](https://github.com/Smana/runlore/issues/499)) ([8e74ea4](https://github.com/Smana/runlore/commit/8e74ea40dfcbe3c24e0d326bb56f6cbd5bda3d32))
+* **thread:** every note in a thread reaches the entry, not only the first ([#501](https://github.com/Smana/runlore/issues/501)) ([ecbb01e](https://github.com/Smana/runlore/commit/ecbb01e060ce80159a98851a34c7f5d4cd341062))
+* **thread:** stop the chat layer denying capabilities RunLore has ([#532](https://github.com/Smana/runlore/issues/532)) ([bd1962a](https://github.com/Smana/runlore/commit/bd1962a35d54d573a2f1a58ffd617270331f4c34))
+* **whatchanged:** clone SSH GitOps repoURLs over HTTPS, confined to the credential's host ([#498](https://github.com/Smana/runlore/issues/498)) ([6134fae](https://github.com/Smana/runlore/commit/6134fae38a4960bc16c833f34b6d1f084d738a00))
+* **whatchanged:** refuse a non-ASCII host in hostOf, and repair two post-merge guards ([#518](https://github.com/Smana/runlore/issues/518)) ([50e1a05](https://github.com/Smana/runlore/commit/50e1a05cc51f94db9048fbf9521def7c698da084))
+
+
+### Documentation
+
+* **dev:** design for the evidence-honesty group ([#503](https://github.com/Smana/runlore/issues/503), [#504](https://github.com/Smana/runlore/issues/504), [#505](https://github.com/Smana/runlore/issues/505), [#506](https://github.com/Smana/runlore/issues/506)) ([#507](https://github.com/Smana/runlore/issues/507)) ([d5a2507](https://github.com/Smana/runlore/commit/d5a2507183b4a5de729aaff3456f0cbe69ae315d))
+* **learning-loop:** say what verify actually rejects, and pin it to the code ([#511](https://github.com/Smana/runlore/issues/511)) ([42936ac](https://github.com/Smana/runlore/commit/42936ace3a80a6dabd8965c906c278d03ca80add))
+* make the section landing pages route the reader ([#531](https://github.com/Smana/runlore/issues/531)) ([f3c1fff](https://github.com/Smana/runlore/commit/f3c1fffcd9e3d573c3b6acb1606c8e5d7d49abb9))
+* **observability:** correct the release's documentation drift and panel what it added ([#527](https://github.com/Smana/runlore/issues/527)) ([3db4f77](https://github.com/Smana/runlore/commit/3db4f7731b09ddefce8e7ff7f7c77881cb95922b))
+* **slack:** pre-flight the thread-capture endpoint and warn about bot-token rotation ([#497](https://github.com/Smana/runlore/issues/497)) ([7d45c0d](https://github.com/Smana/runlore/commit/7d45c0de87e0b1e0951bc5b939332bef9704e25e))
+* **upgrade:** state the 0.15.0 migration correctly, and guard the footer defect that broke it ([#524](https://github.com/Smana/runlore/issues/524)) ([9f1aa48](https://github.com/Smana/runlore/commit/9f1aa4850b7b3716ad4f423ca8ae12aacedabe3b))
+
 ## [0.14.0](https://github.com/Smana/runlore/compare/v0.13.0...v0.14.0) (2026-08-14)
 
 
