@@ -39,28 +39,28 @@ next time gets an instant answer — no fresh investigation.
 The same incident, twice — and the second time is the whole point. Shown here in Slack; Matrix
 delivers the same findings.
 
-**First time — a full investigation.** **7 model calls, 131,354 tokens.** A verdict-first card: the
+**First time — a full investigation.** **6 model calls, 79,471 tokens.** A verdict-first card: the
 actionability call, a confidence-scored root cause with the evidence behind it, and suggested next
 steps it will *not* apply for you.
 
 <div align="center">
-<img src="assets/slack-notification.png" alt="RunLore Slack notification — a verdict-first card headed 'ImageGalleryUnavailable — apps/xplane-image-gallery': Action required, High confidence 92%, the cause traced to a manual AWS Secrets Manager DeleteSecret, read-only suggested next steps, a What changed line citing the CloudTrail event, a footer of 7 model calls and 121,758 in / 9,596 out tokens, feedback buttons, and a link to the knowledge-base pull request it opened" width="760" />
+<img src="assets/slack-notification.png" alt="RunLore Slack notification — a verdict-first card headed 'CheckoutUiUnavailable — demo/orders-api-allow-payments-only': Action required, High confidence 80%, the cause traced to a CiliumNetworkPolicy that still denies checkout-ui to orders-api traffic and so fails the readiness probe, read-only suggested next steps naming the exact ingress rule to add, a What changed line and a Recurrence count, a footer of 6 model calls and 69,868 in / 9,603 out tokens, feedback buttons, and a link to the knowledge-base pull request it opened" width="760" />
 </div>
 
-**Next time — an instant recall. 2 model calls, 8,289 tokens: about 6% of the cost, in seconds.**
+**Next time — an instant recall. 2 model calls, 5,860 tokens: about 7% of the cost, in seconds.**
 Once you merge the entry, the same failure — even under a *different, generic alert* — is answered
 straight from your knowledge base: no investigation, no second PR, and it cites the entry so you can
 check it.
 
 <div align="center">
-<img src="assets/recall-notification.png" alt="RunLore Slack notification — an instant recall: an ⚡ Instant recall banner reading 'answered from your knowledge base, no investigation was run', the known cause carried over from the merged entry, High confidence 78% after the verify pass, and a cost footer showing 2 model calls and 4,764 in / 3,525 out tokens" width="760" />
+<img src="assets/recall-notification.png" alt="RunLore Slack notification showing an instant recall: a lightning-bolt Instant recall banner reading 'answered from your knowledge base, no investigation was run', the known cause carried over from the merged entry — a CiliumNetworkPolicy still denying checkout-ui to orders-api traffic — Medium confidence 55% after the verify pass re-checked it, an open question asking a human to confirm the recall still applies, a link to the entry, and a cost footer showing 2 model calls and 3,139 in / 2,721 out tokens" width="760" />
 </div>
 
 <details>
 <summary><b>What's in those cards, in full</b></summary>
 
-Both cards are that one incident on a live cluster, so the cost is a matched pair — 8,289 tokens
-recalled against 131,354 investigated.
+Both cards are that one incident on a live cluster, so the cost is a matched pair — 5,860 tokens
+recalled against 79,471 investigated.
 
 **On the investigation.** The actionability call is one of *no action / suggested / required /
 inconclusive*. Alert metadata, recurrence and a link to the knowledge-base PR appear alongside when
@@ -69,8 +69,8 @@ threaded reply — open questions, data gaps and ruled-out hypotheses. The foote
 model calls and tokens.
 
 **On the recall.** As shipped it is **two** model calls — the LLM reranker that picks the entry, then
-the adversarial verify pass — against the **7** the full investigation took. A recall is *re-checked,
-not replayed*: the verify pass is why the recalled card reads 78% where the stored entry says 92%,
+the adversarial verify pass — against the **6** the full investigation took. A recall is *re-checked,
+not replayed*: the verify pass is why the recalled card reads 55% where the stored entry says 80%,
 and it falls through to a full investigation if it cannot confirm the entry. Once the entry has a
 track record its resolve rate is shown alongside, and that record weighs whether recall is trusted
 enough to fire at all.
