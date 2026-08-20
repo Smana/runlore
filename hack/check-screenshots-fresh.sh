@@ -51,14 +51,14 @@ SHOTS=(assets/slack-notification.png assets/recall-notification.png)
 CARD_GOLDEN=internal/notify/testdata/incident-card.golden.json
 
 # DIGEST_AT_SHOT is the card AS THE SHIPPED SCREENSHOTS DEPICT IT: the golden as
-# rendered by the renderer at 3c87467 (#455, "retake both Slack screenshots from a
-# live incident"), the commit that last replaced both images. Reproduce it by
-# checking that commit out into a worktree, copying in card_golden_test.go, and
-# running the test with -update-card-golden.
+# rendered at f8f01ea, the commit running in the cluster the captures were taken
+# from. Both images were retaken 2026-08-20 from real investigations on a live
+# workspace, so this is the renderer's current output rather than a reconstruction —
+# no worktree replay needed this time.
 #
 # Update it in the same commit that lands retaken screenshots — and clear the
 # acknowledgement below at the same time.
-DIGEST_AT_SHOT="f73e6221440fceab4e2bed088ec6cb72bbb6b827bb075e643b5fcae708d810cb"
+DIGEST_AT_SHOT="7e20faaa535f1f01597b8e10e078f731acc65c387b21bafe2ae0b97c959ee434"
 
 # ACKNOWLEDGED_DIGEST records ONE card the shipped screenshots are known not to
 # show, because retaking them is blocked on something outside this repo: the card
@@ -72,8 +72,8 @@ DIGEST_AT_SHOT="f73e6221440fceab4e2bed088ec6cb72bbb6b827bb075e643b5fcae708d810cb
 #     and this fails, so an acknowledgement cannot silently become permanent.
 #
 # Clear it (set to "") in the same commit that lands retaken screenshots.
-ACKNOWLEDGED_DIGEST="7e20faaa535f1f01597b8e10e078f731acc65c387b21bafe2ae0b97c959ee434"
-ACKNOWLEDGED_REASON="An inconclusive verdict now accounts for itself on the card, which adds two fixtures — 'stopped_by_budget' (a spend ceiling ended the run, so the summary names the ceiling instead of leaving it in the thread reply) and 'inconclusive_unaccounted' (the 2026-08-18 card: a definite conclusion in the title with no cause, no open question and no data gap behind it, which now says so). Both of those two fixtures then moved AGAIN when the resource-scope rendering landed: they are the only fixtures whose kind is a cluster-scoped Node, so they are the only ones that stopped rendering the alert's namespace as the resource's own. That second move is why this digest is not the one the adding change computed — neither PR could see it, because each was green against a base without the other, and it is recorded here rather than papered over. Every one of the seven OTHER fixtures still hashes identically field-for-field, including both cards the captures actually show. Neither image is WRONG, only incomplete: both depict conclusive findings, and neither new arm renders on a card with a root cause, so no capture session could stage them. This supersedes the #510 acknowledgement (the 'curate_failed' footer arm) and the #475 one before it; all three are equally absent and equally harmless. Retake when a live workspace is next available."
+ACKNOWLEDGED_DIGEST=""
+ACKNOWLEDGED_REASON=""
 
 for f in "${SHOTS[@]}" "$CARD_GOLDEN"; do
   [ -f "$f" ] || { echo "::error::$f is missing — update hack/check-screenshots-fresh.sh" >&2; exit 1; }
