@@ -6,18 +6,18 @@ Auto-published by [`.github/workflows/eval.yaml`](https://github.com/Smana/runlo
 lore eval -config eval/ci.runlore.yaml -cases examples/eval -n 5 -fail-under 0.7
 ```
 
-**Latest run:** 2026-08-22T06:54:44Z · model `openai/glm-4.5-air` · **2/6 scenarios reached (33%)** · n=5 runs/case, k-of-n bar 70% · est. cost $0.32 (1.3M in / 55.3k out tokens)
+**Latest run:** 2026-08-23T06:50:15Z · model `openai/glm-4.5-air` · **2/6 scenarios reached (33%)** · n=5 runs/case, k-of-n bar 70% · est. cost $0.28 (1.1M in / 54.7k out tokens)
 
 ## Scenarios (latest run)
 
 | scenario | result | pass-rate | median confidence | recall | notes |
 |---|---|---|---|---|---|
-| gitops-broken-kustomization | ✅ PASS | 80% (n=5) | 0.90 | — | — |
+| gitops-broken-kustomization | ✅ PASS | 100% (n=5) | 0.90 | — | — |
 | harbor-chart-bump | ⚠️ FLAKY | 40% (n=5) | 0.90 | — | harbor-db |
-| node-eviction-no-commons | ❌ MISS | 0% (n=5) | 0.70 | fired 0/5 · short-circuit 0/5 (expect: rejected) | report-worker, request |
-| node-eviction-with-commons | ✅ PASS | 100% (n=5) | 0.90 | fired 0/5 · short-circuit 0/5 (expect: rejected) | — |
-| poisoned-recall-rejected | ⚠️ FLAKY | 60% (n=5) | 0.90 | — | pull, v9.9.9 |
-| poisoned-recall-verify | ❌ MISS | 20% (n=5) | 1.00 | fired 5/5 · short-circuit 0/5 (expect: withdrawn) | v9.9.9 |
+| node-eviction-no-commons | ❌ MISS | 20% (n=5) | 0.80 | fired 0/5 · short-circuit 0/5 (expect: rejected) | request |
+| node-eviction-with-commons | ✅ PASS | 80% (n=5) | 0.70 | fired 0/5 · short-circuit 0/5 (expect: rejected) | request |
+| poisoned-recall-rejected | ⚠️ FLAKY | 40% (n=5) | 0.90 | — | pull, v9.9.9 |
+| poisoned-recall-verify | ❌ MISS | 20% (n=5) | 0.90 | fired 5/5 · short-circuit 0/5 (expect: withdrawn) | pull, v9.9.9 |
 
 ## Cost per investigation
 
@@ -25,7 +25,7 @@ Median provider-reported tokens per case on `openai/glm-4.5-air`, priced at $0.2
 
 | path | cases | median in tok | median out tok | est. cost |
 |---|---|---|---|---|
-| full investigation | 6 | 36.6k | 1.7k | $0.009 |
+| full investigation | 6 | 30.2k | 1.8k | $0.008 |
 
 ## Confidence calibration
 
@@ -38,6 +38,7 @@ Newest first, last 30 shown — the full log is [`history.jsonl`](https://github
 
 | date | model | reached | pass-rate | est. cost |
 |---|---|---|---|---|
+| 2026-08-23T06:50:15Z | openai/glm-4.5-air | 2/6 | 33% | $0.28 |
 | 2026-08-22T06:54:44Z | openai/glm-4.5-air | 2/6 | 33% | $0.32 |
 | 2026-08-21T07:04:23Z | openai/glm-4.5-air | 2/6 | 33% | $0.28 |
 | 2026-08-20T07:02:55Z | openai/glm-4.5-air | 1/6 | 17% | $0.28 |
