@@ -158,7 +158,7 @@ func alertResourceIfDistinct(inv providers.Investigation) string {
 //
 // It reuses Workload.Ref(), so the namespace is never touched and the empty /
 // bare-namespace cases pass through unchanged; w is a value copy, so mutating its
-// Name is local. Idempotent (NormalizeResourceName is, to a fixed point).
+// Name is local. Idempotent (NormalizeResourceName is).
 //
 // The Ref() is then narrowed by kbvalidate.DraftResource → providers.EntryResourceRef, because
 // Workload.Name on a curated finding is MODEL-WRITTEN free text and a
