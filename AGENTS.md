@@ -6,13 +6,19 @@ RunLore is a self-improving, GitOps-native SRE agent written in Go. Start with
 ## Quality gate — run before every commit
 
 ```bash
-go build ./... && go vet ./... && go test ./... && gofmt -l . && golangci-lint run ./...
+go build ./... && go vet ./... && go test ./... && gofmt -l . && hack/lint.sh
 ```
 
 - `gofmt -l .` must print nothing.
-- `golangci-lint run ./...` must report **`0 issues`**.
+- `hack/lint.sh` must report **`0 issues`**.
 - Linter config: [`.golangci.yml`](.golangci.yml) (golangci-lint **v2**). CI runs the same gate
   ([`.github/workflows/ci.yaml`](.github/workflows/ci.yaml)).
+- **Use `hack/lint.sh`, not a bare `golangci-lint run ./...`.** It is that command with
+  `GOTOOLCHAIN` pinned to go.mod's `toolchain` line — the Go version CI resolves too. With a
+  newer Go on PATH, the staticcheck bundled in golangci-lint panics building its IR
+  (`unexpected expr: *ast.KeyValueExpr`) and aborts the whole run, so the failure has nothing
+  to do with your code. Do **not** reach for `--disable=staticcheck` to get past it: that runs
+  clean while silently dropping one of the five linters in the `standard` set.
 
 ## Try it
 
