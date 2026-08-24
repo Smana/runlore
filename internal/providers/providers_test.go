@@ -64,6 +64,23 @@ func TestNormalizeWorkloadName(t *testing.T) {
 		"redis-cache":                                  "redis-cache",                            // 5-char tail but no digit → kept
 		"web":                                          "web",
 		"":                                             "",
+
+		// CronJob-generated Job names: <cronjob>-<unix-minutes>. Without this every
+		// failed run keys as its own incident, splitting the recurrence chain, the
+		// dedup fingerprint and the recall gate once per run.
+		"github-teams-sync-aqemia-29787720":      "github-teams-sync-aqemia",
+		"github-teams-sync-aqemia-mdft-29787720": "github-teams-sync-aqemia-mdft",
+		"github-teams-sync-aqemia-29790030":      "github-teams-sync-aqemia", // a later run collapses to the same family
+		"wet-collab-data-ingestion-29791885":     "wet-collab-data-ingestion",
+
+		// The suffix has to be long AND all-digit. Short numeric tails are ordinary
+		// naming (cluster ordinals, StatefulSet replicas, IP-derived node names) and
+		// collapsing them would merge genuinely distinct workloads.
+		"vmagent-vmagent-0":                "vmagent-vmagent-0",
+		"aurora-serverless-postgres-old-1": "aurora-serverless-postgres-old-1",
+		"ip-10-20-0-144":                   "ip-10-20-0-144",
+		"datagrok-group-sync-manual-j8g":   "datagrok-group-sync-manual-j8g", // one-off Job, not a run suffix
+		"job-1234567":                      "job-1234567",                    // 7 digits — below the run-suffix floor
 	}
 	for in, want := range cases {
 		if got := providers.NormalizeWorkloadName(in); got != want {

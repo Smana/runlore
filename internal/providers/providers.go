@@ -203,11 +203,32 @@ func EntryResourceRef(ref string) string {
 // names one ephemeral pod, not the controller family it belongs to.
 var reDeployPod = regexp.MustCompile(`-[a-f0-9]{8,10}-[a-z0-9]{5}$`) // <name>-<rs-hash>-<pod-hash>
 
-// NormalizeWorkloadName strips a trailing pod-name hash so a per-pod name reduces
-// to its controller family: a Deployment pod (<name>-<rs-hash>-<pod-hash>) and a
-// DaemonSet/StatefulSet-revision pod (<name>-<5-char hash containing a digit>)
-// both collapse to <name>. Names without such a suffix are returned unchanged, so
-// real trailing words (e.g. "redis-cache") are preserved. It is idempotent.
+// reJobRun matches a CronJob run suffix: the Job a CronJob creates is named
+// <cronjob>-<unix-minutes>, e.g. "github-teams-sync-aqemia-29787720". The suffix
+// names one scheduled RUN, not the CronJob family it belongs to.
+//
+// The floor of 8 digits is what keeps this safe. A unix-minute stamp has been 8
+// digits since 1989 and stays 8 until 2160, while the short numeric tails that
+// appear all over real workload names — StatefulSet ordinals (vmagent-vmagent-0),
+// cluster ordinals (shared-0), RDS instance suffixes (…-instance-1) and
+// IP-derived node names (ip-10-20-0-144) — are 1–3 digits and must never collapse:
+// merging those would fold genuinely distinct workloads into one incident.
+var reJobRun = regexp.MustCompile(`-[0-9]{8,}$`) // <cronjob>-<unix-minutes>
+
+// NormalizeWorkloadName strips a trailing per-instance suffix so a name reduces to
+// its controller family: a Deployment pod (<name>-<rs-hash>-<pod-hash>), a
+// DaemonSet/StatefulSet-revision pod (<name>-<5-char hash containing a digit>) and
+// a CronJob run Job (<name>-<unix-minutes>) all collapse to <name>. Names without
+// such a suffix are returned unchanged, so real trailing words (e.g. "redis-cache")
+// and short numeric tails (e.g. "vmagent-vmagent-0") are preserved. It is idempotent.
+//
+// The CronJob case was the expensive omission. A CronJob that fails once emits a
+// Job named for THAT run, and the run number reaches four separate consumers — the
+// alert TriggerKey, the suppression gate's recurrence chain, DupFingerprint and the
+// recall gate — so each new run presented as a brand-new incident: a fault already
+// investigated five times restarted at occurrence #1, recall could not match the
+// entry written for the previous run, and the curator filed a duplicate KB PR per
+// run. Collapsing to the CronJob family repairs all four at once.
 //
 // This is the single source of truth for pod-hash normalization. It is shared by
 // the curator dedup path (curator.DupFingerprint / IncidentKey — CORE-681, so the
@@ -225,6 +246,9 @@ func NormalizeWorkloadName(name string) string {
 		if len(suf) == 5 && strings.ContainsAny(suf, "0123456789") && isAlnum(suf) {
 			return name[:i]
 		}
+	}
+	if m := reJobRun.FindString(name); m != "" {
+		return name[:len(name)-len(m)]
 	}
 	return name
 }
