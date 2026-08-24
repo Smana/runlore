@@ -16,7 +16,7 @@ type fakeCloud struct {
 	health  providers.LogResult
 }
 
-func (f fakeCloud) CloudChanges(context.Context, providers.Selector, providers.TimeWindow) ([]providers.Change, error) {
+func (f fakeCloud) CloudChanges(context.Context, providers.Selector, providers.TimeWindow, providers.CloudChangeFilter) ([]providers.Change, error) {
 	return f.changes, nil
 }
 func (f fakeCloud) ResourceHealth(context.Context, providers.Selector, providers.TimeWindow) (providers.LogResult, error) {
@@ -65,12 +65,12 @@ type exactMatchCloud struct {
 	resourceName string             // the only scope that matches
 	changes      []providers.Change // returned when the scope matches, or unscoped
 	scopedCalls  []string           // every Selector.Name the tool asked for, in order
-	sels         []providers.Selector
+	filters      []providers.CloudChangeFilter
 }
 
-func (f *exactMatchCloud) CloudChanges(_ context.Context, sel providers.Selector, _ providers.TimeWindow) ([]providers.Change, error) {
+func (f *exactMatchCloud) CloudChanges(_ context.Context, sel providers.Selector, _ providers.TimeWindow, f2 providers.CloudChangeFilter) ([]providers.Change, error) {
 	f.scopedCalls = append(f.scopedCalls, sel.Name)
-	f.sels = append(f.sels, sel)
+	f.filters = append(f.filters, f2)
 	if sel.Name == "" || sel.Name == f.resourceName {
 		return f.changes, nil
 	}
@@ -158,12 +158,12 @@ func TestCloudWhatChangedFailedOnly(t *testing.T) {
 	if !strings.Contains(out, "InvalidDBClusterStateFault") {
 		t.Errorf("the error code must reach the model:\n%s", out)
 	}
-	if len(cloud.sels) != 2 {
-		t.Fatalf("want a scoped call then an unscoped retry, got %d", len(cloud.sels))
+	if len(cloud.filters) != 2 {
+		t.Fatalf("want a scoped call then an unscoped retry, got %d", len(cloud.filters))
 	}
-	for i, sel := range cloud.sels {
-		if !sel.FailedOnly {
-			t.Errorf("call %d dropped FailedOnly: %+v", i, sel)
+	for i, f := range cloud.filters {
+		if !f.FailedOnly {
+			t.Errorf("call %d dropped FailedOnly: %+v", i, f)
 		}
 	}
 	// The widen banner must not lecture about exact-match names here. Under
@@ -196,7 +196,7 @@ func TestCloudWhatChangedFailedOnlyEmptyIsNotSilence(t *testing.T) {
 // failures in the window.
 type boundedScanCloud struct{ calls int }
 
-func (f *boundedScanCloud) CloudChanges(_ context.Context, _ providers.Selector, _ providers.TimeWindow) ([]providers.Change, error) {
+func (f *boundedScanCloud) CloudChanges(_ context.Context, _ providers.Selector, _ providers.TimeWindow, _ providers.CloudChangeFilter) ([]providers.Change, error) {
 	f.calls++
 	return []providers.Change{{
 		Workload: providers.Workload{Kind: "(truncated)",

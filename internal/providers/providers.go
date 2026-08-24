@@ -415,12 +415,6 @@ type Selector struct {
 	Namespace string
 	Kind      string
 	Name      string
-	// FailedOnly keeps only events that the provider reports as failed calls.
-	// Cloud control-plane lookups return the most recent MUTATING events, which on
-	// a Karpenter cluster are overwhelmingly routine churn; a "why did this fail"
-	// question wants the rejected calls, and those are usually older than the
-	// result cap. Honoured by CloudProvider.CloudChanges; ignored elsewhere.
-	FailedOnly bool
 }
 
 // ---- provider interfaces -----------------------------------------------------
@@ -1057,11 +1051,28 @@ type OwnerWalker interface {
 // (EKS Pod Identity / IRSA) — not Steampipe and not a bundled CLI (both break the
 // single-binary property). Steampipe / cloud MCP servers stay optional MCP
 // extensions. Cloud is opt-in (config.cloud.provider).
+// CloudChangeFilter narrows which control-plane events CloudChanges keeps. It is a
+// parameter of that ONE method rather than a field on Selector, because Selector
+// answers "which object" and every other consumer of it — the GitOps providers'
+// Changes, the three flow providers' Drops, ResourceHealth — would silently drop a
+// filter they never honour. A caller asking to narrow and a callee quietly not
+// narrowing is the defect LookupReason exists to prevent one layer up.
+//
+// The zero value keeps everything, so a caller that does not care says nothing.
+type CloudChangeFilter struct {
+	// FailedOnly keeps only events the provider recorded as REJECTED calls. Cloud
+	// lookups return the most recent MUTATING events, which on a busy cluster are
+	// overwhelmingly routine instance and tag churn; a "why did this fail" question
+	// wants the rejected calls, and those are usually older than the result cap.
+	FailedOnly bool
+}
+
 type CloudProvider interface {
 	// CloudChanges returns recent mutating cloud control-plane events (AWS:
 	// CloudTrail) in the window, normalized to the engine-agnostic Change model so
-	// they join the same "what changed" timeline as GitOps diffs.
-	CloudChanges(ctx context.Context, sel Selector, w TimeWindow) ([]Change, error)
+	// they join the same "what changed" timeline as GitOps diffs. f narrows WHICH of
+	// those events are kept; the zero value keeps all of them.
+	CloudChanges(ctx context.Context, sel Selector, w TimeWindow, f CloudChangeFilter) ([]Change, error)
 	// ResourceHealth returns cloud-side state/health for resources backing the
 	// selector (EC2 instance status, ASG capacity/activities, EKS nodegroup), as
 	// normalized lines for the model.

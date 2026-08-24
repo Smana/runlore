@@ -50,7 +50,7 @@ func TestCloudChangesFailedOnly(t *testing.T) {
 
 	// Control: without the filter the answer is past the cap, exactly as observed.
 	c := &Client{ct: &fakeCT{pages: pages}, maxEvents: 25}
-	got, err := c.CloudChanges(context.Background(), providers.Selector{}, providers.TimeWindow{})
+	got, err := c.CloudChanges(context.Background(), providers.Selector{}, providers.TimeWindow{}, providers.CloudChangeFilter{})
 	if err != nil {
 		t.Fatalf("CloudChanges: %v", err)
 	}
@@ -60,7 +60,7 @@ func TestCloudChangesFailedOnly(t *testing.T) {
 
 	// With the filter, the failed call is the whole result.
 	c = &Client{ct: &fakeCT{pages: pages}, maxEvents: 25}
-	got, err = c.CloudChanges(context.Background(), providers.Selector{FailedOnly: true}, providers.TimeWindow{})
+	got, err = c.CloudChanges(context.Background(), providers.Selector{}, providers.TimeWindow{}, providers.CloudChangeFilter{FailedOnly: true})
 	if err != nil {
 		t.Fatalf("CloudChanges(FailedOnly): %v", err)
 	}
@@ -99,7 +99,7 @@ func TestCloudChangesFailedOnlyBoundsItsScan(t *testing.T) {
 	}
 	ct := &fakeCT{pages: pages}
 	c := &Client{ct: ct, maxEvents: 25}
-	got, err := c.CloudChanges(context.Background(), providers.Selector{FailedOnly: true}, providers.TimeWindow{})
+	got, err := c.CloudChanges(context.Background(), providers.Selector{}, providers.TimeWindow{}, providers.CloudChangeFilter{FailedOnly: true})
 	if err != nil {
 		t.Fatalf("CloudChanges(FailedOnly): %v", err)
 	}
@@ -144,7 +144,7 @@ func TestCloudChangesFailedOnlyScanNoteNotTruncation(t *testing.T) {
 		})
 	}
 	c := &Client{ct: &fakeCT{pages: pages}, maxEvents: 25}
-	got, err := c.CloudChanges(context.Background(), providers.Selector{FailedOnly: true}, providers.TimeWindow{})
+	got, err := c.CloudChanges(context.Background(), providers.Selector{}, providers.TimeWindow{}, providers.CloudChangeFilter{FailedOnly: true})
 	if err != nil {
 		t.Fatalf("CloudChanges(FailedOnly): %v", err)
 	}
@@ -183,7 +183,7 @@ func TestCloudChangesFailedOnlyCompleteScanIsNotPartial(t *testing.T) {
 			"InvalidDBClusterStateFault", "cluster is stopped", t0)},
 	})
 	c := &Client{ct: &fakeCT{pages: pages}, maxEvents: 25}
-	got, err := c.CloudChanges(context.Background(), providers.Selector{FailedOnly: true}, providers.TimeWindow{})
+	got, err := c.CloudChanges(context.Background(), providers.Selector{}, providers.TimeWindow{}, providers.CloudChangeFilter{FailedOnly: true})
 	if err != nil {
 		t.Fatalf("CloudChanges(FailedOnly): %v", err)
 	}

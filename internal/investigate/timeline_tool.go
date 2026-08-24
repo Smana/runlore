@@ -160,7 +160,7 @@ func (t IncidentTimelineTool) Call(ctx context.Context, args string) (string, er
 	// (cloud events are cluster/account-scoped), so we pass an empty selector and let
 	// the provider return the window's mutating events.
 	if t.Cloud != nil {
-		changes, err := t.Cloud.CloudChanges(ctx, providers.Selector{}, window)
+		changes, err := t.Cloud.CloudChanges(ctx, providers.Selector{}, window, providers.CloudChangeFilter{})
 		if err != nil {
 			notes = append(notes, fmt.Sprintf("(cloud changes error: %v)", err))
 		} else {

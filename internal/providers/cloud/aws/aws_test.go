@@ -92,7 +92,7 @@ func TestCloudChangesPagination(t *testing.T) {
 			ct := &fakeCT{pages: tc.pages}
 			c := &Client{ct: ct, maxEvents: tc.maxEvents}
 
-			changes, err := c.CloudChanges(context.Background(), providers.Selector{}, providers.TimeWindow{})
+			changes, err := c.CloudChanges(context.Background(), providers.Selector{}, providers.TimeWindow{}, providers.CloudChangeFilter{})
 			if err != nil {
 				t.Fatalf("CloudChanges: %v", err)
 			}
@@ -135,7 +135,7 @@ func TestCloudChanges(t *testing.T) {
 	}}}}
 	c := &Client{ct: ct, maxEvents: 25}
 
-	changes, err := c.CloudChanges(context.Background(), providers.Selector{Name: "i-0abc"}, providers.TimeWindow{Start: t0.Add(-time.Hour), End: t0})
+	changes, err := c.CloudChanges(context.Background(), providers.Selector{Name: "i-0abc"}, providers.TimeWindow{Start: t0.Add(-time.Hour), End: t0}, providers.CloudChangeFilter{})
 	if err != nil {
 		t.Fatalf("CloudChanges: %v", err)
 	}
@@ -175,7 +175,7 @@ func TestCloudChangesUnscoped(t *testing.T) {
 	}}}}
 	c := &Client{ct: ct, maxEvents: 25}
 
-	_, err := c.CloudChanges(context.Background(), providers.Selector{}, providers.TimeWindow{})
+	_, err := c.CloudChanges(context.Background(), providers.Selector{}, providers.TimeWindow{}, providers.CloudChangeFilter{})
 	if err != nil {
 		t.Fatalf("CloudChanges: %v", err)
 	}
@@ -211,7 +211,7 @@ func TestCloudChangesResourceScopedFiltersReadOnly(t *testing.T) {
 	}}}}
 	c := &Client{ct: ct, maxEvents: 25}
 
-	changes, err := c.CloudChanges(context.Background(), providers.Selector{Name: "i-0abc"}, providers.TimeWindow{})
+	changes, err := c.CloudChanges(context.Background(), providers.Selector{Name: "i-0abc"}, providers.TimeWindow{}, providers.CloudChangeFilter{})
 	if err != nil {
 		t.Fatalf("CloudChanges: %v", err)
 	}
@@ -240,7 +240,7 @@ func TestCloudChangesErrorCode(t *testing.T) {
 	}}}}
 	c := &Client{ct: ct, maxEvents: 25}
 
-	changes, err := c.CloudChanges(context.Background(), providers.Selector{Name: "i-0abc"}, providers.TimeWindow{})
+	changes, err := c.CloudChanges(context.Background(), providers.Selector{Name: "i-0abc"}, providers.TimeWindow{}, providers.CloudChangeFilter{})
 	if err != nil {
 		t.Fatalf("CloudChanges: %v", err)
 	}

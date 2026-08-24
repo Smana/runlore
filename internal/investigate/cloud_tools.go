@@ -53,7 +53,8 @@ func (t CloudWhatChangedTool) Call(ctx context.Context, args string) (string, er
 		return "", fmt.Errorf("parse args: %w", err)
 	}
 	window := windowSince(in.SinceMinutes, 90)
-	changes, err := t.Cloud.CloudChanges(ctx, providers.Selector{Name: in.Resource, FailedOnly: in.FailedOnly}, window)
+	filter := providers.CloudChangeFilter{FailedOnly: in.FailedOnly}
+	changes, err := t.Cloud.CloudChanges(ctx, providers.Selector{Name: in.Resource}, window, filter)
 	if err != nil {
 		return "", err
 	}
@@ -81,7 +82,7 @@ func (t CloudWhatChangedTool) Call(ctx context.Context, args string) (string, er
 	events, note := splitNote(changes)
 	var widened bool
 	if len(events) == 0 && in.Resource != "" && note == "" {
-		all, aerr := t.Cloud.CloudChanges(ctx, providers.Selector{FailedOnly: in.FailedOnly}, window)
+		all, aerr := t.Cloud.CloudChanges(ctx, providers.Selector{}, window, filter)
 		if allEvents, allNote := splitNote(all); aerr == nil && len(allEvents) > 0 {
 			events, note, widened = allEvents, allNote, true
 		}

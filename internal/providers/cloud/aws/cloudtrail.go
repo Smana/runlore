@@ -33,7 +33,7 @@ import (
 //
 // Note: CloudTrail is eventually consistent (~15 min), so a too-narrow window can
 // miss a just-made change — callers should use a generous lookback.
-func (c *Client) CloudChanges(ctx context.Context, sel providers.Selector, w providers.TimeWindow) ([]providers.Change, error) {
+func (c *Client) CloudChanges(ctx context.Context, sel providers.Selector, w providers.TimeWindow, f providers.CloudChangeFilter) ([]providers.Change, error) {
 	// CloudTrail LookupEvents accepts exactly ONE LookupAttribute per request.
 	// When a resource name is given, scope by ResourceName and filter read-only
 	// events client-side (the Event carries a ReadOnly field). When no resource
@@ -91,10 +91,10 @@ func (c *Client) CloudChanges(ctx context.Context, sel providers.Selector, w pro
 			}
 			// Parsed once here and handed to eventToChange, which used to re-parse the
 			// identical payload for the message. Note this is an if-init-free spelling on
-			// purpose: `if code, _ := eventError(e); sel.FailedOnly && ...` runs the parse
+			// purpose: `if code, _ := eventError(e); f.FailedOnly && ...` runs the parse
 			// unconditionally, because Go evaluates the init statement before the guard.
 			code, msg := eventError(out.Events[i])
-			if sel.FailedOnly && code == "" {
+			if f.FailedOnly && code == "" {
 				continue
 			}
 			changes = append(changes, eventToChange(out.Events[i], code, msg))
@@ -109,7 +109,7 @@ func (c *Client) CloudChanges(ctx context.Context, sel providers.Selector, w pro
 		// period one page at a time.
 		//
 		// See scanBoundedNote for why this does not reuse the cap's message.
-		if sel.FailedOnly && pages >= maxFailureScanPages {
+		if f.FailedOnly && pages >= maxFailureScanPages {
 			// Only partial if there was actually more to read. A scan that happens to
 			// finish on its last allowed page is complete, and saying otherwise tells
 			// the model its one real answer might be missing a sibling.
