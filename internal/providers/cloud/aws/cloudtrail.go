@@ -57,6 +57,11 @@ func (c *Client) CloudChanges(ctx context.Context, sel providers.Selector, w pro
 	}
 
 	in := &cloudtrail.LookupEventsInput{LookupAttributes: attrs}
+	// Ask for full pages. Without this the server picks the page size, so
+	// maxFailureScanPages would bound PAGES but not events — twenty short pages can
+	// examine a few dozen events rather than the ~1000 the budget is sized for, and
+	// the scan then gives up far short of the depth it reports.
+	in.MaxResults = ptr(int32(50))
 	if !w.Start.IsZero() {
 		in.StartTime = ptr(w.Start)
 	}
@@ -71,6 +76,7 @@ func (c *Client) CloudChanges(ctx context.Context, sel providers.Selector, w pro
 	p := cloudtrail.NewLookupEventsPaginator(c.ct, in)
 	var changes []providers.Change
 	truncated := false
+	scanBounded := false
 	pages := 0
 	for p.HasMorePages() {
 		out, err := p.NextPage(ctx)
@@ -84,7 +90,7 @@ func (c *Client) CloudChanges(ctx context.Context, sel providers.Selector, w pro
 			if resourceScoped && deref(out.Events[i].ReadOnly) == "true" {
 				continue
 			}
-			if sel.FailedOnly && eventError(out.Events[i]) == "" {
+			if code, _ := eventError(out.Events[i]); sel.FailedOnly && code == "" {
 				continue
 			}
 			changes = append(changes, eventToChange(out.Events[i]))
@@ -96,10 +102,18 @@ func (c *Client) CloudChanges(ctx context.Context, sel providers.Selector, w pro
 		// A failure scan has to look past the cap — failures are sparse, and the
 		// answer is typically behind pages of successful churn. Bound it anyway: a
 		// window with no failures at all would otherwise walk the whole retention
-		// period one page at a time. Hitting the budget is a partial view, so it
-		// reuses the truncation sentinel rather than reporting a clean empty result.
+		// period one page at a time.
+		//
+		// This is NOT the same condition as the cap binding above, and it does not
+		// reuse its sentinel. The cap means "more events matched than we kept, narrow
+		// the search"; the budget means "we stopped reading, widen or scope it". Same
+		// word, opposite advice — and for a sparse-failure scan the cap's advice sends
+		// the model away from an answer that is older, not newer.
 		if sel.FailedOnly && pages >= maxFailureScanPages {
-			truncated = true
+			// Only partial if there was actually more to read. A scan that happens to
+			// finish on its last allowed page is complete, and saying otherwise tells
+			// the model its one real answer might be missing a sibling.
+			scanBounded = p.HasMorePages()
 			break
 		}
 	}
@@ -112,8 +126,18 @@ func (c *Client) CloudChanges(ctx context.Context, sel providers.Selector, w pro
 	}
 	// Append the sentinel AFTER the sort+slice so it always lands last (a zero
 	// When would otherwise sort it among real events), signalling a partial view.
-	if truncated {
-		changes = append(changes, truncatedChange(c.maxEvents))
+	//
+	// Never on its own, though. A sentinel-only slice is not empty, so a caller
+	// testing len(changes) == 0 stops seeing an empty result: the failure scan that
+	// walked 20 pages of Karpenter churn and found nothing returned one bogus row,
+	// which suppressed both the "no failures found" message and the unscoped widen —
+	// on exactly the busy cluster the filter was written for.
+	if (truncated || scanBounded) && len(changes) > 0 {
+		if scanBounded {
+			changes = append(changes, scanBoundedChange(pages))
+		} else {
+			changes = append(changes, truncatedChange(c.maxEvents))
+		}
 	}
 	return changes, nil
 }
@@ -124,26 +148,48 @@ func (c *Client) CloudChanges(ctx context.Context, sel providers.Selector, w pro
 // churn, and small enough that a quiet window returns promptly.
 const maxFailureScanPages = 20
 
-// eventError returns the errorCode from an event's raw CloudTrail payload, or ""
-// when the call succeeded (successful calls omit the field). It is the single
-// reader of that payload: both the FailedOnly filter and the rendered "FAILED:"
-// annotation key on it, so the two can never disagree about what failed.
-func eventError(e cttypes.Event) string {
+// eventError returns the errorCode and errorMessage from an event's raw CloudTrail
+// payload; code is "" when the call succeeded (successful calls omit the field).
+//
+// It is the single reader of that payload — both the FailedOnly filter and the
+// rendered "FAILED:" annotation key on it, so the two can never disagree about what
+// failed. It returns the message too rather than leaving eventToChange to re-parse
+// the same JSON for it: on a 20-page failure scan that second parse ran over every
+// kept event, and a claim of single-readership that a sibling function quietly
+// breaks is worse than no claim.
+func eventError(e cttypes.Event) (code, message string) {
 	raw := deref(e.CloudTrailEvent)
 	if raw == "" {
-		return ""
+		return "", ""
 	}
 	var payload ctEventJSON
 	if err := json.Unmarshal([]byte(raw), &payload); err != nil {
-		return ""
+		return "", ""
 	}
-	return payload.ErrorCode
+	return payload.ErrorCode, payload.ErrorMessage
 }
 
 // truncatedChange is the sentinel appended when CloudChanges stops at its cap
 // with more events upstream, so the model knows the timeline is partial. It is
 // not a real event: Kind "(truncated)" is the recognizable marker, and it is
 // appended last so cloud_tools renders it as a trailing note.
+// scanBoundedChange is the sentinel for a FailedOnly scan that spent its page
+// budget with more pages still to read. It is deliberately NOT truncatedChange:
+// nothing was truncated at the cap, and "narrow the window" — that sentinel's
+// advice — is the wrong move here, because a sparse failure is typically OLDER
+// than the newest events, not newer.
+func scanBoundedChange(pages int) providers.Change {
+	return providers.Change{
+		Engine: providers.EngineAWS,
+		Type:   providers.ChangeCloudAPI,
+		Workload: providers.Workload{
+			Kind: "(truncated)",
+			Name: fmt.Sprintf("scan stopped after %d pages of successful events; any FAILED calls older "+
+				"than that were not examined — narrow the window's END, or scope to a resource", pages),
+		},
+	}
+}
+
 func truncatedChange(limit int) providers.Change {
 	return providers.Change{
 		Engine: providers.EngineAWS,
@@ -188,11 +234,10 @@ func eventToChange(e cttypes.Event) providers.Change {
 	// raw CloudTrail JSON carries an errorCode — so the model sees failed calls
 	// (InsufficientInstanceCapacity, UnauthorizedOperation, etc.) not as successes.
 	path := deref(e.EventName) + " by " + deref(e.Username)
-	if code := eventError(e); code != "" {
+	if code, msg := eventError(e); code != "" {
 		path += " — FAILED: " + code
-		var payload ctEventJSON
-		if err := json.Unmarshal([]byte(deref(e.CloudTrailEvent)), &payload); err == nil && payload.ErrorMessage != "" {
-			path += " (" + payload.ErrorMessage + ")"
+		if msg != "" {
+			path += " (" + msg + ")"
 		}
 	}
 	ch.Source = providers.SourceRef{Path: path}

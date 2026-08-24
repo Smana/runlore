@@ -30,7 +30,7 @@ func (t CloudWhatChangedTool) Description() string {
 		"service name or substring; OMIT it to see every mutating event, which is the right move when you do " +
 		"not know the exact identifier. Set failed_only=true when the incident IS a failed AWS operation and " +
 		"you do not know which resource it happened to (a failed backup/snapshot job, a rejected API call): " +
-		"results are capped at the NEWEST events, which on a Karpenter cluster are routine instance and tag " +
+		"results are capped at the NEWEST events, which on a busy cluster are routine instance and tag " +
 		"churn, so the rejected call you are looking for is usually just past the cap. failed_only spends the " +
 		"cap on rejected calls instead and reports each one's error code. since_minutes default 90 " +
 		"(CloudTrail lags ~15m)."
@@ -39,7 +39,7 @@ func (t CloudWhatChangedTool) Description() string {
 // Schema returns the JSON schema for the arguments.
 func (t CloudWhatChangedTool) Schema() string {
 	return `{"type":"object","properties":{"resource":{"type":"string"},"since_minutes":{"type":"integer"},` +
-		`"failed_only":{"type":"boolean","description":"keep only control-plane calls that were REJECTED, reporting each error code; use when the incident is itself a failed AWS operation"}},"required":[]}`
+		`"failed_only":{"type":"boolean","description":"keep only MUTATING control-plane calls that were REJECTED, reporting each error code; use when the incident is itself a failed AWS write operation. Read-only calls are never listed by this tool, so a denied Describe/Get will NOT appear here"}},"required":[]}`
 }
 
 // Call lists cloud changes over the window and renders them.
@@ -79,28 +79,50 @@ func (t CloudWhatChangedTool) Call(ctx context.Context, args string) (string, er
 	// So a scoped miss retries unscoped rather than dead-ending. The banner says the
 	// filter was dropped, because silently widening a query the model asked to narrow
 	// would be worse than the dead end.
+	// Not when the scoped scan already spent its page budget: the widen would spend a
+	// second one, and LookupEvents is limited to ~2 TPS per account/region, so 40
+	// sequential pages can outlast the per-tool timeout and turn a partial answer into
+	// a hard dead end. A bounded scan is reported as bounded instead.
 	var widened bool
-	if len(changes) == 0 && in.Resource != "" {
+	if !hasEvent(changes) && in.Resource != "" && scanNote(changes) == "" {
 		all, aerr := t.Cloud.CloudChanges(ctx, providers.Selector{FailedOnly: in.FailedOnly}, window)
-		if aerr == nil && len(all) > 0 {
+		if aerr == nil && hasEvent(all) {
 			changes, widened = all, true
 		}
 	}
 
-	if len(changes) == 0 {
+	if !hasEvent(changes) {
 		if in.FailedOnly {
 			// Say which filter produced the empty result. "No events" from a filtered
 			// lookup is not the same claim as "the control plane was quiet", and the
 			// schema asks the model not to read absence as evidence.
-			return "no FAILED AWS control-plane calls in the window (successful events were not listed — re-run without failed_only to see them)", nil
+			msg := "no FAILED AWS control-plane calls in the window (successful events were not listed — re-run without failed_only to see them)"
+			// A bounded scan did not establish absence at all — it stopped reading. Carry
+			// the provider's own note rather than reporting the quiet window it did not
+			// observe. Without this the sentinel was the whole result and this message
+			// never ran.
+			if note := scanNote(changes); note != "" {
+				msg += "\nNOTE: " + note
+			}
+			return msg, nil
 		}
 		return "no mutating AWS events in the window", nil
 	}
 	var b strings.Builder
 	if widened {
-		fmt.Fprintf(&b, "resource %q matched no CloudTrail events — ResourceName is an exact match on the "+
-			"full AWS resource name or ARN (e.g. a secret's full path \"apps/team/name\"), not a service or "+
-			"substring. Showing ALL mutating events in the window instead:\n", in.Resource)
+		// Under failed_only a scoped miss means "no FAILURES for this resource", which
+		// is NOT evidence the name was wrong — the exact-match lecture below would send
+		// the model off inventing new names for a resource it had already identified
+		// correctly, and then attribute other resources' failures to it.
+		if in.FailedOnly {
+			fmt.Fprintf(&b, "no FAILED calls against resource %q in the window — the name may still be "+
+				"correct, it simply had no rejected calls. Showing ALL rejected calls in the window, which "+
+				"may belong to OTHER resources:\n", in.Resource)
+		} else {
+			fmt.Fprintf(&b, "resource %q matched no CloudTrail events — ResourceName is an exact match on the "+
+				"full AWS resource name or ARN (e.g. a secret's full path \"apps/team/name\"), not a service or "+
+				"substring. Showing ALL mutating events in the window instead:\n", in.Resource)
+		}
 	}
 	renderRows(&b, len(changes), "more", func(i int) {
 		c := changes[i]
@@ -110,6 +132,30 @@ func (t CloudWhatChangedTool) Call(ctx context.Context, args string) (string, er
 		}
 	})
 	return b.String(), nil
+}
+
+// hasEvent reports whether changes holds at least one REAL event. CloudChanges may
+// append a trailing "(truncated)" sentinel describing the shape of the result, and
+// a sentinel-only slice is not empty — so testing len(changes) == 0 quietly stopped
+// treating an empty failure scan as empty, suppressing both the widen retry and the
+// no-failures message on exactly the busy cluster failed_only exists for.
+func hasEvent(changes []providers.Change) bool {
+	for _, c := range changes {
+		if c.Workload.Kind != "(truncated)" {
+			return true
+		}
+	}
+	return false
+}
+
+// scanNote returns the sentinel's text, if the provider appended one.
+func scanNote(changes []providers.Change) string {
+	for _, c := range changes {
+		if c.Workload.Kind == "(truncated)" {
+			return c.Workload.Name
+		}
+	}
+	return ""
 }
 
 // CloudResourceHealthTool exposes AWS-side resource health (EC2/ASG/EKS) to the model.

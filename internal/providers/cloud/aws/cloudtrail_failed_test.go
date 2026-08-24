@@ -54,7 +54,7 @@ func TestCloudChangesFailedOnly(t *testing.T) {
 	if err != nil {
 		t.Fatalf("CloudChanges: %v", err)
 	}
-	if containsEvent(got, "CreateDBClusterSnapshot") {
+	if containsPath(got, "CreateDBClusterSnapshot") {
 		t.Fatalf("fixture does not reproduce the bug: the answer was inside the cap")
 	}
 
@@ -64,7 +64,7 @@ func TestCloudChangesFailedOnly(t *testing.T) {
 	if err != nil {
 		t.Fatalf("CloudChanges(FailedOnly): %v", err)
 	}
-	if !containsEvent(got, "CreateDBClusterSnapshot") {
+	if !containsPath(got, "CreateDBClusterSnapshot") {
 		t.Fatalf("FailedOnly must surface the failed call; got %d changes: %+v", len(got), got)
 	}
 	for _, ch := range got {
@@ -99,19 +99,96 @@ func TestCloudChangesFailedOnlyBoundsItsScan(t *testing.T) {
 	}
 	ct := &fakeCT{pages: pages}
 	c := &Client{ct: ct, maxEvents: 25}
-	if _, err := c.CloudChanges(context.Background(), providers.Selector{FailedOnly: true}, providers.TimeWindow{}); err != nil {
+	got, err := c.CloudChanges(context.Background(), providers.Selector{FailedOnly: true}, providers.TimeWindow{})
+	if err != nil {
 		t.Fatalf("CloudChanges(FailedOnly): %v", err)
 	}
-	if ct.call > 50 {
-		t.Errorf("the failure scan is unbounded: made %d LookupEvents calls", ct.call)
+	// Pinned to the constant, not to a loose ceiling. An earlier revision asserted
+	// `> 50`, which passed for any budget from 2 to 50 — so raising the constant to a
+	// 2.5x latency regression against a ~2 TPS API was invisible to CI.
+	if ct.call != maxFailureScanPages {
+		t.Errorf("the failure scan made %d LookupEvents calls, want exactly %d", ct.call, maxFailureScanPages)
 	}
-	if ct.call < 2 {
-		t.Errorf("the failure scan must look past the first page, made %d calls", ct.call)
+	// And the RESULT of a budget-exhausted scan matters as much as its cost: a
+	// sentinel-only slice is not empty, so callers testing len(changes) == 0 stopped
+	// seeing an empty scan as empty. It must come back genuinely empty.
+	if len(got) != 0 {
+		t.Errorf("a failure scan that found nothing must return no rows, got %d: %+v", len(got), got)
 	}
 }
 
-func containsEvent(changes []providers.Change, name string) bool {
-	return containsPath(changes, name)
+// TestCloudChangesFailedOnlyScanNoteNotTruncation: when the budget runs out with
+// real failures in hand, the note must describe what actually happened. The cap's
+// sentinel says "more events matched; narrow the window", which is both false (the
+// cap never bound) and backwards — a sparse failure is OLDER than the newest events,
+// so narrowing the window moves it further out of reach.
+func TestCloudChangesFailedOnlyScanNoteNotTruncation(t *testing.T) {
+	t0 := time.Date(2026, 8, 23, 3, 55, 0, 0, time.UTC)
+	pages := make([]*cloudtrail.LookupEventsOutput, 0, 500)
+	// One real failure up front, then endless churn, so the scan ends on its budget.
+	pages = append(pages, &cloudtrail.LookupEventsOutput{
+		Events: []cttypes.Event{ctFailedEvent("snap", "CreateDBClusterSnapshot",
+			"InvalidDBClusterStateFault", "cluster is stopped", t0)},
+		NextToken: ptr("more"),
+	})
+	for i := range 500 {
+		pages = append(pages, &cloudtrail.LookupEventsOutput{
+			Events:    []cttypes.Event{ctEvent(fmt.Sprintf("n-%d", i), "CreateTags", t0)},
+			NextToken: ptr("more"),
+		})
+	}
+	c := &Client{ct: &fakeCT{pages: pages}, maxEvents: 25}
+	got, err := c.CloudChanges(context.Background(), providers.Selector{FailedOnly: true}, providers.TimeWindow{})
+	if err != nil {
+		t.Fatalf("CloudChanges(FailedOnly): %v", err)
+	}
+	var note string
+	for _, ch := range got {
+		if ch.Workload.Kind == "(truncated)" {
+			note = ch.Workload.Name
+		}
+	}
+	if note == "" {
+		t.Fatalf("a bounded scan must say so; got %+v", got)
+	}
+	if strings.Contains(note, "truncated at") {
+		t.Errorf("a bounded scan reused the CAP's sentinel, whose advice is backwards here: %q", note)
+	}
+	if !strings.Contains(note, "older") {
+		t.Errorf("the note must say what was not examined: %q", note)
+	}
+}
+
+// TestCloudChangesFailedOnlyCompleteScanIsNotPartial: a scan that finishes on its
+// last allowed page is COMPLETE. Reporting it as partial tells the model its one
+// real answer might be missing a sibling that does not exist.
+func TestCloudChangesFailedOnlyCompleteScanIsNotPartial(t *testing.T) {
+	t0 := time.Date(2026, 8, 23, 3, 55, 0, 0, time.UTC)
+	pages := make([]*cloudtrail.LookupEventsOutput, 0, maxFailureScanPages)
+	for i := range maxFailureScanPages - 1 {
+		pages = append(pages, &cloudtrail.LookupEventsOutput{
+			Events:    []cttypes.Event{ctEvent(fmt.Sprintf("n-%d", i), "CreateTags", t0)},
+			NextToken: ptr("more"),
+		})
+	}
+	// The last page carries the answer and NO NextToken — there is nothing more.
+	pages = append(pages, &cloudtrail.LookupEventsOutput{
+		Events: []cttypes.Event{ctFailedEvent("snap", "CreateDBClusterSnapshot",
+			"InvalidDBClusterStateFault", "cluster is stopped", t0)},
+	})
+	c := &Client{ct: &fakeCT{pages: pages}, maxEvents: 25}
+	got, err := c.CloudChanges(context.Background(), providers.Selector{FailedOnly: true}, providers.TimeWindow{})
+	if err != nil {
+		t.Fatalf("CloudChanges(FailedOnly): %v", err)
+	}
+	for _, ch := range got {
+		if ch.Workload.Kind == "(truncated)" {
+			t.Errorf("a complete scan was reported as partial: %q", ch.Workload.Name)
+		}
+	}
+	if !containsPath(got, "InvalidDBClusterStateFault") {
+		t.Errorf("the answer on the last page must survive; got %+v", got)
+	}
 }
 
 func containsPath(changes []providers.Change, substr string) bool {
