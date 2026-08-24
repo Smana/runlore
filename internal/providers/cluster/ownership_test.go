@@ -4,9 +4,11 @@ package cluster
 
 import (
 	"context"
+	"strings"
 	"testing"
 
 	appsv1 "k8s.io/api/apps/v1"
+	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes/fake"
@@ -201,3 +203,53 @@ func TestWorkloadOwnershipNoPods(t *testing.T) {
 }
 
 var _ providers.OwnerWalker = (*Reader)(nil)
+
+// TestWorkloadOwnershipPodToJobToCronJob: the walk must terminate at the CronJob, not
+// at the Job of one scheduled run.
+//
+// Kubernetes names a CronJob's Job <cronjob>-<unix-minutes>, so the Job is an object
+// named for a single execution that never recurs. With no CronJob case in fetchOwner
+// the walk reported that per-run Job as the top controller, which is not a thing an
+// operator manages and not a thing a second failure of the same schedule shares.
+// providers.NormalizeWorkloadName infers the same family from the name's shape
+// because the alert path has no cluster client; here the API server knows.
+func TestWorkloadOwnershipPodToJobToCronJob(t *testing.T) {
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:            "github-teams-sync-aqemia-29787720-mdft8",
+			Namespace:       "tooling",
+			Labels:          map[string]string{"app": "github-teams-sync"},
+			OwnerReferences: []metav1.OwnerReference{ownerRef("Job", "github-teams-sync-aqemia-29787720")},
+		},
+	}
+	job := &batchv1.Job{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:            "github-teams-sync-aqemia-29787720",
+			Namespace:       "tooling",
+			OwnerReferences: []metav1.OwnerReference{ownerRef("CronJob", "github-teams-sync-aqemia")},
+		},
+	}
+	cron := &batchv1.CronJob{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "github-teams-sync-aqemia",
+			Namespace: "tooling",
+			Labels: map[string]string{
+				"kustomize.toolkit.fluxcd.io/name":      "tooling",
+				"kustomize.toolkit.fluxcd.io/namespace": "flux-system",
+			},
+		},
+	}
+	r := New(fake.NewSimpleClientset(pod, job, cron))
+
+	oc, err := r.WorkloadOwnership(context.Background(), "tooling", "app=github-teams-sync", "")
+	if err != nil {
+		t.Fatalf("WorkloadOwnership: %v", err)
+	}
+	if oc.Top.Kind != "CronJob" || oc.Top.Name != "github-teams-sync-aqemia" {
+		t.Fatalf("top controller = %+v, want CronJob/github-teams-sync-aqemia", oc.Top)
+	}
+	// The run stamp must not survive into the identity the rest of the system keys on.
+	if strings.Contains(oc.Top.Name, "29787720") {
+		t.Errorf("the top controller still carries a run stamp: %q", oc.Top.Name)
+	}
+}
