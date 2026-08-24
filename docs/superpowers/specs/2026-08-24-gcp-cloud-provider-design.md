@@ -98,11 +98,16 @@ type CloudDescriber interface{ CloudVocabulary() CloudVocabulary }
 type CloudVocabulary struct {
 	Cloud          string // "AWS" | "GCP"
 	ChangeLog      string // "CloudTrail" | "Cloud Audit Logs"
-	ChangeScopeArg string // how the `resource` arg matches
+	ChangeExamples string // the kinds of change this log carries
+	ScopeGuidance  string // how the `resource` arg matches, and when to omit it
+	WidenedBanner  string // format string with ONE %q, shown when a scoped lookup is widened
+	LagNote        string // ingestion lag, e.g. "CloudTrail lags ~15m"
 	HealthSurface  string // "EKS nodegroup, ASG activities, EC2 status"
 	InstanceArg    string // "EC2 instance id (i-…)" | "Compute Engine instance name"
 }
 ```
+
+The fields are fragments rather than two finished strings so the rendering skeleton stays shared, and the two clouds cannot drift into describing structurally different contracts for the same tool. `WidenedBanner` is the field that most needs to vary: the AWS banner makes a claim about *match semantics* that is false on GCP (see [the exact-match trap](#the-exact-match-trap-does-not-reproduce--and-the-banner-must-say-so) below).
 
 Same shape as every other optional capability in this codebase — `OwnerWalker`, `EventWindower`,
 `GitOpsEngineReporter`, `ProgressNotifier`, `ThreadNotifier`: type-asserted, gracefully absent. Only
