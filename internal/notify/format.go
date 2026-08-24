@@ -188,10 +188,7 @@ const noRemedyNotice = "*🛠 No next steps proposed* — the verdict says a hum
 // show accounts for a verdict that tells the on-call to act.
 //
 // It is the reader-side counterpart to providers.Investigation.ActionWithoutRemedy,
-// split for the same reason as unaccountedForReader above: the contract predicate
-// answers "did the MODEL contradict itself", which the loop logs at submit time and
-// pre-verify; this answers the later, different question "is there anything on the
-// delivered notification the reader can use". The two must not be the same test.
+// split for the same reason as unaccountedForReader above.
 //
 // The difference is load-bearing, and the shipped card fixtures prove it. Both
 // `seen_before` (a human-reviewed resolution quoted from the KB entry) and

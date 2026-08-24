@@ -671,15 +671,14 @@ func summaryBlocks(inv providers.Investigation) []map[string]any {
 	// 6. Suggested next steps — the resolution guide (per-root-cause suggestions +
 	// policy actions, de-duplicated, reversibility-flagged), capped at three.
 	//
-	// When the verdict claims an action and there is no remedy to show, the section
-	// is rendered anyway, saying that. suggested_action and actions are both optional
-	// in submit_findings, so the payload is legal, and it shipped live on 2026-08-24:
-	// a card headed "Action suggested" whose next-steps section was simply missing,
-	// leaving the reader unable to tell a failed render from an absent remedy. The
-	// verdict badge (2, above) is drawn from the verdict alone and would otherwise go
-	// on promising something the body never carries.
+	// Rendered even with nothing to show, saying so — see
+	// providers.Investigation.ActionWithoutRemedy for the payload that motivated it,
+	// and notify.remedyMissingForReader for why the gate is not that predicate
+	// directly. The two branches are mutually exclusive: the predicate requires that
+	// no root cause and no action carried a remedy, and nextSteps builds its list
+	// from exactly those fields, trimmed the same way.
 	steps := nextSteps(inv)
-	if len(steps) == 0 && remedyMissingForReader(inv) {
+	if remedyMissingForReader(inv) {
 		blocks = append(blocks,
 			map[string]any{"type": "divider"},
 			map[string]any{"type": "section", "text": map[string]any{"type": "mrkdwn",

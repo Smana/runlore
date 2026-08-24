@@ -1753,48 +1753,6 @@ func TestMultiDeliverKBUpdateNilAndEmptyAreNoOps(t *testing.T) {
 	}
 }
 
-// TestSlackActionVerdictWithoutStepsSaysSo: when the verdict tells the on-call to
-// act but the investigation supplied no remedy, the card must say that outright
-// rather than silently dropping the section.
-//
-// Live card, 2026-08-24 02:18: header "🛠 Action suggested", and the next-steps
-// section simply absent — the reader is left to wonder whether the steps failed to
-// render or were never produced. Naming the gap is the honest option, and it keeps
-// the actionability signal (a human should still look) without promising a remedy
-// that does not exist.
-func TestSlackActionVerdictWithoutStepsSaysSo(t *testing.T) {
-	inv := providers.Investigation{
-		Title:      "BackupJobFailed — failing instance unidentified",
-		Verdict:    providers.VerdictActionSuggested,
-		RootCauses: []providers.Hypothesis{{Summary: "the failing RDS resource could not be identified", Confidence: 0.85}},
-	}
-	txt := blocksText(t, summaryBlocks(inv))
-	if !strings.Contains(txt, "No next steps") {
-		t.Errorf("a verdict claiming an action with no remedy must say so on the card:\n%s", txt)
-	}
-
-	// Control: a card that DOES carry a remedy renders the normal section and never
-	// the disclaimer.
-	inv.RootCauses[0].SuggestedAction = "delete the stale Job object"
-	txt = blocksText(t, summaryBlocks(inv))
-	if !strings.Contains(txt, "Suggested next steps") || !strings.Contains(txt, "delete the stale Job object") {
-		t.Errorf("a supplied remedy must render normally:\n%s", txt)
-	}
-	if strings.Contains(txt, "No next steps") {
-		t.Errorf("the disclaimer must not appear when steps exist:\n%s", txt)
-	}
-
-	// Control: no_action never claims a remedy, so it never gets the disclaimer.
-	quiet := providers.Investigation{
-		Title:      "self-healed",
-		Verdict:    providers.VerdictNoAction,
-		RootCauses: []providers.Hypothesis{{Summary: "transient", Confidence: 0.9}},
-	}
-	if txt := blocksText(t, summaryBlocks(quiet)); strings.Contains(txt, "No next steps") {
-		t.Errorf("no_action must not carry the disclaimer:\n%s", txt)
-	}
-}
-
 // TestNoRemedyNoticeRespectsWhatTheCardShows pins the split between the contract
 // predicate and the reader-side one. The contract asks "did the model supply a
 // remedy"; the card must ask "does the reader have one in front of them", and the
@@ -1815,27 +1773,28 @@ func TestNoRemedyNoticeRespectsWhatTheCardShows(t *testing.T) {
 		name       string
 		mutate     func(*providers.Investigation)
 		wantNotice bool
+		wantSteps  string // when set, the normal section must render carrying this text
 	}{
-		{"nothing to act on at all", func(*providers.Investigation) {}, true},
+		{"nothing to act on at all", func(*providers.Investigation) {}, true, ""},
 		{"a validated prior resolution is a remedy", func(inv *providers.Investigation) {
 			inv.Prior = &providers.PriorKnowledge{Resolution: "roll back to 1.14.2, clear the lock"}
-		}, false},
+		}, false, ""},
 		{"a whitespace-only prior resolution is not", func(inv *providers.Investigation) {
 			inv.Prior = &providers.PriorKnowledge{Resolution: "   "}
-		}, true},
+		}, true, ""},
 		{"a matched runbook is a remedy", func(inv *providers.Investigation) {
 			inv.MatchedKnowledge = &providers.MatchedEntry{
 				Path: "entries/x.md", Title: "Registry credentials deleted", Score: 6.4}
-		}, false},
+		}, false, ""},
 		{"the model's own suggested_action is a remedy", func(inv *providers.Investigation) {
 			inv.RootCauses[0].SuggestedAction = "clear the migration lock"
-		}, false},
+		}, false, "clear the migration lock"},
 		{"a whitespace-only suggested_action is not, and renders no empty bullet", func(inv *providers.Investigation) {
 			inv.RootCauses[0].SuggestedAction = "   "
-		}, true},
+		}, true, ""},
 		{"no_action promises nothing", func(inv *providers.Investigation) {
 			inv.Verdict = providers.VerdictNoAction
-		}, false},
+		}, false, ""},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -1845,8 +1804,15 @@ func TestNoRemedyNoticeRespectsWhatTheCardShows(t *testing.T) {
 			if got := strings.Contains(txt, "No next steps proposed"); got != c.wantNotice {
 				t.Errorf("notice rendered = %v, want %v:\n%s", got, c.wantNotice, txt)
 			}
-			// Whichever way it went, the card must never show a bullet with nothing in it.
-			if strings.Contains(txt, "1. \n") || strings.Contains(txt, "1.  _(reversible)_") {
+			// A supplied remedy must render the normal section carrying its text.
+			if c.wantSteps != "" {
+				if !strings.Contains(txt, "Suggested next steps") || !strings.Contains(txt, c.wantSteps) {
+					t.Errorf("a supplied remedy must render normally:\n%s", txt)
+				}
+			}
+			// Whichever way it went, the card must never show a bullet with nothing in
+			// it. Next steps render as "\n• %s", with the reversible marker on the bullet.
+			if strings.Contains(txt, "• \n") || strings.Contains(txt, "•  _(reversible)_") {
 				t.Errorf("rendered an empty next-step bullet:\n%s", txt)
 			}
 		})

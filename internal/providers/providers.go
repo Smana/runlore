@@ -1595,18 +1595,11 @@ func (inv Investigation) UnaccountedInconclusive() bool {
 // so the header promises a remedy the body never carries; a card that does that
 // costs more trust than one that says inconclusive.
 //
-// It lives HERE for the same reason as UnaccountedInconclusive: two sides consult
-// it and must not disagree. The loop says it out loud at the source, where the
-// payload is still attributable to the model call that made it; the notifier acts
-// on it at delivery. One definition, so a fifth verdict is one switch to update
-// rather than two adjacent ones.
-//
-// And, exactly as there, one definition is NOT one snapshot. The loop evaluates
-// this pre-verify; the notifier evaluates it on the post-verify result, so a run
-// whose reviewer rejected the one cause that carried the remedy legitimately
-// disagrees between them. The notifier also does not render straight off this
-// predicate — see notify.remedyMissingForReader, which additionally requires that
-// the card show no OTHER remedy (a validated prior resolution, a matched runbook).
+// Placement, and the pre-verify/post-verify caveat, are exactly as for
+// UnaccountedInconclusive above. As there, the notifier does not render straight off
+// this predicate — see notify.remedyMissingForReader, which additionally requires
+// that the card show no OTHER remedy (a validated prior resolution, a matched
+// runbook).
 func (inv Investigation) ActionWithoutRemedy() bool {
 	if !inv.Verdict.ClaimsAction() {
 		return false
@@ -1628,8 +1621,12 @@ func (inv Investigation) ActionWithoutRemedy() bool {
 // obliges the delivered notification to show what. no_action and inconclusive make
 // no such promise, and an empty/unknown verdict is a parse concern rather than a
 // contract breach — it renders no badge at all, so it promises nothing.
+//
+// Defined in terms of Conclusive for the reason ValidVerdict gives: the three
+// actionability verdicts stay enumerated once, so a fifth is one switch to update
+// rather than two adjacent ones.
 func (v Verdict) ClaimsAction() bool {
-	return v == VerdictActionSuggested || v == VerdictActionRequired
+	return v.Conclusive() && v != VerdictNoAction
 }
 
 // MatchedEntry is the strongest pre-existing catalog entry an investigation's
