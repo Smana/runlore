@@ -1752,3 +1752,89 @@ func TestMultiDeliverKBUpdateNilAndEmptyAreNoOps(t *testing.T) {
 		t.Fatalf("empty Multi: got %v, want nil", err)
 	}
 }
+
+// TestNoRemedyNoticeRespectsWhatTheCardShows pins the split between the contract
+// predicate and the reader-side one. The contract asks "did the model supply a
+// remedy"; the card must ask "does the reader have one in front of them", and the
+// two differ on the shapes the shipped golden fixtures already cover.
+//
+// Without this split the notice printed on `seen_before` and `matched_runbook` —
+// telling the on-call the investigation supplied no remedy directly below a
+// human-reviewed resolution, or a matched runbook with its URL.
+func TestNoRemedyNoticeRespectsWhatTheCardShows(t *testing.T) {
+	base := func() providers.Investigation {
+		return providers.Investigation{
+			Title:      "harbor-db crash-looping again",
+			Verdict:    providers.VerdictActionSuggested,
+			RootCauses: []providers.Hypothesis{{Summary: "the same migration lock", Confidence: 0.6}},
+		}
+	}
+	cases := []struct {
+		name       string
+		mutate     func(*providers.Investigation)
+		wantNotice bool
+		wantSteps  string // when set, the normal section must render carrying this text
+	}{
+		{"nothing to act on at all", func(*providers.Investigation) {}, true, ""},
+		{"a validated prior resolution is a remedy", func(inv *providers.Investigation) {
+			inv.Prior = &providers.PriorKnowledge{Resolution: "roll back to 1.14.2, clear the lock"}
+		}, false, ""},
+		{"a whitespace-only prior resolution is not", func(inv *providers.Investigation) {
+			inv.Prior = &providers.PriorKnowledge{Resolution: "   "}
+		}, true, ""},
+		{"a matched runbook is a remedy", func(inv *providers.Investigation) {
+			inv.MatchedKnowledge = &providers.MatchedEntry{
+				Path: "entries/x.md", Title: "Registry credentials deleted", Score: 6.4}
+		}, false, ""},
+		{"the model's own suggested_action is a remedy", func(inv *providers.Investigation) {
+			inv.RootCauses[0].SuggestedAction = "clear the migration lock"
+		}, false, "clear the migration lock"},
+		{"a whitespace-only suggested_action is not, and renders no empty bullet", func(inv *providers.Investigation) {
+			inv.RootCauses[0].SuggestedAction = "   "
+		}, true, ""},
+		{"no_action promises nothing", func(inv *providers.Investigation) {
+			inv.Verdict = providers.VerdictNoAction
+		}, false, ""},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			inv := base()
+			c.mutate(&inv)
+			txt := blocksText(t, summaryBlocks(inv))
+			if got := strings.Contains(txt, "No next steps proposed"); got != c.wantNotice {
+				t.Errorf("notice rendered = %v, want %v:\n%s", got, c.wantNotice, txt)
+			}
+			// A supplied remedy must render the normal section carrying its text.
+			if c.wantSteps != "" {
+				if !strings.Contains(txt, "Suggested next steps") || !strings.Contains(txt, c.wantSteps) {
+					t.Errorf("a supplied remedy must render normally:\n%s", txt)
+				}
+			}
+			// Whichever way it went, the card must never show a bullet with nothing in
+			// it. Next steps render as "\n• %s", with the reversible marker on the bullet.
+			if strings.Contains(txt, "• \n") || strings.Contains(txt, "•  _(reversible)_") {
+				t.Errorf("rendered an empty next-step bullet:\n%s", txt)
+			}
+		})
+	}
+}
+
+// TestFormatCarriesTheNoRemedyNotice: Format feeds Matrix, the webhook text and the
+// CLI, and its doc comment says its claims "must never diverge" from the Slack card.
+// Gating only the Slack block would have left every non-Slack channel showing the
+// 2026-08-24 defect unfixed.
+func TestFormatCarriesTheNoRemedyNotice(t *testing.T) {
+	inv := providers.Investigation{
+		Title:      "BackupJobFailed",
+		Verdict:    providers.VerdictActionRequired,
+		RootCauses: []providers.Hypothesis{{Summary: "the failing RDS resource could not be identified"}},
+	}
+	if out := Format(inv); !strings.Contains(out, "No next steps proposed") {
+		t.Errorf("Format must say the verdict promises a remedy it does not carry:\n%s", out)
+	}
+	// And it must not, when the reader has something to act on.
+	inv.RootCauses[0].SuggestedAction = "delete the stale snapshot"
+	if out := Format(inv); strings.Contains(out, "No next steps proposed") {
+		t.Errorf("Format printed the notice over a supplied remedy:\n%s", out)
+	}
+}

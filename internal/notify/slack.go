@@ -670,7 +670,21 @@ func summaryBlocks(inv providers.Investigation) []map[string]any {
 
 	// 6. Suggested next steps — the resolution guide (per-root-cause suggestions +
 	// policy actions, de-duplicated, reversibility-flagged), capped at three.
-	if steps := nextSteps(inv); len(steps) > 0 {
+	//
+	// Rendered even with nothing to show, saying so — see
+	// providers.Investigation.ActionWithoutRemedy for the payload that motivated it,
+	// and notify.remedyMissingForReader for why the gate is not that predicate
+	// directly. The two branches are mutually exclusive: the predicate requires that
+	// no root cause and no action carried a remedy, and nextSteps builds its list
+	// from exactly those fields, trimmed the same way.
+	steps := nextSteps(inv)
+	if remedyMissingForReader(inv) {
+		blocks = append(blocks,
+			map[string]any{"type": "divider"},
+			map[string]any{"type": "section", "text": map[string]any{"type": "mrkdwn",
+				"text": noRemedyNotice}})
+	}
+	if len(steps) > 0 {
 		var s strings.Builder
 		s.WriteString("*🛠 Suggested next steps*  _(read-only — RunLore won't apply these)_")
 		// Own loop, not appendCappedBullets: nextSteps has already escaped these
@@ -1010,6 +1024,11 @@ func nextSteps(inv providers.Investigation) []string {
 	var steps []string
 	seen := map[string]bool{}
 	add := func(desc string, reversible bool) {
+		// Trimmed, so this agrees with providers.Investigation.ActionWithoutRemedy,
+		// which trims too. Gating on desc == "" instead let a whitespace-only
+		// suggested_action produce a step, suppressing the no-remedy notice while
+		// rendering an empty bullet — the promised remedy, spelled as one space.
+		desc = strings.TrimSpace(desc)
 		if desc == "" || seen[desc] {
 			return
 		}

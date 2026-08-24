@@ -176,6 +176,37 @@ func unaccountedForReader(inv providers.Investigation) bool {
 	return inv.UnaccountedInconclusive() && len(inv.RuledOut) == 0
 }
 
+// noRemedyNotice is what a delivered notification says when its verdict tells the
+// on-call to act and it has nothing to show them. Naming the gap keeps the
+// actionability signal — a human should still look — without promising a remedy
+// that does not exist, and lets the reader tell an ABSENT remedy from a failed
+// render, which is what the live 2026-08-24 card could not do.
+const noRemedyNotice = "*🛠 No next steps proposed* — the verdict says a human should act, but the " +
+	"investigation did not supply a remedy. Work from the analysis above and any data gaps in the thread."
+
+// remedyMissingForReader reports whether nothing the delivered notification can
+// show accounts for a verdict that tells the on-call to act.
+//
+// It is the reader-side counterpart to providers.Investigation.ActionWithoutRemedy,
+// split for the same reason as unaccountedForReader above.
+//
+// The difference is load-bearing, and the shipped card fixtures prove it. Both
+// `seen_before` (a human-reviewed resolution quoted from the KB entry) and
+// `matched_runbook` (a matched entry with its URL) carry an action verdict and no
+// suggested_action of their own — and both render a remedy the reader can follow,
+// several blocks ABOVE where this notice would print. Announcing that the
+// investigation supplied no remedy there would point the on-call away from an
+// answer that is on screen.
+func remedyMissingForReader(inv providers.Investigation) bool {
+	if !inv.ActionWithoutRemedy() {
+		return false
+	}
+	if p := inv.Prior; p != nil && strings.TrimSpace(p.Resolution) != "" {
+		return false
+	}
+	return inv.MatchedKnowledge == nil
+}
+
 // verdictBadge maps a model verdict to its emoji + human label. Empty/unknown
 // verdicts return ("", "") and are rendered nowhere — never invent a verdict.
 func verdictBadge(v providers.Verdict) (emoji, label string) {
@@ -322,6 +353,14 @@ func Format(inv providers.Investigation) string {
 	// reasons it just claimed do not exist.
 	if unaccountedForReader(inv) {
 		b.WriteString(unaccountedInconclusiveNotice + "\n")
+	}
+	// The action-verdict counterpart, and it renders HERE for the reason Format's doc
+	// comment gives: this message feeds Matrix, the webhook text and the CLI, and its
+	// ordering "must never diverge" from the Slack card in what it claims. Gating the
+	// Slack block and not this one would have left every non-Slack channel showing the
+	// 2026-08-24 defect unfixed.
+	if remedyMissingForReader(inv) {
+		b.WriteString(noRemedyNotice + "\n")
 	}
 	if len(inv.Unresolved) > 0 {
 		b.WriteString("*Unresolved:*\n")

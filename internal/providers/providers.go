@@ -1585,6 +1585,50 @@ func (inv Investigation) UnaccountedInconclusive() bool {
 		len(inv.RootCauses) == 0 && len(inv.Unresolved) == 0 && len(inv.DataGaps) == 0
 }
 
+// ActionWithoutRemedy reports whether inv tells the on-call to act and then gives
+// them nothing to do: a verdict of action_suggested/action_required with no
+// suggested_action on any root cause and no proposed action.
+//
+// Both fields are optional in submit_findings, so this payload is legal, and it
+// shipped live on 2026-08-24 — a card headed "Action suggested" whose next-steps
+// section was simply absent. The verdict badge is rendered from the verdict alone,
+// so the header promises a remedy the body never carries; a card that does that
+// costs more trust than one that says inconclusive.
+//
+// Placement, and the pre-verify/post-verify caveat, are exactly as for
+// UnaccountedInconclusive above. As there, the notifier does not render straight off
+// this predicate — see notify.remedyMissingForReader, which additionally requires
+// that the card show no OTHER remedy (a validated prior resolution, a matched
+// runbook).
+func (inv Investigation) ActionWithoutRemedy() bool {
+	if !inv.Verdict.ClaimsAction() {
+		return false
+	}
+	for _, rc := range inv.RootCauses {
+		if strings.TrimSpace(rc.SuggestedAction) != "" {
+			return false
+		}
+	}
+	for _, a := range inv.Actions {
+		if strings.TrimSpace(a.Description) != "" {
+			return false
+		}
+	}
+	return true
+}
+
+// ClaimsAction reports whether a verdict tells the on-call to do something, and so
+// obliges the delivered notification to show what. no_action and inconclusive make
+// no such promise, and an empty/unknown verdict is a parse concern rather than a
+// contract breach — it renders no badge at all, so it promises nothing.
+//
+// Defined in terms of Conclusive for the reason ValidVerdict gives: the three
+// actionability verdicts stay enumerated once, so a fifth is one switch to update
+// rather than two adjacent ones.
+func (v Verdict) ClaimsAction() bool {
+	return v.Conclusive() && v != VerdictNoAction
+}
+
 // MatchedEntry is the strongest pre-existing catalog entry an investigation's
 // kb_search calls matched at clear-match strength. It closes a live visibility gap:
 // when a full investigation's kb_search found a known runbook and used it, the
