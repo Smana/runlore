@@ -757,6 +757,14 @@ func (li *LoopInvestigator) Investigate(ctx context.Context, req Request) error 
 				li.Log.Warn("submit_findings: verdict=inconclusive with no cause, no open question and no data gap — the delivered card will have no Why and no next steps",
 					"title", inv.Title, "trigger_key", req.TriggerKey, "confidence", inv.Confidence, "tools_used", used)
 			}
+			if actionWithoutRemedy(inv) {
+				li.Log.Warn("submit_findings: verdict claims an action but no suggested_action or action was supplied — the card's header promises a remedy its body does not carry",
+					"title", inv.Title, "trigger_key", req.TriggerKey, "verdict", inv.Verdict, "confidence", inv.Confidence, "tools_used", used)
+			}
+			if unevidencedConclusion(inv) {
+				li.Log.Warn("submit_findings: conclusive verdict whose leading root cause cites no evidence — the confidence badge is backed by nothing the reader or the verify pass can trace",
+					"title", inv.Title, "trigger_key", req.TriggerKey, "verdict", inv.Verdict, "confidence", inv.Confidence, "tools_used", used)
+			}
 			if li.Metrics != nil {
 				// Usage-anchored when the provider reported usage; heuristic otherwise.
 				li.Metrics.InvestigationTokens.Record(ctx, int64(calib.estimate(sys, messages, specs)))

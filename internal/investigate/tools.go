@@ -76,11 +76,11 @@ func submitFindingsSpec() providers.ToolSpec {
 "confidence":{"type":"number"},
 "affected_resource":{"type":"object","description":"the workload your investigation identified as the failing/affected resource","properties":{"kind":{"type":"string"},"name":{"type":"string"},"namespace":{"type":"string"}}},
 "root_causes":{"type":"array","items":{"type":"object","properties":{
-"summary":{"type":"string"},"confidence":{"type":"number","description":"how strongly the evidence supports THIS root cause, 0-1. Required: an omitted confidence is delivered as 0%, which reads to the on-call as 'no confidence' and buries a sound finding under a red badge"},"change_ref":{"type":"string"},
-"evidence":{"type":"array","items":{"type":"string"}},"suggested_action":{"type":"string"},"reversible":{"type":"boolean"}},
-"required":["summary","confidence"]}},
+"summary":{"type":"string"},"confidence":{"type":"number","description":"how strongly the evidence below supports THIS root cause, 0-1. It measures support for the cause you STATED - not how sure you are of the narrative around it, and not how confident you are that you could not find something. Required: an omitted confidence is delivered as 0%, which reads to the on-call as 'no confidence' and buries a sound finding under a red badge"},"change_ref":{"type":"string"},
+"evidence":{"type":"array","minItems":1,"items":{"type":"string"},"description":"REQUIRED, at least one: the specific tool results that support this cause - name the tool and quote the value, error or log line it returned. This is what lets a human check the cause and what the verify pass traces. A cause asserted with no evidence is delivered as a bare paragraph under a confidence badge nothing backs"},"suggested_action":{"type":"string","description":"what the human should DO about this cause. Required whenever the verdict is action_suggested or action_required, unless a top-level actions entry already covers it - a card whose verdict promises an action and then offers none is worse than one that admits it is inconclusive"},"reversible":{"type":"boolean"}},
+"required":["summary","confidence","evidence"]}},
 "unresolved":{"type":"array","items":{"type":"string"},"description":"genuine open questions only a human can answer - put tool or data limitations in data_gaps instead"},
-"verdict":{"type":"string","enum":["no_action","action_suggested","action_required","inconclusive"],"description":"actionability for the on-call: no_action (benign/self-healed/synthetic), action_suggested (a human should follow the next steps), action_required (live impact needing prompt action), inconclusive (you genuinely could not determine the cause, and data_gaps/unresolved say what blocked you). A recurrence of a fault you DID identify is NOT inconclusive - naming a known cause again is still a conclusion, so restate it with the actionability verdict it deserves"},
+"verdict":{"type":"string","enum":["no_action","action_suggested","action_required","inconclusive"],"description":"actionability for the on-call: no_action (benign/self-healed/synthetic), action_suggested (a human should follow the next steps), action_required (live impact needing prompt action), inconclusive (you genuinely could not determine the cause, and data_gaps/unresolved say what blocked you). A recurrence of a fault you DID identify is NOT inconclusive - naming a known cause again is still a conclusion, so restate it with the actionability verdict it deserves. The converse also holds: if you could not name the failing resource or the cause THIS time, the verdict is inconclusive however sure you are of everything around it - do not report a high-confidence action_suggested whose actual finding is that you could not identify what failed"},
 "ruled_out":{"type":"array","items":{"type":"string"},"description":"hypotheses you considered and REJECTED, one line each naming the disproving evidence"},
 "data_gaps":{"type":"array","items":{"type":"string"},"description":"signals you could not obtain (tool errors, RBAC denials, truncated output) that limited the investigation - data limitations, NOT questions for a human. State the tool you called and the ACTUAL error it returned. Do NOT speculate about a cause you did not verify: if a metrics query returned nothing, call discover_metrics before claiming a metric or its name is absent; if a logs query returned nothing, call discover_log_fields; if a tool was refused, report the refusal rather than guessing why. An empty result is not evidence that the data does not exist."},
 "actions":{"type":"array","description":"proposed remediations; prefer reversible, low-blast-radius","items":{"type":"object","properties":{
@@ -208,6 +208,52 @@ func parseFindings(args string) (providers.Investigation, error) {
 // thin answer beats no answer for the human reading the card.
 func unaccountedInconclusive(inv providers.Investigation) bool {
 	return inv.UnaccountedInconclusive()
+}
+
+// actionWithoutRemedy reports whether a submitted finding tells the on-call to act
+// and then gives them nothing to do: a verdict of action_suggested/action_required
+// with no suggested_action on any root cause and no proposed action.
+//
+// Both fields are optional in the schema, so this payload is legal, and it shipped
+// live on 2026-08-24 — a card headed "Action suggested" whose next-steps section was
+// simply absent. The verdict badge is rendered from the verdict alone, so the header
+// promises a remedy the body never carries; a card that does that costs more trust
+// than one that says inconclusive.
+//
+// Deliberately NOT an error, for the same reason as unaccountedInconclusive: the
+// analysis is still worth delivering, and re-asking costs a model call to re-answer
+// a question the model just answered badly. The renderer says so on the card instead.
+func actionWithoutRemedy(inv providers.Investigation) bool {
+	if inv.Verdict != providers.VerdictActionSuggested && inv.Verdict != providers.VerdictActionRequired {
+		return false
+	}
+	for _, rc := range inv.RootCauses {
+		if strings.TrimSpace(rc.SuggestedAction) != "" {
+			return false
+		}
+	}
+	for _, a := range inv.Actions {
+		if strings.TrimSpace(a.Description) != "" {
+			return false
+		}
+	}
+	return true
+}
+
+// unevidencedConclusion reports whether a finding reaches a conclusive verdict while
+// its leading root cause cites no evidence at all.
+//
+// Live on 2026-08-22: "High confidence · 85%" over a Why paragraph with not one
+// bullet beneath it. The prose may well have been right, but nothing on the card let
+// a human check it and nothing let the verify pass trace it — the confidence badge
+// was backed by the model's say-so alone. `inconclusive` is exempt: having nothing
+// to show is what that verdict is for. So is an empty root-cause list, which is
+// unaccountedInconclusive's business.
+func unevidencedConclusion(inv providers.Investigation) bool {
+	if inv.Verdict == providers.VerdictInconclusive || len(inv.RootCauses) == 0 {
+		return false
+	}
+	return len(inv.RootCauses[0].Evidence) == 0
 }
 
 // buildInvestigation maps the parsed findings shape onto a providers.Investigation,

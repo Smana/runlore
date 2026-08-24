@@ -670,7 +670,23 @@ func summaryBlocks(inv providers.Investigation) []map[string]any {
 
 	// 6. Suggested next steps — the resolution guide (per-root-cause suggestions +
 	// policy actions, de-duplicated, reversibility-flagged), capped at three.
-	if steps := nextSteps(inv); len(steps) > 0 {
+	//
+	// When the verdict claims an action and there is no remedy to show, the section
+	// is rendered anyway, saying that. suggested_action and actions are both optional
+	// in submit_findings, so the payload is legal, and it shipped live on 2026-08-24:
+	// a card headed "Action suggested" whose next-steps section was simply missing,
+	// leaving the reader unable to tell a failed render from an absent remedy. The
+	// verdict badge (2, above) is drawn from the verdict alone and would otherwise go
+	// on promising something the body never carries.
+	steps := nextSteps(inv)
+	if len(steps) == 0 && claimsAction(inv.Verdict) {
+		blocks = append(blocks,
+			map[string]any{"type": "divider"},
+			map[string]any{"type": "section", "text": map[string]any{"type": "mrkdwn",
+				"text": "*🛠 No next steps proposed* — the verdict says a human should act, but the investigation " +
+					"did not supply a remedy. Work from the Why above and any data gaps in the thread."}})
+	}
+	if len(steps) > 0 {
 		var s strings.Builder
 		s.WriteString("*🛠 Suggested next steps*  _(read-only — RunLore won't apply these)_")
 		// Own loop, not appendCappedBullets: nextSteps has already escaped these
@@ -1027,6 +1043,13 @@ func nextSteps(inv providers.Investigation) []string {
 		add(a.Description, a.Reversible)
 	}
 	return steps
+}
+
+// claimsAction reports whether a verdict tells the on-call to do something, and so
+// obliges the card to show what. no_action and inconclusive make no such promise,
+// and an absent verdict is a parse concern rather than a contract breach.
+func claimsAction(v providers.Verdict) bool {
+	return v == providers.VerdictActionSuggested || v == providers.VerdictActionRequired
 }
 
 // truncate caps a string to n runes, appending an ellipsis when cut (Slack section

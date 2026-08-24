@@ -1752,3 +1752,45 @@ func TestMultiDeliverKBUpdateNilAndEmptyAreNoOps(t *testing.T) {
 		t.Fatalf("empty Multi: got %v, want nil", err)
 	}
 }
+
+// TestSlackActionVerdictWithoutStepsSaysSo: when the verdict tells the on-call to
+// act but the investigation supplied no remedy, the card must say that outright
+// rather than silently dropping the section.
+//
+// Live card, 2026-08-24 02:18: header "🛠 Action suggested", and the next-steps
+// section simply absent — the reader is left to wonder whether the steps failed to
+// render or were never produced. Naming the gap is the honest option, and it keeps
+// the actionability signal (a human should still look) without promising a remedy
+// that does not exist.
+func TestSlackActionVerdictWithoutStepsSaysSo(t *testing.T) {
+	inv := providers.Investigation{
+		Title:      "BackupJobFailed — failing instance unidentified",
+		Verdict:    providers.VerdictActionSuggested,
+		RootCauses: []providers.Hypothesis{{Summary: "the failing RDS resource could not be identified", Confidence: 0.85}},
+	}
+	txt := blocksText(t, summaryBlocks(inv))
+	if !strings.Contains(txt, "No next steps") {
+		t.Errorf("a verdict claiming an action with no remedy must say so on the card:\n%s", txt)
+	}
+
+	// Control: a card that DOES carry a remedy renders the normal section and never
+	// the disclaimer.
+	inv.RootCauses[0].SuggestedAction = "delete the stale Job object"
+	txt = blocksText(t, summaryBlocks(inv))
+	if !strings.Contains(txt, "Suggested next steps") || !strings.Contains(txt, "delete the stale Job object") {
+		t.Errorf("a supplied remedy must render normally:\n%s", txt)
+	}
+	if strings.Contains(txt, "No next steps") {
+		t.Errorf("the disclaimer must not appear when steps exist:\n%s", txt)
+	}
+
+	// Control: no_action never claims a remedy, so it never gets the disclaimer.
+	quiet := providers.Investigation{
+		Title:      "self-healed",
+		Verdict:    providers.VerdictNoAction,
+		RootCauses: []providers.Hypothesis{{Summary: "transient", Confidence: 0.9}},
+	}
+	if txt := blocksText(t, summaryBlocks(quiet)); strings.Contains(txt, "No next steps") {
+		t.Errorf("no_action must not carry the disclaimer:\n%s", txt)
+	}
+}
