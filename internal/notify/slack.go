@@ -15,6 +15,7 @@ import (
 	"os"
 	"strings"
 	"time"
+	"unicode"
 
 	"github.com/Smana/runlore/internal/config"
 	"github.com/Smana/runlore/internal/httpx"
@@ -820,7 +821,14 @@ func metadataFields(inv providers.Investigation) []map[string]any {
 	// deploy, which is the first thing they should check.
 	if len(inv.RootCauses) > 0 {
 		if ch := inv.RootCauses[0].ChangeRef; ch != "" {
-			add("What changed", truncate(escapeMrkdwn(ch), 200))
+			// Capped BEFORE escaping, which is the reverse of this file's other two
+			// truncate sites and deliberate. Those cap at 2900 — a last-resort guard on
+			// a pathological payload — where it does not matter that "&" costs 5 of the
+			// budget. This cap fires routinely, so measuring escaped runes would hand a
+			// change_ref describing "1.14.2 -> 1.15.0 && <prod>" a materially smaller
+			// allowance than one without meta characters. Capping the source also means
+			// truncateWords only ever sees real prose, so no cut can sever an entity.
+			add("What changed", escapeMrkdwn(truncateWords(ch, slackWhatChangedRunes)))
 		}
 	}
 	if inv.Occurrences > 1 && inv.Prior == nil {
@@ -1056,6 +1064,56 @@ func truncate(s string, n int) string {
 		return s
 	}
 	return string(r[:n-1]) + "…"
+}
+
+// slackWhatChangedRunes caps the "What changed" metadata field. 200 was tighter
+// than what models actually put in change_ref: it carries a revision range on some
+// cards and a sentence explaining the change on others, and the explanatory form is
+// the more useful of the two. 600 holds it while still leaving the two-column
+// metadata grid readable, and stays well inside the 2000-rune per-field cap add()
+// applies.
+const slackWhatChangedRunes = 600
+
+// truncateWords caps a string to n runes like truncate, but backs the cut off to
+// the last space so the ellipsis never lands inside a word. Use it for prose the
+// model wrote; use truncate for values that are one token (a ref, a URL, a sha)
+// or where the cap is a hard protocol limit.
+//
+// A mid-word cut reads as a rendering fault rather than an intentional elision —
+// live, a change_ref ended "…outside Argo/Fl…", which looks like the card broke.
+// The cap itself is still enforced: a tail with no space in its final half is one
+// long token, and that gets the hard cut rather than losing half the value.
+//
+// Call it on RAW text and escape the result, not the other way round. It counts
+// runes of content, and a cut through escaped text can sever an "&amp;" into a
+// visible "&am" — the same rendering fault, in the one branch the back-off cannot
+// reach, since a long token has no space to back off to.
+//
+// internal/thread.truncateWords is the byte-budget twin of this function, applying
+// the same rule to the KB validator's byte limits (and trimming dangling
+// punctuation, which Slack does not need). Keep the two in step.
+func truncateWords(s string, n int) string {
+	r := []rune(s)
+	if len(r) <= n {
+		return s
+	}
+	if n < 2 {
+		return "" // no room for content and a mark both
+	}
+	// The scan starts at the FIRST DROPPED rune, not the last kept one. That is what
+	// makes the word-boundary case ordinary rather than special: when r[n-1] is
+	// itself a space the prefix already ends on a boundary, and starting there finds
+	// it instead of scanning past a whole word that fitted. Bounded at half the
+	// allowance — a tail with no space in it is one long token (a sha, a URL), and
+	// backing off to a distant space would lose more than the cut does.
+	cut := r[:n-1]
+	for i := n - 1; i > n/2; i-- {
+		if unicode.IsSpace(r[i]) {
+			cut = r[:i]
+			break
+		}
+	}
+	return strings.TrimRightFunc(string(cut), unicode.IsSpace) + "…"
 }
 
 // Multi delivers to several notifiers, best-effort: a failing notifier is logged,

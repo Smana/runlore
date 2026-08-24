@@ -1838,3 +1838,114 @@ func TestFormatCarriesTheNoRemedyNotice(t *testing.T) {
 		t.Errorf("Format printed the notice over a supplied remedy:\n%s", out)
 	}
 }
+
+// TestTruncateWords is the unit table for the helper itself. The card-level test
+// below drives one realistic fixture through summaryBlocks; this covers the branches
+// that fixture can never reach — the hard cut, the exact-boundary case, a severed
+// entity, and the degenerate caps.
+func TestTruncateWords(t *testing.T) {
+	cases := []struct {
+		name, in string
+		n        int
+		want     string
+	}{
+		{"short enough is returned whole", "hello world", 20, "hello world"},
+		{"exactly n is not truncated", "hello", 5, "hello"},
+		{"backs off to the word boundary", "hello world foo", 12, "hello world…"},
+		// The cut lands on a space, so the prefix is ALREADY word-aligned: backing off
+		// further would drop "bb", a whole word that fitted.
+		{"a cut on the boundary keeps the last whole word", "aaaa bb cc", 8, "aaaa bb…"},
+		// No space in the final half — one long token (a sha, a URL). The cap wins;
+		// losing half the value to reach a distant space would be worse.
+		{"one long token still gets the hard cut", "abcdefghijklmnopqrstuvwxyz", 10, "abcdefghi…"},
+		{"trailing space is trimmed before the ellipsis", "hello world      xx", 13, "hello world…"},
+		{"a cap with no room for content and a mark", "hello", 1, ""},
+		{"n=0 does not panic", "hello", 0, ""},
+		{"n negative does not panic", "hello", -3, ""},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := truncateWords(c.in, c.n); got != c.want {
+				t.Errorf("truncateWords(%q, %d) = %q, want %q", c.in, c.n, got, c.want)
+			}
+		})
+	}
+}
+
+// whatChangedField returns the rendered "What changed" metadata value, without its
+// label. Asserting on the field rather than the whole encoded blob is what keeps the
+// cap assertions honest.
+func whatChangedField(t *testing.T, inv providers.Investigation) string {
+	t.Helper()
+	for _, f := range metadataFields(inv) {
+		txt, _ := f["text"].(string)
+		if after, ok := strings.CutPrefix(txt, "*What changed:*\n"); ok {
+			return after
+		}
+	}
+	t.Fatalf("no What changed field rendered")
+	return ""
+}
+
+// TestSlackWhatChangedTruncatesOnWordBoundary: a long change_ref is cut at a word
+// boundary, never mid-word.
+//
+// Live card, 2026-08-24: the field ended "…consistent with Coder provisioning
+// workspaces outside Argo/Fl…". Two things were wrong at once — the 200-rune cap
+// was tighter than the explanatory text models actually put in change_ref, and the
+// cut landed inside a word, which reads as a rendering fault rather than an
+// intentional elision. The cap is a limit and stays enforced; where it falls is
+// what changed.
+func TestSlackWhatChangedTruncatesOnWordBoundary(t *testing.T) {
+	long := "argocd Application coder-shared sync to bc20dc3a at 09:17:46Z, which recreated the whole " +
+		"shared-0 instance directory and restarted the singleton coder Deployment with a newly mounted " +
+		"kubeconfig ConfigMap plus new environment variables, consistent with Coder provisioning " +
+		"workspaces outside Argo CD rather than through the tracked GitOps path, and additionally " +
+		"retargeted the provisioner daemon concurrency, rewrote the access URL, replaced the instance " +
+		"kustomization, and rolled every workspace template that referenced the previous access URL " +
+		"so that the migrated instance would come up against the new control plane endpoint"
+	inv := providers.Investigation{
+		Title:      "t",
+		RootCauses: []providers.Hypothesis{{Summary: "s", ChangeRef: long}},
+	}
+	got := whatChangedField(t, inv)
+
+	// The cap must be materially larger than the 200 it replaced. Measured on the
+	// FIELD, so lowering the cap fails this — asserting on the whole encoded blocks
+	// blob did not: the header, verdict and footer satisfied it on their own, and it
+	// passed with the cap set to 60.
+	if n := len([]rune(strings.TrimSuffix(got, "…"))); n <= 200 {
+		t.Errorf("the cap is too tight to hold an explanatory change_ref: %d runes\n%s", n, got)
+	}
+	// The cap is still a cap.
+	if n := len([]rune(got)); n > 600 {
+		t.Errorf("the cap is not enforced: %d runes", n)
+	}
+
+	// This fixture reaches the cap exactly ON a space — the case the first revision
+	// got wrong, scanning back past the boundary and dropping "the", a whole word
+	// that fitted. The exact suffix pins the cut point, the word boundary and the
+	// absence of a stray space before the ellipsis in one assertion.
+	if !strings.HasSuffix(got, "against the…") {
+		t.Errorf("a cut landing on a word boundary must keep the last whole word, got tail %q",
+			got[max(0, len(got)-24):])
+	}
+
+	// Shifted so the cap lands INSIDE a word, which is what distinguishes truncateWords
+	// from the plain truncate this field used to call. Without the shift both helpers
+	// return the same string and nothing pins the wiring.
+	inv.RootCauses[0].ChangeRef = "sync: " + long
+	shifted := whatChangedField(t, inv)
+	if !strings.HasSuffix(shifted, "come up…") {
+		t.Errorf("expected a back-off to the word boundary, got tail %q, want a mid-word hard cut to be avoided",
+			shifted[max(0, len(shifted)-24):])
+	}
+
+	// The raised cap must not start truncating the revision-range form, which is the
+	// other shape change_ref carries — and it must still be escaped.
+	const short = "flux: HelmRelease harbor 1.14.2 -> 1.15.0 <prod>"
+	inv.RootCauses[0].ChangeRef = short
+	if got := whatChangedField(t, inv); got != escapeMrkdwn(short) {
+		t.Errorf("a short change_ref must render verbatim and escaped:\ngot  %q\nwant %q", got, escapeMrkdwn(short))
+	}
+}
