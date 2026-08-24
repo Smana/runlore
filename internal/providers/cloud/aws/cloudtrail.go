@@ -17,7 +17,18 @@ import (
 // CloudChanges returns recent MUTATING AWS control-plane events (CloudTrail
 // LookupEvents) in the window, normalized to the engine-agnostic Change model so
 // they join the same "what changed" timeline as GitOps diffs. When the selector
-// carries a Name, it scopes the lookup to that resource.
+// carries a Name, it scopes the lookup to that resource; when it sets FailedOnly,
+// only rejected calls are kept.
+//
+// FailedOnly exists because the result cap is applied to the NEWEST events, and on
+// a Karpenter cluster the newest mutating events are routine instance and tag
+// churn. Live: four investigations of a failing AWS Backup job concluded the
+// resource "could not be identified", each correctly reporting that the cluster-wide
+// lookup was full of Karpenter/SSM noise — while the CreateDBClusterSnapshot calls
+// that answered the question sat in CloudTrail just past the cap. Filtering first
+// spends the cap on events that can answer a "why did this fail" question.
+// CloudTrail accepts exactly one LookupAttribute, already spent on ResourceName or
+// ReadOnly, so the filter is client-side and the scan is bounded below.
 //
 // Note: CloudTrail is eventually consistent (~15 min), so a too-narrow window can
 // miss a just-made change — callers should use a generous lookback.
@@ -60,15 +71,20 @@ func (c *Client) CloudChanges(ctx context.Context, sel providers.Selector, w pro
 	p := cloudtrail.NewLookupEventsPaginator(c.ct, in)
 	var changes []providers.Change
 	truncated := false
+	pages := 0
 	for p.HasMorePages() {
 		out, err := p.NextPage(ctx)
 		if err != nil {
 			return nil, fmt.Errorf("cloudtrail lookup: %w", err)
 		}
+		pages++
 		for i := range out.Events {
 			// When resource-scoped the server cannot also filter by ReadOnly, so
 			// drop read-only events here. e.ReadOnly is "true"/"false" (string).
 			if resourceScoped && deref(out.Events[i].ReadOnly) == "true" {
+				continue
+			}
+			if sel.FailedOnly && eventError(out.Events[i]) == "" {
 				continue
 			}
 			changes = append(changes, eventToChange(out.Events[i]))
@@ -76,6 +92,15 @@ func (c *Client) CloudChanges(ctx context.Context, sel providers.Selector, w pro
 		if len(changes) > c.maxEvents {
 			truncated = true
 			break // we already have more than the cap; further pages cannot change the kept top-N
+		}
+		// A failure scan has to look past the cap — failures are sparse, and the
+		// answer is typically behind pages of successful churn. Bound it anyway: a
+		// window with no failures at all would otherwise walk the whole retention
+		// period one page at a time. Hitting the budget is a partial view, so it
+		// reuses the truncation sentinel rather than reporting a clean empty result.
+		if sel.FailedOnly && pages >= maxFailureScanPages {
+			truncated = true
+			break
 		}
 	}
 	// Sort most-recent-first BEFORE capping, so the cap keeps the newest events
@@ -91,6 +116,28 @@ func (c *Client) CloudChanges(ctx context.Context, sel providers.Selector, w pro
 		changes = append(changes, truncatedChange(c.maxEvents))
 	}
 	return changes, nil
+}
+
+// maxFailureScanPages bounds the extra pagination a FailedOnly scan performs. A
+// CloudTrail page is <=50 events, so this is up to ~1000 events examined to find
+// the cap's worth of failures — enough to reach past a busy cluster's routine
+// churn, and small enough that a quiet window returns promptly.
+const maxFailureScanPages = 20
+
+// eventError returns the errorCode from an event's raw CloudTrail payload, or ""
+// when the call succeeded (successful calls omit the field). It is the single
+// reader of that payload: both the FailedOnly filter and the rendered "FAILED:"
+// annotation key on it, so the two can never disagree about what failed.
+func eventError(e cttypes.Event) string {
+	raw := deref(e.CloudTrailEvent)
+	if raw == "" {
+		return ""
+	}
+	var payload ctEventJSON
+	if err := json.Unmarshal([]byte(raw), &payload); err != nil {
+		return ""
+	}
+	return payload.ErrorCode
 }
 
 // truncatedChange is the sentinel appended when CloudChanges stops at its cap
@@ -141,13 +188,11 @@ func eventToChange(e cttypes.Event) providers.Change {
 	// raw CloudTrail JSON carries an errorCode — so the model sees failed calls
 	// (InsufficientInstanceCapacity, UnauthorizedOperation, etc.) not as successes.
 	path := deref(e.EventName) + " by " + deref(e.Username)
-	if raw := deref(e.CloudTrailEvent); raw != "" {
+	if code := eventError(e); code != "" {
+		path += " — FAILED: " + code
 		var payload ctEventJSON
-		if err := json.Unmarshal([]byte(raw), &payload); err == nil && payload.ErrorCode != "" {
-			path += " — FAILED: " + payload.ErrorCode
-			if payload.ErrorMessage != "" {
-				path += " (" + payload.ErrorMessage + ")"
-			}
+		if err := json.Unmarshal([]byte(deref(e.CloudTrailEvent)), &payload); err == nil && payload.ErrorMessage != "" {
+			path += " (" + payload.ErrorMessage + ")"
 		}
 	}
 	ch.Source = providers.SourceRef{Path: path}

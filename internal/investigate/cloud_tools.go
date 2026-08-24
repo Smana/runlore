@@ -28,12 +28,18 @@ func (t CloudWhatChangedTool) Description() string {
 		"the incident. Optional resource is an EXACT CloudTrail ResourceName — a full ARN, instance-id, " +
 		"ASG name, or a resource's full path (e.g. a Secrets Manager secret's \"apps/team/name\") — never a " +
 		"service name or substring; OMIT it to see every mutating event, which is the right move when you do " +
-		"not know the exact identifier. since_minutes default 90 (CloudTrail lags ~15m)."
+		"not know the exact identifier. Set failed_only=true when the incident IS a failed AWS operation and " +
+		"you do not know which resource it happened to (a failed backup/snapshot job, a rejected API call): " +
+		"results are capped at the NEWEST events, which on a Karpenter cluster are routine instance and tag " +
+		"churn, so the rejected call you are looking for is usually just past the cap. failed_only spends the " +
+		"cap on rejected calls instead and reports each one's error code. since_minutes default 90 " +
+		"(CloudTrail lags ~15m)."
 }
 
 // Schema returns the JSON schema for the arguments.
 func (t CloudWhatChangedTool) Schema() string {
-	return `{"type":"object","properties":{"resource":{"type":"string"},"since_minutes":{"type":"integer"}},"required":[]}`
+	return `{"type":"object","properties":{"resource":{"type":"string"},"since_minutes":{"type":"integer"},` +
+		`"failed_only":{"type":"boolean","description":"keep only control-plane calls that were REJECTED, reporting each error code; use when the incident is itself a failed AWS operation"}},"required":[]}`
 }
 
 // Call lists cloud changes over the window and renders them.
@@ -41,6 +47,7 @@ func (t CloudWhatChangedTool) Call(ctx context.Context, args string) (string, er
 	var in struct {
 		Resource     string `json:"resource"`
 		SinceMinutes int    `json:"since_minutes"`
+		FailedOnly   bool   `json:"failed_only"`
 	}
 	if err := json.Unmarshal([]byte(args), &in); err != nil {
 		return "", fmt.Errorf("parse args: %w", err)
@@ -52,7 +59,7 @@ func (t CloudWhatChangedTool) Call(ctx context.Context, args string) (string, er
 	end := time.Now()
 	start := end.Add(-time.Duration(since) * time.Minute)
 	window := providers.TimeWindow{Start: start, End: end}
-	changes, err := t.Cloud.CloudChanges(ctx, providers.Selector{Name: in.Resource}, window)
+	changes, err := t.Cloud.CloudChanges(ctx, providers.Selector{Name: in.Resource, FailedOnly: in.FailedOnly}, window)
 	if err != nil {
 		return "", err
 	}
@@ -74,13 +81,19 @@ func (t CloudWhatChangedTool) Call(ctx context.Context, args string) (string, er
 	// would be worse than the dead end.
 	var widened bool
 	if len(changes) == 0 && in.Resource != "" {
-		all, aerr := t.Cloud.CloudChanges(ctx, providers.Selector{}, window)
+		all, aerr := t.Cloud.CloudChanges(ctx, providers.Selector{FailedOnly: in.FailedOnly}, window)
 		if aerr == nil && len(all) > 0 {
 			changes, widened = all, true
 		}
 	}
 
 	if len(changes) == 0 {
+		if in.FailedOnly {
+			// Say which filter produced the empty result. "No events" from a filtered
+			// lookup is not the same claim as "the control plane was quiet", and the
+			// schema asks the model not to read absence as evidence.
+			return "no FAILED AWS control-plane calls in the window (successful events were not listed — re-run without failed_only to see them)", nil
+		}
 		return "no mutating AWS events in the window", nil
 	}
 	var b strings.Builder

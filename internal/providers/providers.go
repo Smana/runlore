@@ -415,6 +415,12 @@ type Selector struct {
 	Namespace string
 	Kind      string
 	Name      string
+	// FailedOnly keeps only events that the provider reports as failed calls.
+	// Cloud control-plane lookups return the most recent MUTATING events, which on
+	// a Karpenter cluster are overwhelmingly routine churn; a "why did this fail"
+	// question wants the rejected calls, and those are usually older than the
+	// result cap. Honoured by CloudProvider.CloudChanges; ignored elsewhere.
+	FailedOnly bool
 }
 
 // ---- provider interfaces -----------------------------------------------------

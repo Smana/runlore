@@ -136,3 +136,62 @@ func TestCloudWhatChangedWidensOnScopedMiss(t *testing.T) {
 		}
 	})
 }
+
+// recordingCloud captures the selectors CloudChanges was called with.
+type recordingCloud struct {
+	changes []providers.Change
+	sels    []providers.Selector
+}
+
+func (r *recordingCloud) CloudChanges(_ context.Context, sel providers.Selector, _ providers.TimeWindow) ([]providers.Change, error) {
+	r.sels = append(r.sels, sel)
+	if sel.Name != "" {
+		return nil, nil // every scoped lookup misses, forcing the widen path
+	}
+	return r.changes, nil
+}
+func (r *recordingCloud) ResourceHealth(context.Context, providers.Selector, providers.TimeWindow) (providers.LogResult, error) {
+	return nil, nil
+}
+
+// TestCloudWhatChangedFailedOnly: the flag reaches the provider, and it SURVIVES the
+// unscoped widen. Without that, a scoped failure lookup that misses would widen into
+// an unfiltered cluster-wide query and bury the rejected call under exactly the
+// Karpenter churn the flag exists to skip past — the widen would undo the fix.
+func TestCloudWhatChangedFailedOnly(t *testing.T) {
+	failed := providers.Change{
+		When: time.Unix(1700000000, 0).UTC(), ManagedBy: "rds.amazonaws.com",
+		Workload: providers.Workload{Kind: "AWS::RDS::DBCluster", Name: "aurora-serverless-postgres-old"},
+		Source:   providers.SourceRef{Path: "CreateDBClusterSnapshot by backup — FAILED: InvalidDBClusterStateFault"},
+	}
+	cloud := &recordingCloud{changes: []providers.Change{failed}}
+	out, err := (CloudWhatChangedTool{Cloud: cloud}).Call(context.Background(),
+		`{"resource":"aurora-serverless-postgres","failed_only":true}`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out, "InvalidDBClusterStateFault") {
+		t.Errorf("the error code must reach the model:\n%s", out)
+	}
+	if len(cloud.sels) != 2 {
+		t.Fatalf("want a scoped call then an unscoped retry, got %d", len(cloud.sels))
+	}
+	for i, sel := range cloud.sels {
+		if !sel.FailedOnly {
+			t.Errorf("call %d dropped FailedOnly: %+v", i, sel)
+		}
+	}
+}
+
+// TestCloudWhatChangedFailedOnlyEmptyIsNotSilence: an empty FILTERED result must not
+// read as "the control plane was quiet". submit_findings tells the model that an
+// empty result is not evidence of absence; the tool has to hold up its end.
+func TestCloudWhatChangedFailedOnlyEmptyIsNotSilence(t *testing.T) {
+	out, err := (CloudWhatChangedTool{Cloud: &recordingCloud{}}).Call(context.Background(), `{"failed_only":true}`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out, "FAILED") || !strings.Contains(out, "failed_only") {
+		t.Errorf("an empty filtered result must name the filter that produced it:\n%s", out)
+	}
+}
