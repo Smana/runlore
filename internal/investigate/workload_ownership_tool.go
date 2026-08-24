@@ -13,7 +13,7 @@ import (
 
 // WorkloadOwnershipTool answers two questions the Git-only what_changed tool cannot
 // (G4): (a) WHICH GitOps object owns a failing pod — resolved by walking real
-// ownerReferences (Pod → ReplicaSet → Deployment/StatefulSet/DaemonSet/Job) and the
+// ownerReferences (Pod → ReplicaSet → Deployment/StatefulSet/DaemonSet, and Job → CronJob) and the
 // top controller's Flux/ArgoCD tracking labels, not by name-guessing; and (b) whether
 // the workload's LIVE state has DRIFTED from what GitOps applied (the classic
 // "someone kubectl-edited it" cause).
@@ -39,7 +39,7 @@ func (t WorkloadOwnershipTool) Name() string { return "workload_ownership" }
 // Description returns the tool description.
 func (t WorkloadOwnershipTool) Description() string {
 	return "Given a failing workload (namespace + label selector, or a specific pod), walk its " +
-		"ownerReferences (Pod → ReplicaSet → Deployment/StatefulSet/DaemonSet/Job) to find (a) WHICH " +
+		"ownerReferences (Pod → ReplicaSet → Deployment/StatefulSet/DaemonSet, Job → CronJob) to find (a) WHICH " +
 		"GitOps object owns it (Flux Kustomization/HelmRelease or Argo CD Application — resolved from the " +
 		"controller's tracking labels, not guessed by name) and (b) whether the LIVE state has DRIFTED " +
 		"from what GitOps applied (a manual `kubectl edit`/scale). Use this when a workload is failing and " +

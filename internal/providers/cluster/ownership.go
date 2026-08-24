@@ -164,6 +164,20 @@ func (r *Reader) fetchOwner(ctx context.Context, kind, namespace, name string) (
 			return ownerMeta{}, err
 		}
 		return ownerMeta{kind, o.Name, o.Namespace, controllerRef(o.OwnerReferences), o.Labels, o.Annotations, o.Spec}, nil
+	case "CronJob":
+		// The hop that makes a scheduled workload's chain terminate at the thing an
+		// operator actually manages. Kubernetes sets a Controller=true ownerReference
+		// from a Job to the CronJob that created it, so without this case the walk
+		// stopped at the per-RUN Job — and Top was an object named for one execution,
+		// which never appears again. providers.NormalizeWorkloadName infers the same
+		// family from the name's shape, and has to, because the alert path
+		// (source.Decode) has no cluster client at all; here the API server already
+		// knows, so it is asked rather than guessed.
+		o, err := r.client.BatchV1().CronJobs(namespace).Get(ctx, name, get)
+		if err != nil {
+			return ownerMeta{}, err
+		}
+		return ownerMeta{kind, o.Name, o.Namespace, controllerRef(o.OwnerReferences), o.Labels, o.Annotations, o.Spec}, nil
 	default:
 		return ownerMeta{}, fmt.Errorf("unhandled controller kind %q", kind)
 	}

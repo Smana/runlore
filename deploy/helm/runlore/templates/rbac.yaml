@@ -46,7 +46,7 @@ rules:
   # They are scoped to rbac.actionNamespaces as namespaced Roles below, so a
   # confused/compromised agent cannot mutate flux-system or another team's workloads.
   # workload_ownership (G4) walks a failing pod's ownerReferences to its TOP controller
-  # (Pod → ReplicaSet → Deployment/StatefulSet/DaemonSet/Job) and reads the GitOps
+  # (Pod → ReplicaSet → Deployment/StatefulSet/DaemonSet, Job → CronJob) and reads the GitOps
   # tracking labels off it. These are the only controller kinds the walk can follow
   # (internal/providers/cluster/ownership.go, fetchOwner), and the tool is registered
   # unconditionally whenever the cluster reader is.
@@ -61,7 +61,7 @@ rules:
     resources: ["replicasets", "deployments", "statefulsets", "daemonsets"]
     verbs: ["get"]
   - apiGroups: ["batch"]
-    resources: ["jobs"]
+    resources: ["jobs", "cronjobs"]
     verbs: ["get"]
   # resource_spec (read an arbitrary object's .spec/.status): an operator-owned, read-only
   # allowlist of spec-bearing kinds — see rbac.resourceSpecRules in values.yaml, which also
