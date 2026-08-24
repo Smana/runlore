@@ -19,8 +19,14 @@ go build ./...
 go vet ./...
 go test ./...
 gofmt -l .                 # must print nothing
-golangci-lint run ./...    # must report 0 issues
+hack/lint.sh               # must report 0 issues
 ```
+
+`hack/lint.sh` is `golangci-lint run ./...` with `GOTOOLCHAIN` pinned to the `toolchain`
+line in `go.mod`, which is also where CI resolves its Go version. Run bare and with a newer
+Go on your PATH, golangci-lint's bundled staticcheck panics while building its IR and takes
+the entire run down with it — a failure that says nothing about your change. It forwards
+arguments, so `hack/lint.sh ./internal/notify/...` narrows it.
 
 Run race detection on anything touching goroutines (the queue, informer, leader election):
 

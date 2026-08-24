@@ -1,5 +1,6 @@
 # golangci-lint v2 config — quality gate for RunLore.
-# Run locally with: golangci-lint run ./...
+# Run locally with: hack/lint.sh  (golangci-lint run ./... under go.mod's pinned
+# toolchain — a newer local Go makes the bundled staticcheck panic; see that script).
 version: "2"
 
 run:
