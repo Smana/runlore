@@ -33,6 +33,8 @@ You will be dropped into a mature Go codebase. These are not suggestions; matchi
 | `internal/providers/providers.go` *(modify)* | `EngineGCP`; `CloudDescriber` + `CloudVocabulary`; `AWSCloudVocabulary()`; widened doc comments |
 | `internal/investigate/cloud_tools.go` *(modify)* | Tool text composed from the vocabulary instead of hardcoded AWS literals |
 | `internal/config/config.go` *(modify)* | `CloudAWS`/`CloudGCP` constants; nested `GCPCloudCfg` |
+| `internal/eval/coverage.go` *(modify)* | `cloud_what_changed`/`cloud_resource_health` are hardcoded to the `"aws"` datasource group (`:26-27`); a GCP investigation is otherwise scored as AWS coverage. This is the one place the tool→datasource attribution lives |
+| `internal/notify/resource_scope.go` *(modify)* | `notKubernetesShaped` (`:145`) tests only `strings.Contains(kind, ":")`, which is true for `AWS::EC2::Instance` and false for `gke_nodepool`/`gce_instance` — so a GCP resource falls through to `Workload.Ref()`, which returns `""` for an empty namespace, and the card drops the resource identity entirely |
 | `internal/providers/cloud/gcp/gcp.go` *(create)* | `Client`, `New`, narrow API interfaces, `CloudVocabulary()`, preflight |
 | `internal/providers/cloud/gcp/identity.go` *(create)* | Three-tier project/location/cluster resolution |
 | `internal/providers/cloud/gcp/auditlog.go` *(create)* | `CloudChanges` |
@@ -107,6 +109,8 @@ func TestEngineGCPIsDistinctFromEngineAWS(t *testing.T) {
 ```
 
 - [ ] **Step 2: Run test to verify it fails**
+
+It must fail on the missing warning, not on a compile error. If it does not compile, the harness is wrong — fix that first, or Step 3 will "pass" for the wrong reason.
 
 Run: `go test ./internal/providers/ -run 'TestAWSCloudVocabulary|TestEngineGCP' -v`
 Expected: FAIL to compile — `undefined: AWSCloudVocabulary`, `undefined: EngineGCP`.
@@ -258,7 +262,30 @@ test, so a provider that does not implement CloudDescriber is unaffected."
 
 **Files:**
 - Modify: `internal/investigate/cloud_tools.go` (whole file)
+- Modify: `internal/investigate/timeline_tool.go` (`:67` description, `:36`/`:159` comments)
 - Test: `internal/investigate/cloud_tools_test.go` (extend)
+
+**Four AWS nouns are model-facing and easy to miss**, because they are not in the
+`Description()`/`Schema()` pair this task is mostly about:
+
+| site | text | why it matters on GCP |
+|---|---|---|
+| `cloud_tools.go:84` | `"no mutating AWS events in the window"` | every quiet window tells the model it queried AWS — and this is the string a model is most likely to quote verbatim into a finding |
+| `cloud_tools.go:145` | `"no AWS resource health returned"` | same, on the health lens |
+| `cloud_tools.go` widened banner | `"matched no CloudTrail events"` | names the wrong log |
+| `timeline_tool.go:67` | `"cloud control-plane changes (CloudTrail: ASG/EC2/EKS/manual actions)"` | `IncidentTimelineTool` is registered whenever `cloudProvider != nil`, so a GCP install ships it verbatim |
+
+The empty-result strings must come from the vocabulary too — an empty result is a
+claim about a named log, and getting the noun wrong there is exactly the defect
+`CloudDescriber` exists to prevent. `IncidentTimelineTool` needs the same optional
+type-assert as the two cloud tools; it has no `CloudDescriber` hook today.
+
+- [ ] **Step 0: Extend the test to cover all four**
+
+The Task 2 test must assert that with a GCP describer wired, NONE of the rendered
+tool text, the empty-result strings, or the timeline description contains `"AWS"` or
+`"CloudTrail"`. A test that only checks `Description()` passes while three of the
+four sites stay wrong.
 
 - [ ] **Step 1: Write the failing test**
 
@@ -785,6 +812,12 @@ func (Client) CloudVocabulary() providers.CloudVocabulary {
 }
 
 // deref safely dereferences an optional string.
+// NOTE: only keep this if a call site exists. The AWS client needs it because the
+// AWS SDK uses pointer fields; the generated Google clients (container/compute/
+// logging) use value fields and the audit payload decodes into a plain struct, so
+// Tasks 4-9 create no caller. `unused` is in the repo's `default: standard` linter
+// set, so an uncalled deref fails the zero-issue gate in Task 9 Step 5. Delete it
+// unless you have actually written a caller.
 func deref(s *string) string {
 	if s == nil {
 		return ""
@@ -1702,6 +1735,12 @@ func TestResourceHealthReportsDegradedNodePools(t *testing.T) {
 	c, done := routedClient(t, map[string]any{
 		"/clusters/": cluster,
 		"listErrors": map[string]any{"items": []any{}},
+		// This route is registered because describeMIGs MUST call listManagedInstances —
+		// the spec specifies it as half of sub-query 2, supplying currentAction and
+		// instanceHealth so node churn (instances repeatedly RECREATING/DELETING) is
+		// visible. An earlier revision routed it and never requested it, which made the
+		// fixture read as coverage for behaviour that did not exist. Cap at
+		// defaultMaxEvents, same as listErrors.
 		"listManagedInstances": map[string]any{"managedInstances": []any{}},
 	})
 	defer done()
@@ -1799,16 +1838,20 @@ func (c *Client) ResourceHealth(ctx context.Context, sel providers.Selector, w p
 
 	migs, autopilot := c.describeCluster(ctx, add)
 
-	// On Autopilot the node layer is Google-managed: there are no node pools the
-	// operator controls, and the MIGs backing them are not in their project's view.
-	// Running the sub-queries anyway returns empty results, which the model reads as
-	// "capacity is fine" — a false negative on the exact question this tool answers.
-	// So they are skipped and the reason is stated.
+	// On Autopilot the operator controls no node pools, so the node-pool listing is
+	// noise. The MIG and instance sub-queries are NOT skipped, though: Autopilot node
+	// VMs (gk3-*) and the managed instance groups behind them DO live in the customer
+	// project and are readable with roles/compute.viewer.
+	//
+	// An earlier revision returned here on the premise that "the MIGs backing them are
+	// not in their project's view", which is factually wrong — and skipping on it threw
+	// away the listErrors stockout signal the spec calls the highest-value output, on a
+	// mode where pods genuinely do get stuck pending on zonal exhaustion. It also
+	// refused an explicit instance_id question the AggregatedList lookup would have
+	// answered.
 	if autopilot {
-		add("NOTE: this is a GKE Autopilot cluster — the node layer is Google-managed, so " +
-			"node-pool, instance-group and instance health are not visible here. Node-level causes " +
-			"must be inferred from Kubernetes node conditions and events instead.")
-		return lines, nil
+		add("NOTE: this is a GKE Autopilot cluster — node pools are Google-managed and not " +
+			"listed. Instance-group and instance health below ARE the Autopilot nodes.")
 	}
 
 	c.describeMIGs(ctx, migs, w, add)
@@ -1859,8 +1902,16 @@ func (c *Client) describeCluster(ctx context.Context, add func(string, ...any)) 
 		if np.Version != "" && cl.CurrentMasterVersion != "" && np.Version != cl.CurrentMasterVersion {
 			skew = fmt.Sprintf(" SKEW: pool=%s control-plane=%s", np.Version, cl.CurrentMasterVersion)
 		}
-		add("  node pool %s: status=%s%s nodes=%d%s%s", np.Name, np.Status,
-			optional(" (%s)", np.StatusMessage), np.InitialNodeCount, scale, skew)
+		// NOT np.InitialNodeCount: that is the creation-time per-zone value and never
+		// changes. On an autoscaled pool created with 3 and now running at its ceiling
+		// of 10 it renders "nodes=3 autoscaling=1..10", and a model investigating a
+		// capacity incident reads headroom where the pool is actually pinned — the
+		// opposite conclusion, in the lens whose whole job is capacity. container.NodePool
+		// carries no current-size field, so the real number comes from the MIG's
+		// targetSize (summed across the pool's instance groups) with cluster.CurrentNodeCount
+		// as the cluster-wide fallback.
+		add("  node pool %s: status=%s%s nodes=%s%s%s", np.Name, np.Status,
+			optional(" (%s)", np.StatusMessage), poolSize(np), scale, skew)
 		for _, cond := range np.Conditions {
 			add("    condition: %s %s", cond.CanonicalCode, cond.Message)
 		}
@@ -2308,13 +2359,15 @@ func (c *Client) Preflight(ctx context.Context) error {
 	if !isStatus(err, 403) && !isStatus(err, 401) {
 		return fmt.Errorf("cloud logging read failed on project %s: %w", c.project, err)
 	}
-	return fmt.Errorf("Cloud Logging read denied on project %s.\n"+
-		"RunLore authenticated as ServiceAccount %s/%s, which no GCP role is bound to.\n\n"+
+	// Lowercase, no trailing period: staticcheck ST1005 and revive's error-strings
+	// are both in the repo's gate, and "Cloud" is not an acronym they exempt.
+	return fmt.Errorf("cloud logging read denied on project %s: "+
+		"RunLore authenticated as ServiceAccount %s/%s, which no GCP role is bound to\n\n"+
 		"  gcloud projects add-iam-policy-binding %s \\\n"+
 		"    --role=roles/logging.viewer \\\n"+
 		"    --member=%q\n\n"+
-		"Repeat for roles/container.clusterViewer and roles/compute.viewer. "+
-		"Note the project NUMBER in the member string — the project ID does not work there.",
+		"repeat for roles/container.clusterViewer and roles/compute.viewer; "+
+		"note the project NUMBER in the member string — the project ID does not work there",
 		c.project, podNamespace(), podServiceAccount(),
 		c.project, c.principal())
 }
@@ -2327,9 +2380,19 @@ func (c *Client) Preflight(ctx context.Context) error {
 // matches. That is the single most common way a direct binding is set up wrong, which
 // is why this is generated rather than left to the docs.
 func (c *Client) principal() string {
+	// Same placeholder discipline as podNamespace/podServiceAccount below, and for a
+	// sharper reason: projectNum comes ONLY from the metadata server, so an operator
+	// using the explicit-config escape hatch on a pod that cannot reach it renders
+	// "projects//locations/..." — which gcloud ACCEPTS and which never matches. An
+	// obviously-a-template placeholder is the one thing worse than no command that is
+	// still better than a silently wrong one.
+	num := c.projectNum
+	if num == "" {
+		num = "<project-number>"
+	}
 	return fmt.Sprintf(
 		"principal://iam.googleapis.com/projects/%s/locations/global/workloadIdentityPools/%s.svc.id.goog/subject/ns/%s/sa/%s",
-		c.projectNum, c.project, podNamespace(), podServiceAccount())
+		num, c.project, podNamespace(), podServiceAccount())
 }
 
 // podNamespace and podServiceAccount read the downward-API values the Helm chart
@@ -2381,8 +2444,54 @@ the project ID there is accepted by gcloud and silently never matches."
 ## Task 10: Wire the provider into the app
 
 **Files:**
-- Modify: `internal/app/investigate.go:25-42` (imports), `:281-291` (cloud wiring)
+- Modify: `internal/app/investigate.go:25-42` (imports), `:261-265` (hoist the clientset), `:281-291` (cloud wiring)
+- Modify: `internal/providers/cloud/gcp/identity.go` (add `NodeIdentityFromClientset`)
 - Test: `internal/app/investigate_test.go` (extend)
+
+- [ ] **Step 0: Make tier 3 reachable**
+
+`kubeReader` is a `providers.KubeReader`, which exposes only `PodStatuses` and `Events` — no node access — so tier 3 cannot be fed from it. The clientset one line above it can:
+
+```go
+// was: if cs := KubeClientset(log); cs != nil {
+kubeCS := KubeClientset(log)
+if kubeCS != nil {
+    cr := cluster.New(kubeCS)
+    kubeReader = cr
+    tools = append(tools, clusterTools(cr, cfg)...)
+}
+```
+
+`kubeCS` is declared before the cloud switch, so the GCP branch can build the tier-3 closure from it. Add the reader in `identity.go`:
+
+```go
+// NodeIdentityFromClientset reads one node's providerID (gce://PROJECT/ZONE/INSTANCE)
+// and the region label, which is tier 3's whole input. It lists a single node — the
+// values are cluster-wide, so the first one answers.
+//
+// This is the ONLY production caller of parseProviderID. If the live run shows tier 2
+// is reliable, this function and everything under it goes.
+func NodeIdentityFromClientset(ctx context.Context, cs kubernetes.Interface) (*NodeIdentity, error) {
+	nodes, err := cs.CoreV1().Nodes().List(ctx, metav1.ListOptions{Limit: 1})
+	if err != nil {
+		return nil, fmt.Errorf("list nodes: %w", err)
+	}
+	if len(nodes.Items) == 0 {
+		return nil, errNoNodeSource
+	}
+	n := nodes.Items[0]
+	id, err := parseProviderID(n.Spec.ProviderID)
+	if err != nil {
+		return nil, err
+	}
+	if r := n.Labels["topology.kubernetes.io/region"]; r != "" {
+		id.Region = r
+	}
+	return id, nil
+}
+```
+
+Verify: `go build ./...` — and confirm `grep -rn parseProviderID internal/` shows a non-test caller.
 
 - [ ] **Step 1: Write the failing test**
 
@@ -2396,9 +2505,13 @@ Append to `internal/app/investigate_test.go`:
 func TestUnknownCloudProviderIsRefusedLoudly(t *testing.T) {
 	var buf bytes.Buffer
 	log := slog.New(slog.NewTextHandler(&buf, nil))
-	cfg := config.Config{Cloud: config.Cloud{Provider: "gpc"}}
+	cfg := &config.Config{Cloud: config.Cloud{Provider: "gpc"}}
 
-	_, _, _ = BuildModelAndTools(context.Background(), cfg, nil, log)
+	// Real signature (internal/app/investigate.go:46): five parameters — cfg is a
+	// POINTER — and four returns. An earlier revision of this plan passed a value and
+	// four arguments with three returns, which fails to compile for three reasons that
+	// have nothing to do with the behaviour under test.
+	_, _, _, _ = BuildModelAndTools(context.Background(), cfg, nil, nil, log)
 
 	if !strings.Contains(buf.String(), "unknown cloud provider") {
 		t.Errorf("expected a warning naming the unknown provider, got:\n%s", buf.String())
@@ -2440,13 +2553,25 @@ Replace the block at lines 281-291 with:
 	case config.CloudGCP:
 		// Identity resolves from config, then the GKE metadata server, then a node's
 		// providerID — so `cloud: {provider: gcp}` alone is a complete configuration
-		// on GKE. Tier 3 is wired only when a cluster reader exists; without one it
-		// simply does not contribute.
+		// on GKE. Tier 3 is wired only when a clientset exists; without one it simply
+		// does not contribute.
+		//
+		// It MUST be wired to something. Passing nil here makes tier 3 unreachable in
+		// production, which would ship parseProviderID, NodeIdentity and the sourceNode
+		// branch as test-only code AND make runbook step 3 undecidable — the step whose
+		// entire purpose is to observe whether tier 3 is ever needed. `kubeCS` is the
+		// hoisted clientset from the cluster-access block above; see Task 10 Step 1.
+		var nodes func(context.Context) (*gcpcloud.NodeIdentity, error)
+		if kubeCS != nil {
+			nodes = func(ctx context.Context) (*gcpcloud.NodeIdentity, error) {
+				return gcpcloud.NodeIdentityFromClientset(ctx, kubeCS)
+			}
+		}
 		id := gcpcloud.ResolveIdentity(ctx, gcpcloud.Identity{
 			Project:     cfg.Cloud.GCP.Project,
 			Location:    cfg.Cloud.GCP.Location,
 			ClusterName: cfg.Cloud.GCP.ClusterName,
-		}, nil)
+		}, nodes)
 		if cfg.Cloud.Region != "" {
 			log.Warn("config.cloud.region is AWS-only and is ignored on GCP; set config.cloud.gcp.location")
 		}
@@ -2508,6 +2633,27 @@ the live-validation run reads to decide whether tier 3 is needed."
 **Files:**
 - Modify: `deploy/helm/runlore/templates/_helpers.tpl` (the `env:` block, around line 118-136)
 - Modify: `deploy/helm/runlore/values.yaml` (around line 371, beside the network example)
+- Modify: `deploy/helm/runlore/values-full.yaml` (`networkPolicy`, around line 132-172)
+
+**Without the egress rules this provider does not work under the chart's own hardened
+profile**, and it fails in the least diagnosable way. `values-full.yaml` ships
+`networkPolicy.strict` with `extraEgress` for the AWS control plane plus a
+Cilium-only `awsPodIdentity` toggle, which exists precisely because the AWS metadata
+endpoint runs on the node's host network and a plain NetworkPolicy cannot match it.
+GKE Workload Identity needs the identical treatment:
+
+| destination | why |
+|---|---|
+| `169.254.169.254:80` | GKE metadata server — ADC credentials AND identity tier 2. Host-network, so it needs the same Cilium-only toggle shape as `awsPodIdentity` |
+| `logging.googleapis.com:443` | `cloud_what_changed` |
+| `container.googleapis.com:443` | GKE cluster/node-pool health |
+| `compute.googleapis.com:443` | MIG `listErrors`, instance status |
+
+Add a `gcpWorkloadIdentity` toggle mirroring `awsPodIdentity`, and the three API
+endpoints to `extraEgress`. Note the failure shape if this is skipped: `Preflight`
+gets a connect timeout rather than a 403, so it takes the `!isStatus(403)` branch and
+prints **no binding command** — the operator gets a bare timeout for a firewall
+problem, which is the opposite of what the generated-command work is for.
 
 - [ ] **Step 1: Add the downward-API variable**
 
@@ -2593,6 +2739,15 @@ Run: `cat website/content/docs/integrations/data-sources/aws-cloud.md`
 
 Match its front matter shape exactly — `integration: {kind: cloud, id: ...}` — and its section order. The site's integration index is generated from that front matter, so a mismatch drops the page from the listing.
 
+**`weight` is mandatory and must be unique within the band.** `internal/docsguard`'s
+`TestIntegrationWeightsMatchTheirSection` errors with *"no `weight` in front matter — it
+sorts to 0 and leads its section"* for any page without one, and separately rejects
+duplicates. `data-sources/` currently occupies **301-313 contiguously**, with
+`aws-cloud.md` at 310 — so placing `gcp-cloud.md` beside it means taking 311 and
+renumbering 311→312, 312→313, 313→314. Verifying with `hugo --minify` alone will NOT
+catch this: hugo is happy without a weight, and the failure surfaces later under
+`go test -race ./...`.
+
 - [ ] **Step 2: Write `gcp-cloud.md`**
 
 Create the page covering, in this order:
@@ -2639,7 +2794,7 @@ Not a code task. Until this runs, the provider is documented as functional but *
 - [ ] **1.** Create a Standard cluster with Workload Identity: `gcloud container clusters create runlore-test --workload-pool=PROJECT.svc.id.goog --num-nodes=1 --zone=europe-west1-b`
 - [ ] **2.** Apply the three `add-iam-policy-binding` commands from the values comment.
 - [ ] **3.** Deploy with `cloud: {provider: gcp}` and **nothing else**. Confirm the startup line reports project, location, cluster **and `identity_source`**.
-      **This is the decisive step.** `identity_source=metadata-server` means tier 3 is dead weight → delete `nodeLookup`, `NodeIdentity`, `parseProviderID` and the `sourceNode` branch. `identity_source=node-provider-id` means the metadata server does not expose the cluster attributes and tier 3 is load-bearing → wire it to the real cluster reader, which Task 10 currently passes as `nil`.
+      **This is the decisive step, and it only decides anything because Task 10 wires tier 3 to the real clientset.** An earlier revision passed `nil` there, which made `identity_source=node-provider-id` unobservable — so the step could only ever report the answer that deletes tier 3, whether or not that answer was true. `identity_source=metadata-server` means tier 3 is dead weight → delete `NodeIdentityFromClientset`, `nodeLookup`, `NodeIdentity`, `parseProviderID` and the `sourceNode` branch, and drop the `nodes` closure from Task 10. `identity_source=node-provider-id` means the metadata server does not expose the cluster attributes and tier 3 is load-bearing → keep it.
 - [ ] **4.** Confirm `cloud_what_changed` returns the cluster-creation audit events.
 - [ ] **5.** Force a stockout: request a rare machine type in a node pool. Confirm `cloud_resource_health` surfaces `ZONE_RESOURCE_POOL_EXHAUSTED`.
 - [ ] **6.** **Negative test:** remove the `roles/logging.viewer` binding, restart, and confirm the printed command works verbatim when pasted back.
@@ -2652,7 +2807,7 @@ Not a code task. Until this runs, the provider is documented as functional but *
 
 **Spec coverage.** Every spec section maps to a task: model changes → 1; `CloudDescriber` → 1, 2; config → 3; package skeleton → 4; identity → 5; `CloudChanges` → 6; `ResourceHealth` → 7, 8; Workload Identity + error tiers → 9; wiring → 10; Helm → 11; docs → 12; runbook → post-merge.
 
-**One deliberate refinement of the spec.** `CloudVocabulary` gained `WidenedBanner`, `ChangeExamples` and `LagNote`, and `ChangeScopeArg` was renamed `ScopeGuidance`. The spec's five-field sketch could not render the widening banner — which is the one string that most needs to differ per cloud, since it is where the AWS text makes a claim about match semantics that is false on GCP. **Update the spec's struct to match before merging** so the two documents do not disagree.
+**One deliberate refinement of the spec.** `CloudVocabulary` gained `WidenedBanner`, `ChangeExamples` and `LagNote`, and `ChangeScopeArg` was renamed `ScopeGuidance` — because the original sketch could not render the widening banner, which is the one string that most needs to differ per cloud, since it is where the AWS text makes a claim about match semantics that is false on GCP. **The spec committed alongside this plan already carries all eight fields with the rename applied, so there is nothing to update** — an earlier revision of this note told the implementer to go and fix a "five-field sketch" that no longer exists, which is either a no-op or an edit toward a state neither document describes.
 
 **Two things this plan pins that the spec only asserted.** That AWS tool text does not change is now `TestAWSCloudVocabularyReproducesTheShippedToolText` rather than a promise. And `identity_source` is logged specifically so step 3 of the runbook has an observable answer, rather than the tier-3 question being settled by opinion.
 

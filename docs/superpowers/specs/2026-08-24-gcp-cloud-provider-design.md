@@ -77,6 +77,14 @@ Three small ones. No new `Workload` fields, no identity-key change.
    the recall index and the dedup fingerprint are untouched, so a GCP resource keys exactly as an
    AWS one does.
 
+   **One place this is not automatic: the notification card.** `notKubernetesShaped`
+   (`internal/notify/resource_scope.go:145`) recognises a cloud resource by testing
+   `strings.Contains(kind, ":")` — true for `AWS::EC2::Instance`, false for `gke_nodepool`
+   and `gce_instance`. A GCP resource therefore falls through to `Workload.Ref()`, which
+   returns `""` when `Namespace` is empty, so the resource identity is dropped from the
+   card entirely where the AWS equivalent renders its name. The kind test has to learn
+   the GCP shape, or GCP kinds have to join the existing non-Kubernetes kind list.
+
 ### New optional capability: `CloudDescriber`
 
 `internal/investigate/cloud_tools.go` hardcodes AWS vocabulary into the model-facing tool text —
