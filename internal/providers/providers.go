@@ -1043,14 +1043,6 @@ type OwnerWalker interface {
 	WorkloadOwnership(ctx context.Context, namespace, labelSelector, podName string) (OwnerChain, error)
 }
 
-// CloudProvider abstracts read-only cloud-side context for an incident. It adds
-// the AWS-layer "what changed" lens (mutating control-plane events) and cloud
-// resource health (instances/ASGs/nodegroups) that the in-cluster signals can't see.
-//
-// Implemented with native cloud SDKs (aws-sdk-go-v2) and in-cluster identity
-// (EKS Pod Identity / IRSA) — not Steampipe and not a bundled CLI (both break the
-// single-binary property). Steampipe / cloud MCP servers stay optional MCP
-// extensions. Cloud is opt-in (config.cloud.provider).
 // CloudChangeFilter narrows which control-plane events CloudChanges keeps. It is a
 // parameter of that ONE method rather than a field on Selector, because Selector
 // answers "which object" and every other consumer of it — the GitOps providers'
@@ -1067,6 +1059,14 @@ type CloudChangeFilter struct {
 	FailedOnly bool
 }
 
+// CloudProvider abstracts read-only cloud-side context for an incident. It adds
+// the AWS-layer "what changed" lens (mutating control-plane events) and cloud
+// resource health (instances/ASGs/nodegroups) that the in-cluster signals can't see.
+//
+// Implemented with native cloud SDKs (aws-sdk-go-v2) and in-cluster identity
+// (EKS Pod Identity / IRSA) — not Steampipe and not a bundled CLI (both break the
+// single-binary property). Steampipe / cloud MCP servers stay optional MCP
+// extensions. Cloud is opt-in (config.cloud.provider).
 type CloudProvider interface {
 	// CloudChanges returns recent mutating cloud control-plane events (AWS:
 	// CloudTrail) in the window, normalized to the engine-agnostic Change model so
