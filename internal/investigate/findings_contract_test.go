@@ -3,6 +3,9 @@
 package investigate
 
 import (
+	"encoding/json"
+	"slices"
+	"strings"
 	"testing"
 
 	"github.com/Smana/runlore/internal/providers"
@@ -43,8 +46,8 @@ func TestActionWithoutRemedy(t *testing.T) {
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			if got := actionWithoutRemedy(c.inv); got != c.want {
-				t.Fatalf("actionWithoutRemedy = %v, want %v", got, c.want)
+			if got := c.inv.ActionWithoutRemedy(); got != c.want {
+				t.Fatalf("ActionWithoutRemedy = %v, want %v", got, c.want)
 			}
 		})
 	}
@@ -81,5 +84,52 @@ func TestUnevidencedConclusion(t *testing.T) {
 				t.Fatalf("unevidencedConclusion = %v, want %v", got, c.want)
 			}
 		})
+	}
+}
+
+// TestSubmitFindingsRequiresEvidence guards the model-facing half of this fix, which
+// has no compiler. The predicates above test Go functions; the schema is a JSON
+// string literal, so a future edit that reflows or re-wraps that line can silently
+// revert `evidence` to optional while every other test in this file keeps passing.
+// Same reasoning as TestDataGapsForbidsSpeculation.
+func TestSubmitFindingsRequiresEvidence(t *testing.T) {
+	var schema struct {
+		Properties struct {
+			RootCauses struct {
+				Items struct {
+					Properties map[string]struct {
+						MinItems    int    `json:"minItems"`
+						Description string `json:"description"`
+					} `json:"properties"`
+					Required []string `json:"required"`
+				} `json:"items"`
+			} `json:"root_causes"`
+			Verdict struct {
+				Description string `json:"description"`
+			} `json:"verdict"`
+		} `json:"properties"`
+	}
+	if err := json.Unmarshal([]byte(submitFindingsSpec().Schema), &schema); err != nil {
+		t.Fatalf("submit_findings schema is not valid JSON: %v", err)
+	}
+	rc := schema.Properties.RootCauses.Items
+
+	if !slices.Contains(rc.Required, "evidence") {
+		t.Errorf("a root cause must REQUIRE evidence; required = %v", rc.Required)
+	}
+	if got := rc.Properties["evidence"].MinItems; got != 1 {
+		t.Errorf("evidence minItems = %d, want 1 — an empty array satisfies a bare `required`", got)
+	}
+	// The conditional requirement that pairs a remedy with a verdict claiming one.
+	// ActionWithoutRemedy only WARNS, so this sentence is the only thing that stops
+	// the payload being produced in the first place.
+	if d := rc.Properties["suggested_action"].Description; !strings.Contains(d, "action_required") {
+		t.Errorf("suggested_action must say when it is required:\n%s", d)
+	}
+	// The converse of the inconclusive rule: high confidence in "I could not tell"
+	// is still inconclusive. Live 2026-08-24, an 85%% action_suggested whose finding
+	// was that it could not identify the failing resource.
+	if d := schema.Properties.Verdict.Description; !strings.Contains(d, "could not name the failing resource") {
+		t.Errorf("verdict must state the converse of the recurrence rule:\n%s", d)
 	}
 }

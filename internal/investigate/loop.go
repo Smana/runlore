@@ -757,7 +757,7 @@ func (li *LoopInvestigator) Investigate(ctx context.Context, req Request) error 
 				li.Log.Warn("submit_findings: verdict=inconclusive with no cause, no open question and no data gap — the delivered card will have no Why and no next steps",
 					"title", inv.Title, "trigger_key", req.TriggerKey, "confidence", inv.Confidence, "tools_used", used)
 			}
-			if actionWithoutRemedy(inv) {
+			if inv.ActionWithoutRemedy() {
 				li.Log.Warn("submit_findings: verdict claims an action but no suggested_action or action was supplied — the card's header promises a remedy its body does not carry",
 					"title", inv.Title, "trigger_key", req.TriggerKey, "verdict", inv.Verdict, "confidence", inv.Confidence, "tools_used", used)
 			}

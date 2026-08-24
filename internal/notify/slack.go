@@ -679,12 +679,11 @@ func summaryBlocks(inv providers.Investigation) []map[string]any {
 	// verdict badge (2, above) is drawn from the verdict alone and would otherwise go
 	// on promising something the body never carries.
 	steps := nextSteps(inv)
-	if len(steps) == 0 && claimsAction(inv.Verdict) {
+	if len(steps) == 0 && remedyMissingForReader(inv) {
 		blocks = append(blocks,
 			map[string]any{"type": "divider"},
 			map[string]any{"type": "section", "text": map[string]any{"type": "mrkdwn",
-				"text": "*🛠 No next steps proposed* — the verdict says a human should act, but the investigation " +
-					"did not supply a remedy. Work from the Why above and any data gaps in the thread."}})
+				"text": noRemedyNotice}})
 	}
 	if len(steps) > 0 {
 		var s strings.Builder
@@ -1026,6 +1025,11 @@ func nextSteps(inv providers.Investigation) []string {
 	var steps []string
 	seen := map[string]bool{}
 	add := func(desc string, reversible bool) {
+		// Trimmed, so this agrees with providers.Investigation.ActionWithoutRemedy,
+		// which trims too. Gating on desc == "" instead let a whitespace-only
+		// suggested_action produce a step, suppressing the no-remedy notice while
+		// rendering an empty bullet — the promised remedy, spelled as one space.
+		desc = strings.TrimSpace(desc)
 		if desc == "" || seen[desc] {
 			return
 		}
@@ -1043,13 +1047,6 @@ func nextSteps(inv providers.Investigation) []string {
 		add(a.Description, a.Reversible)
 	}
 	return steps
-}
-
-// claimsAction reports whether a verdict tells the on-call to do something, and so
-// obliges the card to show what. no_action and inconclusive make no such promise,
-// and an absent verdict is a parse concern rather than a contract breach.
-func claimsAction(v providers.Verdict) bool {
-	return v == providers.VerdictActionSuggested || v == providers.VerdictActionRequired
 }
 
 // truncate caps a string to n runes, appending an ellipsis when cut (Slack section

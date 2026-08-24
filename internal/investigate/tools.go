@@ -210,36 +210,6 @@ func unaccountedInconclusive(inv providers.Investigation) bool {
 	return inv.UnaccountedInconclusive()
 }
 
-// actionWithoutRemedy reports whether a submitted finding tells the on-call to act
-// and then gives them nothing to do: a verdict of action_suggested/action_required
-// with no suggested_action on any root cause and no proposed action.
-//
-// Both fields are optional in the schema, so this payload is legal, and it shipped
-// live on 2026-08-24 — a card headed "Action suggested" whose next-steps section was
-// simply absent. The verdict badge is rendered from the verdict alone, so the header
-// promises a remedy the body never carries; a card that does that costs more trust
-// than one that says inconclusive.
-//
-// Deliberately NOT an error, for the same reason as unaccountedInconclusive: the
-// analysis is still worth delivering, and re-asking costs a model call to re-answer
-// a question the model just answered badly. The renderer says so on the card instead.
-func actionWithoutRemedy(inv providers.Investigation) bool {
-	if inv.Verdict != providers.VerdictActionSuggested && inv.Verdict != providers.VerdictActionRequired {
-		return false
-	}
-	for _, rc := range inv.RootCauses {
-		if strings.TrimSpace(rc.SuggestedAction) != "" {
-			return false
-		}
-	}
-	for _, a := range inv.Actions {
-		if strings.TrimSpace(a.Description) != "" {
-			return false
-		}
-	}
-	return true
-}
-
 // unevidencedConclusion reports whether a finding reaches a conclusive verdict while
 // its leading root cause cites no evidence at all.
 //
@@ -250,10 +220,21 @@ func actionWithoutRemedy(inv providers.Investigation) bool {
 // to show is what that verdict is for. So is an empty root-cause list, which is
 // unaccountedInconclusive's business.
 func unevidencedConclusion(inv providers.Investigation) bool {
-	if inv.Verdict == providers.VerdictInconclusive || len(inv.RootCauses) == 0 {
+	// Conclusive() rather than "!= inconclusive": an omitted or unparseable verdict
+	// leaves inv.Verdict empty, which renders no badge at all, so there is no claim
+	// to hold to account. Testing it the other way warned about a badge never drawn.
+	if !inv.Verdict.Conclusive() || len(inv.RootCauses) == 0 {
 		return false
 	}
-	return len(inv.RootCauses[0].Evidence) == 0
+	// Non-blank, because the schema's minItems:1 counts an empty string. Requiring a
+	// present-but-empty array to silence the warning would make the cheapest possible
+	// non-answer the way to pass, and the card then renders a bare bullet.
+	for _, e := range inv.RootCauses[0].Evidence {
+		if strings.TrimSpace(e) != "" {
+			return false
+		}
+	}
+	return true
 }
 
 // buildInvestigation maps the parsed findings shape onto a providers.Investigation,
