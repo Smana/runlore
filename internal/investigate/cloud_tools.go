@@ -52,13 +52,7 @@ func (t CloudWhatChangedTool) Call(ctx context.Context, args string) (string, er
 	if err := json.Unmarshal([]byte(args), &in); err != nil {
 		return "", fmt.Errorf("parse args: %w", err)
 	}
-	since := in.SinceMinutes
-	if since <= 0 {
-		since = 90
-	}
-	end := time.Now()
-	start := end.Add(-time.Duration(since) * time.Minute)
-	window := providers.TimeWindow{Start: start, End: end}
+	window := windowSince(in.SinceMinutes, 90)
 	changes, err := t.Cloud.CloudChanges(ctx, providers.Selector{Name: in.Resource, FailedOnly: in.FailedOnly}, window)
 	if err != nil {
 		return "", err
@@ -79,50 +73,50 @@ func (t CloudWhatChangedTool) Call(ctx context.Context, args string) (string, er
 	// So a scoped miss retries unscoped rather than dead-ending. The banner says the
 	// filter was dropped, because silently widening a query the model asked to narrow
 	// would be worse than the dead end.
-	// Not when the scoped scan already spent its page budget: the widen would spend a
-	// second one, and LookupEvents is limited to ~2 TPS per account/region, so 40
-	// sequential pages can outlast the per-tool timeout and turn a partial answer into
-	// a hard dead end. A bounded scan is reported as bounded instead.
+	//
+	// Not when the scoped scan already spent its page budget, though: the widen would
+	// spend a second one, and LookupEvents is limited to ~2 TPS per account/region, so
+	// 40 sequential pages can outlast the per-tool timeout and turn a partial answer
+	// into a hard dead end. A bounded scan is reported as bounded instead.
+	events, note := splitNote(changes)
 	var widened bool
-	if !hasEvent(changes) && in.Resource != "" && scanNote(changes) == "" {
+	if len(events) == 0 && in.Resource != "" && note == "" {
 		all, aerr := t.Cloud.CloudChanges(ctx, providers.Selector{FailedOnly: in.FailedOnly}, window)
-		if aerr == nil && hasEvent(all) {
-			changes, widened = all, true
+		if allEvents, allNote := splitNote(all); aerr == nil && len(allEvents) > 0 {
+			events, note, widened = allEvents, allNote, true
 		}
 	}
 
-	if !hasEvent(changes) {
-		if in.FailedOnly {
-			// Say which filter produced the empty result. "No events" from a filtered
-			// lookup is not the same claim as "the control plane was quiet", and the
-			// schema asks the model not to read absence as evidence.
-			msg := "no FAILED AWS control-plane calls in the window (successful events were not listed — re-run without failed_only to see them)"
-			// A bounded scan did not establish absence at all — it stopped reading. Carry
-			// the provider's own note rather than reporting the quiet window it did not
-			// observe. Without this the sentinel was the whole result and this message
-			// never ran.
-			if note := scanNote(changes); note != "" {
-				msg += "\nNOTE: " + note
-			}
-			return msg, nil
+	if len(events) == 0 {
+		if !in.FailedOnly {
+			return "no mutating AWS events in the window", nil
 		}
-		return "no mutating AWS events in the window", nil
+		// Say which filter produced the empty result. "No events" from a filtered
+		// lookup is not the same claim as "the control plane was quiet", and the schema
+		// asks the model not to read absence as evidence. A bounded scan did not
+		// establish absence at all — it stopped reading — so it carries the provider's
+		// own note rather than the quiet window it never observed.
+		msg := "no FAILED AWS control-plane calls in the window (successful events were not listed — re-run without failed_only to see them)"
+		if note != "" {
+			msg += "\nNOTE: " + note
+		}
+		return msg, nil
 	}
+	if note != "" {
+		events = append(events, providers.ChangeNote(providers.EngineAWS, note))
+	}
+	changes = events
 	var b strings.Builder
 	if widened {
 		// Under failed_only a scoped miss means "no FAILURES for this resource", which
-		// is NOT evidence the name was wrong — the exact-match lecture below would send
-		// the model off inventing new names for a resource it had already identified
+		// is NOT evidence the name was wrong. The exact-match lecture would send the
+		// model off inventing new names for a resource it had already identified
 		// correctly, and then attribute other resources' failures to it.
+		banner := widenedBanner
 		if in.FailedOnly {
-			fmt.Fprintf(&b, "no FAILED calls against resource %q in the window — the name may still be "+
-				"correct, it simply had no rejected calls. Showing ALL rejected calls in the window, which "+
-				"may belong to OTHER resources:\n", in.Resource)
-		} else {
-			fmt.Fprintf(&b, "resource %q matched no CloudTrail events — ResourceName is an exact match on the "+
-				"full AWS resource name or ARN (e.g. a secret's full path \"apps/team/name\"), not a service or "+
-				"substring. Showing ALL mutating events in the window instead:\n", in.Resource)
+			banner = widenedFailedBanner
 		}
+		fmt.Fprintf(&b, banner, in.Resource)
 	}
 	renderRows(&b, len(changes), "more", func(i int) {
 		c := changes[i]
@@ -134,28 +128,34 @@ func (t CloudWhatChangedTool) Call(ctx context.Context, args string) (string, er
 	return b.String(), nil
 }
 
-// hasEvent reports whether changes holds at least one REAL event. CloudChanges may
-// append a trailing "(truncated)" sentinel describing the shape of the result, and
-// a sentinel-only slice is not empty — so testing len(changes) == 0 quietly stopped
-// treating an empty failure scan as empty, suppressing both the widen retry and the
-// no-failures message on exactly the busy cluster failed_only exists for.
-func hasEvent(changes []providers.Change) bool {
-	for _, c := range changes {
-		if c.Workload.Kind != "(truncated)" {
-			return true
-		}
-	}
-	return false
-}
+// widenedBanner and widenedFailedBanner explain a dropped resource scope. They say
+// different things because a scoped miss means different things: without the filter
+// the name did not match anything, with it the name may be perfectly right and simply
+// have no rejected calls.
+const (
+	widenedBanner = "resource %q matched no CloudTrail events — ResourceName is an exact match on the " +
+		"full AWS resource name or ARN (e.g. a secret's full path \"apps/team/name\"), not a service or " +
+		"substring. Showing ALL mutating events in the window instead:\n"
+	widenedFailedBanner = "no FAILED calls against resource %q in the window — the name may still be " +
+		"correct, it simply had no rejected calls. Showing ALL rejected calls in the window, which " +
+		"may belong to OTHER resources:\n"
+)
 
-// scanNote returns the sentinel's text, if the provider appended one.
-func scanNote(changes []providers.Change) string {
+// splitNote separates the real events from the provider's trailing note about the
+// shape of the result. CloudChanges may append one (see providers.ChangeNote), and a
+// note-only slice is NOT an empty one — testing len(changes) == 0 on the raw return
+// quietly stopped detecting an empty failure scan, which suppressed both the widen
+// retry and the no-failures message on exactly the busy cluster failed_only exists
+// for. One pass yields both answers.
+func splitNote(changes []providers.Change) (events []providers.Change, note string) {
 	for _, c := range changes {
-		if c.Workload.Kind == "(truncated)" {
-			return c.Workload.Name
+		if providers.IsChangeNote(c) {
+			note = c.Workload.Name
+			continue
 		}
+		events = append(events, c)
 	}
-	return ""
+	return events, note
 }
 
 // CloudResourceHealthTool exposes AWS-side resource health (EC2/ASG/EKS) to the model.

@@ -1382,6 +1382,32 @@ type LogLine struct {
 	Fields  map[string]string
 }
 
+// changeNoteKind marks a Change that is not an event but a note about the result —
+// why the timeline is partial. It is spelled "(truncated)" for compatibility with
+// the marker cloud providers already emitted before ChangeNote existed.
+const changeNoteKind = "(truncated)"
+
+// ChangeNote builds the sentinel a Change-producing provider appends when the view
+// it returns is partial, so the model knows not to read the list as complete. It is
+// the Change-shaped counterpart of TruncationLine, and exists here for the same
+// reason: the marker is a cross-package contract, and a consumer that has to
+// recognise it by matching a string literal has no compiler behind it.
+//
+// It carries no When, so it sorts and reads as a non-event, and IsChangeNote is the
+// only supported way to recognise it.
+func ChangeNote(engine Engine, msg string) Change {
+	return Change{
+		Engine:   engine,
+		Type:     ChangeCloudAPI,
+		Workload: Workload{Kind: changeNoteKind, Name: msg},
+	}
+}
+
+// IsChangeNote reports whether c is a ChangeNote rather than a real event. Callers
+// that count or render events must skip these; callers that want to surface the
+// caveat read c.Workload.Name.
+func IsChangeNote(c Change) bool { return c.Workload.Kind == changeNoteKind }
+
 // TruncationLine is the sentinel appended when a logs/flow query stops at its cap
 // with more entries upstream, so the model knows the view is partial. It carries no
 // Time or Fields, so it cannot be mistaken for a real entry. Every capping provider

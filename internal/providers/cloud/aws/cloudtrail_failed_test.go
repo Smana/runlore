@@ -68,7 +68,7 @@ func TestCloudChangesFailedOnly(t *testing.T) {
 		t.Fatalf("FailedOnly must surface the failed call; got %d changes: %+v", len(got), got)
 	}
 	for _, ch := range got {
-		if ch.Workload.Kind == "(truncated)" {
+		if providers.IsChangeNote(ch) {
 			continue
 		}
 		if !strings.Contains(ch.Source.Path, "FAILED") {
@@ -109,11 +109,17 @@ func TestCloudChangesFailedOnlyBoundsItsScan(t *testing.T) {
 	if ct.call != maxFailureScanPages {
 		t.Errorf("the failure scan made %d LookupEvents calls, want exactly %d", ct.call, maxFailureScanPages)
 	}
-	// And the RESULT of a budget-exhausted scan matters as much as its cost: a
-	// sentinel-only slice is not empty, so callers testing len(changes) == 0 stopped
-	// seeing an empty scan as empty. It must come back genuinely empty.
-	if len(got) != 0 {
-		t.Errorf("a failure scan that found nothing must return no rows, got %d: %+v", len(got), got)
+	// The RESULT of a budget-exhausted scan matters as much as its cost. It must carry
+	// the note — "we stopped reading" is the one thing a caller must never read as
+	// "the window was quiet" — and NOTHING else, since no real failure was found.
+	if n := len(got); n != 1 {
+		t.Fatalf("want the bounded-scan note and no events, got %d rows: %+v", n, got)
+	}
+	if !providers.IsChangeNote(got[0]) {
+		t.Errorf("a scan that found no failures returned an event row: %+v", got[0])
+	}
+	if !strings.Contains(got[0].Workload.Name, "scan stopped after") {
+		t.Errorf("the note must say the scan stopped reading: %q", got[0].Workload.Name)
 	}
 }
 
@@ -144,7 +150,7 @@ func TestCloudChangesFailedOnlyScanNoteNotTruncation(t *testing.T) {
 	}
 	var note string
 	for _, ch := range got {
-		if ch.Workload.Kind == "(truncated)" {
+		if providers.IsChangeNote(ch) {
 			note = ch.Workload.Name
 		}
 	}
@@ -181,10 +187,8 @@ func TestCloudChangesFailedOnlyCompleteScanIsNotPartial(t *testing.T) {
 	if err != nil {
 		t.Fatalf("CloudChanges(FailedOnly): %v", err)
 	}
-	for _, ch := range got {
-		if ch.Workload.Kind == "(truncated)" {
-			t.Errorf("a complete scan was reported as partial: %q", ch.Workload.Name)
-		}
+	if n := countTruncated(got); n != 0 {
+		t.Errorf("a complete scan was reported as partial: %+v", got)
 	}
 	if !containsPath(got, "InvalidDBClusterStateFault") {
 		t.Errorf("the answer on the last page must survive; got %+v", got)
