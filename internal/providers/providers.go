@@ -205,20 +205,46 @@ var reDeployPod = regexp.MustCompile(`-[a-f0-9]{8,10}-[a-z0-9]{5}$`) // <name>-<
 
 // reJobRun matches a CronJob run suffix: the Job a CronJob creates is named
 // <cronjob>-<unix-minutes>, e.g. "github-teams-sync-aqemia-29787720". The suffix
-// names one scheduled RUN, not the CronJob family it belongs to.
+// names one scheduled RUN, not the CronJob family it belongs to. The optional
+// second group is the completion index a completionMode: Indexed Job adds to its
+// pods (<cronjob>-<unix-minutes>-<index>), which the 8-digit stamp in front of it
+// anchors — without that anchor an ordinal tail is indistinguishable from a
+// StatefulSet's and must never be stripped.
 //
-// The floor of 8 digits is what keeps this safe. A unix-minute stamp has been 8
-// digits since 1989 and stays 8 until 2160, while the short numeric tails that
-// appear all over real workload names — StatefulSet ordinals (vmagent-vmagent-0),
-// cluster ordinals (shared-0), RDS instance suffixes (…-instance-1) and
-// IP-derived node names (ip-10-20-0-144) — are 1–3 digits and must never collapse:
-// merging those would fold genuinely distinct workloads into one incident.
-var reJobRun = regexp.MustCompile(`-[0-9]{8,}$`) // <cronjob>-<unix-minutes>
+// The digit run is bounded at BOTH ends, and both bounds carry weight.
+//
+// The floor of 8 stops the short numeric tails that appear all over real workload
+// names from collapsing — StatefulSet ordinals (vmagent-vmagent-0), cluster
+// ordinals (shared-0), RDS instance suffixes (…-instance-1) and IP-derived node
+// names (ip-10-20-0-144) are 1–3 digits, and merging those would fold genuinely
+// distinct workloads into one incident.
+//
+// The ceiling of 9 stops the LONGER all-digit tails that are not timestamps. A
+// 12-digit AWS account id is the common one: `${name}-${account_id}` is a standard
+// Terraform naming convention, and ParseResourceID feeds this function, so an
+// unbounded rule made acme-logs-111111111111 and acme-logs-222222222222 — two
+// buckets in two different accounts — one identity, contradicting the very reason
+// Workload.Account exists. A unix-minute stamp is 8 digits until 2160; 9 is
+// headroom, not a guess.
+//
+// The rule cannot separate a stamp from an 8-digit YYYYMMDD date suffix, so a
+// resource named <name>-20260824 does collapse to <name>. That is accepted: a
+// date-stamped name is per-run by construction too, which is the case this exists
+// to fold.
+var reJobRun = regexp.MustCompile(`-[0-9]{8,9}(-[0-9]{1,3})?$`) // <cronjob>-<unix-minutes>[-<index>]
+
+// minFamilyName is the shortest remainder a strip may leave. Below it the "family"
+// is not a name any more: a legacy EC2 id like i-12345678 is `i` plus 8 digits, and
+// stripping it yielded "i" — which then compared equal to every other such id, so
+// two unrelated instances became one incident identity.
+const minFamilyName = 2
 
 // NormalizeWorkloadName strips a trailing per-instance suffix so a name reduces to
 // its controller family: a Deployment pod (<name>-<rs-hash>-<pod-hash>), a
 // DaemonSet/StatefulSet-revision pod (<name>-<5-char hash containing a digit>) and
-// a CronJob run Job (<name>-<unix-minutes>) all collapse to <name>. Names without
+// a CronJob run Job (<name>-<unix-minutes>, and the <name>-<unix-minutes>-<index>
+// pod of an Indexed one) all collapse to <name>. The rules run to a FIXED POINT, so
+// a CronJob's pod sheds both its hash and its run stamp. Names without
 // such a suffix are returned unchanged, so real trailing words (e.g. "redis-cache")
 // and short numeric tails (e.g. "vmagent-vmagent-0") are preserved. It is idempotent.
 //
@@ -230,25 +256,53 @@ var reJobRun = regexp.MustCompile(`-[0-9]{8,}$`) // <cronjob>-<unix-minutes>
 // entry written for the previous run, and the curator filed a duplicate KB PR per
 // run. Collapsing to the CronJob family repairs all four at once.
 //
-// This is the single source of truth for pod-hash normalization. It is shared by
-// the curator dedup path (curator.DupFingerprint / IncidentKey — CORE-681, so the
+// This is the single source of truth for per-instance-suffix normalization — pod
+// hashes and CronJob run stamps. It is shared by the curator dedup path (curator.DupFingerprint / IncidentKey — CORE-681, so the
 // same incident on a different pod dedupes to one KB entry) AND the instant-recall
 // structural gate (investigate.resourceAgrees), so a pod-scoped alert carrying the
 // volatile hash still matches the normalized workload stored on a KB entry. Homed
 // here — not in curator — because both packages already import providers, which
 // owns the Workload type; investigate must not import curator (no cycle).
 func NormalizeWorkloadName(name string) string {
+	// To a fixed point, because one strip can expose another and the callers below
+	// normalize each side exactly ONCE. A CronJob pod is <cronjob>-<stamp>-<hash>:
+	// running the rules in sequence returned <cronjob>-<stamp>, so an entry stored
+	// under the family name never matched an incoming pod-scoped alert — the recall
+	// miss this function exists to prevent, reintroduced by the shape of the fix.
+	// The loop is bounded by the fact that every step strictly shortens the name.
+	for {
+		next := stripInstanceSuffix(name)
+		if next == name {
+			return name
+		}
+		name = next
+	}
+}
+
+// stripInstanceSuffix removes at most ONE trailing per-instance suffix, or returns
+// its input unchanged. NormalizeWorkloadName drives it to a fixed point.
+func stripInstanceSuffix(name string) string {
+	keep := func(stripped string) string {
+		// A strip that leaves a trailing hyphen (name--12345678) or too little to be a
+		// name is not a family, it is debris — and debris compares equal to other
+		// debris. Leave the name alone rather than invent an identity for it.
+		stripped = strings.TrimRight(stripped, "-")
+		if len(stripped) < minFamilyName {
+			return name
+		}
+		return stripped
+	}
 	if m := reDeployPod.FindString(name); m != "" {
-		return name[:len(name)-len(m)]
+		return keep(name[:len(name)-len(m)])
 	}
 	if i := strings.LastIndexByte(name, '-'); i >= 0 {
 		suf := name[i+1:]
 		if len(suf) == 5 && strings.ContainsAny(suf, "0123456789") && isAlnum(suf) {
-			return name[:i]
+			return keep(name[:i])
 		}
 	}
 	if m := reJobRun.FindString(name); m != "" {
-		return name[:len(name)-len(m)]
+		return keep(name[:len(name)-len(m)])
 	}
 	return name
 }

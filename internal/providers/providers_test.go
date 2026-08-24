@@ -81,6 +81,27 @@ func TestNormalizeWorkloadName(t *testing.T) {
 		"ip-10-20-0-144":                   "ip-10-20-0-144",
 		"datagrok-group-sync-manual-j8g":   "datagrok-group-sync-manual-j8g", // one-off Job, not a run suffix
 		"job-1234567":                      "job-1234567",                    // 7 digits — below the run-suffix floor
+
+		// The POD of a CronJob's Job carries both a run stamp and a hash. Stripping one
+		// rule per call left the stamp behind, so an entry stored under the family name
+		// never matched a pod-scoped alert — the recall miss this change exists to fix.
+		// Spelled with a realistic 5-char hash, which is what caught it.
+		"github-teams-sync-aqemia-mdft8-29787720":   "github-teams-sync-aqemia",
+		"github-teams-sync-aqemia-29787720-3-mdft8": "github-teams-sync-aqemia", // completionMode: Indexed
+		"github-teams-sync-aqemia-29787720-3":       "github-teams-sync-aqemia", // its Job, un-podded
+
+		// Long all-digit tails that are NOT timestamps must survive. `${name}-${account_id}`
+		// is a standard Terraform convention and ParseResourceID feeds this function, so
+		// collapsing 12 digits made two buckets in two accounts one identity.
+		"acme-logs-111111111111": "acme-logs-111111111111",
+		"acme-logs-222222222222": "acme-logs-222222222222",
+
+		// A strip must never leave debris, because debris compares equal to other debris.
+		// A legacy EC2 id is one letter plus 8 digits; stripping gave "i", and every such
+		// id then agreed with every other.
+		"i-12345678":    "i-12345678",
+		"-12345678":     "-12345678",
+		"foo--12345678": "foo", // the empty segment goes with the stamp, not into the name
 	}
 	for in, want := range cases {
 		if got := providers.NormalizeWorkloadName(in); got != want {

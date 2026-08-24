@@ -45,10 +45,10 @@ func normalizeText(s string) string {
 // single source of truth shared with the instant-recall path (CORE-681) so the two
 // can never drift.
 //
-// It is deliberately NOT named normalizeWorkloadName any more: providers still
-// exports a NormalizeWorkloadName that does only the pod-hash half, and a local alias
-// wearing that exact name would read as a pass-through to it while meaning something
-// wider. Read providers.NormalizeResourceName for the accepted consequence of the ARN
+// It is deliberately NOT named normalizeWorkloadName any more: providers also
+// exports a NormalizeWorkloadName that does only the per-instance-suffix half (pod
+// hashes and CronJob run stamps), and a local alias wearing that exact name would
+// read as a pass-through to it while meaning something wider. Read providers.NormalizeResourceName for the accepted consequence of the ARN
 // collapse — the account and region are dropped, and the surrounding key fields do
 // not reliably put them back.
 func normalizeResourceName(name string) string {
@@ -85,6 +85,13 @@ func normalizeResourceName(name string) string {
 // Its recurrence count restarts from zero once, on the first firing after the
 // upgrade; the old bucket is simply never looked up again. Kubernetes keys are
 // byte-identical (they have no account segment) and are unaffected.
+//
+// ONE-OFF MIGRATION, second: a CronJob-generated workload's key changes the same way,
+// for the same reason — NormalizeWorkloadName now folds the <unix-minutes> run suffix
+// into the CronJob family, so github-teams-sync-29787720 and github-teams-sync-29790030
+// key alike where they used to key apart. Every such workload's recurrence count resets
+// once. Expect it, and do not read the first post-upgrade "occurrence #1" as the fold
+// having failed: that reset is the LAST time those runs are counted separately.
 func IncidentKey(alertname string, w providers.Workload, cluster string) string {
 	parts := []string{
 		strings.TrimSpace(alertname),
