@@ -47,7 +47,7 @@ side effect, not the argument.
 | Re-arm: 👎 | `!prior.Contested()` | The **same** shared definition #288 established for every layer that must yield to a human |
 | Re-arm: resolve | Clears the silence at fold time | The incident went away; a later firing is arguably new |
 | Authorization | **Unprivileged**, like feedback | Blast radius is bounded four independent ways — see [Security](#security) |
-| Matrix parity | 🔕 reaction (default window) **+** `silence:` thread command (full choice) | Reuses the reaction listener and the reserved-prefix grammar |
+| Matrix parity | 🔕 reaction (default window, `silence_reactions` alone) **+** `silence:` thread command (full choice, needs that transport's own `thread_capture` too — the command arrives as a message, and the `/sync` filter only requests `m.room.message` under thread capture) | Reuses the reaction listener and the reserved-prefix grammar; the command itself is transport-neutral (shared `thread.Responder`), so it also works in a Slack thread once `thread_capture` is on there |
 | Ack message | Carries an explicit **warning** | A silence is the one feedback click that changes behaviour; the reader must know what they just switched off |
 
 ## Non-goals
@@ -293,10 +293,19 @@ on a forged `io.runlore.trigger_key` would be a denial-of-investigation primitiv
 strictly worse than the vote-misdirection the check was built for.
 
 - **🔕 reaction** → the **default** window (reactions carry no duration; the default is presets[0]).
+  `notify.matrix.silence_reactions` alone is enough: the `/sync` filter already requests
+  `m.reaction` for feedback voting, so no other flag is required.
 - **`silence: 4h`** → a new `IntentSilence` in `internal/thread/grammar.go`, which already parses
   colon-anchored reserved prefixes as whole tokens (`note:`, `reinvestigate:`). It inherits the
   anywhere-match and prefix-collision behaviour already specified and tested there.
   A missing or unparseable duration falls back to the default window and says so in the reply.
+  **Unlike the reaction, this additionally requires `notify.matrix.thread_capture` to be on** — a
+  plain `m.room.message` is never requested from the homeserver, let alone dispatched to
+  `HandleMention`, unless `thread_capture` is (see `sync`'s filter construction and
+  `handleMessage`'s own guard). `silence_reactions` on its own is not enough. The command is also
+  **transport-neutral**: it is the same `thread.Responder.Handle` Slack's `/slack/events` path
+  calls, so `@runlore silence: 4h` works in a Slack thread too, once `notify.slack.thread_capture`
+  is on there — this is not a Matrix-exclusive capability, despite living in this section.
 
 ### Sink wiring
 
@@ -333,7 +342,7 @@ notify:
   slack:
     silence_button: true
   matrix:
-    silence_reactions: true
+    silence_reactions: true  # enables the 🔕 reaction ONLY — see §6 for the silence: command
 ```
 
 Validation mirrors the existing `feedback_buttons` rules (`config.go:2070`) — fail loud at startup
@@ -344,6 +353,13 @@ rather than render a control whose clicks vanish:
 - Any silence transport requires `outcome.ledger_path` — without it the gate would silently never
   suppress, the same failure `recurrence_cooldown` already fails loud on (`config.go:2064`).
 - `windows` must be non-empty, every entry `> 0` and `<= max_window`.
+
+Not a `Validate()` rule, but the same fail-*quiet*-otherwise shape: the `silence:` command needs
+that transport's own `thread_capture` on too (`notify.matrix.thread_capture`, or
+`notify.slack.thread_capture` for a Slack thread), because it arrives as a message and messages are
+only received once thread capture is on — see §6. `silence_reactions`/`silence_button` alone leave
+that command unreachable, silently, since a missing prerequisite there degrades thread capture to
+off rather than failing startup.
 
 ## 8. Observability
 
