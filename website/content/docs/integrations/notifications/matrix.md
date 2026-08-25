@@ -213,6 +213,8 @@ notify:
     thread_capture: true
   thread:
     announce_kb_updates: channel  # default false; also true (= channel), thread, both
+outcome:
+  ledger_path: /var/lib/runlore/outcome.jsonl   # required by thread_capture, as above
 ```
 
 The post names the pull request, the entry that was created, who the note came from
@@ -256,10 +258,15 @@ model:
     model: claude-haiku-4-5      # required — never inherited from model.model
 notify:
   matrix:
+    homeserver: https://matrix.org
+    room_id: "!yourroom:matrix.org"
+    access_token_env: MATRIX_TOKEN
     thread_capture: true         # the chat layer has no channel without it
   thread:
     chat_calls_per_hour: 30      # default 30
     chat_tokens_per_hour: 109480 # default 109480 — derived, not round
+outcome:
+  ledger_path: /var/lib/runlore/outcome.jsonl   # required by thread_capture, as above
 ```
 
 **This is a paid path any member of the room can trigger, and on Matrix "addressed" is looser than
