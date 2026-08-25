@@ -32,7 +32,7 @@ Every task uses these exact names. A mismatch between tasks is a bug.
 | Symbol | Package | Signature / type |
 |---|---|---|
 | `Ledger.Silence` | `internal/outcome` | `func (l *Ledger) Silence(triggerKey string, window time.Duration, user string, at time.Time) error` |
-| `Ledger.MaxSilenceWindow` | `internal/outcome` | `time.Duration` — exported field, zero = uncapped |
+| `Ledger.SetMaxSilenceWindow` | `internal/outcome` | `func (l *Ledger) SetMaxSilenceWindow(d time.Duration)` — zero = uncapped |
 | `Ledger.silences` | `internal/outcome` | `map[string]time.Time` — TriggerKey → expiry |
 | `checkpointData.Silences` | `internal/outcome` | `map[string]time.Time` `json:"silences,omitempty"` |
 | `TriggerRecurrence.SilencedUntil` | `internal/outcome` | `time.Time` — zero = no standing silence |
@@ -69,12 +69,12 @@ Every task uses these exact names. A mismatch between tasks is a bug.
 
 | File | Change |
 |---|---|
-| `internal/outcome/ledger.go` | `silences` map, `"silence"` fold case, checkpoint field, `Silence()`, `MaxSilenceWindow`, `SilencedUntil`, resolve re-arm |
+| `internal/outcome/ledger.go` | `silences` map, `"silence"` fold case, checkpoint field, `Silence()`, `SetMaxSilenceWindow`, `SilencedUntil`, resolve re-arm |
 | `internal/investigate/recurrence.go` | `recurrenceSilenced` + the `decide()` branch |
 | `internal/investigate/loop.go:~440` | The `recurrenceSilenced` case: metric literal + INFO log |
 | `internal/config/config.go` | `SilenceNotify`, two bools, `SilenceEnabled()`, validation |
 | `internal/app/investigate.go:~628` | Gate construction — the nil-gate trap |
-| `internal/app/serve.go` | `MaxSilenceWindow`, `Actions.Silence`, Matrix option |
+| `internal/app/serve.go` | `SetMaxSilenceWindow`, `Actions.Silence`, Matrix option |
 | `internal/notify/slack.go` | `silenceActionID`, `feedbackBlocks` signature, `SilenceWindows` on both notifiers |
 | `internal/notify/registry.go` | Pass windows through from config |
 | `internal/server/server.go` | `SilenceRecorder`, `Actions.Silence`, `Server.silence`, handler case, ack |
@@ -94,7 +94,7 @@ Every task uses these exact names. A mismatch between tasks is a bug.
 
 **Interfaces:**
 - Consumes: nothing (first task).
-- Produces: `Ledger.Silence(triggerKey string, window time.Duration, user string, at time.Time) error`; exported field `Ledger.MaxSilenceWindow time.Duration`; `TriggerRecurrence.SilencedUntil time.Time`.
+- Produces: `Ledger.Silence(triggerKey string, window time.Duration, user string, at time.Time) error`; `Ledger.SetMaxSilenceWindow(d time.Duration)`; `TriggerRecurrence.SilencedUntil time.Time`.
 
 **Background for the implementer.** The ledger is an append-only JSONL file. Every write is *durable first*: append the line, and only fold it into memory if the append succeeded (see `Feedback` at `ledger.go:1194`). The same file is replayed on startup and on every leadership acquisition, so **every piece of in-memory state must be reconstructible from the file alone**. Compaction rewrites the file as `[checkpoint][recent tail]`, so any new fold state must also be carried in `checkpointData` or it is lost the first time the ledger exceeds `maxEvents`.
 
@@ -156,7 +156,7 @@ func TestSilenceLatestWinsPerTrigger(t *testing.T) {
 
 func TestSilenceRejectsBadWindows(t *testing.T) {
 	l := newTestLedger(t)
-	l.MaxSilenceWindow = 24 * time.Hour
+	l.SetMaxSilenceWindow(24 * time.Hour)
 	now := time.Now()
 	for _, tc := range []struct {
 		name   string
@@ -233,11 +233,14 @@ In `internal/outcome/ledger.go`, add to the `Ledger` struct (after the `votes` f
 	// and pruned opportunistically rather than swept by a timer.
 	silences map[string]time.Time
 
-	// MaxSilenceWindow caps what Silence accepts (zero = uncapped). Set by the serve
-	// wiring from notify.silence.max_window. It lives HERE, not in each caller, so
-	// there is one place the invariant holds: a Matrix `silence:` command is free
-	// text and must not be able to exceed what the Slack presets offer.
-	MaxSilenceWindow time.Duration
+	// maxSilenceWindow caps what Silence accepts (zero = uncapped), installed by the
+	// serve wiring from notify.silence.max_window through the SetMaxSilenceWindow
+	// setter below — unexported and set/read under l.mu rather than a public field,
+	// because Silence is called concurrently (the Slack interactions handler and the
+	// Matrix /sync goroutine both reach it). It lives on the ledger, not in each
+	// caller, so there is one place the invariant holds: a Matrix `silence:` command
+	// is free text and must not be able to exceed what the Slack presets offer.
+	maxSilenceWindow time.Duration
 ```
 
 Add to `TriggerRecurrence` (~line 875), after `FeedbackDown`:
@@ -273,7 +276,7 @@ Add the fold function beside `applyFeedbackLocked`:
 // A malformed replayed line (no key, unparseable or non-positive window) is
 // dropped rather than folded — the same posture applyFeedbackLocked takes.
 //
-// The cap is NOT re-applied here. MaxSilenceWindow is a write-time policy that
+// The cap is NOT re-applied here. maxSilenceWindow is a write-time policy that
 // can legitimately change between runs, and re-applying it on replay would let a
 // config edit retroactively rewrite history the file already records.
 func (l *Ledger) applySilenceLocked(e Event) {
@@ -336,10 +339,10 @@ Beside `Feedback` in `internal/outcome/ledger.go`:
 // what RunLore DOES rather than how it weighs an entry.
 //
 // Validation is deliberately at the write, not the caller: window must be positive
-// and within MaxSilenceWindow, so a Matrix `silence:` command (free text) cannot
-// exceed what the Slack presets offer. triggerKey must be non-empty — with nothing
-// to key the suppression on there is nothing for the gate to read back, and a line
-// that can never be read is worse than a refused write.
+// and within the cap SetMaxSilenceWindow installed, so a Matrix `silence:` command
+// (free text) cannot exceed what the Slack presets offer. triggerKey must be
+// non-empty — with nothing to key the suppression on there is nothing for the gate
+// to read back, and a line that can never be read is worse than a refused write.
 //
 // Durable-first, like Open/Resolve/Feedback: a failed append leaves the fold
 // untouched. Attribution is entirely TriggerKey-based; user is recorded for the
@@ -351,14 +354,14 @@ func (l *Ledger) Silence(triggerKey string, window time.Duration, user string, a
 	if window <= 0 {
 		return fmt.Errorf("silence window %v: must be positive", window)
 	}
-	if l.MaxSilenceWindow > 0 && window > l.MaxSilenceWindow {
-		return fmt.Errorf("silence window %v exceeds the %v cap", window, l.MaxSilenceWindow)
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if l.maxSilenceWindow > 0 && window > l.maxSilenceWindow {
+		return fmt.Errorf("silence window %v exceeds the %v cap", window, l.maxSilenceWindow)
 	}
 	if !l.enabled() {
 		return nil
 	}
-	l.mu.Lock()
-	defer l.mu.Unlock()
 	e := Event{Event: "silence", TriggerKey: triggerKey, Kind: window.String(), User: user, At: at}
 	if err := l.appendLocked(e); err != nil {
 		return err
@@ -1170,7 +1173,7 @@ else in the system would ever lift it."
 - Test: `internal/app/notify_test.go` (append)
 
 **Interfaces:**
-- Consumes: `Ledger.MaxSilenceWindow` (Task 1); `recurrenceSilenced` (Task 3); `Notify.SilenceEnabled()`, `SilenceNotify.MaxWindow` (Task 4).
+- Consumes: `Ledger.SetMaxSilenceWindow` (Task 1); `recurrenceSilenced` (Task 3); `Notify.SilenceEnabled()`, `SilenceNotify.MaxWindow` (Task 4).
 - Produces: `server.SilenceRecorder` interface; `server.Actions.Silence` field; `Server.silence` field (consumed by Task 6).
 
 **THIS IS THE HIGHEST-RISK TASK IN THE PLAN.** `internal/app/investigate.go:628` currently builds the gate **only** when a cooldown is configured:
@@ -1317,7 +1320,7 @@ In `internal/app/serve.go`, immediately after the ledger is constructed (~line 1
 	// holds: a Matrix `silence:` command is free text and must not be able to
 	// exceed what the Slack presets offer. Zero when silencing is off, which the
 	// ledger reads as uncapped — harmless, since nothing can then record one.
-	ledger.MaxSilenceWindow = cfg.Notify.Silence.MaxWindow.Std()
+	ledger.SetMaxSilenceWindow(cfg.Notify.Silence.MaxWindow.Std())
 ```
 
 After the existing `acts.Feedback` block (~line 460):
