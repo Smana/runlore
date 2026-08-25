@@ -453,6 +453,22 @@ func (li *LoopInvestigator) Investigate(ctx context.Context, req Request) error 
 			"standing_answer", prior.Conclusive.Title, "standing_verdict", prior.Conclusive.Verdict,
 			"answered_at", prior.Conclusive.At, "standing_url", prior.Conclusive.CuratedURL)
 		return nil
+	case recurrenceSilenced:
+		// A distinct metric label from recurrence_suppressed, deliberately: an
+		// operator asking "why is RunLore quiet?" must be able to tell a machine
+		// decision from a human one on the dashboard alone. Spelled as a LITERAL,
+		// like every other result value — see recurrenceDecision's doc comment for
+		// why the internal name must never become the label.
+		result = "silenced"
+		// INFO, not DEBUG, for the same reason recurrenceNoAnswer is INFO: a human
+		// deliberately switched something off, and the operator who did not click it
+		// must be able to find out why the channel went quiet without raising log
+		// levels on a production deployment.
+		li.Log.Info("silenced by a human: skipping re-investigation",
+			"title", req.Title, "trigger_key", req.TriggerKey,
+			"silenced_until", prior.SilencedUntil,
+			"occurrences", prior.Count, "last_investigated", prior.Last)
+		return nil
 	case recurrenceNoAnswer:
 		// The one bypass worth saying out loud at INFO: the trigger fired again inside
 		// its cooldown and we paid for a full investigation anyway, because no prior run

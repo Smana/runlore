@@ -16,7 +16,13 @@ type RecurrenceStats interface {
 	Recurrence(triggerKey string) outcome.TriggerRecurrence
 }
 
-// RecurrenceGate suppresses re-investigating a trigger that was conclusively
+// RecurrenceGate is the one place that decides a trigger is not worth
+// re-investigating right now, for either of two reasons: the MACHINE's cooldown
+// (a conclusive answer landed moments ago) or a HUMAN's standing 🔕 silence
+// (accurate, known, stop telling me). The two are independent — a silence works
+// with Cooldown at 0 — and the human one is checked first; see decide.
+//
+// The cooldown half suppresses re-investigating a trigger that was conclusively
 // investigated moments ago. Without it, nothing keys on TriggerKey before the
 // paid loop: Alertmanager re-sends a still-firing alert every repeat_interval
 // and a persistently-failing GitOps resource re-emits every informer resync
@@ -63,7 +69,7 @@ type RecurrenceStats interface {
 // per-trigger snapshot once per investigation and hands it here, so the suppression
 // decision and the seed's known-recurrence block are made from the same facts.
 type RecurrenceGate struct {
-	Cooldown time.Duration // 0 disables the gate (default: off, opt-in)
+	Cooldown time.Duration // 0 disables the COOLDOWN only; a human silence still applies
 }
 
 // priorForTrigger reads the trigger's recurrence snapshot: what earlier
@@ -97,17 +103,47 @@ const (
 	recurrenceCooldownLapsed recurrenceDecision = "cooldown_lapsed"     // the last look is older than the cooldown
 	recurrenceNoAnswer       recurrenceDecision = "no_conclusive_prior" // looked recently, but never reached an answer
 	recurrenceContested      recurrenceDecision = "contested_by_human"  // a standing 👎 re-arms investigation
+	recurrenceSilenced       recurrenceDecision = "silenced_by_human"   // a human 🔕 stands: skip the paid loop
 	recurrenceSuppressed     recurrenceDecision = "suppressed"          // the one decision that skips the paid loop
 )
 
-// suppressed reports whether d is the one decision that skips the paid loop.
-func (d recurrenceDecision) suppressed() bool { return d == recurrenceSuppressed }
+// suppressed reports whether d is a decision that skips the paid loop. Two now
+// do: the machine's cooldown and the human's silence. Callers must never test
+// `== recurrenceSuppressed` directly, or the human branch silently stops
+// suppressing while every log line still claims it decided.
+func (d recurrenceDecision) suppressed() bool {
+	return d == recurrenceSuppressed || d == recurrenceSilenced
+}
 
 // decide reports whether req should be suppressed and why, given the trigger's
 // prior-investigation snapshot. A pure function of (config, history, clock): now is
 // a parameter so the decision matrix is testable without sleeping.
 func (g *RecurrenceGate) decide(req Request, prior outcome.TriggerRecurrence, now time.Time) recurrenceDecision {
-	if g == nil || g.Cooldown <= 0 || req.TriggerKey == "" {
+	if g == nil || req.TriggerKey == "" {
+		return recurrenceOff
+	}
+	// A HUMAN silence, checked before the cooldown short-circuit below. Three
+	// reasons the order is load-bearing:
+	//
+	//   - recurrence_cooldown defaults to 0 (off). Left below the short-circuit,
+	//     the entire feature would be inert in a default install while the UI
+	//     still confirmed each click — the worst possible failure mode.
+	//   - A silence stands regardless of prior history, INCLUDING the
+	//     no_conclusive_prior case the cooldown deliberately refuses to suppress.
+	//     That case (a trigger that keeps coming back inconclusive, re-running the
+	//     full paid loop on every firing) is exactly the one a human is most
+	//     likely to want silenced.
+	//   - It is the human's decision, so it outranks the machine's heuristics.
+	//
+	// Two escapes are checked here rather than at the click, because both can
+	// become true AFTER a silence was recorded: a CRITICAL firing (a silence must
+	// never mute a page — the same carve-out the debouncer makes, see
+	// source/debounce.go) and a standing 👎 (a colleague saying the diagnosis is
+	// wrong, read through the ONE shared definition of contested-ness, #288).
+	if now.Before(prior.SilencedUntil) && !req.IsCritical() && !prior.Contested() {
+		return recurrenceSilenced
+	}
+	if g.Cooldown <= 0 {
 		return recurrenceOff
 	}
 	switch {
