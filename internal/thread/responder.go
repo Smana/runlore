@@ -101,6 +101,27 @@ const ReinvestigateNotSupportedReply = "Re-running an investigation from a threa
 	"and nothing was recorded. To save this as a note, rephrase without `reinvestigate:` and use `note:`. " +
 	"To actually re-run, add the `reinvestigate` label to the knowledge-base issue."
 
+// SilenceNotAnchoredReply is what Handle answers when "silence:" appeared
+// mid-sentence rather than at the start of the message.
+//
+// It makes the same three points ReinvestigateNotSupportedReply does, for the
+// same reason: (1) the incident was NOT silenced; (2) nothing was recorded
+// either, so the human is never left believing their note was filed; (3) how
+// to get either outcome they might have meant. The third point matters most
+// here, because both readings are plausible — "note: we agreed on silence: 4h"
+// is one message that could sincerely mean either — and only the human can say
+// which.
+//
+// A refusal is the right side to err on because the two failures are not
+// symmetric. Refusing costs one rephrased message. Acting wrote a durable
+// ledger event, acked a suppression the human never asked for, discarded the
+// note they did ask for, and left RunLore silent on the incident for the whole
+// window — none of which the reply they are reading can undo.
+const SilenceNotAnchoredReply = "I didn't silence anything, and I didn't record that. " +
+	"`silence:` only counts as a command when it starts your message, and here it appeared mid-sentence — " +
+	"so I can't tell whether you meant to mute this incident or were just writing about it. " +
+	"To silence, send `silence: 4h` on its own. To save the sentence, rephrase it without `silence:` and use `note:`."
+
 // FreeformNotRecordedReply is what Handle answers an addressed message with no
 // recognised prefix (IntentFreeform) — a question, or any other prose with no
 // explicit "note:" — whenever nothing was written.
@@ -221,6 +242,31 @@ type Responder struct {
 	// goes — each notifier's own channel, or back into the originating thread —
 	// is the announcer's own setting; see KBAnnouncer and providers.KBDelivery.
 	Announcer *KBAnnouncer
+	// Silence records a `silence: <duration>` command; nil when silencing is not
+	// enabled, in which case the command is answered with a short explanation
+	// rather than silently ignored. SilenceMax is notify.silence.max_window,
+	// carried only so the reply can state the bound — the LEDGER enforces it, and
+	// remains the single place that does.
+	Silence    SilenceRecorder
+	SilenceMax time.Duration
+	// FeedbackEnabled reports whether ANY enabled transport offers a 👍/👎 control
+	// (notify.slack.feedback_buttons or notify.matrix.feedback_reactions). It is a
+	// deployment-wide fact, not a per-transport one — this Responder is SHARED
+	// across Slack's thread capture and Matrix's, and the votes and silences share
+	// one ledger, so a 👎 cast in Matrix re-arms a silence recorded in Slack.
+	//
+	// It exists solely so the acknowledgement does not promise an escape hatch the
+	// deployment does not have; see SilenceAck. False (the zero value) is the safe
+	// default: it under-promises rather than over-promises.
+	FeedbackEnabled bool
+}
+
+// SilenceRecorder records a human 🔕 silence (implemented by *outcome.Ledger).
+// Declared here rather than imported because internal/thread cannot depend on
+// internal/notify; each package declaring the narrow interface it consumes is
+// the idiom this codebase already follows for feedback.
+type SilenceRecorder interface {
+	Silence(triggerKey string, window time.Duration, user string, at time.Time) error
 }
 
 // Announcement bounds. Both are properties of the delivery, not of the write:
@@ -728,6 +774,24 @@ func (r *Responder) Handle(ctx context.Context, tc Context, author, raw string) 
 	switch p.Intent {
 	case IntentReinvestigate:
 		return ReinvestigateNotSupportedReply, nil
+	case IntentSilence:
+		// The same guard IntentNote applies below, and for a STRONGER reason. Parse
+		// matches "silence:" as a whole token anywhere in the message and scans it
+		// ahead of "note:", so "note: we agreed on silence: 4h" lands here with Text
+		// "4h". Parse justifies the anywhere-match with "the outcome is a refusal
+		// that writes nothing and spends nothing" — true for reinvestigate:, false
+		// for this one: r.silence writes a ledger event and switches investigation
+		// off. Unguarded, a sentence meant as prose silenced the incident for four
+		// hours AND discarded the note the human was actually writing.
+		//
+		// Refused rather than routed to freeform, and unconditionally rather than
+		// only with no Chat wired: freeform with a Chat can itself write a
+		// model-drafted note, and a write is not a refusal — the human reading the
+		// reply cannot undo it. A refusal comes back with wording they can act on.
+		if !p.Anchored {
+			return SilenceNotAnchoredReply, nil
+		}
+		return r.silence(tc, author, p.Text)
 	case IntentFreeform:
 		return r.freeform(ctx, tc, author, p.Text)
 	case IntentNote:
@@ -752,6 +816,28 @@ func (r *Responder) Handle(ctx context.Context, tc Context, author, raw string) 
 		return "Tell me what to record — for example: `note: the real cause was a spot-node reclaim`.", nil
 	}
 	return r.record(ctx, tc, HumanNote(author, p.Text))
+}
+
+// silence answers a `silence: <duration>` command. Every failure path REPLIES —
+// a command that changes behaviour must never fail quietly, or the human walks
+// away believing the incident is muted when it is not.
+func (r *Responder) silence(tc Context, author, text string) (string, error) {
+	if r.Silence == nil {
+		return "Silencing isn't enabled here — ask an operator to turn on `notify.silence` for this transport.", nil
+	}
+	if tc.TriggerKey == "" {
+		return "I can't tell which incident this thread is about, so there's nothing to silence.", nil
+	}
+	window, err := time.ParseDuration(strings.TrimSpace(text))
+	if err != nil {
+		return fmt.Sprintf("I couldn't read %q as a duration — try `silence: 4h` (up to %s).",
+			strings.TrimSpace(text), ShortDuration(r.SilenceMax)), nil
+	}
+	now := r.now()
+	if err := r.Silence.Silence(tc.TriggerKey, window, author, now); err != nil {
+		return "Couldn't silence this: " + err.Error(), nil
+	}
+	return SilenceAck(author, window, now.Add(window), r.FeedbackEnabled), nil
 }
 
 // freeform answers an addressed message that carried no recognised command

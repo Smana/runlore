@@ -970,6 +970,225 @@ func TestHandleNoteContainingReservedWordWithoutColonIsCaptured(t *testing.T) {
 	}
 }
 
+// fakeSilenceRecorder is a SilenceRecorder that records every call it
+// receives and returns silenceErr, if set.
+type fakeSilenceRecorder struct {
+	calls []struct {
+		triggerKey string
+		window     time.Duration
+		user       string
+		at         time.Time
+	}
+	silenceErr error
+}
+
+func (f *fakeSilenceRecorder) Silence(triggerKey string, window time.Duration, user string, at time.Time) error {
+	f.calls = append(f.calls, struct {
+		triggerKey string
+		window     time.Duration
+		user       string
+		at         time.Time
+	}{triggerKey, window, user, at})
+	return f.silenceErr
+}
+
+// TestHandleSilenceNotEnabledStillReplies pins the rule stated on
+// Responder.silence: a command that changes behaviour must never fail
+// quietly. With no SilenceRecorder wired, the command must be answered with
+// an explanation rather than falling through to some other intent's reply.
+//
+// The Responder is SHARED across transports (the same value backs both
+// Slack's thread capture, in mention.go, and Matrix's mention handler), and
+// silence() has no way to tell which one a given message arrived on. The
+// reply must therefore name the shared config block (notify.silence) rather
+// than either transport's own flag — an earlier draft named
+// notify.matrix.silence_reactions here, which told a Slack user to set a key
+// that has nothing to do with their transport. This pins the exact wording
+// and explicitly asserts neither transport's name leaks into it, so a future
+// edit cannot silently reintroduce a transport-specific hint.
+func TestHandleSilenceNotEnabledStillReplies(t *testing.T) {
+	f := &fakeForge{}
+	r := newTestResponder(t, f)
+	tc := Context{Root: "111.222", TriggerKey: "trig-1"}
+
+	reply, err := r.Handle(context.Background(), tc, "alice", "<@U0BOT> silence: 4h")
+	if err != nil {
+		t.Fatalf("Handle: %v", err)
+	}
+	const want = "Silencing isn't enabled here — ask an operator to turn on `notify.silence` for this transport."
+	if reply != want {
+		t.Errorf("reply = %q, want %q", reply, want)
+	}
+	lower := strings.ToLower(reply)
+	for _, transportSpecific := range []string{"matrix", "slack"} {
+		if strings.Contains(lower, transportSpecific) {
+			t.Errorf("reply names a specific transport (%q), but silence() cannot tell which one a message "+
+				"arrived on: %q", transportSpecific, reply)
+		}
+	}
+	if len(f.comments) != 0 || len(f.opened) != 0 {
+		t.Error("a silence command must never write to the knowledge base")
+	}
+}
+
+// TestHandleSilenceNoTriggerKeyReplies covers a thread whose Context carries
+// no incident identity — nothing for the ledger to key the suppression on.
+func TestHandleSilenceNoTriggerKeyReplies(t *testing.T) {
+	f := &fakeForge{}
+	r := newTestResponder(t, f)
+	rec := &fakeSilenceRecorder{}
+	r.Silence = rec
+	tc := Context{Root: "111.222"} // no TriggerKey
+
+	reply, err := r.Handle(context.Background(), tc, "alice", "silence: 4h")
+	if err != nil {
+		t.Fatalf("Handle: %v", err)
+	}
+	if len(rec.calls) != 0 {
+		t.Error("Silence must not be called when there is no trigger key to record against")
+	}
+	if !strings.Contains(strings.ToLower(reply), "incident") {
+		t.Errorf("reply must explain there is nothing to silence: %q", reply)
+	}
+}
+
+// TestHandleSilenceUnparseableDurationReplies covers free text that does not
+// parse as a Go duration, and pins that the reply states the configured cap.
+func TestHandleSilenceUnparseableDurationReplies(t *testing.T) {
+	f := &fakeForge{}
+	r := newTestResponder(t, f)
+	rec := &fakeSilenceRecorder{}
+	r.Silence = rec
+	r.SilenceMax = 24 * time.Hour
+	tc := Context{Root: "111.222", TriggerKey: "trig-1"}
+
+	reply, err := r.Handle(context.Background(), tc, "alice", "silence: not-a-duration")
+	if err != nil {
+		t.Fatalf("Handle: %v", err)
+	}
+	if len(rec.calls) != 0 {
+		t.Error("Silence must not be called with an unparseable duration")
+	}
+	if !strings.Contains(reply, "up to 24h)") {
+		t.Errorf("reply must state the configured cap as an operator writes it: %q", reply)
+	}
+	if strings.Contains(reply, "0m0s") {
+		t.Errorf("reply renders the cap as a Go duration string: %q", reply)
+	}
+}
+
+// TestHandleSilenceLedgerErrorIsReported covers the ledger refusing the
+// window (e.g. over cap) — the human must see why, not a bare "ok".
+func TestHandleSilenceLedgerErrorIsReported(t *testing.T) {
+	f := &fakeForge{}
+	r := newTestResponder(t, f)
+	rec := &fakeSilenceRecorder{silenceErr: errors.New("window exceeds notify.silence.max_window")}
+	r.Silence = rec
+	tc := Context{Root: "111.222", TriggerKey: "trig-1"}
+
+	reply, err := r.Handle(context.Background(), tc, "alice", "silence: 999h")
+	if err != nil {
+		t.Fatalf("Handle: %v", err)
+	}
+	if !strings.Contains(reply, "window exceeds notify.silence.max_window") {
+		t.Errorf("reply must surface the ledger's own error: %q", reply)
+	}
+}
+
+// TestHandleSilenceRecordsAndAcks is the success path: the ledger is called
+// with exactly the parsed window and the reply is the shared SilenceAck text
+// — the same one Slack's silence button produces, by construction.
+func TestHandleSilenceRecordsAndAcks(t *testing.T) {
+	f := &fakeForge{}
+	r := newTestResponder(t, f)
+	rec := &fakeSilenceRecorder{}
+	r.Silence = rec
+	tc := Context{Root: "111.222", TriggerKey: "trig-1"}
+
+	reply, err := r.Handle(context.Background(), tc, "alice", "<@U0BOT> silence: 4h")
+	if err != nil {
+		t.Fatalf("Handle: %v", err)
+	}
+	if len(rec.calls) != 1 {
+		t.Fatalf("Silence calls = %d, want 1", len(rec.calls))
+	}
+	got := rec.calls[0]
+	if got.triggerKey != "trig-1" || got.window != 4*time.Hour || got.user != "alice" || !got.at.Equal(noteAt) {
+		t.Errorf("Silence called with %+v", got)
+	}
+	want := SilenceAck("alice", 4*time.Hour, noteAt.Add(4*time.Hour), r.FeedbackEnabled)
+	if reply != want {
+		t.Errorf("reply = %q, want the shared SilenceAck text %q", reply, want)
+	}
+	if len(f.comments) != 0 || len(f.opened) != 0 {
+		t.Error("a silence command must never write to the knowledge base")
+	}
+}
+
+// TestHandleUnanchoredSilenceNeverWrites pins the guard IntentNote already had
+// and IntentSilence did not. Parse scans "silence:" before "note:" and matches it
+// as a whole token ANYWHERE, so "note: we agreed on silence: 4h" parsed as
+// IntentSilence with Text "4h" — and Handle routed it straight to r.silence,
+// which wrote the ledger event and acked a suppression. The operator's note was
+// never written and investigation was switched off for four hours by a sentence
+// meant as prose.
+//
+// Parse's justification for the anywhere-match is that "the outcome is a refusal
+// that writes nothing and spends nothing". True for reinvestigate:, false for
+// silence:, which both writes and changes behaviour — so the unanchored case must
+// be refused here, exactly as an unanchored note: is.
+func TestHandleUnanchoredSilenceNeverWrites(t *testing.T) {
+	for _, raw := range []string{
+		"<@U0BOT> note: we agreed on silence: 4h",
+		"the runbook says to silence: 4h next time",
+		"hey <@U0BOT> please silence: 4h",
+	} {
+		t.Run(raw, func(t *testing.T) {
+			f := &fakeForge{}
+			r := newTestResponder(t, f)
+			rec := &fakeSilenceRecorder{}
+			r.Silence = rec
+			r.SilenceMax = 24 * time.Hour
+			tc := Context{Root: "111.222", TriggerKey: "trig-1", CuratedURL: "https://github.com/o/r/pull/42"}
+
+			reply, err := r.Handle(context.Background(), tc, "alice", raw)
+			if err != nil {
+				t.Fatalf("Handle: %v", err)
+			}
+			if len(rec.calls) != 0 {
+				t.Errorf("Silence was called %d time(s) for an unanchored command: %+v", len(rec.calls), rec.calls)
+			}
+			if len(f.comments) != 0 || len(f.opened) != 0 {
+				t.Error("an unanchored silence: must not write to the knowledge base either")
+			}
+			if reply != SilenceNotAnchoredReply {
+				t.Errorf("reply = %q, want SilenceNotAnchoredReply %q", reply, SilenceNotAnchoredReply)
+			}
+		})
+	}
+}
+
+// TestHandleAnchoredSilenceStillWorks is the other half: the guard must not
+// disarm the command itself, including after a stripped mention.
+func TestHandleAnchoredSilenceStillWorks(t *testing.T) {
+	for _, raw := range []string{"silence: 4h", "<@U0BOT> silence: 4h", "<@U0BOT> <@U1> SILENCE: 4h"} {
+		t.Run(raw, func(t *testing.T) {
+			f := &fakeForge{}
+			r := newTestResponder(t, f)
+			rec := &fakeSilenceRecorder{}
+			r.Silence = rec
+			tc := Context{Root: "111.222", TriggerKey: "trig-1"}
+
+			if _, err := r.Handle(context.Background(), tc, "alice", raw); err != nil {
+				t.Fatalf("Handle: %v", err)
+			}
+			if len(rec.calls) != 1 {
+				t.Fatalf("Silence calls = %d, want 1", len(rec.calls))
+			}
+		})
+	}
+}
+
 func TestHandleEmptyTextAsksForContent(t *testing.T) {
 	f := &fakeForge{}
 	r := newTestResponder(t, f)
@@ -4688,5 +4907,72 @@ func TestOpenPRRouteCountsADefectiveDraftUnderItsDefect(t *testing.T) {
 		if !strings.Contains(body, want) {
 			t.Errorf("scrape does not contain %q; got:\n%s", want, body)
 		}
+	}
+}
+
+// TestHandleBothBehaviourPrefixesNeverSilences pins what the relative order of
+// "reinvestigate:" and "silence:" in prefixes actually decides: which REFUSAL a
+// message carrying both tokens gets, never whether one of them writes.
+//
+// Two independent mechanics make that true, and the comment on prefixes used to
+// claim only the weaker first one. An unanchored "silence:" is refused by Handle
+// whatever won the scan; and an ANCHORED "silence:" swallows the rest of the
+// message as its Text, so a "reinvestigate:" token can only ever appear inside a
+// duration that then fails to parse. Reordering the slice is therefore safe in a
+// way the comment previously overstated as dangerous.
+func TestHandleBothBehaviourPrefixesNeverSilences(t *testing.T) {
+	for _, raw := range []string{
+		"silence: 4h, and please reinvestigate: this tomorrow",
+		"<@U0BOT> silence: 4h — reinvestigate: after the deploy",
+		"reinvestigate: the DNS path, and silence: 4h",
+		"please reinvestigate: this, then silence: 24h",
+	} {
+		t.Run(raw, func(t *testing.T) {
+			f := &fakeForge{}
+			r := newTestResponder(t, f)
+			rec := &fakeSilenceRecorder{}
+			r.Silence = rec
+			r.SilenceMax = 24 * time.Hour
+			tc := Context{Root: "111.222", TriggerKey: "trig-1"}
+
+			reply, err := r.Handle(context.Background(), tc, "alice", raw)
+			if err != nil {
+				t.Fatalf("Handle: %v", err)
+			}
+			if len(rec.calls) != 0 {
+				t.Errorf("Silence was called %d time(s) for a message carrying both tokens: %+v", len(rec.calls), rec.calls)
+			}
+			if len(f.comments) != 0 || len(f.opened) != 0 {
+				t.Error("a message carrying both behaviour-changing tokens must not write to the knowledge base either")
+			}
+			if reply != ReinvestigateNotSupportedReply {
+				t.Errorf("reply = %q, want ReinvestigateNotSupportedReply — reinvestigate: leads the scan", reply)
+			}
+		})
+	}
+}
+
+// TestAnAnchoredSilenceCannotSwallowAReinvestigateToken is the half of the rule
+// above that does not depend on the slice order at all: even reached directly,
+// the silence path refuses a window whose text carries anything else, because
+// time.ParseDuration takes the WHOLE string. This is what makes reordering
+// prefixes safe rather than merely currently harmless.
+func TestAnAnchoredSilenceCannotSwallowAReinvestigateToken(t *testing.T) {
+	f := &fakeForge{}
+	r := newTestResponder(t, f)
+	rec := &fakeSilenceRecorder{}
+	r.Silence = rec
+	r.SilenceMax = 24 * time.Hour
+
+	reply, err := r.silence(Context{Root: "111.222", TriggerKey: "trig-1"}, "alice",
+		"4h, and please reinvestigate: this tomorrow")
+	if err != nil {
+		t.Fatalf("silence: %v", err)
+	}
+	if len(rec.calls) != 0 {
+		t.Fatalf("Silence was called %d time(s) for an unparseable window: %+v", len(rec.calls), rec.calls)
+	}
+	if !strings.Contains(reply, "couldn't read") {
+		t.Errorf("reply = %q, want the unparseable-duration refusal", reply)
 	}
 }

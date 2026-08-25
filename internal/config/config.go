@@ -827,17 +827,20 @@ type ModelOverride struct {
 
 // Notify configures where investigation findings are delivered.
 type Notify struct {
-	Slack  SlackNotify  `yaml:"slack"`
-	Matrix MatrixNotify `yaml:"matrix"`
-	Thread ThreadNotify `yaml:"thread"` // shared Slack/Matrix thread-capture bounds — see ThreadNotify
+	Slack   SlackNotify   `yaml:"slack"`
+	Matrix  MatrixNotify  `yaml:"matrix"`
+	Thread  ThreadNotify  `yaml:"thread"`  // shared Slack/Matrix thread-capture bounds — see ThreadNotify
+	Silence SilenceNotify `yaml:"silence"` // shared Slack/Matrix silence windows — see SilenceNotify
 	// Extra catches notify.<name> blocks for registered (non-built-in)
 	// notifiers. CONSTRAINT: a drop-in notifier must never be registered
-	// under the name "slack", "matrix" or "thread" — those are named fields
-	// above, and a notify.<that-name> block would land there instead of
-	// here, silently shadowing the notifier's own config. (Slack and Matrix
-	// themselves are registered under those exact names on purpose — that
-	// pairing is the reason those two fields exist — so the constraint is on
-	// every OTHER registered notifier, not on those two.)
+	// under the name of any named field above — today "slack", "matrix",
+	// "thread" or "silence" — because a notify.<that-name> block would land
+	// there instead of here, silently shadowing the notifier's own config.
+	// (Slack and Matrix themselves are registered under those exact names on
+	// purpose — that pairing is the reason those two fields exist — so the
+	// constraint is on every OTHER registered notifier, not on those two.)
+	//
+	// This list is prose and can go stale; the guard below does not read it.
 	//
 	// Enforced by TestRegisteredNotifierNamesDoNotCollideWithConfigFields in
 	// internal/notify (package notify_test, so it can import both this
@@ -1138,6 +1141,12 @@ type SlackNotify struct {
 	// AND a delivery target (webhook_url_env, or bot_token_env + channel — buttons
 	// render and dispatch on either path); Validate fails loud when any is missing.
 	FeedbackButtons bool `yaml:"feedback_buttons"`
+	// SilenceButton (opt-in, notify.slack.silence_button) appends a 🔕 overflow menu
+	// offering notify.silence.windows. A click suppresses re-investigating the same
+	// TriggerKey for the chosen window. Deliberately a SEPARATE flag from
+	// feedback_buttons: a rating records an opinion, a silence changes what RunLore
+	// does, and an operator must be able to take the first without the second.
+	SilenceButton bool `yaml:"silence_button"`
 	// ThreadCapture (opt-in, default off) registers each delivered investigation's
 	// thread root so a later `@runlore note: …` reply in that thread can be
 	// attributed to it and written into the knowledge base. Requires exposing
@@ -1162,6 +1171,14 @@ type MatrixNotify struct {
 	// OUTBOUND request authenticated by the access token above. Requires the three
 	// notifier fields and outcome.ledger_path; Validate fails loud otherwise.
 	FeedbackReactions bool `yaml:"feedback_reactions"`
+	// SilenceReactions (opt-in, notify.matrix.silence_reactions) records a 🔕
+	// reaction as a silence at notify.silence.windows[0]. It does NOT by itself
+	// enable the `silence: <duration>` thread command — that additionally needs
+	// ThreadCapture on (below), since the command arrives as a message and the
+	// /sync filter only requests m.room.message when ThreadCapture is set.
+	// Separate from feedback_reactions for the same reason SlackNotify.SilenceButton
+	// is separate from FeedbackButtons.
+	SilenceReactions bool `yaml:"silence_reactions"`
 	// ThreadCapture (opt-in, default off) registers each delivered investigation's
 	// thread root so a later `@runlore note: …` reply in that thread can be
 	// attributed to it and written into the knowledge base. Like FeedbackReactions,
@@ -1171,6 +1188,88 @@ type MatrixNotify struct {
 	// outcome.ledger_path — the thread registry lives beside the ledger and must
 	// survive a restart and a leader failover; Validate fails loud otherwise.
 	ThreadCapture bool `yaml:"thread_capture"`
+}
+
+// SilenceNotify configures the human 🔕 silence verdict — the presets offered on
+// the Slack overflow menu and the hard cap every transport is held to. Shared
+// across transports on purpose: a Matrix `silence: 999h` command is free text,
+// and must not be able to exceed what the Slack presets offer.
+type SilenceNotify struct {
+	// Windows are the durations offered, in the order they are rendered. The FIRST
+	// entry is the default used where no duration can be carried — notably a Matrix
+	// 🔕 reaction, which is a bare emoji.
+	//
+	// Non-empty always; and 2 to 5 entries whenever notify.slack.silence_button is
+	// on, because both bounds belong to Slack's overflow element and breaching
+	// either makes Slack reject the WHOLE message (invalid_blocks) rather than just
+	// the control. Enforced in Validate.
+	Windows []Duration `yaml:"windows"`
+	// MaxWindow is the hard cap. Zero means uncapped, which Validate rejects
+	// whenever a silence transport is on — an uncapped silence is indistinguishable
+	// from a permanent one, and nothing else in the system would ever lift it.
+	MaxWindow Duration `yaml:"max_window"`
+}
+
+// Std returns the presets as standard-library durations, in render order.
+func (s SilenceNotify) Std() []time.Duration {
+	out := make([]time.Duration, 0, len(s.Windows))
+	for _, w := range s.Windows {
+		out = append(out, w.Std())
+	}
+	return out
+}
+
+// Default is the window used where none can be carried (a Matrix reaction).
+// Zero when no presets are configured — callers treat that as "silencing off".
+func (s SilenceNotify) Default() time.Duration {
+	if len(s.Windows) == 0 {
+		return 0
+	}
+	return s.Windows[0].Std()
+}
+
+// hasDeliveryTarget reports whether a Slack notifier could be built at all: an
+// incoming-webhook URL, or a bot token together with a channel. It is the ONE
+// definition of "a Slack delivery target", shared by every control that only
+// exists on a message the notifier delivered (feedback buttons, the silence
+// menu). Kept as a method rather than repeated inline so a new delivery path is
+// added in one place — two copies of this predicate drifted apart is exactly
+// the failure it exists to prevent.
+//
+// It answers the STATIC question only. Runtime emptiness (an env var set but
+// unmounted) is not knowable here; app.SlackFeedbackDeliverable warns for that.
+func (s SlackNotify) hasDeliveryTarget() bool {
+	return s.WebhookURLEnv != "" || (s.BotTokenEnv != "" && s.Channel != "")
+}
+
+// hasListenerFields reports whether the Matrix /sync listener could run at all.
+// Every Matrix capability that long-polls the room needs the same three fields,
+// so they are checked through one predicate rather than three inline copies.
+func (m MatrixNotify) hasListenerFields() bool {
+	return m.Homeserver != "" && m.RoomID != "" && m.AccessTokenEnv != ""
+}
+
+// SilenceEnabled reports whether ANY transport can record a silence. It is the
+// condition the investigation gate must be constructed on: without it, a
+// deployment with silencing on but no recurrence cooldown would record every
+// click durably and then ignore it, while the UI confirmed success.
+func (n Notify) SilenceEnabled() bool {
+	return n.Slack.SilenceButton || n.Matrix.SilenceReactions
+}
+
+// FeedbackEnabled reports whether ANY transport offers a 👍/👎 control. It is a
+// DEPLOYMENT-WIDE fact rather than a per-transport one on purpose: votes and
+// silences share one outcome ledger and are keyed by TriggerKey alone, so a 👎
+// cast in Matrix re-arms a silence clicked in Slack.
+//
+// It exists because one of the four documented escapes from a 🔕 — "a standing
+// 👎 re-arms it" — simply does not exist when no such control is enabled, and
+// the deployment where that is true is the one the Slack docs RECOMMEND
+// (feedback_buttons off, silence_button on). Read by the silence acknowledgement
+// so it never promises an escape this deployment lacks, and by the startup
+// warning that tells an operator the bound is narrower than four.
+func (n Notify) FeedbackEnabled() bool {
+	return n.Slack.FeedbackButtons || n.Matrix.FeedbackReactions
 }
 
 // GitOps selects the GitOps engine RunLore reads (what-changed + failure watch).
@@ -2091,8 +2190,77 @@ func (c *Config) Validate() error {
 		// configs where no notifier could ever be built regardless of the environment —
 		// i.e. where the buttons were already dead. Runtime emptiness (an env var set
 		// but unmounted) is not knowable here; app.SlackFeedbackDeliverable warns for it.
-		if sl := c.Notify.Slack; sl.WebhookURLEnv == "" && (sl.BotTokenEnv == "" || sl.Channel == "") {
+		if !c.Notify.Slack.hasDeliveryTarget() {
 			return fmt.Errorf("notify.slack.feedback_buttons requires a Slack delivery target: set notify.slack.webhook_url_env, or notify.slack.bot_token_env together with notify.slack.channel — with neither the Slack notifier is skipped, so no message is delivered, no buttons render and no feedback can ever be recorded")
+		}
+	}
+	// Silencing is click-driven and CHANGES BEHAVIOUR: enabling it without the
+	// pieces a click needs would record every silence durably and then ignore it,
+	// while the UI confirmed success. Fail loud at startup instead — the same
+	// posture feedback_buttons and recurrence_cooldown already take.
+	if c.Notify.Slack.SilenceButton {
+		if c.Notify.Slack.SigningSecretEnv == "" {
+			return fmt.Errorf("notify.slack.silence_button requires notify.slack.signing_secret_env: clicks arrive on the exposed POST /slack/interactions endpoint and must be signature-verified")
+		}
+		// …and a delivery target, for the same reason feedback_buttons requires
+		// one above: a 🔕 menu only ever exists on a message the Slack notifier
+		// delivered, and that notifier is skipped silently with neither target set.
+		if !c.Notify.Slack.hasDeliveryTarget() {
+			return fmt.Errorf("notify.slack.silence_button requires a Slack delivery target: set notify.slack.webhook_url_env, or notify.slack.bot_token_env together with notify.slack.channel — with neither the Slack notifier is skipped, so no message is delivered, no 🔕 menu renders and no silence can ever be recorded")
+		}
+	}
+	// Same fail-loud contract for the Matrix reaction listener as
+	// feedback_reactions above: without the notifier fields it would sync
+	// nothing, so a 🔕 reaction could never be recorded.
+	if c.Notify.Matrix.SilenceReactions {
+		if !c.Notify.Matrix.hasListenerFields() {
+			return fmt.Errorf("notify.matrix.silence_reactions requires homeserver, room_id and access_token_env (the reaction listener long-polls the configured room)")
+		}
+	}
+	if c.Notify.SilenceEnabled() {
+		if c.Outcome.LedgerPath == "" {
+			return fmt.Errorf("notify.silence requires outcome.ledger_path: a silence is recorded in the outcome ledger, and the suppression gate reads it back from there")
+		}
+		if len(c.Notify.Silence.Windows) == 0 {
+			return fmt.Errorf("notify.silence.windows must list at least one duration when a silence transport is enabled: with no presets there is nothing to render, and no duration for a click to record")
+		}
+		// Slack's overflow element accepts at most 5 options. A 6th preset does not
+		// just fail to render — Slack rejects the WHOLE message (invalid_blocks), so
+		// Multi.Deliver logs and moves on and the symptom is "findings stopped
+		// arriving in Slack" with nothing pointing at this config. Caught here, at
+		// startup, instead.
+		if n := len(c.Notify.Silence.Windows); n > 5 {
+			return fmt.Errorf("notify.silence.windows lists %d entries, but Slack's overflow element accepts at most 5 options: more than that and Slack rejects the entire message (invalid_blocks), not just the 🔕 control — trim the list to 5 or fewer presets", n)
+		}
+		if c.Notify.Silence.MaxWindow.Std() <= 0 {
+			return fmt.Errorf("notify.silence.max_window must be positive when a silence transport is enabled: an uncapped silence is indistinguishable from a permanent one")
+		}
+		for _, w := range c.Notify.Silence.Windows {
+			if w.Std() <= 0 {
+				return fmt.Errorf("notify.silence.windows entry %v must be positive: zero silences nothing and a negative duration is meaningless as a suppression window", w.Std())
+			}
+			if w.Std() > c.Notify.Silence.MaxWindow.Std() {
+				return fmt.Errorf("notify.silence.windows entry %v exceeds notify.silence.max_window (%v)", w.Std(), c.Notify.Silence.MaxWindow.Std())
+			}
+		}
+		// The OTHER end of the same Slack constraint, and the one that was missed:
+		// an overflow element requires a MINIMUM of 2 options as well as a maximum
+		// of 5. `windows: [4h]` passed startup and then made chat.postMessage
+		// return invalid_blocks for EVERY message — the symptom is "findings
+		// stopped arriving in Slack" with nothing pointing at this config.
+		//
+		// Scoped to silence_button, unlike the ceiling above, because it is a
+		// property of the OVERFLOW and Matrix renders none: a bare 🔕 reaction
+		// silences for windows[0] and nothing else, so a single-preset Matrix
+		// deployment is a perfectly coherent config and rejecting it would be
+		// inventing a constraint. (The ceiling stays unconditional on purpose: it
+		// costs a Matrix-only deployment two presets nobody can reach from a
+		// reaction, and it keeps the config from breaking the day Slack is added.)
+		//
+		// Checked after the per-entry loop so a single entry that is ALSO invalid
+		// on its own terms reports the more specific reason.
+		if n := len(c.Notify.Silence.Windows); n < 2 && c.Notify.Slack.SilenceButton {
+			return fmt.Errorf("notify.silence.windows lists %d entry, but Slack's overflow element requires at least 2 options: with one preset Slack rejects the entire message (invalid_blocks), so no finding is delivered at all — add a second preset, or turn off notify.slack.silence_button", n)
 		}
 	}
 	// Thread capture cannot work without the same signature verification as
@@ -2117,8 +2285,7 @@ func (c *Config) Validate() error {
 	// notifier fields it would sync nothing, without the ledger it would record
 	// nowhere — both silent lies to whoever enabled the option.
 	if c.Notify.Matrix.FeedbackReactions {
-		m := c.Notify.Matrix
-		if m.Homeserver == "" || m.RoomID == "" || m.AccessTokenEnv == "" {
+		if !c.Notify.Matrix.hasListenerFields() {
 			return fmt.Errorf("notify.matrix.feedback_reactions requires homeserver, room_id and access_token_env (the reaction listener long-polls the configured room)")
 		}
 		if c.Outcome.LedgerPath == "" {
@@ -2130,8 +2297,7 @@ func (c *Config) Validate() error {
 	// registry has nowhere durable to live — both silent lies to whoever enabled
 	// the option.
 	if c.Notify.Matrix.ThreadCapture {
-		m := c.Notify.Matrix
-		if m.Homeserver == "" || m.RoomID == "" || m.AccessTokenEnv == "" {
+		if !c.Notify.Matrix.hasListenerFields() {
 			return fmt.Errorf("notify.matrix.thread_capture requires homeserver, room_id and access_token_env (the listener long-polls the configured room and authenticates as the bot)")
 		}
 		if c.Outcome.LedgerPath == "" {

@@ -1940,3 +1940,212 @@ func TestMaxNoteBytesTooSmallToKeepAnyNoteIsRejected(t *testing.T) {
 		})
 	}
 }
+
+func TestSilenceConfigValidation(t *testing.T) {
+	base := func() *Config {
+		c := &Config{}
+		c.Outcome.LedgerPath = "/tmp/outcome.jsonl"
+		c.Notify.Slack.SigningSecretEnv = "SLACK_SIGNING_SECRET"
+		c.Notify.Slack.WebhookURLEnv = "SLACK_WEBHOOK_URL"
+		c.Notify.Slack.SilenceButton = true
+		// TWO presets, deliberately: Slack's overflow element requires a minimum of
+		// 2 options, so a one-window base config would have every case in this table
+		// validating a config that makes chat.postMessage return invalid_blocks.
+		c.Notify.Silence.Windows = []Duration{Duration(time.Hour), Duration(4 * time.Hour)}
+		c.Notify.Silence.MaxWindow = Duration(24 * time.Hour)
+		return c
+	}
+
+	for _, tc := range []struct {
+		name    string
+		mutate  func(*Config)
+		wantErr string
+	}{
+		{
+			name:   "the happy path validates",
+			mutate: func(*Config) {},
+		},
+		{
+			name:    "the silence button needs a signing secret",
+			mutate:  func(c *Config) { c.Notify.Slack.SigningSecretEnv = "" },
+			wantErr: "signing_secret_env",
+		},
+		{
+			name:    "silencing needs a ledger",
+			mutate:  func(c *Config) { c.Outcome.LedgerPath = "" },
+			wantErr: "outcome.ledger_path",
+		},
+		{
+			name:    "an empty preset list is a misconfiguration",
+			mutate:  func(c *Config) { c.Notify.Silence.Windows = nil },
+			wantErr: "notify.silence.windows",
+		},
+		{
+			name:    "a non-positive preset is rejected",
+			mutate:  func(c *Config) { c.Notify.Silence.Windows = []Duration{0} },
+			wantErr: "must be positive",
+		},
+		{
+			name: "a preset above the cap is rejected",
+			mutate: func(c *Config) {
+				c.Notify.Silence.Windows = []Duration{Duration(48 * time.Hour)}
+			},
+			wantErr: "max_window",
+		},
+		{
+			name:    "a zero max_window is rejected when a transport is enabled",
+			mutate:  func(c *Config) { c.Notify.Silence.MaxWindow = 0 },
+			wantErr: "max_window",
+		},
+		{
+			name:    "the silence button needs a delivery target",
+			mutate:  func(c *Config) { c.Notify.Slack.WebhookURLEnv = "" },
+			wantErr: "delivery target",
+		},
+		{
+			name: "the Matrix path needs listener fields",
+			mutate: func(c *Config) {
+				c.Notify.Slack.SilenceButton = false
+				c.Notify.Matrix.SilenceReactions = true
+			},
+			wantErr: "homeserver",
+		},
+		{
+			name: "more than 5 presets is rejected — Slack's overflow element accepts at most 5 options",
+			mutate: func(c *Config) {
+				c.Notify.Silence.Windows = []Duration{
+					Duration(time.Hour), Duration(2 * time.Hour), Duration(4 * time.Hour),
+					Duration(8 * time.Hour), Duration(12 * time.Hour), Duration(24 * time.Hour),
+				}
+				c.Notify.Silence.MaxWindow = Duration(24 * time.Hour)
+			},
+			wantErr: "notify.silence.windows",
+		},
+		{
+			name: "exactly 5 presets is the accepted boundary",
+			mutate: func(c *Config) {
+				c.Notify.Silence.Windows = []Duration{
+					Duration(time.Hour), Duration(2 * time.Hour), Duration(4 * time.Hour),
+					Duration(8 * time.Hour), Duration(12 * time.Hour),
+				}
+				c.Notify.Silence.MaxWindow = Duration(24 * time.Hour)
+			},
+		},
+		{
+			name:    "a single preset is rejected while Slack renders the overflow",
+			mutate:  func(c *Config) { c.Notify.Silence.Windows = []Duration{Duration(4 * time.Hour)} },
+			wantErr: "at least 2",
+		},
+		{
+			name: "a single preset is fine for Matrix alone — it renders no overflow",
+			mutate: func(c *Config) {
+				c.Notify.Slack.SilenceButton = false
+				c.Notify.Matrix.SilenceReactions = true
+				c.Notify.Matrix.Homeserver = "https://matrix.example.org"
+				c.Notify.Matrix.RoomID = "!room:example.org"
+				c.Notify.Matrix.AccessTokenEnv = "MATRIX_ACCESS_TOKEN"
+				c.Notify.Silence.Windows = []Duration{Duration(4 * time.Hour)}
+			},
+		},
+		{
+			name: "the Matrix path needs a ledger too",
+			mutate: func(c *Config) {
+				c.Notify.Slack.SilenceButton = false
+				c.Notify.Matrix.SilenceReactions = true
+				c.Notify.Matrix.Homeserver = "https://matrix.example.org"
+				c.Notify.Matrix.RoomID = "!room:example.org"
+				c.Notify.Matrix.AccessTokenEnv = "MATRIX_ACCESS_TOKEN"
+				c.Outcome.LedgerPath = ""
+			},
+			wantErr: "outcome.ledger_path",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			c := base()
+			tc.mutate(c)
+			err := c.Validate()
+			if tc.wantErr == "" {
+				if err != nil {
+					t.Fatalf("Validate() = %v, want nil", err)
+				}
+				return
+			}
+			if err == nil {
+				t.Fatalf("Validate() = nil, want an error mentioning %q", tc.wantErr)
+			}
+			if !strings.Contains(err.Error(), tc.wantErr) {
+				t.Errorf("Validate() = %q, want it to mention %q", err, tc.wantErr)
+			}
+		})
+	}
+}
+
+// TestSilenceDefaultIsTheFirstPreset pins the contract the Matrix reaction path
+// depends on — a reaction carries no duration, so it uses windows[0].
+func TestSilenceDefaultIsTheFirstPreset(t *testing.T) {
+	s := SilenceNotify{Windows: []Duration{Duration(4 * time.Hour), Duration(time.Hour)}}
+	if got, want := s.Default(), 4*time.Hour; got != want {
+		t.Errorf("Default() = %v, want %v", got, want)
+	}
+	if got := (SilenceNotify{}).Default(); got != 0 {
+		t.Errorf("Default() with no presets = %v, want 0", got)
+	}
+}
+
+// TestSilenceWindowsParseFromYAML exercises real YAML list parsing, not just Go
+// literals: Windows is the first []Duration in the config package, and a
+// sequence of duration strings goes through a different yaml.v3 decode path
+// than a single scalar Duration.
+func TestSilenceWindowsParseFromYAML(t *testing.T) {
+	const y = `
+notify:
+  silence:
+    windows: ["1h", "4h", "24h"]
+    max_window: "24h"
+`
+	var c Config
+	if err := yaml.Unmarshal([]byte(y), &c); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	want := []time.Duration{time.Hour, 4 * time.Hour, 24 * time.Hour}
+	got := c.Notify.Silence.Std()
+	if len(got) != len(want) {
+		t.Fatalf("notify.silence.windows: got %v, want %v", got, want)
+	}
+	for i, w := range want {
+		if got[i] != w {
+			t.Errorf("notify.silence.windows[%d] = %v, want %v", i, got[i], w)
+		}
+	}
+	if got := c.Notify.Silence.MaxWindow.Std(); got != 24*time.Hour {
+		t.Fatalf("notify.silence.max_window: got %v, want 24h", got)
+	}
+}
+
+// TestNotifyFeedbackEnabled pins the deployment-wide fact the silence
+// acknowledgement and the startup warning both read: whether ANY transport
+// offers a 👍/👎 control. It is deployment-wide rather than per-transport
+// because votes and silences share one outcome ledger — a 👎 cast in Matrix
+// re-arms a silence clicked in Slack.
+func TestNotifyFeedbackEnabled(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		slack  bool
+		matrix bool
+		want   bool
+	}{
+		{name: "neither", want: false},
+		{name: "slack buttons only", slack: true, want: true},
+		{name: "matrix reactions only", matrix: true, want: true},
+		{name: "both", slack: true, matrix: true, want: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var n Notify
+			n.Slack.FeedbackButtons = tc.slack
+			n.Matrix.FeedbackReactions = tc.matrix
+			if got := n.FeedbackEnabled(); got != tc.want {
+				t.Errorf("FeedbackEnabled() = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}

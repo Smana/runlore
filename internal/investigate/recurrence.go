@@ -16,7 +16,13 @@ type RecurrenceStats interface {
 	Recurrence(triggerKey string) outcome.TriggerRecurrence
 }
 
-// RecurrenceGate suppresses re-investigating a trigger that was conclusively
+// RecurrenceGate is the one place that decides a trigger is not worth
+// re-investigating right now, for either of two reasons: the MACHINE's cooldown
+// (a conclusive answer landed moments ago) or a HUMAN's standing 🔕 silence
+// (accurate, known, stop telling me). The two are independent — a silence works
+// with Cooldown at 0 — and the human one is checked first; see decide.
+//
+// The cooldown half suppresses re-investigating a trigger that was conclusively
 // investigated moments ago. Without it, nothing keys on TriggerKey before the
 // paid loop: Alertmanager re-sends a still-firing alert every repeat_interval
 // and a persistently-failing GitOps resource re-emits every informer resync
@@ -24,8 +30,10 @@ type RecurrenceStats interface {
 // as fresh noise — the recall short-circuit only helps once the KB PR is MERGED,
 // so the human-review window is exactly when the repetition is worst.
 //
-// The gate turns on two independent facts from the trigger's snapshot, and
-// conflating them is what broke it once already (#471):
+// Inside that cooldown half — and NOT to be confused with the two REASONS above,
+// which are the machine's cooldown and the human's silence — sit two independent
+// FACTS read from the trigger's snapshot. The human silence turns on neither of
+// them; conflating this pair is what broke the cooldown once already (#471):
 //
 //   - WHEN did we last look? The newest open of any kind, conclusive or not. The
 //     cooldown lapses from there, because a full investigation was paid for at that
@@ -39,12 +47,16 @@ type RecurrenceStats interface {
 //     later firing bought a full investigation. Reading the newest conclusive prior
 //     costs one run per mislabel instead of all of them.
 //
-// A trigger that has NEVER concluded still bypasses the gate on every firing: there
-// is no answer to stand on, and suppressing would leave the on-call with silence.
+// A trigger that has NEVER concluded still bypasses the COOLDOWN on every firing:
+// there is no answer to stand on, and suppressing would leave the on-call with
+// nothing. A standing 🔕 suppresses it anyway — that is the human reason, and it
+// reads none of the two facts above; see decide for why that case is precisely the
+// one an operator most wants muted.
 //
 // The gate is deliberately human-deferential in the other direction too: a standing
 // 👎 on the trigger breaks the cooldown immediately — a human saying "that diagnosis
-// is wrong" re-arms the very next occurrence.
+// is wrong" re-arms the very next occurrence. Against a 🔕 SILENCE the same 👎 is
+// weighed by RECENCY rather than taken as an absolute veto: see decide.
 //
 // A suppressed occurrence makes no model call, sends no notification, and
 // records no ledger open. (It does still consume a workqueue turn and a
@@ -63,7 +75,7 @@ type RecurrenceStats interface {
 // per-trigger snapshot once per investigation and hands it here, so the suppression
 // decision and the seed's known-recurrence block are made from the same facts.
 type RecurrenceGate struct {
-	Cooldown time.Duration // 0 disables the gate (default: off, opt-in)
+	Cooldown time.Duration // 0 disables the COOLDOWN only; a human silence still applies
 }
 
 // priorForTrigger reads the trigger's recurrence snapshot: what earlier
@@ -97,17 +109,65 @@ const (
 	recurrenceCooldownLapsed recurrenceDecision = "cooldown_lapsed"     // the last look is older than the cooldown
 	recurrenceNoAnswer       recurrenceDecision = "no_conclusive_prior" // looked recently, but never reached an answer
 	recurrenceContested      recurrenceDecision = "contested_by_human"  // a standing 👎 re-arms investigation
+	recurrenceSilenced       recurrenceDecision = "silenced_by_human"   // a human 🔕 stands: skip the paid loop
 	recurrenceSuppressed     recurrenceDecision = "suppressed"          // the one decision that skips the paid loop
 )
 
-// suppressed reports whether d is the one decision that skips the paid loop.
-func (d recurrenceDecision) suppressed() bool { return d == recurrenceSuppressed }
+// suppressed reports whether d is a decision that skips the paid loop. Two now
+// do: the machine's cooldown and the human's silence.
+//
+// This is the ONLY test of that question in the tree, by construction rather
+// than by convention: LoopInvestigator.Investigate gates its early return on it
+// and switches on the individual constants afterwards purely to pick the metric
+// label and the log line. Gating on `== recurrenceSuppressed` instead would mean
+// a decision added here later still bought a full investigation while every log
+// line claimed it had been suppressed — which is precisely the failure the named
+// decisions exist to make visible.
+func (d recurrenceDecision) suppressed() bool {
+	return d == recurrenceSuppressed || d == recurrenceSilenced
+}
 
 // decide reports whether req should be suppressed and why, given the trigger's
 // prior-investigation snapshot. A pure function of (config, history, clock): now is
 // a parameter so the decision matrix is testable without sleeping.
 func (g *RecurrenceGate) decide(req Request, prior outcome.TriggerRecurrence, now time.Time) recurrenceDecision {
-	if g == nil || g.Cooldown <= 0 || req.TriggerKey == "" {
+	if g == nil || req.TriggerKey == "" {
+		return recurrenceOff
+	}
+	// A HUMAN silence, checked before the cooldown short-circuit below. Three
+	// reasons the order is load-bearing:
+	//
+	//   - recurrence_cooldown defaults to 0 (off). Left below the short-circuit,
+	//     the entire feature would be inert in a default install while the UI
+	//     still confirmed each click — the worst possible failure mode.
+	//   - A silence stands regardless of prior history, INCLUDING the
+	//     no_conclusive_prior case the cooldown deliberately refuses to suppress.
+	//     That case (a trigger that keeps coming back inconclusive, re-running the
+	//     full paid loop on every firing) is exactly the one a human is most
+	//     likely to want silenced.
+	//   - It is the human's decision, so it outranks the machine's heuristics.
+	//
+	// Two escapes are checked here rather than at the click, because both can
+	// become true AFTER a silence was recorded: a CRITICAL firing (a silence must
+	// never mute a page — the same carve-out the debouncer makes, see
+	// source/debounce.go) and a standing 👎 (a colleague saying the diagnosis is
+	// wrong).
+	//
+	// The 👎 escape is read through SilenceOutranksFeedback, NOT through
+	// Contested() alone, and the difference is the whole feature working or not.
+	// Contested() compares no timestamps — it is `FeedbackDown > 0` — so reading it
+	// bare made a 👎 cast on Monday outrank a 🔕 clicked on Tuesday forever: the
+	// click was written to the ledger, the human was acked "RunLore will NOT
+	// investigate this incident", and every firing re-investigated anyway. NEWEST
+	// HUMAN WINS instead: a silence recorded after the newest standing 👎
+	// suppresses, a 👎 cast after a silence re-arms, mirroring the latest-wins rule
+	// silences already use among themselves. Contested() keeps its meaning for the
+	// coalescer and the prompt-replay path (#288) — the ordering is added beside
+	// it, in outcome, never folded into it.
+	if now.Before(prior.SilencedUntil) && !req.IsCritical() && prior.SilenceOutranksFeedback() {
+		return recurrenceSilenced
+	}
+	if g.Cooldown <= 0 {
 		return recurrenceOff
 	}
 	switch {

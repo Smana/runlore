@@ -61,7 +61,7 @@ func Derived(fp string) bool {
 
 // Event is one ledger line: an investigation opened, or an incident resolved.
 type Event struct {
-	Event          string `json:"event"`                     // "open" | "resolve" | "feedback" | "checkpoint" | "confirm"
+	Event          string `json:"event"`                     // "open" | "resolve" | "feedback" | "silence" | "checkpoint" | "confirm"
 	Fingerprint    string `json:"fingerprint"`               // Alertmanager fingerprint (stable firing↔resolved)
 	DupFingerprint string `json:"dup_fingerprint,omitempty"` // curator dedup fingerprint (resource+cause); the curated-PR resolution join key
 
@@ -87,10 +87,12 @@ type Event struct {
 	CuratedURL string `json:"curated_url,omitempty"` // KB link surfaced as "previous: <link>" on recurrence
 	Verdict    string `json:"verdict,omitempty"`     // curator's machine verdict on the investigation
 
-	// User identifies the human behind a feedback event (a Slack user id) — the
-	// dedup key that keeps one live vote per (TriggerKey, user), latest wins.
-	// Empty on open/resolve lines. On a feedback line Kind carries the rating
-	// ("up" | "down").
+	// User identifies the human behind a feedback or silence event (a Slack user id
+	// or a Matrix user id). On feedback it is the dedup key that keeps one live vote
+	// per (TriggerKey, user), latest wins; on silence it is AUDIT ONLY — silences
+	// dedup per trigger alone. Empty on open/resolve lines. On a feedback line Kind
+	// carries the rating ("up" | "down"); on a silence line it carries the window as
+	// a duration string ("4h").
 	User string `json:"user,omitempty"`
 
 	// Resolvable is set on an open when we know whether a ground-truth resolve signal
@@ -171,6 +173,40 @@ type Ledger struct {
 	// OutcomeFloor. Folded on replay like agg; checkpointed on compaction.
 	votes map[string]feedbackVote
 
+	// silences holds the standing human silence per TriggerKey — the 🔕 verdict,
+	// which suppresses re-investigation rather than weighing an entry.
+	//
+	// LATEST WINS, keyed by TriggerKey ALONE. This is deliberately unlike votes,
+	// which dedup per (TriggerKey, user) because ratings AGGREGATE: a silence is one
+	// standing decision ABOUT THE TRIGGER, so the most recent human wins outright,
+	// including shortening or effectively lifting a colleague's. Rebuilt on load and
+	// checkpointed on compaction like votes.
+	//
+	// A LAPSED entry is dropped wherever the ledger already walks this map —
+	// loadLocked after a replay, and compactLocked before the checkpoint is written
+	// — rather than swept by a timer. Doing it there is observationally free: the
+	// suppression gate consults a silence only while now < SilencedUntil (see
+	// RecurrenceGate.decide), and SilenceOutranksFeedback is reached only behind
+	// that same test, so an entry the prune removes could not have changed a
+	// decision. Without the prune every silence ever recorded stays resident for the
+	// life of the process AND is copied into every checkpoint, which also lengthens
+	// the scan clearSilencesForFingerprintLocked makes on the resolve path.
+	silences map[string]silenceState
+
+	// maxSilenceWindow caps what Silence accepts (zero = uncapped). Set by the serve
+	// wiring from notify.silence.max_window. It lives HERE, not in each caller, so
+	// there is one place the invariant holds: a Matrix `silence:` command is free
+	// text and must not be able to exceed what the Slack presets offer.
+	//
+	// UNEXPORTED, and read under mu like every other field on this type. It used to
+	// be a public field that Silence dereferenced before taking the lock; that was
+	// race-free only because the serve wiring happened to write it once before any
+	// goroutine started. Nothing marked it construction-only, and Silence is called
+	// concurrently from the Slack HTTP handler and the Matrix /sync goroutine, so
+	// any future caller assigning it after startup would have raced live readers.
+	// See SetMaxSilenceWindow.
+	maxSilenceWindow time.Duration
+
 	// triggerConfirms counts confirmations per TriggerKey — the ContestedTriggers
 	// join that lets the curate Contested pass tell a reviewer "N re-investigations
 	// reached this same conclusion". Rebuilt on load, checkpointed on compaction.
@@ -225,9 +261,27 @@ type checkpointData struct {
 	PendingOpens    map[string][]pendingOpenJSON `json:"pending_opens,omitempty"`
 	PendingResolves map[string][]time.Time       `json:"pending_resolves,omitempty"`
 	Votes           map[string]feedbackVoteJSON  `json:"votes,omitempty"`
-	TriggerConfirms map[string]int               `json:"trigger_confirms,omitempty"`
-	DroppedResolves int                          `json:"dropped_resolves,omitempty"`
-	StaleResolves   int                          `json:"stale_resolves,omitempty"`
+	// Silences carries the standing per-TriggerKey silence expiries across compaction.
+	// Without it a compaction would drop a live silence (RunLore starts talking again
+	// mid-window) or, on an older reader, resurrect none at all. Absent from a
+	// checkpoint written before this field existed; a replay then reconstructs from the
+	// retained tail only, which degrades to "no silence stands" — conservative
+	// (RunLore investigates), never the reverse.
+	Silences map[string]time.Time `json:"silences,omitempty"`
+	// SilencedAt carries WHEN each standing silence was recorded, the comparison key
+	// behind TriggerRecurrence.SilenceOutranksFeedback ("newest human wins"). It is a
+	// SIBLING map rather than a field folded into Silences above on purpose: a
+	// checkpoint line that fails to decode takes every other aggregate down with it, so
+	// widening an existing map's VALUE type from a bare timestamp to an object would
+	// turn any checkpoint written by an earlier build into one unreadable line that
+	// drops agg, byTrigger and the open index too. Two additive maps cost one extra
+	// key and cannot fail that way. Absent from an older checkpoint; a replay then
+	// reads a zero recorded-at, which SilenceOutranksFeedback treats as unknown
+	// ordering and resolves in the 👎's favour — conservative (RunLore investigates).
+	SilencedAt      map[string]time.Time `json:"silenced_at,omitempty"`
+	TriggerConfirms map[string]int       `json:"trigger_confirms,omitempty"`
+	DroppedResolves int                  `json:"dropped_resolves,omitempty"`
+	StaleResolves   int                  `json:"stale_resolves,omitempty"`
 	// ResolvesSeen carries the resolve-channel liveness proof across compaction. Absent
 	// from a checkpoint written before this field existed; a replay then reconstructs it
 	// from the retained tail only, which degrades to "channel not proven" — conservative
@@ -241,6 +295,12 @@ type triggerAggJSON struct {
 	CuratedURL string    `json:"curated_url,omitempty"`
 	Entry      string    `json:"entry,omitempty"`
 	Verdict    string    `json:"verdict,omitempty"`
+	// Fingerprint mirrors triggerAgg.fingerprint. Without it a compaction takes the
+	// resolve escape's fallback lookup with it: the escape would keep working right
+	// up to the first compaction, then silently stop. Absent from a checkpoint
+	// written before this field existed; a replay then reads "", which only costs
+	// the fallback (a live open, when there is one, still resolves the trigger key).
+	Fingerprint string `json:"fingerprint,omitempty"`
 	// Conclusive mirrors triggerAgg.conclusive. omitzero (not omitempty, which does
 	// not apply to structs) keeps it out of the file when the trigger has never
 	// concluded. Absent from a checkpoint written before #471; a replay then
@@ -257,6 +317,13 @@ type triggerAggJSON struct {
 type feedbackVoteJSON struct {
 	Rating string `json:"rating"`
 	Entry  string `json:"entry,omitempty"`
+	// At mirrors feedbackVote.at — when the vote was cast. Without it a compaction
+	// silently strips every live vote of its timestamp and the newest-human-wins
+	// comparison loses its left-hand side. omitzero (not omitempty, which does not
+	// apply to a struct) keeps it out of the file for a vote replayed from a
+	// checkpoint written before this field existed; that reads back as zero, which
+	// SilenceOutranksFeedback resolves in the 👎's favour.
+	At time.Time `json:"at,omitzero"`
 }
 
 type pendingOpenJSON struct {
@@ -272,6 +339,10 @@ type triggerAgg struct {
 	curatedURL string // CuratedURL of the newest open
 	entry      string // Entry of the newest open ("" for fresh) — feedback attribution target
 	verdict    string // Verdict of the newest open (may be inconclusive/"")
+	// fingerprint is the Fingerprint of the newest open. It is what lets a resolve
+	// still find the trigger to un-silence once the fingerprint→open index has been
+	// emptied by an earlier resolve — see applyResolveLocked.
+	fingerprint string
 	// conclusive is the newest open whose verdict was an ANSWER, folded separately
 	// from the newest open so a single inconclusive run cannot erase the answer
 	// standing behind it — the distinction the suppression gate turns on (#471).
@@ -286,6 +357,23 @@ type triggerAgg struct {
 type feedbackVote struct {
 	rating string // "up" | "down"
 	entry  string // agg key credited; "" when the newest open was fresh (nothing credited)
+	// at is WHEN this vote was cast, and it exists for one reason: a 👎 and a 🔕 are
+	// both standing human decisions about the same trigger that say opposite things,
+	// so deciding between them needs their order. See
+	// TriggerRecurrence.SilenceOutranksFeedback. It advances on a repeat click of the
+	// SAME rating even though the aggregate does not — re-clicking 👎 after a silence
+	// is a fresh refusal, not a no-op.
+	at time.Time
+}
+
+// silenceState is the fold state of the standing 🔕 on one trigger: when a human
+// recorded it, and when it lapses. The recorded-at half is not decoration — it is
+// the comparison key that decides a standing 👎 and a standing 🔕 against each
+// other (newest human wins), which an expiry alone cannot answer: a long window
+// clicked minutes ago and a short one clicked last week can share an expiry.
+type silenceState struct {
+	at    time.Time // when the human recorded it
+	until time.Time // at + the chosen window; the expiry the gate compares against now
 }
 
 // maxPendingResolvesPerFingerprint bounds the resolve-before-open buffer per
@@ -391,6 +479,13 @@ func (l *Ledger) loadLocked() error {
 	for _, e := range events {
 		l.foldLocked(e)
 	}
+	// A replay resurrects every silence the file ever recorded, including the ones
+	// whose window closed long ago. They are inert to the gate but not free: they
+	// stay resident for the life of the process and are copied into every later
+	// checkpoint. Dropping them here costs one walk of a map the replay just built.
+	if dropped := l.pruneLapsedSilencesLocked(time.Now()); dropped > 0 {
+		l.log.Debug("outcome ledger: dropped lapsed silences on replay", "count", dropped, "path", l.path)
+	}
 	// Compaction backstop: an append-only ledger replayed in full on every startup /
 	// leadership Reload / curate Episodes() grows without bound. When it exceeds the
 	// configured cap, fold the oldest events into a single checkpoint record and keep a
@@ -412,6 +507,7 @@ func (l *Ledger) resetStateLocked() {
 	l.pendingResolves = map[string][]time.Time{}
 	l.byTrigger = map[string]triggerAgg{}
 	l.votes = map[string]feedbackVote{}
+	l.silences = map[string]silenceState{}
 	l.triggerConfirms = map[string]int{}
 	l.droppedResolves = 0
 	l.staleResolves = 0
@@ -420,7 +516,9 @@ func (l *Ledger) resetStateLocked() {
 
 // foldLocked folds one replayed event into the derived state. Open/resolve maintain the
 // aggregate, open-index, pairing stacks, and occurrence index; feedback folds a human
-// vote into the aggregate; a checkpoint seeds the state a prior compaction folded away.
+// vote into the aggregate; silence folds the standing per-trigger suppression; confirm
+// credits a machine re-derivation to its entry and its trigger; a checkpoint seeds the
+// state a prior compaction folded away.
 // Any other (unknown/future) kind is ignored — the forward-compat property binaries
 // older than a given kind rely on (they ignored "feedback" before it was folded, and
 // "checkpoint" before compaction existed).
@@ -431,10 +529,17 @@ func (l *Ledger) foldLocked(e Event) {
 		l.applyOpenLocked(e)
 		l.applyTriggerLocked(e)
 	case "resolve":
-		delete(l.open, e.Fingerprint)
+		// applyResolveLocked reads l.open[fp] (to clear a standing silence via the
+		// TriggerKey), so it must run BEFORE the delete below — matching the live
+		// path (Resolve calls applyResolveLocked, then reads/deletes l.open itself).
+		// Getting this backwards would make the replay path see an already-empty
+		// l.open[fp] and silently skip clearing the silence on reload.
 		l.applyResolveLocked(e.Fingerprint, e.At)
+		delete(l.open, e.Fingerprint)
 	case "feedback":
 		l.applyFeedbackLocked(e)
+	case "silence":
+		l.applySilenceLocked(e)
 	case "confirm":
 		l.applyConfirmLocked(e)
 	case "checkpoint":
@@ -464,10 +569,13 @@ func (l *Ledger) seedCheckpointLocked(cd *checkpointData) {
 	}
 	for k, v := range cd.ByTrigger {
 		l.byTrigger[k] = triggerAgg{count: v.Count, last: v.Last, curatedURL: v.CuratedURL,
-			entry: v.Entry, verdict: v.Verdict, conclusive: v.Conclusive}
+			entry: v.Entry, verdict: v.Verdict, conclusive: v.Conclusive, fingerprint: v.Fingerprint}
 	}
 	for k, v := range cd.Votes {
-		l.votes[k] = feedbackVote{rating: v.Rating, entry: v.Entry}
+		l.votes[k] = feedbackVote{rating: v.Rating, entry: v.Entry, at: v.At}
+	}
+	for k, v := range cd.Silences {
+		l.silences[k] = silenceState{at: cd.SilencedAt[k], until: v}
 	}
 	for k, v := range cd.TriggerConfirms {
 		l.triggerConfirms[k] = v
@@ -482,6 +590,25 @@ func (l *Ledger) seedCheckpointLocked(cd *checkpointData) {
 	l.droppedResolves += cd.DroppedResolves
 	l.staleResolves += cd.StaleResolves
 	l.resolvesSeen += cd.ResolvesSeen
+}
+
+// pruneLapsedSilencesLocked drops every standing silence whose window has already
+// closed at now, and reports how many it removed. Must be called with mu held (or
+// during single-threaded New, or on a compaction scratch ledger).
+//
+// The boundary matches the gate's exactly: RecurrenceGate.decide suppresses only
+// while now < SilencedUntil, so an entry with until <= now can no longer suppress
+// anything and removing it is invisible to every reader. That equality is what
+// makes this a prune rather than a policy — see Ledger.silences.
+func (l *Ledger) pruneLapsedSilencesLocked(now time.Time) int {
+	dropped := 0
+	for tk, s := range l.silences {
+		if !s.until.After(now) {
+			delete(l.silences, tk)
+			dropped++
+		}
+	}
+	return dropped
 }
 
 // compactLocked rewrites the ledger file as [checkpoint][recent tail]: it folds the
@@ -508,6 +635,10 @@ func (l *Ledger) compactLocked(events []Event) error {
 	for _, e := range events[:cut] {
 		scratch.foldLocked(e)
 	}
+	// The checkpoint is what the NEXT replay seeds from, so a lapsed silence written
+	// into it outlives the file it came from — the one place the leak becomes durable
+	// rather than merely resident. Pruned on the same terms as the live map above.
+	scratch.pruneLapsedSilencesLocked(time.Now())
 	return l.rewriteFileLocked(scratch.snapshotCheckpointLocked(), events[cut:])
 }
 
@@ -526,13 +657,21 @@ func (l *Ledger) snapshotCheckpointLocked() *checkpointData {
 		cd.ByTrigger = make(map[string]triggerAggJSON, len(l.byTrigger))
 		for k, v := range l.byTrigger {
 			cd.ByTrigger[k] = triggerAggJSON{Count: v.count, Last: v.last, CuratedURL: v.curatedURL,
-				Entry: v.entry, Verdict: v.verdict, Conclusive: v.conclusive}
+				Entry: v.entry, Verdict: v.verdict, Conclusive: v.conclusive, Fingerprint: v.fingerprint}
 		}
 	}
 	if len(l.votes) > 0 {
 		cd.Votes = make(map[string]feedbackVoteJSON, len(l.votes))
 		for k, v := range l.votes {
-			cd.Votes[k] = feedbackVoteJSON{Rating: v.rating, Entry: v.entry}
+			cd.Votes[k] = feedbackVoteJSON{Rating: v.rating, Entry: v.entry, At: v.at}
+		}
+	}
+	if len(l.silences) > 0 {
+		cd.Silences = make(map[string]time.Time, len(l.silences))
+		cd.SilencedAt = make(map[string]time.Time, len(l.silences))
+		for k, v := range l.silences {
+			cd.Silences[k] = v.until
+			cd.SilencedAt[k] = v.at
 		}
 	}
 	if len(l.triggerConfirms) > 0 {
@@ -687,7 +826,54 @@ func (l *Ledger) applyOpenLocked(e Event) {
 // Episodes(): pop the most-recent unresolved open (LIFO) for the fingerprint and,
 // if it was a counted recall, credit its resolution; with no pending open, buffer
 // the resolve for a later open. Must be called with mu held (or during New).
+//
+// It ALSO lifts any standing 🔕 silence on the resolved incident's trigger, before
+// and regardless of any of the above: the incident ending is the only question that
+// escape turns on. That is done through two complementary mechanisms whose union is
+// deliberate — see the comment at the top of the body before removing either.
 func (l *Ledger) applyResolveLocked(fp string, at time.Time) {
+	// A resolve re-arms investigation: the incident ended, so a standing human
+	// silence has served its purpose and a later firing deserves a fresh look.
+	// Done FIRST and unconditionally, because whether this resolve goes on to
+	// pair, buffer, or be discarded as stale says nothing about whether the
+	// incident is over — which is the only question the silence turns on.
+	//
+	// l.open is the fingerprint → latest-unresolved-open index, and an open
+	// carries its TriggerKey, so no new index is needed. foldLocked's resolve
+	// case deletes from l.open only AFTER calling this, so the entry is still
+	// here on both the live and the replay path.
+	if tk := l.open[fp].TriggerKey; tk != "" {
+		delete(l.silences, tk)
+	}
+	// …but l.open holds UNRESOLVED opens only, and the suppressed path records no
+	// open at all, so that index alone left the escape dead on a reachable path:
+	//
+	//	fire → investigate → resolve   (the open is paired and deleted)
+	//	🔕 clicked on the scrolled-back card
+	//	fire again → SUPPRESSED, no ledger open recorded
+	//	resolve again → l.open[fp] is empty → nothing to un-silence, ever
+	//
+	// The per-trigger index outlives the open, so it covers that gap without a new
+	// index to keep, checkpoint and bound. See clearSilencesForFingerprintLocked.
+	//
+	// BOTH mechanisms are kept, and NEITHER subsumes the other — do not "simplify"
+	// this to one. applyTriggerLocked only stamps a.fingerprint for the NEWEST open
+	// of a trigger, so the two cover complementary cases:
+	//
+	//	direct lookup ONLY   a resolve for an OLDER still-unresolved open whose
+	//	                     trigger has since opened again under a different
+	//	                     fingerprint — byTrigger holds the newer one, so the
+	//	                     scan below never matches it.
+	//	scan ONLY            the no-live-open case above, where l.open[fp] is empty.
+	//
+	// Two independent quality reviews read this comment when it claimed the scan
+	// "answers the same question", each concluded one of the two was redundant,
+	// and each proposed deleting a DIFFERENT one. Both would have silently
+	// narrowed the escape. The union is the point: clearing a silence too eagerly
+	// only costs one extra investigation, while missing one leaves an incident
+	// muted with no way out but expiry.
+	l.clearSilencesForFingerprintLocked(fp)
+
 	// Channel-liveness proof, recorded before any pairing decision: whether this
 	// resolve pairs, buffers, or is discarded says nothing about whether the SENDER
 	// emits resolves, and that is the only question ResolveChannelLive answers.
@@ -712,6 +898,31 @@ func (l *Ledger) applyResolveLocked(fp string, at time.Time) {
 	l.pendingOpens[fp] = stack[:len(stack)-1]
 	if top.counted {
 		l.creditResolveLocked(top.entry, at)
+	}
+}
+
+// clearSilencesForFingerprintLocked lifts every STANDING silence whose trigger's
+// newest investigation carried fingerprint fp — the resolve escape's fallback for
+// when the fingerprint→open index can no longer answer (see applyResolveLocked).
+//
+// It iterates the SILENCES, not the triggers: that bounds the scan by the number
+// of triggers a human has actually silenced and left live, which only ever grows
+// by an explicit click and is orders of magnitude smaller than byTrigger. No new
+// index is introduced, so nothing new can grow without bound either — the
+// fingerprint rides on the per-trigger roll-up that already exists per TriggerKey.
+//
+// Every match is cleared rather than the first one found, so the outcome does not
+// depend on Go's randomised map iteration order. Two distinct TriggerKeys sharing
+// a fingerprint is not a shape RunLore produces, but "usually deterministic" is not
+// a property worth shipping.
+func (l *Ledger) clearSilencesForFingerprintLocked(fp string) {
+	if fp == "" || len(l.silences) == 0 {
+		return
+	}
+	for tk := range l.silences {
+		if l.byTrigger[tk].fingerprint == fp {
+			delete(l.silences, tk)
+		}
 	}
 }
 
@@ -846,6 +1057,7 @@ func (l *Ledger) applyTriggerLocked(e Event) {
 		// an older recall's entry. The verdict tracks the newest open the same way.
 		a.entry = e.Entry
 		a.verdict = e.Verdict
+		a.fingerprint = e.Fingerprint
 	}
 	// The conclusive prior advances on its own clock and is never CLEARED by a later
 	// inconclusive open: the standing answer for a trigger outlives a run that failed
@@ -878,9 +1090,22 @@ type TriggerRecurrence struct {
 	Verdict      string // newest open's verdict ("" for pre-verdict events)
 	CuratedURL   string
 	FeedbackDown int // LIVE 👎 votes for this trigger, after per-user dedup
+	// FeedbackDownLatest is when the NEWEST live 👎 on this trigger was cast; zero
+	// when none stands (or when it was replayed from a checkpoint written before
+	// votes carried a time). Paired with SilencedAt by SilenceOutranksFeedback.
+	FeedbackDownLatest time.Time
 	// Conclusive is the newest prior that actually ANSWERED — not necessarily the
 	// newest one. Zero value when this trigger has never concluded.
 	Conclusive ConclusivePrior
+	// SilencedUntil is the expiry of the standing human 🔕 silence on this trigger;
+	// zero when none stands. Read by the suppression gate, which compares it against
+	// now — a lapsed silence is simply inert, never swept.
+	SilencedUntil time.Time
+	// SilencedAt is when that silence was RECORDED. It is carried alongside the
+	// expiry because the expiry cannot order two humans: a 24h silence clicked an
+	// hour ago and a 1h one clicked yesterday say different things about who spoke
+	// last while both being live. See SilenceOutranksFeedback.
+	SilencedAt time.Time
 }
 
 // ConclusivePrior is the newest investigation of a trigger whose verdict was an
@@ -903,6 +1128,39 @@ type ConclusivePrior struct {
 // different notions of contested-ness is exactly the divergence that issue was
 // about; add nuance here, not at the call sites.
 func (r TriggerRecurrence) Contested() bool { return r.FeedbackDown > 0 }
+
+// SilenceOutranksFeedback reports whether the standing 🔕 on this trigger is the
+// NEWEST HUMAN decision about it — the rule that settles a standing 👎 and a
+// standing 🔕 saying opposite things.
+//
+// It exists BESIDE Contested rather than inside it. Contested is the one shared
+// definition of contested-ness (#288), read by the coalescer and the prompt-replay
+// path as well as by suppression, and none of those asks "…but was it superseded?".
+// Folding the ordering in there would silently change all three.
+//
+// The bug it closes: Contested compares no timestamps at all, so a 👎 cast on
+// Monday outranked a 🔕 clicked on Tuesday forever. The click was recorded
+// durably, the human was acked "RunLore will NOT investigate this incident", and
+// every later firing re-investigated anyway — on precisely the triggers people
+// most want silenced, since a trigger nobody contests is rarely worth muting.
+//
+// Newest human wins, in both directions: a silence recorded after the newest live
+// 👎 suppresses; a 👎 cast after a silence re-arms investigation. It mirrors the
+// rule silences already use among themselves (latest wins per trigger).
+//
+// An UNKNOWN ordering — either timestamp zero, which is what a checkpoint written
+// before those fields existed replays — resolves in the 👎's favour. That is the
+// conservative direction: RunLore investigates and the human sees a notification
+// they can silence again, rather than going quiet on an argument it cannot settle.
+func (r TriggerRecurrence) SilenceOutranksFeedback() bool {
+	if !r.Contested() {
+		return true // nothing standing to outrank
+	}
+	if r.SilencedAt.IsZero() || r.FeedbackDownLatest.IsZero() {
+		return false
+	}
+	return r.SilencedAt.After(r.FeedbackDownLatest)
+}
 
 // Concluded reports whether an ANSWER stands for this trigger — some prior
 // investigation reached a conclusive verdict, whether or not the most recent one
@@ -929,10 +1187,15 @@ func (l *Ledger) Recurrence(triggerKey string) TriggerRecurrence {
 	defer l.mu.Unlock()
 	a := l.byTrigger[triggerKey]
 	tr := TriggerRecurrence{Count: a.count, Last: a.last, Verdict: a.verdict, CuratedURL: a.curatedURL, Conclusive: a.conclusive}
+	s := l.silences[triggerKey]
+	tr.SilencedUntil, tr.SilencedAt = s.until, s.at
 	prefix := triggerKey + "\x00"
 	for k, v := range l.votes {
 		if v.rating == "down" && strings.HasPrefix(k, prefix) {
 			tr.FeedbackDown++
+			if v.at.After(tr.FeedbackDownLatest) {
+				tr.FeedbackDownLatest = v.at
+			}
 		}
 	}
 	return tr
@@ -1225,12 +1488,107 @@ func (l *Ledger) applyFeedbackLocked(e Event) {
 	entry := l.byTrigger[e.TriggerKey].entry
 	if prev, ok := l.votes[key]; ok {
 		if prev.rating == e.Kind && prev.entry == entry {
-			return // duplicate click — idempotent
+			// Idempotent for the AGGREGATE — nothing is re-credited — but the vote's
+			// TIME still moves forward. Under newest-human-wins a repeat 👎 cast after
+			// a colleague's 🔕 is a fresh human refusal, and freezing the timestamp at
+			// the first click would leave the silence permanently outranking it: the
+			// same "recorded, acked, then ignored" failure this whole ordering exists
+			// to close. Guarded on After so a replay can never rewind it.
+			if e.At.After(prev.at) {
+				prev.at = e.At
+				l.votes[key] = prev
+			}
+			return
 		}
 		l.creditFeedbackLocked(prev.entry, prev.rating, -1)
 	}
-	l.votes[key] = feedbackVote{rating: e.Kind, entry: entry}
+	l.votes[key] = feedbackVote{rating: e.Kind, entry: entry, at: e.At}
 	l.creditFeedbackLocked(entry, e.Kind, +1)
+}
+
+// SetMaxSilenceWindow installs the cap Silence enforces on a requested window
+// (zero = uncapped), and is how the serve wiring hands the ledger
+// notify.silence.max_window. A nil receiver is a no-op, like every other write
+// on this type.
+//
+// It is a setter rather than a public field because Silence is called
+// concurrently — the Slack interactions handler and the Matrix /sync goroutine
+// both reach it — and the cap is read on that path. Taking the same mutex here
+// means a caller that changes the cap after startup (a config reload, a test)
+// cannot race a live click.
+func (l *Ledger) SetMaxSilenceWindow(d time.Duration) {
+	if l == nil {
+		return
+	}
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.maxSilenceWindow = d
+}
+
+// Silence records a human 🔕 verdict: this trigger's diagnosis is accurate and
+// known, so do not re-investigate it for window. It is the third feedback verdict
+// — 👍 accurate, 👎 off-base, 🔕 accurate but known — and the only one that changes
+// what RunLore DOES rather than how it weighs an entry.
+//
+// Validation is deliberately at the write, not the caller: window must be positive
+// and within the cap SetMaxSilenceWindow installed, so a Matrix `silence:` command
+// (free text) cannot
+// exceed what the Slack presets offer. triggerKey must be non-empty — with nothing
+// to key the suppression on there is nothing for the gate to read back, and a line
+// that can never be read is worse than a refused write.
+//
+// Durable-first, like Open/Resolve/Feedback: a failed append leaves the fold
+// untouched. Attribution is entirely TriggerKey-based; user is recorded for the
+// audit trail, NOT for dedup — see Ledger.silences for why latest-wins per trigger.
+func (l *Ledger) Silence(triggerKey string, window time.Duration, user string, at time.Time) error {
+	// A nil receiver must degrade the same way Feedback already does through its
+	// nil-safe enabled() check — but enabled() runs AFTER the window/cap
+	// validation below (deliberately: see the doc comment), so without this guard
+	// a nil *Ledger would panic on the l.mu.Lock() taken to read the cap before
+	// ever reaching it.
+	if l == nil {
+		return nil
+	}
+	if triggerKey == "" {
+		return fmt.Errorf("silence: empty trigger key")
+	}
+	if window <= 0 {
+		return fmt.Errorf("silence window %v: must be positive", window)
+	}
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if l.maxSilenceWindow > 0 && window > l.maxSilenceWindow {
+		return fmt.Errorf("silence window %v exceeds the %v cap", window, l.maxSilenceWindow)
+	}
+	if !l.enabled() {
+		return nil
+	}
+	e := Event{Event: "silence", TriggerKey: triggerKey, Kind: window.String(), User: user, At: at}
+	if err := l.appendLocked(e); err != nil {
+		return err
+	}
+	l.applySilenceLocked(e)
+	return nil
+}
+
+// applySilenceLocked folds one silence event into the per-trigger expiry map.
+// Latest wins: the event's own At + window replaces whatever stood, so a replay
+// in file order lands on the newest silence exactly as the live path did.
+// A malformed replayed line (no key, unparseable or non-positive window) is
+// dropped rather than folded — the same posture applyFeedbackLocked takes.
+//
+// The cap is NOT re-applied here. maxSilenceWindow is a write-time policy that
+// can legitimately change between runs, and re-applying it on replay would let a
+// config edit retroactively rewrite history the file already records.
+func (l *Ledger) applySilenceLocked(e Event) {
+	if e.TriggerKey == "" {
+		return
+	}
+	window, err := time.ParseDuration(e.Kind)
+	if err != nil || window <= 0 {
+		return
+	}
+	l.silences[e.TriggerKey] = silenceState{at: e.At, until: e.At.Add(window)}
 }
 
 // Confirm appends a machine confirmation: a FRESH investigation independently

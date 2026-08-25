@@ -5,7 +5,8 @@ integration: {kind: notifier, id: matrix}
 ---
 
 **What it gives you** — findings delivered to any Matrix room, with an optional zero-ingress
-👍/👎 feedback loop over reactions.
+👍/👎 feedback loop over reactions, and a 🔕 reaction (or a `silence:` thread command) to silence a
+known incident.
 
 ## Minimal config
 
@@ -42,21 +43,105 @@ kubectl -n runlore logs deploy/runlore | grep 'msg=findings'
   *outbound* HTTPS request authenticated by the notifier's own access token. This is the zero-ingress
   alternative to Slack's Interactivity Request URL.
 - The listener runs on the leader only, skips reactions from before startup, ignores every emoji
-  except 👍/👎, and only counts votes on messages **the bot itself sent** (attribution is anchored on
-  `/whoami`).
+  except 👍/👎/🔕, and only counts votes (and silences) on messages **the bot itself sent**
+  (attribution is anchored on `/whoami`).
 - Startup fails loud unless `homeserver`/`room_id`/`access_token_env` and `outcome.ledger_path` are
   set.
-- Use an **invite-only room** — any room member can vote.
-- **`feedback_reactions` and `thread_capture` are two independently-gated capabilities sharing ONE
-  listener.** Enabling either starts the same `/sync` long-poll and the same leader-only goroutine —
-  there is one Matrix listener and one `/sync` connection per process, never two. What differs per
-  flag is which event types that shared `/sync` filter requests and which handler actually acts on
-  them: `feedback_reactions` alone asks for `m.reaction` and only ever calls the reaction handler;
-  `thread_capture` alone asks for `m.room.message` and only ever calls the message handler. With both
-  on, the filter requests both event types over that same connection. Turning one on never turns the
-  other's handling on — each is gated on its own flag in code, not just requested-or-not on the wire —
-  but it does mean a homeserver hiccup or a leadership change pauses whichever capabilities are
-  enabled together, since they ride the same poll loop.
+- Use an **invite-only room** — any room member can vote, and any room member can silence.
+- **`feedback_reactions`, `silence_reactions` and `thread_capture` are independently-gated
+  capabilities sharing ONE listener.** Enabling any of them starts the same `/sync` long-poll and the
+  same leader-only goroutine — there is one Matrix listener and one `/sync` connection per process, no
+  matter how many of the three are on. What differs per flag is which event types that shared `/sync`
+  filter requests and which handler actually acts on them: `feedback_reactions` **and**
+  `silence_reactions` both ask for `m.reaction` (👍/👎 and 🔕 are the same event type on the wire, and
+  are told apart only once `handleReaction` reads which emoji it was — each still gated on its own
+  flag, so `silence_reactions` off means a 🔕 reaction is read and dropped, never recorded); enabling
+  either alone is therefore enough to receive the event, but recording a silence additionally needs
+  `silence_reactions` itself on. `thread_capture` alone asks for `m.room.message`. Turning one flag on
+  never turns another's handling on — each is gated on its own flag in code, not just
+  requested-or-not on the wire — but it does mean a homeserver hiccup or a leadership change pauses
+  whichever capabilities are enabled together, since they ride the same poll loop.
+
+### Silence a recurring incident
+
+**`notify.matrix.silence_reactions` (opt-in, default `false`)** turns on a 🔕 reaction; a second
+path, the `silence: <duration>` thread command, needs `thread_capture` too. Both land in the same
+outcome ledger as Slack's `silence_button`:
+
+- **A 🔕 reaction** on a RunLore investigation message — the zero-ingress equivalent of Slack's
+  overflow menu. A bare reaction carries no duration, so it always silences for
+  `notify.silence.windows[0]` (the FIRST configured preset) — there is no way to pick a longer
+  window from a reaction alone. `silence_reactions` alone is enough: the `/sync` filter already
+  carries `m.reaction` for feedback voting, so no other flag is required.
+- **A `silence: <duration>` thread command** — reply in the investigation thread with, for example
+  `silence: 4h`, and RunLore silences for exactly that duration (up to `notify.silence.max_window`).
+  The `silence:` token is matched case-insensitively (`SILENCE: 4h` works) and must **start** your
+  message, once the bot mention is stripped. That is stricter than `note:` and `reinvestigate:`, which
+  are recognised anywhere in a message, and deliberately so: acting on this one *writes* — it records
+  a ledger event and switches investigation off — so a sentence that merely mentions it (`note: we
+  agreed on silence: 4h`) is answered with a request to rephrase rather than silently muting the
+  incident and discarding the note. A sentence using the word without a trailing colon is not a
+  command at all. This path needs
+  no `model.chat` configuration and costs no model call: parsing a duration is deterministic.
+  **Unlike the reaction, it also needs `notify.matrix.thread_capture: true`** — a plain message only
+  reaches RunLore at all once the `/sync` filter widens to `m.room.message`, which `silence_reactions`
+  on its own does not request. That in turn means the same forge/registry/replier prerequisites
+  [Write knowledge back from a thread](#write-knowledge-back-from-a-thread) below documents for
+  `thread_capture` apply here too, even though recording a silence never touches the forge itself:
+  with any of those three missing, `thread_capture` silently degrades to off and the command is never
+  parsed. Either `silence_reactions` or Slack's `silence_button` satisfies the shared
+  `notify.silence` requirements (`outcome.ledger_path`, non-empty `windows`, a positive `max_window`)
+  the command also depends on.
+
+Either path suppresses re-investigating this exact `TriggerKey` — **no model call, no notification,
+no ledger open** — until the window expires, the incident fires again as **CRITICAL**, a standing
+**👎** re-arms it (newest human wins: a 👎 cast *after* the silence lifts it, a 🔕 clicked after the
+newest 👎 still suppresses), or the incident **resolves**. The **`silence:` thread command** is
+acknowledged with a message naming who silenced it, until when, and restating the escapes that apply
+to this deployment. A bare **🔕 reaction** is recorded and logged but gets no reply — a reaction has
+no thread to answer in, so check `runlore_investigations_completed_total{result="silenced"}` or the
+`msg="matrix silence recorded"` log line if you need confirmation.
+
+**Two of those four are alert-specific**, exactly as on the Slack side (see [Slack → Silence a
+recurring incident]({{< relref "/docs/integrations/notifications/slack.md#silence-a-recurring-incident" >}})
+for the full explanation): a GitOps-sourced failure sets no severity, so the CRITICAL carve-out never
+fires, and its fingerprint is synthetic with no resolve channel, so the resolve escape never fires
+either. **For a GitOps failure, a silence is bounded by its expiry and a 👎 — and nothing else.** The
+same loss of the resolve escape applies to an Alertmanager receiver configured with
+`send_resolved: false`.
+
+**A third is config-specific.** The 👎 escape only exists where a 👍/👎 control is actually enabled
+somewhere: with `silence_reactions: true` and `feedback_reactions: false`, `handleReaction` drops a
+👎, so nobody can cast one. Combine that with a GitOps trigger and the expiry is the only bound left.
+RunLore warns at startup when silencing is on with no 👍/👎 control on any transport; votes and
+silences share one outcome ledger, so Slack's `feedback_buttons` satisfies it too.
+
+```yaml
+notify:
+  silence:
+    windows: [1h, 4h, 24h]
+    max_window: 24h
+  matrix:
+    homeserver: https://matrix.org
+    room_id: "!yourroom:matrix.org"
+    access_token_env: MATRIX_TOKEN
+    silence_reactions: true
+outcome:
+  ledger_path: /var/lib/runlore/outcome.jsonl
+```
+
+Like Matrix's feedback reactions, silencing is deliberately **unprivileged** — any member of the
+room can silence an incident, with no allowlist — which is safe for the same reason Slack's button
+is: for an alert-sourced incident **with a 👍/👎 control enabled** the blast radius is bounded by the
+four escapes above (narrower for a GitOps failure, a `send_resolved: false` receiver, or a deployment
+with no 👍/👎 control anywhere, per above), every silence is attributed to the sender's Matrix id in
+the outcome ledger, and the window is capped by `notify.silence.max_window`.
+Use an **invite-only room**, as for feedback reactions.
+
+`silence_reactions` is gated **independently** of `feedback_reactions` — enabling it on its own
+records 🔕 silences without recording 👍/👎 votes, and vice versa. Turning silencing on *without*
+either transport's 👍/👎 control removes the 👎 escape entirely; startup warns when that is the
+configuration.
 
 ### Write knowledge back from a thread
 

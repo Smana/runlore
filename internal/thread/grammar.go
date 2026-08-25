@@ -23,6 +23,16 @@ const (
 	// `reinvestigate` forge label. Reserving it now makes adding it later a
 	// handler case rather than a grammar migration.
 	IntentReinvestigate
+	// IntentSilence is the "silence:" prefix: suppress re-investigating this
+	// incident for the duration that follows ("silence: 4h"). Like
+	// IntentReinvestigate it CHANGES BEHAVIOUR rather than recording knowledge,
+	// which is why it sits at high priority in prefixes — a note that merely
+	// contains it is refused as ambiguous rather than filed as the human's words.
+	//
+	// Unlike IntentReinvestigate, acting on it WRITES: Responder.Handle therefore
+	// requires Anchored before touching the ledger, and answers
+	// SilenceNotAnchoredReply otherwise. See Parse.
+	IntentSilence
 )
 
 // String renders the intent for logs and metrics.
@@ -32,6 +42,8 @@ func (i Intent) String() string {
 		return "note"
 	case IntentReinvestigate:
 		return "reinvestigate"
+	case IntentSilence:
+		return "silence"
 	default:
 		return "freeform"
 	}
@@ -56,14 +68,34 @@ type Parsed struct {
 
 // prefixes maps a recognised command prefix to its intent, in PRIORITY order:
 // the first entry whose token appears anywhere in the message wins, regardless
-// of which one appears earlier in the text. "reinvestigate:" leads so a note
-// that also contains it is refused rather than recorded — see Parse for why
-// that side is the right one to err on.
+// of which one appears earlier in the text. "reinvestigate:" and "silence:"
+// both lead, ahead of "note:", and for the identical reason: each CHANGES
+// BEHAVIOUR rather than recording knowledge, so a note that also contains one
+// of them is refused as ambiguous rather than filed as the human's words — see
+// Parse for why that side is the right one to err on. Their relative order
+// between themselves decides WHICH refusal a message carrying both tokens gets,
+// and nothing more — Parse returns the first entry in this slice's order whose
+// token matches anywhere, so swapping them flips the winner, but never flips a
+// refusal into a write:
+//
+//   - "silence:" NOT at position 0 is refused by Handle as unanchored, whichever
+//     entry led.
+//   - "silence:" AT position 0 takes the rest of the message as its Text, so a
+//     "reinvestigate:" token anywhere after it lands inside that Text and
+//     time.ParseDuration rejects the lot.
+//
+// So "silence: 4h, and please reinvestigate: this tomorrow" answers
+// ReinvestigateNotSupportedReply today and would answer "I couldn't read … as a
+// duration" under the opposite order; either way nothing is silenced and nothing
+// is written. Shipped order still puts "reinvestigate:" first, on the weaker but
+// real ground that its refusal is the same whatever the token's position, so the
+// reply a human gets does not depend on where they put it.
 var prefixes = []struct {
 	prefix string
 	intent Intent
 }{
 	{"reinvestigate:", IntentReinvestigate},
+	{"silence:", IntentSilence},
 	{"note:", IntentNote},
 }
 
@@ -85,6 +117,15 @@ var prefixes = []struct {
 // operator is left believing either a re-run started or their words were
 // saved, when neither happened. A false POSITIVE costs nothing to match here,
 // because the outcome is a refusal that writes nothing and spends nothing.
+//
+// For "silence:" the anywhere-match is likewise unconditional, but ACTING on an
+// unanchored one is not, and the asymmetry is the whole point. Recording a
+// silence WRITES a durable ledger event and switches investigation off for the
+// window — so "note: we agreed on silence: 4h" matching here must not become a
+// suppression, or one sentence of prose mutes an incident for four hours and
+// throws away the note the human was actually writing. Handle refuses it with
+// SilenceNotAnchoredReply; the match still happens here so the refusal can be
+// specific rather than the sentence sliding into freeform and being billed.
 //
 // For "note:" the reason is COST, and it only holds when the chat layer is
 // configured. Everything that is not a recognised prefix is IntentFreeform,

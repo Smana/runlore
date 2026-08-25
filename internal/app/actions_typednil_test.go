@@ -56,11 +56,11 @@ func TestActionsInterfaceFieldsAreNeverAssignedRawBuilderResults(t *testing.T) {
 			"teach actionsInterfaceFields to resolve it if this is noisy", u)
 	}
 
-	// Sanity: a field set missing any of the three known interface fields means
+	// Sanity: a field set missing any of the four known interface fields means
 	// the reader silently stopped matching (a renamed struct, a moved package)
 	// and the guard below would pass forever having checked nothing.
-	if !fields["Threads"] || !fields["Pauser"] || !fields["Feedback"] {
-		t.Fatalf("expected Threads, Pauser and Feedback among server.Actions' interface fields, got %v — "+
+	if !fields["Threads"] || !fields["Pauser"] || !fields["Feedback"] || !fields["Silence"] {
+		t.Fatalf("expected Threads, Pauser, Feedback and Silence among server.Actions' interface fields, got %v — "+
 			"this guard has gone inert", slices.Sorted(maps.Keys(fields)))
 	}
 

@@ -589,6 +589,46 @@ func BuildDeps(ctx context.Context, cfg *config.Config, gp providers.GitOpsProvi
 	return &Deps{Model: model, Tools: tools, Recall: recall, Catalog: cat}
 }
 
+// recurrenceGateWanted reports whether the suppression gate must exist at all.
+//
+// Extracted as a named predicate rather than left inline because getting it wrong
+// is invisible: recurrence_cooldown defaults to 0, so a deployment that enabled
+// ONLY silencing would get a nil gate, and every click would be durably recorded,
+// acked as successful, and then ignored. The gate is needed whenever EITHER a
+// machine cooldown or a human silence can suppress — see RecurrenceGate.
+func recurrenceGateWanted(cfg *config.Config) bool {
+	return cfg.Investigation.RecurrenceCooldown.Std() > 0 || cfg.Notify.SilenceEnabled()
+}
+
+// warnSilenceWithoutFeedback warns when silencing is on and no transport offers
+// a 👍/👎 control.
+//
+// A 🔕 is documented — and argued to be safe as an UNPRIVILEGED action —
+// because its blast radius is bounded four independent ways: the window expires,
+// a CRITICAL firing is never silenced, the alert resolving clears it, and a
+// standing 👎 re-arms it. That last one is not a property of the silence: it is a
+// property of a control the deployment may not have. With feedback_buttons and
+// feedback_reactions both off — which is exactly the deployment the Slack page
+// recommends, "the 🔕 menu and nothing else" — there is no way to cast a 👎 at
+// all. Pair that with a GitOps-sourced trigger, which has no severity and no
+// resolve channel, and the expiry is the ONLY remaining bound: a mistaken 24h
+// click cannot be lifted by anyone.
+//
+// That is a legitimate configuration; being silently unaware of it is not. A
+// warning rather than a validation error, deliberately: the silence-only
+// deployment is documented and supported, and failing startup would break it.
+func warnSilenceWithoutFeedback(cfg *config.Config, log *slog.Logger) {
+	if !cfg.Notify.SilenceEnabled() || cfg.Notify.FeedbackEnabled() {
+		return
+	}
+	log.Warn("investigation silencing is enabled with no 👍/👎 control on any transport: "+
+		"the 👎 escape from a silence does not exist here, so a silence can only be lifted by its expiry, "+
+		"a CRITICAL firing, or the alert resolving — and a GitOps-sourced trigger has neither of those last "+
+		"two, leaving its expiry as the only bound. Enable notify.slack.feedback_buttons or "+
+		"notify.matrix.feedback_reactions to restore it, or lower notify.silence.max_window",
+		"max_window", cfg.Notify.Silence.MaxWindow.Std())
+}
+
 // BuildInvestigator returns the LLM ReAct investigator when a model is configured,
 // otherwise the read-only LogInvestigator. It also returns the catalog (nil when
 // no model is configured or no catalog is wired) and the notifier it builds
@@ -622,13 +662,20 @@ func BuildInvestigator(ctx context.Context, cfg *config.Config, deps *Deps, appr
 	if actions.Enabled() {
 		log.Info("action policy enabled", "mode", string(actions.Mode()))
 	}
-	// Recurrence cooldown (opt-in): suppress re-investigating a trigger the agent
-	// conclusively answered moments ago. Validate already requires a ledger with a
-	// non-zero cooldown; Enabled() guards the disabled-ledger edge regardless.
+	// The suppression gate: the machine's cooldown, the human's silence, or both.
+	// Cooldown may legitimately be 0 here — a silence-only deployment gets a gate
+	// whose cooldown ladder never fires but whose silence branch does.
 	var recurrence *investigate.RecurrenceGate
-	if d := cfg.Investigation.RecurrenceCooldown.Std(); d > 0 && ledger.Enabled() {
+	if recurrenceGateWanted(cfg) && ledger.Enabled() {
+		d := cfg.Investigation.RecurrenceCooldown.Std()
 		recurrence = &investigate.RecurrenceGate{Cooldown: d}
-		log.Info("recurrence cooldown enabled", "cooldown", d)
+		if d > 0 {
+			log.Info("recurrence cooldown enabled", "cooldown", d)
+		}
+		if cfg.Notify.SilenceEnabled() {
+			log.Info("investigation silencing enabled", "max_window", cfg.Notify.Silence.MaxWindow.Std())
+			warnSilenceWithoutFeedback(cfg, log)
+		}
 	}
 	// Per-tool timeout: default to 60s when unset (0) so one hung tool can't eat the
 	// whole per-investigation budget; an explicit config value flows through as-is.

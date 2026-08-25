@@ -25,7 +25,13 @@ two diagnostic channels:
 
 ## An alert fired but no investigation started
 
-By far the most common case. Work from ingress inward.
+By far the most common case. RunLore has **five** independent layers that can each decide not to
+investigate — dedup, debounce, the coalescer's cooldown, the per-trigger recurrence cooldown, and a
+human 🔕 silence — and they answer different questions (*"is this the same still-firing alert?"*,
+*"did it clear before we even started?"*, *"did this correlation just get investigated?"*, *"did THIS
+trigger just get a conclusive answer?"*, *"did a human say stop?"*). Ruling one out does not rule out
+another, so an operator chasing "why was it quiet" needs to know all five exist before assuming the
+layer they found is the only candidate. Work from ingress inward.
 
 **1. Is there a per-incident decision line?** Every *admitted* alert produces exactly one log event:
 
@@ -70,6 +76,8 @@ msg=incident alert=<name> severity=<sev> namespace=<ns> investigate=<bool> reaso
 | `runlore_incidents_debounced_total` rising | a **non-critical** alert self-resolved within `triggers.incidents.debounce` and was dropped before investigating; log: `msg="alert resolved within debounce window; dropping self-resolving incident"` | expected noise control — lower `incidents.debounce` if you want faster (but noisier) reactions, or set `0s` to disable. (Criticals are never held, so they never appear here) |
 | `runlore_incidents_dropped_on_shutdown_total` > 0 | **alert LOSS.** The process shut down while an alert was still held in its debounce window. Alertmanager already got a `200`, so it will not resend until its `repeat_interval` (often hours) — the alert is simply never investigated. Log: `msg="held incident DROPPED: shutting down before its debounce window elapsed"` (WARN, names the alert + fingerprint) | expected to be **rare**, but it rises once per held alert on every restart/`helm upgrade` that lands mid-hold. The hold window (60s default) exceeds the drain grace period, so draining cannot rescue it. If you cannot tolerate this, shorten `triggers.incidents.debounce` or set it to `0s`. Note criticals are never held, so they are never lost this way |
 | `runlore_investigations_cancelled_total` rising | the alert resolved while its investigation was still queued and `triggers.incidents.cancel_queued_on_resolve` (**on by default**) dropped it; log: `msg="incident resolved before investigation started; cancelling queued investigation"` | expected noise control — and the only self-resolving filter criticals get. Set the flag to `false` if you want post-hoc investigations of self-resolved alerts |
+| `runlore_investigations_completed_total{result="recurrence_suppressed"}` rising | this exact `TriggerKey` was conclusively answered less than `investigation.recurrence_cooldown` ago and fired again — suppressed: no model call, no notification, no ledger open; log: `msg="recurrence cooldown: suppressing re-investigation"` | expected noise control (opt-in, off by default) — raise/lower the cooldown, or accept it. A trigger that has **never** concluded is never suppressed this way; a standing 👎 re-arms it immediately. (A resolve does **not** re-arm the cooldown — it only clears a **silence**, a separate mechanism; see the `silenced` row below) |
+| `runlore_investigations_completed_total{result="silenced"}` rising | a human clicked the Slack 🔕 button, reacted 🔕 on Matrix, or typed `silence: <duration>` in an investigation thread on either transport, and the window hasn't lapsed — suppressed exactly like the recurrence cooldown: no model call, no notification, no ledger open; log: `msg="silenced by a human: skipping re-investigation"` | expected — this is exactly what the control is for (opt-in, off by default: `notify.slack.silence_button` / `notify.matrix.silence_reactions`). It never suppresses a **CRITICAL** firing; a colleague's 👎 (cast *after* the silence — newest human wins) or the incident resolving lifts it immediately, or wait for the window to expire. The 👎 escape needs a 👍/👎 control enabled on some transport (`notify.slack.feedback_buttons` / `notify.matrix.feedback_reactions`); with none, RunLore warns at startup and only the expiry, a CRITICAL firing and a resolve remain |
 
 ---
 

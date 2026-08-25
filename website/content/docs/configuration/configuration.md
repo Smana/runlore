@@ -591,6 +591,59 @@ attributes nothing). Startup fails loud unless `homeserver`/`room_id`/`access_to
 > the same poll loop, so a homeserver hiccup or a leadership change pauses whichever of the two you
 > have enabled together.
 
+**🔕 Silence — `notify.silence`, `slack.silence_button`, `matrix.silence_reactions` (opt-in, all
+default `false`/empty).** A third feedback verdict beside 👍/👎, and the only one that changes what
+RunLore *does* rather than how it weighs a recalled entry: picking a window suppresses
+re-investigating that incident's `TriggerKey` for the duration chosen — no model call, no
+notification, no ledger open — until it expires, a CRITICAL firing breaks through, a standing 👎
+re-arms it (newest human wins: a 👎 cast *after* the silence lifts it, a 🔕 clicked after the newest
+👎 still suppresses), or the incident resolves. **The CRITICAL and resolve escapes are
+alert-specific**: a GitOps-sourced failure sets no severity and its fingerprint has no resolve channel
+at all, so such a silence is bounded only by its expiry and a 👎 (same for an Alertmanager receiver
+configured with `send_resolved: false`, which loses only the resolve escape). **And the 👎 escape is
+config-specific**: it needs a 👍/👎 control enabled on some transport (`slack.feedback_buttons` or
+`matrix.feedback_reactions` — votes and silences share one ledger, so either counts). With none
+enabled, and a GitOps trigger, the expiry is the only bound; startup warns when silencing is on with
+no 👍/👎 control anywhere. See [Slack → Silence a recurring
+incident]({{< relref "/docs/integrations/notifications/slack.md#silence-a-recurring-incident" >}})
+and [Matrix → Silence a recurring
+incident]({{< relref "/docs/integrations/notifications/matrix.md#silence-a-recurring-incident" >}})
+for the click/reaction/command mechanics and the escapes in full; this section is the key
+reference:
+
+- `notify.silence.windows` — **opt-in**, the durations offered (Slack's overflow-menu options; also
+  the ceiling a Matrix `silence: <duration>` command may not exceed). **Required, non-empty** whenever
+  any silence transport is on — with no presets there is nothing to render and no duration for a
+  click to record. With `slack.silence_button` on it must list **2 to 5** entries: both bounds are
+  Slack's own limits on an overflow element, and breaching either makes Slack reject the *entire*
+  message (`invalid_blocks`), so no finding is delivered at all — not just a missing 🔕 control. Only
+  the **lower** bound is conditional: a Matrix-only deployment renders no overflow and may list a
+  single preset, but the **ceiling of 5 stays unconditional** — it costs a Matrix-only deployment
+  two presets no reaction can reach anyway, and it keeps the config from breaking the day Slack is
+  turned on. `windows[0]` doubles as the default used wherever no duration can be carried (a bare
+  Matrix 🔕 reaction).
+- `notify.silence.max_window` — **opt-in**, the hard cap every window above — and every Matrix
+  `silence:` command — must respect. **Required, positive** whenever any silence transport is on:
+  zero is rejected as indistinguishable from a permanent silence, since nothing else in the system
+  would ever lift one.
+- `notify.slack.silence_button` — **opt-in**, a 🔕 overflow menu beside 👍/👎 on Slack investigation
+  messages. Gated **independently** of `feedback_buttons`: enabling one does not render the other.
+  Requires `signing_secret_env` and a Slack delivery target, for the same reason `feedback_buttons`
+  does above — clicks arrive on the same `POST /slack/interactions` endpoint, and a control can only
+  exist on a message RunLore actually delivered.
+- `notify.matrix.silence_reactions` — **opt-in**, a 🔕 reaction on Matrix investigation messages,
+  recorded at `notify.silence.windows[0]` (a bare reaction carries no duration of its own). Gated
+  **independently** of `feedback_reactions`, sharing the same `/sync` listener and the same
+  `m.reaction` event type — the two are told apart only by which emoji arrived. Requires the same
+  notifier fields `feedback_reactions` does; the `silence: <duration>` command additionally requires
+  `thread_capture` (below), since a plain message only reaches RunLore once the `/sync` filter widens
+  to `m.room.message`.
+
+Every silence transport additionally requires `outcome.ledger_path`: a silence is recorded there, and
+the suppression gate (`RecurrenceGate`, the same one `recurrence_cooldown` above uses) reads it back
+from there. Without it, Validate fails loud at startup rather than let a control record a click
+durably and then silently ignore it forever — the same posture `feedback_buttons` already takes.
+
 **🧵 Thread capture — `thread_capture` (opt-in, default `false`).** When enabled, replying inside a
 Slack investigation thread with `@runlore note: <text>` writes what you know back into the knowledge
 base as a reviewed PR — a comment on the finding's existing KB PR, or a small `Concept` entry PR when

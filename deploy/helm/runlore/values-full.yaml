@@ -204,6 +204,22 @@ config:
   notify:
     slack:
       webhook_url_env: SLACK_WEBHOOK_URL
+      # Verifies every button click below (±5 min replay window).
+      signing_secret_env: SLACK_SIGNING_SECRET
+      # OPT-IN 🔕: a third control beside 👍/👎 that suppresses re-investigating a
+      # trigger for the chosen window (notify.silence below) — no model call, no
+      # notification, no ledger open — until it expires, a CRITICAL fires, a 👎
+      # lands (newest human wins), or the incident resolves. Gated independently
+      # of feedback_buttons — but the 👎 escape needs a 👍/👎 control enabled on
+      # SOME transport, so turning this on with neither feedback_buttons nor
+      # matrix.feedback_reactions removes it (startup warns).
+      silence_button: true
+    # Shared presets for the 🔕 control above: windows[0] is used wherever no
+    # duration can be carried (a bare Matrix reaction). Requires outcome.ledger_path
+    # (set below) and at least one of slack.silence_button / matrix.silence_reactions.
+    silence:
+      windows: [1h, 4h, 24h]
+      max_window: 24h
 
   catalog:
     dir: /var/lib/runlore/catalog # must match catalog.mountPath above

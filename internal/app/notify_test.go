@@ -566,6 +566,32 @@ func TestBuildMatrixFeedbackThreadCaptureWiresStandalone(t *testing.T) {
 	}
 }
 
+// TestBuildMatrixFeedbackSilenceReactionsWiresStandalone pins the Task 5 early-
+// return widening at the top gate: the listener must build from
+// notify.matrix.silence_reactions ALONE, with feedback_reactions and
+// thread_capture both off. Before that widening, BuildMatrixFeedback's top gate
+// checked only FeedbackReactions/ThreadCapture, so a silence_reactions-only
+// deployment got a nil listener — the same shape of bug
+// TestBuildMatrixFeedbackThreadCaptureWiresStandalone pins for thread_capture.
+func TestBuildMatrixFeedbackSilenceReactionsWiresStandalone(t *testing.T) {
+	t.Setenv("TEST_MATRIX_TOKEN_SILENCE_STANDALONE", "matrix-token")
+	cfg := &config.Config{}
+	cfg.Notify.Matrix = config.MatrixNotify{
+		Homeserver: "https://matrix.example.org", RoomID: "!room:x",
+		AccessTokenEnv: "TEST_MATRIX_TOKEN_SILENCE_STANDALONE", SilenceReactions: true, // FeedbackReactions and ThreadCapture left false
+	}
+	ledger, err := outcome.New(filepath.Join(t.TempDir(), "ledger.jsonl"))
+	if err != nil {
+		t.Fatalf("outcome.New: %v", err)
+	}
+	log := slog.New(slog.NewTextHandler(io.Discard, nil))
+
+	mfb := BuildMatrixFeedback(cfg, ledger, nil, nil, nil, nil, nil, log)
+	if mfb == nil {
+		t.Fatal("silence_reactions alone (feedback_reactions and thread_capture both off) must still build the listener")
+	}
+}
+
 // TestBuildMatrixFeedbackThreadCaptureOffLeavesNeitherWired pins "supplying no
 // option must leave thread capture off": with thread_capture off (even with
 // everything else reachable), the built listener carries neither Mentions nor
@@ -1246,5 +1272,84 @@ func mustPut(t *testing.T, reg *thread.Registry, tc thread.Context) {
 	t.Helper()
 	if err := reg.Put(tc); err != nil {
 		t.Fatalf("Registry.Put(%q): %v", tc.Root, err)
+	}
+}
+
+// TestRecurrenceGateBuiltForSilenceWithoutACooldown pins the nil-gate trap.
+//
+// recurrence_cooldown defaults to 0. If the gate is only constructed when a
+// cooldown is set, a deployment that turned on silencing and nothing else gets a
+// nil gate — every click is durably recorded, the ack says it worked, and not one
+// investigation is ever suppressed. The failure is invisible from outside.
+func TestRecurrenceGateBuiltForSilenceWithoutACooldown(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		cooldown time.Duration
+		silence  bool
+		want     bool // is a gate expected?
+	}{
+		{name: "neither: no gate", want: false},
+		{name: "cooldown only", cooldown: time.Hour, want: true},
+		{name: "silence only — the regression", silence: true, want: true},
+		{name: "both", cooldown: time.Hour, silence: true, want: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := &config.Config{}
+			cfg.Investigation.RecurrenceCooldown = config.Duration(tc.cooldown)
+			cfg.Notify.Slack.SilenceButton = tc.silence
+
+			got := recurrenceGateWanted(cfg)
+			if got != tc.want {
+				t.Errorf("recurrenceGateWanted() = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+// TestWarnSilenceWithoutFeedback pins the startup warning for the deployment
+// the Slack docs actively RECOMMEND — feedback_buttons off, silence_button on,
+// which that page describes as showing "the 🔕 menu and nothing else". There is
+// then no way to cast a 👎 at all, so one of the four documented escapes does
+// not exist; pair it with a GitOps-sourced trigger (no severity, synthetic
+// fingerprint) and the expiry is the ONLY bound left. That is defensible, but
+// only if the operator is told, because the security argument for leaving
+// silencing unprivileged rests on the four-way bound.
+func TestWarnSilenceWithoutFeedback(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		silence  bool
+		feedback bool
+		wantWarn bool
+	}{
+		{name: "silence with no feedback control anywhere", silence: true, wantWarn: true},
+		{name: "silence with Slack feedback buttons", silence: true, feedback: true},
+		{name: "no silencing at all", feedback: true},
+		{name: "nothing enabled"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var buf bytes.Buffer
+			log := slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelWarn}))
+			cfg := &config.Config{}
+			cfg.Notify.Slack.SilenceButton = tc.silence
+			cfg.Notify.Slack.FeedbackButtons = tc.feedback
+
+			warnSilenceWithoutFeedback(cfg, log)
+
+			got := buf.String()
+			if tc.wantWarn {
+				if got == "" {
+					t.Fatal("nothing was logged: the missing 👎 escape is invisible to the operator")
+				}
+				for _, want := range []string{"level=WARN", "feedback_buttons", "feedback_reactions"} {
+					if !strings.Contains(got, want) {
+						t.Errorf("log = %q, want it to mention %q", got, want)
+					}
+				}
+				return
+			}
+			if got != "" {
+				t.Errorf("log = %q, want nothing", got)
+			}
+		})
 	}
 }

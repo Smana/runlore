@@ -73,6 +73,8 @@ type Server struct {
 	approvals        *action.Approvals  // nil unless action mode "approve" is configured
 	pauser           Pauser             // nil unless action mode "auto" is configured (kill-switch)
 	feedback         FeedbackRecorder   // nil unless notify.slack.feedback_buttons is on (with an enabled ledger)
+	feedbackEnabled  bool               // any transport offers 👍/👎 — see Actions.FeedbackEnabled
+	silence          SilenceRecorder    // nil unless notify.slack.silence_button is on (with an enabled ledger)
 	token            string             // shared secret for the approval/control endpoints (required when actions enabled)
 	slackSecret      string             // Slack signing secret; verifies interactive button clicks
 	webhookToken     string             // optional bearer token required on POST /webhook/alertmanager
@@ -106,6 +108,15 @@ type Pauser interface {
 // (implemented by *outcome.Ledger).
 type FeedbackRecorder interface {
 	Feedback(triggerKey, rating, user string, at time.Time) error
+}
+
+// SilenceRecorder persists a human 🔕 silence on a delivered investigation — the
+// verdict that suppresses re-investigating the same trigger for a window
+// (implemented by *outcome.Ledger). Kept SEPARATE from FeedbackRecorder rather
+// than widening it: a deployment may enable ratings without silencing, and the
+// server's nil-means-off guards must be able to express that per capability.
+type SilenceRecorder interface {
+	Silence(triggerKey string, window time.Duration, user string, at time.Time) error
 }
 
 // ThreadHandler processes a human message addressed to RunLore inside a thread.
@@ -147,13 +158,13 @@ var nilableKinds = map[reflect.Kind]bool{
 // in a detached goroutine.
 //
 // Normalising HERE rather than at the call site is deliberate, and it is applied
-// to ALL THREE optional fields rather than only the one that was reported.
-// `s.threads == nil`, `s.pauser == nil` and `s.feedback == nil` each decide
-// whether an internet-facing endpoint exists or an action can be vetoed; a
-// safety guard whose correctness depends on every present and future caller
-// remembering to nil-check before filling an exported struct field is not a
-// safety guard, and that argument is not specific to Threads. The call sites are
-// still expected to assign guarded — see RunServe, and the
+// to ALL FOUR optional fields rather than only the one that was reported.
+// `s.threads == nil`, `s.pauser == nil`, `s.feedback == nil` and `s.silence ==
+// nil` each decide whether an internet-facing endpoint exists or an action can
+// be vetoed; a safety guard whose correctness depends on every present and
+// future caller remembering to nil-check before filling an exported struct
+// field is not a safety guard, and that argument is not specific to Threads.
+// The call sites are still expected to assign guarded — see RunServe, and the
 // TestActionsInterfaceFieldsAreNeverAssignedRawBuilderResults guard in
 // internal/app that enforces it for the whole class — but the invariant no
 // longer depends on them.
@@ -170,17 +181,26 @@ func liveIface[T any](v T) T {
 
 // Actions bundles the optional rung-2/rung-3 wiring: the approval queue, the auto
 // kill-switch, the shared control token, the Slack signing secret, and the opt-in
-// feedback recorder.
+// feedback and silence recorders.
 type Actions struct {
 	Approvals    *action.Approvals
 	Pauser       Pauser
 	Feedback     FeedbackRecorder // opt-in 👍/👎 recording (notify.slack.feedback_buttons)
+	Silence      SilenceRecorder  // opt-in 🔕 silencing (notify.slack.silence_button)
 	Token        string
 	SlackSecret  string
 	WebhookToken string             // optional bearer token required on POST /webhook/alertmanager
 	ApproverIDs  []string           // Slack user IDs permitted to approve actions
 	Threads      ThreadHandler      // opt-in thread capture (notify.slack.thread_capture)
 	Metrics      *telemetry.Metrics // optional; nil-safe — powers the mentions-dropped-on-saturation counter
+	// FeedbackEnabled reports whether ANY enabled transport offers a 👍/👎 control
+	// (notify.slack.feedback_buttons or notify.matrix.feedback_reactions) — a
+	// deployment-wide fact, since votes and silences share one ledger and a 👎 cast
+	// in Matrix re-arms a silence clicked in Slack. Read only by the silence
+	// acknowledgement, so it never promises an escape hatch this deployment lacks;
+	// see thread.SilenceAck. Deliberately NOT `Feedback != nil`, which would answer
+	// the narrower "can Slack record a rating".
+	FeedbackEnabled bool
 }
 
 // New builds a Server. ready reports whether this replica should serve; nil =
@@ -204,6 +224,7 @@ func New(ready func() bool, acts Actions, built []source.Built, pipe *source.Pip
 	s := &Server{
 		ready:     ready,
 		approvals: acts.Approvals, pauser: liveIface(acts.Pauser), feedback: liveIface(acts.Feedback),
+		silence: liveIface(acts.Silence), feedbackEnabled: acts.FeedbackEnabled,
 		token: acts.Token, slackSecret: acts.SlackSecret,
 		webhookToken: acts.WebhookToken, approvers: approvers, metrics: metricsHandler, log: log,
 		guard:            newAuthGuard(),
@@ -390,20 +411,31 @@ type slackInteraction struct {
 	Actions []struct {
 		ActionID string `json:"action_id"`
 		Value    string `json:"value"`
+		// BlockID is the actions block's block_id, echoed back on every action.
+		// The silence overflow carries no room for the TriggerKey in its option
+		// values (Slack caps those at 75 chars), so notify.slack.go stashes it
+		// here instead — see notify.silenceBlockIDPrefix.
+		BlockID string `json:"block_id"`
+		// SelectedOption carries an overflow's chosen value — NOT the top-level
+		// Value field above, which button clicks (approve/reject/feedback) use.
+		SelectedOption struct {
+			Value string `json:"value"`
+		} `json:"selected_option"`
 	} `json:"actions"`
 }
 
 // handleSlackInteraction processes Block Kit button clicks: it verifies the Slack
 // request signature, then approves (executing) / rejects the referenced action
-// (privileged — approver allowlist) or records a 👍/👎 feedback rating
-// (unprivileged — an opinion, not a cluster mutation), updating the message via
-// response_url.
+// (privileged — approver allowlist) or records a 👍/👎 feedback rating or a 🔕
+// silence verdict (both unprivileged — an opinion or a suppression window, not a
+// cluster mutation), updating the message via response_url.
 func (s *Server) handleSlackInteraction(w http.ResponseWriter, r *http.Request) {
-	// The endpoint drives Approve/Reject on queued actions and the opt-in 👍/👎
-	// feedback; it stays 404 unless at least one is wired, so a deployment that
-	// enabled neither exposes no interactive callback at all. The signing secret
-	// stays mandatory: signature verification is never optional.
-	if (s.approvals == nil && s.feedback == nil) || s.slackSecret == "" {
+	// The endpoint drives Approve/Reject on queued actions, the opt-in 👍/👎
+	// feedback, and the opt-in 🔕 silence; it stays 404 unless at least one is
+	// wired, so a deployment that enabled none of them exposes no interactive
+	// callback at all. The signing secret stays mandatory: signature verification
+	// is never optional.
+	if (s.approvals == nil && s.feedback == nil && s.silence == nil) || s.slackSecret == "" {
 		http.Error(w, "slack interactions not enabled", http.StatusNotFound)
 		return
 	}
@@ -489,13 +521,57 @@ func (s *Server) handleSlackInteraction(w http.ResponseWriter, r *http.Request) 
 			msg = fmt.Sprintf("🙏 feedback recorded (%s) — thanks @%s", rating, p.User.Username)
 			s.log.Info("slack feedback recorded", "key", act.Value, "rating", rating, "user_id", p.User.ID, "user", p.User.Username)
 		}
+	case "runlore_silence": // must match notify.silenceActionID (internal/server cannot import internal/notify)
+		// Unprivileged, like feedback and unlike approve/reject: the signature
+		// proves the workspace, and for an alert-sourced incident the blast radius
+		// is bounded four independent ways — the window expires, a CRITICAL firing
+		// is never suppressed, the alert resolving clears it, and any colleague's
+		// 👎 re-arms it (newest human wins, so a 👎 cast after the silence takes
+		// precedence). Every silence is attributed in the ledger besides.
+		//
+		// Two of those four are conditional, and the acknowledgement below says
+		// which: a GitOps-sourced trigger has no severity and no resolve channel
+		// (see FromFailureEvent / outcome.Derived), and the 👎 escape only exists
+		// where a 👍/👎 control is actually enabled somewhere — see
+		// Actions.FeedbackEnabled.
+		if s.silence == nil {
+			msg = "⚠️ silencing not enabled (notify.slack.silence_button is off)"
+			break
+		}
+		// "sil:" must match notify.silenceBlockIDPrefix byte for byte (this package
+		// deliberately does not import internal/notify, exactly like the action id
+		// above). That is not left to this comment: notify's
+		// TestSilenceBlockIDPrefixMatchesTheServerHandler parses this call and fails
+		// when the two diverge.
+		key, ok := strings.CutPrefix(act.BlockID, "sil:")
+		if !ok || key == "" {
+			msg = "⚠️ could not identify the incident to silence"
+			s.log.Warn("slack silence: unexpected block_id", "block_id", act.BlockID)
+			break
+		}
+		window, werr := time.ParseDuration(act.SelectedOption.Value)
+		if werr != nil {
+			msg = "⚠️ could not read the silence window"
+			s.log.Warn("slack silence: bad window", "value", act.SelectedOption.Value, "err", werr)
+			break
+		}
+		now := time.Now()
+		if serr := s.silence.Silence(key, window, p.User.ID, now); serr != nil {
+			msg = "⚠️ silencing failed: " + serr.Error()
+			s.log.Warn("slack silence failed", "key", key, "window", window, "err", serr)
+			break
+		}
+		msg = thread.SilenceAck(p.User.Username, window, now.Add(window), s.feedbackEnabled)
+		s.log.Info("slack silence recorded", "key", key, "window", window,
+			"until", now.Add(window), "user_id", p.User.ID, "user", p.User.Username)
 	default:
 		http.Error(w, "unknown action", http.StatusBadRequest)
 		return
 	}
 	w.WriteHeader(http.StatusOK) // ack the click; update the message best-effort
 	// Approve/reject replace the interaction message with the outcome; a feedback
-	// ack must NOT — replacing would wipe the investigation the rating is about.
+	// or silence ack must NOT — replacing would wipe the investigation the rating
+	// or the silence is about.
 	replace := act.ActionID == "runlore_approve" || act.ActionID == "runlore_reject"
 	s.updateSlack(r.Context(), p.ResponseURL, msg, replace)
 }

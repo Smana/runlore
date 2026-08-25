@@ -169,6 +169,7 @@
           "type": "section"
         },
         {
+          "block_id": "sil:HarborDown/tooling/harbor",
           "elements": [
             {
               "action_id": "runlore_feedback_up",
@@ -189,6 +190,36 @@
               },
               "type": "button",
               "value": "HarborDown/tooling/harbor"
+            },
+            {
+              "action_id": "runlore_silence",
+              "options": [
+                {
+                  "text": {
+                    "emoji": true,
+                    "text": "🔕 Silence 1h",
+                    "type": "plain_text"
+                  },
+                  "value": "1h0m0s"
+                },
+                {
+                  "text": {
+                    "emoji": true,
+                    "text": "🔕 Silence 4h",
+                    "type": "plain_text"
+                  },
+                  "value": "4h0m0s"
+                },
+                {
+                  "text": {
+                    "emoji": true,
+                    "text": "🔕 Silence 24h",
+                    "type": "plain_text"
+                  },
+                  "value": "24h0m0s"
+                }
+              ],
+              "type": "overflow"
             }
           ],
           "type": "actions"
@@ -270,6 +301,7 @@
           "type": "context"
         },
         {
+          "block_id": "sil:HarborDown/tooling/harbor",
           "elements": [
             {
               "action_id": "runlore_feedback_up",
@@ -290,6 +322,36 @@
               },
               "type": "button",
               "value": "HarborDown/tooling/harbor"
+            },
+            {
+              "action_id": "runlore_silence",
+              "options": [
+                {
+                  "text": {
+                    "emoji": true,
+                    "text": "🔕 Silence 1h",
+                    "type": "plain_text"
+                  },
+                  "value": "1h0m0s"
+                },
+                {
+                  "text": {
+                    "emoji": true,
+                    "text": "🔕 Silence 4h",
+                    "type": "plain_text"
+                  },
+                  "value": "4h0m0s"
+                },
+                {
+                  "text": {
+                    "emoji": true,
+                    "text": "🔕 Silence 24h",
+                    "type": "plain_text"
+                  },
+                  "value": "24h0m0s"
+                }
+              ],
+              "type": "overflow"
             }
           ],
           "type": "actions"
@@ -371,6 +433,7 @@
           "type": "context"
         },
         {
+          "block_id": "sil:HarborDown/tooling/harbor",
           "elements": [
             {
               "action_id": "runlore_feedback_up",
@@ -391,6 +454,36 @@
               },
               "type": "button",
               "value": "HarborDown/tooling/harbor"
+            },
+            {
+              "action_id": "runlore_silence",
+              "options": [
+                {
+                  "text": {
+                    "emoji": true,
+                    "text": "🔕 Silence 1h",
+                    "type": "plain_text"
+                  },
+                  "value": "1h0m0s"
+                },
+                {
+                  "text": {
+                    "emoji": true,
+                    "text": "🔕 Silence 4h",
+                    "type": "plain_text"
+                  },
+                  "value": "4h0m0s"
+                },
+                {
+                  "text": {
+                    "emoji": true,
+                    "text": "🔕 Silence 24h",
+                    "type": "plain_text"
+                  },
+                  "value": "24h0m0s"
+                }
+              ],
+              "type": "overflow"
             }
           ],
           "type": "actions"
@@ -721,6 +814,7 @@
           "type": "context"
         },
         {
+          "block_id": "sil:ArgoCDRepoServerDown/argocd/argocd-repo-server",
           "elements": [
             {
               "action_id": "runlore_feedback_up",
@@ -741,6 +835,36 @@
               },
               "type": "button",
               "value": "ArgoCDRepoServerDown/argocd/argocd-repo-server"
+            },
+            {
+              "action_id": "runlore_silence",
+              "options": [
+                {
+                  "text": {
+                    "emoji": true,
+                    "text": "🔕 Silence 1h",
+                    "type": "plain_text"
+                  },
+                  "value": "1h0m0s"
+                },
+                {
+                  "text": {
+                    "emoji": true,
+                    "text": "🔕 Silence 4h",
+                    "type": "plain_text"
+                  },
+                  "value": "4h0m0s"
+                },
+                {
+                  "text": {
+                    "emoji": true,
+                    "text": "🔕 Silence 24h",
+                    "type": "plain_text"
+                  },
+                  "value": "24h0m0s"
+                }
+              ],
+              "type": "overflow"
             }
           ],
           "type": "actions"

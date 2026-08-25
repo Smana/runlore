@@ -61,33 +61,39 @@ func TestRecurrenceGateDecisions(t *testing.T) {
 	// still standing behind it, from 2h ago.
 	mislabelled := standing(2, recent, stale, "action_required", "broken down-migration")
 	on := &RecurrenceGate{Cooldown: time.Hour}
+	// wantSkip is stated per case rather than derived from want: deriving it
+	// (`want == recurrenceSuppressed`) makes the assertion vacuous — want is
+	// already checked — and hard-codes ONE suppressing decision, so it would fail
+	// the moment a case expects recurrenceSilenced. suppressed() is the gate
+	// Investigate actually branches on, so it is worth pinning independently.
 	cases := []struct {
-		name  string
-		gate  *RecurrenceGate
-		req   Request
-		prior outcome.TriggerRecurrence
-		want  recurrenceDecision
+		name     string
+		gate     *RecurrenceGate
+		req      Request
+		prior    outcome.TriggerRecurrence
+		want     recurrenceDecision
+		wantSkip bool
 	}{
 		{"suppresses a fresh conclusive uncontested recurrence",
-			on, req, concluded(1, recent, "no_action"), recurrenceSuppressed},
+			on, req, concluded(1, recent, "no_action"), recurrenceSuppressed, true},
 		{"action_required is conclusive too",
-			on, req, concluded(2, recent, "action_required"), recurrenceSuppressed},
-		{"nil gate never suppresses", nil, req, concluded(1, recent, "no_action"), recurrenceOff},
+			on, req, concluded(2, recent, "action_required"), recurrenceSuppressed, true},
+		{"nil gate never suppresses", nil, req, concluded(1, recent, "no_action"), recurrenceOff, false},
 		{"cooldown 0 (off) never suppresses",
-			&RecurrenceGate{}, req, concluded(1, recent, "no_action"), recurrenceOff},
+			&RecurrenceGate{}, req, concluded(1, recent, "no_action"), recurrenceOff, false},
 		{"no trigger key never suppresses",
-			on, Request{Title: "t"}, concluded(1, recent, "no_action"), recurrenceOff},
-		{"never investigated", on, req, outcome.TriggerRecurrence{}, recurrenceFirstLook},
+			on, Request{Title: "t"}, concluded(1, recent, "no_action"), recurrenceOff, false},
+		{"never investigated", on, req, outcome.TriggerRecurrence{}, recurrenceFirstLook, false},
 		{"cooldown expired — re-investigate",
-			on, req, concluded(3, stale, "no_action"), recurrenceCooldownLapsed},
+			on, req, concluded(3, stale, "no_action"), recurrenceCooldownLapsed, false},
 		{"inconclusive prior, nothing ever concluded — retry, we owe a real answer",
-			on, req, outcome.TriggerRecurrence{Count: 1, Last: recent, Verdict: "inconclusive"}, recurrenceNoAnswer},
+			on, req, outcome.TriggerRecurrence{Count: 1, Last: recent, Verdict: "inconclusive"}, recurrenceNoAnswer, false},
 		{"pre-verdict prior (old events) — retry",
-			on, req, outcome.TriggerRecurrence{Count: 1, Last: recent}, recurrenceNoAnswer},
+			on, req, outcome.TriggerRecurrence{Count: 1, Last: recent}, recurrenceNoAnswer, false},
 		{"inconclusive prior with an answer standing behind it — suppress; the mislabel costs one run",
-			on, req, mislabelled, recurrenceSuppressed},
+			on, req, mislabelled, recurrenceSuppressed, true},
 		{"a standing 👎 breaks the cooldown — the human re-arms investigation",
-			on, req, contested(concluded(1, recent, "no_action")), recurrenceContested},
+			on, req, contested(concluded(1, recent, "no_action")), recurrenceContested, false},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -95,8 +101,8 @@ func TestRecurrenceGateDecisions(t *testing.T) {
 			if got != c.want {
 				t.Fatalf("decide = %q, want %q", got, c.want)
 			}
-			if want := c.want == recurrenceSuppressed; got.suppressed() != want {
-				t.Fatalf("decision %q suppressed() = %v, want %v", got, got.suppressed(), want)
+			if got.suppressed() != c.wantSkip {
+				t.Fatalf("decision %q suppressed() = %v, want %v", got, got.suppressed(), c.wantSkip)
 			}
 		})
 	}
