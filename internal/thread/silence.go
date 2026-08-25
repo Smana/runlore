@@ -37,6 +37,20 @@ func ShortDuration(d time.Duration) string {
 	return s
 }
 
+// silenceExpiryLayout dates the expiry rather than printing a bare clock time.
+//
+// "15:04 MST" made the SHIPPED DEFAULT the ambiguous case, not an edge one: 24h
+// is the window values-full.yaml and both docs pages configure, so a 🔕 clicked
+// at 11:58 acked as "until 11:58 UTC" — the same clock time it was clicked at,
+// which reads as "expires now" — and any window past 12h reads as a time in the
+// PAST (a 20h silence at 18:00 acked "until 14:00"). An operator cannot act on
+// that, and the ack's whole job is to say when the channel goes quiet until.
+//
+// ISO-ordered rather than a localised day name: the reader is an on-call
+// engineer, the zone is whatever the process runs in, and yyyy-mm-dd is the one
+// ordering nobody has to guess at.
+const silenceExpiryLayout = "2006-01-02 15:04 MST"
+
 // SilenceAck is the message posted back after a human silences an
 // investigation, on EVERY transport. It carries an explicit WARNING, because a
 // silence is the one feedback verdict that changes what RunLore does: a reader
@@ -52,5 +66,5 @@ func SilenceAck(user string, window time.Duration, until time.Time) string {
 		"⚠️ RunLore will NOT investigate this incident while the silence stands — "+
 		"no model call, no notification, no record. A CRITICAL firing still breaks "+
 		"through; a 👎 or a resolved alert re-arms it immediately.",
-		user, until.Format("15:04 MST"), ShortDuration(window))
+		user, until.Format(silenceExpiryLayout), ShortDuration(window))
 }

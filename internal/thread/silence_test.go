@@ -28,6 +28,19 @@ func TestSilenceAckCarriesTheWarning(t *testing.T) {
 	}
 }
 
+// TestSilenceAckDatesTheExpiry pins the fix for a time-only acknowledgement.
+// "15:04 MST" made the SHIPPED DEFAULT the ambiguous case: 24h is what
+// values-full.yaml and both docs pages configure, so a 🔕 clicked at 11:58 acked
+// as "until 11:58 UTC" — indistinguishable from "expires now" — and a 20h window
+// clicked at 18:00 read "until 14:00", which looks four hours in the past.
+func TestSilenceAckDatesTheExpiry(t *testing.T) {
+	at := time.Date(2026, 8, 25, 11, 58, 0, 0, time.UTC)
+	got := SilenceAck("bob", 24*time.Hour, at.Add(24*time.Hour))
+	if !strings.Contains(got, "2026-08-26 11:58 UTC") {
+		t.Errorf("SilenceAck() = %q, want the expiry to carry its DATE (2026-08-26 11:58 UTC)", got)
+	}
+}
+
 // TestShortDuration pins the rendering every human-facing silence window goes
 // through. time.Duration.String() always appends the zero minute/second tail, so
 // a 1h preset advertised as `1h` in the docs and the chart rendered as
