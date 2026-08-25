@@ -46,7 +46,7 @@ side effect, not the argument.
 | Re-arm: CRITICAL | A silence **never** suppresses a CRITICAL firing | Matches an established invariant — `debounce.go:89` already refuses to hold criticals |
 | Re-arm: 👎 | `!prior.Contested()` | The **same** shared definition #288 established for every layer that must yield to a human |
 | Re-arm: resolve | Clears the silence at fold time | The incident went away; a later firing is arguably new |
-| Authorization | **Unprivileged**, like feedback | Blast radius is bounded four independent ways — see [Security](#security) |
+| Authorization | **Unprivileged**, like feedback | Blast radius is bounded — see [Security](#security) for the four bounds and the GitOps carve-out |
 | Matrix parity | 🔕 reaction (default window, `silence_reactions` alone) **+** `silence:` thread command (full choice, needs that transport's own `thread_capture` too — the command arrives as a message, and the `/sync` filter only requests `m.room.message` under thread capture) | Reuses the reaction listener and the reserved-prefix grammar; the command itself is transport-neutral (shared `thread.Responder`), so it also works in a Slack thread once `thread_capture` is on there |
 | Ack message | Carries an explicit **warning** | A silence is the one feedback click that changes behaviour; the reader must know what they just switched off |
 

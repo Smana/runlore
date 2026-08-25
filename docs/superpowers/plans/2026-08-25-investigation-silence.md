@@ -1766,6 +1766,7 @@ In `handleSlackInteraction`, add a case beside the feedback one:
 		// proves the workspace, and the blast radius is bounded four independent
 		// ways — the window expires, a CRITICAL firing is never suppressed, any
 		// colleague's 👎 re-arms it, and every silence is attributed in the ledger.
+		// For a GitOps failure, only the first and third apply — expiry and a 👎.
 		if s.silence == nil {
 			msg = "⚠️ silencing not enabled (notify.slack.silence_button is off)"
 			break
