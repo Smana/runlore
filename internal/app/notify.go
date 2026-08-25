@@ -467,24 +467,29 @@ func buildMatrixThreadMention(cfg *config.Config, responder *thread.Responder, n
 	}
 }
 
-// BuildMatrixFeedback assembles the opt-in Matrix listener backing BOTH
-// notify.matrix.feedback_reactions and notify.matrix.thread_capture: one
-// /sync long-poll loop serves either or both, so the listener is built
-// whenever EITHER option is on. Returns nil when neither option is on, the
-// outcome ledger cannot persist, or the access token is actually empty at
+// BuildMatrixFeedback assembles the opt-in Matrix listener backing THREE
+// independent capabilities: notify.matrix.feedback_reactions,
+// notify.matrix.silence_reactions and notify.matrix.thread_capture. One
+// /sync long-poll loop serves any combination of them, so the listener is
+// built whenever ANY option is on. Returns nil when none of the three is on,
+// the outcome ledger cannot persist, or the access token is actually empty at
 // runtime — a listener that could record nowhere or authenticate as no one
 // must not start. Validate has already required the notifier fields and the
-// ledger path with either option on; the token presence is an env-var runtime
+// ledger path with any option on; the token presence is an env-var runtime
 // fact, checked here like the notifier's own builder does.
+//
+// notify.WithSilenceReactions type-asserts the ledger it is given against
+// notify.SilenceSink itself, so passing ledger unconditionally here (rather
+// than only when SilenceReactions is set) is safe either way.
 //
 // Thread capture (the returned listener's Mentions/Dispatch) is wired on top
 // ONLY when notify.matrix.thread_capture is on AND buildMatrixThreadMention
 // can resolve a forge, an enabled registry and a Matrix replier — see that
 // function for the guard-and-warn per condition. Missing any of the three
-// degrades to a listener with thread capture off (feedback reactions still
-// work if that option is on); it is never a reason to fail startup, and
-// WithThreadCapture is simply not called — see its doc for why that leaves
-// Mentions/Dispatch nil rather than partially set.
+// degrades to a listener with thread capture off (feedback and silence
+// reactions still work if those options are on); it is never a reason to
+// fail startup, and WithThreadCapture is simply not called — see its doc for
+// why that leaves Mentions/Dispatch nil rather than partially set.
 //
 // responder, dispatch and busyDispatch are the SAME instances the Slack path
 // builds and drains (see serve.go): exactly one *thread.Responder and two
@@ -505,12 +510,15 @@ func BuildMatrixFeedback(cfg *config.Config, ledger *outcome.Ledger, responder *
 	}
 	tok := os.Getenv(mc.AccessTokenEnv)
 	if tok == "" {
-		log.Warn("matrix feedback_reactions/thread_capture enabled but the access token env is empty; listener disabled", "env", mc.AccessTokenEnv)
+		log.Warn("matrix feedback_reactions/silence_reactions/thread_capture enabled but the access token env is empty; listener disabled", "env", mc.AccessTokenEnv)
 		return nil
 	}
 	opts := []notify.MatrixFeedbackOption{notify.WithMetrics(metrics)}
 	if mc.FeedbackReactions {
 		opts = append(opts, notify.WithFeedbackReactions())
+	}
+	if mc.SilenceReactions {
+		opts = append(opts, notify.WithSilenceReactions(cfg.Notify.Silence.Default(), cfg.Notify.Silence.MaxWindow.Std()))
 	}
 	if mc.ThreadCapture {
 		if mention := buildMatrixThreadMention(cfg, responder, notifier, log); mention != nil {

@@ -35,16 +35,29 @@ type FeedbackSink interface {
 	Feedback(triggerKey, rating, user string, at time.Time) error
 }
 
-// MatrixFeedback is the opt-in Matrix listener backing two INDEPENDENT
+// SilenceSink records a human 🔕 silence on a delivered investigation
+// (implemented by *outcome.Ledger — the same ledger the Slack path records
+// through, so the window cap, the dedup and the gate's read are shared by
+// construction). Kept separate from FeedbackSink rather than widening it: the
+// two capabilities have separate config flags and must be independently nil.
+type SilenceSink interface {
+	Silence(triggerKey string, window time.Duration, user string, at time.Time) error
+}
+
+// MatrixFeedback is the opt-in Matrix listener backing three INDEPENDENT
 // capabilities, each gated by its own flag and its own functional option:
 // recording 👍/👎 reactions into the outcome ledger
-// (notify.matrix.feedback_reactions, WithFeedbackReactions) and capturing
-// addressed thread replies into the knowledge base
-// (notify.matrix.thread_capture, WithThreadCapture). One /sync long-poll
-// loop serves whichever of the two are on; the /sync filter itself is
-// narrowed to request only the event types the enabled capabilities actually
-// need (see sync) — a deployment that enabled thread capture alone must never
-// even ask the homeserver for reactions, let alone record one.
+// (notify.matrix.feedback_reactions, WithFeedbackReactions), recording a 🔕
+// silence into the same ledger (notify.matrix.silence_reactions,
+// WithSilenceReactions), and capturing addressed thread replies into the
+// knowledge base (notify.matrix.thread_capture, WithThreadCapture). One
+// /sync long-poll loop serves whichever of the three are on; the /sync
+// filter itself is narrowed to request only the event types the enabled
+// capabilities actually need (see sync) — a deployment that enabled thread
+// capture alone must never even ask the homeserver for reactions, let alone
+// record one, and feedback reactions and silence reactions share the wire
+// event type (m.reaction) but are told apart, and independently gated, once
+// handleReaction looks at the emoji.
 //
 // Unlike the Slack feedback path, NOTHING is exposed: /sync is an outbound
 // HTTPS long-poll authenticated by the notifier's access token — no inbound
@@ -109,6 +122,15 @@ type MatrixFeedback struct {
 	// as threadCapture/handleMessage below.
 	feedbackReactions bool
 
+	// silenceReactions, silenceWindow and silenceSink back the 🔕 reaction
+	// (notify.matrix.silence_reactions). silenceWindow is notify.silence.windows[0]:
+	// a reaction is a bare emoji and can carry no duration of its own, so the
+	// default is the only window this path can offer. The `silence:` thread command
+	// is what offers the full choice.
+	silenceReactions bool
+	silenceWindow    time.Duration
+	silenceSink      SilenceSink
+
 	// threadCapture mirrors notify.matrix.thread_capture: only when true does
 	// sync widen its /sync filter to also carry m.room.message, and only then
 	// does handleMessage ever run. Set via WithThreadCapture; false (the
@@ -170,12 +192,14 @@ const eventCacheCap = 256
 
 // NewMatrixFeedback builds the Matrix listener. homeserver/roomID/token are
 // the notifier's own settings; sink is where ratings land (the outcome
-// ledger). Both CAPABILITIES default OFF: pass WithFeedbackReactions to
-// record 👍/👎 reactions, and/or WithThreadCapture to also opt into handling
+// ledger), and — when it also implements SilenceSink, as *outcome.Ledger does
+// — where silences land too. All CAPABILITIES default OFF: pass
+// WithFeedbackReactions to record 👍/👎 reactions, and/or WithSilenceReactions
+// to record 🔕 silences, and/or WithThreadCapture to also opt into handling
 // addressed thread messages; WithMetrics is a plain optional dependency, not
 // a capability, and app.BuildMatrixFeedback supplies it unconditionally.
 //
-// A listener with NEITHER capability option requests neither event type over
+// A listener with NONE of the capability options requests no event type over
 // /sync and processes nothing. That is not purely hypothetical: contrary to
 // an earlier version of this comment, app.BuildMatrixFeedback does not
 // always avoid it — when notify.matrix.thread_capture is the only capability
@@ -216,6 +240,31 @@ type MatrixFeedbackOption func(*MatrixFeedback)
 func WithFeedbackReactions() MatrixFeedbackOption {
 	return func(f *MatrixFeedback) {
 		f.feedbackReactions = true
+	}
+}
+
+// WithSilenceReactions turns on Matrix 🔕 silence reactions
+// (notify.matrix.silence_reactions). Like WithFeedbackReactions it is threaded
+// through both the /sync filter and the handler's own guard, so a listener that
+// was never given this option never records a silence even if it somehow
+// received the reaction.
+//
+// defaultWindow is notify.silence.windows[0] — the only window a bare emoji can
+// express. maxWindow is carried for the `silence:` command path and is enforced
+// by the ledger regardless; it is threaded here so a misconfiguration is visible
+// at construction rather than at the first click.
+func WithSilenceReactions(defaultWindow, maxWindow time.Duration) MatrixFeedbackOption {
+	return func(f *MatrixFeedback) {
+		if defaultWindow <= 0 || (maxWindow > 0 && defaultWindow > maxWindow) {
+			return // a misconfigured window leaves the capability off rather than silently clamping
+		}
+		sink, ok := f.sink.(SilenceSink)
+		if !ok {
+			return // the configured sink cannot record silences; leave the capability off
+		}
+		f.silenceReactions = true
+		f.silenceWindow = defaultWindow
+		f.silenceSink = sink
 	}
 }
 
@@ -347,13 +396,15 @@ type matrixEvent struct {
 // event types the enabled capabilities actually need — no presence, state, or
 // other rooms' traffic ever crosses the wire, and neither does an event type
 // belonging to a capability this listener was not opted into: m.reaction only
-// when feedbackReactions is on, m.room.message only when threadCapture is on.
-// A deployment that has not opted into a capability must keep receiving
-// exactly what it receives today for that capability — including "nothing",
-// so it never even asks the homeserver for events it would just discard.
+// when feedbackReactions or silenceReactions is on (both ride the same
+// m.reaction event type — 👍/👎 and 🔕 are only told apart once handleReaction
+// looks at the key), m.room.message only when threadCapture is on. A
+// deployment that has not opted into a capability must keep receiving exactly
+// what it receives today for that capability — including "nothing", so it
+// never even asks the homeserver for events it would just discard.
 func (f *MatrixFeedback) sync(ctx context.Context, since string) (string, []matrixEvent, error) {
 	var types []string
-	if f.feedbackReactions {
+	if f.feedbackReactions || f.silenceReactions {
 		types = append(types, `"m.reaction"`)
 	}
 	if f.threadCapture {
@@ -398,35 +449,45 @@ func (f *MatrixFeedback) sync(ctx context.Context, since string) (string, []matr
 	return res.NextBatch, res.Rooms.Join[f.roomID].Timeline.Events, nil
 }
 
-// handleReaction maps one m.reaction event to a ledger rating: 👍→up, 👎→down
-// (every other emoji is ignored — reactions are a general mechanism and 🎉 on a
-// resolved incident must not count as an endorsement of the diagnosis). The
-// reaction names its target event; the trigger identity is read back from the
-// target's content — a target without the field is not one of RunLore's
-// investigation messages and is skipped.
+// handleReaction maps one m.reaction event to either a ledger rating (👍→up,
+// 👎→down) or a ledger silence (🔕, at f.silenceWindow) — every other emoji is
+// ignored, reactions being a general mechanism: 🎉 on a resolved incident must
+// not count as an endorsement of the diagnosis, nor as a request to silence
+// it. The reaction names its target event; the trigger identity is read back
+// from the target's content via triggerKeyFor — a target without the field,
+// or not sent by the bot (see triggerKeyFor/contextFor's self-authorship
+// check), is not one of RunLore's investigation messages and is skipped.
 func (f *MatrixFeedback) handleReaction(ctx context.Context, e matrixEvent) {
-	// Guard on the opt-in flag, not just the /sync filter that requests
-	// m.reaction only when it is set: that filter is a wire-level guarantee,
-	// not a code-level one, and a listener started for thread capture alone
-	// must never record a reaction even if a non-compliant homeserver sends
-	// one anyway. Deployments that enabled only notify.matrix.thread_capture
-	// must not silently also get 👍/👎 recording into the outcome ledger — a
-	// capability, and a learning-loop trust-weighting input, its operator
-	// never opted into.
-	if !f.feedbackReactions {
-		return
-	}
 	if e.Type != "m.reaction" || e.Content.RelatesTo.RelType != "m.annotation" {
 		return
 	}
-	rating := ""
+	// The opt-in check is PER CAPABILITY, not per function: a deployment with
+	// silence_reactions on and feedback_reactions off must record 🔕 and must not
+	// record 👍/👎. A single early return at the top of this function would
+	// silently grant one capability to anyone who enabled the other — the exact
+	// class of bug the original guard was written to prevent. Each case's own
+	// guard is a code-level backstop behind the /sync filter's wire-level one
+	// (see sync): a non-compliant homeserver can still deliver an event type
+	// this listener never asked for.
+	kind := ""
 	// Clients commonly append the emoji variation selector (U+FE0F); strip it so
-	// "👍" and "👍️" are the same vote.
+	// "👍"/"🔕" and "👍️"/"🔕️" are the same action.
 	switch strings.ReplaceAll(e.Content.RelatesTo.Key, "️", "") {
 	case "👍":
-		rating = "up"
+		if !f.feedbackReactions {
+			return
+		}
+		kind = "up"
 	case "👎":
-		rating = "down"
+		if !f.feedbackReactions {
+			return
+		}
+		kind = "down"
+	case "🔕":
+		if !f.silenceReactions {
+			return
+		}
+		kind = "silence"
 	default:
 		return
 	}
@@ -438,11 +499,19 @@ func (f *MatrixFeedback) handleReaction(ctx context.Context, e matrixEvent) {
 	if key == "" {
 		return // not one of our investigation messages
 	}
-	if err := f.sink.Feedback(key, rating, e.Sender, time.Now()); err != nil {
+	if kind == "silence" {
+		if err := f.silenceSink.Silence(key, f.silenceWindow, e.Sender, time.Now()); err != nil {
+			f.log.Warn("matrix silence recording failed", "key", key, "err", err)
+			return
+		}
+		f.log.Info("matrix silence recorded", "key", key, "window", f.silenceWindow, "user", e.Sender)
+		return
+	}
+	if err := f.sink.Feedback(key, kind, e.Sender, time.Now()); err != nil {
 		f.log.Warn("matrix feedback recording failed", "key", key, "err", err)
 		return
 	}
-	f.log.Info("matrix feedback recorded", "key", key, "rating", rating, "user", e.Sender)
+	f.log.Info("matrix feedback recorded", "key", key, "rating", kind, "user", e.Sender)
 }
 
 // handleMessage reacts to one m.room.message event: when it addresses RunLore
