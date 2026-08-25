@@ -75,9 +75,13 @@ outcome ledger as Slack's `silence_button`:
   carries `m.reaction` for feedback voting, so no other flag is required.
 - **A `silence: <duration>` thread command** — reply in the investigation thread with, for example
   `silence: 4h`, and RunLore silences for exactly that duration (up to `notify.silence.max_window`).
-  The `silence:` token is matched case-insensitively and as a whole token anywhere in the message,
-  the same grammar `note:` and `reinvestigate:` use — `SILENCE: 4h` and `please silence: 4h` both
-  work, but a sentence merely containing the word without a trailing colon does not. This path needs
+  The `silence:` token is matched case-insensitively (`SILENCE: 4h` works) and must **start** your
+  message, once the bot mention is stripped. That is stricter than `note:` and `reinvestigate:`, which
+  are recognised anywhere in a message, and deliberately so: acting on this one *writes* — it records
+  a ledger event and switches investigation off — so a sentence that merely mentions it (`note: we
+  agreed on silence: 4h`) is answered with a request to rephrase rather than silently muting the
+  incident and discarding the note. A sentence using the word without a trailing colon is not a
+  command at all. This path needs
   no `model.chat` configuration and costs no model call: parsing a duration is deterministic.
   **Unlike the reaction, it also needs `notify.matrix.thread_capture: true`** — a plain message only
   reaches RunLore at all once the `/sync` filter widens to `m.room.message`, which `silence_reactions`

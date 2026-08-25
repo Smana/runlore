@@ -1122,6 +1122,70 @@ func TestHandleSilenceRecordsAndAcks(t *testing.T) {
 	}
 }
 
+// TestHandleUnanchoredSilenceNeverWrites pins the guard IntentNote already had
+// and IntentSilence did not. Parse scans "silence:" before "note:" and matches it
+// as a whole token ANYWHERE, so "note: we agreed on silence: 4h" parsed as
+// IntentSilence with Text "4h" — and Handle routed it straight to r.silence,
+// which wrote the ledger event and acked a suppression. The operator's note was
+// never written and investigation was switched off for four hours by a sentence
+// meant as prose.
+//
+// Parse's justification for the anywhere-match is that "the outcome is a refusal
+// that writes nothing and spends nothing". True for reinvestigate:, false for
+// silence:, which both writes and changes behaviour — so the unanchored case must
+// be refused here, exactly as an unanchored note: is.
+func TestHandleUnanchoredSilenceNeverWrites(t *testing.T) {
+	for _, raw := range []string{
+		"<@U0BOT> note: we agreed on silence: 4h",
+		"the runbook says to silence: 4h next time",
+		"hey <@U0BOT> please silence: 4h",
+	} {
+		t.Run(raw, func(t *testing.T) {
+			f := &fakeForge{}
+			r := newTestResponder(t, f)
+			rec := &fakeSilenceRecorder{}
+			r.Silence = rec
+			r.SilenceMax = 24 * time.Hour
+			tc := Context{Root: "111.222", TriggerKey: "trig-1", CuratedURL: "https://github.com/o/r/pull/42"}
+
+			reply, err := r.Handle(context.Background(), tc, "alice", raw)
+			if err != nil {
+				t.Fatalf("Handle: %v", err)
+			}
+			if len(rec.calls) != 0 {
+				t.Errorf("Silence was called %d time(s) for an unanchored command: %+v", len(rec.calls), rec.calls)
+			}
+			if len(f.comments) != 0 || len(f.opened) != 0 {
+				t.Error("an unanchored silence: must not write to the knowledge base either")
+			}
+			if reply != SilenceNotAnchoredReply {
+				t.Errorf("reply = %q, want SilenceNotAnchoredReply %q", reply, SilenceNotAnchoredReply)
+			}
+		})
+	}
+}
+
+// TestHandleAnchoredSilenceStillWorks is the other half: the guard must not
+// disarm the command itself, including after a stripped mention.
+func TestHandleAnchoredSilenceStillWorks(t *testing.T) {
+	for _, raw := range []string{"silence: 4h", "<@U0BOT> silence: 4h", "<@U0BOT> <@U1> SILENCE: 4h"} {
+		t.Run(raw, func(t *testing.T) {
+			f := &fakeForge{}
+			r := newTestResponder(t, f)
+			rec := &fakeSilenceRecorder{}
+			r.Silence = rec
+			tc := Context{Root: "111.222", TriggerKey: "trig-1"}
+
+			if _, err := r.Handle(context.Background(), tc, "alice", raw); err != nil {
+				t.Fatalf("Handle: %v", err)
+			}
+			if len(rec.calls) != 1 {
+				t.Fatalf("Silence calls = %d, want 1", len(rec.calls))
+			}
+		})
+	}
+}
+
 func TestHandleEmptyTextAsksForContent(t *testing.T) {
 	f := &fakeForge{}
 	r := newTestResponder(t, f)

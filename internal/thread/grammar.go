@@ -28,6 +28,10 @@ const (
 	// IntentReinvestigate it CHANGES BEHAVIOUR rather than recording knowledge,
 	// which is why it sits at high priority in prefixes — a note that merely
 	// contains it is refused as ambiguous rather than filed as the human's words.
+	//
+	// Unlike IntentReinvestigate, acting on it WRITES: Responder.Handle therefore
+	// requires Anchored before touching the ledger, and answers
+	// SilenceNotAnchoredReply otherwise. See Parse.
 	IntentSilence
 )
 
@@ -71,8 +75,10 @@ type Parsed struct {
 // Parse for why that side is the right one to err on. Their relative order
 // between themselves IS load-bearing for a message containing both tokens —
 // Parse returns the first match in this slice's order, so swapping them would
-// flip which one wins — but shipping "reinvestigate:" first is safe either
-// way, since both outcomes are refusals that write nothing.
+// flip which one wins — and shipping "reinvestigate:" first is the safe side of
+// that: it is the one whose outcome is a refusal whatever its position, whereas
+// an ANCHORED "silence:" writes. "silence: 4h, and please reinvestigate: this
+// tomorrow" is refused rather than silenced because reinvestigate leads.
 var prefixes = []struct {
 	prefix string
 	intent Intent
@@ -100,6 +106,15 @@ var prefixes = []struct {
 // operator is left believing either a re-run started or their words were
 // saved, when neither happened. A false POSITIVE costs nothing to match here,
 // because the outcome is a refusal that writes nothing and spends nothing.
+//
+// For "silence:" the anywhere-match is likewise unconditional, but ACTING on an
+// unanchored one is not, and the asymmetry is the whole point. Recording a
+// silence WRITES a durable ledger event and switches investigation off for the
+// window — so "note: we agreed on silence: 4h" matching here must not become a
+// suppression, or one sentence of prose mutes an incident for four hours and
+// throws away the note the human was actually writing. Handle refuses it with
+// SilenceNotAnchoredReply; the match still happens here so the refusal can be
+// specific rather than the sentence sliding into freeform and being billed.
 //
 // For "note:" the reason is COST, and it only holds when the chat layer is
 // configured. Everything that is not a recognised prefix is IntentFreeform,

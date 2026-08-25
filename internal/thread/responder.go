@@ -101,6 +101,27 @@ const ReinvestigateNotSupportedReply = "Re-running an investigation from a threa
 	"and nothing was recorded. To save this as a note, rephrase without `reinvestigate:` and use `note:`. " +
 	"To actually re-run, add the `reinvestigate` label to the knowledge-base issue."
 
+// SilenceNotAnchoredReply is what Handle answers when "silence:" appeared
+// mid-sentence rather than at the start of the message.
+//
+// It makes the same three points ReinvestigateNotSupportedReply does, for the
+// same reason: (1) the incident was NOT silenced; (2) nothing was recorded
+// either, so the human is never left believing their note was filed; (3) how
+// to get either outcome they might have meant. The third point matters most
+// here, because both readings are plausible — "note: we agreed on silence: 4h"
+// is one message that could sincerely mean either — and only the human can say
+// which.
+//
+// A refusal is the right side to err on because the two failures are not
+// symmetric. Refusing costs one rephrased message. Acting wrote a durable
+// ledger event, acked a suppression the human never asked for, discarded the
+// note they did ask for, and left RunLore silent on the incident for the whole
+// window — none of which the reply they are reading can undo.
+const SilenceNotAnchoredReply = "I didn't silence anything, and I didn't record that. " +
+	"`silence:` only counts as a command when it starts your message, and here it appeared mid-sentence — " +
+	"so I can't tell whether you meant to mute this incident or were just writing about it. " +
+	"To silence, send `silence: 4h` on its own. To save the sentence, rephrase it without `silence:` and use `note:`."
+
 // FreeformNotRecordedReply is what Handle answers an addressed message with no
 // recognised prefix (IntentFreeform) — a question, or any other prose with no
 // explicit "note:" — whenever nothing was written.
@@ -744,6 +765,22 @@ func (r *Responder) Handle(ctx context.Context, tc Context, author, raw string) 
 	case IntentReinvestigate:
 		return ReinvestigateNotSupportedReply, nil
 	case IntentSilence:
+		// The same guard IntentNote applies below, and for a STRONGER reason. Parse
+		// matches "silence:" as a whole token anywhere in the message and scans it
+		// ahead of "note:", so "note: we agreed on silence: 4h" lands here with Text
+		// "4h". Parse justifies the anywhere-match with "the outcome is a refusal
+		// that writes nothing and spends nothing" — true for reinvestigate:, false
+		// for this one: r.silence writes a ledger event and switches investigation
+		// off. Unguarded, a sentence meant as prose silenced the incident for four
+		// hours AND discarded the note the human was actually writing.
+		//
+		// Refused rather than routed to freeform, and unconditionally rather than
+		// only with no Chat wired: freeform with a Chat can itself write a
+		// model-drafted note, and a write is not a refusal — the human reading the
+		// reply cannot undo it. A refusal comes back with wording they can act on.
+		if !p.Anchored {
+			return SilenceNotAnchoredReply, nil
+		}
 		return r.silence(tc, author, p.Text)
 	case IntentFreeform:
 		return r.freeform(ctx, tc, author, p.Text)

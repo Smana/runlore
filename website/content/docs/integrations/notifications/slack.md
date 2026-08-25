@@ -133,7 +133,9 @@ and `silence_button: true`, an investigation message shows the 🔕 menu and not
 **The button is not the only way in.** With `thread_capture` also on (see below), replying
 `@runlore silence: 4h` in the investigation thread does exactly what the button does — same parser,
 same ledger write, same acknowledgement — because Slack's thread mentions and the 🔕 button both
-route through the one shared `thread.Responder`. That command path is gated on
+route through the one shared `thread.Responder`. `silence:` must **start** the message (after the
+mention); mentioned mid-sentence it is answered with a request to rephrase, never acted on, since
+acting writes a ledger event and mutes the incident. That command path is gated on
 `notify.silence` being enabled at all (either `silence_button` here **or** Matrix's
 `silence_reactions` — whichever transport you turned it on for) plus Slack's own `thread_capture`,
 **not** specifically on `silence_button` — so a deployment running `thread_capture: true` with
