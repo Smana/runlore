@@ -278,6 +278,12 @@ type triggerAggJSON struct {
 	CuratedURL string    `json:"curated_url,omitempty"`
 	Entry      string    `json:"entry,omitempty"`
 	Verdict    string    `json:"verdict,omitempty"`
+	// Fingerprint mirrors triggerAgg.fingerprint. Without it a compaction takes the
+	// resolve escape's fallback lookup with it: the escape would keep working right
+	// up to the first compaction, then silently stop. Absent from a checkpoint
+	// written before this field existed; a replay then reads "", which only costs
+	// the fallback (a live open, when there is one, still resolves the trigger key).
+	Fingerprint string `json:"fingerprint,omitempty"`
 	// Conclusive mirrors triggerAgg.conclusive. omitzero (not omitempty, which does
 	// not apply to structs) keeps it out of the file when the trigger has never
 	// concluded. Absent from a checkpoint written before #471; a replay then
@@ -316,6 +322,10 @@ type triggerAgg struct {
 	curatedURL string // CuratedURL of the newest open
 	entry      string // Entry of the newest open ("" for fresh) — feedback attribution target
 	verdict    string // Verdict of the newest open (may be inconclusive/"")
+	// fingerprint is the Fingerprint of the newest open. It is what lets a resolve
+	// still find the trigger to un-silence once the fingerprint→open index has been
+	// emptied by an earlier resolve — see applyResolveLocked.
+	fingerprint string
 	// conclusive is the newest open whose verdict was an ANSWER, folded separately
 	// from the newest open so a single inconclusive run cannot erase the answer
 	// standing behind it — the distinction the suppression gate turns on (#471).
@@ -533,7 +543,7 @@ func (l *Ledger) seedCheckpointLocked(cd *checkpointData) {
 	}
 	for k, v := range cd.ByTrigger {
 		l.byTrigger[k] = triggerAgg{count: v.Count, last: v.Last, curatedURL: v.CuratedURL,
-			entry: v.Entry, verdict: v.Verdict, conclusive: v.Conclusive}
+			entry: v.Entry, verdict: v.Verdict, conclusive: v.Conclusive, fingerprint: v.Fingerprint}
 	}
 	for k, v := range cd.Votes {
 		l.votes[k] = feedbackVote{rating: v.Rating, entry: v.Entry, at: v.At}
@@ -598,7 +608,7 @@ func (l *Ledger) snapshotCheckpointLocked() *checkpointData {
 		cd.ByTrigger = make(map[string]triggerAggJSON, len(l.byTrigger))
 		for k, v := range l.byTrigger {
 			cd.ByTrigger[k] = triggerAggJSON{Count: v.count, Last: v.last, CuratedURL: v.curatedURL,
-				Entry: v.entry, Verdict: v.verdict, Conclusive: v.conclusive}
+				Entry: v.entry, Verdict: v.verdict, Conclusive: v.conclusive, Fingerprint: v.fingerprint}
 		}
 	}
 	if len(l.votes) > 0 {
@@ -781,6 +791,18 @@ func (l *Ledger) applyResolveLocked(fp string, at time.Time) {
 	if tk := l.open[fp].TriggerKey; tk != "" {
 		delete(l.silences, tk)
 	}
+	// …but l.open holds UNRESOLVED opens only, and the suppressed path records no
+	// open at all, so that index alone left the escape dead on a reachable path:
+	//
+	//	fire → investigate → resolve   (the open is paired and deleted)
+	//	🔕 clicked on the scrolled-back card
+	//	fire again → SUPPRESSED, no ledger open recorded
+	//	resolve again → l.open[fp] is empty → nothing to un-silence, ever
+	//
+	// The per-trigger index outlives the open and already remembers the newest
+	// investigation, so it answers the same question without a new index to keep,
+	// checkpoint and bound. See clearSilencesForFingerprintLocked.
+	l.clearSilencesForFingerprintLocked(fp)
 
 	// Channel-liveness proof, recorded before any pairing decision: whether this
 	// resolve pairs, buffers, or is discarded says nothing about whether the SENDER
@@ -806,6 +828,31 @@ func (l *Ledger) applyResolveLocked(fp string, at time.Time) {
 	l.pendingOpens[fp] = stack[:len(stack)-1]
 	if top.counted {
 		l.creditResolveLocked(top.entry, at)
+	}
+}
+
+// clearSilencesForFingerprintLocked lifts every STANDING silence whose trigger's
+// newest investigation carried fingerprint fp — the resolve escape's fallback for
+// when the fingerprint→open index can no longer answer (see applyResolveLocked).
+//
+// It iterates the SILENCES, not the triggers: that bounds the scan by the number
+// of triggers a human has actually silenced and left live, which only ever grows
+// by an explicit click and is orders of magnitude smaller than byTrigger. No new
+// index is introduced, so nothing new can grow without bound either — the
+// fingerprint rides on the per-trigger roll-up that already exists per TriggerKey.
+//
+// Every match is cleared rather than the first one found, so the outcome does not
+// depend on Go's randomised map iteration order. Two distinct TriggerKeys sharing
+// a fingerprint is not a shape RunLore produces, but "usually deterministic" is not
+// a property worth shipping.
+func (l *Ledger) clearSilencesForFingerprintLocked(fp string) {
+	if fp == "" || len(l.silences) == 0 {
+		return
+	}
+	for tk := range l.silences {
+		if l.byTrigger[tk].fingerprint == fp {
+			delete(l.silences, tk)
+		}
 	}
 }
 
@@ -940,6 +987,7 @@ func (l *Ledger) applyTriggerLocked(e Event) {
 		// an older recall's entry. The verdict tracks the newest open the same way.
 		a.entry = e.Entry
 		a.verdict = e.Verdict
+		a.fingerprint = e.Fingerprint
 	}
 	// The conclusive prior advances on its own clock and is never CLEARED by a later
 	// inconclusive open: the standing answer for a trigger outlives a run that failed

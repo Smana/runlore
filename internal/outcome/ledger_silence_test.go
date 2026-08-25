@@ -378,3 +378,114 @@ func TestVoteAndSilenceTimesSurviveCompaction(t *testing.T) {
 		t.Error("after compaction the silence no longer outranks the older 👎")
 	}
 }
+
+// TestResolveClearsTheSilenceWithNoLiveOpen walks the reachable path that killed
+// the resolve escape outright. applyResolveLocked reached the TriggerKey through
+// l.open[fp], which holds UNRESOLVED opens only — and the suppressed path
+// deliberately records no open at all:
+//
+//	fire → investigate → resolve   (the open is paired and deleted)
+//	🔕 clicked on the scrolled-back card
+//	fire again → SUPPRESSED, no ledger open recorded
+//	resolve again → l.open[fp] is empty → tk == "" → the silence survives
+//
+// so for that silence the resolve escape was permanently dead and only the
+// expiry remained.
+func TestResolveClearsTheSilenceWithNoLiveOpen(t *testing.T) {
+	l := newTestLedger(t)
+	now := time.Date(2026, 8, 25, 12, 0, 0, 0, time.UTC)
+
+	if err := l.Open(Event{Fingerprint: "fp1", TriggerKey: "k", Title: "boom", At: now}); err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	if _, _, err := l.Resolve("fp1", now.Add(time.Minute)); err != nil {
+		t.Fatalf("Resolve (first episode): %v", err)
+	}
+	// An hour later the on-call scrolls back and clicks 🔕 on that card.
+	if err := l.Silence("k", 24*time.Hour, "U1", now.Add(time.Hour)); err != nil {
+		t.Fatalf("Silence: %v", err)
+	}
+	// The trigger fires again and is suppressed: NO open is recorded, by design.
+	if _, _, err := l.Resolve("fp1", now.Add(2*time.Hour)); err != nil {
+		t.Fatalf("Resolve (second episode): %v", err)
+	}
+	if got := l.Recurrence("k").SilencedUntil; !got.IsZero() {
+		t.Errorf("SilencedUntil = %v after the incident resolved, want zero — the resolve escape is dead", got)
+	}
+}
+
+// TestResolveWithNoLiveOpenKeepsAnUnrelatedSilence guards the fallback lookup
+// from over-reaching: it must clear the silence on the trigger whose own
+// investigation carried this fingerprint, and no other.
+func TestResolveWithNoLiveOpenKeepsAnUnrelatedSilence(t *testing.T) {
+	l := newTestLedger(t)
+	now := time.Date(2026, 8, 25, 12, 0, 0, 0, time.UTC)
+
+	if err := l.Open(Event{Fingerprint: "fp1", TriggerKey: "k", At: now}); err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	if err := l.Open(Event{Fingerprint: "fp2", TriggerKey: "other", At: now}); err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	if _, _, err := l.Resolve("fp1", now.Add(time.Minute)); err != nil {
+		t.Fatalf("Resolve: %v", err)
+	}
+	if _, _, err := l.Resolve("fp2", now.Add(time.Minute)); err != nil {
+		t.Fatalf("Resolve: %v", err)
+	}
+	if err := l.Silence("k", 24*time.Hour, "U1", now.Add(time.Hour)); err != nil {
+		t.Fatalf("Silence: %v", err)
+	}
+	if _, _, err := l.Resolve("fp2", now.Add(2*time.Hour)); err != nil {
+		t.Fatalf("Resolve (unrelated): %v", err)
+	}
+	if l.Recurrence("k").SilencedUntil.IsZero() {
+		t.Error("an unrelated resolve cleared the silence")
+	}
+}
+
+// TestResolveWithNoLiveOpenSurvivesCompaction: the fingerprint the fallback
+// looks up lives on the per-trigger index, which is checkpointed. Drop it there
+// and the escape works right up until the first compaction, then silently stops.
+func TestResolveWithNoLiveOpenSurvivesCompaction(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "outcome.jsonl")
+	now := time.Date(2026, 8, 25, 12, 0, 0, 0, time.UTC)
+
+	l, err := NewWithMaxEvents(path, 8)
+	if err != nil {
+		t.Fatalf("NewWithMaxEvents: %v", err)
+	}
+	if err := l.Open(Event{Fingerprint: "fp1", TriggerKey: "k", At: now}); err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	if _, _, err := l.Resolve("fp1", now.Add(time.Minute)); err != nil {
+		t.Fatalf("Resolve: %v", err)
+	}
+	if err := l.Silence("k", 24*time.Hour, "U1", now.Add(time.Hour)); err != nil {
+		t.Fatalf("Silence: %v", err)
+	}
+	for i := 0; i < 20; i++ {
+		if err := l.Open(Event{Fingerprint: "noise", Title: "noise", At: now}); err != nil {
+			t.Fatalf("Open: %v", err)
+		}
+	}
+	compacting, err := NewWithMaxEvents(path, 8) // folds everything, THEN rewrites the file
+	if err != nil {
+		t.Fatalf("NewWithMaxEvents (compacting load): %v", err)
+	}
+	_ = compacting
+
+	replayed, err := NewWithMaxEvents(path, 8) // reads [checkpoint][tail] — the real assertion
+	if err != nil {
+		t.Fatalf("NewWithMaxEvents (replaying load): %v", err)
+	}
+	if replayed.Recurrence("k").SilencedUntil.IsZero() {
+		t.Fatal("precondition: the silence should still stand after the replay")
+	}
+	if _, _, err := replayed.Resolve("fp1", now.Add(2*time.Hour)); err != nil {
+		t.Fatalf("Resolve (after compaction): %v", err)
+	}
+	if got := replayed.Recurrence("k").SilencedUntil; !got.IsZero() {
+		t.Errorf("SilencedUntil = %v, want zero — the checkpoint dropped the trigger's fingerprint", got)
+	}
+}
