@@ -833,12 +833,14 @@ type Notify struct {
 	Silence SilenceNotify `yaml:"silence"` // shared Slack/Matrix silence windows — see SilenceNotify
 	// Extra catches notify.<name> blocks for registered (non-built-in)
 	// notifiers. CONSTRAINT: a drop-in notifier must never be registered
-	// under the name "slack", "matrix" or "thread" — those are named fields
-	// above, and a notify.<that-name> block would land there instead of
-	// here, silently shadowing the notifier's own config. (Slack and Matrix
-	// themselves are registered under those exact names on purpose — that
-	// pairing is the reason those two fields exist — so the constraint is on
-	// every OTHER registered notifier, not on those two.)
+	// under the name of any named field above — today "slack", "matrix",
+	// "thread" or "silence" — because a notify.<that-name> block would land
+	// there instead of here, silently shadowing the notifier's own config.
+	// (Slack and Matrix themselves are registered under those exact names on
+	// purpose — that pairing is the reason those two fields exist — so the
+	// constraint is on every OTHER registered notifier, not on those two.)
+	//
+	// This list is prose and can go stale; the guard below does not read it.
 	//
 	// Enforced by TestRegisteredNotifierNamesDoNotCollideWithConfigFields in
 	// internal/notify (package notify_test, so it can import both this

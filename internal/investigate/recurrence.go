@@ -30,8 +30,10 @@ type RecurrenceStats interface {
 // as fresh noise — the recall short-circuit only helps once the KB PR is MERGED,
 // so the human-review window is exactly when the repetition is worst.
 //
-// The gate turns on two independent facts from the trigger's snapshot, and
-// conflating them is what broke it once already (#471):
+// Inside that cooldown half — and NOT to be confused with the two REASONS above,
+// which are the machine's cooldown and the human's silence — sit two independent
+// FACTS read from the trigger's snapshot. The human silence turns on neither of
+// them; conflating this pair is what broke the cooldown once already (#471):
 //
 //   - WHEN did we last look? The newest open of any kind, conclusive or not. The
 //     cooldown lapses from there, because a full investigation was paid for at that
@@ -45,8 +47,11 @@ type RecurrenceStats interface {
 //     later firing bought a full investigation. Reading the newest conclusive prior
 //     costs one run per mislabel instead of all of them.
 //
-// A trigger that has NEVER concluded still bypasses the gate on every firing: there
-// is no answer to stand on, and suppressing would leave the on-call with silence.
+// A trigger that has NEVER concluded still bypasses the COOLDOWN on every firing:
+// there is no answer to stand on, and suppressing would leave the on-call with
+// nothing. A standing 🔕 suppresses it anyway — that is the human reason, and it
+// reads none of the two facts above; see decide for why that case is precisely the
+// one an operator most wants muted.
 //
 // The gate is deliberately human-deferential in the other direction too: a standing
 // 👎 on the trigger breaks the cooldown immediately — a human saying "that diagnosis

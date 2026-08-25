@@ -516,7 +516,9 @@ func (l *Ledger) resetStateLocked() {
 
 // foldLocked folds one replayed event into the derived state. Open/resolve maintain the
 // aggregate, open-index, pairing stacks, and occurrence index; feedback folds a human
-// vote into the aggregate; a checkpoint seeds the state a prior compaction folded away.
+// vote into the aggregate; silence folds the standing per-trigger suppression; confirm
+// credits a machine re-derivation to its entry and its trigger; a checkpoint seeds the
+// state a prior compaction folded away.
 // Any other (unknown/future) kind is ignored — the forward-compat property binaries
 // older than a given kind rely on (they ignored "feedback" before it was folded, and
 // "checkpoint" before compaction existed).
@@ -824,6 +826,11 @@ func (l *Ledger) applyOpenLocked(e Event) {
 // Episodes(): pop the most-recent unresolved open (LIFO) for the fingerprint and,
 // if it was a counted recall, credit its resolution; with no pending open, buffer
 // the resolve for a later open. Must be called with mu held (or during New).
+//
+// It ALSO lifts any standing 🔕 silence on the resolved incident's trigger, before
+// and regardless of any of the above: the incident ending is the only question that
+// escape turns on. That is done through two complementary mechanisms whose union is
+// deliberate — see the comment at the top of the body before removing either.
 func (l *Ledger) applyResolveLocked(fp string, at time.Time) {
 	// A resolve re-arms investigation: the incident ended, so a standing human
 	// silence has served its purpose and a later firing deserves a fresh look.

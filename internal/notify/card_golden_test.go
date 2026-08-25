@@ -50,8 +50,8 @@ var updateCardGolden = flag.Bool("update-card-golden", false,
 //	                       verdict + restated title, stated confidence, top cause with
 //	                       overflow evidence, next steps with overflow, metadata fields,
 //	                       verified/entry-link/usage footer, approval buttons, feedback
-//	                       buttons, the 🔕 silence overflow, and a detail section (extra
-//	                       hypotheses, open questions, data gaps, ruled out)
+//	                       buttons, and a detail section (extra hypotheses, open
+//	                       questions, data gaps, ruled out)
 //	instant_recall         the README's second capture — Prior + Recalled: the ⚡ banner,
 //	                       known cause / validated resolution labels, resolve rate, the
 //	                       recall confidence note, no verdict
@@ -75,6 +75,13 @@ var updateCardGolden = flag.Bool("update-card-golden", false,
 //	                       conclusion in the title, and nothing behind it — the ⚠️ "No
 //	                       account given" arm that keeps an incomplete run from reading
 //	                       as a finding
+//
+// The 🔕 silence overflow is NOT one fixture's arm: renderCardGolden hands the same
+// silenceWindows() preset to every fixture, so it renders on each one that carries a
+// TriggerKey — action_required, instant_recall, seen_before and curate_failed. The
+// five fingerprint-only fixtures pin the other side of that branch: the overflow
+// requires the TriggerKey specifically and is dropped without it (see
+// feedbackBlocks), which is itself an arm worth holding open.
 //
 // Times are fixed constants: slackDate emits a <!date^…> token built from a Unix
 // timestamp, so a time.Now() anywhere here would rewrite the golden on every run.
