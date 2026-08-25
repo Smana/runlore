@@ -3,7 +3,9 @@
 package outcome
 
 import (
+	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -87,7 +89,12 @@ func TestSilenceUnattributableIsRejected(t *testing.T) {
 func TestSilenceSurvivesReload(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "outcome.jsonl")
-	now := time.Date(2026, 8, 25, 12, 0, 0, 0, time.UTC)
+	// Anchored on the REAL clock, not a fixed date: loadLocked prunes silences
+	// whose window has already closed (see pruneLapsedSilencesLocked), so a
+	// hard-coded 2026 date would turn this test into a time bomb that starts
+	// failing the day the wall clock passes it — asserting a survival the
+	// ledger deliberately no longer offers.
+	now := time.Now()
 
 	first, err := New(path)
 	if err != nil {
@@ -112,7 +119,7 @@ func TestSilenceSurvivesReload(t *testing.T) {
 // again mid-window, silently.
 func TestSilenceSurvivesCompaction(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "outcome.jsonl")
-	now := time.Date(2026, 8, 25, 12, 0, 0, 0, time.UTC)
+	now := time.Now() // still-live at replay time — see TestSilenceSurvivesReload
 
 	// maxEvents low enough that the silence is certain to fall before the horizon.
 	l, err := NewWithMaxEvents(path, 8)
@@ -488,4 +495,83 @@ func TestResolveWithNoLiveOpenSurvivesCompaction(t *testing.T) {
 	if got := replayed.Recurrence("k").SilencedUntil; !got.IsZero() {
 		t.Errorf("SilencedUntil = %v, want zero — the checkpoint dropped the trigger's fingerprint", got)
 	}
+}
+
+// TestReplayPrunesLapsedSilences: a silence whose window closed before the replay
+// is dropped rather than resurrected. Without the prune every silence the file ever
+// recorded stays resident for the life of the process and is copied into every later
+// checkpoint — an append-only leak on a map the resolve path scans.
+func TestReplayPrunesLapsedSilences(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "outcome.jsonl")
+	now := time.Now()
+
+	first, err := New(path)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	// One window closed two days ago, one still open for another day.
+	if err := first.Silence("lapsed", time.Hour, "U1", now.Add(-48*time.Hour)); err != nil {
+		t.Fatalf("Silence (lapsed): %v", err)
+	}
+	if err := first.Silence("live", 24*time.Hour, "U1", now); err != nil {
+		t.Fatalf("Silence (live): %v", err)
+	}
+	// The LIVE path keeps both: nothing sweeps, and the lapsed one is simply inert.
+	if len(first.silences) != 2 {
+		t.Fatalf("live ledger holds %d silences, want 2 (the fold must not sweep)", len(first.silences))
+	}
+
+	second, err := New(path) // a fresh process replaying the same file
+	if err != nil {
+		t.Fatalf("New (reload): %v", err)
+	}
+	if _, ok := second.silences["lapsed"]; ok {
+		t.Errorf("the lapsed silence survived the replay: %+v", second.silences)
+	}
+	if got, want := second.Recurrence("live").SilencedUntil, now.Add(24*time.Hour); !got.Equal(want) {
+		t.Errorf("live SilencedUntil = %v, want %v — the prune took a standing silence", got, want)
+	}
+}
+
+// TestCompactionDropsLapsedSilencesFromTheCheckpoint: the checkpoint is what the
+// NEXT replay seeds from, so a lapsed entry written into it outlives the file it
+// came from. Pruning only the live map would leave that half of the leak durable.
+func TestCompactionDropsLapsedSilencesFromTheCheckpoint(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "outcome.jsonl")
+	now := time.Now()
+
+	l, err := NewWithMaxEvents(path, 8)
+	if err != nil {
+		t.Fatalf("NewWithMaxEvents: %v", err)
+	}
+	if err := l.Silence("lapsed", time.Hour, "U1", now.Add(-48*time.Hour)); err != nil {
+		t.Fatalf("Silence: %v", err)
+	}
+	// Push it past the compaction horizon so it can only reach a later replay
+	// through the checkpoint.
+	for i := 0; i < 20; i++ {
+		if err := l.Open(Event{Fingerprint: "fp", Title: "noise", At: now}); err != nil {
+			t.Fatalf("Open: %v", err)
+		}
+	}
+	if _, err := NewWithMaxEvents(path, 8); err != nil { // folds all 21, THEN rewrites the file
+		t.Fatalf("NewWithMaxEvents (compacting load): %v", err)
+	}
+
+	// Read the rewritten file directly: a later replay would prune the entry on its
+	// own, so only the bytes can say whether the checkpoint still carries it.
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read ledger: %v", err)
+	}
+	if strings.Contains(string(raw), `"lapsed"`) {
+		t.Errorf("the checkpoint still carries the lapsed silence:\n%s", firstLine(string(raw)))
+	}
+}
+
+func firstLine(s string) string {
+	if i := strings.IndexByte(s, '\n'); i >= 0 {
+		return s[:i]
+	}
+	return s
 }

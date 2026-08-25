@@ -3,10 +3,12 @@
 package investigate
 
 import (
+	"path/filepath"
 	"testing"
 	"time"
 
 	"github.com/Smana/runlore/internal/outcome"
+	"github.com/Smana/runlore/internal/providers"
 )
 
 // TestDecideSilence is the full matrix for the human silence branch. The cases
@@ -166,5 +168,58 @@ func TestDecideSilenceVersusFeedbackOrdering(t *testing.T) {
 				t.Errorf("decide() = %q, want %q", got, tc.want)
 			}
 		})
+	}
+}
+
+// TestPruningALapsedSilenceChangesNoDecision is the observational-equivalence pin
+// for outcome's lapsed-silence prune. Dropping a lapsed entry is only safe because
+// decide consults a silence exclusively behind `now < SilencedUntil` — but the
+// prune also clears SilencedAt, which SilenceOutranksFeedback DOES read, so the
+// two snapshots genuinely differ on a field the gate calls. This drives a real
+// ledger through both states and requires every decision to match.
+func TestPruningALapsedSilenceChangesNoDecision(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "o.jsonl")
+	live, err := outcome.New(path)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	now := time.Now()
+	if err := live.Open(outcome.Event{Fingerprint: "fp", TriggerKey: "k", Kind: "fresh",
+		Verdict: string(providers.VerdictNoAction), At: now.Add(-5 * time.Minute)}); err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	// A 👎 cast BEFORE the silence, so SilenceOutranksFeedback reads true while the
+	// lapsed entry is still on the books and false once it is pruned — the field the
+	// prune actually moves.
+	if err := live.Feedback("k", "down", "U1", now.Add(-72*time.Hour)); err != nil {
+		t.Fatalf("Feedback: %v", err)
+	}
+	if err := live.Silence("k", time.Hour, "U2", now.Add(-48*time.Hour)); err != nil {
+		t.Fatalf("Silence: %v", err)
+	}
+
+	replayed, err := outcome.New(path) // a fresh process: loadLocked prunes the lapsed entry
+	if err != nil {
+		t.Fatalf("New (reload): %v", err)
+	}
+	before, after := live.Recurrence("k"), replayed.Recurrence("k")
+	if before.SilencedAt.IsZero() || !after.SilencedAt.IsZero() {
+		t.Fatalf("precondition: want the entry present before (%v) and pruned after (%v)",
+			before.SilencedAt, after.SilencedAt)
+	}
+	if !before.SilenceOutranksFeedback() || after.SilenceOutranksFeedback() {
+		t.Fatalf("precondition: the prune must actually move SilenceOutranksFeedback (before=%v after=%v)",
+			before.SilenceOutranksFeedback(), after.SilenceOutranksFeedback())
+	}
+
+	for _, gate := range []*RecurrenceGate{{}, {Cooldown: time.Hour}, {Cooldown: 24 * time.Hour}} {
+		for _, sev := range []string{"warning", "critical", ""} {
+			req := Request{Title: "t", TriggerKey: "k", Severity: sev}
+			got, want := gate.decide(req, after, now), gate.decide(req, before, now)
+			if got != want {
+				t.Errorf("cooldown=%v severity=%q: pruned decision %q, unpruned %q — the prune moved a decision",
+					gate.Cooldown, sev, got, want)
+			}
+		}
 	}
 }

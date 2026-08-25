@@ -180,8 +180,17 @@ type Ledger struct {
 	// which dedup per (TriggerKey, user) because ratings AGGREGATE: a silence is one
 	// standing decision ABOUT THE TRIGGER, so the most recent human wins outright,
 	// including shortening or effectively lifting a colleague's. Rebuilt on load and
-	// checkpointed on compaction like votes; a lapsed entry is inert (see Recurrence)
-	// and pruned opportunistically rather than swept by a timer.
+	// checkpointed on compaction like votes.
+	//
+	// A LAPSED entry is dropped wherever the ledger already walks this map —
+	// loadLocked after a replay, and compactLocked before the checkpoint is written
+	// — rather than swept by a timer. Doing it there is observationally free: the
+	// suppression gate consults a silence only while now < SilencedUntil (see
+	// RecurrenceGate.decide), and SilenceOutranksFeedback is reached only behind
+	// that same test, so an entry the prune removes could not have changed a
+	// decision. Without the prune every silence ever recorded stays resident for the
+	// life of the process AND is copied into every checkpoint, which also lengthens
+	// the scan clearSilencesForFingerprintLocked makes on the resolve path.
 	silences map[string]silenceState
 
 	// MaxSilenceWindow caps what Silence accepts (zero = uncapped). Set by the serve
@@ -462,6 +471,13 @@ func (l *Ledger) loadLocked() error {
 	for _, e := range events {
 		l.foldLocked(e)
 	}
+	// A replay resurrects every silence the file ever recorded, including the ones
+	// whose window closed long ago. They are inert to the gate but not free: they
+	// stay resident for the life of the process and are copied into every later
+	// checkpoint. Dropping them here costs one walk of a map the replay just built.
+	if dropped := l.pruneLapsedSilencesLocked(time.Now()); dropped > 0 {
+		l.log.Debug("outcome ledger: dropped lapsed silences on replay", "count", dropped, "path", l.path)
+	}
 	// Compaction backstop: an append-only ledger replayed in full on every startup /
 	// leadership Reload / curate Episodes() grows without bound. When it exceeds the
 	// configured cap, fold the oldest events into a single checkpoint record and keep a
@@ -566,6 +582,25 @@ func (l *Ledger) seedCheckpointLocked(cd *checkpointData) {
 	l.resolvesSeen += cd.ResolvesSeen
 }
 
+// pruneLapsedSilencesLocked drops every standing silence whose window has already
+// closed at now, and reports how many it removed. Must be called with mu held (or
+// during single-threaded New, or on a compaction scratch ledger).
+//
+// The boundary matches the gate's exactly: RecurrenceGate.decide suppresses only
+// while now < SilencedUntil, so an entry with until <= now can no longer suppress
+// anything and removing it is invisible to every reader. That equality is what
+// makes this a prune rather than a policy — see Ledger.silences.
+func (l *Ledger) pruneLapsedSilencesLocked(now time.Time) int {
+	dropped := 0
+	for tk, s := range l.silences {
+		if !s.until.After(now) {
+			delete(l.silences, tk)
+			dropped++
+		}
+	}
+	return dropped
+}
+
 // compactLocked rewrites the ledger file as [checkpoint][recent tail]: it folds the
 // oldest events (everything but the most recent maxEvents-1) into a checkpoint that
 // captures their exact aggregate contribution, and retains the tail as raw lines. The
@@ -590,6 +625,10 @@ func (l *Ledger) compactLocked(events []Event) error {
 	for _, e := range events[:cut] {
 		scratch.foldLocked(e)
 	}
+	// The checkpoint is what the NEXT replay seeds from, so a lapsed silence written
+	// into it outlives the file it came from — the one place the leak becomes durable
+	// rather than merely resident. Pruned on the same terms as the live map above.
+	scratch.pruneLapsedSilencesLocked(time.Now())
 	return l.rewriteFileLocked(scratch.snapshotCheckpointLocked(), events[cut:])
 }
 
