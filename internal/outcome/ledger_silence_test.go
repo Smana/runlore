@@ -226,3 +226,15 @@ func TestResolveClearingSurvivesReplay(t *testing.T) {
 		t.Errorf("after replay SilencedUntil = %v, want zero — replay disagrees with the live path", got)
 	}
 }
+
+// TestSilenceNilReceiverIsSafe pins Finding 1(b) from the Task 5 review: Silence
+// must degrade gracefully on a nil *Ledger, the same way Feedback already does
+// via its nil-safe enabled() check. Before the fix, Silence read
+// l.MaxSilenceWindow — a plain field dereference — before ever calling
+// l.enabled(), so a nil receiver panicked instead of quietly no-opping.
+func TestSilenceNilReceiverIsSafe(t *testing.T) {
+	var l *Ledger
+	if err := l.Silence("k", time.Hour, "U1", time.Now()); err != nil {
+		t.Fatalf("Silence on a nil *Ledger returned %v, want nil (quiet no-op)", err)
+	}
+}

@@ -1310,6 +1310,14 @@ func (l *Ledger) applyFeedbackLocked(e Event) {
 // untouched. Attribution is entirely TriggerKey-based; user is recorded for the
 // audit trail, NOT for dedup — see Ledger.silences for why latest-wins per trigger.
 func (l *Ledger) Silence(triggerKey string, window time.Duration, user string, at time.Time) error {
+	// A nil receiver must degrade the same way Feedback already does through its
+	// nil-safe enabled() check — but enabled() runs AFTER the window/cap
+	// validation below (deliberately: see the doc comment), so without this guard
+	// a nil *Ledger would panic on the l.MaxSilenceWindow read before ever
+	// reaching it.
+	if l == nil {
+		return nil
+	}
 	if triggerKey == "" {
 		return fmt.Errorf("silence: empty trigger key")
 	}

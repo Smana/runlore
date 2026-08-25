@@ -566,6 +566,32 @@ func TestBuildMatrixFeedbackThreadCaptureWiresStandalone(t *testing.T) {
 	}
 }
 
+// TestBuildMatrixFeedbackSilenceReactionsWiresStandalone pins the Task 5 early-
+// return widening at the top gate: the listener must build from
+// notify.matrix.silence_reactions ALONE, with feedback_reactions and
+// thread_capture both off. Before that widening, BuildMatrixFeedback's top gate
+// checked only FeedbackReactions/ThreadCapture, so a silence_reactions-only
+// deployment got a nil listener — the same shape of bug
+// TestBuildMatrixFeedbackThreadCaptureWiresStandalone pins for thread_capture.
+func TestBuildMatrixFeedbackSilenceReactionsWiresStandalone(t *testing.T) {
+	t.Setenv("TEST_MATRIX_TOKEN_SILENCE_STANDALONE", "matrix-token")
+	cfg := &config.Config{}
+	cfg.Notify.Matrix = config.MatrixNotify{
+		Homeserver: "https://matrix.example.org", RoomID: "!room:x",
+		AccessTokenEnv: "TEST_MATRIX_TOKEN_SILENCE_STANDALONE", SilenceReactions: true, // FeedbackReactions and ThreadCapture left false
+	}
+	ledger, err := outcome.New(filepath.Join(t.TempDir(), "ledger.jsonl"))
+	if err != nil {
+		t.Fatalf("outcome.New: %v", err)
+	}
+	log := slog.New(slog.NewTextHandler(io.Discard, nil))
+
+	mfb := BuildMatrixFeedback(cfg, ledger, nil, nil, nil, nil, nil, log)
+	if mfb == nil {
+		t.Fatal("silence_reactions alone (feedback_reactions and thread_capture both off) must still build the listener")
+	}
+}
+
 // TestBuildMatrixFeedbackThreadCaptureOffLeavesNeitherWired pins "supplying no
 // option must leave thread capture off": with thread_capture off (even with
 // everything else reachable), the built listener carries neither Mentions nor

@@ -157,13 +157,13 @@ var nilableKinds = map[reflect.Kind]bool{
 // in a detached goroutine.
 //
 // Normalising HERE rather than at the call site is deliberate, and it is applied
-// to ALL THREE optional fields rather than only the one that was reported.
-// `s.threads == nil`, `s.pauser == nil` and `s.feedback == nil` each decide
-// whether an internet-facing endpoint exists or an action can be vetoed; a
-// safety guard whose correctness depends on every present and future caller
-// remembering to nil-check before filling an exported struct field is not a
-// safety guard, and that argument is not specific to Threads. The call sites are
-// still expected to assign guarded — see RunServe, and the
+// to ALL FOUR optional fields rather than only the one that was reported.
+// `s.threads == nil`, `s.pauser == nil`, `s.feedback == nil` and `s.silence ==
+// nil` each decide whether an internet-facing endpoint exists or an action can
+// be vetoed; a safety guard whose correctness depends on every present and
+// future caller remembering to nil-check before filling an exported struct
+// field is not a safety guard, and that argument is not specific to Threads.
+// The call sites are still expected to assign guarded — see RunServe, and the
 // TestActionsInterfaceFieldsAreNeverAssignedRawBuilderResults guard in
 // internal/app that enforces it for the whole class — but the invariant no
 // longer depends on them.
@@ -180,7 +180,7 @@ func liveIface[T any](v T) T {
 
 // Actions bundles the optional rung-2/rung-3 wiring: the approval queue, the auto
 // kill-switch, the shared control token, the Slack signing secret, and the opt-in
-// feedback recorder.
+// feedback and silence recorders.
 type Actions struct {
 	Approvals    *action.Approvals
 	Pauser       Pauser
@@ -215,7 +215,7 @@ func New(ready func() bool, acts Actions, built []source.Built, pipe *source.Pip
 	s := &Server{
 		ready:     ready,
 		approvals: acts.Approvals, pauser: liveIface(acts.Pauser), feedback: liveIface(acts.Feedback),
-		silence: acts.Silence,
+		silence: liveIface(acts.Silence),
 		token:   acts.Token, slackSecret: acts.SlackSecret,
 		webhookToken: acts.WebhookToken, approvers: approvers, metrics: metricsHandler, log: log,
 		guard:            newAuthGuard(),
@@ -407,9 +407,9 @@ type slackInteraction struct {
 
 // handleSlackInteraction processes Block Kit button clicks: it verifies the Slack
 // request signature, then approves (executing) / rejects the referenced action
-// (privileged — approver allowlist) or records a 👍/👎 feedback rating
-// (unprivileged — an opinion, not a cluster mutation), updating the message via
-// response_url.
+// (privileged — approver allowlist) or records a 👍/👎 feedback rating or a 🔕
+// silence verdict (both unprivileged — an opinion or a suppression window, not a
+// cluster mutation), updating the message via response_url.
 func (s *Server) handleSlackInteraction(w http.ResponseWriter, r *http.Request) {
 	// The endpoint drives Approve/Reject on queued actions, the opt-in 👍/👎
 	// feedback, and the opt-in 🔕 silence; it stays 404 unless at least one is
