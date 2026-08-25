@@ -69,7 +69,10 @@ type Parsed struct {
 // BEHAVIOUR rather than recording knowledge, so a note that also contains one
 // of them is refused as ambiguous rather than filed as the human's words — see
 // Parse for why that side is the right one to err on. Their relative order
-// between themselves does not matter, since a message cannot anchor on both.
+// between themselves IS load-bearing for a message containing both tokens —
+// Parse returns the first match in this slice's order, so swapping them would
+// flip which one wins — but shipping "reinvestigate:" first is safe either
+// way, since both outcomes are refusals that write nothing.
 var prefixes = []struct {
 	prefix string
 	intent Intent
