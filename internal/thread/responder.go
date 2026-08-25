@@ -776,7 +776,7 @@ func (r *Responder) Handle(ctx context.Context, tc Context, author, raw string) 
 // away believing the incident is muted when it is not.
 func (r *Responder) silence(tc Context, author, text string) (string, error) {
 	if r.Silence == nil {
-		return "Silencing isn't enabled here — ask an operator about `notify.matrix.silence_reactions`.", nil
+		return "Silencing isn't enabled here — ask an operator to turn on `notify.silence` for this transport.", nil
 	}
 	if tc.TriggerKey == "" {
 		return "I can't tell which incident this thread is about, so there's nothing to silence.", nil

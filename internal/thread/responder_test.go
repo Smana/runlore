@@ -996,6 +996,16 @@ func (f *fakeSilenceRecorder) Silence(triggerKey string, window time.Duration, u
 // Responder.silence: a command that changes behaviour must never fail
 // quietly. With no SilenceRecorder wired, the command must be answered with
 // an explanation rather than falling through to some other intent's reply.
+//
+// The Responder is SHARED across transports (the same value backs both
+// Slack's thread capture, in mention.go, and Matrix's mention handler), and
+// silence() has no way to tell which one a given message arrived on. The
+// reply must therefore name the shared config block (notify.silence) rather
+// than either transport's own flag — an earlier draft named
+// notify.matrix.silence_reactions here, which told a Slack user to set a key
+// that has nothing to do with their transport. This pins the exact wording
+// and explicitly asserts neither transport's name leaks into it, so a future
+// edit cannot silently reintroduce a transport-specific hint.
 func TestHandleSilenceNotEnabledStillReplies(t *testing.T) {
 	f := &fakeForge{}
 	r := newTestResponder(t, f)
@@ -1005,8 +1015,16 @@ func TestHandleSilenceNotEnabledStillReplies(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Handle: %v", err)
 	}
-	if !strings.Contains(strings.ToLower(reply), "not enabled") && !strings.Contains(strings.ToLower(reply), "isn't enabled") {
-		t.Errorf("reply must explain silencing is off: %q", reply)
+	const want = "Silencing isn't enabled here — ask an operator to turn on `notify.silence` for this transport."
+	if reply != want {
+		t.Errorf("reply = %q, want %q", reply, want)
+	}
+	lower := strings.ToLower(reply)
+	for _, transportSpecific := range []string{"matrix", "slack"} {
+		if strings.Contains(lower, transportSpecific) {
+			t.Errorf("reply names a specific transport (%q), but silence() cannot tell which one a message "+
+				"arrived on: %q", transportSpecific, reply)
+		}
 	}
 	if len(f.comments) != 0 || len(f.opened) != 0 {
 		t.Error("a silence command must never write to the knowledge base")
