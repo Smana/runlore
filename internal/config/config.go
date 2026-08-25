@@ -2182,6 +2182,14 @@ func (c *Config) Validate() error {
 		if len(c.Notify.Silence.Windows) == 0 {
 			return fmt.Errorf("notify.silence.windows must list at least one duration when a silence transport is enabled: with no presets there is nothing to render, and no duration for a click to record")
 		}
+		// Slack's overflow element accepts at most 5 options. A 6th preset does not
+		// just fail to render — Slack rejects the WHOLE message (invalid_blocks), so
+		// Multi.Deliver logs and moves on and the symptom is "findings stopped
+		// arriving in Slack" with nothing pointing at this config. Caught here, at
+		// startup, instead.
+		if n := len(c.Notify.Silence.Windows); n > 5 {
+			return fmt.Errorf("notify.silence.windows lists %d entries, but Slack's overflow element accepts at most 5 options: more than that and Slack rejects the entire message (invalid_blocks), not just the 🔕 control — trim the list to 5 or fewer presets", n)
+		}
 		if c.Notify.Silence.MaxWindow.Std() <= 0 {
 			return fmt.Errorf("notify.silence.max_window must be positive when a silence transport is enabled: an uncapped silence is indistinguishable from a permanent one")
 		}

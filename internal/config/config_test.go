@@ -2008,6 +2008,27 @@ func TestSilenceConfigValidation(t *testing.T) {
 			wantErr: "homeserver",
 		},
 		{
+			name: "more than 5 presets is rejected — Slack's overflow element accepts at most 5 options",
+			mutate: func(c *Config) {
+				c.Notify.Silence.Windows = []Duration{
+					Duration(time.Hour), Duration(2 * time.Hour), Duration(4 * time.Hour),
+					Duration(8 * time.Hour), Duration(12 * time.Hour), Duration(24 * time.Hour),
+				}
+				c.Notify.Silence.MaxWindow = Duration(24 * time.Hour)
+			},
+			wantErr: "notify.silence.windows",
+		},
+		{
+			name: "exactly 5 presets is the accepted boundary",
+			mutate: func(c *Config) {
+				c.Notify.Silence.Windows = []Duration{
+					Duration(time.Hour), Duration(2 * time.Hour), Duration(4 * time.Hour),
+					Duration(8 * time.Hour), Duration(12 * time.Hour),
+				}
+				c.Notify.Silence.MaxWindow = Duration(24 * time.Hour)
+			},
+		},
+		{
 			name: "the Matrix path needs a ledger too",
 			mutate: func(c *Config) {
 				c.Notify.Slack.SilenceButton = false
