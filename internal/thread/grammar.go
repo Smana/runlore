@@ -23,6 +23,12 @@ const (
 	// `reinvestigate` forge label. Reserving it now makes adding it later a
 	// handler case rather than a grammar migration.
 	IntentReinvestigate
+	// IntentSilence is the "silence:" prefix: suppress re-investigating this
+	// incident for the duration that follows ("silence: 4h"). Like
+	// IntentReinvestigate it CHANGES BEHAVIOUR rather than recording knowledge,
+	// which is why it sits at high priority in prefixes — a note that merely
+	// contains it is refused as ambiguous rather than filed as the human's words.
+	IntentSilence
 )
 
 // String renders the intent for logs and metrics.
@@ -32,6 +38,8 @@ func (i Intent) String() string {
 		return "note"
 	case IntentReinvestigate:
 		return "reinvestigate"
+	case IntentSilence:
+		return "silence"
 	default:
 		return "freeform"
 	}
@@ -56,14 +64,18 @@ type Parsed struct {
 
 // prefixes maps a recognised command prefix to its intent, in PRIORITY order:
 // the first entry whose token appears anywhere in the message wins, regardless
-// of which one appears earlier in the text. "reinvestigate:" leads so a note
-// that also contains it is refused rather than recorded — see Parse for why
-// that side is the right one to err on.
+// of which one appears earlier in the text. "reinvestigate:" and "silence:"
+// both lead, ahead of "note:", and for the identical reason: each CHANGES
+// BEHAVIOUR rather than recording knowledge, so a note that also contains one
+// of them is refused as ambiguous rather than filed as the human's words — see
+// Parse for why that side is the right one to err on. Their relative order
+// between themselves does not matter, since a message cannot anchor on both.
 var prefixes = []struct {
 	prefix string
 	intent Intent
 }{
 	{"reinvestigate:", IntentReinvestigate},
+	{"silence:", IntentSilence},
 	{"note:", IntentNote},
 }
 

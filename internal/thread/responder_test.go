@@ -970,6 +970,140 @@ func TestHandleNoteContainingReservedWordWithoutColonIsCaptured(t *testing.T) {
 	}
 }
 
+// fakeSilenceRecorder is a SilenceRecorder that records every call it
+// receives and returns silenceErr, if set.
+type fakeSilenceRecorder struct {
+	calls []struct {
+		triggerKey string
+		window     time.Duration
+		user       string
+		at         time.Time
+	}
+	silenceErr error
+}
+
+func (f *fakeSilenceRecorder) Silence(triggerKey string, window time.Duration, user string, at time.Time) error {
+	f.calls = append(f.calls, struct {
+		triggerKey string
+		window     time.Duration
+		user       string
+		at         time.Time
+	}{triggerKey, window, user, at})
+	return f.silenceErr
+}
+
+// TestHandleSilenceNotEnabledStillReplies pins the rule stated on
+// Responder.silence: a command that changes behaviour must never fail
+// quietly. With no SilenceRecorder wired, the command must be answered with
+// an explanation rather than falling through to some other intent's reply.
+func TestHandleSilenceNotEnabledStillReplies(t *testing.T) {
+	f := &fakeForge{}
+	r := newTestResponder(t, f)
+	tc := Context{Root: "111.222", TriggerKey: "trig-1"}
+
+	reply, err := r.Handle(context.Background(), tc, "alice", "<@U0BOT> silence: 4h")
+	if err != nil {
+		t.Fatalf("Handle: %v", err)
+	}
+	if !strings.Contains(strings.ToLower(reply), "not enabled") && !strings.Contains(strings.ToLower(reply), "isn't enabled") {
+		t.Errorf("reply must explain silencing is off: %q", reply)
+	}
+	if len(f.comments) != 0 || len(f.opened) != 0 {
+		t.Error("a silence command must never write to the knowledge base")
+	}
+}
+
+// TestHandleSilenceNoTriggerKeyReplies covers a thread whose Context carries
+// no incident identity — nothing for the ledger to key the suppression on.
+func TestHandleSilenceNoTriggerKeyReplies(t *testing.T) {
+	f := &fakeForge{}
+	r := newTestResponder(t, f)
+	rec := &fakeSilenceRecorder{}
+	r.Silence = rec
+	tc := Context{Root: "111.222"} // no TriggerKey
+
+	reply, err := r.Handle(context.Background(), tc, "alice", "silence: 4h")
+	if err != nil {
+		t.Fatalf("Handle: %v", err)
+	}
+	if len(rec.calls) != 0 {
+		t.Error("Silence must not be called when there is no trigger key to record against")
+	}
+	if !strings.Contains(strings.ToLower(reply), "incident") {
+		t.Errorf("reply must explain there is nothing to silence: %q", reply)
+	}
+}
+
+// TestHandleSilenceUnparseableDurationReplies covers free text that does not
+// parse as a Go duration, and pins that the reply states the configured cap.
+func TestHandleSilenceUnparseableDurationReplies(t *testing.T) {
+	f := &fakeForge{}
+	r := newTestResponder(t, f)
+	rec := &fakeSilenceRecorder{}
+	r.Silence = rec
+	r.SilenceMax = 24 * time.Hour
+	tc := Context{Root: "111.222", TriggerKey: "trig-1"}
+
+	reply, err := r.Handle(context.Background(), tc, "alice", "silence: not-a-duration")
+	if err != nil {
+		t.Fatalf("Handle: %v", err)
+	}
+	if len(rec.calls) != 0 {
+		t.Error("Silence must not be called with an unparseable duration")
+	}
+	if !strings.Contains(reply, "24h0m0s") {
+		t.Errorf("reply must state the configured cap: %q", reply)
+	}
+}
+
+// TestHandleSilenceLedgerErrorIsReported covers the ledger refusing the
+// window (e.g. over cap) — the human must see why, not a bare "ok".
+func TestHandleSilenceLedgerErrorIsReported(t *testing.T) {
+	f := &fakeForge{}
+	r := newTestResponder(t, f)
+	rec := &fakeSilenceRecorder{silenceErr: errors.New("window exceeds notify.silence.max_window")}
+	r.Silence = rec
+	tc := Context{Root: "111.222", TriggerKey: "trig-1"}
+
+	reply, err := r.Handle(context.Background(), tc, "alice", "silence: 999h")
+	if err != nil {
+		t.Fatalf("Handle: %v", err)
+	}
+	if !strings.Contains(reply, "window exceeds notify.silence.max_window") {
+		t.Errorf("reply must surface the ledger's own error: %q", reply)
+	}
+}
+
+// TestHandleSilenceRecordsAndAcks is the success path: the ledger is called
+// with exactly the parsed window and the reply is the shared SilenceAck text
+// — the same one Slack's silence button produces, by construction.
+func TestHandleSilenceRecordsAndAcks(t *testing.T) {
+	f := &fakeForge{}
+	r := newTestResponder(t, f)
+	rec := &fakeSilenceRecorder{}
+	r.Silence = rec
+	tc := Context{Root: "111.222", TriggerKey: "trig-1"}
+
+	reply, err := r.Handle(context.Background(), tc, "alice", "<@U0BOT> silence: 4h")
+	if err != nil {
+		t.Fatalf("Handle: %v", err)
+	}
+	if len(rec.calls) != 1 {
+		t.Fatalf("Silence calls = %d, want 1", len(rec.calls))
+	}
+	got := rec.calls[0]
+	if got.triggerKey != "trig-1" || got.window != 4*time.Hour || got.user != "alice" || !got.at.Equal(noteAt) {
+		t.Errorf("Silence called with %+v", got)
+	}
+	want := SilenceAck("alice", 4*time.Hour, noteAt.Add(4*time.Hour))
+	if reply != want {
+		t.Errorf("reply = %q, want the shared SilenceAck text %q", reply, want)
+	}
+	if len(f.comments) != 0 || len(f.opened) != 0 {
+		t.Error("a silence command must never write to the knowledge base")
+	}
+}
+
 func TestHandleEmptyTextAsksForContent(t *testing.T) {
 	f := &fakeForge{}
 	r := newTestResponder(t, f)

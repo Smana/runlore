@@ -221,6 +221,21 @@ type Responder struct {
 	// goes — each notifier's own channel, or back into the originating thread —
 	// is the announcer's own setting; see KBAnnouncer and providers.KBDelivery.
 	Announcer *KBAnnouncer
+	// Silence records a `silence: <duration>` command; nil when silencing is not
+	// enabled, in which case the command is answered with a short explanation
+	// rather than silently ignored. SilenceMax is notify.silence.max_window,
+	// carried only so the reply can state the bound — the LEDGER enforces it, and
+	// remains the single place that does.
+	Silence    SilenceRecorder
+	SilenceMax time.Duration
+}
+
+// SilenceRecorder records a human 🔕 silence (implemented by *outcome.Ledger).
+// Declared here rather than imported because internal/thread cannot depend on
+// internal/notify; each package declaring the narrow interface it consumes is
+// the idiom this codebase already follows for feedback.
+type SilenceRecorder interface {
+	Silence(triggerKey string, window time.Duration, user string, at time.Time) error
 }
 
 // Announcement bounds. Both are properties of the delivery, not of the write:
@@ -728,6 +743,8 @@ func (r *Responder) Handle(ctx context.Context, tc Context, author, raw string) 
 	switch p.Intent {
 	case IntentReinvestigate:
 		return ReinvestigateNotSupportedReply, nil
+	case IntentSilence:
+		return r.silence(tc, author, p.Text)
 	case IntentFreeform:
 		return r.freeform(ctx, tc, author, p.Text)
 	case IntentNote:
@@ -752,6 +769,28 @@ func (r *Responder) Handle(ctx context.Context, tc Context, author, raw string) 
 		return "Tell me what to record — for example: `note: the real cause was a spot-node reclaim`.", nil
 	}
 	return r.record(ctx, tc, HumanNote(author, p.Text))
+}
+
+// silence answers a `silence: <duration>` command. Every failure path REPLIES —
+// a command that changes behaviour must never fail quietly, or the human walks
+// away believing the incident is muted when it is not.
+func (r *Responder) silence(tc Context, author, text string) (string, error) {
+	if r.Silence == nil {
+		return "Silencing isn't enabled here — ask an operator about `notify.matrix.silence_reactions`.", nil
+	}
+	if tc.TriggerKey == "" {
+		return "I can't tell which incident this thread is about, so there's nothing to silence.", nil
+	}
+	window, err := time.ParseDuration(strings.TrimSpace(text))
+	if err != nil {
+		return fmt.Sprintf("I couldn't read %q as a duration — try `silence: 4h` (up to %s).",
+			strings.TrimSpace(text), r.SilenceMax), nil
+	}
+	now := r.now()
+	if err := r.Silence.Silence(tc.TriggerKey, window, author, now); err != nil {
+		return "Couldn't silence this: " + err.Error(), nil
+	}
+	return SilenceAck(author, window, now.Add(window)), nil
 }
 
 // freeform answers an addressed message that carried no recognised command

@@ -236,6 +236,18 @@ func RunServe(version string, args []string) error {
 	forge := buildForge(cfg, log)
 	threadChat := buildThreadChat(cfg, cat, metrics, log)
 	threadResponder := buildThreadResponder(cfg, threadRegistry, forge, threadChat, notifier, metrics, log)
+	// Opt-in `silence: <duration>` thread command, wired on the same terms as
+	// the Slack silence button and Slack/Matrix feedback: the recorder is set
+	// whenever a click or a command could arrive, gated on the ledger actually
+	// persisting (Enabled() covers both "no ledger_path configured" and a
+	// typed-nil *outcome.Ledger). Matrix is the only transport that can carry
+	// an explicit duration in free text, but the responder is shared with
+	// Slack's thread capture too, so wiring it here reaches both.
+	if cfg.Notify.SilenceEnabled() && ledger.Enabled() {
+		threadResponder.Silence = ledger
+		threadResponder.SilenceMax = cfg.Notify.Silence.MaxWindow.Std()
+		log.Info("thread silence command enabled", "max_window", threadResponder.SilenceMax)
+	}
 	queue := investigate.NewQueue(inv, log)
 	var rlStarts *ratelimit.Window
 	if rl := cfg.Investigation.RateLimit; rl.MaxPerWindow != nil && *rl.MaxPerWindow > 0 {
