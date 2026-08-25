@@ -133,9 +133,12 @@ Public API mirrors `Feedback` (`ledger.go:1194`) — validate, durable-append, t
 func (l *Ledger) Silence(triggerKey string, window time.Duration, user string, at time.Time) error
 ```
 
-Rejects a non-positive window and a window above the configured cap (the cap is passed in at
-construction, so the ledger stays the one place the invariant is enforced — a Matrix command must
-not be able to exceed what the Slack presets allow).
+Rejects a non-positive window and a window above the cap held in a new exported field,
+`Ledger.MaxSilenceWindow` (zero = uncapped), set by the serve wiring right after construction —
+the same set-after-New pattern `cz.Outcome = ledger` already uses (`app/serve.go:281`). Keeping
+the cap in the ledger rather than in each caller makes it the one place the invariant is enforced:
+a Matrix `silence:` command is free text and must not be able to exceed what the Slack presets
+offer.
 
 ### Expiry is read, never swept
 
@@ -312,7 +315,10 @@ type SilenceSink interface {
 }
 ```
 
-`*outcome.Ledger` satisfies both, exactly as it satisfies `FeedbackRecorder`/`FeedbackSink` today.
+A third, identical one lives in `internal/thread` for the `silence:` command path (`thread.SilenceRecorder`),
+because `internal/thread` cannot import `internal/notify`. `*outcome.Ledger` satisfies all three,
+exactly as it satisfies `FeedbackRecorder`/`FeedbackSink` today — each package declaring the
+narrow interface it consumes is the idiom this codebase already follows for feedback.
 Keeping them separate preserves the existing nil-means-off pattern (`server.go:151`) at the right
 granularity: a deployment with `feedback_buttons` on and `silence_button` off must have
 `s.silence == nil` while `s.feedback` is live, and a widened interface could not express that.
