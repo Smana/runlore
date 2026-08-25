@@ -1948,7 +1948,10 @@ func TestSilenceConfigValidation(t *testing.T) {
 		c.Notify.Slack.SigningSecretEnv = "SLACK_SIGNING_SECRET"
 		c.Notify.Slack.WebhookURLEnv = "SLACK_WEBHOOK_URL"
 		c.Notify.Slack.SilenceButton = true
-		c.Notify.Silence.Windows = []Duration{Duration(time.Hour)}
+		// TWO presets, deliberately: Slack's overflow element requires a minimum of
+		// 2 options, so a one-window base config would have every case in this table
+		// validating a config that makes chat.postMessage return invalid_blocks.
+		c.Notify.Silence.Windows = []Duration{Duration(time.Hour), Duration(4 * time.Hour)}
 		c.Notify.Silence.MaxWindow = Duration(24 * time.Hour)
 		return c
 	}
@@ -2026,6 +2029,22 @@ func TestSilenceConfigValidation(t *testing.T) {
 					Duration(8 * time.Hour), Duration(12 * time.Hour),
 				}
 				c.Notify.Silence.MaxWindow = Duration(24 * time.Hour)
+			},
+		},
+		{
+			name:    "a single preset is rejected while Slack renders the overflow",
+			mutate:  func(c *Config) { c.Notify.Silence.Windows = []Duration{Duration(4 * time.Hour)} },
+			wantErr: "at least 2",
+		},
+		{
+			name: "a single preset is fine for Matrix alone — it renders no overflow",
+			mutate: func(c *Config) {
+				c.Notify.Slack.SilenceButton = false
+				c.Notify.Matrix.SilenceReactions = true
+				c.Notify.Matrix.Homeserver = "https://matrix.example.org"
+				c.Notify.Matrix.RoomID = "!room:example.org"
+				c.Notify.Matrix.AccessTokenEnv = "MATRIX_ACCESS_TOKEN"
+				c.Notify.Silence.Windows = []Duration{Duration(4 * time.Hour)}
 			},
 		},
 		{

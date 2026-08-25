@@ -1196,6 +1196,11 @@ type SilenceNotify struct {
 	// Windows are the durations offered, in the order they are rendered. The FIRST
 	// entry is the default used where no duration can be carried — notably a Matrix
 	// 🔕 reaction, which is a bare emoji.
+	//
+	// Non-empty always; and 2 to 5 entries whenever notify.slack.silence_button is
+	// on, because both bounds belong to Slack's overflow element and breaching
+	// either makes Slack reject the WHOLE message (invalid_blocks) rather than just
+	// the control. Enforced in Validate.
 	Windows []Duration `yaml:"windows"`
 	// MaxWindow is the hard cap. Zero means uncapped, which Validate rejects
 	// whenever a silence transport is on — an uncapped silence is indistinguishable
@@ -2200,6 +2205,25 @@ func (c *Config) Validate() error {
 			if w.Std() > c.Notify.Silence.MaxWindow.Std() {
 				return fmt.Errorf("notify.silence.windows entry %v exceeds notify.silence.max_window (%v)", w.Std(), c.Notify.Silence.MaxWindow.Std())
 			}
+		}
+		// The OTHER end of the same Slack constraint, and the one that was missed:
+		// an overflow element requires a MINIMUM of 2 options as well as a maximum
+		// of 5. `windows: [4h]` passed startup and then made chat.postMessage
+		// return invalid_blocks for EVERY message — the symptom is "findings
+		// stopped arriving in Slack" with nothing pointing at this config.
+		//
+		// Scoped to silence_button, unlike the ceiling above, because it is a
+		// property of the OVERFLOW and Matrix renders none: a bare 🔕 reaction
+		// silences for windows[0] and nothing else, so a single-preset Matrix
+		// deployment is a perfectly coherent config and rejecting it would be
+		// inventing a constraint. (The ceiling stays unconditional on purpose: it
+		// costs a Matrix-only deployment two presets nobody can reach from a
+		// reaction, and it keeps the config from breaking the day Slack is added.)
+		//
+		// Checked after the per-entry loop so a single entry that is ALSO invalid
+		// on its own terms reports the more specific reason.
+		if n := len(c.Notify.Silence.Windows); n < 2 && c.Notify.Slack.SilenceButton {
+			return fmt.Errorf("notify.silence.windows lists %d entry, but Slack's overflow element requires at least 2 options: with one preset Slack rejects the entire message (invalid_blocks), so no finding is delivered at all — add a second preset, or turn off notify.slack.silence_button", n)
 		}
 	}
 	// Thread capture cannot work without the same signature verification as

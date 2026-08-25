@@ -609,8 +609,11 @@ reference:
 - `notify.silence.windows` — **opt-in**, the durations offered (Slack's overflow-menu options; also
   the ceiling a Matrix `silence: <duration>` command may not exceed). **Required, non-empty** whenever
   any silence transport is on — with no presets there is nothing to render and no duration for a
-  click to record. `windows[0]` doubles as the default used wherever no duration can be carried (a
-  bare Matrix 🔕 reaction).
+  click to record. With `slack.silence_button` on it must list **2 to 5** entries: both bounds are
+  Slack's own limits on an overflow element, and breaching either makes Slack reject the *entire*
+  message (`invalid_blocks`), so no finding is delivered at all — not just a missing 🔕 control. A
+  Matrix-only deployment renders no overflow and may list a single preset. `windows[0]` doubles as
+  the default used wherever no duration can be carried (a bare Matrix 🔕 reaction).
 - `notify.silence.max_window` — **opt-in**, the hard cap every window above — and every Matrix
   `silence:` command — must respect. **Required, positive** whenever any silence transport is on:
   zero is rejected as indistinguishable from a permanent silence, since nothing else in the system
