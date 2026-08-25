@@ -538,6 +538,8 @@ func (s *Server) handleSlackInteraction(w http.ResponseWriter, r *http.Request) 
 			msg = "⚠️ silencing not enabled (notify.slack.silence_button is off)"
 			break
 		}
+		// "sil:" must match notify.silenceBlockIDPrefix (internal/server cannot
+		// import internal/notify), exactly like the action id above.
 		key, ok := strings.CutPrefix(act.BlockID, "sil:")
 		if !ok || key == "" {
 			msg = "⚠️ could not identify the incident to silence"

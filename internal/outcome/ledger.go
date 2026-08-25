@@ -799,9 +799,25 @@ func (l *Ledger) applyResolveLocked(fp string, at time.Time) {
 	//	fire again → SUPPRESSED, no ledger open recorded
 	//	resolve again → l.open[fp] is empty → nothing to un-silence, ever
 	//
-	// The per-trigger index outlives the open and already remembers the newest
-	// investigation, so it answers the same question without a new index to keep,
-	// checkpoint and bound. See clearSilencesForFingerprintLocked.
+	// The per-trigger index outlives the open, so it covers that gap without a new
+	// index to keep, checkpoint and bound. See clearSilencesForFingerprintLocked.
+	//
+	// BOTH mechanisms are kept, and NEITHER subsumes the other — do not "simplify"
+	// this to one. applyTriggerLocked only stamps a.fingerprint for the NEWEST open
+	// of a trigger, so the two cover complementary cases:
+	//
+	//	direct lookup ONLY   a resolve for an OLDER still-unresolved open whose
+	//	                     trigger has since opened again under a different
+	//	                     fingerprint — byTrigger holds the newer one, so the
+	//	                     scan below never matches it.
+	//	scan ONLY            the no-live-open case above, where l.open[fp] is empty.
+	//
+	// Two independent quality reviews read this comment when it claimed the scan
+	// "answers the same question", each concluded one of the two was redundant,
+	// and each proposed deleting a DIFFERENT one. Both would have silently
+	// narrowed the escape. The union is the point: clearing a silence too eagerly
+	// only costs one extra investigation, while missing one leaves an incident
+	// muted with no way out but expiry.
 	l.clearSilencesForFingerprintLocked(fp)
 
 	// Channel-liveness proof, recorded before any pairing decision: whether this

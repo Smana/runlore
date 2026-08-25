@@ -1226,6 +1226,27 @@ func (s SilenceNotify) Default() time.Duration {
 	return s.Windows[0].Std()
 }
 
+// hasDeliveryTarget reports whether a Slack notifier could be built at all: an
+// incoming-webhook URL, or a bot token together with a channel. It is the ONE
+// definition of "a Slack delivery target", shared by every control that only
+// exists on a message the notifier delivered (feedback buttons, the silence
+// menu). Kept as a method rather than repeated inline so a new delivery path is
+// added in one place — two copies of this predicate drifted apart is exactly
+// the failure it exists to prevent.
+//
+// It answers the STATIC question only. Runtime emptiness (an env var set but
+// unmounted) is not knowable here; app.SlackFeedbackDeliverable warns for that.
+func (s SlackNotify) hasDeliveryTarget() bool {
+	return s.WebhookURLEnv != "" || (s.BotTokenEnv != "" && s.Channel != "")
+}
+
+// hasListenerFields reports whether the Matrix /sync listener could run at all.
+// Every Matrix capability that long-polls the room needs the same three fields,
+// so they are checked through one predicate rather than three inline copies.
+func (m MatrixNotify) hasListenerFields() bool {
+	return m.Homeserver != "" && m.RoomID != "" && m.AccessTokenEnv != ""
+}
+
 // SilenceEnabled reports whether ANY transport can record a silence. It is the
 // condition the investigation gate must be constructed on: without it, a
 // deployment with silencing on but no recurrence cooldown would record every
@@ -2167,7 +2188,7 @@ func (c *Config) Validate() error {
 		// configs where no notifier could ever be built regardless of the environment —
 		// i.e. where the buttons were already dead. Runtime emptiness (an env var set
 		// but unmounted) is not knowable here; app.SlackFeedbackDeliverable warns for it.
-		if sl := c.Notify.Slack; sl.WebhookURLEnv == "" && (sl.BotTokenEnv == "" || sl.Channel == "") {
+		if !c.Notify.Slack.hasDeliveryTarget() {
 			return fmt.Errorf("notify.slack.feedback_buttons requires a Slack delivery target: set notify.slack.webhook_url_env, or notify.slack.bot_token_env together with notify.slack.channel — with neither the Slack notifier is skipped, so no message is delivered, no buttons render and no feedback can ever be recorded")
 		}
 	}
@@ -2182,7 +2203,7 @@ func (c *Config) Validate() error {
 		// …and a delivery target, for the same reason feedback_buttons requires
 		// one above: a 🔕 menu only ever exists on a message the Slack notifier
 		// delivered, and that notifier is skipped silently with neither target set.
-		if sl := c.Notify.Slack; sl.WebhookURLEnv == "" && (sl.BotTokenEnv == "" || sl.Channel == "") {
+		if !c.Notify.Slack.hasDeliveryTarget() {
 			return fmt.Errorf("notify.slack.silence_button requires a Slack delivery target: set notify.slack.webhook_url_env, or notify.slack.bot_token_env together with notify.slack.channel — with neither the Slack notifier is skipped, so no message is delivered, no 🔕 menu renders and no silence can ever be recorded")
 		}
 	}
@@ -2190,8 +2211,7 @@ func (c *Config) Validate() error {
 	// feedback_reactions above: without the notifier fields it would sync
 	// nothing, so a 🔕 reaction could never be recorded.
 	if c.Notify.Matrix.SilenceReactions {
-		m := c.Notify.Matrix
-		if m.Homeserver == "" || m.RoomID == "" || m.AccessTokenEnv == "" {
+		if !c.Notify.Matrix.hasListenerFields() {
 			return fmt.Errorf("notify.matrix.silence_reactions requires homeserver, room_id and access_token_env (the reaction listener long-polls the configured room)")
 		}
 	}
@@ -2263,8 +2283,7 @@ func (c *Config) Validate() error {
 	// notifier fields it would sync nothing, without the ledger it would record
 	// nowhere — both silent lies to whoever enabled the option.
 	if c.Notify.Matrix.FeedbackReactions {
-		m := c.Notify.Matrix
-		if m.Homeserver == "" || m.RoomID == "" || m.AccessTokenEnv == "" {
+		if !c.Notify.Matrix.hasListenerFields() {
 			return fmt.Errorf("notify.matrix.feedback_reactions requires homeserver, room_id and access_token_env (the reaction listener long-polls the configured room)")
 		}
 		if c.Outcome.LedgerPath == "" {
@@ -2276,8 +2295,7 @@ func (c *Config) Validate() error {
 	// registry has nowhere durable to live — both silent lies to whoever enabled
 	// the option.
 	if c.Notify.Matrix.ThreadCapture {
-		m := c.Notify.Matrix
-		if m.Homeserver == "" || m.RoomID == "" || m.AccessTokenEnv == "" {
+		if !c.Notify.Matrix.hasListenerFields() {
 			return fmt.Errorf("notify.matrix.thread_capture requires homeserver, room_id and access_token_env (the listener long-polls the configured room and authenticates as the bot)")
 		}
 		if c.Outcome.LedgerPath == "" {
