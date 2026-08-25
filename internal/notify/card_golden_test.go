@@ -50,8 +50,8 @@ var updateCardGolden = flag.Bool("update-card-golden", false,
 //	                       verdict + restated title, stated confidence, top cause with
 //	                       overflow evidence, next steps with overflow, metadata fields,
 //	                       verified/entry-link/usage footer, approval buttons, feedback
-//	                       buttons, and a detail section (extra hypotheses, open
-//	                       questions, data gaps, ruled out)
+//	                       buttons, the 🔕 silence overflow, and a detail section (extra
+//	                       hypotheses, open questions, data gaps, ruled out)
 //	instant_recall         the README's second capture — Prior + Recalled: the ⚡ banner,
 //	                       known cause / validated resolution labels, resolve rate, the
 //	                       recall confidence note, no verdict
@@ -322,9 +322,10 @@ func cardGoldenFixtures() []struct {
 }
 
 // renderCardGolden renders every fixture through slackMessageWith — the exact
-// entry point the bot path posts (summary + detail + feedback buttons) — and
-// encodes the result with sorted map keys, so the bytes are a pure function of
-// the renderer.
+// entry point the bot path posts (summary + detail + feedback buttons + the 🔕
+// silence overflow, via the fixed silenceWindows() test preset) — and encodes
+// the result with sorted map keys, so the bytes are a pure function of the
+// renderer.
 //
 // HTML escaping is off: Slack's own mrkdwn vocabulary is built from <, > and &
 // (<!date^…>, <url|label>, &gt; escapes), and < everywhere would make the
@@ -338,7 +339,7 @@ func renderCardGolden(t *testing.T) []byte {
 	}
 	cards := make([]card, 0, len(cardGoldenFixtures()))
 	for _, f := range cardGoldenFixtures() {
-		cards = append(cards, card{Fixture: f.Name, Card: slackMessageWith(f.Inv, true)})
+		cards = append(cards, card{Fixture: f.Name, Card: slackMessageWith(f.Inv, true, silenceWindows())})
 	}
 	var buf bytes.Buffer
 	enc := json.NewEncoder(&buf)
@@ -425,6 +426,7 @@ func TestCardGoldenCoversEveryRenderedBranch(t *testing.T) {
 		"Proposed action",                      // an action awaiting approval
 		"Approve",                              //
 		"👍 Accurate",                           // feedbackBlocks
+		"🔕 Silence",                            // feedbackBlocks' silence overflow
 		"…1 more",                              // evidence / next-step overflow
 		"<!date^",                              // slackDate, which is why the fixtures fix their times
 	} {

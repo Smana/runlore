@@ -402,6 +402,16 @@ type slackInteraction struct {
 	Actions []struct {
 		ActionID string `json:"action_id"`
 		Value    string `json:"value"`
+		// BlockID is the actions block's block_id, echoed back on every action.
+		// The silence overflow carries no room for the TriggerKey in its option
+		// values (Slack caps those at 75 chars), so notify.slack.go stashes it
+		// here instead — see notify.silenceBlockIDPrefix.
+		BlockID string `json:"block_id"`
+		// SelectedOption carries an overflow's chosen value — NOT the top-level
+		// Value field above, which button clicks (approve/reject/feedback) use.
+		SelectedOption struct {
+			Value string `json:"value"`
+		} `json:"selected_option"`
 	} `json:"actions"`
 }
 
@@ -502,13 +512,44 @@ func (s *Server) handleSlackInteraction(w http.ResponseWriter, r *http.Request) 
 			msg = fmt.Sprintf("🙏 feedback recorded (%s) — thanks @%s", rating, p.User.Username)
 			s.log.Info("slack feedback recorded", "key", act.Value, "rating", rating, "user_id", p.User.ID, "user", p.User.Username)
 		}
+	case "runlore_silence": // must match notify.silenceActionID (internal/server cannot import internal/notify)
+		// Unprivileged, like feedback and unlike approve/reject: the signature
+		// proves the workspace, and the blast radius is bounded four independent
+		// ways — the window expires, a CRITICAL firing is never suppressed, any
+		// colleague's 👎 re-arms it, and every silence is attributed in the ledger.
+		if s.silence == nil {
+			msg = "⚠️ silencing not enabled (notify.slack.silence_button is off)"
+			break
+		}
+		key, ok := strings.CutPrefix(act.BlockID, "sil:")
+		if !ok || key == "" {
+			msg = "⚠️ could not identify the incident to silence"
+			s.log.Warn("slack silence: unexpected block_id", "block_id", act.BlockID)
+			break
+		}
+		window, werr := time.ParseDuration(act.SelectedOption.Value)
+		if werr != nil {
+			msg = "⚠️ could not read the silence window"
+			s.log.Warn("slack silence: bad window", "value", act.SelectedOption.Value, "err", werr)
+			break
+		}
+		now := time.Now()
+		if serr := s.silence.Silence(key, window, p.User.ID, now); serr != nil {
+			msg = "⚠️ silencing failed: " + serr.Error()
+			s.log.Warn("slack silence failed", "key", key, "window", window, "err", serr)
+			break
+		}
+		msg = thread.SilenceAck(p.User.Username, window, now.Add(window))
+		s.log.Info("slack silence recorded", "key", key, "window", window,
+			"until", now.Add(window), "user_id", p.User.ID, "user", p.User.Username)
 	default:
 		http.Error(w, "unknown action", http.StatusBadRequest)
 		return
 	}
 	w.WriteHeader(http.StatusOK) // ack the click; update the message best-effort
 	// Approve/reject replace the interaction message with the outcome; a feedback
-	// ack must NOT — replacing would wipe the investigation the rating is about.
+	// or silence ack must NOT — replacing would wipe the investigation the rating
+	// or the silence is about.
 	replace := act.ActionID == "runlore_approve" || act.ActionID == "runlore_reject"
 	s.updateSlack(r.Context(), p.ResponseURL, msg, replace)
 }

@@ -72,8 +72,8 @@ DIGEST_AT_SHOT="7e20faaa535f1f01597b8e10e078f731acc65c387b21bafe2ae0b97c959ee434
 #     and this fails, so an acknowledgement cannot silently become permanent.
 #
 # Clear it (set to "") in the same commit that lands retaken screenshots.
-ACKNOWLEDGED_DIGEST=""
-ACKNOWLEDGED_REASON=""
+ACKNOWLEDGED_DIGEST="21b1a35ca16a4d4ccba51b9eedcd4426ab00c680917902ebbaaa53602bc244c1"
+ACKNOWLEDGED_REASON="feat(slack): the investigation-silence feature added a 🔕 overflow menu (silenceActionID) beside the existing 👍/👎 feedback buttons — internal/notify/card_golden_test.go's fixtures now render it, moving the golden's digest. The shipped screenshots (assets/slack-notification.png, assets/recall-notification.png) predate this control and cannot be retaken here: the card can only be rendered by a live Slack workspace, and the credentials for one live in the demo cluster outside this repo. Clear this and update DIGEST_AT_SHOT in the same commit that lands retaken screenshots."
 
 for f in "${SHOTS[@]}" "$CARD_GOLDEN"; do
   [ -f "$f" ] || { echo "::error::$f is missing — update hack/check-screenshots-fresh.sh" >&2; exit 1; }

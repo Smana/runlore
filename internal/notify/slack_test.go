@@ -1152,7 +1152,7 @@ func TestSlackFeedbackButtonsOptIn(t *testing.T) {
 		t.Fatal("feedback buttons must NOT render when the option is off (default)")
 	}
 
-	on := marshalBlocks(t, slackMessageWith(inv, true))
+	on := marshalBlocks(t, slackMessageWith(inv, true, nil))
 	if !strings.Contains(on, `"action_id":"runlore_feedback_up"`) ||
 		!strings.Contains(on, `"action_id":"runlore_feedback_down"`) {
 		t.Fatalf("both feedback buttons must render when opted in, got: %s", on)
@@ -1161,12 +1161,12 @@ func TestSlackFeedbackButtonsOptIn(t *testing.T) {
 		t.Fatalf("buttons must carry the TriggerKey as value, got: %s", on)
 	}
 
-	byFP := marshalBlocks(t, slackMessageWith(providers.Investigation{Title: "t", Fingerprint: "fp1"}, true))
+	byFP := marshalBlocks(t, slackMessageWith(providers.Investigation{Title: "t", Fingerprint: "fp1"}, true, nil))
 	if !strings.Contains(byFP, `"value":"fp1"`) {
 		t.Fatalf("buttons must fall back to the fingerprint, got: %s", byFP)
 	}
 
-	if s := marshalBlocks(t, slackMessageWith(providers.Investigation{Title: "t"}, true)); strings.Contains(s, "runlore_feedback") {
+	if s := marshalBlocks(t, slackMessageWith(providers.Investigation{Title: "t"}, true, nil)); strings.Contains(s, "runlore_feedback") {
 		t.Fatal("no TriggerKey and no fingerprint ⇒ nothing to attribute ⇒ no buttons")
 	}
 }

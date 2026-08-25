@@ -81,6 +81,9 @@ func init() {
 			case slackTargetBot:
 				b := NewSlackBot(os.Getenv(sl.BotTokenEnv), sl.Channel)
 				b.FeedbackButtons = sl.FeedbackButtons
+				if sl.SilenceButton {
+					b.SilenceWindows = d.Cfg.Notify.Silence.Std()
+				}
 				if sl.ThreadCapture {
 					b.Threads = d.Threads
 				}
@@ -88,6 +91,9 @@ func init() {
 			case slackTargetWebhook:
 				s := NewSlack(os.Getenv(sl.WebhookURLEnv))
 				s.FeedbackButtons = sl.FeedbackButtons
+				if sl.SilenceButton {
+					s.SilenceWindows = d.Cfg.Notify.Silence.Std()
+				}
 				return s, nil
 			}
 			return nil, nil
@@ -103,6 +109,9 @@ type Slack struct {
 	// so the on-call can rate the diagnosis; clicks land in the outcome ledger via
 	// the exposed /slack/interactions endpoint.
 	FeedbackButtons bool
+	// SilenceWindows are the presets offered by the 🔕 overflow
+	// (notify.silence.windows); empty disables the control.
+	SilenceWindows []time.Duration
 }
 
 // NewSlack builds a Slack webhook notifier.
@@ -119,7 +128,10 @@ var (
 // Deliver posts the formatted investigation to the webhook. When an action carries
 // an ApprovalID, it renders interactive Approve/Reject buttons (Block Kit).
 func (s *Slack) Deliver(ctx context.Context, inv providers.Investigation) error {
-	return s.post(ctx, slackMessageWith(inv, s.FeedbackButtons))
+	// The row renders whenever EITHER capability is on: notify.slack.silence_button
+	// is validated (config.Validate) as usable without feedback_buttons, so an
+	// operator who wants only the suppression must still see the 🔕 control.
+	return s.post(ctx, slackMessageWith(inv, s.FeedbackButtons || len(s.SilenceWindows) > 0, s.SilenceWindows))
 }
 
 // DeliverProgress posts an interim progress ping to the webhook (ProgressNotifier).
@@ -167,6 +179,9 @@ type SlackBot struct {
 	// FeedbackButtons — see Slack.FeedbackButtons; on the bot path the buttons sit
 	// on the channel summary message, never on the detail thread reply.
 	FeedbackButtons bool
+	// SilenceWindows are the presets offered by the 🔕 overflow
+	// (notify.silence.windows); empty disables the control.
+	SilenceWindows []time.Duration
 	// Threads, when set (notify.slack.thread_capture), receives the summary
 	// message's ts so a later reply in that thread can be attributed to this
 	// investigation. Never set from the detail reply — the root is the handle.
@@ -193,8 +208,10 @@ var (
 // yields no ts (empty-body path) or the investigation has no detail beyond it.
 func (s *SlackBot) Deliver(ctx context.Context, inv providers.Investigation) error {
 	summary := summaryBlocks(inv)
-	if s.FeedbackButtons {
-		summary = append(summary, feedbackBlocks(inv)...)
+	// See Slack.Deliver: the row renders whenever EITHER capability is on, so a
+	// silence_button-only deployment still gets the 🔕 control.
+	if s.FeedbackButtons || len(s.SilenceWindows) > 0 {
+		summary = append(summary, feedbackBlocks(inv, s.SilenceWindows)...)
 	}
 	ts, err := s.post(ctx, map[string]any{"text": fallbackText(inv), "blocks": summary})
 	if err != nil {
@@ -307,6 +324,22 @@ const (
 	rejectActionID       = "runlore_reject"
 	feedbackUpActionID   = "runlore_feedback_up"
 	feedbackDownActionID = "runlore_feedback_down"
+	silenceActionID      = "runlore_silence"
+)
+
+// silenceBlockIDPrefix namespaces the actions block whose block_id carries the
+// TriggerKey for the silence overflow, and slackBlockIDMax is Slack's cap on that
+// field.
+//
+// The key rides in block_id rather than in the overflow's option values because
+// Slack caps an option value at 75 characters (a button value gets 2000), and a
+// GitOps TriggerKey is `namespace/name:Reason` — routinely 60-70 characters, and
+// unbounded in principle since Kubernetes names run to 253. An over-long option
+// value makes Slack reject the ENTIRE message, so the failure would take out the
+// notification, not just the control.
+const (
+	silenceBlockIDPrefix = "sil:"
+	slackBlockIDMax      = 255
 )
 
 // slackMessage builds the Slack payload: a verdict-first Block Kit summary
@@ -333,16 +366,19 @@ const (
 // emits a raw <!date^…> token that is blocks-only — it must never enter the
 // escaped fallback text.
 func slackMessage(inv providers.Investigation) map[string]any {
-	return slackMessageWith(inv, false)
+	return slackMessageWith(inv, false, nil)
 }
 
-// slackMessageWith is slackMessage plus the opt-in 👍/👎 feedback block appended
-// last (after the detail section) when withFeedback is set — the single-message
-// webhook path's equivalent of the bot path's buttons-on-summary.
-func slackMessageWith(inv providers.Investigation, withFeedback bool) map[string]any {
+// slackMessageWith is slackMessage plus the opt-in 👍/👎/🔕 feedback block
+// appended last (after the detail section) when withFeedback is set — the
+// single-message webhook path's equivalent of the bot path's
+// buttons-on-summary. silenceWindows is threaded through to feedbackBlocks
+// unconditionally: it is a free function (unlike the Slack/SlackBot methods
+// that call it), so it has no receiver to read the configured presets from.
+func slackMessageWith(inv providers.Investigation, withFeedback bool, silenceWindows []time.Duration) map[string]any {
 	blocks := append(summaryBlocks(inv), detailBlocks(inv)...)
 	if withFeedback {
-		blocks = append(blocks, feedbackBlocks(inv)...)
+		blocks = append(blocks, feedbackBlocks(inv, silenceWindows)...)
 	}
 	return map[string]any{
 		"text":   fallbackText(inv),
@@ -350,25 +386,50 @@ func slackMessageWith(inv providers.Investigation, withFeedback bool) map[string
 	}
 }
 
-// feedbackBlocks renders the 👍/👎 actions block — the human end of the learning
-// loop: a click lands in the outcome ledger and weighs the recalled entry's trust
-// like a resolve signal does (the only ground-truth channel for sources with no
-// resolve webhook, e.g. GitOps failures). The button value is the TriggerKey
-// (incident identity — ratings survive re-worded re-investigations), falling back
-// to the alert fingerprint; with neither there is nothing for the ledger to
-// attribute, so no buttons render. Labels are plain_text (never escaped); the
-// value is opaque to Slack.
-func feedbackBlocks(inv providers.Investigation) []map[string]any {
+// feedbackBlocks renders the human end of the learning loop: 👍/👎 plus, when
+// silenceWindows is non-empty, a 🔕 overflow offering each configured window.
+//
+// The three are one row and one verdict vocabulary — 👍 accurate, 👎 off-base,
+// 🔕 accurate but known — but they are NOT one capability: a rating weighs a
+// recalled entry's trust, while a silence suppresses re-investigation. They are
+// enabled by separate config flags and this function renders whichever are on.
+//
+// Attribution is the TriggerKey (incident identity — ratings and silences survive
+// re-worded re-investigations), falling back to the alert fingerprint; with
+// neither there is nothing for the ledger to attribute, so nothing renders.
+//
+// The silence element's TriggerKey travels in the block's block_id, not in the
+// option values — see silenceBlockIDPrefix for why. If the key is too long for
+// even that, the silence element alone is dropped: a pathological resource name
+// must degrade ONE control, never the card.
+//
+// Labels are plain_text (never escaped); values are opaque to Slack.
+func feedbackBlocks(inv providers.Investigation, silenceWindows []time.Duration) []map[string]any {
 	key := cmp.Or(inv.TriggerKey, inv.Fingerprint)
 	if key == "" {
 		return nil
 	}
-	return []map[string]any{{"type": "actions", "elements": []map[string]any{
+	block := map[string]any{"type": "actions", "elements": []map[string]any{
 		{"type": "button", "action_id": feedbackUpActionID, "value": key,
 			"text": map[string]any{"type": "plain_text", "text": "👍 Accurate", "emoji": true}},
 		{"type": "button", "action_id": feedbackDownActionID, "value": key,
 			"text": map[string]any{"type": "plain_text", "text": "👎 Off-base", "emoji": true}},
-	}}}
+	}}
+	blockID := silenceBlockIDPrefix + key
+	if len(silenceWindows) > 0 && len(blockID) <= slackBlockIDMax {
+		opts := make([]map[string]any, 0, len(silenceWindows))
+		for _, w := range silenceWindows {
+			opts = append(opts, map[string]any{
+				"text":  map[string]any{"type": "plain_text", "text": "🔕 Silence " + w.String(), "emoji": true},
+				"value": w.String(),
+			})
+		}
+		block["block_id"] = blockID
+		block["elements"] = append(block["elements"].([]map[string]any), map[string]any{
+			"type": "overflow", "action_id": silenceActionID, "options": opts,
+		})
+	}
+	return []map[string]any{block}
 }
 
 // fallbackText renders the one-line notification/accessibility summary Slack
