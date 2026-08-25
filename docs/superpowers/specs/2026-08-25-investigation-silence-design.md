@@ -375,13 +375,26 @@ off rather than failing startup.
 ## Security
 
 Silencing is unprivileged — the Slack signature proves the workspace, which is the bar feedback
-already meets. The justification is that the blast radius is bounded four **independent** ways, and
-an attacker would have to defeat all of them:
+already meets. The justification is that, for an **alert-sourced** incident, the blast radius is
+bounded four **independent** ways, and an attacker would have to defeat all of them:
 
 1. It **expires** on its own, capped by `max_window`.
 2. It **never** suppresses a CRITICAL firing.
 3. Any colleague's 👎 **immediately** undoes it (and is one click).
 4. Every silence is attributed to a user id in the durable ledger and in the logs.
+
+Plus the resolve re-arm (§2 above): the incident ending clears the silence outright, so the next
+occurrence gets a fresh look without waiting for expiry.
+
+**Two of those five do not hold for a GitOps-sourced trigger.** `FromFailureEvent`
+(`internal/investigate/investigate.go`) never sets `Severity`, so `req.IsCritical()` is always false
+and bound 2 never fires — a silenced GitOps failure has no CRITICAL escape. And a GitOps failure's
+fingerprint is synthetic (`outcome.Derived`'s doc comment: "such incidents have no resolve channel —
+no resolved-alert webhook can ever match them"), so the resolve re-arm never fires either. **For a
+GitOps failure, a silence is bounded by its expiry and a colleague's 👎 — and nothing else.** The
+same loss of the resolve re-arm (but not bound 2, since a real severity label is still present)
+applies to an Alertmanager receiver configured with `send_resolved: false`: RunLore never reads that
+receiver's config, so it has no signal that a resolve will never arrive.
 
 An approver allowlist was considered and rejected: it buys little against that, and adds friction
 exactly when the on-call is busiest. Should the posture need tightening later, a

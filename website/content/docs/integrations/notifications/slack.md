@@ -92,15 +92,23 @@ The silence stands until one of **four** things happens:
 - the incident **resolves** — a resolve clears the silence outright, so the next occurrence gets a
   fresh look.
 
+**Two of those four are alert-specific and do not apply to a GitOps-sourced failure.**
+`FromFailureEvent` never sets a severity, so the CRITICAL carve-out can never fire; and a GitOps
+failure's fingerprint is synthetic, so it has no resolve channel at all — nothing can ever clear the
+silence early. **For a GitOps failure, a silence is bounded by its expiry and a colleague's 👎 — and
+nothing else.** The same loss of the resolve escape (but not the CRITICAL one, since a real severity
+is still present) applies to an Alertmanager receiver configured with `send_resolved: false`.
+
 The click is acknowledged with a message naming who silenced it, until when, and restating the escapes
 above, so nobody has to guess why the channel went quiet.
 
 Like `feedback_buttons`, silencing is deliberately **unprivileged**: any signature-valid member of
-your workspace can silence an incident — there is no `approver_ids`-style allowlist. That is safe
-because the blast radius is bounded four independent ways (the escapes above), every silence is
-attributed to the clicking Slack user's id in the outcome ledger (so a bad click is auditable, not
-anonymous), and the window itself is capped by `notify.silence.max_window` — nothing can be silenced
-indefinitely.
+your workspace can silence an incident — there is no `approver_ids`-style allowlist. That is safe for
+an alert-sourced incident, where the blast radius is bounded four independent ways (the escapes
+above); for a GitOps failure, or a `send_resolved: false` receiver, it is narrower — per above — but
+still bounded by expiry and a 👎. Every silence is attributed to the clicking Slack user's id in the
+outcome ledger (so a bad click is auditable, not anonymous), and the window itself is capped by
+`notify.silence.max_window` — nothing can be silenced indefinitely.
 
 ```yaml
 notify:

@@ -514,9 +514,12 @@ func (s *Server) handleSlackInteraction(w http.ResponseWriter, r *http.Request) 
 		}
 	case "runlore_silence": // must match notify.silenceActionID (internal/server cannot import internal/notify)
 		// Unprivileged, like feedback and unlike approve/reject: the signature
-		// proves the workspace, and the blast radius is bounded four independent
-		// ways — the window expires, a CRITICAL firing is never suppressed, any
-		// colleague's 👎 re-arms it, and every silence is attributed in the ledger.
+		// proves the workspace, and for an alert-sourced incident the blast radius
+		// is bounded four independent ways — the window expires, a CRITICAL firing
+		// is never suppressed, any colleague's 👎 re-arms it, and every silence is
+		// attributed in the ledger. For a GitOps-sourced trigger (no severity, no
+		// resolve channel — see FromFailureEvent / outcome.Derived) only the first
+		// and third bounds apply.
 		if s.silence == nil {
 			msg = "⚠️ silencing not enabled (notify.slack.silence_button is off)"
 			break

@@ -94,6 +94,14 @@ no ledger open** — until the window expires, the incident fires again as **CRI
 **👎** re-arms it, or the incident **resolves**. Every silence, whichever path recorded it, gets the
 same acknowledgement: a message naming who silenced it, until when, and restating those four escapes.
 
+**Two of those four are alert-specific**, exactly as on the Slack side (see [Slack → Silence a
+recurring incident]({{< relref "/docs/integrations/notifications/slack.md#silence-a-recurring-incident" >}})
+for the full explanation): a GitOps-sourced failure sets no severity, so the CRITICAL carve-out never
+fires, and its fingerprint is synthetic with no resolve channel, so the resolve escape never fires
+either. **For a GitOps failure, a silence is bounded by its expiry and a 👎 — and nothing else.** The
+same loss of the resolve escape applies to an Alertmanager receiver configured with
+`send_resolved: false`.
+
 ```yaml
 notify:
   silence:
@@ -110,7 +118,8 @@ outcome:
 
 Like Matrix's feedback reactions, silencing is deliberately **unprivileged** — any member of the
 room can silence an incident, with no allowlist — which is safe for the same reason Slack's button
-is: the blast radius is bounded by the four escapes above, every silence is attributed to the
+is: for an alert-sourced incident the blast radius is bounded by the four escapes above (narrower for
+a GitOps failure or a `send_resolved: false` receiver, per above), every silence is attributed to the
 sender's Matrix id in the outcome ledger, and the window is capped by `notify.silence.max_window`.
 Use an **invite-only room**, as for feedback reactions.
 
