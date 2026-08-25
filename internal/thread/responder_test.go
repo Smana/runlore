@@ -4909,3 +4909,70 @@ func TestOpenPRRouteCountsADefectiveDraftUnderItsDefect(t *testing.T) {
 		}
 	}
 }
+
+// TestHandleBothBehaviourPrefixesNeverSilences pins what the relative order of
+// "reinvestigate:" and "silence:" in prefixes actually decides: which REFUSAL a
+// message carrying both tokens gets, never whether one of them writes.
+//
+// Two independent mechanics make that true, and the comment on prefixes used to
+// claim only the weaker first one. An unanchored "silence:" is refused by Handle
+// whatever won the scan; and an ANCHORED "silence:" swallows the rest of the
+// message as its Text, so a "reinvestigate:" token can only ever appear inside a
+// duration that then fails to parse. Reordering the slice is therefore safe in a
+// way the comment previously overstated as dangerous.
+func TestHandleBothBehaviourPrefixesNeverSilences(t *testing.T) {
+	for _, raw := range []string{
+		"silence: 4h, and please reinvestigate: this tomorrow",
+		"<@U0BOT> silence: 4h — reinvestigate: after the deploy",
+		"reinvestigate: the DNS path, and silence: 4h",
+		"please reinvestigate: this, then silence: 24h",
+	} {
+		t.Run(raw, func(t *testing.T) {
+			f := &fakeForge{}
+			r := newTestResponder(t, f)
+			rec := &fakeSilenceRecorder{}
+			r.Silence = rec
+			r.SilenceMax = 24 * time.Hour
+			tc := Context{Root: "111.222", TriggerKey: "trig-1"}
+
+			reply, err := r.Handle(context.Background(), tc, "alice", raw)
+			if err != nil {
+				t.Fatalf("Handle: %v", err)
+			}
+			if len(rec.calls) != 0 {
+				t.Errorf("Silence was called %d time(s) for a message carrying both tokens: %+v", len(rec.calls), rec.calls)
+			}
+			if len(f.comments) != 0 || len(f.opened) != 0 {
+				t.Error("a message carrying both behaviour-changing tokens must not write to the knowledge base either")
+			}
+			if reply != ReinvestigateNotSupportedReply {
+				t.Errorf("reply = %q, want ReinvestigateNotSupportedReply — reinvestigate: leads the scan", reply)
+			}
+		})
+	}
+}
+
+// TestAnAnchoredSilenceCannotSwallowAReinvestigateToken is the half of the rule
+// above that does not depend on the slice order at all: even reached directly,
+// the silence path refuses a window whose text carries anything else, because
+// time.ParseDuration takes the WHOLE string. This is what makes reordering
+// prefixes safe rather than merely currently harmless.
+func TestAnAnchoredSilenceCannotSwallowAReinvestigateToken(t *testing.T) {
+	f := &fakeForge{}
+	r := newTestResponder(t, f)
+	rec := &fakeSilenceRecorder{}
+	r.Silence = rec
+	r.SilenceMax = 24 * time.Hour
+
+	reply, err := r.silence(Context{Root: "111.222", TriggerKey: "trig-1"}, "alice",
+		"4h, and please reinvestigate: this tomorrow")
+	if err != nil {
+		t.Fatalf("silence: %v", err)
+	}
+	if len(rec.calls) != 0 {
+		t.Fatalf("Silence was called %d time(s) for an unparseable window: %+v", len(rec.calls), rec.calls)
+	}
+	if !strings.Contains(reply, "couldn't read") {
+		t.Errorf("reply = %q, want the unparseable-duration refusal", reply)
+	}
+}

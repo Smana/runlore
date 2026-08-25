@@ -73,12 +73,23 @@ type Parsed struct {
 // BEHAVIOUR rather than recording knowledge, so a note that also contains one
 // of them is refused as ambiguous rather than filed as the human's words — see
 // Parse for why that side is the right one to err on. Their relative order
-// between themselves IS load-bearing for a message containing both tokens —
-// Parse returns the first match in this slice's order, so swapping them would
-// flip which one wins — and shipping "reinvestigate:" first is the safe side of
-// that: it is the one whose outcome is a refusal whatever its position, whereas
-// an ANCHORED "silence:" writes. "silence: 4h, and please reinvestigate: this
-// tomorrow" is refused rather than silenced because reinvestigate leads.
+// between themselves decides WHICH refusal a message carrying both tokens gets,
+// and nothing more — Parse returns the first entry in this slice's order whose
+// token matches anywhere, so swapping them flips the winner, but never flips a
+// refusal into a write:
+//
+//   - "silence:" NOT at position 0 is refused by Handle as unanchored, whichever
+//     entry led.
+//   - "silence:" AT position 0 takes the rest of the message as its Text, so a
+//     "reinvestigate:" token anywhere after it lands inside that Text and
+//     time.ParseDuration rejects the lot.
+//
+// So "silence: 4h, and please reinvestigate: this tomorrow" answers
+// ReinvestigateNotSupportedReply today and would answer "I couldn't read … as a
+// duration" under the opposite order; either way nothing is silenced and nothing
+// is written. Shipped order still puts "reinvestigate:" first, on the weaker but
+// real ground that its refusal is the same whatever the token's position, so the
+// reply a human gets does not depend on where they put it.
 var prefixes = []struct {
 	prefix string
 	intent Intent
