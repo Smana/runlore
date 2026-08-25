@@ -821,7 +821,7 @@ func (r *Responder) silence(tc Context, author, text string) (string, error) {
 	window, err := time.ParseDuration(strings.TrimSpace(text))
 	if err != nil {
 		return fmt.Sprintf("I couldn't read %q as a duration — try `silence: 4h` (up to %s).",
-			strings.TrimSpace(text), r.SilenceMax), nil
+			strings.TrimSpace(text), ShortDuration(r.SilenceMax)), nil
 	}
 	now := r.now()
 	if err := r.Silence.Silence(tc.TriggerKey, window, author, now); err != nil {

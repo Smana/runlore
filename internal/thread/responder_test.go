@@ -1069,8 +1069,11 @@ func TestHandleSilenceUnparseableDurationReplies(t *testing.T) {
 	if len(rec.calls) != 0 {
 		t.Error("Silence must not be called with an unparseable duration")
 	}
-	if !strings.Contains(reply, "24h0m0s") {
-		t.Errorf("reply must state the configured cap: %q", reply)
+	if !strings.Contains(reply, "up to 24h)") {
+		t.Errorf("reply must state the configured cap as an operator writes it: %q", reply)
+	}
+	if strings.Contains(reply, "0m0s") {
+		t.Errorf("reply renders the cap as a Go duration string: %q", reply)
 	}
 }
 

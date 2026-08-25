@@ -267,3 +267,31 @@ func TestSilenceOmittedWithoutTriggerKey(t *testing.T) {
 		t.Errorf("expected 👍/👎 to still render off the fingerprint fallback; sawUp=%v sawDown=%v", sawUp, sawDown)
 	}
 }
+
+// TestSilenceOverflowLabelsReadLikeTheDocs pins the human-facing half of the
+// overflow. The label came from time.Duration.String(), so a preset the docs and
+// values.yaml both write as `1h` rendered as "🔕 Silence 1h0m0s" on the card.
+// The option VALUE is a machine token and deliberately keeps whatever spelling
+// round-trips through time.ParseDuration.
+func TestSilenceOverflowLabelsReadLikeTheDocs(t *testing.T) {
+	inv := providers.Investigation{Title: "boom", TriggerKey: "ns/app:CrashLoop"}
+	el, _ := findOverflow(t, feedbackBlocks(inv, true, []time.Duration{time.Hour, 4 * time.Hour, 24 * time.Hour}))
+	if el == nil {
+		t.Fatal("no silence overflow element rendered")
+	}
+	opts, ok := el["options"].([]map[string]any)
+	if !ok {
+		t.Fatalf("options = %v, not a []map[string]any", el["options"])
+	}
+	want := []string{"🔕 Silence 1h", "🔕 Silence 4h", "🔕 Silence 24h"}
+	if len(opts) != len(want) {
+		t.Fatalf("rendered %d options, want %d", len(opts), len(want))
+	}
+	for i, o := range opts {
+		txt, _ := o["text"].(map[string]any)
+		got, _ := txt["text"].(string)
+		if got != want[i] {
+			t.Errorf("option %d label = %q, want %q", i, got, want[i])
+		}
+	}
+}

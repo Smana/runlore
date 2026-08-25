@@ -432,7 +432,11 @@ func feedbackBlocks(inv providers.Investigation, withFeedback bool, silenceWindo
 		opts := make([]map[string]any, 0, len(silenceWindows))
 		for _, w := range silenceWindows {
 			opts = append(opts, map[string]any{
-				"text":  map[string]any{"type": "plain_text", "text": "🔕 Silence " + w.String(), "emoji": true},
+				// The LABEL is human text and reads the way the docs and values.yaml
+				// write the preset (thread.ShortDuration); the VALUE is a machine token
+				// the interactions handler parses back with time.ParseDuration, and
+				// keeps the canonical spelling.
+				"text":  map[string]any{"type": "plain_text", "text": "🔕 Silence " + thread.ShortDuration(w), "emoji": true},
 				"value": w.String(),
 			})
 		}
