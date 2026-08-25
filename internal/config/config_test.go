@@ -1940,3 +1940,92 @@ func TestMaxNoteBytesTooSmallToKeepAnyNoteIsRejected(t *testing.T) {
 		})
 	}
 }
+
+func TestSilenceConfigValidation(t *testing.T) {
+	base := func() *Config {
+		c := &Config{}
+		c.Outcome.LedgerPath = "/tmp/outcome.jsonl"
+		c.Notify.Slack.SigningSecretEnv = "SLACK_SIGNING_SECRET"
+		c.Notify.Slack.SilenceButton = true
+		c.Notify.Silence.Windows = []Duration{Duration(time.Hour)}
+		c.Notify.Silence.MaxWindow = Duration(24 * time.Hour)
+		return c
+	}
+
+	for _, tc := range []struct {
+		name    string
+		mutate  func(*Config)
+		wantErr string
+	}{
+		{
+			name:   "the happy path validates",
+			mutate: func(*Config) {},
+		},
+		{
+			name:    "the silence button needs a signing secret",
+			mutate:  func(c *Config) { c.Notify.Slack.SigningSecretEnv = "" },
+			wantErr: "signing_secret_env",
+		},
+		{
+			name:    "silencing needs a ledger",
+			mutate:  func(c *Config) { c.Outcome.LedgerPath = "" },
+			wantErr: "outcome.ledger_path",
+		},
+		{
+			name:    "an empty preset list is a misconfiguration",
+			mutate:  func(c *Config) { c.Notify.Silence.Windows = nil },
+			wantErr: "notify.silence.windows",
+		},
+		{
+			name:    "a non-positive preset is rejected",
+			mutate:  func(c *Config) { c.Notify.Silence.Windows = []Duration{0} },
+			wantErr: "must be positive",
+		},
+		{
+			name: "a preset above the cap is rejected",
+			mutate: func(c *Config) {
+				c.Notify.Silence.Windows = []Duration{Duration(48 * time.Hour)}
+			},
+			wantErr: "max_window",
+		},
+		{
+			name: "the Matrix path needs a ledger too",
+			mutate: func(c *Config) {
+				c.Notify.Slack.SilenceButton = false
+				c.Notify.Matrix.SilenceReactions = true
+				c.Outcome.LedgerPath = ""
+			},
+			wantErr: "outcome.ledger_path",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			c := base()
+			tc.mutate(c)
+			err := c.Validate()
+			if tc.wantErr == "" {
+				if err != nil {
+					t.Fatalf("Validate() = %v, want nil", err)
+				}
+				return
+			}
+			if err == nil {
+				t.Fatalf("Validate() = nil, want an error mentioning %q", tc.wantErr)
+			}
+			if !strings.Contains(err.Error(), tc.wantErr) {
+				t.Errorf("Validate() = %q, want it to mention %q", err, tc.wantErr)
+			}
+		})
+	}
+}
+
+// TestSilenceDefaultIsTheFirstPreset pins the contract the Matrix reaction path
+// depends on — a reaction carries no duration, so it uses windows[0].
+func TestSilenceDefaultIsTheFirstPreset(t *testing.T) {
+	s := SilenceNotify{Windows: []Duration{Duration(4 * time.Hour), Duration(time.Hour)}}
+	if got, want := s.Default(), 4*time.Hour; got != want {
+		t.Errorf("Default() = %v, want %v", got, want)
+	}
+	if got := (SilenceNotify{}).Default(); got != 0 {
+		t.Errorf("Default() with no presets = %v, want 0", got)
+	}
+}

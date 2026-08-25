@@ -827,9 +827,10 @@ type ModelOverride struct {
 
 // Notify configures where investigation findings are delivered.
 type Notify struct {
-	Slack  SlackNotify  `yaml:"slack"`
-	Matrix MatrixNotify `yaml:"matrix"`
-	Thread ThreadNotify `yaml:"thread"` // shared Slack/Matrix thread-capture bounds — see ThreadNotify
+	Slack   SlackNotify   `yaml:"slack"`
+	Matrix  MatrixNotify  `yaml:"matrix"`
+	Thread  ThreadNotify  `yaml:"thread"`  // shared Slack/Matrix thread-capture bounds — see ThreadNotify
+	Silence SilenceNotify `yaml:"silence"` // shared Slack/Matrix silence windows — see SilenceNotify
 	// Extra catches notify.<name> blocks for registered (non-built-in)
 	// notifiers. CONSTRAINT: a drop-in notifier must never be registered
 	// under the name "slack", "matrix" or "thread" — those are named fields
@@ -1138,6 +1139,12 @@ type SlackNotify struct {
 	// AND a delivery target (webhook_url_env, or bot_token_env + channel — buttons
 	// render and dispatch on either path); Validate fails loud when any is missing.
 	FeedbackButtons bool `yaml:"feedback_buttons"`
+	// SilenceButton (opt-in, notify.slack.silence_button) appends a 🔕 overflow menu
+	// offering notify.silence.windows. A click suppresses re-investigating the same
+	// TriggerKey for the chosen window. Deliberately a SEPARATE flag from
+	// feedback_buttons: a rating records an opinion, a silence changes what RunLore
+	// does, and an operator must be able to take the first without the second.
+	SilenceButton bool `yaml:"silence_button"`
 	// ThreadCapture (opt-in, default off) registers each delivered investigation's
 	// thread root so a later `@runlore note: …` reply in that thread can be
 	// attributed to it and written into the knowledge base. Requires exposing
@@ -1162,6 +1169,11 @@ type MatrixNotify struct {
 	// OUTBOUND request authenticated by the access token above. Requires the three
 	// notifier fields and outcome.ledger_path; Validate fails loud otherwise.
 	FeedbackReactions bool `yaml:"feedback_reactions"`
+	// SilenceReactions (opt-in, notify.matrix.silence_reactions) records a 🔕
+	// reaction as a silence at notify.silence.windows[0], and enables the
+	// `silence: <duration>` thread command. Separate from feedback_reactions for
+	// the same reason SlackNotify.SilenceButton is separate from FeedbackButtons.
+	SilenceReactions bool `yaml:"silence_reactions"`
 	// ThreadCapture (opt-in, default off) registers each delivered investigation's
 	// thread root so a later `@runlore note: …` reply in that thread can be
 	// attributed to it and written into the knowledge base. Like FeedbackReactions,
@@ -1171,6 +1183,47 @@ type MatrixNotify struct {
 	// outcome.ledger_path — the thread registry lives beside the ledger and must
 	// survive a restart and a leader failover; Validate fails loud otherwise.
 	ThreadCapture bool `yaml:"thread_capture"`
+}
+
+// SilenceNotify configures the human 🔕 silence verdict — the presets offered on
+// the Slack overflow menu and the hard cap every transport is held to. Shared
+// across transports on purpose: a Matrix `silence: 999h` command is free text,
+// and must not be able to exceed what the Slack presets offer.
+type SilenceNotify struct {
+	// Windows are the durations offered, in the order they are rendered. The FIRST
+	// entry is the default used where no duration can be carried — notably a Matrix
+	// 🔕 reaction, which is a bare emoji.
+	Windows []Duration `yaml:"windows"`
+	// MaxWindow is the hard cap. Zero means uncapped, which Validate rejects
+	// whenever a silence transport is on — an uncapped silence is indistinguishable
+	// from a permanent one, and nothing else in the system would ever lift it.
+	MaxWindow Duration `yaml:"max_window"`
+}
+
+// Std returns the presets as standard-library durations, in render order.
+func (s SilenceNotify) Std() []time.Duration {
+	out := make([]time.Duration, 0, len(s.Windows))
+	for _, w := range s.Windows {
+		out = append(out, w.Std())
+	}
+	return out
+}
+
+// Default is the window used where none can be carried (a Matrix reaction).
+// Zero when no presets are configured — callers treat that as "silencing off".
+func (s SilenceNotify) Default() time.Duration {
+	if len(s.Windows) == 0 {
+		return 0
+	}
+	return s.Windows[0].Std()
+}
+
+// SilenceEnabled reports whether ANY transport can record a silence. It is the
+// condition the investigation gate must be constructed on: without it, a
+// deployment with silencing on but no recurrence cooldown would record every
+// click durably and then ignore it, while the UI confirmed success.
+func (n Notify) SilenceEnabled() bool {
+	return n.Slack.SilenceButton || n.Matrix.SilenceReactions
 }
 
 // GitOps selects the GitOps engine RunLore reads (what-changed + failure watch).
@@ -2093,6 +2146,32 @@ func (c *Config) Validate() error {
 		// but unmounted) is not knowable here; app.SlackFeedbackDeliverable warns for it.
 		if sl := c.Notify.Slack; sl.WebhookURLEnv == "" && (sl.BotTokenEnv == "" || sl.Channel == "") {
 			return fmt.Errorf("notify.slack.feedback_buttons requires a Slack delivery target: set notify.slack.webhook_url_env, or notify.slack.bot_token_env together with notify.slack.channel — with neither the Slack notifier is skipped, so no message is delivered, no buttons render and no feedback can ever be recorded")
+		}
+	}
+	// Silencing is click-driven and CHANGES BEHAVIOUR: enabling it without the
+	// pieces a click needs would record every silence durably and then ignore it,
+	// while the UI confirmed success. Fail loud at startup instead — the same
+	// posture feedback_buttons and recurrence_cooldown already take.
+	if c.Notify.Slack.SilenceButton && c.Notify.Slack.SigningSecretEnv == "" {
+		return fmt.Errorf("notify.slack.silence_button requires notify.slack.signing_secret_env: clicks arrive on the exposed POST /slack/interactions endpoint and must be signature-verified")
+	}
+	if c.Notify.SilenceEnabled() {
+		if c.Outcome.LedgerPath == "" {
+			return fmt.Errorf("notify.silence requires outcome.ledger_path: a silence is recorded in the outcome ledger, and the suppression gate reads it back from there")
+		}
+		if len(c.Notify.Silence.Windows) == 0 {
+			return fmt.Errorf("notify.silence.windows must list at least one duration when a silence transport is enabled")
+		}
+		if c.Notify.Silence.MaxWindow.Std() <= 0 {
+			return fmt.Errorf("notify.silence.max_window must be positive when a silence transport is enabled: an uncapped silence is indistinguishable from a permanent one")
+		}
+		for _, w := range c.Notify.Silence.Windows {
+			if w.Std() <= 0 {
+				return fmt.Errorf("notify.silence.windows entry %v must be positive", w.Std())
+			}
+			if w.Std() > c.Notify.Silence.MaxWindow.Std() {
+				return fmt.Errorf("notify.silence.windows entry %v exceeds notify.silence.max_window (%v)", w.Std(), c.Notify.Silence.MaxWindow.Std())
+			}
 		}
 	}
 	// Thread capture cannot work without the same signature verification as
