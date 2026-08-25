@@ -128,10 +128,7 @@ var (
 // Deliver posts the formatted investigation to the webhook. When an action carries
 // an ApprovalID, it renders interactive Approve/Reject buttons (Block Kit).
 func (s *Slack) Deliver(ctx context.Context, inv providers.Investigation) error {
-	// The row renders whenever EITHER capability is on: notify.slack.silence_button
-	// is validated (config.Validate) as usable without feedback_buttons, so an
-	// operator who wants only the suppression must still see the 🔕 control.
-	return s.post(ctx, slackMessageWith(inv, s.FeedbackButtons || len(s.SilenceWindows) > 0, s.SilenceWindows))
+	return s.post(ctx, slackMessageWith(inv, s.FeedbackButtons, s.SilenceWindows))
 }
 
 // DeliverProgress posts an interim progress ping to the webhook (ProgressNotifier).
@@ -208,11 +205,7 @@ var (
 // yields no ts (empty-body path) or the investigation has no detail beyond it.
 func (s *SlackBot) Deliver(ctx context.Context, inv providers.Investigation) error {
 	summary := summaryBlocks(inv)
-	// See Slack.Deliver: the row renders whenever EITHER capability is on, so a
-	// silence_button-only deployment still gets the 🔕 control.
-	if s.FeedbackButtons || len(s.SilenceWindows) > 0 {
-		summary = append(summary, feedbackBlocks(inv, s.SilenceWindows)...)
-	}
+	summary = append(summary, feedbackBlocks(inv, s.FeedbackButtons, s.SilenceWindows)...)
 	ts, err := s.post(ctx, map[string]any{"text": fallbackText(inv), "blocks": summary})
 	if err != nil {
 		return err
@@ -370,29 +363,34 @@ func slackMessage(inv providers.Investigation) map[string]any {
 }
 
 // slackMessageWith is slackMessage plus the opt-in 👍/👎/🔕 feedback block
-// appended last (after the detail section) when withFeedback is set — the
-// single-message webhook path's equivalent of the bot path's
-// buttons-on-summary. silenceWindows is threaded through to feedbackBlocks
-// unconditionally: it is a free function (unlike the Slack/SlackBot methods
-// that call it), so it has no receiver to read the configured presets from.
+// appended last (after the detail section) — the single-message webhook path's
+// equivalent of the bot path's buttons-on-summary. withFeedback and
+// silenceWindows are independent facts, both forwarded to feedbackBlocks
+// unconditionally: it decides for itself which half (if either) to render, so
+// this free function (unlike the Slack/SlackBot methods that call it, which
+// read their own struct fields) just passes both through.
 func slackMessageWith(inv providers.Investigation, withFeedback bool, silenceWindows []time.Duration) map[string]any {
 	blocks := append(summaryBlocks(inv), detailBlocks(inv)...)
-	if withFeedback {
-		blocks = append(blocks, feedbackBlocks(inv, silenceWindows)...)
-	}
+	blocks = append(blocks, feedbackBlocks(inv, withFeedback, silenceWindows)...)
 	return map[string]any{
 		"text":   fallbackText(inv),
 		"blocks": blocks,
 	}
 }
 
-// feedbackBlocks renders the human end of the learning loop: 👍/👎 plus, when
-// silenceWindows is non-empty, a 🔕 overflow offering each configured window.
+// feedbackBlocks renders the human end of the learning loop: 👍/👎 when
+// withFeedback is set, a 🔕 overflow offering each configured window when
+// silenceWindows is non-empty — INDEPENDENTLY of each other.
 //
 // The three are one row and one verdict vocabulary — 👍 accurate, 👎 off-base,
 // 🔕 accurate but known — but they are NOT one capability: a rating weighs a
 // recalled entry's trust, while a silence suppresses re-investigation. They are
-// enabled by separate config flags and this function renders whichever are on.
+// enabled by separate config flags (notify.slack.feedback_buttons,
+// notify.slack.silence_button), and a deployment may enable either without the
+// other — config.Validate allows it, and the server nil-checks each recorder
+// independently. Rendering a control whose capability is off would dead-end at
+// handleSlackInteraction's "not enabled" ack, so each half is gated on its own
+// flag rather than on "is either on".
 //
 // Attribution is the TriggerKey (incident identity — ratings and silences survive
 // re-worded re-investigations), falling back to the alert fingerprint; with
@@ -404,19 +402,23 @@ func slackMessageWith(inv providers.Investigation, withFeedback bool, silenceWin
 // must degrade ONE control, never the card.
 //
 // Labels are plain_text (never escaped); values are opaque to Slack.
-func feedbackBlocks(inv providers.Investigation, silenceWindows []time.Duration) []map[string]any {
+func feedbackBlocks(inv providers.Investigation, withFeedback bool, silenceWindows []time.Duration) []map[string]any {
 	key := cmp.Or(inv.TriggerKey, inv.Fingerprint)
 	if key == "" {
 		return nil
 	}
-	block := map[string]any{"type": "actions", "elements": []map[string]any{
-		{"type": "button", "action_id": feedbackUpActionID, "value": key,
-			"text": map[string]any{"type": "plain_text", "text": "👍 Accurate", "emoji": true}},
-		{"type": "button", "action_id": feedbackDownActionID, "value": key,
-			"text": map[string]any{"type": "plain_text", "text": "👎 Off-base", "emoji": true}},
-	}}
+	var elements []map[string]any
+	if withFeedback {
+		elements = append(elements,
+			map[string]any{"type": "button", "action_id": feedbackUpActionID, "value": key,
+				"text": map[string]any{"type": "plain_text", "text": "👍 Accurate", "emoji": true}},
+			map[string]any{"type": "button", "action_id": feedbackDownActionID, "value": key,
+				"text": map[string]any{"type": "plain_text", "text": "👎 Off-base", "emoji": true}},
+		)
+	}
 	blockID := silenceBlockIDPrefix + key
-	if len(silenceWindows) > 0 && len(blockID) <= slackBlockIDMax {
+	overflowFits := len(silenceWindows) > 0 && len(blockID) <= slackBlockIDMax
+	if overflowFits {
 		opts := make([]map[string]any, 0, len(silenceWindows))
 		for _, w := range silenceWindows {
 			opts = append(opts, map[string]any{
@@ -424,10 +426,16 @@ func feedbackBlocks(inv providers.Investigation, silenceWindows []time.Duration)
 				"value": w.String(),
 			})
 		}
-		block["block_id"] = blockID
-		block["elements"] = append(block["elements"].([]map[string]any), map[string]any{
+		elements = append(elements, map[string]any{
 			"type": "overflow", "action_id": silenceActionID, "options": opts,
 		})
+	}
+	if len(elements) == 0 {
+		return nil
+	}
+	block := map[string]any{"type": "actions", "elements": elements}
+	if overflowFits {
+		block["block_id"] = blockID
 	}
 	return []map[string]any{block}
 }

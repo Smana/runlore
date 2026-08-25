@@ -41,7 +41,7 @@ func findOverflow(t *testing.T, blocks []map[string]any) (map[string]any, string
 // overflow option value at 75 chars, so the TriggerKey CANNOT live there.
 func TestSilenceOverflowCarriesTheKeyInTheBlockID(t *testing.T) {
 	inv := providers.Investigation{Title: "boom", TriggerKey: "production/payments-api:ProgressDeadlineExceeded"}
-	el, blockID := findOverflow(t, feedbackBlocks(inv, silenceWindows()))
+	el, blockID := findOverflow(t, feedbackBlocks(inv, true, silenceWindows()))
 	if el == nil {
 		t.Fatal("no silence overflow element rendered")
 	}
@@ -75,7 +75,7 @@ func TestSilenceOverflowCarriesTheKeyInTheBlockID(t *testing.T) {
 func TestSilenceOverflowEveryValueIsUnder75(t *testing.T) {
 	long := "kube-system/nginx-ingress-controller-cluster-wide-abcdef123456:ProgressDeadlineExceeded"
 	inv := providers.Investigation{Title: "boom", TriggerKey: long}
-	el, _ := findOverflow(t, feedbackBlocks(inv, silenceWindows()))
+	el, _ := findOverflow(t, feedbackBlocks(inv, true, silenceWindows()))
 	if el == nil {
 		t.Fatal("no silence overflow element rendered")
 	}
@@ -96,7 +96,7 @@ func TestSilenceOverflowEveryValueIsUnder75(t *testing.T) {
 // of rendering no buttons when there is nothing to attribute.
 func TestSilenceOmittedWhenTheBlockIDWouldOverflow(t *testing.T) {
 	inv := providers.Investigation{Title: "boom", TriggerKey: strings.Repeat("x", 300)}
-	blocks := feedbackBlocks(inv, silenceWindows())
+	blocks := feedbackBlocks(inv, true, silenceWindows())
 	if el, _ := findOverflow(t, blocks); el != nil {
 		t.Error("silence element rendered with an over-long block_id")
 	}
@@ -109,7 +109,7 @@ func TestSilenceOmittedWhenTheBlockIDWouldOverflow(t *testing.T) {
 // off, and nothing should render.
 func TestSilenceAbsentWithoutWindows(t *testing.T) {
 	inv := providers.Investigation{Title: "boom", TriggerKey: "k"}
-	if el, _ := findOverflow(t, feedbackBlocks(inv, nil)); el != nil {
+	if el, _ := findOverflow(t, feedbackBlocks(inv, true, nil)); el != nil {
 		t.Error("silence element rendered with no configured windows")
 	}
 }
@@ -118,9 +118,9 @@ func TestSilenceAbsentWithoutWindows(t *testing.T) {
 // config.Validate already allows: notify.slack.silence_button on its own,
 // feedback_buttons left off. A rating and a suppression are independent
 // capabilities enabled by separate flags (see feedbackBlocks' doc comment), so
-// gating the whole row on FeedbackButtons alone would silently drop the 🔕
-// control for exactly the config that turned it on. Both delivery paths must
-// still render it.
+// the card must show EXACTLY the 🔕 control — rendering 👍/👎 too would be two
+// controls that dead-end at handleSlackInteraction's `s.feedback == nil` ack.
+// Both delivery paths are checked.
 func TestSilenceOnlyRendersWithoutFeedbackButtons(t *testing.T) {
 	inv := providers.Investigation{Title: "t", TriggerKey: "k"}
 
@@ -140,6 +140,9 @@ func TestSilenceOnlyRendersWithoutFeedbackButtons(t *testing.T) {
 		}
 		if !strings.Contains(got, silenceActionID) {
 			t.Fatalf("silence-only webhook delivery must still render the 🔕 overflow, got: %s", got)
+		}
+		if strings.Contains(got, feedbackUpActionID) || strings.Contains(got, feedbackDownActionID) {
+			t.Fatalf("silence-only webhook delivery must NOT render 👍/👎 — they would dead-end (feedback_buttons is off), got: %s", got)
 		}
 	})
 
@@ -161,6 +164,64 @@ func TestSilenceOnlyRendersWithoutFeedbackButtons(t *testing.T) {
 		}
 		if len(bodies) == 0 || !strings.Contains(bodies[0], silenceActionID) {
 			t.Fatalf("silence-only bot summary must still render the 🔕 overflow, got: %v", bodies)
+		}
+		if strings.Contains(bodies[0], feedbackUpActionID) || strings.Contains(bodies[0], feedbackDownActionID) {
+			t.Fatalf("silence-only bot summary must NOT render 👍/👎 — they would dead-end (feedback_buttons is off), got: %v", bodies)
+		}
+	})
+}
+
+// TestFeedbackOnlyRendersWithoutSilenceOverflow is the mirror of
+// TestSilenceOnlyRendersWithoutFeedbackButtons: feedback_buttons on its own,
+// silence_button off (no SilenceWindows configured) must render 👍/👎 and NOT
+// the 🔕 overflow — a control with nothing behind it, since s.silence would be
+// nil on that deployment.
+func TestFeedbackOnlyRendersWithoutSilenceOverflow(t *testing.T) {
+	inv := providers.Investigation{Title: "t", TriggerKey: "k"}
+
+	t.Run("webhook", func(t *testing.T) {
+		var got string
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			b, _ := io.ReadAll(r.Body)
+			got = string(b)
+			w.WriteHeader(http.StatusOK)
+		}))
+		defer srv.Close()
+
+		s := NewSlack(srv.URL)
+		s.FeedbackButtons = true // SilenceWindows left nil
+		if err := s.Deliver(context.Background(), inv); err != nil {
+			t.Fatalf("Deliver: %v", err)
+		}
+		if !strings.Contains(got, feedbackUpActionID) || !strings.Contains(got, feedbackDownActionID) {
+			t.Fatalf("feedback-only webhook delivery must render 👍/👎, got: %s", got)
+		}
+		if strings.Contains(got, silenceActionID) {
+			t.Fatalf("feedback-only webhook delivery must NOT render the 🔕 overflow — silence_button is off, got: %s", got)
+		}
+	})
+
+	t.Run("bot", func(t *testing.T) {
+		var bodies []string
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			b, _ := io.ReadAll(r.Body)
+			bodies = append(bodies, string(b))
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"ok":true,"ts":"111.222"}`))
+		}))
+		defer srv.Close()
+
+		bot := NewSlackBot("xoxb-t", "#ops")
+		bot.baseURL = srv.URL
+		bot.FeedbackButtons = true // SilenceWindows left nil
+		if err := bot.Deliver(context.Background(), inv); err != nil {
+			t.Fatalf("Deliver: %v", err)
+		}
+		if len(bodies) == 0 || !strings.Contains(bodies[0], feedbackUpActionID) || !strings.Contains(bodies[0], feedbackDownActionID) {
+			t.Fatalf("feedback-only bot summary must render 👍/👎, got: %v", bodies)
+		}
+		if strings.Contains(bodies[0], silenceActionID) {
+			t.Fatalf("feedback-only bot summary must NOT render the 🔕 overflow — silence_button is off, got: %v", bodies)
 		}
 	})
 }
