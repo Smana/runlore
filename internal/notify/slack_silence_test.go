@@ -225,3 +225,45 @@ func TestFeedbackOnlyRendersWithoutSilenceOverflow(t *testing.T) {
 		}
 	})
 }
+
+// TestSilenceOmittedWithoutTriggerKey pins the CRITICAL fix: a card whose
+// Investigation carries only a Fingerprint (TriggerKey == "") must render
+// 👍/👎 (fingerprint is a legitimate attribution for feedback, recorded for
+// analytics regardless) but must NOT render the 🔕 silence overflow. A
+// fingerprint is never a trigger key — alert fingerprints are hex, trigger
+// keys are "alertname/ns/name" or "ns/name:Reason" — so a silence stored
+// under a fingerprint (RecurrenceGate reads l.silences[req.TriggerKey], and
+// decide() returns recurrenceOff outright when req.TriggerKey == "") could
+// never be read back. Recording that click would ack "RunLore will NOT
+// investigate this incident" while doing nothing: the exact "record the
+// click, ack success, then ignore it" failure the feature must never cause.
+//
+// This is exactly the shape budgetKillResult/timeoutResult/refusalResult
+// produce: they set Fingerprint but never call stampRequestFacts, so
+// TriggerKey is "".
+func TestSilenceOmittedWithoutTriggerKey(t *testing.T) {
+	inv := providers.Investigation{Title: "boom", Fingerprint: "fp-9a1"}
+	blocks := feedbackBlocks(inv, true, silenceWindows())
+
+	if el, _ := findOverflow(t, blocks); el != nil {
+		t.Errorf("silence overflow rendered for a card with no TriggerKey: %v", el)
+	}
+	var sawUp, sawDown bool
+	for _, b := range blocks {
+		els, ok := b["elements"].([]map[string]any)
+		if !ok {
+			continue
+		}
+		for _, el := range els {
+			switch el["action_id"] {
+			case feedbackUpActionID:
+				sawUp = true
+			case feedbackDownActionID:
+				sawDown = true
+			}
+		}
+	}
+	if !sawUp || !sawDown {
+		t.Errorf("expected 👍/👎 to still render off the fingerprint fallback; sawUp=%v sawDown=%v", sawUp, sawDown)
+	}
+}

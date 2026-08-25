@@ -392,9 +392,19 @@ func slackMessageWith(inv providers.Investigation, withFeedback bool, silenceWin
 // handleSlackInteraction's "not enabled" ack, so each half is gated on its own
 // flag rather than on "is either on".
 //
-// Attribution is the TriggerKey (incident identity — ratings and silences survive
+// Attribution for 👍/👎 is the TriggerKey (incident identity — ratings survive
 // re-worded re-investigations), falling back to the alert fingerprint; with
 // neither there is nothing for the ledger to attribute, so nothing renders.
+//
+// The 🔕 silence overflow requires the TriggerKey specifically — NOT the
+// fallback above. RecurrenceGate.decide reads l.silences[req.TriggerKey] and
+// bails out to recurrenceOff outright when req.TriggerKey == "", so a silence
+// recorded under a bare fingerprint (e.g. a budget/timeout/refusal result,
+// which stamps Fingerprint but never TriggerKey) could never be read back:
+// the click would be acked as success and then permanently ignored — the
+// worst failure mode this feature can cause. A rating has no such read path
+// (it is recorded for analytics regardless of key shape), so 👍/👎 keep the
+// fingerprint fallback while 🔕 does not.
 //
 // The silence element's TriggerKey travels in the block's block_id, not in the
 // option values — see silenceBlockIDPrefix for why. If the key is too long for
@@ -416,8 +426,8 @@ func feedbackBlocks(inv providers.Investigation, withFeedback bool, silenceWindo
 				"text": map[string]any{"type": "plain_text", "text": "👎 Off-base", "emoji": true}},
 		)
 	}
-	blockID := silenceBlockIDPrefix + key
-	overflowFits := len(silenceWindows) > 0 && len(blockID) <= slackBlockIDMax
+	blockID := silenceBlockIDPrefix + inv.TriggerKey
+	overflowFits := inv.TriggerKey != "" && len(silenceWindows) > 0 && len(blockID) <= slackBlockIDMax
 	if overflowFits {
 		opts := make([]map[string]any, 0, len(silenceWindows))
 		for _, w := range silenceWindows {

@@ -569,7 +569,6 @@
           "type": "context"
         },
         {
-          "block_id": "sil:fp-9a1",
           "elements": [
             {
               "action_id": "runlore_feedback_up",
@@ -590,36 +589,6 @@
               },
               "type": "button",
               "value": "fp-9a1"
-            },
-            {
-              "action_id": "runlore_silence",
-              "options": [
-                {
-                  "text": {
-                    "emoji": true,
-                    "text": "🔕 Silence 1h0m0s",
-                    "type": "plain_text"
-                  },
-                  "value": "1h0m0s"
-                },
-                {
-                  "text": {
-                    "emoji": true,
-                    "text": "🔕 Silence 4h0m0s",
-                    "type": "plain_text"
-                  },
-                  "value": "4h0m0s"
-                },
-                {
-                  "text": {
-                    "emoji": true,
-                    "text": "🔕 Silence 24h0m0s",
-                    "type": "plain_text"
-                  },
-                  "value": "24h0m0s"
-                }
-              ],
-              "type": "overflow"
             }
           ],
           "type": "actions"
@@ -705,7 +674,6 @@
           "type": "section"
         },
         {
-          "block_id": "sil:fp-9a2",
           "elements": [
             {
               "action_id": "runlore_feedback_up",
@@ -726,36 +694,6 @@
               },
               "type": "button",
               "value": "fp-9a2"
-            },
-            {
-              "action_id": "runlore_silence",
-              "options": [
-                {
-                  "text": {
-                    "emoji": true,
-                    "text": "🔕 Silence 1h0m0s",
-                    "type": "plain_text"
-                  },
-                  "value": "1h0m0s"
-                },
-                {
-                  "text": {
-                    "emoji": true,
-                    "text": "🔕 Silence 4h0m0s",
-                    "type": "plain_text"
-                  },
-                  "value": "4h0m0s"
-                },
-                {
-                  "text": {
-                    "emoji": true,
-                    "text": "🔕 Silence 24h0m0s",
-                    "type": "plain_text"
-                  },
-                  "value": "24h0m0s"
-                }
-              ],
-              "type": "overflow"
             }
           ],
           "type": "actions"
@@ -1018,7 +956,6 @@
           "type": "section"
         },
         {
-          "block_id": "sil:fp-9a3",
           "elements": [
             {
               "action_id": "runlore_feedback_up",
@@ -1039,36 +976,6 @@
               },
               "type": "button",
               "value": "fp-9a3"
-            },
-            {
-              "action_id": "runlore_silence",
-              "options": [
-                {
-                  "text": {
-                    "emoji": true,
-                    "text": "🔕 Silence 1h0m0s",
-                    "type": "plain_text"
-                  },
-                  "value": "1h0m0s"
-                },
-                {
-                  "text": {
-                    "emoji": true,
-                    "text": "🔕 Silence 4h0m0s",
-                    "type": "plain_text"
-                  },
-                  "value": "4h0m0s"
-                },
-                {
-                  "text": {
-                    "emoji": true,
-                    "text": "🔕 Silence 24h0m0s",
-                    "type": "plain_text"
-                  },
-                  "value": "24h0m0s"
-                }
-              ],
-              "type": "overflow"
             }
           ],
           "type": "actions"
@@ -1143,7 +1050,6 @@
           "type": "context"
         },
         {
-          "block_id": "sil:fp-9a4",
           "elements": [
             {
               "action_id": "runlore_feedback_up",
@@ -1164,36 +1070,6 @@
               },
               "type": "button",
               "value": "fp-9a4"
-            },
-            {
-              "action_id": "runlore_silence",
-              "options": [
-                {
-                  "text": {
-                    "emoji": true,
-                    "text": "🔕 Silence 1h0m0s",
-                    "type": "plain_text"
-                  },
-                  "value": "1h0m0s"
-                },
-                {
-                  "text": {
-                    "emoji": true,
-                    "text": "🔕 Silence 4h0m0s",
-                    "type": "plain_text"
-                  },
-                  "value": "4h0m0s"
-                },
-                {
-                  "text": {
-                    "emoji": true,
-                    "text": "🔕 Silence 24h0m0s",
-                    "type": "plain_text"
-                  },
-                  "value": "24h0m0s"
-                }
-              ],
-              "type": "overflow"
             }
           ],
           "type": "actions"
