@@ -196,7 +196,7 @@ func RunServe(version string, args []string) error {
 	// holds: a Matrix `silence:` command is free text and must not be able to
 	// exceed what the Slack presets offer. Zero when silencing is off, which the
 	// ledger reads as uncapped — harmless, since nothing can then record one.
-	ledger.MaxSilenceWindow = cfg.Notify.Silence.MaxWindow.Std()
+	ledger.SetMaxSilenceWindow(cfg.Notify.Silence.MaxWindow.Std())
 	// Built ONCE and shared: a second Deps means a second catalog, hence a second
 	// git-sync goroutine racing the first on the same on-disk checkout.
 	deps := BuildDeps(ctx, cfg, gitops, metrics, ledger, log)

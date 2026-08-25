@@ -193,11 +193,19 @@ type Ledger struct {
 	// the scan clearSilencesForFingerprintLocked makes on the resolve path.
 	silences map[string]silenceState
 
-	// MaxSilenceWindow caps what Silence accepts (zero = uncapped). Set by the serve
+	// maxSilenceWindow caps what Silence accepts (zero = uncapped). Set by the serve
 	// wiring from notify.silence.max_window. It lives HERE, not in each caller, so
 	// there is one place the invariant holds: a Matrix `silence:` command is free
 	// text and must not be able to exceed what the Slack presets offer.
-	MaxSilenceWindow time.Duration
+	//
+	// UNEXPORTED, and read under mu like every other field on this type. It used to
+	// be a public field that Silence dereferenced before taking the lock; that was
+	// race-free only because the serve wiring happened to write it once before any
+	// goroutine started. Nothing marked it construction-only, and Silence is called
+	// concurrently from the Slack HTTP handler and the Matrix /sync goroutine, so
+	// any future caller assigning it after startup would have raced live readers.
+	// See SetMaxSilenceWindow.
+	maxSilenceWindow time.Duration
 
 	// triggerConfirms counts confirmations per TriggerKey — the ContestedTriggers
 	// join that lets the curate Contested pass tell a reviewer "N re-investigations
@@ -1491,13 +1499,33 @@ func (l *Ledger) applyFeedbackLocked(e Event) {
 	l.creditFeedbackLocked(entry, e.Kind, +1)
 }
 
+// SetMaxSilenceWindow installs the cap Silence enforces on a requested window
+// (zero = uncapped), and is how the serve wiring hands the ledger
+// notify.silence.max_window. A nil receiver is a no-op, like every other write
+// on this type.
+//
+// It is a setter rather than a public field because Silence is called
+// concurrently — the Slack interactions handler and the Matrix /sync goroutine
+// both reach it — and the cap is read on that path. Taking the same mutex here
+// means a caller that changes the cap after startup (a config reload, a test)
+// cannot race a live click.
+func (l *Ledger) SetMaxSilenceWindow(d time.Duration) {
+	if l == nil {
+		return
+	}
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.maxSilenceWindow = d
+}
+
 // Silence records a human 🔕 verdict: this trigger's diagnosis is accurate and
 // known, so do not re-investigate it for window. It is the third feedback verdict
 // — 👍 accurate, 👎 off-base, 🔕 accurate but known — and the only one that changes
 // what RunLore DOES rather than how it weighs an entry.
 //
 // Validation is deliberately at the write, not the caller: window must be positive
-// and within MaxSilenceWindow, so a Matrix `silence:` command (free text) cannot
+// and within the cap SetMaxSilenceWindow installed, so a Matrix `silence:` command
+// (free text) cannot
 // exceed what the Slack presets offer. triggerKey must be non-empty — with nothing
 // to key the suppression on there is nothing for the gate to read back, and a line
 // that can never be read is worse than a refused write.
@@ -1509,8 +1537,8 @@ func (l *Ledger) Silence(triggerKey string, window time.Duration, user string, a
 	// A nil receiver must degrade the same way Feedback already does through its
 	// nil-safe enabled() check — but enabled() runs AFTER the window/cap
 	// validation below (deliberately: see the doc comment), so without this guard
-	// a nil *Ledger would panic on the l.MaxSilenceWindow read before ever
-	// reaching it.
+	// a nil *Ledger would panic on the l.mu.Lock() taken to read the cap before
+	// ever reaching it.
 	if l == nil {
 		return nil
 	}
@@ -1520,14 +1548,14 @@ func (l *Ledger) Silence(triggerKey string, window time.Duration, user string, a
 	if window <= 0 {
 		return fmt.Errorf("silence window %v: must be positive", window)
 	}
-	if l.MaxSilenceWindow > 0 && window > l.MaxSilenceWindow {
-		return fmt.Errorf("silence window %v exceeds the %v cap", window, l.MaxSilenceWindow)
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if l.maxSilenceWindow > 0 && window > l.maxSilenceWindow {
+		return fmt.Errorf("silence window %v exceeds the %v cap", window, l.maxSilenceWindow)
 	}
 	if !l.enabled() {
 		return nil
 	}
-	l.mu.Lock()
-	defer l.mu.Unlock()
 	e := Event{Event: "silence", TriggerKey: triggerKey, Kind: window.String(), User: user, At: at}
 	if err := l.appendLocked(e); err != nil {
 		return err
@@ -1542,7 +1570,7 @@ func (l *Ledger) Silence(triggerKey string, window time.Duration, user string, a
 // A malformed replayed line (no key, unparseable or non-positive window) is
 // dropped rather than folded — the same posture applyFeedbackLocked takes.
 //
-// The cap is NOT re-applied here. MaxSilenceWindow is a write-time policy that
+// The cap is NOT re-applied here. maxSilenceWindow is a write-time policy that
 // can legitimately change between runs, and re-applying it on replay would let a
 // config edit retroactively rewrite history the file already records.
 func (l *Ledger) applySilenceLocked(e Event) {

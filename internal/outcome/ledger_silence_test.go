@@ -3,9 +3,11 @@
 package outcome
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -53,7 +55,7 @@ func TestSilenceLatestWinsPerTrigger(t *testing.T) {
 
 func TestSilenceRejectsBadWindows(t *testing.T) {
 	l := newTestLedger(t)
-	l.MaxSilenceWindow = 24 * time.Hour
+	l.SetMaxSilenceWindow(24 * time.Hour)
 	now := time.Now()
 	for _, tc := range []struct {
 		name   string
@@ -236,11 +238,15 @@ func TestResolveClearingSurvivesReplay(t *testing.T) {
 
 // TestSilenceNilReceiverIsSafe pins Finding 1(b) from the Task 5 review: Silence
 // must degrade gracefully on a nil *Ledger, the same way Feedback already does
-// via its nil-safe enabled() check. Before the fix, Silence read
-// l.MaxSilenceWindow — a plain field dereference — before ever calling
-// l.enabled(), so a nil receiver panicked instead of quietly no-opping.
+// via its nil-safe enabled() check. Before the fix, Silence read the silence cap
+// before ever calling l.enabled(), so a nil receiver panicked instead of quietly
+// no-opping. It still touches the cap first — now behind l.mu — so the guard has
+// to stay ahead of the lock, not merely ahead of enabled().
 func TestSilenceNilReceiverIsSafe(t *testing.T) {
 	var l *Ledger
+	// The setter degrades the same way, so wiring code need not nil-check a
+	// disabled ledger before handing it the cap.
+	l.SetMaxSilenceWindow(time.Hour)
 	if err := l.Silence("k", time.Hour, "U1", time.Now()); err != nil {
 		t.Fatalf("Silence on a nil *Ledger returned %v, want nil (quiet no-op)", err)
 	}
@@ -574,4 +580,32 @@ func firstLine(s string) string {
 		return s[:i]
 	}
 	return s
+}
+
+// TestSilenceCapIsRaceFreeAgainstConcurrentSilences is the reason the cap is a
+// setter and not a public field. Silence is reached concurrently from the Slack
+// interactions handler and the Matrix /sync goroutine, and it READS the cap; a
+// caller changing the cap after startup therefore has to write it under the same
+// mutex. Run under -race, this fails on an unsynchronised field.
+func TestSilenceCapIsRaceFreeAgainstConcurrentSilences(t *testing.T) {
+	l := newTestLedger(t)
+	l.SetMaxSilenceWindow(24 * time.Hour)
+	now := time.Now()
+
+	var wg sync.WaitGroup
+	for i := 0; i < 8; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			_ = l.Silence(fmt.Sprintf("k%d", i), time.Hour, "U1", now)
+		}(i)
+	}
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for i := 0; i < 8; i++ {
+			l.SetMaxSilenceWindow(time.Duration(i+1) * time.Hour)
+		}
+	}()
+	wg.Wait()
 }
