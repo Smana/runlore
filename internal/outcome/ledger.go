@@ -458,8 +458,13 @@ func (l *Ledger) foldLocked(e Event) {
 		l.applyOpenLocked(e)
 		l.applyTriggerLocked(e)
 	case "resolve":
-		delete(l.open, e.Fingerprint)
+		// applyResolveLocked reads l.open[fp] (to clear a standing silence via the
+		// TriggerKey), so it must run BEFORE the delete below — matching the live
+		// path (Resolve calls applyResolveLocked, then reads/deletes l.open itself).
+		// Getting this backwards would make the replay path see an already-empty
+		// l.open[fp] and silently skip clearing the silence on reload.
 		l.applyResolveLocked(e.Fingerprint, e.At)
+		delete(l.open, e.Fingerprint)
 	case "feedback":
 		l.applyFeedbackLocked(e)
 	case "silence":
@@ -726,6 +731,20 @@ func (l *Ledger) applyOpenLocked(e Event) {
 // if it was a counted recall, credit its resolution; with no pending open, buffer
 // the resolve for a later open. Must be called with mu held (or during New).
 func (l *Ledger) applyResolveLocked(fp string, at time.Time) {
+	// A resolve re-arms investigation: the incident ended, so a standing human
+	// silence has served its purpose and a later firing deserves a fresh look.
+	// Done FIRST and unconditionally, because whether this resolve goes on to
+	// pair, buffer, or be discarded as stale says nothing about whether the
+	// incident is over — which is the only question the silence turns on.
+	//
+	// l.open is the fingerprint → latest-unresolved-open index, and an open
+	// carries its TriggerKey, so no new index is needed. foldLocked's resolve
+	// case deletes from l.open only AFTER calling this, so the entry is still
+	// here on both the live and the replay path.
+	if tk := l.open[fp].TriggerKey; tk != "" {
+		delete(l.silences, tk)
+	}
+
 	// Channel-liveness proof, recorded before any pairing decision: whether this
 	// resolve pairs, buffers, or is discarded says nothing about whether the SENDER
 	// emits resolves, and that is the only question ResolveChannelLive answers.

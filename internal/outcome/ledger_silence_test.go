@@ -149,3 +149,80 @@ func TestSilenceSurvivesCompaction(t *testing.T) {
 		t.Errorf("after compaction SilencedUntil = %v, want %v — the checkpoint dropped it", got, want)
 	}
 }
+
+// TestResolveClearsTheSilence: the incident actually went away, so the silence
+// has served its purpose; a later firing is arguably a new occurrence and
+// deserves a fresh look.
+func TestResolveClearsTheSilence(t *testing.T) {
+	l := newTestLedger(t)
+	now := time.Date(2026, 8, 25, 12, 0, 0, 0, time.UTC)
+
+	if err := l.Open(Event{Fingerprint: "fp1", TriggerKey: "k", Title: "boom", At: now}); err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	if err := l.Silence("k", 24*time.Hour, "U1", now); err != nil {
+		t.Fatalf("Silence: %v", err)
+	}
+	if l.Recurrence("k").SilencedUntil.IsZero() {
+		t.Fatal("precondition: the silence should stand before the resolve")
+	}
+
+	if _, _, err := l.Resolve("fp1", now.Add(time.Minute)); err != nil {
+		t.Fatalf("Resolve: %v", err)
+	}
+	if got := l.Recurrence("k").SilencedUntil; !got.IsZero() {
+		t.Errorf("SilencedUntil = %v after a resolve, want zero", got)
+	}
+}
+
+// TestResolveOfAnUnrelatedFingerprintKeepsTheSilence guards the obvious
+// over-reach: one incident ending must not un-silence a different one.
+func TestResolveOfAnUnrelatedFingerprintKeepsTheSilence(t *testing.T) {
+	l := newTestLedger(t)
+	now := time.Date(2026, 8, 25, 12, 0, 0, 0, time.UTC)
+
+	if err := l.Open(Event{Fingerprint: "fp1", TriggerKey: "k", At: now}); err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	if err := l.Open(Event{Fingerprint: "fp2", TriggerKey: "other", At: now}); err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	if err := l.Silence("k", 24*time.Hour, "U1", now); err != nil {
+		t.Fatalf("Silence: %v", err)
+	}
+	if _, _, err := l.Resolve("fp2", now.Add(time.Minute)); err != nil {
+		t.Fatalf("Resolve: %v", err)
+	}
+	if l.Recurrence("k").SilencedUntil.IsZero() {
+		t.Error("an unrelated resolve cleared the silence")
+	}
+}
+
+// TestResolveClearingSurvivesReplay: the live path and the file replay must
+// agree, or a leadership failover would resurrect a silence a resolve cleared.
+func TestResolveClearingSurvivesReplay(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "outcome.jsonl")
+	now := time.Date(2026, 8, 25, 12, 0, 0, 0, time.UTC)
+
+	l, err := New(path)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	if err := l.Open(Event{Fingerprint: "fp1", TriggerKey: "k", At: now}); err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	if err := l.Silence("k", 24*time.Hour, "U1", now); err != nil {
+		t.Fatalf("Silence: %v", err)
+	}
+	if _, _, err := l.Resolve("fp1", now.Add(time.Minute)); err != nil {
+		t.Fatalf("Resolve: %v", err)
+	}
+
+	reloaded, err := New(path)
+	if err != nil {
+		t.Fatalf("New (reload): %v", err)
+	}
+	if got := reloaded.Recurrence("k").SilencedUntil; !got.IsZero() {
+		t.Errorf("after replay SilencedUntil = %v, want zero — replay disagrees with the live path", got)
+	}
+}
