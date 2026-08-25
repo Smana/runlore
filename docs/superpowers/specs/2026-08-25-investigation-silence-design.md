@@ -133,8 +133,10 @@ Public API mirrors `Feedback` (`ledger.go:1194`) — validate, durable-append, t
 func (l *Ledger) Silence(triggerKey string, window time.Duration, user string, at time.Time) error
 ```
 
-Rejects a non-positive window and a window above the cap held in a new exported field,
-`Ledger.MaxSilenceWindow` (zero = uncapped), set by the serve wiring right after construction —
+Rejects a non-positive window and a window above the cap installed via `Ledger.SetMaxSilenceWindow`
+(zero = uncapped) — a setter rather than the exported field first sketched here, because `Silence`
+is called concurrently (the Slack interactions handler and the Matrix `/sync` goroutine both reach
+it) and the cap is read under the same mutex. Set by the serve wiring right after construction —
 the same set-after-New pattern `cz.Outcome = ledger` already uses (`app/serve.go:281`). Keeping
 the cap in the ledger rather than in each caller makes it the one place the invariant is enforced:
 a Matrix `silence:` command is free text and must not be able to exceed what the Slack presets
